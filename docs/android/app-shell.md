@@ -9,6 +9,9 @@ adb install -r out/xboxrecomp-shell.apk
 adb logcat -s xboxrecomp SDL
 ```
 
+The CI builds it on every push to `main`. The latest one is always the prerelease **shell-latest** of the repo
+(XBA-20): https://git.cf.adserver.fr/Alex/xboxrecomp-android/releases/tag/shell-latest
+
 ## How it is put together
 
 | Piece | What |
