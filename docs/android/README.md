@@ -62,3 +62,7 @@ The pinned image `tools/docker/android.Dockerfile` (NDK, SDK, Gradle, JDK, SDL2 
 ## App shell
 
 The APK every title starts from (SDLActivity + `libmain.so` + logcat): see [app-shell.md](app-shell.md).
+
+## Tests on a device
+
+The C tests as Android executables, run over adb: see [device-tests.md](device-tests.md).

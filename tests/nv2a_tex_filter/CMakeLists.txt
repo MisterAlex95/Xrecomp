@@ -10,7 +10,8 @@ target_include_directories(nv2a-tex-filter-test PRIVATE ../../src/kernel ../../s
 if(MSVC)
     target_compile_definitions(nv2a-tex-filter-test PRIVATE _CRT_SECURE_NO_WARNINGS)
 elseif(NOT WIN32)
-    target_link_libraries(nv2a-tex-filter-test PRIVATE m pthread)
+    find_package(Threads REQUIRED)   # bionic has no libpthread: Threads::Threads, not -lpthread
+    target_link_libraries(nv2a-tex-filter-test PRIVATE m Threads::Threads)
 endif()
 
 # The filter switches are read once per process: one run per mode and sampler.

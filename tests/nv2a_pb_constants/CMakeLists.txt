@@ -10,6 +10,7 @@ target_include_directories(nv2a-pb-constants-test PRIVATE ../../src/kernel ../..
 if(MSVC)
     target_compile_definitions(nv2a-pb-constants-test PRIVATE _CRT_SECURE_NO_WARNINGS)
 elseif(NOT WIN32)
-    target_link_libraries(nv2a-pb-constants-test PRIVATE m pthread)
+    find_package(Threads REQUIRED)   # bionic has no libpthread: Threads::Threads, not -lpthread
+    target_link_libraries(nv2a-pb-constants-test PRIVATE m Threads::Threads)
 endif()
 add_test(NAME nv2a-pb-constants COMMAND nv2a-pb-constants-test)

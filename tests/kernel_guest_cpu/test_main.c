@@ -16,7 +16,7 @@
  *  - GetProcessAffinityMask stays the process's on a pinned caller.
  */
 #ifndef _WIN32
-#define _GNU_SOURCE     /* nftw, pthread_getaffinity_np under -std=c11 */
+#define _GNU_SOURCE     /* nftw, sched_getaffinity under -std=c11 */
 #endif
 #include "kernel.h"
 #include "xbox_memory_layout.h"
@@ -57,7 +57,7 @@ static DWORD_PTR thread_mask(void)
     cpu_set_t set;
     DWORD_PTR m = 0;
     int i;
-    if (pthread_getaffinity_np(pthread_self(), sizeof set, &set) != 0)
+    if (sched_getaffinity(0, sizeof set, &set) != 0)   /* 0: the calling thread (bionic has no pthread_getaffinity_np) */
         return 0;
     for (i = 0; i < (int)(8 * sizeof m) && i < CPU_SETSIZE; i++)
         if (CPU_ISSET(i, &set))
