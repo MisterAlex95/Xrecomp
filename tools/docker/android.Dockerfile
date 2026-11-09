@@ -92,3 +92,31 @@ RUN printf 'sdk.dir=%s\ncmake.dir=/usr\n' "$ANDROID_HOME" > local.properties \
 
 FROM scratch AS apk-out
 COPY --from=apk /out/ /
+
+# The C test projects as Android executables, in a bundle that runs on a device over adb (XBA-19).
+#   docker build -f tools/docker/android.Dockerfile --target device-tests-out --output type=local,dest=out .
+#   tools/android/run_tests.sh out/xba-device-tests.tar.gz
+FROM android AS device-tests
+ARG JOBS=4
+COPY . /src
+RUN mkdir -p /out /work/tests \
+    && A="-DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake -DANDROID_ABI=arm64-v8a \
+          -DANDROID_PLATFORM=30 -DCMAKE_BUILD_TYPE=RelWithDebInfo -DXBOXRECOMP_SDL2_SOURCE_DIR=$SDL2_SRC" \
+    && { echo "| Project | Built for Android |"; echo "|---|---|"; } > /out/build-report.md \
+    && for d in /src/tests/*/; do \
+         n=$(basename "$d"); [ -f "$d/CMakeLists.txt" ] || continue; \
+         if ! cmake -S "$d" -B "/work/tests/$n" -G Ninja $A > "/work/$n.log" 2>&1; then \
+           why=$(grep -m1 -A3 'CMake Error' "/work/$n.log" | sed -n '2,4p' | tr -s ' \n' ' ' | cut -c1-110); \
+           echo "| $n | no: configure ($why) |" >> /out/build-report.md; rm -rf "/work/tests/$n"; continue; fi; \
+         if ! cmake --build "/work/tests/$n" -j"$JOBS" >> "/work/$n.log" 2>&1; then \
+           why=$(grep -m1 -E 'error:|fatal error' "/work/$n.log" | sed 's#.*/src/##' | cut -c1-110); \
+           echo "| $n | no: build ($why) |" >> /out/build-report.md; rm -rf "/work/tests/$n"; continue; fi; \
+         echo "| $n | yes |" >> /out/build-report.md; \
+       done \
+    && python3 /src/tools/android/bundle_tests.py --build /work/tests --src /src --out /out/xba-device-tests \
+    && cp /out/build-report.md /out/xba-device-tests/ \
+    && tar -C /out -czf /out/xba-device-tests.tar.gz xba-device-tests \
+    && rm -rf /work /out/xba-device-tests
+
+FROM scratch AS device-tests-out
+COPY --from=device-tests /out/ /
