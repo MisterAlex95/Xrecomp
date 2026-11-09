@@ -1,0 +1,47 @@
+# Linux baseline of the fork (XBA-13): the toolkit builds, every C test project under tests/ passes or skips
+# (exit 77), and the Python suite (pytest tools/) passes -- all inside tools/docker/linux.Dockerfile.
+# Runs on the Coolify host's Docker (job container with the Docker CLI only), like Table Factory's CI; the host's
+# layer cache keeps the apt / pip layers between runs. The last step prints the C test report.
+name: CI
+
+on:
+  push:
+    branches: [main, android]
+  pull_request:
+    paths-ignore: ['.claude/**', 'CLAUDE.md']
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.event_name }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    container:
+      image: docker:29.8.1-cli
+    env:
+      # per-run tag: runs share the host's Docker, so a run's cleanup never removes another run's image
+      TEST_TAG: xba-linux:${{ github.run_id }}
+    steps:
+      # By hand: there is no Node in this image for actions/checkout.
+      - name: Checkout
+        env:
+          TOKEN: ${{ github.token }}
+        run: |
+          apk add --no-cache git >/dev/null
+          git init -q .
+          git fetch -q --depth 1 "$(printf '%s' "$GITHUB_SERVER_URL" | sed "s#://#://ci:$TOKEN@#")/$GITHUB_REPOSITORY.git" "$GITHUB_SHA"
+          git checkout -q FETCH_HEAD
+          git log -1 --format='%h %s'
+
+      - name: Build and test (Docker)
+        run: docker build -f tools/docker/linux.Dockerfile --target test --progress=plain -t "$TEST_TAG" .
+
+      # On a failure the per-project lines are in the build log above.
+      - name: C test report
+        run: docker run --rm "$TEST_TAG" cat /reports/c-tests.md
+
+      - name: Clean up
+        if: always()
+        run: docker rmi "$TEST_TAG" >/dev/null 2>&1 || true
