@@ -38,7 +38,7 @@ Every push to `main` / `android` and every PR runs `.gitea/workflows/ci.yml`, wh
    (the root build lists only two of them); a skip (exit 77) is fine, a failure fails the run;
 3. `pytest tools/` passes (clang on the PATH: the lifter tests compile with it, as the NDK does).
 
-A second job cross-compiles everything for arm64 and runs the tests under qemu-user
+On pushes to `android` (and by hand), a second job cross-compiles everything for arm64 and runs the tests under qemu-user
 (`tools/docker/linux-arm64.Dockerfile`); its failures are compared to [baseline-arm64.md](baseline-arm64.md), not
 counted as red.
 
