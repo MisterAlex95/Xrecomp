@@ -3,6 +3,9 @@
  * - stdout / stderr go to logcat (tag "xboxrecomp") before anything prints;
  * - RECOMP_* options from <external files dir>/recomp.cfg, before any library
  *   starts (XBA-26);
+ * - the game data in <external files dir>/game/ (or RECOMP_GAME_DIR), the
+ *   saves in <internal files dir>/save/, handed to xbox_path_init; a message
+ *   (NO_GAME_DATA) when default.xbe is not there (XBA-23);
  * - the runtime on the fast cores of a big.LITTLE SoC, before any thread is
  *   created, so every thread inherits it (XBA-25);
  * - the trapped-MMIO fault handler, chained to debuggerd / ART so real
@@ -20,6 +23,7 @@
 #include "platform/android_log.h"
 #include "platform/recomp_cfg.h"
 #include "platform/host_cpus.h"
+#include "platform/recomp_storage.h"
 #include "kernel/xbox_memory_layout.h"
 
 #ifndef XBA_VERSION
@@ -27,6 +31,16 @@
 #endif
 
 #define BACK_WINDOW_MS 2000
+
+/* kernel/kernel.h declares it, among much that the shell has no use for. */
+extern void xbox_path_init(const char *game_dir, const char *save_dir);
+
+/* User-facing text, named by the key the spec and the tests use. English
+ * only until the app has a strings table of its own. */
+#define TEXT_NO_GAME_DATA \
+    "No game data found.\n\n" \
+    "Copy the extracted disc (default.xbe and its files) to:\n%s\n\n" \
+    "for example: adb push <disc folder>/. %s/"
 
 /* The four symbols a title provides (its generated dispatch and one title's
  * front-end hooks). libmain links the whole toolkit, so that loading it on a
@@ -53,6 +67,15 @@ int main(int argc, char *argv[])
         if (recomp_cfg_load(cfg) == 0)
             printf("recomp.cfg: none (read from %s when present)\n", cfg);
     }
+
+    /* Game data and saves, after recomp.cfg (which may set RECOMP_GAME_DIR)
+     * and before any title code opens a file. */
+    recomp_storage store;
+    int have_game = recomp_storage_resolve(ext, SDL_AndroidGetInternalStoragePath(), &store);
+    if (have_game >= 0)
+        xbox_path_init(store.game_dir, store.save_dir);
+    else
+        fprintf(stderr, "xboxrecomp: no usable storage paths (external %s)\n", ext ? ext : "none");
 
     /* After recomp.cfg, which may say RECOMP_BIG_CORES=0; before SDL_Init,
      * whose threads should inherit the mask too. */
@@ -89,6 +112,20 @@ int main(int argc, char *argv[])
     SDL_GetVersion(&sdl);
     printf("xboxrecomp ready (build %s, SDL %d.%d.%d, %dx%d)\n",
            XBA_VERSION, sdl.major, sdl.minor, sdl.patch, w, h);
+
+    /* No title data: say where it goes instead of starting a title that
+     * cannot open its files. The shell carries no title yet, so for now it
+     * shows the message and stays on its black screen. */
+    if (have_game <= 0) {
+        char msg[3 * RECOMP_STORAGE_PATH_MAX];
+        const char *dir = have_game == 0 ? store.game_dir : "(no storage)";
+        SDL_snprintf(msg, sizeof msg, TEXT_NO_GAME_DATA, dir, dir);
+        printf("NO_GAME_DATA: default.xbe not found in %s\n", dir);
+        if (SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_INFORMATION, "xboxrecomp", msg, win) != 0)
+            fprintf(stderr, "message box failed: %s\n", SDL_GetError());
+    } else {
+        printf("xboxrecomp: game data: %s\n", store.xbe);
+    }
 
     /* RECOMP_SHELL_CRASH_TEST=1 (recomp.cfg): a deliberate null write outside
      * guest MMIO, to check on the device that the crash still reaches

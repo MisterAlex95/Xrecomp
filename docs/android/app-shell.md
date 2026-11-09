@@ -29,7 +29,8 @@ The CI builds it on every push to `main`. The latest one is always the prereleas
 
 1. `adb install -r xboxrecomp-shell.apk`, then `adb logcat -c && adb logcat -s xboxrecomp SDL AndroidRuntime DEBUG`.
 2. Launch « xboxrecomp ». Expected: a black screen, fullscreen, landscape. logcat shows
-   `xboxrecomp ready (build <commit>, SDL 2.32.10, <w>x<h>)`.
+   `xboxrecomp ready (build <commit>, SDL 2.32.10, <w>x<h>)`. Without game data a « No game data found » box
+   comes first (see below); tap OK.
 3. Press Back once. logcat: `press Back again to quit`. The app stays open.
 4. Press Back again within 2 s. logcat: `Back pressed twice, quitting`, then `clean exit`, and the app closes.
 5. Check there is no tombstone: `adb shell ls /data/tombstones` (root) or no `DEBUG` / `F libc` lines in logcat.
@@ -48,6 +49,39 @@ adb push recomp.cfg /sdcard/Android/data/fr.adserver.xboxrecomp.shell/files/reco
 logcat then shows one line: `recomp.cfg: 1 option(s) from …: RECOMP_WAIT_LOG=1`. Without the file it shows
 `recomp.cfg: none (read from … when present)`, which is not an error. A variable that is already in the environment
 wins over the file. The list of switches: `docs/runtime/environment-variables.md`.
+
+## Game data and saves
+
+Right after `recomp.cfg`, the shell resolves two directories (`src/platform/recomp_storage.c`, XBA-23) and hands them to
+`xbox_path_init(game_dir, save_dir)`, which maps `D:\` and `\Device\CdRom0\` to the first and the save drives and
+partition images to the second:
+
+| What | Where | Why there |
+|---|---|---|
+| Game data (`default.xbe` and the disc's files) | `/sdcard/Android/data/<app id>/files/game/`, or `RECOMP_GAME_DIR` from `recomp.cfg` | Reachable with `adb push` and a file manager, no permission needed; uninstalling the app removes it. |
+| Saves, `Partition0-5.img` | `/data/data/<app id>/files/save/` | Private to the app, kept when it is killed or updated. The cache partition images are sparse: they take no space until written. |
+
+Both are created at start, so the `game/` folder is there to push into. The lookup of `default.xbe` is
+case-insensitive, like the kernel's. logcat shows `storage: game=… save=… (default.xbe found|missing)` and the kernel's
+`Path init: game=…, save=…, user data=…`.
+
+When `default.xbe` is missing, logcat shows `NO_GAME_DATA: default.xbe not found in …` and the shell shows a message
+with the folder to copy the disc to, instead of starting anything. The shell carries no title yet, so after OK it stays
+on its black screen.
+
+Device check (XBA-23):
+
+1. Start the shell once with nothing pushed. Expected: the « No game data found » box naming
+   `/storage/emulated/0/Android/data/fr.adserver.xboxrecomp.shell/files/game`, and the `NO_GAME_DATA` and
+   `Path init` lines in logcat.
+2. `adb shell run-as fr.adserver.xboxrecomp.shell ls -ls files/save` (debug APK). Expected: `TitleData`,
+   `UserData`, `Cache`, `SystemData` and `Partition0.img` … `Partition5.img`, the last ones taking about 0 blocks.
+3. Push any file named `default.xbe` (one of our nxdk samples will do):
+   `adb push default.xbe /sdcard/Android/data/fr.adserver.xboxrecomp.shell/files/game/`, then restart the app.
+   Expected: no box, logcat `storage: … (default.xbe found)` and `game data: …/game/default.xbe`.
+4. Kill the app (`adb shell am force-stop fr.adserver.xboxrecomp.shell`), restart it, run step 2 again: the same
+   files, still there.
+5. Send the logcat lines and the `ls` output.
 
 ## Fast cores (big.LITTLE)
 
