@@ -1,0 +1,54 @@
+// One APK per title: the title's build passes its own applicationId and label (-PxbaApplicationId=..., -PxbaLabel=...).
+// SDL2's Java side (org.libsdl.app) is compiled from the pinned SDL2 sources, not copied into this repo.
+plugins {
+    id 'com.android.application'
+}
+
+def sdl2Src = System.getenv('SDL2_SRC') ?: findProperty('sdl2Src')
+if (!sdl2Src) throw new GradleException('Set SDL2_SRC (or -Psdl2Src=...) to the SDL2 sources (release-2.32.10)')
+def xbaVersion = findProperty('xbaVersion') ?: 'dev'
+
+android {
+    namespace 'fr.adserver.xboxrecomp'
+    compileSdk 35
+    ndkVersion '28.2.13676358'
+
+    defaultConfig {
+        applicationId findProperty('xbaApplicationId') ?: 'fr.adserver.xboxrecomp.shell'
+        minSdk 30                       // decision XBA-10
+        targetSdk 35
+        versionCode((findProperty('xbaVersionCode') ?: '1') as int)
+        versionName xbaVersion
+        resValue 'string', 'app_name', (findProperty('xbaLabel') ?: 'xboxrecomp')
+        ndk { abiFilters 'arm64-v8a' }
+        externalNativeBuild {
+            cmake {
+                arguments "-DXBOXRECOMP_SDL2_SOURCE_DIR=${sdl2Src}", "-DXBA_VERSION=${xbaVersion}",
+                          '-DXBOXRECOMP_BUILD_TESTS=OFF'
+            }
+        }
+    }
+
+    sourceSets.main.java.srcDirs += "${sdl2Src}/android-project/app/src/main/java"
+
+    externalNativeBuild {
+        cmake {
+            path 'src/main/cpp/CMakeLists.txt'
+            version '3.31.6'
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            signingConfig signingConfigs.debug   // the release key comes later, as a build secret (never in the repo)
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    lint { abortOnError false }
+}

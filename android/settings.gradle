@@ -1,0 +1,15 @@
+// The Android app shell (XBA-18). Built in tools/docker/android.Dockerfile (target apk); see docs/android/app-shell.md.
+pluginManagement {
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+dependencyResolutionManagement {
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+rootProject.name = 'xboxrecomp-shell'
+include ':app'

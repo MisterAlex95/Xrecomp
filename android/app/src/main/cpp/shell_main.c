@@ -1,0 +1,91 @@
+/* The app shell's SDL_main (XBA-18): what every title's APK starts from.
+ *
+ * - stdout / stderr go to logcat (tag "xboxrecomp") before anything prints;
+ * - a black, fullscreen, landscape window;
+ * - "xboxrecomp ready" with the build version;
+ * - Back twice within 2 s quits: SDL_main returns and SDLActivity finishes.
+ *
+ * A title replaces this file with its own entry (the template's WinMain path)
+ * once the generated C is built for Android (XBA-33). */
+#include <SDL.h>
+#include <stdio.h>
+
+#include "platform/android_log.h"
+
+#ifndef XBA_VERSION
+#define XBA_VERSION "dev"
+#endif
+
+#define BACK_WINDOW_MS 2000
+
+/* The four symbols a title provides (its generated dispatch and one title's
+ * front-end hooks). libmain links the whole toolkit, so that loading it on a
+ * device proves bionic resolves every symbol the runtime uses; without a
+ * title these stand in. Weak: a title's own definitions win. */
+typedef void (*recomp_func_t)(void);
+__attribute__((weak)) recomp_func_t recomp_lookup(unsigned int va)        { (void)va; return 0; }
+__attribute__((weak)) recomp_func_t recomp_lookup_manual(unsigned int va) { (void)va; return 0; }
+__attribute__((weak)) int g_fe_cursor;
+__attribute__((weak)) int fe_menu_get_pb_state(void) { return 0; }
+
+int main(int argc, char *argv[])
+{
+    (void)argc; (void)argv;
+    if (xbox_android_log_init() != 0)
+        SDL_Log("xboxrecomp: stdout/stderr redirect failed, runtime messages will be lost");
+
+    /* Back is ours: the shell decides when it quits (twice within 2 s). */
+    SDL_SetHint(SDL_HINT_ANDROID_TRAP_BACK_BUTTON, "1");
+    SDL_SetHint(SDL_HINT_ORIENTATIONS, "LandscapeLeft LandscapeRight");
+
+    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS) != 0) {
+        fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());
+        return 1;
+    }
+    SDL_Window *win = SDL_CreateWindow("xboxrecomp", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
+                                       0, 0, SDL_WINDOW_FULLSCREEN_DESKTOP);
+    SDL_Renderer *ren = win ? SDL_CreateRenderer(win, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC)
+                            : NULL;
+    if (!ren) {
+        fprintf(stderr, "window or renderer failed: %s\n", SDL_GetError());
+        SDL_Quit();
+        return 1;
+    }
+
+    int w = 0, h = 0;
+    SDL_GetRendererOutputSize(ren, &w, &h);
+    SDL_version sdl;
+    SDL_GetVersion(&sdl);
+    printf("xboxrecomp ready (build %s, SDL %d.%d.%d, %dx%d)\n",
+           XBA_VERSION, sdl.major, sdl.minor, sdl.patch, w, h);
+
+    Uint32 back_at = 0;
+    int running = 1;
+    while (running) {
+        SDL_Event ev;
+        while (SDL_PollEvent(&ev)) {
+            if (ev.type == SDL_QUIT) {
+                running = 0;
+            } else if (ev.type == SDL_KEYDOWN && !ev.key.repeat &&
+                       ev.key.keysym.scancode == SDL_SCANCODE_AC_BACK) {
+                Uint32 now = SDL_GetTicks();
+                if (back_at && now - back_at <= BACK_WINDOW_MS) {
+                    printf("xboxrecomp: Back pressed twice, quitting\n");
+                    running = 0;
+                } else {
+                    back_at = now;
+                    printf("xboxrecomp: press Back again to quit\n");
+                }
+            }
+        }
+        SDL_SetRenderDrawColor(ren, 0, 0, 0, 255);
+        SDL_RenderClear(ren);
+        SDL_RenderPresent(ren);
+    }
+
+    SDL_DestroyRenderer(ren);
+    SDL_DestroyWindow(win);
+    SDL_Quit();
+    printf("xboxrecomp: clean exit\n");
+    return 0;
+}

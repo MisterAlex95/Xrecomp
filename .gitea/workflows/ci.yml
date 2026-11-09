@@ -118,6 +118,13 @@ jobs:
           docker build -f tools/docker/android.Dockerfile --target toolkit --progress=plain -t "$IMAGE_TAG-toolkit" .
           docker run --rm "$IMAGE_TAG-toolkit" cat /reports/android-artefacts.txt
 
+      # XBA-18: the app shell APK (debug-signed; no game code in it).
+      - name: App shell APK
+        run: |
+          docker build -f tools/docker/android.Dockerfile --target apk --build-arg XBA_VERSION="${GITHUB_SHA:0:8}" \
+            --progress=plain -t "$IMAGE_TAG-apk" .
+          docker run --rm "$IMAGE_TAG-apk" cat /out/apk-contents.txt
+
       - name: Clean up
         if: always()
-        run: docker rmi "$IMAGE_TAG" "$IMAGE_TAG-toolkit" >/dev/null 2>&1 || true
+        run: docker rmi "$IMAGE_TAG" "$IMAGE_TAG-toolkit" "$IMAGE_TAG-apk" >/dev/null 2>&1 || true
