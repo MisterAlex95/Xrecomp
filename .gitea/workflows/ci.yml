@@ -124,7 +124,33 @@ jobs:
           docker build -f tools/docker/android.Dockerfile --target apk --build-arg XBA_VERSION="${GITHUB_SHA:0:8}" \
             --progress=plain -t "$IMAGE_TAG-apk" .
           docker run --rm "$IMAGE_TAG-apk" cat /out/apk-contents.txt
+          mkdir -p out && cid=$(docker create "$IMAGE_TAG-apk") && docker cp "$cid:/out/xboxrecomp-shell.apk" out/ \
+            && docker rm "$cid" >/dev/null && ls -la out
+
+      # XBA-20: the shell APK of the latest main, as the rolling prerelease « shell-latest » (one at a time).
+      # No game content anywhere: the repo, the image and this job only ever hold the toolkit and the shell.
+      - name: Publish the shell APK (shell-latest)
+        env:
+          TOKEN: ${{ github.token }}
+        run: |
+          apk add --no-cache curl jq >/dev/null
+          api="$GITHUB_SERVER_URL/api/v1/repos/$GITHUB_REPOSITORY"
+          auth="Authorization: token $TOKEN"
+          sha8=$(printf '%s' "$GITHUB_SHA" | cut -c1-8)
+          old=$(curl -fsS -H "$auth" "$api/releases/tags/shell-latest" 2>/dev/null | jq -r '.id // empty' || true)
+          if [ -n "$old" ]; then
+            curl -fsS -X DELETE -H "$auth" "$api/releases/$old"
+            curl -fsS -X DELETE -H "$auth" "$api/tags/shell-latest" || true
+          fi
+          body=$(jq -n --arg sha "$GITHUB_SHA" --arg s "$sha8" \
+            '{tag_name: "shell-latest", target_commitish: $sha, name: ("App shell, latest main (" + $s + ")"), prerelease: true,
+              body: ("The Android app shell built by CI from main at " + $s + ". No game inside. Debug-signed, arm64-v8a, Android 11+.\n\nInstall: adb install -r xboxrecomp-shell-" + $s + ".apk. Check list: docs/android/app-shell.md.")}')
+          id=$(curl -fsS -X POST -H "$auth" -H "Content-Type: application/json" -d "$body" "$api/releases" | jq -r .id)
+          curl -fsS -X POST -H "$auth" -F "attachment=@out/xboxrecomp-shell.apk;type=application/vnd.android.package-archive" \
+            "$api/releases/$id/assets?name=xboxrecomp-shell-$sha8.apk" | jq -r .browser_download_url
 
       - name: Clean up
         if: always()
-        run: docker rmi "$IMAGE_TAG" "$IMAGE_TAG-toolkit" "$IMAGE_TAG-apk" >/dev/null 2>&1 || true
+        run: |
+          docker rmi "$IMAGE_TAG" "$IMAGE_TAG-toolkit" "$IMAGE_TAG-apk" >/dev/null 2>&1 || true
+          rm -rf out
