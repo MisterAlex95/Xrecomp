@@ -20,7 +20,7 @@ The CI builds it on every push to `main`. The latest one is always the prereleas
 | `libmain.so` | `shell_main.c` + the **whole** toolkit (`--whole-archive`). Loading it on a device proves that bionic resolves every symbol the runtime uses. Four symbols that a title provides are weak stubs in `shell_main.c`. |
 | logcat | `src/platform/android_log.c`: stdout (INFO) and stderr (WARN) go to the tag `xboxrecomp`, one entry per line. `xbox_android_log_init()` is the first call of `SDL_main`. |
 | Window | Black, fullscreen, landscape (`sensorLandscape` + `SDL_HINT_ORIENTATIONS`). |
-| Back | Trapped (`SDL_HINT_ANDROID_TRAP_BACK_BUTTON`). Pressing it twice within 2 s returns from `SDL_main`, and SDLActivity then finishes. |
+| Back | Trapped (`SDL_HINT_ANDROID_TRAP_BACK_BUTTON`). Once shows a « Press Back again to quit » toast (`QUIT_PROMPT`); twice within 2 s returns from `SDL_main`, and SDLActivity then finishes. |
 | Manifest | minSdk 30, target 35, arm64-v8a only, GLES 3.0 required, `allowNativeHeapPointerTagging="false"`, `isGame`. |
 | Per title | `-PxbaApplicationId=…`, `-PxbaLabel=…`, `-PxbaVersionCode=…`. A title replaces `shell_main.c` with its own entry (XBA-33). |
 | Signing | Debug key generated once per toolchain image, so updates install in place while the image is cached. The release key will be a build secret, never in the repo. |
@@ -31,7 +31,7 @@ The CI builds it on every push to `main`. The latest one is always the prereleas
 2. Launch « xboxrecomp ». Expected: a black screen, fullscreen, landscape. logcat shows
    `xboxrecomp ready (build <commit>, SDL 2.32.10, <w>x<h>)`. Without game data a « No game data found » box
    comes first (see below); tap OK.
-3. Press Back once. logcat: `press Back again to quit`. The app stays open.
+3. Press Back once. A « Press Back again to quit » toast shows; logcat: `QUIT_PROMPT shown`. The app stays open.
 4. Press Back again within 2 s. logcat: `Back pressed twice, quitting`, then `clean exit`, and the app closes.
 5. Check there is no tombstone: `adb shell ls /data/tombstones` (root) or no `DEBUG` / `F libc` lines in logcat.
 6. Send a screenshot (`adb exec-out screencap -p > shell.png`) and the logcat lines.
@@ -82,6 +82,32 @@ Device check (XBA-23):
 4. Kill the app (`adb shell am force-stop fr.adserver.xboxrecomp.shell`), restart it, run step 2 again: the same
    files, still there.
 5. Send the logcat lines and the `ls` output.
+
+## Background and resume
+
+(`src/platform/recomp_lifecycle.c`, XBA-24.) On Android SDL already blocks the thread that pumps its events while the
+app is in the background, and pauses its audio there. The title's own threads would keep running, so:
+
+- an SDL event watch (in the title's window, `fb_present_sdl.c`, and in the shell) calls `recomp_lifecycle_pause()` on
+  `SDL_APP_WILLENTERBACKGROUND` and `recomp_lifecycle_resume()` on `SDL_APP_DIDENTERFOREGROUND`;
+- the flip (`xbox_FramebufferWindowPresent`) holds there while paused, on a condition variable: no CPU. The title's
+  other threads then stop behind it, as they wait for the GPU;
+- the SDL audio device is paused by a listener at once, not at the next flip, and plays its queue on at resume;
+- if the GL context was lost (`SDL_RENDER_DEVICE_RESET`), the window remakes its texture from the last frame;
+- logcat shows `lifecycle: paused (background)` and `lifecycle: resumed after N ms`.
+
+Guest time is not frozen: after a long pause the title sees the time that passed, as after a long frame. Most titles
+clamp their frame time; if one does not, that becomes its own ticket.
+
+Device check (XBA-24), shell part (the in-game part waits for a title, XBA-35):
+
+1. Start the shell, press Home. logcat: `lifecycle: paused (background)`.
+2. `adb shell top -b -n 1 | grep xboxrecomp`: under 2 % CPU.
+3. Wait 5 minutes, bring the app back. logcat: `lifecycle: resumed after ~300000 ms`; the black screen is back, no
+   crash, no tombstone.
+4. Do it once more with a notification pulled down and with the screen turned off and on.
+5. Back once: the toast; Back again within 2 s: `clean exit`.
+6. Send the logcat lines and the `top` line.
 
 ## Fast cores (big.LITTLE)
 

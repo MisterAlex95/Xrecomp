@@ -1,0 +1,10 @@
+cmake_minimum_required(VERSION 3.20)
+project(recomp_lifecycle_test C)
+set(CMAKE_C_STANDARD 11)
+# recomp_lifecycle.c only: no runtime to build.
+find_package(Threads REQUIRED)
+add_executable(recomp_lifecycle_test test_main.c ../../src/platform/recomp_lifecycle.c)
+target_include_directories(recomp_lifecycle_test PRIVATE ../../src/platform)
+target_link_libraries(recomp_lifecycle_test PRIVATE Threads::Threads)
+enable_testing()
+add_test(NAME recomp_lifecycle COMMAND recomp_lifecycle_test)
