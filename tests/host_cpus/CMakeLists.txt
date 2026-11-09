@@ -1,0 +1,11 @@
+cmake_minimum_required(VERSION 3.20)
+project(host_cpus_test C)
+set(CMAKE_C_STANDARD 11)
+if(WIN32)
+    message(FATAL_ERROR "The fake sysfs tree is POSIX-only")
+endif()
+# host_cpus.c only: the fast-core mask from a fake sysfs tree.
+add_executable(host_cpus_test test_main.c ../../src/platform/host_cpus.c)
+target_include_directories(host_cpus_test PRIVATE ../../src/platform)
+enable_testing()
+add_test(NAME host_cpus COMMAND host_cpus_test)

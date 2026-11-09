@@ -41,9 +41,14 @@ target_include_directories(host_time PUBLIC
 add_library(recomp_cfg STATIC recomp_cfg.c)
 target_include_directories(recomp_cfg PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
+# host_cpus: run on the fast cores of a big.LITTLE host (host_cpus.h). A real
+# library on every host (a no-op outside Linux).
+add_library(host_cpus STATIC host_cpus.c)
+target_include_directories(host_cpus PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+
 if(WIN32)
     add_library(platform INTERFACE)
-    target_link_libraries(platform INTERFACE host_time recomp_cfg)
+    target_link_libraries(platform INTERFACE host_time recomp_cfg host_cpus)
     target_include_directories(platform INTERFACE ${XBOXRECOMP_SRC_DIR})
     target_link_libraries(platform INTERFACE recomp_exit_hook)
 else()
@@ -53,7 +58,7 @@ else()
         ${CMAKE_CURRENT_SOURCE_DIR}
     )
     find_package(Threads REQUIRED)
-    target_link_libraries(platform PUBLIC Threads::Threads recomp_exit_hook host_time recomp_cfg)
+    target_link_libraries(platform PUBLIC Threads::Threads recomp_exit_hook host_time recomp_cfg host_cpus)
     if(NOT APPLE)
         target_link_libraries(platform PUBLIC m)   # feclearexcept etc.; libSystem has them on macOS
     endif()
