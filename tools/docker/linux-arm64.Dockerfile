@@ -16,14 +16,16 @@ FROM deps AS test
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 WORKDIR /src
 COPY . .
-ENV SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy \
+ARG JOBS=4
+ENV SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy JOBS=${JOBS} \
     XBR_CMAKE_ARGS="-DCMAKE_TOOLCHAIN_FILE=/src/cmake/toolchains/linux-aarch64-cross.cmake"
-# tmpfs on /tmp, as in linux.Dockerfile (multi-GB sparse images from kernel_fd_limit). The C test run does not fail
+# /work removed at the end of the RUN, as in linux.Dockerfile (multi-GB sparse images from kernel_fd_limit). The C test run does not fail
 # the build here: under qemu a failure is a lead, not a verdict; the report says what failed.
-RUN --mount=type=tmpfs,target=/tmp \
-    mkdir -p /reports \
-    && cmake -S . -B /tmp/build/root -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo $XBR_CMAKE_ARGS \
-    && cmake --build /tmp/build/root -j"$(nproc)" 2>&1 | tee /reports/build-root.log \
-    && (ctest --test-dir /tmp/build/root --output-on-failure --timeout 600 || true) \
-    && (tools/run_c_tests.sh /tmp/build/c-tests /reports/c-tests.md || true) \
-    && file /tmp/build/c-tests/mmx_helpers/mmx_helpers_test* | tee /reports/arch.txt
+RUN mkdir -p /work && trap 'rm -rf /work; find /tmp -mindepth 1 -delete' EXIT \
+    && export TMPDIR=/work TMP=/work TEMP=/work \
+    && mkdir -p /reports \
+    && cmake -S . -B /work/build/root -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo $XBR_CMAKE_ARGS \
+    && cmake --build /work/build/root -j"$JOBS" 2>&1 | tee /reports/build-root.log \
+    && (ctest --test-dir /work/build/root --output-on-failure --timeout 600 || true) \
+    && (tools/run_c_tests.sh /work/build/c-tests /reports/c-tests.md || true) \
+    && file /work/build/c-tests/mmx_helpers/mmx_helpers_test* | tee /reports/arch.txt

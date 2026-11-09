@@ -20,16 +20,21 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 WORKDIR /src
 COPY . .
 # Headless: SDL picks its dummy drivers, the tests that need a real display or audio device skip (exit 77).
-ENV SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy
-# Everything runs in a tmpfs on /tmp: some tests write multi-GB sparse partition images there (kernel_fd_limit),
-# which would fill the host's disk once frozen into an image layer. Only the reports stay in the image.
+ARG JOBS=4
+ENV SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy JOBS=${JOBS}
+# Builds and temp files go to /work (and some tests write to /tmp directly), both emptied at the end of the same RUN:
+# some tests write multi-GB sparse partition
+# images to the temp dir (kernel_fd_limit), which would fill the disk once frozen into an image layer. Only the
+# reports stay in the image. Not a tmpfs: on the CI host (shared with Gitea and Plane) a RAM tmpfs of several GB per
+# job made it thrash on 2026-11-09. JOBS caps the parallel compiles for the same reason.
 # 1. the toolkit itself, and the two tests the root build lists
 # 2. every self-contained C test project under tests/ (report in /reports/c-tests.md)
 # 3. the Python side (lifter unit tests)
-RUN --mount=type=tmpfs,target=/tmp \
-    mkdir -p /reports \
-    && cmake -S . -B /tmp/build/root -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DXBOXRECOMP_BUILD_TESTS=ON \
-    && cmake --build /tmp/build/root -j"$(nproc)" \
-    && ctest --test-dir /tmp/build/root --output-on-failure --timeout 300 \
-    && tools/run_c_tests.sh /tmp/build/c-tests /reports/c-tests.md \
+RUN mkdir -p /work && trap 'rm -rf /work; find /tmp -mindepth 1 -delete' EXIT \
+    && export TMPDIR=/work TMP=/work TEMP=/work \
+    && mkdir -p /reports \
+    && cmake -S . -B /work/build/root -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DXBOXRECOMP_BUILD_TESTS=ON \
+    && cmake --build /work/build/root -j"$JOBS" \
+    && ctest --test-dir /work/build/root --output-on-failure --timeout 300 \
+    && tools/run_c_tests.sh /work/build/c-tests /reports/c-tests.md \
     && python3 -m pytest -q -p no:cacheprovider tools/ | tee /reports/pytest.txt
