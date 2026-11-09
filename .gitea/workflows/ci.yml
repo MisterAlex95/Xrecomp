@@ -45,3 +45,31 @@ jobs:
       - name: Clean up
         if: always()
         run: docker rmi "$TEST_TAG" >/dev/null 2>&1 || true
+
+  # arm64: cross-compiled, tests under qemu-user (docs/android/baseline-arm64.md). A build break fails the job;
+  # test failures do not (under qemu they are leads, not verdicts): read the report against the baseline.
+  linux-arm64:
+    runs-on: ubuntu-latest
+    container:
+      image: docker:29.8.1-cli
+    env:
+      TEST_TAG: xba-linux-arm64:${{ github.run_id }}
+    steps:
+      - name: Checkout
+        env:
+          TOKEN: ${{ github.token }}
+        run: |
+          apk add --no-cache git >/dev/null
+          git init -q .
+          git fetch -q --depth 1 "$(printf '%s' "$GITHUB_SERVER_URL" | sed "s#://#://ci:$TOKEN@#")/$GITHUB_REPOSITORY.git" "$GITHUB_SHA"
+          git checkout -q FETCH_HEAD
+
+      - name: Cross-build and test under qemu (Docker)
+        run: docker build -f tools/docker/linux-arm64.Dockerfile --target test --progress=plain -t "$TEST_TAG" .
+
+      - name: arm64 C test report
+        run: docker run --rm "$TEST_TAG" cat /reports/c-tests.md
+
+      - name: Clean up
+        if: always()
+        run: docker rmi "$TEST_TAG" >/dev/null 2>&1 || true

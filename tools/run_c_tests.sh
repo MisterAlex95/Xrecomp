@@ -4,6 +4,9 @@
 #
 #   tools/run_c_tests.sh [build-dir] [report.md]
 #
+# XBR_CMAKE_ARGS adds configure arguments, e.g. a toolchain file:
+#   XBR_CMAKE_ARGS="-DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/linux-aarch64-cross.cmake" tools/run_c_tests.sh
+#
 # Each project is configured, built and tested on its own, so one broken
 # project does not hide the others. A ctest skip (exit 77, SKIP_RETURN_CODE)
 # counts as skipped. The report is a Markdown table: project, configure,
@@ -15,6 +18,7 @@ OUT=${1:-$ROOT/build/c-tests}
 REPORT=${2:-$OUT/report.md}
 JOBS=${JOBS:-$(nproc 2>/dev/null || echo 4)}
 GEN=()
+read -r -a EXTRA <<< "${XBR_CMAKE_ARGS:-}"
 command -v ninja >/dev/null 2>&1 && GEN=(-G Ninja)
 
 # Projects that only build for Windows (a FATAL_ERROR under if(NOT WIN32), or an unconditional <windows.h>).
@@ -41,7 +45,7 @@ for dir in "$ROOT"/tests/*/; do
         printf '%-32s windows only\n' "$name"
         continue
     fi
-    if ! cmake -S "$dir" -B "$bdir" "${GEN[@]}" -DCMAKE_BUILD_TYPE=RelWithDebInfo >"$log" 2>&1; then
+    if ! cmake -S "$dir" -B "$bdir" "${GEN[@]}" -DCMAKE_BUILD_TYPE=RelWithDebInfo "${EXTRA[@]}" >"$log" 2>&1; then
         conf=FAIL; build=-; fail=1
     elif ! cmake --build "$bdir" -j"$JOBS" >>"$log" 2>&1; then
         build=FAIL; fail=1
