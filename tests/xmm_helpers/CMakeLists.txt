@@ -15,3 +15,5 @@ if(UNIX)
 endif()
 enable_testing()
 add_test(NAME xmm_helpers COMMAND xmm_helpers_test)
+# Without the x86-64 intrinsics (arm64) there is nothing to compare against: the test exits 77.
+set_tests_properties(xmm_helpers PROPERTIES SKIP_RETURN_CODE 77)

@@ -15,7 +15,8 @@ This repository is a private fork of [sp00nznet/xboxrecomp](https://github.com/s
 | `main` | Pure mirror of `upstream/main`. Never commit on it. |
 | `android` | Our work: upstream plus the Android host. PRs target it. |
 
-Generic fixes (anything not Android-specific) go back upstream as PRs, cut from `main`.
+We take from upstream but send nothing back: no PRs or issues on GitHub, every change stays here (Alex, 2026-11-09).
+Keep generic fixes in their own commits anyway: they merge more easily with upstream changes.
 
 ## Following upstream
 
@@ -36,6 +37,10 @@ Every push to `main` / `android` and every PR runs `.gitea/workflows/ci.yml`, wh
 2. `tools/run_c_tests.sh` builds each self-contained C test project under `tests/` and runs its ctest
    (the root build lists only two of them); a skip (exit 77) is fine, a failure fails the run;
 3. `pytest tools/` passes (clang on the PATH: the lifter tests compile with it, as the NDK does).
+
+On pushes to `android` (and by hand), a second job cross-compiles everything for arm64 and runs the tests under qemu-user
+(`tools/docker/linux-arm64.Dockerfile`); its failures are compared to [baseline-arm64.md](baseline-arm64.md), not
+counted as red.
 
 Locally:
 

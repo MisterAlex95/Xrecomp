@@ -9,3 +9,5 @@ add_executable(mmx_helpers_test test_main.c)
 target_include_directories(mmx_helpers_test PRIVATE ../../templates/runtime)
 enable_testing()
 add_test(NAME mmx_helpers COMMAND mmx_helpers_test)
+# Without the x86-64 intrinsics (arm64) there is nothing to compare against: the test exits 77.
+set_tests_properties(mmx_helpers PROPERTIES SKIP_RETURN_CODE 77)
