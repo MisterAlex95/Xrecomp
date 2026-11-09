@@ -78,7 +78,9 @@ target_include_directories(${PROJECT_NAME} PRIVATE
     ${XBOXRECOMP_DIR}/include
 )
 
-# Windows SDK libraries needed at link time
+# Windows SDK libraries needed at link time (Linux/macOS get SDL2 and the GL
+# backend through the xboxrecomp target)
+if(WIN32)
 target_link_libraries(${PROJECT_NAME} PRIVATE
     d3d11
     dxgi
@@ -89,6 +91,7 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     # function's symbol, i.e. to the guest function that faulted.
     dbghelp
 )
+endif()
 
 # MSVC-specific: large address aware, increase section limit for big generated files
 if(MSVC)

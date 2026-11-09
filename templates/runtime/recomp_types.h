@@ -585,6 +585,15 @@ uint64_t xbox_ReadTimeStampCounter(void);
 uint32_t xbox_PortIn(uint32_t port, int width);
 void     xbox_PortOut(uint32_t port, uint32_t value, int width);
 
+/* `mov` to and from control (crN) and debug (drN) registers. The XDK reads
+ * cr0/cr4 and reloads cr3 to flush the TLB after writing a page table. The
+ * host has nothing to flush: the runtime keeps one value per register, starts
+ * them as the console's kernel leaves them, and logs the first write of each. */
+uint32_t xbox_ReadCr(int n);
+void     xbox_WriteCr(int n, uint32_t value);
+uint32_t xbox_ReadDr(int n);
+void     xbox_WriteDr(int n, uint32_t value);
+
 void recomp_trace_enter(const char *name, uint32_t va);
 #define RECOMP_TRACE_ENTER(name, va) recomp_trace_enter((name), (va))
 void recomp_trace_exit(const char *name, uint32_t va);
