@@ -6,7 +6,7 @@ name: CI
 
 on:
   push:
-    branches: [main, android]
+    branches: [main]
   pull_request:
     paths-ignore: ['.claude/**', 'CLAUDE.md']
   workflow_dispatch:
@@ -49,12 +49,12 @@ jobs:
   # arm64: cross-compiled, tests under qemu-user (docs/android/baseline-arm64.md). A build break fails the job;
   # test failures do not (under qemu they are leads, not verdicts): read the report against the baseline.
   #
-  # The heavy jobs (qemu, the Android SDK image) run one after the other and only on pushes to android or by hand:
+  # The heavy jobs (qemu, the Android SDK image) run one after the other and only on pushes to main or by hand:
   # on 2026-11-09 the first PR running them in parallel saturated the shared Proxmox storage (Gitea and Plane
   # stopped answering).
   linux-arm64:
     needs: linux
-    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/android')
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
     runs-on: ubuntu-latest
     container:
       image: docker:29.8.1-cli

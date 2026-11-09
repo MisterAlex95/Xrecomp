@@ -12,8 +12,10 @@ This repository is a private fork of [sp00nznet/xboxrecomp](https://github.com/s
 
 | Branch | Role |
 |---|---|
-| `main` | Pure mirror of `upstream/main`. Never commit on it. |
-| `android` | Our work: upstream plus the Android host. PRs target it. |
+| `main` | Our work: upstream plus the Android host. PRs target it; merged as soon as CI is green. |
+
+Upstream is followed through the `upstream` remote (`upstream/main`), merged into `main` by the script below.
+Until 2026-11-09 our work lived on `android` with `main` as a mirror; that branch is gone.
 
 We take from upstream but send nothing back: no PRs or issues on GitHub, every change stays here (Alex, 2026-11-09).
 Keep generic fixes in their own commits anyway: they merge more easily with upstream changes.
@@ -21,16 +23,16 @@ Keep generic fixes in their own commits anyway: they merge more easily with upst
 ## Following upstream
 
 ```bash
-tools/sync_upstream.sh          # fast-forward main, merge it into android
-tools/sync_upstream.sh --push   # the same, then push main and android to origin
+tools/sync_upstream.sh          # merge upstream/main into main
+tools/sync_upstream.sh --push   # the same, then push main to origin
 ```
 
 On a conflict the script aborts the merge and lists the files; resolve by hand
-(`git merge main` in the android worktree) and commit.
+(`git merge upstream/main` in the main worktree) and commit.
 
 ## Linux baseline (CI)
 
-Every push to `main` / `android` and every PR runs `.gitea/workflows/ci.yml`, which builds
+Every push to `main` and every PR runs `.gitea/workflows/ci.yml`, which builds
 `tools/docker/linux.Dockerfile` (target `test`):
 
 1. the toolkit builds (gcc, Debian trixie);
@@ -38,7 +40,7 @@ Every push to `main` / `android` and every PR runs `.gitea/workflows/ci.yml`, wh
    (the root build lists only two of them); a skip (exit 77) is fine, a failure fails the run;
 3. `pytest tools/` passes (clang on the PATH: the lifter tests compile with it, as the NDK does).
 
-On pushes to `android` (and by hand), a second job cross-compiles everything for arm64 and runs the tests under qemu-user
+On pushes to `main` (and by hand), a second job cross-compiles everything for arm64 and runs the tests under qemu-user
 (`tools/docker/linux-arm64.Dockerfile`); its failures are compared to [baseline-arm64.md](baseline-arm64.md), not
 counted as red.
 

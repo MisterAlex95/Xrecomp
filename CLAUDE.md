@@ -1,6 +1,6 @@
 # Xbox Recomp Android
 
-Fork of [xboxrecomp](https://github.com/sp00nznet/xboxrecomp) (remote `upstream`, our work on branch `android`) that adds
+Fork of [xboxrecomp](https://github.com/sp00nznet/xboxrecomp) (remote `upstream`, our work on `main`) that adds
 **Android arm64** as a host: NDK build, OpenGL ES 3.0, SDLActivity app shell, one APK per title.
 
 **Vision, roadmap, decisions, spec: Plane project XBA** (`plane page show -p XBA "Vision"`, « Roadmap »,

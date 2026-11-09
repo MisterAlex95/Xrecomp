@@ -1,6 +1,6 @@
 # Linux arm64 baseline
 
-XBA-14, 2026-11-09, upstream v0.17.0 + `android` at the time of writing. A later Android failure is compared to this.
+XBA-14, 2026-11-09, upstream v0.17.0 + our `main` at the time of writing. A later Android failure is compared to this.
 
 ## How it was made
 
