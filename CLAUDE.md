@@ -13,7 +13,9 @@ Work language English (code, comments, commits, Plane). Chat with Alex in French
 ## Rules
 - **Legal**: never commit, download or store game code, XBEs, disc images or game data. Test with our own XBEs (nxdk)
   or data Alex dumped from his own discs, kept outside the repo. Per-title repos (generated C) stay private.
-- Upstream first: a change must keep the upstream tests green on Linux; generic fixes go back upstream as PRs.
+- Upstream tests stay green: a change must keep them passing on Linux (CI: `tools/docker/linux.Dockerfile`). We take
+  from upstream (`tools/sync_upstream.sh`) but send nothing back: no PRs or issues on GitHub, everything stays on our
+  Gitea (Alex, 2026-11-09).
 - A title runs on Linux arm64 before we debug it on Android.
 - Agents cannot test on a device: label « Device » + a numbered check list for Alex.
 

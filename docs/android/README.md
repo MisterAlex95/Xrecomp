@@ -15,7 +15,8 @@ This repository is a private fork of [sp00nznet/xboxrecomp](https://github.com/s
 | `main` | Pure mirror of `upstream/main`. Never commit on it. |
 | `android` | Our work: upstream plus the Android host. PRs target it. |
 
-Generic fixes (anything not Android-specific) go back upstream as PRs, cut from `main`.
+We take from upstream but send nothing back: no PRs or issues on GitHub, every change stays here (Alex, 2026-11-09).
+Keep generic fixes in their own commits anyway: they merge more easily with upstream changes.
 
 ## Following upstream
 
