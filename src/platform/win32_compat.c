@@ -218,6 +218,30 @@ BOOL InitOnceExecuteOnce(PINIT_ONCE once, PINIT_ONCE_FN fn, PVOID param, PVOID *
 /* Condition variables (paired with a CRITICAL_SECTION)                  */
 /* ===================================================================== */
 
+/* The clock every timed wait counts on. A phone steps its wall clock (NTP,
+ * carrier time) far more often than a desktop, and a CLOCK_REALTIME deadline
+ * then stretches or cuts the wait by the step. Darwin has no
+ * pthread_condattr_setclock, so it stays on the wall clock there. */
+#if defined(__APPLE__)
+#define W32_WAIT_CLOCK CLOCK_REALTIME
+#else
+#define W32_WAIT_CLOCK CLOCK_MONOTONIC
+#endif
+
+/* A condition variable whose timed waits count on W32_WAIT_CLOCK. */
+static void cond_init_wait_clock(pthread_cond_t *c)
+{
+#if defined(__APPLE__)
+    pthread_cond_init(c, NULL);
+#else
+    pthread_condattr_t a;
+    pthread_condattr_init(&a);
+    pthread_condattr_setclock(&a, W32_WAIT_CLOCK);
+    pthread_cond_init(c, &a);
+    pthread_condattr_destroy(&a);
+#endif
+}
+
 /* Forward decl; the definition lives further down with the wait helpers. */
 static void deadline_from_ms(DWORD ms, struct timespec *ts);
 
@@ -225,7 +249,7 @@ static void cv_lazy_init(PCONDITION_VARIABLE cv)
 {
     if (!cv->Ptr) {
         pthread_cond_t *c = (pthread_cond_t *)malloc(sizeof(pthread_cond_t));
-        pthread_cond_init(c, NULL);
+        cond_init_wait_clock(c);
         /* Race window OK for typical Win32 usage (the CS is held). */
         cv->Ptr = c;
     }
@@ -543,8 +567,8 @@ static w32_object *obj_alloc(w32_kind kind)
     o->kind     = kind;
     o->refcount = 1;
     pthread_mutex_init(&o->lock, NULL);
-    pthread_cond_init(&o->cond, NULL);
-    pthread_cond_init(&o->gate, NULL);
+    cond_init_wait_clock(&o->cond);
+    cond_init_wait_clock(&o->gate);
     return o;
 }
 
@@ -693,7 +717,7 @@ BOOL DuplicateHandle(HANDLE srcProc, HANDLE src, HANDLE dstProc, PHANDLE dst,
 /* ---- deadline helper -------------------------------------------------- */
 static void deadline_from_ms(DWORD ms, struct timespec *ts)
 {
-    clock_gettime(CLOCK_REALTIME, ts);
+    clock_gettime(W32_WAIT_CLOCK, ts);
     ts->tv_sec  += ms / 1000;
     ts->tv_nsec += (long)(ms % 1000) * 1000000L;
     if (ts->tv_nsec >= 1000000000L) { ts->tv_sec++; ts->tv_nsec -= 1000000000L; }
@@ -733,7 +757,7 @@ static int waitable_due(w32_object *o)
     struct timespec now;
     if (o->waitable_triggered) return 1;
     if (!o->waitable_armed) return 0;
-    clock_gettime(CLOCK_REALTIME, &now);
+    clock_gettime(W32_WAIT_CLOCK, &now);
     if (timespec_before(&now, &o->waitable_due_time)) return 0;
     o->waitable_triggered = 1;
     return 1;
@@ -792,7 +816,7 @@ static DWORD wait_single(w32_object *o, DWORD ms)
                  * period after the last due time (on the grid, catching up
                  * if the waiter was late), and it stays armed. */
                 struct timespec now;
-                clock_gettime(CLOCK_REALTIME, &now);
+                clock_gettime(W32_WAIT_CLOCK, &now);
                 do {
                     long long ns = o->waitable_due_time.tv_nsec + (long long)o->waitable_period_ms * 1000000LL;
                     o->waitable_due_time.tv_sec += (time_t)(ns / 1000000000LL);
@@ -887,7 +911,7 @@ DWORD WaitForMultipleObjectsEx(DWORD count, const HANDLE *handles, BOOL waitAll,
 
         if (timed) {
             struct timespec now;
-            clock_gettime(CLOCK_REALTIME, &now);
+            clock_gettime(W32_WAIT_CLOCK, &now);
             if (now.tv_sec > ts.tv_sec ||
                 (now.tv_sec == ts.tv_sec && now.tv_nsec >= ts.tv_nsec))
                 return WAIT_TIMEOUT;
@@ -1433,7 +1457,7 @@ BOOL SetWaitableTimer(HANDLE h, const LARGE_INTEGER *dueTime, LONG period,
      * each expiry (wait_single); a periodic manual-reset timer stays
      * signalled after the first expiry, which is the same to a waiter. */
     if (dueTime->QuadPart <= 0) {
-        clock_gettime(CLOCK_REALTIME, &o->waitable_due_time);
+        clock_gettime(W32_WAIT_CLOCK, &o->waitable_due_time);
         LONGLONG ns = -dueTime->QuadPart * 100LL;
         o->waitable_due_time.tv_sec  += (time_t)(ns / 1000000000LL);
         o->waitable_due_time.tv_nsec += (long)(ns % 1000000000LL);
@@ -1442,10 +1466,19 @@ BOOL SetWaitableTimer(HANDLE h, const LARGE_INTEGER *dueTime, LONG period,
             o->waitable_due_time.tv_nsec -= 1000000000L;
         }
     } else {
-        /* FILETIME epoch is 1601-01-01; Unix is 1970-01-01. */
+        /* An absolute FILETIME (epoch 1601-01-01; Unix is 1970-01-01) is a
+         * wall-clock instant: turn it into a deadline on the wait clock once,
+         * now, as "that far from the wall clock's present". */
         LONGLONG unix100ns = dueTime->QuadPart - 116444736000000000LL;
-        o->waitable_due_time.tv_sec  = (time_t)(unix100ns / 10000000LL);
-        o->waitable_due_time.tv_nsec = (long)((unix100ns % 10000000LL) * 100LL);
+        struct timespec wall, base;
+        clock_gettime(CLOCK_REALTIME, &wall);
+        clock_gettime(W32_WAIT_CLOCK, &base);
+        long long delta_ns = (long long)unix100ns * 100LL
+                           - ((long long)wall.tv_sec * 1000000000LL + wall.tv_nsec);
+        long long due_ns = (long long)base.tv_sec * 1000000000LL + base.tv_nsec + delta_ns;
+        if (due_ns < 0) due_ns = 0;          /* long past: due at once */
+        o->waitable_due_time.tv_sec  = (time_t)(due_ns / 1000000000LL);
+        o->waitable_due_time.tv_nsec = (long)(due_ns % 1000000000LL);
     }
     o->waitable_period_ms = period > 0 ? period : 0;
     o->waitable_armed = 1;
