@@ -1186,14 +1186,18 @@ BOOL TerminateThread(HANDLE h, DWORD exitCode)
     w32_object *o = obj_from_handle(h);
     if (!o || o->kind != K_THREAD) return FALSE;
 #if defined(__ANDROID__)
-    /* bionic has no pthread_cancel. Temporary (XBA-17): the thread keeps
-     * running, it is only reported as exited. The real answer is XBA-25. */
+    /* bionic has no pthread_cancel. Nothing in the runtime calls this: an
+     * Xbox thread only ends itself (PsTerminateSystemThread -> ExitThread,
+     * which bionic's pthread_exit handles). So fail plainly rather than
+     * report a thread as exited while it keeps running (XBA-25). */
     {
         static volatile LONG warned;
         if (InterlockedExchange(&warned, 1) == 0)
-            fprintf(stderr, "TerminateThread: no pthread_cancel on Android, "
-                            "the thread keeps running (XBA-25)\n");
+            fprintf(stderr, "TerminateThread: not supported on Android (no pthread_cancel); "
+                            "the thread keeps running\n");
     }
+    SetLastError(50 /* ERROR_NOT_SUPPORTED */);
+    return FALSE;
 #else
     pthread_cancel(o->thread);
 #endif

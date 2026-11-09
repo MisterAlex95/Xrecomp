@@ -45,3 +45,11 @@ adb push recomp.cfg /sdcard/Android/data/fr.adserver.xboxrecomp.shell/files/reco
 logcat then shows one line: `recomp.cfg: 1 option(s) from …: RECOMP_WAIT_LOG=1`. Without the file it shows
 `recomp.cfg: none (read from … when present)`, which is not an error. A variable that is already in the environment
 wins over the file. The list of switches: `docs/runtime/environment-variables.md`.
+
+## Fast cores (big.LITTLE)
+
+Right after `recomp.cfg`, the shell calls `recomp_host_cpus_init()` (`src/platform/host_cpus.c`, XBA-25). It restricts
+the main thread to the cores whose cpufreq maximum is above the slowest cluster's, before any other thread exists, so
+every thread inherits that mask: guest threads, the rasteriser pool, SDL's. On the Thor (Snapdragon 8 Gen 2) that means
+cpus 3-7 and not the three A510 cores. logcat: `host cpus: runtime on the fast cores 3-7 of 0-7 (...)`.
+`RECOMP_BIG_CORES=0` in `recomp.cfg` turns it off. On desktop it is off unless `RECOMP_BIG_CORES=1`.

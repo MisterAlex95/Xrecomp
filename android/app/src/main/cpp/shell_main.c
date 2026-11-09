@@ -3,6 +3,8 @@
  * - stdout / stderr go to logcat (tag "xboxrecomp") before anything prints;
  * - RECOMP_* options from <external files dir>/recomp.cfg, before any library
  *   starts (XBA-26);
+ * - the runtime on the fast cores of a big.LITTLE SoC, before any thread is
+ *   created, so every thread inherits it (XBA-25);
  * - a black, fullscreen, landscape window;
  * - "xboxrecomp ready" with the build version;
  * - Back twice within 2 s quits: SDL_main returns and SDLActivity finishes.
@@ -14,6 +16,7 @@
 
 #include "platform/android_log.h"
 #include "platform/recomp_cfg.h"
+#include "platform/host_cpus.h"
 
 #ifndef XBA_VERSION
 #define XBA_VERSION "dev"
@@ -46,6 +49,10 @@ int main(int argc, char *argv[])
         if (recomp_cfg_load(cfg) == 0)
             printf("recomp.cfg: none (read from %s when present)\n", cfg);
     }
+
+    /* After recomp.cfg, which may say RECOMP_BIG_CORES=0; before SDL_Init,
+     * whose threads should inherit the mask too. */
+    recomp_host_cpus_init();
 
     /* Back is ours: the shell decides when it quits (twice within 2 s). */
     SDL_SetHint(SDL_HINT_ANDROID_TRAP_BACK_BUTTON, "1");
