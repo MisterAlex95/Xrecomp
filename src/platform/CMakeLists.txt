@@ -46,6 +46,14 @@ target_include_directories(recomp_cfg PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 add_library(host_cpus STATIC host_cpus.c)
 target_include_directories(host_cpus PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
+# recomp_storage: the title's data and save directories on a host without a
+# shell (recomp_storage.h, XBA-23). POSIX hosts (dirent); only the Android
+# app shell links it.
+if(NOT WIN32)
+    add_library(recomp_storage STATIC recomp_storage.c)
+    target_include_directories(recomp_storage PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+endif()
+
 if(WIN32)
     add_library(platform INTERFACE)
     target_link_libraries(platform INTERFACE host_time recomp_cfg host_cpus)

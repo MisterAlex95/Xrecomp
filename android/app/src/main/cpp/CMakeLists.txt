@@ -14,7 +14,8 @@ target_compile_definitions(main PRIVATE XBA_VERSION="${XBA_VERSION}")
 # The whole toolkit, not only what shell_main.c calls: System.loadLibrary("main") then checks on the device that
 # bionic resolves every symbol the runtime needs (shell_main.c stands in for the four a title provides).
 set(XBA_TOOLKIT_LIBS xbox_kernel xbox_d3d8 xbox_dsound xbox_input xbox_input_map xbox_usb xbox_apu xbox_nv2a
-                     xbox_video platform host_time recomp_exit_hook recomp_cfg host_cpus)
+                     xbox_video platform host_time recomp_exit_hook recomp_cfg host_cpus
+                     recomp_storage)
 target_link_libraries(main PRIVATE -Wl,--whole-archive ${XBA_TOOLKIT_LIBS} -Wl,--no-whole-archive
                                    SDL2::SDL2 GLESv3 log android m)
 target_link_options(main PRIVATE -Wl,--no-undefined)
