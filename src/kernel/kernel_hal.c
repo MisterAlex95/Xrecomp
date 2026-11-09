@@ -1874,6 +1874,57 @@ void xbox_PortOut(uint32_t port, uint32_t value, int width)
 }
 
 /* =========================================================================
+ * Control and debug registers
+ *
+ * Read and written by `mov crN` / `mov drN` in the XDK's kernel-mode helpers
+ * (page-table edits followed by a cr3 reload, cr0.WP toggles around writes to
+ * read-only pages). Nothing on the host depends on them, so each register is
+ * a plain value. The start values are the retail kernel's: protected mode with
+ * paging and write protect (cr0), the page directory at physical 0xF000 (cr3),
+ * large pages and SSE enabled (cr4). dr7 starts with its reserved bit 10 set.
+ * ========================================================================= */
+
+static volatile uint32_t s_cr[8] = { 0x80010033u, 0, 0, 0x0000F000u, 0x00000610u };
+static volatile uint32_t s_dr[8] = { 0, 0, 0, 0, 0, 0, 0xFFFF0FF0u, 0x00000400u };
+
+static void special_reg_first_write(char kind, int n, uint32_t old, uint32_t value)
+{
+    static volatile LONG seen;
+    LONG bit = 1L << ((kind == 'd' ? 8 : 0) + n);
+    if (InterlockedOr(&seen, bit) & bit)
+        return;
+    fprintf(stderr, "  [%cR] mov %cr%d, 0x%08X (was 0x%08X; kept, no effect on the host)\n",
+            kind == 'd' ? 'D' : 'C', kind, n, value, old);
+    fflush(stderr);
+}
+
+uint32_t xbox_ReadCr(int n)
+{
+    return s_cr[n & 7];
+}
+
+void xbox_WriteCr(int n, uint32_t value)
+{
+    uint32_t old = s_cr[n & 7];
+    s_cr[n & 7] = value;
+    if (value != old)
+        special_reg_first_write('c', n & 7, old, value);
+}
+
+uint32_t xbox_ReadDr(int n)
+{
+    return s_dr[n & 7];
+}
+
+void xbox_WriteDr(int n, uint32_t value)
+{
+    uint32_t old = s_dr[n & 7];
+    s_dr[n & 7] = value;
+    if (value != old)
+        special_reg_first_write('d', n & 7, old, value);
+}
+
+/* =========================================================================
  * cpuid
  *
  * The Xbox CPU is a 733 MHz Coppermine-based Pentium III with MMX, FXSR and

@@ -298,6 +298,18 @@ def _narrow_source(ops):
     return src
 
 
+_SPECIAL_REG_RE = re.compile(r"^([cd])r([0-7])$")
+
+
+def _special_reg(op):
+    """('c', n) for a control register crN, ('d', n) for a debug register drN,
+    None for anything else."""
+    if op.type != "reg" or not op.reg:
+        return None
+    m = _SPECIAL_REG_RE.match(op.reg)
+    return (m.group(1), int(m.group(2))) if m else None
+
+
 def _fmt_operand_read(op):
     """Format reading any operand type."""
     if op.type == "reg":
@@ -2028,6 +2040,14 @@ class Lifter:
     def _lift_mov(self, insn, ops):
         if nops := len(ops) < 2:
             return [f"/* mov: bad operands */"]
+        # Control and debug registers: `mov eax, cr3` / `mov cr3, eax` is the
+        # XDK's TLB flush after a page-table write, and the XDK's page-table
+        # helpers read cr0/cr4 too. Formatted as ordinary operands they came
+        # out as bare `cr3` identifiers and the generated file did not compile.
+        # The runtime keeps a value per register instead.
+        special = _special_reg(ops[0]) or _special_reg(ops[1])
+        if special:
+            return self._lift_mov_special(insn, ops)
         src = _fmt_operand_read(ops[1])
         out = [_fmt_operand_write(ops[0], src)]
         # `mov ebp, esp` establishes this function's frame. Publish it, because
@@ -2049,6 +2069,18 @@ class Lifter:
             # of the stack.
             out.append("g_seh_ebp = ebp;")
         return out
+
+    def _lift_mov_special(self, insn, ops):
+        dst, src = _special_reg(ops[0]), _special_reg(ops[1])
+        if dst and src:
+            return [f"/* mov {ops[0].reg}, {ops[1].reg}: bad operands */"]
+        if dst:
+            kind, n = dst
+            fn = "xbox_WriteCr" if kind == "c" else "xbox_WriteDr"
+            return [f"{fn}({n}, {_fmt_operand_read(ops[1])});"]
+        kind, n = src
+        fn = "xbox_ReadCr" if kind == "c" else "xbox_ReadDr"
+        return [_fmt_operand_write(ops[0], f"{fn}({n})")]
 
     def _lift_movzx(self, insn, ops):
         if len(ops) < 2:
