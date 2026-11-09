@@ -31,3 +31,17 @@ adb logcat -s xboxrecomp SDL
 4. Press Back again within 2 s. logcat: `Back pressed twice, quitting`, then `clean exit`, and the app closes.
 5. Check there is no tombstone: `adb shell ls /data/tombstones` (root) or no `DEBUG` / `F libc` lines in logcat.
 6. Send a screenshot (`adb exec-out screencap -p > shell.png`) and the logcat lines.
+
+## RECOMP_* options (recomp.cfg)
+
+There is no shell environment on Android. The shell therefore reads `recomp.cfg` from the app's external files dir
+before anything starts, and puts each line in the environment (`src/platform/recomp_cfg.c`, XBA-26):
+
+```bash
+printf 'RECOMP_WAIT_LOG=1\n# comments and blank lines are fine\n' > recomp.cfg
+adb push recomp.cfg /sdcard/Android/data/fr.adserver.xboxrecomp.shell/files/recomp.cfg
+```
+
+logcat then shows one line: `recomp.cfg: 1 option(s) from …: RECOMP_WAIT_LOG=1`. Without the file it shows
+`recomp.cfg: none (read from … when present)`, which is not an error. A variable that is already in the environment
+wins over the file. The list of switches: `docs/runtime/environment-variables.md`.

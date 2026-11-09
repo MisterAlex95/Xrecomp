@@ -36,9 +36,14 @@ target_include_directories(host_time PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
+# recomp_cfg: RECOMP_* options from a recomp.cfg file (recomp_cfg.h), for
+# hosts without a shell environment (Android). A real library on every host.
+add_library(recomp_cfg STATIC recomp_cfg.c)
+target_include_directories(recomp_cfg PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+
 if(WIN32)
     add_library(platform INTERFACE)
-    target_link_libraries(platform INTERFACE host_time)
+    target_link_libraries(platform INTERFACE host_time recomp_cfg)
     target_include_directories(platform INTERFACE ${XBOXRECOMP_SRC_DIR})
     target_link_libraries(platform INTERFACE recomp_exit_hook)
 else()
@@ -48,7 +53,7 @@ else()
         ${CMAKE_CURRENT_SOURCE_DIR}
     )
     find_package(Threads REQUIRED)
-    target_link_libraries(platform PUBLIC Threads::Threads recomp_exit_hook host_time)
+    target_link_libraries(platform PUBLIC Threads::Threads recomp_exit_hook host_time recomp_cfg)
     if(NOT APPLE)
         target_link_libraries(platform PUBLIC m)   # feclearexcept etc.; libSystem has them on macOS
     endif()

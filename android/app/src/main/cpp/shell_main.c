@@ -1,6 +1,8 @@
 /* The app shell's SDL_main (XBA-18): what every title's APK starts from.
  *
  * - stdout / stderr go to logcat (tag "xboxrecomp") before anything prints;
+ * - RECOMP_* options from <external files dir>/recomp.cfg, before any library
+ *   starts (XBA-26);
  * - a black, fullscreen, landscape window;
  * - "xboxrecomp ready" with the build version;
  * - Back twice within 2 s quits: SDL_main returns and SDLActivity finishes.
@@ -11,6 +13,7 @@
 #include <stdio.h>
 
 #include "platform/android_log.h"
+#include "platform/recomp_cfg.h"
 
 #ifndef XBA_VERSION
 #define XBA_VERSION "dev"
@@ -33,6 +36,16 @@ int main(int argc, char *argv[])
     (void)argc; (void)argv;
     if (xbox_android_log_init() != 0)
         SDL_Log("xboxrecomp: stdout/stderr redirect failed, runtime messages will be lost");
+
+    /* RECOMP_* switches: no shell environment on Android, so a file in the
+     * app's external files dir (adb push recomp.cfg /sdcard/Android/data/<id>/files/). */
+    const char *ext = SDL_AndroidGetExternalStoragePath();
+    if (ext) {
+        char cfg[1024];
+        SDL_snprintf(cfg, sizeof cfg, "%s/recomp.cfg", ext);
+        if (recomp_cfg_load(cfg) == 0)
+            printf("recomp.cfg: none (read from %s when present)\n", cfg);
+    }
 
     /* Back is ours: the shell decides when it quits (twice within 2 s). */
     SDL_SetHint(SDL_HINT_ANDROID_TRAP_BACK_BUTTON, "1");
