@@ -27,7 +27,11 @@ def command(cc, sources, output, *, include_dirs=(), defines=(),
                  *('/D' + str(d) for d in defines), *sources]
                 + (['/c', '/Fo:' + str(output)] if compile_only
                    else ['/Fe:' + str(output)]))
-    return ([cc, '-w', '-O2', *gnu_flags,
+    # Libraries go after the sources: with --as-needed (the default of Debian
+    # and Ubuntu toolchains) a `-lm` placed before them links nothing.
+    libs = [f for f in gnu_flags if f.startswith('-l')]
+    flags = [f for f in gnu_flags if not f.startswith('-l')]
+    return ([cc, '-w', '-O2', *flags,
              *(arg for p in include_dirs for arg in ('-I', str(p))),
              *('-D' + str(d) for d in defines), *sources,
-             *(['-c'] if compile_only else []), '-o', str(output)])
+             *(['-c'] if compile_only else libs), '-o', str(output)])
