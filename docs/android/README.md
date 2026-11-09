@@ -54,3 +54,7 @@ docker build -f tools/docker/linux.Dockerfile --target test .
 
 Personal builds only: no game code, XBE, disc image or game data in this repo, in CI, or in any release.
 Per-title repos (generated C) are separate and private.
+
+## Android toolchain
+
+The pinned image `tools/docker/android.Dockerfile` (NDK, SDK, Gradle, JDK, SDL2 sources): see [toolchain.md](toolchain.md).

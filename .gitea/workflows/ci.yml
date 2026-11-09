@@ -79,3 +79,37 @@ jobs:
       - name: Clean up
         if: always()
         run: docker rmi "$TEST_TAG" >/dev/null 2>&1 || true
+
+  # The Android toolchain image (docs/android/toolchain.md) builds, and its NDK builds SDL2 for arm64-v8a / API 30.
+  android-image:
+    runs-on: ubuntu-latest
+    container:
+      image: docker:29.8.1-cli
+    env:
+      IMAGE_TAG: xba-android:${{ github.run_id }}
+    steps:
+      - name: Checkout
+        env:
+          TOKEN: ${{ github.token }}
+        run: |
+          apk add --no-cache git >/dev/null
+          git init -q .
+          git fetch -q --depth 1 "$(printf '%s' "$GITHUB_SERVER_URL" | sed "s#://#://ci:$TOKEN@#")/$GITHUB_REPOSITORY.git" "$GITHUB_SHA"
+          git checkout -q FETCH_HEAD
+
+      - name: Build the image
+        run: docker build -f tools/docker/android.Dockerfile --progress=plain -t "$IMAGE_TAG" .
+
+      - name: Smoke test (SDL2 for arm64-v8a, API 30)
+        run: |
+          docker run --rm --tmpfs /tmp:exec "$IMAGE_TAG" bash -c '
+            cat /etc/xba-toolchain.txt
+            cmake -S "$SDL2_SRC" -B /tmp/sdl -G Ninja -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake" \
+              -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=30 >/dev/null
+            cmake --build /tmp/sdl -j"$(nproc)" >/dev/null
+            file /tmp/sdl/libSDL2.so | tee /dev/stderr | grep -q "ARM aarch64, version 1 (SYSV), dynamically linked, for Android 30"'
+
+      - name: Clean up
+        if: always()
+        run: docker rmi "$IMAGE_TAG" >/dev/null 2>&1 || true
