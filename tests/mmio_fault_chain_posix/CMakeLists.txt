@@ -1,0 +1,16 @@
+cmake_minimum_required(VERSION 3.20)
+project(mmio_fault_chain_posix_test C)
+# xbox_PosixInstallMmioFaultHandler (XBA-22): a fault outside guest MMIO reaches the previous handler,
+# and with no previous handler the process still dies of the original signal.
+if(WIN32)
+    message(FATAL_ERROR "POSIX signal chaining; Windows uses vectored handlers")
+endif()
+set(CMAKE_C_STANDARD 11)
+add_subdirectory(../.. runtime)
+add_executable(mmio_fault_chain_posix_test test_main.c)
+target_include_directories(mmio_fault_chain_posix_test PRIVATE ../../src)
+target_link_libraries(mmio_fault_chain_posix_test PRIVATE xboxrecomp)
+enable_testing()
+add_test(NAME mmio_fault_chain_posix_previous COMMAND mmio_fault_chain_posix_test previous)
+add_test(NAME mmio_fault_chain_posix_default COMMAND mmio_fault_chain_posix_test default)
+add_test(NAME mmio_fault_chain_posix_replaced COMMAND mmio_fault_chain_posix_test replaced)

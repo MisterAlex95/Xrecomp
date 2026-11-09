@@ -265,6 +265,13 @@ void xbox_ProtectMirrorsForDebug(void);
 int xbox_VehMmioFault(void *exception_pointers);
 #else
 int xbox_PosixMmioFault(void *ucv, uintptr_t fault);
+/* Installs a SIGSEGV / SIGBUS handler that services trapped MMIO through
+ * xbox_PosixMmioFault and hands every other fault to the handler that was
+ * there before (debuggerd and ART on Android), so real crashes keep their
+ * tombstone. Call early, before the title runs; call again after anything
+ * that may install its own handler (SDL_Init): it checks it is still in
+ * front and re-installs itself, chaining to the newcomer. 0 on success. */
+int xbox_PosixInstallMmioFaultHandler(void);
 #endif
 
 /* Dump the guest call stack and abort if the title has not exited within

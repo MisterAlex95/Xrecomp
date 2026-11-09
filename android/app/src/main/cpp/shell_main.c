@@ -5,6 +5,8 @@
  *   starts (XBA-26);
  * - the runtime on the fast cores of a big.LITTLE SoC, before any thread is
  *   created, so every thread inherits it (XBA-25);
+ * - the trapped-MMIO fault handler, chained to debuggerd / ART so real
+ *   crashes keep their tombstone, checked again after SDL_Init (XBA-22);
  * - a black, fullscreen, landscape window;
  * - "xboxrecomp ready" with the build version;
  * - Back twice within 2 s quits: SDL_main returns and SDLActivity finishes.
@@ -13,10 +15,12 @@
  * once the generated C is built for Android (XBA-33). */
 #include <SDL.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 #include "platform/android_log.h"
 #include "platform/recomp_cfg.h"
 #include "platform/host_cpus.h"
+#include "kernel/xbox_memory_layout.h"
 
 #ifndef XBA_VERSION
 #define XBA_VERSION "dev"
@@ -54,6 +58,9 @@ int main(int argc, char *argv[])
      * whose threads should inherit the mask too. */
     recomp_host_cpus_init();
 
+    if (xbox_PosixInstallMmioFaultHandler() != 0)
+        fprintf(stderr, "xboxrecomp: could not install the MMIO fault handler\n");
+
     /* Back is ours: the shell decides when it quits (twice within 2 s). */
     SDL_SetHint(SDL_HINT_ANDROID_TRAP_BACK_BUTTON, "1");
     SDL_SetHint(SDL_HINT_ORIENTATIONS, "LandscapeLeft LandscapeRight");
@@ -72,12 +79,26 @@ int main(int argc, char *argv[])
         return 1;
     }
 
+    /* SDL may have installed handlers of its own: make sure ours is still
+     * in front (it chains to theirs). */
+    xbox_PosixInstallMmioFaultHandler();
+
     int w = 0, h = 0;
     SDL_GetRendererOutputSize(ren, &w, &h);
     SDL_version sdl;
     SDL_GetVersion(&sdl);
     printf("xboxrecomp ready (build %s, SDL %d.%d.%d, %dx%d)\n",
            XBA_VERSION, sdl.major, sdl.minor, sdl.patch, w, h);
+
+    /* RECOMP_SHELL_CRASH_TEST=1 (recomp.cfg): a deliberate null write outside
+     * guest MMIO, to check on the device that the crash still reaches
+     * debuggerd and gives a tombstone whose backtrace names this function. */
+    if (getenv("RECOMP_SHELL_CRASH_TEST")) {
+        printf("xboxrecomp: RECOMP_SHELL_CRASH_TEST: writing to NULL now\n");
+        fflush(stdout);
+        SDL_Delay(200);                      /* let the line reach logcat */
+        *(volatile int *)0 = 0x58424121;     /* "XBA!" */
+    }
 
     Uint32 back_at = 0;
     int running = 1;
