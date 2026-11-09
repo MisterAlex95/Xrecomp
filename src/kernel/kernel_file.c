@@ -1130,7 +1130,8 @@ static NTSTATUS errno_to_status(int e)
         case ENOENT:  return STATUS_OBJECT_NAME_NOT_FOUND;
         case ENOTDIR: return STATUS_OBJECT_PATH_NOT_FOUND;
         case EACCES:
-        case EPERM:   return STATUS_ACCESS_DENIED;
+        case EPERM:
+        case EISDIR:  return STATUS_ACCESS_DENIED;   /* the Win32 backend's ERROR_ACCESS_DENIED */
         case EEXIST:  return STATUS_OBJECT_NAME_COLLISION;
         case ENOMEM:  return STATUS_NO_MEMORY;
         case EMFILE:
@@ -1223,6 +1224,15 @@ NTSTATUS __stdcall xbox_NtCreateFile(
         if (defer)
             flags &= ~O_TRUNC;
         fd = open(host_path, flags, 0644);
+        /* open(2) hands back a directory fd for a read-only open; the console
+         * refuses a directory under FILE_NON_DIRECTORY_FILE, and so does the
+         * Win32 backend (CreateFileW without backup semantics). */
+        if (fd >= 0 && (CreateOptions & XBOX_FILE_NON_DIRECTORY_FILE) &&
+            fstat(fd, &st) == 0 && S_ISDIR(st.st_mode)) {
+            close(fd);
+            fd = -1;
+            errno = EISDIR;
+        }
         if (fd >= 0 && fd < FATX_PENDING_MAX)
             s_overwrite_pending[fd] = (unsigned char)defer;
         else if (fd >= 0 && defer && ftruncate(fd, 0) != 0) {
@@ -1243,7 +1253,7 @@ NTSTATUS __stdcall xbox_NtCreateFile(
          * FAILED line: it read win32 err=0 on every POSIX failure. */
         g_xbox_last_file_error = no_dir ? 3u
                                : e == ENOENT ? 2u
-                               : (e == EACCES || e == EPERM) ? 5u
+                               : (e == EACCES || e == EPERM || e == EISDIR) ? 5u
                                : e == EEXIST ? 80u
                                : (e == EMFILE || e == ENFILE) ? 4u : 0u;
         /* Not the title's fault, and easy to mistake for a missing file:
