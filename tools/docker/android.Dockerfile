@@ -44,6 +44,11 @@ RUN curl -fsSL -o /tmp/gradle.zip "https://services.gradle.org/distributions/gra
 RUN git clone -q --depth 1 --branch "${SDL2_TAG}" https://github.com/libsdl-org/SDL.git "$SDL2_SRC" \
     && rm -rf "$SDL2_SRC/.git"
 
+# A debug key made once per image, so successive debug APKs from the same image update the app in place.
+RUN mkdir -p /root/.android && keytool -genkeypair -keystore /root/.android/debug.keystore -storepass android \
+        -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 \
+        -dname "CN=Android Debug,O=Android,C=US" 2>/dev/null
+
 # What is inside, for docs/android/toolchain.md and the CI log.
 RUN { echo "NDK      $(grep Pkg.Revision $ANDROID_NDK_HOME/source.properties | cut -d= -f2 | tr -d ' ')"; \
       echo "clang    $($ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/clang --version | head -1)"; \
@@ -71,3 +76,19 @@ RUN mkdir -p /reports \
          | while read -r f; do printf '%-42s %9s  %s\n' "$f" "$(stat -c%s "$f")" "$(file -b "$f" | cut -c1-70)"; done \
          | tee /reports/android-artefacts.txt \
     && rm -rf /work
+
+# The app shell APK (XBA-18), debug-signed. Out of the image with:
+#   docker build -f tools/docker/android.Dockerfile --target apk-out --output type=local,dest=out .
+FROM android AS apk
+ARG XBA_VERSION=dev
+COPY . /src
+WORKDIR /src/android
+RUN printf 'sdk.dir=%s\ncmake.dir=/usr\n' "$ANDROID_HOME" > local.properties \
+    && gradle --no-daemon --console=plain -PxbaVersion="$XBA_VERSION" assembleDebug \
+    && mkdir -p /out \
+    && cp app/build/outputs/apk/debug/app-debug.apk /out/xboxrecomp-shell.apk \
+    && unzip -l /out/xboxrecomp-shell.apk | grep -E 'lib/|classes' | tee /out/apk-contents.txt \
+    && rm -rf /root/.gradle/caches /root/.gradle/daemon app/build app/.cxx build .gradle
+
+FROM scratch AS apk-out
+COPY --from=apk /out/ /

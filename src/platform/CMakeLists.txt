@@ -42,7 +42,7 @@ if(WIN32)
     target_include_directories(platform INTERFACE ${XBOXRECOMP_SRC_DIR})
     target_link_libraries(platform INTERFACE recomp_exit_hook)
 else()
-    add_library(platform STATIC win32_compat.c)
+    add_library(platform STATIC win32_compat.c android_log.c)
     target_include_directories(platform PUBLIC
         ${XBOXRECOMP_SRC_DIR}
         ${CMAKE_CURRENT_SOURCE_DIR}
@@ -51,6 +51,9 @@ else()
     target_link_libraries(platform PUBLIC Threads::Threads recomp_exit_hook host_time)
     if(NOT APPLE)
         target_link_libraries(platform PUBLIC m)   # feclearexcept etc.; libSystem has them on macOS
+    endif()
+    if(ANDROID)
+        target_link_libraries(platform PUBLIC log)   # android_log.c: stdout / stderr -> logcat
     endif()
     target_compile_options(platform PRIVATE -Wall -Wextra -Wno-unused-parameter -O2)
 endif()

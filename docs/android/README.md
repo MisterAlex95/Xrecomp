@@ -58,3 +58,7 @@ Per-title repos (generated C) are separate and private.
 ## Android toolchain
 
 The pinned image `tools/docker/android.Dockerfile` (NDK, SDK, Gradle, JDK, SDL2 sources): see [toolchain.md](toolchain.md).
+
+## App shell
+
+The APK every title starts from (SDLActivity + `libmain.so` + logcat): see [app-shell.md](app-shell.md).
