@@ -1,4 +1,4 @@
-> **Fork:** this is Alex's private Android fork (branch `android`); see [docs/android/README.md](docs/android/README.md).
+> **Fork:** this is Alex's private Android fork; see [docs/android/README.md](docs/android/README.md).
 
 # xboxrecomp
 
