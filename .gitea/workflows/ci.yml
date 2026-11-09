@@ -100,18 +100,24 @@ jobs:
           git checkout -q FETCH_HEAD
 
       - name: Build the image
-        run: docker build -f tools/docker/android.Dockerfile --progress=plain -t "$IMAGE_TAG" .
+        run: docker build -f tools/docker/android.Dockerfile --target android --progress=plain -t "$IMAGE_TAG" .
 
       - name: Smoke test (SDL2 for arm64-v8a, API 30)
         run: |
-          docker run --rm --tmpfs /tmp:exec "$IMAGE_TAG" bash -c '
+          docker run --rm "$IMAGE_TAG" bash -c '
             cat /etc/xba-toolchain.txt
             cmake -S "$SDL2_SRC" -B /tmp/sdl -G Ninja -DCMAKE_BUILD_TYPE=Release \
               -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake" \
               -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=30 >/dev/null
-            cmake --build /tmp/sdl -j"$(nproc)" >/dev/null
+            cmake --build /tmp/sdl -j4 >/dev/null
             file /tmp/sdl/libSDL2.so | tee /dev/stderr | grep -q "ARM aarch64, version 1 (SYSV), dynamically linked, for Android 30"'
+
+      # XBA-17: every toolkit library builds for arm64-v8a, SDL2 from the pinned sources, no desktop dependency.
+      - name: Toolkit for arm64-v8a (NDK, API 30)
+        run: |
+          docker build -f tools/docker/android.Dockerfile --target toolkit --progress=plain -t "$IMAGE_TAG-toolkit" .
+          docker run --rm "$IMAGE_TAG-toolkit" cat /reports/android-artefacts.txt
 
       - name: Clean up
         if: always()
-        run: docker rmi "$IMAGE_TAG" >/dev/null 2>&1 || true
+        run: docker rmi "$IMAGE_TAG" "$IMAGE_TAG-toolkit" >/dev/null 2>&1 || true

@@ -24,6 +24,23 @@ add_compile_definitions(
 
 # Option to build examples
 
+# ── Android host ──────────────────────────────────────────────
+
+# Android (NDK toolchain): SDL2 is built from pinned sources as a subproject
+# instead of found on the system, as a shared libSDL2.so that SDLActivity
+# loads. The Android toolchain image sets SDL2_SRC (docs/android/toolchain.md).
+if(ANDROID AND NOT TARGET SDL2::SDL2)
+    set(XBOXRECOMP_SDL2_SOURCE_DIR "$ENV{SDL2_SRC}" CACHE PATH
+        "SDL2 sources for the Android build (release-2.32.10)")
+    if(NOT EXISTS "${XBOXRECOMP_SDL2_SOURCE_DIR}/CMakeLists.txt")
+        message(FATAL_ERROR "Android build: set XBOXRECOMP_SDL2_SOURCE_DIR (or SDL2_SRC) to the SDL2 sources")
+    endif()
+    set(SDL_SHARED ON CACHE BOOL "" FORCE)
+    set(SDL_STATIC OFF CACHE BOOL "" FORCE)
+    set(SDL_TEST OFF CACHE BOOL "" FORCE)
+    add_subdirectory("${XBOXRECOMP_SDL2_SOURCE_DIR}" "${CMAKE_BINARY_DIR}/SDL2" EXCLUDE_FROM_ALL)
+endif()
+
 # ── Runtime Libraries ─────────────────────────────────────────
 
 # Platform: Win32/NT type vocabulary + POSIX implementation of generic

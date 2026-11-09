@@ -1,6 +1,7 @@
 # syntax=docker/dockerfile:1
 # Android toolchain image (XBA-16): everything needed to build the toolkit for arm64-v8a and an APK.
-#   docker build -f tools/docker/android.Dockerfile -t xba-android .
+#   docker build -f tools/docker/android.Dockerfile --target android -t xba-android .   # the toolchain image
+#   docker build -f tools/docker/android.Dockerfile --target toolkit .                  # + the toolkit for arm64-v8a
 # Pinned versions (also in docs/android/toolchain.md; change both together):
 ARG DEBIAN=trixie-slim
 FROM debian:${DEBIAN} AS android
@@ -54,3 +55,19 @@ RUN { echo "NDK      $(grep Pkg.Revision $ANDROID_NDK_HOME/source.properties | c
       echo "SDL2     ${SDL2_TAG}"; } | tee /etc/xba-toolchain.txt
 # The release keystore never goes in the image: it comes in as a build secret when an APK is signed.
 WORKDIR /src
+
+# The toolkit's static libraries for arm64-v8a, API 30 (XBA-17). Checks that no desktop dependency is linked.
+FROM android AS toolkit
+ARG JOBS=4
+COPY . /src
+RUN mkdir -p /reports \
+    && cmake -S /src -B /work/android -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DXBOXRECOMP_BUILD_TESTS=OFF \
+         -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake" \
+         -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=30 \
+    && cmake --build /work/android -j"$JOBS" \
+    && ! grep -qE 'epoxy|X11|libssl|libcrypto' /work/android/build.ninja \
+    && cd /work/android \
+    && find . \( -name '*.a' -o -name '*.so' \) -not -path '*/CMakeFiles/*' | sort \
+         | while read -r f; do printf '%-42s %9s  %s\n' "$f" "$(stat -c%s "$f")" "$(file -b "$f" | cut -c1-70)"; done \
+         | tee /reports/android-artefacts.txt \
+    && rm -rf /work

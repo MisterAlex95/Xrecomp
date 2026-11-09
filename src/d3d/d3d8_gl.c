@@ -25,7 +25,7 @@
 #include "d3d8_fvf.h"
 
 #include <SDL.h>
-#include <epoxy/gl.h>
+#include "gl_host.h"
 
 #include <stdio.h>
 #include <stdlib.h>

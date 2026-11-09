@@ -41,6 +41,20 @@
 #include <sys/sysinfo.h>
 #endif
 
+#if defined(__ANDROID__)
+/* bionic lacks the glibc thread-affinity calls; the kernel's per-task
+ * affinity works on the thread's tid, which bionic hands out. */
+static int xr_thread_affinity(pthread_t th, size_t size, cpu_set_t *set, int get)
+{
+    pid_t tid = pthread_gettid_np(th);
+    int rc = get ? sched_getaffinity(tid, size, set)
+                 : sched_setaffinity(tid, size, set);
+    return rc == 0 ? 0 : errno;
+}
+#define pthread_getaffinity_np(th, size, set) xr_thread_affinity((th), (size), (set), 1)
+#define pthread_setaffinity_np(th, size, set) xr_thread_affinity((th), (size), (cpu_set_t *)(set), 0)
+#endif
+
 /* ===================================================================== */
 /* Last-error (thread-local)                                             */
 /* ===================================================================== */
@@ -1171,7 +1185,18 @@ BOOL TerminateThread(HANDLE h, DWORD exitCode)
 {
     w32_object *o = obj_from_handle(h);
     if (!o || o->kind != K_THREAD) return FALSE;
+#if defined(__ANDROID__)
+    /* bionic has no pthread_cancel. Temporary (XBA-17): the thread keeps
+     * running, it is only reported as exited. The real answer is XBA-25. */
+    {
+        static volatile LONG warned;
+        if (InterlockedExchange(&warned, 1) == 0)
+            fprintf(stderr, "TerminateThread: no pthread_cancel on Android, "
+                            "the thread keeps running (XBA-25)\n");
+    }
+#else
     pthread_cancel(o->thread);
+#endif
     pthread_mutex_lock(&o->lock);
     o->exit_code = exitCode;
     o->exited    = 1;
@@ -1728,6 +1753,11 @@ VOID SecureZeroMemory(PVOID ptr, SIZE_T cnt)
 {
 #if defined(__APPLE__)
     memset_s(ptr, cnt, 0, cnt);
+#elif defined(__ANDROID__)
+    /* bionic has no explicit_bzero: memset, then a barrier that tells the
+     * compiler the bytes are read, so the store is not dropped. */
+    memset(ptr, 0, cnt);
+    __asm__ __volatile__("" : : "r"(ptr) : "memory");
 #else
     explicit_bzero(ptr, cnt);
 #endif
