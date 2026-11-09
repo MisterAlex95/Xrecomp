@@ -53,3 +53,16 @@ the main thread to the cores whose cpufreq maximum is above the slowest cluster'
 every thread inherits that mask: guest threads, the rasteriser pool, SDL's. On the Thor (Snapdragon 8 Gen 2) that means
 cpus 3-7 and not the three A510 cores. logcat: `host cpus: runtime on the fast cores 3-7 of 0-7 (...)`.
 `RECOMP_BIG_CORES=0` in `recomp.cfg` turns it off. On desktop it is off unless `RECOMP_BIG_CORES=1`.
+
+## Fault handler (trapped MMIO and real crashes)
+
+Before SDL starts, the shell calls `xbox_PosixInstallMmioFaultHandler()` (XBA-22), and calls it again after
+`SDL_Init`. The handler emulates guest accesses to trapped hardware registers (APU, AC'97, USB OHCI). Every other
+fault goes to the handler that was there before, debuggerd (and ART in front of it). When the previous action is the
+default one, the handler restores it and the instruction faults again, so a real crash gives the usual tombstone at
+the right place. If something replaced the handler in the meantime, the second call puts it back in front and chains
+to the newcomer.
+
+Device check: `RECOMP_SHELL_CRASH_TEST=1` in `recomp.cfg` makes the shell write to NULL right after the ready line.
+Expected: the app closes and logcat shows `Fatal signal 11 (SIGSEGV)` with a backtrace that goes through `SDL_main`
+in `libmain.so`. Remove the line afterwards.

@@ -895,6 +895,86 @@ int xbox_PosixMmioFault(void *ucv, uintptr_t fault)
 #endif
     return 0;
 }
+
+/* The fault handler a POSIX title would otherwise write itself (see
+ * docs/runtime/README.md), with the chaining Android needs (XBA-22).
+ *
+ * A guest MMIO access is serviced and the thread resumes. Anything else is a
+ * real crash and must reach whoever was there before us -- debuggerd on
+ * Android, which writes the tombstone, or ART's fault manager in front of it
+ * (libsigchain sits in front of sigaction in an app process): their handler
+ * is called with the original context, or, when the previous action is the
+ * default one, it is put back and the faulting instruction runs again, so
+ * the crash and its backtrace are the original ones. SA_ONSTACK: bionic gives
+ * every thread an alternate signal stack, which a stack overflow needs. */
+#include <signal.h>
+static struct sigaction g_mmio_prev_segv, g_mmio_prev_bus;
+static volatile sig_atomic_t g_mmio_handler_installed;
+
+static void mmio_fault_handler(int sig, siginfo_t *si, void *ucv)
+{
+    struct sigaction *prev;
+
+    if (xbox_PosixMmioFault(ucv, (uintptr_t)si->si_addr))
+        return;
+    prev = sig == SIGBUS ? &g_mmio_prev_bus : &g_mmio_prev_segv;
+    if (prev->sa_flags & SA_SIGINFO) {
+        if (prev->sa_sigaction) {
+            prev->sa_sigaction(sig, si, ucv);
+            return;
+        }
+    } else if (prev->sa_handler != SIG_DFL && prev->sa_handler != SIG_IGN) {
+        prev->sa_handler(sig);
+        return;
+    }
+    /* Default action: restore it and return; the instruction faults again
+     * and the process dies of the original signal at the original place. */
+    sigaction(sig, prev, NULL);
+}
+
+int xbox_PosixInstallMmioFaultHandler(void)
+{
+    struct sigaction sa;
+
+    if (g_mmio_handler_installed) {
+        /* Called again (after SDL_Init, say): still first in line? If someone
+         * replaced us, go back in front and chain to them instead. */
+        struct sigaction cur_segv, cur_bus;
+        int segv_ok, bus_ok;
+        sigaction(SIGSEGV, NULL, &cur_segv);
+        sigaction(SIGBUS, NULL, &cur_bus);
+        segv_ok = (cur_segv.sa_flags & SA_SIGINFO) && cur_segv.sa_sigaction == mmio_fault_handler;
+        bus_ok  = (cur_bus.sa_flags & SA_SIGINFO) && cur_bus.sa_sigaction == mmio_fault_handler;
+        if (segv_ok && bus_ok)
+            return 0;
+        fprintf(stderr, "  [MMIO] fault handler replaced (SIGSEGV %s, SIGBUS %s): re-installed in front\n",
+                segv_ok ? "ours" : "theirs", bus_ok ? "ours" : "theirs");
+        g_mmio_handler_installed = 0;
+        if (!segv_ok) g_mmio_prev_segv = cur_segv;
+        if (!bus_ok)  g_mmio_prev_bus = cur_bus;
+        memset(&sa, 0, sizeof sa);
+        sa.sa_sigaction = mmio_fault_handler;
+        sa.sa_flags = SA_SIGINFO | SA_ONSTACK | SA_RESTART;
+        sigemptyset(&sa.sa_mask);
+        if ((!segv_ok && sigaction(SIGSEGV, &sa, NULL) != 0) ||
+            (!bus_ok && sigaction(SIGBUS, &sa, NULL) != 0))
+            return -1;
+        g_mmio_handler_installed = 1;
+        return 0;
+    }
+    memset(&sa, 0, sizeof sa);
+    sa.sa_sigaction = mmio_fault_handler;
+    sa.sa_flags = SA_SIGINFO | SA_ONSTACK | SA_RESTART;
+    sigemptyset(&sa.sa_mask);
+    if (sigaction(SIGSEGV, &sa, &g_mmio_prev_segv) != 0)
+        return -1;
+    if (sigaction(SIGBUS, &sa, &g_mmio_prev_bus) != 0) {
+        sigaction(SIGSEGV, &g_mmio_prev_segv, NULL);
+        return -1;
+    }
+    g_mmio_handler_installed = 1;
+    return 0;
+}
 #endif
 
 /*
