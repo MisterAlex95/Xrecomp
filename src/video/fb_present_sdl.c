@@ -45,6 +45,7 @@
 #include <sys/resource.h>
 #include <time.h>
 
+#include "platform/recomp_lifecycle.h"
 #include "video_player.h"
 #include "keyboard_sdl.h"     /* src/input: keys into the pad stand-in */
 #include "xinput_xbox.h"
@@ -53,6 +54,11 @@ extern ptrdiff_t xbox_GetMemoryOffset(void);
 
 #define FB_W 640u
 #define FB_H 480u
+
+/* Back twice within this many ms quits (Android, XBA-24). */
+#define BACK_QUIT_MS 2000u
+/* User-facing text, named by its key (spec XBA-24). */
+#define TEXT_QUIT_PROMPT "Press Back again to quit"
 
 /* ── Handoff: three slots, one each for writer, reader and the ready frame ── */
 
@@ -154,6 +160,10 @@ static void present_copy(uint32_t fb_va, uint32_t pitch)
 /* Called by the pushbuffer executor when the title flips. */
 void xbox_FramebufferWindowPresent(uint32_t fb_va, uint32_t pitch)
 {
+    /* App in the background: the flip waits here, and the title's other
+     * threads stop behind it (they wait for the GPU). Before the handshake
+     * below, so a window that closes meanwhile is not kept waiting. */
+    recomp_lifecycle_hold();
     /* Dekker-style handshake with the close path: each side stores its own
      * flag and then loads the other's, all seq_cst, so either the window sees
      * this present in flight or this present sees the window closing. */
@@ -263,6 +273,18 @@ static int start_guest(void)
 
 /* ── The window, on the process main thread ───────────────────────────── */
 
+/* SDL's background / foreground events, on the thread that sends them (the
+ * Android UI thread), before the main loop sees them. */
+static int SDLCALL lifecycle_watch(void *user, SDL_Event *ev)
+{
+    (void)user;
+    if (ev->type == SDL_APP_WILLENTERBACKGROUND)
+        recomp_lifecycle_pause();
+    else if (ev->type == SDL_APP_DIDENTERFOREGROUND)
+        recomp_lifecycle_resume();
+    return 1;
+}
+
 static int env_on(const char *name)
 {
     const char *e = getenv(name);
@@ -277,7 +299,8 @@ int xbox_HostWindowMain(int (*guest_main)(void))
     uint32_t tex_bpp = 0;
     uint64_t shown_seq = 0, t_title = 0, flips_title = 0;
     const char *e;
-    int vsync, scale, quit = 0, guest_done = 0, dirty = 1;
+    int vsync, scale, quit = 0, guest_done = 0, dirty = 1, reupload = 0;
+    uint64_t back_at = 0;
 
     /* Ctrl-C and SIGTERM keep their default meaning; SDL would turn them
      * into an SDL_QUIT that a headless run never reads. Set before the
@@ -294,6 +317,10 @@ int xbox_HostWindowMain(int (*guest_main)(void))
         scale = 2;
 
     SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "nearest");
+#ifdef __ANDROID__
+    /* Back is the window's: once shows QUIT_PROMPT, twice within 2 s quits. */
+    SDL_SetHint(SDL_HINT_ANDROID_TRAP_BACK_BUTTON, "1");
+#endif
     if (SDL_Init(FBWIN_SDL_SUBSYSTEMS) != 0) {
         fprintf(stderr, "  [FBWIN] SDL video unavailable (%s); running headless\n",
                 SDL_GetError());
@@ -326,6 +353,8 @@ int xbox_HostWindowMain(int (*guest_main)(void))
                     " vsync %s); guest runs on a pthread\n",
                     FB_W, FB_H, ri.name, vsync ? "on" : "off");
     }
+
+    SDL_AddEventWatch(lifecycle_watch, NULL);
 
     s_guest_done_event = SDL_RegisterEvents(2);
     if (s_guest_done_event == (Uint32)-1) {
@@ -376,6 +405,30 @@ int xbox_HostWindowMain(int (*guest_main)(void))
                          && (ev.window.event == SDL_WINDOWEVENT_EXPOSED
                              || ev.window.event == SDL_WINDOWEVENT_SIZE_CHANGED))
                     dirty = 1;
+                else if (ev.type == SDL_RENDER_TARGETS_RESET)
+                    dirty = 1;
+                else if (ev.type == SDL_RENDER_DEVICE_RESET) {
+                    /* GL context lost (some Android devices, on resume): the
+                     * texture is gone; upload the frame shown again. */
+                    if (tex)
+                        SDL_DestroyTexture(tex);
+                    tex = NULL;
+                    reupload = 1;
+                    dirty = 1;
+                } else if (ev.type == SDL_KEYDOWN && !ev.key.repeat
+                           && ev.key.keysym.scancode == SDL_SCANCODE_AC_BACK) {
+                    uint64_t t = now_ms();
+                    if (back_at && t - back_at <= BACK_QUIT_MS) {
+                        fprintf(stderr, "  [FBWIN] Back pressed twice, quitting\n");
+                        quit = 1;
+                    } else {
+                        back_at = t;
+                        fprintf(stderr, "  [FBWIN] QUIT_PROMPT shown\n");
+#ifdef __ANDROID__
+                        SDL_AndroidShowToast(TEXT_QUIT_PROMPT, 0, -1, 0, 0);
+#endif
+                    }
+                }
             } while (SDL_PollEvent(&ev));
         }
 
@@ -388,7 +441,7 @@ int xbox_HostWindowMain(int (*guest_main)(void))
         }
         pthread_mutex_unlock(&s_lock);
 
-        if (seq != shown_seq) {
+        if (seq != shown_seq || (reupload && shown_seq)) {
             shown_seq = seq;
             px = s_slot[s_front].px;
             bpp = s_slot[s_front].bpp;
@@ -413,6 +466,7 @@ int xbox_HostWindowMain(int (*guest_main)(void))
             if (tex)
                 SDL_UpdateTexture(tex, NULL, px, (int)pitch);
             dirty = 1;
+            reupload = 0;
         }
         if (dirty) {
             dirty = 0;
@@ -437,8 +491,12 @@ int xbox_HostWindowMain(int (*guest_main)(void))
         }
     }
 
-    /* No present may be mid-publish (it pushes an SDL event) once SDL goes. */
+    /* No present may be mid-publish (it pushes an SDL event) once SDL goes.
+     * A flip held by the lifecycle is let go first: it then sees s_running
+     * clear and returns. */
+    SDL_DelEventWatch(lifecycle_watch, NULL);
     __atomic_store_n(&s_running, 0, __ATOMIC_SEQ_CST);
+    recomp_lifecycle_resume();
     while (__atomic_load_n(&s_in_present, __ATOMIC_SEQ_CST))
         sched_yield();
     fprintf(stderr, "  [FBWIN] %s\n", quit ? "window closed" : "guest returned");

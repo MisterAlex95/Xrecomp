@@ -24,6 +24,7 @@
 #if !defined(_WIN32)
 
 #include <SDL.h>
+#include "platform/recomp_lifecycle.h"
 #include <time.h>
 
 #define SDLA_SAMPLE_RATE   48000
@@ -65,6 +66,15 @@ static int64_t now_ms(void)
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+/* App in the background (XBA-24): the device stops at once rather than at
+ * the guest's next flip, and plays the queue on from where it was. */
+static void on_lifecycle(int paused, void *user)
+{
+    (void)user;
+    if (g_dev)
+        SDL_PauseAudioDevice(g_dev, paused);
 }
 
 int xa2_init(void)
@@ -129,6 +139,11 @@ int xa2_init(void)
     g_dry = 0;
     g_initialized = 1;
     SDL_PauseAudioDevice(g_dev, 0);
+    {
+        static int listening;
+        if (!listening)   /* once per process; it reads g_dev when called */
+            listening = recomp_lifecycle_listen(on_lifecycle, NULL) == 0;
+    }
 
     driver = SDL_GetCurrentAudioDriver();
     fprintf(stderr, "[SDL2] audio initialized: driver %s (%d Hz stereo 16-bit, %d x %d-sample buffers, %.1f ms queued max)%s\n",

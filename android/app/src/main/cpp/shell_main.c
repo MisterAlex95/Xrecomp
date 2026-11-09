@@ -12,7 +12,10 @@
  *   crashes keep their tombstone, checked again after SDL_Init (XBA-22);
  * - a black, fullscreen, landscape window;
  * - "xboxrecomp ready" with the build version;
- * - Back twice within 2 s quits: SDL_main returns and SDLActivity finishes.
+ * - Back once shows QUIT_PROMPT (a toast), twice within 2 s quits: SDL_main
+ *   returns and SDLActivity finishes;
+ * - "lifecycle: paused" / "resumed after N ms" when the app leaves and comes
+ *   back (XBA-24).
  *
  * A title replaces this file with its own entry (the template's WinMain path)
  * once the generated C is built for Android (XBA-33). */
@@ -24,6 +27,7 @@
 #include "platform/recomp_cfg.h"
 #include "platform/host_cpus.h"
 #include "platform/recomp_storage.h"
+#include "platform/recomp_lifecycle.h"
 #include "kernel/xbox_memory_layout.h"
 
 #ifndef XBA_VERSION
@@ -37,6 +41,7 @@ extern void xbox_path_init(const char *game_dir, const char *save_dir);
 
 /* User-facing text, named by the key the spec and the tests use. English
  * only until the app has a strings table of its own. */
+#define TEXT_QUIT_PROMPT "Press Back again to quit"
 #define TEXT_NO_GAME_DATA \
     "No game data found.\n\n" \
     "Copy the extracted disc (default.xbe and its files) to:\n%s\n\n" \
@@ -51,6 +56,19 @@ __attribute__((weak)) recomp_func_t recomp_lookup(unsigned int va)        { (voi
 __attribute__((weak)) recomp_func_t recomp_lookup_manual(unsigned int va) { (void)va; return 0; }
 __attribute__((weak)) int g_fe_cursor;
 __attribute__((weak)) int fe_menu_get_pb_state(void) { return 0; }
+
+/* Background / foreground (XBA-24): the same watch as the title's window
+ * (fb_present_sdl.c), so logcat shows "lifecycle: paused" / "resumed after
+ * N ms" on the shell too. */
+static int SDLCALL lifecycle_watch(void *user, SDL_Event *ev)
+{
+    (void)user;
+    if (ev->type == SDL_APP_WILLENTERBACKGROUND)
+        recomp_lifecycle_pause();
+    else if (ev->type == SDL_APP_DIDENTERFOREGROUND)
+        recomp_lifecycle_resume();
+    return 1;
+}
 
 int main(int argc, char *argv[])
 {
@@ -92,6 +110,7 @@ int main(int argc, char *argv[])
         fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());
         return 1;
     }
+    SDL_AddEventWatch(lifecycle_watch, NULL);
     SDL_Window *win = SDL_CreateWindow("xboxrecomp", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
                                        0, 0, SDL_WINDOW_FULLSCREEN_DESKTOP);
     SDL_Renderer *ren = win ? SDL_CreateRenderer(win, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC)
@@ -152,7 +171,8 @@ int main(int argc, char *argv[])
                     running = 0;
                 } else {
                     back_at = now;
-                    printf("xboxrecomp: press Back again to quit\n");
+                    printf("xboxrecomp: QUIT_PROMPT shown (press Back again to quit)\n");
+                    SDL_AndroidShowToast(TEXT_QUIT_PROMPT, 0, -1, 0, 0);
                 }
             }
         }
