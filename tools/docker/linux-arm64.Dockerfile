@@ -17,7 +17,9 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 WORKDIR /src
 COPY . .
 ARG JOBS=4
-ENV SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy JOBS=${JOBS} \
+# RECOMP_GUEST_WINDOW=1: the memory layout Android uses by default (XBA-21); without it the contiguous window at
+# base + 2 GB lands on a taken range under qemu-user, as it would in an app process.
+ENV SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy JOBS=${JOBS} RECOMP_GUEST_WINDOW=1 \
     XBR_CMAKE_ARGS="-DCMAKE_TOOLCHAIN_FILE=/src/cmake/toolchains/linux-aarch64-cross.cmake"
 # /work removed at the end of the RUN, as in linux.Dockerfile (multi-GB sparse images from kernel_fd_limit). The C test run does not fail
 # the build here: under qemu a failure is a lead, not a verdict; the report says what failed.

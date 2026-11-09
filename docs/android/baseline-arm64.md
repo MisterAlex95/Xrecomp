@@ -22,7 +22,7 @@ address space and signal frames itself. A pass is good evidence. A failure is a 
 | Toolkit build | ok | ok, ELF aarch64 |
 | Compiler warnings (toolkit, unique) | 94 | 94, the same list (no new warning) |
 | C test projects | 80, 11 Windows-only | 80, 11 Windows-only |
-| Tests | 99 pass, 1 skip, 0 fail | 90 pass, 3 skip, **7 fail** (3 projects) |
+| Tests | 99 pass, 1 skip, 0 fail (80 projects, 2026-11-09) | 98 pass, 3 skip, **1 fail** (82 projects, after XBA-21) |
 | `pytest tools/` | 981 pass, 8 skip | n/a (host independent) |
 
 ## The arm64 failures
@@ -30,7 +30,12 @@ address space and signal frames itself. A pass is good evidence. A failure is a 
 | Project | What fails | Reading | Next |
 |---|---|---|---|
 | `mmio_decode_a64` (1) | Trapped `ldr s/d/q`: the SIMD register written in the signal frame is not the one the code reads after `sigreturn` (got 0x2F2F2F2F, want 0x3FC00000). Output: 30 traps, 1 unknown, 4 failures, all four on `ldr s`, `ldr d` and `ldr q`. | Probably qemu-user. Its `fpsimd_context` write-back is the suspect. It is exactly what XBA-22 depends on, though. | Confirm on hardware (XBA-45). |
-| `kernel_memory_bridge_posix` (2), `memory_regressions` (4 of 5) | SIGSEGV after `xbox_MemoryLayoutInit` cannot map the contiguous window at base + 0x80000000 (ENOMEM) nor the kernel VA 0x80010000. | Probably qemu-user. It places guest mappings itself, high in the address space, and the base view landed where base + 2 GB was not free. | Confirm on hardware (XBA-45). It feeds XBA-21. |
+
+**Fixed, not qemu after all (XBA-21):** `kernel_memory_bridge_posix` (2) and `memory_regressions` (4 of 5) crashed
+because the contiguous window at base + 2 GB was mapped at a fixed address outside the reserved span, and Linux had
+already put something there (top-down placement). The layout now holds the whole 4 GB guest window and carves every
+view out of it: `RECOMP_GUEST_WINDOW`, on by default on Android. The arm64 image sets it, because an app process
+crowded with libraries is in the same situation as qemu-user.
 
 ## Skips that are expected
 
@@ -63,6 +68,7 @@ kernel_irql_abi, kernel_physical_address, kernel_regressions, mmio_decode, nv2a_
 | flip_hold | 1 pass | 1 pass |
 | fp_precision | 1 pass | 1 pass |
 | guest_cpu | 1 pass | 1 pass |
+| host_cpus | n/a (added later) | 1 pass |
 | input_keyboard | 1 pass | 1 pass |
 | input_keyboard_map | 1 pass | 1 pass |
 | input_keyboard_sdl | 1 pass | 1 pass |
@@ -85,7 +91,7 @@ kernel_irql_abi, kernel_physical_address, kernel_regressions, mmio_decode, nv2a_
 | kernel_file_status | 1 pass | 1 pass |
 | kernel_guest_cpu | 1 pass | 1 pass |
 | kernel_io_apc | 1 pass | 1 pass |
-| kernel_memory_bridge_posix | 2 pass | **2 FAIL** |
+| kernel_memory_bridge_posix | 2 pass | 2 pass |
 | kernel_memory_posix | 1 pass | 1 pass |
 | kernel_missing_report | 1 pass | 1 pass |
 | kernel_object_paths | 1 pass | 1 pass |
@@ -93,7 +99,7 @@ kernel_irql_abi, kernel_physical_address, kernel_regressions, mmio_decode, nv2a_
 | kernel_path | 1 pass | 1 pass |
 | kernel_wait_log | 2 pass | 2 pass |
 | memory_layout_posix | 1 pass | 1 pass |
-| memory_regressions | 5 pass | 1 pass, **4 FAIL** |
+| memory_regressions | 5 pass | 5 pass |
 | mmio_decode_a64 | 1 skip | **1 FAIL** |
 | mmx_helpers | 1 pass | 1 skip |
 | mmx_integer | 1 pass | 1 skip |
@@ -106,6 +112,7 @@ kernel_irql_abi, kernel_physical_address, kernel_regressions, mmio_decode, nv2a_
 | nv2a_raster_batch | 1 pass | 1 pass |
 | nv2a_tex_filter | 12 pass | 12 pass |
 | nv2a_vsh | 2 pass | 2 pass |
+| recomp_cfg | n/a (added later) | 1 pass |
 | recomp_diff | 1 pass | 1 pass |
 | stack_ops | 1 pass | 1 pass |
 | usb_ohci_posix | 1 pass | 1 pass |

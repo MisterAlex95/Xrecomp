@@ -56,6 +56,8 @@ Opt-ins that change how the kernel layer behaves. Each fixes a class of titles; 
 | `RECOMP_SAVE_DIR=<dir>` | off | Root for the title's `UDATA`, `TDATA` and cache folders; created if missing. Absolute. Saves left in the game folder are then not used. | `kernel_path.c` |
 | `RECOMP_HEAP_RECLAIM` | off | Gives freed guest heap back. | `xbox_memory_layout.c` |
 | `RECOMP_EXT_VMA` | off | Extended virtual-memory areas above the mirrors. | `guest_vmem.c`, `xbox_memory_layout.c` |
+| `RECOMP_GUEST_WINDOW=0/1` | on for Android, off elsewhere | POSIX: hold the whole 4 GB guest window from the start and carve every view out of it, so the contiguous window, the apertures and the tiled alias never land on a taken host range. Implied by `RECOMP_EXT_VMA`. | `xbox_memory_layout.c` |
+| `RECOMP_BIG_CORES=0/1` | on for Android, off elsewhere | big.LITTLE hosts: run the runtime on the cores whose cpufreq maximum is above the slowest cluster's (set once at start by `recomp_host_cpus_init`; every thread inherits it). | `host_cpus.c` |
 | `RECOMP_CONTIG_AVOID_IMAGE=1` | off | Keeps contiguous allocations out of the image range. | `xbox_memory_layout.c` |
 | `RECOMP_WIN_PLACEHOLDER` | off | Reserves the guest window with placeholders on Windows hosts where fixed bases are taken. | `xbox_memory_layout.c` |
 | `RECOMP_TITLE_KEVENTS=1` | off | Host events for events a title builds inline instead of through `KeInitializeEvent`. | `kernel_bridge.c` |

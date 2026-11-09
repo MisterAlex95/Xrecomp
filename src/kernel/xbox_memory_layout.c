@@ -273,6 +273,27 @@ static uint64_t ext_vma_span(uint64_t mirror_top)
     return GUEST_VMEM_TOP - mirror_top;
 }
 
+/* RECOMP_GUEST_WINDOW: hold the whole 4 GB guest window from the start and
+ * carve every view out of it (POSIX), instead of reserving only base+mirrors
+ * and mapping the contiguous window, the apertures and the tiled alias at
+ * fixed addresses that must still be free. Linux places mappings top-down, so
+ * the host range just above a fresh span is often taken already: under
+ * qemu-user, and in a process full of libraries like an Android app, the
+ * contiguous window at base + 2 GB then fails (ENOMEM) and the first pinned
+ * allocation faults. =1 on, =0 off; unset, on for Android and off elsewhere
+ * (the desktop layout stays as it was). RECOMP_EXT_VMA implies it. */
+static int hold_guest_window(void)
+{
+    const char *e = getenv("RECOMP_GUEST_WINDOW");
+    if (e && *e)
+        return *e != '0';
+#if defined(__ANDROID__)
+    return 1;
+#else
+    return 0;
+#endif
+}
+
 /* Map a view of `mapping` at a fixed host address. On Windows, inside the
  * reserved window, the view replaces the placeholder there. Elsewhere this is
  * the MapViewOfFileEx call it always was. */
@@ -2633,7 +2654,7 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
          * instead. Each fixed window is carved out of the span as it is
          * mapped, and guest_vmem's range is handed over just before
          * guest_vmem_init. Off by default; the stock span is unchanged. */
-        if (ext_vma_span(g_span_size)) {
+        if (ext_vma_span(g_span_size) || hold_guest_window()) {
             g_span_size = (size_t)1 << 32;
             g_span_whole_window = 1;
         }
@@ -2761,6 +2782,11 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
         fprintf(stderr, "xbox_MemoryLayoutInit: mapped %zu KB at 0x%p (offset %+td from Xbox base)\n",
                 g_memory_size / 1024, g_memory_base, g_memory_offset);
     }
+#if !defined(_WIN32)
+    if (g_span_whole_window)
+        fprintf(stderr, "xbox_MemoryLayoutInit: whole 4 GB guest window held at %p-%p "
+                "(RECOMP_GUEST_WINDOW)\n", g_span_base, (void *)((uintptr_t)g_span_base + g_span_size));
+#endif
 
     /*
      * Helper macro: convert Xbox VA to actual mapped address.
