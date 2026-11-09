@@ -24,7 +24,9 @@ if(WIN32)
     target_link_libraries(xbox_input PUBLIC platform
         $<IF:$<BOOL:${MINGW}>,xinput1_4,xinput>)
 else()
-    find_package(SDL2 REQUIRED)
+    if(NOT TARGET SDL2::SDL2)
+        find_package(SDL2 REQUIRED)
+    endif()
     # The SDL window's key and focus events into that table.
     target_sources(xbox_input PRIVATE keyboard_sdl.c)
     target_link_libraries(xbox_input PUBLIC platform SDL2::SDL2)
