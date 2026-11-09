@@ -39,7 +39,10 @@ static int count_of(const char *hay, const char *needle)
 int main(void)
 {
     const int want = getenv("RECOMP_WAIT_LOG") != NULL;
-    const char *path = "wait_log_test.stderr";
+    /* One file per process: ctest runs the _unset and _set cases of this
+     * binary in parallel, in the same directory, and a shared name let one
+     * truncate the other's log mid-test. */
+    char path[64];
     char buf[4096];
     size_t got;
     FILE *f;
@@ -47,6 +50,7 @@ int main(void)
     LARGE_INTEGER t;
     char timeout_field[64];
 
+    snprintf(path, sizeof path, "wait_log_test.%lu.stderr", (unsigned long)GetCurrentProcessId());
     /* Everything the wait functions print on stderr goes to a file we can read. */
     if (!freopen(path, "w", stderr)) {
         printf("cannot redirect stderr\n");
@@ -91,6 +95,7 @@ int main(void)
         check(count_of(buf, "[WAIT]") == 0, "unset: no [WAIT] line at all");
     }
 
+    remove(path);
     printf("%d failure(s)\n", failures);
     return failures ? 1 : 0;
 }
