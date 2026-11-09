@@ -1,0 +1,12 @@
+cmake_minimum_required(VERSION 3.20)
+project(win32_wait_clock_posix_test C)
+# Timed waits of the POSIX Win32 shim on the monotonic clock (XBA-46).
+if(WIN32)
+    message(FATAL_ERROR "This regression covers the POSIX shim; Windows has the real waits")
+endif()
+set(CMAKE_C_STANDARD 11)
+add_subdirectory(../../src/platform platform)
+add_executable(win32_wait_clock_posix_test test_main.c)
+target_link_libraries(win32_wait_clock_posix_test PRIVATE platform m)
+enable_testing()
+add_test(NAME win32_wait_clock_posix_test COMMAND win32_wait_clock_posix_test)
