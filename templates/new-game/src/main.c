@@ -377,6 +377,18 @@ static int game_main(void *hInstance, void *hPrevInstance, char *lpCmdLine,
     }
 
     g_xbox_mem_offset = xbox_GetMemoryOffset();
+
+    /* The pad. XAPI is linked into the title and drives the MCPX USB host
+     * controllers itself, so a controller has to be there for it to find:
+     * xbox_OhciInit models them once guest memory is mapped. It does nothing
+     * unless RECOMP_USB=1 (and RECOMP_KEYBOARD=1 lets the keyboard stand in
+     * for the pad: Enter = Start, Z/X/C/V = A/B/X/Y, arrows, WASD). Nothing
+     * called it before, so a title built from this template saw no pad even
+     * with RECOMP_USB set (Fable: The Lost Chapters sat on "Press START"). */
+    {
+        extern void xbox_OhciInit(void);
+        xbox_OhciInit();
+    }
     printf("Xbox memory mapped. Offset: 0x%llX\n", (unsigned long long)g_xbox_mem_offset);
 
     /* Bring up the emulated APU.
