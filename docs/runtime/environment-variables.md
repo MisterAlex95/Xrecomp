@@ -56,7 +56,7 @@ Opt-ins that change how the kernel layer behaves. Each fixes a class of titles; 
 | Variable | Default | What it does | Where |
 |---|---|---|---|
 | `RECOMP_SAVE_DIR=<dir>` | off | Root for the title's `UDATA`, `TDATA` and cache folders; created if missing. Absolute. Saves left in the game folder are then not used. | `kernel_path.c` |
-| `RECOMP_GAME_DIR=<dir>` | `<external files dir>/game` | Android app shell: where the title's data (`default.xbe` and the disc's files) is read from; set it in `recomp.cfg`. | `recomp_storage.c` |
+| `RECOMP_GAME_DIR=<dir>` | `<external files dir>/game` | Android app shell: where the title's data (`default.xbe` and the disc's files) is read from. The game picker sets it from the folder the player chose (XBA-54; it then wins over `recomp.cfg`); otherwise set it in `recomp.cfg`. | `recomp_storage.c` |
 | `RECOMP_HEAP_RECLAIM` | off | Gives freed guest heap back. | `xbox_memory_layout.c` |
 | `RECOMP_EXT_VMA` | off | Extended virtual-memory areas above the mirrors. | `guest_vmem.c`, `xbox_memory_layout.c` |
 | `RECOMP_GUEST_WINDOW=0/1` | on for Android, off elsewhere | POSIX: hold the whole 4 GB guest window from the start and carve every view out of it, so the contiguous window, the apertures and the tiled alias never land on a taken host range. Implied by `RECOMP_EXT_VMA`. | `xbox_memory_layout.c` |
