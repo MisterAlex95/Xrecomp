@@ -33,7 +33,8 @@ The CI builds it on every push to `main`. The latest one is always the prereleas
 1. `adb install -r xboxrecomp-shell.apk`, then `adb logcat -c && adb logcat -s xboxrecomp SDL AndroidRuntime DEBUG`.
 2. Launch « xboxrecomp ». Expected: a black screen, fullscreen, landscape. logcat shows
    `xboxrecomp ready (build <commit>, SDL 2.32.10, <w>x<h>)`. Without game data the game picker shows instead
-   ([Choosing the game](#choosing-the-game)); push any `default.xbe` to `files/game/` first to reach the black screen.
+   ([Choosing the game](#choosing-the-game)); push any `default.xbe` to `files/game/` first: the shell then shows a « Game data found … This APK has no
+   recompiled game in it » message box (`NO_TITLE`, logcat `(no title linked)`); OK, and the black screen stays.
 3. Press Back once. A « Press Back again to quit » toast shows; logcat: `QUIT_PROMPT shown`. The app stays open.
 4. Press Back again within 2 s. logcat: `Back pressed twice, quitting`, then `clean exit`, and the app closes.
 5. Check there is no tombstone: `adb shell ls /data/tombstones` (root) or no `DEBUG` / `F libc` lines in logcat.
@@ -210,7 +211,8 @@ for the stub title. `adb logcat -c && adb logcat -s xboxrecomp SDL AndroidRuntim
 2. Copy `stub-default.xbe` as `default.xbe` into a folder of internal storage (e.g. `Download/stubgame/`).
    « Choose game folder », « Allow all files access », turn it on, come back: the folder picker opens. Pick the folder.
    Expected: a « Starting ... » toast, then the stub title starts (`storage: game=/storage/emulated/0/Download/stubgame
-   ... (default.xbe found)`, `stub title: all 5 lifted functions OK`).
+   ... (default.xbe found)`, `stub title: all 5 lifted functions OK`), and a « The title finished (code 0) » toast on
+   the black screen.
 3. Kill the app (swipe it from recents) and start it again: it starts directly, no picker.
 4. Long-press the app icon: « Change game ». Expected: the picker, « Game: ... / Folder: ... », and the note that the
    running game will close. Pick an empty folder: `NOT_A_GAME_FOLDER`; the picker can be opened again.
@@ -411,7 +413,8 @@ sink.
    `adb logcat -c && adb logcat -s xboxrecomp SDL DEBUG AndroidRuntime`. Expected in logcat: `defaults: RECOMP_FB_WINDOW=1
    RECOMP_PB_EXEC=1`, `xboxrecomp ready (… title)`, `starting the title`, the boot lines (`xbox_MemoryLayoutInit:
    complete`, `Starting game...`), five `stub title: …` lines and `stub title: all 5 lifted functions OK`, then
-   `[FBWIN] guest returned (0); Back twice to quit`. The screen is black (the stub draws nothing).
+   `[FBWIN] guest returned (0); Back twice to quit`. The screen is black (the stub draws nothing), with a « The title finished (code 0). Press Back twice to quit. »
+   toast.
 2. Home, wait 10 s, come back: `lifecycle: paused (background)`, then `lifecycle: resumed after ~10000 ms`.
 3. Back twice: `[FBWIN] Back pressed twice, quitting`, `xboxrecomp: clean exit`, the app closes; `adb logcat -b crash`
    is empty.
