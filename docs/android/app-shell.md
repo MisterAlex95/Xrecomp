@@ -347,6 +347,126 @@ Use the Thor's gamepad for everything unless a step says touch.
     data and About, and the logcat lines (`launcher:`, `import:`, `recomp.cfg:`, `storage: game=...`). Say if the A /
     B buttons are swapped on the Thor (its « Xbox » / « Nintendo » layout setting changes the key codes the app sees).
 
+## Prepare on the device (the app side)
+
+The on-device Prepare turns the player's game into a title pack (`<files dir>/packs/<TITLEID>/{libtitle.so,
+pack.json}`); the contract (command, progress lines, error codes, pack.json) is
+[prepare.md](prepare.md). This section is the app's half: `PrepareService`, `PrepareRunner`, `PrepareProtocol`,
+`Pack`, `Toolchain`, `LogProvider` and the launcher's Prepare screens.
+
+**Hidden without the toolchain.** The feature shows only when the APK carries `libxbapython.so` and `libxbacc.so` in
+`nativeLibraryDir` and the three tool zips in its assets. Without them (the shell as built today) the launcher behaves
+exactly as before. Native libraries are extracted at install (`jniLibs.useLegacyPackaging = true`), so they can be
+exec'd and `libmain.so` can be handed to the linker.
+
+**Tool assets** (`Toolchain`): `assets/prepare/python-stdlib.zip`, `sysroot.zip`, `toolkit.zip` (any zip in
+`prepare/` or the root whose name contains `stdlib`, `sysroot`, `toolkit` also works), each optionally with a sidecar
+`<zip>.sha256` (checked before extracting; a mismatch fails with `ASSET_HASH`). Each is extracted once into
+`<files dir>/python-<v>`, `sysroot-<v>`, `toolkit-<v>`, where `<v>` is the first 12 hex digits of the zip's SHA-256,
+through a `.tmp` directory renamed when complete (`.xba-complete` holds the hash); other versions are deleted. The
+hashes are cached per APK install (`lastUpdateTime`), so a second start opens nothing. This is the service's
+« Install tools » phase (status `id=install`, `step=0`), on its worker thread.
+
+**The service** (`PrepareService`, process `:prepare`, foreground type `specialUse`: `dataSync` is capped at 6 h a day
+on Android 15). The launcher starts it with the game folder and the title ID (from `default.xbe`'s certificate,
+`cert + 0x08`). It takes a partial wake lock (6 h at most), installs the tools, then runs, in its own process group
+(`setsid`):
+
+```
+<nativeLibraryDir>/libxbapython.so -m tools.prepare <game dir> --android --work <files>/work/<TID>
+    --pack-dir <files>/packs --cc <nativeLibraryDir>/libxbacc.so --cc-prefix-arg clang --sysroot <files>/sysroot-<v>
+    --shell-lib <nativeLibraryDir>/libmain.so --jobs N --opt 2 --shell-abi 1
+cwd <files>/toolkit-<v>; PYTHONHOME=<files>/python-<v> PYTHONPATH=<files>/toolkit-<v>
+PYTHONPYCACHEPREFIX=<cache>/pycache TMPDIR=<cache>/tmp HOME=<files> LIBCAPSTONE_PATH=LD_LIBRARY_PATH=<nativeLibraryDir>
+PYTHONUNBUFFERED=1 XBA_PYTHON=<nativeLibraryDir>/libxbapython.so
+```
+
+`N` = (MemAvailable − 3 GB) / 1 GB, between 1 and min(5, cores). One Prepare at a time (a second start is ignored).
+The notification shows the step, a progress bar, the time left and **Cancel**. Cancel (notification or launcher)
+sends SIGTERM to the group, then SIGKILL 5 s later. A child killed by a signal it did not ask for (Android's
+phantom-process killer, low memory) runs once more with half the jobs; a second kill fails with `KILLED`. After an
+« ok », the pack is checked (`Pack.check`); a pack that does not pass fails with `PACK_INVALID`. Starting again after
+any end runs the same command: tools.prepare's stamps skip what was done.
+
+**Files**, per title in `<files dir>/prepare/<TID>/`:
+
+- `status.json`, written atomically (temp file, rename) at most every 250 ms and at each step change:
+  `state` (`running`, `done`, `failed`, `cancelled`), `step`, `n`, `id` (`install`, `identify`, `analyse`, `lift`,
+  `compile`, `pack`), `pct` (per step), `eta` (s, −1 = unknown), `msg`, `code`, `started_at`, `updated_at` (ms since
+  the epoch), `log`, plus `jobs`, `attempt`, `title_id`.
+- `prepare.log`: the command's whole stdout and stderr, one header per attempt, the outcome, and at the end the tail
+  (2 MB) of tools.prepare's own `<work>/prepare.log`. « Share log » sends it through `LogProvider`
+  (`content://<app id>.logs/prepare/<TID>/prepare.log`, read-only grant).
+
+Codes the app sets itself: `KILLED`, `CANCELLED`, `SPAWN_FAILED`, `NO_RESULT` (exit without a result line),
+`PACK_INVALID`, `INSTALL_FAILED`, `NO_TOOLS`, `ASSET_HASH`, `START_FAILED`; the others come from tools.prepare.
+
+**A pack is valid** when `pack.json` parses, `format` is 1, `title_id` is the game's, `shell_abi` is the app's
+`Pack.SHELL_ABI` (1), and `lib` exists with `lib_size` bytes (the loader checks `lib_sha256`). `xbe_sha256` is not
+compared yet (hashing `default.xbe` at each Home is slow on a picked folder): another revision of a disc with the
+same title ID keeps the old pack until it is prepared again.
+
+**The launcher.** With a game ready and the toolchain present:
+
+| Case | Home | Preparing screen |
+|---|---|---|
+| No valid pack, nothing run | **Prepare** instead of Play, « about 20–30 min » (30–45 below 8 cores, 40–60 under 6 GB of RAM), chip « Needs preparing »; the detail panel shows the free internal space (red under 2 GB: Prepare refuses) and the memory (amber under 6 GB: a warning only). | |
+| Running | « Preparing… » with the step, percent and time left, chip « Preparing » | The step list (Install tools, Identify, Analyse, Translate, Compile, Pack) with the current one lit, the ring (overall percent), the message and the time left. B twice (or Cancel twice) cancels; Y goes back to the menu and the Prepare carries on. Polls `status.json` twice a second; the screen stays on. |
+| Failed | « Prepare » with a « Prepare failed » badge, chip « Prepare failed » | The code and message (a hint for `KILLED` and `NO_SPACE`), the log's path, **Retry**, **Share log** (also Y). |
+| Cancelled, or interrupted (a `running` status older than 15 s with no `:prepare` process) | « Prepare » carries on where it stopped | **Resume**, **Share log**. |
+| Pack valid | **Play**, as before | Done: back to Home, « … is ready ». |
+
+The app opens on the Preparing screen while a Prepare runs or after one failed. « Open the game directly » does not
+skip a Prepare that is needed. On Android 13+ the first Prepare asks for the notification permission (refused: it
+runs anyway, without the notification's progress).
+
+**Tests** (JVM, Robolectric 4.14.1, `android/app/src/test`): the line parser, `status.json`, every pack check,
+the asset install, the runner against scripted fake commands (progress → done, an error, a hang → cancel with
+SIGKILL, a kill → retry with half the jobs), the service, and the launcher's states rendered to
+`android/app/build/screenshots/prepare-*.png`:
+
+```
+cd android && gradle testDebugUnitTest -x externalNativeBuildDebug     # in xba-android:local, the repo mounted
+docker build -f tools/docker/android.Dockerfile --target app-unit-tests .                 # the same, as CI runs it
+```
+
+### Device check (Prepare), for Alex
+
+Needs an APK with the toolchain (the embedded-prepare branch merged) and the pack loader; until then steps 1 and 13.
+
+1. The shell APK as built today (no toolchain): the launcher is unchanged: Home shows **Play**, no « Needs
+   preparing » chip, no Prepare notification channel in the app's settings.
+2. With the toolchain APK and your game chosen: Home shows **Prepare**, « about 20–30 min », chip « Needs
+   preparing »; the right panel shows the free internal space and the memory (Thor: about 11 GB). Screenshot.
+3. A on Prepare. On Android 13+ the notification permission is asked once: allow it. Expected: the Preparing screen,
+   « Install tools » lit with a percentage for a few seconds the first time; then Identify, Analyse, Translate,
+   Compile, Pack in turn; the ring's percent and the time left move. logcat `prepare: started for <TID> ... N jobs`
+   (N = 4 or 5 on the Thor).
+4. Pull down the notification shade: « Preparing <title> », the step, the bar, the time left, **Cancel**. Screenshot.
+5. Press Y: Home shows « Preparing… » with the step and percent updating. Press Home on the Thor, use another app
+   for a minute, turn the screen off for a few minutes: the notification keeps moving; back in the app, the Preparing
+   screen shows the current step.
+6. B once: « Press again » on Cancel; B again: within a few seconds « Preparation stopped », **Resume** and **Share
+   log**. `adb shell ps -A | grep -E 'xbacc|xbapython'`: nothing left.
+7. Resume: it starts again and skips the steps already done (Identify / Analyse / Translate are quick, Compile
+   compiles only what was missing). Let it finish: Home with **Play** and « … is ready »; the notification says
+   « Ready ». Write down the whole time and the compile time (« Measurements » in prepare.md asks for them).
+8. Play: the game starts from the pack (loader logcat lines). Quit, start the app again: Home with Play, no Prepare.
+9. Second start of a Prepare (e.g. after `adb shell run-as <app id> rm -r files/packs`): no « Install tools » phase
+   this time (the tools are installed once per APK version); `files/` holds one `python-*`, `sysroot-*`,
+   `toolkit-*` each.
+10. Failure: `adb shell run-as <app id> rm -r files/packs`, start a Prepare and, during Compile,
+    `adb shell run-as <app id> sh -c 'kill -9 $(pidof libxbapython.so)'`. Expected: it restarts by itself with half
+    the jobs (logcat `prepare: killed by signal 9, retrying with N jobs`). Kill it again: « Preparation failed »,
+    code `KILLED` with the hint; Share log opens the share sheet with `prepare-<TID>.log`; send it to yourself and
+    check it holds the command, the progress lines and the end of tools.prepare's log.
+11. Interrupted: during a Prepare, `adb shell am kill <app id>` is not enough (foreground); use
+    `adb shell run-as <app id> kill -9 $(adb shell pidof <app id>:prepare)`. Open the app after 20 s: Home says
+    « Interrupted », Prepare resumes.
+12. Low space: fill internal storage under 2 GB free, A on Prepare: the note says how much is needed and free, and
+    nothing starts.
+13. Switch the Thor to French: Prepare, Preparing and Failed screens, the notification and the note in French.
+
 ## Background and resume
 
 (`src/platform/recomp_lifecycle.c`, XBA-24.) On Android SDL already blocks the thread that pumps its events while the

@@ -94,6 +94,46 @@ RUN printf 'sdk.dir=%s\ncmake.dir=/usr\n' "$ANDROID_HOME" > local.properties \
 FROM scratch AS apk-out
 COPY --from=apk /out/ /
 
+# The app's JVM unit tests (Robolectric: the launcher's Prepare screens, PrepareService, the pack check, the tool
+# install; docs/android/app-shell.md « Prepare on the device »). No NDK build. The first layer resolves Gradle's and
+# Robolectric's downloads against the build files only (a stub manifest and one empty test), so it stays cached until
+# they change; the second runs the real tests. Maven Central through Google's mirror (gradle-central-mirror.gradle).
+# Screenshots of the launcher's states out of the image with:
+#   docker build -f tools/docker/android.Dockerfile --target app-unit-tests-out --output type=local,dest=out .
+FROM android AS app-unit-tests-deps
+ARG CENTRAL_MIRROR=https://maven-central.storage-download.googleapis.com/maven2
+COPY tools/docker/gradle-central-mirror.gradle /root/.gradle/init.d/central-mirror.gradle
+COPY android/build.gradle android/settings.gradle android/gradle.properties /src/android/
+COPY android/app/build.gradle /src/android/app/
+COPY tools/conformance/test.xbe /src/tools/conformance/
+WORKDIR /src/android
+RUN printf 'sdk.dir=%s\ncmake.dir=/usr\n' "$ANDROID_HOME" > local.properties \
+    && mkdir -p app/src/main app/src/test/java/w \
+    && printf '<manifest/>\n' > app/src/main/AndroidManifest.xml \
+    && printf 'package w;\n@org.junit.runner.RunWith(org.robolectric.RobolectricTestRunner.class)\n@org.robolectric.annotation.Config(sdk = 34)\npublic class W { @org.junit.Test public void t() {} }\n' \
+         > app/src/test/java/w/W.java \
+    && gradle --no-daemon --console=plain -ProbolectricRepoUrl="$CENTRAL_MIRROR" testDebugUnitTest \
+         -x externalNativeBuildDebug \
+    && rm -rf app/src app/build build .gradle /root/.gradle/daemon
+
+FROM app-unit-tests-deps AS app-unit-tests
+ARG CENTRAL_MIRROR=https://maven-central.storage-download.googleapis.com/maven2
+COPY . /src
+WORKDIR /src/android
+RUN printf 'sdk.dir=%s\ncmake.dir=/usr\n' "$ANDROID_HOME" > local.properties \
+    && gradle --no-daemon --console=plain -ProbolectricRepoUrl="$CENTRAL_MIRROR" testDebugUnitTest \
+         -x externalNativeBuildDebug \
+    && mkdir -p /out \
+    && cp -r app/build/screenshots /out/ \
+    && cp -r app/build/test-results/testDebugUnitTest /out/test-results \
+    && grep -ho 'tests="[0-9]*" skipped="[0-9]*" failures="[0-9]*" errors="[0-9]*"' /out/test-results/*.xml \
+         | awk -F'"' '{t+=$2; s+=$4; f+=$6; e+=$8} END {printf "app unit tests: %d run, %d skipped, %d failed, %d errors\n", t, s, f, e}' \
+         | tee /out/app-unit-tests.txt \
+    && rm -rf app/build app/.cxx build .gradle /root/.gradle/daemon
+
+FROM scratch AS app-unit-tests-out
+COPY --from=app-unit-tests /out/ /
+
 # The stub title APK (XBA-52): templates/new-game around the synthetic XBE of tools/conformance (ours, no game
 # content), lifted by the pipeline and linked into libmain.so through -PxbaTitleDir. The first end-to-end link of
 # generated C for Android. Out of the image with:
