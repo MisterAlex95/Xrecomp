@@ -77,7 +77,7 @@ not rely on symbol interposition.
 
 ```
 python -m tools.prepare SOURCE --android --work DIR --pack-dir DIR --cc PATH [--cc-prefix-arg clang]
-       --sysroot DIR --shell-lib PATH [--jobs N] [--opt 1] [--shell-abi N]
+       --sysroot DIR --shell-lib PATH [--jobs N] [--opt 2] [--shell-abi N]
        [--ld PATH [--ld-prefix-arg ARG]] [--builtins PATH] [--python PATH]
        [--extra-src FILE.c]... [--include-dir DIR]... [--force]
 ```
@@ -93,8 +93,8 @@ python -m tools.prepare SOURCE --android --work DIR --pack-dir DIR --cc PATH [--
 | `--builtins PATH` | `libclang_rt.builtins-aarch64-android.a`; default: asked from the compiler (`-print-libgcc-file-name`). |
 | `--shell-lib PATH` | `<nativeLibraryDir>/libmain.so`: the pack links against it (DT_NEEDED `libmain.so`). |
 | `--shell-abi N` | The integer the shell exports (default 1), written to `pack.json`. |
-| `--jobs N` | Parallel compiles; 0 or absent = `min(5, (MemAvailable − 3 GB) / 1.5 GB)`, at least 1, at most the CPU count. |
-| `--opt N` | clang `-O` level, default 1 (see Measurements). |
+| `--jobs N` | Parallel compiles; 0 or absent = `min(5, (MemAvailable − 3 GB) / 1 GB)`, at least 1, at most the CPU count (1 GB per job: see Measurements). |
+| `--opt N` | clang `-O` level, default 2 (see Measurements). |
 | `--python PATH` | The interpreter for the pipeline steps; default `$XBA_PYTHON`, else `sys.executable`. |
 | `--extra-src`, `--include-dir` | Development: an extra C file in the pack, an extra `-I`. |
 | `--force` | Redo every step (the object cache still applies). |
@@ -218,7 +218,33 @@ Its format belongs to the app (prepare-app branch, `android/app`), not to this p
 
 ## Measurements
 
-<!-- T4: filled from a run on a real title's generated C (numbers only). -->
+One real title's generated C (Alex's own disc, kept outside the repository; numbers only): 163 files, 256 MB of C
+(`--split 250`), the largest 5.1 MB. NDK r28c clang 19 for `aarch64-linux-android30`, `-g0`, the flags above;
+3 jobs in a container limited to 3 CPUs on the x86-64 host (Ryzen AI Max+ 395, Zen 5), 2026-11-10.
+
+| | -O1 | -O2 |
+|---|---|---|
+| Wall time, 3 jobs | 240 s | 254 s |
+| CPU time, all files (sum of per-file wall) | 717 s | 759 s |
+| Per file: median / largest | 3.2 s / 23.5 s | 3.6 s / 23.2 s |
+| Peak RSS per job: median / p90 / max | 163 / 304 / 597 MB | 163 / 302 / 589 MB |
+| Objects, total | 150.5 MB | 149.0 MB |
+
+**`--opt`: default 2.** -O2 costs 6 % more compile time than -O1 and the same memory, for the code the game then
+runs all the time. -O1 stays an option for a low-end device.
+
+**Jobs: 1 GB per job instead of 1.5.** The worst file peaks at 0.6 GB, 90 % of them under 0.3 GB, and the files are
+compiled largest first, so the big ones never run all at once. `min(5, (MemAvailable − 3 GB) / 1 GB)` gives a
+12 GB device with ~7 GB available 4 jobs (1.5 GB would give 2). The 3 GB reserve stays: the app's UI, the system,
+and room for a title whose largest file is twice this one.
+
+**On a Thor (Snapdragon 8 Gen 2: 1× X3 3.2 GHz, 4× A715/A710 2.8 GHz, 3× A510), a rough estimate.** Per thread,
+clang runs at about 0.6× a Zen 5 core on the X3 and 0.4× on an A715/A710 (published SPECint-class ratios; clang is
+branchy integer code). Five jobs land on the X3 and the four middle cores: ~2.2 Zen 5 cores of throughput, so 760 s
+of CPU at -O2 is ~6 min, plus 20–30 % for sustained clocks under thermal limits: **7–8 min** for the compile with
+the NDK's clang. The embedded clang is a plain build of LLVM 19 (the NDK's is PGO + BOLT + LTO, ~20–30 % faster):
+count **8–10 min**. With 2 jobs (the 1.5 GB formula on a 12 GB device) it would be 15–20 min. The largest file alone
+takes ~1 min on a middle core; it starts first. To be measured on the device (« Device » check list).
 
 ## Checking on a host
 
@@ -234,7 +260,7 @@ python3 -m tools.prepare tools/conformance/test.xbe --android --work /tmp/aw --p
 $B/bin/llvm-readelf -d /tmp/packs/12345678/libtitle.so | grep NEEDED      # libmain.so, libm, libdl, liblog, libc
 ```
 
-Checked on 2026-11-10: NEEDED `libmain.so`; every undefined symbol of `libtitle.so` (46, 25 of them from the
+Checked on 2026-11-10: NEEDED `libmain.so`; every undefined symbol of `libtitle.so` (45 at -O2, 25 of them from the
 toolkit) is exported by the real `libmain.so` or libc/libm/libdl/liblog; `recomp_title_main`, `xbe_entry_point`,
 `recomp_lookup` exported; a second run compiles 0 files and keeps the pack; SIGTERM mid-compile exits 130 with
 `CANCELLED`, leaves no compiler running and the previous pack in place, and the rerun compiles only the files

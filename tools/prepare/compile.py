@@ -23,7 +23,7 @@ API = 30
 TARGET = "aarch64-linux-android%d" % API
 GB = 1 << 30
 # Each clang job on the generated C: see "Measurements" in docs/android/prepare.md.
-JOB_RSS = 1.5 * GB
+JOB_RSS = 1 * GB
 RESERVED = 3 * GB
 MAX_JOBS = 5
 
@@ -127,7 +127,7 @@ def mem_available(meminfo="/proc/meminfo"):
 
 
 def default_jobs(avail=None, cpus=None):
-    """min(5, (MemAvailable - 3 GB) / 1.5 GB), at least 1, at most the CPU
+    """min(5, (MemAvailable - 3 GB) / 1 GB), at least 1, at most the CPU
     count. `avail` None = unknown memory: 1."""
     if avail is None:
         return 1

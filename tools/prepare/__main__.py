@@ -188,7 +188,7 @@ def main(argv=None):
     an.add_argument("--shell-lib", help="the app shell's libmain.so, which the pack links against")
     an.add_argument("--shell-abi", type=int, default=1, help="the shell ABI the app exports (default 1)")
     an.add_argument("--jobs", type=int, default=0, help="parallel compiles (default: from free memory)")
-    an.add_argument("--opt", default="1", choices=("0", "1", "2", "3", "s"), help="clang -O level (default 1)")
+    an.add_argument("--opt", default="2", choices=("0", "1", "2", "3", "s"), help="clang -O level (default 2)")
     an.add_argument("--python", help="Python for the pipeline steps (default: $XBA_PYTHON, else this one)")
     an.add_argument("--extra-src", action="append", default=[], metavar="FILE.c",
                     help="an extra C file compiled into the pack (src/extra/)")

@@ -81,11 +81,11 @@ def test_reporter_dedupes(capsys):
 @pytest.mark.parametrize("avail_gb,cpus,want", [
     (None, 8, 1),        # unknown memory
     (2, 8, 1),           # below the reserve: still one job
-    (4.4, 8, 1),
-    (4.5, 8, 1),
-    (6.0, 8, 2),
-    (7.5, 8, 3),
-    (12, 8, 5),          # (12 - 3) / 1.5 = 6 -> capped at 5
+    (4.9, 8, 1),
+    (5.0, 8, 2),
+    (6.0, 8, 3),
+    (7.5, 8, 4),
+    (12, 8, 5),          # (12 - 3) / 1 = 9 -> capped at 5
     (64, 8, 5),
     (12, 2, 2),          # no more jobs than cores
 ])
