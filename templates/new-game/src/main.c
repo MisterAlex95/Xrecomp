@@ -44,6 +44,16 @@
 /* xboxrecomp runtime headers */
 #include <xbox/xboxrecomp.h>
 
+/* A title profile: titles/<title id>/*.c in the toolkit, copied into src/title/
+ * by tools.prepare (CMakeLists defines XBA_TITLE_PROFILE when that folder has
+ * sources). configure runs before the memory layout -- switches, map size --
+ * and start right before the guest's entry point, with the kernel up; it gets
+ * the game and save directories (save_dir NULL = the kernel's default). */
+#ifdef XBA_TITLE_PROFILE
+extern void xba_title_configure(void);
+extern void xba_title_start(const char *game_dir, const char *save_dir);
+#endif
+
 /* Android (XBOXRECOMP_SHELL_TITLE, set when android/app builds this project
  * with XBA_TITLE_DIR): the app shell owns SDL_main. It does the start-up
  * (logcat, recomp.cfg, storage, fast cores, fault handler) and calls
@@ -366,6 +376,10 @@ static int game_main(void *hInstance, void *hPrevInstance, char *lpCmdLine,
     }
     printf("XBE loaded: %zu bytes\n", xbe_size);
 
+#ifdef XBA_TITLE_PROFILE
+    xba_title_configure();
+#endif
+
     /* Step 2: Initialize Xbox memory layout */
     printf("Initializing Xbox memory layout...\n");
     if (!xbox_MemoryLayoutInit(xbe_data, xbe_size)) {
@@ -464,6 +478,10 @@ static int game_main(void *hInstance, void *hPrevInstance, char *lpCmdLine,
      * does nothing while appearing to be set. */
     xbox_WatchdogStart();
 
+#ifdef XBA_TITLE_PROFILE
+    xba_title_start(s_game_dir, s_save_dir);
+#endif
+
     /* Step 7: Call the recompiled entry point */
     printf("\nStarting game...\n");
     fflush(stdout);
@@ -530,6 +548,40 @@ int recomp_title_main(const recomp_storage *store)
     return game_main(NULL, NULL, NULL, 0);
 }
 #else
+#ifndef _WIN32
+#include <limits.h>
+#include <unistd.h>
+#ifdef __APPLE__
+#include <mach-o/dyld.h>
+#endif
+/* The game paths are relative ("game/default.xbe"): started from Finder or
+ * another directory, move to the binary's own folder first. */
+static void chdir_to_executable(void)
+{
+    char path[PATH_MAX];
+    char *slash;
+#ifdef __APPLE__
+    uint32_t size = sizeof path;
+    if (_NSGetExecutablePath(path, &size) != 0)
+        return;
+#else
+    ssize_t n = readlink("/proc/self/exe", path, sizeof path - 1);
+    if (n <= 0)
+        return;
+    path[n] = 0;
+#endif
+    slash = strrchr(path, '/');
+    if (!slash)
+        return;
+    *slash = 0;
+    if (chdir(path) != 0)
+        fprintf(stderr, "[BOOT] chdir %s failed\n", path);
+}
+
+extern int xbox_HostWindowMain(int (*guest_main)(void));
+static int guest_main_posix(void) { return game_main(NULL, NULL, NULL, 0); }
+#endif
+
 /* Console entry point (for debugging -- lets you see printf output) */
 int main(int argc, char **argv)
 {
@@ -538,7 +590,15 @@ int main(int argc, char **argv)
 #ifdef _WIN32
     return WinMain(GetModuleHandle(NULL), NULL, GetCommandLineA(), SW_SHOW);
 #else
-    return game_main(NULL, NULL, NULL, 0);
+    chdir_to_executable();
+    /* The Android shell's defaults, on the desktop too: the frame-buffer
+     * window and the pushbuffer executor that draws into it (a title that
+     * links the XDK's D3D shows nothing without them). Either can still be
+     * set to 0. The window lives on the process main thread (macOS requires
+     * it) and the guest on a thread of its own. */
+    setenv("RECOMP_FB_WINDOW", "1", 0);
+    setenv("RECOMP_PB_EXEC", "1", 0);
+    return xbox_HostWindowMain(guest_main_posix);
 #endif
 }
 #endif /* XBOXRECOMP_SHELL_TITLE */

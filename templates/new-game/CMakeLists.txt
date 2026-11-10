@@ -65,6 +65,14 @@ set(GAME_SOURCES
     # src/custom_renderer.c
 )
 
+# A title profile (titles/<title id>/ in the toolkit, copied here by
+# tools.prepare): the title's own switches and fixes. main.c calls its hooks.
+file(GLOB TITLE_PROFILE_SOURCES CONFIGURE_DEPENDS "src/title/*.c")
+if(TITLE_PROFILE_SOURCES)
+    list(APPEND GAME_SOURCES ${TITLE_PROFILE_SOURCES})
+    add_compile_definitions(XBA_TITLE_PROFILE=1)
+endif()
+
 # The recomp pipeline also generates a dispatch header and function declarations.
 # These are included by the generated .c files:
 #   src/recomp/gen/recomp_funcs.h    - extern declarations for all recompiled functions

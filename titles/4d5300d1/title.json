@@ -1,0 +1,7 @@
+{
+  "title_id": "4D5300D1",
+  "name": "Fable: The Lost Chapters",
+  "project": "fable",
+  "exclude_manual": ["overrides.c"],
+  "status": "Boots, intro movies skipped, title screen, menus and loading screens, pad works. Software rasteriser."
+}
