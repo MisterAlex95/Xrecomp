@@ -469,6 +469,153 @@ Needs an APK with the toolchain (the embedded-prepare branch merged) and the pac
     nothing starts.
 13. Switch the Thor to French: Prepare, Preparing and Failed screens, the notification and the note in French.
 
+## Dual screen (AYN Thor)
+
+The AYN Thor has two screens: the top one (6", 1920 x 1080, 120 Hz) is the main display, the bottom one (3.92",
+1240 x 1080, touch) is a second `Display`. The launcher and the game stay on the display they start on (the top one);
+a **companion panel** goes on the other one. On a single-screen device nothing of this runs.
+
+### How it is put together
+
+- `DualScreen.java`: the decisions, pure functions over plain display records (JUnit-tested over fake lists).
+  `choose()`: a display of `DisplayManager.getDisplays(DISPLAY_CATEGORY_PRESENTATION)` other than ours, not private,
+  not off; failing that, any other public display that is on. `decide()`: show, move or dismiss from the setting, the
+  chosen display and the one shown on. Every display is logged once per change (`<tag>: displays:` then one line
+  each: id, name, flags, size, refresh, state).
+- `CompanionScreen.java`: one `android.app.Presentation` per process, shown from the activity's `onStart`, dismissed
+  in `onStop`, with a `DisplayListener` for displays that come, go or change state. Pure black window. ShellActivity
+  owns one (tag `shell`, the in-game panel); `LauncherCompanion` owns the launcher's (tag `launcher`).
+- The panels are plain Views drawn on a 1240 x 1080 design grid scaled to fit (`PanelView`): `CompanionPanel` in the
+  game, `LauncherPanel` and `PreparingPanel` in the launcher. No animation: a 1 Hz tick (stats, battery, thermal,
+  dimming) that redraws only when something changed, and redraws while a hold button is held (0.8 s at most), so
+  the second window costs the game next to nothing.
+- Burn-in (AMOLED): pure black background; after 10 s without a touch the panel dims to faint outlines (the
+  Preparing panel: after 30 s, to the percentage alone); the whole layout moves by a few pixels each minute. The touch
+  that wakes a dimmed panel presses pad buttons but fires no action.
+
+### The setting « Bottom screen »
+
+`GameStore.bottomScreen(ctx)` / `GameStore.setBottomScreen(ctx, GameStore.BottomScreen.PANEL | BLACK | OFF)`:
+the panel (default), a black screen (an empty black Presentation, hides what the system shows there), or nothing.
+Stored in `<files>/settings/bottom_screen` rather than in the game SharedPreferences: the launcher writes it while
+the game's process may be alive, and SharedPreferences caches per process; each process reads the file at its next
+`onStart`. The Settings row is the launcher's (another change): show it only when
+`DualScreen.available(activity, displayId)` is true, and call `setBottomScreen` on change.
+
+### In the game
+
+```
+  fps · frame time              battery                  thermal
+  [ Back  ]   [Launcher] [Screenshot] [ Perf ]   [ White ]
+  [ Start ]   [Share log] [   Quit (hold)    ]   [ Black ]
+               (Perf details)       nothing to touch bottom-centre (palms)
+```
+
+- **Back / Start / White / Black**, in the edge columns next to the thumbs: duplicates of Select, Start, R1 and L1
+  (`xinput_device.c` maps L1 to Black and R1 to White), there so the player finds them. Each pointer is tracked on its
+  own (two thumbs on two buttons work, sliding from one to the next works); everything is released on
+  `ACTION_CANCEL`, when the panel is dismissed or detached, and in `ShellActivity.onStop`.
+- **Launcher** opens the launcher (the game waits in the background, as with Home). **Quit** needs a hold of 0.8 s
+  (it fills in red), then ends the game as Back twice does (`recomp_quit(0)`). **Screenshot** saves the last frame as
+  `<external files>/screenshots/<date>.bmp` (24-bit BMP, 640 x 480: `xbox_FramebufferDumpBmp`, now implemented for
+  the SDL window) and says « Saved … » in the status strip. **Perf** shows more figures on the panel (draws per frame,
+  battery temperature); it does not draw over the game. **Share log** dumps this process's logcat (the runtime's
+  stdout and stderr go there) to `<files>/logs/game.log` and opens the share sheet (`LogProvider`,
+  `content://<app id>.logs/game/game.log`).
+- Status strip, once a second: the fps the window computes for its title bar (`xbox_FramebufferWindowGetStats`) and
+  the matching frame time, the battery (`BatteryManager`), the thermal status (`PowerManager.getCurrentThermalStatus`:
+  Cool, Warm, Hot…, coloured from moderate on).
+
+The buttons reach the pad through the touch overlay (`src/input/input_overlay.c`):
+`xbox_InputOverlaySet(port, pad)` stores a whole pad under a mutex; the SDL backend's `xbox_InputGetState` merges it
+into port 0 (`xbox_InputMap_PadMerge`, after the keyboard), and with no gamepad attached it stands in for one
+(success on port 0 while the panel is up). Each change bumps the packet number. JNI:
+`android/app/src/main/cpp/companion_jni.c` (`CompanionNative`: `nativeOverlay`, `nativeOverlayOff`, `nativeStats`,
+`nativeScreenshot`, `nativeQuit`). Test: `tests/input_overlay` (Linux, fake SDL: merge over a pad, release, no pad,
+keyboard stand-in, a concurrent writer).
+
+### Focus: Plan A and Plan B
+
+A second window must not take the gamepad away from SDLActivity: on Android, keys go to the focused window, and
+touching a focusable window on another display can move the focus there.
+
+- **Plan A** (default): the Presentation is `FLAG_NOT_FOCUSABLE` (set before `show()`). Touch still works; the focus
+  never leaves the game.
+- **Plan B**: the panel's window is focusable and hands every key and motion event it receives to ShellActivity
+  (`dispatchKeyEvent` / `dispatchGenericMotionEvent`, which SDL's surface handles as usual); ShellActivity ignores
+  losing the focus while the panel is up (logcat `shell: focus went to the companion panel, ignored`). Switch it on
+  without a rebuild with `RECOMP_COMPANION_FOCUS=forward` in `recomp.cfg` (wins), or `GameStore.setCompanionFocusPref`.
+  The launcher's panel always uses Plan A.
+
+logcat at each show: `shell: companion panel on display 2 "…" … (not focusable)` or `(focusable, keys forwarded)`.
+
+### In the launcher (wiring)
+
+`LauncherCompanion` does it in a few calls; LauncherActivity is being reworked elsewhere, so the wiring lands with that
+change. In `LauncherActivity`:
+
+```java
+private LauncherCompanion companion;
+
+// onCreate, after buildStage() (not on the early launchShell() return):
+companion = new LauncherCompanion(this, new LauncherPanel.Actions() {
+    @Override public void play() { launchShell(false); }
+    @Override public void settings() { go(Screen.SETTINGS); }
+    @Override public void changeGame() { go(Screen.SOURCE); }
+});
+
+@Override protected void onStart() { super.onStart(); if (companion != null) companion.start(); }
+@Override protected void onStop() { if (companion != null) companion.stop(); super.onStop(); }
+
+// where Home is built (the chip's text and colour, Play allowed or not):
+companion.home(gameTitle(dir), chipText, chipColor, !prepareBlocksPlay());
+// where the Preparing screen is built:
+companion.preparing(titleId(), gameTitle(dir));
+```
+
+Home shows an identity card (title, status) and three big shortcuts: Play, Settings, Change game. Preparing shows the
+step list, the overall percentage and time left, the last four lines of `prepare.log`, battery and thermal, and
+**Cancel** on a hold (it sends `PrepareService`'s cancel itself); it reads `status.json` and the log once a second.
+
+### Tests and screenshots
+
+`DualScreenTest` (chooser over one, two, private and off displays; decisions; focus mode), `CompanionPanelTest`
+(multi-touch, slide, cancel, detach, taps, hold-to-quit, dimming, shift; through a fake sink), `CompanionScreenTest`
+(Robolectric `ShadowDisplayManager.addDisplay` / `removeDisplay`: shown, moved, dismissed, Off / Black, `onStop`,
+Plan A not focusable and Plan B focusable and forwarding, the launcher's panel switch), `LauncherPanelsTest`. The
+panels are rendered at 1240 x 1080 to `build/screenshots/companion-*.png` (`--target app-unit-tests-out`).
+
+### Device check (dual screen), for Alex
+
+On the Thor, with the shell APK of this change (and the stub or a title for steps 5 to 9):
+
+1. Start the app: the launcher on the top screen. Until the launcher wiring lands the bottom screen shows the system's
+   own content; after it, the launcher panel (title card, Play / Settings / Change game). logcat
+   `launcher: displays:` lists both screens: send those lines (id, name, flags, size, refresh).
+2. Start the game: the bottom screen turns to the in-game panel (black first, no white flash). logcat
+   `shell: companion panel on display N … (not focusable)`. Photo of both screens.
+3. **Focus, Plan A**: while playing with the built-in pad, touch the bottom screen anywhere (an empty spot, then
+   Perf): the pad keeps driving the game, no pause, no `onWindowFocusChanged(): false` in logcat.
+4. **Focus, Plan B**: `RECOMP_COMPANION_FOCUS=forward` in recomp.cfg, restart the game. Repeat 3: the pad still drives
+   the game; logcat may show `focus went to the companion panel, ignored`. Say which plan behaves better (keys lost,
+   doubled, a pause, the sticks).
+5. **Buttons**: hold White on the panel (the game sees R1's action), then Start; both thumbs at once (White + Back).
+   Slide a thumb from Back to Start. Same results as the physical L1 / R1 / Select / Start.
+6. **Stuck keys**: hold White, and while holding press Home (or pull the notification shade, or let the screen turn
+   off). Come back: White is not held. Same with two fingers on the panel and a palm landing on the screen.
+7. **fps**: logcat prints `shell: fps N, M draws, companion shown|off` every 10 s. In the same scene, a minute with
+   the panel (Perf on, so it redraws every second), then set Bottom screen to Off
+   (`adb shell run-as <app id> sh -c 'mkdir -p files/settings; echo OFF > files/settings/bottom_screen'`, Home and
+   back to the game) and a minute again. Expected: no measurable difference. Send both sets of lines.
+8. **Dimming**: leave the panel 10 s: it dims to faint outlines; touch it: it wakes, and that first touch does not
+   fire Launcher or Screenshot. Watch for a minute: the layout moves by a few pixels.
+9. **Actions**: Screenshot (the strip says « Saved … »; `adb shell ls /sdcard/Android/data/<app id>/files/screenshots`,
+   pull the BMP), Share log (share sheet with game.log), Perf, Launcher (the launcher comes up on top, the game
+   waits), Quit: a short tap does nothing, a 1 s hold quits (`clean exit`).
+10. **Off and Black**: `echo BLACK` / `echo OFF` into `files/settings/bottom_screen` as in 7 (`echo PANEL` to come
+    back): Black keeps the bottom screen black, Off leaves the system's content there, nothing else changes.
+11. **Single screen**: on a one-screen device (a phone): no panel, no error, logcat `displays:` lists one display.
+
 ## Background and resume
 
 (`src/platform/recomp_lifecycle.c`, XBA-24.) On Android SDL already blocks the thread that pumps its events while the

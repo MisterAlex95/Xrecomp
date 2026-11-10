@@ -15,8 +15,9 @@ import java.io.IOException;
 
 /**
  * Hands the Prepare's log to another app (« Share log » on the launcher), read-only, through a temporary URI grant:
- * content://<app id>.logs/prepare/<TITLEID>/prepare.log. Only files named prepare.log under <files>/prepare are
- * served. A framework ContentProvider rather than AndroidX's FileProvider (the app has no AndroidX).
+ * content://<app id>.logs/prepare/<TITLEID>/prepare.log; and the game's logcat dump (« Share log » on the companion
+ * panel), content://<app id>.logs/game/game.log. Only files named prepare.log under <files>/prepare, and
+ * <files>/logs/game.log, are served. A framework ContentProvider rather than AndroidX's FileProvider (the app has no AndroidX).
  */
 public class LogProvider extends ContentProvider {
     static String authority(Context c) {
@@ -28,17 +29,53 @@ public class LogProvider extends ContentProvider {
                 .appendPath(titleId).appendPath("prepare.log").build();
     }
 
+    /** The game's log (« Share log » on the companion panel): content://<app id>.logs/game/game.log. */
+    static Uri gameUri(Context c) {
+        return new Uri.Builder().scheme("content").authority(authority(c)).appendPath("game")
+                .appendPath("game.log").build();
+    }
+
+    /** <files>/logs/game.log: the game process's logcat, dumped by {@link #dumpOwnLogcat}. */
+    static File gameLogFile(Context c) {
+        return new File(new File(c.getFilesDir(), "logs"), "game.log");
+    }
+
+    /**
+     * This process's logcat (an app reads its own lines without a permission) into f, the last 20000 lines: the
+     * runtime's stdout and stderr go to logcat (tag xboxrecomp). False when nothing could be written.
+     */
+    static boolean dumpOwnLogcat(File f) {
+        File d = f.getParentFile();
+        if (d != null && !d.isDirectory() && !d.mkdirs())
+            return false;
+        try {
+            Process p = new ProcessBuilder("logcat", "-d", "-v", "threadtime", "-t", "20000",
+                                           "--pid=" + android.os.Process.myPid())
+                    .redirectErrorStream(true).redirectOutput(f).start();
+            if (!p.waitFor(10, java.util.concurrent.TimeUnit.SECONDS))
+                p.destroy();
+        } catch (IOException e) {
+            return false;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return false;
+        }
+        return f.isFile() && f.length() > 0;
+    }
+
     @Override
     public boolean onCreate() {
         return true;
     }
 
-    /** The file behind a URI, or null when it is not a Prepare log. */
+    /** The file behind a URI, or null when it is not a Prepare log or the game's log. */
     private File file(Uri uri) {
         Context c = getContext();
         if (c == null)
             return null;
         java.util.List<String> seg = uri.getPathSegments();
+        if (seg.size() == 2 && seg.get(0).equals("game") && seg.get(1).equals("game.log"))
+            return gameLogFile(c);
         if (seg.size() != 3 || !seg.get(0).equals("prepare") || !seg.get(2).equals("prepare.log"))
             return null;
         String tid = seg.get(1);
@@ -76,7 +113,8 @@ public class LogProvider extends ContentProvider {
         Object[] row = new Object[cols.length];
         for (int i = 0; i < cols.length; i++) {
             if (OpenableColumns.DISPLAY_NAME.equals(cols[i]))
-                row[i] = "prepare-" + uri.getPathSegments().get(1) + ".log";
+                row[i] = uri.getPathSegments().get(0).equals("game") ? "game.log"
+                                                                     : "prepare-" + uri.getPathSegments().get(1) + ".log";
             else if (OpenableColumns.SIZE.equals(cols[i]))
                 row[i] = f.length();
         }
