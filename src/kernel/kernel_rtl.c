@@ -697,6 +697,50 @@ VOID __stdcall xbox_RtlEnterCriticalSection(PRTL_CRITICAL_SECTION CriticalSectio
     }
 }
 
+/* TryEnter takes the same lock Enter and Leave take.
+ *
+ * It used to live in kernel_bridge.c with a host-lock table of its own,
+ * because xbox_cs_shadow is private to this file. Enter and Leave never saw
+ * that table, so a TryEnter on a critical section excluded nobody who used
+ * Enter, and the Leave that followed it unlocked the *other* lock -- one it
+ * did not hold -- while the try-table lock stayed held. Fable: The Lost
+ * Chapters guards its load requests with exactly that pair: the loader
+ * thread TryEnters, the main thread Enters, and both found the request
+ * without a buffer and allocated one. The loader read the file into its
+ * buffer, the main thread parsed the other one. */
+BOOLEAN __stdcall xbox_RtlTryEnterCriticalSection(PRTL_CRITICAL_SECTION CriticalSection)
+{
+    CRITICAL_SECTION* cs;
+
+    if (g_cs_single_mode == 2 && cs_guest_is_cs((const uint8_t*)CriticalSection)) {
+        uint8_t* g = (uint8_t*)CriticalSection;
+        volatile LONG* lock = (volatile LONG*)(g + 0x10);
+        uint32_t* rec  = (uint32_t*)(g + 0x14);
+        volatile uint32_t* owner = (volatile uint32_t*)(g + 0x18);
+        uint32_t me = xbox_cs_guest_tid();
+        if (InterlockedCompareExchange(lock, 0, -1) == -1) {
+            *owner = me;
+            *rec = 1;
+            return TRUE;
+        }
+        if (*owner == me) {
+            InterlockedIncrement(lock);
+            (*rec)++;
+            return TRUE;
+        }
+        return FALSE;
+    }
+    cs = xbox_cs_shadow(CriticalSection);
+    if (!cs)
+        return FALSE;
+    if (!TryEnterCriticalSection(cs))
+        return FALSE;
+    InterlockedIncrement(&g_cs_enters);
+    crt_lock_trace("try", CriticalSection);
+    xbox_cs_note_owner(cs);
+    return TRUE;
+}
+
 VOID __stdcall xbox_RtlLeaveCriticalSection(PRTL_CRITICAL_SECTION CriticalSection)
 {
     if (g_cs_single_mode == 2 && cs_guest_is_cs((const uint8_t*)CriticalSection)) {

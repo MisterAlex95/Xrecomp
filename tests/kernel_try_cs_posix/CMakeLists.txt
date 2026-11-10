@@ -1,0 +1,15 @@
+cmake_minimum_required(VERSION 3.20)
+project(kernel_try_cs_posix_test C)
+# RtlTryEnterCriticalSection against Enter/Leave on a POSIX host: the three
+# have to take the same host lock.
+if(WIN32)
+    message(FATAL_ERROR "This regression covers the POSIX critical-section shadow")
+endif()
+set(CMAKE_C_STANDARD 11)
+add_subdirectory(../.. runtime)
+add_executable(kernel_try_cs_posix_test test_main.c)
+target_include_directories(kernel_try_cs_posix_test PRIVATE ../../src/kernel)
+target_link_libraries(kernel_try_cs_posix_test PRIVATE xboxrecomp)
+enable_testing()
+add_test(NAME kernel_try_cs_posix_test COMMAND kernel_try_cs_posix_test)
+set_tests_properties(kernel_try_cs_posix_test PROPERTIES TIMEOUT 30)
