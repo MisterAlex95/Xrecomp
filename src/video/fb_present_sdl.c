@@ -226,6 +226,77 @@ void xbox_FramebufferWindowFrameStats(uint32_t draws)
     __atomic_store_n(&s_frame_draws, draws, __ATOMIC_RELAXED);
 }
 
+/* The title bar's rate, kept for other readers (the Android companion
+ * panel): frames per second x 100, set once a second by the main loop. */
+static uint32_t s_fps_centi;
+
+void xbox_FramebufferWindowGetStats(uint32_t *fps_centi, uint32_t *draws)
+{
+    if (fps_centi)
+        *fps_centi = __atomic_load_n(&s_fps_centi, __ATOMIC_RELAXED);
+    if (draws)
+        *draws = __atomic_load_n(&s_frame_draws, __ATOMIC_RELAXED);
+}
+
+/* The last published frame as a 24-bit BMP, from any thread. The ready slot
+ * is only swapped under s_lock and nobody writes it, so it is copied under
+ * the lock (1.2 MB at most) and written out after. -1: no frame yet, or the
+ * file could not be written. */
+int xbox_FramebufferDumpBmp(const char *path)
+{
+    uint32_t row = (FB_W * 3u + 3u) & ~3u, img = row * FB_H, total = 54u + img;
+    uint32_t w = FB_W, h = FB_H, bpp, x, y;
+    uint8_t hdr[54], *px = NULL, *line;
+    FILE *f;
+
+    pthread_mutex_lock(&s_lock);
+    bpp = s_ready_seq ? s_slot[s_ready].bpp : 0;
+    if (bpp && s_slot[s_ready].px && (px = (uint8_t *)malloc((size_t)FB_W * FB_H * bpp)))
+        memcpy(px, s_slot[s_ready].px, (size_t)FB_W * FB_H * bpp);
+    pthread_mutex_unlock(&s_lock);
+    if (!px)
+        return -1;
+    line = (uint8_t *)calloc(1, row);
+    f = line ? fopen(path, "wb") : NULL;
+    if (!f) {
+        free(px);
+        free(line);
+        return -1;
+    }
+    memset(hdr, 0, sizeof hdr);
+    hdr[0] = 'B'; hdr[1] = 'M';
+    memcpy(hdr + 2, &total, 4);
+    hdr[10] = 54; hdr[14] = 40;
+    memcpy(hdr + 18, &w, 4);
+    memcpy(hdr + 22, &h, 4);
+    hdr[26] = 1; hdr[28] = 24;
+    memcpy(hdr + 34, &img, 4);
+    fwrite(hdr, 1, sizeof hdr, f);
+    for (y = 0; y < FB_H; y++) {
+        const uint8_t *src = px + (size_t)(FB_H - 1 - y) * FB_W * bpp;
+        for (x = 0; x < FB_W; x++) {
+            uint32_t v;
+            if (bpp == 4) {     /* X8R8G8B8 */
+                v = (uint32_t)src[x * 4] | (uint32_t)src[x * 4 + 1] << 8 | (uint32_t)src[x * 4 + 2] << 16;
+            } else {            /* R5G6B5 */
+                uint32_t p = (uint32_t)src[x * 2] | (uint32_t)src[x * 2 + 1] << 8;
+                v = ((p >> 11 & 0x1F) * 255u / 31u) << 16 | ((p >> 5 & 0x3F) * 255u / 63u) << 8
+                    | (p & 0x1F) * 255u / 31u;
+            }
+            line[x * 3 + 0] = (uint8_t)v;
+            line[x * 3 + 1] = (uint8_t)(v >> 8);
+            line[x * 3 + 2] = (uint8_t)(v >> 16);
+        }
+        fwrite(line, 1, row, f);
+    }
+    free(line);
+    free(px);
+    if (fclose(f) != 0)
+        return -1;
+    fprintf(stderr, "  [FBWIN] wrote %s (%ux%u)\n", path, FB_W, FB_H);
+    return 0;
+}
+
 /* ── The guest thread ─────────────────────────────────────────────────── */
 
 static int (*s_guest_main)(void);
@@ -508,6 +579,9 @@ int xbox_HostWindowMain(int (*guest_main)(void))
                              : 0.0,
                      (unsigned)__atomic_load_n(&s_frame_draws, __ATOMIC_RELAXED));
             SDL_SetWindowTitle(win, tb);
+            __atomic_store_n(&s_fps_centi, t_title ? (uint32_t)((f - flips_title) * 100000u
+                                                                / (now - t_title)) : 0u,
+                             __ATOMIC_RELAXED);
             t_title = now;
             flips_title = f;
         }
