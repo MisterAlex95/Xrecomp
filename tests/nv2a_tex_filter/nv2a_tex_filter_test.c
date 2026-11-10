@@ -38,7 +38,9 @@
 #define POS_AT    0x40000u
 #define UV_AT     0x41000u
 #define DIFF_AT   0x42000u
-#define MEM_BYTES 0x50000u
+#define COLOR3_AT 0x50000u
+#define TEX3_AT   0x32000u
+#define MEM_BYTES 0x60000u
 static uint8_t s_mem[MEM_BYTES];
 
 /* ---- what the executor expects the runtime to provide ------------------ */
@@ -79,14 +81,14 @@ static void put_vertex(uint32_t n, float x, float y, float u, float v)
 
 /* A 64x64 quad (two triangles) with u running 0..u1 and v 0..1 across it,
  * drawn on the surface at `color_at` through the texture at `tex_at`. */
-static void draw_quad(uint32_t color_at, uint32_t tex_at, uint32_t tex_w,
-                      float u1, uint32_t wrap)
+static void draw_quad_fmt(uint32_t color_at, uint32_t tex_at, uint32_t tex_w,
+                          float u1, uint32_t wrap, uint32_t fmt, uint32_t bpp)
 {
     m(0x0210, color_at);                           /* SET_SURFACE_COLOR_OFFSET */
     m(0x1B00, tex_at);                             /* TEXTURE_OFFSET */
-    m(0x1B04, (0x12u << 8) | (1u << 16));          /* FORMAT: LIN_A8R8G8B8, 1 level */
+    m(0x1B04, (fmt << 8) | (1u << 16));            /* FORMAT: fmt, 1 level */
     m(0x1B08, wrap | (wrap << 8));                 /* ADDRESS: u and v */
-    m(0x1B10, (tex_w * 4u) << 16);                 /* CONTROL1: pitch */
+    m(0x1B10, (tex_w * bpp) << 16);                /* CONTROL1: pitch */
     m(0x1B1C, (tex_w << 16) | 1u);                 /* IMAGE_RECT: tex_w x 1 */
     put_vertex(0, 0,  0,  0,  0);
     put_vertex(1, W,  0,  u1, 0);
@@ -97,6 +99,12 @@ static void draw_quad(uint32_t color_at, uint32_t tex_at, uint32_t tex_w,
     m(0x17FC, 5);                                  /* BEGIN_END: triangles */
     m(0x1810, (6u - 1u) << 24);                    /* DRAW_ARRAYS: 6 from 0 */
     m(0x17FC, 0);
+}
+
+static void draw_quad(uint32_t color_at, uint32_t tex_at, uint32_t tex_w,
+                      float u1, uint32_t wrap)
+{
+    draw_quad_fmt(color_at, tex_at, tex_w, u1, wrap, 0x12u, 4u);   /* LIN_A8R8G8B8 */
 }
 
 static int gray(uint32_t color_at, int x, int y)
@@ -122,6 +130,8 @@ int main(int argc, char **argv)
     setenv("RECOMP_RASTER_THREADS", "1", 1);
 #endif
 
+    s_mem[TEX3_AT] = 0x00;                       /* LIN_AL8 ramp: 0 then 255 */
+    s_mem[TEX3_AT + 1] = 0xFF;
     memcpy(s_mem + TEX1_AT,     &black, 4);
     memcpy(s_mem + TEX1_AT + 4, &white, 4);
     for (x = 0; x < 64; x++)                     /* odd texels white */
@@ -153,6 +163,7 @@ int main(int argc, char **argv)
 
     draw_quad(COLOR1_AT, TEX1_AT, 2, 2.0f, 3);       /* ramp: clamp */
     draw_quad(COLOR2_AT, TEX2_AT, 64, 192.0f, 1);    /* stripes: wrap */
+    draw_quad_fmt(COLOR3_AT, TEX3_AT, 2, 2.0f, 3, 0x1Bu, 1u);   /* AL8 ramp: clamp */
 
     /* ramp, row 32 */
     mid = gray(COLOR1_AT, 32, 32);
@@ -193,6 +204,18 @@ int main(int argc, char **argv)
                   "stripes x=%d is %d, want %d", x, g, want);
         }
     }
+
+    /* AL8 (one byte, alpha and luminance): the same ramp as the first quad.
+     * Unsupported, the quad took the vertex colour (white) throughout --
+     * Fable's glyph cache, text drawn as solid blocks. */
+    printf("al8: x=0 %d  x=63 %d\n", gray(COLOR3_AT, 0, 32), gray(COLOR3_AT, 63, 32));
+    if (nearest)
+        for (x = 0; x < W; x++)
+            CHECK(gray(COLOR3_AT, x, 32) == (x < 32 ? 0 : 255),
+                  "al8 ramp x=%d is %d, nearest wants %d", x, gray(COLOR3_AT, x, 32), x < 32 ? 0 : 255);
+    else
+        CHECK(gray(COLOR3_AT, 0, 32) <= 2 && gray(COLOR3_AT, 63, 32) >= 253,
+              "al8 ramp ends %d %d, want 0 and 255", gray(COLOR3_AT, 0, 32), gray(COLOR3_AT, 63, 32));
 
     printf("%s %s: %s\n", mode, variant, s_fail ? "FAIL" : "PASS");
     return s_fail ? 1 : 0;

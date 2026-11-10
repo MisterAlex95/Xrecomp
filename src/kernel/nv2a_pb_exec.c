@@ -1140,6 +1140,7 @@ static uint32_t linear_twin(uint32_t fmt)
 {
     switch (fmt) {
     case 0x00: return 0x13;                /* L8        -> LIN_L8        */
+    case 0x01: return 0x1B;                /* AL8       -> LIN_AL8       */
     case 0x02: return 0x10;                /* A1R5G5B5  -> LIN_A1R5G5B5  */
     case 0x03: return 0x1C;                /* X1R5G5B5  -> LIN_X1R5G5B5  */
     case 0x04: return 0x1D;                /* A4R4G4B4  -> LIN_A4R4G4B4  */
@@ -1302,6 +1303,16 @@ static int sample_tex(const Texture *t, uint32_t face_offset,
     case 0x1F:                                      /* LIN_A8 */
         *argb = ((uint32_t)p[u] << 24) | 0x00FFFFFFu;
         return 1;
+
+    /* One byte that is both the alpha and the luminance (NV2A AY8). Fable:
+     * The Lost Chapters keeps its glyph cache in a 512x512 swizzled AL8
+     * texture; without a case every glyph quad was the unsupported-format
+     * fill, so its text came out as solid blocks the shape of the words. */
+    case 0x1B: {                                    /* LIN_AL8 */
+        uint32_t t = p[u];
+        *argb = (t << 24) | (t << 16) | (t << 8) | t;
+        return 1;
+    }
 
     /* 4:2:2 packed YUV, two texels per four bytes.
      *
