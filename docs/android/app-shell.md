@@ -16,9 +16,9 @@ The CI builds it on every push to `main`. The latest one is always the prereleas
 
 | Piece | What |
 |---|---|
-| `LauncherActivity` | The launcher entry: the game picker ([Choosing the game](#choosing-the-game)), in its own process `:launcher`. With a valid game it starts `ShellActivity` at once and shows nothing. |
-| `ShellActivity` | Subclass of SDL's `SDLActivity`, which loads `libSDL2.so` and then `libmain.so`. SDL's Java side is compiled from the pinned sources (`$SDL2_SRC/android-project`), not copied here. Not exported: started by the picker, after it sets `RECOMP_GAME_DIR`. |
-| `libxba_import.so` | The picker's ISO import: `xiso_jni.c` around the static `xiso` target (`src/xiso`). Loaded only in `:launcher`. |
+| `LauncherActivity` | The launcher entry ([The launcher](#the-launcher)): welcome, game choice and import, home (Play, Settings, Game data, About), in its own process `:launcher`. `Theme.java` and `Widgets.java` draw it; `RecompConfig.java` writes its settings to `recomp.cfg`. With a valid game and « Open the game directly next time » on, it starts `ShellActivity` at once and shows nothing. |
+| `ShellActivity` | Subclass of SDL's `SDLActivity`, which loads `libSDL2.so` and then `libmain.so`. SDL's Java side is compiled from the pinned sources (`$SDL2_SRC/android-project`), not copied here. Not exported: started by the launcher, after it sets `RECOMP_GAME_DIR`. |
+| `libxba_import.so` | The launcher's ISO import: `xiso_jni.c` around the static `xiso` target (`src/xiso`). Loaded only in `:launcher`. |
 | `libmain.so` | `shell_main.c` + the **whole** toolkit (`--whole-archive`) + the title, when one is linked (see [A title in the shell](#a-title-in-the-shell)). Loading it on a device proves that bionic resolves every symbol the runtime uses. Four symbols that a title provides are weak stubs in `shell_main.c`, and so is the title's hook `recomp_title_main`. |
 | logcat | `src/platform/android_log.c`: stdout (INFO) and stderr (WARN) go to the tag `xboxrecomp`, one entry per line. `xbox_android_log_init()` is the first call of `SDL_main`. |
 | Window | Black, fullscreen, landscape (`sensorLandscape` + `SDL_HINT_ORIENTATIONS`). |
@@ -32,9 +32,10 @@ The CI builds it on every push to `main`. The latest one is always the prereleas
 
 1. `adb install -r xboxrecomp-shell.apk`, then `adb logcat -c && adb logcat -s xboxrecomp SDL AndroidRuntime DEBUG`.
 2. Launch « xboxrecomp ». Expected: a black screen, fullscreen, landscape. logcat shows
-   `xboxrecomp ready (build <commit>, SDL 2.32.10, <w>x<h>)`. Without game data the game picker shows instead
-   ([Choosing the game](#choosing-the-game)); push any `default.xbe` to `files/game/` first: the shell then shows a « Game data found … This APK has no
-   recompiled game in it » message box (`NO_TITLE`, logcat `(no title linked)`); OK, and the black screen stays.
+   `xboxrecomp ready (build <commit>, SDL 2.32.10, <w>x<h>)`. Without game data the launcher's welcome screen shows
+   instead ([The launcher](#the-launcher)); push any `default.xbe` to `files/game/` first and press Play on the
+   launcher's home: the shell then shows a « Game data found … This APK has no recompiled game in it » message box
+   (`NO_TITLE`, logcat `(no title linked)`); OK, and the black screen stays.
 3. Press Back once. A « Press Back again to quit » toast shows; logcat: `QUIT_PROMPT shown`. The app stays open.
 4. Press Back again within 2 s. logcat: `Back pressed twice, quitting`, then `clean exit`, and the app closes.
 5. Check there is no tombstone: `adb shell ls /data/tombstones` (root) or no `DEBUG` / `F libc` lines in logcat.
@@ -52,7 +53,8 @@ adb push recomp.cfg /sdcard/Android/data/fr.adserver.xboxrecomp.shell/files/reco
 
 logcat then shows one line: `recomp.cfg: 1 option(s) from …: RECOMP_WAIT_LOG=1`. Without the file it shows
 `recomp.cfg: none (read from … when present)`, which is not an error. A variable that is already in the environment
-wins over the file. The list of switches: `docs/runtime/environment-variables.md`.
+wins over the file. The list of switches: `docs/runtime/environment-variables.md`. The launcher's Settings screen
+writes a few of them into the same file and keeps the lines written by hand ([Settings](#settings)).
 
 ## Game data and saves
 
@@ -62,7 +64,7 @@ partition images to the second:
 
 | What | Where | Why there |
 |---|---|---|
-| Game data (`default.xbe` and the disc's files) | The folder chosen in the [game picker](#choosing-the-game), else `/sdcard/Android/data/<app id>/files/game/` (where the picker's imports go too), or `RECOMP_GAME_DIR` from `recomp.cfg` | Reachable with `adb push` and a file manager, no permission needed; uninstalling the app removes it. |
+| Game data (`default.xbe` and the disc's files) | The folder chosen in the [launcher](#choosing-the-game), else `/sdcard/Android/data/<app id>/files/game/` (where the launcher's imports go too), or `RECOMP_GAME_DIR` from `recomp.cfg` | Reachable with `adb push` and a file manager, no permission needed; uninstalling the app removes it. |
 | Saves, `Partition0-5.img` | `/data/data/<app id>/files/save/` | Private to the app, kept when it is killed or updated. The cache partition images are sparse: they take no space until written. |
 
 Both are created at start, so the `game/` folder is there to push into. The lookup of `default.xbe` is
@@ -70,19 +72,20 @@ case-insensitive, like the kernel's. logcat shows `storage: game=… save=… (d
 `Path init: game=…, save=…, user data=…`.
 
 When `default.xbe` is missing, logcat shows `NO_GAME_DATA: default.xbe not found in …` and, instead of starting
-anything (with or without a title linked), the shell opens the game picker naming that folder
+anything (with or without a title linked), the shell opens the launcher on its game choice, naming that folder
 (`ShellActivity.openGamePicker`, called from `shell_main.c` over JNI) and finishes. If that call fails it shows the
-old « No game data found » box with the folder to copy the disc to. The picker normally catches a missing game before
+old « No game data found » box with the folder to copy the disc to. The launcher normally catches a missing game before
 the shell starts; this is the path for a folder that went away in between, or `RECOMP_GAME_DIR` in `recomp.cfg`
 pointing nowhere.
 
 Device check (XBA-23):
 
-1. Start the shell once with nothing pushed. Expected: the game picker, « No game is set up », and logcat
-   `picker: shown (no game set up)`; nothing from the runtime, which has not started.
+1. Start the shell once with nothing pushed. Expected: the launcher's welcome screen, and logcat
+   `launcher: shown (no game set up)`; nothing from the runtime, which has not started.
 2. Push any file named `default.xbe` (one of our nxdk samples will do):
    `adb push default.xbe /sdcard/Android/data/fr.adserver.xboxrecomp.shell/files/game/`, then start the app again.
-   Expected: no picker, logcat `storage: … (default.xbe found)` and `game data: …/game/default.xbe`.
+   Expected: the launcher's home, chip « Ready »; Play: logcat `storage: … (default.xbe found)` and
+   `game data: …/game/default.xbe`.
 3. `adb shell run-as fr.adserver.xboxrecomp.shell ls -ls files/save` (debug APK). Expected: `TitleData`,
    `UserData`, `Cache`, `SystemData` and `Partition0.img` … `Partition5.img`, the last ones taking about 0 blocks.
 4. Kill the app (`adb shell am force-stop fr.adserver.xboxrecomp.shell`), restart it, run step 3 again: the same
@@ -108,61 +111,144 @@ the ContentResolver opened and only needs `pread` on it:
 
 On a desktop, `xiso_extract image.iso outdir` (built by `tests/xiso`, `tools/xiso/README.md`) does the same.
 
-In the app the picker calls it into `files/game.import`, never into `files/game` itself, and swaps the result in
+In the app the launcher calls it into `files/game.import`, never into `files/game` itself, and swaps the result in
 once checked ([Choose disc image (ISO)](#choose-disc-image-iso)).
 
-## Choosing the game
+## The launcher
 
-(XBA-54, and the import half of XBA-40.) The runtime reads the game with POSIX calls (`open`, `opendir`, the kernel's
-case-insensitive lookup), so it needs a real path, not a `content://` URI. The app's launcher entry is therefore a
-small picker, `LauncherActivity` (framework widgets, no AndroidX), in its own process `:launcher`: it never loads
-`libSDL2.so` or the runtime, and after a new choice it can end the game's process and start a fresh one (the runtime
-maps its memory once per process).
+(XBA-41, around the game picker of XBA-54 and the import of XBA-40.) The app's launcher entry is
+`LauncherActivity`, in its own process `:launcher`: it never loads `libSDL2.so` or the runtime, and after a new choice
+it can end the game's process and start a fresh one (the runtime maps its memory once per process). It is made for a
+gamepad first, in landscape, and works by touch too.
+
+How it is built: framework `Activity` and `View`s only (no AndroidX, no Material, no new Gradle dependency), drawn in
+code (`Theme.java` for colours, type and sizes; `Widgets.java` for the custom views: rows, cards, progress ring,
+status chip, button hints). Everything is laid out on a 1920 x 1080 design grid that `Widgets.Stage` scales to the
+window (wider or taller screens get a wider or taller grid, never a stretched one), so it looks the same from 1280 x 720
+to 1920 x 1080. The window is fullscreen and immersive (system bars hidden, back with a swipe), drawn under the display
+cutout, and the stage keeps its content out of the cutout's insets. System fonts only (`sans-serif`,
+`sans-serif-medium`); the look is our own (deep green-black, one vivid green accent, warm off-white text), with no
+console or game maker's logo or name in the art.
+
+### Screens
+
+One activity, a small state machine of screens (`LauncherActivity.Screen`) with a back history instead of fragments:
+
+| Screen | What it shows | Reached from |
+|---|---|---|
+| Welcome | What the app is (a recompiled game, the game not included: bring your own copy), three steps, « Get started ». | First start, when no game is set up at all. |
+| Choose your game (source) | Two large cards: **Game folder** (the extracted disc; read in place with All files access, otherwise copied; a badge says which) and **Disc image (ISO)** (extracted once; a badge gives the free space). | Welcome, Game data › Change game, Play with no usable game, the « Change game » shortcut, `NO_GAME_DATA`. |
+| Read the game in place? | Only without All files access: the explanation (in place: no copy, fine for a 4 GB disc, only that folder is read; copy: as much free space again, a few minutes, removed with the app) and two cards, **Allow all files access** (recommended; opens the system page, then the folder picker) and **Copy into the app** (the folder picker). | Game folder. |
+| Preparing the game (import) | A progress ring (percent, ticks), the step (« Checking », « Copying », « Extracting »), « X of Y », the current file, the free space, **Cancel**. The screen stays on; B cancels too. | A picked folder or image. |
+| Home | The game's title (the XBE certificate's name from the folder or the image, else the folder's name) and a status chip (**Ready**, **Game data missing**, **No file access**, **Wrong game**, **No game**). Menu: **Play**, **Settings**, **Game data**, **About**, each with a one-line summary; a detail panel on the right for the focused item; « Open the game directly next time » at the bottom left. | A finished import (Play focused), every start when « Open directly » is off, the « Launcher » shortcut, B from the screens above. |
+| Settings | The [options](#settings) as rows, left / right (or A) to change, a detail panel with what the option does, its choices and its line in `recomp.cfg`. | Home. |
+| Game data | Folder, source (read in place, imported copy, set in `recomp.cfg`), size (counted in the background), free space; **Change game** (another folder or image, or the same one again to re-import); **Delete the imported copy** (only when the game is the app's own `files/game/`; press A twice within 5 s; saves are kept; then the choice is forgotten). | Home. |
+| About | Version (`-PxbaVersion`), build (`-PxbaVersionCode`), app id, the game check (the first digits of `-PxbaXbeSha256`, or none), licences (xboxrecomp MIT, SDL2 zlib), and that no game data is included. | Home. |
+
+Messages and errors (`NOT_A_GAME_FOLDER`, `WRONG_GAME`, `NOT_ENOUGH_SPACE`, « Import canceled », « Saved », ...) go to
+a note line above the button hints, coloured by kind; there are no toasts and no dialogs. logcat (tag `xboxrecomp`):
+`launcher: shown (...)` naming why, then one `launcher:` line per step (folder, hash, copy, import, game set, play,
+settings saved, errors).
 
 ### When it shows
 
 | Case | What happens |
 |---|---|
-| A remembered folder that holds `default.xbe` (any case) | `ShellActivity` starts at once; the picker shows nothing. |
-| Nothing remembered, but `RECOMP_GAME_DIR` in `recomp.cfg`, or `default.xbe` pushed to `files/game/` | Same: the adb workflow still works. |
-| Nothing set up | The picker: « No game is set up ». |
-| The remembered folder is gone (deleted, SD card out) | The picker, naming the old path (`GAME_FOLDER_GONE`); the previous choice stays until a new one is made. |
-| The folder is there but unreadable because All files access was turned off | The picker says so (`GAME_FOLDER_NO_ACCESS`). |
-| The native side found no `default.xbe` (`NO_GAME_DATA`) | `shell_main.c` calls `ShellActivity.openGamePicker(dir)`; the picker shows `NO_GAME_DATA` with that folder. |
-| Long-press on the app icon, « Change game » | The picker, even with a game set up. A dynamic shortcut (the package name differs per title, which a static `shortcuts.xml` cannot follow), published each time the picker runs, so it appears after the first start. If the game is running, the picker says it will close when another game is chosen; saves are in internal storage and stay. |
+| A usable game and « Open the game directly next time » off (the default) | Home, Play focused. |
+| A usable game and « Open directly » on | `ShellActivity` starts at once; nothing shows. |
+| The game is running in the background and the app icon is pressed | Back to the game at once, whatever « Open directly » says. |
+| Nothing remembered, but `RECOMP_GAME_DIR` in `recomp.cfg`, or `default.xbe` pushed to `files/game/` | A usable game, as above: the adb workflow still works (source « Set in recomp.cfg » or « Imported copy »). |
+| Nothing set up | Welcome. |
+| The remembered folder is gone (deleted, SD card out) | Home, chip « Game data missing », the note naming the old path (`GAME_FOLDER_GONE`), Game data focused; the previous choice stays until a new one is made. |
+| The folder is there but unreadable because All files access was turned off | Home, chip « No file access », the note says so (`GAME_FOLDER_NO_ACCESS`). |
+| `default.xbe` there but not the one this APK was built for (files changed since the choice, or set up through `recomp.cfg` / adb) | Home, chip « Wrong game »: Play says `WRONG_GAME` instead of starting. Checked once per folder in the background, only when the APK has an expected hash. |
+| The native side found no `default.xbe` (`NO_GAME_DATA`) | `shell_main.c` calls `ShellActivity.openGamePicker(dir)`; the launcher opens on Choose your game with `NO_GAME_DATA` and that folder in the note; B goes to Home. |
+| Long-press on the app icon, « Change game » | Choose your game, even with a game set up; B goes to Home. If the game is running, the note says it will close when another game is chosen; saves are in internal storage and stay. |
+| Long-press on the app icon, « Launcher » | Home, even with « Open directly » on or the game running. |
 
-logcat (tag `xboxrecomp`): `picker: shown (...)`, then one `picker:` line per step.
+The two shortcuts are dynamic (the package name differs per title, which a static `shortcuts.xml` cannot follow),
+published each time the launcher runs, so they appear after the first start.
 
-### The screen
+A new game, once checked, is remembered and the running game (if any) is ended then, as before; the launcher goes to
+Home with Play focused and « TITLE is ready » in the note, instead of starting the game by itself.
 
-One screen, landscape or portrait, usable with a gamepad (D-pad focus on the buttons):
+### Controls
 
-- the app's name; the state (« Game: TITLE / Folder: PATH », or why none is usable); a message line for errors;
-- **Choose game folder**, **Choose disc image (ISO)**, **Start the game** (enabled when the current game is usable);
-- while copying or extracting: a label, a progress bar with « X of Y » and the current file, and **Cancel**. The
-  buttons are off, the screen stays on (`FLAG_KEEP_SCREEN_ON`), Back cancels too. The work runs on a background
-  thread; the activity handles rotation itself so it survives.
+| Input | Does |
+|---|---|
+| D-pad, left stick | Move the focus (Android turns the stick and the hat into D-pad keys). Each screen remembers its focused item. |
+| A (`BUTTON_A`), D-pad centre, Enter | Select the focused item; on a setting, the next value. |
+| B (`BUTTON_B`), Back, Escape | Back one screen; on Home or Welcome, leave the app; during an import, Cancel. |
+| Left / right on a setting | Previous / next value. |
+| L1 / R1 | Settings: previous / next section. |
+| Y | Settings: restore the defaults. |
+| X | Home: « Open the game directly next time » on / off. |
+| Start | Home: Play. |
+| Touch | Tap an item to select it, the arrows of a setting to step it, a button hint to do what it says, the switch at the bottom left to toggle « Open directly ». After a touch, the first D-pad or A press brings the focus back. |
 
-Texts are string resources, English (`res/values`) and French (`res/values-fr`), named by key: `NO_GAME_SET_UP`,
-`NO_GAME_DATA`, `NOT_A_GAME_FOLDER`, `NOT_AN_ISO`, `NOT_A_GAME_IMAGE`, `WRONG_GAME`, `NOT_ENOUGH_SPACE`, ...
+A and B are taken on release, once, so a held button does not repeat. The focus is a green outline with a soft glow
+and gradient; dimmed rows (Play without a usable game) stay focusable so that pressing them says why.
+
+### Settings
+
+The Settings screen writes a few `RECOMP_*` options to `recomp.cfg` (the file the runtime already reads,
+[RECOMP_* options](#recomp_-options-recompcfg)), and they apply the next time the game starts. Only options that
+exist in the runtime and mean something to a player are offered:
+
+| Row | Choices (default first or marked) | Line in `recomp.cfg` |
+|---|---|---|
+| Open the game directly next time | Off (default), On | none: a launcher preference (`game` SharedPreferences, `auto_start`) |
+| Graphics › Vertical sync | On (default), Off | `RECOMP_PRESENT_VSYNC=0` when off |
+| Graphics › Texture filtering | Sharp (default), Smooth, Anisotropic 8×, Anisotropic 16× | `RECOMP_TEX_BILINEAR=1`, `RECOMP_TEX_ANISO=8` / `16` |
+| Audio › 3D audio (HRTF) | On (default), Off | `RECOMP_APU_HRTF=0` when off |
+| Audio › Audio buffer | Short (256), Normal (default, 512), Long (1024), Very long (2048) | `RECOMP_AUDIO_BUF_SAMPLES=…` |
+| Advanced › Drawing threads | Auto (default), 1, 2, 4, 6, 8 | `RECOMP_RASTER_THREADS=…` |
+| Advanced › Fast cores only | On (default on Android), Off | `RECOMP_BIG_CORES=0` when off |
+| Advanced › Self-test at start | Off (default), On | `RECOMP_SHELL_SELFTEST=1` |
+
+How the file is written (`RecompConfig.java`): it is parsed as `recomp_cfg.c` does (one `KEY=VALUE` per line, blanks
+and `#` comments skipped, keys and values trimmed, the first line for a key wins). A change rewrites the key's first
+line in place and removes its later duplicates; a default value removes the key's lines (the runtime default then
+applies); a new key is appended under the comment « Written by the launcher's Settings screen ». Every other line
+(comments, other variables, `RECOMP_GAME_DIR`) is kept as written. The file goes through `recomp.cfg.tmp` and a
+rename; no file is created while every option is at its default. A value the screen does not offer (written by hand)
+shows as « Custom » and stays until that row is changed. « Restore defaults » (or Y) removes the lines of these
+options only.
+
+Asked for in XBA-41 but left out, because no runtime option backs them on Android: the output scaling and its filter
+(the SDL presenter always letterboxes the 640 x 480 frame with nearest-neighbour sampling, `fb_present_sdl.c`;
+`RECOMP_WINDOW_SCALE` only sizes a desktop window and `RECOMP_PRESENT_FILTER` is the D3D11 presenter's), an fps cap,
+control remapping and a stats overlay (no such switch), and vibration (`RECOMP_RUMBLE` only gates the emulated USB
+pad, `RECOMP_USB`, a per-title opt-in). Bring-up and debug switches stay out on purpose.
+
+## Choosing the game
+
+(XBA-54, and the import half of XBA-40.) The runtime reads the game with POSIX calls (`open`, `opendir`, the kernel's
+case-insensitive lookup), so it needs a real path, not a `content://` URI. The launcher's source screens therefore
+end with a folder path the runtime can open: the folder itself, or the app's `files/game/` after a copy or an
+extraction.
 
 ### Choose game folder
 
-1. Without All files access (`MANAGE_EXTERNAL_STORAGE`), a dialog explains: with it the game is read in place from
-   the folder (phone or SD card, no copy, fine for a 4 GB disc, only that folder is read); without it the folder is
-   copied into the app's storage (as much free space again, a few minutes, removed with the app). « Allow all files
-   access » opens the system's settings page for the app; on return the folder picker opens either way. « Copy
-   instead » opens it directly.
+1. Without All files access (`MANAGE_EXTERNAL_STORAGE`), the « Read the game in place? » screen explains the choice:
+   with it the game is read in place from the folder (phone or SD card, no copy, fine for a 4 GB disc, only that folder
+   is read); without it the folder is copied into the app's storage (as much free space again, a few minutes, removed
+   with the app). « Allow all files access » opens the system's settings page for the app; on return the folder
+   picker opens either way. « Copy into the app » opens it directly. With the permission already granted, the folder
+   picker opens straight from the Game folder card.
 2. The system folder picker (`ACTION_OPEN_DOCUMENT_TREE`).
 3. **With the permission**, the tree URI is mapped to a path: the external storage provider's `primary:Games/Halo`
    is `/storage/emulated/0/Games/Halo`, `1A2B-3C4D:Halo` is `/storage/1A2B-3C4D/Halo` (SD card), `home:X` is
-   `Documents/X`; the downloads provider's `raw:/path` is a path already. No `default.xbe` there: `NOT_A_GAME_FOLDER`,
-   and the picker can be opened again. Otherwise the [hash check](#wrong_game), then the folder is remembered as is.
+   `Documents/X`; the downloads provider's `raw:/path` is a path already. No `default.xbe` there: `NOT_A_GAME_FOLDER`
+   in the note, and the card can be chosen again. Otherwise the [hash check](#wrong_game) (the import screen shows
+   « Checking the game »), then the folder is remembered as is.
 4. **Without the permission** (or a provider that is not a storage volume, or a path that cannot be listed): the tree
    is listed through `DocumentsContract`, `default.xbe` checked (`NOT_A_GAME_FOLDER`) and hashed from the provider
    before anything is copied, the free space checked against the total, then everything is copied to
    `files/game.import/` with progress and Cancel, checked again and swapped in place of `files/game/` (the old
    `game/` becomes `game.old/` and is removed once the new one is in). `files/game` is remembered.
+
+An error or a Cancel ends on Choose your game with the reason in the note; the previous game is untouched.
 
 ### Choose disc image (ISO)
 
@@ -175,7 +261,7 @@ Texts are string resources, English (`res/values`) and French (`res/values-fr`),
 3. Free space in the external files dir must be the total plus 64 MB, or `NOT_ENOUGH_SPACE` names both.
 4. `xiso_extract_fd` extracts into `files/game.import/` (through `.partial`, renamed at the end) on the background
    thread; its progress callback calls back into Java (at each file start and at most ten times a second), which
-   updates the bar and returns Cancel. A cancel or an error leaves `files/game/` untouched.
+   updates the ring and returns Cancel. A cancel or an error leaves `files/game/` untouched.
 5. The extracted `default.xbe` is hashed ([WRONG_GAME](#wrong_game)), then `game.import/` is swapped in place of
    `game/` as above and remembered.
 
@@ -187,10 +273,11 @@ whole runtime (`--whole-archive` toolkit, the title) into a process that would n
 
 A title's APK is made for one disc. `-PxbaXbeSha256=<sha256sum of default.xbe>` bakes the expected hash in (string
 resource `xba_xbe_sha256`, 64 hex digits, checked by Gradle); empty, as for the shell and the stub, means no check.
-The picker computes the SHA-256 of `default.xbe` of the chosen folder (in place), of the provider's file (before a
+The launcher computes the SHA-256 of `default.xbe` of the chosen folder (in place), of the provider's file (before a
 copy) or of the extracted tree (after an extraction, before the swap). A mismatch shows `WRONG_GAME` and changes
-nothing: the previous choice is kept, `files/game/` is untouched, the staging folder is removed. logcat names the
-hash: `picker: ... sha256 <hex>`.
+nothing: the previous choice is kept, `files/game/` is untouched, the staging folder is removed. Home checks the
+current folder once more in the background (chip « Wrong game »). logcat names the hash:
+`launcher: ... sha256 <hex>`.
 
 ### How the path reaches the runtime
 
@@ -201,36 +288,64 @@ variable (the process environment is libc's, so `getenv` sees it). An environmen
 so a remembered choice wins over a `RECOMP_GAME_DIR` line there. Saves stay in internal storage whatever the game
 folder.
 
-### Device check (XBA-54, XBA-40), for Alex
+### Device check (XBA-41, with XBA-54 and XBA-40), for Alex
 
 Use the stub APK (**shell-latest**) and its `stub-default.xbe` as the « game »: a folder holding only it is enough
 for the stub title. `adb logcat -c && adb logcat -s xboxrecomp SDL AndroidRuntime DEBUG` in a terminal throughout.
+Use the Thor's gamepad for everything unless a step says touch.
 
-1. Install the APK with nothing configured (`adb uninstall` first). Expected: the picker, « No game is set up »,
-   logcat `picker: shown (no game set up)`.
-2. Copy `stub-default.xbe` as `default.xbe` into a folder of internal storage (e.g. `Download/stubgame/`).
-   « Choose game folder », « Allow all files access », turn it on, come back: the folder picker opens. Pick the folder.
-   Expected: a « Starting ... » toast, then the stub title starts (`storage: game=/storage/emulated/0/Download/stubgame
-   ... (default.xbe found)`, `stub title: all 5 lifted functions OK`), and a « The title finished (code 0) » toast on
-   the black screen.
-3. Kill the app (swipe it from recents) and start it again: it starts directly, no picker.
-4. Long-press the app icon: « Change game ». Expected: the picker, « Game: ... / Folder: ... », and the note that the
-   running game will close. Pick an empty folder: `NOT_A_GAME_FOLDER`; the picker can be opened again.
-5. Repeat step 2 with the folder on the SD card if the Thor has one (expected path `/storage/XXXX-XXXX/...`).
-6. Folder gone: rename the folder of step 2 with a file manager, start the app. Expected: the picker naming the old
-   path (`GAME_FOLDER_GONE`), no crash.
-7. Copy fallback: Settings › Apps › the app › All files access off. « Choose game folder », « Copy instead », pick the
-   folder of step 2. Expected: the progress bar, then the game starts from
-   `/storage/emulated/0/Android/data/<app id>/files/game`.
-8. ISO: make an XISO of our own test data (e.g. `extract-xiso -c stubgame stub.iso`, or any image dumped from your
-   own disc), push it to `Download/`. « Choose disc image (ISO) », pick it. Expected: the progress bar with file
-   names, the screen stays on, then the game starts from `files/game`. Do it once more and press Cancel halfway:
-   « Import canceled », and the previous game still starts.
-9. Pick a file that is not an ISO (e.g. a photo): `NOT_AN_ISO`.
-10. WRONG_GAME needs an APK built with `-PxbaXbeSha256=` of another XBE (ask for one, or build one): picking the stub
-    folder then shows `WRONG_GAME`, and the previous choice still starts.
-11. Switch the phone to French: the picker's texts are in French.
-12. Send screenshots of the picker (steps 1, 4, 8) and the logcat lines (`picker:`, `import:`, `storage: game=...`).
+1. Install the APK with nothing configured (`adb uninstall` first). Expected: the Welcome screen, landscape,
+   fullscreen (no status or navigation bar), nothing hidden under the camera cutout, « Get started » focused with a
+   green outline; logcat `launcher: shown (no game set up)`.
+2. Look at the layout: texts not cut, nothing overlapping, the button hints at the bottom right (A Start, B Quit).
+   Send a screenshot (`adb exec-out screencap -p > welcome.png`).
+3. A on « Get started »: Choose your game, the Game folder card focused. D-pad down / up moves between the two cards;
+   B goes back to Welcome; A again.
+4. Copy `stub-default.xbe` as `default.xbe` into a folder of internal storage (e.g. `Download/stubgame/`). A on Game
+   folder: « Read the game in place? ». A on « Allow all files access », turn it on, come back: the folder picker
+   opens. Pick the folder. Expected: Home, title of the stub (or the folder's name), chip « Ready », Play focused, the
+   note « … is ready »; logcat `launcher: game set: /storage/emulated/0/Download/stubgame`.
+5. A on Play: the stub title starts (`storage: game=/storage/emulated/0/Download/stubgame ... (default.xbe found)`,
+   `stub title: all 5 lifted functions OK`), and « The title finished (code 0) » on the black screen.
+6. Press Home on the Thor, then the app icon: back to the game at once (logcat `launcher: game running, bringing it
+   back`). Back twice to quit it, start the app again: Home with Play focused (« Open directly » is off).
+7. Settings: D-pad through the rows (the list scrolls), left / right change Vertical sync and Texture filtering, L1 /
+   R1 jump between sections, the right panel follows the focus. Then
+   `adb shell cat /sdcard/Android/data/fr.adserver.xboxrecomp.shell/files/recomp.cfg`: the comment line and
+   `RECOMP_PRESENT_VSYNC=0` / `RECOMP_TEX_BILINEAR=1` (or what you chose). Play: logcat `recomp.cfg: N option(s)
+   from …` lists them and `[FBWIN] … vsync off`. Back in Settings, Y: the lines are gone.
+8. Hand-written lines survive: `adb shell "echo RECOMP_WAIT_LOG=1 >> /sdcard/Android/data/fr.adserver.xboxrecomp.shell/files/recomp.cfg"`,
+   change a setting, `cat` again: `RECOMP_WAIT_LOG=1` is still there.
+9. Home, X (or tap the switch at the bottom left): « Open the game directly next time » on; quit and start the app:
+   the game starts directly. Long-press the icon › « Launcher »: Home. Turn it off again with X.
+10. Long-press the app icon › « Change game »: Choose your game, the note says the running game will close (if it
+    runs). Pick an empty folder: `NOT_A_GAME_FOLDER` in the note, nothing changed; B goes to Home.
+11. Folder gone: rename the folder of step 4 with a file manager, start the app. Expected: Home, chip « Game data
+    missing », the note naming the old path (`GAME_FOLDER_GONE`), no crash; A on Play opens Choose your game.
+12. Copy fallback: Settings › Apps › the app › All files access off. Game folder › « Copy into the app », pick the
+    folder of step 4 (renamed back). Expected: the progress ring, then Home with Play focused, Game data showing
+    « Imported copy » and the folder `/storage/emulated/0/Android/data/<app id>/files/game`.
+13. ISO: make an XISO of our own test data (e.g. `extract-xiso -c stubgame stub.iso`, or any image dumped from your own
+    disc), push it to `Download/`. Disc image (ISO), pick it. Expected: the ring with the percentage, « X of Y », file
+    names, the screen stays on, then Home. Do it once more and press B (or Cancel) halfway: « Import canceled » in the
+    note on Choose your game, and the previous game still plays. Re-import your own disc's image too (it worked
+    before this change).
+14. Pick a file that is not an ISO (e.g. a photo): `NOT_AN_ISO` in the note.
+15. Game data › Delete the imported copy: the first A shows « Press A again », the second deletes; then Welcome (or
+    Home without a game) and « The imported copy was deleted ». Saves: `adb shell run-as fr.adserver.xboxrecomp.shell ls files/save`
+    still lists them.
+16. `NO_GAME_DATA` (after step 15, so that no game is remembered): `adb shell mkdir /sdcard/Download/empty`, then
+    `adb shell "echo RECOMP_GAME_DIR=/sdcard/Download/empty >> /sdcard/Android/data/fr.adserver.xboxrecomp.shell/files/recomp.cfg"`.
+    Start the app: Home, source « Set in recomp.cfg ». Play: the native side finds no `default.xbe` and hands over;
+    the launcher opens on Choose your game with `NO_GAME_DATA` and the folder in the note. Remove the line afterwards.
+17. WRONG_GAME needs an APK built with `-PxbaXbeSha256=` of another XBE (ask for one, or build one): picking the stub
+    folder then shows `WRONG_GAME`, and the previous choice still plays.
+18. Touch: tap the cards, the menu rows, a setting's arrows, the hints (B Back). Everything works without the gamepad,
+    and the next D-pad press shows the focus again.
+19. Switch the Thor to French: every launcher text is in French (screens, settings, notes, shortcuts).
+20. Send screenshots of Welcome, Choose your game, Read the game in place?, the import ring, Home, Settings, Game
+    data and About, and the logcat lines (`launcher:`, `import:`, `recomp.cfg:`, `storage: game=...`). Say if the A /
+    B buttons are swapped on the Thor (its « Xbox » / « Nintendo » layout setting changes the key codes the app sees).
 
 ## Background and resume
 

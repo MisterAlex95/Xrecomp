@@ -50,6 +50,9 @@ android {
         versionName xbaVersion
         resValue 'string', 'app_name', (findProperty('xbaLabel') ?: 'xboxrecomp')
         resValue 'string', 'xba_xbe_sha256', xbaXbeSha256
+        // Shown on the launcher's About screen (XBA-41).
+        resValue 'string', 'xba_version', xbaVersion
+        resValue 'string', 'xba_version_code', (findProperty('xbaVersionCode') ?: '1') as String
         ndk { abiFilters 'arm64-v8a' }
         externalNativeBuild {
             cmake {

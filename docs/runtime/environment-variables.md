@@ -14,6 +14,11 @@ How to read the tables:
 - **Where** is the source file that reads it, so the code is one search away.
 - Values are text. A flag is "set" when the variable exists, unless the entry says `1` or non-zero is required.
 
+On Android these come from `recomp.cfg` in the app's external files dir. The launcher's Settings screen writes a few of
+them there for the player (`RECOMP_PRESENT_VSYNC`, `RECOMP_TEX_BILINEAR`, `RECOMP_TEX_ANISO`, `RECOMP_APU_HRTF`,
+`RECOMP_AUDIO_BUF_SAMPLES`, `RECOMP_RASTER_THREADS`, `RECOMP_BIG_CORES`, `RECOMP_SHELL_SELFTEST`) and keeps every
+other line as written: see [Settings](../android/app-shell.md#settings).
+
 ## Bring-up and diagnostics
 
 Start here when a title does not run. See [Step 6: Iterative Debugging](../pipeline/06-debugging.md) for the workflow these belong to.
@@ -56,7 +61,7 @@ Opt-ins that change how the kernel layer behaves. Each fixes a class of titles; 
 | Variable | Default | What it does | Where |
 |---|---|---|---|
 | `RECOMP_SAVE_DIR=<dir>` | off | Root for the title's `UDATA`, `TDATA` and cache folders; created if missing. Absolute. Saves left in the game folder are then not used. | `kernel_path.c` |
-| `RECOMP_GAME_DIR=<dir>` | `<external files dir>/game` | Android app shell: where the title's data (`default.xbe` and the disc's files) is read from. The game picker sets it from the folder the player chose (XBA-54; it then wins over `recomp.cfg`); otherwise set it in `recomp.cfg`. | `recomp_storage.c` |
+| `RECOMP_GAME_DIR=<dir>` | `<external files dir>/game` | Android app shell: where the title's data (`default.xbe` and the disc's files) is read from. The launcher sets it from the folder the player chose (XBA-54; it then wins over `recomp.cfg`); otherwise set it in `recomp.cfg`. | `recomp_storage.c` |
 | `RECOMP_HEAP_RECLAIM` | off | Gives freed guest heap back. | `xbox_memory_layout.c` |
 | `RECOMP_EXT_VMA` | off | Extended virtual-memory areas above the mirrors. | `guest_vmem.c`, `xbox_memory_layout.c` |
 | `RECOMP_GUEST_WINDOW=0/1` | on for Android, off elsewhere | POSIX: hold the whole 4 GB guest window from the start and carve every view out of it, so the contiguous window, the apertures and the tiled alias never land on a taken host range. Implied by `RECOMP_EXT_VMA`. | `xbox_memory_layout.c` |

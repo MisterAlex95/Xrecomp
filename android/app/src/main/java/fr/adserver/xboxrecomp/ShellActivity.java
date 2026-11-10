@@ -10,7 +10,7 @@ import org.libsdl.app.SDLActivity;
 
 /**
  * The app shell every title uses: SDL loads libSDL2.so, then libmain.so, and calls its SDL_main.
- * Started by LauncherActivity (the game picker, XBA-54) once a game is set up.
+ * Started by LauncherActivity (the launcher and game picker, XBA-41 / XBA-54) once a game is set up.
  */
 public class ShellActivity extends SDLActivity {
     @Override

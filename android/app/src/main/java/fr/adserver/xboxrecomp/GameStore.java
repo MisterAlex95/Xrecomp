@@ -21,13 +21,15 @@ import java.util.Locale;
 /**
  * The game the player chose (XBA-54): where it is, remembered in SharedPreferences, and the checks on it
  * (default.xbe present, its SHA-256 against the one baked into a per-title APK, the title name from the XBE
- * certificate). Shared by LauncherActivity (process ":launcher") and ShellActivity (the main process): the
+ * certificate), and « Open the game directly next time ». Shared by LauncherActivity (process ":launcher") and ShellActivity (the main process): the
  * preferences are written with commit() before the main process starts, so it reads them fresh.
  */
 final class GameStore {
     static final String PREFS = "game";
     static final String KEY_DIR = "game_dir";
     static final String KEY_TITLE = "title";
+    /** « Open the game directly next time » (XBA-41): off by default, the launcher's home shows at each start. */
+    static final String KEY_AUTO_START = "auto_start";
 
     /** Where an imported game (copied folder or extracted ISO) lives, and the native default. */
     static final String GAME_SUBDIR = "game";
@@ -50,6 +52,19 @@ final class GameStore {
 
     static boolean remember(Context c, String dir, String title) {
         return prefs(c).edit().putString(KEY_DIR, dir).putString(KEY_TITLE, title == null ? "" : title).commit();
+    }
+
+    /** Forgets the chosen game (after its imported copy was deleted); the other preferences stay. */
+    static boolean forget(Context c) {
+        return prefs(c).edit().remove(KEY_DIR).remove(KEY_TITLE).commit();
+    }
+
+    static boolean autoStart(Context c) {
+        return prefs(c).getBoolean(KEY_AUTO_START, false);
+    }
+
+    static boolean setAutoStart(Context c, boolean on) {
+        return prefs(c).edit().putBoolean(KEY_AUTO_START, on).commit();
     }
 
     static File externalFilesDir(Context c) {

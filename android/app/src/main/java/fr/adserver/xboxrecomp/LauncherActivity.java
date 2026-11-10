@@ -2,13 +2,15 @@ package fr.adserver.xboxrecomp;
 
 import android.app.Activity;
 import android.app.ActivityManager;
-import android.app.AlertDialog;
 import android.content.ActivityNotFoundException;
 import android.content.ContentResolver;
 import android.content.Intent;
 import android.content.pm.ShortcutInfo;
 import android.content.pm.ShortcutManager;
 import android.database.Cursor;
+import android.graphics.drawable.ColorDrawable;
+import android.graphics.drawable.ShapeDrawable;
+import android.graphics.drawable.shapes.OvalShape;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.Environment;
@@ -18,39 +20,60 @@ import android.os.SystemClock;
 import android.provider.DocumentsContract;
 import android.provider.OpenableColumns;
 import android.provider.Settings;
+import android.text.TextUtils;
 import android.text.format.Formatter;
 import android.util.Log;
+import android.view.Gravity;
+import android.view.KeyEvent;
 import android.view.View;
+import android.view.ViewGroup;
+import android.view.Window;
+import android.view.WindowInsets;
+import android.view.WindowInsetsController;
 import android.view.WindowManager;
-import android.widget.Button;
-import android.widget.ProgressBar;
+import android.widget.FrameLayout;
+import android.widget.LinearLayout;
+import android.widget.ScrollView;
 import android.widget.TextView;
-import android.widget.Toast;
 
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.EnumMap;
 import java.util.List;
 import java.util.Locale;
 
+import fr.adserver.xboxrecomp.Widgets.Icon;
+import fr.adserver.xboxrecomp.Widgets.MenuRow;
+
 /**
- * The game picker (XBA-54, XBA-40): the app's launcher entry, in its own process (":launcher"), before SDL.
+ * The launcher (XBA-41, with the game picker of XBA-54 / XBA-40): the app's launcher entry, in its own process
+ * (":launcher"), before SDL. A controller-first screen set, built in code on a 1920 x 1080 design grid scaled to
+ * the screen (Theme, Widgets), with a small state machine of screens and a back history instead of fragments:
  *
- * With a valid game it starts ShellActivity at once and shows nothing. Otherwise (no game, the remembered folder
- * gone, NO_GAME_DATA from the native side, or « Change game » from the app icon's long-press menu) it shows one
- * screen: « Choose game folder » (read in place with All files access, else copied into the app's game/ folder),
- * « Choose disc image (ISO) » (extracted into game/ by libxba_import.so) and « Start the game ».
- * The choice is remembered in SharedPreferences (GameStore); ShellActivity hands it to native code as
- * RECOMP_GAME_DIR. See docs/android/app-shell.md, « Choosing the game ».
+ * - WELCOME (first run, no game set up) -> SOURCE (game folder or disc image) -> FOLDER_ACCESS (All files access
+ *   explained, or copy) -> IMPORT (progress ring, Cancel) -> HOME;
+ * - HOME: the game and its status, Play / Settings / Game data / About, a detail panel for the focused item, and
+ *   « Open the game directly next time » (off by default: HOME shows at each start with Play focused);
+ * - SETTINGS: a few RECOMP_* options saved to recomp.cfg (RecompConfig), applied at the next start;
+ * - GAME_DATA: where the game is, its size, choose another, delete the imported copy; ABOUT.
+ *
+ * D-pad / stick move the focus (remembered per screen), A selects, B goes back, left / right change a setting,
+ * L1 / R1 jump between settings sections, X toggles « Open directly », Start plays; touch works too. Messages go to
+ * a note line, not toasts. The choice is remembered in SharedPreferences (GameStore); ShellActivity hands it to
+ * native code as RECOMP_GAME_DIR. See docs/android/app-shell.md, « The launcher ».
  */
 public class LauncherActivity extends Activity {
     static final String TAG = "xboxrecomp";
-    /** Open the picker screen even when a game is set up (the « Change game » shortcut). */
+    /** Open the source screen even when a game is set up (the « Change game » shortcut). */
     static final String ACTION_CHOOSE_GAME = "fr.adserver.xboxrecomp.CHOOSE_GAME";
+    /** Open the home screen even when « Open the game directly » is on (the « Launcher » shortcut). */
+    static final String ACTION_SHOW_LAUNCHER = "fr.adserver.xboxrecomp.SHOW_LAUNCHER";
     /** Set by ShellActivity when the native side found no default.xbe: the folder it looked in. */
     static final String EXTRA_NO_GAME_DATA = "fr.adserver.xboxrecomp.NO_GAME_DATA";
 
@@ -58,78 +81,1115 @@ public class LauncherActivity extends Activity {
     private static final int REQ_ISO = 2;
     private static final int REQ_ALL_FILES = 3;
     private static final long SPACE_MARGIN = 64L << 20;
+    private static final long CONFIRM_MS = 5000;
 
-    private TextView status, message, progressLabel, progressDetail;
-    private Button chooseFolder, chooseIso, start, cancel;
-    private View progressBox;
-    private ProgressBar progressBar;
+    enum Screen { WELCOME, SOURCE, FOLDER_ACCESS, IMPORT, HOME, SETTINGS, GAME_DATA, ABOUT }
 
+    enum State { READY, NONE, MISSING, NO_ACCESS, WRONG }
+
+    private static final int NOTE_INFO = 0, NOTE_OK = 1, NOTE_WARN = 2, NOTE_ERROR = 3;
+
+    // ---- The stage ----
+    private TextView screenTitle, note;
+    private Widgets.Chip chip;
+    private FrameLayout body;
+    private LinearLayout bottomLeft, hints;
+    private ShapeDrawable noteDot;
+    private String noteText = "";
+    private int noteKind;
+
+    // ---- Screens, history, focus ----
+    private Screen screen;
+    private final ArrayDeque<Screen> history = new ArrayDeque<>();
+    private final EnumMap<Screen, Integer> focusMemory = new EnumMap<>(Screen.class);
+    private final List<View> focusables = new ArrayList<>();
+    private View defaultFocus;
+    private Runnable xAction, yAction, startAction, l1Action, r1Action;
+
+    // ---- Detail panel of the current screen ----
+    private LinearLayout detail;
+
+    // ---- Game facts computed off the UI thread ----
+    private String hashDir;
+    private Boolean hashOk;
+    private String sizeDir;
+    private long sizeBytes = -1;
+    private boolean deleting;
+    private long deleteArmedAt;
+
+    // ---- Settings ----
+    private RecompConfig cfg;
+
+    // ---- Import ----
     private Thread worker;
     private volatile boolean cancelRequested;
     private long lastUiUpdate;
+    private int importLabel;
+    private Screen importReturn = Screen.SOURCE;
+    private Widgets.Ring ring;
+    private TextView importHead, importBytes, importFile;
+    private MenuRow cancelRow;
+    private volatile String workerNote, chosenDir, chosenTitle;
+    private volatile int workerNoteKind;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        publishShortcut();
+        publishShortcuts();
 
         Intent in = getIntent();
-        boolean forced = ACTION_CHOOSE_GAME.equals(in.getAction()) || in.hasExtra(EXTRA_NO_GAME_DATA);
+        String action = in.getAction();
+        boolean change = ACTION_CHOOSE_GAME.equals(action);
+        boolean showLauncher = ACTION_SHOW_LAUNCHER.equals(action);
+        String noData = in.getStringExtra(EXTRA_NO_GAME_DATA);
+        boolean forced = change || showLauncher || noData != null;
         if (!forced && savedInstanceState == null && gameReady()) {
+            /* The app icon while the game runs in the background: straight back to it (the « Launcher » shortcut
+             * reaches this screen then). Otherwise only with « Open the game directly next time » on. */
+            boolean running = gameRunning();
+            if (running || GameStore.autoStart(this)) {
+                Log.i(TAG, "launcher: " + (running ? "game running, bringing it back"
+                                                   : "game ready and « open directly » on, starting it"));
+                launchShell(false);
+                return;
+            }
+        }
+
+        setUpWindow();
+        buildStage();
+
+        String dir = GameStore.chosenDir(this);
+        Log.i(TAG, "launcher: shown (" + (noData != null ? "NO_GAME_DATA in " + noData
+                                          : change ? "change game"
+                                          : showLauncher ? "launcher shortcut"
+                                          : dir != null && !gameReady() ? "remembered folder unusable: " + dir
+                                          : gameReady() ? "home" : "no game set up") + ")");
+        if (noData != null) {
+            history.push(Screen.HOME);
+            show(Screen.SOURCE);
+            setNote(getString(R.string.NO_GAME_DATA, noData), NOTE_ERROR);
+        } else if (change) {
+            history.push(Screen.HOME);
+            show(Screen.SOURCE);
+            if (gameRunning())
+                setNote(getString(R.string.GAME_RUNNING), NOTE_INFO);
+        } else if (state() == State.NONE) {
+            show(Screen.WELCOME);
+        } else {
+            show(Screen.HOME);
+        }
+    }
+
+    // ---- Window and stage ----------------------------------------------------------------------------------------
+
+    /** Fullscreen, immersive, drawn under the display cutout (the stage keeps its content out of it). */
+    private void setUpWindow() {
+        Window w = getWindow();
+        w.setBackgroundDrawable(new ColorDrawable(Theme.BG_BOTTOM));
+        WindowManager.LayoutParams lp = w.getAttributes();
+        lp.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS;
+        w.setAttributes(lp);
+        hideSystemBars();
+    }
+
+    private void hideSystemBars() {
+        WindowInsetsController c = getWindow().getInsetsController();
+        if (c != null) {
+            c.hide(WindowInsets.Type.systemBars());
+            c.setSystemBarsBehavior(WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
+        }
+    }
+
+    @Override
+    public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        if (hasFocus)
+            hideSystemBars();
+    }
+
+    private static LinearLayout.LayoutParams lp(int w, int h) {
+        return new LinearLayout.LayoutParams(w, h);
+    }
+
+    private static LinearLayout.LayoutParams lp(int w, int h, float weight) {
+        return new LinearLayout.LayoutParams(w, h, weight);
+    }
+
+    private static final int MATCH = ViewGroup.LayoutParams.MATCH_PARENT, WRAP = ViewGroup.LayoutParams.WRAP_CONTENT;
+
+    private LinearLayout column() {
+        LinearLayout l = new LinearLayout(this);
+        l.setOrientation(LinearLayout.VERTICAL);
+        return l;
+    }
+
+    private LinearLayout rowLayout() {
+        LinearLayout l = new LinearLayout(this);
+        l.setOrientation(LinearLayout.HORIZONTAL);
+        return l;
+    }
+
+    private static View gap(android.content.Context c) {
+        return new View(c);
+    }
+
+    /** The parts every screen shares: top bar (mark, title, status chip), body, note line, bottom bar (hints). */
+    private void buildStage() {
+        LinearLayout root = column();
+        root.setBackground(new Widgets.Backdrop());
+        root.setPadding(Theme.MARGIN_X, Theme.MARGIN_TOP, Theme.MARGIN_X, Theme.MARGIN_BOTTOM);
+        root.setClipChildren(false);
+
+        LinearLayout top = rowLayout();
+        top.setGravity(Gravity.CENTER_VERTICAL);
+        Widgets.BrandMark mark = new Widgets.BrandMark(this);
+        LinearLayout.LayoutParams mlp = lp(64, 64);
+        mlp.rightMargin = 26;
+        top.addView(mark, mlp);
+        screenTitle = Theme.oneLine(Theme.text(this, Theme.T_TITLE, Theme.MEDIUM, Theme.TEXT));
+        top.addView(screenTitle, lp(0, WRAP, 1));
+        chip = new Widgets.Chip(this);
+        top.addView(chip, lp(WRAP, WRAP));
+        root.addView(top, lp(MATCH, Theme.TOP_BAR_H));
+
+        LinearLayout.LayoutParams rlp = lp(MATCH, 2);
+        rlp.bottomMargin = Theme.GAP;
+        root.addView(new Widgets.Rule(this), rlp);
+
+        body = new FrameLayout(this);
+        body.setClipChildren(false);
+        root.addView(body, lp(MATCH, 0, 1));
+
+        note = Theme.oneLine(Theme.text(this, Theme.T_BODY, Theme.REGULAR, Theme.TEXT_DIM));
+        note.setGravity(Gravity.CENTER_VERTICAL);
+        noteDot = new ShapeDrawable(new OvalShape());
+        noteDot.setBounds(0, 0, 14, 14);
+        note.setCompoundDrawables(noteDot, null, null, null);
+        note.setCompoundDrawablePadding(20);
+        note.setPadding(8, 0, 0, 0);
+        root.addView(note, lp(MATCH, Theme.NOTE_H));
+
+        LinearLayout bottom = rowLayout();
+        bottom.setGravity(Gravity.CENTER_VERTICAL);
+        bottomLeft = rowLayout();
+        bottomLeft.setGravity(Gravity.CENTER_VERTICAL);
+        bottom.addView(bottomLeft, lp(WRAP, MATCH));
+        bottom.addView(gap(this), lp(0, 1, 1));
+        hints = rowLayout();
+        hints.setGravity(Gravity.CENTER_VERTICAL);
+        bottom.addView(hints, lp(WRAP, MATCH));
+        root.addView(bottom, lp(MATCH, Theme.BOTTOM_BAR_H));
+
+        setContentView(new Widgets.Stage(this, root));
+        setNote(null, NOTE_INFO);
+    }
+
+    private void setNote(String text, int kind) {
+        noteText = text == null ? "" : text;
+        noteKind = kind;
+        paintNote();
+        if (!noteText.isEmpty() && kind >= NOTE_WARN)
+            Log.i(TAG, "launcher: " + noteText);
+    }
+
+    private void paintNote() {
+        if (note == null)
+            return;
+        int color = noteKind == NOTE_ERROR ? Theme.ERROR : noteKind == NOTE_WARN ? Theme.WARN
+                    : noteKind == NOTE_OK ? Theme.ACCENT : Theme.TEXT_DIM;
+        note.setText(noteText);
+        note.setTextColor(color);
+        noteDot.getPaint().setColor(noteText.isEmpty() ? 0 : color);
+        noteDot.invalidateSelf();
+    }
+
+    private void addHint(String glyph, int label, Runnable action) {
+        Widgets.Hint h = new Widgets.Hint(this, glyph, getString(label), v -> action.run());
+        LinearLayout.LayoutParams p = lp(WRAP, WRAP);
+        p.leftMargin = 44;
+        hints.addView(h, p);
+    }
+
+    /** A focusable the screen registers, in order: focus memory is an index in this list. */
+    private <T extends View> T focusable(T v) {
+        focusables.add(v);
+        return v;
+    }
+
+    private MenuRow row(Icon icon, String title, String sub, Runnable click) {
+        MenuRow r = new MenuRow(this);
+        r.set(icon, title, sub);
+        if (click != null)
+            r.setOnClickListener(v -> click.run());
+        return focusable(r);
+    }
+
+    private FrameLayout panel() {
+        FrameLayout f = new FrameLayout(this);
+        f.setBackground(new Widgets.Panel());
+        f.setPadding(56, 48, 56, 44);
+        return f;
+    }
+
+    // ---- Navigation --------------------------------------------------------------------------------------------
+
+    private void go(Screen s) {
+        if (screen != null && screen != Screen.IMPORT)
+            history.push(screen);
+        show(s);
+    }
+
+    private void back() {
+        if (screen == Screen.IMPORT) {
+            requestCancel();
+            return;
+        }
+        if (history.isEmpty()) {
+            finish();
+            return;
+        }
+        show(history.pop());
+    }
+
+    /** Builds screen s from scratch (state may have changed), clears the note, restores the screen's focus. */
+    private void show(Screen s) {
+        if (screen != null) {
+            int i = focusables.indexOf(getCurrentFocus());
+            if (i >= 0)
+                focusMemory.put(screen, i);
+        }
+        screen = s;
+        body.removeAllViews();
+        bottomLeft.removeAllViews();
+        hints.removeAllViews();
+        focusables.clear();
+        defaultFocus = null;
+        detail = null;
+        xAction = yAction = startAction = l1Action = r1Action = null;
+        chip.set("", 0);
+        deleteArmedAt = 0;
+        setNote(null, NOTE_INFO);
+        switch (s) {
+        case WELCOME:
+            buildWelcome();
+            break;
+        case SOURCE:
+            buildSource();
+            break;
+        case FOLDER_ACCESS:
+            buildFolderAccess();
+            break;
+        case IMPORT:
+            buildImport();
+            break;
+        case HOME:
+            buildHome();
+            break;
+        case SETTINGS:
+            buildSettings();
+            break;
+        case GAME_DATA:
+            buildGameData();
+            break;
+        case ABOUT:
+            buildAbout();
+            break;
+        }
+        restoreFocus(false);
+    }
+
+    private View focusTarget() {
+        Integer i = focusMemory.get(screen);
+        if (i != null && i < focusables.size())
+            return focusables.get(i);
+        if (defaultFocus != null)
+            return defaultFocus;
+        return focusables.isEmpty() ? null : focusables.get(0);
+    }
+
+    private void restoreFocus(boolean fromTouch) {
+        View v = focusTarget();
+        if (v == null)
+            return;
+        if (fromTouch)
+            v.requestFocusFromTouch();
+        else
+            v.requestFocus();
+    }
+
+    /**
+     * Gamepad buttons, before the views: A selects the focused item, B / Back goes back (both on release, once), X,
+     * Y, Start, L1, R1 do what the screen's hints say. A navigation key with nothing focused (after a touch) first
+     * brings the screen's focus back. Left / right on a setting are the row's own (MenuRow.onKeyDown).
+     */
+    @Override
+    public boolean dispatchKeyEvent(KeyEvent e) {
+        if (screen == null)
+            return super.dispatchKeyEvent(e);
+        int k = e.getKeyCode();
+        boolean down = e.getAction() == KeyEvent.ACTION_DOWN;
+        boolean once = e.getAction() == KeyEvent.ACTION_UP && !e.isCanceled();
+        switch (k) {
+        case KeyEvent.KEYCODE_BACK:
+        case KeyEvent.KEYCODE_BUTTON_B:
+        case KeyEvent.KEYCODE_ESCAPE:
+            if (once)
+                back();
+            return true;
+        case KeyEvent.KEYCODE_BUTTON_A:
+            if (down && e.getRepeatCount() == 0 && getCurrentFocus() == null) {
+                restoreFocus(true);
+                return true;
+            }
+            if (once && getCurrentFocus() != null)
+                getCurrentFocus().performClick();
+            return true;
+        case KeyEvent.KEYCODE_BUTTON_X:
+            return runOnce(once, xAction);
+        case KeyEvent.KEYCODE_BUTTON_Y:
+            return runOnce(once, yAction);
+        case KeyEvent.KEYCODE_BUTTON_START:
+            return runOnce(once, startAction);
+        case KeyEvent.KEYCODE_BUTTON_L1:
+            return runOnce(once, l1Action);
+        case KeyEvent.KEYCODE_BUTTON_R1:
+            return runOnce(once, r1Action);
+        case KeyEvent.KEYCODE_DPAD_UP:
+        case KeyEvent.KEYCODE_DPAD_DOWN:
+        case KeyEvent.KEYCODE_DPAD_LEFT:
+        case KeyEvent.KEYCODE_DPAD_RIGHT:
+        case KeyEvent.KEYCODE_DPAD_CENTER:
+        case KeyEvent.KEYCODE_ENTER:
+            if (down && getCurrentFocus() == null && !focusables.isEmpty()) {
+                restoreFocus(true);
+                return true;
+            }
+            break;
+        default:
+            break;
+        }
+        return super.dispatchKeyEvent(e);
+    }
+
+    private static boolean runOnce(boolean once, Runnable r) {
+        if (once && r != null)
+            r.run();
+        return true;
+    }
+
+    // ---- Detail panel ------------------------------------------------------------------------------------------
+
+    /** A panel on the right of a screen, refilled for the focused item. */
+    private FrameLayout detailPanel() {
+        FrameLayout p = panel();
+        detail = column();
+        p.addView(detail, new FrameLayout.LayoutParams(MATCH, MATCH));
+        return p;
+    }
+
+    private void detailClear(String caps, String title, String text) {
+        if (detail == null)
+            return;
+        detail.removeAllViews();
+        if (caps != null)
+            detail.addView(Theme.caps(this, caps, Theme.ACCENT), lp(MATCH, WRAP));
+        TextView t = Theme.text(this, Theme.T_TITLE, Theme.MEDIUM, Theme.TEXT, title);
+        LinearLayout.LayoutParams tl = lp(MATCH, WRAP);
+        tl.topMargin = caps != null ? 18 : 0;
+        tl.bottomMargin = 18;
+        detail.addView(t, tl);
+        if (text != null && !text.isEmpty())
+            detail.addView(Theme.small(this, text), lp(MATCH, WRAP));
+    }
+
+    /** A « label   value » line in the detail panel. */
+    private TextView detailKv(String label, String value) {
+        LinearLayout l = rowLayout();
+        TextView k = Theme.oneLine(Theme.text(this, Theme.T_BODY - 2, Theme.REGULAR, Theme.TEXT_FAINT, label));
+        l.addView(k, lp(250, WRAP));
+        TextView v = Theme.text(this, Theme.T_BODY - 2, Theme.REGULAR, Theme.TEXT, value);
+        v.setMaxLines(2);
+        v.setEllipsize(TextUtils.TruncateAt.END);
+        l.addView(v, lp(0, WRAP, 1));
+        LinearLayout.LayoutParams p = lp(MATCH, WRAP);
+        p.topMargin = 12;
+        detail.addView(l, p);
+        return v;
+    }
+
+    private void detailFooter(String text, int color) {
+        detail.addView(gap(this), lp(MATCH, 0, 1));
+        detail.addView(new Widgets.Rule(this), lp(MATCH, 2));
+        TextView t = Theme.text(this, Theme.T_SMALL, Theme.REGULAR, color, text);
+        t.setLineSpacing(0, 1.2f);
+        LinearLayout.LayoutParams p = lp(MATCH, WRAP);
+        p.topMargin = 18;
+        detail.addView(t, p);
+    }
+
+    private void onFocus(View v, Runnable fill) {
+        v.setOnFocusChangeListener((view, has) -> {
+            if (has)
+                fill.run();
+        });
+    }
+
+    // ---- WELCOME -----------------------------------------------------------------------------------------------
+
+    private void buildWelcome() {
+        screenTitle.setText(R.string.WELCOME_TITLE);
+        chip.set(getString(R.string.CHIP_OFFLINE), Theme.ACCENT);
+        LinearLayout h = rowLayout();
+
+        LinearLayout left = column();
+        left.setGravity(Gravity.CENTER_VERTICAL);
+        left.addView(Theme.caps(this, getString(R.string.app_name), Theme.ACCENT), lp(MATCH, WRAP));
+        TextView hero = Theme.text(this, Theme.T_HERO, Theme.MEDIUM, Theme.TEXT, getString(R.string.WELCOME_HERO));
+        LinearLayout.LayoutParams hl = lp(MATCH, WRAP);
+        hl.topMargin = 20;
+        hl.bottomMargin = 28;
+        left.addView(hero, hl);
+        left.addView(Theme.body(this, getString(R.string.WELCOME_TEXT)), lp(MATCH, WRAP));
+        MenuRow start = row(Icon.ARROW, getString(R.string.WELCOME_START), getString(R.string.WELCOME_START_SUB),
+                            () -> go(Screen.SOURCE));
+        LinearLayout.LayoutParams sl = lp(640, Theme.ROW_H);
+        sl.topMargin = 48;
+        left.addView(start, sl);
+        defaultFocus = start;
+        LinearLayout.LayoutParams ll = lp(0, MATCH, 1);
+        ll.rightMargin = 80;
+        h.addView(left, ll);
+
+        FrameLayout p = panel();
+        LinearLayout steps = column();
+        steps.addView(Theme.caps(this, getString(R.string.WELCOME_STEPS), Theme.ACCENT), lp(MATCH, WRAP));
+        int[][] items = { { R.string.STEP1, R.string.STEP1_SUB }, { R.string.STEP2, R.string.STEP2_SUB },
+                          { R.string.STEP3, R.string.STEP3_SUB } };
+        Icon[] icons = { Icon.FOLDER, Icon.COPY, Icon.PLAY };
+        for (int i = 0; i < items.length; i++) {
+            MenuRow r = new MenuRow(this);
+            r.set(icons[i], getString(items[i][0]), getString(items[i][1]));
+            r.subMaxLines = 2;
+            r.setFocusable(false);
+            r.setClickable(false);
+            LinearLayout.LayoutParams rl = lp(MATCH, 150);
+            rl.topMargin = i == 0 ? 20 : 4;
+            steps.addView(r, rl);
+        }
+        p.addView(steps);
+        h.addView(p, lp(820, MATCH));
+
+        body.addView(h, new FrameLayout.LayoutParams(MATCH, MATCH));
+        addHint("A", R.string.HINT_START, () -> go(Screen.SOURCE));
+        addHint("B", R.string.HINT_QUIT, this::back);
+    }
+
+    // ---- SOURCE and FOLDER_ACCESS --------------------------------------------------------------------------------
+
+    /** The left half of a choice screen: a heading and an explanation in a panel. */
+    private LinearLayout explainPanel(LinearLayout parent, int width, String caps, String head, String text) {
+        FrameLayout p = panel();
+        LinearLayout c = column();
+        c.addView(Theme.caps(this, caps, Theme.ACCENT), lp(MATCH, WRAP));
+        TextView t = Theme.text(this, Theme.T_TITLE, Theme.MEDIUM, Theme.TEXT, head);
+        LinearLayout.LayoutParams tl = lp(MATCH, WRAP);
+        tl.topMargin = 18;
+        tl.bottomMargin = 22;
+        c.addView(t, tl);
+        c.addView(Theme.small(this, text), lp(MATCH, WRAP));
+        p.addView(c);
+        LinearLayout.LayoutParams pl = lp(width, MATCH);
+        pl.rightMargin = Theme.GAP;
+        parent.addView(p, pl);
+        return c;
+    }
+
+    private MenuRow card(LinearLayout cards, Icon icon, int title, String sub, String badge, int badgeColor,
+                         Runnable click) {
+        MenuRow r = row(icon, getString(title), sub, click);
+        r.subMaxLines = 4;
+        r.setBadge(badge, badgeColor);
+        LinearLayout.LayoutParams l = lp(MATCH, Theme.CARD_H);
+        l.bottomMargin = 24;
+        cards.addView(r, l);
+        return r;
+    }
+
+    private void buildSource() {
+        screenTitle.setText(R.string.SOURCE_TITLE);
+        chip.set(getString(R.string.CHIP_OFFLINE), Theme.ACCENT);
+        LinearLayout h = rowLayout();
+        LinearLayout ex = explainPanel(h, 700, getString(R.string.SOURCE_CAPS), getString(R.string.SOURCE_HEAD),
+                                       getString(R.string.SOURCE_TEXT));
+        TextView free = Theme.text(this, Theme.T_SMALL, Theme.REGULAR, Theme.TEXT_FAINT,
+                                   getString(R.string.FREE_SPACE_APP, size(freeSpace())));
+        LinearLayout.LayoutParams fl = lp(MATCH, WRAP);
+        fl.topMargin = 26;
+        ex.addView(free, fl);
+
+        LinearLayout cards = column();
+        boolean all = Environment.isExternalStorageManager();
+        MenuRow folder = card(cards, Icon.FOLDER, R.string.CARD_FOLDER, getString(R.string.CARD_FOLDER_SUB),
+                              getString(all ? R.string.BADGE_IN_PLACE : R.string.BADGE_FOLDER_ASK),
+                              all ? Theme.ACCENT : Theme.WARN, this::onChooseFolder);
+        card(cards, Icon.DISC, R.string.CARD_ISO, getString(R.string.CARD_ISO_SUB),
+             getString(R.string.BADGE_FREE, size(freeSpace())), Theme.TEXT_DIM, this::openIsoPicker);
+        defaultFocus = folder;
+        h.addView(cards, lp(0, MATCH, 1));
+        body.addView(h, new FrameLayout.LayoutParams(MATCH, MATCH));
+        addHint("A", R.string.HINT_CHOOSE, this::clickFocused);
+        addHint("B", R.string.HINT_BACK, this::back);
+    }
+
+    private void buildFolderAccess() {
+        screenTitle.setText(R.string.ALL_FILES_TITLE);
+        LinearLayout h = rowLayout();
+        explainPanel(h, 820, getString(R.string.CARD_FOLDER), getString(R.string.ALL_FILES_TITLE),
+                     getString(R.string.ALL_FILES_EXPLAIN));
+        LinearLayout cards = column();
+        MenuRow grant = card(cards, Icon.KEY, R.string.ALL_FILES_GRANT, getString(R.string.ALL_FILES_GRANT_SUB),
+                             getString(R.string.BADGE_RECOMMENDED), Theme.ACCENT, this::askAllFilesAccess);
+        card(cards, Icon.COPY, R.string.ALL_FILES_COPY, getString(R.string.ALL_FILES_COPY_SUB), null, 0,
+             this::openTreePicker);
+        defaultFocus = grant;
+        h.addView(cards, lp(0, MATCH, 1));
+        body.addView(h, new FrameLayout.LayoutParams(MATCH, MATCH));
+        addHint("A", R.string.HINT_CHOOSE, this::clickFocused);
+        addHint("B", R.string.HINT_BACK, this::back);
+    }
+
+    private void clickFocused() {
+        View f = getCurrentFocus();
+        if (f != null)
+            f.performClick();
+        else
+            restoreFocus(true);
+    }
+
+    // ---- IMPORT ------------------------------------------------------------------------------------------------
+
+    private void buildImport() {
+        screenTitle.setText(R.string.IMPORT_TITLE);
+        chip.set(getString(R.string.CHIP_SCREEN_ON), Theme.ACCENT);
+        LinearLayout h = rowLayout();
+        FrameLayout left = new FrameLayout(this);
+        ring = new Widgets.Ring(this);
+        left.addView(ring, new FrameLayout.LayoutParams(620, 620, Gravity.CENTER));
+        h.addView(left, lp(760, MATCH));
+
+        FrameLayout p = panel();
+        LinearLayout c = column();
+        c.addView(Theme.caps(this, getString(R.string.IMPORT_CAPS), Theme.ACCENT), lp(MATCH, WRAP));
+        importHead = Theme.text(this, Theme.T_TITLE, Theme.MEDIUM, Theme.TEXT, getString(importLabel));
+        LinearLayout.LayoutParams hl = lp(MATCH, WRAP);
+        hl.topMargin = 18;
+        hl.bottomMargin = 26;
+        c.addView(importHead, hl);
+        importBytes = Theme.text(this, Theme.T_BODY + 4, Theme.MEDIUM, Theme.TEXT, "");
+        c.addView(importBytes, lp(MATCH, WRAP));
+        importFile = Theme.text(this, Theme.T_SMALL, Theme.REGULAR, Theme.TEXT_DIM, "");
+        importFile.setSingleLine(true);
+        importFile.setEllipsize(TextUtils.TruncateAt.MIDDLE);
+        LinearLayout.LayoutParams fl = lp(MATCH, WRAP);
+        fl.topMargin = 14;
+        c.addView(importFile, fl);
+        TextView free = Theme.text(this, Theme.T_SMALL, Theme.REGULAR, Theme.TEXT_FAINT,
+                                   getString(R.string.FREE_SPACE_APP, size(freeSpace())));
+        LinearLayout.LayoutParams frl = lp(MATCH, WRAP);
+        frl.topMargin = 14;
+        c.addView(free, frl);
+        c.addView(gap(this), lp(MATCH, 0, 1));
+        c.addView(Theme.body(this, getString(R.string.IMPORT_KEEPS)), lp(MATCH, WRAP));
+        cancelRow = row(Icon.BACK, getString(R.string.CANCEL), getString(R.string.CANCEL_SUB), this::requestCancel);
+        LinearLayout.LayoutParams cl = lp(MATCH, Theme.ROW_H);
+        cl.topMargin = 24;
+        c.addView(cancelRow, cl);
+        p.addView(c);
+        h.addView(p, lp(0, MATCH, 1));
+        body.addView(h, new FrameLayout.LayoutParams(MATCH, MATCH));
+        defaultFocus = cancelRow;
+        addHint("B", R.string.CANCEL, this::requestCancel);
+        ring.set(-1, "", getString(R.string.IMPORT_STARTING), "");
+    }
+
+    private void requestCancel() {
+        if (worker == null || !worker.isAlive() || cancelRequested)
+            return;
+        cancelRequested = true;
+        if (cancelRow != null)
+            cancelRow.setDim(true);
+        setNote(getString(R.string.CANCELING), NOTE_INFO);
+    }
+
+    // ---- HOME --------------------------------------------------------------------------------------------------
+
+    private void buildHome() {
+        State st = state();
+        String dir = gameDir();
+        boolean running = gameRunning();
+        screenTitle.setText(st == State.NONE ? getString(R.string.app_name) : gameTitle(dir));
+        chip.set(getString(stateLabel(st)), stateColor(st));
+        checkHashLater(dir);
+        sizeLater(dir);
+
+        LinearLayout h = rowLayout();
+        LinearLayout menu = column();
+        menu.addView(Theme.caps(this, getString(R.string.HOME_MENU), Theme.TEXT_FAINT), lp(MATCH, WRAP));
+        LinearLayout.LayoutParams first = lp(MATCH, Theme.ROW_H);
+        first.topMargin = 22;
+
+        String playSub = st != State.READY ? getString(R.string.PLAY_SUB_UNAVAILABLE, getString(stateLabel(st)))
+                         : running ? getString(R.string.PLAY_SUB_RUNNING) : getString(R.string.PLAY_SUB);
+        MenuRow play = row(Icon.PLAY, getString(R.string.PLAY), playSub, this::onPlay);
+        play.setDim(st != State.READY);
+        menu.addView(play, first);
+        MenuRow settings = row(Icon.SLIDERS, getString(R.string.SETTINGS), settingsSummary(),
+                               () -> go(Screen.SETTINGS));
+        menu.addView(settings, lp(MATCH, Theme.ROW_H));
+        MenuRow data = row(Icon.DISC, getString(R.string.GAME_DATA), gameDataSummary(st, dir),
+                           () -> go(Screen.GAME_DATA));
+        menu.addView(data, lp(MATCH, Theme.ROW_H));
+        MenuRow about = row(Icon.INFO, getString(R.string.ABOUT), getString(R.string.ABOUT_SUB, version()),
+                            () -> go(Screen.ABOUT));
+        menu.addView(about, lp(MATCH, Theme.ROW_H));
+        LinearLayout.LayoutParams ml = lp(860, MATCH);
+        ml.rightMargin = Theme.GAP;
+        h.addView(menu, ml);
+        h.addView(detailPanel(), lp(0, MATCH, 1));
+        body.addView(h, new FrameLayout.LayoutParams(MATCH, MATCH));
+
+        onFocus(play, () -> homePlayDetail(st, dir, running));
+        onFocus(settings, this::homeSettingsDetail);
+        onFocus(data, () -> homeDataDetail(st, dir));
+        onFocus(about, this::homeAboutDetail);
+        defaultFocus = st == State.READY ? play : data;
+        homePlayDetail(st, dir, running);
+
+        Widgets.Toggle auto = new Widgets.Toggle(this, "X", getString(R.string.OPEN_DIRECTLY));
+        auto.setOn(GameStore.autoStart(this));
+        auto.setOnClickListener(v -> toggleAutoStart(auto));
+        bottomLeft.addView(auto, lp(WRAP, WRAP));
+        xAction = () -> toggleAutoStart(auto);
+        startAction = this::onPlay;
+        addHint("A", R.string.HINT_SELECT, this::clickFocused);
+        addHint("B", R.string.HINT_QUIT, this::back);
+        addHint("START", R.string.PLAY, this::onPlay);
+
+        if (running)
+            setNote(getString(R.string.GAME_RUNNING_HOME), NOTE_INFO);
+        else if (st == State.MISSING || st == State.NO_ACCESS)
+            setNote(stateText(st, dir), NOTE_WARN);
+    }
+
+    private void toggleAutoStart(Widgets.Toggle t) {
+        boolean on = !GameStore.autoStart(this);
+        GameStore.setAutoStart(this, on);
+        if (t != null)
+            t.setOn(on);
+        setNote(getString(on ? R.string.OPEN_DIRECTLY_ON : R.string.OPEN_DIRECTLY_OFF), NOTE_INFO);
+        Log.i(TAG, "launcher: open directly " + (on ? "on" : "off"));
+    }
+
+    private void homePlayDetail(State st, String dir, boolean running) {
+        detailClear(getString(R.string.PLAY), st == State.NONE ? getString(R.string.NO_GAME_HEAD) : gameTitle(dir),
+                    st == State.READY ? getString(running ? R.string.PLAY_DETAIL_RUNNING : R.string.PLAY_DETAIL)
+                                      : stateText(st, dir));
+        if (dir != null) {
+            detailKv(getString(R.string.KV_FOLDER), dir);
+            detailKv(getString(R.string.KV_SOURCE), sourceLabel(dir));
+        }
+        detailKv(getString(R.string.KV_STATUS), getString(stateLabel(st)));
+        detailFooter(getString(R.string.PLAY_FOOTER), Theme.TEXT_FAINT);
+    }
+
+    private void homeSettingsDetail() {
+        RecompConfig c = RecompConfig.load(GameStore.externalFilesDir(this));
+        detailClear(getString(R.string.SETTINGS), getString(R.string.SETTINGS_HEAD), null);
+        detailKv(getString(R.string.OPEN_DIRECTLY_SHORT),
+                 getString(GameStore.autoStart(this) ? R.string.VAL_ON : R.string.VAL_OFF));
+        for (RecompConfig.Option o : RecompConfig.OPTIONS)
+            detailKv(getString(o.title), choiceLabel(c, o));
+        detailFooter(getString(R.string.SETTINGS_FOOTER, c.file().getAbsolutePath()), Theme.TEXT_FAINT);
+    }
+
+    private void homeDataDetail(State st, String dir) {
+        detailClear(getString(R.string.GAME_DATA), getString(R.string.GAME_DATA_HEAD),
+                    getString(R.string.GAME_DATA_TEXT));
+        if (dir != null) {
+            detailKv(getString(R.string.KV_FOLDER), dir);
+            detailKv(getString(R.string.KV_SOURCE), sourceLabel(dir));
+            detailKv(getString(R.string.KV_SIZE), sizeText(dir));
+        } else {
+            detailKv(getString(R.string.KV_STATUS), getString(stateLabel(st)));
+        }
+        detailKv(getString(R.string.KV_FREE), size(freeSpace()));
+    }
+
+    private void homeAboutDetail() {
+        detailClear(getString(R.string.ABOUT), getString(R.string.app_name), getString(R.string.ABOUT_TEXT));
+        detailKv(getString(R.string.KV_VERSION), version());
+    }
+
+    private void onPlay() {
+        State st = state();
+        if (st == State.READY) {
             launchShell(false);
             return;
         }
+        if (st == State.WRONG) {
+            setNote(getString(R.string.WRONG_GAME_HOME), NOTE_ERROR);
+            return;
+        }
+        String why = stateText(st, gameDir());
+        go(Screen.SOURCE);
+        setNote(why, NOTE_WARN);
+    }
 
-        setContentView(R.layout.activity_launcher);
-        status = findViewById(R.id.status);
-        message = findViewById(R.id.message);
-        chooseFolder = findViewById(R.id.choose_folder);
-        chooseIso = findViewById(R.id.choose_iso);
-        start = findViewById(R.id.start);
-        progressBox = findViewById(R.id.progress_box);
-        progressLabel = findViewById(R.id.progress_label);
-        progressDetail = findViewById(R.id.progress_detail);
-        progressBar = findViewById(R.id.progress_bar);
-        cancel = findViewById(R.id.cancel);
+    private String settingsSummary() {
+        RecompConfig c = RecompConfig.load(GameStore.externalFilesDir(this));
+        List<String> changed = new ArrayList<>();
+        for (RecompConfig.Option o : RecompConfig.OPTIONS) {
+            if (c.choiceIndex(o) != o.defaultIndex())
+                changed.add(getString(o.title) + " " + choiceLabel(c, o).toLowerCase(Locale.getDefault()));
+        }
+        if (changed.isEmpty())
+            return getString(R.string.SETTINGS_SUB_DEFAULT);
+        return TextUtils.join(" · ", changed);
+    }
 
-        chooseFolder.setOnClickListener(v -> onChooseFolder());
-        chooseIso.setOnClickListener(v -> openIsoPicker());
-        start.setOnClickListener(v -> launchShell(true));
-        cancel.setOnClickListener(v -> {
-            cancelRequested = true;
-            cancel.setEnabled(false);
+    private String gameDataSummary(State st, String dir) {
+        if (dir == null)
+            return getString(stateLabel(st));
+        return sourceLabel(dir) + " · " + sizeText(dir);
+    }
+
+    // ---- SETTINGS ----------------------------------------------------------------------------------------------
+
+    private final List<Integer> sectionStarts = new ArrayList<>();
+
+    private void buildSettings() {
+        screenTitle.setText(R.string.SETTINGS);
+        cfg = RecompConfig.load(GameStore.externalFilesDir(this));
+        sectionStarts.clear();
+
+        LinearLayout h = rowLayout();
+        ScrollView scroll = new ScrollView(this);
+        scroll.setVerticalScrollBarEnabled(false);
+        scroll.setClipToPadding(false);
+        scroll.setPadding(0, 0, 0, 24);
+        LinearLayout list = column();
+        list.setPadding(0, 4, 0, 4);
+        scroll.addView(list, new FrameLayout.LayoutParams(MATCH, WRAP));
+
+        sectionHeader(list, R.string.SECTION_LAUNCHER);
+        MenuRow auto = settingRow(list, getString(R.string.OPEN_DIRECTLY), getString(R.string.OPEN_DIRECTLY_SUMMARY));
+        Runnable autoDetail = () -> {
+            detailClear(getString(R.string.SECTION_LAUNCHER), getString(R.string.OPEN_DIRECTLY),
+                        getString(R.string.OPEN_DIRECTLY_DETAIL));
+            detailKv(getString(R.string.KV_VALUE), getString(GameStore.autoStart(this) ? R.string.VAL_ON
+                                                                                     : R.string.VAL_OFF));
+            detailFooter(getString(R.string.OPEN_DIRECTLY_FOOTER), Theme.TEXT_FAINT);
+        };
+        Runnable autoRefresh = () -> {
+            boolean on = GameStore.autoStart(this);
+            auto.setValue(getString(on ? R.string.VAL_ON : R.string.VAL_OFF), on ? 1 : 0, 2);
+        };
+        autoRefresh.run();
+        auto.cycler = dir -> {
+            GameStore.setAutoStart(this, !GameStore.autoStart(this));
+            autoRefresh.run();
+            autoDetail.run();
+            setNote(getString(GameStore.autoStart(this) ? R.string.OPEN_DIRECTLY_ON : R.string.OPEN_DIRECTLY_OFF),
+                    NOTE_OK);
+        };
+        auto.setOnClickListener(v -> auto.cycler.step(1));
+        onFocus(auto, autoDetail);
+
+        RecompConfig.Section section = null;
+        List<MenuRow> optionRows = new ArrayList<>();
+        for (RecompConfig.Option o : RecompConfig.OPTIONS) {
+            if (o.section != section) {
+                section = o.section;
+                sectionHeader(list, sectionTitle(section));
+            }
+            MenuRow r = settingRow(list, getString(o.title), getString(o.summary));
+            optionRows.add(r);
+            refreshOptionRow(r, o);
+            r.cycler = d -> stepOption(r, o, d);
+            r.setOnClickListener(v -> stepOption(r, o, 1));
+            onFocus(r, () -> optionDetail(o));
+        }
+
+        View spacer = gap(this);
+        list.addView(spacer, lp(MATCH, 20));
+        MenuRow reset = row(Icon.RESET, getString(R.string.RESET), getString(R.string.RESET_SUB), null);
+        reset.setOnClickListener(v -> resetSettings(optionRows));
+        list.addView(reset, lp(MATCH, Theme.ROW_H_SMALL));
+        onFocus(reset, () -> {
+            detailClear(null, getString(R.string.RESET), getString(R.string.RESET_DETAIL));
+            detailFooter(getString(R.string.SETTINGS_FOOTER, cfg.file().getAbsolutePath()), Theme.TEXT_FAINT);
         });
 
-        String noData = in.getStringExtra(EXTRA_NO_GAME_DATA);
-        String dir = GameStore.chosenDir(this);
-        Log.i(TAG, "picker: shown (" + (noData != null ? "NO_GAME_DATA in " + noData
-                                        : forced ? "change game"
-                                        : dir != null ? "remembered folder unusable: " + dir
-                                        : "no game set up") + ")");
-        refreshStatus(noData);
+        LinearLayout.LayoutParams sl = lp(920, MATCH);
+        sl.rightMargin = Theme.GAP;
+        h.addView(scroll, sl);
+        h.addView(detailPanel(), lp(0, MATCH, 1));
+        body.addView(h, new FrameLayout.LayoutParams(MATCH, MATCH));
+        autoDetail.run();
+
+        l1Action = () -> jumpSection(-1);
+        r1Action = () -> jumpSection(1);
+        yAction = () -> resetSettings(optionRows);
+        addHint("L1/R1", R.string.HINT_SECTION, () -> jumpSection(1));
+        addHint("Y", R.string.HINT_DEFAULTS, () -> resetSettings(optionRows));
+        addHint("A", R.string.HINT_CHANGE, this::clickFocused);
+        addHint("B", R.string.HINT_BACK, this::back);
         if (gameRunning())
-            showMessage(getString(R.string.GAME_RUNNING), false);
-        chooseFolder.requestFocus();
+            setNote(getString(R.string.SETTINGS_GAME_RUNNING), NOTE_INFO);
     }
 
-    /** Long-press on the app icon: « Change game ». Dynamic, as the package name differs per title. */
-    private void publishShortcut() {
-        try {
-            ShortcutManager sm = getSystemService(ShortcutManager.class);
-            if (sm == null)
-                return;
-            Intent i = new Intent(this, LauncherActivity.class).setAction(ACTION_CHOOSE_GAME)
-                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK);
-            ShortcutInfo s = new ShortcutInfo.Builder(this, "change_game")
-                    .setShortLabel(getString(R.string.SHORTCUT_CHANGE_GAME))
-                    .setLongLabel(getString(R.string.SHORTCUT_CHANGE_GAME_LONG))
-                    .setIntent(i)
-                    .build();
-            sm.setDynamicShortcuts(Collections.singletonList(s));
-        } catch (RuntimeException e) {
-            Log.w(TAG, "picker: could not publish the Change game shortcut", e);
+    private int sectionTitle(RecompConfig.Section s) {
+        switch (s) {
+        case GRAPHICS:
+            return R.string.SECTION_GRAPHICS;
+        case AUDIO:
+            return R.string.SECTION_AUDIO;
+        default:
+            return R.string.SECTION_ADVANCED;
         }
     }
+
+    private void sectionHeader(LinearLayout list, int title) {
+        TextView t = Theme.caps(this, getString(title), Theme.TEXT_FAINT);
+        t.setPadding(36, 0, 0, 0);
+        LinearLayout.LayoutParams p = lp(MATCH, WRAP);
+        p.topMargin = list.getChildCount() == 0 ? 4 : 30;
+        p.bottomMargin = 8;
+        list.addView(t, p);
+        sectionStarts.add(focusables.size());
+    }
+
+    private MenuRow settingRow(LinearLayout list, String title, String sub) {
+        MenuRow r = row(null, title, sub, null);
+        list.addView(r, lp(MATCH, Theme.ROW_H_SMALL));
+        return r;
+    }
+
+    private void jumpSection(int dir) {
+        int cur = focusables.indexOf(getCurrentFocus());
+        int target = -1;
+        if (dir > 0) {
+            for (int s : sectionStarts) {
+                if (s > cur) {
+                    target = s;
+                    break;
+                }
+            }
+        } else {
+            for (int i = sectionStarts.size() - 1; i >= 0; i--) {
+                if (sectionStarts.get(i) < cur) {
+                    target = sectionStarts.get(i);
+                    break;
+                }
+            }
+        }
+        if (target >= 0 && target < focusables.size())
+            focusables.get(target).requestFocusFromTouch();
+    }
+
+    private String choiceLabel(RecompConfig c, RecompConfig.Option o) {
+        int i = c.choiceIndex(o);
+        return i < 0 ? getString(R.string.VAL_CUSTOM) : getString(o.choices[i].label);
+    }
+
+    private void refreshOptionRow(MenuRow r, RecompConfig.Option o) {
+        int i = cfg.choiceIndex(o);
+        r.setValue(choiceLabel(cfg, o), i, o.choices.length);
+    }
+
+    private void stepOption(MenuRow r, RecompConfig.Option o, int dir) {
+        int n = o.choices.length, i = cfg.choiceIndex(o);
+        int next = i < 0 ? o.defaultIndex() : ((i + dir) % n + n) % n;
+        cfg.set(o, o.choices[next]);
+        saveSettings();
+        refreshOptionRow(r, o);
+        optionDetail(o);
+    }
+
+    private void saveSettings() {
+        try {
+            cfg.save();
+            Log.i(TAG, "launcher: settings saved to " + cfg.file());
+            setNote(getString(gameRunning() ? R.string.SETTINGS_SAVED_RUNNING : R.string.SETTINGS_SAVED), NOTE_OK);
+        } catch (IOException e) {
+            Log.w(TAG, "launcher: cannot save settings", e);
+            setNote(getString(R.string.SETTINGS_SAVE_FAILED, String.valueOf(e.getMessage())), NOTE_ERROR);
+        }
+    }
+
+    private void resetSettings(List<MenuRow> rows) {
+        cfg.resetAll();
+        saveSettings();
+        for (int i = 0; i < RecompConfig.OPTIONS.length; i++)
+            refreshOptionRow(rows.get(i), RecompConfig.OPTIONS[i]);
+        setNote(getString(R.string.RESET_DONE), NOTE_OK);
+    }
+
+    private void optionDetail(RecompConfig.Option o) {
+        detailClear(getString(sectionTitle(o.section)), getString(o.title), getString(o.detail));
+        List<String> names = new ArrayList<>();
+        for (RecompConfig.Choice c : o.choices)
+            names.add(getString(c.label) + (c.isDefault() ? " " + getString(R.string.DEFAULT_MARK) : ""));
+        detailKv(getString(R.string.KV_CHOICES), TextUtils.join(" · ", names));
+        String raw = cfg.rawValue(o);
+        detailKv(getString(R.string.KV_CFG), raw.isEmpty() ? getString(R.string.CFG_NOTHING) : raw);
+        detailFooter(getString(R.string.APPLIES_NEXT_START), Theme.TEXT_FAINT);
+    }
+
+    // ---- GAME_DATA ---------------------------------------------------------------------------------------------
+
+    private void buildGameData() {
+        screenTitle.setText(R.string.GAME_DATA);
+        State st = state();
+        String dir = gameDir();
+        chip.set(getString(stateLabel(st)), stateColor(st));
+        sizeLater(dir);
+
+        LinearLayout h = rowLayout();
+        LinearLayout menu = column();
+        menu.addView(Theme.caps(this, getString(R.string.GAME_DATA_CAPS), Theme.TEXT_FAINT), lp(MATCH, WRAP));
+        MenuRow change = row(Icon.SWAP, getString(dir == null ? R.string.CHOOSE_GAME : R.string.CHANGE_GAME),
+                             getString(R.string.CHANGE_GAME_SUB), () -> go(Screen.SOURCE));
+        LinearLayout.LayoutParams first = lp(MATCH, Theme.ROW_H);
+        first.topMargin = 22;
+        menu.addView(change, first);
+        onFocus(change, () -> dataChangeDetail(dir));
+        defaultFocus = change;
+
+        if (dir != null && ownedCopy(dir)) {
+            MenuRow del = row(Icon.TRASH, getString(R.string.DELETE_COPY), getString(R.string.DELETE_COPY_SUB), null);
+            del.setOnClickListener(v -> onDelete(del, dir));
+            menu.addView(del, lp(MATCH, Theme.ROW_H));
+            onFocus(del, () -> dataDeleteDetail(dir));
+        }
+        LinearLayout.LayoutParams ml = lp(860, MATCH);
+        ml.rightMargin = Theme.GAP;
+        h.addView(menu, ml);
+        h.addView(detailPanel(), lp(0, MATCH, 1));
+        body.addView(h, new FrameLayout.LayoutParams(MATCH, MATCH));
+        dataChangeDetail(dir);
+        addHint("A", R.string.HINT_SELECT, this::clickFocused);
+        addHint("B", R.string.HINT_BACK, this::back);
+    }
+
+    private void dataFacts(String dir) {
+        if (dir == null) {
+            detailKv(getString(R.string.KV_STATUS), getString(stateLabel(state())));
+            return;
+        }
+        detailKv(getString(R.string.KV_GAME), gameTitle(dir));
+        detailKv(getString(R.string.KV_FOLDER), dir);
+        detailKv(getString(R.string.KV_SOURCE), sourceLabel(dir));
+        detailKv(getString(R.string.KV_SIZE), sizeText(dir));
+        detailKv(getString(R.string.KV_FREE), size(freeSpace()));
+        if (ownedCopy(dir) && sizeBytes >= 0 && dir.equals(sizeDir)) {
+            Widgets.Meter m = new Widgets.Meter(this);
+            long free = freeSpace();
+            m.set(sizeBytes / (float)Math.max(1, sizeBytes + free), Theme.ACCENT);
+            LinearLayout.LayoutParams p = lp(MATCH, 10);
+            p.topMargin = 26;
+            detail.addView(m, p);
+        }
+    }
+
+    private void dataChangeDetail(String dir) {
+        detailClear(getString(R.string.GAME_DATA), getString(dir == null ? R.string.CHOOSE_GAME
+                                                                          : R.string.CHANGE_GAME),
+                    getString(R.string.CHANGE_GAME_DETAIL));
+        dataFacts(dir);
+    }
+
+    private void dataDeleteDetail(String dir) {
+        detailClear(getString(R.string.GAME_DATA), getString(R.string.DELETE_COPY),
+                    getString(R.string.DELETE_COPY_DETAIL, dir));
+        dataFacts(dir);
+    }
+
+    /** Two presses within CONFIRM_MS: the first arms, the second deletes (on a background thread). */
+    private void onDelete(MenuRow row, String dir) {
+        if (deleting)
+            return;
+        long now = SystemClock.uptimeMillis();
+        if (deleteArmedAt == 0 || now - deleteArmedAt > CONFIRM_MS) {
+            deleteArmedAt = now;
+            row.setBadge(getString(R.string.DELETE_CONFIRM_BADGE), Theme.WARN);
+            setNote(getString(R.string.DELETE_CONFIRM), NOTE_WARN);
+            return;
+        }
+        deleteArmedAt = 0;
+        deleting = true;
+        row.setBadge(getString(R.string.DELETING), Theme.TEXT_DIM);
+        setNote(getString(R.string.DELETING), NOTE_INFO);
+        endRunningGame();
+        Log.i(TAG, "launcher: deleting the imported copy " + dir);
+        new Thread(() -> {
+            GameStore.deleteTree(new File(dir));
+            if (dir.equals(GameStore.chosenDir(this)))
+                GameStore.forget(this);
+            runOnUiThread(() -> {
+                deleting = false;
+                sizeDir = null;
+                hashDir = null;
+                history.clear();
+                focusMemory.remove(Screen.HOME);
+                show(state() == State.NONE ? Screen.WELCOME : Screen.HOME);
+                setNote(getString(R.string.DELETED), NOTE_OK);
+            });
+        }, "xba-delete").start();
+    }
+
+    // ---- ABOUT -------------------------------------------------------------------------------------------------
+
+    private void buildAbout() {
+        screenTitle.setText(R.string.ABOUT);
+        LinearLayout h = rowLayout();
+        LinearLayout left = column();
+        left.setGravity(Gravity.CENTER_VERTICAL);
+        Widgets.BrandMark mark = new Widgets.BrandMark(this);
+        left.addView(mark, lp(150, 150));
+        TextView name = Theme.text(this, Theme.T_HERO, Theme.MEDIUM, Theme.TEXT, getString(R.string.app_name));
+        LinearLayout.LayoutParams nl = lp(MATCH, WRAP);
+        nl.topMargin = 30;
+        nl.bottomMargin = 16;
+        left.addView(name, nl);
+        left.addView(Theme.caps(this, getString(R.string.ABOUT_TAGLINE), Theme.ACCENT), lp(MATCH, WRAP));
+        TextView t = Theme.body(this, getString(R.string.ABOUT_TEXT));
+        LinearLayout.LayoutParams tl = lp(MATCH, WRAP);
+        tl.topMargin = 30;
+        left.addView(t, tl);
+        LinearLayout.LayoutParams ll = lp(0, MATCH, 1);
+        ll.rightMargin = 80;
+        h.addView(left, ll);
+
+        h.addView(detailPanel(), lp(820, MATCH));
+        detailClear(getString(R.string.ABOUT_CAPS), getString(R.string.ABOUT_BUILD), null);
+        detailKv(getString(R.string.KV_VERSION), version());
+        detailKv(getString(R.string.KV_BUILD), getString(R.string.xba_version_code));
+        detailKv(getString(R.string.KV_APP_ID), getPackageName());
+        String sha = GameStore.expectedSha256(this);
+        detailKv(getString(R.string.KV_GAME_CHECK), sha.isEmpty() ? getString(R.string.GAME_CHECK_NONE)
+                                                                  : sha.substring(0, 16) + "…");
+        detailKv(getString(R.string.KV_LICENCE), getString(R.string.ABOUT_LICENCE));
+        detailFooter(getString(R.string.ABOUT_LEGAL), Theme.TEXT_FAINT);
+        body.addView(h, new FrameLayout.LayoutParams(MATCH, MATCH));
+        addHint("B", R.string.HINT_BACK, this::back);
+    }
+
+    private String version() {
+        return getString(R.string.xba_version);
+    }
+
+    // ---- Game state --------------------------------------------------------------------------------------------
 
     /**
      * A game is ready when the remembered folder holds default.xbe, or, with nothing remembered, when recomp.cfg sets
@@ -144,45 +1204,185 @@ public class LauncherActivity extends Activity {
         return GameStore.findXbe(GameStore.defaultGameDir(this)) != null;
     }
 
-    private void refreshStatus(String noGameData) {
+    /** The folder the game is read from, or null when none is set up. */
+    private String gameDir() {
         String dir = GameStore.chosenDir(this);
-        boolean ready = false;
-        String text;
-        if (noGameData != null && !noGameData.isEmpty()) {
-            text = getString(R.string.NO_GAME_DATA, noGameData);
-        } else if (dir != null) {
-            File xbe = GameStore.findXbe(new File(dir));
-            if (xbe != null) {
-                String title = GameStore.chosenTitle(this);
-                text = getString(R.string.CURRENT_GAME, title.isEmpty() ? new File(dir).getName() : title, dir);
-                ready = true;
-            } else if (new File(dir).exists() && !Environment.isExternalStorageManager()
-                       && !dir.startsWith(GameStore.externalFilesDir(this).getAbsolutePath())) {
-                text = getString(R.string.GAME_FOLDER_NO_ACCESS, dir);
-            } else {
-                text = getString(R.string.GAME_FOLDER_GONE, dir);
-            }
-            if (!ready)
-                Log.i(TAG, "picker: remembered game folder unusable: " + dir);
-        } else if (gameReady()) {
-            File def = GameStore.defaultGameDir(this);
-            String cfg = GameStore.cfgGameDir(this);
-            text = getString(R.string.CURRENT_GAME, getString(R.string.GAME_UNNAMED),
-                             cfg != null ? cfg : def.getAbsolutePath());
-            ready = true;
-        } else {
-            text = getString(R.string.NO_GAME_SET_UP);
-        }
-        status.setText(text);
-        start.setEnabled(ready);
+        if (dir != null)
+            return dir;
+        String cfgDir = GameStore.cfgGameDir(this);
+        if (cfgDir != null)
+            return cfgDir;
+        File def = GameStore.defaultGameDir(this);
+        return GameStore.findXbe(def) != null ? def.getAbsolutePath() : null;
     }
 
-    private void showMessage(String text, boolean error) {
-        message.setText(text);
-        message.setTextColor(error ? 0xFFFF8A80 : 0xFFB0BEC5);
-        message.setVisibility(text == null || text.isEmpty() ? View.GONE : View.VISIBLE);
-        if (error)
-            Log.i(TAG, "picker: " + text);
+    private State state() {
+        String dir = GameStore.chosenDir(this);
+        if (dir != null) {
+            if (GameStore.findXbe(new File(dir)) == null) {
+                File ext = GameStore.externalFilesDir(this);
+                boolean outside = ext == null || !dir.startsWith(ext.getAbsolutePath());
+                return new File(dir).exists() && !Environment.isExternalStorageManager() && outside
+                       ? State.NO_ACCESS : State.MISSING;
+            }
+        } else if (!gameReady()) {
+            return State.NONE;
+        }
+        String d = gameDir();
+        return d != null && d.equals(hashDir) && Boolean.FALSE.equals(hashOk) ? State.WRONG : State.READY;
+    }
+
+    private static int stateLabel(State s) {
+        switch (s) {
+        case READY:
+            return R.string.STATE_READY;
+        case MISSING:
+            return R.string.STATE_MISSING;
+        case NO_ACCESS:
+            return R.string.STATE_NO_ACCESS;
+        case WRONG:
+            return R.string.STATE_WRONG;
+        default:
+            return R.string.STATE_NONE;
+        }
+    }
+
+    private static int stateColor(State s) {
+        return s == State.READY ? Theme.ACCENT : s == State.WRONG ? Theme.ERROR : Theme.WARN;
+    }
+
+    private String stateText(State s, String dir) {
+        switch (s) {
+        case MISSING:
+            return getString(R.string.GAME_FOLDER_GONE, dir);
+        case NO_ACCESS:
+            return getString(R.string.GAME_FOLDER_NO_ACCESS, dir);
+        case WRONG:
+            return getString(R.string.WRONG_GAME_HOME);
+        case NONE:
+            return getString(R.string.NO_GAME_SET_UP);
+        default:
+            return "";
+        }
+    }
+
+    private String gameTitle(String dir) {
+        String t = GameStore.chosenTitle(this);
+        if (dir != null && dir.equals(GameStore.chosenDir(this)) && !t.isEmpty())
+            return t;
+        if (dir == null)
+            return getString(R.string.app_name);
+        File xbe = GameStore.findXbe(new File(dir));
+        String x = xbe == null ? "" : GameStore.xbeTitle(xbe);
+        return x.isEmpty() ? new File(dir).getName() : x;
+    }
+
+    private boolean ownedCopy(String dir) {
+        File def = GameStore.defaultGameDir(this);
+        return def != null && dir.equals(def.getAbsolutePath()) && def.isDirectory();
+    }
+
+    private String sourceLabel(String dir) {
+        if (ownedCopy(dir))
+            return getString(R.string.SOURCE_IMPORTED);
+        if (GameStore.chosenDir(this) == null && GameStore.cfgGameDir(this) != null)
+            return getString(R.string.SOURCE_CFG);
+        return getString(R.string.SOURCE_IN_PLACE);
+    }
+
+    private String sizeText(String dir) {
+        return dir.equals(sizeDir) && sizeBytes >= 0 ? size(sizeBytes) : getString(R.string.SIZE_COUNTING);
+    }
+
+    /** The folder's size, counted once per folder on a background thread; the screen is rebuilt when it is known. */
+    private void sizeLater(String dir) {
+        if (dir == null || dir.equals(sizeDir))
+            return;
+        sizeDir = dir;
+        sizeBytes = -1;
+        new Thread(() -> {
+            long n = GameStore.treeSize(new File(dir));
+            runOnUiThread(() -> {
+                if (!dir.equals(sizeDir))
+                    return;
+                sizeBytes = n;
+                if (screen == Screen.HOME || screen == Screen.GAME_DATA)
+                    refreshKeepingFocus();
+            });
+        }, "xba-size").start();
+    }
+
+    /**
+     * WRONG_GAME on HOME: default.xbe of the current folder against the hash this APK was built for, once per folder
+     * on a background thread (a picked game was checked already; this catches files changed since, or a folder set
+     * up through recomp.cfg or adb). No expected hash (the shell, the stub): nothing to check.
+     */
+    private void checkHashLater(String dir) {
+        if (dir == null || dir.equals(hashDir) || GameStore.expectedSha256(this).isEmpty())
+            return;
+        hashDir = dir;
+        hashOk = null;
+        new Thread(() -> {
+            Boolean ok = null;
+            File xbe = GameStore.findXbe(new File(dir));
+            if (xbe != null) {
+                try {
+                    String sha = GameStore.sha256(xbe);
+                    ok = GameStore.hashMatches(this, sha);
+                    Log.i(TAG, "launcher: " + xbe + " sha256 " + sha + (ok ? "" : " (WRONG_GAME)"));
+                } catch (IOException e) {
+                    Log.w(TAG, "launcher: cannot hash " + xbe, e);
+                }
+            }
+            Boolean result = ok;
+            runOnUiThread(() -> {
+                if (!dir.equals(hashDir))
+                    return;
+                hashOk = result;
+                if (Boolean.FALSE.equals(result) && screen == Screen.HOME)
+                    refreshKeepingFocus();
+            });
+        }, "xba-hash").start();
+    }
+
+    /** Rebuilds the current screen (a fact computed in the background arrived), keeping its focus and note. */
+    private void refreshKeepingFocus() {
+        String text = noteText;
+        int kind = noteKind;
+        show(screen);
+        noteText = text;
+        noteKind = kind;
+        paintNote();
+    }
+
+    // ---- Shortcuts -----------------------------------------------------------------------------------------------
+
+    /** Long-press on the app icon: « Change game » and « Launcher ». Dynamic: the package name differs per title. */
+    private void publishShortcuts() {
+        try {
+            ShortcutManager sm = getSystemService(ShortcutManager.class);
+            if (sm == null)
+                return;
+            int flags = Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK;
+            ShortcutInfo change = new ShortcutInfo.Builder(this, "change_game")
+                    .setShortLabel(getString(R.string.SHORTCUT_CHANGE_GAME))
+                    .setLongLabel(getString(R.string.SHORTCUT_CHANGE_GAME_LONG))
+                    .setIntent(new Intent(this, LauncherActivity.class).setAction(ACTION_CHOOSE_GAME).addFlags(flags))
+                    .setRank(0)
+                    .build();
+            ShortcutInfo home = new ShortcutInfo.Builder(this, "launcher")
+                    .setShortLabel(getString(R.string.SHORTCUT_LAUNCHER))
+                    .setLongLabel(getString(R.string.SHORTCUT_LAUNCHER_LONG))
+                    .setIntent(new Intent(this, LauncherActivity.class).setAction(ACTION_SHOW_LAUNCHER)
+                                       .addFlags(flags))
+                    .setRank(1)
+                    .build();
+            List<ShortcutInfo> list = new ArrayList<>();
+            Collections.addAll(list, change, home);
+            sm.setDynamicShortcuts(list);
+        } catch (RuntimeException e) {
+            Log.w(TAG, "launcher: could not publish the shortcuts", e);
+        }
     }
 
     // ---- Starting the game ----------------------------------------------------------------------------------
@@ -222,26 +1422,34 @@ public class LauncherActivity extends Activity {
     }
 
     /**
-     * Starts ShellActivity. After a new choice (restart = true) a running game is ended first: the runtime maps its
-     * memory once per process, so the new game needs a fresh one. Saves are in internal storage and stay.
+     * Ends the game's process, if any: after a new choice (the runtime maps its memory once per process, so the new
+     * game needs a fresh one) and before deleting its files. Saves are in internal storage and stay.
+     */
+    private void endRunningGame() {
+        int pid = mainProcessPid();
+        if (pid == 0)
+            return;
+        Log.i(TAG, "launcher: ending the running game (pid " + pid + ")");
+        Process.killProcess(pid);
+        long until = SystemClock.uptimeMillis() + 2000;
+        while (mainProcessPid() != 0 && SystemClock.uptimeMillis() < until)
+            SystemClock.sleep(50);
+    }
+
+    /**
+     * Starts ShellActivity. A live game with no new choice is only brought to the front; a main process without a
+     * live ShellActivity (SDL_main returned, e.g. after NO_GAME_DATA) cannot start the runtime again, so it is ended
+     * first (restart = true does the same unconditionally).
      */
     private void launchShell(boolean restart) {
         int pid = mainProcessPid();
-        /* A main process without a live ShellActivity (SDL_main returned, e.g. after NO_GAME_DATA) cannot start the
-         * runtime again either: end it too. A live game with no new choice is only brought to the front. */
         if (pid != 0 && !restart && !shellAlive()) {
-            Log.i(TAG, "picker: main process " + pid + " has no game window, restarting it");
+            Log.i(TAG, "launcher: main process " + pid + " has no game window, restarting it");
             restart = true;
         }
-        if (restart) {
-            if (pid != 0) {
-                Log.i(TAG, "picker: ending the running game (pid " + pid + ") to start the new choice");
-                Process.killProcess(pid);
-                long until = SystemClock.uptimeMillis() + 2000;
-                while (mainProcessPid() != 0 && SystemClock.uptimeMillis() < until)
-                    SystemClock.sleep(50);
-            }
-        }
+        if (restart)
+            endRunningGame();
+        Log.i(TAG, "launcher: play");
         Intent i = new Intent(this, ShellActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
         if (restart)
             i.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TASK);
@@ -249,28 +1457,27 @@ public class LauncherActivity extends Activity {
         finish();
     }
 
-    private void startChosenGame(String dir, String title) {
+    /** A new game was checked and remembered: end the old one's process, then HOME with Play focused. */
+    private void onGameChosen(String dir, String title) {
         GameStore.remember(this, dir, title);
-        Log.i(TAG, "picker: game set: " + dir + " (" + title + ")");
-        Toast.makeText(this, getString(R.string.STARTING, title.isEmpty() ? new File(dir).getName() : title),
-                       Toast.LENGTH_LONG).show();
-        launchShell(true);
+        Log.i(TAG, "launcher: game set: " + dir + " (" + title + ")");
+        endRunningGame();
+        hashDir = dir;
+        hashOk = Boolean.TRUE;
+        sizeDir = null;
+        history.clear();
+        focusMemory.remove(Screen.HOME);
+        show(Screen.HOME);
+        setNote(getString(R.string.READY_TO_PLAY, title.isEmpty() ? new File(dir).getName() : title), NOTE_OK);
     }
 
     // ---- Folder --------------------------------------------------------------------------------------------
 
     private void onChooseFolder() {
-        showMessage("", false);
-        if (Environment.isExternalStorageManager()) {
+        if (Environment.isExternalStorageManager())
             openTreePicker();
-            return;
-        }
-        new AlertDialog.Builder(this)
-                .setTitle(R.string.ALL_FILES_TITLE)
-                .setMessage(R.string.ALL_FILES_EXPLAIN)
-                .setPositiveButton(R.string.ALL_FILES_GRANT, (d, w) -> askAllFilesAccess())
-                .setNegativeButton(R.string.ALL_FILES_COPY, (d, w) -> openTreePicker())
-                .show();
+        else
+            go(Screen.FOLDER_ACCESS);
     }
 
     private void askAllFilesAccess() {
@@ -291,17 +1498,17 @@ public class LauncherActivity extends Activity {
         try {
             startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE), REQ_TREE);
         } catch (ActivityNotFoundException e) {
-            showMessage(getString(R.string.PICKER_MISSING), true);
+            setNote(getString(R.string.PICKER_MISSING), NOTE_ERROR);
         }
     }
 
     private void onTreePicked(Uri tree) {
         String path = Environment.isExternalStorageManager() ? GameStore.treeUriToPath(tree) : null;
-        Log.i(TAG, "picker: folder " + tree + (path != null ? " = " + path : " (copy)"));
+        Log.i(TAG, "launcher: folder " + tree + (path != null ? " = " + path : " (copy)"));
         File dir = path == null ? null : new File(path);
         if (dir != null && dir.list() != null) {
             if (GameStore.findXbe(dir) == null)
-                showMessage(getString(R.string.NOT_A_GAME_FOLDER), true);
+                setNote(getString(R.string.NOT_A_GAME_FOLDER), NOTE_ERROR);
             else
                 runWorker(R.string.CHECKING, () -> checkInPlace(dir));
             return;
@@ -318,13 +1525,12 @@ public class LauncherActivity extends Activity {
     private void checkInPlace(File dir) throws IOException {
         File xbe = GameStore.findXbe(dir);
         String sha = GameStore.sha256(xbe);
-        Log.i(TAG, "picker: " + xbe + " sha256 " + sha);
+        Log.i(TAG, "launcher: " + xbe + " sha256 " + sha);
         if (!GameStore.hashMatches(this, sha)) {
             fail(getString(R.string.WRONG_GAME));
             return;
         }
-        String title = GameStore.xbeTitle(xbe);
-        runOnUiThread(() -> startChosenGame(dir.getAbsolutePath(), title));
+        chosen(dir.getAbsolutePath(), GameStore.xbeTitle(xbe));
     }
 
     private static final class Doc {
@@ -392,7 +1598,8 @@ public class LauncherActivity extends Activity {
                     throw new IOException("cannot open default.xbe");
                 sha = GameStore.sha256(in);
             }
-            Log.i(TAG, "picker: copy: default.xbe sha256 " + sha + ", " + docs.size() + " entries, " + total + " bytes");
+            Log.i(TAG, "launcher: copy: default.xbe sha256 " + sha + ", " + docs.size() + " entries, " + total
+                       + " bytes");
             if (!GameStore.hashMatches(this, sha)) {
                 fail(getString(R.string.WRONG_GAME));
                 return;
@@ -442,12 +1649,11 @@ public class LauncherActivity extends Activity {
     // ---- ISO -----------------------------------------------------------------------------------------------
 
     private void openIsoPicker() {
-        showMessage("", false);
         Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("*/*");
         try {
             startActivityForResult(i, REQ_ISO);
         } catch (ActivityNotFoundException e) {
-            showMessage(getString(R.string.PICKER_MISSING), true);
+            setNote(getString(R.string.PICKER_MISSING), NOTE_ERROR);
         }
     }
 
@@ -465,9 +1671,9 @@ public class LauncherActivity extends Activity {
     private void onIsoPicked(Uri uri) {
         String name = displayName(uri);
         String lower = name.toLowerCase(Locale.ROOT);
-        Log.i(TAG, "picker: image " + uri + " (" + name + ")");
+        Log.i(TAG, "launcher: image " + uri + " (" + name + ")");
         if (!lower.endsWith(".iso") && !lower.endsWith(".xiso")) {
-            showMessage(getString(R.string.NOT_AN_ISO, name), true);
+            setNote(getString(R.string.NOT_AN_ISO, name), NOTE_ERROR);
             return;
         }
         runWorker(R.string.EXTRACTING, () -> extractIso(uri, name));
@@ -537,7 +1743,7 @@ public class LauncherActivity extends Activity {
             return;
         }
         String sha = GameStore.sha256(xbe);
-        Log.i(TAG, "picker: imported default.xbe sha256 " + sha);
+        Log.i(TAG, "launcher: imported default.xbe sha256 " + sha);
         if (!GameStore.hashMatches(this, sha)) {
             GameStore.deleteTree(staged);
             fail(getString(R.string.WRONG_GAME));
@@ -550,7 +1756,7 @@ public class LauncherActivity extends Activity {
             fail(getString(R.string.IMPORT_FAILED, "rename"));
             return;
         }
-        runOnUiThread(() -> startChosenGame(game.getAbsolutePath(), title));
+        chosen(game.getAbsolutePath(), title);
     }
 
     private long freeSpace() {
@@ -576,46 +1782,55 @@ public class LauncherActivity extends Activity {
         void run() throws IOException;
     }
 
+    /** Runs work on a background thread behind the IMPORT screen; its outcome is handled in onWorkerDone. */
     private void runWorker(int label, Work work) {
         if (worker != null && worker.isAlive())
             return;
         cancelRequested = false;
-        setBusy(true, label);
+        workerNote = null;
+        chosenDir = null;
+        chosenTitle = null;
+        importLabel = label;
+        if (screen == Screen.FOLDER_ACCESS && !history.isEmpty())
+            importReturn = history.pop();   // SOURCE: a failed import comes back to the choice of source
+        else
+            importReturn = screen == Screen.IMPORT || screen == null ? Screen.SOURCE : screen;
+        int i = focusables.indexOf(getCurrentFocus());
+        if (i >= 0 && screen != null)
+            focusMemory.put(screen, i);
+        show(Screen.IMPORT);
+        getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         worker = new Thread(() -> {
             try {
                 work.run();
             } catch (IOException | RuntimeException e) {
-                Log.w(TAG, "picker: import failed", e);
+                Log.w(TAG, "launcher: import failed", e);
                 fail(getString(R.string.IMPORT_FAILED, String.valueOf(e.getMessage())));
             } finally {
-                runOnUiThread(() -> setBusy(false, 0));
+                runOnUiThread(this::onWorkerDone);
             }
         }, "xba-import");
         worker.start();
     }
 
-    /** Buttons off, progress on, the screen kept on while a copy or an extraction runs. */
-    private void setBusy(boolean busy, int label) {
+    private void onWorkerDone() {
+        getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         if (isFinishing())
             return;
-        chooseFolder.setEnabled(!busy);
-        chooseIso.setEnabled(!busy);
-        if (busy)
-            start.setEnabled(false);
-        else
-            refreshStatus(null);
-        progressBox.setVisibility(busy ? View.VISIBLE : View.GONE);
-        cancel.setEnabled(busy);
-        if (busy) {
-            progressLabel.setText(label);
-            progressDetail.setText("");
-            progressBar.setIndeterminate(true);
-            getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
-            cancel.requestFocus();
-        } else {
-            getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
-            chooseFolder.requestFocus();
+        if (chosenDir != null) {
+            onGameChosen(chosenDir, chosenTitle == null ? "" : chosenTitle);
+            return;
         }
+        String text = workerNote;
+        int kind = workerNoteKind;
+        show(importReturn);
+        if (text != null)
+            setNote(text, kind);
+    }
+
+    private void chosen(String dir, String title) {
+        chosenTitle = title;
+        chosenDir = dir;
     }
 
     private void progress(long done, long total, String path) {
@@ -624,35 +1839,41 @@ public class LauncherActivity extends Activity {
             return;
         lastUiUpdate = now;
         runOnUiThread(() -> {
-            if (total > 0) {
-                progressBar.setIndeterminate(false);
-                progressBar.setMax(1000);
-                progressBar.setProgress((int)(done * 1000 / total));
-            }
-            progressDetail.setText(getString(R.string.PROGRESS_BYTES, size(done), size(total))
-                                   + (path == null || path.isEmpty() ? "" : "\n" + path));
+            if (screen != Screen.IMPORT || ring == null)
+                return;
+            float frac = total > 0 ? Math.min(1f, done / (float)total) : -1;
+            String pct = frac >= 0 ? String.format(Locale.getDefault(), "%d%%", Math.round(frac * 100)) : "";
+            ring.set(frac, pct, getString(importLabel), getString(R.string.PROGRESS_BYTES, size(done), size(total)));
+            importBytes.setText(getString(R.string.PROGRESS_BYTES, size(done), size(total)));
+            importFile.setText(path == null ? "" : path);
         });
     }
 
     private void progressIndeterminate(int label) {
         runOnUiThread(() -> {
-            progressLabel.setText(label);
-            progressDetail.setText("");
-            progressBar.setIndeterminate(true);
-            cancel.setEnabled(false);
+            if (screen != Screen.IMPORT || ring == null)
+                return;
+            importLabel = label;
+            importHead.setText(label);
+            ring.set(-1, "", getString(label), "");
+            importFile.setText("");
+            if (cancelRow != null)
+                cancelRow.setDim(true);
         });
     }
 
     private void fail(String text) {
-        runOnUiThread(() -> showMessage(text, true));
+        workerNoteKind = NOTE_ERROR;
+        workerNote = text;
     }
 
     /** True (and says so) when the player pressed Cancel. */
     private boolean cancelled() {
         if (!cancelRequested)
             return false;
-        Log.i(TAG, "picker: import canceled");
-        runOnUiThread(() -> showMessage(getString(R.string.CANCELED), false));
+        Log.i(TAG, "launcher: import canceled");
+        workerNoteKind = NOTE_INFO;
+        workerNote = getString(R.string.CANCELED);
         return true;
     }
 
@@ -660,7 +1881,8 @@ public class LauncherActivity extends Activity {
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
         if (requestCode == REQ_ALL_FILES) {
-            Log.i(TAG, "picker: All files access " + (Environment.isExternalStorageManager() ? "granted" : "refused"));
+            Log.i(TAG, "launcher: All files access "
+                       + (Environment.isExternalStorageManager() ? "granted" : "refused"));
             openTreePicker();   // in place when granted, copied otherwise
             return;
         }
@@ -670,14 +1892,5 @@ public class LauncherActivity extends Activity {
             onTreePicked(data.getData());
         else if (requestCode == REQ_ISO)
             onIsoPicked(data.getData());
-    }
-
-    @Override
-    public void onBackPressed() {
-        if (worker != null && worker.isAlive()) {
-            cancelRequested = true;
-            return;
-        }
-        super.onBackPressed();
     }
 }

@@ -1,41 +1,222 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- The game picker's texts (LauncherActivity, XBA-54 / XBA-40). Keys in capitals are the ones the spec and logcat
-     name (NO_GAME_DATA, NOT_A_GAME_FOLDER, WRONG_GAME, ...). French: values-fr/strings.xml. app_name and
-     xba_xbe_sha256 come from android/app/build.gradle. -->
+<!-- The launcher's texts (LauncherActivity, XBA-41, with the game picker of XBA-54 / XBA-40). Keys in capitals; the
+     ones the spec and logcat name (NO_GAME_DATA, NOT_A_GAME_FOLDER, WRONG_GAME, ...) are kept. French:
+     values-fr/strings.xml (every key). app_name, xba_xbe_sha256, xba_version and xba_version_code come from
+     android/app/build.gradle. -->
 <resources xmlns:tools="http://schemas.android.com/tools" tools:ignore="ResourceName">
+    <!-- States and messages -->
     <string name="NO_GAME_SET_UP">No game is set up. Choose the folder of your extracted disc (default.xbe and its files), or a disc image (.iso).</string>
     <string name="NO_GAME_DATA">No game data found in %1$s (no default.xbe there). Choose the game folder or a disc image.</string>
     <string name="GAME_FOLDER_GONE">The game folder %1$s is no longer there (deleted, or its SD card removed). Choose the game again.</string>
     <string name="GAME_FOLDER_NO_ACCESS">The game folder %1$s cannot be read: All files access is off. Turn it on again (choose the folder again to be asked), or choose the game again.</string>
-    <string name="CURRENT_GAME">Game: %1$s\nFolder: %2$s</string>
-    <string name="GAME_UNNAMED">(set up outside this screen)</string>
     <string name="GAME_RUNNING">The game is running: it closes when you choose another one. Saves are kept.</string>
-
-    <string name="CHOOSE_FOLDER">Choose game folder</string>
-    <string name="CHOOSE_ISO">Choose disc image (ISO)</string>
-    <string name="START_GAME">Start the game</string>
-    <string name="CANCEL">Cancel</string>
+    <string name="GAME_RUNNING_HOME">The game is running: Play brings it back.</string>
+    <string name="READY_TO_PLAY">%1$s is ready. Press A on Play.</string>
+    <string name="STATE_READY">Ready</string>
+    <string name="STATE_NONE">No game</string>
+    <string name="STATE_MISSING">Game data missing</string>
+    <string name="STATE_NO_ACCESS">No file access</string>
+    <string name="STATE_WRONG">Wrong game</string>
 
     <string name="NOT_A_GAME_FOLDER">This folder holds no default.xbe: it is not an extracted Xbox disc. Choose the folder that contains default.xbe.</string>
     <string name="NOT_AN_ISO">%1$s is not a disc image: choose a file ending in .iso or .xiso.</string>
     <string name="NOT_A_GAME_IMAGE">Not an Xbox disc image, or no default.xbe in it: %1$s</string>
     <string name="WRONG_GAME">This is not the game this app was made for (another game, or another region): its default.xbe does not match. Nothing was changed.</string>
+    <string name="WRONG_GAME_HOME">This folder\'s default.xbe is not the game this app was made for (another game, or another region). Choose the right game in Game data.</string>
     <string name="NOT_ENOUGH_SPACE">Not enough free space: the game needs %1$s, %2$s are free.</string>
     <string name="IMPORT_FAILED">The import failed: %1$s. Nothing was changed.</string>
     <string name="CANCELED">Import canceled. Nothing was changed.</string>
+    <string name="CANCELING">Canceling…</string>
     <string name="PICKER_MISSING">This device has no file picker.</string>
 
+    <!-- Common -->
+    <string name="CHIP_OFFLINE">Works offline</string>
+    <string name="CHIP_SCREEN_ON">Screen stays on</string>
+    <string name="HINT_SELECT">Select</string>
+    <string name="HINT_CHOOSE">Choose</string>
+    <string name="HINT_BACK">Back</string>
+    <string name="HINT_QUIT">Quit</string>
+    <string name="HINT_START">Start</string>
+    <string name="HINT_CHANGE">Change</string>
+    <string name="HINT_DEFAULTS">Defaults</string>
+    <string name="HINT_SECTION">Section</string>
+    <string name="KV_GAME">Game</string>
+    <string name="KV_FOLDER">Folder</string>
+    <string name="KV_SOURCE">Source</string>
+    <string name="KV_STATUS">Status</string>
+    <string name="KV_SIZE">Size</string>
+    <string name="KV_FREE">Free in app storage</string>
+    <string name="KV_VALUE">Value</string>
+    <string name="KV_CHOICES">Choices</string>
+    <string name="KV_CFG">In recomp.cfg</string>
+    <string name="KV_VERSION">Version</string>
+    <string name="KV_BUILD">Build</string>
+    <string name="KV_APP_ID">App id</string>
+    <string name="KV_GAME_CHECK">Game check</string>
+    <string name="KV_LICENCE">Licences</string>
+    <string name="FREE_SPACE_APP">Free space in the app\'s storage: %1$s</string>
+    <string name="SIZE_COUNTING">counting…</string>
+    <string name="SOURCE_IN_PLACE">Read in place</string>
+    <string name="SOURCE_IMPORTED">Imported copy (app storage)</string>
+    <string name="SOURCE_CFG">Set in recomp.cfg</string>
+
+    <!-- Welcome -->
+    <string name="WELCOME_TITLE">Set up your game</string>
+    <string name="WELCOME_HERO">Welcome</string>
+    <string name="WELCOME_TEXT">This app runs a recompiled Xbox game on Android. The game itself is not included: you bring your own copy, from a disc you own. Setting it up takes a minute, or a few for a disc image.</string>
+    <string name="WELCOME_START">Get started</string>
+    <string name="WELCOME_START_SUB">Choose where your game is</string>
+    <string name="WELCOME_STEPS">Three steps</string>
+    <string name="STEP1">Choose your game</string>
+    <string name="STEP1_SUB">The folder of your extracted disc, or a disc image (.iso)</string>
+    <string name="STEP2">Check and import</string>
+    <string name="STEP2_SUB">The app checks it is the right game, and copies or extracts it if needed</string>
+    <string name="STEP3">Play</string>
+    <string name="STEP3_SUB">Settings and game data stay one press away</string>
+
+    <!-- Choose the source -->
+    <string name="SOURCE_TITLE">Choose your game</string>
+    <string name="SOURCE_CAPS">Your game</string>
+    <string name="SOURCE_HEAD">Where is your game?</string>
+    <string name="SOURCE_TEXT">Use a game you own: the folder of your extracted disc, or a disc image you made yourself. Your current game stays until the new one has been checked.</string>
+    <string name="CARD_FOLDER">Game folder</string>
+    <string name="CARD_FOLDER_SUB">The extracted disc: default.xbe and its files, on the device or an SD card. Read in place with All files access, otherwise copied into the app.</string>
+    <string name="CARD_ISO">Disc image (ISO)</string>
+    <string name="CARD_ISO_SUB">A .iso or .xiso image of your disc. Extracted once into the app\'s storage: it needs the game\'s size free and takes a few minutes.</string>
+    <string name="BADGE_IN_PLACE">Read in place</string>
+    <string name="BADGE_FOLDER_ASK">In place or copy</string>
+    <string name="BADGE_FREE">%1$s free</string>
+    <string name="BADGE_RECOMMENDED">Recommended</string>
+
+    <!-- All files access -->
     <string name="ALL_FILES_TITLE">Read the game in place?</string>
     <string name="ALL_FILES_EXPLAIN">With « All files access », the app reads the game straight from the folder you choose, on the phone or on an SD card: no copy, and it works for a 4 GB disc. The app only reads the game folder you pick.\n\nWithout it, the folder is copied into the app\'s own storage: that takes as much free space again and a few minutes, and the copy is removed with the app.</string>
     <string name="ALL_FILES_GRANT">Allow all files access</string>
-    <string name="ALL_FILES_COPY">Copy instead</string>
+    <string name="ALL_FILES_GRANT_SUB">Opens the system page: turn it on for this app, come back, then pick the folder.</string>
+    <string name="ALL_FILES_COPY">Copy into the app</string>
+    <string name="ALL_FILES_COPY_SUB">No permission. The folder is copied into the app\'s storage: as much free space again, a few minutes; removed with the app.</string>
 
+    <!-- Import -->
+    <string name="IMPORT_TITLE">Preparing the game</string>
+    <string name="IMPORT_CAPS">Import</string>
+    <string name="IMPORT_STARTING">Starting…</string>
+    <string name="IMPORT_KEEPS">Your current game is kept until the new one has been checked. Keep the app open until the end.</string>
     <string name="CHECKING">Checking the game…</string>
     <string name="COPYING">Copying the game…</string>
     <string name="EXTRACTING">Extracting the disc image…</string>
     <string name="PROGRESS_BYTES">%1$s of %2$s</string>
-    <string name="STARTING">Starting %1$s</string>
+    <string name="CANCEL">Cancel</string>
+    <string name="CANCEL_SUB">Stop and keep the current game</string>
 
+    <!-- Home -->
+    <string name="HOME_MENU">Main menu</string>
+    <string name="PLAY">Play</string>
+    <string name="PLAY_SUB">Start the game</string>
+    <string name="PLAY_SUB_RUNNING">Back to the running game</string>
+    <string name="PLAY_SUB_UNAVAILABLE">Not available: %1$s</string>
+    <string name="PLAY_DETAIL">Starts the game from the folder below. In the game, press Back twice to quit.</string>
+    <string name="PLAY_DETAIL_RUNNING">The game is already running: Play brings it back where you left it.</string>
+    <string name="PLAY_FOOTER">Saves stay in the app\'s internal storage, whatever the game folder.</string>
+    <string name="NO_GAME_HEAD">No game yet</string>
+    <string name="SETTINGS">Settings</string>
+    <string name="SETTINGS_SUB_DEFAULT">Default settings</string>
+    <string name="SETTINGS_HEAD">Current settings</string>
+    <string name="SETTINGS_FOOTER">Saved in %1$s and applied the next time the game starts. Lines you add there yourself are kept.</string>
+    <string name="GAME_DATA">Game data</string>
+    <string name="GAME_DATA_HEAD">Where the game is</string>
+    <string name="GAME_DATA_TEXT">Change the game, or free the space an imported copy takes.</string>
+    <string name="ABOUT">About</string>
+    <string name="ABOUT_SUB">Version %1$s · licences</string>
+    <string name="OPEN_DIRECTLY">Open the game directly next time</string>
+    <string name="OPEN_DIRECTLY_SHORT">Open directly</string>
+    <string name="OPEN_DIRECTLY_ON">Next time, the game opens directly. Long-press the app icon › Launcher to come back here.</string>
+    <string name="OPEN_DIRECTLY_OFF">Next time, this screen shows first.</string>
+
+    <!-- Settings -->
+    <string name="SECTION_LAUNCHER">Launcher</string>
+    <string name="SECTION_GRAPHICS">Graphics</string>
+    <string name="SECTION_AUDIO">Audio</string>
+    <string name="SECTION_ADVANCED">Advanced</string>
+    <string name="OPEN_DIRECTLY_SUMMARY">Skip this screen when the game is ready</string>
+    <string name="OPEN_DIRECTLY_DETAIL">On: the app icon starts the game straight away when it is set up. Off: this screen shows first, with Play selected.</string>
+    <string name="OPEN_DIRECTLY_FOOTER">Long-press the app icon › Launcher (or Change game) to reach this screen while it is on.</string>
+    <string name="APPLIES_NEXT_START">Saved at once; applied the next time the game starts.</string>
+    <string name="SETTINGS_SAVED">Saved. Applied the next time the game starts.</string>
+    <string name="SETTINGS_SAVED_RUNNING">Saved. The game is running: it uses the new setting after it is restarted.</string>
+    <string name="SETTINGS_GAME_RUNNING">The game is running: changes apply the next time it starts.</string>
+    <string name="SETTINGS_SAVE_FAILED">Could not save the settings: %1$s</string>
+    <string name="RESET">Restore defaults</string>
+    <string name="RESET_SUB">Lines you wrote in recomp.cfg yourself are kept</string>
+    <string name="RESET_DETAIL">Puts every option on this screen back to its default, by removing its lines from recomp.cfg. Other lines in the file are left as they are.</string>
+    <string name="RESET_DONE">Defaults restored. Applied the next time the game starts.</string>
+    <string name="DEFAULT_MARK">(default)</string>
+    <string name="CFG_NOTHING">nothing: the default</string>
+    <string name="VAL_ON">On</string>
+    <string name="VAL_OFF">Off</string>
+    <string name="VAL_AUTO">Auto</string>
+    <string name="VAL_CUSTOM">Custom</string>
+    <string name="VAL_1" translatable="false">1</string>
+    <string name="VAL_2" translatable="false">2</string>
+    <string name="VAL_4" translatable="false">4</string>
+    <string name="VAL_6" translatable="false">6</string>
+    <string name="VAL_8" translatable="false">8</string>
+
+    <string name="OPT_VSYNC">Vertical sync</string>
+    <string name="OPT_VSYNC_SUMMARY">Show each frame in step with the screen</string>
+    <string name="OPT_VSYNC_DETAIL">On: frames are shown in step with the display, without tearing. Off: frames are shown as soon as they are ready; a little less delay, but the picture can tear. (RECOMP_PRESENT_VSYNC)</string>
+    <string name="OPT_TEX">Texture filtering</string>
+    <string name="OPT_TEX_SUMMARY">How textures are sampled when drawn</string>
+    <string name="OPT_TEX_DETAIL">Sharp takes the nearest texel, as the game is drawn by default. Smooth blends four texels; anisotropic also follows surfaces seen at an angle. Smoother modes cost speed, and are not the default because they change the look the game was tested with. (RECOMP_TEX_BILINEAR, RECOMP_TEX_ANISO)</string>
+    <string name="VAL_TEX_SHARP">Sharp</string>
+    <string name="VAL_TEX_SMOOTH">Smooth</string>
+    <string name="VAL_TEX_ANISO8">Anisotropic 8×</string>
+    <string name="VAL_TEX_ANISO16">Anisotropic 16×</string>
+    <string name="OPT_HRTF">3D audio</string>
+    <string name="OPT_HRTF_SUMMARY">Positional sound for 3D voices (HRTF)</string>
+    <string name="OPT_HRTF_DETAIL">On: sounds the game places in 3D are filtered to sound like they come from their direction, best with headphones. Off: plain stereo panning. (RECOMP_APU_HRTF)</string>
+    <string name="OPT_AUDIO_BUF">Audio buffer</string>
+    <string name="OPT_AUDIO_BUF_SUMMARY">Lower delay or fewer crackles</string>
+    <string name="OPT_AUDIO_BUF_DETAIL">The size of each buffer handed to the device, in samples (256, 512, 1024, 2048). Short: less delay between the picture and the sound. Long: fewer crackles and drop-outs on a busy device. (RECOMP_AUDIO_BUF_SAMPLES)</string>
+    <string name="VAL_BUF_SHORT">Short</string>
+    <string name="VAL_BUF_NORMAL">Normal</string>
+    <string name="VAL_BUF_LONG">Long</string>
+    <string name="VAL_BUF_LONGEST">Very long</string>
+    <string name="OPT_RASTER">Drawing threads</string>
+    <string name="OPT_RASTER_SUMMARY">Cores that draw large triangles</string>
+    <string name="OPT_RASTER_DETAIL">Threads of the software renderer that share large triangles. Auto leaves four cores to the game and the system. More can be faster on a big SoC; fewer can help when the game itself is short of cores. (RECOMP_RASTER_THREADS)</string>
+    <string name="OPT_BIG_CORES">Fast cores only</string>
+    <string name="OPT_BIG_CORES_SUMMARY">Keep the game on the big cores</string>
+    <string name="OPT_BIG_CORES_DETAIL">On: the game runs on the SoC\'s fast cores only, as set at start. Off: the system may also put it on the slow cores; try it only if the game stutters with this on. (RECOMP_BIG_CORES)</string>
+    <string name="OPT_SELFTEST">Self-test at start</string>
+    <string name="OPT_SELFTEST_SUMMARY">For bug reports: checks in the log</string>
+    <string name="OPT_SELFTEST_DETAIL">Runs the runtime\'s self-test before the game starts and writes one PASS or FAIL line per check to the log (logcat, tag xboxrecomp). Useful in a bug report; the game then starts as usual. (RECOMP_SHELL_SELFTEST)</string>
+
+    <!-- Game data -->
+    <string name="GAME_DATA_CAPS">Manage</string>
+    <string name="CHOOSE_GAME">Choose a game</string>
+    <string name="CHANGE_GAME">Change game</string>
+    <string name="CHANGE_GAME_SUB">Another folder or disc image, or import again</string>
+    <string name="CHANGE_GAME_DETAIL">Pick a game folder or a disc image. The current game stays until the new one has been checked; a running game is closed then. Saves are kept.</string>
+    <string name="DELETE_COPY">Delete the imported copy</string>
+    <string name="DELETE_COPY_SUB">Free the space; saves are kept</string>
+    <string name="DELETE_COPY_DETAIL">Removes %1$s, the copy this app made. Your saves stay (internal storage). You then choose the game again to play.</string>
+    <string name="DELETE_CONFIRM_BADGE">Press A again</string>
+    <string name="DELETE_CONFIRM">Press A again within 5 seconds to delete the imported copy.</string>
+    <string name="DELETING">Deleting…</string>
+    <string name="DELETED">The imported copy was deleted. Saves are kept.</string>
+
+    <!-- About -->
+    <string name="ABOUT_CAPS">This build</string>
+    <string name="ABOUT_BUILD">Build</string>
+    <string name="ABOUT_TAGLINE">Android port of xboxrecomp</string>
+    <string name="ABOUT_TEXT">A statically recompiled game, run by the xboxrecomp runtime on Android arm64. No game data is included: the app reads the copy you set up from a disc you own.</string>
+    <string name="ABOUT_LICENCE">xboxrecomp: MIT. SDL2: zlib.</string>
+    <string name="ABOUT_LEGAL">Not affiliated with or endorsed by the console\'s or the game\'s makers. Use only games you own.</string>
+    <string name="GAME_CHECK_NONE">None (any game)</string>
+
+    <!-- Shortcuts (long-press on the app icon) -->
     <string name="SHORTCUT_CHANGE_GAME">Change game</string>
     <string name="SHORTCUT_CHANGE_GAME_LONG">Change game folder</string>
+    <string name="SHORTCUT_LAUNCHER">Launcher</string>
+    <string name="SHORTCUT_LAUNCHER_LONG">Launcher: settings and game data</string>
 </resources>
