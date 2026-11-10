@@ -29,4 +29,7 @@ tools/android/run_tests.sh out/xba-device-tests.tar.gz memory     # only the tes
 
 Compare with [baseline-arm64.md](baseline-arm64.md). A test that passes on Linux arm64 but not on the device gets a
 ticket under A2 / A3 / A4. Expected on the device: `mmio_decode_a64` is the test qemu could not judge (XBA-45), and
-the memory tests check XBA-21.
+the memory tests check XBA-21. `recomp_selftest` runs the checks of the app shell's self-test (XBA-51) from the
+shell domain; the same checks in the app process are `RECOMP_SHELL_SELFTEST=1`
+([app-shell.md](app-shell.md#self-test-in-the-app-process)), and a check that passes here but fails there is an app
+difference (untrusted_app, ART, libsigchain).

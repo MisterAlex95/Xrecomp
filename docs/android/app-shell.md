@@ -23,6 +23,7 @@ The CI builds it on every push to `main`. The latest one is always the prereleas
 | Back | Trapped (`SDL_HINT_ANDROID_TRAP_BACK_BUTTON`). Once shows a « Press Back again to quit » toast (`QUIT_PROMPT`); twice within 2 s returns from `SDL_main`, and SDLActivity then finishes. With a title, the title's window does the same and ends the process (see [Quit](#quit)). |
 | Manifest | minSdk 30, target 35, arm64-v8a only, GLES 3.0 required, `allowNativeHeapPointerTagging="false"`, `isGame`. |
 | Per title | `-PxbaTitleDir=…` (the title's project), `-PxbaApplicationId=…`, `-PxbaLabel=…`, `-PxbaVersionCode=…`. The title is linked next to `shell_main.c`, which stays the entry (XBA-52). |
+| Assets | `selftest.xbe`: the synthetic XBE of `tools/conformance` (ours, no game content), copied in at build time for the [self-test](#self-test-in-the-app-process). |
 | Signing | Debug key generated once per toolchain image, so updates install in place while the image is cached. The release key will be a build secret, never in the repo. |
 
 ## Check list on the device (Alex)
@@ -131,6 +132,55 @@ Device check: `RECOMP_SHELL_CRASH_TEST=1` in `recomp.cfg` makes the shell write 
 `RECOMP_SHELL_CRASH_TEST: writing to NULL now`, then `Fatal signal 11 (SIGSEGV)` with a backtrace that goes through
 `SDL_main` in `libmain.so`. Remove the line afterwards. The shell no longer waits before the write: the line is there
 because the handler drains the log pipes first ([Last lines before a crash](#last-lines-before-a-crash)).
+
+## Self-test in the app process
+
+(XBA-51.) The device test bundle ([device-tests.md](device-tests.md)) runs from `adb shell`: SELinux domain `shell`, no
+ART, no libsigchain, an almost empty address space. An app runs as `untrusted_app` under ART, with libsigchain in front
+of `sigaction` and hundreds of libraries mapped, so a pass in the bundle does not prove the app. With
+`RECOMP_SHELL_SELFTEST=1` in `recomp.cfg`, the shell runs the runtime's risky pieces in its own process, right after
+`SDL_Init` and the second fault-handler install, before the window or a title:
+
+| Check | What it proves in the app |
+|---|---|
+| `layout` | `xbox_MemoryLayoutInit` on `selftest.xbe` (the APK asset, read with `SDL_LoadFile`; the layout takes the bytes, no copy on disk); the base is host-page aligned. |
+| `window` | The whole 4 GB guest window is held (`RECOMP_GUEST_WINDOW`, on by default on Android) and `/proc/self/maps` covers all of it. On Android, a refused 4 GB reservation (the layout then falls back to fixed addresses) fails. |
+| `mirrors` | A write and a read through each of the 28 RAM mirrors (memfd views, XBA-21), seen at the base, and the other way round. |
+| `tiled_alias` | The same between the tiled aperture and the contiguous window (two views of the other memfd). |
+| `mmio_handler` | The toolkit's SIGSEGV handler is still in front, and one host page of guest RAM traps (`PAGE_NOACCESS`, routed by `xbox_PosixMmioSetTestWindow` to a test device). |
+| `mmio_imm`, `mmio_extend`, `mmio_regoff`, `mmio_writeback`, `mmio_unscaled`, `mmio_pair`, `mmio_simd` | One trapped access of each A64 decoder class through that page, by the real chain: libsigchain, the toolkit's handler, `mmio_decode_a64.h`, the register write-back into the signal frame. `mmio_simd` is `ldr q` / `str q` / `ldr d`: the V register written in the frame's `fpsimd_context` (XBA-45). (On x86-64 Linux: `mmio_mov`, `mmio_extend`, `mmio_immstore`, `mmio_xmm_scalar`, `mmio_simd` = `movups`.) |
+| `exec_alloc` | `NtAllocateVirtualMemory` with `PAGE_EXECUTE_READWRITE` succeeds, read / write, and the mapping is not executable. |
+| `exec_guest` | `MmSetAddressProtect` with `PAGE_EXECUTE_READ` (read-only) and `PAGE_EXECUTE_READWRITE` on guest RAM (a memfd view) takes effect, without `PROT_EXEC`. |
+| `save_dir` | A file created, written, `fsync`ed, read back and removed in the save directory. |
+| `reinit` | Shutdown, a second init and shutdown again: a title maps its own layout after the self-test, in the same process. |
+
+Each prints `selftest NAME: PASS` (sometimes with a note) or `selftest NAME: FAIL (reason)`, then
+`selftest: N passed, M failed`. The shell then carries on as without the option (its window, or the title). The checks
+never fault on purpose: whether an address is mapped is asked of the kernel (a pipe write or read returns `EFAULT`).
+A trapped access the decoder cannot service is a crash, as in a title; the fault handler drains logcat first, so the
+last `PASS` line says which check came next. The same code is the CMake test `tests/recomp_selftest` (CI on x86-64,
+arm64 under qemu-user, and the device bundle), so a check that fails only in the app is an Android difference.
+Under qemu-user `mmio_simd` fails (the `mmio_decode_a64` lead, XBA-45): the arm64 job expects `recomp_selftest` to
+fail and gates `recomp_selftest_no_simd` (`RECOMP_SELFTEST_SKIP=mmio_simd`).
+
+**No executable guest memory.** The POSIX Win32 shim (`prot_from_page` in `src/platform/win32_compat.c`) no longer maps
+`PAGE_EXECUTE*` to `PROT_EXEC`: read / write are kept, `PAGE_EXECUTE` alone becomes `PROT_READ`. Guest code is
+recompiled ahead of time and never runs from guest memory, and the runtime has no JIT, while an executable anonymous
+or memfd mapping can be refused to an app (SELinux `execmem`). Every guest protection reaches the host through that
+function (`VirtualAlloc`, `VirtualProtect`; file-mapping views were never executable), and `VirtualQuery` already
+reported every mapping as `PAGE_READWRITE`.
+
+### Device check (XBA-51), for Alex
+
+1. Install the shell APK (**shell-latest**), push a `recomp.cfg` with `RECOMP_SHELL_SELFTEST=1`:
+   `printf 'RECOMP_SHELL_SELFTEST=1\n' > recomp.cfg`,
+   `adb push recomp.cfg /sdcard/Android/data/fr.adserver.xboxrecomp.shell/files/recomp.cfg`.
+2. Start the app, then `adb logcat -d -s xboxrecomp`.
+3. Expected: every `selftest` line `PASS` and the summary `selftest: 16 passed, 0 failed`; no tombstone
+   (`adb logcat -d -b crash` empty).
+4. Run it a second time after a reboot (the address space layout changes).
+5. Send the logcat lines (both runs); remove the option (`adb shell rm
+   /sdcard/Android/data/fr.adserver.xboxrecomp.shell/files/recomp.cfg`).
 
 ## A title in the shell
 
