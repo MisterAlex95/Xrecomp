@@ -8,6 +8,11 @@ cmake_minimum_required(VERSION 3.20)
 #   2. Set XBOXRECOMP_DIR to where you cloned xboxrecomp
 #   3. Adjust source file lists as you add game-specific code
 #   4. Add any game-specific compile definitions or link libraries
+#
+# Android: this project is not built on its own but through the app shell,
+# which sets XBOXRECOMP_SHELL_TITLE and links the title into its libmain.so:
+#   cd xboxrecomp/android && gradle assembleDebug -PxbaTitleDir=/path/to/this/project
+# (see "Android" below and docs/android/app-shell.md).
 # ============================================================================
 
 project(your_game_recomp C)
@@ -35,7 +40,10 @@ set(XBOXRECOMP_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../xboxrecomp" CACHE PATH
 
 # Add xboxrecomp as a subdirectory -- this builds all 6 runtime libraries
 # and provides the 'xboxrecomp' umbrella target to link against.
-add_subdirectory(${XBOXRECOMP_DIR} ${CMAKE_BINARY_DIR}/xboxrecomp)
+# (The Android app shell has added it already, and set XBOXRECOMP_DIR.)
+if(NOT XBOXRECOMP_SHELL_TITLE)
+    add_subdirectory(${XBOXRECOMP_DIR} ${CMAKE_BINARY_DIR}/xboxrecomp)
+endif()
 
 # ── Recompiled game executable ──────────────────────────────────
 
@@ -62,6 +70,25 @@ set(GAME_SOURCES
 #   src/recomp/gen/recomp_funcs.h    - extern declarations for all recompiled functions
 #   src/recomp/recomp_dispatch.h     - binary search dispatch table
 #   src/recomp/recomp_types.h        - register model, ICALL macros, MEM helpers
+
+if(XBOXRECOMP_SHELL_TITLE)
+    # ── Android: the title inside the app shell's libmain.so ─────
+    # The shell (android/app/src/main/cpp) owns SDL_main and the start-up
+    # (logcat, recomp.cfg, storage, fast cores, fault handler, window,
+    # lifecycle); main.c then defines recomp_title_main() instead of main(),
+    # and takes its paths from recomp_storage. The target name is fixed: the
+    # shell links xba_title. Everything after this block is for executables.
+    add_library(xba_title OBJECT ${GAME_SOURCES} ${RECOMP_GEN_SOURCES})
+    target_compile_definitions(xba_title PRIVATE XBOXRECOMP_SHELL_TITLE=1)
+    target_link_libraries(xba_title PRIVATE xboxrecomp)
+    target_include_directories(xba_title PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/recomp
+        ${XBOXRECOMP_DIR}/include
+        ${XBOXRECOMP_DIR}/src
+    )
+    return()
+endif()
 
 add_executable(${PROJECT_NAME} WIN32
     ${GAME_SOURCES}

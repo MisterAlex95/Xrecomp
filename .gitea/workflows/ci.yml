@@ -237,6 +237,29 @@ jobs:
           curl -fsS -X POST -H "$auth" -F "attachment=@out/xboxrecomp-shell.apk;type=application/vnd.android.package-archive" \
             "$api/releases/$id/assets?name=xboxrecomp-shell-$sha8.apk" | jq -r .browser_download_url
 
+      # XBA-52: the stub title (templates/new-game around the synthetic XBE of tools/conformance, lifted by the
+      # pipeline) linked into the shell: the first end-to-end link of generated C for Android. Its APK and the
+      # synthetic XBE (ours, no game content) go next to the shell APK in « shell-latest », for the device check.
+      - name: Stub title APK
+        env:
+          TOKEN: ${{ github.token }}
+        run: |
+          trap 'docker rmi "$IMAGE_TAG-stub" >/dev/null 2>&1 || true; rm -rf out-stub' EXIT
+          docker build -f tools/docker/android.Dockerfile --target stub-apk --build-arg XBA_VERSION="${GITHUB_SHA:0:8}" \
+            --progress=plain -t "$IMAGE_TAG-stub" .
+          docker run --rm "$IMAGE_TAG-stub" cat /out/stub-apk-contents.txt
+          mkdir -p out-stub && cid=$(docker create "$IMAGE_TAG-stub") \
+            && docker cp "$cid:/out/xboxrecomp-stub.apk" out-stub/ && docker cp "$cid:/out/stub-default.xbe" out-stub/ \
+            && docker rm "$cid" >/dev/null
+          api="$GITHUB_SERVER_URL/api/v1/repos/$GITHUB_REPOSITORY"
+          auth="Authorization: token $TOKEN"
+          sha8=$(printf '%s' "$GITHUB_SHA" | cut -c1-8)
+          id=$(curl -fsS -H "$auth" "$api/releases/tags/shell-latest" | jq -r .id)
+          curl -fsS -X POST -H "$auth" -F "attachment=@out-stub/xboxrecomp-stub.apk;type=application/vnd.android.package-archive" \
+            "$api/releases/$id/assets?name=xboxrecomp-stub-$sha8.apk" | jq -r .browser_download_url
+          curl -fsS -X POST -H "$auth" -F "attachment=@out-stub/stub-default.xbe;type=application/octet-stream" \
+            "$api/releases/$id/assets?name=stub-default.xbe" | jq -r .browser_download_url
+
       - name: Clean up
         if: always()
         run: |

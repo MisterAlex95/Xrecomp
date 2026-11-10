@@ -17,12 +17,12 @@ The CI builds it on every push to `main`. The latest one is always the prereleas
 | Piece | What |
 |---|---|
 | `ShellActivity` | Subclass of SDL's `SDLActivity`, which loads `libSDL2.so` and then `libmain.so`. SDL's Java side is compiled from the pinned sources (`$SDL2_SRC/android-project`), not copied here. |
-| `libmain.so` | `shell_main.c` + the **whole** toolkit (`--whole-archive`). Loading it on a device proves that bionic resolves every symbol the runtime uses. Four symbols that a title provides are weak stubs in `shell_main.c`. |
+| `libmain.so` | `shell_main.c` + the **whole** toolkit (`--whole-archive`) + the title, when one is linked (see [A title in the shell](#a-title-in-the-shell)). Loading it on a device proves that bionic resolves every symbol the runtime uses. Four symbols that a title provides are weak stubs in `shell_main.c`, and so is the title's hook `recomp_title_main`. |
 | logcat | `src/platform/android_log.c`: stdout (INFO) and stderr (WARN) go to the tag `xboxrecomp`, one entry per line. `xbox_android_log_init()` is the first call of `SDL_main`. |
 | Window | Black, fullscreen, landscape (`sensorLandscape` + `SDL_HINT_ORIENTATIONS`). |
-| Back | Trapped (`SDL_HINT_ANDROID_TRAP_BACK_BUTTON`). Once shows a « Press Back again to quit » toast (`QUIT_PROMPT`); twice within 2 s returns from `SDL_main`, and SDLActivity then finishes. |
+| Back | Trapped (`SDL_HINT_ANDROID_TRAP_BACK_BUTTON`). Once shows a « Press Back again to quit » toast (`QUIT_PROMPT`); twice within 2 s returns from `SDL_main`, and SDLActivity then finishes. With a title, the title's window does the same and ends the process (see [Quit](#quit)). |
 | Manifest | minSdk 30, target 35, arm64-v8a only, GLES 3.0 required, `allowNativeHeapPointerTagging="false"`, `isGame`. |
-| Per title | `-PxbaApplicationId=…`, `-PxbaLabel=…`, `-PxbaVersionCode=…`. A title replaces `shell_main.c` with its own entry (XBA-33). |
+| Per title | `-PxbaTitleDir=…` (the title's project), `-PxbaApplicationId=…`, `-PxbaLabel=…`, `-PxbaVersionCode=…`. The title is linked next to `shell_main.c`, which stays the entry (XBA-52). |
 | Signing | Debug key generated once per toolchain image, so updates install in place while the image is cached. The release key will be a build secret, never in the repo. |
 
 ## Check list on the device (Alex)
@@ -66,8 +66,8 @@ case-insensitive, like the kernel's. logcat shows `storage: game=… save=… (d
 `Path init: game=…, save=…, user data=…`.
 
 When `default.xbe` is missing, logcat shows `NO_GAME_DATA: default.xbe not found in …` and the shell shows a message
-with the folder to copy the disc to, instead of starting anything. The shell carries no title yet, so after OK it stays
-on its black screen.
+with the folder to copy the disc to, instead of starting anything (with or without a title linked): after OK it stays
+on its black screen; restart the app once the data is pushed.
 
 Device check (XBA-23):
 
@@ -126,6 +126,99 @@ default one, the handler restores it and the instruction faults again, so a real
 the right place. If something replaced the handler in the meantime, the second call puts it back in front and chains
 to the newcomer.
 
-Device check: `RECOMP_SHELL_CRASH_TEST=1` in `recomp.cfg` makes the shell write to NULL right after the ready line.
-Expected: the app closes and logcat shows `Fatal signal 11 (SIGSEGV)` with a backtrace that goes through `SDL_main`
-in `libmain.so`. Remove the line afterwards.
+Device check: `RECOMP_SHELL_CRASH_TEST=1` in `recomp.cfg` makes the shell write to NULL right after the ready line
+(shell without a title, or without game data). Expected: the app closes and logcat shows
+`RECOMP_SHELL_CRASH_TEST: writing to NULL now`, then `Fatal signal 11 (SIGSEGV)` with a backtrace that goes through
+`SDL_main` in `libmain.so`. Remove the line afterwards. The shell no longer waits before the write: the line is there
+because the handler drains the log pipes first ([Last lines before a crash](#last-lines-before-a-crash)).
+
+## A title in the shell
+
+(XBA-52.) A title does not copy or replace `shell_main.c`. It defines one function, and the shell calls it:
+
+```c
+#include "platform/recomp_storage.h"
+int recomp_title_main(const recomp_storage *store);   /* store->game_dir, ->save_dir, ->xbe */
+```
+
+1. `SDL_main` calls `recomp_app_start()` (`src/platform/recomp_app.c`): logcat, `recomp.cfg`, the Android defaults
+   below, storage and `xbox_path_init`, fast cores, the fault handler. A title gets all of them by being linked in.
+2. `SDL_Init`, the fault handler checked again, `xboxrecomp ready (build …, SDL …, title)`.
+3. When `default.xbe` is found and a title is linked, `xbox_HostWindowMain(title_boot)`: the window on the main
+   thread, `recomp_title_main(&store)` on a 64 MB guest thread, the lifecycle watch, Back twice to quit. When the
+   guest returns, the window stays on its last frame (`[FBWIN] guest returned (N); Back twice to quit`): an app does
+   not vanish on its own.
+4. No title linked (the weak `recomp_title_main` is NULL), or no game data: the shell's own black window, as before.
+
+`templates/new-game` is such a title. Built through the app, its `CMakeLists.txt` sees `XBOXRECOMP_SHELL_TITLE` and
+makes the object library `xba_title` instead of an executable (the toolkit is the shell's), and its `main.c` defines
+`recomp_title_main` instead of `main`, taking the XBE path, `game_dir` and `save_dir` from `store` instead of the
+`YOUR_GAME_*` constants. The rest of its boot (memory layout, kernel, bridge, `xbe_entry_point`) is unchanged.
+
+```bash
+# the title project: templates/new-game + its generated C in src/recomp/gen (docs/GETTING_STARTED.md)
+cd android && gradle assembleDebug -PxbaTitleDir=/path/to/my_xbox_game \
+    -PxbaApplicationId=fr.adserver.xboxrecomp.mygame -PxbaLabel="My game"
+# or the NDK alone: cmake -S android/app/src/main/cpp -DXBA_TITLE_DIR=/path/to/my_xbox_game (+ the NDK toolchain)
+```
+
+### The stub title
+
+`tools/android/stub_title.sh OUT` makes a title from `templates/new-game` and the synthetic XBE of `tools/conformance`
+(ours: five leaf functions, no game content), lifted by the pipeline, plus an `xbe_entry_point` that calls the five
+and checks what they return. The CI builds its APK (`--target stub-apk` of `tools/docker/android.Dockerfile`) on every
+push to `main`, after the shell, and attaches `xboxrecomp-stub-<commit>.apk` and `stub-default.xbe` to the
+**shell-latest** prerelease. On Linux the same project builds as the template's executable and prints the same lines
+(x86-64, and arm64 under qemu).
+
+### Android defaults
+
+After `recomp.cfg`, for what neither it nor the environment sets (`recomp_app_set_defaults`):
+
+| Variable | Default on Android | Why |
+|---|---|---|
+| `RECOMP_FB_WINDOW` | `1` | Without it `xbox_HostWindowMain` runs the guest on SDL's thread: no event loop (no pause, no Back) and a 1 MB stack. |
+| `RECOMP_PB_EXEC` | `1` | The pushbuffer executor: its flips are what the window shows. |
+
+`RECOMP_HEADLESS=1` still keeps the window off. `RECOMP_FB_WINDOW=0` or `RECOMP_PB_EXEC=0` in `recomp.cfg` turn either
+off (the kernel reads `RECOMP_PB_EXEC` by presence, so the `=0` is removed from the environment). logcat:
+`defaults: RECOMP_FB_WINDOW=1 RECOMP_PB_EXEC=1 (Android; …)`.
+
+### Quit
+
+Back twice in the title's window calls `recomp_quit(0)` (`src/platform/recomp_quit.c`): the exit hook (the kernel's
+missing-file summary), `xboxrecomp: clean exit`, `fflush` of stdout and stderr, the log pump drained (at most
+500 ms), then `_exit(0)`. Not `exit()`: the guest's threads are still running, and atexit handlers and destructors must
+not run under them. The other atexit reports (`RECOMP_PROFILE`, the ICALL feedback dump, a WAV capture) are desktop
+diagnostics and are skipped on Android. On desktop hosts `recomp_quit` is `exit()`, as before.
+
+### Last lines before a crash
+
+stdout and stderr reach logcat through pipes read by two pump threads (`src/platform/android_log.c`); a line still in
+a pipe when the process dies is lost. So before the fault handler hands a fault that is not guest MMIO to debuggerd,
+it calls `xbox_log_drain(200)`: it waits, at most 200 ms, until both pipes are empty and the pump threads have written
+what they read, and ends a half-written line with a `\n` so that it goes out too. That runs in a signal handler, so it
+only uses lock-free atomics and plain system calls (`ioctl(FIONREAD)`, `clock_gettime`, `nanosleep`, a 1-byte write
+into an empty pipe); it never logs by itself (`__android_log_write` takes locks the crashing thread may hold), it only
+waits for the pump threads to do it. Trade-offs: a pump thread stuck behind the crashing thread is not waited for past
+200 ms (its lines are lost, the crash is not held up); a crash on a pump thread does not wait for itself; a second
+fault during the drain returns at once; a partial stdout line still in stdio's buffer (no `\n`, no `fflush`) is not
+flushed, as `fflush` is not async-signal-safe. When the pipes are empty the drain returns at once, so it costs nothing
+on the way to a tombstone in the usual case. `tests/mmio_fault_chain_posix` (`drain`) checks it on Linux with a slow
+sink.
+
+### Device check (XBA-52), for Alex
+
+1. From **shell-latest**, install the stub APK and push its XBE, then start « xboxrecomp stub »:
+   `adb install -r xboxrecomp-stub-<commit>.apk`,
+   `adb push stub-default.xbe /sdcard/Android/data/fr.adserver.xboxrecomp.stub/files/game/default.xbe`,
+   `adb logcat -c && adb logcat -s xboxrecomp SDL DEBUG AndroidRuntime`. Expected in logcat: `defaults: RECOMP_FB_WINDOW=1
+   RECOMP_PB_EXEC=1`, `xboxrecomp ready (… title)`, `starting the title`, the boot lines (`xbox_MemoryLayoutInit:
+   complete`, `Starting game...`), five `stub title: …` lines and `stub title: all 5 lifted functions OK`, then
+   `[FBWIN] guest returned (0); Back twice to quit`. The screen is black (the stub draws nothing).
+2. Home, wait 10 s, come back: `lifecycle: paused (background)`, then `lifecycle: resumed after ~10000 ms`.
+3. Back twice: `[FBWIN] Back pressed twice, quitting`, `xboxrecomp: clean exit`, the app closes; `adb logcat -b crash`
+   is empty.
+4. Crash lines: push a `recomp.cfg` with `RECOMP_SHELL_CRASH_TEST=1` to the **shell** app (no title) and start it: the
+   `writing to NULL now` line is in logcat above the `Fatal signal 11` and the backtrace. Remove the file afterwards.
+5. Send the logcat lines.
