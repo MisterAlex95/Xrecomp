@@ -93,6 +93,33 @@ RUN printf 'sdk.dir=%s\ncmake.dir=/usr\n' "$ANDROID_HOME" > local.properties \
 FROM scratch AS apk-out
 COPY --from=apk /out/ /
 
+# The stub title APK (XBA-52): templates/new-game around the synthetic XBE of tools/conformance (ours, no game
+# content), lifted by the pipeline and linked into libmain.so through -PxbaTitleDir. The first end-to-end link of
+# generated C for Android. Out of the image with:
+#   docker build -f tools/docker/android.Dockerfile --target stub-apk-out --output type=local,dest=out .
+FROM android AS stub-apk
+ARG XBA_VERSION=dev
+RUN apt-get update && apt-get install -y --no-install-recommends python3-capstone && rm -rf /var/lib/apt/lists/*
+COPY . /src
+WORKDIR /src/android
+RUN /src/tools/android/stub_title.sh /work/stub \
+    && printf 'sdk.dir=%s\ncmake.dir=/usr\n' "$ANDROID_HOME" > local.properties \
+    && gradle --no-daemon --console=plain -PxbaVersion="$XBA_VERSION" -PxbaTitleDir=/work/stub \
+         -PxbaApplicationId=fr.adserver.xboxrecomp.stub -PxbaLabel="xboxrecomp stub" assembleDebug \
+    && mkdir -p /out \
+    && cp app/build/outputs/apk/debug/app-debug.apk /out/xboxrecomp-stub.apk \
+    && cp /work/stub/game/default.xbe /out/stub-default.xbe \
+    && unzip -l /out/xboxrecomp-stub.apk | grep -E 'lib/|classes' | tee /out/stub-apk-contents.txt \
+    && unzip -p /out/xboxrecomp-stub.apk lib/arm64-v8a/libmain.so > /tmp/libmain.so \
+    && "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-nm" -D --defined-only /tmp/libmain.so \
+         | grep -E ' T (recomp_title_main|xbe_entry_point|sub_00011000)$' | tee -a /out/stub-apk-contents.txt \
+    && [ "$(grep -cE ' T (recomp_title_main|xbe_entry_point|sub_00011000)$' /out/stub-apk-contents.txt)" = 3 ] \
+    && rm /tmp/libmain.so \
+    && rm -rf /root/.gradle/caches /root/.gradle/daemon app/build app/.cxx build .gradle /work
+
+FROM scratch AS stub-apk-out
+COPY --from=stub-apk /out/ /
+
 # The C test projects as Android executables, in a bundle that runs on a device over adb (XBA-19).
 #   docker build -f tools/docker/android.Dockerfile --target device-tests-out --output type=local,dest=out .
 #   tools/android/run_tests.sh out/xba-device-tests.tar.gz

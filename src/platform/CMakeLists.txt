@@ -52,6 +52,14 @@ target_include_directories(host_cpus PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 if(NOT WIN32)
     add_library(recomp_storage STATIC recomp_storage.c)
     target_include_directories(recomp_storage PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+
+    # recomp_app: a title's start-up on a host without a shell, in one call
+    # (recomp_app.h, XBA-52): logcat, recomp.cfg, host defaults, storage,
+    # fast cores, fault handler. Calls the kernel (xbox_path_init, the fault
+    # handler), hence a library of its own; the Android app shell links it.
+    add_library(recomp_app STATIC recomp_app.c)
+    target_include_directories(recomp_app PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(recomp_app PUBLIC recomp_storage recomp_cfg host_cpus platform xbox_kernel)
 endif()
 
 if(WIN32)
@@ -60,7 +68,7 @@ if(WIN32)
     target_include_directories(platform INTERFACE ${XBOXRECOMP_SRC_DIR})
     target_link_libraries(platform INTERFACE recomp_exit_hook)
 else()
-    add_library(platform STATIC win32_compat.c android_log.c recomp_lifecycle.c)
+    add_library(platform STATIC win32_compat.c android_log.c recomp_lifecycle.c recomp_quit.c)
     target_include_directories(platform PUBLIC
         ${XBOXRECOMP_SRC_DIR}
         ${CMAKE_CURRENT_SOURCE_DIR}

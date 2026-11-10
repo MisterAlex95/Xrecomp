@@ -1,4 +1,5 @@
-// One APK per title: the title's build passes its own applicationId and label (-PxbaApplicationId=..., -PxbaLabel=...).
+// One APK per title: the title's build passes its own applicationId and label (-PxbaApplicationId=..., -PxbaLabel=...)
+// and its project (-PxbaTitleDir=...).
 // SDL2's Java side (org.libsdl.app) is compiled from the pinned SDL2 sources, not copied into this repo.
 plugins {
     id 'com.android.application'
@@ -7,6 +8,8 @@ plugins {
 def sdl2Src = System.getenv('SDL2_SRC') ?: findProperty('sdl2Src')
 if (!sdl2Src) throw new GradleException('Set SDL2_SRC (or -Psdl2Src=...) to the SDL2 sources (release-2.32.10)')
 def xbaVersion = findProperty('xbaVersion') ?: 'dev'
+// A title linked into libmain.so (XBA-52): its project directory, a copy of templates/new-game with its generated C.
+def xbaTitleDir = findProperty('xbaTitleDir') ?: ''
 
 android {
     namespace 'fr.adserver.xboxrecomp'
@@ -24,7 +27,7 @@ android {
         externalNativeBuild {
             cmake {
                 arguments "-DXBOXRECOMP_SDL2_SOURCE_DIR=${sdl2Src}", "-DXBA_VERSION=${xbaVersion}",
-                          '-DXBOXRECOMP_BUILD_TESTS=OFF'
+                          '-DXBOXRECOMP_BUILD_TESTS=OFF', "-DXBA_TITLE_DIR=${xbaTitleDir}"
             }
         }
     }

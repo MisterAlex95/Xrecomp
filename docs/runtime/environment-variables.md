@@ -86,7 +86,7 @@ The executor is itself opt-in: set `RECOMP_PB_EXEC=1` to execute the pushbuffer.
 
 | Variable | Default | What it does | Where |
 |---|---|---|---|
-| `RECOMP_PB_EXEC` | off | Executes the title's pushbuffer. | `nv2a_pb_scan.c`, `xbox_memory_layout.c` |
+| `RECOMP_PB_EXEC` | off (Android: on) | Executes the title's pushbuffer. On Android the app shell sets it unless `recomp.cfg` says `RECOMP_PB_EXEC=0` (docs/android/app-shell.md). | `nv2a_pb_scan.c`, `xbox_memory_layout.c` |
 | `RECOMP_PB_SCAN` | off | Read-only survey of the pushbuffer; ranks what is not implemented. | `nv2a_pb_scan.c`, `xbox_memory_layout.c` |
 | `RECOMP_PB_WALK=dma` | off | Walks the pushbuffer as the DMA engine does, which delivers D3D's software-method interrupt. | `nv2a_pb_scan.c` |
 | `RECOMP_NV2A_TRACE` | off | Shows whether `DMA_PUT` moves at all. | `xbox_memory_layout.c` |
@@ -123,7 +123,7 @@ The executor is itself opt-in: set `RECOMP_PB_EXEC=1` to execute the pushbuffer.
 
 | Variable | Default | What it does | Where |
 |---|---|---|---|
-| `RECOMP_FB_WINDOW` | off | Opens a window showing the frame buffer. | `fb_present.c`, `fb_present_sdl.c` |
+| `RECOMP_FB_WINDOW` | off (Android: on) | Opens a window showing the frame buffer. On Android the app shell sets it unless `recomp.cfg` says `RECOMP_FB_WINDOW=0`; `RECOMP_HEADLESS=1` keeps it off everywhere. | `fb_present.c`, `fb_present_sdl.c` |
 | `RECOMP_FB_VA=<va>` | follows the draw surface | Pins the window to one guest address. | `fb_present.c` |
 | `RECOMP_FB_WINDOW_DUMP_EVERY=N` | 0 | With `RECOMP_FB_DUMP`: dumps what the window shows every N frames. | `fb_present.c` |
 | `RECOMP_WINDOW_SCALE=1..8` | 2 | Client-area scale. | `fb_present.c`, `fb_present_sdl.c` |

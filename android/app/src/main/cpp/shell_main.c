@@ -1,43 +1,45 @@
 /* The app shell's SDL_main (XBA-18): what every title's APK starts from.
  *
+ * recomp_app_start() (src/platform/recomp_app.c, XBA-52) does the start-up:
  * - stdout / stderr go to logcat (tag "xboxrecomp") before anything prints;
  * - RECOMP_* options from <external files dir>/recomp.cfg, before any library
- *   starts (XBA-26);
+ *   starts (XBA-26), then the Android defaults (RECOMP_FB_WINDOW,
+ *   RECOMP_PB_EXEC on);
  * - the game data in <external files dir>/game/ (or RECOMP_GAME_DIR), the
- *   saves in <internal files dir>/save/, handed to xbox_path_init; a message
- *   (NO_GAME_DATA) when default.xbe is not there (XBA-23);
+ *   saves in <internal files dir>/save/, handed to xbox_path_init (XBA-23);
  * - the runtime on the fast cores of a big.LITTLE SoC, before any thread is
  *   created, so every thread inherits it (XBA-25);
  * - the trapped-MMIO fault handler, chained to debuggerd / ART so real
- *   crashes keep their tombstone, checked again after SDL_Init (XBA-22);
- * - a black, fullscreen, landscape window;
- * - "xboxrecomp ready" with the build version;
- * - Back once shows QUIT_PROMPT (a toast), twice within 2 s quits: SDL_main
- *   returns and SDLActivity finishes;
- * - "lifecycle: paused" / "resumed after N ms" when the app leaves and comes
- *   back (XBA-24).
+ *   crashes keep their tombstone (XBA-22); checked again here after SDL_Init.
  *
- * A title replaces this file with its own entry (the template's WinMain path)
- * once the generated C is built for Android (XBA-33). */
+ * Then "xboxrecomp ready" with the build version, and:
+ * - a title linked in (it defines recomp_title_main, XBA-52) and default.xbe
+ *   found: xbox_HostWindowMain runs the title on its guest thread, with the
+ *   window, Back twice to quit (flush, drain logcat, _exit(0): « clean
+ *   exit ») and the lifecycle;
+ * - otherwise the shell's own black, fullscreen, landscape window: a message
+ *   (NO_GAME_DATA) when default.xbe is not there; Back once shows
+ *   QUIT_PROMPT (a toast), twice within 2 s quits: SDL_main returns and
+ *   SDLActivity finishes; "lifecycle: paused" / "resumed after N ms" when
+ *   the app leaves and comes back (XBA-24).
+ *
+ * A title does not replace this file: it is linked next to it (android/app's
+ * CMake option XBA_TITLE_DIR, docs/android/app-shell.md). */
 #include <SDL.h>
 #include <stdio.h>
 #include <stdlib.h>
 
-#include "platform/android_log.h"
-#include "platform/recomp_cfg.h"
-#include "platform/host_cpus.h"
-#include "platform/recomp_storage.h"
+#include "platform/recomp_app.h"
 #include "platform/recomp_lifecycle.h"
+#include "platform/recomp_quit.h"
 #include "kernel/xbox_memory_layout.h"
+#include "video/video_player.h"     /* xbox_HostWindowMain */
 
 #ifndef XBA_VERSION
 #define XBA_VERSION "dev"
 #endif
 
 #define BACK_WINDOW_MS 2000
-
-/* kernel/kernel.h declares it, among much that the shell has no use for. */
-extern void xbox_path_init(const char *game_dir, const char *save_dir);
 
 /* User-facing text, named by the key the spec and the tests use. English
  * only until the app has a strings table of its own. */
@@ -57,6 +59,18 @@ __attribute__((weak)) recomp_func_t recomp_lookup_manual(unsigned int va) { (voi
 __attribute__((weak)) int g_fe_cursor;
 __attribute__((weak)) int fe_menu_get_pb_state(void) { return 0; }
 
+/* The title's boot (recomp_app.h). Weak and undefined without a title: the
+ * address is then NULL and the shell runs its own window. */
+extern int recomp_title_main(const recomp_storage *store) __attribute__((weak));
+
+static const recomp_storage *s_title_store;
+
+/* xbox_HostWindowMain's guest_main, on the guest thread. */
+static int title_boot(void)
+{
+    return recomp_title_main(s_title_store);
+}
+
 /* Background / foreground (XBA-24): the same watch as the title's window
  * (fb_present_sdl.c), so logcat shows "lifecycle: paused" / "resumed after
  * N ms" on the shell too. */
@@ -73,34 +87,11 @@ static int SDLCALL lifecycle_watch(void *user, SDL_Event *ev)
 int main(int argc, char *argv[])
 {
     (void)argc; (void)argv;
-    if (xbox_android_log_init() != 0)
-        SDL_Log("xboxrecomp: stdout/stderr redirect failed, runtime messages will be lost");
-
-    /* RECOMP_* switches: no shell environment on Android, so a file in the
-     * app's external files dir (adb push recomp.cfg /sdcard/Android/data/<id>/files/). */
-    const char *ext = SDL_AndroidGetExternalStoragePath();
-    if (ext) {
-        char cfg[1024];
-        SDL_snprintf(cfg, sizeof cfg, "%s/recomp.cfg", ext);
-        if (recomp_cfg_load(cfg) == 0)
-            printf("recomp.cfg: none (read from %s when present)\n", cfg);
-    }
-
-    /* Game data and saves, after recomp.cfg (which may set RECOMP_GAME_DIR)
-     * and before any title code opens a file. */
+    /* Start-up steps, shared with every title (recomp_app.h). */
     recomp_storage store;
-    int have_game = recomp_storage_resolve(ext, SDL_AndroidGetInternalStoragePath(), &store);
-    if (have_game >= 0)
-        xbox_path_init(store.game_dir, store.save_dir);
-    else
-        fprintf(stderr, "xboxrecomp: no usable storage paths (external %s)\n", ext ? ext : "none");
-
-    /* After recomp.cfg, which may say RECOMP_BIG_CORES=0; before SDL_Init,
-     * whose threads should inherit the mask too. */
-    recomp_host_cpus_init();
-
-    if (xbox_PosixInstallMmioFaultHandler() != 0)
-        fprintf(stderr, "xboxrecomp: could not install the MMIO fault handler\n");
+    int have_game = recomp_app_start(SDL_AndroidGetExternalStoragePath(),
+                                     SDL_AndroidGetInternalStoragePath(), &store);
+    int run_title = have_game > 0 && recomp_title_main != NULL;
 
     /* Back is ours: the shell decides when it quits (twice within 2 s). */
     SDL_SetHint(SDL_HINT_ANDROID_TRAP_BACK_BUTTON, "1");
@@ -110,6 +101,27 @@ int main(int argc, char *argv[])
         fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());
         return 1;
     }
+    /* SDL may have installed handlers of its own: make sure ours is still
+     * in front (it chains to theirs). */
+    xbox_PosixInstallMmioFaultHandler();
+
+    SDL_version sdl;
+    SDL_GetVersion(&sdl);
+    if (run_title) {
+        printf("xboxrecomp ready (build %s, SDL %d.%d.%d, title)\n",
+               XBA_VERSION, sdl.major, sdl.minor, sdl.patch);
+        printf("xboxrecomp: game data: %s\n", store.xbe);
+        printf("xboxrecomp: starting the title\n");
+        /* The title's window owns this thread from here: Back twice ends the
+         * process there (recomp_quit). It returns only when the window is
+         * off (RECOMP_HEADLESS=1, RECOMP_FB_WINDOW=0, SDL video failing) and
+         * the title returned. */
+        s_title_store = &store;
+        int rc = xbox_HostWindowMain(title_boot);
+        printf("xboxrecomp: title returned %d\n", rc);
+        recomp_quit(rc);
+    }
+
     SDL_AddEventWatch(lifecycle_watch, NULL);
     SDL_Window *win = SDL_CreateWindow("xboxrecomp", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
                                        0, 0, SDL_WINDOW_FULLSCREEN_DESKTOP);
@@ -121,20 +133,14 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    /* SDL may have installed handlers of its own: make sure ours is still
-     * in front (it chains to theirs). */
-    xbox_PosixInstallMmioFaultHandler();
-
     int w = 0, h = 0;
     SDL_GetRendererOutputSize(ren, &w, &h);
-    SDL_version sdl;
-    SDL_GetVersion(&sdl);
     printf("xboxrecomp ready (build %s, SDL %d.%d.%d, %dx%d)\n",
            XBA_VERSION, sdl.major, sdl.minor, sdl.patch, w, h);
 
     /* No title data: say where it goes instead of starting a title that
-     * cannot open its files. The shell carries no title yet, so for now it
-     * shows the message and stays on its black screen. */
+     * cannot open its files. It shows the message and stays on its black
+     * screen (the app is restarted once the data is pushed). */
     if (have_game <= 0) {
         char msg[3 * RECOMP_STORAGE_PATH_MAX];
         const char *dir = have_game == 0 ? store.game_dir : "(no storage)";
@@ -143,16 +149,17 @@ int main(int argc, char *argv[])
         if (SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_INFORMATION, "xboxrecomp", msg, win) != 0)
             fprintf(stderr, "message box failed: %s\n", SDL_GetError());
     } else {
-        printf("xboxrecomp: game data: %s\n", store.xbe);
+        printf("xboxrecomp: game data: %s (no title linked)\n", store.xbe);
     }
 
     /* RECOMP_SHELL_CRASH_TEST=1 (recomp.cfg): a deliberate null write outside
      * guest MMIO, to check on the device that the crash still reaches
      * debuggerd and gives a tombstone whose backtrace names this function. */
     if (getenv("RECOMP_SHELL_CRASH_TEST")) {
+        /* No delay before the write any more: the fault handler drains the
+         * log pump before it chains to debuggerd (XBA-52), so this line must
+         * be in logcat above the tombstone. */
         printf("xboxrecomp: RECOMP_SHELL_CRASH_TEST: writing to NULL now\n");
-        fflush(stdout);
-        SDL_Delay(200);                      /* let the line reach logcat */
         *(volatile int *)0 = 0x58424121;     /* "XBA!" */
     }
 

@@ -17,6 +17,7 @@
  *   - Set YOUR_GAME_ENTRY_POINT to the XBE entry point address
  *   - Set YOUR_GAME_XBE_PATH to where the XBE file lives
  *   - Set YOUR_GAME_DIR to the game data directory
+ *     (on Android both come from the app's storage instead, see below)
  *   - Add any CRT global pre-initialization your game needs
  *   - Customize the VEH handler for game-specific crash diagnosis
  *
@@ -42,6 +43,16 @@
 
 /* xboxrecomp runtime headers */
 #include <xbox/xboxrecomp.h>
+
+/* Android (XBOXRECOMP_SHELL_TITLE, set when android/app builds this project
+ * with XBA_TITLE_DIR): the app shell owns SDL_main. It does the start-up
+ * (logcat, recomp.cfg, storage, fast cores, fault handler) and calls
+ * recomp_title_main() below on the guest thread of its window, with the
+ * directories it resolved: game_dir (D:\), save_dir, and the XBE as found
+ * on disk. See docs/android/app-shell.md. */
+#ifdef XBOXRECOMP_SHELL_TITLE
+#include "platform/recomp_storage.h"
+#endif
 
 /*
  * If xboxrecomp.h is not an umbrella header in your setup, include
@@ -87,6 +98,12 @@ extern ptrdiff_t g_xbox_mem_offset;
 #define YOUR_GAME_ENTRY_POINT   0x00000000  /* XBE entry point VA */
 #define YOUR_GAME_XBE_PATH      "game\\Your Game Title\\default.xbe"
 #define YOUR_GAME_DIR            "game\\Your Game Title"
+
+/* What the boot below uses: the constants above, or on Android the paths
+ * recomp_title_main() was handed. save_dir NULL = the kernel's default. */
+static const char *s_xbe_path = YOUR_GAME_XBE_PATH;
+static const char *s_game_dir = YOUR_GAME_DIR;
+static const char *s_save_dir = NULL;
 
 /* ── Forward declarations ──────────────────────────────────── */
 
@@ -341,7 +358,7 @@ static int game_main(void *hInstance, void *hPrevInstance, char *lpCmdLine,
 #endif
 
     /* Step 1: Load XBE */
-    if (!load_xbe(YOUR_GAME_XBE_PATH, &xbe_data, &xbe_size)) {
+    if (!load_xbe(s_xbe_path, &xbe_data, &xbe_size)) {
         MessageBoxA(NULL, "Failed to load default.xbe.\n"
                     "Place the game files in the 'game' subdirectory.",
                     "Recomp", MB_ICONERROR);
@@ -382,7 +399,7 @@ static int game_main(void *hInstance, void *hPrevInstance, char *lpCmdLine,
     /* Step 4: Set game directory for file I/O path translation */
     {
         extern void xbox_path_init(const char *game_dir, const char *save_dir);
-        xbox_path_init(YOUR_GAME_DIR, NULL);
+        xbox_path_init(s_game_dir, s_save_dir);
     }
 
     /* Step 5: Initialize kernel bridge (thunk table in Xbox memory) */
@@ -488,6 +505,19 @@ static BOOL load_xbe(const char *path, void **out_data, size_t *out_size)
     return TRUE;
 }
 
+#ifdef XBOXRECOMP_SHELL_TITLE
+/* Android: the app shell's hook (src/platform/recomp_app.h). Called once
+ * default.xbe is found, on the guest thread (64 MB stack) of the window.
+ * When the guest returns, the window stays on its last frame until Back is
+ * pressed twice. */
+int recomp_title_main(const recomp_storage *store)
+{
+    s_xbe_path = store->xbe;
+    s_game_dir = store->game_dir;
+    s_save_dir = store->save_dir;
+    return game_main(NULL, NULL, NULL, 0);
+}
+#else
 /* Console entry point (for debugging -- lets you see printf output) */
 int main(int argc, char **argv)
 {
@@ -499,3 +529,4 @@ int main(int argc, char **argv)
     return game_main(NULL, NULL, NULL, 0);
 #endif
 }
+#endif /* XBOXRECOMP_SHELL_TITLE */

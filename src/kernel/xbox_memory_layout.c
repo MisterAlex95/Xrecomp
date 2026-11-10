@@ -908,6 +908,8 @@ int xbox_PosixMmioFault(void *ucv, uintptr_t fault)
  * the crash and its backtrace are the original ones. SA_ONSTACK: bionic gives
  * every thread an alternate signal stack, which a stack overflow needs. */
 #include <signal.h>
+#include "platform/android_log.h"
+#define XBOX_FAULT_LOG_DRAIN_MS 200
 static struct sigaction g_mmio_prev_segv, g_mmio_prev_bus;
 static volatile sig_atomic_t g_mmio_handler_installed;
 
@@ -917,6 +919,11 @@ static void mmio_fault_handler(int sig, siginfo_t *si, void *ucv)
 
     if (xbox_PosixMmioFault(ucv, (uintptr_t)si->si_addr))
         return;
+    /* A real crash: let the log pump hand the last lines to logcat before
+     * debuggerd writes the tombstone and the process goes (XBA-52). Bounded,
+     * async-signal-safe, and immediate when the pipes are empty or no pump
+     * runs (desktop) -- see xbox_log_drain in platform/android_log.h. */
+    xbox_log_drain(XBOX_FAULT_LOG_DRAIN_MS);
     prev = sig == SIGBUS ? &g_mmio_prev_bus : &g_mmio_prev_segv;
     if (prev->sa_flags & SA_SIGINFO) {
         if (prev->sa_sigaction) {

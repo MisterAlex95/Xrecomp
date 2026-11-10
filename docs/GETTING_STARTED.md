@@ -293,6 +293,16 @@ named after your entry point VA.
 **3. Game data** — put the extracted `default.xbe` and data files where
 `YOUR_GAME_DIR` points, relative to the `.exe`.
 
+**Android** — the same project, unchanged, builds into the Android app shell
+instead of an executable: `cd xboxrecomp/android && gradle assembleDebug
+-PxbaTitleDir=/path/to/my_xbox_game`. There the template's `main.c` defines
+`recomp_title_main()` instead of `main()`, the shell does the start-up
+(logcat, `recomp.cfg`, storage, window, lifecycle) and hands it the XBE path,
+the game directory and the save directory, so the two path constants are not
+used. See [docs/android/app-shell.md](android/app-shell.md#a-title-in-the-shell);
+`tools/android/stub_title.sh` builds a complete example from the synthetic
+conformance XBE.
+
 ## Step 7: Build and Crash
 
 From `my_xbox_game/` — **not** from the toolkit clone:
