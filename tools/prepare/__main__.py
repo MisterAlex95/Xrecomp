@@ -17,6 +17,10 @@ already there for this XBE and this toolkit:
 The work folder (default: <title id>-work next to SOURCE) holds everything it
 writes; nothing is written into the toolkit. Nothing from the game is ever
 uploaded or shared: the output is for your own machines.
+
+With --android it makes a title pack for the Android app instead (libtitle.so
++ pack.json, built with clang and ld.lld, no CMake), with machine-readable
+progress lines: docs/android/prepare.md.
 """
 
 import argparse
@@ -61,12 +65,25 @@ def sha256(path):
     return h.hexdigest()
 
 
+VERSION_FILE = os.path.join(ROOT, "tools", "VERSION")
+
+
 def toolkit_version():
+    """The toolkit's commit: git, else tools/VERSION (written into the app's
+    assets, where there is no git), else "unknown"."""
     try:
         return subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT,
                                        stderr=subprocess.DEVNULL, text=True).strip()
     except (OSError, subprocess.CalledProcessError):
-        return "unknown"
+        pass
+    try:
+        with open(VERSION_FILE) as f:
+            v = f.read().split()
+        if v:
+            return v[0]
+    except OSError:
+        pass
+    return "unknown"
 
 
 def find_xbe(source, work):
@@ -158,7 +175,28 @@ def main(argv=None):
     ap.add_argument("--no-data", action="store_true",
                     help="do not extract the disc image for the desktop build")
     ap.add_argument("--force", action="store_true", help="redo every step")
+    an = ap.add_argument_group("Android title pack (docs/android/prepare.md)")
+    an.add_argument("--android", action="store_true", help="make a title pack for the Android app")
+    an.add_argument("--pack-dir", help="packs folder: the pack goes to PACK_DIR/<TITLEID>/")
+    an.add_argument("--cc", help="clang (or the multicall LLVM binary, with --cc-prefix-arg clang)")
+    an.add_argument("--cc-prefix-arg", action="append", default=[], metavar="ARG",
+                    help="argument(s) put right after --cc (multicall: clang)")
+    an.add_argument("--ld", help="ld.lld (default: CC ld.lld for a multicall CC, else ld.lld next to CC)")
+    an.add_argument("--ld-prefix-arg", action="append", default=[], metavar="ARG")
+    an.add_argument("--sysroot", help="the NDK sysroot (usr/include, usr/lib/aarch64-linux-android/30)")
+    an.add_argument("--builtins", help="libclang_rt.builtins-aarch64-android.a (default: asked from CC)")
+    an.add_argument("--shell-lib", help="the app shell's libmain.so, which the pack links against")
+    an.add_argument("--shell-abi", type=int, default=1, help="the shell ABI the app exports (default 1)")
+    an.add_argument("--jobs", type=int, default=0, help="parallel compiles (default: from free memory)")
+    an.add_argument("--opt", default="1", choices=("0", "1", "2", "3", "s"), help="clang -O level (default 1)")
+    an.add_argument("--python", help="Python for the pipeline steps (default: $XBA_PYTHON, else this one)")
+    an.add_argument("--extra-src", action="append", default=[], metavar="FILE.c",
+                    help="an extra C file compiled into the pack (src/extra/)")
+    an.add_argument("--include-dir", action="append", default=[], metavar="DIR", help="an extra -I")
     a = ap.parse_args(argv)
+    if a.android:
+        from tools.prepare import android
+        return android.run(a, sys.modules[__name__])
     py = sys.executable
     src = os.path.abspath(a.source)
     tmp_work = a.work or os.path.join(os.path.dirname(src), "xboxrecomp-work")
