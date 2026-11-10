@@ -4,3 +4,6 @@
 #   <project>/<test>   a test of tests/<project> (root/<test>: the root build's ctest)
 #   <project>          the project fails to configure or build
 mmio_decode_a64/mmio_decode_a64   # trapped ldr s/d/q: qemu-user's fpsimd_context write-back, to confirm on hardware (XBA-45)
+# Intermittent under qemu-user only (x86-64: 0/120; qemu: about 1 run in 6 with RECOMP_GUEST_WINDOW=1, 2 in 5
+# without): the second xbox_MemoryLayoutInit after a shutdown runs on libc pages that read as zeros. XBA-55.
+flaky memory_layout_posix/memory_layout_posix_test

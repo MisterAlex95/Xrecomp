@@ -84,6 +84,26 @@ def test_listed_test_that_is_gone_is_stale(tmp_path):
     assert "STALE     renamed/test: not found" in out
 
 
+FLAKY = EXPECTED + "flaky adpcm_decode/adpcm_decode   # intermittent, has a ticket\n"
+
+
+@pytest.mark.parametrize("result,row", [
+    (FAIL, "ok | ok | 0 | 0 | 1"),
+    (PASS, "ok | ok | 1 | 0 | 0"),
+])
+def test_flaky_entry_may_fail_or_pass(tmp_path, result, row):
+    rc, out = run(write_ctest(tmp_path, expected=FLAKY, junit={"adpcm_decode": {"adpcm_decode": result}},
+                              rows={"adpcm_decode": row}))
+    assert rc == 0, out
+    assert "adpcm_decode/adpcm_decode" in out
+
+
+def test_flaky_entry_that_is_gone_is_stale(tmp_path):
+    rc, out = run(write_ctest(tmp_path, expected=EXPECTED + "flaky renamed/test\n"))
+    assert rc == 1, out
+    assert "STALE     renamed/test: not found" in out
+
+
 def test_missing_report_is_an_input_error(tmp_path):
     args = write_ctest(tmp_path)
     args[args.index("--report") + 1] = str(tmp_path / "nope.md")
