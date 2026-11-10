@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources xmlns:tools="http://schemas.android.com/tools" tools:ignore="ResourceName">
+    <string name="NO_GAME_SET_UP">Aucun jeu n\'est configuré. Choisissez le dossier de votre disque extrait (default.xbe et ses fichiers), ou une image disque (.iso).</string>
+    <string name="NO_GAME_DATA">Aucune donnée de jeu dans %1$s (pas de default.xbe). Choisissez le dossier du jeu ou une image disque.</string>
+    <string name="GAME_FOLDER_GONE">Le dossier du jeu %1$s n\'existe plus (supprimé, ou carte SD retirée). Choisissez de nouveau le jeu.</string>
+    <string name="GAME_FOLDER_NO_ACCESS">Le dossier du jeu %1$s est illisible : l\'accès à tous les fichiers est désactivé. Réactivez-le (choisissez de nouveau le dossier pour qu\'il soit demandé), ou choisissez de nouveau le jeu.</string>
+    <string name="CURRENT_GAME">Jeu : %1$s\nDossier : %2$s</string>
+    <string name="GAME_UNNAMED">(configuré hors de cet écran)</string>
+    <string name="GAME_RUNNING">Le jeu est lancé : il se ferme si vous en choisissez un autre. Les sauvegardes sont conservées.</string>
+
+    <string name="CHOOSE_FOLDER">Choisir le dossier du jeu</string>
+    <string name="CHOOSE_ISO">Choisir une image disque (ISO)</string>
+    <string name="START_GAME">Lancer le jeu</string>
+    <string name="CANCEL">Annuler</string>
+
+    <string name="NOT_A_GAME_FOLDER">Ce dossier ne contient pas de default.xbe : ce n\'est pas un disque Xbox extrait. Choisissez le dossier qui contient default.xbe.</string>
+    <string name="NOT_AN_ISO">%1$s n\'est pas une image disque : choisissez un fichier .iso ou .xiso.</string>
+    <string name="NOT_A_GAME_IMAGE">Pas une image disque Xbox, ou pas de default.xbe dedans : %1$s</string>
+    <string name="WRONG_GAME">Ce n\'est pas le jeu prévu pour cette application (autre jeu ou autre région) : son default.xbe ne correspond pas. Rien n\'a été modifié.</string>
+    <string name="NOT_ENOUGH_SPACE">Espace libre insuffisant : le jeu demande %1$s, il reste %2$s.</string>
+    <string name="IMPORT_FAILED">L\'import a échoué : %1$s. Rien n\'a été modifié.</string>
+    <string name="CANCELED">Import annulé. Rien n\'a été modifié.</string>
+    <string name="PICKER_MISSING">Cet appareil n\'a pas de sélecteur de fichiers.</string>
+
+    <string name="ALL_FILES_TITLE">Lire le jeu sur place ?</string>
+    <string name="ALL_FILES_EXPLAIN">Avec « Accès à tous les fichiers », l\'application lit le jeu directement dans le dossier choisi, sur le téléphone ou une carte SD : pas de copie, et cela marche pour un disque de 4 Go. L\'application ne lit que le dossier du jeu que vous choisissez.\n\nSans cet accès, le dossier est copié dans le stockage de l\'application : il faut autant d\'espace libre en plus et quelques minutes, et la copie disparaît avec l\'application.</string>
+    <string name="ALL_FILES_GRANT">Autoriser l\'accès à tous les fichiers</string>
+    <string name="ALL_FILES_COPY">Copier plutôt</string>
+
+    <string name="CHECKING">Vérification du jeu…</string>
+    <string name="COPYING">Copie du jeu…</string>
+    <string name="EXTRACTING">Extraction de l\'image disque…</string>
+    <string name="PROGRESS_BYTES">%1$s sur %2$s</string>
+    <string name="STARTING">Lancement de %1$s</string>
+
+    <string name="SHORTCUT_CHANGE_GAME">Changer de jeu</string>
+    <string name="SHORTCUT_CHANGE_GAME_LONG">Changer le dossier du jeu</string>
+</resources>
