@@ -4130,6 +4130,23 @@ uint32_t xbox_HeapAlloc(uint32_t size, uint32_t alignment);
 #define XBOX_THREAD_STACK_SIZE  (512 * 1024)
 #define XBOX_MAX_THREAD_STACKS  8
 
+/* RECOMP_THREAD_STACKS=N raises the number of worker stacks alive at once.
+ * Eight was enough for every title so far; Fable: The Lost Chapters has more
+ * workers than that alive during its front-end load, and the ninth fell back
+ * to running inline, where it blocked the caller on an event only the caller
+ * would have signalled. Each stack costs 512 KB of guest heap, so the default
+ * stays at 8 and a title that needs more asks. */
+static int max_thread_stacks(void)
+{
+    static int n;
+    if (!n) {
+        const char *e = getenv("RECOMP_THREAD_STACKS");
+        int v = e ? atoi(e) : 0;
+        n = v > 0 ? v : XBOX_MAX_THREAD_STACKS;
+    }
+    return n;
+}
+
 static int g_thread_stacks_used = 0;
 
 /* A TIB and TLS block for a newly spawned guest thread.
@@ -4184,7 +4201,7 @@ uint32_t xbox_AllocThreadStack(void)
 {
     uint32_t base;
 
-    if (g_thread_stacks_used >= XBOX_MAX_THREAD_STACKS) {
+    if (g_thread_stacks_used >= max_thread_stacks()) {
         return 0;
     }
 
