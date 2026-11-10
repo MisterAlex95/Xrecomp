@@ -152,7 +152,7 @@ WORKDIR /src/android
 RUN /src/tools/android/stub_title.sh /work/stub \
     && printf 'sdk.dir=%s\ncmake.dir=/usr\n' "$ANDROID_HOME" > local.properties \
     && gradle --no-daemon --console=plain -PxbaVersion="$XBA_VERSION" -PxbaTitleDir=/work/stub \
-         -PxbaApplicationId=fr.adserver.xboxrecomp.stub -PxbaLabel="xboxrecomp stub" assembleDebug \
+         -PxbaApplicationId=fr.adserver.xboxrecomp.stub -PxbaLabel="XRecomp stub" assembleDebug \
     && mkdir -p /out \
     && cp app/build/outputs/apk/debug/app-debug.apk /out/xboxrecomp-stub.apk \
     && cp /work/stub/game/default.xbe /out/stub-default.xbe \

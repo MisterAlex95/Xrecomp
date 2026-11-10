@@ -202,8 +202,8 @@
     <!-- About -->
     <string name="ABOUT_CAPS">This build</string>
     <string name="ABOUT_BUILD">Build</string>
-    <string name="ABOUT_TAGLINE">Android port of xboxrecomp</string>
-    <string name="ABOUT_TEXT">A statically recompiled game, run by the xboxrecomp runtime on Android arm64. No game data is included: the app reads the copy you set up from a disc you own.</string>
+    <string name="ABOUT_TAGLINE">Built on the xboxrecomp runtime</string>
+    <string name="ABOUT_TEXT">A statically recompiled game, run by XRecomp (the xboxrecomp runtime) on Android arm64. No game data is included: the app reads the copy you set up from a disc you own.</string>
     <string name="ABOUT_LICENCE">xboxrecomp: MIT. SDL2: zlib.</string>
     <string name="ABOUT_LEGAL">Not affiliated with or endorsed by the console\'s or the game\'s makers. Use only games you own.</string>
     <string name="GAME_CHECK_NONE">None (any game)</string>

@@ -124,7 +124,7 @@ android {
         targetSdk 35
         versionCode((findProperty('xbaVersionCode') ?: '1') as int)
         versionName xbaVersion
-        resValue 'string', 'app_name', (findProperty('xbaLabel') ?: 'xboxrecomp')
+        resValue 'string', 'app_name', (findProperty('xbaLabel') ?: 'XRecomp')
         resValue 'string', 'xba_xbe_sha256', xbaXbeSha256
         // Shown on the launcher's About screen (XBA-41).
         resValue 'string', 'xba_version', xbaVersion

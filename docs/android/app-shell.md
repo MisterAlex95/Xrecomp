@@ -31,7 +31,7 @@ The CI builds it on every push to `main`. The latest one is always the prereleas
 ## Check list on the device (Alex)
 
 1. `adb install -r xboxrecomp-shell.apk`, then `adb logcat -c && adb logcat -s xboxrecomp SDL AndroidRuntime DEBUG`.
-2. Launch « xboxrecomp ». Expected: a black screen, fullscreen, landscape. logcat shows
+2. Launch « XRecomp ». Expected: a black screen, fullscreen, landscape. logcat shows
    `xboxrecomp ready (build <commit>, SDL 2.32.10, <w>x<h>)`. Without game data the launcher's welcome screen shows
    instead ([The launcher](#the-launcher)); push any `default.xbe` to `files/game/` first and press Play on the
    launcher's home: the shell then shows a « Game data found … This APK has no recompiled game in it » message box
@@ -937,7 +937,7 @@ sink.
 
 ### Device check (XBA-52), for Alex
 
-1. From **shell-latest**, install the stub APK and push its XBE, then start « xboxrecomp stub »:
+1. From **shell-latest**, install the stub APK and push its XBE, then start « XRecomp stub »:
    `adb install -r xboxrecomp-stub-<commit>.apk`,
    `adb push stub-default.xbe /sdcard/Android/data/fr.adserver.xboxrecomp.stub/files/game/default.xbe`,
    `adb logcat -c && adb logcat -s xboxrecomp SDL DEBUG AndroidRuntime`. Expected in logcat: `defaults: RECOMP_FB_WINDOW=1

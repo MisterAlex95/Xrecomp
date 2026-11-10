@@ -194,8 +194,8 @@
     <!-- À propos -->
     <string name="ABOUT_CAPS">Cette version</string>
     <string name="ABOUT_BUILD">Build</string>
-    <string name="ABOUT_TAGLINE">Portage Android de xboxrecomp</string>
-    <string name="ABOUT_TEXT">Un jeu recompilé statiquement, exécuté par le runtime xboxrecomp sur Android arm64. Aucune donnée de jeu n\'est incluse : l\'application lit la copie que vous avez configurée depuis un disque que vous possédez.</string>
+    <string name="ABOUT_TAGLINE">Basé sur le runtime xboxrecomp</string>
+    <string name="ABOUT_TEXT">Un jeu recompilé statiquement, exécuté par XRecomp (le runtime xboxrecomp) sur Android arm64. Aucune donnée de jeu n\'est incluse : l\'application lit la copie que vous avez configurée depuis un disque que vous possédez.</string>
     <string name="ABOUT_LICENCE">xboxrecomp : MIT. SDL2 : zlib.</string>
     <string name="ABOUT_LEGAL">Ni affilié ni approuvé par les fabricants de la console ou du jeu. N\'utilisez que des jeux que vous possédez.</string>
     <string name="GAME_CHECK_NONE">Aucun (tout jeu)</string>
