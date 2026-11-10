@@ -31,9 +31,85 @@ abstract class XbaSelftestAsset extends DefaultTask {
 def selftestAsset = tasks.register('xbaSelftestAsset', XbaSelftestAsset) {
     xbe = rootProject.file('../tools/conformance/test.xbe')
 }
+// The on-device toolchain of the Prepare (docs/android/toolchain.md, docs/android/prepare.md): -PxbaToolchainDir=DIR,
+// made by tools/android/toolchain/ (the toolchain-out stage of tools/docker/android.Dockerfile). It adds the jniLibs
+// libxbapython.so, libpython3.13.so, libcapstone.so and libxbacc.so, the assets prepare/python-stdlib.zip and
+// prepare/sysroot.zip, and prepare/toolkit.zip, made here (xbaToolkitAsset: what the pipeline needs from this
+// repository, zipped at build time, never copied by hand), each with its .sha256. The app (Toolchain.java) extracts
+// them once per version. Without it the APK is the plain shell, as before.
+def xbaToolchainDir = (findProperty('xbaToolchainDir') ?: '') as String
+if (xbaToolchainDir) {
+    def need = ['libxbapython.so', 'libpython3.13.so', 'libcapstone.so', 'libxbacc.so'].collect { "jniLibs/arm64-v8a/$it" } +
+               ['python-stdlib.zip', 'sysroot.zip'].collect { "assets/prepare/$it" }
+    def missing = need.findAll { !new File(xbaToolchainDir, it).isFile() }
+    if (missing) throw new GradleException("-PxbaToolchainDir=${xbaToolchainDir}: missing ${missing.join(', ')}")
+}
+
+abstract class XbaToolkitAsset extends DefaultTask {
+    @Input abstract Property<String> getRepoRoot()
+    @InputFiles @PathSensitive(PathSensitivity.RELATIVE) abstract ConfigurableFileCollection getToolkitFiles()
+    @Input abstract Property<String> getCommit()
+    @OutputDirectory abstract DirectoryProperty getOutputDir()
+
+    @TaskAction void make() {
+        def dir = new File(outputDir.get().asFile, 'prepare')
+        outputDir.get().asFile.deleteDir()
+        dir.mkdirs()
+        def root = new File(repoRoot.get()).toPath()
+        def files = toolkitFiles.files.collect { [root.relativize(it.toPath()).toString().replace('\\', '/'), it] }
+                                .sort { it[0] }
+        // tools/VERSION stands in for git, absent on the device (tools/prepare: toolkit_version): the commit, or
+        // without git (the Docker builds) a hash of the files, so that a changed toolkit still restarts the steps.
+        def id = commit.get()
+        if (id == 'unknown') {
+            def md = java.security.MessageDigest.getInstance('SHA-256')
+            files.each { md.update((it[0] + '\0').getBytes('UTF-8')); md.update(it[1].bytes) }
+            id = 'files-' + md.digest().encodeHex().toString()
+        }
+        // Same inputs, same bytes: sorted entries, fixed times.
+        def zip = new File(dir, 'toolkit.zip')
+        new java.util.zip.ZipOutputStream(new FileOutputStream(zip)).withCloseable { out ->
+            out.setLevel(9)
+            def put = { String name, byte[] data ->
+                def e = new java.util.zip.ZipEntry(name)
+                e.setTime(315532800000L)        // 1980-01-01, the zip epoch
+                out.putNextEntry(e)
+                out.write(data)
+                out.closeEntry()
+            }
+            put('tools/VERSION', "${id}\n".getBytes('UTF-8'))
+            files.each { put(it[0], it[1].bytes) }
+        }
+        def md = java.security.MessageDigest.getInstance('SHA-256')
+        zip.withInputStream { is -> byte[] b = new byte[1 << 16]; int n; while ((n = is.read(b)) > 0) md.update(b, 0, n) }
+        new File(dir, 'toolkit.zip.sha256').text = "${md.digest().encodeHex()}  toolkit.zip\n"
+    }
+}
+def repoRoot = rootProject.file('..')
+def xbaCommit = providers.exec {
+    commandLine 'git', '-C', repoRoot.path, 'rev-parse', 'HEAD'
+    ignoreExitValue = true
+}.standardOutput.asText.map { it.trim() ?: 'unknown' }
+def toolkitAsset = xbaToolchainDir ? tasks.register('xbaToolkitAsset', XbaToolkitAsset) {
+    it.repoRoot = repoRoot.path
+    // docs/android/prepare.md « Toolkit tree »: the pipeline (Python only: no tests, caches or per-game output),
+    // the title template and profiles, and the headers the generated C includes.
+    it.toolkitFiles.from(fileTree(repoRoot) {
+        include 'tools/**/*.py', 'tools/recomp/data/**'
+        exclude '**/test_*.py', '**/tests/**', '**/conftest.py', '**/__pycache__/**', 'tools/*/output/**',
+                'tools/android/**', 'tools/docker/**', 'tools/ci/**', 'tools/conformance/msvc-wine/**'
+    })
+    it.toolkitFiles.from(fileTree(repoRoot) {
+        include 'templates/new-game/**', 'titles/**', 'include/**', 'src/**/*.h'
+        exclude '**/build/**'
+    })
+    it.commit = xbaCommit
+} : null
+
 androidComponents {
     onVariants(selector().all()) { variant ->
         variant.sources.assets?.addGeneratedSourceDirectory(selftestAsset, XbaSelftestAsset::getOutputDir)
+        if (toolkitAsset) variant.sources.assets?.addGeneratedSourceDirectory(toolkitAsset, XbaToolkitAsset::getOutputDir)
     }
 }
 
@@ -63,6 +139,12 @@ android {
     }
 
     sourceSets.main.java.srcDirs += "${sdl2Src}/android-project/app/src/main/java"
+
+    if (xbaToolchainDir) {
+        sourceSets.main.jniLibs.srcDirs += "${xbaToolchainDir}/jniLibs"
+        sourceSets.main.assets.srcDirs += "${xbaToolchainDir}/assets"     // prepare/python-stdlib.zip, sysroot.zip
+        // (Exec'd from nativeLibraryDir: extracted at install, packagingOptions below.)
+    }
 
     externalNativeBuild {
         cmake {

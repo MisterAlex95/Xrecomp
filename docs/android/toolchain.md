@@ -58,6 +58,99 @@ the build. What differs from desktop POSIX (XBA-17):
 
 `liblog` and `libandroid` are not linked yet: nothing in the toolkit calls them before the app shell (XBA-18).
 
+## The on-device toolchain (embedded Prepare)
+
+The on-device Prepare ([prepare.md](prepare.md)) runs the recompilation pipeline on the device and compiles the
+generated C into a title pack, with no PC and no Termux. This is the toolchain the APK carries for it: Python with
+capstone, and clang + lld. The scripts are in `tools/android/toolchain/`, the versions and checksums in
+`tools/android/toolchain/versions.env` (the one place to change them; the table below follows).
+
+```bash
+docker build -f tools/docker/android.Dockerfile --target toolchain-out --output type=local,dest=out/toolchain .
+cd android && gradle assembleDebug -PxbaToolchainDir=../out/toolchain       # the shell, with the toolchain
+docker build -f tools/docker/android.Dockerfile --target prepare-apk-out --output type=local,dest=out .
+```
+
+Without `-PxbaToolchainDir` the APK is the plain shell, unchanged (the app hides Prepare when the toolchain is
+absent); the CI targets do not build the toolchain.
+
+| Component | Version | How |
+|---|---|---|
+| CPython | 3.13.18 | Its official Android build (`Android/android.py`, PEP 738), NDK r28c, API 30. The prebuilt libffi/bzip2/xz/OpenSSL/SQLite it unpacks (BeeWare's `cpython-android-source-deps`, as CPython's own release) are fetched and checked first. |
+| capstone | 5.0.9 | CMake with the NDK, X86 only, shared; its pure-Python (ctypes) bindings in `site-packages`. |
+| LLVM | 19.1.7 | clang + lld + llvm-ar as one multicall binary (`LLVM_TOOL_LLVM_DRIVER_BUILD`), AArch64 target only, default target `aarch64-linux-android30`, fully static against bionic (`-static`, libc++ static), stripped. 19.1.x is the release line of the NDK r28c clang (19.0.1). |
+
+What the APK gets (the names are those of [prepare.md](prepare.md) and the app's `Toolchain.java`):
+
+| In the APK | What | Size |
+|---|---|---|
+| `lib/arm64-v8a/libxbapython.so` | the Python executable: `xbapython.c`, `Py_BytesMain` around libpython (CPython's Android build is meant for embedding); `DT_RUNPATH $ORIGIN` | 4.5 KB |
+| `lib/arm64-v8a/libpython3.13.so` | libpython | 5.2 MB |
+| `lib/arm64-v8a/libcapstone.so` | capstone, X86 only | 2.3 MB |
+| `lib/arm64-v8a/libxbacc.so` | clang + ld.lld + llvm-ar, static | 80 MB (35 MB compressed in the APK) |
+| `assets/prepare/python-stdlib.zip` | PYTHONHOME: `lib/python3.13/`, the standard library without test, idlelib, tkinter, turtledemo, ensurepip, pydoc_data, venv, sqlite3 and without the modules that need OpenSSL or SQLite (`_ssl`, `_hashlib`, `_sqlite3`: hashlib uses its built-in SHA-2), with `lib-dynload/` and `site-packages/capstone/` | 4.0 MB (14 MB extracted) |
+| `assets/prepare/sysroot.zip` | the `--sysroot`: the NDK layout (`usr/include`: the generic and aarch64 headers, no libc++; `usr/lib/aarch64-linux-android/30/`: crt objects and the libc, libm, libdl, liblog, libz, libandroid stubs), plus `lib/clang/19/`: this clang's resource headers (`stddef.h`, `arm_neon.h`, ...), the NDK's `lib/linux/libclang_rt.builtins-aarch64-android.a` and `lib/linux/aarch64/libunwind.a` | 3.5 MB (28 MB extracted) |
+| `assets/prepare/toolkit.zip` | made by Gradle (`xbaToolkitAsset`) from this repository at build time: `tools/**/*.py` (no tests, caches, per-game output, Docker/CI/Android scripts) and `tools/recomp/data/`, `templates/new-game/`, `titles/`, `include/`, `src/**/*.h`, and `tools/VERSION` (the commit; without git, as in the Docker builds, `files-<sha256 of the files>`) | 0.65 MB (2.1 MB extracted, 196 files) |
+| `assets/prepare/*.zip.sha256` | `<hex>  <name>`, checked by the app before it extracts | |
+
+The pipeline imports nothing outside the standard library but capstone (`grep` of `tools/{xiso,xbe_parser,disasm,
+func_id,abi_analysis,recomp,prepare}`; unicorn, pefile and numpy are only in tools the Prepare does not run).
+
+APK size (debug, 2026-11-10): the plain shell 3.2 MB, with the toolchain 47.2 MB, so **+44 MB** (35 MB of it is
+libxbacc.so, compressed). Installed: 92 MB of extracted jniLibs, 44 MB of extracted assets.
+
+### On the device
+
+The app side is in [app-shell.md](app-shell.md) and the command in [prepare.md](prepare.md). What the toolchain
+needs from it:
+
+- Android 10+ apps (target API 29+) may only exec files from `nativeLibraryDir`: the two executables are jniLibs and
+  the APK is built with `packaging.jniLibs.useLegacyPackaging` (`extractNativeLibs=true`, checked in the APK).
+- `libxbapython.so -m tools.prepare ...` with `PYTHONHOME` = the extracted `python-stdlib.zip`, `PYTHONPATH` = the
+  toolkit, `LIBCAPSTONE_PATH` = `nativeLibraryDir`. `sys.executable` is `libxbapython.so`, so the pipeline's child
+  steps run the same way (`XBA_PYTHON` says it too).
+- `--cc <nativeLibraryDir>/libxbacc.so --cc-prefix-arg clang --sysroot <extracted sysroot.zip>`: the tool is the
+  first argument (`libxbacc.so clang ...`, `libxbacc.so ld.lld ...`) and the link is done by ld.lld directly, so
+  clang never has to find a linker by name. The embedded clang would look for its resource directory next to its
+  binary (in `nativeLibraryDir`), so `tools/prepare/compile.py` passes `-resource-dir=<sysroot>/lib/clang/19`
+  and takes the builtins from there when the sysroot carries them (the NDK's sysroot does not: nothing changes on
+  a host).
+
+### Checks without a device
+
+There is no emulator on the CI host (no KVM). `tools/android/toolchain/check.sh` (run by the `toolchain` stage):
+
+- every jniLib is an aarch64 ELF that needs only `libc`, `libm`, `libdl`, `liblog`, `libz` or a library we ship;
+  `libxbacc.so` needs nothing (static); the zips match their `.sha256`;
+- `libxbacc.so` runs under qemu-aarch64 as is: it compiles a C file against the extracted `sysroot.zip` and ld.lld
+  links it as a shared object and as an executable;
+- `tools.prepare --android` builds the stub title's pack (`tools/conformance/test.xbe`, our synthetic XBE, no game
+  content, with `xbe_entry.c` from `tools/android/stub_title.sh`) with the shipped compiler and sysroot, the app's
+  flags, against the shell's real `libmain.so` (built there with the NDK): `libtitle.so` needs `libmain.so` and
+  exports `recomp_title_main`, `xbe_entry_point`, `sub_00011000`;
+- with `XBA_TC_ANDROID_ROOT` (made by `tools/android/toolchain/android_root.sh`: Android 13's `linker64` and
+  bionic from Google's emulator system image, through sdkmanager; 3 MB kept, about 1.3 GB downloaded), the dynamic
+  parts too: `libxbapython.so` under `qemu-aarch64 -L`, capstone disassembles, and the shipped Python runs the
+  whole `tools.prepare --android` above with the app's environment; the executable clang linked runs. The
+  `toolchain` stage does not download the image (it runs the pipeline with the image's Python).
+
+qemu-user cannot exec another aarch64 binary without binfmt: `check.sh` reaches the compiler and the step
+interpreter through small host scripts that start qemu (`--cc` and `XBA_PYTHON` point at them). On the device
+they are the jniLibs themselves.
+
+Run by hand on 2026-11-10 (`XBA_TC_ANDROID_ROOT` set), all green:
+
+| Check | Result |
+|---|---|
+| jniLibs | `libxbacc.so` static; `libpython3.13.so` needs libc/libm/libdl/liblog; `libxbapython.so` libpython + libc/libdl; `libcapstone.so` libc/libm/libdl |
+| clang under qemu | `clang version 19.1.7`, target `aarch64-unknown-linux-android30`; a C file compiled and linked twice in 2 s |
+| Python under qemu + bionic 13 | `3.13.18 android aarch64`, `sys.executable` = `libxbapython.so`; capstone 5.0 disassembles; `tools.prepare --help` |
+| Executable built by clang | runs under bionic, prints the expected result |
+| `tools.prepare --android`, shipped Python + clang | `XBA_RESULT ok` in 15 s under qemu (5 files at -O2, 2 jobs); `libtitle.so`: AArch64 DYN, NEEDED libmain/libm/libdl/liblog/libc, the three symbols; `pack.json` with `"cc": "clang 19.1.7 -O2"` |
+
+Build times on the CI host (6 jobs): LLVM 20 min (host tablegen 80 s, cross build 19 min), CPython 1.5 min (2.5 min
+at 3 jobs), capstone seconds. Disk: about 9 GB of LLVM build tree during the build (removed by the stage).
+
 ## CI gating
 
 XBA-53. `.gitea/workflows/ci.yml` runs on the Docker of the host that also serves Gitea and Plane, so what runs when

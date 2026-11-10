@@ -88,8 +88,8 @@ python -m tools.prepare SOURCE --android --work DIR --pack-dir DIR --cc PATH [--
 | `--pack-dir DIR` | `<files dir>/packs` |
 | `--cc PATH` | `<nativeLibraryDir>/libxbacc.so` |
 | `--cc-prefix-arg clang` | The multicall applet. With a prefix arg, the linker is `PATH ld.lld` unless `--ld` says otherwise. On a host: the NDK's `clang` and no prefix (ld.lld is taken next to it). |
-| `--sysroot DIR` | The NDK-layout sysroot from the assets (`usr/include`, `usr/lib/aarch64-linux-android/30/{crtbegin_so.o,crtend_so.o,libc.so,...}`). |
-| `--builtins PATH` | `libclang_rt.builtins-aarch64-android.a`; default: asked from the compiler (`-print-libgcc-file-name`). |
+| `--sysroot DIR` | The NDK-layout sysroot from the assets (`usr/include`, `usr/lib/aarch64-linux-android/30/{crtbegin_so.o,crtend_so.o,libc.so,...}`), plus `lib/clang/19/`: the embedded clang's resource directory (headers, builtins, libunwind), which it cannot find by itself; `-resource-dir` then points there ([toolchain.md](toolchain.md#the-on-device-toolchain-embedded-prepare)). |
+| `--builtins PATH` | `libclang_rt.builtins-aarch64-android.a`; default: from `<sysroot>/lib/clang/<v>/lib/linux/` when the sysroot carries it, else asked from the compiler (`-print-libgcc-file-name`). |
 | `--shell-lib PATH` | `<nativeLibraryDir>/libmain.so`: the pack links against it (DT_NEEDED `libmain.so`). |
 | `--shell-abi N` | The integer the shell exports (default 1), written to `pack.json`. |
 | `--jobs N` | Parallel compiles; 0 or absent = `min(5, (MemAvailable − 3 GB) / 1 GB)`, at least 1, at most the CPU count (1 GB per job: see Measurements). |

@@ -138,6 +138,25 @@ def test_compile_flags():
     assert "-DXBA_TITLE_PROFILE=1" not in cc.compile_flags("1", "/tk", "/w/p", "/sys")
 
 
+def test_sysroot_resource_dir(tmp_path):
+    """The app's sysroot.zip carries the embedded clang's resource directory: -resource-dir and the builtins come
+    from there. The NDK's sysroot has none: no flag, the compiler is asked for its builtins."""
+    sys_ = str(tmp_path)
+    assert cc.sysroot_resource_dir(sys_) is None
+    assert not any(f.startswith("-resource-dir") for f in cc.compile_flags("2", "/tk", "/w/p", sys_))
+    rd = tmp_path / "lib" / "clang" / "19"
+    (rd / "include").mkdir(parents=True)
+    (rd / "include" / "stddef.h").write_text("")
+    (tmp_path / "lib" / "clang" / "18").mkdir()            # no headers: not a resource directory
+    rt = rd / "lib" / "linux" / "libclang_rt.builtins-aarch64-android.a"
+    rt.parent.mkdir(parents=True)
+    rt.write_bytes(b"!<arch>\n")
+    assert cc.sysroot_resource_dir(sys_) == str(rd)
+    assert "-resource-dir=" + str(rd) in cc.compile_flags("2", "/tk", "/w/p", sys_)
+    tc = cc.Toolchain("/data/app/lib/libxbacc.so", sys_, cc_prefix=["clang"])
+    assert tc.builtins() == str(rt)                           # without running the compiler
+
+
 def test_collect_sources(tmp_path):
     for rel in ("src/main.c", "src/recomp_manual.c", "src/title/t.c", "src/extra/e.c",
                 "src/recomp/gen/recomp_0001.c", "src/recomp/gen/recomp_0000.c", "src/recomp/gen/recomp_funcs.h"):
