@@ -66,6 +66,16 @@ final class Pack {
         return Check.VALID;
     }
 
+    /**
+     * Removes packs/<titleId> (the native loader refused it): the next check says NO_PACK and the launcher offers
+     * Prepare, which builds it again (its link step redoes a pack without pack.json).
+     */
+    static void drop(File filesDir, String titleId) {
+        String id = normTitleId(titleId);
+        if (id != null)
+            GameStore.deleteTree(packDir(filesDir, id));
+    }
+
     /** « 4D530004 », « 0x4d530004 » and « 4d530004 » are the same title ID. */
     static boolean sameTitleId(String a, String b) {
         String x = normTitleId(a), y = normTitleId(b);

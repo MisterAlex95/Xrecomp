@@ -26,7 +26,7 @@ Nothing from the game leaves the device: the pack is built from the player's dis
 `<files dir>` is the app's **internal** storage (`Context.getFilesDir()`). External storage
 (`/sdcard/Android/data/<app>/files`) is mounted `noexec`: dlopen of a library there fails. An external `packs/` folder
 is only an import/export drop: the app copies a pack in from there after checking `lib_sha256`, never loads it in
-place.
+place (planned; not implemented yet, see « The loader »).
 
 `TITLEID` is the XBE's title ID in 8 upper-case hex digits (`4D5300D1`).
 
@@ -67,11 +67,10 @@ Readers ignore fields they do not know. `tools/prepare/pack.py` (`read`, `check`
 
 `libtitle.so` is linked with `-Bsymbolic` (the title's calls to itself bind inside it) and `--no-undefined` against
 `libmain.so`, so every symbol it uses is exported by the shell or by libc/libm/libdl/liblog. Its dynamic symbols
-include `recomp_title_main` and the symbols the shell defines as weak stand-ins today (`recomp_lookup`,
-`recomp_lookup_manual`, and per title `g_fe_cursor`, `fe_menu_get_pb_state`). **For the loader:** the toolkit inside
-`libmain.so` calls `recomp_lookup` (thread start, APCs); a library dlopened later does not override `libmain.so`'s
-own weak definition, so the loader has to fetch these with `dlsym` and hand them to the runtime (a hook it installs),
-not rely on symbol interposition.
+include `recomp_title_main` and the symbols the shell defines as weak forwarders (`recomp_lookup`,
+`recomp_lookup_manual`, and per title `g_fe_cursor`, `fe_menu_get_pb_state`). The toolkit inside `libmain.so` calls
+`recomp_lookup` (thread start, APCs); a library dlopened later does not override `libmain.so`'s own weak definition,
+so the loader fetches these with `dlsym` and the forwarders call through them (« The loader » below).
 
 ## The command
 
@@ -245,6 +244,26 @@ of CPU at -O2 is ~6 min, plus 20–30 % for sustained clocks under thermal limit
 the NDK's clang. The embedded clang is a plain build of LLVM 19 (the NDK's is PGO + BOLT + LTO, ~20–30 % faster):
 count **8–10 min**. With 2 jobs (the 1.5 GB formula on a 12 GB device) it would be 15–20 min. The largest file alone
 takes ~1 min on a middle core; it starts first. To be measured on the device (« Device » check list).
+
+## The loader
+
+The app shell's side (`android/app/src/main/cpp/pack_loader.{c,h}`, `src/platform/recomp_pack.{c,h}`; details and
+logcat lines in [app-shell.md](app-shell.md) « Title packs »):
+
+1. Only when no title is linked into `libmain.so` and `default.xbe` is found. Title ID from the XBE's certificate.
+2. `<files dir>/packs/<TITLEID>/pack.json`; absent → `PACK_MISSING <TID>`, the shell goes on as before.
+3. Checks: required fields, `format` 1, `title_id`, `abi` (`arm64-v8a`), `shell_abi` = `libmain.so`'s exported
+   `xba_shell_abi` (1), `lib` a plain name, present, `lib_size` bytes. **`lib_sha256` is not checked at load**
+   (private storage, atomic publish by prepare which hashed it; ~1 s per start for a large pack); the import drop,
+   when it exists, checks it. Failure → `PACK_INVALID <reason>`.
+4. `dlopen(lib, RTLD_NOW | RTLD_LOCAL)`; `dlsym` of `entry` (required), `recomp_lookup`, `recomp_lookup_manual`,
+   `fe_menu_get_pb_state`, `g_fe_cursor`, each kept only if it lies in the pack (`dladdr`; `dlsym` on a handle also
+   searches `libmain.so`). Failure → `PACK_DLOPEN <dlerror>`.
+5. The pointers go behind `libmain.so`'s weak forwarders; the title runs from `entry` on the guest thread, as a linked
+   title does. On `PACK_INVALID` / `PACK_DLOPEN` the shell hands back to the launcher, which deletes the pack and
+   offers Prepare again.
+
+`tests/recomp_pack` checks it on Linux with a fake shell and fake packs linked the way `compile.py` links.
 
 ## Checking on a host
 

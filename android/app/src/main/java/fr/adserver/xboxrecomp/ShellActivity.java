@@ -48,4 +48,20 @@ public class ShellActivity extends SDLActivity {
             finish();
         });
     }
+
+    /**
+     * Called by shell_main.c (SDLThread, through JNI) when the title pack could not be loaded (PACK_INVALID,
+     * PACK_DLOPEN; pack_loader.h): the launcher opens, drops the pack and offers Prepare again, and this activity
+     * finishes.
+     */
+    @SuppressWarnings("unused")
+    public void openLauncherBadPack(String reason) {
+        runOnUiThread(() -> {
+            Intent i = new Intent(this, LauncherActivity.class)
+                    .putExtra(LauncherActivity.EXTRA_BAD_PACK, reason == null ? "" : reason)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK);
+            startActivity(i);
+            finish();
+        });
+    }
 }

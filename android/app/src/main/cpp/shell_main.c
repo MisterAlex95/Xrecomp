@@ -24,9 +24,15 @@
  *   found: xbox_HostWindowMain runs the title on its guest thread, with the
  *   window, Back twice to quit (flush, drain logcat, _exit(0): « clean
  *   exit ») and the lifecycle;
+ * - no title linked in and default.xbe found: the title pack for its title
+ *   ID, <internal files dir>/packs/<TITLEID>/ (pack_loader.h), dlopened and
+ *   run the same way (PACK_LOADED). An invalid pack or a dlopen error
+ *   (PACK_INVALID, PACK_DLOPEN) hands back to the launcher
+ *   (ShellActivity.openLauncherBadPack), which drops the pack and offers
+ *   Prepare again; no pack (PACK_MISSING) goes on as below;
  * - otherwise the shell's own black, fullscreen, landscape window. With
- *   default.xbe found but no title linked, a message box says so (NO_TITLE)
- *   instead of a bare black screen. When
+ *   default.xbe found but no title linked and no pack, a message box says
+ *   so (NO_TITLE) instead of a bare black screen. When
  *   default.xbe is not there (NO_GAME_DATA) it hands over to the game picker
  *   (ShellActivity.openGamePicker, XBA-54), which names the folder and lets
  *   the player choose the game; a message box if that call fails. Back once shows
@@ -49,6 +55,8 @@
 #include "kernel/xbox_memory_layout.h"
 #include "video/video_player.h"     /* xbox_HostWindowMain */
 
+#include "pack_loader.h"
+
 #ifndef XBA_VERSION
 #define XBA_VERSION "dev"
 #endif
@@ -67,27 +75,28 @@
     "This APK has no recompiled game in it (the plain shell), so there is " \
     "nothing to run and the screen stays black. Install the APK built for " \
     "this game."
+#define TEXT_BAD_PACK \
+    "The prepared game cannot be loaded:\n%s\n\n" \
+    "Open the app again and prepare the game again."
 
 /* The four symbols a title provides (its generated dispatch and one title's
- * front-end hooks). libmain links the whole toolkit, so that loading it on a
- * device proves bionic resolves every symbol the runtime uses; without a
- * title these stand in. Weak: a title's own definitions win. */
-typedef void (*recomp_func_t)(void);
-__attribute__((weak)) recomp_func_t recomp_lookup(unsigned int va)        { (void)va; return 0; }
-__attribute__((weak)) recomp_func_t recomp_lookup_manual(unsigned int va) { (void)va; return 0; }
-__attribute__((weak)) int g_fe_cursor;
-__attribute__((weak)) int fe_menu_get_pb_state(void) { return 0; }
+ * front-end hooks: recomp_lookup, recomp_lookup_manual, g_fe_cursor,
+ * fe_menu_get_pb_state) are weak forwarders in pack_loader.c: a title linked
+ * in defines them strong and wins; otherwise they reach the loaded pack, or
+ * stand in. libmain links the whole toolkit, so that loading it on a device
+ * proves bionic resolves every symbol the runtime uses. */
 
 /* The title's boot (recomp_app.h). Weak and undefined without a title: the
- * address is then NULL and the shell runs its own window. */
+ * address is then NULL and the shell looks for a pack. */
 extern int recomp_title_main(const recomp_storage *store) __attribute__((weak));
 
 static const recomp_storage *s_title_store;
+static xba_title_main_fn s_title_main;
 
 /* xbox_HostWindowMain's guest_main, on the guest thread. */
 static int title_boot(void)
 {
-    return recomp_title_main(s_title_store);
+    return s_title_main(s_title_store);
 }
 
 /* RECOMP_SHELL_SELFTEST=1 (recomp.cfg, XBA-51). The synthetic XBE of
@@ -111,11 +120,10 @@ static int selftest_wanted(void)
     return e && *e && strcmp(e, "0") != 0;
 }
 
-/* NO_GAME_DATA: ShellActivity.openGamePicker(dir) (XBA-54) starts the game
- * picker naming the folder and finishes this activity, so SDL_QUIT follows.
- * Called on SDLThread, a Java thread: SDL_AndroidGetJNIEnv is its env. The
- * method is looked up on the activity's own class, not with FindClass. */
-static int open_game_picker(const char *dir)
+/* Calls void ShellActivity.<method>(String arg). Called on SDLThread, a Java
+ * thread: SDL_AndroidGetJNIEnv is its env. The method is looked up on the
+ * activity's own class, not with FindClass. 0 when the call was made. */
+static int call_activity(const char *method, const char *arg)
 {
     JNIEnv *env = (JNIEnv *)SDL_AndroidGetJNIEnv();
     jobject act = env ? (jobject)SDL_AndroidGetActivity() : NULL;
@@ -124,12 +132,12 @@ static int open_game_picker(const char *dir)
     if (!act)
         return -1;
     jclass cls = (*env)->GetObjectClass(env, act);
-    jmethodID m = cls ? (*env)->GetMethodID(env, cls, "openGamePicker", "(Ljava/lang/String;)V") : NULL;
-    jstring jdir = m ? (*env)->NewStringUTF(env, dir) : NULL;
-    if (jdir) {
-        (*env)->CallVoidMethod(env, act, m, jdir);
+    jmethodID m = cls ? (*env)->GetMethodID(env, cls, method, "(Ljava/lang/String;)V") : NULL;
+    jstring jarg = m ? (*env)->NewStringUTF(env, arg) : NULL;
+    if (jarg) {
+        (*env)->CallVoidMethod(env, act, m, jarg);
         rc = 0;
-        (*env)->DeleteLocalRef(env, jdir);
+        (*env)->DeleteLocalRef(env, jarg);
     }
     if ((*env)->ExceptionCheck(env)) {
         (*env)->ExceptionDescribe(env);
@@ -140,6 +148,21 @@ static int open_game_picker(const char *dir)
         (*env)->DeleteLocalRef(env, cls);
     (*env)->DeleteLocalRef(env, act);
     return rc;
+}
+
+/* NO_GAME_DATA: ShellActivity.openGamePicker(dir) (XBA-54) starts the game
+ * picker naming the folder and finishes this activity, so SDL_QUIT follows. */
+static int open_game_picker(const char *dir)
+{
+    return call_activity("openGamePicker", dir);
+}
+
+/* PACK_INVALID / PACK_DLOPEN: ShellActivity.openLauncherBadPack(reason)
+ * opens the launcher, which drops the pack and offers Prepare again, and
+ * finishes this activity (SDL_QUIT follows). */
+static int open_launcher_bad_pack(const char *reason)
+{
+    return call_activity("openLauncherBadPack", reason);
 }
 
 /* Background / foreground (XBA-24): the same watch as the title's window
@@ -162,7 +185,7 @@ int main(int argc, char *argv[])
     recomp_storage store;
     int have_game = recomp_app_start(SDL_AndroidGetExternalStoragePath(),
                                      SDL_AndroidGetInternalStoragePath(), &store);
-    int run_title = have_game > 0 && recomp_title_main != NULL;
+    s_title_main = recomp_title_main;
 
     /* Back is ours: the shell decides when it quits (twice within 2 s). */
     SDL_SetHint(SDL_HINT_ANDROID_TRAP_BACK_BUTTON, "1");
@@ -180,6 +203,15 @@ int main(int argc, char *argv[])
      * title maps its own layout (the self-test shuts its one down). */
     if (selftest_wanted())
         run_selftest(&store);
+
+    /* No title linked in: the pack the on-device Prepare built for this
+     * default.xbe, if any (pack_loader.h). */
+    int pack_rc = RECOMP_PACK_MISSING;
+    char pack_reason[512] = "";
+    if (have_game > 0 && !s_title_main)
+        pack_rc = xba_pack_load(SDL_AndroidGetInternalStoragePath(), store.xbe, &s_title_main,
+                                pack_reason, sizeof pack_reason);
+    int run_title = have_game > 0 && s_title_main != NULL;
 
     SDL_version sdl;
     SDL_GetVersion(&sdl);
@@ -226,6 +258,17 @@ int main(int argc, char *argv[])
         } else {
             SDL_snprintf(msg, sizeof msg, TEXT_NO_GAME_DATA, dir, dir);
             if (SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_INFORMATION, "xboxrecomp", msg, win) != 0)
+                fprintf(stderr, "message box failed: %s\n", SDL_GetError());
+        }
+    } else if (pack_rc == RECOMP_PACK_INVALID || pack_rc == RECOMP_PACK_DLOPEN) {
+        /* A pack that cannot run: back to the launcher, which drops it and
+         * offers Prepare again (its own, lighter check passed it). */
+        char msg[2 * RECOMP_STORAGE_PATH_MAX];
+        if (open_launcher_bad_pack(pack_reason) == 0) {
+            printf("xboxrecomp: pack not usable, launcher opened\n");
+        } else {
+            SDL_snprintf(msg, sizeof msg, TEXT_BAD_PACK, pack_reason);
+            if (SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "xboxrecomp", msg, win) != 0)
                 fprintf(stderr, "message box failed: %s\n", SDL_GetError());
         }
     } else {

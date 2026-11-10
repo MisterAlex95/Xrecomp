@@ -77,6 +77,11 @@ public class LauncherActivity extends Activity {
     static final String ACTION_SHOW_LAUNCHER = "fr.adserver.xboxrecomp.SHOW_LAUNCHER";
     /** Set by ShellActivity when the native side found no default.xbe: the folder it looked in. */
     static final String EXTRA_NO_GAME_DATA = "fr.adserver.xboxrecomp.NO_GAME_DATA";
+    /**
+     * Set by ShellActivity when the native loader refused the title pack (PACK_INVALID / PACK_DLOPEN): why. The pack
+     * is dropped and Home offers Prepare again.
+     */
+    static final String EXTRA_BAD_PACK = "fr.adserver.xboxrecomp.BAD_PACK";
 
     private static final int REQ_TREE = 1;
     private static final int REQ_ISO = 2;
@@ -172,7 +177,10 @@ public class LauncherActivity extends Activity {
         boolean change = ACTION_CHOOSE_GAME.equals(action);
         boolean showLauncher = ACTION_SHOW_LAUNCHER.equals(action);
         String noData = in.getStringExtra(EXTRA_NO_GAME_DATA);
-        boolean forced = change || showLauncher || noData != null;
+        String badPack = in.getStringExtra(EXTRA_BAD_PACK);
+        boolean forced = change || showLauncher || noData != null || badPack != null;
+        if (badPack != null && savedInstanceState == null)
+            dropBadPack(badPack);
         if (!forced && savedInstanceState == null && gameReady() && !prepareBlocksPlay()) {
             /* The app icon while the game runs in the background: straight back to it (the « Launcher » shortcut
              * reaches this screen then). Otherwise only with « Open the game directly next time » on. */
@@ -190,6 +198,7 @@ public class LauncherActivity extends Activity {
 
         String dir = GameStore.chosenDir(this);
         Log.i(TAG, "launcher: shown (" + (noData != null ? "NO_GAME_DATA in " + noData
+                                          : badPack != null ? "pack refused: " + badPack
                                           : change ? "change game"
                                           : showLauncher ? "launcher shortcut"
                                           : dir != null && !gameReady() ? "remembered folder unusable: " + dir
@@ -205,6 +214,9 @@ public class LauncherActivity extends Activity {
                 setNote(getString(R.string.GAME_RUNNING), NOTE_INFO);
         } else if (state() == State.NONE) {
             show(Screen.WELCOME);
+        } else if (badPack != null) {
+            show(Screen.HOME);
+            setNote(getString(R.string.PACK_BAD, badPack), NOTE_ERROR);
         } else {
             show(Screen.HOME);
             Prep p = prep();
@@ -1317,6 +1329,17 @@ public class LauncherActivity extends Activity {
         default:
             return Prep.NEEDED;   // done, but the pack is gone or stale (another shell ABI): prepare again
         }
+    }
+
+    /**
+     * The shell could not load the pack (EXTRA_BAD_PACK): drop it, so Home offers Prepare again instead of a Play that
+     * fails the same way. This check is lighter than the native one (no dlopen), hence passed it.
+     */
+    private void dropBadPack(String why) {
+        String tid = titleId();
+        Log.w(TAG, "launcher: pack " + tid + " refused by the shell (" + why + "), dropped");
+        if (tid != null)
+            Pack.drop(getFilesDir(), tid);
     }
 
     /** « Open the game directly » does not skip a Prepare that is needed. */
