@@ -1152,6 +1152,42 @@ static uint32_t linear_twin(uint32_t fmt)
     }
 }
 
+/* The 16 decoded texels of DXT block (bx, by) of the image at `base`.
+ *
+ * Decoded blocks, direct-mapped by address. Every texel of a DXT texture
+ * decodes its whole 4x4 block, and bilinear reads four neighbours that nearly
+ * always share one -- this was a tenth of the executor's time. Keyed on the
+ * block's bytes as well as its address, so a texture rewritten in place (a
+ * render target reused, a streamed mip) never returns stale texels. One table
+ * per raster thread. */
+/* Entries per raster thread (power of two). 16384 x 92 bytes is about 1.5 MB:
+ * a frame that magnifies a few 256x256 DXT textures across the screen touches
+ * 4096 blocks each, and with 4096 entries they evicted one another. */
+#define NV_DXT_CACHE 16384u
+static const uint32_t *dxt_block_px(const Texture *t, uint32_t base,
+                                    uint32_t bx, uint32_t by)
+{
+    static NV_TLS struct { uintptr_t key; uint32_t fmt; uint64_t raw[2];
+                    uint32_t px[16]; } cache[NV_DXT_CACHE];
+    const uint8_t *mem = (const uint8_t *)xbox_GetMemoryOffset();
+    uint32_t fmt = t->color, bb = d3d8_format_dxt_block_bytes(fmt);
+    uint32_t bw = (t->width + 3) >> 2;
+    const uint8_t *blk = mem + base + ((size_t)by * bw + bx) * bb;
+    uintptr_t key = (uintptr_t)blk;
+    size_t slot = ((key / bb) ^ (key >> 16)) & (NV_DXT_CACHE - 1);
+    uint64_t raw[2] = {0, 0};
+    memcpy(raw, blk, bb);
+    if (cache[slot].key != key || cache[slot].fmt != fmt
+        || cache[slot].raw[0] != raw[0] || cache[slot].raw[1] != raw[1]) {
+        d3d8_dxt_decode_block(blk, fmt, cache[slot].px);
+        cache[slot].key = key;
+        cache[slot].fmt = fmt;
+        cache[slot].raw[0] = raw[0];
+        cache[slot].raw[1] = raw[1];
+    }
+    return cache[slot].px;
+}
+
 /* Sample texel (u, v) of stage texture `t`; `face` offsets a cube map. */
 static int sample_tex(const Texture *t, uint32_t face_offset,
                       uint32_t u, uint32_t v, uint32_t *argb)
@@ -1177,35 +1213,7 @@ static int sample_tex(const Texture *t, uint32_t face_offset,
 
     fmt = t->color;
     if (d3d8_format_dxt_block_bytes(fmt)) {
-        /* Decoded blocks, direct-mapped by address. Every texel of a DXT
-         * texture decodes its whole 4x4 block, and bilinear reads four
-         * neighbours that nearly always share one -- this was a tenth of
-         * the executor's time. Keyed on the block's bytes as well as its
-         * address, so a texture rewritten in place (a render target reused,
-         * a streamed mip) never returns stale texels.
-         * ponytail: single-threaded executor, so a plain static table. */
-        static NV_TLS struct { uintptr_t key; uint32_t fmt; uint64_t raw[2];
-                        uint32_t px[16]; } cache[4096];
-        uint32_t bb = d3d8_format_dxt_block_bytes(fmt);
-        uint32_t bx = u >> 2, by = v >> 2, bw = (t->width + 3) >> 2;
-        const uint8_t *blk = mem + base + ((size_t)by * bw + bx) * bb;
-        uintptr_t key = (uintptr_t)blk;
-        size_t slot = ((key / bb) ^ (key >> 16)) & 4095;
-        uint64_t raw[2] = {0, 0};
-        memcpy(raw, blk, bb);
-        if (cache[slot].key != key || cache[slot].fmt != fmt
-            || cache[slot].raw[0] != raw[0] || cache[slot].raw[1] != raw[1]) {
-            uint32_t i;
-            for (i = 0; i < 16; i++)
-                d3d8_dxt_decode_texel(mem + base, fmt, bx * 4 + (i & 3),
-                                      by * 4 + (i >> 2), t->width,
-                                      &cache[slot].px[i]);
-            cache[slot].key = key;
-            cache[slot].fmt = fmt;
-            cache[slot].raw[0] = raw[0];
-            cache[slot].raw[1] = raw[1];
-        }
-        *argb = cache[slot].px[(v & 3) * 4 + (u & 3)];
+        *argb = dxt_block_px(t, base, u >> 2, v >> 2)[(v & 3) * 4 + (u & 3)];
         return 1;
     }
     if (d3d8_format_is_swizzled(fmt)) {
@@ -2417,6 +2425,27 @@ static void rc_tent(const Texture *t, uint32_t face, float u, float v,
 
     wu = fu - (float)iu;
     wv = fv - (float)iv;
+    /* The 2x2 footprint inside one DXT block and inside the image (no wrap,
+     * clamp or border to apply): decode the block once and read the four
+     * texels from it, instead of four trips through sample_tex. Bilinear is
+     * what Fable: The Lost Chapters asks for on its frontend, and those four
+     * trips were half of the rasteriser's time. Same texels as the general
+     * path below, which every other case still takes. */
+    if (t->valid && d3d8_format_dxt_block_bytes(t->color)
+        && iu >= 0 && iv >= 0 && (uint32_t)iu + 1 < t->width
+        && (uint32_t)iv + 1 < t->height && (iu & 3) != 3 && (iv & 3) != 3) {
+        const uint32_t *px = dxt_block_px(t, t->offset + face,
+                                          (uint32_t)iu >> 2, (uint32_t)iv >> 2);
+        uint32_t o = (uint32_t)(iv & 3) * 4 + (uint32_t)(iu & 3);
+        nv2a_rc_unpack(px[o], c[0]);
+        nv2a_rc_unpack(px[o + 1], c[1]);
+        nv2a_rc_unpack(px[o + 4], c[2]);
+        nv2a_rc_unpack(px[o + 5], c[3]);
+        for (j = 0; j < 4; j++)
+            out[j] = (c[0][j] * (1.0f - wu) + c[1][j] * wu) * (1.0f - wv)
+                   + (c[2][j] * (1.0f - wu) + c[3][j] * wu) * wv;
+        return;
+    }
     for (k = 0; k < 4; k++) {
         if (sample_tex(t, face, (uint32_t)(iu + (k & 1)),
                        (uint32_t)(iv + (k >> 1)), &texel))
@@ -4868,6 +4897,19 @@ static void peek_chain(void)
     fflush(stderr);
 }
 
+/* Wall-clock milliseconds for the report, without the platform library (the
+ * executor tests link this file on its own). */
+static unsigned long report_now_ms(void)
+{
+#ifdef _WIN32
+    return (unsigned long)GetTickCount64();
+#else
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (unsigned long)ts.tv_sec * 1000ul + (unsigned long)(ts.tv_nsec / 1000000);
+#endif
+}
+
 void nv2a_pb_exec_report(void)
 {
     peek_addresses();
@@ -4885,10 +4927,13 @@ void nv2a_pb_exec_report(void)
     int i, j;
 
     {
-        /* Frames per second of guest time, from flips between reports. */
+        /* Frames per second, from flips between reports, over wall time.
+         * clock() was process CPU time: with the rasteriser on six cores it
+         * ran six times faster than the wall, and 11 flips a second read as
+         * "1.9 fps". */
         static uint32_t last_flips;
         static unsigned long last_ms;
-        unsigned long now = (unsigned long)(clock() * 1000.0 / CLOCKS_PER_SEC);
+        unsigned long now = report_now_ms();
         if (last_ms && now > last_ms)
             fprintf(stderr, "[GPU] %.2f fps (%u flips)%c",
                     (s_gpu.flips - last_flips) * 1000.0 / (now - last_ms),
