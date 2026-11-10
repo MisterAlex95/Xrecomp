@@ -64,6 +64,9 @@ extern ptrdiff_t xbox_GetMemoryOffset(void);
 #define BACK_QUIT_MS 2000u
 /* User-facing text, named by its key (spec XBA-24). */
 #define TEXT_QUIT_PROMPT "Press Back again to quit"
+/* The title ended on its own (a test title like the stub; a game does not):
+ * the screen stays as it was, so say it there and not only in logcat. */
+#define TEXT_GUEST_DONE "The title finished (code %d). Press Back twice to quit."
 
 /* ── Handoff: three slots, one each for writer, reader and the ready frame ── */
 
@@ -407,10 +410,15 @@ int xbox_HostWindowMain(int (*guest_main)(void))
                 if (ev.type == SDL_QUIT)
                     quit = 1;
                 else if (ev.type == s_guest_done_event) {
-                    if (stay_after_guest)
+                    if (stay_after_guest) {
                         fprintf(stderr, "  [FBWIN] guest returned (%d); Back twice to quit\n",
                                 s_guest_rc);
-                    else
+#ifdef __ANDROID__
+                        char done_msg[96];
+                        SDL_snprintf(done_msg, sizeof done_msg, TEXT_GUEST_DONE, s_guest_rc);
+                        SDL_AndroidShowToast(done_msg, 1, -1, 0, 0);
+#endif
+                    } else
                         guest_done = 1;
                 }
                 else if (ev.type == s_frame_event)

@@ -24,7 +24,9 @@
  *   found: xbox_HostWindowMain runs the title on its guest thread, with the
  *   window, Back twice to quit (flush, drain logcat, _exit(0): « clean
  *   exit ») and the lifecycle;
- * - otherwise the shell's own black, fullscreen, landscape window. When
+ * - otherwise the shell's own black, fullscreen, landscape window. With
+ *   default.xbe found but no title linked, a message box says so (NO_TITLE)
+ *   instead of a bare black screen. When
  *   default.xbe is not there (NO_GAME_DATA) it hands over to the game picker
  *   (ShellActivity.openGamePicker, XBA-54), which names the folder and lets
  *   the player choose the game; a message box if that call fails. Back once shows
@@ -60,6 +62,11 @@
     "No game data found.\n\n" \
     "Copy the extracted disc (default.xbe and its files) to:\n%s\n\n" \
     "for example: adb push <disc folder>/. %s/"
+#define TEXT_NO_TITLE \
+    "Game data found:\n%s\n\n" \
+    "This APK has no recompiled game in it (the plain shell), so there is " \
+    "nothing to run and the screen stays black. Install the APK built for " \
+    "this game."
 
 /* The four symbols a title provides (its generated dispatch and one title's
  * front-end hooks). libmain links the whole toolkit, so that loading it on a
@@ -222,7 +229,13 @@ int main(int argc, char *argv[])
                 fprintf(stderr, "message box failed: %s\n", SDL_GetError());
         }
     } else {
+        char msg[2 * RECOMP_STORAGE_PATH_MAX];
         printf("xboxrecomp: game data: %s (no title linked)\n", store.xbe);
+        /* NO_TITLE: the picker worked but this APK cannot run anything; a
+         * bare black screen reads as a crash, so say it on screen. */
+        SDL_snprintf(msg, sizeof msg, TEXT_NO_TITLE, store.game_dir);
+        if (SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_INFORMATION, "xboxrecomp", msg, win) != 0)
+            fprintf(stderr, "message box failed: %s\n", SDL_GetError());
     }
 
     /* RECOMP_SHELL_CRASH_TEST=1 (recomp.cfg): a deliberate null write outside
