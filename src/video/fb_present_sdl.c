@@ -52,6 +52,7 @@
 #include "platform/recomp_lifecycle.h"
 #include "platform/recomp_quit.h"
 #include "video_player.h"
+#include "perf_overlay.h"
 #include "keyboard_sdl.h"     /* src/input: keys into the pad stand-in */
 #include "xinput_xbox.h"
 
@@ -376,7 +377,7 @@ int xbox_HostWindowMain(int (*guest_main)(void))
     SDL_Renderer *ren;
     SDL_Texture *tex = NULL;
     uint32_t tex_bpp = 0;
-    uint64_t shown_seq = 0, t_title = 0, flips_title = 0;
+    uint64_t shown_seq = 0, t_title = 0, flips_title = 0, t_overlay = 0;
     const char *e;
     int vsync, scale, quit = 0, guest_done = 0, dirty = 1, reupload = 0;
     int stay_after_guest = 0;   /* Android: the window outlives the guest */
@@ -506,6 +507,7 @@ int xbox_HostWindowMain(int (*guest_main)(void))
                     if (tex)
                         SDL_DestroyTexture(tex);
                     tex = NULL;
+                    perf_overlay_reset();
                     reupload = 1;
                     dirty = 1;
                 } else if (ev.type == SDL_KEYDOWN && !ev.key.repeat
@@ -567,10 +569,18 @@ int xbox_HostWindowMain(int (*guest_main)(void))
             SDL_RenderClear(ren);
             if (tex)
                 SDL_RenderCopy(ren, tex, NULL, NULL);
+            perf_overlay_draw(ren);
             SDL_RenderPresent(ren);
         }
 
         now = now_ms();
+        if (perf_overlay_enabled() && now - t_overlay >= 500) {
+            if (perf_overlay_tick(now, __atomic_load_n(&s_flips, __ATOMIC_RELAXED),
+                                  __atomic_load_n(&s_frame_draws, __ATOMIC_RELAXED),
+                                  strcmp(s_title, "Xbox Recomp") ? s_title : NULL))
+                dirty = 1;
+            t_overlay = now;
+        }
         if (now - t_title >= 1000) {
             uint64_t f = __atomic_load_n(&s_flips, __ATOMIC_RELAXED);
             char tb[192];
@@ -606,6 +616,7 @@ int xbox_HostWindowMain(int (*guest_main)(void))
      * start calling SDL_GameControllerUpdate while SDL goes down. */
     if (tex)
         SDL_DestroyTexture(tex);
+    perf_overlay_reset();
     SDL_DestroyRenderer(ren);
     SDL_DestroyWindow(win);
     if (!xbox_InputAnyOpen())

@@ -2814,7 +2814,16 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
          * mapped, and guest_vmem's range is handed over just before
          * guest_vmem_init. Off by default; the stock span is unchanged. */
         if (ext_vma_span(g_span_size) || hold_guest_window()) {
-            g_span_size = (size_t)1 << 32;
+            /* The 4 GB window plus one view past it: the first RAM mirror
+             * above 4 GB is the wrap of a guest access that runs over the
+             * top (a dword read at 0xFFFFFFFF, guest+disp carrying out of 32
+             * bits). Left outside the span its host range is often taken in
+             * an Android app (top-down placement again), the mirror fails
+             * and the access faults; Fable reads a -1 vtable pointer there
+             * during its front-end load and died on the Thor, while the Mac,
+             * where that range was free, read the wrapped zero and skipped
+             * the call. */
+            g_span_size = ((size_t)1 << 32) + g_memory_size;
             g_span_whole_window = 1;
         }
         g_span_base = VirtualAlloc(NULL, g_span_size, MEM_RESERVE, PAGE_NOACCESS);
@@ -2944,8 +2953,10 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
     }
 #if !defined(_WIN32)
     if (g_span_whole_window)
-        fprintf(stderr, "xbox_MemoryLayoutInit: whole 4 GB guest window held at %p-%p "
-                "(RECOMP_GUEST_WINDOW)\n", g_span_base, (void *)((uintptr_t)g_span_base + g_span_size));
+        fprintf(stderr, "xbox_MemoryLayoutInit: whole 4 GB guest window held at %p-%p, "
+                "plus its wrap mirror to %p (RECOMP_GUEST_WINDOW)\n", g_span_base,
+                (void *)((uintptr_t)g_span_base + ((size_t)1 << 32)),
+                (void *)((uintptr_t)g_span_base + g_span_size));
 #endif
 
     /*
