@@ -102,8 +102,12 @@ class Run:
         an = os.path.join(self.work, "analysis")
         mb = max(1.0, os.path.getsize(self.xbe) / 1e6)
         d, fid = os.path.join(an, "disasm"), os.path.join(an, "func_id")
+        disasm = ["tools.disasm", self.xbe, "-o", d, "--force"]
+        # Function starts the analysis cannot find (title.json "seed_functions").
+        for fn in (self.profile or {}).get("seed_functions", []):
+            disasm += ["--seed-functions", os.path.join(self.profile["dir"], fn)]
         steps = (
-            ("disasm", 0, 55, 20 * mb, ["tools.disasm", self.xbe, "-o", d, "--force"]),
+            ("disasm", 0, 55, 20 * mb, disasm),
             ("func_id", 55, 70, 5 * mb, ["tools.func_id", self.xbe,
                                          "--functions", os.path.join(d, "functions.json"),
                                          "--strings", os.path.join(d, "strings.json"),
