@@ -609,6 +609,30 @@ class FunctionTranslator:
             return None
         return source.imm if source.type == "imm" else None
 
+    @classmethod
+    def _stored_immediates(cls, instructions):
+        """Return every immediate the instructions push or store.
+
+        Also one loaded into a register that the next instruction pushes:
+        Fable registers the factory 0x005BC9A2 with `mov edi, imm; push edi`.
+        """
+        found = []
+        by_address = {insn.address: insn for insn in instructions}
+        for insn in instructions:
+            imm = cls._stored_immediate(insn)
+            operands = insn.operands
+            if (imm is None and insn.mnemonic == "mov" and len(operands) >= 2
+                    and operands[0].type == "reg" and operands[1].type == "imm"):
+                pushed = by_address.get(insn.end_address)
+                if (pushed is not None and pushed.mnemonic == "push"
+                        and pushed.operands
+                        and pushed.operands[0].type == "reg"
+                        and pushed.operands[0].reg == operands[0].reg):
+                    imm = operands[1].imm
+            if imm is not None:
+                found.append(imm)
+        return found
+
     def _follows_code_end(self, gap_start, target):
         """Return whether target starts right after a return, jump or padding.
 
@@ -676,7 +700,7 @@ class FunctionTranslator:
                 if caller in self.recovered_function_starts or any(
                         imm is not None and imm not in self.func_db
                         and is_code_address(imm)
-                        for imm in map(self._stored_immediate, instructions)):
+                        for imm in self._stored_immediates(instructions)):
                     reachable = (self._reach(caller, end) or [[]])[0]
             if caller in self.recovered_function_starts:
                 instructions = reachable
@@ -727,9 +751,8 @@ class FunctionTranslator:
             # own section, keep it out of every existing range, require it to
             # follow a return, jump or padding, and require its reachable code
             # to close.
-            for insn in reachable:
-                imm = self._stored_immediate(insn)
-                if imm is not None and imm not in self.func_db:
+            for imm in self._stored_immediates(reachable):
+                if imm not in self.func_db:
                     recovered_callers.setdefault(imm, set()).add(caller)
 
         # End of the code claimed by entries accepted earlier in this pass;
@@ -895,6 +918,20 @@ class FunctionTranslator:
                         edges = [*edges, insn.end_address]
                     for edge in edges:
                         if edge in starts:
+                            continue
+                        # The body can run straight into an alias start, as
+                        # a table target does above: a stray data word made
+                        # an alias of a later instruction of this same
+                        # function, and the alias's body carries on to the
+                        # ret. Fable's factories are stored as immediates
+                        # (0x002214F9, with the alias 0x00221500 on its third
+                        # instruction) and tail jump to their constructors
+                        # (0x002206B9, alias at 0x00220745); left out, a
+                        # factory returned null or raw memory as an object.
+                        if (edge == insn.end_address and edge == next_start
+                                and next_func.get("detection_method")
+                                == "tail_jump_alias"):
+                            exits = True
                             continue
                         if (insn.mnemonic == "jmp" or edge == insn.jump_target) and (
                                 edge in self.func_db

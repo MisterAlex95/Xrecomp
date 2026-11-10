@@ -3,5 +3,6 @@
   "name": "Fable: The Lost Chapters",
   "project": "fable",
   "exclude_manual": ["overrides.c"],
+  "seed_functions": ["seed_functions.json"],
   "status": "Boots, intro movies skipped, title screen, menus and loading screens, pad works. Software rasteriser."
 }
