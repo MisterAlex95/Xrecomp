@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The second-screen panels (docs/android/app-shell.md « Dual screen »): CompanionPanel in the game, LauncherPanel and
+     PreparingPanel in the launcher. A file of their own so that they do not collide with strings.xml edits. -->
+<resources>
+    <string name="PANEL_BACK">Back</string>
+    <string name="PANEL_START">Start</string>
+    <string name="PANEL_WHITE">White</string>
+    <string name="PANEL_BLACK">Black</string>
+    <string name="PANEL_HINT_SELECT">same as Select</string>
+    <string name="PANEL_HINT_START">same as Start</string>
+    <string name="PANEL_HINT_R1">same as R1</string>
+    <string name="PANEL_HINT_L1">same as L1</string>
+    <string name="PANEL_LAUNCHER">Launcher</string>
+    <string name="PANEL_SCREENSHOT">Screenshot</string>
+    <string name="PANEL_PERF">Perf</string>
+    <string name="PANEL_SHARE_LOG">Share log</string>
+    <string name="PANEL_QUIT">Quit</string>
+    <string name="PANEL_HOLD">Hold 1 second</string>
+    <string name="PANEL_FPS">%1$s fps · %2$s ms</string>
+    <string name="PANEL_FPS_NONE">— fps</string>
+    <string name="PANEL_BATTERY">Battery %1$s</string>
+    <string name="PANEL_PERF_LINE1">%1$s · %2$d draws per frame</string>
+    <string name="PANEL_PERF_LINE2">Battery %1$s °C · %2$s</string>
+    <string name="PANEL_SHOT_SAVED">Saved %1$s</string>
+    <string name="PANEL_SHOT_NONE">No frame to save yet</string>
+    <string name="THERMAL_NONE">Cool</string>
+    <string name="THERMAL_LIGHT">Warm</string>
+    <string name="THERMAL_MODERATE">Hot, slowing down</string>
+    <string name="THERMAL_SEVERE">Very hot</string>
+    <string name="THERMAL_CRITICAL">Critical heat</string>
+    <string name="THERMAL_EMERGENCY">Overheating</string>
+    <string name="THERMAL_SHUTDOWN">Shutting down</string>
+    <string name="PANEL_READY">Ready to play</string>
+    <string name="PANEL_NO_GAME">No game set up</string>
+    <string name="PANEL_PREPARING_CAPS">Preparing</string>
+    <string name="PANEL_TIME_LEFT">%1$s left</string>
+    <string name="PANEL_HOLD_CANCEL">Hold to cancel</string>
+    <string name="PANEL_LOG_CAPS">Log</string>
+    <string name="PANEL_PREPARE_DONE">Prepared</string>
+</resources>

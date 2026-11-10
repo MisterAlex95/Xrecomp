@@ -176,6 +176,7 @@ DWORD xbox_InputGetCapabilities(DWORD dwPort, DWORD dwFlags, XBOX_INPUT_CAPABILI
 /* ======================================================================== */
 
 #include <SDL.h>
+#include "input_overlay.h"   /* touch buttons on a second screen (Android) */
 
 static SDL_GameController *g_pads[XBOX_MAX_CONTROLLERS];
 static BOOL  g_controller_connected[XBOX_MAX_CONTROLLERS];
@@ -300,7 +301,11 @@ DWORD xbox_InputGetState(DWORD dwPort, XBOX_INPUT_STATE *pState)
     SDL_GameController *c = controller_for_port_locked(dwPort);
     if (!c) {
         SDL_UnlockJoysticks();
-        if (dwPort == 0 && xbox_InputKeyboardPoll(pState))
+        if (dwPort == 0 && xbox_InputKeyboardPoll(pState)) {
+            xbox_InputOverlayMerge(dwPort, pState);
+            return ERROR_SUCCESS;
+        }
+        if (xbox_InputOverlayStandIn(dwPort, pState))
             return ERROR_SUCCESS;
         return ERROR_DEVICE_NOT_CONNECTED;
     }
@@ -350,6 +355,7 @@ DWORD xbox_InputGetState(DWORD dwPort, XBOX_INPUT_STATE *pState)
 
     if (dwPort == 0)
         keyboard_merge(pState);
+    xbox_InputOverlayMerge(dwPort, pState);
     return ERROR_SUCCESS;
 }
 

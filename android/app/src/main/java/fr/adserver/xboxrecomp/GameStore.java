@@ -67,6 +67,70 @@ final class GameStore {
         return prefs(c).edit().putBoolean(KEY_AUTO_START, on).commit();
     }
 
+    /**
+     * « Bottom screen » on a device with a second display (AYN Thor, docs/android/app-shell.md « Dual screen »):
+     * the companion panel (default), a black screen, or nothing (the system's own content stays there).
+     */
+    enum BottomScreen { PANEL, BLACK, OFF }
+
+    /*
+     * These two live in small files next to the preferences rather than in the SharedPreferences above: the launcher
+     * (":launcher") writes them while the game's process may be alive, and SharedPreferences caches a file per process
+     * (a running game would never see the change). A file is read fresh at every onStart.
+     */
+    static final String BOTTOM_SCREEN_FILE = "bottom_screen", COMPANION_FOCUS_FILE = "companion_focus";
+
+    static BottomScreen bottomScreen(Context c) {
+        String v = readSmall(c, BOTTOM_SCREEN_FILE);
+        for (BottomScreen b : BottomScreen.values()) {
+            if (b.name().equals(v))
+                return b;
+        }
+        return BottomScreen.PANEL;
+    }
+
+    static boolean setBottomScreen(Context c, BottomScreen b) {
+        return writeSmall(c, BOTTOM_SCREEN_FILE, b.name());
+    }
+
+    /** How the companion panel takes input focus (DualScreen.FOCUS_*), or null: the default. */
+    static String companionFocusPref(Context c) {
+        return readSmall(c, COMPANION_FOCUS_FILE);
+    }
+
+    static boolean setCompanionFocusPref(Context c, String mode) {
+        return writeSmall(c, COMPANION_FOCUS_FILE, mode == null ? "" : mode);
+    }
+
+    private static File smallFile(Context c, String name) {
+        return new File(new File(c.getFilesDir(), "settings"), name);
+    }
+
+    private static String readSmall(Context c, String name) {
+        File f = smallFile(c, name);
+        if (!f.isFile())
+            return null;
+        try (BufferedReader r = new BufferedReader(new FileReader(f))) {
+            String s = r.readLine();
+            return s == null || s.trim().isEmpty() ? null : s.trim();
+        } catch (IOException e) {
+            return null;
+        }
+    }
+
+    private static boolean writeSmall(Context c, String name, String value) {
+        File f = smallFile(c, name), tmp = new File(f.getPath() + ".tmp");
+        File d = f.getParentFile();
+        if (d != null && !d.isDirectory() && !d.mkdirs())
+            return false;
+        try (java.io.FileOutputStream o = new java.io.FileOutputStream(tmp)) {
+            o.write((value + "\n").getBytes(StandardCharsets.UTF_8));
+        } catch (IOException e) {
+            return false;
+        }
+        return tmp.renameTo(f);
+    }
+
     static File externalFilesDir(Context c) {
         return c.getExternalFilesDir(null);
     }

@@ -12,11 +12,13 @@ enable_testing()
 
 add_executable(input_sdl_hotplug_test
     test_main.c
-    ../../src/input/xinput_device.c)
+    ../../src/input/xinput_device.c
+    ../../src/input/input_overlay.c     # merged into the SDL backend's GetState
+    ../../src/input/input_map.c)
 target_include_directories(input_sdl_hotplug_test PRIVATE
     fake_sdl
     ../../src/input
     ../../src)
-target_link_libraries(input_sdl_hotplug_test PRIVATE Threads::Threads)
+target_link_libraries(input_sdl_hotplug_test PRIVATE Threads::Threads m)
 
 add_test(NAME input_sdl_hotplug COMMAND input_sdl_hotplug_test)

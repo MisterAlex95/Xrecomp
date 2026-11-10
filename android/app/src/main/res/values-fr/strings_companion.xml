@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="PANEL_BACK">Back</string>
+    <string name="PANEL_START">Start</string>
+    <string name="PANEL_WHITE">Blanc</string>
+    <string name="PANEL_BLACK">Noir</string>
+    <string name="PANEL_HINT_SELECT">comme Select</string>
+    <string name="PANEL_HINT_START">comme Start</string>
+    <string name="PANEL_HINT_R1">comme R1</string>
+    <string name="PANEL_HINT_L1">comme L1</string>
+    <string name="PANEL_LAUNCHER">Lanceur</string>
+    <string name="PANEL_SCREENSHOT">Capture</string>
+    <string name="PANEL_PERF">Perfs</string>
+    <string name="PANEL_SHARE_LOG">Partager le journal</string>
+    <string name="PANEL_QUIT">Quitter</string>
+    <string name="PANEL_HOLD">Maintenir 1 seconde</string>
+    <string name="PANEL_FPS">%1$s i/s · %2$s ms</string>
+    <string name="PANEL_FPS_NONE">— i/s</string>
+    <string name="PANEL_BATTERY">Batterie %1$s</string>
+    <string name="PANEL_PERF_LINE1">%1$s · %2$d appels de dessin par image</string>
+    <string name="PANEL_PERF_LINE2">Batterie %1$s °C · %2$s</string>
+    <string name="PANEL_SHOT_SAVED">Enregistrée : %1$s</string>
+    <string name="PANEL_SHOT_NONE">Pas encore d\'image à enregistrer</string>
+    <string name="THERMAL_NONE">Frais</string>
+    <string name="THERMAL_LIGHT">Tiède</string>
+    <string name="THERMAL_MODERATE">Chaud, ralentit</string>
+    <string name="THERMAL_SEVERE">Très chaud</string>
+    <string name="THERMAL_CRITICAL">Chaleur critique</string>
+    <string name="THERMAL_EMERGENCY">Surchauffe</string>
+    <string name="THERMAL_SHUTDOWN">Arrêt imminent</string>
+    <string name="PANEL_READY">Prêt à jouer</string>
+    <string name="PANEL_NO_GAME">Aucun jeu configuré</string>
+    <string name="PANEL_PREPARING_CAPS">Préparation</string>
+    <string name="PANEL_TIME_LEFT">encore %1$s</string>
+    <string name="PANEL_HOLD_CANCEL">Maintenir pour annuler</string>
+    <string name="PANEL_LOG_CAPS">Journal</string>
+    <string name="PANEL_PREPARE_DONE">Préparé</string>
+</resources>

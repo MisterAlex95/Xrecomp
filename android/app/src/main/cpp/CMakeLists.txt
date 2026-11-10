@@ -11,7 +11,7 @@ set(XBA_TITLE_DIR "" CACHE PATH
 get_filename_component(XBOXRECOMP_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../../../.." ABSOLUTE)
 add_subdirectory("${XBOXRECOMP_ROOT}" xboxrecomp)
 
-add_library(main SHARED shell_main.c pack_loader.c)
+add_library(main SHARED shell_main.c pack_loader.c companion_jni.c)   # companion_jni.c: the second-screen panel
 target_compile_definitions(main PRIVATE XBA_VERSION="${XBA_VERSION}")
 # The whole toolkit, not only what shell_main.c calls: System.loadLibrary("main") then checks on the device that
 # bionic resolves every symbol the runtime needs (pack_loader.c has weak forwarders for the four a title provides:

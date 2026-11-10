@@ -67,6 +67,9 @@ int  xbox_FramebufferDumpBmp(const char *path);
  * UTF-16 title (40 chars max); the stats come from each flip. */
 void xbox_FramebufferWindowSetTitle(const uint16_t *name, int max_chars);
 void xbox_FramebufferWindowFrameStats(uint32_t draws);
+/* POSIX window: the rate the title bar shows (frames per second x 100, 0
+ * before the first second) and the last frame's draw count. */
+void xbox_FramebufferWindowGetStats(uint32_t *fps_centi, uint32_t *draws);
 
 #if !defined(_WIN32)
 /* POSIX hosts: the framebuffer window needs the process main thread (AppKit

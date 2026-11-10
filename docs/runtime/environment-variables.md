@@ -52,6 +52,7 @@ Start here when a title does not run. See [Step 6: Iterative Debugging](../pipel
 | `RECOMP_MISSING_FILES_LIST=<path>` | off | Writes the missing-file list to that path on exit. | `kernel_missing.c` |
 | `RECOMP_CMDLINE=<text>` | off | Command line handed to the title, as a launcher would (`+map intro`). | `kernel_bridge.c` |
 | `RECOMP_SHELL_SELFTEST=1` | off | Android app shell: after `SDL_Init`, runs the self-test in the app process (memory layout on the synthetic XBE asset, the 4 GB window, mirrors, trapped MMIO of each decoder class, execute protections, the save dir), one `selftest NAME: PASS` / `FAIL (reason)` line each and `selftest: N passed, M failed`, then starts as usual. Set it in `recomp.cfg`; `0` is off (docs/android/app-shell.md). | `shell_main.c`, `recomp_selftest.c` |
+| `RECOMP_COMPANION_FOCUS=forward` | `none` | Android app, dual screen (AYN Thor): the second-screen panel's window is focusable and forwards the key and motion events it gets to the game, which ignores losing the focus to it (Plan B). `none`: the panel is never focusable (Plan A). Read from `recomp.cfg` by the Java side at each start of the panel (docs/android/app-shell.md « Dual screen »). | `DualScreen.java`, `CompanionScreen.java` |
 | `RECOMP_SELFTEST_SKIP=<names>` | off | Self-test checks to skip, separated by commas or spaces (`mmio_simd`); each prints `SKIP`. The arm64 CI job skips `mmio_simd` under qemu-user. | `recomp_selftest.c` |
 
 ## Memory and kernel
