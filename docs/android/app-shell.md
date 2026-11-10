@@ -84,6 +84,25 @@ Device check (XBA-23):
    files, still there.
 5. Send the logcat lines and the `ls` output.
 
+### Extracting a disc image in the app (XBA-40)
+
+When the player picks an Xbox disc image (XISO), the app extracts it once into the game folder, because the runtime
+reads plain files. It does this with `src/xiso` (target `xiso`, header `xiso.h`, libc only), which takes the fd that
+the ContentResolver opened and only needs `pread` on it:
+
+- `xiso_probe_fd` reads the volume, checks the whole directory tree and returns the title from `default.xbe`'s
+  certificate, the total size, and whether the root holds a `default.xbe`. The app can show these and check the free
+  space before it writes anything.
+- `xiso_extract_fd(fd, out_dir, progress, user)` writes into `out_dir.partial`. Once every file is written, it
+  replaces `out_dir` as a whole (the old one goes to `out_dir.old`, which is then deleted). If the run is cancelled
+  (the callback returns nonzero) or fails, `out_dir` is untouched and `.partial` is removed. Progress is reported per
+  file and every 4 MB.
+- Images: a bare game partition (extract-xiso, xdvdfs) or a redump full-disc image (game partition at 0x18300000).
+  If the image is corrupt (truncated, offsets out of range, cycles in the tree, names like `..` or with `/`), the call
+  returns `XISO_ECORRUPT` and nothing is written outside `out_dir`. `xiso_strerror` gives a message for each code.
+
+On a desktop, `xiso_extract image.iso outdir` (built by `tests/xiso`, `tools/xiso/README.md`) does the same.
+
 ## Background and resume
 
 (`src/platform/recomp_lifecycle.c`, XBA-24.) On Android SDL already blocks the thread that pumps its events while the

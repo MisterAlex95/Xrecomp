@@ -47,6 +47,12 @@ subtree -- losing a file quietly is worse than being slow.
 
 Not implemented: writing, the video partition, timestamps. Nothing in the pipeline reads them.
 
+### src/xiso and xiso_extract (C)
+
+The Android app extracts a picked image in-app with `src/xiso` (`xiso.h`, XBA-40). That library walks each
+directory's binary tree the way the kernel looks names up, and checks every offset against the image size. On a
+desktop, `xiso_extract image.iso outdir` uses the same code (see `tools/xiso/README.md`).
+
 ### xdvdfs (external)
 
 A Rust-based tool for reading and extracting Xbox disc images.

@@ -89,6 +89,12 @@ if(NOT WIN32)
     add_subdirectory(src/selftest)
 endif()
 
+# Xbox disc image (XISO) extraction (XBA-40): the Android app extracts a picked
+# disc image into the game folder. libc only, POSIX hosts.
+if(NOT WIN32 AND NOT TARGET xiso)
+    add_subdirectory(src/xiso)
+endif()
+
 # ── Umbrella target ───────────────────────────────────────────
 
 # Convenience target that links all runtime libraries
