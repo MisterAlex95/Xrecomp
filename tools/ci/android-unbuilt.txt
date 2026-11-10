@@ -1,0 +1,15 @@
+# Test projects not built for Android in the device-tests stage of tools/docker/android.Dockerfile (build-report.md).
+# Checked weekly by tools/ci/check_expected.py (XBA-53): a project missing from this list that stops building fails
+# the run, and so does a listed project that builds again (remove it). See docs/android/device-tests.md.
+apu_vp                   # Windows-only (Windows threads)
+fb_present               # Windows-only (GDI presenter)
+idex_channel             # Windows-only harness
+input_keyboard_sdl       # needs an SDL window; graphics tests run from the app
+input_xinput_imports     # reads a Windows exe's import table
+kernel_dispatch          # Windows-only harness
+kernel_irql_abi          # Windows VirtualAlloc
+kernel_physical_address  # Windows VirtualAlloc
+kernel_regressions       # Windows VirtualAlloc
+mmio_decode              # windows.h (the arm64 decoder is mmio_decode_a64)
+nv2a_pvideo              # Windows-only PVIDEO hook
+xaudio2                  # windows.h

@@ -14,20 +14,31 @@ RUN dpkg --add-architecture arm64 && apt-get update && apt-get install -y --no-i
 
 FROM deps AS test
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+# The expected-failures checker (tools/ci/check_expected.py). Its own layer, so the deps layer above stays cached.
+RUN apt-get update && apt-get install -y --no-install-recommends python3 && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY . .
 ARG JOBS=4
 # RECOMP_GUEST_WINDOW=1: the memory layout Android uses by default (XBA-21); without it the contiguous window at
 # base + 2 GB lands on a taken range under qemu-user, as it would in an app process.
 ENV SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy JOBS=${JOBS} RECOMP_GUEST_WINDOW=1 \
-    XBR_CMAKE_ARGS="-DCMAKE_TOOLCHAIN_FILE=/src/cmake/toolchains/linux-aarch64-cross.cmake"
-# /work removed at the end of the RUN, as in linux.Dockerfile (multi-GB sparse images from kernel_fd_limit). The C test run does not fail
-# the build here: under qemu a failure is a lead, not a verdict; the report says what failed.
+    XBR_CMAKE_ARGS="-DCMAKE_TOOLCHAIN_FILE=/src/cmake/toolchains/linux-aarch64-cross.cmake" \
+    XBR_JUNIT_DIR=/reports/junit
+# /work removed at the end of the RUN, as in linux.Dockerfile (multi-GB sparse images from kernel_fd_limit).
+# A build break fails at once. The tests run to the end whatever fails (under qemu a failure is a lead, not a
+# verdict), the report is printed, then tools/ci/check_expected.py fails the build on any failure that is not in
+# tools/ci/arm64-expected.txt, and on any line there that no longer fails (XBA-53).
 RUN mkdir -p /work && trap 'rm -rf /work; find /tmp -mindepth 1 -delete' EXIT \
     && export TMPDIR=/work TMP=/work TEMP=/work \
-    && mkdir -p /reports \
+    && mkdir -p /reports/junit \
     && cmake -S . -B /work/build/root -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo $XBR_CMAKE_ARGS \
     && cmake --build /work/build/root -j"$JOBS" 2>&1 | tee /reports/build-root.log \
-    && (ctest --test-dir /work/build/root --output-on-failure --timeout 600 || true) \
+    && (ctest --test-dir /work/build/root --output-on-failure --timeout 600 --output-junit /reports/junit/root.xml || true) \
     && (tools/run_c_tests.sh /work/build/c-tests /reports/c-tests.md || true) \
-    && file /work/build/c-tests/mmx_helpers/mmx_helpers_test* | tee /reports/arch.txt
+    && (file /work/build/c-tests/mmx_helpers/mmx_helpers_test* || true) | tee /reports/arch.txt \
+    && awk -F'|' 'NR > 2 && ($3 ~ /FAIL/ || $4 ~ /FAIL/ || $7 + 0 > 0) { gsub(/ /, "", $2); print $2 }' /reports/c-tests.md \
+         | while read -r p; do echo "=== $p (log tail)"; tail -n 60 "/work/build/c-tests/$p.log"; done \
+    && echo "=== arm64 C test report" && cat /reports/c-tests.md \
+    && echo "=== Against tools/ci/arm64-expected.txt" \
+    && python3 tools/ci/check_expected.py ctest --expected tools/ci/arm64-expected.txt \
+         --report /reports/c-tests.md --junit /reports/junit

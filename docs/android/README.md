@@ -41,8 +41,9 @@ Every push to `main` and every PR runs `.gitea/workflows/ci.yml`, which builds
 3. `pytest tools/` passes (clang on the PATH: the lifter tests compile with it, as the NDK does).
 
 On pushes to `main` (and by hand), a second job cross-compiles everything for arm64 and runs the tests under qemu-user
-(`tools/docker/linux-arm64.Dockerfile`); its failures are compared to [baseline-arm64.md](baseline-arm64.md), not
-counted as red.
+(`tools/docker/linux-arm64.Dockerfile`); it is red on any failure that is not listed in `tools/ci/arm64-expected.txt`
+(see [baseline-arm64.md](baseline-arm64.md)). PRs that touch the toolkit also compile it with the NDK. The whole
+gating, Android jobs included: [toolchain.md « CI gating »](toolchain.md#ci-gating).
 
 Locally:
 
