@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 108 108">
+  <!-- XRecomp app icon (original art). Same design as android/app/src/main/res/drawable/ic_launcher_*.xml. -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#101A15"/>
+      <stop offset="1" stop-color="#060807"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="54" cy="54" r="40" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#4FE38C" stop-opacity="0.25"/>
+      <stop offset="1" stop-color="#4FE38C" stop-opacity="0"/>
+    </radialGradient>
+    <clipPath id="shape"><rect x="0" y="0" width="108" height="108" rx="26"/></clipPath>
+  </defs>
+  <g clip-path="url(#shape)">
+    <rect width="108" height="108" fill="url(#bg)"/>
+    <rect width="108" height="108" fill="url(#glow)"/>
+    <path d="M41,33h26a8,8 0 0 1 8,8v26a8,8 0 0 1 -8,8h-26a8,8 0 0 1 -8,-8v-26a8,8 0 0 1 8,-8z"
+          fill="none" stroke="#4FE38C" stroke-width="3.2"/>
+    <path d="M31,38v-7h7" fill="none" stroke="#4FE38C" stroke-opacity="0.6" stroke-width="2.2"
+          stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M77,70v7h-7" fill="none" stroke="#4FE38C" stroke-opacity="0.6" stroke-width="2.2"
+          stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M54,43l11,11l-11,11l-11,-11z" fill="#4FE38C"/>
+    <path d="M54,43l11,11h-22z" fill="#8AF0B4"/>
+  </g>
+</svg>
