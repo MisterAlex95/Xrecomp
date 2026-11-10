@@ -24,8 +24,10 @@
  *   found: xbox_HostWindowMain runs the title on its guest thread, with the
  *   window, Back twice to quit (flush, drain logcat, _exit(0): « clean
  *   exit ») and the lifecycle;
- * - otherwise the shell's own black, fullscreen, landscape window: a message
- *   (NO_GAME_DATA) when default.xbe is not there; Back once shows
+ * - otherwise the shell's own black, fullscreen, landscape window. When
+ *   default.xbe is not there (NO_GAME_DATA) it hands over to the game picker
+ *   (ShellActivity.openGamePicker, XBA-54), which names the folder and lets
+ *   the player choose the game; a message box if that call fails. Back once shows
  *   QUIT_PROMPT (a toast), twice within 2 s quits: SDL_main returns and
  *   SDLActivity finishes; "lifecycle: paused" / "resumed after N ms" when
  *   the app leaves and comes back (XBA-24).
@@ -33,6 +35,7 @@
  * A title does not replace this file: it is linked next to it (android/app's
  * CMake option XBA_TITLE_DIR, docs/android/app-shell.md). */
 #include <SDL.h>
+#include <jni.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -99,6 +102,37 @@ static int selftest_wanted(void)
 {
     const char *e = getenv("RECOMP_SHELL_SELFTEST");
     return e && *e && strcmp(e, "0") != 0;
+}
+
+/* NO_GAME_DATA: ShellActivity.openGamePicker(dir) (XBA-54) starts the game
+ * picker naming the folder and finishes this activity, so SDL_QUIT follows.
+ * Called on SDLThread, a Java thread: SDL_AndroidGetJNIEnv is its env. The
+ * method is looked up on the activity's own class, not with FindClass. */
+static int open_game_picker(const char *dir)
+{
+    JNIEnv *env = (JNIEnv *)SDL_AndroidGetJNIEnv();
+    jobject act = env ? (jobject)SDL_AndroidGetActivity() : NULL;
+    int rc = -1;
+
+    if (!act)
+        return -1;
+    jclass cls = (*env)->GetObjectClass(env, act);
+    jmethodID m = cls ? (*env)->GetMethodID(env, cls, "openGamePicker", "(Ljava/lang/String;)V") : NULL;
+    jstring jdir = m ? (*env)->NewStringUTF(env, dir) : NULL;
+    if (jdir) {
+        (*env)->CallVoidMethod(env, act, m, jdir);
+        rc = 0;
+        (*env)->DeleteLocalRef(env, jdir);
+    }
+    if ((*env)->ExceptionCheck(env)) {
+        (*env)->ExceptionDescribe(env);
+        (*env)->ExceptionClear(env);
+        rc = -1;
+    }
+    if (cls)
+        (*env)->DeleteLocalRef(env, cls);
+    (*env)->DeleteLocalRef(env, act);
+    return rc;
 }
 
 /* Background / foreground (XBA-24): the same watch as the title's window
@@ -179,10 +213,14 @@ int main(int argc, char *argv[])
     if (have_game <= 0) {
         char msg[3 * RECOMP_STORAGE_PATH_MAX];
         const char *dir = have_game == 0 ? store.game_dir : "(no storage)";
-        SDL_snprintf(msg, sizeof msg, TEXT_NO_GAME_DATA, dir, dir);
         printf("NO_GAME_DATA: default.xbe not found in %s\n", dir);
-        if (SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_INFORMATION, "xboxrecomp", msg, win) != 0)
-            fprintf(stderr, "message box failed: %s\n", SDL_GetError());
+        if (open_game_picker(dir) == 0) {
+            printf("xboxrecomp: NO_GAME_DATA: game picker opened\n");
+        } else {
+            SDL_snprintf(msg, sizeof msg, TEXT_NO_GAME_DATA, dir, dir);
+            if (SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_INFORMATION, "xboxrecomp", msg, win) != 0)
+                fprintf(stderr, "message box failed: %s\n", SDL_GetError());
+        }
     } else {
         printf("xboxrecomp: game data: %s (no title linked)\n", store.xbe);
     }

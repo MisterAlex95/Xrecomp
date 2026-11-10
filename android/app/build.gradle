@@ -10,6 +10,11 @@ if (!sdl2Src) throw new GradleException('Set SDL2_SRC (or -Psdl2Src=...) to the 
 def xbaVersion = findProperty('xbaVersion') ?: 'dev'
 // A title linked into libmain.so (XBA-52): its project directory, a copy of templates/new-game with its generated C.
 def xbaTitleDir = findProperty('xbaTitleDir') ?: ''
+// The SHA-256 of the default.xbe a title's APK is built for (XBA-54, XBA-40): the game picker refuses another disc
+// (WRONG_GAME). Empty (the shell, the stub) = no check.
+def xbaXbeSha256 = ((findProperty('xbaXbeSha256') ?: '') as String).trim().toLowerCase()
+if (xbaXbeSha256 && !(xbaXbeSha256 ==~ /[0-9a-f]{64}/))
+    throw new GradleException("-PxbaXbeSha256=${xbaXbeSha256}: expected 64 hex digits (sha256sum default.xbe)")
 
 // The synthetic XBE of tools/conformance (ours: five leaf functions, no game content) as the asset selftest.xbe, for
 // the in-app self-test (XBA-51, RECOMP_SHELL_SELFTEST=1). Copied at build time rather than kept twice in the repo.
@@ -44,6 +49,7 @@ android {
         versionCode((findProperty('xbaVersionCode') ?: '1') as int)
         versionName xbaVersion
         resValue 'string', 'app_name', (findProperty('xbaLabel') ?: 'xboxrecomp')
+        resValue 'string', 'xba_xbe_sha256', xbaXbeSha256
         ndk { abiFilters 'arm64-v8a' }
         externalNativeBuild {
             cmake {

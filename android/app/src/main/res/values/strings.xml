@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The game picker's texts (LauncherActivity, XBA-54 / XBA-40). Keys in capitals are the ones the spec and logcat
+     name (NO_GAME_DATA, NOT_A_GAME_FOLDER, WRONG_GAME, ...). French: values-fr/strings.xml. app_name and
+     xba_xbe_sha256 come from android/app/build.gradle. -->
+<resources xmlns:tools="http://schemas.android.com/tools" tools:ignore="ResourceName">
+    <string name="NO_GAME_SET_UP">No game is set up. Choose the folder of your extracted disc (default.xbe and its files), or a disc image (.iso).</string>
+    <string name="NO_GAME_DATA">No game data found in %1$s (no default.xbe there). Choose the game folder or a disc image.</string>
+    <string name="GAME_FOLDER_GONE">The game folder %1$s is no longer there (deleted, or its SD card removed). Choose the game again.</string>
+    <string name="GAME_FOLDER_NO_ACCESS">The game folder %1$s cannot be read: All files access is off. Turn it on again (choose the folder again to be asked), or choose the game again.</string>
+    <string name="CURRENT_GAME">Game: %1$s\nFolder: %2$s</string>
+    <string name="GAME_UNNAMED">(set up outside this screen)</string>
+    <string name="GAME_RUNNING">The game is running: it closes when you choose another one. Saves are kept.</string>
+
+    <string name="CHOOSE_FOLDER">Choose game folder</string>
+    <string name="CHOOSE_ISO">Choose disc image (ISO)</string>
+    <string name="START_GAME">Start the game</string>
+    <string name="CANCEL">Cancel</string>
+
+    <string name="NOT_A_GAME_FOLDER">This folder holds no default.xbe: it is not an extracted Xbox disc. Choose the folder that contains default.xbe.</string>
+    <string name="NOT_AN_ISO">%1$s is not a disc image: choose a file ending in .iso or .xiso.</string>
+    <string name="NOT_A_GAME_IMAGE">Not an Xbox disc image, or no default.xbe in it: %1$s</string>
+    <string name="WRONG_GAME">This is not the game this app was made for (another game, or another region): its default.xbe does not match. Nothing was changed.</string>
+    <string name="NOT_ENOUGH_SPACE">Not enough free space: the game needs %1$s, %2$s are free.</string>
+    <string name="IMPORT_FAILED">The import failed: %1$s. Nothing was changed.</string>
+    <string name="CANCELED">Import canceled. Nothing was changed.</string>
+    <string name="PICKER_MISSING">This device has no file picker.</string>
+
+    <string name="ALL_FILES_TITLE">Read the game in place?</string>
+    <string name="ALL_FILES_EXPLAIN">With « All files access », the app reads the game straight from the folder you choose, on the phone or on an SD card: no copy, and it works for a 4 GB disc. The app only reads the game folder you pick.\n\nWithout it, the folder is copied into the app\'s own storage: that takes as much free space again and a few minutes, and the copy is removed with the app.</string>
+    <string name="ALL_FILES_GRANT">Allow all files access</string>
+    <string name="ALL_FILES_COPY">Copy instead</string>
+
+    <string name="CHECKING">Checking the game…</string>
+    <string name="COPYING">Copying the game…</string>
+    <string name="EXTRACTING">Extracting the disc image…</string>
+    <string name="PROGRESS_BYTES">%1$s of %2$s</string>
+    <string name="STARTING">Starting %1$s</string>
+
+    <string name="SHORTCUT_CHANGE_GAME">Change game</string>
+    <string name="SHORTCUT_CHANGE_GAME_LONG">Change game folder</string>
+</resources>

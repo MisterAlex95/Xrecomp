@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
     android:installLocation="auto">
 
     <uses-feature android:glEsVersion="0x00030000" android:required="true" />
@@ -8,6 +9,11 @@
     <uses-feature android:name="android.hardware.bluetooth" android:required="false" />
     <uses-feature android:name="android.hardware.usb.host" android:required="false" />
     <uses-permission android:name="android.permission.VIBRATE" />
+    <!-- All files access (XBA-54): read the picked game folder in place with POSIX calls. Asked from the picker with
+         the settings screen, never required: without it the folder is copied into the app's storage. Personal
+         builds only (refused on the Play Store). -->
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE"
+        tools:ignore="ScopedStorage" />
 
     <!-- allowNativeHeapPointerTagging: lifted code may squeeze host pointers; tagged heap pointers would break it
          (see the Plane page « Reference · BananaNative »). -->
@@ -20,18 +26,33 @@
         android:isGame="true"
         android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen">
 
+        <!-- The game picker (XBA-54): the launcher entry, in its own process so that it never loads SDL or the
+             runtime (and can end and restart the game's process after a new choice). With a valid game it starts
+             ShellActivity at once. -->
         <activity
-            android:name=".ShellActivity"
+            android:name=".LauncherActivity"
             android:exported="true"
-            android:launchMode="singleInstance"
-            android:alwaysRetainTaskState="true"
-            android:screenOrientation="sensorLandscape"
-            android:preferMinimalPostProcessing="true"
+            android:process=":launcher"
+            android:theme="@android:style/Theme.Material.NoActionBar"
             android:configChanges="layoutDirection|locale|orientation|uiMode|screenLayout|screenSize|smallestScreenSize|keyboard|keyboardHidden|navigation">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+            <intent-filter>
+                <action android:name="fr.adserver.xboxrecomp.CHOOSE_GAME" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
+
+        <activity
+            android:name=".ShellActivity"
+            android:exported="false"
+            android:launchMode="singleInstance"
+            android:alwaysRetainTaskState="true"
+            android:screenOrientation="sensorLandscape"
+            android:preferMinimalPostProcessing="true"
+            android:configChanges="layoutDirection|locale|orientation|uiMode|screenLayout|screenSize|smallestScreenSize|keyboard|keyboardHidden|navigation">
         </activity>
     </application>
 </manifest>

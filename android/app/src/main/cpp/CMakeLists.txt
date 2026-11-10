@@ -22,6 +22,16 @@ target_link_libraries(main PRIVATE -Wl,--whole-archive ${XBA_TOOLKIT_LIBS} -Wl,-
                                    SDL2::SDL2 GLESv3 log android m)
 target_link_options(main PRIVATE -Wl,--no-undefined)
 
+# libxba_import.so (XBA-40, XBA-54): the game picker's ISO import, JNI around src/xiso. A library of its own: the
+# picker runs in its own process before SDL, and must not load libSDL2.so and the whole runtime that libmain.so
+# brings. The toolkit's root CMakeLists adds src/xiso (target xiso, libc only).
+if(NOT TARGET xiso)
+    add_subdirectory("${XBOXRECOMP_ROOT}/src/xiso" xiso)
+endif()
+add_library(xba_import SHARED xiso_jni.c)
+target_link_libraries(xba_import PRIVATE xiso log)
+target_link_options(xba_import PRIVATE -Wl,--no-undefined)
+
 # The title (XBA-52). Its CMakeLists sees XBOXRECOMP_SHELL_TITLE and, instead of an executable, defines the object
 # library xba_title (its main.c then defines recomp_title_main, which shell_main.c calls). Objects, not an archive:
 # every one of them is linked, as an executable would link them.
