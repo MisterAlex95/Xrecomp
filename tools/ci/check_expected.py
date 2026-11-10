@@ -18,6 +18,8 @@ project, "yes" or "no: <why>". Entries: the projects that are not built for Andr
 
 Either way an entry must still fail: a listed test that passes, skips or is gone makes the list stale, and the run
 fails until the line is removed. Lines are "<entry>  # reason"; blank lines and comments are ignored.
+"flaky <entry>  # reason" marks an entry that fails only some of the time: it may fail or pass, and is never
+stale (it must still exist in the results). Use it for a known intermittent failure that has its own ticket.
 Exit status: 0 when the results match the list exactly, 1 otherwise, 2 on unreadable input.
 """
 import argparse
@@ -28,16 +30,22 @@ import xml.etree.ElementTree as ET
 
 
 def read_expected(path):
-    entries = {}
+    """{entry: line number} and the set of entries marked flaky."""
+    entries, flaky = {}, set()
     with open(path, encoding="utf-8") as f:
         for n, line in enumerate(f, 1):
             text = line.split("#", 1)[0].strip()
             if not text:
                 continue
+            is_flaky = text.startswith("flaky ")
+            if is_flaky:
+                text = text[len("flaky "):].strip()
             if text in entries:
                 raise ValueError(f"{path}:{n}: {text} listed twice")
             entries[text] = n
-    return entries
+            if is_flaky:
+                flaky.add(text)
+    return entries, flaky
 
 
 def read_table(path):
@@ -137,7 +145,7 @@ def main():
     ap.add_argument("--junit", help="ctest mode: directory of the JUnit files")
     a = ap.parse_args()
     try:
-        expected = read_expected(a.expected)
+        expected, flaky = read_expected(a.expected)
         if a.mode == "ctest":
             if not a.junit:
                 ap.error("ctest mode needs --junit")
@@ -149,11 +157,15 @@ def main():
         return 2
 
     unexpected = sorted(set(failing) - set(expected))
-    stale = sorted(set(expected) - set(failing))
+    # A flaky entry that passed this time is fine, as long as it ran at all.
+    stale = sorted(e for e in set(expected) - set(failing)
+                   if not (e in flaky and e in seen))
     known = sorted(set(expected) & set(failing))
     now = "builds now" if a.mode == "android" else "no longer fails"
     for e in known:
-        print(f"expected  {e}: {failing[e]}")
+        print(f"expected  {e}: {failing[e]}{' (flaky)' if e in flaky else ''}")
+    for e in sorted(flaky & (set(seen) - set(failing))):
+        print(f"flaky     {e}: passed this time")
     for e in unexpected:
         print(f"UNEXPECTED {e}: {failing[e]}")
     for e in stale:
