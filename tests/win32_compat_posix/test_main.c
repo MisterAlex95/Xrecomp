@@ -15,12 +15,18 @@
  *                   the range back, so the same address can be mapped again
  *   4. release      UnmapViewOfFile and VirtualFree(MEM_RELEASE) free the
  *                   address for reuse
+ *   5. no exec      a PAGE_EXECUTE_* request (VirtualAlloc, VirtualProtect,
+ *                   also on a view of a file mapping) succeeds with its read /
+ *                   write access and without PROT_EXEC (XBA-51): nothing runs
+ *                   guest memory, and an Android app may not get an
+ *                   executable memfd or anonymous mapping
  *
  * The addresses come from the OS: map anonymously, note where it landed,
  * unmap. Nothing here assumes a fixed host layout.
  */
 #include "win32_compat.h"
 
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
@@ -33,6 +39,37 @@ static void check(int ok, const char *what)
     printf("  %-60s %s\n", what, ok ? "PASS" : "FAIL");
     if (!ok) failures++;
 }
+
+#if defined(__linux__)
+/* The permission letters /proc/self/maps shows for addr ("rw-p"), or "" when
+ * no mapping covers it. */
+static void maps_perms(const void *addr, char out[5])
+{
+    char line[512];
+    FILE *f = fopen("/proc/self/maps", "r");
+    out[0] = '\0';
+    if (!f) return;
+    while (fgets(line, sizeof line, f)) {
+        unsigned long lo, hi;
+        char perms[5];
+        if (sscanf(line, "%lx-%lx %4s", &lo, &hi, perms) == 3
+                && (uintptr_t)addr >= lo && (uintptr_t)addr < hi) {
+            memcpy(out, perms, 5);
+            break;
+        }
+    }
+    fclose(f);
+}
+
+static int not_exec(const void *addr)
+{
+    char perms[5];
+    maps_perms(addr, perms);
+    return perms[0] && perms[2] != 'x';
+}
+#else
+static int not_exec(const void *addr) { (void)addr; return 1; }   /* no /proc: access checks only */
+#endif
 
 /* An address range nothing currently occupies. */
 static void *free_range(size_t len)
@@ -106,6 +143,34 @@ int main(void)
     a = VirtualAlloc(at, len, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
     check(a == at, "the address can be allocated again after VirtualFree");
     if (a) VirtualFree(a, 0, MEM_RELEASE);
+
+    /* 5. No exec. The guest's execute protections keep their data access and
+     *    lose the execute bit. */
+    {
+        DWORD old = 0;
+        volatile unsigned char *x = VirtualAlloc(NULL, len, MEM_RESERVE | MEM_COMMIT,
+                                                 PAGE_EXECUTE_READWRITE);
+        check(x != NULL, "VirtualAlloc(PAGE_EXECUTE_READWRITE) succeeds");
+        if (x) {
+            x[0] = 0x5A;
+            check(x[0] == 0x5A, "...and the memory is readable and writable");
+            check(not_exec((const void *)x), "...without PROT_EXEC");
+            check(VirtualProtect((LPVOID)x, len, PAGE_EXECUTE_READ, &old),
+                  "VirtualProtect(PAGE_EXECUTE_READ) succeeds");
+            check(x[0] == 0x5A && not_exec((const void *)x), "...readable, without PROT_EXEC");
+            check(VirtualProtect((LPVOID)x, len, PAGE_EXECUTE, &old) && x[0] == 0x5A,
+                  "VirtualProtect(PAGE_EXECUTE) leaves it readable");
+            VirtualFree((LPVOID)x, 0, MEM_RELEASE);
+        }
+        unsigned char *v = MapViewOfFile(map, FILE_MAP_ALL_ACCESS, 0, 0, len);
+        check(v && VirtualProtect(v, len, PAGE_EXECUTE_READWRITE, &old),
+              "VirtualProtect(PAGE_EXECUTE_READWRITE) on a mapping view succeeds");
+        if (v) {
+            v[1] = 0xA5;
+            check(v[1] == 0xA5 && not_exec(v), "...read / write, without PROT_EXEC");
+            UnmapViewOfFile(v);
+        }
+    }
 
     CloseHandle(map);
 

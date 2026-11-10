@@ -12,6 +12,13 @@
  * - the trapped-MMIO fault handler, chained to debuggerd / ART so real
  *   crashes keep their tombstone (XBA-22); checked again here after SDL_Init.
  *
+ * With RECOMP_SHELL_SELFTEST=1 in recomp.cfg, the self-test (XBA-51,
+ * src/selftest/recomp_selftest.h) runs next, after SDL_Init, in this app
+ * process: the memory layout on the synthetic XBE shipped as the asset
+ * selftest.xbe, its mirrors, trapped MMIO, execute protections, the save
+ * dir; one « selftest NAME: PASS / FAIL » line each and a summary. The shell
+ * then goes on as below.
+ *
  * Then "xboxrecomp ready" with the build version, and:
  * - a title linked in (it defines recomp_title_main, XBA-52) and default.xbe
  *   found: xbox_HostWindowMain runs the title on its guest thread, with the
@@ -28,10 +35,12 @@
 #include <SDL.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "platform/recomp_app.h"
 #include "platform/recomp_lifecycle.h"
 #include "platform/recomp_quit.h"
+#include "recomp_selftest.h"
 #include "kernel/xbox_memory_layout.h"
 #include "video/video_player.h"     /* xbox_HostWindowMain */
 
@@ -71,6 +80,27 @@ static int title_boot(void)
     return recomp_title_main(s_title_store);
 }
 
+/* RECOMP_SHELL_SELFTEST=1 (recomp.cfg, XBA-51). The synthetic XBE of
+ * tools/conformance (ours, no game content) is the APK asset selftest.xbe
+ * (android/app/build.gradle); SDL_LoadFile reads a relative path through the
+ * asset manager on Android. The layout takes the bytes, so no copy on disk. */
+static void run_selftest(const recomp_storage *store)
+{
+    size_t len = 0;
+    void *xbe = SDL_LoadFile("selftest.xbe", &len);
+
+    if (!xbe)
+        fprintf(stderr, "selftest: cannot read the asset selftest.xbe: %s\n", SDL_GetError());
+    recomp_selftest_run(xbe, xbe ? len : 0, store->save_dir[0] ? store->save_dir : NULL);
+    SDL_free(xbe);
+}
+
+static int selftest_wanted(void)
+{
+    const char *e = getenv("RECOMP_SHELL_SELFTEST");
+    return e && *e && strcmp(e, "0") != 0;
+}
+
 /* Background / foreground (XBA-24): the same watch as the title's window
  * (fb_present_sdl.c), so logcat shows "lifecycle: paused" / "resumed after
  * N ms" on the shell too. */
@@ -104,6 +134,11 @@ int main(int argc, char *argv[])
     /* SDL may have installed handlers of its own: make sure ours is still
      * in front (it chains to theirs). */
     xbox_PosixInstallMmioFaultHandler();
+
+    /* In the app process, with SDL and ART's handlers in place, before any
+     * title maps its own layout (the self-test shuts its one down). */
+    if (selftest_wanted())
+        run_selftest(&store);
 
     SDL_version sdl;
     SDL_GetVersion(&sdl);

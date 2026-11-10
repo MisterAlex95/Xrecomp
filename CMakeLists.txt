@@ -83,6 +83,12 @@ add_subdirectory(src/input)
 # Shared FMV player (Media Foundation -> D3D8 texture)
 add_subdirectory(src/video)
 
+# The in-app self-test (XBA-51): the Android app shell runs it under
+# RECOMP_SHELL_SELFTEST=1, tests/recomp_selftest on Linux. POSIX hosts.
+if(NOT WIN32)
+    add_subdirectory(src/selftest)
+endif()
+
 # ── Umbrella target ───────────────────────────────────────────
 
 # Convenience target that links all runtime libraries

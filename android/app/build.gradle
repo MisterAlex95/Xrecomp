@@ -11,6 +11,27 @@ def xbaVersion = findProperty('xbaVersion') ?: 'dev'
 // A title linked into libmain.so (XBA-52): its project directory, a copy of templates/new-game with its generated C.
 def xbaTitleDir = findProperty('xbaTitleDir') ?: ''
 
+// The synthetic XBE of tools/conformance (ours: five leaf functions, no game content) as the asset selftest.xbe, for
+// the in-app self-test (XBA-51, RECOMP_SHELL_SELFTEST=1). Copied at build time rather than kept twice in the repo.
+abstract class XbaSelftestAsset extends DefaultTask {
+    @InputFile abstract RegularFileProperty getXbe()
+    @OutputDirectory abstract DirectoryProperty getOutputDir()
+    @TaskAction void copy() {
+        def dir = outputDir.get().asFile
+        dir.mkdirs()
+        java.nio.file.Files.copy(xbe.get().asFile.toPath(), new File(dir, 'selftest.xbe').toPath(),
+                                 java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+    }
+}
+def selftestAsset = tasks.register('xbaSelftestAsset', XbaSelftestAsset) {
+    xbe = rootProject.file('../tools/conformance/test.xbe')
+}
+androidComponents {
+    onVariants(selector().all()) { variant ->
+        variant.sources.assets?.addGeneratedSourceDirectory(selftestAsset, XbaSelftestAsset::getOutputDir)
+    }
+}
+
 android {
     namespace 'fr.adserver.xboxrecomp'
     compileSdk 35

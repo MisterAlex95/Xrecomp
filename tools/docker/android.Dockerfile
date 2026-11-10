@@ -87,7 +87,8 @@ RUN printf 'sdk.dir=%s\ncmake.dir=/usr\n' "$ANDROID_HOME" > local.properties \
     && gradle --no-daemon --console=plain -PxbaVersion="$XBA_VERSION" assembleDebug \
     && mkdir -p /out \
     && cp app/build/outputs/apk/debug/app-debug.apk /out/xboxrecomp-shell.apk \
-    && unzip -l /out/xboxrecomp-shell.apk | grep -E 'lib/|classes' | tee /out/apk-contents.txt \
+    && unzip -l /out/xboxrecomp-shell.apk | grep -E 'lib/|classes|assets/' | tee /out/apk-contents.txt \
+    && grep -q 'assets/selftest.xbe' /out/apk-contents.txt \
     && rm -rf /root/.gradle/caches /root/.gradle/daemon app/build app/.cxx build .gradle
 
 FROM scratch AS apk-out
@@ -109,7 +110,7 @@ RUN /src/tools/android/stub_title.sh /work/stub \
     && mkdir -p /out \
     && cp app/build/outputs/apk/debug/app-debug.apk /out/xboxrecomp-stub.apk \
     && cp /work/stub/game/default.xbe /out/stub-default.xbe \
-    && unzip -l /out/xboxrecomp-stub.apk | grep -E 'lib/|classes' | tee /out/stub-apk-contents.txt \
+    && unzip -l /out/xboxrecomp-stub.apk | grep -E 'lib/|classes|assets/' | tee /out/stub-apk-contents.txt \
     && unzip -p /out/xboxrecomp-stub.apk lib/arm64-v8a/libmain.so > /tmp/libmain.so \
     && "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-nm" -D --defined-only /tmp/libmain.so \
          | grep -E ' T (recomp_title_main|xbe_entry_point|sub_00011000)$' | tee -a /out/stub-apk-contents.txt \

@@ -870,9 +870,18 @@ extern bool apu_hook_handle_mmio_posix(void *ucv, uintptr_t fault_addr,
                                        uint32_t fault_xbox_va, int is_write);
 #endif
 
+/* The caller's own trapped window (xbox_PosixMmioSetTestWindow). */
+static struct {
+    uint32_t va, size;              /* size 0: none; written last, read first */
+    void *dev;
+    xbox_mmio_read_fn rd;
+    xbox_mmio_write_fn wr;
+} g_mmio_test;
+
 /* POSIX: call from the title's SIGBUS/SIGSEGV handler (SA_SIGINFO) with its
  * ucontext_t * and si_addr; on 1, return from the handler and the thread
- * resumes after the emulated instruction. APU, then AC'97, then OHCI. Linux
+ * resumes after the emulated instruction. APU, then AC'97, then OHCI, then
+ * the caller's test window (the self-test, XBA-51). Linux
  * arm64 and Linux x86-64 have decoders; elsewhere nothing is trapped and this
  * returns 0. */
 int xbox_PosixMmioFault(void *ucv, uintptr_t fault)
@@ -890,10 +899,40 @@ int xbox_PosixMmioFault(void *ucv, uintptr_t fault)
         return 1;
     if (xbox_OhciOwnsAddress(va))
         return xbox_OhciHandleMmio(ucv, va);
+    if (__atomic_load_n(&g_mmio_test.size, __ATOMIC_ACQUIRE)
+            && va - g_mmio_test.va < g_mmio_test.size)
+#if defined(__aarch64__)
+        return mmio_emulate_a64((ucontext_t *)ucv, va - g_mmio_test.va,
+                                g_mmio_test.dev, g_mmio_test.rd, g_mmio_test.wr);
+#else
+        return mmio_emulate_x86_64((ucontext_t *)ucv, va - g_mmio_test.va,
+                                   g_mmio_test.dev, g_mmio_test.rd, g_mmio_test.wr);
+#endif
 #else
     (void)ucv; (void)fault;
 #endif
     return 0;
+}
+
+int xbox_PosixMmioSetTestWindow(uint32_t va, uint32_t size, void *dev,
+                                xbox_mmio_read_fn rd, xbox_mmio_write_fn wr)
+{
+#if defined(__aarch64__) || (defined(__x86_64__) && defined(__linux__))
+    __atomic_store_n(&g_mmio_test.size, 0, __ATOMIC_RELEASE);
+    if (!size)
+        return 0;
+    if (!rd || !wr)
+        return -1;
+    g_mmio_test.va = va;
+    g_mmio_test.dev = dev;
+    g_mmio_test.rd = rd;
+    g_mmio_test.wr = wr;
+    __atomic_store_n(&g_mmio_test.size, size, __ATOMIC_RELEASE);
+    return 0;
+#else
+    (void)va; (void)dev; (void)rd; (void)wr; (void)&g_mmio_test;
+    return size ? -1 : 0;
+#endif
 }
 
 /* The fault handler a POSIX title would otherwise write itself (see
@@ -2933,6 +2972,12 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
         int sections_short = 0;
         size_t total_bytes = 0;
 
+        /* This image's ranges, not the union with a previous init's: the app
+         * shell's self-test (XBA-51) maps the synthetic XBE, shuts down, and
+         * the title then maps its own in the same process. */
+        g_xbox_image_lo = g_xbox_image_hi = 0;
+        g_xbox_code_lo = g_xbox_code_hi = 0;
+
         fprintf(stderr, "  XBE sections: %u (headers at file offset 0x%08X)\n",
                 num_sections, sect_headers_off);
 
@@ -3759,6 +3804,15 @@ void xbox_ProtectMirrorsForDebug(void)
     }
     fprintf(stderr, "  Mirrors: %d/%d made read-only (debug)\n",
             n, XBOX_NUM_MIRRORS);
+}
+
+int xbox_GuestWindowHeld(void)
+{
+#if defined(_WIN32)
+    return g_win_window_size != 0;
+#else
+    return g_span_whole_window;
+#endif
 }
 
 void xbox_MemoryLayoutShutdown(void)

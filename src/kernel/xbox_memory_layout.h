@@ -272,7 +272,24 @@ int xbox_PosixMmioFault(void *ucv, uintptr_t fault);
  * that may install its own handler (SDL_Init): it checks it is still in
  * front and re-installs itself, chaining to the newcomer. 0 on success. */
 int xbox_PosixInstallMmioFaultHandler(void);
+
+/* A trapped window of the caller's own, for the self-test (XBA-51,
+ * src/platform/recomp_selftest.c): xbox_PosixMmioFault services a fault at
+ * guest [va, va + size) against (dev, rd, wr) with this host's decoder, after
+ * the APU, AC'97 and OHCI. The caller makes those pages fault (PAGE_NOACCESS)
+ * and puts them back. One window; size 0 removes it. 0 on success, -1 on a
+ * host with no decoder (anything but POSIX arm64 and Linux x86-64). */
+typedef uint64_t (*xbox_mmio_read_fn)(void *dev, uint32_t off, int size);
+typedef void     (*xbox_mmio_write_fn)(void *dev, uint32_t off, uint64_t val, int size);
+int xbox_PosixMmioSetTestWindow(uint32_t va, uint32_t size, void *dev,
+                                xbox_mmio_read_fn rd, xbox_mmio_write_fn wr);
 #endif
+
+/* 1 while the whole 4 GB guest window is held as one reservation
+ * (RECOMP_GUEST_WINDOW, on by default on Android; the Windows placeholder),
+ * 0 when only RAM and its mirrors are reserved and the other windows were
+ * mapped at fixed addresses that happened to be free. */
+int xbox_GuestWindowHeld(void);
 
 /* Dump the guest call stack and abort if the title has not exited within
  * RECOMP_WATCHDOG_SECS seconds. Call from the thread that runs guest code;

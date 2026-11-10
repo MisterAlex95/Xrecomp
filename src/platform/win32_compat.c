@@ -1600,16 +1600,27 @@ SIZE_T HeapSize(HANDLE heap, DWORD flags, LPCVOID mem)
 /* Virtual memory                                                        */
 /* ===================================================================== */
 
+/* Never PROT_EXEC (XBA-51). Nothing executes memory allocated through this
+ * layer: guest code is recompiled ahead of time into the host binary, so a
+ * guest's execute request (its code pages, NtAllocateVirtualMemory or
+ * NtProtectVirtualMemory with PAGE_EXECUTE_*, MmSetAddressProtect) only ever
+ * needs the data access that comes with it, and the runtime has no JIT. An
+ * executable mapping costs something, though: in an Android app (SELinux
+ * untrusted_app) an executable anonymous or memfd mapping can be refused
+ * (execmem), and then the guest's request fails for a permission it never
+ * uses. So the execute bit is dropped and read / write kept; PAGE_EXECUTE
+ * alone, which on x86 reads as well, becomes PROT_READ. VirtualQuery already
+ * reports every mapping as PAGE_READWRITE, so no caller sees the difference. */
 static int prot_from_page(DWORD protect)
 {
     switch (protect & 0xFF) {
     case PAGE_NOACCESS:          return PROT_NONE;
     case PAGE_READONLY:          return PROT_READ;
     case PAGE_READWRITE:         return PROT_READ | PROT_WRITE;
-    case PAGE_EXECUTE:           return PROT_EXEC;
-    case PAGE_EXECUTE_READ:      return PROT_READ | PROT_EXEC;
-    case PAGE_EXECUTE_READWRITE: return PROT_READ | PROT_WRITE | PROT_EXEC;
-    default:                     return PROT_READ | PROT_WRITE;
+    case PAGE_EXECUTE:           return PROT_READ;
+    case PAGE_EXECUTE_READ:      return PROT_READ;
+    case PAGE_EXECUTE_READWRITE: return PROT_READ | PROT_WRITE;
+    default:                     return PROT_READ | PROT_WRITE;   /* WRITECOPY, EXECUTE_WRITECOPY */
     }
 }
 
