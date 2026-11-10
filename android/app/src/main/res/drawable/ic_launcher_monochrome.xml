@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- XRecomp icon for themed (monochrome) launcher icons: the frame and the gem only. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="108" android:viewportHeight="108">
+    <path android:pathData="M41,33h26a8,8 0,0 1,8,8v26a8,8 0,0 1,-8,8h-26a8,8 0,0 1,-8,-8v-26a8,8 0,0 1,8,-8z"
+        android:strokeColor="#FFFFFFFF" android:strokeWidth="3.2" android:fillColor="#00000000" />
+    <path android:pathData="M54,43l11,11l-11,11l-11,-11z" android:fillColor="#FFFFFFFF" />
+</vector>

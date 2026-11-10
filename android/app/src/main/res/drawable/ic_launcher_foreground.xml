@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- XRecomp icon, foreground layer: the launcher's brand mark (Widgets.BrandMark), a rounded frame with the green gem,
+     plus two corner ticks like the launcher's panels. Inside the adaptive-icon safe zone (66 dp circle). -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="108" android:viewportHeight="108">
+    <!-- frame -->
+    <path android:pathData="M41,33h26a8,8 0,0 1,8,8v26a8,8 0,0 1,-8,8h-26a8,8 0,0 1,-8,-8v-26a8,8 0,0 1,8,-8z"
+        android:strokeColor="#FF4FE38C" android:strokeWidth="3.2" android:fillColor="#00000000" />
+    <!-- corner ticks -->
+    <path android:pathData="M31,38v-7h7" android:strokeColor="#994FE38C" android:strokeWidth="2.2"
+        android:strokeLineCap="round" android:strokeLineJoin="round" android:fillColor="#00000000" />
+    <path android:pathData="M77,70v7h-7" android:strokeColor="#994FE38C" android:strokeWidth="2.2"
+        android:strokeLineCap="round" android:strokeLineJoin="round" android:fillColor="#00000000" />
+    <!-- gem -->
+    <path android:pathData="M54,43l11,11l-11,11l-11,-11z" android:fillColor="#FF4FE38C" />
+    <path android:pathData="M54,43l11,11h-22z" android:fillColor="#FF8AF0B4" />
+</vector>

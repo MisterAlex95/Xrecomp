@@ -1,4 +1,28 @@
-> **Fork:** this is Alex's private Android fork; see [docs/android/README.md](docs/android/README.md).
+<p align="center"><img src="docs/images/xrecomp-icon.svg" width="128" alt="XRecomp icon"></p>
+
+<h1 align="center">XRecomp</h1>
+
+<p align="center"><b>Original Xbox games, recompiled to native code, on Android.</b><br>
+Alex's private Android fork of xboxrecomp (below): one app for arm64 handhelds, AYN Thor first.</p>
+
+- **Bring your own disc.** Pick the extracted game folder or an ISO you dumped from your own disc; nothing from any
+  game is in the repo or the APK.
+- **Prepare on the device.** The app runs the recompilation pipeline itself (embedded Python, capstone, clang + lld)
+  and builds a native pack for that game, in the background with progress: about 20–30 min once, no PC needed.
+- **Play.** A console-style launcher driven by the gamepad (title image read from the disc, settings, controls), and
+  on the AYN Thor a touch panel on the bottom screen (White / Black / Back / Start, quick actions, fps and battery).
+
+| | |
+|---|---|
+| Get the APK | release [shell-latest](https://git.cf.adserver.fr/Alex/xboxrecomp-android/releases/tag/shell-latest) (`xrecomp-prepare-*.apk`) |
+| The app | [docs/android/app-shell.md](docs/android/app-shell.md): launcher, packs, dual screen, device check lists |
+| Prepare on the device | [docs/android/prepare.md](docs/android/prepare.md), [docs/android/toolchain.md](docs/android/toolchain.md) |
+| The fork | [docs/android/README.md](docs/android/README.md): branches, following upstream, CI |
+
+Plan, decisions and tickets: Plane project **XBA**. The upstream README follows unchanged.
+
+---
+
 
 # xboxrecomp
 
