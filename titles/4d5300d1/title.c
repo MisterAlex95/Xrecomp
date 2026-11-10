@@ -12,6 +12,7 @@
 #include <string.h>
 
 extern void xbox_SetMapSize(size_t bytes);
+extern void xbox_SetDeferredIoApc(int on);
 
 #ifndef _WIN32
 #include <dirent.h>
@@ -45,6 +46,13 @@ void xba_title_configure(void)
      * keyboard stands in for it on a desktop. */
     SETENV_DEFAULT("RECOMP_USB", "1");
     SETENV_DEFAULT("RECOMP_KEYBOARD", "1");
+    /* File-I/O completion APCs at the next alertable wait, as the hardware
+     * does, not inline inside NtReadFile (kernel_bridge.c, deliver_one_apc).
+     * Delivered inline, the loader's completion ran before the read call had
+     * returned and its bookkeeping was set up. FABLE_INLINE_APC=1 restores
+     * the inline delivery for comparison. */
+    if (!getenv("FABLE_INLINE_APC"))
+        xbox_SetDeferredIoApc(1);
 }
 
 #ifndef _WIN32
