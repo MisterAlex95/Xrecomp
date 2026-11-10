@@ -9,9 +9,16 @@
  *             (checked from a child with waitpid), not hang or exit 0.
  *   replaced: another library installs its own handler after ours (SDL_Init
  *             on Android); a second install call puts ours back in front and
- *             the fault still reaches that library's handler. */
+ *             the fault still reaches that library's handler.
+ *   drain:    the log pump runs (logcat on Android, a slow sink here); lines
+ *             printed just before a real crash, a partial one included,
+ *             must reach the sink before the process dies (XBA-52). */
 #define _GNU_SOURCE
 #include "kernel/xbox_memory_layout.h"
+#include "platform/android_log.h"
+
+#include <fcntl.h>
+#include <time.h>
 
 #include <setjmp.h>
 #include <signal.h>
@@ -125,8 +132,71 @@ static int test_replaced(void)
     return 0;
 }
 
+/* The pump's sink: slow on purpose (15 ms a line, as a busy logd might be),
+ * so without the drain the process is gone before the lines are out. */
+static int s_sink_fd = -1;
+
+static void slow_sink(int is_stderr, const char *line)
+{
+    char buf[512];
+    struct timespec nap = { 0, 15 * 1000000 };
+    int n = snprintf(buf, sizeof buf, "%s%s\n", is_stderr ? "E " : "O ", line);
+    nanosleep(&nap, NULL);
+    if (write(s_sink_fd, buf, (size_t)n) != n)
+        _exit(4);
+}
+
+static int test_drain(void)
+{
+    static const char *want[] = { "O out 1", "O out 2", "O out 3", "E err 1", "E err 2",
+                                  "E err 3", "O last words without newline" };
+    char path[] = "/tmp/xba_drain_XXXXXX";
+    char got[4096];
+    int status = 0, fd = mkstemp(path);
+    ssize_t n;
+    pid_t pid;
+
+    if (fd < 0) { puts("mkstemp failed"); return 2; }
+    pid = fork();
+    if (pid < 0) { puts("fork failed"); return 2; }
+    if (pid == 0) {
+        char *page = guard_page();
+        signal(SIGSEGV, SIG_DFL);
+        signal(SIGBUS, SIG_DFL);
+        alarm(10);
+        s_sink_fd = fd;
+        if (!page || xbox_log_pump_start(slow_sink) != 0 || xbox_PosixInstallMmioFaultHandler() != 0)
+            _exit(3);
+        printf("out 1\nout 2\nout 3\n");
+        fprintf(stderr, "err 1\nerr 2\nerr 3\n");
+        printf("last words without newline");
+        fflush(stdout);                              /* stdio is the caller's: see android_log.h */
+        *(volatile char *)(page + 16) = 1;
+        _exit(0);
+    }
+    waitpid(pid, &status, 0);
+    n = pread(fd, got, sizeof got - 1, 0);
+    close(fd);
+    unlink(path);
+    got[n > 0 ? n : 0] = '\0';
+    if (!WIFSIGNALED(status) || (WTERMSIG(status) != SIGSEGV && WTERMSIG(status) != SIGBUS)) {
+        printf("FAIL: child status %#x (want death by SIGSEGV/SIGBUS)\n", status);
+        return 1;
+    }
+    for (unsigned i = 0; i < sizeof want / sizeof want[0]; i++) {
+        if (!strstr(got, want[i])) {
+            printf("FAIL: \"%s\" did not reach the sink before the crash; it got:\n%s", want[i], got);
+            return 1;
+        }
+    }
+    puts("PASS: the lines printed before the crash reached the sink before the process died");
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
+    if (argc > 1 && strcmp(argv[1], "drain") == 0)
+        return test_drain();
     if (argc > 1 && strcmp(argv[1], "default") == 0)
         return test_default();
     if (argc > 1 && strcmp(argv[1], "replaced") == 0)

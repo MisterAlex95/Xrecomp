@@ -27,7 +27,11 @@
  * surface directly, as the GDI window does, for a title that never flips.
  *
  * Closing the window ends the process: the window owns the main thread, and
- * lifted code cannot be stopped mid-flight. atexit handlers still run.
+ * lifted code cannot be stopped mid-flight. atexit handlers still run, except
+ * on Android, where recomp_quit() flushes the logs and _exit()s instead
+ * (recomp_quit.h). Also on Android, a guest that returns leaves the window
+ * up on its last frame until Back is pressed twice: an app does not vanish
+ * on its own, and the lifecycle keeps working (XBA-52).
  *
  * Knobs: RECOMP_PRESENT_VSYNC=0 presents without waiting for the display;
  * RECOMP_WINDOW_SCALE=<n> sizes the window (default 2);
@@ -46,6 +50,7 @@
 #include <time.h>
 
 #include "platform/recomp_lifecycle.h"
+#include "platform/recomp_quit.h"
 #include "video_player.h"
 #include "keyboard_sdl.h"     /* src/input: keys into the pad stand-in */
 #include "xinput_xbox.h"
@@ -300,6 +305,7 @@ int xbox_HostWindowMain(int (*guest_main)(void))
     uint64_t shown_seq = 0, t_title = 0, flips_title = 0;
     const char *e;
     int vsync, scale, quit = 0, guest_done = 0, dirty = 1, reupload = 0;
+    int stay_after_guest = 0;   /* Android: the window outlives the guest */
     uint64_t back_at = 0;
 
     /* Ctrl-C and SIGTERM keep their default meaning; SDL would turn them
@@ -365,6 +371,9 @@ int xbox_HostWindowMain(int (*guest_main)(void))
         return guest_main();
     }
     s_frame_event = s_guest_done_event + 1;
+#ifdef __ANDROID__
+    stay_after_guest = 1;
+#endif
     s_guest_main = guest_main;
     /* This thread pumps SDL events from here on, which also updates the
      * game controllers; the input layer then only reads them. */
@@ -397,8 +406,13 @@ int xbox_HostWindowMain(int (*guest_main)(void))
                 xbox_InputSdlEvent(&ev);
                 if (ev.type == SDL_QUIT)
                     quit = 1;
-                else if (ev.type == s_guest_done_event)
-                    guest_done = 1;
+                else if (ev.type == s_guest_done_event) {
+                    if (stay_after_guest)
+                        fprintf(stderr, "  [FBWIN] guest returned (%d); Back twice to quit\n",
+                                s_guest_rc);
+                    else
+                        guest_done = 1;
+                }
                 else if (ev.type == s_frame_event)
                     __atomic_store_n(&s_wake_pending, 0, __ATOMIC_RELEASE);
                 else if (ev.type == SDL_WINDOWEVENT
@@ -517,7 +531,7 @@ int xbox_HostWindowMain(int (*guest_main)(void))
     else
         SDL_QuitSubSystem(FBWIN_SDL_SUBSYSTEMS);
     if (quit)
-        exit(0);
+        recomp_quit(0);     /* exit(0); on Android flush, drain, _exit(0) */
     return s_guest_rc;
 }
 

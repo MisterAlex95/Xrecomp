@@ -1,9 +1,11 @@
 # libmain.so of the app shell (XBA-18): SDLActivity loads libSDL2.so, then this, and calls SDL_main.
-# A title's build replaces shell_main.c with its own entry and generated C; the toolkit part stays the same.
+# A title is linked next to shell_main.c (XBA-52): -DXBA_TITLE_DIR=<title project> (gradle -PxbaTitleDir=...).
 cmake_minimum_required(VERSION 3.22)
 project(xboxrecomp_shell C)
 
 set(XBA_VERSION "dev" CACHE STRING "Build version shown in the ready line (CI: the commit)")
+set(XBA_TITLE_DIR "" CACHE PATH
+    "A title project (a copy of templates/new-game with its generated C) to link into libmain.so; empty = shell only")
 
 # The toolkit, from the root of this repository (SDL2 comes in as its subproject on Android).
 get_filename_component(XBOXRECOMP_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../../../.." ABSOLUTE)
@@ -15,7 +17,28 @@ target_compile_definitions(main PRIVATE XBA_VERSION="${XBA_VERSION}")
 # bionic resolves every symbol the runtime needs (shell_main.c stands in for the four a title provides).
 set(XBA_TOOLKIT_LIBS xbox_kernel xbox_d3d8 xbox_dsound xbox_input xbox_input_map xbox_usb xbox_apu xbox_nv2a
                      xbox_video platform host_time recomp_exit_hook recomp_cfg host_cpus
-                     recomp_storage)
+                     recomp_storage recomp_app)
 target_link_libraries(main PRIVATE -Wl,--whole-archive ${XBA_TOOLKIT_LIBS} -Wl,--no-whole-archive
                                    SDL2::SDL2 GLESv3 log android m)
 target_link_options(main PRIVATE -Wl,--no-undefined)
+
+# The title (XBA-52). Its CMakeLists sees XBOXRECOMP_SHELL_TITLE and, instead of an executable, defines the object
+# library xba_title (its main.c then defines recomp_title_main, which shell_main.c calls). Objects, not an archive:
+# every one of them is linked, as an executable would link them.
+if(XBA_TITLE_DIR)
+    get_filename_component(_xba_title_dir "${XBA_TITLE_DIR}" ABSOLUTE)
+    if(NOT EXISTS "${_xba_title_dir}/CMakeLists.txt")
+        message(FATAL_ERROR "XBA_TITLE_DIR=${XBA_TITLE_DIR}: no CMakeLists.txt there (copy templates/new-game)")
+    endif()
+    set(XBOXRECOMP_SHELL_TITLE ON)
+    # A cache entry: the template declares XBOXRECOMP_DIR with set(... CACHE PATH), which under its
+    # cmake_minimum_required(3.20) would drop a plain variable of that name.
+    set(XBOXRECOMP_DIR "${XBOXRECOMP_ROOT}" CACHE PATH "The xboxrecomp toolkit (set by the app shell)" FORCE)
+    add_subdirectory("${_xba_title_dir}" title)
+    if(NOT TARGET xba_title)
+        message(FATAL_ERROR "${_xba_title_dir}/CMakeLists.txt defines no xba_title target "
+                            "(see templates/new-game/CMakeLists.txt, XBOXRECOMP_SHELL_TITLE)")
+    endif()
+    target_link_libraries(main PRIVATE xba_title)
+    message(STATUS "libmain.so: title from ${_xba_title_dir}")
+endif()
