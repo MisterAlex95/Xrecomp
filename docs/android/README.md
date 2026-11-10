@@ -64,6 +64,11 @@ The pinned image `tools/docker/android.Dockerfile` (NDK, SDK, Gradle, JDK, SDL2 
 
 The APK every title starts from (SDLActivity + `libmain.so` + logcat): see [app-shell.md](app-shell.md).
 
+## Prepare on the device
+
+A title pack (`libtitle.so` + `pack.json`) built on the device from the player's disc, `tools.prepare --android`:
+see [prepare.md](prepare.md).
+
 ## Tests on a device
 
 The C tests as Android executables, run over adb: see [device-tests.md](device-tests.md).
