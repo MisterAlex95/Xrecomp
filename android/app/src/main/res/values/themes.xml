@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The launcher's window (XBA-41): dark from the first frame, fullscreen, drawn under the display cutout (the
+     launcher keeps its content out of it). Framework theme, no AndroidX. -->
+<resources>
+    <style name="Launcher" parent="@android:style/Theme.Material.NoActionBar.Fullscreen">
+        <item name="android:windowBackground">@color/launcher_bg</item>
+        <item name="android:windowLayoutInDisplayCutoutMode">always</item>
+        <item name="android:colorAccent">#FF4FE38C</item>
+    </style>
+    <color name="launcher_bg">#FF060807</color>
+</resources>
