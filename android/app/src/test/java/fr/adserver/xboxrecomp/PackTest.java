@@ -54,6 +54,17 @@ public class PackTest {
     }
 
     @Test
+    public void drop() throws Exception {
+        File dir = TestSupport.writePack(files(), TID, 10);
+        Pack.drop(files(), "0x4d530004");
+        assertFalse(dir.exists());
+        assertEquals(Pack.Check.NO_PACK, Pack.check(files(), TID));
+        Pack.drop(files(), TID);                  // nothing there: no error
+        Pack.drop(files(), "../..");              // not a title ID: nothing removed
+        assertTrue(files().isDirectory());
+    }
+
+    @Test
     public void noTitleId() {
         assertEquals(Pack.Check.NO_TITLE_ID, Pack.check(files(), null));
         assertEquals(Pack.Check.NO_TITLE_ID, Pack.check(files(), ""));

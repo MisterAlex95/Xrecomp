@@ -11,13 +11,14 @@ set(XBA_TITLE_DIR "" CACHE PATH
 get_filename_component(XBOXRECOMP_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../../../.." ABSOLUTE)
 add_subdirectory("${XBOXRECOMP_ROOT}" xboxrecomp)
 
-add_library(main SHARED shell_main.c)
+add_library(main SHARED shell_main.c pack_loader.c)
 target_compile_definitions(main PRIVATE XBA_VERSION="${XBA_VERSION}")
 # The whole toolkit, not only what shell_main.c calls: System.loadLibrary("main") then checks on the device that
-# bionic resolves every symbol the runtime needs (shell_main.c stands in for the four a title provides).
+# bionic resolves every symbol the runtime needs (pack_loader.c has weak forwarders for the four a title provides:
+# a title linked in wins, otherwise they reach a dlopened title pack, pack_loader.h).
 set(XBA_TOOLKIT_LIBS xbox_kernel xbox_d3d8 xbox_dsound xbox_input xbox_input_map xbox_usb xbox_apu xbox_nv2a
                      xbox_video platform host_time recomp_exit_hook recomp_cfg host_cpus
-                     recomp_storage recomp_app recomp_selftest)
+                     recomp_storage recomp_app recomp_selftest recomp_pack)
 target_link_libraries(main PRIVATE -Wl,--whole-archive ${XBA_TOOLKIT_LIBS} -Wl,--no-whole-archive
                                    SDL2::SDL2 GLESv3 log android m)
 target_link_options(main PRIVATE -Wl,--no-undefined)

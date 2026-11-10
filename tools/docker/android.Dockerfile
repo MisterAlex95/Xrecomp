@@ -89,6 +89,12 @@ RUN printf 'sdk.dir=%s\ncmake.dir=/usr\n' "$ANDROID_HOME" > local.properties \
     && cp app/build/outputs/apk/debug/app-debug.apk /out/xboxrecomp-shell.apk \
     && unzip -l /out/xboxrecomp-shell.apk | grep -E 'lib/|classes|assets/' | tee /out/apk-contents.txt \
     && grep -q 'assets/selftest.xbe' /out/apk-contents.txt \
+    && unzip -p /out/xboxrecomp-shell.apk lib/arm64-v8a/libmain.so > /tmp/libmain.so \
+    && "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-nm" -D --defined-only /tmp/libmain.so \
+         | grep -E ' (R xba_shell_abi|W recomp_lookup|W recomp_lookup_manual|W fe_menu_get_pb_state|V g_fe_cursor)$' \
+         | tee -a /out/apk-contents.txt \
+    && [ "$(grep -cE ' (R xba_shell_abi|W recomp_lookup|W recomp_lookup_manual|W fe_menu_get_pb_state|V g_fe_cursor)$' /out/apk-contents.txt)" = 5 ] \
+    && rm /tmp/libmain.so \
     && rm -rf /root/.gradle/caches /root/.gradle/daemon app/build app/.cxx build .gradle
 
 FROM scratch AS apk-out

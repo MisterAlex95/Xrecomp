@@ -402,7 +402,8 @@ Codes the app sets itself: `KILLED`, `CANCELLED`, `SPAWN_FAILED`, `NO_RESULT` (e
 `PACK_INVALID`, `INSTALL_FAILED`, `NO_TOOLS`, `ASSET_HASH`, `START_FAILED`; the others come from tools.prepare.
 
 **A pack is valid** when `pack.json` parses, `format` is 1, `title_id` is the game's, `shell_abi` is the app's
-`Pack.SHELL_ABI` (1), and `lib` exists with `lib_size` bytes (the loader checks `lib_sha256`). `xbe_sha256` is not
+`Pack.SHELL_ABI` (1), and `lib` exists with `lib_size` bytes. The native loader checks the same and `abi`, then
+dlopens it (« Title packs » below); neither checks `lib_sha256` at each start. `xbe_sha256` is not
 compared yet (hashing `default.xbe` at each Home is slow on a picked folder): another revision of a disc with the
 same title ID keeps the old pack until it is prepared again.
 
@@ -451,7 +452,8 @@ Needs an APK with the toolchain (the embedded-prepare branch merged) and the pac
 7. Resume: it starts again and skips the steps already done (Identify / Analyse / Translate are quick, Compile
    compiles only what was missing). Let it finish: Home with **Play** and « … is ready »; the notification says
    « Ready ». Write down the whole time and the compile time (« Measurements » in prepare.md asks for them).
-8. Play: the game starts from the pack (loader logcat lines). Quit, start the app again: Home with Play, no Prepare.
+8. Play: the game starts from the pack (`PACK_LOADED`, « Title packs » below). Quit, start the app again: Home
+   with Play, no Prepare.
 9. Second start of a Prepare (e.g. after `adb shell run-as <app id> rm -r files/packs`): no « Install tools » phase
    this time (the tools are installed once per APK version); `files/` holds one `python-*`, `sysroot-*`,
    `toolkit-*` each.
@@ -581,7 +583,9 @@ int recomp_title_main(const recomp_storage *store);   /* store->game_dir, ->save
    thread, `recomp_title_main(&store)` on a 64 MB guest thread, the lifecycle watch, Back twice to quit. When the
    guest returns, the window stays on its last frame (`[FBWIN] guest returned (N); Back twice to quit`): an app does
    not vanish on its own.
-4. No title linked (the weak `recomp_title_main` is NULL), or no game data: the shell's own black window, as before.
+4. No title linked (the weak `recomp_title_main` is NULL) and `default.xbe` found: the title pack for its title ID
+   (« Title packs » below), run the same way.
+5. No title and no pack, or no game data: the shell's own black window, as before.
 
 `templates/new-game` is such a title. Built through the app, its `CMakeLists.txt` sees `XBOXRECOMP_SHELL_TITLE` and
 makes the object library `xba_title` instead of an executable (the toolkit is the shell's), and its `main.c` defines
@@ -594,6 +598,106 @@ cd android && gradle assembleDebug -PxbaTitleDir=/path/to/my_xbox_game \
     -PxbaApplicationId=fr.adserver.xboxrecomp.mygame -PxbaLabel="My game"
 # or the NDK alone: cmake -S android/app/src/main/cpp -DXBA_TITLE_DIR=/path/to/my_xbox_game (+ the NDK toolchain)
 ```
+
+### Title packs (the loader)
+
+The one app runs any title from the pack the on-device Prepare built for it
+(`<internal files dir>/packs/<TITLEID>/{libtitle.so, pack.json}`, [prepare.md](prepare.md)). Code:
+`android/app/src/main/cpp/pack_loader.{c,h}` (forwarders, `xba_shell_abi`, `xba_pack_load`) and
+`src/platform/recomp_pack.{c,h}` (title ID, `pack.json`, checks, dlopen; no Android in it).
+
+**When.** In `SDL_main`, after `SDL_Init` and the self-test, when no title is linked into `libmain.so`
+(`recomp_title_main` is NULL) and `default.xbe` was found: the title ID from its certificate (base at `0x104`,
+certificate address at `0x118`, title ID at certificate + `0x08`), then `<SDL_AndroidGetInternalStoragePath()>/packs/
+<TITLEID>/pack.json`.
+
+**Checks** (the same as `tools/prepare/pack.py` `check` and the launcher's `Pack.check`, plus `abi`): every required
+field, `format` 1, `title_id` = the XBE's, `abi` = `arm64-v8a`, `shell_abi` = the exported `xba_shell_abi`, `lib` a
+plain file name, present, of `lib_size` bytes. **Not `lib_sha256`**: the pack sits in the app's private storage,
+published atomically by prepare which hashed it, and hashing a 100–250 MB library costs about a second at every
+start on a phone. `lib_size` catches a truncated file; an import from outside (below) is where the hash is checked.
+
+**dlopen** with `RTLD_NOW | RTLD_LOCAL`. The pack has `DT_NEEDED libmain.so` (already loaded by SDLActivity: bionic
+matches it by soname) and binds its calls to itself (`-Bsymbolic`), so nothing later needs its symbols in the global
+scope (`RTLD_GLOBAL` is not needed); `RTLD_NOW` fails a missing symbol at start, not mid-game. The app namespace lets
+`libmain.so` dlopen from the app's data directory. Then `dlsym` of `entry` (`recomp_title_main`, required),
+`recomp_lookup`, `recomp_lookup_manual`, `fe_menu_get_pb_state`, `g_fe_cursor` (optional). `dlsym` on a handle also
+searches the pack's dependencies, so a name the pack does not define comes back as `libmain.so`'s own forwarder:
+each result is kept only if `dladdr` puts it inside the pack (else the forwarder would call itself).
+
+**Routing: weak forwarders, strong titles.** The toolkit inside `libmain.so` calls `recomp_lookup` and
+`recomp_lookup_manual` (thread start, APCs, DPCs, the USB and APU callbacks) and the pushbuffer replay calls
+`fe_menu_get_pb_state` and reads `g_fe_cursor`. Those references were bound when `libmain.so` was loaded; a library
+dlopened later cannot take them over. So `pack_loader.c` defines the four as **weak forwarders**:
+
+```c
+__attribute__((weak)) recomp_func_t recomp_lookup(uint32_t va) { return s_lookup ? s_lookup(va) : 0; }
+```
+
+and `xba_pack_load` sets `s_lookup` & co. from the pack before the title starts (NULL = the old stand-in result,
+0). `g_fe_cursor` is data: `libmain.so`'s copy is refreshed from the pack's in each `fe_menu_get_pb_state` call
+(the replay asks for the menu state, then reads the cursor, in the same frame). A title linked in statically
+(`-PxbaTitleDir`, the stub APK) defines these **strong**: the static link takes them over the weak forwarders, and the
+loader never runs. The stub APK's CI check (`llvm-nm`, `T recomp_title_main`) still holds.
+
+**`xba_shell_abi`**: `const int` = 1, exported by `libmain.so` (`llvm-nm -D libmain.so | grep xba_shell_abi`). It
+equals `Pack.SHELL_ABI` and the `--shell-abi` the app passes to prepare; bump all of them (and `tools/prepare/pack.py`
+`SHELL_ABI`) together when what a pack links against in `libmain.so` changes incompatibly. A pack built against
+another value is refused (`PACK_INVALID shell_abi …`) and the launcher offers Prepare again.
+
+**logcat** (stdout, tag `xboxrecomp`):
+
+| Line | Then |
+|---|---|
+| `PACK_LOADED <TID> <path> (<bytes> bytes, "<title>", shell_abi 1; exports: …)` | `xboxrecomp ready (… title)`, the title runs as a linked one would. |
+| `PACK_MISSING <TID> (no …/packs/<TID>/pack.json)` | As before: the black window and the NO_TITLE message. (The launcher normally shows Prepare before Play gets here.) |
+| `PACK_INVALID <reason>` | `ShellActivity.openLauncherBadPack(reason)`: the launcher opens with `EXTRA_BAD_PACK`, deletes `packs/<TID>`, and Home shows **Prepare** with « The prepared game could not be loaded (…). Prepare it again. » Its own lighter check passed the pack, hence this round trip. A message box if the JNI call fails. |
+| `PACK_DLOPEN <dlerror>` | The same. |
+
+NO_GAME_DATA is unchanged (no `default.xbe`: the game picker).
+
+**Import drop: later.** prepare.md describes `<external files dir>/packs/<TID>/` as an import drop (copied in after
+checking `lib_sha256`, never loaded in place: external storage is `noexec`). Not done yet: the copy of a 100+ MB
+library belongs on a worker thread with progress in the launcher, not in `SDL_main`; for now a pack is made on the
+device (or pushed with `adb shell run-as`, below).
+
+**Tests.** `tests/recomp_pack` (Linux CI, and the device-tests bundle): the title ID, `pack.json` parsing (escapes,
+unknown and nested fields, wrong types, truncation), every check, and the routing with three small libraries built
+like the app's: a fake shell (`pack_loader.c` + `recomp_pack.c` + a stand-in for the toolkit calling
+`recomp_lookup` & co. from inside it), a pack linked `-Bsymbolic --no-undefined` against it, a pack with its entry
+only (the `dladdr` guard), and a shell with a title linked in (strong symbols win). `PackTest.drop` and
+`LauncherPrepareTest.badPackFromShellOffersPrepareAgain` (Robolectric) cover the launcher side.
+
+### Device check (title packs), for Alex
+
+Needs the shell APK from this branch. Steps 1–5 need no toolchain in the APK (a pack made on a host, pushed); with the
+toolchain, step 6.
+
+1. Shell APK, no pack, your game chosen: logcat `PACK_MISSING <TID> (no /data/user/0/fr.adserver.xboxrecomp/files/
+   packs/<TID>/pack.json)`, then the NO_TITLE message as before. `adb logcat -s xboxrecomp`.
+2. A pack for the stub XBE made on a host (prepare.md « Checking on a host », with `--shell-lib` = the `libmain.so`
+   out of **this** APK: `unzip -p xboxrecomp-shell.apk lib/arm64-v8a/libmain.so > libmain.so`). Push the stub's
+   `default.xbe` as the game (`/sdcard/Android/data/fr.adserver.xboxrecomp/files/game/`), then the pack:
+   `adb push packs/12345678 /data/local/tmp/` and
+   `adb shell run-as fr.adserver.xboxrecomp sh -c 'mkdir -p files/packs && cp -r /data/local/tmp/12345678 files/packs/'`.
+3. Start the app, Play. Expected: `PACK_LOADED 12345678 …/files/packs/12345678/libtitle.so (… bytes, "…",
+   shell_abi 1; exports: recomp_lookup …)`, `xboxrecomp ready (… title)`, the five `stub title: …` lines and
+   `stub title: all 5 lifted functions OK`, then `[FBWIN] guest returned (0)`. Back twice quits; `adb logcat -b crash`
+   empty.
+4. Unloadable pack, same size (the launcher's check passes it):
+   `adb shell run-as fr.adserver.xboxrecomp dd if=/dev/zero of=files/packs/12345678/libtitle.so bs=64 count=1 conv=notrunc`
+   (zeroes the ELF header). Play: `PACK_DLOPEN …` (bionic's « not a valid ELF » or similar), the launcher comes back
+   with the red note « The prepared game could not be loaded (…). Prepare it again. » and Home shows **Prepare**
+   (with the toolchain) or **Play**; `files/packs/12345678` is gone (`run-as … ls files/packs`). Screenshot.
+5. Wrong ABI: edit `pack.json` to `"shell_abi": 2` (the launcher then shows Prepare: `Pack.check` refuses it too).
+   Then set it back to 1 and `"abi": "x86_64"`: Play → `PACK_INVALID abi x86_64, this shell is arm64-v8a`, back to the
+   launcher.
+6. With the toolchain APK: Prepare your game, Play: `PACK_LOADED <TID>`, the game boots as the per-title APK did
+   (same logcat up to the first frames). Note the time from tapping Play to `PACK_LOADED` (dlopen of the real pack,
+   ~150 MB, with `RTLD_NOW`).
+7. The stub APK (static title) from the same commit: unchanged (no `PACK_` line at all), the « Device check
+   (XBA-52) » steps 1 and 3.
+8. Send the logcat lines.
 
 ### The stub title
 

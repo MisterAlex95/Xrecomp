@@ -239,6 +239,27 @@ public class LauncherPrepareTest {
         assertEquals(LauncherActivity.Prep.NEEDED, a.homePrepForTest());
     }
 
+    /** The shell refused the pack (PACK_INVALID / PACK_DLOPEN): it is dropped and Home offers Prepare again. */
+    @Test
+    public void badPackFromShellOffersPrepareAgain() throws Exception {
+        withToolchain();
+        GameStore.setAutoStart(app, true);
+        File dir = TestSupport.writePack(app.getFilesDir(), TID, 64);
+        status(PrepareProtocol.DONE, "pack", 5, 100, -1, "", "");
+        assertEquals(Pack.Check.VALID, Pack.check(app.getFilesDir(), TID));
+        Intent in = new Intent(app, LauncherActivity.class)
+                .putExtra(LauncherActivity.EXTRA_BAD_PACK, "dlopen failed: libtitle.so: bad ELF magic");
+        LauncherActivity a = Robolectric.buildActivity(LauncherActivity.class, in).setup().get();
+        shadowOf(Looper.getMainLooper()).idle();
+        shot(a, "6-bad-pack");
+        assertEquals(LauncherActivity.Screen.HOME, a.screenForTest());
+        assertEquals(LauncherActivity.Prep.NEEDED, a.homePrepForTest());
+        assertTrue(!dir.exists());
+        assertEquals(Pack.Check.NO_PACK, Pack.check(app.getFilesDir(), TID));
+        assertTrue(a.noteForTest(), a.noteForTest().contains("bad ELF magic"));
+        assertNull("« open directly » does not restart the shell", shadowOf(a).getNextStartedActivity());
+    }
+
     @Test
     public void autoStartDoesNotSkipPrepare() throws Exception {
         withToolchain();

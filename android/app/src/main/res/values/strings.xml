@@ -12,6 +12,7 @@
     <string name="GAME_RUNNING">The game is running: it closes when you choose another one. Saves are kept.</string>
     <string name="GAME_RUNNING_HOME">The game is running: Play brings it back.</string>
     <string name="READY_TO_PLAY">%1$s is ready. Press A on Play.</string>
+    <string name="PACK_BAD">The prepared game could not be loaded (%1$s). Prepare it again.</string>
     <string name="STATE_READY">Ready</string>
     <string name="STATE_NONE">No game</string>
     <string name="STATE_MISSING">Game data missing</string>
