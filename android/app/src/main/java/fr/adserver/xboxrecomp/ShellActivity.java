@@ -10,6 +10,7 @@ import android.view.KeyEvent;
 import android.view.MotionEvent;
 
 import org.libsdl.app.SDLActivity;
+import org.libsdl.app.SDLControllerManager;
 
 import java.io.File;
 import java.text.SimpleDateFormat;
@@ -22,10 +23,15 @@ import java.util.Locale;
  *
  * On a device with a second screen (AYN Thor) the in-game CompanionPanel goes there (CompanionScreen; shown in
  * onStart, dismissed in onStop; docs/android/app-shell.md « Dual screen »).
+ *
+ * The in-game menu (GameMenu, docs/android/app-shell.md « In-game menu ») is a View layer over SDL's surface: every
+ * key, joystick and touch event passes through it first (dispatchKeyEvent, dispatchGenericMotionEvent,
+ * dispatchTouchEvent), and what it takes never reaches SDL.
  */
 public class ShellActivity extends SDLActivity {
     private CompanionScreen companion;
     private CompanionPanel panel;
+    private GameMenu menu;
     /** « shell: fps N » every 10 s while started, panel or not (Device check: fps with the panel on and off). */
     private final android.os.Handler fpsLog = new android.os.Handler(android.os.Looper.getMainLooper());
     private final Runnable fpsTick = new Runnable() {
@@ -54,6 +60,10 @@ public class ShellActivity extends SDLActivity {
             }
         }
         super.onCreate(savedInstanceState);
+        if (mBrokenLibraries)
+            return;   // SDLActivity shows its error dialog and finishes
+        menu = new GameMenu(this, new MenuHost());
+        menu.attach();
         companion = new CompanionScreen(this, "shell", ctx -> {
             panel = new CompanionPanel(ctx, new NativeSink(), ShellActivity::stats);
             return panel;
@@ -67,6 +77,15 @@ public class ShellActivity extends SDLActivity {
             companion.start();
         fpsLog.removeCallbacks(fpsTick);
         fpsLog.postDelayed(fpsTick, 10_000);
+        if (menu != null)
+            menu.onStart();
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        if (menu != null)
+            menu.onResume();
     }
 
     @Override
@@ -77,6 +96,147 @@ public class ShellActivity extends SDLActivity {
         overlayOff();           // and again here, whatever happened to the panel
         panel = null;
         super.onStop();
+        if (menu != null)
+            menu.onStop();      // after SDL's pause: a Back to launcher hands the hold to the background
+    }
+
+    @Override
+    protected void onDestroy() {
+        if (menu != null)
+            menu.release();
+        super.onDestroy();
+    }
+
+    // ---- The in-game menu's ends --------------------------------------------------------------------------------
+
+    @Override
+    public boolean dispatchKeyEvent(KeyEvent e) {
+        if (menu != null && menu.dispatchKey(e))
+            return true;
+        return super.dispatchKeyEvent(e);
+    }
+
+    @Override
+    public boolean dispatchGenericMotionEvent(MotionEvent e) {
+        if (menu != null && menu.dispatchMotion(e))
+            return true;
+        return super.dispatchGenericMotionEvent(e);
+    }
+
+    @Override
+    public boolean dispatchTouchEvent(MotionEvent e) {
+        if (menu != null && menu.dispatchTouch(e))
+            return true;
+        return super.dispatchTouchEvent(e);
+    }
+
+    private final class MenuHost implements GameMenu.Host {
+        @Override
+        public void hold(boolean on) {
+            try {
+                MenuNative.nativeHold(on);
+            } catch (UnsatisfiedLinkError e) {
+                Log.w(LauncherActivity.TAG, "shell: menu: no native hold", e);
+            }
+        }
+
+        @Override
+        public void sendKeyToGame(KeyEvent e) {
+            // Straight to SDL's handler: the focus may be on the drawer's rows at this point.
+            SDLActivity.handleKeyEvent(mSurface, e.getKeyCode(), e, null);
+        }
+
+        @Override
+        public void sendMotionToGame(MotionEvent e) {
+            // SDL's surface handles joystick motion (SDLControllerManager): the focus may be on the drawer's rows.
+            if (mSurface != null)
+                mSurface.dispatchGenericMotionEvent(e);
+        }
+
+        @Override
+        public void cancelGameTouch(MotionEvent e) {
+            MotionEvent c = MotionEvent.obtain(e);
+            c.setAction(MotionEvent.ACTION_CANCEL);
+            ShellActivity.super.dispatchTouchEvent(c);
+            c.recycle();
+        }
+
+        @Override
+        public void releaseOverlay() {
+            if (panel == null)
+                return;   // no panel: the overlay is off already (onStop, CompanionPanel.onDetachedFromWindow)
+            panel.releaseAll();
+            try {
+                CompanionNative.nativeOverlay(0, 0);   // still on (a stand-in pad), nothing held
+            } catch (UnsatisfiedLinkError ignored) {
+            }
+        }
+
+        @Override
+        public void restoreGameFocus() {
+            if (mSurface != null)
+                mSurface.requestFocus();
+        }
+
+        @Override
+        public boolean fromGamepad(KeyEvent e) {
+            return SDLControllerManager.isDeviceSDLJoystick(e.getDeviceId());
+        }
+
+        @Override
+        public void setVolume(int percent) {
+            try {
+                MenuNative.nativeSetVolume(percent);
+            } catch (UnsatisfiedLinkError ignored) {
+            }
+        }
+
+        @Override
+        public int[] stats() {
+            return ShellActivity.stats();
+        }
+
+        @Override
+        public boolean hasSecondScreen() {
+            return DualScreen.available(ShellActivity.this, CompanionScreen.ownDisplayId(ShellActivity.this));
+        }
+
+        @Override
+        public void bottomScreenChanged() {
+            if (companion != null)
+                companion.refresh();
+        }
+
+        @Override
+        public void screenshot() {
+            ShellActivity.this.screenshot();
+        }
+
+        @Override
+        public void shareLog() {
+            ShellActivity.this.shareLog();
+        }
+
+        @Override
+        public void backToLauncher() {
+            openLauncher();
+        }
+
+        @Override
+        public void quit() {
+            overlayOff();
+            try {
+                MenuNative.nativeQuit();
+            } catch (UnsatisfiedLinkError e) {
+                finish();
+            }
+        }
+    }
+
+    /** The launcher on top; this task (the game) stays, and the launcher's Play brings it back. */
+    private void openLauncher() {
+        startActivity(new Intent(this, LauncherActivity.class)
+                .setAction(LauncherActivity.ACTION_SHOW_LAUNCHER).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
     }
 
     /**
@@ -133,8 +293,14 @@ public class ShellActivity extends SDLActivity {
             switch (id) {
             case CompanionPanel.LAUNCHER:
                 Log.i(LauncherActivity.TAG, "shell: companion: launcher");
-                startActivity(new Intent(ShellActivity.this, LauncherActivity.class)
-                        .setAction(LauncherActivity.ACTION_SHOW_LAUNCHER).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+                if (menu != null && menu.isOpen())
+                    menu.close();
+                openLauncher();
+                break;
+            case CompanionPanel.MENU:
+                Log.i(LauncherActivity.TAG, "shell: companion: menu");
+                if (menu != null)
+                    menu.toggle("panel");
                 break;
             case CompanionPanel.QUIT:
                 Log.i(LauncherActivity.TAG, "shell: companion: quit (held)");
@@ -173,8 +339,11 @@ public class ShellActivity extends SDLActivity {
             boolean saved = ok;
             Log.i(LauncherActivity.TAG, "shell: companion: screenshot " + (saved ? out : "failed"));
             runOnUiThread(() -> {
+                String msg = getString(saved ? R.string.PANEL_SHOT_SAVED : R.string.PANEL_SHOT_NONE, name);
                 if (panel != null)
-                    panel.flash(getString(saved ? R.string.PANEL_SHOT_SAVED : R.string.PANEL_SHOT_NONE, name));
+                    panel.flash(msg);
+                if (menu != null)
+                    menu.flash(msg, saved);
             });
         }, "screenshot").start();
     }
@@ -186,8 +355,7 @@ public class ShellActivity extends SDLActivity {
             boolean ok = LogProvider.dumpOwnLogcat(f);
             runOnUiThread(() -> {
                 if (!ok) {
-                    if (panel != null)
-                        panel.flash(getString(R.string.SHARE_LOG_NONE));
+                    flashBoth(getString(R.string.SHARE_LOG_NONE));
                     return;
                 }
                 android.net.Uri uri = LogProvider.gameUri(this);
@@ -197,11 +365,17 @@ public class ShellActivity extends SDLActivity {
                 try {
                     startActivity(Intent.createChooser(send, getString(R.string.SHARE_LOG)));
                 } catch (ActivityNotFoundException e) {
-                    if (panel != null)
-                        panel.flash(getString(R.string.SHARE_LOG_NO_APP));
+                    flashBoth(getString(R.string.SHARE_LOG_NO_APP));
                 }
             });
         }, "share-log").start();
+    }
+
+    private void flashBoth(String msg) {
+        if (panel != null)
+            panel.flash(msg);
+        if (menu != null)
+            menu.flash(msg, false);
     }
 
     /** Plan B: the panel's window hands its events to SDL as if they had come to this window. */

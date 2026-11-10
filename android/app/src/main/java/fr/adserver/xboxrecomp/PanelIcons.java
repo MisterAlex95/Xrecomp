@@ -8,7 +8,7 @@ import android.graphics.Path;
 final class PanelIcons {
     private PanelIcons() {}
 
-    enum Icon { HOME, POWER, CAMERA, BARS, SHARE, PLAY, SETTINGS, DISC, STOP }
+    enum Icon { HOME, POWER, CAMERA, BARS, SHARE, PLAY, SETTINGS, DISC, STOP, MENU, SCREEN }
 
     /** Draws icon in a box of side s centred on (cx, cy) with the stroke paint p (its colour and width kept). */
     static void draw(Canvas c, Icon icon, float cx, float cy, float s, Paint p) {
@@ -56,6 +56,14 @@ final class PanelIcons {
             c.drawCircle(cx + h * 0.55f, cy + h * 0.6f, h * 0.22f, f);
             c.drawLine(cx - h * 0.55f, cy, cx + h * 0.55f, cy - h * 0.6f, p);
             c.drawLine(cx - h * 0.55f, cy, cx + h * 0.55f, cy + h * 0.6f, p);
+            break;
+        case MENU:   // three lines: the in-game menu
+            for (int i = -1; i <= 1; i++)
+                c.drawLine(cx - h * 0.7f, cy + i * h * 0.5f, cx + h * 0.7f, cy + i * h * 0.5f, p);
+            break;
+        case SCREEN:   // two stacked screens: the bottom screen
+            c.drawRoundRect(cx - h * 0.8f, cy - h * 0.85f, cx + h * 0.8f, cy - h * 0.1f, h * 0.12f, h * 0.12f, p);
+            c.drawRoundRect(cx - h * 0.55f, cy + h * 0.15f, cx + h * 0.55f, cy + h * 0.85f, h * 0.12f, h * 0.12f, p);
             break;
         case STOP:
             c.drawCircle(cx, cy, h * 0.82f, p);

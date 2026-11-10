@@ -22,8 +22,10 @@
  * Then "xboxrecomp ready" with the build version, and:
  * - a title linked in (it defines recomp_title_main, XBA-52) and default.xbe
  *   found: xbox_HostWindowMain runs the title on its guest thread, with the
- *   window, Back twice to quit (flush, drain logcat, _exit(0): « clean
- *   exit ») and the lifecycle;
+ *   window and the lifecycle; quitting is the in-game menu's (Android Back
+ *   opens it in ShellActivity: GameMenu, menu_jni.c), which ends the
+ *   process with recomp_quit (flush, drain logcat, _exit(0): « clean
+ *   exit »);
  * - no title linked in and default.xbe found: the title pack for its title
  *   ID, <internal files dir>/packs/<TITLEID>/ (pack_loader.h), dlopened and
  *   run the same way (PACK_LOADED). An invalid pack or a dlopen error
@@ -35,10 +37,12 @@
  *   so (NO_TITLE) instead of a bare black screen. When
  *   default.xbe is not there (NO_GAME_DATA) it hands over to the game picker
  *   (ShellActivity.openGamePicker, XBA-54), which names the folder and lets
- *   the player choose the game; a message box if that call fails. Back once shows
- *   QUIT_PROMPT (a toast), twice within 2 s quits: SDL_main returns and
- *   SDLActivity finishes; "lifecycle: paused" / "resumed after N ms" when
- *   the app leaves and comes back (XBA-24).
+ *   the player choose the game; a message box if that call fails. In the
+ *   app, ShellActivity takes Android Back first (the in-game menu, whose
+ *   Quit ends the process); the Back-twice loop below (QUIT_PROMPT toast,
+ *   twice within 2 s returns from SDL_main) only runs where nothing above
+ *   SDL takes Back. "lifecycle: paused" / "resumed after N ms" when the app
+ *   leaves and comes back (XBA-24).
  *
  * A title does not replace this file: it is linked next to it (android/app's
  * CMake option XBA_TITLE_DIR, docs/android/app-shell.md). */
