@@ -11,6 +11,7 @@ Maps the Xbox controller API to Windows XInput. The original Xbox used `XInputGe
 | `keyboard.c` | | The key table and the one key map, every host |
 | `keyboard_sdl.c` | | The SDL window's key and focus events into that table (POSIX) |
 | `input_map.c` | | Named bindings over that table, pad remapping, deadzones, merging (`xbox_input_map`) |
+| `input_overlay.c` | | A touch overlay pad merged into port 0 by the SDL backend (the Android second-screen panel, POSIX) |
 
 ## Quick Start
 

@@ -27,8 +27,9 @@ else()
     if(NOT TARGET SDL2::SDL2)
         find_package(SDL2 REQUIRED)
     endif()
-    # The SDL window's key and focus events into that table.
-    target_sources(xbox_input PRIVATE keyboard_sdl.c)
+    # The SDL window's key and focus events into that table; the touch overlay
+    # pad (input_overlay.h, the Android companion panel).
+    target_sources(xbox_input PRIVATE keyboard_sdl.c input_overlay.c)
     target_link_libraries(xbox_input PUBLIC platform SDL2::SDL2)
 endif()
 
