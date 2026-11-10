@@ -472,6 +472,8 @@ class FunctionDetector:
             i = bisect.bisect_right(covered_starts, addr) - 1
             return not (i >= 0 and addr < covered[i][1])
 
+        arms = self._jump_table_arms()
+
         added = False
         for insn in list(self.engine.instructions.values()):
             if not insn.is_ret:
@@ -492,6 +494,8 @@ class FunctionDetector:
                 continue
             if not in_a_gap(nxt):
                 continue                    # an out-of-line tail, not a start
+            if nxt in arms:
+                continue                    # a switch arm, not a start
             first = self.engine.get_instruction(nxt)
             if first and first.end_address in self.engine.jump_tables:
                 continue                    # alignment before a table, not a prologue
@@ -516,6 +520,27 @@ class FunctionDetector:
                                 "gap_prologue")
             added = True
         return added
+
+    def _jump_table_arms(self) -> set:
+        """Every code address a known jump table holds.
+
+        A switch arm can follow a ret with nothing between, and it can open
+        with something _pass_gap_prologues accepts: the CRT memmove's byte
+        tails do (`mov al, [esi]` at 0x0057FFB0 in Fable: The Lost Chapters).
+        When the owner's end was found short of its arms, they sit in a gap,
+        and the third arm became a function. The lifter keeps only the table
+        entries below the next function, so memmove's switch on `n & 3` lost
+        two of its four cases: every copy whose length was 2 or 3 mod 4 left
+        its tail uncopied and returned without the destination in eax.
+        """
+        entries = getattr(self.engine, "jump_table_entries", None)
+        if entries is None:
+            return set()
+        arms = set()
+        for tbl in list(self.engine.jump_tables):
+            arms.update(entries(tbl))
+        arms.discard(0)
+        return arms
 
     def _gap_alias_bodies(self, bodies) -> List[Tuple[int, int]]:
         """The code each alias in a gap owns, measured as its own body.

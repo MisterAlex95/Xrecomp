@@ -134,6 +134,19 @@ class GapPrologueTest(unittest.TestCase):
         self.assertFalse(det._pass_gap_prologues([]))
         self.assertEqual(det.added, [])
 
+    def test_a_switch_arm_after_a_ret_is_not_a_function(self):
+        # Fable's CRT memmove: arms 0x0057FF9C/A4/B0/C4 of the table at
+        # 0x0057FF8C; the third follows a ret and probes as a prologue.
+        insns = [_Insn(0x0057FFAF, 1, is_ret=True)]
+        funcs = [_Func(0x0057FE40, 0x0057FEA9), _Func(0x0057FFDC, 0x00580180)]
+        det = _detector(insns, funcs, prologues={0x0057FFB0})
+        det.engine.jump_tables = {0x0057FF8C: 0x0057FF9C}
+        det.engine.jump_table_entries = lambda tbl: (
+            [0x0057FF9C, 0x0057FFA4, 0x0057FFB0, 0x0057FFC4]
+            if tbl == 0x0057FF8C else [])
+        self.assertFalse(det._pass_gap_prologues([]))
+        self.assertEqual(det.added, [])
+
     def test_a_non_ret_instruction_starts_nothing(self):
         insns = [_Insn(0x00476EAF, 1, is_ret=False)]
         funcs = [_Func(0x00476EA0, 0x00476EB0), _Func(0x004771C0, 0x004771D0)]
