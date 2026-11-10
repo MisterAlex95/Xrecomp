@@ -9,3 +9,4 @@ recomp_selftest/recomp_selftest   # its mmio_simd check is the trapped ldr q abo
 # without): the second xbox_MemoryLayoutInit after a shutdown runs on libc pages that read as zeros. XBA-55.
 flaky memory_layout_posix/memory_layout_posix_test
 flaky recomp_selftest/recomp_selftest_no_simd   # its reinit check is the same re-init (5/40 under qemu), XBA-55
+flaky memory_regressions/memory_regressions_ext_vma   # same crash after xbox_MemoryLayoutShutdown under qemu (run 5099), XBA-55
