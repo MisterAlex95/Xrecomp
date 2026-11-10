@@ -1,5 +1,7 @@
 package fr.adserver.xboxrecomp;
 
+import android.animation.AnimatorSet;
+import android.animation.ObjectAnimator;
 import android.app.Activity;
 import android.app.ActivityManager;
 import android.content.ActivityNotFoundException;
@@ -8,6 +10,7 @@ import android.content.Intent;
 import android.content.pm.ShortcutInfo;
 import android.content.pm.ShortcutManager;
 import android.database.Cursor;
+import android.graphics.Bitmap;
 import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.ShapeDrawable;
 import android.graphics.drawable.shapes.OvalShape;
@@ -22,10 +25,12 @@ import android.provider.DocumentsContract;
 import android.provider.OpenableColumns;
 import android.provider.Settings;
 import android.text.TextUtils;
+import android.text.format.DateUtils;
 import android.text.format.Formatter;
 import android.util.Log;
 import android.view.Gravity;
 import android.view.KeyEvent;
+import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.Window;
@@ -36,6 +41,9 @@ import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
+
+import org.json.JSONException;
+import org.json.JSONObject;
 
 import java.io.File;
 import java.io.FileOutputStream;
@@ -48,6 +56,9 @@ import java.util.Collections;
 import java.util.EnumMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.function.BiFunction;
+import java.util.function.Function;
+import java.util.function.LongSupplier;
 
 import fr.adserver.xboxrecomp.Widgets.Icon;
 import fr.adserver.xboxrecomp.Widgets.MenuRow;
@@ -59,15 +70,19 @@ import fr.adserver.xboxrecomp.Widgets.MenuRow;
  *
  * - WELCOME (first run, no game set up) -> SOURCE (game folder or disc image) -> FOLDER_ACCESS (All files access
  *   explained, or copy) -> IMPORT (progress ring, Cancel) -> HOME;
- * - HOME: the game and its status, Play / Settings / Game data / About, a detail panel for the focused item, and
- *   « Open the game directly next time » (off by default: HOME shows at each start with Play focused);
- * - SETTINGS: a few RECOMP_* options saved to recomp.cfg (RecompConfig), applied at the next start;
- * - GAME_DATA: where the game is, its size, choose another, delete the imported copy; ABOUT.
+ * - HOME: a console-style home: a hero (the game's title image or a monogram, its title, a status chip, a few facts
+ *   and one big Play / Prepare) over a row of smaller tiles: Settings, Controls, Game data, About;
+ * - SETTINGS: « Open the game directly next time », UI sounds and vibration, and a few RECOMP_* options saved to
+ *   recomp.cfg (RecompConfig), applied at the next start;
+ * - CONTROLS: the device's buttons and the Xbox controller buttons the game gets;
+ * - GAME_DATA: where the game is, its size, choose another, delete the imported copy; ABOUT;
+ * - PREPARE: the on-device Prepare's progress (dimmed after two idle minutes, for OLED screens).
  *
- * D-pad / stick move the focus (remembered per screen), A selects, B goes back, left / right change a setting,
- * L1 / R1 jump between settings sections, X toggles « Open directly », Start plays; touch works too. Messages go to
- * a note line, not toasts. The choice is remembered in SharedPreferences (GameStore); ShellActivity hands it to
- * native code as RECOMP_GAME_DIR. See docs/android/app-shell.md, « The launcher ».
+ * D-pad / stick move the focus (remembered per screen; one highlight glides from row to row), A selects, B goes back,
+ * left / right change a setting, L1 / R1 jump between settings sections, Start plays; touch works too. Screens fade
+ * and slide in; moves, selects, backs, errors and a finished Prepare have a short sound and a haptic (UiFeedback).
+ * Messages go to a note line, not toasts. The choice is remembered in SharedPreferences (GameStore); ShellActivity
+ * hands it to native code as RECOMP_GAME_DIR. See docs/android/app-shell.md, « The launcher ».
  */
 public class LauncherActivity extends Activity {
     static final String TAG = "xboxrecomp";
@@ -89,7 +104,12 @@ public class LauncherActivity extends Activity {
     private static final long SPACE_MARGIN = 64L << 20;
     private static final long CONFIRM_MS = 5000;
 
-    enum Screen { WELCOME, SOURCE, FOLDER_ACCESS, IMPORT, HOME, SETTINGS, GAME_DATA, ABOUT, PREPARE }
+    enum Screen { WELCOME, SOURCE, FOLDER_ACCESS, IMPORT, HOME, SETTINGS, CONTROLS, GAME_DATA, ABOUT, PREPARE }
+
+    /** The Preparing screen dims after this long without input (OLED burn-in); any key or touch wakes it. */
+    static final long DIM_AFTER_MS = 120_000;
+    /** The launcher's clock for the idle dim (uptime ms); the JVM tests put a fake one here. */
+    static LongSupplier clock = SystemClock::uptimeMillis;
 
     /**
      * The on-device Prepare for the current game (docs/android/prepare.md): OFF when this APK has no toolchain or
@@ -113,7 +133,32 @@ public class LauncherActivity extends Activity {
     // ---- The stage ----
     private TextView screenTitle, note;
     private Widgets.Chip chip;
-    private FrameLayout body;
+    private FrameLayout body, host;
+    private Widgets.Backdrop backdrop;
+    private Widgets.Glide glide;
+    private AnimatorSet screenAnim;
+    private UiFeedback feedback;
+    /** The panel on a second display (null until the stage is built, and when the game started at once). */
+    private LauncherCompanion companion;
+    /** True while a screen is being built: its first focus is not a « move ». */
+    private boolean building;
+
+    // ---- The game's identity (TitleArt) ----
+    private String artTid;
+    private Bitmap art;
+    private int artColor = Theme.ACCENT;
+
+    // ---- Home ----
+    private MenuRow homePrimary;
+    private Widgets.Meter homeMeter;
+    private TextView homeProgress;
+
+    // ---- The Preparing screen's idle dim ----
+    private FrameLayout dimView;
+    private TextView dimBig, dimSmall;
+    private boolean dimmed;
+    private long lastInputAt;
+    private int swallowUp = -1;
     private LinearLayout bottomLeft, hints;
     private ShapeDrawable noteDot;
     private String noteText = "";
@@ -158,9 +203,8 @@ public class LauncherActivity extends Activity {
     private final android.os.Handler poller = new android.os.Handler(android.os.Looper.getMainLooper());
     private boolean resumed;
     private Prep homePrep;
-    private MenuRow homePrepRow;
     private PrepareProtocol.Status prepShown;
-    private TextView prepHead, prepMsg, prepEta;
+    private TextView prepHead, prepMsg, prepEta, prepCaption;
     private final List<TextView[]> prepSteps = new ArrayList<>();
     private MenuRow prepCancelRow;
     private long cancelArmedAt;
@@ -181,6 +225,9 @@ public class LauncherActivity extends Activity {
         boolean forced = change || showLauncher || noData != null || badPack != null;
         if (badPack != null && savedInstanceState == null)
             dropBadPack(badPack);
+        // Back from the game: its play session ends here (Home's « Play time »).
+        if (savedInstanceState == null && !gameRunning())
+            GameStore.sessionEnd(this, System.currentTimeMillis());
         if (!forced && savedInstanceState == null && gameReady() && !prepareBlocksPlay()) {
             /* The app icon while the game runs in the background: straight back to it (the « Launcher » shortcut
              * reaches this screen then). Otherwise only with « Open the game directly next time » on. */
@@ -195,6 +242,23 @@ public class LauncherActivity extends Activity {
 
         setUpWindow();
         buildStage();
+        // The second screen (AYN Thor, docs/android/app-shell.md « Dual screen »): Home's or the Prepare's panel.
+        companion = new LauncherCompanion(this, new LauncherPanel.Actions() {
+            @Override
+            public void play() {
+                onPlay();
+            }
+
+            @Override
+            public void settings() {
+                go(Screen.SETTINGS);
+            }
+
+            @Override
+            public void changeGame() {
+                go(Screen.SOURCE);
+            }
+        });
 
         String dir = GameStore.chosenDir(this);
         Log.i(TAG, "launcher: shown (" + (noData != null ? "NO_GAME_DATA in " + noData
@@ -240,9 +304,80 @@ public class LauncherActivity extends Activity {
         super.onPause();
     }
 
+    @Override
+    protected void onStart() {
+        super.onStart();
+        if (companion != null)
+            companion.start();
+    }
+
+    @Override
+    protected void onStop() {
+        if (companion != null)
+            companion.stop();
+        super.onStop();
+    }
+
+    LauncherCompanion companionForTest() {
+        return companion;
+    }
+
+    @Override
+    protected void onDestroy() {
+        if (feedback != null)
+            feedback.release();
+        super.onDestroy();
+    }
+
     /** For the JVM unit tests: the screen shown, and the Prepare state Home was built with (null: Play). */
     Screen screenForTest() {
         return screen;
+    }
+
+    /** The tests run in touch mode, where nothing is focused: this brings the screen's focus as a D-pad press does. */
+    void forceFocusForTest() {
+        restoreFocus(true);
+    }
+
+    View focusForTest() {
+        return focused();
+    }
+
+    /** The focused view of the stage (what the Glide highlights), or null. */
+    private View focused() {
+        return host == null ? getCurrentFocus() : host.findFocus();
+    }
+
+    void goForTest(Screen s) {
+        go(s);
+    }
+
+    UiFeedback feedbackForTest() {
+        return feedback;
+    }
+
+    AnimatorSet screenAnimatorForTest() {
+        return screenAnim;
+    }
+
+    Widgets.Glide glideForTest() {
+        return glide;
+    }
+
+    Widgets.Backdrop backdropForTest() {
+        return backdrop;
+    }
+
+    MenuRow homePrimaryForTest() {
+        return homePrimary;
+    }
+
+    boolean dimmedForTest() {
+        return dimmed;
+    }
+
+    boolean hasArtForTest() {
+        return art != null;
     }
 
     Prep homePrepForTest() {
@@ -312,8 +447,19 @@ public class LauncherActivity extends Activity {
 
     /** The parts every screen shares: top bar (mark, title, status chip), body, note line, bottom bar (hints). */
     private void buildStage() {
+        feedback = new UiFeedback(this);
+        host = new FrameLayout(this);
+        backdrop = new Widgets.Backdrop();
+        host.setBackground(backdrop);
         LinearLayout root = column();
-        root.setBackground(new Widgets.Backdrop());
+        host.addView(root, new FrameLayout.LayoutParams(MATCH, MATCH));
+        glide = new Widgets.Glide(this);
+        host.addView(glide, new FrameLayout.LayoutParams(MATCH, MATCH));
+        buildDim();
+        host.getViewTreeObserver().addOnGlobalFocusChangeListener((was, now) -> {
+            if (!building && was != null && now instanceof MenuRow)
+                feedback.play(UiFeedback.Cue.MOVE, now);
+        });
         root.setPadding(Theme.MARGIN_X, Theme.MARGIN_TOP, Theme.MARGIN_X, Theme.MARGIN_BOTTOM);
         root.setClipChildren(false);
 
@@ -357,7 +503,7 @@ public class LauncherActivity extends Activity {
         bottom.addView(hints, lp(WRAP, MATCH));
         root.addView(bottom, lp(MATCH, Theme.BOTTOM_BAR_H));
 
-        setContentView(new Widgets.Stage(this, root));
+        setContentView(new Widgets.Stage(this, host));
         setNote(null, NOTE_INFO);
     }
 
@@ -367,6 +513,8 @@ public class LauncherActivity extends Activity {
         paintNote();
         if (!noteText.isEmpty() && kind >= NOTE_WARN)
             Log.i(TAG, "launcher: " + noteText);
+        if (!noteText.isEmpty() && kind == NOTE_ERROR && feedback != null)
+            feedback.play(UiFeedback.Cue.ERROR, host);
     }
 
     private void paintNote() {
@@ -396,6 +544,7 @@ public class LauncherActivity extends Activity {
     private MenuRow row(Icon icon, String title, String sub, Runnable click) {
         MenuRow r = new MenuRow(this);
         r.set(icon, title, sub);
+        r.onPress = () -> feedback.play(UiFeedback.Cue.SELECT, r);
         if (click != null)
             r.setOnClickListener(v -> click.run());
         return focusable(r);
@@ -417,6 +566,7 @@ public class LauncherActivity extends Activity {
     }
 
     private void back() {
+        feedback.play(UiFeedback.Cue.BACK, host);
         if (screen == Screen.IMPORT) {
             requestCancel();
             return;
@@ -429,16 +579,27 @@ public class LauncherActivity extends Activity {
             finish();
             return;
         }
-        show(history.pop());
+        show(history.pop(), -1);
     }
 
-    /** Builds screen s from scratch (state may have changed), clears the note, restores the screen's focus. */
     private void show(Screen s) {
+        show(s, 1);
+    }
+
+    /**
+     * Builds screen s from scratch (state may have changed), clears the note, restores the screen's focus, and fades
+     * it in sliding from the right (dir 1, forward), the left (-1, back), or not at all (0, a refresh).
+     */
+    private void show(Screen s, int dir) {
         if (screen != null) {
-            int i = focusables.indexOf(getCurrentFocus());
+            int i = focusables.indexOf(host.findFocus());
             if (i >= 0)
                 focusMemory.put(screen, i);
         }
+        building = true;
+        setDimmed(false);
+        if (s != screen)
+            lastInputAt = clock.getAsLong();
         screen = s;
         if (s != Screen.IMPORT && s != Screen.PREPARE)
             getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
@@ -452,13 +613,16 @@ public class LauncherActivity extends Activity {
         chip.set("", 0);
         deleteArmedAt = 0;
         cancelArmedAt = 0;
-        homePrepRow = null;
         homePrep = null;
         prepShown = null;
         prepSteps.clear();
-        prepHead = prepMsg = prepEta = null;
+        prepHead = prepMsg = prepEta = prepCaption = null;
         prepCancelRow = null;
+        homePrimary = null;
+        homeMeter = null;
+        homeProgress = null;
         setNote(null, NOTE_INFO);
+        refreshIdentity();
         switch (s) {
         case WELCOME:
             buildWelcome();
@@ -478,6 +642,9 @@ public class LauncherActivity extends Activity {
         case SETTINGS:
             buildSettings();
             break;
+        case CONTROLS:
+            buildControls();
+            break;
         case GAME_DATA:
             buildGameData();
             break;
@@ -489,6 +656,42 @@ public class LauncherActivity extends Activity {
             break;
         }
         restoreFocus(false);
+        building = false;
+        if (dir != 0)
+            animateIn(dir);
+    }
+
+    /** The screen change: the body fades in and slides in by Theme.ANIM_SLIDE, the title fades in. */
+    private void animateIn(int dir) {
+        if (screenAnim != null)
+            screenAnim.cancel();
+        AnimatorSet set = new AnimatorSet();
+        set.playTogether(ObjectAnimator.ofFloat(body, View.ALPHA, 0, 1),
+                         ObjectAnimator.ofFloat(body, View.TRANSLATION_X, dir * Theme.ANIM_SLIDE, 0),
+                         ObjectAnimator.ofFloat(screenTitle, View.ALPHA, 0, 1));
+        set.setDuration(Theme.ANIM_SCREEN_MS);
+        set.setInterpolator(new android.view.animation.DecelerateInterpolator());
+        set.start();
+        screenAnim = set;
+    }
+
+    /** The game's title image (or monogram colour) for the current game, and the backdrop's tint from it. */
+    private void refreshIdentity() {
+        String dir = gameDir();
+        String tid = dir == null ? null : titleId();
+        String key = dir == null ? null : tid != null ? tid : dir;
+        if (key == null) {
+            artTid = null;
+            art = null;
+            artColor = Theme.ACCENT;
+        } else if (!key.equals(artTid)) {
+            artTid = key;
+            art = tid == null ? null : TitleArt.load(getFilesDir(), GameStore.findXbe(new File(dir)), tid);
+            artColor = art != null ? TitleArt.tint(art) : TitleArt.monogramColor(key);
+            Log.i(TAG, "launcher: title image " + (art != null ? art.getWidth() + "x" + art.getHeight() : "none")
+                       + " for " + key);
+        }
+        backdrop.setGlow(state() == State.NONE ? Theme.ACCENT : artColor);
     }
 
     private View focusTarget() {
@@ -522,6 +725,19 @@ public class LauncherActivity extends Activity {
         int k = e.getKeyCode();
         boolean down = e.getAction() == KeyEvent.ACTION_DOWN;
         boolean once = e.getAction() == KeyEvent.ACTION_UP && !e.isCanceled();
+        lastInputAt = clock.getAsLong();
+        // The dimmed Preparing screen: the first key only wakes it (its release is swallowed too).
+        if (dimmed) {
+            if (down) {
+                setDimmed(false);
+                swallowUp = k;
+            }
+            return true;
+        }
+        if (swallowUp == k && !down) {
+            swallowUp = -1;
+            return true;
+        }
         switch (k) {
         case KeyEvent.KEYCODE_BACK:
         case KeyEvent.KEYCODE_BUTTON_B:
@@ -530,12 +746,12 @@ public class LauncherActivity extends Activity {
                 back();
             return true;
         case KeyEvent.KEYCODE_BUTTON_A:
-            if (down && e.getRepeatCount() == 0 && getCurrentFocus() == null) {
+            if (down && e.getRepeatCount() == 0 && focused() == null) {
                 restoreFocus(true);
                 return true;
             }
-            if (once && getCurrentFocus() != null)
-                getCurrentFocus().performClick();
+            if (once && focused() != null)
+                focused().performClick();
             return true;
         case KeyEvent.KEYCODE_BUTTON_X:
             return runOnce(once, xAction);
@@ -553,7 +769,7 @@ public class LauncherActivity extends Activity {
         case KeyEvent.KEYCODE_DPAD_RIGHT:
         case KeyEvent.KEYCODE_DPAD_CENTER:
         case KeyEvent.KEYCODE_ENTER:
-            if (down && getCurrentFocus() == null && !focusables.isEmpty()) {
+            if (down && focused() == null && !focusables.isEmpty()) {
                 restoreFocus(true);
                 return true;
             }
@@ -568,6 +784,78 @@ public class LauncherActivity extends Activity {
         if (once && r != null)
             r.run();
         return true;
+    }
+
+    @Override
+    public boolean dispatchTouchEvent(MotionEvent e) {
+        lastInputAt = clock.getAsLong();
+        if (dimmed) {
+            if (e.getActionMasked() == MotionEvent.ACTION_DOWN)
+                setDimmed(false);
+            return true;
+        }
+        return super.dispatchTouchEvent(e);
+    }
+
+    // ---- The Preparing screen's idle dim (OLED burn-in) --------------------------------------------------------
+
+    /** A near-black layer over the stage: the overall percentage and the step, small and grey, moved each minute. */
+    private void buildDim() {
+        dimView = new FrameLayout(this);
+        dimView.setBackgroundColor(0xFF000000);
+        dimView.setVisibility(View.GONE);
+        LinearLayout c = column();
+        c.setGravity(Gravity.CENTER_HORIZONTAL);
+        dimBig = Theme.text(this, 120, Theme.LIGHT, Theme.alpha(Theme.TEXT_DIM, 0.55f), "");
+        c.addView(dimBig, lp(WRAP, WRAP));
+        dimSmall = Theme.text(this, Theme.T_BODY, Theme.REGULAR, Theme.alpha(Theme.TEXT_FAINT, 0.8f), "");
+        LinearLayout.LayoutParams sl = lp(WRAP, WRAP);
+        sl.topMargin = 18;
+        c.addView(dimSmall, sl);
+        dimView.addView(c, new FrameLayout.LayoutParams(WRAP, WRAP, Gravity.CENTER));
+        host.addView(dimView, new FrameLayout.LayoutParams(MATCH, MATCH));
+    }
+
+    private void setDimmed(boolean on) {
+        if (dimView == null || dimmed == on)
+            return;
+        dimmed = on;
+        dimView.setVisibility(on ? View.VISIBLE : View.GONE);
+        WindowManager.LayoutParams wlp = getWindow().getAttributes();
+        wlp.screenBrightness = on ? 0.02f : WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE;
+        getWindow().setAttributes(wlp);
+        if (on)
+            paintDim();
+        else
+            lastInputAt = clock.getAsLong();
+        Log.i(TAG, "launcher: preparing screen " + (on ? "dimmed (idle)" : "awake"));
+    }
+
+    /** The dim layer's text, from the Preparing screen's last status; its place shifts by the minute. */
+    private void paintDim() {
+        PrepareProtocol.Status s = prepShown;
+        float frac = s == null || s.step <= 0 ? -1 : PrepareProtocol.overall(s.step, s.n, s.pct);
+        dimBig.setText(frac >= 0 ? String.format(Locale.getDefault(), "%d%%", Math.round(frac * 100)) : "…");
+        String step = s == null ? getString(R.string.PREPARE_STARTING) : PrepareService.stepName(this, s.id);
+        if (s != null && s.eta >= 0)
+            step += " · " + getString(R.string.PREPARE_ETA, PrepareProtocol.formatEta(s.eta));
+        dimSmall.setText(step);
+        long minute = clock.getAsLong() / 60_000;
+        View c = (View)dimBig.getParent();
+        c.setTranslationX((float)(Math.sin(minute * 1.7) * 220));
+        c.setTranslationY((float)(Math.cos(minute * 1.3) * 140));
+    }
+
+    /** Polled with the status: dims the running Preparing screen after DIM_AFTER_MS without input. */
+    private void checkDim(boolean running) {
+        if (!running) {
+            setDimmed(false);
+            return;
+        }
+        if (dimmed)
+            paintDim();
+        else if (clock.getAsLong() - lastInputAt >= DIM_AFTER_MS)
+            setDimmed(true);
     }
 
     // ---- Detail panel ------------------------------------------------------------------------------------------
@@ -752,7 +1040,7 @@ public class LauncherActivity extends Activity {
     }
 
     private void clickFocused() {
-        View f = getCurrentFocus();
+        View f = focused();
         if (f != null)
             f.performClick();
         else
@@ -816,131 +1104,288 @@ public class LauncherActivity extends Activity {
 
     // ---- HOME --------------------------------------------------------------------------------------------------
 
+    /**
+     * A console home: the hero (the game's art, its title, a status chip, a lead line, a few facts and one big Play
+     * or Prepare) over a row of four smaller tiles (Settings, Controls, Game data, About). The top bar only says
+     * « Home », so the title shows once.
+     */
     private void buildHome() {
         State st = state();
         String dir = gameDir();
         boolean running = gameRunning();
-        screenTitle.setText(st == State.NONE ? getString(R.string.app_name) : gameTitle(dir));
-        chip.set(getString(stateLabel(st)), stateColor(st));
+        screenTitle.setText(R.string.HOME_TITLE);
         Prep prep = prep();
         PrepareProtocol.Status ps = prep == Prep.OFF || prep == Prep.PLAYABLE ? null : readPrepStatus();
         boolean preparing = prep != Prep.OFF && prep != Prep.PLAYABLE;
-        if (preparing)
-            prepChip(prep);
         checkHashLater(dir);
         sizeLater(dir);
 
-        LinearLayout h = rowLayout();
-        LinearLayout menu = column();
-        menu.addView(Theme.caps(this, getString(R.string.HOME_MENU), Theme.TEXT_FAINT), lp(MATCH, WRAP));
-        LinearLayout.LayoutParams first = lp(MATCH, Theme.ROW_H);
-        first.topMargin = 22;
+        LinearLayout col = column();
+        LinearLayout hero = rowLayout();
+        hero.setGravity(Gravity.CENTER_VERTICAL);
+        Widgets.ArtTile tile = new Widgets.ArtTile(this);
+        String title = st == State.NONE ? getString(R.string.NO_GAME_HEAD) : gameTitle(dir);
+        if (st == State.NONE)
+            tile.setEmpty();
+        else if (art != null)
+            tile.setArt(art, artColor);
+        else
+            tile.setMonogram(TitleArt.initials(title), artColor);
+        hero.addView(tile, lp(Theme.ART, Theme.ART));
 
-        String playSub = st != State.READY ? getString(R.string.PLAY_SUB_UNAVAILABLE, getString(stateLabel(st)))
-                         : running ? getString(R.string.PLAY_SUB_RUNNING) : getString(R.string.PLAY_SUB);
-        MenuRow play = preparing ? row(Icon.ARROW, getString(prep == Prep.RUNNING ? R.string.PREPARING
-                                                                                  : R.string.PREPARE),
-                                       prepSub(prep, ps), this::onPlay)
-                                 : row(Icon.PLAY, getString(R.string.PLAY), playSub, this::onPlay);
-        play.setDim(st != State.READY);
-        if (preparing) {
-            homePrep = prep;
-            homePrepRow = play;
-            if (prep == Prep.FAILED)
-                play.setBadge(getString(R.string.CHIP_PREPARE_FAILED), Theme.ERROR);
+        LinearLayout info = column();
+        String tid = st == State.NONE ? null : titleId();
+        if (tid != null)
+            info.addView(Theme.caps(this, getString(R.string.HOME_TITLE_ID, tid), Theme.TEXT_FAINT), lp(MATCH, WRAP));
+        TextView big = Theme.text(this, Theme.T_HERO, Theme.MEDIUM, Theme.TEXT, title);
+        big.setMaxLines(2);
+        big.setEllipsize(TextUtils.TruncateAt.END);
+        big.setLineSpacing(0, 1.05f);
+        LinearLayout.LayoutParams bl = lp(MATCH, WRAP);
+        bl.topMargin = tid != null ? 14 : 0;
+        info.addView(big, bl);
+
+        LinearLayout chips = rowLayout();
+        chips.setGravity(Gravity.CENTER_VERTICAL);
+        Widgets.Chip status = new Widgets.Chip(this);
+        if (preparing)
+            setPrepChip(status, prep);
+        else
+            status.set(getString(stateLabel(st)), stateColor(st));
+        chips.addView(status, lp(WRAP, WRAP));
+        if (companion != null)
+            companion.home(st == State.NONE ? "" : title, status.label(), status.color(),
+                           st == State.READY && !preparing);
+        if (running && st == State.READY) {
+            Widgets.Chip run = new Widgets.Chip(this);
+            run.set(getString(R.string.CHIP_RUNNING), Theme.ACCENT);
+            LinearLayout.LayoutParams rl = lp(WRAP, WRAP);
+            rl.leftMargin = 16;
+            chips.addView(run, rl);
         }
-        menu.addView(play, first);
-        MenuRow settings = row(Icon.SLIDERS, getString(R.string.SETTINGS), settingsSummary(),
-                               () -> go(Screen.SETTINGS));
-        menu.addView(settings, lp(MATCH, Theme.ROW_H));
-        MenuRow data = row(Icon.DISC, getString(R.string.GAME_DATA), gameDataSummary(st, dir),
-                           () -> go(Screen.GAME_DATA));
-        menu.addView(data, lp(MATCH, Theme.ROW_H));
-        MenuRow about = row(Icon.INFO, getString(R.string.ABOUT), getString(R.string.ABOUT_SUB, version()),
-                            () -> go(Screen.ABOUT));
-        menu.addView(about, lp(MATCH, Theme.ROW_H));
-        LinearLayout.LayoutParams ml = lp(860, MATCH);
-        ml.rightMargin = Theme.GAP;
-        h.addView(menu, ml);
-        h.addView(detailPanel(), lp(0, MATCH, 1));
-        body.addView(h, new FrameLayout.LayoutParams(MATCH, MATCH));
+        LinearLayout.LayoutParams cl = lp(MATCH, WRAP);
+        cl.topMargin = 22;
+        info.addView(chips, cl);
 
-        Runnable playDetail = preparing ? () -> homePrepareDetail(prep, ps, dir)
-                                        : () -> homePlayDetail(st, dir, running);
-        onFocus(play, playDetail);
-        onFocus(settings, this::homeSettingsDetail);
-        onFocus(data, () -> homeDataDetail(st, dir));
-        onFocus(about, this::homeAboutDetail);
-        defaultFocus = st == State.READY ? play : data;
-        playDetail.run();
+        String lead;
+        int leadColor = Theme.TEXT_DIM;
+        if (st == State.READY && preparing) {
+            switch (prep) {
+            case RUNNING:
+                lead = getString(R.string.HOME_LEAD_PREPARING);
+                break;
+            case FAILED:
+                lead = getString(R.string.HOME_LEAD_FAILED);
+                break;
+            default:
+                lead = getString(R.string.HOME_LEAD_PREPARE);
+                break;
+            }
+        } else if (st == State.READY) {
+            lead = getString(running ? R.string.PLAY_DETAIL_RUNNING : R.string.HOME_LEAD_READY);
+        } else {
+            lead = stateText(st, dir);
+            leadColor = st == State.NONE ? Theme.TEXT_DIM : st == State.WRONG ? Theme.ERROR : Theme.WARN;
+        }
+        TextView leadV = Theme.text(this, Theme.T_BODY, Theme.REGULAR, leadColor, lead);
+        leadV.setMaxLines(2);
+        leadV.setEllipsize(TextUtils.TruncateAt.END);
+        leadV.setLineSpacing(0, 1.2f);
+        LinearLayout.LayoutParams ll = lp(MATCH, WRAP);
+        ll.topMargin = 22;
+        info.addView(leadV, ll);
 
-        Widgets.Toggle auto = new Widgets.Toggle(this, "X", getString(R.string.OPEN_DIRECTLY));
-        auto.setOn(GameStore.autoStart(this));
-        auto.setOnClickListener(v -> toggleAutoStart(auto));
-        bottomLeft.addView(auto, lp(WRAP, WRAP));
-        xAction = () -> toggleAutoStart(auto);
+        LinearLayout facts = homeFacts(st, prep, ps);
+        if (facts != null) {
+            LinearLayout.LayoutParams fl = lp(MATCH, WRAP);
+            fl.topMargin = 26;
+            info.addView(facts, fl);
+        }
+
+        MenuRow play;
+        if (st == State.NONE || st == State.MISSING || st == State.NO_ACCESS) {
+            play = row(Icon.FOLDER, getString(st == State.NONE ? R.string.CHOOSE_GAME : R.string.CHOOSE_AGAIN),
+                       getString(R.string.CHOOSE_GAME_SUB), () -> go(Screen.SOURCE));
+        } else if (preparing) {
+            int t = prep == Prep.RUNNING ? R.string.PREPARING : prep == Prep.FAILED ? R.string.PREPARE_SEE_WHY
+                    : R.string.PREPARE;
+            play = row(prep == Prep.FAILED ? Icon.INFO : Icon.ARROW, getString(t), prepSub(prep, ps), this::onPlay);
+            homePrep = prep;
+        } else {
+            String playSub = st != State.READY ? getString(R.string.PLAY_SUB_UNAVAILABLE, getString(stateLabel(st)))
+                             : running ? getString(R.string.PLAY_SUB_RUNNING) : getString(R.string.PLAY_SUB);
+            play = row(Icon.PLAY, getString(R.string.PLAY), playSub, this::onPlay);
+            play.setDim(st != State.READY);
+        }
+        play.setPrimary(true);
+        homePrimary = play;
+        LinearLayout.LayoutParams pl = lp(Theme.PRIMARY_W, Theme.PRIMARY_H);
+        pl.topMargin = 30;
+        pl.leftMargin = -12;   // the row's own inset: its outline lines up with the texts above
+        info.addView(play, pl);
+
+        LinearLayout.LayoutParams il = lp(0, WRAP, 1);
+        il.leftMargin = 52;
+        hero.addView(info, il);
+        col.addView(hero, lp(MATCH, 0, 1));
+
+        LinearLayout tiles = rowLayout();
+        MenuRow settings = homeTile(tiles, Icon.SLIDERS, R.string.SETTINGS, settingsSummary(), Screen.SETTINGS);
+        homeTile(tiles, Icon.PAD, R.string.CONTROLS, getString(R.string.CONTROLS_SUB), Screen.CONTROLS);
+        homeTile(tiles, Icon.DISC, R.string.GAME_DATA, dir == null ? getString(stateLabel(st))
+                 : sizeText(dir) + " · " + sourceShort(dir), Screen.GAME_DATA);
+        MenuRow about = homeTile(tiles, Icon.INFO, R.string.ABOUT, getString(R.string.ABOUT_SUB, version()),
+                                 Screen.ABOUT);
+        ((LinearLayout.LayoutParams)settings.getLayoutParams()).leftMargin = -12;
+        ((LinearLayout.LayoutParams)about.getLayoutParams()).rightMargin = -12;
+        LinearLayout.LayoutParams tl = lp(MATCH, Theme.TILE_H);
+        tl.topMargin = 28;
+        col.addView(tiles, tl);
+        body.addView(col, new FrameLayout.LayoutParams(MATCH, MATCH));
+
+        defaultFocus = play;
         startAction = this::onPlay;
         addHint("A", R.string.HINT_SELECT, this::clickFocused);
         addHint("B", R.string.HINT_QUIT, this::back);
-        addHint("START", preparing ? R.string.PREPARE : R.string.PLAY, this::onPlay);
+        boolean choose = st == State.NONE || st == State.MISSING || st == State.NO_ACCESS;
+        addHint("START", choose ? R.string.HINT_CHOOSE : preparing ? R.string.PREPARE : R.string.PLAY, this::onPlay);
 
         if (preparing && prep == Prep.INTERRUPTED)
             setNote(getString(R.string.PREPARE_INTERRUPTED), NOTE_WARN);
         else if (running)
             setNote(getString(R.string.GAME_RUNNING_HOME), NOTE_INFO);
-        else if (st == State.MISSING || st == State.NO_ACCESS)
-            setNote(stateText(st, dir), NOTE_WARN);
     }
 
-    private void toggleAutoStart(Widgets.Toggle t) {
-        boolean on = !GameStore.autoStart(this);
-        GameStore.setAutoStart(this, on);
-        if (t != null)
-            t.setOn(on);
-        setNote(getString(on ? R.string.OPEN_DIRECTLY_ON : R.string.OPEN_DIRECTLY_OFF), NOTE_INFO);
-        Log.i(TAG, "launcher: open directly " + (on ? "on" : "off"));
+    private MenuRow homeTile(LinearLayout tiles, Icon icon, int title, String sub, Screen target) {
+        MenuRow r = row(icon, getString(title), sub, () -> go(target));
+        r.setCompact();
+        LinearLayout.LayoutParams p = lp(0, MATCH, 1);
+        p.leftMargin = 6;
+        p.rightMargin = 6;
+        tiles.addView(r, p);
+        return r;
     }
 
-    private void homePlayDetail(State st, String dir, boolean running) {
-        detailClear(getString(R.string.PLAY), st == State.NONE ? getString(R.string.NO_GAME_HEAD) : gameTitle(dir),
-                    st == State.READY ? getString(running ? R.string.PLAY_DETAIL_RUNNING : R.string.PLAY_DETAIL)
-                                      : stateText(st, dir));
-        if (dir != null) {
-            detailKv(getString(R.string.KV_FOLDER), dir);
-            detailKv(getString(R.string.KV_SOURCE), sourceLabel(dir));
+    /** One fact of the hero: a caps label over its value. */
+    private TextView homeFact(LinearLayout facts, String label, String value, int color) {
+        LinearLayout c = column();
+        c.addView(Theme.caps(this, label, Theme.TEXT_FAINT), lp(WRAP, WRAP));
+        TextView v = Theme.oneLine(Theme.text(this, Theme.T_BODY + 3, Theme.MEDIUM, color, value));
+        LinearLayout.LayoutParams vl = lp(WRAP, WRAP);
+        vl.topMargin = 10;
+        c.addView(v, vl);
+        LinearLayout.LayoutParams p = lp(WRAP, WRAP);
+        p.rightMargin = 64;
+        facts.addView(c, p);
+        return v;
+    }
+
+    /** The hero's facts for the state: play stats, the pack, what a Prepare needs, or its progress; null: none. */
+    private LinearLayout homeFacts(State st, Prep prep, PrepareProtocol.Status ps) {
+        if (st != State.READY)
+            return null;
+        LinearLayout f = rowLayout();
+        switch (prep) {
+        case RUNNING: {
+            LinearLayout c = column();
+            homeMeter = new Widgets.Meter(this);
+            float frac = ps != null && ps.step > 0 ? PrepareProtocol.overall(ps.step, ps.n, ps.pct) : 0;
+            homeMeter.set(frac, Theme.ACCENT);
+            c.addView(homeMeter, lp(Theme.PRIMARY_W - 24, 10));
+            homeProgress = Theme.oneLine(Theme.text(this, Theme.T_BODY, Theme.MEDIUM, Theme.TEXT,
+                                                    ps == null ? getString(R.string.PREPARE_STARTING)
+                                                               : progressLine(ps)));
+            LinearLayout.LayoutParams pl = lp(MATCH, WRAP);
+            pl.topMargin = 16;
+            c.addView(homeProgress, pl);
+            f.addView(c, lp(MATCH, WRAP));
+            return f;
         }
-        detailKv(getString(R.string.KV_STATUS), getString(stateLabel(st)));
-        detailFooter(getString(R.string.PLAY_FOOTER), Theme.TEXT_FAINT);
-    }
-
-    private void homeSettingsDetail() {
-        RecompConfig c = RecompConfig.load(GameStore.externalFilesDir(this));
-        detailClear(getString(R.string.SETTINGS), getString(R.string.SETTINGS_HEAD), null);
-        detailKv(getString(R.string.OPEN_DIRECTLY_SHORT),
-                 getString(GameStore.autoStart(this) ? R.string.VAL_ON : R.string.VAL_OFF));
-        for (RecompConfig.Option o : RecompConfig.OPTIONS)
-            detailKv(getString(o.title), choiceLabel(c, o));
-        detailFooter(getString(R.string.SETTINGS_FOOTER, c.file().getAbsolutePath()), Theme.TEXT_FAINT);
-    }
-
-    private void homeDataDetail(State st, String dir) {
-        detailClear(getString(R.string.GAME_DATA), getString(R.string.GAME_DATA_HEAD),
-                    getString(R.string.GAME_DATA_TEXT));
-        if (dir != null) {
-            detailKv(getString(R.string.KV_FOLDER), dir);
-            detailKv(getString(R.string.KV_SOURCE), sourceLabel(dir));
-            detailKv(getString(R.string.KV_SIZE), sizeText(dir));
+        case FAILED:
+            homeFact(f, getString(R.string.KV_CODE), ps == null || ps.code.isEmpty() ? "?" : ps.code, Theme.ERROR);
+            homeFact(f, getString(R.string.KV_INTERNAL_FREE), size(internalFree()), Theme.TEXT);
+            return f;
+        case NEEDED:
+        case CANCELLED:
+        case INTERRUPTED: {
+            homeFact(f, getString(R.string.KV_ESTIMATE), estimate(), Theme.TEXT);
+            long free = internalFree();
+            homeFact(f, getString(R.string.KV_INTERNAL_FREE), size(free),
+                     free < PREPARE_MIN_FREE ? Theme.ERROR : Theme.TEXT);
+            long ram = Toolchain.totalRam(this);
+            homeFact(f, getString(R.string.KV_RAM), ram > 0 ? size(ram) : "?",
+                     ram > 0 && ram < PREPARE_RAM_WARN ? Theme.WARN : Theme.TEXT);
+            return f;
+        }
+        default:
+            break;
+        }
+        long last = GameStore.lastPlayed(this), now = System.currentTimeMillis();
+        homeFact(f, getString(R.string.KV_LAST_PLAYED), last <= 0 ? getString(R.string.VAL_NEVER)
+                 : DateUtils.getRelativeTimeSpanString(last, now, DateUtils.MINUTE_IN_MILLIS).toString(), Theme.TEXT);
+        homeFact(f, getString(R.string.KV_PLAY_TIME), playTimeText(GameStore.playTime(this)), Theme.TEXT);
+        String tid = titleId();
+        if (prep == Prep.PLAYABLE && tid != null) {
+            String[] pack = packFacts(tid);
+            homeFact(f, getString(R.string.KV_PREPARED), pack[0], Theme.TEXT);
+            homeFact(f, getString(R.string.KV_PACK_SIZE), pack[1], Theme.TEXT);
         } else {
-            detailKv(getString(R.string.KV_STATUS), getString(stateLabel(st)));
+            String dir = gameDir();
+            homeFact(f, getString(R.string.KV_SIZE), dir == null ? "?" : sizeText(dir), Theme.TEXT);
         }
-        detailKv(getString(R.string.KV_FREE), size(freeSpace()));
+        return f;
     }
 
-    private void homeAboutDetail() {
-        detailClear(getString(R.string.ABOUT), getString(R.string.app_name), getString(R.string.ABOUT_TEXT));
-        detailKv(getString(R.string.KV_VERSION), version());
+    /** « 45 min », « 3 h 05 », « — » for none. */
+    private String playTimeText(long ms) {
+        long min = ms / 60_000;
+        if (min <= 0)
+            return ms > 0 ? getString(R.string.PLAYTIME_MIN, 1) : getString(R.string.VAL_NONE);
+        if (min < 60)
+            return getString(R.string.PLAYTIME_MIN, (int)min);
+        return getString(R.string.PLAYTIME_H, (int)(min / 60), String.format(Locale.ROOT, "%02d", min % 60));
     }
 
+    /** The pack's prepared date (pack.json's built_at, else the file's date) and its library's size. */
+    private String[] packFacts(String tid) {
+        File dir = Pack.packDir(getFilesDir(), tid);
+        File json = new File(dir, Pack.JSON);
+        long when = json.lastModified();
+        long bytes = -1;
+        try {
+            JSONObject o = new JSONObject(PrepareProtocol.readText(json, 1 << 20));
+            String at = o.optString("built_at", "");
+            if (!at.isEmpty()) {
+                try {
+                    when = java.time.Instant.parse(at).toEpochMilli();
+                } catch (java.time.format.DateTimeParseException ignored) {
+                }
+            }
+            String lib = o.optString("lib", "");
+            File so = new File(dir, lib);
+            if (!lib.isEmpty() && so.isFile())
+                bytes = so.length();
+        } catch (IOException | JSONException ignored) {
+        }
+        java.util.Locale loc = getResources().getConfiguration().getLocales().get(0);
+        String date = when > 0 ? java.text.DateFormat.getDateInstance(java.text.DateFormat.MEDIUM, loc).format(when)
+                               : "?";
+        return new String[] { date, bytes >= 0 ? size(bytes) : "?" };
+    }
+
+    private void setPrepChip(Widgets.Chip c, Prep p) {
+        switch (p) {
+        case RUNNING:
+            c.set(getString(R.string.CHIP_PREPARING), Theme.ACCENT);
+            break;
+        case FAILED:
+            c.set(getString(R.string.CHIP_PREPARE_FAILED), Theme.ERROR);
+            break;
+        default:
+            c.set(getString(R.string.CHIP_NEEDS_PREPARE), Theme.WARN);
+            break;
+        }
+    }
     private void onPlay() {
         State st = state();
         if (st == State.READY) {
@@ -977,12 +1422,6 @@ public class LauncherActivity extends Activity {
         return TextUtils.join(" · ", changed);
     }
 
-    private String gameDataSummary(State st, String dir) {
-        if (dir == null)
-            return getString(stateLabel(st));
-        return sourceLabel(dir) + " · " + sizeText(dir);
-    }
-
     // ---- SETTINGS ----------------------------------------------------------------------------------------------
 
     private final List<Integer> sectionStarts = new ArrayList<>();
@@ -1002,28 +1441,18 @@ public class LauncherActivity extends Activity {
         scroll.addView(list, new FrameLayout.LayoutParams(MATCH, WRAP));
 
         sectionHeader(list, R.string.SECTION_LAUNCHER);
-        MenuRow auto = settingRow(list, getString(R.string.OPEN_DIRECTLY), getString(R.string.OPEN_DIRECTLY_SUMMARY));
-        Runnable autoDetail = () -> {
-            detailClear(getString(R.string.SECTION_LAUNCHER), getString(R.string.OPEN_DIRECTLY),
-                        getString(R.string.OPEN_DIRECTLY_DETAIL));
-            detailKv(getString(R.string.KV_VALUE), getString(GameStore.autoStart(this) ? R.string.VAL_ON
-                                                                                     : R.string.VAL_OFF));
-            detailFooter(getString(R.string.OPEN_DIRECTLY_FOOTER), Theme.TEXT_FAINT);
-        };
-        Runnable autoRefresh = () -> {
-            boolean on = GameStore.autoStart(this);
-            auto.setValue(getString(on ? R.string.VAL_ON : R.string.VAL_OFF), on ? 1 : 0, 2);
-        };
-        autoRefresh.run();
-        auto.cycler = dir -> {
-            GameStore.setAutoStart(this, !GameStore.autoStart(this));
-            autoRefresh.run();
-            autoDetail.run();
-            setNote(getString(GameStore.autoStart(this) ? R.string.OPEN_DIRECTLY_ON : R.string.OPEN_DIRECTLY_OFF),
-                    NOTE_OK);
-        };
-        auto.setOnClickListener(v -> auto.cycler.step(1));
-        onFocus(auto, autoDetail);
+        Runnable autoDetail = launcherToggle(list, R.string.OPEN_DIRECTLY, R.string.OPEN_DIRECTLY_SUMMARY,
+                                             R.string.OPEN_DIRECTLY_DETAIL, R.string.OPEN_DIRECTLY_FOOTER,
+                                             GameStore::autoStart, GameStore::setAutoStart,
+                                             R.string.OPEN_DIRECTLY_ON, R.string.OPEN_DIRECTLY_OFF);
+        launcherToggle(list, R.string.UI_SOUND, R.string.UI_SOUND_SUMMARY, R.string.UI_SOUND_DETAIL,
+                       R.string.UI_FEEDBACK_FOOTER, GameStore::uiSound, GameStore::setUiSound, R.string.UI_SOUND_ON,
+                       R.string.UI_SOUND_OFF);
+        launcherToggle(list, R.string.UI_HAPTICS, R.string.UI_HAPTICS_SUMMARY, R.string.UI_HAPTICS_DETAIL,
+                       R.string.UI_FEEDBACK_FOOTER, GameStore::uiHaptics, GameStore::setUiHaptics,
+                       R.string.UI_HAPTICS_ON, R.string.UI_HAPTICS_OFF);
+        if (DualScreen.available(this, CompanionScreen.ownDisplayId(this)))
+            bottomScreenRow(list);
 
         RecompConfig.Section section = null;
         List<MenuRow> optionRows = new ArrayList<>();
@@ -1033,6 +1462,11 @@ public class LauncherActivity extends Activity {
                 sectionHeader(list, sectionTitle(section));
             }
             MenuRow r = settingRow(list, getString(o.title), getString(o.summary));
+            String[] labels = new String[o.choices.length + 1];
+            for (int i = 0; i < o.choices.length; i++)
+                labels[i] = getString(o.choices[i].label);
+            labels[o.choices.length] = getString(R.string.VAL_CUSTOM);
+            r.setChoices(labels);
             optionRows.add(r);
             refreshOptionRow(r, o);
             r.cycler = d -> stepOption(r, o, d);
@@ -1089,14 +1523,85 @@ public class LauncherActivity extends Activity {
         sectionStarts.add(focusables.size());
     }
 
+    /** A setting row: its press steps the value, which plays the « move » tick instead of « select ». */
     private MenuRow settingRow(LinearLayout list, String title, String sub) {
         MenuRow r = row(null, title, sub, null);
+        r.onPress = null;
         list.addView(r, lp(MATCH, Theme.ROW_H_SMALL));
         return r;
     }
 
+    /**
+     * « Bottom screen: Panel / Black / Off » (GameStore.bottomScreen), only on a device with a second display: what
+     * the launcher and the game show there (docs/android/app-shell.md « Dual screen »). Applied at once.
+     */
+    private void bottomScreenRow(LinearLayout list) {
+        GameStore.BottomScreen[] modes = GameStore.BottomScreen.values();
+        int[] labels = { R.string.VAL_PANEL, R.string.VAL_BLACK, R.string.VAL_OFF };
+        String[] names = new String[modes.length];
+        for (int i = 0; i < modes.length; i++)
+            names[i] = getString(labels[i]);
+        MenuRow r = settingRow(list, getString(R.string.BOTTOM_SCREEN), getString(R.string.BOTTOM_SCREEN_SUMMARY));
+        r.setChoices(names);
+        Runnable fill = () -> {
+            detailClear(getString(R.string.SECTION_LAUNCHER), getString(R.string.BOTTOM_SCREEN),
+                        getString(R.string.BOTTOM_SCREEN_DETAIL));
+            detailKv(getString(R.string.KV_VALUE), names[GameStore.bottomScreen(this).ordinal()]);
+            detailFooter(getString(R.string.UI_FEEDBACK_FOOTER), Theme.TEXT_FAINT);
+        };
+        Runnable refresh = () -> {
+            int i = GameStore.bottomScreen(this).ordinal();
+            r.setValue(names[i], i, modes.length);
+        };
+        refresh.run();
+        r.cycler = d -> {
+            int n = modes.length, i = ((GameStore.bottomScreen(this).ordinal() + d) % n + n) % n;
+            GameStore.setBottomScreen(this, modes[i]);
+            refresh.run();
+            fill.run();
+            feedback.play(UiFeedback.Cue.MOVE, r);
+            if (companion != null)
+                companion.screen().refresh();
+            setNote(getString(R.string.BOTTOM_SCREEN_SAVED, names[i]), NOTE_OK);
+            Log.i(TAG, "launcher: bottom screen " + modes[i]);
+        };
+        r.setOnClickListener(v -> r.cycler.step(1));
+        onFocus(r, fill);
+    }
+
+    /** An on / off launcher preference as a setting row; returns its detail filler (shown when focused). */
+    private Runnable launcherToggle(LinearLayout list, int title, int summary, int detailText, int footer,
+                                    Function<android.content.Context, Boolean> get,
+                                    BiFunction<android.content.Context, Boolean, Boolean> set, int onNote,
+                                    int offNote) {
+        MenuRow r = settingRow(list, getString(title), getString(summary));
+        r.setChoices(new String[] { getString(R.string.VAL_ON), getString(R.string.VAL_OFF) });
+        Runnable fill = () -> {
+            detailClear(getString(R.string.SECTION_LAUNCHER), getString(title), getString(detailText));
+            detailKv(getString(R.string.KV_VALUE), getString(get.apply(this) ? R.string.VAL_ON : R.string.VAL_OFF));
+            detailFooter(getString(footer), Theme.TEXT_FAINT);
+        };
+        Runnable refresh = () -> {
+            boolean on = get.apply(this);
+            r.setValue(getString(on ? R.string.VAL_ON : R.string.VAL_OFF), on ? 1 : 0, 2);
+        };
+        refresh.run();
+        r.cycler = d -> {
+            set.apply(this, !get.apply(this));
+            refresh.run();
+            fill.run();
+            feedback.play(UiFeedback.Cue.MOVE, r);
+            setNote(getString(get.apply(this) ? onNote : offNote), NOTE_OK);
+            Log.i(TAG, "launcher: " + getResources().getResourceEntryName(title) + " "
+                       + (get.apply(this) ? "on" : "off"));
+        };
+        r.setOnClickListener(v -> r.cycler.step(1));
+        onFocus(r, fill);
+        return fill;
+    }
+
     private void jumpSection(int dir) {
-        int cur = focusables.indexOf(getCurrentFocus());
+        int cur = focusables.indexOf(focused());
         int target = -1;
         if (dir > 0) {
             for (int s : sectionStarts) {
@@ -1134,6 +1639,7 @@ public class LauncherActivity extends Activity {
         saveSettings();
         refreshOptionRow(r, o);
         optionDetail(o);
+        feedback.play(UiFeedback.Cue.MOVE, r);
     }
 
     private void saveSettings() {
@@ -1348,20 +1854,6 @@ public class LauncherActivity extends Activity {
         return p != Prep.OFF && p != Prep.PLAYABLE;
     }
 
-    private void prepChip(Prep p) {
-        switch (p) {
-        case RUNNING:
-            chip.set(getString(R.string.CHIP_PREPARING), Theme.ACCENT);
-            break;
-        case FAILED:
-            chip.set(getString(R.string.CHIP_PREPARE_FAILED), Theme.ERROR);
-            break;
-        default:
-            chip.set(getString(R.string.CHIP_NEEDS_PREPARE), Theme.WARN);
-            break;
-        }
-    }
-
     /** « about 20–30 min »: from the cores and the RAM; a guess until tools.prepare gives its own eta. */
     private String estimate() {
         int cores = Runtime.getRuntime().availableProcessors();
@@ -1380,19 +1872,28 @@ public class LauncherActivity extends Activity {
         return getString(R.string.PREPARE_ESTIMATE, lo, hi);
     }
 
+    /** The subtitle of Home's big button in a Prepare state (the hero's facts carry the numbers). */
     private String prepSub(Prep p, PrepareProtocol.Status s) {
         switch (p) {
         case RUNNING:
-            return s == null ? getString(R.string.PREPARE_STARTING) : progressLine(s);
+            return getString(R.string.HOME_SUB_PREPARING);
         case FAILED:
-            return getString(R.string.PREPARE_SUB_FAILED, s == null ? "" : s.code);
+            return getString(R.string.HOME_SUB_FAILED);
         case CANCELLED:
-            return getString(R.string.PREPARE_SUB_CANCELLED);
         case INTERRUPTED:
-            return getString(R.string.PREPARE_SUB_INTERRUPTED);
+            return getString(R.string.HOME_SUB_RESUME);
         default:
-            return getString(R.string.PREPARE_SUB, estimate());
+            return getString(R.string.HOME_SUB_PREPARE);
         }
+    }
+
+    /** « copy », « in place », « recomp.cfg »: the source in a word, for Home's Game data tile. */
+    private String sourceShort(String dir) {
+        if (ownedCopy(dir))
+            return getString(R.string.SOURCE_SHORT_COPY);
+        if (GameStore.chosenDir(this) == null && GameStore.cfgGameDir(this) != null)
+            return "recomp.cfg";
+        return getString(R.string.SOURCE_SHORT_IN_PLACE);
     }
 
     /** « Compile · 42 % · about 12 min left ». */
@@ -1407,24 +1908,6 @@ public class LauncherActivity extends Activity {
 
     private long internalFree() {
         return getFilesDir().getUsableSpace();
-    }
-
-    private void homePrepareDetail(Prep p, PrepareProtocol.Status s, String dir) {
-        detailClear(getString(R.string.PREPARE), gameTitle(dir), getString(R.string.PREPARE_DETAIL, estimate()));
-        detailKv(getString(R.string.KV_ESTIMATE), estimate());
-        long free = internalFree();
-        TextView f = detailKv(getString(R.string.KV_INTERNAL_FREE), size(free));
-        if (free < PREPARE_MIN_FREE)
-            f.setTextColor(Theme.ERROR);
-        long ram = Toolchain.totalRam(this);
-        TextView r = detailKv(getString(R.string.KV_RAM), ram > 0 ? size(ram) : "?");
-        if (ram > 0 && ram < PREPARE_RAM_WARN)
-            r.setTextColor(Theme.WARN);
-        if (s != null && !s.code.isEmpty() && p == Prep.FAILED)
-            detailKv(getString(R.string.KV_CODE), s.code);
-        if (p != Prep.NEEDED)
-            detailKv(getString(R.string.KV_STATUS), prepSub(p, s));
-        detailFooter(getString(R.string.PREPARE_FOOTER, size(PREPARE_MIN_FREE)), Theme.TEXT_FAINT);
     }
 
     /** Checks the space, then starts PrepareService and shows the Preparing screen. */
@@ -1491,10 +1974,23 @@ public class LauncherActivity extends Activity {
         LinearLayout c = column();
         c.addView(Theme.caps(this, getString(R.string.PREPARE_CAPS), Theme.ACCENT), lp(MATCH, WRAP));
         prepHead = Theme.oneLine(Theme.text(this, Theme.T_TITLE, Theme.MEDIUM, Theme.TEXT, gameTitle(dir)));
+        if (companion != null)
+            companion.preparing(titleId(), gameTitle(dir));
         LinearLayout.LayoutParams hl = lp(MATCH, WRAP);
         hl.topMargin = 18;
-        hl.bottomMargin = 22;
         c.addView(prepHead, hl);
+        // The time left, prominent; what the player may do meanwhile, under it.
+        prepEta = Theme.oneLine(Theme.text(this, Theme.T_HEAD, Theme.MEDIUM, Theme.ACCENT, ""));
+        LinearLayout.LayoutParams el = lp(MATCH, WRAP);
+        el.topMargin = 14;
+        c.addView(prepEta, el);
+        prepCaption = Theme.text(this, Theme.T_SMALL, Theme.REGULAR, Theme.TEXT_FAINT, "");
+        prepCaption.setMaxLines(2);
+        prepCaption.setEllipsize(TextUtils.TruncateAt.END);
+        LinearLayout.LayoutParams capl = lp(MATCH, WRAP);
+        capl.topMargin = 10;
+        capl.bottomMargin = 16;
+        c.addView(prepCaption, capl);
 
         int[] names = { R.string.STEP_INSTALL, R.string.STEP_IDENTIFY, R.string.STEP_ANALYSE, R.string.STEP_LIFT,
                         R.string.STEP_COMPILE, R.string.STEP_PACK };
@@ -1516,21 +2012,17 @@ public class LauncherActivity extends Activity {
             pct.setGravity(Gravity.END);
             r.addView(pct, lp(110, WRAP));
             LinearLayout.LayoutParams rl = lp(MATCH, WRAP);
-            rl.topMargin = i == 0 ? 0 : 8;
+            rl.topMargin = i == 0 ? 0 : 3;
             c.addView(r, rl);
             prepSteps.add(new TextView[] { mark, name, sub, pct });
         }
 
         prepMsg = Theme.text(this, Theme.T_SMALL, Theme.REGULAR, Theme.TEXT_DIM, "");
-        prepMsg.setMaxLines(2);
+        prepMsg.setMaxLines(1);
         prepMsg.setEllipsize(TextUtils.TruncateAt.END);
         LinearLayout.LayoutParams ml = lp(MATCH, WRAP);
-        ml.topMargin = 26;
+        ml.topMargin = 16;
         c.addView(prepMsg, ml);
-        prepEta = Theme.text(this, Theme.T_SMALL, Theme.REGULAR, Theme.TEXT_FAINT, "");
-        LinearLayout.LayoutParams el = lp(MATCH, WRAP);
-        el.topMargin = 10;
-        c.addView(prepEta, el);
         c.addView(gap(this), lp(MATCH, 0, 1));
 
         PrepareProtocol.Status s = readPrepStatus();
@@ -1594,7 +2086,9 @@ public class LauncherActivity extends Activity {
         String big = frac >= 0 ? String.format(Locale.getDefault(), "%d%%", Math.round(frac * 100)) : "";
         String label = s == null ? getString(R.string.PREPARE_STARTING) : PrepareService.stepName(this, s.id);
         String sub = s != null && s.step > 0 ? getString(R.string.PREPARE_STEP_OF, s.step, s.n)
-                     : s != null && s.pct > 0 ? String.format(Locale.getDefault(), "%d%%", s.pct) : "";
+                     : "";
+        if (running && s != null && s.pct > 0)
+            sub = (sub.isEmpty() ? "" : sub + " · ") + getString(R.string.PREPARE_STEP_PCT, s.pct);
         if (failed) {
             label = getString(R.string.PREPARE_FAILED_HEAD);
             sub = s.code;
@@ -1630,19 +2124,30 @@ public class LauncherActivity extends Activity {
                       + (why.isEmpty() ? "" : " " + why);
             prepMsg.setText(getString(R.string.PREPARE_CODE_LINE, s.code) + (why.isEmpty() ? "" : " · " + why));
             prepMsg.setTextColor(Theme.TEXT);
-            prepEta.setText(getString(R.string.PREPARE_SHARE_HINT));
+            prepMsg.setMaxLines(2);
+            prepEta.setText(getString(R.string.PREPARE_ETA_FAILED));
+            prepEta.setTextColor(Theme.ERROR);
+            prepCaption.setVisibility(View.GONE);   // Y « Share log » says it, and the error needs the room
         } else if (stopped) {
             prepHead.setText(getString(R.string.PREPARE_CANCELLED_HEAD));
             prepHead.setTextColor(Theme.TEXT);
             prepMsg.setText(getString(PrepareProtocol.RUNNING.equals(s.state) ? R.string.PREPARE_INTERRUPTED
                                                                               : R.string.PREPARE_CANCELLED_TEXT));
-            prepEta.setText("");
+            prepEta.setText(getString(R.string.PREPARE_ETA_STOPPED));
+            prepEta.setTextColor(Theme.WARN);
+            prepCaption.setVisibility(View.GONE);
+            prepMsg.setMaxLines(2);
         } else {
             prepMsg.setText(s == null || s.msg.isEmpty() ? getString(R.string.PREPARE_STARTING) : s.msg);
-            prepEta.setText(s != null && s.eta >= 0 ? getString(R.string.PREPARE_ETA_LONG,
+            prepEta.setText(s != null && s.eta >= 0 ? getString(R.string.PREPARE_ETA_BIG,
                                                                 PrepareProtocol.formatEta(s.eta))
-                                                    : getString(R.string.PREPARE_KEEPS));
+                                                    : getString(R.string.PREPARE_ETA_UNKNOWN));
+            prepEta.setTextColor(Theme.ACCENT);
+            prepCaption.setText(getString(R.string.PREPARE_KEEPS));
+            prepCaption.setVisibility(View.VISIBLE);
         }
+        if (dimmed)
+            paintDim();
     }
 
     private static int indexOfStep(String id) {
@@ -1719,6 +2224,7 @@ public class LauncherActivity extends Activity {
                 return;
             }
             paintPrepare(s);
+            checkDim(isRunning);
         } else if (screen == Screen.HOME && homePrep != null) {
             Prep now = prep();
             if (now != homePrep) {
@@ -1727,11 +2233,17 @@ public class LauncherActivity extends Activity {
                     setNote(getString(R.string.READY_TO_PLAY, gameTitle(gameDir())), NOTE_OK);
                 return;
             }
-            if (now == Prep.RUNNING && homePrepRow != null)
-                homePrepRow.setSubtitle(prepSub(now, readPrepStatus()));
+            if (now == Prep.RUNNING) {
+                PrepareProtocol.Status s = readPrepStatus();
+                if (s != null && homeMeter != null && homeProgress != null) {
+                    homeMeter.set(s.step > 0 ? PrepareProtocol.overall(s.step, s.n, s.pct) : 0, Theme.ACCENT);
+                    homeProgress.setText(progressLine(s));
+                }
+            }
         }
     }
 
+    /** The Prepare finished: Home with Play focused, the « done » sound and haptic, « TITLE is ready ». */
     private void onPrepareDone() {
         getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         String tid = titleId();
@@ -1740,8 +2252,47 @@ public class LauncherActivity extends Activity {
         history.clear();
         focusMemory.remove(Screen.HOME);
         show(Screen.HOME);
-        if (ok)
+        if (ok) {
+            restoreFocus(true);   // Play, even after a touch: the next press of A plays
+            feedback.play(UiFeedback.Cue.DONE, host);
             setNote(getString(R.string.READY_TO_PLAY, gameTitle(gameDir())), NOTE_OK);
+        }
+    }
+
+    // ---- CONTROLS ----------------------------------------------------------------------------------------------
+
+    /**
+     * The device's buttons and the Xbox controller buttons the game gets: the SDL game controller mapping of
+     * src/input/xinput_device.c (L1 = Black, R1 = White, L2 / R2 = the triggers, Select = Back, stick presses = the
+     * thumbstick buttons), and the shell's own Android Back, pressed twice to quit (shell_main.c, recomp_quit).
+     */
+    private void buildControls() {
+        screenTitle.setText(R.string.CONTROLS);
+        LinearLayout h = rowLayout();
+        FrameLayout left = panel();
+        Widgets.PadDiagram pad = new Widgets.PadDiagram(this);
+        int[] labels = { R.string.PAD_L1, R.string.PAD_L2, R.string.PAD_R1, R.string.PAD_R2, R.string.PAD_SELECT,
+                         R.string.PAD_START, R.string.PAD_DPAD, R.string.PAD_LSTICK, R.string.PAD_RSTICK,
+                         R.string.PAD_FACE, R.string.PAD_SCREEN };
+        for (int i = 0; i < labels.length; i++)
+            pad.labels[i] = getString(labels[i]);
+        left.addView(pad, new FrameLayout.LayoutParams(MATCH, MATCH));
+        LinearLayout.LayoutParams ll = lp(0, MATCH, 1);
+        ll.rightMargin = Theme.GAP;
+        h.addView(left, ll);
+
+        h.addView(detailPanel(), lp(640, MATCH));
+        detailClear(getString(R.string.CONTROLS_CAPS), getString(R.string.CONTROLS_HEAD), null);
+        int[][] rows = { { R.string.CTL_FACE, R.string.CTL_FACE_X }, { R.string.CTL_L1, R.string.CTL_L1_X },
+                         { R.string.CTL_R1, R.string.CTL_R1_X }, { R.string.CTL_TRIGGERS, R.string.CTL_TRIGGERS_X },
+                         { R.string.CTL_START, R.string.CTL_START_X }, { R.string.CTL_SELECT, R.string.CTL_SELECT_X },
+                         { R.string.CTL_DPAD, R.string.CTL_DPAD_X }, { R.string.CTL_STICKS, R.string.CTL_STICKS_X },
+                         { R.string.CTL_QUIT, R.string.CTL_QUIT_X } };
+        for (int[] r : rows)
+            detailKv(getString(r[0]), getString(r[1]));
+        detailFooter(getString(R.string.CONTROLS_FOOTER), Theme.TEXT_FAINT);
+        body.addView(h, new FrameLayout.LayoutParams(MATCH, MATCH));
+        addHint("B", R.string.HINT_BACK, this::back);
     }
 
     // ---- ABOUT -------------------------------------------------------------------------------------------------
@@ -1945,7 +2496,7 @@ public class LauncherActivity extends Activity {
     private void refreshKeepingFocus() {
         String text = noteText;
         int kind = noteKind;
-        show(screen);
+        show(screen, 0);
         noteText = text;
         noteKind = kind;
         paintNote();
@@ -2045,6 +2596,9 @@ public class LauncherActivity extends Activity {
         }
         if (restart)
             endRunningGame();
+        boolean resume = pid != 0 && !restart;   // a live game brought back: its play session goes on
+        if (!resume)
+            GameStore.sessionStart(this, System.currentTimeMillis());
         Log.i(TAG, "launcher: play");
         Intent i = new Intent(this, ShellActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
         if (restart)
@@ -2064,6 +2618,7 @@ public class LauncherActivity extends Activity {
         history.clear();
         focusMemory.remove(Screen.HOME);
         show(Screen.HOME);
+        feedback.play(UiFeedback.Cue.DONE, host);
         setNote(getString(R.string.READY_TO_PLAY, title.isEmpty() ? new File(dir).getName() : title), NOTE_OK);
     }
 
@@ -2391,7 +2946,7 @@ public class LauncherActivity extends Activity {
             importReturn = history.pop();   // SOURCE: a failed import comes back to the choice of source
         else
             importReturn = screen == Screen.IMPORT || screen == null ? Screen.SOURCE : screen;
-        int i = focusables.indexOf(getCurrentFocus());
+        int i = focusables.indexOf(focused());
         if (i >= 0 && screen != null)
             focusMemory.put(screen, i);
         show(Screen.IMPORT);

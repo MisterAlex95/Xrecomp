@@ -110,26 +110,19 @@
     <string name="CANCEL_SUB">Stop and keep the current game</string>
 
     <!-- Home -->
-    <string name="HOME_MENU">Main menu</string>
     <string name="PLAY">Play</string>
     <string name="PLAY_SUB">Start the game</string>
     <string name="PLAY_SUB_RUNNING">Back to the running game</string>
     <string name="PLAY_SUB_UNAVAILABLE">Not available: %1$s</string>
-    <string name="PLAY_DETAIL">Starts the game from the folder below. In the game, press Back twice to quit.</string>
     <string name="PLAY_DETAIL_RUNNING">The game is already running: Play brings it back where you left it.</string>
-    <string name="PLAY_FOOTER">Saves stay in the app\'s internal storage, whatever the game folder.</string>
     <string name="NO_GAME_HEAD">No game yet</string>
     <string name="SETTINGS">Settings</string>
     <string name="SETTINGS_SUB_DEFAULT">Default settings</string>
-    <string name="SETTINGS_HEAD">Current settings</string>
     <string name="SETTINGS_FOOTER">Saved in %1$s and applied the next time the game starts. Lines you add there yourself are kept.</string>
     <string name="GAME_DATA">Game data</string>
-    <string name="GAME_DATA_HEAD">Where the game is</string>
-    <string name="GAME_DATA_TEXT">Change the game, or free the space an imported copy takes.</string>
     <string name="ABOUT">About</string>
     <string name="ABOUT_SUB">Version %1$s · licences</string>
     <string name="OPEN_DIRECTLY">Open the game directly next time</string>
-    <string name="OPEN_DIRECTLY_SHORT">Open directly</string>
     <string name="OPEN_DIRECTLY_ON">Next time, the game opens directly. Long-press the app icon › Launcher to come back here.</string>
     <string name="OPEN_DIRECTLY_OFF">Next time, this screen shows first.</string>
 
@@ -227,19 +220,12 @@
     <string name="PREPARE_TITLE">Preparing the game</string>
     <string name="PREPARE_CAPS">Made once, on this device</string>
     <string name="PREPARE_ESTIMATE">about %1$d–%2$d min</string>
-    <string name="PREPARE_SUB">%1$s · makes your game playable on this device</string>
-    <string name="PREPARE_SUB_FAILED">Failed (%1$s): see why, retry</string>
-    <string name="PREPARE_SUB_CANCELLED">Cancelled: Prepare carries on where it stopped</string>
-    <string name="PREPARE_SUB_INTERRUPTED">Interrupted: Prepare carries on where it stopped</string>
-    <string name="PREPARE_DETAIL">This app plays your game as native code, made from your own copy. It is made once, here on the device, in %1$s; then Play starts at once. You can leave the app meanwhile: the notification shows how far it is.</string>
-    <string name="PREPARE_FOOTER">Needs %1$s of free internal storage. Keep the device on its charger: compiling keeps every core busy.</string>
     <string name="PREPARE_NO_SPACE">Not enough internal storage to prepare the game: %1$s needed, %2$s free.</string>
     <string name="PREPARE_LOW_RAM">This device has %1$s of memory: preparing may be slow or fail (6 GB or more recommended).</string>
     <string name="PREPARE_START_FAILED">The preparation could not start: %1$s</string>
     <string name="PREPARE_STARTING">Starting…</string>
     <string name="PREPARE_KEEPS">You can leave the app: it carries on in the background.</string>
     <string name="PREPARE_ETA">about %1$s left</string>
-    <string name="PREPARE_ETA_LONG">About %1$s left. You can leave the app: it carries on in the background.</string>
     <string name="PREPARE_CANCEL_SUB">Stops now; what is done is kept for next time</string>
     <string name="PREPARE_CANCEL_CONFIRM">Press again to cancel the preparation.</string>
     <string name="PREPARE_CANCEL_BADGE">Press again</string>
@@ -248,7 +234,6 @@
     <string name="PREPARE_CANCELLED_TEXT">The preparation was cancelled. What was done is kept: Resume carries on from there.</string>
     <string name="PREPARE_INTERRUPTED">The preparation was interrupted (the system closed it). What was done is kept: Prepare carries on from there.</string>
     <string name="PREPARE_STEP_OF">Step %1$d of %2$d</string>
-    <string name="PREPARE_SHARE_HINT">Share log sends what happened (prepare.log) to you or a developer.</string>
     <string name="PREPARE_CODE_LINE">Code %1$s</string>
     <string name="PREPARE_HINT_KILLED">The system stopped the compiler twice (not enough memory, or Android\'s limit on background processes). Close other apps and retry.</string>
     <string name="PREPARE_HINT_NO_SPACE">Internal storage is full (%1$s free). Free some space, then retry: what was done is kept.</string>
@@ -287,4 +272,90 @@
     <string name="PREPARE_NOTIF_STEP">Step %1$d of %2$d: %3$s</string>
     <string name="PREPARE_NOTIF_DONE">Ready: open the app and press Play.</string>
     <string name="PREPARE_NOTIF_FAILED">The preparation failed (%1$s). Open the app to see why.</string>
+    <string name="PREPARE_STEP_PCT">this step %1$d%%</string>
+    <string name="PREPARE_ETA_BIG">About %1$s left</string>
+    <string name="PREPARE_ETA_UNKNOWN">Working out the time left…</string>
+    <string name="PREPARE_ETA_FAILED">Stopped on an error</string>
+    <string name="PREPARE_ETA_STOPPED">Paused</string>
+
+    <!-- Home (the console-style hero) -->
+    <string name="HOME_TITLE">Home</string>
+    <string name="HOME_TITLE_ID">Title ID %1$s</string>
+    <string name="CHIP_RUNNING">Running</string>
+    <string name="HOME_LEAD_READY">In the game, press Back twice to quit. Saves stay on this device.</string>
+    <string name="HOME_LEAD_PREPARE">Made once, here on the device, from your own copy: then Play starts at once.</string>
+    <string name="HOME_LEAD_PREPARING">Preparing your game. You can leave the app: it carries on in the background.</string>
+    <string name="HOME_LEAD_FAILED">The preparation stopped on an error. See why, then retry from where it stopped.</string>
+    <string name="CHOOSE_AGAIN">Choose the game again</string>
+    <string name="CHOOSE_GAME_SUB">A disc folder or a disc image</string>
+    <string name="PREPARE_SEE_WHY">See what failed</string>
+    <string name="HOME_SUB_PREPARE">Makes your game playable here</string>
+    <string name="HOME_SUB_PREPARING">Progress, or cancel</string>
+    <string name="HOME_SUB_FAILED">Then retry from where it stopped</string>
+    <string name="HOME_SUB_RESUME">Carries on where it stopped</string>
+    <string name="SOURCE_SHORT_COPY">copy</string>
+    <string name="SOURCE_SHORT_IN_PLACE">in place</string>
+    <string name="KV_LAST_PLAYED">Last played</string>
+    <string name="KV_PLAY_TIME">Play time</string>
+    <string name="KV_PREPARED">Prepared</string>
+    <string name="KV_PACK_SIZE">Pack size</string>
+    <string name="VAL_NEVER">Never</string>
+    <string name="VAL_NONE">—</string>
+    <string name="PLAYTIME_MIN">%1$d min</string>
+    <string name="PLAYTIME_H">%1$d h %2$s</string>
+
+    <!-- Settings › Launcher: UI sounds and vibration -->
+    <string name="UI_SOUND">Sounds</string>
+    <string name="UI_SOUND_SUMMARY">Short sounds when you move and select</string>
+    <string name="UI_SOUND_DETAIL">On: a soft tick when the selection moves or a value changes, and short sounds to select, go back, for an error and when the game is ready. Off: the launcher is silent. The game\'s own sound is not affected.</string>
+    <string name="UI_SOUND_ON">Launcher sounds on.</string>
+    <string name="UI_SOUND_OFF">Launcher sounds off.</string>
+    <string name="UI_HAPTICS">Vibration</string>
+    <string name="UI_HAPTICS_SUMMARY">A light buzz with each move and press</string>
+    <string name="UI_HAPTICS_DETAIL">On: the device gives a light buzz when the selection moves, a press, an error and when the game is ready. Android\'s own « touch feedback » setting must be on too. Off: no buzz from the launcher.</string>
+    <string name="UI_HAPTICS_ON">Vibration on.</string>
+    <string name="UI_HAPTICS_OFF">Vibration off.</string>
+    <string name="UI_FEEDBACK_FOOTER">Only the launcher\'s screens; saved at once.</string>
+    <string name="BOTTOM_SCREEN">Bottom screen</string>
+    <string name="BOTTOM_SCREEN_SUMMARY">What the second screen shows</string>
+    <string name="BOTTOM_SCREEN_DETAIL">Panel: the game\'s card and buttons here, and in the game the Xbox buttons the device lacks (Black, White, Back, Start) and a few tools. Black: the second screen stays black. Off: the app leaves it to the system.</string>
+    <string name="BOTTOM_SCREEN_SAVED">Bottom screen: %1$s.</string>
+    <string name="VAL_PANEL">Panel</string>
+    <string name="VAL_BLACK">Black</string>
+
+    <!-- Controls -->
+    <string name="CONTROLS">Controls</string>
+    <string name="CONTROLS_SUB">Your buttons</string>
+    <string name="CONTROLS_CAPS">In the game</string>
+    <string name="CONTROLS_HEAD">As an Xbox controller</string>
+    <string name="CONTROLS_FOOTER">The same for any gamepad Android sees: the game reads it as the first Xbox controller. Buttons are taken by position, as Android names them.</string>
+    <string name="PAD_L1">L1 · Black</string>
+    <string name="PAD_L2">L2 · LT</string>
+    <string name="PAD_R1">R1 · White</string>
+    <string name="PAD_R2">R2 · RT</string>
+    <string name="PAD_SELECT">Select · Back</string>
+    <string name="PAD_START">Start · Start</string>
+    <string name="PAD_DPAD">D-pad</string>
+    <string name="PAD_LSTICK">L stick · L3</string>
+    <string name="PAD_RSTICK">R stick · R3</string>
+    <string name="PAD_FACE">A B X Y</string>
+    <string name="PAD_SCREEN">Back twice: quit</string>
+    <string name="CTL_FACE">A B X Y</string>
+    <string name="CTL_FACE_X">A B X Y</string>
+    <string name="CTL_L1">L1</string>
+    <string name="CTL_L1_X">Black</string>
+    <string name="CTL_R1">R1</string>
+    <string name="CTL_R1_X">White</string>
+    <string name="CTL_TRIGGERS">L2 · R2</string>
+    <string name="CTL_TRIGGERS_X">Left · right trigger</string>
+    <string name="CTL_START">Start</string>
+    <string name="CTL_START_X">Start</string>
+    <string name="CTL_SELECT">Select</string>
+    <string name="CTL_SELECT_X">Back</string>
+    <string name="CTL_DPAD">D-pad, sticks</string>
+    <string name="CTL_DPAD_X">D-pad, thumbsticks</string>
+    <string name="CTL_STICKS">L3 · R3</string>
+    <string name="CTL_STICKS_X">Thumbstick buttons (press a stick)</string>
+    <string name="CTL_QUIT">Back ◁ twice</string>
+    <string name="CTL_QUIT_X">Quit the game</string>
 </resources>

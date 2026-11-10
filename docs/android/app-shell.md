@@ -16,7 +16,7 @@ The CI builds it on every push to `main`. The latest one is always the prereleas
 
 | Piece | What |
 |---|---|
-| `LauncherActivity` | The launcher entry ([The launcher](#the-launcher)): welcome, game choice and import, home (Play, Settings, Game data, About), in its own process `:launcher`. `Theme.java` and `Widgets.java` draw it; `RecompConfig.java` writes its settings to `recomp.cfg`. With a valid game and « Open the game directly next time » on, it starts `ShellActivity` at once and shows nothing. |
+| `LauncherActivity` | The launcher entry ([The launcher](#the-launcher)): welcome, game choice and import, home (the game's hero with Play / Prepare, then Settings, Controls, Game data, About), in its own process `:launcher`. `Theme.java` and `Widgets.java` draw it, `TitleArt.java` decodes the game's title image, `UiFeedback.java` plays its sounds and haptics; `RecompConfig.java` writes its settings to `recomp.cfg`. With a valid game and « Open the game directly next time » on, it starts `ShellActivity` at once and shows nothing. |
 | `ShellActivity` | Subclass of SDL's `SDLActivity`, which loads `libSDL2.so` and then `libmain.so`. SDL's Java side is compiled from the pinned sources (`$SDL2_SRC/android-project`), not copied here. Not exported: started by the launcher, after it sets `RECOMP_GAME_DIR`. |
 | `libxba_import.so` | The launcher's ISO import: `xiso_jni.c` around the static `xiso` target (`src/xiso`). Loaded only in `:launcher`. |
 | `libmain.so` | `shell_main.c` + the **whole** toolkit (`--whole-archive`) + the title, when one is linked (see [A title in the shell](#a-title-in-the-shell)). Loading it on a device proves that bionic resolves every symbol the runtime uses. Four symbols that a title provides are weak stubs in `shell_main.c`, and so is the title's hook `recomp_title_main`. |
@@ -140,9 +140,10 @@ One activity, a small state machine of screens (`LauncherActivity.Screen`) with 
 | Choose your game (source) | Two large cards: **Game folder** (the extracted disc; read in place with All files access, otherwise copied; a badge says which) and **Disc image (ISO)** (extracted once; a badge gives the free space). | Welcome, Game data › Change game, Play with no usable game, the « Change game » shortcut, `NO_GAME_DATA`. |
 | Read the game in place? | Only without All files access: the explanation (in place: no copy, fine for a 4 GB disc, only that folder is read; copy: as much free space again, a few minutes, removed with the app) and two cards, **Allow all files access** (recommended; opens the system page, then the folder picker) and **Copy into the app** (the folder picker). | Game folder. |
 | Preparing the game (import) | A progress ring (percent, ticks), the step (« Checking », « Copying », « Extracting »), « X of Y », the current file, the free space, **Cancel**. The screen stays on; B cancels too. | A picked folder or image. |
-| Home | The game's title (the XBE certificate's name from the folder or the image, else the folder's name) and a status chip (**Ready**, **Game data missing**, **No file access**, **Wrong game**, **No game**). Menu: **Play**, **Settings**, **Game data**, **About**, each with a one-line summary; a detail panel on the right for the focused item; « Open the game directly next time » at the bottom left. | A finished import (Play focused), every start when « Open directly » is off, the « Launcher » shortcut, B from the screens above. |
+| Home | A console-style home (the top bar only says « Home », so the title shows once). The hero: the game's [title image](#title-image) (or a monogram), its title ID, its title (the XBE certificate's name, else the folder's name), a status chip (**Ready**, **Needs preparing**, **Preparing**, **Prepare failed**, **Game data missing**, **No file access**, **Wrong game**, **No game**; plus **Running** when the game runs in the background), one lead line, a few facts and one big button. Facts: **Last played**, **Play time**, then **Prepared** (pack.json's `built_at`) and **Pack size** when a pack is there, else the game's size; while a Prepare is needed: how long it takes, the free internal storage, the memory; while it runs: a bar and « Compile · 42 % · about 12 min left »; after a failure: the code. The big button: **Play**, **Prepare**, **Preparing…** (opens its screen), **See what failed**, or **Choose a game** / **Choose the game again**. Under the hero, a row of four smaller tiles: **Settings**, **Controls**, **Game data**, **About**. | A finished import (Play focused), every start when « Open directly » is off, the « Launcher » shortcut, B from the screens above. |
 | Settings | The [options](#settings) as rows, left / right (or A) to change, a detail panel with what the option does, its choices and its line in `recomp.cfg`. | Home. |
-| Game data | Folder, source (read in place, imported copy, set in `recomp.cfg`), size (counted in the background), free space; **Change game** (another folder or image, or the same one again to re-import); **Delete the imported copy** (only when the game is the app's own `files/game/`; press A twice within 5 s; saves are kept; then the choice is forgotten). | Home. |
+| Controls | A drawn handheld with, next to each control, the Xbox controller button the game gets, and the same as a table: A B X Y as they are, L1 = **Black**, R1 = **White**, L2 / R2 = the triggers, Start = Start, Select = **Back**, D-pad and sticks as they are, pressing a stick = its thumbstick button (`src/input/xinput_device.c`, SDL's game controller mapping), and Android's Back pressed twice quits the game (`shell_main.c`, [Quit](#quit)). | Home. |
+| Game data | The raw folder path (only here, not on Home), source (read in place, imported copy, set in `recomp.cfg`), size (counted in the background), free space; **Change game** (another folder or image, or the same one again to re-import); **Delete the imported copy** (only when the game is the app's own `files/game/`; press A twice within 5 s; saves are kept; then the choice is forgotten). | Home. |
 | About | Version (`-PxbaVersion`), build (`-PxbaVersionCode`), app id, the game check (the first digits of `-PxbaXbeSha256`, or none), licences (xboxrecomp MIT, SDL2 zlib), and that no game data is included. | Home. |
 
 Messages and errors (`NOT_A_GAME_FOLDER`, `WRONG_GAME`, `NOT_ENOUGH_SPACE`, « Import canceled », « Saved », ...) go to
@@ -182,12 +183,52 @@ Home with Play focused and « TITLE is ready » in the note, instead of starting
 | Left / right on a setting | Previous / next value. |
 | L1 / R1 | Settings: previous / next section. |
 | Y | Settings: restore the defaults. |
-| X | Home: « Open the game directly next time » on / off. |
 | Start | Home: Play. |
-| Touch | Tap an item to select it, the arrows of a setting to step it, a button hint to do what it says, the switch at the bottom left to toggle « Open directly ». After a touch, the first D-pad or A press brings the focus back. |
+| Touch | Tap an item to select it, the arrows of a setting to step it, a button hint to do what it says. After a touch, the first D-pad or A press brings the focus back. |
 
-A and B are taken on release, once, so a held button does not repeat. The focus is a green outline with a soft glow
-and gradient; dimmed rows (Play without a usable game) stay focusable so that pressing them says why.
+A and B are taken on release, once, so a held button does not repeat. Dimmed rows (Play without a usable game) stay
+focusable so that pressing them says why. « Open the game directly next time » is in Settings only (the X toggle on
+Home is gone).
+
+### Look, motion and sound
+
+- **Focus**: one highlight for the screen (`Widgets.Glide`: a green outline with a soft glow, a light gradient and an
+  accent bar on the left) glides from the row it leaves to the row it reaches in 150 ms; the focused row's title turns
+  brighter and the row grows to 102 %.
+- **Screens** fade in and slide in from the side they come from (forward from the right, back from the left), 150 ms.
+- **Settings**: a value pulses when it changes (160 ms). A setting row keeps the width of its widest choice for the
+  value, and a title too long for what is left ends in « … » (measured with the row's own paint); the detail panel
+  shows it in full.
+- **Sounds and haptics** (`UiFeedback`): five short sounds, made with `soundcraft-cli` from our own synth recipes
+  (`tools/android/ui_sounds.sh`, WAVs in `res/raw`, 16-bit 22.05 kHz, about 115 kB in all): **move** (focus or a
+  value), **select**, **back**, **error** (an error note) and **done** (a game set up, a Prepare finished), played
+  through SoundPool at a low volume, each with a haptic (`performHapticFeedback`: clock tick, keyboard tap, reject,
+  confirm; Android's own « touch feedback » setting applies). Settings › Launcher › **Sounds** and **Vibration** turn
+  them off (`game` SharedPreferences, `ui_sound`, `ui_haptics`).
+- **Preparing screen**: one big overall percentage in the ring, the step and its own percentage smaller under it, the
+  time left prominent in the panel. When the Prepare ends: Home with Play focused, the « done » sound and haptic. After
+  two minutes without input it dims (OLED burn-in): a black layer with the percentage and the step in grey, moved a
+  little each minute, and the window's brightness lowered; any key or touch wakes it and does nothing else.
+
+### Title image
+
+Home shows the game's own title image: the XBE's `$$XTIMAGE` section, an XPR0 resource file holding one texture
+(usually 128 x 128 DXT1), decoded in Java on the device (`TitleArt`: DXT1 / DXT3 / DXT5, and swizzled or linear
+A8R8G8B8 / X8R8G8B8 / R5G6B5) and cached as `<internal files>/art/<TITLEID>.png`. Formats from public documentation
+(xboxdevwiki « Xbe » and « XPR ») and `src/d3d` (format codes, swizzle). The backdrop's glow takes the image's
+colour. An XBE without one (or in a format not read) gets a monogram: the title's initials on a gradient whose hue
+comes from the title ID. Nothing of a game is in the APK or the repo; the unit test builds its XBE and XPR0 itself.
+
+### Play time
+
+« Last played » and « Play time » are kept simple: a session starts when the launcher starts `ShellActivity` (not when
+it only brings a running game back) and ends when the launcher shows again with the game no longer running; a session
+the launcher never saw end counts for at most 6 hours (`game` SharedPreferences, `last_played`, `play_ms`,
+`session_start`).
+
+`LauncherScreensTest` renders every screen and Home state in English and French at 1280 x 720 and 1920 x 1080, each
+with its focused row, to `build/screenshots/ui-<state>-<en|fr>-<720|1080>.png` (`--target app-unit-tests-out`);
+`TitleArtTest` checks the XBE section, the XPR0 container and the texel decoders on blobs it builds.
 
 ### Settings
 
@@ -198,6 +239,9 @@ exist in the runtime and mean something to a player are offered:
 | Row | Choices (default first or marked) | Line in `recomp.cfg` |
 |---|---|---|
 | Open the game directly next time | Off (default), On | none: a launcher preference (`game` SharedPreferences, `auto_start`) |
+| Sounds | On (default), Off | none: `ui_sound` |
+| Vibration | On (default), Off | none: `ui_haptics` |
+| Bottom screen (only with a second display) | Panel (default), Black, Off | none: [Dual screen](#dual-screen-ayn-thor), `GameStore.bottomScreen` |
 | Graphics › Vertical sync | On (default), Off | `RECOMP_PRESENT_VSYNC=0` when off |
 | Graphics › Texture filtering | Sharp (default), Smooth, Anisotropic 8×, Anisotropic 16× | `RECOMP_TEX_BILINEAR=1`, `RECOMP_TEX_ANISO=8` / `16` |
 | Audio › 3D audio (HRTF) | On (default), Off | `RECOMP_APU_HRTF=0` when off |
@@ -316,8 +360,8 @@ Use the Thor's gamepad for everything unless a step says touch.
    from …` lists them and `[FBWIN] … vsync off`. Back in Settings, Y: the lines are gone.
 8. Hand-written lines survive: `adb shell "echo RECOMP_WAIT_LOG=1 >> /sdcard/Android/data/fr.adserver.xboxrecomp.shell/files/recomp.cfg"`,
    change a setting, `cat` again: `RECOMP_WAIT_LOG=1` is still there.
-9. Home, X (or tap the switch at the bottom left): « Open the game directly next time » on; quit and start the app:
-   the game starts directly. Long-press the icon › « Launcher »: Home. Turn it off again with X.
+9. Settings › « Open the game directly next time » on; quit and start the app: the game starts directly.
+   Long-press the icon › « Launcher »: Home. Turn it off again in Settings.
 10. Long-press the app icon › « Change game »: Choose your game, the note says the running game will close (if it
     runs). Pick an empty folder: `NOT_A_GAME_FOLDER` in the note, nothing changed; B goes to Home.
 11. Folder gone: rename the folder of step 4 with a file manager, start the app. Expected: Home, chip « Game data
@@ -551,15 +595,15 @@ logcat at each show: `shell: companion panel on display 2 "…" … (not focusab
 
 ### In the launcher (wiring)
 
-`LauncherCompanion` does it in a few calls; LauncherActivity is being reworked elsewhere, so the wiring lands with that
-change. In `LauncherActivity`:
+`LauncherCompanion` does it in a few calls, wired in `LauncherActivity` like this (Play goes through the launcher's own
+`onPlay`, so a Prepare still comes first; the Home call passes the hero's chip):
 
 ```java
 private LauncherCompanion companion;
 
 // onCreate, after buildStage() (not on the early launchShell() return):
 companion = new LauncherCompanion(this, new LauncherPanel.Actions() {
-    @Override public void play() { launchShell(false); }
+    @Override public void play() { onPlay(); }
     @Override public void settings() { go(Screen.SETTINGS); }
     @Override public void changeGame() { go(Screen.SOURCE); }
 });
@@ -568,7 +612,7 @@ companion = new LauncherCompanion(this, new LauncherPanel.Actions() {
 @Override protected void onStop() { if (companion != null) companion.stop(); super.onStop(); }
 
 // where Home is built (the chip's text and colour, Play allowed or not):
-companion.home(gameTitle(dir), chipText, chipColor, !prepareBlocksPlay());
+companion.home(title, status.label(), status.color(), st == State.READY && !preparing);
 // where the Preparing screen is built:
 companion.preparing(titleId(), gameTitle(dir));
 ```
