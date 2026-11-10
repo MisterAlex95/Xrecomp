@@ -131,6 +131,55 @@ final class GameStore {
         return tmp.renameTo(f);
     }
 
+    /** The launcher's UI sounds and haptics (Settings › Launcher), on by default. */
+    static final String KEY_UI_SOUND = "ui_sound", KEY_UI_HAPTICS = "ui_haptics";
+
+    static boolean uiSound(Context c) {
+        return prefs(c).getBoolean(KEY_UI_SOUND, true);
+    }
+
+    static boolean uiHaptics(Context c) {
+        return prefs(c).getBoolean(KEY_UI_HAPTICS, true);
+    }
+
+    static boolean setUiSound(Context c, boolean on) {
+        return prefs(c).edit().putBoolean(KEY_UI_SOUND, on).commit();
+    }
+
+    static boolean setUiHaptics(Context c, boolean on) {
+        return prefs(c).edit().putBoolean(KEY_UI_HAPTICS, on).commit();
+    }
+
+    // ---- Play time (Home's « Last played » and « Play time »), kept simple ----------------------------------------
+    // A session starts when the launcher starts ShellActivity and ends when the launcher shows again with the game no
+    // longer running. A session left open longer than SESSION_MAX (the launcher never came back: the app was swiped
+    // away or the device rebooted) counts for SESSION_MAX.
+    static final String KEY_LAST_PLAYED = "last_played", KEY_PLAY_MS = "play_ms", KEY_SESSION_START = "session_start";
+    static final long SESSION_MAX = 6 * 3600_000L;
+
+    /** When the game was last started (System.currentTimeMillis), 0 if never. */
+    static long lastPlayed(Context c) {
+        return prefs(c).getLong(KEY_LAST_PLAYED, 0);
+    }
+
+    /** Total play time in ms, closed sessions only. */
+    static long playTime(Context c) {
+        return prefs(c).getLong(KEY_PLAY_MS, 0);
+    }
+
+    static void sessionStart(Context c, long now) {
+        prefs(c).edit().putLong(KEY_LAST_PLAYED, now).putLong(KEY_SESSION_START, now).commit();
+    }
+
+    /** Closes an open session (adds its length to the play time); nothing when none is open. */
+    static void sessionEnd(Context c, long now) {
+        long start = prefs(c).getLong(KEY_SESSION_START, 0);
+        if (start <= 0)
+            return;
+        long d = Math.max(0, Math.min(SESSION_MAX, now - start));
+        prefs(c).edit().putLong(KEY_PLAY_MS, playTime(c) + d).remove(KEY_SESSION_START).commit();
+    }
+
     static File externalFilesDir(Context c) {
         return c.getExternalFilesDir(null);
     }

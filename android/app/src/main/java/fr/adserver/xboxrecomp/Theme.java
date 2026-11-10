@@ -26,6 +26,8 @@ final class Theme {
     static final int LINE = 0xFF27332D;
     static final int LINE_SOFT = 0x6627332D;
     static final int TEXT = 0xFFF3EEE4;
+    /** A focused row's title: a step brighter than TEXT. */
+    static final int TEXT_BRIGHT = 0xFFFFFFFF;
     static final int TEXT_DIM = 0xFFA9AFA6;
     static final int TEXT_FAINT = 0xFF6C746D;
     static final int ACCENT = 0xFF4FE38C;
@@ -35,6 +37,11 @@ final class Theme {
     /** The face of a controller button glyph (A, B, ...), and the letter on it. */
     static final int GLYPH_FACE = 0xFFEDE6D8;
     static final int GLYPH_INK = 0xFF0C110F;
+
+    /** A colour from hue (degrees), saturation and value (0..1), opaque. */
+    static int hsv(float h, float s, float v) {
+        return Color.HSVToColor(new float[] { ((h % 360) + 360) % 360, s, v });
+    }
 
     static int alpha(int color, float a) {
         int al = Math.max(0, Math.min(255, Math.round(Color.alpha(color) * a)));
@@ -53,6 +60,21 @@ final class Theme {
     static final int TOP_BAR_H = 112, BOTTOM_BAR_H = 92, NOTE_H = 64;
     static final int GAP = 40, RADIUS = 22, ROW_RADIUS = 18;
     static final int ROW_H = 112, ROW_H_SMALL = 96, CARD_H = 230;
+    /** Home: the hero's art tile, its primary button, the secondary row's tiles. */
+    static final int ART = 400, PRIMARY_W = 660, PRIMARY_H = 128, TILE_H = 128;
+
+    // ---- Motion -------------------------------------------------------------------------------------------------
+    /** A new screen fades in and slides in from the side it comes from (ANIM_SLIDE design pixels). */
+    static final long ANIM_SCREEN_MS = 150;
+    static final int ANIM_SLIDE = 40;
+    /** The focus highlight glides from the row it leaves to the row it reaches. */
+    static final long ANIM_GLIDE_MS = 150;
+    /** A row's own focus change (title brightness, scale). */
+    static final long ANIM_FOCUS_MS = 140;
+    /** A setting's value pulses when it changes. */
+    static final long ANIM_TICK_MS = 160;
+    /** The focused row is drawn this much bigger. */
+    static final float FOCUS_SCALE = 1.02f;
 
     /** A text view in design pixels. */
     static TextView text(Context c, float size, Typeface face, int color) {

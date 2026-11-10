@@ -107,26 +107,19 @@
     <string name="CANCEL_SUB">Arrêter et garder le jeu actuel</string>
 
     <!-- Accueil -->
-    <string name="HOME_MENU">Menu principal</string>
     <string name="PLAY">Jouer</string>
     <string name="PLAY_SUB">Lancer le jeu</string>
     <string name="PLAY_SUB_RUNNING">Revenir au jeu en cours</string>
     <string name="PLAY_SUB_UNAVAILABLE">Indisponible : %1$s</string>
-    <string name="PLAY_DETAIL">Lance le jeu depuis le dossier ci-dessous. En jeu, appuyez deux fois sur Retour pour quitter.</string>
     <string name="PLAY_DETAIL_RUNNING">Le jeu est déjà lancé : Jouer le ramène là où vous l\'avez laissé.</string>
-    <string name="PLAY_FOOTER">Les sauvegardes restent dans le stockage interne de l\'application, quel que soit le dossier du jeu.</string>
     <string name="NO_GAME_HEAD">Pas encore de jeu</string>
     <string name="SETTINGS">Réglages</string>
     <string name="SETTINGS_SUB_DEFAULT">Réglages par défaut</string>
-    <string name="SETTINGS_HEAD">Réglages actuels</string>
     <string name="SETTINGS_FOOTER">Enregistrés dans %1$s et appliqués au prochain lancement du jeu. Les lignes que vous y ajoutez vous-même sont conservées.</string>
     <string name="GAME_DATA">Données du jeu</string>
-    <string name="GAME_DATA_HEAD">Où est le jeu</string>
-    <string name="GAME_DATA_TEXT">Changer de jeu, ou libérer l\'espace d\'une copie importée.</string>
     <string name="ABOUT">À propos</string>
     <string name="ABOUT_SUB">Version %1$s · licences</string>
     <string name="OPEN_DIRECTLY">Ouvrir directement le jeu la prochaine fois</string>
-    <string name="OPEN_DIRECTLY_SHORT">Ouvrir directement</string>
     <string name="OPEN_DIRECTLY_ON">La prochaine fois, le jeu s\'ouvre directement. Appui long sur l\'icône › Lanceur pour revenir ici.</string>
     <string name="OPEN_DIRECTLY_OFF">La prochaine fois, cet écran s\'affiche d\'abord.</string>
 
@@ -219,19 +212,12 @@
     <string name="PREPARE_TITLE">Préparation du jeu</string>
     <string name="PREPARE_CAPS">Une seule fois, sur cet appareil</string>
     <string name="PREPARE_ESTIMATE">environ %1$d à %2$d min</string>
-    <string name="PREPARE_SUB">%1$s · rend votre jeu jouable sur cet appareil</string>
-    <string name="PREPARE_SUB_FAILED">Échec (%1$s) : voir pourquoi, réessayer</string>
-    <string name="PREPARE_SUB_CANCELLED">Annulée : Préparer reprend où elle s\'est arrêtée</string>
-    <string name="PREPARE_SUB_INTERRUPTED">Interrompue : Préparer reprend où elle s\'est arrêtée</string>
-    <string name="PREPARE_DETAIL">Cette application joue votre jeu en code natif, fabriqué à partir de votre propre copie. Il est fabriqué une seule fois, ici sur l\'appareil, en %1$s ; ensuite Jouer démarre tout de suite. Vous pouvez quitter l\'application pendant ce temps : la notification indique l\'avancement.</string>
-    <string name="PREPARE_FOOTER">Il faut %1$s libres dans le stockage interne. Laissez l\'appareil sur son chargeur : la compilation occupe tous les cœurs.</string>
     <string name="PREPARE_NO_SPACE">Pas assez de stockage interne pour préparer le jeu : il faut %1$s, %2$s sont libres.</string>
     <string name="PREPARE_LOW_RAM">Cet appareil a %1$s de mémoire : la préparation peut être lente ou échouer (6 Go ou plus recommandés).</string>
     <string name="PREPARE_START_FAILED">La préparation n\'a pas pu démarrer : %1$s</string>
     <string name="PREPARE_STARTING">Démarrage…</string>
     <string name="PREPARE_KEEPS">Vous pouvez quitter l\'application : elle continue en arrière-plan.</string>
     <string name="PREPARE_ETA">encore %1$s environ</string>
-    <string name="PREPARE_ETA_LONG">Encore %1$s environ. Vous pouvez quitter l\'application : elle continue en arrière-plan.</string>
     <string name="PREPARE_CANCEL_SUB">S\'arrête maintenant ; ce qui est fait est gardé pour la prochaine fois</string>
     <string name="PREPARE_CANCEL_CONFIRM">Appuyez encore pour annuler la préparation.</string>
     <string name="PREPARE_CANCEL_BADGE">Appuyez encore</string>
@@ -240,7 +226,6 @@
     <string name="PREPARE_CANCELLED_TEXT">La préparation a été annulée. Ce qui a été fait est gardé : Reprendre continue à partir de là.</string>
     <string name="PREPARE_INTERRUPTED">La préparation a été interrompue (le système l\'a fermée). Ce qui a été fait est gardé : Préparer continue à partir de là.</string>
     <string name="PREPARE_STEP_OF">Étape %1$d sur %2$d</string>
-    <string name="PREPARE_SHARE_HINT">Partager le journal envoie ce qui s\'est passé (prepare.log) à vous ou à un développeur.</string>
     <string name="PREPARE_CODE_LINE">Code %1$s</string>
     <string name="PREPARE_HINT_KILLED">Le système a arrêté le compilateur deux fois (pas assez de mémoire, ou la limite d\'Android sur les processus en arrière-plan). Fermez les autres applications et réessayez.</string>
     <string name="PREPARE_HINT_NO_SPACE">Le stockage interne est plein (%1$s libres). Libérez de la place, puis réessayez : ce qui a été fait est gardé.</string>
@@ -279,4 +264,90 @@
     <string name="PREPARE_NOTIF_STEP">Étape %1$d sur %2$d : %3$s</string>
     <string name="PREPARE_NOTIF_DONE">Prêt : ouvrez l\'application et appuyez sur Jouer.</string>
     <string name="PREPARE_NOTIF_FAILED">La préparation a échoué (%1$s). Ouvrez l\'application pour voir pourquoi.</string>
+    <string name="PREPARE_STEP_PCT">cette étape %1$d %%</string>
+    <string name="PREPARE_ETA_BIG">Encore %1$s environ</string>
+    <string name="PREPARE_ETA_UNKNOWN">Calcul du temps restant…</string>
+    <string name="PREPARE_ETA_FAILED">Arrêtée sur une erreur</string>
+    <string name="PREPARE_ETA_STOPPED">En pause</string>
+
+    <!-- Accueil (le héros façon console) -->
+    <string name="HOME_TITLE">Accueil</string>
+    <string name="HOME_TITLE_ID">ID du titre %1$s</string>
+    <string name="CHIP_RUNNING">En cours</string>
+    <string name="HOME_LEAD_READY">En jeu, appuyez deux fois sur Retour pour quitter. Les sauvegardes restent sur l\'appareil.</string>
+    <string name="HOME_LEAD_PREPARE">Préparé une fois, ici sur l\'appareil, à partir de votre copie : ensuite Jouer démarre tout de suite.</string>
+    <string name="HOME_LEAD_PREPARING">Préparation de votre jeu. Vous pouvez quitter l\'application : elle continue en arrière-plan.</string>
+    <string name="HOME_LEAD_FAILED">La préparation s\'est arrêtée sur une erreur. Voyez pourquoi, puis reprenez là où elle s\'est arrêtée.</string>
+    <string name="CHOOSE_AGAIN">Choisir à nouveau le jeu</string>
+    <string name="CHOOSE_GAME_SUB">Dossier du disque ou image disque</string>
+    <string name="PREPARE_SEE_WHY">Voir l\'erreur</string>
+    <string name="HOME_SUB_PREPARE">Rend votre jeu jouable ici</string>
+    <string name="HOME_SUB_PREPARING">Progression, ou annuler</string>
+    <string name="HOME_SUB_FAILED">Puis reprendre là où elle s\'est arrêtée</string>
+    <string name="HOME_SUB_RESUME">Reprend là où elle s\'est arrêtée</string>
+    <string name="SOURCE_SHORT_COPY">copie</string>
+    <string name="SOURCE_SHORT_IN_PLACE">sur place</string>
+    <string name="KV_LAST_PLAYED">Dernière partie</string>
+    <string name="KV_PLAY_TIME">Temps de jeu</string>
+    <string name="KV_PREPARED">Préparé le</string>
+    <string name="KV_PACK_SIZE">Taille du pack</string>
+    <string name="VAL_NEVER">Jamais</string>
+    <string name="VAL_NONE">—</string>
+    <string name="PLAYTIME_MIN">%1$d min</string>
+    <string name="PLAYTIME_H">%1$d h %2$s</string>
+
+    <!-- Réglages › Lanceur : sons et vibration -->
+    <string name="UI_SOUND">Sons</string>
+    <string name="UI_SOUND_SUMMARY">De courts sons quand vous naviguez et choisissez</string>
+    <string name="UI_SOUND_DETAIL">Activé : un léger tic quand la sélection bouge ou qu\'une valeur change, et de courts sons pour choisir, revenir, signaler une erreur et quand le jeu est prêt. Désactivé : le lanceur est muet. Le son du jeu n\'est pas concerné.</string>
+    <string name="UI_SOUND_ON">Sons du lanceur activés.</string>
+    <string name="UI_SOUND_OFF">Sons du lanceur désactivés.</string>
+    <string name="UI_HAPTICS">Vibration</string>
+    <string name="UI_HAPTICS_SUMMARY">Une légère vibration à chaque mouvement et appui</string>
+    <string name="UI_HAPTICS_DETAIL">Activé : l\'appareil vibre légèrement quand la sélection bouge, à un appui, à une erreur et quand le jeu est prêt. Le réglage Android « retour tactile » doit aussi être activé. Désactivé : le lanceur ne vibre pas.</string>
+    <string name="UI_HAPTICS_ON">Vibration activée.</string>
+    <string name="UI_HAPTICS_OFF">Vibration désactivée.</string>
+    <string name="UI_FEEDBACK_FOOTER">Seulement les écrans du lanceur ; enregistré tout de suite.</string>
+    <string name="BOTTOM_SCREEN">Écran du bas</string>
+    <string name="BOTTOM_SCREEN_SUMMARY">Ce qu\'affiche le second écran</string>
+    <string name="BOTTOM_SCREEN_DETAIL">Panneau : la carte du jeu et ses boutons, et en jeu les boutons Xbox absents de l\'appareil (Noir, Blanc, Back, Start) et quelques outils. Noir : le second écran reste noir. Désactivé : l\'application le laisse au système.</string>
+    <string name="BOTTOM_SCREEN_SAVED">Écran du bas : %1$s.</string>
+    <string name="VAL_PANEL">Panneau</string>
+    <string name="VAL_BLACK">Noir</string>
+
+    <!-- Commandes -->
+    <string name="CONTROLS">Commandes</string>
+    <string name="CONTROLS_SUB">Vos boutons</string>
+    <string name="CONTROLS_CAPS">Dans le jeu</string>
+    <string name="CONTROLS_HEAD">Comme une manette Xbox</string>
+    <string name="CONTROLS_FOOTER">Pareil pour toute manette vue par Android : le jeu la lit comme la première manette Xbox. Les boutons sont pris par position, tels qu\'Android les nomme.</string>
+    <string name="PAD_L1">L1 · Noir</string>
+    <string name="PAD_L2">L2 · LT</string>
+    <string name="PAD_R1">R1 · Blanc</string>
+    <string name="PAD_R2">R2 · RT</string>
+    <string name="PAD_SELECT">Select · Back</string>
+    <string name="PAD_START">Start · Start</string>
+    <string name="PAD_DPAD">Croix</string>
+    <string name="PAD_LSTICK">Stick G · L3</string>
+    <string name="PAD_RSTICK">Stick D · R3</string>
+    <string name="PAD_FACE">A B X Y</string>
+    <string name="PAD_SCREEN">Retour deux fois : quitter</string>
+    <string name="CTL_FACE">A B X Y</string>
+    <string name="CTL_FACE_X">A B X Y</string>
+    <string name="CTL_L1">L1</string>
+    <string name="CTL_L1_X">Noir (Black)</string>
+    <string name="CTL_R1">R1</string>
+    <string name="CTL_R1_X">Blanc (White)</string>
+    <string name="CTL_TRIGGERS">L2 · R2</string>
+    <string name="CTL_TRIGGERS_X">Gâchettes G · D</string>
+    <string name="CTL_START">Start</string>
+    <string name="CTL_START_X">Start</string>
+    <string name="CTL_SELECT">Select</string>
+    <string name="CTL_SELECT_X">Back</string>
+    <string name="CTL_DPAD">Croix, sticks</string>
+    <string name="CTL_DPAD_X">Croix, sticks</string>
+    <string name="CTL_STICKS">L3 · R3</string>
+    <string name="CTL_STICKS_X">Boutons des sticks (appui)</string>
+    <string name="CTL_QUIT">Retour ◁ deux fois</string>
+    <string name="CTL_QUIT_X">Quitter le jeu</string>
 </resources>

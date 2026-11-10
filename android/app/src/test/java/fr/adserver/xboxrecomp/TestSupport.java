@@ -51,6 +51,90 @@ final class TestSupport {
         return b;
     }
 
+    /**
+     * A minimal XBE as xbe() with one section, $$XTIMAGE, holding image (an XPR0 built by xpr0()): headers up to
+     * 0x400 (section header at 0x300, its name at 0x340), the section's bytes from 0x400. Ours, no game content.
+     */
+    static byte[] xbeWithImage(int titleId, String name, byte[] image) {
+        byte[] head = xbe(titleId, name);
+        byte[] b = new byte[0x400 + image.length];
+        System.arraycopy(head, 0, b, 0, head.length);
+        le32(b, 0x108, 0x400);              // size of headers
+        le32(b, 0x11c, 1);                  // one section
+        le32(b, 0x120, 0x10300);            // section headers at base + 0x300
+        le32(b, 0x300 + 0x0c, 0x400);       // raw address
+        le32(b, 0x300 + 0x10, image.length);
+        le32(b, 0x300 + 0x14, 0x10340);     // name address
+        byte[] n = TitleArt.SECTION.getBytes(StandardCharsets.US_ASCII);
+        System.arraycopy(n, 0, b, 0x340, n.length);
+        System.arraycopy(image, 0, b, 0x400, image.length);
+        return b;
+    }
+
+    /** An XPR0 file with one texture: format code fmt, w x h (powers of two), data placed after a 2048-byte header. */
+    static byte[] xpr0(int fmt, int w, int h, byte[] data) {
+        int hdr = 0x800;
+        byte[] b = new byte[hdr + data.length];
+        java.util.Arrays.fill(b, 12, hdr, (byte)0xAD);
+        b[0] = 'X';
+        b[1] = 'P';
+        b[2] = 'R';
+        b[3] = '0';
+        le32(b, 4, b.length);
+        le32(b, 8, hdr);
+        le32(b, 12, 0x00040001);            // a texture, one reference
+        le32(b, 16, 0);                     // its data: right after the header
+        le32(b, 20, 0);
+        le32(b, 24, 0x29 | fmt << 8 | 1 << 16 | Integer.numberOfTrailingZeros(w) << 20
+                    | Integer.numberOfTrailingZeros(h) << 24);
+        le32(b, 28, 0);
+        le32(b, 32, 0xFFFFFFFF);
+        System.arraycopy(data, 0, b, hdr, data.length);
+        return b;
+    }
+
+    static int rgb565(int r, int g, int b) {
+        return (r >> 3) << 11 | (g >> 2) << 5 | (b >> 3);
+    }
+
+    /**
+     * A 128 x 128 DXT1 picture made here: concentric rings over a hue sweep, so the art and its tint are visible in
+     * the screenshots.
+     */
+    static byte[] dxt1Picture() {
+        int n = 32;
+        byte[] d = new byte[n * n * 8];
+        for (int by = 0; by < n; by++) {
+            for (int bx = 0; bx < n; bx++) {
+                float hue = 190 + (bx + by) * 1.6f;
+                int c0 = android.graphics.Color.HSVToColor(new float[] { hue % 360, 0.75f, 0.95f });
+                int c1 = android.graphics.Color.HSVToColor(new float[] { (hue + 50) % 360, 0.85f, 0.22f });
+                int a = rgb565(c0 >> 16 & 0xff, c0 >> 8 & 0xff, c0 & 0xff);
+                int z = rgb565(c1 >> 16 & 0xff, c1 >> 8 & 0xff, c1 & 0xff);
+                if (a <= z) {   // keep the four-colour mode
+                    int t = a;
+                    a = z;
+                    z = t;
+                }
+                int o = (by * n + bx) * 8;
+                d[o] = (byte)a;
+                d[o + 1] = (byte)(a >> 8);
+                d[o + 2] = (byte)z;
+                d[o + 3] = (byte)(z >> 8);
+                int idx = 0;
+                for (int i = 0; i < 16; i++) {
+                    float x = bx * 4 + (i & 3) - 64, y = by * 4 + (i >> 2) - 64;
+                    double r = Math.sqrt(x * x + y * y);
+                    int band = (int)(r / 6) % 4;
+                    int code = band == 0 ? 0 : band == 1 ? 2 : band == 2 ? 3 : 1;
+                    idx |= code << (2 * i);
+                }
+                le32(d, o + 4, idx);
+            }
+        }
+        return d;
+    }
+
     static void le32(byte[] b, int o, int v) {
         b[o] = (byte)v;
         b[o + 1] = (byte)(v >> 8);
