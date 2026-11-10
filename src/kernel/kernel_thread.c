@@ -104,7 +104,9 @@ NTSTATUS __stdcall xbox_PsCreateSystemThreadEx(
 
     dwCreationFlags = CreateSuspended ? CREATE_SUSPENDED : 0;
 
-    /* Use default stack size if 0 (Xbox default is 64KB) */
+    /* Use default stack size if 0 (Xbox default is 64KB). On Windows this is
+     * a commit size inside the default reservation; on POSIX CreateThread
+     * raises it to the host thread stack floor (RECOMP_THREAD_STACK_MB). */
     if (KernelStackSize == 0)
         KernelStackSize = 65536;
 

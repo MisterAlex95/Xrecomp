@@ -1077,6 +1077,59 @@ static DWORD_PTR process_mask_capture(void)
     return mask;
 }
 
+/* Host stack for threads that may run lifted code. Lifted code recurses on
+ * the native stack, so the libc default is not enough: glibc gives 8 MB,
+ * bionic about 1 MB, and a Win32 stackSize (64 KB for an Xbox kernel
+ * thread) is only a commit size on Windows but the whole stack here. Every
+ * thread the shim creates for a caller's routine gets at least this floor;
+ * a larger request is kept. Stacks are committed lazily, so the floor costs
+ * address space, not memory. RECOMP_THREAD_STACK_MB replaces the floor. */
+#define W32_THREAD_STACK_FLOOR_MB 8
+
+static size_t         s_stack_floor;
+static pthread_once_t s_stack_floor_once = PTHREAD_ONCE_INIT;
+
+static void stack_floor_init(void)
+{
+    unsigned long mb = W32_THREAD_STACK_FLOOR_MB;
+    const char   *env = getenv("RECOMP_THREAD_STACK_MB");
+    const char   *from = "default";
+
+    if (env && *env) {
+        char *end = NULL;
+        unsigned long v = strtoul(env, &end, 10);
+        if (end != env && *end == '\0' && v >= 1 && v <= 1024) {
+            mb = v;
+            from = "RECOMP_THREAD_STACK_MB";
+        } else {
+            fprintf(stderr, "[win32_compat] RECOMP_THREAD_STACK_MB=%s ignored "
+                    "(want 1..1024)\n", env);
+        }
+    }
+    s_stack_floor = (size_t)mb << 20;
+    fprintf(stderr, "[win32_compat] thread stack floor: %lu MB (%s)\n", mb, from);
+}
+
+/* The stack size a new thread gets for a request (0 = no preference). */
+static size_t thread_stack_size(size_t requested)
+{
+    size_t size, page;
+    long   pg;
+
+    pthread_once(&s_stack_floor_once, stack_floor_init);
+    size = requested > s_stack_floor ? requested : s_stack_floor;
+    pg   = sysconf(_SC_PAGESIZE);
+    page = pg > 0 ? (size_t)pg : 4096;
+    return (size + page - 1) / page * page;
+}
+
+/* pthread_attr_init plus the stack size; the caller destroys the attr. */
+static void thread_attr_init(pthread_attr_t *attr, size_t requested)
+{
+    pthread_attr_init(attr);
+    pthread_attr_setstacksize(attr, thread_stack_size(requested));
+}
+
 static void *thread_trampoline(void *arg)
 {
     w32_object *o = (w32_object *)arg;
@@ -1128,9 +1181,7 @@ HANDLE CreateThread(LPSECURITY_ATTRIBUTES sa, SIZE_T stackSize,
     o->refcount      = 2;   /* one for caller, one for the trampoline */
 
     pthread_attr_t attr;
-    pthread_attr_init(&attr);
-    if (stackSize)
-        pthread_attr_setstacksize(&attr, stackSize < 65536 ? 65536 : stackSize);
+    thread_attr_init(&attr, stackSize);
 
     if (pthread_create(&o->thread, &attr, thread_trampoline, o) != 0) {
         pthread_attr_destroy(&attr);
@@ -1378,7 +1429,13 @@ BOOL CreateTimerQueueTimer(PHANDLE newTimer, HANDLE timerQueue,
     o->timer_period = period;
     o->refcount     = 2;   /* caller + timer thread */
 
-    if (pthread_create(&o->thread, NULL, timer_thread, o) != 0) {
+    /* The callback can be a guest DPC (KeSetTimerEx): lifted code. */
+    pthread_attr_t attr;
+    int rc;
+    thread_attr_init(&attr, 0);
+    rc = pthread_create(&o->thread, &attr, timer_thread, o);
+    pthread_attr_destroy(&attr);
+    if (rc != 0) {
         o->refcount = 1;
         obj_release(o);
         return FALSE;
@@ -1426,8 +1483,14 @@ BOOL TrySubmitThreadpoolCallback(PTP_SIMPLE_CALLBACK callback,
     /* Run on a throwaway detached thread. */
     struct w32_tp_args *a = (struct w32_tp_args *)malloc(sizeof(*a));
     a->cb = callback; a->ctx = context;
+    /* The callback can be a guest DPC (KeInsertQueueDpc): lifted code. */
     pthread_t th;
-    if (pthread_create(&th, NULL, w32_tp_trampoline, a) != 0) { free(a); return FALSE; }
+    pthread_attr_t attr;
+    int rc;
+    thread_attr_init(&attr, 0);
+    rc = pthread_create(&th, &attr, w32_tp_trampoline, a);
+    pthread_attr_destroy(&attr);
+    if (rc != 0) { free(a); return FALSE; }
     pthread_detach(th);
     return TRUE;
 }
