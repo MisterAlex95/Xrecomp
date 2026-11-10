@@ -536,6 +536,18 @@ LPVOID MapViewOfFileEx(HANDLE mapping, DWORD access,
 BOOL   UnmapViewOfFile(LPCVOID baseAddr);
 #define CreateFileMapping CreateFileMappingA
 
+/* Not Win32: the POSIX side of Windows' placeholder replacement (XBA-55).
+ * [addr, addr + len) must already be the caller's own reservation (a
+ * VirtualAlloc MEM_RESERVE it still holds): the view or the read-write memory
+ * replaces that part of it in one mmap(MAP_FIXED), so no other thread can
+ * map anything in between, which unmap-then-map-again allows. Both register
+ * the range like MapViewOfFileEx and VirtualAlloc do. w32_view_forget drops
+ * a range from the registry without unmapping it, for a caller about to
+ * unmap the whole reservation around it in one call. */
+LPVOID w32_map_view_replace(HANDLE mapping, SIZE_T len, LPVOID addr);
+LPVOID w32_commit_replace(LPVOID addr, SIZE_T len);
+void   w32_view_forget(LPCVOID addr);
+
 /* ---- Aligned allocation ---------------------------------------------- */
 void *_aligned_malloc(SIZE_T size, SIZE_T alignment);
 void  _aligned_free(void *ptr);

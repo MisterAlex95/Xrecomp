@@ -41,6 +41,14 @@ already put something there (top-down placement). The layout now holds the whole
 view out of it: `RECOMP_GUEST_WINDOW`, on by default on Android. The arm64 image sets it, because an app process
 crowded with libraries is in the same situation as qemu-user.
 
+**Fixed, ours too (XBA-55):** `memory_layout_posix`, `recomp_selftest_no_simd` (its reinit check) and
+`memory_regressions_ext_vma` crashed about 1 run in 10 after `xbox_MemoryLayoutShutdown`, and were listed `flaky`.
+Shutdown unmapped each window inside the span, then the span: a 64 MB malloc heap that qemu created for the exiting
+NV2A ack thread landed in one of those holes and was unmapped with the span (seen with `strace -f` on qemu itself).
+Any thread of an app process can map in that window. The span now never has a hole: windows replace their slice of
+the reservation in one `mmap`, shutdown unmaps the span in one call. 0 crashes in 200 runs of each under qemu (were
+12/200 and 35/200 for the last two).
+
 ## Skips that are expected
 
 - `mmio_decode_a64` on x86-64: arm64-only.
