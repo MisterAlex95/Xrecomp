@@ -87,21 +87,34 @@ static size_t g_span_size = 0;
  * every fixed-address window is carved out of it (layout_map_view,
  * layout_commit_at). See the span reservation in xbox_MemoryLayoutInit. */
 static int g_span_whole_window = 0;
+/* POSIX, RECOMP_EXT_VMA: the part of the span handed to guest_vmem, which
+ * reserves (and releases) it itself. Not ours any more: see span_holds. */
+static uintptr_t g_span_gap_lo = 0, g_span_gap_hi = 0;
 
-/* POSIX: hand back the part of our span reservation a fixed-address window is
- * about to take. Only when the span holds the whole window; the stock span
- * covers RAM and the mirrors alone, whose loop frees its own slices. Not
- * atomic: the slice is unmapped, then mapped again with MAP_FIXED_NOREPLACE,
- * and another thread's mmap could land in between. The window's map then fails
- * and says so, as it did before the span held it. */
-static void span_release_for(void *addr, size_t size)
+/* POSIX: is [addr, addr + size) part of the span reservation we still hold?
+ *
+ * Every window inside the span replaces its slice of the reservation in one
+ * mmap (w32_map_view_replace, w32_commit_replace), and shutdown forgets those
+ * windows and unmaps the span in one call, so the span never has a hole in it
+ * while we hold it (XBA-55). It used to: init unmapped a slice and mapped the
+ * window again with MAP_FIXED_NOREPLACE, and shutdown unmapped each window
+ * and then the whole span. Anything another thread mapped into one of those
+ * holes in between -- a malloc arena's 64 MB heap, a thread stack -- was then
+ * unmapped with the span, under the thread using it. Under qemu-user that
+ * was qemu's own arena for the NV2A ack thread, created while the thread
+ * exited (the wait only sees its start routine return), and the next access
+ * crashed about one run in ten after the shutdown; in an app process, any of
+ * its threads can map at that moment. */
+static int span_holds(const void *addr, size_t size)
 {
 #if !defined(_WIN32)
     uintptr_t a = (uintptr_t)addr, lo = (uintptr_t)g_span_base;
-    if (g_span_whole_window && a >= lo && a + size <= lo + g_span_size)
-        VirtualFree(addr, size, MEM_RELEASE);
+    if (!g_span_base || a < lo || a + size > lo + g_span_size)
+        return 0;
+    return a + size <= g_span_gap_lo || a >= g_span_gap_hi;
 #else
     (void)addr; (void)size;
+    return 0;
 #endif
 }
 static void *g_tiled_view = NULL;
@@ -306,8 +319,10 @@ static void *layout_map_view(HANDLE mapping, size_t size, void *addr)
                                 MEM_REPLACE_PLACEHOLDER, PAGE_READWRITE,
                                 NULL, 0);
     }
+#else
+    if (span_holds(addr, size))
+        return w32_map_view_replace(mapping, size, addr);
 #endif
-    span_release_for(addr, size);
     return MapViewOfFileEx(mapping, FILE_MAP_ALL_ACCESS, 0, 0, size, addr);
 }
 
@@ -326,9 +341,27 @@ static void *layout_commit_at(void *addr, size_t size)
             return NULL;
         return VirtualAlloc(addr, size, MEM_COMMIT, PAGE_READWRITE);
     }
+#else
+    if (span_holds(addr, size))
+        return w32_commit_replace(addr, size);
 #endif
-    span_release_for(addr, size);
     return VirtualAlloc(addr, size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+}
+
+/* Shutdown's counterpart: unmap a window, or forget one inside the span,
+ * which the span release unmaps with the rest of it (see span_holds). */
+static void layout_release(void *addr, int is_view)
+{
+#if !defined(_WIN32)
+    if (span_holds(addr, 1)) {
+        w32_view_forget(addr);
+        return;
+    }
+#endif
+    if (is_view)
+        UnmapViewOfFile(addr);
+    else
+        VirtualFree(addr, 0, MEM_RELEASE);
 }
 
 #if defined(_WIN32)
@@ -2754,12 +2787,12 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
                                                      g_memory_size);
 #else
         /* Reserve base + mirrors as one range, and map the base at its head.
-         * VirtualFree releases just the slice about to be used, so each view
-         * replaces our own reservation rather than racing for free space.
+         * Each view replaces its slice of our own reservation in one mmap
+         * (layout_map_view, span_holds) rather than racing for free space.
          *
-         * POSIX only. Win32 VirtualFree cannot release part of a reservation:
-         * MEM_RELEASE with a nonzero size is ERROR_INVALID_PARAMETER, so both
-         * frees below fail, the base view never maps, and the whole span stays
+         * POSIX only. Win32 VirtualFree cannot release part of a reservation
+         * (MEM_RELEASE with a nonzero size is ERROR_INVALID_PARAMETER), so
+         * there the base view never maps and the whole span stays
          * reserved. At a 64 MB map that is 1.8 GB the OS tends to place at
          * 0x80000000 -- exactly the host range the contiguous window (guest
          * 0x80000000) needs, which then fails with error 487 and the first
@@ -2786,10 +2819,11 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
         }
         g_span_base = VirtualAlloc(NULL, g_span_size, MEM_RESERVE, PAGE_NOACCESS);
         if (g_span_base) {
-            VirtualFree(g_span_base, g_memory_size, MEM_RELEASE);
-            g_memory_base = MapViewOfFileEx(g_mapping_handle,
-                                            FILE_MAP_ALL_ACCESS, 0, 0,
-                                            g_memory_size, g_span_base);
+            /* g_span_size keeps the length; left registered, the span would
+             * answer VirtualQuery for every window carved out of it. */
+            w32_view_forget(g_span_base);
+            g_memory_base = layout_map_view(g_mapping_handle, g_memory_size,
+                                            g_span_base);
             if (!g_memory_base) {
                 VirtualFree(g_span_base, g_span_size, MEM_RELEASE);
                 g_span_base = NULL;
@@ -3632,14 +3666,10 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
                         m + 1, (unsigned)XBOX_NV2A_BASE);
                 continue;
             }
-            /* Inside the reservation this hands back the slice we are about
-             * to use; outside it (no reservation) this is a no-op on an
-             * address we never held. When the span holds the whole window
-             * (RECOMP_EXT_VMA), layout_map_view releases the slice itself:
-             * freeing it here too would unmap it twice, and the second
-             * munmap could take out another thread's mapping in the gap. */
-            if (g_span_base && !g_span_whole_window)
-                VirtualFree((LPVOID)mirror_base, g_memory_size, MEM_RELEASE);
+            /* Inside the span the view replaces its slice of the reservation
+             * (span_holds). This loop used to free the slice first, in every
+             * case: outside the span (128 MB, whose span stops at the
+             * contiguous window) that was a munmap of a range we never held. */
             g_mirror_views[m] = layout_map_view(g_mapping_handle,
                                                 g_memory_size,
                                                 (LPVOID)mirror_base);
@@ -3675,9 +3705,15 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
                 VirtualFree((LPVOID)host, 0, MEM_RELEASE);
             }
 #else
-            if (g_span_base && host >= (uintptr_t)g_span_base
-                    && host + ext <= (uintptr_t)g_span_base + g_span_size)
+            /* From here on the range is guest_vmem's: it reserves what the
+             * host leaves free there and releases that itself, and the span
+             * release at shutdown skips the whole range (span_holds), so
+             * nothing is unmapped twice. */
+            if (span_holds((void *)host, (size_t)ext)) {
                 VirtualFree((LPVOID)host, (SIZE_T)ext, MEM_RELEASE);
+                g_span_gap_lo = host;
+                g_span_gap_hi = host + (uintptr_t)ext;
+            }
 #endif
         }
         guest_vmem_init(g_memory_offset, g_memory_size, mirror_top);
@@ -3817,30 +3853,42 @@ int xbox_GuestWindowHeld(void)
 
 void xbox_MemoryLayoutShutdown(void)
 {
-    if (g_kernel_memory) {
-        VirtualFree(g_kernel_memory, 0, MEM_RELEASE);
-        g_kernel_memory = NULL;
-    }
+    /* The ack thread first: every tick writes the NV2A aperture and guest RAM
+     * (KeTickCount), so nothing it touches may go before it has stopped. It
+     * used to be given 1000 ms and then left running, with g_kernel_memory
+     * already released. */
     if (g_nv2a_ack_thread) {
         InterlockedExchange(&g_nv2a_ack_stop, 1);
-        WaitForSingleObject(g_nv2a_ack_thread, 1000);
+        if (WaitForSingleObject(g_nv2a_ack_thread, 5000) == WAIT_TIMEOUT) {
+            fprintf(stderr, "xbox_MemoryLayoutShutdown: NV2A ack thread still"
+                            " running after 5 s; waiting for it\n");
+            WaitForSingleObject(g_nv2a_ack_thread, INFINITE);
+        }
         CloseHandle(g_nv2a_ack_thread);
         g_nv2a_ack_thread = NULL;
     }
+    /* Inside the span (POSIX), layout_release only forgets a window: the span
+     * release below unmaps them all in one call, so no hole opens in the span
+     * for another thread's mmap to land in and be unmapped with it
+     * (span_holds). Outside it, each window is unmapped as before. */
+    if (g_kernel_memory) {
+        /* Inside the contiguous window when that mapped, and then not a
+         * registered range: a no-op, the window's release covers it. */
+        layout_release(g_kernel_memory, 0);
+        g_kernel_memory = NULL;
+    }
     if (g_nv2a_memory) {
-        VirtualFree(g_nv2a_memory, 0, MEM_RELEASE);
+        layout_release(g_nv2a_memory, 0);
         g_nv2a_memory = NULL;
     }
-    /* Unmap mirror views first */
     for (int m = 0; m < XBOX_NUM_MIRRORS; m++) {
         if (g_mirror_views[m]) {
-            UnmapViewOfFile(g_mirror_views[m]);
+            layout_release(g_mirror_views[m], 1);
             g_mirror_views[m] = NULL;
         }
     }
-    /* Unmap base view */
     if (g_memory_base) {
-        UnmapViewOfFile(g_memory_base);
+        layout_release(g_memory_base, 1);
         g_memory_base = NULL;
         g_memory_size = 0;
     }
@@ -3850,7 +3898,7 @@ void xbox_MemoryLayoutShutdown(void)
      * still returns TRUE because they are best-effort. The result is a layout
      * that looks initialised and has no device apertures at all. */
     if (g_tiled_view) {
-        UnmapViewOfFile(g_tiled_view);
+        layout_release(g_tiled_view, 1);
         g_tiled_view = NULL;
     }
     if (g_contig_memory) {
@@ -3858,8 +3906,10 @@ void xbox_MemoryLayoutShutdown(void)
         /* Usually a view of g_contig_mapping, which VirtualFree cannot
          * release. Committed memory only when that view failed. */
         if (!UnmapViewOfFile(g_contig_memory))
+            VirtualFree(g_contig_memory, 0, MEM_RELEASE);
+#else
+        layout_release(g_contig_memory, 0);
 #endif
-        VirtualFree(g_contig_memory, 0, MEM_RELEASE);
         g_contig_memory = NULL;
     }
 #if defined(_WIN32)
@@ -3869,11 +3919,11 @@ void xbox_MemoryLayoutShutdown(void)
     }
 #endif
     if (g_mcpx_memory) {
-        VirtualFree(g_mcpx_memory, 0, MEM_RELEASE);
+        layout_release(g_mcpx_memory, 0);
         g_mcpx_memory = NULL;
     }
     if (g_flash_memory) {
-        VirtualFree(g_flash_memory, 0, MEM_RELEASE);
+        layout_release(g_flash_memory, 0);
         g_flash_memory = NULL;
     }
 
@@ -3883,15 +3933,26 @@ void xbox_MemoryLayoutShutdown(void)
         g_mapping_handle = NULL;
     }
 
+    /* Its own reservation, inside the gap the span release skips. */
     guest_vmem_shutdown();
 
-    /* Whatever is left of the base+mirrors reservation. The views carved out
-     * of it are already unmapped above; this releases the range itself. */
+    /* The span, with every window still in it: one munmap, or one on each
+     * side of guest_vmem's range, which is not ours to unmap a second time. */
     if (g_span_base) {
-        VirtualFree(g_span_base, g_span_size, MEM_RELEASE);
+        uintptr_t lo = (uintptr_t)g_span_base, hi = lo + g_span_size;
+        if (g_span_gap_hi > g_span_gap_lo) {
+            if (g_span_gap_lo > lo)
+                VirtualFree(g_span_base, g_span_gap_lo - lo, MEM_RELEASE);
+            if (hi > g_span_gap_hi)
+                VirtualFree((LPVOID)g_span_gap_hi, hi - g_span_gap_hi,
+                            MEM_RELEASE);
+        } else {
+            VirtualFree(g_span_base, g_span_size, MEM_RELEASE);
+        }
         g_span_base = NULL;
         g_span_size = 0;
         g_span_whole_window = 0;
+        g_span_gap_lo = g_span_gap_hi = 0;
     }
 #if defined(_WIN32)
     /* The rest of the Windows guest window: the leftover placeholders and

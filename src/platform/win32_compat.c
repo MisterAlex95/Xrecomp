@@ -2281,6 +2281,58 @@ BOOL UnmapViewOfFile(LPCVOID baseAddr)
     return munmap((void *)baseAddr, len) == 0;
 }
 
+/* Replacing inside our own reservation (see the header). MAP_FIXED is the
+ * point here, not the hazard it is elsewhere in this file: the range is the
+ * caller's, so what it unmaps is the caller's reservation and nothing else,
+ * and it does so atomically. Linux may still have unmapped the old range when
+ * a MAP_FIXED mmap fails (ENOMEM on the map count, say), so a failure puts the
+ * reservation back where it can; MAP_FIXED_NOREPLACE leaves an intact one
+ * alone. */
+static void *replace_in_reservation(void *addr, size_t len, int prot, int flags,
+                                    int fd)
+{
+    void *p = mmap(addr, len, prot, flags | MAP_FIXED, fd, 0);
+    if (p == MAP_FAILED) {
+#if defined(MAP_FIXED_NOREPLACE)
+        void *r = mmap(addr, len, PROT_NONE,
+                       MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_FIXED_NOREPLACE,
+                       -1, 0);
+        if (r != MAP_FAILED && r != addr)
+            munmap(r, len);
+#endif
+        SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+        return NULL;
+    }
+    view_register(p, len);
+    return p;
+}
+
+LPVOID w32_map_view_replace(HANDLE mapping, SIZE_T len, LPVOID addr)
+{
+    w32_object *o = obj_from_handle(mapping);
+    if (!o || o->kind != K_FILEMAP || !addr) {
+        SetLastError(ERROR_INVALID_HANDLE);
+        return NULL;
+    }
+    return replace_in_reservation(addr, len, PROT_READ | PROT_WRITE, MAP_SHARED,
+                                  o->fd);
+}
+
+LPVOID w32_commit_replace(LPVOID addr, SIZE_T len)
+{
+    if (!addr) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return NULL;
+    }
+    return replace_in_reservation(addr, len, PROT_READ | PROT_WRITE,
+                                  MAP_PRIVATE | MAP_ANONYMOUS, -1);
+}
+
+void w32_view_forget(LPCVOID addr)
+{
+    (void)view_take(addr);
+}
+
 /* ===================================================================== */
 /* VirtualQuery                                                           */
 /* ===================================================================== */
