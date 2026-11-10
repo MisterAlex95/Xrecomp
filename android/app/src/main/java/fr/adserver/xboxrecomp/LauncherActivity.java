@@ -193,6 +193,10 @@ public class LauncherActivity extends Activity {
     }
 
     private void hideSystemBars() {
+        /* PhoneWindow.getInsetsController() dereferences the decor view without creating it: called before
+         * setContentView it throws a NullPointerException (the crash at start of the first launcher build).
+         * getDecorView() creates the decor first. */
+        getWindow().getDecorView();
         WindowInsetsController c = getWindow().getInsetsController();
         if (c != null) {
             c.hide(WindowInsets.Type.systemBars());
