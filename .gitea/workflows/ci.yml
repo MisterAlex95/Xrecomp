@@ -4,7 +4,7 @@
 # layer cache keeps the apt / pip layers between runs. The last step prints the C test report.
 #
 # Gating (XBA-53, docs/android/toolchain.md « CI gating »):
-#   pull request   linux, then android-toolkit (NDK compile) when the PR touches what the toolkit is built from
+#   pull request   linux, then android-toolkit (NDK compile, app unit tests) when the PR touches the Android build
 #   push to main   linux, then linux-arm64 (fails on a failure not in tools/ci/arm64-expected.txt), then android-image
 #   weekly         linux, then device-tests (the device test bundle; fails when a project stops building)
 # Heavy jobs (everything but linux) take tools/ci/heavy_lock.sh: one at a time on the shared host, queued, never
@@ -95,7 +95,7 @@ jobs:
           if [ -n "$base" ] && git fetch -q --depth 1 "$url" "$base" 2>/dev/null \
              && files=$(git diff --name-only "$base" HEAD); then
             echo "Changed since $(printf '%.8s' "$base"):"; printf '%s\n' "$files" | sed 's/^/  /'
-            if printf '%s\n' "$files" | grep -qE '^(src/|include/|android/|cmake/|CMakeLists\.txt$|tools/docker/android\.Dockerfile$|\.gitea/workflows/ci\.yml$)'; then
+            if printf '%s\n' "$files" | grep -qE '^(src/|include/|android/|cmake/|CMakeLists\.txt$|tools/docker/android\.Dockerfile$|tools/docker/gradle-central-mirror\.gradle$|\.gitea/workflows/ci\.yml$)'; then
               echo "android=true" >> "$GITHUB_OUTPUT"
             else
               echo "Nothing the Android toolkit is built from: compile skipped."
@@ -117,10 +117,20 @@ jobs:
             -t "$IMAGE_TAG" .
           docker run --rm "$IMAGE_TAG" cat /reports/android-artefacts.txt
 
+      # The app's JVM unit tests (Robolectric: launcher Prepare screens, PrepareService, pack check, tool install).
+      # About 1 min with the dependency layer cached (2 min cold); only the result folder leaves BuildKit.
+      - name: App unit tests (Robolectric)
+        if: steps.paths.outputs.android == 'true'
+        run: |
+          docker build -f tools/docker/android.Dockerfile --target app-unit-tests-out --progress=plain \
+            --output type=local,dest=out-unit .
+          cat out-unit/app-unit-tests.txt
+
       - name: Clean up
         if: always()
         run: |
           docker rmi "$IMAGE_TAG" >/dev/null 2>&1 || true
+          rm -rf out-unit
           sh tools/ci/heavy_lock.sh release || true
 
   # arm64: cross-compiled, tests under qemu-user (docs/android/baseline-arm64.md). A build break fails the job, and

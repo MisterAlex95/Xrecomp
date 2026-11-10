@@ -12,6 +12,7 @@ import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.ShapeDrawable;
 import android.graphics.drawable.shapes.OvalShape;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Environment;
 import android.os.ParcelFileDescriptor;
@@ -83,7 +84,22 @@ public class LauncherActivity extends Activity {
     private static final long SPACE_MARGIN = 64L << 20;
     private static final long CONFIRM_MS = 5000;
 
-    enum Screen { WELCOME, SOURCE, FOLDER_ACCESS, IMPORT, HOME, SETTINGS, GAME_DATA, ABOUT }
+    enum Screen { WELCOME, SOURCE, FOLDER_ACCESS, IMPORT, HOME, SETTINGS, GAME_DATA, ABOUT, PREPARE }
+
+    /**
+     * The on-device Prepare for the current game (docs/android/prepare.md): OFF when this APK has no toolchain or
+     * the game is not READY (the launcher then behaves as before), PLAYABLE when its pack is valid.
+     */
+    enum Prep { OFF, NEEDED, RUNNING, FAILED, CANCELLED, INTERRUPTED, PLAYABLE }
+
+    /** Free internal storage a Prepare needs (work files, objects, the pack). */
+    static final long PREPARE_MIN_FREE = 2_000_000_000L;
+    /** Below this much RAM the Prepare screen warns: about what Android reports for a « 6 GB » device. */
+    static final long PREPARE_RAM_WARN = (5L << 30) + (512L << 20);
+    /** A « running » status.json this fresh counts as alive even before the ":prepare" process shows up. */
+    private static final long PREPARE_FRESH_MS = 15000;
+    private static final long PREPARE_POLL_MS = 500;
+    private static final int REQ_NOTIFICATIONS = 4;
 
     enum State { READY, NONE, MISSING, NO_ACCESS, WRONG }
 
@@ -132,6 +148,20 @@ public class LauncherActivity extends Activity {
     private volatile String workerNote, chosenDir, chosenTitle;
     private volatile int workerNoteKind;
 
+    // ---- Prepare ----
+    private String titleIdDir, titleIdValue;
+    private final android.os.Handler poller = new android.os.Handler(android.os.Looper.getMainLooper());
+    private boolean resumed;
+    private Prep homePrep;
+    private MenuRow homePrepRow;
+    private PrepareProtocol.Status prepShown;
+    private TextView prepHead, prepMsg, prepEta;
+    private final List<TextView[]> prepSteps = new ArrayList<>();
+    private MenuRow prepCancelRow;
+    private long cancelArmedAt;
+    private boolean cancelSent;
+    private final Runnable pollTick = this::pollPrepare;
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -143,7 +173,7 @@ public class LauncherActivity extends Activity {
         boolean showLauncher = ACTION_SHOW_LAUNCHER.equals(action);
         String noData = in.getStringExtra(EXTRA_NO_GAME_DATA);
         boolean forced = change || showLauncher || noData != null;
-        if (!forced && savedInstanceState == null && gameReady()) {
+        if (!forced && savedInstanceState == null && gameReady() && !prepareBlocksPlay()) {
             /* The app icon while the game runs in the background: straight back to it (the « Launcher » shortcut
              * reaches this screen then). Otherwise only with « Open the game directly next time » on. */
             boolean running = gameRunning();
@@ -177,7 +207,38 @@ public class LauncherActivity extends Activity {
             show(Screen.WELCOME);
         } else {
             show(Screen.HOME);
+            Prep p = prep();
+            if (p == Prep.RUNNING || p == Prep.FAILED)
+                go(Screen.PREPARE);
         }
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        resumed = true;
+        poller.removeCallbacks(pollTick);
+        poller.postDelayed(pollTick, PREPARE_POLL_MS);
+    }
+
+    @Override
+    protected void onPause() {
+        resumed = false;
+        poller.removeCallbacks(pollTick);
+        super.onPause();
+    }
+
+    /** For the JVM unit tests: the screen shown, and the Prepare state Home was built with (null: Play). */
+    Screen screenForTest() {
+        return screen;
+    }
+
+    Prep homePrepForTest() {
+        return homePrep;
+    }
+
+    String noteForTest() {
+        return noteText;
     }
 
     // ---- Window and stage ----------------------------------------------------------------------------------------
@@ -348,6 +409,10 @@ public class LauncherActivity extends Activity {
             requestCancel();
             return;
         }
+        if (screen == Screen.PREPARE && prepShown != null && prepShown.running()) {
+            armCancelPrepare();
+            return;
+        }
         if (history.isEmpty()) {
             finish();
             return;
@@ -363,6 +428,8 @@ public class LauncherActivity extends Activity {
                 focusMemory.put(screen, i);
         }
         screen = s;
+        if (s != Screen.IMPORT && s != Screen.PREPARE)
+            getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         body.removeAllViews();
         bottomLeft.removeAllViews();
         hints.removeAllViews();
@@ -372,6 +439,13 @@ public class LauncherActivity extends Activity {
         xAction = yAction = startAction = l1Action = r1Action = null;
         chip.set("", 0);
         deleteArmedAt = 0;
+        cancelArmedAt = 0;
+        homePrepRow = null;
+        homePrep = null;
+        prepShown = null;
+        prepSteps.clear();
+        prepHead = prepMsg = prepEta = null;
+        prepCancelRow = null;
         setNote(null, NOTE_INFO);
         switch (s) {
         case WELCOME:
@@ -397,6 +471,9 @@ public class LauncherActivity extends Activity {
             break;
         case ABOUT:
             buildAbout();
+            break;
+        case PREPARE:
+            buildPrepare();
             break;
         }
         restoreFocus(false);
@@ -733,6 +810,11 @@ public class LauncherActivity extends Activity {
         boolean running = gameRunning();
         screenTitle.setText(st == State.NONE ? getString(R.string.app_name) : gameTitle(dir));
         chip.set(getString(stateLabel(st)), stateColor(st));
+        Prep prep = prep();
+        PrepareProtocol.Status ps = prep == Prep.OFF || prep == Prep.PLAYABLE ? null : readPrepStatus();
+        boolean preparing = prep != Prep.OFF && prep != Prep.PLAYABLE;
+        if (preparing)
+            prepChip(prep);
         checkHashLater(dir);
         sizeLater(dir);
 
@@ -744,8 +826,17 @@ public class LauncherActivity extends Activity {
 
         String playSub = st != State.READY ? getString(R.string.PLAY_SUB_UNAVAILABLE, getString(stateLabel(st)))
                          : running ? getString(R.string.PLAY_SUB_RUNNING) : getString(R.string.PLAY_SUB);
-        MenuRow play = row(Icon.PLAY, getString(R.string.PLAY), playSub, this::onPlay);
+        MenuRow play = preparing ? row(Icon.ARROW, getString(prep == Prep.RUNNING ? R.string.PREPARING
+                                                                                  : R.string.PREPARE),
+                                       prepSub(prep, ps), this::onPlay)
+                                 : row(Icon.PLAY, getString(R.string.PLAY), playSub, this::onPlay);
         play.setDim(st != State.READY);
+        if (preparing) {
+            homePrep = prep;
+            homePrepRow = play;
+            if (prep == Prep.FAILED)
+                play.setBadge(getString(R.string.CHIP_PREPARE_FAILED), Theme.ERROR);
+        }
         menu.addView(play, first);
         MenuRow settings = row(Icon.SLIDERS, getString(R.string.SETTINGS), settingsSummary(),
                                () -> go(Screen.SETTINGS));
@@ -762,12 +853,14 @@ public class LauncherActivity extends Activity {
         h.addView(detailPanel(), lp(0, MATCH, 1));
         body.addView(h, new FrameLayout.LayoutParams(MATCH, MATCH));
 
-        onFocus(play, () -> homePlayDetail(st, dir, running));
+        Runnable playDetail = preparing ? () -> homePrepareDetail(prep, ps, dir)
+                                        : () -> homePlayDetail(st, dir, running);
+        onFocus(play, playDetail);
         onFocus(settings, this::homeSettingsDetail);
         onFocus(data, () -> homeDataDetail(st, dir));
         onFocus(about, this::homeAboutDetail);
         defaultFocus = st == State.READY ? play : data;
-        homePlayDetail(st, dir, running);
+        playDetail.run();
 
         Widgets.Toggle auto = new Widgets.Toggle(this, "X", getString(R.string.OPEN_DIRECTLY));
         auto.setOn(GameStore.autoStart(this));
@@ -777,9 +870,11 @@ public class LauncherActivity extends Activity {
         startAction = this::onPlay;
         addHint("A", R.string.HINT_SELECT, this::clickFocused);
         addHint("B", R.string.HINT_QUIT, this::back);
-        addHint("START", R.string.PLAY, this::onPlay);
+        addHint("START", preparing ? R.string.PREPARE : R.string.PLAY, this::onPlay);
 
-        if (running)
+        if (preparing && prep == Prep.INTERRUPTED)
+            setNote(getString(R.string.PREPARE_INTERRUPTED), NOTE_WARN);
+        else if (running)
             setNote(getString(R.string.GAME_RUNNING_HOME), NOTE_INFO);
         else if (st == State.MISSING || st == State.NO_ACCESS)
             setNote(stateText(st, dir), NOTE_WARN);
@@ -837,6 +932,15 @@ public class LauncherActivity extends Activity {
     private void onPlay() {
         State st = state();
         if (st == State.READY) {
+            Prep p = prep();
+            if (p == Prep.RUNNING || p == Prep.FAILED) {
+                go(Screen.PREPARE);
+                return;
+            }
+            if (p != Prep.OFF && p != Prep.PLAYABLE) {
+                startPrepare();
+                return;
+            }
             launchShell(false);
             return;
         }
@@ -1150,6 +1254,471 @@ public class LauncherActivity extends Activity {
                 setNote(getString(R.string.DELETED), NOTE_OK);
             });
         }, "xba-delete").start();
+    }
+
+    // ---- PREPARE (the on-device Prepare, docs/android/prepare.md) -----------------------------------------------
+
+    /** The title ID of the current game's default.xbe (its certificate), read once per folder; null if none. */
+    private String titleId() {
+        String dir = gameDir();
+        if (dir == null)
+            return null;
+        if (!dir.equals(titleIdDir)) {
+            titleIdDir = dir;
+            titleIdValue = Pack.xbeTitleId(GameStore.findXbe(new File(dir)));
+        }
+        return titleIdValue;
+    }
+
+    private PrepareProtocol.Status readPrepStatus() {
+        String tid = titleId();
+        return tid == null ? null : PrepareProtocol.readStatus(PrepareService.statusFile(this, tid));
+    }
+
+    /** The ":prepare" process is there (a running status.json from a dead process means interrupted). */
+    private boolean prepareProcessAlive() {
+        ActivityManager am = getSystemService(ActivityManager.class);
+        List<ActivityManager.RunningAppProcessInfo> procs = am == null ? null : am.getRunningAppProcesses();
+        if (procs == null)
+            return false;
+        String name = getPackageName() + ":prepare";
+        for (ActivityManager.RunningAppProcessInfo p : procs) {
+            if (name.equals(p.processName))
+                return true;
+        }
+        return false;
+    }
+
+    private boolean statusAlive(PrepareProtocol.Status s) {
+        return s != null && s.running()
+               && (System.currentTimeMillis() - s.updatedAt < PREPARE_FRESH_MS || prepareProcessAlive());
+    }
+
+    private Prep prep() {
+        if (state() != State.READY || !Toolchain.available(this))
+            return Prep.OFF;
+        String tid = titleId();
+        if (tid == null)
+            return Prep.OFF;
+        PrepareProtocol.Status s = PrepareProtocol.readStatus(PrepareService.statusFile(this, tid));
+        if (statusAlive(s))
+            return Prep.RUNNING;
+        if (Pack.check(getFilesDir(), tid) == Pack.Check.VALID)
+            return Prep.PLAYABLE;
+        if (s == null)
+            return Prep.NEEDED;
+        switch (s.state) {
+        case PrepareProtocol.FAILED:
+            return Prep.FAILED;
+        case PrepareProtocol.CANCELLED:
+            return Prep.CANCELLED;
+        case PrepareProtocol.RUNNING:
+            return Prep.INTERRUPTED;
+        default:
+            return Prep.NEEDED;   // done, but the pack is gone or stale (another shell ABI): prepare again
+        }
+    }
+
+    /** « Open the game directly » does not skip a Prepare that is needed. */
+    private boolean prepareBlocksPlay() {
+        Prep p = prep();
+        return p != Prep.OFF && p != Prep.PLAYABLE;
+    }
+
+    private void prepChip(Prep p) {
+        switch (p) {
+        case RUNNING:
+            chip.set(getString(R.string.CHIP_PREPARING), Theme.ACCENT);
+            break;
+        case FAILED:
+            chip.set(getString(R.string.CHIP_PREPARE_FAILED), Theme.ERROR);
+            break;
+        default:
+            chip.set(getString(R.string.CHIP_NEEDS_PREPARE), Theme.WARN);
+            break;
+        }
+    }
+
+    /** « about 20–30 min »: from the cores and the RAM; a guess until tools.prepare gives its own eta. */
+    private String estimate() {
+        int cores = Runtime.getRuntime().availableProcessors();
+        long ram = Toolchain.totalRam(this);
+        int lo, hi;
+        if (ram > 0 && ram < PREPARE_RAM_WARN) {
+            lo = 40;
+            hi = 60;
+        } else if (cores >= 8) {
+            lo = 20;
+            hi = 30;
+        } else {
+            lo = 30;
+            hi = 45;
+        }
+        return getString(R.string.PREPARE_ESTIMATE, lo, hi);
+    }
+
+    private String prepSub(Prep p, PrepareProtocol.Status s) {
+        switch (p) {
+        case RUNNING:
+            return s == null ? getString(R.string.PREPARE_STARTING) : progressLine(s);
+        case FAILED:
+            return getString(R.string.PREPARE_SUB_FAILED, s == null ? "" : s.code);
+        case CANCELLED:
+            return getString(R.string.PREPARE_SUB_CANCELLED);
+        case INTERRUPTED:
+            return getString(R.string.PREPARE_SUB_INTERRUPTED);
+        default:
+            return getString(R.string.PREPARE_SUB, estimate());
+        }
+    }
+
+    /** « Compile · 42 % · about 12 min left ». */
+    private String progressLine(PrepareProtocol.Status s) {
+        String line = PrepareService.stepName(this, s.id);
+        int pct = s.step > 0 ? Math.round(PrepareProtocol.overall(s.step, s.n, s.pct) * 100) : s.pct;
+        line += " · " + String.format(Locale.getDefault(), "%d%%", pct);
+        if (s.eta >= 0)
+            line += " · " + getString(R.string.PREPARE_ETA, PrepareProtocol.formatEta(s.eta));
+        return line;
+    }
+
+    private long internalFree() {
+        return getFilesDir().getUsableSpace();
+    }
+
+    private void homePrepareDetail(Prep p, PrepareProtocol.Status s, String dir) {
+        detailClear(getString(R.string.PREPARE), gameTitle(dir), getString(R.string.PREPARE_DETAIL, estimate()));
+        detailKv(getString(R.string.KV_ESTIMATE), estimate());
+        long free = internalFree();
+        TextView f = detailKv(getString(R.string.KV_INTERNAL_FREE), size(free));
+        if (free < PREPARE_MIN_FREE)
+            f.setTextColor(Theme.ERROR);
+        long ram = Toolchain.totalRam(this);
+        TextView r = detailKv(getString(R.string.KV_RAM), ram > 0 ? size(ram) : "?");
+        if (ram > 0 && ram < PREPARE_RAM_WARN)
+            r.setTextColor(Theme.WARN);
+        if (s != null && !s.code.isEmpty() && p == Prep.FAILED)
+            detailKv(getString(R.string.KV_CODE), s.code);
+        if (p != Prep.NEEDED)
+            detailKv(getString(R.string.KV_STATUS), prepSub(p, s));
+        detailFooter(getString(R.string.PREPARE_FOOTER, size(PREPARE_MIN_FREE)), Theme.TEXT_FAINT);
+    }
+
+    /** Checks the space, then starts PrepareService and shows the Preparing screen. */
+    private void startPrepare() {
+        String tid = titleId(), dir = gameDir();
+        if (tid == null || dir == null)
+            return;
+        long free = internalFree();
+        if (free < PREPARE_MIN_FREE) {
+            setNote(getString(R.string.PREPARE_NO_SPACE, size(PREPARE_MIN_FREE), size(free)), NOTE_ERROR);
+            return;
+        }
+        if (Build.VERSION.SDK_INT >= 33
+            && checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS)
+               != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            try {
+                requestPermissions(new String[] { android.Manifest.permission.POST_NOTIFICATIONS }, REQ_NOTIFICATIONS);
+            } catch (RuntimeException ignored) {
+            }
+        }
+        // A fresh status first, so the Preparing screen never shows the previous run's outcome.
+        PrepareProtocol.Status s = new PrepareProtocol.Status();
+        s.titleId = tid;
+        s.startedAt = s.updatedAt = System.currentTimeMillis();
+        s.msg = getString(R.string.PREPARE_STARTING);
+        s.log = PrepareService.logFile(this, tid).getAbsolutePath();
+        File sf = PrepareService.statusFile(this, tid);
+        try {
+            PrepareProtocol.writeStatus(sf, s);
+            startForegroundService(PrepareService.startIntent(this, dir, tid, gameTitle(dir)));
+        } catch (IOException | RuntimeException e) {
+            Log.w(TAG, "launcher: cannot start the Prepare", e);
+            s.state = PrepareProtocol.FAILED;
+            s.code = "START_FAILED";
+            s.msg = String.valueOf(e.getMessage());
+            try {
+                PrepareProtocol.writeStatus(sf, s);
+            } catch (IOException ignored) {
+            }
+            setNote(getString(R.string.PREPARE_START_FAILED, String.valueOf(e.getMessage())), NOTE_ERROR);
+            return;
+        }
+        Log.i(TAG, "launcher: prepare started for " + tid + " (" + dir + ")");
+        cancelSent = false;
+        go(Screen.PREPARE);
+        long ram = Toolchain.totalRam(this);
+        if (ram > 0 && ram < PREPARE_RAM_WARN)
+            setNote(getString(R.string.PREPARE_LOW_RAM, size(ram)), NOTE_WARN);
+    }
+
+    private static final String[] PREP_IDS = { PrepareProtocol.STEP_INSTALL, "identify", "analyse", "lift",
+                                               "compile", "pack" };
+
+    private void buildPrepare() {
+        String dir = gameDir();
+        screenTitle.setText(R.string.PREPARE_TITLE);
+        LinearLayout h = rowLayout();
+        FrameLayout left = new FrameLayout(this);
+        ring = new Widgets.Ring(this);
+        left.addView(ring, new FrameLayout.LayoutParams(620, 620, Gravity.CENTER));
+        h.addView(left, lp(760, MATCH));
+
+        FrameLayout p = panel();
+        LinearLayout c = column();
+        c.addView(Theme.caps(this, getString(R.string.PREPARE_CAPS), Theme.ACCENT), lp(MATCH, WRAP));
+        prepHead = Theme.oneLine(Theme.text(this, Theme.T_TITLE, Theme.MEDIUM, Theme.TEXT, gameTitle(dir)));
+        LinearLayout.LayoutParams hl = lp(MATCH, WRAP);
+        hl.topMargin = 18;
+        hl.bottomMargin = 22;
+        c.addView(prepHead, hl);
+
+        int[] names = { R.string.STEP_INSTALL, R.string.STEP_IDENTIFY, R.string.STEP_ANALYSE, R.string.STEP_LIFT,
+                        R.string.STEP_COMPILE, R.string.STEP_PACK };
+        int[] subs = { R.string.STEP_INSTALL_SUB, R.string.STEP_IDENTIFY_SUB, R.string.STEP_ANALYSE_SUB,
+                       R.string.STEP_LIFT_SUB, R.string.STEP_COMPILE_SUB, R.string.STEP_PACK_SUB };
+        for (int i = 0; i < names.length; i++) {
+            LinearLayout r = rowLayout();
+            r.setGravity(Gravity.CENTER_VERTICAL);
+            TextView mark = Theme.text(this, Theme.T_BODY, Theme.MEDIUM, Theme.TEXT_FAINT, "○");
+            mark.setGravity(Gravity.CENTER);
+            r.addView(mark, lp(48, WRAP));
+            TextView name = Theme.oneLine(Theme.text(this, Theme.T_BODY, Theme.MEDIUM, Theme.TEXT_DIM,
+                                                     getString(names[i])));
+            r.addView(name, lp(300, WRAP));
+            TextView sub = Theme.oneLine(Theme.text(this, Theme.T_SMALL, Theme.REGULAR, Theme.TEXT_FAINT,
+                                                    getString(subs[i])));
+            r.addView(sub, lp(0, WRAP, 1));
+            TextView pct = Theme.text(this, Theme.T_SMALL, Theme.MEDIUM, Theme.TEXT_FAINT, "");
+            pct.setGravity(Gravity.END);
+            r.addView(pct, lp(110, WRAP));
+            LinearLayout.LayoutParams rl = lp(MATCH, WRAP);
+            rl.topMargin = i == 0 ? 0 : 8;
+            c.addView(r, rl);
+            prepSteps.add(new TextView[] { mark, name, sub, pct });
+        }
+
+        prepMsg = Theme.text(this, Theme.T_SMALL, Theme.REGULAR, Theme.TEXT_DIM, "");
+        prepMsg.setMaxLines(2);
+        prepMsg.setEllipsize(TextUtils.TruncateAt.END);
+        LinearLayout.LayoutParams ml = lp(MATCH, WRAP);
+        ml.topMargin = 26;
+        c.addView(prepMsg, ml);
+        prepEta = Theme.text(this, Theme.T_SMALL, Theme.REGULAR, Theme.TEXT_FAINT, "");
+        LinearLayout.LayoutParams el = lp(MATCH, WRAP);
+        el.topMargin = 10;
+        c.addView(prepEta, el);
+        c.addView(gap(this), lp(MATCH, 0, 1));
+
+        PrepareProtocol.Status s = readPrepStatus();
+        boolean running = s == null || statusAlive(s);
+        if (running) {
+            prepCancelRow = row(Icon.BACK, getString(R.string.CANCEL), getString(R.string.PREPARE_CANCEL_SUB),
+                                this::armCancelPrepare);
+            c.addView(prepCancelRow, lp(MATCH, Theme.ROW_H));
+            defaultFocus = prepCancelRow;
+            yAction = this::leavePrepare;
+            addHint("Y", R.string.HINT_MENU, this::leavePrepare);
+            addHint("B", R.string.CANCEL, this::armCancelPrepare);
+            chip.set(getString(R.string.CHIP_PREPARING), Theme.ACCENT);
+            getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        } else {
+            boolean cancelled = PrepareProtocol.CANCELLED.equals(s.state) || PrepareProtocol.RUNNING.equals(s.state);
+            LinearLayout actions = rowLayout();
+            MenuRow retry = row(Icon.RESET, getString(cancelled ? R.string.PREPARE_RESUME : R.string.PREPARE_RETRY),
+                                getString(R.string.PREPARE_RETRY_SUB), this::startPrepare);
+            LinearLayout.LayoutParams al = lp(0, Theme.ROW_H, 1);
+            al.rightMargin = 24;
+            actions.addView(retry, al);
+            MenuRow share = row(Icon.COPY, getString(R.string.SHARE_LOG), getString(R.string.SHARE_LOG_SUB),
+                                this::shareLog);
+            actions.addView(share, lp(0, Theme.ROW_H, 1));
+            c.addView(actions, lp(MATCH, Theme.ROW_H));
+            defaultFocus = retry;
+            yAction = this::shareLog;
+            addHint("A", R.string.HINT_SELECT, this::clickFocused);
+            addHint("Y", R.string.SHARE_LOG, this::shareLog);
+            addHint("B", R.string.HINT_BACK, this::back);
+            chip.set(getString(cancelled ? R.string.CHIP_NEEDS_PREPARE : R.string.CHIP_PREPARE_FAILED),
+                     cancelled ? Theme.WARN : Theme.ERROR);
+            getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        }
+        p.addView(c);
+        h.addView(p, lp(0, MATCH, 1));
+        body.addView(h, new FrameLayout.LayoutParams(MATCH, MATCH));
+        paintPrepare(s);
+    }
+
+    /** Y on the Preparing screen: back to the menu, the Prepare carries on. */
+    private void leavePrepare() {
+        getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        if (history.isEmpty())
+            show(Screen.HOME);
+        else
+            show(history.pop());
+    }
+
+    /** Fills the Preparing screen from a status (null: just started). */
+    private void paintPrepare(PrepareProtocol.Status s) {
+        prepShown = s;
+        if (ring == null || prepHead == null)
+            return;
+        boolean running = s == null || statusAlive(s);
+        boolean failed = s != null && !running && PrepareProtocol.FAILED.equals(s.state);
+        boolean stopped = s != null && !running && !failed;
+        int cur = s == null ? 0 : indexOfStep(s.id);
+        float frac = s == null ? -1 : s.step > 0 ? PrepareProtocol.overall(s.step, s.n, s.pct) : -1;
+        String big = frac >= 0 ? String.format(Locale.getDefault(), "%d%%", Math.round(frac * 100)) : "";
+        String label = s == null ? getString(R.string.PREPARE_STARTING) : PrepareService.stepName(this, s.id);
+        String sub = s != null && s.step > 0 ? getString(R.string.PREPARE_STEP_OF, s.step, s.n)
+                     : s != null && s.pct > 0 ? String.format(Locale.getDefault(), "%d%%", s.pct) : "";
+        if (failed) {
+            label = getString(R.string.PREPARE_FAILED_HEAD);
+            sub = s.code;
+        } else if (stopped) {
+            label = getString(R.string.PREPARE_CANCELLED_HEAD);
+            sub = "";
+        }
+        ring.setColor(failed ? Theme.ERROR : stopped ? Theme.WARN : Theme.ACCENT);
+        ring.set(running ? frac : Math.max(0, frac), big, label, sub);
+        for (int i = 0; i < prepSteps.size(); i++) {
+            TextView[] v = prepSteps.get(i);
+            boolean done = i < cur || (s != null && PrepareProtocol.DONE.equals(s.state));
+            boolean now = i == cur && !done;
+            int color = now ? (failed ? Theme.ERROR : stopped ? Theme.WARN : Theme.ACCENT)
+                        : done ? Theme.TEXT : Theme.TEXT_FAINT;
+            v[0].setText(done ? "✓" : now ? (failed ? "✕" : "●") : "○");
+            v[0].setTextColor(done ? Theme.ACCENT : color);
+            v[1].setTextColor(now ? (failed ? Theme.ERROR : Theme.TEXT) : done ? Theme.TEXT_DIM : Theme.TEXT_FAINT);
+            v[1].setTypeface(now ? Theme.MEDIUM : Theme.REGULAR);
+            v[2].setTextColor(now ? Theme.TEXT_DIM : Theme.TEXT_FAINT);
+            v[3].setText(now && running && s != null && s.pct > 0
+                         ? String.format(Locale.getDefault(), "%d%%", s.pct) : "");
+            v[3].setTextColor(color);
+        }
+        if (failed) {
+            prepHead.setText(getString(R.string.PREPARE_FAILED_HEAD));
+            prepHead.setTextColor(Theme.ERROR);
+            String why = s.msg;
+            if (PrepareRunner.KILLED.equals(s.code))
+                why = getString(R.string.PREPARE_HINT_KILLED);
+            else if ("NO_SPACE".equals(s.code))
+                why = getString(R.string.PREPARE_HINT_NO_SPACE, size(internalFree()))
+                      + (why.isEmpty() ? "" : " " + why);
+            prepMsg.setText(getString(R.string.PREPARE_CODE_LINE, s.code) + (why.isEmpty() ? "" : " · " + why));
+            prepMsg.setTextColor(Theme.TEXT);
+            prepEta.setText(getString(R.string.PREPARE_SHARE_HINT));
+        } else if (stopped) {
+            prepHead.setText(getString(R.string.PREPARE_CANCELLED_HEAD));
+            prepHead.setTextColor(Theme.TEXT);
+            prepMsg.setText(getString(PrepareProtocol.RUNNING.equals(s.state) ? R.string.PREPARE_INTERRUPTED
+                                                                              : R.string.PREPARE_CANCELLED_TEXT));
+            prepEta.setText("");
+        } else {
+            prepMsg.setText(s == null || s.msg.isEmpty() ? getString(R.string.PREPARE_STARTING) : s.msg);
+            prepEta.setText(s != null && s.eta >= 0 ? getString(R.string.PREPARE_ETA_LONG,
+                                                                PrepareProtocol.formatEta(s.eta))
+                                                    : getString(R.string.PREPARE_KEEPS));
+        }
+    }
+
+    private static int indexOfStep(String id) {
+        for (int i = 0; i < PREP_IDS.length; i++) {
+            if (PREP_IDS[i].equals(id))
+                return i;
+        }
+        return 0;
+    }
+
+    /** Twice within CONFIRM_MS: the first press arms, the second sends ACTION_CANCEL to the service. */
+    private void armCancelPrepare() {
+        if (cancelSent)
+            return;
+        long now = SystemClock.uptimeMillis();
+        if (cancelArmedAt == 0 || now - cancelArmedAt > CONFIRM_MS) {
+            cancelArmedAt = now;
+            if (prepCancelRow != null)
+                prepCancelRow.setBadge(getString(R.string.PREPARE_CANCEL_BADGE), Theme.WARN);
+            setNote(getString(R.string.PREPARE_CANCEL_CONFIRM), NOTE_WARN);
+            return;
+        }
+        cancelArmedAt = 0;
+        cancelSent = true;
+        String tid = titleId();
+        if (prepCancelRow != null) {
+            prepCancelRow.setBadge(getString(R.string.CANCELING), Theme.TEXT_DIM);
+            prepCancelRow.setDim(true);
+        }
+        setNote(getString(R.string.CANCELING), NOTE_INFO);
+        Log.i(TAG, "launcher: prepare cancel");
+        try {
+            startService(PrepareService.cancelIntent(this, tid));
+        } catch (RuntimeException e) {
+            Log.w(TAG, "launcher: cannot reach the Prepare service", e);
+        }
+    }
+
+    /** « Share log »: prepare.log through LogProvider, to whatever app the player picks. */
+    private void shareLog() {
+        String tid = titleId();
+        if (tid == null || !PrepareService.logFile(this, tid).isFile()) {
+            setNote(getString(R.string.SHARE_LOG_NONE), NOTE_INFO);
+            return;
+        }
+        Uri uri = LogProvider.uriFor(this, tid);
+        Intent send = new Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_STREAM, uri)
+                .putExtra(Intent.EXTRA_SUBJECT, getString(R.string.SHARE_LOG_SUBJECT, gameTitle(gameDir()), tid))
+                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        send.setClipData(android.content.ClipData.newRawUri("prepare.log", uri));
+        try {
+            startActivity(Intent.createChooser(send, getString(R.string.SHARE_LOG)));
+        } catch (ActivityNotFoundException e) {
+            setNote(getString(R.string.SHARE_LOG_NO_APP), NOTE_ERROR);
+        }
+    }
+
+    /** Every PREPARE_POLL_MS while resumed: status.json into the Preparing screen, or into Home's row. */
+    private void pollPrepare() {
+        if (!resumed)
+            return;
+        poller.postDelayed(pollTick, PREPARE_POLL_MS);
+        if (screen == Screen.PREPARE) {
+            PrepareProtocol.Status s = readPrepStatus();
+            boolean wasRunning = prepShown == null || statusAlive(prepShown);
+            boolean isRunning = s == null || statusAlive(s);
+            if (s != null && PrepareProtocol.DONE.equals(s.state)) {
+                onPrepareDone();
+                return;
+            }
+            if (wasRunning != isRunning) {
+                cancelSent = false;
+                show(Screen.PREPARE);   // running -> failed / cancelled: the actions change
+                return;
+            }
+            paintPrepare(s);
+        } else if (screen == Screen.HOME && homePrep != null) {
+            Prep now = prep();
+            if (now != homePrep) {
+                refreshKeepingFocus();
+                if (now == Prep.PLAYABLE)
+                    setNote(getString(R.string.READY_TO_PLAY, gameTitle(gameDir())), NOTE_OK);
+                return;
+            }
+            if (now == Prep.RUNNING && homePrepRow != null)
+                homePrepRow.setSubtitle(prepSub(now, readPrepStatus()));
+        }
+    }
+
+    private void onPrepareDone() {
+        getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        String tid = titleId();
+        boolean ok = tid != null && Pack.check(getFilesDir(), tid) == Pack.Check.VALID;
+        Log.i(TAG, "launcher: prepare done, pack " + (ok ? "valid" : "not valid"));
+        history.clear();
+        focusMemory.remove(Screen.HOME);
+        show(Screen.HOME);
+        if (ok)
+            setNote(getString(R.string.READY_TO_PLAY, gameTitle(gameDir())), NOTE_OK);
     }
 
     // ---- ABOUT -------------------------------------------------------------------------------------------------

@@ -709,6 +709,13 @@ final class Widgets {
             arcP.setShadowLayer(20, 0, 0, Theme.alpha(Theme.ACCENT, 0.65f));
         }
 
+        /** The arc's colour (the accent; the Prepare screen's failed / stopped states use ERROR / WARN). */
+        void setColor(int color) {
+            arcP.setColor(color);
+            arcP.setShadowLayer(20, 0, 0, Theme.alpha(color, 0.65f));
+            invalidate();
+        }
+
         /** frac below 0: indeterminate (a turning arc). */
         void set(float frac, String big, String label, String sub) {
             this.frac = frac;
@@ -726,7 +733,7 @@ final class Widgets {
             for (int i = 0; i < n; i++) {
                 double a = Math.toRadians(-90 + i * 360.0 / n);
                 boolean lit = frac >= 0 && i < Math.round(frac * n);
-                tickP.setColor(lit ? Theme.alpha(Theme.ACCENT, 0.9f) : Theme.alpha(Theme.LINE, 0.9f));
+                tickP.setColor(lit ? Theme.alpha(arcP.getColor(), 0.9f) : Theme.alpha(Theme.LINE, 0.9f));
                 float r0 = R + 30, r1 = R + (i % 6 == 0 ? 48 : 40);
                 c.drawLine(cx + (float)Math.cos(a) * r0, cy + (float)Math.sin(a) * r0,
                            cx + (float)Math.cos(a) * r1, cy + (float)Math.sin(a) * r1, tickP);

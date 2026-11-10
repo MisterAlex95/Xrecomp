@@ -83,5 +83,34 @@ android {
         targetCompatibility JavaVersion.VERSION_17
     }
 
+    // The on-device Prepare (docs/android/prepare.md) execs libxbapython.so and libxbacc.so from nativeLibraryDir and
+    // passes libmain.so to the linker: the native libraries must be extracted at install (extractNativeLibs).
+    packagingOptions {
+        jniLibs { useLegacyPackaging = true }
+    }
+
     lint { abortOnError false }
+
+    // JVM unit tests (Robolectric) of the launcher and the Prepare service: android/app/src/test, run with
+    // `gradle testDebugUnitTest -x externalNativeBuildDebug` (tools/docker/android.Dockerfile, target app-unit-tests).
+    testOptions {
+        unitTests {
+            includeAndroidResources = true
+            all {
+                systemProperty 'robolectric.graphicsMode', 'NATIVE'
+                systemProperty 'xba.screenshots', "${buildDir}/screenshots"
+                maxHeapSize = '2g'
+                // Robolectric fetches its android-all jars from Maven Central at the first run; another repository
+                // (a mirror of Central) with -ProbolectricRepoUrl=...
+                if (findProperty('robolectricRepoUrl'))
+                    systemProperty 'robolectric.dependency.repo.url', findProperty('robolectricRepoUrl')
+            }
+        }
+    }
+}
+
+// Test-only dependencies: the app itself uses no AndroidX and no library (Robolectric brings test-only AndroidX).
+dependencies {
+    testImplementation 'junit:junit:4.13.2'
+    testImplementation 'org.robolectric:robolectric:4.14.1'
 }

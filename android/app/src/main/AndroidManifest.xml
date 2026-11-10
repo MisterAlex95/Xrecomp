@@ -14,6 +14,12 @@
          builds only (refused on the Play Store). -->
     <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE"
         tools:ignore="ScopedStorage" />
+    <!-- The on-device Prepare (docs/android/prepare.md): a foreground service of type specialUse with a partial wake
+         lock; POST_NOTIFICATIONS is asked at the first Prepare on Android 13+ (the progress notification). -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <!-- allowNativeHeapPointerTagging: lifted code may squeeze host pointers; tagged heap pointers would break it
          (see the Plane page « Reference · BananaNative »). -->
@@ -59,5 +65,26 @@
             android:preferMinimalPostProcessing="true"
             android:configChanges="layoutDirection|locale|orientation|uiMode|screenLayout|screenSize|smallestScreenSize|keyboard|keyboardHidden|navigation">
         </activity>
+
+        <!-- The on-device Prepare (docs/android/prepare.md): python -m tools.prepare and clang, in their own process
+             so that neither the launcher nor the game shares their memory. specialUse: dataSync is capped at 6 h a
+             day on Android 15, and a Prepare compiles locally (no transfer). -->
+        <service
+            android:name=".PrepareService"
+            android:exported="false"
+            android:process=":prepare"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Compiles the user's own game files into native code on the device (a one-time, user-started build of 20 to 60 minutes, with progress and Cancel in the notification)" />
+        </service>
+
+        <!-- « Share log » on the launcher: the Prepare's log, read-only, by a temporary grant. -->
+        <provider
+            android:name=".LogProvider"
+            android:authorities="${applicationId}.logs"
+            android:process=":launcher"
+            android:exported="false"
+            android:grantUriPermissions="true" />
     </application>
 </manifest>

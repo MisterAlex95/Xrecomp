@@ -1,0 +1,10 @@
+// Gradle init script for the app's JVM unit tests in Docker (android.Dockerfile, target app-unit-tests): Maven
+// Central answers 429 (Too Many Requests) to the shared CI host, so its artefacts come from Google's mirror of Central
+// instead. google() stays as it is. Robolectric's own downloads (android-all jars) take the same mirror through
+// -ProbolectricRepoUrl (android/app/build.gradle).
+settingsEvaluated { s ->
+    [s.dependencyResolutionManagement.repositories, s.pluginManagement.repositories].each { r ->
+        r.removeIf { it.name == 'MavenRepo' }
+        r.maven { url 'https://maven-central.storage-download.googleapis.com/maven2/' }
+    }
+}
