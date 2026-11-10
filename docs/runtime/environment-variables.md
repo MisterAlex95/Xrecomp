@@ -173,7 +173,7 @@ See [xbox_input](../../src/input/README.md).
 | `RECOMP_KEY_TRACE` | off | Prints the first 40 key-downs. | `keyboard_sdl.c`, `fb_present.c` |
 | `RECOMP_INPUT_DIAG` | off | Reports whether the input chain is wired. | `usb_gamepad.c` |
 | `RECOMP_RUMBLE` | on | `0` turns rumble off. | `ohci.c` |
-| `RECOMP_USB` | off | Enables the USB controller model. | `ohci.c` |
+| `RECOMP_USB` | off | Enables the USB controller model. The title project calls `xbox_OhciInit()` after the memory layout (the template does). | `ohci.c` |
 | `RECOMP_USB_PADS=1..4` | 1 | Number of pads plugged. | `ohci.c` |
 | `RECOMP_USB_PORT=0..3` | 2 with four ports | Root port the pad appears on. | `ohci.c` |
 | `RECOMP_USB_HC`, `RECOMP_USB_NDP` | model default | Host-controller selection and port count. | `ohci.c` |
