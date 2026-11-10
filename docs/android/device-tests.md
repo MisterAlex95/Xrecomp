@@ -21,8 +21,9 @@ tools/android/run_tests.sh out/xba-device-tests.tar.gz memory     # only the tes
   synthetic `tools/conformance/test.xbe`, which is ours) and rewrites the paths relative to the bundle.
 - `run.sh` is POSIX sh for Android's toybox: `timeout` of 300 s per test, `LD_LIBRARY_PATH` for `libSDL2.so`,
   `TMPDIR` inside the bundle, and the SDL dummy drivers.
-- The bundle is not built in CI: 12 minutes, because every project rebuilds the toolkit. Build it when there is a
-  device run to do.
+- CI builds the bundle once a week (job `device-tests`, 12 minutes, because every project rebuilds the toolkit) and
+  fails when a project that is not in `tools/ci/android-unbuilt.txt` stops building (XBA-53). It does not publish the
+  bundle: build it when there is a device run to do.
 
 ## Reading the result
 

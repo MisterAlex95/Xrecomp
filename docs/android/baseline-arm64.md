@@ -27,6 +27,10 @@ address space and signal frames itself. A pass is good evidence. A failure is a 
 
 ## The arm64 failures
 
+CI holds this list in [`tools/ci/arm64-expected.txt`](../../tools/ci/arm64-expected.txt) (XBA-53): the `linux-arm64`
+job is red on any other failure, and on a listed test that no longer fails. Change the file and this table together.
+How the job checks it: [toolchain.md « CI gating »](toolchain.md#ci-gating).
+
 | Project | What fails | Reading | Next |
 |---|---|---|---|
 | `mmio_decode_a64` (1) | Trapped `ldr s/d/q`: the SIMD register written in the signal frame is not the one the code reads after `sigreturn` (got 0x2F2F2F2F, want 0x3FC00000). Output: 30 traps, 1 unknown, 4 failures, all four on `ldr s`, `ldr d` and `ldr q`. | Probably qemu-user. Its `fpsimd_context` write-back is the suspect. It is exactly what XBA-22 depends on, though. | Confirm on hardware (XBA-45). |

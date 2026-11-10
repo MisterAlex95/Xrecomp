@@ -57,3 +57,42 @@ the build. What differs from desktop POSIX (XBA-17):
 | `src/kernel` | No OpenSSL anywhere (desktop too): nothing called it, `kernel_crypto.c` has its own SHA-1. |
 
 `liblog` and `libandroid` are not linked yet: nothing in the toolkit calls them before the app shell (XBA-18).
+
+## CI gating
+
+XBA-53. `.gitea/workflows/ci.yml` runs on the Docker of the host that also serves Gitea and Plane, so what runs when
+is chosen to keep that host up (on 2026-11-09, heavy jobs in parallel took Gitea and Plane down).
+
+| When | Jobs | Red when |
+|---|---|---|
+| Every PR | `linux`, then `android-toolkit` | a Linux test fails; the toolkit does not build with the NDK |
+| Push to `main`, or by hand | `linux`, then `linux-arm64`, then `android-image` (publishes `shell-latest`) | a Linux test fails; an arm64 failure that is not expected; the image, the toolkit or the shell APK does not build |
+| Monday 02:30 (server time), or by hand with `device_tests` | `linux`, then `device-tests` | a test project that should build for Android does not |
+
+- **`android-toolkit`** builds the `toolkit` target of `android.Dockerfile` (compile only, `JOBS=4`) when the PR
+  touches `src/`, `include/`, `android/`, `cmake/`, the root `CMakeLists.txt`, `tools/docker/android.Dockerfile` or
+  the workflow. A first step diffs the PR against its merge base and decides; other PRs pass the job in seconds.
+  The Android image layers are cached on the host: the compile takes a few minutes.
+- **`linux-arm64`**: the tests run under qemu-user to the end whatever fails, the image prints the report, then
+  `tools/ci/check_expected.py ctest` compares the JUnit files of ctest with `tools/ci/arm64-expected.txt`. Any failure
+  not listed fails the build, and so does a listed test that no longer fails (pass, skip or gone): remove its line,
+  in the same PR as the fix. Lines are `<project>/<test>` (`root/<test>` for the root build) or `<project>` for a
+  project that does not configure or build.
+- **`device-tests`** builds the `device-tests` stage (about 12 minutes) and prints its `build-report.md`;
+  `tools/ci/check_expected.py android` compares it with `tools/ci/android-unbuilt.txt`, the projects that are not
+  built for Android (Windows-only ones, `input_keyboard_sdl`). Same rule both ways. The bundle stays in the image.
+- **One heavy job at a time.** Every job but `linux` takes `tools/ci/heavy_lock.sh` before its Docker build and
+  gives it back at the end. The lock is a created, never started container named `xba-ci-heavy` on the host's
+  Docker (`docker create --name` is atomic); a job that waits prints who holds it every 5 minutes. A holder whose job
+  container is gone (cancelled run) loses the lock at once; one that cannot be identified, after 4 hours.
+  Not `concurrency:`: Gitea keeps one running and **one** pending job per group, and a newer job cancels the one
+  already waiting, so with a main push chaining two heavy jobs a PR's job would be cancelled routinely. A stuck lock
+  can be removed by hand: `docker rm xba-ci-heavy` on the host.
+- No tmpfs, `JOBS` at 4 in every image, the `linux` job is not under the lock (it ran on every PR before XBA-53).
+
+To check the expected-failure files by hand:
+
+```bash
+python3 tools/ci/check_expected.py ctest --expected tools/ci/arm64-expected.txt --report c-tests.md --junit junit/
+python3 tools/ci/check_expected.py android --expected tools/ci/android-unbuilt.txt --report build-report.md
+```

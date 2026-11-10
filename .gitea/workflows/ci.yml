@@ -2,6 +2,13 @@
 # (exit 77), and the Python suite (pytest tools/) passes -- all inside tools/docker/linux.Dockerfile.
 # Runs on the Coolify host's Docker (job container with the Docker CLI only), like Table Factory's CI; the host's
 # layer cache keeps the apt / pip layers between runs. The last step prints the C test report.
+#
+# Gating (XBA-53, docs/android/toolchain.md « CI gating »):
+#   pull request   linux, then android-toolkit (NDK compile) when the PR touches what the toolkit is built from
+#   push to main   linux, then linux-arm64 (fails on a failure not in tools/ci/arm64-expected.txt), then android-image
+#   weekly         linux, then device-tests (the device test bundle; fails when a project stops building)
+# Heavy jobs (everything but linux) take tools/ci/heavy_lock.sh: one at a time on the shared host, queued, never
+# cancelled. Gitea's `concurrency:` keeps one pending job per group and cancels the others, hence the lock.
 name: CI
 
 on:
@@ -9,7 +16,14 @@ on:
     branches: [main]
   pull_request:
     paths-ignore: ['.claude/**', 'CLAUDE.md']
+  schedule:
+    - cron: '30 2 * * 1'   # Monday night: device-tests
   workflow_dispatch:
+    inputs:
+      device_tests:
+        description: 'Also build the device test bundle (device-tests job, about 12 min)'
+        type: boolean
+        default: false
 
 concurrency:
   group: ci-${{ github.event_name }}-${{ github.head_ref || github.ref }}
@@ -46,12 +60,76 @@ jobs:
         if: always()
         run: docker rmi "$TEST_TAG" >/dev/null 2>&1 || true
 
-  # arm64: cross-compiled, tests under qemu-user (docs/android/baseline-arm64.md). A build break fails the job;
-  # test failures do not (under qemu they are leads, not verdicts): read the report against the baseline.
+  # XBA-53: a PR that breaks the NDK build goes red before the merge. The toolkit target of android.Dockerfile
+  # (compile only, JOBS=4, after linux, under the heavy-job lock), only when the PR touches what it is built from;
+  # other PRs pass through in seconds. The Android image layers are cached on the host: a few minutes.
+  android-toolkit:
+    needs: linux
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    container:
+      image: docker:29.8.1-cli
+    env:
+      IMAGE_TAG: xba-android-pr:${{ github.run_id }}
+    steps:
+      - name: Checkout
+        env:
+          TOKEN: ${{ github.token }}
+        run: |
+          apk add --no-cache git >/dev/null
+          git init -q .
+          git fetch -q --depth 1 "$(printf '%s' "$GITHUB_SERVER_URL" | sed "s#://#://ci:$TOKEN@#")/$GITHUB_REPOSITORY.git" "$GITHUB_SHA"
+          git checkout -q FETCH_HEAD
+
+      # The PR's files, from the merge base (Gitea puts it in the event). A cheap step: two depth-1 fetches and a
+      # tree diff. If the merge base cannot be had, the compile runs (better a few minutes than a miss).
+      - name: Does the PR touch the Android build?
+        id: paths
+        env:
+          TOKEN: ${{ github.token }}
+          MERGE_BASE: ${{ github.event.pull_request.merge_base }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          url="$(printf '%s' "$GITHUB_SERVER_URL" | sed "s#://#://ci:$TOKEN@#")/$GITHUB_REPOSITORY.git"
+          base=${MERGE_BASE:-$BASE_SHA}
+          if [ -n "$base" ] && git fetch -q --depth 1 "$url" "$base" 2>/dev/null \
+             && files=$(git diff --name-only "$base" HEAD); then
+            echo "Changed since $(printf '%.8s' "$base"):"; printf '%s\n' "$files" | sed 's/^/  /'
+            if printf '%s\n' "$files" | grep -qE '^(src/|include/|android/|cmake/|CMakeLists\.txt$|tools/docker/android\.Dockerfile$|\.gitea/workflows/ci\.yml$)'; then
+              echo "android=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "Nothing the Android toolkit is built from: compile skipped."
+              echo "android=false" >> "$GITHUB_OUTPUT"
+            fi
+          else
+            echo "No merge base to diff against: compiling anyway."
+            echo "android=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Wait for the heavy-job lock
+        if: steps.paths.outputs.android == 'true'
+        run: sh tools/ci/heavy_lock.sh acquire
+
+      - name: Toolkit for arm64-v8a (NDK, API 30)
+        if: steps.paths.outputs.android == 'true'
+        run: |
+          docker build -f tools/docker/android.Dockerfile --target toolkit --build-arg JOBS=4 --progress=plain \
+            -t "$IMAGE_TAG" .
+          docker run --rm "$IMAGE_TAG" cat /reports/android-artefacts.txt
+
+      - name: Clean up
+        if: always()
+        run: |
+          docker rmi "$IMAGE_TAG" >/dev/null 2>&1 || true
+          sh tools/ci/heavy_lock.sh release || true
+
+  # arm64: cross-compiled, tests under qemu-user (docs/android/baseline-arm64.md). A build break fails the job, and
+  # so does a test failure that is not in tools/ci/arm64-expected.txt, or a line there that no longer fails (XBA-53):
+  # the Docker build prints the report and runs tools/ci/check_expected.py.
   #
-  # The heavy jobs (qemu, the Android SDK image) run one after the other and only on pushes to main or by hand:
-  # on 2026-11-09 the first PR running them in parallel saturated the shared Proxmox storage (Gitea and Plane
-  # stopped answering).
+  # The qemu and Android SDK jobs run only on pushes to main or by hand, chained, and under the heavy-job lock across
+  # runs: on 2026-11-09 the first PR running them in parallel saturated the shared Proxmox storage (Gitea and Plane
+  # stopped answering). On PRs only the toolkit compile runs (android-toolkit).
   linux-arm64:
     needs: linux
     if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
@@ -70,6 +148,10 @@ jobs:
           git fetch -q --depth 1 "$(printf '%s' "$GITHUB_SERVER_URL" | sed "s#://#://ci:$TOKEN@#")/$GITHUB_REPOSITORY.git" "$GITHUB_SHA"
           git checkout -q FETCH_HEAD
 
+      # One heavy job at a time on the shared host (XBA-53): waits here, never cancelled.
+      - name: Wait for the heavy-job lock
+        run: sh tools/ci/heavy_lock.sh acquire
+
       - name: Cross-build and test under qemu (Docker)
         run: docker build -f tools/docker/linux-arm64.Dockerfile --target test --progress=plain -t "$TEST_TAG" .
 
@@ -78,7 +160,9 @@ jobs:
 
       - name: Clean up
         if: always()
-        run: docker rmi "$TEST_TAG" >/dev/null 2>&1 || true
+        run: |
+          docker rmi "$TEST_TAG" >/dev/null 2>&1 || true
+          sh tools/ci/heavy_lock.sh release || true
 
   # The Android toolchain image (docs/android/toolchain.md) builds, and its NDK builds SDL2 for arm64-v8a / API 30.
   android-image:
@@ -98,6 +182,10 @@ jobs:
           git init -q .
           git fetch -q --depth 1 "$(printf '%s' "$GITHUB_SERVER_URL" | sed "s#://#://ci:$TOKEN@#")/$GITHUB_REPOSITORY.git" "$GITHUB_SHA"
           git checkout -q FETCH_HEAD
+
+      # One heavy job at a time on the shared host (XBA-53): waits here, never cancelled.
+      - name: Wait for the heavy-job lock
+        run: sh tools/ci/heavy_lock.sh acquire
 
       - name: Build the image
         run: docker build -f tools/docker/android.Dockerfile --target android --progress=plain -t "$IMAGE_TAG" .
@@ -154,3 +242,48 @@ jobs:
         run: |
           docker rmi "$IMAGE_TAG" "$IMAGE_TAG-toolkit" "$IMAGE_TAG-apk" >/dev/null 2>&1 || true
           rm -rf out
+          sh tools/ci/heavy_lock.sh release || true
+
+  # XBA-53: the device test bundle (XBA-19) still builds. Weekly at night, or by hand with device_tests ticked;
+  # about 12 minutes (every project rebuilds the toolkit). build-report.md says which projects were built for
+  # Android; tools/ci/check_expected.py fails the run when one that is not in tools/ci/android-unbuilt.txt was not,
+  # or when a listed one builds again. The bundle itself stays in the image (no game content in it either).
+  device-tests:
+    needs: linux
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.event.inputs.device_tests == 'true')
+    runs-on: ubuntu-latest
+    container:
+      image: docker:29.8.1-cli
+    env:
+      IMAGE_TAG: xba-device-tests:${{ github.run_id }}
+    steps:
+      - name: Checkout
+        env:
+          TOKEN: ${{ github.token }}
+        run: |
+          apk add --no-cache git >/dev/null
+          git init -q .
+          git fetch -q --depth 1 "$(printf '%s' "$GITHUB_SERVER_URL" | sed "s#://#://ci:$TOKEN@#")/$GITHUB_REPOSITORY.git" "$GITHUB_SHA"
+          git checkout -q FETCH_HEAD
+
+      # One heavy job at a time on the shared host (XBA-53): waits here, never cancelled.
+      - name: Wait for the heavy-job lock
+        run: sh tools/ci/heavy_lock.sh acquire
+
+      - name: Device test bundle (NDK, API 30)
+        run: |
+          docker build -f tools/docker/android.Dockerfile --target device-tests --build-arg JOBS=4 --progress=plain \
+            -t "$IMAGE_TAG" .
+
+      - name: Build report, against tools/ci/android-unbuilt.txt
+        run: |
+          docker run --rm "$IMAGE_TAG" cat /out/build-report.md
+          docker run --rm "$IMAGE_TAG" ls -la /out
+          docker run --rm -w /src "$IMAGE_TAG" python3 tools/ci/check_expected.py android \
+            --expected tools/ci/android-unbuilt.txt --report /out/build-report.md
+
+      - name: Clean up
+        if: always()
+        run: |
+          docker rmi "$IMAGE_TAG" >/dev/null 2>&1 || true
+          sh tools/ci/heavy_lock.sh release || true

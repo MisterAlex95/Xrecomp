@@ -1,0 +1,6 @@
+# Tests allowed to fail in the arm64 job (cross-compiled, run under qemu-user): tools/docker/linux-arm64.Dockerfile.
+# Checked by tools/ci/check_expected.py (XBA-53): any other failure fails the job, and so does a line here that no
+# longer fails (remove it). Reasons and history: docs/android/baseline-arm64.md.
+#   <project>/<test>   a test of tests/<project> (root/<test>: the root build's ctest)
+#   <project>          the project fails to configure or build
+mmio_decode_a64/mmio_decode_a64   # trapped ldr s/d/q: qemu-user's fpsimd_context write-back, to confirm on hardware (XBA-45)

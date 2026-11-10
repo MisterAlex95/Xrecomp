@@ -11,6 +11,9 @@
 # project does not hide the others. A ctest skip (exit 77, SKIP_RETURN_CODE)
 # counts as skipped. The report is a Markdown table: project, configure,
 # build, tests passed / skipped / failed. Exit status: 0 when nothing failed.
+#
+# XBR_JUNIT_DIR=dir also writes ctest's JUnit file per project, dir/<project>.xml (ctest 3.21+), which
+# tools/ci/check_expected.py reads (the arm64 job, XBA-53).
 set -uo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -20,6 +23,8 @@ JOBS=${JOBS:-$(nproc 2>/dev/null || echo 4)}
 GEN=()
 read -r -a EXTRA <<< "${XBR_CMAKE_ARGS:-}"
 command -v ninja >/dev/null 2>&1 && GEN=(-G Ninja)
+JUNIT_DIR=${XBR_JUNIT_DIR:-}
+[ -z "$JUNIT_DIR" ] || { mkdir -p "$JUNIT_DIR" && JUNIT_DIR=$(cd "$JUNIT_DIR" && pwd); }   # ctest: relative to the build dir
 
 # Projects that only build for Windows (a FATAL_ERROR under if(NOT WIN32), or an unconditional <windows.h>).
 # Listed by hand on purpose: a new Windows-only project fails the run until someone looks at it and adds it here.
@@ -50,7 +55,9 @@ for dir in "$ROOT"/tests/*/; do
     elif ! cmake --build "$bdir" -j"$JOBS" >>"$log" 2>&1; then
         build=FAIL; fail=1
     else
-        ctest --test-dir "$bdir" --output-on-failure --timeout 300 -j"$JOBS" >>"$log" 2>&1
+        junit=()
+        [ -z "$JUNIT_DIR" ] || junit=(--output-junit "$JUNIT_DIR/$name.xml")
+        ctest --test-dir "$bdir" --output-on-failure --timeout 300 -j"$JOBS" "${junit[@]}" >>"$log" 2>&1
         # ctest's summary lines: "Test #n: name ...   Passed", "***Skipped", "***Failed", "***Timeout", "***Exception"
         pass=$(grep -cE 'Test +#[0-9]+: .* Passed' "$log")
         skip=$(grep -cE 'Test +#[0-9]+: .*\*\*\*(Skipped|Not Run)' "$log")
