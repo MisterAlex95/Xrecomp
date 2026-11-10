@@ -59,6 +59,8 @@ Per-title repos (generated C) are separate and private.
 ## Android toolchain
 
 The pinned image `tools/docker/android.Dockerfile` (NDK, SDK, Gradle, JDK, SDL2 sources): see [toolchain.md](toolchain.md).
+The toolchain the APK can carry for the embedded Prepare (Python + capstone, clang + lld for arm64, `-PxbaToolchainDir`):
+[toolchain.md « The on-device toolchain »](toolchain.md#the-on-device-toolchain-embedded-prepare).
 
 ## App shell
 

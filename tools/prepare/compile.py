@@ -32,6 +32,26 @@ TOOLKIT_INCLUDES = ("include", "src", "src/kernel", "src/platform", "src/audio",
                     "src/nv2a", "src/d3d", "src/input", "src/usb", "src/video", "src/selftest")
 
 
+def sysroot_resource_dir(sysroot):
+    """The clang resource directory carried inside the sysroot, or None.
+
+    The app's sysroot.zip (docs/android/toolchain.md) holds lib/clang/<major>/
+    next to usr/: the embedded clang's own headers (stddef.h, arm_neon.h, ...)
+    and compiler-rt. That clang cannot find them by itself: it would look next
+    to its binary, in nativeLibraryDir. The NDK's sysroot has no lib/clang (its
+    clang knows its own resource directory): None, and nothing changes."""
+    base = os.path.join(sysroot, "lib", "clang")
+    try:
+        names = os.listdir(base)
+    except OSError:
+        return None
+    for name in sorted(names, key=lambda n: [int(x) if x.isdigit() else 0 for x in n.split(".")], reverse=True):
+        d = os.path.join(base, name)
+        if os.path.isfile(os.path.join(d, "include", "stddef.h")):
+            return d
+    return None
+
+
 class StepError(Exception):
     def __init__(self, code, msg):
         Exception.__init__(self, msg)
@@ -198,6 +218,11 @@ class Toolchain:
 
     def builtins(self):
         if not self._builtins:
+            rd = sysroot_resource_dir(self.sysroot)
+            mine = rd and os.path.join(rd, "lib", "linux", "libclang_rt.builtins-aarch64-android.a")
+            if mine and os.path.isfile(mine):
+                self._builtins = mine
+                return mine
             rc, out = self.procs.run(self.cc_argv + ["--target=" + TARGET, "-rtlib=compiler-rt",
                                                      "-print-libgcc-file-name"])
             path = out.strip().splitlines()[-1] if out.strip() else ""
@@ -226,9 +251,12 @@ def collect_sources(proj):
 
 
 def compile_flags(opt, toolkit, proj, sysroot, profile=False, include_dirs=()):
-    flags = ["--target=" + TARGET, "--sysroot=" + sysroot,
-             "-O%s" % opt, "-g0", "-fPIC", "-std=gnu11", "-w",
-             "-DXBOXRECOMP_SHELL_TITLE=1", "-DWIN32_LEAN_AND_MEAN", "-DNOMINMAX", "-DNDEBUG"]
+    flags = ["--target=" + TARGET, "--sysroot=" + sysroot]
+    rd = sysroot_resource_dir(sysroot)
+    if rd:
+        flags.append("-resource-dir=" + rd)
+    flags += ["-O%s" % opt, "-g0", "-fPIC", "-std=gnu11", "-w",
+              "-DXBOXRECOMP_SHELL_TITLE=1", "-DWIN32_LEAN_AND_MEAN", "-DNOMINMAX", "-DNDEBUG"]
     if profile:
         flags.append("-DXBA_TITLE_PROFILE=1")
     # src and src/recomp as in the template's CMakeLists; src/recomp/gen too, for

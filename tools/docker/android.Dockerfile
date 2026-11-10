@@ -194,3 +194,63 @@ RUN mkdir -p /out /work/tests \
 
 FROM scratch AS device-tests-out
 COPY --from=device-tests /out/ /
+
+# The on-device toolchain of the embedded Prepare (phase 1, docs/android/toolchain.md): CPython + capstone and
+# clang + lld for arm64-v8a, as jniLibs and assets in /opt/xba-toolchain, which the app build picks up with
+# -PxbaToolchainDir. Versions and checksums are in tools/android/toolchain/versions.env. Only that directory is
+# copied into the build stages, so a change elsewhere in the repository keeps them cached. Out of the image with:
+#   docker build -f tools/docker/android.Dockerfile --target toolchain-out --output type=local,dest=out/toolchain .
+FROM android AS toolchain-base
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential pkg-config zip xz-utils qemu-user e2fsprogs \
+    && rm -rf /var/lib/apt/lists/*
+ENV XBA_TC_OUT=/opt/xba-toolchain XBA_TC_WORK=/work/toolchain XBA_TC_CACHE=/work/cache
+
+# LLVM in its own stage: the longest build (20 min at JOBS=6 on the CI host), cached while the scripts do not change.
+FROM toolchain-base AS toolchain-llvm
+ARG JOBS=6
+COPY tools/android/toolchain/ /src/tools/android/toolchain/
+RUN ulimit -c 0 && JOBS=$JOBS XBA_TC_KEEP=0 /src/tools/android/toolchain/build_llvm.sh && rm -rf /work
+
+# BuildKit runs this stage beside toolchain-llvm: 3 jobs, so that both together stay within the host's budget.
+FROM toolchain-base AS toolchain-python
+ARG JOBS=3
+COPY tools/android/toolchain/ /src/tools/android/toolchain/
+RUN ulimit -c 0 && export JOBS=$JOBS \
+    && /src/tools/android/toolchain/build_capstone.sh \
+    && /src/tools/android/toolchain/build_python.sh \
+    && rm -rf /work
+
+# Both together, checked (check.sh): aarch64 ELFs that need only system libraries; under qemu-aarch64, clang compiles
+# and links, and tools.prepare --android builds the stub title's pack with it against the real libmain.so.
+FROM toolchain-base AS toolchain
+COPY --from=toolchain-llvm /opt/xba-toolchain/ /opt/xba-toolchain/
+COPY --from=toolchain-python /opt/xba-toolchain/ /opt/xba-toolchain/
+RUN apt-get update && apt-get install -y --no-install-recommends python3-capstone && rm -rf /var/lib/apt/lists/*
+COPY . /src
+RUN ulimit -c 0 && (/src/tools/android/toolchain/check.sh /opt/xba-toolchain > /opt/xba-toolchain/check.txt 2>&1; \
+        rc=$?; cat /opt/xba-toolchain/check.txt; exit $rc) \
+    && rm -rf /work
+
+FROM scratch AS toolchain-out
+COPY --from=toolchain /opt/xba-toolchain/ /
+
+# The shell APK with the toolchain inside (-PxbaToolchainDir), to see what it adds.
+#   docker build -f tools/docker/android.Dockerfile --target prepare-apk-out --output type=local,dest=out .
+FROM toolchain AS prepare-apk
+ARG XBA_VERSION=dev
+WORKDIR /src/android
+RUN printf 'sdk.dir=%s\ncmake.dir=/usr\n' "$ANDROID_HOME" > local.properties \
+    && gradle --no-daemon --console=plain -PxbaVersion="$XBA_VERSION" -PxbaToolchainDir=/opt/xba-toolchain \
+         assembleDebug \
+    && mkdir -p /out \
+    && cp app/build/outputs/apk/debug/app-debug.apk /out/xboxrecomp-shell-prepare.apk \
+    && unzip -lv /out/xboxrecomp-shell-prepare.apk | grep -E 'lib/|assets/' | tee /out/prepare-apk-contents.txt \
+    && for f in lib/arm64-v8a/libxbacc.so lib/arm64-v8a/libxbapython.so lib/arm64-v8a/libpython3.13.so \
+                lib/arm64-v8a/libcapstone.so assets/prepare/python-stdlib.zip assets/prepare/sysroot.zip \
+                assets/prepare/toolkit.zip assets/prepare/toolkit.zip.sha256; do \
+         grep -q " $f\$" /out/prepare-apk-contents.txt || { echo "missing $f"; exit 1; }; done \
+    && rm -rf /root/.gradle/caches /root/.gradle/daemon app/build app/.cxx build .gradle
+
+FROM scratch AS prepare-apk-out
+COPY --from=prepare-apk /out/ /
