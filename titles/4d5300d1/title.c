@@ -180,12 +180,28 @@ static void *semaphore_watch(void *unused)
 
 /* ── Background cache progress ───────────────────────────────────────────
  *
- * On first run the title decompresses every d:\Data\...\*.biz into
- * z:\data\...\*.big (about 626 MB) while its menus already run. A .biz starts
- * with "biz!" and the decompressed size (u32 LE), so progress is the bytes
- * already in the cache over the sum of those sizes. Shown in the window title
- * and printed (stdout, logcat on Android) whenever the whole percent changes. */
-typedef struct { char big[1024]; uint64_t size; } CacheItem;
+ * On first run the title decompresses d:\Data\...\*.biz into z:\data\...\*.big
+ * while its menus already run. A .biz starts with "biz!" and the decompressed
+ * size (u32 LE), so progress is the bytes already in the cache over the sum of
+ * those sizes. Shown in the window title and printed (stdout, logcat on
+ * Android) whenever the whole percent changes.
+ *
+ * The sum is over the files the game creates, not every .biz on the disc: the
+ * disc carries Data\lang\<language> for each language and the game unpacks
+ * one (English and French on the PAL disc: 626 MB of .biz, 554 MB unpacked),
+ * so counting them all left the line at 88 % forever. A language's files
+ * join the total once the game has created one of them. The cache also does
+ * not keep the disc's case (Data\Misc becomes data\misc), so the .big is
+ * looked up case-insensitively, which matters on Android's file systems.
+ *
+ * Polling stops at 100 %, or once the unpacked size has not moved for 30 s
+ * (a cache that was already complete, or one the game stopped writing). */
+typedef struct {
+    char big[1024];     /* expected path, disc case */
+    char found[1024];   /* the path that exists, once it does */
+    uint64_t size;
+    int lang;           /* under Data/lang/<language>/ */
+} CacheItem;
 static CacheItem *s_items;
 static int s_n, s_cap;
 static char s_game_dir[1024], s_save_dir[1024];
@@ -224,8 +240,10 @@ static void cache_scan(const char *dir, const char *rel, const char *cache_root)
                 }
                 snprintf(s_items[s_n].big, sizeof s_items[0].big, "%s/%.*s.big",
                          cache_root, (int)(strlen(sub) - 4), sub);
+                s_items[s_n].found[0] = 0;
                 s_items[s_n].size = (uint64_t)h[4] | (uint64_t)h[5] << 8
                                   | (uint64_t)h[6] << 16 | (uint64_t)h[7] << 24;
+                s_items[s_n].lang = !strncasecmp(sub, "lang/", 5);
                 s_n++;
             }
             if (f)
@@ -233,6 +251,44 @@ static void cache_scan(const char *dir, const char *rel, const char *cache_root)
         }
     }
     closedir(d);
+}
+
+/* Find `rel` (a path under `root`, '/'-separated) whatever the case of each
+ * component. Returns 1 and fills `out` when it exists. */
+static int find_nocase(const char *root, const char *rel, char *out, size_t cap)
+{
+    char cur[1024], part[256];
+    snprintf(cur, sizeof cur, "%s", root);
+    while (*rel) {
+        size_t n = strcspn(rel, "/");
+        DIR *d;
+        struct dirent *e;
+        int hit = 0;
+        if (n >= sizeof part)
+            return 0;
+        memcpy(part, rel, n);
+        part[n] = 0;
+        rel += n;
+        while (*rel == '/')
+            rel++;
+        if (!n)
+            continue;
+        if (!(d = opendir(cur)))
+            return 0;
+        while ((e = readdir(d)) != NULL) {
+            if (!strcasecmp(e->d_name, part)) {
+                size_t l = strlen(cur);
+                snprintf(cur + l, sizeof cur - l, "/%s", e->d_name);
+                hit = 1;
+                break;
+            }
+        }
+        closedir(d);
+        if (!hit)
+            return 0;
+    }
+    snprintf(out, cap, "%s", cur);
+    return 1;
 }
 
 static void set_title(const char *ascii)
@@ -248,41 +304,84 @@ static void set_title(const char *ascii)
 static void *cache_progress(void *unused)
 {
     char data[1100], cache[1100];
-    uint64_t total = 0;
-    int i, last = -1;
+    uint64_t last_done = (uint64_t)-1;
+    unsigned still = 0;                 /* polls without the size moving */
+    int i, last = -1, have_lang = 0;
     (void)unused;
 
     snprintf(data, sizeof data, "%s/Data", s_game_dir);
     snprintf(cache, sizeof cache, "%s/Cache/data", s_save_dir);
     cache_scan(data, "", cache);
     for (i = 0; i < s_n; i++)
-        total += s_items[i].size;
-    if (!total)
+        have_lang |= s_items[i].lang;
+    if (!s_n)
         return NULL;
     for (;;) {
-        uint64_t done = 0;
-        int pct;
+        uint64_t done = 0, total = 0;
+        int pct, lang_started = 0;
+        struct stat st;
+
         for (i = 0; i < s_n; i++) {
-            struct stat st;
-            if (stat(s_items[i].big, &st) == 0)
-                done += (uint64_t)st.st_size < s_items[i].size
-                      ? (uint64_t)st.st_size : s_items[i].size;
+            CacheItem *it = &s_items[i];
+            if (!it->found[0])
+                find_nocase(cache, it->big + strlen(cache), it->found,
+                            sizeof it->found);
+            if (it->found[0] && it->lang)
+                lang_started = 1;
         }
-        pct = (int)(done * 100 / total);
+        for (i = 0; i < s_n; i++) {
+            CacheItem *it = &s_items[i];
+            /* A language counts once the game has started on it: the one it
+             * picked, not the others on the disc. */
+            if (it->lang) {
+                char dir[1024];
+                const char *slash;
+                int j, picked = 0;
+                if (!lang_started)
+                    continue;
+                /* Same Data/lang/<language>/ directory as a created file? */
+                slash = strchr(it->big + strlen(cache) + 6, '/');
+                snprintf(dir, sizeof dir, "%.*s", slash
+                         ? (int)(slash - it->big) : 0, it->big);
+                for (j = 0; j < s_n && !picked; j++)
+                    picked = s_items[j].lang && s_items[j].found[0]
+                          && !strncasecmp(s_items[j].big, dir, strlen(dir))
+                          && s_items[j].big[strlen(dir)] == '/';
+                if (!picked)
+                    continue;
+            }
+            total += it->size;
+            if (it->found[0] && stat(it->found, &st) == 0)
+                done += (uint64_t)st.st_size < it->size
+                      ? (uint64_t)st.st_size : it->size;
+        }
+        pct = total ? (int)(done * 100 / total) : 0;
         if (pct != last) {
             char t[128];
             printf("[CACHE] background data preparation: %d %% (%llu / %llu MB)\n", pct,
                    (unsigned long long)(done >> 20), (unsigned long long)(total >> 20));
             fflush(stdout);
             if (pct < 100)
-                snprintf(t, sizeof t, "Fable - preparation des donnees %d %%", pct);
+                snprintf(t, sizeof t, "Fable - preparing game data %d %%", pct);
             else
                 snprintf(t, sizeof t, "Fable: The Lost Chapters");
             set_title(t);
             last = pct;
         }
-        if (pct >= 100)
+        /* Done, unless the language files have not started yet. */
+        if (pct >= 100 && (lang_started || !have_lang))
             return NULL;
+        still = done == last_done ? still + 1 : 0;
+        last_done = done;
+        if (still >= 60) {              /* 30 s at 0.5 s */
+            printf("[CACHE] no progress for 30 s; stopped at %d %% (%llu / %llu MB)\n",
+                   pct, (unsigned long long)(done >> 20),
+                   (unsigned long long)(total >> 20));
+            fflush(stdout);
+            if (pct < 100)
+                set_title("Fable: The Lost Chapters");
+            return NULL;
+        }
         usleep(500 * 1000);
     }
 }
