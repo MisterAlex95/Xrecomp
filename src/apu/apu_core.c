@@ -102,6 +102,15 @@ static inline uint32_t apu_mapped_ram(void)
 uint8_t *mcpx_apu_phys(uint64_t addr)
 {
     uint32_t a = (uint32_t)addr & 0x0FFFFFFFu;
+    /* RAM mapped beyond 256 MB (xbox_SetMapSize): MmGetPhysicalAddress
+     * returns such an address unchanged, so the whole number names it. The
+     * 28-bit mask below would fold it into another page: Fable allocates its
+     * sound and music buffers in a 608 MB reserve at 0x2xxxxxxx, and every
+     * one of those voices played whatever sat at the address minus
+     * 0x20000000 -- zeros, so the front end and the world were silent while
+     * the movies (buffers in low RAM) played. */
+    if ((uint32_t)addr >= (256u << 20) && (uint32_t)addr < apu_mapped_ram())
+        return g_apu_ram_ptr + (uint32_t)addr;
     /* RAM above the window's 64 MB. On a 128 MB layout (a devkit) most of
      * the heap sits above 0x04000000, and so do the sound buffers a title
      * malloc()s and hands to DirectSound as plain pointers, which
@@ -152,6 +161,8 @@ uint8_t *mcpx_apu_phys(uint64_t addr)
 const char *mcpx_apu_phys_class(uint64_t addr)
 {
     uint32_t a = (uint32_t)addr & 0x0FFFFFFFu;
+    if ((uint32_t)addr >= (256u << 20) && (uint32_t)addr < apu_mapped_ram())
+        return "ram";
     if (a >= (64u << 20))
         return a < apu_mapped_ram() ? "ram" : "wrap";
     if (xbox_PhysRamNamedAt(a))
