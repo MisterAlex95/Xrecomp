@@ -199,3 +199,14 @@ the lock stalls D3D init (RECOMP_GUEST_CPU_TRACE).
   BACK_END_WRITE_SEMAPHORE_RELEASE before semaphore_watch has set the target is dropped; main thread stuck in
   sub_00855260, 0 flips) went from 0 of 6 starts to 4 of 8 on 2026-11-11. The pending-release fix for that race
   must land with this.
+
+## 2026-11-11: FPS quick wins (WP5)
+- The main thread's 92-100 % "in sub_00855520" was D3D's flush-kick wait sub_008556D0 (inlined into its caller in
+  the shared build): it sets PFB 0x100410 bit 16 and spins until the ack thread clears it, i.e. until the executor
+  gets through what it is drawing. overrides.c replaces it with a wait that yields, then sleeps 50 us a turn
+  (FABLE_D3D_SPIN=1: the old spin). Needs the generated code regenerated (prepare / tools.recomp --exclude-manual).
+  Mac title screen 12.3-13.2 -> 17.5-17.7 fps, main thread from 100 % spinning to sleeping.
+- Front end Sleep(50) at 0x0020BD93 / 0x0020C3C5 -> 16 ms (FABLE_FRONTEND_SLEEP_MS, kernel delay override).
+- Executor: vertex programs shaded on the raster pool; RECOMP_ACK_IDLE_US (off until the scan follows jumps).
+- Seen during these runs: 0-flip starts (D3D waiting in sub_00855260, GPU semaphore behind) in roughly 1 run in 4
+  on a loaded Mac -- the init/semaphore race of the investigation (section 4.1), more frequent than its 2 in 14.

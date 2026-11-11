@@ -4,6 +4,11 @@
  * bodies defined here, so every caller, direct or indirect, reaches these. */
 #define RECOMP_GENERATED_CODE   /* register names (eax, esp...) as in generated code */
 #include "recomp/gen/recomp_types.h"
+#include <stdlib.h>
+#ifndef _WIN32
+#include <sched.h>
+#include <time.h>
+#endif
 
 /* XMVDecoder_GetNextFrame(IXMVDecoder *, IDirect3DSurface8 *, XMVRESULT *,
  *                         REFERENCE_TIME *)  -- stdcall, 16 bytes of args.
@@ -288,4 +293,50 @@ void sub_0004B440(void)
     (void)from;
     (void)to;
 #endif
+}
+
+/* ── D3D's flush kick: sub_008556D0, the wait the main thread spins in ──────
+ *
+ * XDK D3D's KickOff, before it writes DMA_PUT, sets bit 16 of PFB register
+ * 0x100410 (nv = [device+0x1C28]) and spins until the GPU clears it. Here the
+ * NV2A ack thread clears it, at the top of each pass and between commands of
+ * the segment it executes -- so while the executor rasterises a big batch the
+ * title waits for it, and Fable's main thread spent 92-100 % of a core in this
+ * loop on the title screen and in-world (sampled under sub_00855520, its
+ * caller, into which the shared build had inlined it), a core the
+ * rasteriser's workers need, above all on a handheld's five fast cores.
+ *
+ * The same register traffic and the same flags out, but the wait yields, and
+ * after 64 empty turns sleeps 50 us a turn. FABLE_D3D_SPIN=1 restores the
+ * bare spin. */
+void sub_008556D0(void)
+{
+    static int spin = -1;
+    unsigned turn = 0;
+
+    if (spin < 0) {
+        const char *e = getenv("FABLE_D3D_SPIN");
+        spin = e && e[0] == '1';
+    }
+    eax = MEM32(0x00862288u);
+    eax = MEM32(eax + 0x1C28);
+    ecx = MEM32(eax + 0x100410) | 0x10000u;
+    MEM32(eax + 0x100410) = ecx;
+    while (MEM32(eax + 0x100410) & 0x10000u) {
+        if (spin)
+            continue;
+#ifndef _WIN32
+        if (turn < 64) {
+            turn++;
+            sched_yield();
+        } else {
+            struct timespec ts = { 0, 50 * 1000 };
+            nanosleep(&ts, NULL);
+        }
+#endif
+    }
+    /* test [nv+0x100410], 0x10000 came out zero: ZF and PF set, CF, SF,
+     * OF clear. */
+    g_eflags = (g_eflags & ~0x8C5u) | 0x4u | 0x40u;
+    esp += 4;                                     /* ret */
 }
