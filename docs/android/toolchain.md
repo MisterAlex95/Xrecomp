@@ -74,6 +74,30 @@ docker build -f tools/docker/android.Dockerfile --target prepare-apk-out --outpu
 Without `-PxbaToolchainDir` the APK is the plain shell, unchanged (the app hides Prepare when the toolchain is
 absent); the CI targets do not build the toolchain.
 
+**On a macOS host, without Docker.** The scripts also run on macOS (Apple silicon or Intel): `common.sh` takes the
+NDK's `darwin-x86_64` prebuilts (universal binaries, native on Apple silicon) and falls back to `shasum -a 256` and
+`wc -c` where GNU `sha256sum` / `stat` are missing; the scripts stay parseable by macOS's bash 3.2. What the host
+needs: the NDK r28c under `$ANDROID_HOME/ndk/28.2.13676358`, Homebrew `cmake` and `ninja`, and a `python3` ≥ 3.12
+first in `PATH` (`/usr/bin/python3` is 3.9: put a `python3` → `python3.12` link ahead of it). The output is the
+`toolchain-out` layout:
+
+```bash
+export ANDROID_HOME=~/Library/Android/sdk ANDROID_NDK_HOME=~/Library/Android/sdk/ndk/28.2.13676358
+export XBA_TC_OUT=$PWD/out/toolchain XBA_TC_WORK=/tmp/tc/work XBA_TC_CACHE=/tmp/tc/cache
+JOBS=10 tools/android/toolchain/build_llvm.sh &          # beside the other two
+JOBS=4 tools/android/toolchain/build_capstone.sh && JOBS=4 tools/android/toolchain/build_python.sh; wait
+XBA_TC_CHECK_WORK=/tmp/tc/check tools/android/toolchain/check.sh out/toolchain
+```
+
+Without `qemu-aarch64` (not installed on macOS by default) `check.sh` runs the static checks only (jniLibs: ELF
+machine, NEEDED, `libxbacc.so` static; assets: `.sha256`) and says it skipped the rest; on Linux qemu stays
+required.
+On an M1 Max (10 cores), 2026-11-11: LLVM 11 min (host tablegen 65 s, cross build 10 min) with CPython (4.3 min)
+and capstone built beside it; the outputs have the sizes of the table below. The NDK unpacked on macOS's
+case-insensitive file system keeps one of each pair of netfilter headers that differ only by case
+(`xt_CONNMARK.h` / `xt_connmark.h`, ...), so its `sysroot.zip` lacks those few kernel headers; generated title code
+never includes them.
+
 | Component | Version | How |
 |---|---|---|
 | CPython | 3.13.18 | Its official Android build (`Android/android.py`, PEP 738), NDK r28c, API 30. The prebuilt libffi/bzip2/xz/OpenSSL/SQLite it unpacks (BeeWare's `cpython-android-source-deps`, as CPython's own release) are fetched and checked first. |

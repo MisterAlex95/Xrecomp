@@ -34,9 +34,15 @@ for so in "$N"/*.so; do check_jnilib "$so"; done
 if "$NDK_BIN/llvm-readelf" -d "$N/libxbacc.so" | has NEEDED; then fail "libxbacc.so is not static"; fi
 echo "== assets"
 for z in "$ASSET_DIR"/*.zip; do
-    printf '%-24s %10s\n' "$(basename "$z")" "$(stat -c%s "$z")"
-    (cd "$ASSET_DIR" && sha256sum -c --quiet "$(basename "$z").sha256")
+    printf '%-24s %10s\n' "$(basename "$z")" "$(filesize "$z")"
+    (cd "$ASSET_DIR" && sha256 -c --quiet "$(basename "$z").sha256")
 done
+# A macOS host (no qemu-user there unless installed): the static checks above only. The Docker image always has it.
+if [ "$(uname -s)" != Linux ] && ! command -v "$QEMU" >/dev/null; then
+    echo "SKIP: no $QEMU on this $(uname -s) host: the static checks only (jniLibs, assets)"
+    rm -rf "$W"
+    exit 0
+fi
 
 # What the app installs (Toolchain.java): files/sysroot-<v>, files/python-<v>.
 F=$W/files

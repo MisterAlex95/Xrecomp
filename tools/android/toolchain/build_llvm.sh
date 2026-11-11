@@ -76,7 +76,7 @@ for f in crtbegin_so.o crtend_so.o crtbegin_dynamic.o crtend_android.o \
 done
 # compiler-rt builtins and libunwind.a where the NDK keeps them (lib/linux/, lib/linux/aarch64/): the link takes
 # libunwind.a next to the builtins.
-ndk_rt=$(echo "$ANDROID_NDK_HOME"/toolchains/llvm/prebuilt/linux-x86_64/lib/clang/*/lib/linux)
+ndk_rt=$(echo "$NDK_PREBUILT"/lib/clang/*/lib/linux)
 cp "$ndk_rt/libclang_rt.builtins-aarch64-android.a" "$stage/lib/clang/$MAJOR/lib/linux/"
 cp "$ndk_rt/aarch64/libunwind.a" "$stage/lib/clang/$MAJOR/lib/linux/aarch64/"
 cp -a "$cross/lib/clang/$MAJOR/include" "$stage/lib/clang/$MAJOR/"

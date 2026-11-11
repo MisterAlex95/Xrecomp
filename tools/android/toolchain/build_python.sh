@@ -21,7 +21,9 @@ echo "$PYTHON_DEPS" | while read -r dep sum; do
 done
 # Our NDK (r28c, the image's) instead of the one android-env.sh pins (it would install that one through sdkmanager).
 ndk_version=$(basename "$ANDROID_NDK_HOME")
-sed -i "s/^ndk_version=.*/ndk_version=$ndk_version/" "$src/Android/android-env.sh"
+# (-i.orig: GNU and BSD sed both take it.)
+sed -i.orig "s/^ndk_version=.*/ndk_version=$ndk_version/" "$src/Android/android-env.sh"
+rm "$src/Android/android-env.sh.orig"
 grep -q "^ndk_version=$ndk_version\$" "$src/Android/android-env.sh"
 
 export ANDROID_HOME=${ANDROID_HOME:?} ANDROID_API_LEVEL=$XBA_TC_API CROSS_BUILD_DIR=$cross
