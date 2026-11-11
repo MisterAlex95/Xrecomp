@@ -180,6 +180,22 @@ def env_force_header(tid, env):
     return "\n".join(lines)
 
 
+def identify_xbe(xbe, work):
+    """tools.xbe_ident's answer (XDK version, engines, profile layers) in
+    work/ident.json, or None when it cannot tell: the prepare goes on
+    without it (it only informs the layers, XBA-66)."""
+    from tools import xbe_ident
+    try:
+        ident = xbe_ident.identify(xbe)
+    except Exception as e:
+        print("      could not identify the XDK and engine: %s" % e, flush=True)
+        return None
+    ident["summary"] = xbe_ident.summary(ident)
+    with open(os.path.join(work, "ident.json"), "w", encoding="utf-8") as f:
+        json.dump(ident, f, indent=1)
+    return ident
+
+
 def assemble_project(proj, profile, info):
     """templates/new-game + the profile's .c files in src/title/, and
     src/title/env_force.h when the profile has env_force. main.c gets the
@@ -276,6 +292,9 @@ def main(argv=None):
             xbe = os.path.join(work, "xbe", "default.xbe")
     log = os.path.join(work, "prepare.log")
     print("      %s (title ID %s), work folder %s" % (info["title"], tid, work), flush=True)
+    ident = identify_xbe(xbe, work)
+    if ident:
+        print("      built with: %s" % ident["summary"], flush=True)
     pdir = os.path.join(TITLES, tid.lower())
     profile = None
     if os.path.isfile(os.path.join(pdir, "title.json")):

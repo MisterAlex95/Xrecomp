@@ -100,8 +100,10 @@ class Run:
             self.env_force = pack.env_force_of(self.profile)
         except ValueError as e:
             raise cc.StepError("BAD_PROFILE", "titles/%s: %s" % (self.tid.lower(), e))
-        self.rep.progress(1, 100, "%s (title ID %s)%s" % (self.info.get("title", "?"), self.tid,
-                                                         ", title profile" if self.profile else ""))
+        self.ident = self.m.identify_xbe(self.xbe, self.work)
+        self.rep.progress(1, 100, "%s (title ID %s)%s%s" % (self.info.get("title", "?"), self.tid,
+                                                           ", title profile" if self.profile else "",
+                                                           ", " + self.ident["summary"] if self.ident else ""))
 
     def analyse(self):
         an = os.path.join(self.work, "analysis")

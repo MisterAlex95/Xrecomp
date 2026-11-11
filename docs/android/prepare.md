@@ -105,7 +105,7 @@ The steps, each one subprocess (`python -m tools.<tool>`) or a pool of compiler 
 
 | # | id | Does | Stamp |
 |---|---|---|---|
-| 1 | `identify` | finds `default.xbe`, copies it to `<work>/xbe/`, `xbe_parser` → title ID, title profile | `parse` |
+| 1 | `identify` | finds `default.xbe`, copies it to `<work>/xbe/`, `xbe_parser` → title ID, title profile; `xbe_ident` → XDK version, engines, profile layers in `<work>/ident.json` (shown in `msg`; never fails the step) | `parse` |
 | 2 | `analyse` | `disasm`, `func_id`, `abi_analysis` | `disasm`, `func_id`, `abi` |
 | 3 | `lift` | the project from `templates/new-game` + `titles/<title id>/`, then `tools.recomp` | `lift` (= profile digest) |
 | 4 | `compile` | every C file to an object, largest first, cached | the object cache |
@@ -136,7 +136,7 @@ XBA_RESULT error code=<UPPER_SNAKE> msg=<text>
 Example (the conformance stub):
 
 ```
-XBA_PROGRESS step=1/5 id=identify pct=100 msg=SYNTH (title ID 12345678)
+XBA_PROGRESS step=1/5 id=identify pct=100 msg=SYNTH (title ID 12345678), XDK 5849, no known engine
 XBA_PROGRESS step=2/5 id=analyse pct=55 msg=disasm done in 0 s
 XBA_PROGRESS step=4/5 id=compile pct=40 eta=12 msg=2/5 files (2 compiled)
 XBA_PROGRESS step=5/5 id=pack pct=100 msg=pack 12345678, 19272 bytes
@@ -212,7 +212,7 @@ into a link error on the device rather than a dlopen failure at start.
 The working directory does not matter; `python -m tools.prepare` needs the toolkit root on `sys.path`
 (`PYTHONPATH=<toolkit root>`).
 
-**Toolkit tree** in the assets (read-only): `tools/` (Python), `include/`, the headers of `src/` (`src/**/*.h`),
+**Toolkit tree** in the assets (read-only): `tools/` (Python, plus the data files the tools read: `tools/recomp/data/`, `tools/xbe_ident/engines.json`), `include/`, the headers of `src/` (`src/**/*.h`),
 `templates/new-game/`, `templates/runtime/` (the `recomp_types.h` the lifter copies next to the generated C), `titles/`, and `tools/VERSION` (one line: the commit; written by the asset build, git-ignored).
 
 **status.json**: the service writes it from the progress lines for the UI and for a restart after the app was killed.

@@ -106,7 +106,7 @@ def toolkitAsset = xbaToolchainDir ? tasks.register('xbaToolkitAsset', XbaToolki
     // docs/android/prepare.md « Toolkit tree »: the pipeline (Python only: no tests, caches or per-game output),
     // the title template and profiles, and the headers the generated C includes.
     it.toolkitFiles.from(fileTree(repoRoot) {
-        include 'tools/**/*.py', 'tools/recomp/data/**'
+        include 'tools/**/*.py', 'tools/recomp/data/**', 'tools/xbe_ident/*.json'
         exclude '**/test_*.py', '**/tests/**', '**/conftest.py', '**/__pycache__/**', 'tools/*/output/**',
                 'tools/android/**', 'tools/docker/**', 'tools/ci/**', 'tools/conformance/msvc-wine/**'
     })
