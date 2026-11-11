@@ -182,6 +182,7 @@ See the [APU](../../src/apu/README.md) and [DirectSound](../../src/audio/README.
 | `RECOMP_APU_MIXDOWN_ALL` | on | `0` limits the mixdown. | `apu_dsp.c` |
 | `RECOMP_APU_DSP_ACK` | auto | DSP doorbell acknowledgement: `auto` derives it, `0`/`off` disables, or a list of addresses. | `apu_dsp.c` |
 | `RECOMP_APU_PRIORITY` | on | `0` leaves the APU frame thread at the default priority (otherwise nice -16 on Linux/Android, QoS user-interactive on macOS). | `apu_core.c` |
+| `RECOMP_APU_EP_CANARY` | on | Keeps the XDK EP program's canary (`0x00CCCCCC` at EP P:6, VA `0xFE85A018`) while the APU frame thread runs; DirectSound resets the whole APU (10 ms stall) on every `DoWork` that reads anything else. `0` leaves the word alone. | `apu_dsp.c` |
 | `RECOMP_AUDIO_BUF_COUNT`, `RECOMP_AUDIO_BUF_SAMPLES` | built-in | Device buffer count and size. | `apu_sdl2.c`, `apu_xaudio2.c` |
 
 ## Input

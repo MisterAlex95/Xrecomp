@@ -4234,6 +4234,11 @@ void *xbox_GetMemoryBase(void)
     return g_memory_base;
 }
 
+void *xbox_GetMcpxAperture(void)
+{
+    return g_mcpx_memory;
+}
+
 ptrdiff_t xbox_GetMemoryOffset(void)
 {
     return g_memory_offset;

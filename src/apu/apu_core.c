@@ -1593,6 +1593,10 @@ uint64_t mcpx_apu_mmio_read(MCPXAPUState *d, uint64_t addr, unsigned int size)
         return mcpx_apu_vp_read(d, addr - 0x20000, size);
     } else if (addr < 0x20000) {
         return mcpx_apu_read(d, (hwaddr)addr, size);
+    } else {
+        uint64_t v;
+        if (mcpx_apu_dsp_mem_read(addr, &v))
+            return v;
     }
     return 0;
 }

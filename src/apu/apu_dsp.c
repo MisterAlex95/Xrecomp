@@ -155,12 +155,74 @@ static uint32_t *dsp_ack_auto_slot(MCPXAPUState *d)
     return (uint32_t *)(mcpx_apu_phys(page) + GP_DOORBELL_OFFSET);
 }
 
+/* ── The EP program's canary ─────────────────────────────────────────────
+ *
+ * DirectSound checks that the encode processor is alive by reading a word of
+ * its P memory: the XDK EP program keeps 0x00CCCCCC at P:6, which is APU
+ * aperture offset 0x5A018 (Xbox VA 0xFE85A018). Fable's DSOUND (DoWork,
+ * sub_0082CAF4) ends with
+ *
+ *     if (*(uint32_t *)0xFE85A018 != 0x00CCCCCC) sub_0082C8B4();
+ *
+ * and sub_0082C8B4 resets the whole APU: two AC'97 channels, the GP and EP
+ * reset registers, the front end, then KeStallExecutionProcessor(10000).
+ * With no EP program running the word stays 0, so every DoWork reset the
+ * APU: 781 resets in 45 s of movies, 10 ms each, movies at 21-28 fps. With
+ * the word in place: no resets, 30 fps.
+ *
+ * The EP memory is plain RAM in the aperture (only 0x00000-0x2FFFF is
+ * trapped), so the read never reaches the model: the word is kept there
+ * every APU frame, which also restores it after the title rewrites EP
+ * memory. mcpx_apu_dsp_mem_read answers it for a host that traps the
+ * read instead. RECOMP_APU_EP_CANARY=0 leaves the word alone.
+ *
+ * ponytail: a canary, not an EP. Anything the title reads back from EP
+ * memory beyond this word is still what it last wrote there. */
+#define EP_CANARY_OFFSET 0x5A018u
+#define EP_CANARY_VALUE  0x00CCCCCCu
+extern void *xbox_GetMcpxAperture(void);
+
+static int ep_canary_on(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("RECOMP_APU_EP_CANARY");
+        on = (e && *e) ? (atoi(e) != 0) : 1;
+        if (on)
+            fprintf(stderr, "[APU] EP canary: 0x%08X kept at 0x%08X\n",
+                    EP_CANARY_VALUE, 0xFE800000u + EP_CANARY_OFFSET);
+    }
+    return on;
+}
+
+static void ep_canary_poll(void)
+{
+    char *ap;
+    volatile uint32_t *w;
+
+    if (!ep_canary_on() || !(ap = (char *)xbox_GetMcpxAperture()))
+        return;
+    w = (volatile uint32_t *)(ap + EP_CANARY_OFFSET);
+    if (*w != EP_CANARY_VALUE)
+        *w = EP_CANARY_VALUE;
+}
+
+int mcpx_apu_dsp_mem_read(uint64_t addr, uint64_t *val)
+{
+    if (addr == EP_CANARY_OFFSET && ep_canary_on()) {
+        *val = EP_CANARY_VALUE;
+        return 1;
+    }
+    return 0;
+}
+
 void mcpx_apu_dsp_ack_poll(MCPXAPUState *d)
 {
     int i;
 
     if (s_dsp_ack_count < 0)
         dsp_ack_init();
+    ep_canary_poll();
     if (!d->ram_ptr)
         return;
     if (s_dsp_ack_auto) {

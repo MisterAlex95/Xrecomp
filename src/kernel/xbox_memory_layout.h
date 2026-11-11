@@ -245,6 +245,13 @@ BOOL xbox_IsXboxAddress(uintptr_t address);
 void *xbox_GetMemoryBase(void);
 
 /**
+ * Host address of the MCPX device aperture (Xbox VA 0xFE800000, 8 MB), or
+ * NULL when it is not mapped. Its first 0x30000 bytes (APU registers and VP)
+ * may be trapped; the GP/EP DSP memories above them are plain memory.
+ */
+void *xbox_GetMcpxAperture(void);
+
+/**
  * Get the offset from Xbox VA to actual mapped address.
  * actual_address = xbox_va + offset
  * Returns 0 if memory is mapped at original Xbox addresses (ideal case).
