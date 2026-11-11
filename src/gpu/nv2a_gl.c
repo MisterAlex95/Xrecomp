@@ -868,7 +868,12 @@ typedef struct {
  * while no target it overlaps was written after its upload. */
 static uint32_t s_rt_serial;
 
-#define NV_GL_MAX_RT    16
+/* Colour targets held at once (least recently bound evicted: read back,
+ * and a scaled one loses its resolution until re-seeded). Burnout 3 holds
+ * 14 in a race; 32 leaves room for menus and scenes with more effect
+ * targets. Only slots in use own GL objects; the walks over the table cost
+ * a compare per slot. */
+#define NV_GL_MAX_RT    32
 #define NV_GL_MAX_DEPTH 8
 static GlRT    s_rt[NV_GL_MAX_RT];
 /* The colour target each stage samples directly this batch (NULL: none;

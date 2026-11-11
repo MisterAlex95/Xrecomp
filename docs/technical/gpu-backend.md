@@ -79,7 +79,7 @@ guest memory:
 - a texture the GPU cannot sample it as (another format or shape, an
   offset inside it: "Render to texture" below) -- read back before the
   batch;
-- its eviction (least recently drawn, 16 targets) or a change of its bytes
+- its eviction (least recently drawn, 32 targets) or a change of its bytes
   per pixel;
 - an out-of-memory reset of the GL objects (targets reseed from guest
   memory);
