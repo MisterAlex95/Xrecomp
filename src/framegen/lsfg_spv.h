@@ -77,6 +77,18 @@ int lsfg_spv_inspect(const uint32_t *words, size_t nwords, LsfgSpvLayout *found)
  * partly rewritten only for LSFG_SPV_ELAYOUT (the renumbering itself succeeded). */
 int lsfg_spv_renumber(uint32_t *words, size_t nwords, const LsfgSpvLayout *expect, LsfgSpvLayout *found);
 
+/* What a module asks of the device: its SPIR-V version (0x00010600 = 1.6, which needs Vulkan 1.3; 1.5 needs 1.2;
+ * 1.3 needs 1.1) and the capabilities below. Shaders translated by DXVK 2.6 are SPIR-V 1.6 with VulkanMemoryModel and
+ * StorageImageWriteWithoutFormat. */
+#define LSFG_SPV_CAP_VULKAN_MEMORY_MODEL   0x01u
+#define LSFG_SPV_CAP_READ_WITHOUT_FORMAT   0x02u
+#define LSFG_SPV_CAP_WRITE_WITHOUT_FORMAT  0x04u
+#define LSFG_SPV_CAP_EXTENDED_FORMATS      0x08u
+#define LSFG_SPV_CAP_FLOAT16               0x10u
+#define LSFG_SPV_CAP_INT16                 0x20u
+#define LSFG_SPV_CAP_OTHER                 0x80u   /* a capability beyond Shader and the above */
+int lsfg_spv_requirements(const uint32_t *words, size_t nwords, uint32_t *version, uint32_t *caps);
+
 const char *lsfg_spv_strerror(int err);
 
 #ifdef __cplusplus

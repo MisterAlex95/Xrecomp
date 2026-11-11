@@ -19,12 +19,12 @@ static const LsfgShaderInfo k_table[] = {
     { "beta[2]", 277, 0, { 0, 1, 2, 2 } },
     { "beta[3]", 278, 0, { 0, 1, 2, 2 } },
     { "beta[4]", 279, 0, { 1, 1, 2, 6 } },
-    { "gamma[0]", 257, 0, { 0, 2, 9, 3 } },
+    { "gamma[0]", 257, 0, { 1, 2, 9, 3 } },
     { "gamma[1]", 259, 0, { 0, 1, 3, 4 } },
     { "gamma[2]", 260, 0, { 0, 1, 4, 4 } },
     { "gamma[3]", 261, 0, { 0, 1, 4, 4 } },
     { "gamma[4]", 262, 0, { 1, 2, 6, 1 } },
-    { "delta[0]", 257, 0, { 0, 2, 9, 3 } },
+    { "delta[0]", 257, 0, { 1, 2, 9, 3 } },
     { "delta[1]", 263, 0, { 0, 1, 3, 4 } },
     { "delta[2]", 264, 0, { 0, 1, 4, 4 } },
     { "delta[3]", 265, 0, { 0, 1, 4, 4 } },
@@ -45,12 +45,12 @@ static const LsfgShaderInfo k_table[] = {
     { "p_beta[2]", 300, 1, { 0, 1, 2, 2 } },
     { "p_beta[3]", 301, 1, { 0, 1, 2, 2 } },
     { "p_beta[4]", 302, 1, { 1, 1, 2, 6 } },
-    { "p_gamma[0]", 280, 1, { 0, 2, 5, 3 } },
+    { "p_gamma[0]", 280, 1, { 1, 2, 5, 3 } },
     { "p_gamma[1]", 282, 1, { 0, 1, 3, 2 } },
     { "p_gamma[2]", 283, 1, { 0, 1, 2, 2 } },
     { "p_gamma[3]", 284, 1, { 0, 1, 2, 2 } },
     { "p_gamma[4]", 285, 1, { 1, 2, 4, 1 } },
-    { "p_delta[0]", 280, 1, { 0, 2, 5, 3 } },
+    { "p_delta[0]", 280, 1, { 1, 2, 5, 3 } },
     { "p_delta[1]", 286, 1, { 0, 1, 3, 2 } },
     { "p_delta[2]", 287, 1, { 0, 1, 2, 2 } },
     { "p_delta[3]", 288, 1, { 0, 1, 2, 2 } },
@@ -321,6 +321,38 @@ int lsfg_spv_renumber(uint32_t *words, size_t nwords, const LsfgSpvLayout *expec
     }
     if (expect && memcmp(expect, &l, sizeof l) != 0)
         return LSFG_SPV_ELAYOUT;
+    return 0;
+}
+
+int lsfg_spv_requirements(const uint32_t *words, size_t nwords, uint32_t *version, uint32_t *caps)
+{
+    if (!words || nwords < 5 || words[0] != LSFG_SPV_MAGIC)
+        return LSFG_SPV_ENOTSPV;
+    uint32_t c = 0;
+    for (size_t at = 5; at < nwords;) {
+        uint32_t wc = words[at] >> 16, op = words[at] & 0xffffu;
+        if (wc == 0 || wc > nwords - at)
+            return LSFG_SPV_ECORRUPT;
+        if (op == 17 && wc >= 2) {   /* OpCapability */
+            switch (words[at + 1]) {
+            case 1: case 50: case 2: break;   /* Shader, ImageQuery, Matrix */
+            case 5345: c |= LSFG_SPV_CAP_VULKAN_MEMORY_MODEL; break;
+            case 55: c |= LSFG_SPV_CAP_READ_WITHOUT_FORMAT; break;
+            case 56: c |= LSFG_SPV_CAP_WRITE_WITHOUT_FORMAT; break;
+            case 49: c |= LSFG_SPV_CAP_EXTENDED_FORMATS; break;
+            case 9: c |= LSFG_SPV_CAP_FLOAT16; break;
+            case 22: c |= LSFG_SPV_CAP_INT16; break;
+            default: c |= LSFG_SPV_CAP_OTHER; break;
+            }
+        } else if (op != 17 && op != 11 && op != 10) {   /* capabilities come first (after OpCapability: ext/imports) */
+            break;
+        }
+        at += wc;
+    }
+    if (version)
+        *version = words[1];
+    if (caps)
+        *caps = c;
     return 0;
 }
 

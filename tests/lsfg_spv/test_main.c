@@ -167,8 +167,34 @@ static void test_table(void)
     }
 }
 
+static void test_requirements(void)
+{
+    SbModule m;
+    size_t n = sb_build_layout(&m, 0, 1, 1, 1);
+    uint32_t version = 0, caps = 0xff;
+    CHECK_EQ(lsfg_spv_requirements(m.w, n, &version, &caps), 0);
+    CHECK_EQ(version, 0x10000);
+    CHECK_EQ(caps, 0);
+    /* The OpCapability Shader at word 5 becomes VulkanMemoryModel, then StorageImageWriteWithoutFormat, Float16. */
+    static const uint32_t cap[][2] = { { 5345, LSFG_SPV_CAP_VULKAN_MEMORY_MODEL },
+                                       { 56, LSFG_SPV_CAP_WRITE_WITHOUT_FORMAT },
+                                       { 55, LSFG_SPV_CAP_READ_WITHOUT_FORMAT },
+                                       { 9, LSFG_SPV_CAP_FLOAT16 },
+                                       { 4427, LSFG_SPV_CAP_OTHER } };
+    for (size_t i = 0; i < sizeof cap / sizeof cap[0]; i++) {
+        SbModule t = m;
+        t.w[6] = cap[i][0];
+        CHECK_EQ(lsfg_spv_requirements(t.w, n, &version, &caps), 0);
+        CHECK_EQ(caps, cap[i][1]);
+    }
+    SbModule t = m;
+    t.w[5] = 0;
+    CHECK_EQ(lsfg_spv_requirements(t.w, n, &version, &caps), LSFG_SPV_ECORRUPT);
+}
+
 int main(void)
 {
+    test_requirements();
     test_magic();
     test_renumber_order();
     test_sets();
