@@ -30,11 +30,13 @@ final class LauncherPanel extends PanelView {
     private final RectF artBox = new RectF(84, 176, 342, 434);
     private final android.graphics.Paint artP = new android.graphics.Paint(android.graphics.Paint.FILTER_BITMAP_FLAG
                                                                            | android.graphics.Paint.ANTI_ALIAS_FLAG);
+    private final android.graphics.Path artClip = new android.graphics.Path();
     private android.graphics.Bitmap art;
 
     LauncherPanel(Context c, Actions actions) {
         super(c, DIM_MS);
         this.actions = actions;
+        artClip.addRoundRect(artBox, 22, 22, android.graphics.Path.Direction.CW);
         Button play = new Button(PLAY, Kind.TAP, 36, 510, 520, 860, PanelIcons.Icon.PLAY, c.getString(R.string.PLAY),
                                  null);
         play.accent = true;
@@ -115,10 +117,8 @@ final class LauncherPanel extends PanelView {
         drawCard(c, card);
         float tx = 84;
         if (art != null) {
-            android.graphics.Path clip = new android.graphics.Path();
-            clip.addRoundRect(artBox, 22, 22, android.graphics.Path.Direction.CW);
             c.save();
-            c.clipPath(clip);
+            c.clipPath(artClip);
             c.drawBitmap(art, null, artBox, artP);
             c.restore();
             stroke.setStrokeWidth(2);
