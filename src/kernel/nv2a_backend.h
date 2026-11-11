@@ -101,6 +101,9 @@ typedef struct {
      * that ignores these draws that pass over the whole surface. */
     uint32_t stencil_enable, stencil_func, stencil_ref, stencil_func_mask;
     uint32_t stencil_write_mask, stencil_fail, stencil_zfail, stencil_zpass;
+    /* SET_ZPASS_PIXEL_COUNT_ENABLE: a visibility test is counting the pixels
+     * this batch passes the depth test with (see zpass_read). */
+    uint32_t zpass_enable;
 } Nv2aRenderState;
 
 /* A vertex as the CPU transform left it, for back ends with
@@ -167,6 +170,13 @@ typedef struct {
     void (*draw)(const Nv2aSurface *s, const Nv2aBatch *b);
     void (*flip)(void);
     uint32_t caps;              /* NV2A_BACKEND_CAP_*; 0 in older initialisers */
+    /* Visibility tests. The pixels the back end's batches passed the depth
+     * test with while zpass_enable was set, since the previous call (the
+     * call resets the count). The executor calls it at GET_REPORT, adding to
+     * what it reports, and at CLEAR_REPORT_VALUE, discarding. NULL: reports
+     * carry 0 for a back end's batches. A count may be a lower bound
+     * (GLES 3.0 queries say only "any passed": report 1). */
+    uint32_t (*zpass_read)(void);
 } Nv2aBackend;
 
 /* Register (or, with NULL, remove) the back end. Call before the title starts
