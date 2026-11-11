@@ -57,13 +57,21 @@ typedef struct {
     uint32_t format;
     uint32_t clip_x, clip_y;
     /* 0: there is no colour surface to write -- SET_SURFACE_COLOR_OFFSET is
-     * 0 (a depth-only pass such as a shadow map), the surface would land on
-     * the title's image, or (draw() only) SET_COLOR_MASK is 0. A back end
-     * then draws into depth/stencil alone (rs->zeta_va) and neither creates
-     * nor reads back a colour target at color_va: Fable's 768x768 shadow
-     * pass at offset 0 resolved to 0x80000000 and its read-back overwrote
-     * the title's textures there. clear() then carries Z/stencil flags only. */
+     * 0 (a depth-only pass such as a shadow map) or the surface would land
+     * on the title's image. A back end then draws into depth/stencil alone
+     * (rs->zeta_va) and neither creates nor reads back a colour target at
+     * color_va: Fable's 768x768 shadow pass at offset 0 resolved to
+     * 0x80000000 and its read-back overwrote the title's textures there.
+     * clear() then carries Z/stencil flags only. */
     uint32_t color_valid;
+    /* draw() only: the colour surface is there (color_valid) but
+     * SET_COLOR_MASK writes no channel -- a depth pre-pass or a visibility
+     * proxy on the frame's own surface. A back end may draw it into the
+     * colour target with every channel masked (it then writes nothing
+     * there and need not read it back), or into depth/stencil alone. Fable
+     * interleaves such batches with its normal ones on the back buffer; sent
+     * as color_valid 0 they cost a framebuffer switch each way. */
+    uint32_t color_masked;
 } Nv2aSurface;
 
 /* A texture as the title programmed it. uv in Nv2aVertex are in texels. */

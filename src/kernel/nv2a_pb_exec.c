@@ -1032,7 +1032,8 @@ static void current_surface(Nv2aSurface *out)
     out->format          = s_gpu.format;
     out->clip_x          = s_gpu.clip_x;
     out->clip_y          = s_gpu.clip_y;
-    out->color_valid     = (uint32_t)surface_color_valid(1);
+    out->color_valid     = (uint32_t)surface_color_valid(0);
+    out->color_masked    = !(s_gpu.color_mask & 0x01010101u);
 }
 
 /* A texture stage as nv2a_backend.h describes it. */
@@ -1183,6 +1184,7 @@ static void clear_surface(uint32_t param)
          * Fable clears its shadow map's Z this way every frame, and the
          * clear never reached the back end while it was skipped whole. */
         surf.color_valid = (uint32_t)surface_color_valid(0);
+        surf.color_masked = 0;             /* a clear ignores SET_COLOR_MASK */
         if (!surf.color_valid)
             param &= ~(uint32_t)NV097_CLEAR_COLOR_MASK;
         if (!(param & 0x3u) && !surf.color_valid)

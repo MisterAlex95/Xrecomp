@@ -76,6 +76,8 @@ static struct {
     uint32_t rt_creates, relayouts, rt_direct, rt_copies, rt_grows, shadow_binds;
     uint32_t seeds, seeds_skipped, invalidates;
     uint32_t bump_draws;            /* batches with a bump-env stage */
+    uint32_t target_switches;       /* draw/clear framebuffer changes (bind_target) */
+    uint32_t frames;                /* flips since the line was last printed */
 } s_st;
 
 /* RECOMP_GPU_RT_RELAYOUT_READBACK=1: read a target back when the title
@@ -721,6 +723,18 @@ typedef struct {
     uint32_t w, h, bpp;
 } GlTarget;
 
+/* The framebuffer the last draw or clear went into: a change is a target
+ * switch, which on a tiler ends a render pass (stored, later reloaded). */
+static GLuint s_target_fbo;
+
+static void note_target(GLuint fbo)
+{
+    if (fbo != s_target_fbo) {
+        s_target_fbo = fbo;
+        s_st.target_switches++;
+    }
+}
+
 /* The depth-only framebuffer for zeta surface `va` (glDrawBuffers GL_NONE):
  * a shadow-map pass writes depth and nothing else, so no colour target is
  * created in guest memory and nothing is read back. */
@@ -746,6 +760,7 @@ static int bind_depth_only(const Nv2aSurface *s, uint32_t zeta_va, GlTarget *t)
     } else {
         glBindFramebuffer(GL_FRAMEBUFFER, d->fbo);
     }
+    note_target(d->fbo);
     t->rt = NULL;
     t->w = d->w;
     t->h = d->h;
@@ -756,17 +771,36 @@ static int bind_depth_only(const Nv2aSurface *s, uint32_t zeta_va, GlTarget *t)
     return 1;
 }
 
-/* Bind the render target for drawing into, with its depth surface. */
+/* A colour target already made for surface s's memory, with its pixel size. */
+static int rt_exists(const Nv2aSurface *s)
+{
+    int i;
+
+    for (i = 0; i < NV_GL_MAX_RT; i++)
+        if (s_rt[i].tex && s_rt[i].va == s->color_va
+            && s_rt[i].bpp == s->bytes_per_pixel)
+            return 1;
+    return 0;
+}
+
+/* Bind the render target for drawing into, with its depth surface. A batch
+ * with every colour channel masked (Nv2aSurface.color_masked: depth
+ * pre-passes and visibility proxies) stays on the colour target when there
+ * is one -- apply_state masks every channel and such a batch does not make
+ * the target dirty -- instead of going to the depth-only framebuffer of the
+ * same zeta surface and back: Fable did that 65-90 times a frame in
+ * Oakvale. Without a target for that memory yet, it does not make one. */
 static int bind_target(const Nv2aSurface *s, uint32_t zeta_va, GlTarget *t)
 {
     GlRT *r;
     GLuint d;
 
-    if (!s->color_valid)
+    if (!s->color_valid || (s->color_masked && !rt_exists(s)))
         return bind_depth_only(s, zeta_va, t);
     if (!(r = rt_get(s)))
         return 0;
     glBindFramebuffer(GL_FRAMEBUFFER, r->fbo);
+    note_target(r->fbo);
     d = depth_get(zeta_va, r->gw, r->gh, zeta_bpp(s))->tex;
     if (d != r->depth) {
         glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT,
@@ -2119,6 +2153,7 @@ static void gl_reset_objects(int lost)
     memset(&s_pend, 0, sizeof s_pend);
     s_near_program = 0;             /* ensure_init: depth clamp on, range 0..1 */
     s_near01 = 0.0f;
+    s_target_fbo = 0;
     /* Visibility queries: dropped; reports still pending in the executor
      * resolve with what was counted (gl_zpass_resolve answers 0 for a
      * ticket whose queries are gone). */
@@ -2287,6 +2322,7 @@ static int gl_present(const Nv2aPresentSurface *now, int sync, Nv2aPresentSurfac
 static void gl_flip(void)
 {
     s_frame++;
+    s_st.frames++;
     if (s_init > 0 && (s_verbose ? s_frame % 60 == 0 : s_frame % 600 == 0)) {
         int i, nrt = 0, nprog = 0;
         for (i = 0; i < NV_GL_MAX_RT; i++)
@@ -2298,13 +2334,15 @@ static void gl_flip(void)
                         " targets: %u created, %u relayouts, %u grown, %u sampled directly"
                         " (%u copies), %u shadow maps, %u bump-env, %u seeded, %u seeds skipped, %u invalidates,"
                         " %u uploads (%u KB), %u KB hashed, %d textures,"
-                        " %d targets, %d programs (%u compiled)\n",
+                        " %d targets, %d programs (%u compiled),"
+                        " %.1f target switches/frame\n",
                 s_frame, s_st.draws, s_st.vsh_draws, s_st.vsh_kb, s_st.tris,
                 s_st.clears, s_st.readbacks, s_st.rt_creates, s_st.relayouts, s_st.rt_grows,
                 s_st.rt_direct, s_st.rt_copies, s_st.shadow_binds, s_st.bump_draws, s_st.seeds,
                 s_st.seeds_skipped, s_st.invalidates,
                 s_st.uploads, s_st.upload_kb, s_st.hashes_kb, s_ntex, nrt, nprog,
-                s_st.compiles);
+                s_st.compiles,
+                s_st.frames ? (double)s_st.target_switches / s_st.frames : 0.0);
         memset(&s_st, 0, sizeof s_st);
     }
     gl_check_frame();

@@ -287,10 +287,18 @@ still reads the target back and uploads it as below. `RECOMP_GPU_RT_DIRECT=0`
 turns direct sampling off. In Oakvale that removed every texture upload in
 steady state (16 a frame, 3 MB, all bloom-chain targets) and 7 of the 16
 read-backs a frame. A surface without colour (`Nv2aSurface.color_valid` 0:
-colour offset 0, as in Fable's 768x768 shadow pass, a colour mask of 0, or a
-surface that would land on the image) draws into a depth-only framebuffer
-per zeta address (`glDrawBuffers(GL_NONE)`); no colour target is created and
-nothing is read back. Its depth clears reach the back end. A texture whose
+colour offset 0, as in Fable's 768x768 shadow pass, or a surface that would
+land on the image) draws into a depth-only framebuffer per zeta address
+(`glDrawBuffers(GL_NONE)`); no colour target is created and nothing is read
+back. Its depth clears reach the back end. A batch with a colour surface but
+a colour mask of 0 (`Nv2aSurface.color_masked`: depth pre-passes, visibility
+proxies) stays on that surface's colour target with `glColorMask(0,0,0,0)`
+and does not make it dirty; only when no target exists for that memory yet
+does it go to the depth-only framebuffer. Sent as "no colour" before,
+Fable's masked batches on the back buffer switched to the depth-only
+framebuffer of the same zeta and back 65-90 times a frame in Oakvale. The
+statistics line ends with `target switches/frame` (framebuffer changes
+between draws and clears, averaged over the line's period). A texture whose
 upload failed (`GlTex.failed`, e.g. the Z16 shadow map bound as format
 0x30) is drawn as "no texture" until its bytes change, instead of sampling
 an incomplete GL texture as black.
