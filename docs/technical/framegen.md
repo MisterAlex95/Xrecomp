@@ -13,6 +13,190 @@ Built only with `-DXBOXRECOMP_LSFG=ON` (POSIX hosts); the default build and the
 upstream tests do not see it. Run-time switches: see
 [Environment Variables](../runtime/environment-variables.md#frame-generation).
 
+## Design
+
+Frame generation runs as a **Vulkan compute sidecar**: the GL back end keeps
+rendering and the SDL/GLES presenter keeps presenting; a small Vulkan device
+(no surface, no swapchain) turns two consecutive frames into the in-between
+one(s). Phase 1 is a CPU bridge:
+
+```
+flip N (guest frame in memory) -> pacer thread: lsfg_bridge_generate
+    upload N into in[N % 2] -> framegen presentContext -> read back G(N-1, N)
+-> presenter sink: G due at T + c, N at T + c + P/2 (Pacing below)
+```
+
+One upload and one read-back of 1.2 MB per frame at 640x480. Nothing changes in
+`src/gpu/`; it works the same with the CPU rasteriser, on Android, macOS
+(MoltenVK) and Linux. Zero copy (AHardwareBuffer images shared with the GL back
+end) is a later phase.
+
+| Piece | File | Language |
+|---|---|---|
+| PE resource walker (Lossless.dll RT_RCDATA) | `src/framegen/lsfg_dll.c` | C, libc |
+| Shader table, SPIR-V binding renumbering, requirements | `src/framegen/lsfg_spv.c` | C, libc |
+| Shader cache (extract, manifest, translate, load) | `src/framegen/lsfg_cache.c` | C, libc |
+| DXBC -> SPIR-V over DXVK's compiler | `src/framegen/lsfg_dxbc.cpp`, `dxvk_shim/` | C++17 |
+| Vulkan bridge over framegen | `src/framegen/lsfg_bridge.cpp` | C++20 behind `extern "C"` |
+| Bridge as the pacer's generator | `src/framegen/lsfg_generator.c` | C |
+| Pacer, fake generator, cap rule | `framegen_pacer.c`, `framegen_fake.c`, `framegen_policy.h` | C |
+| Listing a DLL's resources (metadata only) | `tools/lsfg/inspect_dll.py` | Python |
+| Filling the cache on a desktop | `tools/lsfg/lsfg_translate` | C |
+| "Choose Lossless.dll" JNI | `android/app/src/main/cpp/lsfg_jni.c` (`libxba_import.so`), `LsfgNative.java` | C |
+
+### framegen
+
+The LSFG compute chain (mipmaps -> alpha x7 -> beta -> gamma x7 -> delta x3 ->
+generate, ~100 dispatches per generated frame, storage images in R8_UNORM,
+R8G8B8A8_UNORM and R16G16B16A16_SFLOAT) is the `framegen/` library of
+lsfg-vk 1.0 as carried by the Android fork **GameNative/lsfg-vk-android at
+commit d33caceb** (MIT, see Licences). We build it unmodified from a checkout
+(`XBOXRECOMP_LSFG_VK_SRC`, like `SDL2_SRC`) and call only its public API
+(`framegen/public/lsfg_3_1.hpp`, `lsfg_3_1p.hpp`): the fork's
+`initializeExternal` (framegen on *our* device and queue) and
+`createContextFromImages` (plain VkImages in GENERAL layout), then
+`presentContext(id, -1, {})` per frame, `deleteContext`, `finalize`. Inputs are
+two images used alternately: framegen's frame counter k reads `in[k % 2]` as the
+newest frame. framegen asks for each shader by name (`"alpha[0]"`,
+`"p_generate"`, ...) through a loader callback; the bridge's loader reads the
+shader cache.
+
+### Bridge
+
+`lsfg_bridge.h`: `lsfg_bridge_open(cfg)`, `lsfg_bridge_generate(frame, pitch,
+out[], out_pitch)`, `lsfg_bridge_reset`, `lsfg_bridge_close`, plus `probe`,
+`bench`, `get_info`, `last_gen_us`, `save_pipeline_cache`. All calls from one
+thread (the pacer's).
+
+- **Vulkan through volk** (dlopen of libvulkan / MoltenVK): nothing links
+  libvulkan, so a binary with the bridge starts on a machine without Vulkan
+  and `open` returns `LSFG_E_NOLOADER`. On macOS the instance enables
+  `VK_KHR_portability_enumeration`, the device `VK_KHR_portability_subset`.
+- **Device**: Vulkan 1.1+, a compute queue, `shaderStorageImageExtendedFormats`,
+  storage + sampled support for the three formats above; enabled only what the
+  device reports: read/write without format, `shaderFloat16`,
+  `timelineSemaphore`, `vulkanMemoryModel`, `shaderInt16`.
+- **Shader check before Vulkan sees a module**: open loads the whole variant
+  from the cache (renumbered and checked against the pass layouts) and compares
+  each module's SPIR-V version and capabilities with the device. Translated
+  DXBC is SPIR-V 1.6 with VulkanMemoryModel and StorageImageWriteWithoutFormat,
+  so it needs Vulkan 1.3 + `vulkanMemoryModel` (Adreno 7xx, MoltenVK 1.3 have
+  both); otherwise `LSFG_E_FEATURE` with the missing items.
+- **Images**: in[2] and out[multiplier - 1], R8G8B8A8_UNORM, STORAGE | SAMPLED
+  | TRANSFER_SRC | TRANSFER_DST, GENERAL. The guest frame is uploaded as is
+  (BGRX into RGBA: the swap cancels on the way back); 16 bpp frames are
+  expanded by the pacer.
+- **Per frame**: upload (barrier compute -> transfer, copy, transfer ->
+  compute), `presentContext`, read-back (compute -> transfer, copy, transfer ->
+  host) with one fence, bounded 2 s waits (`LSFG_E_TIMEOUT`). The first frame
+  after open/reset, and any call with `out == NULL`, only enters the history
+  (`LSFG_PRIMED`).
+- **VkPipelineCache**: framegen builds its pipelines with no cache; volk's
+  dispatch pointers are globals, so while the bridge is open
+  `vkCreateComputePipelines` is wrapped to pass ours. Loaded from and saved to
+  `<shader dir>/pipeline-<vendor>-<device>-<driver>.bin` (header checked:
+  vendor, device, pipelineCacheUUID), saved after the pipelines are built and at
+  close.
+- **Errors**: every C++ exception is caught at the boundary and becomes an
+  `LSFG_E_*` code with a one-line message; after a generate failure the bridge
+  stays failed until closed (the pacer falls back, Pacing below).
+
+## Shader cache
+
+Lossless.dll (the user's own copy, from their Steam install of Lossless
+Scaling) carries the LSFG shaders as RT_RCDATA resources. The IDs framegen
+needs (fixed table, the one lsfg-vk 1.0 used, in `lsfg_spv.c`): 255..279 for
+LSFG 3.1, 255, 256 and 280..302 for 3.1 performance, 25 per variant, 48
+distinct. Alex's DLL (2026-11-11): 202 RCDATA resources, IDs 101..302, **all
+DXBC**; the SPIR-V some builds reportedly carry at ID + 49 (FP16) / + 98 (FP32)
+is absent. The cache handles both.
+
+`lsfg_cache.h` describes the layout: `<base>/<key>/` with `<id>.dxbc` (kept, so
+a translation can run later without the DLL), `<id>.fp16.spv` / `<id>.fp32.spv`
+(embedded SPIR-V), `<id>.spv` (translated), `manifest.txt`, the pipeline cache;
+`<base>/current` names the active key (first 16 hex digits of the DLL's
+SHA-256). Extraction goes through `<key>.partial` and a rename. The version
+check: one variant complete in one form, else "this Lossless.dll version is
+not supported". `<base>` is `getFilesDir()/lsfg` on Android (excluded from
+backups and from the log provider, launcher package), the desktop default
+otherwise (`RECOMP_LSFG_CACHE`).
+
+**Binding renumbering.** framegen numbers each pass's descriptor bindings
+0..N-1 over its declared type list: uniform buffers, samplers, sampled images,
+storage images (`framegen/src/core/shadermodule.cpp`, counts in
+`framegen/v3.1*_src/shaders/*.cpp`). Compiled HLSL carries register slots
+instead. `lsfg_spv_renumber` classifies every resource variable by its SPIR-V
+type, sorts each class by (set, binding) and numbers class after class, set 0,
+then checks the counts against the pass layout. The cache stores the
+translator's output and the bridge renumbers again at load (idempotent).
+
+### DXBC translation
+
+DXBC needs a DXBC -> SPIR-V compiler. We use **DXVK's** (`src/dxbc`, zlib),
+as lsfg-vk 1.0 did with its DXVK subset: `lsfg_dxbc.cpp` reads the container,
+compiles it with default options and returns the SPIR-V
+(`lsfg_translate_fn`, the contract is in `lsfg_cache.h`). Pinned at **DXVK
+v2.6.2**: 2.7 moved samplers to a global descriptor heap, which framegen's
+fixed per-pass layouts cannot express. DXVK is used from a checkout
+(`XBOXRECOMP_LSFG_DXVK_SRC` / `$DXVK_SRC`, with its `include/spirv` submodule),
+never vendored. DXVK's `src/dxbc` includes `../dxvk/dxvk_shader.h` (the whole
+Vulkan back end), so `lsfg_dxbc.cmake` stages `src/dxbc`, `src/spirv` and
+`src/util` into the build tree beside our reduced stand-ins
+(`src/framegen/dxvk_shim/dxvk/`: the few DXVK types the compiler uses, a
+logger instance, `getEnvVar`; a DXVK derivative under zlib, marked as altered).
+
+DXVK's compiler emits per-class binding ranges (cbuffers from 800, samplers 816,
+SRVs 832, UAVs 1088 for compute), which the renumbering maps to framegen's
+order. Measured on Alex's DLL (Mac, 2026-11-11): 48/48 shaders translated,
+every output SPIR-V 1.6 with the right resource counts for its pass, 4.7 MB in
+all, 0.4 s.
+
+```
+cmake -S tools/lsfg -B build/lsfg -DXBOXRECOMP_LSFG_DXVK_SRC=$DXVK_SRC \
+      -DXBOXRECOMP_VULKAN_HEADERS=<dir with vulkan/vulkan_core.h>
+build/lsfg/lsfg_translate /path/to/your/Lossless.dll       # -> the desktop cache, made current
+build/lsfg/lsfg_translate --dir <cache dir pulled from a phone>
+```
+
+On Android the translator links into `libxba_import.so` (about 1.3 MB stripped,
+arm64) when the APK is built with `-PxbaLsfg=1` and `DXVK_SRC`, so the phone
+translates at import (`LsfgNative.hasTranslator()`); without it the app only
+extracts, and a cache translated on a desktop can be pushed.
+
+## Build
+
+| Build | What |
+|---|---|
+| default | nothing of this (`XBOXRECOMP_LSFG` OFF): default build and upstream tests unchanged |
+| `-DXBOXRECOMP_LSFG=ON` | `xbox_framegen`: pacer, fake generator, shader-cache helpers (C only) |
+| + `-DXBOXRECOMP_LSFG_VK_SRC=<checkout>` (or `$LSFG_VK_SRC`) | + the bridge (C++20), volk, framegen; `XBOXRECOMP_LSFG_BRIDGE=1` on `xbox_framegen`; call `lsfg_bridge_register()` before `framegen_pacer_start()` |
+| + `-DXBOXRECOMP_LSFG_DXVK_SRC=<checkout>` (or `$DXVK_SRC`) | + `lsfg_dxbc` (the translator) |
+| Android `-PxbaLsfg=1` (+ `-PlsfgVkSrc`, `-PdxvkSrc` or the env vars) | the same in `libmain.so` / `libxba_import.so` |
+
+Sources:
+
+```
+git clone https://github.com/GameNative/lsfg-vk-android && git -C lsfg-vk-android checkout d33caceb
+git -C lsfg-vk-android submodule update --init thirdparty/volk     # volk be3dbd49, the fork's own pin
+git clone --branch v2.6.2 --depth 1 https://github.com/doitsujin/dxvk && \
+    git -C dxvk submodule update --init --depth 1 include/spirv
+```
+
+Only `framegen/` and `thirdparty/volk` of the fork are compiled; its
+pe-parse, dxbc, toml11 submodules and its layer are not used. Vulkan headers:
+the NDK sysroot on Android; elsewhere `XBOXRECOMP_VULKAN_HEADERS` (a directory
+holding `vulkan/vulkan_core.h`: Vulkan-Headers' `include`, or the NDK's
+`sysroot/usr/include`, whose `vulkan/` and `vk_video/` alone are staged into
+the build tree) or a Vulkan SDK. Android: `VK_USE_PLATFORM_ANDROID_KHR` (volk's
+public define) for framegen's AHardwareBuffer paths; libc++ static
+(`c++_static`) in `libmain.so` and `libxba_import.so`; SDL2's hidapi brings its
+own static libc++ into `libSDL2.so`, which is fine as no C++ object crosses
+the library boundary. Measured arm64 Release sizes, stripped: bridge +
+framegen + volk 1.6 MB, translator 1.3 MB; neither needs `libvulkan.so`.
+
+A project that adds the toolkit with `add_subdirectory` enables CXX itself
+when `XBOXRECOMP_LSFG` is on (`templates/new-game` does).
+
 ## Pacing
 
 The pacer (`src/framegen/framegen_pacer.c`, C, libc + pthreads) sits between
@@ -106,3 +290,62 @@ projects, no `XBOXRECOMP_LSFG` needed): fake generator plus a fake clock
   `framegen_pacer_start` from the environment with `RECOMP_LSFG_FAKE=1`.
 
 Clean under ThreadSanitizer and UBSan (30 runs).
+
+## Measurements
+
+Mac (Apple M1 Max, MoltenVK 1.3 from an existing app bundle via
+`DYLD_LIBRARY_PATH`, nothing installed; other jobs running), Alex's DLL
+translated, 2x, `tests/lsfg_bridge`:
+
+| | 640x480 | 1280x960 | 1920x1080 |
+|---|---|---|---|
+| LSFG 3.1, generate (GPU) | 17.8 ms | 40.4 ms | 62.1 ms |
+| LSFG 3.1 performance | 4.4 ms | 8.0 ms | 11.5 ms |
+
+Round trip (upload + generate + read-back) adds 0.1-0.6 ms. Pipelines: 150 ms
+cold, 9 ms with the pipeline cache (1.6 MB); the performance set 1.9 s cold.
+Moving square (48 px, 48 px per frame): generated centre within 0.5 px of the
+midpoint every step. MoltenVK numbers say little about Adreno: the device
+benchmark is Device checklist step 3.
+
+## Licences
+
+| Component | Licence | How it is used |
+|---|---|---|
+| framegen (lsfg-vk 1.0, GameNative/lsfg-vk-android d33caceb, `framegen/`) | MIT, (c) 2025 lsfg-vk | compiled from a checkout, unmodified; in binaries (NOTICE) |
+| volk (zeux/volk be3dbd49, the fork's submodule) | MIT, (c) 2018-2025 Arseny Kapoulkine | same |
+| DXVK v2.6.2 (`src/dxbc`, `src/spirv`, `src/util`) | zlib, (c) 2017 Philip Rebohle and others | compiled from a checkout; `src/framegen/dxvk_shim/` is a DXVK derivative in this repo (zlib, altered) |
+| SPIRV-Headers (DXVK's `include/spirv`) | MIT-style (Khronos) | headers only |
+| Vulkan headers (NDK / Vulkan-Headers) | Apache-2.0 / MIT | headers only |
+| MoltenVK (macOS) | Apache-2.0 | user-installed or already present, never bundled |
+
+**Not used:** lsfg-vk 2.x (CC BY-NC-ND 4.0: no derivatives), the fork's code
+outside `framegen/` and `thirdparty/volk` (its layer, extractor, translator
+glue), pe-parse, PancakeTAS/dxbc, toml11, and LSFG-Android-Application (GPLv3
+with extra terms: read for nothing, copy nothing).
+
+## Legal rules
+
+- **Lossless.dll is the user's.** Never download, commit, bundle (APK, CI
+  artefact, Docker image) or upload it, its shaders, or anything derived from
+  it (extracted DXBC, translated SPIR-V, pipeline caches). It stays where the
+  user put it; the app reads it once through the picker's fd and keeps only
+  the shader cache in its private storage.
+- Logs and tools print metadata only: IDs, sizes, kinds, counts, hashes'
+  first 16 hex digits. Never shader contents.
+- Tests use synthetic inputs built by the tests (`tests/lsfg_dll`,
+  `tests/lsfg_spv`, `tools/lsfg/test_inspect_dll.py`); `tests/lsfg_bridge`
+  skips (exit 77) unless the developer points it at their own cache or DLL.
+- Code comes only from our repository, the MIT `framegen/` tree (and volk) of
+  the pinned fork, and DXVK (zlib) as described above.
+
+## Tests
+
+| Test | What | Needs |
+|---|---|---|
+| `tests/lsfg_dll` | PE walker on synthetic PE32/PE32+ (all truncations, 15 malformations), SHA-256 vectors, cache import / reuse / translate with a fake translator, unsupported DLL, damaged cache file | nothing (C, POSIX) |
+| `tests/lsfg_spv` | renumbering order, sets, idempotence, layout mismatch, unsupported resources, corrupt modules, capabilities, every table layout | nothing |
+| `tools/lsfg/test_inspect_dll.py` | inspect_dll on synthetic PE | pytest |
+| `tests/lsfg_bridge` | argument checks; moving square (generated square between the inputs), history-only and reset, pipeline cache reuse; `--bench [frames]` | `LSFG_VK_SRC` at build time; a Vulkan driver and `RECOMP_LSFG_DIR` (or `RECOMP_LSFG_DLL` + the translator built in) at run time, else exit 77 |
+| `tests/framegen_pacer` | pacing (below) | nothing |
+

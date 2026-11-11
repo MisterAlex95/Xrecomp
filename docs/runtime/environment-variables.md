@@ -182,6 +182,13 @@ Only in a build configured with `-DXBOXRECOMP_LSFG=ON` (POSIX hosts); see [Frame
 | `RECOMP_LSFG_BUDGET_MS=N` | cap period / multiplier (16.7 ms at 30 fps, 2x) | Generation cost above which a frame counts as over budget; 30 in a row (or 30 failed generations) turn frame generation off: `[LSFG] off: <reason>`. | `src/framegen/framegen_pacer.c` |
 | `RECOMP_LSFG_FAKE=1` | off | Use the fake generator (CPU linear blend of the two frames, no Vulkan) instead of the LSFG bridge: headless runs and tests. | `framegen_pacer.c` |
 | `RECOMP_LSFG_FAKE_MS=N` | 0 | With the fake generator: sleep N ms per generated pair, to exercise the budget fallback. | `src/framegen/framegen_fake.c` |
+| `RECOMP_LSFG_DIR=<dir>` | the current cache of the default base | The LSFG bridge's shader cache directory (`<base>/<key>`, made by `tools/lsfg/lsfg_translate` or the app's "Choose Lossless.dll"). The bridge's VkPipelineCache is kept there too. Bridge builds only (`XBOXRECOMP_LSFG_VK_SRC`). | `src/framegen/lsfg_generator.c`, `lsfg_cache.h` |
+| `RECOMP_LSFG_DLL=<path>` | unset | Desktop: your own Lossless.dll, extracted into the default cache base when `RECOMP_LSFG_DIR` is unset. The DXBC shaders still need one `lsfg_translate` run. | `lsfg_generator.c` |
+| `RECOMP_LSFG_CACHE=<dir>` | `~/Library/Caches/xboxrecomp/lsfg` (macOS), `$XDG_CACHE_HOME/xboxrecomp/lsfg` or `~/.cache/xboxrecomp/lsfg` | The default cache base. | `lsfg_cache.c` |
+| `RECOMP_LSFG_FLOW=0.25..1` | 1 | Flow scale (lower is cheaper and blurrier motion). | `lsfg_generator.c` |
+| `RECOMP_LSFG_PERF=1` | off | LSFG 3.1 performance shader set (about 4x cheaper). | `lsfg_generator.c` |
+| `RECOMP_LSFG_FP16=auto\|0\|1` | auto | Embedded FP16 SPIR-V when the DLL has it and the device has `shaderFloat16` (translated DXBC is always full precision). | `lsfg_generator.c` |
+| `RECOMP_LSFG_GPU=<index>` | best device | Vulkan physical device index for the bridge. | `src/framegen/lsfg_bridge.cpp` |
 
 ## Audio
 
