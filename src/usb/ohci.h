@@ -49,6 +49,11 @@ int  xbox_OhciOwnsAddress(uint32_t xbox_va);
  * route to it) before it treats the fault as a crash. */
 int  xbox_OhciHandleMmio(void *ctx, uint32_t xbox_va);
 
+/* Tests only: walk the endpoint descriptor list starting at `ed` once, as
+ * the controller thread does every pass, adding what retires to *done_head
+ * (newest first). Returns how many transfer descriptors completed. */
+int  xbox_OhciWalkListForTest(uint32_t ed, uint32_t *done_head);
+
 /* Report counts at exit, so a run says whether the driver ever looked. */
 void xbox_OhciReport(void);
 
