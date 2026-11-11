@@ -1,0 +1,9 @@
+{
+  "name": "XDK DirectSound (DSOUND)",
+  "applies": {"libraries": ["DSOUND", "DSOUNDLTCG"]},
+  "env_default": {"RECOMP_AC97_READY": "1"},
+  "_why": [
+    "DirectSoundCreate waits for the AC'97 codec: the emulated APU with a ready codec, else a hang after the USB",
+    "start and no flip. Seen on: Fable 4D5300D1, Burnout 3 4541005B (XDK 5849)."
+  ]
+}

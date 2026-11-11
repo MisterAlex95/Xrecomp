@@ -2,6 +2,11 @@
 
 Private, never commit to xboxrecomp-android: contains game data and generated code.
 
+(That line is about the private bring-up folder this file describes; this NOTES.md itself is ours. Since XBA-66
+the profile sits on the XDK layers `profiles/xdk/xapi`, `dsound`, `d3d8` (title.json `"layers"`): the executor,
+AC'97, paced vblanks, DISPATCH gate, pad, and D3D's semaphore and RunPushBuffer methods with the addresses in
+title.json `"params"`. Rules: `docs/technical/profiles.md`.)
+
 | Dir | What |
 |---|---|
 | `toolkit/` | clone of xboxrecomp-android (main @ 8e50e7e) |
@@ -218,7 +223,7 @@ the lock stalls D3D init (RECOMP_GUEST_CPU_TRACE).
   (sub_006440AB needs its body back): tools.prepare, or
   `python -m tools.recomp <default.xbe> --all --split 250 --game-name "Fable: The Lost Chapters"
   --disasm-dir <analysis>/disasm --func-id-dir <analysis>/func_id --abi-dir <analysis>/abi
-  --gen-dir <project>/src/recomp/gen --exclude-manual titles/4d5300d1/overrides.c` (~4.5 min on the Mac).
+  --gen-dir <project>/src/recomp/gen --exclude-manual profiles/titles/4d5300d1/overrides.c` (~4.5 min on the Mac).
   Against the previous tree only sub_006440AB's body, its call sites and the chunk boundaries change.
 - With movies on, DirectSound hung in its AC'97 channel reset (sub_00832BFC) when two threads reset channels
   at once: the POSIX trap opened the page for everyone. Toolkit: read-only shared page + writable view
@@ -314,13 +319,13 @@ the lock stalls D3D init (RECOMP_GUEST_CPU_TRACE).
   0 and writes 16.0/9.0 at +8/+0xC of whatever it points to, before every camera setup, so a reload that resets
   the pointer is covered on the next pass; sub_0023EB70_enter replaces a third argument in (1.7, 1.8) at
   [esp+0xC] (entry, before its push ecx) with 4/3. Both do nothing unless g_fable_aspect_wide.
-- title.c fable_aspect_configure (from xba_title_configure): wide when xbox_AspectSetting() is 2 (16:9), or 0
+- title.c fable_aspect_configure (from fable_configure): wide when xbox_AspectSetting() is 2 (16:9), or 0
   (auto) on Android; desktop auto stays 4:3. Wide sets g_fable_aspect_wide and calls
   xbox_FramebufferWindowSetWide(1); "[ASPECT] 16:9 scenes" is printed. Both functions belong to src/video
   (src/video/aspect_policy.c, declared in video_player.h, every configuration).
 - The profile compiles into the Android pack too: there auto means 16:9 scenes.
 - Regenerate after changing the hooks (the generated sub_00132D00 and sub_0023EB70 call them):
-  `python -m tools.recomp <xbe> --all --split 250 ... --exclude-manual titles/4d5300d1/overrides.c`
+  `python -m tools.recomp <xbe> --all --split 250 ... --exclude-manual profiles/titles/4d5300d1/overrides.c`
   (tools.prepare passes the profile's exclude_manual); only recomp_0020.c and recomp_0036.c change.
 - Mac, RECOMP_GPU=1, headless pad scripts, RECOMP_ASPECT=16:9: "[ASPECT] camera display size 16 x 9 at <blob>
   (ours)" at the first scene, "[ASPECT] cutscene bars 16:9 -> 4:3" at the AutoSave cutscene; gameplay drawn

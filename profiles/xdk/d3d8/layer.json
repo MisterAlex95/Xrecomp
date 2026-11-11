@@ -1,0 +1,15 @@
+{
+  "name": "XDK Direct3D 8 (D3D8, D3D8LTCG)",
+  "applies": {"libraries": ["D3D8", "D3D8LTCG"]},
+  "hooks": "xba_d3d8",
+  "env_default": {
+    "RECOMP_PB_EXEC": "1",
+    "RECOMP_VBLANK": "paced"
+  },
+  "_why": [
+    "RECOMP_PB_EXEC: the pushbuffer executor draws what D3D wrote. RECOMP_VBLANK=paced: D3D's vblank handler keeps",
+    "the count the XMV player's clock and the swap counters read (without it: one flip, movies stuck on frame 1).",
+    "d3d8.c services D3D's GPU semaphore and software methods once the title gives their addresses (params):",
+    "see the comment at its top. Seen on: Fable 4D5300D1, Burnout 3 4541005B (XDK 5849)."
+  ]
+}

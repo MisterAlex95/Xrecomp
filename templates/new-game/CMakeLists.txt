@@ -69,8 +69,9 @@ set(GAME_SOURCES
     # src/custom_renderer.c
 )
 
-# A title profile (titles/<title id>/ in the toolkit, copied here by
-# tools.prepare): the title's own switches and fixes. main.c calls its hooks.
+# The profile layers (profiles/ in the toolkit: XDK libraries, engine, title;
+# copied here by tools.prepare, docs/technical/profiles.md): switches and
+# fixes. main.c calls their hooks through the generated xba_layers.c.
 file(GLOB TITLE_PROFILE_SOURCES CONFIGURE_DEPENDS "src/title/*.c")
 if(TITLE_PROFILE_SOURCES)
     list(APPEND GAME_SOURCES ${TITLE_PROFILE_SOURCES})

@@ -107,7 +107,7 @@ The steps, each one subprocess (`python -m tools.<tool>`) or a pool of compiler 
 |---|---|---|---|
 | 1 | `identify` | finds `default.xbe`, copies it to `<work>/xbe/`, `xbe_parser` → title ID, title profile; `xbe_ident` → XDK version, engines, profile layers in `<work>/ident.json` (shown in `msg`; never fails the step) | `parse` |
 | 2 | `analyse` | `disasm`, `func_id`, `abi_analysis` | `disasm`, `func_id`, `abi` |
-| 3 | `lift` | the project from `templates/new-game` + `titles/<title id>/`, then `tools.recomp` | `lift` (= profile digest) |
+| 3 | `lift` | the project from `templates/new-game` + the profile layers (`profiles/`, [profiles.md](../technical/profiles.md)), then `tools.recomp` | `lift` (= profile digest) |
 | 4 | `compile` | every C file to an object, largest first, cached | the object cache |
 | 5 | `pack` | `ld.lld` → `packs/<TID>.partial/libtitle.so`, `pack.json`, publish | `link` |
 
@@ -213,7 +213,7 @@ The working directory does not matter; `python -m tools.prepare` needs the toolk
 (`PYTHONPATH=<toolkit root>`).
 
 **Toolkit tree** in the assets (read-only): `tools/` (Python, plus the data files the tools read: `tools/recomp/data/`, `tools/xbe_ident/engines.json`), `include/`, the headers of `src/` (`src/**/*.h`),
-`templates/new-game/`, `templates/runtime/` (the `recomp_types.h` the lifter copies next to the generated C), `titles/`, and `tools/VERSION` (one line: the commit; written by the asset build, git-ignored).
+`templates/new-game/`, `templates/runtime/` (the `recomp_types.h` the lifter copies next to the generated C), `profiles/`, and `tools/VERSION` (one line: the commit; written by the asset build, git-ignored).
 
 **status.json**: the service writes it from the progress lines for the UI and for a restart after the app was killed.
 Its format belongs to the app (prepare-app branch, `android/app`), not to this page; prepare never reads it.

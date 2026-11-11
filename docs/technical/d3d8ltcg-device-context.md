@@ -16,7 +16,7 @@ Xbox games using Criterion's RenderWare engine (and potentially other Xbox D3D8 
 
 Every address in this document is from the Burnout 3 build the original fork
 was mapped on. The PAL disc (French/German/Italian, title ID 4541005B, the one
-`titles/4541005b/` profiles) has the D3D section 0x300 higher; the offsets
+`profiles/titles/4541005b/` profiles) has the D3D section 0x300 higher; the offsets
 inside the device are the same:
 
 | What | This document | PAL 4541005B |
@@ -205,8 +205,8 @@ the executor had already run. The executor models both (`0x0310`'s latch, and
 so no wrapper is needed for either. The event itself needs the title project:
 with `RECOMP_PB_WALK=dma` the "far behind" path is taken, and something must set
 the event when the executor reaches the patched NOP — a software-method hook
-answering type 5 with `xbox_KeSetGuestEvent(device + 0x1DCC)`, as the Burnout 3
-profile (`titles/4541005b/title.c`) does.
+answering type 5 with `xbox_KeSetGuestEvent(device + 0x1DCC)`, as the XDK D3D
+profile layer (`profiles/xdk/d3d8/d3d8.c`) does for Burnout 3.
 
 ## D3D8LTCG Stub Functions
 

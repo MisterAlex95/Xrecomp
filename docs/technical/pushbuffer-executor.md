@@ -343,9 +343,10 @@ The executor calls a hook the game project registers,
 `nv2a_pb_set_software_method_hook()` (`nv2a_backend.h`), for every software
 method except the swap, on the executor thread, before it reads the next
 pushbuffer word — the GPU waits for the handler on the console too. The
-*Fable* profile (`titles/4d5300d1/title.c`) services 0xC–0xE exactly as its
-D3D's `sub_00855860` does; the *Burnout 3* profile (`titles/4541005b/title.c`)
-answers 5 with `xbox_KeSetGuestEvent()` on its fence event. The report counts
+XDK D3D profile layer (`profiles/xdk/d3d8/d3d8.c`) services 0xC–0xE exactly
+as D3D's RunPushBuffer helper does (*Fable*'s `sub_00855860`) and answers 5
+with `xbox_KeSetGuestEvent()` on the fence event (*Burnout 3*), for the
+methods and the device addresses each title profile gives it. The report counts
 what was serviced and, by type, what was not (`[GPU] software methods: ...`).
 
 ### Why not the title's own handler

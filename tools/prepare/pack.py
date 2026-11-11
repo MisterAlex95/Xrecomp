@@ -44,7 +44,7 @@ def sha256_file(path):
 
 
 def env_force_of(profile):
-    """A title profile's "env_force" as a {key: value} dict ({} when it has
+    """The profile layers' merged "env_force" as a {key: value} dict ({} when it has
     none), checked: keys RECOMP_[A-Z0-9_]+ (63 characters at most), values
     strings of printable ASCII (255 at most; a number is taken as its text),
     16 entries at most. ValueError says which entry is wrong."""
@@ -68,9 +68,11 @@ def env_force_of(profile):
 
 
 def make_meta(lib_path, title_id, title, xbe_sha256, toolkit, cc, shell_abi=SHELL_ABI, now=None,
-              env_force=None):
+              env_force=None, layers=None):
     """pack.json's content. env_force (env_force_of) goes in only when it is
-    not empty: a pack without it forces nothing."""
+    not empty: a pack without it forces nothing. layers: the profile layers
+    the pack was built with (tools.prepare.profiles), lowest first; the
+    loader does not read them, they say what went in."""
     now = now or datetime.datetime.now(datetime.timezone.utc)
     meta = {
         "format": FORMAT,
@@ -89,6 +91,8 @@ def make_meta(lib_path, title_id, title, xbe_sha256, toolkit, cc, shell_abi=SHEL
     }
     if env_force:
         meta["env_force"] = dict(env_force)
+    if layers:
+        meta["layers"] = list(layers)
     return meta
 
 

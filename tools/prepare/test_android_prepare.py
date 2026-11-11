@@ -280,6 +280,7 @@ def test_android_bad_args(capsys):
 # ── title.json "env_force" → pack.json, and the desktop project ──
 
 BO3_LIKE = {"title_id": "4541005B", "project": "synthetic", "env_force": {"RECOMP_LSFG": "0", "RECOMP_GPU_FPS_CAP": 60}}
+BO3_LIKE_NO_FORCE = {"title_id": "4541005B", "project": "synthetic"}
 
 
 def test_env_force_of():
@@ -314,13 +315,12 @@ def test_make_meta_env_force(tmp_path):
 
 
 def _profile(tmp_path, obj):
+    from tools.prepare import profiles
     d = tmp_path / "titles" / obj["title_id"].lower()
-    d.mkdir(parents=True)
+    d.mkdir(parents=True, exist_ok=True)
     (d / "title.json").write_text(json.dumps(obj))
-    (d / "title.c").write_text("void xba_title_configure(void) {}\n")
-    p = dict(obj)
-    p["dir"] = str(d)
-    return p
+    (d / "title.c").write_text("/* no hooks */\n")
+    return profiles.resolve(obj["title_id"], None, str(tmp_path))
 
 
 def test_assemble_project_env_force_header(tmp_path):
@@ -336,12 +336,12 @@ def test_assemble_project_env_force_header(tmp_path):
     with open(os.path.join(proj, "CMakeLists.txt")) as f:
         assert "src/title/env_force.h" in f.read()
     # Without env_force (or without a profile) there is no header: XBA_TITLE_ENV_FORCE stays undefined.
-    prep.assemble_project(proj, dict(prof, env_force={}), {"title_id": "0x4541005B"})
+    prep.assemble_project(proj, _profile(tmp_path, BO3_LIKE_NO_FORCE), {"title_id": "0x4541005B"})
     assert not os.path.exists(os.path.join(proj, "src", "title", "env_force.h"))
     prep.assemble_project(proj, None, {"title_id": "0x4541005B"})
     assert not os.path.exists(os.path.join(proj, "src", "title"))
     with pytest.raises(ValueError):
-        prep.assemble_project(proj, dict(prof, env_force={"PATH": "/"}), {"title_id": "0x4541005B"})
+        _profile(tmp_path, dict(BO3_LIKE, env_force={"PATH": "/"}))
 
 
 def test_env_force_header_compiles(tmp_path):
@@ -379,7 +379,7 @@ class _Tc:
         return "clang 19"
 
 
-def _make_pack(tmp_path, monkeypatch, env_force):
+def _make_pack(tmp_path, monkeypatch, env_force, layers=()):
     from tools.prepare import android
     links = []
 
@@ -402,6 +402,7 @@ def _make_pack(tmp_path, monkeypatch, env_force):
     r.tid, r.objects, r.toolkit, r.xbe_sha, r.tc = "4541005B", [], "k", "ab" * 32, _Tc()
     r.info = {"title": "Synthetic"}
     r.env_force = env_force
+    r.layers = list(layers)
     final = r.make_pack()
     return pack.read(final), links
 
@@ -414,4 +415,15 @@ def test_android_pack_json_env_force(tmp_path, monkeypatch, capsys):
     assert links == [] and meta["env_force"]["RECOMP_LSFG"] == "0"
     # Only title.json's env_force changed (same objects): pack.json is written again.
     meta, links = _make_pack(tmp_path, monkeypatch, {})
-    assert len(links) == 1 and "env_force" not in meta
+    assert len(links) == 1 and "env_force" not in meta and "layers" not in meta
+
+
+def test_android_pack_json_layers(tmp_path, monkeypatch):
+    """pack.json says which profile layers went in; a change of layers alone writes it again."""
+    layers = ["xdk/d3d8", "titles/4541005b"]
+    meta, links = _make_pack(tmp_path, monkeypatch, {}, layers)
+    assert meta["layers"] == layers and len(links) == 1
+    meta, links = _make_pack(tmp_path, monkeypatch, {}, layers)
+    assert links == []
+    meta, links = _make_pack(tmp_path, monkeypatch, {}, layers[1:])
+    assert meta["layers"] == layers[1:] and len(links) == 1
