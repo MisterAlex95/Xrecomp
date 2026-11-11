@@ -130,6 +130,16 @@ void xba_title_configure(void)
      * setting (recomp.cfg) wins. */
     SETENV_DEFAULT("RECOMP_GPU_FPS_CAP", "30");
 #endif
+    /* The one-CPU DISPATCH gate (kernel_hal.c). XAPI's USB stack (XPP,
+     * 0x0086E480-0x00876C3C) locks only by raising to DISPATCH_LEVEL.
+     * XInputSetState programs a control transfer ~30 times a second
+     * (sub_008766DD takes 4 TDs from the free list at 0x9A614C) while the
+     * USB DPC (sub_00875EA1, on the timer thread) frees TDs and re-arms the
+     * pad's interrupt URB. Without the gate the two run side by side, the TD
+     * pool and the ED queues get corrupted and within a minute the DPC loops
+     * for ever in sub_00875A48: pad input dead, movies stalled. The gate
+     * needs the paced vblank loop above. RECOMP_DISPATCH_GATE=0 to compare. */
+    SETENV_DEFAULT("RECOMP_DISPATCH_GATE", "1");
     /* More than the default 8 worker threads alive during the front-end load. */
     SETENV_DEFAULT("RECOMP_THREAD_STACKS", "32");
     /* The pad (the template starts the USB model when RECOMP_USB is set); the

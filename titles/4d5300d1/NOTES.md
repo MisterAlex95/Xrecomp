@@ -243,3 +243,24 @@ the lock stalls D3D init (RECOMP_GUEST_CPU_TRACE).
   the intro was skipped (the guest stopped polling the interrupt endpoint: no more pad reports; in one of them the
   attract movie then stalled at 0 fps). Not seen in 2 baseline GPU runs nor in 3 CPU-rasteriser drives. Same
   symptoms as the OHCI race (5a) and the DPC stall above; not root-caused here.
+
+## 2026-11-11: pad input dies (branch xba-fable-input)
+- Root cause of the "pad input stops for good" above and of the intro_comp stall: not the OHCI walker. XAPI's USB
+  stack (XPP section 0x0086E480-0x00876C3C) uses KeRaiseIrqlToDpcLevel as its only lock. XInputSetState (~30/s,
+  sub_0007F4C0 -> sub_008701C5 -> sub_0087249E) raises and programs a control transfer that takes 4 TDs
+  (sub_008766DD, alloc sub_00876613: eax = [0x9A614C]; [0x9A614C] = [eax+0x14]); the USB DPC sub_00875EA1 frees
+  TDs (sub_00875341), completes URBs and re-arms the pad's interrupt URB ~200/s on the kernel timer thread. The
+  ~167 TDs are shared by the control and interrupt EDs. Without the one-CPU gate kernel_drain_dpcs never waits for
+  a raised guest thread (and a raise never waits for a running DPC): ~5-7 overlaps/s, TDs queued twice or while on
+  the free list, the free list cycling. The end state is the DPC looping in sub_00875A48 (failed-TD path) for ever:
+  no more DPCs (vblank count stops, movie stalls) and the driver ISR sub_008757CD left MIE masked, so the OHCI model
+  went quiet without a warning.
+- Fix: title.c defaults RECOMP_DISPATCH_GATE=1 (one-CPU DISPATCH gate, kernel_hal.c), which orders DPCs against
+  raised threads. Needs RECOMP_VBLANK=paced (already the default). RECOMP_DISPATCH_GATE=0 for the old behaviour.
+  Investigation numbers (Mac): gate off, driven scenario (A, A, A, Start, A, A) 3 of 30 runs lost input 40-50 s in;
+  allocator window widened 50 us (debug build) 6 of 6; gate on, driven 0 of 36, widened 0 of 13. fps gate on vs off
+  at the same time: identical (30.0/30.0, 7.7/7.7 under 40 busy loops).
+- Toolkit: the OHCI model now raises FrameNumberOverflow (the driver keeps the high word of its 32-bit frame count
+  at ext+0x418 from the FNO handler 0x00875801; without it the count wrapped at 65536). It warns when MIE stays
+  masked > 2 s with a pad plugged (naming the DPC running on the timer thread), and with the gate off the IRQ
+  report counts DPCs that started while a guest thread was raised.
