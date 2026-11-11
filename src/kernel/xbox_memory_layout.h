@@ -201,7 +201,8 @@ uint32_t xbox_ContiguousAllocEx(uint32_t size, uint32_t alignment,
                                 uint32_t phys_lo, uint32_t phys_hi);
 /* Record a block the caller placed itself, so it is not handed out again. */
 void xbox_ContiguousClaim(uint32_t va, uint32_t size);
-/* Release a block (RECOMP_HEAP_RECLAIM only); 0 if va is not in the window. */
+/* Release a block (unless RECOMP_CONTIG_RECLAIM=0); 0 if va is not in the
+ * window. */
 int xbox_ContiguousFree(uint32_t va);
 /* Bytes from va to the end of its block, 0 if va is not allocated. */
 uint32_t xbox_ContiguousBlockSize(uint32_t va);

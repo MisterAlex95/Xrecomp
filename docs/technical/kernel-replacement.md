@@ -162,7 +162,7 @@ static void bridge_NtCreateFile(void) {
 |---------------|---------------|
 | MmAllocateContiguousMemory | Bump allocator (returns Xbox VAs in heap region) |
 | MmAllocateContiguousMemoryEx | Bump allocator with alignment |
-| MmFreeContiguousMemory | No-op (bump allocator doesn't free) |
+| MmFreeContiguousMemory | Returns the block to the contiguous window (`RECOMP_CONTIG_RECLAIM=0` keeps it) |
 | NtAllocateVirtualMemory | Bump allocator |
 | NtFreeVirtualMemory | No-op |
 | ExAllocatePool / ExAllocatePoolWithTag | Bump allocator |

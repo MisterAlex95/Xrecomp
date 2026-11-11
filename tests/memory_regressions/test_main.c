@@ -22,14 +22,19 @@
  *      VirtualFree as a pointer, which failed, so none of it ever returned.
  *   5. MEM_DECOMMIT then MEM_COMMIT on heap memory gives zeroed pages, as on
  *      the console. Both were no-ops, so the old contents came back.
- *   6. MmFreeContiguousMemory gives a contiguous block back and the next
- *      request of that size reuses it; the default never reuses one.
+ *   6. (default too) MmFreeContiguousMemory gives a contiguous block back:
+ *      the pages in use drop by exactly that block, and the next request of
+ *      that size gets the same address. It used to be kept unless
+ *      RECOMP_HEAP_RECLAIM was set, so a title that freed and reloaded a scene
+ *      ran the 64 MB window out.
  *   7. (default too) MmAllocateContiguousMemoryEx's physical range is
  *      honoured. A request limited to the low 16 MB still succeeds once
  *      unconstrained requests have filled up to it -- XDK D3D's visibility
  *      test report pages ask for exactly that, and a bump pointer refused
  *      every one -- and a request for a range above the pointer lands in it.
  *
+ *   contig-keep   RECOMP_CONTIG_RECLAIM=0: the old behaviour, contiguous
+ *                 memory is never reused.
  *   ext-vma       RECOMP_EXT_VMA=1. A title that reserves a specific address
  *                 above the RAM mirrors gets it, can commit inside it and use
  *                 the memory, is told the truth when it asks, and is refused
@@ -187,13 +192,14 @@ int main(int argc, char **argv)
     int ext128 = !strcmp(mode, "ext-vma-128");
     int ext = ext128 || !strcmp(mode, "ext-vma");
     int avoid = !strcmp(mode, "contig-avoid-image");
+    int keep = !strcmp(mode, "contig-keep");
     size_t xbe_len = 0;
     unsigned char *xbe;
     char d[160];
     int i;
 
     setvbuf(stdout, NULL, _IONBF, 0);
-    if (!reclaim && !ext && !avoid && strcmp(mode, "default")) {
+    if (!reclaim && !ext && !avoid && !keep && strcmp(mode, "default")) {
         printf("unknown mode '%s'\n", mode);
         return 2;
     }
@@ -203,6 +209,8 @@ int main(int argc, char **argv)
         set_env("RECOMP_EXT_VMA", "1");
     if (avoid)
         set_env("RECOMP_CONTIG_AVOID_IMAGE", "1");
+    if (keep)
+        set_env("RECOMP_CONTIG_RECLAIM", "0");
     if (ext128)
         xbox_SetTotalRam(XBOX_DEVKIT_RAM);
 
@@ -323,19 +331,26 @@ int main(int argc, char **argv)
               "a decommitted page comes back zeroed, its neighbours kept", d);
     }
 
-    /* 6. Contiguous memory can be given back. */
+    /* 6. Contiguous memory is given back, once, unless RECOMP_CONTIG_RECLAIM=0. */
     if (!ext) {
         uint32_t c1 = xbox_ContiguousAlloc(0x20000, 4096);
-        uint32_t c2;
+        uint32_t before = xbox_ContiguousInUseBytes(), after, c2;
+        int said = xbox_ContiguousFree(c1);
 
-        snprintf(d, sizeof d, "free said %d", xbox_ContiguousFree(c1));
+        after = xbox_ContiguousInUseBytes();
         c2 = xbox_ContiguousAlloc(0x20000, 4096);
-        if (reclaim) {
-            char d2[160];
-            snprintf(d2, sizeof d2, "%s, got 0x%08X, expected 0x%08X", d, c2, c1);
-            check(c1 && c2 == c1, "a freed contiguous block is reused", d2);
+        if (!keep) {
+            snprintf(d, sizeof d, "free said %d, in use %u -> %u bytes", said,
+                     before, after);
+            check(c1 && said == 1 && before - after == 0x20000,
+                  "a contiguous free releases exactly that block", d);
+            snprintf(d, sizeof d, "got 0x%08X, expected 0x%08X", c2, c1);
+            check(c2 == c1, "the next request of that size reuses its address", d);
         } else {
-            check(c1 && c2 != c1, "default: contiguous memory is never reused", d);
+            snprintf(d, sizeof d, "free said %d, in use %u -> %u bytes, got 0x%08X",
+                     said, before, after, c2);
+            check(c1 && said == 1 && after == before && c2 != c1,
+                  "contig-keep: contiguous memory is never reused", d);
         }
     }
 

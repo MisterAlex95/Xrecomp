@@ -4283,12 +4283,11 @@ void xbox_FreeThreadStack(uint32_t stack_top)
  * it is free. XBOX_GPU_INSTANCE_DEFAULT stays carved off the top for the
  * GPU-instance bridge.
  *
- * Freed blocks are reused only under RECOMP_HEAP_RECLAIM, as before: without
- * it MmFreeContiguousMemory releases nothing and the arena fills in address
- * order. Contiguous blocks are also every texture and vertex buffer a D3D
- * title creates, and those come and go with the scene; a title that frees and
- * reallocates them as each texture pack loads runs the 64 MB window out
- * without the switch.
+ * MmFreeContiguousMemory gives a block back (RECOMP_CONTIG_RECLAIM, on by
+ * default; see contig_reclaim()). Contiguous blocks are every texture and
+ * vertex buffer a D3D title creates, and those come and go with the scene; a
+ * title that frees and reallocates them as each texture pack loads ran the
+ * 64 MB window out when frees were ignored.
  *
  * Locked: textures are created from loader threads as well as the main one. */
 #define CONTIG_PAGE       4096u
@@ -4333,7 +4332,9 @@ static uint32_t g_contig_len[CONTIG_PAGES];    /* pages, at a block's first page
 static uint32_t g_contig_pages_in_use;
 static uint32_t g_contig_high = CONTIG_PAGE;   /* high-water mark, bytes */
 static uint32_t g_contig_first_free = 1;       /* no free page below this */
-static uint32_t g_contig_allocs, g_contig_frees;
+static uint32_t g_contig_allocs;
+static uint32_t g_contig_released;             /* blocks given back */
+static uint32_t g_contig_free_calls;           /* frees asked for, kept or not */
 static uint32_t g_contig_peak_pages;
 static DWORD    g_contig_t0;
 static volatile LONG g_contig_lock;
@@ -4364,12 +4365,14 @@ static void contig_report(const char *what, uint32_t va, uint32_t pages)
         return;
     last_pages = g_contig_pages_in_use;
     fprintf(stderr, "  [CONTIG] t=%.1fs %s 0x%08X %u KB: in use %u KB, "
-            "peak %u KB, high-water %u KB (allocs=%u frees=%u)\n",
+            "peak %u KB, high-water %u KB (allocs=%u released=%u "
+            "free calls=%u)\n",
             (GetTickCount() - g_contig_t0) / 1000.0, what, va,
             pages * (CONTIG_PAGE / 1024),
             g_contig_pages_in_use * (CONTIG_PAGE / 1024),
             g_contig_peak_pages * (CONTIG_PAGE / 1024),
-            g_contig_high / 1024, g_contig_allocs, g_contig_frees);
+            g_contig_high / 1024, g_contig_allocs, g_contig_released,
+            g_contig_free_calls);
     fflush(stderr);
 }
 
@@ -4526,7 +4529,24 @@ void xbox_ContiguousClaim(uint32_t va, uint32_t size)
     contig_unlock();
 }
 
-/* Release a block (RECOMP_HEAP_RECLAIM only). Returns 1 if va is in the
+/* RECOMP_CONTIG_RECLAIM: MmFreeContiguousMemory gives the block back. On
+ * unless set to 0, which keeps every block for good, as the arena did before
+ * (then only under RECOMP_HEAP_RECLAIM, which now governs the general heap and
+ * NtFreeVirtualMemory alone). Off, the window fills in address order and a
+ * block's address is never seen twice; on, a freed block's pages go to the
+ * next request that fits. Fable frees about 16 MB per load transition and ran
+ * the 64 MB window out without it. Read once. */
+static int contig_reclaim(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("RECOMP_CONTIG_RECLAIM");
+        on = !e || !*e || atoi(e) != 0;
+    }
+    return on;
+}
+
+/* Release a block (unless RECOMP_CONTIG_RECLAIM=0). Returns 1 if va is in the
  * window, 0 if this arena never handed it out -- the caller decides whether
  * that is someone else's. */
 int xbox_ContiguousFree(uint32_t va)
@@ -4537,13 +4557,15 @@ int xbox_ContiguousFree(uint32_t va)
     if (va < XBOX_CONTIG_BASE
             || (uint64_t)va >= (uint64_t)XBOX_CONTIG_BASE + XBOX_CONTIG_SIZE)
         return 0;
-    /* Ours, but kept: without RECOMP_HEAP_RECLAIM contiguous memory is never
-     * reused, and 1 stops the caller handing it to the general heap. */
-    if (!xbox_HeapReclaimEnabled())
-        return 1;
     first = (va - XBOX_CONTIG_BASE) / CONTIG_PAGE;
 
     contig_lock();
+    g_contig_free_calls++;
+    /* Ours, but kept: 1 stops the caller handing it to the general heap. */
+    if (!contig_reclaim()) {
+        contig_unlock();
+        return 1;
+    }
     n = (va & (CONTIG_PAGE - 1)) ? 0 : g_contig_len[first];
     if (!n) {
         contig_unlock();
@@ -4559,7 +4581,7 @@ int xbox_ContiguousFree(uint32_t va)
     g_contig_pages_in_use -= n;
     if (first < g_contig_first_free)
         g_contig_first_free = first;
-    g_contig_frees++;
+    g_contig_released++;
     contig_report("free", va, n);
     contig_unlock();
     return 1;

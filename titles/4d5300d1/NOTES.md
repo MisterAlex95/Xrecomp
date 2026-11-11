@@ -162,3 +162,14 @@ the lock stalls D3D init (RECOMP_GUEST_CPU_TRACE).
   xbox_OhciInit() right after xbox_MemoryLayoutInit. XAPI then enumerates the pad (port 3) and polls it.
 - With RECOMP_PAD_PRESS=0x10 (Start pulses) the title leaves the title screen and reaches a loading screen with a tip
   and a progress bar. Toolkit follow-up: the template should call xbox_OhciInit too.
+
+## 2026-11-11: contiguous memory
+- `[CONTIG] arena exhausted` after the first world load: Fable frees about 16 MB of contiguous memory per load
+  transition (MmFreeContiguousMemory via its allocator 0x000AC000 -> D3D 0x001EC2C0), and the runtime kept every
+  freed block unless RECOMP_HEAP_RECLAIM was set. Toolkit fix: contiguous frees are honoured by default
+  (RECOMP_CONTIG_RECLAIM, =0 restores the old behaviour); the profile sets nothing. RECOMP_HEAP_RECLAIM (general heap,
+  NtFreeVirtualMemory) stays off for Fable.
+- 150 s run with Start pressed: 0 `arena exhausted`, last `[CONTIG]` line in use 52524 KB, peak 52524 KB of 65408 KB,
+  allocs=181 released=63 free calls=63. The run then stops at the in-world stall in sub_0012F7F0 (~220-250 flips).
+- About 26 MB of the window is Fable's own demand-paging pool (XPhysicalAlloc from sub_000AB270, xboot.ini
+  PhysicalSize = 26544 KB), which its pager never uses here (sidt/invlpg are no-ops). Harmless at this peak.

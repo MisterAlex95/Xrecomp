@@ -57,13 +57,14 @@ Start here when a title does not run. See [Step 6: Iterative Debugging](../pipel
 
 ## Memory and kernel
 
-Opt-ins that change how the kernel layer behaves. Each fixes a class of titles; none is a default. See [Xbox Kernel Replacement](../technical/kernel-replacement.md) and [Memory Layout Reproduction](../technical/memory-layout.md).
+Switches that change how the kernel layer behaves. Each fixes a class of titles; apart from `RECOMP_CONTIG_RECLAIM` and the per-host defaults noted, none is a default. See [Xbox Kernel Replacement](../technical/kernel-replacement.md) and [Memory Layout Reproduction](../technical/memory-layout.md).
 
 | Variable | Default | What it does | Where |
 |---|---|---|---|
 | `RECOMP_SAVE_DIR=<dir>` | off | Root for the title's `UDATA`, `TDATA` and cache folders; created if missing. Absolute. Saves left in the game folder are then not used. | `kernel_path.c` |
 | `RECOMP_GAME_DIR=<dir>` | `<external files dir>/game` | Android app shell: where the title's data (`default.xbe` and the disc's files) is read from. The launcher sets it from the folder the player chose (XBA-54; it then wins over `recomp.cfg`); otherwise set it in `recomp.cfg`. | `recomp_storage.c` |
-| `RECOMP_HEAP_RECLAIM` | off | Gives freed guest heap back. | `xbox_memory_layout.c` |
+| `RECOMP_HEAP_RECLAIM` | off | Gives freed guest heap back: freed heap blocks are split instead of handed over whole, and `NtFreeVirtualMemory` returns heap memory. Contiguous memory is `RECOMP_CONTIG_RECLAIM`. | `xbox_memory_layout.c`, `kernel_bridge.c` |
+| `RECOMP_CONTIG_RECLAIM=0` | on | `MmFreeContiguousMemory` gives the block back to the contiguous window, so the next request that fits gets its pages (and possibly its address). `0` keeps every block for good, the behaviour before (when only `RECOMP_HEAP_RECLAIM` freed them): addresses are never seen twice, but a title that frees and reloads textures per scene runs the 64 MB window out (Fable: `[CONTIG] arena exhausted`). The `[CONTIG]` lines count `released=` blocks and `free calls=`. Read once. | `xbox_memory_layout.c` |
 | `RECOMP_EXT_VMA` | off | Extended virtual-memory areas above the mirrors. | `guest_vmem.c`, `xbox_memory_layout.c` |
 | `RECOMP_GUEST_WINDOW=0/1` | on for Android, off elsewhere | POSIX: hold the whole 4 GB guest window from the start and carve every view out of it, so the contiguous window, the apertures and the tiled alias never land on a taken host range. Implied by `RECOMP_EXT_VMA`. | `xbox_memory_layout.c` |
 | `RECOMP_THREAD_STACK_MB=N` | 8 | POSIX: floor, in MB (1 to 1024), for the host stack of every thread the Win32 shim creates for a routine (`CreateThread`, so guest threads from `PsCreateSystemThreadEx`, plus timer and DPC callbacks). Lifted code recurses on the native stack; without a floor bionic gives about 1 MB and an Xbox thread's 64 KB would be the whole stack. A larger request is kept. Logged once as `[win32_compat] thread stack floor`. The guest main thread has its own 64 MB stack (`fb_present_sdl.c`). | `win32_compat.c` |
