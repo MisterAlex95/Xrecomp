@@ -1898,7 +1898,9 @@ public class LauncherActivity extends Activity {
         endRunningGame();
         Log.i(TAG, "launcher: deleting the imported copy " + dir);
         new Thread(() -> {
+            String tid = Pack.xbeTitleId(GameStore.findXbe(new File(dir)));
             GameStore.deleteTree(new File(dir));
+            GameTheme.clear(this, tid);   // its title image, hero and colours (docs/android/app-shell.md « Game theme »)
             if (dir.equals(GameStore.chosenDir(this)))
                 GameStore.forget(this);
             runOnUiThread(() -> {
@@ -3132,7 +3134,10 @@ public class LauncherActivity extends Activity {
             setNote(text, kind);
     }
 
+    /** Worker: the game is checked; its theme is baked here, off the UI thread, before HOME shows it. */
     private void chosen(String dir, String title) {
+        File d = new File(dir);
+        GameTheme.ensure(this, d, Pack.xbeTitleId(GameStore.findXbe(d)), title);
         chosenTitle = title;
         chosenDir = dir;
     }

@@ -361,11 +361,16 @@ final class TitleArt {
 
     /** The monogram's colour: a hue from the title ID (stable for a title), vivid. */
     static int monogramColor(String titleId) {
+        return Theme.hsv(titleHue(titleId), 0.62f, 0.9f);
+    }
+
+    /** A hue (degrees, 0..359) from the title ID, stable for a title: the monogram's, and the game theme's fallback. */
+    static int titleHue(String titleId) {
         int hsh = titleId == null ? 0 : titleId.toUpperCase(Locale.ROOT).hashCode();
         hsh ^= hsh >>> 16;
         hsh *= 0x45d9f3b;
         hsh ^= hsh >>> 16;
-        return Theme.hsv((hsh & 0x7fffffff) % 360, 0.62f, 0.9f);
+        return (hsh & 0x7fffffff) % 360;
     }
 
     /** « Sample Game » -> « SG », « Halo » -> « HA », « 4x4 Evo 2 » -> « 4E ». */

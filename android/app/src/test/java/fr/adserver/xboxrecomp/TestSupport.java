@@ -57,6 +57,11 @@ final class TestSupport {
      * 0x400 (section header at 0x300, its name at 0x340), the section's bytes from 0x400. Ours, no game content.
      */
     static byte[] xbeWithImage(int titleId, String name, byte[] image) {
+        return xbeWithSection(titleId, name, TitleArt.SECTION, image);
+    }
+
+    /** xbeWithImage() with the one section called section ($$XSIMAGE, ...). */
+    static byte[] xbeWithSection(int titleId, String name, String section, byte[] image) {
         byte[] head = xbe(titleId, name);
         byte[] b = new byte[0x400 + image.length];
         System.arraycopy(head, 0, b, 0, head.length);
@@ -66,7 +71,7 @@ final class TestSupport {
         le32(b, 0x300 + 0x0c, 0x400);       // raw address
         le32(b, 0x300 + 0x10, image.length);
         le32(b, 0x300 + 0x14, 0x10340);     // name address
-        byte[] n = TitleArt.SECTION.getBytes(StandardCharsets.US_ASCII);
+        byte[] n = section.getBytes(StandardCharsets.US_ASCII);
         System.arraycopy(n, 0, b, 0x340, n.length);
         System.arraycopy(image, 0, b, 0x400, image.length);
         return b;
@@ -92,6 +97,21 @@ final class TestSupport {
         le32(b, 32, 0xFFFFFFFF);
         System.arraycopy(data, 0, b, hdr, data.length);
         return b;
+    }
+
+    /** An XPR0 with one linear A8R8G8B8 texture (format 0x12) of w x h pixels (plain Java, no android.*). */
+    static byte[] xprArgb(int w, int h, int[] argb) {
+        byte[] d = new byte[w * h * 4];
+        for (int i = 0; i < w * h; i++)
+            le32(d, 4 * i, argb[i]);
+        return xpr0(0x12, w, h, d);
+    }
+
+    /** xprArgb() of one colour. */
+    static byte[] xprSolid(int w, int h, int argb) {
+        int[] px = new int[w * h];
+        java.util.Arrays.fill(px, argb);
+        return xprArgb(w, h, px);
     }
 
     static int rgb565(int r, int g, int b) {
