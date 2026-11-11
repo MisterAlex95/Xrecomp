@@ -358,8 +358,8 @@ static void sh_active(int unit)
     }
 }
 
-/* Bind on the active unit (texture uploads and parameter changes bind on
- * whatever unit is active; only units 0-3 are shadowed). */
+/* Bind on the active unit (only units 0-3, the ones stages sample, are
+ * shadowed). For sampling: the caller has made the stage's unit active. */
 static void sh_tex(GLenum target, GLuint t)
 {
     int k = target == GL_TEXTURE_CUBE_MAP;
@@ -370,6 +370,22 @@ static void sh_tex(GLenum target, GLuint t)
         s_sh.tex[s_sh.unit][k] = t;
     }
     glBindTexture(target, t);
+}
+
+/* Bind for creating, uploading to or copying into a texture, on unit
+ * SH_UNITS, which no stage samples. A batch's textures are bound before its
+ * target (bind_stage_textures, then bind_target), and binding there on the
+ * active unit -- the stage bound last -- would make that stage sample the
+ * new texture: Burnout 3's back buffer, re-created at another scale while
+ * stage 1 held its bloom texture, became the bloom, a frame fed back into
+ * itself every frame (the white centre at scale 2). Every path that can run
+ * between the stage binds and the draw binds here: target creation and
+ * growth, depth creation, seeding, resolves, texture uploads. A stage bind
+ * that follows makes its own unit active again (sh_active). */
+static void sh_tex_scratch(GLenum target, GLuint t)
+{
+    sh_active(SH_UNITS);
+    sh_tex(target, t);
 }
 
 /* Deleting an object unbinds it wherever it is bound (GL reverts those
@@ -854,6 +870,9 @@ static uint32_t s_rt_serial;
 #define NV_GL_MAX_RT    16
 #define NV_GL_MAX_DEPTH 8
 static GlRT    s_rt[NV_GL_MAX_RT];
+/* The colour target each stage samples directly this batch (NULL: none;
+ * bind_stage_textures, break_feedback). */
+static GlRT   *s_stage_rt[4];
 static GlDepth s_depth[NV_GL_MAX_DEPTH];
 static uint8_t *s_scratch;                /* readback / conversion buffer */
 static size_t   s_scratch_cap;
@@ -897,10 +916,7 @@ static int rt_resolve_alloc(GlRT *r)
         glGenTextures(1, &r->rtex);
         glGenFramebuffers(1, &r->rfbo);
     }
-    /* On a unit no stage samples from (this can run after the batch's
-     * textures are bound: seeding the target it draws into). */
-    sh_active(SH_UNITS);
-    sh_tex(GL_TEXTURE_2D, r->rtex);
+    sh_tex_scratch(GL_TEXTURE_2D, r->rtex);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, (GLsizei)r->gw, (GLsizei)r->gh, 0,
                  GL_RGBA, GL_UNSIGNED_BYTE, NULL);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
@@ -972,8 +988,7 @@ static void rt_upload(GlRT *r)
         }
     if (r->sc != 1.0f) {
         rt_resolve_alloc(r);
-        sh_active(SH_UNITS);          /* as rt_resolve_alloc */
-        sh_tex(GL_TEXTURE_2D, r->rtex);
+        sh_tex_scratch(GL_TEXTURE_2D, r->rtex);
         glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, (GLsizei)r->w, (GLsizei)r->h,
                         GL_RGBA, GL_UNSIGNED_BYTE, buf);
         sh_blit(r->rfbo, (GLint)r->w, (GLint)r->h, r->fbo, (GLint)rt_real_px(r, r->w),
@@ -982,7 +997,7 @@ static void rt_upload(GlRT *r)
         s_sst.seed_blits++;
         return;
     }
-    sh_tex(GL_TEXTURE_2D, r->tex);
+    sh_tex_scratch(GL_TEXTURE_2D, r->tex);
     glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, (GLsizei)r->w, (GLsizei)r->h,
                     GL_RGBA, GL_UNSIGNED_BYTE, buf);
 }
@@ -1125,6 +1140,15 @@ static void rt_readback(GlRT *r)
 
 static void rt_free(GlRT *r)
 {
+    int st;
+
+    /* A target freed between the stage binds and the draw (re-created at
+     * another scale, evicted for the batch's own target): its slot may be
+     * reused at once, and break_feedback must not take the new occupant for
+     * the texture a stage samples. */
+    for (st = 0; st < 4; st++)
+        if (s_stage_rt[st] == r)
+            s_stage_rt[st] = NULL;
     rt_readback(r);
     if (r->fbo) sh_delete_fbo(r->fbo);
     if (r->tex) sh_delete_textures(1, &r->tex);
@@ -1141,7 +1165,7 @@ static void rt_grow(GlRT *r, uint32_t gw, uint32_t gh)
     GLuint t;
 
     glGenTextures(1, &t);
-    sh_tex(GL_TEXTURE_2D, t);
+    sh_tex_scratch(GL_TEXTURE_2D, t);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, (GLsizei)rt_real_px(r, gw),
                  (GLsizei)rt_real_px(r, gh), 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
@@ -1258,7 +1282,7 @@ static GlRT *rt_get(const Nv2aSurface *s)
     r->cfmt = s->format & 0xF;
     r->samp.wrap_s = r->samp.wrap_t = r->samp.filter = r->samp.swz_a = -1;
     glGenTextures(1, &r->tex);
-    sh_tex(GL_TEXTURE_2D, r->tex);
+    sh_tex_scratch(GL_TEXTURE_2D, r->tex);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, (GLsizei)rt_real_px(r, w),
                  (GLsizei)rt_real_px(r, h), 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
@@ -1351,7 +1375,7 @@ static GlDepth *depth_get(uint32_t va, uint32_t w, uint32_t h, uint32_t zbpp, fl
     d->samp.wrap_s = d->samp.wrap_t = d->samp.filter = d->samp.swz_a = -1;
     d->cmp = 0;
     glGenTextures(1, &d->tex);
-    sh_tex(GL_TEXTURE_2D, d->tex);
+    sh_tex_scratch(GL_TEXTURE_2D, d->tex);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH24_STENCIL8, (GLsizei)nv2a_gl_scale_px(d->w, sc),
                  (GLsizei)nv2a_gl_scale_px(d->h, sc), 0,
                  GL_DEPTH_STENCIL, GL_UNSIGNED_INT_24_8, NULL);
@@ -1692,7 +1716,7 @@ static int tex_upload(GlTex *e, const Nv2aTexture *t)
 
     if (!e->tex)
         glGenTextures(1, &e->tex);
-    sh_tex(target, e->tex);
+    sh_tex_scratch(target, e->tex);
     one.cube = 0;
     if (e->cube) {
         uint32_t stride = e->bytes / 6;
@@ -2711,9 +2735,6 @@ static void gl_clear(const Nv2aSurface *s, const Nv2aRenderState *rs,
  * the texel-to-normalised scale per stage. Before the target is bound:
  * sampling a surface the GPU drew may read it back, which rebinds the
  * framebuffer. */
-/* The colour target each stage samples directly this batch (NULL: none). */
-static GlRT *s_stage_rt[4];
-
 /* Texel coordinates (linear formats, and every format on the screen-space
  * path) rather than normalised ones. */
 static int tex_coords_in_texels(const Nv2aPixelState *ps, const Nv2aTexture *t)
