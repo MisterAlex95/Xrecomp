@@ -243,6 +243,8 @@ exist in the runtime and mean something to a player are offered:
 | Vibration | On (default), Off | none: `ui_haptics` |
 | Bottom screen (only with a second display) | Panel (default), Black, Off | none: [Dual screen](#dual-screen-ayn-thor), `GameStore.bottomScreen` |
 | Graphics › Vertical sync | On (default), Off | `RECOMP_PRESENT_VSYNC=0` when off |
+| Graphics › Renderer | Auto (default: the title profile's choice, software today), Software, GPU | `RECOMP_GPU=0` / `1`; see [GPU back end](../technical/gpu-backend.md#android) |
+| Graphics › Frame cap (GPU renderer) | 30, 60 (default), Off | `RECOMP_GPU_FPS_CAP=30` / `0` |
 | Graphics › Texture filtering | Sharp (default), Smooth, Anisotropic 8×, Anisotropic 16× | `RECOMP_TEX_BILINEAR=1`, `RECOMP_TEX_ANISO=8` / `16` |
 | Audio › 3D audio (HRTF) | On (default), Off | `RECOMP_APU_HRTF=0` when off |
 | Audio › Audio buffer | Short (256), Normal (default, 512), Long (1024), Very long (2048) | `RECOMP_AUDIO_BUF_SAMPLES=…` |
@@ -261,8 +263,8 @@ options only.
 
 Asked for in XBA-41 but left out, because no runtime option backs them on Android: the output scaling and its filter
 (the SDL presenter always letterboxes the 640 x 480 frame with nearest-neighbour sampling, `fb_present_sdl.c`;
-`RECOMP_WINDOW_SCALE` only sizes a desktop window and `RECOMP_PRESENT_FILTER` is the D3D11 presenter's), an fps cap,
-control remapping and a stats overlay (no such switch), and vibration (`RECOMP_RUMBLE` only gates the emulated USB
+`RECOMP_WINDOW_SCALE` only sizes a desktop window and `RECOMP_PRESENT_FILTER` is the D3D11 presenter's), an fps cap
+for the software renderer (only the GPU renderer has one, `RECOMP_GPU_FPS_CAP`), control remapping and a stats overlay (no such switch), and vibration (`RECOMP_RUMBLE` only gates the emulated USB
 pad, `RECOMP_USB`, a per-title opt-in). Bring-up and debug switches stay out on purpose.
 
 ## Choosing the game
