@@ -17,12 +17,12 @@ The CI builds it on every push to `main`. The latest one is always the prereleas
 | Piece | What |
 |---|---|
 | `LauncherActivity` | The launcher entry ([The launcher](#the-launcher)): welcome, game choice and import, home (the game's hero with Play / Prepare, then Settings, Controls, Game data, About), in its own process `:launcher`. `Theme.java` and `Widgets.java` draw it, `TitleArt.java` decodes the game's title image, `UiFeedback.java` plays its sounds and haptics; `RecompConfig.java` writes its settings to `recomp.cfg`. With a valid game and « Open the game directly next time » on, it starts `ShellActivity` at once and shows nothing. |
-| `ShellActivity` | Subclass of SDL's `SDLActivity`, which loads `libSDL2.so` and then `libmain.so`. SDL's Java side is compiled from the pinned sources (`$SDL2_SRC/android-project`), not copied here. Not exported: started by the launcher, after it sets `RECOMP_GAME_DIR`. |
+| `ShellActivity` | Subclass of SDL's `SDLActivity`, which loads `libSDL2.so` and then `libmain.so`. SDL's Java side is compiled from the pinned sources (`$SDL2_SRC/android-project`), not copied here. Not exported: started by the launcher, after it sets `RECOMP_GAME_DIR`. Holds the [in-game menu](#in-game-menu) (`GameMenu`), a View layer over SDL's surface. |
 | `libxba_import.so` | The launcher's ISO import: `xiso_jni.c` around the static `xiso` target (`src/xiso`). Loaded only in `:launcher`. |
 | `libmain.so` | `shell_main.c` + the **whole** toolkit (`--whole-archive`) + the title, when one is linked (see [A title in the shell](#a-title-in-the-shell)). Loading it on a device proves that bionic resolves every symbol the runtime uses. Four symbols that a title provides are weak stubs in `shell_main.c`, and so is the title's hook `recomp_title_main`. |
 | logcat | `src/platform/android_log.c`: stdout (INFO) and stderr (WARN) go to the tag `xboxrecomp`, one entry per line. `xbox_android_log_init()` is the first call of `SDL_main`. |
 | Window | Black, fullscreen, landscape (`sensorLandscape` + `SDL_HINT_ORIENTATIONS`). |
-| Back | Trapped (`SDL_HINT_ANDROID_TRAP_BACK_BUTTON`). Once shows a « Press Back again to quit » toast (`QUIT_PROMPT`); twice within 2 s returns from `SDL_main`, and SDLActivity then finishes. With a title, the title's window does the same and ends the process (see [Quit](#quit)). |
+| Back | Opens and closes the [in-game menu](#in-game-menu) (ShellActivity takes it before SDL); quitting is in the menu (see [Quit](#quit)). A gamepad's own Back key stays that pad's Select for the game, as before. SDL still traps Back (`SDL_HINT_ANDROID_TRAP_BACK_BUTTON`); its old Back-twice path (`QUIT_PROMPT` toast, twice within 2 s quits) is only reached where nothing above SDL takes Back. |
 | Manifest | minSdk 30, target 35, arm64-v8a only, GLES 3.0 required, `allowNativeHeapPointerTagging="false"`, `isGame`. |
 | Per title | `-PxbaTitleDir=…` (the title's project), `-PxbaApplicationId=…`, `-PxbaLabel=…`, `-PxbaVersionCode=…`, `-PxbaXbeSha256=…` (the expected `default.xbe`, [WRONG_GAME](#wrong_game)). The title is linked next to `shell_main.c`, which stays the entry (XBA-52). |
 | Assets | `selftest.xbe`: the synthetic XBE of `tools/conformance` (ours, no game content), copied in at build time for the [self-test](#self-test-in-the-app-process). |
@@ -36,8 +36,9 @@ The CI builds it on every push to `main`. The latest one is always the prereleas
    instead ([The launcher](#the-launcher)); push any `default.xbe` to `files/game/` first and press Play on the
    launcher's home: the shell then shows a « Game data found … This APK has no recompiled game in it » message box
    (`NO_TITLE`, logcat `(no title linked)`); OK, and the black screen stays.
-3. Press Back once. A « Press Back again to quit » toast shows; logcat: `QUIT_PROMPT shown`. The app stays open.
-4. Press Back again within 2 s. logcat: `Back pressed twice, quitting`, then `clean exit`, and the app closes.
+3. Press Back once. The in-game menu slides in from the left; logcat: `shell: menu open (Back)`. The app stays open.
+4. Quit game, then Quit game again (the second press confirms). logcat: `shell: menu: quit (confirmed)`, then
+   `clean exit`, and the app closes.
 5. Check there is no tombstone: `adb shell ls /data/tombstones` (root) or no `DEBUG` / `F libc` lines in logcat.
 6. Send a screenshot (`adb exec-out screencap -p > shell.png`) and the logcat lines.
 
@@ -142,7 +143,7 @@ One activity, a small state machine of screens (`LauncherActivity.Screen`) with 
 | Preparing the game (import) | A progress ring (percent, ticks), the step (« Checking », « Copying », « Extracting »), « X of Y », the current file, the free space, **Cancel**. The screen stays on; B cancels too. | A picked folder or image. |
 | Home | A console-style home (the top bar only says « Home », so the title shows once). The hero: the game's [title image](#title-image) (or a monogram), its title ID, its title (the XBE certificate's name, else the folder's name), a status chip (**Ready**, **Needs preparing**, **Preparing**, **Prepare failed**, **Game data missing**, **No file access**, **Wrong game**, **No game**; plus **Running** when the game runs in the background), one lead line, a few facts and one big button. Facts: **Last played**, **Play time**, then **Prepared** (pack.json's `built_at`) and **Pack size** when a pack is there, else the game's size; while a Prepare is needed: how long it takes, the free internal storage, the memory; while it runs: a bar and « Compile · 42 % · about 12 min left »; after a failure: the code. The big button: **Play**, **Prepare**, **Preparing…** (opens its screen), **See what failed**, or **Choose a game** / **Choose the game again**. Under the hero, a row of four smaller tiles: **Settings**, **Controls**, **Game data**, **About**. | A finished import (Play focused), every start when « Open directly » is off, the « Launcher » shortcut, B from the screens above. |
 | Settings | The [options](#settings) as rows, left / right (or A) to change, a detail panel with what the option does, its choices and its line in `recomp.cfg`. | Home. |
-| Controls | A drawn handheld with, next to each control, the Xbox controller button the game gets, and the same as a table: A B X Y as they are, L1 = **Black**, R1 = **White**, L2 / R2 = the triggers, Start = Start, Select = **Back**, D-pad and sticks as they are, pressing a stick = its thumbstick button (`src/input/xinput_device.c`, SDL's game controller mapping), and Android's Back pressed twice quits the game (`shell_main.c`, [Quit](#quit)). | Home. |
+| Controls | A drawn handheld with, next to each control, the Xbox controller button the game gets, and the same as a table: A B X Y as they are, L1 = **Black**, R1 = **White**, L2 / R2 = the triggers, Start = Start, Select = **Back**, D-pad and sticks as they are, pressing a stick = its thumbstick button (`src/input/xinput_device.c`, SDL's game controller mapping), and Android's Back opens the [in-game menu](#in-game-menu) (also Select + Start held). | Home. |
 | Game data | The raw folder path (only here, not on Home), source (read in place, imported copy, set in `recomp.cfg`), size (counted in the background), free space; **Change game** (another folder or image, or the same one again to re-import); **Delete the imported copy** (only when the game is the app's own `files/game/`; press A twice within 5 s; saves are kept; then the choice is forgotten). | Home. |
 | About | Version (`-PxbaVersion`), build (`-PxbaVersionCode`), app id, the game check (the first digits of `-PxbaXbeSha256`, or none), licences (xboxrecomp MIT, SDL2 zlib), and that no game data is included. | Home. |
 
@@ -242,6 +243,7 @@ exist in the runtime and mean something to a player are offered:
 | Sounds | On (default), Off | none: `ui_sound` |
 | Vibration | On (default), Off | none: `ui_haptics` |
 | Bottom screen (only with a second display) | Panel (default), Black, Off | none: [Dual screen](#dual-screen-ayn-thor), `GameStore.bottomScreen` |
+| Game › Language | Same as Android (default), English, Français, Deutsch, Español, Italiano, Português, 日本語, 한국어, 中文 | `RECOMP_LANGUAGE=…`; « Same as Android » writes nothing ([Game language](#game-language)) |
 | Graphics › Vertical sync | On (default), Off | `RECOMP_PRESENT_VSYNC=0` when off |
 | Graphics › Renderer | Auto (default: the title profile's choice, software today), Software, GPU | `RECOMP_GPU=0` / `1`; see [GPU back end](../technical/gpu-backend.md#android) |
 | Graphics › Frame cap (GPU renderer) | Auto (default: the title profile's choice, 60 unless the profile sets one; Fable: 30), 30, 60, Off | `RECOMP_GPU_FPS_CAP=30` / `60` / `0` |
@@ -251,6 +253,16 @@ exist in the runtime and mean something to a player are offered:
 | Advanced › Drawing threads | Auto (default), 1, 2, 4, 6, 8 | `RECOMP_RASTER_THREADS=…` |
 | Advanced › Fast cores only | On (default on Android), Off | `RECOMP_BIG_CORES=0` when off |
 | Advanced › Self-test at start | Off (default), On | `RECOMP_SHELL_SELFTEST=1` |
+
+#### Game language
+
+The console language the runtime reports to the title (`RECOMP_LANGUAGE`, XBA-77, `GameLanguage.java`). First found
+wins: the title's own choice (in-game menu › Quick settings › **Language**, kept per title ID in
+`files/settings/language_<TITLEID>`), then the `RECOMP_LANGUAGE` line of `recomp.cfg` (Settings › Game › Language),
+then the Android language when the Xbox has it, then English. `ShellActivity` sets the variable before the runtime
+starts for the first and the third (the environment wins over `recomp.cfg`), and clears it otherwise; logcat says
+« shell: game language … ». A title only has the languages on its disc: a US disc is often English whatever is
+chosen.
 
 How the file is written (`RecompConfig.java`): it is parsed as `recomp_cfg.c` does (one `KEY=VALUE` per line, blanks
 and `#` comments skipped, keys and values trimmed, the first line for a key wins). A change rewrites the key's first
@@ -354,7 +366,7 @@ Use the Thor's gamepad for everything unless a step says touch.
 5. A on Play: the stub title starts (`storage: game=/storage/emulated/0/Download/stubgame ... (default.xbe found)`,
    `stub title: all 5 lifted functions OK`), and « The title finished (code 0) » on the black screen.
 6. Press Home on the Thor, then the app icon: back to the game at once (logcat `launcher: game running, bringing it
-   back`). Back twice to quit it, start the app again: Home with Play focused (« Open directly » is off).
+   back`). Back, Quit game twice to quit it, start the app again: Home with Play focused (« Open directly » is off).
 7. Settings: D-pad through the rows (the list scrolls), left / right change Vertical sync and Texture filtering, L1 /
    R1 jump between sections, the right panel follows the focus. Then
    `adb shell cat /sdcard/Android/data/fr.adserver.xboxrecomp.shell/files/recomp.cfg`: the comment line and
@@ -553,7 +565,8 @@ the game's process may be alive, and SharedPreferences caches per process; each 
 ```
   fps · frame time              battery                  thermal
   [ Back  ]   [Launcher] [Screenshot] [ Perf ]   [ White ]
-  [ Start ]   [Share log] [   Quit (hold)    ]   [ Black ]
+  [ Start ]   [Share log] [  Menu  ] [ Quit  ]   [ Black ]
+                                     (hold)
                (Perf details)       nothing to touch bottom-centre (palms)
 ```
 
@@ -561,8 +574,9 @@ the game's process may be alive, and SharedPreferences caches per process; each 
   (`xinput_device.c` maps L1 to Black and R1 to White), there so the player finds them. Each pointer is tracked on its
   own (two thumbs on two buttons work, sliding from one to the next works); everything is released on
   `ACTION_CANCEL`, when the panel is dismissed or detached, and in `ShellActivity.onStop`.
-- **Launcher** opens the launcher (the game waits in the background, as with Home). **Quit** needs a hold of 0.8 s
-  (it fills in red), then ends the game as Back twice does (`recomp_quit(0)`). **Screenshot** saves the last frame as
+- **Launcher** opens the launcher (the game waits in the background, as with Home). **Menu** opens or closes the
+  [in-game menu](#in-game-menu) on the top screen. **Quit** needs a hold of 0.8 s (it fills in red), then ends the game
+  (`recomp_quit(0)`). **Screenshot** saves the last frame as
   `<external files>/screenshots/<date>.bmp` (24-bit BMP, 640 x 480: `xbox_FramebufferDumpBmp`, now implemented for
   the SDL window) and says « Saved … » in the status strip. **Perf** shows more figures on the panel (draws per frame,
   battery temperature); it does not draw over the game. **Share log** dumps this process's logcat (the runtime's
@@ -662,6 +676,143 @@ On the Thor, with the shell APK of this change (and the stub or a title for step
     back): Black keeps the bottom screen black, Off leaves the system's content there, nothing else changes.
 11. **Single screen**: on a one-screen device (a phone): no panel, no error, logcat `displays:` lists one display.
 
+## In-game menu
+
+A drawer that slides in from the left over the game (Eden / BananaNative style) with XRecomp's own options: resume,
+quick settings, controls, screenshot, share log, back to the launcher, quit. `GameMenu.java` (the drawer and its
+input), `MenuTriggers.java` (the edge swipe and the gamepad combo as plain state machines), `MenuNative.java` /
+`android/app/src/main/cpp/menu_jni.c` (hold, volume, quit), wired in `ShellActivity`.
+
+```
+  ┌──────────────────────────┐
+  │ ◆ GAME MENU    ● Paused  │   the game's frame, dimmed,
+  │ <game title>             │   stays behind (held, not redrawn)
+  │ Playing for 0:42:10      │
+  │ ──────────────────────── │                        59.9 fps · 16.7 ms
+  │ ▶ Resume                 │                        (performance overlay,
+  │ ☰ Quick settings         │                         also with the menu closed)
+  │ ✚ Controls               │
+  │ ◎ Screenshot             │
+  │ < Share log              │
+  │ ▦ Back to launcher       │
+  │ ⏻ Quit game              │
+  │ (A) Select  (B) Back     │
+  └──────────────────────────┘
+```
+
+**How it is put together.** A View layer (`FrameLayout`: a dimming scrim, then the launcher's `Widgets.Stage` with the
+drawer, the focus `Glide`, the performance overlay and a message chip) added over SDL's layout with
+`addContentView` in `ShellActivity.onCreate`. SDL's surface is never recreated or resized. The drawer is 680 of the
+1920 design pixels (35 %), the launcher's dark glass panel with MenuRows, the gliding focus, its sounds and haptics
+(`UiFeedback`); it slides in in 200 ms (decelerating) while the scrim fades in. The Stage scales it to the screen
+less the display cutout, so 720p and 1080p look the same.
+
+**Opens by** (logcat `shell: menu open (<why>)`):
+
+| Trigger | Notes |
+|---|---|
+| Android Back (the navigation bar, the back gesture, a keyboard) | Opens; Back again (or B) closes. A Back key **from a gamepad** SDL reads (`SDLControllerManager.isDeviceSDLJoystick`) is that pad's Select for the game, as it always was (SDL maps `KEYCODE_BACK` from a pad to its Back button), so it does not open the menu. |
+| Guide / Mode (`KEYCODE_BUTTON_MODE`) | The Xbox pad has no such button, so no game uses it: the menu takes it whole. Many handhelds keep it for the system; then it never reaches the app. |
+| Select + Start held 0.5 s | Both still reach the game while held (each alone is a game button: Back and Start); when the menu opens, the game gets their release. Xbox games read Back and Start each on its own, so holding both half a second is free. |
+| A swipe in from the left edge (top screen) | Down within 3 % of the width from the left edge, then 6 % of the width to the right, mostly sideways. The game sees the touch begin and gets an `ACTION_CANCEL` when the swipe is recognised. With Android's gesture navigation the same swipe may also be the system's back gesture: a Back within 0.6 s of a swipe-open is ignored, so the menu stays open. |
+| « Menu » on the companion panel (second screen) | Opens or closes it. |
+
+**While open.**
+
+- **The game is held**: `MenuNative.nativeHold(true)` → `recomp_lifecycle_pause_for(RECOMP_HOLD_MENU)`, the same
+  hold as the background ([Background and resume](#background-and-resume)): the flip parks, the title's threads stop
+  behind it, the audio device pauses at once. The window keeps showing the last frame, dimmed. Closing calls
+  `nativeHold(false)`. The two reasons are kept apart, so Home with the menu open, then back, leaves the game paused
+  under the menu.
+- **Input goes to the menu only**: `ShellActivity.dispatchKeyEvent` / `dispatchGenericMotionEvent` /
+  `dispatchTouchEvent` ask `GameMenu` first, and what it takes never reaches SDL. D-pad, hat and left stick move the
+  focus (left / right step a setting), A selects, B or Back goes back (closes from the main page), Start or Guide
+  resumes. A, B and Start act on their **release**, and only for a press that went down while the menu was open: the
+  release of the key that opened it does nothing, and the key that closes it never reaches the game. Volume keys stay
+  the system's. Touch: tap a row, tap the dimmed game to close.
+- **No stuck buttons**: when the menu opens it hands SDL the release of every key the game saw go down (`KeyEvent`
+  copies, sent straight to `SDLActivity.handleKeyEvent`), a centred event for every joystick that moved (sticks,
+  triggers and hat at rest, to SDL's surface), and releases the companion panel's buttons (`input_overlay`: still on,
+  nothing held); it releases the panel's again when it closes.
+
+**Items.**
+
+| Item | Does |
+|---|---|
+| Resume | Closes the menu. |
+| Quick settings | **Perf overlay** On / Off: fps and frame time (`xbox_FramebufferWindowGetStats`, twice a second) in the top right corner, in the menu's layer, not in the game frame; stays with the menu closed. **Volume** 0–100 % in steps of 10, A mutes / unmutes: one gain on the mixed APU output (`apu_volume.c`, the square of the fraction, after the WAV capture), set through JNI. **Bottom screen** Panel / Black / Off (only with a second screen): `GameStore.setBottomScreen` and the companion is refreshed at once. These three apply **now** (the rows say so) and are remembered (`files/settings/perf_overlay`, `game_volume`, `bottom_screen`); the volume is applied again at the next start. **Language** (only when the game's XBE gives a title ID): As in Settings, then the nine languages; this game's own [language](#game-language), applied at the next start. Screen filter and scaling are not offered: the SDL window's are fixed at start (`fb_present_sdl.c`: nearest, logical size 640 x 480). |
+| Controls | The launcher's Controls table, compact (plus Back and Select + Start: the menu). |
+| Screenshot | Closes the menu first, then saves the game's last frame as `<external files>/screenshots/<date>.bmp` (`xbox_FramebufferDumpBmp`, the companion panel's), and says « Saved … » at the top of the screen (and on the panel). |
+| Share log | This process's logcat to `files/logs/game.log`, then the share sheet (the companion panel's `LogProvider` path). The menu stays open. |
+| Back to launcher | **The game stays alive** (the runtime maps its guest memory once per process: starting it again means a new process), held: the drawer goes at once, the launcher comes up (`ACTION_SHOW_LAUNCHER`), and the menu's hold is let go only in `onStop`, after SDL's pause has put the background hold in place, so no frame runs in between. The launcher's Play brings this task back and the game goes on (`launcher: game running, bringing it back`). |
+| Quit game | The first press turns the row into « Press again to quit » for 4 s (moving away cancels it); the second press quits: `nativeQuit` lets the guest go, `sync()`s the saves, then `recomp_quit(0)` ([Quit](#quit)). |
+
+The header shows the game's title (the launcher's choice) and the time since the game started (this process).
+
+**Tests and screenshots.** `GameMenuTest` (Robolectric, a fake `GameMenu.Host` standing in for libmain and SDL): Back,
+a gamepad's Back, Guide, Select + Start timing (0.4 s no, 0.55 s yes, released early no), the edge swipe and what is
+not one, the panel's Menu; nothing reaching the game while open; the releases on open (keys, a centred joystick
+event, the overlay) and on close; B acting on release; stick and hat navigation with repeat; Back to launcher holding
+until `onStop`; Quit's confirmation and its timeout; the quick settings by pad (live, remembered, applied at start);
+the slide; the drawer's width. Rendered over a made-up game frame to `build/screenshots/menu-*.png`: closed, main,
+quit armed, quick settings, controls, closed with the overlay and a message; en and fr at 1080p and 720p
+(`--target app-unit-tests-out`). C: `tests/recomp_lifecycle` (the reasons) and `tests/apu_volume`.
+
+### Device check (in-game menu), for Alex
+
+With the shell APK of this change and the stub or a title (and the Thor for 5 and 9):
+
+1. **Back**: in the game, press Android Back (the navigation key or the back gesture). The menu slides in from the
+   left over the dimmed game, Resume focused. logcat `shell: menu open (Back)`, `lifecycle: paused (menu)`. Back
+   again: it slides out, `shell: menu closed`, `lifecycle: resumed after N ms`.
+2. **Paused, with sound**: open the menu during a scene with music or motion: the picture freezes and the sound
+   stops at once; Resume: both come back where they were. Then open the menu, press Home, wait 10 s, come back: still
+   paused under the menu (`lifecycle: still paused (menu)`), Resume continues.
+3. **Swipe**: swipe from the very left edge of the top screen to the right: the menu opens (`menu open (swipe)`), and
+   it stays open even if the system's back gesture fires with it. Tap the dimmed game: it closes.
+4. **Combo and Guide**: hold Select + Start: after about half a second the menu opens (`menu open (Select+Start)`);
+   press each alone in the game: the game still gets them. If the pad has a Guide / Home button the app receives,
+   it opens the menu (`menu open (Guide)`); say whether the Thor's does. Also say what the Thor's own Back button
+   does: opens the menu, or acts as Select in the game (logcat shows which).
+5. **Bottom panel**: tap « Menu » on the companion panel: the menu opens on the top screen; tap it again: it closes.
+6. **No stuck buttons**: hold A (or a direction, or the right trigger) in the game and open the menu with Back while
+   holding; let go inside the menu, close it: nothing is held in the game. Same while holding White on the bottom
+   panel. Close the menu with B and with A on Resume: the game does not get that B or A.
+7. **Navigation**: D-pad, hat and left stick move the focus (held: it repeats); A selects; B goes back from Quick
+   settings and Controls; Start resumes from anywhere.
+8. **Quick settings**: Perf overlay On: the fps and frame time show in the top right corner, also after Resume
+   (compare with the companion's fps). Volume: left / right change the game's volume in steps (audible after
+   Resume), A mutes; quit and start again: the volume is remembered. Bottom screen (Thor): Panel / Black / Off switch
+   the bottom screen at once.
+9. **Screenshot**: Screenshot closes the menu and « Saved <date>.bmp » shows at the top;
+   `adb shell ls /sdcard/Android/data/<app id>/files/screenshots`, pull the BMP: the game's frame, without the menu.
+10. **Share log**: the share sheet opens with game.log; cancel it: the menu is still there, the game still paused.
+11. **Back to launcher**: the launcher comes up and the game waits (no sound; logcat `paused (menu)` then
+    `still paused (background)` and no `resumed` in between). Play: the game is back where it was, running
+    (`launcher: game running, bringing it back`).
+12. **Quit**: Quit game once: the row asks « Press again to quit »; wait 4 s: it goes back to « Quit game ». Press it
+    twice: `shell: menu: quit (confirmed)`, `quit from the in-game menu`, `clean exit`; start the game again: the
+    saves are there.
+13. **French**: with the device in French, every row, hint and message of the menu is in French. Photos of the menu
+    (main page, Quick settings) at least once, in French.
+14. **Notch / 720p**: on a phone with a cutout, the drawer's text stays clear of it; on a 720p screen the menu looks
+    the same as at 1080p.
+
+### Device check (game language, XBA-77), for Alex
+
+With a title from a European (multi-language) disc, Fable's PAL disc for instance:
+
+1. **Same as Android**: device in French, Settings › Game › Language on « Comme Android » (the default): start the
+   game. logcat `shell: game language fr, title 4D5300D1`; the game's menus are in French.
+2. **Settings**: Settings › Game › Language → English; quit the game and start it again: logcat
+   `shell: game language en (recomp.cfg)`, menus in English.
+3. **This game**: in the game, in-game menu › Quick settings › Language → Deutsch; quit and start again: logcat
+   `shell: game language de`, menus in German (and the Settings line still says English).
+4. **Back to Settings**: same row → « Comme les Réglages »; next start: English again.
+5. **US disc** (if you have one): choose French: the game stays in English (its disc has nothing else), nothing
+   breaks.
+6. Say which languages Fable's disc offers, for the profile notes.
+
 ## Background and resume
 
 (`src/platform/recomp_lifecycle.c`, XBA-24.) On Android SDL already blocks the thread that pumps its events while the
@@ -674,6 +825,10 @@ app is in the background, and pauses its audio there. The title's own threads wo
 - the SDL audio device is paused by a listener at once, not at the next flip, and plays its queue on at resume;
 - if the GL context was lost (`SDL_RENDER_DEVICE_RESET`), the window remakes its texture from the last frame;
 - logcat shows `lifecycle: paused (background)` and `lifecycle: resumed after N ms`.
+- the pause has reasons (`RECOMP_HOLD_BACKGROUND`, `RECOMP_HOLD_MENU`: `recomp_lifecycle_pause_for` /
+  `resume_for`): the guest stays held while any is set, so the [in-game menu](#in-game-menu) open across a trip to
+  the background keeps the game paused when the app comes back (`lifecycle: still paused (menu)`). Listeners (the
+  audio device) see the first reason set and the last one cleared. Test: `tests/recomp_lifecycle`.
 
 Guest time is not frozen: after a long pause the title sees the time that passed, as after a long frame. Most titles
 clamp their frame time; if one does not, that becomes its own ticket.
@@ -685,7 +840,7 @@ Device check (XBA-24), shell part (the in-game part waits for a title, XBA-35):
 3. Wait 5 minutes, bring the app back. logcat: `lifecycle: resumed after ~300000 ms`; the black screen is back, no
    crash, no tombstone.
 4. Do it once more with a notification pulled down and with the screen turned off and on.
-5. Back once: the toast; Back again within 2 s: `clean exit`.
+5. Back: the in-game menu; Quit game twice: `clean exit`.
 6. Send the logcat lines and the `top` line.
 
 ## Fast cores (big.LITTLE)
@@ -773,9 +928,9 @@ int recomp_title_main(const recomp_storage *store);   /* store->game_dir, ->save
    below, storage and `xbox_path_init`, fast cores, the fault handler. A title gets all of them by being linked in.
 2. `SDL_Init`, the fault handler checked again, `xboxrecomp ready (build …, SDL …, title)`.
 3. When `default.xbe` is found and a title is linked, `xbox_HostWindowMain(title_boot)`: the window on the main
-   thread, `recomp_title_main(&store)` on a 64 MB guest thread, the lifecycle watch, Back twice to quit. When the
-   guest returns, the window stays on its last frame (`[FBWIN] guest returned (N); Back twice to quit`): an app does
-   not vanish on its own.
+   thread, `recomp_title_main(&store)` on a 64 MB guest thread, the lifecycle watch; quitting is the
+   [in-game menu](#in-game-menu)'s. When the guest returns, the window stays on its last frame
+   (`[FBWIN] guest returned (N); the window stays`): an app does not vanish on its own.
 4. No title linked (the weak `recomp_title_main` is NULL) and `default.xbe` found: the title pack for its title ID
    (« Title packs » below), run the same way.
 5. No title and no pack, or no game data: the shell's own black window, as before.
@@ -875,8 +1030,8 @@ toolchain, step 6.
    `adb shell run-as fr.adserver.xboxrecomp sh -c 'mkdir -p files/packs && cp -r /data/local/tmp/12345678 files/packs/'`.
 3. Start the app, Play. Expected: `PACK_LOADED 12345678 …/files/packs/12345678/libtitle.so (… bytes, "…",
    shell_abi 1; exports: recomp_lookup …)`, `xboxrecomp ready (… title)`, the five `stub title: …` lines and
-   `stub title: all 5 lifted functions OK`, then `[FBWIN] guest returned (0)`. Back twice quits; `adb logcat -b crash`
-   empty.
+   `stub title: all 5 lifted functions OK`, then `[FBWIN] guest returned (0)`. Back, Quit game twice quits;
+   `adb logcat -b crash` empty.
 4. Unloadable pack, same size (the launcher's check passes it):
    `adb shell run-as fr.adserver.xboxrecomp dd if=/dev/zero of=files/packs/12345678/libtitle.so bs=64 count=1 conv=notrunc`
    (zeroes the ELF header). Play: `PACK_DLOPEN …` (bionic's « not a valid ELF » or similar), the launcher comes back
@@ -916,7 +1071,11 @@ off (the kernel reads `RECOMP_PB_EXEC` by presence, so the `=0` is removed from 
 
 ### Quit
 
-Back twice in the title's window calls `recomp_quit(0)` (`src/platform/recomp_quit.c`): the exit hook (the kernel's
+**Quit game** in the [in-game menu](#in-game-menu) (pressed twice: the second press confirms) lets the guest go
+(`recomp_lifecycle_resume_for(RECOMP_HOLD_ALL)`), `sync()`s the saves the title wrote (plain files under
+`<internal files>/save`) and calls `recomp_quit(0)` (`menu_jni.c`); the companion panel's Quit (a hold) calls
+`recomp_quit(0)` too. Where nothing above SDL takes Back (not the app), Back twice in the title's window does the same.
+`recomp_quit(0)` (`src/platform/recomp_quit.c`) runs the exit hook (the kernel's
 missing-file summary), `xboxrecomp: clean exit`, `fflush` of stdout and stderr, the log pump drained (at most
 500 ms), then `_exit(0)`. Not `exit()`: the guest's threads are still running, and atexit handlers and destructors must
 not run under them. The other atexit reports (`RECOMP_PROFILE`, the ICALL feedback dump, a WAV capture) are desktop
@@ -964,11 +1123,11 @@ sink.
    `adb logcat -c && adb logcat -s xboxrecomp SDL DEBUG AndroidRuntime`. Expected in logcat: `defaults: RECOMP_FB_WINDOW=1
    RECOMP_PB_EXEC=1`, `xboxrecomp ready (… title)`, `starting the title`, the boot lines (`xbox_MemoryLayoutInit:
    complete`, `Starting game...`), five `stub title: …` lines and `stub title: all 5 lifted functions OK`, then
-   `[FBWIN] guest returned (0); Back twice to quit`. The screen is black (the stub draws nothing), with a « The title finished (code 0). Press Back twice to quit. »
-   toast.
+   `[FBWIN] guest returned (0); the window stays`. The screen is black (the stub draws nothing), with a « The title
+   finished (code 0). Press Back for the menu (Quit). » toast.
 2. Home, wait 10 s, come back: `lifecycle: paused (background)`, then `lifecycle: resumed after ~10000 ms`.
-3. Back twice: `[FBWIN] Back pressed twice, quitting`, `xboxrecomp: clean exit`, the app closes; `adb logcat -b crash`
-   is empty.
+3. Back, Quit game, Quit game: `shell: menu: quit (confirmed)`, `xboxrecomp: clean exit`, the app closes;
+   `adb logcat -b crash` is empty.
 4. Crash lines: push a `recomp.cfg` with `RECOMP_SHELL_CRASH_TEST=1` to the **shell** app (no title) and start it: the
    `writing to NULL now` line is in logcat above the `Fatal signal 11` and the backtrace. Remove the file afterwards.
 5. Send the logcat lines.

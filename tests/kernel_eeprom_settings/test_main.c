@@ -1,6 +1,6 @@
-/* The EEPROM user settings: the time zone is the host's, and XC_MAX_OS --
- * the whole block, which XAPI reads in one query -- agrees with the single
- * queries. */
+/* The EEPROM user settings: the time zone is the host's, the language is
+ * RECOMP_LANGUAGE's (English when unset), and XC_MAX_OS -- the whole block,
+ * which XAPI reads in one query -- agrees with the single queries. */
 #include "kernel.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -24,6 +24,35 @@ static LONG host_bias(void)
     localtime_r(&now, &lt);
     return (LONG)(-lt.tm_gmtoff / 60);
 #endif
+}
+
+static void set_language(const char *v)
+{
+#ifdef _WIN32
+    _putenv_s("RECOMP_LANGUAGE", v ? v : "");
+#else
+    if (v) setenv("RECOMP_LANGUAGE", v, 1);
+    else unsetenv("RECOMP_LANGUAGE");
+#endif
+}
+
+static ULONG query(ULONG index);
+
+/* XC_LANGUAGE and the block's +0x30 both give want for RECOMP_LANGUAGE=v. */
+static int check_language(const char *v, ULONG want)
+{
+    uint8_t blk[0x60];
+    ULONG type = 0, len = 0, b = 0, q;
+    set_language(v);
+    q = query(XC_LANGUAGE);
+    if (xbox_ExQueryNonVolatileSetting(XC_MAX_OS, &type, blk, sizeof blk, &len) == 0)
+        memcpy(&b, blk + 0x30, 4);
+    if (q != want || b != want) {
+        fprintf(stderr, "FAIL: RECOMP_LANGUAGE=%s: XC_LANGUAGE %lu, block %lu, want %lu\n",
+                v ? v : "(unset)", (unsigned long)q, (unsigned long)b, (unsigned long)want);
+        return 0;
+    }
+    return 1;
 }
 
 static ULONG query(ULONG index)
@@ -84,7 +113,12 @@ int main(void)
             fprintf(stderr, "FAIL: byte 0x%02X past the block is 0x%02X\n", (unsigned)i, blk[i]);
             return 1;
         }
-    printf("PASS: time zone bias %ld (host), XC_MAX_OS block matches the single queries.\n",
-           (long)bias);
+    if (!check_language(NULL, 1) || !check_language("fr", 4) || !check_language("FR", 4)
+        || !check_language("de-DE", 3) || !check_language("pt_BR", 9) || !check_language("ja", 2)
+        || !check_language("7", 7) || !check_language("xx", 1) || !check_language("", 1))
+        return 1;
+    set_language(NULL);
+    printf("PASS: time zone bias %ld (host), XC_MAX_OS block matches the single queries, "
+           "RECOMP_LANGUAGE sets the language.\n", (long)bias);
     return 0;
 }

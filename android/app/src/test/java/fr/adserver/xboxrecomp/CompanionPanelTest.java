@@ -140,6 +140,13 @@ public class CompanionPanelTest {
     }
 
     @Test
+    public void menuTapOpensTheInGameMenu() {
+        touch.tap(at(CompanionPanel.MENU));
+        assertEquals(Collections.singletonList(CompanionPanel.MENU), sink.actions);
+        assertEquals(0, sink.buttons);       // no pad button with it
+    }
+
+    @Test
     public void quitNeedsAHold() throws Exception {
         touch.press(0, at(CompanionPanel.QUIT));
         idle(400);

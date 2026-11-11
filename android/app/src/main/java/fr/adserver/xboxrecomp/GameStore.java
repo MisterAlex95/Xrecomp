@@ -102,6 +102,42 @@ final class GameStore {
         return writeSmall(c, COMPANION_FOCUS_FILE, mode == null ? "" : mode);
     }
 
+    /*
+     * The in-game menu's quick settings (GameMenu, docs/android/app-shell.md « In-game menu »), written by the game's
+     * process and read again at its next start: the performance overlay and the game's volume (0..100, 0 = muted).
+     */
+    static final String PERF_OVERLAY_FILE = "perf_overlay", GAME_VOLUME_FILE = "game_volume";
+
+    static boolean perfOverlay(Context c) {
+        return "1".equals(readSmall(c, PERF_OVERLAY_FILE));
+    }
+
+    static boolean setPerfOverlay(Context c, boolean on) {
+        return writeSmall(c, PERF_OVERLAY_FILE, on ? "1" : "0");
+    }
+
+    static int gameVolume(Context c) {
+        String v = readSmall(c, GAME_VOLUME_FILE);
+        try {
+            return v == null ? 100 : Math.max(0, Math.min(100, Integer.parseInt(v)));
+        } catch (NumberFormatException e) {
+            return 100;
+        }
+    }
+
+    static boolean setGameVolume(Context c, int percent) {
+        return writeSmall(c, GAME_VOLUME_FILE, Integer.toString(Math.max(0, Math.min(100, percent))));
+    }
+
+    /** A one-line setting in files/settings (GameLanguage's per-title choice); null when missing or blank. */
+    static String readSettingFile(Context c, String name) {
+        return readSmall(c, name);
+    }
+
+    static boolean writeSettingFile(Context c, String name, String value) {
+        return writeSmall(c, name, value);
+    }
+
     private static File smallFile(Context c, String name) {
         return new File(new File(c.getFilesDir(), "settings"), name);
     }

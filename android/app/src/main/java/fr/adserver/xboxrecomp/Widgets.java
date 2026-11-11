@@ -232,7 +232,11 @@ final class Widgets {
 
     // ---- Icons -----------------------------------------------------------------------------------------------------
 
-    enum Icon { PLAY, SLIDERS, DISC, INFO, FOLDER, KEY, COPY, SWAP, TRASH, ARROW, CHECK, BACK, RESET, PAD, SOUND, BUZZ }
+    enum Icon {
+        PLAY, SLIDERS, DISC, INFO, FOLDER, KEY, COPY, SWAP, TRASH, ARROW, CHECK, BACK, RESET, PAD, SOUND, BUZZ,
+        // The in-game menu's (GameMenu), drawn by PanelIcons.
+        CAMERA, SHARE, HOME, POWER, BARS, SCREEN
+    }
 
     /** Draws an icon in a box of side s centred on (cx, cy), with the stroke paint p (its colour is kept). */
     static void drawIcon(Canvas c, Icon icon, float cx, float cy, float s, Paint p) {
@@ -349,6 +353,24 @@ final class Widgets {
             c.drawLine(cx + h * 0.55f, cy - h * 0.3f, cx + h * 0.55f, cy + h * 0.3f, p);
             c.drawLine(cx - h * 0.78f, cy - h * 0.15f, cx - h * 0.78f, cy + h * 0.15f, p);
             c.drawLine(cx + h * 0.78f, cy - h * 0.15f, cx + h * 0.78f, cy + h * 0.15f, p);
+            break;
+        case CAMERA:
+            PanelIcons.draw(c, PanelIcons.Icon.CAMERA, cx, cy, s, p);
+            break;
+        case SHARE:
+            PanelIcons.draw(c, PanelIcons.Icon.SHARE, cx, cy, s, p);
+            break;
+        case HOME:
+            PanelIcons.draw(c, PanelIcons.Icon.HOME, cx, cy, s, p);
+            break;
+        case POWER:
+            PanelIcons.draw(c, PanelIcons.Icon.POWER, cx, cy, s, p);
+            break;
+        case BARS:
+            PanelIcons.draw(c, PanelIcons.Icon.BARS, cx, cy, s, p);
+            break;
+        case SCREEN:
+            PanelIcons.draw(c, PanelIcons.Icon.SCREEN, cx, cy, s, p);
             break;
         }
     }

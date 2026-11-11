@@ -19,6 +19,7 @@ static pthread_cond_t  s_cond = PTHREAD_COND_INITIALIZER;
 static pthread_mutex_t s_transition = PTHREAD_MUTEX_INITIALIZER;
 static int      s_paused;
 static unsigned s_pauses;
+static unsigned s_reasons;   /* RECOMP_HOLD_* set; s_paused while any */
 static struct { recomp_lifecycle_fn fn; void *user; } s_listeners[MAX_LISTENERS];
 static int      s_nlisteners;
 
@@ -41,16 +42,37 @@ static int snapshot(recomp_lifecycle_fn *fns, void **users)
     return s_nlisteners;
 }
 
-void recomp_lifecycle_pause(void)
+static const char *reason_name(unsigned reasons)
+{
+    if (reasons == RECOMP_HOLD_BACKGROUND)
+        return "background";
+    if (reasons == RECOMP_HOLD_MENU)
+        return "menu";
+    return "background, menu";
+}
+
+void recomp_lifecycle_pause_for(unsigned reasons)
 {
     recomp_lifecycle_fn fns[MAX_LISTENERS];
     void *users[MAX_LISTENERS];
+    unsigned before;
     int n;
 
+    if (!reasons)
+        return;
     pthread_mutex_lock(&s_transition);
     pthread_mutex_lock(&s_lock);
-    if (s_paused) {
+    before = s_reasons;
+    s_reasons |= reasons;
+    if (before) {
+        /* Already held (s_transition orders this after any resume): one
+         * more reason, no listener. */
+        unsigned now = s_reasons;
         pthread_mutex_unlock(&s_lock);
+        if (now != before) {
+            printf("lifecycle: still paused (%s)\n", reason_name(now));
+            fflush(stdout);
+        }
         pthread_mutex_unlock(&s_transition);
         return;
     }
@@ -60,14 +82,14 @@ void recomp_lifecycle_pause(void)
     n = snapshot(fns, users);
     pthread_mutex_unlock(&s_lock);
 
-    printf("lifecycle: paused (background)\n");
+    printf("lifecycle: paused (%s)\n", reason_name(reasons));
     fflush(stdout);
     for (int i = 0; i < n; i++)
         fns[i](1, users[i]);
     pthread_mutex_unlock(&s_transition);
 }
 
-void recomp_lifecycle_resume(void)
+void recomp_lifecycle_resume_for(unsigned reasons)
 {
     recomp_lifecycle_fn fns[MAX_LISTENERS];
     void *users[MAX_LISTENERS];
@@ -76,8 +98,18 @@ void recomp_lifecycle_resume(void)
 
     pthread_mutex_lock(&s_transition);
     pthread_mutex_lock(&s_lock);
-    if (!s_paused) {
+    if (!s_paused || !(s_reasons & reasons)) {
         pthread_mutex_unlock(&s_lock);
+        pthread_mutex_unlock(&s_transition);
+        return;
+    }
+    s_reasons &= ~reasons;
+    if (s_reasons) {
+        /* Another reason still holds the guest. */
+        unsigned left = s_reasons;
+        pthread_mutex_unlock(&s_lock);
+        printf("lifecycle: still paused (%s)\n", reason_name(left));
+        fflush(stdout);
         pthread_mutex_unlock(&s_transition);
         return;
     }
@@ -97,6 +129,21 @@ void recomp_lifecycle_resume(void)
     printf("lifecycle: resumed after %llu ms\n", (unsigned long long)away);
     fflush(stdout);
     pthread_mutex_unlock(&s_transition);
+}
+
+void recomp_lifecycle_pause(void)
+{
+    recomp_lifecycle_pause_for(RECOMP_HOLD_BACKGROUND);
+}
+
+void recomp_lifecycle_resume(void)
+{
+    recomp_lifecycle_resume_for(RECOMP_HOLD_BACKGROUND);
+}
+
+unsigned recomp_lifecycle_reasons(void)
+{
+    return __atomic_load_n(&s_reasons, __ATOMIC_ACQUIRE);
 }
 
 int recomp_lifecycle_paused(void)

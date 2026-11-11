@@ -94,6 +94,45 @@ int main(void)
     printf("held thread CPU while paused: %llu us\n", (unsigned long long)(s_cpu_ns / 1000));
     CHECK(s_cpu_ns < 6000000ull);
 
+    /* Reasons: the menu opened, then the app goes to the background and
+     * comes back: still paused (one pause, listeners once); the menu closing
+     * resumes. */
+    s_log[0] = 0;
+    unsigned pauses = recomp_lifecycle_pauses();
+    recomp_lifecycle_pause_for(RECOMP_HOLD_MENU);
+    CHECK(recomp_lifecycle_paused() == 1);
+    CHECK(recomp_lifecycle_reasons() == RECOMP_HOLD_MENU);
+    recomp_lifecycle_pause();                        /* background */
+    CHECK(recomp_lifecycle_reasons() == (RECOMP_HOLD_MENU | RECOMP_HOLD_BACKGROUND));
+    recomp_lifecycle_resume();                       /* foreground */
+    CHECK(recomp_lifecycle_paused() == 1);
+    CHECK(recomp_lifecycle_reasons() == RECOMP_HOLD_MENU);
+    CHECK(strcmp(s_log, "A+B+A+") == 0);             /* the first reason only */
+    CHECK(recomp_lifecycle_pauses() == pauses + 1);
+    sleep_ms(30);
+    frames = s_frames;
+    sleep_ms(100);
+    CHECK(s_frames == frames);                       /* held by the menu */
+    recomp_lifecycle_resume_for(RECOMP_HOLD_MENU);
+    CHECK(recomp_lifecycle_paused() == 0);
+    CHECK(recomp_lifecycle_reasons() == 0);
+    CHECK(strcmp(s_log, "A+B+A+A-B-A-") == 0);
+    sleep_ms(50);
+    CHECK(s_frames > frames);
+
+    /* resume_for a reason not set does nothing; ALL lets go of everything. */
+    s_log[0] = 0;
+    recomp_lifecycle_pause();
+    recomp_lifecycle_resume_for(RECOMP_HOLD_MENU);
+    CHECK(recomp_lifecycle_paused() == 1);
+    recomp_lifecycle_pause_for(RECOMP_HOLD_MENU);
+    recomp_lifecycle_resume_for(RECOMP_HOLD_ALL);
+    CHECK(recomp_lifecycle_paused() == 0);
+    CHECK(recomp_lifecycle_reasons() == 0);
+    CHECK(strcmp(s_log, "A+B+A+A-B-A-") == 0);
+    recomp_lifecycle_pause_for(0);                   /* no reason: nothing */
+    CHECK(recomp_lifecycle_paused() == 0);
+
     /* Full listener table. */
     for (int i = 0; i < 5; i++)
         CHECK(recomp_lifecycle_listen(listener_b, NULL) == 0);

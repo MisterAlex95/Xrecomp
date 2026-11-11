@@ -1514,6 +1514,8 @@ public class LauncherActivity extends Activity {
 
     private int sectionTitle(RecompConfig.Section s) {
         switch (s) {
+        case GAME:
+            return R.string.SECTION_GAME;
         case GRAPHICS:
             return R.string.SECTION_GRAPHICS;
         case AUDIO:
@@ -2274,7 +2276,7 @@ public class LauncherActivity extends Activity {
     /**
      * The device's buttons and the Xbox controller buttons the game gets: the SDL game controller mapping of
      * src/input/xinput_device.c (L1 = Black, R1 = White, L2 / R2 = the triggers, Select = Back, stick presses = the
-     * thumbstick buttons), and the shell's own Android Back, pressed twice to quit (shell_main.c, recomp_quit).
+     * thumbstick buttons), and the shell's own Android Back, which opens the in-game menu (GameMenu).
      */
     private void buildControls() {
         screenTitle.setText(R.string.CONTROLS);
@@ -2297,7 +2299,7 @@ public class LauncherActivity extends Activity {
                          { R.string.CTL_R1, R.string.CTL_R1_X }, { R.string.CTL_TRIGGERS, R.string.CTL_TRIGGERS_X },
                          { R.string.CTL_START, R.string.CTL_START_X }, { R.string.CTL_SELECT, R.string.CTL_SELECT_X },
                          { R.string.CTL_DPAD, R.string.CTL_DPAD_X }, { R.string.CTL_STICKS, R.string.CTL_STICKS_X },
-                         { R.string.CTL_QUIT, R.string.CTL_QUIT_X } };
+                         { R.string.CTL_MENU, R.string.CTL_MENU_X } };
         for (int[] r : rows)
             detailKv(getString(r[0]), getString(r[1]));
         detailFooter(getString(R.string.CONTROLS_FOOTER), Theme.TEXT_FAINT);
