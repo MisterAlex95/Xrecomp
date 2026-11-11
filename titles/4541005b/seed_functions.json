@@ -1,0 +1,7 @@
+[
+ {
+  "start": "0x00363064",
+  "note": "XID class driver Init (XPP): only reached through the class-driver tables at 0x00362ECC / 0x00362EE4; the sweep decoded it one byte early (0x00363063)",
+  "observed": true
+ }
+]

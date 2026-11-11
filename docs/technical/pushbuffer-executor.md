@@ -344,8 +344,9 @@ The executor calls a hook the game project registers,
 method except the swap, on the executor thread, before it reads the next
 pushbuffer word — the GPU waits for the handler on the console too. The
 *Fable* profile (`titles/4d5300d1/title.c`) services 0xC–0xE exactly as its
-D3D's `sub_00855860` does. The report counts what was serviced and, by type,
-what was not (`[GPU] software methods: ...`).
+D3D's `sub_00855860` does; the *Burnout 3* profile (`titles/4541005b/title.c`)
+answers 5 with `xbox_KeSetGuestEvent()` on its fence event. The report counts
+what was serviced and, by type, what was not (`[GPU] software methods: ...`).
 
 ### Why not the title's own handler
 
