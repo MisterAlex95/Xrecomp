@@ -163,6 +163,11 @@
     <string name="OPT_GPU_FPS_CAP">Limite d\'images (rendu GPU)</string>
     <string name="OPT_GPU_FPS_CAP_SUMMARY">Images par seconde au plus, pour économiser la batterie</string>
     <string name="OPT_GPU_FPS_CAP_DETAIL">Avec le rendu GPU, les menus et l\'écran de pause peuvent tourner à 200 images par seconde ou plus, ce qui ne fait que vider la batterie et chauffer l\'appareil. La limite les tient à 60 (ou 30). Auto : ce que choisit le profil du jeu (60, ou 30 quand le profil demande un rythme régulier, comme Fable). Désactivée : aucune limite, pour les tests. Sans effet avec le rendu logiciel. (RECOMP_GPU_FPS_CAP)</string>
+    <string name="OPT_GPU_SCALE">Résolution interne (rendu GPU)</string>
+    <string name="OPT_GPU_SCALE_SUMMARY">Dessiner le jeu à un multiple de son 640×480</string>
+    <string name="OPT_GPU_SCALE_DETAIL">Le rendu GPU peut dessiner l\'image 3D à 2 ou 3 fois la résolution de la console, ou à la taille qui remplit exactement l\'écran. Plus net, au prix de plus de travail pour le GPU, de chaleur et de batterie. Les effets comme le halo et les ombres gardent leur résolution d\'origine. Auto : ce que choisit le profil du jeu (1× pour l\'instant). Sans effet avec le rendu logiciel. (RECOMP_GPU_SCALE)</string>
+    <string name="VAL_SCALE_1">1× (d\'origine)</string>
+    <string name="VAL_SCALE_FIT">Adapter à l\'écran</string>
     <string name="OPT_TEX">Filtrage des textures</string>
     <string name="OPT_TEX_SUMMARY">Comment les textures sont échantillonnées</string>
     <string name="OPT_TEX_DETAIL">Net prend le texel le plus proche, comme le jeu est dessiné par défaut. Lissé mélange quatre texels ; l\'anisotrope suit aussi les surfaces vues de biais. Les modes lissés coûtent de la vitesse, et ne sont pas le défaut car ils changent le rendu avec lequel le jeu a été testé. (RECOMP_TEX_BILINEAR, RECOMP_TEX_ANISO)</string>
