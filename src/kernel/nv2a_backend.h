@@ -214,4 +214,18 @@ uint32_t nv2a_backend_texture_bytes(const Nv2aTexture *tex);
  * the semaphore context DMA object through RAMIN. */
 void nv2a_pb_set_semaphore_target(uint32_t guest_va);
 
+/* D3D's software methods: NV097_NO_OPERATION (0x0100) with a non-zero value,
+ * which the GPU traps to D3D's interrupt handler on the console. The low five
+ * bits are the method, the rest its payload. hook(value) is called for every
+ * one except the swap (1), on the executor thread, before the walk reads the
+ * next pushbuffer word -- the GPU waits for the handler on the console, and a
+ * handler may rewrite the pushbuffer ahead of it. Return non-zero when it was
+ * serviced. NULL removes the hook. The guest's main thread runs meanwhile:
+ * guest words it also writes need atomic updates.
+ *
+ * ponytail: a title hook re-implements what its D3D's handler does, instead
+ * of the executor delivering the interrupt to it (see pushbuffer-executor.md,
+ * "D3D Software Methods"). */
+void nv2a_pb_set_software_method_hook(int (*hook)(uint32_t param));
+
 #endif /* NV2A_BACKEND_H */

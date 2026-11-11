@@ -181,3 +181,21 @@ the lock stalls D3D init (RECOMP_GUEST_CPU_TRACE).
 - Frames match the CPU path: title 0.34/255 mean diff, AutoSave screen 0.33/255 (progress bar end only).
 - Every title-screen batch is a vertex-program batch (15336 of 15336); 3 shader programs cover the front end.
 - After Start both paths stop flipping after the AutoSave screen: the pushbuffer stall (WP2/WP3), not the back end.
+
+## 2026-11-11: in-world stall in sub_0012F7F0 fixed (pushbuffer jumps + deferred RunPushBuffer)
+- sub_0012F7F0 (inlined D3DDevice_GetVisibilityTestResult) waited for reports the executor never wrote: the segment
+  scan stopped at every top-level JUMP, and XDK D3DDevice_RunPushBuffer (0x00855900) jumps from the ring into recorded
+  pushbuffers. Toolkit: the scan follows jumps, one walk from the previous PUT to the new one (wraps included), and a
+  walk that loops is dropped and counted (docs/technical/pushbuffer-executor.md).
+- Following them needs D3D's software methods 0xC/0xD/0xE (NO_OPERATION with a value): they patch a re-run
+  pushbuffer's return JUMP. title.c registers fable_software_method() with nv2a_pb_set_software_method_hook(), a
+  re-implementation of sub_00855860 (node table 0x00860044, pending count 0x0085FE30). Without it the walk loops
+  (`[PB] runaway segment walk (jump taken twice)`) and the game stalls as before.
+- Not serviced (counted in `[GPU] software methods:`): 6 (InsertCallback, ~1 per frame), 8 (PGRAPH RDI, ~30 per
+  frame in-world), 9 (register poke). Delivering D3D's own PGRAPH interrupt instead is blocked by
+  write-1-to-clear on plain-RAM registers (its DPC never leaves); see the executor doc.
+- Needs the contiguous frees (RECOMP_HEAP_RECLAIM=1 for now) to get past the world load at all.
+- Side effect: the walk now runs D3D's init commands earlier, so the semaphore hand-over race (a
+  BACK_END_WRITE_SEMAPHORE_RELEASE before semaphore_watch has set the target is dropped; main thread stuck in
+  sub_00855260, 0 flips) went from 0 of 6 starts to 4 of 8 on 2026-11-11. The pending-release fix for that race
+  must land with this.

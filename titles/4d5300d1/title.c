@@ -25,6 +25,78 @@ extern void xbox_SetDeferredIoApc(int on);
 #define SETENV_DEFAULT(k, v) do { if (!getenv(k)) _putenv(k "=" v); } while (0)
 #endif
 
+/* ── D3D's deferred RunPushBuffer (software methods 0xC, 0xD, 0xE) ─────────
+ *
+ * XDK D3DDevice_RunPushBuffer (0x00855900) JUMPs from the ring into a
+ * recorded pushbuffer whose last word is a JUMP back. If the GPU has not yet
+ * passed the pushbuffer's previous use, that return JUMP cannot be patched
+ * yet: D3D puts a software method before the entering JUMP and lets its
+ * interrupt handler patch it when the GPU gets there (dispatcher
+ * sub_00859C40, helper sub_00855860). Unserviced, the walk follows the old
+ * return target and runs earlier commands again, and the visibility reports
+ * Fable waits on in-world (sub_0012F7F0) never come.
+ *
+ *   0xC  node = payload | 0x80000000 (in the ring), one pending run fewer
+ *   0xD  node = 0x00860044 + payload * 20 (D3D's table), one pending run fewer
+ *   0xE  node = payload | 0x80000000, recording: the count is left alone
+ *
+ * A node is { return target | flags, next, slot, fixups, base }. As
+ * sub_00855860 does, for each node of the chain: *slot = JUMP(target);
+ * with flag bit 29, copy each fixup { size, offset, bytes } to base + offset
+ * until size 0xFFFFFFFF; next = -1; with bit 31, clear bit 30. The handler's
+ * final cache flush (sub_008556D0) has nothing to flush here.
+ *
+ * Runs on the executor thread (nv2a_pb_set_software_method_hook), while the
+ * main thread may be in RunPushBuffer bumping the same pending count. */
+extern ptrdiff_t xbox_GetMemoryOffset(void);
+extern void nv2a_pb_set_software_method_hook(int (*hook)(uint32_t param));
+
+#define FABLE_RPB_NODES   0x00860044u   /* device (0x0085FDE0) + 0x264 */
+#define FABLE_RPB_PENDING 0x0085FE30u   /* device + 0x50 */
+
+static int fable_software_method(uint32_t param)
+{
+    uint8_t *mem = (uint8_t *)xbox_GetMemoryOffset();
+    uint32_t type = param & 0x1Fu, payload = param >> 5, node;
+    int guard;
+#define G32(a) (*(volatile uint32_t *)(mem + (uint32_t)(a)))
+
+    switch (type) {
+    case 0xC: node = payload | 0x80000000u; break;
+    case 0xD: node = FABLE_RPB_NODES + payload * 20u; break;
+    case 0xE: node = payload | 0x80000000u; break;
+    default:  return 0;             /* the rest: not serviced */
+    }
+    if (type != 0xE) {
+#if defined(__GNUC__) || defined(__clang__)
+        __atomic_fetch_sub((uint32_t *)(mem + FABLE_RPB_PENDING), 1u, __ATOMIC_SEQ_CST);
+#else
+        G32(FABLE_RPB_PENDING) -= 1u;
+#endif
+    }
+    for (guard = 0; guard < 4096; guard++) {
+        uint32_t target = G32(node), next;
+
+        G32(G32(node + 8)) = (target & 0x0FFFFFFFu) + 1u;      /* JUMP target */
+        if (target & 0x20000000u) {
+            uint32_t base = G32(node + 16), fix = G32(node + 12), size;
+            while ((size = G32(fix)) != 0xFFFFFFFFu) {
+                memcpy(mem + (uint32_t)(base + G32(fix + 4)), mem + fix + 8, size);
+                fix += 8u + size;
+            }
+        }
+        next = G32(node + 4);
+        G32(node + 4) = 0xFFFFFFFFu;
+        if (target & 0x80000000u)
+            G32(node) = target & 0xBFFFFFFFu;
+        if (next == 0 || next == 0xFFFFFFFFu)
+            break;
+        node = next;
+    }
+#undef G32
+    return 1;
+}
+
 void xba_title_configure(void)
 {
     /* Fable reserves 608 MB of address space for its own allocator and
@@ -53,6 +125,8 @@ void xba_title_configure(void)
      * the inline delivery for comparison. */
     if (!getenv("FABLE_INLINE_APC"))
         xbox_SetDeferredIoApc(1);
+    /* D3D's deferred RunPushBuffer, above. */
+    nv2a_pb_set_software_method_hook(fable_software_method);
 }
 
 #ifndef _WIN32

@@ -301,3 +301,52 @@ words without reaching PUT.
 and old style), a wrap beyond every earlier PUT, a return jump patched by a
 software method, an unpatched one (stopped, counted), a jump to itself, a jump
 outside RAM; each method is executed exactly once.
+
+## D3D Software Methods
+
+XDK D3D uses `NV097_NO_OPERATION` (`0x0100`) with a non-zero value as a
+software method: the GPU stops and raises a PGRAPH interrupt, and D3D's handler
+reads the value from PGRAPH (`TRAPPED_DATA_LOW`, `0x400708`). The low five bits
+say which method, the rest is its payload. Seen in *Fable* (dispatcher
+`sub_00859C40`):
+
+| Type | Handler does |
+|---|---|
+| 1 | swap bookkeeping: the flip hold uses its interval (`nv2a_flip_hold.c`) |
+| 5 | `KeSetEvent` on a fence event |
+| 6, 7 | `D3DDevice_InsertCallback`: calls `[0x401A88]` with `[0x40186C]` (methods `0x1D8C`/`0x1D90` pushed just before) |
+| 8, 9 | PGRAPH RDI writes, a register poke |
+| 0xC, 0xD, 0xE | deferred `RunPushBuffer`: patch the return `JUMP` (and fixups) of a recorded pushbuffer that is run again before the GPU passed its previous run |
+
+The 0xC–0xE ones matter for the walk: until the handler has run, the recorded
+pushbuffer's last word still jumps back to where its previous run came from,
+and the walk loops (see [The Segment Scan Follows Jumps](#the-segment-scan-follows-jumps)).
+
+The executor calls a hook the game project registers,
+`nv2a_pb_set_software_method_hook()` (`nv2a_backend.h`), for every software
+method except the swap, on the executor thread, before it reads the next
+pushbuffer word — the GPU waits for the handler on the console too. The
+*Fable* profile (`titles/4d5300d1/title.c`) services 0xC–0xE exactly as its
+D3D's `sub_00855860` does. The report counts what was serviced and, by type,
+what was not (`[GPU] software methods: ...`).
+
+### Why not the title's own handler
+
+Delivering the interrupt to the title's D3D (PGRAPH_INTR, NSOURCE, the trapped
+method and data, PMC_INTR_0 bit 12, then its ISR and DPC) would service every
+type without a per-title hook. It does not work against this runtime yet:
+
+- D3D's DPC (`sub_008595E0` in *Fable*) loops while its PGRAPH handler returns
+  non-zero, and that handler returns PGRAPH_INTR as read back after its
+  write-1-to-clear acknowledgement. The NV2A registers are plain memory here:
+  writing the value back leaves it set, so the DPC re-runs the method (patches
+  twice, decrements D3D's pending count twice) and never leaves. The vblank
+  gets away with a watcher thread because its ack is a visible change; this one
+  writes the value that is already there. It needs a trapped PGRAPH page or a
+  write-1-to-clear model.
+- The DPC is shared with the vblank, which the timer thread delivers; running
+  it synchronously on the executor thread races that delivery (both mask and
+  unmask `PMC_INTR_EN_0`), and the executor thread has no guest stack or TIB.
+
+Until then a title that needs other types (InsertCallback callbacks, register
+pokes) has to service them in its hook.

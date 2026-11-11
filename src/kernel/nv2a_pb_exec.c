@@ -434,6 +434,12 @@ void nv2a_pb_set_semaphore_target(uint32_t guest_va)
     } while (s_sem_last != v);
 }
 
+/* D3D's software methods other than the swap; see nv2a_backend.h and
+ * NV097_NO_OPERATION below. Counted for the report. */
+static int (*volatile s_swm_hook)(uint32_t param);
+static uint32_t s_swm_serviced, s_swm_ignored[32];
+void nv2a_pb_set_software_method_hook(int (*hook)(uint32_t param)) { s_swm_hook = hook; }
+
 /* Unhandled methods, ranked. The interesting output is not that something was
  * skipped but which things dominate, because that is the order to implement
  * them in. */
@@ -4679,8 +4685,24 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
         break;
     case NV097_NO_OPERATION:
         /* Non-zero, it is one of D3D's software methods, which the GPU traps
-         * to D3D's interrupt handler on the console. Only the swap's interval
-         * matters here (nv2a_flip_hold.h); the rest stays a no-op. */
+         * to D3D's interrupt handler on the console: the low five bits say
+         * which, the rest is its payload. The GPU stops until the handler
+         * has run, and some handlers rewrite the pushbuffer ahead of it (a
+         * re-run pushbuffer's return JUMP), so a title hook that services
+         * them runs here, synchronously, before the walk reads on. The
+         * swap (1) is the flip hold's (nv2a_flip_hold.h).
+         *
+         * Not the title's own handler: its DPC loops until PGRAPH_INTR
+         * reads back zero after a write-1-to-clear, which plain-RAM
+         * registers never do (docs/technical/pushbuffer-executor.md). */
+        if (param && (param & 0x1Fu) != 1u) {
+            int (*hook)(uint32_t) = s_swm_hook;
+            if (hook && hook(param)) {
+                s_swm_serviced++;
+                return;
+            }
+            s_swm_ignored[param & 0x1Fu]++;
+        }
         if (!nv2a_pb_exec_flip_pacing()) {
             if (!imm_vertex_method(method, param))
                 note_unhandled(method, param);   /* as before the hold */
@@ -5101,6 +5123,17 @@ static unsigned long report_now_ms(void)
 
 void nv2a_pb_exec_report(void)
 {
+    {
+        char buf[256];
+        int t, o = 0;
+        for (t = 0; t < 32; t++)
+            if (s_swm_ignored[t] && o < (int)sizeof buf - 24)
+                o += snprintf(buf + o, sizeof buf - o, " %X:%u", t, s_swm_ignored[t]);
+        if (s_swm_serviced || o)
+            fprintf(stderr, "[GPU] software methods: %u serviced by the title;"
+                            " not serviced (type:count)%s\n",
+                    s_swm_serviced, o ? buf : " none");
+    }
     peek_addresses();
     peek_chain();
     if (getenv("RECOMP_FIND_NAN")) {
