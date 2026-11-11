@@ -138,6 +138,8 @@ One activity, a small state machine of screens (`LauncherActivity.Screen`) with 
 
 | Screen | What it shows | Reached from |
 |---|---|---|
+| Library | The [game library](#game-library): a grid of the games of the library folder and the imported ones, the focused game's details, the « Library folder » tile. | Every start when the library is on, B from a game's Home, « Change game ». |
+| Storage | What the app stores per game, each deleted on its own ([Storage](#storage)). | X on the library. |
 | Welcome | What the app is (a recompiled game, the game not included: bring your own copy), three steps, « Get started ». | First start, when no game is set up at all. |
 | Choose your game (source) | Two large cards: **Game folder** (the extracted disc; read in place with All files access, otherwise copied; a badge says which) and **Disc image (ISO)** (extracted once; a badge gives the free space). | Welcome, Game data › Change game, Play with no usable game, the « Change game » shortcut, `NO_GAME_DATA`. |
 | Read the game in place? | Only without All files access: the explanation (in place: no copy, fine for a 4 GB disc, only that folder is read; copy: as much free space again, a few minutes, removed with the app) and two cards, **Allow all files access** (recommended; opens the system page, then the folder picker) and **Copy into the app** (the folder picker). | Game folder. |
@@ -145,7 +147,7 @@ One activity, a small state machine of screens (`LauncherActivity.Screen`) with 
 | Home | A console-style home (the top bar only says « Home », so the title shows once). The hero: the game's title image (or a monogram), in the [game theme](#game-theme)'s colours, its title ID, its title (the XBE certificate's name, else the folder's name), a status chip (**Ready**, **Needs preparing**, **Preparing**, **Prepare failed**, **Game data missing**, **No file access**, **Wrong game**, **No game**; plus **Running** when the game runs in the background), one lead line, a few facts and one big button. Facts: **Last played**, **Play time**, then **Prepared** (pack.json's `built_at`) and **Pack size** when a pack is there, else the game's size; while a Prepare is needed: how long it takes, the free internal storage, the memory; while it runs: a bar and « Compile · 42 % · about 12 min left »; after a failure: the code. The big button: **Play**, **Prepare**, **Preparing…** (opens its screen), **See what failed**, or **Choose a game** / **Choose the game again**. Under the hero, a row of four smaller tiles: **Settings**, **Controls**, **Game data**, **About**. | A finished import (Play focused), every start when « Open directly » is off, the « Launcher » shortcut, B from the screens above. |
 | Settings | The [options](#settings) as rows, left / right (or A) to change, a detail panel with what the option does, its choices and its line in `recomp.cfg`. | Home. |
 | Controls | A drawn handheld with, next to each control, the Xbox controller button the game gets, and the same as a table: A B X Y as they are, L1 = **Black**, R1 = **White**, L2 / R2 = the triggers, Start = Start, Select = **Back**, D-pad and sticks as they are, pressing a stick = its thumbstick button (`src/input/xinput_device.c`, SDL's game controller mapping), and Android's Back opens the [in-game menu](#in-game-menu) (also Select + Start held). | Home. |
-| Game data | The raw folder path (only here, not on Home), source (read in place, imported copy, set in `recomp.cfg`), size (counted in the background), free space; **Change game** (another folder or image, or the same one again to re-import); **Delete the imported copy** (only when the game is the app's own `files/game/`; press A twice within 5 s; saves are kept; then the choice is forgotten). | Home. |
+| Game data | The raw folder path (only here, not on Home), source (read in place, imported copy, set in `recomp.cfg`), size (counted in the background), free space; **Change game** (another folder or image, or the same one again to re-import; **Library** when the [game library](#game-library) is on); **Delete the imported copy** (only when the game is the app's own copy, `files/games/<TID>/` or the older `files/game/`; press A twice within 5 s; saves are kept); the game's pack, Prepare files, caches and saves, each deleted on its own ([Storage](#storage)). | Home. |
 | About | Version (`-PxbaVersion`), build (`-PxbaVersionCode`), app id, the game check (the first digits of `-PxbaXbeSha256`, or none), licences (xboxrecomp MIT, SDL2 zlib), and that no game data is included. | Home. |
 
 Messages and errors (`NOT_A_GAME_FOLDER`, `WRONG_GAME`, `NOT_ENOUGH_SPACE`, « Import canceled », « Saved », ...) go to
@@ -172,8 +174,10 @@ settings saved, errors).
 The two shortcuts are dynamic (the package name differs per title, which a static `shortcuts.xml` cannot follow),
 published each time the launcher runs, so they appear after the first start.
 
-A new game, once checked, is remembered and the running game (if any) is ended then, as before; the launcher goes to
-Home with Play focused and « TITLE is ready » in the note, instead of starting the game by itself.
+A new game, once checked, becomes a record of the [game library](#game-library) and the selected game; the launcher
+goes to Home with Play focused and « TITLE is ready » in the note, instead of starting the game by itself. It
+becomes the launched game (the preferences ShellActivity reads) and a running other game is ended only when it is
+played.
 
 ### Controls
 
@@ -287,7 +291,8 @@ its theme to `build/screenshots/preview-*.png` (git-ignored); without the proper
 6. Play: the in-game menu in the game's colours, « Paused » still amber, the screenshot flash green.
 7. Change game to Fable (import or folder): periwinkle (#A7C2FF) without restarting the app.
 8. Force-stop the app and open it again: no flash of the stock green before the game's colours.
-9. Game data › Delete the imported copy: no `files/art/<TID>.*` left (`adb shell run-as <app id> ls files/art`).
+9. Game data › Delete the imported copy: no `files/art/<TID>.*` left (`adb shell run-as <app id> ls files/art`),
+   unless the game is still in the library folder (the library keeps showing its art).
 10. Screenshots of Home with both games (and of a warm-coloured game next to the amber « Needs preparing » chip, if
     one is at hand: the accent is not kept away from the amber yet, `GamePalette.WARN_AVOID_DEG`).
 
@@ -516,6 +521,157 @@ Use the Thor's gamepad for everything unless a step says touch.
 20. Send screenshots of Welcome, Choose your game, Read the game in place?, the import ring, Home, Settings, Game
     data and About, and the logcat lines (`launcher:`, `import:`, `recomp.cfg:`, `storage: game=...`). Say if the A /
     B buttons are swapped on the Thor (its « Xbox » / « Nintendo » layout setting changes the key codes the app sees).
+
+## Game library
+
+One APK, several games. A **library folder** (for example `/sdcard/xbox`) holds disc images (`*.iso`, `*.xiso`) and
+extracted game folders (a folder with a `default.xbe`); the launcher lists them, and the player imports the ones he
+plays. Games are never run from the image: an image is extracted once into `<external files>/games/<TID>/`, a game
+folder read as files is played in place (no copy). Prepare packs, Prepare status, the title image, the game theme,
+the language and the saves were already per title ID; the few caches that are not (see below) change hands when the
+launched game changes.
+
+### Turning it on
+
+Choose your game › **Game library folder** (third card). With All files access the folder is read as files (the
+tree URI resolved to a path, `java.io.File`, images opened with `ParcelFileDescriptor`); without it,
+FOLDER_ACCESS offers **Allow all files access** or **Use the file picker** (Storage Access Framework: images are
+imported from their document, folders must be copied, chip « Needs copying »). The read permission on the tree is
+kept (`takePersistableUriPermission`). Preferences (`game`): `library_tree`, `library_path` (absent in SAF mode),
+`library_scanned_at`.
+
+The library is **on** when a library folder is set, or the launcher knows two games or more. Otherwise everything is
+as before (Welcome, Home of the one game, Change game): the one-game launcher and its tests are unchanged.
+
+### Scan
+
+`LibraryScanner` on a worker: at most four levels, 5,000 entries; names starting with « . » and `Android/` skipped; a
+folder holding `default.xbe` is a game folder (not descended). Each new or changed image gives its `default.xbe` only
+(`XisoNative.extractFile`, at most 32 MB) into `files/library/xbe/<TID>-<sha8>/` (art, theme, hash, and the Prepare's
+source before an import); an unchanged one (location, size, modification time) is not opened again. The title image
+and the game theme are cached there and then (`files/art/<TID>.png`, `<TID>.theme`). Files that are not games (not
+an Xbox image, no or a bad `default.xbe`, unreadable) make the dimmed « Other files (n) » line under the grid. The
+index is `files/library/index.json` (rebuildable). Rescans: each time the library opens (path mode), Y, a new folder;
+in SAF mode only at a cold start and on Y. logcat: `launcher: library: scan N items, M games, T ms (…)`.
+
+### The library screen
+
+The grid (left two thirds, four columns, scrolling): one card per title ID — title image or monogram, two-line title,
+state chip — sorted by title; last, the **Library folder** tile (folder, last scan, counts; A chooses another).
+Right: the focused game's details (title ID, state and what it means, source file and « n versions », region and
+version, image size, files, last played, play time, prepared date). D-pad between cards (the focus highlight glides
+to them), **A** the game's Home, **Start** its primary action without opening Home, **Y** rescan, **X** Storage,
+**B** leaves the app. The library is always in the stock colours; only the backdrop's glow follows the focused card
+(from its cached `<TID>.theme`). Opening a game's Home applies its theme; back to the library resets it. The bottom
+screen shows `LibraryPanel`: the focused game's card, its primary action, Rescan, Settings.
+
+States (`GameState`, first that applies): **Running**, **Preparing**, **Queued (n)**, **Importing**, then with the
+game's files present **Prepare failed**, **Pack invalid** (the pack was built from another `default.xbe` —
+`Pack.xbeSha256` against the record's — or the shell refused it), **Ready**, **Needs preparing**; without them
+**Not imported**, **Needs copying**, **No file access**, else **Source gone** (an in-place folder that vanished) or
+**Game data missing**. A game with neither files nor source leaves the grid (its pack and saves stay in Storage).
+Variants: images with the same title ID are one game; the active one is the record's source, else the most recently
+modified.
+
+### Home of a library game
+
+Home shows the **selected** game (`Library.Games.selected`): its folder, state, title ID, title, play time. B goes
+back to the library. With its files: as before (Play, Prepare, Preparing, See what failed), plus **Queued (n)** (A
+takes it out of the queue) and, when another game runs, Play warns first (« X is running and will close », a second
+press within 5 s ends it). Without them: **Import** (the image extracted, or the SAF folder copied, into
+`games/<TID>`; a needed Prepare starts right after), **Copy into the app**, **Choose the folder again**, and
+**Prepare now**: tools.prepare needs only `default.xbe`, so the cached copy is the Prepare's source and several games
+can be prepared (queued) before their gigabytes are imported.
+
+**Selected vs launched.** The preferences `game_dir`, `title` and the new `title_id` keep meaning « the game the
+process runs or last ran » (ShellActivity, quick reboot, the game's language read them). Opening another game's Home
+writes nothing there; `GameStore.rememberLaunch` runs only in `launchShell()`. The launcher opens on the last
+launched game; « Open the last game directly » starts it.
+
+**Caches.** Saves (`UDATA/<tid>`, `TDATA/<tid>`) are per title. `save/Cache` (Z: and the cache partitions),
+`save/TitleCache` (E:\CACHE), `Partition3-5.img` and `launch_data.bin` are not: `files/library/cache_owner` names their
+title, and `launchShell()` calls `SaveCaches.switchTo` (only while no game process runs): the live set moves by rename
+into `save/.stash/<owner>/`, the new title's stash comes back, `launch_data.bin` (a quick-reboot hand-off) is
+dropped. Nothing is wiped: Fable's unpacked cache does not have to be rebuilt after a game of Burnout 3.
+
+**Play time** is per record (`last_played`, `play_ms`): a session opens at launch (`session_tid`) and closes when the
+launcher comes back.
+
+### Storage
+
+X on the library: free space (internal storage, game files), then per game what the app stores — **Imported copy**,
+**Pack**, **Prepare files** (`files/work/<TID>`), **Game caches** (live or stashed), **Saves** — with their sizes.
+Each is deleted on its own (A twice within 5 s, on a worker, after ending the game that runs from it). Saves have
+their own row and a stronger warning; nothing else deletes them. Game data shows the same rows for the selected game.
+Only what the app made is ever deleted: never a folder read in place nor anything in the library folder. Deleting
+the imported copy keeps the game in the library (import it again); its art and theme go only when the title also
+left the library folder.
+
+### Files
+
+| What | Where |
+|---|---|
+| Records (launcher only; temporary file, then rename) | `files/library/games.json`: `selected`, per title ID `title`, `source`, `data_dir`, `data_kind` (`imported`, `in_place`, `cfg`), `xbe_sha256`, `added_at`, `last_played`, `play_ms` |
+| Scan index (rebuildable) | `files/library/index.json` |
+| Cached `default.xbe` | `files/library/xbe/<TID>-<sha8>/default.xbe` |
+| Imported games | `<external files>/games/<TID>/` (staged in `games/.import`, swapped once checked) |
+| Owner of the shared caches, stashes | `files/library/cache_owner`, `files/save/.stash/<TID>/` |
+
+**Migration.** The first start of this version (`Library.migrate`, no file moves): the game a launcher without the
+library would run (the chosen folder, else `RECOMP_GAME_DIR`, else `files/game/` with a `default.xbe`) becomes the
+first record and the owner of the caches, `title_id` is written; logcat `launcher: library: migrated <TID> (<dir>)`.
+`files/game/` stays that game's data and is never an import target again; a later import of the same title into
+`games/<TID>` removes it once the new copy is checked (and no game process runs). An older APK still finds its
+preferences and `files/game/`. The adb workflow (`RECOMP_GAME_DIR`, pushing to `files/game/`) still works.
+
+### A test library
+
+`tools/android/make_test_library.sh OUT_DIR [COUNT]` builds a synthetic library: images made with
+`tools/xiso/mkxiso.py` around the conformance XBE with patched title IDs, names, regions and versions (two versions
+of one game), one game folder, one nested image, a non-Xbox `notes.iso`, and a hidden and an `Android/` image that
+the scan skips. `adb push OUT_DIR /sdcard/xbox-test`, then choose it as the library folder. The games import in a
+second; they do not run (the XBE is not a game).
+
+Tests: `LibraryScreenTest`, `StorageTest` (plain JUnit), `LauncherLibraryTest` (routing, grid with 0 / 1 / 7 / 20
+games in en / fr at 720p / 1080p → `build/screenshots/library-*.png`, navigation, theme, launched game written at
+Play only, caches switched, not imported, Prepare now, queue, Storage), `LauncherPanelsTest` (`companion-library-*`).
+
+### Device check (game library), for Alex
+
+`adb logcat -s xboxrecomp` throughout. Library folder `/sdcard/xbox` with Burnout 3 and Fable.
+
+1. Install over the current APK and open it: Fable's Home as before (same game, play time, saves). logcat
+   `launcher: library: migrated 4D5300D1 (<dir>)` once (not at the next start).
+2. Home › Game data › Library is not there yet (one game): « Change game » as before. Choose your game: a third card
+   **Game library folder**. Choose `/sdcard/xbox`: the library opens, the grid fills; logcat
+   `launcher: library: scan N items, M games, T ms (…)`. Send the line.
+3. Burnout 3 shows once (one card even with several images of it, « n versions » in the details), with its title
+   image; Fable shows **Ready**; the other files of the folder, if any, on the « Other files (n) » line.
+4. D-pad between the cards (the highlight glides, the backdrop's glow takes each game's colour), A on Burnout 3: its
+   Home in its colours, chip **Not imported**; B: back to the library in the stock green, the focus on Burnout 3.
+5. Y: the rescan is quick (`… 0 opened, N unchanged`). Copy another ISO into `/sdcard/xbox`, Y: it appears.
+6. Put a non-Xbox `.iso` (any file renamed) in the folder, Y: « Other files (1) » under the grid, no card.
+7. Burnout 3 › Import: the progress ring; Cancel once (back to its Home, nothing left in `games/`), then Import again
+   to the end: Home, a Prepare starts by itself (if the APK has the toolchain). `adb shell ls
+   /sdcard/Android/data/<app id>/files/games/` shows its title ID.
+8. While Burnout 3 prepares, Fable or another game › Prepare: its chip reads **Queued (1)**; A on it takes it out;
+   start it again and let it run after the first one.
+9. On a game not imported: **Prepare now** — the Prepare runs from the cached `default.xbe` (logcat `prepare
+   started for <TID> (…/files/library/xbe/<TID>-…)`); it ends « … is prepared: import it to play ».
+10. Play Fable, back to the launcher, play Burnout 3 (Play warns « Fable is running and will close », press again):
+    logcat `launcher: game caches switched to <TID>`; back on Fable later, it starts without the long cache rebuild
+    (`run-as <app id> ls files/save/.stash` shows the other game's caches).
+11. In Fable, Pause › Quit (quick reboot): Fable comes back, not Burnout 3.
+12. X on the library: Storage lists both games; delete Burnout 3's Prepare files (A twice), then its imported copy:
+    the game stays in the grid as **Not imported**, its saves row is still there; your ISO in `/sdcard/xbox` is
+    untouched.
+13. Rename `/sdcard/xbox` (or remove the SD card) and open the launcher: no crash; games read in place show
+    **Source gone**, imported ones still play; rename it back, Y.
+14. Bottom screen (Thor): on the library the focused game's card with its action (Play, Import, …), Rescan,
+    Settings; on a game's Home the third shortcut reads **Library**.
+15. In French: the library, the chips (« Non importé », « En attente (1) »), Storage.
+16. Turn All files access off (system settings), choose the folder again with **Use the file picker**: the games
+    are listed; folders read « À copier » / « Needs copying », images import.
 
 ## Prepare on the device (the app side)
 
