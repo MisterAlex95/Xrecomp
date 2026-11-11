@@ -57,6 +57,19 @@ float nv2a_gl_surface_scale(const Nv2aGlScaleConfig *cfg, const Nv2aSurface *s)
     return 1.0f;
 }
 
+float nv2a_gl_target_scale(const Nv2aGlScaleConfig *cfg, const Nv2aSurface *s,
+                           const Nv2aGlHeldTarget *held)
+{
+    float sc = nv2a_gl_surface_scale(cfg, s);
+
+    if (sc != 1.0f || cfg->scale == 1.0f || cfg->no_sticky || !held || !s->color_valid)
+        return sc;
+    if (((s->format >> 8) & 0xF) == 2 || held->swizzled || held->sc == 1.0f
+        || held->pitch != s->pitch)
+        return sc;
+    return held->sc;
+}
+
 uint32_t nv2a_gl_scale_px(uint32_t v, float sc)
 {
     return (uint32_t)((double)v * (double)sc + 0.5);

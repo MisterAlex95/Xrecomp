@@ -1,5 +1,6 @@
 /* Internal resolution policy (nv2a_gl_scale.c): which surfaces scale, the
- * rectangle rounding, visibility counts and RECOMP_GPU_SCALE_TARGETS parsing. */
+ * scale that sticks to a scaled target's memory, the rectangle rounding,
+ * visibility counts and RECOMP_GPU_SCALE_TARGETS parsing. */
 #include "nv2a_gl_scale.h"
 
 #include <math.h>
@@ -117,6 +118,114 @@ static void test_policy(void)
     CHECK(FEQ(nv2a_gl_surface_scale(&cfg, &s), 1.0f));
 }
 
+/* Burnout 3's back buffer: 0x80714000, pitch 2560, A8R8G8B8 (0x128). */
+static Nv2aSurface bo3_back_buffer(uint32_t cx, uint32_t cy, uint32_t w, uint32_t h)
+{
+    Nv2aSurface s;
+
+    memset(&s, 0, sizeof s);
+    s.color_va = 0x80714000u;
+    s.pitch = 2560;
+    s.bytes_per_pixel = 4;
+    s.format = 0x128;
+    s.aa_sx = s.aa_sy = 1;
+    s.clip_x = cx;
+    s.clip_y = cy;
+    s.width = w;
+    s.height = h;
+    s.color_valid = 1;
+    return s;
+}
+
+static void test_sticky(void)
+{
+    Nv2aGlScaleConfig cfg;
+    Nv2aGlHeldTarget held = { 2.0f, 2560, 0 }, native = { 1.0f, 2560, 0 };
+    Nv2aSurface s;
+
+    memset(&cfg, 0, sizeof cfg);
+    cfg.scale = 2.0f;
+
+    /* The full-frame bind scales, with or without a target held. */
+    s = bo3_back_buffer(0, 0, 640, 480);
+    CHECK(FEQ(nv2a_gl_target_scale(&cfg, &s, NULL), 2.0f));
+    CHECK(FEQ(nv2a_gl_target_scale(&cfg, &s, &held), 2.0f));
+    /* The HUD clip 0,16 640x448 on the scaled target stays scaled ... */
+    s = bo3_back_buffer(0, 16, 640, 448);
+    CHECK(FEQ(nv2a_gl_surface_scale(&cfg, &s), 1.0f));    /* the policy alone */
+    CHECK(FEQ(nv2a_gl_target_scale(&cfg, &s, &held), 2.0f));
+    /* ... and so does a menu's scissor, 160,16 480x447. */
+    s = bo3_back_buffer(160, 16, 480, 447);
+    CHECK(FEQ(nv2a_gl_target_scale(&cfg, &s, &held), 2.0f));
+    /* Bound first with a sub-rectangle: native, nothing to stick to. */
+    s = bo3_back_buffer(0, 16, 640, 448);
+    CHECK(FEQ(nv2a_gl_target_scale(&cfg, &s, NULL), 1.0f));
+    CHECK(FEQ(nv2a_gl_target_scale(&cfg, &s, &native), 1.0f));
+    /* Then the full frame: promoted (never down) ... */
+    s = bo3_back_buffer(0, 0, 640, 480);
+    CHECK(FEQ(nv2a_gl_target_scale(&cfg, &s, &native), 2.0f));
+    /* ... and the sub-rectangle stays at 2 from then on. */
+    s = bo3_back_buffer(0, 16, 640, 448);
+    CHECK(FEQ(nv2a_gl_target_scale(&cfg, &s, &held), 2.0f));
+    /* Other scales stick as they are. */
+    cfg.scale = 2.25f;
+    held.sc = 2.25f;
+    CHECK(FEQ(nv2a_gl_target_scale(&cfg, &s, &held), 2.25f));
+    cfg.scale = 2.0f;
+    held.sc = 2.0f;
+
+    /* Another pitch on that memory: a different surface, the policy. */
+    s = bo3_back_buffer(0, 0, 320, 240);
+    s.pitch = 1280;
+    CHECK(FEQ(nv2a_gl_target_scale(&cfg, &s, &held), 1.0f));
+    /* Swizzled on that memory: an effect target, the policy. */
+    s = bo3_back_buffer(0, 0, 256, 256);
+    s.format = 0x08080208u;
+    CHECK(FEQ(nv2a_gl_target_scale(&cfg, &s, &held), 1.0f));
+    /* Held swizzled (last bound as an effect target): the policy. */
+    {
+        Nv2aGlHeldTarget swz = { 2.0f, 2560, 1 };
+        s = bo3_back_buffer(0, 16, 640, 448);
+        CHECK(FEQ(nv2a_gl_target_scale(&cfg, &s, &swz), 1.0f));
+    }
+
+    /* Fable's 0x121 / 0x2121 back buffer: 2 either way, as before. */
+    {
+        Nv2aGlHeldTarget fable = { 2.0f, 1280, 0 };
+        s = back_buffer(0x121);
+        CHECK(FEQ(nv2a_gl_target_scale(&cfg, &s, NULL), 2.0f));
+        CHECK(FEQ(nv2a_gl_target_scale(&cfg, &s, &fable), 2.0f));
+        s = back_buffer(0x2121);
+        CHECK(FEQ(nv2a_gl_target_scale(&cfg, &s, NULL), 2.0f));
+        CHECK(FEQ(nv2a_gl_target_scale(&cfg, &s, &fable), 2.0f));
+    }
+
+    /* Depth-only (no colour surface): the policy, held or not. */
+    memset(&s, 0, sizeof s);
+    s.width = s.height = 768;
+    s.format = 0x20;
+    s.aa_sx = s.aa_sy = 1;
+    CHECK(FEQ(nv2a_gl_target_scale(&cfg, &s, &held), 1.0f));
+    cfg.shadow = 1;
+    CHECK(FEQ(nv2a_gl_target_scale(&cfg, &s, &held), 2.0f));
+    cfg.shadow = 0;
+
+    /* A masked batch on the HUD clip keeps the target's scale. */
+    s = bo3_back_buffer(0, 16, 640, 448);
+    s.color_masked = 1;
+    CHECK(FEQ(nv2a_gl_target_scale(&cfg, &s, &held), 2.0f));
+
+    /* RECOMP_GPU_SCALE_STICKY=0: the policy alone. */
+    cfg.no_sticky = 1;
+    CHECK(FEQ(nv2a_gl_target_scale(&cfg, &s, &held), 1.0f));
+    cfg.no_sticky = 0;
+
+    /* Scale 1: everything 1. */
+    cfg.scale = 1.0f;
+    s = bo3_back_buffer(0, 0, 640, 480);
+    CHECK(FEQ(nv2a_gl_target_scale(&cfg, &s, &native), 1.0f));
+}
+
 static void test_rects(void)
 {
     int32_t c[4];
@@ -179,6 +288,7 @@ static void test_parse(void)
 int main(void)
 {
     test_policy();
+    test_sticky();
     test_rects();
     test_counts();
     test_parse();

@@ -158,10 +158,10 @@ void nv2a_gl_set_display_size(uint32_t w, uint32_t h)
  * reads a native-size resolve of it rather than the scaled texture (which
  * it would under-filter). s_scale_dump (RECOMP_GPU_SCALE_DUMP=1): a dumping
  * flip also writes the presented target at its real size. */
-static Nv2aGlScaleConfig s_scale_cfg = { 1.0f, 0, 0, { 0 }, { 0 } };
+static Nv2aGlScaleConfig s_scale_cfg = { 1.0f, 0, 0, { 0 }, { 0 }, 0 };
 static int s_scale_resolve = 1, s_scale_dump;
 /* The scale of the target the batch being set up draws into (known before
- * its textures are bound: nv2a_gl_surface_scale). */
+ * its textures are bound: surface_scale). */
 static float s_draw_sc = 1.0f;
 static struct {
     uint32_t resolves, rescales, depth_recreates, seed_blits;
@@ -568,6 +568,7 @@ static int ensure_init(void)
     s_scale_cfg.scale = s_scale;
     s_scale_cfg.shadow = env_on("RECOMP_GPU_SCALE_SHADOW");
     nv2a_gl_scale_parse_targets(getenv("RECOMP_GPU_SCALE_TARGETS"), &s_scale_cfg);
+    s_scale_cfg.no_sticky = getenv("RECOMP_GPU_SCALE_STICKY") && !env_on("RECOMP_GPU_SCALE_STICKY");
     s_scale_resolve = !(getenv("RECOMP_GPU_SCALE_RESOLVE") && !env_on("RECOMP_GPU_SCALE_RESOLVE"));
     s_scale_dump = env_on("RECOMP_GPU_SCALE_DUMP");
     if (s_scale > 1.0f)
@@ -1181,9 +1182,37 @@ static void rt_grow(GlRT *r, uint32_t gw, uint32_t gh)
     s_st.rt_grows++;
 }
 
+/* The colour target already made for surface s's memory, with its pixel
+ * size (NULL: none yet). */
+static GlRT *rt_find(const Nv2aSurface *s)
+{
+    int i;
+
+    for (i = 0; i < NV_GL_MAX_RT; i++)
+        if (s_rt[i].tex && s_rt[i].va == s->color_va
+            && s_rt[i].bpp == s->bytes_per_pixel)
+            return &s_rt[i];
+    return NULL;
+}
+
+/* The scale surface s is drawn at (nv2a_gl_target_scale: the policy, and a
+ * scaled target's scale sticks to its memory). */
+static float surface_scale(const Nv2aSurface *s)
+{
+    const GlRT *r;
+    Nv2aGlHeldTarget held;
+
+    if (s_scale_cfg.scale == 1.0f || !s->color_valid || !(r = rt_find(s)))
+        return nv2a_gl_target_scale(&s_scale_cfg, s, NULL);
+    held.sc = r->sc;
+    held.pitch = r->pitch;
+    held.swizzled = r->swz != 0;
+    return nv2a_gl_target_scale(&s_scale_cfg, s, &held);
+}
+
 static GlRT *rt_get(const Nv2aSurface *s)
 {
-    float sc = nv2a_gl_surface_scale(&s_scale_cfg, s);
+    float sc = surface_scale(s);
     uint32_t bpp = s->bytes_per_pixel, w, h, swz = 0, i;
     GlRT *r, *free_slot = NULL, *lru = NULL;
 
@@ -1223,9 +1252,13 @@ static GlRT *rt_get(const Nv2aSurface *s)
              * when the new shape does not fit. Recreating it cost a
              * read-back and an upload per switch, 16 a frame. */
             if (r->bpp == bpp && r->sc != sc) {
-                /* Another scale class now (nv2a_gl_surface_scale keys on
-                 * real pixels, so Fable's 0x121 / 0x2121 back buffer does
-                 * not come here): hand it back through guest memory. */
+                /* Another scale class now: a native target promoted to
+                 * the frame class, or the memory reused in another layout
+                 * (surface_scale keeps a scaled target's scale for any clip
+                 * on the same pitch, and keys the policy on real pixels, so
+                 * neither Fable's 0x121 / 0x2121 back buffer nor Burnout
+                 * 3's HUD clip comes here): hand it back through guest
+                 * memory. */
                 s_sst.rescales++;
                 if (s_verbose)
                     fprintf(stderr, "  [GPUGL] target 0x%08X rescaled %.2f -> %.2f"
@@ -1450,7 +1483,7 @@ static void set_view(const Nv2aSurface *s, uint32_t w, uint32_t h, float sc)
 static int bind_depth_only(const Nv2aSurface *s, uint32_t zeta_va, GlTarget *t)
 {
     uint32_t w = s->clip_x + s->width, h = s->clip_y + s->height;
-    float sc = nv2a_gl_surface_scale(&s_scale_cfg, s);   /* masked: the colour surface's */
+    float sc = surface_scale(s);   /* masked: the colour surface's */
     GlDepth *d;
 
     if (!zeta_va || !w || !h || w > 4096 || h > 4096)
@@ -1480,19 +1513,6 @@ static int bind_depth_only(const Nv2aSurface *s, uint32_t zeta_va, GlTarget *t)
     t->sc = sc;
     set_view(s, t->w, t->h, sc);
     return 1;
-}
-
-/* The colour target already made for surface s's memory, with its pixel
- * size (NULL: none yet). */
-static GlRT *rt_find(const Nv2aSurface *s)
-{
-    int i;
-
-    for (i = 0; i < NV_GL_MAX_RT; i++)
-        if (s_rt[i].tex && s_rt[i].va == s->color_va
-            && s_rt[i].bpp == s->bytes_per_pixel)
-            return &s_rt[i];
-    return NULL;
 }
 
 /* Bind the render target for drawing into, with its depth surface. A batch
@@ -3024,7 +3044,7 @@ static void gl_draw(const Nv2aSurface *s, const Nv2aBatch *b)
         return;
     if (!ensure_init())
         return;
-    s_draw_sc = nv2a_gl_surface_scale(&s_scale_cfg, s);
+    s_draw_sc = surface_scale(s);
     bind_stage_textures(ps, kind, tscale);
     if (s_sig_on && sig_batch(s, b, kind, b->count / 3))
         return;
@@ -3509,7 +3529,7 @@ static int gl_draw_program(const Nv2aSurface *s, const Nv2aBatch *b)
         return 0;                   /* the executor sends it gathered */
     if (!(vsh = vsh_get(pb, fmt)))
         return 0;
-    s_draw_sc = nv2a_gl_surface_scale(&s_scale_cfg, s);
+    s_draw_sc = surface_scale(s);
     bind_stage_textures(ps, kind, tscale);
     if (s_sig_on && sig_batch(s, b, kind, pb->index_count / 3))
         return 1;                   /* skipped: drawn by nobody */

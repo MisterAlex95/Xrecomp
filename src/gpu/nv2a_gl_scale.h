@@ -26,7 +26,17 @@ typedef struct {
     int shadow;                         /* depth-only targets scale too */
     uint32_t ntargets;                  /* extra real sizes of the frame class */
     uint32_t target_w[NV2A_GL_SCALE_MAX_TARGETS], target_h[NV2A_GL_SCALE_MAX_TARGETS];
+    int no_sticky;                      /* RECOMP_GPU_SCALE_STICKY=0: policy only */
 } Nv2aGlScaleConfig;
+
+/* The render target the back end already holds for a colour surface's
+ * memory (same address, same bytes per pixel): what nv2a_gl_target_scale
+ * needs of it. */
+typedef struct {
+    float sc;                           /* its scale */
+    uint32_t pitch;                     /* bytes per row of its linear layout */
+    int swizzled;                       /* last bound swizzled */
+} Nv2aGlHeldTarget;
 
 /* RECOMP_GPU_SCALE_TARGETS: "WxH[,WxH...]" real sizes added to the frame
  * class. Returns the number parsed (stored in cfg, at most
@@ -47,6 +57,21 @@ int nv2a_gl_frame_surface(const Nv2aSurface *s);
  * else 1. A batch with every colour channel masked keeps its colour
  * surface's scale. */
 float nv2a_gl_surface_scale(const Nv2aGlScaleConfig *cfg, const Nv2aSurface *s);
+
+/* The scale a batch on surface s draws at, given the target already held
+ * for s's memory (NULL: none). The policy above, except that the scale of
+ * a scaled target sticks to its memory: a linear surface on it with the
+ * same pitch (and bytes per pixel, as `held` implies) keeps it whatever its
+ * clip. Burnout 3 binds its 640x480 back buffer with clip 0,0 640x480 for
+ * its post-process quads and 0,16 640x448 for its HUD (menus: other
+ * scissor rectangles, 160,16 480x447); keyed on the clip alone the target
+ * went 1 -> 2 -> 1 twice a frame, each time back through guest memory.
+ * Never down: a native target bound as frame class is promoted (re-created
+ * once) and then stays. Swizzled surfaces, another pitch and depth-only
+ * passes follow the policy. Every caller (draw, depth-only, target
+ * creation) asks this, so draw, depth and target agree. */
+float nv2a_gl_target_scale(const Nv2aGlScaleConfig *cfg, const Nv2aSurface *s,
+                           const Nv2aGlHeldTarget *held);
 
 /* round(v * sc). */
 uint32_t nv2a_gl_scale_px(uint32_t v, float sc);
