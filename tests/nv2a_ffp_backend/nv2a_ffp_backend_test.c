@@ -33,6 +33,7 @@ uint32_t g_xbox_stack_base, g_xbox_stack_size;   /* #189 made the stack placemen
 uint32_t xbox_ContiguousAllocatedBytes(void) { return 0; }
 void xbox_FramebufferWindowSet(uint32_t va, uint32_t pitch) { (void)va; (void)pitch; }
 void xbox_FramebufferWindowSetAA(uint32_t sy) { (void)sy; }
+void xbox_FramebufferWindowSetFormat(uint32_t f) { (void)f; }
 static uint32_t s_fence_va;                           /* the mirrored fence word, if any */
 uint32_t xbox_Nv2aFenceWordVa(void) { return s_fence_va; }
 int nv2a_pb_dma_walk(void) { return 1; }             /* RECOMP_PB_WALK=dma: 0x0310 is latched */
@@ -45,6 +46,7 @@ void xbox_Nv2aFrameCounterFlip(void) {}
 int nv2a_pb_scan_in_call(void) { return 0; }
 uint32_t xbox_VblankCount(void) { return 0; }
 uint64_t xbox_HostNowNs(void) { return 0; }
+void xbox_HostSleepNs(uint64_t ns) { (void)ns; }
 uint32_t xbox_Nv2aFrameCountersOwned(void) { return 0; }
 
 static volatile uint32_t s_pgraph_400b10;
@@ -62,6 +64,9 @@ static struct {
     Nv2aVertex v[8];
     int textured;
     uint32_t clear_flags, clear_argb;
+    int has_full;
+    Nv2aVertexFull full[3];
+    Nv2aPixelState ps;
 } s_be;
 
 static void be_clear(const Nv2aSurface *s, const Nv2aRenderState *rs,
@@ -84,11 +89,73 @@ static void be_draw(const Nv2aSurface *s, const Nv2aBatch *b)
     s_be.textured = b->texture != NULL;
     for (i = 0; i < b->count && i < 8; i++)
         s_be.v[i] = b->vertices[i];
+    s_be.has_full = b->full != NULL && b->pixel != NULL;
+    if (s_be.has_full) {
+        for (i = 0; i < b->count && i < 3; i++)
+            s_be.full[i] = b->full[i];
+        s_be.ps = *b->pixel;
+    }
 }
 
 static void be_flip(void) { s_be.flips++; }
 
+/* A back end that runs vertex programs itself (NV2A_BACKEND_CAP_PROGRAM). */
+static struct {
+    int calls, decline;
+    uint32_t ins_count, vertex_count, streams, index_count;
+    uint64_t hash, serial;
+    float attrs[8][8];
+    uint16_t idx[12];
+    float imm2[4], c5[4];
+    int has_pixel, has_texture_ptr;
+    /* NV2A_BACKEND_CAP_RAW_VERTEX: the last batch's arrays as stored. */
+    int raw, decline_raw;
+    uint32_t raw_first;
+    Nv2aRawAttr raw0, raw3;
+} s_pg;
+
+static int be_draw_program(const Nv2aSurface *s, const Nv2aBatch *b)
+{
+    const Nv2aProgramBatch *p = b->program;
+    uint32_t i;
+
+    (void)s;
+    s_pg.calls++;
+    if (s_pg.decline || (p->raw && s_pg.decline_raw))
+        return 0;
+    s_pg.raw = p->raw != NULL;
+    if (p->raw) {
+        s_pg.raw_first = p->raw_first;
+        s_pg.raw0 = p->raw[0];
+        s_pg.raw3 = p->raw[3];
+    }
+    s_pg.ins_count = p->ins_count;
+    s_pg.hash = p->hash;
+    s_pg.serial = p->const_serial;
+    s_pg.vertex_count = p->vertex_count;
+    s_pg.streams = p->streams;
+    s_pg.index_count = p->index_count;
+    for (i = 0; p->attrs && i < p->vertex_count && i < 8; i++)
+        memcpy(s_pg.attrs[i], p->attrs + i * 8, 8 * sizeof(float));
+    for (i = 0; i < p->index_count && i < 12; i++)
+        s_pg.idx[i] = p->indices[i];
+    memcpy(s_pg.imm2, p->imm[2], sizeof s_pg.imm2);
+    memcpy(s_pg.c5, p->constants[5], sizeof s_pg.c5);
+    s_pg.has_pixel = b->pixel != NULL && b->vertices == NULL && b->full == NULL;
+    return 1;
+}
+
 static const Nv2aBackend s_backend = { be_clear, be_draw, be_flip };
+/* The same back end asking for the full vertex and the pixel state. */
+static const Nv2aBackend s_backend_px = { be_clear, be_draw, be_flip,
+                                          NV2A_BACKEND_CAP_PIXEL };
+static const Nv2aBackend s_backend_pg = { be_clear, be_draw, be_flip,
+                                          NV2A_BACKEND_CAP_PIXEL | NV2A_BACKEND_CAP_PROGRAM,
+                                          NULL, NULL, NULL, be_draw_program };
+static const Nv2aBackend s_backend_raw = { be_clear, be_draw, be_flip,
+                                           NV2A_BACKEND_CAP_PIXEL | NV2A_BACKEND_CAP_PROGRAM
+                                           | NV2A_BACKEND_CAP_RAW_VERTEX,
+                                           NULL, NULL, NULL, be_draw_program };
 
 /* ---- driving the executor ---------------------------------------------- */
 extern void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param);
@@ -261,8 +328,18 @@ int main(void)
         CHECK(s_be.draws == draws);
     }
 
-    /* The semaphore release lands where the title said. */
+    /* A release before the title names the semaphore is not lost: the
+     * hand-over writes it (D3D init waited on it for ever otherwise). */
+    m(0x1D70, 0x0FFF);
+    put32(0x5000, 0);
     nv2a_pb_set_semaphore_target(0x5000);
+    {
+        uint32_t got;
+        memcpy(&got, s_mem + 0x5000, 4);
+        CHECK(got == 0x0FFF);
+    }
+
+    /* The semaphore release lands where the title said. */
     m(0x1D70, 0x1234);
     {
         uint32_t got;
@@ -299,6 +376,117 @@ int main(void)
     CHECK(s_be.flips == 0);
     m(0x0130, 0);                                     /* FLIP_STALL */
     CHECK(s_be.flips == 1);
+    CHECK(!s_be.has_full);                            /* caps 0: no full vertices */
+
+    /* NV2A_BACKEND_CAP_PIXEL: the full vertex and the pixel state arrive
+     * with the batch. No combiner program yet: stage 0 texel * diffuse. */
+    nv2a_backend_register(&s_backend_px);
+    m(0x17FC, 5); m(0x1810, 2u << 24); m(0x17FC, 0);
+    CHECK(s_be.has_full);
+    CHECK(s_be.ps.shade == NV2A_SHADE_MODULATE);
+    CHECK(near_(s_be.full[1].pos[0], 640.0f) && near_(s_be.full[1].pos[1], 480.0f));
+    CHECK(near_(s_be.full[1].pos[3], 1.0f));
+    CHECK(near_(s_be.full[0].d0[0], 128.0f / 255.0f));   /* 0xFF804020: r 0x80 */
+    CHECK(near_(s_be.full[0].fog, 1.0f));               /* fog off */
+    CHECK(s_be.surf.format == 0x0008);
+    /* A combiner program switches the batch to the combiners and carries
+     * the program and the stage modes. */
+    m(0x1E60, 0x00001001u);                           /* SET_COMBINER_CONTROL: 1 stage */
+    m(0x1E70, 0x1u);                                  /* SHADER_STAGE_PROGRAM: stage 0 2D */
+    m(0x0288, 0x0000000Cu);                           /* SPECULAR_FOG_CW0: D = r0 */
+    m(0x17FC, 5); m(0x1810, 2u << 24); m(0x17FC, 0);
+    CHECK(s_be.ps.shade == NV2A_SHADE_COMBINERS);
+    CHECK(s_be.ps.rc.control == 0x1001u && s_be.ps.rc.final0 == 0x0Cu);
+    CHECK(s_be.ps.stage[0].mode == 1 && s_be.ps.stage[1].mode == 0);
+    nv2a_backend_register(&s_backend);
+
+    /* NV2A_BACKEND_CAP_PROGRAM: a vertex-program batch reaches draw_program
+     * untransformed -- each unique vertex once, only the inputs the program
+     * reads, an index list in the CPU path's triangle order, the program and
+     * the constants -- unless the back end declines it, when the executor
+     * transforms on the CPU and calls draw() with triangles. Program:
+     *   mov o[0] (oPos), v0;  mov o[3] (oD0), v3  FINAL */
+    {
+        static const uint32_t prog[2][4] = {
+            { 0, (1u << 21) | (0u << 9) | 0x1Bu, 2u << 26, (0xFu << 12) | (1u << 11) | (0u << 3) },
+            { 0, (1u << 21) | (3u << 9) | 0x1Bu, 2u << 26, (0xFu << 12) | (1u << 11) | (3u << 3) | 1u },
+        };
+        const float c5[4] = { 5, 6, 7, 8 };
+        uint64_t serial0;
+        int k, w;
+
+        nv2a_backend_register(&s_backend_pg);
+        m(0x1E9C, 0);                                 /* _PROGRAM_LOAD slot 0 */
+        for (k = 0; k < 2; k++)
+            for (w = 0; w < 4; w++)
+                m(0x0B00 + 4 * (uint32_t)w, prog[k][w]);
+        m(0x1EA0, 0);                                 /* _PROGRAM_START */
+        m(0x1EA4, 5);                                 /* _CONSTANT_LOAD c[5] */
+        for (w = 0; w < 4; w++)
+            mf(0x0B80 + 4 * (uint32_t)w, c5[w]);
+        m(0x1E94, 2);                                 /* TRANSFORM_EXECUTION_MODE: program */
+        m(0x0208, 0x0008);
+        mf(0x1A00 + 2 * 16, 0.25f);                   /* SET_VERTEX_DATA4F(2): not read */
+        /* Triangles 0 1 2, 2 1 3 by index (ARRAY_ELEMENT16, two per word). */
+        m(0x17FC, 5);
+        m(0x1800, 0u | (1u << 16));
+        m(0x1800, 2u | (2u << 16));
+        m(0x1800, 1u | (3u << 16));
+        m(0x17FC, 0);
+        CHECK(s_pg.calls == 1);
+        CHECK(s_pg.ins_count == 2 && s_pg.hash != 0);
+        CHECK(s_pg.streams == ((1u << 0) | (1u << 3)));   /* v0, v3; v2 is not read */
+        CHECK(s_pg.vertex_count == 4 && s_pg.index_count == 6);
+        CHECK(s_pg.idx[0] == 0 && s_pg.idx[1] == 1 && s_pg.idx[2] == 2);
+        CHECK(s_pg.idx[3] == 2 && s_pg.idx[4] == 1 && s_pg.idx[5] == 3);
+        /* Row 1: v0 = (1, -1, 0, 1) (float3, w 1), v3 = 0xFF804020 as r, g, b, a. */
+        CHECK(near_(s_pg.attrs[1][0], 1) && near_(s_pg.attrs[1][1], -1)
+              && near_(s_pg.attrs[1][2], 0) && near_(s_pg.attrs[1][3], 1));
+        CHECK(near_(s_pg.attrs[1][4], 128.0f / 255.0f) && near_(s_pg.attrs[1][7], 1.0f));
+        CHECK(near_(s_pg.attrs[3][0], 1) && near_(s_pg.attrs[3][1], 1));
+        CHECK(near_(s_pg.c5[0], 5) && near_(s_pg.c5[3], 8));
+        CHECK(s_pg.has_pixel);
+        serial0 = s_pg.serial;
+        mf(0x0B80, 9.0f);                             /* c[6].x: the serial moves */
+        m(0x17FC, 5); m(0x1810, 2u << 24); m(0x17FC, 0);
+        CHECK(s_pg.calls == 2 && s_pg.serial > serial0);
+        CHECK(s_pg.vertex_count == 3 && s_pg.index_count == 3);
+        /* Declined: the CPU transforms and draw() gets the triangles. */
+        s_be.draws = 0;
+        s_pg.decline = 1;
+        m(0x17FC, 5); m(0x1810, 2u << 24); m(0x17FC, 0);
+        CHECK(s_pg.calls == 3 && s_be.draws == 1 && s_be.count == 3);
+        CHECK(s_be.has_full && near_(s_be.full[1].pos[0], 1.0f));  /* oPos = v0 */
+        s_pg.decline = 0;
+        CHECK(!s_pg.raw);
+        /* NV2A_BACKEND_CAP_RAW_VERTEX: no gather -- the arrays as the title
+         * set them, indices counted from the smallest (1 2 3, 3 2 1). */
+        nv2a_backend_register(&s_backend_raw);
+        m(0x17FC, 5);
+        m(0x1800, 1u | (2u << 16));
+        m(0x1800, 3u | (3u << 16));
+        m(0x1800, 2u | (1u << 16));
+        m(0x17FC, 0);
+        CHECK(s_pg.calls == 4 && s_pg.raw && s_pg.raw_first == 1);
+        CHECK(s_pg.vertex_count == 3 && s_pg.index_count == 6);
+        CHECK(s_pg.idx[0] == 0 && s_pg.idx[1] == 1 && s_pg.idx[2] == 2);
+        CHECK(s_pg.idx[3] == 2 && s_pg.idx[4] == 1 && s_pg.idx[5] == 0);
+        CHECK(s_pg.raw0.offset == 0x2000 && s_pg.raw0.type == 2 && s_pg.raw0.size == 3
+              && s_pg.raw0.stride == 12);
+        CHECK(s_pg.raw3.offset == 0x3000 && s_pg.raw3.type == 0 && s_pg.raw3.stride == 4);
+        /* Declined as stored: the same batch again, gathered. */
+        s_pg.decline_raw = 1;
+        m(0x17FC, 5);
+        m(0x1800, 1u | (2u << 16));
+        m(0x1800, 3u | (3u << 16));
+        m(0x1800, 2u | (1u << 16));
+        m(0x17FC, 0);
+        CHECK(s_pg.calls == 6 && !s_pg.raw && s_pg.vertex_count == 3);
+        CHECK(near_(s_pg.attrs[0][0], 1) && near_(s_pg.attrs[0][1], -1));   /* element 1 */
+        s_pg.decline_raw = 0;
+        m(0x1E94, 0);
+        nv2a_backend_register(&s_backend);
+    }
 
     if (!s_fail)
         printf("nv2a fixed-function path through a back end: ok\n");

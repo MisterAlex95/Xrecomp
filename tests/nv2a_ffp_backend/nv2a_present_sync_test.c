@@ -30,6 +30,7 @@ uint32_t g_xbox_stack_base, g_xbox_stack_size;
 uint32_t xbox_ContiguousAllocatedBytes(void) { return 0; }
 void xbox_FramebufferWindowSet(uint32_t va, uint32_t pitch) { (void)va; (void)pitch; }
 void xbox_FramebufferWindowSetAA(uint32_t sy) { (void)sy; }
+void xbox_FramebufferWindowSetFormat(uint32_t f) { (void)f; }
 uint32_t xbox_Nv2aFenceWordVa(void) { return 0; }
 int nv2a_pb_dma_walk(void) { return 1; }
 void xbox_FramebufferWindowStart(void) {}
@@ -38,6 +39,7 @@ void xbox_Nv2aFrameCounterFlip(void) {}
 int nv2a_pb_scan_in_call(void) { return 0; }
 uint32_t xbox_VblankCount(void) { return 0; }
 uint64_t xbox_HostNowNs(void) { return 0; }
+void xbox_HostSleepNs(uint64_t ns) { (void)ns; }
 uint32_t xbox_Nv2aFrameCountersOwned(void) { return 0; }
 volatile uint32_t *xbox_Nv2aRegPtr(uint32_t offset) { (void)offset; return NULL; }
 
@@ -64,6 +66,20 @@ void xbox_FramebufferWindowPresent(uint32_t va, uint32_t pitch)
 
 static void write_pixel(uint32_t pixel) { memcpy(s_mem + FB_ADDR, &pixel, sizeof pixel); }
 static void sync_surface(void) { event(EVENT_SYNC); write_pixel(NEW_PIXEL); }
+/* The present hook (nv2a_backend_register_with_present). */
+static int s_hook_sync = -1, s_hook_lie;
+static Nv2aPresentSurface s_hook_now;
+static int present_hook(const Nv2aPresentSurface *now, int sync, Nv2aPresentSurface *ready)
+{
+    event(EVENT_SYNC);
+    s_hook_now = *now;
+    s_hook_sync = sync;
+    write_pixel(NEW_PIXEL);
+    *ready = *now;
+    if (s_hook_lie)
+        ready->va = FB_ADDR + 0x100;   /* an earlier frame, not allowed with sync */
+    return 1;
+}
 static void draw_surface(const Nv2aSurface *s, const Nv2aBatch *batch)
 {
     (void)batch;
@@ -218,6 +234,39 @@ int main(int argc, char **argv)
     flip_and_check_dump(argv[1], 6, OLD_PIXEL);
     CHECK(s_event_count == 1 && s_events[0] == EVENT_PRESENT);
     CHECK(s_present_count == 1 && s_presented[0] == OLD_PIXEL);
+
+    /* The present hook: called with the presented surface, synchronous
+     * while frames are dumped (RECOMP_FB_DUMP_FLIPS=1 here), and the window
+     * shows the surface it hands back -- `now` whenever sync is set. */
+    nv2a_backend_register_with_present(&s_backend, present_hook);
+    reset_events();
+    write_pixel(OLD_PIXEL);
+    method(0x0210, FB_ADDR);
+    s_draw_count = 0;
+    draw_to_first_surface();
+    flip_and_check_dump(argv[1], 7, NEW_PIXEL);
+    CHECK(s_event_count == 3 && s_events[0] == EVENT_SYNC &&
+          s_events[1] == EVENT_PRESENT && s_events[2] == EVENT_FLIP);
+    CHECK(s_hook_sync == 1);
+    CHECK(s_hook_now.va == FB_ADDR && s_hook_now.pitch == 4 && s_hook_now.bpp == 4);
+    CHECK(s_present_count == 1 && s_presented_va[0] == FB_ADDR && s_presented[0] == NEW_PIXEL);
+
+    reset_events();
+    write_pixel(OLD_PIXEL);
+    method(0x0210, FB_ADDR);
+    s_draw_count = 0;
+    draw_to_first_surface();
+    s_hook_lie = 1;
+    flip_and_check_dump(argv[1], 8, NEW_PIXEL);
+    s_hook_lie = 0;
+    CHECK(s_present_count == 1 && s_presented_va[0] == FB_ADDR);
+
+    /* A later plain registration drops the hook. */
+    nv2a_backend_register(&s_backend);
+    reset_events();
+    write_pixel(OLD_PIXEL);
+    flip_and_check_dump(argv[1], 9, OLD_PIXEL);
+    CHECK(s_event_count == 2 && s_events[0] == EVENT_PRESENT && s_events[1] == EVENT_FLIP);
 
     if (!s_fail)
         puts("NV2A present synchronization: ok");

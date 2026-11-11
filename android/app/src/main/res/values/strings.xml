@@ -172,6 +172,16 @@
     <string name="OPT_VSYNC">Vertical sync</string>
     <string name="OPT_VSYNC_SUMMARY">Show each frame in step with the screen</string>
     <string name="OPT_VSYNC_DETAIL">On: frames are shown in step with the display, without tearing. Off: frames are shown as soon as they are ready; a little less delay, but the picture can tear. (RECOMP_PRESENT_VSYNC)</string>
+    <string name="OPT_GPU">Renderer</string>
+    <string name="OPT_GPU_SUMMARY">Draw on the CPU or on the GPU (experimental)</string>
+    <string name="OPT_GPU_DETAIL">Software: the game is drawn by the CPU, the tested path. GPU: drawn with OpenGL ES, much faster in menus; still experimental, some effects may be missing or wrong. Auto: what this game\'s profile chooses (software for now). If the GPU cannot start, the game falls back to software. (RECOMP_GPU)</string>
+    <string name="VAL_GPU_CPU">Software</string>
+    <string name="VAL_GPU_GL">GPU</string>
+    <string name="OPT_GPU_FPS_CAP">Frame cap (GPU renderer)</string>
+    <string name="OPT_GPU_FPS_CAP_SUMMARY">Frames per second at most, to save battery</string>
+    <string name="OPT_GPU_FPS_CAP_DETAIL">With the GPU renderer, menus and pause screens can run at 200 frames per second or more, which only drains the battery and heats the device. The cap holds them to 60 (or 30). Auto: what this game\'s profile chooses (60, or 30 where the profile asks for even pacing, as Fable does). Off removes it, for testing. No effect with the software renderer. (RECOMP_GPU_FPS_CAP)</string>
+    <string name="VAL_FPS_30" translatable="false">30</string>
+    <string name="VAL_FPS_60" translatable="false">60</string>
     <string name="OPT_TEX">Texture filtering</string>
     <string name="OPT_TEX_SUMMARY">How textures are sampled when drawn</string>
     <string name="OPT_TEX_DETAIL">Sharp takes the nearest texel, as the game is drawn by default. Smooth blends four texels; anisotropic also follows surfaces seen at an angle. Smoother modes cost speed, and are not the default because they change the look the game was tested with. (RECOMP_TEX_BILINEAR, RECOMP_TEX_ANISO)</string>
@@ -191,7 +201,7 @@
     <string name="VAL_BUF_LONGEST">Very long</string>
     <string name="OPT_RASTER">Drawing threads</string>
     <string name="OPT_RASTER_SUMMARY">Cores that draw large triangles</string>
-    <string name="OPT_RASTER_DETAIL">Threads of the software renderer that share large triangles. Auto leaves four cores to the game and the system. More can be faster on a big SoC; fewer can help when the game itself is short of cores. (RECOMP_RASTER_THREADS)</string>
+    <string name="OPT_RASTER_DETAIL">Threads of the software renderer that share large triangles and vertex shading. Auto uses every core the game runs on but one (the fast cores when "Fast cores only" is on). More can be faster on a big SoC; fewer can help when the game itself is short of cores. (RECOMP_RASTER_THREADS)</string>
     <string name="OPT_BIG_CORES">Fast cores only</string>
     <string name="OPT_BIG_CORES_SUMMARY">Keep the game on the big cores</string>
     <string name="OPT_BIG_CORES_DETAIL">On: the game runs on the SoC\'s fast cores only, as set at start. Off: the system may also put it on the slow cores; try it only if the game stutters with this on. (RECOMP_BIG_CORES)</string>

@@ -22,7 +22,8 @@
  * slot of three and publishes it with an index swap under a mutex held for a
  * few instructions, so the executor never waits for the window and the
  * window never reads guest memory the rasteriser may be writing. The surface
- * format is the GDI window's: 640x480, bpp from pitch / 640, 2 = R5G6B5,
+ * format is the GDI window's: 640x480, bpp from pitch / 640, 2 = R5G6B5
+ * (X1R5G5B5 when the executor says so, xbox_FramebufferWindowSetFormat),
  * 4 = X8R8G8B8. Before the first flip the window reads the AvSetDisplayMode
  * surface directly, as the GDI window does, for a title that never flips.
  *
@@ -53,8 +54,12 @@
 #include "platform/recomp_lifecycle.h"
 #include "platform/recomp_quit.h"
 #include "video_player.h"
+#include "perf_overlay.h"
 #include "keyboard_sdl.h"     /* src/input: keys into the pad stand-in */
 #include "xinput_xbox.h"
+#if defined(XBOXRECOMP_HAVE_GPU)
+#include "nv2a_gl.h"          /* src/gpu: RECOMP_GPU=1 */
+#endif
 
 extern ptrdiff_t xbox_GetMemoryOffset(void);
 
@@ -75,6 +80,7 @@ struct fb_slot {
     uint8_t *px;
     size_t   cap;
     uint32_t bpp;
+    uint32_t x555;              /* 16-bit pixels are X1R5G5B5, not R5G6B5 */
 };
 
 /* What the window takes from SDL, and gives back on every way out. */
@@ -90,6 +96,7 @@ static Uint32          s_frame_event;        /* wakes the main loop */
 static volatile int    s_wake_pending;
 static volatile int    s_in_present;         /* executor inside Present */
 static volatile uint32_t s_fb_va, s_fb_pitch; /* AvSetDisplayMode surface */
+static volatile uint32_t s_fb_x555;           /* xbox_FramebufferWindowSetFormat */
 
 /* Counted at the flip, read once a second for the title bar. */
 static uint64_t s_flips;
@@ -113,6 +120,14 @@ void xbox_FramebufferWindowSet(uint32_t fb_va, uint32_t pitch)
  * surfaces (#162) come through at twice the height until it honours this. */
 void xbox_FramebufferWindowSetAA(uint32_t sy) { (void)sy; }
 
+/* SET_SURFACE_FORMAT colour format of what the next presents hold in guest
+ * memory: 1 and 2 (X1R5G5B5) are shown as 555, anything else 16-bit as
+ * R5G6B5. */
+void xbox_FramebufferWindowSetFormat(uint32_t color_format)
+{
+    s_fb_x555 = color_format == 1 || color_format == 2;
+}
+
 /* The window is opened by xbox_HostWindowMain, on the main thread. */
 void xbox_FramebufferWindowStart(void) {}
 
@@ -121,6 +136,7 @@ void xbox_FramebufferWindowStart(void) {}
 static void publish(uint32_t bpp)
 {
     s_slot[s_back].bpp = bpp;          /* only this thread touches s_back */
+    s_slot[s_back].x555 = bpp == 2 && s_fb_x555;
     pthread_mutex_lock(&s_lock);
     {
         int t = s_ready;
@@ -246,12 +262,13 @@ void xbox_FramebufferWindowGetStats(uint32_t *fps_centi, uint32_t *draws)
 int xbox_FramebufferDumpBmp(const char *path)
 {
     uint32_t row = (FB_W * 3u + 3u) & ~3u, img = row * FB_H, total = 54u + img;
-    uint32_t w = FB_W, h = FB_H, bpp, x, y;
+    uint32_t w = FB_W, h = FB_H, bpp, x555, x, y;
     uint8_t hdr[54], *px = NULL, *line;
     FILE *f;
 
     pthread_mutex_lock(&s_lock);
     bpp = s_ready_seq ? s_slot[s_ready].bpp : 0;
+    x555 = s_ready_seq ? s_slot[s_ready].x555 : 0;
     if (bpp && s_slot[s_ready].px && (px = (uint8_t *)malloc((size_t)FB_W * FB_H * bpp)))
         memcpy(px, s_slot[s_ready].px, (size_t)FB_W * FB_H * bpp);
     pthread_mutex_unlock(&s_lock);
@@ -279,6 +296,10 @@ int xbox_FramebufferDumpBmp(const char *path)
             uint32_t v;
             if (bpp == 4) {     /* X8R8G8B8 */
                 v = (uint32_t)src[x * 4] | (uint32_t)src[x * 4 + 1] << 8 | (uint32_t)src[x * 4 + 2] << 16;
+            } else if (x555) {  /* X1R5G5B5 */
+                uint32_t p = (uint32_t)src[x * 2] | (uint32_t)src[x * 2 + 1] << 8;
+                v = ((p >> 10 & 0x1F) * 255u / 31u) << 16 | ((p >> 5 & 0x1F) * 255u / 31u) << 8
+                    | (p & 0x1F) * 255u / 31u;
             } else {            /* R5G6B5 */
                 uint32_t p = (uint32_t)src[x * 2] | (uint32_t)src[x * 2 + 1] << 8;
                 v = ((p >> 11 & 0x1F) * 255u / 31u) << 16 | ((p >> 5 & 0x3F) * 255u / 63u) << 8
@@ -376,8 +397,8 @@ int xbox_HostWindowMain(int (*guest_main)(void))
     SDL_Window *win;
     SDL_Renderer *ren;
     SDL_Texture *tex = NULL;
-    uint32_t tex_bpp = 0;
-    uint64_t shown_seq = 0, t_title = 0, flips_title = 0;
+    uint32_t tex_bpp = 0, tex_x555 = 0;
+    uint64_t shown_seq = 0, t_title = 0, flips_title = 0, t_overlay = 0;
     const char *e;
     int vsync, scale, quit = 0, guest_done = 0, dirty = 1, reupload = 0;
     int stay_after_guest = 0;   /* Android: the window outlives the guest */
@@ -387,6 +408,13 @@ int xbox_HostWindowMain(int (*guest_main)(void))
      * into an SDL_QUIT that a headless run never reads. Set before the
      * headless return: audio and input start SDL subsystems there too. */
     SDL_SetHint(SDL_HINT_NO_SIGNAL_HANDLERS, "1");
+#if defined(XBOXRECOMP_HAVE_GPU)
+    /* RECOMP_GPU=1: the GL back end draws instead of the CPU rasteriser.
+     * Before the guest starts, windowed or not; its context lives on the
+     * executor thread, frames still reach this window through guest
+     * memory (src/gpu/nv2a_gl.c). */
+    nv2a_gl_install_from_env();
+#endif
     if (!env_on("RECOMP_FB_WINDOW") || env_on("RECOMP_HEADLESS"))
         return guest_main();
 
@@ -471,7 +499,7 @@ int xbox_HostWindowMain(int (*guest_main)(void))
         SDL_Event ev;
         uint64_t seq, now;
         const uint8_t *px = NULL;
-        uint32_t bpp = 0, pitch = 0;
+        uint32_t bpp = 0, pitch = 0, x555 = 0;
 
         /* Before the first flip, poll at the display rate: the window then
          * reads the display surface itself. After, the flip's event wakes
@@ -509,6 +537,7 @@ int xbox_HostWindowMain(int (*guest_main)(void))
                     if (tex)
                         SDL_DestroyTexture(tex);
                     tex = NULL;
+                    perf_overlay_reset();
                     reupload = 1;
                     dirty = 1;
                 } else if (ev.type == SDL_KEYDOWN && !ev.key.repeat
@@ -541,23 +570,27 @@ int xbox_HostWindowMain(int (*guest_main)(void))
             shown_seq = seq;
             px = s_slot[s_front].px;
             bpp = s_slot[s_front].bpp;
+            x555 = s_slot[s_front].x555;
             pitch = FB_W * bpp;
         } else if (!shown_seq && s_fb_va && s_fb_pitch) {
             /* No flip yet: the display surface, as the GDI window reads it. */
             bpp = s_fb_pitch / FB_W;
+            x555 = bpp == 2 && s_fb_x555;
             pitch = s_fb_pitch;
             if (bpp == 2 || bpp == 4)
                 px = (const uint8_t *)((uintptr_t)s_fb_va + xbox_GetMemoryOffset());
         }
         if (px) {
-            if (!tex || bpp != tex_bpp) {
+            if (!tex || bpp != tex_bpp || x555 != tex_x555) {
                 if (tex)
                     SDL_DestroyTexture(tex);
                 tex = SDL_CreateTexture(ren, bpp == 4 ? SDL_PIXELFORMAT_RGB888
-                                                      : SDL_PIXELFORMAT_RGB565,
+                                             : x555 ? SDL_PIXELFORMAT_RGB555
+                                                    : SDL_PIXELFORMAT_RGB565,
                                         SDL_TEXTUREACCESS_STREAMING,
                                         (int)FB_W, (int)FB_H);
                 tex_bpp = bpp;
+                tex_x555 = x555;
             }
             if (tex)
                 SDL_UpdateTexture(tex, NULL, px, (int)pitch);
@@ -570,10 +603,18 @@ int xbox_HostWindowMain(int (*guest_main)(void))
             SDL_RenderClear(ren);
             if (tex)
                 SDL_RenderCopy(ren, tex, NULL, NULL);
+            perf_overlay_draw(ren);
             SDL_RenderPresent(ren);
         }
 
         now = now_ms();
+        if (perf_overlay_enabled() && now - t_overlay >= 500) {
+            if (perf_overlay_tick(now, __atomic_load_n(&s_flips, __ATOMIC_RELAXED),
+                                  __atomic_load_n(&s_frame_draws, __ATOMIC_RELAXED),
+                                  strcmp(s_title, "Xbox Recomp") ? s_title : NULL))
+                dirty = 1;
+            t_overlay = now;
+        }
         if (now - t_title >= 1000) {
             uint64_t f = __atomic_load_n(&s_flips, __ATOMIC_RELAXED);
             char tb[192];
@@ -609,6 +650,7 @@ int xbox_HostWindowMain(int (*guest_main)(void))
      * start calling SDL_GameControllerUpdate while SDL goes down. */
     if (tex)
         SDL_DestroyTexture(tex);
+    perf_overlay_reset();
     SDL_DestroyRenderer(ren);
     SDL_DestroyWindow(win);
     if (!xbox_InputAnyOpen())

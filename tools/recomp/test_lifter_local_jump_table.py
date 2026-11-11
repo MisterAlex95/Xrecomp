@@ -64,3 +64,17 @@ def test_entries_outside_the_function_are_not_arms():
     table = BASE + 0x20
     lifter = _lifter(table, [BASE + 0x200, *ARMS, BASE + 0x300])
     assert _arms(lifter, table + 4) == ARMS
+
+
+def test_null_slots_inside_a_table_do_not_end_it():
+    # A sparse state switch with no default: unused states are null slots.
+    table = BASE + 0x20
+    lifter = _lifter(table, [ARMS[0], ARMS[1], 0, ARMS[2], 0, 0, BASE + 0x58,
+                             GARBAGE])
+    assert _arms(lifter, table) == [*ARMS, BASE + 0x58]
+
+
+def test_nulls_before_another_function_s_table_end_the_table():
+    table = BASE + 0x20
+    lifter = _lifter(table, [ARMS[0], ARMS[1], 0, BASE + 0x200, ARMS[2]])
+    assert _arms(lifter, table) == ARMS[:2]

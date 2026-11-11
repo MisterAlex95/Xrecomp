@@ -62,6 +62,10 @@ void xbox_FramebufferWindowStart(void);
 void xbox_FramebufferWindowSet(uint32_t fb_va, uint32_t pitch);
 /* Rows per displayed row: 2 for a 2x2 anti-aliased surface, else 1. */
 void xbox_FramebufferWindowSetAA(uint32_t sy);
+/* SET_SURFACE_FORMAT colour format of the surface the following presents
+ * hold, as its bytes are in guest memory: 1 or 2 (X1R5G5B5) show 16-bit
+ * pixels as 555, anything else as R5G6B5. */
+void xbox_FramebufferWindowSetFormat(uint32_t color_format);
 int  xbox_FramebufferDumpBmp(const char *path);
 /* Title bar: "<XBE title> | FPS: n | draws: n". The name is the certificate's
  * UTF-16 title (40 chars max); the stats come from each flip. */

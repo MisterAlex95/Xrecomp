@@ -58,9 +58,9 @@ class RuntimeHelpersDefinedTest(unittest.TestCase):
         for i in range(8):
             self.assertIn(f"#define xmm{i} g_xmm{i}", runtime)
         self.assertIn("typedef union RecompXmm", runtime)
-        main_c = (_ROOT / "templates" / "new-game" / "src" / "main.c").read_text(
-            encoding="utf-8")
-        self.assertIn("RecompXmm g_xmm0", main_c)
+        # The storage is a member of the per-thread g_cpu block.
+        self.assertIn("RecompXmm r_xmm0,", runtime)
+        self.assertIn("#define g_xmm0            g_cpu.r_xmm0", runtime)
 
 
 if __name__ == "__main__":

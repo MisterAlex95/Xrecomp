@@ -57,14 +57,15 @@ Start here when a title does not run. See [Step 6: Iterative Debugging](../pipel
 
 ## Memory and kernel
 
-Opt-ins that change how the kernel layer behaves. Each fixes a class of titles; none is a default. See [Xbox Kernel Replacement](../technical/kernel-replacement.md) and [Memory Layout Reproduction](../technical/memory-layout.md).
+Switches that change how the kernel layer behaves. Each fixes a class of titles; apart from `RECOMP_CONTIG_RECLAIM` and the per-host defaults noted, none is a default. See [Xbox Kernel Replacement](../technical/kernel-replacement.md) and [Memory Layout Reproduction](../technical/memory-layout.md).
 
 | Variable | Default | What it does | Where |
 |---|---|---|---|
 | `RECOMP_LANGUAGE=<code>` | English | The console language the title reads (`XC_LANGUAGE` and the `XC_MAX_OS` block): `en`, `ja`, `de`, `fr`, `es`, `it`, `ko`, `zh`, `pt` (a region suffix such as `fr-CA` is ignored) or the Xbox value `1`..`9`. The title uses it when its disc has that language. A player setting, not a fix: on Android the launcher sets it (Settings › Game › Language, per-title choice in the in-game menu). | `kernel_xbox.c` |
 | `RECOMP_SAVE_DIR=<dir>` | off | Root for the title's `UDATA`, `TDATA` and cache folders; created if missing. Absolute. Saves left in the game folder are then not used. | `kernel_path.c` |
 | `RECOMP_GAME_DIR=<dir>` | `<external files dir>/game` | Android app shell: where the title's data (`default.xbe` and the disc's files) is read from. The launcher sets it from the folder the player chose (XBA-54; it then wins over `recomp.cfg`); otherwise set it in `recomp.cfg`. | `recomp_storage.c` |
-| `RECOMP_HEAP_RECLAIM` | off | Gives freed guest heap back. | `xbox_memory_layout.c` |
+| `RECOMP_HEAP_RECLAIM` | off | Gives freed guest heap back: freed heap blocks are split instead of handed over whole, and `NtFreeVirtualMemory` returns heap memory. Contiguous memory is `RECOMP_CONTIG_RECLAIM`. | `xbox_memory_layout.c`, `kernel_bridge.c` |
+| `RECOMP_CONTIG_RECLAIM=0` | on | `MmFreeContiguousMemory` gives the block back to the contiguous window, so the next request that fits gets its pages (and possibly its address). `0` keeps every block for good, the behaviour before (when only `RECOMP_HEAP_RECLAIM` freed them): addresses are never seen twice, but a title that frees and reloads textures per scene runs the 64 MB window out (Fable: `[CONTIG] arena exhausted`). The `[CONTIG]` lines count `released=` blocks and `free calls=`. Read once. | `xbox_memory_layout.c` |
 | `RECOMP_EXT_VMA` | off | Extended virtual-memory areas above the mirrors. | `guest_vmem.c`, `xbox_memory_layout.c` |
 | `RECOMP_GUEST_WINDOW=0/1` | on for Android, off elsewhere | POSIX: hold the whole 4 GB guest window from the start and carve every view out of it, so the contiguous window, the apertures and the tiled alias never land on a taken host range. Implied by `RECOMP_EXT_VMA`. | `xbox_memory_layout.c` |
 | `RECOMP_THREAD_STACK_MB=N` | 8 | POSIX: floor, in MB (1 to 1024), for the host stack of every thread the Win32 shim creates for a routine (`CreateThread`, so guest threads from `PsCreateSystemThreadEx`, plus timer and DPC callbacks). Lifted code recurses on the native stack; without a floor bionic gives about 1 MB and an Xbox thread's 64 KB would be the whole stack. A larger request is kept. Logged once as `[win32_compat] thread stack floor`. The guest main thread has its own 64 MB stack (`fb_present_sdl.c`). | `win32_compat.c` |
@@ -88,6 +89,7 @@ Opt-ins that change how the kernel layer behaves. Each fixes a class of titles; 
 | `RECOMP_DPC_ON_RAISE` | on with the gate | `0` stops DPCs running when IRQL is raised. | `kernel_hal.c` |
 | `RECOMP_CPUID_NO_SIMD` | off | Hides SIMD from `cpuid`. | `kernel_hal.c` |
 | `RECOMP_AC97_READY=1` | off | Reports the AC'97 codec ready and routes the APU aperture to the emulated APU. | `xbox_memory_layout.c`, `templates/new-game/src/main.c` |
+| `RECOMP_AC97_ALIAS=0` | on (POSIX) | With `RECOMP_AC97_READY`: arm the AC'97 bus-master write trap with the old `mprotect` window instead of a read-only shared page plus a writable view. The window lets a second thread's store keep the RR bit, so a channel reset can spin (Fable during movies); for A/B only. | `xbox_memory_layout.c` |
 | `RECOMP_DSP_ACK=va[,...]` | off | Guest addresses to acknowledge as the DSP's doorbell. | `xbox_memory_layout.c` |
 
 ## Graphics: pushbuffer executor
@@ -106,13 +108,35 @@ The executor is itself opt-in: set `RECOMP_PB_EXEC=1` to execute the pushbuffer.
 | `RECOMP_VBLANK[=paced]` | no vblanks | Raises vblanks: a ~50 Hz tick, or `paced` for the 60 Hz schedule. `0` or empty is off. | `kernel_bridge.c` |
 | `RECOMP_FLIP_PACING[=edge]` | off | Holds each flip to the vblank count. | `nv2a_pb_exec.c` |
 | `RECOMP_FFP_FLIP_NORMALS` | off | Lights the side of a fixed-function mesh that faces the viewer. Not hardware behaviour. | `nv2a_pb_exec.c` |
-| `RECOMP_CLIP_NEAR_Z` | on | `0` turns off the near-plane clip. | `nv2a_pb_exec.c` |
+| `RECOMP_CLIP_NEAR_Z` | on | `0` turns off the near-plane clip (window z below `SET_CLIP_MIN`). | `nv2a_pb_exec.c` |
 | `RECOMP_SWIZZLED_RT` | on | `0` stops rendering into swizzled render targets. | `nv2a_pb_exec.c` |
 | `RECOMP_NO_COMBINERS` | off | Skips the register combiners. | `nv2a_pb_exec.c` |
 | `RECOMP_NO_VSH` | off | Skips vertex programs. | `nv2a_pb_exec.c` |
-| `RECOMP_RASTER_THREADS=N` | auto | Worker threads for the software rasteriser, on Windows and POSIX. | `nv2a_pb_exec.c` |
+| `RECOMP_RASTER_THREADS=N` | auto | Threads drawing (and shading vertex programs) for the software rasteriser, the executor thread included, on Windows and POSIX. Auto: online cores − 4 on desktop; on Android the cores the runtime may run on (the fast cluster under `RECOMP_BIG_CORES`) − 1. | `nv2a_pb_exec.c` |
+| `RECOMP_ACK_IDLE_US=N` | 250 | POSIX: with nothing submitted, the NV2A ack thread sleeps in 50 us steps for up to N us (watching PUT and the busy bits) instead of yielding in a loop. While the title kicks through `xbox_Nv2aKickWait` (a title override of D3D's KickOff wait, e.g. Fable's), it instead sleeps until the next kick, for at most N us, and yields only briefly for the DMA_PUT after an ack that released the title. 0 restores the bare yield. | `xbox_memory_layout.c` |
+| `RECOMP_RASTER_SPIN_US=N` | 20 | POSIX: how long an idle rasteriser worker watches for the next job before it parks (`0`: park at once). The executor hands batches over back to back, and a wake costs tens of microseconds. | `nv2a_pb_exec.c` |
+| `RECOMP_VSH_POOL=0` | on | Shades every vertex-program batch on the executor thread instead of splitting batches of 192+ vertices across the rasteriser's worker threads (same output either way). | `nv2a_pb_exec.c` |
 | `RECOMP_TEX_BILINEAR=1` | off | CPU rasteriser blends the four nearest texels instead of taking the nearest. | `nv2a_pb_exec.c` |
 | `RECOMP_TEX_ANISO=8\|16` | off | Anisotropic filtering on the CPU rasteriser; implies `RECOMP_TEX_BILINEAR`. Slower. | `nv2a_pb_exec.c` |
+| `RECOMP_GPU=1` | off | Draw with the GL back end (desktop GL 3.3/4.1 core, GLES 3.0 on Android) instead of the CPU rasteriser; vertex programs run as GLSL vertex shaders (see `RECOMP_GPU_VSH`). Falls back to the CPU rasteriser if no GL context can be made. See [GPU Back End](../technical/gpu-backend.md). | `src/gpu/nv2a_gl.c` |
+| `RECOMP_GPU_FPS_CAP=N` | 60 on macOS and Android, off elsewhere | With a back end drawing (`RECOMP_GPU=1`), at most N flips per second of host time: after `FLIP_STALL` the executor sleeps until the frame's slot before it walks on. `0` turns it off. Independent of `RECOMP_FLIP_PACING`. The `[GPU] frame cap` report line gives waits, time slept and how late the sleeps woke. | `nv2a_pb_exec.c` |
+| `RECOMP_GPU_PRIORITY=0` | high where offered | GL back end on EGL: do not ask for a high-priority context (`EGL_IMG_context_priority`). | `src/gpu/nv2a_gl_context.c` |
+| `RECOMP_GPU_FAKE_RESET=<frame>[,oom]` | off | Test aid: the GL back end acts as if its context were lost (or `GL_OUT_OF_MEMORY` were raised) at that frame, then re-creates its objects. | `src/gpu/nv2a_gl.c` |
+| `RECOMP_GPU_CULL=0` | on | GL back end: draw both faces (no back-face culling). | `src/gpu/nv2a_gl.c` |
+| `RECOMP_GPU_ZPASS=sync`, `=always`, `=lazy` | deferred | GPU back end: visibility reports (`GET_REPORT`) are written when the GPU's count is in, without waiting (when the walker idles, at the flip and after the present); a report still pending at the head after 300 us of idle calls gets one flush, after 2 ms a wait; past 512 pending the oldest are waited for. `sync` waits at every report; `always` runs no queries and reports 1; `lazy` never flushes or waits from the idle hook and answers 1 (visible) where it would wait. | `nv2a_pb_exec.c` |
+| `RECOMP_GPU_VSH=0` | on | GL back end: run vertex programs on the CPU (interpreter, near-plane clipping, triangle expansion) instead of as GLSL vertex shaders; for comparing the two paths. | `src/kernel/nv2a_pb_exec.c` |
+| `RECOMP_GPU_VBO=0` | on | GL back end: draw vertex-program batches from cached GL buffers holding the guest's vertex bytes in their own formats (validated by a hash once a frame) instead of attributes gathered on the CPU; `0` gathers every batch (the old path, for comparison). See `docs/technical/gpu-backend.md`. | `src/gpu/nv2a_gl.c` |
+| `RECOMP_GPU_S3TC=0` | on where supported | GL back end: decode DXT textures on the CPU instead of uploading them compressed. | `src/gpu/nv2a_gl.c` |
+| `RECOMP_GPU_TEX_RECHECK=frame`, `=switch` | per frame, on texture switch for volatile textures, never over GPU targets | GL back end: `frame` hashes a cached texture's guest bytes only once per frame; `switch` restores the old policy (every frame and every texture switch, targets included). | `src/gpu/nv2a_gl.c` |
+| `RECOMP_GPU_RT_DIRECT=0` | on | GL back end: never sample a render target's GL texture directly; read the target back into guest memory and upload it as a texture instead (the pre-7d path). | `src/gpu/nv2a_gl.c` |
+| `RECOMP_GPU_RT_RELAYOUT_READBACK=1` | off | GL back end: read a render target back when the title switches it between swizzled and linear or between sizes (it is kept on the GPU either way). | `src/gpu/nv2a_gl.c` |
+| `RECOMP_GPU_PRESENT=sync` | async | GL back end: read the presented surface back at its own flip instead of one frame later through a pixel pack buffer. Frame dumps always read synchronously. | `src/gpu/nv2a_gl.c` |
+| `RECOMP_GPU_READBACK=all` | presented surface only | GL back end: at every flip also read back every other render target drawn since the last one (for a title whose CPU reads its render targets). | `src/gpu/nv2a_gl.c` |
+| `RECOMP_GPU_SHADER_CACHE=0` | on where the driver offers a binary format | GL back end: do not load or save linked programs in `<save dir>/shadercache/<title id>/` (`glProgramBinary`); every program is compiled at its first use. | `src/gpu/nv2a_gl.c` |
+| `RECOMP_GPU_INVALIDATE=0` | on where supported (GLES 3.0, GL 4.3) | GL back end: do not call `glInvalidateSubFramebuffer` before full clears, nor `glInvalidateFramebuffer` on the scratch depth of a target drawn without a zeta surface when it is left. | `src/gpu/nv2a_gl.c` |
+| `RECOMP_GPU_SIGDUMP=<file>` | off | GL back end, diagnosis: at the first flip where `<file>` exists, print that frame's batch signature table (`[GPUSIG] <sig> n <batches> tris <triangles> : <description>`, one per signature) and its target runs (`[GPUSEQ]`), then delete the file. See [GPU Back End](../technical/gpu-backend.md#batch-signatures). | `src/gpu/nv2a_gl.c` |
+| `RECOMP_GPU_SIGSKIP=<file>` | off | GL back end, diagnosis: do not draw batches whose signature (hex, as `RECOMP_GPU_SIGDUMP` prints it) is listed in `<file>`; re-read every 16 flips, so it can be edited while the game runs. | `src/gpu/nv2a_gl.c` |
+| `RECOMP_GPU_VERBOSE=1` | off | GL back end: log render targets as they are created and a statistics line every 60 frames (default every 600); on EGL, the EGL version, vendor and extension list once. | `src/gpu/nv2a_gl.c`, `nv2a_gl_context.c` |
 | `RECOMP_STRIP_ALT_WINDING` | off | Odd triangles of a strip keep the strip's winding, as on hardware. | `nv2a_pb_exec.c` |
 | `RECOMP_PB_CONST_FAST=0` | on | Sends every `SET_TRANSFORM_CONSTANT` word through the general dispatcher. | `nv2a_pb_exec.c` |
 | `RECOMP_RASTER_TEST` | off | Bring-up aid: draws a magenta triangle after every clear, to prove the rasteriser and presenter work. | `nv2a_pb_exec.c` |
@@ -124,7 +148,7 @@ The executor is itself opt-in: set `RECOMP_PB_EXEC=1` to execute the pushbuffer.
 | `RECOMP_TEX_STATE` | off | Texture state per report. | `nv2a_pb_exec.c` |
 | `RECOMP_TEX_DUMP=<prefix>` | off | Writes each distinct texture as a BMP, first use only. | `nv2a_pb_exec.c` |
 | `RECOMP_TEX_DUMP_EVERY=N` | 0 | Dumps every Nth texture bind instead. | `nv2a_pb_exec.c` |
-| `RECOMP_FB_DUMP=<prefix>` | off | Writes the draw surface as a BMP at each report. | `nv2a_pb_exec.c`, `fb_present.c` |
+| `RECOMP_FB_DUMP=<prefix>` | off | Writes a BMP per report: the frame the next flip presents (complete), or, for a title that has not flipped yet or stopped flipping, the draw surface as it is; before the first flip also the first frames that draw geometry. | `nv2a_pb_exec.c`, `fb_present.c` |
 | `RECOMP_FB_DUMP_FLIPS` | off | `1` dumps every flip; any other value names a file whose existence turns dumping on. | `nv2a_pb_exec.c` |
 | `RECOMP_FIND_NAN` | off | Scans for NaN matrices at every report. | `nv2a_pb_exec.c` |
 | `RECOMP_FIND_QUAD` | off | Scans once for quad vertices. | `nv2a_pb_exec.c` |
@@ -162,6 +186,8 @@ See the [APU](../../src/apu/README.md) and [DirectSound](../../src/audio/README.
 | `RECOMP_APU_HRTF` | on | `0` turns HRTF for 3D voices off. | `apu_vp.c` |
 | `RECOMP_APU_MIXDOWN_ALL` | on | `0` limits the mixdown. | `apu_dsp.c` |
 | `RECOMP_APU_DSP_ACK` | auto | DSP doorbell acknowledgement: `auto` derives it, `0`/`off` disables, or a list of addresses. | `apu_dsp.c` |
+| `RECOMP_APU_PRIORITY` | on | `0` leaves the APU frame thread at the default priority (otherwise nice -16 on Linux/Android, QoS user-interactive on macOS). | `apu_core.c` |
+| `RECOMP_APU_EP_CANARY` | on | Keeps the XDK EP program's canary (`0x00CCCCCC` at EP P:6, VA `0xFE85A018`) while the APU frame thread runs; DirectSound resets the whole APU (10 ms stall) on every `DoWork` that reads anything else. `0` leaves the word alone. | `apu_dsp.c` |
 | `RECOMP_AUDIO_BUF_COUNT`, `RECOMP_AUDIO_BUF_SAMPLES` | built-in | Device buffer count and size. | `apu_sdl2.c`, `apu_xaudio2.c` |
 
 ## Input

@@ -80,6 +80,12 @@ add_subdirectory(src/usb)
 # Input: Xbox gamepad → XInput
 add_subdirectory(src/input)
 
+# The GPU render back end (XBA-27): POSIX hosts, selected with RECOMP_GPU=1.
+option(XBOXRECOMP_BUILD_GPU "Build the GL render back end for the pushbuffer executor" ON)
+if(XBOXRECOMP_BUILD_GPU AND NOT WIN32)
+    add_subdirectory(src/gpu)
+endif()
+
 # Shared FMV player (Media Foundation -> D3D8 texture)
 add_subdirectory(src/video)
 
@@ -110,6 +116,9 @@ list(APPEND XBOXRECOMP_LIBS
     xbox_nv2a
     xbox_video
 )
+if(TARGET xbox_gpu)
+    list(APPEND XBOXRECOMP_LIBS xbox_gpu)
+endif()
 add_library(xboxrecomp INTERFACE)
 if(UNIX AND NOT APPLE)
     # The archives call each other both ways (the APU reaches the kernel's

@@ -169,6 +169,34 @@ static int open_launcher_bad_pack(const char *reason)
     return call_activity("openLauncherBadPack", reason);
 }
 
+/* Quick reboot into the running title (src/kernel/kernel_reboot.c). The
+ * kernel has written the launch data to the save dir; a process cannot start
+ * the runtime twice, so ShellActivity.restartGame asks the :launcher process
+ * to end this one and start the game activity again (LauncherActivity
+ * ACTION_RESTART_GAME). Called on the guest thread: SDL_AndroidGetJNIEnv
+ * attaches it. Then this thread waits to be ended; if the launcher has not
+ * done it within RESTART_WAIT_MS the process exits by itself, leaving the
+ * launch data for the next start. Returns (the kernel then exits as before)
+ * only when the call could not be made. Declared here rather than through
+ * kernel.h, which brings the Xbox types. */
+typedef void (*xbox_restart_handler)(void);
+void xbox_SetRestartHandler(xbox_restart_handler fn);
+
+#define RESTART_WAIT_MS 10000
+
+static void restart_via_launcher(void)
+{
+    if (call_activity("restartGame", "") != 0) {
+        fprintf(stderr, "xboxrecomp: quick reboot: ShellActivity.restartGame failed\n");
+        return;
+    }
+    printf("xboxrecomp: quick reboot: launcher asked to restart the game\n");
+    fflush(stdout);
+    SDL_Delay(RESTART_WAIT_MS);
+    printf("xboxrecomp: quick reboot: not restarted after %d ms, exiting\n", RESTART_WAIT_MS);
+    recomp_quit(0);
+}
+
 /* Background / foreground (XBA-24): the same watch as the title's window
  * (fb_present_sdl.c), so logcat shows "lifecycle: paused" / "resumed after
  * N ms" on the shell too. */
@@ -229,6 +257,7 @@ int main(int argc, char *argv[])
          * off (RECOMP_HEADLESS=1, RECOMP_FB_WINDOW=0, SDL video failing) and
          * the title returned. */
         s_title_store = &store;
+        xbox_SetRestartHandler(restart_via_launcher);
         int rc = xbox_HostWindowMain(title_boot);
         printf("xboxrecomp: title returned %d\n", rc);
         recomp_quit(rc);

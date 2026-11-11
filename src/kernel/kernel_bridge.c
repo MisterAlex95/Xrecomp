@@ -46,14 +46,9 @@
 #include <ctype.h>
 #include <wctype.h>
 
-/* Access to recompiled code registers. Per-thread: RECOMP_TLS comes from
- * xbox_memory_layout.h and must match the definitions there -- a plain extern
- * here binds to the TLS template rather than the calling thread's copy, which
- * reads as every register being zero. */
-extern RECOMP_TLS uint32_t g_eax, g_ecx, g_edx, g_esp;
-extern RECOMP_TLS uint32_t g_ebx, g_esi, g_edi;
+/* The recompiled code's registers (g_eax, g_esp, ...) are fields of the
+ * per-thread g_cpu, declared in xbox_memory_layout.h. */
 extern uint32_t g_xbox_code_lo, g_xbox_code_hi;
-extern RECOMP_TLS uint32_t g_seh_ebp;
 extern ptrdiff_t g_xbox_mem_offset;
 
 /* Dispatch table lookup (for function pointer args) */
@@ -238,7 +233,33 @@ static void kernel_data_init(void)
      * RECOMP_CMDLINE does the same thing here, so a title can be told to load
      * a level the way the console would tell it: "+map intro".
      */
-    {
+    /* A quick reboot into this title (kernel_reboot.c): the page the last
+     * run's XLaunchNewImage filled, back where XGetLaunchInfo looks. It wins
+     * over RECOMP_CMDLINE, which the restarted process still has in its
+     * environment. Contiguous memory, as on the console, where XAPI keeps the
+     * page with MmPersistContiguousMemory and may free or reuse it. */
+    uint8_t reboot_page[XBOX_LAUNCH_PAGE_BYTES];
+    uint32_t reboot_va = 0;
+
+    if (xbox_launch_data_take(reboot_page) == 0) {
+        reboot_va = xbox_ContiguousAlloc(XBOX_LAUNCH_PAGE_BYTES, 4096);
+        if (!reboot_va)
+            reboot_va = xbox_HeapAlloc(XBOX_LAUNCH_PAGE_BYTES, 4096);
+        if (reboot_va) {
+            char path[64];
+            memcpy((void *)((uintptr_t)reboot_va + g_xbox_mem_offset),
+                   reboot_page, XBOX_LAUNCH_PAGE_BYTES);
+            memcpy(path, reboot_page + 8, sizeof(path) - 1);
+            path[sizeof(path) - 1] = 0;
+            fprintf(stderr, "  Launch data: quick reboot page at 0x%08X, type=%u"
+                            " titleid=0x%08X path='%s'\n", reboot_va,
+                    BRIDGE_MEM32(reboot_va), BRIDGE_MEM32(reboot_va + 4), path);
+        }
+    }
+
+    if (reboot_va) {
+        BRIDGE_MEM32(XBOX_KERNEL_DATA_BASE + KDATA_LAUNCH_DATA_PAGE) = reboot_va;
+    } else {
         const char *cmdline = getenv("RECOMP_CMDLINE");
 
         if (cmdline && *cmdline) {
@@ -769,7 +790,8 @@ static DWORD WINAPI bridge_thread_main(LPVOID param)
 
 static HANDLE bridge_spawn_thread(recomp_func_t fn, uint32_t ctx1,
                                   uint32_t ctx2, uint32_t stack_top,
-                                  uint32_t obj_va, uint32_t tls_size)
+                                  uint32_t obj_va, uint32_t tls_size,
+                                  int suspended)
 {
     struct bridge_thread_start *s = malloc(sizeof(*s));
     HANDLE th;
@@ -779,7 +801,12 @@ static HANDLE bridge_spawn_thread(recomp_func_t fn, uint32_t ctx1,
     s->obj_va = obj_va;
     s->tls_size = tls_size;
 
-    th = CreateThread(NULL, 0, bridge_thread_main, s, 0, NULL);
+    /* CreateSuspended: the thread waits for NtResumeThread before its first
+     * instruction. A title creates a worker suspended to finish its context
+     * first; started at once, on a multi-core host it ran on a context still
+     * zero (Fable: a loading worker spun forever on a NULL object). */
+    th = CreateThread(NULL, 0, bridge_thread_main, s,
+                      suspended ? CREATE_SUSPENDED : 0, NULL);
     if (!th) free(s);
     /* Record the game thread so a host-tick-driven title's watchdog can sample
      * it via xbox_thread_debug_handle. Harmless for default-model titles: they
@@ -794,13 +821,14 @@ static HANDLE bridge_spawn_thread(recomp_func_t fn, uint32_t ctx1,
  * of the host thread handle, which is what KeWaitForSingleObject waits on. */
 static HANDLE bridge_spawn_guest_thread(recomp_func_t fn, uint32_t ctx1,
                                         uint32_t ctx2, uint32_t stack_top,
-                                        uint32_t handle_va, uint32_t tls_size)
+                                        uint32_t handle_va, uint32_t tls_size,
+                                        int suspended)
 {
     uint32_t obj = thobj_alloc();
     HANDLE th, shadow = NULL;
 
     thobj_ref(obj);
-    th = bridge_spawn_thread(fn, ctx1, ctx2, stack_top, obj, tls_size);
+    th = bridge_spawn_thread(fn, ctx1, ctx2, stack_top, obj, tls_size, suspended);
     if (!th) {
         thobj_unref(obj);   /* the thread's own: it never ran */
     } else {
@@ -838,6 +866,7 @@ static void bridge_PsCreateSystemThreadEx(void)
     uint32_t start_context1  = STACK_ARG(5);
     uint32_t start_context2  = STACK_ARG(6);
     uint32_t start_routine   = STACK_ARG(9);
+    int create_suspended     = (STACK_ARG(7) & 0xFF) != 0;   /* BOOLEAN */
     /* In SPAWN mode there is no privileged "first call": every thread is real,
      * so the entry can return. In INLINE mode the first call runs the game. */
     int is_first_call = (g_thread_mode == XBOX_THREAD_MODE_INLINE)
@@ -944,10 +973,11 @@ static void bridge_PsCreateSystemThreadEx(void)
                 } else {
                     bridge_spawn_guest_thread(fn, start_context1, start_context2,
                                               stack_top, xbox_handle_ptr,
-                                              tls_size);
+                                              tls_size, create_suspended);
                     fprintf(stderr, "  [KERNEL] PsCreateSystemThreadEx: spawned "
-                            "worker 0x%08X (ctx=0x%08X, stack top 0x%08X)\n",
-                            start_routine, start_context1, stack_top);
+                            "worker 0x%08X (ctx=0x%08X, stack top 0x%08X%s)\n",
+                            start_routine, start_context1, stack_top,
+                            create_suspended ? ", suspended" : "");
                     fflush(stderr);
                 }
             }
@@ -1766,7 +1796,7 @@ static void bridge_HalReturnToFirmware(void)
         uint32_t page = BRIDGE_MEM32(XBOX_KERNEL_DATA_BASE + KDATA_LAUNCH_DATA_PAGE);
 
         if (page) {
-            char path[64];
+            char path[520];
             uint32_t i;
 
             for (i = 0; i < sizeof(path) - 1; i++) {
@@ -1811,7 +1841,7 @@ static void bridge_HalReturnToFirmware(void)
     }
 
     xbox_PeekSample("exit peek");
-    fprintf(stderr, "  [KERNEL] HalReturnToFirmware: routine=%u - title is exiting\n",
+    fprintf(stderr, "  [KERNEL] HalReturnToFirmware: routine=%u - title is leaving\n",
             routine);
     fflush(stderr);
 
@@ -1844,6 +1874,32 @@ static void bridge_HalReturnToFirmware(void)
         if (waited)
             fprintf(stderr, "  [KERNEL] waited %dms for the video to finish\n",
                     waited);
+    }
+
+    /* Routine 2 with a page naming this title's own image: a restart, not an
+     * exit (kernel_reboot.c). Fable's Pause -> Quit -> Confirm goes back to
+     * its main menu this way. Another image, or no page, exits as before:
+     * there is no dashboard or second XBE to hand over to. */
+    {
+        uint32_t page = BRIDGE_MEM32(XBOX_KERNEL_DATA_BASE + KDATA_LAUNCH_DATA_PAGE);
+
+        if (routine == 2 && page) {
+            char path[520];
+            uint32_t i;
+
+            for (i = 0; i < sizeof(path) - 1; i++) {
+                path[i] = (char)BRIDGE_MEM8(page + 8 + i);
+                if (!path[i]) break;
+            }
+            path[i] = 0;
+            if (xbox_launch_path_is_image(path, xbox_XeImageFileName.Buffer))
+                xbox_quick_reboot((const uint8_t *)((uintptr_t)page +
+                                                    g_xbox_mem_offset));
+            else
+                fprintf(stderr, "  [KERNEL] launch of '%s' is not this title"
+                                " (%s): exiting\n", path,
+                        xbox_XeImageFileName.Buffer);
+        }
     }
 
     xbox_HalReturnToFirmware(routine);
@@ -2321,6 +2377,63 @@ static void bridge_NtUserIoApcDispatcher(void)
 }
 
 /* ── KeDelayExecutionThread (ordinal 99) ─────────────────── */
+
+/* Sleeps a title profile shortens (xbox_SetDelayOverride).
+ *
+ * A title whose loop is `draw; Sleep(50)` caps itself at 20 fps by design.
+ * On the console the draw is a few milliseconds; here it can be most of a
+ * frame, and the fixed sleep comes on top of it. A profile can name the
+ * call: the return address the title's `call Sleep` pushes, and the
+ * milliseconds it passes. The XAPI Sleep(ms) -> SleepEx -> this thunk chain
+ * leaves both on the guest stack, the return address right below the pushed
+ * argument, a few frames above the thunk's own arguments; so a matching
+ * pair within the top 64 words of the stack, and an interval of exactly
+ * that many milliseconds, identify the call. Nothing else is touched, and
+ * with no override registered the scan never runs. */
+#define DELAY_OVERRIDES_MAX 8
+static struct { uint32_t ret_va, from_ms, to_ms; } s_delay_ovr[DELAY_OVERRIDES_MAX];
+static int s_delay_novr;
+
+void xbox_SetDelayOverride(uint32_t ret_va, uint32_t from_ms, uint32_t to_ms)
+{
+    if (s_delay_novr < DELAY_OVERRIDES_MAX) {
+        s_delay_ovr[s_delay_novr].ret_va = ret_va;
+        s_delay_ovr[s_delay_novr].from_ms = from_ms;
+        s_delay_ovr[s_delay_novr].to_ms = to_ms;
+        s_delay_novr++;
+    }
+}
+
+/* The override for this delay, in ms, or -1. */
+static int delay_override(uint32_t interval_ptr)
+{
+    int64_t interval;
+    uint32_t w;
+    int i;
+
+    if (!s_delay_novr || !interval_ptr)
+        return -1;
+    memcpy(&interval, XBOX_TO_NATIVE(interval_ptr), sizeof interval);
+    for (i = 0; i < s_delay_novr; i++) {
+        if (interval != -(int64_t)s_delay_ovr[i].from_ms * 10000)
+            continue;
+        for (w = 0; w < 64; w++)
+            if (BRIDGE_MEM32(g_esp + w * 4) == s_delay_ovr[i].ret_va
+                && BRIDGE_MEM32(g_esp + w * 4 + 4) == s_delay_ovr[i].from_ms) {
+                static uint32_t told;           /* one line per override */
+                if (!(told & (1u << i))) {
+                    told |= 1u << i;
+                    fprintf(stderr, "  [KERNEL] Sleep(%u) returning to 0x%08X"
+                            " sleeps %u ms (title profile)\n",
+                            s_delay_ovr[i].from_ms, s_delay_ovr[i].ret_va,
+                            s_delay_ovr[i].to_ms);
+                }
+                return (int)s_delay_ovr[i].to_ms;
+            }
+    }
+    return -1;
+}
+
 /* Unbridged this returned instantly, turning every "sleep and retry" in the
  * title into a hot spin. Halo's cache-partition setup retries this way. */
 static void bridge_KeDelayExecutionThread(void)
@@ -2328,10 +2441,18 @@ static void bridge_KeDelayExecutionThread(void)
     uint32_t wait_mode    = STACK_ARG(0);
     uint32_t alertable    = STACK_ARG(1);
     uint32_t interval_ptr = STACK_ARG(2);
+    int ovr;
 
 
     if (bridge_run_io_apcs(alertable, wait_mode))
         return;
+    if ((ovr = delay_override(interval_ptr)) >= 0) {
+        LARGE_INTEGER shorter;
+        shorter.QuadPart = -(LONGLONG)ovr * 10000;
+        g_eax = (uint32_t)xbox_KeDelayExecutionThread(
+            (KPROCESSOR_MODE)wait_mode, (BOOLEAN)alertable, &shorter);
+        return;
+    }
     g_eax = (uint32_t)xbox_KeDelayExecutionThread(
         (KPROCESSOR_MODE)wait_mode, (BOOLEAN)alertable,
         XBOX_TO_NATIVE(interval_ptr));
@@ -2528,10 +2649,41 @@ static void bridge_HalReadSMCTrayState(void)
  *
  * Returns 1 if the routine was found and called.
  */
+/* The DPC routine running now and since when (GetTickCount), for the device
+ * models' stall warnings: a deferred routine that never returns stops every
+ * other DPC, and the model that notices (its driver's ISR masked it and the
+ * DPC never unmasked it) can say which routine is stuck. One slot: with the
+ * gate on DPCs never run two at a time; with it off it names the latest. */
+static volatile uint32_t s_dpc_now_routine;
+static volatile LONG s_dpc_now_since;
+static volatile LONG s_dpc_now_tid;
+/* Gate off: DPCs that started while another thread was at DISPATCH_LEVEL.
+ * A driver that locks by raising IRQL (XAPI's USB stack does) is racing its
+ * own DPC every time this moves. */
+static volatile LONG s_dpc_overlaps;
+
+int xbox_DpcRunning(uint32_t *routine, unsigned long *ms)
+{
+    uint32_t r = s_dpc_now_routine;
+    LONG since = InterlockedCompareExchange(&s_dpc_now_since, 0, 0);
+    if (!r || r != s_dpc_now_routine)
+        return 0;
+    if (routine) *routine = r;
+    if (ms) *ms = (unsigned long)GetTickCount() - (unsigned long)since;
+    return 1;
+}
+
+long xbox_DpcOverlapCount(void)
+{
+    return (long)InterlockedCompareExchange(&s_dpc_overlaps, 0, 0);
+}
+
 static int kernel_run_dpc(uint32_t dpc_va, uint32_t arg1, uint32_t arg2)
 {
     uint32_t routine, context;
     recomp_func_t fn;
+    uint32_t prev_routine;
+    LONG prev_since, prev_tid, tid;
 
     if (!dpc_va)
         return 0;
@@ -2560,7 +2712,23 @@ static int kernel_run_dpc(uint32_t dpc_va, uint32_t arg1, uint32_t arg2)
         g_esp -= 4; BRIDGE_MEM32(g_esp) = context;
         g_esp -= 4; BRIDGE_MEM32(g_esp) = dpc_va;
         g_esp -= 4; BRIDGE_MEM32(g_esp) = 0;
+        if (!xbox_DispatchGateOn()
+            && xbox_IrqlRaisedCount() > (xbox_IrqlCurrent() >= 2 ? 1 : 0))
+            InterlockedIncrement(&s_dpc_overlaps);
+        /* Nested (a DPC run from inside one) puts the outer one back. */
+        prev_routine = s_dpc_now_routine;
+        prev_since = s_dpc_now_since;
+        prev_tid = s_dpc_now_tid;
+        tid = (LONG)GetCurrentThreadId();
+        InterlockedExchange(&s_dpc_now_since, (LONG)GetTickCount());
+        InterlockedExchange(&s_dpc_now_tid, tid);
+        s_dpc_now_routine = routine;
         { int _irql = xbox_IrqlEnterInterrupt(2); fn(); xbox_IrqlLeaveInterrupt(_irql); }
+        if (InterlockedCompareExchange(&s_dpc_now_tid, 0, 0) == tid) {
+            s_dpc_now_routine = prev_routine;
+            InterlockedExchange(&s_dpc_now_since, prev_since);
+            InterlockedExchange(&s_dpc_now_tid, prev_tid);
+        }
         callback_regs_restore(&saved, 0);
     }
     return 1;
@@ -4760,15 +4928,15 @@ static void bridge_NtReadFile(void)
          * early looks identical to one that never started -- until you can
          * see where each one landed. */
         if (poff)
-            fprintf(stderr, "  [READ] from=0x%08X ev=%08X apc=%08X @%lld want=%u got=%u st=0x%08X  %02X %02X %02X %02X\n",
-                    g_xbox_kernel_caller, STACK_ARG(1), STACK_ARG(2),
+            fprintf(stderr, "  [READ] from=0x%08X ev=%08X apc=%08X buf=0x%08X @%lld want=%u got=%u st=0x%08X  %02X %02X %02X %02X\n",
+                    g_xbox_kernel_caller, STACK_ARG(1), STACK_ARG(2), buffer_va,
                     (long long)off.QuadPart, length, got,
                     (uint32_t)ios.Status,
                     got > 0 ? p[0] : 0, got > 1 ? p[1] : 0,
                     got > 2 ? p[2] : 0, got > 3 ? p[3] : 0);
         else
-            fprintf(stderr, "  [READ] from=0x%08X @seq want=%u got=%u st=0x%08X  %02X %02X %02X %02X\n",
-                    g_xbox_kernel_caller,
+            fprintf(stderr, "  [READ] from=0x%08X buf=0x%08X esp=0x%08X @seq want=%u got=%u st=0x%08X  %02X %02X %02X %02X\n",
+                    g_xbox_kernel_caller, buffer_va, g_esp,
                     length, got, (uint32_t)ios.Status,
                     got > 0 ? p[0] : 0, got > 1 ? p[1] : 0,
                     got > 2 ? p[2] : 0, got > 3 ? p[3] : 0);
@@ -9257,7 +9425,7 @@ static void bridge_PsCreateSystemThread(void)
                     bridge_run_thread_inline(fn, start_context1, start_context2);
                 } else {
                     bridge_spawn_guest_thread(fn, start_context1, start_context2,
-                                              stack_top, xbox_handle_ptr, 0);
+                                              stack_top, xbox_handle_ptr, 0, 0);
                 }
             }
         } else {

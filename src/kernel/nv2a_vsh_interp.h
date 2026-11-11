@@ -50,6 +50,16 @@ void nv2a_vsh_set_cxt_write(uint32_t enable);         /* _CXT_WRITE_EN      */
  * transform this batch" rather than drawing garbage. */
 int  nv2a_vsh_run(const float in[NV2A_VSH_INPUTS][4], Nv2aVshOutput *out);
 
+/* Shading a batch on several threads (the executor's raster pool). Call
+ * nv2a_vsh_prepare_parallel on the executor thread before the batch: it
+ * returns 0 when the batch must run serially through nv2a_vsh_run (a program
+ * that writes c[], or the RECOMP_VSH_DECODED=0 / _CHECK / _DUMP modes), else
+ * decodes the program and nv2a_vsh_run_prepared may then run on any number of
+ * threads at once, with results identical to nv2a_vsh_run. Nothing may upload
+ * a program or a constant until those runs are over. */
+int  nv2a_vsh_prepare_parallel(void);
+int  nv2a_vsh_run_prepared(const float in[NV2A_VSH_INPUTS][4], Nv2aVshOutput *out);
+
 /* Direct access, for the self-test. */
 void nv2a_vsh_set_constant(uint32_t index, const float v[4]);
 const float *nv2a_vsh_constant(uint32_t index);   /* for traces */
@@ -57,5 +67,26 @@ const float *nv2a_vsh_constant(uint32_t index);   /* for traces */
  * (scale) and c[59] (offset) a word at a time rather than via _CONSTANT. */
 void nv2a_vsh_constant_component(uint32_t index, uint32_t comp, uint32_t word);
 void nv2a_vsh_set_instruction(uint32_t slot, const uint32_t words[4]);
+
+/* For a back end that runs the program itself (NV2A_BACKEND_CAP_PROGRAM).
+ *
+ * nv2a_vsh_program: the instructions from the start slot through the first
+ * FINAL, as uploaded (four words each). Returns their count, 0 when there is
+ * no FINAL within program memory (nv2a_vsh_run would return 0). *hash
+ * identifies the words (equal programs, equal hash); *inputs has bit k set
+ * when an instruction reads v[k]. Any pointer may be NULL.
+ *
+ * nv2a_vsh_program_writes_constants: the program writes c[] and
+ * _CXT_WRITE_EN is on, so it changes the constants vertex by vertex -- only
+ * the CPU can run that.
+ *
+ * Constants: every write to c[i] (methods, viewport words, direct sets,
+ * program writes) stamps stamps[i] with a new, increasing serial; *serial is
+ * the latest. A copy synced at serial S is stale exactly where stamps[i] > S. */
+uint32_t nv2a_vsh_program(const uint32_t (**ins)[4], uint64_t *hash,
+                          uint32_t *inputs);
+int nv2a_vsh_program_writes_constants(void);
+const float (*nv2a_vsh_constants(void))[4];
+const uint64_t *nv2a_vsh_constant_stamps(uint64_t *serial);
 
 #endif

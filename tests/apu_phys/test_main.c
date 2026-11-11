@@ -150,6 +150,23 @@ int main(int argc, char **argv)
     xbox_HeapFree(b);
     check(side(b) == 1, "a page shared by two blocks both now free goes back");
 
+    /* RAM mapped past 256 MB (Fable maps 1 GB and keeps its sound buffers
+     * at 0x2xxxxxxx): the whole address names it, no 28-bit fold. Pointer
+     * arithmetic only; nothing is read. */
+    {
+        extern size_t g_xbox_map_size;
+        size_t saved = g_xbox_map_size;
+        uint32_t hi = 0x267A7418u;
+
+        g_xbox_map_size = (size_t)1024 * 1024 * 1024;
+        check((uintptr_t)(mcpx_apu_phys(hi) - g_apu_ram_ptr) == hi,
+              "an address above 256 MB inside a 1 GB map is that RAM");
+        g_xbox_map_size = 0;
+        check((uintptr_t)(mcpx_apu_phys(hi) - g_apu_ram_ptr) < (64u << 20),
+              "without the map it still folds into the 64 MB");
+        g_xbox_map_size = saved;
+    }
+
     printf("apu_phys: %s\n", failures ? "FAILED" : "all passed");
     return failures ? 1 : 0;
 }

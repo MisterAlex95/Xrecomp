@@ -10,7 +10,8 @@ already there for this XBE and this toolkit:
   1. find default.xbe (out of the image if needed) and read its title ID
   2. the analysis pipeline: xbe_parser, disasm, func_id, abi_analysis
   3. the title project: templates/new-game + the title's profile from
-     titles/<title id>/ when there is one (its switches and fixes)
+     titles/<title id>/ when there is one (its switches and fixes; its
+     seed_functions files already went to the disassembler in step 2)
   4. the C lift (tools.recomp) into the project
   5. build it for this host (CMake), with the game data next to it
 
@@ -242,7 +243,12 @@ def main(argv=None):
         print("      up to date", flush=True)
     else:
         run([py, "-m", "tools.xbe_parser", xbe, "--json", xjson], log)
-        t = run([py, "-m", "tools.disasm", xbe, "-o", os.path.join(an, "disasm"), "--force"], log)
+        cmd = [py, "-m", "tools.disasm", xbe, "-o", os.path.join(an, "disasm"), "--force"]
+        # Function starts the analysis cannot find and a run did (title.json
+        # "seed_functions": files in the profile, tools.seed_from_log's format).
+        for fn in (profile or {}).get("seed_functions", []):
+            cmd += ["--seed-functions", os.path.join(profile["dir"], fn)]
+        t = run(cmd, log)
         print("      disassembled in %.0f s" % t, flush=True)
         run([py, "-m", "tools.func_id", xbe,
              "--functions", os.path.join(an, "disasm", "functions.json"),

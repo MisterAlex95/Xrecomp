@@ -50,6 +50,7 @@ uint32_t g_xbox_stack_base, g_xbox_stack_size;
 uint32_t xbox_ContiguousAllocatedBytes(void) { return 0; }
 void xbox_FramebufferWindowSet(uint32_t va, uint32_t pitch) { (void)va; (void)pitch; }
 void xbox_FramebufferWindowSetAA(uint32_t sy) { (void)sy; }
+void xbox_FramebufferWindowSetFormat(uint32_t f) { (void)f; }
 uint32_t xbox_Nv2aFenceWordVa(void) { return 0; }
 int nv2a_pb_dma_walk(void) { return 1; }
 void xbox_FramebufferWindowStart(void) {}
@@ -59,6 +60,7 @@ void xbox_Nv2aFrameCounterFlip(void) {}
 int nv2a_pb_scan_in_call(void) { return 0; }
 uint32_t xbox_VblankCount(void) { return 0; }
 uint64_t xbox_HostNowNs(void) { return 0; }
+void xbox_HostSleepNs(uint64_t ns) { (void)ns; }
 uint32_t xbox_Nv2aFrameCountersOwned(void) { return 0; }
 volatile uint32_t *xbox_Nv2aRegPtr(uint32_t offset) { (void)offset; return NULL; }
 

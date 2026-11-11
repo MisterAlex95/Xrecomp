@@ -245,6 +245,8 @@ exist in the runtime and mean something to a player are offered:
 | Bottom screen (only with a second display) | Panel (default), Black, Off | none: [Dual screen](#dual-screen-ayn-thor), `GameStore.bottomScreen` |
 | Game › Language | Same as Android (default), English, Français, Deutsch, Español, Italiano, Português, 日本語, 한국어, 中文 | `RECOMP_LANGUAGE=…`; « Same as Android » writes nothing ([Game language](#game-language)) |
 | Graphics › Vertical sync | On (default), Off | `RECOMP_PRESENT_VSYNC=0` when off |
+| Graphics › Renderer | Auto (default: the title profile's choice, software today), Software, GPU | `RECOMP_GPU=0` / `1`; see [GPU back end](../technical/gpu-backend.md#android) |
+| Graphics › Frame cap (GPU renderer) | Auto (default: the title profile's choice, 60 unless the profile sets one; Fable: 30), 30, 60, Off | `RECOMP_GPU_FPS_CAP=30` / `60` / `0` |
 | Graphics › Texture filtering | Sharp (default), Smooth, Anisotropic 8×, Anisotropic 16× | `RECOMP_TEX_BILINEAR=1`, `RECOMP_TEX_ANISO=8` / `16` |
 | Audio › 3D audio (HRTF) | On (default), Off | `RECOMP_APU_HRTF=0` when off |
 | Audio › Audio buffer | Short (256), Normal (default, 512), Long (1024), Very long (2048) | `RECOMP_AUDIO_BUF_SAMPLES=…` |
@@ -273,8 +275,8 @@ options only.
 
 Asked for in XBA-41 but left out, because no runtime option backs them on Android: the output scaling and its filter
 (the SDL presenter always letterboxes the 640 x 480 frame with nearest-neighbour sampling, `fb_present_sdl.c`;
-`RECOMP_WINDOW_SCALE` only sizes a desktop window and `RECOMP_PRESENT_FILTER` is the D3D11 presenter's), an fps cap,
-control remapping and a stats overlay (no such switch), and vibration (`RECOMP_RUMBLE` only gates the emulated USB
+`RECOMP_WINDOW_SCALE` only sizes a desktop window and `RECOMP_PRESENT_FILTER` is the D3D11 presenter's), an fps cap
+for the software renderer (only the GPU renderer has one, `RECOMP_GPU_FPS_CAP`), control remapping and a stats overlay (no such switch), and vibration (`RECOMP_RUMBLE` only gates the emulated USB
 pad, `RECOMP_USB`, a per-title opt-in). Bring-up and debug switches stay out on purpose.
 
 ## Choosing the game
@@ -1078,6 +1080,25 @@ missing-file summary), `xboxrecomp: clean exit`, `fflush` of stdout and stderr, 
 500 ms), then `_exit(0)`. Not `exit()`: the guest's threads are still running, and atexit handlers and destructors must
 not run under them. The other atexit reports (`RECOMP_PROFILE`, the ICALL feedback dump, a WAV capture) are desktop
 diagnostics and are skipped on Android. On desktop hosts `recomp_quit` is `exit()`, as before.
+
+### Quick reboot
+
+A title that quick-reboots into its own `default.xbe` (`HalReturnToFirmware(2)` after `XLaunchNewImage`; Fable's
+Pause → Quit → Confirm, which goes back to its main menu) is restarted, not ended
+([docs/runtime/README.md](../runtime/README.md), « Quick reboot »). The kernel writes the launch data to
+`<internal files dir>/save/launch_data.bin` and calls the restart handler, which `shell_main.c` sets before the title
+starts (`restart_via_launcher`): it calls `ShellActivity.restartGame` through JNI from the guest thread, which sends
+`LauncherActivity` the explicit intent `fr.adserver.xboxrecomp.RESTART_GAME`. The launcher, in its own `:launcher`
+process, does what it already does after a new game choice: `endRunningGame()` (`Process.killProcess` on the main
+process, waiting at most 2 s), then starts `ShellActivity` with `NEW_TASK | CLEAR_TASK` in a new main process, and
+finishes without showing anything; the play session stays open. A new process is needed because the runtime maps its
+memory once per process. The new process's kernel takes the launch data back, and the title starts where it asked to
+(Fable: its main menu, no logos). The native side waits to be ended; if it is still alive after 10 s it exits by itself
+(`recomp_quit(0)`), leaving the launch data for the next start. If the JNI call fails, the title exits as before.
+Logcat: `[KERNEL] quick reboot: launch data in …`, `xboxrecomp: quick reboot: launcher asked to restart the game`,
+`shell: quick reboot, asking the launcher to restart the game`, `launcher: the game asked for a restart (quick
+reboot)`, `launcher: ending the running game (pid …)`, then the new process's `Launch data: quick reboot page at …`.
+Past 3 restarts in 30 s the kernel refuses and the title exits.
 
 ### Last lines before a crash
 

@@ -35,7 +35,6 @@ recomp_func_t recomp_lookup_manual(uint32_t xbox_va);
 recomp_func_t recomp_lookup_manual(uint32_t xbox_va) { (void)xbox_va; return NULL; }
 
 extern recomp_func_t recomp_lookup_kernel(uint32_t xbox_va);
-extern RECOMP_TLS uint32_t g_eax, g_esp;
 
 enum { S_SET, S_WAIT, S_RESET, S_MULTI, S_INIT, N_SLOTS };
 static const uint32_t ORD[N_SLOTS] = {

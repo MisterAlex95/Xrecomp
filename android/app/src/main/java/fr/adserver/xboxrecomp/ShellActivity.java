@@ -445,4 +445,20 @@ public class ShellActivity extends SDLActivity {
             finish();
         });
     }
+
+    /**
+     * Called by shell_main.c (the guest thread, through JNI) when the title quick-rebooted into itself
+     * (kernel_reboot.c): the launcher process ends this one and starts this activity again in a new process. The
+     * native side waits to be ended.
+     */
+    @SuppressWarnings("unused")
+    public void restartGame(String unused) {
+        runOnUiThread(() -> {
+            Log.i(LauncherActivity.TAG, "shell: quick reboot, asking the launcher to restart the game");
+            startActivity(new Intent(this, LauncherActivity.class)
+                    .setAction(LauncherActivity.ACTION_RESTART_GAME)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+            overridePendingTransition(0, 0);
+        });
+    }
 }

@@ -20,12 +20,14 @@
 #include "guest_vmem.h"
 #include "kernel_missing.h"
 #include "nv2a_flip_hold.h"
+#include "platform/host_time.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <setjmp.h>
 #if !defined(_WIN32)
 #include <unistd.h>   /* _exit */
+#include <time.h>     /* nanosleep: the ack thread's idle wait */
 #endif
 
 /* XBE header field offsets (per xboxdevwiki.net/Xbe) */
@@ -635,6 +637,16 @@ static const struct { uint32_t offset; uint32_t idle_mask; } NV2A_IDLE[] = {
  * one would corrupt a register rather than fail visibly.
  *
  * Only RR. Bit 0 is RPBM, run/pause bus master, which software owns.
+ *
+ * That open window is process-wide, though: while one thread's write is being
+ * stepped, another thread's plain store to the page lands unmasked. On POSIX
+ * the page is therefore a shared mapping instead, read-only at the guest
+ * address with a second writable view: the handler decodes the store, masks
+ * RR out of it and writes it through the view, and the guest page is never
+ * opened (ac97_map_view). The mprotect window stays as the fallback. Windows
+ * keeps the single-step for now and with it the residual; Fable's DirectSound
+ * resets channels from two threads at once during movies, which is what
+ * exposed it on POSIX.
  */
 #define AC97_NABM_OFFSET  0x400000u   /* 0xFEC00000 within the MCPX aperture */
 #define AC97_TRAP_BYTES   0x1000u
@@ -719,6 +731,9 @@ static LONG CALLBACK ac97_write_veh(PEXCEPTION_POINTERS ep)
 #endif
 #include <sys/mman.h>
 static size_t g_ac97_hsize;    /* host page: 16 KB on arm64 Darwin */
+/* A second, writable mapping of the trapped page; NULL on the mprotect
+ * fallback. See ac97_arm_write_trap. */
+static void *g_ac97_view;
 
 static uint64_t ac97_posix_rd(void *dev, uint32_t off, int size)
 {
@@ -727,18 +742,57 @@ static uint64_t ac97_posix_rd(void *dev, uint32_t off, int size)
     return v;
 }
 
+/* The controller's half of the store: RR never reaches the register. The
+ * mask is applied to the bytes being written, so the bit is never visible
+ * to any reader, on any thread, at any moment -- which a sweep after the
+ * store cannot promise. The control bytes are the ones ac97_clear_reset_bits
+ * sweeps: +0x0B of every channel in 0x100..0x17F. */
 static void ac97_posix_wr(void *dev, uint32_t off, uint64_t v, int size)
 {
-    memcpy((char *)dev + off, &v, size > 8 ? 8 : size);
+    uint8_t b[8];
+    int i, n = size > 8 ? 8 : size;
+
+    memcpy(b, &v, (size_t)n);
+    for (i = 0; i < n; i++) {
+        uint32_t o = off + (uint32_t)i;
+        if (o >= 0x10B && o < 0x180 && (o & 0xFu) == 0xBu)
+            b[i] &= (uint8_t)~AC97_RR;
+    }
+    memcpy((char *)(g_ac97_view ? g_ac97_view : dev) + off, b, (size_t)n);
 }
 
-/* POSIX arm64 half of the AC'97 write trap: the page is PROT_READ, so a
- * write arrives as SIGBUS/SIGSEGV; the title's fault handler reaches this
- * through xbox_PosixMmioFault before reporting. The store is emulated onto
- * the page (open for the moment), the controller's reaction applied, and the
- * page closed again. Returns 1 when the fault was this trap and the access
- * was serviced. */
+/* POSIX half of the AC'97 write trap: the page is read-only at the guest
+ * address, so a write arrives as SIGBUS/SIGSEGV; the title's fault handler
+ * reaches this through xbox_PosixMmioFault before reporting. Returns 1 when
+ * the fault was this trap and the access was serviced.
+ *
+ * Normally the store is emulated through g_ac97_view, the writable mapping
+ * of the same memory: the guest page itself never becomes writable, so
+ * every other thread's store keeps faulting and goes through the same mask.
+ * No lock either: two emulated stores are two stores to the same memory,
+ * as on hardware.
+ *
+ * Fallback (no view: the shared mapping could not be made): open the page,
+ * emulate, sweep, close. The page is then writable process-wide for that
+ * window, so a plain store from another thread lands unmasked; the sweep
+ * catches one that lands before it, one between the sweep and the close
+ * keeps its RR bit. Fable hit exactly that (two threads resetting channels
+ * in DirectSound's sub_00832BFC during movies, the main thread then spinning
+ * for ever), which is why the view exists. */
 static volatile int g_ac97_posix_lock;
+
+static int ac97_emulate(void *ucv, uintptr_t fault)
+{
+#if defined(__aarch64__)
+    return mmio_emulate_a64((ucontext_t *)ucv,
+                            (uint32_t)(fault - (uintptr_t)g_ac97_page),
+                            g_ac97_page, ac97_posix_rd, ac97_posix_wr);
+#else
+    return mmio_emulate_x86_64((ucontext_t *)ucv,
+                               (uint32_t)(fault - (uintptr_t)g_ac97_page),
+                               g_ac97_page, ac97_posix_rd, ac97_posix_wr);
+#endif
+}
 
 int xbox_Ac97PosixFault(void *ucv, uintptr_t fault)
 {
@@ -747,15 +801,11 @@ int xbox_Ac97PosixFault(void *ucv, uintptr_t fault)
     if (!g_ac97_page || fault < (uintptr_t)g_ac97_page
             || fault >= (uintptr_t)g_ac97_page + g_ac97_hsize)
         return 0;
-    /* One trap at a time. The page is open process-wide while the store is
-     * emulated, so a second thread trapping in that window would have its
-     * page closed under it by the first thread's mprotect and fault inside
-     * the emulation. Spin: the window is a few hundred instructions, and a
-     * plain store from another thread while the page is open is still
-     * caught by the sweep below if it lands before it; one landing between
-     * the sweep and the close keeps its RR bit until the next trap. That
-     * residual needs two threads resetting channels at once, which
-     * DirectSound's single-threaded init never does. */
+    if (g_ac97_view)
+        return ac97_emulate(ucv, fault);
+    /* Fallback. One trap at a time: a second thread trapping in the open
+     * window would have the page closed under it by the first thread's
+     * mprotect and fault inside the emulation. */
     while (__atomic_exchange_n(&g_ac97_posix_lock, 1, __ATOMIC_ACQUIRE))
         ;
     /* Not opened: the emulated store would fault again on this thread,
@@ -764,20 +814,70 @@ int xbox_Ac97PosixFault(void *ucv, uintptr_t fault)
         __atomic_store_n(&g_ac97_posix_lock, 0, __ATOMIC_RELEASE);
         return 0;
     }
-#if defined(__aarch64__)
-    ok = mmio_emulate_a64((ucontext_t *)ucv,
-                          (uint32_t)(fault - (uintptr_t)g_ac97_page),
-                          g_ac97_page, ac97_posix_rd, ac97_posix_wr);
-#else
-    ok = mmio_emulate_x86_64((ucontext_t *)ucv,
-                             (uint32_t)(fault - (uintptr_t)g_ac97_page),
-                             g_ac97_page, ac97_posix_rd, ac97_posix_wr);
-#endif
+    ok = ac97_emulate(ucv, fault);
     if (ok)
         ac97_clear_reset_bits();
     mprotect(g_ac97_page, g_ac97_hsize, PROT_READ);
     __atomic_store_n(&g_ac97_posix_lock, 0, __ATOMIC_RELEASE);
     return ok;
+}
+
+/* Put a shared mapping under the trapped page: read-only at the guest
+ * address, writable at g_ac97_view. The page's current contents (the codec
+ * ready bit) are copied over first. RECOMP_AC97_ALIAS=0 skips it and keeps
+ * the mprotect fallback, for A/B. Returns 1 when the view is in place; on 0
+ * the page is untouched. */
+static int ac97_map_view(void)
+{
+    const char *e = getenv("RECOMP_AC97_ALIAS");
+    void *view;
+    int fd;
+
+    if (e && e[0] == '0')
+        return 0;
+    fd = w32_anon_map_fd("xba_ac97");
+    if (fd < 0)
+        return 0;
+    if (ftruncate(fd, (off_t)g_ac97_hsize) != 0) {
+        close(fd);
+        return 0;
+    }
+    view = mmap(NULL, g_ac97_hsize, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (view == MAP_FAILED) {
+        close(fd);
+        return 0;
+    }
+    memcpy(view, g_ac97_page, g_ac97_hsize);
+    /* Replaces the page in one call: no moment where it is unmapped. */
+    if (mmap(g_ac97_page, g_ac97_hsize, PROT_READ, MAP_SHARED | MAP_FIXED,
+             fd, 0) == MAP_FAILED) {
+        munmap(view, g_ac97_hsize);
+        close(fd);
+        return 0;
+    }
+    close(fd);                  /* both mappings keep the memory alive */
+    g_ac97_view = view;
+    return 1;
+}
+
+static void ac97_disarm_write_trap(void)
+{
+    if (g_ac97_view) {
+        munmap(g_ac97_view, g_ac97_hsize);
+        g_ac97_view = NULL;
+    }
+    g_ac97_page = NULL;
+}
+#else
+static void ac97_disarm_write_trap(void)
+{
+#if defined(_WIN32)
+    if (g_ac97_veh) {
+        RemoveVectoredExceptionHandler(g_ac97_veh);
+        g_ac97_veh = NULL;
+    }
+#endif
+    g_ac97_page = NULL;
 }
 #endif
 
@@ -798,13 +898,18 @@ static void ac97_arm_write_trap(void)
     fprintf(stderr, "  AC97: bus-master write trap not available on this"
                     " host; a channel reset will spin\n");
     return;
-#endif
-    g_ac97_page = (char *)g_mcpx_memory + AC97_NABM_OFFSET;
-#if !defined(_WIN32) && defined(__aarch64__)
+#elif !defined(_WIN32)
     (void)old;
+    g_ac97_page = (char *)g_mcpx_memory + AC97_NABM_OFFSET;
     g_ac97_hsize = (size_t)sysconf(_SC_PAGESIZE);
     if (g_ac97_hsize < AC97_TRAP_BYTES)
         g_ac97_hsize = AC97_TRAP_BYTES;
+    if (ac97_map_view()) {
+        fprintf(stderr, "  AC97: bus-master writes trapped at 0x%08X"
+                        " (POSIX, writable view; channel reset completes"
+                        " on write)\n", XBOX_MCPX_BASE + AC97_NABM_OFFSET);
+        return;
+    }
     if (mprotect(g_ac97_page, g_ac97_hsize, PROT_READ) != 0) {
         g_ac97_page = NULL;
         fprintf(stderr, "  AC97: could not arm the bus-master write trap;"
@@ -812,10 +917,10 @@ static void ac97_arm_write_trap(void)
         return;
     }
     fprintf(stderr, "  AC97: bus-master writes trapped at 0x%08X"
-                    " (POSIX; channel reset completes on write)\n",
-            XBOX_MCPX_BASE + AC97_NABM_OFFSET);
-    return;
-#endif
+                    " (POSIX, mprotect fallback; channel reset completes"
+                    " on write)\n", XBOX_MCPX_BASE + AC97_NABM_OFFSET);
+#else
+    g_ac97_page = (char *)g_mcpx_memory + AC97_NABM_OFFSET;
     /* First, so it runs before the game target's own crash reporter, which
      * would otherwise print the write as an access violation. */
     g_ac97_veh = AddVectoredExceptionHandler(1, ac97_write_veh);
@@ -834,6 +939,7 @@ static void ac97_arm_write_trap(void)
     fprintf(stderr, "  AC97: bus-master writes trapped at 0x%08X"
                     " (channel reset completes on write)\n",
             XBOX_MCPX_BASE + AC97_NABM_OFFSET);
+#endif
 }
 
 /*
@@ -1574,6 +1680,98 @@ static void framebuffer_probe_tick(void)
 #define NV2A_ACK_PCRTC_INTR_0       0x600100u
 #define NV2A_ACK_PCRTC_INTR_VBLANK  (1u << 0)
 
+/* ---- The PFB flush kick as events (xbox_Nv2aKickWait) -----------------
+ *
+ * D3D's KickOff sets the PFB flush bit and spins until the GPU clears it,
+ * then writes DMA_PUT. Nothing can see that store from translated code, so
+ * the guest polled (yield, then 50 us sleeps that wake late on a loaded
+ * host) and the ack thread polled back (Sleep(0)) while it waited for the
+ * next kick: in Fable's Oakvale 85 % of the main thread and 7-18 % of the
+ * executor went into the two polls. A title override that calls
+ * xbox_Nv2aKickWait turns them into two conditions:
+ *   - "kicked": the guest set the bit. The ack thread, with nothing to walk,
+ *     waits on it instead of polling (nv2a_ack_wait);
+ *   - "acked": the ack thread cleared the bit (nv2a_ack_busy_bits), so the
+ *     waiting guest goes on at once.
+ * Every wait is timed (1 ms for the guest, the ack thread's 250 us cap), so
+ * a lost wake-up costs that much, never a hang. Lost wake-ups are avoided
+ * all the same: the guest counts itself a waiter before it looks at the bit,
+ * and the ack thread looks at the waiters after it cleared the bit, both
+ * sequentially consistent, so either the guest sees the bit clear or the ack
+ * thread sees the waiter and broadcasts under the mutex.
+ *
+ * Titles that never call it keep the polls exactly as before; so does
+ * Windows. */
+#if !defined(_WIN32)
+#include <pthread.h>
+#include <sched.h>
+static pthread_mutex_t s_kick_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t  s_kick_kicked = PTHREAD_COND_INITIALIZER;
+static pthread_cond_t  s_kick_acked = PTHREAD_COND_INITIALIZER;
+static int      s_kick_events;            /* a title waits through xbox_Nv2aKickWait */
+static int      s_kick_waiters;           /* guests waiting on "acked" */
+static int      s_kick_idle;              /* the ack thread waits on "kicked" */
+static uint32_t s_kick_seq;               /* kicks signalled */
+static uint32_t s_kick_seen;              /* the ack thread's view of s_kick_seq */
+static uint64_t s_kick_released_ns;       /* the last ack that released a waiter */
+/* After an ack released a waiter, how long the ack thread polls for the
+ * DMA_PUT that follows (a woken thread's latency on a loaded host). */
+#define NV2A_KICK_PUT_NS  (200u * 1000u)
+
+static void kick_deadline(struct timespec *ts, long ns)
+{
+    clock_gettime(CLOCK_REALTIME, ts);
+    ts->tv_nsec += ns;
+    if (ts->tv_nsec >= 1000000000L) {
+        ts->tv_sec++;
+        ts->tv_nsec -= 1000000000L;
+    }
+}
+#endif
+
+/* The guest side: set `mask` in the register and wait until the ack thread
+ * clears it. Same register traffic as D3D's own loop. */
+void xbox_Nv2aKickWait(volatile uint32_t *reg, uint32_t mask)
+{
+#if defined(_WIN32)
+    InterlockedOr((volatile LONG *)reg, (LONG)mask);
+    while (*reg & mask)
+        Sleep(0);
+#else
+    __atomic_fetch_or(reg, mask, __ATOMIC_SEQ_CST);
+    pthread_mutex_lock(&s_kick_mu);
+    s_kick_events = 1;
+    s_kick_seq++;
+    if (s_kick_idle)
+        pthread_cond_signal(&s_kick_kicked);
+    for (;;) {
+        struct timespec ts;
+        __atomic_add_fetch(&s_kick_waiters, 1, __ATOMIC_SEQ_CST);
+        if (!(__atomic_load_n(reg, __ATOMIC_SEQ_CST) & mask)) {
+            __atomic_sub_fetch(&s_kick_waiters, 1, __ATOMIC_SEQ_CST);
+            break;
+        }
+        kick_deadline(&ts, 1000000L);     /* 1 ms: the lost-wake-up bound */
+        pthread_cond_timedwait(&s_kick_acked, &s_kick_mu, &ts);
+        __atomic_sub_fetch(&s_kick_waiters, 1, __ATOMIC_SEQ_CST);
+    }
+    pthread_mutex_unlock(&s_kick_mu);
+#endif
+}
+
+/* The ack thread cleared the PFB flush bit: wake whoever waits for it. */
+static void kick_acked(void)
+{
+#if !defined(_WIN32)
+    if (!__atomic_load_n(&s_kick_waiters, __ATOMIC_SEQ_CST))
+        return;
+    pthread_mutex_lock(&s_kick_mu);
+    s_kick_released_ns = xbox_HostNowNs();
+    pthread_cond_broadcast(&s_kick_acked);
+    pthread_mutex_unlock(&s_kick_mu);
+#endif
+}
+
 /* Clear the request bits "hardware" would clear on its own.
  *
  * Also called by the pushbuffer walker between commands. This thread executes
@@ -1609,8 +1807,11 @@ static void nv2a_ack_busy_bits(int flip_held)
         }
         /* Interlocked: the vblank-ack thread and the guest change other
          * bits of the same word meanwhile. */
-        if (*r & mask)
+        if (*r & mask) {
             InterlockedAnd((volatile LONG *)r, (LONG)~mask);
+            if (NV2A_ACK[i].offset == NV2A_ACK_PFB_FLUSH)
+                kick_acked();
+        }
     }
 }
 
@@ -1627,6 +1828,140 @@ volatile uint32_t *xbox_Nv2aRegPtr(uint32_t offset)
     if (!g_nv2a_memory || offset + 4 > XBOX_NV2A_SIZE)
         return NULL;
     return (volatile uint32_t *)((char *)g_nv2a_memory + offset);
+}
+
+/* Does the ack pass below have anything to answer right now? A new PUT (the
+ * title kicked off), or a bit nv2a_ack_busy_bits would clear (a PFB flush
+ * kick being waited on, an interrupt status the guest just wrote), or an
+ * idle bit the guest cleared. */
+static int nv2a_ack_wanted(volatile uint32_t *regs, uint32_t put_seen)
+{
+    size_t i;
+
+    if (regs[NV2A_USER_DMA_PUT / 4] != put_seen)
+        return 1;
+    for (i = 0; i < sizeof(NV2A_ACK) / sizeof(NV2A_ACK[0]); i++) {
+        uint32_t mask = NV2A_ACK[i].busy_mask;
+        if (NV2A_ACK[i].offset == NV2A_ACK_PMC_INTR_0)
+            mask &= ~NV2A_ACK_PMC_INTR_PCRTC;      /* the vblank-ack thread's */
+        else if (NV2A_ACK[i].offset == NV2A_ACK_PCRTC_INTR_0)
+            mask &= ~NV2A_ACK_PCRTC_INTR_VBLANK;
+        if (regs[NV2A_ACK[i].offset / 4] & mask)
+            return 1;
+    }
+    for (i = 0; i < sizeof(NV2A_IDLE) / sizeof(NV2A_IDLE[0]); i++)
+        if ((regs[NV2A_IDLE[i].offset / 4] & NV2A_IDLE[i].idle_mask)
+            != NV2A_IDLE[i].idle_mask)
+            return 1;
+    return 0;
+}
+
+/* The ack thread's wait between two passes.
+ *
+ * It used to be a bare yield, so with nothing submitted the thread still ran
+ * flat out: on Fable's title screen 43 % of a core in SwitchToThread, a core
+ * an Android handheld with five fast ones would rather give the rasteriser.
+ * Nothing can wake it instead: PUT and the busy bits are plain memory the
+ * title writes from translated code, so there is no store to hook. The wait
+ * is therefore a bounded poll:
+ *   - while there is work, or for NV2A_ACK_SPIN_NS after the last of it
+ *     (D3D kicks off in bursts), it yields as before, so a burst is answered
+ *     at once;
+ *   - after that, and while a flip waits for its vblank (a wait on the
+ *     clock, not on the title), it sleeps in steps of NV2A_ACK_STEP_US,
+ *     looking at PUT and the busy bits after each, for at most
+ *     RECOMP_ACK_IDLE_US before running a pass anyway, which keeps the
+ *     clocks this thread ticks (KeTickCount, the counter mirrors) moving.
+ * A kick that lands in an idle period waits one step (tens of microseconds,
+ * more on a loaded host) more than before.
+ *
+ * Default 250 us (RECOMP_ACK_IDLE_US=0 restores the bare yield). Before the
+ * segment scan followed jumps it learnt the ring's end from the highest PUT
+ * it had seen, so a thread that saw fewer PUTs lost commands at a wrap and
+ * Fable stopped at 0 flips in most starts; with the jump-following scan it
+ * started 6 of 6. Windows keeps the yield: its sleeps are a millisecond or
+ * more.
+ *
+ * A title that kicks through xbox_Nv2aKickWait (above) can wake it: then,
+ * outside a flip hold, the thread waits on "kicked" for at most the same
+ * RECOMP_ACK_IDLE_US instead of yielding, in the same 50 us steps (each
+ * ended early by a kick), and yields only for the DMA_PUT that follows an
+ * ack which released a waiter. */
+#define NV2A_ACK_SPIN_NS  (2u * 1000u * 1000u)
+#define NV2A_ACK_STEP_US  50
+static void nv2a_ack_wait(volatile uint32_t *regs, int flip_held)
+{
+#if defined(_WIN32)
+    (void)regs; (void)flip_held;
+    Sleep(0);
+#else
+    static int idle_us = -1;
+    static uint64_t busy_ns;               /* the last pass that had work */
+    static uint32_t put_seen;
+    uint32_t put = regs[NV2A_USER_DMA_PUT / 4];
+    uint64_t now = xbox_HostNowNs();
+    int waited;
+
+    if (idle_us < 0) {
+        const char *e = getenv("RECOMP_ACK_IDLE_US");
+        idle_us = e ? atoi(e) : 250;
+        if (idle_us < 0) idle_us = 0;
+        if (idle_us > 20000) idle_us = 20000;
+    }
+    if (put != put_seen || regs[NV2A_USER_DMA_GET / 4] != put) {
+        put_seen = put;
+        if (!flip_held)
+            busy_ns = now;                 /* a kick, or one not yet answered */
+    }
+    if (idle_us && !flip_held && __atomic_load_n(&s_kick_events, __ATOMIC_RELAXED)) {
+        /* The title kicks through xbox_Nv2aKickWait: wait for "kicked"
+         * rather than poll. Except right after an ack released a waiter:
+         * KickOff writes DMA_PUT just after its wait, and that store wakes
+         * nothing, so it is polled for, briefly. */
+        struct timespec ts;
+        if (regs[NV2A_USER_DMA_GET / 4] != put || nv2a_ack_wanted(regs, put))
+            return;
+        if (now - __atomic_load_n(&s_kick_released_ns, __ATOMIC_RELAXED)
+                < NV2A_KICK_PUT_NS) {
+            sched_yield();
+            return;
+        }
+        /* In NV2A_ACK_STEP_US steps, looking at the busy bits and PUT after
+         * each as the sleeps below do: a title also writes PUT or an
+         * interrupt status without a kick, and Fable's loader waits on
+         * those (a single 250 us wait made its loading screen 3-10 fps
+         * and once froze it). */
+        for (waited = 0; waited < idle_us; waited += NV2A_ACK_STEP_US) {
+            int kicked;
+            pthread_mutex_lock(&s_kick_mu);
+            if (s_kick_seq == s_kick_seen && !nv2a_ack_wanted(regs, put)) {
+                s_kick_idle = 1;
+                kick_deadline(&ts, NV2A_ACK_STEP_US * 1000L);
+                pthread_cond_timedwait(&s_kick_kicked, &s_kick_mu, &ts);
+                s_kick_idle = 0;
+            }
+            kicked = s_kick_seq != s_kick_seen;
+            s_kick_seen = s_kick_seq;
+            pthread_mutex_unlock(&s_kick_mu);
+            if (kicked || regs[NV2A_USER_DMA_GET / 4] != put
+                    || nv2a_ack_wanted(regs, put))
+                return;
+        }
+        return;
+    }
+    if (!idle_us || (!flip_held && now - busy_ns < NV2A_ACK_SPIN_NS)) {
+        Sleep(0);
+        return;
+    }
+    for (waited = 0; waited < idle_us; waited += NV2A_ACK_STEP_US) {
+        struct timespec ts = { 0, NV2A_ACK_STEP_US * 1000 };
+        nanosleep(&ts, NULL);
+        if (nv2a_ack_wanted(regs, put)) {
+            busy_ns = xbox_HostNowNs();
+            return;
+        }
+    }
+#endif
 }
 
 static DWORD WINAPI nv2a_ack_thread(LPVOID param)
@@ -1695,8 +2030,10 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
             static uint32_t get_written = 0xFFFFFFFFu;  /* GET as we last left it */
             DWORD now_ms = GetTickCount();
             uint32_t put = *(volatile uint32_t *)((char *)regs + NV2A_USER_DMA_PUT);
+            int walked = 0;
             if (!flip_held
                     && (put != last_put || (now_ms - last_put_ms) > 2000)) {
+                walked = 1;
                 /* Survey the segment the title just submitted, once. */
                 {
                     extern void nv2a_pb_scan(uint32_t);
@@ -1735,27 +2072,28 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
                         if (put != last_put)
                             nv2a_pb_scan(put);
                     } else {
-                        /* The segment scan, the default: the bytes between
-                         * the previous PUT and this one. The pushbuffer is a
-                         * ring, so PUT coming back below where it was is a
-                         * wrap, not a rewind; the ring's bounds are learned
-                         * from the lowest and highest PUT seen. */
-                        static uint32_t put_lo, put_hi;
-                        if (!put_lo || put < put_lo) put_lo = put;
-                        if (put > put_hi) put_hi = put;
-                        if (last_put && put > last_put) {
-                            nv2a_pb_scan_segment(XBOX_CONTIG_BASE | (last_put & 0x0FFFFFFFu),
-                                                 XBOX_CONTIG_BASE | (put      & 0x0FFFFFFFu));
-                        } else if (last_put && put < last_put) {
-                            if (put_hi > last_put)
-                                nv2a_pb_scan_segment(
-                                    XBOX_CONTIG_BASE | (last_put & 0x0FFFFFFFu),
-                                    XBOX_CONTIG_BASE | (put_hi   & 0x0FFFFFFFu));
-                            if (put > put_lo)
-                                nv2a_pb_scan_segment(
-                                    XBOX_CONTIG_BASE | (put_lo & 0x0FFFFFFFu),
-                                    XBOX_CONTIG_BASE | (put    & 0x0FFFFFFFu));
-                        }
+                        /* The segment scan, the default: what the title
+                         * submitted since the previous PUT, one walk from
+                         * there to this PUT. The walk follows JUMPs, so a
+                         * wrap of the ring (D3D's JUMP back to its base, PUT
+                         * coming back below where it was) and a recorded
+                         * pushbuffer run from the ring are both part of it.
+                         * It used to scan up to the highest PUT seen on a
+                         * wrap and stop at every JUMP, which dropped the
+                         * commands past either.
+                         *
+                         * A title that moved GET itself reset the ring
+                         * (XDK D3D writes DMA_GET and DMA_PUT together):
+                         * its commands start at that GET, not at the old
+                         * PUT. */
+                        uint32_t from = last_put;
+                        uint32_t get_now = *(volatile uint32_t *)
+                                           ((char *)regs + NV2A_USER_DMA_GET);
+                        if (get_written != 0xFFFFFFFFu && get_now != get_written)
+                            from = get_now;
+                        if (last_put && put != from)
+                            nv2a_pb_scan_segment(XBOX_CONTIG_BASE | (from & 0x0FFFFFFFu),
+                                                 XBOX_CONTIG_BASE | (put  & 0x0FFFFFFFu));
                     }
                     /* Periodic, because what the title submits at init is not
                      * what it submits once it is drawing a menu, and the
@@ -1802,6 +2140,12 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
                     fflush(stderr);
                 }
             }
+            /* Caught up with PUT: visibility reports the title may be
+             * waiting for are resolved now (nv2a_backend.h). */
+            if (!walked) {
+                extern void nv2a_pb_exec_idle(void);
+                nv2a_pb_exec_idle();
+            }
         }
         if (s_nv2a_trace) {
             static uint32_t last_start = 0xFFFFFFFFu;
@@ -1830,7 +2174,7 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
         *(volatile uint32_t *)((uintptr_t)(XBOX_KERNEL_DATA_BASE + KDATA_TICK_COUNT)
                                + g_memory_offset) = GetTickCount();
 
-        Sleep(0);  /* yield; the waiter is spinning on another core */
+        nv2a_ack_wait(regs, flip_held);
     }
     return 0;
 }
@@ -1879,19 +2223,34 @@ uint32_t g_xbox_stack_size  = 8u * 1024 * 1024;
 uint32_t g_xbox_code_lo = 0;
 uint32_t g_xbox_code_hi = 0;
 
-/* Global registers for recompiled code (via recomp_types.h) */
-/* Each guest thread's TIB. The first thread uses the one the loader built;
- * a spawned thread gets its own from xbox_AllocThreadTib(). */
-RECOMP_TLS uint32_t g_fs_base = XBOX_TIB_MAIN;
+/* The guest CPU registers for recompiled code (see RecompCpu in
+ * xbox_memory_layout.h). One thread-local block per host thread; every
+ * thread starts from these values.
+ *
+ * fs_base: each guest thread's TIB. The first thread uses the one the loader
+ * built; a spawned thread gets its own from xbox_AllocThreadTib().
+ * x87 control and status: the reset default masks every exception and rounds
+ * to nearest, which is what the CRT expects before _control87.
+ * eflags: the image pushfd and popfd use (see recomp_types.h). Bit 1 is
+ * always set and IF is on, as in any guest thread the kernel schedules.
+ * df: zero means the string instructions walk forwards, the ABI's resting
+ * state. MSVC's strrchr/wcsrchr scan backwards with `std; repne scasb`, and
+ * memmove goes backwards when its regions overlap the wrong way; per-thread
+ * because `std` and the `cld` that undoes it can land in different lifted
+ * bodies of the same guest routine. */
+RECOMP_TLS RecompCpu g_cpu = {
+    .r_fs_base = XBOX_TIB_MAIN,
+    .r_fp_control_word = 0x037Fu,
+    .r_mxcsr = 0x1F80u,
+    .r_fp_cc = 0x4000,
+    .r_eflags = 0x00000202u,
+};
 
 /* The shape of the TLS block the loader built, so a new thread can be
  * given one just like it: where the initialised image data starts, how
  * big the block is, and how big the per-thread structure slot 0 points
  * at is. Zero total means the image had no TLS directory. */
 static uint32_t g_tls_template_va, g_tls_total, g_tls_thread_size = 64;
-
-RECOMP_TLS uint32_t g_eax = 0, g_ecx = 0, g_edx = 0, g_esp = 0;
-RECOMP_TLS uint32_t g_ebx = 0, g_esi = 0, g_edi = 0;
 
 #ifdef RECOMP_ABI_CHECK
 /* Report a lifted function that returned without restoring ebx/esi/edi.
@@ -1952,26 +2311,11 @@ void recomp_abi_violation_log(uint32_t va, uint32_t ebx0, uint32_t esi0,
 }
 #endif
 
-/* SEH frame pointer bridge (see recomp_types.h for explanation) */
-RECOMP_TLS uint32_t g_seh_ebp = 0;
-RECOMP_TLS double g_fp_stack[8];
-RECOMP_TLS int g_fp_top = 0;
-
 /* Set once at startup. The generated code reads it at the ret of every
  * --force-return function, so it has to be cheap and it has to default to
  * off: a build carrying forced functions behaves normally until the
  * variable is set. */
 int g_force_return = 0;
-/* x87 control and status. The reset default masks every exception and
- * rounds to nearest, which is what the CRT expects before _control87. */
-RECOMP_TLS uint16_t g_fp_control_word = 0x037Fu;
-RECOMP_TLS uint32_t g_mxcsr = 0x1F80u;
-RECOMP_TLS int g_fp_cmp = 0;
-RECOMP_TLS uint16_t g_fp_cc = 0x4000;
-
-/* Defined below, with the other guest registers. */
-extern RECOMP_TLS uint32_t g_ebp;
-extern RECOMP_TLS uint32_t g_eax, g_ecx, g_edx, g_ebx, g_esi, g_edi;
 
 /* ---- non-local jumps ---------------------------------------------------
  *
@@ -2674,27 +3018,6 @@ void xbox_WatchdogStart(void)
         CloseHandle(h);
 }
 
-/* SSE. 128 bits of architectural state, per-thread like the rest. */
-RECOMP_TLS RecompMmx g_mm0, g_mm1, g_mm2, g_mm3;
-RECOMP_TLS RecompMmx g_mm4, g_mm5, g_mm6, g_mm7;
-RECOMP_TLS RecompXmm g_xmm0, g_xmm1, g_xmm2, g_xmm3;
-RECOMP_TLS RecompXmm g_xmm4, g_xmm5, g_xmm6, g_xmm7;
-/* Last frame established by `mov ebp, esp`. Read by frameless functions
- * that address their caller's frame through ebp. */
-RECOMP_TLS uint32_t g_ebp = 0;
-
-/* EFLAGS.DF. Zero means the string instructions walk forwards, which is the
- * ABI's resting state and what almost every one of them does -- so this is
- * almost always 0 and costs a predictable branch. The exceptions are the ones
- * that matter: MSVC's strrchr/wcsrchr scan backwards from the terminator with
- * `std; repne scasb`, and memmove goes backwards when its regions overlap the
- * wrong way. Thread-local, because `std` and the `cld` that undoes it can land
- * in different lifted bodies of the same guest routine. */
-RECOMP_TLS int g_df = 0;
-/* EFLAGS: the image pushfd and popfd use (see recomp_types.h). Bit 1 is
- * always set and IF is on, as in any guest thread the kernel schedules. */
-RECOMP_TLS uint32_t g_eflags = 0x00000202u;
-
 /* ICALL trace ring buffer */
 volatile uint32_t g_icall_trace[16] = {0};
 volatile uint32_t g_icall_trace_idx = 0;
@@ -2814,7 +3137,16 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
          * mapped, and guest_vmem's range is handed over just before
          * guest_vmem_init. Off by default; the stock span is unchanged. */
         if (ext_vma_span(g_span_size) || hold_guest_window()) {
-            g_span_size = (size_t)1 << 32;
+            /* The 4 GB window plus one view past it: the first RAM mirror
+             * above 4 GB is the wrap of a guest access that runs over the
+             * top (a dword read at 0xFFFFFFFF, guest+disp carrying out of 32
+             * bits). Left outside the span its host range is often taken in
+             * an Android app (top-down placement again), the mirror fails
+             * and the access faults; Fable reads a -1 vtable pointer there
+             * during its front-end load and died on the Thor, while the Mac,
+             * where that range was free, read the wrapped zero and skipped
+             * the call. */
+            g_span_size = ((size_t)1 << 32) + g_memory_size;
             g_span_whole_window = 1;
         }
         g_span_base = VirtualAlloc(NULL, g_span_size, MEM_RESERVE, PAGE_NOACCESS);
@@ -2944,8 +3276,10 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
     }
 #if !defined(_WIN32)
     if (g_span_whole_window)
-        fprintf(stderr, "xbox_MemoryLayoutInit: whole 4 GB guest window held at %p-%p "
-                "(RECOMP_GUEST_WINDOW)\n", g_span_base, (void *)((uintptr_t)g_span_base + g_span_size));
+        fprintf(stderr, "xbox_MemoryLayoutInit: whole 4 GB guest window held at %p-%p, "
+                "plus its wrap mirror to %p (RECOMP_GUEST_WINDOW)\n", g_span_base,
+                (void *)((uintptr_t)g_span_base + ((size_t)1 << 32)),
+                (void *)((uintptr_t)g_span_base + g_span_size));
 #endif
 
     /*
@@ -3919,6 +4253,7 @@ void xbox_MemoryLayoutShutdown(void)
     }
 #endif
     if (g_mcpx_memory) {
+        ac97_disarm_write_trap();
         layout_release(g_mcpx_memory, 0);
         g_mcpx_memory = NULL;
     }
@@ -4013,6 +4348,11 @@ BOOL xbox_IsXboxAddress(uintptr_t address)
 void *xbox_GetMemoryBase(void)
 {
     return g_memory_base;
+}
+
+void *xbox_GetMcpxAperture(void)
+{
+    return g_mcpx_memory;
 }
 
 ptrdiff_t xbox_GetMemoryOffset(void)
@@ -4272,12 +4612,11 @@ void xbox_FreeThreadStack(uint32_t stack_top)
  * it is free. XBOX_GPU_INSTANCE_DEFAULT stays carved off the top for the
  * GPU-instance bridge.
  *
- * Freed blocks are reused only under RECOMP_HEAP_RECLAIM, as before: without
- * it MmFreeContiguousMemory releases nothing and the arena fills in address
- * order. Contiguous blocks are also every texture and vertex buffer a D3D
- * title creates, and those come and go with the scene; a title that frees and
- * reallocates them as each texture pack loads runs the 64 MB window out
- * without the switch.
+ * MmFreeContiguousMemory gives a block back (RECOMP_CONTIG_RECLAIM, on by
+ * default; see contig_reclaim()). Contiguous blocks are every texture and
+ * vertex buffer a D3D title creates, and those come and go with the scene; a
+ * title that frees and reallocates them as each texture pack loads ran the
+ * 64 MB window out when frees were ignored.
  *
  * Locked: textures are created from loader threads as well as the main one. */
 #define CONTIG_PAGE       4096u
@@ -4322,7 +4661,9 @@ static uint32_t g_contig_len[CONTIG_PAGES];    /* pages, at a block's first page
 static uint32_t g_contig_pages_in_use;
 static uint32_t g_contig_high = CONTIG_PAGE;   /* high-water mark, bytes */
 static uint32_t g_contig_first_free = 1;       /* no free page below this */
-static uint32_t g_contig_allocs, g_contig_frees;
+static uint32_t g_contig_allocs;
+static uint32_t g_contig_released;             /* blocks given back */
+static uint32_t g_contig_free_calls;           /* frees asked for, kept or not */
 static uint32_t g_contig_peak_pages;
 static DWORD    g_contig_t0;
 static volatile LONG g_contig_lock;
@@ -4353,12 +4694,14 @@ static void contig_report(const char *what, uint32_t va, uint32_t pages)
         return;
     last_pages = g_contig_pages_in_use;
     fprintf(stderr, "  [CONTIG] t=%.1fs %s 0x%08X %u KB: in use %u KB, "
-            "peak %u KB, high-water %u KB (allocs=%u frees=%u)\n",
+            "peak %u KB, high-water %u KB (allocs=%u released=%u "
+            "free calls=%u)\n",
             (GetTickCount() - g_contig_t0) / 1000.0, what, va,
             pages * (CONTIG_PAGE / 1024),
             g_contig_pages_in_use * (CONTIG_PAGE / 1024),
             g_contig_peak_pages * (CONTIG_PAGE / 1024),
-            g_contig_high / 1024, g_contig_allocs, g_contig_frees);
+            g_contig_high / 1024, g_contig_allocs, g_contig_released,
+            g_contig_free_calls);
     fflush(stderr);
 }
 
@@ -4515,7 +4858,24 @@ void xbox_ContiguousClaim(uint32_t va, uint32_t size)
     contig_unlock();
 }
 
-/* Release a block (RECOMP_HEAP_RECLAIM only). Returns 1 if va is in the
+/* RECOMP_CONTIG_RECLAIM: MmFreeContiguousMemory gives the block back. On
+ * unless set to 0, which keeps every block for good, as the arena did before
+ * (then only under RECOMP_HEAP_RECLAIM, which now governs the general heap and
+ * NtFreeVirtualMemory alone). Off, the window fills in address order and a
+ * block's address is never seen twice; on, a freed block's pages go to the
+ * next request that fits. Fable frees about 16 MB per load transition and ran
+ * the 64 MB window out without it. Read once. */
+static int contig_reclaim(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("RECOMP_CONTIG_RECLAIM");
+        on = !e || !*e || atoi(e) != 0;
+    }
+    return on;
+}
+
+/* Release a block (unless RECOMP_CONTIG_RECLAIM=0). Returns 1 if va is in the
  * window, 0 if this arena never handed it out -- the caller decides whether
  * that is someone else's. */
 int xbox_ContiguousFree(uint32_t va)
@@ -4526,13 +4886,15 @@ int xbox_ContiguousFree(uint32_t va)
     if (va < XBOX_CONTIG_BASE
             || (uint64_t)va >= (uint64_t)XBOX_CONTIG_BASE + XBOX_CONTIG_SIZE)
         return 0;
-    /* Ours, but kept: without RECOMP_HEAP_RECLAIM contiguous memory is never
-     * reused, and 1 stops the caller handing it to the general heap. */
-    if (!xbox_HeapReclaimEnabled())
-        return 1;
     first = (va - XBOX_CONTIG_BASE) / CONTIG_PAGE;
 
     contig_lock();
+    g_contig_free_calls++;
+    /* Ours, but kept: 1 stops the caller handing it to the general heap. */
+    if (!contig_reclaim()) {
+        contig_unlock();
+        return 1;
+    }
     n = (va & (CONTIG_PAGE - 1)) ? 0 : g_contig_len[first];
     if (!n) {
         contig_unlock();
@@ -4548,7 +4910,7 @@ int xbox_ContiguousFree(uint32_t va)
     g_contig_pages_in_use -= n;
     if (first < g_contig_first_free)
         g_contig_first_free = first;
-    g_contig_frees++;
+    g_contig_released++;
     contig_report("free", va, n);
     contig_unlock();
     return 1;

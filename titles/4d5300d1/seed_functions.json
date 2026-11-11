@@ -1,0 +1,50 @@
+[
+ {
+  "start": "0x004ABE7F",
+  "note": "Indirect-call target observed at runtime (vtable slot at 0x0089405C; follows an inline byte table)",
+  "observed": true
+ },
+ {
+  "start": "0x00584074",
+  "note": "Indirect-call target observed at runtime (CRT math dispatch table at 0x00915600)",
+  "observed": true
+ },
+ {
+  "start": "0x0058408A",
+  "note": "CRT math dispatch table at 0x00915600 (packed, unaligned entries)"
+ },
+ {
+  "start": "0x0058532D",
+  "note": "Indirect-call target observed at runtime (CRT math dispatch table at 0x00915600)",
+  "observed": true
+ },
+ {
+  "start": "0x0058545D",
+  "note": "CRT math dispatch table at 0x00915600 (packed, unaligned entries)"
+ },
+ {
+  "start": "0x005861AC",
+  "note": "CRT math dispatch table at 0x00915600 (packed, unaligned entries)"
+ },
+ {
+  "start": "0x005861C5",
+  "note": "Indirect-call target observed at runtime (CRT math dispatch table at 0x00915600)",
+  "observed": true
+ },
+ {
+  "start": "0x005861FE",
+  "note": "CRT math dispatch table at 0x00915600 (packed, unaligned entries)"
+ },
+ {
+  "start": "0x00586220",
+  "note": "CRT math dispatch table at 0x00915600 (packed, unaligned entries)"
+ },
+ {
+  "start": "0x0058622D",
+  "note": "CRT math dispatch table at 0x00915600 (packed, unaligned entries)"
+ },
+ {
+  "start": "0x0058624D",
+  "note": "CRT math dispatch table at 0x00915600 (packed, unaligned entries)"
+ }
+]

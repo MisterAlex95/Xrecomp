@@ -106,6 +106,32 @@ For games that program the APU directly. The game writes to MMIO registers at 0x
 
 The VP runs in a separate thread, mixing active voices at the hardware frame rate.
 
+### The frame thread
+
+`mcpx_apu_frame_thread` (`apu_core.c`) renders one 32-sample frame per pass
+(0.67 ms of audio) and hands the device a 256-sample EP period every eight.
+It holds the APU lock (`d->lock`) for its whole loop and drops it in
+`throttle()`'s wait and once at the end of every frame:
+
+- **Lock hand-over only for waiters.** Every other thread that takes
+  `d->lock` (the software mixer's play, the test tone, init, shutdown) goes
+  through `mcpx_apu_lock_guest()`, which counts waiters. At the end of a frame
+  the thread yields the lock only while that count is non-zero, and then until
+  a waiter has had it (at most 2 ms). An unconditional `SwitchToThread()` on
+  every frame cost a whole scheduler quantum per frame once the host's cores
+  were busy, and the 43 ms device queue ran dry (Fable, 12 busy processes:
+  13 underruns in 20 s). The hand-over itself is still needed: a critical
+  section is not fair, and Burnout 3 froze on its vehicle select while its
+  thread starved on the lock. The MMIO entry points do not take `d->lock`
+  (registers are atomics, VOICE_LOCK is a per-voice spin lock); a new site
+  that takes it must use `mcpx_apu_lock_guest()`. Test:
+  `tests/apu_lock_contention`.
+- **Audio priority.** Linux and Android: `setpriority(-16)` on the thread
+  (Android's `THREAD_PRIORITY_AUDIO`; refused without `CAP_SYS_NICE` on
+  desktop Linux, which is ignored). macOS: QoS user-interactive. The first
+  line of the thread logs the outcome (`[APU] frame thread nice -16: ...`);
+  `RECOMP_APU_PRIORITY=0` keeps the default priority.
+
 ### 2. Software Mixer (Direct API)
 
 For games where you've decoded the audio format yourself and just want to play PCM. The mixer provides 64 voice slots with:

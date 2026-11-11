@@ -22,6 +22,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "nv2a_backend.h"
+#include "nv2a_vsh_interp.h"
 
 #if defined(_WIN32)
 #include <windows.h>
@@ -45,6 +46,7 @@ uint32_t g_xbox_stack_base, g_xbox_stack_size;
 uint32_t xbox_ContiguousAllocatedBytes(void) { return 0; }
 void xbox_FramebufferWindowSet(uint32_t va, uint32_t pitch) { (void)va; (void)pitch; }
 void xbox_FramebufferWindowSetAA(uint32_t sy) { (void)sy; }
+void xbox_FramebufferWindowSetFormat(uint32_t f) { (void)f; }
 uint32_t xbox_Nv2aFenceWordVa(void) { return 0; }
 int nv2a_pb_dma_walk(void) { return 1; }
 void xbox_FramebufferWindowStart(void) {}
@@ -56,10 +58,16 @@ void xbox_Nv2aFrameCounterFlip(void) {}
 int nv2a_pb_scan_in_call(void) { return 0; }
 uint32_t xbox_VblankCount(void) { return 0; }
 uint64_t xbox_HostNowNs(void) { return 0; }
+void xbox_HostSleepNs(uint64_t ns) { (void)ns; }
 uint32_t xbox_Nv2aFrameCountersOwned(void) { return 0; }
 volatile uint32_t *xbox_Nv2aRegPtr(uint32_t offset) { (void)offset; return NULL; }
 
 extern void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param);
+extern void nv2a_vsh_pool_enable(int on);
+extern int nv2a_vsh_last_workers(void);
+extern void nv2a_vsh_set_instruction(uint32_t slot, const uint32_t words[4]);
+extern void nv2a_vsh_set_start_slot(uint32_t slot);
+extern void nv2a_vsh_set_constant(uint32_t index, const float v[4]);
 extern int nv2a_raster_pool_size(void);
 extern int nv2a_raster_last_workers(void);
 static void m(uint32_t method, uint32_t param) { nv2a_pb_exec_method(0, method, param); }
@@ -221,6 +229,154 @@ static int verify(int nq, int *drawn)
     return bad;
 }
 
+/* ---- vertex programs shaded on the pool --------------------------------
+ *
+ * A batch big enough to shade on the pool must come out exactly as the serial
+ * loop shades it: same vertices in the same slots, so the same picture. The
+ * program moves every vertex by a fraction of a pixel and scales its colour,
+ * so a vertex shaded wrong, twice, or into the wrong slot changes coverage or
+ * colour somewhere. Instruction fields as nv2a_vsh_interp.c decodes them;
+ * every swizzle .xyzw. */
+static void vsh_ins(uint32_t slot, uint32_t mac, uint32_t cidx, uint32_t vin,
+                    uint32_t amux, uint32_t areg, uint32_t bmux, uint32_t breg,
+                    uint32_t cmux, uint32_t creg, uint32_t mac_mask,
+                    uint32_t tdst, uint32_t omask, uint32_t oaddr, uint32_t final)
+{
+    uint32_t w[4];
+    w[0] = 0;
+    w[1] = mac << 21 | cidx << 13 | vin << 9 | 0x1Bu;
+    w[2] = amux << 26 | areg << 28 | 0x1Bu << 17 | bmux << 11 | breg << 13
+         | 0x1Bu << 2 | ((creg >> 2) & 3u);
+    w[3] = cmux << 28 | (creg & 3u) << 30 | mac_mask << 24 | tdst << 20
+         | omask << 12 | (omask ? 1u : 0u) << 11 | oaddr << 3 | final;
+    nv2a_vsh_set_instruction(slot, w);
+}
+
+enum { MUX_TEMP = 1, MUX_IN = 2, MUX_CONST = 3 };
+
+static void load_vsh_program(void)
+{
+    static const float c0[4] = { 0.9f, 0.8f, 0.7f, 1.0f };      /* colour scale */
+    static const float c2[4] = { 1.003f, 0.997f, 1.0f, 1.0f };  /* position scale */
+    static const float c3[4] = { 0.25f, -0.25f, 0.0f, 0.0f };   /* position offset */
+    static const float zero[4] = { 0, 0, 0, 0 };
+
+    nv2a_vsh_set_constant(0, c0);
+    nv2a_vsh_set_constant(2, c2);
+    nv2a_vsh_set_constant(3, c3);
+    nv2a_vsh_set_constant(58, zero);
+    nv2a_vsh_set_constant(59, zero);
+    /* mul r0, v0, c[2] */
+    vsh_ins(0, 2, 2, 0, MUX_IN, 0, MUX_CONST, 0, MUX_CONST, 0, 0xF, 0, 0, 0, 0);
+    /* add oPos, r0, c[3] */
+    vsh_ins(1, 3, 3, 0, MUX_TEMP, 0, MUX_CONST, 0, MUX_CONST, 0, 0, 0, 0xF, 0, 0);
+    /* mul oD0, v3, c[0] (final) */
+    vsh_ins(2, 2, 0, 3, MUX_IN, 0, MUX_CONST, 0, MUX_CONST, 0, 0, 0, 0xF, 3, 1);
+    nv2a_vsh_set_start_slot(0);
+}
+
+/* Many small triangles in one batch: QUADS quads of 6 vertices, far above the
+ * pool's vertex threshold, each too small to wake the raster pool, so only
+ * the shading is split. */
+static void emit_small_quads(void)
+{
+    uint32_t v = 0;
+    int i;
+    for (i = 0; i < QUADS * 3; i++) {
+        float x = (float)(4 + (lcg() % (W - 24))) + (float)(lcg() % 7) / 7.0f;
+        float y = (float)(4 + (lcg() % (H - 24))) + (float)(lcg() % 5) / 5.0f;
+        float w = 6.0f + (float)(lcg() % 12), h = 6.0f + (float)(lcg() % 12);
+        uint32_t c = colour(i);
+        put_vertex(v++, x, y, c);
+        put_vertex(v++, x + w, y, c);
+        put_vertex(v++, x + w, y + h, c);
+        put_vertex(v++, x, y, c);
+        put_vertex(v++, x + w, y + h, c);
+        put_vertex(v++, x, y + h, c);
+    }
+}
+
+static int vsh_pool_case(void)
+{
+    static uint8_t serial[(size_t)W * H * 4];
+    uint32_t nv = QUADS * 3 * 6, start;
+    int diff = 0, workers_serial, workers_pool;
+    size_t i;
+
+    load_vsh_program();
+    emit_small_quads();
+    m(0x1E94, 2);                            /* TRANSFORM_EXECUTION_MODE: program */
+
+    s_stage = "a vertex-program batch, shaded serially";
+    nv2a_vsh_pool_enable(0);
+    clear_surface();
+    m(0x17FC, 5);
+    for (start = 0; start < nv; start += 240)
+        m(0x1810, ((nv - start > 240 ? 240 : nv - start) - 1) << 24 | start);
+    m(0x17FC, 0);
+    workers_serial = nv2a_vsh_last_workers();
+    memcpy(serial, s_mem + COLOR_AT, sizeof serial);
+
+    /* The executor keeps its shaded vertices between batches, so a pool
+     * that skipped some would draw the serial run's leftovers and pass.
+     * Overwrite them first: the same batch with every vertex moved. */
+    s_stage = "the batch moved, to overwrite the shaded vertices";
+    memcpy(s_mem + POS_AT + 12u * nv, s_mem + POS_AT, 12u * nv);   /* keep */
+    for (start = 0; start < nv; start++) {
+        float p[3];
+        memcpy(p, s_mem + POS_AT + 12u * start, 12);
+        p[0] += 3.0f; p[1] += 5.0f;
+        memcpy(s_mem + POS_AT + 12u * start, p, 12);
+    }
+    m(0x17FC, 5);
+    for (start = 0; start < nv; start += 240)
+        m(0x1810, ((nv - start > 240 ? 240 : nv - start) - 1) << 24 | start);
+    m(0x17FC, 0);
+    memcpy(s_mem + POS_AT, s_mem + POS_AT + 12u * nv, 12u * nv);   /* restore */
+
+    s_stage = "the same batch, shaded on the pool";
+    nv2a_vsh_pool_enable(1);
+    clear_surface();
+    m(0x17FC, 5);
+    for (start = 0; start < nv; start += 240)
+        m(0x1810, ((nv - start > 240 ? 240 : nv - start) - 1) << 24 | start);
+    m(0x17FC, 0);
+    workers_pool = nv2a_vsh_last_workers();
+
+    for (i = 0; i < sizeof serial; i += 4)
+        if (memcmp(serial + i, s_mem + COLOR_AT + i, 4) != 0 && diff++ < 8) {
+            uint32_t a, b;
+            memcpy(&a, serial + i, 4);
+            memcpy(&b, s_mem + COLOR_AT + i, 4);
+            printf("  pixel %d,%d: serial %08X pool %08X\n",
+                   (int)(i / 4 % W), (int)(i / 4 / W), a, b);
+        }
+    {
+        int lit = 0;
+        for (i = 0; i < sizeof serial; i += 4)
+            if (serial[i] | serial[i + 1] | serial[i + 2])
+                lit++;
+        printf("vertex program: %u vertices, %d pixels drawn, serial %d / pool"
+               " %d shading thread(s), %d pixel(s) differ\n",
+               nv, lit, workers_serial, workers_pool, diff);
+        if (lit < 4096) {
+            printf("FAIL -- the program batch drew almost nothing\n");
+            return 1;
+        }
+    }
+    if (workers_serial != 1 || workers_pool < 2) {
+        printf("FAIL -- expected 1 shading thread serially and several on "
+               "the pool\n");
+        return 1;
+    }
+    if (diff) {
+        printf("FAIL -- shading on the pool changed the picture\n");
+        return 1;
+    }
+    m(0x1E94, 0);
+    return 0;
+}
+
 int main(void)
 {
     static const float I[16] = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
@@ -334,6 +490,61 @@ int main(void)
         printf("FAIL -- a batch of %d pixels woke %d workers; under "
                "NV_RASTER_MT_MIN_PIXELS the caller draws it\n", drawn, workers);
         return 1;
+    }
+
+    if (vsh_pool_case())
+        return 1;
+    /* ── the near plane is SET_CLIP_MIN, not c[59].z ────────────────────
+     *
+     * A vertex-program batch is clipped at window z = SET_CLIP_MIN (0x0394).
+     * It used to clip at c[59].z, D3D's viewport z offset -- but a title is
+     * free to keep anything in c[59]: Fable's text and post-process quads
+     * sit at z = 0 with c[59] = (0, 0, 1, 0), and every one was clipped
+     * away. Program: mov oPos, v0 / mov oD0, v3; the quad at z = 0, w = 1. */
+    {
+        enum { T = 1, V = 2, C = 3 };
+        uint32_t i0[4] = {0}, i1[4] = {0};
+        const float c59[4] = {0.0f, 0.0f, 1.0f, 0.0f};
+
+        i0[1] = (1u << 21);                         /* MAC mov, v0 */
+        i0[2] = (uint32_t)V << 26;                  /* a = v0 */
+        i0[1] |= 0x1B;                              /* .xyzw */
+        i0[3] = (0xFu << 12) | (1u << 11);          /* o[0] (oPos) .xyzw */
+        i1[1] = (1u << 21) | (3u << 9);             /* MAC mov, v3 */
+        i1[2] = ((uint32_t)V << 26) | 0;            /* a = v3 (input field) */
+        i1[1] |= 0x1B;
+        i1[3] = (0xFu << 12) | (1u << 11) | (3u << 3) | 1u;   /* oD0, final */
+        nv2a_vsh_set_instruction(0, i0);
+        nv2a_vsh_set_instruction(1, i1);
+        nv2a_vsh_set_constant(59, c59);
+        m(0x1E94, 2);                               /* TRANSFORM_EXECUTION_MODE: program */
+
+        qx0[0] = 40; qy0[0] = 40; qx1[0] = 120; qy1[0] = 100; qc[0] = colour(21);
+        emit_quads(0, 1);
+        s_stage = "a vertex-program batch at z = 0";
+        clear_surface();
+        draw_quads(0, 1);
+        bad = verify(1, &drawn);
+        printf("program quad at z = 0, c[59].z = 1, CLIP_MIN 0: %d covered,"
+               " %d wrong\n", drawn, bad);
+        if (bad) {
+            printf("FAIL -- the near plane clipped a z = 0 quad (c[59].z read"
+                   " as the near plane?)\n");
+            return 1;
+        }
+        /* And with SET_CLIP_MIN above it, the same quad is behind the near
+         * plane: nothing drawn. */
+        mf(0x0394, 0.5f);
+        clear_surface();
+        draw_quads(0, 1);
+        bad = verify(0, &drawn);
+        printf("same quad with CLIP_MIN 0.5: %d pixels written\n", bad);
+        mf(0x0394, 0.0f);
+        m(0x1E94, 0);
+        if (bad) {
+            printf("FAIL -- a quad below SET_CLIP_MIN was drawn\n");
+            return 1;
+        }
     }
 
     s_finished = 1;

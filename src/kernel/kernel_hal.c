@@ -52,7 +52,7 @@ static XBOX_THREAD_LOCAL KIRQL g_current_irql = PASSIVE_LEVEL;
  * critical section, blocked against the thread that held it, and the title
  * froze with IRQL raised on the blocked thread. Every change of
  * g_current_irql is published here. */
-extern RECOMP_TLS uint32_t g_fs_base;
+
 /* The offset lifted code adds to every guest address; host code that reads
  * guest memory on its behalf uses the same one. */
 extern ptrdiff_t g_xbox_mem_offset;
@@ -133,7 +133,6 @@ static struct {
     void *ra;
     uint32_t guest_ra, guest_esp;   /* the host ra only ever names the bridge */
 } s_holders[IRQL_HOLDERS];
-extern RECOMP_TLS uint32_t g_esp;
 
 static void irql_holder_add(void *ra)
 {
@@ -476,16 +475,6 @@ static void irq_note_wait(int line, uint64_t posted_ns)
  * keeps in these across a call is put back. g_fs_base stays: the
  * routine runs on the holder's TIB, as on the console's one CPU (a device
  * model's thread as holder: see irq_release_point). */
-extern RECOMP_TLS uint32_t g_eax, g_ecx, g_edx, g_ebx, g_esi, g_edi, g_ebp;
-extern RECOMP_TLS uint32_t g_seh_ebp, g_eflags;
-extern RECOMP_TLS int g_df, g_fp_top, g_fp_cmp;
-extern RECOMP_TLS double g_fp_stack[8];
-extern RECOMP_TLS uint16_t g_fp_control_word, g_fp_cc;
-extern RECOMP_TLS RecompXmm g_xmm0, g_xmm1, g_xmm2, g_xmm3;
-extern RECOMP_TLS RecompXmm g_xmm4, g_xmm5, g_xmm6, g_xmm7;
-extern RECOMP_TLS RecompMmx g_mm0, g_mm1, g_mm2, g_mm3;
-extern RECOMP_TLS RecompMmx g_mm4, g_mm5, g_mm6, g_mm7;
-
 typedef struct {
     uint32_t eax, ecx, edx, ebx, esi, edi, ebp, esp, seh_ebp, eflags;
     int df, fp_top, fp_cmp;
@@ -807,6 +796,21 @@ void xbox_IrqReport(void)
     int i;
 
     xbox_IrqStatsGet(&s, 1);
+    /* Gate off, once: DPCs ran beside a thread at DISPATCH_LEVEL. Harmless
+     * for a driver with its own spinlocks, corrupting for one that locks by
+     * raising IRQL alone (XAPI's USB stack: Fable lost its pad that way). */
+    if (!xbox_DispatchGateOn()) {
+        static int said;
+        long ov = xbox_DpcOverlapCount();
+        if (ov && !said) {
+            said = 1;
+            fprintf(stderr, "  [IRQ] gate off: %ld DPC(s) started while a"
+                    " guest thread was at DISPATCH_LEVEL; a driver that"
+                    " locks by raising IRQL races its DPC (try"
+                    " RECOMP_DISPATCH_GATE=1)\n", ov);
+            fflush(stderr);
+        }
+    }
     if (!xbox_IrqSafePointsOn()) {
         if (s.ungated[0] | s.ungated[1] | s.ungated[2]) {
             fprintf(stderr, "  [IRQ] ungated ISRs beside the gate holder"

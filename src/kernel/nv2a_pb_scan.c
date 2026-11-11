@@ -39,6 +39,9 @@ static int s_seen_count;
  * nothing. Unrecognised words are the tell. */
 static uint32_t s_tot_words, s_tot_unknown, s_tot_jumps, s_tot_segments;
 static uint32_t s_tot_calls;
+/* Segment scan: top-level JUMPs followed, and walks that never arrived at PUT
+ * (pb_walk_segment). */
+static uint32_t s_top_jumps, s_runaways;
 
 /* Executing is opt-in separately from surveying: a survey is read-only, while
  * the executor writes to guest memory. */
@@ -170,7 +173,9 @@ void nv2a_pb_scan_report(void)
 
     if (s_exec_enabled > 0) {
         nv2a_pb_exec_report();
-        fprintf(stderr, "[PB] %u pushbuffer calls followed\n", s_tot_calls);
+        fprintf(stderr, "[PB] %u pushbuffer calls followed, %u top-level"
+                        " jumps, %u walks that missed PUT\n",
+                s_tot_calls, s_top_jumps, s_runaways);
     }
     if (!s_seen_count || !getenv("RECOMP_PB_SCAN"))
         return;
@@ -462,15 +467,38 @@ int nv2a_pb_dma_walk(void)
     return on;
 }
 
-/* The segment scan: walk commands from va to end_va. Returns the words
- * consumed.
+/* The segment scan: walk commands from va up to end_va (PUT). Returns the
+ * words consumed.
  *
  * A CALL runs a subroutine -- a pushbuffer somewhere else in memory -- up to
  * its RETURN, then carries on after the CALL. RenderWare on the Xbox compiles
  * static geometry into pushbuffers and draws it with a CALL, so skipping CALLs
  * loses whole meshes. The NV2A has one level of subroutine, so a CALL inside a
- * call is not followed. A JUMP outside a call ends the segment: the ring's
- * wrap is handled by the caller, which scans the two pieces separately.
+ * call is not followed.
+ *
+ * A JUMP is followed, at the top level as inside a call. It used to end the
+ * segment, and two things live behind top-level jumps:
+ *  - the ring's wrap: D3D writes a JUMP back to the ring's base and carries on
+ *    there, so PUT comes back below where it was. The commands between the
+ *    previous PUT and the wrap's JUMP were scanned only up to the highest PUT
+ *    seen so far, and a JUMP beyond it lost the rest (22 KB at once in Fable);
+ *  - XDK D3DDevice_RunPushBuffer: a JUMP into a recorded pushbuffer outside
+ *    the ring, which ends with a JUMP back to the word after the first one.
+ *    Everything from there to PUT was dropped (up to 30 KB per jump), with the
+ *    visibility reports in it, and Fable waits on those in-world.
+ * Following jumps, the top-level walk ends when it arrives exactly at PUT, not
+ * when it passes it: an external pushbuffer may sit above PUT, and after a
+ * wrap the whole walk does.
+ *
+ * A walk that never arrives at PUT is out of step with the title, or loops: a
+ * re-run pushbuffer whose return JUMP still holds an earlier run's target
+ * sends the walk back over commands it already executed, round and round.
+ * (D3D patches that return JUMP from its software-method interrupt; see
+ * nv2a_pb_exec.c, NV097_NO_OPERATION.) The walk ends on the first top-level
+ * JUMP that repeats one already taken in this walk -- same word, same target,
+ * which a ring consumed once per kick never does -- on a target outside RAM,
+ * or after 0x100000 words. Each is counted as a runaway and logged once.
+ *
  * Addresses are physical, like PUT's, and reach guest memory through the
  * contiguous window. */
 /* Whether the walk is inside a pushbuffer CALL, for the executor: a flip
@@ -478,14 +506,41 @@ int nv2a_pb_dma_walk(void)
 static int s_in_call;
 int nv2a_pb_scan_in_call(void) { return s_in_call; }
 
+#define PB_SEG_MAX_WORDS 0x100000u
+#define PB_SEG_JUMP_HIST 64u          /* top-level jumps remembered per walk */
+
+static void pb_runaway(const char *why, uint32_t at, uint32_t end_va)
+{
+    if (s_runaways++ == 0) {
+        fprintf(stderr, "[PB] runaway segment walk (%s) at 0x%08X, PUT 0x%08X;"
+                        " the rest of the segment is dropped (logged once,"
+                        " counted in the report)\n", why, at, end_va);
+        fflush(stderr);
+    }
+}
+
 static uint32_t pb_walk_segment(uint32_t va, uint32_t end_va, int in_call,
                                 uint32_t *jumps, uint32_t *unknown)
 {
     const uint8_t *mem = (const uint8_t *)xbox_GetMemoryOffset();
     uint32_t words = 0;
+    /* Top-level jumps taken in this walk, as (word address, target). */
+    uint32_t hist_at[PB_SEG_JUMP_HIST], hist_to[PB_SEG_JUMP_HIST];
+    uint32_t hist_n = 0;
 
-    while (va < end_va && words < 0x100000u) {
-        uint32_t w = *(const uint32_t *)(mem + va);
+    /* Inside a call the bound is a range (the subroutine ends at its RETURN);
+     * at the top level it is PUT itself. */
+#define PB_SEG_MORE() (in_call ? va < end_va : va != end_va)
+
+    while (PB_SEG_MORE()) {
+        uint32_t w;
+
+        if (words >= PB_SEG_MAX_WORDS) {
+            if (!in_call)
+                pb_runaway("no PUT within 0x100000 words", va, end_va);
+            break;
+        }
+        w = *(const uint32_t *)(mem + va);
         va += 4;
         words++;
 
@@ -493,8 +548,28 @@ static uint32_t pb_walk_segment(uint32_t va, uint32_t end_va, int in_call,
             uint32_t target = (w & 3u) == 1u ? (w & 0xFFFFFFFCu)
                                              : (w & 0x1FFFFFFCu);
             (*jumps)++;
-            if (!in_call)
-                break;                        /* the ring: a jump ends it */
+            if (!in_call) {
+                uint32_t at = va - 4, i, n;
+
+                if ((target & 0x0FFFFFFFu) >= PB_RAM_BYTES) {
+                    pb_runaway("jump outside RAM", at, end_va);
+                    break;
+                }
+                n = hist_n < PB_SEG_JUMP_HIST ? hist_n : PB_SEG_JUMP_HIST;
+                for (i = 0; i < n; i++)
+                    if (hist_at[i] == at && hist_to[i] == target)
+                        break;
+                if (i < n) {
+                    pb_runaway("jump taken twice", at, end_va);
+                    break;
+                }
+                hist_at[hist_n % PB_SEG_JUMP_HIST] = at;
+                hist_to[hist_n % PB_SEG_JUMP_HIST] = target;
+                hist_n++;
+                s_top_jumps++;
+                va = 0x80000000u | (target & 0x0FFFFFFFu);
+                continue;
+            }
             va = 0x80000000u | (target & 0x0FFFFFFFu);
             end_va = va + 0x400000u;
             continue;
@@ -520,7 +595,7 @@ static uint32_t pb_walk_segment(uint32_t va, uint32_t end_va, int in_call,
             uint32_t method =  w & 0x1FFCu;
             int noninc = (w & 0xE0000000u) == 0x40000000u;
 
-            for (uint32_t i = 0; i < count && va < end_va; i++) {
+            for (uint32_t i = 0; i < count && PB_SEG_MORE(); i++) {
                 uint32_t m = noninc ? method : method + i * 4;
                 note(subch, m);
                 if (s_exec_enabled)
@@ -532,17 +607,19 @@ static uint32_t pb_walk_segment(uint32_t va, uint32_t end_va, int in_call,
         }
         (*unknown)++;
     }
+#undef PB_SEG_MORE
     return words;
 }
 
+/* Walk what the title submitted between two DMA_PUTs: from the previous PUT
+ * to this one, following JUMPs, so a wrap of the ring (a JUMP to its base) is
+ * just part of the walk. Virtual addresses in the contiguous window. */
 void nv2a_pb_scan_segment(uint32_t start_va, uint32_t end_va)
 {
     uint32_t words, jumps = 0, unknown = 0;
 
-    if (!pb_walk_enabled() || end_va <= start_va)
+    if (!pb_walk_enabled() || end_va == start_va)
         return;
-    if (end_va - start_va > 0x400000u)        /* a sane single-frame bound */
-        end_va = start_va + 0x400000u;
 
     if (s_exec_enabled) {
         extern void nv2a_pb_exec_walk_begin(void);
@@ -554,4 +631,10 @@ void nv2a_pb_scan_segment(uint32_t start_va, uint32_t end_va)
     s_tot_unknown += unknown;
     s_tot_jumps += jumps;
     s_tot_segments++;
+}
+
+/* Segment walks that never arrived at PUT, for the report and the tests. */
+uint32_t nv2a_pb_scan_runaways(void)
+{
+    return s_runaways;
 }

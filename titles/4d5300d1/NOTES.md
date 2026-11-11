@@ -162,3 +162,134 @@ the lock stalls D3D init (RECOMP_GUEST_CPU_TRACE).
   xbox_OhciInit() right after xbox_MemoryLayoutInit. XAPI then enumerates the pad (port 3) and polls it.
 - With RECOMP_PAD_PRESS=0x10 (Start pulses) the title leaves the title screen and reaches a loading screen with a tip
   and a progress bar. Toolkit follow-up: the template should call xbox_OhciInit too.
+
+## 2026-11-11: contiguous memory
+- `[CONTIG] arena exhausted` after the first world load: Fable frees about 16 MB of contiguous memory per load
+  transition (MmFreeContiguousMemory via its allocator 0x000AC000 -> D3D 0x001EC2C0), and the runtime kept every
+  freed block unless RECOMP_HEAP_RECLAIM was set. Toolkit fix: contiguous frees are honoured by default
+  (RECOMP_CONTIG_RECLAIM, =0 restores the old behaviour); the profile sets nothing. RECOMP_HEAP_RECLAIM (general heap,
+  NtFreeVirtualMemory) stays off for Fable.
+- 150 s run with Start pressed: 0 `arena exhausted`, last `[CONTIG]` line in use 52524 KB, peak 52524 KB of 65408 KB,
+  allocs=181 released=63 free calls=63. The run then stops at the in-world stall in sub_0012F7F0 (~220-250 flips).
+- About 26 MB of the window is Fable's own demand-paging pool (XPhysicalAlloc from sub_000AB270, xboot.ini
+  PhysicalSize = 26544 KB), which its pager never uses here (sidt/invlpg are no-ops). Harmless at this peak.
+
+## 2026-11-11: GPU back end (XBA-27 7a+7b, branch xba-gpu-backend)
+- RECOMP_GPU=1 draws with the GL back end (src/gpu, docs/technical/gpu-backend.md); the CPU rasteriser stays default.
+- Title screen, Mac, back to back: CPU rasteriser 71-93 ms render per frame (10.5-13.8 fps); GL 2.1-2.6 ms
+  (225-278 fps: the "Press START" screen is not capped by the game when the renderer is fast).
+- Frames match the CPU path: title 0.34/255 mean diff, AutoSave screen 0.33/255 (progress bar end only).
+- Every title-screen batch is a vertex-program batch (15336 of 15336); 3 shader programs cover the front end.
+- After Start both paths stop flipping after the AutoSave screen: the pushbuffer stall (WP2/WP3), not the back end.
+
+## 2026-11-11: in-world stall in sub_0012F7F0 fixed (pushbuffer jumps + deferred RunPushBuffer)
+- sub_0012F7F0 (inlined D3DDevice_GetVisibilityTestResult) waited for reports the executor never wrote: the segment
+  scan stopped at every top-level JUMP, and XDK D3DDevice_RunPushBuffer (0x00855900) jumps from the ring into recorded
+  pushbuffers. Toolkit: the scan follows jumps, one walk from the previous PUT to the new one (wraps included), and a
+  walk that loops is dropped and counted (docs/technical/pushbuffer-executor.md).
+- Following them needs D3D's software methods 0xC/0xD/0xE (NO_OPERATION with a value): they patch a re-run
+  pushbuffer's return JUMP. title.c registers fable_software_method() with nv2a_pb_set_software_method_hook(), a
+  re-implementation of sub_00855860 (node table 0x00860044, pending count 0x0085FE30). Without it the walk loops
+  (`[PB] runaway segment walk (jump taken twice)`) and the game stalls as before.
+- Not serviced (counted in `[GPU] software methods:`): 6 (InsertCallback, ~1 per frame), 8 (PGRAPH RDI, ~30 per
+  frame in-world), 9 (register poke). Delivering D3D's own PGRAPH interrupt instead is blocked by
+  write-1-to-clear on plain-RAM registers (its DPC never leaves); see the executor doc.
+- Needs the contiguous frees (RECOMP_HEAP_RECLAIM=1 for now) to get past the world load at all.
+- Side effect: the walk now runs D3D's init commands earlier, so the semaphore hand-over race (a
+  BACK_END_WRITE_SEMAPHORE_RELEASE before semaphore_watch has set the target is dropped; main thread stuck in
+  sub_00855260, 0 flips) went from 0 of 6 starts to 4 of 8 on 2026-11-11. The pending-release fix for that race
+  must land with this.
+
+## 2026-11-11: FPS quick wins (WP5)
+- The main thread's 92-100 % "in sub_00855520" was D3D's flush-kick wait sub_008556D0 (inlined into its caller in
+  the shared build): it sets PFB 0x100410 bit 16 and spins until the ack thread clears it, i.e. until the executor
+  gets through what it is drawing. overrides.c replaces it with a wait that yields, then sleeps 50 us a turn
+  (FABLE_D3D_SPIN=1: the old spin). Needs the generated code regenerated (prepare / tools.recomp --exclude-manual).
+  Mac title screen 12.3-13.2 -> 17.5-17.7 fps, main thread from 100 % spinning to sleeping.
+- Front end Sleep(50) at 0x0020BD93 / 0x0020C3C5 -> 16 ms (FABLE_FRONTEND_SLEEP_MS, kernel delay override).
+- Executor: vertex programs shaded on the raster pool; RECOMP_ACK_IDLE_US (off until the scan follows jumps).
+- Seen during these runs: 0-flip starts (D3D waiting in sub_00855260, GPU semaphore behind) in roughly 1 run in 4
+  on a loaded Mac -- the init/semaphore race of the investigation (section 4.1), more frequent than its 2 in 14.
+
+## 2026-11-11: movies and sound on (cycle 3 WP-1..3, branch xba-fable-movies)
+- Movies: the lifted XMV decoder works; its clock is the vblank count at device+0x1DE8
+  (D3DDevice_GetDisplayFieldStatus, sub_0084F650), which only moves with vblanks. title.c now defaults
+  RECOMP_VBLANK=paced and the sub_006440AB "end of file" override is gone. **Regenerate the C after pulling**
+  (sub_006440AB needs its body back): tools.prepare, or
+  `python -m tools.recomp <default.xbe> --all --split 250 --game-name "Fable: The Lost Chapters"
+  --disasm-dir <analysis>/disasm --func-id-dir <analysis>/func_id --abi-dir <analysis>/abi
+  --gen-dir <project>/src/recomp/gen --exclude-manual titles/4d5300d1/overrides.c` (~4.5 min on the Mac).
+  Against the previous tree only sub_006440AB's body, its call sites and the chunk boundaries change.
+- With movies on, DirectSound hung in its AC'97 channel reset (sub_00832BFC) when two threads reset channels
+  at once: the POSIX trap opened the page for everyone. Toolkit: read-only shared page + writable view
+  (RECOMP_AC97_ALIAS=0 for the old window).
+- DirectSound reset the whole APU on every DoWork (10 ms stall each) because the EP canary at 0xFE85A018 read 0.
+  Toolkit keeps 0x00CCCCCC there (RECOMP_APU_EP_CANARY). Reset counter at 0x834934: 0 with it, ~1,300 per 80 s
+  of movies without it.
+- Silence outside the movies: the sound/music buffers live in the 608 MB reserve at 0x2xxxxxxx and the APU
+  folded their addresses to 28 bits (read zeros). Toolkit fix in mcpx_apu_phys; title screen music
+  (LOOKOUT_POINT.wma), Oakvale.wma and the world are audible (WAV rms 500-3,800 per 10 s window, was 0).
+- Mac, 10 no-input runs of 80 s: lionhead_logo, Microsoft_Logo, intro_comp in order every time; movie fps
+  29.8-30.4 when the machine was not saturated (20-27 under load average ~20); resets 0.
+  1 of the 10 stalled in intro_comp at 1,280 flips: the kernel timer thread never came back from the USB
+  driver's DPC (sub_00875EA1 -> sub_00875B3C -> sub_00875A48 loop, 930/930 samples; OHCI0 WDH interrupts),
+  so no other DPC ran, the vblank count stopped and the decoder with it. That is the OHCI done-queue race
+  (cycle 3, 5a), not the movies; the t1 stall at 272 flips was probably the same (it was not sampled).
+- Continue -> Load Game -> AutoSave plays dream_sequence_comp.xmv (not skippable) and reaches Oakvale.
+- RECOMP_GPU=1 in Oakvale after the AutoSave: 32.6-32.8 fps with this branch, 33.0-33.2 with the previous
+  profile and tree (movies skipped), 32.6-33.4 with the previous one plus RECOMP_VBLANK=paced: paced vblanks cost
+  nothing measurable in-world.
+- Open: in 2 of 3 GPU runs with movies on, pad input stopped for good right as the title screen appeared after
+  the intro was skipped (the guest stopped polling the interrupt endpoint: no more pad reports; in one of them the
+  attract movie then stalled at 0 fps). Not seen in 2 baseline GPU runs nor in 3 CPU-rasteriser drives. Same
+  symptoms as the OHCI race (5a) and the DPC stall above; not root-caused here.
+
+## 2026-11-11: pad input dies (branch xba-fable-input)
+- Root cause of the "pad input stops for good" above and of the intro_comp stall: not the OHCI walker. XAPI's USB
+  stack (XPP section 0x0086E480-0x00876C3C) uses KeRaiseIrqlToDpcLevel as its only lock. XInputSetState (~30/s,
+  sub_0007F4C0 -> sub_008701C5 -> sub_0087249E) raises and programs a control transfer that takes 4 TDs
+  (sub_008766DD, alloc sub_00876613: eax = [0x9A614C]; [0x9A614C] = [eax+0x14]); the USB DPC sub_00875EA1 frees
+  TDs (sub_00875341), completes URBs and re-arms the pad's interrupt URB ~200/s on the kernel timer thread. The
+  ~167 TDs are shared by the control and interrupt EDs. Without the one-CPU gate kernel_drain_dpcs never waits for
+  a raised guest thread (and a raise never waits for a running DPC): ~5-7 overlaps/s, TDs queued twice or while on
+  the free list, the free list cycling. The end state is the DPC looping in sub_00875A48 (failed-TD path) for ever:
+  no more DPCs (vblank count stops, movie stalls) and the driver ISR sub_008757CD left MIE masked, so the OHCI model
+  went quiet without a warning.
+- Fix: title.c defaults RECOMP_DISPATCH_GATE=1 (one-CPU DISPATCH gate, kernel_hal.c), which orders DPCs against
+  raised threads. Needs RECOMP_VBLANK=paced (already the default). RECOMP_DISPATCH_GATE=0 for the old behaviour.
+  Investigation numbers (Mac): gate off, driven scenario (A, A, A, Start, A, A) 3 of 30 runs lost input 40-50 s in;
+  allocator window widened 50 us (debug build) 6 of 6; gate on, driven 0 of 36, widened 0 of 13. fps gate on vs off
+  at the same time: identical (30.0/30.0, 7.7/7.7 under 40 busy loops).
+- Toolkit: the OHCI model now raises FrameNumberOverflow (the driver keeps the high word of its 32-bit frame count
+  at ext+0x418 from the FNO handler 0x00875801; without it the count wrapped at 65536). It warns when MIE stays
+  masked > 2 s with a pad plugged (naming the DPC running on the timer thread), and with the gate off the IRQ
+  report counts DPCs that started while a guest thread was raised.
+- Verified on the Mac with the profile default (gate on), RECOMP_GPU=1, 5 runs in parallel: driven scenario 70 s
+  30 of 30 kept input (6/6 pad commands seen, ~22,000 pad reports each, no [OHCI0] WARNING, no stall). Debug build
+  with the TD allocator window widened 50 us: gate on 10 of 10 kept input; RECOMP_DISPATCH_GATE=0 3 of 5 lost it
+  (no report for 5 s warning, reports frozen at 4,700-6,700), the other 2 kept it at ~120 reports/s against ~400/s
+  gate on; every gate-off run printed the "[IRQ] gate off: N DPC(s) started while a guest thread was at
+  DISPATCH_LEVEL" line. RECOMP_PAD_PRESS=0x10, 150 s: 10 of 10 played lionhead_logo, Microsoft_Logo, intro_comp,
+  dream_sequence_comp in order, no 0.00 fps, no warning. In Oakvale, 2 gate-on and 2 gate-off runs at once:
+  28.1-29.5 fps both ways.
+
+## 2026-11-11: kick wait as events, visibility reports without waiting (cycle 4 WP-1, WP-2)
+- sub_008556D0 now calls xbox_Nv2aKickWait: the main thread sleeps on a condition the ack thread signals when it
+  clears the PFB flush bit; the idle ack thread sleeps on the kick (50 us steps, each ended by a kick) instead of
+  Sleep(0) polling. FABLE_D3D_SPIN=1 keeps the spin. Answering the kick after every draw batch inside the segment
+  scan was tried and dropped: the title ran ahead, took D3D's far-behind path into the 0x400B10 latch loop
+  (sub_008551F0, not latched by the segment scan) and froze after 1115 flips.
+- Reports: resolved at the idle hook / flip / after the present without waiting; a head report stuck 300 us gets a
+  glFlush, 2 ms a wait. RECOMP_GPU_ZPASS=lazy answers 1 instead of waiting (Android candidate).
+- Mac, Oakvale tutorial prompt after the AutoSave, back to back on xba-pack-loader + these two commits, load 4-7:
+  fps (steady 5 s reports) 37.4-39.4 -> 54.6-56.2 (4 runs); render 13.6 -> 13.1-13.6 ms/frame; executor report
+  resolve 25-28.5 % -> 0.4-1.0 %, yield poll 5.2-5.5 % -> 0.7-2.4 %; 9-34 waits per 5 s (~0.03-0.12 a frame),
+  idle hook 0.6-0.8 ms/frame; sub_0012F7F0 <= 0.1 % of the main thread, which sleeps in the kick wait (no yield or
+  nanosleep under sub_008556D0). Title 60 fps at the cap, process CPU 24 % -> 18-20 %. 5 runs of 160 s, no stall.
+- Before the rebase (base 8fdcf01): the loading screen ran at 3-17 fps in 3 of ~16 runs with WP-1 (30 in the others
+  and in every base run): two with an earlier single 250 us event wait (one then froze at 0 fps with the main thread
+  in the loader's Sleep loop, sub_0003B530), one with the 50 us steps at load average 33. Not seen after the rebase
+  (7 runs). Watch for it.
+- RECOMP_GPU_ZPASS=lazy, same spot: 56.2-56.4 fps, 0 flushes, 117-582 reports answered lazily per 5 s, but still
+  18-22 single-report waits per 5 s: the 512-pending cap (zpass_queue), which lazy does not change. On a tiler that
+  is still a mid-frame wait; answer the cap lazily too if the device shows it.

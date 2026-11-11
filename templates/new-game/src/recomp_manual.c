@@ -46,7 +46,9 @@ typedef void (*recomp_func_t)(void);
 
 /* ── Register state (defined in xbox_memory_layout.c) ──────── */
 
-extern uint32_t g_eax;
+/* g_eax, g_esp, ...: fields of the per-thread g_cpu, named by macros in
+ * xbox_memory_layout.h. Never declare them yourself. */
+#include "xbox_memory_layout.h"
 extern ptrdiff_t g_xbox_mem_offset;
 
 /* ── Manual function overrides ─────────────────────────────── */

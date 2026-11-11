@@ -480,6 +480,13 @@ struct MCPXAPUState {
     bool pause_requested;
     bool is_idle;
 
+    /* d->lock taken by any thread but the frame thread goes through
+     * mcpx_apu_lock_guest, which keeps these; the frame thread hands the lock
+     * over only while lock_waiters > 0 (see the end of its loop). */
+    volatile LONG lock_waiters;  /* threads blocked in mcpx_apu_lock_guest */
+    volatile LONG lock_grants;   /* acquisitions through mcpx_apu_lock_guest */
+    volatile LONG lock_handovers; /* frame-thread passes that waited for one */
+
     MemoryRegion *ram;
     uint8_t *ram_ptr;
     MemoryRegion mmio;
@@ -547,6 +554,7 @@ void mcpx_apu_update_dsp_preference(MCPXAPUState *d);
 void mcpx_apu_dsp_frame(MCPXAPUState *d, float mixbins[NUM_MIXBINS][NUM_SAMPLES_PER_FRAME]);
 void mcpx_apu_dsp_ack_poll(MCPXAPUState *d);
 void mcpx_apu_dsp_gprst_write(uint32_t val);
+int mcpx_apu_dsp_mem_read(uint64_t addr, uint64_t *val);
 
 /* Monitor (host output): call after each 32-sample frame; on the last frame
  * of an EP period it adds the software mixer and test tone to frame_buf and
@@ -559,6 +567,14 @@ int64_t mcpx_apu_pace_step(MCPXAPUState *d, int64_t now_us);
 /* The period pace_step admitted was rendered: spend its credit. A pass that
  * renders nothing (front end trapped) spends none. */
 void mcpx_apu_pace_rendered(MCPXAPUState *d);
+
+/* d->lock from any thread other than the frame thread (guest accesses,
+ * the software mixer, the test tone, shutdown). Every such acquisition goes
+ * through these, so the frame thread knows someone waits: it yields the lock
+ * at the end of a frame only then, instead of calling SwitchToThread() on
+ * every 0.67 ms frame (which on a busy host cost a scheduler quantum each). */
+void mcpx_apu_lock_guest(MCPXAPUState *d);
+void mcpx_apu_unlock_guest(MCPXAPUState *d);
 
 /* What the frame thread does with the next 32-sample frame, from SECTL and
  * FECTL: render it through the VP, nothing while the front end is trapped or

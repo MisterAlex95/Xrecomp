@@ -8,7 +8,9 @@ set(NV2A_BACKEND_TEST_SOURCES
     ../../src/kernel/nv2a_flip_hold.c)
 add_executable(nv2a-ffp-backend-test nv2a_ffp_backend_test.c ${NV2A_BACKEND_TEST_SOURCES})
 add_executable(nv2a-present-sync-test nv2a_present_sync_test.c ${NV2A_BACKEND_TEST_SOURCES})
-foreach(target nv2a-ffp-backend-test nv2a-present-sync-test)
+add_executable(nv2a-zpass-test nv2a_zpass_test.c ${NV2A_BACKEND_TEST_SOURCES})
+add_executable(nv2a-flip-cap-test nv2a_flip_cap_test.c ${NV2A_BACKEND_TEST_SOURCES})
+foreach(target nv2a-ffp-backend-test nv2a-present-sync-test nv2a-zpass-test nv2a-flip-cap-test)
     target_include_directories(${target} PRIVATE ../../src/kernel ../../src)
     if(MSVC)
         target_compile_definitions(${target} PRIVATE _CRT_SECURE_NO_WARNINGS)
@@ -26,3 +28,11 @@ set_tests_properties(nv2a-present-sync PROPERTIES ENVIRONMENT
 # checks the unchanged order without it (the test above) and the swapped one with it.
 add_test(NAME nv2a-ffp-backend-strip-winding COMMAND nv2a-ffp-backend-test)
 set_tests_properties(nv2a-ffp-backend-strip-winding PROPERTIES ENVIRONMENT "RECOMP_STRIP_ALT_WINDING=1")
+# Deferred visibility reports with a fake back end; RECOMP_GPU_ZPASS=lazy and =always.
+add_test(NAME nv2a-zpass COMMAND nv2a-zpass-test)
+add_test(NAME nv2a-zpass-lazy COMMAND nv2a-zpass-test)
+set_tests_properties(nv2a-zpass-lazy PROPERTIES ENVIRONMENT "RECOMP_GPU_ZPASS=lazy")
+add_test(NAME nv2a-zpass-always COMMAND nv2a-zpass-test)
+set_tests_properties(nv2a-zpass-always PROPERTIES ENVIRONMENT "RECOMP_GPU_ZPASS=always")
+# RECOMP_GPU_FPS_CAP on a fake clock: fast frames held, slow frames not.
+add_test(NAME nv2a-flip-cap COMMAND nv2a-flip-cap-test)

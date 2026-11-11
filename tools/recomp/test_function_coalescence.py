@@ -741,6 +741,58 @@ def test_immediate_callback_in_gap_is_recovered(code, recovered):
         assert subject.func_db[callback]["called_by"] == [BASE]
 
 
+@pytest.mark.parametrize("pattern, recovered", [
+    ("bf{}57ffd0c3", True),   # mov edi, callback; push edi; call eax; ret
+    ("bf{}56ffd0c3", False),  # mov edi, constant; push esi: not passed on
+    ("b8{}c3", False),        # mov eax, label; ret: an SEH filter's result
+])
+def test_immediate_pushed_through_a_register_is_a_callback(pattern, recovered):
+    callback = BASE + 0x80
+    following = BASE + 0x100
+    code = bytes.fromhex(pattern.format(callback.to_bytes(4, "little").hex()))
+    raw = bytearray(b"\xcc" * 0x200)
+    raw[:len(code)] = code
+    raw[0x80] = raw[0x100] = 0xC3
+    subject = translator(bytes(raw), [])
+    subject.func_db.clear()
+    subject.func_db.update({
+        BASE: function(BASE, BASE + len(code)),
+        following: function(following, following + 1),
+    })
+    subject.discover_static_indirect_targets()
+    assert (callback in subject.func_db) is recovered
+
+
+@pytest.mark.parametrize("through_factory", [True, False])
+def test_immediate_callback_may_fall_into_an_alias(through_factory):
+    # `push factory; call eax; ret`, and the factory is `jmp ctor`. A stray
+    # table word made an alias of the ctor's last instruction, so the ctor's
+    # own code stops at that start with no ret: it runs on into the alias.
+    # The same holds for a callback the immediate names directly.
+    ctor, inner, factory, following = (
+        BASE + 0x40, BASE + 0x44, BASE + 0x80, BASE + 0x100)
+    named = factory if through_factory else ctor
+    pattern = b"\x68" + named.to_bytes(4, "little") + bytes.fromhex("ffd0c3")
+    raw = bytearray(b"\xcc" * 0x200)
+    raw[:len(pattern)] = pattern
+    raw[0x40:0x45] = b"\x90" * 4 + b"\xc3"
+    raw[0x80:0x85] = b"\xe9" + (ctor - (factory + 5)).to_bytes(4, "little", signed=True)
+    raw[0x100] = 0xC3
+    subject = translator(bytes(raw), [])
+    subject.func_db.clear()
+    subject.func_db.update({
+        BASE: function(BASE, BASE + len(pattern)),
+        inner: {**function(inner, inner + 1),
+                "detection_method": "tail_jump_alias"},
+        following: function(following, following + 1),
+    })
+    subject.discover_static_indirect_targets()
+    assert (factory in subject.func_db) is through_factory
+    assert subject.func_db[ctor]["end"] == inner
+    body = subject.translate_function(ctor, subject.func_db[ctor])
+    assert f"sub_{inner:08X}" in body, body
+
+
 @pytest.mark.parametrize("cover", ["tail_jump_alias", "prologue"])
 def test_immediate_inside_another_range_is_not_a_callback(cover):
     # A constant that lands in an alias's code decodes into its ret, but only

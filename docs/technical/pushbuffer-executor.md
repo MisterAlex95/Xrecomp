@@ -58,7 +58,21 @@ the thread that would otherwise answer.
   With the bits cleared only between passes of the poll loop, one pass can be a
   whole rendered frame, so a level load — thousands of kickoffs — looked
   frozen. The walker now clears them every 256 words
-  (`xbox_Nv2aAckBusyBits`).
+  (`xbox_Nv2aAckBusyBits`) under `RECOMP_PB_WALK=dma`. The segment scan does
+  not: there the kickoff is answered at the top of each pass, so the title
+  stays one kick ahead of the executor. Answered mid-segment too (tried for
+  *Fable*, after every draw batch), the title ran further ahead, saw the GPU
+  behind by `DMA_GET` (published when a segment ends), took D3D's "GPU far
+  behind" path and waited in the `0x400B10` loop below, which the segment
+  scan does not latch: frozen after 1115 flips.
+- **Kickoff as events.** A title override of D3D's kickoff wait can call
+  `xbox_Nv2aKickWait(reg, mask)` (*Fable*'s `sub_008556D0` does): the title
+  sleeps until the ack thread clears the bit and the ack thread, with nothing
+  to walk, sleeps until the next kick, instead of both polling (in *Fable*'s
+  Oakvale 85 % of the main thread and 7-18 % of the executor). Every wait is
+  timed (1 ms, `RECOMP_ACK_IDLE_US`), so a lost wake-up costs that much. The
+  `DMA_PUT` store that follows the wait wakes nothing, so the ack thread
+  yields for up to 200 us after an ack that released the title.
 - **Fence mirrors.** A project that registers `xbox_Nv2aMirrorFence` has the
   poll thread copy the title's "submitted" fence into its "consumed" one. The
   walk now follows every CALL and JUMP, so a pass can be long, and a mirror
@@ -221,10 +235,20 @@ of the code here:
   from the projected, mirrored one. Decide culling per triangle from the
   projected screen positions and draw with the rasteriser's culling off.
 
-Not passed on yet: the register-combiner state, and texture stages 1–3 (a back
-end sees stage 0 and the diffuse colour), so effects that need a second stage
-or a combiner program only appear on the CPU rasteriser. Extend `Nv2aBatch`
-when it matters rather than adding callbacks.
+A back end that sets `NV2A_BACKEND_CAP_PIXEL` in `Nv2aBackend.caps` also gets,
+per batch, `Nv2aBatch.full` (each vertex with both colours, the fog factor,
+the four stages' texture coordinates and clip-space w) and `Nv2aBatch.pixel`
+(the register combiners, all four texture stages with their stage-program
+mode, the fog colour, the clip-plane modes, and which of the CPU
+rasteriser's three colour rules applies: combiners, stage 0 × diffuse, or the
+screen-space path's texel-or-flat-colour). `nv2a_backend_texture_bytes` gives
+the guest bytes a texture occupies, for hashing. The GL back end
+(`src/gpu`, [gpu-backend.md](gpu-backend.md)) is built on it. Without the
+flag a back end sees stage 0 and the diffuse colour, as before.
+
+The executor reports `[GPU] render X ms/frame` next to the fps line: wall time
+spent drawing per frame (batches, clears, the present sync), whichever path
+draws.
 
 ## Switches
 
@@ -258,3 +282,85 @@ enough. Burnout 3 did, at its Crash Nav menu, with the main thread in
 
 Turn the walk on for a project that delivers the GPU's software-method
 interrupt, or to bring up a title the segment scan draws wrongly.
+
+## The Segment Scan Follows Jumps
+
+The default walk (`nv2a_pb_scan_segment`, called from the NV2A poll loop) runs
+the commands between the previous `DMA_PUT` and the new one. It used to stop at
+the first top-level `JUMP` and to treat a PUT below the previous one as a wrap
+whose bounds it learned from the lowest and highest PUT seen. Both lost
+commands:
+
+| Case | What was lost |
+|---|---|
+| XDK `D3DDevice_RunPushBuffer`: a `JUMP` from the ring into a recorded pushbuffer, which ends with a `JUMP` back to the word after the first one | everything from the jump to PUT, up to 30 KB per jump in *Fable*, with the visibility reports (`GET_REPORT`) the title then waits on for good (`sub_0012F7F0`) |
+| a wrap whose `JUMP` to the ring's base lies beyond every PUT seen before | the commands between the highest PUT and the jump (22 KB at once in *Fable*) |
+
+The walk now goes from the previous PUT to the new one following every `JUMP`
+(old and new style), so a wrap is just a jump to the ring's base. At the top
+level it ends when it arrives exactly at PUT — an external pushbuffer can sit
+above PUT, and after a wrap the whole walk does. A title that moved `DMA_GET`
+itself (XDK D3D's ring reset writes it with PUT) has the walk start at that GET.
+`CALL`/`RETURN` are unchanged (one level).
+
+A walk that never arrives at PUT is dropped and counted (`[PB] ... walks that
+missed PUT` in the report; the first one also logs `[PB] runaway segment walk
+(...)`): a top-level jump taken twice in one walk — same word, same target,
+which a ring consumed once per kick never does; it is the shape of a re-run
+pushbuffer whose return `JUMP` still holds the previous run's target, see
+[D3D Software Methods](#d3d-software-methods) — a jump outside RAM, or 0x100000
+words without reaching PUT.
+
+`tests/nv2a_pb_walk` checks it: a recorded pushbuffer and its return jump (new
+and old style), a wrap beyond every earlier PUT, a return jump patched by a
+software method, an unpatched one (stopped, counted), a jump to itself, a jump
+outside RAM; each method is executed exactly once.
+
+## D3D Software Methods
+
+XDK D3D uses `NV097_NO_OPERATION` (`0x0100`) with a non-zero value as a
+software method: the GPU stops and raises a PGRAPH interrupt, and D3D's handler
+reads the value from PGRAPH (`TRAPPED_DATA_LOW`, `0x400708`). The low five bits
+say which method, the rest is its payload. Seen in *Fable* (dispatcher
+`sub_00859C40`):
+
+| Type | Handler does |
+|---|---|
+| 1 | swap bookkeeping: the flip hold uses its interval (`nv2a_flip_hold.c`) |
+| 5 | `KeSetEvent` on a fence event |
+| 6, 7 | `D3DDevice_InsertCallback`: calls `[0x401A88]` with `[0x40186C]` (methods `0x1D8C`/`0x1D90` pushed just before) |
+| 8, 9 | PGRAPH RDI writes, a register poke |
+| 0xC, 0xD, 0xE | deferred `RunPushBuffer`: patch the return `JUMP` (and fixups) of a recorded pushbuffer that is run again before the GPU passed its previous run |
+
+The 0xC–0xE ones matter for the walk: until the handler has run, the recorded
+pushbuffer's last word still jumps back to where its previous run came from,
+and the walk loops (see [The Segment Scan Follows Jumps](#the-segment-scan-follows-jumps)).
+
+The executor calls a hook the game project registers,
+`nv2a_pb_set_software_method_hook()` (`nv2a_backend.h`), for every software
+method except the swap, on the executor thread, before it reads the next
+pushbuffer word — the GPU waits for the handler on the console too. The
+*Fable* profile (`titles/4d5300d1/title.c`) services 0xC–0xE exactly as its
+D3D's `sub_00855860` does. The report counts what was serviced and, by type,
+what was not (`[GPU] software methods: ...`).
+
+### Why not the title's own handler
+
+Delivering the interrupt to the title's D3D (PGRAPH_INTR, NSOURCE, the trapped
+method and data, PMC_INTR_0 bit 12, then its ISR and DPC) would service every
+type without a per-title hook. It does not work against this runtime yet:
+
+- D3D's DPC (`sub_008595E0` in *Fable*) loops while its PGRAPH handler returns
+  non-zero, and that handler returns PGRAPH_INTR as read back after its
+  write-1-to-clear acknowledgement. The NV2A registers are plain memory here:
+  writing the value back leaves it set, so the DPC re-runs the method (patches
+  twice, decrements D3D's pending count twice) and never leaves. The vblank
+  gets away with a watcher thread because its ack is a visible change; this one
+  writes the value that is already there. It needs a trapped PGRAPH page or a
+  write-1-to-clear model.
+- The DPC is shared with the vblank, which the timer thread delivers; running
+  it synchronously on the executor thread races that delivery (both mask and
+  unmask `PMC_INTR_EN_0`), and the executor thread has no guest stack or TIB.
+
+Until then a title that needs other types (InsertCallback callbacks, register
+pokes) has to service them in its hook.

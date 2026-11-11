@@ -20,14 +20,26 @@
  * so a back end only ever sees surface pixels. Blend, depth, alpha, cull and
  * stencil state arrive in Nv2aRenderState.
  *
- * ponytail: register-combiner state and texture stages 1-3 are not passed on:
- * a back end sees stage 0 and the diffuse colour. Extend Nv2aBatch when that
- * matters rather than adding callbacks.
+ * A back end that sets NV2A_BACKEND_CAP_PIXEL in Nv2aBackend.caps also gets,
+ * with every batch, the full vertex (both colours, fog, the four stages'
+ * texture coordinates, clip-space w) and the pixel state: the register
+ * combiners, all four texture stages, fog colour and clip-plane modes. That
+ * is what a GPU renderer needs to reproduce the CPU rasteriser's colour
+ * (src/gpu/nv2a_gl.c is one). Without the flag a back end sees stage 0 and
+ * the diffuse colour only, as before.
+ *
+ * A back end that also sets NV2A_BACKEND_CAP_PROGRAM and draw_program runs
+ * vertex programs itself: a batch drawn with a vertex program then arrives
+ * untransformed (Nv2aProgramBatch: the program, the constants with change
+ * stamps, the batch's attributes gathered once per unique vertex, and a
+ * triangle index list), with the same surface, render and pixel state.
+ * Fixed-function and screen-space batches still arrive as triangles.
  */
 #ifndef NV2A_BACKEND_H
 #define NV2A_BACKEND_H
 
 #include <stdint.h>
+#include "nv2a_combiner.h"   /* Nv2aCombiner, for Nv2aPixelState */
 
 /* The colour surface being drawn into, in real (anti-aliased) pixels.
  * aa_sx/aa_sy give the anti-aliasing factor, so width/aa_sx is the logical
@@ -38,6 +50,28 @@ typedef struct {
     uint32_t pitch;             /* bytes per row */
     uint32_t bytes_per_pixel;   /* 2 or 4 */
     uint32_t aa_sx, aa_sy;      /* 1 or 2 each */
+    /* SET_SURFACE_FORMAT as sent: colour format bits 0-3, zeta format bits
+     * 4-7 (1 Z16, 2 Z24S8), type bits 8-11 (2 swizzled: log2 width/height in
+     * bits 16-19/24-27), anti-aliasing bits 12-15. clip_x/clip_y: the clip
+     * rectangle's origin in real pixels (width/height above are its size). */
+    uint32_t format;
+    uint32_t clip_x, clip_y;
+    /* 0: there is no colour surface to write -- SET_SURFACE_COLOR_OFFSET is
+     * 0 (a depth-only pass such as a shadow map) or the surface would land
+     * on the title's image. A back end then draws into depth/stencil alone
+     * (rs->zeta_va) and neither creates nor reads back a colour target at
+     * color_va: Fable's 768x768 shadow pass at offset 0 resolved to
+     * 0x80000000 and its read-back overwrote the title's textures there.
+     * clear() then carries Z/stencil flags only. */
+    uint32_t color_valid;
+    /* draw() only: the colour surface is there (color_valid) but
+     * SET_COLOR_MASK writes no channel -- a depth pre-pass or a visibility
+     * proxy on the frame's own surface. A back end may draw it into the
+     * colour target with every channel masked (it then writes nothing
+     * there and need not read it back), or into depth/stencil alone. Fable
+     * interleaves such batches with its normal ones on the back buffer; sent
+     * as color_valid 0 they cost a framebuffer switch each way. */
+    uint32_t color_masked;
 } Nv2aSurface;
 
 /* A texture as the title programmed it. uv in Nv2aVertex are in texels. */
@@ -51,6 +85,12 @@ typedef struct {
      * a linear texture) and the raw SET_TEXTURE_FILTER word (MIN in bits
      * 16-23). A back end that ignores them samples level 0. */
     uint32_t levels, filter;
+    /* Guest address of the 256-entry A8R8G8B8 palette (format 0x0B), the
+     * border colour (0xAARRGGBB) and whether FORMAT selects it for address
+     * mode 4, and whether the texture is a cube map (six faces, each
+     * nv2a_backend_texture_bytes() / 6 apart). Zero in a struct a back end
+     * builds itself means: no palette, no border, not a cube. */
+    uint32_t palette, border, border_color, cube;
 } Nv2aTexture;
 
 typedef struct {
@@ -80,14 +120,164 @@ typedef struct {
      * that ignores these draws that pass over the whole surface. */
     uint32_t stencil_enable, stencil_func, stencil_ref, stencil_func_mask;
     uint32_t stencil_write_mask, stencil_fail, stencil_zfail, stencil_zpass;
+    /* SET_ZPASS_PIXEL_COUNT_ENABLE: a visibility test is counting the pixels
+     * this batch passes the depth test with (see zpass_read). */
+    uint32_t zpass_enable;
+    /* SET_POLY_OFFSET_FILL_ENABLE, SET_POLYGON_OFFSET_SCALE_FACTOR / _BIAS:
+     * glPolygonOffset's factor and units, the units counted in the zeta
+     * format's own steps (1/0xFFFF of the range for Z16). Shadow-map
+     * passes push their depth back with these. The CPU rasteriser ignores
+     * them. */
+    uint32_t poly_offset_fill;
+    float    poly_offset_factor, poly_offset_units;
 } Nv2aRenderState;
+
+/* A vertex as the CPU transform left it, for back ends with
+ * NV2A_BACKEND_CAP_PIXEL. pos: x, y in surface pixels (real, anti-aliased),
+ * z the window z the title produced (0..0xFFFF for Z16, 0..0xFFFFFF for
+ * Z24S8; not clamped), w the clip-space w (> 0 after near-plane clipping, 1
+ * for screen-space batches). Interpolate with 1/w like the rasteriser.
+ * tex: what the vertex program wrote to oT0..oT3 (s, t, r, q): normalised
+ * for swizzled and DXT textures, in texels for linear ones. fog: the fog
+ * factor after the fog unit (1 = no fog), what the combiners read as fog.a. */
+typedef struct {
+    float pos[4];
+    float d0[4], d1[4];         /* diffuse, specular: r, g, b, a in 0..1 */
+    float fog;
+    float tex[4][4];
+} Nv2aVertexFull;
+
+/* How the CPU rasteriser decides a batch's colour, which a back end should
+ * copy to draw the same picture. */
+enum {
+    NV2A_SHADE_COMBINERS = 0,   /* register combiners (Nv2aPixelState.rc) */
+    NV2A_SHADE_MODULATE  = 1,   /* stage 0 texel * diffuse (no combiner program yet) */
+    NV2A_SHADE_REPLACE   = 2    /* screen-space batch: stage 0 texel, else the
+                                 * first vertex's colour, flat; no depth test, no
+                                 * alpha test; tex[0] in texels for every format */
+};
+
+/* One texture stage. mode is the stage's SHADER_STAGE_PROGRAM field
+ * (0 none, 1 2D, 2 3D, 3 cube, 4 pass-through, 5 clip plane, 6 bump-env,
+ * 7 bump-env with luminance, others dot modes; the CPU rasteriser reads 6
+ * and up as zero); valid says the stage's texture registers describe
+ * something samplable.
+ *
+ * Stages 1-3, modes 6 and 7 (xemu psh.c PS_TEXTUREMODES_BUMPENVMAP[_LUM]):
+ * the stage samples its texture at its coordinates plus bump_mat times
+ * (dU, dV), dU/dV the signed blue and green of the input stage's texel
+ * (Nv2aPixelState.other_stage_input); mode 7 then multiplies the texel by
+ * bump_scale * L + bump_offset, L the input texel's red.
+ * SET_TEXTURE_SET_BUMP_ENV_MAT(st) words as matrix elements m00, m01, m10,
+ * m11 (the method's own word order is 00, 01, 11, 10). */
+typedef struct {
+    uint32_t    mode;
+    uint32_t    valid;
+    Nv2aTexture tex;
+    float       bump_mat[4];
+    float       bump_scale, bump_offset;
+} Nv2aTexStage;
+
+typedef struct {
+    uint32_t     shade;             /* NV2A_SHADE_* */
+    Nv2aCombiner rc;                /* meaningful for NV2A_SHADE_COMBINERS */
+    uint32_t     fog_color;         /* 0xAARRGGBB (converted from FOG_COLOR) */
+    uint32_t     clip_plane_mode;   /* SET_SHADER_CLIP_PLANE_MODE */
+    Nv2aTexStage stage[4];
+    /* SET_SHADOW_DEPTH_FUNC (0x1E6C): 0 NEVER .. 7 ALWAYS, in GL's order
+     * (GL_NEVER + value). A stage sampling a depth texture format
+     * (0x2A-0x31, a shadow map) in PROJECT3D mode reads 1 where
+     * "stored depth <func> r/q" holds, r/q clamped to the depth format's
+     * range (xemu psh.c, psh_append_shadowmap), else 0; in PROJECT2D mode
+     * "stored depth <func> 0". The CPU rasteriser reads such stages as
+     * white. */
+    uint32_t     shadow_func;
+    /* SET_SHADER_OTHER_STAGE_INPUT (0x1E78): the stage a bump-env stage
+     * reads dU/dV from -- stage 1 always stage 0, stage 2 bits 16-19,
+     * stage 3 bits 20-23 (xemu psh.c input_tex). */
+    uint32_t     other_stage_input;
+} Nv2aPixelState;
+
+/* A vertex-program batch for a back end with NV2A_BACKEND_CAP_PROGRAM.
+ *
+ * Program: the instruction words (nv2a_vsh_interp.c encoding) from the start
+ * slot through FINAL; `hash` is equal for equal words. Constants: c[0..191]
+ * as the program reads them; const_stamp[i] is the serial of the last write
+ * to c[i] and const_serial the newest, so a copy synced at serial S needs
+ * exactly the c[i] with const_stamp[i] > S.
+ *
+ * Vertices: `attrs` holds vertex_count vertices, each the attributes in
+ * `streams` (bit a = v[a]) as four floats, in increasing a: what the
+ * executor's own fetch reads (D3DCOLOR as r, g, b, a; absent components
+ * 0, 0, 0, 1). Every other input reads imm[a], its current value. Only
+ * inputs the program reads are streamed. indices: a triangle list into
+ * attrs, in the order and winding the CPU path draws the primitive.
+ *
+ * The program's oPos is in the title's logical pixels: x, y scale by aa_sx,
+ * aa_sy to surface pixels; z is window z; w the clip-space w, +0 meaning 1
+ * (transform_vertex). The executor clips at w > 0 and at the near plane
+ * z >= state->depth_min (SET_CLIP_MIN). fog_*: the fog unit's registers;
+ * the fog factor from oFog.x is fog_factor() in nv2a_pb_exec.c. */
+/* A vertex array as the title programmed it (SET_VERTEX_DATA_ARRAY_*):
+ * element i of the input is at guest address offset + i * stride, in NV097
+ * data type `type` (0 D3DCOLOR, 1 normalised short, 2 float, 4 normalised
+ * unsigned byte, 5 short, 6 packed 11:11:10) with `size` components. */
+typedef struct {
+    uint32_t offset, type, size, stride;
+} Nv2aRawAttr;
+
+typedef struct {
+    const uint32_t (*ins)[4];
+    uint32_t        ins_count;
+    uint64_t        hash;
+    const float    (*constants)[4];
+    const uint64_t *const_stamp;
+    uint64_t        const_serial;
+    const float    *attrs;
+    uint32_t        vertex_count;
+    uint32_t        streams;
+    const float    (*imm)[4];       /* [16] */
+    const uint16_t *indices;
+    uint32_t        index_count;
+    float           aa_sx, aa_sy;
+    uint32_t        fog_enable, fog_mode;
+    float           fog_param[2];
+    /* NV2A_BACKEND_CAP_RAW_VERTEX only. raw non-NULL: attrs is NULL and the
+     * inputs in `streams` are to be read from guest memory, raw[a] for v[a]
+     * (16 entries); `indices` count from element raw_first (vertex i of the
+     * batch is element raw_first + i of every stream) and vertex_count
+     * elements from raw_first on are inside guest memory. A back end that
+     * cannot read some format returns 0 from draw_program; the executor then
+     * sends the same batch gathered (raw NULL). */
+    const Nv2aRawAttr *raw;
+    uint32_t        raw_first;
+} Nv2aProgramBatch;
 
 typedef struct {
     const Nv2aVertex  *vertices;    /* triangle list: count is a multiple of 3 */
     uint32_t           count;
     const Nv2aTexture *texture;     /* NULL: untextured */
     const Nv2aRenderState *state;
+    /* NV2A_BACKEND_CAP_PIXEL only (NULL otherwise): count entries matching
+     * vertices[], and the pixel state. */
+    const Nv2aVertexFull  *full;
+    const Nv2aPixelState  *pixel;
+    /* draw_program only (NULL in draw()): vertices and full are NULL then,
+     * count is 0, and pixel is always set. */
+    const Nv2aProgramBatch *program;
 } Nv2aBatch;
+
+#define NV2A_BACKEND_CAP_PIXEL 0x1u
+/* The back end culls from the winding (Nv2aRenderState cull_*): the executor
+ * then hands over every triangle strip with one winding (odd triangles with
+ * their first two vertices swapped, as RECOMP_STRIP_ALT_WINDING does), as the
+ * hardware assembles strips. Without it strips arrive as (i, i+1, i+2). */
+#define NV2A_BACKEND_CAP_CULL  0x2u
+#define NV2A_BACKEND_CAP_PROGRAM 0x4u   /* with CAP_PIXEL and draw_program */
+/* With CAP_PROGRAM: vertex-program batches drawn from vertex arrays (not
+ * INLINE_ARRAY) may arrive with their arrays as the title stored them
+ * (Nv2aProgramBatch.raw) instead of gathered. */
+#define NV2A_BACKEND_CAP_RAW_VERTEX 0x8u
 
 typedef struct {
     /* flags: CLEAR_SURFACE bits (Z 0x1, stencil 0x2, colour 0xF0).
@@ -96,7 +286,43 @@ typedef struct {
                   uint32_t flags, uint32_t argb, uint32_t zstencil);
     void (*draw)(const Nv2aSurface *s, const Nv2aBatch *b);
     void (*flip)(void);
+    uint32_t caps;              /* NV2A_BACKEND_CAP_*; 0 in older initialisers */
+    /* Visibility tests. The pixels the back end's batches passed the depth
+     * test with while zpass_enable was set, since the previous call (the
+     * call resets the count). The executor calls it at GET_REPORT, adding to
+     * what it reports, and at CLEAR_REPORT_VALUE, discarding. NULL: reports
+     * carry 0 for a back end's batches. A count may be a lower bound
+     * (GLES 3.0 queries say only "any passed": report 1). */
+    uint32_t (*zpass_read)(void);
+    /* Deferred visibility tests (both or neither; NULL: the executor reads
+     * zpass_read synchronously). zpass_end closes the count of the batches
+     * drawn with zpass_enable since the previous zpass_end and returns a
+     * ticket for it, without waiting for the GPU. zpass_resolve(ticket,
+     * block, &count) returns 1 with that count once it is in, 0 while it is
+     * not (only when block is 0; with block set it waits). The executor
+     * resolves tickets in the order zpass_end issued them, and writes the
+     * report slot only then (see nv2a_pb_exec.c, "Visibility reports").
+     * RECOMP_GPU_ZPASS=sync uses zpass_read instead. */
+    uint32_t (*zpass_end)(void);
+    int (*zpass_resolve)(uint32_t ticket, int block, uint32_t *count);
+    /* NV2A_BACKEND_CAP_PROGRAM: draw a vertex-program batch (b->program).
+     * Return 0 to decline it (the executor then transforms on the CPU and
+     * calls draw() with triangles); RECOMP_GPU_VSH=0 never calls it. */
+    int (*draw_program)(const Nv2aSurface *s, const Nv2aBatch *b);
+    /* Optional, with zpass_resolve: submit the GPU work queued so far
+     * without waiting for it (glFlush), so the counts zpass_resolve polls
+     * for come in. The executor calls it at most once per report that a
+     * title may be spinning on (unresolved at the head of the queue for
+     * 300 us across idle calls), never with RECOMP_GPU_ZPASS=lazy. NULL:
+     * the executor waits for that report after 2 ms instead. */
+    void (*zpass_flush)(void);
 } Nv2aBackend;
+
+/* The NV2A poll loop calls this when a tick found nothing new to walk
+ * (the walker has caught up with PUT): pending visibility reports the GPU
+ * has finished are written then, without waiting; one the title may be
+ * spinning on is flushed for, then waited for (see nv2a_pb_exec.c). */
+void nv2a_pb_exec_idle(void);
 
 /* Register (or, with NULL, remove) the back end. Call before the title starts
  * submitting work; the executor must also be enabled (RECOMP_PB_EXEC). */
@@ -112,10 +338,53 @@ void nv2a_backend_register(const Nv2aBackend *backend);
 void nv2a_backend_register_with_present_sync(const Nv2aBackend *backend,
                                              void (*present_sync)(void));
 
+/* The surface a flip presents (FLIP_STALL): the biggest colour surface
+ * drawn since the previous flip, as the CPU path presents it. */
+typedef struct {
+    uint32_t va;                /* guest address of pixel (0,0), resolved */
+    uint32_t pitch;             /* bytes per row */
+    uint32_t bpp;               /* 2 or 4 */
+    uint32_t format;            /* SET_SURFACE_FORMAT (colour format in bits 0-3) */
+    uint32_t x, y, w, h;        /* the clip rectangle drawn, real pixels */
+} Nv2aPresentSurface;
+
+/* Register a back end with a present hook instead of a present sync. At
+ * every flip, before the window snapshot and the frame dump, the executor
+ * calls present(now, sync, ready) on its thread. The back end makes the
+ * pixels of one finished frame available in guest memory and describes
+ * that surface in *ready, returning 1 (0: nothing to show this flip):
+ *
+ *   sync != 0 (a frame dump will read `now`): ready must be `now`, its
+ *     pixels in guest memory on return;
+ *   sync == 0: ready may be an earlier frame's surface whose read-back
+ *     has completed since (an asynchronous read-back is one frame behind);
+ *     its bytes must stay valid until the window has copied them, which
+ *     happens before present returns control to the title.
+ *
+ * The back end stores surfaces in their own colour format (X1R5G5B5 for
+ * colour formats 1 and 2, R5G6B5 for 3), and the window and frame dumps
+ * read them so; the CPU rasteriser writes R5G6B5 for every 16-bit surface.
+ *
+ * Only the presented surface needs to be in guest memory: other surfaces
+ * are the back end's business (it reads them back when the title samples
+ * them in a form it cannot use, or when the guest CPU needs them). flip()
+ * still runs after the snapshot and dump. A later register call replaces
+ * this registration. */
+void nv2a_backend_register_with_present(const Nv2aBackend *backend,
+                                        int (*present)(const Nv2aPresentSurface *now,
+                                                       int sync,
+                                                       Nv2aPresentSurface *ready));
+
 /* Decode a whole texture to 0xAARRGGBB, row-major, width*height entries.
  * Handles every format the executor can sample (swizzled, linear, DXT).
  * Returns 0 if the format is not supported. */
 int nv2a_backend_decode_texture(const Nv2aTexture *tex, uint32_t *argb_out);
+
+/* Bytes of guest memory a texture occupies: every mip level it declares
+ * (rounded to the NV2A's 128-byte face alignment) times six for a cube map,
+ * or pitch * height for a linear one. What a back end hashes to notice that
+ * a texture changed. 0 if the format is unknown. */
+uint32_t nv2a_backend_texture_bytes(const Nv2aTexture *tex);
 
 /* Where BACK_END_WRITE_SEMAPHORE_RELEASE (0x1D70) values land: the guest VA
  * of the semaphore the title reads GPU progress from (for XDK D3D, the
@@ -126,5 +395,19 @@ int nv2a_backend_decode_texture(const Nv2aTexture *tex, uint32_t *argb_out);
  * ponytail: the title supplies the address instead of the executor resolving
  * the semaphore context DMA object through RAMIN. */
 void nv2a_pb_set_semaphore_target(uint32_t guest_va);
+
+/* D3D's software methods: NV097_NO_OPERATION (0x0100) with a non-zero value,
+ * which the GPU traps to D3D's interrupt handler on the console. The low five
+ * bits are the method, the rest its payload. hook(value) is called for every
+ * one except the swap (1), on the executor thread, before the walk reads the
+ * next pushbuffer word -- the GPU waits for the handler on the console, and a
+ * handler may rewrite the pushbuffer ahead of it. Return non-zero when it was
+ * serviced. NULL removes the hook. The guest's main thread runs meanwhile:
+ * guest words it also writes need atomic updates.
+ *
+ * ponytail: a title hook re-implements what its D3D's handler does, instead
+ * of the executor delivering the interrupt to it (see pushbuffer-executor.md,
+ * "D3D Software Methods"). */
+void nv2a_pb_set_software_method_hook(int (*hook)(uint32_t param));
 
 #endif /* NV2A_BACKEND_H */

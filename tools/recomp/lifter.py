@@ -2867,6 +2867,8 @@ class Lifter:
         # none of them, the indexed jump became an unresolvable indirect call,
         # and sprintf silently produced the wrong string.
         inside = self._leading_arms(targets)
+        if table_va not in self.jump_table_targets and len(inside) == len(targets):
+            inside += self._arms_past_null_slots(table_va + 4 * len(targets))
         # Two arms is the smallest thing worth calling a switch; one is more
         # likely a coincidence than a jump table -- unless a null slot ends
         # the table right after it. DOA2U's record lookup (0x00292970)
@@ -2911,6 +2913,32 @@ class Lifter:
         if offset is None or offset + 4 > len(self.xbe_data):
             return None
         return struct.unpack_from('<I', self.xbe_data, offset)[0]
+
+    def _arms_past_null_slots(self, va, max_nulls=16):
+        """Arms of a table that goes on after null slots, starting at va.
+
+        A switch over a sparse set of states with no default leaves the unused
+        slots null. Fable's inflate (sub_00196A80) does `dec ecx; jmp
+        [ecx*4 + 0x00199868]` over 18 slots, three of them null: read up to
+        the first null, the table had 4 arms and the other 11 states left
+        through an indirect tail jump nothing could resolve. Only a run of
+        nulls followed by more arms of this function continues the table.
+        """
+        arms = []
+        while True:
+            nulls = 0
+            while nulls <= max_nulls and self._table_word(va + 4 * nulls) == 0:
+                nulls += 1
+            if not nulls or nulls > max_nulls:
+                return arms
+            run = self._read_jump_table(va + 4 * nulls)
+            inside = self._leading_arms(run)
+            if not inside:
+                return arms
+            arms += inside
+            if len(inside) < len(run):
+                return arms
+            va += 4 * (nulls + len(run))
 
     def _leading_arms(self, targets):
         """Entries up to the first one outside the current function."""
