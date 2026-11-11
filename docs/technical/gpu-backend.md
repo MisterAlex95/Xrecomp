@@ -25,7 +25,7 @@ presenting from the GPU. The last section lists what 7c–7e have to do.
 | `src/gpu/nv2a_gl_context.c` | Headless context: CGL (macOS), EGL pbuffer or surfaceless (Android, Linux); loss detection. |
 | `src/gpu/nv2a_gl_api.h` | GL headers per platform: `OpenGL/gl3.h`, `GLES3/gl3.h`, libepoxy. |
 | `tests/nv2a_gl_shader` | 400 random combiner programs through the generated shaders, each pixel compared with `nv2a_rc_eval`. |
-| `tests/nv2a_gl_scale` | The internal resolution policy (0x121 / 0x2121 back buffer, swizzled and depth-only targets), scissor rounding at 2.25, visibility count scaling, `RECOMP_GPU_SCALE_TARGETS` parsing. |
+| `tests/nv2a_gl_scale` | The internal resolution policy (0x121 / 0x2121 back buffer, swizzled and depth-only targets), the scale sticking to a scaled target's memory (Burnout 3's HUD clip and menu scissor, promotion, other pitch / swizzled), scissor rounding at 2.25, visibility count scaling, `RECOMP_GPU_SCALE_TARGETS` parsing. |
 | `tests/nv2a_gl_vsh` | 600 random vertex programs plus ILU/a0 edge cases through the translator (transform feedback), compared with `nv2a_vsh_interp.c`; eight deliberate translator mutations must be caught. |
 
 One code path for desktop GL 3.3 core / macOS 4.1 core and GLES 3.0: the
@@ -215,6 +215,22 @@ decided from the colour surface when a batch binds it:
    target has one of each. The 640x480 minimum stays logical.
 5. A batch with every colour channel masked and no colour target yet (the
    depth-only framebuffer) takes its colour surface's scale.
+6. **The scale sticks to a scaled target's memory**
+   (`nv2a_gl_target_scale`): a linear surface bound on memory that already
+   has a scaled target with the same bytes per pixel and pitch keeps that
+   target's scale, whatever its clip -- a sub-rectangle of a frame-class
+   surface is the frame. Burnout 3 binds its 640x480 back buffer with clip
+   0,0 640x480 for its post-process quads and 0,16 640x448 for its HUD
+   (menus: other scissor rectangles, 160,16 480x447); keyed on the clip
+   alone the target went 1 -> 2 -> 1 twice a frame (120 rescales per 60
+   frames) and the presented target was the 1x one. Never down: a native
+   target later bound as frame class is promoted (re-created once) and
+   stays. Swizzled surfaces, another pitch and depth-only passes follow
+   rules 1-5; a title that only ever binds its back buffer through a
+   sub-rectangle stays native. All four callers (`rt_get`,
+   `bind_depth_only`, both draw paths' `s_draw_sc`) go through
+   `surface_scale`, so draw, depth and target agree.
+   `RECOMP_GPU_SCALE_STICKY=0` turns the rule off, for comparison.
 
 How the rest follows (`nv2a_gl.c`): `GlRT.w/h/gw/gh` and `GlDepth.w/h` stay
 in guest pixels; `GlRT.sc` / `GlDepth.sc` give the scale and every GL size
@@ -227,9 +243,23 @@ and a pixel at scale n covers 1/n of a guest pixel); the units are not, and
 depth-only targets keep the factor. Visibility counts on desktop GL are
 exact samples, n² times more: each query keeps its target's scale and its
 count is divided by sc², rounded, at least 1 when any sample passed (GLES
-reports 1 either way). A target whose scale class changes (never seen in
-Fable) goes back through guest memory and is re-created ("target
-rescales").
+reports 1 either way). A target whose scale changes (a native target
+promoted, memory reused at another pitch; neither seen in Fable or
+Burnout 3's race) goes back through guest memory and is re-created
+("target rescales").
+
+**Scratch texture unit.** A batch binds its stage textures before its
+target (`bind_stage_textures`, then `bind_target`), so anything that binds
+a texture in between must not use the active unit -- the stage bound last
+would sample it. Creating, uploading to or copying into a texture
+(target creation and `rt_grow`, depth creation, seeding, resolves,
+`tex_upload`) binds through `sh_tex_scratch`, on unit `SH_UNITS` (4),
+which no stage samples; stage binds make their own unit active
+(`sh_active`). Burnout 3's white centre at scale 2 was this: the back
+buffer, re-created at another scale while stage 1 held the bloom, became
+the composite's bloom texture, seeded with the previous final frame, a
+frame fed back into itself every frame. `rt_free` also drops the stage
+entries pointing at the freed target (`s_stage_rt`).
 
 The **native resolve** of a scaled target (`rt_resolve`: a guest-size
 texture + FBO, linear `glBlitFramebuffer` through `sh_blit`, cached by the
@@ -282,6 +312,21 @@ point as the build without this work (an interposer counting 86
 functions; the rest differ by timing), and no blit or extra query at all.
 RECOMP_GPU_FAKE_RESET (lost and oom) at scale 2 recovers on the title
 screen (the back buffer reseeds by blit).
+
+Measured (M1 Max, Burnout 3 PAL, boot through the menus to a Silver Lake
+race on a pad script, headless, 335 s, 2026-11-11), with the sticky rule
+and the scratch unit: 0 target rescales, 0 depth re-creations and no
+`rescaled` line over whole runs at 2, 2.02 and 2.25; the presented target
+1280x960 / 1293x970 / 1440x1080; 14 colour targets; race brightness (mean
+luma of the native dumps) 52-92 at 2.02, 52-85 at 2.25, 59-83 at 2, against
+53-92 at scale 1; about 59 fps at every scale. Before: at 2, 120 rescales
+per 60 frames, the race white from the centre (luma 202-226), the
+presented target 640x464 (native). With the scratch unit alone
+(`RECOMP_GPU_SCALE_STICKY=0`) the picture is right but the rescales stay
+(120 per 60 frames, presented 640x464). Fable at 2 and 2.25 is unchanged:
+the same targets, 0 rescales, the same statistics, last dumps within
+0.3/255 of the build without these rules (that build against itself:
+0.33-0.37/255).
 
 Launcher: Settings › Graphics › **Internal resolution (GPU renderer)**: Auto
 (the profile's choice: 1 for now, no title sets it), 1× (original), 2×, 3×,
