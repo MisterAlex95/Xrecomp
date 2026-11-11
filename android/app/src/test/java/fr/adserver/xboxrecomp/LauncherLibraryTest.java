@@ -363,7 +363,9 @@ public class LauncherLibraryTest {
 
     @Test
     public void navigationHomeAndBack() throws Exception {
-        for (int i = 0; i < 6; i++)
+        // Two full rows of the five-column grid: with a short last row, D-pad down from the second column lands on
+        // the first card below and up then comes back to the first column, not to the card it left.
+        for (int i = 0; i < 10; i++)
             folderGame(i);
         useFolder();
         LauncherActivity a = launch();
