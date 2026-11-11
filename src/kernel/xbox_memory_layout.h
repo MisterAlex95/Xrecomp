@@ -182,6 +182,12 @@ void xbox_Nv2aFrameCounterFlip(void);
 /* A word of the NV2A register file (offset from the register base); NULL until
  * the aperture is mapped. */
 volatile uint32_t *xbox_Nv2aRegPtr(uint32_t offset);
+/* A kick that waits for the GPU's ack, as events rather than a poll: set
+ * `mask` in the register (an NV2A word, e.g. the PFB flush kick 0x100410)
+ * and return once the NV2A ack thread has cleared it. While the title kicks
+ * through this, the ack thread sleeps until a kick instead of polling (see
+ * xbox_memory_layout.c). For title overrides of D3D's KickOff wait. */
+void xbox_Nv2aKickWait(volatile uint32_t *reg, uint32_t mask);
 /* Registered counters the title turned out to move itself (its vblank DPC),
  * which the toolkit has stopped bumping; for the [GPU] report. */
 uint32_t xbox_Nv2aFrameCountersOwned(void);

@@ -1680,6 +1680,98 @@ static void framebuffer_probe_tick(void)
 #define NV2A_ACK_PCRTC_INTR_0       0x600100u
 #define NV2A_ACK_PCRTC_INTR_VBLANK  (1u << 0)
 
+/* ---- The PFB flush kick as events (xbox_Nv2aKickWait) -----------------
+ *
+ * D3D's KickOff sets the PFB flush bit and spins until the GPU clears it,
+ * then writes DMA_PUT. Nothing can see that store from translated code, so
+ * the guest polled (yield, then 50 us sleeps that wake late on a loaded
+ * host) and the ack thread polled back (Sleep(0)) while it waited for the
+ * next kick: in Fable's Oakvale 85 % of the main thread and 7-18 % of the
+ * executor went into the two polls. A title override that calls
+ * xbox_Nv2aKickWait turns them into two conditions:
+ *   - "kicked": the guest set the bit. The ack thread, with nothing to walk,
+ *     waits on it instead of polling (nv2a_ack_wait);
+ *   - "acked": the ack thread cleared the bit (nv2a_ack_busy_bits), so the
+ *     waiting guest goes on at once.
+ * Every wait is timed (1 ms for the guest, the ack thread's 250 us cap), so
+ * a lost wake-up costs that much, never a hang. Lost wake-ups are avoided
+ * all the same: the guest counts itself a waiter before it looks at the bit,
+ * and the ack thread looks at the waiters after it cleared the bit, both
+ * sequentially consistent, so either the guest sees the bit clear or the ack
+ * thread sees the waiter and broadcasts under the mutex.
+ *
+ * Titles that never call it keep the polls exactly as before; so does
+ * Windows. */
+#if !defined(_WIN32)
+#include <pthread.h>
+#include <sched.h>
+static pthread_mutex_t s_kick_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t  s_kick_kicked = PTHREAD_COND_INITIALIZER;
+static pthread_cond_t  s_kick_acked = PTHREAD_COND_INITIALIZER;
+static int      s_kick_events;            /* a title waits through xbox_Nv2aKickWait */
+static int      s_kick_waiters;           /* guests waiting on "acked" */
+static int      s_kick_idle;              /* the ack thread waits on "kicked" */
+static uint32_t s_kick_seq;               /* kicks signalled */
+static uint32_t s_kick_seen;              /* the ack thread's view of s_kick_seq */
+static uint64_t s_kick_released_ns;       /* the last ack that released a waiter */
+/* After an ack released a waiter, how long the ack thread polls for the
+ * DMA_PUT that follows (a woken thread's latency on a loaded host). */
+#define NV2A_KICK_PUT_NS  (200u * 1000u)
+
+static void kick_deadline(struct timespec *ts, long ns)
+{
+    clock_gettime(CLOCK_REALTIME, ts);
+    ts->tv_nsec += ns;
+    if (ts->tv_nsec >= 1000000000L) {
+        ts->tv_sec++;
+        ts->tv_nsec -= 1000000000L;
+    }
+}
+#endif
+
+/* The guest side: set `mask` in the register and wait until the ack thread
+ * clears it. Same register traffic as D3D's own loop. */
+void xbox_Nv2aKickWait(volatile uint32_t *reg, uint32_t mask)
+{
+#if defined(_WIN32)
+    InterlockedOr((volatile LONG *)reg, (LONG)mask);
+    while (*reg & mask)
+        Sleep(0);
+#else
+    __atomic_fetch_or(reg, mask, __ATOMIC_SEQ_CST);
+    pthread_mutex_lock(&s_kick_mu);
+    s_kick_events = 1;
+    s_kick_seq++;
+    if (s_kick_idle)
+        pthread_cond_signal(&s_kick_kicked);
+    for (;;) {
+        struct timespec ts;
+        __atomic_add_fetch(&s_kick_waiters, 1, __ATOMIC_SEQ_CST);
+        if (!(__atomic_load_n(reg, __ATOMIC_SEQ_CST) & mask)) {
+            __atomic_sub_fetch(&s_kick_waiters, 1, __ATOMIC_SEQ_CST);
+            break;
+        }
+        kick_deadline(&ts, 1000000L);     /* 1 ms: the lost-wake-up bound */
+        pthread_cond_timedwait(&s_kick_acked, &s_kick_mu, &ts);
+        __atomic_sub_fetch(&s_kick_waiters, 1, __ATOMIC_SEQ_CST);
+    }
+    pthread_mutex_unlock(&s_kick_mu);
+#endif
+}
+
+/* The ack thread cleared the PFB flush bit: wake whoever waits for it. */
+static void kick_acked(void)
+{
+#if !defined(_WIN32)
+    if (!__atomic_load_n(&s_kick_waiters, __ATOMIC_SEQ_CST))
+        return;
+    pthread_mutex_lock(&s_kick_mu);
+    s_kick_released_ns = xbox_HostNowNs();
+    pthread_cond_broadcast(&s_kick_acked);
+    pthread_mutex_unlock(&s_kick_mu);
+#endif
+}
+
 /* Clear the request bits "hardware" would clear on its own.
  *
  * Also called by the pushbuffer walker between commands. This thread executes
@@ -1715,8 +1807,11 @@ static void nv2a_ack_busy_bits(int flip_held)
         }
         /* Interlocked: the vblank-ack thread and the guest change other
          * bits of the same word meanwhile. */
-        if (*r & mask)
+        if (*r & mask) {
             InterlockedAnd((volatile LONG *)r, (LONG)~mask);
+            if (NV2A_ACK[i].offset == NV2A_ACK_PFB_FLUSH)
+                kick_acked();
+        }
     }
 }
 
@@ -1785,7 +1880,13 @@ static int nv2a_ack_wanted(volatile uint32_t *regs, uint32_t put_seen)
  * it had seen, so a thread that saw fewer PUTs lost commands at a wrap and
  * Fable stopped at 0 flips in most starts; with the jump-following scan it
  * started 6 of 6. Windows keeps the yield: its sleeps are a millisecond or
- * more. */
+ * more.
+ *
+ * A title that kicks through xbox_Nv2aKickWait (above) can wake it: then,
+ * outside a flip hold, the thread waits on "kicked" for at most the same
+ * RECOMP_ACK_IDLE_US instead of yielding, in the same 50 us steps (each
+ * ended early by a kick), and yields only for the DMA_PUT that follows an
+ * ack which released a waiter. */
 #define NV2A_ACK_SPIN_NS  (2u * 1000u * 1000u)
 #define NV2A_ACK_STEP_US  50
 static void nv2a_ack_wait(volatile uint32_t *regs, int flip_held)
@@ -1811,6 +1912,42 @@ static void nv2a_ack_wait(volatile uint32_t *regs, int flip_held)
         put_seen = put;
         if (!flip_held)
             busy_ns = now;                 /* a kick, or one not yet answered */
+    }
+    if (idle_us && !flip_held && __atomic_load_n(&s_kick_events, __ATOMIC_RELAXED)) {
+        /* The title kicks through xbox_Nv2aKickWait: wait for "kicked"
+         * rather than poll. Except right after an ack released a waiter:
+         * KickOff writes DMA_PUT just after its wait, and that store wakes
+         * nothing, so it is polled for, briefly. */
+        struct timespec ts;
+        if (regs[NV2A_USER_DMA_GET / 4] != put || nv2a_ack_wanted(regs, put))
+            return;
+        if (now - __atomic_load_n(&s_kick_released_ns, __ATOMIC_RELAXED)
+                < NV2A_KICK_PUT_NS) {
+            sched_yield();
+            return;
+        }
+        /* In NV2A_ACK_STEP_US steps, looking at the busy bits and PUT after
+         * each as the sleeps below do: a title also writes PUT or an
+         * interrupt status without a kick, and Fable's loader waits on
+         * those (a single 250 us wait made its loading screen 3-10 fps
+         * and once froze it). */
+        for (waited = 0; waited < idle_us; waited += NV2A_ACK_STEP_US) {
+            int kicked;
+            pthread_mutex_lock(&s_kick_mu);
+            if (s_kick_seq == s_kick_seen && !nv2a_ack_wanted(regs, put)) {
+                s_kick_idle = 1;
+                kick_deadline(&ts, NV2A_ACK_STEP_US * 1000L);
+                pthread_cond_timedwait(&s_kick_kicked, &s_kick_mu, &ts);
+                s_kick_idle = 0;
+            }
+            kicked = s_kick_seq != s_kick_seen;
+            s_kick_seen = s_kick_seq;
+            pthread_mutex_unlock(&s_kick_mu);
+            if (kicked || regs[NV2A_USER_DMA_GET / 4] != put
+                    || nv2a_ack_wanted(regs, put))
+                return;
+        }
+        return;
     }
     if (!idle_us || (!flip_held && now - busy_ns < NV2A_ACK_SPIN_NS)) {
         Sleep(0);

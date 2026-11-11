@@ -58,7 +58,21 @@ the thread that would otherwise answer.
   With the bits cleared only between passes of the poll loop, one pass can be a
   whole rendered frame, so a level load — thousands of kickoffs — looked
   frozen. The walker now clears them every 256 words
-  (`xbox_Nv2aAckBusyBits`).
+  (`xbox_Nv2aAckBusyBits`) under `RECOMP_PB_WALK=dma`. The segment scan does
+  not: there the kickoff is answered at the top of each pass, so the title
+  stays one kick ahead of the executor. Answered mid-segment too (tried for
+  *Fable*, after every draw batch), the title ran further ahead, saw the GPU
+  behind by `DMA_GET` (published when a segment ends), took D3D's "GPU far
+  behind" path and waited in the `0x400B10` loop below, which the segment
+  scan does not latch: frozen after 1115 flips.
+- **Kickoff as events.** A title override of D3D's kickoff wait can call
+  `xbox_Nv2aKickWait(reg, mask)` (*Fable*'s `sub_008556D0` does): the title
+  sleeps until the ack thread clears the bit and the ack thread, with nothing
+  to walk, sleeps until the next kick, instead of both polling (in *Fable*'s
+  Oakvale 85 % of the main thread and 7-18 % of the executor). Every wait is
+  timed (1 ms, `RECOMP_ACK_IDLE_US`), so a lost wake-up costs that much. The
+  `DMA_PUT` store that follows the wait wakes nothing, so the ack thread
+  yields for up to 200 us after an ack that released the title.
 - **Fence mirrors.** A project that registers `xbox_Nv2aMirrorFence` has the
   poll thread copy the title's "submitted" fence into its "consumed" one. The
   walk now follows every CALL and JUMP, so a pass can be long, and a mirror

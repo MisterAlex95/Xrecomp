@@ -284,13 +284,18 @@ void sub_0004B440(void)
  * caller, into which the shared build had inlined it), a core the
  * rasteriser's workers need, above all on a handheld's five fast cores.
  *
- * The same register traffic and the same flags out, but the wait yields, and
- * after 64 empty turns sleeps 50 us a turn. FABLE_D3D_SPIN=1 restores the
- * bare spin. */
+ * The same register traffic and the same flags out, but the wait is
+ * xbox_Nv2aKickWait: the guest sleeps on a condition the ack thread signals
+ * when it clears the bit, and the ack thread, idle, sleeps on one the kick
+ * signals (xbox_memory_layout.c). It used to yield 64 times and then sleep
+ * 50 us a turn: in Oakvale 3-4 sleeps a kick, each waking late, 850-890 ms
+ * a second spent in the loop, and the ack thread polled for the next kick
+ * meanwhile. FABLE_D3D_SPIN=1 restores the bare spin. */
+extern void xbox_Nv2aKickWait(volatile uint32_t *reg, uint32_t mask);
+
 void sub_008556D0(void)
 {
     static int spin = -1;
-    unsigned turn = 0;
 
     if (spin < 0) {
         const char *e = getenv("FABLE_D3D_SPIN");
@@ -299,19 +304,12 @@ void sub_008556D0(void)
     eax = MEM32(0x00862288u);
     eax = MEM32(eax + 0x1C28);
     ecx = MEM32(eax + 0x100410) | 0x10000u;
-    MEM32(eax + 0x100410) = ecx;
-    while (MEM32(eax + 0x100410) & 0x10000u) {
-        if (spin)
-            continue;
-#ifndef _WIN32
-        if (turn < 64) {
-            turn++;
-            sched_yield();
-        } else {
-            struct timespec ts = { 0, 50 * 1000 };
-            nanosleep(&ts, NULL);
-        }
-#endif
+    if (spin) {
+        MEM32(eax + 0x100410) = ecx;
+        while (MEM32(eax + 0x100410) & 0x10000u)
+            ;
+    } else {
+        xbox_Nv2aKickWait(&MEM32(eax + 0x100410), 0x10000u);
     }
     /* test [nv+0x100410], 0x10000 came out zero: ZF and PF set, CF, SF,
      * OF clear. */
