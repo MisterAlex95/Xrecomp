@@ -106,7 +106,7 @@ The executor is itself opt-in: set `RECOMP_PB_EXEC=1` to execute the pushbuffer.
 | `RECOMP_VBLANK[=paced]` | no vblanks | Raises vblanks: a ~50 Hz tick, or `paced` for the 60 Hz schedule. `0` or empty is off. | `kernel_bridge.c` |
 | `RECOMP_FLIP_PACING[=edge]` | off | Holds each flip to the vblank count. | `nv2a_pb_exec.c` |
 | `RECOMP_FFP_FLIP_NORMALS` | off | Lights the side of a fixed-function mesh that faces the viewer. Not hardware behaviour. | `nv2a_pb_exec.c` |
-| `RECOMP_CLIP_NEAR_Z` | on | `0` turns off the near-plane clip. | `nv2a_pb_exec.c` |
+| `RECOMP_CLIP_NEAR_Z` | on | `0` turns off the near-plane clip (window z below `SET_CLIP_MIN`). | `nv2a_pb_exec.c` |
 | `RECOMP_SWIZZLED_RT` | on | `0` stops rendering into swizzled render targets. | `nv2a_pb_exec.c` |
 | `RECOMP_NO_COMBINERS` | off | Skips the register combiners. | `nv2a_pb_exec.c` |
 | `RECOMP_NO_VSH` | off | Skips vertex programs. | `nv2a_pb_exec.c` |
@@ -134,7 +134,7 @@ The executor is itself opt-in: set `RECOMP_PB_EXEC=1` to execute the pushbuffer.
 | `RECOMP_TEX_STATE` | off | Texture state per report. | `nv2a_pb_exec.c` |
 | `RECOMP_TEX_DUMP=<prefix>` | off | Writes each distinct texture as a BMP, first use only. | `nv2a_pb_exec.c` |
 | `RECOMP_TEX_DUMP_EVERY=N` | 0 | Dumps every Nth texture bind instead. | `nv2a_pb_exec.c` |
-| `RECOMP_FB_DUMP=<prefix>` | off | Writes the draw surface as a BMP at each report. | `nv2a_pb_exec.c`, `fb_present.c` |
+| `RECOMP_FB_DUMP=<prefix>` | off | Writes a BMP per report: the frame the next flip presents (complete), or, for a title that has not flipped yet or stopped flipping, the draw surface as it is; before the first flip also the first frames that draw geometry. | `nv2a_pb_exec.c`, `fb_present.c` |
 | `RECOMP_FB_DUMP_FLIPS` | off | `1` dumps every flip; any other value names a file whose existence turns dumping on. | `nv2a_pb_exec.c` |
 | `RECOMP_FIND_NAN` | off | Scans for NaN matrices at every report. | `nv2a_pb_exec.c` |
 | `RECOMP_FIND_QUAD` | off | Scans once for quad vertices. | `nv2a_pb_exec.c` |

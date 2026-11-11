@@ -736,6 +736,10 @@ static uint32_t surface_bpp(void)
  * the sequence. */
 static int s_flip_dumping;
 
+/* Set by the report (fb_dump_report) for the next FLIP_STALL to dump the
+ * frame it presents. */
+static int s_dump_at_flip;
+
 static void dump_surface_bmp(void)
 {
     const char *prefix = getenv("RECOMP_FB_DUMP");
@@ -3538,7 +3542,8 @@ static void raster_xf_triangle(const Nv2aVshOutput *va, const Nv2aVshOutput *vb,
  *
  * The polygon is clipped against w = NV_CLIP_W and then the near plane
  * z = 0 (Sutherland-Hodgman), divided back by w, and fanned. The near plane
- * is screen z = the viewport's z offset (s_xf_o[2], 0 for D3D). Clipping at
+ * is screen z = SET_CLIP_MIN (s_xf_o[2], 0 for D3D); a vertex on it is
+ * inside. Clipping at
  * w alone let geometry between the eye and the near plane through at huge
  * screen coordinates: torn streaks at the frame's edges. RECOMP_CLIP_NEAR_Z=0
  * clips at w only.
@@ -3546,8 +3551,8 @@ static void raster_xf_triangle(const Nv2aVshOutput *va, const Nv2aVshOutput *vb,
  * check, which is correct, just slower for huge off-screen triangles. */
 #define NV_CLIP_W 1e-3f
 
-/* The z offset of the current batch's screen-space transform (the near
- * plane, see above), scaled like the vertices. Set by xf_set_viewport(). */
+/* [2]: the near plane in window z (SET_CLIP_MIN, see above); [0], [1]: the
+ * c[59] viewport offset, scaled like the vertices. Set by xf_set_viewport(). */
 static float s_xf_o[3];
 
 static void xf_lerp(const Nv2aVshOutput *a, const Nv2aVshOutput *b, float t,
@@ -3768,13 +3773,18 @@ static int transform_batch(uint32_t n)
     return 1;
 }
 
+/* The near plane is SET_CLIP_MIN (0x0394), the window z the hardware clips
+ * below, which D3D sets from the viewport's MinZ. It used to be c[59].z, on
+ * the assumption that c[59] holds D3D's viewport offset; Fable keeps other
+ * data in c[58]/c[59] (c[59].z = 1, 0.99, 15.87 ...), so every z = 0 quad
+ * -- all its text and the whole bloom chain -- was clipped away. */
 static void xf_set_viewport(void)
 {
     const float *of = nv2a_vsh_constant(59);
 
     s_xf_o[0] = of[0] * s_gpu.aa_sx;
     s_xf_o[1] = of[1] * s_gpu.aa_sy;
-    s_xf_o[2] = of[2];
+    s_xf_o[2] = reg_f(0x0394);                    /* SET_CLIP_MIN */
 }
 
 static void raster_batch_program(void)
@@ -4013,9 +4023,10 @@ static void raster_batch(void)
      * in only some of them, so a report almost always lands on a surface that
      * was wiped a moment ago -- which reads as "nothing was drawn" when the
      * triangles went down correctly just before it. A few frames that actually
-     * contain geometry are worth more than any number of clears. */
+     * contain geometry are worth more than any number of clears. Only until
+     * the first flip: from then on the report dumps presented frames. */
     if (s_gpu.tris_drawn != before && s_drawn_dumps < FB_DUMP_AFTER_DRAW
-        && !s_flip_dumping) {
+        && !s_flip_dumping && !s_gpu.flips) {
         s_drawn_dumps++;
         dump_surface_bmp();
     }
@@ -5172,6 +5183,11 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
                 if (on)
                     dump_surface_bmp();
             }
+            /* The report's picture (fb_dump_report): the frame just
+             * presented, complete, rather than a surface caught mid-frame. */
+            if (s_dump_at_flip && !s_flip_dumping)
+                dump_surface_bmp();
+            s_dump_at_flip = 0;
         }
         s_gpu.drawn_stale = 1;
         if (s_backend && s_backend->flip)
@@ -5232,6 +5248,9 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
     /* Depth. */
     case 0x030C: s_gpu.depth_test = param; break; /* DEPTH_TEST_ENABLE */
     case 0x0354: s_gpu.depth_func = param; break; /* DEPTH_FUNC */
+    case 0x0394:                                  /* SET_CLIP_MIN: the near plane */
+    case 0x0398:                                  /* SET_CLIP_MAX */
+        break;                                    /* read from s_reg */
     case 0x035C: s_gpu.depth_mask = param; break; /* DEPTH_MASK */
     case 0x0214: s_gpu.zeta_offset = param; break;/* SURFACE_ZETA_OFFSET */
     case 0x1D8C: s_gpu.zstencil_clear = param; break; /* ZSTENCIL_CLEAR_VALUE */
@@ -5486,6 +5505,25 @@ static unsigned long report_now_ms(void)
 #endif
 }
 
+/* The report's RECOMP_FB_DUMP picture. The report runs whenever its timer
+ * says, usually in the middle of a frame: dumping the surface then showed
+ * whatever part of the frame was drawn so far (Fable's grass on black, the
+ * sky and the rest of the world still to come). So the dump is left to the
+ * next FLIP_STALL, which writes the frame it presents. A title that has never
+ * flipped, or has stopped flipping since the previous report, gets the
+ * surface as it is. */
+static void fb_dump_report(void)
+{
+    if (s_flip_dumping)
+        return;                           /* every flip is dumped already */
+    if (s_gpu.flips && !s_dump_at_flip) {
+        s_dump_at_flip = 1;
+        return;
+    }
+    s_dump_at_flip = 0;
+    dump_surface_bmp();
+}
+
 void nv2a_pb_exec_report(void)
 {
     {
@@ -5549,8 +5587,7 @@ void nv2a_pb_exec_report(void)
             s_gpu.min_x, s_gpu.max_x, s_gpu.min_y, s_gpu.max_y);
     /* One picture per report rather than per clear: a title clears hundreds of
      * times a second and nobody wants that many files. */
-    if (!s_flip_dumping)
-        dump_surface_bmp();
+    fb_dump_report();
 
     /* Drawn and skipped separately: "nothing appeared" and "every batch needed
      * a vertex program we do not run" look identical on screen, and only one

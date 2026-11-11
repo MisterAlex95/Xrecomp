@@ -22,6 +22,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "nv2a_backend.h"
+#include "nv2a_vsh_interp.h"
 
 #if defined(_WIN32)
 #include <windows.h>
@@ -492,6 +493,58 @@ int main(void)
 
     if (vsh_pool_case())
         return 1;
+    /* ── the near plane is SET_CLIP_MIN, not c[59].z ────────────────────
+     *
+     * A vertex-program batch is clipped at window z = SET_CLIP_MIN (0x0394).
+     * It used to clip at c[59].z, D3D's viewport z offset -- but a title is
+     * free to keep anything in c[59]: Fable's text and post-process quads
+     * sit at z = 0 with c[59] = (0, 0, 1, 0), and every one was clipped
+     * away. Program: mov oPos, v0 / mov oD0, v3; the quad at z = 0, w = 1. */
+    {
+        enum { T = 1, V = 2, C = 3 };
+        uint32_t i0[4] = {0}, i1[4] = {0};
+        const float c59[4] = {0.0f, 0.0f, 1.0f, 0.0f};
+
+        i0[1] = (1u << 21);                         /* MAC mov, v0 */
+        i0[2] = (uint32_t)V << 26;                  /* a = v0 */
+        i0[1] |= 0x1B;                              /* .xyzw */
+        i0[3] = (0xFu << 12) | (1u << 11);          /* o[0] (oPos) .xyzw */
+        i1[1] = (1u << 21) | (3u << 9);             /* MAC mov, v3 */
+        i1[2] = ((uint32_t)V << 26) | 0;            /* a = v3 (input field) */
+        i1[1] |= 0x1B;
+        i1[3] = (0xFu << 12) | (1u << 11) | (3u << 3) | 1u;   /* oD0, final */
+        nv2a_vsh_set_instruction(0, i0);
+        nv2a_vsh_set_instruction(1, i1);
+        nv2a_vsh_set_constant(59, c59);
+        m(0x1E94, 2);                               /* TRANSFORM_EXECUTION_MODE: program */
+
+        qx0[0] = 40; qy0[0] = 40; qx1[0] = 120; qy1[0] = 100; qc[0] = colour(21);
+        emit_quads(0, 1);
+        s_stage = "a vertex-program batch at z = 0";
+        clear_surface();
+        draw_quads(0, 1);
+        bad = verify(1, &drawn);
+        printf("program quad at z = 0, c[59].z = 1, CLIP_MIN 0: %d covered,"
+               " %d wrong\n", drawn, bad);
+        if (bad) {
+            printf("FAIL -- the near plane clipped a z = 0 quad (c[59].z read"
+                   " as the near plane?)\n");
+            return 1;
+        }
+        /* And with SET_CLIP_MIN above it, the same quad is behind the near
+         * plane: nothing drawn. */
+        mf(0x0394, 0.5f);
+        clear_surface();
+        draw_quads(0, 1);
+        bad = verify(0, &drawn);
+        printf("same quad with CLIP_MIN 0.5: %d pixels written\n", bad);
+        mf(0x0394, 0.0f);
+        m(0x1E94, 0);
+        if (bad) {
+            printf("FAIL -- a quad below SET_CLIP_MIN was drawn\n");
+            return 1;
+        }
+    }
 
     s_finished = 1;
     printf("PASS\n");
