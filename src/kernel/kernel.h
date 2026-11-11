@@ -633,6 +633,10 @@ void xbox_SetCrtLockTable(uint32_t table_va, uint32_t count);
  * Off by default: the inline path is what every other title was brought up
  * on. Call before the guest runs. */
 void xbox_SetDeferredIoApc(int on);
+/* A title's Sleep(from_ms) whose call returns to ret_va sleeps to_ms instead
+ * (kernel_bridge.c, KeDelayExecutionThread). Up to 8; call before the title
+ * runs. */
+void xbox_SetDelayOverride(uint32_t ret_va, uint32_t from_ms, uint32_t to_ms);
 
 VOID    __stdcall xbox_RtlEnterCriticalSection(PRTL_CRITICAL_SECTION CriticalSection);
 VOID    __stdcall xbox_RtlLeaveCriticalSection(PRTL_CRITICAL_SECTION CriticalSection);

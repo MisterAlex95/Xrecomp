@@ -13,6 +13,7 @@
 
 extern void xbox_SetMapSize(size_t bytes);
 extern void xbox_SetDeferredIoApc(int on);
+extern void xbox_SetDelayOverride(uint32_t ret_va, uint32_t from_ms, uint32_t to_ms);
 
 #ifndef _WIN32
 #include <dirent.h>
@@ -127,6 +128,21 @@ void xba_title_configure(void)
         xbox_SetDeferredIoApc(1);
     /* D3D's deferred RunPushBuffer, above. */
     nv2a_pb_set_software_method_hook(fable_software_method);
+    /* The front end (title screen, menus, loading screens) runs
+     * do { draw; Sleep(50); } while (!done) in sub_0020BBB5, the two
+     * `push 0x32; call Sleep` at 0x0020BD93 and 0x0020C3C5: 20 fps at most
+     * by design, with the draw on top -- 7-8 fps on an AYN Thor, where the
+     * draw is ~80 ms. The loading itself runs on other threads, which the
+     * loop only waits for. FABLE_FRONTEND_SLEEP_MS=<ms> sets the sleep
+     * (default 16; 50 is the game's own). */
+    {
+        const char *e = getenv("FABLE_FRONTEND_SLEEP_MS");
+        int ms = e ? atoi(e) : 16;
+        if (ms >= 0 && ms < 50) {
+            xbox_SetDelayOverride(0x0020BD9Au, 50, (uint32_t)ms);   /* return addresses */
+            xbox_SetDelayOverride(0x0020C3CCu, 50, (uint32_t)ms);
+        }
+    }
 }
 
 #ifndef _WIN32

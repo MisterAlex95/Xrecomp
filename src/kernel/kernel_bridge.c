@@ -2330,6 +2330,63 @@ static void bridge_NtUserIoApcDispatcher(void)
 }
 
 /* ── KeDelayExecutionThread (ordinal 99) ─────────────────── */
+
+/* Sleeps a title profile shortens (xbox_SetDelayOverride).
+ *
+ * A title whose loop is `draw; Sleep(50)` caps itself at 20 fps by design.
+ * On the console the draw is a few milliseconds; here it can be most of a
+ * frame, and the fixed sleep comes on top of it. A profile can name the
+ * call: the return address the title's `call Sleep` pushes, and the
+ * milliseconds it passes. The XAPI Sleep(ms) -> SleepEx -> this thunk chain
+ * leaves both on the guest stack, the return address right below the pushed
+ * argument, a few frames above the thunk's own arguments; so a matching
+ * pair within the top 64 words of the stack, and an interval of exactly
+ * that many milliseconds, identify the call. Nothing else is touched, and
+ * with no override registered the scan never runs. */
+#define DELAY_OVERRIDES_MAX 8
+static struct { uint32_t ret_va, from_ms, to_ms; } s_delay_ovr[DELAY_OVERRIDES_MAX];
+static int s_delay_novr;
+
+void xbox_SetDelayOverride(uint32_t ret_va, uint32_t from_ms, uint32_t to_ms)
+{
+    if (s_delay_novr < DELAY_OVERRIDES_MAX) {
+        s_delay_ovr[s_delay_novr].ret_va = ret_va;
+        s_delay_ovr[s_delay_novr].from_ms = from_ms;
+        s_delay_ovr[s_delay_novr].to_ms = to_ms;
+        s_delay_novr++;
+    }
+}
+
+/* The override for this delay, in ms, or -1. */
+static int delay_override(uint32_t interval_ptr)
+{
+    int64_t interval;
+    uint32_t w;
+    int i;
+
+    if (!s_delay_novr || !interval_ptr)
+        return -1;
+    memcpy(&interval, XBOX_TO_NATIVE(interval_ptr), sizeof interval);
+    for (i = 0; i < s_delay_novr; i++) {
+        if (interval != -(int64_t)s_delay_ovr[i].from_ms * 10000)
+            continue;
+        for (w = 0; w < 64; w++)
+            if (BRIDGE_MEM32(g_esp + w * 4) == s_delay_ovr[i].ret_va
+                && BRIDGE_MEM32(g_esp + w * 4 + 4) == s_delay_ovr[i].from_ms) {
+                static uint32_t told;           /* one line per override */
+                if (!(told & (1u << i))) {
+                    told |= 1u << i;
+                    fprintf(stderr, "  [KERNEL] Sleep(%u) returning to 0x%08X"
+                            " sleeps %u ms (title profile)\n",
+                            s_delay_ovr[i].from_ms, s_delay_ovr[i].ret_va,
+                            s_delay_ovr[i].to_ms);
+                }
+                return (int)s_delay_ovr[i].to_ms;
+            }
+    }
+    return -1;
+}
+
 /* Unbridged this returned instantly, turning every "sleep and retry" in the
  * title into a hot spin. Halo's cache-partition setup retries this way. */
 static void bridge_KeDelayExecutionThread(void)
@@ -2337,10 +2394,18 @@ static void bridge_KeDelayExecutionThread(void)
     uint32_t wait_mode    = STACK_ARG(0);
     uint32_t alertable    = STACK_ARG(1);
     uint32_t interval_ptr = STACK_ARG(2);
+    int ovr;
 
 
     if (bridge_run_io_apcs(alertable, wait_mode))
         return;
+    if ((ovr = delay_override(interval_ptr)) >= 0) {
+        LARGE_INTEGER shorter;
+        shorter.QuadPart = -(LONGLONG)ovr * 10000;
+        g_eax = (uint32_t)xbox_KeDelayExecutionThread(
+            (KPROCESSOR_MODE)wait_mode, (BOOLEAN)alertable, &shorter);
+        return;
+    }
     g_eax = (uint32_t)xbox_KeDelayExecutionThread(
         (KPROCESSOR_MODE)wait_mode, (BOOLEAN)alertable,
         XBOX_TO_NATIVE(interval_ptr));
