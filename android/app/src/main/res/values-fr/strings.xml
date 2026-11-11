@@ -169,7 +169,7 @@
     <string name="VAL_BUF_LONGEST">Très long</string>
     <string name="OPT_RASTER">Threads de dessin</string>
     <string name="OPT_RASTER_SUMMARY">Cœurs qui dessinent les grands triangles</string>
-    <string name="OPT_RASTER_DETAIL">Threads du moteur de rendu logiciel qui se partagent les grands triangles. Auto laisse quatre cœurs au jeu et au système. Plus peut être plus rapide sur une grosse puce ; moins peut aider quand le jeu lui-même manque de cœurs. (RECOMP_RASTER_THREADS)</string>
+    <string name="OPT_RASTER_DETAIL">Threads du moteur de rendu logiciel qui se partagent les grands triangles et le calcul des sommets. Auto utilise tous les cœurs où tourne le jeu sauf un (les cœurs rapides quand « Cœurs rapides seulement » est activé). Plus peut être plus rapide sur une grosse puce ; moins peut aider quand le jeu lui-même manque de cœurs. (RECOMP_RASTER_THREADS)</string>
     <string name="OPT_BIG_CORES">Cœurs rapides seulement</string>
     <string name="OPT_BIG_CORES_SUMMARY">Garder le jeu sur les gros cœurs</string>
     <string name="OPT_BIG_CORES_DETAIL">Activé : le jeu tourne sur les cœurs rapides de la puce seulement, fixés au démarrage. Désactivé : le système peut aussi le placer sur les cœurs lents ; à essayer seulement si le jeu saccade avec l\'option activée. (RECOMP_BIG_CORES)</string>

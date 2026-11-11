@@ -24,6 +24,9 @@
  * has not given us any vertices". RECOMP_FB_DUMP=<prefix> writes the surface to
  * <prefix>NNN.bmp, so the result can be looked at without a display.
  */
+#if defined(__ANDROID__) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE   /* sched_getaffinity / CPU_COUNT: the raster pool size */
+#endif
 #include <math.h>
 #include <stdio.h>
 #include <stdint.h>
@@ -37,7 +40,7 @@
 #if !defined(_WIN32)
 #include <pthread.h>              /* the raster worker pool */
 #include <unistd.h>               /* sysconf(_SC_NPROCESSORS_ONLN) */
-#include <sched.h>                /* sched_yield */
+#include <sched.h>                /* sched_yield; sched_getaffinity on Android */
 #endif
 /* The swizzle decoder the D3D8 layer already uses -- one implementation of
  * Morton order, not a second one that can disagree with it. */
@@ -3194,17 +3197,36 @@ static void *raster_worker(void *arg)
     return NULL;
 }
 
+/* The default pool size, the executor thread included.
+ *
+ * Desktop: every online core but four, as on Windows -- the title's threads
+ * and the host keep the rest.
+ *
+ * Android: the cores the runtime may run on, less one. recomp_host_cpus_init
+ * restricts the process to the fast cluster (an AYN Thor: cores 3-7 of 8),
+ * and "online cores - 4" counted the slow ones it can never use -- 4 on the
+ * Thor by coincidence, 2 on a 2+6 phone, 6 on a 10-core one. One fast core
+ * is left to the guest's main thread, which spins in D3D waiting for the
+ * GPU (Fable: sub_00855520), and to audio. */
+static int raster_pool_default(void)
+{
+    long cpus = sysconf(_SC_NPROCESSORS_ONLN);
+#if defined(__ANDROID__)
+    cpu_set_t set;
+    if (sched_getaffinity(0, sizeof set, &set) == 0 && CPU_COUNT(&set) > 0)
+        return CPU_COUNT(&set) - 1;
+#endif
+    return (int)(cpus > 0 ? cpus : 1) - 4;
+}
+
 static int raster_pool_size(void)
 {
     static int init;
     if (!init) {
         const char *e = getenv("RECOMP_RASTER_THREADS");
-        long cpus = sysconf(_SC_NPROCESSORS_ONLN);
         int n, k;
         init = 1;
-        /* Same policy as the Windows branch: leave a few cores for the title
-         * and the host unless the variable says otherwise. */
-        n = e ? atoi(e) : (int)(cpus > 0 ? cpus : 1) - 4;
+        n = e ? atoi(e) : raster_pool_default();
         if (n < 1) n = 1;
         if (n > NV_RASTER_MAX_THREADS) n = NV_RASTER_MAX_THREADS;
         s_pool.n = n;

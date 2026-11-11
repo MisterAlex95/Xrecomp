@@ -177,7 +177,7 @@
     <string name="VAL_BUF_LONGEST">Very long</string>
     <string name="OPT_RASTER">Drawing threads</string>
     <string name="OPT_RASTER_SUMMARY">Cores that draw large triangles</string>
-    <string name="OPT_RASTER_DETAIL">Threads of the software renderer that share large triangles. Auto leaves four cores to the game and the system. More can be faster on a big SoC; fewer can help when the game itself is short of cores. (RECOMP_RASTER_THREADS)</string>
+    <string name="OPT_RASTER_DETAIL">Threads of the software renderer that share large triangles and vertex shading. Auto uses every core the game runs on but one (the fast cores when "Fast cores only" is on). More can be faster on a big SoC; fewer can help when the game itself is short of cores. (RECOMP_RASTER_THREADS)</string>
     <string name="OPT_BIG_CORES">Fast cores only</string>
     <string name="OPT_BIG_CORES_SUMMARY">Keep the game on the big cores</string>
     <string name="OPT_BIG_CORES_DETAIL">On: the game runs on the SoC\'s fast cores only, as set at start. Off: the system may also put it on the slow cores; try it only if the game stutters with this on. (RECOMP_BIG_CORES)</string>
