@@ -47,16 +47,16 @@ final class RecompConfig {
 
     static final class Option {
         final Section section;
-        final int title, summary, detail;
+        /** The row's label, and the description the Settings screen shows for the focused row. */
+        final int title, detail;
         final String[] keys;
         final Choice[] choices;
         /** Offered only by an APK built with frame generation (-PxbaLsfg=1 with the bridge: R.bool.xba_lsfg). */
         boolean needsLsfg;
 
-        Option(Section section, int title, int summary, int detail, String[] keys, Choice... choices) {
+        Option(Section section, int title, int detail, String[] keys, Choice... choices) {
             this.section = section;
             this.title = title;
-            this.summary = summary;
             this.detail = detail;
             this.keys = keys;
             this.choices = choices;
@@ -86,61 +86,57 @@ final class RecompConfig {
      */
     static final Option[] OPTIONS = {
         // GameLanguage (XBA-77): unset = the Android language when the Xbox has it, set by ShellActivity.
-        new Option(Section.GAME, R.string.OPT_LANGUAGE, R.string.OPT_LANGUAGE_SUMMARY, R.string.OPT_LANGUAGE_DETAIL,
+        new Option(Section.GAME, R.string.OPT_LANGUAGE, R.string.OPT_LANGUAGE_DETAIL,
                    keys(GameLanguage.ENV),
                    new Choice(R.string.VAL_LANG_SYSTEM, (String)null), new Choice(R.string.LANG_EN, "en"),
                    new Choice(R.string.LANG_FR, "fr"), new Choice(R.string.LANG_DE, "de"),
                    new Choice(R.string.LANG_ES, "es"), new Choice(R.string.LANG_IT, "it"),
                    new Choice(R.string.LANG_PT, "pt"), new Choice(R.string.LANG_JA, "ja"),
                    new Choice(R.string.LANG_KO, "ko"), new Choice(R.string.LANG_ZH, "zh")),
-        new Option(Section.GRAPHICS, R.string.OPT_VSYNC, R.string.OPT_VSYNC_SUMMARY, R.string.OPT_VSYNC_DETAIL,
+        new Option(Section.GRAPHICS, R.string.OPT_VSYNC, R.string.OPT_VSYNC_DETAIL,
                    keys("RECOMP_PRESENT_VSYNC"),
                    new Choice(R.string.VAL_ON, (String)null), new Choice(R.string.VAL_OFF, "0")),
-        new Option(Section.GRAPHICS, R.string.OPT_GPU, R.string.OPT_GPU_SUMMARY, R.string.OPT_GPU_DETAIL,
+        new Option(Section.GRAPHICS, R.string.OPT_GPU, R.string.OPT_GPU_DETAIL,
                    keys("RECOMP_GPU"),
                    new Choice(R.string.VAL_AUTO, (String)null), new Choice(R.string.VAL_GPU_CPU, "0"),
                    new Choice(R.string.VAL_GPU_GL, "1")),
-        new Option(Section.GRAPHICS, R.string.OPT_GPU_FPS_CAP, R.string.OPT_GPU_FPS_CAP_SUMMARY,
-                   R.string.OPT_GPU_FPS_CAP_DETAIL, keys("RECOMP_GPU_FPS_CAP"),
+        new Option(Section.GRAPHICS, R.string.OPT_GPU_FPS_CAP, R.string.OPT_GPU_FPS_CAP_DETAIL, keys("RECOMP_GPU_FPS_CAP"),
                    new Choice(R.string.VAL_AUTO, (String)null), new Choice(R.string.VAL_FPS_30, "30"),
                    new Choice(R.string.VAL_FPS_60, "60"), new Choice(R.string.VAL_OFF, "0")),
-        new Option(Section.GRAPHICS, R.string.OPT_GPU_SCALE, R.string.OPT_GPU_SCALE_SUMMARY,
-                   R.string.OPT_GPU_SCALE_DETAIL, keys("RECOMP_GPU_SCALE"),
+        new Option(Section.GRAPHICS, R.string.OPT_GPU_SCALE, R.string.OPT_GPU_SCALE_DETAIL, keys("RECOMP_GPU_SCALE"),
                    new Choice(R.string.VAL_AUTO, (String)null), new Choice(R.string.VAL_SCALE_1, "1"),
                    new Choice(R.string.VAL_SCALE_2, "2"), new Choice(R.string.VAL_SCALE_3, "3"),
                    new Choice(R.string.VAL_SCALE_FIT, "auto")),
         // Aspect modes (docs/technical/gpu-backend.md « Aspect modes »): auto = 16:9 where the title draws wide frames.
-        new Option(Section.GRAPHICS, R.string.OPT_ASPECT, R.string.OPT_ASPECT_SUMMARY, R.string.OPT_ASPECT_DETAIL,
+        new Option(Section.GRAPHICS, R.string.OPT_ASPECT, R.string.OPT_ASPECT_DETAIL,
                    keys("RECOMP_ASPECT"),
                    new Choice(R.string.VAL_AUTO, (String)null), new Choice(R.string.VAL_ASPECT_4_3, "4:3"),
                    new Choice(R.string.VAL_ASPECT_16_9, "16:9")),
         // Frame generation (docs/technical/framegen.md): RECOMP_LSFG_DIR, the app-private shader cache, is written by
         // « Choose Lossless.dll » (LSFG_DIR_KEY), not by this option.
-        new Option(Section.GRAPHICS, R.string.OPT_LSFG, R.string.OPT_LSFG_SUMMARY, R.string.OPT_LSFG_DETAIL,
+        new Option(Section.GRAPHICS, R.string.OPT_LSFG, R.string.OPT_LSFG_DETAIL,
                    keys("RECOMP_LSFG", "RECOMP_LSFG_MULT", "RECOMP_LSFG_PERF"),
                    new Choice(R.string.VAL_OFF, null, null, null), new Choice(R.string.VAL_LSFG_2X, "1", "2", null),
                    new Choice(R.string.VAL_LSFG_2X_PERF, "1", "2", "1")).lsfgOnly(),
-        new Option(Section.GRAPHICS, R.string.OPT_TEX, R.string.OPT_TEX_SUMMARY, R.string.OPT_TEX_DETAIL,
+        new Option(Section.GRAPHICS, R.string.OPT_TEX, R.string.OPT_TEX_DETAIL,
                    keys("RECOMP_TEX_BILINEAR", "RECOMP_TEX_ANISO"),
                    new Choice(R.string.VAL_TEX_SHARP, null, null), new Choice(R.string.VAL_TEX_SMOOTH, "1", null),
                    new Choice(R.string.VAL_TEX_ANISO8, null, "8"), new Choice(R.string.VAL_TEX_ANISO16, null, "16")),
-        new Option(Section.AUDIO, R.string.OPT_HRTF, R.string.OPT_HRTF_SUMMARY, R.string.OPT_HRTF_DETAIL,
+        new Option(Section.AUDIO, R.string.OPT_HRTF, R.string.OPT_HRTF_DETAIL,
                    keys("RECOMP_APU_HRTF"),
                    new Choice(R.string.VAL_ON, (String)null), new Choice(R.string.VAL_OFF, "0")),
-        new Option(Section.AUDIO, R.string.OPT_AUDIO_BUF, R.string.OPT_AUDIO_BUF_SUMMARY, R.string.OPT_AUDIO_BUF_DETAIL,
+        new Option(Section.AUDIO, R.string.OPT_AUDIO_BUF, R.string.OPT_AUDIO_BUF_DETAIL,
                    keys("RECOMP_AUDIO_BUF_SAMPLES"),
                    new Choice(R.string.VAL_BUF_SHORT, "256"), new Choice(R.string.VAL_BUF_NORMAL, (String)null),
                    new Choice(R.string.VAL_BUF_LONG, "1024"), new Choice(R.string.VAL_BUF_LONGEST, "2048")),
-        new Option(Section.ADVANCED, R.string.OPT_RASTER, R.string.OPT_RASTER_SUMMARY, R.string.OPT_RASTER_DETAIL,
+        new Option(Section.ADVANCED, R.string.OPT_RASTER, R.string.OPT_RASTER_DETAIL,
                    keys("RECOMP_RASTER_THREADS"),
                    new Choice(R.string.VAL_AUTO, (String)null), new Choice(R.string.VAL_1, "1"),
                    new Choice(R.string.VAL_2, "2"), new Choice(R.string.VAL_4, "4"), new Choice(R.string.VAL_6, "6"),
                    new Choice(R.string.VAL_8, "8")),
-        new Option(Section.ADVANCED, R.string.OPT_BIG_CORES, R.string.OPT_BIG_CORES_SUMMARY,
-                   R.string.OPT_BIG_CORES_DETAIL, keys("RECOMP_BIG_CORES"),
+        new Option(Section.ADVANCED, R.string.OPT_BIG_CORES, R.string.OPT_BIG_CORES_DETAIL, keys("RECOMP_BIG_CORES"),
                    new Choice(R.string.VAL_ON, (String)null), new Choice(R.string.VAL_OFF, "0")),
-        new Option(Section.ADVANCED, R.string.OPT_SELFTEST, R.string.OPT_SELFTEST_SUMMARY,
-                   R.string.OPT_SELFTEST_DETAIL, keys("RECOMP_SHELL_SELFTEST"),
+        new Option(Section.ADVANCED, R.string.OPT_SELFTEST, R.string.OPT_SELFTEST_DETAIL, keys("RECOMP_SHELL_SELFTEST"),
                    new Choice(R.string.VAL_OFF, (String)null), new Choice(R.string.VAL_ON, "1")),
     };
 

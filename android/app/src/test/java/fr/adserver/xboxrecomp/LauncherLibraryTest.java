@@ -458,13 +458,15 @@ public class LauncherLibraryTest {
         LauncherActivity a = launch();
         a.goForTest(LauncherActivity.Screen.STORAGE);
         idle(300);
-        for (int i = 0; i < 50 && menuRow(a, app.getString(R.string.LIB_ST_PACK)).subtitle
+        for (int i = 0; i < 50 && menuRow(a, app.getString(R.string.LIB_ST_PACK)).value
                                        .equals(app.getString(R.string.SIZE_COUNTING)); i++) {
             Thread.sleep(20);
             idle(50);
         }
         assertNotNull(menuRow(a, app.getString(R.string.LIB_ST_DATA)));
         assertNotNull(menuRow(a, app.getString(R.string.LIB_ST_SAVES)));
+        assertFalse("the size is the row's value", menuRow(a, app.getString(R.string.LIB_ST_PACK)).value
+                                                       .equals(app.getString(R.string.SIZE_COUNTING)));
         a.forceFocusForTest();
         idle(300);
         TestSupport.screenshot(a.getWindow().getDecorView(), "library-storage");

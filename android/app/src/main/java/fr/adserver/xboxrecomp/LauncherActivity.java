@@ -741,6 +741,11 @@ public class LauncherActivity extends Activity {
     // ---- Navigation --------------------------------------------------------------------------------------------
 
     private void go(Screen s) {
+        if (s == Screen.SETTINGS && screen != Screen.SETTINGS) {   // Settings opens on General
+            settingsTab = TAB_GENERAL;
+            java.util.Arrays.fill(tabFocus, -1);
+            focusMemory.remove(Screen.SETTINGS);
+        }
         if (screen != null && screen != Screen.IMPORT)
             history.push(screen);
         show(s);
@@ -776,7 +781,7 @@ public class LauncherActivity extends Activity {
      * it in sliding from the right (dir 1, forward), the left (-1, back), or not at all (0, a refresh).
      */
     private void show(Screen s, int dir) {
-        if (screen != null) {
+        if (screen != null && !switchingTab) {
             int i = focusables.indexOf(host.findFocus());
             if (i >= 0)
                 focusMemory.put(screen, i);
@@ -799,6 +804,7 @@ public class LauncherActivity extends Activity {
         focusables.clear();
         defaultFocus = null;
         detail = null;
+        desc = null;
         xAction = yAction = startAction = l1Action = r1Action = null;
         topRight.setText("");
         topTabs.removeAllViews();
@@ -1138,6 +1144,93 @@ public class LauncherActivity extends Activity {
             paintDim();
         else if (clock.getAsLong() - lastInputAt >= DIM_AFTER_MS)
             setDimmed(true);
+    }
+
+    // ---- The list template (Settings, Manage, Storage) -----------------------------------------------------------
+
+    /** The list's width, its focus plates included (its rows' text starts on the margin). */
+    static final int LIST_W = 1072;
+    /** Between the list's focus plates and the description column. */
+    static final int DESC_GAP = 80;
+
+    /** The description column of a list screen: the focused row's explanation, as plain text. */
+    private LinearLayout desc;
+
+    /**
+     * The list template: a scrolling list on the left (its rows' text on the margin, their focus plates in the
+     * margin), and a quiet column on the right with the focused row's description only. Returns the list.
+     */
+    private LinearLayout listTemplate() {
+        LinearLayout h = rowLayout();
+        ScrollView scroll = new ScrollView(this);
+        scroll.setVerticalScrollBarEnabled(false);
+        scroll.setClipToPadding(false);
+        scroll.setClipChildren(false);
+        scroll.setPadding(0, 0, 0, Theme.S3);
+        LinearLayout list = column();
+        list.setClipChildren(false);
+        scroll.addView(list, new FrameLayout.LayoutParams(MATCH, WRAP));
+        LinearLayout.LayoutParams sl = lp(LIST_W, MATCH);
+        sl.leftMargin = -Theme.ROW_INSET;
+        h.addView(scroll, sl);
+        desc = column();
+        desc.setPadding(0, Theme.S3, 0, 0);
+        LinearLayout.LayoutParams dl = lp(0, MATCH, 1);
+        dl.leftMargin = DESC_GAP;
+        h.addView(desc, dl);
+        body.addView(h, new FrameLayout.LayoutParams(MATCH, MATCH));
+        return list;
+    }
+
+    /** A list row: label (and value); its description shows in the column when it is focused. */
+    private MenuRow listRow(LinearLayout list, String title, String description, Runnable click) {
+        MenuRow r = row(null, title, description, click);
+        list.addView(r, lp(MATCH, Theme.ROW_H));
+        onFocus(r, () -> describe(r.description));
+        return r;
+    }
+
+    /** A group label in a list (a game's name in Storage): Small, sentence case. */
+    private void listLabel(LinearLayout list, String text) {
+        TextView t = Theme.oneLine(Theme.label(this, text));
+        t.setPadding(Theme.ROW_INSET, 0, Theme.ROW_INSET, 0);
+        LinearLayout.LayoutParams p = lp(MATCH, WRAP);
+        p.topMargin = list.getChildCount() == 0 ? Theme.S1 : Theme.S4;
+        p.bottomMargin = Theme.S1;
+        list.addView(t, p);
+    }
+
+    private void describe(String text) {
+        describe(text, null, 0);
+    }
+
+    /** The description column: text, and an extra paragraph in its colour (a warning, a path), either may be null. */
+    private void describe(String text, String extra, int extraColor) {
+        if (desc == null)
+            return;
+        desc.removeAllViews();
+        if (text != null && !text.isEmpty())
+            desc.addView(Theme.body(this, text), lp(MATCH, WRAP));
+        if (extra != null && !extra.isEmpty()) {
+            TextView t = Theme.body(this, extra);
+            t.setTextColor(extraColor);
+            LinearLayout.LayoutParams p = lp(MATCH, WRAP);
+            p.topMargin = desc.getChildCount() == 0 ? 0 : Theme.S3;
+            desc.addView(t, p);
+        }
+    }
+
+    /** What the description column shows (tests). */
+    String descriptionForTest() {
+        StringBuilder b = new StringBuilder();
+        for (int i = 0; desc != null && i < desc.getChildCount(); i++)
+            b.append(i == 0 ? "" : "\n\n").append(((TextView)desc.getChildAt(i)).getText());
+        return b.toString();
+    }
+
+    /** « Folder: /sdcard/xbox »: a fact line of a description. */
+    private String kv(int label, String value) {
+        return getString(R.string.KV_LINE, getString(label), value);
     }
 
     // ---- Detail panel ------------------------------------------------------------------------------------------
@@ -1661,125 +1754,145 @@ public class LauncherActivity extends Activity {
 
     // ---- SETTINGS ----------------------------------------------------------------------------------------------
 
-    private final List<Integer> sectionStarts = new ArrayList<>();
+    /** Settings' tabs: General (the launcher, the bottom screen, the game theme, the language), Graphics, Audio, Advanced. */
+    static final int TAB_GENERAL = 0, TAB_GRAPHICS = 1, TAB_AUDIO = 2, TAB_ADVANCED = 3, TABS = 4;
+    private int settingsTab;
+    /** The focus of each tab when it was left (an index in its focusables; -1: its first row). */
+    private final int[] tabFocus = { -1, -1, -1, -1 };
+    /** True while a tab switch rebuilds Settings: show() does not overwrite the new tab's focus memory. */
+    private boolean switchingTab;
+    /** The option rows of the tab shown. */
+    private final java.util.Map<RecompConfig.Option, MenuRow> optionRows = new java.util.LinkedHashMap<>();
 
+    int settingsTabForTest() {
+        return settingsTab;
+    }
+
+    private static RecompConfig.Section tabSection(int tab) {
+        switch (tab) {
+        case TAB_GRAPHICS:
+            return RecompConfig.Section.GRAPHICS;
+        case TAB_AUDIO:
+            return RecompConfig.Section.AUDIO;
+        case TAB_ADVANCED:
+            return RecompConfig.Section.ADVANCED;
+        default:
+            return RecompConfig.Section.GAME;
+        }
+    }
+
+    private static final int[] TAB_LABELS = { R.string.SECTION_GENERAL, R.string.SECTION_GRAPHICS,
+                                               R.string.SECTION_AUDIO, R.string.SECTION_ADVANCED };
+
+    /**
+     * Settings: four tabs (L1 / R1), each a short list of « label  value » rows (left / right change a value, A steps
+     * it), the focused row's description on the right. No tab needs scrolling on a 1080p stage. Y puts the options
+     * back to their defaults; « Reset all » and About end the Advanced tab.
+     */
     private void buildSettings() {
         screenTitle.setText(R.string.SETTINGS);
         cfg = RecompConfig.load(GameStore.externalFilesDir(this));
-        sectionStarts.clear();
+        optionRows.clear();
+        String[] names = new String[TABS];
+        for (int i = 0; i < TABS; i++)
+            names[i] = getString(TAB_LABELS[i]);
+        topTabs.addView(new Widgets.Tabs(this, names, settingsTab, i -> switchTab(i - settingsTab)),
+                        lp(WRAP, MATCH));
+        LinearLayout list = listTemplate();
 
-        LinearLayout h = rowLayout();
-        ScrollView scroll = new ScrollView(this);
-        scroll.setVerticalScrollBarEnabled(false);
-        scroll.setClipToPadding(false);
-        scroll.setPadding(0, 0, 0, 24);
-        LinearLayout list = column();
-        list.setPadding(0, 4, 0, 4);
-        scroll.addView(list, new FrameLayout.LayoutParams(MATCH, WRAP));
-
-        sectionHeader(list, R.string.SECTION_LAUNCHER);
-        Runnable autoDetail = launcherToggle(list, R.string.OPEN_DIRECTLY, R.string.OPEN_DIRECTLY_SUMMARY,
-                                             R.string.OPEN_DIRECTLY_DETAIL, R.string.OPEN_DIRECTLY_FOOTER,
-                                             GameStore::autoStart, GameStore::setAutoStart,
-                                             R.string.OPEN_DIRECTLY_ON, R.string.OPEN_DIRECTLY_OFF);
-        launcherToggle(list, R.string.UI_SOUND, R.string.UI_SOUND_SUMMARY, R.string.UI_SOUND_DETAIL,
-                       R.string.UI_FEEDBACK_FOOTER, GameStore::uiSound, GameStore::setUiSound, R.string.UI_SOUND_ON,
-                       R.string.UI_SOUND_OFF);
-        launcherToggle(list, R.string.UI_HAPTICS, R.string.UI_HAPTICS_SUMMARY, R.string.UI_HAPTICS_DETAIL,
-                       R.string.UI_FEEDBACK_FOOTER, GameStore::uiHaptics, GameStore::setUiHaptics,
-                       R.string.UI_HAPTICS_ON, R.string.UI_HAPTICS_OFF);
-        if (DualScreen.available(this, CompanionScreen.ownDisplayId(this)))
-            bottomScreenRow(list);
-        String dir = gameDir();
-        if (dir != null && state() != State.NONE && GameStore.findXbe(new File(dir)) != null && titleId() != null)
-            gameThemeRow(list, titleId(), gameTitle(dir));
-
-        RecompConfig.Section section = null;
-        List<MenuRow> optionRows = new ArrayList<>();
         List<RecompConfig.Option> shown = RecompConfig.shownOptions(lsfgBuilt());
         lsfgOff = lsfgForcedOff();
+        if (settingsTab == TAB_GENERAL) {
+            launcherToggle(list, R.string.OPEN_DIRECTLY, R.string.OPEN_DIRECTLY_DETAIL, GameStore::autoStart,
+                           GameStore::setAutoStart, R.string.OPEN_DIRECTLY_ON, R.string.OPEN_DIRECTLY_OFF);
+            launcherToggle(list, R.string.UI_SOUND, R.string.UI_SOUND_DETAIL, GameStore::uiSound,
+                           GameStore::setUiSound, R.string.UI_SOUND_ON, R.string.UI_SOUND_OFF);
+            launcherToggle(list, R.string.UI_HAPTICS, R.string.UI_HAPTICS_DETAIL, GameStore::uiHaptics,
+                           GameStore::setUiHaptics, R.string.UI_HAPTICS_ON, R.string.UI_HAPTICS_OFF);
+            if (DualScreen.available(this, CompanionScreen.ownDisplayId(this)))
+                bottomScreenRow(list);
+            String dir = gameDir();
+            if (dir != null && state() != State.NONE && GameStore.findXbe(new File(dir)) != null && titleId() != null)
+                gameThemeRow(list, titleId(), gameTitle(dir));
+        }
+        RecompConfig.Section section = tabSection(settingsTab);
         for (RecompConfig.Option o : shown) {
-            if (o.section != section) {
-                section = o.section;
-                sectionHeader(list, sectionTitle(section));
-            }
-            MenuRow r = settingRow(list, getString(o.title), getString(o.summary));
+            if (o.section != section)
+                continue;
+            MenuRow r = listRow(list, getString(o.title), getString(o.detail), null);
+            r.onPress = null;   // a press steps the value: the « move » tick, not « select »
             String[] labels = new String[o.choices.length + 1];
             for (int i = 0; i < o.choices.length; i++)
                 labels[i] = getString(o.choices[i].label);
             labels[o.choices.length] = getString(R.string.VAL_CUSTOM);
             r.setChoices(labels);
-            optionRows.add(r);
+            optionRows.put(o, r);
             refreshOptionRow(r, o);
             r.cycler = d -> stepOption(r, o, d);
             r.setOnClickListener(v -> stepOption(r, o, 1));
             onFocus(r, () -> optionDetail(o));
             if (o.needsLsfg && lsfgOff) {
                 // The game's pack forces it off (pack.json env_force RECOMP_LSFG=0): the setting stays, for the
-                // other games, but says it does nothing for this one.
-                r.setSubtitle(getString(R.string.LSFG_TITLE_UNAVAILABLE));
+                // other games, but is dimmed and its description says it does nothing for this one.
                 r.setDim(true);
+                r.setDescription(getString(R.string.LSFG_TITLE_UNAVAILABLE));
             }
             if (o.needsLsfg)
                 lsfgDllRow(list);
         }
+        refreshRendererDims();
+        if (settingsTab == TAB_ADVANCED) {
+            MenuRow reset = listRow(list, getString(R.string.RESET), getString(R.string.RESET_DETAIL),
+                                    this::resetSettings);
+            onFocus(reset, () -> describe(getString(R.string.RESET_DETAIL),
+                                          getString(R.string.SETTINGS_FOOTER, cfg.file().getAbsolutePath()),
+                                          Theme.TEXT_DIM));
+            MenuRow about = listRow(list, getString(R.string.ABOUT), getString(R.string.ABOUT_TEXT),
+                                    () -> go(Screen.ABOUT));
+            about.setValue(version());
+        }
 
-        View spacer = gap(this);
-        list.addView(spacer, lp(MATCH, 20));
-        MenuRow reset = row(Icon.RESET, getString(R.string.RESET), getString(R.string.RESET_SUB), null);
-        reset.setOnClickListener(v -> resetSettings(optionRows, shown));
-        list.addView(reset, lp(MATCH, Theme.ROW_H_SMALL));
-        onFocus(reset, () -> {
-            detailClear(null, getString(R.string.RESET), getString(R.string.RESET_DETAIL));
-            detailFooter(getString(R.string.SETTINGS_FOOTER, cfg.file().getAbsolutePath()), Theme.TEXT_FAINT);
-        });
-
-        LinearLayout.LayoutParams sl = lp(920, MATCH);
-        sl.rightMargin = Theme.GAP;
-        h.addView(scroll, sl);
-        h.addView(detailPanel(), lp(0, MATCH, 1));
-        body.addView(h, new FrameLayout.LayoutParams(MATCH, MATCH));
-        autoDetail.run();
-
-        l1Action = () -> jumpSection(-1);
-        r1Action = () -> jumpSection(1);
-        yAction = () -> resetSettings(optionRows, shown);
+        l1Action = () -> switchTab(-1);
+        r1Action = () -> switchTab(1);
+        yAction = this::resetSettings;
         addHint("A", R.string.HINT_CHANGE, this::clickFocused);
-        addHint("Y", R.string.HINT_DEFAULTS, () -> resetSettings(optionRows, shown));
+        addHint("Y", R.string.HINT_DEFAULTS, this::resetSettings);
         addHint("B", R.string.HINT_BACK, this::back);
         if (gameRunning())
             setNote(getString(R.string.SETTINGS_GAME_RUNNING), NOTE_INFO);
     }
 
-    private int sectionTitle(RecompConfig.Section s) {
-        switch (s) {
-        case GAME:
-            return R.string.SECTION_GAME;
-        case GRAPHICS:
-            return R.string.SECTION_GRAPHICS;
-        case AUDIO:
-            return R.string.SECTION_AUDIO;
-        default:
-            return R.string.SECTION_ADVANCED;
+    /** L1 / R1 (and a tap on a tab): the previous or next tab, wrapping; each tab keeps its own focus. */
+    private void switchTab(int dir) {
+        if (screen != Screen.SETTINGS || dir == 0)
+            return;
+        tabFocus[settingsTab] = focusables.indexOf(focused());
+        settingsTab = ((settingsTab + dir) % TABS + TABS) % TABS;
+        int f = tabFocus[settingsTab];
+        if (f >= 0)
+            focusMemory.put(Screen.SETTINGS, f);
+        else
+            focusMemory.remove(Screen.SETTINGS);
+        feedback.play(UiFeedback.Cue.MOVE, host);
+        switchingTab = true;
+        show(Screen.SETTINGS, dir > 0 ? 1 : -1);
+        switchingTab = false;
+    }
+
+    /** Frame cap and Resolution only apply to the GPU renderer: dimmed (still changeable) otherwise. */
+    private void refreshRendererDims() {
+        boolean gpu = false;
+        for (RecompConfig.Option o : RecompConfig.OPTIONS) {
+            if (o.title == R.string.OPT_GPU) {
+                int i = cfg.choiceIndex(o);
+                gpu = i >= 0 && o.choices[i].label == R.string.VAL_GPU_GL;
+            }
         }
-    }
-
-    private void sectionHeader(LinearLayout list, int title) {
-        TextView t = Theme.caps(this, getString(title), Theme.TEXT_FAINT);
-        t.setPadding(36, 0, 0, 0);
-        LinearLayout.LayoutParams p = lp(MATCH, WRAP);
-        p.topMargin = list.getChildCount() == 0 ? 4 : 30;
-        p.bottomMargin = 8;
-        list.addView(t, p);
-        sectionStarts.add(focusables.size());
-    }
-
-    /** A setting row: its press steps the value, which plays the « move » tick instead of « select ». */
-    private MenuRow settingRow(LinearLayout list, String title, String sub) {
-        MenuRow r = row(null, title, sub, null);
-        r.onPress = null;
-        list.addView(r, lp(MATCH, Theme.ROW_H_SMALL));
-        return r;
+        for (java.util.Map.Entry<RecompConfig.Option, MenuRow> e : optionRows.entrySet()) {
+            int t = e.getKey().title;
+            if (t == R.string.OPT_GPU_FPS_CAP || t == R.string.OPT_GPU_SCALE)
+                e.getValue().setDim(!gpu);
+        }
     }
 
     /**
@@ -1792,24 +1905,14 @@ public class LauncherActivity extends Activity {
         String[] names = new String[modes.length];
         for (int i = 0; i < modes.length; i++)
             names[i] = getString(labels[i]);
-        MenuRow r = settingRow(list, getString(R.string.BOTTOM_SCREEN), getString(R.string.BOTTOM_SCREEN_SUMMARY));
+        MenuRow r = settingRow(list, getString(R.string.BOTTOM_SCREEN), getString(R.string.BOTTOM_SCREEN_DETAIL));
         r.setChoices(names);
-        Runnable fill = () -> {
-            detailClear(getString(R.string.SECTION_LAUNCHER), getString(R.string.BOTTOM_SCREEN),
-                        getString(R.string.BOTTOM_SCREEN_DETAIL));
-            detailKv(getString(R.string.KV_VALUE), names[GameStore.bottomScreen(this).ordinal()]);
-            detailFooter(getString(R.string.UI_FEEDBACK_FOOTER), Theme.TEXT_FAINT);
-        };
-        Runnable refresh = () -> {
-            int i = GameStore.bottomScreen(this).ordinal();
-            r.setValue(names[i]);
-        };
+        Runnable refresh = () -> r.setValue(names[GameStore.bottomScreen(this).ordinal()]);
         refresh.run();
         r.cycler = d -> {
             int n = modes.length, i = ((GameStore.bottomScreen(this).ordinal() + d) % n + n) % n;
             GameStore.setBottomScreen(this, modes[i]);
             refresh.run();
-            fill.run();
             feedback.play(UiFeedback.Cue.MOVE, r);
             if (companion != null)
                 companion.screen().refresh();
@@ -1817,11 +1920,10 @@ public class LauncherActivity extends Activity {
             Log.i(TAG, "launcher: bottom screen " + modes[i]);
         };
         r.setOnClickListener(v -> r.cycler.step(1));
-        onFocus(r, fill);
     }
 
     /**
-     * Settings › Launcher › Game theme, per title: « Art and colours », « Colours only », « Off ». Applies at once
+     * Settings › General › Game theme, per title: « Art and colours », « Colours only », « Off ». Applies at once
      * here (the stage is built again in the new colours), in the game's menu at its next start.
      */
     private void gameThemeRow(LinearLayout list, String tid, String title) {
@@ -1830,20 +1932,9 @@ public class LauncherActivity extends Activity {
         String[] names = new String[modes.length];
         for (int i = 0; i < modes.length; i++)
             names[i] = getString(labels[i]);
-        MenuRow r = settingRow(list, getString(R.string.GAME_THEME), getString(R.string.GAME_THEME_SUMMARY));
+        MenuRow r = settingRow(list, getString(R.string.GAME_THEME), getString(R.string.GAME_THEME_DETAIL, title));
         r.setChoices(names);
-        Runnable fill = () -> {
-            detailClear(getString(R.string.SECTION_LAUNCHER), getString(R.string.GAME_THEME),
-                        getString(R.string.GAME_THEME_DETAIL, title));
-            detailKv(getString(R.string.KV_VALUE), names[GameTheme.mode(this, tid).ordinal()]);
-            GameTheme g = GameTheme.cached(this, new File(gameDir()), tid);
-            if (g != null)
-                detailKv(getString(R.string.KV_IMAGE), g.source.equals("none")
-                                                         ? getString(R.string.GAME_THEME_SOURCE_NONE) : g.source);
-            detailFooter(getString(R.string.GAME_THEME_FOOTER), Theme.TEXT_FAINT);
-        };
-        int cur = GameTheme.mode(this, tid).ordinal();
-        r.setValue(names[cur]);
+        r.setValue(names[GameTheme.mode(this, tid).ordinal()]);
         r.cycler = d -> {
             int n = modes.length, i = ((GameTheme.mode(this, tid).ordinal() + d) % n + n) % n;
             GameTheme.setMode(this, tid, modes[i]);
@@ -1853,60 +1944,32 @@ public class LauncherActivity extends Activity {
             setNote(getString(R.string.GAME_THEME_SAVED, names[i]), NOTE_OK);
         };
         r.setOnClickListener(v -> r.cycler.step(1));
-        onFocus(r, fill);
     }
 
-    /** An on / off launcher preference as a setting row; returns its detail filler (shown when focused). */
-    private Runnable launcherToggle(LinearLayout list, int title, int summary, int detailText, int footer,
-                                    Function<android.content.Context, Boolean> get,
-                                    BiFunction<android.content.Context, Boolean, Boolean> set, int onNote,
-                                    int offNote) {
-        MenuRow r = settingRow(list, getString(title), getString(summary));
+    /** A setting row: its press steps the value, which plays the « move » tick instead of « select ». */
+    private MenuRow settingRow(LinearLayout list, String title, String description) {
+        MenuRow r = listRow(list, title, description, null);
+        r.onPress = null;
+        return r;
+    }
+
+    /** An on / off launcher preference as a setting row. */
+    private void launcherToggle(LinearLayout list, int title, int detailText,
+                                Function<android.content.Context, Boolean> get,
+                                BiFunction<android.content.Context, Boolean, Boolean> set, int onNote, int offNote) {
+        MenuRow r = settingRow(list, getString(title), getString(detailText));
         r.setChoices(new String[] { getString(R.string.VAL_ON), getString(R.string.VAL_OFF) });
-        Runnable fill = () -> {
-            detailClear(getString(R.string.SECTION_LAUNCHER), getString(title), getString(detailText));
-            detailKv(getString(R.string.KV_VALUE), getString(get.apply(this) ? R.string.VAL_ON : R.string.VAL_OFF));
-            detailFooter(getString(footer), Theme.TEXT_FAINT);
-        };
-        Runnable refresh = () -> {
-            boolean on = get.apply(this);
-            r.setValue(getString(on ? R.string.VAL_ON : R.string.VAL_OFF));
-        };
+        Runnable refresh = () -> r.setValue(getString(get.apply(this) ? R.string.VAL_ON : R.string.VAL_OFF));
         refresh.run();
         r.cycler = d -> {
             set.apply(this, !get.apply(this));
             refresh.run();
-            fill.run();
             feedback.play(UiFeedback.Cue.MOVE, r);
             setNote(getString(get.apply(this) ? onNote : offNote), NOTE_OK);
             Log.i(TAG, "launcher: " + getResources().getResourceEntryName(title) + " "
                        + (get.apply(this) ? "on" : "off"));
         };
         r.setOnClickListener(v -> r.cycler.step(1));
-        onFocus(r, fill);
-        return fill;
-    }
-
-    private void jumpSection(int dir) {
-        int cur = focusables.indexOf(focused());
-        int target = -1;
-        if (dir > 0) {
-            for (int s : sectionStarts) {
-                if (s > cur) {
-                    target = s;
-                    break;
-                }
-            }
-        } else {
-            for (int i = sectionStarts.size() - 1; i >= 0; i--) {
-                if (sectionStarts.get(i) < cur) {
-                    target = sectionStarts.get(i);
-                    break;
-                }
-            }
-        }
-        if (target >= 0 && target < focusables.size())
-            focusables.get(target).requestFocusFromTouch();
     }
 
     private String choiceLabel(RecompConfig c, RecompConfig.Option o) {
@@ -1924,7 +1987,8 @@ public class LauncherActivity extends Activity {
         cfg.set(o, o.choices[next]);
         saveSettings();
         refreshOptionRow(r, o);
-        optionDetail(o);
+        if (o.title == R.string.OPT_GPU)
+            refreshRendererDims();
         feedback.play(UiFeedback.Cue.MOVE, r);
     }
 
@@ -1939,30 +2003,21 @@ public class LauncherActivity extends Activity {
         }
     }
 
-    private void resetSettings(List<MenuRow> rows, List<RecompConfig.Option> shown) {
+    /** Y, or « Reset all »: every option back to its default (the launcher's own preferences stay). */
+    private void resetSettings() {
         cfg.resetAll();
         saveSettings();
-        for (int i = 0; i < shown.size(); i++)
-            refreshOptionRow(rows.get(i), shown.get(i));
+        for (java.util.Map.Entry<RecompConfig.Option, MenuRow> e : optionRows.entrySet())
+            refreshOptionRow(e.getValue(), e.getKey());
+        refreshRendererDims();
         setNote(getString(R.string.RESET_DONE), NOTE_OK);
     }
 
+    /** The focused option's description; frame generation forced off for this game says so, in WARN. */
     private void optionDetail(RecompConfig.Option o) {
-        detailClear(getString(sectionTitle(o.section)), getString(o.title), getString(o.detail));
-        if (o.needsLsfg && lsfgOff) {
-            TextView t = Theme.text(this, Theme.T_SMALL, Theme.MEDIUM, Theme.WARN,
-                                    getString(R.string.LSFG_TITLE_UNAVAILABLE_DETAIL));
-            LinearLayout.LayoutParams p = lp(MATCH, WRAP);
-            p.topMargin = 12;
-            detail.addView(t, p);
-        }
-        List<String> names = new ArrayList<>();
-        for (RecompConfig.Choice c : o.choices)
-            names.add(getString(c.label) + (c.isDefault() ? " " + getString(R.string.DEFAULT_MARK) : ""));
-        detailKv(getString(R.string.KV_CHOICES), TextUtils.join(" · ", names));
-        String raw = cfg.rawValue(o);
-        detailKv(getString(R.string.KV_CFG), raw.isEmpty() ? getString(R.string.CFG_NOTHING) : raw);
-        detailFooter(getString(R.string.APPLIES_NEXT_START), Theme.TEXT_FAINT);
+        boolean off = o.needsLsfg && lsfgOff;
+        describe(getString(o.detail), off ? getString(R.string.LSFG_TITLE_UNAVAILABLE) + ". "
+                                            + getString(R.string.LSFG_TITLE_UNAVAILABLE_DETAIL) : null, Theme.WARN);
     }
 
     // ---- Frame generation: « Choose Lossless.dll » ---------------------------------------------------------------
@@ -2028,21 +2083,15 @@ public class LauncherActivity extends Activity {
         return getString(R.string.LSFG_UNSUPPORTED);
     }
 
-    /** « Choose Lossless.dll », under the frame generation option. */
+    /** « Choose Lossless.dll », under the frame generation option: its state as the value. */
     private void lsfgDllRow(LinearLayout list) {
         int[] kind = new int[1];
         String status = lsfgStatus(kind);
-        MenuRow r = row(Icon.KEY, getString(R.string.LSFG_CHOOSE_DLL), status, this::openLsfgDllPicker);
-        list.addView(r, lp(MATCH, Theme.ROW_H_SMALL));
-        onFocus(r, () -> {
-            detailClear(getString(R.string.SECTION_GRAPHICS), getString(R.string.LSFG_CHOOSE_DLL),
-                        getString(R.string.LSFG_CHOOSE_DLL_DETAIL));
-            detailKv(getString(R.string.KV_STATUS), status);
-            String dir = cfg.get(RecompConfig.LSFG_DIR_KEY);
-            detailKv(getString(R.string.KV_CFG), dir == null ? getString(R.string.CFG_NOTHING)
-                                                             : RecompConfig.LSFG_DIR_KEY + "=" + dir);
-            detailFooter(getString(R.string.LSFG_LEGAL_FOOTER), Theme.TEXT_FAINT);
-        });
+        MenuRow r = listRow(list, getString(R.string.LSFG_CHOOSE_DLL), getString(R.string.LSFG_CHOOSE_DLL_DETAIL),
+                            this::openLsfgDllPicker);
+        r.setValue(status);
+        onFocus(r, () -> describe(getString(R.string.LSFG_CHOOSE_DLL_DETAIL), getString(R.string.LSFG_LEGAL_FOOTER),
+                                  Theme.TEXT_DIM));
     }
 
     private void openLsfgDllPicker() {
@@ -2105,31 +2154,29 @@ public class LauncherActivity extends Activity {
 
     // ---- GAME_DATA ---------------------------------------------------------------------------------------------
 
+    /**
+     * Manage (Home's third pill): the library (or Change game), deleting the imported copy, and the game's other
+     * stored things, each with its size as the value. The technical facts (title ID, pack, folder) are the first
+     * row's description.
+     */
     private void buildGameData() {
-        screenTitle.setText(R.string.GAME_DATA);
-        State st = state();
+        screenTitle.setText(R.string.HOME_MANAGE);
         String dir = gameDir();
         sizeLater(dir);
-
-        LinearLayout h = rowLayout();
-        LinearLayout menu = column();
-        menu.addView(Theme.caps(this, getString(R.string.HOME_MANAGE), Theme.TEXT_FAINT), lp(MATCH, WRAP));
+        LinearLayout list = listTemplate();
         boolean lib = libraryOn();
-        MenuRow change = lib ? row(Icon.SWAP, getString(R.string.LIB_TITLE), getString(R.string.LIB_GO_SUB),
-                                   this::openLibrary)
-                             : row(Icon.SWAP, getString(dir == null ? R.string.CHOOSE_GAME : R.string.CHANGE_GAME),
-                                   getString(R.string.CHANGE_GAME_SUB), () -> go(Screen.SOURCE));
-        LinearLayout.LayoutParams first = lp(MATCH, Theme.ROW_H);
-        first.topMargin = 22;
-        menu.addView(change, first);
-        onFocus(change, () -> dataChangeDetail(dir));
+        String facts = manageFacts(dir);
+        MenuRow change = lib ? listRow(list, getString(R.string.LIB_TITLE), null, this::openLibrary)
+                             : listRow(list, getString(dir == null ? R.string.CHOOSE_GAME : R.string.CHANGE_GAME),
+                                       getString(R.string.CHANGE_GAME_DETAIL), () -> go(Screen.SOURCE));
+        onFocus(change, () -> describe(change.description, facts, Theme.TEXT_DIM));
         defaultFocus = change;
 
         if (dir != null && ownedCopy(dir)) {
-            MenuRow del = row(Icon.TRASH, getString(R.string.DELETE_COPY), getString(R.string.DELETE_COPY_SUB), null);
+            MenuRow del = listRow(list, getString(R.string.DELETE_COPY), getString(R.string.DELETE_COPY_DETAIL, dir),
+                                  null);
+            del.setValue(sizeText(dir));
             del.setOnClickListener(v -> onDelete(del, dir));
-            menu.addView(del, lp(MATCH, Theme.ROW_H));
-            onFocus(del, () -> dataDeleteDetail(dir));
         }
         // The game's other stored things (pack, Prepare files, caches, saves), each deleted on its own (Storage).
         String tid = titleId();
@@ -2142,50 +2189,34 @@ public class LauncherActivity extends Activity {
                     items.add(it);
             }
             for (Storage.Item it : items)
-                menu.addView(storageRow(it, gameTitle(dir)), lp(MATCH, Theme.ROW_H_SMALL));
+                storageRow(list, it);
             storageMeasureLater(items);
         }
-        LinearLayout.LayoutParams ml = lp(860, MATCH);
-        ml.rightMargin = Theme.GAP;
-        h.addView(menu, ml);
-        h.addView(detailPanel(), lp(0, MATCH, 1));
-        body.addView(h, new FrameLayout.LayoutParams(MATCH, MATCH));
-        dataChangeDetail(dir);
+        describe(change.description, facts, Theme.TEXT_DIM);
         addHint("A", R.string.HINT_SELECT, this::clickFocused);
         addHint("B", R.string.HINT_BACK, this::back);
     }
 
-    private void dataFacts(String dir) {
+    /** The game's technical facts, one per line: title ID, when it was prepared and its pack's size, its files. */
+    private String manageFacts(String dir) {
+        List<String> l = new ArrayList<>();
+        String tid = titleId();
+        if (tid != null)
+            l.add(kv(R.string.KV_TITLE_ID, tid));
+        if (tid != null && Pack.check(getFilesDir(), tid) == Pack.Check.VALID) {
+            String[] pack = packFacts(tid);
+            l.add(kv(R.string.KV_PREPARED, pack[0]));
+            l.add(kv(R.string.KV_PACK_SIZE, pack[1]));
+        }
         if (dir == null) {
-            detailKv(getString(R.string.KV_STATUS), getString(stateLabel(state())));
-            return;
+            l.add(kv(R.string.KV_STATUS, getString(stateLabel(state()))));
+        } else {
+            l.add(kv(R.string.KV_FOLDER, dir));
+            l.add(kv(R.string.KV_SOURCE, sourceLabel(dir)));
+            l.add(kv(R.string.KV_SIZE, sizeText(dir)));
         }
-        detailKv(getString(R.string.KV_GAME), gameTitle(dir));
-        detailKv(getString(R.string.KV_FOLDER), dir);
-        detailKv(getString(R.string.KV_SOURCE), sourceLabel(dir));
-        detailKv(getString(R.string.KV_SIZE), sizeText(dir));
-        detailKv(getString(R.string.KV_FREE), size(freeSpace()));
-        if (ownedCopy(dir) && sizeBytes >= 0 && dir.equals(sizeDir)) {
-            Widgets.Meter m = new Widgets.Meter(this);
-            long free = freeSpace();
-            m.set(sizeBytes / (float)Math.max(1, sizeBytes + free), Theme.ACCENT);
-            LinearLayout.LayoutParams p = lp(MATCH, 10);
-            p.topMargin = 26;
-            detail.addView(m, p);
-        }
-    }
-
-    private void dataChangeDetail(String dir) {
-        detailClear(getString(R.string.GAME_DATA), getString(dir == null ? R.string.CHOOSE_GAME
-                                                                          : R.string.CHANGE_GAME),
-                    getString(R.string.CHANGE_GAME_DETAIL));
-        dataFacts(dir);
-    }
-
-    private void dataDeleteDetail(String dir) {
-        detailClear(getString(R.string.GAME_DATA), getString(R.string.DELETE_COPY),
-                    getString(R.string.DELETE_COPY_DETAIL, dir));
-        dataFacts(dir);
+        l.add(kv(R.string.KV_FREE, size(freeSpace())));
+        return TextUtils.join("\n", l);
     }
 
     /** Two presses within CONFIRM_MS: the first arms, the second deletes (on a background thread). */
@@ -3257,28 +3288,39 @@ public class LauncherActivity extends Activity {
     private void buildControls() {
         screenTitle.setText(R.string.CONTROLS);
         LinearLayout h = rowLayout();
-        FrameLayout left = panel();
         Widgets.PadDiagram pad = new Widgets.PadDiagram(this);
         int[] labels = { R.string.PAD_L1, R.string.PAD_L2, R.string.PAD_R1, R.string.PAD_R2, R.string.PAD_SELECT,
                          R.string.PAD_START, R.string.PAD_DPAD, R.string.PAD_LSTICK, R.string.PAD_RSTICK,
                          R.string.PAD_FACE, R.string.PAD_SCREEN };
         for (int i = 0; i < labels.length; i++)
             pad.labels[i] = getString(labels[i]);
-        left.addView(pad, new FrameLayout.LayoutParams(MATCH, MATCH));
-        LinearLayout.LayoutParams ll = lp(0, MATCH, 1);
-        ll.rightMargin = Theme.GAP;
-        h.addView(left, ll);
+        h.addView(pad, lp(0, MATCH, 1));
 
-        h.addView(detailPanel(), lp(640, MATCH));
-        detailClear(getString(R.string.CONTROLS_CAPS), getString(R.string.CONTROLS_HEAD), null);
+        // Your button, and the Xbox button the game gets: two quiet columns.
+        LinearLayout col = column();
         int[][] rows = { { R.string.CTL_FACE, R.string.CTL_FACE_X }, { R.string.CTL_L1, R.string.CTL_L1_X },
                          { R.string.CTL_R1, R.string.CTL_R1_X }, { R.string.CTL_TRIGGERS, R.string.CTL_TRIGGERS_X },
                          { R.string.CTL_START, R.string.CTL_START_X }, { R.string.CTL_SELECT, R.string.CTL_SELECT_X },
                          { R.string.CTL_DPAD, R.string.CTL_DPAD_X }, { R.string.CTL_STICKS, R.string.CTL_STICKS_X },
                          { R.string.CTL_MENU, R.string.CTL_MENU_X } };
-        for (int[] r : rows)
-            detailKv(getString(r[0]), getString(r[1]));
-        detailFooter(getString(R.string.CONTROLS_FOOTER), Theme.TEXT_FAINT);
+        for (int[] r : rows) {
+            LinearLayout line = rowLayout();
+            line.addView(Theme.oneLine(Theme.text(this, Theme.T_BODY, Theme.MEDIUM, Theme.TEXT, getString(r[0]))),
+                         lp(220, WRAP));
+            TextView x = Theme.text(this, Theme.T_BODY, Theme.REGULAR, Theme.TEXT_DIM, getString(r[1]));
+            x.setMaxLines(2);
+            line.addView(x, lp(0, WRAP, 1));
+            LinearLayout.LayoutParams p = lp(MATCH, WRAP);
+            p.bottomMargin = Theme.S2;
+            col.addView(line, p);
+        }
+        TextView foot = Theme.body(this, getString(R.string.CONTROLS_FOOTER));
+        LinearLayout.LayoutParams fl = lp(MATCH, WRAP);
+        fl.topMargin = Theme.S3;
+        col.addView(foot, fl);
+        LinearLayout.LayoutParams cl = lp(Theme.DESC_W, MATCH);
+        cl.leftMargin = Theme.S5;
+        h.addView(col, cl);
         body.addView(h, new FrameLayout.LayoutParams(MATCH, MATCH));
         addHint("B", R.string.HINT_BACK, this::back);
     }
@@ -3292,59 +3334,28 @@ public class LauncherActivity extends Activity {
      */
     private void buildStorage() {
         screenTitle.setText(R.string.LIB_STORAGE);
+        topRight.setText(getString(R.string.LIB_ST_FREE, size(freeSpace())));
         Storage.Dirs dirs = storageDirs();
-        LinearLayout h = rowLayout();
-        ScrollView scroll = new ScrollView(this);
-        scroll.setVerticalScrollBarEnabled(false);
-        scroll.setClipToPadding(false);
-        scroll.setPadding(0, 0, 0, 24);
-        LinearLayout list = column();
-        list.setPadding(0, 4, 0, 4);
-        scroll.addView(list, new FrameLayout.LayoutParams(MATCH, WRAP));
-
-        TextView freeCaps = Theme.caps(this, getString(R.string.LIB_ST_FREE_CAPS), Theme.TEXT_FAINT);
-        freeCaps.setPadding(36, 0, 0, 0);
-        list.addView(freeCaps, lp(MATCH, WRAP));
-        TextView free = Theme.text(this, Theme.T_BODY, Theme.REGULAR, Theme.TEXT,
-                                   getString(R.string.LIB_ST_FREE_LINE, size(internalFree()), size(freeSpace())));
-        free.setPadding(36, 10, 0, 0);
-        list.addView(free, lp(MATCH, WRAP));
-
+        LinearLayout list = listTemplate();
         List<Storage.Item> all = new ArrayList<>();
         for (String tid : Storage.titles(dirs, games)) {
             List<Storage.Item> items = Storage.items(dirs, tid, games.get(tid));
             if (items.isEmpty())
                 continue;
             Library.Record r = games.get(tid);
-            String name = r != null && !r.title.isEmpty() ? r.title : tid;
-            TextView t = Theme.caps(this, name, Theme.TEXT_FAINT);
-            t.setPadding(36, 0, 0, 0);
-            LinearLayout.LayoutParams p = lp(MATCH, WRAP);
-            p.topMargin = 30;
-            p.bottomMargin = 8;
-            list.addView(t, p);
+            listLabel(list, r != null && !r.title.isEmpty() ? r.title : tid);
             for (Storage.Item it : items) {
-                list.addView(storageRow(it, name), lp(MATCH, Theme.ROW_H_SMALL));
+                storageRow(list, it);
                 all.add(it);
             }
         }
         if (all.isEmpty()) {
-            TextView none = Theme.text(this, Theme.T_BODY, Theme.REGULAR, Theme.TEXT_DIM,
-                                       getString(R.string.LIB_ST_EMPTY));
-            none.setPadding(36, 30, 0, 0);
+            TextView none = Theme.body(this, getString(R.string.LIB_ST_EMPTY));
+            none.setPadding(Theme.ROW_INSET, Theme.S3, 0, 0);
             list.addView(none, lp(MATCH, WRAP));
+            describe(getString(R.string.LIB_ST_FOOTER));
         }
         storageMeasureLater(all);
-
-        LinearLayout.LayoutParams sl = lp(920, MATCH);
-        sl.rightMargin = Theme.GAP;
-        h.addView(scroll, sl);
-        h.addView(detailPanel(), lp(0, MATCH, 1));
-        body.addView(h, new FrameLayout.LayoutParams(MATCH, MATCH));
-        detailClear(getString(R.string.LIB_STORAGE), getString(R.string.LIB_ST_FREE_CAPS), null);
-        detailKv(getString(R.string.KV_INTERNAL_FREE), size(internalFree()));
-        detailKv(getString(R.string.KV_FREE), size(freeSpace()));
-        detailFooter(getString(R.string.LIB_ST_FOOTER), Theme.TEXT_FAINT);
         addHint("A", R.string.LIB_ST_HINT_DELETE, this::clickFocused);
         addHint("B", R.string.HINT_BACK, this::back);
         if (gameRunning())
@@ -3375,39 +3386,39 @@ public class LauncherActivity extends Activity {
         return n == null ? getString(R.string.SIZE_COUNTING) : size(n);
     }
 
-    /** One stored thing of a game: its size, A twice deletes it; the detail panel says what it is. */
-    private MenuRow storageRow(Storage.Item it, String gameName) {
-        MenuRow r = row(it.kind == Storage.Kind.SAVES ? Icon.INFO : Icon.TRASH, getString(storageLabel(it.kind)),
-                        storageSize(it), null);
+    /** One stored thing of a game: its size as the value, A twice deletes it; the description says what it is. */
+    private MenuRow storageRow(LinearLayout list, Storage.Item it) {
+        int detailText;
+        switch (it.kind) {
+        case DATA:
+            detailText = R.string.LIB_ST_DATA_DETAIL;
+            break;
+        case PACK:
+            detailText = R.string.LIB_ST_PACK_DETAIL;
+            break;
+        case WORK:
+            detailText = R.string.LIB_ST_WORK_DETAIL;
+            break;
+        case CACHES:
+            detailText = R.string.LIB_ST_CACHES_DETAIL;
+            break;
+        default:
+            detailText = R.string.LIB_ST_SAVES_DETAIL;
+            break;
+        }
+        MenuRow r = listRow(list, getString(storageLabel(it.kind)), getString(detailText), null);
+        r.setValue(storageSize(it));
         r.setOnClickListener(v -> onStorageDelete(r, it));
         onFocus(r, () -> {
-            int detailText;
-            switch (it.kind) {
-            case DATA:
-                detailText = R.string.LIB_ST_DATA_DETAIL;
-                break;
-            case PACK:
-                detailText = R.string.LIB_ST_PACK_DETAIL;
-                break;
-            case WORK:
-                detailText = R.string.LIB_ST_WORK_DETAIL;
-                break;
-            case CACHES:
-                detailText = R.string.LIB_ST_CACHES_DETAIL;
-                break;
-            default:
-                detailText = R.string.LIB_ST_SAVES_DETAIL;
-                break;
-            }
-            detailClear(gameName, getString(storageLabel(it.kind)), getString(detailText));
-            detailKv(getString(R.string.KV_SIZE), storageSize(it));
+            List<String> paths = new ArrayList<>();
             for (File f : it.files) {
                 if (f.exists())
-                    detailKv(getString(R.string.KV_FOLDER), f.getAbsolutePath());
+                    paths.add(kv(R.string.KV_FOLDER, f.getAbsolutePath()));
             }
-            detailFooter(getString(it.kind == Storage.Kind.SAVES ? R.string.LIB_ST_SAVES_FOOTER
-                                                                 : R.string.LIB_ST_FOOTER),
-                         it.kind == Storage.Kind.SAVES ? Theme.WARN : Theme.TEXT_FAINT);
+            boolean saves = it.kind == Storage.Kind.SAVES;
+            String extra = saves ? getString(R.string.LIB_ST_SAVES_FOOTER) : TextUtils.join("\n", paths);
+            describe(r.description + (saves && !paths.isEmpty() ? "\n\n" + TextUtils.join("\n", paths) : ""),
+                     extra, saves ? Theme.WARN : Theme.TEXT_DIM);
         });
         return r;
     }
@@ -3508,31 +3519,37 @@ public class LauncherActivity extends Activity {
         LinearLayout left = column();
         left.setGravity(Gravity.CENTER_VERTICAL);
         Widgets.BrandMark mark = new Widgets.BrandMark(this);
-        left.addView(mark, lp(150, 150));
-        TextView name = Theme.text(this, Theme.T_HERO, Theme.MEDIUM, Theme.TEXT, getString(R.string.app_name));
+        left.addView(mark, lp(120, 120));
+        TextView name = Theme.text(this, Theme.T_DISPLAY, Theme.MEDIUM, Theme.TEXT, getString(R.string.app_name));
         LinearLayout.LayoutParams nl = lp(MATCH, WRAP);
-        nl.topMargin = 30;
-        nl.bottomMargin = 16;
+        nl.topMargin = Theme.S4;
         left.addView(name, nl);
-        left.addView(Theme.caps(this, getString(R.string.ABOUT_TAGLINE), Theme.ACCENT), lp(MATCH, WRAP));
+        TextView tag = Theme.text(this, Theme.T_BODY, Theme.REGULAR, Theme.TEXT_DIM, getString(R.string.ABOUT_TAGLINE));
+        LinearLayout.LayoutParams gl = lp(MATCH, WRAP);
+        gl.topMargin = Theme.S2;
+        left.addView(tag, gl);
         TextView t = Theme.body(this, getString(R.string.ABOUT_TEXT));
         LinearLayout.LayoutParams tl = lp(MATCH, WRAP);
-        tl.topMargin = 30;
+        tl.topMargin = Theme.S5;
         left.addView(t, tl);
-        LinearLayout.LayoutParams ll = lp(0, MATCH, 1);
-        ll.rightMargin = 80;
-        h.addView(left, ll);
+        h.addView(left, lp(0, MATCH, 1));
 
-        h.addView(detailPanel(), lp(820, MATCH));
-        detailClear(getString(R.string.ABOUT_CAPS), getString(R.string.ABOUT_BUILD), null);
-        detailKv(getString(R.string.KV_VERSION), version());
-        detailKv(getString(R.string.KV_BUILD), getString(R.string.xba_version_code));
-        detailKv(getString(R.string.KV_APP_ID), getPackageName());
+        LinearLayout right = column();
+        right.setGravity(Gravity.CENTER_VERTICAL);
         String sha = GameStore.expectedSha256(this);
-        detailKv(getString(R.string.KV_GAME_CHECK), sha.isEmpty() ? getString(R.string.GAME_CHECK_NONE)
-                                                                  : sha.substring(0, 16) + "…");
-        detailKv(getString(R.string.KV_LICENCE), getString(R.string.ABOUT_LICENCE));
-        detailFooter(getString(R.string.ABOUT_LEGAL), Theme.TEXT_FAINT);
+        String facts = TextUtils.join("\n", new String[] {
+            kv(R.string.KV_VERSION, version()), kv(R.string.KV_BUILD, getString(R.string.xba_version_code)),
+            kv(R.string.KV_APP_ID, getPackageName()),
+            kv(R.string.KV_GAME_CHECK, sha.isEmpty() ? getString(R.string.GAME_CHECK_NONE) : sha.substring(0, 16) + "…"),
+            kv(R.string.KV_LICENCE, getString(R.string.ABOUT_LICENCE)) });
+        right.addView(Theme.body(this, facts), lp(MATCH, WRAP));
+        TextView legal = Theme.body(this, getString(R.string.ABOUT_LEGAL));
+        LinearLayout.LayoutParams ll = lp(MATCH, WRAP);
+        ll.topMargin = Theme.S5;
+        right.addView(legal, ll);
+        LinearLayout.LayoutParams rl = lp(Theme.DESC_W + Theme.S6, MATCH);
+        rl.leftMargin = Theme.S6;
+        h.addView(right, rl);
         body.addView(h, new FrameLayout.LayoutParams(MATCH, MATCH));
         addHint("B", R.string.HINT_BACK, this::back);
     }

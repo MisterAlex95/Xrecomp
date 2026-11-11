@@ -296,16 +296,23 @@ public class LauncherScreensTest {
         render("settings-graphics", true, a -> {
             a.goForTest(LauncherActivity.Screen.SETTINGS);
             idle(300);
+            key(a, KeyEvent.KEYCODE_BUTTON_R1);   // the Graphics tab
             a.forceFocusForTest();
-            for (int i = 0; i < 5; i++) {   // past the launcher rows (with Game theme) to a graphics option
+            for (int i = 0; i < 4; i++) {   // down to Aspect ratio
                 View next = a.focusForTest().focusSearch(View.FOCUS_DOWN);
                 next.requestFocus();
                 idle(200);
             }
             key(a, KeyEvent.KEYCODE_DPAD_RIGHT);   // a value changes: it pulses
         });
+        render("settings-advanced", true, a -> {
+            a.goForTest(LauncherActivity.Screen.SETTINGS);
+            idle(300);
+            key(a, KeyEvent.KEYCODE_BUTTON_L1);   // wraps to Advanced
+        });
         render("controls", false, a -> a.goForTest(LauncherActivity.Screen.CONTROLS));
         render("game-data", true, a -> a.goForTest(LauncherActivity.Screen.GAME_DATA));
+        render("storage", true, a -> a.goForTest(LauncherActivity.Screen.STORAGE));
         render("about", false, a -> a.goForTest(LauncherActivity.Screen.ABOUT));
         render("source", true, a -> a.goForTest(LauncherActivity.Screen.SOURCE));
     }
@@ -460,6 +467,66 @@ public class LauncherScreensTest {
         boolean before = GameStore.autoStart(app);
         key(a, KeyEvent.KEYCODE_BUTTON_X);
         assertEquals(before, GameStore.autoStart(app));
+    }
+
+    /** Calm: Settings' tabs: L1 / R1 switch them (wrapping), each keeps its focus; Frame cap follows the renderer. */
+    @Test
+    public void settingsTabs() throws Exception {
+        LauncherActivity a = launch();
+        a.goForTest(LauncherActivity.Screen.SETTINGS);
+        idle(300);
+        assertEquals(LauncherActivity.TAB_GENERAL, a.settingsTabForTest());
+        assertNotNull(row(a, app.getString(R.string.UI_SOUND)));
+        a.forceFocusForTest();
+        View second = a.focusForTest().focusSearch(View.FOCUS_DOWN);
+        second.requestFocus();
+        idle(200);
+        String keep = ((Widgets.MenuRow)a.focusForTest()).title;
+        key(a, KeyEvent.KEYCODE_BUTTON_R1);
+        assertEquals(LauncherActivity.TAB_GRAPHICS, a.settingsTabForTest());
+        assertNull(row(a, app.getString(R.string.UI_SOUND)));
+        assertNotNull(row(a, app.getString(R.string.OPT_VSYNC)));
+        // Frame cap and Resolution only matter with the GPU renderer: dimmed until it is chosen.
+        Widgets.MenuRow cap = row(a, app.getString(R.string.OPT_GPU_FPS_CAP));
+        assertTrue(cap.dim);
+        Widgets.MenuRow gpu = row(a, app.getString(R.string.OPT_GPU));
+        gpu.requestFocusFromTouch();
+        while (!app.getString(R.string.VAL_GPU_GL).equals(gpu.value))
+            key(a, KeyEvent.KEYCODE_DPAD_RIGHT);
+        assertFalse(cap.dim);
+        assertFalse(row(a, app.getString(R.string.OPT_GPU_SCALE)).dim);
+        key(a, KeyEvent.KEYCODE_BUTTON_R1);
+        key(a, KeyEvent.KEYCODE_BUTTON_R1);
+        assertEquals(LauncherActivity.TAB_ADVANCED, a.settingsTabForTest());
+        assertNotNull(row(a, app.getString(R.string.RESET)));
+        assertNotNull("About ends Advanced", row(a, app.getString(R.string.ABOUT)));
+        key(a, KeyEvent.KEYCODE_BUTTON_R1);   // wraps
+        assertEquals(LauncherActivity.TAB_GENERAL, a.settingsTabForTest());
+        a.forceFocusForTest();
+        idle(200);
+        assertEquals("General keeps its focus", keep, ((Widgets.MenuRow)a.focusForTest()).title);
+        key(a, KeyEvent.KEYCODE_BUTTON_L1);   // wraps back
+        assertEquals(LauncherActivity.TAB_ADVANCED, a.settingsTabForTest());
+        Widgets.Tabs tabs = null;
+        for (View v : allViews(a.getWindow().getDecorView(), new ArrayList<>()))
+            if (v instanceof Widgets.Tabs)
+                tabs = (Widgets.Tabs)v;
+        assertNotNull(tabs);
+        assertEquals(LauncherActivity.TAB_ADVANCED, tabs.activeForTest());
+        assertEquals(Theme.ACCENT, tabs.accentForTest());
+        // The focused row's description, and nothing else, in the column.
+        row(a, app.getString(R.string.RESET)).requestFocusFromTouch();
+        idle(200);
+        assertTrue(a.descriptionForTest().startsWith(app.getString(R.string.RESET_DETAIL)));
+    }
+
+    private static List<View> allViews(View v, List<View> out) {
+        out.add(v);
+        if (v instanceof ViewGroup) {
+            for (int i = 0; i < ((ViewGroup)v).getChildCount(); i++)
+                allViews(((ViewGroup)v).getChildAt(i), out);
+        }
+        return out;
     }
 
     /** U4: the screen change, the glide and the focus animate for the durations of Theme. */
@@ -638,9 +705,11 @@ public class LauncherScreensTest {
         LauncherActivity a = launch();
         a.goForTest(LauncherActivity.Screen.SETTINGS);
         idle(300);
+        assertNull("not on General", row(a, app.getString(R.string.OPT_LSFG)));
+        key(a, KeyEvent.KEYCODE_BUTTON_R1);
         Widgets.MenuRow r = row(a, app.getString(R.string.OPT_LSFG));
         assertNotNull("Settings › Graphics › Frame generation", r);
-        assertEquals(app.getString(R.string.OPT_LSFG_SUMMARY), r.subtitle);
+        assertEquals(app.getString(R.string.OPT_LSFG_DETAIL), r.description);
         assertFalse(r.dim);
 
         File json = new File(Pack.packDir(app.getFilesDir(), TID), "pack.json");
@@ -651,12 +720,15 @@ public class LauncherScreensTest {
         idle(300);
         a.goForTest(LauncherActivity.Screen.SETTINGS);
         idle(300);
+        key(a, KeyEvent.KEYCODE_BUTTON_R1);
         r = row(a, app.getString(R.string.OPT_LSFG));
         assertNotNull(r);
-        assertEquals(app.getString(R.string.LSFG_TITLE_UNAVAILABLE), r.subtitle);
+        assertEquals(app.getString(R.string.LSFG_TITLE_UNAVAILABLE), r.description);
         assertTrue(r.dim);
         // The setting itself still cycles (it is global: the other games keep it).
         r.requestFocusFromTouch();
+        idle(200);
+        assertTrue(a.descriptionForTest().contains(app.getString(R.string.LSFG_TITLE_UNAVAILABLE_DETAIL)));
         key(a, KeyEvent.KEYCODE_DPAD_RIGHT);
         assertEquals(app.getString(R.string.VAL_LSFG_2X), r.value);
     }

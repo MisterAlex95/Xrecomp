@@ -85,8 +85,7 @@
     <string name="LIB_SAF_SUB">Without All files access: games are listed, then imported or copied into the app</string>
 
     <!-- Storage (X on the library; per-game rows in Game data) -->
-    <string name="LIB_ST_FREE_CAPS">Free space</string>
-    <string name="LIB_ST_FREE_LINE">Internal storage %1$s free · Game files %2$s free</string>
+    <string name="LIB_ST_FREE">%1$s free</string>
     <string name="LIB_ST_HINT_DELETE">Delete</string>
     <string name="LIB_ST_DATA">Imported copy</string>
     <string name="LIB_ST_PACK">Pack</string>

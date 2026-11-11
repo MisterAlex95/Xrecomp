@@ -80,8 +80,7 @@
     <string name="LIB_SAF">Utiliser le sélecteur de fichiers</string>
     <string name="LIB_SAF_SUB">Sans l\'accès à tous les fichiers : les jeux sont listés, puis importés ou copiés dans l\'application</string>
 
-    <string name="LIB_ST_FREE_CAPS">Espace libre</string>
-    <string name="LIB_ST_FREE_LINE">Stockage interne : %1$s libres · Fichiers des jeux : %2$s libres</string>
+    <string name="LIB_ST_FREE">%1$s libres</string>
     <string name="LIB_ST_HINT_DELETE">Supprimer</string>
     <string name="LIB_ST_DATA">Copie importée</string>
     <string name="LIB_ST_PACK">Pack</string>

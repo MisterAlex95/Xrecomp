@@ -47,14 +47,13 @@
     <string name="KV_STATUS">Status</string>
     <string name="KV_SIZE">Size</string>
     <string name="KV_FREE">Free in app storage</string>
-    <string name="KV_VALUE">Value</string>
-    <string name="KV_CHOICES">Choices</string>
-    <string name="KV_CFG">In recomp.cfg</string>
     <string name="KV_VERSION">Version</string>
     <string name="KV_BUILD">Build</string>
     <string name="KV_APP_ID">App id</string>
     <string name="KV_GAME_CHECK">Game check</string>
     <string name="KV_LICENCE">Licences</string>
+    <string name="KV_LINE">%1$s: %2$s</string>
+    <string name="KV_TITLE_ID">Title ID</string>
     <string name="FREE_SPACE_APP">Free space in the app\'s storage: %1$s</string>
     <string name="SIZE_COUNTING">counting…</string>
     <string name="SOURCE_IN_PLACE">Read in place</string>
@@ -122,18 +121,16 @@
     <string name="GAME_DATA">Game data</string>
     <string name="ABOUT">About</string>
     <string name="ABOUT_SUB">Version %1$s · licences</string>
-    <string name="OPEN_DIRECTLY">Open the last game directly</string>
+    <string name="OPEN_DIRECTLY">Start in the game</string>
     <string name="OPEN_DIRECTLY_ON">Next time, the game opens directly. Long-press the app icon › Launcher to come back here.</string>
     <string name="OPEN_DIRECTLY_OFF">Next time, this screen shows first.</string>
 
     <!-- Settings -->
-    <string name="SECTION_LAUNCHER">Launcher</string>
+    <string name="SECTION_GENERAL">General</string>
     <string name="SECTION_GRAPHICS">Graphics</string>
     <string name="SECTION_AUDIO">Audio</string>
     <string name="SECTION_ADVANCED">Advanced</string>
-    <string name="SECTION_GAME">Game</string>
     <string name="OPT_LANGUAGE">Language</string>
-    <string name="OPT_LANGUAGE_SUMMARY">The console language the game sees</string>
     <string name="OPT_LANGUAGE_DETAIL">The language the Xbox tells the game. The game shows its menus, text and voices in it when its disc has that language (a European disc usually does, a US disc is often English only); otherwise the game picks one itself, usually English. « Same as Android » follows the phone\'s language. A game can have its own in the in-game menu (Quick settings). Applies the next time the game starts. (RECOMP_LANGUAGE)</string>
     <string name="VAL_LANG_SYSTEM">Same as Android</string>
     <string name="LANG_EN" translatable="false">English</string>
@@ -145,15 +142,12 @@
     <string name="LANG_JA" translatable="false">日本語</string>
     <string name="LANG_KO" translatable="false">한국어</string>
     <string name="LANG_ZH" translatable="false">中文</string>
-    <string name="OPEN_DIRECTLY_SUMMARY">Skip this screen when the game is ready</string>
     <string name="OPEN_DIRECTLY_DETAIL">On: the app icon starts the game straight away when it is set up. Off: this screen shows first, with Play selected.</string>
-    <string name="OPEN_DIRECTLY_FOOTER">Long-press the app icon › Launcher (or Change game) to reach this screen while it is on.</string>
-    <string name="APPLIES_NEXT_START">Saved at once; applied the next time the game starts.</string>
     <string name="SETTINGS_SAVED">Saved. Applied the next time the game starts.</string>
     <string name="SETTINGS_SAVED_RUNNING">Saved. The game is running: it uses the new setting after it is restarted.</string>
     <string name="SETTINGS_GAME_RUNNING">The game is running: changes apply the next time it starts.</string>
     <string name="SETTINGS_SAVE_FAILED">Could not save the settings: %1$s</string>
-    <string name="RESET">Restore defaults</string>
+    <string name="RESET">Reset all</string>
     <string name="RESET_SUB">Lines you wrote in recomp.cfg yourself are kept</string>
     <string name="RESET_DETAIL">Puts every option on this screen back to its default, by removing its lines from recomp.cfg. Other lines in the file are left as they are.</string>
     <string name="RESET_DONE">Defaults restored. Applied the next time the game starts.</string>
@@ -170,55 +164,44 @@
     <string name="VAL_8" translatable="false">8</string>
 
     <string name="OPT_VSYNC">Vertical sync</string>
-    <string name="OPT_VSYNC_SUMMARY">Show each frame in step with the screen</string>
     <string name="OPT_VSYNC_DETAIL">On: frames are shown in step with the display, without tearing. Off: frames are shown as soon as they are ready; a little less delay, but the picture can tear. (RECOMP_PRESENT_VSYNC)</string>
     <string name="OPT_GPU">Renderer</string>
-    <string name="OPT_GPU_SUMMARY">Draw on the CPU or on the GPU (experimental)</string>
     <string name="OPT_GPU_DETAIL">Software: the game is drawn by the CPU, the tested path. GPU: drawn with OpenGL ES, much faster in menus; still experimental, some effects may be missing or wrong. Auto: what this game\'s profile chooses (software for now). If the GPU cannot start, the game falls back to software. (RECOMP_GPU)</string>
     <string name="VAL_GPU_CPU">Software</string>
     <string name="VAL_GPU_GL">GPU</string>
-    <string name="OPT_GPU_FPS_CAP">Frame cap (GPU renderer)</string>
-    <string name="OPT_GPU_FPS_CAP_SUMMARY">Frames per second at most, to save battery</string>
+    <string name="OPT_GPU_FPS_CAP">Frame cap</string>
     <string name="OPT_GPU_FPS_CAP_DETAIL">With the GPU renderer, menus and pause screens can run at 200 frames per second or more, which only drains the battery and heats the device. The cap holds them to 60 (or 30). Auto: what this game\'s profile chooses (60, or 30 where the profile asks for even pacing, as Fable does). Off removes it, for testing. No effect with the software renderer. (RECOMP_GPU_FPS_CAP)</string>
     <string name="VAL_FPS_30" translatable="false">30</string>
     <string name="VAL_FPS_60" translatable="false">60</string>
-    <string name="OPT_GPU_SCALE">Internal resolution (GPU renderer)</string>
-    <string name="OPT_GPU_SCALE_SUMMARY">Draw the game at a multiple of its 640×480</string>
+    <string name="OPT_GPU_SCALE">Resolution</string>
     <string name="OPT_GPU_SCALE_DETAIL">The GPU renderer can draw the 3D picture at 2 or 3 times the console\'s resolution, or at the size that fits the screen exactly. Sharper, at the cost of more GPU work, heat and battery. Effects such as bloom and shadows keep their original resolution. Auto: what this game\'s profile chooses (1× for now). No effect with the software renderer. (RECOMP_GPU_SCALE)</string>
-    <string name="VAL_SCALE_1">1× (original)</string>
+    <string name="VAL_SCALE_1">1×</string>
     <string name="VAL_SCALE_2" translatable="false">2×</string>
     <string name="VAL_SCALE_3" translatable="false">3×</string>
     <string name="VAL_SCALE_FIT">Fit the screen</string>
     <string name="OPT_ASPECT">Aspect ratio</string>
-    <string name="OPT_ASPECT_SUMMARY">Fill a wide screen when the game can</string>
     <string name="OPT_ASPECT_DETAIL">Auto shows the game in 16:9 when it can draw a wider picture, and keeps menus and videos in their original shape. 4:3 always shows the console\'s original picture with side bars. 16:9 always fills the screen; a game without widescreen support is stretched.</string>
-    <string name="VAL_ASPECT_4_3">4:3 (original)</string>
+    <string name="VAL_ASPECT_4_3">4:3</string>
     <string name="VAL_ASPECT_16_9" translatable="false">16:9</string>
     <string name="OPT_TEX">Texture filtering</string>
-    <string name="OPT_TEX_SUMMARY">How textures are sampled when drawn</string>
     <string name="OPT_TEX_DETAIL">Sharp takes the nearest texel, as the game is drawn by default. Smooth blends four texels; anisotropic also follows surfaces seen at an angle. Smoother modes cost speed, and are not the default because they change the look the game was tested with. (RECOMP_TEX_BILINEAR, RECOMP_TEX_ANISO)</string>
     <string name="VAL_TEX_SHARP">Sharp</string>
     <string name="VAL_TEX_SMOOTH">Smooth</string>
     <string name="VAL_TEX_ANISO8">Anisotropic 8×</string>
     <string name="VAL_TEX_ANISO16">Anisotropic 16×</string>
     <string name="OPT_HRTF">3D audio</string>
-    <string name="OPT_HRTF_SUMMARY">Positional sound for 3D voices (HRTF)</string>
     <string name="OPT_HRTF_DETAIL">On: sounds the game places in 3D are filtered to sound like they come from their direction, best with headphones. Off: plain stereo panning. (RECOMP_APU_HRTF)</string>
     <string name="OPT_AUDIO_BUF">Audio buffer</string>
-    <string name="OPT_AUDIO_BUF_SUMMARY">Lower delay or fewer crackles</string>
     <string name="OPT_AUDIO_BUF_DETAIL">The size of each buffer handed to the device, in samples (256, 512, 1024, 2048). Short: less delay between the picture and the sound. Long: fewer crackles and drop-outs on a busy device. (RECOMP_AUDIO_BUF_SAMPLES)</string>
     <string name="VAL_BUF_SHORT">Short</string>
     <string name="VAL_BUF_NORMAL">Normal</string>
     <string name="VAL_BUF_LONG">Long</string>
     <string name="VAL_BUF_LONGEST">Very long</string>
     <string name="OPT_RASTER">Drawing threads</string>
-    <string name="OPT_RASTER_SUMMARY">Cores that draw large triangles</string>
-    <string name="OPT_RASTER_DETAIL">Threads of the software renderer that share large triangles and vertex shading. Auto uses every core the game runs on but one (the fast cores when "Fast cores only" is on). More can be faster on a big SoC; fewer can help when the game itself is short of cores. (RECOMP_RASTER_THREADS)</string>
-    <string name="OPT_BIG_CORES">Fast cores only</string>
-    <string name="OPT_BIG_CORES_SUMMARY">Keep the game on the big cores</string>
+    <string name="OPT_RASTER_DETAIL">Threads of the software renderer that share large triangles and vertex shading. Auto uses every core the game runs on but one (the fast cores when "Fast cores" is on). More can be faster on a big SoC; fewer can help when the game itself is short of cores. (RECOMP_RASTER_THREADS)</string>
+    <string name="OPT_BIG_CORES">Fast cores</string>
     <string name="OPT_BIG_CORES_DETAIL">On: the game runs on the SoC\'s fast cores only, as set at start. Off: the system may also put it on the slow cores; try it only if the game stutters with this on. (RECOMP_BIG_CORES)</string>
-    <string name="OPT_SELFTEST">Self-test at start</string>
-    <string name="OPT_SELFTEST_SUMMARY">For bug reports: checks in the log</string>
+    <string name="OPT_SELFTEST">Self-test</string>
     <string name="OPT_SELFTEST_DETAIL">Runs the runtime\'s self-test before the game starts and writes one PASS or FAIL line per check to the log (logcat, tag xboxrecomp). Useful in a bug report; the game then starts as usual. (RECOMP_SHELL_SELFTEST)</string>
 
     <!-- Game data -->
@@ -348,18 +331,14 @@
 
     <!-- Settings › Launcher: UI sounds and vibration -->
     <string name="UI_SOUND">Sounds</string>
-    <string name="UI_SOUND_SUMMARY">Short sounds when you move and select</string>
     <string name="UI_SOUND_DETAIL">On: a soft tick when the selection moves or a value changes, and short sounds to select, go back, for an error and when the game is ready. Off: the launcher is silent. The game\'s own sound is not affected.</string>
     <string name="UI_SOUND_ON">Launcher sounds on.</string>
     <string name="UI_SOUND_OFF">Launcher sounds off.</string>
     <string name="UI_HAPTICS">Vibration</string>
-    <string name="UI_HAPTICS_SUMMARY">A light buzz with each move and press</string>
     <string name="UI_HAPTICS_DETAIL">On: the device gives a light buzz when the selection moves, a press, an error and when the game is ready. Android\'s own « touch feedback » setting must be on too. Off: no buzz from the launcher.</string>
     <string name="UI_HAPTICS_ON">Vibration on.</string>
     <string name="UI_HAPTICS_OFF">Vibration off.</string>
-    <string name="UI_FEEDBACK_FOOTER">Only the launcher\'s screens; saved at once.</string>
     <string name="BOTTOM_SCREEN">Bottom screen</string>
-    <string name="BOTTOM_SCREEN_SUMMARY">What the second screen shows</string>
     <string name="BOTTOM_SCREEN_DETAIL">Panel: the game\'s card and buttons here, and in the game the Xbox buttons the device lacks (Black, White, Back, Start) and a few tools. Black: the second screen stays black. Off: the app leaves it to the system.</string>
     <string name="BOTTOM_SCREEN_SAVED">Bottom screen: %1$s.</string>
     <string name="VAL_PANEL">Panel</string>
@@ -400,7 +379,6 @@
     <string name="CTL_STICKS_X">Thumbstick buttons (press a stick)</string>
     <!-- Frame generation (docs/technical/framegen.md): only in an APK built with -PxbaLsfg=1 and the bridge. -->
     <string name="OPT_LSFG">Frame generation</string>
-    <string name="OPT_LSFG_SUMMARY">Show an extra, generated frame between real ones</string>
     <string name="OPT_LSFG_DETAIL">Lossless Scaling frame generation (LSFG 3.1) draws one frame between every two the game renders: the game runs at 30 frames per second and the screen shows 60. It needs your own copy of Lossless.dll (Choose Lossless.dll below) and Vulkan. Moving text and the HUD can wobble, a scene cut can ghost for one frame, and input waits one frame longer. 2× performance uses the lighter shader set, for when 2× is too heavy for the device. If generation fails or is too slow, the game goes back to normal frames on its own. Needs the GPU renderer for the 30 fps pacing. (RECOMP_LSFG, RECOMP_LSFG_MULT, RECOMP_LSFG_PERF)</string>
     <string name="VAL_LSFG_2X" translatable="false">2×</string>
     <string name="VAL_LSFG_2X_PERF">2× performance</string>
@@ -418,9 +396,7 @@
     <string name="LSFG_NOT_A_DLL">%1$s is not a DLL: choose Lossless.dll.</string>
     <!-- Settings › Launcher › Game theme (docs/android/app-shell.md « Game theme ») -->
     <string name="GAME_THEME">Game theme</string>
-    <string name="GAME_THEME_SUMMARY">Colours from the game\'s own image</string>
     <string name="GAME_THEME_DETAIL">The launcher takes its colours, and a faint backdrop, from the title image of %1$s, read from your copy of the game. The status colours (ready, warnings, errors) stay the same. Colours only: no backdrop image. Off: the launcher\'s own green.</string>
-    <string name="GAME_THEME_FOOTER">Saved at once; the in-game menu takes it at the next game start.</string>
     <string name="GAME_THEME_SAVED">Game theme: %1$s.</string>
     <string name="GAME_THEME_SOURCE_NONE">None (a colour from the title ID)</string>
     <string name="KV_IMAGE">Image</string>

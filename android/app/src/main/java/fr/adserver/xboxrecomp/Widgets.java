@@ -677,7 +677,7 @@ final class Widgets {
             }
             float x = Theme.ROW_INSET, right = w - Theme.ROW_INSET, textRight = right;
             leftArrowX = -1;
-            if (value != null) {
+            if (value != null && (badge == null || badge.isEmpty())) {
                 float vw = valueP.measureText(value), col = Math.max(vw, valueReserve);
                 float arrows = cycler != null ? ARROW + ARROW_GAP : 0;
                 // The value sits at the right edge, and moves left to make room for its arrows when focused.
@@ -833,6 +833,114 @@ final class Widgets {
                 drawIcon(c, icon, x + iw / 2, h / 2, iw, iconP);
             Paint.FontMetrics fm = labelP.getFontMetrics();
             c.drawText(label, x + iw + ig, h / 2 - (fm.ascent + fm.descent) / 2, labelP);
+        }
+    }
+
+    // ---- Tabs: a screen's sections, switched with L1 / R1 -------------------------------------------------------------
+
+    /**
+     * The tabs of a screen's top bar (Settings): the labels, the active one in TEXT with an ACCENT underline, the
+     * others TEXT_DIM, flanked by the L1 and R1 glyphs that switch them. Not focusable; a tap on a label opens it, on a
+     * glyph the previous or next one.
+     */
+    static final class Tabs extends View {
+        interface Listener {
+            void onTab(int index);
+        }
+
+        private final String[] labels;
+        private final int active;
+        private final Listener listener;
+        private final TextPaint tp = textPaint(Theme.T_ROW, Theme.REGULAR, Theme.TEXT_DIM);
+        private final TextPaint gp = textPaint(Theme.T_SMALL - 2, Theme.MEDIUM, Theme.TEXT_DIM);
+        private final Paint ringP = stroke(Theme.TEXT_DIM, 2), lineP = fill(Theme.ACCENT);
+        private final float[] left, width;
+        private final RectF r = new RectF();
+        private static final float GLYPH_W = 48, GLYPH_H = 40, GAP = Theme.S5, UNDERLINE = 4;
+
+        Tabs(Context c, String[] labels, int active, Listener listener) {
+            super(c);
+            this.labels = labels;
+            this.active = active;
+            this.listener = listener;
+            left = new float[labels.length];
+            width = new float[labels.length];
+            float x = GLYPH_W + GAP - Theme.S2;
+            for (int i = 0; i < labels.length; i++) {
+                width[i] = tp.measureText(labels[i]);
+                left[i] = x;
+                x += width[i] + GAP;
+            }
+            setFocusable(false);
+        }
+
+        int activeForTest() {
+            return active;
+        }
+
+        /** The underline's colour: the accent the screen was built with. */
+        int accentForTest() {
+            return lineP.getColor();
+        }
+
+        private float total() {
+            int n = labels.length;
+            return n == 0 ? 2 * GLYPH_W : left[n - 1] + width[n - 1] + GAP - Theme.S2 + GLYPH_W;
+        }
+
+        @Override
+        protected void onMeasure(int w, int h) {
+            setMeasuredDimension(Math.round(total()) + 2, MeasureSpec.getMode(h) == MeasureSpec.EXACTLY
+                                                          ? MeasureSpec.getSize(h) : Theme.TOP_BAR_H);
+        }
+
+        private void glyph(Canvas c, float x, float cy, String g) {
+            r.set(x + 1, cy - GLYPH_H / 2, x + GLYPH_W - 1, cy + GLYPH_H / 2);
+            c.drawRoundRect(r, GLYPH_H / 2, GLYPH_H / 2, ringP);
+            Paint.FontMetrics fm = gp.getFontMetrics();
+            c.drawText(g, x + GLYPH_W / 2 - gp.measureText(g) / 2, cy - (fm.ascent + fm.descent) / 2, gp);
+        }
+
+        @Override
+        protected void onDraw(Canvas c) {
+            float cy = getHeight() / 2f;
+            glyph(c, 0, cy, "L1");
+            Paint.FontMetrics fm = tp.getFontMetrics();
+            float base = cy - (fm.ascent + fm.descent) / 2;
+            for (int i = 0; i < labels.length; i++) {
+                tp.setColor(i == active ? Theme.TEXT : Theme.TEXT_DIM);
+                c.drawText(labels[i], left[i], base, tp);
+                if (i == active)
+                    c.drawRoundRect(left[i], base + Theme.S2, left[i] + width[i], base + Theme.S2 + UNDERLINE,
+                                    UNDERLINE / 2, UNDERLINE / 2, lineP);
+            }
+            glyph(c, total() - GLYPH_W, cy, "R1");
+        }
+
+        @Override
+        public boolean onTouchEvent(MotionEvent e) {
+            if (e.getAction() == MotionEvent.ACTION_DOWN)
+                return true;
+            if (e.getAction() != MotionEvent.ACTION_UP || listener == null)
+                return super.onTouchEvent(e);
+            float x = e.getX();
+            int n = labels.length;
+            if (x < GLYPH_W) {
+                listener.onTab((active - 1 + n) % n);
+                return true;
+            }
+            if (x > total() - GLYPH_W) {
+                listener.onTab((active + 1) % n);
+                return true;
+            }
+            for (int i = 0; i < n; i++) {
+                if (x >= left[i] - GAP / 2 && x <= left[i] + width[i] + GAP / 2) {
+                    if (i != active)
+                        listener.onTab(i);
+                    return true;
+                }
+            }
+            return true;
         }
     }
 
