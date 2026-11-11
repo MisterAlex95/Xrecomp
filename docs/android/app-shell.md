@@ -247,6 +247,7 @@ exist in the runtime and mean something to a player are offered:
 | Graphics › Vertical sync | On (default), Off | `RECOMP_PRESENT_VSYNC=0` when off |
 | Graphics › Renderer | Auto (default: the title profile's choice, software today), Software, GPU | `RECOMP_GPU=0` / `1`; see [GPU back end](../technical/gpu-backend.md#android) |
 | Graphics › Frame cap (GPU renderer) | Auto (default: the title profile's choice, 60 unless the profile sets one; Fable: 30), 30, 60, Off | `RECOMP_GPU_FPS_CAP=30` / `60` / `0` |
+| Graphics › Internal resolution (GPU renderer) | Auto (default: the title profile's choice, 1× for now), 1× (original), 2×, 3×, Fit the screen | `RECOMP_GPU_SCALE=1` / `2` / `3` / `auto` (Fit: the screen's height / 480, at most 3); see [GPU back end](../technical/gpu-backend.md#internal-resolution) |
 | Graphics › Texture filtering | Sharp (default), Smooth, Anisotropic 8×, Anisotropic 16× | `RECOMP_TEX_BILINEAR=1`, `RECOMP_TEX_ANISO=8` / `16` |
 | Audio › 3D audio (HRTF) | On (default), Off | `RECOMP_APU_HRTF=0` when off |
 | Audio › Audio buffer | Short (256), Normal (default, 512), Long (1024), Very long (2048) | `RECOMP_AUDIO_BUF_SAMPLES=…` |
@@ -577,8 +578,9 @@ the game's process may be alive, and SharedPreferences caches per process; each 
 - **Launcher** opens the launcher (the game waits in the background, as with Home). **Menu** opens or closes the
   [in-game menu](#in-game-menu) on the top screen. **Quit** needs a hold of 0.8 s (it fills in red), then ends the game
   (`recomp_quit(0)`). **Screenshot** saves the last frame as
-  `<external files>/screenshots/<date>.bmp` (24-bit BMP, 640 x 480: `xbox_FramebufferDumpBmp`, now implemented for
-  the SDL window) and says « Saved … » in the status strip. **Perf** shows more figures on the panel (draws per frame,
+  `<external files>/screenshots/<date>.bmp` (24-bit BMP of the frame shown, `xbox_FramebufferDumpBmp`: 640 x 480,
+  or the GPU renderer's own size with an internal resolution above 1×, e.g. 1440 x 1080 at Fit the screen on a
+  1080p display) and says « Saved … » in the status strip. **Perf** shows more figures on the panel (draws per frame,
   battery temperature); it does not draw over the game. **Share log** dumps this process's logcat (the runtime's
   stdout and stderr go there) to `<files>/logs/game.log` and opens the share sheet (`LogProvider`,
   `content://<app id>.logs/game/game.log`).
