@@ -113,6 +113,13 @@ void xba_title_configure(void)
      * (DirectSoundCreate waits on the AC'97 codec). */
     SETENV_DEFAULT("RECOMP_PB_EXEC", "1");
     SETENV_DEFAULT("RECOMP_AC97_READY", "1");
+    /* Vblank interrupts on the 60 Hz schedule. The XMV decoder's clock is
+     * D3DDevice_GetDisplayFieldStatus (sub_0084F650), which reads the vblank
+     * count D3D's vblank handler keeps at device+0x1DE8; with no vblanks it
+     * never moved, the decoder delivered the first frame and then waited for
+     * ever (the movies were skipped with an override until now). The plain
+     * ~50 Hz tick plays them slower than the game expects: paced. */
+    SETENV_DEFAULT("RECOMP_VBLANK", "paced");
     /* More than the default 8 worker threads alive during the front-end load. */
     SETENV_DEFAULT("RECOMP_THREAD_STACKS", "32");
     /* The pad (the template starts the USB model when RECOMP_USB is set); the
