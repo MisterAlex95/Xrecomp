@@ -2,8 +2,8 @@
  * frame-buffer window (fb_present_sdl.c): FPS, frame time, draws, memory,
  * CPU, battery and temperature, and the title's status line (the window
  * title it sets, e.g. a background preparation percentage, which a phone has
- * no title bar to show). On by default on Android; RECOMP_OVERLAY=0 turns it
- * off, =1 turns it on on a desktop. */
+ * no title bar to show). Off by default everywhere; RECOMP_OVERLAY=1 turns it
+ * on (Android: Settings › Advanced › Performance overlay). */
 #ifndef PERF_OVERLAY_H
 #define PERF_OVERLAY_H
 

@@ -62,11 +62,7 @@ int perf_overlay_enabled(void)
     static int v = -1;
     if (v < 0) {
         const char *e = getenv("RECOMP_OVERLAY");
-#ifdef __ANDROID__
-        v = !e || (*e && strcmp(e, "0") != 0);
-#else
-        v = e && *e && strcmp(e, "0") != 0;
-#endif
+        v = e && *e && strcmp(e, "0") != 0;   /* off unless asked for */
     }
     return v;
 }
