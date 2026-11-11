@@ -189,6 +189,177 @@ static GLuint compile(GLenum type, const char *body)
     return sh;
 }
 
+/* ---- GL state shadow ---------------------------------------------------- */
+
+/* The GL state the back end sets per batch, as last set: a call that would
+ * set what is already there is skipped. Each draw used to rebind the
+ * framebuffer and set viewport, scissor, enables, blend/depth/stencil
+ * state, program, vertex array and 16 attribute states whether or not they
+ * changed, about 30 calls a batch for Fable's 1090 batches a frame; on a
+ * mobile driver each costs validation on the one thread that feeds the GPU.
+ * Every change of this state in this file goes through these helpers (or
+ * marks the entry unknown); gl_reset_objects forgets all of it, and a
+ * deleted object's bindings are forgotten with it. All bytes 0xFF means
+ * unknown: no GL name or enum is 0xFFFFFFFF, and the floats are NaN, which
+ * compares unequal to everything. */
+enum { SH_BLEND, SH_DEPTH, SH_STENCIL, SH_CULL, SH_POLY, SH_SCISSOR, SH_NCAP };
+#define SH_UNITS 4
+static struct {
+    GLuint fbo, prog, vao, array_buf;
+    GLint vp[4], sc[4];
+    GLint unit;                             /* active texture unit, 0-based */
+    GLuint tex[SH_UNITS][2];                /* per unit: 2D, cube */
+    GLint cap[SH_NCAP];
+    GLenum blend_src, blend_dst, blend_eq;
+    float blend_color[4];
+    GLenum depth_func;
+    GLint depth_mask;
+    GLenum st_func, st_fail, st_zfail, st_zpass;
+    GLint st_ref;
+    GLuint st_mask, st_write;
+    GLenum cull_face, front_face;
+    float po_factor, po_units;
+    GLint cmask;                            /* r | g << 1 | b << 2 | a << 3 */
+    /* s_pvao (gl_draw_program): attribute layout (streams mask), element
+     * buffer bound, generic values of the disabled attributes. */
+    uint32_t pv_streams, pv_ebo;
+    float pv_imm[16][4];
+} s_sh;
+
+static void sh_forget(void)
+{
+    memset(&s_sh, 0xFF, sizeof s_sh);
+}
+
+static void sh_fbo(GLuint f)
+{
+    if (s_sh.fbo != f) {
+        glBindFramebuffer(GL_FRAMEBUFFER, f);
+        s_sh.fbo = f;
+    }
+}
+
+static void sh_viewport(GLint x, GLint y, GLsizei w, GLsizei h)
+{
+    if (s_sh.vp[0] != x || s_sh.vp[1] != y || s_sh.vp[2] != w || s_sh.vp[3] != h) {
+        glViewport(x, y, w, h);
+        s_sh.vp[0] = x; s_sh.vp[1] = y; s_sh.vp[2] = w; s_sh.vp[3] = h;
+    }
+}
+
+static void sh_scissor(GLint x, GLint y, GLsizei w, GLsizei h)
+{
+    if (s_sh.sc[0] != x || s_sh.sc[1] != y || s_sh.sc[2] != w || s_sh.sc[3] != h) {
+        glScissor(x, y, w, h);
+        s_sh.sc[0] = x; s_sh.sc[1] = y; s_sh.sc[2] = w; s_sh.sc[3] = h;
+    }
+}
+
+static void sh_cap(int i, GLenum cap, int on)
+{
+    if (s_sh.cap[i] != on) {
+        if (on)
+            glEnable(cap);
+        else
+            glDisable(cap);
+        s_sh.cap[i] = on;
+    }
+}
+
+static void sh_program(GLuint p)
+{
+    if (s_sh.prog != p) {
+        glUseProgram(p);
+        s_sh.prog = p;
+    }
+}
+
+static void sh_vao(GLuint v)
+{
+    if (s_sh.vao != v) {
+        glBindVertexArray(v);
+        s_sh.vao = v;
+    }
+}
+
+static void sh_array_buffer(GLuint b)
+{
+    if (s_sh.array_buf != b) {
+        glBindBuffer(GL_ARRAY_BUFFER, b);
+        s_sh.array_buf = b;
+    }
+}
+
+static void sh_active(int unit)
+{
+    if (s_sh.unit != unit) {
+        glActiveTexture(GL_TEXTURE0 + (GLenum)unit);
+        s_sh.unit = unit;
+    }
+}
+
+/* Bind on the active unit (texture uploads and parameter changes bind on
+ * whatever unit is active; only units 0-3 are shadowed). */
+static void sh_tex(GLenum target, GLuint t)
+{
+    int k = target == GL_TEXTURE_CUBE_MAP;
+
+    if (s_sh.unit >= 0 && s_sh.unit < SH_UNITS) {
+        if (s_sh.tex[s_sh.unit][k] == t)
+            return;
+        s_sh.tex[s_sh.unit][k] = t;
+    }
+    glBindTexture(target, t);
+}
+
+/* Deleting an object unbinds it wherever it is bound (GL reverts those
+ * bindings to 0): forget them, a new object may get the same name. */
+static void sh_delete_textures(GLsizei n, const GLuint *t)
+{
+    GLsizei i;
+    int u, k;
+
+    for (i = 0; i < n; i++)
+        for (u = 0; u < SH_UNITS; u++)
+            for (k = 0; k < 2; k++)
+                if (s_sh.tex[u][k] == t[i])
+                    s_sh.tex[u][k] = 0xFFFFFFFFu;
+    glDeleteTextures(n, t);
+}
+
+static void sh_delete_fbo(GLuint f)
+{
+    if (s_sh.fbo == f)
+        s_sh.fbo = 0xFFFFFFFFu;
+    glDeleteFramebuffers(1, &f);
+}
+
+static void sh_color_mask(int r, int g, int b, int a)
+{
+    GLint m = (r != 0) | (g != 0) << 1 | (b != 0) << 2 | (a != 0) << 3;
+
+    if (s_sh.cmask != m) {
+        glColorMask(r != 0, g != 0, b != 0, a != 0);
+        s_sh.cmask = m;
+    }
+}
+
+static void sh_depth_mask(int on)
+{
+    if (s_sh.depth_mask != on) {
+        glDepthMask(on ? GL_TRUE : GL_FALSE);
+        s_sh.depth_mask = on;
+    }
+}
+
+static void sh_stencil_mask(GLuint m)
+{
+    if (s_sh.st_write != m) {
+        glStencilMask(m);
+        s_sh.st_write = m;
+    }
+}
+
 /* ---- set-up ------------------------------------------------------------- */
 
 static void unregister_self(void);
@@ -203,6 +374,7 @@ static int ensure_init(void)
         unregister_self();
         return 0;
     }
+    sh_forget();
     fprintf(stderr, "  [GPUGL] %s | %s | GLSL %s\n",
             (const char *)glGetString(GL_RENDERER),
             (const char *)glGetString(GL_VERSION),
@@ -257,9 +429,9 @@ static int ensure_init(void)
         return 0;
     }
     glGenVertexArrays(1, &s_vao);
-    glBindVertexArray(s_vao);
+    sh_vao(s_vao);
     glGenBuffers(1, &s_vbo);
-    glBindBuffer(GL_ARRAY_BUFFER, s_vbo);
+    sh_array_buffer(s_vbo);
     {
         const GLsizei st = (GLsizei)sizeof(Nv2aVertexFull);
         int t;
@@ -395,7 +567,7 @@ static void rt_upload(GlRT *r)
                 o[3] = 0xFF;
             }
         }
-    glBindTexture(GL_TEXTURE_2D, r->tex);
+    sh_tex(GL_TEXTURE_2D, r->tex);
     glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, (GLsizei)r->w, (GLsizei)r->h,
                     GL_RGBA, GL_UNSIGNED_BYTE, buf);
 }
@@ -505,7 +677,7 @@ static void rt_readback(GlRT *r)
     buf = scratch((size_t)r->w * r->h * 4);
     if (!buf)
         return;
-    glBindFramebuffer(GL_FRAMEBUFFER, r->fbo);
+    sh_fbo(r->fbo);
     glReadPixels(0, 0, (GLsizei)r->w, (GLsizei)r->h, NV_GL_READ_FORMAT, NV_GL_READ_TYPE, buf);
     rt_store(r, buf);
     if (s_pend.pending && s_pend.snap.va == r->va)
@@ -517,9 +689,9 @@ static void rt_readback(GlRT *r)
 static void rt_free(GlRT *r)
 {
     rt_readback(r);
-    if (r->fbo) glDeleteFramebuffers(1, &r->fbo);
-    if (r->tex) glDeleteTextures(1, &r->tex);
-    if (r->copy) glDeleteTextures(1, &r->copy);
+    if (r->fbo) sh_delete_fbo(r->fbo);
+    if (r->tex) sh_delete_textures(1, &r->tex);
+    if (r->copy) sh_delete_textures(1, &r->copy);
     memset(r, 0, sizeof *r);
 }
 
@@ -530,14 +702,14 @@ static void rt_grow(GlRT *r, uint32_t gw, uint32_t gh)
     GLuint t;
 
     glGenTextures(1, &t);
-    glBindTexture(GL_TEXTURE_2D, t);
+    sh_tex(GL_TEXTURE_2D, t);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, (GLsizei)gw, (GLsizei)gh, 0,
                  GL_RGBA, GL_UNSIGNED_BYTE, NULL);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
-    glBindFramebuffer(GL_FRAMEBUFFER, r->fbo);
+    sh_fbo(r->fbo);
     glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, (GLsizei)r->gw, (GLsizei)r->gh);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, t, 0);
-    glDeleteTextures(1, &r->tex);
+    sh_delete_textures(1, &r->tex);
     r->tex = t;
     r->gw = gw;
     r->gh = gh;
@@ -629,7 +801,7 @@ static GlRT *rt_get(const Nv2aSurface *s)
     r->cfmt = s->format & 0xF;
     r->samp.wrap_s = r->samp.wrap_t = r->samp.filter = r->samp.swz_a = -1;
     glGenTextures(1, &r->tex);
-    glBindTexture(GL_TEXTURE_2D, r->tex);
+    sh_tex(GL_TEXTURE_2D, r->tex);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, (GLsizei)w, (GLsizei)h, 0,
                  GL_RGBA, GL_UNSIGNED_BYTE, NULL);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
@@ -638,7 +810,7 @@ static GlRT *rt_get(const Nv2aSurface *s)
     r->seed = 1;
     s_st.rt_creates++;
     glGenFramebuffers(1, &r->fbo);
-    glBindFramebuffer(GL_FRAMEBUFFER, r->fbo);
+    sh_fbo(r->fbo);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, r->tex, 0);
     r->depth = 0;
     if (s_verbose)
@@ -660,13 +832,13 @@ static void depth_free(GlDepth *d)
     /* Colour targets that have it attached drop it (re-attached at bind). */
     for (i = 0; i < NV_GL_MAX_RT; i++)
         if (s_rt[i].depth == d->tex && d->tex) {
-            glBindFramebuffer(GL_FRAMEBUFFER, s_rt[i].fbo);
+            sh_fbo(s_rt[i].fbo);
             glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT,
                                    GL_TEXTURE_2D, 0, 0);
             s_rt[i].depth = 0;
         }
-    if (d->fbo) glDeleteFramebuffers(1, &d->fbo);
-    if (d->tex) glDeleteTextures(1, &d->tex);
+    if (d->fbo) sh_delete_fbo(d->fbo);
+    if (d->tex) sh_delete_textures(1, &d->tex);
     memset(d, 0, sizeof *d);
 }
 
@@ -706,7 +878,7 @@ static GlDepth *depth_get(uint32_t va, uint32_t w, uint32_t h, uint32_t zbpp)
     d->samp.wrap_s = d->samp.wrap_t = d->samp.filter = d->samp.swz_a = -1;
     d->cmp = 0;
     glGenTextures(1, &d->tex);
-    glBindTexture(GL_TEXTURE_2D, d->tex);
+    sh_tex(GL_TEXTURE_2D, d->tex);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH24_STENCIL8, (GLsizei)d->w, (GLsizei)d->h, 0,
                  GL_DEPTH_STENCIL, GL_UNSIGNED_INT_24_8, NULL);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
@@ -749,7 +921,7 @@ static int bind_depth_only(const Nv2aSurface *s, uint32_t zeta_va, GlTarget *t)
     if (!d->fbo) {
         const GLenum none = GL_NONE;
         glGenFramebuffers(1, &d->fbo);
-        glBindFramebuffer(GL_FRAMEBUFFER, d->fbo);
+        sh_fbo(d->fbo);
         glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT,
                                GL_TEXTURE_2D, d->tex, 0);
         glDrawBuffers(1, &none);
@@ -758,16 +930,16 @@ static int bind_depth_only(const Nv2aSurface *s, uint32_t zeta_va, GlTarget *t)
             fprintf(stderr, "  [GPUGL] depth-only target for zeta 0x%08X %ux%u\n",
                     zeta_va, d->w, d->h);
     } else {
-        glBindFramebuffer(GL_FRAMEBUFFER, d->fbo);
+        sh_fbo(d->fbo);
     }
     note_target(d->fbo);
     t->rt = NULL;
     t->w = d->w;
     t->h = d->h;
     t->bpp = 4;
-    glViewport(0, 0, (GLsizei)t->w, (GLsizei)t->h);
-    glEnable(GL_SCISSOR_TEST);
-    glScissor((GLint)s->clip_x, (GLint)s->clip_y, (GLsizei)s->width, (GLsizei)s->height);
+    sh_viewport(0, 0, (GLsizei)t->w, (GLsizei)t->h);
+    sh_cap(SH_SCISSOR, GL_SCISSOR_TEST, 1);
+    sh_scissor((GLint)s->clip_x, (GLint)s->clip_y, (GLsizei)s->width, (GLsizei)s->height);
     return 1;
 }
 
@@ -799,7 +971,7 @@ static int bind_target(const Nv2aSurface *s, uint32_t zeta_va, GlTarget *t)
         return bind_depth_only(s, zeta_va, t);
     if (!(r = rt_get(s)))
         return 0;
-    glBindFramebuffer(GL_FRAMEBUFFER, r->fbo);
+    sh_fbo(r->fbo);
     note_target(r->fbo);
     d = depth_get(zeta_va, r->gw, r->gh, zeta_bpp(s))->tex;
     if (d != r->depth) {
@@ -807,9 +979,9 @@ static int bind_target(const Nv2aSurface *s, uint32_t zeta_va, GlTarget *t)
                                GL_TEXTURE_2D, d, 0);
         r->depth = d;
     }
-    glViewport(0, 0, (GLsizei)r->gw, (GLsizei)r->gh);
-    glEnable(GL_SCISSOR_TEST);
-    glScissor((GLint)s->clip_x, (GLint)s->clip_y, (GLsizei)s->width, (GLsizei)s->height);
+    sh_viewport(0, 0, (GLsizei)r->gw, (GLsizei)r->gh);
+    sh_cap(SH_SCISSOR, GL_SCISSOR_TEST, 1);
+    sh_scissor((GLint)s->clip_x, (GLint)s->clip_y, (GLsizei)s->width, (GLsizei)s->height);
     r->used = s_frame;
     t->rt = r;
     t->w = r->gw;
@@ -943,7 +1115,7 @@ static void tex_drop_all(void)
     int i;
     for (i = 0; i < NV_GL_MAX_TEX; i++)
         if (s_tex[i].tex)
-            glDeleteTextures(1, &s_tex[i].tex);
+            sh_delete_textures(1, &s_tex[i].tex);
     memset(s_tex, 0, sizeof s_tex);
     memset(s_bound, 0, sizeof s_bound);
     s_ntex = 0;
@@ -1000,7 +1172,7 @@ static int tex_upload(GlTex *e, const Nv2aTexture *t)
 
     if (!e->tex)
         glGenTextures(1, &e->tex);
-    glBindTexture(target, e->tex);
+    sh_tex(target, e->tex);
     one.cube = 0;
     if (e->cube) {
         uint32_t stride = e->bytes / 6;
@@ -1202,8 +1374,8 @@ static void tex_bind(GlTex *e, const Nv2aTexture *t, int unit, uint32_t shade)
 {
     GLenum target = e->cube ? GL_TEXTURE_CUBE_MAP : GL_TEXTURE_2D;
 
-    glActiveTexture(GL_TEXTURE0 + (GLenum)unit);
-    glBindTexture(target, e->tex);
+    sh_active((int)unit);
+    sh_tex(target, e->tex);
     samp_set(target, &e->samp, tex_filter(t, shade),
              wrap_mode(t->addr_u, (int)t->border_color),
              wrap_mode(t->addr_v, (int)t->border_color), t->border, GL_ALPHA);
@@ -1320,7 +1492,7 @@ static GlProg *prog_get(const Nv2aGlShaderKey *key, const GlVsh *vsh)
         p->failed = 1;
         return NULL;
     }
-    glUseProgram(p->prog);
+    sh_program(p->prog);
     for (i = 0; i < 4; i++) {
         char name[8];
         snprintf(name, sizeof name, "u_t%u", i);
@@ -1401,32 +1573,60 @@ static void apply_state(const Nv2aRenderState *rs, uint32_t shade, uint32_t bpp,
         default:
             eq = GL_FUNC_ADD;
         }
-        glEnable(GL_BLEND);
-        glBlendFunc(blend_factor(rs->blend_src, 1), blend_factor(rs->blend_dst, 0));
-        glBlendEquation(eq);
+        GLenum src = blend_factor(rs->blend_src, 1), dst = blend_factor(rs->blend_dst, 0);
+        sh_cap(SH_BLEND, GL_BLEND, 1);
+        if (s_sh.blend_src != src || s_sh.blend_dst != dst) {
+            glBlendFunc(src, dst);
+            s_sh.blend_src = src;
+            s_sh.blend_dst = dst;
+        }
+        if (s_sh.blend_eq != eq) {
+            glBlendEquation(eq);
+            s_sh.blend_eq = eq;
+        }
         unpack4(rs->blend_color, bc);
-        glBlendColor(bc[0], bc[1], bc[2], bc[3]);
+        if (memcmp(bc, s_sh.blend_color, sizeof bc) != 0) {
+            glBlendColor(bc[0], bc[1], bc[2], bc[3]);
+            memcpy(s_sh.blend_color, bc, sizeof bc);
+        }
     } else {
-        glDisable(GL_BLEND);
+        sh_cap(SH_BLEND, GL_BLEND, 0);
     }
     if (shade == NV2A_SHADE_REPLACE
         || !(rs->depth_test_enable || rs->depth_write)) {
-        glDisable(GL_DEPTH_TEST);
+        sh_cap(SH_DEPTH, GL_DEPTH_TEST, 0);
     } else {
         /* GL writes depth only with the test on: ALWAYS stands in for "off". */
-        glEnable(GL_DEPTH_TEST);
-        glDepthFunc(rs->depth_test_enable ? compare_func(rs->depth_func) : GL_ALWAYS);
-        glDepthMask(rs->depth_write ? GL_TRUE : GL_FALSE);
+        GLenum f = rs->depth_test_enable ? compare_func(rs->depth_func) : GL_ALWAYS;
+        sh_cap(SH_DEPTH, GL_DEPTH_TEST, 1);
+        if (s_sh.depth_func != f) {
+            glDepthFunc(f);
+            s_sh.depth_func = f;
+        }
+        sh_depth_mask(rs->depth_write != 0);
     }
     if (rs->stencil_enable && shade != NV2A_SHADE_REPLACE) {
-        glEnable(GL_STENCIL_TEST);
-        glStencilFunc(compare_func(rs->stencil_func), (GLint)(rs->stencil_ref & 0xFF),
-                      rs->stencil_func_mask & 0xFF);
-        glStencilOp(stencil_op(rs->stencil_fail), stencil_op(rs->stencil_zfail),
-                    stencil_op(rs->stencil_zpass));
-        glStencilMask(rs->stencil_write_mask & 0xFF);
+        GLenum f = compare_func(rs->stencil_func);
+        GLenum o1 = stencil_op(rs->stencil_fail), o2 = stencil_op(rs->stencil_zfail);
+        GLenum o3 = stencil_op(rs->stencil_zpass);
+        GLint ref = (GLint)(rs->stencil_ref & 0xFF);
+        GLuint fm = rs->stencil_func_mask & 0xFF;
+        sh_cap(SH_STENCIL, GL_STENCIL_TEST, 1);
+        if (s_sh.st_func != f || s_sh.st_ref != ref || s_sh.st_mask != fm) {
+            glStencilFunc(f, ref, fm);
+            s_sh.st_func = f;
+            s_sh.st_ref = ref;
+            s_sh.st_mask = fm;
+        }
+        if (s_sh.st_fail != o1 || s_sh.st_zfail != o2 || s_sh.st_zpass != o3) {
+            glStencilOp(o1, o2, o3);
+            s_sh.st_fail = o1;
+            s_sh.st_zfail = o2;
+            s_sh.st_zpass = o3;
+        }
+        sh_stencil_mask(rs->stencil_write_mask & 0xFF);
     } else {
-        glDisable(GL_STENCIL_TEST);
+        sh_cap(SH_STENCIL, GL_STENCIL_TEST, 0);
     }
     /* Culling as the title set it. Rows map one to one (guest row y = GL
      * row y), which mirrors the picture vertically in GL's window space, so
@@ -1436,25 +1636,36 @@ static void apply_state(const Nv2aRenderState *rs, uint32_t shade, uint32_t bpp,
     if (s_cull && rs->cull_enable
         && (rs->cull_face == GL_FRONT || rs->cull_face == GL_BACK
             || rs->cull_face == GL_FRONT_AND_BACK)) {
-        glEnable(GL_CULL_FACE);
-        glCullFace((GLenum)rs->cull_face);
-        glFrontFace(rs->front_face == GL_CCW ? GL_CW : GL_CCW);
+        GLenum ff = rs->front_face == GL_CCW ? GL_CW : GL_CCW;
+        sh_cap(SH_CULL, GL_CULL_FACE, 1);
+        if (s_sh.cull_face != (GLenum)rs->cull_face) {
+            glCullFace((GLenum)rs->cull_face);
+            s_sh.cull_face = (GLenum)rs->cull_face;
+        }
+        if (s_sh.front_face != ff) {
+            glFrontFace(ff);
+            s_sh.front_face = ff;
+        }
     } else {
-        glDisable(GL_CULL_FACE);
+        sh_cap(SH_CULL, GL_CULL_FACE, 0);
     }
     /* Polygon offset (shadow-map passes push their depth back). The units
      * count the zeta format's steps; the depth buffer is D24S8 whatever the
      * format, so a Z16 surface's step is 256 of ours. */
     if (rs->poly_offset_fill && shade != NV2A_SHADE_REPLACE) {
-        glEnable(GL_POLYGON_OFFSET_FILL);
-        glPolygonOffset(rs->poly_offset_factor,
-                        rs->poly_offset_units * (zeta16 ? 256.0f : 1.0f));
+        float units = rs->poly_offset_units * (zeta16 ? 256.0f : 1.0f);
+        sh_cap(SH_POLY, GL_POLYGON_OFFSET_FILL, 1);
+        if (s_sh.po_factor != rs->poly_offset_factor || s_sh.po_units != units) {
+            glPolygonOffset(rs->poly_offset_factor, units);
+            s_sh.po_factor = rs->poly_offset_factor;
+            s_sh.po_units = units;
+        }
     } else {
-        glDisable(GL_POLYGON_OFFSET_FILL);
+        sh_cap(SH_POLY, GL_POLYGON_OFFSET_FILL, 0);
     }
     /* A 16-bit surface has no alpha: keep the target's at 1, as the CPU
      * path reads it back. */
-    glColorMask((cm & 0x00010000u) != 0, (cm & 0x00000100u) != 0,
+    sh_color_mask((cm & 0x00010000u) != 0, (cm & 0x00000100u) != 0,
                 (cm & 0x00000001u) != 0, bpp == 4 && (cm & 0x01000000u) != 0);
 }
 
@@ -1599,7 +1810,7 @@ static void gl_clear(const Nv2aSurface *s, const Nv2aRenderState *rs,
         unpack4(argb, c);
         if (t.bpp == 2)
             c[3] = 1.0f;
-        glColorMask((flags & 0x10) != 0, (flags & 0x20) != 0, (flags & 0x40) != 0,
+        sh_color_mask((flags & 0x10) != 0, (flags & 0x20) != 0, (flags & 0x40) != 0,
                     t.bpp == 2 || (flags & 0x80) != 0);
         glClearColor(c[0], c[1], c[2], c[3]);
         mask |= GL_COLOR_BUFFER_BIT;
@@ -1608,7 +1819,7 @@ static void gl_clear(const Nv2aSurface *s, const Nv2aRenderState *rs,
         /* zclear_value(): Z16 in the low 16 bits, Z24 in the top 24. */
         float z = ((s->format >> 4) & 0xF) == 1 ? (float)(zstencil & 0xFFFF) / 65535.0f
                                                 : (float)(zstencil >> 8) / 16777215.0f;
-        glDepthMask(GL_TRUE);
+        sh_depth_mask(1);
 #if NV2A_GL_ES
         glClearDepthf(z);
 #else
@@ -1617,7 +1828,7 @@ static void gl_clear(const Nv2aSurface *s, const Nv2aRenderState *rs,
         mask |= GL_DEPTH_BUFFER_BIT;
     }
     if (flags & 0x02) {
-        glStencilMask(0xFF);
+        sh_stencil_mask(0xFF);
         glClearStencil((GLint)(zstencil & 0xFF));
         mask |= GL_STENCIL_BUFFER_BIT;
     }
@@ -1652,8 +1863,8 @@ static void rt_bind_as_texture(GlRT *r, const Nv2aPixelState *ps, const Nv2aText
                                int unit, GLint alpha, float *tscale)
 {
     rt_seed(r);
-    glActiveTexture(GL_TEXTURE0 + (GLenum)unit);
-    glBindTexture(GL_TEXTURE_2D, r->tex);
+    sh_active((int)unit);
+    sh_tex(GL_TEXTURE_2D, r->tex);
     samp_set(GL_TEXTURE_2D, &r->samp, tex_filter(t, ps->shade),
              wrap_mode(t->addr_u, (int)t->border_color),
              wrap_mode(t->addr_v, (int)t->border_color), t->border, alpha);
@@ -1703,8 +1914,8 @@ static int bind_shadow(const Nv2aPixelState *ps, const Nv2aTexture *t, int unit,
             d = &s_depth[i];
     if (!d || t->width > d->w || t->height > d->h)
         return 0;
-    glActiveTexture(GL_TEXTURE0 + (GLenum)unit);
-    glBindTexture(GL_TEXTURE_2D, d->tex);
+    sh_active((int)unit);
+    sh_tex(GL_TEXTURE_2D, d->tex);
     samp_set(GL_TEXTURE_2D, &d->samp, tex_filter(t, ps->shade),
              wrap_mode(t->addr_u, (int)t->border_color),
              wrap_mode(t->addr_v, (int)t->border_color), t->border, GL_ALPHA);
@@ -1794,11 +2005,11 @@ static void break_feedback(GlRT *target)
         GlRT *r = s_stage_rt[st];
         if (r != target)
             continue;
-        glActiveTexture(GL_TEXTURE0 + (GLenum)st);
+        sh_active((int)st);
         if (!r->copy || r->copy_w != r->gw || r->copy_h != r->gh) {
             if (!r->copy)
                 glGenTextures(1, &r->copy);
-            glBindTexture(GL_TEXTURE_2D, r->copy);
+            sh_tex(GL_TEXTURE_2D, r->copy);
             glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, (GLsizei)r->gw, (GLsizei)r->gh, 0,
                          GL_RGBA, GL_UNSIGNED_BYTE, NULL);
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
@@ -1807,7 +2018,7 @@ static void break_feedback(GlRT *target)
             r->copy_samp.wrap_s = r->copy_samp.wrap_t = -1;
             r->copy_samp.filter = r->copy_samp.swz_a = -1;
         } else {
-            glBindTexture(GL_TEXTURE_2D, r->copy);
+            sh_tex(GL_TEXTURE_2D, r->copy);
         }
         /* The target's framebuffer is bound for drawing (and reading). */
         glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, (GLsizei)r->gw, (GLsizei)r->gh);
@@ -1924,7 +2135,7 @@ static void gl_draw(const Nv2aSurface *s, const Nv2aBatch *b)
     break_feedback(t.rt);
     apply_state(rs, ps->shade, t.bpp, ((s->format >> 4) & 0xF) == 1);
     set_near_mode(0, 0.0f);
-    glUseProgram(p->prog);
+    sh_program(p->prog);
     v[0] = 2.0f / (float)t.w;
     v[1] = 2.0f / (float)t.h;
     v[2] = 2.0f / zmax_of(s->format);
@@ -1932,8 +2143,8 @@ static void gl_draw(const Nv2aSurface *s, const Nv2aBatch *b)
     glUniform4fv(p->u_vp, 1, v);
     set_pixel_uniforms(p, ps, rs, tscale);
 
-    glBindVertexArray(s_vao);
-    glBindBuffer(GL_ARRAY_BUFFER, s_vbo);
+    sh_vao(s_vao);
+    sh_array_buffer(s_vbo);
     glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)b->count * (GLsizeiptr)sizeof(Nv2aVertexFull),
                  b->full, GL_STREAM_DRAW);
     if (rs->zpass_enable && s_qcount < NV_GL_MAX_QUERY) {
@@ -2026,7 +2237,7 @@ static int gl_draw_program(const Nv2aSurface *s, const Nv2aBatch *b)
     if (!(zmin >= 0.0f && zmin < zmax))
         zmin = 0.0f;
     set_near_mode(1, zmin / zmax);
-    glUseProgram(p->prog);
+    sh_program(p->prog);
     v[0] = 2.0f / (float)t.w;
     v[1] = 2.0f / (float)t.h;
     v[2] = 2.0f / (zmax - zmin);
@@ -2047,26 +2258,41 @@ static int gl_draw_program(const Nv2aSurface *s, const Nv2aBatch *b)
         glGenBuffers(1, &s_pvbo);
         glGenBuffers(1, &s_pebo);
     }
-    glBindVertexArray(s_pvao);
+    sh_vao(s_pvao);
     for (a = 0; a < 16; a++)
         nstream += (pb->streams >> a) & 1;
-    glBindBuffer(GL_ARRAY_BUFFER, s_pvbo);
+    sh_array_buffer(s_pvbo);
     glBufferData(GL_ARRAY_BUFFER,
                  (GLsizeiptr)((size_t)pb->vertex_count * nstream * 4 * sizeof(float)),
                  pb->attrs, GL_STREAM_DRAW);
-    for (a = 0, k = 0; a < 16; a++) {
-        if (pb->streams & (1u << a)) {
-            glEnableVertexAttribArray(a);
-            glVertexAttribPointer(a, 4, GL_FLOAT, GL_FALSE,
-                                  (GLsizei)(nstream * 4 * sizeof(float)),
-                                  (const void *)((size_t)k * 4 * sizeof(float)));
-            k++;
-        } else {
-            glDisableVertexAttribArray(a);
-            glVertexAttrib4fv(a, pb->imm[a]);
+    /* The layout follows from the streams mask alone (one interleaved
+     * buffer, always s_pvbo): specified again only when the mask changes.
+     * The generic values of attributes without a stream are context state,
+     * set when they change. The element buffer is s_pvao's for good. */
+    if (s_sh.pv_streams != pb->streams) {
+        for (a = 0, k = 0; a < 16; a++) {
+            if (pb->streams & (1u << a)) {
+                glEnableVertexAttribArray(a);
+                glVertexAttribPointer(a, 4, GL_FLOAT, GL_FALSE,
+                                      (GLsizei)(nstream * 4 * sizeof(float)),
+                                      (const void *)((size_t)k * 4 * sizeof(float)));
+                k++;
+            } else {
+                glDisableVertexAttribArray(a);
+            }
         }
+        s_sh.pv_streams = pb->streams;
     }
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, s_pebo);
+    for (a = 0; a < 16; a++)
+        if (!(pb->streams & (1u << a))
+            && memcmp(s_sh.pv_imm[a], pb->imm[a], sizeof s_sh.pv_imm[a]) != 0) {
+            glVertexAttrib4fv(a, pb->imm[a]);
+            memcpy(s_sh.pv_imm[a], pb->imm[a], sizeof s_sh.pv_imm[a]);
+        }
+    if (s_sh.pv_ebo != s_pebo) {
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, s_pebo);
+        s_sh.pv_ebo = s_pebo;
+    }
     glBufferData(GL_ELEMENT_ARRAY_BUFFER, (GLsizeiptr)(pb->index_count * sizeof(uint16_t)),
                  pb->indices, GL_STREAM_DRAW);
     if (rs->zpass_enable && s_qcount < NV_GL_MAX_QUERY) {
@@ -2154,6 +2380,7 @@ static void gl_reset_objects(int lost)
     s_near_program = 0;             /* ensure_init: depth clamp on, range 0..1 */
     s_near01 = 0.0f;
     s_target_fbo = 0;
+    sh_forget();
     /* Visibility queries: dropped; reports still pending in the executor
      * resolve with what was counted (gl_zpass_resolve answers 0 for a
      * ticket whose queries are gone). */
@@ -2269,7 +2496,7 @@ static void pbo_issue(GlRT *r, const Nv2aPresentSurface *surf)
         glBufferData(GL_PIXEL_PACK_BUFFER, (GLsizeiptr)n, NULL, GL_STREAM_READ);
         s_pbo_size = n;
     }
-    glBindFramebuffer(GL_FRAMEBUFFER, r->fbo);
+    sh_fbo(r->fbo);
     glReadPixels(0, 0, (GLsizei)r->w, (GLsizei)r->h, NV_GL_READ_FORMAT, NV_GL_READ_TYPE, NULL);
     glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
     s_pend.pending = 1;

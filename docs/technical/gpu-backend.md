@@ -340,6 +340,17 @@ texel-or-flat-colour without depth or alpha test (`Nv2aPixelState.shade`).
 Blend factors, equations, depth and stencil functions arrive in GL's own
 enum values and are passed through after a range check.
 
+**State shadowing.** The GL state set per batch -- framebuffer, viewport,
+scissor, program, vertex array and array buffer, blend/depth/stencil/cull/
+polygon-offset state, write masks, the active unit and units 0-3's texture
+bindings -- is kept as last set (`s_sh` in `nv2a_gl.c`), and a call that
+would set what is already there is skipped. The vertex-program VAO keeps
+its attribute layout while the streams mask is unchanged and sets the
+generic values of stream-less attributes only when they change. Every
+change of that state goes through the `sh_*` helpers; deleting a texture or
+framebuffer forgets its bindings, and context creation and
+`gl_reset_objects` forget everything.
+
 **Visibility tests.** Batches drawn while `SET_ZPASS_PIXEL_COUNT_ENABLE` is
 on are wrapped in occlusion queries (a ring of recycled query objects).
 Reading them at every `GET_REPORT` made the executor wait for the GPU 341
