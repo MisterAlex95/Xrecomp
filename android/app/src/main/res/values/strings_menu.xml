@@ -29,6 +29,9 @@
     <string name="MENU_PERCENT">%1$d %%</string>
     <string name="MENU_BOTTOM">Bottom screen</string>
     <string name="MENU_BOTTOM_SUB">Applies now</string>
+    <string name="MENU_LANGUAGE">Language</string>
+    <string name="MENU_LANGUAGE_SUB">This game · next start</string>
+    <string name="MENU_LANGUAGE_FOLLOW">As in Settings</string>
     <string name="MENU_BACK">Back</string>
     <string name="MENU_BACK_SUB">To the game menu</string>
     <string name="MENU_HINT_SELECT">Select</string>

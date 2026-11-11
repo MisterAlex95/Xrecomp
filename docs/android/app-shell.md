@@ -243,6 +243,7 @@ exist in the runtime and mean something to a player are offered:
 | Sounds | On (default), Off | none: `ui_sound` |
 | Vibration | On (default), Off | none: `ui_haptics` |
 | Bottom screen (only with a second display) | Panel (default), Black, Off | none: [Dual screen](#dual-screen-ayn-thor), `GameStore.bottomScreen` |
+| Game › Language | Same as Android (default), English, Français, Deutsch, Español, Italiano, Português, 日本語, 한국어, 中文 | `RECOMP_LANGUAGE=…`; « Same as Android » writes nothing ([Game language](#game-language)) |
 | Graphics › Vertical sync | On (default), Off | `RECOMP_PRESENT_VSYNC=0` when off |
 | Graphics › Texture filtering | Sharp (default), Smooth, Anisotropic 8×, Anisotropic 16× | `RECOMP_TEX_BILINEAR=1`, `RECOMP_TEX_ANISO=8` / `16` |
 | Audio › 3D audio (HRTF) | On (default), Off | `RECOMP_APU_HRTF=0` when off |
@@ -250,6 +251,16 @@ exist in the runtime and mean something to a player are offered:
 | Advanced › Drawing threads | Auto (default), 1, 2, 4, 6, 8 | `RECOMP_RASTER_THREADS=…` |
 | Advanced › Fast cores only | On (default on Android), Off | `RECOMP_BIG_CORES=0` when off |
 | Advanced › Self-test at start | Off (default), On | `RECOMP_SHELL_SELFTEST=1` |
+
+#### Game language
+
+The console language the runtime reports to the title (`RECOMP_LANGUAGE`, XBA-77, `GameLanguage.java`). First found
+wins: the title's own choice (in-game menu › Quick settings › **Language**, kept per title ID in
+`files/settings/language_<TITLEID>`), then the `RECOMP_LANGUAGE` line of `recomp.cfg` (Settings › Game › Language),
+then the Android language when the Xbox has it, then English. `ShellActivity` sets the variable before the runtime
+starts for the first and the third (the environment wins over `recomp.cfg`), and clears it otherwise; logcat says
+« shell: game language … ». A title only has the languages on its disc: a US disc is often English whatever is
+chosen.
 
 How the file is written (`RecompConfig.java`): it is parsed as `recomp_cfg.c` does (one `KEY=VALUE` per line, blanks
 and `#` comments skipped, keys and values trimmed, the first line for a key wins). A change rewrites the key's first
@@ -727,7 +738,7 @@ less the display cutout, so 720p and 1080p look the same.
 | Item | Does |
 |---|---|
 | Resume | Closes the menu. |
-| Quick settings | **Perf overlay** On / Off: fps and frame time (`xbox_FramebufferWindowGetStats`, twice a second) in the top right corner, in the menu's layer, not in the game frame; stays with the menu closed. **Volume** 0–100 % in steps of 10, A mutes / unmutes: one gain on the mixed APU output (`apu_volume.c`, the square of the fraction, after the WAV capture), set through JNI. **Bottom screen** Panel / Black / Off (only with a second screen): `GameStore.setBottomScreen` and the companion is refreshed at once. All three apply **now** (the rows say so) and are remembered (`files/settings/perf_overlay`, `game_volume`, `bottom_screen`); the volume is applied again at the next start. Screen filter and scaling are not offered: the SDL window's are fixed at start (`fb_present_sdl.c`: nearest, logical size 640 x 480). |
+| Quick settings | **Perf overlay** On / Off: fps and frame time (`xbox_FramebufferWindowGetStats`, twice a second) in the top right corner, in the menu's layer, not in the game frame; stays with the menu closed. **Volume** 0–100 % in steps of 10, A mutes / unmutes: one gain on the mixed APU output (`apu_volume.c`, the square of the fraction, after the WAV capture), set through JNI. **Bottom screen** Panel / Black / Off (only with a second screen): `GameStore.setBottomScreen` and the companion is refreshed at once. These three apply **now** (the rows say so) and are remembered (`files/settings/perf_overlay`, `game_volume`, `bottom_screen`); the volume is applied again at the next start. **Language** (only when the game's XBE gives a title ID): As in Settings, then the nine languages; this game's own [language](#game-language), applied at the next start. Screen filter and scaling are not offered: the SDL window's are fixed at start (`fb_present_sdl.c`: nearest, logical size 640 x 480). |
 | Controls | The launcher's Controls table, compact (plus Back and Select + Start: the menu). |
 | Screenshot | Closes the menu first, then saves the game's last frame as `<external files>/screenshots/<date>.bmp` (`xbox_FramebufferDumpBmp`, the companion panel's), and says « Saved … » at the top of the screen (and on the panel). |
 | Share log | This process's logcat to `files/logs/game.log`, then the share sheet (the companion panel's `LogProvider` path). The menu stays open. |
@@ -784,6 +795,21 @@ With the shell APK of this change and the stub or a title (and the Thor for 5 an
     (main page, Quick settings) at least once, in French.
 14. **Notch / 720p**: on a phone with a cutout, the drawer's text stays clear of it; on a 720p screen the menu looks
     the same as at 1080p.
+
+### Device check (game language, XBA-77), for Alex
+
+With a title from a European (multi-language) disc, Fable's PAL disc for instance:
+
+1. **Same as Android**: device in French, Settings › Game › Language on « Comme Android » (the default): start the
+   game. logcat `shell: game language fr, title 4D5300D1`; the game's menus are in French.
+2. **Settings**: Settings › Game › Language → English; quit the game and start it again: logcat
+   `shell: game language en (recomp.cfg)`, menus in English.
+3. **This game**: in the game, in-game menu › Quick settings › Language → Deutsch; quit and start again: logcat
+   `shell: game language de`, menus in German (and the Settings line still says English).
+4. **Back to Settings**: same row → « Comme les Réglages »; next start: English again.
+5. **US disc** (if you have one): choose French: the game stays in English (its disc has nothing else), nothing
+   breaks.
+6. Say which languages Fable's disc offers, for the profile notes.
 
 ## Background and resume
 

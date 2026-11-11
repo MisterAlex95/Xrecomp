@@ -1504,6 +1504,8 @@ public class LauncherActivity extends Activity {
 
     private int sectionTitle(RecompConfig.Section s) {
         switch (s) {
+        case GAME:
+            return R.string.SECTION_GAME;
         case GRAPHICS:
             return R.string.SECTION_GRAPHICS;
         case AUDIO:

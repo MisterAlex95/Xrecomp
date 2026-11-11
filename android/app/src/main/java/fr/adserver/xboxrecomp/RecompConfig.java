@@ -43,7 +43,7 @@ final class RecompConfig {
         }
     }
 
-    enum Section { GRAPHICS, AUDIO, ADVANCED }
+    enum Section { GAME, GRAPHICS, AUDIO, ADVANCED }
 
     static final class Option {
         final Section section;
@@ -78,6 +78,14 @@ final class RecompConfig {
      * and matters to a player on Android; bring-up and debug switches stay out.
      */
     static final Option[] OPTIONS = {
+        // GameLanguage (XBA-77): unset = the Android language when the Xbox has it, set by ShellActivity.
+        new Option(Section.GAME, R.string.OPT_LANGUAGE, R.string.OPT_LANGUAGE_SUMMARY, R.string.OPT_LANGUAGE_DETAIL,
+                   keys(GameLanguage.ENV),
+                   new Choice(R.string.VAL_LANG_SYSTEM, (String)null), new Choice(R.string.LANG_EN, "en"),
+                   new Choice(R.string.LANG_FR, "fr"), new Choice(R.string.LANG_DE, "de"),
+                   new Choice(R.string.LANG_ES, "es"), new Choice(R.string.LANG_IT, "it"),
+                   new Choice(R.string.LANG_PT, "pt"), new Choice(R.string.LANG_JA, "ja"),
+                   new Choice(R.string.LANG_KO, "ko"), new Choice(R.string.LANG_ZH, "zh")),
         new Option(Section.GRAPHICS, R.string.OPT_VSYNC, R.string.OPT_VSYNC_SUMMARY, R.string.OPT_VSYNC_DETAIL,
                    keys("RECOMP_PRESENT_VSYNC"),
                    new Choice(R.string.VAL_ON, (String)null), new Choice(R.string.VAL_OFF, "0")),

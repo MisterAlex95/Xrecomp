@@ -15,7 +15,7 @@ How to read the tables:
 - Values are text. A flag is "set" when the variable exists, unless the entry says `1` or non-zero is required.
 
 On Android these come from `recomp.cfg` in the app's external files dir. The launcher's Settings screen writes a few of
-them there for the player (`RECOMP_PRESENT_VSYNC`, `RECOMP_TEX_BILINEAR`, `RECOMP_TEX_ANISO`, `RECOMP_APU_HRTF`,
+them there for the player (`RECOMP_LANGUAGE`, `RECOMP_PRESENT_VSYNC`, `RECOMP_TEX_BILINEAR`, `RECOMP_TEX_ANISO`, `RECOMP_APU_HRTF`,
 `RECOMP_AUDIO_BUF_SAMPLES`, `RECOMP_RASTER_THREADS`, `RECOMP_BIG_CORES`, `RECOMP_SHELL_SELFTEST`) and keeps every
 other line as written: see [Settings](../android/app-shell.md#settings).
 
@@ -61,6 +61,7 @@ Opt-ins that change how the kernel layer behaves. Each fixes a class of titles; 
 
 | Variable | Default | What it does | Where |
 |---|---|---|---|
+| `RECOMP_LANGUAGE=<code>` | English | The console language the title reads (`XC_LANGUAGE` and the `XC_MAX_OS` block): `en`, `ja`, `de`, `fr`, `es`, `it`, `ko`, `zh`, `pt` (a region suffix such as `fr-CA` is ignored) or the Xbox value `1`..`9`. The title uses it when its disc has that language. A player setting, not a fix: on Android the launcher sets it (Settings › Game › Language, per-title choice in the in-game menu). | `kernel_xbox.c` |
 | `RECOMP_SAVE_DIR=<dir>` | off | Root for the title's `UDATA`, `TDATA` and cache folders; created if missing. Absolute. Saves left in the game folder are then not used. | `kernel_path.c` |
 | `RECOMP_GAME_DIR=<dir>` | `<external files dir>/game` | Android app shell: where the title's data (`default.xbe` and the disc's files) is read from. The launcher sets it from the folder the player chose (XBA-54; it then wins over `recomp.cfg`); otherwise set it in `recomp.cfg`. | `recomp_storage.c` |
 | `RECOMP_HEAP_RECLAIM` | off | Gives freed guest heap back. | `xbox_memory_layout.c` |
