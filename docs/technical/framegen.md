@@ -397,9 +397,9 @@ Mac display gave a cap of 60: shown 44-48 fps, half the pairs skipped.
   there for a later translation) `RECOMP_LSFG_DIR=<filesDir>/lsfg/<key>` goes
   into `recomp.cfg`. Strings in English and French. When the selected game's
   pack forces `RECOMP_LSFG` off (`pack.json` `env_force`, from its title
-  profile), the row stays (the setting is global) but is dimmed, its line says
-  « Frame generation unavailable for this title » and the detail panel says
-  why (`Pack.forcesOff`).
+  profile), the row stays (the setting is global) but is dimmed, and its
+  description (shown when it is focused) says « Frame generation unavailable
+  for this title » and why (`Pack.forcesOff`).
 - **Storage**: `files/lsfg` is excluded from backups (`allowBackup="false"`,
   plus `fullBackupContent` and `dataExtractionRules`, which also cover a
   device-to-device transfer) and never served by `LogProvider`.

@@ -16,7 +16,7 @@ The CI builds it on every push to `main`. The latest one is always the prereleas
 
 | Piece | What |
 |---|---|
-| `LauncherActivity` | The launcher entry ([The launcher](#the-launcher)): welcome, game choice and import, home (the game's hero with Play / Prepare, then Settings, Controls, Game data, About), in its own process `:launcher`. `Theme.java` and `Widgets.java` draw it, `TitleArt.java` decodes the game's title image, `GameArt`, `GamePalette` and `GameTheme` make the [game theme](#game-theme) from it, `UiFeedback.java` plays its sounds and haptics; `RecompConfig.java` writes its settings to `recomp.cfg`. With a valid game and « Open the game directly next time » on, it starts `ShellActivity` at once and shows nothing. |
+| `LauncherActivity` | The launcher entry ([The launcher](#the-launcher)): welcome, game choice and import, home (the game's art and title, one line, a solid Play / Prepare and three quiet pills: Settings, Controls, Manage), in its own process `:launcher`. `Theme.java` and `Widgets.java` draw it, `TitleArt.java` decodes the game's title image, `GameArt`, `GamePalette` and `GameTheme` make the [game theme](#game-theme) from it, `UiFeedback.java` plays its sounds and haptics; `RecompConfig.java` writes its settings to `recomp.cfg`. With a valid game and « Open the game directly next time » on, it starts `ShellActivity` at once and shows nothing. |
 | `ShellActivity` | Subclass of SDL's `SDLActivity`, which loads `libSDL2.so` and then `libmain.so`. SDL's Java side is compiled from the pinned sources (`$SDL2_SRC/android-project`), not copied here. Not exported: started by the launcher, after it sets `RECOMP_GAME_DIR`. Holds the [in-game menu](#in-game-menu) (`GameMenu`), a View layer over SDL's surface. |
 | `libxba_import.so` | The launcher's ISO import: `xiso_jni.c` around the static `xiso` target (`src/xiso`); and « Choose Lossless.dll » ([Frame generation](#frame-generation)): `lsfg_jni.c` around the shader cache (and the DXBC translator in a `-PxbaLsfg=1` build with DXVK). Loaded only in `:launcher`. |
 | `libmain.so` | `shell_main.c` + the **whole** toolkit (`--whole-archive`) + the title, when one is linked (see [A title in the shell](#a-title-in-the-shell)). Loading it on a device proves that bionic resolves every symbol the runtime uses. Four symbols that a title provides are weak stubs in `shell_main.c`, and so is the title's hook `recomp_title_main`. |
@@ -124,8 +124,8 @@ it can end the game's process and start a fresh one (the runtime maps its memory
 gamepad first, in landscape, and works by touch too.
 
 How it is built: framework `Activity` and `View`s only (no AndroidX, no Material, no new Gradle dependency), drawn in
-code (`Theme.java` for colours, type and sizes; `Widgets.java` for the custom views: rows, cards, progress ring,
-status chip, button hints). Everything is laid out on a 1920 x 1080 design grid that `Widgets.Stage` scales to the
+code (`Theme.java` for colours, type, spacing and sizes; `Widgets.java` for the custom views: list rows, pill
+buttons, tabs, the Options sheet, the focus highlight, the import ring, status dots, button hints). Everything is laid out on a 1920 x 1080 design grid that `Widgets.Stage` scales to the
 window (wider or taller screens get a wider or taller grid, never a stretched one), so it looks the same from 1280 x 720
 to 1920 x 1080. The window is fullscreen and immersive (system bars hidden, back with a swipe), drawn under the display
 cutout, and the stage keeps its content out of the cutout's insets. System fonts only (`sans-serif`,
@@ -138,20 +138,20 @@ One activity, a small state machine of screens (`LauncherActivity.Screen`) with 
 
 | Screen | What it shows | Reached from |
 |---|---|---|
-| Library | The [game library](#game-library): a grid of the games of the library folder and the imported ones, the focused game's details, the « Library folder » tile. | Every start when the library is on, B from a game's Home, « Change game ». |
-| Storage | What the app stores per game, each deleted on its own ([Storage](#storage)). | X on the library. |
-| Welcome | What the app is (a recompiled game, the game not included: bring your own copy), three steps, « Get started ». | First start, when no game is set up at all. |
-| Choose your game (source) | Two large cards: **Game folder** (the extracted disc; read in place with All files access, otherwise copied; a badge says which) and **Disc image (ISO)** (extracted once; a badge gives the free space). | Welcome, Game data › Change game, Play with no usable game, the « Change game » shortcut, `NO_GAME_DATA`. |
-| Read the game in place? | Only without All files access: the explanation (in place: no copy, fine for a 4 GB disc, only that folder is read; copy: as much free space again, a few minutes, removed with the app) and two cards, **Allow all files access** (recommended; opens the system page, then the folder picker) and **Copy into the app** (the folder picker). | Game folder. |
-| Preparing the game (import) | A progress ring (percent, ticks), the step (« Checking », « Copying », « Extracting »), « X of Y », the current file, the free space, **Cancel**. The screen stays on; B cancels too. | A picked folder or image. |
-| Home | A console-style home (the top bar only says « Home », so the title shows once). The hero: the game's title image (or a monogram), in the [game theme](#game-theme)'s colours, its title ID, its title (the XBE certificate's name, else the folder's name), a status chip (**Ready**, **Needs preparing**, **Preparing**, **Prepare failed**, **Game data missing**, **No file access**, **Wrong game**, **No game**; plus **Running** when the game runs in the background), one lead line, a few facts and one big button. Facts: **Last played**, **Play time**, then **Prepared** (pack.json's `built_at`) and **Pack size** when a pack is there, else the game's size; while a Prepare is needed: how long it takes, the free internal storage, the memory; while it runs: a bar and « Compile · 42 % · about 12 min left »; after a failure: the code. The big button: **Play**, **Prepare**, **Preparing…** (opens its screen), **See what failed**, or **Choose a game** / **Choose the game again**. Under the hero, a row of four smaller tiles: **Settings**, **Controls**, **Game data**, **About**. | A finished import (Play focused), every start when « Open directly » is off, the « Launcher » shortcut, B from the screens above. |
-| Settings | The [options](#settings) as rows, left / right (or A) to change, a detail panel with what the option does, its choices and its line in `recomp.cfg`. | Home. |
-| Controls | A drawn handheld with, next to each control, the Xbox controller button the game gets, and the same as a table: A B X Y as they are, L1 = **Black**, R1 = **White**, L2 / R2 = the triggers, Start = Start, Select = **Back**, D-pad and sticks as they are, pressing a stick = its thumbstick button (`src/input/xinput_device.c`, SDL's game controller mapping), and Android's Back opens the [in-game menu](#in-game-menu) (also Select + Start held). | Home. |
-| Game data | The raw folder path (only here, not on Home), source (read in place, imported copy, set in `recomp.cfg`), size (counted in the background), free space; **Change game** (another folder or image, or the same one again to re-import; **Library** when the [game library](#game-library) is on); **Delete the imported copy** (only when the game is the app's own copy, `files/games/<TID>/` or the older `files/game/`; press A twice within 5 s; saves are kept); the game's pack, Prepare files, caches and saves, each deleted on its own ([Storage](#storage)). | Home. |
-| About | Version (`-PxbaVersion`), build (`-PxbaVersionCode`), app id, the game check (the first digits of `-PxbaXbeSha256`, or none), licences (xboxrecomp MIT, SDL2 zlib), and that no game data is included. | Home. |
+| Library | The [game library](#game-library): a full-width grid of the games (five columns), the focused game's state and play time as one context line at the bottom left; Rescan, Storage, Library folder, Settings and About in the **Options** sheet (Y). | Every start when the library is on, B from a game's Home. |
+| Storage | What the app stores per game, each deleted on its own ([Storage](#storage)). | Options (Y) on the library. |
+| Welcome | What the app is (a recompiled game, the game not included: bring your own copy), three plain steps, a « Get started » button. | First start, when no game is set up at all. |
+| Choose your game (source) | A list: **Game folder** (read in place with All files access, otherwise copied; the value says which), **Disc image (ISO)** (extracted once; the free space in the top bar), **Game library folder**; the focused choice explained on the right. | Welcome, Manage › Change game, Play with no usable game, the « Change game » shortcut, `NO_GAME_DATA`. |
+| Read the game in place? | Only without All files access: **Allow all files access** (recommended; opens the system page, then the folder picker) and **Copy into the app** (the folder picker), with the explanation on the right (in place: no copy, fine for a 4 GB disc, only that folder is read; copy: as much free space again, a few minutes, removed with the app). | Game folder. |
+| Preparing the game (import) | A plain progress ring (percent), the step (« Checking », « Copying », « Extracting »), « X of Y », the current file, the free space. The screen stays on; B cancels (nothing to focus). | A picked folder or image. |
+| Home | No top bar: the game's title image (or a monogram) in the [game theme](#game-theme)'s colours, its title (the XBE certificate's name, else the folder's name), **one line** — when it was played (« Yesterday · 12 h 40 min played », « Not played yet »), or its state when it is not ready (« Needs preparing · once, about 20–30 min », « Prepare failed · CODE », the Prepare's progress, « Queued (n) », « Game data missing » with the folder, …) — and **one row of buttons**: a solid **Play** (or **Prepare**, **Preparing…**, **See what failed**, **Choose a game**) and three quiet pills, **Settings**, **Controls**, **Manage**. Before the first play the note says where the in-game menu is. | A finished import (Play focused), every start when « Start in the game » is off, the « Launcher » shortcut, B from the screens above. |
+| Settings | Four tabs (General, Graphics, Audio, Advanced; L1 / R1) of [options](#settings) as « label  value » rows, left / right (or A) to change, the focused option's description on the right. About ends Advanced. | Home, Options. |
+| Controls | A drawn handheld with, next to each control, the Xbox controller button the game gets, and the same as two quiet columns: A B X Y as they are, L1 = **Black**, R1 = **White**, L2 / R2 = the triggers, Start = Start, Select = **Back**, D-pad and sticks as they are, pressing a stick = its thumbstick button (`src/input/xinput_device.c`, SDL's game controller mapping), and Android's Back opens the [in-game menu](#in-game-menu) (also Select + Start held). | Home. |
+| Manage | **Change game** (another folder or image, or the same one again to re-import; **Library** when the [game library](#game-library) is on); **Delete the imported copy** (only when the game is the app's own copy, `files/games/<TID>/` or the older `files/game/`; its size as the value; press A twice within 5 s; saves are kept); the game's pack, Prepare files, caches and saves with their sizes, each deleted on its own ([Storage](#storage)). The technical facts (title ID, prepared date, pack size, folder, source, size, free space) are the first row's description. | Home. |
+| About | Version (`-PxbaVersion`), build (`-PxbaVersionCode`), app id, the game check (the first digits of `-PxbaXbeSha256`, or none), licences (xboxrecomp MIT, SDL2 zlib), and that no game data is included. | The end of Settings › Advanced, Options on the library. |
 
 Messages and errors (`NOT_A_GAME_FOLDER`, `WRONG_GAME`, `NOT_ENOUGH_SPACE`, « Import canceled », « Saved », ...) go to
-a note line above the button hints, coloured by kind; there are no toasts and no dialogs. logcat (tag `xboxrecomp`):
+the left of the footer line (the hints are on its right), with a dot coloured by kind; there are no toasts and no dialogs. logcat (tag `xboxrecomp`):
 `launcher: shown (...)` naming why, then one `launcher:` line per step (folder, hash, copy, import, game set, play,
 settings saved, errors).
 
@@ -159,17 +159,17 @@ settings saved, errors).
 
 | Case | What happens |
 |---|---|
-| A usable game and « Open the game directly next time » off (the default) | Home, Play focused. |
-| A usable game and « Open directly » on | `ShellActivity` starts at once; nothing shows. |
-| The game is running in the background and the app icon is pressed | Back to the game at once, whatever « Open directly » says. |
+| A usable game and « Start in the game » off (the default) | Home, Play focused. |
+| A usable game and « Start in the game » on | `ShellActivity` starts at once; nothing shows. |
+| The game is running in the background and the app icon is pressed | Back to the game at once, whatever « Start in the game » says. |
 | Nothing remembered, but `RECOMP_GAME_DIR` in `recomp.cfg`, or `default.xbe` pushed to `files/game/` | A usable game, as above: the adb workflow still works (source « Set in recomp.cfg » or « Imported copy »). |
 | Nothing set up | Welcome. |
-| The remembered folder is gone (deleted, SD card out) | Home, chip « Game data missing », the note naming the old path (`GAME_FOLDER_GONE`), Game data focused; the previous choice stays until a new one is made. |
-| The folder is there but unreadable because All files access was turned off | Home, chip « No file access », the note says so (`GAME_FOLDER_NO_ACCESS`). |
-| `default.xbe` there but not the one this APK was built for (files changed since the choice, or set up through `recomp.cfg` / adb) | Home, chip « Wrong game »: Play says `WRONG_GAME` instead of starting. Checked once per folder in the background, only when the APK has an expected hash. |
+| The remembered folder is gone (deleted, SD card out) | Home, « Game data missing » and the old path on its line (`GAME_FOLDER_GONE`), « Choose the game again » focused; the previous choice stays until a new one is made. |
+| The folder is there but unreadable because All files access was turned off | Home, « No file access » and why on its line (`GAME_FOLDER_NO_ACCESS`). |
+| `default.xbe` there but not the one this APK was built for (files changed since the choice, or set up through `recomp.cfg` / adb) | Home, « Wrong game » on its line, Play dimmed: it says `WRONG_GAME` instead of starting. Checked once per folder in the background, only when the APK has an expected hash. |
 | The native side found no `default.xbe` (`NO_GAME_DATA`) | `shell_main.c` calls `ShellActivity.openGamePicker(dir)`; the launcher opens on Choose your game with `NO_GAME_DATA` and that folder in the note; B goes to Home. |
 | Long-press on the app icon, « Change game » | Choose your game, even with a game set up; B goes to Home. If the game is running, the note says it will close when another game is chosen; saves are in internal storage and stay. |
-| Long-press on the app icon, « Launcher » | Home, even with « Open directly » on or the game running. |
+| Long-press on the app icon, « Launcher » | Home, even with « Start in the game » on or the game running. |
 
 The two shortcuts are dynamic (the package name differs per title, which a static `shortcuts.xml` cannot follow),
 published each time the launcher runs, so they appear after the first start.
@@ -183,43 +183,93 @@ played.
 
 | Input | Does |
 |---|---|
-| D-pad, left stick | Move the focus (Android turns the stick and the hat into D-pad keys). Each screen remembers its focused item. |
+| D-pad, left stick | Move the focus (Android turns the stick and the hat into D-pad keys). Each screen (and each Settings tab) remembers its focused item. Home's buttons are one row: left / right. |
 | A (`BUTTON_A`), D-pad centre, Enter | Select the focused item; on a setting, the next value. |
-| B (`BUTTON_B`), Back, Escape | Back one screen; on Home or Welcome, leave the app; during an import, Cancel. |
+| B (`BUTTON_B`), Back, Escape | Back one screen; on Home or Welcome, leave the app (on a library game's Home: the library); during an import or a Prepare, Cancel (a Prepare: twice); with the Options sheet open, close it. |
 | Left / right on a setting | Previous / next value. |
-| L1 / R1 | Settings: previous / next section. |
-| Y | Settings: restore the defaults. |
-| Start | Home: Play. |
+| L1 / R1 | Settings: previous / next tab (wrapping). |
+| Y | Library: the **Options** sheet (Rescan, Storage, Library folder, Settings, About; B or Y closes it, the focus comes back). Settings: the defaults. Preparing: hide it (the Prepare carries on). A failed Prepare: Share log. |
+| Start | Home: Play (not shown as a hint). Library: the focused game's primary action. |
 | Touch | Tap an item to select it, the arrows of a setting to step it, a button hint to do what it says. After a touch, the first D-pad or A press brings the focus back. |
 
-A and B are taken on release, once, so a held button does not repeat. Dimmed rows (Play without a usable game) stay
-focusable so that pressing them says why. « Open the game directly next time » is in Settings only (the X toggle on
-Home is gone).
+A and B are taken on release, once, so a held button does not repeat. Dimmed rows and buttons (Play without a usable
+game) stay focusable so that pressing them says why. Each screen shows **three hints at most**, on the right of the
+footer line (`LauncherActivity.MAX_HINTS`: a fourth is a bug and throws). « Start in the game » is in Settings ›
+General only.
 
 ### Look, motion and sound
 
-- **Focus**: one highlight for the screen (`Widgets.Glide`: a green outline with a soft glow, a light gradient and an
-  accent bar on the left) glides from the row it leaves to the row it reaches in 150 ms; the focused row's title turns
-  brighter and the row grows to 102 %.
-- **Screens** fade in and slide in from the side they come from (forward from the right, back from the left), 150 ms.
+« Calm » (the 2026-11 redesign): fewer things on screen, one way to show the focus, secondary text quiet.
+
+- **Type**: five sizes, two weights (`Theme`): Display 64 (Home's title), Title 40 (a screen's title), Row 34 (a
+  row's label, a button), Body 28 (values, lines, descriptions), Small 24 (group labels); nothing smaller (hints 26),
+  no Light weight, no spaced capitals. Spacing on an 8-pixel scale (8, 16, 24, 32, 48, 96); 96 px side margins.
+- **Colour**: the tokens of `GamePalette` (and the [game theme](#game-theme)) unchanged. All secondary text is
+  `TEXT_DIM` (8.5:1 on the backdrop); `TEXT_FAINT` only says « disabled ». The backdrop is the gradient with one soft
+  glow (7 %), or, on Home and Preparing only, the game's hero instead; no dot grid, bezel, corner ticks, rules or
+  panel outlines. A flat `PANEL` surface only for overlays (the Options sheet, the in-game drawer).
+- **Chrome**: a top bar with the screen's title only (Settings adds its tabs, Storage the free space on the right;
+  Home and Preparing have none), and one 72 px footer line: the note on the left, at most three hints on the right
+  (outlined glyphs, 26 px labels).
+- **Focus**: one highlight for the screen (`Widgets.Glide`): a flat `ACCENT` plate at 14 % with a 2.5 px `ACCENT`
+  outline (radius 16) around a row or a quiet button, a 4 px ring around a game card's art; the solid Play is its own
+  highlight. It glides from the item it leaves to the item it reaches in 150 ms; the focused item grows to 102 %.
+  Contrast (stock and every hue, `CalmContrastTest`): `TEXT_DIM` on the plate 4.5:1 or more, `TEXT_BRIGHT` 7:1, the
+  outline 3:1 on the backdrop, the ink on Play 4.5:1.
+- **Rows**: label left, value right (`ACCENT` when focused), the « < > » arrows of a setting only on the focused row;
+  no subtitles: the focused row's description shows as plain text in a quiet column on the right.
+- **Screens** fade in and slide in from the side they come from (forward from the right, back from the left), 150 ms;
+  a Settings tab slides in from its side.
 - **Settings**: a value pulses when it changes (160 ms). A setting row keeps the width of its widest choice for the
-  value, and a title too long for what is left ends in « … » (measured with the row's own paint); the detail panel
-  shows it in full.
+  value, and a label too long for what is left ends in « … » (measured with the row's own paint).
 - **Sounds and haptics** (`UiFeedback`): five short sounds, made with `soundcraft-cli` from our own synth recipes
   (`tools/android/ui_sounds.sh`, WAVs in `res/raw`, 16-bit 22.05 kHz, about 115 kB in all): **move** (focus or a
   value), **select**, **back**, **error** (an error note) and **done** (a game set up, a Prepare finished), played
   through SoundPool at a low volume, each with a haptic (`performHapticFeedback`: clock tick, keyboard tap, reject,
-  confirm; Android's own « touch feedback » setting applies). Settings › Launcher › **Sounds** and **Vibration** turn
+  confirm; Android's own « touch feedback » setting applies). Settings › General › **Sounds** and **Vibration** turn
   them off (`game` SharedPreferences, `ui_sound`, `ui_haptics`).
-- **Preparing screen**: one big overall percentage in the ring, the step and its own percentage smaller under it, the
-  time left prominent in the panel. When the Prepare ends: Home with Play focused, the « done » sound and haptic. After
-  two minutes without input it dims (OLED burn-in): a black layer with the percentage and the step in grey, moved a
-  little each minute, and the window's brightness lowered; any key or touch wakes it and does nothing else.
+- **Preparing screen**: Home's layout with the buttons replaced by the progress, so nothing jumps: « Preparing · step
+  5 of 6 · Compile », one 12 px bar, the percentage and the time left, and that the app can be left. When the Prepare
+  ends: Home with Play focused, the « done » sound and haptic. After two minutes without input it dims (OLED
+  burn-in): a black layer with the percentage and the step in grey, moved a little each minute, and the window's
+  brightness lowered; any key or touch wakes it and does nothing else.
+
+### Device check (Calm launcher), for Alex
+
+`adb logcat -s xboxrecomp` throughout; Fable and Burnout 3 in the library, the Thor.
+
+1. Home (Fable): no top bar; the art, the title, one line « <when> · <time> played », a solid Play and three quiet
+   pills (Settings, Controls, Manage) in one row; hints A Select, B Library only. Left / right moves along the row
+   (the plate glides, Play stays solid). Start still plays. Screenshot.
+2. A game that needs preparing (Burnout 3): an amber dot and « Needs preparing · once, about … », the button reads
+   Prepare. Start a Prepare: the same layout, the bar moving, « Preparing · step n of 6 · <step> », the time left;
+   no row to focus; Y hides it, B twice cancels. Screenshot of each.
+3. Settings: the tabs in the top bar, L1 / R1 switch them (and wrap), each tab keeps its focus, no tab scrolls;
+   only the focused row shows its arrows; its description on the right, plain. Graphics: Frame cap and Resolution
+   dimmed until Renderer is GPU. Advanced ends with Reset all and About. A long French label is cut with « … » and
+   never runs under its value. Screenshot of each tab, in English and French.
+4. Library: five columns, « Ready » not written under a ready game, the others with a dot and their state
+   (« Not imported » grey); the focused game's line at the bottom left. Y opens Options from the right: Rescan,
+   Storage (free space), Library folder (its name), Settings, About; D-pad stays in it; B closes it and the focus is
+   back on the card. X does nothing any more. Screenshot with and without the sheet.
+5. Storage (from Options): « … free » in the top bar, the games' names as small labels, sizes as values, A twice
+   deletes (« Press A again » replaces the size); paths in the description. Manage (Home): the title ID, prepared
+   date, pack size and folder in the first row's description.
+6. In-game menu: a flat sheet flush with the left edge (about 30 % of the screen), the title and « Paused · 0:42
+   played », six rows (Quit apart), B Resume; Settings holds Perf overlay, Volume, Bottom screen, Language and Share
+   log. Screenshot.
+7. Bottom screen (Thor): pure black, the art, the title, one pill (Play, Prepare, Import…) and the battery; on the
+   library it follows the focused card, on Settings or Storage only the art shows. While preparing: the big
+   percentage, the bar, « <step> · about … left », Hold to cancel. Nothing in the bottom centre.
+8. Contrast and comfort: the dim text readable over the hero (Fable) at arm's length; the focused row's value and
+   description readable on the plate; say if anything looks too faint or too small at 1080p on the Thor.
+9. Send the screenshots (`adb exec-out screencap -p > x.png`) of Home, Preparing, the four Settings tabs, the
+   library with and without Options, Storage, the in-game menu and both bottom-screen states.
 
 ### Game theme
 
-The launcher takes its colours from the game: Home shows the game's own title image, and the accent (focus, caps
-headers, values, the Play button, the brand mark), its glows and the neutrals' hue come from it, with a faint blurred
+The launcher takes its colours from the game: Home shows the game's own title image, and the accent (the focus,
+values, the Play button, the tabs' underline), its glow and the neutrals' hue come from it, with a faint blurred
 copy of the image washing in from the right of the backdrop. The text colours and the **status colours never change**:
 `Theme.OK` (ready, done, connected: the stock green), `WARN` (amber), `ERROR` (red). Nothing of a game is in the APK or
 the repo: everything is read from the player's own copy and kept in app-private storage.
@@ -246,8 +296,8 @@ accent on its surfaces 7:1, ...). Fable: accent `#A7C2FF` (periwinkle), blue-bla
 **The hero backdrop** (`GamePalette.bakeHero`): 48 px on its long side, Gaussian-blurred (σ 3 px), then a gain in
 linear light so the 95th-percentile luminance is 0.012 and nothing above it: small text keeps its contrast over the
 brightest pixel (a render test checks TEXT_FAINT 3:1 and TEXT_DIM 4.5:1). `Widgets.Backdrop` draws it cover-fit,
-faded out at the left and in the bottom 35 % (the tiles and hints stay on the plain gradient), with the glows dimmer
-over it; one bitmap and cached shaders, nothing per frame.
+on Home and Preparing only, gone left of 30 % of the width and in the bottom 40 % (the buttons and hints stay on the
+plain gradient), at most 85 % opaque; no glow over it; one bitmap and cached shaders, nothing per frame.
 
 **Cache** (`GameTheme`), per title ID in `<internal files>/art/`: `<TID>.png` (the title image), `<TID>.hero.png`,
 `<TID>.theme` (text: `v=<GamePalette.VERSION>`, `xbe=<length>:<mtime>`, `source=`, `hues=`, `hero=`, one
@@ -257,14 +307,14 @@ deletes it. Each bake logs `launcher: theme <TID>: source xbe:$$XTIMAGE, accent 
 full`, and the launcher logs the same line when it applies a theme (`launcher: theme <TID>: stock, mode off` without).
 
 **Where it applies**: the launcher (applied before any view is built, so no flash of the stock green; when the game or
-the setting changes, the stage is built again in the new colours), the bottom screen's panel (its identity card also
+the setting changes, the stage is built again in the new colours), the bottom screen's panel (it also
 shows the title image; the panel's background stays black), and in the game process the in-game menu and the
 companion panel (`ShellActivity` reads the cached tokens once at game start: no bitmaps). Without a usable image
 (none, or an unknown format) Home shows a monogram (the title's initials on a gradient whose hue comes from the title
 ID) and the colours take that hue; a grey image keeps its picture and hero with the title ID's hue. No title ID, no
 game: the stock colours.
 
-**Settings › Launcher › Game theme** (only with a game that has a title ID): Art and colours (default), Colours only
+**Settings › General › Game theme** (only with a game that has a title ID): Art and colours (default), Colours only
 (no hero), Off (the stock green), per title in `files/settings/theme_<TID>`; applies at once in the launcher, at the
 next game start in the in-game menu.
 
@@ -281,17 +331,16 @@ its theme to `build/screenshots/preview-*.png` (git-ignored); without the proper
 1. Open the launcher with Burnout 3: one line `launcher: theme <TID>: source …, accent #…, hues …, mode full` (send
    it, and whether the source is `xbe:$$XTIMAGE`). The first start after the update bakes it on a worker: Home shows
    again in the game's colours within a second.
-2. Home: the accent (brand mark, focus, caps headers, Play) in the game's colour, the **Ready** chip still green, a
-   faint wash of the title image on the right of the backdrop, no banding in it.
-3. The small caps (TITLE ID, LAST PLAYED, ...) and the dim text stay easy to read over the wash.
-4. Settings › Launcher › Game theme: Colours only (the wash goes, the colours stay), Off (the stock green at once),
-   Art and colours again; the detail names the game and the image source.
-5. Bottom screen (Thor): black background, the title image on the identity card, Play in the game's colour; it dims
-   after 10 s.
-6. Play: the in-game menu in the game's colours, « Paused » still amber, the screenshot flash green.
+2. Home: the accent (focus, Play) in the game's colour, a faint wash of the title image on the right of the backdrop,
+   no banding in it; a not-ready state's dot keeps its status colour (amber, red).
+3. The dim line under the title stays easy to read over the wash.
+4. Settings › General › Game theme: Colours only (the wash goes, the colours stay), Off (the stock green at once),
+   Art and colours again; the description names the game.
+5. Bottom screen (Thor): black background, the title image, Play in the game's colour; it dims after 10 s.
+6. Play: the in-game menu in the game's colours, the screenshot flash green.
 7. Change game to Fable (import or folder): periwinkle (#A7C2FF) without restarting the app.
 8. Force-stop the app and open it again: no flash of the stock green before the game's colours.
-9. Game data › Delete the imported copy: no `files/art/<TID>.*` left (`adb shell run-as <app id> ls files/art`),
+9. Manage › Delete the imported copy: no `files/art/<TID>.*` left (`adb shell run-as <app id> ls files/art`),
    unless the game is still in the library folder (the library keeps showing its art).
 10. Screenshots of Home with both games (and of a warm-coloured game next to the amber « Needs preparing » chip, if
     one is at hand: the accent is not kept away from the amber yet, `GamePalette.WARN_AVOID_DEG`).
@@ -312,37 +361,38 @@ game's theme (`ui-home-themed-*`) and the Game theme setting (`ui-settings-theme
 
 ### Settings
 
-The Settings screen writes a few `RECOMP_*` options to `recomp.cfg` (the file the runtime already reads,
+The Settings screen has four tabs — **General**, **Graphics**, **Audio**, **Advanced** — switched with L1 / R1; it
+writes a few `RECOMP_*` options to `recomp.cfg` (the file the runtime already reads,
 [RECOMP_* options](#recomp_-options-recompcfg)), and they apply the next time the game starts. Only options that
 exist in the runtime and mean something to a player are offered:
 
 | Row | Choices (default first or marked) | Line in `recomp.cfg` |
 |---|---|---|
-| Open the game directly next time | Off (default), On | none: a launcher preference (`game` SharedPreferences, `auto_start`) |
-| Sounds | On (default), Off | none: `ui_sound` |
-| Vibration | On (default), Off | none: `ui_haptics` |
-| Bottom screen (only with a second display) | Panel (default), Black, Off | none: [Dual screen](#dual-screen-ayn-thor), `GameStore.bottomScreen` |
-| Game theme (only with a game that has a title ID) | Art and colours (default), Colours only, Off | none: [Game theme](#game-theme), `files/settings/theme_<TID>` |
-| Game › Language | Same as Android (default), English, Français, Deutsch, Español, Italiano, Português, 日本語, 한국어, 中文 | `RECOMP_LANGUAGE=…`; « Same as Android » writes nothing ([Game language](#game-language)) |
+| General › Start in the game | Off (default), On | none: a launcher preference (`game` SharedPreferences, `auto_start`) |
+| General › Sounds | On (default), Off | none: `ui_sound` |
+| General › Vibration | On (default), Off | none: `ui_haptics` |
+| General › Bottom screen (only with a second display) | Panel (default), Black, Off | none: [Dual screen](#dual-screen-ayn-thor), `GameStore.bottomScreen` |
+| General › Game theme (only with a game that has a title ID) | Art and colours (default), Colours only, Off | none: [Game theme](#game-theme), `files/settings/theme_<TID>` |
+| General › Language | Same as Android (default), English, Français, Deutsch, Español, Italiano, Português, 日本語, 한국어, 中文 | `RECOMP_LANGUAGE=…`; « Same as Android » writes nothing ([Game language](#game-language)) |
 | Graphics › Vertical sync | On (default), Off | `RECOMP_PRESENT_VSYNC=0` when off |
 | Graphics › Renderer | Auto (default: the title profile's choice, software today), Software, GPU | `RECOMP_GPU=0` / `1`; see [GPU back end](../technical/gpu-backend.md#android) |
-| Graphics › Frame cap (GPU renderer) | Auto (default: the title profile's choice, 60 unless the profile sets one; Fable: 30), 30, 60, Off | `RECOMP_GPU_FPS_CAP=30` / `60` / `0` |
-| Graphics › Internal resolution (GPU renderer) | Auto (default: the title profile's choice, 1× for now), 1× (original), 2×, 3×, Fit the screen | `RECOMP_GPU_SCALE=1` / `2` / `3` / `auto` (Fit: the screen's height / 480, at most 3); see [GPU back end](../technical/gpu-backend.md#internal-resolution) |
+| Graphics › Frame cap (dimmed unless Renderer is GPU) | Auto (default: the title profile's choice, 60 unless the profile sets one; Fable: 30), 30, 60, Off | `RECOMP_GPU_FPS_CAP=30` / `60` / `0` |
+| Graphics › Resolution (dimmed unless Renderer is GPU) | Auto (default: the title profile's choice, 1× for now), 1× (original), 2×, 3×, Fit the screen | `RECOMP_GPU_SCALE=1` / `2` / `3` / `auto` (Fit: the screen's height / 480, at most 3); see [GPU back end](../technical/gpu-backend.md#internal-resolution) |
 | Graphics › Aspect ratio | Auto (default), 4:3 (original), 16:9 | `RECOMP_ASPECT=4:3` / `16:9`. Auto: 16:9 for the frames a title draws wide (a title patch declares them; Fable on Android) with menus and videos kept in their shape, 4:3 otherwise; 16:9 stretches every frame of a title that draws no wide frames; see [GPU back end](../technical/gpu-backend.md#aspect-modes) |
 | Graphics › Frame generation (only in a [frame generation](#frame-generation) APK) | Off (default), 2×, 2× performance | `RECOMP_LSFG=1`, `RECOMP_LSFG_MULT=2`, plus `RECOMP_LSFG_PERF=1` for 2× performance |
-| Graphics › Choose Lossless.dll (same) | a document picker; the row shows the shaders' state | `RECOMP_LSFG_DIR=<files>/lsfg/<key>` once the shaders are there (not removed by « Restore defaults ») |
+| Graphics › Choose Lossless.dll (same) | a document picker; the row shows the shaders' state | `RECOMP_LSFG_DIR=<files>/lsfg/<key>` once the shaders are there (not removed by « Reset all ») |
 | Graphics › Texture filtering | Sharp (default), Smooth, Anisotropic 8×, Anisotropic 16× | `RECOMP_TEX_BILINEAR=1`, `RECOMP_TEX_ANISO=8` / `16` |
 | Audio › 3D audio (HRTF) | On (default), Off | `RECOMP_APU_HRTF=0` when off |
 | Audio › Audio buffer | Short (256), Normal (default, 512), Long (1024), Very long (2048) | `RECOMP_AUDIO_BUF_SAMPLES=…` |
 | Advanced › Drawing threads | Auto (default), 1, 2, 4, 6, 8 | `RECOMP_RASTER_THREADS=…` |
-| Advanced › Fast cores only | On (default on Android), Off | `RECOMP_BIG_CORES=0` when off |
-| Advanced › Self-test at start | Off (default), On | `RECOMP_SHELL_SELFTEST=1` |
+| Advanced › Fast cores | On (default on Android), Off | `RECOMP_BIG_CORES=0` when off |
+| Advanced › Self-test | Off (default), On | `RECOMP_SHELL_SELFTEST=1` |
 
 #### Game language
 
 The console language the runtime reports to the title (`RECOMP_LANGUAGE`, XBA-77, `GameLanguage.java`). First found
-wins: the title's own choice (in-game menu › Quick settings › **Language**, kept per title ID in
-`files/settings/language_<TITLEID>`), then the `RECOMP_LANGUAGE` line of `recomp.cfg` (Settings › Game › Language),
+wins: the title's own choice (in-game menu › Settings › **Language**, kept per title ID in
+`files/settings/language_<TITLEID>`), then the `RECOMP_LANGUAGE` line of `recomp.cfg` (Settings › General › Language),
 then the Android language when the Xbox has it, then English. `ShellActivity` sets the variable before the runtime
 starts for the first and the third (the environment wins over `recomp.cfg`), and clears it otherwise; logcat says
 « shell: game language … ». A title only has the languages on its disc: a US disc is often English whatever is
@@ -354,8 +404,10 @@ line in place and removes its later duplicates; a default value removes the key'
 applies); a new key is appended under the comment « Written by the launcher's Settings screen ». Every other line
 (comments, other variables, `RECOMP_GAME_DIR`) is kept as written. The file goes through `recomp.cfg.tmp` and a
 rename; no file is created while every option is at its default. A value the screen does not offer (written by hand)
-shows as « Custom » and stays until that row is changed. « Restore defaults » (or Y) removes the lines of these
-options only.
+shows as « Custom » and stays until that row is changed. « Reset all » (the end of Advanced, or Y on any tab)
+removes the lines of these options only. Frame generation forced off by the game's pack (`env_force` RECOMP_LSFG=0)
+stays changeable (it is global) but is dimmed, and its description says, in amber, that it is unavailable for this
+title.
 
 Asked for in XBA-41 but left out, because no runtime option backs them on Android: the output scaling and its filter
 (the SDL presenter always letterboxes the 640 x 480 frame with nearest-neighbour sampling, `fb_present_sdl.c`;
@@ -474,7 +526,7 @@ Use the Thor's gamepad for everything unless a step says touch.
    green outline; logcat `launcher: shown (no game set up)`.
 2. Look at the layout: texts not cut, nothing overlapping, the button hints at the bottom right (A Start, B Quit).
    Send a screenshot (`adb exec-out screencap -p > welcome.png`).
-3. A on « Get started »: Choose your game, the Game folder card focused. D-pad down / up moves between the two cards;
+3. A on « Get started »: Choose your game, Game folder focused. D-pad down / up moves between the choices;
    B goes back to Welcome; A again.
 4. Copy `stub-default.xbe` as `default.xbe` into a folder of internal storage (e.g. `Download/stubgame/`). A on Game
    folder: « Read the game in place? ». A on « Allow all files access », turn it on, come back: the folder picker
@@ -484,21 +536,22 @@ Use the Thor's gamepad for everything unless a step says touch.
    `stub title: all 5 lifted functions OK`), and « The title finished (code 0) » on the black screen.
 6. Press Home on the Thor, then the app icon: back to the game at once (logcat `launcher: game running, bringing it
    back`). Back, Quit game twice to quit it, start the app again: Home with Play focused (« Open directly » is off).
-7. Settings: D-pad through the rows (the list scrolls), left / right change Vertical sync and Texture filtering, L1 /
-   R1 jump between sections, the right panel follows the focus. Then
+7. Settings: L1 / R1 to the Graphics tab, D-pad through the rows, left / right change Vertical sync and Texture
+   filtering, the description on the right follows the focus. Then
    `adb shell cat /sdcard/Android/data/fr.adserver.xboxrecomp.shell/files/recomp.cfg`: the comment line and
    `RECOMP_PRESENT_VSYNC=0` / `RECOMP_TEX_BILINEAR=1` (or what you chose). Play: logcat `recomp.cfg: N option(s)
    from …` lists them and `[FBWIN] … vsync off`. Back in Settings, Y: the lines are gone.
 8. Hand-written lines survive: `adb shell "echo RECOMP_WAIT_LOG=1 >> /sdcard/Android/data/fr.adserver.xboxrecomp.shell/files/recomp.cfg"`,
    change a setting, `cat` again: `RECOMP_WAIT_LOG=1` is still there.
-9. Settings › « Open the game directly next time » on; quit and start the app: the game starts directly.
+9. Settings › General › « Start in the game » on; quit and start the app: the game starts directly.
    Long-press the icon › « Launcher »: Home. Turn it off again in Settings.
 10. Long-press the app icon › « Change game »: Choose your game, the note says the running game will close (if it
     runs). Pick an empty folder: `NOT_A_GAME_FOLDER` in the note, nothing changed; B goes to Home.
-11. Folder gone: rename the folder of step 4 with a file manager, start the app. Expected: Home, chip « Game data
-    missing », the note naming the old path (`GAME_FOLDER_GONE`), no crash; A on Play opens Choose your game.
+11. Folder gone: rename the folder of step 4 with a file manager, start the app. Expected: Home, « Game data
+    missing » and the old path on its line (`GAME_FOLDER_GONE`), no crash; A on « Choose the game again » opens
+    Choose your game.
 12. Copy fallback: Settings › Apps › the app › All files access off. Game folder › « Copy into the app », pick the
-    folder of step 4 (renamed back). Expected: the progress ring, then Home with Play focused, Game data showing
+    folder of step 4 (renamed back). Expected: the progress ring, then Home with Play focused, Manage showing
     « Imported copy » and the folder `/storage/emulated/0/Android/data/<app id>/files/game`.
 13. ISO: make an XISO of our own test data (e.g. `extract-xiso -c stubgame stub.iso`, or any image dumped from your own
     disc), push it to `Download/`. Disc image (ISO), pick it. Expected: the ring with the percentage, « X of Y », file
@@ -506,20 +559,20 @@ Use the Thor's gamepad for everything unless a step says touch.
     note on Choose your game, and the previous game still plays. Re-import your own disc's image too (it worked
     before this change).
 14. Pick a file that is not an ISO (e.g. a photo): `NOT_AN_ISO` in the note.
-15. Game data › Delete the imported copy: the first A shows « Press A again », the second deletes; then Welcome (or
+15. Manage › Delete the imported copy: the first A shows « Press A again », the second deletes; then Welcome (or
     Home without a game) and « The imported copy was deleted ». Saves: `adb shell run-as fr.adserver.xboxrecomp.shell ls files/save`
     still lists them.
 16. `NO_GAME_DATA` (after step 15, so that no game is remembered): `adb shell mkdir /sdcard/Download/empty`, then
     `adb shell "echo RECOMP_GAME_DIR=/sdcard/Download/empty >> /sdcard/Android/data/fr.adserver.xboxrecomp.shell/files/recomp.cfg"`.
-    Start the app: Home, source « Set in recomp.cfg ». Play: the native side finds no `default.xbe` and hands over;
+    Start the app: Home; Manage says « Set in recomp.cfg ». Play: the native side finds no `default.xbe` and hands over;
     the launcher opens on Choose your game with `NO_GAME_DATA` and the folder in the note. Remove the line afterwards.
 17. WRONG_GAME needs an APK built with `-PxbaXbeSha256=` of another XBE (ask for one, or build one): picking the stub
     folder then shows `WRONG_GAME`, and the previous choice still plays.
-18. Touch: tap the cards, the menu rows, a setting's arrows, the hints (B Back). Everything works without the gamepad,
+18. Touch: tap the choices, the buttons and rows, a setting's arrows, the Settings tabs, the hints (B Back). Everything works without the gamepad,
     and the next D-pad press shows the focus again.
 19. Switch the Thor to French: every launcher text is in French (screens, settings, notes, shortcuts).
-20. Send screenshots of Welcome, Choose your game, Read the game in place?, the import ring, Home, Settings, Game
-    data and About, and the logcat lines (`launcher:`, `import:`, `recomp.cfg:`, `storage: game=...`). Say if the A /
+20. Send screenshots of Welcome, Choose your game, Read the game in place?, the import ring, Home, Settings, Manage
+    and About, and the logcat lines (`launcher:`, `import:`, `recomp.cfg:`, `storage: game=...`). Say if the A /
     B buttons are swapped on the Thor (its « Xbox » / « Nintendo » layout setting changes the key codes the app sees).
 
 ## Game library
@@ -556,14 +609,17 @@ in SAF mode only at a cold start and on Y. logcat: `launcher: library: scan N it
 
 ### The library screen
 
-The grid (left two thirds, four columns, scrolling): one card per title ID — title image or monogram, two-line title,
-state chip — sorted by title; last, the **Library folder** tile (folder, last scan, counts; A chooses another).
-Right: the focused game's details (title ID, state and what it means, source file and « n versions », region and
-version, image size, files, last played, play time, prepared date). D-pad between cards (the focus highlight glides
-to them), **A** the game's Home, **Start** its primary action without opening Home, **Y** rescan, **X** Storage,
-**B** leaves the app. The library is always in the stock colours; only the backdrop's glow follows the focused card
-(from its cached `<TID>.theme`). Opening a game's Home applies its theme; back to the library resets it. The bottom
-screen shows `LibraryPanel`: the focused game's card, its primary action, Rescan, Settings.
+The grid (the full width, five columns of 288 px art, scrolling): one card per title ID — title image or monogram,
+one-line title, and its state as a dot and a label only when it is not **Ready** (« Not imported » is a neutral
+grey dot) — sorted by title. The focused game's state and play time are one context line at the bottom left
+(« Ready · Yesterday · 12 h 40 min played »). D-pad between cards (a ring around the art glides to them), **A** the
+game's Home, **Start** its primary action without opening Home, **Y** the **Options** sheet — **Rescan**, **Storage**
+(the free space), **Library folder** (its name; A chooses another), **Settings**, **About** — and **B** leaves the
+app. An empty library shows why (no folder yet, nothing found, the scan's progress) and a **Library folder** button.
+The scan's progress, a scan cut at 5,000 entries and the « Other files (n) » line go under the grid. The library is
+always in the stock colours; only the backdrop's glow follows the focused card (from its cached `<TID>.theme`).
+Opening a game's Home applies its theme; back to the library resets it. The bottom screen shows the focused game:
+its art, title and primary action.
 
 States (`GameState`, first that applies): **Running**, **Preparing**, **Queued (n)**, **Importing**, then with the
 game's files present **Prepare failed**, **Pack invalid** (the pack was built from another `default.xbe` —
@@ -599,10 +655,12 @@ launcher comes back.
 
 ### Storage
 
-X on the library: free space (internal storage, game files), then per game what the app stores — **Imported copy**,
+Options › Storage on the library: the free space in the top bar, then per game (its name as a small label) what the
+app stores — **Imported copy**,
 **Pack**, **Prepare files** (`files/work/<TID>`), **Game caches** (live or stashed), **Saves** — with their sizes.
 Each is deleted on its own (A twice within 5 s, on a worker, after ending the game that runs from it). Saves have
-their own row and a stronger warning; nothing else deletes them. Game data shows the same rows for the selected game.
+their own row and a stronger warning; nothing else deletes them. The sizes are the rows' values, the paths are in
+the focused row's description. Manage shows the same rows for the selected game.
 Only what the app made is ever deleted: never a folder read in place nor anything in the library folder. Deleting
 the imported copy keeps the game in the library (import it again); its art and theme go only when the title also
 left the library folder.
@@ -642,7 +700,7 @@ Play only, caches switched, not imported, Prepare now, queue, Storage), `Launche
 
 1. Install over the current APK and open it: Fable's Home as before (same game, play time, saves). logcat
    `launcher: library: migrated 4D5300D1 (<dir>)` once (not at the next start).
-2. Home › Game data › Library is not there yet (one game): « Change game » as before. Choose your game: a third card
+2. Home › Manage › Library is not there yet (one game): « Change game » as before. Choose your game: a third card
    **Game library folder**. Choose `/sdcard/xbox`: the library opens, the grid fills; logcat
    `launcher: library: scan N items, M games, T ms (…)`. Send the line.
 3. Burnout 3 shows once (one card even with several images of it, « n versions » in the details), with its title
@@ -662,13 +720,13 @@ Play only, caches switched, not imported, Prepare now, queue, Storage), `Launche
     logcat `launcher: game caches switched to <TID>`; back on Fable later, it starts without the long cache rebuild
     (`run-as <app id> ls files/save/.stash` shows the other game's caches).
 11. In Fable, Pause › Quit (quick reboot): Fable comes back, not Burnout 3.
-12. X on the library: Storage lists both games; delete Burnout 3's Prepare files (A twice), then its imported copy:
+12. Library › Options (Y) › Storage lists both games; delete Burnout 3's Prepare files (A twice), then its imported copy:
     the game stays in the grid as **Not imported**, its saves row is still there; your ISO in `/sdcard/xbox` is
     untouched.
 13. Rename `/sdcard/xbox` (or remove the SD card) and open the launcher: no crash; games read in place show
     **Source gone**, imported ones still play; rename it back, Y.
-14. Bottom screen (Thor): on the library the focused game's card with its action (Play, Import, …), Rescan,
-    Settings; on a game's Home the third shortcut reads **Library**.
+14. Bottom screen (Thor): on the library the focused game's art, title and action (Play, Import, …); on a game's
+    Home its Play (or Prepare); on Settings and Storage the art alone.
 15. In French: the library, the chips (« Non importé », « En attente (1) »), Storage.
 16. Turn All files access off (system settings), choose the folder again with **Use the file picker**: the games
     are listed; folders read « À copier » / « Needs copying », images import.
@@ -737,10 +795,10 @@ same title ID keeps the old pack until it is prepared again.
 
 | Case | Home | Preparing screen |
 |---|---|---|
-| No valid pack, nothing run | **Prepare** instead of Play, « about 20–30 min » (30–45 below 8 cores, 40–60 under 6 GB of RAM), chip « Needs preparing »; the detail panel shows the free internal space (red under 2 GB: Prepare refuses) and the memory (amber under 6 GB: a warning only). | |
-| Running | « Preparing… » with the step, percent and time left, chip « Preparing » | The step list (Install tools, Identify, Analyse, Translate, Compile, Pack) with the current one lit, the ring (overall percent), the message and the time left. B twice (or Cancel twice) cancels; Y goes back to the menu and the Prepare carries on. Polls `status.json` twice a second; the screen stays on. |
-| Failed | « Prepare » with a « Prepare failed » badge, chip « Prepare failed » | The code and message (a hint for `KILLED` and `NO_SPACE`), the log's path, **Retry**, **Share log** (also Y). |
-| Cancelled, or interrupted (a `running` status older than 15 s with no `:prepare` process) | « Prepare » carries on where it stopped | **Resume**, **Share log**. |
+| No valid pack, nothing run | **Prepare** instead of Play, « about 20–30 min » (30–45 below 8 cores, 40–60 under 6 GB of RAM), « Needs preparing · once, about … » with an amber dot. Prepare refuses under 2 GB of free internal space, and warns (a note) under 6 GB of memory. | |
+| Running | « Preparing… », the line « Compile · 42 % · about 12 min left » | Home's layout: « Preparing · step 5 of 6 · Compile », one bar, the percentage, the time left, « You can leave the app ». Nothing to focus: B twice cancels; Y hides it and the Prepare carries on. Polls `status.json` twice a second; the screen stays on. |
+| Failed | **See what failed**, the line « Prepare failed · CODE » with a red dot | « Preparation failed · CODE » with a red dot, the message (a hint for `KILLED` and `NO_SPACE`), **Retry** and **Share log** (also Y) as buttons. |
+| Cancelled, or interrupted (a `running` status older than 15 s with no `:prepare` process) | « Prepare » carries on where it stopped | « Preparation stopped » with an amber dot, why, **Resume** and **Share log**. |
 | Pack valid | **Play**, as before | Done: back to Home, « … is ready ». |
 
 The app opens on the Preparing screen while a Prepare runs or after one failed. « Open the game directly » does not
@@ -763,14 +821,14 @@ Needs an APK with the toolchain (the embedded-prepare branch merged) and the pac
 
 1. The shell APK as built today (no toolchain): the launcher is unchanged: Home shows **Play**, no « Needs
    preparing » chip, no Prepare notification channel in the app's settings.
-2. With the toolchain APK and your game chosen: Home shows **Prepare**, « about 20–30 min », chip « Needs
-   preparing »; the right panel shows the free internal space and the memory (Thor: about 11 GB). Screenshot.
+2. With the toolchain APK and your game chosen: Home shows **Prepare** and « Needs preparing · once, about
+   20–30 min » with an amber dot. Screenshot.
 3. A on Prepare. On Android 13+ the notification permission is asked once: allow it. Expected: the Preparing screen,
-   « Install tools » lit with a percentage for a few seconds the first time; then Identify, Analyse, Translate,
-   Compile, Pack in turn; the ring's percent and the time left move. logcat `prepare: started for <TID> ... N jobs`
+   « Preparing · Install tools » for a few seconds the first time; then « step n of 6 » with Identify, Analyse,
+   Translate, Compile, Pack in turn; the bar, the percentage and the time left move. logcat `prepare: started for <TID> ... N jobs`
    (N = 4 or 5 on the Thor).
 4. Pull down the notification shade: « Preparing <title> », the step, the bar, the time left, **Cancel**. Screenshot.
-5. Press Y: Home shows « Preparing… » with the step and percent updating. Press Home on the Thor, use another app
+5. Press Y: Home shows « Preparing… » and its line with the step and percent updating. Press Home on the Thor, use another app
    for a minute, turn the screen off for a few minutes: the notification keeps moving; back in the app, the Preparing
    screen shows the current step.
 6. B once: « Press again » on Cancel; B again: within a few seconds « Preparation stopped », **Resume** and **Share
@@ -880,31 +938,34 @@ logcat at each show: `shell: companion panel on display 2 "…" … (not focusab
 
 ### In the launcher (wiring)
 
-`LauncherCompanion` does it in a few calls, wired in `LauncherActivity` like this (Play goes through the launcher's own
-`onPlay`, so a Prepare still comes first; the Home call passes the hero's chip):
+`LauncherCompanion` does it in a few calls, wired in `LauncherActivity` like this (the panel's one action is the
+main screen's: Play goes through the launcher's own `onPlay`, so a Prepare still comes first):
 
 ```java
 private LauncherCompanion companion;
 
 // onCreate, after buildStage() (not on the early launchShell() return):
-companion = new LauncherCompanion(this, new LauncherPanel.Actions() {
-    @Override public void play() { onPlay(); }
-    @Override public void settings() { go(Screen.SETTINGS); }
-    @Override public void changeGame() { go(Screen.SOURCE); }
-});
+companion = new LauncherCompanion(this, this::onPlay);
+companion.libraryActions(() -> libraryPrimary(focusedEntry()));
 
 @Override protected void onStart() { super.onStart(); if (companion != null) companion.start(); }
 @Override protected void onStop() { if (companion != null) companion.stop(); super.onStop(); }
 
-// where Home is built (the chip's text and colour, Play allowed or not):
-companion.home(title, status.label(), status.color(), st == State.READY && !preparing);
+// where Home is built (its state, whether its button can run, and its label: Play, Prepare, …):
+companion.home(title, statusText, statusColor, !play.dim, play.title);
+// on the library, for the focused card:
+companion.library(e.title(), chipText, chipColor, art, primaryLabel(e));
 // where the Preparing screen is built:
 companion.preparing(titleId(), gameTitle(dir));
+// on every other screen:
+companion.artOnly();
 ```
 
-Home shows an identity card (title, status) and three big shortcuts: Play, Settings, Change game. Preparing shows the
-step list, the overall percentage and time left, the last four lines of `prepare.log`, battery and thermal, and
-**Cancel** on a hold (it sends `PrepareService`'s cancel itself); it reads `status.json` and the log once a second.
+Home and the library show one panel (`LauncherPanel`): pure black, the game's art (440 px), its title, one pill
+(Play, Prepare, Import…; y 716–844, the bottom centre left empty for the palms) and the battery small in the corner;
+no card, status or other shortcuts. The other screens show the art alone. Preparing shows the overall percentage
+big, one bar, « Compile · about 12 min left », the title and **Hold to cancel** (it sends `PrepareService`'s cancel
+itself); it reads `status.json` once a second. Buttons are borderless pills (the in-game panel's too, rounded).
 
 ### Tests and screenshots
 
@@ -919,7 +980,7 @@ panels are rendered at 1240 x 1080 to `build/screenshots/companion-*.png` (`--ta
 On the Thor, with the shell APK of this change (and the stub or a title for steps 5 to 9):
 
 1. Start the app: the launcher on the top screen. Until the launcher wiring lands the bottom screen shows the system's
-   own content; after it, the launcher panel (title card, Play / Settings / Change game). logcat
+   own content; after it, the launcher panel (the art, the title, one Play pill). logcat
    `launcher: displays:` lists both screens: send those lines (id, name, flags, size, refresh).
 2. Start the game: the bottom screen turns to the in-game panel (black first, no white flash). logcat
    `shell: companion panel on display N … (not focusable)`. Photo of both screens.
@@ -948,31 +1009,31 @@ On the Thor, with the shell APK of this change (and the stub or a title for step
 ## In-game menu
 
 A drawer that slides in from the left over the game (Eden / BananaNative style) with XRecomp's own options: resume,
-quick settings, controls, screenshot, share log, back to the launcher, quit. `GameMenu.java` (the drawer and its
+settings (with share log), controls, screenshot, back to the launcher, quit. `GameMenu.java` (the drawer and its
 input), `MenuTriggers.java` (the edge swipe and the gamepad combo as plain state machines), `MenuNative.java` /
 `android/app/src/main/cpp/menu_jni.c` (hold, volume, quit), wired in `ShellActivity`.
 
 ```
-  ┌──────────────────────────┐
-  │ ◆ GAME MENU    ● Paused  │   the game's frame, dimmed,
-  │ <game title>             │   stays behind (held, not redrawn)
-  │ Playing for 0:42:10      │
-  │ ──────────────────────── │                        59.9 fps · 16.7 ms
-  │ ▶ Resume                 │                        (performance overlay,
-  │ ☰ Quick settings         │                         also with the menu closed)
-  │ ✚ Controls               │
-  │ ◎ Screenshot             │
-  │ < Share log              │
-  │ ▦ Back to launcher       │
-  │ ⏻ Quit game              │
-  │ (A) Select  (B) Back     │
-  └──────────────────────────┘
+  ┌──────────────────────┐
+  │ <game title>         │   the game's frame, dimmed,
+  │ Paused · 0:42 played │   stays behind (held, not redrawn)
+  │                      │
+  │ Resume               │                        59.9 fps · 16.7 ms
+  │ Settings             │                        (performance overlay,
+  │ Controls             │                         also with the menu closed)
+  │ Screenshot           │
+  │ Back to launcher     │
+  │                      │
+  │ Quit game            │
+  │ (A) Select (B) Resume│
+  └──────────────────────┘
 ```
 
 **How it is put together.** A View layer (`FrameLayout`: a dimming scrim, then the launcher's `Widgets.Stage` with the
-drawer, the focus `Glide`, the performance overlay and a message chip) added over SDL's layout with
-`addContentView` in `ShellActivity.onCreate`. SDL's surface is never recreated or resized. The drawer is 680 of the
-1920 design pixels (35 %), the launcher's dark glass panel with MenuRows, the gliding focus, its sounds and haptics
+drawer, the focus `Glide`, the performance overlay and a message line) added over SDL's layout with
+`addContentView` in `ShellActivity.onCreate`. SDL's surface is never recreated or resized. The drawer is a flat sheet
+flush with the left edge, 560 of the 1920 design pixels (29 %), over a light scrim: the game's title, « Paused · 0:42
+played », text-only 88 px rows (no icons, no subtitles; Quit stands apart), the gliding focus, its sounds and haptics
 (`UiFeedback`); it slides in in 200 ms (decelerating) while the scrim fades in. The Stage scales it to the screen
 less the display cutout, so 720p and 1080p look the same.
 
@@ -1009,14 +1070,15 @@ less the display cutout, so 720p and 1080p look the same.
 | Item | Does |
 |---|---|
 | Resume | Closes the menu. |
-| Quick settings | **Perf overlay** On / Off: fps and frame time (`xbox_FramebufferWindowGetStats`, twice a second) in the top right corner, in the menu's layer, not in the game frame; stays with the menu closed. **Volume** 0–100 % in steps of 10, A mutes / unmutes: one gain on the mixed APU output (`apu_volume.c`, the square of the fraction, after the WAV capture), set through JNI. **Bottom screen** Panel / Black / Off (only with a second screen): `GameStore.setBottomScreen` and the companion is refreshed at once. These three apply **now** (the rows say so) and are remembered (`files/settings/perf_overlay`, `game_volume`, `bottom_screen`); the volume is applied again at the next start. **Language** (only when the game's XBE gives a title ID): As in Settings, then the nine languages; this game's own [language](#game-language), applied at the next start. Screen filter and scaling are not offered: the SDL window's are fixed at start (`fb_present_sdl.c`: nearest, logical size 640 x 480). |
+| Settings | **Perf overlay** On / Off: fps and frame time (`xbox_FramebufferWindowGetStats`, twice a second) in the top right corner, in the menu's layer, not in the game frame; stays with the menu closed. **Volume** 0–100 % in steps of 10, A mutes / unmutes: one gain on the mixed APU output (`apu_volume.c`, the square of the fraction, after the WAV capture), set through JNI. **Bottom screen** Panel / Black / Off (only with a second screen): `GameStore.setBottomScreen` and the companion is refreshed at once. These three apply **now** (the rows say so) and are remembered (`files/settings/perf_overlay`, `game_volume`, `bottom_screen`); the volume is applied again at the next start. **Language** (only when the game's XBE gives a title ID): As in Settings, then the nine languages; this game's own [language](#game-language), applied at the next start. Screen filter and scaling are not offered: the SDL window's are fixed at start (`fb_present_sdl.c`: nearest, logical size 640 x 480). |
 | Controls | The launcher's Controls table, compact (plus Back and Select + Start: the menu). |
 | Screenshot | Closes the menu first, then saves the game's last frame as `<external files>/screenshots/<date>.bmp` (`xbox_FramebufferDumpBmp`, the companion panel's), and says « Saved … » at the top of the screen (and on the panel). |
-| Share log | This process's logcat to `files/logs/game.log`, then the share sheet (the companion panel's `LogProvider` path). The menu stays open. |
+| Settings › Share log | This process's logcat to `files/logs/game.log`, then the share sheet (the companion panel's `LogProvider` path). The menu stays open. |
 | Back to launcher | **The game stays alive** (the runtime maps its guest memory once per process: starting it again means a new process), held: the drawer goes at once, the launcher comes up (`ACTION_SHOW_LAUNCHER`), and the menu's hold is let go only in `onStop`, after SDL's pause has put the background hold in place, so no frame runs in between. The launcher's Play brings this task back and the game goes on (`launcher: game running, bringing it back`). |
-| Quit game | The first press turns the row into « Press again to quit » for 4 s (moving away cancels it); the second press quits: `nativeQuit` lets the guest go, `sync()`s the saves, then `recomp_quit(0)` ([Quit](#quit)). |
+| Quit game | The first press turns the row into « Press again to quit » (with « Progress since the last save is lost » under it, the only row that says more) for 4 s (moving away cancels it); the second press quits: `nativeQuit` lets the guest go, `sync()`s the saves, then `recomp_quit(0)` ([Quit](#quit)). |
 
-The header shows the game's title (the launcher's choice) and the time since the game started (this process).
+The header shows the game's title (the launcher's choice) and « Paused · h:mm played », the time since the game
+started (this process). Hints: A Select, B Resume on the main page, B Back on Settings and Controls.
 
 **Tests and screenshots.** `GameMenuTest` (Robolectric, a fake `GameMenu.Host` standing in for libmain and SDL): Back,
 a gamepad's Back, Guide, Select + Start timing (0.4 s no, 0.55 s yes, released early no), the edge swipe and what is
@@ -1047,15 +1109,15 @@ With the shell APK of this change and the stub or a title (and the Thor for 5 an
 6. **No stuck buttons**: hold A (or a direction, or the right trigger) in the game and open the menu with Back while
    holding; let go inside the menu, close it: nothing is held in the game. Same while holding White on the bottom
    panel. Close the menu with B and with A on Resume: the game does not get that B or A.
-7. **Navigation**: D-pad, hat and left stick move the focus (held: it repeats); A selects; B goes back from Quick
-   settings and Controls; Start resumes from anywhere.
-8. **Quick settings**: Perf overlay On: the fps and frame time show in the top right corner, also after Resume
+7. **Navigation**: D-pad, hat and left stick move the focus (held: it repeats); A selects; B goes back from Settings
+   and Controls; Start resumes from anywhere.
+8. **Settings**: Perf overlay On: the fps and frame time show in the top right corner, also after Resume
    (compare with the companion's fps). Volume: left / right change the game's volume in steps (audible after
    Resume), A mutes; quit and start again: the volume is remembered. Bottom screen (Thor): Panel / Black / Off switch
    the bottom screen at once.
 9. **Screenshot**: Screenshot closes the menu and « Saved <date>.bmp » shows at the top;
    `adb shell ls /sdcard/Android/data/<app id>/files/screenshots`, pull the BMP: the game's frame, without the menu.
-10. **Share log**: the share sheet opens with game.log; cancel it: the menu is still there, the game still paused.
+10. **Settings › Share log**: the share sheet opens with game.log; cancel it: the menu is still there, the game still paused.
 11. **Back to launcher**: the launcher comes up and the game waits (no sound; logcat `paused (menu)` then
     `still paused (background)` and no `resumed` in between). Play: the game is back where it was, running
     (`launcher: game running, bringing it back`).
@@ -1063,7 +1125,7 @@ With the shell APK of this change and the stub or a title (and the Thor for 5 an
     twice: `shell: menu: quit (confirmed)`, `quit from the in-game menu`, `clean exit`; start the game again: the
     saves are there.
 13. **French**: with the device in French, every row, hint and message of the menu is in French. Photos of the menu
-    (main page, Quick settings) at least once, in French.
+    (main page, Settings) at least once, in French.
 14. **Notch / 720p**: on a phone with a cutout, the drawer's text stays clear of it; on a 720p screen the menu looks
     the same as at 1080p.
 
@@ -1075,7 +1137,7 @@ With a title from a European (multi-language) disc, Fable's PAL disc for instanc
    game. logcat `shell: game language fr, title 4D5300D1`; the game's menus are in French.
 2. **Settings**: Settings › Game › Language → English; quit the game and start it again: logcat
    `shell: game language en (recomp.cfg)`, menus in English.
-3. **This game**: in the game, in-game menu › Quick settings › Language → Deutsch; quit and start again: logcat
+3. **This game**: in the game, in-game menu › Settings › Language → Deutsch; quit and start again: logcat
    `shell: game language de`, menus in German (and the Settings line still says English).
 4. **Back to Settings**: same row → « Comme les Réglages »; next start: English again.
 5. **US disc** (if you have one): choose French: the game stays in English (its disc has nothing else), nothing
