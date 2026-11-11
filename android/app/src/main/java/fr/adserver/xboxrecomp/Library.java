@@ -33,7 +33,7 @@ import java.util.Map;
  * « selected » is the game the launcher shows; the preferences game_dir / title / title_id (GameStore) keep meaning the
  * game the process runs or last ran, written only at launch.
  *
- * Plain Java and org.json except migrate(Context).
+ * Plain Java and org.json except migrate(Context) and the library folder preferences.
  */
 final class Library {
     private Library() {}
@@ -47,8 +47,9 @@ final class Library {
 
     static final String KIND_IMPORTED = "imported", KIND_IN_PLACE = "in_place", KIND_CFG = "cfg";
 
-    /** Preference (GameStore.PREFS): the launched game's title ID, next to game_dir and title. */
-    static final String PREF_TITLE_ID = "title_id";
+    /** Preferences (GameStore.PREFS): the launched game's title ID (next to game_dir and title), the library folder. */
+    static final String PREF_TITLE_ID = "title_id", PREF_TREE = "library_tree", PREF_PATH = "library_path",
+            PREF_SCANNED_AT = "library_scanned_at";
 
     static File dir(File filesDir) {
         return new File(filesDir, DIR);
@@ -364,6 +365,43 @@ final class Library {
             Log.w(TAG, "launcher: library: migration failed", e);
             return read(gamesFile(c.getFilesDir()));
         }
+    }
+
+    // ---- Library folder (preferences) -------------------------------------------------------------------------------
+
+    /** The picked library folder's tree URI, or null. */
+    static String folderTree(Context c) {
+        String s = GameStore.prefs(c).getString(PREF_TREE, null);
+        return s == null || s.isEmpty() ? null : s;
+    }
+
+    /** The library folder as a path (All files access), or null (no folder, or the SAF fallback). */
+    static String folderPath(Context c) {
+        String s = GameStore.prefs(c).getString(PREF_PATH, null);
+        return s == null || s.isEmpty() ? null : s;
+    }
+
+    /** Remembers the folder: its tree URI and, when readable as files, its path (null: SAF). Clears the scan time. */
+    static boolean setFolder(Context c, String treeUri, String path) {
+        SharedPreferences.Editor e = GameStore.prefs(c).edit().putString(PREF_TREE, treeUri == null ? "" : treeUri)
+                .remove(PREF_SCANNED_AT);
+        if (path == null || path.isEmpty())
+            e.remove(PREF_PATH);
+        else
+            e.putString(PREF_PATH, path);
+        return e.commit();
+    }
+
+    static boolean clearFolder(Context c) {
+        return GameStore.prefs(c).edit().remove(PREF_TREE).remove(PREF_PATH).remove(PREF_SCANNED_AT).commit();
+    }
+
+    static long scannedAt(Context c) {
+        return GameStore.prefs(c).getLong(PREF_SCANNED_AT, 0);
+    }
+
+    static boolean setScannedAt(Context c, long when) {
+        return GameStore.prefs(c).edit().putLong(PREF_SCANNED_AT, when).commit();
     }
 
     private static boolean sameFile(File a, File b) {
