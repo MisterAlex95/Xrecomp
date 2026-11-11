@@ -199,6 +199,49 @@ c[] with `CXT_WRITE` on stay on the CPU (they change constants vertex by
 vertex), as does any batch the back end declines (a shader that fails to
 compile, a full cache).
 
+**Guest vertex buffers (`RECOMP_GPU_VBO`, WP-3).** Gathering cost 21–25 % of
+the executor in Oakvale (190 k vertices a frame through `fetch_attr`), yet
+every indexed vertex range Fable draws is the same frame after frame. By
+default (`RECOMP_GPU_VBO=0` gathers every batch, as before) the GL back end sets `NV2A_BACKEND_CAP_RAW_VERTEX` and a
+vertex-program batch drawn from vertex arrays arrives with its arrays as the
+title stored them (`Nv2aProgramBatch.raw`: offset, type, size, stride per
+input; `raw_first` the smallest index; `indices` the triangle list counted
+from it; `vertex_count` the index range). The executor only finds the index
+range and checks it lies in guest memory; inline arrays, ranges over 65536
+elements and types `fetch_attr` does not read are gathered as before, and a
+back end that declines a raw batch gets it again gathered.
+
+The back end keeps one GL buffer per (first byte, length, stride) of a
+batch's index range, streams that interleave (same stride, less than a stride
+apart) sharing one. A buffer is hashed again the first time it is used in a
+frame and re-uploaded when its bytes changed; a buffer created or changed in
+this frame is hashed at every use, so a ring of dynamic vertices rewritten
+within a frame is caught (a static range rewritten mid-frame is caught at the
+next frame). Index lists are cached by content (element buffer per distinct
+list), and each layout (buffers, offsets, formats, strides) has its vertex
+array object, with the element buffer it last bound. Bounds: 4096 vertex
+buffers / 64 MB and 8192 index lists / 32 MB, then the whole cache (and the
+vertex arrays) is dropped. Attributes keep their guest formats
+(`nv2a_gl_vsh_attr`): floats as floats, unsigned bytes normalised by GL,
+D3DCOLOR as four normalised bytes swizzled `.zyxw` in the shader, normalised
+shorts as integers divided by 32767 in the shader (GL's own normalisation
+differs between GL 4.1 and 4.2+/ES 3), plain shorts as is, 11:11:10 as an
+integer attribute unpacked in the shader. The input formats are part of the
+vertex shader's cache key. `tests/nv2a_gl_vsh` runs every format and size
+through the gathered and the raw path against the interpreter. The frame line
+gains a `vertex buffers:` line (raw batches, KB uploaded and hashed per
+frame, buffers, vertex arrays, index lists).
+
+Oakvale at the tutorial prompt, M1 Max (shared), same build back to back,
+steady 30 s averages: `RECOMP_GPU_VBO=0` render 13.0 ms/frame, 40 fps;
+vertex buffers only 7.5 ms/frame, 48–50 fps; with the index list cache
+6.85 ms/frame, 52.6 fps. `fetch_attr` and the dedup (24.9 % of the executor)
+gone, batch build 2.6 %; 1046 raw batches/frame, 0 KB/frame vertex and index
+upload in steady state, 3.1 MB/frame hashed (1.5 vertex, 1.6 index), 1357
+vertex buffers (4.6 MB), 979 index lists (2.3 MB), 730 vertex arrays. No GL
+errors; the frame dump differs from the gathered run only where the scene
+animates (sky, grass, the character, the pulsing button).
+
 **Vertices.** Otherwise the executor transforms: vertex programs run in
 `nv2a_vsh_interp.c`, fixed-function vertices in `ffp_vertex`, and triangles
 are clipped at the near plane. The back end gets surface-pixel x/y, window z,
@@ -552,9 +595,9 @@ taken at the same flip: `touch sig flag; sleep 0.4; rm flag`.
 ### 7c: vertex programs on the GPU
 
 Done as 7c-lite (above): items 1–3 and 5, with attributes gathered on the CPU
-(the first option of item 4). Left: item 4 proper (attribute arrays uploaded
-by range and cached, fetched by the GPU in their own formats), item 6, and
-programs that write c[] (`CXT_WRITE`), which stay on the CPU.
+(the first option of item 4); item 4 proper as `RECOMP_GPU_VBO` (guest vertex
+buffers, above). Left: item 6, inline arrays (still gathered), and programs
+that write c[] (`CXT_WRITE`), which stay on the CPU.
 
 The original list (the interpreter was 41 % of the in-world executor):
 

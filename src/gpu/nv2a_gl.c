@@ -3598,7 +3598,7 @@ int nv2a_gl_install_from_env(void)
      * guest vertex buffers in their own formats (raw_bind) instead of
      * gathered floats; 0 gathers every batch, as before. */
     e = getenv("RECOMP_GPU_VBO");
-    s_vbo_on = e && *e && strcmp(e, "0") != 0;
+    s_vbo_on = !(e && strcmp(e, "0") == 0);
     if (s_vbo_on)
         s_backend.caps |= NV2A_BACKEND_CAP_RAW_VERTEX;
     e = getenv("RECOMP_GPU");
