@@ -310,6 +310,10 @@ typedef struct {
  *     its bytes must stay valid until the window has copied them, which
  *     happens before present returns control to the title.
  *
+ * The back end stores surfaces in their own colour format (X1R5G5B5 for
+ * colour formats 1 and 2, R5G6B5 for 3), and the window and frame dumps
+ * read them so; the CPU rasteriser writes R5G6B5 for every 16-bit surface.
+ *
  * Only the presented surface needs to be in guest memory: other surfaces
  * are the back end's business (it reads them back when the title samples
  * them in a form it cannot use, or when the guest CPU needs them). flip()

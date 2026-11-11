@@ -223,7 +223,14 @@ flipped. Depth/stencil is a D24S8 texture per zeta address (up to 8),
 attached to whichever colour target draws with it, as the CPU rasteriser
 keeps one buffer per zeta address; a texture rather than a renderbuffer so
 that a shadow map drawn into it can be sampled (below). A 16-bit surface keeps alpha at 1 (colour
-mask), as the CPU path reads 565 back with alpha 0xFF. Pixels go back to
+mask). 16-bit surfaces go to and from guest memory in their own format:
+R5G6B5 (colour format 3) or X1R5G5B5 (1 and 2; the X bit 0 or 1). Fable's
+back buffer is X1R5G5B5 (`SET_SURFACE_FORMAT` 0x121) and its bloom samples
+it as `LU_X1R5G5B5` (0x1C); the executor tells the presenter
+(`xbox_FramebufferWindowSetFormat`, SDL texture `RGB555`) and the frame
+dump the format when a back end with a present hook drew the frame. The
+CPU rasteriser still writes R5G6B5 into every 16-bit surface, and its
+window keeps reading R5G6B5. Pixels go back to
 guest memory (in the surface's own format and swizzle) by the rules under
 "Present" above.
 A target is dirty only after a batch or clear that writes colour (colour

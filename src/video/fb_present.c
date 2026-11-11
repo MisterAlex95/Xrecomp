@@ -152,6 +152,28 @@ void xbox_FramebufferWindowSetAA(uint32_t sy)
     s_fb_aa_sy = sy ? sy : 1;
 }
 
+/* 16-bit surfaces: X1R5G5B5 (colour formats 1, 2) or R5G6B5 (the rest). */
+static volatile LONG s_fb_x555;
+
+void xbox_FramebufferWindowSetFormat(uint32_t color_format)
+{
+    InterlockedExchange(&s_fb_x555, color_format == 1 || color_format == 2);
+}
+
+static uint32_t px16_to_rgb(uint16_t v, int x555)
+{
+    uint32_t r, g, b;
+    if (x555) {
+        r = (uint32_t)((v >> 10) & 0x1F) * 255u / 31u;
+        g = (uint32_t)((v >>  5) & 0x1F) * 255u / 31u;
+    } else {
+        r = (uint32_t)((v >> 11) & 0x1F) * 255u / 31u;
+        g = (uint32_t)((v >>  5) & 0x3F) * 255u / 63u;
+    }
+    b = (uint32_t)(v & 0x1F) * 255u / 31u;
+    return (r << 16) | (g << 8) | b;
+}
+
 /* Called by the pushbuffer executor when the title flips. */
 void xbox_FramebufferWindowPresent(uint32_t fb_va, uint32_t pitch)
 {
@@ -190,13 +212,9 @@ void xbox_FramebufferWindowPresent(uint32_t fb_va, uint32_t pitch)
                 dst[x] = p[x * 2];
         } else if (bpp == 2) {
             const uint16_t *p = (const uint16_t *)row;
-            for (x = 0; x < s_fb_width; x++) {
-                uint16_t v = p[x];
-                uint32_t r = (uint32_t)((v >> 11) & 0x1F) * 255u / 31u;
-                uint32_t g = (uint32_t)((v >>  5) & 0x3F) * 255u / 63u;
-                uint32_t b = (uint32_t)( v        & 0x1F) * 255u / 31u;
-                dst[x] = (r << 16) | (g << 8) | b;
-            }
+            int x555 = (int)s_fb_x555;
+            for (x = 0; x < s_fb_width; x++)
+                dst[x] = px16_to_rgb(p[x], x555);
         } else {
             memset(dst, 0, (size_t)s_fb_width * 4);
         }
@@ -397,13 +415,9 @@ static void fb_convert(const uint8_t *src, uint32_t bpp)
                 dst[x] = p[x * 2];
         } else if (bpp == 2) {
             const uint16_t *p = (const uint16_t *)row;
-            for (x = 0; x < s_fb_width; x++) {
-                uint16_t v = p[x];
-                uint32_t r = (uint32_t)((v >> 11) & 0x1F) * 255u / 31u;
-                uint32_t g = (uint32_t)((v >>  5) & 0x3F) * 255u / 63u;
-                uint32_t b = (uint32_t)( v        & 0x1F) * 255u / 31u;
-                dst[x] = (r << 16) | (g << 8) | b;
-            }
+            int x555 = (int)s_fb_x555;
+            for (x = 0; x < s_fb_width; x++)
+                dst[x] = px16_to_rgb(p[x], x555);
         } else {
             memset(dst, 0, (size_t)s_fb_width * 4);
         }

@@ -352,6 +352,12 @@ static void rt_upload(GlRT *r)
                 uint32_t c;
                 memcpy(&c, p, 4);
                 argb_to_rgba(c, o);
+            } else if (r->cfmt == 0x1 || r->cfmt == 0x2) {   /* X1R5G5B5 */
+                uint32_t t = (uint32_t)p[0] | ((uint32_t)p[1] << 8);
+                o[0] = (uint8_t)((((t >> 10) & 0x1F) * 255u + 15u) / 31u);
+                o[1] = (uint8_t)((((t >> 5) & 0x1F) * 255u + 15u) / 31u);
+                o[2] = (uint8_t)(((t & 0x1F) * 255u + 15u) / 31u);
+                o[3] = 0xFF;
             } else {
                 uint32_t t = (uint32_t)p[0] | ((uint32_t)p[1] << 8);
                 o[0] = (uint8_t)(((t >> 11) & 0x1F) << 3);
@@ -390,12 +396,17 @@ static inline uint32_t read_px(const uint8_t *p)
 }
 
 /* w x h read-back pixels (read_px layout) -> guest bytes of target r, in
- * the surface's own format and layout (565 and 8888 the way put_pixel
- * writes them, swizzled when the surface is). */
+ * the surface's own format and layout (8888, 565 or 1555, swizzled when
+ * the surface is). */
 static void rt_store(const GlRT *r, const uint8_t *buf)
 {
     uint8_t *mem = guest(r->va);
     uint32_t x, y, mx = 0, my = 0;
+    /* 16-bit surfaces in their own format: X1R5G5B5 (colour formats 1 and
+     * 2, the X bit 0 and 1: Z1R5G5B5 / O1R5G5B5) or R5G6B5. Fable's back
+     * buffer is X1R5G5B5 (0x121), which it samples as LU_X1R5G5B5. */
+    int x555 = r->cfmt == 0x1 || r->cfmt == 0x2;
+    uint32_t x_bit = r->cfmt == 0x2 ? 0x8000u : 0;
 
     if (r->swz)
         xbox_swizzle_masks(r->w, r->h, &mx, &my);
@@ -418,6 +429,10 @@ static void rt_store(const GlRT *r, const uint8_t *buf)
                                        : (size_t)y * r->pitch + (size_t)x * r->bpp);
             if (r->bpp == 4) {
                 memcpy(p, &c, 4);
+            } else if (x555) {
+                uint16_t v = (uint16_t)(x_bit | (((c >> 19) & 0x1F) << 10)
+                                        | (((c >> 11) & 0x1F) << 5) | ((c >> 3) & 0x1F));
+                memcpy(p, &v, 2);
             } else {
                 uint16_t v = (uint16_t)((((c >> 19) & 0x1F) << 11) | (((c >> 10) & 0x3F) << 5)
                                         | ((c >> 3) & 0x1F));

@@ -33,6 +33,7 @@ uint32_t g_xbox_stack_base, g_xbox_stack_size;   /* #189 made the stack placemen
 uint32_t xbox_ContiguousAllocatedBytes(void) { return 0; }
 void xbox_FramebufferWindowSet(uint32_t va, uint32_t pitch) { (void)va; (void)pitch; }
 void xbox_FramebufferWindowSetAA(uint32_t sy) { (void)sy; }
+void xbox_FramebufferWindowSetFormat(uint32_t f) { (void)f; }
 static uint32_t s_fence_va;                           /* the mirrored fence word, if any */
 uint32_t xbox_Nv2aFenceWordVa(void) { return s_fence_va; }
 int nv2a_pb_dma_walk(void) { return 1; }             /* RECOMP_PB_WALK=dma: 0x0310 is latched */

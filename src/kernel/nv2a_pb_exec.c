@@ -749,6 +749,10 @@ static int s_flip_dumping;
  * frame it presents. */
 static int s_dump_at_flip;
 
+/* The back end's present hook (nv2a_backend_register_with_present). */
+static int (*s_backend_present)(const Nv2aPresentSurface *now, int sync,
+                                Nv2aPresentSurface *ready);
+
 static void dump_surface_bmp(void)
 {
     const char *prefix = getenv("RECOMP_FB_DUMP");
@@ -763,6 +767,10 @@ static void dump_surface_bmp(void)
     uint32_t w = drawn ? s_gpu.drawn_w : s_gpu.clip_w;
     uint32_t h = drawn ? s_gpu.drawn_h : s_gpu.clip_h, y, x;
     uint32_t bpp = drawn ? s_gpu.drawn_bpp : surface_bpp();
+    /* 16-bit pixels as the presenter reads them (FLIP_STALL): the surface's
+     * own format from a back end with a present hook, else R5G6B5. */
+    uint32_t cfmt = (drawn ? s_gpu.drawn_format : s_gpu.format) & 0xF;
+    int x555 = s_backend_present && (cfmt == 0x1 || cfmt == 0x2);
     uint32_t row_bytes, pad, filesz;
     uint8_t hdr[54];
     FILE *f;
@@ -801,6 +809,11 @@ static void dump_surface_bmp(void)
                 bgr[0] = (uint8_t)(v);
                 bgr[1] = (uint8_t)(v >> 8);
                 bgr[2] = (uint8_t)(v >> 16);
+            } else if (x555) {
+                uint16_t v = ((const uint16_t *)row)[cx + x];
+                bgr[0] = (uint8_t)(( v        & 0x1F) << 3);
+                bgr[1] = (uint8_t)(((v >>  5) & 0x1F) << 3);
+                bgr[2] = (uint8_t)(((v >> 10) & 0x1F) << 3);
             } else {
                 uint16_t v = ((const uint16_t *)row)[cx + x];
                 bgr[0] = (uint8_t)(( v        & 0x1F) << 3);
@@ -853,8 +866,6 @@ static void surface_apply_clip(void)
 
 static const Nv2aBackend *s_backend;
 static void (*s_backend_present_sync)(void);
-static int (*s_backend_present)(const Nv2aPresentSurface *now, int sync,
-                                Nv2aPresentSurface *ready);
 
 void nv2a_backend_register_with_present_sync(const Nv2aBackend *backend,
                                              void (*present_sync)(void))
@@ -5605,6 +5616,12 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
             }
             if (have) {
                 extern void xbox_FramebufferWindowPresent(uint32_t, uint32_t);
+                extern void xbox_FramebufferWindowSetFormat(uint32_t);
+                /* How 16-bit pixels sit in guest memory: a back end with a
+                 * present hook stores the surface's own format (X1R5G5B5
+                 * for colour formats 1 and 2); the CPU rasteriser writes
+                 * R5G6B5 whatever the format. */
+                xbox_FramebufferWindowSetFormat(s_backend_present ? ready.format & 0xF : 0x3);
                 xbox_FramebufferWindowSet(ready.va, ready.pitch);
                 xbox_FramebufferWindowSetAA(s_gpu.aa_sy > 1.5f ? 2 : 1);
                 xbox_FramebufferWindowPresent(ready.va, ready.pitch);
