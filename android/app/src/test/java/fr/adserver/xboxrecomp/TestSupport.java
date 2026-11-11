@@ -5,6 +5,7 @@ import android.graphics.Bitmap;
 import android.view.View;
 
 import org.json.JSONObject;
+import org.junit.rules.ExternalResource;
 
 import java.io.ByteArrayInputStream;
 import java.io.File;
@@ -239,6 +240,22 @@ final class TestSupport {
             bm.compress(Bitmap.CompressFormat.PNG, 100, o);
         }
         return out;
+    }
+
+    /**
+     * Puts the stock colours back after each test (Theme's tokens are mutable statics, GameTheme applies a game's):
+     * {@code @Rule public final TestSupport.StockTheme stock = new TestSupport.StockTheme();}
+     */
+    static final class StockTheme extends ExternalResource {
+        @Override
+        protected void before() {
+            Theme.reset();
+        }
+
+        @Override
+        protected void after() {
+            Theme.reset();
+        }
     }
 
     static InputStream bytes(byte[] b) {

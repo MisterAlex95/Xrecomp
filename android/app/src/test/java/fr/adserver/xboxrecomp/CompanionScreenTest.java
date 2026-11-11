@@ -15,6 +15,7 @@ import android.view.View;
 import android.view.WindowManager;
 
 import org.junit.Before;
+import org.junit.Rule;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.robolectric.Robolectric;
@@ -37,6 +38,9 @@ import java.io.File;
 @Config(sdk = 34, qualifiers = "w1920dp-h1080dp-land-mdpi")
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 public class CompanionScreenTest {
+    @Rule
+    public final TestSupport.StockTheme stockTheme = new TestSupport.StockTheme();
+
     private ActivityController<Activity> controller;
     private Activity activity;
     private PanelTesting.Sink sink;

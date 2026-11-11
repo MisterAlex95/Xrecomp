@@ -39,6 +39,9 @@ import java.time.Duration;
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 public class LauncherPrepareTest {
     @Rule
+    public final TestSupport.StockTheme stockTheme = new TestSupport.StockTheme();
+
+    @Rule
     public TemporaryFolder tmp = new TemporaryFolder();
 
     private Application app;

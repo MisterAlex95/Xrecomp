@@ -18,25 +18,99 @@ final class Theme {
     /** The design grid: the stage is at least this big, and scaled to fit the screen. */
     static final int DESIGN_W = 1920, DESIGN_H = 1080;
 
-    // ---- Colours: a deep green-black, one vivid green, warm off-white text --------------------------------------
-    static final int BG_TOP = 0xFF0C110F;
-    static final int BG_BOTTOM = 0xFF060807;
-    static final int PANEL = 0xE6111814;
-    static final int PANEL_HI = 0xFF18211C;
-    static final int LINE = 0xFF27332D;
-    static final int LINE_SOFT = 0x6627332D;
-    static final int TEXT = 0xFFF3EEE4;
+    // ---- Colours ------------------------------------------------------------------------------------------------
+    // Stock: a deep green-black, one vivid green, warm off-white text. A game's theme (GameTheme, from its title
+    // image: GamePalette) replaces the accent, its glows and the neutrals' hue; the text and the semantic colours
+    // (OK, WARN, ERROR) never change. The tokens are mutable: apply() sets them all, on the UI thread, before any view
+    // is built, and whoever applies a new set rebuilds its views (paints copy the colours when they are made). So no
+    // « static final » copy or switch case of a colour token outside this class.
+    static int BG_TOP, BG_BOTTOM, PANEL, PANEL_HI, LINE, LINE_SOFT, TEXT,
     /** A focused row's title: a step brighter than TEXT. */
-    static final int TEXT_BRIGHT = 0xFFFFFFFF;
-    static final int TEXT_DIM = 0xFFA9AFA6;
-    static final int TEXT_FAINT = 0xFF6C746D;
-    static final int ACCENT = 0xFF4FE38C;
-    static final int ACCENT_DEEP = 0xFF1F7A48;
-    static final int WARN = 0xFFF2BA52;
-    static final int ERROR = 0xFFFF6F61;
+               TEXT_BRIGHT, TEXT_DIM, TEXT_FAINT,
+    /** The brand colour (focus, caps headers, values, the Play button); ACCENT_DEEP and ACCENT_FACE darker steps. */
+               ACCENT, ACCENT_DEEP, ACCENT_FACE,
+    /** A meter's empty track. */
+               TRACK,
+    /** Status, not brand: ready, done, connected. Always green, whatever the game's colours. */
+               OK, WARN, ERROR,
     /** The face of a controller button glyph (A, B, ...), and the letter on it. */
-    static final int GLYPH_FACE = 0xFFEDE6D8;
-    static final int GLYPH_INK = 0xFF0C110F;
+               GLYPH_FACE, GLYPH_INK,
+    /** The backdrop's two soft glows (stock: the accent). */
+               GLOW, GLOW2;
+
+    /** A full set of colour tokens (GamePalette.NAMES order). */
+    static final class Colors {
+        static final Colors STOCK = new Colors(GamePalette.STOCK);
+        private final int[] v;
+
+        Colors(int[] values) {
+            if (values.length != GamePalette.COUNT)
+                throw new IllegalArgumentException("expected " + GamePalette.COUNT + " colours");
+            v = values.clone();
+        }
+
+        int get(int token) {
+            return v[token];
+        }
+
+        int[] values() {
+            return v.clone();
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            return o instanceof Colors && java.util.Arrays.equals(v, ((Colors)o).v);
+        }
+
+        @Override
+        public int hashCode() {
+            return java.util.Arrays.hashCode(v);
+        }
+    }
+
+    private static Colors current;
+    static {
+        apply(Colors.STOCK);
+    }
+
+    /** Sets every colour token. UI thread, before the views that use them are built (rebuild them after). */
+    static void apply(Colors c) {
+        current = c;
+        BG_TOP = c.get(GamePalette.BG_TOP);
+        BG_BOTTOM = c.get(GamePalette.BG_BOTTOM);
+        PANEL = c.get(GamePalette.PANEL);
+        PANEL_HI = c.get(GamePalette.PANEL_HI);
+        LINE = c.get(GamePalette.LINE);
+        LINE_SOFT = c.get(GamePalette.LINE_SOFT);
+        TEXT = c.get(GamePalette.TEXT);
+        TEXT_BRIGHT = c.get(GamePalette.TEXT_BRIGHT);
+        TEXT_DIM = c.get(GamePalette.TEXT_DIM);
+        TEXT_FAINT = c.get(GamePalette.TEXT_FAINT);
+        ACCENT = c.get(GamePalette.ACCENT);
+        ACCENT_DEEP = c.get(GamePalette.ACCENT_DEEP);
+        ACCENT_FACE = c.get(GamePalette.ACCENT_FACE);
+        TRACK = c.get(GamePalette.TRACK);
+        OK = c.get(GamePalette.OK);
+        WARN = c.get(GamePalette.WARN);
+        ERROR = c.get(GamePalette.ERROR);
+        GLYPH_FACE = c.get(GamePalette.GLYPH_FACE);
+        GLYPH_INK = c.get(GamePalette.GLYPH_INK);
+        GLOW = c.get(GamePalette.GLOW);
+        GLOW2 = c.get(GamePalette.GLOW2);
+    }
+
+    /** Back to the stock colours. */
+    static void reset() {
+        apply(Colors.STOCK);
+    }
+
+    static boolean isStock() {
+        return current.equals(Colors.STOCK);
+    }
+
+    static Colors current() {
+        return current;
+    }
 
     /** A colour from hue (degrees), saturation and value (0..1), opaque. */
     static int hsv(float h, float s, float v) {

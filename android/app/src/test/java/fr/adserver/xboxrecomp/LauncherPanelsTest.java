@@ -11,6 +11,7 @@ import android.view.View;
 import android.widget.FrameLayout;
 
 import org.junit.Before;
+import org.junit.Rule;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.robolectric.Robolectric;
@@ -32,6 +33,9 @@ import java.util.List;
 @Config(sdk = 34, qualifiers = "w1240dp-h1080dp-land-mdpi")
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 public class LauncherPanelsTest {
+    @Rule
+    public final TestSupport.StockTheme stockTheme = new TestSupport.StockTheme();
+
     private Activity activity;
     private FrameLayout host;
     private final List<String> calls = new ArrayList<>();

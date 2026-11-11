@@ -11,6 +11,7 @@ import android.os.Looper;
 import android.widget.FrameLayout;
 
 import org.junit.Before;
+import org.junit.Rule;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.robolectric.Robolectric;
@@ -31,6 +32,9 @@ import java.util.Collections;
 @Config(sdk = 34, qualifiers = "w1240dp-h1080dp-land-mdpi")
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 public class CompanionPanelTest {
+    @Rule
+    public final TestSupport.StockTheme stockTheme = new TestSupport.StockTheme();
+
     private static final int WHITE_MASK = 1 << CompanionPanel.XB_WHITE, BLACK_MASK = 1 << CompanionPanel.XB_BLACK;
 
     private Activity activity;

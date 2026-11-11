@@ -43,6 +43,9 @@ import java.util.function.Consumer;
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 public class LauncherScreensTest {
     @Rule
+    public final TestSupport.StockTheme stockTheme = new TestSupport.StockTheme();
+
+    @Rule
     public TemporaryFolder tmp = new TemporaryFolder();
 
     private Application app;

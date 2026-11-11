@@ -23,6 +23,7 @@ import android.view.View;
 
 import org.junit.After;
 import org.junit.Before;
+import org.junit.Rule;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.robolectric.Robolectric;
@@ -46,6 +47,9 @@ import java.util.List;
 @Config(sdk = 34, qualifiers = "en-w1920dp-h1080dp-land-mdpi")
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 public class GameMenuTest {
+    @Rule
+    public final TestSupport.StockTheme stockTheme = new TestSupport.StockTheme();
+
     private static final int PAD = 7;
 
     /** What would go to libmain and SDL. */
