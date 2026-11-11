@@ -2,11 +2,17 @@
  * GPU render back end for the pushbuffer executor: OpenGL 3.3 core / 4.1
  * core (macOS) / GLES 3.0 (Android), one code path. XBA-27 stage 7b.
  *
- * The executor still decodes the pushbuffer and runs vertex programs on the
- * CPU; what moves to the GPU is everything per pixel -- rasterisation,
- * texturing, the register combiners, alpha test, depth, stencil and
- * blending -- which is where the software renderer spends its time.
+ * The executor still decodes the pushbuffer; what moves to the GPU is
+ * everything per pixel -- rasterisation, texturing, the register combiners,
+ * alpha test, depth, stencil and blending -- which is where the software
+ * renderer spends its time, and vertex programs (7c-lite).
  *
+ *   vertex programs one GLSL vertex shader per program (nv2a_gl_vsh.c) on the
+ *                   attributes the executor gathers per unique vertex
+ *                   (gl_draw_program); fixed-function and screen-space
+ *                   batches still arrive as CPU-transformed triangles.
+ *
+
  *   render targets  one RGBA8 texture + FBO per colour surface, created from
  *                   the guest bytes; depth/stencil renderbuffers per zeta
  *                   surface. Pixels go back to guest memory only when
@@ -39,6 +45,7 @@
 #include "nv2a_gl.h"
 #include "nv2a_gl_api.h"
 #include "nv2a_gl_shader.h"
+#include "nv2a_gl_vsh.h"
 #include "nv2a_backend.h"
 #include "d3d/d3d8_swizzle.h"
 
@@ -62,6 +69,7 @@ static GLuint s_vao, s_vbo, s_vs;
 
 static struct {
     uint32_t draws, tris, clears, uploads, upload_kb, readbacks, compiles, hashes_kb;
+    uint32_t vsh_draws, vsh_kb;     /* vertex-program batches, their upload */
 } s_st;
 
 /* ---- helpers ------------------------------------------------------------ */
@@ -880,15 +888,68 @@ typedef struct {
     GLuint prog;                    /* 0 with `failed`: do not retry */
     int failed;
     GLint u_vp, u_tscale, u_c0, u_c1, u_fc0, u_fc1, u_fogc, u_aref;
+    /* With a translated vertex program (vsh_hash != 0): its uniforms, the
+     * location of each c[i] (-1 where the compiler dropped it), and the
+     * constant serial this program's copy of c[] is synced to. */
+    uint64_t vsh_hash;
+    GLint u_xf, u_fog;
+    GLint *cloc;
+    uint64_t const_synced;
 } GlProg;
 
-#define NV_GL_MAX_PROG 512          /* power of two */
+/* A translated vertex program (nv2a_gl_vsh.c), compiled once per program. */
+typedef struct {
+    uint64_t hash;
+    uint32_t count;
+    GLuint sh;                      /* 0 with `failed`: do not retry */
+    int failed;
+} GlVsh;
+
+#define NV_GL_MAX_PROG 2048         /* power of two; pipelines x programs */
+#define NV_GL_MAX_VSH  512          /* power of two */
 static GlProg s_prog[NV_GL_MAX_PROG];
 
-static GlProg *prog_get(const Nv2aGlShaderKey *key)
+static GlVsh s_vsh[NV_GL_MAX_VSH];
+
+static GlVsh *vsh_get(const Nv2aProgramBatch *pb)
+{
+    static char body[131072];
+    uint64_t h = pb->hash ? pb->hash : 1;
+    uint32_t i, slot = (uint32_t)h & (NV_GL_MAX_VSH - 1);
+    GlVsh *v = NULL;
+
+    for (i = 0; i < NV_GL_MAX_VSH; i++) {
+        GlVsh *c = &s_vsh[(slot + i) & (NV_GL_MAX_VSH - 1)];
+        if (!c->sh && !c->failed) {
+            v = c;
+            break;
+        }
+        if (c->hash == h && c->count == pb->ins_count)
+            return c->failed ? NULL : c;
+    }
+    if (!v)
+        return NULL;                /* ponytail: 512 programs, then the CPU */
+    v->hash = h;
+    v->count = pb->ins_count;
+    if (!nv2a_gl_vsh_body(pb->ins, pb->ins_count,
+                          NV2A_GL_ES ? NV2A_GL_VSH_RENDER
+                                     : NV2A_GL_VSH_RENDER | NV2A_GL_VSH_CLIP_DISTANCE,
+                          body, sizeof body, NULL)
+        || !(v->sh = compile(GL_VERTEX_SHADER, body))) {
+        v->failed = 1;
+        return NULL;
+    }
+    s_st.compiles++;
+    return v;
+}
+
+/* The program for pipeline `key` with the fixed vertex shader (vsh NULL:
+ * CPU-transformed vertices) or a translated vertex program. */
+static GlProg *prog_get(const Nv2aGlShaderKey *key, const GlVsh *vsh)
 {
     static char body[32768];
-    uint64_t h = nv2a_gl_shader_key_hash(key);
+    uint64_t vh = vsh ? vsh->hash : 0;
+    uint64_t h = nv2a_gl_shader_key_hash(key) ^ (vh * 0x9E3779B97F4A7C15ull);
     uint32_t i, slot = (uint32_t)h & (NV_GL_MAX_PROG - 1);
     GlProg *p = NULL;
     GLuint fs;
@@ -900,20 +961,21 @@ static GlProg *prog_get(const Nv2aGlShaderKey *key)
             p = c;
             break;
         }
-        if (c->hash == h && memcmp(&c->key, key, sizeof *key) == 0)
+        if (c->hash == h && c->vsh_hash == vh && memcmp(&c->key, key, sizeof *key) == 0)
             return c->failed ? NULL : c;
     }
     if (!p)
-        return NULL;                /* ponytail: 512 pipelines, then no more */
+        return NULL;                /* ponytail: 2048 pipelines, then no more */
     p->key = *key;
     p->hash = h;
+    p->vsh_hash = vh;
     if (!nv2a_gl_fragment_body(key, body, sizeof body)
         || !(fs = compile(GL_FRAGMENT_SHADER, body))) {
         p->failed = 1;
         return NULL;
     }
     p->prog = glCreateProgram();
-    glAttachShader(p->prog, s_vs);
+    glAttachShader(p->prog, vsh ? vsh->sh : s_vs);
     glAttachShader(p->prog, fs);
     glLinkProgram(p->prog);
     glDeleteShader(fs);
@@ -941,6 +1003,19 @@ static GlProg *prog_get(const Nv2aGlShaderKey *key)
     p->u_fc1 = glGetUniformLocation(p->prog, "u_fc1");
     p->u_fogc = glGetUniformLocation(p->prog, "u_fogc");
     p->u_aref = glGetUniformLocation(p->prog, "u_aref");
+    if (vsh) {
+        p->u_xf = glGetUniformLocation(p->prog, "u_xf");
+        p->u_fog = glGetUniformLocation(p->prog, "u_fog");
+        p->cloc = (GLint *)malloc(192 * sizeof(GLint));
+        if (p->cloc) {
+            for (i = 0; i < 192; i++) {
+                char name[12];
+                snprintf(name, sizeof name, "c[%u]", i);
+                p->cloc[i] = glGetUniformLocation(p->prog, name);
+            }
+        }
+        p->const_synced = 0;
+    }
     s_st.compiles++;
     return p;
 }
@@ -1184,27 +1259,19 @@ static void gl_clear(const Nv2aSurface *s, const Nv2aRenderState *rs,
     s_st.clears++;
 }
 
-static void gl_draw(const Nv2aSurface *s, const Nv2aBatch *b)
+/* The batch's textures, stage by stage: kind[] for the shader key, tscale
+ * the texel-to-normalised scale per stage. Before the target is bound:
+ * sampling a surface the GPU drew may read it back, which rebinds the
+ * framebuffer. */
+static void bind_stage_textures(const Nv2aPixelState *ps, uint32_t kind[4], float tscale[8])
 {
-    const Nv2aPixelState *ps = b->pixel;
-    const Nv2aRenderState *rs = b->state;
-    uint32_t kind[4] = {0, 0, 0, 0}, st;
-    float tscale[8], c0[32], c1[32], v[4];
-    Nv2aGlShaderKey key;
-    GlProg *p;
-    GlTarget t;
-    int query = 0;
+    uint32_t st;
 
-    if (!b->full || !ps || b->count < 3)
-        return;
-    if (!ensure_init())
-        return;
-    /* Textures first: sampling a surface the GPU drew may read it back,
-     * which rebinds the framebuffer. */
     for (st = 0; st < 4; st++) {
         const Nv2aTexStage *ts = &ps->stage[st];
         uint32_t mode = ts->mode, cube = 0;
         GlTex *e;
+        kind[st] = NV2A_GL_TEX_NONE;
         tscale[st * 2] = tscale[st * 2 + 1] = 1.0f;
         if (ps->shade == NV2A_SHADE_COMBINERS ? !(mode >= 1 && mode <= 3) : (st || !mode))
             continue;
@@ -1226,19 +1293,15 @@ static void gl_draw(const Nv2aSurface *s, const Nv2aBatch *b)
             tscale[st * 2 + 1] = 1.0f / (float)ts->tex.height;
         }
     }
-    nv2a_gl_shader_key(ps, rs, kind, &key);
-    p = prog_get(&key);
-    if (!p)
-        return;
-    if (!bind_target(s, rs->zeta_va, &t))
-        return;
-    apply_state(rs, ps->shade, t.bpp);
-    glUseProgram(p->prog);
-    v[0] = 2.0f / (float)t.w;
-    v[1] = 2.0f / (float)t.h;
-    v[2] = 2.0f / zmax_of(s->format);
-    v[3] = s_depth_clamp ? 0.0f : 1.0f;    /* vertex-shader clamp instead */
-    glUniform4fv(p->u_vp, 1, v);
+}
+
+/* The fragment shader's uniforms (combiner constants, fog colour, alpha
+ * reference, texture scales). */
+static void set_pixel_uniforms(const GlProg *p, const Nv2aPixelState *ps,
+                               const Nv2aRenderState *rs, const float tscale[8])
+{
+    float c0[32], c1[32], v[4];
+
     glUniform2fv(p->u_tscale, 4, tscale);
     if (ps->shade == NV2A_SHADE_COMBINERS) {
         int i;
@@ -1256,6 +1319,80 @@ static void gl_draw(const Nv2aSurface *s, const Nv2aBatch *b)
         glUniform4fv(p->u_fogc, 1, v);
     }
     glUniform1f(p->u_aref, (float)(rs->alpha_ref & 0xFF));
+}
+
+/* Near plane and depth mapping. CPU-transformed triangles arrive clipped:
+ * depth clamp on (where it exists), depth range 0..1. A translated vertex
+ * program clips at z >= SET_CLIP_MIN itself: on desktop GL with
+ * gl_ClipDistance[0] (depth clamp stays on, nothing clips at the far
+ * plane, as on the CPU path); on GLES depth clamp goes off so GL's own near
+ * plane is there. Either way glDepthRange(zmin/zmax, 1) keeps window depth
+ * at z/zmax (nv2a_gl_vsh.h). */
+static int s_near_program;          /* set_near_mode's current state */
+static float s_near01;
+
+static void set_near_mode(int program, float near01)
+{
+    int cur_program = s_near_program;
+    float cur_near = s_near01;
+
+    if (program == cur_program && near01 == cur_near)
+        return;
+    if (program != cur_program) {
+#if NV2A_GL_ES
+        if (s_depth_clamp) {
+            if (program)
+                glDisable(GL_DEPTH_CLAMP);
+            else
+                glEnable(GL_DEPTH_CLAMP);
+        }
+#else
+        if (program)
+            glEnable(GL_CLIP_DISTANCE0);
+        else
+            glDisable(GL_CLIP_DISTANCE0);
+#endif
+    }
+#if NV2A_GL_ES
+    glDepthRangef(near01, 1.0f);
+#else
+    glDepthRange((double)near01, 1.0);
+#endif
+    s_near_program = program;
+    s_near01 = near01;
+}
+
+static void gl_draw(const Nv2aSurface *s, const Nv2aBatch *b)
+{
+    const Nv2aPixelState *ps = b->pixel;
+    const Nv2aRenderState *rs = b->state;
+    uint32_t kind[4];
+    float tscale[8], v[4];
+    Nv2aGlShaderKey key;
+    GlProg *p;
+    GlTarget t;
+    int query = 0;
+
+    if (!b->full || !ps || b->count < 3)
+        return;
+    if (!ensure_init())
+        return;
+    bind_stage_textures(ps, kind, tscale);
+    nv2a_gl_shader_key(ps, rs, kind, &key);
+    p = prog_get(&key, NULL);
+    if (!p)
+        return;
+    if (!bind_target(s, rs->zeta_va, &t))
+        return;
+    apply_state(rs, ps->shade, t.bpp);
+    set_near_mode(0, 0.0f);
+    glUseProgram(p->prog);
+    v[0] = 2.0f / (float)t.w;
+    v[1] = 2.0f / (float)t.h;
+    v[2] = 2.0f / zmax_of(s->format);
+    v[3] = s_depth_clamp ? 0.0f : 1.0f;    /* vertex-shader clamp instead */
+    glUniform4fv(p->u_vp, 1, v);
+    set_pixel_uniforms(p, ps, rs, tscale);
 
     glBindVertexArray(s_vao);
     glBindBuffer(GL_ARRAY_BUFFER, s_vbo);
@@ -1283,6 +1420,139 @@ static void gl_draw(const Nv2aSurface *s, const Nv2aBatch *b)
     s_st.tris += b->count / 3;
 }
 
+/* Upload what changed in c[] since this program last drew (nv2a_backend.h:
+ * stamps), as runs of consecutive uniform locations. */
+static void sync_constants(GlProg *p, const Nv2aProgramBatch *pb)
+{
+    uint32_t i, lo = 192, hi = 0;
+
+    if (p->const_synced >= pb->const_serial)
+        return;
+    for (i = 0; i < 192; i++)
+        if (pb->const_stamp[i] > p->const_synced) {
+            if (lo == 192)
+                lo = i;
+            hi = i;
+        }
+    for (i = lo; i <= hi && i < 192;) {
+        uint32_t j = i + 1;
+        if (p->cloc[i] < 0) {
+            i++;
+            continue;
+        }
+        while (j <= hi && p->cloc[j] == p->cloc[j - 1] + 1)
+            j++;
+        glUniform4fv(p->cloc[i], (GLsizei)(j - i), pb->constants[i]);
+        i = j;
+    }
+    p->const_synced = pb->const_serial;
+}
+
+static GLuint s_pvao, s_pvbo, s_pebo;
+
+/* A vertex-program batch (NV2A_BACKEND_CAP_PROGRAM): the program runs as a
+ * GLSL vertex shader (nv2a_gl_vsh.c) on the gathered attributes; the pixel
+ * side is gl_draw's. Declines (0) only when the program cannot be compiled
+ * or a cache is full: the executor then transforms on the CPU. */
+static int gl_draw_program(const Nv2aSurface *s, const Nv2aBatch *b)
+{
+    const Nv2aProgramBatch *pb = b->program;
+    const Nv2aPixelState *ps = b->pixel;
+    const Nv2aRenderState *rs = b->state;
+    uint32_t kind[4], a, k, nstream = 0;
+    float tscale[8], v[4], zmax, zmin;
+    Nv2aGlShaderKey key;
+    GlVsh *vsh;
+    GlProg *p;
+    GlTarget t;
+    int query = 0;
+
+    if (!pb || !ps || !ensure_init())
+        return 0;
+    if (!(vsh = vsh_get(pb)))
+        return 0;
+    bind_stage_textures(ps, kind, tscale);
+    nv2a_gl_shader_key(ps, rs, kind, &key);
+    p = prog_get(&key, vsh);
+    if (!p || !p->cloc)
+        return 0;
+    if (!bind_target(s, rs->zeta_va, &t))
+        return 1;                   /* gl_draw drops these too */
+    apply_state(rs, ps->shade, t.bpp);
+    zmax = zmax_of(s->format);
+    zmin = rs->depth_min;
+    if (!(zmin >= 0.0f && zmin < zmax))
+        zmin = 0.0f;
+    set_near_mode(1, zmin / zmax);
+    glUseProgram(p->prog);
+    v[0] = 2.0f / (float)t.w;
+    v[1] = 2.0f / (float)t.h;
+    v[2] = 2.0f / (zmax - zmin);
+    v[3] = 0.0f;                    /* GL clips near and far itself (set_near_mode) */
+    glUniform4fv(p->u_vp, 1, v);
+    v[0] = pb->aa_sx;
+    v[1] = pb->aa_sy;
+    v[2] = zmin;
+    glUniform4fv(p->u_xf, 1, v);
+    nv2a_gl_vsh_fog_uniform(pb->fog_enable, pb->fog_mode, pb->fog_param[0],
+                            pb->fog_param[1], v);
+    glUniform4fv(p->u_fog, 1, v);
+    set_pixel_uniforms(p, ps, rs, tscale);
+    sync_constants(p, pb);
+
+    if (!s_pvao) {
+        glGenVertexArrays(1, &s_pvao);
+        glGenBuffers(1, &s_pvbo);
+        glGenBuffers(1, &s_pebo);
+    }
+    glBindVertexArray(s_pvao);
+    for (a = 0; a < 16; a++)
+        nstream += (pb->streams >> a) & 1;
+    glBindBuffer(GL_ARRAY_BUFFER, s_pvbo);
+    glBufferData(GL_ARRAY_BUFFER,
+                 (GLsizeiptr)((size_t)pb->vertex_count * nstream * 4 * sizeof(float)),
+                 pb->attrs, GL_STREAM_DRAW);
+    for (a = 0, k = 0; a < 16; a++) {
+        if (pb->streams & (1u << a)) {
+            glEnableVertexAttribArray(a);
+            glVertexAttribPointer(a, 4, GL_FLOAT, GL_FALSE,
+                                  (GLsizei)(nstream * 4 * sizeof(float)),
+                                  (const void *)((size_t)k * 4 * sizeof(float)));
+            k++;
+        } else {
+            glDisableVertexAttribArray(a);
+            glVertexAttrib4fv(a, pb->imm[a]);
+        }
+    }
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, s_pebo);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, (GLsizeiptr)(pb->index_count * sizeof(uint16_t)),
+                 pb->indices, GL_STREAM_DRAW);
+    if (rs->zpass_enable && s_qcount < NV_GL_MAX_QUERY) {
+        GlQuery *q = &s_qring[(s_qhead + s_qcount) & (NV_GL_MAX_QUERY - 1)];
+        q->q = query_new();
+        q->ticket = 0;
+        glBeginQuery(NV2A_GL_ES ? GL_ANY_SAMPLES_PASSED : GL_SAMPLES_PASSED, q->q);
+        query = 1;
+    }
+    glDrawElements(GL_TRIANGLES, (GLsizei)pb->index_count, GL_UNSIGNED_SHORT, NULL);
+    if (query) {
+        glEndQuery(NV2A_GL_ES ? GL_ANY_SAMPLES_PASSED : GL_SAMPLES_PASSED);
+        s_qcount++;
+        s_qopen++;
+    }
+    /* Only a batch that writes colour makes the target worth reading back. */
+    if (t.rt && (rs->color_mask & 0x01010101u)) {
+        t.rt->dirty = 1;
+        t.rt->serial = ++s_rt_serial;
+    }
+    s_st.draws++;
+    s_st.vsh_draws++;
+    s_st.vsh_kb += (uint32_t)(((size_t)pb->vertex_count * nstream * 16
+                               + pb->index_count * 2) >> 10);
+    s_st.tris += pb->index_count / 3;
+    return 1;
+}
+
 /* ---- context loss and GL_OUT_OF_MEMORY ---------------------------------- */
 
 /* Forget every GL object the back end holds and start again at the next
@@ -1308,6 +1578,11 @@ static void gl_reset_objects(int lost)
             if (s_tex[i].tex) glDeleteTextures(1, &s_tex[i].tex);
         for (i = 0; i < NV_GL_MAX_PROG; i++)
             if (s_prog[i].prog) glDeleteProgram(s_prog[i].prog);
+        for (i = 0; i < NV_GL_MAX_VSH; i++)
+            if (s_vsh[i].sh) glDeleteShader(s_vsh[i].sh);
+        if (s_pvbo) glDeleteBuffers(1, &s_pvbo);
+        if (s_pebo) glDeleteBuffers(1, &s_pebo);
+        if (s_pvao) glDeleteVertexArrays(1, &s_pvao);
         for (i = 0; (uint32_t)i < s_qcount; i++)
             glDeleteQueries(1, &s_qring[(s_qhead + (uint32_t)i) & (NV_GL_MAX_QUERY - 1)].q);
         if (s_nqfree) glDeleteQueries((GLsizei)s_nqfree, s_qfree);
@@ -1323,7 +1598,13 @@ static void gl_reset_objects(int lost)
     memset(s_tex, 0, sizeof s_tex);
     memset(s_bound, 0, sizeof s_bound);
     s_ntex = 0;
+    for (i = 0; i < NV_GL_MAX_PROG; i++)
+        free(s_prog[i].cloc);
     memset(s_prog, 0, sizeof s_prog);
+    memset(s_vsh, 0, sizeof s_vsh);
+    s_pvao = s_pvbo = s_pebo = 0;
+    s_near_program = 0;             /* ensure_init: depth clamp on, range 0..1 */
+    s_near01 = 0.0f;
     /* Visibility queries: dropped; reports still pending in the executor
      * resolve with what was counted (gl_zpass_resolve answers 0 for a
      * ticket whose queries are gone). */
@@ -1411,10 +1692,12 @@ static void gl_flip(void)
             nrt += s_rt[i].tex != 0;
         for (i = 0; i < NV_GL_MAX_PROG; i++)
             nprog += s_prog[i].prog != 0;
-        fprintf(stderr, "  [GPUGL] frame %u: %u draws, %u tris, %u clears, %u readbacks,"
+        fprintf(stderr, "  [GPUGL] frame %u: %u draws (%u vertex programs, %u KB),"
+                        " %u tris, %u clears, %u readbacks,"
                         " %u uploads (%u KB), %u KB hashed, %d textures, %d targets,"
                         " %d programs (%u compiled)\n",
-                s_frame, s_st.draws, s_st.tris, s_st.clears, s_st.readbacks,
+                s_frame, s_st.draws, s_st.vsh_draws, s_st.vsh_kb, s_st.tris,
+                s_st.clears, s_st.readbacks,
                 s_st.uploads, s_st.upload_kb, s_st.hashes_kb, s_ntex, nrt, nprog,
                 s_st.compiles);
         memset(&s_st, 0, sizeof s_st);
@@ -1423,8 +1706,9 @@ static void gl_flip(void)
 }
 
 static Nv2aBackend s_backend = {
-    gl_clear, gl_draw, gl_flip, NV2A_BACKEND_CAP_PIXEL | NV2A_BACKEND_CAP_CULL,
-    gl_zpass_read, gl_zpass_end, gl_zpass_resolve
+    gl_clear, gl_draw, gl_flip,
+    NV2A_BACKEND_CAP_PIXEL | NV2A_BACKEND_CAP_CULL | NV2A_BACKEND_CAP_PROGRAM,
+    gl_zpass_read, gl_zpass_end, gl_zpass_resolve, gl_draw_program
 };
 
 static void unregister_self(void)

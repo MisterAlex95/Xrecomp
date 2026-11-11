@@ -9,9 +9,9 @@ blending) to OpenGL. `RECOMP_GPU=1` selects it; the CPU rasteriser stays the
 default and is unchanged.
 
 Stages: **7a** interface (done), **7b** GL back end with CPU-transformed
-vertices (done), **7c** vertex programs in GLSL, **7d** surfaces and
-readback, **7e** presenting from the GPU. The last section lists what 7c–7e
-have to do.
+vertices (done), **7c** vertex programs in GLSL (7c-lite done: programs in
+GLSL, attributes gathered on the CPU), **7d** surfaces and readback, **7e**
+presenting from the GPU. The last section lists what 7c–7e have to do.
 
 ## Layout
 
@@ -20,9 +20,11 @@ have to do.
 | `src/kernel/nv2a_backend.h` | The interface. `NV2A_BACKEND_CAP_PIXEL` gives a back end the full vertex (`Nv2aVertexFull`) and the pixel state (`Nv2aPixelState`) with every batch; `zpass_read` returns visibility-test counts. |
 | `src/gpu/nv2a_gl.c` | The back end: render targets, texture cache, state, draws, readback, queries. |
 | `src/gpu/nv2a_gl_shader.c` | Combiner program → fragment shader, one per pipeline key. No GL calls. |
+| `src/gpu/nv2a_gl_vsh.c` | Vertex program (nv2a_vsh_interp.c encoding) → GLSL vertex shader, one per program hash. No GL calls. |
 | `src/gpu/nv2a_gl_context.c` | Headless context: CGL (macOS), EGL pbuffer or surfaceless (Android, Linux); loss detection. |
 | `src/gpu/nv2a_gl_api.h` | GL headers per platform: `OpenGL/gl3.h`, `GLES3/gl3.h`, libepoxy. |
 | `tests/nv2a_gl_shader` | 400 random combiner programs through the generated shaders, each pixel compared with `nv2a_rc_eval`. |
+| `tests/nv2a_gl_vsh` | 600 random vertex programs plus ILU/a0 edge cases through the translator (transform feedback), compared with `nv2a_vsh_interp.c`; eight deliberate translator mutations must be caught. |
 
 One code path for desktop GL 3.3 core / macOS 4.1 core and GLES 3.0: the
 GLSL is the common subset of `#version 330 core` and `#version 300 es`, and
@@ -127,7 +129,32 @@ dump the full title screen.
 
 ## What the back end does
 
-**Vertices.** The executor still transforms: vertex programs run in
+**Vertex programs (7c-lite).** With `NV2A_BACKEND_CAP_PROGRAM` a batch drawn
+with a vertex program reaches `draw_program` untransformed
+(`Nv2aProgramBatch`): the executor gathers each unique vertex's attributes
+once through its own `fetch_attr` (only the inputs the program reads, as
+vec4s; the others as their current value), builds a 16-bit triangle index
+list in the CPU path's order and winding, and passes the program words with a
+hash and the 192 constants with per-constant change stamps. `nv2a_gl_vsh.c`
+turns the program into a GLSL vertex shader (compiled once per hash), which
+computes exactly what `nv2a_vsh_interp.c` does and then maps `oPos` as the
+fixed vertex shader below maps a CPU-transformed vertex: x, y times the
+anti-aliasing scale (the title's viewport is its own business: c[58]/c[59]
+are not assumed), `oPos.w == +0` as 1, z measured from the near plane
+`SET_CLIP_MIN` (0x0394). Desktop GL clips there with `gl_ClipDistance[0]`
+and keeps depth clamp (nothing clips at the far plane, as on the CPU path);
+GLES turns depth clamp off for these draws so GL's own near plane is there;
+both use `glDepthRange(zmin/zmax, 1)` so window depth stays z/zmax. The fog
+factor (`fog_factor`) and the colour clamp are computed in the shader. Each
+linked program keeps its own copy of `uniform vec4 c[192]` and uploads only
+the constants whose stamp is newer than its last sync. The executor skips
+the interpreter, the near-plane clipper and the triangle expansion for these
+batches; `RECOMP_GPU_VSH=0` keeps the CPU transform, and programs that write
+c[] with `CXT_WRITE` on stay on the CPU (they change constants vertex by
+vertex), as does any batch the back end declines (a shader that fails to
+compile, a full cache).
+
+**Vertices.** Otherwise the executor transforms: vertex programs run in
 `nv2a_vsh_interp.c`, fixed-function vertices in `ffp_vertex`, and triangles
 are clipped at the near plane. The back end gets surface-pixel x/y, window z,
 clip-space w, both colours, the fog factor and four texture-coordinate sets
@@ -232,6 +259,32 @@ Past the AutoSave screen both paths stop flipping: that is the pushbuffer
 stall the jump-following and software-method work (WP2/WP3) removes, not the
 back end. In-world rendering is untested.
 
+**7c-lite, Fable in-world (2026-11-11, M1 Max, shared).** 130 s runs back
+to back, Start pressed through the menus, Oakvale at t = 100–130 s;
+`[GPU] render` per 10 s window:
+
+| Path | render ms/frame, last three windows |
+|---|---|
+| GL, `RECOMP_GPU_VSH=0` (CPU transform) | 284, 260, 204 |
+| GL, vertex programs in GLSL | 123, 97, 76 |
+
+Rebased on deferred reports, the hash policy, depth-only targets, culling
+and the raster pool (WP-A/B/C/F, WP5), same runs: `RECOMP_GPU_VSH=0`
+169/152/114 ms/frame at 4.7–6.8 fps, GLSL vertex programs 65/66/40 at
+9.5–13.9 fps (35–46 ms at 13–16 fps earlier in Oakvale); flip dumps of the
+same view 1.2/255 mean apart; title screen 2.4 ms/frame at the 60 fps cap.
+
+`sample` at t = 95 s: `vsh_run_decoded`/`run_mac` absent from the executor
+(were the largest CPU item with `RECOMP_GPU_VSH=0`); what is left there is
+the synchronous visibility queries (`gl_zpass_read`, about 60 % of the
+executor), texture hashing and render-target readbacks inside
+`bind_stage_textures`, which deferred reports, the hash policy and direct
+render-target sampling (7d) address. Vertex upload went from about 115 MB to
+about 7 MB a frame. Flip dumps of the same Oakvale view on both paths: 2.9/255
+mean, and the difference image is black on every static surface (houses,
+ground); what differs is what animates between the two runs (clouds,
+villagers, grass).
+
 ## Known differences from the CPU rasteriser (7b)
 
 - Colours and fog are interpolated with perspective (GL's default); the CPU
@@ -242,7 +295,10 @@ back end. In-world rendering is untested.
 - Window z is clamped to the zeta format's range (depth clamp); the CPU keeps
   unbounded floats. `SET_CLIP_MIN` is the near plane both paths clip at;
   `SET_CLIP_MAX` is ignored by both. Float zeta
-  formats are treated as integer.
+  formats are treated as integer. On GLES, GLSL vertex programs are also
+  clipped at the far plane (depth clamp off for those draws, so GL's own
+  near plane sits at `SET_CLIP_MIN`); on desktop they keep depth clamp and
+  clip the near plane with `gl_ClipDistance`.
 - Address mode 4 with a border colour clamps to the edge on GLES 3.0/3.1
   without `GL_EXT_texture_border_clamp` / `GL_OES_texture_border_clamp`.
 - Without depth clamp (GLES lacking `GL_EXT_depth_clamp`) z is clamped per
@@ -262,7 +318,12 @@ back end. In-world rendering is untested.
 
 ### 7c: vertex programs on the GPU
 
-The interpreter is 41 % of the in-world executor. Needed:
+Done as 7c-lite (above): items 1–3 and 5, with attributes gathered on the CPU
+(the first option of item 4). Left: item 4 proper (attribute arrays uploaded
+by range and cached, fetched by the GPU in their own formats), item 6, and
+programs that write c[] (`CXT_WRITE`), which stay on the CPU.
+
+The original list (the interpreter was 41 % of the in-world executor):
 
 1. Interface: a batch carrying raw attribute streams instead of transformed
    vertices: the 16 `VertexAttr` (offset, type, size, stride, or the
