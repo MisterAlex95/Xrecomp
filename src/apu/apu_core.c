@@ -19,6 +19,16 @@
  * License along with this library; if not, see <http://www.gnu.org/licenses/>.
  */
 
+#if defined(__APPLE__)
+#  include <pthread.h>
+#  include <pthread/qos.h>
+#elif defined(__linux__)
+#  include <errno.h>
+#  include <string.h>
+#  include <sys/resource.h>
+#  include <sys/syscall.h>
+#  include <unistd.h>
+#endif
 #include "apu_state.h"
 #include "apu.h"
 #include "apu_xaudio2.h"
@@ -280,8 +290,8 @@ static int apu_call_isr(void)
 
 /* The gate holder's run of a posted APU interrupt (kernel_hal.c has put it
  * on a worker stack). The routine reads the APU registers through the MMIO
- * trap, which takes d->lock as any guest access does; the frame thread is
- * not holding it here (apu_deliver_irq drops it before posting). If the line
+ * trap (atomics, no d->lock); the frame thread is not holding d->lock here
+ * either (apu_deliver_irq drops it before posting). If the line
  * dropped since the post, the routine reads ISTS and declines, as on
  * hardware. */
 static void apu_isr_on_holder(void)
@@ -1166,9 +1176,89 @@ static void apu_irq_stats_line(void)
     s_irq_next_ns = now + 5000000000ull;
 }
 
+/* ============================================================
+ * d->lock between the frame thread and everyone else
+ * ============================================================ */
+
+/* Every acquisition of d->lock by a thread other than the frame thread. The
+ * MMIO entry points (mcpx_apu_mmio_read/write and the VP methods behind
+ * them, VOICE_LOCK included) do not take d->lock at all: registers are
+ * atomics and a voice lock is a per-voice spin lock (apu_vp.c,
+ * voice_spin_lock). What remains is the software mixer's play, the test
+ * tone, init and shutdown; a new site has to use these too, or the frame
+ * thread will not let it in while it runs behind real time. */
+void mcpx_apu_lock_guest(MCPXAPUState *d)
+{
+    InterlockedIncrement(&d->lock_waiters);
+    qemu_mutex_lock(&d->lock);
+    InterlockedIncrement(&d->lock_grants);
+    InterlockedDecrement(&d->lock_waiters);
+}
+
+void mcpx_apu_unlock_guest(MCPXAPUState *d)
+{
+    qemu_mutex_unlock(&d->lock);
+}
+
+/* Longest the frame thread waits, lock dropped, for a waiter to take it. */
+#define APU_HANDOVER_MAX_US 2000
+
+/* Called with d->lock dropped while someone waits for it: yield until a
+ * waiter has had it (lock_grants moved), nobody waits any more, or the bound
+ * passed. One SwitchToThread() is not enough on a host with idle cores: the
+ * waiter wakes on another core after this thread has already relocked. */
+static void apu_hand_over_lock(MCPXAPUState *d)
+{
+    LONG grants = InterlockedCompareExchange(&d->lock_grants, 0, 0);
+    int64_t until = qemu_clock_get_us(QEMU_CLOCK_REALTIME) + APU_HANDOVER_MAX_US;
+
+    InterlockedIncrement(&d->lock_handovers);
+    do {
+        SwitchToThread();
+    } while (InterlockedCompareExchange(&d->lock_grants, 0, 0) == grants &&
+             InterlockedCompareExchange(&d->lock_waiters, 0, 0) > 0 &&
+             qemu_clock_get_us(QEMU_CLOCK_REALTIME) < until);
+}
+
+/* Audio priority for the frame thread: it has 5.3 ms per EP period and the
+ * device queue holds about 43 ms, so a few scheduler quanta lost to busy
+ * cores are an underrun. Linux and Android: nice -16 on this thread (what
+ * Android calls THREAD_PRIORITY_AUDIO; a desktop Linux user without
+ * CAP_SYS_NICE or an RLIMIT_NICE allowance is refused, which is ignored).
+ * macOS: QoS user-interactive. RECOMP_APU_PRIORITY=0 leaves the thread at
+ * the default priority. */
+static void apu_frame_thread_priority(void)
+{
+    const char *e = getenv("RECOMP_APU_PRIORITY");
+    static int shown;
+
+    if (e && e[0] == '0' && e[1] == '\0')
+        return;
+#if defined(__APPLE__)
+    {
+        int rc = pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+        if (!shown++)
+            fprintf(stderr, "[APU] frame thread QoS user-interactive: %s\n",
+                    rc == 0 ? "set" : "refused");
+    }
+#elif defined(__linux__)
+    {
+        int rc = setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), -16);
+        int err = rc ? errno : 0;
+        if (!shown++)
+            fprintf(stderr, "[APU] frame thread nice -16: %s%s\n",
+                    rc == 0 ? "set" : "refused, ",
+                    rc == 0 ? "" : strerror(err));
+    }
+#else
+    (void)shown;
+#endif
+}
+
 static void *mcpx_apu_frame_thread(void *arg)
 {
     MCPXAPUState *d = MCPX_APU_DEVICE(arg);
+    apu_frame_thread_priority();
     qemu_mutex_lock(&d->lock);
 
     while (!qatomic_read(&d->exiting)) {
@@ -1275,9 +1365,18 @@ static void *mcpx_apu_frame_thread(void *arg)
          * it (voice_lock). A critical section is not fair, so the title's
          * thread starved there indefinitely: Burnout 3 froze on its vehicle
          * select, blocked in voice_lock at raised IRQL, which in turn held
-         * off every USB interrupt. */
+         * off every USB interrupt.
+         *
+         * (VOICE_LOCK has since moved to a per-voice spin lock, but every
+         * other thread taking d->lock still needs this.) The yield happens
+         * only while some thread waits in mcpx_apu_lock_guest: an
+         * unconditional SwitchToThread() on every 0.67 ms frame cost a whole
+         * scheduler quantum (up to 10-17 ms) per frame once the host's cores
+         * were busy, and the device queue (43 ms) ran dry -- Fable, 12 busy
+         * processes: 13 underruns in 20 s with the yield, none without. */
         qemu_mutex_unlock(&d->lock);
-        SwitchToThread();
+        if (InterlockedCompareExchange(&d->lock_waiters, 0, 0) > 0)
+            apu_hand_over_lock(d);
         qemu_mutex_lock(&d->lock);
         if (fe_trapped &&
             (qatomic_read(&d->regs[NV_PAPU_FECTL]) &
@@ -1386,7 +1485,7 @@ MCPXAPUState *mcpx_apu_init_standalone(uint8_t *ram_ptr)
     d->pause_requested = true;
 
     qemu_mutex_init(&d->lock);
-    qemu_mutex_lock(&d->lock);
+    mcpx_apu_lock_guest(d);
     qemu_cond_init(&d->cond);
     qemu_cond_init(&d->idle_cond);
 
@@ -1410,7 +1509,7 @@ MCPXAPUState *mcpx_apu_init_standalone(uint8_t *ram_ptr)
     qemu_thread_create(&d->apu_thread, "mcpx.apu_thread",
                        mcpx_apu_frame_thread, d, QEMU_THREAD_JOINABLE);
     mcpx_apu_wait_for_idle(d);
-    qemu_mutex_unlock(&d->lock);
+    mcpx_apu_unlock_guest(d);
 
     fprintf(stderr, "[APU] MCPX APU initialized (standalone)\n");
     fprintf(stderr, "[APU]   RAM pointer: %p\n", (void *)ram_ptr);
@@ -1426,11 +1525,11 @@ void mcpx_apu_shutdown(MCPXAPUState *d)
 
     fprintf(stderr, "[APU] Shutting down MCPX APU...\n");
 
-    qemu_mutex_lock(&d->lock);
+    mcpx_apu_lock_guest(d);
     mcpx_apu_wait_for_idle(d);
     qatomic_set(&d->exiting, true);
     qemu_cond_signal(&d->cond);
-    qemu_mutex_unlock(&d->lock);
+    mcpx_apu_unlock_guest(d);
 
     /* Everything below is freed only once the frame thread has returned.
      * g_state is cleared before the teardown, so a mixer start that begins
@@ -1537,7 +1636,7 @@ void mcpx_apu_play_test_tone(MCPXAPUState *d)
     g_test_tone.active = true;
 
     /* Make sure waveOut is running - enable SECTL and resume APU thread */
-    qemu_mutex_lock(&d->lock);
+    mcpx_apu_lock_guest(d);
     d->regs[NV_PAPU_SECTL] = NV_PAPU_SECTL_XCNTMODE & ~NV_PAPU_SECTL_XCNTMODE_OFF;
     d->regs[NV_PAPU_FECTL] = NV_PAPU_FECTL_FEMETHMODE_FREE_RUNNING;
     /* Initialize empty voice lists so VP frame doesn't crash */
@@ -1545,7 +1644,7 @@ void mcpx_apu_play_test_tone(MCPXAPUState *d)
     d->regs[NV_PAPU_TVL3D] = 0xFFFF;
     d->regs[NV_PAPU_TVLMP] = 0xFFFF;
     mcpx_apu_resume(d);
-    qemu_mutex_unlock(&d->lock);
+    mcpx_apu_unlock_guest(d);
 
     fprintf(stderr, "[APU-TEST] Test tone ON - 440Hz sine, amplitude=%d\n",
             g_test_tone.amplitude);
@@ -1656,10 +1755,10 @@ void apu_mixer_play(int slot, int looping)
     /* The frame thread takes the APU lock before the mixer lock. */
     extern MCPXAPUState *g_state;
     if (g_state) {
-        qemu_mutex_lock(&g_state->lock);
+        mcpx_apu_lock_guest(g_state);
         g_state->pause_requested = false;
         qemu_cond_signal(&g_state->cond);
-        qemu_mutex_unlock(&g_state->lock);
+        mcpx_apu_unlock_guest(g_state);
     }
 }
 

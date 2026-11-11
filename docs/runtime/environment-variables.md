@@ -180,6 +180,7 @@ See the [APU](../../src/apu/README.md) and [DirectSound](../../src/audio/README.
 | `RECOMP_APU_HRTF` | on | `0` turns HRTF for 3D voices off. | `apu_vp.c` |
 | `RECOMP_APU_MIXDOWN_ALL` | on | `0` limits the mixdown. | `apu_dsp.c` |
 | `RECOMP_APU_DSP_ACK` | auto | DSP doorbell acknowledgement: `auto` derives it, `0`/`off` disables, or a list of addresses. | `apu_dsp.c` |
+| `RECOMP_APU_PRIORITY` | on | `0` leaves the APU frame thread at the default priority (otherwise nice -16 on Linux/Android, QoS user-interactive on macOS). | `apu_core.c` |
 | `RECOMP_AUDIO_BUF_COUNT`, `RECOMP_AUDIO_BUF_SAMPLES` | built-in | Device buffer count and size. | `apu_sdl2.c`, `apu_xaudio2.c` |
 
 ## Input
