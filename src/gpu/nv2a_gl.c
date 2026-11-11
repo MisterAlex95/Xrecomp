@@ -70,7 +70,15 @@ static GLuint s_vao, s_vbo, s_vs;
 static struct {
     uint32_t draws, tris, clears, uploads, upload_kb, readbacks, compiles, hashes_kb;
     uint32_t vsh_draws, vsh_kb;     /* vertex-program batches, their upload */
+    uint32_t rt_creates, relayouts, rt_direct, rt_copies, rt_grows;
 } s_st;
+
+/* RECOMP_GPU_RT_RELAYOUT_READBACK=1: read a target back when the title
+ * switches it between swizzled and linear (the old behaviour). */
+static int s_readback_layout_switch;
+/* RECOMP_GPU_RT_DIRECT=0: never sample a colour target directly (read it
+ * back into guest memory and upload it as a texture, as before 7d). */
+static int s_rt_direct_off;
 
 /* ---- helpers ------------------------------------------------------------ */
 
@@ -185,6 +193,8 @@ static int ensure_init(void)
                       || has_ext("GL_OES_texture_border_clamp");
     }
     s_verbose = env_on("RECOMP_GPU_VERBOSE");
+    s_readback_layout_switch = env_on("RECOMP_GPU_RT_RELAYOUT_READBACK");
+    s_rt_direct_off = getenv("RECOMP_GPU_RT_DIRECT") && !env_on("RECOMP_GPU_RT_DIRECT");
     {
         const char *a = getenv("RECOMP_TEX_ANISO");
         s_bilinear = env_on("RECOMP_TEX_BILINEAR")
@@ -239,12 +249,29 @@ static int ensure_init(void)
 
 /* ---- render targets ----------------------------------------------------- */
 
+/* Sampler state last set on a GL texture object (-1: unknown). */
 typedef struct {
-    uint32_t va, pitch, bpp, w, h, swz;   /* swz: 0, or 1 | log2w << 8 | log2h << 16 */
+    GLint wrap_s, wrap_t, filter, swz_a;
+    uint32_t border;                      /* border colour set (with a border wrap) */
+} GlSamp;
+
+typedef struct {
+    /* The guest surface as last bound: w x h pixels in the layout pitch /
+     * swz (swz: 0, or 1 | log2w << 8 | log2h << 16). What read-back and
+     * seeding convert. */
+    uint32_t va, pitch, bpp, w, h, swz;
+    uint32_t gw, gh;                      /* the GL texture's size (>= w, h) */
+    uint32_t cfmt;                        /* SET_SURFACE_FORMAT colour format (bits 0-3) */
     GLuint tex, fbo, depth;               /* depth: renderbuffer attached now */
     int dirty;
     uint32_t used;                        /* frame last drawn into */
     uint32_t serial;                      /* s_rt_serial at the last colour write */
+    uint32_t sampled;                     /* frame last sampled directly as a texture */
+    GlSamp samp;                          /* sampler state of tex */
+    GLuint copy;                          /* copy of tex for a batch that samples
+                                           * the target it draws into */
+    uint32_t copy_w, copy_h;
+    GlSamp copy_samp;
 } GlRT;
 
 typedef struct {
@@ -318,13 +345,72 @@ static void rt_upload(GlRT *r)
                     GL_RGBA, GL_UNSIGNED_BYTE, buf);
 }
 
-/* The render target -> guest bytes, in the surface's own format and layout
- * (565 and 8888 the way put_pixel writes them, swizzled when the surface
- * is). */
+/* Read-backs come as 0xAARRGGBB words where the API offers it (desktop GL:
+ * GL_BGRA + GL_UNSIGNED_INT_8_8_8_8_REV, the guest's own byte order), else
+ * as RGBA bytes (GLES guarantees only GL_RGBA / GL_UNSIGNED_BYTE). */
+#if NV2A_GL_ES
+#define NV_GL_READ_FORMAT GL_RGBA
+#define NV_GL_READ_TYPE   GL_UNSIGNED_BYTE
+#define NV_GL_READ_ARGB   0
+#else
+#define NV_GL_READ_FORMAT GL_BGRA
+#define NV_GL_READ_TYPE   GL_UNSIGNED_INT_8_8_8_8_REV
+#define NV_GL_READ_ARGB   1
+#endif
+
+static inline uint32_t read_px(const uint8_t *p)
+{
+#if NV_GL_READ_ARGB
+    uint32_t c;
+    memcpy(&c, p, 4);
+    return c;
+#else
+    return ((uint32_t)p[3] << 24) | ((uint32_t)p[0] << 16) | ((uint32_t)p[1] << 8) | p[2];
+#endif
+}
+
+/* w x h read-back pixels (read_px layout) -> guest bytes of target r, in
+ * the surface's own format and layout (565 and 8888 the way put_pixel
+ * writes them, swizzled when the surface is). */
+static void rt_store(const GlRT *r, const uint8_t *buf)
+{
+    uint8_t *mem = guest(r->va);
+    uint32_t x, y, mx = 0, my = 0;
+
+    if (r->swz)
+        xbox_swizzle_masks(r->w, r->h, &mx, &my);
+    for (y = 0; y < r->h; y++) {
+        const uint8_t *row = buf + (size_t)y * r->w * 4;
+        if (r->bpp == 4 && !r->swz) {
+            uint32_t *o = (uint32_t *)(mem + (size_t)y * r->pitch);
+#if NV_GL_READ_ARGB
+            memcpy(o, row, (size_t)r->w * 4);
+#else
+            for (x = 0; x < r->w; x++, row += 4)
+                o[x] = read_px(row);
+#endif
+            continue;
+        }
+        for (x = 0; x < r->w; x++, row += 4) {
+            uint32_t c = read_px(row);
+            uint8_t *p = mem + (r->swz ? (size_t)(swizzle_deposit(x, mx)
+                                                  | swizzle_deposit(y, my)) * r->bpp
+                                       : (size_t)y * r->pitch + (size_t)x * r->bpp);
+            if (r->bpp == 4) {
+                memcpy(p, &c, 4);
+            } else {
+                uint16_t v = (uint16_t)((((c >> 19) & 0x1F) << 11) | (((c >> 10) & 0x3F) << 5)
+                                        | ((c >> 3) & 0x1F));
+                memcpy(p, &v, 2);
+            }
+        }
+    }
+}
+
+/* The render target -> guest bytes (synchronous). */
 static void rt_readback(GlRT *r)
 {
-    uint8_t *buf, *mem;
-    uint32_t x, y;
+    uint8_t *buf;
 
     if (!r->dirty || !r->fbo)
         return;
@@ -332,30 +418,8 @@ static void rt_readback(GlRT *r)
     if (!buf)
         return;
     glBindFramebuffer(GL_FRAMEBUFFER, r->fbo);
-    glReadPixels(0, 0, (GLsizei)r->w, (GLsizei)r->h, GL_RGBA, GL_UNSIGNED_BYTE, buf);
-    mem = guest(r->va);
-    for (y = 0; y < r->h; y++) {
-        const uint8_t *row = buf + (size_t)y * r->w * 4;
-        if (r->bpp == 4 && !r->swz) {
-            uint32_t *o = (uint32_t *)(mem + (size_t)y * r->pitch);
-            for (x = 0; x < r->w; x++, row += 4)
-                o[x] = ((uint32_t)row[3] << 24) | ((uint32_t)row[0] << 16)
-                     | ((uint32_t)row[1] << 8) | row[2];
-            continue;
-        }
-        for (x = 0; x < r->w; x++, row += 4) {
-            uint8_t *p = mem + rt_offset(r, x, y);
-            if (r->bpp == 4) {
-                uint32_t c = ((uint32_t)row[3] << 24) | ((uint32_t)row[0] << 16)
-                           | ((uint32_t)row[1] << 8) | row[2];
-                memcpy(p, &c, 4);
-            } else {
-                uint16_t c = (uint16_t)(((row[0] >> 3) << 11) | ((row[1] >> 2) << 5)
-                                        | (row[2] >> 3));
-                memcpy(p, &c, 2);
-            }
-        }
-    }
+    glReadPixels(0, 0, (GLsizei)r->w, (GLsizei)r->h, NV_GL_READ_FORMAT, NV_GL_READ_TYPE, buf);
+    rt_store(r, buf);
     r->dirty = 0;
     s_st.readbacks++;
 }
@@ -365,7 +429,30 @@ static void rt_free(GlRT *r)
     rt_readback(r);
     if (r->fbo) glDeleteFramebuffers(1, &r->fbo);
     if (r->tex) glDeleteTextures(1, &r->tex);
+    if (r->copy) glDeleteTextures(1, &r->copy);
     memset(r, 0, sizeof *r);
+}
+
+/* Give target r a bigger GL texture (gw x gh), keeping its pixels (a GPU
+ * copy, no read-back). */
+static void rt_grow(GlRT *r, uint32_t gw, uint32_t gh)
+{
+    GLuint t;
+
+    glGenTextures(1, &t);
+    glBindTexture(GL_TEXTURE_2D, t);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, (GLsizei)gw, (GLsizei)gh, 0,
+                 GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
+    glBindFramebuffer(GL_FRAMEBUFFER, r->fbo);
+    glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, (GLsizei)r->gw, (GLsizei)r->gh);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, t, 0);
+    glDeleteTextures(1, &r->tex);
+    r->tex = t;
+    r->gw = gw;
+    r->gh = gh;
+    r->samp.wrap_s = r->samp.wrap_t = r->samp.filter = r->samp.swz_a = -1;
+    s_st.rt_grows++;
 }
 
 static GlRT *rt_get(const Nv2aSurface *s)
@@ -398,10 +485,38 @@ static GlRT *rt_get(const Nv2aSurface *s)
             continue;
         }
         if (r->va == s->color_va) {
-            if (r->bpp == bpp && r->swz == swz && r->pitch == s->pitch
-                && r->w >= w && r->h >= h)
+            /* The same memory in another layout or size (bytes per pixel
+             * unchanged): Fable's bloom chain draws its 256x256 target at
+             * 0x80D38080 swizzled in one pass and linear (pitch 1024) in the
+             * next, and 0x80CF9080 alternately as a 256x256 and a 128x128
+             * swizzled surface. The GL texture holds pixels by (x, y)
+             * whatever the guest layout, and each pass draws over what it
+             * then reads, so the target is kept: only the layout read-back
+             * and seeding use changes, and the texture grows (by a GPU copy)
+             * when the new shape does not fit. Recreating it cost a
+             * read-back and an upload per switch, 16 a frame. */
+            if (r->bpp == bpp) {
+                if (w > r->gw || h > r->gh)
+                    rt_grow(r, w > r->gw ? w : r->gw, h > r->gh ? h : r->gh);
+                if (r->swz != swz || r->pitch != s->pitch || (swz && (r->w != w || r->h != h))) {
+                    if (r->dirty && s_readback_layout_switch)
+                        rt_readback(r);
+                    r->swz = swz;
+                    r->pitch = s->pitch;
+                    r->w = w;
+                    r->h = h;
+                    s_st.relayouts++;
+                } else {
+                    /* A linear surface of the same pitch: rows drawn by an
+                     * earlier, taller pass still count. */
+                    if (w > r->w) r->w = w;
+                    if (h > r->h) r->h = h;
+                }
+                r->cfmt = s->format & 0xF;
                 return r;
-            /* Same memory, another shape: hand the old one back first. */
+            }
+            /* Same memory, another pixel size: the bytes mean something
+             * else now. Hand the old one back first. */
             rt_free(r);
             if (!free_slot)
                 free_slot = r;
@@ -418,17 +533,18 @@ static GlRT *rt_get(const Nv2aSurface *s)
     r->va = s->color_va;
     r->pitch = s->pitch;
     r->bpp = bpp;
-    r->w = w;
-    r->h = h;
+    r->w = r->gw = w;
+    r->h = r->gh = h;
     r->swz = swz;
+    r->cfmt = s->format & 0xF;
+    r->samp.wrap_s = r->samp.wrap_t = r->samp.filter = r->samp.swz_a = -1;
     glGenTextures(1, &r->tex);
     glBindTexture(GL_TEXTURE_2D, r->tex);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, (GLsizei)w, (GLsizei)h, 0,
                  GL_RGBA, GL_UNSIGNED_BYTE, NULL);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
     rt_upload(r);
+    s_st.rt_creates++;
     glGenFramebuffers(1, &r->fbo);
     glBindFramebuffer(GL_FRAMEBUFFER, r->fbo);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, r->tex, 0);
@@ -561,19 +677,19 @@ static int bind_target(const Nv2aSurface *s, uint32_t zeta_va, GlTarget *t)
     if (!(r = rt_get(s)))
         return 0;
     glBindFramebuffer(GL_FRAMEBUFFER, r->fbo);
-    d = depth_get(zeta_va, r->w, r->h, zeta_bpp(s));
+    d = depth_get(zeta_va, r->gw, r->gh, zeta_bpp(s));
     if (d != r->depth) {
         glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT,
                                   GL_RENDERBUFFER, d);
         r->depth = d;
     }
-    glViewport(0, 0, (GLsizei)r->w, (GLsizei)r->h);
+    glViewport(0, 0, (GLsizei)r->gw, (GLsizei)r->gh);
     glEnable(GL_SCISSOR_TEST);
     glScissor((GLint)s->clip_x, (GLint)s->clip_y, (GLsizei)s->width, (GLsizei)s->height);
     r->used = s_frame;
     t->rt = r;
-    t->w = r->w;
-    t->h = r->h;
+    t->w = r->gw;
+    t->h = r->gh;
     t->bpp = r->bpp;
     return 1;
 }
@@ -595,6 +711,75 @@ static void readback_overlapping(uint32_t va, uint32_t bytes)
     }
 }
 
+/* A texture format that reads a colour target's pixels as they are: same
+ * bytes per pixel and component layout. *alpha: what alpha reads (GL_RED..
+ * for "the target's", GL_ONE / GL_ZERO for a format without one). 0: the
+ * format reinterprets the bytes (a 32-bit target read as 16-bit texels, BGRA
+ * orders, palettes, YUV...): read back and decode instead. */
+static int rt_format_compatible(const GlRT *r, uint32_t color, GLint *alpha)
+{
+    *alpha = GL_ALPHA;
+    if (r->bpp == 4) {
+        switch (color) {
+        case 0x06: case 0x12:                       /* SZ/LU A8R8G8B8 */
+            /* X8R8G8B8 surfaces (formats 4, 5) keep their own alpha byte in
+             * memory as the CPU path does; read it as stored. */
+            return 1;
+        case 0x07: case 0x1E:                       /* SZ/LU X8R8G8B8 */
+            *alpha = GL_ONE;
+            return 1;
+        default:
+            return 0;
+        }
+    }
+    if (r->cfmt == 0x3)                             /* R5G6B5 */
+        return color == 0x05 || color == 0x11;
+    if (r->cfmt == 0x1 || r->cfmt == 0x2) {         /* X1R5G5B5, Z or O */
+        switch (color) {
+        case 0x03: case 0x1C:                       /* SZ/LU X1R5G5B5 */
+            *alpha = GL_ONE;
+            return 1;
+        case 0x02: case 0x10:                       /* SZ/LU A1R5G5B5: the X bit */
+            *alpha = r->cfmt == 0x2 ? GL_ONE : GL_ZERO;
+            return 1;
+        default:
+            return 0;
+        }
+    }
+    return 0;
+}
+
+/* The colour target a texture reads, when the GPU can sample it as it is
+ * (render to texture without a read-back): same address, a compatible
+ * format (rt_format_compatible), and the texture inside the target --
+ * swizzled textures cover the whole target (the target is stored linear, so
+ * a normalised coordinate means the same texel), linear ones read rows
+ * of the same pitch. A cube map never matches. */
+static GlRT *rt_for_texture(const Nv2aTexture *t, uint32_t cube, GLint *alpha)
+{
+    int i;
+
+    if (cube || s_rt_direct_off)
+        return NULL;
+    for (i = 0; i < NV_GL_MAX_RT; i++) {
+        GlRT *r = &s_rt[i];
+        if (!r->tex || r->va != t->offset)
+            continue;
+        if (!rt_format_compatible(r, t->color, alpha))
+            return NULL;
+        if (t->width > r->w || t->height > r->h)
+            return NULL;
+        if (d3d8_format_is_swizzled(t->color)) {
+            if (t->width != r->w || t->height != r->h)
+                return NULL;
+        } else if (!r->swz && t->pitch != r->pitch) {
+            return NULL;
+        }
+        return r;
+    }
+    return NULL;
+}
+
 /* ---- textures ----------------------------------------------------------- */
 
 typedef struct {
@@ -603,7 +788,7 @@ typedef struct {
     uint64_t hash;
     GLuint tex;
     uint32_t checked;               /* frame of the last hash check */
-    GLint wrap_s, wrap_t, filter;   /* sampler state last set */
+    GlSamp samp;                    /* sampler state last set */
     /* The last upload failed (a format the decoder does not know, such as
      * Fable's Z16 shadow map bound as 0x30): drawn as "no texture" until the
      * bytes change. Returned as usable, the incomplete GL texture sampled
@@ -703,7 +888,7 @@ static int tex_upload(GlTex *e, const Nv2aTexture *t)
         ok = tex_upload_image(GL_TEXTURE_2D, &one);   /* a cube seen as 2D: face 0 */
     }
     glTexParameteri(target, GL_TEXTURE_MAX_LEVEL, 0);
-    e->wrap_s = e->wrap_t = e->filter = -1;
+    e->samp.wrap_s = e->samp.wrap_t = e->samp.filter = e->samp.swz_a = -1;
     s_st.uploads++;
     return ok;
 }
@@ -843,40 +1028,57 @@ static GLint wrap_mode(uint32_t a, int border)
     }
 }
 
-/* Filtering the way the CPU rasteriser chooses it: the combiner path
- * honours the title's TENT filters (rc_texel), the two simpler paths take
- * the nearest texel unless RECOMP_TEX_BILINEAR. Level 0 only on both. */
-static void tex_bind(GlTex *e, const Nv2aTexture *t, int unit, uint32_t shade)
+/* Sampler state on the texture bound to `target`, set only where it changed. */
+static void samp_set(GLenum target, GlSamp *sp, GLint f, GLint ws, GLint wt,
+                     uint32_t border, GLint swz_a)
 {
-    GLenum target = e->cube ? GL_TEXTURE_CUBE_MAP : GL_TEXTURE_2D;
-    uint32_t mag = (t->filter >> 24) & 0xF, min = (t->filter >> 16) & 0xFF;
-    int lin = s_bilinear
-           || (shade == NV2A_SHADE_COMBINERS
-               && (mag == 2 || min == 2 || min == 4 || min == 6));
-    GLint f = lin ? GL_LINEAR : GL_NEAREST;
-    GLint ws = wrap_mode(t->addr_u, (int)t->border_color);
-    GLint wt = wrap_mode(t->addr_v, (int)t->border_color);
-
-    glActiveTexture(GL_TEXTURE0 + (GLenum)unit);
-    glBindTexture(target, e->tex);
-    if (e->filter != f) {
+    if (sp->filter != f) {
         glTexParameteri(target, GL_TEXTURE_MIN_FILTER, f);
         glTexParameteri(target, GL_TEXTURE_MAG_FILTER, f);
-        e->filter = f;
+        sp->filter = f;
     }
-    if (e->wrap_s != ws || e->wrap_t != wt) {
+    if (sp->wrap_s != ws || sp->wrap_t != wt
+        || ((ws == GL_CLAMP_TO_BORDER || wt == GL_CLAMP_TO_BORDER) && sp->border != border)) {
         glTexParameteri(target, GL_TEXTURE_WRAP_S, ws);
         glTexParameteri(target, GL_TEXTURE_WRAP_T, wt);
         if (target == GL_TEXTURE_CUBE_MAP)
             glTexParameteri(target, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
-        e->wrap_s = ws;
-        e->wrap_t = wt;
+        sp->wrap_s = ws;
+        sp->wrap_t = wt;
         if (ws == GL_CLAMP_TO_BORDER || wt == GL_CLAMP_TO_BORDER) {
             float bc[4];
-            unpack4(t->border, bc);
+            unpack4(border, bc);
             glTexParameterfv(target, GL_TEXTURE_BORDER_COLOR, bc);
+            sp->border = border;
         }
     }
+    if (sp->swz_a != swz_a) {
+        glTexParameteri(target, GL_TEXTURE_SWIZZLE_A, swz_a);
+        sp->swz_a = swz_a;
+    }
+}
+
+/* Filtering the way the CPU rasteriser chooses it: the combiner path
+ * honours the title's TENT filters (rc_texel), the two simpler paths take
+ * the nearest texel unless RECOMP_TEX_BILINEAR. Level 0 only on both. */
+static GLint tex_filter(const Nv2aTexture *t, uint32_t shade)
+{
+    uint32_t mag = (t->filter >> 24) & 0xF, min = (t->filter >> 16) & 0xFF;
+    int lin = s_bilinear
+           || (shade == NV2A_SHADE_COMBINERS
+               && (mag == 2 || min == 2 || min == 4 || min == 6));
+    return lin ? GL_LINEAR : GL_NEAREST;
+}
+
+static void tex_bind(GlTex *e, const Nv2aTexture *t, int unit, uint32_t shade)
+{
+    GLenum target = e->cube ? GL_TEXTURE_CUBE_MAP : GL_TEXTURE_2D;
+
+    glActiveTexture(GL_TEXTURE0 + (GLenum)unit);
+    glBindTexture(target, e->tex);
+    samp_set(target, &e->samp, tex_filter(t, shade),
+             wrap_mode(t->addr_u, (int)t->border_color),
+             wrap_mode(t->addr_v, (int)t->border_color), t->border, GL_ALPHA);
     s_bound[unit] = e;
 }
 
@@ -1263,6 +1465,41 @@ static void gl_clear(const Nv2aSurface *s, const Nv2aRenderState *rs,
  * the texel-to-normalised scale per stage. Before the target is bound:
  * sampling a surface the GPU drew may read it back, which rebinds the
  * framebuffer. */
+/* The colour target each stage samples directly this batch (NULL: none). */
+static GlRT *s_stage_rt[4];
+
+/* Texel coordinates (linear formats, and every format on the screen-space
+ * path) rather than normalised ones. */
+static int tex_coords_in_texels(const Nv2aPixelState *ps, const Nv2aTexture *t)
+{
+    return ps->shade == NV2A_SHADE_REPLACE
+        || !(d3d8_format_is_swizzled(t->color) || d3d8_format_dxt_block_bytes(t->color));
+}
+
+/* Sample colour target r on `unit` as texture t (rt_for_texture). The GL
+ * texture can be larger than the guest texture (a linear target is as wide
+ * as its pitch): coordinates scale to the target's size. */
+static void rt_bind_as_texture(GlRT *r, const Nv2aPixelState *ps, const Nv2aTexture *t,
+                               int unit, GLint alpha, float *tscale)
+{
+    glActiveTexture(GL_TEXTURE0 + (GLenum)unit);
+    glBindTexture(GL_TEXTURE_2D, r->tex);
+    samp_set(GL_TEXTURE_2D, &r->samp, tex_filter(t, ps->shade),
+             wrap_mode(t->addr_u, (int)t->border_color),
+             wrap_mode(t->addr_v, (int)t->border_color), t->border, alpha);
+    if (tex_coords_in_texels(ps, t)) {
+        tscale[0] = 1.0f / (float)r->gw;
+        tscale[1] = 1.0f / (float)r->gh;
+    } else {
+        tscale[0] = (float)t->width / (float)r->gw;
+        tscale[1] = (float)t->height / (float)r->gh;
+    }
+    r->sampled = s_frame;
+    s_bound[unit] = NULL;
+    s_stage_rt[unit] = r;
+    s_st.rt_direct++;
+}
+
 static void bind_stage_textures(const Nv2aPixelState *ps, uint32_t kind[4], float tscale[8])
 {
     uint32_t st;
@@ -1271,27 +1508,68 @@ static void bind_stage_textures(const Nv2aPixelState *ps, uint32_t kind[4], floa
         const Nv2aTexStage *ts = &ps->stage[st];
         uint32_t mode = ts->mode, cube = 0;
         GlTex *e;
+        GlRT *r;
+        GLint alpha;
         kind[st] = NV2A_GL_TEX_NONE;
         tscale[st * 2] = tscale[st * 2 + 1] = 1.0f;
+        s_stage_rt[st] = NULL;
         if (ps->shade == NV2A_SHADE_COMBINERS ? !(mode >= 1 && mode <= 3) : (st || !mode))
             continue;
         if (!ts->valid)
             continue;
         if (ps->shade == NV2A_SHADE_COMBINERS && mode == 3 && ts->tex.cube)
             cube = 1;
+        if ((r = rt_for_texture(&ts->tex, cube, &alpha)) != NULL) {
+            rt_bind_as_texture(r, ps, &ts->tex, (int)st, alpha, &tscale[st * 2]);
+            kind[st] = NV2A_GL_TEX_2D;
+            continue;
+        }
         e = tex_get(&ts->tex, cube, (int)st);
         if (!e)
             continue;
         tex_bind(e, &ts->tex, (int)st, ps->shade);
         kind[st] = cube ? NV2A_GL_TEX_CUBE : NV2A_GL_TEX_2D;
-        /* Texel coordinates (linear formats, and every format on the
-         * screen-space path) to normalised. */
-        if (ps->shade == NV2A_SHADE_REPLACE
-            || !(d3d8_format_is_swizzled(ts->tex.color)
-                 || d3d8_format_dxt_block_bytes(ts->tex.color))) {
+        /* Texel coordinates to normalised. */
+        if (tex_coords_in_texels(ps, &ts->tex)) {
             tscale[st * 2] = 1.0f / (float)ts->tex.width;
             tscale[st * 2 + 1] = 1.0f / (float)ts->tex.height;
         }
+    }
+}
+
+/* A batch that samples the target it draws into (a feedback loop GL leaves
+ * undefined): those stages read a copy of the target taken before the
+ * batch, which is what the hardware's texture cache sees in practice. */
+static void break_feedback(GlRT *target)
+{
+    int st;
+
+    if (!target)
+        return;
+    for (st = 0; st < 4; st++) {
+        GlRT *r = s_stage_rt[st];
+        if (r != target)
+            continue;
+        glActiveTexture(GL_TEXTURE0 + (GLenum)st);
+        if (!r->copy || r->copy_w != r->gw || r->copy_h != r->gh) {
+            if (!r->copy)
+                glGenTextures(1, &r->copy);
+            glBindTexture(GL_TEXTURE_2D, r->copy);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, (GLsizei)r->gw, (GLsizei)r->gh, 0,
+                         GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
+            r->copy_w = r->gw;
+            r->copy_h = r->gh;
+            r->copy_samp.wrap_s = r->copy_samp.wrap_t = -1;
+            r->copy_samp.filter = r->copy_samp.swz_a = -1;
+        } else {
+            glBindTexture(GL_TEXTURE_2D, r->copy);
+        }
+        /* The target's framebuffer is bound for drawing (and reading). */
+        glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, (GLsizei)r->gw, (GLsizei)r->gh);
+        samp_set(GL_TEXTURE_2D, &r->copy_samp, r->samp.filter, r->samp.wrap_s,
+                 r->samp.wrap_t, r->samp.border, r->samp.swz_a);
+        s_st.rt_copies++;
     }
 }
 
@@ -1384,6 +1662,7 @@ static void gl_draw(const Nv2aSurface *s, const Nv2aBatch *b)
         return;
     if (!bind_target(s, rs->zeta_va, &t))
         return;
+    break_feedback(t.rt);
     apply_state(rs, ps->shade, t.bpp);
     set_near_mode(0, 0.0f);
     glUseProgram(p->prog);
@@ -1478,6 +1757,7 @@ static int gl_draw_program(const Nv2aSurface *s, const Nv2aBatch *b)
         return 0;
     if (!bind_target(s, rs->zeta_va, &t))
         return 1;                   /* gl_draw drops these too */
+    break_feedback(t.rt);
     apply_state(rs, ps->shade, t.bpp);
     zmax = zmax_of(s->format);
     zmin = rs->depth_min;
@@ -1569,6 +1849,7 @@ static void gl_reset_objects(int lost)
         for (i = 0; i < NV_GL_MAX_RT; i++) {
             if (s_rt[i].fbo) glDeleteFramebuffers(1, &s_rt[i].fbo);
             if (s_rt[i].tex) glDeleteTextures(1, &s_rt[i].tex);
+            if (s_rt[i].copy) glDeleteTextures(1, &s_rt[i].copy);
         }
         for (i = 0; i < NV_GL_MAX_DEPTH; i++) {
             if (s_depth[i].fbo) glDeleteFramebuffers(1, &s_depth[i].fbo);
@@ -1597,6 +1878,7 @@ static void gl_reset_objects(int lost)
     memset(s_depth, 0, sizeof s_depth);
     memset(s_tex, 0, sizeof s_tex);
     memset(s_bound, 0, sizeof s_bound);
+    memset(s_stage_rt, 0, sizeof s_stage_rt);
     s_ntex = 0;
     for (i = 0; i < NV_GL_MAX_PROG; i++)
         free(s_prog[i].cloc);
@@ -1694,10 +1976,12 @@ static void gl_flip(void)
             nprog += s_prog[i].prog != 0;
         fprintf(stderr, "  [GPUGL] frame %u: %u draws (%u vertex programs, %u KB),"
                         " %u tris, %u clears, %u readbacks,"
-                        " %u uploads (%u KB), %u KB hashed, %d textures, %d targets,"
-                        " %d programs (%u compiled)\n",
+                        " targets: %u created, %u relayouts, %u grown, %u sampled directly"
+                        " (%u copies), %u uploads (%u KB), %u KB hashed, %d textures,"
+                        " %d targets, %d programs (%u compiled)\n",
                 s_frame, s_st.draws, s_st.vsh_draws, s_st.vsh_kb, s_st.tris,
-                s_st.clears, s_st.readbacks,
+                s_st.clears, s_st.readbacks, s_st.rt_creates, s_st.relayouts, s_st.rt_grows,
+                s_st.rt_direct, s_st.rt_copies,
                 s_st.uploads, s_st.upload_kb, s_st.hashes_kb, s_ntex, nrt, nprog,
                 s_st.compiles);
         memset(&s_st, 0, sizeof s_st);

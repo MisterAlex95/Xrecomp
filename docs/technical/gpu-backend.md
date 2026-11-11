@@ -164,9 +164,16 @@ the CPU rasteriser interpolates texture coordinates, and `Nv2aVertexFull` is
 uploaded as it is (one `glBufferData` per batch).
 
 **Render targets.** One RGBA8 texture + FBO per colour surface address and
-shape (pitch, bpp, linear or swizzled), up to 16, least recently drawn
-evicted. Created from the guest bytes (a title may draw over a picture the
-CPU put there). Rows map one to one, guest row y = GL row y, so nothing is
+bytes per pixel, up to 16, least recently drawn evicted. Created from the
+guest bytes (a title may draw over a picture the CPU put there). The GL
+texture holds pixels by (x, y) whatever the guest layout, so a target is
+kept when the title switches the same memory between swizzled and linear or
+between sizes (Fable's bloom chain draws 0x80D38080 swizzled in one pass and
+linear in the next, and 0x80CF9080 as 256x256 and 128x128 surfaces in
+turn): only the layout that read-back and seeding convert changes, and a
+shape that no longer fits grows the texture by a GPU copy. Each switch used
+to cost a read-back and an upload (16 a frame in Oakvale). Only a change of
+bytes per pixel recreates the target. Rows map one to one, guest row y = GL row y, so nothing is
 flipped. Depth/stencil is a D24S8 renderbuffer per zeta address (up to 8),
 attached to whichever colour target draws with it, as the CPU rasteriser
 keeps one buffer per zeta address. A 16-bit surface keeps alpha at 1 (colour
@@ -174,7 +181,24 @@ mask), as the CPU path reads 565 back with alpha 0xFF. Pixels go back to
 guest memory (in the surface's own format and swizzle) at the present sync
 and when a batch samples memory a dirty target covers (render to texture).
 A target is dirty only after a batch or clear that writes colour (colour
-mask non-zero). A surface without colour (`Nv2aSurface.color_valid` 0:
+mask non-zero).
+
+**Render to texture.** A texture stage whose address is a colour target's
+samples the target's GL texture directly (`rt_for_texture`): no read-back,
+no hash, no upload. The format must read the target's pixels as they are --
+A8R8G8B8 / X8R8G8B8 (swizzled or linear) on a 32-bit target, R5G6B5 on a
+565 target, X1R5G5B5 / A1R5G5B5 on a 1555 one; the X variants read alpha 1
+through `GL_TEXTURE_SWIZZLE_A`. A swizzled texture must cover the target
+(the target is stored linear, so a normalised coordinate means the same
+texel), a linear one must have the target's pitch; coordinates scale to the
+GL texture's size. A batch that samples the target it draws into reads a
+copy taken just before it (`break_feedback`; GL leaves the loop undefined).
+Anything else -- another format (a 32-bit target read as 16-bit texels,
+BGRA orders, P8), a texture at an offset inside a target, a cube map --
+still reads the target back and uploads it as below. `RECOMP_GPU_RT_DIRECT=0`
+turns direct sampling off. In Oakvale that removed every texture upload in
+steady state (16 a frame, 3 MB, all bloom-chain targets) and 7 of the 16
+read-backs a frame. A surface without colour (`Nv2aSurface.color_valid` 0:
 colour offset 0, as in Fable's 768x768 shadow pass, a colour mask of 0, or a
 surface that would land on the image) draws into a depth-only framebuffer
 per zeta address (`glDrawBuffers(GL_NONE)`); no colour target is created and
@@ -353,10 +377,7 @@ The original list (the interpreter was 41 % of the in-world executor):
 
 ### 7d: surfaces, readback, reports
 
-1. Render to texture without readback: sample the target's texture directly
-   when a stage's texture address and format match a target (linear: direct;
-   swizzled: the target is stored linear, so the texture coordinates are the
-   same); read back only for guest CPU reads.
+1. Done: render to texture without readback (above, "Render to texture").
 2. Guest CPU writes into surfaces: hash the surface's guest bytes against
    the last readback before drawing into it, or write-protect the pages, and
    re-upload when they changed.
