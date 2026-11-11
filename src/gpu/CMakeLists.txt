@@ -5,6 +5,20 @@
 #   macOS    system OpenGL framework, headless CGL context
 #   Android  GLESv3 + EGL from the NDK
 #   Linux    libepoxy (GL and EGL)
+# Linux needs libepoxy through pkg-config. Without it (a consumer that turned
+# pkg-config off, as tests/cmake_d3d8_consumer does, or no libepoxy) the back
+# end is left out: the CPU rasteriser stays, RECOMP_GPU=1 has no effect.
+if(NOT APPLE AND NOT ANDROID)
+    find_package(PkgConfig QUIET)
+    if(PkgConfig_FOUND)
+        pkg_check_modules(XBOX_GPU_EPOXY QUIET epoxy)
+    endif()
+    if(NOT XBOX_GPU_EPOXY_FOUND)
+        message(STATUS "xbox_gpu: libepoxy not found through pkg-config, GL render back end left out")
+        return()
+    endif()
+endif()
+
 add_library(xbox_gpu STATIC
     nv2a_gl.c
     nv2a_gl_context.c
@@ -23,8 +37,6 @@ if(APPLE)
 elseif(ANDROID)
     target_link_libraries(xbox_gpu PUBLIC GLESv3 EGL)
 else()
-    find_package(PkgConfig REQUIRED)
-    pkg_check_modules(XBOX_GPU_EPOXY REQUIRED epoxy)
     target_include_directories(xbox_gpu PRIVATE ${XBOX_GPU_EPOXY_INCLUDE_DIRS})
     target_link_libraries(xbox_gpu PUBLIC ${XBOX_GPU_EPOXY_LINK_LIBRARIES})
 endif()
