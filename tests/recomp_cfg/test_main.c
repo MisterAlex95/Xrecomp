@@ -87,6 +87,23 @@ int main(void)
         CHECK(getenv("RECOMP_CFG_LONG_199") != NULL, "last long option");
     }
 
+    /* 4. a title's forced options (env_force): they win over the environment and recomp.cfg */
+    set("RECOMP_LSFG", "1");
+    CHECK(recomp_cfg_force("4541005B", "RECOMP_LSFG", "0") == 0, "force RECOMP_LSFG=0");
+    CHECK(env_is("RECOMP_LSFG", "0"), "a forced value wins over the environment");
+    CHECK(recomp_cfg_force_key_ok("RECOMP_GPU_FPS_CAP") && recomp_cfg_force_key_ok("RECOMP_X9_"),
+          "RECOMP_[A-Z0-9_]+ allowed");
+    CHECK(!recomp_cfg_force_key_ok("RECOMP_") && !recomp_cfg_force_key_ok("LD_PRELOAD")
+          && !recomp_cfg_force_key_ok("RECOMP_lsfg") && !recomp_cfg_force_key_ok("RECOMP_A-B")
+          && !recomp_cfg_force_key_ok(NULL), "other names refused");
+    CHECK(recomp_cfg_force_value_ok("") && recomp_cfg_force_value_ok("60") && !recomp_cfg_force_value_ok("a\nb")
+          && !recomp_cfg_force_value_ok("\xc3\xa9"), "values: printable ASCII");
+    unset("LD_PRELOAD_TEST");
+    CHECK(recomp_cfg_force("T", "LD_PRELOAD_TEST", "x") == -1 && getenv("LD_PRELOAD_TEST") == NULL,
+          "a refused key is not set");
+    CHECK(recomp_cfg_force("T", "RECOMP_LSFG", "1\n") == -1 && env_is("RECOMP_LSFG", "0"),
+          "a refused value leaves the old one");
+
     remove(path);
     if (failures) { printf("%d failure(s)\n", failures); return 1; }
     puts("PASS: recomp.cfg");

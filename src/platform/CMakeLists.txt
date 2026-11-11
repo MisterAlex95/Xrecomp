@@ -62,11 +62,12 @@ if(NOT WIN32)
     target_link_libraries(recomp_app PUBLIC recomp_storage recomp_cfg host_cpus platform xbox_kernel)
 
     # recomp_pack: a title pack, the loader's side (recomp_pack.h): the
-    # XBE's title ID, pack.json, dlopen. libc + libdl only; the Android app
+    # XBE's title ID, pack.json (its env_force through recomp_cfg), dlopen.
+    # libc + libdl + recomp_cfg only; the Android app
     # shell links it (pack_loader.c), tests/recomp_pack on Linux.
     add_library(recomp_pack STATIC recomp_pack.c)
     target_include_directories(recomp_pack PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-    target_link_libraries(recomp_pack PUBLIC ${CMAKE_DL_LIBS})
+    target_link_libraries(recomp_pack PUBLIC recomp_cfg ${CMAKE_DL_LIBS})
 endif()
 
 if(WIN32)

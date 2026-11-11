@@ -67,6 +67,11 @@ int xba_pack_load(const char *files_dir, const char *xbe_path, xba_title_main_fn
         printf("PACK_INVALID %s\n", why);
         goto out;
     }
+    /* The title profile's forced options (pack.json env_force): after
+     * recomp.cfg (recomp_app_start), before the window and the frame
+     * generation pacer read them, and before the title's own
+     * xba_title_configure, which runs too late for those. */
+    recomp_pack_apply_env_force(&m);
     rc = recomp_pack_open(lib, m.entry, &syms, why, sizeof why);
     if (rc != RECOMP_PACK_OK) {
         printf("PACK_DLOPEN %s\n", why);

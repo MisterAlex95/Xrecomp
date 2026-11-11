@@ -95,3 +95,51 @@ int recomp_cfg_load(const char *path)
     fflush(stdout);
     return count;
 }
+
+int recomp_cfg_force_key_ok(const char *key)
+{
+    size_t n;
+    if (!key || strncmp(key, "RECOMP_", 7) != 0)
+        return 0;
+    n = strlen(key);
+    if (n == 7 || n >= RECOMP_CFG_FORCE_KEY_MAX)
+        return 0;
+    for (key += 7; *key; key++)
+        if (!((*key >= 'A' && *key <= 'Z') || (*key >= '0' && *key <= '9') || *key == '_'))
+            return 0;
+    return 1;
+}
+
+int recomp_cfg_force_value_ok(const char *value)
+{
+    size_t n = 0;
+    if (!value)
+        return 0;
+    for (; value[n]; n++)
+        if ((unsigned char)value[n] < 0x20 || (unsigned char)value[n] > 0x7e)
+            return 0;
+    return n < RECOMP_CFG_FORCE_VALUE_MAX;
+}
+
+int recomp_cfg_force(const char *tid, const char *key, const char *value)
+{
+    if (!tid)
+        tid = "?";
+    if (!recomp_cfg_force_key_ok(key)) {
+        fprintf(stderr, "[TITLE] %s: env_force \"%s\" ignored (only RECOMP_[A-Z0-9_]+ names)\n", tid,
+                key ? key : "");
+        return -1;
+    }
+    if (!recomp_cfg_force_value_ok(value)) {
+        fprintf(stderr, "[TITLE] %s: env_force %s ignored (value not printable ASCII under %d bytes)\n", tid,
+                key, RECOMP_CFG_FORCE_VALUE_MAX);
+        return -1;
+    }
+    if (cfg_setenv(key, value) != 0) {
+        fprintf(stderr, "[TITLE] %s: cannot set %s\n", tid, key);
+        return -1;
+    }
+    printf("[TITLE] %s forces %s=%s (title profile)\n", tid, key, value);
+    fflush(stdout);
+    return 0;
+}

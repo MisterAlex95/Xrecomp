@@ -52,7 +52,9 @@ typedef int (*xba_title_main_fn)(const recomp_storage *store);
  *   PACK_DLOPEN <dlerror>           dlopen or the entry's dlsym failed
  * Returns RECOMP_PACK_OK (*main_out = the pack's recomp_title_main),
  * RECOMP_PACK_MISSING, RECOMP_PACK_INVALID or RECOMP_PACK_DLOPEN, with why
- * in reason (for MISSING: the title ID). */
+ * in reason (for MISSING: the title ID). A valid pack's env_force options
+ * are set before the dlopen, one "[TITLE] <tid> forces KEY=VALUE (title
+ * profile)" line each (recomp_pack_apply_env_force). */
 int xba_pack_load(const char *files_dir, const char *xbe_path, xba_title_main_fn *main_out,
                   char *reason, size_t reason_n);
 

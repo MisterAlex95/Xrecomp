@@ -8,7 +8,7 @@
  *   - the XBE's title ID (certificate, 8 upper-case hex digits);
  *   - pack.json, read and checked the way tools/prepare/pack.py `check` and
  *     the app's Pack.check do (format, title_id, abi, shell_abi, lib,
- *     lib_size);
+ *     lib_size), and its env_force options, set over recomp.cfg;
  *   - dlopen + dlsym of the symbols a pack exports, each one checked to come
  *     from the pack itself, not from a library it depends on.
  *
@@ -29,6 +29,8 @@ extern "C" {
 
 #define RECOMP_PACK_FORMAT 1
 #define RECOMP_PACK_PATH_MAX 1024
+/* env_force entries a pack.json may carry (tools/prepare/pack.py ENV_FORCE_MAX). */
+#define RECOMP_PACK_ENV_FORCE_MAX 16
 
 /* Results of recomp_pack_find / recomp_pack_open. */
 enum {
@@ -49,6 +51,11 @@ typedef struct recomp_pack_meta {
     char lib_sha256[72];
     char entry[64];            /* "recomp_title_main" when absent */
     unsigned have;             /* RECOMP_PACK_HAVE_* bits: fields found */
+    /* "env_force": {"RECOMP_LSFG": "0", ...}, the title profile's forced
+     * options (title.json). Entries past RECOMP_PACK_ENV_FORCE_MAX, or with a
+     * key or value too long for the arrays, are counted in env_force_dropped. */
+    int env_force_n, env_force_dropped;
+    struct { char key[64]; char value[256]; } env_force[RECOMP_PACK_ENV_FORCE_MAX];
 } recomp_pack_meta;
 
 #define RECOMP_PACK_HAVE_FORMAT    0x01u
@@ -74,10 +81,18 @@ int recomp_pack_xbe_title_id(const char *path, char out[9]);
  * Returns 0, or -1 when s is not 1 to 8 hex digits. */
 int recomp_pack_norm_title_id(const char *s, char out[9]);
 
-/* Parses pack.json (a flat JSON object; unknown keys and nested values are
- * skipped). Returns 0, or -1 with why in err when it is not JSON or a known
- * field has the wrong type. Absent fields are left out of m->have. */
+/* Parses pack.json (a flat JSON object, plus "env_force", an object of
+ * strings; unknown keys and nested values are skipped). Returns 0, or -1 with
+ * why in err when it is not JSON or a known field has the wrong type. Absent
+ * fields are left out of m->have. */
 int recomp_pack_parse(const char *json, size_t len, recomp_pack_meta *m, char *err, size_t errn);
+
+/* Applies m->env_force with recomp_cfg_force (recomp_cfg.h): each entry set
+ * over whatever recomp.cfg or the environment said, one line each,
+ * "[TITLE] <tid> forces KEY=VALUE (title profile)". Call it after recomp.cfg
+ * and before anything reads those options (the window, the frame generation
+ * pacer). Returns the number of options set. */
+int recomp_pack_apply_env_force(const recomp_pack_meta *m);
 
 /* The checks on a parsed pack.json for title tid, this shell's ABI and the
  * pack directory: every required field, format 1, title_id = tid, abi = the

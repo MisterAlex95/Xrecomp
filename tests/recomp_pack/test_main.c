@@ -128,6 +128,47 @@ static void test_parse(void)
     CHECK(recomp_pack_parse("{\"format\":1", 11, &m, err, sizeof err) == -1);
 }
 
+/* "env_force" (title.json, copied by tools/prepare/pack.py): parsed, then set over the environment. */
+static void test_env_force(void)
+{
+    recomp_pack_meta m;
+    char err[160];
+    const char *j = "{\"title_id\":\"4541005b\",\"env_force\":{\"RECOMP_LSFG\":\"0\",\"RECOMP_GPU_FPS_CAP\":\"60\","
+                    "\"LD_PRELOAD\":\"x\"},\"format\":1}";
+    char big[4096];
+
+    CHECK(recomp_pack_parse(j, strlen(j), &m, err, sizeof err) == 0);
+    CHECK(m.format == 1 && m.env_force_n == 3 && m.env_force_dropped == 0);
+    CHECK(!strcmp(m.env_force[0].key, "RECOMP_LSFG") && !strcmp(m.env_force[0].value, "0"));
+    CHECK(!strcmp(m.env_force[1].key, "RECOMP_GPU_FPS_CAP") && !strcmp(m.env_force[1].value, "60"));
+    setenv("RECOMP_LSFG", "1", 1);            /* as recomp.cfg would have set it */
+    unsetenv("RECOMP_GPU_FPS_CAP");
+    unsetenv("LD_PRELOAD_X");
+    CHECK(recomp_pack_apply_env_force(&m) == 2);   /* LD_PRELOAD refused */
+    CHECK(getenv("RECOMP_LSFG") && !strcmp(getenv("RECOMP_LSFG"), "0"));
+    CHECK(getenv("RECOMP_GPU_FPS_CAP") && !strcmp(getenv("RECOMP_GPU_FPS_CAP"), "60"));
+    unsetenv("RECOMP_LSFG");
+    unsetenv("RECOMP_GPU_FPS_CAP");
+
+    /* No env_force, an empty one: nothing to set. */
+    CHECK(recomp_pack_parse("{\"env_force\":{}}", strlen("{\"env_force\":{}}"), &m, err, sizeof err) == 0 && m.env_force_n == 0);
+    CHECK(recomp_pack_apply_env_force(&m) == 0);
+    /* Wrong types fail like any known field. */
+    CHECK(recomp_pack_parse("{\"env_force\":[]}", strlen("{\"env_force\":[]}"), &m, err, sizeof err) == -1 && strstr(err, "env_force"));
+    CHECK(recomp_pack_parse("{\"env_force\":{\"RECOMP_A\":1}}", strlen("{\"env_force\":{\"RECOMP_A\":1}}"), &m, err, sizeof err) == -1
+          && strstr(err, "env_force"));
+    CHECK(recomp_pack_parse("{\"env_force\":{\"RECOMP_A\":\"1\"", strlen("{\"env_force\":{\"RECOMP_A\":\"1\""), &m, err, sizeof err) == -1);
+    /* Too many entries: the first RECOMP_PACK_ENV_FORCE_MAX kept, the others counted. */
+    {
+        size_t k = (size_t)snprintf(big, sizeof big, "{\"env_force\":{");
+        for (int i = 0; i < RECOMP_PACK_ENV_FORCE_MAX + 2; i++)
+            k += (size_t)snprintf(big + k, sizeof big - k, "%s\"RECOMP_T%d\":\"%d\"", i ? "," : "", i, i);
+        snprintf(big + k, sizeof big - k, "}}");
+        CHECK(recomp_pack_parse(big, strlen(big), &m, err, sizeof err) == 0);
+        CHECK(m.env_force_n == RECOMP_PACK_ENV_FORCE_MAX && m.env_force_dropped == 2);
+    }
+}
+
 static void test_validate_and_find(void)
 {
     recomp_pack_meta m;
@@ -305,6 +346,7 @@ int main(int argc, char **argv)
 
     test_title_id();
     test_parse();
+    test_env_force();
     test_validate_and_find();
     if (argc >= 5)
         test_routing(argv[1], argv[2], argv[3], argv[4]);

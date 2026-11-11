@@ -2,6 +2,7 @@
  * (recomp_pack.h, docs/android/prepare.md « The loader »). */
 #define _GNU_SOURCE
 #include "recomp_pack.h"
+#include "recomp_cfg.h"
 
 #include <dlfcn.h>
 #include <errno.h>
@@ -287,6 +288,42 @@ static int jskip(jr *r, int depth)
     return -1;
 }
 
+/* "env_force": {"KEY": "VALUE", ...} into m->env_force. A value that is not
+ * a string is an error; an entry that does not fit is counted and dropped. */
+static int jenv_force(jr *r, recomp_pack_meta *m, char *err, size_t errn)
+{
+    if (r->p >= r->end || *r->p != '{') { say(err, errn, "env_force: object expected"); return -1; }
+    r->p++;
+    ws(r);
+    if (r->p < r->end && *r->p == '}') { r->p++; return 0; }
+    for (;;) {
+        char key[64], value[256];
+        int kfit = 1, vfit = 1;
+        ws(r);
+        if (jstring(r, key, sizeof key, &kfit)) goto bad;
+        ws(r);
+        if (r->p >= r->end || *r->p != ':') { r->err = "':' expected"; goto bad; }
+        r->p++;
+        ws(r);
+        if (r->p >= r->end || *r->p != '"') { say(err, errn, "env_force: string values expected"); return -1; }
+        if (jstring(r, value, sizeof value, &vfit)) goto bad;
+        if (kfit && vfit && m->env_force_n < RECOMP_PACK_ENV_FORCE_MAX) {
+            memcpy(m->env_force[m->env_force_n].key, key, sizeof key);
+            memcpy(m->env_force[m->env_force_n].value, value, sizeof value);
+            m->env_force_n++;
+        } else {
+            m->env_force_dropped++;
+        }
+        ws(r);
+        if (r->p < r->end && *r->p == ',') { r->p++; continue; }
+        if (r->p < r->end && *r->p == '}') { r->p++; return 0; }
+        r->err = "',' or '}' expected";
+        goto bad;
+    }
+bad:
+    return -2;     /* r->err says why: the caller's "bad JSON at byte N" */
+}
+
 typedef struct { const char *key; unsigned bit; size_t off; size_t size; } field;
 
 #define STR_FIELD(k, bit, member) { k, bit, offsetof(recomp_pack_meta, member), sizeof(((recomp_pack_meta *)0)->member) }
@@ -332,7 +369,11 @@ int recomp_pack_parse(const char *json, size_t len, recomp_pack_meta *m, char *e
         const field *f = NULL;
         for (size_t i = 0; full && i < sizeof FIELDS / sizeof FIELDS[0]; i++)
             if (!strcmp(key, FIELDS[i].key)) f = &FIELDS[i];
-        if (!f) {
+        if (full && !strcmp(key, "env_force")) {
+            int rc = jenv_force(&r, m, err, errn);
+            if (rc == -1) return -1;
+            if (rc) goto bad;
+        } else if (!f) {
             if (jskip(&r, 1)) goto bad;
         } else if (f->size) {
             int fits = 1;
@@ -367,6 +408,21 @@ done:
 bad:
     say(err, errn, "bad JSON at byte %ld: %s", (long)(r.p - json), r.err ? r.err : "?");
     return -1;
+}
+
+int recomp_pack_apply_env_force(const recomp_pack_meta *m)
+{
+    char tid[9];
+    int n = 0;
+    if (recomp_pack_norm_title_id(m->title_id, tid))
+        snprintf(tid, sizeof tid, "?");
+    for (int i = 0; i < m->env_force_n; i++)
+        if (recomp_cfg_force(tid, m->env_force[i].key, m->env_force[i].value) == 0)
+            n++;
+    if (m->env_force_dropped)
+        fprintf(stderr, "[TITLE] %s: %d env_force entr%s of pack.json ignored (too many or too long)\n", tid,
+                m->env_force_dropped, m->env_force_dropped == 1 ? "y" : "ies");
+    return n;
 }
 
 int recomp_pack_validate(const recomp_pack_meta *m, const char *tid, long long shell_abi,
