@@ -264,3 +264,11 @@ the lock stalls D3D init (RECOMP_GUEST_CPU_TRACE).
   at ext+0x418 from the FNO handler 0x00875801; without it the count wrapped at 65536). It warns when MIE stays
   masked > 2 s with a pad plugged (naming the DPC running on the timer thread), and with the gate off the IRQ
   report counts DPCs that started while a guest thread was raised.
+- Verified on the Mac with the profile default (gate on), RECOMP_GPU=1, 5 runs in parallel: driven scenario 70 s
+  30 of 30 kept input (6/6 pad commands seen, ~22,000 pad reports each, no [OHCI0] WARNING, no stall). Debug build
+  with the TD allocator window widened 50 us: gate on 10 of 10 kept input; RECOMP_DISPATCH_GATE=0 3 of 5 lost it
+  (no report for 5 s warning, reports frozen at 4,700-6,700), the other 2 kept it at ~120 reports/s against ~400/s
+  gate on; every gate-off run printed the "[IRQ] gate off: N DPC(s) started while a guest thread was at
+  DISPATCH_LEVEL" line. RECOMP_PAD_PRESS=0x10, 150 s: 10 of 10 played lionhead_logo, Microsoft_Logo, intro_comp,
+  dream_sequence_comp in order, no 0.00 fps, no warning. In Oakvale, 2 gate-on and 2 gate-off runs at once:
+  28.1-29.5 fps both ways.
