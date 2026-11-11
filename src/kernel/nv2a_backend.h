@@ -218,6 +218,14 @@ typedef struct {
  * (transform_vertex). The executor clips at w > 0 and at the near plane
  * z >= state->depth_min (SET_CLIP_MIN). fog_*: the fog unit's registers;
  * the fog factor from oFog.x is fog_factor() in nv2a_pb_exec.c. */
+/* A vertex array as the title programmed it (SET_VERTEX_DATA_ARRAY_*):
+ * element i of the input is at guest address offset + i * stride, in NV097
+ * data type `type` (0 D3DCOLOR, 1 normalised short, 2 float, 4 normalised
+ * unsigned byte, 5 short, 6 packed 11:11:10) with `size` components. */
+typedef struct {
+    uint32_t offset, type, size, stride;
+} Nv2aRawAttr;
+
 typedef struct {
     const uint32_t (*ins)[4];
     uint32_t        ins_count;
@@ -234,6 +242,15 @@ typedef struct {
     float           aa_sx, aa_sy;
     uint32_t        fog_enable, fog_mode;
     float           fog_param[2];
+    /* NV2A_BACKEND_CAP_RAW_VERTEX only. raw non-NULL: attrs is NULL and the
+     * inputs in `streams` are to be read from guest memory, raw[a] for v[a]
+     * (16 entries); `indices` count from element raw_first (vertex i of the
+     * batch is element raw_first + i of every stream) and vertex_count
+     * elements from raw_first on are inside guest memory. A back end that
+     * cannot read some format returns 0 from draw_program; the executor then
+     * sends the same batch gathered (raw NULL). */
+    const Nv2aRawAttr *raw;
+    uint32_t        raw_first;
 } Nv2aProgramBatch;
 
 typedef struct {
@@ -257,6 +274,10 @@ typedef struct {
  * hardware assembles strips. Without it strips arrive as (i, i+1, i+2). */
 #define NV2A_BACKEND_CAP_CULL  0x2u
 #define NV2A_BACKEND_CAP_PROGRAM 0x4u   /* with CAP_PIXEL and draw_program */
+/* With CAP_PROGRAM: vertex-program batches drawn from vertex arrays (not
+ * INLINE_ARRAY) may arrive with their arrays as the title stored them
+ * (Nv2aProgramBatch.raw) instead of gathered. */
+#define NV2A_BACKEND_CAP_RAW_VERTEX 0x8u
 
 typedef struct {
     /* flags: CLEAR_SURFACE bits (Z 0x1, stencil 0x2, colour 0xF0).

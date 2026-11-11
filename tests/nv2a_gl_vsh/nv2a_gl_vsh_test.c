@@ -86,6 +86,17 @@ static void random_ins(uint32_t w[4], int final)
 #define NV 64                           /* vertices per program */
 
 static GLuint s_vao, s_vbo, s_tfb, s_fs;
+/* Raw inputs (RECOMP_GPU_VBO): when s_raw.on, gpu_run reads attribute
+ * s_raw.k from s_raw.bytes in the guest format nv2a_gl_vsh_attr gives,
+ * as nv2a_gl.c's raw_bind sets it up, instead of from gathered vec4s. */
+static struct {
+    int on;
+    uint32_t k, stride;
+    Nv2aGlVshAttr at;
+    const uint8_t *bytes;
+    size_t len;
+    GLuint vao, vbo;
+} s_raw;
 static char s_body[131072], s_mut[131072];
 
 static GLuint compile(GLenum type, const char *body)
@@ -163,9 +174,31 @@ static int gpu_run(const char *body, const float (*in)[16][4], Nv2aVshOutput *ou
         if (loc >= 0)
             glUniform4fv(loc, 1, s_const[i]);
     }
-    glBindVertexArray(s_vao);
-    glBindBuffer(GL_ARRAY_BUFFER, s_vbo);
-    glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(nv * 16 * 4 * sizeof(float)), in, GL_STREAM_DRAW);
+    if (s_raw.on) {
+        static const GLenum type[4] = { GL_FLOAT, GL_UNSIGNED_BYTE, GL_SHORT, GL_INT };
+        if (!s_raw.vao) {
+            glGenVertexArrays(1, &s_raw.vao);
+            glGenBuffers(1, &s_raw.vbo);
+        }
+        glBindVertexArray(s_raw.vao);
+        glBindBuffer(GL_ARRAY_BUFFER, s_raw.vbo);
+        glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)s_raw.len, s_raw.bytes, GL_STREAM_DRAW);
+        for (i = 0; i < 16; i++)
+            glDisableVertexAttribArray(i);
+        glEnableVertexAttribArray(s_raw.k);
+        if (s_raw.at.kind == NV2A_GL_ATTR_INT)
+            glVertexAttribIPointer(s_raw.k, (GLint)s_raw.at.comps, GL_INT,
+                                   (GLsizei)s_raw.stride, NULL);
+        else
+            glVertexAttribPointer(s_raw.k, (GLint)s_raw.at.comps, type[s_raw.at.kind],
+                                  s_raw.at.kind == NV2A_GL_ATTR_UBYTE, (GLsizei)s_raw.stride,
+                                  NULL);
+    } else {
+        glBindVertexArray(s_vao);
+        glBindBuffer(GL_ARRAY_BUFFER, s_vbo);
+        glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(nv * 16 * 4 * sizeof(float)), in,
+                     GL_STREAM_DRAW);
+    }
     glBindBufferBase(GL_TRANSFORM_FEEDBACK_BUFFER, 0, s_tfb);
     glBufferData(GL_TRANSFORM_FEEDBACK_BUFFER, (GLsizeiptr)(nv * sizeof(Nv2aVshOutput)),
                  NULL, GL_STREAM_READ);
@@ -251,6 +284,125 @@ static int run_both(const uint32_t (*prog)[4], uint32_t len, const float (*in)[1
     if (!need_gpu)
         return 1;
     return gpu_run(s_body, in, got, nv);
+}
+
+/* ---- raw attribute formats ----------------------------------------------- */
+
+/* fetch_attr (nv2a_pb_exec.c), element at p: what a gathered input holds. */
+static void ref_fetch(uint32_t type, uint32_t size, const uint8_t *p, float out[4])
+{
+    uint32_t i;
+
+    out[0] = out[1] = out[2] = 0.0f;
+    out[3] = 1.0f;
+    switch (type) {
+    case 0:
+        out[0] = (float)p[2] / 255.0f; out[1] = (float)p[1] / 255.0f;
+        out[2] = (float)p[0] / 255.0f; out[3] = (float)p[3] / 255.0f;
+        break;
+    case 2:
+        for (i = 0; i < size; i++) memcpy(&out[i], p + 4 * i, 4);
+        break;
+    case 4:
+        for (i = 0; i < size; i++) out[i] = (float)p[i] / 255.0f;
+        break;
+    case 1:
+    case 5:
+        for (i = 0; i < size; i++) {
+            int16_t v;
+            memcpy(&v, p + 2 * i, 2);
+            out[i] = type == 1 ? (float)v / 32767.0f : (float)v;
+        }
+        break;
+    case 6: {
+        uint32_t v;
+        memcpy(&v, p, 4);
+        out[0] = (float)((int32_t)(v << 21) >> 21) / 1023.0f;
+        out[1] = (float)((int32_t)(v << 10) >> 21) / 1023.0f;
+        out[2] = (float)((int32_t)v >> 22) / 511.0f;
+        break;
+    }
+    }
+}
+
+/* Every format fetch_attr reads, in every size: the program copies v[k] to
+ * oT0 (and to oD0, through the colour clamp); the interpreter's output on
+ * fetch_attr's floats, the gathered GLSL path and the raw GLSL path must
+ * agree. */
+static void run_formats(void)
+{
+    static const uint32_t fmts[][2] = {
+        { 0, 4 }, { 1, 1 }, { 1, 2 }, { 1, 3 }, { 1, 4 }, { 2, 1 }, { 2, 2 }, { 2, 3 },
+        { 2, 4 }, { 4, 1 }, { 4, 2 }, { 4, 3 }, { 4, 4 }, { 5, 1 }, { 5, 2 }, { 5, 3 },
+        { 5, 4 }, { 6, 1 }
+    };
+    static float in[NV][16][4];
+    static uint8_t bytes[NV * 64];
+    static Nv2aVshOutput ref[NV], got[NV];
+    Src rv = { 2, 0, SWZ_ID, 0 }, rr0 = { 1, 0, SWZ_ID, 0 };
+    uint32_t w[2][4], f, v, b;
+    Nv2aGlVshAttr at;
+
+    CHECK(!nv2a_gl_vsh_attr(3, 1, &at) && !nv2a_gl_vsh_attr(2, 5, &at)
+          && !nv2a_gl_vsh_attr(2, 0, &at) && !nv2a_gl_vsh_attr(7, 1, &at));
+    for (f = 0; f < sizeof fmts / sizeof fmts[0]; f++) {
+        uint32_t type = fmts[f][0], size = fmts[f][1], k = (f * 5u + 1u) % 16u, stride;
+        uint64_t fmt;
+        char what[48];
+        int bad;
+
+        CHECK(nv2a_gl_vsh_attr(type, size, &at));
+        stride = ((at.bytes + 3u) & ~3u) + 4u * (f % 3u);
+        for (b = 0; b < sizeof bytes; b++)
+            bytes[b] = (uint8_t)rnd();
+        for (v = 0; v < NV; v++) {
+            uint8_t *p = bytes + v * stride;
+            if (type == 2)
+                for (b = 0; b < size; b++) {
+                    float x = rndf();
+                    memcpy(p + 4 * b, &x, 4);
+                }
+            if ((type == 1 || type == 5) && v < 4) {
+                /* The ends of the range: -32768 reads a bit below -1. */
+                static const int16_t ends[4] = { -32768, 32767, 0, -1 };
+                for (b = 0; b < size; b++)
+                    memcpy(p + 2 * b, &ends[(v + b) & 3], 2);
+            }
+            memset(in[v], 0, sizeof in[v]);
+            ref_fetch(type, size, p, in[v][k]);
+        }
+        /* MOV oT0 = v[k]; MOV oD0 = v[k], FINAL. */
+        encode(w[0], 1, 0, rv, rr0, rr0, 0, k, 0, 0, 0, 0xF, 1, 9, 0, 0, 0);
+        encode(w[1], 1, 0, rv, rr0, rr0, 0, k, 0, 0, 0, 0xF, 1, 3, 0, 0, 1);
+        snprintf(what, sizeof what, "type %u size %u gathered", type, size);
+        if (run_both((const uint32_t (*)[4])w, 2, (const float (*)[16][4])in, NV, ref, got, 1)) {
+            bad = compare(ref, got, NV, 2, what);
+            CHECK(bad == 0);
+        } else {
+            CHECK(0);
+        }
+        fmt = (uint64_t)at.fmt << (4 * k);
+        CHECK(nv2a_gl_vsh_body_fmt((const uint32_t (*)[4])w, 2, NV2A_GL_VSH_CAPTURE, fmt,
+                                   s_body, sizeof s_body, NULL) > 0);
+        if (at.fmt)
+            CHECK(strstr(s_body, "in vec4 v") == NULL);
+        s_raw.on = 1;
+        s_raw.k = k;
+        s_raw.stride = stride;
+        s_raw.at = at;
+        s_raw.bytes = bytes;
+        s_raw.len = (size_t)NV * stride;
+        snprintf(what, sizeof what, "type %u size %u raw", type, size);
+        if (gpu_run(s_body, (const float (*)[16][4])in, got, NV)) {
+            bad = compare(ref, got, NV, 2, what);
+            CHECK(bad == 0);
+        } else {
+            CHECK(0);
+        }
+        s_raw.on = 0;
+    }
+    printf("formats: %u attribute formats, gathered and raw\n",
+           (uint32_t)(sizeof fmts / sizeof fmts[0]));
 }
 
 /* ---- random programs ----------------------------------------------------- */
@@ -476,6 +628,8 @@ int main(void)
         }
         (void)rc;
     }
+
+    run_formats();
 
     /* ---- random programs ------------------------------------------------- */
     make_programs();

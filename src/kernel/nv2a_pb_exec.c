@@ -4288,6 +4288,51 @@ static int pv_alloc(void)
     return 1;
 }
 
+/* RECOMP_GPU_VBO (NV2A_BACKEND_CAP_RAW_VERTEX): can the batch go to the back
+ * end with its vertex arrays as stored? Every streamed input in a format
+ * fetch_attr reads, the batch's index range at most 65536 elements and
+ * inside guest memory for every stream. *lo, *hi: the smallest and largest
+ * index. Inline arrays live in the pushbuffer copy, not guest memory: no. */
+static Nv2aRawAttr s_raw[NV2A_VSH_INPUTS];
+
+static int raw_batch_ok(uint32_t streams, uint32_t n, uint32_t *lo, uint32_t *hi)
+{
+    uint32_t a, i, mn = 0xFFFFFFFFu, mx = 0;
+
+    if (s_gpu.inline_active || !n
+        || !(s_backend->caps & NV2A_BACKEND_CAP_RAW_VERTEX))
+        return 0;
+    for (a = 0; a < NV2A_VSH_INPUTS; a++) {
+        const VertexAttr *at = &s_gpu.attr[a];
+        if (!(streams & (1u << a)))
+            continue;
+        if (!at->offset || !at->size || at->size > 4 || at->type == 3 || at->type > 6)
+            return 0;
+    }
+    for (i = 0; i < n; i++) {
+        uint32_t ix = s_gpu.idx[i];
+        if (ix < mn) mn = ix;
+        if (ix > mx) mx = ix;
+    }
+    if (mx - mn >= 65536u)
+        return 0;
+    for (a = 0; a < NV2A_VSH_INPUTS; a++) {
+        const VertexAttr *at = &s_gpu.attr[a];
+        if (!(streams & (1u << a)))
+            continue;
+        if (!guest_span_ok((uint64_t)at->offset + (uint64_t)mn * at->stride,
+                           (mx - mn) * at->stride + attr_elem_bytes(at)))
+            return 0;
+        s_raw[a].offset = at->offset;
+        s_raw[a].type = at->type;
+        s_raw[a].size = at->size;
+        s_raw[a].stride = at->stride;
+    }
+    *lo = mn;
+    *hi = mx;
+    return 1;
+}
+
 static int raster_batch_backend_program(void)
 {
     Nv2aProgramBatch pb;
@@ -4298,8 +4343,9 @@ static int raster_batch_backend_program(void)
     Nv2aBatch batch;
     static float imm[NV2A_VSH_INPUTS][4];
     uint32_t inputs, streams = 0, nstream = 0, n = s_gpu.idx_count, rows = 0;
-    uint32_t i, a, t = 0;
+    uint32_t i, a, t = 0, lo = 0, hi = 0;
     static int no_rc = -1;
+    int raw;
 
     if (!s_backend || !s_backend->draw_program
         || (s_backend->caps & (NV2A_BACKEND_CAP_PROGRAM | NV2A_BACKEND_CAP_PIXEL))
@@ -4325,6 +4371,19 @@ static int raster_batch_backend_program(void)
             streams |= 1u << a;
             nstream++;
         }
+    }
+
+    /* RECOMP_GPU_VBO: no gather, the back end reads the arrays itself;
+     * vertex i is element lo + i. */
+    raw = raw_batch_ok(streams, n, &lo, &hi);
+retry:
+    rows = 0;
+    t = 0;
+    if (raw) {
+        for (i = 0; i < n; i++)
+            s_pv.slot[i] = (uint16_t)(s_gpu.idx[i] - lo);
+        rows = hi - lo + 1;
+        goto gathered;
     }
 
     /* One row per unique index. DRAW_ARRAYS and inline arrays count up from
@@ -4409,7 +4468,9 @@ gathered:
 
     pb.constants = nv2a_vsh_constants();
     pb.const_stamp = nv2a_vsh_constant_stamps(&pb.const_serial);
-    pb.attrs = s_pv.attrs;
+    pb.attrs = raw ? NULL : s_pv.attrs;
+    pb.raw = raw ? s_raw : NULL;
+    pb.raw_first = raw ? lo : 0;
     pb.vertex_count = rows;
     pb.streams = streams;
     pb.imm = (const float (*)[4])imm;
@@ -4438,8 +4499,13 @@ gathered:
     }
     if (!t)
         return 1;                       /* nothing to draw: done all the same */
-    if (!s_backend->draw_program(&surf, &batch))
+    if (!s_backend->draw_program(&surf, &batch)) {
+        if (raw) {
+            raw = 0;                    /* declined as stored: send it gathered */
+            goto retry;
+        }
         return 0;
+    }
 
     s_gpu.batches_program++;
     s_gpu.verts_program += n;

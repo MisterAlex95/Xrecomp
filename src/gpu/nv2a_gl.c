@@ -81,6 +81,10 @@ static struct {
     uint32_t target_switches;       /* draw/clear framebuffer changes (bind_target) */
     uint32_t frames;                /* flips since the line was last printed */
     uint32_t cache_loads;           /* programs from the binary cache */
+    /* RECOMP_GPU_VBO: batches drawn from cached guest vertex buffers, bytes
+     * uploaded into them and hashed to validate them, buffers created,
+     * buffers whose bytes changed, vertex arrays created. */
+    uint32_t vbo_draws, vbo_kb, vbo_hash_kb, vbo_new, vbo_changed, vao_new;
 } s_st;
 
 /* RECOMP_GPU_RT_RELAYOUT_READBACK=1: read a target back when the title
@@ -1634,6 +1638,7 @@ typedef struct {
     uint32_t count;
     char *src;
     uint64_t src_hash;
+    uint64_t fmt;                   /* input formats (nv2a_gl_vsh_body_fmt) */
     GLuint sh;                      /* 0 until compiled */
     int failed;                     /* translation or compile failed: do not retry */
 } GlVsh;
@@ -1653,10 +1658,14 @@ static uint64_t hash_str(uint64_t h, const char *t)
     return h;
 }
 
-static GlVsh *vsh_get(const Nv2aProgramBatch *pb)
+/* The shader for program pb reading its inputs in formats `fmt` (0: all
+ * gathered vec4s). The input formats are part of the key (and of hash,
+ * which prog_get keys its programs on): the same program drawn from
+ * gathered and raw vertices is two shaders. */
+static GlVsh *vsh_get(const Nv2aProgramBatch *pb, uint64_t fmt)
 {
     static char body[131072];
-    uint64_t h = pb->hash ? pb->hash : 1;
+    uint64_t h = (pb->hash ^ (fmt * 0xC2B2AE3D27D4EB4Full)) | 1;
     uint32_t i, slot = (uint32_t)h & (NV_GL_MAX_VSH - 1);
     GlVsh *v = NULL;
 
@@ -1666,17 +1675,18 @@ static GlVsh *vsh_get(const Nv2aProgramBatch *pb)
             v = c;
             break;
         }
-        if (c->hash == h && c->count == pb->ins_count)
+        if (c->hash == h && c->count == pb->ins_count && c->fmt == fmt)
             return c->failed ? NULL : c;
     }
     if (!v)
         return NULL;                /* ponytail: 512 programs, then the CPU */
     v->hash = h;
     v->count = pb->ins_count;
-    if (!nv2a_gl_vsh_body(pb->ins, pb->ins_count,
-                          NV2A_GL_ES ? NV2A_GL_VSH_RENDER
-                                     : NV2A_GL_VSH_RENDER | NV2A_GL_VSH_CLIP_DISTANCE,
-                          body, sizeof body, NULL)
+    v->fmt = fmt;
+    if (!nv2a_gl_vsh_body_fmt(pb->ins, pb->ins_count,
+                              NV2A_GL_ES ? NV2A_GL_VSH_RENDER
+                                         : NV2A_GL_VSH_RENDER | NV2A_GL_VSH_CLIP_DISTANCE,
+                              fmt, body, sizeof body, NULL)
         || !(v->src = strdup(body))) {
         v->failed = 1;
         return NULL;
@@ -2752,6 +2762,305 @@ static void sync_constants(GlProg *p, const Nv2aProgramBatch *pb)
 
 static GLuint s_pvao, s_pvbo, s_pebo;
 
+/* ---- guest vertex buffers (RECOMP_GPU_VBO) -------------------------------
+ *
+ * A batch that arrives raw (Nv2aProgramBatch.raw) is drawn from GL buffers
+ * holding the title's own vertex bytes, in their own formats (the shader
+ * converts them, nv2a_gl_vsh_attr), instead of from floats the executor
+ * gathered vertex by vertex. Fable's 1000 indexed batches a frame read the
+ * same 1050 vertex ranges every frame, unchanged.
+ *
+ *   buffer   one per (first byte, length, stride): the bytes of the batch's
+ *            index range [raw_first, raw_first + vertex_count) of the
+ *            streams that interleave in it (same stride, starting less than
+ *            a stride apart); the indices count from that range's start.
+ *   validity the bytes are hashed again the first time a buffer is used in
+ *            a frame, and re-uploaded when they changed. A buffer created or
+ *            changed this frame is hashed at every use: a ring of dynamic
+ *            vertices rewritten within the frame is caught. A static buffer
+ *            rewritten mid-frame is caught at the next frame.
+ *   bounds   NV_GL_MAX_VB buffers or NV_GL_VB_BYTES bytes, then every
+ *            buffer (and every vertex array, which name them) is dropped.
+ *   arrays   one vertex array object per layout (buffers, offsets, formats,
+ *            strides), with the shared element buffer s_pebo. */
+#define NV_GL_MAX_VB   4096         /* power of two */
+#define NV_GL_VB_BYTES (64u << 20)
+#define NV_GL_MAX_VAO  1024         /* power of two */
+
+typedef struct {
+    uint32_t va, len, stride;       /* len 0: empty slot */
+    GLuint buf;
+    uint64_t hash;
+    uint32_t checked;               /* s_frame + 1 of the last hash, 0 never */
+    uint32_t uploaded;              /* s_frame + 1 of the last upload */
+} GlVb;
+
+typedef struct {
+    uint32_t streams;
+    GLuint buf[16];
+    uint32_t off[16];
+    uint8_t kind[16], comps[16], stride[16];
+} GlVaoKey;
+
+typedef struct {
+    GlVaoKey key;
+    uint64_t hash;
+    GLuint vao;                     /* 0: empty slot */
+} GlVao;
+
+static GlVb s_vb[NV_GL_MAX_VB];
+static uint32_t s_nvb;
+static size_t s_vb_bytes;
+static uint32_t s_vb_gen;           /* vb_drop_all calls */
+static GlVao *s_vao_cache;          /* NV_GL_MAX_VAO, allocated at first use */
+static uint32_t s_nvao;
+static int s_vbo_on;                /* RECOMP_GPU_VBO */
+
+/* hash_bytes in four independent lanes: vertex ranges are hashed every
+ * frame (~3 MB in Oakvale), and one multiply chain is latency bound. */
+static uint64_t vb_hash(const uint8_t *p, size_t n)
+{
+    uint64_t h0 = 0x9E3779B97F4A7C15ull ^ n, h1 = 0xC2B2AE3D27D4EB4Full,
+             h2 = 0x165667B19E3779F9ull, h3 = 0x27D4EB2F165667C5ull, w[4];
+    size_t i;
+
+    for (i = 0; i + 32 <= n; i += 32) {
+        memcpy(w, p + i, 32);
+        h0 = (h0 ^ w[0]) * 0xFF51AFD7ED558CCDull; h0 ^= h0 >> 29;
+        h1 = (h1 ^ w[1]) * 0xFF51AFD7ED558CCDull; h1 ^= h1 >> 29;
+        h2 = (h2 ^ w[2]) * 0xFF51AFD7ED558CCDull; h2 ^= h2 >> 29;
+        h3 = (h3 ^ w[3]) * 0xFF51AFD7ED558CCDull; h3 ^= h3 >> 29;
+    }
+    for (; i < n; i++)
+        h0 = (h0 ^ p[i]) * 0x100000001B3ull;
+    s_st.vbo_hash_kb += (uint32_t)(n >> 10);
+    return h0 ^ (h1 * 31u) ^ (h2 * 961u) ^ (h3 * 29791u);
+}
+
+static void vao_drop_all(void)
+{
+    uint32_t i;
+
+    if (!s_vao_cache)
+        return;
+    for (i = 0; i < NV_GL_MAX_VAO; i++)
+        if (s_vao_cache[i].vao) {
+            if (s_sh.vao == s_vao_cache[i].vao)
+                sh_vao(0);
+            glDeleteVertexArrays(1, &s_vao_cache[i].vao);
+        }
+    memset(s_vao_cache, 0, NV_GL_MAX_VAO * sizeof *s_vao_cache);
+    s_nvao = 0;
+}
+
+static void vb_drop_all(void)
+{
+    uint32_t i;
+
+    vao_drop_all();                 /* they name the buffers */
+    for (i = 0; i < NV_GL_MAX_VB; i++)
+        if (s_vb[i].buf) {
+            if (s_sh.array_buf == s_vb[i].buf)
+                sh_array_buffer(0);
+            glDeleteBuffers(1, &s_vb[i].buf);
+        }
+    memset(s_vb, 0, sizeof s_vb);
+    s_vb_gen++;
+    s_nvb = 0;
+    s_vb_bytes = 0;
+}
+
+/* The GL buffer holding guest bytes [va, va + len), up to date. */
+static GLuint vb_get(uint32_t va, uint32_t len, uint32_t stride)
+{
+    uint32_t h = (va * 2654435761u) ^ (len * 0x85EBCA6Bu) ^ (stride * 0xC2B2AE35u);
+    uint32_t i, slot = (h ^ (h >> 15)) & (NV_GL_MAX_VB - 1);
+    const uint8_t *src = guest(va);
+    GlVb *e = NULL;
+
+    for (i = 0; i < NV_GL_MAX_VB; i++) {
+        GlVb *c = &s_vb[(slot + i) & (NV_GL_MAX_VB - 1)];
+        if (!c->len) {
+            e = c;
+            break;
+        }
+        if (c->va == va && c->len == len && c->stride == stride) {
+            /* Stable (hashed equal in a frame after its upload) and already
+             * checked this frame: trust it. */
+            if (c->checked != s_frame + 1 || c->uploaded == s_frame + 1) {
+                uint64_t hh = vb_hash(src, len);
+                if (hh != c->hash) {
+                    sh_array_buffer(c->buf);
+                    glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)len, src, GL_DYNAMIC_DRAW);
+                    c->hash = hh;
+                    c->uploaded = s_frame + 1;
+                    s_st.vbo_changed++;
+                    s_st.vbo_kb += len >> 10;
+                }
+                c->checked = s_frame + 1;
+            }
+            return c->buf;
+        }
+    }
+    if (!e || s_nvb >= NV_GL_MAX_VB * 3 / 4 || s_vb_bytes + len > NV_GL_VB_BYTES) {
+        if (s_verbose)
+            fprintf(stderr, "  [GPUGL] vertex buffer cache full (%u buffers, %zu KB):"
+                            " dropping it at frame %u\n", s_nvb, s_vb_bytes >> 10, s_frame);
+        vb_drop_all();
+        return vb_get(va, len, stride);
+    }
+    e->va = va;
+    e->len = len;
+    e->stride = stride;
+    e->hash = vb_hash(src, len);
+    e->checked = e->uploaded = s_frame + 1;
+    glGenBuffers(1, &e->buf);
+    sh_array_buffer(e->buf);
+    glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)len, src, GL_STATIC_DRAW);
+    s_nvb++;
+    s_vb_bytes += len;
+    s_st.vbo_new++;
+    s_st.vbo_kb += len >> 10;
+    return e->buf;
+}
+
+static GLuint vao_get(const GlVaoKey *k)
+{
+    uint64_t h = hash_str(0xCBF29CE484222325ull, "");
+    const uint8_t *kb = (const uint8_t *)k;
+    uint32_t i, a, slot;
+    GlVao *e = NULL;
+    static const GLenum gl_type[4] = { GL_FLOAT, GL_UNSIGNED_BYTE, GL_SHORT, GL_INT };
+
+    for (i = 0; i < sizeof *k; i++)
+        h = (h ^ kb[i]) * 0x100000001B3ull;
+    if (!s_vao_cache
+        && !(s_vao_cache = (GlVao *)calloc(NV_GL_MAX_VAO, sizeof *s_vao_cache)))
+        return 0;
+    slot = (uint32_t)h & (NV_GL_MAX_VAO - 1);
+    for (i = 0; i < NV_GL_MAX_VAO; i++) {
+        GlVao *c = &s_vao_cache[(slot + i) & (NV_GL_MAX_VAO - 1)];
+        if (!c->vao) {
+            e = c;
+            break;
+        }
+        if (c->hash == h && memcmp(&c->key, k, sizeof *k) == 0)
+            return c->vao;
+    }
+    if (!e || s_nvao >= NV_GL_MAX_VAO * 3 / 4) {
+        vao_drop_all();
+        return vao_get(k);
+    }
+    e->key = *k;
+    e->hash = h;
+    glGenVertexArrays(1, &e->vao);
+    sh_vao(e->vao);
+    for (a = 0; a < 16; a++) {
+        if (!(k->streams & (1u << a)))
+            continue;
+        sh_array_buffer(k->buf[a]);
+        glEnableVertexAttribArray(a);
+        if (k->kind[a] == NV2A_GL_ATTR_INT)
+            glVertexAttribIPointer(a, k->comps[a], GL_INT, k->stride[a],
+                                   (const void *)(size_t)k->off[a]);
+        else
+            glVertexAttribPointer(a, k->comps[a], gl_type[k->kind[a]],
+                                  k->kind[a] == NV2A_GL_ATTR_UBYTE, k->stride[a],
+                                  (const void *)(size_t)k->off[a]);
+    }
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, s_pebo);
+    s_nvao++;
+    s_st.vao_new++;
+    return e->vao;
+}
+
+/* Bind the vertex array for raw batch pb (its buffers up to date). The
+ * streams group into buffers by interleaving. 0: cannot (no memory). */
+static int raw_bind(const Nv2aProgramBatch *pb)
+{
+    GlVaoKey k;
+    struct { uint32_t lo, hi, base, stride; } g[16];
+    uint32_t gof[16], start[16], a, j, ng = 0, try;
+    Nv2aGlVshAttr at[16];
+    GLuint vao;
+
+    memset(&k, 0, sizeof k);
+    k.streams = pb->streams;
+    for (a = 0; a < 16; a++) {
+        const Nv2aRawAttr *r = &pb->raw[a];
+        uint32_t end;
+        if (!(pb->streams & (1u << a)))
+            continue;
+        if (!nv2a_gl_vsh_attr(r->type, r->size, &at[a]))
+            return 0;
+        start[a] = r->offset + pb->raw_first * r->stride;
+        end = start[a] + (pb->vertex_count - 1) * r->stride + at[a].bytes;
+        for (j = 0; j < ng; j++)
+            if (g[j].stride == r->stride
+                && (start[a] >= g[j].base ? start[a] - g[j].base : g[j].base - start[a])
+                       < r->stride)
+                break;
+        if (j == ng) {
+            g[ng].lo = start[a];
+            g[ng].hi = end;
+            g[ng].base = start[a];
+            g[ng].stride = r->stride;
+            ng++;
+        } else {
+            if (start[a] < g[j].lo) g[j].lo = start[a];
+            if (end > g[j].hi) g[j].hi = end;
+        }
+        gof[a] = j;
+    }
+    /* vb_get may drop the cache (and earlier groups' buffers) when it
+     * fills: then once more, into the emptied cache. */
+    for (try = 0; try < 2; try++) {
+        uint32_t gen = s_vb_gen;
+        for (j = 0; j < ng; j++) {
+            GLuint b = vb_get(g[j].lo, g[j].hi - g[j].lo, g[j].stride);
+            for (a = 0; a < 16; a++)
+                if ((pb->streams & (1u << a)) && gof[a] == j)
+                    k.buf[a] = b;
+        }
+        if (gen == s_vb_gen)
+            break;
+    }
+    for (a = 0; a < 16; a++) {
+        if (!(pb->streams & (1u << a)))
+            continue;
+        k.off[a] = start[a] - g[gof[a]].lo;
+        k.kind[a] = (uint8_t)at[a].kind;
+        k.comps[a] = (uint8_t)at[a].comps;
+        k.stride[a] = (uint8_t)pb->raw[a].stride;
+    }
+    if (!(vao = vao_get(&k)))
+        return 0;
+    sh_vao(vao);
+    return 1;
+}
+
+/* The input format word of raw batch pb (nv2a_gl_vsh_body_fmt); 0 for a
+ * gathered one. *ok 0: a stream in a format nv2a_gl_vsh_attr cannot read. */
+static uint64_t raw_formats(const Nv2aProgramBatch *pb, int *ok)
+{
+    uint64_t f = 0;
+    uint32_t a;
+    Nv2aGlVshAttr at;
+
+    *ok = 1;
+    if (!pb->raw)
+        return 0;
+    for (a = 0; a < 16; a++)
+        if (pb->streams & (1u << a)) {
+            if (!nv2a_gl_vsh_attr(pb->raw[a].type, pb->raw[a].size, &at)) {
+                *ok = 0;
+                return 0;
+            }
+            f |= (uint64_t)at.fmt << (4 * a);
+        }
+    return f;
+}
+
 /* A vertex-program batch (NV2A_BACKEND_CAP_PROGRAM): the program runs as a
  * GLSL vertex shader (nv2a_gl_vsh.c) on the gathered attributes; the pixel
  * side is gl_draw's. Declines (0) only when the program cannot be compiled
@@ -2767,11 +3076,15 @@ static int gl_draw_program(const Nv2aSurface *s, const Nv2aBatch *b)
     GlVsh *vsh;
     GlProg *p;
     GlTarget t;
-    int query = 0;
+    int query = 0, ok;
+    uint64_t fmt;
 
     if (!pb || !ps || !ensure_init())
         return 0;
-    if (!(vsh = vsh_get(pb)))
+    fmt = raw_formats(pb, &ok);
+    if (!ok || (pb->raw && !s_vbo_on))
+        return 0;                   /* the executor sends it gathered */
+    if (!(vsh = vsh_get(pb, fmt)))
         return 0;
     bind_stage_textures(ps, kind, tscale);
     if (s_sig_on && sig_batch(s, b, kind, pb->index_count / 3))
@@ -2810,12 +3123,18 @@ static int gl_draw_program(const Nv2aSurface *s, const Nv2aBatch *b)
 
     if (!s_pvao) {
         glGenVertexArrays(1, &s_pvao);
-        glGenBuffers(1, &s_pvbo);
         glGenBuffers(1, &s_pebo);
+        glGenBuffers(1, &s_pvbo);
     }
-    sh_vao(s_pvao);
     for (a = 0; a < 16; a++)
         nstream += (pb->streams >> a) & 1;
+    if (pb->raw) {
+        if (!raw_bind(pb))
+            return 0;
+        s_st.vbo_draws++;
+        goto bound;
+    }
+    sh_vao(s_pvao);
     sh_array_buffer(s_pvbo);
     glBufferData(GL_ARRAY_BUFFER,
                  (GLsizeiptr)((size_t)pb->vertex_count * nstream * 4 * sizeof(float)),
@@ -2838,16 +3157,17 @@ static int gl_draw_program(const Nv2aSurface *s, const Nv2aBatch *b)
         }
         s_sh.pv_streams = pb->streams;
     }
+    if (s_sh.pv_ebo != s_pebo) {
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, s_pebo);
+        s_sh.pv_ebo = s_pebo;
+    }
+bound:
     for (a = 0; a < 16; a++)
         if (!(pb->streams & (1u << a))
             && memcmp(s_sh.pv_imm[a], pb->imm[a], sizeof s_sh.pv_imm[a]) != 0) {
             glVertexAttrib4fv(a, pb->imm[a]);
             memcpy(s_sh.pv_imm[a], pb->imm[a], sizeof s_sh.pv_imm[a]);
         }
-    if (s_sh.pv_ebo != s_pebo) {
-        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, s_pebo);
-        s_sh.pv_ebo = s_pebo;
-    }
     glBufferData(GL_ELEMENT_ARRAY_BUFFER, (GLsizeiptr)(pb->index_count * sizeof(uint16_t)),
                  pb->indices, GL_STREAM_DRAW);
     if (rs->zpass_enable && s_qcount < NV_GL_MAX_QUERY) {
@@ -2870,7 +3190,7 @@ static int gl_draw_program(const Nv2aSurface *s, const Nv2aBatch *b)
     }
     s_st.draws++;
     s_st.vsh_draws++;
-    s_st.vsh_kb += (uint32_t)(((size_t)pb->vertex_count * nstream * 16
+    s_st.vsh_kb += (uint32_t)(((pb->raw ? 0 : (size_t)pb->vertex_count * nstream * 16)
                                + pb->index_count * 2) >> 10);
     s_st.tris += pb->index_count / 3;
     return 1;
@@ -2910,6 +3230,7 @@ static void gl_reset_objects(int lost)
         if (s_pvbo) glDeleteBuffers(1, &s_pvbo);
         if (s_pebo) glDeleteBuffers(1, &s_pebo);
         if (s_pvao) glDeleteVertexArrays(1, &s_pvao);
+        vb_drop_all();
         for (i = 0; (uint32_t)i < s_qcount; i++)
             glDeleteQueries(1, &s_qring[(s_qhead + (uint32_t)i) & (NV_GL_MAX_QUERY - 1)].q);
         if (s_nqfree) glDeleteQueries((GLsizei)s_nqfree, s_qfree);
@@ -2938,6 +3259,14 @@ static void gl_reset_objects(int lost)
     s_pc_nlist = s_pc_next = 0;
     s_pc_on = 0;
     s_pvao = s_pvbo = s_pebo = 0;
+    /* Lost context: the names are only forgotten. */
+    memset(s_vb, 0, sizeof s_vb);
+    s_nvb = 0;
+    s_vb_bytes = 0;
+    s_vb_gen++;
+    if (s_vao_cache)
+        memset(s_vao_cache, 0, NV_GL_MAX_VAO * sizeof *s_vao_cache);
+    s_nvao = 0;
     s_pbo = 0;
     s_pbo_size = 0;
     memset(&s_pend, 0, sizeof s_pend);
@@ -3139,6 +3468,15 @@ static void gl_flip(void)
                 s_st.uploads, s_st.upload_kb, s_st.hashes_kb, s_ntex, nrt, nprog,
                 s_st.compiles, s_st.cache_loads, s_pc_total_compiled, s_pc_total_loaded,
                 s_st.frames ? (double)s_st.target_switches / s_st.frames : 0.0);
+        if (s_vbo_on && s_st.frames)
+            fprintf(stderr, "  [GPUGL] vertex buffers: %.0f raw batches/frame,"
+                            " %.1f KB/frame uploaded (%.1f new, %.1f changed buffers/frame),"
+                            " %.0f KB/frame hashed, %u buffers (%zu KB), %u vertex arrays"
+                            " (%u new)\n",
+                    (double)s_st.vbo_draws / s_st.frames, (double)s_st.vbo_kb / s_st.frames,
+                    (double)s_st.vbo_new / s_st.frames, (double)s_st.vbo_changed / s_st.frames,
+                    (double)s_st.vbo_hash_kb / s_st.frames, s_nvb, s_vb_bytes >> 10,
+                    s_nvao, s_st.vao_new);
         memset(&s_st, 0, sizeof s_st);
     }
     gl_check_frame();
@@ -3167,6 +3505,12 @@ int nv2a_gl_install_from_env(void)
     s_cull = !(e && strcmp(e, "0") == 0);
     if (!s_cull)
         s_backend.caps &= ~NV2A_BACKEND_CAP_CULL;
+    /* RECOMP_GPU_VBO=1: vertex-program batches from cached guest vertex
+     * buffers in their own formats (raw_bind) instead of gathered floats. */
+    e = getenv("RECOMP_GPU_VBO");
+    s_vbo_on = e && *e && strcmp(e, "0") != 0;
+    if (s_vbo_on)
+        s_backend.caps |= NV2A_BACKEND_CAP_RAW_VERTEX;
     e = getenv("RECOMP_GPU");
     nv2a_backend_register_with_present(&s_backend, gl_present);
     fprintf(stderr, "  [GPUGL] GPU back end selected (RECOMP_GPU=%s); the context is"

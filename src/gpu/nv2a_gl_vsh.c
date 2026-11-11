@@ -229,8 +229,49 @@ static const char *out_name(uint32_t addr)
     }
 }
 
+int nv2a_gl_vsh_attr(uint32_t type, uint32_t size, Nv2aGlVshAttr *out)
+{
+    if (!size || size > 4)
+        return 0;
+    switch (type) {
+    case 0:                                  /* D3DCOLOR: B,G,R,A bytes */
+        out->kind = NV2A_GL_ATTR_UBYTE; out->comps = 4; out->bytes = 4;
+        out->fmt = NV2A_GL_VSH_IN_BGRA;
+        return 1;
+    case 1:                                  /* signed short, normalised */
+        out->kind = NV2A_GL_ATTR_SHORT; out->comps = size; out->bytes = 2 * size;
+        out->fmt = NV2A_GL_VSH_IN_SNORM | (size - 1) << 2;
+        return 1;
+    case 2:                                  /* float */
+        out->kind = NV2A_GL_ATTR_FLOAT; out->comps = size; out->bytes = 4 * size;
+        out->fmt = NV2A_GL_VSH_IN_AS_IS;
+        return 1;
+    case 4:                                  /* unsigned byte, normalised */
+        out->kind = NV2A_GL_ATTR_UBYTE; out->comps = size; out->bytes = size;
+        out->fmt = NV2A_GL_VSH_IN_AS_IS;
+        return 1;
+    case 5:                                  /* signed short, as is */
+        out->kind = NV2A_GL_ATTR_SHORT; out->comps = size; out->bytes = 2 * size;
+        out->fmt = NV2A_GL_VSH_IN_AS_IS;
+        return 1;
+    case 6:                                  /* packed 11:11:10 */
+        out->kind = NV2A_GL_ATTR_INT; out->comps = 1; out->bytes = 4;
+        out->fmt = NV2A_GL_VSH_IN_PACKED;
+        return 1;
+    default:
+        return 0;
+    }
+}
+
 size_t nv2a_gl_vsh_body(const uint32_t (*ins)[4], uint32_t count, uint32_t flags,
                         char *buf, size_t cap, Nv2aGlVshInfo *info_out)
+{
+    return nv2a_gl_vsh_body_fmt(ins, count, flags, 0, buf, cap, info_out);
+}
+
+size_t nv2a_gl_vsh_body_fmt(const uint32_t (*ins)[4], uint32_t count, uint32_t flags,
+                            uint64_t formats, char *buf, size_t cap,
+                            Nv2aGlVshInfo *info_out)
 {
     Sb b = { buf, cap, 0, 0 };
     Sb body;
@@ -288,9 +329,17 @@ size_t nv2a_gl_vsh_body(const uint32_t (*ins)[4], uint32_t count, uint32_t flags
     info.count = n;
 
     sb(&b, "uniform vec4 c[192];\n");
-    for (k = 0; k < 16; k++)
-        if (info.inputs & (1u << k))
+    for (k = 0; k < 16; k++) {
+        uint32_t f = (uint32_t)(formats >> (4 * k)) & 3u;
+        if (!(info.inputs & (1u << k)))
+            continue;
+        if (f == NV2A_GL_VSH_IN_AS_IS)
             sb(&b, "layout(location = %u) in vec4 v%u;\n", k, k);
+        else if (f == NV2A_GL_VSH_IN_PACKED)
+            sb(&b, "layout(location = %u) in int i%u;\n", k, k);
+        else
+            sb(&b, "layout(location = %u) in vec4 i%u;\n", k, k);
+    }
     if (flags & NV2A_GL_VSH_CAPTURE) {
         for (k = 0; k < 8; k++)
             sb(&b, "out vec4 %s;\n", nv2a_gl_vsh_capture_names[k]);
@@ -314,6 +363,34 @@ size_t nv2a_gl_vsh_body(const uint32_t (*ins)[4], uint32_t count, uint32_t flags
            "  vec4 A = vec4(0.0), B = vec4(0.0), C = vec4(0.0);\n"
            "  vec4 t_m = vec4(0.0), t_i = vec4(0.0);\n"
            "  int a0 = 0;\n");
+    /* Raw inputs as fetch_attr reads them. */
+    for (k = 0; k < 16; k++) {
+        uint32_t f = (uint32_t)(formats >> (4 * k)) & 0xFu;
+        if (!(info.inputs & (1u << k)) || !(f & 3u))
+            continue;
+        switch (f & 3u) {
+        case NV2A_GL_VSH_IN_BGRA:
+            sb(&b, "  vec4 v%u = i%u.zyxw;\n", k, k);
+            break;
+        case NV2A_GL_VSH_IN_SNORM: {
+            static const char *const sw[4][2] = {
+                { "x", "yzw" }, { "xy", "zw" }, { "xyz", "w" }, { "xyzw", NULL }
+            };
+            uint32_t n = f >> 2;
+            if (sw[n][1])
+                sb(&b, "  vec4 v%u = vec4(i%u.%s / 32767.0, i%u.%s);\n", k, k, sw[n][0],
+                   k, sw[n][1]);
+            else
+                sb(&b, "  vec4 v%u = i%u / 32767.0;\n", k, k);
+            break;
+        }
+        default:                            /* packed 11:11:10 */
+            sb(&b, "  vec4 v%u = vec4(float((i%u << 21) >> 21) / 1023.0,"
+                   " float((i%u << 10) >> 21) / 1023.0, float(i%u >> 22) / 511.0, 1.0);\n",
+               k, k, k, k);
+            break;
+        }
+    }
     sb(&b, "%s", prog);
     if (flags & NV2A_GL_VSH_CAPTURE) {
         sb(&b, "  x_pos = R12; x_d0 = vsh_sat(o_d0); x_d1 = vsh_sat(o_d1);\n"
