@@ -92,8 +92,22 @@ public class LauncherLibraryTest {
         shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(ms));
     }
 
+    /**
+     * A key press as the window delivers it. Activity.dispatchKeyEvent alone never moves the focus: on a device the
+     * D-pad navigation is ViewRootImpl's, for a direction key nobody consumed. So does it here: focusSearch from the
+     * launcher's focused view, then requestFocus, as ViewRootImpl.performFocusNavigation does.
+     */
     private static void key(LauncherActivity a, int code) {
-        a.dispatchKeyEvent(new KeyEvent(KeyEvent.ACTION_DOWN, code));
+        boolean used = a.dispatchKeyEvent(new KeyEvent(KeyEvent.ACTION_DOWN, code));
+        int dir = code == KeyEvent.KEYCODE_DPAD_LEFT ? View.FOCUS_LEFT : code == KeyEvent.KEYCODE_DPAD_RIGHT
+                ? View.FOCUS_RIGHT : code == KeyEvent.KEYCODE_DPAD_UP ? View.FOCUS_UP
+                : code == KeyEvent.KEYCODE_DPAD_DOWN ? View.FOCUS_DOWN : 0;
+        View f = a.focusForTest();
+        if (!used && dir != 0 && f != null) {
+            View next = f.focusSearch(dir);
+            if (next != null)
+                next.requestFocus(dir);
+        }
         a.dispatchKeyEvent(new KeyEvent(KeyEvent.ACTION_UP, code));
         idle(300);
     }
