@@ -122,7 +122,7 @@
     <string name="GAME_DATA">Game data</string>
     <string name="ABOUT">About</string>
     <string name="ABOUT_SUB">Version %1$s · licences</string>
-    <string name="OPEN_DIRECTLY">Open the game directly next time</string>
+    <string name="OPEN_DIRECTLY">Open the last game directly</string>
     <string name="OPEN_DIRECTLY_ON">Next time, the game opens directly. Long-press the app icon › Launcher to come back here.</string>
     <string name="OPEN_DIRECTLY_OFF">Next time, this screen shows first.</string>
 

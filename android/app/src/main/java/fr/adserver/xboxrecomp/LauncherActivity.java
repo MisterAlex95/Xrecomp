@@ -111,7 +111,9 @@ public class LauncherActivity extends Activity {
     private static final long SPACE_MARGIN = 64L << 20;
     private static final long CONFIRM_MS = 5000;
 
-    enum Screen { WELCOME, SOURCE, FOLDER_ACCESS, IMPORT, HOME, SETTINGS, CONTROLS, GAME_DATA, ABOUT, PREPARE }
+    enum Screen {
+        WELCOME, SOURCE, FOLDER_ACCESS, IMPORT, HOME, SETTINGS, CONTROLS, GAME_DATA, ABOUT, PREPARE, LIBRARY, STORAGE
+    }
 
     /** The Preparing screen dims after this long without input (OLED burn-in); any key or touch wakes it. */
     static final long DIM_AFTER_MS = 120_000;
@@ -133,8 +135,12 @@ public class LauncherActivity extends Activity {
     private static final long PREPARE_POLL_MS = 500;
     private static final int REQ_NOTIFICATIONS = 4;
     private static final int REQ_LSFG_DLL = 5;
+    private static final int REQ_LIBRARY_TREE = 6;
+    /** The library re-reads its entries' states (Prepare, queue, running game) every this many polls. */
+    private static final int LIBRARY_POLL_EVERY = 4;
 
-    enum State { READY, NONE, MISSING, NO_ACCESS, WRONG }
+    /** The selected game's files: READY, ... ; LIBRARY: a library game whose files are not here (see its chip). */
+    enum State { READY, NONE, MISSING, NO_ACCESS, WRONG, LIBRARY }
 
     private static final int NOTE_INFO = 0, NOTE_OK = 1, NOTE_WARN = 2, NOTE_ERROR = 3;
 
@@ -229,6 +235,36 @@ public class LauncherActivity extends Activity {
     private boolean cancelSent;
     private final Runnable pollTick = this::pollPrepare;
 
+    // ---- The game library (docs/android/app-shell.md « Game library ») ----
+    /** games.json: the records; selected is the game Home shows (the launched one is in the preferences). */
+    private Library.Games games = new Library.Games();
+    /** index.json: what the library folder holds, as last scanned. */
+    private LibraryIndex index = new LibraryIndex();
+    private java.util.Map<String, List<LibraryIndex.Item>> indexGames = new java.util.HashMap<>();
+    /** The library screen's entries and cards, as built. */
+    private List<LibraryScreen.Entry> libEntries = new ArrayList<>();
+    private final List<GameCard> libCards = new ArrayList<>();
+    private final java.util.Map<String, Bitmap> libArt = new java.util.HashMap<>();
+    /** The focused card's title ID on the library ("" for the folder tile). */
+    private String focusTid;
+    private TextView libCaption;
+    private int libPolls;
+    private Thread scanner;
+    private volatile boolean scanCancel;
+    private volatile int scanFound;
+    /** The tree picker was opened for the library folder (not for a game folder). */
+    private boolean pickLibrary;
+    /** Title IDs whose pack the shell refused in this process (GameState's « Pack invalid »). */
+    private final java.util.Set<String> droppedPacks = new java.util.HashSet<>();
+    /** The title being imported from the library (its chip), and whether a Prepare follows the import. */
+    private volatile String importTid;
+    private boolean importFromLibrary;
+    private volatile String chosenSha;
+    /** « Play » while another game runs: the first press warns, the second within CONFIRM_MS ends it. */
+    private long switchArmedAt;
+    /** The library chip Home was built with (a game whose files are not here), for the poll. */
+    private GameState.Chip homeChip;
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -245,26 +281,87 @@ public class LauncherActivity extends Activity {
         String noData = in.getStringExtra(EXTRA_NO_GAME_DATA);
         String badPack = in.getStringExtra(EXTRA_BAD_PACK);
         boolean forced = change || showLauncher || noData != null || badPack != null;
+        // Back from the game: its play session ends here (Home's « Play time »), then the library is read: the
+        // one-game state becomes its first record the first time (Library.migrate moves no file).
+        long sessionStart = GameStore.sessionStartedAt(this);
+        String sessionTid = GameStore.sessionTid(this);
+        boolean hadLibrary = Library.gamesFile(getFilesDir()).isFile();
+        long now = System.currentTimeMillis();
+        if (savedInstanceState == null && !gameRunning())
+            GameStore.sessionEnd(this, now);
+        else
+            sessionStart = 0;
+        games = Library.migrate(this);
+        setIndex(LibraryIndex.read(Library.indexFile(getFilesDir())));
+        if (sessionStart > 0 && sessionTid != null && hadLibrary) {
+            Library.sessionEnd(games, sessionTid, sessionStart, now);
+            writeGames();
+        }
+        if (savedInstanceState == null) {
+            // The launcher opens on the game last launched (the preferences say which; its record may lack).
+            String launched = GameStore.launchedTitleId(this);
+            if (launched != null && games.get(launched) != null)
+                games.selected = launched;
+        }
         if (badPack != null && savedInstanceState == null)
             dropBadPack(badPack);
-        // Back from the game: its play session ends here (Home's « Play time »).
-        if (savedInstanceState == null && !gameRunning())
-            GameStore.sessionEnd(this, System.currentTimeMillis());
         if (!forced && savedInstanceState == null && gameReady() && !prepareBlocksPlay()) {
             /* The app icon while the game runs in the background: straight back to it (the « Launcher » shortcut
              * reaches this screen then). Otherwise only with « Open the game directly next time » on. */
             boolean running = gameRunning();
-            if (running || GameStore.autoStart(this)) {
-                Log.i(TAG, "launcher: " + (running ? "game running, bringing it back"
-                                                   : "game ready and « open directly » on, starting it"));
+            if (running) {
+                Log.i(TAG, "launcher: game running, bringing it back");
+                resumeShell();
+                return;
+            }
+            if (GameStore.autoStart(this) && selectedIsLaunched()) {
+                Log.i(TAG, "launcher: game ready and « open directly » on, starting it");
                 launchShell(false);
                 return;
             }
         }
 
+        boolean lib = libraryOn();
+        String dir = GameStore.chosenDir(this);
+        Log.i(TAG, "launcher: shown (" + (noData != null ? "NO_GAME_DATA in " + noData
+                                          : badPack != null ? "pack refused: " + badPack
+                                          : change ? "change game"
+                                          : showLauncher ? "launcher shortcut"
+                                          : dir != null && !gameReady() ? "remembered folder unusable: " + dir
+                                          : lib ? "library, " + games.games.size() + " games"
+                                          : gameReady() ? "home" : "no game set up") + ")");
+        Screen first;
+        boolean toPrepare = false;
+        if (noData != null) {
+            history.push(lib ? Screen.LIBRARY : Screen.HOME);
+            first = lib ? Screen.HOME : Screen.SOURCE;
+        } else if (change) {
+            if (!lib)
+                history.push(Screen.HOME);
+            first = lib ? Screen.LIBRARY : Screen.SOURCE;
+        } else if (badPack != null) {
+            if (lib)
+                history.push(Screen.LIBRARY);
+            first = Screen.HOME;
+        } else if (lib) {
+            first = Screen.LIBRARY;
+            Prep p = prep();
+            if (p == Prep.RUNNING || p == Prep.FAILED) {   // the pending Prepare, its Home beneath
+                history.push(Screen.LIBRARY);
+                history.push(Screen.HOME);
+                first = Screen.PREPARE;
+            }
+        } else if (state() == State.NONE) {
+            first = Screen.WELCOME;
+        } else {
+            first = Screen.HOME;
+            Prep p = prep();
+            toPrepare = p == Prep.RUNNING || p == Prep.FAILED;
+        }
+
         setUpWindow();
         feedback = new UiFeedback(this);
-        syncTheme();            // the game's colours before any view is built: no flash of the stock green
+        syncTheme(first);       // the game's colours before any view is built: no flash of the stock green
         buildStage();
         // The second screen (AYN Thor, docs/android/app-shell.md « Dual screen »): Home's or the Prepare's panel.
         companion = new LauncherCompanion(this, new LauncherPanel.Actions() {
@@ -280,37 +377,40 @@ public class LauncherActivity extends Activity {
 
             @Override
             public void changeGame() {
-                go(Screen.SOURCE);
+                onChangeGame();
+            }
+        });
+        companion.libraryActions(new LibraryPanel.Actions() {
+            @Override
+            public void primary() {
+                LibraryScreen.Entry e = focusedEntry();
+                if (e != null)
+                    libraryPrimary(e);
+            }
+
+            @Override
+            public void rescan() {
+                rescanLibrary();
+            }
+
+            @Override
+            public void settings() {
+                go(Screen.SETTINGS);
             }
         });
 
-        String dir = GameStore.chosenDir(this);
-        Log.i(TAG, "launcher: shown (" + (noData != null ? "NO_GAME_DATA in " + noData
-                                          : badPack != null ? "pack refused: " + badPack
-                                          : change ? "change game"
-                                          : showLauncher ? "launcher shortcut"
-                                          : dir != null && !gameReady() ? "remembered folder unusable: " + dir
-                                          : gameReady() ? "home" : "no game set up") + ")");
-        if (noData != null) {
-            history.push(Screen.HOME);
-            show(Screen.SOURCE);
+        show(first);
+        if (noData != null)
             setNote(getString(R.string.NO_GAME_DATA, noData), NOTE_ERROR);
-        } else if (change) {
-            history.push(Screen.HOME);
-            show(Screen.SOURCE);
-            if (gameRunning())
-                setNote(getString(R.string.GAME_RUNNING), NOTE_INFO);
-        } else if (state() == State.NONE) {
-            show(Screen.WELCOME);
-        } else if (badPack != null) {
-            show(Screen.HOME);
+        else if (change && !lib && gameRunning())
+            setNote(getString(R.string.GAME_RUNNING), NOTE_INFO);
+        else if (badPack != null)
             setNote(getString(R.string.PACK_BAD, badPack), NOTE_ERROR);
-        } else {
-            show(Screen.HOME);
-            Prep p = prep();
-            if (p == Prep.RUNNING || p == Prep.FAILED)
-                go(Screen.PREPARE);
-        }
+        if (toPrepare)
+            go(Screen.PREPARE);
+        // The library folder through the Storage Access Framework: scanned at a cold start (and on Y) only.
+        if (savedInstanceState == null && lib && Library.folderTree(this) != null && Library.folderPath(this) == null)
+            startScan();
     }
 
     @Override
@@ -412,6 +512,11 @@ public class LauncherActivity extends Activity {
         return noteText;
     }
 
+    /** The library's cards as built (the « Library folder » tile last). */
+    List<GameCard> libraryCardsForTest() {
+        return libCards;
+    }
+
     // ---- Window and stage ----------------------------------------------------------------------------------------
 
     /** Fullscreen, immersive, drawn under the display cutout (the stage keeps its content out of it). */
@@ -486,7 +591,7 @@ public class LauncherActivity extends Activity {
         host.addView(glide, new FrameLayout.LayoutParams(MATCH, MATCH));
         buildDim();
         host.getViewTreeObserver().addOnGlobalFocusChangeListener((was, now) -> {
-            if (!building && was != null && now instanceof MenuRow)
+            if (!building && was != null && (now instanceof MenuRow || now instanceof GameCard))
                 feedback.play(UiFeedback.Cue.MOVE, now);
         });
         root.setPadding(Theme.MARGIN_X, Theme.MARGIN_TOP, Theme.MARGIN_X, Theme.MARGIN_BOTTOM);
@@ -605,6 +710,10 @@ public class LauncherActivity extends Activity {
             return;
         }
         if (history.isEmpty()) {
+            if (screen != Screen.LIBRARY && screen != Screen.WELCOME && libraryOn()) {
+                show(Screen.LIBRARY, -1);   // Home of a library game: back to the library
+                return;
+            }
             finish();
             return;
         }
@@ -625,9 +734,12 @@ public class LauncherActivity extends Activity {
             if (i >= 0)
                 focusMemory.put(screen, i);
         }
-        syncTheme();
+        syncTheme(s);
+        if (s != Screen.LIBRARY && backdrop != null)
+            backdrop.setGlows(Theme.GLOW, Theme.GLOW2);   // the library's per-card glow stays there
         building = true;
         setDimmed(false);
+        Screen was = screen;
         if (s != screen)
             lastInputAt = clock.getAsLong();
         screen = s;
@@ -651,6 +763,10 @@ public class LauncherActivity extends Activity {
         homePrimary = null;
         homeMeter = null;
         homeProgress = null;
+        homeChip = null;
+        switchArmedAt = 0;
+        libCards.clear();
+        libCaption = null;
         setNote(null, NOTE_INFO);
         refreshIdentity();
         switch (s) {
@@ -684,8 +800,17 @@ public class LauncherActivity extends Activity {
         case PREPARE:
             buildPrepare();
             break;
+        case LIBRARY:
+            buildLibrary();
+            break;
+        case STORAGE:
+            buildStorage();
+            break;
         }
         restoreFocus(false);
+        // The library folder read as files: a (stat-only) rescan each time the library opens.
+        if (s == Screen.LIBRARY && was != Screen.LIBRARY && Library.folderPath(this) != null)
+            startScan();
         building = false;
         if (dir != 0)
             animateIn(dir);
@@ -711,16 +836,20 @@ public class LauncherActivity extends Activity {
      * colours or the hero change, the tokens are applied and the stage is built again (its paints hold the colours
      * they were made with), and the bottom screen's panel too; show() then builds the body. True when it changed.
      */
-    private boolean syncTheme() {
-        String dir = gameDir();
+    private boolean syncTheme(Screen s) {
+        // The library and Storage: always the stock colours (only the backdrop's glow follows the focused card).
+        boolean stock = s == Screen.LIBRARY || s == Screen.STORAGE;
+        String dir = stock ? null : gameDir();
         File gd = dir == null ? null : new File(dir);
-        String tid = gd == null || GameStore.findXbe(gd) == null ? null : titleId();
+        String tid = null;
+        if (!stock && (gd != null && GameStore.findXbe(gd) != null || dir == null && state() == State.LIBRARY))
+            tid = titleId();
         GameTheme g = null;
         GameTheme.Mode mode = tid == null ? null : GameTheme.mode(this, tid);
         if (tid != null && mode != GameTheme.Mode.OFF) {
             g = GameTheme.load(this, gd, tid);
             if (g == null)
-                bakeTheme(gd, tid);
+                bakeTheme(gd != null ? gd : cachedXbeDir(), tid);
         }
         Theme.Colors want = g == null ? Theme.Colors.STOCK : g.colors;
         File wantHero = g == null ? null : g.heroFile;
@@ -747,16 +876,16 @@ public class LauncherActivity extends Activity {
 
     /** Bakes the title's theme off the UI thread (an older import, a cache made stale), then shows the screen again. */
     private void bakeTheme(File gameDir, String tid) {
-        if (!themeBaking.add(tid))
+        if (gameDir == null || !themeBaking.add(tid))
             return;
-        String title = GameStore.chosenTitle(this);
+        String title = gameTitle(gameDir());
         android.content.Context app = getApplicationContext();
         themeExecutor.execute(() -> {
             GameTheme.ensure(app, gameDir, tid, title);
             poller.post(() -> {
                 if (isFinishing() || isDestroyed() || screen == null || screen == Screen.IMPORT
-                    || screen == Screen.PREPARE)
-                    return;   // those two hold live progress: the theme shows on the next screen
+                    || screen == Screen.PREPARE || screen == Screen.LIBRARY || screen == Screen.STORAGE)
+                    return;   // live progress, or stock colours: the theme shows on the next screen
                 artTid = null;   // the title image may have come from another source than $$XTIMAGE
                 String keep = noteText;
                 int keepKind = noteKind;
@@ -771,15 +900,22 @@ public class LauncherActivity extends Activity {
     /** The game's title image (or monogram colour) for the current game. */
     private void refreshIdentity() {
         String dir = gameDir();
-        String tid = dir == null ? null : titleId();
-        String key = dir == null ? null : tid != null ? tid : dir;
+        String tid = titleId();
+        String key = tid != null ? tid : dir;
         if (key == null) {
             artTid = null;
             art = null;
             artColor = Theme.ACCENT;
         } else if (!key.equals(artTid)) {
             artTid = key;
-            art = tid == null ? null : TitleArt.load(getFilesDir(), GameStore.findXbe(new File(dir)), tid);
+            if (tid == null) {
+                art = null;
+            } else if (dir != null) {
+                art = TitleArt.load(getFilesDir(), GameStore.findXbe(new File(dir)), tid);
+            } else {   // a library game whose files are not here: the scan's cached image
+                File f = TitleArt.cacheFile(getFilesDir(), tid);
+                art = f.isFile() ? BitmapFactory.decodeFile(f.getPath()) : null;
+            }
             Log.i(TAG, "launcher: title image " + (art != null ? art.getWidth() + "x" + art.getHeight() : "none")
                        + " for " + key);
         }
@@ -1082,10 +1218,11 @@ public class LauncherActivity extends Activity {
     private MenuRow card(LinearLayout cards, Icon icon, int title, String sub, String badge, int badgeColor,
                          Runnable click) {
         MenuRow r = row(icon, getString(title), sub, click);
-        r.subMaxLines = 4;
+        boolean three = screen == Screen.SOURCE;   // three cards: a little shorter, so that all fit
+        r.subMaxLines = three ? 3 : 4;
         r.setBadge(badge, badgeColor);
-        LinearLayout.LayoutParams l = lp(MATCH, Theme.CARD_H);
-        l.bottomMargin = 24;
+        LinearLayout.LayoutParams l = lp(MATCH, three ? Theme.CARD_H - 34 : Theme.CARD_H);
+        l.bottomMargin = three ? 16 : 24;
         cards.addView(r, l);
         return r;
     }
@@ -1109,6 +1246,11 @@ public class LauncherActivity extends Activity {
                               all ? Theme.OK : Theme.WARN, this::onChooseFolder);
         card(cards, Icon.DISC, R.string.CARD_ISO, getString(R.string.CARD_ISO_SUB),
              getString(R.string.BADGE_FREE, size(freeSpace())), Theme.TEXT_DIM, this::openIsoPicker);
+        String libPath = Library.folderPath(this);
+        card(cards, Icon.SWAP, R.string.LIB_CARD, getString(R.string.LIB_CARD_SUB),
+             Library.folderTree(this) == null ? getString(R.string.LIB_BADGE_NEW)
+             : libPath != null ? libPath : getString(R.string.LIB_BADGE_SET), Theme.ACCENT,
+             this::onChooseLibraryFolder);
         defaultFocus = folder;
         h.addView(cards, lp(0, MATCH, 1));
         body.addView(h, new FrameLayout.LayoutParams(MATCH, MATCH));
@@ -1119,13 +1261,18 @@ public class LauncherActivity extends Activity {
     private void buildFolderAccess() {
         screenTitle.setText(R.string.ALL_FILES_TITLE);
         LinearLayout h = rowLayout();
-        explainPanel(h, 820, getString(R.string.CARD_FOLDER), getString(R.string.ALL_FILES_TITLE),
-                     getString(R.string.ALL_FILES_EXPLAIN));
+        explainPanel(h, 820, getString(pickLibrary ? R.string.LIB_CARD : R.string.CARD_FOLDER),
+                     getString(R.string.ALL_FILES_TITLE),
+                     getString(pickLibrary ? R.string.LIB_ALL_FILES_EXPLAIN : R.string.ALL_FILES_EXPLAIN));
         LinearLayout cards = column();
         MenuRow grant = card(cards, Icon.KEY, R.string.ALL_FILES_GRANT, getString(R.string.ALL_FILES_GRANT_SUB),
                              getString(R.string.BADGE_RECOMMENDED), Theme.OK, this::askAllFilesAccess);
-        card(cards, Icon.COPY, R.string.ALL_FILES_COPY, getString(R.string.ALL_FILES_COPY_SUB), null, 0,
-             this::openTreePicker);
+        if (pickLibrary)
+            card(cards, Icon.FOLDER, R.string.LIB_SAF, getString(R.string.LIB_SAF_SUB), null, 0,
+                 this::openTreePicker);
+        else
+            card(cards, Icon.COPY, R.string.ALL_FILES_COPY, getString(R.string.ALL_FILES_COPY_SUB), null, 0,
+                 this::openTreePicker);
         defaultFocus = grant;
         h.addView(cards, lp(0, MATCH, 1));
         body.addView(h, new FrameLayout.LayoutParams(MATCH, MATCH));
@@ -1205,6 +1352,10 @@ public class LauncherActivity extends Activity {
      */
     private void buildHome() {
         State st = state();
+        if (st == State.LIBRARY) {
+            buildHomeNotHere();
+            return;
+        }
         String dir = gameDir();
         boolean running = gameRunning();
         screenTitle.setText(R.string.HOME_TITLE);
@@ -1248,11 +1399,12 @@ public class LauncherActivity extends Activity {
             status.set(getString(stateLabel(st)), stateColor(st));
         chips.addView(status, lp(WRAP, WRAP));
         if (companion != null) {
+            companion.changeLabel(libraryOn() ? getString(R.string.LIB_TITLE) : null);
             companion.art(st == State.NONE ? null : art);
             companion.home(st == State.NONE ? "" : title, status.label(), status.color(),
                            st == State.READY && !preparing);
         }
-        if (running && st == State.READY) {
+        if (running && st == State.READY && selectedIsLaunched()) {
             Widgets.Chip run = new Widgets.Chip(this);
             run.set(getString(R.string.CHIP_RUNNING), Theme.OK);
             LinearLayout.LayoutParams rl = lp(WRAP, WRAP);
@@ -1278,7 +1430,7 @@ public class LauncherActivity extends Activity {
                 break;
             }
         } else if (st == State.READY) {
-            lead = getString(running ? R.string.PLAY_DETAIL_RUNNING : R.string.HOME_LEAD_READY);
+            lead = getString(running && selectedIsLaunched() ? R.string.PLAY_DETAIL_RUNNING : R.string.HOME_LEAD_READY);
         } else {
             lead = stateText(st, dir);
             leadColor = st == State.NONE ? Theme.TEXT_DIM : st == State.WRONG ? Theme.ERROR : Theme.WARN;
@@ -1302,6 +1454,9 @@ public class LauncherActivity extends Activity {
         if (st == State.NONE || st == State.MISSING || st == State.NO_ACCESS) {
             play = row(Icon.FOLDER, getString(st == State.NONE ? R.string.CHOOSE_GAME : R.string.CHOOSE_AGAIN),
                        getString(R.string.CHOOSE_GAME_SUB), () -> go(Screen.SOURCE));
+        } else if (preparing && prep == Prep.QUEUED) {
+            play = row(Icon.ARROW, queuedLabel(tid), getString(R.string.LIB_QUEUED_SUB), this::onPlay);
+            homePrep = prep;
         } else if (preparing) {
             int t = prep == Prep.RUNNING ? R.string.PREPARING : prep == Prep.FAILED ? R.string.PREPARE_SEE_WHY
                     : R.string.PREPARE;
@@ -1309,7 +1464,9 @@ public class LauncherActivity extends Activity {
             homePrep = prep;
         } else {
             String playSub = st != State.READY ? getString(R.string.PLAY_SUB_UNAVAILABLE, getString(stateLabel(st)))
-                             : running ? getString(R.string.PLAY_SUB_RUNNING) : getString(R.string.PLAY_SUB);
+                             : running && selectedIsLaunched() ? getString(R.string.PLAY_SUB_RUNNING)
+                             : running ? getString(R.string.LIB_PLAY_SUB_SWITCH, runningTitle())
+                             : getString(R.string.PLAY_SUB);
             play = row(Icon.PLAY, getString(R.string.PLAY), playSub, this::onPlay);
             play.setDim(st != State.READY);
         }
@@ -1342,14 +1499,18 @@ public class LauncherActivity extends Activity {
         defaultFocus = play;
         startAction = this::onPlay;
         addHint("A", R.string.HINT_SELECT, this::clickFocused);
-        addHint("B", R.string.HINT_QUIT, this::back);
+        addHint("B", libraryOn() && history.isEmpty() ? R.string.LIB_TITLE : history.isEmpty() ? R.string.HINT_QUIT
+                                                                                                : R.string.HINT_BACK,
+                this::back);
         boolean choose = st == State.NONE || st == State.MISSING || st == State.NO_ACCESS;
         addHint("START", choose ? R.string.HINT_CHOOSE : preparing ? R.string.PREPARE : R.string.PLAY, this::onPlay);
 
         if (preparing && prep == Prep.INTERRUPTED)
             setNote(getString(R.string.PREPARE_INTERRUPTED), NOTE_WARN);
-        else if (running)
+        else if (running && selectedIsLaunched())
             setNote(getString(R.string.GAME_RUNNING_HOME), NOTE_INFO);
+        else if (running && st == State.READY)
+            setNote(getString(R.string.LIB_OTHER_RUNNING, runningTitle()), NOTE_INFO);
     }
 
     private MenuRow homeTile(LinearLayout tiles, Icon icon, int title, String sub, Screen target) {
@@ -1416,10 +1577,11 @@ public class LauncherActivity extends Activity {
         default:
             break;
         }
-        long last = GameStore.lastPlayed(this), now = System.currentTimeMillis();
-        homeFact(f, getString(R.string.KV_LAST_PLAYED), last <= 0 ? getString(R.string.VAL_NEVER)
-                 : DateUtils.getRelativeTimeSpanString(last, now, DateUtils.MINUTE_IN_MILLIS).toString(), Theme.TEXT);
-        homeFact(f, getString(R.string.KV_PLAY_TIME), playTimeText(GameStore.playTime(this)), Theme.TEXT);
+        Library.Record rec = rec();
+        long last = rec != null ? rec.lastPlayed : GameStore.lastPlayed(this), now = System.currentTimeMillis();
+        homeFact(f, getString(R.string.KV_LAST_PLAYED), lastPlayedText(last, now), Theme.TEXT);
+        homeFact(f, getString(R.string.KV_PLAY_TIME), playTimeText(rec != null ? rec.playMs : GameStore.playTime(this)),
+                 Theme.TEXT);
         String tid = titleId();
         if (prep == Prep.PLAYABLE && tid != null) {
             String[] pack = packFacts(tid);
@@ -1430,6 +1592,11 @@ public class LauncherActivity extends Activity {
             homeFact(f, getString(R.string.KV_SIZE), dir == null ? "?" : sizeText(dir), Theme.TEXT);
         }
         return f;
+    }
+
+    private String lastPlayedText(long last, long now) {
+        return last <= 0 ? getString(R.string.VAL_NEVER)
+                         : DateUtils.getRelativeTimeSpanString(last, now, DateUtils.MINUTE_IN_MILLIS).toString();
     }
 
     /** « 45 min », « 3 h 05 », « — » for none. */
@@ -1487,20 +1654,26 @@ public class LauncherActivity extends Activity {
     }
     private void onPlay() {
         State st = state();
+        if (st == State.LIBRARY) {
+            libraryAction(currentEntry());
+            return;
+        }
         if (st == State.READY) {
             Prep p = prep();
             if (p == Prep.RUNNING || p == Prep.FAILED) {
                 go(Screen.PREPARE);
                 return;
             }
-            if (p == Prep.QUEUED) {   // it starts by itself; a new start would overwrite its « queued » status
-                setNote(getString(R.string.PREPARE_QUEUED_NOTE), NOTE_INFO);
+            if (p == Prep.QUEUED) {   // A takes it out of the queue (a new start would only keep its place)
+                dequeuePrepare(titleId());
                 return;
             }
             if (p != Prep.OFF && p != Prep.PLAYABLE) {
                 startPrepare();
                 return;
             }
+            if (!confirmSwitch())
+                return;
             launchShell(false);
             return;
         }
@@ -1954,8 +2127,11 @@ public class LauncherActivity extends Activity {
         LinearLayout h = rowLayout();
         LinearLayout menu = column();
         menu.addView(Theme.caps(this, getString(R.string.GAME_DATA_CAPS), Theme.TEXT_FAINT), lp(MATCH, WRAP));
-        MenuRow change = row(Icon.SWAP, getString(dir == null ? R.string.CHOOSE_GAME : R.string.CHANGE_GAME),
-                             getString(R.string.CHANGE_GAME_SUB), () -> go(Screen.SOURCE));
+        boolean lib = libraryOn();
+        MenuRow change = lib ? row(Icon.SWAP, getString(R.string.LIB_TITLE), getString(R.string.LIB_GO_SUB),
+                                   this::openLibrary)
+                             : row(Icon.SWAP, getString(dir == null ? R.string.CHOOSE_GAME : R.string.CHANGE_GAME),
+                                   getString(R.string.CHANGE_GAME_SUB), () -> go(Screen.SOURCE));
         LinearLayout.LayoutParams first = lp(MATCH, Theme.ROW_H);
         first.topMargin = 22;
         menu.addView(change, first);
@@ -2026,12 +2202,17 @@ public class LauncherActivity extends Activity {
         deleting = true;
         row.setBadge(getString(R.string.DELETING), Theme.TEXT_DIM);
         setNote(getString(R.string.DELETING), NOTE_INFO);
-        endRunningGame();
+        if (dir.equals(launchedDir()))
+            endRunningGame();   // only the game that runs from these files
         Log.i(TAG, "launcher: deleting the imported copy " + dir);
+        boolean inLibrary = indexGames.containsKey(titleId());
         new Thread(() -> {
             String tid = Pack.xbeTitleId(GameStore.findXbe(new File(dir)));
             GameStore.deleteTree(new File(dir));
-            GameTheme.clear(this, tid);   // its title image, hero and colours (docs/android/app-shell.md « Game theme »)
+            /* Its title image, hero and colours (docs/android/app-shell.md « Game theme ») go only when the title
+             * also left the library folder: the library still shows it there (docs « Game library »). */
+            if (!inLibrary)
+                GameTheme.clear(this, tid);
             if (dir.equals(GameStore.chosenDir(this)))
                 GameStore.forget(this);
             runOnUiThread(() -> {
@@ -2040,9 +2221,19 @@ public class LauncherActivity extends Activity {
                 hashDir = null;
                 titleIdDir = null;
                 artTid = null;
+                for (Library.Record r : games.games.values()) {
+                    if (dir.equals(r.dataDir)) {
+                        r.dataDir = "";
+                        r.dataKind = "";
+                    }
+                }
+                writeGames();
+                if (tid != null)
+                    libArt.remove(tid);
                 history.clear();
                 focusMemory.remove(Screen.HOME);
-                show(state() == State.NONE ? Screen.WELCOME : Screen.HOME);
+                show(libraryOn() ? (rec() != null ? Screen.HOME : Screen.LIBRARY)
+                                 : state() == State.NONE ? Screen.WELCOME : Screen.HOME);
                 setNote(getString(R.string.DELETED), NOTE_OK);
             });
         }, "xba-delete").start();
@@ -2053,8 +2244,11 @@ public class LauncherActivity extends Activity {
     /** The title ID of the current game's default.xbe (its certificate), read once per folder; null if none. */
     private String titleId() {
         String dir = gameDir();
-        if (dir == null)
-            return null;
+        if (dir == null) {
+            // A library game whose files are not here: its record's key (its Prepare, art and theme go by it).
+            Library.Record r = rec();
+            return r != null && r.dataDir.isEmpty() && !Library.isLocalKey(r.titleId) ? r.titleId : null;
+        }
         if (!dir.equals(titleIdDir)) {
             titleIdDir = dir;
             titleIdValue = Pack.xbeTitleId(GameStore.findXbe(new File(dir)));
@@ -2097,7 +2291,7 @@ public class LauncherActivity extends Activity {
             return Prep.RUNNING;
         if (s != null && s.queued())   // waiting behind another title's Prepare; no :prepare process = cut off
             return prepareProcessAlive() ? Prep.QUEUED : Prep.INTERRUPTED;
-        if (Pack.check(getFilesDir(), tid) == Pack.Check.VALID)
+        if (Pack.check(getFilesDir(), tid) == Pack.Check.VALID && packMatchesSelected(tid))
             return Prep.PLAYABLE;
         if (s == null)
             return Prep.NEEDED;
@@ -2113,6 +2307,12 @@ public class LauncherActivity extends Activity {
         }
     }
 
+    /** The pack of tid was built from the selected game's default.xbe (as far as both say: LibraryScreen). */
+    private boolean packMatchesSelected(String tid) {
+        Library.Record r = rec();
+        return r == null || LibraryScreen.packMatches(getFilesDir(), tid, r.xbeSha256);
+    }
+
     /**
      * The shell could not load the pack (EXTRA_BAD_PACK): drop it, so Home offers Prepare again instead of a Play that
      * fails the same way. This check is lighter than the native one (no dlopen), hence passed it.
@@ -2120,8 +2320,10 @@ public class LauncherActivity extends Activity {
     private void dropBadPack(String why) {
         String tid = titleId();
         Log.w(TAG, "launcher: pack " + tid + " refused by the shell (" + why + "), dropped");
-        if (tid != null)
+        if (tid != null) {
             Pack.drop(getFilesDir(), tid);
+            droppedPacks.add(tid);
+        }
     }
 
     /** « Open the game directly » does not skip a Prepare that is needed. */
@@ -2167,7 +2369,7 @@ public class LauncherActivity extends Activity {
     private String sourceShort(String dir) {
         if (ownedCopy(dir))
             return getString(R.string.SOURCE_SHORT_COPY);
-        if (GameStore.chosenDir(this) == null && GameStore.cfgGameDir(this) != null)
+        if (fromCfg())
             return "recomp.cfg";
         return getString(R.string.SOURCE_SHORT_IN_PLACE);
     }
@@ -2188,7 +2390,13 @@ public class LauncherActivity extends Activity {
 
     /** Checks the space, then starts PrepareService and shows the Preparing screen. */
     private void startPrepare() {
+        // SOURCE: the game's files, or, before an import, the library's cached default.xbe (tools.prepare needs
+        // only the XBE).
         String tid = titleId(), dir = gameDir();
+        if (dir == null && state() == State.LIBRARY) {
+            File x = cachedXbeDir();
+            dir = x == null ? null : x.getAbsolutePath();
+        }
         if (tid == null || dir == null)
             return;
         long free = internalFree();
@@ -2213,7 +2421,7 @@ public class LauncherActivity extends Activity {
         File sf = PrepareService.statusFile(this, tid);
         try {
             PrepareProtocol.writeStatus(sf, s);
-            startForegroundService(PrepareService.startIntent(this, dir, tid, gameTitle(dir)));
+            startForegroundService(PrepareService.startIntent(this, dir, tid, gameTitle(gameDir())));
         } catch (IOException | RuntimeException e) {
             Log.w(TAG, "launcher: cannot start the Prepare", e);
             s.state = PrepareProtocol.FAILED;
@@ -2501,6 +2709,13 @@ public class LauncherActivity extends Activity {
             }
             paintPrepare(s);
             checkDim(isRunning);
+        } else if (screen == Screen.HOME && homeChip != null) {
+            LibraryScreen.Entry e = ++libPolls % LIBRARY_POLL_EVERY == 0 ? currentEntry() : null;
+            if (e != null && e.chip != homeChip)
+                refreshKeepingFocus();
+        } else if (screen == Screen.LIBRARY && !scanning()) {
+            if (++libPolls % LIBRARY_POLL_EVERY == 0 && libraryChanged())
+                refreshKeepingFocus();
         } else if (screen == Screen.HOME && homePrep != null) {
             Prep now = prep();
             if (now != homePrep) {
@@ -2531,8 +2746,698 @@ public class LauncherActivity extends Activity {
         if (ok) {
             restoreFocus(true);   // Play, even after a touch: the next press of A plays
             feedback.play(UiFeedback.Cue.DONE, host);
-            setNote(getString(R.string.READY_TO_PLAY, gameTitle(gameDir())), NOTE_OK);
+            setNote(getString(state() == State.LIBRARY ? R.string.LIB_PREPARED_IMPORT : R.string.READY_TO_PLAY,
+                              gameTitle(gameDir())), NOTE_OK);
         }
+    }
+
+    // ---- LIBRARY (docs/android/app-shell.md « Game library ») ------------------------------------------------
+
+    /** The game library is on: a library folder is set, or the launcher knows two games or more. */
+    private boolean libraryOn() {
+        return Library.folderTree(this) != null || games.games.size() >= 2;
+    }
+
+    private void setIndex(LibraryIndex x) {
+        index = x;
+        indexGames = x.games();
+    }
+
+    private void writeGames() {
+        try {
+            Library.write(Library.gamesFile(getFilesDir()), games);
+        } catch (IOException e) {
+            Log.w(TAG, "launcher: library: cannot write games.json", e);
+        }
+    }
+
+    /** The library folder can be read: All files access for a path, the persisted permission for a tree. */
+    private boolean folderAccessible() {
+        String tree = Library.folderTree(this);
+        if (tree == null)
+            return true;
+        if (Library.folderPath(this) != null)
+            return Environment.isExternalStorageManager();
+        for (android.content.UriPermission p : getContentResolver().getPersistedUriPermissions()) {
+            if (p.isReadPermission() && p.getUri().toString().equals(tree))
+                return true;
+        }
+        return false;
+    }
+
+    private LibraryScreen.Env libEnv() {
+        LibraryScreen.Env e = new LibraryScreen.Env();
+        e.toolchain = Toolchain.available(this);
+        e.accessible = folderAccessible();
+        e.prepareProcess = prepareProcessAlive();
+        e.runningTid = gameRunning() ? launchedTid() : null;
+        e.importingTid = worker != null && worker.isAlive() ? importTid : null;
+        e.queue = PrepareProtocol.readQueue(PrepareProtocol.queueFile(getFilesDir()));
+        e.packDropped = droppedPacks;
+        return e;
+    }
+
+    /** The selected game as a library entry (its chip), or null. */
+    private LibraryScreen.Entry currentEntry() {
+        Library.Record r = games.selected();
+        return r == null ? null : LibraryScreen.entry(getFilesDir(), r.titleId, games, index, libEnv());
+    }
+
+    /** The library's focused card's entry, else the selected game's. */
+    private LibraryScreen.Entry focusedEntry() {
+        if (screen == Screen.LIBRARY) {
+            for (LibraryScreen.Entry e : libEntries) {
+                if (e.tid.equals(focusTid))
+                    return e;
+            }
+            return null;
+        }
+        return currentEntry();
+    }
+
+    /** The folder of the selected game's cached default.xbe (the scan's copy), or null. */
+    private File cachedXbeDir() {
+        Library.Record r = games.selected();
+        if (r == null)
+            return null;
+        LibraryIndex.Item it = LibraryIndex.active(indexGames.get(r.titleId), r.source);
+        File x = it == null ? null : it.xbeFile(getFilesDir());
+        return x == null || !x.isFile() ? null : x.getParentFile();
+    }
+
+    /** Opens the library (« Library » from Home, Game data or the bottom screen). */
+    private void openLibrary() {
+        history.clear();
+        show(Screen.LIBRARY, -1);
+    }
+
+    /** e becomes the selected game (a record is made for a game seen in the folder only). */
+    private void selectEntry(LibraryScreen.Entry e) {
+        boolean isNew = games.get(e.tid) == null;
+        Library.Record r = LibraryScreen.recordFor(e, System.currentTimeMillis());
+        if (isNew)
+            games.put(r);
+        if (isNew || !e.tid.equals(games.selected)) {
+            games.selected = e.tid;
+            writeGames();
+            switchArmedAt = 0;
+            focusMemory.remove(Screen.HOME);
+        }
+        titleIdDir = null;
+        artTid = null;
+    }
+
+    /** A on a card: the game's Home, in its colours. */
+    private void openGame(LibraryScreen.Entry e) {
+        selectEntry(e);
+        Log.i(TAG, "launcher: library: open " + e.tid + " (" + e.title() + ", " + e.chip + ")");
+        go(Screen.HOME);
+    }
+
+    /** Start on a card (or the bottom screen's big button): the game's primary action, without opening Home. */
+    private void libraryPrimary(LibraryScreen.Entry e) {
+        selectEntry(e);
+        onPlay();
+    }
+
+    /** The primary action of a library game whose files are not here (State.LIBRARY). */
+    private void libraryAction(LibraryScreen.Entry e) {
+        if (e == null)
+            return;
+        switch (e.chip) {
+        case PREPARING:
+            go(Screen.PREPARE);
+            break;
+        case QUEUED:
+            dequeuePrepare(e.tid);
+            break;
+        case NOT_IMPORTED:
+        case NEEDS_COPYING:
+            importEntry(e);
+            break;
+        case NO_FILE_ACCESS:
+            onChooseLibraryFolder();
+            break;
+        default:
+            setNote(getString(R.string.LIB_SOURCE_GONE_NOTE, e.title()), NOTE_WARN);
+            break;
+        }
+    }
+
+    /** The primary action's label for e (the bottom screen's big button); null when there is none. */
+    private String primaryLabel(LibraryScreen.Entry e) {
+        switch (e.chip) {
+        case READY:
+        case RUNNING:
+            return getString(R.string.PLAY);
+        case NEEDS_PREPARING:
+        case PACK_INVALID:
+            return getString(R.string.PREPARE);
+        case PREPARE_FAILED:
+            return getString(R.string.PREPARE_SEE_WHY);
+        case PREPARING:
+            return getString(R.string.PREPARING);
+        case QUEUED:
+            return LibraryScreen.chipText(this, e);
+        case NOT_IMPORTED:
+            return getString(R.string.LIB_IMPORT);
+        case NEEDS_COPYING:
+            return getString(R.string.LIB_COPY);
+        case NO_FILE_ACCESS:
+            return getString(R.string.LIB_CHOOSE_FOLDER);
+        default:
+            return null;
+        }
+    }
+
+    /** « Queued (2) »: the place of tid in the Prepare queue. */
+    private String queuedLabel(String tid) {
+        int pos = tid == null ? 0 : PrepareProtocol.readQueue(PrepareProtocol.queueFile(getFilesDir())).position(tid);
+        return pos > 0 ? getString(R.string.LIB_QUEUED_N, pos) : getString(R.string.CHIP_QUEUED);
+    }
+
+    /** A on « Queued (n) »: the title leaves the Prepare queue (PrepareService marks it cancelled). */
+    private void dequeuePrepare(String tid) {
+        if (tid == null)
+            return;
+        try {
+            startService(PrepareService.cancelIntent(this, tid));
+        } catch (RuntimeException e) {
+            Log.w(TAG, "launcher: cannot reach the Prepare service", e);
+        }
+        Log.i(TAG, "launcher: prepare " + tid + " taken out of the queue");
+        setNote(getString(R.string.LIB_DEQUEUED), NOTE_INFO);
+        Screen at = screen;
+        poller.postDelayed(() -> {
+            if (!isFinishing() && screen == at && (at == Screen.HOME || at == Screen.LIBRARY))
+                refreshKeepingFocus();
+        }, 600);
+    }
+
+    /**
+     * Import a library game: its disc image extracted (a file, or a document of the library folder), or its folder
+     * copied (seen through the Storage Access Framework only), into games/<TID>; a needed Prepare follows.
+     */
+    private void importEntry(LibraryScreen.Entry e) {
+        LibraryIndex.Item it = e.active;
+        String tree = Library.folderTree(this);
+        if (it == null) {
+            setNote(getString(R.string.LIB_SOURCE_GONE_NOTE, e.title()), NOTE_WARN);
+            return;
+        }
+        File f = LibraryIndex.locFile(it.loc);
+        String docId = it.loc.startsWith("doc:") ? it.loc.substring(4) : null;
+        if (f == null && (docId == null || tree == null)) {
+            setNote(getString(R.string.LIB_SOURCE_GONE_NOTE, e.title()), NOTE_WARN);
+            return;
+        }
+        Log.i(TAG, "launcher: library: import " + e.tid + " from " + it.loc);
+        importTid = e.tid;
+        importFromLibrary = true;
+        if (LibraryIndex.KIND_FOLDER.equals(it.kind)) {
+            if (docId == null) {   // a folder read as files is played in place: nothing to copy
+                importFromLibrary = false;
+                return;
+            }
+            Uri t = Uri.parse(tree);
+            runWorker(R.string.COPYING, () -> copyTree(t, docId, false));
+            return;
+        }
+        String name = it.name;
+        runWorker(R.string.EXTRACTING, () -> {
+            ParcelFileDescriptor pfd = f != null
+                    ? ParcelFileDescriptor.open(f, ParcelFileDescriptor.MODE_READ_ONLY)
+                    : getContentResolver().openFileDescriptor(
+                              DocumentsContract.buildDocumentUriUsingTree(Uri.parse(tree), docId), "r");
+            if (pfd == null)
+                throw new IOException("cannot open " + name);
+            extractIso(pfd, name);
+        });
+    }
+
+    /** The library folder was picked: remembered (path with All files access, else the tree), then scanned. */
+    private void onLibraryTreePicked(Uri tree) {
+        try {
+            getContentResolver().takePersistableUriPermission(tree, Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        } catch (SecurityException ignored) {
+        }
+        String path = Environment.isExternalStorageManager() ? GameStore.treeUriToPath(tree) : null;
+        if (path != null && !new File(path).isDirectory())
+            path = null;
+        String before = Library.folderTree(this);
+        Library.setFolder(this, tree.toString(), path);
+        Log.i(TAG, "launcher: library: folder " + tree + (path != null ? " = " + path : " (Storage Access Framework)"));
+        pickLibrary = false;
+        if (!tree.toString().equals(before))
+            setIndex(new LibraryIndex());   // another folder: its own items (the scan still reuses what it can)
+        focusTid = null;
+        history.clear();
+        show(Screen.LIBRARY);   // a path is scanned as the library opens
+        if (path == null)
+            startScan();
+    }
+
+    /** Y: scan the library folder again (or choose one). */
+    private void rescanLibrary() {
+        if (Library.folderTree(this) == null) {
+            onChooseLibraryFolder();
+            return;
+        }
+        startScan();
+        setNote(getString(R.string.LIB_SCANNING_NOTE), NOTE_INFO);
+    }
+
+    /** The scan on a worker thread; the screen is built again when it ends. */
+    private void startScan() {
+        if (scanner != null && scanner.isAlive())
+            return;
+        LibraryScanner.Tree t = LibraryScanner.folderTree(this);
+        if (t == null)
+            return;
+        scanCancel = false;
+        scanFound = 0;
+        android.content.Context app = getApplicationContext();
+        LibraryIndex before = index;
+        scanner = new Thread(() -> {
+            LibraryScanner.Result r = null;
+            try {
+                r = LibraryScanner.scanLibrary(app, t, item -> {
+                    scanFound++;
+                    postScanProgress();
+                }, () -> scanCancel);
+            } catch (RuntimeException | LinkageError e) {
+                Log.w(TAG, "launcher: library: scan failed", e);
+            }
+            LibraryScanner.Result res = r;
+            runOnUiThread(() -> onScanDone(res, before));
+        }, "xba-scan");
+        scanner.start();
+        paintScanCaption();
+    }
+
+    Thread scannerForTest() {
+        return scanner;
+    }
+
+    private volatile long scanPaintedAt;
+
+    private void postScanProgress() {
+        long now = SystemClock.uptimeMillis();
+        if (now - scanPaintedAt < 250)
+            return;
+        scanPaintedAt = now;
+        runOnUiThread(this::paintScanCaption);
+    }
+
+    private boolean scanning() {
+        return scanner != null && scanner.isAlive();
+    }
+
+    private void onScanDone(LibraryScanner.Result r, LibraryIndex before) {
+        if (isFinishing() || isDestroyed())
+            return;
+        if (r != null && !r.cancelled) {
+            setIndex(r.index);
+            // A title that left the folder and has no files here: its cached art and theme go (docs « Game
+            // library »). Not when the folder could not be read at all (root unknown): it may only be unmounted.
+            if (!r.index.root.isEmpty()) {
+                for (String tid : before.games().keySet()) {
+                    Library.Record rr = games.get(tid);
+                    if (!indexGames.containsKey(tid) && (rr == null || !rr.hasData())) {
+                        GameTheme.clear(this, tid);
+                        libArt.remove(tid);
+                    }
+                }
+            }
+            libArt.values().removeIf(java.util.Objects::isNull);   // art the scan made shows now
+        }
+        if (screen == Screen.LIBRARY)
+            refreshKeepingFocus();
+        else if (screen == Screen.HOME && state() == State.LIBRARY)
+            refreshKeepingFocus();
+    }
+
+    /** Under the grid: the scan's progress, an empty library's hint, the « Other files » line. */
+    private void paintScanCaption() {
+        if (libCaption == null)
+            return;
+        List<String> parts = new ArrayList<>();
+        if (scanning())
+            parts.add(getString(R.string.LIB_SCANNING, scanFound));
+        else if (Library.folderTree(this) == null)
+            parts.add(getString(R.string.LIB_NO_FOLDER));
+        else if (libEntries.isEmpty())
+            parts.add(getString(R.string.LIB_EMPTY));
+        List<LibraryIndex.Item> others = index.others();
+        if (!others.isEmpty()) {
+            List<String> names = new ArrayList<>();
+            for (int i = 0; i < others.size() && i < 3; i++)
+                names.add(others.get(i).name);
+            parts.add(getString(R.string.LIB_OTHERS, others.size(), TextUtils.join(", ", names)
+                                                                   + (others.size() > 3 ? ", …" : "")));
+        }
+        libCaption.setText(TextUtils.join("\n", parts));
+    }
+
+    /**
+     * The library: the grid of games (left), the focused game's details (right), the « Library folder » tile last.
+     * Stock colours; the backdrop's glow follows the focused card (its cached theme).
+     */
+    private void buildLibrary() {
+        screenTitle.setText(R.string.LIB_TITLE);
+        libEntries = LibraryScreen.entries(getFilesDir(), games, index, libEnv());
+        int n = libEntries.size();
+        chip.set(getResources().getQuantityString(R.plurals.LIB_GAMES, n, n), Theme.OK);
+        Library.Record sel = games.selected();
+        String want = focusTid != null ? focusTid : sel != null ? sel.titleId : null;
+        GameCard focusCard = null;
+        for (LibraryScreen.Entry e : libEntries) {
+            GameCard c = new GameCard(this);
+            c.setGame(LibraryScreen.art(getFilesDir(), libArt, e), e.tid, e.title(), LibraryScreen.chipText(this, e),
+                      LibraryScreen.chipColor(e.chip));
+            c.setDim(e.chip == GameState.Chip.SOURCE_GONE || e.chip == GameState.Chip.DATA_MISSING
+                     || e.chip == GameState.Chip.NO_FILE_ACCESS);
+            c.setOnClickListener(v -> {
+                feedback.play(UiFeedback.Cue.SELECT, v);
+                openGame(e);
+            });
+            onFocus(c, () -> libFocus(e));
+            libCards.add(focusable(c));
+            if (e.tid.equals(want))
+                focusCard = c;
+        }
+        GameCard folder = new GameCard(this);
+        String path = Library.folderPath(this), tree = Library.folderTree(this);
+        folder.setTile(Icon.FOLDER, getString(R.string.LIB_FOLDER_TILE),
+                       tree == null ? getString(R.string.LIB_FOLDER_NONE)
+                       : path != null ? new File(path).getName() : getString(R.string.LIB_FOLDER_SAF));
+        folder.setOnClickListener(v -> {
+            feedback.play(UiFeedback.Cue.SELECT, v);
+            onChooseLibraryFolder();
+        });
+        onFocus(folder, this::libFolderFocus);
+        libCards.add(focusable(folder));
+        if (focusCard == null && (libEntries.isEmpty() || "".equals(focusTid)))
+            focusCard = folder;
+        if (focusCard == null)
+            focusCard = libCards.get(0);
+
+        libCaption = Theme.text(this, Theme.T_SMALL, Theme.REGULAR, Theme.TEXT_FAINT, "");
+        libCaption.setPadding(28, 0, 0, 0);
+        libCaption.setLineSpacing(0, 1.2f);
+        paintScanCaption();
+        LinearLayout h = rowLayout();
+        LinearLayout.LayoutParams gl = lp(0, MATCH, 1);
+        gl.rightMargin = Theme.GAP;
+        h.addView(LibraryScreen.grid(this, libCards, libCaption), gl);
+        h.addView(detailPanel(), lp(600, MATCH));
+        body.addView(h, new FrameLayout.LayoutParams(MATCH, MATCH));
+
+        focusMemory.remove(Screen.LIBRARY);   // the focus follows the title, not a place in the grid
+        defaultFocus = focusCard;
+        if (focusCard == folder) {
+            libFolderFocus();
+        } else {
+            for (LibraryScreen.Entry e : libEntries) {
+                if (libCards.get(libEntries.indexOf(e)) == focusCard) {
+                    libFocus(e);
+                    break;
+                }
+            }
+        }
+        startAction = () -> {
+            LibraryScreen.Entry e = focusedEntry();
+            if (e != null)
+                libraryPrimary(e);
+            else
+                onChooseLibraryFolder();
+        };
+        yAction = this::rescanLibrary;
+        xAction = () -> go(Screen.STORAGE);
+        addHint("A", R.string.LIB_HINT_OPEN, this::clickFocused);
+        addHint("START", R.string.LIB_HINT_PRIMARY, startAction);
+        addHint("Y", R.string.LIB_RESCAN, this::rescanLibrary);
+        addHint("X", R.string.LIB_STORAGE, () -> go(Screen.STORAGE));
+        addHint("B", R.string.HINT_QUIT, this::back);
+        if (gameRunning())
+            setNote(getString(R.string.LIB_RUNNING_NOTE, runningTitle()), NOTE_INFO);
+    }
+
+    /** A card got the focus: the details, the backdrop's glow, the bottom screen. */
+    private void libFocus(LibraryScreen.Entry e) {
+        focusTid = e.tid;
+        int[] g = LibraryScreen.glows(this, e);
+        if (backdrop != null)
+            backdrop.setGlows(g[0], g[1]);
+        libDetail(e);
+        if (companion != null)
+            companion.library(e.title(), LibraryScreen.chipText(this, e), LibraryScreen.chipColor(e.chip),
+                              LibraryScreen.art(getFilesDir(), libArt, e), primaryLabel(e));
+    }
+
+    private void libDetail(LibraryScreen.Entry e) {
+        detailClear(e.realTid() ? getString(R.string.HOME_TITLE_ID, e.tid) : getString(R.string.LIB_TITLE),
+                    e.title(), libLead(e));
+        detailKv(getString(R.string.KV_STATUS), LibraryScreen.chipText(this, e));
+        LibraryIndex.Item it = e.active;
+        if (it != null) {
+            String src = it.name + (e.variants.size() > 1 ? " · " + getString(R.string.LIB_VERSIONS, e.variants.size())
+                                                         : "");
+            detailKv(getString(R.string.KV_SOURCE), src);
+            String region = LibraryScreen.regionText(this, it.region);
+            if (!region.isEmpty())
+                detailKv(getString(R.string.LIB_KV_REGION), region + " · " + LibraryScreen.versionText(it.version)
+                                                            + (it.disc > 1 ? " · " + getString(R.string.LIB_DISC, it.disc)
+                                                                           : ""));
+            if (LibraryIndex.KIND_ISO.equals(it.kind))
+                detailKv(getString(R.string.LIB_KV_IMAGE), size(it.size));
+        }
+        if (e.record != null && !e.record.dataDir.isEmpty())
+            detailKv(getString(R.string.KV_FOLDER), e.record.dataDir);
+        long now = System.currentTimeMillis();
+        if (e.record != null) {
+            detailKv(getString(R.string.KV_LAST_PLAYED), lastPlayedText(e.record.lastPlayed, now));
+            detailKv(getString(R.string.KV_PLAY_TIME), playTimeText(e.record.playMs));
+        }
+        if (e.realTid() && Pack.check(getFilesDir(), e.tid) == Pack.Check.VALID)
+            detailKv(getString(R.string.KV_PREPARED), packFacts(e.tid)[0]);
+        String action = primaryLabel(e);
+        detailFooter(action == null ? getString(R.string.LIB_FOOTER_OPEN)
+                                    : getString(R.string.LIB_FOOTER, action), Theme.TEXT_FAINT);
+    }
+
+    /** One line on what a library game's state means for the player. */
+    private String libLead(LibraryScreen.Entry e) {
+        switch (e.chip) {
+        case RUNNING:
+            return getString(R.string.PLAY_DETAIL_RUNNING);
+        case READY:
+            return getString(R.string.HOME_LEAD_READY);
+        case NEEDS_PREPARING:
+            return getString(R.string.HOME_LEAD_PREPARE);
+        case PREPARING:
+            return getString(R.string.HOME_LEAD_PREPARING);
+        case PREPARE_FAILED:
+            return getString(R.string.HOME_LEAD_FAILED);
+        case PACK_INVALID:
+            return getString(R.string.LIB_LEAD_PACK_INVALID);
+        case QUEUED:
+            return getString(R.string.PREPARE_QUEUED_NOTE);
+        case IMPORTING:
+            return getString(R.string.LIB_LEAD_IMPORTING);
+        case NOT_IMPORTED:
+            return getString(R.string.LIB_LEAD_NOT_IMPORTED);
+        case NEEDS_COPYING:
+            return getString(R.string.LIB_LEAD_NEEDS_COPYING);
+        case NO_FILE_ACCESS:
+            return getString(R.string.LIB_LEAD_NO_ACCESS);
+        case SOURCE_GONE:
+            return getString(R.string.LIB_LEAD_SOURCE_GONE);
+        default:
+            return getString(R.string.LIB_LEAD_DATA_MISSING);
+        }
+    }
+
+    /** The « Library folder » tile got the focus. */
+    private void libFolderFocus() {
+        focusTid = "";
+        if (backdrop != null)
+            backdrop.setGlows(Theme.GLOW, Theme.GLOW2);
+        String tree = Library.folderTree(this), path = Library.folderPath(this);
+        detailClear(getString(R.string.LIB_TITLE), getString(R.string.LIB_FOLDER_TILE),
+                    getString(R.string.LIB_FOLDER_DETAIL));
+        detailKv(getString(R.string.KV_FOLDER), tree == null ? getString(R.string.LIB_FOLDER_NONE)
+                                                             : path != null ? path : Uri.parse(tree).getPath());
+        long at = Library.scannedAt(this);
+        if (tree != null)
+            detailKv(getString(R.string.LIB_KV_SCANNED), at <= 0 ? getString(R.string.VAL_NEVER)
+                                                                 : lastPlayedText(at, System.currentTimeMillis()));
+        detailKv(getString(R.string.LIB_KV_GAMES), String.valueOf(libEntries.size()));
+        int others = index.others().size();
+        if (others > 0)
+            detailKv(getString(R.string.LIB_KV_OTHERS), String.valueOf(others));
+        if (index.truncated)
+            detailKv(getString(R.string.KV_STATUS), getString(R.string.LIB_TRUNCATED));
+        detailFooter(getString(R.string.LIB_FOLDER_FOOTER), Theme.TEXT_FAINT);
+        if (companion != null)
+            companion.library("", tree == null ? getString(R.string.LIB_FOLDER_NONE)
+                                               : getString(R.string.LIB_FOLDER_TILE), Theme.TEXT_DIM, null, null);
+    }
+
+    /**
+     * Home of a library game whose files are not here: its art (the scan's cached image), title and state, the
+     * primary action (Import, Copy, Preparing, Queued (n), Choose the folder again) and, before an import, « Prepare
+     * now » from the cached default.xbe.
+     */
+    private void buildHomeNotHere() {
+        LibraryScreen.Entry e = currentEntry();
+        screenTitle.setText(R.string.HOME_TITLE);
+        homeChip = e.chip;
+        String title = e.title();
+        String chipText = LibraryScreen.chipText(this, e);
+        int chipColor = LibraryScreen.chipColor(e.chip);
+
+        LinearLayout col = column();
+        LinearLayout hero = rowLayout();
+        hero.setGravity(Gravity.CENTER_VERTICAL);
+        Widgets.ArtTile tile = new Widgets.ArtTile(this);
+        if (art != null)
+            tile.setArt(art, artColor);
+        else
+            tile.setMonogram(TitleArt.initials(title), artColor);
+        hero.addView(tile, lp(Theme.ART, Theme.ART));
+
+        LinearLayout info = column();
+        if (e.realTid())
+            info.addView(Theme.caps(this, getString(R.string.HOME_TITLE_ID, e.tid), Theme.TEXT_FAINT), lp(MATCH, WRAP));
+        TextView big = Theme.text(this, Theme.T_HERO, Theme.MEDIUM, Theme.TEXT, title);
+        big.setMaxLines(2);
+        big.setEllipsize(TextUtils.TruncateAt.END);
+        LinearLayout.LayoutParams bl = lp(MATCH, WRAP);
+        bl.topMargin = 14;
+        info.addView(big, bl);
+        Widgets.Chip status = new Widgets.Chip(this);
+        status.set(chipText, chipColor);
+        LinearLayout.LayoutParams cl = lp(WRAP, WRAP);
+        cl.topMargin = 22;
+        info.addView(status, cl);
+        TextView leadV = Theme.text(this, Theme.T_BODY, Theme.REGULAR, Theme.TEXT_DIM, libLead(e));
+        leadV.setMaxLines(2);
+        leadV.setEllipsize(TextUtils.TruncateAt.END);
+        leadV.setLineSpacing(0, 1.2f);
+        LinearLayout.LayoutParams ll = lp(MATCH, WRAP);
+        ll.topMargin = 22;
+        info.addView(leadV, ll);
+
+        LibraryIndex.Item it = e.active;
+        LinearLayout facts = rowLayout();
+        if (it != null) {
+            homeFact(facts, getString(R.string.KV_SOURCE), it.name, Theme.TEXT);
+            if (LibraryIndex.KIND_ISO.equals(it.kind))
+                homeFact(facts, getString(R.string.LIB_KV_IMAGE), size(it.size), Theme.TEXT);
+        }
+        homeFact(facts, getString(R.string.KV_FREE), size(freeSpace()), Theme.TEXT);
+        GameState.Facts f = e.facts;
+        Prep p = GameState.prep(f.toolchain, f.pack == Pack.Check.VALID && f.packMatches, f.prepare, f.prepareFresh,
+                                f.prepareProcess);
+        if (p == Prep.PLAYABLE)
+            homeFact(facts, getString(R.string.KV_PREPARED), packFacts(e.tid)[0], Theme.OK);
+        LinearLayout.LayoutParams fl = lp(MATCH, WRAP);
+        fl.topMargin = 26;
+        info.addView(facts, fl);
+
+        MenuRow play;
+        switch (e.chip) {
+        case NOT_IMPORTED:
+            play = row(Icon.COPY, getString(R.string.LIB_IMPORT),
+                       getString(it != null && LibraryIndex.KIND_ISO.equals(it.kind) ? R.string.LIB_IMPORT_SUB
+                                                                                    : R.string.LIB_COPY_SUB),
+                       this::onPlay);
+            break;
+        case NEEDS_COPYING:
+            play = row(Icon.COPY, getString(R.string.LIB_COPY), getString(R.string.LIB_COPY_SUB), this::onPlay);
+            break;
+        case NO_FILE_ACCESS:
+            play = row(Icon.KEY, getString(R.string.LIB_CHOOSE_FOLDER), getString(R.string.LIB_CHOOSE_FOLDER_SUB),
+                       this::onPlay);
+            break;
+        case PREPARING:
+            play = row(Icon.ARROW, getString(R.string.PREPARING), getString(R.string.HOME_SUB_PREPARING),
+                       this::onPlay);
+            break;
+        case QUEUED:
+            play = row(Icon.ARROW, queuedLabel(e.tid), getString(R.string.LIB_QUEUED_SUB), this::onPlay);
+            break;
+        default:
+            play = row(Icon.FOLDER, getString(R.string.LIB_FOLDER_TILE), getString(R.string.LIB_SOURCE_GONE_SUB),
+                       this::onChooseLibraryFolder);
+            break;
+        }
+        play.setPrimary(true);
+        homePrimary = play;
+        LinearLayout actions = rowLayout();
+        LinearLayout.LayoutParams pl = lp(Theme.PRIMARY_W, Theme.PRIMARY_H);
+        pl.leftMargin = -12;
+        actions.addView(play, pl);
+        // « Prepare now »: tools.prepare needs only default.xbe, so a game can be prepared (or queued) before its
+        // gigabytes are imported.
+        boolean canPrepare = f.toolchain && e.realTid() && cachedXbeDir() != null
+                             && (e.chip == GameState.Chip.NOT_IMPORTED || e.chip == GameState.Chip.NEEDS_COPYING);
+        if (canPrepare && (p == Prep.NEEDED || p == Prep.CANCELLED || p == Prep.INTERRUPTED || p == Prep.FAILED)) {
+            boolean failed = p == Prep.FAILED;
+            MenuRow now = row(failed ? Icon.INFO : Icon.ARROW,
+                              getString(failed ? R.string.PREPARE_SEE_WHY : R.string.LIB_PREPARE_NOW),
+                              getString(failed ? R.string.HOME_SUB_FAILED : R.string.LIB_PREPARE_NOW_SUB),
+                              failed ? () -> go(Screen.PREPARE) : this::startPrepare);
+            LinearLayout.LayoutParams nl = lp(0, Theme.PRIMARY_H, 1);
+            nl.leftMargin = 12;
+            actions.addView(now, nl);
+        }
+        LinearLayout.LayoutParams al = lp(MATCH, Theme.PRIMARY_H);
+        al.topMargin = 30;
+        info.addView(actions, al);
+
+        LinearLayout.LayoutParams il = lp(0, WRAP, 1);
+        il.leftMargin = 52;
+        hero.addView(info, il);
+        col.addView(hero, lp(MATCH, 0, 1));
+
+        LinearLayout tiles = rowLayout();
+        MenuRow settings = homeTile(tiles, Icon.SLIDERS, R.string.SETTINGS, settingsSummary(), Screen.SETTINGS);
+        homeTile(tiles, Icon.PAD, R.string.CONTROLS, getString(R.string.CONTROLS_SUB), Screen.CONTROLS);
+        homeTile(tiles, Icon.DISC, R.string.GAME_DATA, chipText, Screen.GAME_DATA);
+        MenuRow about = homeTile(tiles, Icon.INFO, R.string.ABOUT, getString(R.string.ABOUT_SUB, version()),
+                                 Screen.ABOUT);
+        ((LinearLayout.LayoutParams)settings.getLayoutParams()).leftMargin = -12;
+        ((LinearLayout.LayoutParams)about.getLayoutParams()).rightMargin = -12;
+        LinearLayout.LayoutParams tl = lp(MATCH, Theme.TILE_H);
+        tl.topMargin = 28;
+        col.addView(tiles, tl);
+        body.addView(col, new FrameLayout.LayoutParams(MATCH, MATCH));
+
+        if (companion != null) {
+            companion.changeLabel(getString(R.string.LIB_TITLE));
+            companion.art(art);
+            companion.home(title, chipText, chipColor, primaryLabel(e) != null);
+        }
+        defaultFocus = play;
+        startAction = this::onPlay;
+        addHint("A", R.string.HINT_SELECT, this::clickFocused);
+        addHint("B", history.isEmpty() ? R.string.LIB_TITLE : R.string.HINT_BACK, this::back);
+        addHint("START", R.string.LIB_HINT_PRIMARY, this::onPlay);
+    }
+
+    /** The library's entries changed state (a Prepare moved on, the queue, a game ended): true. */
+    private boolean libraryChanged() {
+        List<LibraryScreen.Entry> now = LibraryScreen.entries(getFilesDir(), games, index, libEnv());
+        if (now.size() != libEntries.size())
+            return true;
+        for (int i = 0; i < now.size(); i++) {
+            LibraryScreen.Entry a = now.get(i), b = libEntries.get(i);
+            if (!a.tid.equals(b.tid) || a.chip != b.chip || a.queuePos != b.queuePos)
+                return true;
+        }
+        return false;
     }
 
     // ---- CONTROLS ----------------------------------------------------------------------------------------------
@@ -2568,6 +3473,13 @@ public class LauncherActivity extends Activity {
             detailKv(getString(r[0]), getString(r[1]));
         detailFooter(getString(R.string.CONTROLS_FOOTER), Theme.TEXT_FAINT);
         body.addView(h, new FrameLayout.LayoutParams(MATCH, MATCH));
+        addHint("B", R.string.HINT_BACK, this::back);
+    }
+
+    // ---- STORAGE -----------------------------------------------------------------------------------------------
+
+    private void buildStorage() {
+        screenTitle.setText(R.string.LIB_STORAGE);
         addHint("B", R.string.HINT_BACK, this::back);
     }
 
@@ -2615,10 +3527,29 @@ public class LauncherActivity extends Activity {
     // ---- Game state --------------------------------------------------------------------------------------------
 
     /**
-     * A game is ready when the remembered folder holds default.xbe, or, with nothing remembered, when recomp.cfg sets
-     * RECOMP_GAME_DIR (the native side then decides) or default.xbe was pushed to the default game/ folder.
+     * The selected library record when it stands for a game Home can show: its files are set (present or not: a
+     * missing folder is « Game data missing »), or it has a source in the library folder. Null otherwise, and the
+     * launcher falls back to the one-game rules (the remembered folder, recomp.cfg, the default game/).
+     */
+    private Library.Record rec() {
+        Library.Record r = games.selected();
+        if (r == null)
+            return null;
+        if (!r.dataDir.isEmpty())
+            return r;
+        return indexGames.containsKey(r.titleId) ? r : null;
+    }
+
+    /**
+     * A game is ready when the selected game's folder holds default.xbe, or, with nothing remembered, when
+     * recomp.cfg sets RECOMP_GAME_DIR (the native side then decides) or default.xbe was pushed to the default game/
+     * folder.
      */
     private boolean gameReady() {
+        Library.Record r = rec();
+        if (r != null)
+            return !r.dataDir.isEmpty()
+                   && (Library.KIND_CFG.equals(r.dataKind) || GameStore.findXbe(new File(r.dataDir)) != null);
         String dir = GameStore.chosenDir(this);
         if (dir != null)
             return GameStore.findXbe(new File(dir)) != null;
@@ -2627,8 +3558,16 @@ public class LauncherActivity extends Activity {
         return GameStore.findXbe(GameStore.defaultGameDir(this)) != null;
     }
 
-    /** The folder the game is read from, or null when none is set up. */
+    /** The folder the selected game is read from, or null when none is set up (or its files are not here). */
     private String gameDir() {
+        Library.Record r = rec();
+        if (r != null)
+            return r.dataDir.isEmpty() ? null : r.dataDir;
+        return legacyDir();
+    }
+
+    /** The one-game rule: the remembered folder, else RECOMP_GAME_DIR, else game/ when it holds default.xbe. */
+    private String legacyDir() {
         String dir = GameStore.chosenDir(this);
         if (dir != null)
             return dir;
@@ -2639,20 +3578,61 @@ public class LauncherActivity extends Activity {
         return GameStore.findXbe(def) != null ? def.getAbsolutePath() : null;
     }
 
-    private State state() {
+    /** The folder the game process runs (or last ran): the preferences, as ShellActivity reads them. */
+    private String launchedDir() {
         String dir = GameStore.chosenDir(this);
-        if (dir != null) {
-            if (GameStore.findXbe(new File(dir)) == null) {
-                File ext = GameStore.externalFilesDir(this);
-                boolean outside = ext == null || !dir.startsWith(ext.getAbsolutePath());
-                return new File(dir).exists() && !Environment.isExternalStorageManager() && outside
-                       ? State.NO_ACCESS : State.MISSING;
+        if (dir != null)
+            return dir;
+        String cfgDir = GameStore.cfgGameDir(this);
+        if (cfgDir != null)
+            return cfgDir;
+        File def = GameStore.defaultGameDir(this);
+        return def == null ? null : def.getAbsolutePath();
+    }
+
+    /** The selected game is the one the process runs or last ran. */
+    private boolean selectedIsLaunched() {
+        String d = gameDir();
+        return d != null && d.equals(launchedDir());
+    }
+
+    /** The title ID of the game the process runs or last ran, or null. */
+    private String launchedTid() {
+        String t = GameStore.launchedTitleId(this);
+        if (t != null)
+            return t;
+        String d = launchedDir();
+        return d == null ? null : Pack.xbeTitleId(GameStore.findXbe(new File(d)));
+    }
+
+    private State state() {
+        Library.Record r = rec();
+        String dir;
+        if (r != null) {
+            if (r.dataDir.isEmpty())
+                return State.LIBRARY;
+            dir = r.dataDir;
+            if (!Library.KIND_CFG.equals(r.dataKind) && GameStore.findXbe(new File(dir)) == null)
+                return missingState(dir);
+        } else {
+            dir = GameStore.chosenDir(this);
+            if (dir != null) {
+                if (GameStore.findXbe(new File(dir)) == null)
+                    return missingState(dir);
+            } else if (!gameReady()) {
+                return State.NONE;
             }
-        } else if (!gameReady()) {
-            return State.NONE;
         }
         String d = gameDir();
         return d != null && d.equals(hashDir) && Boolean.FALSE.equals(hashOk) ? State.WRONG : State.READY;
+    }
+
+    /** A folder without default.xbe: unreadable (no All files access, outside the app) or gone. */
+    private State missingState(String dir) {
+        File ext = GameStore.externalFilesDir(this);
+        boolean outside = ext == null || !dir.startsWith(ext.getAbsolutePath());
+        return new File(dir).exists() && !Environment.isExternalStorageManager() && outside ? State.NO_ACCESS
+                                                                                            : State.MISSING;
     }
 
     private static int stateLabel(State s) {
@@ -2665,6 +3645,8 @@ public class LauncherActivity extends Activity {
             return R.string.STATE_NO_ACCESS;
         case WRONG:
             return R.string.STATE_WRONG;
+        case LIBRARY:
+            return R.string.LIB_CHIP_NOT_IMPORTED;
         default:
             return R.string.STATE_NONE;
         }
@@ -2690,6 +3672,9 @@ public class LauncherActivity extends Activity {
     }
 
     private String gameTitle(String dir) {
+        Library.Record r = rec();
+        if (r != null && !r.title.isEmpty() && (dir == null ? r.dataDir.isEmpty() : dir.equals(r.dataDir)))
+            return r.title;
         String t = GameStore.chosenTitle(this);
         if (dir != null && dir.equals(GameStore.chosenDir(this)) && !t.isEmpty())
             return t;
@@ -2700,15 +3685,27 @@ public class LauncherActivity extends Activity {
         return x.isEmpty() ? new File(dir).getName() : x;
     }
 
+    private Storage.Dirs storageDirs() {
+        return new Storage.Dirs(getFilesDir(), GameStore.externalFilesDir(this));
+    }
+
+    /** A copy this app made (games/<TID>, or the older game/): the only game files it ever deletes. */
     private boolean ownedCopy(String dir) {
-        File def = GameStore.defaultGameDir(this);
-        return def != null && dir.equals(def.getAbsolutePath()) && def.isDirectory();
+        return Storage.ownedCopy(storageDirs(), dir) && new File(dir).isDirectory();
+    }
+
+    /** The selected game came from recomp.cfg's RECOMP_GAME_DIR. */
+    private boolean fromCfg() {
+        Library.Record r = rec();
+        if (r != null)
+            return Library.KIND_CFG.equals(r.dataKind);
+        return GameStore.chosenDir(this) == null && GameStore.cfgGameDir(this) != null;
     }
 
     private String sourceLabel(String dir) {
         if (ownedCopy(dir))
             return getString(R.string.SOURCE_IMPORTED);
-        if (GameStore.chosenDir(this) == null && GameStore.cfgGameDir(this) != null)
+        if (fromCfg())
             return getString(R.string.SOURCE_CFG);
         return getString(R.string.SOURCE_IN_PLACE);
     }
@@ -2860,27 +3857,90 @@ public class LauncherActivity extends Activity {
     }
 
     /**
-     * Starts ShellActivity. A live game with no new choice is only brought to the front; a main process without a
-     * live ShellActivity (SDL_main returned, e.g. after NO_GAME_DATA) cannot start the runtime again, so it is ended
-     * first (restart = true does the same unconditionally).
+     * Starts ShellActivity for the selected game. A live game with no new choice is only brought to the front; a
+     * main process without a live ShellActivity (SDL_main returned, e.g. after NO_GAME_DATA) cannot start the
+     * runtime again, so it is ended first (restart = true does the same unconditionally). Another game than the one
+     * the process runs: that process is ended, the selected game becomes the launched one (GameStore.rememberLaunch,
+     * the only place it is written) and the shared caches switch owner (SaveCaches).
      */
     private void launchShell(boolean restart) {
+        boolean other = !selectedIsLaunched() && gameDir() != null;
         int pid = mainProcessPid();
-        if (pid != 0 && !restart && !shellAlive()) {
-            Log.i(TAG, "launcher: main process " + pid + " has no game window, restarting it");
+        if (pid != 0 && !restart && (other || !shellAlive())) {
+            Log.i(TAG, "launcher: main process " + pid + (other ? " runs another game" : " has no game window")
+                       + ", restarting it");
             restart = true;
         }
         if (restart)
             endRunningGame();
+        String tid = titleId();
+        Library.Record r = rec();
+        if (other || (r != null && tid != null && !tid.equals(GameStore.launchedTitleId(this)))) {
+            String dir = gameDir();
+            boolean cfg = r != null && Library.KIND_CFG.equals(r.dataKind);
+            GameStore.rememberLaunch(this, cfg ? null : dir, gameTitle(dir), tid);
+            Log.i(TAG, "launcher: launched game set: " + dir + " (" + tid + ")");
+        }
+        String owner = tid != null ? tid : r != null ? r.titleId : null;
         boolean resume = pid != 0 && !restart;   // a live game brought back: its play session goes on
-        if (!resume)
-            GameStore.sessionStart(this, System.currentTimeMillis());
+        if (owner != null && !resume) {   // the caches move only while no game process uses them
+            try {
+                if (SaveCaches.switchTo(GameTheme.saveDir(this), Library.cacheOwnerFile(getFilesDir()), owner))
+                    Log.i(TAG, "launcher: game caches switched to " + owner);
+            } catch (IOException e) {
+                Log.w(TAG, "launcher: cannot switch the game caches to " + owner, e);
+            }
+        }
+        if (!resume) {
+            long now = System.currentTimeMillis();
+            GameStore.sessionStart(this, now, owner);
+            if (owner != null) {
+                Library.sessionStart(games, owner, now);
+                writeGames();
+            }
+        }
         Log.i(TAG, "launcher: play");
         Intent i = new Intent(this, ShellActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
         if (restart)
             i.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TASK);
         startActivity(i);
         finish();
+    }
+
+    /** The app icon while the game runs: back to it as it is (whatever game the library shows). */
+    private void resumeShell() {
+        startActivity(new Intent(this, ShellActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+        finish();
+    }
+
+    /**
+     * Play while another game runs: the first press says it will close (badge and note), a second within CONFIRM_MS
+     * goes on. True when the launch may go on.
+     */
+    private boolean confirmSwitch() {
+        if (selectedIsLaunched() || !gameRunning())
+            return true;
+        long now = SystemClock.uptimeMillis();
+        if (switchArmedAt != 0 && now - switchArmedAt <= CONFIRM_MS) {
+            switchArmedAt = 0;
+            Log.i(TAG, "launcher: switching games, ending " + runningTitle());
+            return true;
+        }
+        switchArmedAt = now;
+        if (homePrimary != null)
+            homePrimary.setBadge(getString(R.string.PREPARE_CANCEL_BADGE), Theme.WARN);
+        setNote(getString(R.string.LIB_SWITCH_CONFIRM, runningTitle()), NOTE_WARN);
+        return false;
+    }
+
+    /** The running (or last launched) game's title, for the switch warning. */
+    private String runningTitle() {
+        String t = GameStore.chosenTitle(this);
+        String tid = launchedTid();
+        Library.Record r = tid == null ? null : games.get(tid);
+        if (r != null && !r.title.isEmpty())
+            return r.title;
+        return t.isEmpty() ? getString(R.string.LIB_ANOTHER_GAME) : t;
     }
 
     /**
@@ -2897,26 +3957,81 @@ public class LauncherActivity extends Activity {
         overridePendingTransition(0, 0);
     }
 
-    /** A new game was checked and remembered: end the old one's process, then HOME with Play focused. */
+    /**
+     * A new game was checked (picked, imported, copied): it becomes a library record and the selected game, then
+     * HOME with Play focused. The launched game (the preferences) changes only when it is played (launchShell).
+     * After an import from the library, a Prepare that is needed starts at once.
+     */
     private void onGameChosen(String dir, String title) {
-        GameStore.remember(this, dir, title);
-        titleIdDir = null;   // a new game may sit in the same folder (game/): read its title ID again
+        File d = new File(dir);
+        String tid = Pack.xbeTitleId(GameStore.findXbe(d));
+        if (tid == null)
+            tid = Library.localKey(d.getAbsolutePath());
+        long now = System.currentTimeMillis();
+        Library.Record r = games.get(tid);
+        if (r == null) {
+            r = new Library.Record();
+            r.titleId = tid;
+            r.addedAt = now;
+            games.put(r);
+        }
+        if (!title.isEmpty())
+            r.title = title;
+        else if (r.title.isEmpty())
+            r.title = d.getName();
+        r.dataDir = d.getAbsolutePath();
+        r.dataKind = Storage.ownedCopy(storageDirs(), dir) ? Library.KIND_IMPORTED : Library.KIND_IN_PLACE;
+        if (Library.KIND_IN_PLACE.equals(r.dataKind) && r.source.isEmpty())
+            r.source = LibraryIndex.fileLoc(d);
+        if (chosenSha != null)
+            r.xbeSha256 = chosenSha;
+        games.selected = tid;
+        writeGames();
+        boolean fromLibrary = importFromLibrary;
+        importFromLibrary = false;
+        importTid = null;
+        titleIdDir = null;   // a new game may sit in the same folder: read its title ID again
         artTid = null;
-        Log.i(TAG, "launcher: game set: " + dir + " (" + title + ")");
-        endRunningGame();
-        hashDir = dir;
+        libArt.remove(tid);
+        Log.i(TAG, "launcher: game set: " + dir + " (" + title + ", " + tid + ")");
+        hashDir = r.dataDir;
         hashOk = Boolean.TRUE;
         sizeDir = null;
         history.clear();
+        if (libraryOn())
+            history.push(Screen.LIBRARY);
         focusMemory.remove(Screen.HOME);
         show(Screen.HOME);
         feedback.play(UiFeedback.Cue.DONE, host);
-        setNote(getString(R.string.READY_TO_PLAY, title.isEmpty() ? new File(dir).getName() : title), NOTE_OK);
+        setNote(getString(R.string.READY_TO_PLAY, title.isEmpty() ? d.getName() : title), NOTE_OK);
+        if (fromLibrary && prep() == Prep.NEEDED)
+            startPrepare();
+    }
+
+    /** « Change game » (Home's bottom-screen shortcut): the library when it is on, else the choice of source. */
+    private void onChangeGame() {
+        if (libraryOn())
+            openLibrary();
+        else
+            go(Screen.SOURCE);
     }
 
     // ---- Folder --------------------------------------------------------------------------------------------
 
     private void onChooseFolder() {
+        pickLibrary = false;
+        if (Environment.isExternalStorageManager())
+            openTreePicker();
+        else
+            go(Screen.FOLDER_ACCESS);
+    }
+
+    /**
+     * « Game library folder »: the tree picker; without All files access the FOLDER_ACCESS screen first (granted:
+     * the folder is read as files; otherwise through the Storage Access Framework, ISOs imported, folders copied).
+     */
+    private void onChooseLibraryFolder() {
+        pickLibrary = true;
         if (Environment.isExternalStorageManager())
             openTreePicker();
         else
@@ -2939,7 +4054,8 @@ public class LauncherActivity extends Activity {
 
     private void openTreePicker() {
         try {
-            startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE), REQ_TREE);
+            startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE), pickLibrary ? REQ_LIBRARY_TREE
+                                                                                             : REQ_TREE);
         } catch (ActivityNotFoundException e) {
             setNote(getString(R.string.PICKER_MISSING), NOTE_ERROR);
         }
@@ -3012,11 +4128,18 @@ public class LauncherActivity extends Activity {
             listTree(tree, d.id, d.path + "/", out);
     }
 
-    /** Worker: copy a picked tree into <external files dir>/game (fallback without All files access, XBA-40). */
+    /** Worker: copy a picked tree into the app (fallback without All files access, XBA-40). */
     private void copyTree(Uri tree) throws IOException {
+        copyTree(tree, DocumentsContract.getTreeDocumentId(tree), true);
+    }
+
+    /**
+     * Worker: copy the folder rootId of tree into <external files>/games/<TID>. release: give the read permission
+     * back at the end (a picked game folder; the library folder keeps it).
+     */
+    private void copyTree(Uri tree, String rootId, boolean release) throws IOException {
         ContentResolver cr = getContentResolver();
         try {
-            String rootId = DocumentsContract.getTreeDocumentId(tree);
             List<Doc> docs = new ArrayList<>();
             listTree(tree, rootId, "", docs);
             if (cancelled())
@@ -3082,9 +4205,11 @@ public class LauncherActivity extends Activity {
             }
             finishImport(staged);
         } finally {
-            try {
-                cr.releasePersistableUriPermission(tree, Intent.FLAG_GRANT_READ_URI_PERMISSION);
-            } catch (SecurityException ignored) {
+            if (release) {
+                try {
+                    cr.releasePersistableUriPermission(tree, Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                } catch (SecurityException ignored) {
+                }
             }
         }
     }
@@ -3124,7 +4249,12 @@ public class LauncherActivity extends Activity {
 
     /** Worker: probe, check the space, extract into the staging dir (libxba_import.so), check the hash, swap. */
     private void extractIso(Uri uri, String name) throws IOException {
-        try (ParcelFileDescriptor pfd = getContentResolver().openFileDescriptor(uri, "r")) {
+        extractIso(getContentResolver().openFileDescriptor(uri, "r"), name);
+    }
+
+    /** extractIso() of an image already open (the library's: a file, or a document of the library folder). */
+    private void extractIso(ParcelFileDescriptor opened, String name) throws IOException {
+        try (ParcelFileDescriptor pfd = opened) {
             if (pfd == null)
                 throw new IOException("cannot open " + name);
             String[] title = new String[1];
@@ -3163,14 +4293,18 @@ public class LauncherActivity extends Activity {
 
     // ---- Shared import steps -------------------------------------------------------------------------------
 
-    /** <external files dir>/game.import, emptied: the import goes there, and replaces game/ only once checked. */
+    /**
+     * <external files dir>/games/.import, emptied: the import goes there, and becomes games/<TID> only once checked
+     * (the older game/ is never an import target again: docs « Game library »).
+     */
     private File stagingDir() throws IOException {
         File ext = GameStore.externalFilesDir(this);
         if (ext == null)
             throw new IOException("no external files dir");
-        File staged = new File(ext, GameStore.GAME_SUBDIR + ".import");
+        File games = new File(ext, Library.GAMES_SUBDIR);
+        File staged = new File(games, ".import");
         GameStore.deleteTree(staged);
-        GameStore.deleteTree(new File(ext, GameStore.GAME_SUBDIR + ".import.partial"));
+        GameStore.deleteTree(new File(games, ".import.partial"));
         if (!staged.mkdirs() && !staged.isDirectory())
             throw new IOException("cannot create " + staged);
         return staged;
@@ -3193,13 +4327,37 @@ public class LauncherActivity extends Activity {
             return;
         }
         String title = GameStore.xbeTitle(xbe);
-        File game = GameStore.swapIntoGameDir(this, staged);
+        String tid = Pack.xbeTitleId(xbe);
+        if (tid == null)
+            tid = Library.localKey(sha);
+        File game = GameStore.swapInto(staged, Library.importDir(GameStore.externalFilesDir(this), tid));
         if (game == null) {
             GameStore.deleteTree(staged);
             fail(getString(R.string.IMPORT_FAILED, "rename"));
             return;
         }
+        Log.i(TAG, "launcher: library: imported " + tid + " into " + game);
+        dropLegacyCopy(tid, game);
         chosen(game.getAbsolutePath(), title);
+    }
+
+    /**
+     * Worker, after a checked import into games/<TID>: the older game/ copy of the same title goes (docs « Game
+     * library », migration), unless a game process may be using it. The launched game moves to the new copy.
+     */
+    private void dropLegacyCopy(String tid, File game) {
+        File legacy = GameStore.defaultGameDir(this);
+        if (legacy == null || legacy.equals(game) || !tid.equals(Pack.xbeTitleId(GameStore.findXbe(legacy))))
+            return;
+        if (mainProcessPid() != 0) {
+            Log.i(TAG, "launcher: library: the older copy " + legacy + " stays (a game process is running)");
+            return;
+        }
+        String launched = GameStore.chosenDir(this);
+        if (launched == null || launched.equals(legacy.getAbsolutePath()))
+            GameStore.rememberLaunch(this, game.getAbsolutePath(), GameStore.xbeTitle(GameStore.findXbe(game)), tid);
+        GameStore.deleteTree(legacy);
+        Log.i(TAG, "launcher: library: removed the older copy " + legacy);
     }
 
     private long freeSpace() {
@@ -3233,6 +4391,7 @@ public class LauncherActivity extends Activity {
         workerNote = null;
         chosenDir = null;
         chosenTitle = null;
+        chosenSha = null;
         importLabel = label;
         if (screen == Screen.FOLDER_ACCESS && !history.isEmpty())
             importReturn = history.pop();   // SOURCE: a failed import comes back to the choice of source
@@ -3264,6 +4423,8 @@ public class LauncherActivity extends Activity {
             onGameChosen(chosenDir, chosenTitle == null ? "" : chosenTitle);
             return;
         }
+        importTid = null;
+        importFromLibrary = false;
         String text = workerNote;
         int kind = workerNoteKind;
         show(importReturn);
@@ -3275,6 +4436,11 @@ public class LauncherActivity extends Activity {
     private void chosen(String dir, String title) {
         File d = new File(dir);
         GameTheme.ensure(this, d, Pack.xbeTitleId(GameStore.findXbe(d)), title);
+        try {
+            chosenSha = GameStore.sha256(GameStore.findXbe(d));
+        } catch (IOException | RuntimeException e) {
+            chosenSha = null;
+        }
         chosenTitle = title;
         chosenDir = dir;
     }
@@ -3336,6 +4502,8 @@ public class LauncherActivity extends Activity {
             return;
         if (requestCode == REQ_TREE)
             onTreePicked(data.getData());
+        else if (requestCode == REQ_LIBRARY_TREE)
+            onLibraryTreePicked(data.getData());
         else if (requestCode == REQ_ISO)
             onIsoPicked(data.getData());
         else if (requestCode == REQ_LSFG_DLL)

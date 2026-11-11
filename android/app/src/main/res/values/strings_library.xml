@@ -3,4 +3,84 @@
 <resources>
     <string name="CHIP_QUEUED">Queued</string>
     <string name="PREPARE_QUEUED_NOTE">Queued behind another game\'s Prepare: it starts by itself.</string>
+
+    <!-- The library screen -->
+    <string name="LIB_TITLE">Library</string>
+    <plurals name="LIB_GAMES">
+        <item quantity="one">%1$d game</item>
+        <item quantity="other">%1$d games</item>
+    </plurals>
+    <string name="LIB_HINT_OPEN">Open</string>
+    <string name="LIB_HINT_PRIMARY">Play</string>
+    <string name="LIB_RESCAN">Rescan</string>
+    <string name="LIB_STORAGE">Storage</string>
+    <string name="LIB_FOLDER_TILE">Library folder</string>
+    <string name="LIB_FOLDER_NONE">Not chosen yet</string>
+    <string name="LIB_FOLDER_SAF">Chosen folder</string>
+    <string name="LIB_FOLDER_DETAIL">The folder where your disc images and extracted game folders are, for example /sdcard/xbox. The app reads it and never changes or deletes anything in it. Press A to choose another one.</string>
+    <string name="LIB_FOLDER_FOOTER">Images (.iso, .xiso) and folders holding a default.xbe, up to four levels down. Y scans it again.</string>
+    <string name="LIB_KV_SCANNED">Last scan</string>
+    <string name="LIB_KV_GAMES">Games</string>
+    <string name="LIB_KV_OTHERS">Other files</string>
+    <string name="LIB_KV_REGION">Region</string>
+    <string name="LIB_KV_IMAGE">Image</string>
+    <string name="LIB_TRUNCATED">Too many files: the scan stopped at 5,000 entries</string>
+    <string name="LIB_SCANNING">Scanning the library folder… %1$d found</string>
+    <string name="LIB_SCANNING_NOTE">Scanning the library folder…</string>
+    <string name="LIB_NO_FOLDER">Choose your library folder: the folder where your disc images and game folders are.</string>
+    <string name="LIB_EMPTY">No game found in the library folder yet.</string>
+    <string name="LIB_OTHERS">Other files (%1$d): %2$s</string>
+    <string name="LIB_VERSIONS">%1$d versions</string>
+    <string name="LIB_DISC">Disc %1$d</string>
+    <string name="LIB_REGION_NA">North America</string>
+    <string name="LIB_REGION_JP">Japan</string>
+    <string name="LIB_REGION_WORLD">Rest of the world</string>
+    <string name="LIB_FOOTER">A opens the game\'s home · Start: %1$s</string>
+    <string name="LIB_FOOTER_OPEN">A opens the game\'s home</string>
+    <string name="LIB_RUNNING_NOTE">%1$s is running in the background.</string>
+    <string name="LIB_PANEL_NONE">Your library</string>
+
+    <!-- States (chips) -->
+    <string name="LIB_CHIP_NOT_IMPORTED">Not imported</string>
+    <string name="LIB_CHIP_NEEDS_COPYING">Needs copying</string>
+    <string name="LIB_CHIP_IMPORTING">Importing</string>
+    <string name="LIB_CHIP_PACK_INVALID">Pack invalid</string>
+    <string name="LIB_CHIP_SOURCE_GONE">Source gone</string>
+    <string name="LIB_QUEUED_N">Queued (%1$d)</string>
+    <string name="LIB_LEAD_NOT_IMPORTED">In your library folder. Import it once to play: its files are copied into the app.</string>
+    <string name="LIB_LEAD_NEEDS_COPYING">This folder can only be read through Android\'s file picker: it must be copied into the app to be played.</string>
+    <string name="LIB_LEAD_IMPORTING">Being imported.</string>
+    <string name="LIB_LEAD_NO_ACCESS">The app lost its access to the library folder. Choose it again.</string>
+    <string name="LIB_LEAD_SOURCE_GONE">Its folder is no longer in the library folder.</string>
+    <string name="LIB_LEAD_DATA_MISSING">Its files are missing.</string>
+    <string name="LIB_LEAD_PACK_INVALID">Its pack was built from another version of the game, or the game refused it: prepare it again.</string>
+
+    <!-- Home of a library game -->
+    <string name="LIB_IMPORT">Import</string>
+    <string name="LIB_IMPORT_SUB">Extract the disc image into the app (a few minutes), then prepare it if needed</string>
+    <string name="LIB_COPY">Copy into the app</string>
+    <string name="LIB_COPY_SUB">Copy the game folder into the app, then prepare it if needed</string>
+    <string name="LIB_CHOOSE_FOLDER">Choose the folder again</string>
+    <string name="LIB_CHOOSE_FOLDER_SUB">Give the app access to your library folder</string>
+    <string name="LIB_PREPARE_NOW">Prepare now</string>
+    <string name="LIB_PREPARE_NOW_SUB">From the disc\'s default.xbe, before importing</string>
+    <string name="LIB_QUEUED_SUB">Waits for the Prepare before it · A takes it out of the queue</string>
+    <string name="LIB_DEQUEUED">Taken out of the Prepare queue.</string>
+    <string name="LIB_SOURCE_GONE_SUB">Choose or scan the library folder again</string>
+    <string name="LIB_SOURCE_GONE_NOTE">%1$s is no longer in the library folder.</string>
+    <string name="LIB_PREPARED_IMPORT">%1$s is prepared: import it to play.</string>
+    <string name="LIB_GO_SUB">Your games, and the library folder</string>
+    <string name="LIB_OTHER_RUNNING">%1$s is running: playing this game closes it (saves are kept).</string>
+    <string name="LIB_PLAY_SUB_SWITCH">%1$s will close first</string>
+    <string name="LIB_SWITCH_CONFIRM">%1$s is running and will close. Press Play again within 5 seconds.</string>
+    <string name="LIB_ANOTHER_GAME">Another game</string>
+
+    <!-- Choosing the library folder -->
+    <string name="LIB_CARD">Game library folder</string>
+    <string name="LIB_CARD_SUB">A folder holding several games: disc images and extracted folders. The app lists them; you import the ones you play.</string>
+    <string name="LIB_BADGE_NEW">Several games</string>
+    <string name="LIB_BADGE_SET">Chosen</string>
+    <string name="LIB_ALL_FILES_EXPLAIN">With All files access the app reads your library folder as it is: extracted game folders play in place, disc images are read without copying. Without it, Android\'s file picker still lets the app list the folder, but every game must be imported or copied.</string>
+    <string name="LIB_SAF">Use the file picker</string>
+    <string name="LIB_SAF_SUB">Without All files access: games are listed, then imported or copied into the app</string>
 </resources>

@@ -553,6 +553,19 @@ final class LibraryScanner {
     }
 
     /**
+     * The launcher's art hook: titleArt(), plus the title's game theme (GameTheme.ensure from the cached XBE, so the
+     * library's glow and the game's Home have its colours before it is imported).
+     */
+    static Art titleArtAndTheme(Context c) {
+        Art art = titleArt(c.getFilesDir());
+        return (xbe, tid, title) -> {
+            art.onGame(xbe, tid, title);
+            if (xbe != null && !GameTheme.themeFile(c, tid).isFile())
+                GameTheme.ensure(c, xbe.getParentFile(), tid, title);
+        };
+    }
+
+    /**
      * Scans the app's library folder (on the calling thread: a worker) and, unless cancelled, writes index.json and
      * the scan time. Returns null when no folder is set.
      */
@@ -567,7 +580,7 @@ final class LibraryScanner {
         File indexFile = Library.indexFile(files);
         LibraryIndex prev = LibraryIndex.read(indexFile);
         long start = SystemClock.elapsedRealtime();
-        Result r = scan(t, prev, NATIVE_PEEK, Library.xbeCacheDir(files), titleArt(files), listener, cancel);
+        Result r = scan(t, prev, NATIVE_PEEK, Library.xbeCacheDir(files), titleArtAndTheme(c), listener, cancel);
         if (!r.cancelled) {
             try {
                 LibraryIndex.write(indexFile, r.index);

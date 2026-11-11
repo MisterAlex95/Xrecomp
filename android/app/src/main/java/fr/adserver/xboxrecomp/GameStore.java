@@ -190,7 +190,8 @@ final class GameStore {
     // A session starts when the launcher starts ShellActivity and ends when the launcher shows again with the game no
     // longer running. A session left open longer than SESSION_MAX (the launcher never came back: the app was swiped
     // away or the device rebooted) counts for SESSION_MAX.
-    static final String KEY_LAST_PLAYED = "last_played", KEY_PLAY_MS = "play_ms", KEY_SESSION_START = "session_start";
+    static final String KEY_LAST_PLAYED = "last_played", KEY_PLAY_MS = "play_ms", KEY_SESSION_START = "session_start",
+            KEY_SESSION_TID = "session_tid";
     static final long SESSION_MAX = 6 * 3600_000L;
 
     /** When the game was last started (System.currentTimeMillis), 0 if never. */
@@ -205,6 +206,51 @@ final class GameStore {
 
     static void sessionStart(Context c, long now) {
         prefs(c).edit().putLong(KEY_LAST_PLAYED, now).putLong(KEY_SESSION_START, now).commit();
+    }
+
+    /** sessionStart() of the game library: also the title the session belongs to (session_tid, its record). */
+    static void sessionStart(Context c, long now, String titleId) {
+        SharedPreferences.Editor e = prefs(c).edit().putLong(KEY_LAST_PLAYED, now).putLong(KEY_SESSION_START, now);
+        if (titleId == null)
+            e.remove(KEY_SESSION_TID);
+        else
+            e.putString(KEY_SESSION_TID, titleId);
+        e.commit();
+    }
+
+    /** When the open session started, 0 when none is open. */
+    static long sessionStartedAt(Context c) {
+        return prefs(c).getLong(KEY_SESSION_START, 0);
+    }
+
+    /** The title ID of the open (or last) session, or null. */
+    static String sessionTid(Context c) {
+        String s = prefs(c).getString(KEY_SESSION_TID, null);
+        return s == null || s.isEmpty() ? null : s;
+    }
+
+    /**
+     * The game the process will run, written at launch only (docs « Game library »: the launcher's selected game is
+     * another thing): game_dir, title and title_id. A null dir forgets the folder (recomp.cfg's RECOMP_GAME_DIR or
+     * the default game/ then apply).
+     */
+    static boolean rememberLaunch(Context c, String dir, String title, String titleId) {
+        SharedPreferences.Editor e = prefs(c).edit();
+        if (dir == null)
+            e.remove(KEY_DIR).remove(KEY_TITLE);
+        else
+            e.putString(KEY_DIR, dir).putString(KEY_TITLE, title == null ? "" : title);
+        if (titleId == null || Library.isLocalKey(titleId))
+            e.remove(Library.PREF_TITLE_ID);
+        else
+            e.putString(Library.PREF_TITLE_ID, titleId);
+        return e.commit();
+    }
+
+    /** The title ID of the game last launched (title_id), or null. */
+    static String launchedTitleId(Context c) {
+        String s = prefs(c).getString(Library.PREF_TITLE_ID, null);
+        return s == null || s.isEmpty() ? null : s;
     }
 
     /** Closes an open session (adds its length to the play time); nothing when none is open. */
@@ -394,10 +440,20 @@ final class GameStore {
      * removed; on a failed rename the old one goes back. Returns the new game dir or null.
      */
     static File swapIntoGameDir(Context c, File staged) {
-        File game = defaultGameDir(c);
+        return swapInto(staged, defaultGameDir(c));
+    }
+
+    /**
+     * Puts staged in place of game (the game library's games/<TID>): game -> <name>.old, staged -> game, the old one
+     * removed; on a failed rename the old one goes back. Returns game or null.
+     */
+    static File swapInto(File staged, File game) {
         if (game == null)
             return null;
-        File old = new File(game.getParentFile(), GAME_SUBDIR + ".old");
+        File parent = game.getParentFile();
+        if (parent != null && !parent.isDirectory() && !parent.mkdirs())
+            return null;
+        File old = new File(parent, game.getName() + ".old");
         deleteTree(old);
         boolean hadOld = game.exists();
         if (hadOld && !game.renameTo(old))

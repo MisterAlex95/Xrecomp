@@ -119,7 +119,7 @@
     <string name="GAME_DATA">Données du jeu</string>
     <string name="ABOUT">À propos</string>
     <string name="ABOUT_SUB">Version %1$s · licences</string>
-    <string name="OPEN_DIRECTLY">Ouvrir directement le jeu la prochaine fois</string>
+    <string name="OPEN_DIRECTLY">Ouvrir directement le dernier jeu</string>
     <string name="OPEN_DIRECTLY_ON">La prochaine fois, le jeu s\'ouvre directement. Appui long sur l\'icône › Lanceur pour revenir ici.</string>
     <string name="OPEN_DIRECTLY_OFF">La prochaine fois, cet écran s\'affiche d\'abord.</string>
 

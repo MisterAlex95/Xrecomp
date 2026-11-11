@@ -2,4 +2,81 @@
 <resources>
     <string name="CHIP_QUEUED">En attente</string>
     <string name="PREPARE_QUEUED_NOTE">En file derrière la préparation d\'un autre jeu : elle démarrera d\'elle-même.</string>
+
+    <string name="LIB_TITLE">Bibliothèque</string>
+    <plurals name="LIB_GAMES">
+        <item quantity="one">%1$d jeu</item>
+        <item quantity="many">%1$d jeux</item>
+        <item quantity="other">%1$d jeux</item>
+    </plurals>
+    <string name="LIB_HINT_OPEN">Ouvrir</string>
+    <string name="LIB_HINT_PRIMARY">Jouer</string>
+    <string name="LIB_RESCAN">Actualiser</string>
+    <string name="LIB_STORAGE">Stockage</string>
+    <string name="LIB_FOLDER_TILE">Dossier de la bibliothèque</string>
+    <string name="LIB_FOLDER_NONE">Pas encore choisi</string>
+    <string name="LIB_FOLDER_SAF">Dossier choisi</string>
+    <string name="LIB_FOLDER_DETAIL">Le dossier où sont vos images disque et vos dossiers de jeu extraits, par exemple /sdcard/xbox. L\'application le lit sans jamais rien y modifier ni supprimer. Appuyez sur A pour en choisir un autre.</string>
+    <string name="LIB_FOLDER_FOOTER">Images (.iso, .xiso) et dossiers contenant un default.xbe, jusqu\'à quatre niveaux. Y relance l\'analyse.</string>
+    <string name="LIB_KV_SCANNED">Dernière analyse</string>
+    <string name="LIB_KV_GAMES">Jeux</string>
+    <string name="LIB_KV_OTHERS">Autres fichiers</string>
+    <string name="LIB_KV_REGION">Région</string>
+    <string name="LIB_KV_IMAGE">Image</string>
+    <string name="LIB_TRUNCATED">Trop de fichiers : l\'analyse s\'est arrêtée à 5 000 entrées</string>
+    <string name="LIB_SCANNING">Analyse du dossier de la bibliothèque… %1$d trouvés</string>
+    <string name="LIB_SCANNING_NOTE">Analyse du dossier de la bibliothèque…</string>
+    <string name="LIB_NO_FOLDER">Choisissez le dossier de votre bibliothèque : celui où sont vos images disque et vos dossiers de jeu.</string>
+    <string name="LIB_EMPTY">Aucun jeu trouvé dans le dossier de la bibliothèque pour l\'instant.</string>
+    <string name="LIB_OTHERS">Autres fichiers (%1$d) : %2$s</string>
+    <string name="LIB_VERSIONS">%1$d versions</string>
+    <string name="LIB_DISC">Disque %1$d</string>
+    <string name="LIB_REGION_NA">Amérique du Nord</string>
+    <string name="LIB_REGION_JP">Japon</string>
+    <string name="LIB_REGION_WORLD">Reste du monde</string>
+    <string name="LIB_FOOTER">A ouvre l\'accueil du jeu · Start : %1$s</string>
+    <string name="LIB_FOOTER_OPEN">A ouvre l\'accueil du jeu</string>
+    <string name="LIB_RUNNING_NOTE">%1$s tourne en arrière-plan.</string>
+    <string name="LIB_PANEL_NONE">Votre bibliothèque</string>
+
+    <string name="LIB_CHIP_NOT_IMPORTED">Non importé</string>
+    <string name="LIB_CHIP_NEEDS_COPYING">À copier</string>
+    <string name="LIB_CHIP_IMPORTING">Importation</string>
+    <string name="LIB_CHIP_PACK_INVALID">Pack invalide</string>
+    <string name="LIB_CHIP_SOURCE_GONE">Source introuvable</string>
+    <string name="LIB_QUEUED_N">En attente (%1$d)</string>
+    <string name="LIB_LEAD_NOT_IMPORTED">Dans le dossier de votre bibliothèque. Importez-le une fois pour jouer : ses fichiers sont copiés dans l\'application.</string>
+    <string name="LIB_LEAD_NEEDS_COPYING">Ce dossier n\'est lisible que par le sélecteur de fichiers d\'Android : il doit être copié dans l\'application pour être joué.</string>
+    <string name="LIB_LEAD_IMPORTING">Importation en cours.</string>
+    <string name="LIB_LEAD_NO_ACCESS">L\'application n\'a plus accès au dossier de la bibliothèque. Choisissez-le à nouveau.</string>
+    <string name="LIB_LEAD_SOURCE_GONE">Son dossier n\'est plus dans le dossier de la bibliothèque.</string>
+    <string name="LIB_LEAD_DATA_MISSING">Ses fichiers sont introuvables.</string>
+    <string name="LIB_LEAD_PACK_INVALID">Son pack a été fait à partir d\'une autre version du jeu, ou le jeu l\'a refusé : préparez-le à nouveau.</string>
+
+    <string name="LIB_IMPORT">Importer</string>
+    <string name="LIB_IMPORT_SUB">Extraire l\'image disque dans l\'application (quelques minutes), puis la préparer si besoin</string>
+    <string name="LIB_COPY">Copier dans l\'application</string>
+    <string name="LIB_COPY_SUB">Copier le dossier du jeu dans l\'application, puis le préparer si besoin</string>
+    <string name="LIB_CHOOSE_FOLDER">Choisir à nouveau le dossier</string>
+    <string name="LIB_CHOOSE_FOLDER_SUB">Redonner à l\'application l\'accès au dossier de votre bibliothèque</string>
+    <string name="LIB_PREPARE_NOW">Préparer maintenant</string>
+    <string name="LIB_PREPARE_NOW_SUB">À partir du default.xbe du disque, avant l\'importation</string>
+    <string name="LIB_QUEUED_SUB">Attend la préparation en cours · A le retire de la file</string>
+    <string name="LIB_DEQUEUED">Retiré de la file de préparation.</string>
+    <string name="LIB_SOURCE_GONE_SUB">Choisir ou analyser à nouveau le dossier de la bibliothèque</string>
+    <string name="LIB_SOURCE_GONE_NOTE">%1$s n\'est plus dans le dossier de la bibliothèque.</string>
+    <string name="LIB_PREPARED_IMPORT">%1$s est préparé : importez-le pour jouer.</string>
+    <string name="LIB_GO_SUB">Vos jeux, et le dossier de la bibliothèque</string>
+    <string name="LIB_OTHER_RUNNING">%1$s est en cours : jouer à ce jeu le ferme (les sauvegardes sont conservées).</string>
+    <string name="LIB_PLAY_SUB_SWITCH">%1$s sera d\'abord fermé</string>
+    <string name="LIB_SWITCH_CONFIRM">%1$s est en cours et va être fermé. Appuyez à nouveau sur Jouer dans les 5 secondes.</string>
+    <string name="LIB_ANOTHER_GAME">Un autre jeu</string>
+
+    <string name="LIB_CARD">Dossier de bibliothèque</string>
+    <string name="LIB_CARD_SUB">Un dossier qui contient plusieurs jeux : images disque et dossiers extraits. L\'application les liste ; vous importez ceux auxquels vous jouez.</string>
+    <string name="LIB_BADGE_NEW">Plusieurs jeux</string>
+    <string name="LIB_BADGE_SET">Choisi</string>
+    <string name="LIB_ALL_FILES_EXPLAIN">Avec l\'accès à tous les fichiers, l\'application lit le dossier de votre bibliothèque tel quel : les dossiers de jeu extraits se jouent sur place, les images disque sont lues sans copie. Sans lui, le sélecteur de fichiers d\'Android permet quand même de lister le dossier, mais chaque jeu doit être importé ou copié.</string>
+    <string name="LIB_SAF">Utiliser le sélecteur de fichiers</string>
+    <string name="LIB_SAF_SUB">Sans l\'accès à tous les fichiers : les jeux sont listés, puis importés ou copiés dans l\'application</string>
 </resources>

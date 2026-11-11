@@ -56,6 +56,16 @@ final class LauncherPanel extends PanelView {
         invalidate();
     }
 
+    /** The third shortcut's label: « Change game », or « Library » with the game library on (null: the default). */
+    void setChangeLabel(String label) {
+        button(CHANGE).label = label != null ? label : getContext().getString(R.string.CHANGE_GAME);
+        invalidate();
+    }
+
+    String changeLabelForTest() {
+        return button(CHANGE).label;
+    }
+
     /** The game's title image on the identity card (null: none, the text starts at the card's edge). */
     void setArt(android.graphics.Bitmap b) {
         if (b != art) {

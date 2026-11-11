@@ -26,8 +26,8 @@ import java.util.Arrays;
 import java.util.List;
 
 /**
- * D5: the launcher's second-screen panels (Home, Preparing) at 1240 x 1080, one PNG per state in
- * build/screenshots/companion-launcher-*.png and companion-preparing-*.png.
+ * D5: the launcher's second-screen panels (Home, Preparing, the game library) at 1240 x 1080, one PNG per state in
+ * build/screenshots/companion-launcher-*.png, companion-preparing-*.png and companion-library-*.png.
  */
 @RunWith(RobolectricTestRunner.class)
 @Config(sdk = 34, qualifiers = "w1240dp-h1080dp-land-mdpi")
@@ -125,6 +125,70 @@ public class LauncherPanelsTest {
         shot(p, "companion-launcher-themed-long");
         p.setArt(null);
         assertFalse(p.hasArtForTest());
+    }
+
+    private LibraryPanel library() {
+        return new LibraryPanel(activity, new LibraryPanel.Actions() {
+            @Override
+            public void primary() {
+                calls.add("primary");
+            }
+
+            @Override
+            public void rescan() {
+                calls.add("rescan");
+            }
+
+            @Override
+            public void settings() {
+                calls.add("settings");
+            }
+        });
+    }
+
+    /** The library's panel: the focused game (art, state, its primary action), Rescan, Settings; the folder tile. */
+    @Test
+    public void libraryStates() throws Exception {
+        int[] wh = new int[2];
+        int[] px = TitleArt.decodeXpr(TestSupport.xpr0(0x0C, 128, 128, TestSupport.dxt1Picture()), wh);
+        LibraryPanel p = put(library());
+        p.setArt(android.graphics.Bitmap.createBitmap(px, wh[0], wh[1], android.graphics.Bitmap.Config.ARGB_8888));
+        p.set("Sample Game", activity.getString(R.string.STATE_READY), Theme.OK, activity.getString(R.string.PLAY));
+        assertTrue(p.hasArtForTest());
+        shot(p, "companion-library-ready");
+        PanelTesting t = new PanelTesting(p);
+        t.tap(PanelTesting.centre(p.button(LibraryPanel.PRIMARY)));
+        t.tap(PanelTesting.centre(p.button(LibraryPanel.RESCAN)));
+        t.tap(PanelTesting.centre(p.button(LibraryPanel.SETTINGS)));
+        assertEquals(Arrays.asList("primary", "rescan", "settings"), calls);
+
+        p.setArt(null);
+        p.set("A Game With A Really Long Title That Will Not Fit On One Line Of The Card",
+              activity.getString(R.string.LIB_CHIP_NOT_IMPORTED), Theme.ACCENT, activity.getString(R.string.LIB_IMPORT));
+        assertEquals(activity.getString(R.string.LIB_IMPORT), p.button(LibraryPanel.PRIMARY).label);
+        shot(p, "companion-library-not-imported");
+
+        p.set("", activity.getString(R.string.LIB_FOLDER_TILE), Theme.TEXT_DIM, null);
+        t.tap(PanelTesting.centre(p.button(LibraryPanel.PRIMARY)));
+        assertEquals("no primary action: greyed, no call", 3, calls.size());
+        shot(p, "companion-library-folder");
+
+        idle(11_000);
+        assertTrue(p.isDimmed());
+        shot(p, "companion-library-dimmed");
+    }
+
+    /** Home's third shortcut reads « Library » when the game library is on. */
+    @Test
+    public void homeChangeLabel() throws Exception {
+        LauncherPanel p = put(home());
+        assertEquals(activity.getString(R.string.CHANGE_GAME), p.changeLabelForTest());
+        p.setChangeLabel(activity.getString(R.string.LIB_TITLE));
+        p.set("Sample Game", activity.getString(R.string.PANEL_READY), Theme.OK, true);
+        assertEquals(activity.getString(R.string.LIB_TITLE), p.changeLabelForTest());
+        shot(p, "companion-launcher-library");
+        p.setChangeLabel(null);
+        assertEquals(activity.getString(R.string.CHANGE_GAME), p.changeLabelForTest());
     }
 
     private static PrepareProtocol.Status status(String state, String id, int step, int pct, long eta) {

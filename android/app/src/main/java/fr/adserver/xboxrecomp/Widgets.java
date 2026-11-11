@@ -848,7 +848,7 @@ final class Widgets {
         public boolean onPreDraw() {
             View host = (View)getParent();
             View f = host == null ? null : host.findFocus();
-            if (!(f instanceof MenuRow) || !f.isShown() || !rectIn(f, host, tmp)) {
+            if (!(f instanceof MenuRow || f instanceof GameCard) || !f.isShown() || !rectIn(f, host, tmp)) {
                 if (target != null) {
                     target = null;
                     invalidate();
