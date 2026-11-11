@@ -1017,6 +1017,105 @@ static void gl_draw(const Nv2aSurface *s, const Nv2aBatch *b)
     s_st.tris += b->count / 3;
 }
 
+/* ---- context loss and GL_OUT_OF_MEMORY ---------------------------------- */
+
+/* Forget every GL object the back end holds and start again at the next
+ * call: ensure_init re-creates the shared objects, the caches fill again
+ * from guest memory (targets are seeded from the guest bytes, which the
+ * present sync has just brought up to date). lost: the context is gone, so
+ * its objects are only forgotten, not deleted. Every cache of GL names
+ * belongs here. */
+static void gl_reset_objects(int lost)
+{
+    int i;
+
+    if (!lost) {
+        for (i = 0; i < NV_GL_MAX_RT; i++) {
+            if (s_rt[i].fbo) glDeleteFramebuffers(1, &s_rt[i].fbo);
+            if (s_rt[i].tex) glDeleteTextures(1, &s_rt[i].tex);
+        }
+        for (i = 0; i < NV_GL_MAX_DEPTH; i++)
+            if (s_depth[i].rb) glDeleteRenderbuffers(1, &s_depth[i].rb);
+        for (i = 0; i < NV_GL_MAX_TEX; i++)
+            if (s_tex[i].tex) glDeleteTextures(1, &s_tex[i].tex);
+        for (i = 0; i < NV_GL_MAX_PROG; i++)
+            if (s_prog[i].prog) glDeleteProgram(s_prog[i].prog);
+        if (s_nquery) glDeleteQueries(s_nquery, s_query);
+        if (s_vbo) glDeleteBuffers(1, &s_vbo);
+        if (s_vao) glDeleteVertexArrays(1, &s_vao);
+        if (s_vs) glDeleteShader(s_vs);
+        glFinish();
+        while (glGetError() != GL_NO_ERROR)
+            ;
+    }
+    memset(s_rt, 0, sizeof s_rt);
+    memset(s_depth, 0, sizeof s_depth);
+    memset(s_tex, 0, sizeof s_tex);
+    memset(s_bound, 0, sizeof s_bound);
+    s_ntex = 0;
+    memset(s_prog, 0, sizeof s_prog);
+    s_nquery = 0;
+    s_vbo = s_vao = s_vs = 0;
+    s_init = 0;
+}
+
+/* At the flip: drain glGetError, and on a lost context (GPU reset, the
+ * Android driver dropping it) or GL_OUT_OF_MEMORY forget all objects and
+ * re-create them lazily. Out of memory leaves GL state undefined, and a
+ * texture or target that failed to allocate would otherwise stay in its
+ * cache as incomplete. After NV_GL_MAX_RESETS the CPU rasteriser takes
+ * over for the rest of the run. */
+#define NV_GL_MAX_RESETS 4
+static void gl_check_frame(void)
+{
+    static int said, resets;
+    int lost, oom = 0, n = 0;
+    GLenum e;
+
+    if (s_init <= 0)
+        return;
+    lost = nv2a_gl_context_lost();
+    {
+        /* RECOMP_GPU_FAKE_RESET=<frame>[,oom]: act as if the context were
+         * lost (or out of memory) at that frame, to exercise this path on
+         * a host whose driver never resets. */
+        static long at = -2;
+        static int fake_oom;
+        if (at == -2) {
+            const char *f = getenv("RECOMP_GPU_FAKE_RESET");
+            at = f && *f ? strtol(f, NULL, 10) : -1;
+            fake_oom = f && strstr(f, "oom") != NULL;
+        }
+        if (at >= 0 && s_frame == (uint32_t)at) {
+            if (fake_oom)
+                oom = 1;
+            else
+                lost = 1;
+        }
+    }
+    while (!lost && n++ < 16 && (e = glGetError()) != GL_NO_ERROR) {
+        if (e == GL_OUT_OF_MEMORY)
+            oom = 1;
+        else if (e == GL_CONTEXT_LOST)
+            lost = 1;
+        else if (said++ < 8)
+            fprintf(stderr, "  [GPUGL] GL error 0x%X during frame %u\n", e, s_frame);
+    }
+    if (!lost && !oom)
+        return;
+    fprintf(stderr, "  [GPUGL] %s at frame %u: dropping every GL object%s\n",
+            lost ? "context lost" : "GL_OUT_OF_MEMORY", s_frame,
+            resets + 1 < NV_GL_MAX_RESETS ? ", re-created as needed"
+                                          : "; the CPU rasteriser takes over");
+    gl_reset_objects(lost);
+    if (lost)
+        nv2a_gl_context_destroy();
+    if (++resets >= NV_GL_MAX_RESETS) {
+        s_init = -1;
+        unregister_self();
+    }
+}
+
 /* Before the flip's window snapshot and frame dump: every surface the GPU
  * drew into this frame goes back to guest memory. */
 static void gl_present_sync(void)
@@ -1047,12 +1146,7 @@ static void gl_flip(void)
                 s_st.compiles);
         memset(&s_st, 0, sizeof s_st);
     }
-    {
-        GLenum e = s_init > 0 ? glGetError() : GL_NO_ERROR;
-        static int said;
-        if (e != GL_NO_ERROR && said++ < 8)
-            fprintf(stderr, "  [GPUGL] GL error 0x%X during frame %u\n", e, s_frame);
-    }
+    gl_check_frame();
 }
 
 static const Nv2aBackend s_backend = {

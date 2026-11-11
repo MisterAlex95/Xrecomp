@@ -36,13 +36,26 @@
 #ifndef GL_CLAMP_TO_BORDER
 #define GL_CLAMP_TO_BORDER 0x812D
 #endif
+#ifndef GL_CONTEXT_LOST
+#define GL_CONTEXT_LOST 0x0507      /* GLES 3.2, KHR_robustness */
+#endif
 #ifndef GL_TEXTURE_BORDER_COLOR
 #define GL_TEXTURE_BORDER_COLOR 0x1004
 #endif
 
 /* Create a context with no window and make it current on the calling
- * thread. Returns 0 on failure (and says why on stderr). The context stays
- * bound to that thread for the rest of the run. */
+ * thread. Returns 0 on failure (and says why on stderr); 1 at once if the
+ * context already exists. The context stays bound to that thread for the
+ * rest of the run, or until nv2a_gl_context_destroy. */
 int nv2a_gl_context_create(void);
+
+/* 1 if the context is gone: the driver reported a reset (EGL, with
+ * EGL_EXT_create_context_robustness) or it is no longer current on this
+ * thread. Every GL object it held is then invalid. Cheap: call per frame. */
+int nv2a_gl_context_lost(void);
+
+/* Drop the context after a loss; the next nv2a_gl_context_create makes a
+ * new one (EGL keeps the display, config and pbuffer). */
+void nv2a_gl_context_destroy(void);
 
 #endif
