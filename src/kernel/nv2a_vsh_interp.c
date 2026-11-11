@@ -43,6 +43,12 @@ static int      s_const_trace = -1;      /* RECOMP_VSH_DUMP: constant traffic */
 /* Changes whenever the program memory or the start slot does, so the decoded
  * copy below knows when to decode again. */
 static uint32_t s_program_revision;
+/* Constant dirty tracking, for a back end that keeps c[] in GPU uniforms:
+ * every write to c[i] stamps it with the next serial. */
+static uint64_t s_const_stamp[NV2A_VSH_CONSTANTS];
+static uint64_t s_const_serial;
+
+#define CONST_TOUCH(i) (s_const_stamp[(i)] = ++s_const_serial)
 
 static int vsh_dump_enabled(void)
 {
@@ -95,9 +101,10 @@ void nv2a_vsh_set_constant_load(uint32_t index)
 
 void nv2a_vsh_constant_word(uint32_t word)
 {
-    if (s_const_load < NV2A_VSH_CONSTANTS)
+    if (s_const_load < NV2A_VSH_CONSTANTS) {
         memcpy(&s_const[s_const_load][s_const_word], &word, 4);
-    else if (vsh_dump_enabled()) {
+        CONST_TOUCH(s_const_load);
+    } else if (vsh_dump_enabled()) {
         static int warned;
         if (warned++ < 8)
             fprintf(stderr, "  [VSH] constant write DROPPED (c[%u] >= %u)\n",
@@ -119,8 +126,10 @@ void nv2a_vsh_constant_word(uint32_t word)
 
 void nv2a_vsh_set_constant(uint32_t index, const float v[4])
 {
-    if (index < NV2A_VSH_CONSTANTS)
+    if (index < NV2A_VSH_CONSTANTS) {
         memcpy(s_const[index], v, sizeof s_const[index]);
+        CONST_TOUCH(index);
+    }
 }
 
 void nv2a_vsh_set_instruction(uint32_t slot, const uint32_t words[4])
@@ -203,8 +212,10 @@ const float *nv2a_vsh_constant(uint32_t index)
 
 void nv2a_vsh_constant_component(uint32_t index, uint32_t comp, uint32_t word)
 {
-    if (index < NV2A_VSH_CONSTANTS && comp < 4)
+    if (index < NV2A_VSH_CONSTANTS && comp < 4) {
         memcpy(&s_const[index][comp], &word, 4);
+        CONST_TOUCH(index);
+    }
 }
 
 /* ---- execution ----------------------------------------------------------- */
@@ -569,8 +580,10 @@ static int vsh_run_decoded(const float in[NV2A_VSH_INPUTS][4], Nv2aVshOutput *ou
         if (d->omask) {
             const vec4 *src = d->from_ilu ? &ires : &mres;
             if (!d->to_o) {                               /* to c[] */
-                if (s_cxt_write && d->oaddr < NV2A_VSH_CONSTANTS)
+                if (s_cxt_write && d->oaddr < NV2A_VSH_CONSTANTS) {
                     write_masked(s_const[d->oaddr], src, d->omask);
+                    CONST_TOUCH(d->oaddr);
+                }
             } else if (d->oaddr == 0) {
                 write_masked(regs[12].v, src, d->omask);
             } else if (d->oaddr < 13) {
@@ -725,8 +738,10 @@ static int vsh_run_fields(const float in[NV2A_VSH_INPUTS][4], Nv2aVshOutput *out
         if (omask) {
             const vec4 *src = field(ins, 3, 2, 1) ? &ires : &mres;
             if (!field(ins, 3, 11, 1)) {                  /* to c[] */
-                if (s_cxt_write && oaddr < NV2A_VSH_CONSTANTS)
+                if (s_cxt_write && oaddr < NV2A_VSH_CONSTANTS) {
                     write_masked(s_const[oaddr], src, omask);
+                    CONST_TOUCH(oaddr);
+                }
             } else if (oaddr == 0) {
                 write_masked(opos.v, src, omask);
             } else if (oaddr < 13) {
@@ -739,4 +754,83 @@ static int vsh_run_fields(const float in[NV2A_VSH_INPUTS][4], Nv2aVshOutput *out
         }
     }
     return 0;
+}
+
+/* ---- the program for a back end that runs it itself ------------------- */
+
+static struct {
+    uint32_t rev, valid;
+    uint32_t count, inputs, writes_const;
+    uint64_t hash;
+} s_info;
+
+static void info_update(void)
+{
+    uint32_t s, n = 0, inputs = 0, wc = 0, i;
+    uint64_t h = 1469598103934665603ull;
+    int final = 0;
+
+    for (s = s_start_slot; s < NV2A_VSH_SLOTS; s++) {
+        const uint32_t *ins = s_program[s];
+        uint32_t mac = field(ins, 1, 21, 4), ilu = field(ins, 1, 25, 3);
+        uint8_t reads = dec_reads(mac, ilu);
+        uint32_t in = field(ins, 1, 9, 4);
+
+        /* Words 1-3 (word 0 is unused), so equal programs hash equal. */
+        for (i = 1; i < 4; i++) {
+            h ^= ins[i];
+            h *= 1099511628211ull;
+        }
+        if (((reads & 1) && field(ins, 2, 26, 2) == 2)
+            || ((reads & 2) && field(ins, 2, 11, 2) == 2)
+            || ((reads & 4) && field(ins, 3, 28, 2) == 2))
+            inputs |= 1u << in;
+        if (field(ins, 3, 12, 4) && !field(ins, 3, 11, 1))
+            wc = 1;
+        n++;
+        if (field(ins, 3, 0, 1)) {
+            final = 1;
+            break;
+        }
+    }
+    s_info.count = final ? n : 0;
+    s_info.inputs = inputs;
+    s_info.writes_const = wc;
+    s_info.hash = h ^ ((uint64_t)n << 56);
+    s_info.rev = s_program_revision;
+    s_info.valid = 1;
+}
+
+uint32_t nv2a_vsh_program(const uint32_t (**ins)[4], uint64_t *hash,
+                          uint32_t *inputs)
+{
+    if (!s_info.valid || s_info.rev != s_program_revision)
+        info_update();
+    if (ins)
+        *ins = (const uint32_t (*)[4])s_program[s_start_slot < NV2A_VSH_SLOTS
+                                                 ? s_start_slot : 0];
+    if (hash)
+        *hash = s_info.hash;
+    if (inputs)
+        *inputs = s_info.inputs;
+    return s_info.count;
+}
+
+int nv2a_vsh_program_writes_constants(void)
+{
+    if (!s_info.valid || s_info.rev != s_program_revision)
+        info_update();
+    return s_cxt_write && s_info.writes_const;
+}
+
+const float (*nv2a_vsh_constants(void))[4]
+{
+    return (const float (*)[4])s_const;
+}
+
+const uint64_t *nv2a_vsh_constant_stamps(uint64_t *serial)
+{
+    if (serial)
+        *serial = s_const_serial;
+    return s_const_stamp;
 }

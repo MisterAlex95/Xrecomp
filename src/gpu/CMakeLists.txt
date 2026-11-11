@@ -9,6 +9,7 @@ add_library(xbox_gpu STATIC
     nv2a_gl.c
     nv2a_gl_context.c
     nv2a_gl_shader.c
+    nv2a_gl_vsh.c
 )
 get_filename_component(XBOXRECOMP_SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/.." ABSOLUTE)
 target_include_directories(xbox_gpu PUBLIC
