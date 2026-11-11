@@ -28,8 +28,6 @@
     <string name="PICKER_MISSING">Cet appareil n\'a pas de sélecteur de fichiers.</string>
 
     <!-- Commun -->
-    <string name="CHIP_OFFLINE">Fonctionne hors ligne</string>
-    <string name="CHIP_SCREEN_ON">L\'écran reste allumé</string>
     <string name="HINT_SELECT">Choisir</string>
     <string name="HINT_CHOOSE">Choisir</string>
     <string name="HINT_BACK">Retour</string>
@@ -39,8 +37,6 @@
     <string name="HINT_DEFAULTS">Par défaut</string>
     <string name="HINT_OPTIONS">Options</string>
     <string name="HINT_CLOSE">Fermer</string>
-    <string name="HINT_SECTION">Section</string>
-    <string name="KV_GAME">Jeu</string>
     <string name="KV_FOLDER">Dossier</string>
     <string name="KV_SOURCE">Source</string>
     <string name="KV_STATUS">État</string>
@@ -64,8 +60,6 @@
     <string name="WELCOME_HERO">Bienvenue</string>
     <string name="WELCOME_TEXT">Cette application fait tourner un jeu Xbox recompilé sur Android. Le jeu lui-même n\'est pas inclus : vous apportez votre propre copie, depuis un disque que vous possédez. La configuration prend une minute, ou quelques-unes pour une image disque.</string>
     <string name="WELCOME_START">Commencer</string>
-    <string name="WELCOME_START_SUB">Indiquer où se trouve votre jeu</string>
-    <string name="WELCOME_STEPS">Trois étapes</string>
     <string name="STEP1">Choisir votre jeu</string>
     <string name="STEP1_SUB">Le dossier de votre disque extrait, ou une image disque (.iso)</string>
     <string name="STEP2">Vérifier et importer</string>
@@ -75,8 +69,6 @@
 
     <!-- Choix de la source -->
     <string name="SOURCE_TITLE">Choisir votre jeu</string>
-    <string name="SOURCE_CAPS">Votre jeu</string>
-    <string name="SOURCE_HEAD">Où est votre jeu ?</string>
     <string name="SOURCE_TEXT">Utilisez un jeu que vous possédez : le dossier de votre disque extrait, ou une image disque que vous avez faite vous-même. Le jeu actuel reste en place tant que le nouveau n\'a pas été vérifié.</string>
     <string name="CARD_FOLDER">Dossier du jeu</string>
     <string name="CARD_FOLDER_SUB">Le disque extrait : default.xbe et ses fichiers, sur l\'appareil ou une carte SD. Lu sur place avec l\'accès à tous les fichiers, sinon copié dans l\'application.</string>
@@ -84,7 +76,6 @@
     <string name="CARD_ISO_SUB">Une image .iso ou .xiso de votre disque. Extraite une fois dans le stockage de l\'application : il faut la taille du jeu en espace libre, et quelques minutes.</string>
     <string name="BADGE_IN_PLACE">Lu sur place</string>
     <string name="BADGE_FOLDER_ASK">Sur place ou copie</string>
-    <string name="BADGE_FREE">%1$s libres</string>
     <string name="BADGE_RECOMMENDED">Recommandé</string>
 
     <!-- Accès à tous les fichiers -->
@@ -97,7 +88,6 @@
 
     <!-- Import -->
     <string name="IMPORT_TITLE">Préparation du jeu</string>
-    <string name="IMPORT_CAPS">Import</string>
     <string name="IMPORT_STARTING">Démarrage…</string>
     <string name="IMPORT_KEEPS">Le jeu actuel est conservé tant que le nouveau n\'a pas été vérifié. Gardez l\'application ouverte jusqu\'à la fin.</string>
     <string name="CHECKING">Vérification du jeu…</string>
@@ -105,21 +95,14 @@
     <string name="EXTRACTING">Extraction de l\'image disque…</string>
     <string name="PROGRESS_BYTES">%1$s sur %2$s</string>
     <string name="CANCEL">Annuler</string>
-    <string name="CANCEL_SUB">Arrêter et garder le jeu actuel</string>
 
     <!-- Accueil -->
     <string name="PLAY">Jouer</string>
-    <string name="PLAY_SUB">Lancer le jeu</string>
-    <string name="PLAY_SUB_RUNNING">Revenir au jeu en cours</string>
-    <string name="PLAY_SUB_UNAVAILABLE">Indisponible : %1$s</string>
     <string name="PLAY_DETAIL_RUNNING">Le jeu est déjà lancé : Jouer le ramène là où vous l\'avez laissé.</string>
     <string name="NO_GAME_HEAD">Pas encore de jeu</string>
     <string name="SETTINGS">Réglages</string>
-    <string name="SETTINGS_SUB_DEFAULT">Réglages par défaut</string>
     <string name="SETTINGS_FOOTER">Enregistrés dans %1$s et appliqués au prochain lancement du jeu. Les lignes que vous y ajoutez vous-même sont conservées.</string>
-    <string name="GAME_DATA">Données du jeu</string>
     <string name="ABOUT">À propos</string>
-    <string name="ABOUT_SUB">Version %1$s · licences</string>
     <string name="OPEN_DIRECTLY">Démarrer dans le jeu</string>
     <string name="OPEN_DIRECTLY_ON">La prochaine fois, le jeu s\'ouvre directement. Appui long sur l\'icône › Lanceur pour revenir ici.</string>
     <string name="OPEN_DIRECTLY_OFF">La prochaine fois, cet écran s\'affiche d\'abord.</string>
@@ -138,11 +121,8 @@
     <string name="SETTINGS_GAME_RUNNING">Le jeu est lancé : les changements s\'appliquent à son prochain lancement.</string>
     <string name="SETTINGS_SAVE_FAILED">Impossible d\'enregistrer les réglages : %1$s</string>
     <string name="RESET">Tout réinitialiser</string>
-    <string name="RESET_SUB">Vos propres lignes de recomp.cfg restent</string>
     <string name="RESET_DETAIL">Remet chaque option de cet écran à sa valeur par défaut, en retirant ses lignes de recomp.cfg. Les autres lignes du fichier restent telles quelles.</string>
     <string name="RESET_DONE">Valeurs par défaut rétablies. Appliquées au prochain lancement du jeu.</string>
-    <string name="DEFAULT_MARK">(défaut)</string>
-    <string name="CFG_NOTHING">rien : la valeur par défaut</string>
     <string name="VAL_ON">Oui</string>
     <string name="VAL_OFF">Non</string>
     <string name="VAL_AUTO">Auto</string>
@@ -188,10 +168,8 @@
     <string name="HOME_MANAGE">Gérer</string>
     <string name="CHOOSE_GAME">Choisir un jeu</string>
     <string name="CHANGE_GAME">Changer de jeu</string>
-    <string name="CHANGE_GAME_SUB">Un autre dossier ou une image disque, ou réimporter</string>
     <string name="CHANGE_GAME_DETAIL">Choisissez un dossier de jeu ou une image disque. Le jeu actuel reste tant que le nouveau n\'a pas été vérifié ; un jeu lancé est alors fermé. Les sauvegardes sont conservées.</string>
     <string name="DELETE_COPY">Supprimer la copie importée</string>
-    <string name="DELETE_COPY_SUB">Libérer l\'espace ; les sauvegardes restent</string>
     <string name="DELETE_COPY_DETAIL">Supprime %1$s, la copie faite par cette application. Vos sauvegardes restent (stockage interne). Il faudra ensuite choisir de nouveau le jeu pour jouer.</string>
     <string name="DELETE_CONFIRM_BADGE">Appuyez encore sur A</string>
     <string name="DELETE_CONFIRM">Appuyez de nouveau sur A dans les 5 secondes pour supprimer la copie importée.</string>
@@ -199,8 +177,6 @@
     <string name="DELETED">La copie importée a été supprimée. Les sauvegardes sont conservées.</string>
 
     <!-- À propos -->
-    <string name="ABOUT_CAPS">Cette version</string>
-    <string name="ABOUT_BUILD">Build</string>
     <string name="ABOUT_TAGLINE">Basé sur le runtime xboxrecomp</string>
     <string name="ABOUT_TEXT">Un jeu recompilé statiquement, exécuté par XRecomp (le runtime xboxrecomp) sur Android arm64. Aucune donnée de jeu n\'est incluse : l\'application lit la copie que vous avez configurée depuis un disque que vous possédez.</string>
     <string name="ABOUT_LICENCE">xboxrecomp : MIT. SDL2 : zlib.</string>
@@ -216,8 +192,6 @@
     <!-- La préparation sur l'appareil (docs/android/prepare.md) -->
     <string name="PREPARE">Préparer</string>
     <string name="PREPARING">Préparation…</string>
-    <string name="PREPARE_TITLE">Préparation du jeu</string>
-    <string name="PREPARE_CAPS">Une seule fois, sur cet appareil</string>
     <string name="PREPARE_ESTIMATE">environ %1$d à %2$d min</string>
     <string name="PREPARE_NO_SPACE">Pas assez de stockage interne pour préparer le jeu : il faut %1$s, %2$s sont libres.</string>
     <string name="PREPARE_LOW_RAM">Cet appareil a %1$s de mémoire : la préparation peut être lente ou échouer (6 Go ou plus recommandés).</string>
@@ -225,45 +199,29 @@
     <string name="PREPARE_STARTING">Démarrage…</string>
     <string name="PREPARE_KEEPS">Vous pouvez quitter l\'application : elle continue en arrière-plan.</string>
     <string name="PREPARE_ETA">encore %1$s environ</string>
-    <string name="PREPARE_CANCEL_SUB">S\'arrête maintenant ; ce qui est fait est gardé pour la prochaine fois</string>
     <string name="PREPARE_CANCEL_CONFIRM">Appuyez encore pour annuler la préparation.</string>
     <string name="PREPARE_CANCEL_BADGE">Appuyez encore</string>
     <string name="PREPARE_FAILED_HEAD">La préparation a échoué</string>
     <string name="PREPARE_CANCELLED_HEAD">Préparation arrêtée</string>
     <string name="PREPARE_CANCELLED_TEXT">La préparation a été annulée. Ce qui a été fait est gardé : Reprendre continue à partir de là.</string>
     <string name="PREPARE_INTERRUPTED">La préparation a été interrompue (le système l\'a fermée). Ce qui a été fait est gardé : Préparer continue à partir de là.</string>
-    <string name="PREPARE_STEP_OF">Étape %1$d sur %2$d</string>
-    <string name="PREPARE_CODE_LINE">Code %1$s</string>
     <string name="PREPARE_HINT_KILLED">Le système a arrêté le compilateur deux fois (pas assez de mémoire, ou la limite d\'Android sur les processus en arrière-plan). Fermez les autres applications et réessayez.</string>
     <string name="PREPARE_HINT_NO_SPACE">Le stockage interne est plein (%1$s libres). Libérez de la place, puis réessayez : ce qui a été fait est gardé.</string>
     <string name="PREPARE_RETRY">Réessayer</string>
     <string name="PREPARE_RESUME">Reprendre</string>
-    <string name="PREPARE_RETRY_SUB">D\'où elle s\'est arrêtée</string>
     <string name="SHARE_LOG">Partager le journal</string>
-    <string name="SHARE_LOG_SUB">prepare.log, à vous ou un développeur</string>
     <string name="SHARE_LOG_NONE">Pas encore de journal.</string>
     <string name="SHARE_LOG_NO_APP">Aucune application de cet appareil ne peut recevoir le journal.</string>
     <string name="SHARE_LOG_SUBJECT">Journal de préparation : %1$s (%2$s)</string>
-    <string name="HINT_MENU">Menu</string>
     <string name="CHIP_NEEDS_PREPARE">À préparer</string>
     <string name="CHIP_PREPARING">Préparation</string>
     <string name="CHIP_PREPARE_FAILED">Préparation en échec</string>
-    <string name="KV_ESTIMATE">Durée</string>
-    <string name="KV_INTERNAL_FREE">Libre (interne)</string>
-    <string name="KV_RAM">Mémoire</string>
-    <string name="KV_CODE">Code</string>
     <string name="STEP_INSTALL">Installer les outils</string>
-    <string name="STEP_INSTALL_SUB">Une fois par version de l\'application</string>
     <string name="STEP_IDENTIFY">Identifier</string>
-    <string name="STEP_IDENTIFY_SUB">Quel jeu, quelle version</string>
     <string name="STEP_ANALYSE">Analyser</string>
-    <string name="STEP_ANALYSE_SUB">Trouve le code du jeu</string>
     <string name="STEP_LIFT">Traduire</string>
-    <string name="STEP_LIFT_SUB">Le transforme en C</string>
     <string name="STEP_COMPILE">Compiler</string>
-    <string name="STEP_COMPILE_SUB">Code natif pour cet appareil</string>
     <string name="STEP_PACK">Assembler</string>
-    <string name="STEP_PACK_SUB">Prêt à jouer</string>
     <string name="PREPARE_CHANNEL">Préparation du jeu</string>
     <string name="PREPARE_CHANNEL_DESC">Avancement de la préparation du jeu, avec Annuler</string>
     <string name="PREPARE_NOTIF_TITLE">Préparation de %1$s</string>
@@ -271,34 +229,20 @@
     <string name="PREPARE_NOTIF_STEP">Étape %1$d sur %2$d : %3$s</string>
     <string name="PREPARE_NOTIF_DONE">Prêt : ouvrez l\'application et appuyez sur Jouer.</string>
     <string name="PREPARE_NOTIF_FAILED">La préparation a échoué (%1$s). Ouvrez l\'application pour voir pourquoi.</string>
-    <string name="PREPARE_STEP_PCT">cette étape %1$d %%</string>
     <string name="PREPARE_ETA_BIG">Encore %1$s environ</string>
     <string name="PREPARE_ETA_UNKNOWN">Calcul du temps restant…</string>
-    <string name="PREPARE_ETA_FAILED">Arrêtée sur une erreur</string>
-    <string name="PREPARE_ETA_STOPPED">En pause</string>
     <string name="PREPARE_STATUS">Préparation · étape %1$d sur %2$d · %3$s</string>
     <string name="PREPARE_STATUS_SHORT">Préparation · %1$s</string>
     <string name="HINT_HIDE">Masquer</string>
 
     <!-- Accueil (le héros façon console) -->
-    <string name="HOME_TITLE">Accueil</string>
-    <string name="HOME_TITLE_ID">ID du titre %1$s</string>
     <string name="CHIP_RUNNING">En cours</string>
     <string name="HOME_LEAD_READY">En jeu, Retour ouvre le menu du jeu (réglages, quitter). Les sauvegardes restent sur l\'appareil.</string>
     <string name="HOME_LEAD_PREPARE">Préparé une fois, ici sur l\'appareil, à partir de votre copie : ensuite Jouer démarre tout de suite.</string>
     <string name="HOME_LEAD_PREPARING">Préparation de votre jeu. Vous pouvez quitter l\'application : elle continue en arrière-plan.</string>
     <string name="HOME_LEAD_FAILED">La préparation s\'est arrêtée sur une erreur. Voyez pourquoi, puis reprenez là où elle s\'est arrêtée.</string>
     <string name="CHOOSE_AGAIN">Choisir à nouveau le jeu</string>
-    <string name="CHOOSE_GAME_SUB">Dossier du disque ou image disque</string>
     <string name="PREPARE_SEE_WHY">Voir l\'erreur</string>
-    <string name="HOME_SUB_PREPARE">Rend votre jeu jouable ici</string>
-    <string name="HOME_SUB_PREPARING">Progression, ou annuler</string>
-    <string name="HOME_SUB_FAILED">Puis reprendre là où elle s\'est arrêtée</string>
-    <string name="HOME_SUB_RESUME">Reprend là où elle s\'est arrêtée</string>
-    <string name="SOURCE_SHORT_COPY">copie</string>
-    <string name="SOURCE_SHORT_IN_PLACE">sur place</string>
-    <string name="KV_LAST_PLAYED">Dernière partie</string>
-    <string name="KV_PLAY_TIME">Temps de jeu</string>
     <string name="KV_PREPARED">Préparé le</string>
     <string name="KV_PACK_SIZE">Taille du pack</string>
     <string name="VAL_NEVER">Jamais</string>
@@ -326,9 +270,6 @@
 
     <!-- Commandes -->
     <string name="CONTROLS">Commandes</string>
-    <string name="CONTROLS_SUB">Vos boutons</string>
-    <string name="CONTROLS_CAPS">Dans le jeu</string>
-    <string name="CONTROLS_HEAD">Comme une manette Xbox</string>
     <string name="CONTROLS_FOOTER">Pareil pour toute manette vue par Android : le jeu la lit comme la première manette Xbox. Les boutons sont pris par position, tels qu\'Android les nomme.</string>
     <string name="PAD_L1">L1 · Noir</string>
     <string name="PAD_L2">L2 · LT</string>
@@ -376,8 +317,6 @@
     <string name="GAME_THEME">Thème du jeu</string>
     <string name="GAME_THEME_DETAIL">Le lanceur prend ses couleurs, et un léger fond, dans l\'image de titre de %1$s, lue dans votre copie du jeu. Les couleurs d\'état (prêt, avertissements, erreurs) ne changent pas. Couleurs seules : sans image de fond. Désactivé : le vert du lanceur.</string>
     <string name="GAME_THEME_SAVED">Thème du jeu : %1$s.</string>
-    <string name="GAME_THEME_SOURCE_NONE">Aucune (une couleur tirée de l\'ID du titre)</string>
-    <string name="KV_IMAGE">Image</string>
     <string name="VAL_THEME_FULL">Image et couleurs</string>
     <string name="VAL_THEME_COLORS">Couleurs seules</string>
     <string name="VAL_THEME_OFF">Non</string>

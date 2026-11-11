@@ -144,8 +144,6 @@ final class Theme {
     static final float T_DISPLAY = 64, T_TITLE = 40, T_ROW = 34, T_BODY = 28, T_SMALL = 24;
     /** The hints' labels (between Small and Body: they are read at a glance). */
     static final float T_HINT = 26;
-    /** Aliases of the pre-Calm names, until every screen has moved (WP7 removes them). */
-    static final float T_HERO = T_DISPLAY, T_HEAD = T_TITLE, T_CAPS = T_SMALL;
 
     // ---- Layout -------------------------------------------------------------------------------------------------
     /** The spacing scale: every gap is one of these. */
@@ -161,10 +159,8 @@ final class Theme {
     static final int ART = 400, BUTTON_H = 96;
     /** The quiet right column of a list screen (the focused row's description). */
     static final int DESC_W = 600;
+    /** An overlay's corner (the in-game menu's flash and overlay pills keep their own). */
     static final int RADIUS = 22;
-    /** Aliases of the pre-Calm names, until every screen has moved (WP7 removes them). */
-    static final int GAP = S5, NOTE_H = FOOTER_H, BOTTOM_BAR_H = 0, ROW_H_SMALL = ROW_H, CARD_H = 230,
-                     PRIMARY_W = 660, PRIMARY_H = 128, TILE_H = 128;
 
     // ---- Motion -------------------------------------------------------------------------------------------------
     /** A new screen fades in and slides in from the side it comes from (ANIM_SLIDE design pixels). */
@@ -200,10 +196,6 @@ final class Theme {
         return text(c, T_SMALL, MEDIUM, TEXT_DIM, s);
     }
 
-    /** The old caps header, now a plain group label (WP7 removes it). */
-    static TextView caps(Context c, CharSequence s, int color) {
-        return label(c, s);
-    }
 
     static TextView oneLine(TextView t) {
         t.setSingleLine(true);
@@ -215,10 +207,5 @@ final class Theme {
         TextView t = text(c, T_BODY, REGULAR, TEXT_DIM, s);
         t.setLineSpacing(0, 1.3f);
         return t;
-    }
-
-    /** The old smaller body (WP7 removes it). */
-    static TextView small(Context c, CharSequence s) {
-        return body(c, s);
     }
 }

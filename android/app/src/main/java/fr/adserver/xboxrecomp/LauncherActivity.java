@@ -69,19 +69,24 @@ import fr.adserver.xboxrecomp.Widgets.MenuRow;
  * (":launcher"), before SDL. A controller-first screen set, built in code on a 1920 x 1080 design grid scaled to
  * the screen (Theme, Widgets), with a small state machine of screens and a back history instead of fragments:
  *
- * - WELCOME (first run, no game set up) -> SOURCE (game folder or disc image) -> FOLDER_ACCESS (All files access
- *   explained, or copy) -> IMPORT (progress ring, Cancel) -> HOME;
- * - HOME: a console-style home: a hero (the game's title image or a monogram, its title, a status chip, a few facts
- *   and one big Play / Prepare) over a row of smaller tiles: Settings, Controls, Game data, About;
- * - SETTINGS: « Open the game directly next time », UI sounds and vibration, and a few RECOMP_* options saved to
- *   recomp.cfg (RecompConfig), applied at the next start;
+ * - WELCOME (first run, no game set up) -> SOURCE (game folder, disc image or library folder) -> FOLDER_ACCESS (All
+ *   files access explained, or copy) -> IMPORT (progress ring; B cancels) -> HOME;
+ * - LIBRARY: the game library's grid, a context line, the Options sheet on Y (Rescan, Storage, Library folder,
+ *   Settings, About); STORAGE: what the app stores, per game;
+ * - HOME: the game's art and title, one line (when it was played, or its state), one row of buttons: a solid Play
+ *   (or Prepare, Choose…) and three quiet pills, Settings, Controls, Manage;
+ * - SETTINGS: four tabs (General, Graphics, Audio, Advanced): the launcher's preferences and a few RECOMP_* options
+ *   saved to recomp.cfg (RecompConfig), applied at the next start; About ends Advanced;
  * - CONTROLS: the device's buttons and the Xbox controller buttons the game gets;
- * - GAME_DATA: where the game is, its size, choose another, delete the imported copy; ABOUT;
- * - PREPARE: the on-device Prepare's progress (dimmed after two idle minutes, for OLED screens).
+ * - GAME_DATA (« Manage »): change game, delete the imported copy and the game's stored things; ABOUT;
+ * - PREPARE: Home's layout with the on-device Prepare's progress (dimmed after two idle minutes, for OLED screens).
  *
- * D-pad / stick move the focus (remembered per screen; one highlight glides from row to row), A selects, B goes back,
- * left / right change a setting, L1 / R1 jump between settings sections, Start plays; touch works too. Screens fade
- * and slide in; moves, selects, backs, errors and a finished Prepare have a short sound and a haptic (UiFeedback).
+ * The « Calm » look (docs/android/app-shell.md « Look, motion and sound »): a title-only top bar, one footer line
+ * (the note left, at most three hints right), list rows of label and value with the focused row's description in a
+ * quiet column. D-pad / stick move the focus (remembered per screen and per Settings tab; one highlight glides from
+ * item to item), A selects, B goes back, left / right change a setting, L1 / R1 switch Settings' tabs, Start plays;
+ * touch works too. Screens fade and slide in; moves, selects, backs, errors and a finished Prepare have a short sound
+ * and a haptic (UiFeedback).
  * Messages go to a note line, not toasts. The choice is remembered in SharedPreferences (GameStore); ShellActivity
  * hands it to native code as RECOMP_GAME_DIR. See docs/android/app-shell.md, « The launcher ».
  */
@@ -202,9 +207,6 @@ public class LauncherActivity extends Activity {
     private View defaultFocus;
     private Runnable xAction, yAction, startAction, l1Action, r1Action;
 
-    // ---- Detail panel of the current screen ----
-    private LinearLayout detail;
-
     // ---- Game facts computed off the UI thread ----
     private String hashDir;
     private Boolean hashOk;
@@ -224,7 +226,6 @@ public class LauncherActivity extends Activity {
     private Screen importReturn = Screen.SOURCE;
     private Widgets.Ring ring;
     private TextView importHead, importBytes, importFile;
-    private MenuRow cancelRow;
     private volatile String workerNote, chosenDir, chosenTitle;
     private volatile int workerNoteKind;
 
@@ -702,20 +703,13 @@ public class LauncherActivity extends Activity {
         return v;
     }
 
-    private MenuRow row(Icon icon, String title, String sub, Runnable click) {
+    private MenuRow row(String title, String description, Runnable click) {
         MenuRow r = new MenuRow(this);
-        r.set(icon, title, sub);
+        r.set(title, description);
         r.onPress = () -> feedback.play(UiFeedback.Cue.SELECT, r);
         if (click != null)
             r.setOnClickListener(v -> click.run());
         return focusable(r);
-    }
-
-    private FrameLayout panel() {
-        FrameLayout f = new FrameLayout(this);
-        f.setBackground(new Widgets.Panel());
-        f.setPadding(56, 48, 56, 44);
-        return f;
     }
 
     // ---- Navigation --------------------------------------------------------------------------------------------
@@ -784,7 +778,6 @@ public class LauncherActivity extends Activity {
         hints.removeAllViews();
         focusables.clear();
         defaultFocus = null;
-        detail = null;
         desc = null;
         xAction = yAction = startAction = l1Action = r1Action = null;
         topRight.setText("");
@@ -1108,7 +1101,7 @@ public class LauncherActivity extends Activity {
     /** A row of the open sheet: its action runs once the sheet is closed. */
     private MenuRow sheetRow(String title, Runnable action) {
         MenuRow r = new MenuRow(this);
-        r.set(null, title, null);
+        r.set(title, null);
         r.onPress = () -> feedback.play(UiFeedback.Cue.SELECT, r);
         r.setOnClickListener(v -> {
             closeSheet(false);
@@ -1252,7 +1245,7 @@ public class LauncherActivity extends Activity {
 
     /** A list row: label (and value); its description shows in the column when it is focused. */
     private MenuRow listRow(LinearLayout list, String title, String description, Runnable click) {
-        MenuRow r = row(null, title, description, click);
+        MenuRow r = row(title, description, click);
         list.addView(r, lp(MATCH, Theme.ROW_H));
         onFocus(r, () -> describe(r.description));
         return r;
@@ -1301,55 +1294,6 @@ public class LauncherActivity extends Activity {
         return getString(R.string.KV_LINE, getString(label), value);
     }
 
-    // ---- Detail panel ------------------------------------------------------------------------------------------
-
-    /** A panel on the right of a screen, refilled for the focused item. */
-    private FrameLayout detailPanel() {
-        FrameLayout p = panel();
-        detail = column();
-        p.addView(detail, new FrameLayout.LayoutParams(MATCH, MATCH));
-        return p;
-    }
-
-    private void detailClear(String caps, String title, String text) {
-        if (detail == null)
-            return;
-        detail.removeAllViews();
-        if (caps != null)
-            detail.addView(Theme.caps(this, caps, Theme.ACCENT), lp(MATCH, WRAP));
-        TextView t = Theme.text(this, Theme.T_TITLE, Theme.MEDIUM, Theme.TEXT, title);
-        LinearLayout.LayoutParams tl = lp(MATCH, WRAP);
-        tl.topMargin = caps != null ? 18 : 0;
-        tl.bottomMargin = 18;
-        detail.addView(t, tl);
-        if (text != null && !text.isEmpty())
-            detail.addView(Theme.small(this, text), lp(MATCH, WRAP));
-    }
-
-    /** A « label   value » line in the detail panel. */
-    private TextView detailKv(String label, String value) {
-        LinearLayout l = rowLayout();
-        TextView k = Theme.oneLine(Theme.text(this, Theme.T_BODY - 2, Theme.REGULAR, Theme.TEXT_FAINT, label));
-        l.addView(k, lp(250, WRAP));
-        TextView v = Theme.text(this, Theme.T_BODY - 2, Theme.REGULAR, Theme.TEXT, value);
-        v.setMaxLines(2);
-        v.setEllipsize(TextUtils.TruncateAt.END);
-        l.addView(v, lp(0, WRAP, 1));
-        LinearLayout.LayoutParams p = lp(MATCH, WRAP);
-        p.topMargin = 12;
-        detail.addView(l, p);
-        return v;
-    }
-
-    private void detailFooter(String text, int color) {
-        detail.addView(gap(this), lp(MATCH, 0, 1));
-        TextView t = Theme.text(this, Theme.T_SMALL, Theme.REGULAR, color, text);
-        t.setLineSpacing(0, 1.2f);
-        LinearLayout.LayoutParams p = lp(MATCH, WRAP);
-        p.topMargin = 18;
-        detail.addView(t, p);
-    }
-
     private void onFocus(View v, Runnable fill) {
         v.setOnFocusChangeListener((view, has) -> {
             if (has)
@@ -1359,47 +1303,43 @@ public class LauncherActivity extends Activity {
 
     // ---- WELCOME -----------------------------------------------------------------------------------------------
 
+    /** First run: a welcome, what it takes in three plain steps, and one button. */
     private void buildWelcome() {
         screenTitle.setText(R.string.WELCOME_TITLE);
         LinearLayout h = rowLayout();
-
         LinearLayout left = column();
         left.setGravity(Gravity.CENTER_VERTICAL);
-        left.addView(Theme.caps(this, getString(R.string.app_name), Theme.ACCENT), lp(MATCH, WRAP));
-        TextView hero = Theme.text(this, Theme.T_HERO, Theme.MEDIUM, Theme.TEXT, getString(R.string.WELCOME_HERO));
-        LinearLayout.LayoutParams hl = lp(MATCH, WRAP);
-        hl.topMargin = 20;
-        hl.bottomMargin = 28;
-        left.addView(hero, hl);
-        left.addView(Theme.body(this, getString(R.string.WELCOME_TEXT)), lp(MATCH, WRAP));
-        MenuRow start = row(Icon.ARROW, getString(R.string.WELCOME_START), getString(R.string.WELCOME_START_SUB),
-                            () -> go(Screen.SOURCE));
-        LinearLayout.LayoutParams sl = lp(640, Theme.ROW_H);
-        sl.topMargin = 48;
-        left.addView(start, sl);
-        defaultFocus = start;
-        LinearLayout.LayoutParams ll = lp(0, MATCH, 1);
-        ll.rightMargin = 80;
-        h.addView(left, ll);
+        left.addView(Theme.text(this, Theme.T_DISPLAY, Theme.MEDIUM, Theme.TEXT, getString(R.string.WELCOME_HERO)),
+                     lp(MATCH, WRAP));
+        TextView t = Theme.body(this, getString(R.string.WELCOME_TEXT));
+        LinearLayout.LayoutParams tl = lp(MATCH, WRAP);
+        tl.topMargin = Theme.S3;
+        left.addView(t, tl);
+        LinearLayout buttons = rowLayout();
+        LinearLayout.LayoutParams bl = lp(MATCH, Theme.BUTTON_H);
+        bl.topMargin = Theme.S5;
+        left.addView(buttons, bl);
+        defaultFocus = pill(buttons, Icon.ARROW, getString(R.string.WELCOME_START), true, () -> go(Screen.SOURCE));
+        h.addView(left, lp(0, MATCH, 1));
 
-        FrameLayout p = panel();
         LinearLayout steps = column();
-        steps.addView(Theme.caps(this, getString(R.string.WELCOME_STEPS), Theme.ACCENT), lp(MATCH, WRAP));
+        steps.setGravity(Gravity.CENTER_VERTICAL);
         int[][] items = { { R.string.STEP1, R.string.STEP1_SUB }, { R.string.STEP2, R.string.STEP2_SUB },
                           { R.string.STEP3, R.string.STEP3_SUB } };
-        Icon[] icons = { Icon.FOLDER, Icon.COPY, Icon.PLAY };
         for (int i = 0; i < items.length; i++) {
-            MenuRow r = new MenuRow(this);
-            r.set(icons[i], getString(items[i][0]), getString(items[i][1]));
-            r.setFocusable(false);
-            r.setClickable(false);
-            LinearLayout.LayoutParams rl = lp(MATCH, 150);
-            rl.topMargin = i == 0 ? 20 : 4;
-            steps.addView(r, rl);
+            TextView n = Theme.text(this, Theme.T_ROW, Theme.MEDIUM, Theme.TEXT,
+                                    (i + 1) + "   " + getString(items[i][0]));
+            LinearLayout.LayoutParams nl = lp(MATCH, WRAP);
+            nl.topMargin = i == 0 ? 0 : Theme.S5;
+            steps.addView(n, nl);
+            TextView d = Theme.body(this, getString(items[i][1]));
+            LinearLayout.LayoutParams dl = lp(MATCH, WRAP);
+            dl.topMargin = Theme.S1;
+            steps.addView(d, dl);
         }
-        p.addView(steps);
-        h.addView(p, lp(820, MATCH));
-
+        LinearLayout.LayoutParams sl = lp(Theme.DESC_W + Theme.S5, MATCH);
+        sl.leftMargin = Theme.S6;
+        h.addView(steps, sl);
         body.addView(h, new FrameLayout.LayoutParams(MATCH, MATCH));
         addHint("A", R.string.HINT_START, () -> go(Screen.SOURCE));
         addHint("B", R.string.HINT_QUIT, this::back);
@@ -1407,83 +1347,55 @@ public class LauncherActivity extends Activity {
 
     // ---- SOURCE and FOLDER_ACCESS --------------------------------------------------------------------------------
 
-    /** The left half of a choice screen: a heading and an explanation in a panel. */
-    private LinearLayout explainPanel(LinearLayout parent, int width, String caps, String head, String text) {
-        FrameLayout p = panel();
-        LinearLayout c = column();
-        c.addView(Theme.caps(this, caps, Theme.ACCENT), lp(MATCH, WRAP));
-        TextView t = Theme.text(this, Theme.T_TITLE, Theme.MEDIUM, Theme.TEXT, head);
-        LinearLayout.LayoutParams tl = lp(MATCH, WRAP);
-        tl.topMargin = 18;
-        tl.bottomMargin = 22;
-        c.addView(t, tl);
-        c.addView(Theme.small(this, text), lp(MATCH, WRAP));
-        p.addView(c);
-        LinearLayout.LayoutParams pl = lp(width, MATCH);
-        pl.rightMargin = Theme.GAP;
-        parent.addView(p, pl);
-        return c;
-    }
-
-    private MenuRow card(LinearLayout cards, Icon icon, int title, String sub, String badge, int badgeColor,
-                         Runnable click) {
-        MenuRow r = row(icon, getString(title), sub, click);
-        boolean three = screen == Screen.SOURCE;   // three cards: a little shorter, so that all fit
-        r.setBadge(badge, badgeColor);
-        LinearLayout.LayoutParams l = lp(MATCH, three ? Theme.CARD_H - 34 : Theme.CARD_H);
-        l.bottomMargin = three ? 16 : 24;
-        cards.addView(r, l);
+    /** A choice of the list template: its label and a short value, its explanation in the description column. */
+    private MenuRow choice(LinearLayout list, int title, String description, String value, Runnable click) {
+        MenuRow r = listRow(list, getString(title), description, click);
+        if (value != null)
+            r.setValue(value);
         return r;
     }
 
     private void buildSource() {
         screenTitle.setText(R.string.SOURCE_TITLE);
-        LinearLayout h = rowLayout();
-        LinearLayout ex = explainPanel(h, 700, getString(R.string.SOURCE_CAPS), getString(R.string.SOURCE_HEAD),
-                                       getString(R.string.SOURCE_TEXT));
-        TextView free = Theme.text(this, Theme.T_SMALL, Theme.REGULAR, Theme.TEXT_FAINT,
-                                   getString(R.string.FREE_SPACE_APP, size(freeSpace())));
-        LinearLayout.LayoutParams fl = lp(MATCH, WRAP);
-        fl.topMargin = 26;
-        ex.addView(free, fl);
-
-        LinearLayout cards = column();
+        topRight.setText(getString(R.string.LIB_ST_FREE, size(freeSpace())));
+        LinearLayout list = listTemplate();
         boolean all = Environment.isExternalStorageManager();
-        MenuRow folder = card(cards, Icon.FOLDER, R.string.CARD_FOLDER, getString(R.string.CARD_FOLDER_SUB),
-                              getString(all ? R.string.BADGE_IN_PLACE : R.string.BADGE_FOLDER_ASK),
-                              all ? Theme.OK : Theme.WARN, this::onChooseFolder);
-        card(cards, Icon.DISC, R.string.CARD_ISO, getString(R.string.CARD_ISO_SUB),
-             getString(R.string.BADGE_FREE, size(freeSpace())), Theme.TEXT_DIM, this::openIsoPicker);
+        MenuRow folder = choice(list, R.string.CARD_FOLDER, getString(R.string.CARD_FOLDER_SUB),
+                                getString(all ? R.string.BADGE_IN_PLACE : R.string.BADGE_FOLDER_ASK),
+                                this::onChooseFolder);
+        choice(list, R.string.CARD_ISO, getString(R.string.CARD_ISO_SUB), null, this::openIsoPicker);
         String libPath = Library.folderPath(this);
-        card(cards, Icon.SWAP, R.string.LIB_CARD, getString(R.string.LIB_CARD_SUB),
-             Library.folderTree(this) == null ? getString(R.string.LIB_BADGE_NEW)
-             : libPath != null ? libPath : getString(R.string.LIB_BADGE_SET), Theme.ACCENT,
-             this::onChooseLibraryFolder);
+        choice(list, R.string.LIB_CARD, getString(R.string.LIB_CARD_SUB),
+               Library.folderTree(this) == null ? null : libPath != null ? new File(libPath).getName()
+                                                                         : getString(R.string.LIB_BADGE_SET),
+               this::onChooseLibraryFolder);
+        // The intro under the focused choice's own text: what any choice keeps.
+        for (int i = 0; i < list.getChildCount(); i++) {
+            MenuRow r = (MenuRow)list.getChildAt(i);
+            onFocus(r, () -> describe(r.description, getString(R.string.SOURCE_TEXT), Theme.TEXT_DIM));
+        }
         defaultFocus = folder;
-        h.addView(cards, lp(0, MATCH, 1));
-        body.addView(h, new FrameLayout.LayoutParams(MATCH, MATCH));
+        describe(folder.description, getString(R.string.SOURCE_TEXT), Theme.TEXT_DIM);
         addHint("A", R.string.HINT_CHOOSE, this::clickFocused);
         addHint("B", R.string.HINT_BACK, this::back);
     }
 
     private void buildFolderAccess() {
         screenTitle.setText(R.string.ALL_FILES_TITLE);
-        LinearLayout h = rowLayout();
-        explainPanel(h, 820, getString(pickLibrary ? R.string.LIB_CARD : R.string.CARD_FOLDER),
-                     getString(R.string.ALL_FILES_TITLE),
-                     getString(pickLibrary ? R.string.LIB_ALL_FILES_EXPLAIN : R.string.ALL_FILES_EXPLAIN));
-        LinearLayout cards = column();
-        MenuRow grant = card(cards, Icon.KEY, R.string.ALL_FILES_GRANT, getString(R.string.ALL_FILES_GRANT_SUB),
-                             getString(R.string.BADGE_RECOMMENDED), Theme.OK, this::askAllFilesAccess);
+        LinearLayout list = listTemplate();
+        String why = getString(pickLibrary ? R.string.LIB_ALL_FILES_EXPLAIN : R.string.ALL_FILES_EXPLAIN);
+        MenuRow grant = choice(list, R.string.ALL_FILES_GRANT, getString(R.string.ALL_FILES_GRANT_SUB),
+                               getString(R.string.BADGE_RECOMMENDED), this::askAllFilesAccess);
         if (pickLibrary)
-            card(cards, Icon.FOLDER, R.string.LIB_SAF, getString(R.string.LIB_SAF_SUB), null, 0,
-                 this::openTreePicker);
+            choice(list, R.string.LIB_SAF, getString(R.string.LIB_SAF_SUB), null, this::openTreePicker);
         else
-            card(cards, Icon.COPY, R.string.ALL_FILES_COPY, getString(R.string.ALL_FILES_COPY_SUB), null, 0,
-                 this::openTreePicker);
+            choice(list, R.string.ALL_FILES_COPY, getString(R.string.ALL_FILES_COPY_SUB), null, this::openTreePicker);
+        for (int i = 0; i < list.getChildCount(); i++) {
+            MenuRow r = (MenuRow)list.getChildAt(i);
+            onFocus(r, () -> describe(r.description, why, Theme.TEXT_DIM));
+        }
         defaultFocus = grant;
-        h.addView(cards, lp(0, MATCH, 1));
-        body.addView(h, new FrameLayout.LayoutParams(MATCH, MATCH));
+        describe(grant.description, why, Theme.TEXT_DIM);
         addHint("A", R.string.HINT_CHOOSE, this::clickFocused);
         addHint("B", R.string.HINT_BACK, this::back);
     }
@@ -1498,45 +1410,40 @@ public class LauncherActivity extends Activity {
 
     // ---- IMPORT ------------------------------------------------------------------------------------------------
 
+    /** The import: a plain ring on the left, what is copied and how much on the right; B cancels (nothing to focus). */
     private void buildImport() {
         screenTitle.setText(R.string.IMPORT_TITLE);
         LinearLayout h = rowLayout();
-        FrameLayout left = new FrameLayout(this);
+        h.setGravity(Gravity.CENTER_VERTICAL);
         ring = new Widgets.Ring(this);
-        left.addView(ring, new FrameLayout.LayoutParams(620, 620, Gravity.CENTER));
-        h.addView(left, lp(760, MATCH));
+        h.addView(ring, lp(560, 560));
 
-        FrameLayout p = panel();
         LinearLayout c = column();
-        c.addView(Theme.caps(this, getString(R.string.IMPORT_CAPS), Theme.ACCENT), lp(MATCH, WRAP));
         importHead = Theme.text(this, Theme.T_TITLE, Theme.MEDIUM, Theme.TEXT, getString(importLabel));
-        LinearLayout.LayoutParams hl = lp(MATCH, WRAP);
-        hl.topMargin = 18;
-        hl.bottomMargin = 26;
-        c.addView(importHead, hl);
-        importBytes = Theme.text(this, Theme.T_BODY + 4, Theme.MEDIUM, Theme.TEXT, "");
-        c.addView(importBytes, lp(MATCH, WRAP));
+        c.addView(importHead, lp(MATCH, WRAP));
+        importBytes = Theme.text(this, Theme.T_BODY, Theme.MEDIUM, Theme.TEXT, "");
+        LinearLayout.LayoutParams bl = lp(MATCH, WRAP);
+        bl.topMargin = Theme.S3;
+        c.addView(importBytes, bl);
         importFile = Theme.text(this, Theme.T_SMALL, Theme.REGULAR, Theme.TEXT_DIM, "");
         importFile.setSingleLine(true);
         importFile.setEllipsize(TextUtils.TruncateAt.MIDDLE);
         LinearLayout.LayoutParams fl = lp(MATCH, WRAP);
-        fl.topMargin = 14;
+        fl.topMargin = Theme.S2;
         c.addView(importFile, fl);
-        TextView free = Theme.text(this, Theme.T_SMALL, Theme.REGULAR, Theme.TEXT_FAINT,
+        TextView free = Theme.text(this, Theme.T_SMALL, Theme.REGULAR, Theme.TEXT_DIM,
                                    getString(R.string.FREE_SPACE_APP, size(freeSpace())));
         LinearLayout.LayoutParams frl = lp(MATCH, WRAP);
-        frl.topMargin = 14;
+        frl.topMargin = Theme.S2;
         c.addView(free, frl);
-        c.addView(gap(this), lp(MATCH, 0, 1));
-        c.addView(Theme.body(this, getString(R.string.IMPORT_KEEPS)), lp(MATCH, WRAP));
-        cancelRow = row(Icon.BACK, getString(R.string.CANCEL), getString(R.string.CANCEL_SUB), this::requestCancel);
-        LinearLayout.LayoutParams cl = lp(MATCH, Theme.ROW_H);
-        cl.topMargin = 24;
-        c.addView(cancelRow, cl);
-        p.addView(c);
-        h.addView(p, lp(0, MATCH, 1));
+        TextView keeps = Theme.body(this, getString(R.string.IMPORT_KEEPS));
+        LinearLayout.LayoutParams kl = lp(MATCH, WRAP);
+        kl.topMargin = Theme.S5;
+        c.addView(keeps, kl);
+        LinearLayout.LayoutParams cl = lp(0, WRAP, 1);
+        cl.leftMargin = Theme.S6;
+        h.addView(c, cl);
         body.addView(h, new FrameLayout.LayoutParams(MATCH, MATCH));
-        defaultFocus = cancelRow;
         addHint("B", R.string.CANCEL, this::requestCancel);
         ring.set(-1, "", getString(R.string.IMPORT_STARTING), "");
     }
@@ -1545,8 +1452,6 @@ public class LauncherActivity extends Activity {
         if (worker == null || !worker.isAlive() || cancelRequested)
             return;
         cancelRequested = true;
-        if (cancelRow != null)
-            cancelRow.setDim(true);
         setNote(getString(R.string.CANCELING), NOTE_INFO);
     }
 
@@ -2116,7 +2021,7 @@ public class LauncherActivity extends Activity {
 
     /**
      * The state of the imported shaders, from the cache directory recomp.cfg names (RECOMP_LSFG_DIR): one line for
-     * the row and the detail panel. kind gets a NOTE_* colour.
+     * the row's value. kind gets a NOTE_* colour.
      */
     private String lsfgStatus(int[] kind) {
         String dir = cfg == null ? null : cfg.get(RecompConfig.LSFG_DIR_KEY);
@@ -3065,7 +2970,7 @@ public class LauncherActivity extends Activity {
             refreshKeepingFocus();
     }
 
-    /** Under the grid: the scan's progress, an empty library's hint, the « Other files » line. */
+    /** Under the grid: the scan's progress, an empty library's hint, a scan cut short, the « Other files » line. */
     private void paintScanCaption() {
         if (libCaption == null)
             return;
@@ -3076,6 +2981,8 @@ public class LauncherActivity extends Activity {
             parts.add(getString(R.string.LIB_NO_FOLDER));
         else if (libEntries.isEmpty())
             parts.add(getString(R.string.LIB_EMPTY));
+        if (index.truncated)
+            parts.add(getString(R.string.LIB_TRUNCATED));
         List<LibraryIndex.Item> others = index.others();
         if (!others.isEmpty()) {
             List<String> names = new ArrayList<>();
@@ -4076,14 +3983,6 @@ public class LauncherActivity extends Activity {
             startPrepare();
     }
 
-    /** « Change game » (Home's bottom-screen shortcut): the library when it is on, else the choice of source. */
-    private void onChangeGame() {
-        if (libraryOn())
-            openLibrary();
-        else
-            go(Screen.SOURCE);
-    }
-
     // ---- Folder --------------------------------------------------------------------------------------------
 
     private void onChooseFolder() {
@@ -4537,8 +4436,6 @@ public class LauncherActivity extends Activity {
             importHead.setText(label);
             ring.set(-1, "", getString(label), "");
             importFile.setText("");
-            if (cancelRow != null)
-                cancelRow.setDim(true);
         });
     }
 

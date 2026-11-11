@@ -840,7 +840,7 @@ final class GameMenu {
 
     private Widgets.MenuRow row(Item item, String title) {
         Widgets.MenuRow r = new Widgets.MenuRow(activity);
-        r.set(null, title, null);
+        r.set(title, null);
         r.onPress = () -> feedback.play(UiFeedback.Cue.SELECT, r);
         r.setOnClickListener(v -> onItem(item));
         rows.put(item, r);

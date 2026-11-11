@@ -31,8 +31,6 @@
     <string name="PICKER_MISSING">This device has no file picker.</string>
 
     <!-- Common -->
-    <string name="CHIP_OFFLINE">Works offline</string>
-    <string name="CHIP_SCREEN_ON">Screen stays on</string>
     <string name="HINT_SELECT">Select</string>
     <string name="HINT_CHOOSE">Choose</string>
     <string name="HINT_BACK">Back</string>
@@ -42,8 +40,6 @@
     <string name="HINT_DEFAULTS">Defaults</string>
     <string name="HINT_OPTIONS">Options</string>
     <string name="HINT_CLOSE">Close</string>
-    <string name="HINT_SECTION">Section</string>
-    <string name="KV_GAME">Game</string>
     <string name="KV_FOLDER">Folder</string>
     <string name="KV_SOURCE">Source</string>
     <string name="KV_STATUS">Status</string>
@@ -67,8 +63,6 @@
     <string name="WELCOME_HERO">Welcome</string>
     <string name="WELCOME_TEXT">This app runs a recompiled Xbox game on Android. The game itself is not included: you bring your own copy, from a disc you own. Setting it up takes a minute, or a few for a disc image.</string>
     <string name="WELCOME_START">Get started</string>
-    <string name="WELCOME_START_SUB">Choose where your game is</string>
-    <string name="WELCOME_STEPS">Three steps</string>
     <string name="STEP1">Choose your game</string>
     <string name="STEP1_SUB">The folder of your extracted disc, or a disc image (.iso)</string>
     <string name="STEP2">Check and import</string>
@@ -78,8 +72,6 @@
 
     <!-- Choose the source -->
     <string name="SOURCE_TITLE">Choose your game</string>
-    <string name="SOURCE_CAPS">Your game</string>
-    <string name="SOURCE_HEAD">Where is your game?</string>
     <string name="SOURCE_TEXT">Use a game you own: the folder of your extracted disc, or a disc image you made yourself. Your current game stays until the new one has been checked.</string>
     <string name="CARD_FOLDER">Game folder</string>
     <string name="CARD_FOLDER_SUB">The extracted disc: default.xbe and its files, on the device or an SD card. Read in place with All files access, otherwise copied into the app.</string>
@@ -87,7 +79,6 @@
     <string name="CARD_ISO_SUB">A .iso or .xiso image of your disc. Extracted once into the app\'s storage: it needs the game\'s size free and takes a few minutes.</string>
     <string name="BADGE_IN_PLACE">Read in place</string>
     <string name="BADGE_FOLDER_ASK">In place or copy</string>
-    <string name="BADGE_FREE">%1$s free</string>
     <string name="BADGE_RECOMMENDED">Recommended</string>
 
     <!-- All files access -->
@@ -100,7 +91,6 @@
 
     <!-- Import -->
     <string name="IMPORT_TITLE">Preparing the game</string>
-    <string name="IMPORT_CAPS">Import</string>
     <string name="IMPORT_STARTING">Starting…</string>
     <string name="IMPORT_KEEPS">Your current game is kept until the new one has been checked. Keep the app open until the end.</string>
     <string name="CHECKING">Checking the game…</string>
@@ -108,21 +98,14 @@
     <string name="EXTRACTING">Extracting the disc image…</string>
     <string name="PROGRESS_BYTES">%1$s of %2$s</string>
     <string name="CANCEL">Cancel</string>
-    <string name="CANCEL_SUB">Stop and keep the current game</string>
 
     <!-- Home -->
     <string name="PLAY">Play</string>
-    <string name="PLAY_SUB">Start the game</string>
-    <string name="PLAY_SUB_RUNNING">Back to the running game</string>
-    <string name="PLAY_SUB_UNAVAILABLE">Not available: %1$s</string>
     <string name="PLAY_DETAIL_RUNNING">The game is already running: Play brings it back where you left it.</string>
     <string name="NO_GAME_HEAD">No game yet</string>
     <string name="SETTINGS">Settings</string>
-    <string name="SETTINGS_SUB_DEFAULT">Default settings</string>
     <string name="SETTINGS_FOOTER">Saved in %1$s and applied the next time the game starts. Lines you add there yourself are kept.</string>
-    <string name="GAME_DATA">Game data</string>
     <string name="ABOUT">About</string>
-    <string name="ABOUT_SUB">Version %1$s · licences</string>
     <string name="OPEN_DIRECTLY">Start in the game</string>
     <string name="OPEN_DIRECTLY_ON">Next time, the game opens directly. Long-press the app icon › Launcher to come back here.</string>
     <string name="OPEN_DIRECTLY_OFF">Next time, this screen shows first.</string>
@@ -150,11 +133,8 @@
     <string name="SETTINGS_GAME_RUNNING">The game is running: changes apply the next time it starts.</string>
     <string name="SETTINGS_SAVE_FAILED">Could not save the settings: %1$s</string>
     <string name="RESET">Reset all</string>
-    <string name="RESET_SUB">Lines you wrote in recomp.cfg yourself are kept</string>
     <string name="RESET_DETAIL">Puts every option on this screen back to its default, by removing its lines from recomp.cfg. Other lines in the file are left as they are.</string>
     <string name="RESET_DONE">Defaults restored. Applied the next time the game starts.</string>
-    <string name="DEFAULT_MARK">(default)</string>
-    <string name="CFG_NOTHING">nothing: the default</string>
     <string name="VAL_ON">On</string>
     <string name="VAL_OFF">Off</string>
     <string name="VAL_AUTO">Auto</string>
@@ -210,10 +190,8 @@
     <string name="HOME_MANAGE">Manage</string>
     <string name="CHOOSE_GAME">Choose a game</string>
     <string name="CHANGE_GAME">Change game</string>
-    <string name="CHANGE_GAME_SUB">Another folder or disc image, or import again</string>
     <string name="CHANGE_GAME_DETAIL">Pick a game folder or a disc image. The current game stays until the new one has been checked; a running game is closed then. Saves are kept.</string>
     <string name="DELETE_COPY">Delete the imported copy</string>
-    <string name="DELETE_COPY_SUB">Free the space; saves are kept</string>
     <string name="DELETE_COPY_DETAIL">Removes %1$s, the copy this app made. Your saves stay (internal storage). You then choose the game again to play.</string>
     <string name="DELETE_CONFIRM_BADGE">Press A again</string>
     <string name="DELETE_CONFIRM">Press A again within 5 seconds to delete the imported copy.</string>
@@ -221,8 +199,6 @@
     <string name="DELETED">The imported copy was deleted. Saves are kept.</string>
 
     <!-- About -->
-    <string name="ABOUT_CAPS">This build</string>
-    <string name="ABOUT_BUILD">Build</string>
     <string name="ABOUT_TAGLINE">Built on the xboxrecomp runtime</string>
     <string name="ABOUT_TEXT">A statically recompiled game, run by XRecomp (the xboxrecomp runtime) on Android arm64. No game data is included: the app reads the copy you set up from a disc you own.</string>
     <string name="ABOUT_LICENCE">xboxrecomp: MIT. SDL2: zlib.</string>
@@ -238,8 +214,6 @@
     <!-- The on-device Prepare (docs/android/prepare.md): Home's Prepare row, the Preparing screen, the notification -->
     <string name="PREPARE">Prepare</string>
     <string name="PREPARING">Preparing…</string>
-    <string name="PREPARE_TITLE">Preparing the game</string>
-    <string name="PREPARE_CAPS">Made once, on this device</string>
     <string name="PREPARE_ESTIMATE">about %1$d–%2$d min</string>
     <string name="PREPARE_NO_SPACE">Not enough internal storage to prepare the game: %1$s needed, %2$s free.</string>
     <string name="PREPARE_LOW_RAM">This device has %1$s of memory: preparing may be slow or fail (6 GB or more recommended).</string>
@@ -247,45 +221,29 @@
     <string name="PREPARE_STARTING">Starting…</string>
     <string name="PREPARE_KEEPS">You can leave the app: it carries on in the background.</string>
     <string name="PREPARE_ETA">about %1$s left</string>
-    <string name="PREPARE_CANCEL_SUB">Stops now; what is done is kept for next time</string>
     <string name="PREPARE_CANCEL_CONFIRM">Press again to cancel the preparation.</string>
     <string name="PREPARE_CANCEL_BADGE">Press again</string>
     <string name="PREPARE_FAILED_HEAD">Preparation failed</string>
     <string name="PREPARE_CANCELLED_HEAD">Preparation stopped</string>
     <string name="PREPARE_CANCELLED_TEXT">The preparation was cancelled. What was done is kept: Resume carries on from there.</string>
     <string name="PREPARE_INTERRUPTED">The preparation was interrupted (the system closed it). What was done is kept: Prepare carries on from there.</string>
-    <string name="PREPARE_STEP_OF">Step %1$d of %2$d</string>
-    <string name="PREPARE_CODE_LINE">Code %1$s</string>
     <string name="PREPARE_HINT_KILLED">The system stopped the compiler twice (not enough memory, or Android\'s limit on background processes). Close other apps and retry.</string>
     <string name="PREPARE_HINT_NO_SPACE">Internal storage is full (%1$s free). Free some space, then retry: what was done is kept.</string>
     <string name="PREPARE_RETRY">Retry</string>
     <string name="PREPARE_RESUME">Resume</string>
-    <string name="PREPARE_RETRY_SUB">From where it stopped</string>
     <string name="SHARE_LOG">Share log</string>
-    <string name="SHARE_LOG_SUB">prepare.log, to you or a developer</string>
     <string name="SHARE_LOG_NONE">No log yet.</string>
     <string name="SHARE_LOG_NO_APP">No app on this device can receive the log.</string>
     <string name="SHARE_LOG_SUBJECT">Prepare log: %1$s (%2$s)</string>
-    <string name="HINT_MENU">Menu</string>
     <string name="CHIP_NEEDS_PREPARE">Needs preparing</string>
     <string name="CHIP_PREPARING">Preparing</string>
     <string name="CHIP_PREPARE_FAILED">Prepare failed</string>
-    <string name="KV_ESTIMATE">Takes</string>
-    <string name="KV_INTERNAL_FREE">Free (internal)</string>
-    <string name="KV_RAM">Memory</string>
-    <string name="KV_CODE">Code</string>
     <string name="STEP_INSTALL">Install tools</string>
-    <string name="STEP_INSTALL_SUB">Once per app version</string>
     <string name="STEP_IDENTIFY">Identify</string>
-    <string name="STEP_IDENTIFY_SUB">Which game and version</string>
     <string name="STEP_ANALYSE">Analyse</string>
-    <string name="STEP_ANALYSE_SUB">Finds the game\'s code</string>
     <string name="STEP_LIFT">Translate</string>
-    <string name="STEP_LIFT_SUB">Turns it into C</string>
     <string name="STEP_COMPILE">Compile</string>
-    <string name="STEP_COMPILE_SUB">Native code for this device</string>
     <string name="STEP_PACK">Pack</string>
-    <string name="STEP_PACK_SUB">Ready to play</string>
     <string name="PREPARE_CHANNEL">Game preparation</string>
     <string name="PREPARE_CHANNEL_DESC">Progress of the game\'s preparation, with Cancel</string>
     <string name="PREPARE_NOTIF_TITLE">Preparing %1$s</string>
@@ -293,34 +251,20 @@
     <string name="PREPARE_NOTIF_STEP">Step %1$d of %2$d: %3$s</string>
     <string name="PREPARE_NOTIF_DONE">Ready: open the app and press Play.</string>
     <string name="PREPARE_NOTIF_FAILED">The preparation failed (%1$s). Open the app to see why.</string>
-    <string name="PREPARE_STEP_PCT">this step %1$d%%</string>
     <string name="PREPARE_ETA_BIG">About %1$s left</string>
     <string name="PREPARE_ETA_UNKNOWN">Working out the time left…</string>
-    <string name="PREPARE_ETA_FAILED">Stopped on an error</string>
-    <string name="PREPARE_ETA_STOPPED">Paused</string>
     <string name="PREPARE_STATUS">Preparing · step %1$d of %2$d · %3$s</string>
     <string name="PREPARE_STATUS_SHORT">Preparing · %1$s</string>
     <string name="HINT_HIDE">Hide</string>
 
     <!-- Home (the console-style hero) -->
-    <string name="HOME_TITLE">Home</string>
-    <string name="HOME_TITLE_ID">Title ID %1$s</string>
     <string name="CHIP_RUNNING">Running</string>
     <string name="HOME_LEAD_READY">In the game, Back opens the game menu (settings, quit). Saves stay on this device.</string>
     <string name="HOME_LEAD_PREPARE">Made once, here on the device, from your own copy: then Play starts at once.</string>
     <string name="HOME_LEAD_PREPARING">Preparing your game. You can leave the app: it carries on in the background.</string>
     <string name="HOME_LEAD_FAILED">The preparation stopped on an error. See why, then retry from where it stopped.</string>
     <string name="CHOOSE_AGAIN">Choose the game again</string>
-    <string name="CHOOSE_GAME_SUB">A disc folder or a disc image</string>
     <string name="PREPARE_SEE_WHY">See what failed</string>
-    <string name="HOME_SUB_PREPARE">Makes your game playable here</string>
-    <string name="HOME_SUB_PREPARING">Progress, or cancel</string>
-    <string name="HOME_SUB_FAILED">Then retry from where it stopped</string>
-    <string name="HOME_SUB_RESUME">Carries on where it stopped</string>
-    <string name="SOURCE_SHORT_COPY">copy</string>
-    <string name="SOURCE_SHORT_IN_PLACE">in place</string>
-    <string name="KV_LAST_PLAYED">Last played</string>
-    <string name="KV_PLAY_TIME">Play time</string>
     <string name="KV_PREPARED">Prepared</string>
     <string name="KV_PACK_SIZE">Pack size</string>
     <string name="VAL_NEVER">Never</string>
@@ -348,9 +292,6 @@
 
     <!-- Controls -->
     <string name="CONTROLS">Controls</string>
-    <string name="CONTROLS_SUB">Your buttons</string>
-    <string name="CONTROLS_CAPS">In the game</string>
-    <string name="CONTROLS_HEAD">As an Xbox controller</string>
     <string name="CONTROLS_FOOTER">The same for any gamepad Android sees: the game reads it as the first Xbox controller. Buttons are taken by position, as Android names them.</string>
     <string name="PAD_L1">L1 · Black</string>
     <string name="PAD_L2">L2 · LT</string>
@@ -400,8 +341,6 @@
     <string name="GAME_THEME">Game theme</string>
     <string name="GAME_THEME_DETAIL">The launcher takes its colours, and a faint backdrop, from the title image of %1$s, read from your copy of the game. The status colours (ready, warnings, errors) stay the same. Colours only: no backdrop image. Off: the launcher\'s own green.</string>
     <string name="GAME_THEME_SAVED">Game theme: %1$s.</string>
-    <string name="GAME_THEME_SOURCE_NONE">None (a colour from the title ID)</string>
-    <string name="KV_IMAGE">Image</string>
     <string name="VAL_THEME_FULL">Art and colours</string>
     <string name="VAL_THEME_COLORS">Colours only</string>
     <string name="VAL_THEME_OFF">Off</string>

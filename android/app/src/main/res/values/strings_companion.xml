@@ -32,7 +32,6 @@
     <string name="THERMAL_SHUTDOWN">Shutting down</string>
     <string name="PANEL_READY">Ready to play</string>
     <string name="PANEL_NO_GAME">No game set up</string>
-    <string name="PANEL_TIME_LEFT">%1$s left</string>
     <string name="PANEL_HOLD_CANCEL">Hold to cancel</string>
     <string name="PANEL_PREPARE_DONE">Prepared</string>
 </resources>

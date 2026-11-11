@@ -30,7 +30,6 @@
     <string name="THERMAL_SHUTDOWN">Arrêt imminent</string>
     <string name="PANEL_READY">Prêt à jouer</string>
     <string name="PANEL_NO_GAME">Aucun jeu configuré</string>
-    <string name="PANEL_TIME_LEFT">encore %1$s</string>
     <string name="PANEL_HOLD_CANCEL">Maintenir pour annuler</string>
     <string name="PANEL_PREPARE_DONE">Préparé</string>
 </resources>

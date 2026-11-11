@@ -264,23 +264,6 @@ final class Widgets {
         }
     }
 
-    /** A thin horizontal rule. */
-    static final class Rule extends View {
-        private final Paint p = fill(Theme.LINE);
-
-        Rule(Context c) {
-            super(c);
-        }
-
-        @Override
-        protected void onDraw(Canvas c) {
-            p.setShader(new LinearGradient(0, 0, getWidth(), 0, new int[] { Theme.alpha(Theme.LINE, 0f), Theme.LINE,
-                                           Theme.LINE, Theme.alpha(Theme.LINE, 0f) },
-                                           new float[] { 0, 0.08f, 0.92f, 1 }, Shader.TileMode.CLAMP));
-            c.drawRect(0, 0, getWidth(), getHeight(), p);
-        }
-    }
-
     // ---- Icons -----------------------------------------------------------------------------------------------------
 
     enum Icon {
@@ -542,8 +525,6 @@ final class Widgets {
      * say more where it is (the in-game menu's « Press again to quit »).
      */
     static final class MenuRow extends Selectable {
-        /** Not drawn (kept for the callers that still pass one; WP7 removes it). */
-        Icon icon;
         /** What the focused row's description column says. */
         String description;
         /** Drawn under the label, one line (rare: see the class comment). */
@@ -569,8 +550,7 @@ final class Widgets {
             super(c);
         }
 
-        MenuRow set(Icon icon, String title, String description) {
-            this.icon = icon;
+        MenuRow set(String title, String description) {
             this.title = title == null ? "" : title;
             this.description = description;
             invalidate();

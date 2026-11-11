@@ -99,7 +99,7 @@ final class GameCard extends View {
 
     /** The art square in the card's own coordinates (the Glide's ring goes around it). */
     void artRect(RectF out) {
-        float side = Math.min(ART, getWidth() - 8);
+        float side = Math.min(ART, getWidth());
         out.set(0, 8, side, 8 + side);
     }
 
