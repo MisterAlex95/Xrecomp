@@ -319,8 +319,7 @@ typedef struct w32_object {
     int             mtx_recursion;
 
     /* thread */
-    pthread_t       thread;
-    int             thread_joinable;
+    pthread_t       thread;      /* detached: valid only while !exited, read under lock */
     DWORD           tid;
     int             exited;
     DWORD           exit_code;
@@ -1191,7 +1190,13 @@ HANDLE CreateThread(LPSECURITY_ATTRIBUTES sa, SIZE_T stackSize,
         return NULL;
     }
     pthread_attr_destroy(&attr);
-    o->thread_joinable = 1;
+    /* Detached: nothing joins a guest thread, and a joinable thread that
+     * ended keeps its stack mapped (the 8 MB floor) until it is joined. The
+     * handle keeps the exit code and the signalled state (XBA-56). Detached,
+     * o->thread names a live thread only until the thread marks itself
+     * exited under o->lock: SetThreadAffinityMask and TerminateThread use it
+     * under that lock and only while !exited. */
+    pthread_detach(o->thread);
 
     if (threadId) *threadId = o->tid;
     return obj_handle(o);
@@ -1274,9 +1279,13 @@ BOOL TerminateThread(HANDLE h, DWORD exitCode)
     SetLastError(50 /* ERROR_NOT_SUPPORTED */);
     return FALSE;
 #else
+    pthread_mutex_lock(&o->lock);
+    if (o->exited) {               /* gone: its pthread_t may be reused */
+        pthread_mutex_unlock(&o->lock);
+        return TRUE;
+    }
     pthread_cancel(o->thread);
 #endif
-    pthread_mutex_lock(&o->lock);
     o->exit_code = exitCode;
     o->exited    = 1;
     o->signaled  = 1;
@@ -1298,35 +1307,51 @@ int GetThreadPriority(HANDLE h)
     return (o && o->kind == K_THREAD) ? o->priority : THREAD_PRIORITY_NORMAL;
 }
 
+#if defined(__linux__)
+static DWORD_PTR thread_affinity_set(pthread_t th, DWORD_PTR mask)
+{
+    DWORD_PTR prev = 0;
+    cpu_set_t set;
+    int i;
+    if (pthread_getaffinity_np(th, sizeof set, &set) == 0)
+        for (i = 0; i < (int)(8 * sizeof prev) && i < CPU_SETSIZE; i++)
+            if (CPU_ISSET(i, &set))
+                prev |= (DWORD_PTR)1 << i;
+    CPU_ZERO(&set);
+    for (i = 0; i < (int)(8 * sizeof mask) && i < CPU_SETSIZE; i++)
+        if (mask & ((DWORD_PTR)1 << i))
+            CPU_SET(i, &set);
+    if (pthread_setaffinity_np(th, sizeof set, &set) != 0)
+        return 0;
+    return prev ? prev : mask;
+}
+#endif
+
 DWORD_PTR SetThreadAffinityMask(HANDLE h, DWORD_PTR mask)
 {
     w32_object *o = (h == PSEUDO_CURRENT_THREAD) ? t_self_obj : obj_from_handle(h);
-    pthread_t th = (o && o->kind == K_THREAD) ? o->thread : pthread_self();
-    (void)th;
+    if (o && o->kind != K_THREAD)
+        o = NULL;
     if (!mask)
         return 0;
     process_mask_capture();   /* before this thread's mask shrinks */
 #if defined(__linux__)
     {
-        DWORD_PTR prev = 0;
-        cpu_set_t set;
-        int i;
-        if (pthread_getaffinity_np(th, sizeof set, &set) == 0)
-            for (i = 0; i < (int)(8 * sizeof prev) && i < CPU_SETSIZE; i++)
-                if (CPU_ISSET(i, &set))
-                    prev |= (DWORD_PTR)1 << i;
-        CPU_ZERO(&set);
-        for (i = 0; i < (int)(8 * sizeof mask) && i < CPU_SETSIZE; i++)
-            if (mask & ((DWORD_PTR)1 << i))
-                CPU_SET(i, &set);
-        if (pthread_setaffinity_np(th, sizeof set, &set) != 0)
-            return 0;
-        return prev ? prev : mask;
+        DWORD_PTR prev;
+        if (!o || o == t_self_obj)
+            return thread_affinity_set(pthread_self(), mask);
+        /* Another shim thread, detached (XBA-56): its pthread_t is valid
+         * only until it marks itself exited, which it does under o->lock. */
+        pthread_mutex_lock(&o->lock);
+        prev = o->exited ? 0 : thread_affinity_set(o->thread, mask);
+        pthread_mutex_unlock(&o->lock);
+        return prev;
     }
 #else
     /* No thread affinity on this host: macOS has only affinity tags, a
      * hint, so the guest threads' one-core pin (RECOMP_GUEST_CPUS) does
      * nothing here and returns 0 as a failed call would. */
+    (void)o;
     return 0;
 #endif
 }
