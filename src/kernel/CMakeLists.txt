@@ -16,6 +16,7 @@ set(KERNEL_SOURCES
     kernel_hal.c
     kernel_guest_cpu.c
     kernel_xbox.c
+    kernel_reboot.c
     kernel_ob.c
     kernel_io.c
     kernel_crypto.c

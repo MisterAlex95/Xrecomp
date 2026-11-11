@@ -1326,6 +1326,60 @@ void xbox_VblankArmBits(volatile uint32_t *pcrtc_intr, volatile LONG *tick_busy,
  * has come (or a vblank is being raised) within the last second. */
 int xbox_VblankAckHeld(void);
 
+/* ============================================================================
+ * Quick reboot into the running title (kernel_reboot.c)
+ *
+ * HalReturnToFirmware(2) after XLaunchNewImage is how a title hands off to an
+ * image -- and a title that names its own default.xbe is restarting itself
+ * (Fable's Pause -> Quit -> Confirm goes back to its main menu that way). The
+ * bridge then writes the launch data page to <save dir>/launch_data.bin and
+ * calls the restart handler; the next process's kernel init loads the page
+ * back into LaunchDataPage (export 164) and deletes the file, so
+ * XGetLaunchInfo returns what the previous run left. docs/runtime/README.md
+ * « Quick reboot ».
+ * ============================================================================ */
+
+#define XBOX_LAUNCH_PAGE_BYTES   4096   /* header 0x400 + 3072 bytes of data */
+#define XBOX_LAUNCH_DATA_FILE    "launch_data.bin"
+#define XBOX_RESTART_MAX         3      /* restarts allowed ... */
+#define XBOX_RESTART_WINDOW_S    30     /* ... within this many seconds */
+
+/* Starts the title again from scratch. Returns only when it could not; the
+ * caller then exits as before. The desktop default re-executes the running
+ * binary with the same arguments (execv; on Windows CreateProcess and
+ * ExitProcess). Android's shell installs one that asks the launcher process
+ * to start the game activity again. NULL restores the default. Any thread. */
+typedef void (*xbox_restart_handler)(void);
+void xbox_SetRestartHandler(xbox_restart_handler fn);
+
+/* The launch data file: magic "XBLD", version 1, the restart times (Unix
+ * seconds, oldest first, at most XBOX_RESTART_MAX) and the 4096-byte page.
+ * write: 0 on success. read: 0 on success, the page and times filled; the
+ * file is left in place (xbox_launch_data_take deletes it). */
+int xbox_launch_data_write(const char *path, const uint8_t *page,
+                           const int64_t *times, int ntimes);
+int xbox_launch_data_read(const char *path, uint8_t *page,
+                          int64_t *times, int *ntimes);
+
+/* Kernel init: <save dir>/launch_data.bin into page, then the file deleted;
+ * the restart times are kept for the cap. 0 when there was a page. */
+int xbox_launch_data_take(uint8_t *page);
+
+/* Whether a launch path ("\Device\CdRom0;default.xbe": directory, ';',
+ * file, as XLaunchNewImage writes it) names image ("\Device\CdRom0\
+ * default.xbe", XeImageFileName). Case-insensitive. */
+int xbox_launch_path_is_image(const char *launch_path, const char *image_path);
+
+/* How many of times[0..n) fall within XBOX_RESTART_WINDOW_S before now. */
+int xbox_restart_recent(const int64_t *times, int n, int64_t now);
+
+/* The quick reboot itself: refuses past the cap, writes the page and calls the
+ * handler. Returns only when the title was not restarted. */
+void xbox_quick_reboot(const uint8_t *page);
+
+/* The save directory as a UTF-8 path (kernel_path.c). */
+const char *xbox_path_save_dir_utf8(void);
+
 #ifdef __cplusplus
 }
 #endif

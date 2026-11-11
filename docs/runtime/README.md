@@ -99,3 +99,64 @@ int main(void)
 
 `xbox_PosixMmioFault` decodes the faulting instruction on arm64 hosts only;
 on x86-64 POSIX it always returns 0, and the traps are not armed there.
+
+## Quick reboot (a title restarting itself)
+
+On a console `XLaunchNewImage` fills the launch data page (kernel export 164,
+`LaunchDataPage`) and calls `HalReturnToFirmware(2)`, a quick reboot; the page
+survives it and the next image reads it with `XGetLaunchInfo`. A title that
+launches its own `default.xbe` is restarting itself: Fable's Pause → Quit →
+Confirm goes back to its main menu that way (launch path
+`\Device\CdRom0;default.xbe`, type 0, launch data starting `42000100`).
+
+The runtime does the same across a host restart (`src/kernel/kernel_reboot.c`):
+
+1. `bridge_HalReturnToFirmware` (`kernel_bridge.c`), routine 2 with a page
+   whose path names the running image (`XeImageFileName`, compared without
+   case, `dir;file` joined to `dir\file`): `xbox_quick_reboot` writes
+   `<save dir>/launch_data.bin` (magic `XBLD`, version 1, the times of the
+   recent restarts, then the 4096-byte page; written aside and renamed) and
+   calls the restart handler. Log: `[KERNEL] quick reboot: launch data in …,
+   restarting the title (N in the last 30 s)`.
+2. Kernel init (`kernel_data_init`) takes the file back: the page goes into
+   contiguous memory and export 164 points at it, the file is deleted (it is
+   one-shot, like the console's page). Log: `Launch data: quick reboot page at
+   0x…, type=… titleid=… path='…'`. It wins over `RECOMP_CMDLINE`, which the
+   restarted process still has in its environment.
+3. The cap: past 3 restarts in 30 s (`XBOX_RESTART_MAX`,
+   `XBOX_RESTART_WINDOW_S`; the times travel in the file) the title exits as
+   before (`quick reboot refused`), so a title that reboots into itself at
+   once cannot loop.
+4. Any other target (another XBE, the dashboard, no page) and any other
+   routine exit as before: there is nothing to hand over to.
+
+`xbox_SetRestartHandler(fn)` (`kernel.h`) sets how the process restarts. The
+default, on desktop hosts:
+
+- macOS / Linux: `execv` of the running binary (`_NSGetExecutablePath`,
+  `/proc/self/exe`) with the same arguments and environment. Every descriptor
+  past stderr is marked close-on-exec first (partition images, caches, audio,
+  window): their writes are already the kernel's, so the new process reads
+  them back. stdout and stderr carry on into the same files, and a pending
+  `alarm` survives the exec, so a timed headless run stays timed.
+- Windows: `CreateProcessW` with the same command line, no inherited handles,
+  then `ExitProcess(0)`.
+
+Android has no default; the app shell sets one ([docs/android/app-shell.md](../android/app-shell.md),
+« Quick reboot »). When the handler returns, the restart did not happen: the
+launch data file is removed and the title exits as before.
+
+With `RECOMP_PAD_LIVE` the restarted process reads the pad file from the start
+again; a driver script truncates it when it sees the `quick reboot:` line.
+
+Measured on the Mac with Fable (AutoSave loaded, Pause → Quit → Confirm, three
+times in a row): each restart came back to the main menu with « Default -
+Continue Game » selected, without the « Press START » screen, the logos or the
+intro (no `.xmv` opened after the first boot), within 15 s of the quit on a
+loaded machine; the save loaded again from that menu each time.
+
+`tests/kernel_reboot`: the file round trip, `xbox_launch_data_take` (once,
+then deleted; a corrupt file deleted too), the path match, the cap, and on
+POSIX the default handler end to end (a forked child re-executes the test,
+which takes the page back and checks that a descriptor opened before the exec
+is closed).

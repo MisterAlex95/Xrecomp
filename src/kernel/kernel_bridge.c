@@ -238,7 +238,33 @@ static void kernel_data_init(void)
      * RECOMP_CMDLINE does the same thing here, so a title can be told to load
      * a level the way the console would tell it: "+map intro".
      */
-    {
+    /* A quick reboot into this title (kernel_reboot.c): the page the last
+     * run's XLaunchNewImage filled, back where XGetLaunchInfo looks. It wins
+     * over RECOMP_CMDLINE, which the restarted process still has in its
+     * environment. Contiguous memory, as on the console, where XAPI keeps the
+     * page with MmPersistContiguousMemory and may free or reuse it. */
+    uint8_t reboot_page[XBOX_LAUNCH_PAGE_BYTES];
+    uint32_t reboot_va = 0;
+
+    if (xbox_launch_data_take(reboot_page) == 0) {
+        reboot_va = xbox_ContiguousAlloc(XBOX_LAUNCH_PAGE_BYTES, 4096);
+        if (!reboot_va)
+            reboot_va = xbox_HeapAlloc(XBOX_LAUNCH_PAGE_BYTES, 4096);
+        if (reboot_va) {
+            char path[64];
+            memcpy((void *)((uintptr_t)reboot_va + g_xbox_mem_offset),
+                   reboot_page, XBOX_LAUNCH_PAGE_BYTES);
+            memcpy(path, reboot_page + 8, sizeof(path) - 1);
+            path[sizeof(path) - 1] = 0;
+            fprintf(stderr, "  Launch data: quick reboot page at 0x%08X, type=%u"
+                            " titleid=0x%08X path='%s'\n", reboot_va,
+                    BRIDGE_MEM32(reboot_va), BRIDGE_MEM32(reboot_va + 4), path);
+        }
+    }
+
+    if (reboot_va) {
+        BRIDGE_MEM32(XBOX_KERNEL_DATA_BASE + KDATA_LAUNCH_DATA_PAGE) = reboot_va;
+    } else {
         const char *cmdline = getenv("RECOMP_CMDLINE");
 
         if (cmdline && *cmdline) {
@@ -1775,7 +1801,7 @@ static void bridge_HalReturnToFirmware(void)
         uint32_t page = BRIDGE_MEM32(XBOX_KERNEL_DATA_BASE + KDATA_LAUNCH_DATA_PAGE);
 
         if (page) {
-            char path[64];
+            char path[520];
             uint32_t i;
 
             for (i = 0; i < sizeof(path) - 1; i++) {
@@ -1820,7 +1846,7 @@ static void bridge_HalReturnToFirmware(void)
     }
 
     xbox_PeekSample("exit peek");
-    fprintf(stderr, "  [KERNEL] HalReturnToFirmware: routine=%u - title is exiting\n",
+    fprintf(stderr, "  [KERNEL] HalReturnToFirmware: routine=%u - title is leaving\n",
             routine);
     fflush(stderr);
 
@@ -1853,6 +1879,32 @@ static void bridge_HalReturnToFirmware(void)
         if (waited)
             fprintf(stderr, "  [KERNEL] waited %dms for the video to finish\n",
                     waited);
+    }
+
+    /* Routine 2 with a page naming this title's own image: a restart, not an
+     * exit (kernel_reboot.c). Fable's Pause -> Quit -> Confirm goes back to
+     * its main menu this way. Another image, or no page, exits as before:
+     * there is no dashboard or second XBE to hand over to. */
+    {
+        uint32_t page = BRIDGE_MEM32(XBOX_KERNEL_DATA_BASE + KDATA_LAUNCH_DATA_PAGE);
+
+        if (routine == 2 && page) {
+            char path[520];
+            uint32_t i;
+
+            for (i = 0; i < sizeof(path) - 1; i++) {
+                path[i] = (char)BRIDGE_MEM8(page + 8 + i);
+                if (!path[i]) break;
+            }
+            path[i] = 0;
+            if (xbox_launch_path_is_image(path, xbox_XeImageFileName.Buffer))
+                xbox_quick_reboot((const uint8_t *)((uintptr_t)page +
+                                                    g_xbox_mem_offset));
+            else
+                fprintf(stderr, "  [KERNEL] launch of '%s' is not this title"
+                                " (%s): exiting\n", path,
+                        xbox_XeImageFileName.Buffer);
+        }
     }
 
     xbox_HalReturnToFirmware(routine);

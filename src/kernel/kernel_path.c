@@ -579,6 +579,18 @@ static void xbox_remember_host_path(const wchar_t *p)
 
 
 
+const char *xbox_path_save_dir_utf8(void)
+{
+    static char utf8[MAX_PATH * 3];
+
+    if (!s_initialized)
+        xbox_path_init(NULL, NULL);
+    if (!WideCharToMultiByte(CP_UTF8, 0, s_save_dir, -1, utf8, (int)sizeof(utf8),
+                             NULL, NULL))
+        utf8[0] = 0;
+    return utf8;
+}
+
 BOOL xbox_translate_path(const char* xbox_path, xbox_host_char* host_path_buf, DWORD buf_size)
 {
     const char*  remainder = NULL;
@@ -867,6 +879,13 @@ void xbox_path_init(const char* game_dir, const char* save_dir)
     s_initialized = TRUE;
     xbox_log(XBOX_LOG_INFO, XBOX_LOG_PATH, "Path init: game=%s, save=%s, user data=%s",
              s_game_dir, s_save_dir, s_user_dir);
+}
+
+const char *xbox_path_save_dir_utf8(void)
+{
+    if (!s_initialized)
+        xbox_path_init(NULL, NULL);
+    return s_save_dir;
 }
 
 BOOL xbox_translate_path(const char* xbox_path, xbox_host_char* host_path_buf, DWORD buf_size)
