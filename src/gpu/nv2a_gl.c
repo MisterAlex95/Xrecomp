@@ -15,10 +15,13 @@
 
  *   render targets  one RGBA8 texture + FBO per colour surface, created from
  *                   the guest bytes; depth/stencil renderbuffers per zeta
- *                   surface. Pixels go back to guest memory only when
- *                   someone else needs them: at the flip (the presenter and
- *                   RECOMP_FB_DUMP read guest memory) and when a batch
- *                   samples a surface the GPU drew into (render to texture).
+ *                   surface. A texture over a target samples the target
+ *                   directly. Pixels go back to guest memory only when
+ *                   someone else needs them: the presented surface at the
+ *                   flip (the presenter and RECOMP_FB_DUMP read guest
+ *                   memory; one frame late through a pixel pack buffer),
+ *                   and a target a batch samples in a form the GPU cannot
+ *                   (gl_present lists the rules).
  *   textures        uploaded from guest memory, cached by address, format and
  *                   size, re-uploaded when a hash of their bytes changes.
  *                   DXT goes up compressed where S3TC exists, everything else
@@ -34,7 +37,7 @@
  * first call and stays current on that thread; no other thread touches GL.
  * The SDL presenter keeps its own renderer on the main thread and is fed
  * exactly as with the CPU rasteriser -- through guest memory, after the
- * present sync below has read the frame back. Presenting the FBO texture
+ * present hook below (gl_present) has read the frame back. Presenting the FBO texture
  * directly (a context shared with the presenter) is stage 7e.
  *
  * Selected with RECOMP_GPU=1 (nv2a_gl_install_from_env, called by the
@@ -79,6 +82,12 @@ static int s_readback_layout_switch;
 /* RECOMP_GPU_RT_DIRECT=0: never sample a colour target directly (read it
  * back into guest memory and upload it as a texture, as before 7d). */
 static int s_rt_direct_off;
+/* RECOMP_GPU_PRESENT=sync: read the presented surface back at its own flip
+ * (the executor waits for the GPU to finish the frame); default async: one
+ * frame later through a pixel pack buffer. RECOMP_GPU_READBACK=all: also
+ * every other target drawn since the last flip, as before 7d (for a title
+ * whose CPU reads its render targets). */
+static int s_present_sync_mode, s_readback_all;
 
 /* ---- helpers ------------------------------------------------------------ */
 
@@ -195,6 +204,12 @@ static int ensure_init(void)
     s_verbose = env_on("RECOMP_GPU_VERBOSE");
     s_readback_layout_switch = env_on("RECOMP_GPU_RT_RELAYOUT_READBACK");
     s_rt_direct_off = getenv("RECOMP_GPU_RT_DIRECT") && !env_on("RECOMP_GPU_RT_DIRECT");
+    {
+        const char *a = getenv("RECOMP_GPU_PRESENT");
+        s_present_sync_mode = a && strcmp(a, "sync") == 0;
+        a = getenv("RECOMP_GPU_READBACK");
+        s_readback_all = a && strcmp(a, "all") == 0;
+    }
     {
         const char *a = getenv("RECOMP_TEX_ANISO");
         s_bilinear = env_on("RECOMP_TEX_BILINEAR")
@@ -407,6 +422,19 @@ static void rt_store(const GlRT *r, const uint8_t *buf)
     }
 }
 
+/* A present read-back in flight (gl_present): glReadPixels into a pixel
+ * pack buffer at flip N, mapped at flip N+1, when the GPU has long finished
+ * frame N. snap is the target's layout at the read (the target itself may
+ * be relaid out, reshaped or evicted meanwhile). dropped: a synchronous
+ * read-back of the same surface has since put newer pixels there. */
+static GLuint s_pbo;
+static size_t s_pbo_size;
+static struct {
+    int pending, dropped;
+    GlRT snap;
+    Nv2aPresentSurface surf;
+} s_pend;
+
 /* The render target -> guest bytes (synchronous). */
 static void rt_readback(GlRT *r)
 {
@@ -420,6 +448,8 @@ static void rt_readback(GlRT *r)
     glBindFramebuffer(GL_FRAMEBUFFER, r->fbo);
     glReadPixels(0, 0, (GLsizei)r->w, (GLsizei)r->h, NV_GL_READ_FORMAT, NV_GL_READ_TYPE, buf);
     rt_store(r, buf);
+    if (s_pend.pending && s_pend.snap.va == r->va)
+        s_pend.dropped = 1;           /* these pixels are newer than the PBO's */
     r->dirty = 0;
     s_st.readbacks++;
 }
@@ -1838,7 +1868,7 @@ static int gl_draw_program(const Nv2aSurface *s, const Nv2aBatch *b)
 /* Forget every GL object the back end holds and start again at the next
  * call: ensure_init re-creates the shared objects, the caches fill again
  * from guest memory (targets are seeded from the guest bytes, which the
- * present sync has just brought up to date). lost: the context is gone, so
+ * caller has just read back when the context still lives). lost: the context is gone, so
  * its objects are only forgotten, not deleted. Every cache of GL names
  * belongs here. */
 static void gl_reset_objects(int lost)
@@ -1861,6 +1891,7 @@ static void gl_reset_objects(int lost)
             if (s_prog[i].prog) glDeleteProgram(s_prog[i].prog);
         for (i = 0; i < NV_GL_MAX_VSH; i++)
             if (s_vsh[i].sh) glDeleteShader(s_vsh[i].sh);
+        if (s_pbo) glDeleteBuffers(1, &s_pbo);
         if (s_pvbo) glDeleteBuffers(1, &s_pvbo);
         if (s_pebo) glDeleteBuffers(1, &s_pebo);
         if (s_pvao) glDeleteVertexArrays(1, &s_pvao);
@@ -1885,6 +1916,9 @@ static void gl_reset_objects(int lost)
     memset(s_prog, 0, sizeof s_prog);
     memset(s_vsh, 0, sizeof s_vsh);
     s_pvao = s_pvbo = s_pebo = 0;
+    s_pbo = 0;
+    s_pbo_size = 0;
+    memset(&s_pend, 0, sizeof s_pend);
     s_near_program = 0;             /* ensure_init: depth clamp on, range 0..1 */
     s_near01 = 0.0f;
     /* Visibility queries: dropped; reports still pending in the executor
@@ -1902,6 +1936,7 @@ static void gl_reset_objects(int lost)
  * cache as incomplete. After NV_GL_MAX_RESETS the CPU rasteriser takes
  * over for the rest of the run. */
 #define NV_GL_MAX_RESETS 4
+static int pbo_complete(Nv2aPresentSurface *done);
 static void gl_check_frame(void)
 {
     static int said, resets;
@@ -1943,6 +1978,16 @@ static void gl_check_frame(void)
             lost ? "context lost" : "GL_OUT_OF_MEMORY", s_frame,
             resets + 1 < NV_GL_MAX_RESETS ? ", re-created as needed"
                                           : "; the CPU rasteriser takes over");
+    if (!lost) {
+        /* Out of memory, the context lives: what only the GPU holds goes to
+         * guest memory first, so the targets reseed from it. */
+        Nv2aPresentSurface done;
+        int i;
+        (void)pbo_complete(&done);
+        for (i = 0; i < NV_GL_MAX_RT; i++)
+            if (s_rt[i].tex)
+                rt_readback(&s_rt[i]);
+    }
     gl_reset_objects(lost);
     if (lost)
         nv2a_gl_context_destroy();
@@ -1952,17 +1997,93 @@ static void gl_check_frame(void)
     }
 }
 
-/* Before the flip's window snapshot and frame dump: every surface the GPU
- * drew into this frame goes back to guest memory. */
-static void gl_present_sync(void)
-{
-    int i;
+/* ---- present ------------------------------------------------------------ */
 
+/* The present read-back in flight, into guest memory now (its surface in
+ * *done). 0: none was pending. */
+static int pbo_complete(Nv2aPresentSurface *done)
+{
+    const uint8_t *p;
+    size_t n;
+
+    if (!s_pend.pending)
+        return 0;
+    s_pend.pending = 0;
+    *done = s_pend.surf;
+    if (s_pend.dropped || !s_pbo)
+        return 1;                     /* guest memory already holds newer pixels */
+    n = (size_t)s_pend.snap.w * s_pend.snap.h * 4;
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, s_pbo);
+    p = (const uint8_t *)glMapBufferRange(GL_PIXEL_PACK_BUFFER, 0, (GLsizeiptr)n,
+                                          GL_MAP_READ_BIT);
+    if (p) {
+        rt_store(&s_pend.snap, p);
+        glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
+    }
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+    return 1;
+}
+
+/* Start reading target r back into the pack buffer; pbo_complete finishes. */
+static void pbo_issue(GlRT *r, const Nv2aPresentSurface *surf)
+{
+    size_t n = (size_t)r->w * r->h * 4;
+
+    if (!s_pbo)
+        glGenBuffers(1, &s_pbo);
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, s_pbo);
+    if (n > s_pbo_size) {
+        glBufferData(GL_PIXEL_PACK_BUFFER, (GLsizeiptr)n, NULL, GL_STREAM_READ);
+        s_pbo_size = n;
+    }
+    glBindFramebuffer(GL_FRAMEBUFFER, r->fbo);
+    glReadPixels(0, 0, (GLsizei)r->w, (GLsizei)r->h, NV_GL_READ_FORMAT, NV_GL_READ_TYPE, NULL);
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+    s_pend.pending = 1;
+    s_pend.dropped = 0;
+    s_pend.snap = *r;
+    s_pend.surf = *surf;
+    r->dirty = 0;
+    s_st.readbacks++;
+}
+
+/* The flip's present (nv2a_backend_register_with_present): only the
+ * presented surface comes back to guest memory. Other targets stay on the
+ * GPU until something needs their bytes: a texture the GPU cannot sample
+ * them as (rt_for_texture fails: another format or shape), their eviction
+ * or a change of their bytes per pixel, a reset of the GL objects (out of
+ * memory), or RECOMP_GPU_READBACK=all. */
+static int gl_present(const Nv2aPresentSurface *now, int sync, Nv2aPresentSurface *ready)
+{
+    Nv2aPresentSurface prev;
+    GlRT *r = NULL;
+    int i, have_prev;
+
+    *ready = *now;
     if (s_init <= 0)
-        return;
-    for (i = 0; i < NV_GL_MAX_RT; i++)
-        if (s_rt[i].tex && s_rt[i].dirty)
+        return 1;                     /* the CPU's bytes are all there is */
+    for (i = 0; i < NV_GL_MAX_RT; i++) {
+        if (s_rt[i].tex && s_rt[i].va == now->va)
+            r = &s_rt[i];
+        else if (s_readback_all && s_rt[i].tex && s_rt[i].dirty)
             rt_readback(&s_rt[i]);
+    }
+    have_prev = pbo_complete(&prev);
+    if (!r)
+        return 1;                     /* not a GPU target: guest memory is current */
+    if (sync || s_present_sync_mode) {
+        rt_readback(r);
+        return 1;
+    }
+    if (!r->dirty) {
+        /* Not drawn since its last read-back: guest memory holds it. */
+        return 1;
+    }
+    pbo_issue(r, now);
+    if (!have_prev)
+        return 0;                     /* the pipeline starts: show nothing new yet */
+    *ready = prev;
+    return 1;
 }
 
 static void gl_flip(void)
@@ -2013,7 +2134,7 @@ int nv2a_gl_install_from_env(void)
     if (!s_cull)
         s_backend.caps &= ~NV2A_BACKEND_CAP_CULL;
     e = getenv("RECOMP_GPU");
-    nv2a_backend_register_with_present_sync(&s_backend, gl_present_sync);
+    nv2a_backend_register_with_present(&s_backend, gl_present);
     fprintf(stderr, "  [GPUGL] GPU back end selected (RECOMP_GPU=%s); the context is"
                     " created on the executor thread at the first draw\n", e);
     return 1;

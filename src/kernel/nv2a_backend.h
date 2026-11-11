@@ -272,6 +272,39 @@ void nv2a_backend_register(const Nv2aBackend *backend);
 void nv2a_backend_register_with_present_sync(const Nv2aBackend *backend,
                                              void (*present_sync)(void));
 
+/* The surface a flip presents (FLIP_STALL): the biggest colour surface
+ * drawn since the previous flip, as the CPU path presents it. */
+typedef struct {
+    uint32_t va;                /* guest address of pixel (0,0), resolved */
+    uint32_t pitch;             /* bytes per row */
+    uint32_t bpp;               /* 2 or 4 */
+    uint32_t format;            /* SET_SURFACE_FORMAT (colour format in bits 0-3) */
+    uint32_t x, y, w, h;        /* the clip rectangle drawn, real pixels */
+} Nv2aPresentSurface;
+
+/* Register a back end with a present hook instead of a present sync. At
+ * every flip, before the window snapshot and the frame dump, the executor
+ * calls present(now, sync, ready) on its thread. The back end makes the
+ * pixels of one finished frame available in guest memory and describes
+ * that surface in *ready, returning 1 (0: nothing to show this flip):
+ *
+ *   sync != 0 (a frame dump will read `now`): ready must be `now`, its
+ *     pixels in guest memory on return;
+ *   sync == 0: ready may be an earlier frame's surface whose read-back
+ *     has completed since (an asynchronous read-back is one frame behind);
+ *     its bytes must stay valid until the window has copied them, which
+ *     happens before present returns control to the title.
+ *
+ * Only the presented surface needs to be in guest memory: other surfaces
+ * are the back end's business (it reads them back when the title samples
+ * them in a form it cannot use, or when the guest CPU needs them). flip()
+ * still runs after the snapshot and dump. A later register call replaces
+ * this registration. */
+void nv2a_backend_register_with_present(const Nv2aBackend *backend,
+                                        int (*present)(const Nv2aPresentSurface *now,
+                                                       int sync,
+                                                       Nv2aPresentSurface *ready));
+
 /* Decode a whole texture to 0xAARRGGBB, row-major, width*height entries.
  * Handles every format the executor can sample (swizzled, linear, DXT).
  * Returns 0 if the format is not supported. */

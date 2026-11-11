@@ -39,7 +39,7 @@ says which.
 
 ## Threading
 
-The executor calls `clear`, `draw`, `flip` and the present sync on its own
+The executor calls `clear`, `draw`, `flip` and the present hook on its own
 thread, one call at a time. GL contexts are bound to a thread, so the back
 end's context is **created on the executor thread at its first call and stays
 current there**. It has no window (CGL headless context, EGL pbuffer); it
@@ -47,11 +47,53 @@ renders into framebuffer objects only. No other thread makes a GL call.
 
 The SDL presenter keeps its own renderer on the main thread (Metal on macOS,
 GLES on Android) and is fed exactly as with the CPU rasteriser: through guest
-memory. At `FLIP_STALL` the executor calls the back end's present sync before
-it snapshots the frame for the window and for `RECOMP_FB_DUMP`; the present
-sync reads every surface the GPU drew that frame back into guest memory. So
-the presenter, the perf overlay, frame dumps and the Android surface need no
-change, and the CPU and GPU paths can be compared frame against frame.
+memory. At `FLIP_STALL` the executor calls the back end's present hook
+(`nv2a_backend_register_with_present`) before it snapshots the frame for the
+window and for `RECOMP_FB_DUMP`, with the surface the flip presents. The
+hook reads back that surface only -- see "Present" below. So the presenter,
+the perf overlay, frame dumps and the Android surface need no change, and
+the CPU and GPU paths can be compared frame against frame.
+
+### Present
+
+Only the presented surface is read back at a flip, and by default one frame
+late: `glReadPixels` into a pixel pack buffer at flip N, mapped at flip N+1,
+when the GPU has long finished frame N, and the window is handed frame N's
+surface (whose bytes have just landed in guest memory) at flip N+1. The
+executor is the bottleneck in-world (it walks frame N+1 while the GPU draws
+frame N); a synchronous read made it wait at every flip for the GPU to
+finish the frame, and on a tiler it also ends the render pass early. The
+cost is one frame of display latency, invisible at 30 fps next to the
+title's own input latency. A frame dump (`RECOMP_FB_DUMP_FLIPS`, the
+periodic report dump) needs the frame it names in guest memory, so a flip
+that dumps reads synchronously; so does every flip with
+`RECOMP_GPU_PRESENT=sync`. A presented surface that was not drawn since its
+last read-back is shown as it is.
+
+Every other target stays on the GPU until something needs its bytes in
+guest memory:
+
+- a texture the GPU cannot sample it as (another format or shape, an
+  offset inside it: "Render to texture" below) -- read back before the
+  batch;
+- its eviction (least recently drawn, 16 targets) or a change of its bytes
+  per pixel;
+- an out-of-memory reset of the GL objects (targets reseed from guest
+  memory);
+- `RECOMP_GPU_READBACK=all`: every target drawn since the last flip, at the
+  flip, as before 7d -- for a title whose CPU reads its render targets
+  (a save-game thumbnail read with `Lock`, a CPU post-process). Nothing
+  traps guest CPU reads of a target: a title that reads one without
+  sampling it on the GPU sees the bytes of the last read-back.
+
+In Oakvale that is one read-back a frame (was 16 before 7d, 9 after direct
+sampling). Measured on the M1 Max, back to back: the present costs 1.5 % of
+the executor's samples asynchronously and 2.8 % with `RECOMP_GPU_PRESENT=sync`;
+render time is the same within noise (19-20 ms/frame), because the
+visibility reports resolved just before the present already wait for the
+GPU there. Where reports do not drain the GPU first (a title without
+visibility tests, `RECOMP_GPU_ZPASS=always`) and on a tiler, the
+synchronous read is the one that waits for the whole frame.
 
 Rejected for 7b: a command queue to a GL thread (one more copy of every
 batch, and the executor would have to wait for readbacks anyway); a context
@@ -73,7 +115,7 @@ Android, 0 = off; off by default elsewhere, where a game project's own back
 end may present with vsync) holds a back end that draws to that many flips
 per second of host time:
 
-- `FLIP_STALL`, after the present sync, the window snapshot and the back
+- `FLIP_STALL`, after the present hook, the window snapshot and the back
   end's `flip`, books the frame's slot on an absolute schedule 1/cap s apart
   (`flip_cap_book`, nv2a_pb_exec.c);
 - the executor sleeps until the slot before it walks the next segment
@@ -120,7 +162,10 @@ forgets every GL object (deleting them first when the context still lives):
 render targets, depth buffers, textures, programs, queries, the VAO/VBO and
 the vertex shader. A lost context is destroyed; the next call re-creates
 context and objects lazily through `ensure_init`, and render targets reseed
-from guest memory, which the present sync has just brought up to date.
+from guest memory. On `GL_OUT_OF_MEMORY` (the context lives) every target
+and the pending present read-back go to guest memory first; on a lost
+context the targets not presented since their last draw lose what the GPU
+held.
 After four resets the back end unregisters and the CPU rasteriser draws.
 A new cache of GL names (query ring, depth textures) belongs in
 `gl_reset_objects`. `RECOMP_GPU_FAKE_RESET=<frame>[,oom]` exercises the path:
@@ -178,8 +223,8 @@ flipped. Depth/stencil is a D24S8 renderbuffer per zeta address (up to 8),
 attached to whichever colour target draws with it, as the CPU rasteriser
 keeps one buffer per zeta address. A 16-bit surface keeps alpha at 1 (colour
 mask), as the CPU path reads 565 back with alpha 0xFF. Pixels go back to
-guest memory (in the surface's own format and swizzle) at the present sync
-and when a batch samples memory a dirty target covers (render to texture).
+guest memory (in the surface's own format and swizzle) by the rules under
+"Present" above.
 A target is dirty only after a batch or clear that writes colour (colour
 mask non-zero).
 
@@ -263,7 +308,7 @@ reports 1. GLES 3.0 only says whether any sample passed, which reports 1.
 
 Back to back, 45 s each on the title screen, `[GPU] render … ms/frame` is the
 executor's wall time per frame spent drawing (batches including the CPU
-vertex-program run, clears, present sync):
+vertex-program run, clears, present read-back):
 
 | Path | render ms/frame (avg) | fps (uncapped, no flip pacing) |
 |---|---|---|
@@ -381,9 +426,8 @@ The original list (the interpreter was 41 % of the in-world executor):
 2. Guest CPU writes into surfaces: hash the surface's guest bytes against
    the last readback before drawing into it, or write-protect the pages, and
    re-upload when they changed.
-3. Present sync reads back every dirty target every flip (≈1 ms at 640×480).
-   Read back the presented surface only (and any surface a texture or the
-   guest needs), or none once 7e presents from the GPU.
+3. Done: the presented surface only, asynchronously (above, "Present");
+   none once 7e presents from the GPU.
 4. Depth surfaces read as textures (shadow maps): a depth texture instead of
    a renderbuffer, Z16/Z24 readback into guest memory when sampled.
 5. Anti-aliased surfaces (2×1, 2×2): render at the real size as today;

@@ -127,6 +127,8 @@ The executor is itself opt-in: set `RECOMP_PB_EXEC=1` to execute the pushbuffer.
 | `RECOMP_GPU_TEX_RECHECK=frame`, `=switch` | per frame, on texture switch for volatile textures, never over GPU targets | GL back end: `frame` hashes a cached texture's guest bytes only once per frame; `switch` restores the old policy (every frame and every texture switch, targets included). | `src/gpu/nv2a_gl.c` |
 | `RECOMP_GPU_RT_DIRECT=0` | on | GL back end: never sample a render target's GL texture directly; read the target back into guest memory and upload it as a texture instead (the pre-7d path). | `src/gpu/nv2a_gl.c` |
 | `RECOMP_GPU_RT_RELAYOUT_READBACK=1` | off | GL back end: read a render target back when the title switches it between swizzled and linear or between sizes (it is kept on the GPU either way). | `src/gpu/nv2a_gl.c` |
+| `RECOMP_GPU_PRESENT=sync` | async | GL back end: read the presented surface back at its own flip instead of one frame later through a pixel pack buffer. Frame dumps always read synchronously. | `src/gpu/nv2a_gl.c` |
+| `RECOMP_GPU_READBACK=all` | presented surface only | GL back end: at every flip also read back every other render target drawn since the last one (for a title whose CPU reads its render targets). | `src/gpu/nv2a_gl.c` |
 | `RECOMP_GPU_VERBOSE=1` | off | GL back end: log render targets as they are created and a statistics line every 60 frames (default every 600); on EGL, the EGL version, vendor and extension list once. | `src/gpu/nv2a_gl.c`, `nv2a_gl_context.c` |
 | `RECOMP_STRIP_ALT_WINDING` | off | Odd triangles of a strip keep the strip's winding, as on hardware. | `nv2a_pb_exec.c` |
 | `RECOMP_PB_CONST_FAST=0` | on | Sends every `SET_TRANSFORM_CONSTANT` word through the general dispatcher. | `nv2a_pb_exec.c` |

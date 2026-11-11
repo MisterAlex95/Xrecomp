@@ -313,6 +313,7 @@ static struct {
      * those and read it with the framebuffer's pitch: horizontal noise. The
      * biggest surface drawn since the last flip is the one being presented. */
     uint32_t drawn_pitch, drawn_x, drawn_y, drawn_w, drawn_h, drawn_bpp;
+    uint32_t drawn_format;  /* SET_SURFACE_FORMAT of that surface */
     int drawn_stale;      /* set at a flip: the next draw starts a new frame */
     uint64_t pixels;
     uint32_t pixel_max;   /* brightest value any pixel write carried */
@@ -698,6 +699,7 @@ static void note_drawn(void)
     s_gpu.drawn_offset = s_gpu.color_offset;
     s_gpu.drawn_pitch = s_gpu.pitch;
     s_gpu.drawn_bpp = surface_bpp();
+    s_gpu.drawn_format = s_gpu.format;
     s_gpu.drawn_x = s_gpu.clip_x; s_gpu.drawn_y = s_gpu.clip_y;
     s_gpu.drawn_w = s_gpu.clip_w; s_gpu.drawn_h = s_gpu.clip_h;
 }
@@ -851,12 +853,25 @@ static void surface_apply_clip(void)
 
 static const Nv2aBackend *s_backend;
 static void (*s_backend_present_sync)(void);
+static int (*s_backend_present)(const Nv2aPresentSurface *now, int sync,
+                                Nv2aPresentSurface *ready);
 
 void nv2a_backend_register_with_present_sync(const Nv2aBackend *backend,
                                              void (*present_sync)(void))
 {
     s_backend = backend;
     s_backend_present_sync = backend ? present_sync : NULL;
+    s_backend_present = NULL;
+}
+
+void nv2a_backend_register_with_present(const Nv2aBackend *backend,
+                                        int (*present)(const Nv2aPresentSurface *now,
+                                                       int sync,
+                                                       Nv2aPresentSurface *ready))
+{
+    s_backend = backend;
+    s_backend_present_sync = NULL;
+    s_backend_present = backend ? present : NULL;
 }
 
 void nv2a_backend_register(const Nv2aBackend *backend)
@@ -5515,45 +5530,14 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
             zpass_resolve_queue(1, 0);
             s_render_ns += xbox_HostNowNs() - r0;
         }
-        if (s_backend_present_sync) {
-            uint64_t r0 = xbox_HostNowNs();
-            s_backend_present_sync();
-            s_render_ns += xbox_HostNowNs() - r0;
-        }
-        render_time_frame();
-        /* Hand the window a copy of the frame just finished.
-         *
-         * The buffer the title has finished is the one the last batch drew
-         * into, which is what drawn_offset holds and why it exists: by the
-         * flip, color_offset has already moved to the next buffer. Copying
-         * here, rather than letting the window read guest memory on its own
-         * clock, is what stops it showing a surface the rasteriser is still
-         * writing. */
-        {
-            extern void xbox_FramebufferWindowFrameStats(uint32_t);
-            static uint32_t draws_at_flip;
-            xbox_FramebufferWindowFrameStats(s_gpu.draws - draws_at_flip);
-            draws_at_flip = s_gpu.draws;
-        }
-        if (s_gpu.pitch) {
-            extern void xbox_FramebufferWindowPresent(uint32_t, uint32_t);
-            uint32_t done = s_gpu.drawn_offset ? s_gpu.drawn_offset
-                                               : s_gpu.color_offset;
-            uint32_t pitch = s_gpu.drawn_offset ? s_gpu.drawn_pitch
-                                                : s_gpu.pitch;
-            if (done) {
-                xbox_FramebufferWindowSet(dma_resolve(done), pitch);
-                xbox_FramebufferWindowSetAA(s_gpu.aa_sy > 1.5f ? 2 : 1);
-                xbox_FramebufferWindowPresent(dma_resolve(done), pitch);
-            }
-        }
         {
             /* RECOMP_FB_DUMP_FLIPS: dump every presented frame, not one per
              * report -- a consecutive sequence, which is what a headless
              * recording (frames -> ffmpeg) needs. "1" dumps from boot; any
              * other value names a file, and frames are dumped while it
              * exists, so a capture can start mid-game without writing
-             * gigabytes of menus first. */
+             * gigabytes of menus first. Decided before the present: a dump
+             * needs this frame's pixels in guest memory now. */
             static const char *spec = (const char *)-1;
             if (spec == (const char *)-1)
                 spec = getenv("RECOMP_FB_DUMP_FLIPS");
@@ -5564,9 +5548,65 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
                     if (f) { fclose(f); on = 1; }
                 }
                 s_flip_dumping = on;
-                if (on)
-                    dump_surface_bmp();
             }
+        }
+        {
+            /* The surface this flip presents: the buffer the title has
+             * finished is the one the last batch drew into, which is what
+             * drawn_offset holds and why it exists -- by the flip,
+             * color_offset has already moved to the next buffer. */
+            Nv2aPresentSurface now, ready;
+            int drawn = s_gpu.drawn_offset != 0, have = 0;
+            uint32_t done = drawn ? s_gpu.drawn_offset : s_gpu.color_offset;
+            memset(&now, 0, sizeof now);
+            now.va = done ? dma_resolve(done) : 0;
+            now.pitch = drawn ? s_gpu.drawn_pitch : s_gpu.pitch;
+            now.bpp = drawn ? s_gpu.drawn_bpp : surface_bpp();
+            now.format = drawn ? s_gpu.drawn_format : s_gpu.format;
+            now.x = drawn ? s_gpu.drawn_x : s_gpu.clip_x;
+            now.y = drawn ? s_gpu.drawn_y : s_gpu.clip_y;
+            now.w = drawn ? s_gpu.drawn_w : s_gpu.clip_w;
+            now.h = drawn ? s_gpu.drawn_h : s_gpu.clip_h;
+            ready = now;
+            if (s_backend_present) {
+                /* The back end brings the presented surface (and only that)
+                 * into guest memory; without a dump it may hand back an
+                 * earlier frame whose read-back has completed meanwhile
+                 * (nv2a_backend.h). */
+                uint64_t r0 = xbox_HostNowNs();
+                int sync = s_flip_dumping || s_dump_at_flip;
+                have = done && s_gpu.pitch
+                    && s_backend_present(&now, sync, &ready) && ready.va;
+                if (sync && have && ready.va != now.va)
+                    ready = now;          /* the contract says otherwise: be safe */
+                s_render_ns += xbox_HostNowNs() - r0;
+            } else {
+                if (s_backend_present_sync) {
+                    uint64_t r0 = xbox_HostNowNs();
+                    s_backend_present_sync();
+                    s_render_ns += xbox_HostNowNs() - r0;
+                }
+                have = done && s_gpu.pitch;
+            }
+            render_time_frame();
+            /* Hand the window a copy of the frame just finished. Copying
+             * here, rather than letting the window read guest memory on its
+             * own clock, is what stops it showing a surface the rasteriser
+             * is still writing. */
+            {
+                extern void xbox_FramebufferWindowFrameStats(uint32_t);
+                static uint32_t draws_at_flip;
+                xbox_FramebufferWindowFrameStats(s_gpu.draws - draws_at_flip);
+                draws_at_flip = s_gpu.draws;
+            }
+            if (have) {
+                extern void xbox_FramebufferWindowPresent(uint32_t, uint32_t);
+                xbox_FramebufferWindowSet(ready.va, ready.pitch);
+                xbox_FramebufferWindowSetAA(s_gpu.aa_sy > 1.5f ? 2 : 1);
+                xbox_FramebufferWindowPresent(ready.va, ready.pitch);
+            }
+            if (s_flip_dumping)
+                dump_surface_bmp();
             /* The report's picture (fb_dump_report): the frame just
              * presented, complete, rather than a surface caught mid-frame. */
             if (s_dump_at_flip && !s_flip_dumping)
