@@ -1789,8 +1789,10 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
             static uint32_t get_written = 0xFFFFFFFFu;  /* GET as we last left it */
             DWORD now_ms = GetTickCount();
             uint32_t put = *(volatile uint32_t *)((char *)regs + NV2A_USER_DMA_PUT);
+            int walked = 0;
             if (!flip_held
                     && (put != last_put || (now_ms - last_put_ms) > 2000)) {
+                walked = 1;
                 /* Survey the segment the title just submitted, once. */
                 {
                     extern void nv2a_pb_scan(uint32_t);
@@ -1896,6 +1898,12 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
                             g == put ? "" : "  (GPU behind)");
                     fflush(stderr);
                 }
+            }
+            /* Caught up with PUT: visibility reports the title may be
+             * waiting for are resolved now (nv2a_backend.h). */
+            if (!walked) {
+                extern void nv2a_pb_exec_idle(void);
+                nv2a_pb_exec_idle();
             }
         }
         if (s_nv2a_trace) {

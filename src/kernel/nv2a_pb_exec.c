@@ -885,6 +885,115 @@ static int surface_color_valid(int masked)
     return !surface_hits_image(base, (s_gpu.clip_y + s_gpu.clip_h) * s_gpu.pitch);
 }
 
+/* ---- Visibility reports (GET_REPORT) with a back end ----------------
+ *
+ * With a back end the pixel count comes from the GPU, and reading it at
+ * GET_REPORT waits for the GPU to finish everything queued: Fable makes 341
+ * visibility tests a frame, and those waits were a third of the executor's
+ * time in-world (and on a tiler each one also ends the render pass).
+ *
+ * So by default (a back end with zpass_end) a report is deferred: GET_REPORT
+ * closes the count and queues the slot; the 16 bytes are written when the
+ * count is in. Until then the slot keeps the 0xFFFFFFFF D3D's
+ * BeginVisibilityTest wrote at +0xC, which is exactly "not done yet" to the
+ * title. Reports are resolved in order: at FLIP_STALL; whenever the walker
+ * has caught up with PUT (nv2a_pb_exec_idle, which blocks, because a title
+ * waiting for a result in GetVisibilityTestResult submits nothing until it
+ * has it); and past NV_ZP_CAP pending. CLEAR_REPORT_VALUE closes the count
+ * too, and the queue applies it in order, so the counts stay cumulative from
+ * the clear exactly as the synchronous path reports them.
+ *
+ * RECOMP_GPU_ZPASS=sync reads synchronously as before; =always runs no
+ * queries at all and reports 1 (everything visible). The CPU rasteriser
+ * counts its own pixels and is not affected. */
+enum { ZPASS_DEFER = 0, ZPASS_SYNC = 1, ZPASS_ALWAYS = 2 };
+
+static int zpass_mode(void)
+{
+    static int mode = -1;
+
+    if (!s_backend || !s_backend->draw)
+        return ZPASS_SYNC;                 /* the CPU rasteriser's own count */
+    if (mode < 0) {
+        const char *e = getenv("RECOMP_GPU_ZPASS");
+        mode = e && strcmp(e, "always") == 0 ? ZPASS_ALWAYS
+             : e && strcmp(e, "sync") == 0   ? ZPASS_SYNC
+             : ZPASS_DEFER;
+    }
+    if (mode == ZPASS_DEFER && !(s_backend->zpass_end && s_backend->zpass_resolve))
+        return ZPASS_SYNC;
+    return mode;
+}
+
+#define NV_ZP_MAX 1024                     /* ring size */
+#define NV_ZP_CAP 512                      /* pending past this: resolve the oldest */
+typedef struct {
+    uint32_t ticket;                       /* from zpass_end; 0: nothing to wait for */
+    uint32_t at;                           /* resolved slot address; 0: a CLEAR */
+    uint32_t cpu;                          /* the executor's own count at GET_REPORT */
+    uint64_t stamp;
+} ZpPending;
+static ZpPending s_zp[NV_ZP_MAX];
+static uint32_t s_zp_head, s_zp_count;
+static uint32_t s_zp_acc;                  /* back-end count since the last CLEAR, applied */
+static uint32_t s_zp_resolves, s_zp_blocks; /* per report period, for the log */
+
+/* Resolve queued reports in order until at most `keep` remain; wait for the
+ * GPU only when `block` (otherwise stop at the first count not yet in). */
+static void zpass_resolve_queue(int block, uint32_t keep)
+{
+    uint8_t *mem = (uint8_t *)xbox_GetMemoryOffset();
+
+    while (s_zp_count > keep || (s_zp_count && !block)) {
+        ZpPending *e = &s_zp[s_zp_head];
+        uint32_t count = 0;
+
+        if (e->ticket && s_backend && s_backend->zpass_resolve) {
+            int must = block && s_zp_count > keep;
+            if (!s_backend->zpass_resolve(e->ticket, must, &count))
+                break;                     /* not in yet, and not waiting */
+            s_zp_blocks += must;
+        }
+        if (!e->at) {
+            s_zp_acc = 0;                  /* CLEAR_REPORT_VALUE */
+        } else {
+            uint32_t v = e->cpu + (s_zp_acc += count), zero = 0;
+            memcpy(mem + e->at, &e->stamp, 8);
+            memcpy(mem + e->at + 8, &v, 4);
+            memcpy(mem + e->at + 12, &zero, 4);
+            s_zp_resolves++;
+        }
+        s_zp_head = (s_zp_head + 1) % NV_ZP_MAX;
+        s_zp_count--;
+    }
+}
+
+static void zpass_queue(uint32_t at, uint32_t cpu, uint64_t stamp)
+{
+    ZpPending *e;
+
+    if (s_zp_count >= NV_ZP_CAP) {
+        zpass_resolve_queue(0, 0);         /* whatever is in already */
+        if (s_zp_count >= NV_ZP_CAP)
+            zpass_resolve_queue(1, NV_ZP_CAP - 1);
+    }
+    e = &s_zp[(s_zp_head + s_zp_count) % NV_ZP_MAX];
+    e->ticket = s_backend->zpass_end();
+    e->at = at;
+    e->cpu = cpu;
+    e->stamp = stamp;
+    s_zp_count++;
+}
+
+/* The walker has caught up with PUT: whatever the title is waiting for is
+ * queued, so wait for the GPU and write every pending report. Called by the
+ * NV2A poll loop when a tick had nothing new to walk. */
+void nv2a_pb_exec_idle(void)
+{
+    if (s_zp_count)
+        zpass_resolve_queue(1, 0);
+}
+
 static void current_surface(Nv2aSurface *out)
 {
     out->color_va        = dma_resolve(s_gpu.color_offset);
@@ -949,7 +1058,7 @@ static void current_render_state(Nv2aRenderState *r)
     r->stencil_fail      = s_reg[0x0370 / 4];        /* SET_STENCIL_OP_FAIL */
     r->stencil_zfail     = s_reg[0x0374 / 4];        /* SET_STENCIL_OP_ZFAIL */
     r->stencil_zpass     = s_reg[0x0378 / 4];        /* SET_STENCIL_OP_ZPASS */
-    r->zpass_enable      = s_gpu.zpass_enable;
+    r->zpass_enable      = zpass_mode() == ZPASS_ALWAYS ? 0 : s_gpu.zpass_enable;
 }
 
 static int sample_texture(uint32_t u, uint32_t v, uint32_t *argb);
@@ -4985,7 +5094,9 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
     case 0x09C0: memcpy(&s_gpu.fog_param[0], &param, 4); break;
     case 0x09C4: memcpy(&s_gpu.fog_param[1], &param, 4); break;
     case 0x17C8:                                  /* CLEAR_REPORT_VALUE */
-        if (s_backend && s_backend->zpass_read)
+        if (zpass_mode() == ZPASS_DEFER)
+            zpass_queue(0, 0, 0);
+        else if (zpass_mode() == ZPASS_SYNC && s_backend && s_backend->zpass_read)
             (void)s_backend->zpass_read();
         s_gpu.zpass_count = 0;
         break;
@@ -5003,7 +5114,14 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
         uint8_t *mem = (uint8_t *)xbox_GetMemoryOffset();
         uint32_t at = dma_resolve(param & 0x00FFFFFFu);
         uint64_t stamp = (uint64_t)s_gpu.reports++ * 1000u;
-        if (s_backend && s_backend->zpass_read)
+        int mode = zpass_mode();
+        if (mode == ZPASS_DEFER) {
+            zpass_queue(at, s_gpu.zpass_count, stamp);
+            break;
+        }
+        if (mode == ZPASS_ALWAYS && !s_gpu.zpass_count)
+            s_gpu.zpass_count = 1;
+        else if (s_backend && s_backend->zpass_read)
             s_gpu.zpass_count += s_backend->zpass_read();
         memcpy(mem + at, &stamp, 8);
         memcpy(mem + at + 8, &s_gpu.zpass_count, 4);
@@ -5167,6 +5285,11 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
         /* And this is a completed swap, which is what a title's own swap
          * counter counts -- see xbox_Nv2aFrameCounterFlip. */
         xbox_Nv2aFrameCounterFlip();
+        if (s_zp_count) {                     /* the frame's reports, before the flip */
+            uint64_t r0 = xbox_HostNowNs();
+            zpass_resolve_queue(1, 0);
+            s_render_ns += xbox_HostNowNs() - r0;
+        }
         if (s_backend_present_sync) {
             uint64_t r0 = xbox_HostNowNs();
             s_backend_present_sync();
@@ -5606,6 +5729,13 @@ void nv2a_pb_exec_report(void)
                     (double)s_render_sum_ns / s_render_frames / 1e6,
                     (double)s_render_max_ns / 1e6, s_render_frames,
                     backend_draws() ? "back end" : "CPU rasteriser", 10);
+            if (s_gpu.reports && backend_draws())
+                fprintf(stderr, "[GPU] visibility reports: %s, %u written (%u waited"
+                                " on), %u pending%c",
+                        zpass_mode() == ZPASS_DEFER ? "deferred"
+                        : zpass_mode() == ZPASS_ALWAYS ? "always 1" : "synchronous",
+                        s_zp_resolves, s_zp_blocks, s_zp_count, 10);
+            s_zp_resolves = s_zp_blocks = 0;
             s_render_sum_ns = s_render_max_ns = 0;
             s_render_frames = 0;
         }

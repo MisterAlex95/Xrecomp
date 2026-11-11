@@ -157,9 +157,18 @@ an incomplete GL texture as black.
 **Textures.** Cached by address, format, size, pitch, palette and cube-ness
 (512 entries; the cache is flushed whole when three quarters full). A 64-bit
 hash of the guest bytes (all mip levels and faces, plus the palette for P8)
-decides re-upload; it is checked once per frame and whenever a texture unit
-switches to the texture, so a glyph cache written between two text batches
-is seen (`RECOMP_GPU_TEX_RECHECK=frame` checks once per frame only). DXT
+decides re-upload. It is computed once per frame per texture, and again
+within the frame when a texture unit switches back to it only for a
+volatile texture (one whose bytes changed in the last 60 frames, such as a
+glyph cache written between two text batches). A texture overlapping a
+zeta surface bound in the last two frames is never hashed (the GPU's depth
+is not in guest memory; Fable's 1.2 MB shadow map was hashed every frame for
+nothing); one overlapping a colour target drawn in the last two frames is not
+hashed either but read back and re-uploaded when a target it overlaps was
+written since its upload (render to texture). In-world on Fable that took
+hashing from 14.9 % of the executor's samples to 0.5 %.
+`RECOMP_GPU_TEX_RECHECK=frame` hashes once per frame only, `=switch` keeps
+the old policy (every frame and every unit switch, no target rule). DXT
 goes up compressed when S3TC exists (`RECOMP_GPU_S3TC=0` turns it off);
 every other format is decoded once by the executor's own sampler through
 `nv2a_backend_decode_texture`, so the CPU and GPU paths cannot disagree on a
@@ -183,9 +192,19 @@ Blend factors, equations, depth and stencil functions arrive in GL's own
 enum values and are passed through after a range check.
 
 **Visibility tests.** Batches drawn while `SET_ZPASS_PIXEL_COUNT_ENABLE` is
-on are wrapped in occlusion queries; `GET_REPORT` reads them synchronously
-through `zpass_read`. GLES 3.0 only says whether any sample passed, which
-reports 1.
+on are wrapped in occlusion queries (a ring of recycled query objects).
+Reading them at every `GET_REPORT` made the executor wait for the GPU 341
+times a frame in Fable's world (a third of its time; on a tiler each wait
+also ends the render pass), so reports are deferred: `GET_REPORT` calls
+`zpass_end`, which closes the count and returns a ticket, and the executor
+queues the report slot, which keeps the 0xFFFFFFFF D3D wrote at +0xC (not
+done) until `zpass_resolve` has the count. Reports are resolved in order at
+`FLIP_STALL`, when the poll loop finds nothing new to walk
+(`nv2a_pb_exec_idle`, blocking: a title waiting for a result submits nothing
+until it has it), and past 512 pending. `CLEAR_REPORT_VALUE` goes through
+the same queue, so counts stay cumulative from the clear, as before.
+`RECOMP_GPU_ZPASS=sync` reads synchronously, `=always` runs no queries and
+reports 1. GLES 3.0 only says whether any sample passed, which reports 1.
 
 ## Verification (2026-11-11, M1 Max, Fable title screen)
 

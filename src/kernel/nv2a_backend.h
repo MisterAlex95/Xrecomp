@@ -190,7 +190,24 @@ typedef struct {
      * carry 0 for a back end's batches. A count may be a lower bound
      * (GLES 3.0 queries say only "any passed": report 1). */
     uint32_t (*zpass_read)(void);
+    /* Deferred visibility tests (both or neither; NULL: the executor reads
+     * zpass_read synchronously). zpass_end closes the count of the batches
+     * drawn with zpass_enable since the previous zpass_end and returns a
+     * ticket for it, without waiting for the GPU. zpass_resolve(ticket,
+     * block, &count) returns 1 with that count once it is in, 0 while it is
+     * not (only when block is 0; with block set it waits). The executor
+     * resolves tickets in the order zpass_end issued them, and writes the
+     * report slot only then (see nv2a_pb_exec.c, "Visibility reports").
+     * RECOMP_GPU_ZPASS=sync uses zpass_read instead. */
+    uint32_t (*zpass_end)(void);
+    int (*zpass_resolve)(uint32_t ticket, int block, uint32_t *count);
 } Nv2aBackend;
+
+/* The NV2A poll loop calls this when a tick found nothing new to walk
+ * (the walker has caught up with PUT): pending visibility reports are
+ * waited for and written then, since a title waiting on one submits nothing
+ * more until it has it. */
+void nv2a_pb_exec_idle(void);
 
 /* Register (or, with NULL, remove) the back end. Call before the title starts
  * submitting work; the executor must also be enabled (RECOMP_PB_EXEC). */

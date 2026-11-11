@@ -121,8 +121,9 @@ The executor is itself opt-in: set `RECOMP_PB_EXEC=1` to execute the pushbuffer.
 | `RECOMP_GPU_PRIORITY=0` | high where offered | GL back end on EGL: do not ask for a high-priority context (`EGL_IMG_context_priority`). | `src/gpu/nv2a_gl_context.c` |
 | `RECOMP_GPU_FAKE_RESET=<frame>[,oom]` | off | Test aid: the GL back end acts as if its context were lost (or `GL_OUT_OF_MEMORY` were raised) at that frame, then re-creates its objects. | `src/gpu/nv2a_gl.c` |
 | `RECOMP_GPU_CULL=0` | on | GL back end: draw both faces (no back-face culling). | `src/gpu/nv2a_gl.c` |
+| `RECOMP_GPU_ZPASS=sync`, `=always` | deferred | GPU back end: visibility reports (`GET_REPORT`) are written when the GPU's count is in (at the flip, when the walker idles, past 512 pending). `sync` waits at every report; `always` runs no queries and reports 1. | `nv2a_pb_exec.c` |
 | `RECOMP_GPU_S3TC=0` | on where supported | GL back end: decode DXT textures on the CPU instead of uploading them compressed. | `src/gpu/nv2a_gl.c` |
-| `RECOMP_GPU_TEX_RECHECK=frame` | per frame and on texture switch | GL back end: hash a cached texture's guest bytes only once per frame. | `src/gpu/nv2a_gl.c` |
+| `RECOMP_GPU_TEX_RECHECK=frame`, `=switch` | per frame, on texture switch for volatile textures, never over GPU targets | GL back end: `frame` hashes a cached texture's guest bytes only once per frame; `switch` restores the old policy (every frame and every texture switch, targets included). | `src/gpu/nv2a_gl.c` |
 | `RECOMP_GPU_VERBOSE=1` | off | GL back end: log render targets as they are created and a statistics line every 60 frames (default every 600); on EGL, the EGL version, vendor and extension list once. | `src/gpu/nv2a_gl.c`, `nv2a_gl_context.c` |
 | `RECOMP_STRIP_ALT_WINDING` | off | Odd triangles of a strip keep the strip's winding, as on hardware. | `nv2a_pb_exec.c` |
 | `RECOMP_PB_CONST_FAST=0` | on | Sends every `SET_TRANSFORM_CONSTANT` word through the general dispatcher. | `nv2a_pb_exec.c` |
