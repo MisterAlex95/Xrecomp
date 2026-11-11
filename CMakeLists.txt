@@ -116,6 +116,10 @@ if(XBOXRECOMP_LSFG AND NOT WIN32)
     if(TARGET xbox_gpu)
         target_compile_definitions(xbox_gpu PRIVATE XBOXRECOMP_LSFG=1)
     endif()
+    # The SDL presenter (fb_present_sdl.c) feeds the pacer and shows its frames; xbox_framegen carries
+    # XBOXRECOMP_LSFG_BRIDGE=1 when the bridge is built.
+    target_compile_definitions(xbox_video PRIVATE XBOXRECOMP_LSFG=1)
+    target_link_libraries(xbox_video PUBLIC xbox_framegen)
 endif()
 
 # ── Umbrella target ───────────────────────────────────────────

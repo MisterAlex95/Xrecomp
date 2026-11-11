@@ -30,11 +30,12 @@ static void clk_set(uint64_t t) { __atomic_store_n(&s_clock, t, __ATOMIC_SEQ_CST
 static uint64_t s_cost = 5 * MS;
 static int s_gen_error;                 /* generate() returns this when < 0 */
 static int s_open_error;
-static int s_generate_calls, s_prime_calls;
+static int s_generate_calls, s_prime_calls, s_open_calls;
 
 static int t_open(void *u, uint32_t w, uint32_t h, uint32_t m, char *err, size_t n)
 {
     (void)u;
+    s_open_calls++;
     if (s_open_error) {
         snprintf(err, n, "no vulkan");
         return -1;
@@ -62,7 +63,7 @@ static void t_close(void *u) { (void)u; framegen_fake_generator.close(framegen_f
 static const FramegenGenerator s_gen = { "test", NULL, t_open, t_generate, t_reset, t_close };
 
 /* ── Sink: records what was shown ───────────────────────────────────── */
-typedef struct Shown { uint8_t v; uint64_t due; uint32_t bpp; } Shown;
+typedef struct Shown { uint8_t v; uint8_t px4[4]; uint64_t due; uint32_t bpp, w, h; } Shown;
 static Shown s_shown[512];
 static _Atomic int s_nshown;
 static _Atomic int s_gate_show;       /* show() waits while set */
@@ -70,7 +71,6 @@ static _Atomic int s_in_show;
 
 static void sink_show(const uint8_t *px, uint32_t w, uint32_t h, uint32_t bpp, uint64_t due)
 {
-    (void)w; (void)h;
     s_in_show = 1;
     while (s_gate_show) {
         struct timespec ts = { 0, 1000000 };
@@ -79,6 +79,9 @@ static void sink_show(const uint8_t *px, uint32_t w, uint32_t h, uint32_t bpp, u
     s_in_show = 0;
     if (s_nshown < 512) {
         s_shown[s_nshown].v = px[0];
+        memcpy(s_shown[s_nshown].px4, px, 4);
+        s_shown[s_nshown].w = w;
+        s_shown[s_nshown].h = h;
         s_shown[s_nshown].due = due;
         s_shown[s_nshown].bpp = bpp;
         s_nshown++;
@@ -110,7 +113,7 @@ static void start(uint32_t mult, int threaded)
     s_nshown = 0;
     s_cost = 5 * MS;
     s_gen_error = s_open_error = 0;
-    s_generate_calls = s_prime_calls = 0;
+    s_generate_calls = s_prime_calls = s_open_calls = 0;
     clk_set(1000 * MS);
     CHECK_EQ(framegen_pacer_start_ex(&s_sink, &cfg), 0);
 }
@@ -184,6 +187,61 @@ static void test_r5g6b5(void)
     CHECK_EQ(s_shown[0].v, 0);            /* B of red */
     CHECK_EQ(s_shown[1].v, 128);          /* B halfway */
     CHECK_EQ(s_shown[2].v, 255);          /* B of blue */
+    framegen_pacer_stop();
+}
+
+/* RGBX (GLES read-backs) and X1R5G5B5 come out as BGRX; a frame of another
+ * size (a host frame at the internal resolution) reopens the generator and
+ * only primes it. */
+static void test_formats_and_size(void)
+{
+    uint8_t rgbx[W * H * 4];
+    uint16_t x555[W * H];
+    static uint8_t big[2 * W * 2 * H * 4];
+    start(2, 0);
+    for (int i = 0; i < W * H; i++) {
+        rgbx[4 * i + 0] = 0xFF;   /* R */
+        rgbx[4 * i + 1] = 0x40;   /* G */
+        rgbx[4 * i + 2] = 0x00;   /* B */
+        rgbx[4 * i + 3] = 0x00;   /* X: ignored */
+    }
+    framegen_pacer_submit_format(rgbx, W, H, FRAMEGEN_FMT_RGBX8888, W * 4, 1000 * MS);
+    CHECK_EQ(s_nshown, 1);
+    CHECK_EQ(s_shown[0].px4[0], 0x00);
+    CHECK_EQ(s_shown[0].px4[1], 0x40);
+    CHECK_EQ(s_shown[0].px4[2], 0xFF);
+    CHECK_EQ(s_shown[0].px4[3], 0xFF);
+    for (int i = 0; i < W * H; i++)
+        x555[i] = 0x7C00 | 0x8000;   /* red, X bit set */
+    framegen_pacer_submit_format((const uint8_t *)x555, W, H, FRAMEGEN_FMT_X1R5G5B5, W * 2,
+                                 1000 * MS + CAP_PERIOD);
+    CHECK_EQ(s_nshown, 3);
+    CHECK_EQ(s_shown[1].px4[2], 0xFF);    /* G(red, red) */
+    CHECK_EQ(s_shown[2].px4[0], 0x00);
+    CHECK_EQ(s_shown[2].px4[1], 0x00);
+    CHECK_EQ(s_shown[2].px4[2], 0xFF);
+    CHECK_EQ(s_open_calls, 1);
+    /* Bad formats and sizes are ignored. */
+    framegen_pacer_submit_format(rgbx, W, H, 99, W * 4, 1000 * MS + 2 * CAP_PERIOD);
+    framegen_pacer_submit_format(rgbx, W, H, FRAMEGEN_FMT_RGBX8888, W * 2, 1000 * MS + 2 * CAP_PERIOD);
+    CHECK_EQ(counters().submitted, 2);
+    /* Twice the size: reopened, primed, then generating at that size. */
+    memset(big, 0x20, sizeof big);
+    framegen_pacer_submit_format(big, 2 * W, 2 * H, FRAMEGEN_FMT_BGRX8888, 2 * W * 4,
+                                 1000 * MS + 2 * CAP_PERIOD);
+    CHECK_EQ(s_open_calls, 2);
+    CHECK_EQ(s_nshown, 4);
+    CHECK_EQ(s_shown[3].w, 2 * W);
+    CHECK_EQ(s_shown[3].h, 2 * H);
+    CHECK_EQ(s_shown[3].due, 1000 * MS + 2 * CAP_PERIOD);
+    memset(big, 0x40, sizeof big);
+    framegen_pacer_submit_format(big, 2 * W, 2 * H, FRAMEGEN_FMT_BGRX8888, 2 * W * 4,
+                                 1000 * MS + 3 * CAP_PERIOD);
+    CHECK_EQ(s_nshown, 6);
+    CHECK_EQ(s_shown[4].v, 0x30);
+    CHECK_EQ(s_shown[4].w, 2 * W);
+    CHECK_EQ(s_shown[5].v, 0x40);
+    CHECK(framegen_pacer_active());
     framegen_pacer_stop();
 }
 
@@ -493,6 +551,7 @@ int main(void)
     test_policy();
     test_steady_30();
     test_r5g6b5();
+    test_formats_and_size();
     test_slow_frame();
     test_skip();
     test_drop_late_generated();

@@ -26,7 +26,8 @@
  *    its own path.
  *
  * Pixels handed to the sink are always 32 bpp BGRX (byte order B, G, R, X),
- * packed (pitch = w * 4): 16 bpp R5G6B5 input is expanded at submit.
+ * packed (pitch = w * 4): RGBX, R5G6B5 and X1R5G5B5 input is converted at
+ * submit (framegen_pacer_submit_format).
  */
 #ifndef FRAMEGEN_PACER_H
 #define FRAMEGEN_PACER_H
@@ -101,6 +102,22 @@ int  framegen_pacer_start(const FramegenSink *sink);
  * per row; copied before return. flip_ns: CLOCK_MONOTONIC time of the flip. */
 void framegen_pacer_submit(const uint8_t *px, uint32_t w, uint32_t h, uint32_t bpp,
                            uint32_t pitch, uint64_t flip_ns);
+
+/* Input pixel formats (framegen_pacer_submit_format): byte order in memory,
+ * X ignored. BGRX = X8R8G8B8 little-endian words (the guest's 32 bpp surface,
+ * desktop GL GL_BGRA); RGBX = GLES GL_RGBA read-backs; the 16 bpp ones are
+ * little-endian words. Everything is converted to BGRX at submit. */
+enum {
+    FRAMEGEN_FMT_BGRX8888 = 1,
+    FRAMEGEN_FMT_RGBX8888 = 2,
+    FRAMEGEN_FMT_R5G6B5   = 3,
+    FRAMEGEN_FMT_X1R5G5B5 = 4,
+};
+
+/* framegen_pacer_submit with an explicit format (FRAMEGEN_FMT_*); frames up
+ * to 8192 x 8192. */
+void framegen_pacer_submit_format(const uint8_t *px, uint32_t w, uint32_t h, uint32_t format,
+                                  uint32_t pitch, uint64_t flip_ns);
 
 /* Latched about once a second: real frames per second x 100, frames shown
  * per second x 100, mean generator cost in us. Any pointer may be NULL. */

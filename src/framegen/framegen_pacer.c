@@ -56,7 +56,7 @@ static struct {
     uint64_t real_win_start, real_win_n;
     uint64_t shown_win_start, shown_win_n, gen_win_ns, gen_win_n;
     uint32_t real_fps_centi, shown_fps_centi, gen_us;
-    char off_reason[160];
+    char off_reason[320];
 } P;
 
 static const FramegenGenerator *s_registered;
@@ -86,18 +86,42 @@ static int reserve(uint8_t **buf, size_t *cap, size_t need)
     return 0;
 }
 
-/* Copy (and expand R5G6B5) into dst as packed BGRX. */
+static uint32_t format_bpp(uint32_t format)
+{
+    switch (format) {
+    case FRAMEGEN_FMT_BGRX8888:
+    case FRAMEGEN_FMT_RGBX8888:
+        return 4;
+    case FRAMEGEN_FMT_R5G6B5:
+    case FRAMEGEN_FMT_X1R5G5B5:
+        return 2;
+    default:
+        return 0;
+    }
+}
+
+/* Copy (converting RGBX, expanding R5G6B5 / X1R5G5B5) into dst as packed BGRX. */
 static int frame_fill(Frame *dst, const uint8_t *px, uint32_t w, uint32_t h,
-                      uint32_t bpp, uint32_t pitch, uint64_t flip_ns)
+                      uint32_t format, uint32_t pitch, uint64_t flip_ns)
 {
     if (reserve(&dst->px, &dst->cap, (size_t)w * h * 4))
         return -1;
     for (uint32_t y = 0; y < h; y++) {
         const uint8_t *s = px + (size_t)y * pitch;
         uint8_t *d = dst->px + (size_t)y * w * 4;
-        if (bpp == 4) {
+        switch (format) {
+        case FRAMEGEN_FMT_BGRX8888:
             memcpy(d, s, (size_t)w * 4);
-        } else {
+            break;
+        case FRAMEGEN_FMT_RGBX8888:
+            for (uint32_t x = 0; x < w; x++) {
+                d[4 * x + 0] = s[4 * x + 2];
+                d[4 * x + 1] = s[4 * x + 1];
+                d[4 * x + 2] = s[4 * x + 0];
+                d[4 * x + 3] = 0xFF;
+            }
+            break;
+        case FRAMEGEN_FMT_R5G6B5:
             for (uint32_t x = 0; x < w; x++) {
                 uint16_t v = (uint16_t)(s[2 * x] | (s[2 * x + 1] << 8));
                 uint32_t r = (v >> 11) & 31, g = (v >> 5) & 63, b = v & 31;
@@ -106,6 +130,17 @@ static int frame_fill(Frame *dst, const uint8_t *px, uint32_t w, uint32_t h,
                 d[4 * x + 2] = (uint8_t)((r << 3) | (r >> 2));
                 d[4 * x + 3] = 0xFF;
             }
+            break;
+        default:   /* FRAMEGEN_FMT_X1R5G5B5 */
+            for (uint32_t x = 0; x < w; x++) {
+                uint16_t v = (uint16_t)(s[2 * x] | (s[2 * x + 1] << 8));
+                uint32_t r = (v >> 10) & 31, g = (v >> 5) & 31, b = v & 31;
+                d[4 * x + 0] = (uint8_t)((b << 3) | (b >> 2));
+                d[4 * x + 1] = (uint8_t)((g << 3) | (g >> 2));
+                d[4 * x + 2] = (uint8_t)((r << 3) | (r >> 2));
+                d[4 * x + 3] = 0xFF;
+            }
+            break;
         }
     }
     dst->w = w;
@@ -180,7 +215,7 @@ static void history_clear(void)
 static int gen_ensure(uint32_t w, uint32_t h)
 {
     const FramegenGenerator *g = P.cfg.gen;
-    char err[128];
+    char err[256];
     if (P.gen_open && (P.gen_w != w || P.gen_h != h)) {
         g->close(g->user);
         P.gen_open = 0;
@@ -202,7 +237,7 @@ static int gen_ensure(uint32_t w, uint32_t h)
     }
     err[0] = 0;
     if (g->open(g->user, w, h, P.cfg.multiplier, err, sizeof err) < 0) {
-        char reason[160];
+        char reason[320];
         g->close(g->user);
         snprintf(reason, sizeof reason, "%s: %s", g->name ? g->name : "generator",
                  err[0] ? err : "open failed");
@@ -469,14 +504,24 @@ int framegen_pacer_start(const FramegenSink *sink)
 void framegen_pacer_submit(const uint8_t *px, uint32_t w, uint32_t h, uint32_t bpp,
                            uint32_t pitch, uint64_t flip_ns)
 {
-    if (!P.running || !px || !w || !h || (bpp != 2 && bpp != 4) || pitch < w * bpp)
+    if (bpp != 2 && bpp != 4)
+        return;
+    framegen_pacer_submit_format(px, w, h, bpp == 4 ? FRAMEGEN_FMT_BGRX8888 : FRAMEGEN_FMT_R5G6B5,
+                                 pitch, flip_ns);
+}
+
+void framegen_pacer_submit_format(const uint8_t *px, uint32_t w, uint32_t h, uint32_t format,
+                                  uint32_t pitch, uint64_t flip_ns)
+{
+    uint32_t bpp = format_bpp(format);
+    if (!P.running || !px || !w || !h || !bpp || w > 8192 || h > 8192 || pitch < w * bpp)
         return;
     pthread_mutex_lock(&P.mu);
     P.cnt.submitted++;
     stats_real(flip_ns);
     if (!P.cfg.threaded) {
         pthread_mutex_unlock(&P.mu);
-        if (frame_fill(&P.work, px, w, h, bpp, pitch, flip_ns) == 0)
+        if (frame_fill(&P.work, px, w, h, format, pitch, flip_ns) == 0)
             process(&P.work);
         return;
     }
@@ -487,7 +532,7 @@ void framegen_pacer_submit(const uint8_t *px, uint32_t w, uint32_t h, uint32_t b
         P.nqueue--;
         P.cnt.dropped_input++;
     }
-    if (frame_fill(&P.queue[P.nqueue], px, w, h, bpp, pitch, flip_ns) == 0) {
+    if (frame_fill(&P.queue[P.nqueue], px, w, h, format, pitch, flip_ns) == 0) {
         P.nqueue++;
         pthread_cond_signal(&P.cv);
     }
