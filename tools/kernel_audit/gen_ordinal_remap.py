@@ -4,13 +4,17 @@ Generate a per-title kernel ordinal remap for xbox_kernel_set_ordinal_remap.
 
     py -3 -m tools.kernel_audit.gen_ordinal_remap <analysis.json> --out remap.h
 
-The kernel bridge routes ordinals with one hardcoded table -- the ordinal ABI of
-the XDK it was written against. A title built with a different XDK numbers the
-same functions differently (Burnout 3's XDK 5849 has HalRequestSoftwareInterrupt
-at 49 where the older XDKs have HalReturnToFirmware). The kernel functions are
-the same; only the ordinal that names each differs.
+The kernel bridge routes ordinals with one table, xboxkrnl.exe's export
+ordinals. They do not depend on the title's XDK (the kernel is in the console's
+flash, not linked into the title), so a standard title needs no remap: Halo
+(XDK 3911), Crimson Skies (5659), Fable and Burnout 3 (5849) all come out
+identity. An earlier version of this note said XDK 5849 has
+HalRequestSoftwareInterrupt at 49 where older XDKs have HalReturnToFirmware;
+that was wrong -- Burnout 3 imports 49 as HalReturnToFirmware (147 imports, all
+identity). This tool stays as a check, and for a title whose thunk table does
+not follow the standard numbering.
 
-This maps a title's ordinals into the kernel's canonical space by NAME: for each
+It maps a title's ordinals into the kernel's canonical space by NAME: for each
 kernel function the title imports, look up which ordinal the kernel's own table
 gives that function, and emit `map[title_ordinal] = canonical_ordinal` where they
 differ. Names the title's parser could not resolve, or that the kernel's table
@@ -115,14 +119,14 @@ def main(argv=None):
     emit_header(remap, args.out, title, args.analysis)
 
     print("%s -- %d kernel imports" % (title, total))
-    print("  identity (XDK matches kernel) : %d" % identity)
+    print("  identity (standard ordinal)   : %d" % identity)
     print("  remapped (same name, diff ord): %d" % len(remap))
     print("  unresolved (left identity)    : %d" % len(unresolved))
     for o, n in unresolved:
         print("      ordinal %d  %s" % (o, n))
     print("  wrote %s" % args.out)
     if not remap:
-        print("  (no remap needed -- this title's XDK matches the kernel;"
+        print("  (no remap needed -- standard kernel numbering;"
               " it need not call xbox_kernel_set_ordinal_remap)")
     return 0
 

@@ -14,6 +14,22 @@ Xbox games using Criterion's RenderWare engine (and potentially other Xbox D3D8 
 - **Global pointer**: MEM32(0x35FB48) = device address
 - **Size**: ~16KB (0x4000 bytes)
 
+Every address in this document is from the Burnout 3 build the original fork
+was mapped on. The PAL disc (French/German/Italian, title ID 4541005B, the one
+`titles/4541005b/` profiles) has the D3D section 0x300 higher; the offsets
+inside the device are the same:
+
+| What | This document | PAL 4541005B |
+|---|---|---|
+| device (static) | `0x0035D6A0` | `0x0035D9A0` |
+| device pointer | `[0x0035FB48]` | `[0x0035FE48]` |
+| `D3D_BlockOnTime` | spin at `0x003518A3` | `sub_00351A70`, spin at `0x00351BA3`, event wait at `0x00351BB4` |
+| far-behind probe (`0x400B10` loop) | — | `sub_00351A00`, loop at `0x00351A10` |
+| GPU semaphore (`[device + 0x30]` once D3D allocated it) | — | `0x803E6000` |
+
+The stub table further down has not been checked against the PAL build entry by
+entry; expect the same shift.
+
 ## Critical Field Map
 
 ### Push Buffer Ring Management (offsets +0x00 to +0x4C)
@@ -73,7 +89,8 @@ if (surface == NULL) skip_scene_render();
 | +0x1A04 | 4 | `rt_surface_swap` | Render target surface (swap state) |
 | +0x1A08 | 4 | `ds_surface_swap` | Depth/stencil surface (swap state) |
 | +0x1AD4 | 4 | `rs_flags_1` | Render state flags (clear to 0) |
-| +0x1DD0 | 4 | `clear_flag` | Clear state flag |
+| +0x1DCC | 16 | `fence_event` | KEVENT `D3D_BlockOnTime` sleeps on when the GPU is far behind; set by the interrupt for software method 5. D3D builds the header itself, no `KeInitializeEvent` ([D3D Software Methods](pushbuffer-executor.md#d3d-software-methods)) |
+| +0x1DD0 | 4 | `clear_flag` | Clear state flag — the `SignalState` of `fence_event` |
 | +0x2478 | 4 | `frame_counter` | Frame counter (incremented per render) |
 
 ## The GPU Read Pointer Problem
@@ -185,7 +202,11 @@ executor — it used to move only when a walk reached PUT — made it patch comm
 the executor had already run. The executor models both (`0x0310`'s latch, and
 `DMA_GET` published before every command;
 [Answering the Title While It Runs](pushbuffer-executor.md#answering-the-title-while-it-runs)),
-so no wrapper is needed for either.
+so no wrapper is needed for either. The event itself needs the title project:
+with `RECOMP_PB_WALK=dma` the "far behind" path is taken, and something must set
+the event when the executor reaches the patched NOP — a software-method hook
+answering type 5 with `xbox_KeSetGuestEvent(device + 0x1DCC)`, as the Burnout 3
+profile (`titles/4541005b/title.c`) does.
 
 ## D3D8LTCG Stub Functions
 

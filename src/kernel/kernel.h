@@ -532,12 +532,14 @@ int xbox_KeSetGuestEvent(uint32_t guest_va);
 /**
  * Per-title kernel ordinal remap.
  *
- * The bridge routes ordinals with one hardcoded table -- the ordinal ABI of the
- * XDK it was written against (Halo's 3911 / Crimson's 5659). A title built with
- * a different XDK numbers the same kernel functions differently: Burnout 3's
- * XDK 5849 has HalRequestSoftwareInterrupt at 49 where the older XDKs have
- * HalReturnToFirmware. Without this, swapping such a title onto the shared kernel
- * misroutes it (Burnout 3 exited via HalReturnToFirmware during engine setup).
+ * The bridge routes ordinals with one table, xboxkrnl.exe's export ordinals.
+ * Those do not depend on the XDK a title was built with -- the kernel lives in
+ * the console's flash, not in the title -- so every title measured so far
+ * needs no remap: Halo (XDK 3911), Crimson Skies (5659), Fable and Burnout 3
+ * (5849) are identity for every import (Burnout 3 imports 49 as
+ * HalReturnToFirmware like everyone else; an earlier note here said XDK 5849
+ * moved HalRequestSoftwareInterrupt to 49, which was wrong). The hook stays
+ * for a title whose thunk table does not follow the standard numbering.
  *
  * `map[title_ordinal] = canonical_ordinal` translates a title's ordinals into
  * the kernel's canonical space before every routing decision. An entry of 0

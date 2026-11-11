@@ -14,8 +14,10 @@ space by function name. The properties that matter:
     title's parser could not resolve, is left identity and reported, never
     silently pointed at whatever sits at that ordinal.
 
-Measured against the real analyses: Halo (XDK 3911) and Crimson (5659) match the
-kernel and remap nothing; Burnout 3 (5849) remaps 47 and leaves 3 unresolved.
+Measured against the real analyses: Halo (XDK 3911), Crimson (5659), Fable and
+Burnout 3 (5849) remap nothing -- the kernel's export ordinals do not depend on
+the XDK. (This used to say Burnout 3 remaps 47; it is 147 imports, all
+identity.) The shifted cases below are synthetic: they check the mechanism.
 """
 
 import json
@@ -53,7 +55,8 @@ def test_matching_xdk_needs_no_remap():
 
 
 def test_shifted_xdk_remaps_by_name():
-    # A title where HalRequestSoftwareInterrupt sits at 49, not the canonical 48.
+    # A synthetic title whose thunk table puts HalRequestSoftwareInterrupt at
+    # 49, not the canonical 48 (no real title measured does).
     _canon({"HalRequestSoftwareInterrupt": 48, "HalReturnToFirmware": 49,
             "ExFreePool": 17})
     with tempfile.TemporaryDirectory() as tmp:

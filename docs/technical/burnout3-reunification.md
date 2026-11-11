@@ -5,21 +5,51 @@
 Burnout 3 was the first static recompilation of an original Xbox title with no
 prior recompiler to lean on. The core of xboxrecomp was written while getting it
 to boot, then extracted into a reusable toolkit and hardened against Halo,
-Crimson Skies and Steel Battalion. The two have since diverged. This is the plan
-to bring Burnout 3 back onto the shared toolkit — and, more importantly, an
-honest account of why it is a *reconciliation*, not a *swap*.
+Crimson Skies and Steel Battalion. The two then diverged. This page started as
+the plan to bring Burnout 3 back onto the shared toolkit; that has now happened
+another way, and the status below supersedes the plan.
 
-## The one-line finding
+## Status (2026-11-11): runs on the shared toolkit
+
+Burnout 3 (PAL Fr/De/It disc, title ID 4541005B, XDK 5849) runs on the shared
+toolkit and runtime with no fork: `tools.prepare` on the disc image, the generic
+`templates/new-game` project, and a small title profile, `titles/4541005b/`
+(a `title.c` of about 150 lines, one seeded function). On the Mac with the GL back
+end it goes from boot to a finished race at 60 fps: movies with sound, the title
+screen, profile and save, menus, vehicle select, a 2-lap race, results and
+auto-save; two 15-minute soaks did not stall. Android has not been tried yet.
+
+What it took, beyond what Fable already needed:
+
+| Problem | Fix |
+|---|---|
+| black screen: D3D's `BlockOnTime` spinning on the GPU semaphore | the profile hands `[device + 0x30]` to the pushbuffer executor (`nv2a_pb_set_semaphore_target`) |
+| front end stalls at `_FEMain.xmv`: the `0x400B10` latch never moved | `RECOMP_PB_WALK=dma` |
+| under the DMA walk, `BlockOnTime` sleeps for ever on the fence event | a software-method hook answers method 5 with `xbox_KeSetGuestEvent` (new in `kernel_bridge.c`), `RECOMP_TITLE_KEVENTS=1` |
+| no pad: the XID class driver's Init was never lifted | seed `0x00363064`; `tools/disasm` now realigns a table-named prologue the sweep stepped over |
+| game in slow motion with frame generation or a 30 fps cap | the game is locked to the flip rate: cap 60, frame generation off (`env_force` in `title.json`) |
+
+Details, addresses and runs: `titles/4541005b/NOTES.md`.
+
+What did **not** turn out to be needed: the per-title ordinal remap (Phase 2
+below), Burnout 3's own runtime libraries, its hand-written overrides, its xemu
+device-context snapshot, or the threading-model reconciliation (the shared
+kernel's spawned threads run it as they run Fable). The kernel imports are 147,
+all resolved by the bridge with the standard ordinals.
+
+The sections below are the original plan, kept for the record, with the
+ordinal claim corrected where it appears.
+
+## The one-line finding (original plan)
 
 **The toolkit halves reunited cleanly; the runtime halves did not.** After the
 extraction, xboxrecomp's `tools/` and Burnout 3's `tools/` diverged in one
 direction (xboxrecomp got every fix, the fork kept one feature — now upstreamed),
-but the *runtime libraries* diverged in ways that make the kernel a shared-*code*,
-per-title-*data* problem rather than a swap. Two independent walls: the two
-kernels drive the game loop in incompatible ways (**Phase 1, now reconciled**),
-and the kernel export-ordinal table is XDK-version-specific — Burnout 3's XBE
-(XDK 5849) expects a different ordinal mapping than Halo (3911) and Crimson
-(5659), so the routing cannot be shared as-is (**Phase 2, the next gate**).
+but the *runtime libraries* diverged a lot. The plan saw two walls: the two
+kernels drive the game loop in incompatible ways (**Phase 1, reconciled**), and
+an XDK-specific kernel ordinal table (**Phase 2**). The second wall does not
+exist: xboxkrnl's export ordinals are the same for every XDK, see the
+correction below.
 
 ## What is already done
 
@@ -71,28 +101,18 @@ Swapping Burnout 3 onto xboxrecomp's kernel would replace real threads with
 synchronous execution and its frame pump would never be driven. Swapping the
 other way would break Halo. **Neither kernel is a superset of the other.**
 
-There is a second, sharper reason the kernel cannot be swapped, and it is the
-opposite of what an earlier draft of this document claimed. **The kernel export
-ordinals are XDK-version-specific, and Burnout 3's table is correct *for Burnout
-3*.** Its `default.xbe` was built with XDK 5849 (2004); Halo 2276 with 3911
-(2001), Crimson Skies with 5659 (2003). 50 of Burnout 3's 147 imports map to a
-different ordinal than xboxrecomp's table — e.g. ordinal 49 is
-`HalRequestSoftwareInterrupt` for Burnout 3 but `HalReturnToFirmware` for the
-older XDKs, a +1 shift through that region. This was measured, not assumed: an
-actual Phase 2 kernel swap built and ran Burnout 3 on xboxrecomp's kernel — the
-dispatch contract matched, threading worked (SPAWN mode, first call spawned a
-real thread and the entry returned), zero "no bridge" warnings — and then the
-game called ordinal 49 during *engine setup*, where it needs a software
-interrupt, xboxrecomp routed it to `HalReturnToFirmware`, and the process exited.
-Burnout 3's own kernel routes that ordinal to the benign software interrupt and
-the game boots; the routing it was tuned to is the routing its XBE expects.
-
-So the kernel is not "Burnout 3 has bugs xboxrecomp fixed" — it is two correct
-tables for two different XDKs, plus xboxrecomp being ahead on the *code* (the
-correctness fixes, the audit tooling, the Phase 1 threading). A real kernel swap
-therefore needs xboxrecomp's routing to be **per-title data**, derived from the
-title's own XBE import analysis, rather than one hardcoded ordinal switch. That
-is the actual Phase 2 work, and it is larger than a library swap.
+**Correction (2026-11): the ordinal claim was wrong.** An earlier version
+said the kernel export ordinals are XDK-version-specific: that 50 of Burnout 3's
+147 imports map to different ordinals, that ordinal 49 is
+`HalRequestSoftwareInterrupt` for XDK 5849 but `HalReturnToFirmware` for older
+XDKs, and that a kernel swap exited because 49 was routed to
+`HalReturnToFirmware` during engine setup. The kernel is in the console's flash,
+not linked into the title, and its export numbering does not change with the
+XDK: `tools.xbe_parser` reads Burnout 3's ordinal 49 as `HalReturnToFirmware`
+like any other title's, and `tools/kernel_audit/gen_ordinal_remap.py` gives
+identity for all 147 imports (and for Fable's 154, also XDK 5849). The early
+exit seen in that swap had another cause, not identified; it does not occur
+with the current toolkit.
 
 ## The plan
 
@@ -141,69 +161,33 @@ Phase 2 wiring it up under a real swap — including confirming empirically whet
 Burnout 3's init thread must genuinely run concurrently (SPAWN) or whether INLINE
 suffices.
 
-**Phase 2 — kernel swap: routing done, threading-execution next.** Two parts.
+**Phase 2 — kernel swap. Done another way.** The plan was a per-title ordinal
+remap (`xbox_kernel_set_ordinal_remap`, generated by
+`tools/kernel_audit/gen_ordinal_remap.py`) followed by chasing why the spawned
+init worker did not advance. Neither was needed: the ordinals are standard (see
+the correction above; the remap hook stays as a check for a non-standard
+title), and the current kernel's threads run Burnout 3's init worker like any
+other. What stopped the game on the shared kernel was D3D's GPU synchronisation
+and the pad's class driver, as listed under Status.
 
-*Routing (done).* Rather than refactor the kernel's three hardcoded ordinal
-tables, a single translation layer maps a title's ordinals into the kernel's
-canonical space before any routing decision. `xbox_kernel_set_ordinal_remap`
-takes `map[title_ordinal] = canonical_ordinal`; the init loop applies it right
-where it reads the ordinal, so the data-export, bridge, and arg-size lookups all
-see the canonical number. `tools/kernel_audit/gen_ordinal_remap.py` builds the
-map by matching each function the title imports to the ordinal the kernel's own
-table gives that name. Measured: Halo (XDK 3911) and Crimson (5659) remap
-**nothing** — their XDK is the kernel's canonical one, so they are byte-identical
-(verified: Halo still exits 3 at `render_cameras.c:458`). Burnout 3 (XDK 5849)
-remaps 47 ordinals and leaves 3 its parser could not name as identity. With the
-remap installed, **Burnout 3 no longer exits during engine setup** — ordinal 49
-now resolves to `HalRequestSoftwareInterrupt` (which the kernel benignly stubs),
-`xbe_entry_point` returns normally, and the title enters its host loop and starts
-loading crash-mode HUD textures on xboxrecomp's kernel. Zero "no bridge" warnings
-of consequence, zero FP exceptions.
+**Phase 3 — nv2a / d3d. Not needed.** The fork drove its own nv2a through two
+local snapshot headers and an xemu-captured device context. On the shared
+toolkit the title's own statically linked D3D runs as lifted code, and the
+shared pushbuffer executor draws what it submits.
 
-*Threading execution (next).* One layer deeper: the init worker
-`PsCreateSystemThreadEx` spawns runs but does not advance the game state (zero
-kernel calls from the worker stack region). xboxrecomp's `bridge_thread_main` and
-Burnout 3's `xbox_recomp_thread_wrapper` set the new thread up almost identically
-(esp = stack top, push ctx2/ctx1/dummy-return, call the routine), so this is a
-narrow integration difference in how the spawned routine runs under the swapped
-kernel, not a routing problem. That is the next thing to chase — the routing gate
-is now open.
-
-The kernel *code* is shared, the ordinal *table* is per-title data, and Halo and
-Crimson are untouched. Regenerate `gen/` with xboxrecomp's tools when this lands
-(gen reaches the kernel only through `RECOMP_ICALL` by ordinal, so it does not
-hard-depend on names — but the two should move together).
-
-**Phase 3 — nv2a / d3d.** The hardest, most coupled. Burnout 3's game speaks to
-its nv2a through two local bridge headers (`d3d_device_snapshot.h`,
-`render_input_snapshot.h`) that xboxrecomp's nv2a does not expose. This is
-Burnout 3's proven end-to-end pushbuffer pipeline and the last thing to risk.
-Options, in order of preference: (a) upstream Burnout 3's snapshot interface into
-xboxrecomp's nv2a; (b) keep Burnout 3's nv2a local indefinitely and swap only the
-rest. Decide after Phase 2.
-
-**Phase 4 — audio / input.** Peripheral, not on the frame-pump or render path.
-Diff, reconcile, swap. Lowest risk, do last or opportunistically.
+**Phase 4 — audio / input. Not needed.** The shared APU, AC'97 and USB/XID
+stacks run the title's DirectSound and XPP as they run Fable's.
 
 ## The honest summary
 
-"Get Burnout 3 running on the new xboxrecomp" is the right goal, and the toolkit
-half is done. The runtime half turned out to have two gates, and taking each one
-in turn is what made the shape of the problem clear rather than guessed:
+The reconciliation this page planned — keep Burnout 3's runtime, merge it piece
+by piece — was overtaken by the shared runtime growing enough to run the title's
+own libraries unmodified (the pushbuffer executor, the emulated APU, the USB
+stack, title-built kernel events). Burnout 3 now needs what any title needs: a
+profile with its switches and a few addresses.
 
-- **Threading (Phase 1, done).** Two driving models, each correct for its title.
-  Reconciled behind a per-title mode with Halo verified byte-identical.
-- **Routing (Phase 2, the next gate).** The kernel export ordinals are
-  XDK-specific. An actual swap built, linked, and ran Burnout 3 on xboxrecomp's
-  kernel — proof the code and threading are compatible — and then exited during
-  engine setup because ordinal 49 means different things in XDK 5849 and XDK 3911.
-  The fix is to drive the kernel's ordinal routing from per-title data, so one
-  kernel serves every XDK.
-
-The correction worth stating plainly: an earlier pass here called Burnout 3's
-kernel "shifted" and "buggy", with "50 misroutings xboxrecomp fixes". That was
-backwards. Burnout 3's routing is correct *for Burnout 3's XBE*; the 50
-differences are two XDKs, not one bug. xboxrecomp is ahead on kernel *code*, not
-on the routing table — and the reunification has to keep both titles' tables, not
-pick a winner. None of this throws away the worker-stack frame-pump Burnout 3
-earned the hard way; it keeps it, and now keeps its ordinal table too.
+One thing from the plan was wrong and is worth saying plainly: the kernel
+ordinals are not XDK-specific (see the correction), so both the earlier
+"Burnout 3's kernel is shifted" and the later "two correct tables for two XDKs"
+rested on a false premise. The worker-stack and SPAWN threading support that Phase 1
+added to the shared kernel stay; nothing in the current profile uses them.
