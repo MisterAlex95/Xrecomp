@@ -77,6 +77,12 @@ if(TITLE_PROFILE_SOURCES)
     list(APPEND GAME_SOURCES ${TITLE_PROFILE_SOURCES})
     add_compile_definitions(XBA_TITLE_PROFILE=1)
 endif()
+# Where a run records what the static analysis missed (src/kernel/
+# recomp_discovery.h): tools.prepare passes <work>/discovered.jsonl.
+set(XBA_DISCOVERY_FILE "" CACHE STRING "default discovery file (RECOMP_DISCOVERY)")
+if(XBA_DISCOVERY_FILE)
+    add_compile_definitions(XBA_DISCOVERY_FILE="${XBA_DISCOVERY_FILE}")
+endif()
 # The options the title forces (title.json "env_force"), set by main() before
 # anything reads the environment.
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/title/env_force.h")

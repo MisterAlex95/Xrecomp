@@ -21,7 +21,9 @@ Usage:
         --functions build/disasm/functions.json \
         --seeds     config/seed_functions.json
 
-Then re-run disasm with --seed-functions and lift again.
+Then re-run disasm with --seed-functions and lift again. The log can also be
+the runtime's discovery file (`discovered.jsonl` in the prepare's work folder,
+src/kernel/recomp_discovery.h), which holds the same addresses without the noise.
 
 An address the title mentioned is NOT automatically a function. A garbage slot
 points at data just as easily, and seeding data splits real functions and breaks
@@ -67,8 +69,36 @@ LOG_PATTERNS = [
 ]
 
 
+# The runtime's discovery file (src/kernel/recomp_discovery.h, XBA-64): one
+# JSON object per line. Untranslated instructions ("unimpl") are not seeds:
+# they go to the lifter coverage report.
+DISCOVERY_KINDS = {
+    "icall": "Indirect-call target observed at runtime",
+    "thread": "Thread start routine observed at runtime",
+    "thread_ctx": "PsCreateSystemThreadEx StartContext1 observed at runtime",
+}
+
+
+def scan_discovery(text):
+    """{address: reason} from a discovery file; lines that are not whole JSON
+    objects (a run killed mid-write) are skipped."""
+    out = {}
+    for line in text.splitlines():
+        try:
+            e = json.loads(line)
+            va = int(e["va"], 16)
+        except (ValueError, KeyError, TypeError):
+            continue
+        if e.get("t") in DISCOVERY_KINDS:
+            out.setdefault(va, DISCOVERY_KINDS[e["t"]])
+    return out
+
+
 def scan_log(text):
-    """{address: reason} for every candidate the log mentions."""
+    """{address: reason} for every candidate the log mentions: a run's
+    stdout+stderr, or its discovery file (one JSON object per line)."""
+    if text.lstrip().startswith("{"):
+        return scan_discovery(text)
     out = {}
     for pat, reason in LOG_PATTERNS:
         for m in pat.finditer(text):
@@ -79,7 +109,8 @@ def scan_log(text):
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("log", type=Path, help="stdout+stderr of a run")
+    ap.add_argument("log", type=Path,
+                    help="stdout+stderr of a run, or its discovery file (discovered.jsonl)")
     ap.add_argument("xbe", type=Path)
     ap.add_argument("--functions", type=Path, required=True,
                     help="disasm functions.json, to report whether a candidate "

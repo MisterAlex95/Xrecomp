@@ -5,6 +5,7 @@
 
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 /* Exported (default visibility, kept by `used`): see pack_loader.h. */
@@ -72,6 +73,14 @@ int xba_pack_load(const char *files_dir, const char *xbe_path, xba_title_main_fn
      * generation pacer read them, and before the title's own
      * xba_title_configure, which runs too late for those. */
     recomp_pack_apply_env_force(&m);
+    /* What the run meets that the analysis missed (src/kernel/
+     * recomp_discovery.h): in the title's Prepare work folder, where the next
+     * Prepare reads it. recomp.cfg's RECOMP_DISCOVERY wins; =0 turns it off. */
+    if (files_dir && !getenv("RECOMP_DISCOVERY")) {
+        char disc[RECOMP_PACK_PATH_MAX + 64];
+        snprintf(disc, sizeof disc, "%s/work/%s/discovered.jsonl", files_dir, tid);
+        setenv("RECOMP_DISCOVERY", disc, 0);
+    }
     rc = recomp_pack_open(lib, m.entry, &syms, why, sizeof why);
     if (rc != RECOMP_PACK_OK) {
         printf("PACK_DLOPEN %s\n", why);

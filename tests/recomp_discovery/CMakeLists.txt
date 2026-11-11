@@ -1,0 +1,12 @@
+cmake_minimum_required(VERSION 3.20)
+project(recomp_discovery_test C)
+set(CMAKE_C_STANDARD 11)
+# recomp_discovery.c only: it has no dependency on the rest of the runtime.
+add_executable(recomp_discovery_test test_main.c ../../src/kernel/recomp_discovery.c)
+target_include_directories(recomp_discovery_test PRIVATE ../../src/kernel)
+if(NOT WIN32)
+    find_package(Threads REQUIRED)
+    target_link_libraries(recomp_discovery_test PRIVATE Threads::Threads)
+endif()
+enable_testing()
+add_test(NAME recomp_discovery COMMAND recomp_discovery_test)
