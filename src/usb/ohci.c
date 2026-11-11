@@ -1067,6 +1067,44 @@ static void ohci_raise(OhciController *hc, uint32_t source)
     }
 }
 
+/* Move the frame clock `frames` frames on, publish HccaFrameNumber and raise
+ * StartOfFrame (see the end of the ohci_thread pass for why there).
+ *
+ * FrameNumberOverflow too: OHCI sets it whenever bit 15 of the frame number
+ * changes, either way. A driver keeps the upper half of a 32-bit frame count
+ * itself and advances it from that interrupt -- Fable's XAPI keeps it at
+ * ext+0x418, moved only by its FNO handler (0x00875801). Never raised, the
+ * count wrapped at 65536, and anything waiting for "frame N" across the wrap
+ * (an abort or close marks its ED with the frame to wait for) waited a whole
+ * wrap or for ever. */
+static void ohci_frame_advance(OhciController *hc, uint32_t frames)
+{
+    uint32_t hcca = hc->reg[HcHCCA / 4];
+    uint32_t old = hc->reg[HcFmNumber / 4];
+    uint32_t now = (old + frames) & 0xFFFFu;
+
+    if ((old ^ now) & 0x8000u)
+        status_set(hc, INTR_FNO);
+    hc->reg[HcFmNumber / 4] = now;
+    /* HccaFrameNumber is 16 bits at +0x80 with a pad above it that the
+     * controller zeroes, so a dword write is what hardware does. */
+    if (hcca)
+        wr32(hcca + 0x80, now);
+    status_set(hc, INTR_SF);
+}
+
+int xbox_OhciFrameAdvanceForTest(uint32_t from, uint32_t frames, uint32_t *to)
+{
+    OhciController *hc = &s_hc[0];
+    hc->reg[HcFmNumber / 4] = from & 0xFFFFu;
+    __atomic_fetch_and(&hc->reg[HcInterruptStatus / 4], ~(INTR_FNO | INTR_SF),
+                       __ATOMIC_ACQ_REL);
+    ohci_frame_advance(hc, frames);
+    if (to)
+        *to = hc->reg[HcFmNumber / 4];
+    return (hc->reg[HcInterruptStatus / 4] & INTR_FNO) != 0;
+}
+
 /* ---- bring-up ---------------------------------------------------------- */
 
 static void ohci_reset(OhciController *hc, uint32_t base, int index)
@@ -1311,17 +1349,7 @@ static DWORD WINAPI ohci_thread(LPVOID unused)
          * sleeps that long. The count is what drivers compare; the rate is
          * what they feel, and both are closer to right this way than a
          * counter that never moves. */
-        {
-            uint32_t hcca = hc->reg[HcHCCA / 4];
-
-            hc->reg[HcFmNumber / 4] =
-                (hc->reg[HcFmNumber / 4] + OHCI_TICK_MS) & 0xFFFFu;
-            /* HccaFrameNumber is 16 bits at +0x80 with a pad above it that the
-             * controller zeroes, so a dword write is what hardware does. */
-            if (hcca)
-                wr32(hcca + 0x80, hc->reg[HcFmNumber / 4]);
-            status_set(hc, INTR_SF);
-        }
+        ohci_frame_advance(hc, OHCI_TICK_MS);
 
         /* A pad that stopped reporting, said once. Input dying mid-session
          * looks the same from the title whatever the cause -- the driver

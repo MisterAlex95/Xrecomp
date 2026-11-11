@@ -54,6 +54,11 @@ int  xbox_OhciHandleMmio(void *ctx, uint32_t xbox_va);
  * (newest first). Returns how many transfer descriptors completed. */
 int  xbox_OhciWalkListForTest(uint32_t ed, uint32_t *done_head);
 
+/* Tests only: set HcFmNumber to `from`, advance the frame clock `frames`
+ * frames as one controller pass does, store the new HcFmNumber in *to and
+ * return 1 if FrameNumberOverflow was raised. */
+int  xbox_OhciFrameAdvanceForTest(uint32_t from, uint32_t frames, uint32_t *to);
+
 /* Report counts at exit, so a run says whether the driver ever looked. */
 void xbox_OhciReport(void);
 

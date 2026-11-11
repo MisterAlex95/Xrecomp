@@ -23,6 +23,9 @@
  * a free one, never anything outside the pool), Halted is never set, each
  * descriptor retires at most once and only while queued, and at the end every
  * descriptor enqueued is accounted for.
+ *
+ * Then the frame clock: FrameNumberOverflow at 0x7FFF -> 0x8000 and at the
+ * 0xFFFF -> 0 wrap, and only there.
  */
 #include "xbox_memory_layout.h"
 #include "ohci.h"
@@ -338,6 +341,26 @@ int main(int argc, char **argv)
     if (s_bad_head || s_bad_garbage)
         printf("  first bad HeadP: %08X (%ld bad, %ld outside the pool)\n",
                s_first_bad_head, s_bad_head, s_bad_garbage);
+
+    /* The frame clock: FrameNumberOverflow whenever bit 15 of HcFmNumber
+     * changes (XAPI keeps the upper half of its 32-bit frame count from that
+     * interrupt), and not otherwise. */
+    {
+        uint32_t to = 0;
+        int fno;
+        fno = xbox_OhciFrameAdvanceForTest(0x7FFFu, 1, &to);
+        CHECK(fno && to == 0x8000u, "frame 0x7FFF -> 0x8000 raises FrameNumberOverflow");
+        fno = xbox_OhciFrameAdvanceForTest(0xFFFFu, 1, &to);
+        CHECK(fno && to == 0x0000u, "frame 0xFFFF -> 0x0000 raises FrameNumberOverflow");
+        fno = xbox_OhciFrameAdvanceForTest(0x7FFDu, 4, &to);
+        CHECK(fno && to == 0x8001u, "a 4-frame tick across 0x8000 raises it");
+        fno = xbox_OhciFrameAdvanceForTest(0xFFFEu, 4, &to);
+        CHECK(fno && to == 0x0002u, "a 4-frame tick across the wrap raises it");
+        fno = xbox_OhciFrameAdvanceForTest(0x1234u, 4, &to);
+        CHECK(!fno && to == 0x1238u, "a tick inside one half does not");
+        fno = xbox_OhciFrameAdvanceForTest(0x8000u, 4, &to);
+        CHECK(!fno && to == 0x8004u, "nor one just past 0x8000");
+    }
     printf("\n%d failure(s)\n", failures);
     return failures ? 1 : 0;
 }
