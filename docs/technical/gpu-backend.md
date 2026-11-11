@@ -244,9 +244,15 @@ Where the API has it (GLES 3.0, desktop GL 4.3 or
 channels, or of depth and stencil together, first calls
 `glInvalidateSubFramebuffer` on the cleared rectangle, so a tiler neither
 loads nor keeps the old contents (`[GPUGL] ... invalidate on|off` at
-start-up; `RECOMP_GPU_INVALIDATE=0` turns it off). Depth is not
-invalidated at the end of a pass: a zeta surface may be sampled later as a
-shadow map, and nothing says the title is done with it. In Oakvale the
+start-up; `RECOMP_GPU_INVALIDATE=0` turns it off). The depth of a zeta
+surface is not invalidated at the end of a pass: it may be sampled later as
+a shadow map, and nothing says the title is done with it. A target drawn
+without a zeta surface (`zeta_va` 0: Fable's bloom and noise chains, 16x16
+to 256x256, about 15 passes a frame) still has a depth attached, the
+scratch one of address 0; its contents mean nothing after the pass, so it
+is invalidated (`glInvalidateFramebuffer`, depth/stencil attachment) when
+the next draw or clear switches away (`leave_target`), and the tiler does
+not store it. In Oakvale the
 bloom targets are drawn without a clear, so the seed skip seldom applies
 (2 of 14 creations in a run); the clears it invalidates are the frame's 3
 (back buffer colour, main depth/stencil, shadow map depth).

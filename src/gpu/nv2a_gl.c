@@ -103,6 +103,14 @@ static void nv2a_gl_invalidate_rect(GLsizei n, const GLenum *att, GLint x, GLint
     (void)n; (void)att; (void)x; (void)y; (void)w; (void)h;
 #endif
 }
+static void nv2a_gl_invalidate(GLsizei n, const GLenum *att)
+{
+#if NV2A_GL_ES || !defined(__APPLE__)
+    glInvalidateFramebuffer(GL_FRAMEBUFFER, n, att);
+#else
+    (void)n; (void)att;
+#endif
+}
 /* RECOMP_GPU_PRESENT=sync: read the presented surface back at its own flip
  * (the executor waits for the GPU to finish the frame); default async: one
  * frame later through a pixel pack buffer. RECOMP_GPU_READBACK=all: also
@@ -903,6 +911,11 @@ typedef struct {
 /* The framebuffer the last draw or clear went into: a change is a target
  * switch, which on a tiler ends a render pass (stored, later reloaded). */
 static GLuint s_target_fbo;
+/* That target was drawn without a zeta surface (rs->zeta_va 0: Fable's
+ * bloom and noise chains, 16x16 to 256x256): the depth attached to it is
+ * the scratch one of zeta address 0, whose contents mean nothing once the
+ * target is left. */
+static int s_target_scratch_depth;
 
 static void note_target(GLuint fbo)
 {
@@ -910,6 +923,25 @@ static void note_target(GLuint fbo)
         s_target_fbo = fbo;
         s_st.target_switches++;
     }
+}
+
+/* Before switching to framebuffer `next` (0: one not made yet): a tiler
+ * stores every attachment at the end of a render pass unless told its
+ * contents are dead, so the scratch depth of a target drawn without a zeta
+ * surface is invalidated as the pass leaves it (where the API has it,
+ * s_invalidate). Skipped when something else (a read-back) has bound
+ * another framebuffer in between. */
+static void leave_target(GLuint next)
+{
+    static const GLenum att = GL_DEPTH_STENCIL_ATTACHMENT;
+
+    if (next == s_target_fbo || !s_target_scratch_depth)
+        return;
+    if (s_invalidate && s_sh.fbo == s_target_fbo) {
+        nv2a_gl_invalidate(1, &att);
+        s_st.invalidates++;
+    }
+    s_target_scratch_depth = 0;
 }
 
 /* The depth-only framebuffer for zeta surface `va` (glDrawBuffers GL_NONE):
@@ -923,6 +955,7 @@ static int bind_depth_only(const Nv2aSurface *s, uint32_t zeta_va, GlTarget *t)
     if (!zeta_va || !w || !h || w > 4096 || h > 4096)
         return 0;
     d = depth_get(zeta_va, w, h, zeta_bpp(s));
+    leave_target(d->fbo);
     if (!d->fbo) {
         const GLenum none = GL_NONE;
         glGenFramebuffers(1, &d->fbo);
@@ -938,6 +971,7 @@ static int bind_depth_only(const Nv2aSurface *s, uint32_t zeta_va, GlTarget *t)
         sh_fbo(d->fbo);
     }
     note_target(d->fbo);
+    s_target_scratch_depth = 0;
     t->rt = NULL;
     t->w = d->w;
     t->h = d->h;
@@ -948,16 +982,17 @@ static int bind_depth_only(const Nv2aSurface *s, uint32_t zeta_va, GlTarget *t)
     return 1;
 }
 
-/* A colour target already made for surface s's memory, with its pixel size. */
-static int rt_exists(const Nv2aSurface *s)
+/* The colour target already made for surface s's memory, with its pixel
+ * size (NULL: none yet). */
+static GlRT *rt_find(const Nv2aSurface *s)
 {
     int i;
 
     for (i = 0; i < NV_GL_MAX_RT; i++)
         if (s_rt[i].tex && s_rt[i].va == s->color_va
             && s_rt[i].bpp == s->bytes_per_pixel)
-            return 1;
-    return 0;
+            return &s_rt[i];
+    return NULL;
 }
 
 /* Bind the render target for drawing into, with its depth surface. A batch
@@ -972,12 +1007,17 @@ static int bind_target(const Nv2aSurface *s, uint32_t zeta_va, GlTarget *t)
     GlRT *r;
     GLuint d;
 
-    if (!s->color_valid || (s->color_masked && !rt_exists(s)))
+    if (!s->color_valid)
         return bind_depth_only(s, zeta_va, t);
+    r = rt_find(s);
+    if (s->color_masked && !r)
+        return bind_depth_only(s, zeta_va, t);
+    leave_target(r ? r->fbo : 0);
     if (!(r = rt_get(s)))
         return 0;
     sh_fbo(r->fbo);
     note_target(r->fbo);
+    s_target_scratch_depth = zeta_va == 0;
     d = depth_get(zeta_va, r->gw, r->gh, zeta_bpp(s))->tex;
     if (d != r->depth) {
         glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT,
@@ -2713,6 +2753,7 @@ static void gl_reset_objects(int lost)
     s_near_program = 0;             /* ensure_init: depth clamp on, range 0..1 */
     s_near01 = 0.0f;
     s_target_fbo = 0;
+    s_target_scratch_depth = 0;
     sh_forget();
     /* Visibility queries: dropped; reports still pending in the executor
      * resolve with what was counted (gl_zpass_resolve answers 0 for a
