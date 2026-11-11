@@ -1125,7 +1125,7 @@ int xbox_HostWindowMain(int (*guest_main)(void))
             framegen_pacer_stats(&real, &shown, &gen);
             perf_overlay_set_framegen(framegen_pacer_active() ? 1 : 2, real, shown, gen);
             if (now - t_fg_log >= 5000) {
-                if (t_fg_log)
+                if (t_fg_log && !fg_off_seen)
                     fg_log_stats();
                 t_fg_log = now;
             }
