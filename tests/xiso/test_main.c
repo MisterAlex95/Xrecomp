@@ -1,4 +1,5 @@
-/* src/xiso (XBA-40): probe and extract synthetic disc images, byte for byte, plus cancel and corrupt images.
+/* src/xiso (XBA-40): probe and extract synthetic disc images, byte for byte, plus cancel and corrupt images, and
+ * the single-file API of the game library (xiso_open_fd / xiso_lookup / xiso_pread / xiso_extract_file_fd).
  *
  *   xiso_test IMAGE_OR_MANIFEST...
  *
@@ -401,6 +402,267 @@ static void test_corrupt(void)
     printf("corrupt images: ok\n");
 }
 
+/* ── single files (the game library's scan) ── */
+
+/* Looks path up in img and compares its whole content with want (want_len bytes). */
+static void check_file(xiso_image *img, const char *path, const uint8_t *want, size_t want_len)
+{
+    xiso_stat st;
+    int rc = xiso_lookup(img, path, &st);
+    if (rc != 0) {
+        fprintf(stderr, "FAIL lookup %s = %d (%s)\n", path, rc, xiso_strerror(rc));
+        g_fail++;
+        return;
+    }
+    CHECK(!st.is_dir && st.size == want_len);
+    uint8_t *got = malloc(want_len + 16);
+    int n = xiso_pread(img, &st, got, want_len + 16, 0);   /* asks for more: clamped to the file */
+    CHECK(n == (int)want_len);
+    if (n == (int)want_len && memcmp(got, want, want_len) != 0) {
+        fprintf(stderr, "FAIL content of %s through xiso_pread\n", path);
+        g_fail++;
+    }
+    free(got);
+}
+
+static void check_stream(xiso_image *img, const char *lookup_path, const char *real_path, size_t size)
+{
+    uint8_t *want = expected(real_path, size);
+    check_file(img, lookup_path, want, size);
+    free(want);
+}
+
+static void test_lookup(void)
+{
+    size_t xlen;
+    uint8_t *xbe = read_file(fixture("default.xbe.ref"), &xlen);
+    xiso_image *img = NULL;
+    int fd = open_ro(fixture("tree.iso"));
+    CHECK_RC(xiso_open_fd(fd, &img), 0);
+    if (!img) {
+        close(fd);
+        free(xbe);
+        return;
+    }
+    check_file(img, "default.xbe", xbe, xlen);
+    check_file(img, "DEFAULT.XBE", xbe, xlen);                         /* case-insensitive */
+    check_file(img, "/Default.Xbe", xbe, xlen);
+    check_stream(img, "ReadMe.TXT", "ReadMe.TXT", 2048);
+    check_stream(img, "readme.txt", "ReadMe.TXT", 2048);
+    check_stream(img, "media/intro.bik", "media/intro.bik", 5000);
+    check_stream(img, "media/sub/deeper/leaf.txt", "media/sub/deeper/leaf.txt", 3);
+    check_stream(img, "\\MEDIA\\Sub\\deeper\\LEAF.txt", "media/sub/deeper/leaf.txt", 3);   /* backslashes */
+    check_stream(img, "media//sub/\\deeper/leaf.txt/", "media/sub/deeper/leaf.txt", 3);    /* empty components */
+    /* a name deep in the 300-entry directory, whose table spans several sectors */
+    char name[128];
+    snprintf(name, sizeof name, "many/file_%03d_%.*s.dat", 287, 287 % 40, "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx");
+    check_stream(img, name, name, (287 * 37) % 3000);
+
+    xiso_stat st;
+    CHECK_RC(xiso_lookup(img, "", &st), 0);                            /* the root */
+    CHECK(st.is_dir);
+    CHECK_RC(xiso_lookup(img, "/", &st), 0);
+    CHECK(st.is_dir);
+    CHECK_RC(xiso_lookup(img, "media", &st), 0);
+    CHECK(st.is_dir);
+    CHECK_RC(xiso_lookup(img, "Media/SUB/", &st), 0);
+    CHECK(st.is_dir);
+    CHECK_RC(xiso_lookup(img, "emptydir", &st), 0);
+    CHECK(st.is_dir);
+    uint8_t b[64];
+    CHECK_RC(xiso_pread(img, &st, b, sizeof b, 0), XISO_EINVAL);       /* a directory has no bytes */
+    CHECK_RC(xiso_lookup(img, "missing.bin", &st), XISO_ENOENT);
+    CHECK_RC(xiso_lookup(img, "media/nope", &st), XISO_ENOENT);
+    CHECK_RC(xiso_lookup(img, "emptydir/x", &st), XISO_ENOENT);
+    CHECK_RC(xiso_lookup(img, "ReadMe.TXT/inside", &st), XISO_ENOENT);  /* a file used as a directory */
+    CHECK_RC(xiso_lookup(img, "default.xb", &st), XISO_ENOENT);        /* no prefix match */
+    CHECK_RC(xiso_lookup(img, "default.xbee", &st), XISO_ENOENT);
+    CHECK_RC(xiso_lookup(NULL, "a", &st), XISO_EINVAL);
+    CHECK_RC(xiso_lookup(img, NULL, &st), XISO_EINVAL);
+
+    /* xiso_pread clamping, in big.bin (> the copy buffer) */
+    size_t big = 4 * 1024 * 1024 + 300 * 1024 + 7;
+    uint8_t *want = expected("big.bin", big);
+    CHECK_RC(xiso_lookup(img, "big.bin", &st), 0);
+    CHECK(st.size == big && !st.is_dir);
+    uint8_t *got = malloc(4096);
+    CHECK(xiso_pread(img, &st, got, 4096, 3 * 1024 * 1024 + 5) == 4096);
+    CHECK(memcmp(got, want + 3 * 1024 * 1024 + 5, 4096) == 0);
+    CHECK(xiso_pread(img, &st, got, 4096, big - 10) == 10);            /* the tail */
+    CHECK(memcmp(got, want + big - 10, 10) == 0);
+    CHECK(xiso_pread(img, &st, got, 4096, big) == 0);                  /* at the end */
+    CHECK(xiso_pread(img, &st, got, 4096, big + 12345) == 0);          /* past it */
+    CHECK(xiso_pread(img, &st, got, 0, 0) == 0);
+    CHECK_RC(xiso_lookup(img, "empty.bin", &st), 0);
+    CHECK(st.size == 0 && xiso_pread(img, &st, got, 4096, 0) == 0);
+    free(got);
+    free(want);
+    xiso_close(img);
+    xiso_close(NULL);
+    close(fd);
+
+    CHECK_RC(xiso_open_fd(-1, &img), XISO_EINVAL);
+    CHECK(img == NULL);
+    fd = open_ro(fixture("bad_magic.iso"));
+    CHECK_RC(xiso_open_fd(fd, &img), XISO_ENOTXISO);
+    CHECK(img == NULL);
+    close(fd);
+
+    /* Other partition bases: 0x30600, and the redump layout (game partition at 0x18300000, sparse). */
+    fd = open_ro(fixture("small_base30600.iso"));
+    CHECK_RC(xiso_open_fd(fd, &img), 0);
+    if (img) {
+        check_file(img, "default.xbe", xbe, xlen);
+        check_stream(img, "SUB/d2/Z.TXT", "sub/d2/z.txt", 77);
+        xiso_close(img);
+    }
+    close(fd);
+    size_t len;
+    uint8_t *small = read_file(fixture("small.iso"), &len);
+    char *red = tmp_path("redump_lookup.iso");
+    fd = open(red, O_RDWR | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+    if (fd >= 0 && small && pwrite(fd, small, len, (off_t)0x18300000) == (ssize_t)len) {
+        CHECK_RC(xiso_open_fd(fd, &img), 0);
+        if (img) {
+            check_file(img, "default.xbe", xbe, xlen);
+            check_stream(img, "sub/inner.bin", "sub/inner.bin", 4096);
+            CHECK_RC(xiso_lookup(img, "sub", &st), 0);
+            CHECK(st.is_dir && st.offset >= 0x18300000ull);
+            xiso_close(img);
+        }
+    } else {
+        fprintf(stderr, "FAIL cannot write the sparse redump image\n");
+        g_fail++;
+    }
+    if (fd >= 0)
+        close(fd);
+    unlink(red);
+    free(small);
+    free(xbe);
+    printf("lookup: ok\n");
+}
+
+/* Truncated and corrupt images: lookup and pread fail cleanly (never read past the image). */
+static void test_lookup_corrupt(void)
+{
+    static const char *paths[] = { "default.xbe", "a.txt", "b.txt", "c.txt", "dotdot", "slash", "sub/inner.bin",
+                                   "sub/d2/z.txt" };
+    /* truncated.iso: the image ends inside the last file's data */
+    int fd = open_ro(fixture("truncated.iso"));
+    xiso_image *img = NULL;
+    int corrupt = 0;
+    CHECK_RC(xiso_open_fd(fd, &img), 0);
+    if (img) {
+        uint8_t *buf = malloc(1 << 16);
+        for (size_t i = 0; i < sizeof paths / sizeof paths[0]; i++) {
+            xiso_stat st;
+            int rc = xiso_lookup(img, paths[i], &st);
+            if (rc == 0)
+                rc = xiso_pread(img, &st, buf, 1 << 16, 0) < 0 ? XISO_ECORRUPT : 0;
+            CHECK(rc == 0 || rc == XISO_ECORRUPT);
+            corrupt += rc == XISO_ECORRUPT;
+        }
+        free(buf);
+        xiso_close(img);
+    }
+    close(fd);
+    CHECK(corrupt == 1);
+
+    struct { const char *name, *path; int want; } cases[] = {
+        { "truncated_dir.iso", "a.txt", XISO_ECORRUPT },   /* the root table runs past the end */
+        { "self_loop.iso", "a.txt", XISO_ECORRUPT },
+        { "sector_range.iso", "", 0 },                     /* the root itself is fine */
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        fd = open_ro(fixture(cases[i].name));
+        img = NULL;
+        int rc = xiso_open_fd(fd, &img);
+        if (!rc) {
+            xiso_stat st;
+            rc = xiso_lookup(img, cases[i].path, &st);
+            xiso_close(img);
+        }
+        if (rc != cases[i].want) {
+            fprintf(stderr, "FAIL lookup %s in %s = %d (%s), want %d\n", cases[i].path, cases[i].name, rc,
+                    xiso_strerror(rc), cases[i].want);
+            g_fail++;
+        }
+        close(fd);
+    }
+    /* sector_range.iso: some entry points out of the image; whichever it is, lookup or pread says so. */
+    fd = open_ro(fixture("sector_range.iso"));
+    corrupt = 0;
+    if (xiso_open_fd(fd, &img) == 0) {
+        uint8_t buf[256];
+        for (size_t i = 0; i < sizeof paths / sizeof paths[0]; i++) {
+            xiso_stat st;
+            int rc = xiso_lookup(img, paths[i], &st);
+            if (rc == 0 && !st.is_dir)
+                rc = xiso_pread(img, &st, buf, sizeof buf, 0) < 0 ? XISO_ECORRUPT : 0;
+            CHECK(rc == 0 || rc == XISO_ECORRUPT || rc == XISO_ENOENT);
+            corrupt += rc == XISO_ECORRUPT;
+        }
+        xiso_close(img);
+    }
+    close(fd);
+    CHECK(corrupt >= 1);
+    printf("lookup corrupt images: ok\n");
+}
+
+static void test_extract_file(void)
+{
+    size_t xlen, len;
+    uint8_t *xbe = read_file(fixture("default.xbe.ref"), &xlen);
+    char *out = tmp_path("one.xbe");
+    unlink(out);
+    int fd = open_ro(fixture("tree.iso"));
+    CHECK_RC(xiso_extract_file_fd(fd, "Default.XBE", out, 32u << 20), 0);
+    uint8_t *got = read_file(out, &len);
+    CHECK(got && len == xlen && memcmp(got, xbe, xlen) == 0);
+    free(got);
+    /* O_EXCL: an existing file is an error and stays as it was */
+    CHECK_RC(xiso_extract_file_fd(fd, "ReadMe.TXT", out, 32u << 20), XISO_EWRITE);
+    got = read_file(out, &len);
+    CHECK(got && len == xlen && memcmp(got, xbe, xlen) == 0);
+    free(got);
+    unlink(out);
+    /* larger than max_bytes, a directory, a missing file: nothing written */
+    CHECK_RC(xiso_extract_file_fd(fd, "default.xbe", out, xlen - 1), XISO_EINVAL);
+    CHECK(!exists(out));
+    CHECK_RC(xiso_extract_file_fd(fd, "default.xbe", out, xlen), 0);     /* exactly max_bytes is fine */
+    unlink(out);
+    CHECK_RC(xiso_extract_file_fd(fd, "media", out, 32u << 20), XISO_ENOENT);
+    CHECK(!exists(out));
+    CHECK_RC(xiso_extract_file_fd(fd, "nothing.here", out, 32u << 20), XISO_ENOENT);
+    CHECK(!exists(out));
+    /* a multi-chunk file */
+    size_t big = 4 * 1024 * 1024 + 300 * 1024 + 7;
+    CHECK_RC(xiso_extract_file_fd(fd, "big.bin", out, 32u << 20), 0);
+    got = read_file(out, &len);
+    uint8_t *want = expected("big.bin", big);
+    CHECK(got && len == big && memcmp(got, want, big) == 0);
+    free(got);
+    free(want);
+    unlink(out);
+    CHECK_RC(xiso_extract_file_fd(fd, "empty.bin", out, 0), 0);          /* an empty file */
+    CHECK(exists(out));
+    unlink(out);
+    CHECK_RC(xiso_extract_file_fd(fd, "a", "", 1), XISO_EINVAL);
+    close(fd);
+    CHECK_RC(xiso_extract_file_fd(-1, "default.xbe", out, 1), XISO_EINVAL);
+    /* not an image; a truncated one leaves no partial file */
+    fd = open_ro(fixture("bad_magic.iso"));
+    CHECK_RC(xiso_extract_file_fd(fd, "default.xbe", out, 32u << 20), XISO_ENOTXISO);
+    close(fd);
+    CHECK(!exists(out));
+    fd = open_ro(fixture("truncated_dir.iso"));
+    CHECK_RC(xiso_extract_file_fd(fd, "default.xbe", out, 32u << 20), XISO_ECORRUPT);
+    close(fd);
+    CHECK(!exists(out));
+    free(xbe);
+    printf("extract one file: ok\n");
+}
+
 /* Random byte flips in the descriptor and directory tables, and random truncations: no crash, no write outside. */
 static void test_mutations(void)
 {
@@ -434,6 +696,19 @@ static void test_mutations(void)
         }
         write_file(path, img, n);
         int fd = open_ro(path);
+        xiso_image *img = NULL;
+        int lrc = xiso_open_fd(fd, &img);
+        if (!lrc) {
+            xiso_stat st;
+            uint8_t b[512];
+            lrc = xiso_lookup(img, "SUB\\d2/z.txt", &st);
+            if (!lrc && !st.is_dir) {
+                int n = xiso_pread(img, &st, b, sizeof b, 0);
+                lrc = n < 0 ? n : 0;
+            }
+            xiso_close(img);
+        }
+        CHECK(lrc == 0 || lrc == XISO_ECORRUPT || lrc == XISO_ENOTXISO || lrc == XISO_ENOENT);
         int rc = xiso_probe_fd(fd, NULL, 0, NULL, NULL);
         if (rc == 0) {
             rc = xiso_extract_fd(fd, out, NULL, NULL);
@@ -466,6 +741,9 @@ int main(int argc, char **argv)
     test_bases();
     test_cancel();
     test_corrupt();
+    test_lookup();
+    test_lookup_corrupt();
+    test_extract_file();
     test_mutations();
     rm_rf(g_tmp);
     printf(g_fail ? "%d failure(s)\n" : "all passed\n", g_fail);

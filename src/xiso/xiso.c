@@ -93,6 +93,7 @@ const char *xiso_strerror(int err)
     case XISO_EWRITE:    return "cannot write the extracted files";
     case XISO_ENOMEM:    return "out of memory";
     case XISO_EINVAL:    return "invalid argument";
+    case XISO_ENOENT:    return "no such file in the disc image";
     default:             return "unknown error";
     }
 }
@@ -664,5 +665,180 @@ out:
     free(dst);
     free(partial);
     free(old);
+    return rc;
+}
+
+/* ── Single files: open, lookup, pread ───────────────────────────────────── */
+
+struct xiso_image {
+    vol_t v;
+};
+
+int xiso_open_fd(int fd, xiso_image **out)
+{
+    if (!out)
+        return XISO_EINVAL;
+    *out = NULL;
+    if (fd < 0)
+        return XISO_EINVAL;
+    xiso_image *img = malloc(sizeof *img);
+    if (!img)
+        return XISO_ENOMEM;
+    int rc = vol_open(&img->v, fd);
+    if (rc) {
+        vol_close(&img->v);
+        free(img);
+        return rc;
+    }
+    *out = img;
+    return 0;
+}
+
+void xiso_close(xiso_image *img)
+{
+    if (!img)
+        return;
+    vol_close(&img->v);
+    free(img);
+}
+
+/* ASCII case folding only: XDVDFS names are 8-bit and the kernel compares them that way. */
+static int name_eq_nocase(const char *a, const char *b, size_t blen)
+{
+    size_t i = 0;
+    for (; i < blen && a[i]; i++) {
+        unsigned char x = (unsigned char)a[i], y = (unsigned char)b[i];
+        if (x >= 'A' && x <= 'Z')
+            x = (unsigned char)(x + 32);
+        if (y >= 'A' && y <= 'Z')
+            y = (unsigned char)(y + 32);
+        if (x != y)
+            return 0;
+    }
+    return i == blen && a[i] == 0;
+}
+
+int xiso_lookup(xiso_image *img, const char *path, xiso_stat *st)
+{
+    if (!img || !path || !st)
+        return XISO_EINVAL;
+    vol_t *v = &img->v;
+    seen_reset(v);
+    uint32_t sector = v->root_sector, size = v->root_size;
+    int is_dir = 1, depth = 0;
+    const char *p = path;
+    for (;;) {
+        while (*p == '/' || *p == '\\')
+            p++;
+        if (!*p)
+            break;
+        const char *end = p;
+        while (*end && *end != '/' && *end != '\\')
+            end++;
+        size_t len = (size_t)(end - p);
+        if (!is_dir || len > 255)
+            return XISO_ENOENT;
+        if (++depth > MAX_DEPTH)
+            return XISO_ENOENT;   /* deeper than any valid image can be */
+        entry_t *ents;
+        size_t n;
+        int rc = read_dir(v, sector, size, &ents, &n);
+        if (rc)
+            return rc;
+        const entry_t *hit = NULL;
+        for (size_t i = 0; i < n; i++) {
+            if (strlen(ents[i].name) == len && memcmp(ents[i].name, p, len) == 0) {
+                hit = &ents[i];
+                break;
+            }
+            if (!hit && name_eq_nocase(ents[i].name, p, len))
+                hit = &ents[i];
+        }
+        if (!hit) {
+            free(ents);
+            return XISO_ENOENT;
+        }
+        sector = hit->sector;
+        size = hit->size;
+        is_dir = (hit->attr & ATTR_DIRECTORY) != 0;
+        free(ents);
+        p = end;
+    }
+    if (size > 0 && !in_image(v, sector, size))
+        return XISO_ECORRUPT;
+    st->offset = v->base + (uint64_t)sector * SECTOR_SIZE;
+    st->size = size;
+    st->is_dir = is_dir;
+    return 0;
+}
+
+int xiso_pread(xiso_image *img, const xiso_stat *st, void *buf, size_t len, uint64_t off)
+{
+    if (!img || !st || (!buf && len))
+        return XISO_EINVAL;
+    if (st->is_dir)
+        return XISO_EINVAL;
+    if (off >= st->size)
+        return 0;
+    uint64_t left = st->size - off;
+    if (len > left)
+        len = (size_t)left;
+    if (len > INT32_MAX)
+        len = INT32_MAX;
+    int rc = read_full(&img->v, buf, len, st->offset + off);
+    return rc ? rc : (int)len;
+}
+
+int xiso_extract_file_fd(int fd, const char *path, const char *out_file, uint64_t max_bytes)
+{
+    if (fd < 0 || !path || !out_file || !out_file[0])
+        return XISO_EINVAL;
+    xiso_image *img;
+    int rc = xiso_open_fd(fd, &img);
+    if (rc)
+        return rc;
+    xiso_stat st;
+    rc = xiso_lookup(img, path, &st);
+    if (!rc && st.is_dir)
+        rc = XISO_ENOENT;
+    if (!rc && st.size > max_bytes)
+        rc = XISO_EINVAL;
+    uint8_t *buf = NULL;
+    if (!rc && !(buf = malloc(BUF_SIZE)))
+        rc = XISO_ENOMEM;
+    if (rc) {
+        xiso_close(img);
+        return rc;
+    }
+    int out = open(out_file, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0644);
+    if (out < 0) {
+        rc = errno == EEXIST ? XISO_EWRITE : write_err(errno);
+        free(buf);
+        xiso_close(img);
+        return rc;
+    }
+    uint64_t off = 0;
+    while (off < st.size) {
+        size_t want = st.size - off < BUF_SIZE ? (size_t)(st.size - off) : BUF_SIZE;
+        int n = xiso_pread(img, &st, buf, want, off);
+        if (n < 0) {
+            rc = n;
+            break;
+        }
+        if (n == 0) {
+            rc = XISO_ECORRUPT;
+            break;
+        }
+        rc = write_full(out, buf, (size_t)n);
+        if (rc)
+            break;
+        off += (uint64_t)n;
+    }
+    if (close(out) != 0 && !rc && errno != EINTR)
+        rc = write_err(errno);
+    if (rc)
+        unlink(out_file);
+    free(buf);
+    xiso_close(img);
     return rc;
 }

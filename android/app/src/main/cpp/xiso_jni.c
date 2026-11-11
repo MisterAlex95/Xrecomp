@@ -124,6 +124,32 @@ Java_fr_adserver_xboxrecomp_XisoNative_extract(JNIEnv *env, jclass cls, jint fd,
     return rc;
 }
 
+/* fr.adserver.xboxrecomp.XisoNative.extractFile(int fd, String pathInImage, String outFile, long maxBytes) -> int
+ * (0 or XISO_E*): one file of the image (the game library takes default.xbe out of an ISO without extracting it).
+ * outFile is created with O_EXCL and removed on failure; larger than maxBytes is XISO_EINVAL. */
+JNIEXPORT jint JNICALL
+Java_fr_adserver_xboxrecomp_XisoNative_extractFile(JNIEnv *env, jclass cls, jint fd, jstring path_in_image,
+                                                   jstring out_file, jlong max_bytes)
+{
+    (void)cls;
+    if (!path_in_image || !out_file || max_bytes < 0)
+        return XISO_EINVAL;
+    const char *path = (*env)->GetStringUTFChars(env, path_in_image, NULL);
+    if (!path)
+        return XISO_ENOMEM;
+    const char *out = (*env)->GetStringUTFChars(env, out_file, NULL);
+    if (!out) {
+        (*env)->ReleaseStringUTFChars(env, path_in_image, path);
+        return XISO_ENOMEM;
+    }
+    int rc = xiso_extract_file_fd(fd, path, out, (uint64_t)max_bytes);
+    if (rc)
+        __android_log_print(ANDROID_LOG_INFO, TAG, "library: xiso extract %s: %d (%s)", path, rc, xiso_strerror(rc));
+    (*env)->ReleaseStringUTFChars(env, out_file, out);
+    (*env)->ReleaseStringUTFChars(env, path_in_image, path);
+    return rc;
+}
+
 JNIEXPORT jstring JNICALL
 Java_fr_adserver_xboxrecomp_XisoNative_strerror(JNIEnv *env, jclass cls, jint err)
 {

@@ -42,6 +42,7 @@ extern "C" {
 #define XISO_EWRITE     (-6)  /* creating, writing or renaming the output failed (not a space problem) */
 #define XISO_ENOMEM     (-7)  /* out of memory */
 #define XISO_EINVAL     (-8)  /* bad argument (negative fd, empty out_dir, ...) */
+#define XISO_ENOENT     (-9)  /* xiso_lookup: no such file or directory in the image */
 
 /* Extraction progress. done_bytes / total_bytes count file contents only.
  * Called when each file starts (current_path is that file, relative to the
@@ -69,6 +70,48 @@ int xiso_probe_fd(int fd, char *title_out, size_t title_cap, uint64_t *total_byt
  * Returns 0, XISO_ECANCELED when the callback cancelled, or another negative
  * XISO_* code. progress may be NULL. */
 int xiso_extract_fd(int fd, const char *out_dir, xiso_progress_fn progress, void *user);
+
+/* ── Reading single files without extracting (the game library's scan) ──
+ *
+ * xiso_open_fd reads only the volume descriptor (no tree walk), so opening a
+ * multi-GB image costs one sector read. xiso_lookup then reads only the
+ * directory tables on the way to one path, with the same checks as the full
+ * walk (bounds, cycles, names). The fd is not owned: the caller keeps it open
+ * until xiso_close and closes it afterwards. An xiso_image is used by one
+ * thread at a time. */
+typedef struct xiso_image xiso_image;
+
+typedef struct {
+    uint64_t offset;   /* absolute byte offset of the data (or directory table) in the image */
+    uint32_t size;     /* bytes */
+    int is_dir;
+} xiso_stat;
+
+/* Returns 0 and *out, or XISO_EINVAL, XISO_ENOMEM, XISO_EIO, XISO_ENOTXISO. */
+int xiso_open_fd(int fd, xiso_image **out);
+
+/* Frees img (NULL is fine). Does not close the fd. */
+void xiso_close(xiso_image *img);
+
+/* Looks a path up, relative to the image root: components separated by '/'
+ * or '\\' (empty components ignored, so "" and "/" are the root), names
+ * compared case-insensitively (ASCII, as the kernel does; an exact match wins
+ * over a case-insensitive one). Returns 0 and *st, XISO_ENOENT when a component
+ * is missing or a file is used as a directory, XISO_ECORRUPT for a bad table,
+ * or another negative XISO_* code. */
+int xiso_lookup(xiso_image *img, const char *path, xiso_stat *st);
+
+/* Reads up to len bytes of a file found by xiso_lookup, from byte off of the
+ * file. Clamped to the file: returns the number of bytes read (0 at or past
+ * the end, at most INT32_MAX per call), XISO_EINVAL for a directory, or
+ * XISO_ECORRUPT when the image ends before the file does. */
+int xiso_pread(xiso_image *img, const xiso_stat *st, void *buf, size_t len, uint64_t off);
+
+/* Copies one file of the image to out_file, created with O_EXCL (an existing
+ * out_file is XISO_EWRITE and is left alone). A file larger than max_bytes is
+ * XISO_EINVAL, a directory XISO_ENOENT. On any failure out_file is removed.
+ * Returns 0 or a negative XISO_* code. */
+int xiso_extract_file_fd(int fd, const char *path, const char *out_file, uint64_t max_bytes);
 
 /* A static English message for an XISO_* code (or "success" for 0). */
 const char *xiso_strerror(int err);
