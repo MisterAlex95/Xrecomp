@@ -52,6 +52,7 @@
 #include "nv2a_gl_api.h"
 #include "nv2a_gl_shader.h"
 #include "nv2a_gl_vsh.h"
+#include "nv2a_gl_scale.h"
 #include "nv2a_backend.h"
 #include "d3d/d3d8_swizzle.h"
 #ifdef XBOXRECOMP_LSFG
@@ -150,6 +151,21 @@ void nv2a_gl_set_display_size(uint32_t w, uint32_t h)
     s_display_w = w;
     s_display_h = h;
 }
+/* Internal resolution (RECOMP_GPU_SCALE, nv2a_gl_scale.h; gpu-backend.md
+ * "Internal resolution"): the frame-buffer class of targets is drawn at
+ * s_scale_cfg.scale times its guest size. s_scale_resolve (default on,
+ * RECOMP_GPU_SCALE_RESOLVE=0 off): a native target sampling a scaled one
+ * reads a native-size resolve of it rather than the scaled texture (which
+ * it would under-filter). s_scale_dump (RECOMP_GPU_SCALE_DUMP=1): a dumping
+ * flip also writes the presented target at its real size. */
+static Nv2aGlScaleConfig s_scale_cfg = { 1.0f, 0, 0, { 0 }, { 0 } };
+static int s_scale_resolve = 1, s_scale_dump;
+/* The scale of the target the batch being set up draws into (known before
+ * its textures are bound: nv2a_gl_surface_scale). */
+static float s_draw_sc = 1.0f;
+static struct {
+    uint32_t resolves, rescales, depth_recreates, seed_blits;
+} s_sst;
 
 /* ---- helpers ------------------------------------------------------------ */
 
@@ -388,6 +404,32 @@ static void sh_color_mask(int r, int g, int b, int a)
     }
 }
 
+/* Colour blit from framebuffer `src` (sw x sh at the origin) to `dst` (dw x
+ * dh at the origin): scaled-target resolves and seeding. The scissor test
+ * (and on some drivers the colour mask) applies to blits: both go to "all"
+ * for the blit and back afterwards, and the framebuffer bound before is
+ * bound again, so a blit between bind_target and the draw (seeding) leaves
+ * the batch's state as it was. */
+static void sh_blit(GLuint src, GLint sw, GLint sh, GLuint dst, GLint dw, GLint dh,
+                    GLenum filter)
+{
+    GLuint fbo = s_sh.fbo;
+    GLint scissor = s_sh.cap[SH_SCISSOR], cm = s_sh.cmask;
+
+    sh_cap(SH_SCISSOR, GL_SCISSOR_TEST, 0);
+    sh_color_mask(1, 1, 1, 1);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, src);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, dst);
+    glBlitFramebuffer(0, 0, sw, sh, 0, 0, dw, dh, GL_COLOR_BUFFER_BIT, filter);
+    s_sh.fbo = 0xFFFFFFFFu;
+    if (fbo != 0xFFFFFFFFu)
+        sh_fbo(fbo);
+    if (scissor == 1)
+        sh_cap(SH_SCISSOR, GL_SCISSOR_TEST, 1);
+    if (cm >= 0 && cm <= 15)
+        sh_color_mask(cm & 1, cm & 2, cm & 4, cm & 8);
+}
+
 static void sh_depth_mask(int on)
 {
     if (s_sh.depth_mask != on) {
@@ -507,6 +549,17 @@ static int ensure_init(void)
         s_readback_present = a && strcmp(a, "present") == 0;
     }
     s_scale = scale_from_env();
+    s_scale_cfg.scale = s_scale;
+    s_scale_cfg.shadow = env_on("RECOMP_GPU_SCALE_SHADOW");
+    nv2a_gl_scale_parse_targets(getenv("RECOMP_GPU_SCALE_TARGETS"), &s_scale_cfg);
+    s_scale_resolve = !(getenv("RECOMP_GPU_SCALE_RESOLVE") && !env_on("RECOMP_GPU_SCALE_RESOLVE"));
+    s_scale_dump = env_on("RECOMP_GPU_SCALE_DUMP");
+    if (s_scale > 1.0f)
+        fprintf(stderr, "  [GPUGL] scaled targets at %.2f: frame %ux%u -> %ux%u, resolve %s,"
+                        " shadow maps %s, %u extra target sizes\n", (double)s_scale,
+                NV2A_GL_FRAME_W, NV2A_GL_FRAME_H, nv2a_gl_scale_px(NV2A_GL_FRAME_W, s_scale),
+                nv2a_gl_scale_px(NV2A_GL_FRAME_H, s_scale), s_scale_resolve ? "on" : "off",
+                s_scale_cfg.shadow ? "scaled" : "native", s_scale_cfg.ntargets);
     if (s_present_host_env || s_scale > 1.0f)
         fprintf(stderr, "  [GPUGL] host present %s (window %ux%u), native copy %s\n",
                 s_display_w ? "on" : "off: no window", s_display_w, s_display_h,
@@ -756,7 +809,17 @@ typedef struct {
      * swz (swz: 0, or 1 | log2w << 8 | log2h << 16). What read-back and
      * seeding convert. */
     uint32_t va, pitch, bpp, w, h, swz;
-    uint32_t gw, gh;                      /* the GL texture's size (>= w, h) */
+    uint32_t gw, gh;                      /* the GL texture's logical size (>= w, h) */
+    /* Internal resolution: GL texels per guest pixel. tex (and copy) are
+     * round(gw * sc) x round(gh * sc); w, h, gw, gh stay in guest pixels,
+     * which is what positions, texture coordinates and read-back use. A
+     * scaled target has a native-size resolve (rtex/rfbo, gw x gh): what
+     * read-back reads, what a native target samples, and where seeding
+     * uploads before the blit up. rserial: r->serial it was made from. */
+    float sc;
+    GLuint rtex, rfbo;
+    uint32_t rw, rh, rserial;
+    GlSamp rsamp;                         /* sampler state of rtex */
     uint32_t cfmt;                        /* SET_SURFACE_FORMAT colour format (bits 0-3) */
     GLuint tex, fbo, depth;               /* depth: depth texture attached now */
     int dirty;
@@ -774,7 +837,8 @@ typedef struct {
 /* Depth/stencil per zeta surface: a D24S8 texture (not a renderbuffer), so
  * a shadow map drawn into it can be sampled with a depth compare. */
 typedef struct {
-    uint32_t va, w, h;
+    uint32_t va, w, h;                    /* w, h logical (guest pixels) */
+    float sc;                             /* texture: round(w * sc) x round(h * sc) */
     GLuint tex;
     GLuint fbo;                           /* depth-only framebuffer, made on demand */
     uint32_t used, bytes;                 /* frame last bound; guest bytes it shadows */
@@ -817,8 +881,66 @@ static size_t rt_offset(const GlRT *r, uint32_t x, uint32_t y)
     return (size_t)y * r->pitch + (size_t)x * r->bpp;
 }
 
+/* Real (GL) size of a logical length on target r. */
+static uint32_t rt_real_px(const GlRT *r, uint32_t v)
+{
+    return nv2a_gl_scale_px(v, r->sc);
+}
+
+/* The native-size resolve objects of scaled target r (gw x gh), made or
+ * resized as needed; a fresh one holds nothing yet (rserial stale). */
+static int rt_resolve_alloc(GlRT *r)
+{
+    if (r->rtex && r->rw == r->gw && r->rh == r->gh)
+        return 1;
+    if (!r->rtex) {
+        glGenTextures(1, &r->rtex);
+        glGenFramebuffers(1, &r->rfbo);
+    }
+    /* On a unit no stage samples from (this can run after the batch's
+     * textures are bound: seeding the target it draws into). */
+    sh_active(SH_UNITS);
+    sh_tex(GL_TEXTURE_2D, r->rtex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, (GLsizei)r->gw, (GLsizei)r->gh, 0,
+                 GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
+    {
+        GLuint fbo = s_sh.fbo;
+        sh_fbo(r->rfbo);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, r->rtex, 0);
+        if (fbo != 0xFFFFFFFFu)
+            sh_fbo(fbo);
+    }
+    r->rw = r->gw;
+    r->rh = r->gh;
+    r->rsamp.wrap_s = r->rsamp.wrap_t = r->rsamp.filter = r->rsamp.swz_a = -1;
+    r->rserial = r->serial - 1;
+    return 1;
+}
+
+/* Target r's pixels at guest size, current as of r->serial: the framebuffer
+ * to read r->w x r->h guest pixels from. At scale 1 the target's own; a
+ * scaled target is blitted down (linear) into its resolve when it was
+ * written since the last one. */
+static GLuint rt_resolve(GlRT *r)
+{
+    if (r->sc == 1.0f)
+        return r->fbo;
+    rt_resolve_alloc(r);
+    if (r->rserial != r->serial) {
+        sh_blit(r->fbo, (GLint)rt_real_px(r, r->gw), (GLint)rt_real_px(r, r->gh),
+                r->rfbo, (GLint)r->gw, (GLint)r->gh, GL_LINEAR);
+        r->rserial = r->serial;
+        s_sst.resolves++;
+    }
+    return r->rfbo;
+}
+
 /* Guest bytes -> the render target (on creation: what was there before the
- * GPU drew counts, a title may draw over a CPU-written picture). */
+ * GPU drew counts, a title may draw over a CPU-written picture). A scaled
+ * target gets them at guest size in its resolve, blitted up (nearest: an
+ * integer scale replicates pixels, and the resolve then holds the exact
+ * guest picture for read-back). */
 static void rt_upload(GlRT *r)
 {
     uint8_t *buf = scratch((size_t)r->w * r->h * 4), *mem = guest(r->va);
@@ -848,6 +970,18 @@ static void rt_upload(GlRT *r)
                 o[3] = 0xFF;
             }
         }
+    if (r->sc != 1.0f) {
+        rt_resolve_alloc(r);
+        sh_active(SH_UNITS);          /* as rt_resolve_alloc */
+        sh_tex(GL_TEXTURE_2D, r->rtex);
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, (GLsizei)r->w, (GLsizei)r->h,
+                        GL_RGBA, GL_UNSIGNED_BYTE, buf);
+        sh_blit(r->rfbo, (GLint)r->w, (GLint)r->h, r->fbo, (GLint)rt_real_px(r, r->w),
+                (GLint)rt_real_px(r, r->h), GL_NEAREST);
+        r->rserial = r->serial;
+        s_sst.seed_blits++;
+        return;
+    }
     sh_tex(GL_TEXTURE_2D, r->tex);
     glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, (GLsizei)r->w, (GLsizei)r->h,
                     GL_RGBA, GL_UNSIGNED_BYTE, buf);
@@ -980,7 +1114,7 @@ static void rt_readback(GlRT *r)
     buf = scratch((size_t)r->w * r->h * 4);
     if (!buf)
         return;
-    sh_fbo(r->fbo);
+    sh_fbo(rt_resolve(r));
     glReadPixels(0, 0, (GLsizei)r->w, (GLsizei)r->h, NV_GL_READ_FORMAT, NV_GL_READ_TYPE, buf);
     rt_store(r, buf);
     if (s_pend.pending && s_pend.snap.va == r->va)
@@ -995,22 +1129,25 @@ static void rt_free(GlRT *r)
     if (r->fbo) sh_delete_fbo(r->fbo);
     if (r->tex) sh_delete_textures(1, &r->tex);
     if (r->copy) sh_delete_textures(1, &r->copy);
+    if (r->rfbo) sh_delete_fbo(r->rfbo);
+    if (r->rtex) sh_delete_textures(1, &r->rtex);
     memset(r, 0, sizeof *r);
 }
 
-/* Give target r a bigger GL texture (gw x gh), keeping its pixels (a GPU
- * copy, no read-back). */
+/* Give target r a bigger GL texture (gw x gh logical), keeping its pixels
+ * (a GPU copy, no read-back). */
 static void rt_grow(GlRT *r, uint32_t gw, uint32_t gh)
 {
     GLuint t;
 
     glGenTextures(1, &t);
     sh_tex(GL_TEXTURE_2D, t);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, (GLsizei)gw, (GLsizei)gh, 0,
-                 GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, (GLsizei)rt_real_px(r, gw),
+                 (GLsizei)rt_real_px(r, gh), 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
     sh_fbo(r->fbo);
-    glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, (GLsizei)r->gw, (GLsizei)r->gh);
+    glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, (GLsizei)rt_real_px(r, r->gw),
+                        (GLsizei)rt_real_px(r, r->gh));
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, t, 0);
     sh_delete_textures(1, &r->tex);
     r->tex = t;
@@ -1022,6 +1159,7 @@ static void rt_grow(GlRT *r, uint32_t gw, uint32_t gh)
 
 static GlRT *rt_get(const Nv2aSurface *s)
 {
+    float sc = nv2a_gl_surface_scale(&s_scale_cfg, s);
     uint32_t bpp = s->bytes_per_pixel, w, h, swz = 0, i;
     GlRT *r, *free_slot = NULL, *lru = NULL;
 
@@ -1060,6 +1198,21 @@ static GlRT *rt_get(const Nv2aSurface *s)
              * and seeding use changes, and the texture grows (by a GPU copy)
              * when the new shape does not fit. Recreating it cost a
              * read-back and an upload per switch, 16 a frame. */
+            if (r->bpp == bpp && r->sc != sc) {
+                /* Another scale class now (nv2a_gl_surface_scale keys on
+                 * real pixels, so Fable's 0x121 / 0x2121 back buffer does
+                 * not come here): hand it back through guest memory. */
+                s_sst.rescales++;
+                if (s_verbose)
+                    fprintf(stderr, "  [GPUGL] target 0x%08X rescaled %.2f -> %.2f"
+                                    " (format 0x%X, clip %u,%u %ux%u)\n", r->va,
+                            (double)r->sc, (double)sc, s->format, s->clip_x, s->clip_y,
+                            s->width, s->height);
+                rt_free(r);
+                if (!free_slot)
+                    free_slot = r;
+                continue;
+            }
             if (r->bpp == bpp) {
                 if (w > r->gw || h > r->gh)
                     rt_grow(r, w > r->gw ? w : r->gw, h > r->gh ? h : r->gh);
@@ -1101,12 +1254,13 @@ static GlRT *rt_get(const Nv2aSurface *s)
     r->w = r->gw = w;
     r->h = r->gh = h;
     r->swz = swz;
+    r->sc = sc;
     r->cfmt = s->format & 0xF;
     r->samp.wrap_s = r->samp.wrap_t = r->samp.filter = r->samp.swz_a = -1;
     glGenTextures(1, &r->tex);
     sh_tex(GL_TEXTURE_2D, r->tex);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, (GLsizei)w, (GLsizei)h, 0,
-                 GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, (GLsizei)rt_real_px(r, w),
+                 (GLsizei)rt_real_px(r, h), 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
     /* Seeded from the guest bytes when first drawn or sampled, unless the
      * first thing the title does is clear it whole (rt_seed, gl_clear). */
@@ -1116,9 +1270,15 @@ static GlRT *rt_get(const Nv2aSurface *s)
     sh_fbo(r->fbo);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, r->tex, 0);
     r->depth = 0;
-    if (s_verbose)
-        fprintf(stderr, "  [GPUGL] render target 0x%08X %ux%u bpp %u%s\n",
-                r->va, w, h, bpp, swz ? " swizzled" : "");
+    if (s_verbose) {
+        if (sc != 1.0f)
+            fprintf(stderr, "  [GPUGL] render target 0x%08X %ux%u bpp %u%s at %.2fx (%ux%u)\n",
+                    r->va, w, h, bpp, swz ? " swizzled" : "", (double)sc,
+                    rt_real_px(r, w), rt_real_px(r, h));
+        else
+            fprintf(stderr, "  [GPUGL] render target 0x%08X %ux%u bpp %u%s\n",
+                    r->va, w, h, bpp, swz ? " swizzled" : "");
+    }
     return r;
 }
 
@@ -1145,28 +1305,37 @@ static void depth_free(GlDepth *d)
     memset(d, 0, sizeof *d);
 }
 
-/* Depth/stencil for zeta surface `va`, at least w x h. The CPU rasteriser
- * keeps one float buffer per zeta address; so does this, as a D24S8
- * texture. */
-static GlDepth *depth_get(uint32_t va, uint32_t w, uint32_t h, uint32_t zbpp)
+/* Depth/stencil for zeta surface `va` at scale sc, at least w x h logical.
+ * The CPU rasteriser keeps one float buffer per zeta address; so does this,
+ * as a D24S8 texture, one per (address, scale): depth follows the colour
+ * target's scale, and a zeta address shared by a scaled and a native target
+ * (zeta 0, the scratch depth) gets one of each rather than a re-creation
+ * per switch. */
+static GlDepth *depth_get(uint32_t va, uint32_t w, uint32_t h, uint32_t zbpp, float sc)
 {
-    int i, slot = -1;
+    int i, slot = -1, twin = 0;
     GlDepth *d;
 
     for (i = 0; i < NV_GL_MAX_DEPTH; i++) {
         d = &s_depth[i];
-        if (d->tex && d->va == va) {
+        if (d->tex && d->va == va && d->sc == sc) {
             if (d->w >= w && d->h >= h) {
                 d->used = s_frame;
                 return d;
             }
+            if (sc != 1.0f)
+                s_sst.depth_recreates++;
             depth_free(d);
             slot = i;
             break;
         }
+        if (d->tex && d->va == va)
+            twin = 1;
         if (!d->tex && slot < 0)
             slot = i;
     }
+    if (twin && s_scale_cfg.scale != 1.0f)
+        s_sst.depth_recreates++;      /* the same zeta at another scale */
     if (slot < 0) {
         static int next;
         slot = next++ % NV_GL_MAX_DEPTH;
@@ -1178,11 +1347,13 @@ static GlDepth *depth_get(uint32_t va, uint32_t w, uint32_t h, uint32_t zbpp)
     d->bytes = w * h * zbpp;
     d->w = w < 640 ? 640 : w;
     d->h = h < 480 ? 480 : h;
+    d->sc = sc;
     d->samp.wrap_s = d->samp.wrap_t = d->samp.filter = d->samp.swz_a = -1;
     d->cmp = 0;
     glGenTextures(1, &d->tex);
     sh_tex(GL_TEXTURE_2D, d->tex);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH24_STENCIL8, (GLsizei)d->w, (GLsizei)d->h, 0,
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH24_STENCIL8, (GLsizei)nv2a_gl_scale_px(d->w, sc),
+                 (GLsizei)nv2a_gl_scale_px(d->h, sc), 0,
                  GL_DEPTH_STENCIL, GL_UNSIGNED_INT_24_8, NULL);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_COMPARE_MODE, GL_COMPARE_REF_TO_TEXTURE);
@@ -1196,6 +1367,7 @@ static GlDepth *depth_get(uint32_t va, uint32_t w, uint32_t h, uint32_t zbpp)
 typedef struct {
     GlRT *rt;
     uint32_t w, h, bpp;
+    float sc;                             /* real pixels per guest pixel */
 } GlTarget;
 
 /* The framebuffer the last draw or clear went into: a change is a target
@@ -1235,17 +1407,31 @@ static void leave_target(GLuint next)
     s_target_scratch_depth = 0;
 }
 
+/* Viewport (the whole framebuffer, w x h logical) and scissor (the clip
+ * rectangle) of a target drawn at scale sc: real pixels. The vertex
+ * mapping (u_vp) stays logical, so positions scale with the viewport. */
+static void set_view(const Nv2aSurface *s, uint32_t w, uint32_t h, float sc)
+{
+    int32_t c[4];
+
+    sh_viewport(0, 0, (GLsizei)nv2a_gl_scale_px(w, sc), (GLsizei)nv2a_gl_scale_px(h, sc));
+    sh_cap(SH_SCISSOR, GL_SCISSOR_TEST, 1);
+    nv2a_gl_scale_rect(s->clip_x, s->clip_y, s->width, s->height, sc, c);
+    sh_scissor(c[0], c[1], c[2], c[3]);
+}
+
 /* The depth-only framebuffer for zeta surface `va` (glDrawBuffers GL_NONE):
  * a shadow-map pass writes depth and nothing else, so no colour target is
  * created in guest memory and nothing is read back. */
 static int bind_depth_only(const Nv2aSurface *s, uint32_t zeta_va, GlTarget *t)
 {
     uint32_t w = s->clip_x + s->width, h = s->clip_y + s->height;
+    float sc = nv2a_gl_surface_scale(&s_scale_cfg, s);   /* masked: the colour surface's */
     GlDepth *d;
 
     if (!zeta_va || !w || !h || w > 4096 || h > 4096)
         return 0;
-    d = depth_get(zeta_va, w, h, zeta_bpp(s));
+    d = depth_get(zeta_va, w, h, zeta_bpp(s), sc);
     leave_target(d->fbo);
     if (!d->fbo) {
         const GLenum none = GL_NONE;
@@ -1267,9 +1453,8 @@ static int bind_depth_only(const Nv2aSurface *s, uint32_t zeta_va, GlTarget *t)
     t->w = d->w;
     t->h = d->h;
     t->bpp = 4;
-    sh_viewport(0, 0, (GLsizei)t->w, (GLsizei)t->h);
-    sh_cap(SH_SCISSOR, GL_SCISSOR_TEST, 1);
-    sh_scissor((GLint)s->clip_x, (GLint)s->clip_y, (GLsizei)s->width, (GLsizei)s->height);
+    t->sc = sc;
+    set_view(s, t->w, t->h, sc);
     return 1;
 }
 
@@ -1309,20 +1494,19 @@ static int bind_target(const Nv2aSurface *s, uint32_t zeta_va, GlTarget *t)
     sh_fbo(r->fbo);
     note_target(r->fbo, r->va, s->width, s->height);
     s_target_scratch_depth = zeta_va == 0;
-    d = depth_get(zeta_va, r->gw, r->gh, zeta_bpp(s))->tex;
+    d = depth_get(zeta_va, r->gw, r->gh, zeta_bpp(s), r->sc)->tex;
     if (d != r->depth) {
         glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT,
                                GL_TEXTURE_2D, d, 0);
         r->depth = d;
     }
-    sh_viewport(0, 0, (GLsizei)r->gw, (GLsizei)r->gh);
-    sh_cap(SH_SCISSOR, GL_SCISSOR_TEST, 1);
-    sh_scissor((GLint)s->clip_x, (GLint)s->clip_y, (GLsizei)s->width, (GLsizei)s->height);
+    set_view(s, r->gw, r->gh, r->sc);
     r->used = s_frame;
     t->rt = r;
     t->w = r->gw;
     t->h = r->gh;
     t->bpp = r->bpp;
+    t->sc = r->sc;
     return 1;
 }
 
@@ -2219,8 +2403,15 @@ static GLenum stencil_op(uint32_t op)
     }
 }
 
+/* po_scale: the target's internal scale (1 for a depth-only target), which
+ * the polygon offset factor follows: it multiplies the depth slope per
+ * pixel, and a pixel of a target drawn at scale S spans 1/S of the guest's.
+ * Internal resolution and what is not scaled yet: anything the executor
+ * starts sending in surface pixels must go through real = round(logical *
+ * t.sc) as the viewport and scissor do (set_view) -- points and lines
+ * (glPointSize / glLineWidth), SET_WINDOW_CLIP_*, SET_CLEAR_RECT. */
 static void apply_state(const Nv2aRenderState *rs, uint32_t shade, uint32_t bpp,
-                        int zeta16)
+                        int zeta16, float po_scale)
 {
     uint32_t cm = rs->color_mask;
 
@@ -2315,10 +2506,11 @@ static void apply_state(const Nv2aRenderState *rs, uint32_t shade, uint32_t bpp,
      * format, so a Z16 surface's step is 256 of ours. */
     if (rs->poly_offset_fill && shade != NV2A_SHADE_REPLACE) {
         float units = rs->poly_offset_units * (zeta16 ? 256.0f : 1.0f);
+        float factor = rs->poly_offset_factor * po_scale;
         sh_cap(SH_POLY, GL_POLYGON_OFFSET_FILL, 1);
-        if (s_sh.po_factor != rs->poly_offset_factor || s_sh.po_units != units) {
-            glPolygonOffset(rs->poly_offset_factor, units);
-            s_sh.po_factor = rs->poly_offset_factor;
+        if (s_sh.po_factor != factor || s_sh.po_units != units) {
+            glPolygonOffset(factor, units);
+            s_sh.po_factor = factor;
             s_sh.po_units = units;
         }
     } else {
@@ -2346,6 +2538,7 @@ static float zmax_of(uint32_t format)
 typedef struct {
     GLuint q;
     uint32_t ticket;
+    float sc;                       /* the target's scale: counts / sc^2 */
 } GlQuery;
 static GlQuery  s_qring[NV_GL_MAX_QUERY];
 static uint32_t s_qhead, s_qcount, s_qopen;   /* s_qopen: ticket-0 entries at the tail */
@@ -2380,7 +2573,7 @@ static uint32_t gl_zpass_read(void)
     while (s_qcount) {
         GLuint r = 0;
         glGetQueryObjectuiv(s_qring[s_qhead].q, GL_QUERY_RESULT, &r);
-        sum += r;
+        sum += nv2a_gl_scale_count(r, s_qring[s_qhead].sc);
         query_pop();
     }
     s_qopen = 0;
@@ -2422,7 +2615,7 @@ static int gl_zpass_resolve(uint32_t ticket, int block, uint32_t *count)
     for (i = 0; i < n; i++) {
         GLuint r = 0;
         glGetQueryObjectuiv(s_qring[s_qhead].q, GL_QUERY_RESULT, &r);
-        sum += r;
+        sum += nv2a_gl_scale_count(r, s_qring[s_qhead].sc);
         query_pop();
     }
     *count = sum;
@@ -2439,6 +2632,9 @@ static void gl_zpass_flush(void)
 
 /* ---- the back end ------------------------------------------------------- */
 
+/* The clear covers the scissor (the clip rectangle, in real pixels at the
+ * target's scale: bind_target). A SET_CLEAR_RECT on this path would need
+ * the same rounding (nv2a_gl_scale_rect). */
 static void gl_clear(const Nv2aSurface *s, const Nv2aRenderState *rs,
                      uint32_t flags, uint32_t argb, uint32_t zstencil)
 {
@@ -2469,8 +2665,9 @@ static void gl_clear(const Nv2aSurface *s, const Nv2aRenderState *rs,
         if ((flags & 0x03) == 0x03)
             att[n++] = GL_DEPTH_STENCIL_ATTACHMENT;
         if (n) {
-            nv2a_gl_invalidate_rect(n, att, (GLint)s->clip_x, (GLint)s->clip_y,
-                                    (GLsizei)s->width, (GLsizei)s->height);
+            int32_t c[4];
+            nv2a_gl_scale_rect(s->clip_x, s->clip_y, s->width, s->height, t.sc, c);
+            nv2a_gl_invalidate_rect(n, att, c[0], c[1], c[2], c[3]);
             s_st.invalidates++;
         }
     }
@@ -2527,14 +2724,25 @@ static int tex_coords_in_texels(const Nv2aPixelState *ps, const Nv2aTexture *t)
 
 /* Sample colour target r on `unit` as texture t (rt_for_texture). The GL
  * texture can be larger than the guest texture (a linear target is as wide
- * as its pitch): coordinates scale to the target's size. */
+ * as its pitch): coordinates scale to the target's size. That size is the
+ * logical one at any internal scale (coordinates are normalised); a scaled
+ * target sampled by a batch drawing at guest size (s_draw_sc 1: an effect
+ * target) reads its native resolve, as many texels as the guest has. */
 static void rt_bind_as_texture(GlRT *r, const Nv2aPixelState *ps, const Nv2aTexture *t,
                                int unit, GLint alpha, float *tscale)
 {
+    GLuint tex = r->tex;
+    GlSamp *sp = &r->samp;
+
     rt_seed(r);
+    if (r->sc != 1.0f && s_draw_sc == 1.0f && s_scale_resolve) {
+        rt_resolve(r);
+        tex = r->rtex;
+        sp = &r->rsamp;
+    }
     sh_active((int)unit);
-    sh_tex(GL_TEXTURE_2D, r->tex);
-    samp_set(GL_TEXTURE_2D, &r->samp, tex_filter(t, ps->shade),
+    sh_tex(GL_TEXTURE_2D, tex);
+    samp_set(GL_TEXTURE_2D, sp, tex_filter(t, ps->shade),
              wrap_mode(t->addr_u, (int)t->border_color),
              wrap_mode(t->addr_v, (int)t->border_color), t->border, alpha);
     if (tex_coords_in_texels(ps, t)) {
@@ -2578,8 +2786,11 @@ static int bind_shadow(const Nv2aPixelState *ps, const Nv2aTexture *t, int unit,
     GLint cmp = swapped[ps->shadow_func & 7];
     int i;
 
+    /* At an internal scale one zeta address can have a depth texture per
+     * scale (depth_get): the one bound last. */
     for (i = 0; i < NV_GL_MAX_DEPTH; i++)
-        if (s_depth[i].tex && s_depth[i].va == t->offset)
+        if (s_depth[i].tex && s_depth[i].va == t->offset
+            && (!d || s_depth[i].used > d->used))
             d = &s_depth[i];
     if (!d || t->width > d->w || t->height > d->h)
         return 0;
@@ -2679,8 +2890,8 @@ static void break_feedback(GlRT *target)
             if (!r->copy)
                 glGenTextures(1, &r->copy);
             sh_tex(GL_TEXTURE_2D, r->copy);
-            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, (GLsizei)r->gw, (GLsizei)r->gh, 0,
-                         GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, (GLsizei)rt_real_px(r, r->gw),
+                         (GLsizei)rt_real_px(r, r->gh), 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
             r->copy_w = r->gw;
             r->copy_h = r->gh;
@@ -2690,7 +2901,8 @@ static void break_feedback(GlRT *target)
             sh_tex(GL_TEXTURE_2D, r->copy);
         }
         /* The target's framebuffer is bound for drawing (and reading). */
-        glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, (GLsizei)r->gw, (GLsizei)r->gh);
+        glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, (GLsizei)rt_real_px(r, r->gw),
+                            (GLsizei)rt_real_px(r, r->gh));
         samp_set(GL_TEXTURE_2D, &r->copy_samp, r->samp.filter, r->samp.wrap_s,
                  r->samp.wrap_t, r->samp.border, r->samp.swz_a);
         s_st.rt_copies++;
@@ -2791,6 +3003,7 @@ static void gl_draw(const Nv2aSurface *s, const Nv2aBatch *b)
         return;
     if (!ensure_init())
         return;
+    s_draw_sc = nv2a_gl_surface_scale(&s_scale_cfg, s);
     bind_stage_textures(ps, kind, tscale);
     if (s_sig_on && sig_batch(s, b, kind, b->count / 3))
         return;
@@ -2804,7 +3017,7 @@ static void gl_draw(const Nv2aSurface *s, const Nv2aBatch *b)
         return;
     rt_seed(t.rt);
     break_feedback(t.rt);
-    apply_state(rs, ps->shade, t.bpp, ((s->format >> 4) & 0xF) == 1);
+    apply_state(rs, ps->shade, t.bpp, ((s->format >> 4) & 0xF) == 1, t.rt ? t.sc : 1.0f);
     set_near_mode(0, 0.0f);
     sh_program(p->prog);
     v[0] = 2.0f / (float)t.w;
@@ -2822,6 +3035,7 @@ static void gl_draw(const Nv2aSurface *s, const Nv2aBatch *b)
         GlQuery *q = &s_qring[(s_qhead + s_qcount) & (NV_GL_MAX_QUERY - 1)];
         q->q = query_new();
         q->ticket = 0;
+        q->sc = t.sc;
         glBeginQuery(NV2A_GL_ES ? GL_ANY_SAMPLES_PASSED : GL_SAMPLES_PASSED, q->q);
         query = 1;
     }
@@ -3274,6 +3488,7 @@ static int gl_draw_program(const Nv2aSurface *s, const Nv2aBatch *b)
         return 0;                   /* the executor sends it gathered */
     if (!(vsh = vsh_get(pb, fmt)))
         return 0;
+    s_draw_sc = nv2a_gl_surface_scale(&s_scale_cfg, s);
     bind_stage_textures(ps, kind, tscale);
     if (s_sig_on && sig_batch(s, b, kind, pb->index_count / 3))
         return 1;                   /* skipped: drawn by nobody */
@@ -3287,7 +3502,7 @@ static int gl_draw_program(const Nv2aSurface *s, const Nv2aBatch *b)
         return 1;                   /* gl_draw drops these too */
     rt_seed(t.rt);
     break_feedback(t.rt);
-    apply_state(rs, ps->shade, t.bpp, ((s->format >> 4) & 0xF) == 1);
+    apply_state(rs, ps->shade, t.bpp, ((s->format >> 4) & 0xF) == 1, t.rt ? t.sc : 1.0f);
     zmax = zmax_of(s->format);
     zmin = rs->depth_min;
     if (!(zmin >= 0.0f && zmin < zmax))
@@ -3363,6 +3578,7 @@ bound:
         GlQuery *q = &s_qring[(s_qhead + s_qcount) & (NV_GL_MAX_QUERY - 1)];
         q->q = query_new();
         q->ticket = 0;
+        q->sc = t.sc;
         glBeginQuery(NV2A_GL_ES ? GL_ANY_SAMPLES_PASSED : GL_SAMPLES_PASSED, q->q);
         query = 1;
     }
@@ -3403,6 +3619,8 @@ static void gl_reset_objects(int lost)
             if (s_rt[i].fbo) glDeleteFramebuffers(1, &s_rt[i].fbo);
             if (s_rt[i].tex) glDeleteTextures(1, &s_rt[i].tex);
             if (s_rt[i].copy) glDeleteTextures(1, &s_rt[i].copy);
+            if (s_rt[i].rfbo) glDeleteFramebuffers(1, &s_rt[i].rfbo);
+            if (s_rt[i].rtex) glDeleteTextures(1, &s_rt[i].rtex);
         }
         for (i = 0; i < NV_GL_MAX_DEPTH; i++) {
             if (s_depth[i].fbo) glDeleteFramebuffers(1, &s_depth[i].fbo);
@@ -3590,7 +3808,7 @@ static void pbo_issue(GlRT *r, const Nv2aPresentSurface *surf)
         glBufferData(GL_PIXEL_PACK_BUFFER, (GLsizeiptr)n, NULL, GL_STREAM_READ);
         s_pbo_size = n;
     }
-    sh_fbo(r->fbo);
+    sh_fbo(rt_resolve(r));
     glReadPixels(0, 0, (GLsizei)r->w, (GLsizei)r->h, NV_GL_READ_FORMAT, NV_GL_READ_TYPE, NULL);
     glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
     s_pend.pending = 1;
@@ -3601,15 +3819,15 @@ static void pbo_issue(GlRT *r, const Nv2aPresentSurface *surf)
     s_st.readbacks++;
 }
 
-/* The pixels a host present reads for target r: the framebuffer that holds
- * them and their real size in GL pixels, origin (0, 0), top row first, for
- * the area of r's guest surface (r->w x r->h). The one place the present
- * asks for a target's size: 1x today; with an internal resolution (WP-S1)
- * it returns the scaled size of that area, the FBO staying r->fbo. */
+/* The pixels a host present (and the scaled dump) reads for target r: the
+ * framebuffer that holds them and their real size in GL pixels, origin
+ * (0, 0), top row first (guest row y is GL row y), for the area of r's guest
+ * surface (r->w x r->h): round(w * sc) x round(h * sc) of the scaled
+ * texture at an internal resolution, the guest size at 1. */
 static GLuint rt_present_source(const GlRT *r, uint32_t *w, uint32_t *h)
 {
-    *w = r->w;
-    *h = r->h;
+    *w = rt_real_px(r, r->w);
+    *h = rt_real_px(r, r->h);
     return r->fbo;
 }
 
@@ -3740,6 +3958,63 @@ static int host_present(GlRT *r, const Nv2aPresentSurface *now, Nv2aPresentSurfa
     return 0;
 }
 
+/* RECOMP_GPU_SCALE_DUMP=1: at a dumping flip, target r at its real size
+ * (rt_present_source) into <RECOMP_FB_DUMP>S<n>.bmp, 24-bit, next to the guest-size
+ * dumps the executor writes. */
+static void scaled_dump(const GlRT *r)
+{
+    static int seq;
+    const char *prefix = getenv("RECOMP_FB_DUMP");
+    GLuint fbo;
+    uint32_t w, h, y, x, row, img, total;
+    uint8_t hdr[54], *px, *line;
+    char path[1024];
+    FILE *f;
+
+    if (!prefix || !*prefix)
+        return;
+    fbo = rt_present_source(r, &w, &h);
+    row = (w * 3 + 3) & ~3u;
+    img = row * h;
+    total = 54 + img;
+    px = (uint8_t *)malloc((size_t)w * h * 4);
+    line = (uint8_t *)calloc(1, row);
+    snprintf(path, sizeof path, "%sS%05d.bmp", prefix, seq++);
+    f = px && line ? fopen(path, "wb") : NULL;
+    if (!f) {
+        free(px);
+        free(line);
+        return;
+    }
+    sh_fbo(fbo);
+    glReadPixels(0, 0, (GLsizei)w, (GLsizei)h, GL_RGBA, GL_UNSIGNED_BYTE, px);
+    memset(hdr, 0, sizeof hdr);
+    hdr[0] = 'B';
+    hdr[1] = 'M';
+    memcpy(hdr + 2, &total, 4);
+    hdr[10] = 54;
+    hdr[14] = 40;
+    memcpy(hdr + 18, &w, 4);
+    memcpy(hdr + 22, &h, 4);
+    hdr[26] = 1;
+    hdr[28] = 24;
+    memcpy(hdr + 34, &img, 4);
+    fwrite(hdr, 1, sizeof hdr, f);
+    for (y = 0; y < h; y++) {
+        /* BMP rows go bottom up; GL row y is guest row y (top down). */
+        const uint8_t *src = px + (size_t)(h - 1 - y) * w * 4;
+        for (x = 0; x < w; x++) {
+            line[x * 3] = src[x * 4 + 2];
+            line[x * 3 + 1] = src[x * 4 + 1];
+            line[x * 3 + 2] = src[x * 4];
+        }
+        fwrite(line, 1, row, f);
+    }
+    fclose(f);
+    free(px);
+    free(line);
+}
+
 /* The flip's present (nv2a_backend_register_with_present): only the
  * presented surface comes back to guest memory. Other targets stay on the
  * GPU until something needs their bytes: a texture the GPU cannot sample
@@ -3766,6 +4041,8 @@ static int gl_present(const Nv2aPresentSurface *now, int sync, Nv2aPresentSurfac
         s_hpend.pending = 0;          /* a guest frame comes between: drop it */
     if (!r)
         return 1;                     /* not a GPU target: guest memory is current */
+    if (sync && s_scale_dump)
+        scaled_dump(r);
     if (!sync && host_present_on())
         return host_present(r, now, ready);
     if (sync || s_present_sync_mode) {
@@ -3831,6 +4108,13 @@ static void gl_flip(void)
                     (double)s_hst.ns / 1e6 / (double)s_hst.frames);
         memset(&s_st, 0, sizeof s_st);
         memset(&s_hst, 0, sizeof s_hst);
+        if (s_scale_cfg.scale != 1.0f)
+            fprintf(stderr, "  [GPUGL] internal scale %.2f: %u resolves, %u seed blits,"
+                            " %u target rescales, %u depth re-creations\n",
+                    (double)s_scale_cfg.scale, s_sst.resolves, s_sst.seed_blits, s_sst.rescales,
+                    s_sst.depth_recreates);
+        memset(&s_st, 0, sizeof s_st);
+        memset(&s_sst, 0, sizeof s_sst);
     }
     gl_check_frame();
 }
