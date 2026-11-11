@@ -7,7 +7,7 @@ import android.graphics.RectF;
 
 /**
  * The launcher's companion panel on the second screen (docs/android/app-shell.md « Dual screen »): an identity card
- * (the game's title, its status) and three big touch shortcuts, Play, Settings and Change game. Shown through
+ * (the game's title image, title and status) and three big touch shortcuts, Play, Settings and Change game. Shown through
  * LauncherCompanion; nothing in the bottom centre (palms).
  */
 final class LauncherPanel extends PanelView {
@@ -26,6 +26,11 @@ final class LauncherPanel extends PanelView {
     private String title = "", status = "", batteryText = "";
     private int statusColor = Theme.TEXT_DIM, thermal = -1;
     private final RectF card = new RectF(36, 140, 1204, 470);
+    /** The title image on the card: 258 x 258, left; the text moves right of it. */
+    private final RectF artBox = new RectF(84, 176, 342, 434);
+    private final android.graphics.Paint artP = new android.graphics.Paint(android.graphics.Paint.FILTER_BITMAP_FLAG
+                                                                           | android.graphics.Paint.ANTI_ALIAS_FLAG);
+    private android.graphics.Bitmap art;
 
     LauncherPanel(Context c, Actions actions) {
         super(c, DIM_MS);
@@ -47,6 +52,18 @@ final class LauncherPanel extends PanelView {
         this.statusColor = statusColor;
         button(PLAY).enabled = playEnabled;
         invalidate();
+    }
+
+    /** The game's title image on the identity card (null: none, the text starts at the card's edge). */
+    void setArt(android.graphics.Bitmap b) {
+        if (b != art) {
+            art = b;
+            invalidate();
+        }
+    }
+
+    boolean hasArtForTest() {
+        return art != null;
     }
 
     String titleForTest() {
@@ -96,20 +113,33 @@ final class LauncherPanel extends PanelView {
         }
         drawStrip(c, null, batteryText, thermal);
         drawCard(c, card);
+        float tx = 84;
+        if (art != null) {
+            android.graphics.Path clip = new android.graphics.Path();
+            clip.addRoundRect(artBox, 22, 22, android.graphics.Path.Direction.CW);
+            c.save();
+            c.clipPath(clip);
+            c.drawBitmap(art, null, artBox, artP);
+            c.restore();
+            stroke.setStrokeWidth(2);
+            stroke.setColor(Theme.LINE);
+            c.drawRoundRect(artBox, 22, 22, stroke);
+            tx = 372;
+        }
         text.setTextAlign(Paint.Align.LEFT);
         text.setTypeface(Theme.MEDIUM);
         text.setTextSize(Theme.T_CAPS);
         text.setLetterSpacing(0.22f);
         text.setColor(Theme.ACCENT);
-        c.drawText(ctx.getString(R.string.app_name).toUpperCase(java.util.Locale.ROOT), 84, 212, text);
+        c.drawText(ctx.getString(R.string.app_name).toUpperCase(java.util.Locale.ROOT), tx, 212, text);
         text.setLetterSpacing(0);
         text.setTypeface(Theme.LIGHT);
         text.setTextSize(Theme.T_HERO);
         text.setColor(Theme.TEXT);
         String t = title.isEmpty() ? ctx.getString(R.string.PANEL_NO_GAME) : title;
-        drawFit(c, t, 84, 318, card.width() - 96);
+        drawFit(c, t, tx, 318, card.right - 48 - tx);
         if (!status.isEmpty())
-            drawStatus(c, 84, 410, statusColor, status, Theme.TEXT_DIM);
+            drawStatus(c, tx, 410, statusColor, status, Theme.TEXT_DIM);
         for (Button b : buttons)
             drawButton(c, b, false);
     }

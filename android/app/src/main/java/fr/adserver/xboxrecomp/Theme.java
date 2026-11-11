@@ -122,6 +122,19 @@ final class Theme {
         return (color & 0x00FFFFFF) | al << 24;
     }
 
+    /** The colour with full opacity. */
+    static int opaque(int color) {
+        return color | 0xFF000000;
+    }
+
+    /** a mixed with b (k = 0: a, 1: b), opaque. */
+    static int blend(int a, int b, float k) {
+        int out = 0xFF000000;
+        for (int sh = 16; sh >= 0; sh -= 8)
+            out |= Math.round((a >> sh & 0xff) * (1 - k) + (b >> sh & 0xff) * k) << sh;
+        return out;
+    }
+
     // ---- Type ---------------------------------------------------------------------------------------------------
     static final Typeface REGULAR = Typeface.create("sans-serif", Typeface.NORMAL);
     static final Typeface MEDIUM = Typeface.create("sans-serif-medium", Typeface.NORMAL);

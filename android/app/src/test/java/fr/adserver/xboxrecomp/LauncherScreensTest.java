@@ -59,6 +59,7 @@ public class LauncherScreensTest {
         ShadowEnvironment.addExternalDir("sdcard");
         ShadowEnvironment.setExternalStorageState("mounted");
         app = RuntimeEnvironment.getApplication();
+        LauncherActivity.themeExecutor = Runnable::run;   // the theme bakes in place, its re-show still posted
         writeXbe(TestSupport.xbe(0x4D530004, "Sample Game"));
         ActivityManager am = app.getSystemService(ActivityManager.class);
         ActivityManager.MemoryInfo mi = new ActivityManager.MemoryInfo();
@@ -69,6 +70,7 @@ public class LauncherScreensTest {
 
     @After
     public void tearDown() {
+        LauncherActivity.themeExecutor = r -> new Thread(r, "xba-theme").start();
         Toolchain.assetsOverride = null;
         Toolchain.nativeDirOverride = null;
         LauncherActivity.clock = android.os.SystemClock::uptimeMillis;
@@ -171,7 +173,12 @@ public class LauncherScreensTest {
         assertEquals(LauncherActivity.Screen.HOME, a.screenForTest());
         assertFalse("no title image in this XBE: the monogram", a.hasArtForTest());
         assertEquals(app.getString(R.string.PLAY), a.homePrimaryForTest().title);
-        assertEquals(TitleArt.monogramColor(TID), a.backdropForTest().glowForTest());
+        // No image: the theme's colours from the title ID's hue, no hero.
+        GameTheme g = GameTheme.load(app, TID);
+        assertNotNull(g);
+        assertEquals("none", g.source);
+        assertEquals(g.colors.get(GamePalette.GLOW), a.backdropForTest().glowForTest());
+        assertNull(a.backdropForTest().heroForTest());
     }
 
     @Test
@@ -182,7 +189,9 @@ public class LauncherScreensTest {
         LauncherActivity a = launch();
         assertTrue(a.hasArtForTest());
         assertTrue(TitleArt.cacheFile(app.getFilesDir(), TID).isFile());
-        assertTrue(a.backdropForTest().glowForTest() != Theme.ACCENT);
+        assertEquals(Theme.GLOW, a.backdropForTest().glowForTest());
+        assertTrue(Theme.GLOW != GamePalette.STOCK[GamePalette.ACCENT]);
+        assertNotNull(a.backdropForTest().heroForTest());
     }
 
     @Test
@@ -243,7 +252,7 @@ public class LauncherScreensTest {
             a.goForTest(LauncherActivity.Screen.SETTINGS);
             idle(300);
             a.forceFocusForTest();
-            for (int i = 0; i < 4; i++) {
+            for (int i = 0; i < 5; i++) {   // past the launcher rows (with Game theme) to a graphics option
                 View next = a.focusForTest().focusSearch(View.FOCUS_DOWN);
                 next.requestFocus();
                 idle(200);
@@ -254,6 +263,145 @@ public class LauncherScreensTest {
         render("game-data", true, a -> a.goForTest(LauncherActivity.Screen.GAME_DATA));
         render("about", false, a -> a.goForTest(LauncherActivity.Screen.ABOUT));
         render("source", true, a -> a.goForTest(LauncherActivity.Screen.SOURCE));
+    }
+
+    // ---- Game theme ------------------------------------------------------------------------------------------
+
+    private void withArt(byte[] xpr) throws Exception {
+        GameTheme.clear(app, TID);   // the cached title image too: a test swaps the art under one title ID
+        writeXbe(TestSupport.xbeWithImage(0x4D530004, "Sample Game", xpr));
+    }
+
+    /** Home in a blue, a warm and a grey (no colour: the title ID's hue, the hero still baked) game's theme. */
+    @Test
+    public void homeThemed() throws Exception {
+        withArt(TestSupport.xpr0(0x0C, 128, 128, TestSupport.dxt1Picture()));
+        render("home-themed-blue", true, null);
+        withArt(TestSupport.xprArgb(64, 64, GamePaletteTest.image("flame")));
+        render("home-themed-warm", true, null);
+        withArt(TestSupport.xprSolid(64, 64, 0xFF5A5A5C));
+        render("home-themed-grey", true, null);
+        assertNotNull(launch().backdropForTest().heroForTest());
+    }
+
+    private static Widgets.BrandMark brandMark(View v) {
+        if (v instanceof Widgets.BrandMark)
+            return (Widgets.BrandMark)v;
+        if (v instanceof ViewGroup) {
+            ViewGroup g = (ViewGroup)v;
+            for (int i = 0; i < g.getChildCount(); i++) {
+                Widgets.BrandMark m = brandMark(g.getChildAt(i));
+                if (m != null)
+                    return m;
+            }
+        }
+        return null;
+    }
+
+    /** The colour at the centre of the top bar's brand mark (its gem, drawn in the accent). */
+    private static int brandMarkCentre(LauncherActivity a) {
+        Widgets.BrandMark m = brandMark(a.getWindow().getDecorView());
+        assertNotNull(m);
+        android.graphics.Bitmap b = android.graphics.Bitmap.createBitmap(m.getWidth(), m.getHeight(),
+                                                                          android.graphics.Bitmap.Config.ARGB_8888);
+        m.draw(new android.graphics.Canvas(b));
+        return b.getPixel(m.getWidth() / 2, m.getHeight() / 2);
+    }
+
+    private void themeStep(LauncherActivity a) {
+        Widgets.MenuRow r = row(a, app.getString(R.string.GAME_THEME));
+        assertNotNull("Settings › Launcher › Game theme", r);
+        r.requestFocusFromTouch();
+        key(a, KeyEvent.KEYCODE_DPAD_RIGHT);
+        idle(300);
+    }
+
+    /** The game's colours everywhere at once, the status green kept; Settings › Game theme: colours only, off. */
+    @Test
+    public void themeFollowsTheGameAndTheSetting() throws Exception {
+        withArt(TestSupport.xprSolid(64, 64, 0xFF2850DC));
+        LauncherActivity a = launch();
+        assertEquals(0xFFA7C2FF, Theme.ACCENT);
+        assertEquals(GamePalette.STOCK[GamePalette.OK], Theme.OK);
+        assertEquals(Theme.ACCENT, brandMarkCentre(a));
+        assertNotNull(a.backdropForTest().heroForTest());
+        assertEquals(Theme.GLOW, a.backdropForTest().glowForTest());
+
+        a.goForTest(LauncherActivity.Screen.SETTINGS);
+        idle(300);
+        Widgets.MenuRow r = row(a, app.getString(R.string.GAME_THEME));
+        assertEquals(app.getString(R.string.VAL_THEME_FULL), r.value);
+        themeStep(a);
+        assertEquals(GameTheme.Mode.COLORS, GameTheme.mode(app, TID));
+        assertEquals(0xFFA7C2FF, Theme.ACCENT);
+        assertNull("colours only: no hero", a.backdropForTest().heroForTest());
+        assertEquals(app.getString(R.string.VAL_THEME_COLORS), row(a, app.getString(R.string.GAME_THEME)).value);
+        shot(a, "ui-settings-theme-colors", false);
+        themeStep(a);
+        assertEquals(GameTheme.Mode.OFF, GameTheme.mode(app, TID));
+        assertTrue("off: the stock colours", Theme.isStock());
+        assertEquals(GamePalette.STOCK[GamePalette.ACCENT], brandMarkCentre(a));
+        assertEquals(LauncherActivity.Screen.SETTINGS, a.screenForTest());
+        shot(a, "ui-settings-theme-off", false);
+        themeStep(a);
+        assertEquals(GameTheme.Mode.FULL, GameTheme.mode(app, TID));
+        assertEquals(0xFFA7C2FF, brandMarkCentre(a));
+
+        // A fresh launcher starts in the game's colours (from the cache: no stock flash).
+        Theme.reset();
+        LauncherActivity b = launch();
+        assertEquals(0xFFA7C2FF, Theme.ACCENT);
+        assertEquals(0xFFA7C2FF, brandMarkCentre(b));
+    }
+
+    /** No game set up: the stock colours, and no Game theme row. */
+    @Test
+    public void noGameNoTheme() throws Exception {
+        new File(GameStore.defaultGameDir(app), "default.xbe").delete();
+        LauncherActivity a = launch();
+        assertTrue(Theme.isStock());
+        a.goForTest(LauncherActivity.Screen.SETTINGS);
+        idle(300);
+        assertNull(row(a, app.getString(R.string.GAME_THEME)));
+    }
+
+    /**
+     * The hero backdrop alone (no views): over its brightest pixel in the content area (between the dots of the
+     * grid), TEXT_FAINT keeps 3:1 and TEXT_DIM 4.5:1, for a bright image (a white and blue checker).
+     */
+    @Test
+    public void heroKeepsSmallTextReadable() {
+        int n = 128;
+        int[] px = new int[n * n];
+        for (int y = 0; y < n; y++) {
+            for (int x = 0; x < n; x++)
+                px[y * n + x] = (x / 16 + y / 16) % 2 == 0 ? 0xFFFFFFFF : 0xFF2850DC;
+        }
+        GamePalette.Palette p = GamePalette.build(GamePalette.analyse(px, n, n), 212);
+        Theme.apply(new Theme.Colors(p.colors));
+        GamePalette.Image h = GamePalette.bakeHero(px, n, n);
+        Widgets.Backdrop b = new Widgets.Backdrop();
+        b.setGlows(Theme.GLOW, Theme.GLOW2);
+        b.setHero(android.graphics.Bitmap.createBitmap(h.px, h.w, h.h, android.graphics.Bitmap.Config.ARGB_8888));
+        android.graphics.Bitmap out = android.graphics.Bitmap.createBitmap(1920, 1080,
+                                                                            android.graphics.Bitmap.Config.ARGB_8888);
+        b.setBounds(0, 0, 1920, 1080);
+        b.draw(new android.graphics.Canvas(out));
+        double max = 0;
+        for (int y = 72; y < 1008; y++) {
+            if (y % 48 <= 3 || y % 48 >= 45)
+                continue;
+            for (int x = 72; x < 1848; x++) {
+                if (x % 48 <= 3 || x % 48 >= 45)
+                    continue;
+                max = Math.max(max, GamePalette.luminance(out.getPixel(x, y)));
+            }
+        }
+        double faint = (GamePalette.luminance(Theme.TEXT_FAINT) + 0.05) / (max + 0.05);
+        double dim = (GamePalette.luminance(Theme.TEXT_DIM) + 0.05) / (max + 0.05);
+        assertTrue("TEXT_FAINT over the hero: " + faint, faint >= 3.0);
+        assertTrue("TEXT_DIM over the hero: " + dim, dim >= 4.5);
+        assertTrue("the hero shows: " + max, max > GamePalette.luminance(Theme.BG_TOP));
     }
 
     // ---- Behaviour -------------------------------------------------------------------------------------------

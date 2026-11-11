@@ -384,4 +384,15 @@
     <string name="LSFG_UNSUPPORTED">Cette version de Lossless.dll n\'est pas prise en charge</string>
     <string name="LSFG_NO_TRANSLATOR">Shaders trouvés, mais cette application ne sait pas les traduire (traducteur absent)</string>
     <string name="LSFG_NOT_A_DLL">%1$s n\'est pas une DLL : choisissez Lossless.dll.</string>
+    <!-- Réglages › Lanceur › Thème du jeu (docs/android/app-shell.md « Game theme ») -->
+    <string name="GAME_THEME">Thème du jeu</string>
+    <string name="GAME_THEME_SUMMARY">Les couleurs de l\'image du jeu</string>
+    <string name="GAME_THEME_DETAIL">Le lanceur prend ses couleurs, et un léger fond, dans l\'image de titre de %1$s, lue dans votre copie du jeu. Les couleurs d\'état (prêt, avertissements, erreurs) ne changent pas. Couleurs seules : sans image de fond. Désactivé : le vert du lanceur.</string>
+    <string name="GAME_THEME_FOOTER">Enregistré tout de suite ; le menu en jeu le prend au prochain lancement du jeu.</string>
+    <string name="GAME_THEME_SAVED">Thème du jeu : %1$s.</string>
+    <string name="GAME_THEME_SOURCE_NONE">Aucune (une couleur tirée de l\'ID du titre)</string>
+    <string name="KV_IMAGE">Image</string>
+    <string name="VAL_THEME_FULL">Image et couleurs</string>
+    <string name="VAL_THEME_COLORS">Couleurs seules</string>
+    <string name="VAL_THEME_OFF">Désactivé</string>
 </resources>

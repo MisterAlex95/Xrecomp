@@ -133,6 +133,11 @@ final class GameTheme {
         return read(c, GameStore.findXbe(gameDir), tid, m);
     }
 
+    /** The cached theme whatever the player's mode (Settings shows its source even when « Off »); null if none. */
+    static GameTheme cached(Context c, File gameDir, String tid) {
+        return tid == null ? null : read(c, GameStore.findXbe(gameDir), tid, mode(c, tid));
+    }
+
     private static GameTheme read(Context c, File xbe, String tid, Mode m) {
         File f = themeFile(c, tid);
         if (!f.isFile())

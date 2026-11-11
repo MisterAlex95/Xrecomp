@@ -11,6 +11,7 @@ import android.content.pm.ShortcutInfo;
 import android.content.pm.ShortcutManager;
 import android.database.Cursor;
 import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.ShapeDrawable;
 import android.graphics.drawable.shapes.OvalShape;
@@ -155,6 +156,15 @@ public class LauncherActivity extends Activity {
     private Bitmap art;
     private int artColor = Theme.ACCENT;
 
+    // ---- The game theme (GameTheme, docs/android/app-shell.md « Game theme ») ----
+    private File heroFile;
+    private Bitmap hero;
+    private String themeLogged;
+    /** Title IDs whose theme a worker bakes (or tried to), once per activity. */
+    private final java.util.Set<String> themeBaking = new java.util.HashSet<>();
+    /** Where a missing theme is baked (a test runs it in place). */
+    static java.util.concurrent.Executor themeExecutor = r -> new Thread(r, "xba-theme").start();
+
     // ---- Home ----
     private MenuRow homePrimary;
     private Widgets.Meter homeMeter;
@@ -252,6 +262,8 @@ public class LauncherActivity extends Activity {
         }
 
         setUpWindow();
+        feedback = new UiFeedback(this);
+        syncTheme();            // the game's colours before any view is built: no flash of the stock green
         buildStage();
         // The second screen (AYN Thor, docs/android/app-shell.md « Dual screen »): Home's or the Prepare's panel.
         companion = new LauncherCompanion(this, new LauncherPanel.Actions() {
@@ -456,11 +468,16 @@ public class LauncherActivity extends Activity {
         return new View(c);
     }
 
-    /** The parts every screen shares: top bar (mark, title, status chip), body, note line, bottom bar (hints). */
+    /**
+     * The parts every screen shares: top bar (mark, title, status chip), body, note line, bottom bar (hints). Built
+     * again when the game theme changes (syncTheme): it holds no state of its own but the views.
+     */
     private void buildStage() {
-        feedback = new UiFeedback(this);
+        if (screenAnim != null)
+            screenAnim.cancel();
         host = new FrameLayout(this);
         backdrop = new Widgets.Backdrop();
+        backdrop.setHero(hero);
         host.setBackground(backdrop);
         LinearLayout root = column();
         host.addView(root, new FrameLayout.LayoutParams(MATCH, MATCH));
@@ -532,7 +549,7 @@ public class LauncherActivity extends Activity {
         if (note == null)
             return;
         int color = noteKind == NOTE_ERROR ? Theme.ERROR : noteKind == NOTE_WARN ? Theme.WARN
-                    : noteKind == NOTE_OK ? Theme.ACCENT : Theme.TEXT_DIM;
+                    : noteKind == NOTE_OK ? Theme.OK : Theme.TEXT_DIM;
         note.setText(noteText);
         note.setTextColor(color);
         noteDot.getPaint().setColor(noteText.isEmpty() ? 0 : color);
@@ -607,6 +624,7 @@ public class LauncherActivity extends Activity {
             if (i >= 0)
                 focusMemory.put(screen, i);
         }
+        syncTheme();
         building = true;
         setDimmed(false);
         if (s != screen)
@@ -686,7 +704,65 @@ public class LauncherActivity extends Activity {
         screenAnim = set;
     }
 
-    /** The game's title image (or monogram colour) for the current game, and the backdrop's tint from it. */
+    /**
+     * The game theme for the current game: from the cache (GameTheme.load), or baked by a worker when missing, after
+     * which the screen is shown again. No game, no title ID or the player's « Off »: the stock colours. When the
+     * colours or the hero change, the tokens are applied and the stage is built again (its paints hold the colours
+     * they were made with), and the bottom screen's panel too; show() then builds the body. True when it changed.
+     */
+    private boolean syncTheme() {
+        String dir = gameDir();
+        File gd = dir == null ? null : new File(dir);
+        String tid = gd == null || GameStore.findXbe(gd) == null ? null : titleId();
+        GameTheme g = null;
+        GameTheme.Mode mode = tid == null ? null : GameTheme.mode(this, tid);
+        if (tid != null && mode != GameTheme.Mode.OFF) {
+            g = GameTheme.load(this, gd, tid);
+            if (g == null)
+                bakeTheme(gd, tid);
+        }
+        Theme.Colors want = g == null ? Theme.Colors.STOCK : g.colors;
+        File wantHero = g == null ? null : g.heroFile;
+        String line = g != null ? g.logLine()
+                                : "launcher: theme " + (tid == null ? "none" : tid) + ": stock"
+                                  + (mode == null ? "" : ", mode " + mode.key);
+        if (!line.equals(themeLogged)) {
+            themeLogged = line;
+            Log.i(TAG, line);
+        }
+        boolean changed = !want.equals(Theme.current()) || !java.util.Objects.equals(wantHero, heroFile);
+        if (!changed)
+            return false;
+        Theme.apply(want);
+        heroFile = wantHero;
+        hero = wantHero == null ? null : BitmapFactory.decodeFile(wantHero.getPath());
+        if (host != null) {
+            buildStage();
+            if (companion != null)
+                companion.screen().rebuild();
+        }
+        return true;
+    }
+
+    /** Bakes the title's theme off the UI thread (an older import, a cache made stale), then shows the screen again. */
+    private void bakeTheme(File gameDir, String tid) {
+        if (!themeBaking.add(tid))
+            return;
+        String title = GameStore.chosenTitle(this);
+        android.content.Context app = getApplicationContext();
+        themeExecutor.execute(() -> {
+            GameTheme.ensure(app, gameDir, tid, title);
+            poller.post(() -> {
+                if (isFinishing() || isDestroyed() || screen == null || screen == Screen.IMPORT
+                    || screen == Screen.PREPARE)
+                    return;   // those two hold live progress: the theme shows on the next screen
+                artTid = null;   // the title image may have come from another source than $$XTIMAGE
+                show(screen, 0);
+            });
+        });
+    }
+
+    /** The game's title image (or monogram colour) for the current game. */
     private void refreshIdentity() {
         String dir = gameDir();
         String tid = dir == null ? null : titleId();
@@ -698,11 +774,12 @@ public class LauncherActivity extends Activity {
         } else if (!key.equals(artTid)) {
             artTid = key;
             art = tid == null ? null : TitleArt.load(getFilesDir(), GameStore.findXbe(new File(dir)), tid);
-            artColor = art != null ? TitleArt.tint(art) : TitleArt.monogramColor(key);
             Log.i(TAG, "launcher: title image " + (art != null ? art.getWidth() + "x" + art.getHeight() : "none")
                        + " for " + key);
         }
-        backdrop.setGlow(state() == State.NONE ? Theme.ACCENT : artColor);
+        // The art tile's glow: the game theme's (stock: the accent); the monogram keeps the title ID's colour.
+        if (key != null)
+            artColor = art != null ? Theme.GLOW : TitleArt.monogramColor(key);
     }
 
     private View focusTarget() {
@@ -930,7 +1007,7 @@ public class LauncherActivity extends Activity {
 
     private void buildWelcome() {
         screenTitle.setText(R.string.WELCOME_TITLE);
-        chip.set(getString(R.string.CHIP_OFFLINE), Theme.ACCENT);
+        chip.set(getString(R.string.CHIP_OFFLINE), Theme.OK);
         LinearLayout h = rowLayout();
 
         LinearLayout left = column();
@@ -1009,7 +1086,7 @@ public class LauncherActivity extends Activity {
 
     private void buildSource() {
         screenTitle.setText(R.string.SOURCE_TITLE);
-        chip.set(getString(R.string.CHIP_OFFLINE), Theme.ACCENT);
+        chip.set(getString(R.string.CHIP_OFFLINE), Theme.OK);
         LinearLayout h = rowLayout();
         LinearLayout ex = explainPanel(h, 700, getString(R.string.SOURCE_CAPS), getString(R.string.SOURCE_HEAD),
                                        getString(R.string.SOURCE_TEXT));
@@ -1023,7 +1100,7 @@ public class LauncherActivity extends Activity {
         boolean all = Environment.isExternalStorageManager();
         MenuRow folder = card(cards, Icon.FOLDER, R.string.CARD_FOLDER, getString(R.string.CARD_FOLDER_SUB),
                               getString(all ? R.string.BADGE_IN_PLACE : R.string.BADGE_FOLDER_ASK),
-                              all ? Theme.ACCENT : Theme.WARN, this::onChooseFolder);
+                              all ? Theme.OK : Theme.WARN, this::onChooseFolder);
         card(cards, Icon.DISC, R.string.CARD_ISO, getString(R.string.CARD_ISO_SUB),
              getString(R.string.BADGE_FREE, size(freeSpace())), Theme.TEXT_DIM, this::openIsoPicker);
         defaultFocus = folder;
@@ -1040,7 +1117,7 @@ public class LauncherActivity extends Activity {
                      getString(R.string.ALL_FILES_EXPLAIN));
         LinearLayout cards = column();
         MenuRow grant = card(cards, Icon.KEY, R.string.ALL_FILES_GRANT, getString(R.string.ALL_FILES_GRANT_SUB),
-                             getString(R.string.BADGE_RECOMMENDED), Theme.ACCENT, this::askAllFilesAccess);
+                             getString(R.string.BADGE_RECOMMENDED), Theme.OK, this::askAllFilesAccess);
         card(cards, Icon.COPY, R.string.ALL_FILES_COPY, getString(R.string.ALL_FILES_COPY_SUB), null, 0,
              this::openTreePicker);
         defaultFocus = grant;
@@ -1062,7 +1139,7 @@ public class LauncherActivity extends Activity {
 
     private void buildImport() {
         screenTitle.setText(R.string.IMPORT_TITLE);
-        chip.set(getString(R.string.CHIP_SCREEN_ON), Theme.ACCENT);
+        chip.set(getString(R.string.CHIP_SCREEN_ON), Theme.OK);
         LinearLayout h = rowLayout();
         FrameLayout left = new FrameLayout(this);
         ring = new Widgets.Ring(this);
@@ -1164,12 +1241,14 @@ public class LauncherActivity extends Activity {
         else
             status.set(getString(stateLabel(st)), stateColor(st));
         chips.addView(status, lp(WRAP, WRAP));
-        if (companion != null)
+        if (companion != null) {
+            companion.art(st == State.NONE ? null : art);
             companion.home(st == State.NONE ? "" : title, status.label(), status.color(),
                            st == State.READY && !preparing);
+        }
         if (running && st == State.READY) {
             Widgets.Chip run = new Widgets.Chip(this);
-            run.set(getString(R.string.CHIP_RUNNING), Theme.ACCENT);
+            run.set(getString(R.string.CHIP_RUNNING), Theme.OK);
             LinearLayout.LayoutParams rl = lp(WRAP, WRAP);
             rl.leftMargin = 16;
             chips.addView(run, rl);
@@ -1387,7 +1466,7 @@ public class LauncherActivity extends Activity {
     private void setPrepChip(Widgets.Chip c, Prep p) {
         switch (p) {
         case RUNNING:
-            c.set(getString(R.string.CHIP_PREPARING), Theme.ACCENT);
+            c.set(getString(R.string.CHIP_PREPARING), Theme.OK);
             break;
         case FAILED:
             c.set(getString(R.string.CHIP_PREPARE_FAILED), Theme.ERROR);
@@ -1464,6 +1543,9 @@ public class LauncherActivity extends Activity {
                        R.string.UI_HAPTICS_ON, R.string.UI_HAPTICS_OFF);
         if (DualScreen.available(this, CompanionScreen.ownDisplayId(this)))
             bottomScreenRow(list);
+        String dir = gameDir();
+        if (dir != null && state() != State.NONE && GameStore.findXbe(new File(dir)) != null && titleId() != null)
+            gameThemeRow(list, titleId(), gameTitle(dir));
 
         RecompConfig.Section section = null;
         List<MenuRow> optionRows = new ArrayList<>();
@@ -1580,6 +1662,42 @@ public class LauncherActivity extends Activity {
                 companion.screen().refresh();
             setNote(getString(R.string.BOTTOM_SCREEN_SAVED, names[i]), NOTE_OK);
             Log.i(TAG, "launcher: bottom screen " + modes[i]);
+        };
+        r.setOnClickListener(v -> r.cycler.step(1));
+        onFocus(r, fill);
+    }
+
+    /**
+     * Settings › Launcher › Game theme, per title: « Art and colours », « Colours only », « Off ». Applies at once
+     * here (the stage is built again in the new colours), in the game's menu at its next start.
+     */
+    private void gameThemeRow(LinearLayout list, String tid, String title) {
+        GameTheme.Mode[] modes = GameTheme.Mode.values();
+        int[] labels = { R.string.VAL_THEME_FULL, R.string.VAL_THEME_COLORS, R.string.VAL_THEME_OFF };
+        String[] names = new String[modes.length];
+        for (int i = 0; i < modes.length; i++)
+            names[i] = getString(labels[i]);
+        MenuRow r = settingRow(list, getString(R.string.GAME_THEME), getString(R.string.GAME_THEME_SUMMARY));
+        r.setChoices(names);
+        Runnable fill = () -> {
+            detailClear(getString(R.string.SECTION_LAUNCHER), getString(R.string.GAME_THEME),
+                        getString(R.string.GAME_THEME_DETAIL, title));
+            detailKv(getString(R.string.KV_VALUE), names[GameTheme.mode(this, tid).ordinal()]);
+            GameTheme g = GameTheme.cached(this, new File(gameDir()), tid);
+            if (g != null)
+                detailKv(getString(R.string.KV_IMAGE), g.source.equals("none")
+                                                         ? getString(R.string.GAME_THEME_SOURCE_NONE) : g.source);
+            detailFooter(getString(R.string.GAME_THEME_FOOTER), Theme.TEXT_FAINT);
+        };
+        int cur = GameTheme.mode(this, tid).ordinal();
+        r.setValue(names[cur], cur, modes.length);
+        r.cycler = d -> {
+            int n = modes.length, i = ((GameTheme.mode(this, tid).ordinal() + d) % n + n) % n;
+            GameTheme.setMode(this, tid, modes[i]);
+            feedback.play(UiFeedback.Cue.MOVE, r);
+            Log.i(TAG, "launcher: game theme " + tid + " " + modes[i].key);
+            show(Screen.SETTINGS, 0);   // syncTheme: the new colours, the focus stays on this row
+            setNote(getString(R.string.GAME_THEME_SAVED, names[i]), NOTE_OK);
         };
         r.setOnClickListener(v -> r.cycler.step(1));
         onFocus(r, fill);
@@ -1907,6 +2025,8 @@ public class LauncherActivity extends Activity {
                 deleting = false;
                 sizeDir = null;
                 hashDir = null;
+                titleIdDir = null;
+                artTid = null;
                 history.clear();
                 focusMemory.remove(Screen.HOME);
                 show(state() == State.NONE ? Screen.WELCOME : Screen.HOME);
@@ -2176,7 +2296,7 @@ public class LauncherActivity extends Activity {
             yAction = this::leavePrepare;
             addHint("Y", R.string.HINT_MENU, this::leavePrepare);
             addHint("B", R.string.CANCEL, this::armCancelPrepare);
-            chip.set(getString(R.string.CHIP_PREPARING), Theme.ACCENT);
+            chip.set(getString(R.string.CHIP_PREPARING), Theme.OK);
             getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         } else {
             boolean cancelled = PrepareProtocol.CANCELLED.equals(s.state) || PrepareProtocol.RUNNING.equals(s.state);
@@ -2237,16 +2357,16 @@ public class LauncherActivity extends Activity {
             label = getString(R.string.PREPARE_CANCELLED_HEAD);
             sub = "";
         }
-        ring.setColor(failed ? Theme.ERROR : stopped ? Theme.WARN : Theme.ACCENT);
+        ring.setColor(failed ? Theme.ERROR : stopped ? Theme.WARN : Theme.OK);
         ring.set(running ? frac : Math.max(0, frac), big, label, sub);
         for (int i = 0; i < prepSteps.size(); i++) {
             TextView[] v = prepSteps.get(i);
             boolean done = i < cur || (s != null && PrepareProtocol.DONE.equals(s.state));
             boolean now = i == cur && !done;
-            int color = now ? (failed ? Theme.ERROR : stopped ? Theme.WARN : Theme.ACCENT)
+            int color = now ? (failed ? Theme.ERROR : stopped ? Theme.WARN : Theme.OK)
                         : done ? Theme.TEXT : Theme.TEXT_FAINT;
             v[0].setText(done ? "✓" : now ? (failed ? "✕" : "●") : "○");
-            v[0].setTextColor(done ? Theme.ACCENT : color);
+            v[0].setTextColor(done ? Theme.OK : color);
             v[1].setTextColor(now ? (failed ? Theme.ERROR : Theme.TEXT) : done ? Theme.TEXT_DIM : Theme.TEXT_FAINT);
             v[1].setTypeface(now ? Theme.MEDIUM : Theme.REGULAR);
             v[2].setTextColor(now ? Theme.TEXT_DIM : Theme.TEXT_FAINT);
@@ -2536,7 +2656,7 @@ public class LauncherActivity extends Activity {
     }
 
     private static int stateColor(State s) {
-        return s == State.READY ? Theme.ACCENT : s == State.WRONG ? Theme.ERROR : Theme.WARN;
+        return s == State.READY ? Theme.OK : s == State.WRONG ? Theme.ERROR : Theme.WARN;
     }
 
     private String stateText(State s, String dir) {
@@ -2765,6 +2885,8 @@ public class LauncherActivity extends Activity {
     /** A new game was checked and remembered: end the old one's process, then HOME with Play focused. */
     private void onGameChosen(String dir, String title) {
         GameStore.remember(this, dir, title);
+        titleIdDir = null;   // a new game may sit in the same folder (game/): read its title ID again
+        artTid = null;
         Log.i(TAG, "launcher: game set: " + dir + " (" + title + ")");
         endRunningGame();
         hashDir = dir;

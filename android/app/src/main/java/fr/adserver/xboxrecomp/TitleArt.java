@@ -2,7 +2,6 @@ package fr.adserver.xboxrecomp;
 
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
-import android.graphics.Color;
 
 import java.io.File;
 import java.io.FileOutputStream;
@@ -14,7 +13,7 @@ import java.util.Locale;
 
 /**
  * The game's title image, for Home's hero: the XBE's « $$XTIMAGE » section, decoded on the device and cached as a PNG
- * per title ID (<files dir>/art/<TITLEID>.png), plus the monogram fallback and the colour the backdrop is tinted with.
+ * per title ID (<files dir>/art/<TITLEID>.png), plus the monogram fallback. The launcher's colours from it: GameTheme.
  * Nothing of the game is in the APK or the repo: the image comes from the player's own default.xbe.
  *
  * Formats (public documentation, xboxdevwiki « Xbe » and « XPR »; docs/formats/xbe.md):
@@ -325,39 +324,6 @@ final class TitleArt {
     }
 
     // ---- Colour and monogram ---------------------------------------------------------------------------------
-
-    /**
-     * The colour to tint the backdrop with: the mean of the image's saturated, opaque pixels, brought to a vivid but
-     * not glaring value; the accent when the image is grey.
-     */
-    static int tint(Bitmap b) {
-        if (b == null)
-            return Theme.ACCENT;
-        int w = b.getWidth(), h = b.getHeight(), step = Math.max(1, Math.max(w, h) / 48);
-        float[] hsv = new float[3];
-        double sx = 0, sy = 0, wsum = 0, sat = 0;
-        for (int y = 0; y < h; y += step) {
-            for (int x = 0; x < w; x += step) {
-                int p = b.getPixel(x, y);
-                if (Color.alpha(p) < 128)
-                    continue;
-                Color.colorToHSV(p, hsv);
-                double wt = hsv[1] * hsv[2];
-                if (wt < 0.08)
-                    continue;
-                double a = Math.toRadians(hsv[0]);
-                sx += Math.cos(a) * wt;
-                sy += Math.sin(a) * wt;
-                sat += hsv[1] * wt;
-                wsum += wt;
-            }
-        }
-        if (wsum <= 0)
-            return Theme.ACCENT;
-        float hue = (float)Math.toDegrees(Math.atan2(sy, sx));
-        float s = (float)Math.max(0.45, Math.min(0.8, sat / wsum));
-        return Theme.hsv(hue, s, 0.92f);
-    }
 
     /** The monogram's colour: a hue from the title ID (stable for a title), vivid. */
     static int monogramColor(String titleId) {

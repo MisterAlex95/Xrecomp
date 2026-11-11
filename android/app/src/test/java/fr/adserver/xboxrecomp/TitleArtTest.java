@@ -21,7 +21,7 @@ import java.io.File;
 
 /**
  * TitleArt: the XBE's $$XTIMAGE section, its XPR0 container and the DXT / swizzled texels, on blobs built in the test
- * (never game data), and the tint and monogram helpers.
+ * (never game data), and the monogram helpers (the launcher's colours from the image: GameThemeTest).
  */
 @RunWith(RobolectricTestRunner.class)
 @Config(sdk = 34)
@@ -134,7 +134,6 @@ public class TitleArtTest {
         Bitmap again = TitleArt.load(files, null, "4D530004");
         assertNotNull(again);
         assertEquals(b.getPixel(64, 10), again.getPixel(64, 10));
-        assertNotEquals(Theme.ACCENT, TitleArt.tint(b));
 
         // An XBE without the section (TestSupport.xbe): no image, the launcher shows the monogram.
         File plain = tmp.newFile("plain.xbe");
@@ -143,20 +142,13 @@ public class TitleArtTest {
     }
 
     @Test
-    public void tintAndMonogram() {
-        Bitmap grey = Bitmap.createBitmap(16, 16, Bitmap.Config.ARGB_8888);
-        grey.eraseColor(0xFF808080);
-        assertEquals(Theme.ACCENT, TitleArt.tint(grey));
-        Bitmap red = Bitmap.createBitmap(16, 16, Bitmap.Config.ARGB_8888);
-        red.eraseColor(0xFFD02020);
-        float[] hsv = new float[3];
-        android.graphics.Color.colorToHSV(TitleArt.tint(red), hsv);
-        assertTrue(hsv[0] < 10 || hsv[0] > 350);
-
+    public void monogram() {
         assertEquals("SG", TitleArt.initials("Sample Game"));
         assertEquals("HA", TitleArt.initials("Halo"));
         assertEquals("4E", TitleArt.initials("4x4 Evo 2"));
         assertEquals(TitleArt.monogramColor("4D530004"), TitleArt.monogramColor("4d530004"));
         assertNotEquals(TitleArt.monogramColor("4D530004"), TitleArt.monogramColor("41420001"));
+        assertEquals(TitleArt.titleHue("4D530004"), TitleArt.titleHue("4d530004"));
+        assertTrue(TitleArt.titleHue("41420001") >= 0 && TitleArt.titleHue("41420001") < 360);
     }
 }

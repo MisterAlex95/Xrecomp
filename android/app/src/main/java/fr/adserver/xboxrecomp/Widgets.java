@@ -146,20 +146,43 @@ final class Widgets {
     }
 
     /**
-     * The screen behind everything: a dark gradient, a soft glow (green, or the game art's colour once known), a faint
-     * dot grid and a thin bezel.
+     * The screen behind everything: a dark gradient, the game theme's hero (its title image, tiny, blurred and
+     * luminance-capped by GamePalette.bakeHero) washing in from the right, two soft glows (the accent, or the game's
+     * GLOW and GLOW2), a faint dot grid and a thin bezel. The shaders are made once per size and colours, not per frame.
      */
     static final class Backdrop extends SimpleDrawable {
+        /** The glows' opacity: stock, a game's theme, a game's theme over its hero (dimmer: the hero is the light). */
+        static final float GLOW_STOCK = 0.11f, GLOW2_STOCK = 0.05f, GLOW_OWN = 0.16f, GLOW2_OWN = 0.10f,
+                           GLOW_HERO = 0.07f, GLOW2_HERO = 0.05f;
         private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint heroP = new Paint(Paint.FILTER_BITMAP_FLAG | Paint.DITHER_FLAG);
         private final Paint dot = fill(Theme.alpha(Theme.TEXT, 0.045f));
         private final Paint bezel = stroke(Theme.alpha(Theme.LINE, 0.9f), 2);
         private final RectF r = new RectF();
-        private int glow = Theme.ACCENT;
+        private int glow = Theme.GLOW, glow2 = Theme.GLOW2;
+        private android.graphics.Bitmap hero;
+        private Shader bg, glowS, glow2S, heroS;
+        private int shaderW = -1, shaderH = -1;
 
-        /** The glow's colour: the game art's (TitleArt.tint), or the accent. */
-        void setGlow(int color) {
-            if (color != glow) {
+        Backdrop() {
+            paint.setDither(true);
+        }
+
+        /** The glows' colours (the game theme's GLOW and GLOW2; the accent for the stock look). */
+        void setGlows(int color, int color2) {
+            if (color != glow || color2 != glow2) {
                 glow = color;
+                glow2 = color2;
+                shaderW = -1;
+                invalidateSelf();
+            }
+        }
+
+        /** The hero backdrop (null: none). */
+        void setHero(android.graphics.Bitmap b) {
+            if (b != hero) {
+                hero = b;
+                shaderW = -1;
                 invalidateSelf();
             }
         }
@@ -168,18 +191,61 @@ final class Widgets {
             return glow;
         }
 
+        android.graphics.Bitmap heroForTest() {
+            return hero;
+        }
+
+        private boolean own() {
+            int stock = GamePalette.STOCK[GamePalette.ACCENT];
+            return glow != stock || glow2 != stock;
+        }
+
+        private void makeShaders(float w, float h) {
+            bg = new LinearGradient(0, 0, 0, h, Theme.BG_TOP, Theme.BG_BOTTOM, Shader.TileMode.CLAMP);
+            boolean own = own();
+            float a1 = !own ? GLOW_STOCK : hero != null ? GLOW_HERO : GLOW_OWN;
+            float a2 = !own ? GLOW2_STOCK : hero != null ? GLOW2_HERO : GLOW2_OWN;
+            glowS = new RadialGradient(w * 0.86f, h * 0.08f, w * 0.55f, Theme.alpha(glow, a1), 0,
+                                       Shader.TileMode.CLAMP);
+            glow2S = new RadialGradient(w * 0.06f, h * 1.02f, w * 0.42f, Theme.alpha(glow2, a2), 0,
+                                        Shader.TileMode.CLAMP);
+            heroS = null;
+            if (hero != null) {
+                // Cover-fit, centred; full on the right, gone at the left edge (5 % -> 50 %) and in the bottom 35 %,
+                // where the tiles and hints stay on the plain gradient.
+                android.graphics.BitmapShader bs = new android.graphics.BitmapShader(hero, Shader.TileMode.CLAMP,
+                                                                                     Shader.TileMode.CLAMP);
+                float sc = Math.max(w / hero.getWidth(), h / hero.getHeight());
+                android.graphics.Matrix m = new android.graphics.Matrix();
+                m.setScale(sc, sc);
+                m.postTranslate((w - hero.getWidth() * sc) / 2, (h - hero.getHeight() * sc) / 2);
+                bs.setLocalMatrix(m);
+                Shader fx = new LinearGradient(w * 0.05f, 0, w * 0.50f, 0, 0x00000000, 0xFF000000,
+                                               Shader.TileMode.CLAMP);
+                Shader fy = new LinearGradient(0, h * 0.63f, 0, h * 0.98f, 0xFF000000, 0x00000000,
+                                               Shader.TileMode.CLAMP);
+                Shader mask = new android.graphics.ComposeShader(fx, fy, android.graphics.PorterDuff.Mode.DST_IN);
+                heroS = new android.graphics.ComposeShader(bs, mask, android.graphics.PorterDuff.Mode.DST_IN);
+            }
+            shaderW = (int)w;
+            shaderH = (int)h;
+        }
+
         @Override
         public void draw(Canvas c) {
             Rect b = getBounds();
             float w = b.width(), h = b.height();
-            paint.setShader(new LinearGradient(0, 0, 0, h, Theme.BG_TOP, Theme.BG_BOTTOM, Shader.TileMode.CLAMP));
+            if (shaderW != (int)w || shaderH != (int)h)
+                makeShaders(w, h);
+            paint.setShader(bg);
             c.drawRect(b, paint);
-            boolean own = glow != Theme.ACCENT;
-            paint.setShader(new RadialGradient(w * 0.86f, h * 0.08f, w * 0.55f, Theme.alpha(glow, own ? 0.16f : 0.11f),
-                                               0, Shader.TileMode.CLAMP));
+            if (heroS != null) {
+                heroP.setShader(heroS);
+                c.drawRect(b, heroP);
+            }
+            paint.setShader(glowS);
             c.drawRect(b, paint);
-            paint.setShader(new RadialGradient(w * 0.06f, h * 1.02f, w * 0.42f, Theme.alpha(glow, own ? 0.08f : 0.05f),
-                                               0, Shader.TileMode.CLAMP));
+            paint.setShader(glow2S);
             c.drawRect(b, paint);
             paint.setShader(null);
             float step = 48;
@@ -951,9 +1017,9 @@ final class Widgets {
     static final class PadDiagram extends View {
         /** Labels, in order: L1, L2, R1, R2, Select, Start, D-pad, left stick, right stick, face buttons, screen. */
         String[] labels = new String[11];
-        private final Paint bodyP = fill(0xFF141B17), lineP = stroke(Theme.alpha(Theme.TEXT, 0.22f), 2.5f);
-        private final Paint ctlP = fill(0xFF222C26), ctlLine = stroke(Theme.alpha(Theme.TEXT, 0.35f), 2);
-        private final Paint screenP = fill(0xFF070A08), accentP = stroke(Theme.alpha(Theme.ACCENT, 0.75f), 2);
+        private final Paint bodyP = fill(Theme.opaque(Theme.PANEL)), lineP = stroke(Theme.alpha(Theme.TEXT, 0.22f), 2.5f);
+        private final Paint ctlP = fill(Theme.blend(Theme.PANEL_HI, Theme.LINE, 0.65f)), ctlLine = stroke(Theme.alpha(Theme.TEXT, 0.35f), 2);
+        private final Paint screenP = fill(Theme.BG_BOTTOM), accentP = stroke(Theme.alpha(Theme.ACCENT, 0.75f), 2);
         private final Paint dotP = fill(Theme.ACCENT);
         private final TextPaint keyP = textPaint(24, Theme.MEDIUM, Theme.TEXT);
         private final TextPaint labP = textPaint(Theme.T_SMALL, Theme.MEDIUM, Theme.ACCENT);
@@ -1155,7 +1221,7 @@ final class Widgets {
     static final class Ring extends View {
         private float frac = -1;
         private String big = "", label = "", sub = "";
-        private final Paint trackP = stroke(0xFF1A241F, 18), arcP = stroke(Theme.ACCENT, 18);
+        private final Paint trackP = stroke(Theme.TRACK, 18), arcP = stroke(Theme.ACCENT, 18);
         private final Paint tickP = stroke(Theme.LINE, 3), innerP = stroke(Theme.alpha(Theme.ACCENT, 0.25f), 1.5f);
         private final TextPaint bigP = textPaint(118, Theme.MEDIUM, Theme.TEXT);
         private final TextPaint labelP = textPaint(Theme.T_BODY, Theme.REGULAR, Theme.TEXT_DIM);

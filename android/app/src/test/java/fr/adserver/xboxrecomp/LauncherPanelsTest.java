@@ -87,7 +87,7 @@ public class LauncherPanelsTest {
     @Test
     public void homeStates() throws Exception {
         LauncherPanel p = put(home());
-        p.set("Sample Game", activity.getString(R.string.PANEL_READY), Theme.ACCENT, true);
+        p.set("Sample Game", activity.getString(R.string.PANEL_READY), Theme.OK, true);
         shot(p, "companion-launcher-ready");
         PanelTesting t = new PanelTesting(p);
         t.tap(PanelTesting.centre(p.button(LauncherPanel.PLAY)));
@@ -107,6 +107,24 @@ public class LauncherPanelsTest {
         idle(11_000);
         assertTrue(p.isDimmed());
         shot(p, "companion-launcher-dimmed");
+    }
+
+    /** A game's theme: its colours, and its title image on the identity card (the text right of it). */
+    @Test
+    public void homeThemedWithArt() throws Exception {
+        int[] wh = new int[2];
+        int[] px = TitleArt.decodeXpr(TestSupport.xpr0(0x0C, 128, 128, TestSupport.dxt1Picture()), wh);
+        Theme.apply(new Theme.Colors(GamePalette.build(GamePalette.analyse(px, wh[0], wh[1]), 212).colors));
+        LauncherPanel p = put(home());
+        p.setArt(android.graphics.Bitmap.createBitmap(px, wh[0], wh[1], android.graphics.Bitmap.Config.ARGB_8888));
+        p.set("Sample Game", activity.getString(R.string.PANEL_READY), Theme.OK, true);
+        assertTrue(p.hasArtForTest());
+        shot(p, "companion-launcher-themed");
+        p.set("A Game With A Really Long Title That Will Not Fit On One Line Of The Card",
+              activity.getString(R.string.CHIP_NEEDS_PREPARE), Theme.WARN, false);
+        shot(p, "companion-launcher-themed-long");
+        p.setArt(null);
+        assertFalse(p.hasArtForTest());
     }
 
     private static PrepareProtocol.Status status(String state, String id, int step, int pct, long eta) {

@@ -408,4 +408,15 @@
     <string name="LSFG_UNSUPPORTED">This Lossless.dll version is not supported</string>
     <string name="LSFG_NO_TRANSLATOR">Shaders found, but this app cannot translate them (translator missing)</string>
     <string name="LSFG_NOT_A_DLL">%1$s is not a DLL: choose Lossless.dll.</string>
+    <!-- Settings › Launcher › Game theme (docs/android/app-shell.md « Game theme ») -->
+    <string name="GAME_THEME">Game theme</string>
+    <string name="GAME_THEME_SUMMARY">Colours from the game\'s own image</string>
+    <string name="GAME_THEME_DETAIL">The launcher takes its colours, and a faint backdrop, from the title image of %1$s, read from your copy of the game. The status colours (ready, warnings, errors) stay the same. Colours only: no backdrop image. Off: the launcher\'s own green.</string>
+    <string name="GAME_THEME_FOOTER">Saved at once; the in-game menu takes it at the next game start.</string>
+    <string name="GAME_THEME_SAVED">Game theme: %1$s.</string>
+    <string name="GAME_THEME_SOURCE_NONE">None (a colour from the title ID)</string>
+    <string name="KV_IMAGE">Image</string>
+    <string name="VAL_THEME_FULL">Art and colours</string>
+    <string name="VAL_THEME_COLORS">Colours only</string>
+    <string name="VAL_THEME_OFF">Off</string>
 </resources>

@@ -174,9 +174,9 @@ final class PreparingPanel extends PanelView {
         for (int i = 0; i < IDS.length; i++) {
             float y = 268 + i * 66;
             boolean past = done || i < cur, now = !done && i == cur;
-            int col = past ? Theme.ACCENT : now ? (failed ? Theme.ERROR : Theme.TEXT) : Theme.TEXT_FAINT;
+            int col = past ? Theme.OK : now ? (failed ? Theme.ERROR : Theme.TEXT) : Theme.TEXT_FAINT;
             if (past) {
-                stroke.setColor(Theme.ACCENT);
+                stroke.setColor(Theme.OK);
                 stroke.setStrokeWidth(5);
                 c.drawLine(52, y - 12, 62, y - 2, stroke);
                 c.drawLine(62, y - 2, 80, y - 24, stroke);

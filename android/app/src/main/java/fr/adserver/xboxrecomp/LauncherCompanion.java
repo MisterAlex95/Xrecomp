@@ -19,7 +19,7 @@ import android.view.View;
  *   });
  *   protected void onStart() { super.onStart(); companion.start(); }
  *   protected void onStop() { companion.stop(); super.onStop(); }
- *   // where Home is built:      companion.home(gameTitle(dir), chipText, chipColor, canPlay);
+ *   // where Home is built:      companion.art(titleImage); companion.home(gameTitle(dir), chipText, chipColor, canPlay);
  *   // where Preparing is built: companion.preparing(titleId(), gameTitle(dir));
  * </pre>
  * Without home()/preparing() it shows Home with the remembered title and no status. Hold-to-cancel on the Preparing
@@ -31,6 +31,7 @@ final class LauncherCompanion {
     private final CompanionScreen screen;
     private String title, status = "", tid;
     private int statusColor = Theme.TEXT_DIM;
+    private android.graphics.Bitmap art;
     private boolean canPlay = true, preparing;
 
     LauncherCompanion(Activity activity, LauncherPanel.Actions actions) {
@@ -67,6 +68,14 @@ final class LauncherCompanion {
             screen.rebuild();
     }
 
+    /** The game's title image for Home's identity card (null: none); shown with the next home(). */
+    void art(android.graphics.Bitmap b) {
+        art = b;
+        View v = screen.content();
+        if (v instanceof LauncherPanel)
+            ((LauncherPanel)v).setArt(b);
+    }
+
     /** A Prepare runs for titleId: the Preparing panel, which follows status.json and prepare.log on its own. */
     void preparing(String titleId, String title) {
         boolean same = preparing && titleId != null && titleId.equals(tid);
@@ -91,6 +100,7 @@ final class LauncherCompanion {
             });
         }
         LauncherPanel p = new LauncherPanel(c, actions);
+        p.setArt(art);
         p.set(title, status, statusColor, canPlay);
         return p;
     }
