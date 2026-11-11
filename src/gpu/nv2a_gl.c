@@ -74,6 +74,7 @@ static struct {
     uint32_t draws, tris, clears, uploads, upload_kb, readbacks, compiles, hashes_kb;
     uint32_t vsh_draws, vsh_kb;     /* vertex-program batches, their upload */
     uint32_t rt_creates, relayouts, rt_direct, rt_copies, rt_grows, shadow_binds;
+    uint32_t seeds, seeds_skipped, invalidates;
 } s_st;
 
 /* RECOMP_GPU_RT_RELAYOUT_READBACK=1: read a target back when the title
@@ -82,6 +83,20 @@ static int s_readback_layout_switch;
 /* RECOMP_GPU_RT_DIRECT=0: never sample a colour target directly (read it
  * back into guest memory and upload it as a texture, as before 7d). */
 static int s_rt_direct_off;
+/* glInvalidateSubFramebuffer usable: GLES 3.0, desktop GL 4.3 or
+ * GL_ARB_invalidate_subdata (not macOS's 4.1). RECOMP_GPU_INVALIDATE=0
+ * turns it off. */
+static int s_invalidate;
+
+static void nv2a_gl_invalidate_rect(GLsizei n, const GLenum *att, GLint x, GLint y,
+                                    GLsizei w, GLsizei h)
+{
+#if NV2A_GL_ES || !defined(__APPLE__)
+    glInvalidateSubFramebuffer(GL_FRAMEBUFFER, n, att, x, y, w, h);
+#else
+    (void)n; (void)att; (void)x; (void)y; (void)w; (void)h;
+#endif
+}
 /* RECOMP_GPU_PRESENT=sync: read the presented surface back at its own flip
  * (the executor waits for the GPU to finish the frame); default async: one
  * frame later through a pixel pack buffer. RECOMP_GPU_READBACK=all: also
@@ -200,6 +215,15 @@ static int ensure_init(void)
         s_border_clamp = !NV2A_GL_ES || maj > 3 || (maj == 3 && min >= 2)
                       || has_ext("GL_EXT_texture_border_clamp")
                       || has_ext("GL_OES_texture_border_clamp");
+#if NV2A_GL_ES
+        s_invalidate = 1;
+#elif defined(__APPLE__)
+        s_invalidate = 0;
+#else
+        s_invalidate = maj > 4 || (maj == 4 && min >= 3) || has_ext("GL_ARB_invalidate_subdata");
+#endif
+        if (getenv("RECOMP_GPU_INVALIDATE") && !env_on("RECOMP_GPU_INVALIDATE"))
+            s_invalidate = 0;
     }
     s_verbose = env_on("RECOMP_GPU_VERBOSE");
     s_readback_layout_switch = env_on("RECOMP_GPU_RT_RELAYOUT_READBACK");
@@ -218,10 +242,11 @@ static int ensure_init(void)
         s_recheck_frame = a && strcmp(a, "frame") == 0;
         s_recheck_switch = a && strcmp(a, "switch") == 0;
     }
-    fprintf(stderr, "  [GPUGL] S3TC %s, depth clamp %s, border clamp %s\n",
+    fprintf(stderr, "  [GPUGL] S3TC %s, depth clamp %s, border clamp %s, invalidate %s\n",
             s_s3tc ? "on" : "off (DXT decoded on the CPU)",
             s_depth_clamp ? "on" : "off (clamped in the vertex shader)",
-            s_border_clamp ? "on" : "off (clamp to edge)");
+            s_border_clamp ? "on" : "off (clamp to edge)",
+            s_invalidate ? "on" : "off");
 
     s_vs = compile(GL_VERTEX_SHADER, nv2a_gl_vertex_body());
     if (!s_vs) {
@@ -279,6 +304,7 @@ typedef struct {
     uint32_t cfmt;                        /* SET_SURFACE_FORMAT colour format (bits 0-3) */
     GLuint tex, fbo, depth;               /* depth: depth texture attached now */
     int dirty;
+    int seed;                             /* guest bytes not uploaded yet (rt_seed) */
     uint32_t used;                        /* frame last drawn into */
     uint32_t serial;                      /* s_rt_serial at the last colour write */
     uint32_t sampled;                     /* frame last sampled directly as a texture */
@@ -455,6 +481,17 @@ static struct {
     Nv2aPresentSurface surf;
 } s_pend;
 
+/* What the title drew or put there before the GPU target existed: upload
+ * the guest bytes now, if a full clear has not made them moot. */
+static void rt_seed(GlRT *r)
+{
+    if (!r || !r->seed)
+        return;
+    r->seed = 0;
+    rt_upload(r);
+    s_st.seeds++;
+}
+
 /* The render target -> guest bytes (synchronous). */
 static void rt_readback(GlRT *r)
 {
@@ -593,7 +630,9 @@ static GlRT *rt_get(const Nv2aSurface *s)
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, (GLsizei)w, (GLsizei)h, 0,
                  GL_RGBA, GL_UNSIGNED_BYTE, NULL);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
-    rt_upload(r);
+    /* Seeded from the guest bytes when first drawn or sampled, unless the
+     * first thing the title does is clear it whole (rt_seed, gl_clear). */
+    r->seed = 1;
     s_st.rt_creates++;
     glGenFramebuffers(1, &r->fbo);
     glBindFramebuffer(GL_FRAMEBUFFER, r->fbo);
@@ -1486,6 +1525,33 @@ static void gl_clear(const Nv2aSurface *s, const Nv2aRenderState *rs,
 
     if (!ensure_init() || !bind_target(s, rs->zeta_va, &t))
         return;
+    if (t.rt) {
+        /* A clear of every channel over the whole guest surface makes the
+         * old bytes moot: no seed upload, and where the API has it the
+         * driver is told the attachment's old contents are dead (a tiler
+         * then neither loads nor keeps them). */
+        int whole = s->clip_x == 0 && s->clip_y == 0
+                 && s->width >= t.rt->w && s->height >= t.rt->h;
+        int all = (flags & 0x70) == 0x70 && (t.bpp == 2 || (flags & 0x80));
+        if (whole && all && t.rt->seed) {
+            t.rt->seed = 0;
+            s_st.seeds_skipped++;
+        }
+        rt_seed(t.rt);
+    }
+    if (s_invalidate) {
+        GLenum att[2];
+        GLsizei n = 0;
+        if (t.rt && (flags & 0x70) == 0x70 && (t.bpp == 2 || (flags & 0x80)))
+            att[n++] = GL_COLOR_ATTACHMENT0;
+        if ((flags & 0x03) == 0x03)
+            att[n++] = GL_DEPTH_STENCIL_ATTACHMENT;
+        if (n) {
+            nv2a_gl_invalidate_rect(n, att, (GLint)s->clip_x, (GLint)s->clip_y,
+                                    (GLsizei)s->width, (GLsizei)s->height);
+            s_st.invalidates++;
+        }
+    }
     if ((flags & 0xF0) && t.rt) {
         float c[4];
         unpack4(argb, c);
@@ -1543,6 +1609,7 @@ static int tex_coords_in_texels(const Nv2aPixelState *ps, const Nv2aTexture *t)
 static void rt_bind_as_texture(GlRT *r, const Nv2aPixelState *ps, const Nv2aTexture *t,
                                int unit, GLint alpha, float *tscale)
 {
+    rt_seed(r);
     glActiveTexture(GL_TEXTURE0 + (GLenum)unit);
     glBindTexture(GL_TEXTURE_2D, r->tex);
     samp_set(GL_TEXTURE_2D, &r->samp, tex_filter(t, ps->shade),
@@ -1794,6 +1861,7 @@ static void gl_draw(const Nv2aSurface *s, const Nv2aBatch *b)
         return;
     if (!bind_target(s, rs->zeta_va, &t))
         return;
+    rt_seed(t.rt);
     break_feedback(t.rt);
     apply_state(rs, ps->shade, t.bpp, ((s->format >> 4) & 0xF) == 1);
     set_near_mode(0, 0.0f);
@@ -1889,6 +1957,7 @@ static int gl_draw_program(const Nv2aSurface *s, const Nv2aBatch *b)
         return 0;
     if (!bind_target(s, rs->zeta_va, &t))
         return 1;                   /* gl_draw drops these too */
+    rt_seed(t.rt);
     break_feedback(t.rt);
     apply_state(rs, ps->shade, t.bpp, ((s->format >> 4) & 0xF) == 1);
     zmax = zmax_of(s->format);
@@ -2200,11 +2269,13 @@ static void gl_flip(void)
         fprintf(stderr, "  [GPUGL] frame %u: %u draws (%u vertex programs, %u KB),"
                         " %u tris, %u clears, %u readbacks,"
                         " targets: %u created, %u relayouts, %u grown, %u sampled directly"
-                        " (%u copies), %u shadow maps, %u uploads (%u KB), %u KB hashed, %d textures,"
+                        " (%u copies), %u shadow maps, %u seeded, %u seeds skipped, %u invalidates,"
+                        " %u uploads (%u KB), %u KB hashed, %d textures,"
                         " %d targets, %d programs (%u compiled)\n",
                 s_frame, s_st.draws, s_st.vsh_draws, s_st.vsh_kb, s_st.tris,
                 s_st.clears, s_st.readbacks, s_st.rt_creates, s_st.relayouts, s_st.rt_grows,
-                s_st.rt_direct, s_st.rt_copies, s_st.shadow_binds,
+                s_st.rt_direct, s_st.rt_copies, s_st.shadow_binds, s_st.seeds,
+                s_st.seeds_skipped, s_st.invalidates,
                 s_st.uploads, s_st.upload_kb, s_st.hashes_kb, s_ntex, nrt, nprog,
                 s_st.compiles);
         memset(&s_st, 0, sizeof s_st);

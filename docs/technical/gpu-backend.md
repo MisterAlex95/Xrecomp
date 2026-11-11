@@ -236,6 +236,21 @@ guest memory (in the surface's own format and swizzle) by the rules under
 A target is dirty only after a batch or clear that writes colour (colour
 mask non-zero).
 
+**Clear on bind (tilers).** A new target is not seeded from the guest
+bytes at creation but at its first draw or sample (`rt_seed`); a clear of
+every channel over the whole guest surface before that skips the upload.
+Where the API has it (GLES 3.0, desktop GL 4.3 or
+`GL_ARB_invalidate_subdata`; not macOS's 4.1) every clear of all colour
+channels, or of depth and stencil together, first calls
+`glInvalidateSubFramebuffer` on the cleared rectangle, so a tiler neither
+loads nor keeps the old contents (`[GPUGL] ... invalidate on|off` at
+start-up; `RECOMP_GPU_INVALIDATE=0` turns it off). Depth is not
+invalidated at the end of a pass: a zeta surface may be sampled later as a
+shadow map, and nothing says the title is done with it. In Oakvale the
+bloom targets are drawn without a clear, so the seed skip seldom applies
+(2 of 14 creations in a run); the clears it invalidates are the frame's 3
+(back buffer colour, main depth/stencil, shadow map depth).
+
 **Shadow maps.** A combiner stage in PROJECT2D/PROJECT3D mode reading a
 depth format (0x2A-0x31; Fable binds its 768x768 Z16 map as 0x30,
 `LU_IMAGE_DEPTH_Y16_FIXED`, on stage 1 of about 150 batches a frame) at the
