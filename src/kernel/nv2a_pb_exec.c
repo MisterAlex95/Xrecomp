@@ -682,8 +682,15 @@ static int fetch_attr(const VertexAttr *a, uint32_t index, float out[4])
 
 static uint32_t surface_bpp(void);
 
+static int surface_color_valid(int masked);
+
 static void note_drawn(void)
 {
+    /* A depth-only pass (a shadow map at colour offset 0) is not the frame:
+     * left to count, its 768x768 surface became "the surface drawn" and the
+     * flip presented colour offset 0 by luck of the size check below. */
+    if (!surface_color_valid(1))
+        return;
     if (!s_gpu.drawn_stale && s_gpu.drawn_offset
         && s_gpu.clip_w * s_gpu.clip_h < s_gpu.drawn_w * s_gpu.drawn_h)
         return;
@@ -862,6 +869,22 @@ static int backend_draws(void)
     return s_backend && s_backend->draw;
 }
 
+/* Is there colour memory to draw into? Not at colour offset 0 (a depth-only
+ * pass: Fable renders its shadow map with offset 0 and the colour mask 0),
+ * nor where a write would land on the image. `masked`: also not when
+ * SET_COLOR_MASK writes no channel (draws; a clear ignores the mask). */
+static int surface_color_valid(int masked)
+{
+    uint32_t base;
+
+    if (!s_gpu.color_offset || !s_gpu.pitch || !s_gpu.clip_h || !surface_bpp())
+        return 0;
+    if (masked && !(s_gpu.color_mask & 0x01010101u))
+        return 0;
+    base = dma_resolve(s_gpu.color_offset);
+    return !surface_hits_image(base, (s_gpu.clip_y + s_gpu.clip_h) * s_gpu.pitch);
+}
+
 static void current_surface(Nv2aSurface *out)
 {
     out->color_va        = dma_resolve(s_gpu.color_offset);
@@ -874,6 +897,7 @@ static void current_surface(Nv2aSurface *out)
     out->format          = s_gpu.format;
     out->clip_x          = s_gpu.clip_x;
     out->clip_y          = s_gpu.clip_y;
+    out->color_valid     = (uint32_t)surface_color_valid(1);
 }
 
 /* A texture stage as nv2a_backend.h describes it. */
@@ -1013,10 +1037,20 @@ static void clear_surface(uint32_t param)
         Nv2aSurface surf;
         Nv2aRenderState rs;
 
-        if (!s_gpu.color_offset || !s_gpu.pitch || !s_gpu.clip_h || bpp == 0)
+        if (!s_gpu.pitch || !s_gpu.clip_h || bpp == 0)
             return;
         current_surface(&surf);
         current_render_state(&rs);
+        /* A depth-only surface (colour offset 0) still clears its depth:
+         * Fable clears its shadow map's Z this way every frame, and the
+         * clear never reached the back end while it was skipped whole. */
+        surf.color_valid = (uint32_t)surface_color_valid(0);
+        if (!surf.color_valid)
+            param &= ~(uint32_t)NV097_CLEAR_COLOR_MASK;
+        if (!(param & 0x3u) && !surf.color_valid)
+            return;
+        if (!surf.color_valid && !rs.zeta_va)
+            return;
         s_backend->clear(&surf, &rs, param, s_gpu.clear_color,
                          s_gpu.zstencil_clear);
         s_gpu.clears++;
@@ -2038,7 +2072,8 @@ static int batch_is_ffp(void)
  * triangle strip with its first two vertices swapped, so all of a strip's
  * triangles wind the same way, as a strip does on hardware. Left alone the
  * executor emits (i, i+1, i+2) for every i, so a back end that culls or lights
- * two-sided from the winding drops or back-lights every second triangle. */
+ * two-sided from the winding drops or back-lights every second triangle.
+ * On whenever the back end culls (NV2A_BACKEND_CAP_CULL). */
 static int strip_alt_winding(void)
 {
     static int on = -1;
@@ -2047,7 +2082,8 @@ static int strip_alt_winding(void)
         const char *e = getenv("RECOMP_STRIP_ALT_WINDING");
         on = e && strcmp(e, "0") != 0;
     }
-    return on;
+    return on || (s_backend && s_backend->draw
+                  && (s_backend->caps & NV2A_BACKEND_CAP_CULL));
 }
 
 /* RECOMP_FFP_FLIP_NORMALS: a compatibility option, off by default. See

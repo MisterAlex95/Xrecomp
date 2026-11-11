@@ -144,6 +144,15 @@ keeps one buffer per zeta address. A 16-bit surface keeps alpha at 1 (colour
 mask), as the CPU path reads 565 back with alpha 0xFF. Pixels go back to
 guest memory (in the surface's own format and swizzle) at the present sync
 and when a batch samples memory a dirty target covers (render to texture).
+A target is dirty only after a batch or clear that writes colour (colour
+mask non-zero). A surface without colour (`Nv2aSurface.color_valid` 0:
+colour offset 0, as in Fable's 768x768 shadow pass, a colour mask of 0, or a
+surface that would land on the image) draws into a depth-only framebuffer
+per zeta address (`glDrawBuffers(GL_NONE)`); no colour target is created and
+nothing is read back. Its depth clears reach the back end. A texture whose
+upload failed (`GlTex.failed`, e.g. the Z16 shadow map bound as format
+0x30) is drawn as "no texture" until its bytes change, instead of sampling
+an incomplete GL texture as black.
 
 **Textures.** Cached by address, format, size, pitch, palette and cube-ness
 (512 entries; the cache is flushed whole when three quarters full). A 64-bit
@@ -210,15 +219,19 @@ back end. In-world rendering is untested.
   differ.
 - Stencil is honoured on the GPU and ignored by the CPU rasteriser.
 - Window z is clamped to the zeta format's range (depth clamp); the CPU keeps
-  unbounded floats. `SET_CLIP_MIN/MAX` are ignored by both. Float zeta
+  unbounded floats. `SET_CLIP_MIN` is the near plane both paths clip at;
+  `SET_CLIP_MAX` is ignored by both. Float zeta
   formats are treated as integer.
 - Address mode 4 with a border colour clamps to the edge on GLES 3.0/3.1
   without `GL_EXT_texture_border_clamp` / `GL_OES_texture_border_clamp`.
 - Without depth clamp (GLES lacking `GL_EXT_depth_clamp`) z is clamped per
   vertex in the vertex shader, which changes the depth slope of a triangle
   crossing the zeta range.
-- No culling, like the CPU rasteriser (strips are emitted without
-  alternating winding unless `RECOMP_STRIP_ALT_WINDING`).
+- Culling (`SET_CULL_FACE_ENABLE`, `SET_CULL_FACE`, `SET_FRONT_FACE`) on the
+  GPU only; the CPU rasteriser draws both faces. The back end sets
+  `NV2A_BACKEND_CAP_CULL`, so strips arrive with one winding; GL's front
+  face is the opposite of the title's, because guest rows map to GL rows
+  unflipped. `RECOMP_GPU_CULL=0` turns it off.
 - Points and lines are not drawn, like the CPU rasteriser.
 - A guest CPU write into a surface after the GPU created its target is not
   seen (FMV written straight into the framebuffer, a CPU-drawn loading bar):

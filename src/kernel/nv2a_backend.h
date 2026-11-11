@@ -53,6 +53,14 @@ typedef struct {
      * rectangle's origin in real pixels (width/height above are its size). */
     uint32_t format;
     uint32_t clip_x, clip_y;
+    /* 0: there is no colour surface to write -- SET_SURFACE_COLOR_OFFSET is
+     * 0 (a depth-only pass such as a shadow map), the surface would land on
+     * the title's image, or (draw() only) SET_COLOR_MASK is 0. A back end
+     * then draws into depth/stencil alone (rs->zeta_va) and neither creates
+     * nor reads back a colour target at color_va: Fable's 768x768 shadow
+     * pass at offset 0 resolved to 0x80000000 and its read-back overwrote
+     * the title's textures there. clear() then carries Z/stencil flags only. */
+    uint32_t color_valid;
 } Nv2aSurface;
 
 /* A texture as the title programmed it. uv in Nv2aVertex are in texels. */
@@ -161,6 +169,11 @@ typedef struct {
 } Nv2aBatch;
 
 #define NV2A_BACKEND_CAP_PIXEL 0x1u
+/* The back end culls from the winding (Nv2aRenderState cull_*): the executor
+ * then hands over every triangle strip with one winding (odd triangles with
+ * their first two vertices swapped, as RECOMP_STRIP_ALT_WINDING does), as the
+ * hardware assembles strips. Without it strips arrive as (i, i+1, i+2). */
+#define NV2A_BACKEND_CAP_CULL  0x2u
 
 typedef struct {
     /* flags: CLEAR_SURFACE bits (Z 0x1, stencil 0x2, colour 0xF0).

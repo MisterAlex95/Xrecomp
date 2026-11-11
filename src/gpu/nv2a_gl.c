@@ -55,6 +55,7 @@ static int s_s3tc, s_depth_clamp, s_verbose;
 static int s_border_clamp;         /* GL_CLAMP_TO_BORDER usable */
 static int s_bilinear;             /* RECOMP_TEX_BILINEAR / _ANISO, as the CPU path */
 static int s_recheck_frame;        /* RECOMP_GPU_TEX_RECHECK=frame */
+static int s_cull = 1;             /* RECOMP_GPU_CULL (default on) */
 static uint32_t s_frame;
 static GLuint s_vao, s_vbo, s_vs;
 
@@ -238,6 +239,7 @@ typedef struct {
 typedef struct {
     uint32_t va, w, h;
     GLuint rb;
+    GLuint fbo;                           /* depth-only framebuffer, made on demand */
 } GlDepth;
 
 #define NV_GL_MAX_RT    16
@@ -421,6 +423,23 @@ static GlRT *rt_get(const Nv2aSurface *s)
     return r;
 }
 
+static void depth_free(GlDepth *d)
+{
+    int i;
+
+    /* Colour targets that have it attached drop it (re-attached at bind). */
+    for (i = 0; i < NV_GL_MAX_RT; i++)
+        if (s_rt[i].depth == d->rb && d->rb) {
+            glBindFramebuffer(GL_FRAMEBUFFER, s_rt[i].fbo);
+            glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT,
+                                      GL_RENDERBUFFER, 0);
+            s_rt[i].depth = 0;
+        }
+    if (d->fbo) glDeleteFramebuffers(1, &d->fbo);
+    if (d->rb) glDeleteRenderbuffers(1, &d->rb);
+    memset(d, 0, sizeof *d);
+}
+
 /* Depth/stencil for zeta surface `va`, at least w x h. The CPU rasteriser
  * keeps one float buffer per zeta address; so does this, as D24S8. */
 static GLuint depth_get(uint32_t va, uint32_t w, uint32_t h)
@@ -432,8 +451,7 @@ static GLuint depth_get(uint32_t va, uint32_t w, uint32_t h)
         if (d->rb && d->va == va) {
             if (d->w >= w && d->h >= h)
                 return d->rb;
-            glDeleteRenderbuffers(1, &d->rb);
-            memset(d, 0, sizeof *d);
+            depth_free(d);
             slot = i;
             break;
         }
@@ -443,7 +461,7 @@ static GLuint depth_get(uint32_t va, uint32_t w, uint32_t h)
     if (slot < 0) {
         static int next;
         slot = next++ % NV_GL_MAX_DEPTH;
-        glDeleteRenderbuffers(1, &s_depth[slot].rb);
+        depth_free(&s_depth[slot]);
     }
     s_depth[slot].va = va;
     s_depth[slot].w = w < 640 ? 640 : w;
@@ -455,14 +473,67 @@ static GLuint depth_get(uint32_t va, uint32_t w, uint32_t h)
     return s_depth[slot].rb;
 }
 
-/* Bind the render target for drawing into, with its depth surface. */
-static GlRT *bind_target(const Nv2aSurface *s, uint32_t zeta_va)
+/* What a draw or clear goes into: a colour target (rt) with its depth, or,
+ * for a surface without colour (Nv2aSurface.color_valid == 0), the zeta
+ * surface's depth-only framebuffer (rt NULL). w x h is the framebuffer's
+ * size, which the vertex shader maps surface pixels against. */
+typedef struct {
+    GlRT *rt;
+    uint32_t w, h, bpp;
+} GlTarget;
+
+/* The depth-only framebuffer for zeta surface `va` (glDrawBuffers GL_NONE):
+ * a shadow-map pass writes depth and nothing else, so no colour target is
+ * created in guest memory and nothing is read back. */
+static int bind_depth_only(const Nv2aSurface *s, uint32_t zeta_va, GlTarget *t)
 {
-    GlRT *r = rt_get(s);
+    uint32_t w = s->clip_x + s->width, h = s->clip_y + s->height;
+    GlDepth *d = NULL;
+    GLuint rb;
+    int i;
+
+    if (!zeta_va || !w || !h || w > 4096 || h > 4096)
+        return 0;
+    rb = depth_get(zeta_va, w, h);
+    for (i = 0; i < NV_GL_MAX_DEPTH; i++)
+        if (s_depth[i].rb == rb)
+            d = &s_depth[i];
+    if (!d)
+        return 0;
+    if (!d->fbo) {
+        const GLenum none = GL_NONE;
+        glGenFramebuffers(1, &d->fbo);
+        glBindFramebuffer(GL_FRAMEBUFFER, d->fbo);
+        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT,
+                                  GL_RENDERBUFFER, rb);
+        glDrawBuffers(1, &none);
+        glReadBuffer(GL_NONE);
+        if (s_verbose)
+            fprintf(stderr, "  [GPUGL] depth-only target for zeta 0x%08X %ux%u\n",
+                    zeta_va, d->w, d->h);
+    } else {
+        glBindFramebuffer(GL_FRAMEBUFFER, d->fbo);
+    }
+    t->rt = NULL;
+    t->w = d->w;
+    t->h = d->h;
+    t->bpp = 4;
+    glViewport(0, 0, (GLsizei)t->w, (GLsizei)t->h);
+    glEnable(GL_SCISSOR_TEST);
+    glScissor((GLint)s->clip_x, (GLint)s->clip_y, (GLsizei)s->width, (GLsizei)s->height);
+    return 1;
+}
+
+/* Bind the render target for drawing into, with its depth surface. */
+static int bind_target(const Nv2aSurface *s, uint32_t zeta_va, GlTarget *t)
+{
+    GlRT *r;
     GLuint d;
 
-    if (!r)
-        return NULL;
+    if (!s->color_valid)
+        return bind_depth_only(s, zeta_va, t);
+    if (!(r = rt_get(s)))
+        return 0;
     glBindFramebuffer(GL_FRAMEBUFFER, r->fbo);
     d = depth_get(zeta_va, r->w, r->h);
     if (d != r->depth) {
@@ -474,7 +545,11 @@ static GlRT *bind_target(const Nv2aSurface *s, uint32_t zeta_va)
     glEnable(GL_SCISSOR_TEST);
     glScissor((GLint)s->clip_x, (GLint)s->clip_y, (GLsizei)s->width, (GLsizei)s->height);
     r->used = s_frame;
-    return r;
+    t->rt = r;
+    t->w = r->w;
+    t->h = r->h;
+    t->bpp = r->bpp;
+    return 1;
 }
 
 /* Before a batch samples guest memory the GPU has drawn into, put the GPU's
@@ -503,6 +578,11 @@ typedef struct {
     GLuint tex;
     uint32_t checked;               /* frame of the last hash check */
     GLint wrap_s, wrap_t, filter;   /* sampler state last set */
+    /* The last upload failed (a format the decoder does not know, such as
+     * Fable's Z16 shadow map bound as 0x30): drawn as "no texture" until the
+     * bytes change. Returned as usable, the incomplete GL texture sampled
+     * (0, 0, 0, 1) and darkened every batch that used it. */
+    int failed;
 } GlTex;
 
 #define NV_GL_MAX_TEX 512           /* power of two */
@@ -626,16 +706,17 @@ static GlTex *tex_get(const Nv2aTexture *t, uint32_t cube, int unit)
          * something else in between (a glyph cache written between two text
          * batches). */
         if (e->checked == s_frame && (s_recheck_frame || s_bound[unit] == e))
-            return e;
+            return e->failed ? NULL : e;
         readback_overlapping(t->offset, e->bytes);
         e->checked = s_frame;
         {
             uint64_t h = tex_hash(t, e->bytes);
             if (h == e->hash)
-                return e;
+                return e->failed ? NULL : e;
             e->hash = h;
         }
-        return tex_upload(e, t) ? e : NULL;
+        e->failed = !tex_upload(e, t);
+        return e->failed ? NULL : e;
     }
     {
         Nv2aTexture q = *t;
@@ -652,12 +733,10 @@ static GlTex *tex_get(const Nv2aTexture *t, uint32_t cube, int unit)
     e->hash = tex_hash(t, bytes);
     e->checked = s_frame;
     s_ntex++;
-    if (!tex_upload(e, t)) {
-        /* Keep the entry (bytes != 0, tex set) so a format the decoder does
-         * not know is not retried every batch; drawn as "no texture". */
-        return NULL;
-    }
-    return e;
+    /* A failed upload keeps the entry (bytes != 0, tex set, failed) so a
+     * format the decoder does not know is not retried every batch. */
+    e->failed = !tex_upload(e, t);
+    return e->failed ? NULL : e;
 }
 
 static GLint wrap_mode(uint32_t a, int border)
@@ -854,6 +933,20 @@ static void apply_state(const Nv2aRenderState *rs, uint32_t shade, uint32_t bpp)
     } else {
         glDisable(GL_STENCIL_TEST);
     }
+    /* Culling as the title set it. Rows map one to one (guest row y = GL
+     * row y), which mirrors the picture vertically in GL's window space, so
+     * a triangle the title sees clockwise winds counter-clockwise here: the
+     * front face is the opposite of SET_FRONT_FACE. Strips arrive with one
+     * winding (NV2A_BACKEND_CAP_CULL). */
+    if (s_cull && rs->cull_enable
+        && (rs->cull_face == GL_FRONT || rs->cull_face == GL_BACK
+            || rs->cull_face == GL_FRONT_AND_BACK)) {
+        glEnable(GL_CULL_FACE);
+        glCullFace((GLenum)rs->cull_face);
+        glFrontFace(rs->front_face == GL_CCW ? GL_CW : GL_CCW);
+    } else {
+        glDisable(GL_CULL_FACE);
+    }
     /* A 16-bit surface has no alpha: keep the target's at 1, as the CPU
      * path reads it back. */
     glColorMask((cm & 0x00010000u) != 0, (cm & 0x00000100u) != 0,
@@ -894,18 +987,18 @@ static uint32_t gl_zpass_read(void)
 static void gl_clear(const Nv2aSurface *s, const Nv2aRenderState *rs,
                      uint32_t flags, uint32_t argb, uint32_t zstencil)
 {
-    GlRT *r;
+    GlTarget t;
     GLbitfield mask = 0;
 
-    if (!ensure_init() || !(r = bind_target(s, rs->zeta_va)))
+    if (!ensure_init() || !bind_target(s, rs->zeta_va, &t))
         return;
-    if (flags & 0xF0) {
+    if ((flags & 0xF0) && t.rt) {
         float c[4];
         unpack4(argb, c);
-        if (r->bpp == 2)
+        if (t.bpp == 2)
             c[3] = 1.0f;
         glColorMask((flags & 0x10) != 0, (flags & 0x20) != 0, (flags & 0x40) != 0,
-                    r->bpp == 2 || (flags & 0x80) != 0);
+                    t.bpp == 2 || (flags & 0x80) != 0);
         glClearColor(c[0], c[1], c[2], c[3]);
         mask |= GL_COLOR_BUFFER_BIT;
     }
@@ -928,8 +1021,8 @@ static void gl_clear(const Nv2aSurface *s, const Nv2aRenderState *rs,
     }
     if (mask)
         glClear(mask);
-    if (mask & GL_COLOR_BUFFER_BIT)
-        r->dirty = 1;
+    if ((mask & GL_COLOR_BUFFER_BIT) && t.rt)
+        t.rt->dirty = 1;
     s_st.clears++;
 }
 
@@ -941,7 +1034,7 @@ static void gl_draw(const Nv2aSurface *s, const Nv2aBatch *b)
     float tscale[8], c0[32], c1[32], v[4];
     Nv2aGlShaderKey key;
     GlProg *p;
-    GlRT *r;
+    GlTarget t;
     int query = 0;
 
     if (!b->full || !ps || b->count < 3)
@@ -979,12 +1072,12 @@ static void gl_draw(const Nv2aSurface *s, const Nv2aBatch *b)
     p = prog_get(&key);
     if (!p)
         return;
-    if (!(r = bind_target(s, rs->zeta_va)))
+    if (!bind_target(s, rs->zeta_va, &t))
         return;
-    apply_state(rs, ps->shade, r->bpp);
+    apply_state(rs, ps->shade, t.bpp);
     glUseProgram(p->prog);
-    v[0] = 2.0f / (float)r->w;
-    v[1] = 2.0f / (float)r->h;
+    v[0] = 2.0f / (float)t.w;
+    v[1] = 2.0f / (float)t.h;
     v[2] = 2.0f / zmax_of(s->format);
     v[3] = s_depth_clamp ? 0.0f : 1.0f;    /* vertex-shader clamp instead */
     glUniform4fv(p->u_vp, 1, v);
@@ -1021,7 +1114,9 @@ static void gl_draw(const Nv2aSurface *s, const Nv2aBatch *b)
         glEndQuery(NV2A_GL_ES ? GL_ANY_SAMPLES_PASSED : GL_SAMPLES_PASSED);
         s_nquery++;
     }
-    r->dirty = 1;
+    /* Only a batch that writes colour makes the target worth reading back. */
+    if (t.rt && (rs->color_mask & 0x01010101u))
+        t.rt->dirty = 1;
     s_st.draws++;
     s_st.tris += b->count / 3;
 }
@@ -1158,8 +1253,9 @@ static void gl_flip(void)
     gl_check_frame();
 }
 
-static const Nv2aBackend s_backend = {
-    gl_clear, gl_draw, gl_flip, NV2A_BACKEND_CAP_PIXEL, gl_zpass_read
+static Nv2aBackend s_backend = {
+    gl_clear, gl_draw, gl_flip, NV2A_BACKEND_CAP_PIXEL | NV2A_BACKEND_CAP_CULL,
+    gl_zpass_read
 };
 
 static void unregister_self(void)
@@ -1173,6 +1269,13 @@ int nv2a_gl_install_from_env(void)
 
     if (!e || !*e || strcmp(e, "0") == 0)
         return 0;
+    /* RECOMP_GPU_CULL=0: draw both faces (and strips as the CPU path
+     * assembles them). Read here: the caps are part of the registration. */
+    e = getenv("RECOMP_GPU_CULL");
+    s_cull = !(e && strcmp(e, "0") == 0);
+    if (!s_cull)
+        s_backend.caps &= ~NV2A_BACKEND_CAP_CULL;
+    e = getenv("RECOMP_GPU");
     nv2a_backend_register_with_present_sync(&s_backend, gl_present_sync);
     fprintf(stderr, "  [GPUGL] GPU back end selected (RECOMP_GPU=%s); the context is"
                     " created on the executor thread at the first draw\n", e);
