@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The game library (docs: « Game library »). A file of its own so that it does not collide with strings.xml edits. -->
+<resources>
+    <string name="CHIP_QUEUED">Queued</string>
+    <string name="PREPARE_QUEUED_NOTE">Queued behind another game\'s Prepare: it starts by itself.</string>
+</resources>

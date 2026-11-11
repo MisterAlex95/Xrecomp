@@ -159,4 +159,27 @@ public class GameStateTest {
         assertEquals(LauncherActivity.Prep.RUNNING, GameState.prep(true, true, status(PrepareProtocol.RUNNING), true,
                                                                    false));
     }
+
+    @Test
+    public void queued() {
+        GameState.Facts f = ready();
+        f.pack = Pack.Check.NO_PACK;
+        f.prepare = status(PrepareProtocol.QUEUED);
+        f.prepareProcess = true;
+        f.importingTid = TID;
+        assertEquals(GameState.Chip.QUEUED, GameState.chip(f));
+        assertEquals(LauncherActivity.Prep.QUEUED, GameState.prep(true, false, f.prepare, false, true));
+        // « queued » with no :prepare process: the queue died with it, the Prepare is offered again.
+        f.prepareProcess = false;
+        f.importingTid = null;
+        assertEquals(GameState.Chip.NEEDS_PREPARING, GameState.chip(f));
+        assertEquals(LauncherActivity.Prep.INTERRUPTED, GameState.prep(true, false, f.prepare, true, false));
+        // Queued before the import (« Prepare now » from the XBE cache): queued too.
+        f.hasData = false;
+        f.prepareProcess = true;
+        assertEquals(GameState.Chip.QUEUED, GameState.chip(f));
+        // Another title preparing does not make this one preparing.
+        f.prepare = null;
+        assertEquals(GameState.Chip.NOT_IMPORTED, GameState.chip(f));
+    }
 }

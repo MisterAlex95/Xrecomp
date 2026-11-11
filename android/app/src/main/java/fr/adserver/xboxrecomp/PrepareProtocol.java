@@ -220,7 +220,9 @@ final class PrepareProtocol {
 
     // ---- status.json --------------------------------------------------------------------------------------------
 
-    static final String RUNNING = "running", DONE = "done", FAILED = "failed", CANCELLED = "cancelled";
+    /** « queued »: waiting behind another title's Prepare (PrepareService's queue); no :prepare process = cut off. */
+    static final String RUNNING = "running", DONE = "done", FAILED = "failed", CANCELLED = "cancelled",
+            QUEUED = "queued";
 
     /** <files>/prepare/<TID>/status.json, written atomically (temporary file, then rename). */
     static final class Status {
@@ -238,6 +240,10 @@ final class PrepareProtocol {
 
         boolean running() {
             return RUNNING.equals(state);
+        }
+
+        boolean queued() {
+            return QUEUED.equals(state);
         }
 
         JSONObject toJson() {
@@ -315,6 +321,121 @@ final class PrepareProtocol {
         } catch (IOException | JSONException e) {
             return null;
         }
+    }
+
+    // ---- queue.json ---------------------------------------------------------------------------------------------
+
+    /** One waiting Prepare: what ACTION_START carried. */
+    static final class Job {
+        String titleId = "", gameDir = "", title = "";
+
+        Job() {}
+
+        Job(String titleId, String gameDir, String title) {
+            this.titleId = titleId == null ? "" : titleId;
+            this.gameDir = gameDir == null ? "" : gameDir;
+            this.title = title == null ? "" : title;
+        }
+    }
+
+    /**
+     * The Prepares waiting behind the running one, in order: <files>/prepare/queue.json, written by PrepareService
+     * (process ":prepare") only, read by the launcher for « Queued (n) ». One entry per title.
+     * <pre>{"v":1, "jobs":[{"title_id":"…", "game_dir":"…", "title":"…"}]}</pre>
+     */
+    static final class Queue {
+        final java.util.List<Job> jobs = new java.util.ArrayList<>();
+
+        /** Appends j; false when its title is already waiting. */
+        boolean add(Job j) {
+            if (j.titleId.isEmpty() || contains(j.titleId))
+                return false;
+            jobs.add(j);
+            return true;
+        }
+
+        boolean contains(String titleId) {
+            return position(titleId) > 0;
+        }
+
+        /** 1 for the next to run, 0 when not waiting. */
+        int position(String titleId) {
+            for (int i = 0; i < jobs.size(); i++) {
+                if (jobs.get(i).titleId.equals(titleId))
+                    return i + 1;
+            }
+            return 0;
+        }
+
+        boolean remove(String titleId) {
+            int p = position(titleId);
+            if (p == 0)
+                return false;
+            jobs.remove(p - 1);
+            return true;
+        }
+
+        /** The next job, removed; null when empty. */
+        Job pop() {
+            return jobs.isEmpty() ? null : jobs.remove(0);
+        }
+
+        JSONObject toJson() {
+            JSONObject o = new JSONObject();
+            try {
+                o.put("v", 1);
+                org.json.JSONArray a = new org.json.JSONArray();
+                for (Job j : jobs) {
+                    JSONObject x = new JSONObject();
+                    x.put("title_id", j.titleId);
+                    x.put("game_dir", j.gameDir);
+                    x.put("title", j.title);
+                    a.put(x);
+                }
+                o.put("jobs", a);
+            } catch (JSONException e) {
+                throw new IllegalStateException(e);
+            }
+            return o;
+        }
+
+        static Queue fromJson(JSONObject o) {
+            Queue q = new Queue();
+            org.json.JSONArray a = o.optJSONArray("jobs");
+            for (int i = 0; a != null && i < a.length(); i++) {
+                JSONObject x = a.optJSONObject(i);
+                if (x != null)
+                    q.add(new Job(x.optString("title_id", ""), x.optString("game_dir", ""), x.optString("title", "")));
+            }
+            return q;
+        }
+    }
+
+    static File queueFile(File filesDir) {
+        return new File(new File(filesDir, "prepare"), "queue.json");
+    }
+
+    /** queue.json, or an empty queue when missing or unreadable. */
+    static Queue readQueue(File f) {
+        if (!f.isFile())
+            return new Queue();
+        try {
+            return Queue.fromJson(new JSONObject(readText(f, 1 << 20)));
+        } catch (IOException | JSONException e) {
+            return new Queue();
+        }
+    }
+
+    static void writeQueue(File f, Queue q) throws IOException {
+        File dir = f.getParentFile();
+        if (dir != null && !dir.isDirectory() && !dir.mkdirs())
+            throw new IOException("cannot create " + dir);
+        File tmp = new File(f.getPath() + ".tmp");
+        try (FileOutputStream out = new FileOutputStream(tmp)) {
+            out.write(q.toJson().toString().getBytes(StandardCharsets.UTF_8));
+        }
+        if (!tmp.renameTo(f))
+            throw new IOException("cannot rename " + tmp + " to " + f);
     }
 
     static String readText(File f, int max) throws IOException {

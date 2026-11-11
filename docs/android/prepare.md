@@ -214,6 +214,8 @@ The working directory does not matter; `python -m tools.prepare` needs the toolk
 
 **status.json**: the service writes it from the progress lines for the UI and for a restart after the app was killed.
 Its format belongs to the app (prepare-app branch, `android/app`), not to this page; prepare never reads it.
+One Prepare runs at a time: a start for another title while one runs waits in `files/prepare/queue.json` (that
+title's status says `queued`) and starts when the running one ends, whatever its outcome (`PrepareService`).
 
 ## Measurements
 

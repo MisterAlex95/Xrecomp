@@ -174,4 +174,52 @@ public class PrepareProtocolTest {
         assertEquals("2 min", PrepareProtocol.formatEta(61));
         assertEquals("1 h 05", PrepareProtocol.formatEta(3900));
     }
+
+    @Test
+    public void queuedStatus() throws Exception {
+        PrepareProtocol.Status s = new PrepareProtocol.Status();
+        s.state = PrepareProtocol.QUEUED;
+        s.titleId = "4541000D";
+        File f = new File(tmp.getRoot(), "prepare/4541000D/status.json");
+        PrepareProtocol.writeStatus(f, s);
+        PrepareProtocol.Status back = PrepareProtocol.readStatus(f);
+        assertTrue(back.queued());
+        assertFalse(back.running());
+        assertFalse(new PrepareProtocol.Status().queued());
+    }
+
+    @Test
+    public void queue() throws Exception {
+        PrepareProtocol.Queue q = new PrepareProtocol.Queue();
+        assertNull(q.pop());
+        assertTrue(q.add(new PrepareProtocol.Job("A", "/games/a", "Game A")));
+        assertTrue(q.add(new PrepareProtocol.Job("B", "/games/b", "Game B")));
+        assertFalse("one entry per title", q.add(new PrepareProtocol.Job("A", "/elsewhere", "again")));
+        assertFalse(q.add(new PrepareProtocol.Job("", "/x", "no title ID")));
+        assertTrue(q.add(new PrepareProtocol.Job("C", null, null)));
+        assertEquals(1, q.position("A"));
+        assertEquals(3, q.position("C"));
+        assertEquals(0, q.position("Z"));
+
+        File f = PrepareProtocol.queueFile(tmp.getRoot());
+        assertEquals(new File(tmp.getRoot(), "prepare/queue.json"), f);
+        assertTrue(PrepareProtocol.readQueue(f).jobs.isEmpty());
+        PrepareProtocol.writeQueue(f, q);
+        PrepareProtocol.Queue back = PrepareProtocol.readQueue(f);
+        assertEquals(3, back.jobs.size());
+        assertEquals("/games/b", back.jobs.get(1).gameDir);
+        assertEquals("Game B", back.jobs.get(1).title);
+        assertEquals("", back.jobs.get(2).gameDir);
+
+        assertTrue(back.remove("B"));
+        assertFalse(back.remove("B"));
+        assertEquals("A", back.pop().titleId);
+        assertEquals("C", back.pop().titleId);
+        assertNull(back.pop());
+
+        try (FileOutputStream o = new FileOutputStream(f)) {
+            o.write("{\"jobs\": [".getBytes("UTF-8"));
+        }
+        assertTrue(PrepareProtocol.readQueue(f).jobs.isEmpty());
+    }
 }

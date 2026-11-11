@@ -29,7 +29,10 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 
-/** PrepareService with a scripted command (PrepareService.environmentOverride): foreground, status, cancel, one at a time. */
+/**
+ * PrepareService with a scripted command (PrepareService.environmentOverride): foreground, status, cancel, one at a
+ * time, and the queue (another title waits, runs next, can be taken out; a dead process's queue is dropped).
+ */
 @RunWith(RobolectricTestRunner.class)
 @Config(sdk = 34)
 public class PrepareServiceTest {
@@ -37,7 +40,7 @@ public class PrepareServiceTest {
     public TemporaryFolder tmp = new TemporaryFolder();
 
     private Application app;
-    private static final String TID = "12345678";
+    private static final String TID = "12345678", TID2 = "4541000D";
 
     @Before
     public void setUp() {
@@ -47,6 +50,7 @@ public class PrepareServiceTest {
     @After
     public void tearDown() throws Exception {
         PrepareService.environmentOverride = null;
+        PrepareService.forgetQueue();
         Thread w = PrepareService.workerThread();
         if (w != null)
             w.join(20000);
@@ -114,7 +118,7 @@ public class PrepareServiceTest {
         assertTrue(PrepareService.logFile(app, TID).isFile());
         assertTrue(shadowOf(sc.get()).isStoppedBySelf());
         NotificationManager nm = app.getSystemService(NotificationManager.class);
-        assertNotNull(shadowOf(nm).getNotification(PrepareService.NOTIF_DONE_ID));
+        assertNotNull(shadowOf(nm).getNotification(TID, PrepareService.NOTIF_DONE_ID));
     }
 
     @Test
@@ -151,10 +155,11 @@ public class PrepareServiceTest {
             Thread.sleep(50);
         }
         assertEquals("lift", PrepareProtocol.readStatus(status).id);
-        // A second start while it runs is ignored (one Prepare at a time).
+        // A second start of the running title is ignored (one Prepare at a time).
         Thread w = PrepareService.workerThread();
-        sc.withIntent(PrepareService.startIntent(app, "/elsewhere", "99999999", "x")).startCommand(0, 2);
+        sc.withIntent(PrepareService.startIntent(app, "/elsewhere", TID, "x")).startCommand(0, 2);
         assertEquals(w, PrepareService.workerThread());
+        assertTrue(PrepareService.queuedTitleIds().isEmpty());
         sc.withIntent(PrepareService.cancelIntent(app, TID)).startCommand(0, 3);
         waitWorker();
         assertEquals(PrepareProtocol.CANCELLED, PrepareProtocol.readStatus(status).state);
@@ -182,5 +187,148 @@ public class PrepareServiceTest {
         sc.startCommand(0, 1);
         assertEquals(PrepareProtocol.CANCELLED,
                      PrepareProtocol.readStatus(PrepareService.statusFile(app, TID)).state);
+    }
+
+    // ---- Queue ----------------------------------------------------------------------------------------------------
+
+    /** Each title: progress, a second's work, a valid pack under its title ID, ok. */
+    private static final String PACK_SCRIPT = "echo 'XBA_PROGRESS step=1/5 id=identify pct=100 msg=ok'\n"
+            + "sleep 1\n"
+            + "mkdir -p \"$2\" && printf 'ELF!' > \"$2/libtitle.so\"\n"
+            + "tid=$(basename \"$2\")\n"
+            + "echo '{\"format\":1,\"title_id\":\"'$tid'\",\"shell_abi\":1,\"lib\":\"libtitle.so\",\"lib_size\":4}'"
+            + " > \"$2/pack.json\"\n"
+            + "echo \"XBA_RESULT ok pack=$2\"\n";
+
+    private PrepareProtocol.Status status(String tid) {
+        return PrepareProtocol.readStatus(PrepareService.statusFile(app, tid));
+    }
+
+    private void waitState(String tid, String id) throws Exception {
+        long until = System.currentTimeMillis() + 15000;
+        while (System.currentTimeMillis() < until) {
+            PrepareProtocol.Status s = status(tid);
+            if (s != null && id.equals(s.id))
+                return;
+            Thread.sleep(50);
+        }
+        throw new AssertionError(tid + " never reached " + id);
+    }
+
+    @Test
+    public void anotherTitleWaitsAndRunsNext() throws Exception {
+        useScript(PACK_SCRIPT);
+        ServiceController<PrepareService> sc = start();
+        Thread first = PrepareService.workerThread();
+        sc.withIntent(PrepareService.startIntent(app, "/games/b", TID2, "Second")).startCommand(0, 2);
+        assertEquals("the running one goes on", first, PrepareService.workerThread());
+        assertEquals(Collections.singletonList(TID2), PrepareService.queuedTitleIds());
+        PrepareProtocol.Status q = status(TID2);
+        assertNotNull(q);
+        assertTrue(q.queued());
+        PrepareProtocol.Queue file = PrepareProtocol.readQueue(PrepareProtocol.queueFile(app.getFilesDir()));
+        assertEquals(1, file.jobs.size());
+        assertEquals("/games/b", file.jobs.get(0).gameDir);
+        assertEquals("Second", file.jobs.get(0).title);
+        // Starting a waiting title again, or the running one, changes nothing.
+        sc.withIntent(PrepareService.startIntent(app, "/games/b", TID2, "Second")).startCommand(0, 3);
+        sc.withIntent(PrepareService.startIntent(app, "/games/a", TID, "First")).startCommand(0, 4);
+        assertEquals(Collections.singletonList(TID2), PrepareService.queuedTitleIds());
+
+        waitWorker();   // the first ends; its end starts the next
+        Thread second = PrepareService.workerThread();
+        assertTrue("the next one started", second != first);
+        assertEquals(PrepareProtocol.DONE, status(TID).state);
+        assertTrue(PrepareService.queuedTitleIds().isEmpty());
+        assertTrue(PrepareProtocol.readQueue(PrepareProtocol.queueFile(app.getFilesDir())).jobs.isEmpty());
+        assertFalse("still running: not stopped", shadowOf(sc.get()).isStoppedBySelf());
+        waitWorker();
+        assertEquals(PrepareProtocol.DONE, status(TID2).state);
+        assertEquals(Pack.Check.VALID, Pack.check(app.getFilesDir(), TID));
+        assertEquals(Pack.Check.VALID, Pack.check(app.getFilesDir(), TID2));
+        assertTrue(shadowOf(sc.get()).isStoppedBySelf());
+        NotificationManager nm = app.getSystemService(NotificationManager.class);
+        assertNotNull(shadowOf(nm).getNotification(TID, PrepareService.NOTIF_DONE_ID));
+        assertNotNull(shadowOf(nm).getNotification(TID2, PrepareService.NOTIF_DONE_ID));
+    }
+
+    @Test
+    public void nextRunsAfterAFailureToo() throws Exception {
+        useScript("if [ \"$(basename \"$2\")\" = " + TID + " ]; then echo 'XBA_RESULT error code=BOOM msg=x'; exit 1; fi\n"
+                  + PACK_SCRIPT);
+        ServiceController<PrepareService> sc = start();
+        sc.withIntent(PrepareService.startIntent(app, "/games/b", TID2, "Second")).startCommand(0, 2);
+        waitWorker();
+        waitWorker();
+        assertEquals(PrepareProtocol.FAILED, status(TID).state);
+        assertEquals(PrepareProtocol.DONE, status(TID2).state);
+    }
+
+    @Test
+    public void cancelAWaitingTitle() throws Exception {
+        useScript("echo 'XBA_PROGRESS step=3/5 id=lift pct=1 msg=forever'\nwhile :; do sleep 1; done\n");
+        ServiceController<PrepareService> sc = start();
+        waitState(TID, "lift");
+        sc.withIntent(PrepareService.startIntent(app, "/games/b", TID2, "Second")).startCommand(0, 2);
+        assertTrue(status(TID2).queued());
+        sc.withIntent(PrepareService.cancelIntent(app, TID2)).startCommand(0, 3);
+        assertTrue(PrepareService.queuedTitleIds().isEmpty());
+        assertEquals(PrepareProtocol.CANCELLED, status(TID2).state);
+        assertTrue("the running one goes on", PrepareService.busy());
+        assertEquals("lift", status(TID).id);
+        assertFalse(shadowOf(sc.get()).isStoppedBySelf());
+        // A cancel for a title that neither runs nor waits does not stop the running one.
+        sc.withIntent(PrepareService.cancelIntent(app, "99999999")).startCommand(0, 4);
+        assertTrue(PrepareService.busy());
+        sc.withIntent(PrepareService.cancelIntent(app, TID)).startCommand(0, 5);
+        waitWorker();
+        assertEquals(PrepareProtocol.CANCELLED, status(TID).state);
+        assertTrue(shadowOf(sc.get()).isStoppedBySelf());
+    }
+
+    @Test
+    public void destroyCancelsTheWaitingTitles() throws Exception {
+        useScript("echo 'XBA_PROGRESS step=3/5 id=lift pct=1 msg=forever'\nwhile :; do sleep 1; done\n");
+        ServiceController<PrepareService> sc = start();
+        waitState(TID, "lift");
+        sc.withIntent(PrepareService.startIntent(app, "/games/b", TID2, "Second")).startCommand(0, 2);
+        sc.destroy();
+        assertEquals(PrepareProtocol.CANCELLED, status(TID2).state);
+        assertTrue(PrepareProtocol.readQueue(PrepareProtocol.queueFile(app.getFilesDir())).jobs.isEmpty());
+        waitWorker();
+        assertEquals(PrepareProtocol.CANCELLED, status(TID).state);
+    }
+
+    @Test
+    public void aDeadProcessQueueIsDropped() throws Exception {
+        // Left by a process that died: TID2 waited behind another Prepare.
+        PrepareProtocol.Queue q = new PrepareProtocol.Queue();
+        q.add(new PrepareProtocol.Job(TID2, "/games/b", "Second"));
+        PrepareProtocol.writeQueue(PrepareProtocol.queueFile(app.getFilesDir()), q);
+        PrepareProtocol.Status s = new PrepareProtocol.Status();
+        s.state = PrepareProtocol.QUEUED;
+        s.titleId = TID2;
+        PrepareProtocol.writeStatus(PrepareService.statusFile(app, TID2), s);
+
+        useScript(PACK_SCRIPT);
+        start();
+        assertEquals(PrepareProtocol.CANCELLED, status(TID2).state);
+        assertTrue(PrepareService.queuedTitleIds().isEmpty());
+        assertTrue(PrepareProtocol.readQueue(PrepareProtocol.queueFile(app.getFilesDir())).jobs.isEmpty());
+        waitWorker();
+        assertEquals(PrepareProtocol.DONE, status(TID).state);
+        assertEquals("not run", PrepareProtocol.CANCELLED, status(TID2).state);
+    }
+
+    @Test
+    public void cancelWithNothingRunningFixesAStaleQueuedStatus() throws Exception {
+        PrepareProtocol.Status s = new PrepareProtocol.Status();
+        s.state = PrepareProtocol.QUEUED;
+        s.titleId = TID2;
+        PrepareProtocol.writeStatus(PrepareService.statusFile(app, TID2), s);
+        ServiceController<PrepareService> sc =
+                Robolectric.buildService(PrepareService.class, PrepareService.cancelIntent(app, TID2)).create();
+        sc.startCommand(0, 1);
+        assertEquals(PrepareProtocol.CANCELLED, status(TID2).state);
     }
 }

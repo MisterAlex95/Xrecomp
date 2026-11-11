@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="CHIP_QUEUED">En attente</string>
+    <string name="PREPARE_QUEUED_NOTE">En file derrière la préparation d\'un autre jeu : elle démarrera d\'elle-même.</string>
+</resources>

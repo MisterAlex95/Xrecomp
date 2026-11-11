@@ -30,9 +30,13 @@ import java.util.Map;
  * « install » phase), then runs `libxbapython.so -m tools.prepare <game> --android ...` through PrepareRunner, with
  * a partial wake lock. Progress goes to the notification (bar, step, time left, Cancel) and to
  * <files>/prepare/<TID>/status.json, which the launcher polls; the whole output to prepare.log next to it.
- * ACTION_CANCEL stops it (process group SIGTERM, then SIGKILL). One Prepare at a time; a second start while one runs
- * is ignored. Started again after an interruption, it runs the same command: tools.prepare's stamps skip what was
- * done.
+ * ACTION_CANCEL stops it (process group SIGTERM, then SIGKILL). One Prepare at a time: a start for another title
+ * while one runs joins the queue (<files>/prepare/queue.json, PrepareProtocol.Queue; that title's status.json says
+ * « queued »), a start for the running title or one already waiting is ignored; ACTION_CANCEL for a waiting title
+ * takes it out of the queue. When a Prepare ends, whatever its outcome, the next waiting one starts (its own wake
+ * lock). The queue lives in this process: if the process dies, the next start marks the titles it held cancelled
+ * (the launcher shows « queued » without a ":prepare" process as interrupted meanwhile). Started again after an
+ * interruption, a Prepare runs the same command: tools.prepare's stamps skip what was done.
  */
 public class PrepareService extends Service {
     static final String TAG = "xboxrecomp";
@@ -57,7 +61,10 @@ public class PrepareService extends Service {
 
     /** The running job of this process, or null. */
     private static volatile PrepareRunner current;
+    private static volatile String currentTid;
     private static volatile Thread worker;
+    /** The waiting jobs (main thread only); null until this process read the queue file left by an earlier one. */
+    private static PrepareProtocol.Queue queue;
 
     private PowerManager.WakeLock wakeLock;
     private NotificationManager nm;
@@ -95,6 +102,21 @@ public class PrepareService extends Service {
     static Intent startIntent(Context c, String gameDir, String titleId, String title) {
         return new Intent(c, PrepareService.class).setAction(ACTION_START).putExtra(EXTRA_GAME_DIR, gameDir)
                 .putExtra(EXTRA_TITLE_ID, titleId).putExtra(EXTRA_TITLE, title);
+    }
+
+    /** Tests: drops this process's queue (as a new process would start without one). */
+    static void forgetQueue() {
+        queue = null;
+    }
+
+    /** The waiting titles, in order (tests; the launcher reads queue.json). */
+    static java.util.List<String> queuedTitleIds() {
+        java.util.List<String> l = new ArrayList<>();
+        if (queue != null) {
+            for (PrepareProtocol.Job j : queue.jobs)
+                l.add(j.titleId);
+        }
+        return l;
     }
 
     static Intent cancelIntent(Context c, String titleId) {
@@ -136,19 +158,92 @@ public class PrepareService extends Service {
         String title = intent.getStringExtra(EXTRA_TITLE);
         // startForegroundService() needs startForeground() even when nothing new starts.
         goForeground(notification(null));
-        if (busy()) {
-            Log.i(TAG, "prepare: already running, start ignored");
-            return START_NOT_STICKY;
-        }
+        boolean busy = busy();
         if (gameDir == null || titleId == null || titleId.isEmpty()) {
             Log.w(TAG, "prepare: start without a game or title ID");
-            stopForeground(STOP_FOREGROUND_REMOVE);
-            stopSelf(startId);
+            if (!busy) {
+                stopForeground(STOP_FOREGROUND_REMOVE);
+                stopSelf(startId);
+            }
+            return START_NOT_STICKY;
+        }
+        loadQueue();
+        if (busy) {
+            enqueue(new PrepareProtocol.Job(titleId, gameDir, title));
             return START_NOT_STICKY;
         }
         titleName = title == null ? "" : title;
         startJob(gameDir, titleId);
         return START_NOT_STICKY;
+    }
+
+    /**
+     * The queue of this process. The first time, a queue file left by a dead process is emptied and the titles it
+     * held are marked cancelled (their Prepare never started; the launcher offers it again).
+     */
+    private void loadQueue() {
+        if (queue != null)
+            return;
+        queue = new PrepareProtocol.Queue();
+        File f = PrepareProtocol.queueFile(filesDir(this));
+        PrepareProtocol.Queue stale = PrepareProtocol.readQueue(f);
+        for (PrepareProtocol.Job j : stale.jobs)
+            markCancelled(j.titleId, PrepareProtocol.QUEUED);
+        if (f.exists())
+            saveQueue();
+    }
+
+    private void saveQueue() {
+        File f = PrepareProtocol.queueFile(filesDir(this));
+        try {
+            PrepareProtocol.writeQueue(f, queue);
+        } catch (IOException e) {
+            Log.w(TAG, "prepare: cannot write " + f + ": " + e);
+        }
+    }
+
+    /**
+     * A start while a Prepare runs: queued, unless it is the running title (ignored). A title already waiting keeps
+     * its place; its status is written « queued » again (the launcher writes a fresh status before each start).
+     */
+    private void enqueue(PrepareProtocol.Job j) {
+        lastNotifyId = "";   // goForeground(notification(null)) reset the running job's notification: refresh it
+        if (j.titleId.equals(currentTid)) {
+            Log.i(TAG, "prepare: " + j.titleId + " is already running, start ignored");
+            return;
+        }
+        if (queue.add(j))
+            saveQueue();
+        else
+            Log.i(TAG, "prepare: " + j.titleId + " is already queued");
+        PrepareProtocol.Status s = new PrepareProtocol.Status();
+        s.state = PrepareProtocol.QUEUED;
+        s.titleId = j.titleId;
+        s.startedAt = s.updatedAt = System.currentTimeMillis();
+        s.log = logFile(this, j.titleId).getAbsolutePath();
+        File f = statusFile(this, j.titleId);
+        try {
+            PrepareProtocol.writeStatus(f, s);
+        } catch (IOException e) {
+            Log.w(TAG, "prepare: cannot write " + f + ": " + e);
+        }
+        Log.i(TAG, "prepare: " + j.titleId + " queued (" + queue.jobs.size() + " waiting)");
+    }
+
+    /** Sets titleId's status.json to cancelled when its state is one of from (a Prepare that will not run). */
+    private void markCancelled(String titleId, String... from) {
+        File f = statusFile(this, titleId);
+        PrepareProtocol.Status s = PrepareProtocol.readStatus(f);
+        if (s == null || !java.util.Arrays.asList(from).contains(s.state))
+            return;
+        s.state = PrepareProtocol.CANCELLED;
+        s.code = PrepareRunner.CANCELLED_CODE;
+        s.updatedAt = System.currentTimeMillis();
+        try {
+            PrepareProtocol.writeStatus(f, s);
+        } catch (IOException e) {
+            Log.w(TAG, "prepare: cannot write " + f + ": " + e);
+        }
     }
 
     private void goForeground(Notification n) {
@@ -159,27 +254,29 @@ public class PrepareService extends Service {
     }
 
     private void onCancel(String titleId) {
+        loadQueue();
+        if (titleId != null && queue.remove(titleId)) {
+            saveQueue();
+            markCancelled(titleId, PrepareProtocol.QUEUED);
+            Log.i(TAG, "prepare: " + titleId + " taken out of the queue");
+            if (!busy())
+                stopSelf();
+            return;
+        }
         PrepareRunner r = current;
         if (r != null && busy()) {
+            if (titleId != null && !titleId.isEmpty() && !titleId.equals(currentTid)) {
+                Log.i(TAG, "prepare: cancel for " + titleId + ", which neither runs nor waits: ignored");
+                return;
+            }
             Log.i(TAG, "prepare: cancel requested");
             r.cancel();
             return;
         }
-        // Nothing runs here (the process was restarted): a status left « running » by a dead process is cancelled.
-        if (titleId != null) {
-            File f = statusFile(this, titleId);
-            PrepareProtocol.Status s = PrepareProtocol.readStatus(f);
-            if (s != null && s.running()) {
-                s.state = PrepareProtocol.CANCELLED;
-                s.code = PrepareRunner.CANCELLED_CODE;
-                s.updatedAt = System.currentTimeMillis();
-                try {
-                    PrepareProtocol.writeStatus(f, s);
-                } catch (IOException e) {
-                    Log.w(TAG, "prepare: cannot write " + f + ": " + e);
-                }
-            }
-        }
+        // Nothing runs here (the process was restarted): a status left « running » or « queued » by a dead process is
+        // cancelled.
+        if (titleId != null)
+            markCancelled(titleId, PrepareProtocol.RUNNING, PrepareProtocol.QUEUED);
         stopSelf();
     }
 
@@ -208,6 +305,7 @@ public class PrepareService extends Service {
                 () -> Pack.check(filesDir, titleId) == Pack.Check.VALID ? null : PrepareRunner.PACK_INVALID,
                 this::onStatus);
         current = runner;
+        currentTid = titleId;
         PowerManager pm = getSystemService(PowerManager.class);
         if (pm != null) {
             wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "xboxrecomp:prepare");
@@ -336,12 +434,24 @@ public class PrepareService extends Service {
 
     private void onJobEnd(PrepareProtocol.Status s) {
         current = null;
+        currentTid = null;
         if (wakeLock != null && wakeLock.isHeld())
             wakeLock.release();
         wakeLock = null;
-        stopForeground(STOP_FOREGROUND_REMOVE);
+        // One end notification per title (tag = title ID): a queue's outcomes do not replace each other.
         if (nm != null && !PrepareProtocol.CANCELLED.equals(s.state))
-            nm.notify(NOTIF_DONE_ID, endNotification(s));
+            nm.notify(s.titleId, NOTIF_DONE_ID, endNotification(s));
+        PrepareProtocol.Job next = queue == null ? null : queue.pop();
+        if (next != null) {
+            saveQueue();
+            Log.i(TAG, "prepare: next in the queue: " + next.titleId);
+            titleName = next.title;
+            lastNotifyId = "";
+            goForeground(notification(null));
+            startJob(next.gameDir, next.titleId);
+            return;
+        }
+        stopForeground(STOP_FOREGROUND_REMOVE);
         stopSelf();
     }
 
@@ -352,6 +462,13 @@ public class PrepareService extends Service {
             r.cancel();   // the system stops us: do not leave compilers behind
         if (wakeLock != null && wakeLock.isHeld())
             wakeLock.release();
+        // The waiting titles will not run: cancelled, so that a live process does not show them queued for ever.
+        if (queue != null && !queue.jobs.isEmpty()) {
+            for (PrepareProtocol.Job j : queue.jobs)
+                markCancelled(j.titleId, PrepareProtocol.QUEUED);
+            queue.jobs.clear();
+            saveQueue();
+        }
         super.onDestroy();
     }
 

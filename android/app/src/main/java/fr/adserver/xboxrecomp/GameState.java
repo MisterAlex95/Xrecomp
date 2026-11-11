@@ -5,7 +5,7 @@ package fr.adserver.xboxrecomp;
  * about it (record, scan item, pack, Prepare status, the running game, the toolchain). No I/O here: the caller
  * gathers Facts, so the JVM tests cover every combination.
  *
- * Chip priority (first that applies): Running; Preparing; Importing; then, with the game's files present,
+ * Chip priority (first that applies): Running; Preparing; Queued; Importing; then, with the game's files present,
  * Prepare failed, Pack invalid, Ready, Needs preparing (without the on-device toolchain, Ready: the shell runs the
  * game its own way); without them, Not imported / Needs copying / No file access (a source is there), else
  * Source gone (an in-place folder that vanished), Data missing (a recomp.cfg folder that vanished), or GONE: neither
@@ -15,7 +15,7 @@ final class GameState {
     private GameState() {}
 
     enum Chip {
-        RUNNING, PREPARING, IMPORTING, PREPARE_FAILED, PACK_INVALID, READY, NEEDS_PREPARING, NOT_IMPORTED,
+        RUNNING, PREPARING, QUEUED, IMPORTING, PREPARE_FAILED, PACK_INVALID, READY, NEEDS_PREPARING, NOT_IMPORTED,
         NEEDS_COPYING, NO_FILE_ACCESS, SOURCE_GONE, DATA_MISSING, GONE
     }
 
@@ -64,6 +64,8 @@ final class GameState {
         LauncherActivity.Prep p = prep(f.toolchain, packValid, f.prepare, f.prepareFresh, f.prepareProcess);
         if (p == LauncherActivity.Prep.RUNNING)
             return Chip.PREPARING;
+        if (p == LauncherActivity.Prep.QUEUED)
+            return Chip.QUEUED;
         if (f.titleId.equals(f.importingTid))
             return Chip.IMPORTING;
         if (f.hasData) {
@@ -104,9 +106,10 @@ final class GameState {
     }
 
     /**
-     * The Prepare state of a title whose files are present (as LauncherActivity.prep): OFF without the toolchain;
-     * RUNNING while a live Prepare reports; PLAYABLE with a valid pack built from the active XBE; else from the last
-     * outcome.
+     * The Prepare state of a title whose files are present (LauncherActivity.prep, plus the queue): OFF without the
+     * toolchain; RUNNING while a live Prepare reports; QUEUED while it waits behind another (a « queued » status with
+     * no ":prepare" process was cut off: INTERRUPTED); PLAYABLE with a valid pack built from the active XBE; else from
+     * the last outcome.
      */
     static LauncherActivity.Prep prep(boolean toolchain, boolean packValid, PrepareProtocol.Status s,
                                       boolean statusFresh, boolean prepareProcess) {
@@ -114,6 +117,8 @@ final class GameState {
             return LauncherActivity.Prep.OFF;
         if (s != null && s.running() && (statusFresh || prepareProcess))
             return LauncherActivity.Prep.RUNNING;
+        if (s != null && s.queued())
+            return prepareProcess ? LauncherActivity.Prep.QUEUED : LauncherActivity.Prep.INTERRUPTED;
         if (packValid)
             return LauncherActivity.Prep.PLAYABLE;
         if (s == null)

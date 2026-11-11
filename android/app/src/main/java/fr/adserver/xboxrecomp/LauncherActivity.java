@@ -122,7 +122,7 @@ public class LauncherActivity extends Activity {
      * The on-device Prepare for the current game (docs/android/prepare.md): OFF when this APK has no toolchain or
      * the game is not READY (the launcher then behaves as before), PLAYABLE when its pack is valid.
      */
-    enum Prep { OFF, NEEDED, RUNNING, FAILED, CANCELLED, INTERRUPTED, PLAYABLE }
+    enum Prep { OFF, NEEDED, RUNNING, QUEUED, FAILED, CANCELLED, INTERRUPTED, PLAYABLE }
 
     /** Free internal storage a Prepare needs (work files, objects, the pack). */
     static final long PREPARE_MIN_FREE = 2_000_000_000L;
@@ -1474,6 +1474,9 @@ public class LauncherActivity extends Activity {
         case RUNNING:
             c.set(getString(R.string.CHIP_PREPARING), Theme.OK);
             break;
+        case QUEUED:
+            c.set(getString(R.string.CHIP_QUEUED), Theme.ACCENT);
+            break;
         case FAILED:
             c.set(getString(R.string.CHIP_PREPARE_FAILED), Theme.ERROR);
             break;
@@ -1488,6 +1491,10 @@ public class LauncherActivity extends Activity {
             Prep p = prep();
             if (p == Prep.RUNNING || p == Prep.FAILED) {
                 go(Screen.PREPARE);
+                return;
+            }
+            if (p == Prep.QUEUED) {   // it starts by itself; a new start would overwrite its « queued » status
+                setNote(getString(R.string.PREPARE_QUEUED_NOTE), NOTE_INFO);
                 return;
             }
             if (p != Prep.OFF && p != Prep.PLAYABLE) {
@@ -2088,6 +2095,8 @@ public class LauncherActivity extends Activity {
         PrepareProtocol.Status s = PrepareProtocol.readStatus(PrepareService.statusFile(this, tid));
         if (statusAlive(s))
             return Prep.RUNNING;
+        if (s != null && s.queued())   // waiting behind another title's Prepare; no :prepare process = cut off
+            return prepareProcessAlive() ? Prep.QUEUED : Prep.INTERRUPTED;
         if (Pack.check(getFilesDir(), tid) == Pack.Check.VALID)
             return Prep.PLAYABLE;
         if (s == null)
