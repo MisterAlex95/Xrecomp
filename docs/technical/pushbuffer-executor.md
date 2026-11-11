@@ -281,7 +281,10 @@ enough. Burnout 3 did, at its Crash Nav menu, with the main thread in
 `KeWaitForSingleObject` under D3D's fence wait.
 
 Turn the walk on for a project that delivers the GPU's software-method
-interrupt, or to bring up a title the segment scan draws wrongly.
+interrupt, or to bring up a title the segment scan draws wrongly. For the fence
+wait that is method 5: a software-method hook that sets the fence event with
+`xbox_KeSetGuestEvent()` (see [D3D Software Methods](#d3d-software-methods)),
+with `RECOMP_TITLE_KEVENTS=1` when D3D built the event itself.
 
 ## The Segment Scan Follows Jumps
 
@@ -327,7 +330,7 @@ say which method, the rest is its payload. Seen in *Fable* (dispatcher
 | Type | Handler does |
 |---|---|
 | 1 | swap bookkeeping: the flip hold uses its interval (`nv2a_flip_hold.c`) |
-| 5 | `KeSetEvent` on a fence event |
+| 5 | `KeSetEvent` on a fence event: the one D3D's `BlockOnTime` sleeps on, with no timeout, after patching this method in at the fence it waits for when the GPU is more than 0x2000 bytes behind. Often a KEVENT D3D built itself (no `KeInitializeEvent`), so it needs `RECOMP_TITLE_KEVENTS=1`; a hook sets it with `xbox_KeSetGuestEvent()` (`kernel.h`) |
 | 6, 7 | `D3DDevice_InsertCallback`: calls `[0x401A88]` with `[0x40186C]` (methods `0x1D8C`/`0x1D90` pushed just before) |
 | 8, 9 | PGRAPH RDI writes, a register poke |
 | 0xC, 0xD, 0xE | deferred `RunPushBuffer`: patch the return `JUMP` (and fixups) of a recorded pushbuffer that is run again before the GPU passed its previous run |

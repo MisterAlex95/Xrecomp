@@ -2058,6 +2058,23 @@ static HANDLE ke_guest_event_prepare(uint32_t guest_va, int *type)
     return h;
 }
 
+/* Set a KEVENT the title built itself, from a host thread: a device model
+ * standing in for the interrupt that calls KeSetEvent on the console (D3D's
+ * software method 5, for one). Same effect as the KeSetEvent bridge on such an
+ * event. Returns 0, and touches nothing, when the object is not one
+ * (RECOMP_TITLE_KEVENTS off, a KeInitializeEvent shadow, a bad header). */
+int xbox_KeSetGuestEvent(uint32_t guest_va)
+{
+    int type;
+    HANDLE ge = ke_guest_event(guest_va, &type);
+
+    if (!ge)
+        return 0;
+    BRIDGE_MEM32(guest_va + 4) = 1;
+    SetEvent(ge);
+    return 1;
+}
+
 /* ── KeSetEvent (ordinal 145) ────────────────────────────── */
 static void bridge_KeSetEvent(void)
 {

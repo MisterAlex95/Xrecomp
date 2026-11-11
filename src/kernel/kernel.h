@@ -521,6 +521,14 @@ ULONG_PTR xbox_resolve_ordinal(ULONG ordinal);
 /* Kernel bridge (kernel_bridge.c) - resolve kernel thunks in Xbox memory */
 void xbox_kernel_bridge_init(void);
 
+/* Set a KEVENT the title built by writing its header (RECOMP_TITLE_KEVENTS=1)
+ * from a host thread, as the console's interrupt handlers do: SignalState 1 in
+ * guest memory and the host event set, so a guest KeWaitForSingleObject on it
+ * returns. For title profiles and device models (D3D software method 5 sets
+ * the fence event BlockOnTime sleeps on). Returns 1 when set, 0 when the
+ * object is not such an event (switch off, KeInitializeEvent'ed, bad header). */
+int xbox_KeSetGuestEvent(uint32_t guest_va);
+
 /**
  * Per-title kernel ordinal remap.
  *
