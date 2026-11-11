@@ -276,6 +276,24 @@ static void emit_fetch(Sb *b, const Nv2aGlShaderKey *k, uint32_t st)
         sb(b, "  vec4 T%u = vec4(0.0, 0.0, 0.0, 1.0);\n", st);
         return;
     case 1: case 2:                               /* PROJECT2D / 3D */
+        if (kind == NV2A_GL_TEX_SHADOW16 || kind == NV2A_GL_TEX_SHADOW24) {
+            /* xemu psh.c psh_append_shadowmap: PROJECT3D compares the
+             * stored depth with r/q clamped to the depth format's range
+             * (the sampler's compare function: SET_SHADOW_DEPTH_FUNC with
+             * its operands swapped, nv2a_gl.c bind_shadow); PROJECT2D
+             * compares with 0. Window depth is stored as z/zmax, so the
+             * reference is normalised the same way. */
+            const char *zmax = kind == NV2A_GL_TEX_SHADOW16 ? "65535.0" : "16777215.0";
+            sb(b, "  float q%u = v_t%u.w != 0.0 ? v_t%u.w : 1.0;\n", st, st, st);
+            if (mode == 2)
+                sb(b, "  float r%u = clamp(v_t%u.z / q%u, 0.0, %s) / %s;\n",
+                   st, st, st, zmax, zmax);
+            else
+                sb(b, "  float r%u = 0.0;\n", st);
+            sb(b, "  vec4 T%u = vec4(texture(u_t%u, vec3(v_t%u.xy / q%u * u_tscale[%u], r%u)));\n",
+               st, st, st, st, st, st);
+            return;
+        }
         if (kind == NV2A_GL_TEX_NONE) {
             sb(b, "  vec4 T%u = vec4(1.0);\n", st);  /* unusable: white */
             return;
@@ -341,7 +359,9 @@ size_t nv2a_gl_fragment_body(const Nv2aGlShaderKey *k, char *buf, size_t cap)
            "in vec4 v_t0;\nin vec4 v_t1;\nin vec4 v_t2;\nin vec4 v_t3;\n");
     for (st = 0; st < 4; st++)
         sb(&b, "uniform %s u_t%u;\n",
-           k->tex_kind[st] == NV2A_GL_TEX_CUBE ? "samplerCube" : "sampler2D", st);
+           k->tex_kind[st] == NV2A_GL_TEX_CUBE ? "samplerCube"
+           : k->tex_kind[st] == NV2A_GL_TEX_SHADOW16 || k->tex_kind[st] == NV2A_GL_TEX_SHADOW24
+           ? "sampler2DShadow" : "sampler2D", st);
     sb(&b, "uniform vec2 u_tscale[4];\nuniform vec4 u_c0[8];\nuniform vec4 u_c1[8];\n"
            "uniform vec4 u_fc0;\nuniform vec4 u_fc1;\nuniform vec4 u_fogc;\n"
            "uniform float u_aref;\n"

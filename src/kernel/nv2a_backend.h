@@ -115,6 +115,13 @@ typedef struct {
     /* SET_ZPASS_PIXEL_COUNT_ENABLE: a visibility test is counting the pixels
      * this batch passes the depth test with (see zpass_read). */
     uint32_t zpass_enable;
+    /* SET_POLY_OFFSET_FILL_ENABLE, SET_POLYGON_OFFSET_SCALE_FACTOR / _BIAS:
+     * glPolygonOffset's factor and units, the units counted in the zeta
+     * format's own steps (1/0xFFFF of the range for Z16). Shadow-map
+     * passes push their depth back with these. The CPU rasteriser ignores
+     * them. */
+    uint32_t poly_offset_fill;
+    float    poly_offset_factor, poly_offset_units;
 } Nv2aRenderState;
 
 /* A vertex as the CPU transform left it, for back ends with
@@ -158,6 +165,14 @@ typedef struct {
     uint32_t     fog_color;         /* 0xAARRGGBB (converted from FOG_COLOR) */
     uint32_t     clip_plane_mode;   /* SET_SHADER_CLIP_PLANE_MODE */
     Nv2aTexStage stage[4];
+    /* SET_SHADOW_DEPTH_FUNC (0x1E6C): 0 NEVER .. 7 ALWAYS, in GL's order
+     * (GL_NEVER + value). A stage sampling a depth texture format
+     * (0x2A-0x31, a shadow map) in PROJECT3D mode reads 1 where
+     * "stored depth <func> r/q" holds, r/q clamped to the depth format's
+     * range (xemu psh.c, psh_append_shadowmap), else 0; in PROJECT2D mode
+     * "stored depth <func> 0". The CPU rasteriser reads such stages as
+     * white. */
+    uint32_t     shadow_func;
 } Nv2aPixelState;
 
 /* A vertex-program batch for a back end with NV2A_BACKEND_CAP_PROGRAM.

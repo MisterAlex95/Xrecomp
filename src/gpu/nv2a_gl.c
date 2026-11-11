@@ -14,8 +14,8 @@
  *
 
  *   render targets  one RGBA8 texture + FBO per colour surface, created from
- *                   the guest bytes; depth/stencil renderbuffers per zeta
- *                   surface. A texture over a target samples the target
+ *                   the guest bytes; depth/stencil textures per zeta
+ *                   surface (sampled with a compare as shadow maps). A texture over a target samples the target
  *                   directly. Pixels go back to guest memory only when
  *                   someone else needs them: the presented surface at the
  *                   flip (the presenter and RECOMP_FB_DUMP read guest
@@ -73,7 +73,7 @@ static GLuint s_vao, s_vbo, s_vs;
 static struct {
     uint32_t draws, tris, clears, uploads, upload_kb, readbacks, compiles, hashes_kb;
     uint32_t vsh_draws, vsh_kb;     /* vertex-program batches, their upload */
-    uint32_t rt_creates, relayouts, rt_direct, rt_copies, rt_grows;
+    uint32_t rt_creates, relayouts, rt_direct, rt_copies, rt_grows, shadow_binds;
 } s_st;
 
 /* RECOMP_GPU_RT_RELAYOUT_READBACK=1: read a target back when the title
@@ -277,7 +277,7 @@ typedef struct {
     uint32_t va, pitch, bpp, w, h, swz;
     uint32_t gw, gh;                      /* the GL texture's size (>= w, h) */
     uint32_t cfmt;                        /* SET_SURFACE_FORMAT colour format (bits 0-3) */
-    GLuint tex, fbo, depth;               /* depth: renderbuffer attached now */
+    GLuint tex, fbo, depth;               /* depth: depth texture attached now */
     int dirty;
     uint32_t used;                        /* frame last drawn into */
     uint32_t serial;                      /* s_rt_serial at the last colour write */
@@ -289,11 +289,16 @@ typedef struct {
     GlSamp copy_samp;
 } GlRT;
 
+/* Depth/stencil per zeta surface: a D24S8 texture (not a renderbuffer), so
+ * a shadow map drawn into it can be sampled with a depth compare. */
 typedef struct {
     uint32_t va, w, h;
-    GLuint rb;
+    GLuint tex;
     GLuint fbo;                           /* depth-only framebuffer, made on demand */
     uint32_t used, bytes;                 /* frame last bound; guest bytes it shadows */
+    GlSamp samp;                          /* sampler state of tex */
+    GLint cmp;                            /* GL_TEXTURE_COMPARE_FUNC set (0: none yet) */
+    uint32_t sampled;                     /* frame last sampled as a shadow map */
 } GlDepth;
 
 /* Counts colour writes into any target: a texture over a target is current
@@ -597,35 +602,37 @@ static void depth_free(GlDepth *d)
 
     /* Colour targets that have it attached drop it (re-attached at bind). */
     for (i = 0; i < NV_GL_MAX_RT; i++)
-        if (s_rt[i].depth == d->rb && d->rb) {
+        if (s_rt[i].depth == d->tex && d->tex) {
             glBindFramebuffer(GL_FRAMEBUFFER, s_rt[i].fbo);
-            glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT,
-                                      GL_RENDERBUFFER, 0);
+            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT,
+                                   GL_TEXTURE_2D, 0, 0);
             s_rt[i].depth = 0;
         }
     if (d->fbo) glDeleteFramebuffers(1, &d->fbo);
-    if (d->rb) glDeleteRenderbuffers(1, &d->rb);
+    if (d->tex) glDeleteTextures(1, &d->tex);
     memset(d, 0, sizeof *d);
 }
 
 /* Depth/stencil for zeta surface `va`, at least w x h. The CPU rasteriser
- * keeps one float buffer per zeta address; so does this, as D24S8. */
-static GLuint depth_get(uint32_t va, uint32_t w, uint32_t h, uint32_t zbpp)
+ * keeps one float buffer per zeta address; so does this, as a D24S8
+ * texture. */
+static GlDepth *depth_get(uint32_t va, uint32_t w, uint32_t h, uint32_t zbpp)
 {
     int i, slot = -1;
+    GlDepth *d;
 
     for (i = 0; i < NV_GL_MAX_DEPTH; i++) {
-        GlDepth *d = &s_depth[i];
-        if (d->rb && d->va == va) {
+        d = &s_depth[i];
+        if (d->tex && d->va == va) {
             if (d->w >= w && d->h >= h) {
                 d->used = s_frame;
-                return d->rb;
+                return d;
             }
             depth_free(d);
             slot = i;
             break;
         }
-        if (!d->rb && slot < 0)
+        if (!d->tex && slot < 0)
             slot = i;
     }
     if (slot < 0) {
@@ -633,16 +640,21 @@ static GLuint depth_get(uint32_t va, uint32_t w, uint32_t h, uint32_t zbpp)
         slot = next++ % NV_GL_MAX_DEPTH;
         depth_free(&s_depth[slot]);
     }
-    s_depth[slot].va = va;
-    s_depth[slot].used = s_frame;
-    s_depth[slot].bytes = w * h * zbpp;
-    s_depth[slot].w = w < 640 ? 640 : w;
-    s_depth[slot].h = h < 480 ? 480 : h;
-    glGenRenderbuffers(1, &s_depth[slot].rb);
-    glBindRenderbuffer(GL_RENDERBUFFER, s_depth[slot].rb);
-    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8,
-                          (GLsizei)s_depth[slot].w, (GLsizei)s_depth[slot].h);
-    return s_depth[slot].rb;
+    d = &s_depth[slot];
+    d->va = va;
+    d->used = s_frame;
+    d->bytes = w * h * zbpp;
+    d->w = w < 640 ? 640 : w;
+    d->h = h < 480 ? 480 : h;
+    d->samp.wrap_s = d->samp.wrap_t = d->samp.filter = d->samp.swz_a = -1;
+    d->cmp = 0;
+    glGenTextures(1, &d->tex);
+    glBindTexture(GL_TEXTURE_2D, d->tex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH24_STENCIL8, (GLsizei)d->w, (GLsizei)d->h, 0,
+                 GL_DEPTH_STENCIL, GL_UNSIGNED_INT_24_8, NULL);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_COMPARE_MODE, GL_COMPARE_REF_TO_TEXTURE);
+    return d;
 }
 
 /* What a draw or clear goes into: a colour target (rt) with its depth, or,
@@ -660,24 +672,17 @@ typedef struct {
 static int bind_depth_only(const Nv2aSurface *s, uint32_t zeta_va, GlTarget *t)
 {
     uint32_t w = s->clip_x + s->width, h = s->clip_y + s->height;
-    GlDepth *d = NULL;
-    GLuint rb;
-    int i;
+    GlDepth *d;
 
     if (!zeta_va || !w || !h || w > 4096 || h > 4096)
         return 0;
-    rb = depth_get(zeta_va, w, h, zeta_bpp(s));
-    for (i = 0; i < NV_GL_MAX_DEPTH; i++)
-        if (s_depth[i].rb == rb)
-            d = &s_depth[i];
-    if (!d)
-        return 0;
+    d = depth_get(zeta_va, w, h, zeta_bpp(s));
     if (!d->fbo) {
         const GLenum none = GL_NONE;
         glGenFramebuffers(1, &d->fbo);
         glBindFramebuffer(GL_FRAMEBUFFER, d->fbo);
-        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT,
-                                  GL_RENDERBUFFER, rb);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT,
+                               GL_TEXTURE_2D, d->tex, 0);
         glDrawBuffers(1, &none);
         glReadBuffer(GL_NONE);
         if (s_verbose)
@@ -707,10 +712,10 @@ static int bind_target(const Nv2aSurface *s, uint32_t zeta_va, GlTarget *t)
     if (!(r = rt_get(s)))
         return 0;
     glBindFramebuffer(GL_FRAMEBUFFER, r->fbo);
-    d = depth_get(zeta_va, r->gw, r->gh, zeta_bpp(s));
+    d = depth_get(zeta_va, r->gw, r->gh, zeta_bpp(s))->tex;
     if (d != r->depth) {
-        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT,
-                                  GL_RENDERBUFFER, d);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT,
+                               GL_TEXTURE_2D, d, 0);
         r->depth = d;
     }
     glViewport(0, 0, (GLsizei)r->gw, (GLsizei)r->gh);
@@ -935,7 +940,7 @@ static int tex_gpu_overlap(uint32_t va, uint32_t bytes, uint32_t *serial)
     *serial = 0;
     for (i = 0; i < NV_GL_MAX_DEPTH; i++) {
         const GlDepth *d = &s_depth[i];
-        if (d->rb && s_frame - d->used <= 2
+        if (d->tex && s_frame - d->used <= 2
             && va < d->va + d->bytes && d->va < va + bytes)
             return 2;
     }
@@ -1285,7 +1290,8 @@ static GLenum stencil_op(uint32_t op)
     }
 }
 
-static void apply_state(const Nv2aRenderState *rs, uint32_t shade, uint32_t bpp)
+static void apply_state(const Nv2aRenderState *rs, uint32_t shade, uint32_t bpp,
+                        int zeta16)
 {
     uint32_t cm = rs->color_mask;
 
@@ -1339,6 +1345,16 @@ static void apply_state(const Nv2aRenderState *rs, uint32_t shade, uint32_t bpp)
         glFrontFace(rs->front_face == GL_CCW ? GL_CW : GL_CCW);
     } else {
         glDisable(GL_CULL_FACE);
+    }
+    /* Polygon offset (shadow-map passes push their depth back). The units
+     * count the zeta format's steps; the depth buffer is D24S8 whatever the
+     * format, so a Z16 surface's step is 256 of ours. */
+    if (rs->poly_offset_fill && shade != NV2A_SHADE_REPLACE) {
+        glEnable(GL_POLYGON_OFFSET_FILL);
+        glPolygonOffset(rs->poly_offset_factor,
+                        rs->poly_offset_units * (zeta16 ? 256.0f : 1.0f));
+    } else {
+        glDisable(GL_POLYGON_OFFSET_FILL);
     }
     /* A 16-bit surface has no alpha: keep the target's at 1, as the CPU
      * path reads it back. */
@@ -1530,6 +1546,69 @@ static void rt_bind_as_texture(GlRT *r, const Nv2aPixelState *ps, const Nv2aText
     s_st.rt_direct++;
 }
 
+/* A depth texture format (a shadow map): its depth range's kind, else 0. */
+static uint32_t shadow_kind(uint32_t color)
+{
+    switch (color) {
+    case 0x2C: case 0x2D: case 0x30: case 0x31:   /* SZ/LU DEPTH_Y16 fixed/float */
+        return NV2A_GL_TEX_SHADOW16;
+    case 0x2A: case 0x2B: case 0x2E: case 0x2F:   /* SZ/LU DEPTH_X8_Y24 fixed/float */
+        return NV2A_GL_TEX_SHADOW24;
+    default:
+        return 0;
+    }
+}
+
+/* A stage reading a depth format in PROJECT2D/3D mode whose address is a
+ * zeta surface the GPU holds: bind that depth texture with a depth compare
+ * (SET_SHADOW_DEPTH_FUNC). Coordinates scale to the GL texture's size. */
+static int bind_shadow(const Nv2aPixelState *ps, const Nv2aTexture *t, int unit,
+                       float *tscale)
+{
+    GlDepth *d = NULL;
+    /* The NV2A compares "stored depth <func> r/q" (xemu psh.c); GL compares
+     * "r <func> stored depth": the operands swap, so LESS reads as GREATER,
+     * LEQUAL as GEQUAL and back (Fable's GREATER: lit where r/q < stored). */
+    static const GLint swapped[8] = { GL_NEVER, GL_GREATER, GL_EQUAL, GL_GEQUAL,
+                                      GL_LESS, GL_NOTEQUAL, GL_LEQUAL, GL_ALWAYS };
+    GLint cmp = swapped[ps->shadow_func & 7];
+    int i;
+
+    for (i = 0; i < NV_GL_MAX_DEPTH; i++)
+        if (s_depth[i].tex && s_depth[i].va == t->offset)
+            d = &s_depth[i];
+    if (!d || t->width > d->w || t->height > d->h)
+        return 0;
+    glActiveTexture(GL_TEXTURE0 + (GLenum)unit);
+    glBindTexture(GL_TEXTURE_2D, d->tex);
+    samp_set(GL_TEXTURE_2D, &d->samp, tex_filter(t, ps->shade),
+             wrap_mode(t->addr_u, (int)t->border_color),
+             wrap_mode(t->addr_v, (int)t->border_color), t->border, GL_ALPHA);
+    if (d->cmp != cmp) {
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_COMPARE_FUNC, cmp);
+        d->cmp = cmp;
+    }
+    if (d3d8_format_is_swizzled(t->color)) {
+        tscale[0] = (float)t->width / (float)d->w;
+        tscale[1] = (float)t->height / (float)d->h;
+    } else {
+        tscale[0] = 1.0f / (float)d->w;
+        tscale[1] = 1.0f / (float)d->h;
+    }
+    d->sampled = s_frame;
+    s_bound[unit] = NULL;
+    s_st.shadow_binds++;
+    if (s_verbose) {
+        static int said;
+        if (said++ < 2)
+            fprintf(stderr, "  [GPUGL] shadow map 0x%08X stage %d: %ux%u pitch %u fmt 0x%X func %u"
+                    " filter 0x%X addr %u/%u border %u/0x%08X, depth %ux%u\n",
+                    t->offset, unit, t->width, t->height, t->pitch, t->color, ps->shadow_func,
+                    t->filter, t->addr_u, t->addr_v, t->border_color, t->border, d->w, d->h);
+    }
+    return 1;
+}
+
 static void bind_stage_textures(const Nv2aPixelState *ps, uint32_t kind[4], float tscale[8])
 {
     uint32_t st;
@@ -1549,6 +1628,14 @@ static void bind_stage_textures(const Nv2aPixelState *ps, uint32_t kind[4], floa
             continue;
         if (ps->shade == NV2A_SHADE_COMBINERS && mode == 3 && ts->tex.cube)
             cube = 1;
+        if (ps->shade == NV2A_SHADE_COMBINERS && (mode == 1 || mode == 2)
+            && shadow_kind(ts->tex.color)) {
+            /* A shadow map. Not drawn by the GPU: white, as before (the
+             * decoder knows no depth format). */
+            if (bind_shadow(ps, &ts->tex, (int)st, &tscale[st * 2]))
+                kind[st] = shadow_kind(ts->tex.color);
+            continue;
+        }
         if ((r = rt_for_texture(&ts->tex, cube, &alpha)) != NULL) {
             rt_bind_as_texture(r, ps, &ts->tex, (int)st, alpha, &tscale[st * 2]);
             kind[st] = NV2A_GL_TEX_2D;
@@ -1693,7 +1780,7 @@ static void gl_draw(const Nv2aSurface *s, const Nv2aBatch *b)
     if (!bind_target(s, rs->zeta_va, &t))
         return;
     break_feedback(t.rt);
-    apply_state(rs, ps->shade, t.bpp);
+    apply_state(rs, ps->shade, t.bpp, ((s->format >> 4) & 0xF) == 1);
     set_near_mode(0, 0.0f);
     glUseProgram(p->prog);
     v[0] = 2.0f / (float)t.w;
@@ -1788,7 +1875,7 @@ static int gl_draw_program(const Nv2aSurface *s, const Nv2aBatch *b)
     if (!bind_target(s, rs->zeta_va, &t))
         return 1;                   /* gl_draw drops these too */
     break_feedback(t.rt);
-    apply_state(rs, ps->shade, t.bpp);
+    apply_state(rs, ps->shade, t.bpp, ((s->format >> 4) & 0xF) == 1);
     zmax = zmax_of(s->format);
     zmin = rs->depth_min;
     if (!(zmin >= 0.0f && zmin < zmax))
@@ -1883,7 +1970,7 @@ static void gl_reset_objects(int lost)
         }
         for (i = 0; i < NV_GL_MAX_DEPTH; i++) {
             if (s_depth[i].fbo) glDeleteFramebuffers(1, &s_depth[i].fbo);
-            if (s_depth[i].rb) glDeleteRenderbuffers(1, &s_depth[i].rb);
+            if (s_depth[i].tex) glDeleteTextures(1, &s_depth[i].tex);
         }
         for (i = 0; i < NV_GL_MAX_TEX; i++)
             if (s_tex[i].tex) glDeleteTextures(1, &s_tex[i].tex);
@@ -2098,11 +2185,11 @@ static void gl_flip(void)
         fprintf(stderr, "  [GPUGL] frame %u: %u draws (%u vertex programs, %u KB),"
                         " %u tris, %u clears, %u readbacks,"
                         " targets: %u created, %u relayouts, %u grown, %u sampled directly"
-                        " (%u copies), %u uploads (%u KB), %u KB hashed, %d textures,"
+                        " (%u copies), %u shadow maps, %u uploads (%u KB), %u KB hashed, %d textures,"
                         " %d targets, %d programs (%u compiled)\n",
                 s_frame, s_st.draws, s_st.vsh_draws, s_st.vsh_kb, s_st.tris,
                 s_st.clears, s_st.readbacks, s_st.rt_creates, s_st.relayouts, s_st.rt_grows,
-                s_st.rt_direct, s_st.rt_copies,
+                s_st.rt_direct, s_st.rt_copies, s_st.shadow_binds,
                 s_st.uploads, s_st.upload_kb, s_st.hashes_kb, s_ntex, nrt, nprog,
                 s_st.compiles);
         memset(&s_st, 0, sizeof s_st);

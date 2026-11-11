@@ -1074,6 +1074,9 @@ static void current_render_state(Nv2aRenderState *r)
     r->stencil_zfail     = s_reg[0x0374 / 4];        /* SET_STENCIL_OP_ZFAIL */
     r->stencil_zpass     = s_reg[0x0378 / 4];        /* SET_STENCIL_OP_ZPASS */
     r->zpass_enable      = zpass_mode() == ZPASS_ALWAYS ? 0 : s_gpu.zpass_enable;
+    r->poly_offset_fill  = s_reg[0x0338 / 4];        /* SET_POLY_OFFSET_FILL_ENABLE */
+    r->poly_offset_factor = reg_f(0x0384);           /* SET_POLYGON_OFFSET_SCALE_FACTOR */
+    r->poly_offset_units = reg_f(0x0388);            /* SET_POLYGON_OFFSET_BIAS */
 }
 
 static int sample_texture(uint32_t u, uint32_t v, uint32_t *argb);
@@ -2505,6 +2508,7 @@ static void current_pixel_state(Nv2aPixelState *p, uint32_t shade, int textured)
                  | ((s_gpu.fog_color & 0xFFu) << 16)
                  | ((s_gpu.fog_color >> 16) & 0xFFu);
     p->clip_plane_mode = s_gpu.clip_plane_mode;
+    p->shadow_func = s_reg[0x1E6C / 4] & 7;            /* SET_SHADOW_DEPTH_FUNC */
     for (st = 0; st < 4; st++) {
         const Texture *t = &s_gpu.texs[st];
         if (shade == NV2A_SHADE_COMBINERS) {

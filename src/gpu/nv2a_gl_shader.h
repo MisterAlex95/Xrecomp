@@ -31,7 +31,13 @@
 enum {
     NV2A_GL_TEX_NONE  = 0,   /* no usable texture: a fetch reads white */
     NV2A_GL_TEX_2D    = 1,
-    NV2A_GL_TEX_CUBE  = 2
+    NV2A_GL_TEX_CUBE  = 2,
+    /* A depth texture (shadow map) sampled with a depth compare
+     * (sampler2DShadow): the stage reads the comparison's result. 16 and 24
+     * give the depth format's range (Y16: 0xFFFF, X8_Y24: 0xFFFFFF), the
+     * units the stage's r/q is in. */
+    NV2A_GL_TEX_SHADOW16 = 3,
+    NV2A_GL_TEX_SHADOW24 = 4
 };
 
 typedef struct {
@@ -64,7 +70,7 @@ const char *nv2a_gl_vertex_body(void);
 
 /* Write the fragment shader body for `key` into buf (without the header).
  * Returns the length, or 0 if it did not fit. Uniforms it declares:
- *   sampler2D/samplerCube u_t0..u_t3, vec2 u_tscale[4],
+ *   sampler2D/samplerCube/sampler2DShadow u_t0..u_t3, vec2 u_tscale[4],
  *   vec4 u_c0[8], u_c1[8], u_fc0, u_fc1, u_fogc, float u_aref. */
 size_t nv2a_gl_fragment_body(const Nv2aGlShaderKey *key, char *buf, size_t cap);
 

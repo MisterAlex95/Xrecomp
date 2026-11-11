@@ -219,14 +219,35 @@ turn): only the layout that read-back and seeding convert changes, and a
 shape that no longer fits grows the texture by a GPU copy. Each switch used
 to cost a read-back and an upload (16 a frame in Oakvale). Only a change of
 bytes per pixel recreates the target. Rows map one to one, guest row y = GL row y, so nothing is
-flipped. Depth/stencil is a D24S8 renderbuffer per zeta address (up to 8),
+flipped. Depth/stencil is a D24S8 texture per zeta address (up to 8),
 attached to whichever colour target draws with it, as the CPU rasteriser
-keeps one buffer per zeta address. A 16-bit surface keeps alpha at 1 (colour
+keeps one buffer per zeta address; a texture rather than a renderbuffer so
+that a shadow map drawn into it can be sampled (below). A 16-bit surface keeps alpha at 1 (colour
 mask), as the CPU path reads 565 back with alpha 0xFF. Pixels go back to
 guest memory (in the surface's own format and swizzle) by the rules under
 "Present" above.
 A target is dirty only after a batch or clear that writes colour (colour
 mask non-zero).
+
+**Shadow maps.** A combiner stage in PROJECT2D/PROJECT3D mode reading a
+depth format (0x2A-0x31; Fable binds its 768x768 Z16 map as 0x30,
+`LU_IMAGE_DEPTH_Y16_FIXED`, on stage 1 of about 150 batches a frame) at the
+address of a zeta surface the GPU holds samples that depth texture as a
+`sampler2DShadow` with `GL_TEXTURE_COMPARE_MODE`. The NV2A computes
+"stored depth <func> r/q" with r/q clamped to the depth format's range
+(0xFFFF for Y16, 0xFFFFFF for Y24) and `SET_SHADOW_DEPTH_FUNC` (0x1E6C) as
+func (xemu `psh.c`, `psh_append_shadowmap`); PROJECT2D compares with 0.
+GL compares "r <func> stored", so the back end sets the swapped function
+(Fable's GREATER becomes `GL_LESS`: lit where r/q is nearer than the map)
+and the shader passes r/q / range, matching the depth buffer's z/zmax. The
+title's filter applies (bilinear gives GL's 2x2 percentage-closer
+filtering, as the hardware does). Polygon offset (`SET_POLY_OFFSET_FILL_ENABLE`,
+`SET_POLYGON_OFFSET_SCALE_FACTOR`/`_BIAS`, 0x0338/0x0384/0x0388; Fable's
+shadow pass uses 3, 1) goes to `glPolygonOffset`, the units scaled by 256
+on Z16 surfaces since the buffer is D24. A depth texture the GPU did not
+draw (CPU-only zeta) reads white, as on the CPU path, which has no shadow
+maps. `tests/nv2a_gl_shader` checks the compare functions and PROJECT2D on
+a 2x1 depth texture.
 
 **Render to texture.** A texture stage whose address is a colour target's
 samples the target's GL texture directly (`rt_for_texture`): no read-back,
@@ -428,8 +449,9 @@ The original list (the interpreter was 41 % of the in-world executor):
    re-upload when they changed.
 3. Done: the presented surface only, asynchronously (above, "Present");
    none once 7e presents from the GPU.
-4. Depth surfaces read as textures (shadow maps): a depth texture instead of
-   a renderbuffer, Z16/Z24 readback into guest memory when sampled.
+4. Done on the GPU: depth surfaces read as shadow maps (above). Left: a
+   depth surface read as plain texels, or by the guest CPU (Z16/Z24
+   read-back into guest memory), and shadow maps on the CPU path.
 5. Anti-aliased surfaces (2×1, 2×2): render at the real size as today;
    resolve on present.
 6. Asynchronous visibility queries: answer `GET_REPORT` when the result is

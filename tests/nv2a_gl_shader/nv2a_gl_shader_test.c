@@ -274,6 +274,98 @@ int main(void)
     }
     CHECK(glGetError() == GL_NO_ERROR);
     printf("%d combiner programs compared, %d mismatched\n", tested, mism);
+
+    /* ---- shadow maps: a depth texture read with a depth compare ------- *
+     * Stage 0 PROJECT3D on a 2x1 D24S8 texture holding depths 0.25 and
+     * 0.75 (Y16 range: 16384, 49151), the combiners passing t0 through,
+     * r/q = 32768 (0.5). The generated shader leaves the comparison to the
+     * sampler; the GL compare functions here are what bind_shadow sets for
+     * the NV2A's "stored depth <func> r/q" (xemu psh_append_shadowmap), so
+     * GL_GEQUAL is the title's LEQUAL. PROJECT2D compares 0. */
+    {
+        static const uint32_t depth[2] = { 0x40000000u, 0xC0000000u };   /* D24 in the top bits */
+        static const struct { uint32_t func, mode; uint8_t left, right; } cases[] = {
+            { 3, 2, 0, 255 },   /* GL LEQUAL (title GEQUAL): 0.5 <= 0.25 no, <= 0.75 yes */
+            { 4, 2, 255, 0 },   /* GL GREATER (title LESS) */
+            { 0, 2, 0, 0 },     /* NEVER */
+            { 7, 2, 255, 255 }, /* ALWAYS */
+            { 3, 1, 255, 255 }, /* PROJECT2D: 0 <= both */
+        };
+        const uint32_t skinds[4] = { NV2A_GL_TEX_SHADOW16, 0, 0, 0 };
+        float tscale[8] = {0.5f, 1, 1, 1, 1, 1, 1, 1}, vp[4] = {0.5f, 0.5f, 1.0f / 8388607.5f, 0};
+        GLuint dtex, fs, prog;
+        unsigned c, i;
+
+        glGenTextures(1, &dtex);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, dtex);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH24_STENCIL8, 2, 1, 0, GL_DEPTH_STENCIL,
+                     GL_UNSIGNED_INT_24_8, depth);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_COMPARE_MODE, GL_COMPARE_REF_TO_TEXTURE);
+        for (c = 0; c < sizeof cases / sizeof cases[0]; c++) {
+            uint8_t got[4 * 4 * 4];
+            GLint ok = 0;
+            memset(&ps, 0, sizeof ps);
+            ps.shade = NV2A_SHADE_COMBINERS;
+            ps.rc.control = 1;
+            ps.rc.stage_program = cases[c].mode;
+            /* stage 0: A = t0, B = 1 (zero inverted) -> r0 = t0 */
+            ps.rc.color_icw[0] = 0x08u << 24 | 0x20u << 16;
+            ps.rc.color_ocw[0] = 0x0Cu << 4;
+            memset(&rs, 0, sizeof rs);
+            nv2a_gl_shader_key(&ps, &rs, skinds, &k1);
+            CHECK(nv2a_gl_fragment_body(&k1, body, sizeof body) > 0);
+            CHECK(strstr(body, "sampler2DShadow u_t0") != NULL);
+            fs = compile(GL_FRAGMENT_SHADER, body);
+            CHECK(fs != 0);
+            if (!fs)
+                break;
+            prog = glCreateProgram();
+            glAttachShader(prog, vs);
+            glAttachShader(prog, fs);
+            glLinkProgram(prog);
+            glGetProgramiv(prog, GL_LINK_STATUS, &ok);
+            CHECK(ok);
+            glUseProgram(prog);
+            for (i = 0; i < 4; i++) {
+                char nm[8];
+                snprintf(nm, sizeof nm, "u_t%u", i);
+                glUniform1i(glGetUniformLocation(prog, nm), (GLint)i);
+            }
+            glUniform4fv(glGetUniformLocation(prog, "u_vp"), 1, vp);
+            glUniform2fv(glGetUniformLocation(prog, "u_tscale"), 4, tscale);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_COMPARE_FUNC, (GLint)(GL_NEVER + cases[c].func));
+            /* Texels 0..2 across the target (texel coordinates times
+             * tscale 1/2), r = 32768 * q with q = 2 (projective). */
+            for (i = 0; i < 6; i++) {
+                static const float xy[6][2] = { {0,0}, {4,0}, {4,4}, {0,0}, {4,4}, {0,4} };
+                memset(&quad[i], 0, sizeof quad[i]);
+                quad[i].pos[0] = xy[i][0]; quad[i].pos[1] = xy[i][1];
+                quad[i].pos[3] = 1.0f;
+                quad[i].tex[0][0] = xy[i][0] / 2.0f * 2.0f;
+                quad[i].tex[0][1] = 0.5f * 2.0f;
+                quad[i].tex[0][2] = 32768.0f * 2.0f;
+                quad[i].tex[0][3] = 2.0f;
+            }
+            glBufferData(GL_ARRAY_BUFFER, sizeof quad, quad, GL_STREAM_DRAW);
+            glDrawArrays(GL_TRIANGLES, 0, 6);
+            glReadPixels(0, 0, 4, 4, GL_RGBA, GL_UNSIGNED_BYTE, got);
+            /* Column 0 samples texel 0, column 3 texel 1. */
+            if (got[1 * 16 + 0] != cases[c].left || got[1 * 16 + 12] != cases[c].right) {
+                printf("shadow case %u: got %d/%d, want %d/%d\n", c, got[16], got[28],
+                       cases[c].left, cases[c].right);
+                s_fail = 1;
+            }
+            glDeleteProgram(prog);
+            glDeleteShader(fs);
+        }
+        glDeleteTextures(1, &dtex);
+        CHECK(glGetError() == GL_NO_ERROR);
+        printf("shadow-map compares: %s\n", s_fail ? "FAILED" : "ok");
+    }
     CHECK(tested == 400);
     CHECK(mism == 0);
     if (!s_fail)
