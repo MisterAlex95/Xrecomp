@@ -150,6 +150,14 @@
     <string name="OPT_VSYNC">Synchro verticale</string>
     <string name="OPT_VSYNC_SUMMARY">Afficher chaque image au rythme de l\'écran</string>
     <string name="OPT_VSYNC_DETAIL">Activée : les images s\'affichent au rythme de l\'écran, sans déchirure. Désactivée : chaque image s\'affiche dès qu\'elle est prête ; un peu moins de délai, mais l\'image peut se déchirer. (RECOMP_PRESENT_VSYNC)</string>
+    <string name="OPT_GPU">Moteur de rendu</string>
+    <string name="OPT_GPU_SUMMARY">Dessiner sur le processeur ou sur le GPU (expérimental)</string>
+    <string name="OPT_GPU_DETAIL">Logiciel : le jeu est dessiné par le processeur, le chemin testé. GPU : dessiné avec OpenGL ES, bien plus rapide dans les menus ; encore expérimental, certains effets peuvent manquer ou être faux. Auto : ce que choisit le profil du jeu (logiciel pour l\'instant). Si le GPU ne peut pas démarrer, le jeu repasse en logiciel. (RECOMP_GPU)</string>
+    <string name="VAL_GPU_CPU">Logiciel</string>
+    <string name="VAL_GPU_GL">GPU</string>
+    <string name="OPT_GPU_FPS_CAP">Limite d\'images (rendu GPU)</string>
+    <string name="OPT_GPU_FPS_CAP_SUMMARY">Images par seconde au plus, pour économiser la batterie</string>
+    <string name="OPT_GPU_FPS_CAP_DETAIL">Avec le rendu GPU, les menus et l\'écran de pause peuvent tourner à 200 images par seconde ou plus, ce qui ne fait que vider la batterie et chauffer l\'appareil. La limite les tient à 60 (ou 30). Désactivée : aucune limite, pour les tests. Sans effet avec le rendu logiciel. (RECOMP_GPU_FPS_CAP)</string>
     <string name="OPT_TEX">Filtrage des textures</string>
     <string name="OPT_TEX_SUMMARY">Comment les textures sont échantillonnées</string>
     <string name="OPT_TEX_DETAIL">Net prend le texel le plus proche, comme le jeu est dessiné par défaut. Lissé mélange quatre texels ; l\'anisotrope suit aussi les surfaces vues de biais. Les modes lissés coûtent de la vitesse, et ne sont pas le défaut car ils changent le rendu avec lequel le jeu a été testé. (RECOMP_TEX_BILINEAR, RECOMP_TEX_ANISO)</string>
