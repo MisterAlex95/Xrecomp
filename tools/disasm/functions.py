@@ -1341,12 +1341,33 @@ class FunctionDetector:
                 # Padding is what the boundary check buys: a run of int3 is not
                 # an instruction the sweep records a start for, and a table does
                 # not point into it anyway.
+                #
+                # Except where the sweep came out of data one byte off. XPP's
+                # section in Burnout 3 starts with its class-driver tables and
+                # the sweep decoded `00 55 8B` at 0x00363063, so the XID
+                # driver's Init at 0x00363064 -- `push ebp; mov ebp, esp`,
+                # named only by a table word -- was not a boundary, was never
+                # lifted, and the pad never attached. A target off the sweep's
+                # boundaries is realigned when it opens with a prologue and its
+                # own stream falls back into the sweep's within a few
+                # instructions; the probes below still decide.
+                realigned = []
                 if target not in self.engine.instructions:
-                    continue
+                    realigned = self._realign_table_target(target)
+                    if not realigned:
+                        continue
+
+                def drop_realigned():
+                    for address in realigned:
+                        self.engine.instructions.pop(address, None)
+                    if realigned:
+                        self.engine._sorted_addrs = None
+
                 first = self.engine.instructions[target]
                 if first.mnemonic.lower() in ("int3", "nop"):
                     continue
                 if self._is_byte_table(target):
+                    drop_realigned()
                     continue
                 i = bisect.bisect_right(starts, target)
                 sec = self.image.get_section_at_va(target)
@@ -1361,7 +1382,11 @@ class FunctionDetector:
                         or self._probes_as_escaping_body(
                             target, starts, bounds, sections, tails)):
                     if not self._probes_as_tail_body(target, starts, sections):
+                        drop_realigned()
                         continue
+                if end <= target:
+                    drop_realigned()
+                    continue
             if end <= target:
                 continue
             self._alias_entries[target] = end
@@ -1376,6 +1401,45 @@ class FunctionDetector:
         if found:
             print(f"  {found} function address(es) found in data tables")
         return found > 0
+
+    def _realign_table_target(self, target: int, max_bytes: int = 32) -> List[int]:
+        """Decode a table-named address the linear sweep stepped over.
+
+        Only for a target that follows a byte of padding or zero fill (the
+        sweep swallowed the last one into an instruction that runs into the
+        target), opens with a prologue (the one shape that does not occur by
+        accident) and whose own stream lands on an instruction boundary the
+        sweep found within `max_bytes`: from there on the two streams agree, so
+        only the out-of-phase head is new. Anything that fails to decode, or
+        hits padding first, is left alone.
+
+        The padding byte is what keeps a table word that names the middle of
+        real code out: Burnout 3 has a data word 0x00230012, the `53` inside
+        `mov edx, [ebx+0xc]` of an SSE routine -- which reads as `push ebx`.
+
+        Returns the addresses newly decoded (empty: nothing done), so the
+        caller can drop them again if the body probes reject the target.
+        """
+        section = self.image.get_section_at_va(target)
+        data = self.image.get_section_data(section) if section else None
+        if not data:
+            return []
+        offset = target - section.virtual_addr
+        if not (0 < offset < len(data)) or data[offset - 1] not in (0x00, 0x90, 0xCC):
+            return []
+        if not self.engine.probes_as_prologue(target):
+            return []
+        head = []
+        for insn in self.engine._cs.disasm(data[offset:offset + max_bytes], target):
+            if insn.address != target and insn.address in self.engine.instructions:
+                break                       # back in step with the sweep
+            if insn.mnemonic in ("int3", "nop", "ret", "retn", "jmp"):
+                return []                   # padding, or it ends before rejoining
+            head.append(insn.address)
+        else:
+            return []                       # undecodable, or no rejoin in reach
+        self.engine.decode_at(target, max_insns=len(head))
+        return [a for a in head if a in self.engine.instructions]
 
     def _pass_cond_branch_orphans(self, bodies, starts, reachable) -> bool:
         """
