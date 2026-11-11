@@ -75,10 +75,10 @@ for (int i = 1; i < 28; i++)
 // Defined in xbox_memory_layout.c, used everywhere
 extern ptrdiff_t g_xbox_mem_offset;  // Add to Xbox VA → get native pointer
 
-// Simulated x86 registers (the register model)
-extern uint32_t g_eax, g_ecx, g_edx, g_esp;  // Volatile
-extern uint32_t g_ebx, g_esi, g_edi;          // Callee-saved
-extern uint32_t g_seh_ebp;                     // SEH frame pointer
+// Simulated x86 registers (the register model): one per-thread block,
+// declared in xbox_memory_layout.h. g_eax, g_esp, g_seh_ebp, g_xmm0, ...
+// are macros for its members (g_cpu.r_eax ...); do not declare them.
+extern RECOMP_TLS RecompCpu g_cpu;
 ```
 
 ### API

@@ -52,9 +52,6 @@ recomp_func_t recomp_lookup(uint32_t xbox_va) { (void)xbox_va; return NULL; }
 recomp_func_t recomp_lookup_manual(uint32_t xbox_va);
 recomp_func_t recomp_lookup_manual(uint32_t xbox_va) { (void)xbox_va; return NULL; }
 
-extern RECOMP_TLS uint32_t g_eax, g_ecx, g_edx, g_esp, g_ebx, g_esi, g_edi;
-extern RECOMP_TLS uint32_t g_ebp, g_eflags;
-extern RECOMP_TLS RecompXmm g_xmm0;
 extern ptrdiff_t g_xbox_mem_offset;
 
 #define MS 1000000ull

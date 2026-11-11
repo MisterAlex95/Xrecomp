@@ -253,13 +253,8 @@ extern int  xbox_IrqSafePointsOn(void);
 extern void xbox_IrqSetHandler(int line, void (*run)(void));
 extern int  xbox_IrqPost(int line);
 extern void xbox_IrqNoteUngated(int line);
-#if defined(_MSC_VER)
-#  define APU_TLS __declspec(thread)
-#else
-#  define APU_TLS __thread
-#endif
-extern APU_TLS uint32_t g_eax, g_ecx, g_edx, g_esp, g_ebx, g_esi, g_edi;
-extern APU_TLS uint32_t g_fs_base;
+/* g_eax ... g_fs_base: this thread's guest registers (g_cpu, from
+ * xbox_memory_layout.h). */
 
 /* Call the connected service routine while the line is up, from the frame
  * thread, the way the OHCI model delivers USB interrupts (ohci_call_isr):
@@ -315,7 +310,7 @@ static void apu_deliver_irq(MCPXAPUState *d)
     /* Per thread, like the g_fs_base it guards: a new instance's frame
      * thread is a new OS thread and needs its own TIB. g_fs_base itself
      * cannot tell, as every thread starts at the main thread's TIB. */
-    static APU_TLS int tib_ready;
+    static RECOMP_TLS int tib_ready;
     static unsigned held_off;
     uint32_t kint, routine;
     int slot, how;

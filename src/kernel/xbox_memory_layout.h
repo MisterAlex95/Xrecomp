@@ -409,6 +409,88 @@ typedef union RecompXmm {
 } RecompXmm;
 #endif
 
+/* The guest CPU: every per-thread register in one thread-local struct.
+ *
+ * Each register used to be its own thread-local variable (g_eax, g_esp,
+ * g_xmm0, ...). On Mach-O every thread-local is reached through its own
+ * descriptor and a call to _tlv_get_addr, so a lifted function paid one call
+ * per register it touched: 27-33 % of the guest thread's own CPU in Fable.
+ * In one struct a function resolves the thread's block once (the address is
+ * constant per thread, and clang hoists it across calls), and on ELF hosts a
+ * dlopen'd library (Android's libmain.so) pays one TLSDESC call instead of
+ * one per register.
+ *
+ * The old names stay: g_eax is a macro for g_cpu.r_eax, so code that reads or
+ * writes registers compiles unchanged. What no longer compiles is a
+ * declaration of one of them (`extern RECOMP_TLS uint32_t g_eax;`): delete
+ * it, this header declares them all. Taking an address (&g_esp) still gives
+ * the calling thread's register.
+ *
+ * Defined identically in templates/runtime/recomp_types.h and
+ * src/kernel/xbox_memory_layout.h (a translation unit can include both, hence
+ * the guard). The members are r_eax, r_esp, ... rather than eax, esp: in
+ * generated code `ebx` is itself a macro (for g_ebx), so a member called ebx
+ * would be rewritten when g_ebx expands. Designated initializers name them
+ * (`RecompCpu g_cpu = { .r_fs_base = ... }`). The generated code and the
+ * runtime must agree on the layout; tools/recomp/test_cpu_struct.py checks
+ * that the two copies match. */
+#ifndef RECOMP_CPU_DEFINED
+#define RECOMP_CPU_DEFINED
+typedef struct RecompCpu {
+    uint32_t r_eax, r_ecx, r_edx, r_esp, r_ebx, r_esi, r_edi;
+    uint32_t r_ebp;             /* last frame published by `mov ebp, esp` */
+    uint32_t r_seh_ebp;         /* SEH prolog/epilog frame bridge */
+    uint32_t r_fs_base;         /* linear base of fs: (this thread's TIB) */
+    uint32_t r_eflags;          /* EFLAGS image: pushfd, popfd, calls */
+    uint32_t r_mxcsr;           /* SSE control/status */
+    int r_df;                   /* EFLAGS.DF */
+    int r_fp_top;               /* x87 stack top */
+    int r_fp_cmp;
+    uint16_t r_fp_control_word;
+    uint16_t r_fp_cc;           /* x87 status word condition bits */
+    double r_fp_stack[8];
+    RecompXmm r_xmm0, r_xmm1, r_xmm2, r_xmm3, r_xmm4, r_xmm5, r_xmm6, r_xmm7;
+    RecompMmx r_mm0, r_mm1, r_mm2, r_mm3, r_mm4, r_mm5, r_mm6, r_mm7;
+} RecompCpu;
+
+extern RECOMP_TLS RecompCpu g_cpu;
+
+#define g_eax             g_cpu.r_eax
+#define g_ecx             g_cpu.r_ecx
+#define g_edx             g_cpu.r_edx
+#define g_esp             g_cpu.r_esp
+#define g_ebx             g_cpu.r_ebx
+#define g_esi             g_cpu.r_esi
+#define g_edi             g_cpu.r_edi
+#define g_ebp             g_cpu.r_ebp
+#define g_seh_ebp         g_cpu.r_seh_ebp
+#define g_fs_base         g_cpu.r_fs_base
+#define g_eflags          g_cpu.r_eflags
+#define g_mxcsr           g_cpu.r_mxcsr
+#define g_df              g_cpu.r_df
+#define g_fp_top          g_cpu.r_fp_top
+#define g_fp_cmp          g_cpu.r_fp_cmp
+#define g_fp_control_word g_cpu.r_fp_control_word
+#define g_fp_cc           g_cpu.r_fp_cc
+#define g_fp_stack        g_cpu.r_fp_stack
+#define g_xmm0            g_cpu.r_xmm0
+#define g_xmm1            g_cpu.r_xmm1
+#define g_xmm2            g_cpu.r_xmm2
+#define g_xmm3            g_cpu.r_xmm3
+#define g_xmm4            g_cpu.r_xmm4
+#define g_xmm5            g_cpu.r_xmm5
+#define g_xmm6            g_cpu.r_xmm6
+#define g_xmm7            g_cpu.r_xmm7
+#define g_mm0             g_cpu.r_mm0
+#define g_mm1             g_cpu.r_mm1
+#define g_mm2             g_cpu.r_mm2
+#define g_mm3             g_cpu.r_mm3
+#define g_mm4             g_cpu.r_mm4
+#define g_mm5             g_cpu.r_mm5
+#define g_mm6             g_cpu.r_mm6
+#define g_mm7             g_cpu.r_mm7
+#endif /* RECOMP_CPU_DEFINED */
+
 /* The toolkit region: scratch structures, then the main stack, then the heap.
  *
  * These used to be fixed -- scratch at 0x00700000, stack at 0x00780000, heap
@@ -470,7 +552,6 @@ extern uint32_t g_xbox_stack_size;
  * thread gets its own from xbox_AllocThreadTib() and points g_fs_base at
  * it. */
 #define XBOX_TIB_MAIN       0x00004000
-extern RECOMP_TLS uint32_t g_fs_base;
 #define XBOX_FS_BASE        g_fs_base
 
 #define XBOX_STACK_BASE     g_xbox_stack_base
