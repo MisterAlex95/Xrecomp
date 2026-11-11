@@ -62,6 +62,9 @@ static struct {
     Nv2aVertex v[8];
     int textured;
     uint32_t clear_flags, clear_argb;
+    int has_full;
+    Nv2aVertexFull full[3];
+    Nv2aPixelState ps;
 } s_be;
 
 static void be_clear(const Nv2aSurface *s, const Nv2aRenderState *rs,
@@ -84,11 +87,20 @@ static void be_draw(const Nv2aSurface *s, const Nv2aBatch *b)
     s_be.textured = b->texture != NULL;
     for (i = 0; i < b->count && i < 8; i++)
         s_be.v[i] = b->vertices[i];
+    s_be.has_full = b->full != NULL && b->pixel != NULL;
+    if (s_be.has_full) {
+        for (i = 0; i < b->count && i < 3; i++)
+            s_be.full[i] = b->full[i];
+        s_be.ps = *b->pixel;
+    }
 }
 
 static void be_flip(void) { s_be.flips++; }
 
 static const Nv2aBackend s_backend = { be_clear, be_draw, be_flip };
+/* The same back end asking for the full vertex and the pixel state. */
+static const Nv2aBackend s_backend_px = { be_clear, be_draw, be_flip,
+                                          NV2A_BACKEND_CAP_PIXEL };
 
 /* ---- driving the executor ---------------------------------------------- */
 extern void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param);
@@ -309,6 +321,29 @@ int main(void)
     CHECK(s_be.flips == 0);
     m(0x0130, 0);                                     /* FLIP_STALL */
     CHECK(s_be.flips == 1);
+    CHECK(!s_be.has_full);                            /* caps 0: no full vertices */
+
+    /* NV2A_BACKEND_CAP_PIXEL: the full vertex and the pixel state arrive
+     * with the batch. No combiner program yet: stage 0 texel * diffuse. */
+    nv2a_backend_register(&s_backend_px);
+    m(0x17FC, 5); m(0x1810, 2u << 24); m(0x17FC, 0);
+    CHECK(s_be.has_full);
+    CHECK(s_be.ps.shade == NV2A_SHADE_MODULATE);
+    CHECK(near_(s_be.full[1].pos[0], 640.0f) && near_(s_be.full[1].pos[1], 480.0f));
+    CHECK(near_(s_be.full[1].pos[3], 1.0f));
+    CHECK(near_(s_be.full[0].d0[0], 128.0f / 255.0f));   /* 0xFF804020: r 0x80 */
+    CHECK(near_(s_be.full[0].fog, 1.0f));               /* fog off */
+    CHECK(s_be.surf.format == 0x0008);
+    /* A combiner program switches the batch to the combiners and carries
+     * the program and the stage modes. */
+    m(0x1E60, 0x00001001u);                           /* SET_COMBINER_CONTROL: 1 stage */
+    m(0x1E70, 0x1u);                                  /* SHADER_STAGE_PROGRAM: stage 0 2D */
+    m(0x0288, 0x0000000Cu);                           /* SPECULAR_FOG_CW0: D = r0 */
+    m(0x17FC, 5); m(0x1810, 2u << 24); m(0x17FC, 0);
+    CHECK(s_be.ps.shade == NV2A_SHADE_COMBINERS);
+    CHECK(s_be.ps.rc.control == 0x1001u && s_be.ps.rc.final0 == 0x0Cu);
+    CHECK(s_be.ps.stage[0].mode == 1 && s_be.ps.stage[1].mode == 0);
+    nv2a_backend_register(&s_backend);
 
     if (!s_fail)
         printf("nv2a fixed-function path through a back end: ok\n");

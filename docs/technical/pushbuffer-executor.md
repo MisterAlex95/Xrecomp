@@ -221,10 +221,20 @@ of the code here:
   from the projected, mirrored one. Decide culling per triangle from the
   projected screen positions and draw with the rasteriser's culling off.
 
-Not passed on yet: the register-combiner state, and texture stages 1–3 (a back
-end sees stage 0 and the diffuse colour), so effects that need a second stage
-or a combiner program only appear on the CPU rasteriser. Extend `Nv2aBatch`
-when it matters rather than adding callbacks.
+A back end that sets `NV2A_BACKEND_CAP_PIXEL` in `Nv2aBackend.caps` also gets,
+per batch, `Nv2aBatch.full` (each vertex with both colours, the fog factor,
+the four stages' texture coordinates and clip-space w) and `Nv2aBatch.pixel`
+(the register combiners, all four texture stages with their stage-program
+mode, the fog colour, the clip-plane modes, and which of the CPU
+rasteriser's three colour rules applies: combiners, stage 0 × diffuse, or the
+screen-space path's texel-or-flat-colour). `nv2a_backend_texture_bytes` gives
+the guest bytes a texture occupies, for hashing. The GL back end
+(`src/gpu`, [gpu-backend.md](gpu-backend.md)) is built on it. Without the
+flag a back end sees stage 0 and the diffuse colour, as before.
+
+The executor reports `[GPU] render X ms/frame` next to the fps line: wall time
+spent drawing per frame (batches, clears, the present sync), whichever path
+draws.
 
 ## Switches
 

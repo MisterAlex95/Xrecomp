@@ -20,14 +20,23 @@
  * so a back end only ever sees surface pixels. Blend, depth, alpha, cull and
  * stencil state arrive in Nv2aRenderState.
  *
- * ponytail: register-combiner state and texture stages 1-3 are not passed on:
- * a back end sees stage 0 and the diffuse colour. Extend Nv2aBatch when that
- * matters rather than adding callbacks.
+ * A back end that sets NV2A_BACKEND_CAP_PIXEL in Nv2aBackend.caps also gets,
+ * with every batch, the full vertex (both colours, fog, the four stages'
+ * texture coordinates, clip-space w) and the pixel state: the register
+ * combiners, all four texture stages, fog colour and clip-plane modes. That
+ * is what a GPU renderer needs to reproduce the CPU rasteriser's colour
+ * (src/gpu/nv2a_gl.c is one). Without the flag a back end sees stage 0 and
+ * the diffuse colour only, as before.
+ *
+ * ponytail: vertices still arrive transformed by the CPU (vertex programs
+ * run in nv2a_vsh_interp.c). Raw attribute streams plus the program, for a
+ * back end that runs vertex programs itself, are the next extension.
  */
 #ifndef NV2A_BACKEND_H
 #define NV2A_BACKEND_H
 
 #include <stdint.h>
+#include "nv2a_combiner.h"   /* Nv2aCombiner, for Nv2aPixelState */
 
 /* The colour surface being drawn into, in real (anti-aliased) pixels.
  * aa_sx/aa_sy give the anti-aliasing factor, so width/aa_sx is the logical
@@ -38,6 +47,12 @@ typedef struct {
     uint32_t pitch;             /* bytes per row */
     uint32_t bytes_per_pixel;   /* 2 or 4 */
     uint32_t aa_sx, aa_sy;      /* 1 or 2 each */
+    /* SET_SURFACE_FORMAT as sent: colour format bits 0-3, zeta format bits
+     * 4-7 (1 Z16, 2 Z24S8), type bits 8-11 (2 swizzled: log2 width/height in
+     * bits 16-19/24-27), anti-aliasing bits 12-15. clip_x/clip_y: the clip
+     * rectangle's origin in real pixels (width/height above are its size). */
+    uint32_t format;
+    uint32_t clip_x, clip_y;
 } Nv2aSurface;
 
 /* A texture as the title programmed it. uv in Nv2aVertex are in texels. */
@@ -51,6 +66,12 @@ typedef struct {
      * a linear texture) and the raw SET_TEXTURE_FILTER word (MIN in bits
      * 16-23). A back end that ignores them samples level 0. */
     uint32_t levels, filter;
+    /* Guest address of the 256-entry A8R8G8B8 palette (format 0x0B), the
+     * border colour (0xAARRGGBB) and whether FORMAT selects it for address
+     * mode 4, and whether the texture is a cube map (six faces, each
+     * nv2a_backend_texture_bytes() / 6 apart). Zero in a struct a back end
+     * builds itself means: no palette, no border, not a cube. */
+    uint32_t palette, border, border_color, cube;
 } Nv2aTexture;
 
 typedef struct {
@@ -82,12 +103,61 @@ typedef struct {
     uint32_t stencil_write_mask, stencil_fail, stencil_zfail, stencil_zpass;
 } Nv2aRenderState;
 
+/* A vertex as the CPU transform left it, for back ends with
+ * NV2A_BACKEND_CAP_PIXEL. pos: x, y in surface pixels (real, anti-aliased),
+ * z the window z the title produced (0..0xFFFF for Z16, 0..0xFFFFFF for
+ * Z24S8; not clamped), w the clip-space w (> 0 after near-plane clipping, 1
+ * for screen-space batches). Interpolate with 1/w like the rasteriser.
+ * tex: what the vertex program wrote to oT0..oT3 (s, t, r, q): normalised
+ * for swizzled and DXT textures, in texels for linear ones. fog: the fog
+ * factor after the fog unit (1 = no fog), what the combiners read as fog.a. */
+typedef struct {
+    float pos[4];
+    float d0[4], d1[4];         /* diffuse, specular: r, g, b, a in 0..1 */
+    float fog;
+    float tex[4][4];
+} Nv2aVertexFull;
+
+/* How the CPU rasteriser decides a batch's colour, which a back end should
+ * copy to draw the same picture. */
+enum {
+    NV2A_SHADE_COMBINERS = 0,   /* register combiners (Nv2aPixelState.rc) */
+    NV2A_SHADE_MODULATE  = 1,   /* stage 0 texel * diffuse (no combiner program yet) */
+    NV2A_SHADE_REPLACE   = 2    /* screen-space batch: stage 0 texel, else the
+                                 * first vertex's colour, flat; no depth test, no
+                                 * alpha test; tex[0] in texels for every format */
+};
+
+/* One texture stage. mode is the stage's SHADER_STAGE_PROGRAM field
+ * (0 none, 1 2D, 2 3D, 3 cube, 4 pass-through, 5 clip plane, others bump/dot
+ * modes the CPU rasteriser reads as zero); valid says the stage's texture
+ * registers describe something samplable. */
+typedef struct {
+    uint32_t    mode;
+    uint32_t    valid;
+    Nv2aTexture tex;
+} Nv2aTexStage;
+
+typedef struct {
+    uint32_t     shade;             /* NV2A_SHADE_* */
+    Nv2aCombiner rc;                /* meaningful for NV2A_SHADE_COMBINERS */
+    uint32_t     fog_color;         /* 0xAARRGGBB (converted from FOG_COLOR) */
+    uint32_t     clip_plane_mode;   /* SET_SHADER_CLIP_PLANE_MODE */
+    Nv2aTexStage stage[4];
+} Nv2aPixelState;
+
 typedef struct {
     const Nv2aVertex  *vertices;    /* triangle list: count is a multiple of 3 */
     uint32_t           count;
     const Nv2aTexture *texture;     /* NULL: untextured */
     const Nv2aRenderState *state;
+    /* NV2A_BACKEND_CAP_PIXEL only (NULL otherwise): count entries matching
+     * vertices[], and the pixel state. */
+    const Nv2aVertexFull  *full;
+    const Nv2aPixelState  *pixel;
 } Nv2aBatch;
+
+#define NV2A_BACKEND_CAP_PIXEL 0x1u
 
 typedef struct {
     /* flags: CLEAR_SURFACE bits (Z 0x1, stencil 0x2, colour 0xF0).
@@ -96,6 +166,7 @@ typedef struct {
                   uint32_t flags, uint32_t argb, uint32_t zstencil);
     void (*draw)(const Nv2aSurface *s, const Nv2aBatch *b);
     void (*flip)(void);
+    uint32_t caps;              /* NV2A_BACKEND_CAP_*; 0 in older initialisers */
 } Nv2aBackend;
 
 /* Register (or, with NULL, remove) the back end. Call before the title starts
@@ -116,6 +187,12 @@ void nv2a_backend_register_with_present_sync(const Nv2aBackend *backend,
  * Handles every format the executor can sample (swizzled, linear, DXT).
  * Returns 0 if the format is not supported. */
 int nv2a_backend_decode_texture(const Nv2aTexture *tex, uint32_t *argb_out);
+
+/* Bytes of guest memory a texture occupies: every mip level it declares
+ * (rounded to the NV2A's 128-byte face alignment) times six for a cube map,
+ * or pitch * height for a linear one. What a back end hashes to notice that
+ * a texture changed. 0 if the format is unknown. */
+uint32_t nv2a_backend_texture_bytes(const Nv2aTexture *tex);
 
 /* Where BACK_END_WRITE_SEMAPHORE_RELEASE (0x1D70) values land: the guest VA
  * of the semaphore the title reads GPU progress from (for XDK D3D, the
