@@ -16,7 +16,7 @@ The CI builds it on every push to `main`. The latest one is always the prereleas
 
 | Piece | What |
 |---|---|
-| `LauncherActivity` | The launcher entry ([The launcher](#the-launcher)): welcome, game choice and import, home (the game's hero with Play / Prepare, then Settings, Controls, Game data, About), in its own process `:launcher`. `Theme.java` and `Widgets.java` draw it, `TitleArt.java` decodes the game's title image, `UiFeedback.java` plays its sounds and haptics; `RecompConfig.java` writes its settings to `recomp.cfg`. With a valid game and « Open the game directly next time » on, it starts `ShellActivity` at once and shows nothing. |
+| `LauncherActivity` | The launcher entry ([The launcher](#the-launcher)): welcome, game choice and import, home (the game's hero with Play / Prepare, then Settings, Controls, Game data, About), in its own process `:launcher`. `Theme.java` and `Widgets.java` draw it, `TitleArt.java` decodes the game's title image, `GameArt`, `GamePalette` and `GameTheme` make the [game theme](#game-theme) from it, `UiFeedback.java` plays its sounds and haptics; `RecompConfig.java` writes its settings to `recomp.cfg`. With a valid game and « Open the game directly next time » on, it starts `ShellActivity` at once and shows nothing. |
 | `ShellActivity` | Subclass of SDL's `SDLActivity`, which loads `libSDL2.so` and then `libmain.so`. SDL's Java side is compiled from the pinned sources (`$SDL2_SRC/android-project`), not copied here. Not exported: started by the launcher, after it sets `RECOMP_GAME_DIR`. Holds the [in-game menu](#in-game-menu) (`GameMenu`), a View layer over SDL's surface. |
 | `libxba_import.so` | The launcher's ISO import: `xiso_jni.c` around the static `xiso` target (`src/xiso`); and « Choose Lossless.dll » ([Frame generation](#frame-generation)): `lsfg_jni.c` around the shader cache (and the DXBC translator in a `-PxbaLsfg=1` build with DXVK). Loaded only in `:launcher`. |
 | `libmain.so` | `shell_main.c` + the **whole** toolkit (`--whole-archive`) + the title, when one is linked (see [A title in the shell](#a-title-in-the-shell)). Loading it on a device proves that bionic resolves every symbol the runtime uses. Four symbols that a title provides are weak stubs in `shell_main.c`, and so is the title's hook `recomp_title_main`. |
@@ -142,7 +142,7 @@ One activity, a small state machine of screens (`LauncherActivity.Screen`) with 
 | Choose your game (source) | Two large cards: **Game folder** (the extracted disc; read in place with All files access, otherwise copied; a badge says which) and **Disc image (ISO)** (extracted once; a badge gives the free space). | Welcome, Game data › Change game, Play with no usable game, the « Change game » shortcut, `NO_GAME_DATA`. |
 | Read the game in place? | Only without All files access: the explanation (in place: no copy, fine for a 4 GB disc, only that folder is read; copy: as much free space again, a few minutes, removed with the app) and two cards, **Allow all files access** (recommended; opens the system page, then the folder picker) and **Copy into the app** (the folder picker). | Game folder. |
 | Preparing the game (import) | A progress ring (percent, ticks), the step (« Checking », « Copying », « Extracting »), « X of Y », the current file, the free space, **Cancel**. The screen stays on; B cancels too. | A picked folder or image. |
-| Home | A console-style home (the top bar only says « Home », so the title shows once). The hero: the game's [title image](#title-image) (or a monogram), its title ID, its title (the XBE certificate's name, else the folder's name), a status chip (**Ready**, **Needs preparing**, **Preparing**, **Prepare failed**, **Game data missing**, **No file access**, **Wrong game**, **No game**; plus **Running** when the game runs in the background), one lead line, a few facts and one big button. Facts: **Last played**, **Play time**, then **Prepared** (pack.json's `built_at`) and **Pack size** when a pack is there, else the game's size; while a Prepare is needed: how long it takes, the free internal storage, the memory; while it runs: a bar and « Compile · 42 % · about 12 min left »; after a failure: the code. The big button: **Play**, **Prepare**, **Preparing…** (opens its screen), **See what failed**, or **Choose a game** / **Choose the game again**. Under the hero, a row of four smaller tiles: **Settings**, **Controls**, **Game data**, **About**. | A finished import (Play focused), every start when « Open directly » is off, the « Launcher » shortcut, B from the screens above. |
+| Home | A console-style home (the top bar only says « Home », so the title shows once). The hero: the game's title image (or a monogram), in the [game theme](#game-theme)'s colours, its title ID, its title (the XBE certificate's name, else the folder's name), a status chip (**Ready**, **Needs preparing**, **Preparing**, **Prepare failed**, **Game data missing**, **No file access**, **Wrong game**, **No game**; plus **Running** when the game runs in the background), one lead line, a few facts and one big button. Facts: **Last played**, **Play time**, then **Prepared** (pack.json's `built_at`) and **Pack size** when a pack is there, else the game's size; while a Prepare is needed: how long it takes, the free internal storage, the memory; while it runs: a bar and « Compile · 42 % · about 12 min left »; after a failure: the code. The big button: **Play**, **Prepare**, **Preparing…** (opens its screen), **See what failed**, or **Choose a game** / **Choose the game again**. Under the hero, a row of four smaller tiles: **Settings**, **Controls**, **Game data**, **About**. | A finished import (Play focused), every start when « Open directly » is off, the « Launcher » shortcut, B from the screens above. |
 | Settings | The [options](#settings) as rows, left / right (or A) to change, a detail panel with what the option does, its choices and its line in `recomp.cfg`. | Home. |
 | Controls | A drawn handheld with, next to each control, the Xbox controller button the game gets, and the same as a table: A B X Y as they are, L1 = **Black**, R1 = **White**, L2 / R2 = the triggers, Start = Start, Select = **Back**, D-pad and sticks as they are, pressing a stick = its thumbstick button (`src/input/xinput_device.c`, SDL's game controller mapping), and Android's Back opens the [in-game menu](#in-game-menu) (also Select + Start held). | Home. |
 | Game data | The raw folder path (only here, not on Home), source (read in place, imported copy, set in `recomp.cfg`), size (counted in the background), free space; **Change game** (another folder or image, or the same one again to re-import); **Delete the imported copy** (only when the game is the app's own `files/game/`; press A twice within 5 s; saves are kept; then the choice is forgotten). | Home. |
@@ -212,14 +212,84 @@ Home is gone).
   two minutes without input it dims (OLED burn-in): a black layer with the percentage and the step in grey, moved a
   little each minute, and the window's brightness lowered; any key or touch wakes it and does nothing else.
 
-### Title image
+### Game theme
 
-Home shows the game's own title image: the XBE's `$$XTIMAGE` section, an XPR0 resource file holding one texture
-(usually 128 x 128 DXT1), decoded in Java on the device (`TitleArt`: DXT1 / DXT3 / DXT5, and swizzled or linear
-A8R8G8B8 / X8R8G8B8 / R5G6B5) and cached as `<internal files>/art/<TITLEID>.png`. Formats from public documentation
-(xboxdevwiki « Xbe » and « XPR ») and `src/d3d` (format codes, swizzle). The backdrop's glow takes the image's
-colour. An XBE without one (or in a format not read) gets a monogram: the title's initials on a gradient whose hue
-comes from the title ID. Nothing of a game is in the APK or the repo; the unit test builds its XBE and XPR0 itself.
+The launcher takes its colours from the game: Home shows the game's own title image, and the accent (focus, caps
+headers, values, the Play button, the brand mark), its glows and the neutrals' hue come from it, with a faint blurred
+copy of the image washing in from the right of the backdrop. The text colours and the **status colours never change**:
+`Theme.OK` (ready, done, connected: the stock green), `WARN` (amber), `ERROR` (red). Nothing of a game is in the APK or
+the repo: everything is read from the player's own copy and kept in app-private storage.
+
+**Where the image comes from** (`GameArt`, first found): default.xbe's `$$XTIMAGE` section (an XPR0 resource file
+holding one texture, usually 128 x 128 DXT1), its `$$XSIMAGE` (the save image), a loose `TitleImage.xbx` then
+`SaveImage.xbx` in the game folder (any case; its root first, then a walk at most 3 folders deep, 2000 entries, files
+up to 4 MB), then `<internal files>/save/UDATA/<title id>/TitleImage.xbx`, the copy the game writes next to its saves.
+Only default.xbe is read (dashupdate.xbe and update.xbe hold dashboard media). XPR0 and the textures are decoded in
+Java (`TitleArt`: DXT1 / DXT3 / DXT5, and swizzled or linear A8R8G8B8 / X8R8G8B8 / R5G6B5); formats from public
+documentation (xboxdevwiki « Xbe » and « XPR ») and `src/d3d` (format codes, swizzle).
+
+**The colours** (`GamePalette`, pure Java, a 1:1 port of `tools/android/theme_preview/palette.py`): the image is
+box-downsampled to 64 x 64 and its pixels taken to OKLCH; greys, near-black and near-white carry no hue. Two 36-bin
+hue histograms (« vivid »: chroma squared, dark pixels count less; « area »: pixel count) give the peaks. The accent
+takes the most vivid hue, the neutrals the hue covering the most area, the second glow the next peak 40° or more away.
+Every token keeps the stock token's OKLCH lightness: the neutrals take a little chroma (at most 0.035) in the game's
+hue, the accent keeps 7:1 on `PANEL_HI` (its lightness raised when needed), and an accent within 18° of `ERROR`'s hue
+is pushed out of it. `GamePalette.WARN_AVOID_DEG` would do the same around `WARN`'s amber for warm games: 0 (off) for
+now, set it to 15 if an orange accent reads like the amber « Needs preparing » chip on the device. A 360-hue sweep
+keeps every contrast pair the UI relies on (TEXT on PANEL_HI 7:1, TEXT_DIM 4.5:1, TEXT_FAINT on BG_TOP 3:1, the
+accent on its surfaces 7:1, ...). Fable: accent `#A7C2FF` (periwinkle), blue-black neutrals, a rose second glow.
+
+**The hero backdrop** (`GamePalette.bakeHero`): 48 px on its long side, Gaussian-blurred (σ 3 px), then a gain in
+linear light so the 95th-percentile luminance is 0.012 and nothing above it: small text keeps its contrast over the
+brightest pixel (a render test checks TEXT_FAINT 3:1 and TEXT_DIM 4.5:1). `Widgets.Backdrop` draws it cover-fit,
+faded out at the left and in the bottom 35 % (the tiles and hints stay on the plain gradient), with the glows dimmer
+over it; one bitmap and cached shaders, nothing per frame.
+
+**Cache** (`GameTheme`), per title ID in `<internal files>/art/`: `<TID>.png` (the title image), `<TID>.hero.png`,
+`<TID>.theme` (text: `v=<GamePalette.VERSION>`, `xbe=<length>:<mtime>`, `source=`, `hues=`, `hero=`, one
+`TOKEN=AARRGGBB` per colour). Baked on the import worker before Home shows, or lazily on a worker for a game imported
+before (then the screen is shown again); stale when the version or default.xbe changes. « Delete the imported copy »
+deletes it. Each bake logs `launcher: theme <TID>: source xbe:$$XTIMAGE, accent #A7C2FF, hues 265.9/265.9/-, mode
+full`, and the launcher logs the same line when it applies a theme (`launcher: theme <TID>: stock, mode off` without).
+
+**Where it applies**: the launcher (applied before any view is built, so no flash of the stock green; when the game or
+the setting changes, the stage is built again in the new colours), the bottom screen's panel (its identity card also
+shows the title image; the panel's background stays black), and in the game process the in-game menu and the
+companion panel (`ShellActivity` reads the cached tokens once at game start: no bitmaps). Without a usable image
+(none, or an unknown format) Home shows a monogram (the title's initials on a gradient whose hue comes from the title
+ID) and the colours take that hue; a grey image keeps its picture and hero with the title ID's hue. No title ID, no
+game: the stock colours.
+
+**Settings › Launcher › Game theme** (only with a game that has a title ID): Art and colours (default), Colours only
+(no hero), Off (the stock green), per title in `files/settings/theme_<TID>`; applies at once in the launcher, at the
+next game start in the in-game menu.
+
+**Previews on a Mac** (`tools/android/theme_preview/`, Python 3 and Pillow; no art in the repo): `xart.py <xbe> <out>`
+extracts a title image from your own XBE, `palette.py <png>` prints the palette and its contrast checks, `mock.py`
+draws mock-ups, `golden.py` makes `GamePaletteTest`'s golden vectors. With a game folder of your own,
+`gradle testDebugUnitTest -PxbaPreviewGameDir=/path/to/game --tests '*ThemePreviewTest'` renders the real launcher in
+its theme to `build/screenshots/preview-*.png` (git-ignored); without the property the test is skipped.
+
+### Device check (game theme), for Alex
+
+`adb logcat -s xboxrecomp` throughout; Burnout 3 already imported, Fable's folder at hand.
+
+1. Open the launcher with Burnout 3: one line `launcher: theme <TID>: source …, accent #…, hues …, mode full` (send
+   it, and whether the source is `xbe:$$XTIMAGE`). The first start after the update bakes it on a worker: Home shows
+   again in the game's colours within a second.
+2. Home: the accent (brand mark, focus, caps headers, Play) in the game's colour, the **Ready** chip still green, a
+   faint wash of the title image on the right of the backdrop, no banding in it.
+3. The small caps (TITLE ID, LAST PLAYED, ...) and the dim text stay easy to read over the wash.
+4. Settings › Launcher › Game theme: Colours only (the wash goes, the colours stay), Off (the stock green at once),
+   Art and colours again; the detail names the game and the image source.
+5. Bottom screen (Thor): black background, the title image on the identity card, Play in the game's colour; it dims
+   after 10 s.
+6. Play: the in-game menu in the game's colours, « Paused » still amber, the screenshot flash green.
+7. Change game to Fable (import or folder): periwinkle (#A7C2FF) without restarting the app.
+8. Force-stop the app and open it again: no flash of the stock green before the game's colours.
+9. Game data › Delete the imported copy: no `files/art/<TID>.*` left (`adb shell run-as <app id> ls files/art`).
+10. Screenshots of Home with both games (and of a warm-coloured game next to the amber « Needs preparing » chip, if
+    one is at hand: the accent is not kept away from the amber yet, `GamePalette.WARN_AVOID_DEG`).
 
 ### Play time
 
@@ -230,7 +300,10 @@ the launcher never saw end counts for at most 6 hours (`game` SharedPreferences,
 
 `LauncherScreensTest` renders every screen and Home state in English and French at 1280 x 720 and 1920 x 1080, each
 with its focused row, to `build/screenshots/ui-<state>-<en|fr>-<720|1080>.png` (`--target app-unit-tests-out`);
-`TitleArtTest` checks the XBE section, the XPR0 container and the texel decoders on blobs it builds.
+`TitleArtTest` checks the XBE section, the XPR0 container and the texel decoders on blobs it builds; `GamePaletteTest`
+and `GameArtTest` (plain JUnit) the palette against `palette.py`'s golden vectors, the contrast sweep, the hero cap and
+the image sources; `GameThemeTest` the cache; `LauncherScreensTest` also renders Home in a blue, a warm and a grey
+game's theme (`ui-home-themed-*`) and the Game theme setting (`ui-settings-theme-*`).
 
 ### Settings
 
@@ -244,6 +317,7 @@ exist in the runtime and mean something to a player are offered:
 | Sounds | On (default), Off | none: `ui_sound` |
 | Vibration | On (default), Off | none: `ui_haptics` |
 | Bottom screen (only with a second display) | Panel (default), Black, Off | none: [Dual screen](#dual-screen-ayn-thor), `GameStore.bottomScreen` |
+| Game theme (only with a game that has a title ID) | Art and colours (default), Colours only, Off | none: [Game theme](#game-theme), `files/settings/theme_<TID>` |
 | Game › Language | Same as Android (default), English, Français, Deutsch, Español, Italiano, Português, 日本語, 한국어, 中文 | `RECOMP_LANGUAGE=…`; « Same as Android » writes nothing ([Game language](#game-language)) |
 | Graphics › Vertical sync | On (default), Off | `RECOMP_PRESENT_VSYNC=0` when off |
 | Graphics › Renderer | Auto (default: the title profile's choice, software today), Software, GPU | `RECOMP_GPU=0` / `1`; see [GPU back end](../technical/gpu-backend.md#android) |

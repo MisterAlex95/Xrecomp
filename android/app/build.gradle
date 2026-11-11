@@ -203,6 +203,9 @@ android {
                 // (a mirror of Central) with -ProbolectricRepoUrl=...
                 if (findProperty('robolectricRepoUrl'))
                     systemProperty 'robolectric.dependency.repo.url', findProperty('robolectricRepoUrl')
+                // ThemePreviewTest (opt-in): the launcher in the theme of a game of your own, build/screenshots/preview-*
+                if (findProperty('xbaPreviewGameDir'))
+                    systemProperty 'xba.previewGameDir', findProperty('xbaPreviewGameDir')
             }
         }
     }
