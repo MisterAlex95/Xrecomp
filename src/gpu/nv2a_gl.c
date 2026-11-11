@@ -57,6 +57,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <dirent.h>
+#include <sys/stat.h>
 
 extern ptrdiff_t xbox_GetMemoryOffset(void);
 
@@ -78,6 +80,7 @@ static struct {
     uint32_t bump_draws;            /* batches with a bump-env stage */
     uint32_t target_switches;       /* draw/clear framebuffer changes (bind_target) */
     uint32_t frames;                /* flips since the line was last printed */
+    uint32_t cache_loads;           /* programs from the binary cache */
 } s_st;
 
 /* RECOMP_GPU_RT_RELAYOUT_READBACK=1: read a target back when the title
@@ -363,6 +366,7 @@ static void sh_stencil_mask(GLuint m)
 /* ---- set-up ------------------------------------------------------------- */
 
 static void unregister_self(void);
+static void pc_init(void);
 
 static int ensure_init(void)
 {
@@ -454,6 +458,7 @@ static int ensure_init(void)
                                                  + (size_t)t * 4 * sizeof(float)));
         }
     }
+    pc_init();
     glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
     glPixelStorei(GL_PACK_ALIGNMENT, 4);
     if (s_depth_clamp)
@@ -1398,14 +1403,20 @@ typedef struct {
     GLint u_xf, u_fog;
     GLint *cloc;
     uint64_t const_synced;
+    uint64_t src_hash;              /* the program binary cache's key */
 } GlProg;
 
-/* A translated vertex program (nv2a_gl_vsh.c), compiled once per program. */
+/* A translated vertex program (nv2a_gl_vsh.c): its GLSL, kept so that the
+ * program binary cache can key on it, compiled the first time a program
+ * that uses it has to be linked (with every program it is in found in the
+ * cache, never). */
 typedef struct {
-    uint64_t hash;
+    uint64_t hash;                  /* 0: empty slot */
     uint32_t count;
-    GLuint sh;                      /* 0 with `failed`: do not retry */
-    int failed;
+    char *src;
+    uint64_t src_hash;
+    GLuint sh;                      /* 0 until compiled */
+    int failed;                     /* translation or compile failed: do not retry */
 } GlVsh;
 
 #define NV_GL_MAX_PROG 2048         /* power of two; pipelines x programs */
@@ -1413,6 +1424,15 @@ typedef struct {
 static GlProg s_prog[NV_GL_MAX_PROG];
 
 static GlVsh s_vsh[NV_GL_MAX_VSH];
+
+/* 64-bit FNV-1a, continuing from h (shader sources; not hash_bytes, whose
+ * byte count is the texture statistics'). */
+static uint64_t hash_str(uint64_t h, const char *t)
+{
+    for (; *t; t++)
+        h = (h ^ (uint8_t)*t) * 0x100000001B3ull;
+    return h;
+}
 
 static GlVsh *vsh_get(const Nv2aProgramBatch *pb)
 {
@@ -1423,7 +1443,7 @@ static GlVsh *vsh_get(const Nv2aProgramBatch *pb)
 
     for (i = 0; i < NV_GL_MAX_VSH; i++) {
         GlVsh *c = &s_vsh[(slot + i) & (NV_GL_MAX_VSH - 1)];
-        if (!c->sh && !c->failed) {
+        if (!c->hash) {
             v = c;
             break;
         }
@@ -1438,60 +1458,281 @@ static GlVsh *vsh_get(const Nv2aProgramBatch *pb)
                           NV2A_GL_ES ? NV2A_GL_VSH_RENDER
                                      : NV2A_GL_VSH_RENDER | NV2A_GL_VSH_CLIP_DISTANCE,
                           body, sizeof body, NULL)
-        || !(v->sh = compile(GL_VERTEX_SHADER, body))) {
+        || !(v->src = strdup(body))) {
         v->failed = 1;
         return NULL;
     }
-    s_st.compiles++;
+    v->src_hash = hash_str(0xCBF29CE484222325ull, body);
     return v;
 }
 
-/* The program for pipeline `key` with the fixed vertex shader (vsh NULL:
- * CPU-transformed vertices) or a translated vertex program. */
-static GlProg *prog_get(const Nv2aGlShaderKey *key, const GlVsh *vsh)
+/* ---- program binary cache ----------------------------------------------- */
+
+/* Linked programs are kept on disk (glGetProgramBinary) and loaded at the
+ * next start (glProgramBinary) instead of compiled: a mobile driver takes
+ * tens of milliseconds a program, and Fable links ~70 by Oakvale, each the
+ * first time a batch needs it, on the executor thread, mid-frame.
+ *
+ *   where   <save dir>/shadercache/<title id>/<source hash>.bin -- the save
+ *           dir is $XDG_DATA_HOME/xboxrecomp on desktop POSIX and
+ *           <internal files dir>/save on Android (xbox_path_init).
+ *   key     a 64-bit hash of the program's whole GLSL (header, vertex and
+ *           fragment shader), so a change of either generator, of the
+ *           pipeline key or of the vertex program gives another file.
+ *   header  generator version (NV_GL_PCACHE_VERSION), GL_RENDERER and
+ *           GL_VERSION as strings, binary format and length: a file from
+ *           another driver or GPU is deleted and the program compiled.
+ *   warm-up the files found at context creation are loaded a few per flip
+ *           (NV_GL_PCACHE_WARM) during the first frames -- the intro
+ *           movies, the title screen -- so the first in-world frames find
+ *           them linked. A program needed before its turn is loaded from
+ *           its file there and then.
+ * A driver that offers no binary format, or RECOMP_GPU_SHADER_CACHE=0,
+ * compiles every time, as before. */
+#define NV_GL_PCACHE_VERSION 1
+#define NV_GL_PCACHE_WARM    4      /* binaries loaded per flip in the warm-up */
+#define NV_GL_MAX_WARM       1024
+
+typedef struct {
+    char magic[8];                  /* "NV2AGLPB" */
+    uint32_t gen_version, format, length, reserved;
+    uint64_t src_hash;
+    char renderer[128], version[128];
+} GlPcHeader;
+
+static int s_pc_on;
+static char s_pc_dir[900];
+static char s_pc_renderer[128], s_pc_version[128];
+static uint64_t *s_pc_list;         /* files found at start-up, warm-up order */
+static int s_pc_nlist, s_pc_next;
+static struct { uint64_t hash; GLuint prog; } s_warm[NV_GL_MAX_WARM];
+static int s_nwarm;
+static uint32_t s_pc_total_compiled, s_pc_total_loaded;
+
+extern const char *xbox_path_save_dir_utf8(void);
+
+static void mkdir_p(char *path)
 {
-    static char body[32768];
-    uint64_t vh = vsh ? vsh->hash : 0;
-    uint64_t h = nv2a_gl_shader_key_hash(key) ^ (vh * 0x9E3779B97F4A7C15ull);
-    uint32_t i, slot = (uint32_t)h & (NV_GL_MAX_PROG - 1);
-    GlProg *p = NULL;
-    GLuint fs;
+    char *q;
+
+    for (q = path + 1; *q; q++)
+        if (*q == '/') {
+            *q = 0;
+            mkdir(path, 0755);
+            *q = '/';
+        }
+    mkdir(path, 0755);
+}
+
+/* The title ID from the XBE certificate (header mapped at 0x10000, the
+ * certificate's address at +0x118, the ID at +8 in it). */
+static uint32_t title_id(void)
+{
+    uint32_t cert = 0, id = 0;
+
+    memcpy(&cert, guest(0x00010118u), 4);
+    if (cert < 0x00010000u || cert >= 0x04000000u)
+        return 0;
+    memcpy(&id, guest(cert + 8), 4);
+    return id;
+}
+
+static void pc_path(uint64_t h, char *out, size_t n, const char *ext)
+{
+    snprintf(out, n, "%s/%016llX.%s", s_pc_dir, (unsigned long long)h, ext);
+}
+
+static void pc_init(void)
+{
+    const char *e = getenv("RECOMP_GPU_SHADER_CACHE"), *save;
+    GLint nfmt = 0;
+    DIR *d;
+    struct dirent *de;
+    int cap = 0;
+
+    s_pc_on = 0;
+    s_pc_nlist = s_pc_next = 0;
+    if (e && strcmp(e, "0") == 0)
+        return;
+    glGetIntegerv(GL_NUM_PROGRAM_BINARY_FORMATS, &nfmt);
+    save = xbox_path_save_dir_utf8();
+    if (nfmt <= 0 || !save || !save[0]) {
+        fprintf(stderr, "  [GPUGL] program binary cache off (%s)\n",
+                nfmt <= 0 ? "the driver offers no binary format" : "no save dir");
+        return;
+    }
+    snprintf(s_pc_renderer, sizeof s_pc_renderer, "%s", (const char *)glGetString(GL_RENDERER));
+    snprintf(s_pc_version, sizeof s_pc_version, "%s", (const char *)glGetString(GL_VERSION));
+    snprintf(s_pc_dir, sizeof s_pc_dir, "%s/shadercache/%08X", save, title_id());
+    mkdir_p(s_pc_dir);
+    if ((d = opendir(s_pc_dir)) != NULL) {
+        while ((de = readdir(d)) != NULL) {
+            char *end;
+            unsigned long long h;
+            if (strlen(de->d_name) != 20 || strcmp(de->d_name + 16, ".bin") != 0)
+                continue;
+            h = strtoull(de->d_name, &end, 16);
+            if (end != de->d_name + 16 || !h)
+                continue;
+            if (s_pc_nlist == cap) {
+                uint64_t *l = (uint64_t *)realloc(s_pc_list, (size_t)(cap ? cap * 2 : 64)
+                                                             * sizeof *l);
+                if (!l)
+                    break;
+                s_pc_list = l;
+                cap = cap ? cap * 2 : 64;
+            }
+            s_pc_list[s_pc_nlist++] = h;
+        }
+        closedir(d);
+    }
+    s_pc_on = 1;
+    fprintf(stderr, "  [GPUGL] program binary cache %s: %d binaries, warm-up %d a frame\n",
+            s_pc_dir, s_pc_nlist, NV_GL_PCACHE_WARM);
+}
+
+/* The program in file `h`, linked from its binary; 0 when there is no file
+ * or it does not load (then deleted: another driver, a damaged file). */
+static GLuint pc_load(uint64_t h)
+{
+    char path[1024];
+    GlPcHeader hd;
+    FILE *f;
+    void *bin = NULL;
+    GLuint prog = 0;
     GLint ok = 0;
 
-    for (i = 0; i < NV_GL_MAX_PROG; i++) {
-        GlProg *c = &s_prog[(slot + i) & (NV_GL_MAX_PROG - 1)];
-        if (!c->prog && !c->failed) {
-            p = c;
-            break;
-        }
-        if (c->hash == h && c->vsh_hash == vh && memcmp(&c->key, key, sizeof *key) == 0)
-            return c->failed ? NULL : c;
+    pc_path(h, path, sizeof path, "bin");
+    if (!(f = fopen(path, "rb")))
+        return 0;
+    if (fread(&hd, sizeof hd, 1, f) != 1 || memcmp(hd.magic, "NV2AGLPB", 8) != 0
+        || hd.gen_version != NV_GL_PCACHE_VERSION || hd.src_hash != h
+        || !hd.length || hd.length > (64u << 20)
+        || strncmp(hd.renderer, s_pc_renderer, sizeof hd.renderer) != 0
+        || strncmp(hd.version, s_pc_version, sizeof hd.version) != 0
+        || !(bin = malloc(hd.length)) || fread(bin, hd.length, 1, f) != 1) {
+        fclose(f);
+        free(bin);
+        remove(path);
+        return 0;
     }
-    if (!p)
-        return NULL;                /* ponytail: 2048 pipelines, then no more */
-    p->key = *key;
-    p->hash = h;
-    p->vsh_hash = vh;
-    if (!nv2a_gl_fragment_body(key, body, sizeof body)
-        || !(fs = compile(GL_FRAGMENT_SHADER, body))) {
-        p->failed = 1;
-        return NULL;
-    }
-    p->prog = glCreateProgram();
-    glAttachShader(p->prog, vsh ? vsh->sh : s_vs);
-    glAttachShader(p->prog, fs);
-    glLinkProgram(p->prog);
-    glDeleteShader(fs);
-    glGetProgramiv(p->prog, GL_LINK_STATUS, &ok);
+    fclose(f);
+    prog = glCreateProgram();
+    glProgramBinary(prog, (GLenum)hd.format, bin, (GLsizei)hd.length);
+    free(bin);
+    glGetProgramiv(prog, GL_LINK_STATUS, &ok);
     if (!ok) {
-        char log[2048];
-        glGetProgramInfoLog(p->prog, sizeof log, NULL, log);
-        fprintf(stderr, "  [GPUGL] link failed: %s\n", log);
-        glDeleteProgram(p->prog);
-        p->prog = 0;
-        p->failed = 1;
-        return NULL;
+        glDeleteProgram(prog);
+        remove(path);
+        return 0;
     }
+    return prog;
+}
+
+static void pc_store(GLuint prog, uint64_t h)
+{
+    char path[1024], tmp[1024];
+    GlPcHeader hd;
+    GLint len = 0;
+    GLsizei got = 0;
+    GLenum fmt = 0;
+    void *bin;
+    FILE *f;
+    int ok;
+
+    glGetProgramiv(prog, GL_PROGRAM_BINARY_LENGTH, &len);
+    if (len <= 0 || !(bin = malloc((size_t)len)))
+        return;
+    glGetProgramBinary(prog, len, &got, &fmt, bin);
+    if (got <= 0) {
+        free(bin);
+        return;
+    }
+    memset(&hd, 0, sizeof hd);
+    memcpy(hd.magic, "NV2AGLPB", 8);
+    hd.gen_version = NV_GL_PCACHE_VERSION;
+    hd.format = (uint32_t)fmt;
+    hd.length = (uint32_t)got;
+    hd.src_hash = h;
+    snprintf(hd.renderer, sizeof hd.renderer, "%s", s_pc_renderer);
+    snprintf(hd.version, sizeof hd.version, "%s", s_pc_version);
+    pc_path(h, path, sizeof path, "bin");
+    pc_path(h, tmp, sizeof tmp, "tmp");
+    if (!(f = fopen(tmp, "wb"))) {
+        free(bin);
+        return;
+    }
+    ok = fwrite(&hd, sizeof hd, 1, f) == 1 && fwrite(bin, (size_t)got, 1, f) == 1;
+    ok = fclose(f) == 0 && ok;
+    free(bin);
+    if (!ok || rename(tmp, path) != 0)
+        remove(tmp);
+}
+
+/* Is the program for source hash h linked already (in use or warmed)? */
+static int pc_have(uint64_t h)
+{
+    int i;
+
+    for (i = 0; i < s_nwarm; i++)
+        if (s_warm[i].hash == h)
+            return 1;
+    for (i = 0; i < NV_GL_MAX_PROG; i++)
+        if (s_prog[i].prog && s_prog[i].src_hash == h)
+            return 1;
+    return 0;
+}
+
+/* The program for source hash h from the cache, warmed or from its file. */
+static GLuint pc_take(uint64_t h)
+{
+    int i;
+
+    if (!s_pc_on)
+        return 0;
+    for (i = 0; i < s_nwarm; i++)
+        if (s_warm[i].hash == h) {
+            GLuint prog = s_warm[i].prog;
+            s_warm[i] = s_warm[--s_nwarm];
+            return prog;
+        }
+    return pc_load(h);
+}
+
+/* Warm-up, at the flip: the next few files found at start-up. */
+static void pc_warm(void)
+{
+    int n = 0;
+
+    while (s_pc_on && n < NV_GL_PCACHE_WARM && s_pc_next < s_pc_nlist
+           && s_nwarm < NV_GL_MAX_WARM) {
+        uint64_t h = s_pc_list[s_pc_next++];
+        GLuint prog;
+        if (pc_have(h))
+            continue;
+        n++;
+        if ((prog = pc_load(h)) != 0) {
+            s_warm[s_nwarm].hash = h;
+            s_warm[s_nwarm].prog = prog;
+            s_nwarm++;
+        }
+    }
+    if (s_pc_on && s_pc_list && s_pc_next >= s_pc_nlist) {
+        if (s_verbose)
+            fprintf(stderr, "  [GPUGL] program binary cache: warm-up done, %d programs ready\n",
+                    s_nwarm);
+        free(s_pc_list);
+        s_pc_list = NULL;
+        s_pc_nlist = s_pc_next = 0;
+    }
+}
+
+/* Uniform locations and sampler units of a linked program (a program
+ * loaded from a binary starts with every uniform at its default too). */
+static void prog_setup(GlProg *p, int program)
+{
+    uint32_t i;
+
     sh_program(p->prog);
     for (i = 0; i < 4; i++) {
         char name[8];
@@ -1508,7 +1749,7 @@ static GlProg *prog_get(const Nv2aGlShaderKey *key, const GlVsh *vsh)
     p->u_aref = glGetUniformLocation(p->prog, "u_aref");
     p->u_bm = glGetUniformLocation(p->prog, "u_bm");
     p->u_bso = glGetUniformLocation(p->prog, "u_bso");
-    if (vsh) {
+    if (program) {
         p->u_xf = glGetUniformLocation(p->prog, "u_xf");
         p->u_fog = glGetUniformLocation(p->prog, "u_fog");
         p->cloc = (GLint *)malloc(192 * sizeof(GLint));
@@ -1521,7 +1762,90 @@ static GlProg *prog_get(const Nv2aGlShaderKey *key, const GlVsh *vsh)
         }
         p->const_synced = 0;
     }
+}
+
+/* Compile and link program p from fragment body `fs` and the fixed vertex
+ * shader or vsh (compiled here the first time). 0 on failure. */
+static int prog_link(GlProg *p, const char *fs_body, GlVsh *vsh)
+{
+    GLuint fs;
+    GLint ok = 0;
+
+    if (vsh && !vsh->sh) {
+        if (!(vsh->sh = compile(GL_VERTEX_SHADER, vsh->src))) {
+            vsh->failed = 1;
+            return 0;
+        }
+        s_st.compiles++;
+        s_pc_total_compiled++;
+    }
+    if (!(fs = compile(GL_FRAGMENT_SHADER, fs_body)))
+        return 0;
+    p->prog = glCreateProgram();
+    if (s_pc_on)
+        glProgramParameteri(p->prog, GL_PROGRAM_BINARY_RETRIEVABLE_HINT, GL_TRUE);
+    glAttachShader(p->prog, vsh ? vsh->sh : s_vs);
+    glAttachShader(p->prog, fs);
+    glLinkProgram(p->prog);
+    glDeleteShader(fs);
+    glGetProgramiv(p->prog, GL_LINK_STATUS, &ok);
+    if (!ok) {
+        char log[2048];
+        glGetProgramInfoLog(p->prog, sizeof log, NULL, log);
+        fprintf(stderr, "  [GPUGL] link failed: %s\n", log);
+        glDeleteProgram(p->prog);
+        p->prog = 0;
+        return 0;
+    }
     s_st.compiles++;
+    s_pc_total_compiled++;
+    return 1;
+}
+
+/* The program for pipeline `key` with the fixed vertex shader (vsh NULL:
+ * CPU-transformed vertices) or a translated vertex program. */
+static GlProg *prog_get(const Nv2aGlShaderKey *key, GlVsh *vsh)
+{
+    static char body[32768];
+    uint64_t vh = vsh ? vsh->hash : 0;
+    uint64_t h = nv2a_gl_shader_key_hash(key) ^ (vh * 0x9E3779B97F4A7C15ull);
+    uint32_t i, slot = (uint32_t)h & (NV_GL_MAX_PROG - 1);
+    GlProg *p = NULL;
+
+    for (i = 0; i < NV_GL_MAX_PROG; i++) {
+        GlProg *c = &s_prog[(slot + i) & (NV_GL_MAX_PROG - 1)];
+        if (!c->prog && !c->failed) {
+            p = c;
+            break;
+        }
+        if (c->hash == h && c->vsh_hash == vh && memcmp(&c->key, key, sizeof *key) == 0)
+            return c->failed ? NULL : c;
+    }
+    if (!p)
+        return NULL;                /* ponytail: 2048 pipelines, then no more */
+    p->key = *key;
+    p->hash = h;
+    p->vsh_hash = vh;
+    if (!nv2a_gl_fragment_body(key, body, sizeof body)) {
+        p->failed = 1;
+        return NULL;
+    }
+    /* The whole program's source, as the cache keys it. */
+    p->src_hash = hash_str(hash_str(hash_str(0xCBF29CE484222325ull,
+                                             nv2a_gl_glsl_header(NV2A_GL_ES)),
+                                    vsh ? vsh->src : nv2a_gl_vertex_body()),
+                           body);
+    if ((p->prog = pc_take(p->src_hash)) != 0) {
+        s_st.cache_loads++;
+        s_pc_total_loaded++;
+    } else if (prog_link(p, body, vsh)) {
+        if (s_pc_on)
+            pc_store(p->prog, p->src_hash);
+    } else {
+        p->failed = 1;
+        return NULL;
+    }
+    prog_setup(p, vsh != NULL);
     return p;
 }
 
@@ -2349,6 +2673,8 @@ static void gl_reset_objects(int lost)
             if (s_prog[i].prog) glDeleteProgram(s_prog[i].prog);
         for (i = 0; i < NV_GL_MAX_VSH; i++)
             if (s_vsh[i].sh) glDeleteShader(s_vsh[i].sh);
+        for (i = 0; i < s_nwarm; i++)
+            glDeleteProgram(s_warm[i].prog);
         if (s_pbo) glDeleteBuffers(1, &s_pbo);
         if (s_pvbo) glDeleteBuffers(1, &s_pvbo);
         if (s_pebo) glDeleteBuffers(1, &s_pebo);
@@ -2372,7 +2698,14 @@ static void gl_reset_objects(int lost)
     for (i = 0; i < NV_GL_MAX_PROG; i++)
         free(s_prog[i].cloc);
     memset(s_prog, 0, sizeof s_prog);
+    for (i = 0; i < NV_GL_MAX_VSH; i++)
+        free(s_vsh[i].src);
     memset(s_vsh, 0, sizeof s_vsh);
+    s_nwarm = 0;
+    free(s_pc_list);                /* ensure_init scans the cache again */
+    s_pc_list = NULL;
+    s_pc_nlist = s_pc_next = 0;
+    s_pc_on = 0;
     s_pvao = s_pvbo = s_pebo = 0;
     s_pbo = 0;
     s_pbo_size = 0;
@@ -2550,6 +2883,8 @@ static void gl_flip(void)
 {
     s_frame++;
     s_st.frames++;
+    if (s_init > 0)
+        pc_warm();
     if (s_init > 0 && (s_verbose ? s_frame % 60 == 0 : s_frame % 600 == 0)) {
         int i, nrt = 0, nprog = 0;
         for (i = 0; i < NV_GL_MAX_RT; i++)
@@ -2561,14 +2896,15 @@ static void gl_flip(void)
                         " targets: %u created, %u relayouts, %u grown, %u sampled directly"
                         " (%u copies), %u shadow maps, %u bump-env, %u seeded, %u seeds skipped, %u invalidates,"
                         " %u uploads (%u KB), %u KB hashed, %d textures,"
-                        " %d targets, %d programs (%u compiled),"
+                        " %d targets, %d programs (%u compiled, %u from cache;"
+                        " run %u/%u),"
                         " %.1f target switches/frame\n",
                 s_frame, s_st.draws, s_st.vsh_draws, s_st.vsh_kb, s_st.tris,
                 s_st.clears, s_st.readbacks, s_st.rt_creates, s_st.relayouts, s_st.rt_grows,
                 s_st.rt_direct, s_st.rt_copies, s_st.shadow_binds, s_st.bump_draws, s_st.seeds,
                 s_st.seeds_skipped, s_st.invalidates,
                 s_st.uploads, s_st.upload_kb, s_st.hashes_kb, s_ntex, nrt, nprog,
-                s_st.compiles,
+                s_st.compiles, s_st.cache_loads, s_pc_total_compiled, s_pc_total_loaded,
                 s_st.frames ? (double)s_st.target_switches / s_st.frames : 0.0);
         memset(&s_st, 0, sizeof s_st);
     }

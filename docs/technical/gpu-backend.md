@@ -351,6 +351,26 @@ change of that state goes through the `sh_*` helpers; deleting a texture or
 framebuffer forgets its bindings, and context creation and
 `gl_reset_objects` forget everything.
 
+**Program binary cache.** A linked program is written with
+`glGetProgramBinary` to `<save dir>/shadercache/<title id>/<hash>.bin`
+(the save dir is `$XDG_DATA_HOME/xboxrecomp` on desktop POSIX and the app's
+internal `save/` on Android) and loaded with `glProgramBinary` at the next
+start instead of compiled; Fable links about 70 programs by Oakvale, each
+the first time a batch needs it, on the executor thread. The file name is a
+64-bit hash of the program's whole GLSL (header, vertex and fragment
+shader), so a change of a generator, a pipeline key or a vertex program
+gives another file; vertex programs are compiled only when a program that
+uses them has to be linked. The header holds a generator version,
+`GL_RENDERER` and `GL_VERSION`: a file from another driver (or one the
+driver refuses) is deleted and the program compiled. Files found at context
+creation are loaded 4 a flip (the warm-up, during the intro movies and the
+title screen); a program needed before its turn is loaded from its file
+there and then. The statistics line reads `N programs (C compiled, L from
+cache; run C/L)`, the last pair counted since start-up; a second launch
+reaches Oakvale with 0 compiled. Off when the driver offers no binary
+format (`[GPUGL] program binary cache off`) or with
+`RECOMP_GPU_SHADER_CACHE=0`.
+
 **Visibility tests.** Batches drawn while `SET_ZPASS_PIXEL_COUNT_ENABLE` is
 on are wrapped in occlusion queries (a ring of recycled query objects).
 Reading them at every `GET_REPORT` made the executor wait for the GPU 341
