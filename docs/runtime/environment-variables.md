@@ -19,6 +19,30 @@ them there for the player (`RECOMP_LANGUAGE`, `RECOMP_PRESENT_VSYNC`, `RECOMP_TE
 `RECOMP_AUDIO_BUF_SAMPLES`, `RECOMP_RASTER_THREADS`, `RECOMP_BIG_CORES`, `RECOMP_SHELL_SELFTEST`) and keeps every
 other line as written: see [Settings](../android/app-shell.md#settings).
 
+### Forced by a title
+
+A title profile (`titles/<title id>/title.json`) can force options that the title cannot run right without, over
+everything else (the shell environment, `recomp.cfg`, the launcher's Settings):
+
+```json
+"env_force": {"RECOMP_LSFG": "0"}
+```
+
+- **Allowed**: names `RECOMP_[A-Z0-9_]+` (63 characters at most), values strings of printable ASCII (255 at most; a
+  JSON number is taken as its text), 16 entries at most. `tools.prepare` refuses anything else (`BAD_PROFILE` on
+  Android, an error on the desktop); the runtime checks again and ignores a refused entry with a `[TITLE]` line on
+  stderr. The value is set as is: for a switch read by presence, `"0"` still turns it on.
+- **Why not `setenv` in the profile**: `xba_title_configure` runs when the guest thread starts, after the window
+  and the frame generation pacer have read their options. Burnout 3 (its game logic follows the flip rate) under
+  `RECOMP_LSFG=1`'s 30 fps cap runs in slow motion; its profile forces `RECOMP_LSFG=0`.
+- **Android**: `tools/prepare` copies it into `pack.json` ([prepare.md](../android/prepare.md#packjson));
+  `pack_loader.c` sets it after `recomp.cfg` and before the dlopen (`recomp_pack_apply_env_force`,
+  `recomp_cfg_force`). The launcher's frame generation row says « Frame generation unavailable for this title » when
+  the selected game's pack forces `RECOMP_LSFG` off.
+- **Desktop**: `tools.prepare` writes it to the project's `src/title/env_force.h`; `main()` (templates/new-game)
+  sets it first thing.
+- Log, one line per option: `[TITLE] 4541005B forces RECOMP_LSFG=0 (title profile)`.
+
 ## Bring-up and diagnostics
 
 Start here when a title does not run. See [Step 6: Iterative Debugging](../pipeline/06-debugging.md) for the workflow these belong to.
@@ -187,7 +211,7 @@ Only in a build configured with `-DXBOXRECOMP_LSFG=ON` (POSIX hosts); see [Frame
 
 | Variable | Default | What it does | Where |
 |---|---|---|---|
-| `RECOMP_LSFG=1` | off | Frame generation on. While on, the effective `RECOMP_GPU_FPS_CAP` is min(cap, display rate / multiplier) (a cap of `0` becomes display rate / multiplier: 30 at 60 Hz, 2x) and `RECOMP_GPU_PRESENT=sync` is forced. Both stay for the run if the pacer later falls back to pass-through. | `src/framegen/framegen_policy.h`, `nv2a_pb_exec.c`, `src/gpu/nv2a_gl.c` |
+| `RECOMP_LSFG=1` | off | Frame generation on. A title profile can force it off (`env_force`, [Forced by a title](#forced-by-a-title)). While on, the effective `RECOMP_GPU_FPS_CAP` is min(cap, display rate / multiplier) (a cap of `0` becomes display rate / multiplier: 30 at 60 Hz, 2x) and `RECOMP_GPU_PRESENT=sync` is forced. Both stay for the run if the pacer later falls back to pass-through. | `src/framegen/framegen_policy.h`, `nv2a_pb_exec.c`, `src/gpu/nv2a_gl.c` |
 | `RECOMP_LSFG_MULT=2..4` | 2 | Frames shown per real frame (2: one generated frame between two real ones). | `framegen_policy.h` |
 | `RECOMP_LSFG_DISPLAY_HZ=N` | 60 | Display refresh rate used by the cap rule. Unset, the windowed presenter sets it to the display's rate when that is below 60 Hz (a faster display keeps 60). | `framegen_policy.h`, `src/video/fb_present_sdl.c` |
 | `RECOMP_LSFG_BUDGET_MS=N` | cap period / multiplier (16.7 ms at 30 fps, 2x) | Generation cost above which a frame counts as over budget; 30 in a row (or 30 failed generations) turn frame generation off: `[LSFG] off: <reason>`. | `src/framegen/framegen_pacer.c` |

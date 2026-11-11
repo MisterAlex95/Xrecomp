@@ -276,6 +276,16 @@ end need not link the framegen library; included only in an
 Both are read once at start-up; if the pacer falls back later, the cap and the
 sync read-back stay for the run (30 fps is the Android profile's cap anyway).
 
+**Titles locked to the flip rate.** A title whose game logic advances once per
+flip (Burnout 3) runs in slow motion under the 30 fps cap. Its profile forces
+frame generation off with `"env_force": {"RECOMP_LSFG": "0"}` in
+`titles/<title id>/title.json`: `xba_title_configure` is too late for it (the
+presenter and the pacer read `RECOMP_LSFG` before the guest starts), so the
+option travels in `pack.json` on Android (set by the pack loader after
+`recomp.cfg`) and in the generated `src/title/env_force.h` on the desktop (set
+by `main()`). Log: `[TITLE] 4541005B forces RECOMP_LSFG=0 (title profile)`.
+See [Environment variables](../runtime/environment-variables.md#forced-by-a-title).
+
 ### Tests
 
 `tests/framegen_pacer` (C, POSIX, built on its own like the other test
@@ -385,7 +395,11 @@ Mac display gave a cap of 60: shown 44-48 fps, half the pairs skipped.
   the row then says "Shaders ready (LSFG 3.1)", "This Lossless.dll version is
   not supported" or "translator missing". When shaders are usable (or DXBC is
   there for a later translation) `RECOMP_LSFG_DIR=<filesDir>/lsfg/<key>` goes
-  into `recomp.cfg`. Strings in English and French.
+  into `recomp.cfg`. Strings in English and French. When the selected game's
+  pack forces `RECOMP_LSFG` off (`pack.json` `env_force`, from its title
+  profile), the row stays (the setting is global) but is dimmed, its line says
+  « Frame generation unavailable for this title » and the detail panel says
+  why (`Pack.forcesOff`).
 - **Storage**: `files/lsfg` is excluded from backups (`allowBackup="false"`,
   plus `fullBackupContent` and `dataExtractionRules`, which also cover a
   device-to-device transfer) and never served by `LogProvider`.

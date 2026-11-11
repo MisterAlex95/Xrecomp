@@ -43,7 +43,8 @@ prepare puts `.old` back if a kill fell between the two renames. So a reader see
 ```json
 {"format": 1, "title_id": "4D5300D1", "title": "...", "xbe_sha256": "...", "abi": "arm64-v8a", "shell_abi": 1,
  "toolkit": "<commit>", "lib": "libtitle.so", "lib_sha256": "...", "lib_size": 123456,
- "entry": "recomp_title_main", "cc": "clang 19.0.1 -O1", "built_at": "2026-11-10T21:10:35Z"}
+ "entry": "recomp_title_main", "cc": "clang 19.0.1 -O1", "built_at": "2026-11-10T21:10:35Z",
+ "env_force": {"RECOMP_LSFG": "0"}}
 ```
 
 | Field | Type | Meaning |
@@ -60,6 +61,7 @@ prepare puts `.old` back if a kill fell between the two renames. So a reader see
 | `entry` | string | `recomp_title_main`: `int recomp_title_main(const recomp_storage *)` (templates/new-game/src/main.c). |
 | `cc` | string | Compiler and level, informative (`clang 19.0.1 -O1`). |
 | `built_at` | string | ISO 8601, UTC (`Z`). |
+| `env_force` | object | Optional; only when the title profile declares it. `title.json`'s `"env_force"`, checked and copied: `RECOMP_[A-Z0-9_]+` names to strings (printable ASCII), 16 at most. The loader sets each one over `recomp.cfg` before the dlopen (log `[TITLE] <TID> forces KEY=VALUE (title profile)`); the launcher shows a forced `RECOMP_LSFG=0` on the frame generation row. Not a validity check: a pack without it, or with entries the loader refuses, still loads. See [Forced by a title](../runtime/environment-variables.md#forced-by-a-title). |
 
 Readers ignore fields they do not know. `tools/prepare/pack.py` (`read`, `check`) is the reference for the checks.
 
@@ -152,6 +154,7 @@ XBA_RESULT ok pack=/data/user/0/<app>/files/packs/12345678
 | `PACK_FAILED` | writing or publishing the pack failed |
 | `NO_SPACE` | ENOSPC anywhere |
 | `CANCELLED` | SIGTERM or SIGINT |
+| `BAD_PROFILE` | the title profile's `title.json` has an `env_force` entry that is not allowed |
 | `INTERNAL` | anything else (a bug); the traceback is in `prepare.log` |
 
 Exit status: 0 ok, 1 error, 130 cancelled. On SIGTERM/SIGINT prepare kills its children, prints
@@ -261,6 +264,7 @@ logcat lines in [app-shell.md](app-shell.md) « Title packs »):
 4. `dlopen(lib, RTLD_NOW | RTLD_LOCAL)`; `dlsym` of `entry` (required), `recomp_lookup`, `recomp_lookup_manual`,
    `fe_menu_get_pb_state`, `g_fe_cursor`, each kept only if it lies in the pack (`dladdr`; `dlsym` on a handle also
    searches `libmain.so`). Failure → `PACK_DLOPEN <dlerror>`.
+   Then `env_force`, if any: each option set over `recomp.cfg` (`recomp_pack_apply_env_force`).
 5. The pointers go behind `libmain.so`'s weak forwarders; the title runs from `entry` on the guest thread, as a linked
    title does. On `PACK_INVALID` / `PACK_DLOPEN` the shell hands back to the launcher, which deletes the pack and
    offers Prepare again.
