@@ -375,6 +375,7 @@ static void sh_stencil_mask(GLuint m)
 
 static void unregister_self(void);
 static void pc_init(void);
+static void sig_init(void);
 
 static int ensure_init(void)
 {
@@ -467,12 +468,189 @@ static int ensure_init(void)
         }
     }
     pc_init();
+    sig_init();
     glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
     glPixelStorei(GL_PACK_ALIGNMENT, 4);
     if (s_depth_clamp)
         glEnable(GL_DEPTH_CLAMP);
     s_init = 1;
     return 1;
+}
+
+/* ---- batch signatures (RECOMP_GPU_SIGDUMP, RECOMP_GPU_SIGSKIP) ---------- */
+
+/* A diagnosis tool for wrong pixels: which batches draw a spot, and what is
+ * left of the picture without them. Each batch gets a 32-bit signature of
+ * what decides how it looks -- target address and size, combiner program
+ * and words, each stage's format, kind and size, blend, alpha test, depth,
+ * stencil, colour mask -- and of no texture or vertex address, so a kind of
+ * batch keeps its signature from frame to frame while the title streams.
+ *
+ *   RECOMP_GPU_SIGDUMP=<file>  at the first flip where <file> exists, that
+ *       frame's table goes to stderr and the file is deleted (touch it again
+ *       for another frame): one "[GPUSIG] <sig> n <batches> tris <triangles>
+ *       : <description>" line per signature (the description gives the
+ *       first batch's texture addresses), and one "[GPUSEQ]" line with the
+ *       frame's target runs, address(width x height)x batches (a depth-only
+ *       target shows its zeta address | 1);
+ *   RECOMP_GPU_SIGSKIP=<file>  batches whose signature is listed in <file>
+ *       (hex words, re-read every 16 flips) are not drawn.
+ * Off by default (one test per batch). */
+#define NV_GL_MAX_SIG 512
+#define NV_GL_MAX_SEQ 512
+typedef struct {
+    uint32_t sig, count, tris;
+    char desc[400];
+} GlSig;
+static int s_sig_on;
+static const char *s_sigdump, *s_sigskip;
+static GlSig *s_sig;
+static uint32_t s_nsig, s_skip[64], s_nskip;
+static struct { uint32_t va, wh, n; } s_seq[NV_GL_MAX_SEQ];
+static uint32_t s_nseq;
+
+static void sig_init(void)
+{
+    const char *d = getenv("RECOMP_GPU_SIGDUMP"), *k = getenv("RECOMP_GPU_SIGSKIP");
+
+    s_sigdump = d && *d ? d : NULL;
+    s_sigskip = k && *k ? k : NULL;
+    if (!s_sig && (s_sigdump || s_sigskip))
+        s_sig = (GlSig *)calloc(NV_GL_MAX_SIG, sizeof *s_sig);
+    s_sig_on = s_sig != NULL;
+    if (s_sig_on)
+        fprintf(stderr, "  [GPUGL] batch signatures: dump when %s exists, skip list %s\n",
+                s_sigdump ? s_sigdump : "(none)", s_sigskip ? s_sigskip : "(none)");
+}
+
+/* A target switch, for the [GPUSEQ] line. */
+static void sig_target(uint32_t va, uint32_t w, uint32_t h)
+{
+    if (s_sig_on && s_nseq < NV_GL_MAX_SEQ) {
+        s_seq[s_nseq].va = va;
+        s_seq[s_nseq].wh = w | h << 16;
+        s_seq[s_nseq].n = 0;
+        s_nseq++;
+    }
+}
+
+/* Count batch b in this frame's table; 1: it is on the skip list. */
+static int sig_batch(const Nv2aSurface *s, const Nv2aBatch *b, const uint32_t kind[4],
+                     uint32_t tris)
+{
+    const Nv2aPixelState *ps = b->pixel;
+    const Nv2aRenderState *rs = b->state;
+    uint32_t h = 2166136261u, w[48], n = 0, i;
+    GlSig *e;
+
+    if (s_nseq)
+        s_seq[s_nseq - 1].n++;
+    w[n++] = ps->rc.stage_program;
+    w[n++] = s->color_valid ? s->color_va : 0;
+    w[n++] = s->width | s->height << 16;
+    for (i = 0; i < 4; i++) {
+        const Nv2aTexStage *t = &ps->stage[i];
+        w[n++] = t->valid ? t->tex.color : 0xFF;
+        w[n++] = kind[i];
+        w[n++] = t->valid ? (t->tex.width | t->tex.height << 16) : 0;
+    }
+    w[n++] = rs->blend_enable;
+    w[n++] = rs->blend_enable ? rs->blend_src : 0;
+    w[n++] = rs->blend_enable ? rs->blend_dst : 0;
+    w[n++] = rs->blend_enable ? rs->blend_eq : 0;
+    w[n++] = rs->alpha_test_enable;
+    w[n++] = rs->alpha_test_enable ? rs->alpha_func : 0;
+    w[n++] = rs->depth_test_enable;
+    w[n++] = rs->depth_write;
+    w[n++] = rs->color_mask;
+    w[n++] = ps->shade | (ps->rc.control & 0xFF) << 8;
+    w[n++] = ps->rc.final0;
+    w[n++] = ps->rc.final1;
+    w[n++] = rs->stencil_enable;
+    for (i = 0; i < (ps->rc.control & 0xF) && i < 8; i++) {
+        w[n++] = ps->rc.color_icw[i];
+        w[n++] = ps->rc.alpha_icw[i];
+    }
+    for (i = 0; i < n * 4; i++)
+        h = (h ^ ((const uint8_t *)w)[i]) * 16777619u;
+
+    for (i = 0; i < s_nsig && s_sig[i].sig != h; i++)
+        ;
+    if (i == s_nsig && s_nsig < NV_GL_MAX_SIG) {
+        char *d;
+        size_t left;
+        int k;
+        uint32_t st;
+        e = &s_sig[s_nsig++];
+        e->sig = h;
+        e->count = e->tris = 0;
+        d = e->desc;
+        left = sizeof e->desc;
+#define SIG_PUT(...) do { k = snprintf(d, left, __VA_ARGS__);                  \
+                          if (k < 0 || (size_t)k >= left) k = (int)left - 1;   \
+                          d += k; left -= (size_t)k; } while (0)
+        SIG_PUT("rt %08X %ux%u%s sp %05X |", w[1], s->width, s->height,
+                s->color_masked ? " masked" : "", ps->rc.stage_program);
+        for (st = 0; st < 4; st++) {
+            const Nv2aTexStage *t = &ps->stage[st];
+            if (t->valid || ((ps->rc.stage_program >> (st * 5)) & 31))
+                SIG_PUT(" t%u[m%u f%02X k%u %ux%u @%08X a%u/%u flt%X]", st,
+                        (ps->rc.stage_program >> (st * 5)) & 31, t->tex.color, kind[st],
+                        t->tex.width, t->tex.height, t->tex.offset, t->tex.addr_u,
+                        t->tex.addr_v, t->tex.filter >> 16);
+        }
+        SIG_PUT(" | bl %u %X/%X eq %X at %u/%X ref %u z %u/%X w%u cm %08X st %u"
+                " | rc n%u fin %08X %08X fog %08X shf %u zeta %08X",
+                rs->blend_enable, rs->blend_src, rs->blend_dst, rs->blend_eq,
+                rs->alpha_test_enable, rs->alpha_func, rs->alpha_ref,
+                rs->depth_test_enable, rs->depth_func, rs->depth_write, rs->color_mask,
+                rs->stencil_enable, ps->rc.control & 0xF, ps->rc.final0, ps->rc.final1,
+                ps->fog_color, ps->shadow_func, rs->zeta_va);
+#undef SIG_PUT
+    }
+    if (i < s_nsig) {
+        s_sig[i].count++;
+        s_sig[i].tris += tris;
+    }
+    for (i = 0; i < s_nskip; i++)
+        if (s_skip[i] == h)
+            return 1;
+    return 0;
+}
+
+/* At the flip: dump the frame's table if asked, start the next one. */
+static void sig_flip(void)
+{
+    FILE *f;
+    uint32_t i;
+
+    if (!s_sig_on)
+        return;
+    if (s_sigdump && (f = fopen(s_sigdump, "rb")) != NULL) {
+        fclose(f);
+        remove(s_sigdump);
+        fprintf(stderr, "[GPUSIG] frame %u: %u signatures, %u target runs\n",
+                s_frame, s_nsig, s_nseq);
+        fprintf(stderr, "[GPUSEQ]");
+        for (i = 0; i < s_nseq; i++)
+            fprintf(stderr, " %08X(%ux%u)x%u", s_seq[i].va, s_seq[i].wh & 0xFFFF,
+                    s_seq[i].wh >> 16, s_seq[i].n);
+        fprintf(stderr, "\n");
+        for (i = 0; i < s_nsig; i++)
+            fprintf(stderr, "[GPUSIG] %08X n %u tris %u : %s\n", s_sig[i].sig,
+                    s_sig[i].count, s_sig[i].tris, s_sig[i].desc);
+    }
+    s_nsig = 0;
+    s_nseq = 0;
+    if (s_sigskip && (s_frame & 15) == 0) {
+        s_nskip = 0;
+        if ((f = fopen(s_sigskip, "r")) != NULL) {
+            unsigned v;
+            while (s_nskip < 64 && fscanf(f, "%x", &v) == 1)
+                s_skip[s_nskip++] = v;
+            fclose(f);
+        }
+    }
 }
 
 /* ---- render targets ----------------------------------------------------- */
@@ -917,11 +1095,12 @@ static GLuint s_target_fbo;
  * target is left. */
 static int s_target_scratch_depth;
 
-static void note_target(GLuint fbo)
+static void note_target(GLuint fbo, uint32_t va, uint32_t w, uint32_t h)
 {
     if (fbo != s_target_fbo) {
         s_target_fbo = fbo;
         s_st.target_switches++;
+        sig_target(va, w, h);
     }
 }
 
@@ -970,7 +1149,7 @@ static int bind_depth_only(const Nv2aSurface *s, uint32_t zeta_va, GlTarget *t)
     } else {
         sh_fbo(d->fbo);
     }
-    note_target(d->fbo);
+    note_target(d->fbo, zeta_va | 1, d->w, d->h);
     s_target_scratch_depth = 0;
     t->rt = NULL;
     t->w = d->w;
@@ -1016,7 +1195,7 @@ static int bind_target(const Nv2aSurface *s, uint32_t zeta_va, GlTarget *t)
     if (!(r = rt_get(s)))
         return 0;
     sh_fbo(r->fbo);
-    note_target(r->fbo);
+    note_target(r->fbo, r->va, s->width, s->height);
     s_target_scratch_depth = zeta_va == 0;
     d = depth_get(zeta_va, r->gw, r->gh, zeta_bpp(s))->tex;
     if (d != r->depth) {
@@ -2487,6 +2666,8 @@ static void gl_draw(const Nv2aSurface *s, const Nv2aBatch *b)
     if (!ensure_init())
         return;
     bind_stage_textures(ps, kind, tscale);
+    if (s_sig_on && sig_batch(s, b, kind, b->count / 3))
+        return;
     nv2a_gl_shader_key(ps, rs, kind, &key);
     if (key.bump_src[1] | key.bump_src[2] | key.bump_src[3])
         s_st.bump_draws++;
@@ -2585,6 +2766,8 @@ static int gl_draw_program(const Nv2aSurface *s, const Nv2aBatch *b)
     if (!(vsh = vsh_get(pb)))
         return 0;
     bind_stage_textures(ps, kind, tscale);
+    if (s_sig_on && sig_batch(s, b, kind, pb->index_count / 3))
+        return 1;                   /* skipped: drawn by nobody */
     nv2a_gl_shader_key(ps, rs, kind, &key);
     if (key.bump_src[1] | key.bump_src[2] | key.bump_src[3])
         s_st.bump_draws++;
@@ -2922,6 +3105,7 @@ static int gl_present(const Nv2aPresentSurface *now, int sync, Nv2aPresentSurfac
 
 static void gl_flip(void)
 {
+    sig_flip();
     s_frame++;
     s_st.frames++;
     if (s_init > 0)

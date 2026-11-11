@@ -479,6 +479,31 @@ for the bloom; a fix there (writing 1555 for colour formats 1 and 2 in
 `put_pixel` and the CPU presenter) is left out of this change, which keeps
 the CPU path as it was.
 
+## Batch signatures
+
+A tool for a wrong spot in the picture: which batches draw it, and what is
+left without them. Each batch gets a 32-bit signature of what decides how it
+looks -- target address and size, combiner program and words, each stage's
+format, kind and size, blend, alpha test, depth, stencil and colour mask --
+and of no texture or vertex address, so a kind of batch keeps its signature
+while the title streams. Off by default.
+
+- `RECOMP_GPU_SIGDUMP=<file>`: at the first flip where `<file>` exists the
+  frame's table goes to stderr and the file is deleted (`touch` it again for
+  another frame). One line per signature, `[GPUSIG] <sig> n <batches> tris
+  <triangles> : rt <address> <w>x<h> [masked] sp <stage program> | t<stage>[m<mode>
+  f<format> k<kind> <w>x<h> @<address> a<wrap u>/<v> flt<min filter>] ... |
+  bl <blend> at <alpha test> z <test>/<func> w<write> cm <colour mask> st
+  <stencil> | rc n<stages> fin <final words> fog <colour> shf <shadow func>
+  zeta <address>`, where the texture addresses are the first batch's; then
+  one `[GPUSEQ]` line with the frame's target runs, `<address>(<w>x<h>)x<batches>`
+  (a depth-only target shows its zeta address | 1).
+- `RECOMP_GPU_SIGSKIP=<file>`: batches whose signature is listed in
+  `<file>` (hex words, re-read every 16 flips) are not drawn.
+
+With `RECOMP_FB_DUMP_FLIPS=<flag file>` a frame dump and a table can be
+taken at the same flip: `touch sig flag; sleep 0.4; rm flag`.
+
 ## Known differences from the CPU rasteriser (7b)
 
 - Colours and fog are interpolated with perspective (GL's default); the CPU
