@@ -108,6 +108,10 @@ static struct {
     uint16_t idx[12];
     float imm2[4], c5[4];
     int has_pixel, has_texture_ptr;
+    /* NV2A_BACKEND_CAP_RAW_VERTEX: the last batch's arrays as stored. */
+    int raw, decline_raw;
+    uint32_t raw_first;
+    Nv2aRawAttr raw0, raw3;
 } s_pg;
 
 static int be_draw_program(const Nv2aSurface *s, const Nv2aBatch *b)
@@ -117,15 +121,21 @@ static int be_draw_program(const Nv2aSurface *s, const Nv2aBatch *b)
 
     (void)s;
     s_pg.calls++;
-    if (s_pg.decline)
+    if (s_pg.decline || (p->raw && s_pg.decline_raw))
         return 0;
+    s_pg.raw = p->raw != NULL;
+    if (p->raw) {
+        s_pg.raw_first = p->raw_first;
+        s_pg.raw0 = p->raw[0];
+        s_pg.raw3 = p->raw[3];
+    }
     s_pg.ins_count = p->ins_count;
     s_pg.hash = p->hash;
     s_pg.serial = p->const_serial;
     s_pg.vertex_count = p->vertex_count;
     s_pg.streams = p->streams;
     s_pg.index_count = p->index_count;
-    for (i = 0; i < p->vertex_count && i < 8; i++)
+    for (i = 0; p->attrs && i < p->vertex_count && i < 8; i++)
         memcpy(s_pg.attrs[i], p->attrs + i * 8, 8 * sizeof(float));
     for (i = 0; i < p->index_count && i < 12; i++)
         s_pg.idx[i] = p->indices[i];
@@ -142,6 +152,10 @@ static const Nv2aBackend s_backend_px = { be_clear, be_draw, be_flip,
 static const Nv2aBackend s_backend_pg = { be_clear, be_draw, be_flip,
                                           NV2A_BACKEND_CAP_PIXEL | NV2A_BACKEND_CAP_PROGRAM,
                                           NULL, NULL, NULL, be_draw_program };
+static const Nv2aBackend s_backend_raw = { be_clear, be_draw, be_flip,
+                                           NV2A_BACKEND_CAP_PIXEL | NV2A_BACKEND_CAP_PROGRAM
+                                           | NV2A_BACKEND_CAP_RAW_VERTEX,
+                                           NULL, NULL, NULL, be_draw_program };
 
 /* ---- driving the executor ---------------------------------------------- */
 extern void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param);
@@ -444,6 +458,32 @@ int main(void)
         CHECK(s_pg.calls == 3 && s_be.draws == 1 && s_be.count == 3);
         CHECK(s_be.has_full && near_(s_be.full[1].pos[0], 1.0f));  /* oPos = v0 */
         s_pg.decline = 0;
+        CHECK(!s_pg.raw);
+        /* NV2A_BACKEND_CAP_RAW_VERTEX: no gather -- the arrays as the title
+         * set them, indices counted from the smallest (1 2 3, 3 2 1). */
+        nv2a_backend_register(&s_backend_raw);
+        m(0x17FC, 5);
+        m(0x1800, 1u | (2u << 16));
+        m(0x1800, 3u | (3u << 16));
+        m(0x1800, 2u | (1u << 16));
+        m(0x17FC, 0);
+        CHECK(s_pg.calls == 4 && s_pg.raw && s_pg.raw_first == 1);
+        CHECK(s_pg.vertex_count == 3 && s_pg.index_count == 6);
+        CHECK(s_pg.idx[0] == 0 && s_pg.idx[1] == 1 && s_pg.idx[2] == 2);
+        CHECK(s_pg.idx[3] == 2 && s_pg.idx[4] == 1 && s_pg.idx[5] == 0);
+        CHECK(s_pg.raw0.offset == 0x2000 && s_pg.raw0.type == 2 && s_pg.raw0.size == 3
+              && s_pg.raw0.stride == 12);
+        CHECK(s_pg.raw3.offset == 0x3000 && s_pg.raw3.type == 0 && s_pg.raw3.stride == 4);
+        /* Declined as stored: the same batch again, gathered. */
+        s_pg.decline_raw = 1;
+        m(0x17FC, 5);
+        m(0x1800, 1u | (2u << 16));
+        m(0x1800, 3u | (3u << 16));
+        m(0x1800, 2u | (1u << 16));
+        m(0x17FC, 0);
+        CHECK(s_pg.calls == 6 && !s_pg.raw && s_pg.vertex_count == 3);
+        CHECK(near_(s_pg.attrs[0][0], 1) && near_(s_pg.attrs[0][1], -1));   /* element 1 */
+        s_pg.decline_raw = 0;
         m(0x1E94, 0);
         nv2a_backend_register(&s_backend);
     }
