@@ -458,7 +458,7 @@ public class GameMenuTest {
         assertFalse(menu.quitArmed());
     }
 
-    /** A game's theme (read once at game start, ShellActivity): the menu in its colours, « Paused » stays amber. */
+    /** A game's theme (read once at game start, ShellActivity): the menu in its colours. */
     @Test
     public void themedMenu() throws Exception {
         menu.release();
@@ -492,6 +492,8 @@ public class GameMenuTest {
     @Test
     public void shareLogKeepsTheMenu() {
         menu.open("Back");
+        assertNull("Share log is on the Settings page", menu.row(GameMenu.Item.SHARE_LOG));
+        menu.row(GameMenu.Item.SETTINGS).performClick();
         menu.row(GameMenu.Item.SHARE_LOG).performClick();
         assertEquals(1, host.shareLogs);
         assertTrue(menu.isOpen());
@@ -614,19 +616,43 @@ public class GameMenuTest {
     }
 
     @Test
-    public void drawerWidthIsAThird() {
+    public void drawerIsAFlushSheet() {
         menu.open("Back");
         idle(100);
         float scale = menu.content.getScaleX();
         float visible = (menu.drawer.getRight() + menu.drawer.getTranslationX()) * scale;
         float frac = visible / menu.root.getWidth();
-        assertTrue("drawer " + frac, frac > 0.30f && frac < 0.36f);
+        assertTrue("drawer " + frac, frac > 0.27f && frac < 0.31f);   // 560 of 1920
+        assertEquals(0, menu.drawer.getLeft());
     }
 
     @Test
     public void durationFormat() {
-        assertEquals("0:00:05", GameMenu.duration(5_400));
-        assertEquals("1:02:03", GameMenu.duration(3_723_000));
+        assertEquals("0:00", GameMenu.hoursMinutes(5_400));
+        assertEquals("0:42", GameMenu.hoursMinutes(42 * 60_000L + 30_000));
+        assertEquals("1:02", GameMenu.hoursMinutes(3_723_000));
+    }
+
+    /** Calm: six text-only rows (Quit apart), B says Resume; Settings' page says Back and holds Share log. */
+    @Test
+    public void mainPageRows() {
+        menu.open("Back");
+        GameMenu.Item[] main = { GameMenu.Item.RESUME, GameMenu.Item.SETTINGS, GameMenu.Item.CONTROLS,
+                                 GameMenu.Item.SCREENSHOT, GameMenu.Item.LAUNCHER, GameMenu.Item.QUIT };
+        for (GameMenu.Item it : main) {
+            assertNotNull(it.toString(), menu.row(it));
+            assertNull(it + ": no subtitle", menu.row(it).subtitle);
+        }
+        assertNull(menu.row(GameMenu.Item.SHARE_LOG));
+        assertEquals(activity.getString(R.string.MENU_RESUME), menu.backHintForTest());
+        assertEquals(activity.getString(R.string.MENU_SETTINGS), menu.row(GameMenu.Item.SETTINGS).title);
+        menu.row(GameMenu.Item.SETTINGS).performClick();
+        assertNotNull(menu.row(GameMenu.Item.SHARE_LOG));
+        assertEquals(activity.getString(R.string.MENU_HINT_BACK), menu.backHintForTest());
+        // Quit's confirmation is the one row that says more where it is.
+        press(KeyEvent.KEYCODE_BUTTON_B);
+        menu.row(GameMenu.Item.QUIT).performClick();
+        assertEquals(activity.getString(R.string.MENU_QUIT_CONFIRM_SUB), menu.row(GameMenu.Item.QUIT).subtitle);
     }
 
     // ---- Screenshots -----------------------------------------------------------------------------------------------

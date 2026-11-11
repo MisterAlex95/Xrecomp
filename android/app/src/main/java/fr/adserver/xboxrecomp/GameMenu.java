@@ -34,7 +34,8 @@ import java.util.function.LongSupplier;
 /**
  * The in-game menu (docs/android/app-shell.md « In-game menu »): a drawer that slides in from the left over the game
  * (Eden / BananaNative style), in a View layer added over SDL's surface with addContentView (the surface is never
- * recreated). The launcher's look: the dark glass panel, MenuRows with the gliding focus, its sounds and haptics.
+ * recreated). The launcher's look: a flush, flat sheet, text-only MenuRows with the gliding focus, its sounds and
+ * haptics.
  *
  * <ul>
  *   <li>Opens by: Android Back (not a gamepad's: that one is the pad's Select for the game, as before), the
@@ -45,11 +46,10 @@ import java.util.function.LongSupplier;
  *       in the game every key it saw go down and centres every stick it saw move, and the companion's buttons;
  *       closing releases the companion's again. A key whose down came while open acts on its release, so nothing of
  *       it reaches the game.</li>
- *   <li>Items: Resume, Quick settings (performance overlay, game volume, bottom screen: all live; this game's
- *       language: next start), Controls,
- *       Screenshot, Share log, Back to launcher (the game stays alive and held in the background), Quit game (a
- *       second press within {@link #QUIT_ARM_MS} confirms). The header shows the game's title and the session's
- *       time.</li>
+ *   <li>Items: Resume, Settings (performance overlay, game volume, bottom screen: all live; this game's language:
+ *       next start; Share log), Controls, Screenshot, Back to launcher (the game stays alive and held in the
+ *       background), Quit game (a second press within {@link #QUIT_ARM_MS} confirms). The header shows the game's
+ *       title and « Paused · 0:42 played ».</li>
  * </ul>
  *
  * Everything native goes through {@link Host}, so the JVM tests drive it with a fake.
@@ -100,11 +100,11 @@ final class GameMenu {
     /** A Back within this long after a swipe opened the menu is the system's back gesture ending: ignored. */
     static final long SWIPE_BACK_GUARD_MS = 600;
     static final long NAV_FIRST_MS = 380, NAV_REPEAT_MS = 130;
-    /** The drawer's width on the 1920 x 1080 design grid (about a third of it). */
-    static final int DRAWER_W = 680;
-    /** How far the panel reaches past the left edge: its rounded corners and corner tick stay off the screen. */
-    static final int HIDDEN = 48;
-    static final int ROW_H = 100;
+    /** The drawer's width on the 1920 x 1080 design grid: a flush sheet against the left edge. */
+    static final int DRAWER_W = 560;
+    /** How far the panel reaches past the left edge (none: it is flush). */
+    static final int HIDDEN = 0;
+    static final int ROW_H = Theme.ROW_H;
     static final int VOLUME_STEP = 10;
 
     enum Page { MAIN, SETTINGS, CONTROLS }
@@ -125,6 +125,7 @@ final class GameMenu {
     private final LinearLayout list;
     private final ScrollView scroll;
     private final TextView titleV, sessionV, pageV, perfV;
+    private final LinearLayout hints;
     private final FrameLayout flashBox;
     private final Widgets.Chip flashV;
     private final Map<Item, Widgets.MenuRow> rows = new EnumMap<>(Item.class);
@@ -193,7 +194,7 @@ final class GameMenu {
         root = new FrameLayout(activity);
         scrim = new View(activity);
         scrim.setBackground(new GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT,
-                                                 new int[] { 0xD9000000, 0x8C000000, 0x73000000 }));
+                                                 new int[] { 0xA6000000, 0x66000000, 0x4D000000 }));
         scrim.setOnClickListener(v -> {
             feedback.play(UiFeedback.Cue.BACK, v);
             close();
@@ -205,15 +206,14 @@ final class GameMenu {
         content.setClipChildren(false);
         root.addView(new Widgets.Stage(activity, content), match());
 
-        // The drawer: the launcher's glass panel, its rounded left edge off the screen.
+        // The drawer: a flat sheet, flush with the left edge (dark under it too, over a bright game).
         drawer = new FrameLayout(activity);
-        GradientDrawable under = new GradientDrawable();   // so the glass stays dark over a bright game
+        GradientDrawable under = new GradientDrawable();
         under.setColor(Theme.alpha(Theme.BG_BOTTOM, 0.7f));
-        under.setCornerRadius(Theme.RADIUS);
         drawer.setBackground(new android.graphics.drawable.LayerDrawable(
-                new android.graphics.drawable.Drawable[] { under, new Widgets.Panel() }));
+                new android.graphics.drawable.Drawable[] { under, new Widgets.Panel(0) }));
         drawer.setClickable(true);   // touches on it never reach the game
-        drawer.setPadding(HIDDEN + 40, 40, 28, 24);
+        drawer.setPadding(HIDDEN + 64, Theme.S6 - Theme.S2, Theme.S4, Theme.MARGIN_BOTTOM);
         FrameLayout.LayoutParams dlp = new FrameLayout.LayoutParams(DRAWER_W + HIDDEN, ViewGroup.LayoutParams.MATCH_PARENT);
         dlp.leftMargin = -HIDDEN;
         drawer.setVisibility(View.GONE);
@@ -224,29 +224,13 @@ final class GameMenu {
         col.setClipChildren(false);
         drawer.addView(col, match());
 
-        LinearLayout head = new LinearLayout(activity);
-        head.setOrientation(LinearLayout.HORIZONTAL);
-        head.setGravity(Gravity.CENTER_VERTICAL);
-        LinearLayout.LayoutParams mlp = new LinearLayout.LayoutParams(44, 44);
-        mlp.rightMargin = 18;
-        head.addView(new Widgets.BrandMark(activity), mlp);
-        head.addView(Theme.caps(activity, s(R.string.MENU_CAPS), Theme.ACCENT), new LinearLayout.LayoutParams(0, -2, 1));
-        Widgets.Chip paused = new Widgets.Chip(activity);
-        paused.set(s(R.string.MENU_PAUSED), Theme.WARN);
-        head.addView(paused, new LinearLayout.LayoutParams(-2, -2));
-        col.addView(head, new LinearLayout.LayoutParams(-1, 56));
-
-        titleV = Theme.oneLine(Theme.text(activity, Theme.T_TITLE, Theme.MEDIUM, Theme.TEXT));
-        col.addView(titleV, lpTop(-1, -2, 20));
+        // The header: the game's title, then « Paused · 0:42 played ».
+        titleV = Theme.oneLine(Theme.text(activity, Theme.T_ROW, Theme.MEDIUM, Theme.TEXT));
+        col.addView(titleV, new LinearLayout.LayoutParams(-1, -2));
         sessionV = Theme.oneLine(Theme.text(activity, Theme.T_SMALL, Theme.REGULAR, Theme.TEXT_DIM));
-        col.addView(sessionV, lpTop(-1, -2, 10));
-        LinearLayout.LayoutParams rlp = lpTop(-1, 2, 22);
-        rlp.bottomMargin = 8;
-        col.addView(new Widgets.Rule(activity), rlp);
-        pageV = Theme.caps(activity, "", Theme.TEXT_FAINT);
-        LinearLayout.LayoutParams plp = lpTop(-1, -2, 10);
-        plp.bottomMargin = 6;
-        plp.leftMargin = 14;
+        col.addView(sessionV, lpTop(-1, -2, Theme.S2));
+        pageV = Theme.oneLine(Theme.label(activity, ""));
+        LinearLayout.LayoutParams plp = lpTop(-1, -2, Theme.S5);
         col.addView(pageV, plp);
 
         scroll = new ScrollView(activity);
@@ -258,16 +242,19 @@ final class GameMenu {
         list.setOrientation(LinearLayout.VERTICAL);
         list.setClipChildren(false);
         scroll.addView(list, new FrameLayout.LayoutParams(-1, -2));
-        col.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
+        LinearLayout.LayoutParams slp = new LinearLayout.LayoutParams(-1, 0, 1);
+        slp.topMargin = Theme.S5 - Theme.S1;
+        slp.leftMargin = -Theme.ROW_INSET;   // the rows' text on the header's edge, their focus plates in the margin
+        col.addView(scroll, slp);
 
-        LinearLayout hints = new LinearLayout(activity);
+        hints = new LinearLayout(activity);
         hints.setOrientation(LinearLayout.HORIZONTAL);
         hints.setGravity(Gravity.CENTER_VERTICAL);
         hints.addView(new Widgets.Hint(activity, "A", s(R.string.MENU_HINT_SELECT), v -> clickFocused()));
         LinearLayout.LayoutParams hlp = new LinearLayout.LayoutParams(-2, -2);
-        hlp.leftMargin = 30;
-        hints.addView(new Widgets.Hint(activity, "B", s(R.string.MENU_HINT_BACK), v -> back()), hlp);
-        col.addView(hints, lpTop(-1, 64, 8));
+        hlp.leftMargin = Theme.S4;
+        hints.addView(new Widgets.Hint(activity, "B", s(R.string.MENU_RESUME), v -> back()), hlp);
+        col.addView(hints, new LinearLayout.LayoutParams(-1, Theme.FOOTER_H));
 
         glide = new Widgets.Glide(activity);
         content.addView(glide, match());
@@ -765,39 +752,54 @@ final class GameMenu {
 
     // ---- Pages -------------------------------------------------------------------------------------------------
 
+    /** The hints under the list: A Select, and B Resume on the main page, B Back on the others. */
+    private void setBackHint(int label) {
+        if (hints.getChildCount() > 1)
+            hints.removeViewAt(1);
+        LinearLayout.LayoutParams hlp = new LinearLayout.LayoutParams(-2, -2);
+        hlp.leftMargin = Theme.S4;
+        hints.addView(new Widgets.Hint(activity, "B", s(label), v -> back()), hlp);
+    }
+
+    /** The B hint's label (tests). */
+    String backHintForTest() {
+        return ((Widgets.Hint)hints.getChildAt(1)).labelForTest();
+    }
+
     private void showPage(Page p, Item focusItem) {
         boolean hadFocus = focused() != null;
         page = p;
         list.removeAllViews();
         rows.clear();
         disarmQuit();
+        setBackHint(p == Page.MAIN ? R.string.MENU_RESUME : R.string.MENU_HINT_BACK);
         switch (p) {
         case MAIN:
             pageV.setVisibility(View.GONE);
-            row(Item.RESUME, Widgets.Icon.PLAY, s(R.string.MENU_RESUME), s(R.string.MENU_RESUME_SUB));
-            row(Item.SETTINGS, Widgets.Icon.SLIDERS, s(R.string.MENU_SETTINGS), settingsSummary());
-            row(Item.CONTROLS, Widgets.Icon.PAD, s(R.string.MENU_CONTROLS), s(R.string.MENU_CONTROLS_SUB));
-            row(Item.SCREENSHOT, Widgets.Icon.CAMERA, s(R.string.MENU_SCREENSHOT), s(R.string.MENU_SCREENSHOT_SUB));
-            row(Item.SHARE_LOG, Widgets.Icon.SHARE, s(R.string.MENU_SHARE_LOG), s(R.string.MENU_SHARE_LOG_SUB));
-            row(Item.LAUNCHER, Widgets.Icon.HOME, s(R.string.MENU_LAUNCHER), s(R.string.MENU_LAUNCHER_SUB));
-            row(Item.QUIT, Widgets.Icon.POWER, s(R.string.MENU_QUIT), s(R.string.MENU_QUIT_SUB));
+            row(Item.RESUME, s(R.string.MENU_RESUME));
+            row(Item.SETTINGS, s(R.string.MENU_SETTINGS));
+            row(Item.CONTROLS, s(R.string.MENU_CONTROLS));
+            row(Item.SCREENSHOT, s(R.string.MENU_SCREENSHOT));
+            row(Item.LAUNCHER, s(R.string.MENU_LAUNCHER));
+            list.addView(new View(activity), new LinearLayout.LayoutParams(-1, Theme.S3));   // Quit stands apart
+            row(Item.QUIT, s(R.string.MENU_QUIT));
             break;
         case SETTINGS: {
             pageV.setText(s(R.string.MENU_SETTINGS));
             pageV.setVisibility(View.VISIBLE);
-            Widgets.MenuRow r = row(Item.PERF, Widgets.Icon.BARS, s(R.string.MENU_PERF), s(R.string.MENU_PERF_SUB));
+            Widgets.MenuRow r = row(Item.PERF, s(R.string.MENU_PERF));
             r.setChoices(new String[] { s(R.string.MENU_ON), s(R.string.MENU_OFF) });
             r.cycler = dir -> setPerf(!perfOn);
-            r = row(Item.VOLUME, Widgets.Icon.SOUND, s(R.string.MENU_VOLUME), s(R.string.MENU_VOLUME_SUB));
+            r = row(Item.VOLUME, s(R.string.MENU_VOLUME));
             r.setChoices(new String[] { volumeLabel(100), s(R.string.MENU_MUTED) });
             r.cycler = dir -> setVolume(volume + dir * VOLUME_STEP);
             if (host.hasSecondScreen()) {
-                r = row(Item.BOTTOM, Widgets.Icon.SCREEN, s(R.string.MENU_BOTTOM), s(R.string.MENU_BOTTOM_SUB));
+                r = row(Item.BOTTOM, s(R.string.MENU_BOTTOM));
                 r.setChoices(new String[] { s(R.string.VAL_PANEL), s(R.string.VAL_BLACK), s(R.string.MENU_SCREEN_OFF) });
                 r.cycler = this::stepBottom;
             }
             if (titleId() != null) {
-                r = row(Item.LANGUAGE, Widgets.Icon.DISC, s(R.string.MENU_LANGUAGE), s(R.string.MENU_LANGUAGE_SUB));
+                r = row(Item.LANGUAGE, s(R.string.MENU_LANGUAGE));
                 String[] labels = new String[GameLanguage.MENU_ORDER.length + 1];
                 labels[0] = s(R.string.MENU_LANGUAGE_FOLLOW);
                 for (int i = 0; i < GameLanguage.MENU_ORDER.length; i++)
@@ -805,7 +807,8 @@ final class GameMenu {
                 r.setChoices(labels);
                 r.cycler = this::stepLanguage;
             }
-            row(Item.BACK, Widgets.Icon.BACK, s(R.string.MENU_BACK), s(R.string.MENU_BACK_SUB));
+            row(Item.SHARE_LOG, s(R.string.MENU_SHARE_LOG));
+            row(Item.BACK, s(R.string.MENU_BACK));
             updateValues();
             break;
         }
@@ -820,7 +823,7 @@ final class GameMenu {
                            { R.string.CTL_DPAD, R.string.CTL_DPAD_X }, { R.string.CTL_STICKS, R.string.CTL_STICKS_X } };
             for (int[] r : kv)
                 kvRow(s(r[0]), s(r[1]));
-            row(Item.BACK, Widgets.Icon.BACK, s(R.string.MENU_BACK), s(R.string.MENU_BACK_SUB));
+            row(Item.BACK, s(R.string.MENU_BACK));
             break;
         }
         scroll.scrollTo(0, 0);
@@ -835,9 +838,9 @@ final class GameMenu {
         }
     }
 
-    private Widgets.MenuRow row(Item item, Widgets.Icon icon, String title, String sub) {
+    private Widgets.MenuRow row(Item item, String title) {
         Widgets.MenuRow r = new Widgets.MenuRow(activity);
-        r.set(icon, title, sub);
+        r.set(null, title, null);
         r.onPress = () -> feedback.play(UiFeedback.Cue.SELECT, r);
         r.setOnClickListener(v -> onItem(item));
         rows.put(item, r);
@@ -850,11 +853,11 @@ final class GameMenu {
         LinearLayout l = new LinearLayout(activity);
         l.setOrientation(LinearLayout.HORIZONTAL);
         l.setGravity(Gravity.CENTER_VERTICAL);
-        l.setPadding(28, 12, 28, 12);
+        l.setPadding(Theme.ROW_INSET, Theme.S1, Theme.ROW_INSET, Theme.S1);
         l.setMinimumHeight(60);
         TextView k = Theme.oneLine(Theme.text(activity, Theme.T_BODY, Theme.MEDIUM, Theme.TEXT, key));
         l.addView(k, new LinearLayout.LayoutParams(0, -2, 1));
-        TextView v = Theme.text(activity, Theme.T_BODY - 2, Theme.REGULAR, Theme.TEXT_DIM, value);
+        TextView v = Theme.text(activity, Theme.T_SMALL, Theme.REGULAR, Theme.TEXT_DIM, value);
         v.setMaxLines(2);
         v.setEllipsize(android.text.TextUtils.TruncateAt.END);
         v.setLineSpacing(0, 1.15f);
@@ -956,7 +959,7 @@ final class GameMenu {
         Widgets.MenuRow r = rows.get(Item.QUIT);
         if (r != null) {
             r.setTitle(s(R.string.MENU_QUIT));
-            r.setSubtitle(s(R.string.MENU_QUIT_SUB));
+            r.setSubtitle(null);
         }
     }
 
@@ -1045,19 +1048,10 @@ final class GameMenu {
             r.setValue(pos == 0 ? s(R.string.MENU_LANGUAGE_FOLLOW)
                                 : GameLanguage.NAMES[GameLanguage.MENU_ORDER[pos - 1]]);
         }
-        r = rows.get(Item.SETTINGS);
-        if (r != null)
-            r.setSubtitle(settingsSummary());
     }
 
     private String volumeLabel(int v) {
         return activity.getString(R.string.MENU_PERCENT, v);
-    }
-
-    private String settingsSummary() {
-        return activity.getString(R.string.MENU_SETTINGS_SUB,
-                                  volume == 0 ? s(R.string.MENU_MUTED) : volumeLabel(volume),
-                                  s(perfOn ? R.string.MENU_ON : R.string.MENU_OFF));
     }
 
     // ---- Header, overlay, messages -----------------------------------------------------------------------------
@@ -1068,12 +1062,13 @@ final class GameMenu {
     }
 
     private void updateSession() {
-        sessionV.setText(activity.getString(R.string.MENU_SESSION, duration(clock.getAsLong() - startedAt)));
+        sessionV.setText(activity.getString(R.string.MENU_STATUS, hoursMinutes(clock.getAsLong() - startedAt)));
     }
 
-    static String duration(long ms) {
-        long s = Math.max(0, ms) / 1000;
-        return String.format(Locale.ROOT, "%d:%02d:%02d", s / 3600, s / 60 % 60, s % 60);
+    /** « 0:42 », « 1:05 »: hours and minutes. */
+    static String hoursMinutes(long ms) {
+        long m = Math.max(0, ms) / 60_000;
+        return String.format(Locale.ROOT, "%d:%02d", m / 60, m % 60);
     }
 
     private void updatePerf() {
@@ -1136,7 +1131,6 @@ final class GameMenu {
         GradientDrawable g = new GradientDrawable();
         g.setColor(Theme.alpha(Theme.BG_BOTTOM, 0.8f));
         g.setCornerRadius(30);
-        g.setStroke(2, Theme.LINE);
         return g;
     }
 }
