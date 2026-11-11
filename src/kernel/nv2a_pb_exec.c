@@ -4534,6 +4534,113 @@ void nv2a_pb_exec_walk_begin(void)
     s_walk_vbl = xbox_VblankCount();
 }
 
+/* RECOMP_GPU_FPS_CAP: with a back end drawing, at most this many flips per
+ * second of host time. A GPU back end draws a menu frame in 2-3 ms, so a
+ * title whose front end does not pace itself (Fable's title, menus and pause
+ * screen) flips 200-280 times a second and keeps the GPU and two cores busy
+ * for frames nobody sees -- on a handheld, battery and heat. The CPU
+ * rasteriser is slow enough not to need it.
+ *
+ * FLIP_STALL (frame presented, back end flipped) books the frame's slot on
+ * an absolute host-clock schedule, 1/cap s apart; the executor thread
+ * sleeps until it before it walks the next segment (nv2a_pb_exec_flip_poll,
+ * top of the ack loop). Not inside FLIP_STALL: the segment holding the flip
+ * is finished first and DMA_GET reaches PUT, so the title builds its next
+ * frame while the executor sleeps instead of waiting for GPU idle the whole
+ * time, and the ack loop does not poll an empty ring meanwhile. Absolute,
+ * not "1/cap after this flip": a sleep that wakes late (macOS wakes an
+ * ordinary thread's nanosleep ms late) shortens the next one, so the average
+ * holds at the cap without spinning. A frame later than a whole period
+ * restarts the schedule rather than letting the next frames run uncapped to
+ * catch up.
+ *
+ * Independent of RECOMP_FLIP_PACING (the flip hold, guest vblank clock),
+ * which still applies after. Default 60 on macOS and Android, off elsewhere
+ * (a back end a game project registers may present with vsync itself);
+ * 0 = off. */
+static int gpu_fps_cap(void)
+{
+    static int cap = -1;
+    if (cap < 0) {
+        const char *e = getenv("RECOMP_GPU_FPS_CAP");
+#if defined(__APPLE__) || defined(__ANDROID__)
+        int c = 60;
+#else
+        int c = 0;
+#endif
+        if (e && *e)
+            c = atoi(e);
+        if (c < 0)
+            c = 0;
+        if (c > 1000)
+            c = 1000;
+        cap = c;
+        if (e)
+            fprintf(stderr, "  [GPU] back end frame cap %d fps (RECOMP_GPU_FPS_CAP=%s)\n",
+                    c, e);
+    }
+    return cap;
+}
+
+/* Both on the executor (ack) thread, except s_cap_until_ns, which any thread
+ * may read (nv2a_pb_exec_flip_cap_until_ns). */
+static uint64_t s_cap_next_ns;          /* the next frame's slot, 0: none */
+static uint64_t s_cap_due_ns;           /* booked by FLIP_STALL, 0: none */
+static volatile uint64_t s_cap_until_ns;
+static uint64_t s_cap_slept_ns;         /* since the last report */
+static uint64_t s_cap_over_ns, s_cap_over_max_ns;   /* woke after the slot */
+static uint32_t s_cap_waits, s_cap_late;
+
+uint64_t nv2a_pb_exec_flip_cap_until_ns(void)
+{
+    return s_cap_until_ns;
+}
+
+/* At FLIP_STALL: book the slot the next walk waits for. */
+static void flip_cap_book(void)
+{
+    uint64_t period, now;
+    int cap;
+
+    if (!backend_draws() || (cap = gpu_fps_cap()) <= 0) {
+        s_cap_next_ns = s_cap_due_ns = 0;
+        return;
+    }
+    period = 1000000000ull / (uint64_t)cap;
+    now = xbox_HostNowNs();
+    if (!s_cap_next_ns || now >= s_cap_next_ns + period) {
+        if (s_cap_next_ns)
+            s_cap_late++;
+        s_cap_next_ns = now;            /* (re)start the schedule */
+    }
+    s_cap_next_ns += period;
+    s_cap_due_ns = s_cap_next_ns;
+}
+
+/* Before a walk: sleep out a booked slot. */
+static void flip_cap_wait(void)
+{
+    uint64_t due = s_cap_due_ns, now;
+
+    if (!due)
+        return;
+    s_cap_due_ns = 0;
+    now = xbox_HostNowNs();
+    if (now >= due)
+        return;
+    s_cap_until_ns = due;
+    xbox_HostSleepNs(due - now);
+    s_cap_until_ns = 0;
+    s_cap_slept_ns += due - now;
+    s_cap_waits++;
+    now = xbox_HostNowNs();
+    if (now > due) {
+        s_cap_over_ns += now - due;
+        if (now - due > s_cap_over_max_ns)
+            s_cap_over_max_ns = now - due;
+    }
+}
+
 /* RECOMP_FLIP_PACING: unset or 0 off (flips complete at once and frame
  * counters are bumped on every flip, as before), edge (D3D's rule: a late
  * frame waits for the next vblank), anything else on. Opt-in: it holds the
@@ -4581,11 +4688,26 @@ int nv2a_pb_exec_flip_poll(void)
     uint32_t c;
     int ok;
 
+    flip_cap_wait();
     if (!s_flip_hold.held)
         return 0;
     now = xbox_HostNowNs();
     c = flip_clock(now, &ok);
     return xbox_FlipHoldPoll(&s_flip_hold, c, now, ok);
+}
+
+/* The cap's line in the periodic [GPU] report, then reset. */
+static void flip_cap_report(void)
+{
+    if (!backend_draws() || gpu_fps_cap() <= 0)
+        return;
+    fprintf(stderr, "[GPU] frame cap %d: waits %u slept %.1f ms, woke %.2f ms"
+            " late avg (%.2f max), frames over a period %u\n",
+            gpu_fps_cap(), s_cap_waits, s_cap_slept_ns / 1e6,
+            s_cap_waits ? s_cap_over_ns / 1e6 / s_cap_waits : 0.0,
+            s_cap_over_max_ns / 1e6, s_cap_late);
+    s_cap_waits = s_cap_late = 0;
+    s_cap_slept_ns = s_cap_over_ns = s_cap_over_max_ns = 0;
 }
 
 /* The hold's line in the periodic [GPU] report, then reset. */
@@ -5054,6 +5176,7 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
         s_gpu.drawn_stale = 1;
         if (s_backend && s_backend->flip)
             s_backend->flip();
+        flip_cap_book();
 
         if (verbose) {
             static unsigned n;
@@ -5414,6 +5537,7 @@ void nv2a_pb_exec_report(void)
         }
     }
     flip_hold_report();
+    flip_cap_report();
     fprintf(stderr, "[GPU] surface 0x%08X pitch %u clip %ux%u+%u+%u"
                     " clears %u | %u unhandled methods (%d distinct)\n",
             s_gpu.color_offset, s_gpu.pitch, s_gpu.clip_w, s_gpu.clip_h,

@@ -135,6 +135,13 @@ enum {
 int xbox_FrameCounterBump(XboxFrameCounterBump *b, volatile uint32_t *word,
                           int pacing, uint32_t now_ms);
 
+/* RECOMP_GPU_FPS_CAP (nv2a_pb_exec.c): while the executor sleeps out a
+ * frame's slot after FLIP_STALL, the host time (xbox_HostNowNs) it sleeps
+ * until; 0 otherwise. The GPU makes no progress before then, so a guest
+ * wait loop that polls GPU progress (DMA_GET, a fence) may sleep until that
+ * time instead of spinning or yielding. Read from any thread. */
+uint64_t nv2a_pb_exec_flip_cap_until_ns(void);
+
 #ifdef __cplusplus
 }
 #endif

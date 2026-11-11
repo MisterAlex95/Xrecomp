@@ -45,6 +45,7 @@ void xbox_Nv2aFrameCounterFlip(void) {}
 int nv2a_pb_scan_in_call(void) { return 0; }
 uint32_t xbox_VblankCount(void) { return 0; }
 uint64_t xbox_HostNowNs(void) { return 0; }
+void xbox_HostSleepNs(uint64_t ns) { (void)ns; }
 uint32_t xbox_Nv2aFrameCountersOwned(void) { return 0; }
 
 static volatile uint32_t s_pgraph_400b10;
