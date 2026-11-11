@@ -1735,27 +1735,28 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
                         if (put != last_put)
                             nv2a_pb_scan(put);
                     } else {
-                        /* The segment scan, the default: the bytes between
-                         * the previous PUT and this one. The pushbuffer is a
-                         * ring, so PUT coming back below where it was is a
-                         * wrap, not a rewind; the ring's bounds are learned
-                         * from the lowest and highest PUT seen. */
-                        static uint32_t put_lo, put_hi;
-                        if (!put_lo || put < put_lo) put_lo = put;
-                        if (put > put_hi) put_hi = put;
-                        if (last_put && put > last_put) {
-                            nv2a_pb_scan_segment(XBOX_CONTIG_BASE | (last_put & 0x0FFFFFFFu),
-                                                 XBOX_CONTIG_BASE | (put      & 0x0FFFFFFFu));
-                        } else if (last_put && put < last_put) {
-                            if (put_hi > last_put)
-                                nv2a_pb_scan_segment(
-                                    XBOX_CONTIG_BASE | (last_put & 0x0FFFFFFFu),
-                                    XBOX_CONTIG_BASE | (put_hi   & 0x0FFFFFFFu));
-                            if (put > put_lo)
-                                nv2a_pb_scan_segment(
-                                    XBOX_CONTIG_BASE | (put_lo & 0x0FFFFFFFu),
-                                    XBOX_CONTIG_BASE | (put    & 0x0FFFFFFFu));
-                        }
+                        /* The segment scan, the default: what the title
+                         * submitted since the previous PUT, one walk from
+                         * there to this PUT. The walk follows JUMPs, so a
+                         * wrap of the ring (D3D's JUMP back to its base, PUT
+                         * coming back below where it was) and a recorded
+                         * pushbuffer run from the ring are both part of it.
+                         * It used to scan up to the highest PUT seen on a
+                         * wrap and stop at every JUMP, which dropped the
+                         * commands past either.
+                         *
+                         * A title that moved GET itself reset the ring
+                         * (XDK D3D writes DMA_GET and DMA_PUT together):
+                         * its commands start at that GET, not at the old
+                         * PUT. */
+                        uint32_t from = last_put;
+                        uint32_t get_now = *(volatile uint32_t *)
+                                           ((char *)regs + NV2A_USER_DMA_GET);
+                        if (get_written != 0xFFFFFFFFu && get_now != get_written)
+                            from = get_now;
+                        if (last_put && put != from)
+                            nv2a_pb_scan_segment(XBOX_CONTIG_BASE | (from & 0x0FFFFFFFu),
+                                                 XBOX_CONTIG_BASE | (put  & 0x0FFFFFFFu));
                     }
                     /* Periodic, because what the title submits at init is not
                      * what it submits once it is drawing a menu, and the

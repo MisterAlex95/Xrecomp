@@ -33,6 +33,11 @@ static struct { uint32_t subch, method, param, get; } s_seen[64];
 static int s_n;
 static uint32_t s_title_moves_get_at;       /* a method that makes the title write GET */
 static uint32_t s_title_get;
+/* D3D's software-method interrupt, as the segment tests stand it in: a
+ * NO_OPERATION with this value makes the "handler" store s_swm_word at
+ * physical address s_swm_slot (RunPushBuffer's return JUMP). */
+static uint32_t s_swm_param, s_swm_slot, s_swm_word;
+static void put(uint32_t at, uint32_t w);
 
 void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
 {
@@ -45,6 +50,8 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
     s_n++;
     if (method == s_title_moves_get_at)
         s_get_reg = s_title_get;
+    if (method == 0x0100 && s_swm_param && param == s_swm_param)
+        put(s_swm_slot, s_swm_word);
 }
 /* The executor's constant short path: declined, so every word reaches the
  * recorder above. */
@@ -59,6 +66,8 @@ void nv2a_pb_exec_walk_begin(void) {}       /* the flip hold's vblank sample */
 
 void nv2a_pb_resync(uint32_t get_phys);
 void nv2a_pb_scan(uint32_t put_phys);
+void nv2a_pb_scan_segment(uint32_t start_va, uint32_t end_va);
+uint32_t nv2a_pb_scan_runaways(void);
 
 static int s_fail;
 #define CHECK(c) do { if (!(c)) { printf("FAIL line %d: %s\n", __LINE__, #c); s_fail = 1; } } while (0)
@@ -82,6 +91,153 @@ static void title_sets_get(uint32_t get)
 {
     s_get_reg = get;
     nv2a_pb_resync(get);
+}
+
+
+/* The segment scan (the default, RECOMP_PB_WALK unset): the poll thread walks
+ * from the previous PUT to the new one. Physical P is VA 0x80000000 | P. */
+static void segment(uint32_t from, uint32_t to)
+{
+    nv2a_pb_scan_segment(0x80000000u | from, 0x80000000u | to);
+}
+
+/* How many times the walk executed (method, param). */
+static int times(uint32_t method, uint32_t param)
+{
+    int i, n = 0;
+    for (i = 0; i < s_n && i < 64; i++)
+        n += s_seen[i].method == method && s_seen[i].param == param;
+    return n;
+}
+
+static void segment_tests(void)
+{
+    uint32_t r0 = nv2a_pb_scan_runaways();
+
+    /* XDK RunPushBuffer: a JUMP from the ring into a recorded pushbuffer,
+     * which JUMPs back to the word after the first JUMP. Everything runs once,
+     * in order, including what follows the return in the ring. */
+    s_n = 0;
+    put(0x1000, hdr(1, 0, 0x0800)); put(0x1004, 101);
+    put(0x1008, 0x6000u | 1u);                             /* JUMP out */
+    put(0x100C, hdr(1, 0, 0x0808)); put(0x1010, 104);      /* after return */
+    put(0x6000, hdr(2, 0, 0x0900)); put(0x6004, 102); put(0x6008, 103);
+    put(0x600C, 0x100Cu | 1u);                             /* JUMP back */
+    segment(0x1000, 0x1014);
+    CHECK(s_n == 4);
+    expect(0, 0x0800, 101);
+    expect(1, 0x0900, 102);
+    expect(2, 0x0904, 103);
+    expect(3, 0x0808, 104);
+
+    /* The same, with an old-style jump (0x20000000 | address). */
+    s_n = 0;
+    put(0x1100, 0x20000000u | 0x6100u);
+    put(0x6100, hdr(1, 0, 0x0910)); put(0x6104, 111);
+    put(0x6108, 0x20000000u | 0x1104u);
+    put(0x1104, hdr(1, 0, 0x0914)); put(0x1108, 112);
+    segment(0x1100, 0x110C);
+    CHECK(s_n == 2);
+    expect(0, 0x0910, 111);
+    expect(1, 0x0914, 112);
+
+    /* The ring wraps with its JUMP beyond every PUT seen before: kicks at
+     * 0x2010 and 0x2020, then D3D writes up to 0x2030, JUMPs back to the base
+     * and kicks at 0x2008. The commands between the last PUT and the JUMP run,
+     * and so do the ones at the base, each once. */
+    s_n = 0;
+    put(0x2000, hdr(1, 0, 0x0A00)); put(0x2004, 201);
+    put(0x2008, hdr(1, 0, 0x0A04)); put(0x200C, 202);
+    put(0x2010, hdr(1, 0, 0x0A08)); put(0x2014, 203);
+    put(0x2018, hdr(1, 0, 0x0A0C)); put(0x201C, 204);
+    segment(0x2000, 0x2010);
+    segment(0x2010, 0x2020);
+    CHECK(s_n == 4);
+    put(0x2020, hdr(1, 0, 0x0A10)); put(0x2024, 205);
+    put(0x2028, hdr(1, 0, 0x0A14)); put(0x202C, 206);
+    put(0x2030, 0x2000u | 1u);                             /* the wrap */
+    put(0x2000, hdr(1, 0, 0x0A18)); put(0x2004, 207);      /* new lap */
+    segment(0x2020, 0x2008);
+    CHECK(s_n == 7);
+    CHECK(times(0x0A10, 205) == 1);
+    CHECK(times(0x0A14, 206) == 1);
+    CHECK(times(0x0A18, 207) == 1);
+    CHECK(times(0x0A00, 201) == 1);                        /* not replayed */
+    expect(6, 0x0A18, 207);
+
+    /* A wrap that lands exactly on PUT: the walk ends at the base. */
+    s_n = 0;
+    put(0x2008, hdr(1, 0, 0x0A1C)); put(0x200C, 208);
+    put(0x2010, 0x2000u | 1u);
+    segment(0x2008, 0x2000);
+    CHECK(s_n == 1);
+    expect(0, 0x0A1C, 208);
+
+    /* A pushbuffer re-run while the GPU is behind: D3D puts a software
+     * method (NO_OPERATION with a value) before the JUMP, and its interrupt
+     * handler patches the pushbuffer's return JUMP, still pointing at the
+     * previous run's return. The walk reads the JUMP after the handler ran
+     * and goes back to the right place. */
+    s_n = 0;
+    put(0x3000, hdr(1, 0, 0x0100)); put(0x3004, 0x1234Cu);   /* software method */
+    put(0x3008, 0x7000u | 1u);
+    put(0x300C, hdr(1, 0, 0x0B04)); put(0x3010, 302);
+    put(0x7000, hdr(1, 0, 0x0B00)); put(0x7004, 301);
+    put(0x7008, 0x1000u | 1u);                             /* stale return */
+    s_swm_param = 0x1234Cu;
+    s_swm_slot = 0x7008;
+    s_swm_word = 0x300Cu | 1u;
+    segment(0x3000, 0x3014);
+    s_swm_param = 0;
+    CHECK(s_n == 3);
+    expect(1, 0x0B00, 301);
+    expect(2, 0x0B04, 302);
+    CHECK(nv2a_pb_scan_runaways() == r0);
+
+    /* The same with nobody servicing the software method: the stale return
+     * leads back over commands already run, round and round. The walk stops
+     * on the first JUMP it would take a second time, and counts a runaway. */
+    s_n = 0;
+    put(0x3100, hdr(1, 0, 0x0B10)); put(0x3104, 311);
+    put(0x3108, 0x7100u | 1u);
+    put(0x310C, hdr(1, 0, 0x0B14)); put(0x3110, 312);       /* never reached */
+    put(0x7100, hdr(1, 0, 0x0B18)); put(0x7104, 313);
+    put(0x7108, 0x3100u | 1u);                             /* stale return */
+    segment(0x3100, 0x3114);
+    CHECK(s_n == 3);                                       /* 311, 313, 311 */
+    CHECK(times(0x0B10, 311) == 2);
+    CHECK(times(0x0B14, 312) == 0);
+    CHECK(nv2a_pb_scan_runaways() == r0 + 1);
+
+    /* A jump to itself ends the walk the same way, and the next kick is in
+     * step again. */
+    s_n = 0;
+    put(0x3200, 0x3200u | 1u);
+    segment(0x3200, 0x3204);
+    CHECK(s_n == 0);
+    CHECK(nv2a_pb_scan_runaways() == r0 + 2);
+    put(0x3204, hdr(1, 0, 0x0B20)); put(0x3208, 321);
+    segment(0x3204, 0x320C);
+    CHECK(s_n == 1);
+    expect(0, 0x0B20, 321);
+
+    /* A jump outside RAM: dropped, counted. */
+    s_n = 0;
+    put(0x3300, 0x0FFFFFFCu | 1u);
+    segment(0x3300, 0x3304);
+    CHECK(s_n == 0);
+    CHECK(nv2a_pb_scan_runaways() == r0 + 3);
+
+    /* A CALL still runs to its RETURN and comes back. */
+    s_n = 0;
+    put(0x3400, 0x7400u | 2u);
+    put(0x3404, hdr(1, 0, 0x0B34)); put(0x3408, 342);
+    put(0x7400, hdr(1, 0, 0x0B30)); put(0x7404, 341);
+    put(0x7408, 0x00020000u);
+    segment(0x3400, 0x340C);
+    CHECK(s_n == 2);
+    expect(0, 0x0B30, 341);
+    expect(1, 0x0B34, 342);
 }
 
 int main(void)
@@ -234,6 +390,8 @@ int main(void)
         CHECK(s_n == n0 + 1);
         expect(n0, 0x0710, 61);
     }
+
+    segment_tests();
 
     if (!s_fail)
         printf("nv2a pushbuffer walk: ok\n");

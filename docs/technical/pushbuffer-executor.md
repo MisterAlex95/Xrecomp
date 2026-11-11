@@ -268,3 +268,36 @@ enough. Burnout 3 did, at its Crash Nav menu, with the main thread in
 
 Turn the walk on for a project that delivers the GPU's software-method
 interrupt, or to bring up a title the segment scan draws wrongly.
+
+## The Segment Scan Follows Jumps
+
+The default walk (`nv2a_pb_scan_segment`, called from the NV2A poll loop) runs
+the commands between the previous `DMA_PUT` and the new one. It used to stop at
+the first top-level `JUMP` and to treat a PUT below the previous one as a wrap
+whose bounds it learned from the lowest and highest PUT seen. Both lost
+commands:
+
+| Case | What was lost |
+|---|---|
+| XDK `D3DDevice_RunPushBuffer`: a `JUMP` from the ring into a recorded pushbuffer, which ends with a `JUMP` back to the word after the first one | everything from the jump to PUT, up to 30 KB per jump in *Fable*, with the visibility reports (`GET_REPORT`) the title then waits on for good (`sub_0012F7F0`) |
+| a wrap whose `JUMP` to the ring's base lies beyond every PUT seen before | the commands between the highest PUT and the jump (22 KB at once in *Fable*) |
+
+The walk now goes from the previous PUT to the new one following every `JUMP`
+(old and new style), so a wrap is just a jump to the ring's base. At the top
+level it ends when it arrives exactly at PUT — an external pushbuffer can sit
+above PUT, and after a wrap the whole walk does. A title that moved `DMA_GET`
+itself (XDK D3D's ring reset writes it with PUT) has the walk start at that GET.
+`CALL`/`RETURN` are unchanged (one level).
+
+A walk that never arrives at PUT is dropped and counted (`[PB] ... walks that
+missed PUT` in the report; the first one also logs `[PB] runaway segment walk
+(...)`): a top-level jump taken twice in one walk — same word, same target,
+which a ring consumed once per kick never does; it is the shape of a re-run
+pushbuffer whose return `JUMP` still holds the previous run's target, see
+[D3D Software Methods](#d3d-software-methods) — a jump outside RAM, or 0x100000
+words without reaching PUT.
+
+`tests/nv2a_pb_walk` checks it: a recorded pushbuffer and its return jump (new
+and old style), a wrap beyond every earlier PUT, a return jump patched by a
+software method, an unpatched one (stopped, counted), a jump to itself, a jump
+outside RAM; each method is executed exactly once.
