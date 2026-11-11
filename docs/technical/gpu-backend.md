@@ -382,6 +382,43 @@ mean, and the difference image is black on every static surface (houses,
 ground); what differs is what animates between the two runs (clouds,
 villagers, grass).
 
+## Fable's bloom (root cause of the green glare, 2026-11-11)
+
+Once the near-plane fix let Fable's post-process run, the GL frame showed
+a green glare in the bottom right and cyan on faces. The chain: the 640x480
+back buffer (`SET_SURFACE_FORMAT` 0x121, X1R5G5B5, 16-bit) is sampled as
+`LU_X1R5G5B5` (0x1C) into a 256x256 target at 0x80D38080 (drawn linear and
+swizzled in turn), downsampled through swizzled A8R8G8B8 targets
+(`SET_SURFACE_FORMAT` 0x08080228, 0x06060228, 0x04040228: 256², 64², 16²;
+0x80CF9080 alternates 256² and 128², 0x80D39080 128² and 64², with 64²,
+32² and 16² targets after them), and added back over the frame.
+
+Before 7d every link went through guest memory: each target was read back
+and uploaded again where the next pass sampled it, and the back buffer was
+read back as **R5G6B5** and decoded by the texture path as **X1R5G5B5**.
+Read that way a 565 pixel RRRRRGGGGGGBBBBB gives R' = (R<<1 | G>>5) & 31
+and G' = G & 31: red doubles and wraps, green loses its top bit, blue is
+right. Bright greens (G >= 32 of 63) wrap to dark and push red, which the
+threshold and blur passes turned into the glare. Not the threshold
+constants, the blur taps' clamping or the targets' initial contents: with
+the targets sampled directly (no guest-memory round trip, the back buffer
+read as it was drawn) and 1555 read-back, the glare is gone with the same
+combiner constants and the same address modes.
+
+Measured on flip dumps of the same Oakvale view, excess green
+G - (R+B)/2 averaged over the bottom-right 160x160 pixels (four 80x80
+cells): pre-7d GL 54/63/66/68, CPU rasteriser 37/41/46/48, 7d GL 29/36/39/40;
+the sky is 144/167/185 (RGB) pre-7d, 174/201/218 now and 174/197/217 on the
+CPU path.
+
+The CPU rasteriser has the same mismatch and keeps it: it writes R5G6B5
+into the X1R5G5B5 back buffer and samples it as 1555, which is its yellow
+and purple tint; it also adds a brighter white edge glow than the GL path
+(left house wall 165 vs 113-132 mean). It is therefore not the reference
+for the bloom; a fix there (writing 1555 for colour formats 1 and 2 in
+`put_pixel` and the CPU presenter) is left out of this change, which keeps
+the CPU path as it was.
+
 ## Known differences from the CPU rasteriser (7b)
 
 - Colours and fog are interpolated with perspective (GL's default); the CPU
