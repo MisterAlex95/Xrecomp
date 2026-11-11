@@ -1,0 +1,12 @@
+cmake_minimum_required(VERSION 3.20)
+project(recomp_status_test C)
+set(CMAKE_C_STANDARD 11)
+# The status writer and the discovery writer it reads a count from: no runtime to build.
+add_executable(recomp_status_test test_main.c ../../src/kernel/recomp_status.c ../../src/kernel/recomp_discovery.c)
+target_include_directories(recomp_status_test PRIVATE ../../src/kernel)
+if(NOT WIN32)
+    find_package(Threads REQUIRED)
+    target_link_libraries(recomp_status_test PRIVATE Threads::Threads)
+endif()
+enable_testing()
+add_test(NAME recomp_status COMMAND recomp_status_test)

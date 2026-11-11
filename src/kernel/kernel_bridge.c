@@ -32,6 +32,7 @@
 #include "platform/host_time.h"
 #include "recomp_icall_feedback.h"
 #include "recomp_discovery.h"
+#include "recomp_status.h"
 #include <stdio.h>
 /* stdlib.h is load-bearing, not tidiness. Without it C89 implicit declaration
  * makes malloc return `int`, so bridge_spawn_thread truncated its heap pointer
@@ -837,6 +838,7 @@ static HANDLE bridge_spawn_guest_thread(recomp_func_t fn, uint32_t ctx1,
                                         uint32_t handle_va, uint32_t tls_size,
                                         int suspended)
 {
+    recomp_status_thread_started();
     uint32_t obj = thobj_alloc();
     HANDLE th, shadow = NULL;
 

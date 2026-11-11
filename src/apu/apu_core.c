@@ -36,6 +36,7 @@
 #include "apu_volume.h"
 #include "fpconv.h"
 #include "../kernel/xbox_memory_layout.h"   /* XBOX_WORKER_STACK_TOP */
+#include "../kernel/recomp_status.h"       /* RECOMP_STATUS: audio for the compat runner */
 
 /* ============================================================
  * Globals
@@ -930,6 +931,7 @@ void mcpx_apu_monitor_frame(MCPXAPUState *d)
      * so it stays out of the dump too. */
     if (!(xa2_is_active() && d->pace_stalled))
         apu_wav_write((const int16_t *)period, MIXER_FRAME_SAMPLES);
+    recomp_status_audio((const int16_t *)period, MIXER_FRAME_SAMPLES);
 
     /* The player's volume (apu_volume.h), after the capture: it keeps the raw mix. */
     xbox_ApuApplyOutputVolume((int16_t *)period, MIXER_FRAME_SAMPLES * 2);

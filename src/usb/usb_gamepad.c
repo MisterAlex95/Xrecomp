@@ -12,6 +12,7 @@
  * pad plugged into the PC drives this one.
  */
 #include "usb_gamepad.h"
+#include "../kernel/recomp_status.h"   /* RECOMP_STATUS: pad reads for the compat runner */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -513,6 +514,7 @@ static void pad_script_apply(int pad, uint8_t *out)
     unsigned long now, t;
     int i, j;
 
+    recomp_status_pad_read();
     if (s_script_len < 0)
         pad_script_load();
     now = (unsigned long)GetTickCount();
