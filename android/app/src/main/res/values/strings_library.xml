@@ -83,4 +83,24 @@
     <string name="LIB_ALL_FILES_EXPLAIN">With All files access the app reads your library folder as it is: extracted game folders play in place, disc images are read without copying. Without it, Android\'s file picker still lets the app list the folder, but every game must be imported or copied.</string>
     <string name="LIB_SAF">Use the file picker</string>
     <string name="LIB_SAF_SUB">Without All files access: games are listed, then imported or copied into the app</string>
+
+    <!-- Storage (X on the library; per-game rows in Game data) -->
+    <string name="LIB_ST_FREE_CAPS">Free space</string>
+    <string name="LIB_ST_FREE_LINE">Internal storage %1$s free · Game files %2$s free</string>
+    <string name="LIB_ST_HINT_DELETE">Delete</string>
+    <string name="LIB_ST_DATA">Imported copy</string>
+    <string name="LIB_ST_PACK">Pack</string>
+    <string name="LIB_ST_WORK">Prepare files</string>
+    <string name="LIB_ST_CACHES">Game caches</string>
+    <string name="LIB_ST_SAVES">Saves</string>
+    <string name="LIB_ST_DATA_DETAIL">The copy the app made when importing the game. Deleting it frees the space; the game stays in the library and can be imported again. Your disc image or folder is never touched.</string>
+    <string name="LIB_ST_PACK_DETAIL">What the Prepare built for this game. Once deleted, the game needs preparing again (20 to 60 minutes).</string>
+    <string name="LIB_ST_WORK_DETAIL">The Prepare\'s work files (generated code, objects). Only needed to resume or redo a Prepare faster.</string>
+    <string name="LIB_ST_CACHES_DETAIL">The game\'s own caches (Z:, the cache partitions, E:\\CACHE), kept aside while another game plays. The game rebuilds them at its next start, which can take a few minutes.</string>
+    <string name="LIB_ST_SAVES_DETAIL">Your saved games for this title (UDATA, TDATA). Deleted saves cannot be recovered.</string>
+    <string name="LIB_ST_DELETE_CONFIRM">Press A again within 5 seconds to delete it.</string>
+    <string name="LIB_ST_SAVES_CONFIRM">Your saves will be lost for good. Press A again within 5 seconds to delete them.</string>
+    <string name="LIB_ST_EMPTY">Nothing stored yet.</string>
+    <string name="LIB_ST_FOOTER">Only what the app made is deleted here: never your disc images nor the folders of your library folder.</string>
+    <string name="LIB_ST_SAVES_FOOTER">Saves are only deleted from here, one game at a time: nothing else deletes them.</string>
 </resources>

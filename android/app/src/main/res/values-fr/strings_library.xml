@@ -79,4 +79,23 @@
     <string name="LIB_ALL_FILES_EXPLAIN">Avec l\'accès à tous les fichiers, l\'application lit le dossier de votre bibliothèque tel quel : les dossiers de jeu extraits se jouent sur place, les images disque sont lues sans copie. Sans lui, le sélecteur de fichiers d\'Android permet quand même de lister le dossier, mais chaque jeu doit être importé ou copié.</string>
     <string name="LIB_SAF">Utiliser le sélecteur de fichiers</string>
     <string name="LIB_SAF_SUB">Sans l\'accès à tous les fichiers : les jeux sont listés, puis importés ou copiés dans l\'application</string>
+
+    <string name="LIB_ST_FREE_CAPS">Espace libre</string>
+    <string name="LIB_ST_FREE_LINE">Stockage interne : %1$s libres · Fichiers des jeux : %2$s libres</string>
+    <string name="LIB_ST_HINT_DELETE">Supprimer</string>
+    <string name="LIB_ST_DATA">Copie importée</string>
+    <string name="LIB_ST_PACK">Pack</string>
+    <string name="LIB_ST_WORK">Fichiers de préparation</string>
+    <string name="LIB_ST_CACHES">Caches du jeu</string>
+    <string name="LIB_ST_SAVES">Sauvegardes</string>
+    <string name="LIB_ST_DATA_DETAIL">La copie faite par l\'application lors de l\'importation du jeu. La supprimer libère la place ; le jeu reste dans la bibliothèque et peut être importé à nouveau. Votre image disque ou votre dossier ne sont jamais touchés.</string>
+    <string name="LIB_ST_PACK_DETAIL">Ce que la préparation a construit pour ce jeu. Une fois supprimé, le jeu doit être préparé à nouveau (20 à 60 minutes).</string>
+    <string name="LIB_ST_WORK_DETAIL">Les fichiers de travail de la préparation (code généré, objets). Utiles seulement pour reprendre ou refaire une préparation plus vite.</string>
+    <string name="LIB_ST_CACHES_DETAIL">Les caches propres au jeu (Z:, les partitions de cache, E:\\CACHE), mis de côté pendant qu\'un autre jeu tourne. Le jeu les reconstruit au démarrage suivant, ce qui peut prendre quelques minutes.</string>
+    <string name="LIB_ST_SAVES_DETAIL">Vos parties sauvegardées pour ce titre (UDATA, TDATA). Des sauvegardes supprimées ne se récupèrent pas.</string>
+    <string name="LIB_ST_DELETE_CONFIRM">Appuyez à nouveau sur A dans les 5 secondes pour le supprimer.</string>
+    <string name="LIB_ST_SAVES_CONFIRM">Vos sauvegardes seront définitivement perdues. Appuyez à nouveau sur A dans les 5 secondes pour les supprimer.</string>
+    <string name="LIB_ST_EMPTY">Rien n\'est encore stocké.</string>
+    <string name="LIB_ST_FOOTER">Seul ce que l\'application a créé est supprimé ici : jamais vos images disque ni les dossiers de votre dossier de bibliothèque.</string>
+    <string name="LIB_ST_SAVES_FOOTER">Les sauvegardes ne se suppriment qu\'ici, un jeu à la fois : rien d\'autre ne les efface.</string>
 </resources>

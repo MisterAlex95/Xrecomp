@@ -425,6 +425,49 @@ public class LauncherLibraryTest {
         TestSupport.screenshot(a.getWindow().getDecorView(), "library-source-three-cards");
     }
 
+    private static Widgets.MenuRow menuRow(LauncherActivity a, String title) {
+        for (View v : allViews(a.getWindow().getDecorView(), new ArrayList<>())) {
+            if (v instanceof Widgets.MenuRow && title.equals(((Widgets.MenuRow)v).title))
+                return (Widgets.MenuRow)v;
+        }
+        return null;
+    }
+
+    /** Storage: per game, each thing deleted on its own with A twice; saves stay unless deleted on their own. */
+    @Test
+    public void storageDeletesOneThingAtATime() throws Exception {
+        TestSupport.write(new File(GameStore.defaultGameDir(app), "default.xbe"), TestSupport.xbe(0x4D530004, "Sample"));
+        TestSupport.writePack(app.getFilesDir(), "4D530004", 4096);
+        File saves = new File(GameTheme.saveDir(app), "UDATA/4d530004/save.bin");
+        TestSupport.write(saves, new byte[64]);
+        LauncherActivity a = launch();
+        a.goForTest(LauncherActivity.Screen.STORAGE);
+        idle(300);
+        for (int i = 0; i < 50 && menuRow(a, app.getString(R.string.LIB_ST_PACK)).subtitle
+                                       .equals(app.getString(R.string.SIZE_COUNTING)); i++) {
+            Thread.sleep(20);
+            idle(50);
+        }
+        assertNotNull(menuRow(a, app.getString(R.string.LIB_ST_DATA)));
+        assertNotNull(menuRow(a, app.getString(R.string.LIB_ST_SAVES)));
+        a.forceFocusForTest();
+        idle(300);
+        TestSupport.screenshot(a.getWindow().getDecorView(), "library-storage");
+
+        File pack = Pack.packDir(app.getFilesDir(), "4D530004");
+        menuRow(a, app.getString(R.string.LIB_ST_PACK)).performClick();
+        idle(100);
+        assertTrue("the first press only arms", pack.isDirectory());
+        menuRow(a, app.getString(R.string.LIB_ST_PACK)).performClick();
+        for (int i = 0; i < 100 && pack.exists(); i++) {
+            Thread.sleep(20);
+            idle(50);
+        }
+        assertFalse(pack.exists());
+        assertTrue("saves kept", saves.isFile());
+        assertTrue("the game kept", new File(GameStore.defaultGameDir(app), "default.xbe").isFile());
+    }
+
     private static List<View> allViews(View v, List<View> out) {
         out.add(v);
         if (v instanceof ViewGroup) {

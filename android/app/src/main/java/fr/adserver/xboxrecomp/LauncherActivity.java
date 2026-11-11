@@ -264,6 +264,10 @@ public class LauncherActivity extends Activity {
     private long switchArmedAt;
     /** The library chip Home was built with (a game whose files are not here), for the poll. */
     private GameState.Chip homeChip;
+    /** Storage: sizes measured (« tid/KIND » -> bytes), the item armed for deletion. */
+    private final java.util.Map<String, Long> storageSizes = new java.util.HashMap<>();
+    private Thread storageMeasurer;
+    private String storageArmedKey;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -754,6 +758,7 @@ public class LauncherActivity extends Activity {
         xAction = yAction = startAction = l1Action = r1Action = null;
         chip.set("", 0);
         deleteArmedAt = 0;
+        storageArmedKey = null;
         cancelArmedAt = 0;
         homePrep = null;
         prepShown = null;
@@ -2144,6 +2149,20 @@ public class LauncherActivity extends Activity {
             menu.addView(del, lp(MATCH, Theme.ROW_H));
             onFocus(del, () -> dataDeleteDetail(dir));
         }
+        // The game's other stored things (pack, Prepare files, caches, saves), each deleted on its own (Storage).
+        String tid = titleId();
+        Library.Record r = rec();
+        String key = tid != null ? tid : r != null ? r.titleId : null;
+        if (key != null) {
+            List<Storage.Item> items = new ArrayList<>();
+            for (Storage.Item it : Storage.items(storageDirs(), key, r)) {
+                if (it.kind != Storage.Kind.DATA)
+                    items.add(it);
+            }
+            for (Storage.Item it : items)
+                menu.addView(storageRow(it, gameTitle(dir)), lp(MATCH, Theme.ROW_H_SMALL));
+            storageMeasureLater(items);
+        }
         LinearLayout.LayoutParams ml = lp(860, MATCH);
         ml.rightMargin = Theme.GAP;
         h.addView(menu, ml);
@@ -3476,11 +3495,221 @@ public class LauncherActivity extends Activity {
         addHint("B", R.string.HINT_BACK, this::back);
     }
 
-    // ---- STORAGE -----------------------------------------------------------------------------------------------
+    // ---- STORAGE (docs/android/app-shell.md « Game library », Storage) -------------------------------------------
 
+    /**
+     * What the app stores, per game: the imported copy, the pack, the Prepare's files, the game's caches, the saves;
+     * free space on top. Each deleted on its own, A twice within CONFIRM_MS, on a worker thread. Saves have their own
+     * row and a stronger warning; the player's images and library folders are never listed.
+     */
     private void buildStorage() {
         screenTitle.setText(R.string.LIB_STORAGE);
+        Storage.Dirs dirs = storageDirs();
+        LinearLayout h = rowLayout();
+        ScrollView scroll = new ScrollView(this);
+        scroll.setVerticalScrollBarEnabled(false);
+        scroll.setClipToPadding(false);
+        scroll.setPadding(0, 0, 0, 24);
+        LinearLayout list = column();
+        list.setPadding(0, 4, 0, 4);
+        scroll.addView(list, new FrameLayout.LayoutParams(MATCH, WRAP));
+
+        TextView freeCaps = Theme.caps(this, getString(R.string.LIB_ST_FREE_CAPS), Theme.TEXT_FAINT);
+        freeCaps.setPadding(36, 0, 0, 0);
+        list.addView(freeCaps, lp(MATCH, WRAP));
+        TextView free = Theme.text(this, Theme.T_BODY, Theme.REGULAR, Theme.TEXT,
+                                   getString(R.string.LIB_ST_FREE_LINE, size(internalFree()), size(freeSpace())));
+        free.setPadding(36, 10, 0, 0);
+        list.addView(free, lp(MATCH, WRAP));
+
+        List<Storage.Item> all = new ArrayList<>();
+        for (String tid : Storage.titles(dirs, games)) {
+            List<Storage.Item> items = Storage.items(dirs, tid, games.get(tid));
+            if (items.isEmpty())
+                continue;
+            Library.Record r = games.get(tid);
+            String name = r != null && !r.title.isEmpty() ? r.title : tid;
+            TextView t = Theme.caps(this, name, Theme.TEXT_FAINT);
+            t.setPadding(36, 0, 0, 0);
+            LinearLayout.LayoutParams p = lp(MATCH, WRAP);
+            p.topMargin = 30;
+            p.bottomMargin = 8;
+            list.addView(t, p);
+            for (Storage.Item it : items) {
+                list.addView(storageRow(it, name), lp(MATCH, Theme.ROW_H_SMALL));
+                all.add(it);
+            }
+        }
+        if (all.isEmpty()) {
+            TextView none = Theme.text(this, Theme.T_BODY, Theme.REGULAR, Theme.TEXT_DIM,
+                                       getString(R.string.LIB_ST_EMPTY));
+            none.setPadding(36, 30, 0, 0);
+            list.addView(none, lp(MATCH, WRAP));
+        }
+        storageMeasureLater(all);
+
+        LinearLayout.LayoutParams sl = lp(920, MATCH);
+        sl.rightMargin = Theme.GAP;
+        h.addView(scroll, sl);
+        h.addView(detailPanel(), lp(0, MATCH, 1));
+        body.addView(h, new FrameLayout.LayoutParams(MATCH, MATCH));
+        detailClear(getString(R.string.LIB_STORAGE), getString(R.string.LIB_ST_FREE_CAPS), null);
+        detailKv(getString(R.string.KV_INTERNAL_FREE), size(internalFree()));
+        detailKv(getString(R.string.KV_FREE), size(freeSpace()));
+        detailFooter(getString(R.string.LIB_ST_FOOTER), Theme.TEXT_FAINT);
+        addHint("A", R.string.LIB_ST_HINT_DELETE, this::clickFocused);
         addHint("B", R.string.HINT_BACK, this::back);
+        if (gameRunning())
+            setNote(getString(R.string.LIB_RUNNING_NOTE, runningTitle()), NOTE_INFO);
+    }
+
+    private static String storageKey(Storage.Item it) {
+        return it.tid + "/" + it.kind;
+    }
+
+    private int storageLabel(Storage.Kind k) {
+        switch (k) {
+        case DATA:
+            return R.string.LIB_ST_DATA;
+        case PACK:
+            return R.string.LIB_ST_PACK;
+        case WORK:
+            return R.string.LIB_ST_WORK;
+        case CACHES:
+            return R.string.LIB_ST_CACHES;
+        default:
+            return R.string.LIB_ST_SAVES;
+        }
+    }
+
+    private String storageSize(Storage.Item it) {
+        Long n = storageSizes.get(storageKey(it));
+        return n == null ? getString(R.string.SIZE_COUNTING) : size(n);
+    }
+
+    /** One stored thing of a game: its size, A twice deletes it; the detail panel says what it is. */
+    private MenuRow storageRow(Storage.Item it, String gameName) {
+        MenuRow r = row(it.kind == Storage.Kind.SAVES ? Icon.INFO : Icon.TRASH, getString(storageLabel(it.kind)),
+                        storageSize(it), null);
+        r.setOnClickListener(v -> onStorageDelete(r, it));
+        onFocus(r, () -> {
+            int detailText;
+            switch (it.kind) {
+            case DATA:
+                detailText = R.string.LIB_ST_DATA_DETAIL;
+                break;
+            case PACK:
+                detailText = R.string.LIB_ST_PACK_DETAIL;
+                break;
+            case WORK:
+                detailText = R.string.LIB_ST_WORK_DETAIL;
+                break;
+            case CACHES:
+                detailText = R.string.LIB_ST_CACHES_DETAIL;
+                break;
+            default:
+                detailText = R.string.LIB_ST_SAVES_DETAIL;
+                break;
+            }
+            detailClear(gameName, getString(storageLabel(it.kind)), getString(detailText));
+            detailKv(getString(R.string.KV_SIZE), storageSize(it));
+            for (File f : it.files) {
+                if (f.exists())
+                    detailKv(getString(R.string.KV_FOLDER), f.getAbsolutePath());
+            }
+            detailFooter(getString(it.kind == Storage.Kind.SAVES ? R.string.LIB_ST_SAVES_FOOTER
+                                                                 : R.string.LIB_ST_FOOTER),
+                         it.kind == Storage.Kind.SAVES ? Theme.WARN : Theme.TEXT_FAINT);
+        });
+        return r;
+    }
+
+    /** The sizes of items not measured yet, on a worker (an imported copy can be gigabytes), then a refresh. */
+    private void storageMeasureLater(List<Storage.Item> items) {
+        if (storageMeasurer != null && storageMeasurer.isAlive())
+            return;
+        List<Storage.Item> todo = new ArrayList<>();
+        for (Storage.Item it : items) {
+            if (!storageSizes.containsKey(storageKey(it)))
+                todo.add(it);
+        }
+        if (todo.isEmpty())
+            return;
+        storageMeasurer = new Thread(() -> {
+            java.util.Map<String, Long> m = new java.util.HashMap<>();
+            for (Storage.Item it : todo)
+                m.put(storageKey(it), Storage.measure(it));
+            runOnUiThread(() -> {
+                storageSizes.putAll(m);
+                if (screen == Screen.STORAGE || screen == Screen.GAME_DATA)
+                    refreshKeepingFocus();
+            });
+        }, "xba-storage");
+        storageMeasurer.start();
+    }
+
+    /**
+     * A twice within CONFIRM_MS deletes it (saves: a stronger warning first). The game that runs from these files is
+     * ended first. An imported copy leaves its record's data_dir (the game stays in the library); its art and theme
+     * go only when the title also left the library folder.
+     */
+    private void onStorageDelete(MenuRow row, Storage.Item it) {
+        if (deleting)
+            return;
+        long now = SystemClock.uptimeMillis();
+        String key = storageKey(it);
+        if (!key.equals(storageArmedKey) || now - deleteArmedAt > CONFIRM_MS) {
+            storageArmedKey = key;
+            deleteArmedAt = now;
+            row.setBadge(getString(R.string.DELETE_CONFIRM_BADGE), Theme.WARN);
+            setNote(getString(it.kind == Storage.Kind.SAVES ? R.string.LIB_ST_SAVES_CONFIRM
+                                                             : R.string.LIB_ST_DELETE_CONFIRM),
+                    it.kind == Storage.Kind.SAVES ? NOTE_ERROR : NOTE_WARN);
+            return;
+        }
+        storageArmedKey = null;
+        deleteArmedAt = 0;
+        deleting = true;
+        row.setBadge(getString(R.string.DELETING), Theme.TEXT_DIM);
+        setNote(getString(R.string.DELETING), NOTE_INFO);
+        if (gameRunning() && it.tid.equals(launchedTid()))
+            endRunningGame();
+        Storage.Dirs dirs = storageDirs();
+        Log.i(TAG, "launcher: storage: deleting " + key + " " + it.files);
+        new Thread(() -> {
+            Storage.delete(dirs, it, null);
+            runOnUiThread(() -> {
+                deleting = false;
+                storageSizes.remove(key);
+                if (it.kind == Storage.Kind.DATA) {
+                    String dir = it.files.get(0).getAbsolutePath();
+                    for (Library.Record r : games.games.values()) {
+                        if (dir.equals(r.dataDir)) {
+                            r.dataDir = "";
+                            r.dataKind = "";
+                        }
+                    }
+                    writeGames();
+                    if (dir.equals(GameStore.chosenDir(this)))
+                        GameStore.forget(this);
+                    if (!indexGames.containsKey(it.tid))
+                        GameTheme.clear(this, it.tid);
+                    libArt.remove(it.tid);
+                    sizeDir = null;
+                    hashDir = null;
+                    titleIdDir = null;
+                    artTid = null;
+                }
+                if (screen == Screen.GAME_DATA && it.kind == Storage.Kind.DATA) {
+                    history.clear();
+                    show(libraryOn() ? (rec() != null ? Screen.HOME : Screen.LIBRARY)
+                                     : state() == State.NONE ? Screen.WELCOME : Screen.HOME);
+                } else {
+                    refreshKeepingFocus();
+                }
+                setNote(getString(R.string.DELETED), NOTE_OK);
+            });
+        }, "xba-delete").start();
     }
 
     // ---- ABOUT -------------------------------------------------------------------------------------------------

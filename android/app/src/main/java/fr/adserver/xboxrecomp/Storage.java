@@ -81,10 +81,18 @@ final class Storage {
         List<File> l = new ArrayList<>();
         for (String area : new String[] { "UDATA", "TDATA" }) {
             File a = new File(d.saveDir(), area);
-            File lower = new File(a, tid.toLowerCase(Locale.ROOT)), upper = new File(a, tid.toUpperCase(Locale.ROOT));
-            l.add(lower);
-            if (!upper.getName().equals(lower.getName()) && upper.exists())
-                l.add(upper);
+            String[] names = a.list();
+            boolean any = false;
+            if (names != null) {
+                for (String n : names) {   // any case (one entry each, also on a case-insensitive file system)
+                    if (n.equalsIgnoreCase(tid)) {
+                        l.add(new File(a, n));
+                        any = true;
+                    }
+                }
+            }
+            if (!any)
+                l.add(new File(a, tid.toLowerCase(Locale.ROOT)));
         }
         return l;
     }
