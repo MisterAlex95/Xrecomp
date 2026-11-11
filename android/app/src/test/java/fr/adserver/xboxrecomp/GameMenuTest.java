@@ -458,6 +458,23 @@ public class GameMenuTest {
         assertFalse(menu.quitArmed());
     }
 
+    /** A game's theme (read once at game start, ShellActivity): the menu in its colours, « Paused » stays amber. */
+    @Test
+    public void themedMenu() throws Exception {
+        menu.release();
+        int[] px = new int[64 * 64];
+        java.util.Arrays.fill(px, 0xFF2850DC);
+        Theme.apply(new Theme.Colors(GamePalette.build(GamePalette.analysePixels(px), Double.NaN).colors));
+        build();
+        assertEquals(0xFFA7C2FF, Theme.ACCENT);
+        menu.open("Back");
+        idle(50);
+        shot("themed");
+        menu.close();
+        menu.flash(activity.getString(R.string.PANEL_SHOT_SAVED, "20261110-101500.bmp"), true);
+        shot("themed-flash");
+    }
+
     @Test
     public void screenshotClosesFirst() {
         menu.open("Back");

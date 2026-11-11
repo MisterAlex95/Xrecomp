@@ -361,7 +361,7 @@ abstract class PanelView extends View {
         boolean held = isHeld(b), hold = b.kind == Kind.HOLD;
         float a = b.enabled ? 1 : 0.4f;
         // A hold button does something that cannot be undone: it fills in red while held.
-        int face = held ? (hold ? 0xFF2A1210 : Theme.ACCENT_DEEP) : b.accent ? 0xFF143A26 : Theme.PANEL_HI;
+        int face = held ? (hold ? 0xFF2A1210 : Theme.ACCENT_DEEP) : b.accent ? Theme.ACCENT_FACE : Theme.PANEL_HI;
         int edge = held ? (hold ? Theme.ERROR : Theme.ACCENT) : b.on ? Theme.ACCENT
                  : b.accent ? Theme.ACCENT_DEEP : Theme.LINE;
         fill.setColor(Theme.alpha(face, a));

@@ -1100,7 +1100,7 @@ final class GameMenu {
 
     /** A short message at the top of the screen (« Saved … »), for FLASH_MS, over the game or the menu. */
     void flash(String text, boolean ok) {
-        flashV.set(text, ok ? Theme.ACCENT : Theme.WARN);
+        flashV.set(text, ok ? Theme.OK : Theme.WARN);
         flashBox.setVisibility(View.VISIBLE);
         handler.removeCallbacks(flashEnd);
         handler.postDelayed(flashEnd, FLASH_MS);
@@ -1134,7 +1134,7 @@ final class GameMenu {
 
     private static GradientDrawable pill() {
         GradientDrawable g = new GradientDrawable();
-        g.setColor(0xCC050807);
+        g.setColor(Theme.alpha(Theme.BG_BOTTOM, 0.8f));
         g.setCornerRadius(30);
         g.setStroke(2, Theme.LINE);
         return g;

@@ -63,12 +63,31 @@ public class ShellActivity extends SDLActivity {
         super.onCreate(savedInstanceState);
         if (mBrokenLibraries)
             return;   // SDLActivity shows its error dialog and finishes
+        applyGameTheme();
         menu = new GameMenu(this, new MenuHost());
         menu.attach();
         companion = new CompanionScreen(this, "shell", ctx -> {
             panel = new CompanionPanel(ctx, new NativeSink(), ShellActivity::stats);
             return panel;
         }, new KeyForwarder());
+    }
+
+    /**
+     * The game theme's colours for the in-game menu and the bottom screen's panel (docs/android/app-shell.md « Game
+     * theme »), before they are built: from the launcher's cache, read once at game start; tokens only, no bitmaps.
+     * None cached, or the player's « Off »: the stock colours.
+     */
+    private void applyGameTheme() {
+        String tid = GameLanguage.currentTitleId(this);
+        GameTheme g = null;
+        try {
+            g = GameTheme.load(this, tid);
+        } catch (RuntimeException e) {
+            Log.w(LauncherActivity.TAG, "shell: theme unreadable, stock colours", e);
+        }
+        Theme.apply(g != null ? g.colors : Theme.Colors.STOCK);
+        Log.i(LauncherActivity.TAG, g != null ? "shell: " + g.logLine().substring("launcher: ".length())
+                                              : "shell: theme " + tid + ": stock");
     }
 
     /**

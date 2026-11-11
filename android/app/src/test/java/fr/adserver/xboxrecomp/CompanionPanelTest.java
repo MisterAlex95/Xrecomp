@@ -77,6 +77,17 @@ public class CompanionPanelTest {
         shot("game");
     }
 
+    /** A game's theme: the panel's accents follow it; the White and Black buttons keep their own colours. */
+    @Test
+    public void themedPanel() throws Exception {
+        int[] px = new int[64 * 64];
+        java.util.Arrays.fill(px, 0xFF2850DC);
+        Theme.apply(new Theme.Colors(GamePalette.build(GamePalette.analysePixels(px), Double.NaN).colors));
+        panel.invalidate();
+        idle(1000);
+        shot("game-themed");
+    }
+
     @Test
     public void multiTouch() throws Exception {
         touch.press(0, at(CompanionPanel.WHITE));
