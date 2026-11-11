@@ -88,6 +88,7 @@ Switches that change how the kernel layer behaves. Each fixes a class of titles;
 | `RECOMP_DPC_ON_RAISE` | on with the gate | `0` stops DPCs running when IRQL is raised. | `kernel_hal.c` |
 | `RECOMP_CPUID_NO_SIMD` | off | Hides SIMD from `cpuid`. | `kernel_hal.c` |
 | `RECOMP_AC97_READY=1` | off | Reports the AC'97 codec ready and routes the APU aperture to the emulated APU. | `xbox_memory_layout.c`, `templates/new-game/src/main.c` |
+| `RECOMP_AC97_ALIAS=0` | on (POSIX) | With `RECOMP_AC97_READY`: arm the AC'97 bus-master write trap with the old `mprotect` window instead of a read-only shared page plus a writable view. The window lets a second thread's store keep the RR bit, so a channel reset can spin (Fable during movies); for A/B only. | `xbox_memory_layout.c` |
 | `RECOMP_DSP_ACK=va[,...]` | off | Guest addresses to acknowledge as the DSP's doorbell. | `xbox_memory_layout.c` |
 
 ## Graphics: pushbuffer executor

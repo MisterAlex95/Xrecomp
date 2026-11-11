@@ -547,6 +547,10 @@ BOOL   UnmapViewOfFile(LPCVOID baseAddr);
 LPVOID w32_map_view_replace(HANDLE mapping, SIZE_T len, LPVOID addr);
 LPVOID w32_commit_replace(LPVOID addr, SIZE_T len);
 void   w32_view_forget(LPCVOID addr);
+/* Not Win32: an unnamed shared-memory descriptor that ftruncate and mmap
+ * accept (memfd on Linux/Android, an unlinked shm object on macOS), the one
+ * CreateFileMapping uses. -1 on failure. */
+int    w32_anon_map_fd(const char *name);
 
 /* ---- Aligned allocation ---------------------------------------------- */
 void *_aligned_malloc(SIZE_T size, SIZE_T alignment);

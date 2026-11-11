@@ -2333,6 +2333,11 @@ void w32_view_forget(LPCVOID addr)
     (void)view_take(addr);
 }
 
+int w32_anon_map_fd(const char *name)
+{
+    return anon_map_fd(name);
+}
+
 /* ===================================================================== */
 /* VirtualQuery                                                           */
 /* ===================================================================== */

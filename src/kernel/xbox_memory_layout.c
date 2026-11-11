@@ -637,6 +637,16 @@ static const struct { uint32_t offset; uint32_t idle_mask; } NV2A_IDLE[] = {
  * one would corrupt a register rather than fail visibly.
  *
  * Only RR. Bit 0 is RPBM, run/pause bus master, which software owns.
+ *
+ * That open window is process-wide, though: while one thread's write is being
+ * stepped, another thread's plain store to the page lands unmasked. On POSIX
+ * the page is therefore a shared mapping instead, read-only at the guest
+ * address with a second writable view: the handler decodes the store, masks
+ * RR out of it and writes it through the view, and the guest page is never
+ * opened (ac97_map_view). The mprotect window stays as the fallback. Windows
+ * keeps the single-step for now and with it the residual; Fable's DirectSound
+ * resets channels from two threads at once during movies, which is what
+ * exposed it on POSIX.
  */
 #define AC97_NABM_OFFSET  0x400000u   /* 0xFEC00000 within the MCPX aperture */
 #define AC97_TRAP_BYTES   0x1000u
@@ -721,6 +731,9 @@ static LONG CALLBACK ac97_write_veh(PEXCEPTION_POINTERS ep)
 #endif
 #include <sys/mman.h>
 static size_t g_ac97_hsize;    /* host page: 16 KB on arm64 Darwin */
+/* A second, writable mapping of the trapped page; NULL on the mprotect
+ * fallback. See ac97_arm_write_trap. */
+static void *g_ac97_view;
 
 static uint64_t ac97_posix_rd(void *dev, uint32_t off, int size)
 {
@@ -729,18 +742,57 @@ static uint64_t ac97_posix_rd(void *dev, uint32_t off, int size)
     return v;
 }
 
+/* The controller's half of the store: RR never reaches the register. The
+ * mask is applied to the bytes being written, so the bit is never visible
+ * to any reader, on any thread, at any moment -- which a sweep after the
+ * store cannot promise. The control bytes are the ones ac97_clear_reset_bits
+ * sweeps: +0x0B of every channel in 0x100..0x17F. */
 static void ac97_posix_wr(void *dev, uint32_t off, uint64_t v, int size)
 {
-    memcpy((char *)dev + off, &v, size > 8 ? 8 : size);
+    uint8_t b[8];
+    int i, n = size > 8 ? 8 : size;
+
+    memcpy(b, &v, (size_t)n);
+    for (i = 0; i < n; i++) {
+        uint32_t o = off + (uint32_t)i;
+        if (o >= 0x10B && o < 0x180 && (o & 0xFu) == 0xBu)
+            b[i] &= (uint8_t)~AC97_RR;
+    }
+    memcpy((char *)(g_ac97_view ? g_ac97_view : dev) + off, b, (size_t)n);
 }
 
-/* POSIX arm64 half of the AC'97 write trap: the page is PROT_READ, so a
- * write arrives as SIGBUS/SIGSEGV; the title's fault handler reaches this
- * through xbox_PosixMmioFault before reporting. The store is emulated onto
- * the page (open for the moment), the controller's reaction applied, and the
- * page closed again. Returns 1 when the fault was this trap and the access
- * was serviced. */
+/* POSIX half of the AC'97 write trap: the page is read-only at the guest
+ * address, so a write arrives as SIGBUS/SIGSEGV; the title's fault handler
+ * reaches this through xbox_PosixMmioFault before reporting. Returns 1 when
+ * the fault was this trap and the access was serviced.
+ *
+ * Normally the store is emulated through g_ac97_view, the writable mapping
+ * of the same memory: the guest page itself never becomes writable, so
+ * every other thread's store keeps faulting and goes through the same mask.
+ * No lock either: two emulated stores are two stores to the same memory,
+ * as on hardware.
+ *
+ * Fallback (no view: the shared mapping could not be made): open the page,
+ * emulate, sweep, close. The page is then writable process-wide for that
+ * window, so a plain store from another thread lands unmasked; the sweep
+ * catches one that lands before it, one between the sweep and the close
+ * keeps its RR bit. Fable hit exactly that (two threads resetting channels
+ * in DirectSound's sub_00832BFC during movies, the main thread then spinning
+ * for ever), which is why the view exists. */
 static volatile int g_ac97_posix_lock;
+
+static int ac97_emulate(void *ucv, uintptr_t fault)
+{
+#if defined(__aarch64__)
+    return mmio_emulate_a64((ucontext_t *)ucv,
+                            (uint32_t)(fault - (uintptr_t)g_ac97_page),
+                            g_ac97_page, ac97_posix_rd, ac97_posix_wr);
+#else
+    return mmio_emulate_x86_64((ucontext_t *)ucv,
+                               (uint32_t)(fault - (uintptr_t)g_ac97_page),
+                               g_ac97_page, ac97_posix_rd, ac97_posix_wr);
+#endif
+}
 
 int xbox_Ac97PosixFault(void *ucv, uintptr_t fault)
 {
@@ -749,15 +801,11 @@ int xbox_Ac97PosixFault(void *ucv, uintptr_t fault)
     if (!g_ac97_page || fault < (uintptr_t)g_ac97_page
             || fault >= (uintptr_t)g_ac97_page + g_ac97_hsize)
         return 0;
-    /* One trap at a time. The page is open process-wide while the store is
-     * emulated, so a second thread trapping in that window would have its
-     * page closed under it by the first thread's mprotect and fault inside
-     * the emulation. Spin: the window is a few hundred instructions, and a
-     * plain store from another thread while the page is open is still
-     * caught by the sweep below if it lands before it; one landing between
-     * the sweep and the close keeps its RR bit until the next trap. That
-     * residual needs two threads resetting channels at once, which
-     * DirectSound's single-threaded init never does. */
+    if (g_ac97_view)
+        return ac97_emulate(ucv, fault);
+    /* Fallback. One trap at a time: a second thread trapping in the open
+     * window would have the page closed under it by the first thread's
+     * mprotect and fault inside the emulation. */
     while (__atomic_exchange_n(&g_ac97_posix_lock, 1, __ATOMIC_ACQUIRE))
         ;
     /* Not opened: the emulated store would fault again on this thread,
@@ -766,20 +814,70 @@ int xbox_Ac97PosixFault(void *ucv, uintptr_t fault)
         __atomic_store_n(&g_ac97_posix_lock, 0, __ATOMIC_RELEASE);
         return 0;
     }
-#if defined(__aarch64__)
-    ok = mmio_emulate_a64((ucontext_t *)ucv,
-                          (uint32_t)(fault - (uintptr_t)g_ac97_page),
-                          g_ac97_page, ac97_posix_rd, ac97_posix_wr);
-#else
-    ok = mmio_emulate_x86_64((ucontext_t *)ucv,
-                             (uint32_t)(fault - (uintptr_t)g_ac97_page),
-                             g_ac97_page, ac97_posix_rd, ac97_posix_wr);
-#endif
+    ok = ac97_emulate(ucv, fault);
     if (ok)
         ac97_clear_reset_bits();
     mprotect(g_ac97_page, g_ac97_hsize, PROT_READ);
     __atomic_store_n(&g_ac97_posix_lock, 0, __ATOMIC_RELEASE);
     return ok;
+}
+
+/* Put a shared mapping under the trapped page: read-only at the guest
+ * address, writable at g_ac97_view. The page's current contents (the codec
+ * ready bit) are copied over first. RECOMP_AC97_ALIAS=0 skips it and keeps
+ * the mprotect fallback, for A/B. Returns 1 when the view is in place; on 0
+ * the page is untouched. */
+static int ac97_map_view(void)
+{
+    const char *e = getenv("RECOMP_AC97_ALIAS");
+    void *view;
+    int fd;
+
+    if (e && e[0] == '0')
+        return 0;
+    fd = w32_anon_map_fd("xba_ac97");
+    if (fd < 0)
+        return 0;
+    if (ftruncate(fd, (off_t)g_ac97_hsize) != 0) {
+        close(fd);
+        return 0;
+    }
+    view = mmap(NULL, g_ac97_hsize, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (view == MAP_FAILED) {
+        close(fd);
+        return 0;
+    }
+    memcpy(view, g_ac97_page, g_ac97_hsize);
+    /* Replaces the page in one call: no moment where it is unmapped. */
+    if (mmap(g_ac97_page, g_ac97_hsize, PROT_READ, MAP_SHARED | MAP_FIXED,
+             fd, 0) == MAP_FAILED) {
+        munmap(view, g_ac97_hsize);
+        close(fd);
+        return 0;
+    }
+    close(fd);                  /* both mappings keep the memory alive */
+    g_ac97_view = view;
+    return 1;
+}
+
+static void ac97_disarm_write_trap(void)
+{
+    if (g_ac97_view) {
+        munmap(g_ac97_view, g_ac97_hsize);
+        g_ac97_view = NULL;
+    }
+    g_ac97_page = NULL;
+}
+#else
+static void ac97_disarm_write_trap(void)
+{
+#if defined(_WIN32)
+    if (g_ac97_veh) {
+        RemoveVectoredExceptionHandler(g_ac97_veh);
+        g_ac97_veh = NULL;
+    }
+#endif
+    g_ac97_page = NULL;
 }
 #endif
 
@@ -800,13 +898,18 @@ static void ac97_arm_write_trap(void)
     fprintf(stderr, "  AC97: bus-master write trap not available on this"
                     " host; a channel reset will spin\n");
     return;
-#endif
-    g_ac97_page = (char *)g_mcpx_memory + AC97_NABM_OFFSET;
-#if !defined(_WIN32) && defined(__aarch64__)
+#elif !defined(_WIN32)
     (void)old;
+    g_ac97_page = (char *)g_mcpx_memory + AC97_NABM_OFFSET;
     g_ac97_hsize = (size_t)sysconf(_SC_PAGESIZE);
     if (g_ac97_hsize < AC97_TRAP_BYTES)
         g_ac97_hsize = AC97_TRAP_BYTES;
+    if (ac97_map_view()) {
+        fprintf(stderr, "  AC97: bus-master writes trapped at 0x%08X"
+                        " (POSIX, writable view; channel reset completes"
+                        " on write)\n", XBOX_MCPX_BASE + AC97_NABM_OFFSET);
+        return;
+    }
     if (mprotect(g_ac97_page, g_ac97_hsize, PROT_READ) != 0) {
         g_ac97_page = NULL;
         fprintf(stderr, "  AC97: could not arm the bus-master write trap;"
@@ -814,10 +917,10 @@ static void ac97_arm_write_trap(void)
         return;
     }
     fprintf(stderr, "  AC97: bus-master writes trapped at 0x%08X"
-                    " (POSIX; channel reset completes on write)\n",
-            XBOX_MCPX_BASE + AC97_NABM_OFFSET);
-    return;
-#endif
+                    " (POSIX, mprotect fallback; channel reset completes"
+                    " on write)\n", XBOX_MCPX_BASE + AC97_NABM_OFFSET);
+#else
+    g_ac97_page = (char *)g_mcpx_memory + AC97_NABM_OFFSET;
     /* First, so it runs before the game target's own crash reporter, which
      * would otherwise print the write as an access violation. */
     g_ac97_veh = AddVectoredExceptionHandler(1, ac97_write_veh);
@@ -836,6 +939,7 @@ static void ac97_arm_write_trap(void)
     fprintf(stderr, "  AC97: bus-master writes trapped at 0x%08X"
                     " (channel reset completes on write)\n",
             XBOX_MCPX_BASE + AC97_NABM_OFFSET);
+#endif
 }
 
 /*
@@ -4033,6 +4137,7 @@ void xbox_MemoryLayoutShutdown(void)
     }
 #endif
     if (g_mcpx_memory) {
+        ac97_disarm_write_trap();
         layout_release(g_mcpx_memory, 0);
         g_mcpx_memory = NULL;
     }
