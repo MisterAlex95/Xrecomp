@@ -272,3 +272,24 @@ the lock stalls D3D init (RECOMP_GUEST_CPU_TRACE).
   DISPATCH_LEVEL" line. RECOMP_PAD_PRESS=0x10, 150 s: 10 of 10 played lionhead_logo, Microsoft_Logo, intro_comp,
   dream_sequence_comp in order, no 0.00 fps, no warning. In Oakvale, 2 gate-on and 2 gate-off runs at once:
   28.1-29.5 fps both ways.
+
+## 2026-11-11: kick wait as events, visibility reports without waiting (cycle 4 WP-1, WP-2)
+- sub_008556D0 now calls xbox_Nv2aKickWait: the main thread sleeps on a condition the ack thread signals when it
+  clears the PFB flush bit; the idle ack thread sleeps on the kick (50 us steps, each ended by a kick) instead of
+  Sleep(0) polling. FABLE_D3D_SPIN=1 keeps the spin. Answering the kick after every draw batch inside the segment
+  scan was tried and dropped: the title ran ahead, took D3D's far-behind path into the 0x400B10 latch loop
+  (sub_008551F0, not latched by the segment scan) and froze after 1115 flips.
+- Reports: resolved at the idle hook / flip / after the present without waiting; a head report stuck 300 us gets a
+  glFlush, 2 ms a wait. RECOMP_GPU_ZPASS=lazy answers 1 instead of waiting (Android candidate).
+- Mac, Oakvale tutorial prompt after the AutoSave, back to back on xba-pack-loader + these two commits, load 4-7:
+  fps (steady 5 s reports) 37.4-39.4 -> 54.6-56.2 (4 runs); render 13.6 -> 13.1-13.6 ms/frame; executor report
+  resolve 25-28.5 % -> 0.4-1.0 %, yield poll 5.2-5.5 % -> 0.7-2.4 %; 9-34 waits per 5 s (~0.03-0.12 a frame),
+  idle hook 0.6-0.8 ms/frame; sub_0012F7F0 <= 0.1 % of the main thread, which sleeps in the kick wait (no yield or
+  nanosleep under sub_008556D0). Title 60 fps at the cap, process CPU 24 % -> 18-20 %. 5 runs of 160 s, no stall.
+- Before the rebase (base 8fdcf01): the loading screen ran at 3-17 fps in 3 of ~16 runs with WP-1 (30 in the others
+  and in every base run): two with an earlier single 250 us event wait (one then froze at 0 fps with the main thread
+  in the loader's Sleep loop, sub_0003B530), one with the 50 us steps at load average 33. Not seen after the rebase
+  (7 runs). Watch for it.
+- RECOMP_GPU_ZPASS=lazy, same spot: 56.2-56.4 fps, 0 flushes, 117-582 reports answered lazily per 5 s, but still
+  18-22 single-report waits per 5 s: the 512-pending cap (zpass_queue), which lazy does not change. On a tiler that
+  is still a mid-frame wait; answer the cap lazily too if the device shows it.
