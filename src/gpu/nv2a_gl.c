@@ -1060,11 +1060,15 @@ static GlTex *tex_get(const Nv2aTexture *t, uint32_t cube, int unit)
         /* Hash the bytes once per frame; again within the frame only when
          * this unit sampled something else in between AND the texture is
          * volatile (changed in the last 60 frames: a glyph cache written
-         * between two text batches). A texture that has never changed is
-         * not hashed twice in a frame. */
+         * between two text batches) or new this frame (its first bytes may
+         * be a buffer the title is still filling: Fable rewrote a 512x512
+         * texture at 0x80DD6080 between two batches of the frame that
+         * created it, and the entry kept the first bytes). A texture that
+         * has never changed is not hashed twice in a later frame. */
         if (e->checked == s_frame
             && (s_recheck_frame || s_bound[unit] == e
-                || (!s_recheck_switch && !(e->changes && s_frame - e->changed < 60))))
+                || (!s_recheck_switch && !(e->changes && s_frame - e->changed < 60)
+                    && e->changed != s_frame)))
             return e->failed ? NULL : e;
         readback_overlapping(t->offset, e->bytes);
         e->checked = s_frame;
