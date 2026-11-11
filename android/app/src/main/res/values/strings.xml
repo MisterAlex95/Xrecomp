@@ -189,6 +189,11 @@
     <string name="VAL_SCALE_2" translatable="false">2×</string>
     <string name="VAL_SCALE_3" translatable="false">3×</string>
     <string name="VAL_SCALE_FIT">Fit the screen</string>
+    <string name="OPT_ASPECT">Aspect ratio</string>
+    <string name="OPT_ASPECT_SUMMARY">Fill a wide screen when the game can</string>
+    <string name="OPT_ASPECT_DETAIL">Auto shows the game in 16:9 when it can draw a wider picture, and keeps menus and videos in their original shape. 4:3 always shows the console\'s original picture with side bars. 16:9 always fills the screen; a game without widescreen support is stretched.</string>
+    <string name="VAL_ASPECT_4_3">4:3 (original)</string>
+    <string name="VAL_ASPECT_16_9" translatable="false">16:9</string>
     <string name="OPT_TEX">Texture filtering</string>
     <string name="OPT_TEX_SUMMARY">How textures are sampled when drawn</string>
     <string name="OPT_TEX_DETAIL">Sharp takes the nearest texel, as the game is drawn by default. Smooth blends four texels; anisotropic also follows surfaces seen at an angle. Smoother modes cost speed, and are not the default because they change the look the game was tested with. (RECOMP_TEX_BILINEAR, RECOMP_TEX_ANISO)</string>

@@ -109,6 +109,11 @@ final class RecompConfig {
                    new Choice(R.string.VAL_AUTO, (String)null), new Choice(R.string.VAL_SCALE_1, "1"),
                    new Choice(R.string.VAL_SCALE_2, "2"), new Choice(R.string.VAL_SCALE_3, "3"),
                    new Choice(R.string.VAL_SCALE_FIT, "auto")),
+        // Aspect modes (docs/technical/gpu-backend.md « Aspect modes »): auto = 16:9 where the title draws wide frames.
+        new Option(Section.GRAPHICS, R.string.OPT_ASPECT, R.string.OPT_ASPECT_SUMMARY, R.string.OPT_ASPECT_DETAIL,
+                   keys("RECOMP_ASPECT"),
+                   new Choice(R.string.VAL_AUTO, (String)null), new Choice(R.string.VAL_ASPECT_4_3, "4:3"),
+                   new Choice(R.string.VAL_ASPECT_16_9, "16:9")),
         // Frame generation (docs/technical/framegen.md): RECOMP_LSFG_DIR, the app-private shader cache, is written by
         // « Choose Lossless.dll » (LSFG_DIR_KEY), not by this option.
         new Option(Section.GRAPHICS, R.string.OPT_LSFG, R.string.OPT_LSFG_SUMMARY, R.string.OPT_LSFG_DETAIL,

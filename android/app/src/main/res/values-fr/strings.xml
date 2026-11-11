@@ -168,6 +168,10 @@
     <string name="OPT_GPU_SCALE_DETAIL">Le rendu GPU peut dessiner l\'image 3D à 2 ou 3 fois la résolution de la console, ou à la taille qui remplit exactement l\'écran. Plus net, au prix de plus de travail pour le GPU, de chaleur et de batterie. Les effets comme le halo et les ombres gardent leur résolution d\'origine. Auto : ce que choisit le profil du jeu (1× pour l\'instant). Sans effet avec le rendu logiciel. (RECOMP_GPU_SCALE)</string>
     <string name="VAL_SCALE_1">1× (d\'origine)</string>
     <string name="VAL_SCALE_FIT">Adapter à l\'écran</string>
+    <string name="OPT_ASPECT">Format d\'image</string>
+    <string name="OPT_ASPECT_SUMMARY">Remplir un écran large quand le jeu le permet</string>
+    <string name="OPT_ASPECT_DETAIL">Auto affiche le jeu en 16:9 quand il sait dessiner une image plus large, et garde les menus et les vidéos dans leur forme d\'origine. 4:3 affiche toujours l\'image d\'origine de la console, avec des bandes sur les côtés. 16:9 remplit toujours l\'écran ; un jeu sans mode large est étiré.</string>
+    <string name="VAL_ASPECT_4_3">4:3 (d\'origine)</string>
     <string name="OPT_TEX">Filtrage des textures</string>
     <string name="OPT_TEX_SUMMARY">Comment les textures sont échantillonnées</string>
     <string name="OPT_TEX_DETAIL">Net prend le texel le plus proche, comme le jeu est dessiné par défaut. Lissé mélange quatre texels ; l\'anisotrope suit aussi les surfaces vues de biais. Les modes lissés coûtent de la vitesse, et ne sont pas le défaut car ils changent le rendu avec lequel le jeu a été testé. (RECOMP_TEX_BILINEAR, RECOMP_TEX_ANISO)</string>
