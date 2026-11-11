@@ -2526,6 +2526,7 @@ static void backend_flush(int textured, int screen)
     batch.state = &rs;
     batch.full = NULL;
     batch.pixel = NULL;
+    batch.program = NULL;
     if (textured && s_gpu.texs[0].valid) {
         texture_to_backend(&s_gpu.texs[0], &tex);
         batch.texture = &tex;
@@ -4077,6 +4078,219 @@ static void raster_batch_program(void)
         backend_flush(!s_xf_no_tex, 0);
 }
 
+/* ---- vertex programs on the back end (NV2A_BACKEND_CAP_PROGRAM) ---------
+ *
+ * Instead of running the program here (transform_vertex), clipping and
+ * expanding triangles, hand a back end that runs vertex programs itself the
+ * batch as it came: each unique vertex's attributes once (what fetch_attr
+ * reads, only the inputs the program reads), an index list in the CPU path's
+ * triangle order, the program and the constants. RECOMP_GPU_VSH=0 keeps the
+ * CPU transform for every batch. Programs that write c[] with CXT_WRITE on
+ * change the constants vertex by vertex and stay on the CPU. */
+#define VMAP_BITS 17                    /* twice NV_MAX_INDICES */
+#define VMAP_SIZE (1u << VMAP_BITS)
+
+static struct {
+    float    *attrs;                    /* NV_MAX_INDICES x 16 x vec4 */
+    uint16_t *tris;                     /* 3 x NV_MAX_INDICES */
+    uint16_t *slot;                     /* NV_MAX_INDICES: batch vertex -> attrs row */
+    uint32_t *key, *gen;                /* VMAP_SIZE: index -> row, by generation */
+    uint16_t *row;
+    uint32_t  cur;
+} s_pv;
+
+static int gpu_vsh_enabled(void)
+{
+    static int on = -1;
+
+    if (on < 0) {
+        const char *e = getenv("RECOMP_GPU_VSH");
+        on = !(e && e[0] == '0');
+    }
+    return on;
+}
+
+static int pv_alloc(void)
+{
+    if (s_pv.attrs)
+        return 1;
+    s_pv.attrs = (float *)malloc((size_t)NV_MAX_INDICES * 16 * 4 * sizeof(float));
+    s_pv.tris = (uint16_t *)malloc((size_t)NV_MAX_INDICES * 3 * sizeof(uint16_t));
+    s_pv.slot = (uint16_t *)malloc((size_t)NV_MAX_INDICES * sizeof(uint16_t));
+    s_pv.key = (uint32_t *)malloc(VMAP_SIZE * sizeof(uint32_t));
+    s_pv.gen = (uint32_t *)calloc(VMAP_SIZE, sizeof(uint32_t));
+    s_pv.row = (uint16_t *)malloc(VMAP_SIZE * sizeof(uint16_t));
+    if (!s_pv.attrs || !s_pv.tris || !s_pv.slot || !s_pv.key || !s_pv.gen || !s_pv.row) {
+        free(s_pv.attrs); free(s_pv.tris); free(s_pv.slot);
+        free(s_pv.key); free(s_pv.gen); free(s_pv.row);
+        memset(&s_pv, 0, sizeof s_pv);
+        return 0;
+    }
+    return 1;
+}
+
+static int raster_batch_backend_program(void)
+{
+    Nv2aProgramBatch pb;
+    Nv2aSurface surf;
+    Nv2aRenderState rs;
+    Nv2aPixelState ps;
+    Nv2aTexture tex;
+    Nv2aBatch batch;
+    static float imm[NV2A_VSH_INPUTS][4];
+    uint32_t inputs, streams = 0, nstream = 0, n = s_gpu.idx_count, rows = 0;
+    uint32_t i, a, t = 0;
+    static int no_rc = -1;
+
+    if (!s_backend || !s_backend->draw_program
+        || (s_backend->caps & (NV2A_BACKEND_CAP_PROGRAM | NV2A_BACKEND_CAP_PIXEL))
+               != (NV2A_BACKEND_CAP_PROGRAM | NV2A_BACKEND_CAP_PIXEL)
+        || !gpu_vsh_enabled())
+        return 0;
+    memset(&pb, 0, sizeof pb);
+    pb.ins_count = nv2a_vsh_program(&pb.ins, &pb.hash, &inputs);
+    if (!pb.ins_count || nv2a_vsh_program_writes_constants() || !pv_alloc())
+        return 0;
+
+    /* What each input reads (transform_vertex): an array, else the current
+     * value; an array fetch_attr cannot read gives 0,0,0,1 per vertex. */
+    for (a = 0; a < NV2A_VSH_INPUTS; a++) {
+        const VertexAttr *at = &s_gpu.attr[a];
+        imm[a][0] = imm[a][1] = imm[a][2] = 0.0f;
+        imm[a][3] = 1.0f;
+        if (!(inputs & (1u << a)))
+            continue;
+        if (!at->size)
+            memcpy(imm[a], s_gpu.imm_attr[a], sizeof imm[a]);
+        else if (at->stride) {
+            streams |= 1u << a;
+            nstream++;
+        }
+    }
+
+    /* One row per unique index. DRAW_ARRAYS and inline arrays count up from
+     * their first index: no lookup needed. */
+    for (i = 1; i < n && s_gpu.idx[i] == s_gpu.idx[0] + i; i++)
+        ;
+    if (i == n) {
+        float *o = s_pv.attrs;
+        for (i = 0; i < n; i++) {
+            for (a = 0; a < NV2A_VSH_INPUTS; a++)
+                if (streams & (1u << a)) {
+                    fetch_attr(&s_gpu.attr[a], s_gpu.idx[i], o);
+                    o += 4;
+                }
+            s_pv.slot[i] = (uint16_t)i;
+        }
+        rows = n;
+        goto gathered;
+    }
+    if (++s_pv.cur == 0) {
+        memset(s_pv.gen, 0, VMAP_SIZE * sizeof(uint32_t));
+        s_pv.cur = 1;
+    }
+    for (i = 0; i < n; i++) {
+        uint32_t ix = s_gpu.idx[i];
+        uint32_t h = (ix * 2654435761u) >> (32 - VMAP_BITS);
+        while (s_pv.gen[h] == s_pv.cur && s_pv.key[h] != ix)
+            h = (h + 1) & (VMAP_SIZE - 1);
+        if (s_pv.gen[h] != s_pv.cur) {
+            float *o = s_pv.attrs + (size_t)rows * nstream * 4;
+            s_pv.gen[h] = s_pv.cur;
+            s_pv.key[h] = ix;
+            s_pv.row[h] = (uint16_t)rows;
+            for (a = 0; a < NV2A_VSH_INPUTS; a++)
+                if (streams & (1u << a)) {
+                    fetch_attr(&s_gpu.attr[a], ix, o);
+                    o += 4;
+                }
+            rows++;
+        }
+        s_pv.slot[i] = s_pv.row[h];
+    }
+
+gathered:
+    /* Triangles, as raster_batch_program emits them. */
+#define PV_TRI(x, y, z) do { s_pv.tris[t++] = s_pv.slot[x]; s_pv.tris[t++] = s_pv.slot[y]; \
+                             s_pv.tris[t++] = s_pv.slot[z]; } while (0)
+    switch (s_gpu.prim) {
+    case NV_PRIM_TRIANGLES:
+        for (i = 0; i + 2 < n; i += 3)
+            PV_TRI(i, i + 1, i + 2);
+        break;
+    case NV_PRIM_TRIANGLE_STRIP:
+        for (i = 0; i + 2 < n; i++) {
+            if ((i & 1) && strip_alt_winding())
+                PV_TRI(i + 1, i, i + 2);
+            else
+                PV_TRI(i, i + 1, i + 2);
+        }
+        break;
+    case NV_PRIM_TRIANGLE_FAN:
+    case NV_PRIM_POLYGON:
+        for (i = 1; i + 1 < n; i++)
+            PV_TRI(0, i, i + 1);
+        break;
+    case NV_PRIM_QUADS:
+        for (i = 0; i + 3 < n; i += 4) {
+            PV_TRI(i, i + 1, i + 2);
+            PV_TRI(i, i + 2, i + 3);
+        }
+        break;
+    case NV_PRIM_QUAD_STRIP:
+        for (i = 0; i + 3 < n; i += 2) {
+            PV_TRI(i, i + 1, i + 3);
+            PV_TRI(i, i + 3, i + 2);
+        }
+        break;
+    default:
+        break;
+    }
+#undef PV_TRI
+
+    pb.constants = nv2a_vsh_constants();
+    pb.const_stamp = nv2a_vsh_constant_stamps(&pb.const_serial);
+    pb.attrs = s_pv.attrs;
+    pb.vertex_count = rows;
+    pb.streams = streams;
+    pb.imm = (const float (*)[4])imm;
+    pb.indices = s_pv.tris;
+    pb.index_count = t;
+    pb.aa_sx = s_gpu.aa_sx;
+    pb.aa_sy = s_gpu.aa_sy;
+    pb.fog_enable = s_gpu.fog_enable;
+    pb.fog_mode = s_gpu.fog_mode;
+    pb.fog_param[0] = s_gpu.fog_param[0];
+    pb.fog_param[1] = s_gpu.fog_param[1];
+
+    current_surface(&surf);
+    current_render_state(&rs);
+    if (no_rc < 0)
+        no_rc = getenv("RECOMP_NO_COMBINERS") != NULL;
+    current_pixel_state(&ps, (s_gpu.rc_seen && !no_rc) ? NV2A_SHADE_COMBINERS
+                                                       : NV2A_SHADE_MODULATE, 1);
+    memset(&batch, 0, sizeof batch);
+    batch.state = &rs;
+    batch.pixel = &ps;
+    batch.program = &pb;
+    if (s_gpu.texs[0].valid) {
+        texture_to_backend(&s_gpu.texs[0], &tex);
+        batch.texture = &tex;
+    }
+    if (!t)
+        return 1;                       /* nothing to draw: done all the same */
+    if (!s_backend->draw_program(&surf, &batch))
+        return 0;
+
+    s_gpu.batches_program++;
+    s_gpu.verts_program += n;
+    s_gpu.tris_drawn += t / 3;
+    if (s_gpu.texs[0].valid)
+        note_texture_use();
+    note_drawn();
+    return 1;
+}
+
 static void raster_batch(void)
 {
     uint32_t i;
@@ -4086,6 +4300,8 @@ static void raster_batch(void)
     if (s_gpu.idx_count < 3)
         return;
     if (batch_uses_program() || batch_is_ffp()) {
+        if (batch_uses_program() && raster_batch_backend_program())
+            return;
         raster_batch_program();
         return;
     }

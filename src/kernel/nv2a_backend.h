@@ -28,9 +28,12 @@
  * (src/gpu/nv2a_gl.c is one). Without the flag a back end sees stage 0 and
  * the diffuse colour only, as before.
  *
- * ponytail: vertices still arrive transformed by the CPU (vertex programs
- * run in nv2a_vsh_interp.c). Raw attribute streams plus the program, for a
- * back end that runs vertex programs itself, are the next extension.
+ * A back end that also sets NV2A_BACKEND_CAP_PROGRAM and draw_program runs
+ * vertex programs itself: a batch drawn with a vertex program then arrives
+ * untransformed (Nv2aProgramBatch: the program, the constants with change
+ * stamps, the batch's attributes gathered once per unique vertex, and a
+ * triangle index list), with the same surface, render and pixel state.
+ * Fixed-function and screen-space batches still arrive as triangles.
  */
 #ifndef NV2A_BACKEND_H
 #define NV2A_BACKEND_H
@@ -157,6 +160,44 @@ typedef struct {
     Nv2aTexStage stage[4];
 } Nv2aPixelState;
 
+/* A vertex-program batch for a back end with NV2A_BACKEND_CAP_PROGRAM.
+ *
+ * Program: the instruction words (nv2a_vsh_interp.c encoding) from the start
+ * slot through FINAL; `hash` is equal for equal words. Constants: c[0..191]
+ * as the program reads them; const_stamp[i] is the serial of the last write
+ * to c[i] and const_serial the newest, so a copy synced at serial S needs
+ * exactly the c[i] with const_stamp[i] > S.
+ *
+ * Vertices: `attrs` holds vertex_count vertices, each the attributes in
+ * `streams` (bit a = v[a]) as four floats, in increasing a: what the
+ * executor's own fetch reads (D3DCOLOR as r, g, b, a; absent components
+ * 0, 0, 0, 1). Every other input reads imm[a], its current value. Only
+ * inputs the program reads are streamed. indices: a triangle list into
+ * attrs, in the order and winding the CPU path draws the primitive.
+ *
+ * The program's oPos is in the title's logical pixels: x, y scale by aa_sx,
+ * aa_sy to surface pixels; z is window z; w the clip-space w, +0 meaning 1
+ * (transform_vertex). The executor clips at w > 0 and at the near plane
+ * z >= state->depth_min (SET_CLIP_MIN). fog_*: the fog unit's registers;
+ * the fog factor from oFog.x is fog_factor() in nv2a_pb_exec.c. */
+typedef struct {
+    const uint32_t (*ins)[4];
+    uint32_t        ins_count;
+    uint64_t        hash;
+    const float    (*constants)[4];
+    const uint64_t *const_stamp;
+    uint64_t        const_serial;
+    const float    *attrs;
+    uint32_t        vertex_count;
+    uint32_t        streams;
+    const float    (*imm)[4];       /* [16] */
+    const uint16_t *indices;
+    uint32_t        index_count;
+    float           aa_sx, aa_sy;
+    uint32_t        fog_enable, fog_mode;
+    float           fog_param[2];
+} Nv2aProgramBatch;
+
 typedef struct {
     const Nv2aVertex  *vertices;    /* triangle list: count is a multiple of 3 */
     uint32_t           count;
@@ -166,6 +207,9 @@ typedef struct {
      * vertices[], and the pixel state. */
     const Nv2aVertexFull  *full;
     const Nv2aPixelState  *pixel;
+    /* draw_program only (NULL in draw()): vertices and full are NULL then,
+     * count is 0, and pixel is always set. */
+    const Nv2aProgramBatch *program;
 } Nv2aBatch;
 
 #define NV2A_BACKEND_CAP_PIXEL 0x1u
@@ -174,6 +218,7 @@ typedef struct {
  * their first two vertices swapped, as RECOMP_STRIP_ALT_WINDING does), as the
  * hardware assembles strips. Without it strips arrive as (i, i+1, i+2). */
 #define NV2A_BACKEND_CAP_CULL  0x2u
+#define NV2A_BACKEND_CAP_PROGRAM 0x4u   /* with CAP_PIXEL and draw_program */
 
 typedef struct {
     /* flags: CLEAR_SURFACE bits (Z 0x1, stencil 0x2, colour 0xF0).
@@ -201,6 +246,10 @@ typedef struct {
      * RECOMP_GPU_ZPASS=sync uses zpass_read instead. */
     uint32_t (*zpass_end)(void);
     int (*zpass_resolve)(uint32_t ticket, int block, uint32_t *count);
+    /* NV2A_BACKEND_CAP_PROGRAM: draw a vertex-program batch (b->program).
+     * Return 0 to decline it (the executor then transforms on the CPU and
+     * calls draw() with triangles); RECOMP_GPU_VSH=0 never calls it. */
+    int (*draw_program)(const Nv2aSurface *s, const Nv2aBatch *b);
 } Nv2aBackend;
 
 /* The NV2A poll loop calls this when a tick found nothing new to walk
