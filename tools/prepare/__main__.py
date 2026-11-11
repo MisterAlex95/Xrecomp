@@ -5,7 +5,7 @@ Prepare an Xbox title from your own copy of the game.
 
 SOURCE is a disc image (.iso / .xiso), a folder holding default.xbe (the
 extracted disc), or a default.xbe. Steps, each skipped when its output is
-already there for this XBE and this toolkit:
+already there for this XBE, this toolkit and this title profile:
 
   1. find default.xbe (out of the image if needed) and read its title ID
   2. the analysis pipeline: xbe_parser, disasm, func_id, abi_analysis
@@ -132,12 +132,36 @@ def unpack_image(image, dest):
                 last = pct
 
 
+def profile_digest(profile):
+    """What the analysis and the lift depend on beyond the XBE and the toolkit
+    commit: the profile's files (seed_functions and exclude_manual name some of
+    them). Both the desktop and the Android stamps hold it."""
+    h = hashlib.sha256()
+    if profile:
+        d = profile["dir"]
+        for fn in sorted(os.listdir(d)):
+            p = os.path.join(d, fn)
+            if os.path.isfile(p):
+                h.update(fn.encode() + b"\0")
+                with open(p, "rb") as f:
+                    h.update(f.read())
+    return h.hexdigest()
+
+
 def read_stamp(path):
     try:
         with open(path) as f:
             return json.load(f)
     except (OSError, ValueError):
         return {}
+
+
+def c_text(s):
+    """`s` safe inside a C string literal that is also a printf format, and
+    inside a comment."""
+    s = "".join(ch for ch in s if " " <= ch <= "~")
+    return (s.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%")
+             .replace("*/", "* /").replace("??", "?\\?"))
 
 
 def env_force_header(tid, env):
@@ -158,7 +182,8 @@ def env_force_header(tid, env):
 
 def assemble_project(proj, profile, info):
     """templates/new-game + the profile's .c files in src/title/, and
-    src/title/env_force.h when the profile has env_force."""
+    src/title/env_force.h when the profile has env_force. main.c gets the
+    title's name and entry point in place of the template's placeholders."""
     from tools.prepare import pack
     env = pack.env_force_of(profile)
     os.makedirs(os.path.join(proj, "src", "recomp", "gen"), exist_ok=True)
@@ -169,8 +194,16 @@ def assemble_project(proj, profile, info):
         f.write(cm)
     with open(os.path.join(TEMPLATE, "src", "main.c")) as f:
         main = f.read()
+    title = c_text((profile or {}).get("name") or info.get("title") or name)
+    entry = int(info.get("entry_point", "0"), 16)
+    tid = int(info.get("title_id", "0"), 16)
     for old, new in (('"game\\\\Your Game Title\\\\default.xbe"', '"game/default.xbe"'),
-                     ('"game\\\\Your Game Title"', '"game"')):
+                     ('"game\\\\Your Game Title"', '"game"'),
+                     ("#define YOUR_GAME_ENTRY_POINT   0x00000000",
+                      "#define YOUR_GAME_ENTRY_POINT   0x%08X" % entry),
+                     (" *   Title ID:    0x00000000", " *   Title ID:    0x%08X" % tid),
+                     (" *   Entry point: 0x00000000", " *   Entry point: 0x%08X" % entry),
+                     ("YOUR_GAME_NAME", title)):
         main = main.replace(old, new)
     with open(os.path.join(proj, "src", "main.c"), "w") as f:
         f.write(main)
@@ -261,8 +294,10 @@ def main(argv=None):
 
     stamp_path = os.path.join(work, "stamp.json")
     stamp = {} if a.force else read_stamp(stamp_path)
-    want = {"xbe": sha256(xbe), "toolkit": toolkit_version()}
-    same = stamp.get("xbe") == want["xbe"] and stamp.get("toolkit") == want["toolkit"]
+    # The profile counts too: its seeds go to the disassembler, its
+    # exclude_manual to the lift.
+    want = {"xbe": sha256(xbe), "toolkit": toolkit_version(), "profile": profile_digest(profile)}
+    same = all(stamp.get(k) == v for k, v in want.items())
     an = os.path.join(work, "analysis")
     xjson = os.path.splitext(xbe)[0] + "_analysis.json"
 

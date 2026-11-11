@@ -143,7 +143,7 @@ class Run:
             for s in self.a.extra_src:
                 shutil.copy(s, os.path.join(extra, os.path.basename(s)))
         gen = os.path.join(proj, "src", "recomp", "gen")
-        key = profile_digest(self.profile)
+        key = self.m.profile_digest(self.profile)
         if self.stamp.get("lift") == key and os.listdir(gen):
             self.rep.progress(3, 100, "lift up to date (%d C files)" % len(os.listdir(gen)))
         else:
@@ -220,21 +220,6 @@ class Run:
             self.rep.progress(5, 100, "pack %s, %d bytes" % (self.tid, meta["lib_size"]))
         cc.prune(os.path.join(self.work, "obj"), self.objects)
         return final
-
-
-def profile_digest(profile):
-    """What the lift depends on beyond the XBE and the toolkit commit: the
-    profile's files (exclude_manual names one of them)."""
-    h = hashlib.sha256()
-    if profile:
-        d = profile["dir"]
-        for fn in sorted(os.listdir(d)):
-            p = os.path.join(d, fn)
-            if os.path.isfile(p):
-                h.update(fn.encode() + b"\0")
-                with open(p, "rb") as f:
-                    h.update(f.read())
-    return h.hexdigest()
 
 
 def run(a, host):
