@@ -23,6 +23,7 @@
 #include "apu.h"
 #include "apu_xaudio2.h"
 #include "apu_wav.h"
+#include "apu_volume.h"
 #include "fpconv.h"
 #include "../kernel/xbox_memory_layout.h"   /* XBOX_WORKER_STACK_TOP */
 
@@ -913,6 +914,9 @@ void mcpx_apu_monitor_frame(MCPXAPUState *d)
      * so it stays out of the dump too. */
     if (!(xa2_is_active() && d->pace_stalled))
         apu_wav_write((const int16_t *)period, MIXER_FRAME_SAMPLES);
+
+    /* The player's volume (apu_volume.h), after the capture: it keeps the raw mix. */
+    xbox_ApuApplyOutputVolume((int16_t *)period, MIXER_FRAME_SAMPLES * 2);
 
     if (xa2_is_active()) {
         if (!d->pace_stalled) {

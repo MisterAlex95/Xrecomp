@@ -282,7 +282,7 @@
     <string name="HOME_TITLE">Home</string>
     <string name="HOME_TITLE_ID">Title ID %1$s</string>
     <string name="CHIP_RUNNING">Running</string>
-    <string name="HOME_LEAD_READY">In the game, press Back twice to quit. Saves stay on this device.</string>
+    <string name="HOME_LEAD_READY">In the game, Back opens the game menu (settings, quit). Saves stay on this device.</string>
     <string name="HOME_LEAD_PREPARE">Made once, here on the device, from your own copy: then Play starts at once.</string>
     <string name="HOME_LEAD_PREPARING">Preparing your game. You can leave the app: it carries on in the background.</string>
     <string name="HOME_LEAD_FAILED">The preparation stopped on an error. See why, then retry from where it stopped.</string>
@@ -339,7 +339,7 @@
     <string name="PAD_LSTICK">L stick · L3</string>
     <string name="PAD_RSTICK">R stick · R3</string>
     <string name="PAD_FACE">A B X Y</string>
-    <string name="PAD_SCREEN">Back twice: quit</string>
+    <string name="PAD_SCREEN">Back: menu</string>
     <string name="CTL_FACE">A B X Y</string>
     <string name="CTL_FACE_X">A B X Y</string>
     <string name="CTL_L1">L1</string>
@@ -356,6 +356,4 @@
     <string name="CTL_DPAD_X">D-pad, thumbsticks</string>
     <string name="CTL_STICKS">L3 · R3</string>
     <string name="CTL_STICKS_X">Thumbstick buttons (press a stick)</string>
-    <string name="CTL_QUIT">Back ◁ twice</string>
-    <string name="CTL_QUIT_X">Quit the game</string>
 </resources>

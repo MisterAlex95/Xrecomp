@@ -274,7 +274,7 @@
     <string name="HOME_TITLE">Accueil</string>
     <string name="HOME_TITLE_ID">ID du titre %1$s</string>
     <string name="CHIP_RUNNING">En cours</string>
-    <string name="HOME_LEAD_READY">En jeu, appuyez deux fois sur Retour pour quitter. Les sauvegardes restent sur l\'appareil.</string>
+    <string name="HOME_LEAD_READY">En jeu, Retour ouvre le menu du jeu (réglages, quitter). Les sauvegardes restent sur l\'appareil.</string>
     <string name="HOME_LEAD_PREPARE">Préparé une fois, ici sur l\'appareil, à partir de votre copie : ensuite Jouer démarre tout de suite.</string>
     <string name="HOME_LEAD_PREPARING">Préparation de votre jeu. Vous pouvez quitter l\'application : elle continue en arrière-plan.</string>
     <string name="HOME_LEAD_FAILED">La préparation s\'est arrêtée sur une erreur. Voyez pourquoi, puis reprenez là où elle s\'est arrêtée.</string>
@@ -331,7 +331,7 @@
     <string name="PAD_LSTICK">Stick G · L3</string>
     <string name="PAD_RSTICK">Stick D · R3</string>
     <string name="PAD_FACE">A B X Y</string>
-    <string name="PAD_SCREEN">Retour deux fois : quitter</string>
+    <string name="PAD_SCREEN">Retour : menu</string>
     <string name="CTL_FACE">A B X Y</string>
     <string name="CTL_FACE_X">A B X Y</string>
     <string name="CTL_L1">L1</string>
@@ -348,6 +348,4 @@
     <string name="CTL_DPAD_X">Croix, sticks</string>
     <string name="CTL_STICKS">L3 · R3</string>
     <string name="CTL_STICKS_X">Boutons des sticks (appui)</string>
-    <string name="CTL_QUIT">Retour ◁ deux fois</string>
-    <string name="CTL_QUIT_X">Quitter le jeu</string>
 </resources>

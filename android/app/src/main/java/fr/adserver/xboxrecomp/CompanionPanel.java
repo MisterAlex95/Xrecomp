@@ -11,7 +11,8 @@ import android.graphics.RectF;
  * <pre>
  *   fps · frame time                 battery                     thermal
  *   [ Back   ]   [Launcher] [Screenshot] [Perf ]   [ White ]
- *   [ Start  ]   [Share log] [  Quit (hold)    ]   [ Black ]
+ *   [ Start  ]   [Share log] [  Menu  ] [ Quit ]   [ Black ]
+ *                                        (hold)
  *                 (perf details when Perf is on)
  *                 (nothing bottom-centre: palms)
  * </pre>
@@ -40,7 +41,7 @@ final class CompanionPanel extends PanelView {
     static final int XB_START = 0x0010, XB_BACK = 0x0020, XB_BLACK = 4, XB_WHITE = 5;
 
     static final int BACK = 1, START = 2, WHITE = 3, BLACK = 4, LAUNCHER = 10, SCREENSHOT = 11, PERF = 12,
-                     SHARE_LOG = 13, QUIT = 14;
+                     SHARE_LOG = 13, QUIT = 14, MENU = 15;
 
     static final long DIM_MS = 10_000, FLASH_MS = 3000;
 
@@ -82,7 +83,9 @@ final class CompanionPanel extends PanelView {
                                c.getString(R.string.PANEL_PERF), null));
         buttons.add(new Button(SHARE_LOG, Kind.TAP, 290, 425, 496, 675, PanelIcons.Icon.SHARE,
                                c.getString(R.string.PANEL_SHARE_LOG), null));
-        buttons.add(new Button(QUIT, Kind.HOLD, 517, 425, 950, 675, PanelIcons.Icon.POWER,
+        buttons.add(new Button(MENU, Kind.TAP, 517, 425, 723, 675, PanelIcons.Icon.MENU,
+                               c.getString(R.string.PANEL_MENU), null));
+        buttons.add(new Button(QUIT, Kind.HOLD, 744, 425, 950, 675, PanelIcons.Icon.POWER,
                                c.getString(R.string.PANEL_QUIT), c.getString(R.string.PANEL_HOLD)));
     }
 

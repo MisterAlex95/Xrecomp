@@ -30,8 +30,9 @@
  * lifted code cannot be stopped mid-flight. atexit handlers still run, except
  * on Android, where recomp_quit() flushes the logs and _exit()s instead
  * (recomp_quit.h). Also on Android, a guest that returns leaves the window
- * up on its last frame until Back is pressed twice: an app does not vanish
- * on its own, and the lifecycle keeps working (XBA-52).
+ * up on its last frame until the player quits (the in-game menu, or Back
+ * twice where nothing above SDL takes Back): an app does not vanish on its
+ * own, and the lifecycle keeps working (XBA-52).
  *
  * Knobs: RECOMP_PRESENT_VSYNC=0 presents without waiting for the display;
  * RECOMP_WINDOW_SCALE=<n> sizes the window (default 2);
@@ -66,7 +67,7 @@ extern ptrdiff_t xbox_GetMemoryOffset(void);
 #define TEXT_QUIT_PROMPT "Press Back again to quit"
 /* The title ended on its own (a test title like the stub; a game does not):
  * the screen stays as it was, so say it there and not only in logcat. */
-#define TEXT_GUEST_DONE "The title finished (code %d). Press Back twice to quit."
+#define TEXT_GUEST_DONE "The title finished (code %d). Press Back for the menu (Quit)."
 
 /* ── Handoff: three slots, one each for writer, reader and the ready frame ── */
 
@@ -398,7 +399,9 @@ int xbox_HostWindowMain(int (*guest_main)(void))
 
     SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "nearest");
 #ifdef __ANDROID__
-    /* Back is the window's: once shows QUIT_PROMPT, twice within 2 s quits. */
+    /* Back is trapped. In the app ShellActivity takes it first (it opens the
+     * in-game menu, docs/android/app-shell.md « In-game menu »), so the
+     * Back-twice path below only runs where nothing above SDL takes it. */
     SDL_SetHint(SDL_HINT_ANDROID_TRAP_BACK_BUTTON, "1");
 #endif
     if (SDL_Init(FBWIN_SDL_SUBSYSTEMS) != 0) {
@@ -482,7 +485,7 @@ int xbox_HostWindowMain(int (*guest_main)(void))
                     quit = 1;
                 else if (ev.type == s_guest_done_event) {
                     if (stay_after_guest) {
-                        fprintf(stderr, "  [FBWIN] guest returned (%d); Back twice to quit\n",
+                        fprintf(stderr, "  [FBWIN] guest returned (%d); the window stays\n",
                                 s_guest_rc);
 #ifdef __ANDROID__
                         char done_msg[96];
@@ -592,7 +595,7 @@ int xbox_HostWindowMain(int (*guest_main)(void))
      * clear and returns. */
     SDL_DelEventWatch(lifecycle_watch, NULL);
     __atomic_store_n(&s_running, 0, __ATOMIC_SEQ_CST);
-    recomp_lifecycle_resume();
+    recomp_lifecycle_resume_for(RECOMP_HOLD_ALL);   /* background and menu */
     while (__atomic_load_n(&s_in_present, __ATOMIC_SEQ_CST))
         sched_yield();
     fprintf(stderr, "  [FBWIN] %s\n", quit ? "window closed" : "guest returned");
