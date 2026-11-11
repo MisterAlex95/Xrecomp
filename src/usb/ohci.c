@@ -1187,6 +1187,8 @@ static DWORD WINAPI ohci_thread(LPVOID unused)
     unsigned held_off = 0;
     int      held_off_warned = 0, held_off_forced = 0, gated = 0;
     int      no_report_warned = 0;
+    unsigned long mie_off_since = 0;    /* GetTickCount when MIE went off */
+    int      mie_warned = 0, mie_warnings = 0;
     unsigned last_ack = 0;
     unsigned first_port = 0, settle = 0;
 
@@ -1218,8 +1220,68 @@ static DWORD WINAPI ohci_thread(LPVOID unused)
                 break;
             continue;
         }
-        if (!(enable & INTR_MIE))
+        /* A pad that stopped reporting, said once. Input dying mid-session
+         * looks the same from the title whatever the cause -- the driver
+         * stopped re-arming, the interrupt ED halted, a done queue was lost --
+         * so the line carries the endpoint's state at the moment it is
+         * noticed. Only after a first report: a title that has not opened
+         * its pad yet is not a pad that stopped. Before the MIE check below:
+         * a driver whose DPC never came back leaves MIE masked, and that is
+         * the case most worth a line. */
+        if (s_last_report_ms && !no_report_warned
+            && (unsigned long)GetTickCount() - s_last_report_ms >= 5000) {
+            uint32_t e = s_last_report_ed;
+            no_report_warned = 1;
+            fprintf(stderr, "  [OHCI%d] WARNING: pad plugged but no input "
+                    "report completed for 5 s (ED %08X info=%08X head=%08X "
+                    "tail=%08X; ien=%08X ists=%08X)\n", hc->index, e, rd32(e),
+                    rd32(e + 8), rd32(e + 4), enable,
+                    hc->reg[HcInterruptStatus / 4]);
+            fflush(stderr);
+        }
+
+        /* MIE masked for long with a pad plugged. The driver's ISR masks it
+         * and its DPC unmasks it once the done queue is processed (Fable's
+         * sub_008757CD / sub_00875EA1), so a mask that outlives a couple of
+         * seconds is a DPC that never ran or never returned -- and nothing
+         * below runs while it lasts: no walk, no stats, no frame clock. Say
+         * so, naming the deferred routine running now if there is one. */
+        if (!(enable & INTR_MIE)) {
+            unsigned long now = (unsigned long)GetTickCount();
+            if (!plugged) {
+                /* bring-up: not ours to judge */
+            } else if (!mie_off_since) {
+                mie_off_since = now ? now : 1;
+            } else if (!mie_warned && now - mie_off_since >= 2000
+                       && mie_warnings < 5) {
+                uint32_t routine = 0;
+                unsigned long ran = 0;
+                mie_warned = 1;
+                mie_warnings++;
+                if (xbox_DpcRunning(&routine, &ran))
+                    fprintf(stderr, "  [OHCI%d] WARNING: interrupts masked "
+                            "(MIE off) for %lu ms with a pad plugged; DPC "
+                            "0x%08X running for %lu ms (ists=%08X)\n",
+                            hc->index, now - mie_off_since, routine, ran,
+                            hc->reg[HcInterruptStatus / 4]);
+                else
+                    fprintf(stderr, "  [OHCI%d] WARNING: interrupts masked "
+                            "(MIE off) for %lu ms with a pad plugged; no DPC "
+                            "running (DPCs pending: %d, ists=%08X)\n",
+                            hc->index, now - mie_off_since, xbox_DpcPending(),
+                            hc->reg[HcInterruptStatus / 4]);
+                fflush(stderr);
+            }
             continue;
+        }
+        if (mie_warned) {
+            fprintf(stderr, "  [OHCI%d] interrupts unmasked again after "
+                    "%lu ms\n", hc->index,
+                    (unsigned long)GetTickCount() - mie_off_since);
+            fflush(stderr);
+        }
+        mie_off_since = 0;
+        mie_warned = 0;
 
         /* Plug the device in once, after the driver is running and listening.
          * Presenting it earlier does not work: the driver clears the connect
@@ -1350,24 +1412,6 @@ static DWORD WINAPI ohci_thread(LPVOID unused)
          * what they feel, and both are closer to right this way than a
          * counter that never moves. */
         ohci_frame_advance(hc, OHCI_TICK_MS);
-
-        /* A pad that stopped reporting, said once. Input dying mid-session
-         * looks the same from the title whatever the cause -- the driver
-         * stopped re-arming, the interrupt ED halted, a done queue was lost --
-         * so the line carries the endpoint's state at the moment it is
-         * noticed. Only after a first report: a title that has not opened
-         * its pad yet is not a pad that stopped. */
-        if (s_last_report_ms && !no_report_warned
-            && (unsigned long)GetTickCount() - s_last_report_ms >= 5000) {
-            uint32_t e = s_last_report_ed;
-            no_report_warned = 1;
-            fprintf(stderr, "  [OHCI%d] WARNING: pad plugged but no input "
-                    "report completed for 5 s (ED %08X info=%08X head=%08X "
-                    "tail=%08X; ists=%08X)\n", hc->index, e, rd32(e),
-                    rd32(e + 8), rd32(e + 4),
-                    hc->reg[HcInterruptStatus / 4]);
-            fflush(stderr);
-        }
 
         /* Level-triggered, which is what OHCI is: while an enabled source is
          * set, the line is asserted. The handler clears the status bit, so

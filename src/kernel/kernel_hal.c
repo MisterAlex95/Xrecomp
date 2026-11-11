@@ -796,6 +796,21 @@ void xbox_IrqReport(void)
     int i;
 
     xbox_IrqStatsGet(&s, 1);
+    /* Gate off, once: DPCs ran beside a thread at DISPATCH_LEVEL. Harmless
+     * for a driver with its own spinlocks, corrupting for one that locks by
+     * raising IRQL alone (XAPI's USB stack: Fable lost its pad that way). */
+    if (!xbox_DispatchGateOn()) {
+        static int said;
+        long ov = xbox_DpcOverlapCount();
+        if (ov && !said) {
+            said = 1;
+            fprintf(stderr, "  [IRQ] gate off: %ld DPC(s) started while a"
+                    " guest thread was at DISPATCH_LEVEL; a driver that"
+                    " locks by raising IRQL races its DPC (try"
+                    " RECOMP_DISPATCH_GATE=1)\n", ov);
+            fflush(stderr);
+        }
+    }
     if (!xbox_IrqSafePointsOn()) {
         if (s.ungated[0] | s.ungated[1] | s.ungated[2]) {
             fprintf(stderr, "  [IRQ] ungated ISRs beside the gate holder"

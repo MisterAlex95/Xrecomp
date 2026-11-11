@@ -2649,10 +2649,41 @@ static void bridge_HalReadSMCTrayState(void)
  *
  * Returns 1 if the routine was found and called.
  */
+/* The DPC routine running now and since when (GetTickCount), for the device
+ * models' stall warnings: a deferred routine that never returns stops every
+ * other DPC, and the model that notices (its driver's ISR masked it and the
+ * DPC never unmasked it) can say which routine is stuck. One slot: with the
+ * gate on DPCs never run two at a time; with it off it names the latest. */
+static volatile uint32_t s_dpc_now_routine;
+static volatile LONG s_dpc_now_since;
+static volatile LONG s_dpc_now_tid;
+/* Gate off: DPCs that started while another thread was at DISPATCH_LEVEL.
+ * A driver that locks by raising IRQL (XAPI's USB stack does) is racing its
+ * own DPC every time this moves. */
+static volatile LONG s_dpc_overlaps;
+
+int xbox_DpcRunning(uint32_t *routine, unsigned long *ms)
+{
+    uint32_t r = s_dpc_now_routine;
+    LONG since = InterlockedCompareExchange(&s_dpc_now_since, 0, 0);
+    if (!r || r != s_dpc_now_routine)
+        return 0;
+    if (routine) *routine = r;
+    if (ms) *ms = (unsigned long)GetTickCount() - (unsigned long)since;
+    return 1;
+}
+
+long xbox_DpcOverlapCount(void)
+{
+    return (long)InterlockedCompareExchange(&s_dpc_overlaps, 0, 0);
+}
+
 static int kernel_run_dpc(uint32_t dpc_va, uint32_t arg1, uint32_t arg2)
 {
     uint32_t routine, context;
     recomp_func_t fn;
+    uint32_t prev_routine;
+    LONG prev_since, prev_tid, tid;
 
     if (!dpc_va)
         return 0;
@@ -2681,7 +2712,23 @@ static int kernel_run_dpc(uint32_t dpc_va, uint32_t arg1, uint32_t arg2)
         g_esp -= 4; BRIDGE_MEM32(g_esp) = context;
         g_esp -= 4; BRIDGE_MEM32(g_esp) = dpc_va;
         g_esp -= 4; BRIDGE_MEM32(g_esp) = 0;
+        if (!xbox_DispatchGateOn()
+            && xbox_IrqlRaisedCount() > (xbox_IrqlCurrent() >= 2 ? 1 : 0))
+            InterlockedIncrement(&s_dpc_overlaps);
+        /* Nested (a DPC run from inside one) puts the outer one back. */
+        prev_routine = s_dpc_now_routine;
+        prev_since = s_dpc_now_since;
+        prev_tid = s_dpc_now_tid;
+        tid = (LONG)GetCurrentThreadId();
+        InterlockedExchange(&s_dpc_now_since, (LONG)GetTickCount());
+        InterlockedExchange(&s_dpc_now_tid, tid);
+        s_dpc_now_routine = routine;
         { int _irql = xbox_IrqlEnterInterrupt(2); fn(); xbox_IrqlLeaveInterrupt(_irql); }
+        if (InterlockedCompareExchange(&s_dpc_now_tid, 0, 0) == tid) {
+            s_dpc_now_routine = prev_routine;
+            InterlockedExchange(&s_dpc_now_since, prev_since);
+            InterlockedExchange(&s_dpc_now_tid, prev_tid);
+        }
         callback_regs_restore(&saved, 0);
     }
     return 1;

@@ -957,6 +957,11 @@ int     xbox_DpcDrainHere(void);        /* the caller holds the gate; DPCs run *
 int     xbox_DpcDrainTimer(int *ran);
 void    xbox_DpcMarkGuestThread(void);  /* this thread runs guest code */
 int     xbox_DpcOnRaise(void);  /* gate on and RECOMP_DPC_ON_RAISE not 0 */
+/* The deferred routine running now (1) and for how many ms, for stall
+ * warnings; 0 when none is. */
+int     xbox_DpcRunning(uint32_t *routine, unsigned long *ms);
+/* Gate off: DPCs that started while another thread was at DISPATCH_LEVEL. */
+long    xbox_DpcOverlapCount(void);
 
 typedef struct {
     long posted[XBOX_IRQ_LINES];       /* posts that found the gate held */
