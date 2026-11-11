@@ -1676,14 +1676,12 @@ static int nv2a_ack_wanted(volatile uint32_t *regs, uint32_t put_seen)
  * A kick that lands in an idle period waits one step (tens of microseconds,
  * more on a loaded host) more than before.
  *
- * Off by default (RECOMP_ACK_IDLE_US=0, the bare yield) until the segment
- * scan follows jumps: today it learns the ring's end from the highest PUT it
- * has seen, and a thread that sees fewer PUTs loses more commands at a wrap.
- * With RECOMP_ACK_IDLE_US=250 Fable stopped at 0 flips in most starts (GPU
- * semaphore releases lost, D3D waiting in sub_00855260); with the
- * jump-following prototype of the scan it started every time. 250 is the
- * intended value then. Windows keeps the yield: its sleeps are a millisecond
- * or more. */
+ * Default 250 us (RECOMP_ACK_IDLE_US=0 restores the bare yield). Before the
+ * segment scan followed jumps it learnt the ring's end from the highest PUT
+ * it had seen, so a thread that saw fewer PUTs lost commands at a wrap and
+ * Fable stopped at 0 flips in most starts; with the jump-following scan it
+ * started 6 of 6. Windows keeps the yield: its sleeps are a millisecond or
+ * more. */
 #define NV2A_ACK_SPIN_NS  (2u * 1000u * 1000u)
 #define NV2A_ACK_STEP_US  50
 static void nv2a_ack_wait(volatile uint32_t *regs, int flip_held)
@@ -1701,7 +1699,7 @@ static void nv2a_ack_wait(volatile uint32_t *regs, int flip_held)
 
     if (idle_us < 0) {
         const char *e = getenv("RECOMP_ACK_IDLE_US");
-        idle_us = e ? atoi(e) : 0;
+        idle_us = e ? atoi(e) : 250;
         if (idle_us < 0) idle_us = 0;
         if (idle_us > 20000) idle_us = 20000;
     }

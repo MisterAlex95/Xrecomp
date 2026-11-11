@@ -111,7 +111,7 @@ The executor is itself opt-in: set `RECOMP_PB_EXEC=1` to execute the pushbuffer.
 | `RECOMP_NO_COMBINERS` | off | Skips the register combiners. | `nv2a_pb_exec.c` |
 | `RECOMP_NO_VSH` | off | Skips vertex programs. | `nv2a_pb_exec.c` |
 | `RECOMP_RASTER_THREADS=N` | auto | Threads drawing (and shading vertex programs) for the software rasteriser, the executor thread included, on Windows and POSIX. Auto: online cores − 4 on desktop; on Android the cores the runtime may run on (the fast cluster under `RECOMP_BIG_CORES`) − 1. | `nv2a_pb_exec.c` |
-| `RECOMP_ACK_IDLE_US=N` | 0 | POSIX: with nothing submitted, the NV2A ack thread sleeps in 50 us steps for up to N us (watching PUT and the busy bits) instead of yielding in a loop. Off until the segment scan follows jumps (the ring-wrap heuristic loses commands when fewer PUTs are seen); 250 then. | `xbox_memory_layout.c` |
+| `RECOMP_ACK_IDLE_US=N` | 250 | POSIX: with nothing submitted, the NV2A ack thread sleeps in 50 us steps for up to N us (watching PUT and the busy bits) instead of yielding in a loop. 0 restores the bare yield. | `xbox_memory_layout.c` |
 | `RECOMP_RASTER_SPIN_US=N` | 20 | POSIX: how long an idle rasteriser worker watches for the next job before it parks (`0`: park at once). The executor hands batches over back to back, and a wake costs tens of microseconds. | `nv2a_pb_exec.c` |
 | `RECOMP_VSH_POOL=0` | on | Shades every vertex-program batch on the executor thread instead of splitting batches of 192+ vertices across the rasteriser's worker threads (same output either way). | `nv2a_pb_exec.c` |
 | `RECOMP_TEX_BILINEAR=1` | off | CPU rasteriser blends the four nearest texels instead of taking the nearest. | `nv2a_pb_exec.c` |
