@@ -97,6 +97,12 @@ public class LauncherActivity extends Activity {
      * is dropped and Home offers Prepare again.
      */
     static final String EXTRA_BAD_PACK = "fr.adserver.xboxrecomp.BAD_PACK";
+    /**
+     * Sent by ShellActivity when the title quick-rebooted into itself (HalReturnToFirmware after XLaunchNewImage of
+     * its own default.xbe, e.g. Fable's Pause, Quit): end the game's process and start the game activity again. The
+     * launch data waits in the save dir (kernel_reboot.c); the play session goes on. Explicit intents only.
+     */
+    static final String ACTION_RESTART_GAME = "fr.adserver.xboxrecomp.RESTART_GAME";
 
     private static final int REQ_TREE = 1;
     private static final int REQ_ISO = 2;
@@ -218,6 +224,10 @@ public class LauncherActivity extends Activity {
 
         Intent in = getIntent();
         String action = in.getAction();
+        if (ACTION_RESTART_GAME.equals(action) && savedInstanceState == null) {
+            restartGame();
+            return;
+        }
         boolean change = ACTION_CHOOSE_GAME.equals(action);
         boolean showLauncher = ACTION_SHOW_LAUNCHER.equals(action);
         String noData = in.getStringExtra(EXTRA_NO_GAME_DATA);
@@ -2605,6 +2615,20 @@ public class LauncherActivity extends Activity {
             i.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TASK);
         startActivity(i);
         finish();
+    }
+
+    /**
+     * ACTION_RESTART_GAME: the runtime cannot start a title twice in one process (it maps its memory once), so the
+     * game's process is ended here and ShellActivity starts in a new one, which takes the launch data back. Nothing
+     * is shown and the play session is not closed: to the player it is the game going back to its own menu.
+     */
+    private void restartGame() {
+        Log.i(TAG, "launcher: the game asked for a restart (quick reboot)");
+        endRunningGame();
+        startActivity(new Intent(this, ShellActivity.class)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK));
+        finish();
+        overridePendingTransition(0, 0);
     }
 
     /** A new game was checked and remembered: end the old one's process, then HOME with Play focused. */

@@ -922,6 +922,25 @@ missing-file summary), `xboxrecomp: clean exit`, `fflush` of stdout and stderr, 
 not run under them. The other atexit reports (`RECOMP_PROFILE`, the ICALL feedback dump, a WAV capture) are desktop
 diagnostics and are skipped on Android. On desktop hosts `recomp_quit` is `exit()`, as before.
 
+### Quick reboot
+
+A title that quick-reboots into its own `default.xbe` (`HalReturnToFirmware(2)` after `XLaunchNewImage`; Fable's
+Pause → Quit → Confirm, which goes back to its main menu) is restarted, not ended
+([docs/runtime/README.md](../runtime/README.md), « Quick reboot »). The kernel writes the launch data to
+`<internal files dir>/save/launch_data.bin` and calls the restart handler, which `shell_main.c` sets before the title
+starts (`restart_via_launcher`): it calls `ShellActivity.restartGame` through JNI from the guest thread, which sends
+`LauncherActivity` the explicit intent `fr.adserver.xboxrecomp.RESTART_GAME`. The launcher, in its own `:launcher`
+process, does what it already does after a new game choice: `endRunningGame()` (`Process.killProcess` on the main
+process, waiting at most 2 s), then starts `ShellActivity` with `NEW_TASK | CLEAR_TASK` in a new main process, and
+finishes without showing anything; the play session stays open. A new process is needed because the runtime maps its
+memory once per process. The new process's kernel takes the launch data back, and the title starts where it asked to
+(Fable: its main menu, no logos). The native side waits to be ended; if it is still alive after 10 s it exits by itself
+(`recomp_quit(0)`), leaving the launch data for the next start. If the JNI call fails, the title exits as before.
+Logcat: `[KERNEL] quick reboot: launch data in …`, `xboxrecomp: quick reboot: launcher asked to restart the game`,
+`shell: quick reboot, asking the launcher to restart the game`, `launcher: the game asked for a restart (quick
+reboot)`, `launcher: ending the running game (pid …)`, then the new process's `Launch data: quick reboot page at …`.
+Past 3 restarts in 30 s the kernel refuses and the title exits.
+
 ### Last lines before a crash
 
 stdout and stderr reach logcat through pipes read by two pump threads (`src/platform/android_log.c`); a line still in
