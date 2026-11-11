@@ -4706,9 +4706,10 @@ void nv2a_pb_exec_walk_begin(void)
  * time, and the ack loop does not poll an empty ring meanwhile. Absolute,
  * not "1/cap after this flip": a sleep that wakes late (macOS wakes an
  * ordinary thread's nanosleep ms late) shortens the next one, so the average
- * holds at the cap without spinning. A frame later than a whole period
- * restarts the schedule rather than letting the next frames run uncapped to
- * catch up.
+ * holds at the cap without spinning. A frame later than a whole period is
+ * not held at all (its slot is the flip itself) and restarts the schedule
+ * from there, rather than letting the next frames run uncapped to catch up
+ * or sleeping a period after a frame that was already slow.
  *
  * Independent of RECOMP_FLIP_PACING (the flip hold, guest vblank clock),
  * which still applies after. Default 60 on macOS and Android, off elsewhere
@@ -4764,12 +4765,20 @@ static void flip_cap_book(void)
     }
     period = 1000000000ull / (uint64_t)cap;
     now = xbox_HostNowNs();
-    if (!s_cap_next_ns || now >= s_cap_next_ns + period) {
-        if (s_cap_next_ns)
-            s_cap_late++;
-        s_cap_next_ns = now;            /* (re)start the schedule */
+    if (!s_cap_next_ns) {
+        s_cap_next_ns = now + period;   /* the first frame starts the schedule */
+    } else if (now >= s_cap_next_ns + period) {
+        /* Already late: this frame took longer than a period. Its slot is
+         * now -- no wait -- and the schedule restarts from here. Sleeping a
+         * period after a late flip added 16.7 ms to every slow in-world
+         * frame (Fable: ~125 ms frames slept 1333 ms per 10 s). */
+        s_cap_late++;
+        s_cap_next_ns = now;
+        s_cap_due_ns = 0;
+        return;
+    } else {
+        s_cap_next_ns += period;
     }
-    s_cap_next_ns += period;
     s_cap_due_ns = s_cap_next_ns;
 }
 
@@ -4858,7 +4867,7 @@ static void flip_cap_report(void)
     if (!backend_draws() || gpu_fps_cap() <= 0)
         return;
     fprintf(stderr, "[GPU] frame cap %d: waits %u slept %.1f ms, woke %.2f ms"
-            " late avg (%.2f max), frames over a period %u\n",
+            " late avg (%.2f max), frames over a period (not held) %u\n",
             gpu_fps_cap(), s_cap_waits, s_cap_slept_ns / 1e6,
             s_cap_waits ? s_cap_over_ns / 1e6 / s_cap_waits : 0.0,
             s_cap_over_max_ns / 1e6, s_cap_late);

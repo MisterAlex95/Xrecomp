@@ -80,14 +80,16 @@ per second of host time:
   `PUT` and the title builds its next frame while the executor sleeps;
 - absolute, so a sleep that wakes late (macOS wakes an ordinary thread's
   nanosleep 3–5 ms late) shortens the next one and the average stays at the
-  cap without spinning; a frame later than a whole period restarts the
-  schedule instead of letting the next frames run uncapped to catch up.
+  cap without spinning; a frame that took longer than a whole period is not
+  held at all (its slot is the flip itself) and the schedule restarts from
+  there, so slow frames (Fable in-world) pay no sleep and the next frames do
+  not run uncapped to catch up.
 
 It is independent of `RECOMP_FLIP_PACING` (the flip hold on the guest
 vblank clock), which still applies after it. The `[GPU] frame cap` report
 line gives the waits, the time slept, how late the sleeps woke, and how
-many frames took longer than a period (the title, not the cap, was the
-limit for those). `nv2a_pb_exec_flip_cap_until_ns()` (nv2a_flip_hold.h)
+many frames took longer than a period (not held: the title, not the cap,
+was the limit for those). `nv2a_pb_exec_flip_cap_until_ns()` (nv2a_flip_hold.h)
 returns the wake time while the executor sleeps, so a guest wait loop that
 polls GPU progress can sleep until then rather than spin.
 
