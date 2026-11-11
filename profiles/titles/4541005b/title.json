@@ -2,7 +2,25 @@
   "title_id": "4541005B",
   "name": "Burnout 3: Takedown",
   "project": "burnout3",
-  "seed_functions": ["seed_functions.json"],
-  "env_force": {"RECOMP_LSFG": "0"},
+  "layers": [
+    "xdk/xapi",
+    "xdk/dsound",
+    "xdk/d3d8"
+  ],
+  "hooks": "bo3",
+  "params": {
+    "XBA_D3D_DEVICE_PTR": "0x0035FE48",
+    "XBA_D3D_SW_METHODS": "0x20",
+    "XBA_D3D_DMA_WALK": 1
+  },
+  "env_default": {
+    "RECOMP_GPU_FPS_CAP": "60"
+  },
+  "env_force": {
+    "RECOMP_LSFG": "0"
+  },
+  "seed_functions": [
+    "seed_functions.json"
+  ],
   "status": "PAL Fr/De/It. Boots to a finished race at 60 fps on the Mac with the GL back end: movies with sound, title screen, profile and save, menus, vehicle select, 2-lap race, results, auto-save; pad works. DMA walk with D3D's software method 5 serviced (fence event). Frame generation must stay off (the game is locked to the flip rate)."
 }

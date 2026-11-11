@@ -347,7 +347,7 @@ void sub_008556D0(void)
  *
  * Both are entry hooks (tools/recomp/manual_scan.py), so they need the
  * generated code regenerated with this file (--exclude-manual). They run
- * only once title.c has set g_fable_aspect_wide (xba_title_configure). */
+ * only once title.c has set g_fable_aspect_wide (fable_configure). */
 int g_fable_aspect_wide;
 
 #define FABLE_ASPECT_CFG 0x009A1188u    /* display-size override, read by sub_00132D00 */

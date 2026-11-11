@@ -37,6 +37,7 @@ class Run:
         self.stamp_path = os.path.join(self.work, "stamp.json")
         self.stamp = {}
         self.env_force = {}
+        self.layers = []
 
     # ── helpers ──
 
@@ -90,19 +91,16 @@ class Run:
         with open(self.xjson) as f:
             self.info = json.load(f)
         self.tid = self.info["title_id"][2:].upper()
-        pdir = os.path.join(self.m.TITLES, self.tid.lower())
-        self.profile = None
-        if os.path.isfile(os.path.join(pdir, "title.json")):
-            with open(os.path.join(pdir, "title.json")) as f:
-                self.profile = json.load(f)
-            self.profile["dir"] = pdir
+        self.ident = self.m.identify_xbe(self.xbe, self.work)
         try:
+            self.profile = self.m.load_profile(self.tid, self.ident)
             self.env_force = pack.env_force_of(self.profile)
         except ValueError as e:
-            raise cc.StepError("BAD_PROFILE", "titles/%s: %s" % (self.tid.lower(), e))
-        self.ident = self.m.identify_xbe(self.xbe, self.work)
+            raise cc.StepError("BAD_PROFILE", "profiles: %s" % e)
+        self.layers = self.profile["keys"] if self.profile else []
         self.rep.progress(1, 100, "%s (title ID %s)%s%s" % (self.info.get("title", "?"), self.tid,
-                                                           ", title profile" if self.profile else "",
+                                                           ", title profile" if self.profile and self.profile["title"]
+                                                           else "",
                                                            ", " + self.ident["summary"] if self.ident else ""))
 
     def analyse(self):
@@ -110,9 +108,9 @@ class Run:
         mb = max(1.0, os.path.getsize(self.xbe) / 1e6)
         d, fid = os.path.join(an, "disasm"), os.path.join(an, "func_id")
         disasm = ["tools.disasm", self.xbe, "-o", d, "--force"]
-        # Function starts the analysis cannot find (title.json "seed_functions").
+        # Function starts the analysis cannot find (the layers' "seed_functions").
         for fn in (self.profile or {}).get("seed_functions", []):
-            disasm += ["--seed-functions", os.path.join(self.profile["dir"], fn)]
+            disasm += ["--seed-functions", fn]
         steps = (
             ("disasm", 0, 55, 20 * mb, disasm),
             ("func_id", 55, 70, 5 * mb, ["tools.func_id", self.xbe,
@@ -156,7 +154,7 @@ class Run:
                     "--game-name", self.info.get("title", self.tid),
                     "--disasm-dir", os.path.join(an, "disasm"), "--func-id-dir", os.path.join(an, "func_id"),
                     "--abi-dir", os.path.join(an, "abi"), "--gen-dir", gen]
-            for fn in (self.profile or {}).get("exclude_manual", [])[:1]:
+            for fn in (self.profile or {}).get("exclude_manual", []):
                 args += ["--exclude-manual", os.path.join(proj, "src", "title", fn)]
             mb = max(1.0, os.path.getsize(self.xbe) / 1e6)
             self.py_step(args, 3, 2, 100, "lifting to C", 30 * mb, "LIFT_FAILED")
@@ -196,12 +194,14 @@ class Run:
         # pack.json's env_force comes from title.json: a change there alone
         # (same objects) still writes the pack again.
         h.update(("|env_force=%s" % json.dumps(self.env_force, sort_keys=True)).encode())
+        h.update(("|layers=%s" % ",".join(self.layers)).encode())
         key = h.hexdigest()
         pack.recover(packs, self.tid)
         final = pack.final_dir(packs, self.tid)
         meta = pack.read(final)
         if (self.stamp.get("link") == key and meta and meta["xbe_sha256"] == self.xbe_sha
-                and meta.get("env_force", {}) == self.env_force and pack.check(final, a.shell_abi) is None):
+                and meta.get("env_force", {}) == self.env_force and meta.get("layers", []) == self.layers
+                and pack.check(final, a.shell_abi) is None):
             self.rep.progress(5, 100, "pack up to date")
         else:
             try:
@@ -213,7 +213,7 @@ class Run:
             self.rep.progress(5, 70, "writing pack.json")
             meta = pack.make_meta(lib, self.tid, self.info.get("title", ""), self.xbe_sha, self.toolkit,
                                   "%s -O%s" % (self.tc.short_version(), a.opt), shell_abi=a.shell_abi,
-                                  env_force=self.env_force)
+                                  env_force=self.env_force, layers=self.layers)
             try:
                 pack.publish(packs, self.tid, meta)
             except OSError as e:

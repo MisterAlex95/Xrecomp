@@ -1,8 +1,0 @@
-{
-  "title_id": "4D5300D1",
-  "name": "Fable: The Lost Chapters",
-  "project": "fable",
-  "exclude_manual": ["overrides.c"],
-  "seed_functions": ["seed_functions.json"],
-  "status": "Boots; logo, intro and story movies play with sound; title screen, menus, AutoSave loads into Oakvale with music; pad works (one-CPU DISPATCH gate on by default for the USB stack). Software rasteriser by default, GL back end with RECOMP_GPU=1."
-}

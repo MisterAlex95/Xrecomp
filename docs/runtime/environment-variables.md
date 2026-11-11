@@ -21,7 +21,7 @@ other line as written: see [Settings](../android/app-shell.md#settings).
 
 ### Forced by a title
 
-A title profile (`titles/<title id>/title.json`) can force options that the title cannot run right without, over
+A title profile (`profiles/titles/<title id>/title.json`, or any profile layer: [profiles.md](../technical/profiles.md)) can force options that the title cannot run right without, over
 everything else (the shell environment, `recomp.cfg`, the launcher's Settings):
 
 ```json

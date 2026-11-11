@@ -336,7 +336,7 @@ Fit the screen (`auto`). The default stays 1 until the device check.
 
 The console renders 640x480 whatever the screen. A title can still make
 16:9 pictures: it widens its camera and draws the 3D scene anamorphically,
-squeezed into 640x480 (Fable: titles/4d5300d1, the camera's aspect
+squeezed into 640x480 (Fable: profiles/titles/4d5300d1, the camera's aspect
 override), so the frame is right once stretched to 16:9; its menus and
 full-screen movies stay 4:3, and its story movies are 16:9 letterboxed
 inside 4:3. The SDL presenter therefore picks a shape per frame
@@ -985,7 +985,7 @@ Software / GPU, `RECOMP_GPU`) and **Frame cap (GPU renderer)** (Auto / 30 /
 60 / Off, `RECOMP_GPU_FPS_CAP`), written to `recomp.cfg`
 ([app-shell.md](../android/app-shell.md#settings)). Auto is the title
 profile's choice: Fable's profile sets `RECOMP_GPU_FPS_CAP=30` on Android
-(`SETENV_DEFAULT`, `#ifdef __ANDROID__` in `titles/4d5300d1/title.c`), since
+(`env_default_android` in `profiles/titles/4d5300d1/title.json`), since
 an Oakvale frame does not fit 16.7 ms on the Thor and a 60 cap lets the rate
 wander; it does not turn `RECOMP_GPU` on.
 

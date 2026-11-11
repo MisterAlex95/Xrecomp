@@ -48,7 +48,7 @@ def test_xdk_from_the_header_pointer(tmp_path):
     x = r["xdk"]
     assert (x["build"], x["source"], x["mixed"], x["qfe"]) == (5849, "header", True, 3)
     assert x["libraries"] == {"D3D8": 5933, "XAPILIB": 5849}
-    assert r["layers"] == ["xdk/5849"]
+    assert r["layers"] == ["xdk/d3d8", "xdk/xapi"]      # profiles/xdk/<name>/layer.json "applies"
 
 
 def test_xdk_by_name_then_most_common(tmp_path):
@@ -78,7 +78,8 @@ def test_engines_need_their_minimum(tmp_path):
     r = identify(make_xbe(tmp_path / "f.xbe", text=text))
     names = [e["name"] for e in r["engines"]]
     assert names == ["RenderWare", "Bink"]
-    assert r["layers"] == ["xdk/5849", "engines/renderware"]          # middleware is not a layer
+    # No profiles/engines/renderware yet: not a layer (tools/prepare/test_profiles.py has one that is).
+    assert r["layers"] == ["xdk/d3d8", "xdk/xapi"]
     assert summary(r) == "XDK 5849, RenderWare; middleware Bink"
 
 
@@ -118,8 +119,8 @@ def test_cli_one_xbe(tmp_path, capsys):
     p = make_xbe(tmp_path / "h.xbe")
     out = tmp_path / "one.json"
     assert main([p, "--json", str(out)]) == 0
-    assert json.loads(out.read_text())["layers"] == ["xdk/5849"]
-    assert "layers: xdk/5849" in capsys.readouterr().out
+    assert json.loads(out.read_text())["layers"] == ["xdk/d3d8", "xdk/xapi"]
+    assert "layers: xdk/d3d8 xdk/xapi" in capsys.readouterr().out
 
 
 def test_prepare_writes_ident_json(tmp_path):
@@ -127,7 +128,7 @@ def test_prepare_writes_ident_json(tmp_path):
     p = make_xbe(tmp_path / "p.xbe", text=b"Miles Sound System\0")
     r = identify_xbe(p, str(tmp_path))
     assert r["summary"] == "XDK 5849, no known engine; middleware Miles Sound System"
-    assert json.loads((tmp_path / "ident.json").read_text())["layers"] == ["xdk/5849"]
+    assert json.loads((tmp_path / "ident.json").read_text())["layers"] == ["xdk/d3d8", "xdk/xapi"]
     bad = tmp_path / "bad.xbe"
     bad.write_bytes(b"nope")
     assert identify_xbe(str(bad), str(tmp_path)) is None      # the prepare goes on without it

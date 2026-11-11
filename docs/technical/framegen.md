@@ -279,7 +279,7 @@ sync read-back stay for the run (30 fps is the Android profile's cap anyway).
 **Titles locked to the flip rate.** A title whose game logic advances once per
 flip (Burnout 3) runs in slow motion under the 30 fps cap. Its profile forces
 frame generation off with `"env_force": {"RECOMP_LSFG": "0"}` in
-`titles/<title id>/title.json`: `xba_title_configure` is too late for it (the
+`profiles/titles/<title id>/title.json`: `xba_title_configure` is too late for it (the
 presenter and the pacer read `RECOMP_LSFG` before the guest starts), so the
 option travels in `pack.json` on Android (set by the pack loader after
 `recomp.cfg`) and in the generated `src/title/env_force.h` on the desktop (set

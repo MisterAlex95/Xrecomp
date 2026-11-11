@@ -44,9 +44,11 @@
 /* xboxrecomp runtime headers */
 #include <xbox/xboxrecomp.h>
 
-/* A title profile: titles/<title id>/*.c in the toolkit, copied into src/title/
- * by tools.prepare (CMakeLists defines XBA_TITLE_PROFILE when that folder has
- * sources). configure runs before the memory layout -- switches, map size --
+/* The profile layers: profiles/ in the toolkit (XDK libraries, engine, title),
+ * copied into src/title/ by tools.prepare with a generated xba_layers.c that
+ * defines these two hooks and calls each layer's, lowest first
+ * (docs/technical/profiles.md; CMakeLists defines XBA_TITLE_PROFILE when that
+ * folder has sources). configure runs before the memory layout -- switches, map size --
  * and start right before the guest's entry point, with the kernel up; it gets
  * the game and save directories (save_dir NULL = the kernel's default). */
 #ifdef XBA_TITLE_PROFILE

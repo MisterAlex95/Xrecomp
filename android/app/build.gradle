@@ -111,7 +111,7 @@ def toolkitAsset = xbaToolchainDir ? tasks.register('xbaToolkitAsset', XbaToolki
                 'tools/android/**', 'tools/docker/**', 'tools/ci/**', 'tools/conformance/msvc-wine/**'
     })
     it.toolkitFiles.from(fileTree(repoRoot) {
-        include 'templates/new-game/**', 'templates/runtime/**', 'titles/**', 'include/**', 'src/**/*.h'
+        include 'templates/new-game/**', 'templates/runtime/**', 'profiles/**', 'include/**', 'src/**/*.h'
         exclude '**/build/**'
     })
     it.commit = xbaCommit

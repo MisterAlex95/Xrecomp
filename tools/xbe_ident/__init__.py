@@ -94,15 +94,17 @@ def identify(path, table=None):
     c = xbe.certificate
     engines = engines_in(xbe.raw_data, table)
     xdk = xdk_of(xbe)
-    return {
+    ident = {
         "title_id": "%08X" % c.title_id,
         "title": c.title_name,
         "xdk": xdk,
         "engines": engines,
-        # The profile layers this XBE selects, lowest first (XBA-66 reads them).
-        "layers": (["xdk/%d" % xdk["build"]] if xdk["build"] else [])
-                  + ["engines/%s" % e["layer"] for e in engines if e["kind"] == "engine"],
     }
+    # The profile layers this XBE selects, lowest first (tools.prepare.profiles:
+    # the xdk layers whose libraries it links, the engine layers that exist).
+    from tools.prepare import profiles
+    ident["layers"] = profiles.auto_layers(ident)
+    return ident
 
 
 def summary(ident):

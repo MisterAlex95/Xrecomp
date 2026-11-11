@@ -1,9 +1,9 @@
 /*
  * Fable: The Lost Chapters (Xbox, 2005), title ID 4D5300D1 -- the title profile.
  *
- * tools.prepare copies this folder into the title project's src/title/, and
- * the template's main.c calls the two hooks below. Everything here was found
- * bringing the title up on macOS arm64 (see NOTES.md in this folder).
+ * The title layer: tools.prepare puts it on top of the XDK layers and calls
+ * the two hooks below (title.json "hooks") after theirs. Everything here was
+ * found bringing the title up on macOS arm64 (see NOTES.md in this folder).
  */
 #include <stddef.h>
 #include <stdint.h>
@@ -21,82 +21,7 @@ extern void xbox_SetDelayOverride(uint32_t ret_va, uint32_t from_ms, uint32_t to
 #include <strings.h>
 #include <sys/stat.h>
 #include <unistd.h>
-#define SETENV_DEFAULT(k, v) setenv((k), (v), 0)
-#else
-#define SETENV_DEFAULT(k, v) do { if (!getenv(k)) _putenv(k "=" v); } while (0)
 #endif
-
-/* ── D3D's deferred RunPushBuffer (software methods 0xC, 0xD, 0xE) ─────────
- *
- * XDK D3DDevice_RunPushBuffer (0x00855900) JUMPs from the ring into a
- * recorded pushbuffer whose last word is a JUMP back. If the GPU has not yet
- * passed the pushbuffer's previous use, that return JUMP cannot be patched
- * yet: D3D puts a software method before the entering JUMP and lets its
- * interrupt handler patch it when the GPU gets there (dispatcher
- * sub_00859C40, helper sub_00855860). Unserviced, the walk follows the old
- * return target and runs earlier commands again, and the visibility reports
- * Fable waits on in-world (sub_0012F7F0) never come.
- *
- *   0xC  node = payload | 0x80000000 (in the ring), one pending run fewer
- *   0xD  node = 0x00860044 + payload * 20 (D3D's table), one pending run fewer
- *   0xE  node = payload | 0x80000000, recording: the count is left alone
- *
- * A node is { return target | flags, next, slot, fixups, base }. As
- * sub_00855860 does, for each node of the chain: *slot = JUMP(target);
- * with flag bit 29, copy each fixup { size, offset, bytes } to base + offset
- * until size 0xFFFFFFFF; next = -1; with bit 31, clear bit 30. The handler's
- * final cache flush (sub_008556D0) has nothing to flush here.
- *
- * Runs on the executor thread (nv2a_pb_set_software_method_hook), while the
- * main thread may be in RunPushBuffer bumping the same pending count. */
-extern ptrdiff_t xbox_GetMemoryOffset(void);
-extern void nv2a_pb_set_software_method_hook(int (*hook)(uint32_t param));
-
-#define FABLE_RPB_NODES   0x00860044u   /* device (0x0085FDE0) + 0x264 */
-#define FABLE_RPB_PENDING 0x0085FE30u   /* device + 0x50 */
-
-static int fable_software_method(uint32_t param)
-{
-    uint8_t *mem = (uint8_t *)xbox_GetMemoryOffset();
-    uint32_t type = param & 0x1Fu, payload = param >> 5, node;
-    int guard;
-#define G32(a) (*(volatile uint32_t *)(mem + (uint32_t)(a)))
-
-    switch (type) {
-    case 0xC: node = payload | 0x80000000u; break;
-    case 0xD: node = FABLE_RPB_NODES + payload * 20u; break;
-    case 0xE: node = payload | 0x80000000u; break;
-    default:  return 0;             /* the rest: not serviced */
-    }
-    if (type != 0xE) {
-#if defined(__GNUC__) || defined(__clang__)
-        __atomic_fetch_sub((uint32_t *)(mem + FABLE_RPB_PENDING), 1u, __ATOMIC_SEQ_CST);
-#else
-        G32(FABLE_RPB_PENDING) -= 1u;
-#endif
-    }
-    for (guard = 0; guard < 4096; guard++) {
-        uint32_t target = G32(node), next;
-
-        G32(G32(node + 8)) = (target & 0x0FFFFFFFu) + 1u;      /* JUMP target */
-        if (target & 0x20000000u) {
-            uint32_t base = G32(node + 16), fix = G32(node + 12), size;
-            while ((size = G32(fix)) != 0xFFFFFFFFu) {
-                memcpy(mem + (uint32_t)(base + G32(fix + 4)), mem + fix + 8, size);
-                fix += 8u + size;
-            }
-        }
-        next = G32(node + 4);
-        G32(node + 4) = 0xFFFFFFFFu;
-        if (target & 0x80000000u)
-            G32(node) = target & 0xBFFFFFFFu;
-        if (next == 0 || next == 0xFFFFFFFFu)
-            break;
-        node = next;
-    }
-#undef G32
-    return 1;
-}
 
 /* ── Aspect ratio ─────────────────────────────────────────────────────────
  *
@@ -130,54 +55,30 @@ static void fable_aspect_configure(void)
     fprintf(stderr, "[ASPECT] 16:9 scenes (setting %d)\n", setting);
 }
 
-void xba_title_configure(void)
+void fable_configure(void)
 {
     /* Fable reserves 608 MB of address space for its own allocator and
      * sub-allocates across all of it. With the mapping the size of RAM the
      * reserve was clamped to 38 MB, the allocator walked into the RAM mirrors
-     * and two of its strings shared storage. RAM stays 64 MB. */
+     * and two of its strings shared storage. RAM stays 64 MB. With the
+     * mapping above 64 MB the desktop POSIX layout lost pages of the
+     * contiguous window: title.json holds the whole 4 GB window
+     * (RECOMP_GUEST_WINDOW=1, Android's default), which places every view
+     * inside one reservation. title.json also asks for more than the default
+     * 8 worker threads alive during the front-end load (RECOMP_THREAD_STACKS),
+     * and on Android caps the GPU renderer at 30 fps, evenly paced: in
+     * Oakvale a frame takes the executor 17-22 ms on an M1 and more on the
+     * AYN Thor, so a 60 cap only lets the rate wander between 20 and 40
+     * (docs/technical/gpu-backend.md, Android; the launcher's Frame cap wins).
+     *
+     * The XDK layers (title.json "layers") set the pushbuffer executor, the
+     * AC'97 codec, the paced vblanks (the XMV decoder's clock is
+     * D3DDevice_GetDisplayFieldStatus, sub_0084F650, which reads the vblank
+     * count at device+0x1DE8), the one-CPU DISPATCH gate for XPP
+     * (0x0086E480-0x00876C3C), the pad, and service D3D's GPU semaphore and
+     * deferred RunPushBuffer (0x00855900; dispatcher sub_00859C40, helper
+     * sub_00855860) with the addresses in title.json "params". */
     xbox_SetMapSize((size_t)1024 * 1024 * 1024);
-    /* With the mapping above 64 MB the desktop POSIX layout lost pages of the
-     * contiguous window; holding the whole 4 GB window (Android's default)
-     * places every view inside one reservation. */
-    SETENV_DEFAULT("RECOMP_GUEST_WINDOW", "1");
-    /* XDK D3D and DirectSound: the pushbuffer executor, and the emulated APU
-     * (DirectSoundCreate waits on the AC'97 codec). */
-    SETENV_DEFAULT("RECOMP_PB_EXEC", "1");
-    SETENV_DEFAULT("RECOMP_AC97_READY", "1");
-    /* Vblank interrupts on the 60 Hz schedule. The XMV decoder's clock is
-     * D3DDevice_GetDisplayFieldStatus (sub_0084F650), which reads the vblank
-     * count D3D's vblank handler keeps at device+0x1DE8; with no vblanks it
-     * never moved, the decoder delivered the first frame and then waited for
-     * ever (the movies were skipped with an override until now). The plain
-     * ~50 Hz tick plays them slower than the game expects: paced. */
-    SETENV_DEFAULT("RECOMP_VBLANK", "paced");
-#ifdef __ANDROID__
-    /* GPU renderer on Android: 30 fps, evenly paced. In Oakvale a frame
-     * takes the executor 17-22 ms on an M1 and more on the AYN Thor, so a
-     * 60 cap only lets the rate wander between 20 and 40; menus stay
-     * smooth at 30 and the device stays cooler. Only read with
-     * RECOMP_GPU=1, which is not this profile's default yet (see
-     * docs/technical/gpu-backend.md, Android). The launcher's Frame cap
-     * setting (recomp.cfg) wins. */
-    SETENV_DEFAULT("RECOMP_GPU_FPS_CAP", "30");
-#endif
-    /* The one-CPU DISPATCH gate (kernel_hal.c). XAPI's USB stack (XPP,
-     * 0x0086E480-0x00876C3C) locks only by raising to DISPATCH_LEVEL.
-     * XInputSetState programs a control transfer ~30 times a second
-     * (sub_008766DD takes 4 TDs from the free list at 0x9A614C) while the
-     * USB DPC (sub_00875EA1, on the timer thread) frees TDs and re-arms the
-     * pad's interrupt URB. Without the gate the two run side by side, the TD
-     * pool and the ED queues get corrupted and within a minute the DPC loops
-     * for ever in sub_00875A48: pad input dead, movies stalled. The gate
-     * needs the paced vblank loop above. RECOMP_DISPATCH_GATE=0 to compare. */
-    SETENV_DEFAULT("RECOMP_DISPATCH_GATE", "1");
-    /* More than the default 8 worker threads alive during the front-end load. */
-    SETENV_DEFAULT("RECOMP_THREAD_STACKS", "32");
-    /* The pad (the template starts the USB model when RECOMP_USB is set); the
-     * keyboard stands in for it on a desktop. */
-    SETENV_DEFAULT("RECOMP_USB", "1");
-    SETENV_DEFAULT("RECOMP_KEYBOARD", "1");
     /* File-I/O completion APCs at the next alertable wait, as the hardware
      * does, not inline inside NtReadFile (kernel_bridge.c, deliver_one_apc).
      * Delivered inline, the loader's completion ran before the read call had
@@ -185,8 +86,6 @@ void xba_title_configure(void)
      * the inline delivery for comparison. */
     if (!getenv("FABLE_INLINE_APC"))
         xbox_SetDeferredIoApc(1);
-    /* D3D's deferred RunPushBuffer, above. */
-    nv2a_pb_set_software_method_hook(fable_software_method);
     /* The front end (title screen, menus, loading screens) runs
      * do { draw; Sleep(50); } while (!done) in sub_0020BBB5, the two
      * `push 0x32; call Sleep` at 0x0020BD93 and 0x0020C3C5: 20 fps at most
@@ -207,37 +106,7 @@ void xba_title_configure(void)
 }
 
 #ifndef _WIN32
-extern ptrdiff_t g_xbox_mem_offset;
-extern void nv2a_pb_set_semaphore_target(uint32_t guest_va);
 extern void xbox_FramebufferWindowSetTitle(const uint16_t *name, int max_chars);
-
-/* ── D3D's GPU semaphore ─────────────────────────────────────────────────
- *
- * Fable links the XDK's D3D. Its device pointer lives at 0x00862288 (read by
- * the ring make-space loop sub_00855260), and device+0x30 points at the GPU
- * semaphore D3D polls. Nothing writes it unless the pushbuffer executor is
- * told where it is (docs/technical/d3d8ltcg-device-context.md). The slot does
- * not always hold the device, so only a semaphore in contiguous memory is
- * accepted: handing over a heap address made the executor write into game
- * data. */
-#define FABLE_D3D_DEVICE_PTR 0x00862288u
-
-static void *semaphore_watch(void *unused)
-{
-    uint32_t last = 0;
-    (void)unused;
-    for (;;) {
-        uint32_t dev = *(volatile uint32_t *)((uintptr_t)g_xbox_mem_offset + FABLE_D3D_DEVICE_PTR);
-        uint32_t sem = dev ? *(volatile uint32_t *)((uintptr_t)g_xbox_mem_offset + dev + 0x30) : 0;
-        if (sem && sem != last && sem >= 0x80000000u && sem < 0x84000000u) {
-            nv2a_pb_set_semaphore_target(sem);
-            fprintf(stderr, "[D3D] device 0x%08X, GPU semaphore at 0x%08X\n", dev, sem);
-            last = sem;
-        }
-        usleep(1000);
-    }
-    return NULL;
-}
 
 /* ── Background cache progress ───────────────────────────────────────────
  *
@@ -447,7 +316,7 @@ static void *cache_progress(void *unused)
     }
 }
 
-void xba_title_start(const char *game_dir, const char *save_dir)
+void fable_start(const char *game_dir, const char *save_dir)
 {
     pthread_t t;
 
@@ -462,13 +331,11 @@ void xba_title_start(const char *game_dir, const char *save_dir)
         else
             snprintf(s_save_dir, sizeof s_save_dir, "%s/.local/share/xboxrecomp", h ? h : ".");
     }
-    if (pthread_create(&t, NULL, semaphore_watch, NULL) == 0)
-        pthread_detach(t);
     if (pthread_create(&t, NULL, cache_progress, NULL) == 0)
         pthread_detach(t);
 }
 #else
-void xba_title_start(const char *game_dir, const char *save_dir)
+void fable_start(const char *game_dir, const char *save_dir)
 {
     (void)game_dir; (void)save_dir;
 }

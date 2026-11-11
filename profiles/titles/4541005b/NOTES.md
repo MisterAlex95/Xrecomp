@@ -10,18 +10,21 @@ stall.
 
 ## What the profile does
 
+Since XBA-66 most of it comes from the XDK layers (`profiles/xdk/xapi`, `dsound`, `d3d8`; title.json `"layers"`), with
+D3D's addresses in title.json `"params"`; `title.c` keeps the flip pacing only. Rules: `docs/technical/profiles.md`.
+
 | Setting | Why |
 |---|---|
 | `RECOMP_PB_EXEC=1`, `RECOMP_PB_WALK=dma` | D3D's fence wait reads `DMA_GET` and the `0x0310` latch (PGRAPH `0x400B10`); the segment scan never latches it and the front end stalls at `_FEMain.xmv` (~87 s) |
-| semaphore watch (`xba_title_start`) | hands device+0x30 to `nv2a_pb_set_semaphore_target`; without it a black screen, BlockOnTime spinning at `0x00351BA3` |
-| software-method hook, type 5 → `xbox_KeSetGuestEvent(device + 0x1DCC)`, `RECOMP_TITLE_KEVENTS=1` | BlockOnTime's far-behind path patches method 5 and waits without timeout on that event, which D3D built itself |
+| semaphore watch (XDK D3D layer, `XBA_D3D_DEVICE_PTR`) | hands device+0x30 to `nv2a_pb_set_semaphore_target`; without it a black screen, BlockOnTime spinning at `0x00351BA3` |
+| software-method hook, type 5 → `xbox_KeSetGuestEvent(device + 0x1DCC)`, `RECOMP_TITLE_KEVENTS=1` (XDK D3D layer, `XBA_D3D_SW_METHODS` 0x20) | BlockOnTime's far-behind path patches method 5 and waits without timeout on that event, which D3D built itself |
 | `RECOMP_AC97_READY=1` | without: hang after the USB start, no flip |
 | `RECOMP_VBLANK=paced` | without: one flip (XMV clock, swap counters) |
 | `RECOMP_DISPATCH_GATE=1`, `RECOMP_USB=1`, `RECOMP_KEYBOARD=1` | same XDK USB stack as Fable; gate off prints `[IRQ] gate off: N DPCs at DISPATCH` (3–13 in 335 s) |
 | `RECOMP_GPU_FPS_CAP=60`; `RECOMP_FLIP_PACING=1` on the desktop software rasteriser | the game is locked to the flip rate |
 | title.json `"env_force": {"RECOMP_LSFG": "0"}` | frame generation 2x on a 60 Hz panel caps at 30 → slow motion; the shell applies it before the window opens |
 | seed `0x00363064` | the XID class driver's Init, see below |
-| `BO3_FENCE=mirror` | A/B fallback: segment scan, `xbox_Nv2aMirrorFence(0x0035FE48, 0x2C, 0x30)`, no hook, no watch |
+| `XBA_D3D_FENCE=mirror` (was `BO3_FENCE`) | A/B fallback: segment scan, `xbox_Nv2aMirrorFence(0x0035FE48, 0x2C, 0x30)`, no hook, no watch |
 
 Not needed: `xbox_SetMapSize`, `RECOMP_GUEST_WINDOW`, `RECOMP_THREAD_STACKS`, deferred I/O APCs, delay overrides.
 
@@ -60,7 +63,7 @@ Cap 30: 98 → 137 km/h in 5 s, against 2.5 s at 60. Cap 0: 1,450–3,470 flips/
 | S1 | the same, 900 s soak | finished, auto-save, no zero-fps report |
 | A, S2 | segment scan + `0x0310` latch hack + hook (+ gate, 900 s) | race / finished (not shipped) |
 | D | segment scan + latch, no hook | race, but 184 method-5 unserviced (latent hang) |
-| C | `BO3_FENCE=mirror` | race, no toolkit change |
+| C | `BO3_FENCE=mirror` (now `XBA_D3D_FENCE=mirror`) | race, no toolkit change |
 
 Verify (desktop): `tools.prepare <iso> --work <dir> --force` (the stamp does not see a profile-only change), then
 in `project/build`:
