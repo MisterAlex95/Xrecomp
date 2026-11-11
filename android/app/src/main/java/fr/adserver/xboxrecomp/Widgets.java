@@ -944,6 +944,68 @@ final class Widgets {
         }
     }
 
+    // ---- Sheet: a list over the screen, from the right ------------------------------------------------------------
+
+    /**
+     * An overlay list (the library's Options): a scrim over the screen, and on the right a flat PANEL sheet with a
+     * title, MenuRows and its own hints. The launcher adds the rows, keeps the focus in it while it is open, and
+     * closes it on B (or a tap on the scrim: onClose).
+     */
+    static final class Sheet extends android.widget.FrameLayout {
+        static final int W = 600;
+        static final float SCRIM = 0.55f;
+        final android.widget.LinearLayout rows, hints;
+
+        Sheet(Context c, String title, Runnable onClose) {
+            super(c);
+            setBackgroundColor(Theme.alpha(0xFF000000, SCRIM));
+            setClickable(true);
+            setOnClickListener(v -> onClose.run());
+            android.widget.LinearLayout panel = new android.widget.LinearLayout(c);
+            panel.setOrientation(android.widget.LinearLayout.VERTICAL);
+            panel.setBackground(new Panel(0));
+            panel.setClickable(true);   // a tap on the sheet is not one on the scrim
+            panel.setPadding(Theme.S5, Theme.MARGIN_TOP, Theme.S5, Theme.MARGIN_BOTTOM);
+            android.widget.TextView t = Theme.oneLine(Theme.text(c, Theme.T_TITLE, Theme.MEDIUM, Theme.TEXT, title));
+            t.setGravity(android.view.Gravity.CENTER_VERTICAL);
+            android.widget.LinearLayout.LayoutParams tl =
+                    new android.widget.LinearLayout.LayoutParams(LayoutParams.MATCH_PARENT, Theme.TOP_BAR_H);
+            tl.bottomMargin = Theme.S4;
+            panel.addView(t, tl);
+            rows = new android.widget.LinearLayout(c);
+            rows.setOrientation(android.widget.LinearLayout.VERTICAL);
+            rows.setClipChildren(false);
+            android.widget.LinearLayout.LayoutParams rl =
+                    new android.widget.LinearLayout.LayoutParams(LayoutParams.MATCH_PARENT, 0, 1);
+            rl.leftMargin = rl.rightMargin = Theme.S3 - Theme.S5;   // the plates 24 px from the sheet's edges
+            panel.addView(rows, rl);
+            hints = new android.widget.LinearLayout(c);
+            hints.setOrientation(android.widget.LinearLayout.HORIZONTAL);
+            hints.setGravity(android.view.Gravity.CENTER_VERTICAL);
+            panel.addView(hints, new android.widget.LinearLayout.LayoutParams(LayoutParams.MATCH_PARENT,
+                                                                              Theme.FOOTER_H));
+            addView(panel, new LayoutParams(W, LayoutParams.MATCH_PARENT, android.view.Gravity.END));
+        }
+
+        void addRow(MenuRow r) {
+            rows.addView(r, new android.widget.LinearLayout.LayoutParams(LayoutParams.MATCH_PARENT, Theme.ROW_H));
+        }
+
+        void addHint(Hint h) {
+            android.widget.LinearLayout.LayoutParams p = new android.widget.LinearLayout.LayoutParams(
+                    LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT);
+            p.leftMargin = hints.getChildCount() == 0 ? 0 : Theme.S4;
+            hints.addView(h, p);
+        }
+
+        java.util.List<MenuRow> rowsForTest() {
+            java.util.List<MenuRow> out = new java.util.ArrayList<>();
+            for (int i = 0; i < rows.getChildCount(); i++)
+                out.add((MenuRow)rows.getChildAt(i));
+            return out;
+        }
+    }
+
     // ---- Glide: the one focus highlight, gliding from row to row --------------------------------------------------
 
     /**

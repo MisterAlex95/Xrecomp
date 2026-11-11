@@ -148,6 +148,11 @@ public class LauncherActivity extends Activity {
     private TextView screenTitle, note, topRight;
     /** The top bar (hidden on Home and Preparing, which show the game's title big), its tabs' slot. */
     private LinearLayout topBar, topTabs;
+    /** The stage's column (top bar, body, footer): its focus is blocked while a sheet is open. */
+    private LinearLayout stageRoot;
+    /** The open sheet (the library's Options), and the view focused before it opened. */
+    private Widgets.Sheet sheet;
+    private View sheetReturn;
     private FrameLayout body, host;
     private Widgets.Backdrop backdrop;
     private Widgets.Glide glide;
@@ -594,6 +599,8 @@ public class LauncherActivity extends Activity {
         host.setBackground(backdrop);
         LinearLayout root = column();
         host.addView(root, new FrameLayout.LayoutParams(MATCH, MATCH));
+        stageRoot = root;
+        sheet = null;
         glide = new Widgets.Glide(this);
         host.addView(glide, new FrameLayout.LayoutParams(MATCH, MATCH));
         buildDim();
@@ -786,6 +793,7 @@ public class LauncherActivity extends Activity {
             if (i >= 0)
                 focusMemory.put(screen, i);
         }
+        closeSheet(false);
         syncTheme(s);
         if (s != Screen.LIBRARY && backdrop != null)
             backdrop.setGlows(Theme.GLOW, Theme.GLOW2);   // the library's per-card glow stays there
@@ -983,6 +991,8 @@ public class LauncherActivity extends Activity {
     }
 
     private View focusTarget() {
+        if (sheet != null)
+            return sheet.rows.getChildCount() == 0 ? null : sheet.rows.getChildAt(0);
         Integer i = focusMemory.get(screen);
         if (i != null && i < focusables.size())
             return focusables.get(i);
@@ -1026,6 +1036,26 @@ public class LauncherActivity extends Activity {
             swallowUp = -1;
             return true;
         }
+        if (sheet != null) {   // the sheet: B (or Y again) closes it, A and the D-pad act in it, the rest waits
+            switch (k) {
+            case KeyEvent.KEYCODE_BACK:
+            case KeyEvent.KEYCODE_BUTTON_B:
+            case KeyEvent.KEYCODE_ESCAPE:
+            case KeyEvent.KEYCODE_BUTTON_Y:
+                if (once) {
+                    feedback.play(UiFeedback.Cue.BACK, host);
+                    closeSheet(true);
+                }
+                return true;
+            case KeyEvent.KEYCODE_BUTTON_X:
+            case KeyEvent.KEYCODE_BUTTON_START:
+            case KeyEvent.KEYCODE_BUTTON_L1:
+            case KeyEvent.KEYCODE_BUTTON_R1:
+                return true;
+            default:
+                break;
+            }
+        }
         switch (k) {
         case KeyEvent.KEYCODE_BACK:
         case KeyEvent.KEYCODE_BUTTON_B:
@@ -1057,7 +1087,7 @@ public class LauncherActivity extends Activity {
         case KeyEvent.KEYCODE_DPAD_RIGHT:
         case KeyEvent.KEYCODE_DPAD_CENTER:
         case KeyEvent.KEYCODE_ENTER:
-            if (down && focused() == null && !focusables.isEmpty()) {
+            if (down && focused() == null && (!focusables.isEmpty() || sheet != null)) {
                 restoreFocus(true);
                 return true;
             }
@@ -1083,6 +1113,69 @@ public class LauncherActivity extends Activity {
             return true;
         }
         return super.dispatchTouchEvent(e);
+    }
+
+    // ---- Sheet -------------------------------------------------------------------------------------------------
+
+    /** Opens a sheet over the screen: the screen's focus is kept for later and blocked while it is open. */
+    private Widgets.Sheet openSheet(int title) {
+        closeSheet(false);
+        sheetReturn = focused();
+        sheet = new Widgets.Sheet(this, getString(title), () -> {
+            feedback.play(UiFeedback.Cue.BACK, host);
+            closeSheet(true);
+        });
+        host.addView(sheet, host.indexOfChild(glide), new FrameLayout.LayoutParams(MATCH, MATCH));
+        stageRoot.setDescendantFocusability(ViewGroup.FOCUS_BLOCK_DESCENDANTS);
+        return sheet;
+    }
+
+    /** A row of the open sheet: its action runs once the sheet is closed. */
+    private MenuRow sheetRow(String title, Runnable action) {
+        MenuRow r = new MenuRow(this);
+        r.set(null, title, null);
+        r.onPress = () -> feedback.play(UiFeedback.Cue.SELECT, r);
+        r.setOnClickListener(v -> {
+            closeSheet(false);
+            action.run();
+        });
+        sheet.addRow(r);
+        return r;
+    }
+
+    /** After the rows are added: the first one takes the focus (as the D-pad would). */
+    private void sheetReady() {
+        sheet.addHint(new Widgets.Hint(this, "A", getString(R.string.HINT_SELECT), v -> clickFocused()));
+        sheet.addHint(new Widgets.Hint(this, "B", getString(R.string.HINT_CLOSE), v -> {
+            feedback.play(UiFeedback.Cue.BACK, host);
+            closeSheet(true);
+        }));
+        View first = focusTarget();
+        if (first != null && !first.requestFocus())
+            first.requestFocusFromTouch();
+    }
+
+    /** Closes the open sheet; restore: the focus goes back where it was. */
+    private void closeSheet(boolean restore) {
+        if (sheet == null)
+            return;
+        host.removeView(sheet);
+        sheet = null;
+        stageRoot.setDescendantFocusability(ViewGroup.FOCUS_BEFORE_DESCENDANTS);
+        View back = sheetReturn;
+        sheetReturn = null;
+        if (restore) {
+            if (back != null && back.isAttachedToWindow()) {
+                if (!back.requestFocus())
+                    back.requestFocusFromTouch();
+            } else {
+                restoreFocus(false);
+            }
+        }
+    }
+
+    Widgets.Sheet sheetForTest() {
+        return sheet;
     }
 
     // ---- The Preparing screen's idle dim (OLED burn-in) --------------------------------------------------------
@@ -3021,8 +3114,10 @@ public class LauncherActivity extends Activity {
     }
 
     /**
-     * The library: the grid of games (left), the focused game's details (right), the « Library folder » tile last.
-     * Stock colours; the backdrop's glow follows the focused card (its cached theme).
+     * The library: a full-width grid of games (five columns), the focused game's state and play time as one context
+     * line at the bottom left, and the rest (Rescan, Storage, the library folder, Settings, About) in the Options
+     * sheet on Y. An empty library shows why and a « Library folder » button. Stock colours; the backdrop's glow
+     * follows the focused card (its cached theme).
      */
     private void buildLibrary() {
         screenTitle.setText(R.string.LIB_TITLE);
@@ -3034,6 +3129,7 @@ public class LauncherActivity extends Activity {
             GameCard c = new GameCard(this);
             c.setGame(LibraryScreen.art(getFilesDir(), libArt, e), e.tid, e.title(), LibraryScreen.chipText(this, e),
                       LibraryScreen.chipColor(e.chip));
+            c.setChipShown(e.chip != GameState.Chip.READY);
             c.setDim(e.chip == GameState.Chip.SOURCE_GONE || e.chip == GameState.Chip.DATA_MISSING
                      || e.chip == GameState.Chip.NO_FILE_ACCESS);
             c.setOnClickListener(v -> {
@@ -3045,38 +3141,34 @@ public class LauncherActivity extends Activity {
             if (e.tid.equals(want))
                 focusCard = c;
         }
-        GameCard folder = new GameCard(this);
-        String path = Library.folderPath(this), tree = Library.folderTree(this);
-        folder.setTile(Icon.FOLDER, getString(R.string.LIB_FOLDER_TILE),
-                       tree == null ? getString(R.string.LIB_FOLDER_NONE)
-                       : path != null ? new File(path).getName() : getString(R.string.LIB_FOLDER_SAF));
-        folder.setOnClickListener(v -> {
-            feedback.play(UiFeedback.Cue.SELECT, v);
-            onChooseLibraryFolder();
-        });
-        onFocus(folder, this::libFolderFocus);
-        libCards.add(focusable(folder));
-        if (focusCard == null && (libEntries.isEmpty() || "".equals(focusTid)))
-            focusCard = folder;
-        if (focusCard == null)
+        if (focusCard == null && !libCards.isEmpty())
             focusCard = libCards.get(0);
 
-        libCaption = Theme.text(this, Theme.T_SMALL, Theme.REGULAR, Theme.TEXT_FAINT, "");
-        libCaption.setPadding(28, 0, 0, 0);
-        libCaption.setLineSpacing(0, 1.2f);
+        libCaption = Theme.text(this, Theme.T_BODY, Theme.REGULAR, Theme.TEXT_DIM, "");
+        libCaption.setLineSpacing(0, 1.3f);
         paintScanCaption();
-        LinearLayout h = rowLayout();
-        LinearLayout.LayoutParams gl = lp(0, MATCH, 1);
-        gl.rightMargin = Theme.GAP;
-        h.addView(LibraryScreen.grid(this, libCards, libCaption), gl);
-        h.addView(detailPanel(), lp(600, MATCH));
-        body.addView(h, new FrameLayout.LayoutParams(MATCH, MATCH));
-
-        focusMemory.remove(Screen.LIBRARY);   // the focus follows the title, not a place in the grid
-        defaultFocus = focusCard;
-        if (focusCard == folder) {
-            libFolderFocus();
+        if (libEntries.isEmpty()) {
+            // Nothing to show yet: why, and the one thing to do.
+            LinearLayout empty = column();
+            empty.addView(libCaption, lp(MATCH, WRAP));
+            LinearLayout buttons = rowLayout();
+            LinearLayout.LayoutParams bl = lp(MATCH, Theme.BUTTON_H);
+            bl.topMargin = Theme.S5;
+            empty.addView(buttons, bl);
+            Widgets.PillButton folder = pill(buttons, Icon.FOLDER, getString(R.string.LIB_FOLDER_TILE), true,
+                                             this::onChooseLibraryFolder);
+            defaultFocus = folder;
+            body.addView(empty, new FrameLayout.LayoutParams(MATCH, WRAP));
+            focusTid = "";
+            if (backdrop != null)
+                backdrop.setGlows(Theme.GLOW, Theme.GLOW2);
+            if (companion != null)
+                companion.library("", getString(Library.folderTree(this) == null ? R.string.LIB_FOLDER_NONE
+                                                                                 : R.string.LIB_FOLDER_TILE),
+                                  Theme.TEXT_DIM, null, null);
         } else {
+            body.addView(LibraryScreen.grid(this, libCards, libCaption), new FrameLayout.LayoutParams(MATCH, MATCH));
+            defaultFocus = focusCard;
             for (LibraryScreen.Entry e : libEntries) {
                 if (libCards.get(libEntries.indexOf(e)) == focusCard) {
                     libFocus(e);
@@ -3084,6 +3176,8 @@ public class LauncherActivity extends Activity {
                 }
             }
         }
+        focusMemory.remove(Screen.LIBRARY);   // the focus follows the title, not a place in the grid
+
         startAction = () -> {
             LibraryScreen.Entry e = focusedEntry();
             if (e != null)
@@ -3091,56 +3185,49 @@ public class LauncherActivity extends Activity {
             else
                 onChooseLibraryFolder();
         };
-        yAction = this::rescanLibrary;
-        xAction = () -> go(Screen.STORAGE);
+        yAction = this::openOptions;
         addHint("A", R.string.LIB_HINT_OPEN, this::clickFocused);
         addHint("START", R.string.LIB_HINT_PRIMARY, startAction);
-        addHint("Y", R.string.LIB_RESCAN, this::rescanLibrary);
+        addHint("Y", R.string.HINT_OPTIONS, this::openOptions);
         if (gameRunning())
             setNote(getString(R.string.LIB_RUNNING_NOTE, runningTitle()), NOTE_INFO);
     }
 
-    /** A card got the focus: the details, the backdrop's glow, the bottom screen. */
+    /** Y on the library: the Options sheet (Rescan, Storage, Library folder, Settings, About). */
+    private void openOptions() {
+        if (screen != Screen.LIBRARY)
+            return;
+        openSheet(R.string.HINT_OPTIONS);
+        sheetRow(getString(R.string.LIB_RESCAN), this::rescanLibrary);
+        sheetRow(getString(R.string.LIB_STORAGE), () -> go(Screen.STORAGE))
+                .setValue(getString(R.string.LIB_ST_FREE, size(freeSpace())));
+        String path = Library.folderPath(this), tree = Library.folderTree(this);
+        sheetRow(getString(R.string.LIB_FOLDER_TILE), this::onChooseLibraryFolder)
+                .setValue(tree == null ? getString(R.string.LIB_FOLDER_NONE)
+                          : path != null ? new File(path).getName() : getString(R.string.LIB_FOLDER_SAF));
+        sheetRow(getString(R.string.SETTINGS), () -> go(Screen.SETTINGS));
+        sheetRow(getString(R.string.ABOUT), () -> go(Screen.ABOUT));
+        sheetReady();
+    }
+
+    /** A card got the focus: the context line, the backdrop's glow, the bottom screen. */
     private void libFocus(LibraryScreen.Entry e) {
         focusTid = e.tid;
         int[] g = LibraryScreen.glows(this, e);
         if (backdrop != null)
             backdrop.setGlows(g[0], g[1]);
-        libDetail(e);
+        setContext(libContext(e), LibraryScreen.chipColor(e.chip));
         if (companion != null)
             companion.library(e.title(), LibraryScreen.chipText(this, e), LibraryScreen.chipColor(e.chip),
                               LibraryScreen.art(getFilesDir(), libArt, e), primaryLabel(e));
     }
 
-    private void libDetail(LibraryScreen.Entry e) {
-        detailClear(e.realTid() ? getString(R.string.HOME_TITLE_ID, e.tid) : getString(R.string.LIB_TITLE),
-                    e.title(), libLead(e));
-        detailKv(getString(R.string.KV_STATUS), LibraryScreen.chipText(this, e));
-        LibraryIndex.Item it = e.active;
-        if (it != null) {
-            String src = it.name + (e.variants.size() > 1 ? " · " + getString(R.string.LIB_VERSIONS, e.variants.size())
-                                                         : "");
-            detailKv(getString(R.string.KV_SOURCE), src);
-            String region = LibraryScreen.regionText(this, it.region);
-            if (!region.isEmpty())
-                detailKv(getString(R.string.LIB_KV_REGION), region + " · " + LibraryScreen.versionText(it.version)
-                                                            + (it.disc > 1 ? " · " + getString(R.string.LIB_DISC, it.disc)
-                                                                           : ""));
-            if (LibraryIndex.KIND_ISO.equals(it.kind))
-                detailKv(getString(R.string.LIB_KV_IMAGE), size(it.size));
-        }
-        if (e.record != null && !e.record.dataDir.isEmpty())
-            detailKv(getString(R.string.KV_FOLDER), e.record.dataDir);
-        long now = System.currentTimeMillis();
-        if (e.record != null) {
-            detailKv(getString(R.string.KV_LAST_PLAYED), lastPlayedText(e.record.lastPlayed, now));
-            detailKv(getString(R.string.KV_PLAY_TIME), playTimeText(e.record.playMs));
-        }
-        if (e.realTid() && Pack.check(getFilesDir(), e.tid) == Pack.Check.VALID)
-            detailKv(getString(R.string.KV_PREPARED), packFacts(e.tid)[0]);
-        String action = primaryLabel(e);
-        detailFooter(action == null ? getString(R.string.LIB_FOOTER_OPEN)
-                                    : getString(R.string.LIB_FOOTER, action), Theme.TEXT_FAINT);
+    /** « Ready · Yesterday · 12 h 40 min played »: the focused game's state, and when it was played. */
+    private String libContext(LibraryScreen.Entry e) {
+        String chip = LibraryScreen.chipText(this, e);
+        if (e.record == null)
+            return chip;
+        return chip + " · " + homeMeta(e.record.lastPlayed, e.record.playMs);
     }
 
     /** One line on what a library game's state means for the player. */
@@ -3173,32 +3260,6 @@ public class LauncherActivity extends Activity {
         default:
             return getString(R.string.LIB_LEAD_DATA_MISSING);
         }
-    }
-
-    /** The « Library folder » tile got the focus. */
-    private void libFolderFocus() {
-        focusTid = "";
-        if (backdrop != null)
-            backdrop.setGlows(Theme.GLOW, Theme.GLOW2);
-        String tree = Library.folderTree(this), path = Library.folderPath(this);
-        detailClear(getString(R.string.LIB_TITLE), getString(R.string.LIB_FOLDER_TILE),
-                    getString(R.string.LIB_FOLDER_DETAIL));
-        detailKv(getString(R.string.KV_FOLDER), tree == null ? getString(R.string.LIB_FOLDER_NONE)
-                                                             : path != null ? path : Uri.parse(tree).getPath());
-        long at = Library.scannedAt(this);
-        if (tree != null)
-            detailKv(getString(R.string.LIB_KV_SCANNED), at <= 0 ? getString(R.string.VAL_NEVER)
-                                                                 : lastPlayedText(at, System.currentTimeMillis()));
-        detailKv(getString(R.string.LIB_KV_GAMES), String.valueOf(libEntries.size()));
-        int others = index.others().size();
-        if (others > 0)
-            detailKv(getString(R.string.LIB_KV_OTHERS), String.valueOf(others));
-        if (index.truncated)
-            detailKv(getString(R.string.KV_STATUS), getString(R.string.LIB_TRUNCATED));
-        detailFooter(getString(R.string.LIB_FOLDER_FOOTER), Theme.TEXT_FAINT);
-        if (companion != null)
-            companion.library("", tree == null ? getString(R.string.LIB_FOLDER_NONE)
-                                               : getString(R.string.LIB_FOLDER_TILE), Theme.TEXT_DIM, null, null);
     }
 
     /**

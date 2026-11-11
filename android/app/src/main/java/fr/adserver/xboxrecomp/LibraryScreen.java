@@ -20,13 +20,13 @@ import java.util.Map;
 /**
  * The library screen's model and grid (docs/android/app-shell.md « Game library »): the launcher's records
  * (Library.Games) joined with the scan index (LibraryIndex) into one Entry per title ID, each with its GameState chip,
- * and the scrolling 4-column grid of GameCards. LauncherActivity builds the rest of the screen (detail panel, hints)
- * with its own helpers; this class keeps the library's logic out of it.
+ * and the scrolling full-width 5-column grid of GameCards. LauncherActivity builds the rest of the screen (the context
+ * line, the Options sheet, hints) with its own helpers; this class keeps the library's logic out of it.
  */
 final class LibraryScreen {
     private LibraryScreen() {}
 
-    static final int COLUMNS = 4;
+    static final int COLUMNS = 5;
     /** A « running » status this fresh counts as a live Prepare (LauncherActivity.PREPARE_FRESH_MS). */
     static final long PREPARE_FRESH_MS = 15000;
 
@@ -252,8 +252,9 @@ final class LibraryScreen {
             return Theme.OK;
         case QUEUED:
         case IMPORTING:
-        case NOT_IMPORTED:
             return Theme.ACCENT;
+        case NOT_IMPORTED:
+            return Theme.TEXT_DIM;   // neutral: nothing is wrong (ACCENT is the « ready » green in stock)
         case PREPARE_FAILED:
         case PACK_INVALID:
             return Theme.ERROR;
@@ -318,37 +319,39 @@ final class LibraryScreen {
     // ---- The grid ---------------------------------------------------------------------------------------------------
 
     /**
-     * The grid: rows of COLUMNS cards in a vertical scroll (the D-pad's focus search moves between them by geometry).
-     * cards are added in order; the caller registers them as focusables.
+     * The grid: rows of COLUMNS cards in a vertical scroll (the D-pad's focus search moves between them by geometry),
+     * the first column on the left margin, the last art on the right one. cards are added in order; the caller
+     * registers them as focusables.
      */
     static ScrollView grid(Context c, List<? extends View> cards, View footer) {
         ScrollView scroll = new ScrollView(c);
         scroll.setVerticalScrollBarEnabled(false);
         scroll.setClipToPadding(false);
         scroll.setClipChildren(false);
-        scroll.setPadding(0, 6, 0, 24);
+        scroll.setPadding(0, Theme.S1, 0, Theme.S3);
         LinearLayout col = new LinearLayout(c);
         col.setOrientation(LinearLayout.VERTICAL);
         col.setClipChildren(false);
         LinearLayout row = null;
-        for (int i = 0; i < cards.size(); i++) {
+        int n = cards.size(), rows = (n + COLUMNS - 1) / COLUMNS;
+        for (int i = 0; i < rows * COLUMNS; i++) {
             if (i % COLUMNS == 0) {
                 row = new LinearLayout(c);
                 row.setOrientation(LinearLayout.HORIZONTAL);
                 row.setClipChildren(false);
-                col.addView(row, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT,
-                                                               GameCard.H));
+                col.addView(row, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, GameCard.H));
+            } else {
+                row.addView(new View(c), new LinearLayout.LayoutParams(0, 1, 1));   // the gaps share the rest
             }
-            row.addView(cards.get(i), new LinearLayout.LayoutParams(0, GameCard.H, 1));
-        }
-        if (row != null) {
-            for (int i = cards.size() % COLUMNS; i != 0 && i < COLUMNS; i++)
-                row.addView(new View(c), new LinearLayout.LayoutParams(0, GameCard.H, 1));
+            boolean last = i % COLUMNS == COLUMNS - 1;
+            int w = last ? GameCard.ART : GameCard.W;   // the last art ends on the margin
+            View v = i < n ? cards.get(i) : new View(c);
+            row.addView(v, new LinearLayout.LayoutParams(w, GameCard.H));
         }
         if (footer != null) {
             LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT,
                                                                         LinearLayout.LayoutParams.WRAP_CONTENT);
-            p.topMargin = 12;
+            p.topMargin = Theme.S2;
             col.addView(footer, p);
         }
         scroll.addView(col, new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT,

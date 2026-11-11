@@ -37,6 +37,8 @@
     <string name="HINT_START">Commencer</string>
     <string name="HINT_CHANGE">Modifier</string>
     <string name="HINT_DEFAULTS">Par défaut</string>
+    <string name="HINT_OPTIONS">Options</string>
+    <string name="HINT_CLOSE">Fermer</string>
     <string name="HINT_SECTION">Section</string>
     <string name="KV_GAME">Jeu</string>
     <string name="KV_FOLDER">Dossier</string>

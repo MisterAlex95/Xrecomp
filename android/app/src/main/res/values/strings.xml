@@ -40,6 +40,8 @@
     <string name="HINT_START">Start</string>
     <string name="HINT_CHANGE">Change</string>
     <string name="HINT_DEFAULTS">Defaults</string>
+    <string name="HINT_OPTIONS">Options</string>
+    <string name="HINT_CLOSE">Close</string>
     <string name="HINT_SECTION">Section</string>
     <string name="KV_GAME">Game</string>
     <string name="KV_FOLDER">Folder</string>

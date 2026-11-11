@@ -268,10 +268,19 @@ public class LauncherLibraryTest {
         LauncherActivity a = launch();
         assertEquals(LauncherActivity.Screen.LIBRARY, a.screenForTest());
         List<GameCard> cs = a.libraryCardsForTest();
-        assertEquals("seven games and the folder tile", 8, cs.size());
-        assertEquals(app.getString(R.string.LIB_FOLDER_TILE), cs.get(7).titleForTest());
+        assertEquals("seven games, no folder tile (the folder is in Options)", 7, cs.size());
+        for (GameCard c : cs)
+            assertFalse(app.getString(R.string.LIB_FOLDER_TILE).equals(c.titleForTest()));
         assertEquals(app.getString(R.string.LIB_CHIP_NOT_IMPORTED), card(a, NAMES[2]).chipForTest());
+        assertTrue("a state worth saying shows", card(a, NAMES[2]).chipShownForTest());
         assertEquals(app.getString(R.string.STATE_READY), card(a, NAMES[0]).chipForTest());
+        assertFalse("« Ready » is not shown", card(a, NAMES[0]).chipShownForTest());
+        assertEquals("not imported is neutral", Theme.TEXT_DIM,
+                     LibraryScreen.chipColor(GameState.Chip.NOT_IMPORTED));
+        List<String> hints = new ArrayList<>();
+        for (Widgets.Hint h : a.hintsForTest())
+            hints.add(h.glyphForTest());
+        assertEquals(java.util.Arrays.asList("A", "START", "Y"), hints);
         assertTrue("library: stock colours", Theme.isStock());
         assertTrue(a.companionForTest().libraryForTest());
         render("7", null);
@@ -291,7 +300,63 @@ public class LauncherLibraryTest {
                 key(a, KeyEvent.KEYCODE_DPAD_DOWN);   // the grid scrolls to the focused card
         });
         LauncherActivity a = launch();
-        assertEquals(21, a.libraryCardsForTest().size());
+        assertEquals(20, a.libraryCardsForTest().size());
+    }
+
+    /** An empty library: why, and a « Library folder » button; no card. */
+    @Test
+    public void emptyLibraryOffersTheFolder() throws Exception {
+        useFolder();
+        LauncherActivity a = launch();
+        assertEquals(LauncherActivity.Screen.LIBRARY, a.screenForTest());
+        assertTrue(a.libraryCardsForTest().isEmpty());
+        a.forceFocusForTest();
+        idle(300);
+        assertTrue(a.focusForTest() instanceof Widgets.PillButton);
+        assertEquals(app.getString(R.string.LIB_FOLDER_TILE), ((Widgets.PillButton)a.focusForTest()).title);
+    }
+
+    /** Y: the Options sheet (Rescan, Storage, Library folder, Settings, About); B closes it, the focus comes back. */
+    @Test
+    public void optionsSheet() throws Exception {
+        for (int i = 0; i < 3; i++)
+            folderGame(i);
+        useFolder();
+        LauncherActivity a = launch();
+        a.forceFocusForTest();
+        idle(300);
+        key(a, KeyEvent.KEYCODE_DPAD_RIGHT);
+        GameCard focused = (GameCard)a.focusForTest();
+        key(a, KeyEvent.KEYCODE_BUTTON_X);
+        assertEquals("X no longer opens Storage", LauncherActivity.Screen.LIBRARY, a.screenForTest());
+        key(a, KeyEvent.KEYCODE_BUTTON_Y);
+        Widgets.Sheet sheet = a.sheetForTest();
+        assertNotNull(sheet);
+        List<String> rows = new ArrayList<>();
+        for (Widgets.MenuRow r : sheet.rowsForTest())
+            rows.add(r.title);
+        assertEquals(java.util.Arrays.asList(app.getString(R.string.LIB_RESCAN), app.getString(R.string.LIB_STORAGE),
+                                             app.getString(R.string.LIB_FOLDER_TILE), app.getString(R.string.SETTINGS),
+                                             app.getString(R.string.ABOUT)), rows);
+        assertEquals(root.getName(), sheet.rowsForTest().get(2).value);
+        assertTrue(a.focusForTest() == sheet.rowsForTest().get(0));
+        key(a, KeyEvent.KEYCODE_DPAD_LEFT);   // the focus stays in the sheet
+        assertTrue(a.focusForTest() instanceof Widgets.MenuRow);
+        key(a, KeyEvent.KEYCODE_BUTTON_START);   // nothing behind the sheet
+        assertNull(shadowOf(a).getNextStartedActivity());
+        TestSupport.screenshot(a.getWindow().getDecorView(), "library-options");
+        key(a, KeyEvent.KEYCODE_BUTTON_B);
+        assertNull(a.sheetForTest());
+        assertEquals(LauncherActivity.Screen.LIBRARY, a.screenForTest());
+        assertTrue("the focus comes back to the card", a.focusForTest() == focused);
+
+        key(a, KeyEvent.KEYCODE_BUTTON_Y);
+        a.sheetForTest().rowsForTest().get(1).requestFocusFromTouch();
+        key(a, KeyEvent.KEYCODE_BUTTON_A);
+        assertEquals(LauncherActivity.Screen.STORAGE, a.screenForTest());
+        assertNull(a.sheetForTest());
+        key(a, KeyEvent.KEYCODE_BUTTON_B);
+        assertEquals(LauncherActivity.Screen.LIBRARY, a.screenForTest());
     }
 
     // ---- Navigation and theme --------------------------------------------------------------------------------
