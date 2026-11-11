@@ -7,24 +7,20 @@ import android.view.View;
 
 /**
  * The launcher's second screen in a few calls (docs/android/app-shell.md « Dual screen »): owns the ":launcher"
- * process's CompanionScreen and shows LauncherPanel (Home), LibraryPanel (the game library) or PreparingPanel (a
- * Prepare runs). Wiring, in
- * LauncherActivity:
+ * process's CompanionScreen and shows LauncherPanel (Home, and the focused game on the library: art, title, one
+ * action; the art alone on the other screens) or PreparingPanel (a Prepare runs). Wiring, in LauncherActivity:
  * <pre>
- *   private LauncherCompanion companion;
- *   // onCreate, after buildStage():
- *   companion = new LauncherCompanion(this, new LauncherPanel.Actions() {
- *       public void play() { launchShell(false); }
- *       public void settings() { go(Screen.SETTINGS); }
- *       public void changeGame() { go(Screen.SOURCE); }
- *   });
+ *   companion = new LauncherCompanion(this, () -> onPlay());
+ *   companion.libraryActions(() -> libraryPrimary(focusedEntry()));
  *   protected void onStart() { super.onStart(); companion.start(); }
  *   protected void onStop() { companion.stop(); super.onStop(); }
- *   // where Home is built:      companion.art(titleImage); companion.home(gameTitle(dir), chipText, chipColor, canPlay);
+ *   // where Home is built:      companion.art(titleImage); companion.home(title, status, color, canPlay, label);
+ *   // on the library:           companion.library(title, status, color, art, primaryLabel);
  *   // where Preparing is built: companion.preparing(titleId(), gameTitle(dir));
+ *   // on the other screens:     companion.artOnly();
  * </pre>
- * Without home()/preparing() it shows Home with the remembered title and no status. Hold-to-cancel on the Preparing
- * panel sends PrepareService's cancel itself.
+ * Without home()/preparing() it shows Home with the remembered title. Hold-to-cancel on the Preparing panel sends
+ * PrepareService's cancel itself.
  */
 final class LauncherCompanion {
     private final Activity activity;
@@ -33,13 +29,12 @@ final class LauncherCompanion {
     private String title, status = "", tid;
     private int statusColor = Theme.TEXT_DIM;
     private android.graphics.Bitmap art;
-    private boolean canPlay = true, preparing;
-    /** The library (LibraryPanel) instead of Home; its actions, the primary button's label (null: greyed). */
+    private boolean canPlay = true, preparing, artOnly;
+    /** Home's action label (Play, Prepare, Choose…); the library's (null: greyed). */
+    private String homeAction, libraryAction;
+    /** The focused library game instead of Home, and its action. */
     private boolean library;
-    private LibraryPanel.Actions libraryActions;
-    private String libraryAction;
-    /** Home's third shortcut: « Change game », or « Library » when the game library is on. */
-    private String changeLabel;
+    private Runnable libraryPrimary;
 
     LauncherCompanion(Activity activity, LauncherPanel.Actions actions) {
         this.activity = activity;
@@ -60,41 +55,35 @@ final class LauncherCompanion {
         return screen;
     }
 
-    /** Home: the identity card's title and status (e.g. the launcher's chip), Play greyed when it cannot start. */
+    /** Home: its title and status, Play greyed when it cannot start. */
     void home(String title, String status, int statusColor, boolean canPlay) {
+        home(title, status, statusColor, canPlay, null);
+    }
+
+    /** Home, with its action's label (null: Play). */
+    void home(String title, String status, int statusColor, boolean canPlay, String action) {
         this.title = title == null ? "" : title;
         this.status = status == null ? "" : status;
         this.statusColor = statusColor;
         this.canPlay = canPlay;
+        homeAction = action;
         boolean was = preparing || library;
         preparing = false;
         library = false;
+        artOnly = false;
         View v = screen.content();
         if (!was && v instanceof LauncherPanel)
-            ((LauncherPanel)v).set(this.title, this.status, statusColor, canPlay);
+            fill((LauncherPanel)v);
         else
             screen.rebuild();
     }
 
-    /** The actions of the library's panel (set once, before library()). */
-    void libraryActions(LibraryPanel.Actions a) {
-        libraryActions = a;
+    /** The library's action: the focused game's primary one (set once, before library()). */
+    void libraryActions(Runnable primary) {
+        libraryPrimary = primary;
     }
 
-    /** Home's third shortcut's label (« Library » when the game library is on); null: « Change game ». */
-    void changeLabel(String label) {
-        if (java.util.Objects.equals(label, changeLabel))
-            return;
-        changeLabel = label;
-        View v = screen.content();
-        if (v instanceof LauncherPanel)
-            ((LauncherPanel)v).setChangeLabel(label);
-    }
-
-    /**
-     * The library: the focused game's card (title "" for none), its state, its art (null: none) and the primary
-     * button's label (null: greyed).
-     */
+    /** The library: the focused game (title "" for none), its state, its art (null: none) and action (null: greyed). */
     void library(String title, String status, int statusColor, android.graphics.Bitmap art, String action) {
         this.title = title == null ? "" : title;
         this.status = status == null ? "" : status;
@@ -104,20 +93,29 @@ final class LauncherCompanion {
         boolean was = library && !preparing;
         library = true;
         preparing = false;
+        artOnly = false;
         View v = screen.content();
-        if (was && v instanceof LibraryPanel) {
-            ((LibraryPanel)v).setArt(art);
-            ((LibraryPanel)v).set(this.title, this.status, statusColor, action);
-        } else {
+        if (was && v instanceof LauncherPanel)
+            fill((LauncherPanel)v);
+        else
             screen.rebuild();
-        }
     }
 
     boolean libraryForTest() {
         return library && !preparing;
     }
 
-    /** The game's title image for Home's identity card (null: none); shown with the next home(). */
+    /** Any other screen (Settings, Storage…): the art alone. */
+    void artOnly() {
+        if (preparing)
+            return;   // a running Prepare keeps its panel
+        artOnly = true;
+        View v = screen.content();
+        if (v instanceof LauncherPanel)
+            ((LauncherPanel)v).setArtOnly(true);
+    }
+
+    /** The game's title image (null: none); shown at once, and with the next home(). */
     void art(android.graphics.Bitmap b) {
         art = b;
         View v = screen.content();
@@ -125,7 +123,7 @@ final class LauncherCompanion {
             ((LauncherPanel)v).setArt(b);
     }
 
-    /** A Prepare runs for titleId: the Preparing panel, which follows status.json and prepare.log on its own. */
+    /** A Prepare runs for titleId: the Preparing panel, which follows status.json on its own. */
     void preparing(String titleId, String title) {
         boolean same = preparing && titleId != null && titleId.equals(tid);
         tid = titleId;
@@ -133,8 +131,18 @@ final class LauncherCompanion {
             this.title = title;
         preparing = true;
         library = false;
+        artOnly = false;
         if (!same)
             screen.rebuild();
+    }
+
+    private void fill(LauncherPanel p) {
+        p.setArt(art);
+        p.set(title, status, statusColor, library ? libraryAction != null : canPlay);
+        p.setAction(library ? libraryAction : homeAction != null ? homeAction : activity.getString(R.string.PLAY));
+        if (!library && !canPlay)
+            p.button(LauncherPanel.PLAY).enabled = false;
+        p.setArtOnly(artOnly);
     }
 
     private View create(Context c) {
@@ -149,17 +157,15 @@ final class LauncherCompanion {
                 }
             });
         }
-        if (library) {
-            LibraryPanel l = new LibraryPanel(c, libraryActions);
-            l.setArt(art);
-            l.set(title, status, statusColor, libraryAction);
-            return l;
-        }
-        LauncherPanel p = new LauncherPanel(c, actions);
-        if (changeLabel != null)
-            p.setChangeLabel(changeLabel);
-        p.setArt(art);
-        p.set(title, status, statusColor, canPlay);
+        LauncherPanel p = new LauncherPanel(c, () -> {
+            if (library) {
+                if (libraryPrimary != null)
+                    libraryPrimary.run();
+            } else if (actions != null) {
+                actions.play();
+            }
+        });
+        fill(p);
         return p;
     }
 }

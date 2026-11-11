@@ -47,7 +47,7 @@ abstract class PanelView extends View {
         final int id;
         final Kind kind;
         final RectF r;
-        final PanelIcons.Icon icon;
+        PanelIcons.Icon icon;
         String label, hint;
         /** PAD: the wButtons bits and the analog-button mask (bit i = bAnalogButtons[i] at 255) it holds. */
         int padButtons, padAnalog;
@@ -349,9 +349,15 @@ abstract class PanelView extends View {
         return Math.max(0, Math.min(1, (clock.now() - holdStart) / (float)HOLD_MS));
     }
 
+    /**
+     * A button, borderless (Calm): a pill when it is a short one (the launcher's actions), rounded otherwise (the
+     * in-game panel's pads and tools). The accent one is ACCENT on ACCENT_FACE, solid ACCENT with GLYPH_INK while
+     * held; a hold button fills in red while held. Dimmed: a faint outline only.
+     */
     protected void drawButton(Canvas c, Button b, boolean dimmed) {
         RectF r = b.r;
-        float rad = 30;
+        boolean pill = r.height() <= 160;
+        float rad = pill ? r.height() / 2 : 40;
         if (dimmed) {
             stroke.setStrokeWidth(2);
             stroke.setColor(Theme.alpha(Theme.TEXT_FAINT, 0.32f));
@@ -360,15 +366,10 @@ abstract class PanelView extends View {
         }
         boolean held = isHeld(b), hold = b.kind == Kind.HOLD;
         float a = b.enabled ? 1 : 0.4f;
-        // A hold button does something that cannot be undone: it fills in red while held.
-        int face = held ? (hold ? 0xFF2A1210 : Theme.ACCENT_DEEP) : b.accent ? Theme.ACCENT_FACE : Theme.PANEL_HI;
-        int edge = held ? (hold ? Theme.ERROR : Theme.ACCENT) : b.on ? Theme.ACCENT
-                 : b.accent ? Theme.ACCENT_DEEP : Theme.LINE;
+        int face = held ? (hold ? 0xFF2A1210 : Theme.ACCENT) : b.accent ? Theme.ACCENT_FACE
+                 : b.on ? Theme.ACCENT_DEEP : Theme.PANEL_HI;
         fill.setColor(Theme.alpha(face, a));
         c.drawRoundRect(r, rad, rad, fill);
-        stroke.setStrokeWidth(b.on || held ? 4 : 3);
-        stroke.setColor(Theme.alpha(edge, a));
-        c.drawRoundRect(r, rad, rad, stroke);
 
         float hf = holdFraction(b);
         if (hf > 0) {
@@ -379,24 +380,40 @@ abstract class PanelView extends View {
             c.restore();
         }
 
-        int ink = Theme.alpha(held ? 0xFFFFFFFF : b.accent || b.on ? Theme.ACCENT : Theme.TEXT, a);
+        int ink = Theme.alpha(held ? (hold ? 0xFFFFFFFF : Theme.GLYPH_INK)
+                              : b.accent || b.on ? Theme.ACCENT : Theme.TEXT, a);
         boolean hasHint = b.hint != null && !b.hint.isEmpty();
+        text.setTypeface(Theme.MEDIUM);
+        text.setTextSize(b.label.length() > 9 ? 32 : 38);
+        text.setColor(ink);
+        if (pill) {
+            // Side by side: the icon, then the label, centred.
+            float is = b.icon != null ? 40 : 0, gap = b.icon != null ? 24 : 0;
+            String label = fit(b.label, r.width() - 64 - is - gap);
+            float lw = text.measureText(label), x = r.centerX() - (is + gap + lw) / 2;
+            if (b.icon != null) {
+                stroke.setColor(ink);
+                stroke.setStrokeWidth(5);
+                PanelIcons.draw(c, b.icon, x + is / 2, r.centerY(), is, stroke);
+            }
+            text.setTextAlign(Paint.Align.LEFT);
+            Paint.FontMetrics fm = text.getFontMetrics();
+            c.drawText(label, x + is + gap, r.centerY() - (fm.ascent + fm.descent) / 2, text);
+            return;
+        }
         float cy = r.centerY() - (hasHint ? 34 : 22);
         if (b.icon != null) {
             stroke.setColor(ink);
             stroke.setStrokeWidth(6);
             PanelIcons.draw(c, b.icon, r.centerX(), cy - 18, Math.min(84, r.height() * 0.36f), stroke);
         }
-        text.setTypeface(Theme.MEDIUM);
-        text.setTextSize(b.label.length() > 9 ? 32 : 38);
-        text.setColor(ink);
         text.setTextAlign(Paint.Align.CENTER);
         float ly = b.icon != null ? cy + 62 : r.centerY() + (hasHint ? -4 : 13);
         drawFit(c, b.label, r.centerX(), ly, r.width() - 24);
         if (hasHint) {
             text.setTypeface(Theme.REGULAR);
             text.setTextSize(Theme.T_SMALL);
-            text.setColor(Theme.alpha(held ? Theme.TEXT_DIM : Theme.TEXT_FAINT, a));
+            text.setColor(Theme.alpha(held ? Theme.TEXT : Theme.TEXT_DIM, a));
             drawFit(c, b.hint, r.centerX(), ly + 40, r.width() - 24);
         }
     }
@@ -484,27 +501,14 @@ abstract class PanelView extends View {
         return String.format(Locale.ROOT, f, a);
     }
 
-    /** A rounded card behind a block. */
-    protected void drawCard(Canvas c, RectF r) {
-        fill.setColor(Theme.PANEL);
-        c.drawRoundRect(r, 28, 28, fill);
-        stroke.setStrokeWidth(2);
-        stroke.setColor(Theme.LINE);
-        c.drawRoundRect(r, 28, 28, stroke);
-    }
-
-    /** The launcher panels' top strip: an optional caption on the left, battery, then thermal status on the right. */
-    protected void drawStrip(Canvas c, String caption, String bat, int th) {
-        Context ctx = getContext();
-        float y = 92, x = 44;
-        if (caption != null && !caption.isEmpty())
-            x = drawStatus(c, x, y, Theme.ACCENT, caption, Theme.TEXT) + 40;
-        if (!bat.isEmpty())
-            drawStatus(c, x, y, 0, ctx.getString(R.string.PANEL_BATTERY, bat), Theme.TEXT_DIM);
-        String ts = ctx.getString(thermalLabel(th));
-        text.setTextSize(30);
-        text.setTypeface(Theme.MEDIUM);
-        float tw = text.measureText(ts) + 30;
-        drawStatus(c, W - 44 - tw, y, thermalColor(th), ts, thermalColor(th));
+    /** The battery, small, in the top right corner (the launcher's panels). */
+    protected void drawBattery(Canvas c, String bat) {
+        if (bat.isEmpty())
+            return;
+        text.setTypeface(Theme.REGULAR);
+        text.setTextSize(Theme.T_SMALL);
+        text.setTextAlign(Paint.Align.RIGHT);
+        text.setColor(Theme.TEXT_DIM);
+        c.drawText(bat, W - 48, 76, text);
     }
 }

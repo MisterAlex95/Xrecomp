@@ -374,40 +374,13 @@ public class LauncherActivity extends Activity {
         feedback = new UiFeedback(this);
         syncTheme(first);       // the game's colours before any view is built: no flash of the stock green
         buildStage();
-        // The second screen (AYN Thor, docs/android/app-shell.md « Dual screen »): Home's or the Prepare's panel.
-        companion = new LauncherCompanion(this, new LauncherPanel.Actions() {
-            @Override
-            public void play() {
-                onPlay();
-            }
-
-            @Override
-            public void settings() {
-                go(Screen.SETTINGS);
-            }
-
-            @Override
-            public void changeGame() {
-                onChangeGame();
-            }
-        });
-        companion.libraryActions(new LibraryPanel.Actions() {
-            @Override
-            public void primary() {
-                LibraryScreen.Entry e = focusedEntry();
-                if (e != null)
-                    libraryPrimary(e);
-            }
-
-            @Override
-            public void rescan() {
-                rescanLibrary();
-            }
-
-            @Override
-            public void settings() {
-                go(Screen.SETTINGS);
-            }
+        // The second screen (AYN Thor, docs/android/app-shell.md « Dual screen »): Home's, the library's or the
+        // Prepare's panel; its one action is the main screen's.
+        companion = new LauncherCompanion(this, this::onPlay);
+        companion.libraryActions(() -> {
+            LibraryScreen.Entry e = focusedEntry();
+            if (e != null)
+                libraryPrimary(e);
         });
 
         show(first);
@@ -874,6 +847,8 @@ public class LauncherActivity extends Activity {
             break;
         }
         restoreFocus(false);
+        if (companion != null && s != Screen.HOME && s != Screen.LIBRARY && s != Screen.PREPARE)
+            companion.artOnly();   // the bottom screen: the game's art alone
         // The library folder read as files: a (stat-only) rescan each time the library opens.
         if (s == Screen.LIBRARY && was != Screen.LIBRARY && Library.folderPath(this) != null)
             startScan();
@@ -1724,13 +1699,6 @@ public class LauncherActivity extends Activity {
                 heroLine(info, statusText, statusColor);
             heroLine(info, stateText(st, dir), 0);
         }
-        if (companion != null) {
-            companion.changeLabel(libraryOn() ? getString(R.string.LIB_TITLE) : null);
-            companion.art(st == State.NONE ? null : art);
-            companion.home(st == State.NONE ? "" : title,
-                           statusText != null ? statusText : getString(R.string.STATE_READY),
-                           statusText != null ? statusColor : Theme.OK, st == State.READY && !preparing);
-        }
 
         LinearLayout buttons = heroButtons(info);
         Widgets.PillButton play;
@@ -1751,6 +1719,12 @@ public class LauncherActivity extends Activity {
         }
         homePrimary = play;
         homePills(buttons);
+        if (companion != null) {
+            companion.art(st == State.NONE ? null : art);
+            companion.home(st == State.NONE ? "" : title,
+                           statusText != null ? statusText : getString(R.string.STATE_READY),
+                           statusText != null ? statusColor : Theme.OK, !play.dim, play.title);
+        }
 
         defaultFocus = play;
         startAction = this::onPlay;
@@ -3316,9 +3290,8 @@ public class LauncherActivity extends Activity {
         homePills(buttons);
 
         if (companion != null) {
-            companion.changeLabel(getString(R.string.LIB_TITLE));
             companion.art(art);
-            companion.home(title, chipText, chipColor, primaryLabel(e) != null);
+            companion.home(title, chipText, chipColor, primaryLabel(e) != null, play.title);
         }
         defaultFocus = play;
         startAction = this::onPlay;
