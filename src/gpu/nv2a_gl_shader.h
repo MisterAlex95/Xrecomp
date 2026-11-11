@@ -50,7 +50,23 @@ typedef struct {
     uint32_t clip_plane_mode;             /* only when a stage clips */
     uint32_t tex_kind[4];                 /* NV2A_GL_TEX_* */
     uint32_t alpha_func;                  /* 0: alpha test off */
+    /* Bump-env stages (modes 6, 7; stages 1-3): bump_src[st] is 0x10 | the
+     * input stage. bump_fetch[src] says how that input stage's dU/dV/L are
+     * read: NV2A_GL_DSDT_TEXEL set, texel by texel with texelFetch, each
+     * texel's bytes made signed before filtering (what the hardware does;
+     * filtering unsigned bytes first turns 0x01 next to 0xFF into -1), with
+     * _LINEAR a bilinear blend of four, _WRAP_U/_V wrapping rather than
+     * clamping at the edge; 0, from the filtered texel (xemu's way). */
+    uint32_t bump_src[4];
+    uint32_t bump_fetch[4];
 } Nv2aGlShaderKey;
+
+enum {
+    NV2A_GL_DSDT_TEXEL  = 0x1,
+    NV2A_GL_DSDT_LINEAR = 0x2,
+    NV2A_GL_DSDT_WRAP_U = 0x4,
+    NV2A_GL_DSDT_WRAP_V = 0x8
+};
 
 /* Fill the key for one batch. Unused words are zeroed so equal states give
  * equal keys byte for byte (memcmp, hashing). */
@@ -71,7 +87,9 @@ const char *nv2a_gl_vertex_body(void);
 /* Write the fragment shader body for `key` into buf (without the header).
  * Returns the length, or 0 if it did not fit. Uniforms it declares:
  *   sampler2D/samplerCube/sampler2DShadow u_t0..u_t3, vec2 u_tscale[4],
- *   vec4 u_c0[8], u_c1[8], u_fc0, u_fc1, u_fogc, float u_aref. */
+ *   vec4 u_c0[8], u_c1[8], u_fc0, u_fc1, u_fogc, float u_aref,
+ *   vec4 u_bm[4] (bump-env matrix per stage: m00, m01, m10, m11) and
+ *   vec2 u_bso[4] (bump-env luminance scale, offset per stage). */
 size_t nv2a_gl_fragment_body(const Nv2aGlShaderKey *key, char *buf, size_t cap);
 
 #endif

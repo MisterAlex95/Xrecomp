@@ -150,13 +150,24 @@ enum {
 };
 
 /* One texture stage. mode is the stage's SHADER_STAGE_PROGRAM field
- * (0 none, 1 2D, 2 3D, 3 cube, 4 pass-through, 5 clip plane, others bump/dot
- * modes the CPU rasteriser reads as zero); valid says the stage's texture
- * registers describe something samplable. */
+ * (0 none, 1 2D, 2 3D, 3 cube, 4 pass-through, 5 clip plane, 6 bump-env,
+ * 7 bump-env with luminance, others dot modes; the CPU rasteriser reads 6
+ * and up as zero); valid says the stage's texture registers describe
+ * something samplable.
+ *
+ * Stages 1-3, modes 6 and 7 (xemu psh.c PS_TEXTUREMODES_BUMPENVMAP[_LUM]):
+ * the stage samples its texture at its coordinates plus bump_mat times
+ * (dU, dV), dU/dV the signed blue and green of the input stage's texel
+ * (Nv2aPixelState.other_stage_input); mode 7 then multiplies the texel by
+ * bump_scale * L + bump_offset, L the input texel's red.
+ * SET_TEXTURE_SET_BUMP_ENV_MAT(st) words as matrix elements m00, m01, m10,
+ * m11 (the method's own word order is 00, 01, 11, 10). */
 typedef struct {
     uint32_t    mode;
     uint32_t    valid;
     Nv2aTexture tex;
+    float       bump_mat[4];
+    float       bump_scale, bump_offset;
 } Nv2aTexStage;
 
 typedef struct {
@@ -173,6 +184,10 @@ typedef struct {
      * "stored depth <func> 0". The CPU rasteriser reads such stages as
      * white. */
     uint32_t     shadow_func;
+    /* SET_SHADER_OTHER_STAGE_INPUT (0x1E78): the stage a bump-env stage
+     * reads dU/dV from -- stage 1 always stage 0, stage 2 bits 16-19,
+     * stage 3 bits 20-23 (xemu psh.c input_tex). */
+    uint32_t     other_stage_input;
 } Nv2aPixelState;
 
 /* A vertex-program batch for a back end with NV2A_BACKEND_CAP_PROGRAM.

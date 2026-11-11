@@ -366,6 +366,153 @@ int main(void)
         CHECK(glGetError() == GL_NO_ERROR);
         printf("shadow-map compares: %s\n", s_fail ? "FAILED" : "ok");
     }
+    /* ---- bump-env (stage modes 6 and 7) -------------------------------- *
+     * Stage 0 (PROJECT2D) samples a dU/dV/L texture, stage 1 a 4x4 colour
+     * texture whose texel (x, y) is (40x + 20, 40y + 20, 0) at its own
+     * coordinates plus M (dU, dV); the combiners pass t1 through. dU, dV
+     * are the blue and green bytes as signed (0x7F = +1, 0x81 = -1), the
+     * matrix m00, m01, m10, m11 in u_bm, D = (m00 dU + m10 dV,
+     * m01 dU + m11 dV) (xemu psh.c), so 0.25 is one texel. */
+    {
+        static const struct {
+            uint32_t mode;
+            uint8_t b, g, r;                  /* dsdt texel: dU, dV, L */
+            float m[4], scale, offset;
+            int dx, dy;                       /* expected texel shift */
+            float lum;                        /* expected colour factor */
+            int lin;                          /* 2x1 bilinear source case */
+        } cases[] = {
+            { 6, 0x7F, 0x00, 0, { 0.25f, 0, 0, 0.25f }, 0, 0,  1,  0, 1.0f, 0 },
+            { 6, 0x00, 0x81, 0, { 0.25f, 0, 0, 0.25f }, 0, 0,  0, -1, 1.0f, 0 },
+            { 6, 0x7F, 0x00, 0, { 0, 0.25f, 0, 0 },     0, 0,  0,  1, 1.0f, 0 },  /* m01: dU moves v */
+            { 6, 0x00, 0x7F, 0, { 0, 0, 0.5f, 0 },      0, 0,  2,  0, 1.0f, 0 },  /* m10: dV moves u */
+            { 7, 0x81, 0x00, 0x80, { 0.25f, 0, 0, 0.25f }, 0.5f, 0.25f, -1, 0,
+              0.5f * 128.0f / 255.0f + 0.25f, 0 },
+            /* dU +2/127 and -2/127 side by side, sampled half way with a
+             * bilinear filter: signed per texel they cancel (no shift);
+             * blended as unsigned bytes first they would read 0x80, -1. */
+            { 6, 0x02, 0x00, 0, { 0.25f * 127.0f / 2.0f, 0, 0, 0 }, 0, 0, 0, 0, 1.0f, 1 },
+        };
+        const uint32_t bkinds[4] = { NV2A_GL_TEX_2D, NV2A_GL_TEX_2D, 0, 0 };
+        float tscale[8] = {1, 1, 1, 1, 1, 1, 1, 1}, vp[4] = {0.5f, 0.5f, 1.0f / 8388607.5f, 0};
+        uint8_t col[4 * 4 * 4];
+        GLuint btex[2], fs, prog;
+        unsigned c, i, x, y;
+        int bump_bad = 0;
+
+        for (y = 0; y < 4; y++)
+            for (x = 0; x < 4; x++) {
+                uint8_t *p = &col[(y * 4 + x) * 4];
+                p[0] = (uint8_t)(40 * x + 20); p[1] = (uint8_t)(40 * y + 20);
+                p[2] = 0; p[3] = 255;
+            }
+        glGenTextures(2, btex);
+        glActiveTexture(GL_TEXTURE1);
+        glBindTexture(GL_TEXTURE_2D, btex[1]);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 4, 4, 0, GL_RGBA, GL_UNSIGNED_BYTE, col);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+        for (c = 0; c < sizeof cases / sizeof cases[0]; c++) {
+            uint8_t ds[4 * 4 * 4], got[4 * 4 * 4];
+            float bm[16] = {0}, bso[8] = {0};
+            GLint ok = 0;
+            int dw = cases[c].lin ? 2 : 4, dh = cases[c].lin ? 1 : 4;
+            for (i = 0; i < (unsigned)(dw * dh); i++) {
+                ds[i * 4 + 0] = cases[c].r; ds[i * 4 + 1] = cases[c].g;
+                ds[i * 4 + 2] = cases[c].b; ds[i * 4 + 3] = 255;
+            }
+            if (cases[c].lin)
+                ds[4 + 2] = (uint8_t)(0x100 - cases[c].b);
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, btex[0]);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, dw, dh, 0, GL_RGBA, GL_UNSIGNED_BYTE, ds);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, cases[c].lin ? GL_LINEAR : GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, cases[c].lin ? GL_LINEAR : GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_COMPARE_MODE, GL_NONE);
+
+            memset(&ps, 0, sizeof ps);
+            ps.shade = NV2A_SHADE_COMBINERS;
+            ps.rc.control = 1;
+            ps.rc.stage_program = 1u | cases[c].mode << 5;
+            ps.rc.color_icw[0] = 0x09u << 24 | 0x20u << 16;    /* A = t1, B = 1 */
+            ps.rc.color_ocw[0] = 0x0Cu << 4;                   /* r0 = A*B */
+            ps.stage[0].valid = 1;
+            ps.stage[0].mode = 1;
+            ps.stage[0].tex.color = 0x06;
+            ps.stage[0].tex.filter = cases[c].lin ? 0x02020000u : 0x01010000u;
+            ps.stage[0].tex.addr_u = cases[c].lin ? 3 : 1;
+            ps.stage[0].tex.addr_v = cases[c].lin ? 3 : 1;
+            memset(&rs, 0, sizeof rs);
+            nv2a_gl_shader_key(&ps, &rs, bkinds, &k1);
+            CHECK(k1.bump_src[1] == 0x10);
+            CHECK((k1.bump_fetch[0] & NV2A_GL_DSDT_TEXEL) != 0);
+            CHECK(nv2a_gl_fragment_body(&k1, body, sizeof body) > 0);
+            fs = compile(GL_FRAGMENT_SHADER, body);
+            CHECK(fs != 0);
+            if (!fs)
+                break;
+            prog = glCreateProgram();
+            glAttachShader(prog, vs);
+            glAttachShader(prog, fs);
+            glLinkProgram(prog);
+            glGetProgramiv(prog, GL_LINK_STATUS, &ok);
+            CHECK(ok);
+            glUseProgram(prog);
+            for (i = 0; i < 4; i++) {
+                char nm[8];
+                snprintf(nm, sizeof nm, "u_t%u", i);
+                glUniform1i(glGetUniformLocation(prog, nm), (GLint)i);
+            }
+            memcpy(&bm[4], cases[c].m, sizeof cases[c].m);
+            bso[2] = cases[c].scale;
+            bso[3] = cases[c].offset;
+            glUniform4fv(glGetUniformLocation(prog, "u_vp"), 1, vp);
+            glUniform2fv(glGetUniformLocation(prog, "u_tscale"), 4, tscale);
+            glUniform4fv(glGetUniformLocation(prog, "u_bm"), 4, bm);
+            glUniform2fv(glGetUniformLocation(prog, "u_bso"), 4, bso);
+            /* Coordinates 0..1 over the 4x4 target: pixel (x, y) at texel
+             * centre (x, y) of the colour texture; the 2x1 source is read
+             * at its centre (half way between its texels). */
+            for (i = 0; i < 6; i++) {
+                static const float xy[6][2] = { {0,0}, {4,0}, {4,4}, {0,0}, {4,4}, {0,4} };
+                memset(&quad[i], 0, sizeof quad[i]);
+                quad[i].pos[0] = xy[i][0]; quad[i].pos[1] = xy[i][1];
+                quad[i].pos[3] = 1.0f;
+                quad[i].tex[0][0] = cases[c].lin ? 0.5f : xy[i][0] / 4.0f;
+                quad[i].tex[0][1] = cases[c].lin ? 0.5f : xy[i][1] / 4.0f;
+                quad[i].tex[0][3] = 1.0f;
+                quad[i].tex[1][0] = xy[i][0] / 4.0f;
+                quad[i].tex[1][1] = xy[i][1] / 4.0f;
+                quad[i].tex[1][3] = 1.0f;
+            }
+            glBufferData(GL_ARRAY_BUFFER, sizeof quad, quad, GL_STREAM_DRAW);
+            glDrawArrays(GL_TRIANGLES, 0, 6);
+            glReadPixels(0, 0, 4, 4, GL_RGBA, GL_UNSIGNED_BYTE, got);
+            for (y = 0; y < 4; y++)
+                for (x = 0; x < 4; x++) {
+                    unsigned tx = (x + 4 + (unsigned)cases[c].dx) & 3;
+                    unsigned ty = (y + 4 + (unsigned)cases[c].dy) & 3;
+                    int wr = (int)((float)(40 * tx + 20) * cases[c].lum + 0.5f);
+                    int wg = (int)((float)(40 * ty + 20) * cases[c].lum + 0.5f);
+                    const uint8_t *g = &got[(y * 4 + x) * 4];
+                    if (abs(g[0] - wr) > 2 || abs(g[1] - wg) > 2) {
+                        if (bump_bad++ < 6)
+                            printf("bump case %u pixel %u,%u: got %d,%d want %d,%d\n",
+                                   c, x, y, g[0], g[1], wr, wg);
+                    }
+                }
+            glDeleteProgram(prog);
+            glDeleteShader(fs);
+        }
+        glDeleteTextures(2, btex);
+        CHECK(glGetError() == GL_NO_ERROR);
+        CHECK(bump_bad == 0);
+        printf("bump-env stages: %s\n", bump_bad ? "FAILED" : "ok");
+    }
     CHECK(tested == 400);
     CHECK(mism == 0);
     if (!s_fail)

@@ -2532,7 +2532,20 @@ static void current_pixel_state(Nv2aPixelState *p, uint32_t shade, int textured)
         }
         if (p->stage[st].valid)
             texture_to_backend(t, &p->stage[st].tex);
+        if (st > 0 && (p->stage[st].mode == 6 || p->stage[st].mode == 7)) {
+            /* SET_TEXTURE_SET_BUMP_ENV_MAT/_SCALE/_OFFSET(st): words 00,
+             * 01, 11, 10 (xemu pgraph.c's swizzle), scale, offset. */
+            const uint32_t *m = &s_reg[(0x1B28u + 64u * (uint32_t)st) / 4];
+            Nv2aTexStage *o = &p->stage[st];
+            memcpy(&o->bump_mat[0], &m[0], 4);
+            memcpy(&o->bump_mat[1], &m[1], 4);
+            memcpy(&o->bump_mat[3], &m[2], 4);
+            memcpy(&o->bump_mat[2], &m[3], 4);
+            memcpy(&o->bump_scale, &m[4], 4);
+            memcpy(&o->bump_offset, &m[5], 4);
+        }
     }
+    p->other_stage_input = s_reg[0x1E78 / 4];          /* SET_SHADER_OTHER_STAGE_INPUT */
 }
 
 /* `textured`: the batch carried texture coordinates, so the bound texture is
@@ -5337,6 +5350,7 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
         s_gpu.rc_seen = 1;
         break;
     case 0x1E70: s_gpu.rc.stage_program = param; break;
+    case 0x1E78: break;                           /* OTHER_STAGE_INPUT: from s_reg */
     case 0x17F8: s_gpu.clip_plane_mode = param; break;
 
     /* Alpha test and fog. */

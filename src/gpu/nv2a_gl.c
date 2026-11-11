@@ -75,6 +75,7 @@ static struct {
     uint32_t vsh_draws, vsh_kb;     /* vertex-program batches, their upload */
     uint32_t rt_creates, relayouts, rt_direct, rt_copies, rt_grows, shadow_binds;
     uint32_t seeds, seeds_skipped, invalidates;
+    uint32_t bump_draws;            /* batches with a bump-env stage */
 } s_st;
 
 /* RECOMP_GPU_RT_RELAYOUT_READBACK=1: read a target back when the title
@@ -1179,6 +1180,7 @@ typedef struct {
     GLuint prog;                    /* 0 with `failed`: do not retry */
     int failed;
     GLint u_vp, u_tscale, u_c0, u_c1, u_fc0, u_fc1, u_fogc, u_aref;
+    GLint u_bm, u_bso;              /* -1 without a bump-env stage */
     /* With a translated vertex program (vsh_hash != 0): its uniforms, the
      * location of each c[i] (-1 where the compiler dropped it), and the
      * constant serial this program's copy of c[] is synced to. */
@@ -1294,6 +1296,8 @@ static GlProg *prog_get(const Nv2aGlShaderKey *key, const GlVsh *vsh)
     p->u_fc1 = glGetUniformLocation(p->prog, "u_fc1");
     p->u_fogc = glGetUniformLocation(p->prog, "u_fogc");
     p->u_aref = glGetUniformLocation(p->prog, "u_aref");
+    p->u_bm = glGetUniformLocation(p->prog, "u_bm");
+    p->u_bso = glGetUniformLocation(p->prog, "u_bso");
     if (vsh) {
         p->u_xf = glGetUniformLocation(p->prog, "u_xf");
         p->u_fog = glGetUniformLocation(p->prog, "u_fog");
@@ -1704,7 +1708,10 @@ static void bind_stage_textures(const Nv2aPixelState *ps, uint32_t kind[4], floa
         kind[st] = NV2A_GL_TEX_NONE;
         tscale[st * 2] = tscale[st * 2 + 1] = 1.0f;
         s_stage_rt[st] = NULL;
-        if (ps->shade == NV2A_SHADE_COMBINERS ? !(mode >= 1 && mode <= 3) : (st || !mode))
+        /* Combiners: 2D, 3D, cube, and bump-env (6, 7) from stage 1 on. */
+        if (ps->shade == NV2A_SHADE_COMBINERS
+            ? !((mode >= 1 && mode <= 3) || (st && (mode == 6 || mode == 7)))
+            : (st || !mode))
             continue;
         if (!ts->valid)
             continue;
@@ -1794,6 +1801,18 @@ static void set_pixel_uniforms(const GlProg *p, const Nv2aPixelState *ps,
         glUniform4fv(p->u_fc1, 1, v);
         unpack4(ps->fog_color, v);
         glUniform4fv(p->u_fogc, 1, v);
+        if (p->u_bm >= 0 || p->u_bso >= 0) {
+            float bm[16], bso[8];
+            for (i = 0; i < 4; i++) {
+                memcpy(&bm[i * 4], ps->stage[i].bump_mat, sizeof ps->stage[i].bump_mat);
+                bso[i * 2] = ps->stage[i].bump_scale;
+                bso[i * 2 + 1] = ps->stage[i].bump_offset;
+            }
+            if (p->u_bm >= 0)
+                glUniform4fv(p->u_bm, 4, bm);
+            if (p->u_bso >= 0)
+                glUniform2fv(p->u_bso, 4, bso);
+        }
     }
     glUniform1f(p->u_aref, (float)(rs->alpha_ref & 0xFF));
 }
@@ -1856,6 +1875,8 @@ static void gl_draw(const Nv2aSurface *s, const Nv2aBatch *b)
         return;
     bind_stage_textures(ps, kind, tscale);
     nv2a_gl_shader_key(ps, rs, kind, &key);
+    if (key.bump_src[1] | key.bump_src[2] | key.bump_src[3])
+        s_st.bump_draws++;
     p = prog_get(&key, NULL);
     if (!p)
         return;
@@ -1952,6 +1973,8 @@ static int gl_draw_program(const Nv2aSurface *s, const Nv2aBatch *b)
         return 0;
     bind_stage_textures(ps, kind, tscale);
     nv2a_gl_shader_key(ps, rs, kind, &key);
+    if (key.bump_src[1] | key.bump_src[2] | key.bump_src[3])
+        s_st.bump_draws++;
     p = prog_get(&key, vsh);
     if (!p || !p->cloc)
         return 0;
@@ -2269,12 +2292,12 @@ static void gl_flip(void)
         fprintf(stderr, "  [GPUGL] frame %u: %u draws (%u vertex programs, %u KB),"
                         " %u tris, %u clears, %u readbacks,"
                         " targets: %u created, %u relayouts, %u grown, %u sampled directly"
-                        " (%u copies), %u shadow maps, %u seeded, %u seeds skipped, %u invalidates,"
+                        " (%u copies), %u shadow maps, %u bump-env, %u seeded, %u seeds skipped, %u invalidates,"
                         " %u uploads (%u KB), %u KB hashed, %d textures,"
                         " %d targets, %d programs (%u compiled)\n",
                 s_frame, s_st.draws, s_st.vsh_draws, s_st.vsh_kb, s_st.tris,
                 s_st.clears, s_st.readbacks, s_st.rt_creates, s_st.relayouts, s_st.rt_grows,
-                s_st.rt_direct, s_st.rt_copies, s_st.shadow_binds, s_st.seeds,
+                s_st.rt_direct, s_st.rt_copies, s_st.shadow_binds, s_st.bump_draws, s_st.seeds,
                 s_st.seeds_skipped, s_st.invalidates,
                 s_st.uploads, s_st.upload_kb, s_st.hashes_kb, s_ntex, nrt, nprog,
                 s_st.compiles);

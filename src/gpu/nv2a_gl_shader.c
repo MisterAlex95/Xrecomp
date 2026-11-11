@@ -37,6 +37,28 @@ void nv2a_gl_shader_key(const Nv2aPixelState *ps, const Nv2aRenderState *rs,
         for (s = 0; s < 4; s++)
             if (((key->stage_program >> (s * 5)) & 0x1F) == 5)
                 key->clip_plane_mode = ps->clip_plane_mode;
+        for (s = 1; s < 4; s++) {
+            uint32_t mode = (key->stage_program >> (s * 5)) & 0x1F, src, smode;
+            const Nv2aTexture *t;
+            if (mode != 6 && mode != 7)
+                continue;
+            /* xemu psh.c input_tex: stage 1 reads stage 0, stages 2 and 3
+             * the stage SET_SHADER_OTHER_STAGE_INPUT names. */
+            src = s == 1 ? 0 : (ps->other_stage_input >> (s == 2 ? 16 : 20)) & 0xF;
+            if (src >= s)
+                continue;                   /* not fetched yet: reads zero */
+            key->bump_src[s] = 0x10 | src;
+            smode = (key->stage_program >> (src * 5)) & 0x1F;
+            t = &ps->stage[src].tex;
+            if ((smode == 1 || smode == 2) && tex_kind[src] == NV2A_GL_TEX_2D
+                && ps->stage[src].valid) {
+                uint32_t mag = (t->filter >> 24) & 0xF, min = (t->filter >> 16) & 0xFF;
+                key->bump_fetch[src] = NV2A_GL_DSDT_TEXEL
+                    | (mag == 2 || min == 2 || min == 4 || min == 6 ? NV2A_GL_DSDT_LINEAR : 0)
+                    | (t->addr_u == 1 ? NV2A_GL_DSDT_WRAP_U : 0)
+                    | (t->addr_v == 1 ? NV2A_GL_DSDT_WRAP_V : 0);
+            }
+        }
     }
     /* alpha_test_pass(): ALWAYS and anything unknown pass, so they are "off".
      * The screen-space path never alpha-tests. */
@@ -321,11 +343,71 @@ static void emit_fetch(Sb *b, const Nv2aGlShaderKey *k, uint32_t st)
         }
         sb(b, "  vec4 T%u = vec4(0.0);\n", st);
         return;
+    case 6: case 7: {                             /* BUMPENVMAP[_LUM] */
+        /* xemu psh.c: dU, dV the input texel's blue and green as signed
+         * bytes, L its red; coordinates (not divided by q) plus the matrix
+         * times (dU, dV); mode 7 scales the texel by scale * L + offset.
+         * The CPU path reads these stages as zero. */
+        uint32_t src = k->bump_src[st] & 0xF, f = k->bump_fetch[src];
+        if (!(k->bump_src[st] & 0x10)) {
+            sb(b, "  vec4 T%u = vec4(0.0);\n", st);
+            return;
+        }
+        if (f & NV2A_GL_DSDT_TEXEL)
+            sb(b, "  vec3 B%u = nv_dsdtl(u_t%u, v_t%u.xy / q%u * u_tscale[%u], %s, bvec2(%s, %s));\n",
+               st, src, src, src, src, (f & NV2A_GL_DSDT_LINEAR) ? "true" : "false",
+               (f & NV2A_GL_DSDT_WRAP_U) ? "true" : "false",
+               (f & NV2A_GL_DSDT_WRAP_V) ? "true" : "false");
+        else
+            sb(b, "  vec3 B%u = vec3(nv_s8(T%u.b), nv_s8(T%u.g), T%u.r);\n",
+               st, src, src, src);
+        if (kind != NV2A_GL_TEX_2D) {
+            sb(b, "  vec4 T%u = vec4(1.0);\n", st);  /* unusable: white */
+            return;
+        }
+        sb(b, "  vec2 D%u = mat2(u_bm[%u].xy, u_bm[%u].zw) * B%u.xy;\n", st, st, st, st);
+        sb(b, "  vec4 T%u = texture(u_t%u, (v_t%u.xy + D%u) * u_tscale[%u]);\n",
+           st, st, st, st, st);
+        if (mode == 7)
+            sb(b, "  T%u *= u_bso[%u].x * B%u.z + u_bso[%u].y;\n", st, st, st, st);
+        return;
+    }
     default:
-        /* Bump-env and dot-product modes read zero on the CPU path too. */
+        /* Dot-product modes read zero on the CPU path too. */
         sb(b, "  vec4 T%u = vec4(0.0);\n", st);
         return;
     }
+}
+
+/* Helpers for bump-env stages: a byte as the hardware's signed texel
+ * component (two's complement over 127, xemu's sign3), and dU, dV, L
+ * of a 2D texture texel by texel, signed before the bilinear blend. */
+static void emit_bump_helpers(Sb *b)
+{
+    sb(b, "float nv_s8(float x) {\n"
+          "  x = floor(x * 255.0 + 0.5);\n"
+          "  return (x >= 128.0 ? x - 256.0 : x) / 127.0;\n"
+          "}\n"
+          "ivec2 nv_addr(ivec2 c, ivec2 sz, bvec2 wrap) {\n"
+          "  ivec2 m = c - sz * ivec2(floor(vec2(c) / vec2(sz)));\n"
+          "  ivec2 l = clamp(c, ivec2(0), sz - 1);\n"
+          "  return ivec2(wrap.x ? m.x : l.x, wrap.y ? m.y : l.y);\n"
+          "}\n"
+          "vec3 nv_dsdtl(sampler2D s, vec2 uv, bool lin, bvec2 wrap) {\n"
+          "  ivec2 sz = textureSize(s, 0);\n"
+          "  vec2 p = uv * vec2(sz) - (lin ? 0.5 : 0.0);\n"
+          "  ivec2 i0 = ivec2(floor(p));\n"
+          "  vec2 f = lin ? p - floor(p) : vec2(0.0);\n"
+          "  vec3 acc = vec3(0.0);\n"
+          "  for (int k = 0; k < 4; k++) {\n"
+          "    ivec2 o = ivec2(k & 1, k >> 1);\n"
+          "    float w = (o.x == 1 ? f.x : 1.0 - f.x) * (o.y == 1 ? f.y : 1.0 - f.y);\n"
+          "    if (w == 0.0) continue;\n"
+          "    vec4 t = texelFetch(s, nv_addr(i0 + o, sz, wrap), 0);\n"
+          "    acc += w * vec3(nv_s8(t.b), nv_s8(t.g), t.r);\n"
+          "  }\n"
+          "  return acc;\n"
+          "}\n");
 }
 
 static void emit_alpha_test(Sb *b, uint32_t func)
@@ -365,8 +447,12 @@ size_t nv2a_gl_fragment_body(const Nv2aGlShaderKey *k, char *buf, size_t cap)
     sb(&b, "uniform vec2 u_tscale[4];\nuniform vec4 u_c0[8];\nuniform vec4 u_c1[8];\n"
            "uniform vec4 u_fc0;\nuniform vec4 u_fc1;\nuniform vec4 u_fogc;\n"
            "uniform float u_aref;\n"
-           "layout(location = 0) out vec4 o_color;\n"
-           "void main() {\n  vec4 o;\n");
+           "uniform vec4 u_bm[4];\nuniform vec2 u_bso[4];\n"
+           "layout(location = 0) out vec4 o_color;\n");
+    if (k->shade == NV2A_SHADE_COMBINERS
+        && (k->bump_src[1] | k->bump_src[2] | k->bump_src[3]))
+        emit_bump_helpers(&b);
+    sb(&b, "void main() {\n  vec4 o;\n");
 
     if (k->shade == NV2A_SHADE_COMBINERS) {
         for (st = 0; st < 4; st++)
