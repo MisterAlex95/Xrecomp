@@ -1,0 +1,191 @@
+/* Internal resolution policy (nv2a_gl_scale.c): which surfaces scale, the
+ * rectangle rounding, visibility counts and RECOMP_GPU_SCALE_TARGETS parsing. */
+#include "nv2a_gl_scale.h"
+
+#include <math.h>
+#include <stdio.h>
+#include <string.h>
+
+static int s_fail;
+
+#define CHECK(c) do { if (!(c)) { fprintf(stderr, "FAIL %s:%d: %s\n", __FILE__, __LINE__, #c); s_fail++; } } while (0)
+#define FEQ(a, b) (fabsf((a) - (b)) < 1e-6f)
+
+/* Fable's back buffer: 0x80A7E000, pitch 1280, X1R5G5B5, zeta Z24S8. */
+static Nv2aSurface back_buffer(uint32_t format)
+{
+    Nv2aSurface s;
+    uint32_t aa = (format >> 12) & 0xF;
+
+    memset(&s, 0, sizeof s);
+    s.color_va = 0x80A7E000u;
+    s.pitch = 1280;
+    s.bytes_per_pixel = 2;
+    s.format = format;
+    s.aa_sx = s.aa_sy = aa == 2 ? 2 : 1;
+    s.width = 640;                      /* real pixels whatever the AA mode */
+    s.height = 480;
+    s.color_valid = 1;
+    return s;
+}
+
+static void test_policy(void)
+{
+    Nv2aGlScaleConfig cfg;
+    Nv2aSurface s;
+
+    memset(&cfg, 0, sizeof cfg);
+    cfg.scale = 2.0f;
+
+    /* 0x121 (640x480) and 0x2121 (AA 2x2: 320x240 logical, the same real
+     * pixels) are the same target: both scale. */
+    s = back_buffer(0x121);
+    CHECK(nv2a_gl_frame_surface(&s));
+    CHECK(FEQ(nv2a_gl_surface_scale(&cfg, &s), 2.0f));
+    s = back_buffer(0x2121);
+    CHECK(nv2a_gl_frame_surface(&s));
+    CHECK(FEQ(nv2a_gl_surface_scale(&cfg, &s), 2.0f));
+    /* A title drawing 640x480 logical with AA 2x2 into 1280x960. */
+    s = back_buffer(0x2121);
+    s.width = 1280;
+    s.height = 960;
+    s.pitch = 2560;
+    CHECK(nv2a_gl_frame_surface(&s));
+    /* A clip rectangle inside the frame (x, y origin) still sizes it. */
+    s = back_buffer(0x121);
+    s.clip_x = 40;
+    s.width = 600;
+    s.clip_y = 30;
+    s.height = 450;
+    CHECK(FEQ(nv2a_gl_surface_scale(&cfg, &s), 2.0f));
+    /* Smaller: a 320x240 clip without AA is not the frame. */
+    s = back_buffer(0x121);
+    s.width = 320;
+    s.height = 240;
+    CHECK(!nv2a_gl_frame_surface(&s));
+    CHECK(FEQ(nv2a_gl_surface_scale(&cfg, &s), 1.0f));
+
+    /* Swizzled 256x256 effect target (bloom): 1. */
+    memset(&s, 0, sizeof s);
+    s.color_va = 0x80CF9080u;
+    s.bytes_per_pixel = 4;
+    s.format = 0x08080205u;             /* swizzled, log2 8 x 8, A8R8G8B8 */
+    s.width = s.height = 256;
+    s.aa_sx = s.aa_sy = 1;
+    s.color_valid = 1;
+    CHECK(!nv2a_gl_frame_surface(&s));
+    CHECK(FEQ(nv2a_gl_surface_scale(&cfg, &s), 1.0f));
+    /* Even a swizzled 640x480-sized clip is not the frame. */
+    s.width = 640;
+    s.height = 480;
+    CHECK(!nv2a_gl_frame_surface(&s));
+
+    /* Linear 256x256 (the scene copy at 0x80D38080, pitch 1024): 1. */
+    memset(&s, 0, sizeof s);
+    s.color_va = 0x80D38080u;
+    s.pitch = 1024;
+    s.bytes_per_pixel = 4;
+    s.format = 0x105;
+    s.width = s.height = 256;
+    s.aa_sx = s.aa_sy = 1;
+    s.color_valid = 1;
+    CHECK(FEQ(nv2a_gl_surface_scale(&cfg, &s), 1.0f));
+    /* ... unless RECOMP_GPU_SCALE_TARGETS lists it. */
+    CHECK(nv2a_gl_scale_parse_targets("256x256", &cfg) == 1);
+    CHECK(FEQ(nv2a_gl_surface_scale(&cfg, &s), 2.0f));
+    cfg.ntargets = 0;
+
+    /* Depth-only (the 768x768 shadow map at offset 0): 1 unless shadow. */
+    memset(&s, 0, sizeof s);
+    s.width = s.height = 768;
+    s.format = 0x20;
+    s.aa_sx = s.aa_sy = 1;
+    s.color_valid = 0;
+    CHECK(FEQ(nv2a_gl_surface_scale(&cfg, &s), 1.0f));
+    cfg.shadow = 1;
+    CHECK(FEQ(nv2a_gl_surface_scale(&cfg, &s), 2.0f));
+    cfg.shadow = 0;
+
+    /* A masked batch on the back buffer keeps the back buffer's scale. */
+    s = back_buffer(0x121);
+    s.color_masked = 1;
+    CHECK(FEQ(nv2a_gl_surface_scale(&cfg, &s), 2.0f));
+
+    /* Scale 1: everything 1. */
+    cfg.scale = 1.0f;
+    s = back_buffer(0x121);
+    CHECK(FEQ(nv2a_gl_surface_scale(&cfg, &s), 1.0f));
+}
+
+static void test_rects(void)
+{
+    int32_t c[4];
+
+    CHECK(nv2a_gl_scale_px(640, 2.25f) == 1440);
+    CHECK(nv2a_gl_scale_px(480, 2.25f) == 1080);
+    CHECK(nv2a_gl_scale_px(640, 1.0f) == 640);
+    CHECK(nv2a_gl_scale_px(1, 2.25f) == 2);       /* 2.25 -> 2 */
+    CHECK(nv2a_gl_scale_px(3, 2.25f) == 7);       /* 6.75 -> 7 */
+
+    /* Scissor rounding at 2.25: both edges rounded, so the size is not
+     * round(w * 2.25) but what keeps adjacent rectangles adjacent. */
+    nv2a_gl_scale_rect(1, 1, 1, 1, 2.25f, c);     /* 2.25..4.5 */
+    CHECK(c[0] == 2 && c[1] == 2 && c[2] == 3 && c[3] == 3);  /* 2..5 (4.5 rounds up) */
+    nv2a_gl_scale_rect(0, 0, 1, 1, 2.25f, c);     /* 0..2.25 */
+    CHECK(c[0] == 0 && c[2] == 2);
+    nv2a_gl_scale_rect(2, 0, 1, 1, 2.25f, c);     /* 4.5..6.75 */
+    CHECK(c[0] == 5 && c[2] == 2);
+    nv2a_gl_scale_rect(0, 0, 640, 480, 2.25f, c);
+    CHECK(c[0] == 0 && c[1] == 0 && c[2] == 1440 && c[3] == 1080);
+    nv2a_gl_scale_rect(0, 0, 320, 240, 2.25f, c); /* the AA 2x2 logical clip */
+    CHECK(c[2] == 720 && c[3] == 540);
+    {
+        /* Adjacent rectangles tile without gap or overlap. */
+        int32_t a[4], b[4];
+        uint32_t x;
+        for (x = 0; x < 64; x++) {
+            nv2a_gl_scale_rect(x, 0, 1, 1, 2.25f, a);
+            nv2a_gl_scale_rect(x + 1, 0, 1, 1, 2.25f, b);
+            CHECK(a[0] + a[2] == b[0]);
+        }
+    }
+    nv2a_gl_scale_rect(13, 7, 100, 50, 1.0f, c);
+    CHECK(c[0] == 13 && c[1] == 7 && c[2] == 100 && c[3] == 50);
+    nv2a_gl_scale_rect(13, 7, 100, 50, 2.0f, c);
+    CHECK(c[0] == 26 && c[1] == 14 && c[2] == 200 && c[3] == 100);
+}
+
+static void test_counts(void)
+{
+    CHECK(nv2a_gl_scale_count(0, 2.0f) == 0);
+    CHECK(nv2a_gl_scale_count(1, 2.0f) == 1);     /* visible stays visible */
+    CHECK(nv2a_gl_scale_count(3, 2.0f) == 1);
+    CHECK(nv2a_gl_scale_count(400, 2.0f) == 100);
+    CHECK(nv2a_gl_scale_count(507, 2.25f) == 100); /* 507 / 5.0625 = 100.1 */
+    CHECK(nv2a_gl_scale_count(12345, 1.0f) == 12345);
+}
+
+static void test_parse(void)
+{
+    Nv2aGlScaleConfig cfg;
+
+    memset(&cfg, 0, sizeof cfg);
+    CHECK(nv2a_gl_scale_parse_targets("512x512,bad,1024X768,0x5", &cfg) == 2);
+    CHECK(cfg.target_w[0] == 512 && cfg.target_h[0] == 512);
+    CHECK(cfg.target_w[1] == 1024 && cfg.target_h[1] == 768);
+    CHECK(nv2a_gl_scale_parse_targets(NULL, &cfg) == 0);
+}
+
+int main(void)
+{
+    test_policy();
+    test_rects();
+    test_counts();
+    test_parse();
+    if (s_fail) {
+        fprintf(stderr, "nv2a_gl_scale: %d failure(s)\n", s_fail);
+        return 1;
+    }
+    printf("nv2a_gl_scale: all checks passed\n");
+    return 0;
+}

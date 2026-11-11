@@ -21,11 +21,17 @@
  * the executor's thread). The flip copies the finished surface into a free
  * slot of three and publishes it with an index swap under a mutex held for a
  * few instructions, so the executor never waits for the window and the
- * window never reads guest memory the rasteriser may be writing. The surface
- * format is the GDI window's: 640x480, bpp from pitch / 640, 2 = R5G6B5
- * (X1R5G5B5 when the executor says so, xbox_FramebufferWindowSetFormat),
- * 4 = X8R8G8B8. Before the first flip the window reads the AvSetDisplayMode
- * surface directly, as the GDI window does, for a title that never flips.
+ * window never reads guest memory the rasteriser may be writing. A guest
+ * surface is in the GDI window's format: 640x480, bpp from pitch / 640,
+ * 2 = R5G6B5 (X1R5G5B5 when the executor says so,
+ * xbox_FramebufferWindowSetFormat), 4 = X8R8G8B8. A GPU back end may instead
+ * hand over its own pixels at their own size (xbox_FramebufferWindowPresentHost:
+ * an internal resolution above 640x480, RECOMP_GPU_SCALE); each slot carries
+ * its frame's width, height, pitch and pixel format, the texture follows
+ * them, and the renderer's logical size stays 640x480, so letterboxing and
+ * the perf overlay do not change. Before the first flip the window reads
+ * the AvSetDisplayMode surface directly, as the GDI window does, for a title
+ * that never flips.
  *
  * Closing the window ends the process: the window owns the main thread, and
  * lifted code cannot be stopped mid-flight. atexit handlers still run, except
@@ -34,6 +40,14 @@
  * up on its last frame until the player quits (the in-game menu, or Back
  * twice where nothing above SDL takes Back): an app does not vanish on its
  * own, and the lifecycle keeps working (XBA-52).
+ *
+ * Frame generation (built with XBOXRECOMP_LSFG, run with RECOMP_LSFG=1,
+ * docs/technical/framegen.md): both present paths hand their frame to the
+ * pacer (src/framegen) instead of a slot; the pacer's sink queues real and
+ * generated frames with their due times in a FIFO of four, and the main loop
+ * sleeps until the next event or due time and shows each entry when it is
+ * due. Headless, the pacer still runs and its sink only counts. When the
+ * pacer falls back (framegen_pacer_active() == 0) the slots take over again.
  *
  * Knobs: RECOMP_PRESENT_VSYNC=0 presents without waiting for the display;
  * RECOMP_WINDOW_SCALE=<n> sizes the window (default 2);
@@ -60,6 +74,13 @@
 #if defined(XBOXRECOMP_HAVE_GPU)
 #include "nv2a_gl.h"          /* src/gpu: RECOMP_GPU=1 */
 #endif
+#if defined(XBOXRECOMP_LSFG)
+#include "framegen_pacer.h"   /* src/framegen: RECOMP_LSFG=1 */
+#include "framegen_policy.h"
+#if defined(XBOXRECOMP_LSFG_BRIDGE)
+#include "lsfg_generator.h"
+#endif
+#endif
 
 extern ptrdiff_t xbox_GetMemoryOffset(void);
 
@@ -76,11 +97,15 @@ extern ptrdiff_t xbox_GetMemoryOffset(void);
 
 /* ── Handoff: three slots, one each for writer, reader and the ready frame ── */
 
+/* A frame: w x h pixels, rows pitch bytes apart (top row first), in SDL
+ * pixel format `format` (RGB565, RGB555, XRGB8888 or XBGR8888). General on
+ * purpose: whatever produces frames for the window -- the flip, a GPU back
+ * end's own read-back, a frame pacer -- fills one the same way. */
 struct fb_slot {
     uint8_t *px;
     size_t   cap;
-    uint32_t bpp;
-    uint32_t x555;              /* 16-bit pixels are X1R5G5B5, not R5G6B5 */
+    uint32_t w, h, pitch;
+    uint32_t format;            /* SDL_PIXELFORMAT_* */
 };
 
 /* What the window takes from SDL, and gives back on every way out. */
@@ -102,12 +127,233 @@ static volatile uint32_t s_fb_x555;           /* xbox_FramebufferWindowSetFormat
 static uint64_t s_flips;
 static uint32_t s_frame_draws;
 
-static uint64_t now_ms(void)
+static uint64_t now_ns(void)
 {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (uint64_t)ts.tv_sec * 1000ull + (uint64_t)ts.tv_nsec / 1000000ull;
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
 }
+
+static uint64_t now_ms(void)
+{
+    return now_ns() / 1000000ull;
+}
+
+/* Wake the main loop, once per batch of frames it has not looked at. */
+static void wake_main_loop(void)
+{
+    if (!__atomic_exchange_n(&s_wake_pending, 1, __ATOMIC_ACQ_REL)) {
+        SDL_Event ev;
+        memset(&ev, 0, sizeof ev);
+        ev.type = s_frame_event;
+        /* Not queued (full, or filtered): clear the latch, or no frame
+         * would wake the loop again before its timeout. */
+        if (SDL_PushEvent(&ev) <= 0)
+            __atomic_store_n(&s_wake_pending, 0, __ATOMIC_RELEASE);
+    }
+}
+
+/* ── Frame generation: pacer, timed FIFO ──────────────────────────────── */
+
+#if defined(XBOXRECOMP_LSFG)
+/* An entry: w x h packed BGRX (SDL XRGB8888), due on screen at due_ns
+ * (CLOCK_MONOTONIC). */
+struct fg_entry {
+    uint8_t *px;
+    size_t   cap;
+    uint32_t w, h;
+    uint64_t due_ns;
+};
+
+#define FG_FIFO 4
+static struct fg_entry s_fg_fifo[FG_FIFO];   /* ring, s_fg_head the oldest */
+static int             s_fg_head, s_fg_count;
+static struct fg_entry s_fg_front;           /* shown by the main loop */
+static pthread_mutex_t s_fg_lock = PTHREAD_MUTEX_INITIALIZER;
+static int             s_fg_on;              /* the pacer runs */
+static int             s_fg_window;          /* ... and feeds the window */
+static uint64_t        s_fg_full_drops;      /* pushed out of a full FIFO */
+static uint64_t        s_fg_late_skips;      /* due, but a newer one was too */
+static uint64_t        s_fg_presented;       /* FIFO frames the window showed */
+
+/* Frames go to the pacer rather than the slots. */
+static int fg_feeding(void)
+{
+    return s_fg_on && framegen_pacer_active();
+}
+
+/* The window's sink, on the pacer thread: copy into the FIFO and wake the
+ * loop. A full FIFO loses its oldest entry. */
+static void fg_sink_window(const uint8_t *px, uint32_t w, uint32_t h, uint32_t bpp,
+                           uint64_t due_ns)
+{
+    size_t need = (size_t)w * h * 4;
+    struct fg_entry *e;
+
+    if (bpp != 4)
+        return;
+    pthread_mutex_lock(&s_fg_lock);
+    if (s_fg_count == FG_FIFO) {
+        s_fg_head = (s_fg_head + 1) % FG_FIFO;
+        s_fg_count--;
+        s_fg_full_drops++;
+    }
+    e = &s_fg_fifo[(s_fg_head + s_fg_count) % FG_FIFO];
+    if (e->cap < need) {
+        uint8_t *n = (uint8_t *)realloc(e->px, need);
+        if (!n) {
+            pthread_mutex_unlock(&s_fg_lock);
+            return;
+        }
+        e->px = n;
+        e->cap = need;
+    }
+    memcpy(e->px, px, need);
+    e->w = w;
+    e->h = h;
+    e->due_ns = due_ns;
+    s_fg_count++;
+    pthread_mutex_unlock(&s_fg_lock);
+    wake_main_loop();
+}
+
+static void fg_log_stats(void)
+{
+    FramegenPacerCounters c;
+    uint32_t real, shown, gen;
+
+    framegen_pacer_counters(&c);
+    framegen_pacer_stats(&real, &shown, &gen);
+    fprintf(stderr, "[LSFG] real %u.%02u fps, shown %u.%02u fps, generation %.2f ms; "
+            "frames: %llu real in, %llu generated, shown %llu real + %llu generated, "
+            "dropped %llu input / %llu real / %llu generated, skipped %llu, failed %llu, "
+            "over budget %llu",
+            real / 100, real % 100, shown / 100, shown % 100, gen / 1000.0,
+            (unsigned long long)c.submitted, (unsigned long long)c.generated,
+            (unsigned long long)c.shown_real, (unsigned long long)c.shown_generated,
+            (unsigned long long)c.dropped_input, (unsigned long long)c.dropped_real,
+            (unsigned long long)c.dropped_generated, (unsigned long long)c.skipped,
+            (unsigned long long)c.failed, (unsigned long long)c.over_budget);
+    if (s_fg_window) {
+        pthread_mutex_lock(&s_fg_lock);
+        fprintf(stderr, "; window presented %llu, FIFO full %llu, late %llu",
+                (unsigned long long)s_fg_presented, (unsigned long long)s_fg_full_drops,
+                (unsigned long long)s_fg_late_skips);
+        pthread_mutex_unlock(&s_fg_lock);
+    }
+    fputc('\n', stderr);
+}
+
+/* Headless sink: nothing to show; the pacer's counters are the figures,
+ * logged every 5 s of due time and at exit. */
+static void fg_sink_headless(const uint8_t *px, uint32_t w, uint32_t h, uint32_t bpp,
+                             uint64_t due_ns)
+{
+    static uint64_t next;
+    (void)px; (void)w; (void)h; (void)bpp;
+    if (!next)
+        next = due_ns + 5000000000ull;
+    else if (due_ns >= next) {
+        next = due_ns + 5000000000ull;
+        fg_log_stats();
+    }
+}
+
+static void fg_atexit(void)
+{
+    if (s_fg_on)
+        fg_log_stats();
+}
+
+static void fg_fifo_clear(void)
+{
+    pthread_mutex_lock(&s_fg_lock);
+    s_fg_head = s_fg_count = 0;
+    pthread_mutex_unlock(&s_fg_lock);
+}
+
+/* Lifecycle pause / resume: nothing from before the pause is blended with,
+ * or shown after, what comes after it. */
+static void fg_lifecycle(int paused, void *user)
+{
+    (void)paused; (void)user;
+    framegen_pacer_reset();
+    fg_fifo_clear();
+}
+
+/* The display's refresh rate for the cap rule (framegen_policy.h), unless
+ * RECOMP_LSFG_DISPLAY_HZ says otherwise. Only a rate below 60 Hz is passed
+ * on: at 120 Hz the cap rule would ask for 60 real fps, and a title that
+ * runs at 30 (most do) would then be over the pacer's budget and past its
+ * skip threshold every other frame; 60 shown fps sit evenly on a 120 Hz
+ * display. Before the guest starts: the executor reads the cap at its
+ * first flip. */
+static void fg_report_display_rate(SDL_Window *win)
+{
+    SDL_DisplayMode mode;
+    int idx = SDL_GetWindowDisplayIndex(win);
+    const char *e = getenv("RECOMP_LSFG_DISPLAY_HZ");
+
+    if (e && *e)
+        return;
+    if (idx >= 0 && SDL_GetCurrentDisplayMode(idx, &mode) == 0
+            && mode.refresh_rate >= 24 && mode.refresh_rate <= 480) {
+        if (mode.refresh_rate < 60) {
+            char hz[16];
+            snprintf(hz, sizeof hz, "%d", mode.refresh_rate);
+            setenv("RECOMP_LSFG_DISPLAY_HZ", hz, 1);
+        }
+        fprintf(stderr, "[LSFG] display %d Hz; pacing for %d Hz (RECOMP_LSFG_DISPLAY_HZ)\n",
+                mode.refresh_rate, mode.refresh_rate < 60 ? mode.refresh_rate : 60);
+    }
+}
+
+/* Under RECOMP_LSFG=1: register the bridge (when built) and start the
+ * pacer. window = 0: headless, the sink only counts. */
+static void fg_start(int window)
+{
+    static FramegenSink sink;
+
+    if (s_fg_on || !framegen_policy_enabled())
+        return;
+#if defined(XBOXRECOMP_LSFG_BRIDGE)
+    lsfg_bridge_register();
+#endif
+    sink.show = window ? fg_sink_window : fg_sink_headless;
+    if (framegen_pacer_start(&sink) < 0)
+        return;
+    s_fg_window = window;
+    s_fg_on = 1;
+    recomp_lifecycle_listen(fg_lifecycle, NULL);
+    atexit(fg_atexit);
+}
+
+/* Main loop: the newest entry that is due (older due ones are skipped),
+ * swapped into s_fg_front; 1 when there is one. *next_due: the next
+ * entry's due time, 0 when none is left. */
+static int fg_take_due(uint64_t now, uint64_t *next_due)
+{
+    int got = 0;
+
+    pthread_mutex_lock(&s_fg_lock);
+    /* Within a millisecond counts as due: the loop sleeps in whole ms. */
+    while (s_fg_count && s_fg_fifo[s_fg_head].due_ns <= now + 1000000ull) {
+        struct fg_entry t = s_fg_front;
+        if (got)
+            s_fg_late_skips++;
+        s_fg_front = s_fg_fifo[s_fg_head];
+        s_fg_fifo[s_fg_head] = t;
+        s_fg_head = (s_fg_head + 1) % FG_FIFO;
+        s_fg_count--;
+        got = 1;
+    }
+    if (got)
+        s_fg_presented++;
+    *next_due = s_fg_count ? s_fg_fifo[s_fg_head].due_ns : 0;
+    pthread_mutex_unlock(&s_fg_lock);
+    return got;
+}
+#endif /* XBOXRECOMP_LSFG */
 
 void xbox_FramebufferWindowSet(uint32_t fb_va, uint32_t pitch)
 {
@@ -131,12 +377,39 @@ void xbox_FramebufferWindowSetFormat(uint32_t color_format)
 /* The window is opened by xbox_HostWindowMain, on the main thread. */
 void xbox_FramebufferWindowStart(void) {}
 
+/* SDL pixel format of a guest surface of bpp bytes per pixel. */
+static uint32_t guest_format(uint32_t bpp, uint32_t x555)
+{
+    return bpp == 4 ? SDL_PIXELFORMAT_RGB888        /* = XRGB8888 */
+         : x555     ? SDL_PIXELFORMAT_RGB555
+                    : SDL_PIXELFORMAT_RGB565;
+}
+
+/* The back slot with room for h rows of pitch bytes, or NULL. Only the
+ * presenting thread touches s_back. */
+static struct fb_slot *back_slot(uint32_t pitch, uint32_t h)
+{
+    struct fb_slot *s = &s_slot[s_back];
+    size_t need = (size_t)pitch * h;
+
+    if (s->cap < need) {
+        uint8_t *n = (uint8_t *)realloc(s->px, need);
+        if (!n)
+            return NULL;
+        s->px = n;
+        s->cap = need;
+    }
+    return s;
+}
+
 /* The back slot is filled: make it the ready one. An unshown ready frame is
  * overwritten (dropped), never waited for. */
-static void publish(uint32_t bpp)
+static void publish(uint32_t w, uint32_t h, uint32_t pitch, uint32_t format)
 {
-    s_slot[s_back].bpp = bpp;          /* only this thread touches s_back */
-    s_slot[s_back].x555 = bpp == 2 && s_fb_x555;
+    s_slot[s_back].w = w;              /* only this thread touches s_back */
+    s_slot[s_back].h = h;
+    s_slot[s_back].pitch = pitch;
+    s_slot[s_back].format = format;
     pthread_mutex_lock(&s_lock);
     {
         int t = s_ready;
@@ -146,40 +419,35 @@ static void publish(uint32_t bpp)
     }
     pthread_mutex_unlock(&s_lock);
 
-    /* Wake the main loop, once per batch of frames it has not looked at. */
-    if (!__atomic_exchange_n(&s_wake_pending, 1, __ATOMIC_ACQ_REL)) {
-        SDL_Event ev;
-        memset(&ev, 0, sizeof ev);
-        ev.type = s_frame_event;
-        /* Not queued (full, or filtered): clear the latch, or no frame
-         * would wake the loop again before its timeout. */
-        if (SDL_PushEvent(&ev) <= 0)
-            __atomic_store_n(&s_wake_pending, 0, __ATOMIC_RELEASE);
-    }
+    wake_main_loop();
+}
+
+/* Copy w x h pixels (rows src_pitch bytes apart, row_bytes of them used)
+ * into the back slot and publish it. */
+static void present_pixels(const uint8_t *src, uint32_t w, uint32_t h,
+                           uint32_t src_pitch, uint32_t row_bytes, uint32_t format)
+{
+    struct fb_slot *s = back_slot(row_bytes, h);
+    uint32_t y;
+
+    if (!s)
+        return;
+    if (src_pitch == row_bytes)
+        memcpy(s->px, src, (size_t)row_bytes * h);
+    else
+        for (y = 0; y < h; y++)
+            memcpy(s->px + (size_t)y * row_bytes, src + (size_t)y * src_pitch, row_bytes);
+    publish(w, h, row_bytes, format);
 }
 
 static void present_copy(uint32_t fb_va, uint32_t pitch)
 {
-    struct fb_slot *s = &s_slot[s_back];
-    const uint8_t *src;
-    uint32_t bpp = pitch / FB_W, y;
-    size_t need;
+    uint32_t bpp = pitch / FB_W;
 
     if (bpp != 2 && bpp != 4)
         return;
-    need = (size_t)FB_W * FB_H * bpp;
-    if (s->cap < need) {
-        uint8_t *n = (uint8_t *)realloc(s->px, need);
-        if (!n)
-            return;
-        s->px = n;
-        s->cap = need;
-    }
-    src = (const uint8_t *)((uintptr_t)fb_va + xbox_GetMemoryOffset());
-    for (y = 0; y < FB_H; y++)
-        memcpy(s->px + (size_t)y * FB_W * bpp, src + (size_t)y * pitch,
-               (size_t)FB_W * bpp);
-    publish(bpp);
+    present_pixels((const uint8_t *)((uintptr_t)fb_va + xbox_GetMemoryOffset()),
+                   FB_W, FB_H, pitch, FB_W * bpp, guest_format(bpp, bpp == 2 && s_fb_x555));
 }
 
 /* Called by the pushbuffer executor when the title flips. */
@@ -189,15 +457,96 @@ void xbox_FramebufferWindowPresent(uint32_t fb_va, uint32_t pitch)
      * threads stop behind it (they wait for the GPU). Before the handshake
      * below, so a window that closes meanwhile is not kept waiting. */
     recomp_lifecycle_hold();
+#if defined(XBOXRECOMP_LSFG)
+    /* Headless frame generation: the pacer takes the frame, nobody shows it. */
+    if (!s_fg_window && fb_va && fg_feeding()) {
+        uint32_t bpp = pitch / FB_W;
+        if (bpp == 2 || bpp == 4)
+            framegen_pacer_submit_format(
+                (const uint8_t *)((uintptr_t)fb_va + xbox_GetMemoryOffset()), FB_W, FB_H,
+                bpp == 4 ? FRAMEGEN_FMT_BGRX8888
+                         : s_fb_x555 ? FRAMEGEN_FMT_X1R5G5B5 : FRAMEGEN_FMT_R5G6B5,
+                pitch, now_ns());
+        return;
+    }
+#endif
     /* Dekker-style handshake with the close path: each side stores its own
      * flag and then loads the other's, all seq_cst, so either the window sees
      * this present in flight or this present sees the window closing. */
     if (!__atomic_load_n(&s_running, __ATOMIC_SEQ_CST) || !fb_va || !pitch)
         return;
     __atomic_add_fetch(&s_in_present, 1, __ATOMIC_SEQ_CST);
-    if (__atomic_load_n(&s_running, __ATOMIC_SEQ_CST))
+    if (__atomic_load_n(&s_running, __ATOMIC_SEQ_CST)) {
+#if defined(XBOXRECOMP_LSFG)
+        uint32_t bpp = pitch / FB_W;
+        if (fg_feeding() && (bpp == 2 || bpp == 4))
+            /* The flip time is now: the read-back is synchronous under
+             * frame generation (framegen_policy.h). */
+            framegen_pacer_submit_format(
+                (const uint8_t *)((uintptr_t)fb_va + xbox_GetMemoryOffset()), FB_W, FB_H,
+                bpp == 4 ? FRAMEGEN_FMT_BGRX8888
+                         : s_fb_x555 ? FRAMEGEN_FMT_X1R5G5B5 : FRAMEGEN_FMT_R5G6B5,
+                pitch, now_ns());
+        else
+#endif
         present_copy(fb_va, pitch);
+    }
     __atomic_sub_fetch(&s_in_present, 1, __ATOMIC_SEQ_CST);
+}
+
+/* A GPU back end's own frame (FLIP_STALL with Nv2aPresentSurface.host_px):
+ * copied into a slot like a guest frame, at its own size. Returns 1 when
+ * the window took it, 0 when there is no window (headless, closing) or the
+ * frame is not one it can show. */
+int xbox_FramebufferWindowPresentHost(const void *px, uint32_t w, uint32_t h,
+                                      uint32_t pitch, uint32_t format)
+{
+    uint32_t sdl_format;
+    int taken = 0;
+
+    recomp_lifecycle_hold();
+    if (!__atomic_load_n(&s_running, __ATOMIC_SEQ_CST) || !px || !w || !h
+            || w > 8192 || h > 8192 || pitch < w * 4u)
+        return 0;
+    if (format == XBOX_FB_HOST_BGRX8888)
+        sdl_format = SDL_PIXELFORMAT_XRGB8888;   /* 0xXXRRGGBB words */
+    else if (format == XBOX_FB_HOST_RGBX8888)
+        sdl_format = SDL_PIXELFORMAT_XBGR8888;   /* bytes R, G, B, X */
+    else
+        return 0;
+    __atomic_add_fetch(&s_in_present, 1, __ATOMIC_SEQ_CST);
+    if (__atomic_load_n(&s_running, __ATOMIC_SEQ_CST)) {
+        /* The copy's cost on the executor thread, logged every 600 host
+         * frames (only this thread presents). */
+        static uint32_t frames;
+        static uint64_t ns;
+        struct timespec t0, t1;
+        clock_gettime(CLOCK_MONOTONIC, &t0);
+#if defined(XBOXRECOMP_LSFG)
+        if (fg_feeding())
+            /* At its own size: the pacer reopens the generator when it
+             * changes. */
+            framegen_pacer_submit_format((const uint8_t *)px, w, h,
+                                         format == XBOX_FB_HOST_BGRX8888 ? FRAMEGEN_FMT_BGRX8888
+                                                                         : FRAMEGEN_FMT_RGBX8888,
+                                         pitch, (uint64_t)t0.tv_sec * 1000000000ull
+                                                + (uint64_t)t0.tv_nsec);
+        else
+#endif
+        present_pixels((const uint8_t *)px, w, h, pitch, w * 4u, sdl_format);
+        clock_gettime(CLOCK_MONOTONIC, &t1);
+        ns += (uint64_t)(t1.tv_sec - t0.tv_sec) * 1000000000ull
+            + (uint64_t)t1.tv_nsec - (uint64_t)t0.tv_nsec;
+        if (++frames == 600) {
+            fprintf(stderr, "  [FBWIN] host frames %ux%u: copy %.3f ms/frame\n", w, h,
+                    (double)ns / 1e6 / frames);
+            frames = 0;
+            ns = 0;
+        }
+        taken = 1;
+    }
+    __atomic_sub_fetch(&s_in_present, 1, __ATOMIC_SEQ_CST);
+    return taken;
 }
 
 /* Title bar: "<XBE title> | FPS: n | draws: n", as the GDI window shows it.
@@ -255,29 +604,39 @@ void xbox_FramebufferWindowGetStats(uint32_t *fps_centi, uint32_t *draws)
         *draws = __atomic_load_n(&s_frame_draws, __ATOMIC_RELAXED);
 }
 
-/* The last published frame as a 24-bit BMP, from any thread. The ready slot
- * is only swapped under s_lock and nobody writes it, so it is copied under
- * the lock (1.2 MB at most) and written out after. -1: no frame yet, or the
- * file could not be written. */
-int xbox_FramebufferDumpBmp(const char *path)
+/* One pixel of a slot as 0xRRGGBB. */
+static uint32_t slot_rgb(const uint8_t *p, uint32_t format)
 {
-    uint32_t row = (FB_W * 3u + 3u) & ~3u, img = row * FB_H, total = 54u + img;
-    uint32_t w = FB_W, h = FB_H, bpp, x555, x, y;
-    uint8_t hdr[54], *px = NULL, *line;
+    uint32_t v;
+
+    switch (format) {
+    case SDL_PIXELFORMAT_XRGB8888:      /* bytes B, G, R, X */
+        return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16;
+    case SDL_PIXELFORMAT_XBGR8888:      /* bytes R, G, B, X */
+        return (uint32_t)p[2] | (uint32_t)p[1] << 8 | (uint32_t)p[0] << 16;
+    case SDL_PIXELFORMAT_RGB555:
+        v = (uint32_t)p[0] | (uint32_t)p[1] << 8;
+        return ((v >> 10 & 0x1F) * 255u / 31u) << 16 | ((v >> 5 & 0x1F) * 255u / 31u) << 8
+             | (v & 0x1F) * 255u / 31u;
+    default:                            /* RGB565 */
+        v = (uint32_t)p[0] | (uint32_t)p[1] << 8;
+        return ((v >> 11 & 0x1F) * 255u / 31u) << 16 | ((v >> 5 & 0x3F) * 255u / 63u) << 8
+             | (v & 0x1F) * 255u / 31u;
+    }
+}
+
+/* w x h pixels of a slot as a 24-bit BMP. -1: the file could not be written. */
+static int write_bmp(const char *path, const uint8_t *px, uint32_t w, uint32_t h,
+                     uint32_t pitch, uint32_t format)
+{
+    uint32_t bypp = SDL_BYTESPERPIXEL(format), row = (w * 3u + 3u) & ~3u;
+    uint32_t img = row * h, total = 54u + img, x, y;
+    uint8_t hdr[54], *line;
     FILE *f;
 
-    pthread_mutex_lock(&s_lock);
-    bpp = s_ready_seq ? s_slot[s_ready].bpp : 0;
-    x555 = s_ready_seq ? s_slot[s_ready].x555 : 0;
-    if (bpp && s_slot[s_ready].px && (px = (uint8_t *)malloc((size_t)FB_W * FB_H * bpp)))
-        memcpy(px, s_slot[s_ready].px, (size_t)FB_W * FB_H * bpp);
-    pthread_mutex_unlock(&s_lock);
-    if (!px)
-        return -1;
     line = (uint8_t *)calloc(1, row);
     f = line ? fopen(path, "wb") : NULL;
     if (!f) {
-        free(px);
         free(line);
         return -1;
     }
@@ -290,21 +649,10 @@ int xbox_FramebufferDumpBmp(const char *path)
     hdr[26] = 1; hdr[28] = 24;
     memcpy(hdr + 34, &img, 4);
     fwrite(hdr, 1, sizeof hdr, f);
-    for (y = 0; y < FB_H; y++) {
-        const uint8_t *src = px + (size_t)(FB_H - 1 - y) * FB_W * bpp;
-        for (x = 0; x < FB_W; x++) {
-            uint32_t v;
-            if (bpp == 4) {     /* X8R8G8B8 */
-                v = (uint32_t)src[x * 4] | (uint32_t)src[x * 4 + 1] << 8 | (uint32_t)src[x * 4 + 2] << 16;
-            } else if (x555) {  /* X1R5G5B5 */
-                uint32_t p = (uint32_t)src[x * 2] | (uint32_t)src[x * 2 + 1] << 8;
-                v = ((p >> 10 & 0x1F) * 255u / 31u) << 16 | ((p >> 5 & 0x1F) * 255u / 31u) << 8
-                    | (p & 0x1F) * 255u / 31u;
-            } else {            /* R5G6B5 */
-                uint32_t p = (uint32_t)src[x * 2] | (uint32_t)src[x * 2 + 1] << 8;
-                v = ((p >> 11 & 0x1F) * 255u / 31u) << 16 | ((p >> 5 & 0x3F) * 255u / 63u) << 8
-                    | (p & 0x1F) * 255u / 31u;
-            }
+    for (y = 0; y < h; y++) {
+        const uint8_t *src = px + (size_t)(h - 1 - y) * pitch;
+        for (x = 0; x < w; x++) {
+            uint32_t v = slot_rgb(src + (size_t)x * bypp, format);
             line[x * 3 + 0] = (uint8_t)v;
             line[x * 3 + 1] = (uint8_t)(v >> 8);
             line[x * 3 + 2] = (uint8_t)(v >> 16);
@@ -312,12 +660,65 @@ int xbox_FramebufferDumpBmp(const char *path)
         fwrite(line, 1, row, f);
     }
     free(line);
-    free(px);
     if (fclose(f) != 0)
         return -1;
-    fprintf(stderr, "  [FBWIN] wrote %s (%ux%u)\n", path, FB_W, FB_H);
+    fprintf(stderr, "  [FBWIN] wrote %s (%ux%u)\n", path, w, h);
     return 0;
 }
+
+/* The last published frame as a 24-bit BMP at its own size (640x480 for a
+ * guest frame, the back end's size for a host frame), from any thread. The
+ * ready slot is only swapped under s_lock and nobody writes it, so it is
+ * copied under the lock and written out after. -1: no frame yet, or the
+ * file could not be written. */
+int xbox_FramebufferDumpBmp(const char *path)
+{
+    uint32_t w = 0, h = 0, pitch = 0, format = 0;
+    uint8_t *px = NULL;
+    int rc;
+
+#if defined(XBOXRECOMP_LSFG)
+    /* Frame generation: the frame on screen is the FIFO's last shown one. */
+    if (fg_feeding() && s_fg_window) {
+        pthread_mutex_lock(&s_fg_lock);
+        if (s_fg_front.px && s_fg_front.w) {
+            w = s_fg_front.w;
+            h = s_fg_front.h;
+            pitch = w * 4u;
+            format = SDL_PIXELFORMAT_XRGB8888;
+            if ((px = (uint8_t *)malloc((size_t)pitch * h)))
+                memcpy(px, s_fg_front.px, (size_t)pitch * h);
+        }
+        pthread_mutex_unlock(&s_fg_lock);
+        if (px) {
+            rc = write_bmp(path, px, w, h, pitch, format);
+            free(px);
+            return rc;
+        }
+    }
+#endif
+    pthread_mutex_lock(&s_lock);
+    if (s_ready_seq && s_slot[s_ready].px) {
+        w = s_slot[s_ready].w;
+        h = s_slot[s_ready].h;
+        pitch = s_slot[s_ready].pitch;
+        format = s_slot[s_ready].format;
+        if ((px = (uint8_t *)malloc((size_t)pitch * h)))
+            memcpy(px, s_slot[s_ready].px, (size_t)pitch * h);
+    }
+    pthread_mutex_unlock(&s_lock);
+    if (!px)
+        return -1;
+    rc = write_bmp(path, px, w, h, pitch, format);
+    free(px);
+    return rc;
+}
+
+#if defined(XBOXRECOMP_LSFG)
+#define FG_NONE_YET (!fg_any)
+#else
+#define FG_NONE_YET 1
+#endif
 
 /* ── The guest thread ─────────────────────────────────────────────────── */
 
@@ -397,12 +798,17 @@ int xbox_HostWindowMain(int (*guest_main)(void))
     SDL_Window *win;
     SDL_Renderer *ren;
     SDL_Texture *tex = NULL;
-    uint32_t tex_bpp = 0, tex_x555 = 0;
+    uint32_t tex_w = 0, tex_h = 0, tex_format = 0;
+    int tex_linear = 0;
     uint64_t shown_seq = 0, t_title = 0, flips_title = 0, t_overlay = 0;
     const char *e;
     int vsync, scale, quit = 0, guest_done = 0, dirty = 1, reupload = 0;
     int stay_after_guest = 0;   /* Android: the window outlives the guest */
     uint64_t back_at = 0;
+#if defined(XBOXRECOMP_LSFG)
+    uint64_t fg_next_due = 0, t_fg_log = 0;
+    int fg_any = 0, fg_off_seen = 0;
+#endif
 
     /* Ctrl-C and SIGTERM keep their default meaning; SDL would turn them
      * into an SDL_QUIT that a headless run never reads. Set before the
@@ -415,8 +821,12 @@ int xbox_HostWindowMain(int (*guest_main)(void))
      * memory (src/gpu/nv2a_gl.c). */
     nv2a_gl_install_from_env();
 #endif
-    if (!env_on("RECOMP_FB_WINDOW") || env_on("RECOMP_HEADLESS"))
+    if (!env_on("RECOMP_FB_WINDOW") || env_on("RECOMP_HEADLESS")) {
+#if defined(XBOXRECOMP_LSFG)
+        fg_start(0);
+#endif
         return guest_main();
+    }
 
     e = getenv("RECOMP_PRESENT_VSYNC");
     vsync = !e || env_on("RECOMP_PRESENT_VSYNC");
@@ -464,6 +874,17 @@ int xbox_HostWindowMain(int (*guest_main)(void))
                     " vsync %s); guest runs on a pthread\n",
                     FB_W, FB_H, ri.name, vsync ? "on" : "off");
     }
+#if defined(XBOXRECOMP_HAVE_GPU)
+    {
+        /* The drawable's real size (HiDPI pixels), for the GL back end's
+         * RECOMP_GPU_SCALE=auto; read on the executor thread after the
+         * guest starts. Headless runs never set it: scale 1, no host
+         * frames. */
+        int ow = 0, oh = 0;
+        if (SDL_GetRendererOutputSize(ren, &ow, &oh) == 0 && ow > 0 && oh > 0)
+            nv2a_gl_set_display_size((uint32_t)ow, (uint32_t)oh);
+    }
+#endif
 
     SDL_AddEventWatch(lifecycle_watch, NULL);
 
@@ -484,10 +905,20 @@ int xbox_HostWindowMain(int (*guest_main)(void))
      * game controllers; the input layer then only reads them. */
     xbox_InputSetMainPump(1);
     xbox_InputSdlInit();
+#if defined(XBOXRECOMP_LSFG)
+    fg_report_display_rate(win);
+    fg_start(1);
+#endif
     s_running = 1;
     if (!start_guest()) {
         fprintf(stderr, "  [FBWIN] cannot start the guest thread; running headless\n");
         s_running = 0;
+#if defined(XBOXRECOMP_LSFG)
+        if (s_fg_on) {
+            framegen_pacer_stop();
+            s_fg_on = s_fg_window = 0;
+        }
+#endif
         xbox_InputSetMainPump(0);
         SDL_DestroyRenderer(ren);
         SDL_DestroyWindow(win);
@@ -499,12 +930,25 @@ int xbox_HostWindowMain(int (*guest_main)(void))
         SDL_Event ev;
         uint64_t seq, now;
         const uint8_t *px = NULL;
-        uint32_t bpp = 0, pitch = 0, x555 = 0;
+        uint32_t fw = 0, fh = 0, pitch = 0, format = 0;
+        int timeout = shown_seq ? 100 : 16;
 
+#if defined(XBOXRECOMP_LSFG)
+        if (fg_any && !shown_seq)
+            timeout = 100;
+        if (fg_next_due && s_fg_on) {
+            /* Sleep until the next frame generation entry is due (in whole
+             * ms, rounded down; fg_take_due counts the last ms as due). */
+            uint64_t t = now_ns();
+            uint64_t ms = fg_next_due > t ? (fg_next_due - t) / 1000000ull : 0;
+            if (ms < (uint64_t)timeout)
+                timeout = (int)ms;
+        }
+#endif
         /* Before the first flip, poll at the display rate: the window then
          * reads the display surface itself. After, the flip's event wakes
          * the loop. */
-        if (SDL_WaitEventTimeout(&ev, shown_seq ? 100 : 16)) {
+        if (SDL_WaitEventTimeout(&ev, timeout)) {
             do {
                 /* Keys for the pad stand-in, and the window events that
                  * release them; it only reads the event. */
@@ -557,6 +1001,42 @@ int xbox_HostWindowMain(int (*guest_main)(void))
             } while (SDL_PollEvent(&ev));
         }
 
+#if defined(XBOXRECOMP_LSFG)
+        if (s_fg_on) {
+            if (framegen_pacer_active()) {
+                if (fg_take_due(now_ns(), &fg_next_due)) {
+                    px = s_fg_front.px;
+                    fw = s_fg_front.w;
+                    fh = s_fg_front.h;
+                    pitch = fw * 4u;
+                    format = SDL_PIXELFORMAT_XRGB8888;   /* bytes B, G, R, X */
+                    fg_any = 1;
+                } else if (reupload && fg_any) {
+                    px = s_fg_front.px;                  /* only this thread swaps it */
+                    fw = s_fg_front.w;
+                    fh = s_fg_front.h;
+                    pitch = fw * 4u;
+                    format = SDL_PIXELFORMAT_XRGB8888;
+                }
+            } else if (!fg_off_seen) {
+                /* Fallen back: the flips fill the slots again from the
+                 * next one. */
+                fg_off_seen = 1;
+                fg_next_due = 0;
+                fg_fifo_clear();
+                fprintf(stderr, "  [FBWIN] frame generation off (%s); normal present\n",
+                        framegen_pacer_off_reason());
+#ifdef __ANDROID__
+                {
+                    char msg[224];
+                    SDL_snprintf(msg, sizeof msg, "Frame generation off: %s",
+                                 framegen_pacer_off_reason());
+                    SDL_AndroidShowToast(msg, 1, -1, 0, 0);
+                }
+#endif
+            }
+        }
+#endif
         pthread_mutex_lock(&s_lock);
         seq = s_ready_seq;
         if (seq != shown_seq) {
@@ -566,36 +1046,67 @@ int xbox_HostWindowMain(int (*guest_main)(void))
         }
         pthread_mutex_unlock(&s_lock);
 
-        if (seq != shown_seq || (reupload && shown_seq)) {
+        if (px) {
+            /* A frame generation entry, set above. */
+        } else if (seq != shown_seq || (reupload && shown_seq)) {
             shown_seq = seq;
             px = s_slot[s_front].px;
-            bpp = s_slot[s_front].bpp;
-            x555 = s_slot[s_front].x555;
-            pitch = FB_W * bpp;
-        } else if (!shown_seq && s_fb_va && s_fb_pitch) {
+            fw = s_slot[s_front].w;
+            fh = s_slot[s_front].h;
+            pitch = s_slot[s_front].pitch;
+            format = s_slot[s_front].format;
+        } else if (!shown_seq && FG_NONE_YET && s_fb_va && s_fb_pitch) {
             /* No flip yet: the display surface, as the GDI window reads it. */
-            bpp = s_fb_pitch / FB_W;
-            x555 = bpp == 2 && s_fb_x555;
+            uint32_t bpp = s_fb_pitch / FB_W;
+            fw = FB_W;
+            fh = FB_H;
+            format = guest_format(bpp, bpp == 2 && s_fb_x555);
             pitch = s_fb_pitch;
             if (bpp == 2 || bpp == 4)
                 px = (const uint8_t *)((uintptr_t)s_fb_va + xbox_GetMemoryOffset());
         }
-        if (px) {
-            if (!tex || bpp != tex_bpp || x555 != tex_x555) {
+        if (px && fw && fh) {
+            if (!tex || fw != tex_w || fh != tex_h || format != tex_format) {
                 if (tex)
                     SDL_DestroyTexture(tex);
-                tex = SDL_CreateTexture(ren, bpp == 4 ? SDL_PIXELFORMAT_RGB888
-                                             : x555 ? SDL_PIXELFORMAT_RGB555
-                                                    : SDL_PIXELFORMAT_RGB565,
-                                        SDL_TEXTUREACCESS_STREAMING,
-                                        (int)FB_W, (int)FB_H);
-                tex_bpp = bpp;
-                tex_x555 = x555;
+                tex = SDL_CreateTexture(ren, format, SDL_TEXTUREACCESS_STREAMING,
+                                        (int)fw, (int)fh);
+                if (tex && (fw != tex_w || fh != tex_h))
+                    fprintf(stderr, "  [FBWIN] texture %ux%u (%s)\n", fw, fh,
+                            SDL_GetPixelFormatName(format));
+                tex_w = tex ? fw : 0;
+                tex_h = tex ? fh : 0;
+                tex_format = format;
+                tex_linear = -1;            /* chosen below */
             }
             if (tex)
                 SDL_UpdateTexture(tex, NULL, px, (int)pitch);
             dirty = 1;
             reupload = 0;
+        }
+        if (dirty && tex) {
+            /* A frame at the guest's 640x480 keeps the window's nearest
+             * filter; one at another size (a GPU back end's internal
+             * resolution) is filtered linearly unless it maps 1:1 onto the
+             * letterboxed rectangle it is shown in. */
+            int linear = 0;
+            if (tex_w != FB_W || tex_h != FB_H) {
+                int ow = 0, oh = 0;
+                uint32_t rw, rh;
+                SDL_GetRendererOutputSize(ren, &ow, &oh);
+                if ((uint64_t)ow * FB_H <= (uint64_t)oh * FB_W) {
+                    rw = (uint32_t)ow;
+                    rh = (uint32_t)((uint64_t)ow * FB_H / FB_W);
+                } else {
+                    rh = (uint32_t)oh;
+                    rw = (uint32_t)((uint64_t)oh * FB_W / FB_H);
+                }
+                linear = tex_w != rw || tex_h != rh;
+            }
+            if (linear != tex_linear) {
+                SDL_SetTextureScaleMode(tex, linear ? SDL_ScaleModeLinear : SDL_ScaleModeNearest);
+                tex_linear = linear;
+            }
         }
         if (dirty) {
             dirty = 0;
@@ -608,6 +1119,18 @@ int xbox_HostWindowMain(int (*guest_main)(void))
         }
 
         now = now_ms();
+#if defined(XBOXRECOMP_LSFG)
+        if (s_fg_on) {
+            uint32_t real, shown, gen;
+            framegen_pacer_stats(&real, &shown, &gen);
+            perf_overlay_set_framegen(framegen_pacer_active() ? 1 : 2, real, shown, gen);
+            if (now - t_fg_log >= 5000) {
+                if (t_fg_log && !fg_off_seen)
+                    fg_log_stats();
+                t_fg_log = now;
+            }
+        }
+#endif
         if (perf_overlay_enabled() && now - t_overlay >= 500) {
             if (perf_overlay_tick(now, __atomic_load_n(&s_flips, __ATOMIC_RELAXED),
                                   __atomic_load_n(&s_frame_draws, __ATOMIC_RELAXED),
@@ -639,6 +1162,14 @@ int xbox_HostWindowMain(int (*guest_main)(void))
     recomp_lifecycle_resume_for(RECOMP_HOLD_ALL);   /* background and menu */
     while (__atomic_load_n(&s_in_present, __ATOMIC_SEQ_CST))
         sched_yield();
+#if defined(XBOXRECOMP_LSFG)
+    /* The sink wakes this loop through SDL: the pacer goes before SDL. */
+    if (s_fg_on) {
+        fg_log_stats();
+        framegen_pacer_stop();
+        s_fg_on = 0;
+    }
+#endif
     fprintf(stderr, "  [FBWIN] %s\n", quit ? "window closed" : "guest returned");
     fflush(stdout);
     fflush(stderr);

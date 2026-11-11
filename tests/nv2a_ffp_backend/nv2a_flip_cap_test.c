@@ -39,6 +39,9 @@ int nv2a_pb_dma_walk(void) { return 1; }
 void xbox_FramebufferWindowStart(void) {}
 void xbox_FramebufferWindowFrameStats(uint32_t draws) { (void)draws; }
 void xbox_FramebufferWindowPresent(uint32_t va, uint32_t pitch) { (void)va; (void)pitch; }
+int xbox_FramebufferWindowPresentHost(const void *px, uint32_t w, uint32_t h, uint32_t pitch,
+                                      uint32_t format)
+{ (void)px; (void)w; (void)h; (void)pitch; (void)format; return 0; }
 void xbox_Nv2aFrameCounterFlip(void) {}
 int nv2a_pb_scan_in_call(void) { return 0; }
 uint32_t xbox_VblankCount(void) { return 0; }

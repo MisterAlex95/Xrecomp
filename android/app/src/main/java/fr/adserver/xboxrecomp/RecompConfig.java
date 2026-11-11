@@ -50,6 +50,8 @@ final class RecompConfig {
         final int title, summary, detail;
         final String[] keys;
         final Choice[] choices;
+        /** Offered only by an APK built with frame generation (-PxbaLsfg=1 with the bridge: R.bool.xba_lsfg). */
+        boolean needsLsfg;
 
         Option(Section section, int title, int summary, int detail, String[] keys, Choice... choices) {
             this.section = section;
@@ -58,6 +60,11 @@ final class RecompConfig {
             this.detail = detail;
             this.keys = keys;
             this.choices = choices;
+        }
+
+        Option lsfgOnly() {
+            needsLsfg = true;
+            return this;
         }
 
         int defaultIndex() {
@@ -97,6 +104,17 @@ final class RecompConfig {
                    R.string.OPT_GPU_FPS_CAP_DETAIL, keys("RECOMP_GPU_FPS_CAP"),
                    new Choice(R.string.VAL_AUTO, (String)null), new Choice(R.string.VAL_FPS_30, "30"),
                    new Choice(R.string.VAL_FPS_60, "60"), new Choice(R.string.VAL_OFF, "0")),
+        new Option(Section.GRAPHICS, R.string.OPT_GPU_SCALE, R.string.OPT_GPU_SCALE_SUMMARY,
+                   R.string.OPT_GPU_SCALE_DETAIL, keys("RECOMP_GPU_SCALE"),
+                   new Choice(R.string.VAL_AUTO, (String)null), new Choice(R.string.VAL_SCALE_1, "1"),
+                   new Choice(R.string.VAL_SCALE_2, "2"), new Choice(R.string.VAL_SCALE_3, "3"),
+                   new Choice(R.string.VAL_SCALE_FIT, "auto")),
+        // Frame generation (docs/technical/framegen.md): RECOMP_LSFG_DIR, the app-private shader cache, is written by
+        // « Choose Lossless.dll » (LSFG_DIR_KEY), not by this option.
+        new Option(Section.GRAPHICS, R.string.OPT_LSFG, R.string.OPT_LSFG_SUMMARY, R.string.OPT_LSFG_DETAIL,
+                   keys("RECOMP_LSFG", "RECOMP_LSFG_MULT", "RECOMP_LSFG_PERF"),
+                   new Choice(R.string.VAL_OFF, null, null, null), new Choice(R.string.VAL_LSFG_2X, "1", "2", null),
+                   new Choice(R.string.VAL_LSFG_2X_PERF, "1", "2", "1")).lsfgOnly(),
         new Option(Section.GRAPHICS, R.string.OPT_TEX, R.string.OPT_TEX_SUMMARY, R.string.OPT_TEX_DETAIL,
                    keys("RECOMP_TEX_BILINEAR", "RECOMP_TEX_ANISO"),
                    new Choice(R.string.VAL_TEX_SHARP, null, null), new Choice(R.string.VAL_TEX_SMOOTH, "1", null),
@@ -120,6 +138,19 @@ final class RecompConfig {
                    R.string.OPT_SELFTEST_DETAIL, keys("RECOMP_SHELL_SELFTEST"),
                    new Choice(R.string.VAL_OFF, (String)null), new Choice(R.string.VAL_ON, "1")),
     };
+
+    /** The shader cache directory of the imported Lossless.dll (getFilesDir()/lsfg/<key>), for the runtime. */
+    static final String LSFG_DIR_KEY = "RECOMP_LSFG_DIR";
+
+    /** The options this APK offers (frame generation only when it is built in). */
+    static List<Option> shownOptions(boolean lsfg) {
+        List<Option> out = new ArrayList<>();
+        for (Option o : OPTIONS) {
+            if (!o.needsLsfg || lsfg)
+                out.add(o);
+        }
+        return out;
+    }
 
     private final File file;
     private final List<String> lines = new ArrayList<>();

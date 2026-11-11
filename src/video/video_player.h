@@ -66,6 +66,19 @@ void xbox_FramebufferWindowSetAA(uint32_t sy);
  * hold, as its bytes are in guest memory: 1 or 2 (X1R5G5B5) show 16-bit
  * pixels as 555, anything else as R5G6B5. */
 void xbox_FramebufferWindowSetFormat(uint32_t color_format);
+/* A GPU back end's own frame, not through guest memory: w x h pixels, rows
+ * pitch bytes apart, top row first, in an XBOX_FB_HOST_* format (alpha
+ * ignored). Any size: the window scales it into its logical 640x480
+ * (linearly unless it maps 1:1). Called by the executor at FLIP_STALL
+ * (Nv2aPresentSurface.host_px); the pixels are copied before it returns.
+ * Returns 1 if a window took the frame, 0 if there is none (headless) or
+ * the format is unknown. The Win32 GDI window takes none. */
+#define XBOX_FB_HOST_BGRX8888 1u    /* bytes B, G, R, X (desktop GL GL_BGRA) */
+#define XBOX_FB_HOST_RGBX8888 2u    /* bytes R, G, B, X (GLES GL_RGBA) */
+int  xbox_FramebufferWindowPresentHost(const void *px, uint32_t w, uint32_t h,
+                                       uint32_t pitch, uint32_t format);
+/* The frame last shown, as a 24-bit BMP at its own size (640x480, or the
+ * back end's size for a host frame). */
 int  xbox_FramebufferDumpBmp(const char *path);
 /* Title bar: "<XBE title> | FPS: n | draws: n". The name is the certificate's
  * UTF-16 title (40 chars max); the stats come from each flip. */

@@ -9,6 +9,12 @@ set(XBA_TITLE_DIR "" CACHE PATH
 
 # The toolkit, from the root of this repository (SDL2 comes in as its subproject on Android).
 get_filename_component(XBOXRECOMP_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../../../.." ABSOLUTE)
+# Frame generation (gradle -PxbaLsfg=1, docs/technical/framegen.md): the toolkit's XBOXRECOMP_LSFG, with the Vulkan
+# bridge (C++20, libc++ static: ANDROID_STL c++_static, gradle's default) when XBOXRECOMP_LSFG_VK_SRC is given.
+# libvulkan.so is dlopened by volk, never linked: the APK still starts on a device without Vulkan.
+if(XBOXRECOMP_LSFG)
+    enable_language(CXX)
+endif()
 add_subdirectory("${XBOXRECOMP_ROOT}" xboxrecomp)
 
 add_library(main SHARED shell_main.c pack_loader.c companion_jni.c menu_jni.c)
@@ -20,6 +26,9 @@ target_compile_definitions(main PRIVATE XBA_VERSION="${XBA_VERSION}")
 set(XBA_TOOLKIT_LIBS xbox_kernel xbox_d3d8 xbox_dsound xbox_input xbox_input_map xbox_usb xbox_apu xbox_nv2a
                      xbox_video platform host_time recomp_exit_hook recomp_cfg host_cpus
                      recomp_storage recomp_app recomp_selftest recomp_pack)
+if(TARGET xbox_framegen)
+    list(APPEND XBA_TOOLKIT_LIBS xbox_framegen)
+endif()
 target_link_libraries(main PRIVATE -Wl,--whole-archive ${XBA_TOOLKIT_LIBS} -Wl,--no-whole-archive
                                    SDL2::SDL2 GLESv3 log android m)
 
@@ -60,8 +69,17 @@ target_link_options(main PRIVATE -Wl,--no-undefined)
 if(NOT TARGET xiso)
     add_subdirectory("${XBOXRECOMP_ROOT}/src/xiso" xiso)
 endif()
-add_library(xba_import SHARED xiso_jni.c)
-target_link_libraries(xba_import PRIVATE xiso log)
+# It also imports Lossless.dll for frame generation (lsfg_jni.c, LsfgNative.java): the shader-cache helpers are C,
+# libc only, and always built. With -PxbaLsfg=1 and a DXVK checkout (XBOXRECOMP_LSFG_DXVK_SRC) the DXBC translator
+# is linked in too (C++17, libc++ static), so the phone translates the shaders itself.
+include("${XBOXRECOMP_ROOT}/src/framegen/lsfg_shaders.cmake")
+add_library(xba_import SHARED xiso_jni.c lsfg_jni.c)
+target_link_libraries(xba_import PRIVATE xiso lsfg_shaders log)
+if(TARGET lsfg_dxbc)
+    target_link_libraries(xba_import PRIVATE lsfg_dxbc)
+    target_compile_definitions(xba_import PRIVATE XBA_LSFG_TRANSLATOR=1)
+    message(STATUS "libxba_import.so: with the DXBC translator")
+endif()
 target_link_options(xba_import PRIVATE -Wl,--no-undefined)
 
 # The title (XBA-52). Its CMakeLists sees XBOXRECOMP_SHELL_TITLE and, instead of an executable, defines the object

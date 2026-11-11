@@ -69,7 +69,9 @@ The APK every title starts from (SDLActivity + `libmain.so` + logcat): see [app-
 ## GPU renderer (experimental)
 
 `RECOMP_GPU=1` (launcher › Settings › Graphics › Renderer) draws with OpenGL ES 3 on a headless EGL context
-instead of the CPU rasteriser; `RECOMP_GPU_FPS_CAP` (Frame cap, default 60, or the title profile's: 30 for Fable) keeps menus from running at 200+ fps.
+instead of the CPU rasteriser; `RECOMP_GPU_FPS_CAP` (Frame cap, default 60, or the title profile's: 30 for Fable) keeps menus from running at 200+ fps;
+`RECOMP_GPU_SCALE` (Internal resolution: 1×, 2×, 3×, Fit the screen; default 1×) draws the 3D picture above 640×480
+and hands it to the window at that size.
 Not the default yet. Context, GLES details and the device check list:
 [gpu-backend.md « Android »](../technical/gpu-backend.md#android).
 

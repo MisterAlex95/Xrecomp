@@ -174,6 +174,15 @@ static uint32_t px16_to_rgb(uint16_t v, int x555)
     return (r << 16) | (g << 8) | b;
 }
 
+/* A GPU back end's own frame (video_player.h). The GDI window shows guest
+ * memory only: none taken, so a back end keeps presenting through it. */
+int xbox_FramebufferWindowPresentHost(const void *px, uint32_t w, uint32_t h,
+                                      uint32_t pitch, uint32_t format)
+{
+    (void)px; (void)w; (void)h; (void)pitch; (void)format;
+    return 0;
+}
+
 /* Called by the pushbuffer executor when the title flips. */
 void xbox_FramebufferWindowPresent(uint32_t fb_va, uint32_t pitch)
 {

@@ -182,6 +182,13 @@
     <string name="OPT_GPU_FPS_CAP_DETAIL">With the GPU renderer, menus and pause screens can run at 200 frames per second or more, which only drains the battery and heats the device. The cap holds them to 60 (or 30). Auto: what this game\'s profile chooses (60, or 30 where the profile asks for even pacing, as Fable does). Off removes it, for testing. No effect with the software renderer. (RECOMP_GPU_FPS_CAP)</string>
     <string name="VAL_FPS_30" translatable="false">30</string>
     <string name="VAL_FPS_60" translatable="false">60</string>
+    <string name="OPT_GPU_SCALE">Internal resolution (GPU renderer)</string>
+    <string name="OPT_GPU_SCALE_SUMMARY">Draw the game at a multiple of its 640×480</string>
+    <string name="OPT_GPU_SCALE_DETAIL">The GPU renderer can draw the 3D picture at 2 or 3 times the console\'s resolution, or at the size that fits the screen exactly. Sharper, at the cost of more GPU work, heat and battery. Effects such as bloom and shadows keep their original resolution. Auto: what this game\'s profile chooses (1× for now). No effect with the software renderer. (RECOMP_GPU_SCALE)</string>
+    <string name="VAL_SCALE_1">1× (original)</string>
+    <string name="VAL_SCALE_2" translatable="false">2×</string>
+    <string name="VAL_SCALE_3" translatable="false">3×</string>
+    <string name="VAL_SCALE_FIT">Fit the screen</string>
     <string name="OPT_TEX">Texture filtering</string>
     <string name="OPT_TEX_SUMMARY">How textures are sampled when drawn</string>
     <string name="OPT_TEX_DETAIL">Sharp takes the nearest texel, as the game is drawn by default. Smooth blends four texels; anisotropic also follows surfaces seen at an angle. Smoother modes cost speed, and are not the default because they change the look the game was tested with. (RECOMP_TEX_BILINEAR, RECOMP_TEX_ANISO)</string>
@@ -380,4 +387,20 @@
     <string name="CTL_DPAD_X">D-pad, thumbsticks</string>
     <string name="CTL_STICKS">L3 · R3</string>
     <string name="CTL_STICKS_X">Thumbstick buttons (press a stick)</string>
+    <!-- Frame generation (docs/technical/framegen.md): only in an APK built with -PxbaLsfg=1 and the bridge. -->
+    <string name="OPT_LSFG">Frame generation</string>
+    <string name="OPT_LSFG_SUMMARY">Show an extra, generated frame between real ones</string>
+    <string name="OPT_LSFG_DETAIL">Lossless Scaling frame generation (LSFG 3.1) draws one frame between every two the game renders: the game runs at 30 frames per second and the screen shows 60. It needs your own copy of Lossless.dll (Choose Lossless.dll below) and Vulkan. Moving text and the HUD can wobble, a scene cut can ghost for one frame, and input waits one frame longer. 2× performance uses the lighter shader set, for when 2× is too heavy for the device. If generation fails or is too slow, the game goes back to normal frames on its own. Needs the GPU renderer for the 30 fps pacing. (RECOMP_LSFG, RECOMP_LSFG_MULT, RECOMP_LSFG_PERF)</string>
+    <string name="VAL_LSFG_2X" translatable="false">2×</string>
+    <string name="VAL_LSFG_2X_PERF">2× performance</string>
+    <string name="LSFG_CHOOSE_DLL">Choose Lossless.dll</string>
+    <string name="LSFG_CHOOSE_DLL_DETAIL">Frame generation uses the shaders of Lossless Scaling, which you must own (Steam). Copy Lossless.dll from your Lossless Scaling folder (steamapps/common/Lossless Scaling) to this device and choose it here. Only its shaders are kept, in the app\'s private storage; the DLL itself is read once and never stored.</string>
+    <string name="LSFG_LEGAL_FOOTER">Lossless.dll is never included in the app or shared; the shaders stay on this device.</string>
+    <string name="LSFG_IMPORTING">Preparing the frame generation shaders…</string>
+    <string name="LSFG_NO_DLL">No Lossless.dll chosen</string>
+    <string name="LSFG_READY">Shaders ready (LSFG 3.1)</string>
+    <string name="LSFG_READY_PERF_ONLY">Shaders ready (LSFG 3.1 performance only)</string>
+    <string name="LSFG_UNSUPPORTED">This Lossless.dll version is not supported</string>
+    <string name="LSFG_NO_TRANSLATOR">Shaders found, but this app cannot translate them (translator missing)</string>
+    <string name="LSFG_NOT_A_DLL">%1$s is not a DLL: choose Lossless.dll.</string>
 </resources>

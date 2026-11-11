@@ -45,6 +45,17 @@ static int s_tex_w, s_tex_h, s_dirty_tex = 1;
 static uint64_t s_last_ms, s_last_flips;
 static double s_last_cpu_s;
 static double s_fps;
+static int s_fg_state;
+static uint32_t s_fg_real, s_fg_shown, s_fg_gen_us;
+
+void perf_overlay_set_framegen(int state, uint32_t real_fps_centi, uint32_t shown_fps_centi,
+                               uint32_t gen_us)
+{
+    s_fg_state = state;
+    s_fg_real = real_fps_centi;
+    s_fg_shown = shown_fps_centi;
+    s_fg_gen_us = gen_us;
+}
 
 int perf_overlay_enabled(void)
 {
@@ -184,6 +195,13 @@ int perf_overlay_tick(uint64_t now_ms, uint64_t flips, uint32_t draws, const cha
     s_last_ms = now_ms;
     s_last_flips = flips;
     s_last_cpu_s = cpu;
+
+    if (s_fg_state == 1)
+        snprintf(s_lines[n++], LINE_CHARS, "LSFG %u.%u / %u.%u FPS  GEN %u.%u MS",
+                 s_fg_real / 100, s_fg_real % 100 / 10, s_fg_shown / 100, s_fg_shown % 100 / 10,
+                 s_fg_gen_us / 1000, s_fg_gen_us % 1000 / 100);
+    else if (s_fg_state == 2)
+        snprintf(s_lines[n++], LINE_CHARS, "LSFG OFF");
 
     rss = rss_mb();
     if (sys_mem_mb(&used, &total) == 0)

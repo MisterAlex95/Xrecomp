@@ -131,6 +131,7 @@ public class LauncherActivity extends Activity {
     private static final long PREPARE_FRESH_MS = 15000;
     private static final long PREPARE_POLL_MS = 500;
     private static final int REQ_NOTIFICATIONS = 4;
+    private static final int REQ_LSFG_DLL = 5;
 
     enum State { READY, NONE, MISSING, NO_ACCESS, WRONG }
 
@@ -1423,7 +1424,7 @@ public class LauncherActivity extends Activity {
     private String settingsSummary() {
         RecompConfig c = RecompConfig.load(GameStore.externalFilesDir(this));
         List<String> changed = new ArrayList<>();
-        for (RecompConfig.Option o : RecompConfig.OPTIONS) {
+        for (RecompConfig.Option o : RecompConfig.shownOptions(lsfgBuilt())) {
             if (c.choiceIndex(o) != o.defaultIndex())
                 changed.add(getString(o.title) + " " + choiceLabel(c, o).toLowerCase(Locale.getDefault()));
         }
@@ -1466,7 +1467,8 @@ public class LauncherActivity extends Activity {
 
         RecompConfig.Section section = null;
         List<MenuRow> optionRows = new ArrayList<>();
-        for (RecompConfig.Option o : RecompConfig.OPTIONS) {
+        List<RecompConfig.Option> shown = RecompConfig.shownOptions(lsfgBuilt());
+        for (RecompConfig.Option o : shown) {
             if (o.section != section) {
                 section = o.section;
                 sectionHeader(list, sectionTitle(section));
@@ -1482,12 +1484,14 @@ public class LauncherActivity extends Activity {
             r.cycler = d -> stepOption(r, o, d);
             r.setOnClickListener(v -> stepOption(r, o, 1));
             onFocus(r, () -> optionDetail(o));
+            if (o.needsLsfg)
+                lsfgDllRow(list);
         }
 
         View spacer = gap(this);
         list.addView(spacer, lp(MATCH, 20));
         MenuRow reset = row(Icon.RESET, getString(R.string.RESET), getString(R.string.RESET_SUB), null);
-        reset.setOnClickListener(v -> resetSettings(optionRows));
+        reset.setOnClickListener(v -> resetSettings(optionRows, shown));
         list.addView(reset, lp(MATCH, Theme.ROW_H_SMALL));
         onFocus(reset, () -> {
             detailClear(null, getString(R.string.RESET), getString(R.string.RESET_DETAIL));
@@ -1503,9 +1507,9 @@ public class LauncherActivity extends Activity {
 
         l1Action = () -> jumpSection(-1);
         r1Action = () -> jumpSection(1);
-        yAction = () -> resetSettings(optionRows);
+        yAction = () -> resetSettings(optionRows, shown);
         addHint("L1/R1", R.string.HINT_SECTION, () -> jumpSection(1));
-        addHint("Y", R.string.HINT_DEFAULTS, () -> resetSettings(optionRows));
+        addHint("Y", R.string.HINT_DEFAULTS, () -> resetSettings(optionRows, shown));
         addHint("A", R.string.HINT_CHANGE, this::clickFocused);
         addHint("B", R.string.HINT_BACK, this::back);
         if (gameRunning())
@@ -1665,11 +1669,11 @@ public class LauncherActivity extends Activity {
         }
     }
 
-    private void resetSettings(List<MenuRow> rows) {
+    private void resetSettings(List<MenuRow> rows, List<RecompConfig.Option> shown) {
         cfg.resetAll();
         saveSettings();
-        for (int i = 0; i < RecompConfig.OPTIONS.length; i++)
-            refreshOptionRow(rows.get(i), RecompConfig.OPTIONS[i]);
+        for (int i = 0; i < shown.size(); i++)
+            refreshOptionRow(rows.get(i), shown.get(i));
         setNote(getString(R.string.RESET_DONE), NOTE_OK);
     }
 
@@ -1682,6 +1686,129 @@ public class LauncherActivity extends Activity {
         String raw = cfg.rawValue(o);
         detailKv(getString(R.string.KV_CFG), raw.isEmpty() ? getString(R.string.CFG_NOTHING) : raw);
         detailFooter(getString(R.string.APPLIES_NEXT_START), Theme.TEXT_FAINT);
+    }
+
+    // ---- Frame generation: « Choose Lossless.dll » ---------------------------------------------------------------
+
+    /** True when this APK has frame generation (-PxbaLsfg=1 with the Vulkan bridge, docs/technical/framegen.md). */
+    private boolean lsfgBuilt() {
+        return getResources().getBoolean(R.bool.xba_lsfg);
+    }
+
+    /** getFilesDir()/lsfg: the shader cache base (excluded from backups and from LogProvider). */
+    private File lsfgBase() {
+        return new File(getFilesDir(), "lsfg");
+    }
+
+    /**
+     * The state of the imported shaders, from the cache directory recomp.cfg names (RECOMP_LSFG_DIR): one line for
+     * the row and the detail panel. kind gets a NOTE_* colour.
+     */
+    private String lsfgStatus(int[] kind) {
+        String dir = cfg == null ? null : cfg.get(RecompConfig.LSFG_DIR_KEY);
+        kind[0] = NOTE_INFO;
+        if (dir == null || dir.isEmpty() || !new File(dir).isDirectory())
+            return getString(R.string.LSFG_NO_DLL);
+        long[] m;
+        try {
+            m = LsfgNative.readManifest(dir);
+        } catch (UnsatisfiedLinkError e) {
+            return getString(R.string.LSFG_NO_DLL);
+        }
+        return lsfgStatusOf(m, kind);
+    }
+
+    private String lsfgStatusOf(long[] m, int[] kind) {
+        if (m == null || m[LsfgNative.STATUS] != 0) {
+            kind[0] = NOTE_ERROR;
+            return getString(R.string.LSFG_UNSUPPORTED);
+        }
+        boolean full = m[LsfgNative.READY] != 0, perf = m[LsfgNative.READY + 1] != 0;
+        if (full || perf) {
+            kind[0] = NOTE_OK;
+            return getString(full ? R.string.LSFG_READY : R.string.LSFG_READY_PERF_ONLY);
+        }
+        if (m[LsfgNative.DXBC] >= m[LsfgNative.NEEDED] || m[LsfgNative.DXBC + 1] >= m[LsfgNative.NEEDED + 1]) {
+            kind[0] = NOTE_WARN;
+            return getString(R.string.LSFG_NO_TRANSLATOR);
+        }
+        kind[0] = NOTE_ERROR;
+        return getString(R.string.LSFG_UNSUPPORTED);
+    }
+
+    /** « Choose Lossless.dll », under the frame generation option. */
+    private void lsfgDllRow(LinearLayout list) {
+        int[] kind = new int[1];
+        String status = lsfgStatus(kind);
+        MenuRow r = row(Icon.KEY, getString(R.string.LSFG_CHOOSE_DLL), status, this::openLsfgDllPicker);
+        list.addView(r, lp(MATCH, Theme.ROW_H_SMALL));
+        onFocus(r, () -> {
+            detailClear(getString(R.string.SECTION_GRAPHICS), getString(R.string.LSFG_CHOOSE_DLL),
+                        getString(R.string.LSFG_CHOOSE_DLL_DETAIL));
+            detailKv(getString(R.string.KV_STATUS), status);
+            String dir = cfg.get(RecompConfig.LSFG_DIR_KEY);
+            detailKv(getString(R.string.KV_CFG), dir == null ? getString(R.string.CFG_NOTHING)
+                                                             : RecompConfig.LSFG_DIR_KEY + "=" + dir);
+            detailFooter(getString(R.string.LSFG_LEGAL_FOOTER), Theme.TEXT_FAINT);
+        });
+    }
+
+    private void openLsfgDllPicker() {
+        Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("*/*");
+        try {
+            startActivityForResult(i, REQ_LSFG_DLL);
+        } catch (ActivityNotFoundException e) {
+            setNote(getString(R.string.PICKER_MISSING), NOTE_ERROR);
+        }
+    }
+
+    private void onLsfgDllPicked(Uri uri) {
+        String name = displayName(uri);
+        Log.i(TAG, "launcher: Lossless.dll picked (" + name + ")");
+        if (!name.toLowerCase(Locale.ROOT).endsWith(".dll")) {
+            setNote(getString(R.string.LSFG_NOT_A_DLL, name), NOTE_ERROR);
+            return;
+        }
+        runWorker(R.string.LSFG_IMPORTING, () -> importLsfgDll(uri, name));
+    }
+
+    /**
+     * Worker: the DLL is read through the picker's fd only (never copied into the app's storage); its shaders go to
+     * getFilesDir()/lsfg/<key> (libxba_import.so), and recomp.cfg gets RECOMP_LSFG_DIR when they are usable.
+     */
+    private void importLsfgDll(Uri uri, String name) throws IOException {
+        long[] m;
+        String[] dir = new String[1], err = new String[1];
+        try (ParcelFileDescriptor pfd = getContentResolver().openFileDescriptor(uri, "r")) {
+            if (pfd == null)
+                throw new IOException("cannot open " + name);
+            File base = lsfgBase();
+            if (!base.isDirectory() && !base.mkdirs())
+                throw new IOException("cannot create " + base);
+            m = LsfgNative.importDll(pfd.getFd(), base.getAbsolutePath(), dir, err);
+        }
+        int[] kind = new int[1];
+        String status;
+        if (m == null || (m[LsfgNative.STATUS] != 0 && m[LsfgNative.NEEDED] == 0)) {
+            status = getString(R.string.LSFG_UNSUPPORTED);
+            kind[0] = NOTE_ERROR;
+            Log.w(TAG, "launcher: Lossless.dll import failed: " + err[0]);
+        } else {
+            status = lsfgStatusOf(new long[] { 0, m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8], m[9], m[10],
+                                               m[11], m[12], m[13] }, kind);
+            if (m[LsfgNative.STATUS] != 0 && kind[0] == NOTE_OK)
+                kind[0] = NOTE_WARN;   // one variant usable, the other failed to translate
+        }
+        if (kind[0] == NOTE_OK || kind[0] == NOTE_WARN) {
+            RecompConfig c = RecompConfig.load(GameStore.externalFilesDir(this));
+            if (dir[0] != null && !dir[0].isEmpty()) {
+                c.set(RecompConfig.LSFG_DIR_KEY, dir[0]);
+                c.save();
+            }
+        }
+        Log.i(TAG, "launcher: Lossless.dll import: " + status);
+        workerNoteKind = kind[0];
+        workerNote = status;
     }
 
     // ---- GAME_DATA ---------------------------------------------------------------------------------------------
@@ -3069,5 +3196,7 @@ public class LauncherActivity extends Activity {
             onTreePicked(data.getData());
         else if (requestCode == REQ_ISO)
             onIsoPicked(data.getData());
+        else if (requestCode == REQ_LSFG_DLL)
+            onLsfgDllPicked(data.getData());
     }
 }

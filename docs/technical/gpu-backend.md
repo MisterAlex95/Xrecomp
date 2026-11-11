@@ -21,9 +21,11 @@ presenting from the GPU. The last section lists what 7c–7e have to do.
 | `src/gpu/nv2a_gl.c` | The back end: render targets, texture cache, state, draws, readback, queries. |
 | `src/gpu/nv2a_gl_shader.c` | Combiner program → fragment shader, one per pipeline key. No GL calls. |
 | `src/gpu/nv2a_gl_vsh.c` | Vertex program (nv2a_vsh_interp.c encoding) → GLSL vertex shader, one per program hash. No GL calls. |
+| `src/gpu/nv2a_gl_scale.c` | Internal resolution policy (which targets scale) and rectangle rounding. No GL calls. |
 | `src/gpu/nv2a_gl_context.c` | Headless context: CGL (macOS), EGL pbuffer or surfaceless (Android, Linux); loss detection. |
 | `src/gpu/nv2a_gl_api.h` | GL headers per platform: `OpenGL/gl3.h`, `GLES3/gl3.h`, libepoxy. |
 | `tests/nv2a_gl_shader` | 400 random combiner programs through the generated shaders, each pixel compared with `nv2a_rc_eval`. |
+| `tests/nv2a_gl_scale` | The internal resolution policy (0x121 / 0x2121 back buffer, swizzled and depth-only targets), scissor rounding at 2.25, visibility count scaling, `RECOMP_GPU_SCALE_TARGETS` parsing. |
 | `tests/nv2a_gl_vsh` | 600 random vertex programs plus ILU/a0 edge cases through the translator (transform feedback), compared with `nv2a_vsh_interp.c`; eight deliberate translator mutations must be caught. |
 
 One code path for desktop GL 3.3 core / macOS 4.1 core and GLES 3.0: the
@@ -47,7 +49,8 @@ renders into framebuffer objects only. No other thread makes a GL call.
 
 The SDL presenter keeps its own renderer on the main thread (Metal on macOS,
 GLES on Android) and is fed exactly as with the CPU rasteriser: through guest
-memory. At `FLIP_STALL` the executor calls the back end's present hook
+memory (or, with host present, the back end's own pixels at their own size:
+"Host present" below). At `FLIP_STALL` the executor calls the back end's present hook
 (`nv2a_backend_register_with_present`) before it snapshots the frame for the
 window and for `RECOMP_FB_DUMP`, with the surface the flip presents. The
 hook reads back that surface only -- see "Present" below. So the presenter,
@@ -95,6 +98,69 @@ GPU there. Where reports do not drain the GPU first (a title without
 visibility tests, `RECOMP_GPU_ZPASS=always`) and on a tiler, the
 synchronous read is the one that waits for the whole frame.
 
+#### Host present
+
+With an SDL window, the presented target can skip guest memory altogether
+(`RECOMP_GPU_PRESENT=host`; on by itself when `RECOMP_GPU_SCALE` is above 1,
+since guest memory only holds 640x480). At flip N `gl_present` reads the
+target at its **real GL size** into one of two pack buffers of its own
+(`host_issue`); at flip N+1 it maps that buffer (`host_map`) and hands the
+pointer back in `Nv2aPresentSurface.host_px` / `host_w` / `host_h` /
+`host_pitch` / `host_format` (`NV2A_HOST_FORMAT_BGRX8888` from desktop GL's
+`GL_BGRA` read, `NV2A_HOST_FORMAT_RGBX8888` from GLES's `GL_RGBA`), while flip
+N+1's read goes into the other buffer. `FLIP_STALL` then calls
+`xbox_FramebufferWindowPresentHost(px, w, h, pitch, format)` instead of
+`xbox_FramebufferWindowPresent(va, pitch)` (src/gpu never calls src/video);
+the window copies the pixels into a slot before the call returns, and
+`gl_flip` unmaps the buffer. With `RECOMP_GPU_PRESENT=sync` (or frame
+generation forcing it) the frame is read and mapped at its own flip.
+
+- **Where the size comes from**: one accessor, `rt_present_source(r, &w, &h)`,
+  returns the framebuffer and the real GL size of target `r`'s guest area
+  (`r->w x r->h`), origin (0, 0), top row first: `r->fbo` and
+  round(w·sc) x round(h·sc) for a target drawn at an internal resolution
+  (see below), the guest size at 1x. Nothing else in the present asks for
+  a target's size.
+- **Guest memory**: a host frame does not clear `dirty` (guest bytes stale);
+  "host frame issued" is tracked apart (`s_rt_host_serial`, the target's
+  write serial at its last host read: a target not drawn since is not read
+  again and the window keeps its frame). The native copy happens at every
+  flip only with `RECOMP_GPU_READBACK=present` (or `=all`); otherwise the
+  target is read back on demand like any other (texture fallback, eviction,
+  out-of-memory reset). Guest CPU reads of the front buffer (a `Lock`) then
+  see the bytes of the last read-back.
+- **Not host frames**: headless runs (the presenter never called
+  `nv2a_gl_set_display_size`: no host read-back at all), a flip that dumps
+  (`RECOMP_FB_DUMP`, `_FLIPS`: synchronous native read-back into guest memory,
+  the dump files are unchanged and 640x480), and frames the guest CPU wrote
+  (no GPU target at the presented address). The window switches between
+  guest and host frames from one flip to the next; a pending host frame is
+  dropped when a guest frame comes between.
+- **The window** (fb_present_sdl.c): slots carry width, height, pitch and SDL
+  pixel format (general, so a frame pacer can feed them the same way);
+  `xbox_FramebufferWindowPresentHost` has the same lifecycle hold and
+  close handshake as the guest present. The streaming texture is re-created
+  when the size or format changes (`[FBWIN] texture WxH` is logged); a host
+  frame is filtered linearly unless it maps 1:1 onto the letterboxed
+  rectangle, guest frames stay nearest. `SDL_RenderSetLogicalSize(640, 480)`
+  is kept, so letterboxing and the perf overlay are unchanged.
+  `xbox_FramebufferDumpBmp` (the companion's Screenshot) writes the shown
+  frame at its own size. The Win32 GDI window takes no host frames (a stub
+  returning 0) and never sets a display size.
+- **Frame generation** (`RECOMP_LSFG=1`, [Frame Generation](framegen.md#presenter)):
+  host frames go to the pacer (`framegen_pacer_submit_format`, BGRX or RGBX at
+  their own size) instead of a slot, and the window shows the pacer's real and
+  generated frames from its timed FIFO; the generator reopens when the size
+  changes. The `[FBWIN] host frames ...: copy` figure is then the pacer's
+  submit (copy and conversion) on the executor.
+- **Cost** (M1 Max, 1x, Fable intro to Oakvale, windowed): read-back issue +
+  map 0.16-0.24 ms/frame on the executor, the window's copy 0.045-0.055
+  ms/frame (`[GPUGL] host present: ...` and `[FBWIN] host frames ...: copy`
+  lines, every 600 frames). Picture: the same frame through both paths
+  (target read back synchronously into guest memory next to the host read)
+  differs by at most 7/255, mean 1.8-2.4/255 -- the X1R5G5B5 rounding of the
+  guest path, which host frames do not have.
+
 Rejected for 7b: a command queue to a GL thread (one more copy of every
 batch, and the executor would have to wait for readbacks anyway); a context
 shared with the presenter (SDL's renderer owns its context, is Metal on
@@ -104,6 +170,122 @@ macOS, and sharing with it is stage 7e's problem, not a prerequisite).
 guest starts, windowed or headless, which registers the back end; the
 executor must be on (`RECOMP_PB_EXEC`). If the context cannot be created the
 back end unregisters itself at its first call and the CPU rasteriser draws.
+
+## Internal resolution
+
+`RECOMP_GPU_SCALE` (default 1): 2, 3, a decimal 1-4, or `auto`. `auto` fits
+the window's drawable height: `nv2a_gl_set_display_size(w, h)` (nv2a_gl.h)
+is called by the SDL presenter with `SDL_GetRendererOutputSize` once its
+renderer exists and before the guest starts, and `ensure_init` reads it:
+scale = height / 480, at most 3 (1080 -> 2.25, 1440x1080 shown 1:1; a
+default Mac window on a Retina display -> 3), 1 headless; any scale is held
+to `GL_MAX_TEXTURE_SIZE / 640`. The choice is logged:
+`[GPUGL] internal scale 2.25 (RECOMP_GPU_SCALE=auto, window drawable
+2400x1080; max texture 16384)`. The parsed value is `s_scale` in
+nv2a_gl.c (`scale_from_env`). Above 1 the window is fed host frames
+(Present, above) read at the target's real size through
+`rt_present_source`.
+
+What scales: the frame-buffer class of render targets is drawn at s_scale
+times its guest size. Positions need no change: a vertex program's `oPos`
+and the CPU-transformed vertices are in surface pixels, mapped against the
+target's **logical** size (`u_vp` = 2 / gw, 2 / gh), so a viewport of
+round(gw·n) x round(gh·n) over a texture that size scales them
+continuously; half-pixel conventions, text and HUD stay as the title drew
+them, sharper. No title patching, no shader changes.
+
+Which targets (`nv2a_gl_scale.c`, no GL, tested by `tests/nv2a_gl_scale`),
+decided from the colour surface when a batch binds it:
+
+1. **Frame-buffer class → n**: a linear (not swizzled) colour surface whose
+   real size (clip origin + size, real pixels) is 640x480 (the presenter's
+   frame, `NV2A_GL_FRAME_W/H`) or 640x480 times its anti-aliasing factor.
+   The key is real pixels: Fable binds its back buffer as
+   `SET_SURFACE_FORMAT` 0x2121 (AA 2x2, logical clip 320x240) once a frame
+   and 0x121 (640x480) otherwise -- the same pixels; keying on the logical
+   size re-created the target twice a frame (13.8–14.9 ms, 49 fps in the
+   prototype).
+2. **Everything else → 1**: swizzled and power-of-two effect targets
+   (Fable's bloom, noise, the 256² scene copy the bump-env pass reads), and
+   depth-only targets (the 768² shadow map).
+3. `RECOMP_GPU_SCALE_SHADOW=1` scales depth-only targets too;
+   `RECOMP_GPU_SCALE_TARGETS=WxH[,WxH]` adds real sizes to the frame class.
+4. **Depth follows colour**: depth textures are keyed by (zeta address,
+   scale), so zeta 0 (the scratch depth) used by a scaled and a native
+   target has one of each. The 640x480 minimum stays logical.
+5. A batch with every colour channel masked and no colour target yet (the
+   depth-only framebuffer) takes its colour surface's scale.
+
+How the rest follows (`nv2a_gl.c`): `GlRT.w/h/gw/gh` and `GlDepth.w/h` stay
+in guest pixels; `GlRT.sc` / `GlDepth.sc` give the scale and every GL size
+is round(logical·sc): texture creation, `rt_grow`, the feedback copy
+(`break_feedback`), the viewport and the scissor (`set_view`: both edges
+rounded, round(x·sc) .. round((x+w)·sc), so adjacent rectangles stay
+adjacent), the clear's invalidate rectangle. The polygon offset factor is
+multiplied by the target's scale (it multiplies the depth slope per pixel,
+and a pixel at scale n covers 1/n of a guest pixel); the units are not, and
+depth-only targets keep the factor. Visibility counts on desktop GL are
+exact samples, n² times more: each query keeps its target's scale and its
+count is divided by sc², rounded, at least 1 when any sample passed (GLES
+reports 1 either way). A target whose scale class changes (never seen in
+Fable) goes back through guest memory and is re-created ("target
+rescales").
+
+The **native resolve** of a scaled target (`rt_resolve`: a guest-size
+texture + FBO, linear `glBlitFramebuffer` through `sh_blit`, cached by the
+target's write serial) serves what needs guest-size pixels:
+
+- read-back to guest memory (`rt_readback`, the guest-path present's
+  `pbo_issue`): guest memory always holds the native picture in its own
+  format, so headless runs, `RECOMP_FB_DUMP` and the guest-memory present
+  show a supersampled 640x480;
+- a native target sampling a scaled one (Fable's bloom and scene copy read
+  the back buffer), which would otherwise under-filter n² texels per pixel
+  (`RECOMP_GPU_SCALE_RESOLVE=0` samples the scaled texture instead, for
+  comparison); a scaled target sampling a scaled one reads it directly.
+  Texture coordinates stay logical either way (`tscale` from gw/gh);
+- seeding: guest bytes go up at guest size into the resolve and are blitted
+  up (nearest), and the resolve then holds the exact guest picture.
+
+In Oakvale that is two resolves a frame plus one for a guest-path present.
+At 2x the linear blit is an exact 2x2 box filter; at 3x it samples the
+centre texel of each 3x3 block (the guest's own sample position).
+`RECOMP_GPU_SCALE_DUMP=1` writes the presented target at its real size as
+`<RECOMP_FB_DUMP>S<n>.bmp` at every dumping flip, next to the 640x480 dumps.
+With a scale above 1 the start-up line `[GPUGL] scaled targets at 2.00:
+frame 640x480 -> 1280x960, ...` and a statistics line `[GPUGL] internal
+scale 2.00: N resolves, N seed blits, N target rescales, N depth
+re-creations` (every 600 frames, 60 with `RECOMP_GPU_VERBOSE`) are logged;
+rescales and depth re-creations stay 0 in steady state. At scale 1 nothing
+changes: no GL call more.
+
+Not scaled yet (nothing sends them on this path today; comments at
+`apply_state` and `gl_clear`): points and lines, `SET_WINDOW_CLIP_*`,
+`SET_CLEAR_RECT`. Guest CPU reads of a scaled target see the native
+read-back, as at scale 1. Eviction of a scaled target loses its resolution
+(it reseeds from guest memory). Memory: about 17 MB more at 2x, 36 MB at 3x
+for Fable.
+
+Measured (M1 Max, Fable, boot through the intro to Oakvale, 2026-11-11):
+0 target rescales and 0 depth re-creations over whole runs at 2, 2.25 and
+3; 3 resolves a frame in Oakvale headless (two for the effect targets,
+one for the guest-memory present; a host present skips the last), none on
+the title screen windowed; no GL errors. Render time against scale 1 back to back, in-world 5 s
+windows: 7.50 vs 7.78 ms/frame (+0.28 mean, -0.03 to +0.64 per window, a
+shared and noisy machine), 57.6-59.8 fps both. 2.25 and 3 (run in
+parallel): 7.85-7.92 ms. Windowed at 2: `[FBWIN] texture 1280x960`, host
+present 0.17-0.19 ms/frame. The native (guest-memory) dump differs from
+scale 1 by 5.5/255 mean at 2 (mostly cloud animation and supersampled
+edges), 3.5 at 2.25, 0.14 at 3. At scale 1, 45 of 54 windows of 60
+presents on the title screen had exactly the same count of every GL entry
+point as the build without this work (an interposer counting 86
+functions; the rest differ by timing), and no blit or extra query at all.
+RECOMP_GPU_FAKE_RESET (lost and oom) at scale 2 recovers on the title
+screen (the back buffer reseeds by blit).
+
+Launcher: Settings › Graphics › **Internal resolution (GPU renderer)**: Auto
+(the profile's choice: 1 for now, no title sets it), 1× (original), 2×, 3×,
+Fit the screen (`auto`). The default stays 1 until the device check.
 
 ## Frame cap
 
@@ -648,6 +830,10 @@ The original list (the interpreter was 41 % of the in-world executor):
 
 ### 7e: presenting from the GPU
 
+0. Done: host present (Present, above) -- the presented target goes to the
+   window at its real size through a pack buffer, bypassing guest memory
+   (an internal resolution needs it). Still a read-back and a texture
+   upload per frame; the zero-copy options below remove them.
 1. Present the finished FBO texture directly. On Android the SDL renderer is
    GLES: create the executor context shared with a presenter-owned GL context
    (or an `EGLImage` of the FBO texture), draw it in the presenter, and drop
@@ -738,3 +924,15 @@ below passes.
     thread's share at cap 60 vs Off; and in-world.
 11. Settings › Renderer: Auto. `RECOMP_GPU` is gone from recomp.cfg and the
     software renderer draws (no `[GPUGL]` lines).
+12. Renderer GPU, Settings › Internal resolution: 2×. logcat: `[GPUGL]
+    internal scale 2.00`, `[GPUGL] scaled targets at 2.00: frame 640x480 ->
+    1280x960`, `[GPUGL] host present on (window WxH)`, `[FBWIN]
+    texture 1280x960 (SDL_PIXELFORMAT_XBGR8888)`, every 600 frames
+    `[GPUGL] internal scale 2.00: ... 0 target rescales, 0 depth
+    re-creations`,
+    then every 600 frames `[GPUGL] host present: ... ms/frame` and `[FBWIN]
+    host frames ...: copy ... ms/frame`. Picture, letterbox and perf overlay
+    in place; no `GL error`.
+13. Fit the screen: `internal scale` = screen height / 480 (2.25 at 1080).
+    Auto: `RECOMP_GPU_SCALE` gone from recomp.cfg, no `internal scale` line.
+14. Companion panel › Screenshot at 2×: the BMP is the scaled size.

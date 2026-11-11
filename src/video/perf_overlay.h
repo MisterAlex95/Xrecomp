@@ -17,5 +17,10 @@ int  perf_overlay_tick(uint64_t now_ms, uint64_t flips, uint32_t draws, const ch
 /* Inside the frame, after the game picture, before SDL_RenderPresent. */
 void perf_overlay_draw(SDL_Renderer *ren);
 void perf_overlay_reset(void);   /* the renderer's textures were lost */
+/* Frame generation figures for the next tick's "LSFG" line: state 0 = no
+ * line, 1 = generating (real and shown fps x 100, generation time in us),
+ * 2 = fallen back ("LSFG OFF"). */
+void perf_overlay_set_framegen(int state, uint32_t real_fps_centi, uint32_t shown_fps_centi,
+                               uint32_t gen_us);
 
 #endif

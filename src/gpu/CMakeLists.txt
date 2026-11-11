@@ -22,6 +22,7 @@ endif()
 add_library(xbox_gpu STATIC
     nv2a_gl.c
     nv2a_gl_context.c
+    nv2a_gl_scale.c
     nv2a_gl_shader.c
     nv2a_gl_vsh.c
 )

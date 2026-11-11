@@ -163,6 +163,11 @@
     <string name="OPT_GPU_FPS_CAP">Limite d\'images (rendu GPU)</string>
     <string name="OPT_GPU_FPS_CAP_SUMMARY">Images par seconde au plus, pour économiser la batterie</string>
     <string name="OPT_GPU_FPS_CAP_DETAIL">Avec le rendu GPU, les menus et l\'écran de pause peuvent tourner à 200 images par seconde ou plus, ce qui ne fait que vider la batterie et chauffer l\'appareil. La limite les tient à 60 (ou 30). Auto : ce que choisit le profil du jeu (60, ou 30 quand le profil demande un rythme régulier, comme Fable). Désactivée : aucune limite, pour les tests. Sans effet avec le rendu logiciel. (RECOMP_GPU_FPS_CAP)</string>
+    <string name="OPT_GPU_SCALE">Résolution interne (rendu GPU)</string>
+    <string name="OPT_GPU_SCALE_SUMMARY">Dessiner le jeu à un multiple de son 640×480</string>
+    <string name="OPT_GPU_SCALE_DETAIL">Le rendu GPU peut dessiner l\'image 3D à 2 ou 3 fois la résolution de la console, ou à la taille qui remplit exactement l\'écran. Plus net, au prix de plus de travail pour le GPU, de chaleur et de batterie. Les effets comme le halo et les ombres gardent leur résolution d\'origine. Auto : ce que choisit le profil du jeu (1× pour l\'instant). Sans effet avec le rendu logiciel. (RECOMP_GPU_SCALE)</string>
+    <string name="VAL_SCALE_1">1× (d\'origine)</string>
+    <string name="VAL_SCALE_FIT">Adapter à l\'écran</string>
     <string name="OPT_TEX">Filtrage des textures</string>
     <string name="OPT_TEX_SUMMARY">Comment les textures sont échantillonnées</string>
     <string name="OPT_TEX_DETAIL">Net prend le texel le plus proche, comme le jeu est dessiné par défaut. Lissé mélange quatre texels ; l\'anisotrope suit aussi les surfaces vues de biais. Les modes lissés coûtent de la vitesse, et ne sont pas le défaut car ils changent le rendu avec lequel le jeu a été testé. (RECOMP_TEX_BILINEAR, RECOMP_TEX_ANISO)</string>
@@ -361,4 +366,18 @@
     <string name="CTL_DPAD_X">Croix, sticks</string>
     <string name="CTL_STICKS">L3 · R3</string>
     <string name="CTL_STICKS_X">Boutons des sticks (appui)</string>
+    <string name="OPT_LSFG">Génération d\'images</string>
+    <string name="OPT_LSFG_SUMMARY">Afficher une image générée entre deux images réelles</string>
+    <string name="OPT_LSFG_DETAIL">La génération d\'images de Lossless Scaling (LSFG 3.1) dessine une image entre chaque paire que le jeu calcule : le jeu tourne à 30 images par seconde et l\'écran en montre 60. Il faut votre propre copie de Lossless.dll (Choisir Lossless.dll ci-dessous) et Vulkan. Les textes en mouvement et l\'interface peuvent onduler, un changement de plan peut laisser un fantôme pendant une image, et les commandes répondent une image plus tard. 2× performance utilise le jeu de shaders allégé, quand 2× est trop lourd pour l\'appareil. Si la génération échoue ou est trop lente, le jeu revient de lui-même aux images normales. Le rythme à 30 i/s demande le rendu GPU. (RECOMP_LSFG, RECOMP_LSFG_MULT, RECOMP_LSFG_PERF)</string>
+    <string name="VAL_LSFG_2X_PERF">2× performance</string>
+    <string name="LSFG_CHOOSE_DLL">Choisir Lossless.dll</string>
+    <string name="LSFG_CHOOSE_DLL_DETAIL">La génération d\'images utilise les shaders de Lossless Scaling, que vous devez posséder (Steam). Copiez Lossless.dll depuis votre dossier Lossless Scaling (steamapps/common/Lossless Scaling) sur cet appareil et choisissez-le ici. Seuls ses shaders sont gardés, dans le stockage privé de l\'application ; la DLL elle-même est lue une fois et jamais conservée.</string>
+    <string name="LSFG_LEGAL_FOOTER">Lossless.dll n\'est jamais incluse dans l\'application ni partagée ; les shaders restent sur cet appareil.</string>
+    <string name="LSFG_IMPORTING">Préparation des shaders de génération d\'images…</string>
+    <string name="LSFG_NO_DLL">Aucune Lossless.dll choisie</string>
+    <string name="LSFG_READY">Shaders prêts (LSFG 3.1)</string>
+    <string name="LSFG_READY_PERF_ONLY">Shaders prêts (LSFG 3.1 performance seulement)</string>
+    <string name="LSFG_UNSUPPORTED">Cette version de Lossless.dll n\'est pas prise en charge</string>
+    <string name="LSFG_NO_TRANSLATOR">Shaders trouvés, mais cette application ne sait pas les traduire (traducteur absent)</string>
+    <string name="LSFG_NOT_A_DLL">%1$s n\'est pas une DLL : choisissez Lossless.dll.</string>
 </resources>

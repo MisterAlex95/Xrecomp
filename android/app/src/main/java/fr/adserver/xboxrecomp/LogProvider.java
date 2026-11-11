@@ -18,6 +18,8 @@ import java.io.IOException;
  * content://<app id>.logs/prepare/<TITLEID>/prepare.log; and the game's logcat dump (« Share log » on the companion
  * panel), content://<app id>.logs/game/game.log. Only files named prepare.log under <files>/prepare, and
  * <files>/logs/game.log, are served. A framework ContentProvider rather than AndroidX's FileProvider (the app has no AndroidX).
+ * Never anything under <files>/lsfg (the frame generation shaders taken from the player's Lossless.dll,
+ * docs/technical/framegen.md): {@link #file} refuses any path that resolves there.
  */
 public class LogProvider extends ContentProvider {
     static String authority(Context c) {
@@ -73,6 +75,20 @@ public class LogProvider extends ContentProvider {
         Context c = getContext();
         if (c == null)
             return null;
+        File f = servable(c, uri);
+        if (f == null)
+            return null;
+        try {
+            File lsfg = new File(c.getFilesDir(), "lsfg").getCanonicalFile();
+            if (f.getCanonicalPath().startsWith(lsfg.getPath() + File.separator))
+                return null;
+        } catch (IOException e) {
+            return null;
+        }
+        return f;
+    }
+
+    private static File servable(Context c, Uri uri) {
         java.util.List<String> seg = uri.getPathSegments();
         if (seg.size() == 2 && seg.get(0).equals("game") && seg.get(1).equals("game.log"))
             return gameLogFile(c);

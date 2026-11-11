@@ -131,7 +131,14 @@ The executor is itself opt-in: set `RECOMP_PB_EXEC=1` to execute the pushbuffer.
 | `RECOMP_GPU_RT_DIRECT=0` | on | GL back end: never sample a render target's GL texture directly; read the target back into guest memory and upload it as a texture instead (the pre-7d path). | `src/gpu/nv2a_gl.c` |
 | `RECOMP_GPU_RT_RELAYOUT_READBACK=1` | off | GL back end: read a render target back when the title switches it between swizzled and linear or between sizes (it is kept on the GPU either way). | `src/gpu/nv2a_gl.c` |
 | `RECOMP_GPU_PRESENT=sync` | async | GL back end: read the presented surface back at its own flip instead of one frame later through a pixel pack buffer. Frame dumps always read synchronously. | `src/gpu/nv2a_gl.c` |
+| `RECOMP_GPU_PRESENT=host` | through guest memory (host present on by itself at `RECOMP_GPU_SCALE` above 1) | GL back end, SDL window only: hand the presented target to the window at its real GL size (one frame late, through a pack buffer of its own) instead of converting it into guest memory; the guest bytes are then refreshed only when something needs them (or with `RECOMP_GPU_READBACK=present`). Headless runs and frame dumps keep the guest-memory path. See [GPU Back End](../technical/gpu-backend.md#present). | `src/gpu/nv2a_gl.c`, `src/video/fb_present_sdl.c` |
 | `RECOMP_GPU_READBACK=all` | presented surface only | GL back end: at every flip also read back every other render target drawn since the last one (for a title whose CPU reads its render targets). | `src/gpu/nv2a_gl.c` |
+| `RECOMP_GPU_READBACK=present` | on demand under host present | GL back end with host present: still copy the presented surface into guest memory at every flip, as without host present (for a title whose CPU reads its front buffer). | `src/gpu/nv2a_gl.c` |
+| `RECOMP_GPU_SCALE=N`, `=auto` | 1 | GL back end: internal resolution, a multiple of the 640x480 frame buffer (2, 3, or a decimal 1-4). `auto`: the window's drawable height / 480 (1080 -> 2.25), at most 3 and within `GL_MAX_TEXTURE_SIZE`; 1 headless. Logged as `[GPUGL] internal scale <n>`. Above 1 the window gets host frames (`RECOMP_GPU_PRESENT=host`). Launcher: Settings › Graphics › Internal resolution. See [GPU Back End](../technical/gpu-backend.md#internal-resolution). | `src/gpu/nv2a_gl.c` |
+| `RECOMP_GPU_SCALE_RESOLVE=0` | on | With `RECOMP_GPU_SCALE` above 1: a native target sampling a scaled one reads the scaled texture instead of its native-size resolve (comparison aid). | `src/gpu/nv2a_gl.c` |
+| `RECOMP_GPU_SCALE_SHADOW=1` | off | With `RECOMP_GPU_SCALE` above 1: depth-only targets (shadow maps) scale too. | `src/gpu/nv2a_gl.c` |
+| `RECOMP_GPU_SCALE_TARGETS=WxH[,WxH]` | none | With `RECOMP_GPU_SCALE` above 1: colour targets of these real sizes scale as well as the 640x480 frame buffer. | `src/gpu/nv2a_gl_scale.c` |
+| `RECOMP_GPU_SCALE_DUMP=1` | off | At every dumping flip (`RECOMP_FB_DUMP`), also write the presented target at its real (scaled) size as `<prefix>S<n>.bmp`. | `src/gpu/nv2a_gl.c` |
 | `RECOMP_GPU_SHADER_CACHE=0` | on where the driver offers a binary format | GL back end: do not load or save linked programs in `<save dir>/shadercache/<title id>/` (`glProgramBinary`); every program is compiled at its first use. | `src/gpu/nv2a_gl.c` |
 | `RECOMP_GPU_INVALIDATE=0` | on where supported (GLES 3.0, GL 4.3) | GL back end: do not call `glInvalidateSubFramebuffer` before full clears, nor `glInvalidateFramebuffer` on the scratch depth of a target drawn without a zeta surface when it is left. | `src/gpu/nv2a_gl.c` |
 | `RECOMP_GPU_SIGDUMP=<file>` | off | GL back end, diagnosis: at the first flip where `<file>` exists, print that frame's batch signature table (`[GPUSIG] <sig> n <batches> tris <triangles> : <description>`, one per signature) and its target runs (`[GPUSEQ]`), then delete the file. See [GPU Back End](../technical/gpu-backend.md#batch-signatures). | `src/gpu/nv2a_gl.c` |
@@ -169,6 +176,26 @@ The executor is itself opt-in: set `RECOMP_PB_EXEC=1` to execute the pushbuffer.
 | `RECOMP_PRESENT_FILTER` | default | Sampler filter for the D3D11 present. | `gpu_present.c` |
 | `RECOMP_FMV_HOST` | off | Plays a movie through the host player when the title asks to. A substitute for the title's own output. | `kernel_bridge.c` |
 | `RECOMP_FMV_DUMP=<prefix>` | off | Writes two frames of a movie as BMP evidence. | `video_pump.c` |
+
+## Frame generation
+
+Only in a build configured with `-DXBOXRECOMP_LSFG=ON` (POSIX hosts); see [Frame Generation](../technical/framegen.md#pacing). With `RECOMP_LSFG=1` the SDL presenter hands every frame to the pacer and shows real and generated frames at their due times ([Presenter](../technical/framegen.md#presenter)); headless runs count them and log `[LSFG] real ... fps, shown ... fps` every 5 s. On Android the launcher writes `RECOMP_LSFG`, `RECOMP_LSFG_MULT`, `RECOMP_LSFG_PERF` (Settings › Graphics › Frame generation) and `RECOMP_LSFG_DIR` (« Choose Lossless.dll ») to `recomp.cfg`.
+
+| Variable | Default | What it does | Where |
+|---|---|---|---|
+| `RECOMP_LSFG=1` | off | Frame generation on. While on, the effective `RECOMP_GPU_FPS_CAP` is min(cap, display rate / multiplier) (a cap of `0` becomes display rate / multiplier: 30 at 60 Hz, 2x) and `RECOMP_GPU_PRESENT=sync` is forced. Both stay for the run if the pacer later falls back to pass-through. | `src/framegen/framegen_policy.h`, `nv2a_pb_exec.c`, `src/gpu/nv2a_gl.c` |
+| `RECOMP_LSFG_MULT=2..4` | 2 | Frames shown per real frame (2: one generated frame between two real ones). | `framegen_policy.h` |
+| `RECOMP_LSFG_DISPLAY_HZ=N` | 60 | Display refresh rate used by the cap rule. Unset, the windowed presenter sets it to the display's rate when that is below 60 Hz (a faster display keeps 60). | `framegen_policy.h`, `src/video/fb_present_sdl.c` |
+| `RECOMP_LSFG_BUDGET_MS=N` | cap period / multiplier (16.7 ms at 30 fps, 2x) | Generation cost above which a frame counts as over budget; 30 in a row (or 30 failed generations) turn frame generation off: `[LSFG] off: <reason>`. | `src/framegen/framegen_pacer.c` |
+| `RECOMP_LSFG_FAKE=1` | off | Use the fake generator (CPU linear blend of the two frames, no Vulkan) instead of the LSFG bridge: headless runs and tests. | `framegen_pacer.c` |
+| `RECOMP_LSFG_FAKE_MS=N` | 0 | With the fake generator: sleep N ms per generated pair, to exercise the budget fallback. | `src/framegen/framegen_fake.c` |
+| `RECOMP_LSFG_DIR=<dir>` | the current cache of the default base | The LSFG bridge's shader cache directory (`<base>/<key>`, made by `tools/lsfg/lsfg_translate` or the app's "Choose Lossless.dll"). The bridge's VkPipelineCache is kept there too. Bridge builds only (`XBOXRECOMP_LSFG_VK_SRC`). | `src/framegen/lsfg_generator.c`, `lsfg_cache.h` |
+| `RECOMP_LSFG_DLL=<path>` | unset | Desktop: your own Lossless.dll, extracted into the default cache base when `RECOMP_LSFG_DIR` is unset. The DXBC shaders still need one `lsfg_translate` run. | `lsfg_generator.c` |
+| `RECOMP_LSFG_CACHE=<dir>` | `~/Library/Caches/xboxrecomp/lsfg` (macOS), `$XDG_CACHE_HOME/xboxrecomp/lsfg` or `~/.cache/xboxrecomp/lsfg` | The default cache base. | `lsfg_cache.c` |
+| `RECOMP_LSFG_FLOW=0.25..1` | 1 | Flow scale (lower is cheaper and blurrier motion). | `lsfg_generator.c` |
+| `RECOMP_LSFG_PERF=1` | off | LSFG 3.1 performance shader set (about 4x cheaper). | `lsfg_generator.c` |
+| `RECOMP_LSFG_FP16=auto\|0\|1` | auto | Embedded FP16 SPIR-V when the DLL has it and the device has `shaderFloat16` (translated DXBC is always full precision). | `lsfg_generator.c` |
+| `RECOMP_LSFG_GPU=<index>` | best device | Vulkan physical device index for the bridge. | `src/framegen/lsfg_bridge.cpp` |
 
 ## Audio
 
