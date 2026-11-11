@@ -210,7 +210,7 @@ The working directory does not matter; `python -m tools.prepare` needs the toolk
 (`PYTHONPATH=<toolkit root>`).
 
 **Toolkit tree** in the assets (read-only): `tools/` (Python), `include/`, the headers of `src/` (`src/**/*.h`),
-`templates/new-game/`, `titles/`, and `tools/VERSION` (one line: the commit; written by the asset build, git-ignored).
+`templates/new-game/`, `templates/runtime/` (the `recomp_types.h` the lifter copies next to the generated C), `titles/`, and `tools/VERSION` (one line: the commit; written by the asset build, git-ignored).
 
 **status.json**: the service writes it from the progress lines for the UI and for a restart after the app was killed.
 Its format belongs to the app (prepare-app branch, `android/app`), not to this page; prepare never reads it.
