@@ -539,6 +539,33 @@ public class GameMenuTest {
     }
 
     @Test
+    public void noLanguageRowWithoutAGame() {
+        menu.open("Back");
+        menu.row(GameMenu.Item.SETTINGS).performClick();
+        assertNull(menu.row(GameMenu.Item.LANGUAGE));
+    }
+
+    @Test
+    public void languageRowIsPerTitle() throws Exception {
+        java.io.File dir = new java.io.File(activity.getFilesDir(), "lang-game");
+        TestSupport.write(new java.io.File(dir, "default.xbe"), TestSupport.xbe(0x4D5300D1, "Game"));
+        GameStore.remember(activity, dir.getPath(), "Game");
+        menu.release();
+        build();
+        menu.open("Back");
+        menu.row(GameMenu.Item.SETTINGS).performClick();
+        assertNotNull(menu.row(GameMenu.Item.LANGUAGE));
+        assertNull(GameLanguage.titleChoice(activity, "4D5300D1"));
+        menu.row(GameMenu.Item.LANGUAGE).performClick();
+        assertEquals("en", GameLanguage.titleChoice(activity, "4D5300D1"));
+        menu.row(GameMenu.Item.LANGUAGE).performClick();
+        assertEquals("fr", GameLanguage.titleChoice(activity, "4D5300D1"));
+        for (int i = 0; i < GameLanguage.CODES.length - 1; i++)
+            menu.row(GameMenu.Item.LANGUAGE).performClick();
+        assertNull(GameLanguage.titleChoice(activity, "4D5300D1"));
+    }
+
+    @Test
     public void controlsPage() {
         menu.open("Back");
         menu.row(GameMenu.Item.CONTROLS).performClick();

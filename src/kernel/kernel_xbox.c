@@ -10,6 +10,7 @@
  */
 
 #include "kernel.h"
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
@@ -121,7 +122,7 @@ NTSTATUS __stdcall xbox_XeUnloadSection(PXBE_SECTION_HEADER Section)
  * SMBus. For recompilation, we return sensible defaults:
  *   - Region: North America
  *   - Video: NTSC, widescreen+HDTV enabled
- *   - Language: English
+ *   - Language: RECOMP_LANGUAGE, else English
  *   - Audio: Stereo, Dolby Digital
  *   - DVD Region: Region 1 (North America)
  *   - Time zone: the host's
@@ -199,6 +200,35 @@ static void tz_init(void)
 #endif
 }
 
+/* The console language (XC_LANGUAGE, and offset 0x30 of the XC_MAX_OS block):
+ * RECOMP_LANGUAGE as a code (en, ja, de, fr, es, it, ko, zh, pt) or the Xbox
+ * value 1..9; unset or unknown is English (1). Titles pick their text and
+ * voice from it among the languages on their disc. Read on every query: XAPI
+ * asks once or twice at boot, and a test can change it between queries. */
+static ULONG eeprom_language(void)
+{
+    static const char *const codes[] = { "en", "ja", "de", "fr", "es", "it", "ko", "zh", "pt" };
+    const char *e = getenv("RECOMP_LANGUAGE");
+    size_t i;
+    if (!e || !*e)
+        return 1;
+    if (e[0] >= '1' && e[0] <= '9' && e[1] == 0)
+        return (ULONG)(e[0] - '0');
+    for (i = 0; i < sizeof codes / sizeof codes[0]; i++)
+        if ((e[0] | 0x20) == codes[i][0] && (e[1] | 0x20) == codes[i][1]
+            && (e[2] == 0 || e[2] == '-' || e[2] == '_'))
+            return (ULONG)(i + 1);
+    {
+        static int warned;
+        if (!warned) {
+            warned = 1;
+            xbox_log(XBOX_LOG_WARN, XBOX_LOG_XBOX,
+                "RECOMP_LANGUAGE=%s is not a language code (en ja de fr es it ko zh pt) nor 1..9; English", e);
+        }
+    }
+    return 1;
+}
+
 NTSTATUS __stdcall xbox_ExQueryNonVolatileSetting(
     ULONG ValueIndex, PULONG Type, PVOID Value, ULONG ValueLength, PULONG ResultLength)
 {
@@ -211,9 +241,8 @@ NTSTATUS __stdcall xbox_ExQueryNonVolatileSetting(
 
     switch (ValueIndex) {
     case XC_LANGUAGE:
-        /* English = 1 */
         if (ValueLength >= sizeof(ULONG)) {
-            *(PULONG)Value = 1;
+            *(PULONG)Value = eeprom_language();
             if (Type) *Type = 4; /* REG_DWORD */
             if (ResultLength) *ResultLength = sizeof(ULONG);
         }
@@ -312,7 +341,7 @@ NTSTATUS __stdcall xbox_ExQueryNonVolatileSetting(
         memcpy(blk + 0x1C, &s_tz.dlt_date, 4);
         memcpy(blk + 0x28, &s_tz.std_bias, 4);
         memcpy(blk + 0x2C, &s_tz.dlt_bias, 4);
-        { ULONG v = 1; memcpy(blk + 0x30, &v, 4); }                       /* English */
+        { ULONG v = eeprom_language(); memcpy(blk + 0x30, &v, 4); }       /* RECOMP_LANGUAGE */
         { ULONG v = XC_VIDEO_FLAGS_60Hz; memcpy(blk + 0x34, &v, 4); }
         /* 0x58 is MiscFlags (0); DvdRegion is the last field, at 0x5C. */
         { ULONG v = 1; memcpy(blk + 0x5C, &v, 4); }                       /* DVD region 1 */

@@ -45,7 +45,8 @@ import java.util.function.LongSupplier;
  *       in the game every key it saw go down and centres every stick it saw move, and the companion's buttons;
  *       closing releases the companion's again. A key whose down came while open acts on its release, so nothing of
  *       it reaches the game.</li>
- *   <li>Items: Resume, Quick settings (performance overlay, game volume, bottom screen: all live), Controls,
+ *   <li>Items: Resume, Quick settings (performance overlay, game volume, bottom screen: all live; this game's
+ *       language: next start), Controls,
  *       Screenshot, Share log, Back to launcher (the game stays alive and held in the background), Quit game (a
  *       second press within {@link #QUIT_ARM_MS} confirms). The header shows the game's title and the session's
  *       time.</li>
@@ -108,7 +109,7 @@ final class GameMenu {
 
     enum Page { MAIN, SETTINGS, CONTROLS }
 
-    enum Item { RESUME, SETTINGS, CONTROLS, SCREENSHOT, SHARE_LOG, LAUNCHER, QUIT, PERF, VOLUME, BOTTOM, BACK }
+    enum Item { RESUME, SETTINGS, CONTROLS, SCREENSHOT, SHARE_LOG, LAUNCHER, QUIT, PERF, VOLUME, BOTTOM, LANGUAGE, BACK }
 
     private final Activity activity;
     private final Host host;
@@ -133,6 +134,9 @@ final class GameMenu {
     private String openedBy = "";
     private long openedAt, quitArmedAt = -1;
     private boolean perfOn;
+    /** The game's title ID for the per-title language (titleId()). */
+    private boolean titleIdRead;
+    private String titleIdValue;
     private int volume, volumeBeforeMute = 100;
     private ValueAnimator anim;
 
@@ -792,6 +796,15 @@ final class GameMenu {
                 r.setChoices(new String[] { s(R.string.VAL_PANEL), s(R.string.VAL_BLACK), s(R.string.MENU_SCREEN_OFF) });
                 r.cycler = this::stepBottom;
             }
+            if (titleId() != null) {
+                r = row(Item.LANGUAGE, Widgets.Icon.DISC, s(R.string.MENU_LANGUAGE), s(R.string.MENU_LANGUAGE_SUB));
+                String[] labels = new String[GameLanguage.MENU_ORDER.length + 1];
+                labels[0] = s(R.string.MENU_LANGUAGE_FOLLOW);
+                for (int i = 0; i < GameLanguage.MENU_ORDER.length; i++)
+                    labels[i + 1] = GameLanguage.NAMES[GameLanguage.MENU_ORDER[i]];
+                r.setChoices(labels);
+                r.cycler = this::stepLanguage;
+            }
             row(Item.BACK, Widgets.Icon.BACK, s(R.string.MENU_BACK), s(R.string.MENU_BACK_SUB));
             updateValues();
             break;
@@ -886,6 +899,9 @@ final class GameMenu {
         case BOTTOM:
             stepBottom(1);
             break;
+        case LANGUAGE:
+            stepLanguage(1);
+            break;
         case BACK:
             back();
             break;
@@ -979,6 +995,36 @@ final class GameMenu {
         updateValues();
     }
 
+    /** The game's title ID, read once from its XBE; null hides the Language row (nothing to key the choice on). */
+    private String titleId() {
+        if (!titleIdRead) {
+            titleIdRead = true;
+            titleIdValue = GameLanguage.currentTitleId(activity);
+        }
+        return titleIdValue;
+    }
+
+    /** The Language row's position: 0 = as in Settings, then GameLanguage.MENU_ORDER. */
+    private int languagePos() {
+        int idx = GameLanguage.indexOf(GameLanguage.titleChoice(activity, titleId()));
+        for (int i = 0; i < GameLanguage.MENU_ORDER.length; i++) {
+            if (GameLanguage.MENU_ORDER[i] == idx)
+                return i + 1;
+        }
+        return 0;
+    }
+
+    /** This game's language (XBA-77): remembered per title ID, applied by ShellActivity at the next start. */
+    private void stepLanguage(int dir) {
+        int n = GameLanguage.MENU_ORDER.length + 1;
+        int pos = ((languagePos() + dir) % n + n) % n;
+        String code = pos == 0 ? null : GameLanguage.CODES[GameLanguage.MENU_ORDER[pos - 1]];
+        GameLanguage.setTitleChoice(activity, titleId(), code);
+        Log.i(LauncherActivity.TAG, "shell: menu: language " + (code == null ? "as in Settings" : code)
+                                    + " for " + titleId() + " (next start)");
+        updateValues();
+    }
+
     private void updateValues() {
         Widgets.MenuRow r = rows.get(Item.PERF);
         if (r != null)
@@ -992,6 +1038,12 @@ final class GameMenu {
             int label = b == GameStore.BottomScreen.PANEL ? R.string.VAL_PANEL
                         : b == GameStore.BottomScreen.BLACK ? R.string.VAL_BLACK : R.string.MENU_SCREEN_OFF;
             r.setValue(s(label), b.ordinal(), 3);
+        }
+        r = rows.get(Item.LANGUAGE);
+        if (r != null) {
+            int pos = languagePos();
+            r.setValue(pos == 0 ? s(R.string.MENU_LANGUAGE_FOLLOW)
+                                : GameLanguage.NAMES[GameLanguage.MENU_ORDER[pos - 1]], pos, 0);
         }
         r = rows.get(Item.SETTINGS);
         if (r != null)

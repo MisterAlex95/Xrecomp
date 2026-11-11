@@ -129,6 +129,15 @@ final class GameStore {
         return writeSmall(c, GAME_VOLUME_FILE, Integer.toString(Math.max(0, Math.min(100, percent))));
     }
 
+    /** A one-line setting in files/settings (GameLanguage's per-title choice); null when missing or blank. */
+    static String readSettingFile(Context c, String name) {
+        return readSmall(c, name);
+    }
+
+    static boolean writeSettingFile(Context c, String name, String value) {
+        return writeSmall(c, name, value);
+    }
+
     private static File smallFile(Context c, String name) {
         return new File(new File(c.getFilesDir(), "settings"), name);
     }

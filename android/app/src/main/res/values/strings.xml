@@ -131,6 +131,20 @@
     <string name="SECTION_GRAPHICS">Graphics</string>
     <string name="SECTION_AUDIO">Audio</string>
     <string name="SECTION_ADVANCED">Advanced</string>
+    <string name="SECTION_GAME">Game</string>
+    <string name="OPT_LANGUAGE">Language</string>
+    <string name="OPT_LANGUAGE_SUMMARY">The console language the game sees</string>
+    <string name="OPT_LANGUAGE_DETAIL">The language the Xbox tells the game. The game shows its menus, text and voices in it when its disc has that language (a European disc usually does, a US disc is often English only); otherwise the game picks one itself, usually English. « Same as Android » follows the phone\'s language. A game can have its own in the in-game menu (Quick settings). Applies the next time the game starts. (RECOMP_LANGUAGE)</string>
+    <string name="VAL_LANG_SYSTEM">Same as Android</string>
+    <string name="LANG_EN" translatable="false">English</string>
+    <string name="LANG_FR" translatable="false">Français</string>
+    <string name="LANG_DE" translatable="false">Deutsch</string>
+    <string name="LANG_ES" translatable="false">Español</string>
+    <string name="LANG_IT" translatable="false">Italiano</string>
+    <string name="LANG_PT" translatable="false">Português</string>
+    <string name="LANG_JA" translatable="false">日本語</string>
+    <string name="LANG_KO" translatable="false">한국어</string>
+    <string name="LANG_ZH" translatable="false">中文</string>
     <string name="OPEN_DIRECTLY_SUMMARY">Skip this screen when the game is ready</string>
     <string name="OPEN_DIRECTLY_DETAIL">On: the app icon starts the game straight away when it is set up. Off: this screen shows first, with Play selected.</string>
     <string name="OPEN_DIRECTLY_FOOTER">Long-press the app icon › Launcher (or Change game) to reach this screen while it is on.</string>

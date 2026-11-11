@@ -59,6 +59,7 @@ public class ShellActivity extends SDLActivity {
                 Log.w(LauncherActivity.TAG, "shell: cannot set RECOMP_GAME_DIR", e);
             }
         }
+        applyLanguage();
         super.onCreate(savedInstanceState);
         if (mBrokenLibraries)
             return;   // SDLActivity shows its error dialog and finishes
@@ -68,6 +69,28 @@ public class ShellActivity extends SDLActivity {
             panel = new CompanionPanel(ctx, new NativeSink(), ShellActivity::stats);
             return panel;
         }, new KeyForwarder());
+    }
+
+    /**
+     * RECOMP_LANGUAGE for the runtime (XBA-77, {@link GameLanguage}): the title's own choice, else none when recomp.cfg
+     * has a line (the runtime reads it there), else the Android language when the Xbox has it. Unset otherwise, also
+     * clearing a value a previous game left in this process.
+     */
+    private void applyLanguage() {
+        File ext = GameStore.externalFilesDir(this);
+        String cfg = ext == null ? null : RecompConfig.load(ext).get(GameLanguage.ENV);
+        String tid = GameLanguage.currentTitleId(this);
+        String lang = GameLanguage.resolve(GameLanguage.titleChoice(this, tid), cfg, Locale.getDefault());
+        try {
+            if (lang != null)
+                Os.setenv(GameLanguage.ENV, lang, true);
+            else
+                Os.unsetenv(GameLanguage.ENV);
+        } catch (ErrnoException e) {
+            Log.w(LauncherActivity.TAG, "shell: cannot set " + GameLanguage.ENV, e);
+        }
+        Log.i(LauncherActivity.TAG, "shell: game language " + (lang != null ? lang : cfg != null ? cfg + " (recomp.cfg)"
+                                                              : "en (default)") + ", title " + tid);
     }
 
     @Override
