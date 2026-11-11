@@ -261,8 +261,18 @@ int main(void)
         CHECK(s_be.draws == draws);
     }
 
-    /* The semaphore release lands where the title said. */
+    /* A release before the title names the semaphore is not lost: the
+     * hand-over writes it (D3D init waited on it for ever otherwise). */
+    m(0x1D70, 0x0FFF);
+    put32(0x5000, 0);
     nv2a_pb_set_semaphore_target(0x5000);
+    {
+        uint32_t got;
+        memcpy(&got, s_mem + 0x5000, 4);
+        CHECK(got == 0x0FFF);
+    }
+
+    /* The semaphore release lands where the title said. */
     m(0x1D70, 0x1234);
     {
         uint32_t got;

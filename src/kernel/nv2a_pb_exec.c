@@ -379,9 +379,42 @@ static float reg_f(uint32_t method)
     return f;
 }
 
-/* Where BACK_END_WRITE_SEMAPHORE_RELEASE lands; see nv2a_backend.h. */
-static uint32_t s_sem_va;
-void nv2a_pb_set_semaphore_target(uint32_t guest_va) { s_sem_va = guest_va; }
+/* Where BACK_END_WRITE_SEMAPHORE_RELEASE lands; see nv2a_backend.h.
+ *
+ * The title hands the address over from its own thread, and D3D can release
+ * before that: Fable's glue polls for it every millisecond, and in 2 of 14
+ * starts the release that ended D3D's init wait came first, was dropped, and
+ * D3D waited for it for ever (0 flips). So the executor keeps the last value
+ * released, and a hand-over made while no target was set writes it (a change
+ * from one target to another does not: the value belonged to the old one).
+ *
+ * Two threads, no lock: each side stores its own word, fences, then reads the
+ * other's, so at least one of them sees both (the executor sees the target,
+ * or the hand-over sees the value). The hand-over rewrites until the value
+ * holds still, so a release the executor wrote meanwhile is not overwritten
+ * by an older one. */
+static volatile uint32_t s_sem_va;
+static volatile uint32_t s_sem_last;
+static volatile int s_sem_seen;
+#if defined(_WIN32)
+#define SEM_FENCE() MemoryBarrier()
+#else
+#define SEM_FENCE() __atomic_thread_fence(__ATOMIC_SEQ_CST)
+#endif
+void nv2a_pb_set_semaphore_target(uint32_t guest_va)
+{
+    uint32_t v, old = s_sem_va;
+
+    s_sem_va = guest_va;
+    SEM_FENCE();
+    if (old || !guest_va || !s_sem_seen)
+        return;
+    do {
+        v = s_sem_last;
+        *(volatile uint32_t *)((uint8_t *)xbox_GetMemoryOffset() + guest_va) = v;
+        SEM_FENCE();
+    } while (s_sem_last != v);
+}
 
 /* Unhandled methods, ranked. The interesting output is not that something was
  * skipped but which things dominate, because that is the order to implement
@@ -4218,10 +4251,18 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
     /* BACK_END_WRITE_SEMAPHORE_RELEASE. The title's pointer already names the
      * semaphore word; SET_SEMAPHORE_OFFSET is not added (in X-Men Legends it
      * held 0xFF000000 at times, which put the write outside guest memory). */
-    if (subch == 0 && method == 0x1D70 && s_sem_va) {
-        uint8_t *mem = (uint8_t *)xbox_GetMemoryOffset();
-        *(volatile uint32_t *)(mem + s_sem_va) = param;
-        return;
+    if (subch == 0 && method == 0x1D70) {
+        uint32_t va;
+
+        s_sem_last = param;
+        s_sem_seen = 1;
+        SEM_FENCE();
+        va = s_sem_va;
+        if (va) {
+            uint8_t *mem = (uint8_t *)xbox_GetMemoryOffset();
+            *(volatile uint32_t *)(mem + va) = param;
+            return;
+        }
     }
     if (!s_exec_inited) {
         s_exec_inited = 1;
