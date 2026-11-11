@@ -174,9 +174,9 @@ public class LauncherActivity extends Activity {
     static java.util.concurrent.Executor themeExecutor = THEME_THREAD;
 
     // ---- Home ----
-    private MenuRow homePrimary;
-    private Widgets.Meter homeMeter;
-    private TextView homeProgress;
+    private Widgets.PillButton homePrimary;
+    /** Home's status line while a Prepare runs (the poll updates it). */
+    private Widgets.Chip homeStatus;
 
     // ---- The Preparing screen's idle dim ----
     private FrameLayout dimView;
@@ -229,9 +229,10 @@ public class LauncherActivity extends Activity {
     private boolean resumed;
     private Prep homePrep;
     private PrepareProtocol.Status prepShown;
-    private TextView prepHead, prepMsg, prepEta, prepCaption;
-    private final List<TextView[]> prepSteps = new ArrayList<>();
-    private MenuRow prepCancelRow;
+    private Widgets.Chip prepStatus;
+    private Widgets.Meter prepMeter;
+    private TextView prepPct, prepMsg, prepEta, prepCaption;
+    private View prepProgress;
     private long cancelArmedAt;
     private boolean cancelSent;
     private final Runnable pollTick = this::pollPrepare;
@@ -497,7 +498,7 @@ public class LauncherActivity extends Activity {
         return backdrop;
     }
 
-    MenuRow homePrimaryForTest() {
+    Widgets.PillButton homePrimaryForTest() {
         return homePrimary;
     }
 
@@ -808,12 +809,12 @@ public class LauncherActivity extends Activity {
         cancelArmedAt = 0;
         homePrep = null;
         prepShown = null;
-        prepSteps.clear();
-        prepHead = prepMsg = prepEta = prepCaption = null;
-        prepCancelRow = null;
+        prepStatus = null;
+        prepMeter = null;
+        prepPct = prepMsg = prepEta = prepCaption = null;
+        prepProgress = null;
         homePrimary = null;
-        homeMeter = null;
-        homeProgress = null;
+        homeStatus = null;
         homeChip = null;
         switchArmedAt = 0;
         libCards.clear();
@@ -1391,9 +1392,96 @@ public class LauncherActivity extends Activity {
     // ---- HOME --------------------------------------------------------------------------------------------------
 
     /**
-     * A console home: the hero (the game's art, its title, a status chip, a lead line, a few facts and one big Play
-     * or Prepare) over a row of four smaller tiles (Settings, Controls, Game data, About). The top bar only says
-     * « Home », so the title shows once.
+     * The Home layout, shared by Home, a library game's Home and Preparing: the art tile on the left, and on the right
+     * the game's title (Display) over a column the screen fills (returned). No top bar: the title is the heading.
+     */
+    private LinearLayout hero(String title, boolean empty) {
+        LinearLayout hero = rowLayout();
+        hero.setGravity(Gravity.CENTER_VERTICAL);
+        Widgets.ArtTile tile = new Widgets.ArtTile(this);
+        if (empty)
+            tile.setEmpty();
+        else if (art != null)
+            tile.setArt(art, artColor);
+        else
+            tile.setMonogram(TitleArt.initials(title), artColor);
+        hero.addView(tile, lp(Theme.ART, Theme.ART));
+        LinearLayout info = column();
+        TextView big = Theme.text(this, Theme.T_DISPLAY, Theme.MEDIUM, Theme.TEXT, title);
+        big.setMaxLines(2);
+        big.setEllipsize(TextUtils.TruncateAt.END);
+        big.setLineSpacing(0, 1.05f);
+        info.addView(big, lp(MATCH, WRAP));
+        LinearLayout.LayoutParams il = lp(0, WRAP, 1);
+        il.leftMargin = Theme.S5;
+        hero.addView(info, il);
+        body.addView(hero, new FrameLayout.LayoutParams(MATCH, MATCH));
+        return info;
+    }
+
+    /** The line under the title: a status (a dot in its colour) when dot is not 0, else quiet text. */
+    private View heroLine(LinearLayout info, String text, int dot) {
+        View v;
+        if (dot != 0) {
+            Widgets.Chip c = new Widgets.Chip(this);
+            c.set(text, dot);
+            v = c;
+        } else {
+            TextView t = Theme.text(this, Theme.T_BODY, Theme.REGULAR, Theme.TEXT_DIM, text);
+            t.setMaxLines(2);
+            t.setEllipsize(TextUtils.TruncateAt.END);
+            t.setLineSpacing(0, 1.2f);
+            v = t;
+        }
+        LinearLayout.LayoutParams p = lp(dot != 0 ? WRAP : MATCH, WRAP);
+        p.topMargin = Theme.S2;
+        info.addView(v, p);
+        return v;
+    }
+
+    /** The row of buttons under the title: one solid primary and quiet pills. */
+    private LinearLayout heroButtons(LinearLayout info) {
+        LinearLayout row = rowLayout();
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setClipChildren(false);
+        LinearLayout.LayoutParams p = lp(MATCH, Theme.BUTTON_H);
+        p.topMargin = Theme.S5;
+        info.addView(row, p);
+        return row;
+    }
+
+    /** The primary button is at least this wide (Play, Prepare). */
+    static final int PRIMARY_MIN_W = 300;
+
+    private Widgets.PillButton pill(LinearLayout row, Icon icon, String label, boolean primary, Runnable click) {
+        Widgets.PillButton b = new Widgets.PillButton(this);
+        b.set(icon, label, primary);
+        b.onPress = () -> feedback.play(UiFeedback.Cue.SELECT, b);
+        if (click != null)
+            b.setOnClickListener(v -> click.run());
+        LinearLayout.LayoutParams p = lp(primary ? Math.max(PRIMARY_MIN_W, b.naturalWidth()) : WRAP, Theme.BUTTON_H);
+        p.leftMargin = row.getChildCount() == 0 ? 0 : Theme.S2;
+        row.addView(b, p);
+        return focusable(b);
+    }
+
+    /** Home's quiet pills: Settings, Controls, Manage. */
+    private void homePills(LinearLayout row) {
+        pill(row, Icon.SLIDERS, getString(R.string.SETTINGS), false, () -> go(Screen.SETTINGS));
+        pill(row, Icon.PAD, getString(R.string.CONTROLS), false, () -> go(Screen.CONTROLS));
+        pill(row, Icon.DISC, getString(R.string.HOME_MANAGE), false, () -> go(Screen.GAME_DATA));
+    }
+
+    /** « Yesterday · 12 h 40 min played », or « Not played yet ». */
+    private String homeMeta(long last, long playMs) {
+        if (last <= 0 && playMs <= 0)
+            return getString(R.string.HOME_META_NEW);
+        return getString(R.string.HOME_META, lastPlayedText(last, System.currentTimeMillis()), playTimeText(playMs));
+    }
+
+    /**
+     * Home: the game's art and title, one line (when it was played, or its state when it is not ready), and one row of
+     * buttons: a solid Play (or Prepare, Choose…) and three quiet pills (Settings, Controls, Manage). Start plays too.
      */
     private void buildHome() {
         State st = state();
@@ -1403,142 +1491,80 @@ public class LauncherActivity extends Activity {
         }
         String dir = gameDir();
         boolean running = gameRunning();
-        screenTitle.setText(R.string.HOME_TITLE);
         Prep prep = prep();
         PrepareProtocol.Status ps = prep == Prep.OFF || prep == Prep.PLAYABLE ? null : readPrepStatus();
         boolean preparing = prep != Prep.OFF && prep != Prep.PLAYABLE;
         checkHashLater(dir);
         sizeLater(dir);
 
-        LinearLayout col = column();
-        LinearLayout hero = rowLayout();
-        hero.setGravity(Gravity.CENTER_VERTICAL);
-        Widgets.ArtTile tile = new Widgets.ArtTile(this);
         String title = st == State.NONE ? getString(R.string.NO_GAME_HEAD) : gameTitle(dir);
-        if (st == State.NONE)
-            tile.setEmpty();
-        else if (art != null)
-            tile.setArt(art, artColor);
-        else
-            tile.setMonogram(TitleArt.initials(title), artColor);
-        hero.addView(tile, lp(Theme.ART, Theme.ART));
-
-        LinearLayout info = column();
+        LinearLayout info = hero(title, st == State.NONE);
         String tid = st == State.NONE ? null : titleId();
-        if (tid != null)
-            info.addView(Theme.caps(this, getString(R.string.HOME_TITLE_ID, tid), Theme.TEXT_FAINT), lp(MATCH, WRAP));
-        TextView big = Theme.text(this, Theme.T_HERO, Theme.MEDIUM, Theme.TEXT, title);
-        big.setMaxLines(2);
-        big.setEllipsize(TextUtils.TruncateAt.END);
-        big.setLineSpacing(0, 1.05f);
-        LinearLayout.LayoutParams bl = lp(MATCH, WRAP);
-        bl.topMargin = tid != null ? 14 : 0;
-        info.addView(big, bl);
 
-        LinearLayout chips = rowLayout();
-        chips.setGravity(Gravity.CENTER_VERTICAL);
-        Widgets.Chip status = new Widgets.Chip(this);
-        if (preparing)
-            setPrepChip(status, prep);
-        else
-            status.set(getString(stateLabel(st)), stateColor(st));
-        chips.addView(status, lp(WRAP, WRAP));
-        if (companion != null) {
-            companion.changeLabel(libraryOn() ? getString(R.string.LIB_TITLE) : null);
-            companion.art(st == State.NONE ? null : art);
-            companion.home(st == State.NONE ? "" : title, status.label(), status.color(),
-                           st == State.READY && !preparing);
-        }
-        if (running && st == State.READY && selectedIsLaunched()) {
-            Widgets.Chip run = new Widgets.Chip(this);
-            run.set(getString(R.string.CHIP_RUNNING), Theme.OK);
-            LinearLayout.LayoutParams rl = lp(WRAP, WRAP);
-            rl.leftMargin = 16;
-            chips.addView(run, rl);
-        }
-        LinearLayout.LayoutParams cl = lp(MATCH, WRAP);
-        cl.topMargin = 22;
-        info.addView(chips, cl);
-
-        String lead;
-        int leadColor = Theme.TEXT_DIM;
+        // The one line: the state when it is not « Ready », else when it was last played.
+        String statusText = null;
+        int statusColor = Theme.OK;
         if (st == State.READY && preparing) {
             switch (prep) {
             case RUNNING:
-                lead = getString(R.string.HOME_LEAD_PREPARING);
+                statusText = ps == null ? getString(R.string.PREPARE_STARTING) : progressLine(ps);
+                break;
+            case QUEUED:
+                statusText = queuedLabel(tid);
+                statusColor = Theme.ACCENT;
                 break;
             case FAILED:
-                lead = getString(R.string.HOME_LEAD_FAILED);
+                statusText = getString(R.string.CHIP_PREPARE_FAILED)
+                             + (ps == null || ps.code.isEmpty() ? "" : " · " + ps.code);
+                statusColor = Theme.ERROR;
                 break;
             default:
-                lead = getString(R.string.HOME_LEAD_PREPARE);
+                statusText = getString(R.string.HOME_NEEDS_PREPARE, getString(R.string.CHIP_NEEDS_PREPARE),
+                                       estimate());
+                statusColor = Theme.WARN;
                 break;
             }
+            View line = heroLine(info, statusText, statusColor);
+            if (prep == Prep.RUNNING)
+                homeStatus = (Widgets.Chip)line;
         } else if (st == State.READY) {
-            lead = getString(running && selectedIsLaunched() ? R.string.PLAY_DETAIL_RUNNING : R.string.HOME_LEAD_READY);
+            Library.Record rec = rec();
+            heroLine(info, homeMeta(rec != null ? rec.lastPlayed : GameStore.lastPlayed(this),
+                                    rec != null ? rec.playMs : GameStore.playTime(this)), 0);
         } else {
-            lead = stateText(st, dir);
-            leadColor = st == State.NONE ? Theme.TEXT_DIM : st == State.WRONG ? Theme.ERROR : Theme.WARN;
+            statusText = getString(stateLabel(st));
+            statusColor = st == State.NONE ? Theme.TEXT_DIM : stateColor(st);
+            if (st != State.NONE)
+                heroLine(info, statusText, statusColor);
+            heroLine(info, stateText(st, dir), 0);
         }
-        TextView leadV = Theme.text(this, Theme.T_BODY, Theme.REGULAR, leadColor, lead);
-        leadV.setMaxLines(2);
-        leadV.setEllipsize(TextUtils.TruncateAt.END);
-        leadV.setLineSpacing(0, 1.2f);
-        LinearLayout.LayoutParams ll = lp(MATCH, WRAP);
-        ll.topMargin = 22;
-        info.addView(leadV, ll);
-
-        LinearLayout facts = homeFacts(st, prep, ps);
-        if (facts != null) {
-            LinearLayout.LayoutParams fl = lp(MATCH, WRAP);
-            fl.topMargin = 26;
-            info.addView(facts, fl);
+        if (companion != null) {
+            companion.changeLabel(libraryOn() ? getString(R.string.LIB_TITLE) : null);
+            companion.art(st == State.NONE ? null : art);
+            companion.home(st == State.NONE ? "" : title,
+                           statusText != null ? statusText : getString(R.string.STATE_READY),
+                           statusText != null ? statusColor : Theme.OK, st == State.READY && !preparing);
         }
 
-        MenuRow play;
+        LinearLayout buttons = heroButtons(info);
+        Widgets.PillButton play;
         if (st == State.NONE || st == State.MISSING || st == State.NO_ACCESS) {
-            play = row(Icon.FOLDER, getString(st == State.NONE ? R.string.CHOOSE_GAME : R.string.CHOOSE_AGAIN),
-                       getString(R.string.CHOOSE_GAME_SUB), () -> go(Screen.SOURCE));
+            play = pill(buttons, null, getString(st == State.NONE ? R.string.CHOOSE_GAME : R.string.CHOOSE_AGAIN),
+                        true, () -> go(Screen.SOURCE));
         } else if (preparing && prep == Prep.QUEUED) {
-            play = row(Icon.ARROW, queuedLabel(tid), getString(R.string.LIB_QUEUED_SUB), this::onPlay);
+            play = pill(buttons, null, queuedLabel(tid), true, this::onPlay);
             homePrep = prep;
         } else if (preparing) {
             int t = prep == Prep.RUNNING ? R.string.PREPARING : prep == Prep.FAILED ? R.string.PREPARE_SEE_WHY
                     : R.string.PREPARE;
-            play = row(prep == Prep.FAILED ? Icon.INFO : Icon.ARROW, getString(t), prepSub(prep, ps), this::onPlay);
+            play = pill(buttons, null, getString(t), true, this::onPlay);
             homePrep = prep;
         } else {
-            String playSub = st != State.READY ? getString(R.string.PLAY_SUB_UNAVAILABLE, getString(stateLabel(st)))
-                             : running && selectedIsLaunched() ? getString(R.string.PLAY_SUB_RUNNING)
-                             : running ? getString(R.string.LIB_PLAY_SUB_SWITCH, runningTitle())
-                             : getString(R.string.PLAY_SUB);
-            play = row(Icon.PLAY, getString(R.string.PLAY), playSub, this::onPlay);
+            play = pill(buttons, Icon.PLAY, getString(R.string.PLAY), true, this::onPlay);
             play.setDim(st != State.READY);
         }
         homePrimary = play;
-        LinearLayout.LayoutParams pl = lp(Theme.PRIMARY_W, Theme.PRIMARY_H);
-        pl.topMargin = 30;
-        pl.leftMargin = -12;   // the row's own inset: its outline lines up with the texts above
-        info.addView(play, pl);
-
-        LinearLayout.LayoutParams il = lp(0, WRAP, 1);
-        il.leftMargin = 52;
-        hero.addView(info, il);
-        col.addView(hero, lp(MATCH, 0, 1));
-
-        LinearLayout tiles = rowLayout();
-        MenuRow settings = homeTile(tiles, Icon.SLIDERS, R.string.SETTINGS, settingsSummary(), Screen.SETTINGS);
-        homeTile(tiles, Icon.PAD, R.string.CONTROLS, getString(R.string.CONTROLS_SUB), Screen.CONTROLS);
-        homeTile(tiles, Icon.DISC, R.string.GAME_DATA, dir == null ? getString(stateLabel(st))
-                 : sizeText(dir) + " · " + sourceShort(dir), Screen.GAME_DATA);
-        MenuRow about = homeTile(tiles, Icon.INFO, R.string.ABOUT, getString(R.string.ABOUT_SUB, version()),
-                                 Screen.ABOUT);
-        ((LinearLayout.LayoutParams)settings.getLayoutParams()).leftMargin = -12;
-        ((LinearLayout.LayoutParams)about.getLayoutParams()).rightMargin = -12;
-        LinearLayout.LayoutParams tl = lp(MATCH, Theme.TILE_H);
-        tl.topMargin = 28;
-        col.addView(tiles, tl);
-        body.addView(col, new FrameLayout.LayoutParams(MATCH, MATCH));
+        homePills(buttons);
 
         defaultFocus = play;
         startAction = this::onPlay;
@@ -1553,86 +1579,8 @@ public class LauncherActivity extends Activity {
             setNote(getString(R.string.GAME_RUNNING_HOME), NOTE_INFO);
         else if (running && st == State.READY)
             setNote(getString(R.string.LIB_OTHER_RUNNING, runningTitle()), NOTE_INFO);
-    }
-
-    private MenuRow homeTile(LinearLayout tiles, Icon icon, int title, String sub, Screen target) {
-        MenuRow r = row(icon, getString(title), sub, () -> go(target));
-        LinearLayout.LayoutParams p = lp(0, MATCH, 1);
-        p.leftMargin = 6;
-        p.rightMargin = 6;
-        tiles.addView(r, p);
-        return r;
-    }
-
-    /** One fact of the hero: a caps label over its value. */
-    private TextView homeFact(LinearLayout facts, String label, String value, int color) {
-        LinearLayout c = column();
-        c.addView(Theme.caps(this, label, Theme.TEXT_FAINT), lp(WRAP, WRAP));
-        TextView v = Theme.oneLine(Theme.text(this, Theme.T_BODY + 3, Theme.MEDIUM, color, value));
-        LinearLayout.LayoutParams vl = lp(WRAP, WRAP);
-        vl.topMargin = 10;
-        c.addView(v, vl);
-        LinearLayout.LayoutParams p = lp(WRAP, WRAP);
-        p.rightMargin = 64;
-        facts.addView(c, p);
-        return v;
-    }
-
-    /** The hero's facts for the state: play stats, the pack, what a Prepare needs, or its progress; null: none. */
-    private LinearLayout homeFacts(State st, Prep prep, PrepareProtocol.Status ps) {
-        if (st != State.READY)
-            return null;
-        LinearLayout f = rowLayout();
-        switch (prep) {
-        case RUNNING: {
-            LinearLayout c = column();
-            homeMeter = new Widgets.Meter(this);
-            float frac = ps != null && ps.step > 0 ? PrepareProtocol.overall(ps.step, ps.n, ps.pct) : 0;
-            homeMeter.set(frac, Theme.ACCENT);
-            c.addView(homeMeter, lp(Theme.PRIMARY_W - 24, 10));
-            homeProgress = Theme.oneLine(Theme.text(this, Theme.T_BODY, Theme.MEDIUM, Theme.TEXT,
-                                                    ps == null ? getString(R.string.PREPARE_STARTING)
-                                                               : progressLine(ps)));
-            LinearLayout.LayoutParams pl = lp(MATCH, WRAP);
-            pl.topMargin = 16;
-            c.addView(homeProgress, pl);
-            f.addView(c, lp(MATCH, WRAP));
-            return f;
-        }
-        case FAILED:
-            homeFact(f, getString(R.string.KV_CODE), ps == null || ps.code.isEmpty() ? "?" : ps.code, Theme.ERROR);
-            homeFact(f, getString(R.string.KV_INTERNAL_FREE), size(internalFree()), Theme.TEXT);
-            return f;
-        case NEEDED:
-        case CANCELLED:
-        case INTERRUPTED: {
-            homeFact(f, getString(R.string.KV_ESTIMATE), estimate(), Theme.TEXT);
-            long free = internalFree();
-            homeFact(f, getString(R.string.KV_INTERNAL_FREE), size(free),
-                     free < PREPARE_MIN_FREE ? Theme.ERROR : Theme.TEXT);
-            long ram = Toolchain.totalRam(this);
-            homeFact(f, getString(R.string.KV_RAM), ram > 0 ? size(ram) : "?",
-                     ram > 0 && ram < PREPARE_RAM_WARN ? Theme.WARN : Theme.TEXT);
-            return f;
-        }
-        default:
-            break;
-        }
-        Library.Record rec = rec();
-        long last = rec != null ? rec.lastPlayed : GameStore.lastPlayed(this), now = System.currentTimeMillis();
-        homeFact(f, getString(R.string.KV_LAST_PLAYED), lastPlayedText(last, now), Theme.TEXT);
-        homeFact(f, getString(R.string.KV_PLAY_TIME), playTimeText(rec != null ? rec.playMs : GameStore.playTime(this)),
-                 Theme.TEXT);
-        String tid = titleId();
-        if (prep == Prep.PLAYABLE && tid != null) {
-            String[] pack = packFacts(tid);
-            homeFact(f, getString(R.string.KV_PREPARED), pack[0], Theme.TEXT);
-            homeFact(f, getString(R.string.KV_PACK_SIZE), pack[1], Theme.TEXT);
-        } else {
-            String dir = gameDir();
-            homeFact(f, getString(R.string.KV_SIZE), dir == null ? "?" : sizeText(dir), Theme.TEXT);
-        }
-        return f;
+        else if (st == State.READY && !preparing && (rec() != null ? rec().lastPlayed : GameStore.lastPlayed(this)) <= 0)
+            setNote(getString(R.string.HOME_LEAD_READY), NOTE_INFO);   // before the first play: where the menu is
     }
 
     private String lastPlayedText(long last, long now) {
@@ -1677,22 +1625,6 @@ public class LauncherActivity extends Activity {
         return new String[] { date, bytes >= 0 ? size(bytes) : "?" };
     }
 
-    private void setPrepChip(Widgets.Chip c, Prep p) {
-        switch (p) {
-        case RUNNING:
-            c.set(getString(R.string.CHIP_PREPARING), Theme.OK);
-            break;
-        case QUEUED:
-            c.set(getString(R.string.CHIP_QUEUED), Theme.ACCENT);
-            break;
-        case FAILED:
-            c.set(getString(R.string.CHIP_PREPARE_FAILED), Theme.ERROR);
-            break;
-        default:
-            c.set(getString(R.string.CHIP_NEEDS_PREPARE), Theme.WARN);
-            break;
-        }
-    }
     private void onPlay() {
         State st = state();
         if (st == State.LIBRARY) {
@@ -1725,18 +1657,6 @@ public class LauncherActivity extends Activity {
         String why = stateText(st, gameDir());
         go(Screen.SOURCE);
         setNote(why, NOTE_WARN);
-    }
-
-    private String settingsSummary() {
-        RecompConfig c = RecompConfig.load(GameStore.externalFilesDir(this));
-        List<String> changed = new ArrayList<>();
-        for (RecompConfig.Option o : RecompConfig.shownOptions(lsfgBuilt())) {
-            if (c.choiceIndex(o) != o.defaultIndex())
-                changed.add(getString(o.title) + " " + choiceLabel(c, o).toLowerCase(Locale.getDefault()));
-        }
-        if (changed.isEmpty())
-            return getString(R.string.SETTINGS_SUB_DEFAULT);
-        return TextUtils.join(" · ", changed);
     }
 
     // ---- SETTINGS ----------------------------------------------------------------------------------------------
@@ -2193,7 +2113,7 @@ public class LauncherActivity extends Activity {
 
         LinearLayout h = rowLayout();
         LinearLayout menu = column();
-        menu.addView(Theme.caps(this, getString(R.string.GAME_DATA_CAPS), Theme.TEXT_FAINT), lp(MATCH, WRAP));
+        menu.addView(Theme.caps(this, getString(R.string.HOME_MANAGE), Theme.TEXT_FAINT), lp(MATCH, WRAP));
         boolean lib = libraryOn();
         MenuRow change = lib ? row(Icon.SWAP, getString(R.string.LIB_TITLE), getString(R.string.LIB_GO_SUB),
                                    this::openLibrary)
@@ -2431,30 +2351,6 @@ public class LauncherActivity extends Activity {
         return getString(R.string.PREPARE_ESTIMATE, lo, hi);
     }
 
-    /** The subtitle of Home's big button in a Prepare state (the hero's facts carry the numbers). */
-    private String prepSub(Prep p, PrepareProtocol.Status s) {
-        switch (p) {
-        case RUNNING:
-            return getString(R.string.HOME_SUB_PREPARING);
-        case FAILED:
-            return getString(R.string.HOME_SUB_FAILED);
-        case CANCELLED:
-        case INTERRUPTED:
-            return getString(R.string.HOME_SUB_RESUME);
-        default:
-            return getString(R.string.HOME_SUB_PREPARE);
-        }
-    }
-
-    /** « copy », « in place », « recomp.cfg »: the source in a word, for Home's Game data tile. */
-    private String sourceShort(String dir) {
-        if (ownedCopy(dir))
-            return getString(R.string.SOURCE_SHORT_COPY);
-        if (fromCfg())
-            return "recomp.cfg";
-        return getString(R.string.SOURCE_SHORT_IN_PLACE);
-    }
-
     /** « Compile · 42 % · about 12 min left ». */
     private String progressLine(PrepareProtocol.Status s) {
         String line = PrepareService.stepName(this, s.id);
@@ -2523,96 +2419,69 @@ public class LauncherActivity extends Activity {
             setNote(getString(R.string.PREPARE_LOW_RAM, size(ram)), NOTE_WARN);
     }
 
-    private static final String[] PREP_IDS = { PrepareProtocol.STEP_INSTALL, "identify", "analyse", "lift",
-                                               "compile", "pack" };
+    /** The progress bar's width on the Preparing screen. */
+    static final int PREPARE_BAR_W = 960;
 
+    /**
+     * Preparing: Home's layout with the buttons replaced by the progress (so nothing jumps): the title, « Preparing ·
+     * step 5 of 6 · Compile », one bar, the percentage and the time left, and that the app can be left. Nothing to
+     * focus while it runs: Y hides it, B cancels (twice). Failed or stopped: the status line says so, the reason
+     * under it, and Retry (or Resume) and Share log as buttons.
+     */
     private void buildPrepare() {
         String dir = gameDir();
-        screenTitle.setText(R.string.PREPARE_TITLE);
-        LinearLayout h = rowLayout();
-        FrameLayout left = new FrameLayout(this);
-        ring = new Widgets.Ring(this);
-        left.addView(ring, new FrameLayout.LayoutParams(620, 620, Gravity.CENTER));
-        h.addView(left, lp(760, MATCH));
-
-        FrameLayout p = panel();
-        LinearLayout c = column();
-        c.addView(Theme.caps(this, getString(R.string.PREPARE_CAPS), Theme.ACCENT), lp(MATCH, WRAP));
-        prepHead = Theme.oneLine(Theme.text(this, Theme.T_TITLE, Theme.MEDIUM, Theme.TEXT, gameTitle(dir)));
+        String title = gameTitle(dir);
+        LinearLayout info = hero(title, false);
         if (companion != null)
-            companion.preparing(titleId(), gameTitle(dir));
-        LinearLayout.LayoutParams hl = lp(MATCH, WRAP);
-        hl.topMargin = 18;
-        c.addView(prepHead, hl);
-        // The time left, prominent; what the player may do meanwhile, under it.
-        prepEta = Theme.oneLine(Theme.text(this, Theme.T_HEAD, Theme.MEDIUM, Theme.ACCENT, ""));
-        LinearLayout.LayoutParams el = lp(MATCH, WRAP);
-        el.topMargin = 14;
-        c.addView(prepEta, el);
-        prepCaption = Theme.text(this, Theme.T_SMALL, Theme.REGULAR, Theme.TEXT_FAINT, "");
-        prepCaption.setMaxLines(2);
-        prepCaption.setEllipsize(TextUtils.TruncateAt.END);
-        LinearLayout.LayoutParams capl = lp(MATCH, WRAP);
-        capl.topMargin = 10;
-        capl.bottomMargin = 16;
-        c.addView(prepCaption, capl);
+            companion.preparing(titleId(), title);
+        prepStatus = (Widgets.Chip)heroLine(info, getString(R.string.PREPARE_STARTING), Theme.OK);
 
-        int[] names = { R.string.STEP_INSTALL, R.string.STEP_IDENTIFY, R.string.STEP_ANALYSE, R.string.STEP_LIFT,
-                        R.string.STEP_COMPILE, R.string.STEP_PACK };
-        int[] subs = { R.string.STEP_INSTALL_SUB, R.string.STEP_IDENTIFY_SUB, R.string.STEP_ANALYSE_SUB,
-                       R.string.STEP_LIFT_SUB, R.string.STEP_COMPILE_SUB, R.string.STEP_PACK_SUB };
-        for (int i = 0; i < names.length; i++) {
-            LinearLayout r = rowLayout();
-            r.setGravity(Gravity.CENTER_VERTICAL);
-            TextView mark = Theme.text(this, Theme.T_BODY, Theme.MEDIUM, Theme.TEXT_FAINT, "○");
-            mark.setGravity(Gravity.CENTER);
-            r.addView(mark, lp(48, WRAP));
-            TextView name = Theme.oneLine(Theme.text(this, Theme.T_BODY, Theme.MEDIUM, Theme.TEXT_DIM,
-                                                     getString(names[i])));
-            r.addView(name, lp(300, WRAP));
-            TextView sub = Theme.oneLine(Theme.text(this, Theme.T_SMALL, Theme.REGULAR, Theme.TEXT_FAINT,
-                                                    getString(subs[i])));
-            r.addView(sub, lp(0, WRAP, 1));
-            TextView pct = Theme.text(this, Theme.T_SMALL, Theme.MEDIUM, Theme.TEXT_FAINT, "");
-            pct.setGravity(Gravity.END);
-            r.addView(pct, lp(110, WRAP));
-            LinearLayout.LayoutParams rl = lp(MATCH, WRAP);
-            rl.topMargin = i == 0 ? 0 : 3;
-            c.addView(r, rl);
-            prepSteps.add(new TextView[] { mark, name, sub, pct });
-        }
+        LinearLayout progress = column();
+        prepMeter = new Widgets.Meter(this);
+        progress.addView(prepMeter, lp(MATCH, 12));
+        LinearLayout nums = rowLayout();
+        nums.setGravity(Gravity.CENTER_VERTICAL);
+        prepPct = Theme.oneLine(Theme.text(this, Theme.T_TITLE, Theme.MEDIUM, Theme.TEXT, ""));
+        nums.addView(prepPct, lp(0, WRAP, 1));
+        prepEta = Theme.oneLine(Theme.text(this, Theme.T_BODY, Theme.REGULAR, Theme.TEXT_DIM, ""));
+        nums.addView(prepEta, lp(WRAP, WRAP));
+        LinearLayout.LayoutParams nl = lp(MATCH, WRAP);
+        nl.topMargin = Theme.S3;
+        progress.addView(nums, nl);
+        LinearLayout.LayoutParams pl = lp(PREPARE_BAR_W, WRAP);
+        pl.topMargin = Theme.S5;
+        info.addView(progress, pl);
+        prepProgress = progress;
 
-        prepMsg = Theme.text(this, Theme.T_SMALL, Theme.REGULAR, Theme.TEXT_DIM, "");
-        prepMsg.setMaxLines(1);
+        prepCaption = Theme.text(this, Theme.T_BODY, Theme.REGULAR, Theme.TEXT_DIM, getString(R.string.PREPARE_KEEPS));
+        LinearLayout.LayoutParams cl = lp(PREPARE_BAR_W, WRAP);
+        cl.topMargin = Theme.S5;
+        info.addView(prepCaption, cl);
+        prepMsg = Theme.text(this, Theme.T_BODY, Theme.REGULAR, Theme.TEXT, "");
+        prepMsg.setMaxLines(3);
         prepMsg.setEllipsize(TextUtils.TruncateAt.END);
-        LinearLayout.LayoutParams ml = lp(MATCH, WRAP);
-        ml.topMargin = 16;
-        c.addView(prepMsg, ml);
-        c.addView(gap(this), lp(MATCH, 0, 1));
+        prepMsg.setLineSpacing(0, 1.2f);
+        LinearLayout.LayoutParams ml = lp(PREPARE_BAR_W, WRAP);
+        ml.topMargin = Theme.S3;
+        info.addView(prepMsg, ml);
 
         PrepareProtocol.Status s = readPrepStatus();
         boolean running = s == null || statusAlive(s);
         if (running) {
-            prepCancelRow = row(Icon.BACK, getString(R.string.CANCEL), getString(R.string.PREPARE_CANCEL_SUB),
-                                this::armCancelPrepare);
-            c.addView(prepCancelRow, lp(MATCH, Theme.ROW_H));
-            defaultFocus = prepCancelRow;
+            prepMsg.setVisibility(View.GONE);
             yAction = this::leavePrepare;
-            addHint("Y", R.string.HINT_MENU, this::leavePrepare);
+            addHint("Y", R.string.HINT_HIDE, this::leavePrepare);
             addHint("B", R.string.CANCEL, this::armCancelPrepare);
             getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         } else {
+            progress.setVisibility(View.GONE);
+            prepCaption.setVisibility(View.GONE);
             boolean cancelled = PrepareProtocol.CANCELLED.equals(s.state) || PrepareProtocol.RUNNING.equals(s.state);
-            LinearLayout actions = rowLayout();
-            MenuRow retry = row(Icon.RESET, getString(cancelled ? R.string.PREPARE_RESUME : R.string.PREPARE_RETRY),
-                                getString(R.string.PREPARE_RETRY_SUB), this::startPrepare);
-            LinearLayout.LayoutParams al = lp(0, Theme.ROW_H, 1);
-            al.rightMargin = 24;
-            actions.addView(retry, al);
-            MenuRow share = row(Icon.COPY, getString(R.string.SHARE_LOG), getString(R.string.SHARE_LOG_SUB),
-                                this::shareLog);
-            actions.addView(share, lp(0, Theme.ROW_H, 1));
-            c.addView(actions, lp(MATCH, Theme.ROW_H));
+            LinearLayout buttons = heroButtons(info);
+            Widgets.PillButton retry = pill(buttons, Icon.RESET,
+                                            getString(cancelled ? R.string.PREPARE_RESUME : R.string.PREPARE_RETRY),
+                                            true, this::startPrepare);
+            pill(buttons, Icon.COPY, getString(R.string.SHARE_LOG), false, this::shareLog);
             defaultFocus = retry;
             yAction = this::shareLog;
             addHint("A", R.string.HINT_SELECT, this::clickFocused);
@@ -2620,9 +2489,6 @@ public class LauncherActivity extends Activity {
             addHint("B", R.string.HINT_BACK, this::back);
             getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         }
-        p.addView(c);
-        h.addView(p, lp(0, MATCH, 1));
-        body.addView(h, new FrameLayout.LayoutParams(MATCH, MATCH));
         paintPrepare(s);
     }
 
@@ -2638,86 +2504,38 @@ public class LauncherActivity extends Activity {
     /** Fills the Preparing screen from a status (null: just started). */
     private void paintPrepare(PrepareProtocol.Status s) {
         prepShown = s;
-        if (ring == null || prepHead == null)
+        if (prepStatus == null)
             return;
         boolean running = s == null || statusAlive(s);
         boolean failed = s != null && !running && PrepareProtocol.FAILED.equals(s.state);
         boolean stopped = s != null && !running && !failed;
-        int cur = s == null ? 0 : indexOfStep(s.id);
-        float frac = s == null ? -1 : s.step > 0 ? PrepareProtocol.overall(s.step, s.n, s.pct) : -1;
-        String big = frac >= 0 ? String.format(Locale.getDefault(), "%d%%", Math.round(frac * 100)) : "";
-        String label = s == null ? getString(R.string.PREPARE_STARTING) : PrepareService.stepName(this, s.id);
-        String sub = s != null && s.step > 0 ? getString(R.string.PREPARE_STEP_OF, s.step, s.n)
-                     : "";
-        if (running && s != null && s.pct > 0)
-            sub = (sub.isEmpty() ? "" : sub + " · ") + getString(R.string.PREPARE_STEP_PCT, s.pct);
         if (failed) {
-            label = getString(R.string.PREPARE_FAILED_HEAD);
-            sub = s.code;
-        } else if (stopped) {
-            label = getString(R.string.PREPARE_CANCELLED_HEAD);
-            sub = "";
-        }
-        ring.setColor(failed ? Theme.ERROR : stopped ? Theme.WARN : Theme.OK);
-        ring.set(running ? frac : Math.max(0, frac), big, label, sub);
-        for (int i = 0; i < prepSteps.size(); i++) {
-            TextView[] v = prepSteps.get(i);
-            boolean done = i < cur || (s != null && PrepareProtocol.DONE.equals(s.state));
-            boolean now = i == cur && !done;
-            int color = now ? (failed ? Theme.ERROR : stopped ? Theme.WARN : Theme.OK)
-                        : done ? Theme.TEXT : Theme.TEXT_FAINT;
-            v[0].setText(done ? "✓" : now ? (failed ? "✕" : "●") : "○");
-            v[0].setTextColor(done ? Theme.OK : color);
-            v[1].setTextColor(now ? (failed ? Theme.ERROR : Theme.TEXT) : done ? Theme.TEXT_DIM : Theme.TEXT_FAINT);
-            v[1].setTypeface(now ? Theme.MEDIUM : Theme.REGULAR);
-            v[2].setTextColor(now ? Theme.TEXT_DIM : Theme.TEXT_FAINT);
-            v[3].setText(now && running && s != null && s.pct > 0
-                         ? String.format(Locale.getDefault(), "%d%%", s.pct) : "");
-            v[3].setTextColor(color);
-        }
-        if (failed) {
-            prepHead.setText(getString(R.string.PREPARE_FAILED_HEAD));
-            prepHead.setTextColor(Theme.ERROR);
+            prepStatus.set(getString(R.string.PREPARE_FAILED_HEAD) + (s.code.isEmpty() ? "" : " · " + s.code),
+                           Theme.ERROR);
             String why = s.msg;
             if (PrepareRunner.KILLED.equals(s.code))
                 why = getString(R.string.PREPARE_HINT_KILLED);
             else if ("NO_SPACE".equals(s.code))
                 why = getString(R.string.PREPARE_HINT_NO_SPACE, size(internalFree()))
                       + (why.isEmpty() ? "" : " " + why);
-            prepMsg.setText(getString(R.string.PREPARE_CODE_LINE, s.code) + (why.isEmpty() ? "" : " · " + why));
-            prepMsg.setTextColor(Theme.TEXT);
-            prepMsg.setMaxLines(2);
-            prepEta.setText(getString(R.string.PREPARE_ETA_FAILED));
-            prepEta.setTextColor(Theme.ERROR);
-            prepCaption.setVisibility(View.GONE);   // Y « Share log » says it, and the error needs the room
+            prepMsg.setText(why);
         } else if (stopped) {
-            prepHead.setText(getString(R.string.PREPARE_CANCELLED_HEAD));
-            prepHead.setTextColor(Theme.TEXT);
+            prepStatus.set(getString(R.string.PREPARE_CANCELLED_HEAD), Theme.WARN);
             prepMsg.setText(getString(PrepareProtocol.RUNNING.equals(s.state) ? R.string.PREPARE_INTERRUPTED
                                                                               : R.string.PREPARE_CANCELLED_TEXT));
-            prepEta.setText(getString(R.string.PREPARE_ETA_STOPPED));
-            prepEta.setTextColor(Theme.WARN);
-            prepCaption.setVisibility(View.GONE);
-            prepMsg.setMaxLines(2);
         } else {
-            prepMsg.setText(s == null || s.msg.isEmpty() ? getString(R.string.PREPARE_STARTING) : s.msg);
+            String step = s == null ? getString(R.string.PREPARE_STARTING) : PrepareService.stepName(this, s.id);
+            prepStatus.set(s != null && s.step > 0 ? getString(R.string.PREPARE_STATUS, s.step, s.n, step)
+                                                   : getString(R.string.PREPARE_STATUS_SHORT, step), Theme.OK);
+            float frac = s == null ? -1 : s.step > 0 ? PrepareProtocol.overall(s.step, s.n, s.pct) : -1;
+            prepMeter.set(Math.max(0, frac), Theme.ACCENT);
+            prepPct.setText(frac >= 0 ? String.format(Locale.getDefault(), "%d %%", Math.round(frac * 100)) : "");
             prepEta.setText(s != null && s.eta >= 0 ? getString(R.string.PREPARE_ETA_BIG,
                                                                 PrepareProtocol.formatEta(s.eta))
                                                     : getString(R.string.PREPARE_ETA_UNKNOWN));
-            prepEta.setTextColor(Theme.ACCENT);
-            prepCaption.setText(getString(R.string.PREPARE_KEEPS));
-            prepCaption.setVisibility(View.VISIBLE);
         }
         if (dimmed)
             paintDim();
-    }
-
-    private static int indexOfStep(String id) {
-        for (int i = 0; i < PREP_IDS.length; i++) {
-            if (PREP_IDS[i].equals(id))
-                return i;
-        }
-        return 0;
     }
 
     /** Twice within CONFIRM_MS: the first press arms, the second sends ACTION_CANCEL to the service. */
@@ -2727,18 +2545,12 @@ public class LauncherActivity extends Activity {
         long now = SystemClock.uptimeMillis();
         if (cancelArmedAt == 0 || now - cancelArmedAt > CONFIRM_MS) {
             cancelArmedAt = now;
-            if (prepCancelRow != null)
-                prepCancelRow.setBadge(getString(R.string.PREPARE_CANCEL_BADGE), Theme.WARN);
             setNote(getString(R.string.PREPARE_CANCEL_CONFIRM), NOTE_WARN);
             return;
         }
         cancelArmedAt = 0;
         cancelSent = true;
         String tid = titleId();
-        if (prepCancelRow != null) {
-            prepCancelRow.setBadge(getString(R.string.CANCELING), Theme.TEXT_DIM);
-            prepCancelRow.setDim(true);
-        }
         setNote(getString(R.string.CANCELING), NOTE_INFO);
         Log.i(TAG, "launcher: prepare cancel");
         try {
@@ -2804,10 +2616,8 @@ public class LauncherActivity extends Activity {
             }
             if (now == Prep.RUNNING) {
                 PrepareProtocol.Status s = readPrepStatus();
-                if (s != null && homeMeter != null && homeProgress != null) {
-                    homeMeter.set(s.step > 0 ? PrepareProtocol.overall(s.step, s.n, s.pct) : 0, Theme.ACCENT);
-                    homeProgress.setText(progressLine(s));
-                }
+                if (s != null && homeStatus != null)
+                    homeStatus.set(progressLine(s), Theme.OK);
             }
         }
     }
@@ -3363,132 +3173,55 @@ public class LauncherActivity extends Activity {
     /**
      * Home of a library game whose files are not here: its art (the scan's cached image), title and state, the
      * primary action (Import, Copy, Preparing, Queued (n), Choose the folder again) and, before an import, « Prepare
-     * now » from the cached default.xbe.
+     * now » from the cached default.xbe, then the quiet pills.
      */
     private void buildHomeNotHere() {
         LibraryScreen.Entry e = currentEntry();
-        screenTitle.setText(R.string.HOME_TITLE);
         homeChip = e.chip;
         String title = e.title();
         String chipText = LibraryScreen.chipText(this, e);
         int chipColor = LibraryScreen.chipColor(e.chip);
 
-        LinearLayout col = column();
-        LinearLayout hero = rowLayout();
-        hero.setGravity(Gravity.CENTER_VERTICAL);
-        Widgets.ArtTile tile = new Widgets.ArtTile(this);
-        if (art != null)
-            tile.setArt(art, artColor);
-        else
-            tile.setMonogram(TitleArt.initials(title), artColor);
-        hero.addView(tile, lp(Theme.ART, Theme.ART));
+        LinearLayout info = hero(title, false);
+        heroLine(info, chipText, chipColor);
+        heroLine(info, libLead(e), 0);
 
-        LinearLayout info = column();
-        if (e.realTid())
-            info.addView(Theme.caps(this, getString(R.string.HOME_TITLE_ID, e.tid), Theme.TEXT_FAINT), lp(MATCH, WRAP));
-        TextView big = Theme.text(this, Theme.T_HERO, Theme.MEDIUM, Theme.TEXT, title);
-        big.setMaxLines(2);
-        big.setEllipsize(TextUtils.TruncateAt.END);
-        LinearLayout.LayoutParams bl = lp(MATCH, WRAP);
-        bl.topMargin = 14;
-        info.addView(big, bl);
-        Widgets.Chip status = new Widgets.Chip(this);
-        status.set(chipText, chipColor);
-        LinearLayout.LayoutParams cl = lp(WRAP, WRAP);
-        cl.topMargin = 22;
-        info.addView(status, cl);
-        TextView leadV = Theme.text(this, Theme.T_BODY, Theme.REGULAR, Theme.TEXT_DIM, libLead(e));
-        leadV.setMaxLines(2);
-        leadV.setEllipsize(TextUtils.TruncateAt.END);
-        leadV.setLineSpacing(0, 1.2f);
-        LinearLayout.LayoutParams ll = lp(MATCH, WRAP);
-        ll.topMargin = 22;
-        info.addView(leadV, ll);
-
-        LibraryIndex.Item it = e.active;
-        LinearLayout facts = rowLayout();
-        if (it != null) {
-            homeFact(facts, getString(R.string.KV_SOURCE), it.name, Theme.TEXT);
-            if (LibraryIndex.KIND_ISO.equals(it.kind))
-                homeFact(facts, getString(R.string.LIB_KV_IMAGE), size(it.size), Theme.TEXT);
-        }
-        homeFact(facts, getString(R.string.KV_FREE), size(freeSpace()), Theme.TEXT);
         GameState.Facts f = e.facts;
         Prep p = GameState.prep(f.toolchain, f.pack == Pack.Check.VALID && f.packMatches, f.prepare, f.prepareFresh,
                                 f.prepareProcess);
-        if (p == Prep.PLAYABLE)
-            homeFact(facts, getString(R.string.KV_PREPARED), packFacts(e.tid)[0], Theme.OK);
-        LinearLayout.LayoutParams fl = lp(MATCH, WRAP);
-        fl.topMargin = 26;
-        info.addView(facts, fl);
-
-        MenuRow play;
+        LinearLayout buttons = heroButtons(info);
+        Widgets.PillButton play;
         switch (e.chip) {
         case NOT_IMPORTED:
-            play = row(Icon.COPY, getString(R.string.LIB_IMPORT),
-                       getString(it != null && LibraryIndex.KIND_ISO.equals(it.kind) ? R.string.LIB_IMPORT_SUB
-                                                                                    : R.string.LIB_COPY_SUB),
-                       this::onPlay);
+            play = pill(buttons, null, getString(R.string.LIB_IMPORT), true, this::onPlay);
             break;
         case NEEDS_COPYING:
-            play = row(Icon.COPY, getString(R.string.LIB_COPY), getString(R.string.LIB_COPY_SUB), this::onPlay);
+            play = pill(buttons, null, getString(R.string.LIB_COPY), true, this::onPlay);
             break;
         case NO_FILE_ACCESS:
-            play = row(Icon.KEY, getString(R.string.LIB_CHOOSE_FOLDER), getString(R.string.LIB_CHOOSE_FOLDER_SUB),
-                       this::onPlay);
+            play = pill(buttons, null, getString(R.string.LIB_CHOOSE_FOLDER), true, this::onPlay);
             break;
         case PREPARING:
-            play = row(Icon.ARROW, getString(R.string.PREPARING), getString(R.string.HOME_SUB_PREPARING),
-                       this::onPlay);
+            play = pill(buttons, null, getString(R.string.PREPARING), true, this::onPlay);
             break;
         case QUEUED:
-            play = row(Icon.ARROW, queuedLabel(e.tid), getString(R.string.LIB_QUEUED_SUB), this::onPlay);
+            play = pill(buttons, null, queuedLabel(e.tid), true, this::onPlay);
             break;
         default:
-            play = row(Icon.FOLDER, getString(R.string.LIB_FOLDER_TILE), getString(R.string.LIB_SOURCE_GONE_SUB),
-                       this::onChooseLibraryFolder);
+            play = pill(buttons, null, getString(R.string.LIB_FOLDER_TILE), true, this::onChooseLibraryFolder);
             break;
         }
         homePrimary = play;
-        LinearLayout actions = rowLayout();
-        LinearLayout.LayoutParams pl = lp(Theme.PRIMARY_W, Theme.PRIMARY_H);
-        pl.leftMargin = -12;
-        actions.addView(play, pl);
         // « Prepare now »: tools.prepare needs only default.xbe, so a game can be prepared (or queued) before its
         // gigabytes are imported.
         boolean canPrepare = f.toolchain && e.realTid() && cachedXbeDir() != null
                              && (e.chip == GameState.Chip.NOT_IMPORTED || e.chip == GameState.Chip.NEEDS_COPYING);
         if (canPrepare && (p == Prep.NEEDED || p == Prep.CANCELLED || p == Prep.INTERRUPTED || p == Prep.FAILED)) {
             boolean failed = p == Prep.FAILED;
-            MenuRow now = row(failed ? Icon.INFO : Icon.ARROW,
-                              getString(failed ? R.string.PREPARE_SEE_WHY : R.string.LIB_PREPARE_NOW),
-                              getString(failed ? R.string.HOME_SUB_FAILED : R.string.LIB_PREPARE_NOW_SUB),
-                              failed ? () -> go(Screen.PREPARE) : this::startPrepare);
-            LinearLayout.LayoutParams nl = lp(0, Theme.PRIMARY_H, 1);
-            nl.leftMargin = 12;
-            actions.addView(now, nl);
+            pill(buttons, null, getString(failed ? R.string.PREPARE_SEE_WHY : R.string.LIB_PREPARE_NOW), false,
+                 failed ? () -> go(Screen.PREPARE) : this::startPrepare);
         }
-        LinearLayout.LayoutParams al = lp(MATCH, Theme.PRIMARY_H);
-        al.topMargin = 30;
-        info.addView(actions, al);
-
-        LinearLayout.LayoutParams il = lp(0, WRAP, 1);
-        il.leftMargin = 52;
-        hero.addView(info, il);
-        col.addView(hero, lp(MATCH, 0, 1));
-
-        LinearLayout tiles = rowLayout();
-        MenuRow settings = homeTile(tiles, Icon.SLIDERS, R.string.SETTINGS, settingsSummary(), Screen.SETTINGS);
-        homeTile(tiles, Icon.PAD, R.string.CONTROLS, getString(R.string.CONTROLS_SUB), Screen.CONTROLS);
-        homeTile(tiles, Icon.DISC, R.string.GAME_DATA, chipText, Screen.GAME_DATA);
-        MenuRow about = homeTile(tiles, Icon.INFO, R.string.ABOUT, getString(R.string.ABOUT_SUB, version()),
-                                 Screen.ABOUT);
-        ((LinearLayout.LayoutParams)settings.getLayoutParams()).leftMargin = -12;
-        ((LinearLayout.LayoutParams)about.getLayoutParams()).rightMargin = -12;
-        LinearLayout.LayoutParams tl = lp(MATCH, Theme.TILE_H);
-        tl.topMargin = 28;
-        col.addView(tiles, tl);
-        body.addView(col, new FrameLayout.LayoutParams(MATCH, MATCH));
+        homePills(buttons);
 
         if (companion != null) {
             companion.changeLabel(getString(R.string.LIB_TITLE));
@@ -4198,7 +3931,7 @@ public class LauncherActivity extends Activity {
     }
 
     /**
-     * Play while another game runs: the first press says it will close (badge and note), a second within CONFIRM_MS
+     * Play while another game runs: the first press says it will close (the button and the note), a second within CONFIRM_MS
      * goes on. True when the launch may go on.
      */
     private boolean confirmSwitch() {
@@ -4212,7 +3945,7 @@ public class LauncherActivity extends Activity {
         }
         switchArmedAt = now;
         if (homePrimary != null)
-            homePrimary.setBadge(getString(R.string.PREPARE_CANCEL_BADGE), Theme.WARN);
+            homePrimary.setTitle(getString(R.string.PREPARE_CANCEL_BADGE));
         setNote(getString(R.string.LIB_SWITCH_CONFIRM, runningTitle()), NOTE_WARN);
         return false;
     }

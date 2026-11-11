@@ -123,7 +123,7 @@ public class LauncherScreensTest {
             a.forceFocusForTest();
         idle(400);
         if (wantFocus)
-            assertTrue(name + ": a focused row", a.focusForTest() instanceof Widgets.MenuRow);
+            assertTrue(name + ": a focused row or button", a.focusForTest() instanceof Widgets.Selectable);
         File f = TestSupport.screenshot(a.getWindow().getDecorView(), name);
         assertTrue(f.length() > 0);
         return f;
@@ -220,7 +220,7 @@ public class LauncherScreensTest {
             assertEquals(LauncherActivity.Screen.PREPARE, a.screenForTest());
             key(a, KeyEvent.KEYCODE_BUTTON_Y);   // Menu: Home, the Prepare carries on
         });
-        render("prepare-running", true, null);
+        render("prepare-running", false, null);   // nothing to focus while it runs: Y hides, B cancels
     }
 
     @Test
@@ -240,6 +240,52 @@ public class LauncherScreensTest {
         GameStore.sessionStart(app, System.currentTimeMillis() - 40 * 60_000L);
         GameStore.sessionEnd(app, System.currentTimeMillis() - 2 * 60_000L);
         render("home-ready-prepared", true, null);
+    }
+
+    /** Calm: Home is one row of buttons (a solid Play, three quiet pills); A and B are the hints, Start still plays. */
+    @Test
+    public void homeIsOneRowOfButtons() throws Exception {
+        LauncherActivity a = launch();
+        a.forceFocusForTest();
+        idle(300);
+        Widgets.PillButton play = a.homePrimaryForTest();
+        assertTrue(play.primaryForTest());
+        assertTrue(a.focusForTest() == play);
+        List<String> pills = new ArrayList<>();
+        View v = play;
+        for (int i = 0; i < 3; i++) {
+            v = v.focusSearch(View.FOCUS_RIGHT);
+            assertTrue(v instanceof Widgets.PillButton);
+            assertFalse(((Widgets.PillButton)v).primaryForTest());
+            pills.add(((Widgets.PillButton)v).title);
+            v.requestFocus();
+            idle(200);
+        }
+        assertEquals(java.util.Arrays.asList(app.getString(R.string.SETTINGS), app.getString(R.string.CONTROLS),
+                                             app.getString(R.string.HOME_MANAGE)), pills);
+        List<String> hints = new ArrayList<>();
+        for (Widgets.Hint h : a.hintsForTest())
+            hints.add(h.glyphForTest());
+        assertEquals(java.util.Arrays.asList("A", "B"), hints);
+        assertEquals(Theme.ACCENT, play.focusedFillForTest());
+    }
+
+    /** Calm: Preparing is Home's layout with the progress; no focusable, Y hides and B cancels. */
+    @Test
+    public void preparingHasNoRowToFocus() throws Exception {
+        withToolchain();
+        status(PrepareProtocol.RUNNING, "compile", 5, 42, 760, "func_00012a40.c", "");
+        LauncherActivity a = launch();
+        assertEquals(LauncherActivity.Screen.PREPARE, a.screenForTest());
+        a.forceFocusForTest();
+        assertNull(a.focusForTest());
+        List<String> hints = new ArrayList<>();
+        for (Widgets.Hint h : a.hintsForTest())
+            hints.add(h.glyphForTest() + " " + h.labelForTest());
+        assertEquals(java.util.Arrays.asList("Y " + app.getString(R.string.HINT_HIDE),
+                                             "B " + app.getString(R.string.CANCEL)), hints);
+        key(a, KeyEvent.KEYCODE_BUTTON_Y);
+        assertEquals(LauncherActivity.Screen.HOME, a.screenForTest());
     }
 
     // ---- The other screens -----------------------------------------------------------------------------------
@@ -424,12 +470,12 @@ public class LauncherScreensTest {
         idle(300);
         assertEquals(Theme.ANIM_SCREEN_MS, a.screenAnimatorForTest().getDuration());
         assertEquals(150, Theme.ANIM_SCREEN_MS);
-        Widgets.MenuRow play = (Widgets.MenuRow)a.focusForTest();
+        Widgets.Selectable play = (Widgets.Selectable)a.focusForTest();
         assertEquals(Theme.ANIM_FOCUS_MS, play.focusAnimatorForTest().getDuration());
         assertEquals(Theme.FOCUS_SCALE, play.getScaleX(), 0.001f);
         assertTrue(a.glideForTest().targetForTest() == play);
-        View next = play.focusSearch(View.FOCUS_DOWN);
-        assertTrue(next instanceof Widgets.MenuRow);
+        View next = play.focusSearch(View.FOCUS_RIGHT);   // Home's row of buttons: Play, then Settings
+        assertTrue(next instanceof Widgets.PillButton);
         next.requestFocus();
         idle(40);
         assertNotNull(a.glideForTest().animatorForTest());
@@ -467,7 +513,7 @@ public class LauncherScreensTest {
         idle(200);
         List<UiFeedback.Cue> played = a.feedbackForTest().played;
         played.clear();
-        a.focusForTest().focusSearch(View.FOCUS_DOWN).requestFocus();
+        a.focusForTest().focusSearch(View.FOCUS_RIGHT).requestFocus();
         assertEquals(UiFeedback.Cue.MOVE, played.get(played.size() - 1));
         key(a, KeyEvent.KEYCODE_BUTTON_A);
         assertEquals(played.toString(), UiFeedback.Cue.SELECT, played.get(played.size() - 1));

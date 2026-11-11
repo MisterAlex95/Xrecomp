@@ -381,10 +381,11 @@ public class LauncherLibraryTest {
         TestSupport.screenshot(a.getWindow().getDecorView(), "library-home-not-imported");
 
         // « Prepare now »: the cached default.xbe is the Prepare's source.
-        Widgets.MenuRow now = null;
+        Widgets.Selectable now = null;
         for (View v : allViews(a.getWindow().getDecorView(), new ArrayList<>())) {
-            if (v instanceof Widgets.MenuRow && app.getString(R.string.LIB_PREPARE_NOW).equals(((Widgets.MenuRow)v).title))
-                now = (Widgets.MenuRow)v;
+            if (v instanceof Widgets.PillButton
+                && app.getString(R.string.LIB_PREPARE_NOW).equals(((Widgets.PillButton)v).title))
+                now = (Widgets.Selectable)v;
         }
         assertNotNull("Prepare now", now);
         now.performClick();

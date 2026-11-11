@@ -222,7 +222,7 @@
     <string name="OPT_SELFTEST_DETAIL">Runs the runtime\'s self-test before the game starts and writes one PASS or FAIL line per check to the log (logcat, tag xboxrecomp). Useful in a bug report; the game then starts as usual. (RECOMP_SHELL_SELFTEST)</string>
 
     <!-- Game data -->
-    <string name="GAME_DATA_CAPS">Manage</string>
+    <string name="HOME_MANAGE">Manage</string>
     <string name="CHOOSE_GAME">Choose a game</string>
     <string name="CHANGE_GAME">Change game</string>
     <string name="CHANGE_GAME_SUB">Another folder or disc image, or import again</string>
@@ -313,6 +313,9 @@
     <string name="PREPARE_ETA_UNKNOWN">Working out the time left…</string>
     <string name="PREPARE_ETA_FAILED">Stopped on an error</string>
     <string name="PREPARE_ETA_STOPPED">Paused</string>
+    <string name="PREPARE_STATUS">Preparing · step %1$d of %2$d · %3$s</string>
+    <string name="PREPARE_STATUS_SHORT">Preparing · %1$s</string>
+    <string name="HINT_HIDE">Hide</string>
 
     <!-- Home (the console-style hero) -->
     <string name="HOME_TITLE">Home</string>
@@ -339,6 +342,9 @@
     <string name="VAL_NONE">—</string>
     <string name="PLAYTIME_MIN">%1$d min</string>
     <string name="PLAYTIME_H">%1$d h %2$s</string>
+    <string name="HOME_META">%1$s · %2$s played</string>
+    <string name="HOME_META_NEW">Not played yet</string>
+    <string name="HOME_NEEDS_PREPARE">%1$s · once, %2$s</string>
 
     <!-- Settings › Launcher: UI sounds and vibration -->
     <string name="UI_SOUND">Sounds</string>

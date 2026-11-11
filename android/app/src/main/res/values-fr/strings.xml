@@ -200,7 +200,7 @@
     <string name="OPT_SELFTEST_DETAIL">Lance l\'auto-test du runtime avant le jeu et écrit une ligne PASS ou FAIL par vérification dans le journal (logcat, tag xboxrecomp). Utile dans un rapport de bug ; le jeu démarre ensuite normalement. (RECOMP_SHELL_SELFTEST)</string>
 
     <!-- Données du jeu -->
-    <string name="GAME_DATA_CAPS">Gérer</string>
+    <string name="HOME_MANAGE">Gérer</string>
     <string name="CHOOSE_GAME">Choisir un jeu</string>
     <string name="CHANGE_GAME">Changer de jeu</string>
     <string name="CHANGE_GAME_SUB">Un autre dossier ou une image disque, ou réimporter</string>
@@ -291,6 +291,9 @@
     <string name="PREPARE_ETA_UNKNOWN">Calcul du temps restant…</string>
     <string name="PREPARE_ETA_FAILED">Arrêtée sur une erreur</string>
     <string name="PREPARE_ETA_STOPPED">En pause</string>
+    <string name="PREPARE_STATUS">Préparation · étape %1$d sur %2$d · %3$s</string>
+    <string name="PREPARE_STATUS_SHORT">Préparation · %1$s</string>
+    <string name="HINT_HIDE">Masquer</string>
 
     <!-- Accueil (le héros façon console) -->
     <string name="HOME_TITLE">Accueil</string>
@@ -317,6 +320,9 @@
     <string name="VAL_NONE">—</string>
     <string name="PLAYTIME_MIN">%1$d min</string>
     <string name="PLAYTIME_H">%1$d h %2$s</string>
+    <string name="HOME_META">%1$s · %2$s de jeu</string>
+    <string name="HOME_META_NEW">Pas encore joué</string>
+    <string name="HOME_NEEDS_PREPARE">%1$s · une seule fois, %2$s</string>
 
     <!-- Réglages › Lanceur : sons et vibration -->
     <string name="UI_SOUND">Sons</string>
