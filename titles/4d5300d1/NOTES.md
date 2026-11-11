@@ -173,3 +173,11 @@ the lock stalls D3D init (RECOMP_GUEST_CPU_TRACE).
   allocs=181 released=63 free calls=63. The run then stops at the in-world stall in sub_0012F7F0 (~220-250 flips).
 - About 26 MB of the window is Fable's own demand-paging pool (XPhysicalAlloc from sub_000AB270, xboot.ini
   PhysicalSize = 26544 KB), which its pager never uses here (sidt/invlpg are no-ops). Harmless at this peak.
+
+## 2026-11-11: GPU back end (XBA-27 7a+7b, branch xba-gpu-backend)
+- RECOMP_GPU=1 draws with the GL back end (src/gpu, docs/technical/gpu-backend.md); the CPU rasteriser stays default.
+- Title screen, Mac, back to back: CPU rasteriser 71-93 ms render per frame (10.5-13.8 fps); GL 2.1-2.6 ms
+  (225-278 fps: the "Press START" screen is not capped by the game when the renderer is fast).
+- Frames match the CPU path: title 0.34/255 mean diff, AutoSave screen 0.33/255 (progress bar end only).
+- Every title-screen batch is a vertex-program batch (15336 of 15336); 3 shader programs cover the front end.
+- After Start both paths stop flipping after the AutoSave screen: the pushbuffer stall (WP2/WP3), not the back end.

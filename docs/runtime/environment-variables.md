@@ -113,6 +113,10 @@ The executor is itself opt-in: set `RECOMP_PB_EXEC=1` to execute the pushbuffer.
 | `RECOMP_RASTER_THREADS=N` | auto | Worker threads for the software rasteriser, on Windows and POSIX. | `nv2a_pb_exec.c` |
 | `RECOMP_TEX_BILINEAR=1` | off | CPU rasteriser blends the four nearest texels instead of taking the nearest. | `nv2a_pb_exec.c` |
 | `RECOMP_TEX_ANISO=8\|16` | off | Anisotropic filtering on the CPU rasteriser; implies `RECOMP_TEX_BILINEAR`. Slower. | `nv2a_pb_exec.c` |
+| `RECOMP_GPU=1` | off | Draw with the GL back end (desktop GL 3.3/4.1 core, GLES 3.0 on Android) instead of the CPU rasteriser; vertex programs still run on the CPU. Falls back to the CPU rasteriser if no GL context can be made. See [GPU Back End](../technical/gpu-backend.md). | `src/gpu/nv2a_gl.c` |
+| `RECOMP_GPU_S3TC=0` | on where supported | GL back end: decode DXT textures on the CPU instead of uploading them compressed. | `src/gpu/nv2a_gl.c` |
+| `RECOMP_GPU_TEX_RECHECK=frame` | per frame and on texture switch | GL back end: hash a cached texture's guest bytes only once per frame. | `src/gpu/nv2a_gl.c` |
+| `RECOMP_GPU_VERBOSE=1` | off | GL back end: log render targets as they are created and a statistics line every 60 frames (default every 600). | `src/gpu/nv2a_gl.c` |
 | `RECOMP_STRIP_ALT_WINDING` | off | Odd triangles of a strip keep the strip's winding, as on hardware. | `nv2a_pb_exec.c` |
 | `RECOMP_PB_CONST_FAST=0` | on | Sends every `SET_TRANSFORM_CONSTANT` word through the general dispatcher. | `nv2a_pb_exec.c` |
 | `RECOMP_RASTER_TEST` | off | Bring-up aid: draws a magenta triangle after every clear, to prove the rasteriser and presenter work. | `nv2a_pb_exec.c` |
