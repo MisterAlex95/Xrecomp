@@ -332,6 +332,34 @@ extern RECOMP_TLS RecompCpu g_cpu;
 #define RECOMP_ATOMIC_CAS32(p, cmp, val)     ((uint32_t)__sync_val_compare_and_swap((volatile uint32_t *)(p),                                            (uint32_t)(cmp), (uint32_t)(val)))
 #endif
 
+/* The other locked read-modify-writes (XBA-78). `lock inc/dec/add/sub/and/
+ * or/xor/not/neg/bts/btr/btc [mem]` lift as the unlocked instruction on a
+ * local copy inside a compare-and-swap loop (RECOMP_ATOMIC_CASn), so the
+ * flags come out exactly as the unlocked form computes them; a bit string
+ * (`bts [mem], reg`) uses fetch-or/and/xor on the dword holding the bit; and
+ * `xchg` with a memory operand, locked by the hardware whether or not it has
+ * the prefix, is an atomic exchange. Before, the locked forms were no-ops
+ * (RECOMP_UNIMPL) and xchg was a plain load and store. */
+#if defined(_MSC_VER)
+#define RECOMP_ATOMIC_CAS8(p, cmp, val)  ((uint8_t)_InterlockedCompareExchange8((volatile char *)(p), (char)(val), (char)(cmp)))
+#define RECOMP_ATOMIC_CAS16(p, cmp, val) ((uint16_t)_InterlockedCompareExchange16((volatile short *)(p), (short)(val), (short)(cmp)))
+#define RECOMP_ATOMIC_XCHG8(p, v)   ((uint8_t)_InterlockedExchange8((volatile char *)(p), (char)(v)))
+#define RECOMP_ATOMIC_XCHG16(p, v)  ((uint16_t)_InterlockedExchange16((volatile short *)(p), (short)(v)))
+#define RECOMP_ATOMIC_XCHG32(p, v)  ((uint32_t)_InterlockedExchange((volatile long *)(p), (long)(v)))
+#define RECOMP_ATOMIC_OR32(p, v)    ((uint32_t)_InterlockedOr((volatile long *)(p), (long)(v)))
+#define RECOMP_ATOMIC_AND32(p, v)   ((uint32_t)_InterlockedAnd((volatile long *)(p), (long)(v)))
+#define RECOMP_ATOMIC_XOR32(p, v)   ((uint32_t)_InterlockedXor((volatile long *)(p), (long)(v)))
+#else
+#define RECOMP_ATOMIC_CAS8(p, cmp, val)  ((uint8_t)__sync_val_compare_and_swap((volatile uint8_t *)(p), (uint8_t)(cmp), (uint8_t)(val)))
+#define RECOMP_ATOMIC_CAS16(p, cmp, val) ((uint16_t)__sync_val_compare_and_swap((volatile uint16_t *)(p), (uint16_t)(cmp), (uint16_t)(val)))
+#define RECOMP_ATOMIC_XCHG8(p, v)   ((uint8_t)__atomic_exchange_n((volatile uint8_t *)(p), (uint8_t)(v), __ATOMIC_SEQ_CST))
+#define RECOMP_ATOMIC_XCHG16(p, v)  ((uint16_t)__atomic_exchange_n((volatile uint16_t *)(p), (uint16_t)(v), __ATOMIC_SEQ_CST))
+#define RECOMP_ATOMIC_XCHG32(p, v)  ((uint32_t)__atomic_exchange_n((volatile uint32_t *)(p), (uint32_t)(v), __ATOMIC_SEQ_CST))
+#define RECOMP_ATOMIC_OR32(p, v)    ((uint32_t)__sync_fetch_and_or((volatile uint32_t *)(p), (uint32_t)(v)))
+#define RECOMP_ATOMIC_AND32(p, v)   ((uint32_t)__sync_fetch_and_and((volatile uint32_t *)(p), (uint32_t)(v)))
+#define RECOMP_ATOMIC_XOR32(p, v)   ((uint32_t)__sync_fetch_and_xor((volatile uint32_t *)(p), (uint32_t)(v)))
+#endif
+
 #include <setjmp.h>
 jmp_buf *recomp_setjmp_slot(uint32_t buf_va);
 int recomp_guest_longjmp(uint32_t buf_va, uint32_t value);
