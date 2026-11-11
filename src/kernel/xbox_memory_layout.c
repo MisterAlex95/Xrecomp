@@ -20,12 +20,14 @@
 #include "guest_vmem.h"
 #include "kernel_missing.h"
 #include "nv2a_flip_hold.h"
+#include "platform/host_time.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <setjmp.h>
 #if !defined(_WIN32)
 #include <unistd.h>   /* _exit */
+#include <time.h>     /* nanosleep: the ack thread's idle wait */
 #endif
 
 /* XBE header field offsets (per xboxdevwiki.net/Xbe) */
@@ -1629,6 +1631,100 @@ volatile uint32_t *xbox_Nv2aRegPtr(uint32_t offset)
     return (volatile uint32_t *)((char *)g_nv2a_memory + offset);
 }
 
+/* Does the ack pass below have anything to answer right now? A new PUT (the
+ * title kicked off), or a bit nv2a_ack_busy_bits would clear (a PFB flush
+ * kick being waited on, an interrupt status the guest just wrote), or an
+ * idle bit the guest cleared. */
+static int nv2a_ack_wanted(volatile uint32_t *regs, uint32_t put_seen)
+{
+    size_t i;
+
+    if (regs[NV2A_USER_DMA_PUT / 4] != put_seen)
+        return 1;
+    for (i = 0; i < sizeof(NV2A_ACK) / sizeof(NV2A_ACK[0]); i++) {
+        uint32_t mask = NV2A_ACK[i].busy_mask;
+        if (NV2A_ACK[i].offset == NV2A_ACK_PMC_INTR_0)
+            mask &= ~NV2A_ACK_PMC_INTR_PCRTC;      /* the vblank-ack thread's */
+        else if (NV2A_ACK[i].offset == NV2A_ACK_PCRTC_INTR_0)
+            mask &= ~NV2A_ACK_PCRTC_INTR_VBLANK;
+        if (regs[NV2A_ACK[i].offset / 4] & mask)
+            return 1;
+    }
+    for (i = 0; i < sizeof(NV2A_IDLE) / sizeof(NV2A_IDLE[0]); i++)
+        if ((regs[NV2A_IDLE[i].offset / 4] & NV2A_IDLE[i].idle_mask)
+            != NV2A_IDLE[i].idle_mask)
+            return 1;
+    return 0;
+}
+
+/* The ack thread's wait between two passes.
+ *
+ * It used to be a bare yield, so with nothing submitted the thread still ran
+ * flat out: on Fable's title screen 43 % of a core in SwitchToThread, a core
+ * an Android handheld with five fast ones would rather give the rasteriser.
+ * Nothing can wake it instead: PUT and the busy bits are plain memory the
+ * title writes from translated code, so there is no store to hook. The wait
+ * is therefore a bounded poll:
+ *   - while there is work, or for NV2A_ACK_SPIN_NS after the last of it
+ *     (D3D kicks off in bursts), it yields as before, so a burst is answered
+ *     at once;
+ *   - after that, and while a flip waits for its vblank (a wait on the
+ *     clock, not on the title), it sleeps in steps of NV2A_ACK_STEP_US,
+ *     looking at PUT and the busy bits after each, for at most
+ *     RECOMP_ACK_IDLE_US before running a pass anyway, which keeps the
+ *     clocks this thread ticks (KeTickCount, the counter mirrors) moving.
+ * A kick that lands in an idle period waits one step (tens of microseconds,
+ * more on a loaded host) more than before.
+ *
+ * Off by default (RECOMP_ACK_IDLE_US=0, the bare yield) until the segment
+ * scan follows jumps: today it learns the ring's end from the highest PUT it
+ * has seen, and a thread that sees fewer PUTs loses more commands at a wrap.
+ * With RECOMP_ACK_IDLE_US=250 Fable stopped at 0 flips in most starts (GPU
+ * semaphore releases lost, D3D waiting in sub_00855260); with the
+ * jump-following prototype of the scan it started every time. 250 is the
+ * intended value then. Windows keeps the yield: its sleeps are a millisecond
+ * or more. */
+#define NV2A_ACK_SPIN_NS  (2u * 1000u * 1000u)
+#define NV2A_ACK_STEP_US  50
+static void nv2a_ack_wait(volatile uint32_t *regs, int flip_held)
+{
+#if defined(_WIN32)
+    (void)regs; (void)flip_held;
+    Sleep(0);
+#else
+    static int idle_us = -1;
+    static uint64_t busy_ns;               /* the last pass that had work */
+    static uint32_t put_seen;
+    uint32_t put = regs[NV2A_USER_DMA_PUT / 4];
+    uint64_t now = xbox_HostNowNs();
+    int waited;
+
+    if (idle_us < 0) {
+        const char *e = getenv("RECOMP_ACK_IDLE_US");
+        idle_us = e ? atoi(e) : 0;
+        if (idle_us < 0) idle_us = 0;
+        if (idle_us > 20000) idle_us = 20000;
+    }
+    if (put != put_seen || regs[NV2A_USER_DMA_GET / 4] != put) {
+        put_seen = put;
+        if (!flip_held)
+            busy_ns = now;                 /* a kick, or one not yet answered */
+    }
+    if (!idle_us || (!flip_held && now - busy_ns < NV2A_ACK_SPIN_NS)) {
+        Sleep(0);
+        return;
+    }
+    for (waited = 0; waited < idle_us; waited += NV2A_ACK_STEP_US) {
+        struct timespec ts = { 0, NV2A_ACK_STEP_US * 1000 };
+        nanosleep(&ts, NULL);
+        if (nv2a_ack_wanted(regs, put)) {
+            busy_ns = xbox_HostNowNs();
+            return;
+        }
+    }
+#endif
+}
+
 static DWORD WINAPI nv2a_ack_thread(LPVOID param)
 {
     volatile uint32_t *regs = (volatile uint32_t *)param;
@@ -1831,7 +1927,7 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
         *(volatile uint32_t *)((uintptr_t)(XBOX_KERNEL_DATA_BASE + KDATA_TICK_COUNT)
                                + g_memory_offset) = GetTickCount();
 
-        Sleep(0);  /* yield; the waiter is spinning on another core */
+        nv2a_ack_wait(regs, flip_held);
     }
     return 0;
 }
