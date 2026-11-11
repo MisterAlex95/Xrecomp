@@ -348,7 +348,7 @@ ULONG_PTR xbox_resolve_ordinal(ULONG ordinal)
  * runtime -- it exists to keep the table populated when there is no XBE.
  * ============================================================================ */
 
-static const ULONG g_thunk_ordinals[XBOX_KERNEL_THUNK_TABLE_SIZE] = {
+static const ULONG g_thunk_ordinals[] = {
       1,   2,   3,   4,   8,  15,  16,  17,  23,  24,   /* 0-9   */
      40,  41,  42,  44,  46,  47,  49,  62,  65,  67,   /* 10-19 */
      69,  71,  74,  81,  83,  84,  85,  86,  87,  95,   /* 20-29 */
@@ -365,6 +365,7 @@ static const ULONG g_thunk_ordinals[XBOX_KERNEL_THUNK_TABLE_SIZE] = {
     336, 337, 338, 339, 340, 344, 345, 346, 347, 349,   /* 130-139 */
     353, 354, 355, 356, 357, 358, 359,                   /* 140-146 */
 };
+#define THUNK_ORDINALS_COUNT (sizeof g_thunk_ordinals / sizeof g_thunk_ordinals[0])
 
 /* ============================================================================
  * Unresolved Thunk Handler
@@ -388,7 +389,7 @@ static void __stdcall xbox_unresolved_thunk(void)
  * Must be called before any game code runs. Sets up:
  *   1. Logging system
  *   2. Path translation
- *   3. Thunk table (all 147 entries)
+ *   3. Thunk table (the title's imports)
  * ============================================================================ */
 
 void xbox_kernel_init(void)
@@ -397,6 +398,8 @@ void xbox_kernel_init(void)
     ULONG unresolved = 0;
     uint32_t thunk_base = 0;
     uint32_t thunk_count = 0;
+    uint32_t imports;
+    int from_xbe;
 
     /* Initialize logging */
     InitializeCriticalSection(&g_log_cs);
@@ -443,15 +446,26 @@ void xbox_kernel_init(void)
      * The slot->ordinal mapping normally comes from the in-memory thunk table
      * of the loaded XBE (0x80000000|ordinal per entry, same source the kernel
      * bridge reads). That makes the table match any title's import order.
-     * Without a mapped XBE, fall back to the static reference list below. */
+     * Without a mapped XBE, fall back to the static reference list above.
+     *
+     * Only the title's imports: the loop used to run over all 378 export
+     * slots and take the reference list for every slot past the title's
+     * count -- whose tail is zeros -- so each title logged "Unresolved kernel
+     * ordinal 0" a couple of hundred times (231 for Burnout 3) for slots no
+     * code uses. Guest calls go through the kernel bridge, not this table. */
     xbox_kernel_get_thunk_address(&thunk_base, &thunk_count);
-    for (ULONG i = 0; i < XBOX_KERNEL_THUNK_TABLE_SIZE; i++) {
+    from_xbe = thunk_base && thunk_count && xbox_GetMemoryBase();
+    imports = from_xbe ? thunk_count : (uint32_t)THUNK_ORDINALS_COUNT;
+    if (imports > XBOX_KERNEL_THUNK_TABLE_SIZE)
+        imports = XBOX_KERNEL_THUNK_TABLE_SIZE;
+    for (ULONG i = 0; i < imports; i++) {
         ULONG ordinal;
 
-        if (thunk_base && i < thunk_count && xbox_GetMemoryBase()) {
+        if (from_xbe) {
             uint32_t entry = *(volatile uint32_t *)
                 ((uintptr_t)(thunk_base + i * 4) + g_xbox_mem_offset);
             if (entry == 0) {
+                imports = i;
                 break;  /* rest of the table is empty */
             }
             ordinal = entry & 0x7FFFFFFF;
@@ -472,8 +486,8 @@ void xbox_kernel_init(void)
     }
 
     xbox_log(XBOX_LOG_INFO, XBOX_LOG_THUNK,
-        "Thunk table: %u/%u resolved, %u unresolved",
-        resolved, XBOX_KERNEL_THUNK_TABLE_SIZE, unresolved);
+        "Thunk table: %u/%u imports resolved (%s), %u unresolved",
+        resolved, imports, from_xbe ? "the title's" : "reference list", unresolved);
 
     if (unresolved > 0) {
         xbox_log(XBOX_LOG_WARN, XBOX_LOG_THUNK,
