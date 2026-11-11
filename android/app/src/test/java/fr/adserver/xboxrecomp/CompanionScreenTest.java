@@ -207,11 +207,11 @@ public class CompanionScreenTest {
         lc.start();
         idle();
         assertTrue(lc.screen().content() instanceof LauncherPanel);
-        lc.home("Sample Game", "Ready", Theme.ACCENT, true);
+        lc.home("Sample Game", "Ready", Theme.OK, true);
         assertEquals("Sample Game", ((LauncherPanel)lc.screen().content()).titleForTest());
         lc.preparing("4D530004", "Sample Game");
         assertTrue(lc.screen().content() instanceof PreparingPanel);
-        lc.home("Sample Game", "Ready", Theme.ACCENT, true);
+        lc.home("Sample Game", "Ready", Theme.OK, true);
         assertTrue(lc.screen().content() instanceof LauncherPanel);
         lc.stop();
         assertFalse(lc.screen().isShowing());

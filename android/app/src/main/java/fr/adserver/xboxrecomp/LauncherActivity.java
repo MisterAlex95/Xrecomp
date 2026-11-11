@@ -162,8 +162,9 @@ public class LauncherActivity extends Activity {
     private String themeLogged;
     /** Title IDs whose theme a worker bakes (or tried to), once per activity. */
     private final java.util.Set<String> themeBaking = new java.util.HashSet<>();
-    /** Where a missing theme is baked (a test runs it in place). */
-    static java.util.concurrent.Executor themeExecutor = r -> new Thread(r, "xba-theme").start();
+    /** Where a missing theme is baked: a thread of its own (tests run it in place: TestSupport.StockTheme). */
+    static final java.util.concurrent.Executor THEME_THREAD = r -> new Thread(r, "xba-theme").start();
+    static java.util.concurrent.Executor themeExecutor = THEME_THREAD;
 
     // ---- Home ----
     private MenuRow homePrimary;
@@ -757,7 +758,12 @@ public class LauncherActivity extends Activity {
                     || screen == Screen.PREPARE)
                     return;   // those two hold live progress: the theme shows on the next screen
                 artTid = null;   // the title image may have come from another source than $$XTIMAGE
+                String keep = noteText;
+                int keepKind = noteKind;
                 show(screen, 0);
+                noteText = keep;   // the note on screen stays (shown again without its sound or log)
+                noteKind = keepKind;
+                paintNote();
             });
         });
     }

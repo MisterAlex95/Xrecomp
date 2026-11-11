@@ -9,7 +9,6 @@ import android.app.Application;
 import android.os.Looper;
 import android.widget.FrameLayout;
 
-import org.junit.After;
 import org.junit.Assume;
 import org.junit.Rule;
 import org.junit.Test;
@@ -37,11 +36,6 @@ public class ThemePreviewTest {
     @Rule
     public final TestSupport.StockTheme stockTheme = new TestSupport.StockTheme();
 
-    @After
-    public void tearDown() {
-        LauncherActivity.themeExecutor = r -> new Thread(r, "xba-theme").start();
-    }
-
     private static void idle(long ms) {
         shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(ms));
     }
@@ -65,7 +59,6 @@ public class ThemePreviewTest {
         assertNotNull("no theme (turned off?)", t);
         System.out.println(t.logLine());
 
-        LauncherActivity.themeExecutor = Runnable::run;
         LauncherActivity a = Robolectric.buildActivity(LauncherActivity.class).setup().get();
         idle(300);
         a.forceFocusForTest();

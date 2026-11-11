@@ -59,7 +59,6 @@ public class LauncherScreensTest {
         ShadowEnvironment.addExternalDir("sdcard");
         ShadowEnvironment.setExternalStorageState("mounted");
         app = RuntimeEnvironment.getApplication();
-        LauncherActivity.themeExecutor = Runnable::run;   // the theme bakes in place, its re-show still posted
         writeXbe(TestSupport.xbe(0x4D530004, "Sample Game"));
         ActivityManager am = app.getSystemService(ActivityManager.class);
         ActivityManager.MemoryInfo mi = new ActivityManager.MemoryInfo();
@@ -70,7 +69,6 @@ public class LauncherScreensTest {
 
     @After
     public void tearDown() {
-        LauncherActivity.themeExecutor = r -> new Thread(r, "xba-theme").start();
         Toolchain.assetsOverride = null;
         Toolchain.nativeDirOverride = null;
         LauncherActivity.clock = android.os.SystemClock::uptimeMillis;
