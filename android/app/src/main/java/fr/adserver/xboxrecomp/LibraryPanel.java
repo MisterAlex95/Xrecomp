@@ -138,7 +138,7 @@ final class LibraryPanel extends PanelView {
         text.setColor(Theme.ACCENT);
         c.drawText(ctx.getString(R.string.LIB_TITLE).toUpperCase(java.util.Locale.ROOT), tx, 212, text);
         text.setLetterSpacing(0);
-        text.setTypeface(Theme.LIGHT);
+        text.setTypeface(Theme.MEDIUM);
         text.setTextSize(Theme.T_HERO);
         text.setColor(Theme.TEXT);
         String t = title.isEmpty() ? ctx.getString(R.string.LIB_PANEL_NONE) : title;

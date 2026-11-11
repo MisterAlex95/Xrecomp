@@ -136,19 +136,35 @@ final class Theme {
     }
 
     // ---- Type ---------------------------------------------------------------------------------------------------
+    // « Calm » (docs/android/app-shell.md « Look and motion »): five sizes, two weights, nothing below T_SMALL, no caps
+    // style. Secondary text is TEXT_DIM; TEXT_FAINT only says « disabled ».
     static final Typeface REGULAR = Typeface.create("sans-serif", Typeface.NORMAL);
     static final Typeface MEDIUM = Typeface.create("sans-serif-medium", Typeface.NORMAL);
-    static final Typeface LIGHT = Typeface.create("sans-serif-light", Typeface.NORMAL);
 
-    static final float T_HERO = 76, T_TITLE = 46, T_HEAD = 40, T_ROW = 38, T_BODY = 29, T_SMALL = 25, T_CAPS = 22;
+    static final float T_DISPLAY = 64, T_TITLE = 40, T_ROW = 34, T_BODY = 28, T_SMALL = 24;
+    /** The hints' labels (between Small and Body: they are read at a glance). */
+    static final float T_HINT = 26;
+    /** Aliases of the pre-Calm names, until every screen has moved (WP7 removes them). */
+    static final float T_HERO = T_DISPLAY, T_HEAD = T_TITLE, T_CAPS = T_SMALL;
 
     // ---- Layout -------------------------------------------------------------------------------------------------
-    static final int MARGIN_X = 72, MARGIN_TOP = 36, MARGIN_BOTTOM = 30;
-    static final int TOP_BAR_H = 112, BOTTOM_BAR_H = 92, NOTE_H = 64;
-    static final int GAP = 40, RADIUS = 22, ROW_RADIUS = 18;
-    static final int ROW_H = 112, ROW_H_SMALL = 96, CARD_H = 230;
-    /** Home: the hero's art tile, its primary button, the secondary row's tiles. */
-    static final int ART = 400, PRIMARY_W = 660, PRIMARY_H = 128, TILE_H = 128;
+    /** The spacing scale: every gap is one of these. */
+    static final int S1 = 8, S2 = 16, S3 = 24, S4 = 32, S5 = 48, S6 = 96;
+    static final int MARGIN_X = 96, MARGIN_TOP = S5, MARGIN_BOTTOM = S3;
+    /** The top bar (a screen's title, Settings' tabs) and the one footer line (the note left, the hints right). */
+    static final int TOP_BAR_H = 96, FOOTER_H = 72;
+    /** A list row (label and value), its focus plate's corner, the art tiles' corner. */
+    static final int ROW_H = 88, ROW_RADIUS = 16, ART_RADIUS = 24;
+    /** A row's text starts this far inside its focus plate: lists sit this much left of the margin. */
+    static final int ROW_INSET = 32;
+    /** Home: the art tile; a button (Play and the pills next to it). */
+    static final int ART = 400, BUTTON_H = 96;
+    /** The quiet right column of a list screen (the focused row's description). */
+    static final int DESC_W = 600;
+    static final int RADIUS = 22;
+    /** Aliases of the pre-Calm names, until every screen has moved (WP7 removes them). */
+    static final int GAP = S5, NOTE_H = FOOTER_H, BOTTOM_BAR_H = 0, ROW_H_SMALL = ROW_H, CARD_H = 230,
+                     PRIMARY_W = 660, PRIMARY_H = 128, TILE_H = 128;
 
     // ---- Motion -------------------------------------------------------------------------------------------------
     /** A new screen fades in and slides in from the side it comes from (ANIM_SLIDE design pixels). */
@@ -179,12 +195,14 @@ final class Theme {
         return t;
     }
 
-    /** A spaced-out caps label (section headers). */
+    /** A group label (a Storage game's name): Small, sentence case, TEXT_DIM. */
+    static TextView label(Context c, CharSequence s) {
+        return text(c, T_SMALL, MEDIUM, TEXT_DIM, s);
+    }
+
+    /** The old caps header, now a plain group label (WP7 removes it). */
     static TextView caps(Context c, CharSequence s, int color) {
-        TextView t = text(c, T_CAPS, MEDIUM, color, s);
-        t.setAllCaps(true);
-        t.setLetterSpacing(0.22f);
-        return t;
+        return label(c, s);
     }
 
     static TextView oneLine(TextView t) {
@@ -195,14 +213,12 @@ final class Theme {
 
     static TextView body(Context c, CharSequence s) {
         TextView t = text(c, T_BODY, REGULAR, TEXT_DIM, s);
-        t.setLineSpacing(0, 1.28f);
+        t.setLineSpacing(0, 1.3f);
         return t;
     }
 
-    /** Body text a size down, for panels that hold longer explanations. */
+    /** The old smaller body (WP7 removes it). */
     static TextView small(Context c, CharSequence s) {
-        TextView t = text(c, T_BODY - 2, REGULAR, TEXT_DIM, s);
-        t.setLineSpacing(0, 1.26f);
-        return t;
+        return body(c, s);
     }
 }

@@ -145,8 +145,9 @@ public class LauncherActivity extends Activity {
     private static final int NOTE_INFO = 0, NOTE_OK = 1, NOTE_WARN = 2, NOTE_ERROR = 3;
 
     // ---- The stage ----
-    private TextView screenTitle, note;
-    private Widgets.Chip chip;
+    private TextView screenTitle, note, topRight;
+    /** The top bar (hidden on Home and Preparing, which show the game's title big), its tabs' slot. */
+    private LinearLayout topBar, topTabs;
     private FrameLayout body, host;
     private Widgets.Backdrop backdrop;
     private Widgets.Glide glide;
@@ -579,15 +580,16 @@ public class LauncherActivity extends Activity {
     }
 
     /**
-     * The parts every screen shares: top bar (mark, title, status chip), body, note line, bottom bar (hints). Built
-     * again when the game theme changes (syncTheme): it holds no state of its own but the views.
+     * The parts every screen shares: the top bar (the screen's title, Settings' tabs, a quiet fact on the right), the
+     * body, and one footer line (the note left, at most three hints right). Built again when the game theme changes
+     * (syncTheme): it holds no state of its own but the views.
      */
     private void buildStage() {
         if (screenAnim != null)
             screenAnim.cancel();
         host = new FrameLayout(this);
         backdrop = new Widgets.Backdrop();
-        backdrop.setHero(hero);
+        backdrop.setHero(heroFor(screen));
         host.setBackground(backdrop);
         LinearLayout root = column();
         host.addView(root, new FrameLayout.LayoutParams(MATCH, MATCH));
@@ -595,54 +597,64 @@ public class LauncherActivity extends Activity {
         host.addView(glide, new FrameLayout.LayoutParams(MATCH, MATCH));
         buildDim();
         host.getViewTreeObserver().addOnGlobalFocusChangeListener((was, now) -> {
-            if (!building && was != null && (now instanceof MenuRow || now instanceof GameCard))
+            if (!building && was != null && (now instanceof Widgets.Selectable || now instanceof GameCard))
                 feedback.play(UiFeedback.Cue.MOVE, now);
         });
         root.setPadding(Theme.MARGIN_X, Theme.MARGIN_TOP, Theme.MARGIN_X, Theme.MARGIN_BOTTOM);
         root.setClipChildren(false);
 
-        LinearLayout top = rowLayout();
-        top.setGravity(Gravity.CENTER_VERTICAL);
-        Widgets.BrandMark mark = new Widgets.BrandMark(this);
-        LinearLayout.LayoutParams mlp = lp(64, 64);
-        mlp.rightMargin = 26;
-        top.addView(mark, mlp);
+        topBar = rowLayout();
+        topBar.setGravity(Gravity.CENTER_VERTICAL);
         screenTitle = Theme.oneLine(Theme.text(this, Theme.T_TITLE, Theme.MEDIUM, Theme.TEXT));
-        top.addView(screenTitle, lp(0, WRAP, 1));
-        chip = new Widgets.Chip(this);
-        top.addView(chip, lp(WRAP, WRAP));
-        root.addView(top, lp(MATCH, Theme.TOP_BAR_H));
-
-        LinearLayout.LayoutParams rlp = lp(MATCH, 2);
-        rlp.bottomMargin = Theme.GAP;
-        root.addView(new Widgets.Rule(this), rlp);
+        topBar.addView(screenTitle, lp(WRAP, WRAP));
+        topTabs = rowLayout();
+        topTabs.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout.LayoutParams tl = lp(0, MATCH, 1);
+        tl.leftMargin = Theme.S6 + Theme.S5;
+        topBar.addView(topTabs, tl);
+        topRight = Theme.oneLine(Theme.text(this, Theme.T_BODY, Theme.REGULAR, Theme.TEXT_DIM));
+        topBar.addView(topRight, lp(WRAP, WRAP));
+        LinearLayout.LayoutParams bl = lp(MATCH, Theme.TOP_BAR_H);
+        bl.bottomMargin = Theme.S4;
+        root.addView(topBar, bl);
 
         body = new FrameLayout(this);
         body.setClipChildren(false);
         root.addView(body, lp(MATCH, 0, 1));
 
+        LinearLayout bottom = rowLayout();
+        bottom.setGravity(Gravity.CENTER_VERTICAL);
+        bottomLeft = rowLayout();
+        bottomLeft.setGravity(Gravity.CENTER_VERTICAL);
         note = Theme.oneLine(Theme.text(this, Theme.T_BODY, Theme.REGULAR, Theme.TEXT_DIM));
         note.setGravity(Gravity.CENTER_VERTICAL);
         noteDot = new ShapeDrawable(new OvalShape());
         noteDot.setBounds(0, 0, 14, 14);
         note.setCompoundDrawables(noteDot, null, null, null);
-        note.setCompoundDrawablePadding(20);
-        note.setPadding(8, 0, 0, 0);
-        root.addView(note, lp(MATCH, Theme.NOTE_H));
-
-        LinearLayout bottom = rowLayout();
-        bottom.setGravity(Gravity.CENTER_VERTICAL);
-        bottomLeft = rowLayout();
-        bottomLeft.setGravity(Gravity.CENTER_VERTICAL);
-        bottom.addView(bottomLeft, lp(WRAP, MATCH));
-        bottom.addView(gap(this), lp(0, 1, 1));
+        note.setCompoundDrawablePadding(Theme.S2);
+        bottomLeft.addView(note, lp(WRAP, MATCH));
+        bottom.addView(bottomLeft, lp(0, MATCH, 1));
         hints = rowLayout();
-        hints.setGravity(Gravity.CENTER_VERTICAL);
-        bottom.addView(hints, lp(WRAP, MATCH));
-        root.addView(bottom, lp(MATCH, Theme.BOTTOM_BAR_H));
+        hints.setGravity(Gravity.CENTER_VERTICAL | Gravity.END);
+        LinearLayout.LayoutParams hl = lp(WRAP, MATCH);
+        hl.leftMargin = Theme.S5;
+        bottom.addView(hints, hl);
+        LinearLayout.LayoutParams fl = lp(MATCH, Theme.FOOTER_H);
+        fl.topMargin = Theme.S2;
+        root.addView(bottom, fl);
 
         setContentView(new Widgets.Stage(this, host));
         setNote(null, NOTE_INFO);
+    }
+
+    /** The hero backdrop shows on Home and Preparing only; every other screen has the plain gradient and one glow. */
+    private Bitmap heroFor(Screen s) {
+        return s == Screen.HOME || s == Screen.PREPARE ? hero : null;
+    }
+
+    /** The top bar: shown with the screen's title, or hidden (Home, Preparing: the game's title is the heading). */
+    private void setTopBar(boolean shown) {
+        topBar.setVisibility(shown ? View.VISIBLE : View.GONE);
     }
 
     private void setNote(String text, int kind) {
@@ -655,22 +667,52 @@ public class LauncherActivity extends Activity {
             feedback.play(UiFeedback.Cue.ERROR, host);
     }
 
+    /** The footer's left side when there is no note: the library's context line (its dot colour, 0: no dot). */
+    private String contextText = "";
+    private int contextDot;
+
+    private void setContext(String text, int dot) {
+        contextText = text == null ? "" : text;
+        contextDot = dot;
+        paintNote();
+    }
+
     private void paintNote() {
         if (note == null)
             return;
+        if (noteText.isEmpty()) {
+            note.setText(contextText);
+            note.setTextColor(Theme.TEXT_DIM);
+            noteDot.getPaint().setColor(contextText.isEmpty() ? 0 : contextDot);
+            noteDot.invalidateSelf();
+            return;
+        }
         int color = noteKind == NOTE_ERROR ? Theme.ERROR : noteKind == NOTE_WARN ? Theme.WARN
                     : noteKind == NOTE_OK ? Theme.OK : Theme.TEXT_DIM;
         note.setText(noteText);
-        note.setTextColor(color);
-        noteDot.getPaint().setColor(noteText.isEmpty() ? 0 : color);
+        note.setTextColor(noteKind == NOTE_INFO ? Theme.TEXT_DIM : color);
+        noteDot.getPaint().setColor(color);
         noteDot.invalidateSelf();
     }
 
+    /** At most this many hints on a screen: the footer stays one discreet line. */
+    static final int MAX_HINTS = 3;
+
     private void addHint(String glyph, int label, Runnable action) {
+        if (hints.getChildCount() >= MAX_HINTS)
+            throw new IllegalStateException("more than " + MAX_HINTS + " hints on " + screen);
         Widgets.Hint h = new Widgets.Hint(this, glyph, getString(label), v -> action.run());
         LinearLayout.LayoutParams p = lp(WRAP, WRAP);
-        p.leftMargin = 44;
+        p.leftMargin = hints.getChildCount() == 0 ? 0 : Theme.S4;
         hints.addView(h, p);
+    }
+
+    /** The hints shown (tests). */
+    List<Widgets.Hint> hintsForTest() {
+        List<Widgets.Hint> out = new ArrayList<>();
+        for (int i = 0; i < hints.getChildCount(); i++)
+            out.add((Widgets.Hint)hints.getChildAt(i));
+        return out;
     }
 
     /** A focusable the screen registers, in order: focus memory is an index in this list. */
@@ -741,6 +783,7 @@ public class LauncherActivity extends Activity {
         syncTheme(s);
         if (s != Screen.LIBRARY && backdrop != null)
             backdrop.setGlows(Theme.GLOW, Theme.GLOW2);   // the library's per-card glow stays there
+        backdrop.setHero(heroFor(s));
         building = true;
         setDimmed(false);
         Screen was = screen;
@@ -756,7 +799,10 @@ public class LauncherActivity extends Activity {
         defaultFocus = null;
         detail = null;
         xAction = yAction = startAction = l1Action = r1Action = null;
-        chip.set("", 0);
+        topRight.setText("");
+        topTabs.removeAllViews();
+        setTopBar(s != Screen.HOME && s != Screen.PREPARE);
+        contextText = "";
         deleteArmedAt = 0;
         storageArmedKey = null;
         cancelArmedAt = 0;
@@ -1041,7 +1087,7 @@ public class LauncherActivity extends Activity {
         dimView.setVisibility(View.GONE);
         LinearLayout c = column();
         c.setGravity(Gravity.CENTER_HORIZONTAL);
-        dimBig = Theme.text(this, 120, Theme.LIGHT, Theme.alpha(Theme.TEXT_DIM, 0.55f), "");
+        dimBig = Theme.text(this, 120, Theme.REGULAR, Theme.alpha(Theme.TEXT_DIM, 0.55f), "");
         c.addView(dimBig, lp(WRAP, WRAP));
         dimSmall = Theme.text(this, Theme.T_BODY, Theme.REGULAR, Theme.alpha(Theme.TEXT_FAINT, 0.8f), "");
         LinearLayout.LayoutParams sl = lp(WRAP, WRAP);
@@ -1135,7 +1181,6 @@ public class LauncherActivity extends Activity {
 
     private void detailFooter(String text, int color) {
         detail.addView(gap(this), lp(MATCH, 0, 1));
-        detail.addView(new Widgets.Rule(this), lp(MATCH, 2));
         TextView t = Theme.text(this, Theme.T_SMALL, Theme.REGULAR, color, text);
         t.setLineSpacing(0, 1.2f);
         LinearLayout.LayoutParams p = lp(MATCH, WRAP);
@@ -1154,7 +1199,6 @@ public class LauncherActivity extends Activity {
 
     private void buildWelcome() {
         screenTitle.setText(R.string.WELCOME_TITLE);
-        chip.set(getString(R.string.CHIP_OFFLINE), Theme.OK);
         LinearLayout h = rowLayout();
 
         LinearLayout left = column();
@@ -1185,7 +1229,6 @@ public class LauncherActivity extends Activity {
         for (int i = 0; i < items.length; i++) {
             MenuRow r = new MenuRow(this);
             r.set(icons[i], getString(items[i][0]), getString(items[i][1]));
-            r.subMaxLines = 2;
             r.setFocusable(false);
             r.setClickable(false);
             LinearLayout.LayoutParams rl = lp(MATCH, 150);
@@ -1224,7 +1267,6 @@ public class LauncherActivity extends Activity {
                          Runnable click) {
         MenuRow r = row(icon, getString(title), sub, click);
         boolean three = screen == Screen.SOURCE;   // three cards: a little shorter, so that all fit
-        r.subMaxLines = three ? 3 : 4;
         r.setBadge(badge, badgeColor);
         LinearLayout.LayoutParams l = lp(MATCH, three ? Theme.CARD_H - 34 : Theme.CARD_H);
         l.bottomMargin = three ? 16 : 24;
@@ -1234,7 +1276,6 @@ public class LauncherActivity extends Activity {
 
     private void buildSource() {
         screenTitle.setText(R.string.SOURCE_TITLE);
-        chip.set(getString(R.string.CHIP_OFFLINE), Theme.OK);
         LinearLayout h = rowLayout();
         LinearLayout ex = explainPanel(h, 700, getString(R.string.SOURCE_CAPS), getString(R.string.SOURCE_HEAD),
                                        getString(R.string.SOURCE_TEXT));
@@ -1297,7 +1338,6 @@ public class LauncherActivity extends Activity {
 
     private void buildImport() {
         screenTitle.setText(R.string.IMPORT_TITLE);
-        chip.set(getString(R.string.CHIP_SCREEN_ON), Theme.OK);
         LinearLayout h = rowLayout();
         FrameLayout left = new FrameLayout(this);
         ring = new Widgets.Ring(this);
@@ -1475,7 +1515,6 @@ public class LauncherActivity extends Activity {
             play = row(Icon.PLAY, getString(R.string.PLAY), playSub, this::onPlay);
             play.setDim(st != State.READY);
         }
-        play.setPrimary(true);
         homePrimary = play;
         LinearLayout.LayoutParams pl = lp(Theme.PRIMARY_W, Theme.PRIMARY_H);
         pl.topMargin = 30;
@@ -1507,8 +1546,6 @@ public class LauncherActivity extends Activity {
         addHint("B", libraryOn() && history.isEmpty() ? R.string.LIB_TITLE : history.isEmpty() ? R.string.HINT_QUIT
                                                                                                 : R.string.HINT_BACK,
                 this::back);
-        boolean choose = st == State.NONE || st == State.MISSING || st == State.NO_ACCESS;
-        addHint("START", choose ? R.string.HINT_CHOOSE : preparing ? R.string.PREPARE : R.string.PLAY, this::onPlay);
 
         if (preparing && prep == Prep.INTERRUPTED)
             setNote(getString(R.string.PREPARE_INTERRUPTED), NOTE_WARN);
@@ -1520,7 +1557,6 @@ public class LauncherActivity extends Activity {
 
     private MenuRow homeTile(LinearLayout tiles, Icon icon, int title, String sub, Screen target) {
         MenuRow r = row(icon, getString(title), sub, () -> go(target));
-        r.setCompact();
         LinearLayout.LayoutParams p = lp(0, MATCH, 1);
         p.leftMargin = 6;
         p.rightMargin = 6;
@@ -1788,9 +1824,8 @@ public class LauncherActivity extends Activity {
         l1Action = () -> jumpSection(-1);
         r1Action = () -> jumpSection(1);
         yAction = () -> resetSettings(optionRows, shown);
-        addHint("L1/R1", R.string.HINT_SECTION, () -> jumpSection(1));
-        addHint("Y", R.string.HINT_DEFAULTS, () -> resetSettings(optionRows, shown));
         addHint("A", R.string.HINT_CHANGE, this::clickFocused);
+        addHint("Y", R.string.HINT_DEFAULTS, () -> resetSettings(optionRows, shown));
         addHint("B", R.string.HINT_BACK, this::back);
         if (gameRunning())
             setNote(getString(R.string.SETTINGS_GAME_RUNNING), NOTE_INFO);
@@ -1847,7 +1882,7 @@ public class LauncherActivity extends Activity {
         };
         Runnable refresh = () -> {
             int i = GameStore.bottomScreen(this).ordinal();
-            r.setValue(names[i], i, modes.length);
+            r.setValue(names[i]);
         };
         refresh.run();
         r.cycler = d -> {
@@ -1888,7 +1923,7 @@ public class LauncherActivity extends Activity {
             detailFooter(getString(R.string.GAME_THEME_FOOTER), Theme.TEXT_FAINT);
         };
         int cur = GameTheme.mode(this, tid).ordinal();
-        r.setValue(names[cur], cur, modes.length);
+        r.setValue(names[cur]);
         r.cycler = d -> {
             int n = modes.length, i = ((GameTheme.mode(this, tid).ordinal() + d) % n + n) % n;
             GameTheme.setMode(this, tid, modes[i]);
@@ -1915,7 +1950,7 @@ public class LauncherActivity extends Activity {
         };
         Runnable refresh = () -> {
             boolean on = get.apply(this);
-            r.setValue(getString(on ? R.string.VAL_ON : R.string.VAL_OFF), on ? 1 : 0, 2);
+            r.setValue(getString(on ? R.string.VAL_ON : R.string.VAL_OFF));
         };
         refresh.run();
         r.cycler = d -> {
@@ -1960,8 +1995,7 @@ public class LauncherActivity extends Activity {
     }
 
     private void refreshOptionRow(MenuRow r, RecompConfig.Option o) {
-        int i = cfg.choiceIndex(o);
-        r.setValue(choiceLabel(cfg, o), i, o.choices.length);
+        r.setValue(choiceLabel(cfg, o));
     }
 
     private void stepOption(MenuRow r, RecompConfig.Option o, int dir) {
@@ -2155,7 +2189,6 @@ public class LauncherActivity extends Activity {
         screenTitle.setText(R.string.GAME_DATA);
         State st = state();
         String dir = gameDir();
-        chip.set(getString(stateLabel(st)), stateColor(st));
         sizeLater(dir);
 
         LinearLayout h = rowLayout();
@@ -2567,7 +2600,6 @@ public class LauncherActivity extends Activity {
             yAction = this::leavePrepare;
             addHint("Y", R.string.HINT_MENU, this::leavePrepare);
             addHint("B", R.string.CANCEL, this::armCancelPrepare);
-            chip.set(getString(R.string.CHIP_PREPARING), Theme.OK);
             getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         } else {
             boolean cancelled = PrepareProtocol.CANCELLED.equals(s.state) || PrepareProtocol.RUNNING.equals(s.state);
@@ -2586,8 +2618,6 @@ public class LauncherActivity extends Activity {
             addHint("A", R.string.HINT_SELECT, this::clickFocused);
             addHint("Y", R.string.SHARE_LOG, this::shareLog);
             addHint("B", R.string.HINT_BACK, this::back);
-            chip.set(getString(cancelled ? R.string.CHIP_NEEDS_PREPARE : R.string.CHIP_PREPARE_FAILED),
-                     cancelled ? Theme.WARN : Theme.ERROR);
             getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         }
         p.addView(c);
@@ -3156,8 +3186,6 @@ public class LauncherActivity extends Activity {
     private void buildLibrary() {
         screenTitle.setText(R.string.LIB_TITLE);
         libEntries = LibraryScreen.entries(getFilesDir(), games, index, libEnv());
-        int n = libEntries.size();
-        chip.set(getResources().getQuantityString(R.plurals.LIB_GAMES, n, n), Theme.OK);
         Library.Record sel = games.selected();
         String want = focusTid != null ? focusTid : sel != null ? sel.titleId : null;
         GameCard focusCard = null;
@@ -3227,8 +3255,6 @@ public class LauncherActivity extends Activity {
         addHint("A", R.string.LIB_HINT_OPEN, this::clickFocused);
         addHint("START", R.string.LIB_HINT_PRIMARY, startAction);
         addHint("Y", R.string.LIB_RESCAN, this::rescanLibrary);
-        addHint("X", R.string.LIB_STORAGE, () -> go(Screen.STORAGE));
-        addHint("B", R.string.HINT_QUIT, this::back);
         if (gameRunning())
             setNote(getString(R.string.LIB_RUNNING_NOTE, runningTitle()), NOTE_INFO);
     }
@@ -3423,7 +3449,6 @@ public class LauncherActivity extends Activity {
                        this::onChooseLibraryFolder);
             break;
         }
-        play.setPrimary(true);
         homePrimary = play;
         LinearLayout actions = rowLayout();
         LinearLayout.LayoutParams pl = lp(Theme.PRIMARY_W, Theme.PRIMARY_H);
@@ -3474,7 +3499,6 @@ public class LauncherActivity extends Activity {
         startAction = this::onPlay;
         addHint("A", R.string.HINT_SELECT, this::clickFocused);
         addHint("B", history.isEmpty() ? R.string.LIB_TITLE : R.string.HINT_BACK, this::back);
-        addHint("START", R.string.LIB_HINT_PRIMARY, this::onPlay);
     }
 
     /** The library's entries changed state (a Prepare moved on, the queue, a game ended): true. */

@@ -113,6 +113,14 @@ final class GameCard extends View {
         return art != null;
     }
 
+    /** The art square in the card's own coordinates (the Glide's ring goes around it). */
+    void artRect(RectF out) {
+        float w = getWidth(), pad = 12;
+        float side = Math.min(ART, w - 2 * pad - 24);
+        float ax = (w - side) / 2, ay = pad + 14;
+        out.set(ax, ay, ax + side, ay + side);
+    }
+
     @Override
     protected void onFocusChanged(boolean gained, int direction, Rect previous) {
         super.onFocusChanged(gained, direction, previous);

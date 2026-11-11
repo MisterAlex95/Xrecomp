@@ -1028,22 +1028,22 @@ final class GameMenu {
     private void updateValues() {
         Widgets.MenuRow r = rows.get(Item.PERF);
         if (r != null)
-            r.setValue(s(perfOn ? R.string.MENU_ON : R.string.MENU_OFF), perfOn ? 0 : 1, 2);
+            r.setValue(s(perfOn ? R.string.MENU_ON : R.string.MENU_OFF));
         r = rows.get(Item.VOLUME);
         if (r != null)
-            r.setValue(volume == 0 ? s(R.string.MENU_MUTED) : volumeLabel(volume), volume / VOLUME_STEP, 0);
+            r.setValue(volume == 0 ? s(R.string.MENU_MUTED) : volumeLabel(volume));
         r = rows.get(Item.BOTTOM);
         if (r != null) {
             GameStore.BottomScreen b = GameStore.bottomScreen(activity);
             int label = b == GameStore.BottomScreen.PANEL ? R.string.VAL_PANEL
                         : b == GameStore.BottomScreen.BLACK ? R.string.VAL_BLACK : R.string.MENU_SCREEN_OFF;
-            r.setValue(s(label), b.ordinal(), 3);
+            r.setValue(s(label));
         }
         r = rows.get(Item.LANGUAGE);
         if (r != null) {
             int pos = languagePos();
             r.setValue(pos == 0 ? s(R.string.MENU_LANGUAGE_FOLLOW)
-                                : GameLanguage.NAMES[GameLanguage.MENU_ORDER[pos - 1]], pos, 0);
+                                : GameLanguage.NAMES[GameLanguage.MENU_ORDER[pos - 1]]);
         }
         r = rows.get(Item.SETTINGS);
         if (r != null)

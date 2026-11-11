@@ -146,33 +146,30 @@ final class Widgets {
     }
 
     /**
-     * The screen behind everything: a dark gradient, the game theme's hero (its title image, tiny, blurred and
-     * luminance-capped by GamePalette.bakeHero) washing in from the right, two soft glows (the accent, or the game's
-     * GLOW and GLOW2), a faint dot grid and a thin bezel. The shaders are made once per size and colours, not per frame.
+     * The screen behind everything: a dark gradient, and either the game theme's hero (its title image, tiny, blurred
+     * and luminance-capped by GamePalette.bakeHero) washing in from the right — Home and Preparing only — or one soft
+     * glow (the accent, or the game's GLOW). The shaders are made once per size and colours, not per frame.
      */
     static final class Backdrop extends SimpleDrawable {
-        /** The glows' opacity: stock, a game's theme, a game's theme over its hero (dimmer: the hero is the light). */
-        static final float GLOW_STOCK = 0.11f, GLOW2_STOCK = 0.05f, GLOW_OWN = 0.16f, GLOW2_OWN = 0.10f,
-                           GLOW_HERO = 0.07f, GLOW2_HERO = 0.05f;
+        /** The glow's opacity (only without a hero: the hero is the light then). */
+        static final float GLOW_ALPHA = 0.07f;
+        /** The hero's opacity at its strongest. */
+        static final float HERO_ALPHA = 0.85f;
         private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint heroP = new Paint(Paint.FILTER_BITMAP_FLAG | Paint.DITHER_FLAG);
-        private final Paint dot = fill(Theme.alpha(Theme.TEXT, 0.045f));
-        private final Paint bezel = stroke(Theme.alpha(Theme.LINE, 0.9f), 2);
-        private final RectF r = new RectF();
-        private int glow = Theme.GLOW, glow2 = Theme.GLOW2;
+        private int glow = Theme.GLOW;
         private android.graphics.Bitmap hero;
-        private Shader bg, glowS, glow2S, heroS;
+        private Shader bg, glowS, heroS;
         private int shaderW = -1, shaderH = -1;
 
         Backdrop() {
             paint.setDither(true);
         }
 
-        /** The glows' colours (the game theme's GLOW and GLOW2; the accent for the stock look). */
+        /** The glow's colour (the game theme's GLOW; the accent for the stock look). The second is not drawn. */
         void setGlows(int color, int color2) {
-            if (color != glow || color2 != glow2) {
+            if (color != glow) {
                 glow = color;
-                glow2 = color2;
                 shaderW = -1;
                 invalidateSelf();
             }
@@ -195,24 +192,15 @@ final class Widgets {
             return hero;
         }
 
-        private boolean own() {
-            int stock = GamePalette.STOCK[GamePalette.ACCENT];
-            return glow != stock || glow2 != stock;
-        }
-
         private void makeShaders(float w, float h) {
             bg = new LinearGradient(0, 0, 0, h, Theme.BG_TOP, Theme.BG_BOTTOM, Shader.TileMode.CLAMP);
-            boolean own = own();
-            float a1 = !own ? GLOW_STOCK : hero != null ? GLOW_HERO : GLOW_OWN;
-            float a2 = !own ? GLOW2_STOCK : hero != null ? GLOW2_HERO : GLOW2_OWN;
-            glowS = new RadialGradient(w * 0.86f, h * 0.08f, w * 0.55f, Theme.alpha(glow, a1), 0,
-                                       Shader.TileMode.CLAMP);
-            glow2S = new RadialGradient(w * 0.06f, h * 1.02f, w * 0.42f, Theme.alpha(glow2, a2), 0,
-                                        Shader.TileMode.CLAMP);
+            glowS = hero != null ? null
+                    : new RadialGradient(w * 0.86f, h * 0.08f, w * 0.55f, Theme.alpha(glow, GLOW_ALPHA), 0,
+                                         Shader.TileMode.CLAMP);
             heroS = null;
             if (hero != null) {
-                // Cover-fit, centred; full on the right, gone at the left edge (5 % -> 50 %) and in the bottom 35 %,
-                // where the tiles and hints stay on the plain gradient.
+                // Cover-fit, centred; gone left of 30 % of the width, at HERO_ALPHA from 85 %; gone in the bottom 40 %,
+                // where the buttons and hints stay on the plain gradient.
                 android.graphics.BitmapShader bs = new android.graphics.BitmapShader(hero, Shader.TileMode.CLAMP,
                                                                                      Shader.TileMode.CLAMP);
                 float sc = Math.max(w / hero.getWidth(), h / hero.getHeight());
@@ -220,9 +208,9 @@ final class Widgets {
                 m.setScale(sc, sc);
                 m.postTranslate((w - hero.getWidth() * sc) / 2, (h - hero.getHeight() * sc) / 2);
                 bs.setLocalMatrix(m);
-                Shader fx = new LinearGradient(w * 0.05f, 0, w * 0.50f, 0, 0x00000000, 0xFF000000,
-                                               Shader.TileMode.CLAMP);
-                Shader fy = new LinearGradient(0, h * 0.63f, 0, h * 0.98f, 0xFF000000, 0x00000000,
+                int top = Theme.alpha(0xFF000000, HERO_ALPHA);
+                Shader fx = new LinearGradient(w * 0.30f, 0, w * 0.85f, 0, 0x00000000, top, Shader.TileMode.CLAMP);
+                Shader fy = new LinearGradient(0, h * 0.25f, 0, h * 0.60f, 0xFF000000, 0x00000000,
                                                Shader.TileMode.CLAMP);
                 Shader mask = new android.graphics.ComposeShader(fx, fy, android.graphics.PorterDuff.Mode.DST_IN);
                 heroS = new android.graphics.ComposeShader(bs, mask, android.graphics.PorterDuff.Mode.DST_IN);
@@ -243,39 +231,36 @@ final class Widgets {
                 heroP.setShader(heroS);
                 c.drawRect(b, heroP);
             }
-            paint.setShader(glowS);
-            c.drawRect(b, paint);
-            paint.setShader(glow2S);
-            c.drawRect(b, paint);
-            paint.setShader(null);
-            float step = 48;
-            for (float y = step; y < h; y += step) {
-                for (float x = step; x < w; x += step)
-                    c.drawCircle(x, y, 1.5f, dot);
+            if (glowS != null) {
+                paint.setShader(glowS);
+                c.drawRect(b, paint);
             }
-            r.set(18, 18, w - 18, h - 18);
-            c.drawRoundRect(r, 34, 34, bezel);
+            paint.setShader(null);
         }
     }
 
-    /** A panel: dark glass, a thin outline, and two green corner ticks. */
+    /** An overlay's surface (the Options sheet, the in-game drawer): a flat fill, no outline. */
     static final class Panel extends SimpleDrawable {
         private final Paint bg = fill(Theme.PANEL);
-        private final Paint line = stroke(Theme.LINE, 1.5f);
-        private final Paint tick = stroke(Theme.alpha(Theme.ACCENT, 0.7f), 3);
         private final RectF r = new RectF();
+        private final float radius;
+
+        Panel() {
+            this(Theme.RADIUS);
+        }
+
+        Panel(float radius) {
+            this.radius = radius;
+        }
 
         @Override
         public void draw(Canvas c) {
             Rect b = getBounds();
-            r.set(b.left + 1, b.top + 1, b.right - 1, b.bottom - 1);
-            c.drawRoundRect(r, Theme.RADIUS, Theme.RADIUS, bg);
-            c.drawRoundRect(r, Theme.RADIUS, Theme.RADIUS, line);
-            float k = 26, i = 12;
-            c.drawLine(b.left + i, b.top + i, b.left + i + k, b.top + i, tick);
-            c.drawLine(b.left + i, b.top + i, b.left + i, b.top + i + k, tick);
-            c.drawLine(b.right - i, b.bottom - i, b.right - i - k, b.bottom - i, tick);
-            c.drawLine(b.right - i, b.bottom - i, b.right - i, b.bottom - i - k, tick);
+            r.set(b);
+            if (radius <= 0)
+                c.drawRect(r, bg);
+            else
+                c.drawRoundRect(r, radius, radius, bg);
         }
     }
 
@@ -469,133 +454,50 @@ final class Widgets {
         }
     }
 
-    // ---- MenuRow: the one selectable element (menu items, setting rows, big cards, buttons) -------------------------
+    // ---- Selectable: what the focus lands on (list rows, buttons) ----------------------------------------------------
 
     interface Cycler {
         void step(int dir);
     }
 
     /**
-     * A selectable row, drawn on Canvas: icon, title, subtitle (one or several lines), and on the right either a
-     * badge or a value with « < > » (a setting). The focus outline is the Glide's (one highlight for the screen); the
-     * row itself brightens its title, turns its icon green and grows a little (Theme.FOCUS_SCALE). Left and right step
-     * a setting's value (and so do taps on its arrows); the value pulses when it changes. A setting keeps the width of
-     * its widest choice (setChoices) for the value, so a long title is cut short instead of running under it. Dim rows
-     * stay focusable so that a press can say why nothing happens. A primary row (Home's Play) is bigger and tinted.
+     * A focusable the launcher's one highlight (Glide) lands on: a list row (MenuRow) or a button (PillButton). It
+     * grows a little when focused (Theme.FOCUS_SCALE) and runs onPress (the « select » feedback) before a click.
+     * Dim ones stay focusable so that a press can say why nothing happens.
      */
-    static final class MenuRow extends View {
-        Icon icon;
-        String title = "", subtitle, badge, value;
-        int badgeColor = Theme.TEXT_DIM, subMaxLines = 1, pips, pip = -1;
-        boolean dim, primary;
-        Cycler cycler;
+    abstract static class Selectable extends View {
+        String title = "";
+        boolean dim;
         /** Run on a click (A, Enter or a tap) before the click listener: the launcher's « select » feedback. */
         Runnable onPress;
+        float focusT;
+        private ValueAnimator anim;
 
-        private float focusT, tickT, valueReserve;
-        private ValueAnimator anim, tickAnim;
-        private final Paint fillP = fill(0), lineP = stroke(Theme.LINE, 2), ringP = stroke(Theme.LINE, 2.5f);
-        private final Paint iconP = stroke(Theme.TEXT_DIM, 3.5f), chevP = fill(Theme.TEXT_FAINT), pipP = fill(0);
-        private final Paint discP = fill(Theme.ACCENT);
-        private final TextPaint titleP = textPaint(Theme.T_ROW, Theme.MEDIUM, Theme.TEXT);
-        private final TextPaint subP = textPaint(Theme.T_SMALL, Theme.REGULAR, Theme.TEXT_DIM);
-        private final TextPaint valueP = textPaint(Theme.T_BODY + 2, Theme.MEDIUM, Theme.TEXT);
-        private final TextPaint badgeP = textPaint(Theme.T_SMALL, Theme.MEDIUM, Theme.TEXT_DIM);
-        private final RectF r = new RectF();
-        private final Path tri = new Path();
-        private StaticLayout subLayout;
-        private int subLayoutW = -1;
-        private String subLayoutText;
-        private float leftArrowX = -1;
-        private boolean downOnLeftArrow;
-
-        MenuRow(Context c) {
+        Selectable(Context c) {
             super(c);
             setFocusable(true);
             setClickable(true);
         }
 
-        MenuRow set(Icon icon, String title, String subtitle) {
-            this.icon = icon;
-            this.title = title == null ? "" : title;
-            this.subtitle = subtitle;
-            invalidate();
-            return this;
-        }
+        /** The focus plate inside the view: its inset on the sides and at the top and bottom, and its corner. */
+        abstract float plateInsetX();
 
-        /** The big, tinted style of Home's Play / Prepare. */
-        void setPrimary(boolean p) {
-            primary = p;
-            titleP.setTextSize(p ? Theme.T_HEAD + 6 : Theme.T_ROW);
-            subP.setTextSize(p ? Theme.T_SMALL + 2 : Theme.T_SMALL);
-            invalidate();
-        }
+        abstract float plateInsetY();
 
-        /** A smaller title, for Home's row of four tiles. */
-        void setCompact() {
-            titleP.setTextSize(Theme.T_ROW - 4);
-            invalidate();
-        }
-
-        /** The labels a setting can show: the value column is as wide as the widest. */
-        void setChoices(String[] labels) {
-            float m = 0;
-            for (String l : labels)
-                m = Math.max(m, valueP.measureText(l));
-            valueReserve = m;
-            invalidate();
-        }
-
-        void setValue(String value, int pip, int pips) {
-            boolean changed = this.value != null && !this.value.equals(value);
-            this.value = value;
-            this.pip = pip;
-            this.pips = pips;
-            if (changed)
-                tick();
-            invalidate();
-        }
-
-        /** The value's pulse (Theme.ANIM_TICK_MS). */
-        private void tick() {
-            if (tickAnim != null)
-                tickAnim.cancel();
-            tickAnim = ValueAnimator.ofFloat(1, 0);
-            tickAnim.setDuration(Theme.ANIM_TICK_MS);
-            tickAnim.addUpdateListener(a -> {
-                tickT = (float)a.getAnimatedValue();
-                invalidate();
-            });
-            tickAnim.start();
-        }
-
-        ValueAnimator tickAnimatorForTest() {
-            return tickAnim;
-        }
-
-        ValueAnimator focusAnimatorForTest() {
-            return anim;
-        }
-
-        void setBadge(String badge, int color) {
-            this.badge = badge;
-            this.badgeColor = color;
-            invalidate();
-        }
+        abstract float plateRadius(float plateHeight);
 
         void setDim(boolean dim) {
             this.dim = dim;
             invalidate();
         }
 
-        void setSubtitle(String s) {
-            subtitle = s;
-            invalidate();
-        }
-
         void setTitle(String s) {
             title = s == null ? "" : s;
             invalidate();
+        }
+
+        ValueAnimator focusAnimatorForTest() {
+            return anim;
         }
 
         @Override
@@ -627,6 +529,117 @@ final class Widgets {
             super.drawableStateChanged();
             invalidate();
         }
+    }
+
+    // ---- MenuRow: a list row (label and value) ------------------------------------------------------------------------
+
+    /**
+     * A list row, drawn on Canvas: its label, and on the right a value or a badge (« Press A again »). A setting
+     * (cycler set) shows « < value > » arrows when focused only; left and right step it (and so do taps on the
+     * arrows), and the value pulses when it changes. A setting keeps the width of its widest choice (setChoices), so a
+     * long label is cut short instead of running under it. The row's description is not drawn: the screen shows the
+     * focused row's in a quiet column of its own. A subtitle (one line under the label) is for the rare row that must
+     * say more where it is (the in-game menu's « Press again to quit »).
+     */
+    static final class MenuRow extends Selectable {
+        /** Not drawn (kept for the callers that still pass one; WP7 removes it). */
+        Icon icon;
+        /** What the focused row's description column says. */
+        String description;
+        /** Drawn under the label, one line (rare: see the class comment). */
+        String subtitle;
+        String badge, value;
+        int badgeColor = Theme.TEXT_DIM;
+        Cycler cycler;
+
+        private float tickT, valueReserve;
+        private ValueAnimator tickAnim;
+        private final Paint fillP = fill(0), chevP = fill(Theme.ACCENT);
+        private final TextPaint titleP = textPaint(Theme.T_ROW, Theme.MEDIUM, Theme.TEXT);
+        private final TextPaint subP = textPaint(Theme.T_SMALL, Theme.REGULAR, Theme.TEXT_DIM);
+        private final TextPaint valueP = textPaint(Theme.T_BODY, Theme.REGULAR, Theme.TEXT_DIM);
+        private final TextPaint badgeP = textPaint(Theme.T_SMALL, Theme.MEDIUM, Theme.TEXT_DIM);
+        private final RectF r = new RectF();
+        private final Path tri = new Path();
+        private float leftArrowX = -1;
+        private boolean downOnLeftArrow;
+        private static final float ARROW = 10, ARROW_GAP = 18;
+
+        MenuRow(Context c) {
+            super(c);
+        }
+
+        MenuRow set(Icon icon, String title, String description) {
+            this.icon = icon;
+            this.title = title == null ? "" : title;
+            this.description = description;
+            invalidate();
+            return this;
+        }
+
+        @Override
+        float plateInsetX() {
+            return 0;
+        }
+
+        @Override
+        float plateInsetY() {
+            return 4;
+        }
+
+        @Override
+        float plateRadius(float plateHeight) {
+            return Theme.ROW_RADIUS;
+        }
+
+        /** The labels a setting can show: the value column is as wide as the widest. */
+        void setChoices(String[] labels) {
+            float m = 0;
+            for (String l : labels)
+                m = Math.max(m, valueP.measureText(l));
+            valueReserve = m;
+            invalidate();
+        }
+
+        void setValue(String value) {
+            boolean changed = this.value != null && !this.value.equals(value);
+            this.value = value;
+            if (changed)
+                tick();
+            invalidate();
+        }
+
+        /** The value's pulse (Theme.ANIM_TICK_MS). */
+        private void tick() {
+            if (tickAnim != null)
+                tickAnim.cancel();
+            tickAnim = ValueAnimator.ofFloat(1, 0);
+            tickAnim.setDuration(Theme.ANIM_TICK_MS);
+            tickAnim.addUpdateListener(a -> {
+                tickT = (float)a.getAnimatedValue();
+                invalidate();
+            });
+            tickAnim.start();
+        }
+
+        ValueAnimator tickAnimatorForTest() {
+            return tickAnim;
+        }
+
+        void setBadge(String badge, int color) {
+            this.badge = badge;
+            this.badgeColor = color;
+            invalidate();
+        }
+
+        void setDescription(String s) {
+            description = s;
+        }
+
+        void setSubtitle(String s) {
+            subtitle = s;
+            invalidate();
+        }
 
         @Override
         public boolean onKeyDown(int keyCode, KeyEvent e) {
@@ -656,112 +669,59 @@ final class Widgets {
 
         @Override
         protected void onDraw(Canvas c) {
-            float w = getWidth(), h = getHeight(), pad = 12;
-            float t = focusT;
-            r.set(pad, pad, w - pad, h - pad);
-            if (primary) {
-                fillP.setShader(new LinearGradient(0, 0, w, 0, Theme.alpha(Theme.ACCENT, dim ? 0.05f : 0.16f),
-                                                   Theme.alpha(Theme.ACCENT, 0.03f), Shader.TileMode.CLAMP));
-                c.drawRoundRect(r, Theme.ROW_RADIUS, Theme.ROW_RADIUS, fillP);
-                fillP.setShader(null);
-                lineP.setColor(Theme.alpha(dim ? Theme.LINE : Theme.ACCENT, 0.45f * (1 - t)));
-                c.drawRoundRect(r, Theme.ROW_RADIUS, Theme.ROW_RADIUS, lineP);
-            }
+            float w = getWidth(), h = getHeight(), t = focusT;
+            r.set(plateInsetX(), plateInsetY(), w - plateInsetX(), h - plateInsetY());
             if (isPressed()) {
                 fillP.setColor(Theme.alpha(Theme.ACCENT, 0.12f));
                 c.drawRoundRect(r, Theme.ROW_RADIUS, Theme.ROW_RADIUS, fillP);
             }
-
-            float x = pad + 30;
-            int fg = dim ? Theme.TEXT_FAINT : blend(blend(Theme.TEXT, Theme.TEXT_DIM, 0.25f), Theme.TEXT_BRIGHT, t);
-            if (icon != null) {
-                float rad = Math.min(h * 0.29f, primary ? 46 : 40);
-                float cx = x + rad, cy = h / 2;
-                if (primary && !dim) {
-                    discP.setColor(blend(Theme.ACCENT_DEEP, Theme.ACCENT, t));
-                    c.drawCircle(cx, cy, rad, discP);
-                    iconP.setColor(Theme.GLYPH_INK);
-                } else {
-                    ringP.setColor(blend(Theme.LINE, Theme.ACCENT, dim ? t * 0.5f : t));
-                    c.drawCircle(cx, cy, rad, ringP);
-                    iconP.setColor(dim ? Theme.TEXT_FAINT : blend(Theme.TEXT_DIM, Theme.ACCENT, t));
-                }
-                drawIcon(c, icon, cx, cy, rad * 0.95f, iconP);
-                x = cx + rad + 30;
-            }
-
-            // Right side first: it decides how much room the texts get.
-            float right = w - pad - 34;
+            float x = Theme.ROW_INSET, right = w - Theme.ROW_INSET, textRight = right;
             leftArrowX = -1;
             if (value != null) {
                 float vw = valueP.measureText(value), col = Math.max(vw, valueReserve);
-                float arrow = 12, gapA = 22;
-                float colRight = cycler != null ? right - arrow - gapA : right;
-                float colLeft = colRight - col;
-                float vx = cycler != null ? colLeft + (col - vw) / 2 : colRight - vw;
-                float cy = h / 2 + (pips > 1 ? -6 : 0);
+                float arrows = cycler != null ? ARROW + ARROW_GAP : 0;
+                // The value sits at the right edge, and moves left to make room for its arrows when focused.
+                float vRight = right - arrows * t, vx = vRight - vw, cy = h / 2;
                 valueP.setColor(dim ? Theme.TEXT_FAINT
-                                    : blend(blend(Theme.TEXT, Theme.ACCENT, t * 0.25f), Theme.ACCENT, tickT));
+                                    : blend(blend(Theme.TEXT_DIM, Theme.ACCENT, t), Theme.ACCENT, tickT));
                 Paint.FontMetrics fm = valueP.getFontMetrics();
                 c.save();
                 float s = 1 + 0.14f * tickT;
                 c.scale(s, s, vx + vw / 2, cy);
                 c.drawText(value, vx, cy - (fm.ascent + fm.descent) / 2, valueP);
                 c.restore();
-                if (cycler != null) {
-                    chevP.setColor(blend(Theme.TEXT_FAINT, Theme.ACCENT, t));
-                    float lx = colLeft - gapA - arrow, rx = right - arrow;
-                    triangle(c, lx, cy, arrow, -1);
-                    triangle(c, rx, cy, arrow, 1);
-                    leftArrowX = lx + arrow / 2;
-                    right = lx - 28;
-                } else {
-                    right = colLeft - 28;
+                if (cycler != null && t > 0.01f && !dim) {
+                    chevP.setColor(Theme.alpha(Theme.ACCENT, t));
+                    float lx = vx - ARROW_GAP - ARROW;
+                    triangle(c, lx, cy, ARROW, -1);
+                    triangle(c, right - ARROW, cy, ARROW, 1);
+                    leftArrowX = lx + ARROW / 2;
+                } else if (cycler != null) {
+                    leftArrowX = vx - ARROW_GAP - ARROW / 2;
                 }
-                if (pips > 1) {
-                    float pw = 18, pg = 6, total = pips * pw + (pips - 1) * pg;
-                    float px = colLeft + col / 2 - total / 2, py = cy + 26;
-                    for (int i = 0; i < pips; i++) {
-                        pipP.setColor(i == pip ? (dim ? Theme.TEXT_FAINT : Theme.ACCENT) : Theme.LINE);
-                        c.drawRoundRect(px, py, px + pw, py + 4, 2, 2, pipP);
-                        px += pw + pg;
-                    }
-                }
+                textRight = right - 2 * arrows - col - Theme.S4;
             } else if (badge != null && !badge.isEmpty()) {
                 badgeP.setColor(badgeColor);
                 float bw = badgeP.measureText(badge);
                 Paint.FontMetrics fm = badgeP.getFontMetrics();
                 c.drawText(badge, right - bw, h / 2 - (fm.ascent + fm.descent) / 2, badgeP);
-                right -= bw + 30;
+                textRight = right - bw - Theme.S4;
             }
 
-            float avail = Math.max(10, right - x);
-            titleP.setColor(fg);
+            float avail = Math.max(10, textRight - x);
+            titleP.setColor(dim ? Theme.TEXT_FAINT : blend(Theme.TEXT, Theme.TEXT_BRIGHT, t));
             String ti = fit(title, titleP, avail);
             Paint.FontMetrics tf = titleP.getFontMetrics();
-            float titleH = -tf.ascent;
-            boolean hasSub = subtitle != null && !subtitle.isEmpty();
-            if (!hasSub) {
+            if (subtitle == null || subtitle.isEmpty()) {
                 c.drawText(ti, x, h / 2 - (tf.ascent + tf.descent) / 2, titleP);
                 return;
             }
-            int lw = (int)avail;
-            if (subLayout == null || subLayoutW != lw || !subtitle.equals(subLayoutText)) {
-                subLayout = StaticLayout.Builder.obtain(subtitle, 0, subtitle.length(), subP, lw)
-                        .setAlignment(Layout.Alignment.ALIGN_NORMAL).setLineSpacing(0, 1.22f)
-                        .setIncludePad(false).setMaxLines(subMaxLines).setEllipsize(TextUtils.TruncateAt.END)
-                        .build();
-                subLayoutW = lw;
-                subLayoutText = subtitle;
-            }
-            subP.setColor(dim ? Theme.TEXT_FAINT : blend(Theme.TEXT_DIM, Theme.TEXT, t * 0.5f));
-            float gap = primary ? 14 : 12, block = titleH + gap + subLayout.getHeight();
-            float top = (h - block) / 2;
+            Paint.FontMetrics sf = subP.getFontMetrics();
+            float titleH = -tf.ascent, subH = -sf.ascent, gap = Theme.S1;
+            float top = (h - (titleH + gap + subH)) / 2;
             c.drawText(ti, x, top + titleH, titleP);
-            c.save();
-            c.translate(x, top + titleH + gap);
-            subLayout.draw(c);
-            c.restore();
+            subP.setColor(dim ? Theme.TEXT_FAINT : Theme.TEXT_DIM);
+            c.drawText(fit(subtitle, subP, avail), x, top + titleH + gap + subH, subP);
         }
 
         private void triangle(Canvas c, float x, float cy, float s, int dir) {
@@ -780,26 +740,125 @@ final class Widgets {
         }
     }
 
+    // ---- PillButton: Home's Play and its quiet neighbours ---------------------------------------------------------
+
+    /**
+     * A pill-shaped button with an optional icon. The primary one (Play, Prepare) is solid ACCENT with GLYPH_INK text
+     * when focused, ACCENT on ACCENT_FACE otherwise; a quiet one (Settings, Controls, Manage) is a soft PANEL_HI pill
+     * that the focus plate lights. A dim primary stays quiet.
+     */
+    static final class PillButton extends Selectable {
+        Icon icon;
+        private boolean primary;
+        private final Paint fillP = fill(0), iconP = stroke(Theme.TEXT, 3.5f);
+        private final TextPaint labelP = textPaint(Theme.T_ROW, Theme.MEDIUM, Theme.TEXT);
+        private final RectF r = new RectF();
+
+        PillButton(Context c) {
+            super(c);
+        }
+
+        PillButton set(Icon icon, String title, boolean primary) {
+            this.icon = icon;
+            this.title = title == null ? "" : title;
+            this.primary = primary;
+            requestLayout();
+            invalidate();
+            return this;
+        }
+
+        boolean primaryForTest() {
+            return primary;
+        }
+
+        /** The width the label and icon need, padding included. */
+        int naturalWidth() {
+            float w = labelP.measureText(title) + 2 * Theme.S5;
+            if (icon != null)
+                w += 28 + Theme.S2;
+            return Math.round(w);
+        }
+
+        @Override
+        protected void onMeasure(int wSpec, int hSpec) {
+            int w = MeasureSpec.getMode(wSpec) == MeasureSpec.EXACTLY ? MeasureSpec.getSize(wSpec) : naturalWidth();
+            int h = MeasureSpec.getMode(hSpec) == MeasureSpec.EXACTLY ? MeasureSpec.getSize(hSpec) : Theme.BUTTON_H;
+            setMeasuredDimension(w, h);
+        }
+
+        @Override
+        float plateInsetX() {
+            return 0;
+        }
+
+        @Override
+        float plateInsetY() {
+            return 0;
+        }
+
+        @Override
+        float plateRadius(float plateHeight) {
+            return plateHeight / 2;
+        }
+
+        /** The fill when focused (tests: the accent of the theme). */
+        int focusedFillForTest() {
+            return primary && !dim ? Theme.ACCENT : Theme.PANEL_HI;
+        }
+
+        @Override
+        protected void onDraw(Canvas c) {
+            float w = getWidth(), h = getHeight(), t = focusT;
+            r.set(0, 0, w, h);
+            int face, ink;
+            if (primary && !dim) {
+                face = blend(Theme.ACCENT_FACE, Theme.ACCENT, t);
+                ink = blend(Theme.ACCENT, Theme.GLYPH_INK, t);
+            } else {
+                face = Theme.alpha(Theme.PANEL_HI, 0.8f);
+                ink = dim ? Theme.TEXT_FAINT : blend(Theme.TEXT, Theme.TEXT_BRIGHT, t);
+            }
+            fillP.setColor(face);
+            c.drawRoundRect(r, h / 2, h / 2, fillP);
+            if (isPressed()) {
+                fillP.setColor(Theme.alpha(Theme.ACCENT, 0.12f));
+                c.drawRoundRect(r, h / 2, h / 2, fillP);
+            }
+            labelP.setColor(ink);
+            iconP.setColor(ink);
+            float iw = icon != null ? 28 : 0, ig = icon != null ? Theme.S2 : 0;
+            String label = fit(title, labelP, Math.max(10, w - 2 * Theme.S4 - iw - ig));
+            float lw = labelP.measureText(label), total = iw + ig + lw, x = (w - total) / 2;
+            if (icon != null)
+                drawIcon(c, icon, x + iw / 2, h / 2, iw, iconP);
+            Paint.FontMetrics fm = labelP.getFontMetrics();
+            c.drawText(label, x + iw + ig, h / 2 - (fm.ascent + fm.descent) / 2, labelP);
+        }
+    }
+
     // ---- Glide: the one focus highlight, gliding from row to row --------------------------------------------------
 
     /**
-     * Drawn over the stage: a green outline with a soft glow, a light gradient and an accent bar on the left, around
-     * the focused MenuRow. When the focus moves it glides from the old row to the new one (Theme.ANIM_GLIDE_MS); when
-     * the row itself moves (a scroll, its focus scale) it follows at once. Not focusable, lets touches through.
+     * Drawn over the stage: a flat plate (ACCENT at 14 %) with a 2.5 px ACCENT outline around the focused row or
+     * button, or a 4 px ACCENT ring around a focused game card's art. When the focus moves it glides from the old
+     * place to the new one (Theme.ANIM_GLIDE_MS); when the target itself moves (a scroll, its focus scale) it follows
+     * at once. Not focusable, lets touches through.
      */
     static final class Glide extends View implements ViewTreeObserver.OnPreDrawListener {
+        /** The plate's opacity, the outline's and the ring's widths, the ring's gap to the art. */
+        static final float PLATE_ALPHA = 0.14f, OUTLINE = 2.5f, RING = 4, RING_GAP = 4;
         private View target;
         private final RectF from = new RectF(), to = new RectF(), cur = new RectF(), tmp = new RectF();
-        private float t = 1;
+        private final RectF art = new RectF();
+        private float t = 1, fromRad, toRad;
         private ValueAnimator anim;
-        private final Paint fillP = fill(0), glowP = stroke(Theme.ACCENT, 2.5f), barP = fill(Theme.ACCENT);
+        private final Paint plateP = fill(Theme.alpha(Theme.ACCENT, PLATE_ALPHA)), lineP = stroke(Theme.ACCENT, OUTLINE);
+        private final Paint ringP = stroke(Theme.ACCENT, RING);
 
         Glide(Context c) {
             super(c);
             setFocusable(false);
             setClickable(false);
-            glowP.setShadowLayer(18, 0, 0, Theme.alpha(Theme.ACCENT, 0.6f));
-            barP.setShadowLayer(12, 0, 0, Theme.alpha(Theme.ACCENT, 0.8f));
         }
 
         ValueAnimator animatorForTest() {
@@ -808,6 +867,16 @@ final class Widgets {
 
         View targetForTest() {
             return target;
+        }
+
+        /** The plate's colour (tests: the focus contrast). */
+        int plateColorForTest() {
+            return plateP.getColor();
+        }
+
+        /** The outline's colour: the accent the stage was built with (tests: the game theme reaches every view). */
+        int outlineColorForTest() {
+            return lineP.getColor();
         }
 
         @Override
@@ -838,7 +907,23 @@ final class Widgets {
             return true;
         }
 
-        /** The highlight's rectangle now: from the old row to the new one, t of the way. */
+        /** The highlight's place for f, from its drawn bounds b: the plate, or the ring around a card's art. */
+        private float place(View f, RectF b, RectF out) {
+            float k = f.getWidth() > 0 ? b.width() / f.getWidth() : 1;
+            if (f instanceof GameCard) {
+                ((GameCard)f).artRect(art);
+                float g = (RING_GAP + RING / 2) * k;
+                out.set(b.left + art.left * k - g, b.top + art.top * k - g, b.left + art.right * k + g,
+                        b.top + art.bottom * k + g);
+                return (Theme.ART_RADIUS + RING_GAP + RING / 2) * k;
+            }
+            Selectable s = (Selectable)f;
+            out.set(b.left + s.plateInsetX() * k, b.top + s.plateInsetY() * k, b.right - s.plateInsetX() * k,
+                    b.bottom - s.plateInsetY() * k);
+            return s.plateRadius(out.height() / k) * k;
+        }
+
+        /** The highlight's rectangle now: from the old place to the new one, t of the way. */
         private void lerp(RectF out) {
             out.set(from.left + (to.left - from.left) * t, from.top + (to.top - from.top) * t,
                     from.right + (to.right - from.right) * t, from.bottom + (to.bottom - from.bottom) * t);
@@ -848,22 +933,26 @@ final class Widgets {
         public boolean onPreDraw() {
             View host = (View)getParent();
             View f = host == null ? null : host.findFocus();
-            if (!(f instanceof MenuRow || f instanceof GameCard) || !f.isShown() || !rectIn(f, host, tmp)) {
+            if (!(f instanceof Selectable || f instanceof GameCard) || !f.isShown() || !rectIn(f, host, tmp)) {
                 if (target != null) {
                     target = null;
                     invalidate();
                 }
                 return true;
             }
+            float rad = place(f, tmp, tmp);
             if (f != target) {
                 if (target == null) {
                     from.set(tmp);
                     to.set(tmp);
+                    fromRad = toRad = rad;
                     t = 1;
                 } else {
                     lerp(cur);
+                    fromRad = fromRad + (toRad - fromRad) * t;
                     from.set(cur);
                     to.set(tmp);
+                    toRad = rad;
                     t = 0;
                     if (anim != null)
                         anim.cancel();
@@ -879,9 +968,12 @@ final class Widgets {
                 target = f;
                 invalidate();
             } else if (!tmp.equals(to)) {
-                if (anim == null || !anim.isRunning())
+                if (anim == null || !anim.isRunning()) {
                     from.set(tmp);
+                    fromRad = rad;
+                }
                 to.set(tmp);
+                toRad = rad;
                 invalidate();
             }
             return true;
@@ -892,23 +984,24 @@ final class Widgets {
             if (target == null)
                 return;
             lerp(cur);
-            float k = target.getScaleX(), pad = 12 * k, rad = Theme.ROW_RADIUS * k;
-            RectF r = new RectF(cur.left + pad, cur.top + pad, cur.right - pad, cur.bottom - pad);
-            fillP.setShader(new LinearGradient(r.left, 0, r.right, 0, Theme.alpha(Theme.ACCENT, 0.13f),
-                                               Theme.alpha(Theme.ACCENT, 0.02f), Shader.TileMode.CLAMP));
-            c.drawRoundRect(r, rad, rad, fillP);
-            c.drawRoundRect(r, rad, rad, glowP);
-            float bh = Math.max(20, r.height() - 2 * rad - 8);
-            float cy = r.centerY();
-            c.drawRoundRect(r.left + 9, cy - bh / 2, r.left + 15, cy + bh / 2, 3, 3, barP);
+            float rad = fromRad + (toRad - fromRad) * t;
+            if (target instanceof GameCard) {
+                c.drawRoundRect(cur, rad, rad, ringP);
+                return;
+            }
+            if (target instanceof PillButton && ((PillButton)target).primary && !((PillButton)target).dim)
+                return;   // the solid Play is its own highlight
+            c.drawRoundRect(cur, rad, rad, plateP);
+            RectF o = new RectF(cur);
+            o.inset(OUTLINE / 2, OUTLINE / 2);
+            c.drawRoundRect(o, rad, rad, lineP);
         }
     }
 
     // ---- ArtTile: the game's title image, or a monogram -------------------------------------------------------------
 
     /**
-     * The game's identity on Home: its title image from the XBE (TitleArt) in a rounded tile with a soft glow of its
-     * colour, or, without one, a monogram (the title's initials on a gradient whose hue comes from the title ID), or,
+     * The game's identity on Home: its title image from the XBE (TitleArt) in a rounded tile, or, without one, a monogram (the title's initials on a gradient whose hue comes from the title ID), or,
      * with no game at all, a disc.
      */
     static final class ArtTile extends View {
@@ -917,8 +1010,8 @@ final class Widgets {
         private int color = Theme.ACCENT_DEEP;
         private boolean empty = true;
         private final Paint bmpP = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
-        private final Paint bgP = fill(0xFF000000), lineP = stroke(Theme.alpha(Theme.TEXT, 0.14f), 2);
-        private final Paint shadowP = fill(0), ringP = stroke(Theme.alpha(Theme.TEXT, 0.06f), 2);
+        private final Paint bgP = fill(0xFF000000), lineP = stroke(Theme.alpha(Theme.TEXT, 0.10f), 2);
+        private final Paint ringP = stroke(Theme.alpha(Theme.TEXT, 0.06f), 2);
         private final Paint iconP = stroke(Theme.TEXT_FAINT, 5);
         private final TextPaint monoP = textPaint(150, Theme.MEDIUM, Theme.alpha(Theme.TEXT_BRIGHT, 0.94f));
         private final RectF r = new RectF();
@@ -957,13 +1050,8 @@ final class Widgets {
 
         @Override
         protected void onDraw(Canvas c) {
-            float w = getWidth(), h = getHeight(), in = 26, rad = 34;
+            float w = getWidth(), h = getHeight(), in = 1, rad = Theme.ART_RADIUS;
             r.set(in, in, w - in, h - in);
-            if (!empty) {
-                shadowP.setColor(Theme.alpha(color, 0.9f));
-                shadowP.setShadowLayer(30, 0, 8, Theme.alpha(color, 0.55f));
-                c.drawRoundRect(r, rad, rad, shadowP);
-            }
             c.save();
             clip.reset();
             clip.addRoundRect(r, rad, rad, Path.Direction.CW);
@@ -1119,14 +1207,14 @@ final class Widgets {
             callout(c, lab(9), bx + bw + 30, fy, 0, rcx + fo + fr, fy);
         }
     }
-    // ---- Chip: a status pill ---------------------------------------------------------------------------------------
+    // ---- Chip: a status (a dot and its label) ------------------------------------------------------------------------
 
+    /** A status worth saying (not « Ready »): a dot in its colour and its label in TEXT_DIM. No pill. */
     static final class Chip extends View {
         private String label = "";
         private int color = Theme.ACCENT;
-        private final Paint dotP = fill(Theme.ACCENT), bgP = fill(0), lineP = stroke(0, 1.5f);
-        private final TextPaint tp = textPaint(Theme.T_SMALL, Theme.MEDIUM, Theme.TEXT);
-        private final RectF r = new RectF();
+        private final Paint dotP = fill(Theme.ACCENT);
+        private final TextPaint tp = textPaint(Theme.T_BODY, Theme.REGULAR, Theme.TEXT_DIM);
 
         String label() {
             return label;
@@ -1149,7 +1237,9 @@ final class Widgets {
 
         @Override
         protected void onMeasure(int w, int h) {
-            setMeasuredDimension(label.isEmpty() ? 0 : Math.round(tp.measureText(label) + 78), 52);
+            Paint.FontMetrics fm = tp.getFontMetrics();
+            setMeasuredDimension(label.isEmpty() ? 0 : Math.round(tp.measureText(label) + 12 + Theme.S2),
+                                 Math.round(fm.descent - fm.ascent) + 4);
         }
 
         @Override
@@ -1157,27 +1247,23 @@ final class Widgets {
             if (label.isEmpty())
                 return;
             float h = getHeight();
-            r.set(1, 1, getWidth() - 1, h - 1);
-            bgP.setColor(Theme.alpha(color, 0.09f));
-            lineP.setColor(Theme.alpha(color, 0.5f));
-            c.drawRoundRect(r, h / 2, h / 2, bgP);
-            c.drawRoundRect(r, h / 2, h / 2, lineP);
             dotP.setColor(color);
-            dotP.setShadowLayer(8, 0, 0, Theme.alpha(color, 0.8f));
-            c.drawCircle(28, h / 2, 6, dotP);
+            c.drawCircle(6, h / 2, 6, dotP);
             Paint.FontMetrics fm = tp.getFontMetrics();
-            c.drawText(label, 48, h / 2 - (fm.ascent + fm.descent) / 2, tp);
+            c.drawText(label, 12 + Theme.S2, h / 2 - (fm.ascent + fm.descent) / 2, tp);
         }
     }
 
     // ---- Hint: a controller button and what it does (also a touch target) ----------------------------------------
 
+    /** One discreet hint: the button's glyph in a 2 px TEXT_DIM outline, and its label. */
     static final class Hint extends View {
         private final String glyph, label;
-        private final Paint face = fill(Theme.GLYPH_FACE);
-        private final TextPaint ink = textPaint(24, Theme.MEDIUM, Theme.GLYPH_INK);
-        private final TextPaint tp = textPaint(Theme.T_BODY, Theme.REGULAR, Theme.TEXT_DIM);
+        private final Paint ring = stroke(Theme.TEXT_DIM, 2);
+        private final TextPaint ink = textPaint(Theme.T_SMALL - 2, Theme.MEDIUM, Theme.TEXT_DIM);
+        private final TextPaint tp = textPaint(Theme.T_HINT, Theme.REGULAR, Theme.TEXT_DIM);
         private final RectF r = new RectF();
+        private static final float D = 40;
 
         Hint(Context c, String glyph, String label, View.OnClickListener click) {
             super(c);
@@ -1187,26 +1273,35 @@ final class Widgets {
             setFocusable(false);
         }
 
+        String labelForTest() {
+            return label;
+        }
+
+        String glyphForTest() {
+            return glyph;
+        }
+
         private float glyphW() {
-            return glyph.length() <= 1 ? 46 : ink.measureText(glyph) + 30;
+            return glyph.length() <= 1 ? D : Math.max(D, ink.measureText(glyph) + 26);
         }
 
         @Override
         protected void onMeasure(int w, int h) {
-            setMeasuredDimension(Math.round(glyphW() + 16 + tp.measureText(label) + 8), 64);
+            setMeasuredDimension(Math.round(glyphW() + 12 + tp.measureText(label) + 4), Theme.FOOTER_H);
         }
 
         @Override
         protected void onDraw(Canvas c) {
             float h = getHeight(), gw = glyphW();
-            face.setColor(isPressed() ? Theme.ACCENT : Theme.GLYPH_FACE);
-            r.set(0, h / 2 - 23, gw, h / 2 + 23);
-            c.drawRoundRect(r, 23, 23, face);
+            int col = isPressed() ? Theme.ACCENT : Theme.TEXT_DIM;
+            ring.setColor(col);
+            ink.setColor(col);
+            r.set(1, h / 2 - D / 2 + 1, gw - 1, h / 2 + D / 2 - 1);
+            c.drawRoundRect(r, D / 2, D / 2, ring);
             Paint.FontMetrics fm = ink.getFontMetrics();
-            float gx = gw / 2 - ink.measureText(glyph) / 2;
-            c.drawText(glyph, gx, h / 2 - (fm.ascent + fm.descent) / 2, ink);
+            c.drawText(glyph, gw / 2 - ink.measureText(glyph) / 2, h / 2 - (fm.ascent + fm.descent) / 2, ink);
             Paint.FontMetrics lm = tp.getFontMetrics();
-            c.drawText(label, gw + 16, h / 2 - (lm.ascent + lm.descent) / 2, tp);
+            c.drawText(label, gw + 12, h / 2 - (lm.ascent + lm.descent) / 2, tp);
         }
 
         @Override
@@ -1218,25 +1313,23 @@ final class Widgets {
 
     // ---- Ring: the import progress -----------------------------------------------------------------------------------
 
+    /** A plain progress ring (the import): a LINE track, an arc in its colour, the percentage and two lines. */
     static final class Ring extends View {
         private float frac = -1;
         private String big = "", label = "", sub = "";
-        private final Paint trackP = stroke(Theme.TRACK, 18), arcP = stroke(Theme.ACCENT, 18);
-        private final Paint tickP = stroke(Theme.LINE, 3), innerP = stroke(Theme.alpha(Theme.ACCENT, 0.25f), 1.5f);
-        private final TextPaint bigP = textPaint(118, Theme.MEDIUM, Theme.TEXT);
+        private final Paint trackP = stroke(Theme.LINE, 12), arcP = stroke(Theme.ACCENT, 12);
+        private final TextPaint bigP = textPaint(Theme.T_DISPLAY * 1.5f, Theme.MEDIUM, Theme.TEXT);
         private final TextPaint labelP = textPaint(Theme.T_BODY, Theme.REGULAR, Theme.TEXT_DIM);
-        private final TextPaint subP = textPaint(Theme.T_SMALL, Theme.REGULAR, Theme.TEXT_FAINT);
+        private final TextPaint subP = textPaint(Theme.T_SMALL, Theme.REGULAR, Theme.TEXT_DIM);
         private final RectF r = new RectF();
 
         Ring(Context c) {
             super(c);
-            arcP.setShadowLayer(20, 0, 0, Theme.alpha(Theme.ACCENT, 0.65f));
         }
 
-        /** The arc's colour (the accent; the Prepare screen's failed / stopped states use ERROR / WARN). */
+        /** The arc's colour. */
         void setColor(int color) {
             arcP.setColor(color);
-            arcP.setShadowLayer(20, 0, 0, Theme.alpha(color, 0.65f));
             invalidate();
         }
 
@@ -1252,19 +1345,9 @@ final class Widgets {
         @Override
         protected void onDraw(Canvas c) {
             float cx = getWidth() / 2f, cy = getHeight() / 2f;
-            float R = Math.min(getWidth(), getHeight()) / 2f - 56;
-            int n = 72;
-            for (int i = 0; i < n; i++) {
-                double a = Math.toRadians(-90 + i * 360.0 / n);
-                boolean lit = frac >= 0 && i < Math.round(frac * n);
-                tickP.setColor(lit ? Theme.alpha(arcP.getColor(), 0.9f) : Theme.alpha(Theme.LINE, 0.9f));
-                float r0 = R + 30, r1 = R + (i % 6 == 0 ? 48 : 40);
-                c.drawLine(cx + (float)Math.cos(a) * r0, cy + (float)Math.sin(a) * r0,
-                           cx + (float)Math.cos(a) * r1, cy + (float)Math.sin(a) * r1, tickP);
-            }
+            float R = Math.min(getWidth(), getHeight()) / 2f - 24;
             r.set(cx - R, cy - R, cx + R, cy + R);
             c.drawArc(r, 0, 360, false, trackP);
-            c.drawCircle(cx, cy, R - 30, innerP);
             if (frac >= 0) {
                 if (frac > 0.002f)
                     c.drawArc(r, -90, 360 * Math.min(1, frac), false, arcP);

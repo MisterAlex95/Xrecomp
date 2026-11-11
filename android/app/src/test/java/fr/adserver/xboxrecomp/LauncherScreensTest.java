@@ -283,28 +283,9 @@ public class LauncherScreensTest {
         assertNotNull(launch().backdropForTest().heroForTest());
     }
 
-    private static Widgets.BrandMark brandMark(View v) {
-        if (v instanceof Widgets.BrandMark)
-            return (Widgets.BrandMark)v;
-        if (v instanceof ViewGroup) {
-            ViewGroup g = (ViewGroup)v;
-            for (int i = 0; i < g.getChildCount(); i++) {
-                Widgets.BrandMark m = brandMark(g.getChildAt(i));
-                if (m != null)
-                    return m;
-            }
-        }
-        return null;
-    }
-
-    /** The colour at the centre of the top bar's brand mark (its gem, drawn in the accent). */
-    private static int brandMarkCentre(LauncherActivity a) {
-        Widgets.BrandMark m = brandMark(a.getWindow().getDecorView());
-        assertNotNull(m);
-        android.graphics.Bitmap b = android.graphics.Bitmap.createBitmap(m.getWidth(), m.getHeight(),
-                                                                          android.graphics.Bitmap.Config.ARGB_8888);
-        m.draw(new android.graphics.Canvas(b));
-        return b.getPixel(m.getWidth() / 2, m.getHeight() / 2);
+    /** The accent the stage was built with: the focus outline's (the stage is built again when the theme changes). */
+    private static int stageAccent(LauncherActivity a) {
+        return a.glideForTest().outlineColorForTest();
     }
 
     private void themeStep(LauncherActivity a) {
@@ -322,7 +303,7 @@ public class LauncherScreensTest {
         LauncherActivity a = launch();
         assertEquals(0xFFA7C2FF, Theme.ACCENT);
         assertEquals(GamePalette.STOCK[GamePalette.OK], Theme.OK);
-        assertEquals(Theme.ACCENT, brandMarkCentre(a));
+        assertEquals(Theme.ACCENT, stageAccent(a));
         assertNotNull(a.backdropForTest().heroForTest());
         assertEquals(Theme.GLOW, a.backdropForTest().glowForTest());
 
@@ -339,18 +320,18 @@ public class LauncherScreensTest {
         themeStep(a);
         assertEquals(GameTheme.Mode.OFF, GameTheme.mode(app, TID));
         assertTrue("off: the stock colours", Theme.isStock());
-        assertEquals(GamePalette.STOCK[GamePalette.ACCENT], brandMarkCentre(a));
+        assertEquals(GamePalette.STOCK[GamePalette.ACCENT], stageAccent(a));
         assertEquals(LauncherActivity.Screen.SETTINGS, a.screenForTest());
         shot(a, "ui-settings-theme-off", false);
         themeStep(a);
         assertEquals(GameTheme.Mode.FULL, GameTheme.mode(app, TID));
-        assertEquals(0xFFA7C2FF, brandMarkCentre(a));
+        assertEquals(0xFFA7C2FF, stageAccent(a));
 
         // A fresh launcher starts in the game's colours (from the cache: no stock flash).
         Theme.reset();
         LauncherActivity b = launch();
         assertEquals(0xFFA7C2FF, Theme.ACCENT);
-        assertEquals(0xFFA7C2FF, brandMarkCentre(b));
+        assertEquals(0xFFA7C2FF, stageAccent(b));
     }
 
     /** No game set up: the stock colours, and no Game theme row. */
@@ -460,6 +441,22 @@ public class LauncherScreensTest {
         assertTrue(a.screenAnimatorForTest().isRunning());
         idle(300);
         assertFalse(a.screenAnimatorForTest().isRunning());
+    }
+
+    /** Calm: every screen shows at most three hints, in one footer line. */
+    @Test
+    public void atMostThreeHints() throws Exception {
+        withToolchain();
+        LauncherActivity a = launch();
+        for (LauncherActivity.Screen s : new LauncherActivity.Screen[] { LauncherActivity.Screen.HOME,
+                LauncherActivity.Screen.SETTINGS, LauncherActivity.Screen.CONTROLS, LauncherActivity.Screen.GAME_DATA,
+                LauncherActivity.Screen.ABOUT, LauncherActivity.Screen.SOURCE, LauncherActivity.Screen.STORAGE,
+                LauncherActivity.Screen.WELCOME }) {
+            a.goForTest(s);
+            idle(300);
+            int n = a.hintsForTest().size();
+            assertTrue(s + ": " + n + " hints", n >= 1 && n <= LauncherActivity.MAX_HINTS);
+        }
     }
 
     /** U4: moves, selects, backs and errors play their cue (and the cues respect the settings). */

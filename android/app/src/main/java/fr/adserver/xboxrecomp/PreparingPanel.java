@@ -151,7 +151,7 @@ final class PreparingPanel extends PanelView {
         if (dimmed) {
             // The percentage alone, faint, where it always is.
             text.setTextAlign(Paint.Align.CENTER);
-            text.setTypeface(Theme.LIGHT);
+            text.setTypeface(Theme.MEDIUM);
             text.setTextSize(150);
             text.setColor(Theme.alpha(Theme.TEXT_FAINT, 0.55f));
             c.drawText(pct, W / 2, H / 2 - 40, text);
@@ -202,7 +202,7 @@ final class PreparingPanel extends PanelView {
 
         // The overall percentage and time left on the right.
         text.setTextAlign(Paint.Align.CENTER);
-        text.setTypeface(Theme.LIGHT);
+        text.setTypeface(Theme.MEDIUM);
         text.setTextSize(140);
         text.setColor(failed ? Theme.ERROR : Theme.TEXT);
         c.drawText(pct, 982, 300, text);
