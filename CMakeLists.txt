@@ -101,6 +101,20 @@ if(NOT WIN32 AND NOT TARGET xiso)
     add_subdirectory(src/xiso)
 endif()
 
+# Frame generation (LSFG): the pacer (C) here; the Vulkan bridge adds its C++
+# parts to src/framegen. Off by default: the default build and the upstream
+# tests do not see it. ON also defines XBOXRECOMP_LSFG on the executor and the
+# GL back end, which then apply the cap and present-mode rules under
+# RECOMP_LSFG=1 (src/framegen/framegen_policy.h).
+option(XBOXRECOMP_LSFG "Build frame generation (LSFG pacer and bridge)" OFF)
+if(XBOXRECOMP_LSFG AND NOT WIN32)
+    add_subdirectory(src/framegen)
+    target_compile_definitions(xbox_kernel PRIVATE XBOXRECOMP_LSFG=1)
+    if(TARGET xbox_gpu)
+        target_compile_definitions(xbox_gpu PRIVATE XBOXRECOMP_LSFG=1)
+    endif()
+endif()
+
 # ── Umbrella target ───────────────────────────────────────────
 
 # Convenience target that links all runtime libraries
@@ -118,6 +132,9 @@ list(APPEND XBOXRECOMP_LIBS
 )
 if(TARGET xbox_gpu)
     list(APPEND XBOXRECOMP_LIBS xbox_gpu)
+endif()
+if(TARGET xbox_framegen)
+    list(APPEND XBOXRECOMP_LIBS xbox_framegen)
 endif()
 add_library(xboxrecomp INTERFACE)
 if(UNIX AND NOT APPLE)
