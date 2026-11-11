@@ -108,6 +108,9 @@ endif()
 # RECOMP_LSFG=1 (src/framegen/framegen_policy.h).
 option(XBOXRECOMP_LSFG "Build frame generation (LSFG pacer and bridge)" OFF)
 if(XBOXRECOMP_LSFG AND NOT WIN32)
+    # The bridge is C++20 (src/framegen/lsfg_vulkan.cmake: XBOXRECOMP_LSFG_VK_SRC, the pinned MIT framegen). A
+    # project that adds the toolkit with add_subdirectory enables CXX itself (templates/new-game does).
+    enable_language(CXX)
     add_subdirectory(src/framegen)
     target_compile_definitions(xbox_kernel PRIVATE XBOXRECOMP_LSFG=1)
     if(TARGET xbox_gpu)

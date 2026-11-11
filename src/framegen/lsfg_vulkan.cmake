@@ -37,6 +37,9 @@ if(XBOXRECOMP_VULKAN_HEADERS AND NOT ANDROID)
 endif()
 if(ANDROID)
     set(VOLK_PULL_IN_VULKAN OFF CACHE BOOL "" FORCE)   # the NDK sysroot has the headers; libvulkan is dlopened
+    # framegen's AHardwareBuffer paths (framegen/src/core/image.cpp) use the Android platform types; volk's
+    # PUBLIC define carries the macro to framegen and the bridge.
+    set(VOLK_STATIC_DEFINES "VK_USE_PLATFORM_ANDROID_KHR" CACHE STRING "" FORCE)
 endif()
 
 add_subdirectory("${XBOXRECOMP_VOLK_SRC}" "${CMAKE_BINARY_DIR}/lsfg-volk" EXCLUDE_FROM_ALL)
