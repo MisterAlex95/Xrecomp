@@ -5802,7 +5802,7 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
                 int sync = s_flip_dumping || s_dump_at_flip;
                 have = done && s_gpu.pitch
                     && s_backend_present(&now, sync, &ready) && ready.va;
-                if (sync && have && ready.va != now.va)
+                if (sync && have && (ready.va != now.va || ready.host_px))
                     ready = now;          /* the contract says otherwise: be safe */
                 /* The present's read-back waited for the GPU up to some
                  * point: the reports drawn before it are in now. */
@@ -5831,7 +5831,16 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
                 xbox_FramebufferWindowFrameStats(s_gpu.draws - draws_at_flip);
                 draws_at_flip = s_gpu.draws;
             }
-            if (have) {
+            if (have && s_backend_present && ready.host_px) {
+                /* The back end's own pixels (an internal resolution above
+                 * the guest's, or RECOMP_GPU_PRESENT=host): straight to the
+                 * window, guest memory untouched. */
+                extern int xbox_FramebufferWindowPresentHost(const void *, uint32_t, uint32_t,
+                                                             uint32_t, uint32_t);
+                (void)xbox_FramebufferWindowPresentHost(ready.host_px, ready.host_w,
+                                                        ready.host_h, ready.host_pitch,
+                                                        ready.host_format);
+            } else if (have) {
                 extern void xbox_FramebufferWindowPresent(uint32_t, uint32_t);
                 extern void xbox_FramebufferWindowSetFormat(uint32_t);
                 /* How 16-bit pixels sit in guest memory: a back end with a

@@ -21,11 +21,17 @@
  * the executor's thread). The flip copies the finished surface into a free
  * slot of three and publishes it with an index swap under a mutex held for a
  * few instructions, so the executor never waits for the window and the
- * window never reads guest memory the rasteriser may be writing. The surface
- * format is the GDI window's: 640x480, bpp from pitch / 640, 2 = R5G6B5
- * (X1R5G5B5 when the executor says so, xbox_FramebufferWindowSetFormat),
- * 4 = X8R8G8B8. Before the first flip the window reads the AvSetDisplayMode
- * surface directly, as the GDI window does, for a title that never flips.
+ * window never reads guest memory the rasteriser may be writing. A guest
+ * surface is in the GDI window's format: 640x480, bpp from pitch / 640,
+ * 2 = R5G6B5 (X1R5G5B5 when the executor says so,
+ * xbox_FramebufferWindowSetFormat), 4 = X8R8G8B8. A GPU back end may instead
+ * hand over its own pixels at their own size (xbox_FramebufferWindowPresentHost:
+ * an internal resolution above 640x480, RECOMP_GPU_SCALE); each slot carries
+ * its frame's width, height, pitch and pixel format, the texture follows
+ * them, and the renderer's logical size stays 640x480, so letterboxing and
+ * the perf overlay do not change. Before the first flip the window reads
+ * the AvSetDisplayMode surface directly, as the GDI window does, for a title
+ * that never flips.
  *
  * Closing the window ends the process: the window owns the main thread, and
  * lifted code cannot be stopped mid-flight. atexit handlers still run, except
@@ -76,11 +82,15 @@ extern ptrdiff_t xbox_GetMemoryOffset(void);
 
 /* ── Handoff: three slots, one each for writer, reader and the ready frame ── */
 
+/* A frame: w x h pixels, rows pitch bytes apart (top row first), in SDL
+ * pixel format `format` (RGB565, RGB555, XRGB8888 or XBGR8888). General on
+ * purpose: whatever produces frames for the window -- the flip, a GPU back
+ * end's own read-back, a frame pacer -- fills one the same way. */
 struct fb_slot {
     uint8_t *px;
     size_t   cap;
-    uint32_t bpp;
-    uint32_t x555;              /* 16-bit pixels are X1R5G5B5, not R5G6B5 */
+    uint32_t w, h, pitch;
+    uint32_t format;            /* SDL_PIXELFORMAT_* */
 };
 
 /* What the window takes from SDL, and gives back on every way out. */
@@ -131,12 +141,39 @@ void xbox_FramebufferWindowSetFormat(uint32_t color_format)
 /* The window is opened by xbox_HostWindowMain, on the main thread. */
 void xbox_FramebufferWindowStart(void) {}
 
+/* SDL pixel format of a guest surface of bpp bytes per pixel. */
+static uint32_t guest_format(uint32_t bpp, uint32_t x555)
+{
+    return bpp == 4 ? SDL_PIXELFORMAT_RGB888        /* = XRGB8888 */
+         : x555     ? SDL_PIXELFORMAT_RGB555
+                    : SDL_PIXELFORMAT_RGB565;
+}
+
+/* The back slot with room for h rows of pitch bytes, or NULL. Only the
+ * presenting thread touches s_back. */
+static struct fb_slot *back_slot(uint32_t pitch, uint32_t h)
+{
+    struct fb_slot *s = &s_slot[s_back];
+    size_t need = (size_t)pitch * h;
+
+    if (s->cap < need) {
+        uint8_t *n = (uint8_t *)realloc(s->px, need);
+        if (!n)
+            return NULL;
+        s->px = n;
+        s->cap = need;
+    }
+    return s;
+}
+
 /* The back slot is filled: make it the ready one. An unshown ready frame is
  * overwritten (dropped), never waited for. */
-static void publish(uint32_t bpp)
+static void publish(uint32_t w, uint32_t h, uint32_t pitch, uint32_t format)
 {
-    s_slot[s_back].bpp = bpp;          /* only this thread touches s_back */
-    s_slot[s_back].x555 = bpp == 2 && s_fb_x555;
+    s_slot[s_back].w = w;              /* only this thread touches s_back */
+    s_slot[s_back].h = h;
+    s_slot[s_back].pitch = pitch;
+    s_slot[s_back].format = format;
     pthread_mutex_lock(&s_lock);
     {
         int t = s_ready;
@@ -158,28 +195,32 @@ static void publish(uint32_t bpp)
     }
 }
 
+/* Copy w x h pixels (rows src_pitch bytes apart, row_bytes of them used)
+ * into the back slot and publish it. */
+static void present_pixels(const uint8_t *src, uint32_t w, uint32_t h,
+                           uint32_t src_pitch, uint32_t row_bytes, uint32_t format)
+{
+    struct fb_slot *s = back_slot(row_bytes, h);
+    uint32_t y;
+
+    if (!s)
+        return;
+    if (src_pitch == row_bytes)
+        memcpy(s->px, src, (size_t)row_bytes * h);
+    else
+        for (y = 0; y < h; y++)
+            memcpy(s->px + (size_t)y * row_bytes, src + (size_t)y * src_pitch, row_bytes);
+    publish(w, h, row_bytes, format);
+}
+
 static void present_copy(uint32_t fb_va, uint32_t pitch)
 {
-    struct fb_slot *s = &s_slot[s_back];
-    const uint8_t *src;
-    uint32_t bpp = pitch / FB_W, y;
-    size_t need;
+    uint32_t bpp = pitch / FB_W;
 
     if (bpp != 2 && bpp != 4)
         return;
-    need = (size_t)FB_W * FB_H * bpp;
-    if (s->cap < need) {
-        uint8_t *n = (uint8_t *)realloc(s->px, need);
-        if (!n)
-            return;
-        s->px = n;
-        s->cap = need;
-    }
-    src = (const uint8_t *)((uintptr_t)fb_va + xbox_GetMemoryOffset());
-    for (y = 0; y < FB_H; y++)
-        memcpy(s->px + (size_t)y * FB_W * bpp, src + (size_t)y * pitch,
-               (size_t)FB_W * bpp);
-    publish(bpp);
+    present_pixels((const uint8_t *)((uintptr_t)fb_va + xbox_GetMemoryOffset()),
+                   FB_W, FB_H, pitch, FB_W * bpp, guest_format(bpp, bpp == 2 && s_fb_x555));
 }
 
 /* Called by the pushbuffer executor when the title flips. */
@@ -198,6 +239,50 @@ void xbox_FramebufferWindowPresent(uint32_t fb_va, uint32_t pitch)
     if (__atomic_load_n(&s_running, __ATOMIC_SEQ_CST))
         present_copy(fb_va, pitch);
     __atomic_sub_fetch(&s_in_present, 1, __ATOMIC_SEQ_CST);
+}
+
+/* A GPU back end's own frame (FLIP_STALL with Nv2aPresentSurface.host_px):
+ * copied into a slot like a guest frame, at its own size. Returns 1 when
+ * the window took it, 0 when there is no window (headless, closing) or the
+ * frame is not one it can show. */
+int xbox_FramebufferWindowPresentHost(const void *px, uint32_t w, uint32_t h,
+                                      uint32_t pitch, uint32_t format)
+{
+    uint32_t sdl_format;
+    int taken = 0;
+
+    recomp_lifecycle_hold();
+    if (!__atomic_load_n(&s_running, __ATOMIC_SEQ_CST) || !px || !w || !h
+            || w > 8192 || h > 8192 || pitch < w * 4u)
+        return 0;
+    if (format == XBOX_FB_HOST_BGRX8888)
+        sdl_format = SDL_PIXELFORMAT_XRGB8888;   /* 0xXXRRGGBB words */
+    else if (format == XBOX_FB_HOST_RGBX8888)
+        sdl_format = SDL_PIXELFORMAT_XBGR8888;   /* bytes R, G, B, X */
+    else
+        return 0;
+    __atomic_add_fetch(&s_in_present, 1, __ATOMIC_SEQ_CST);
+    if (__atomic_load_n(&s_running, __ATOMIC_SEQ_CST)) {
+        /* The copy's cost on the executor thread, logged every 600 host
+         * frames (only this thread presents). */
+        static uint32_t frames;
+        static uint64_t ns;
+        struct timespec t0, t1;
+        clock_gettime(CLOCK_MONOTONIC, &t0);
+        present_pixels((const uint8_t *)px, w, h, pitch, w * 4u, sdl_format);
+        clock_gettime(CLOCK_MONOTONIC, &t1);
+        ns += (uint64_t)(t1.tv_sec - t0.tv_sec) * 1000000000ull
+            + (uint64_t)t1.tv_nsec - (uint64_t)t0.tv_nsec;
+        if (++frames == 600) {
+            fprintf(stderr, "  [FBWIN] host frames %ux%u: copy %.3f ms/frame\n", w, h,
+                    (double)ns / 1e6 / frames);
+            frames = 0;
+            ns = 0;
+        }
+        taken = 1;
+    }
+    __atomic_sub_fetch(&s_in_present, 1, __ATOMIC_SEQ_CST);
+    return taken;
 }
 
 /* Title bar: "<XBE title> | FPS: n | draws: n", as the GDI window shows it.
@@ -255,29 +340,39 @@ void xbox_FramebufferWindowGetStats(uint32_t *fps_centi, uint32_t *draws)
         *draws = __atomic_load_n(&s_frame_draws, __ATOMIC_RELAXED);
 }
 
-/* The last published frame as a 24-bit BMP, from any thread. The ready slot
- * is only swapped under s_lock and nobody writes it, so it is copied under
- * the lock (1.2 MB at most) and written out after. -1: no frame yet, or the
- * file could not be written. */
-int xbox_FramebufferDumpBmp(const char *path)
+/* One pixel of a slot as 0xRRGGBB. */
+static uint32_t slot_rgb(const uint8_t *p, uint32_t format)
 {
-    uint32_t row = (FB_W * 3u + 3u) & ~3u, img = row * FB_H, total = 54u + img;
-    uint32_t w = FB_W, h = FB_H, bpp, x555, x, y;
-    uint8_t hdr[54], *px = NULL, *line;
+    uint32_t v;
+
+    switch (format) {
+    case SDL_PIXELFORMAT_XRGB8888:      /* bytes B, G, R, X */
+        return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16;
+    case SDL_PIXELFORMAT_XBGR8888:      /* bytes R, G, B, X */
+        return (uint32_t)p[2] | (uint32_t)p[1] << 8 | (uint32_t)p[0] << 16;
+    case SDL_PIXELFORMAT_RGB555:
+        v = (uint32_t)p[0] | (uint32_t)p[1] << 8;
+        return ((v >> 10 & 0x1F) * 255u / 31u) << 16 | ((v >> 5 & 0x1F) * 255u / 31u) << 8
+             | (v & 0x1F) * 255u / 31u;
+    default:                            /* RGB565 */
+        v = (uint32_t)p[0] | (uint32_t)p[1] << 8;
+        return ((v >> 11 & 0x1F) * 255u / 31u) << 16 | ((v >> 5 & 0x3F) * 255u / 63u) << 8
+             | (v & 0x1F) * 255u / 31u;
+    }
+}
+
+/* w x h pixels of a slot as a 24-bit BMP. -1: the file could not be written. */
+static int write_bmp(const char *path, const uint8_t *px, uint32_t w, uint32_t h,
+                     uint32_t pitch, uint32_t format)
+{
+    uint32_t bypp = SDL_BYTESPERPIXEL(format), row = (w * 3u + 3u) & ~3u;
+    uint32_t img = row * h, total = 54u + img, x, y;
+    uint8_t hdr[54], *line;
     FILE *f;
 
-    pthread_mutex_lock(&s_lock);
-    bpp = s_ready_seq ? s_slot[s_ready].bpp : 0;
-    x555 = s_ready_seq ? s_slot[s_ready].x555 : 0;
-    if (bpp && s_slot[s_ready].px && (px = (uint8_t *)malloc((size_t)FB_W * FB_H * bpp)))
-        memcpy(px, s_slot[s_ready].px, (size_t)FB_W * FB_H * bpp);
-    pthread_mutex_unlock(&s_lock);
-    if (!px)
-        return -1;
     line = (uint8_t *)calloc(1, row);
     f = line ? fopen(path, "wb") : NULL;
     if (!f) {
-        free(px);
         free(line);
         return -1;
     }
@@ -290,21 +385,10 @@ int xbox_FramebufferDumpBmp(const char *path)
     hdr[26] = 1; hdr[28] = 24;
     memcpy(hdr + 34, &img, 4);
     fwrite(hdr, 1, sizeof hdr, f);
-    for (y = 0; y < FB_H; y++) {
-        const uint8_t *src = px + (size_t)(FB_H - 1 - y) * FB_W * bpp;
-        for (x = 0; x < FB_W; x++) {
-            uint32_t v;
-            if (bpp == 4) {     /* X8R8G8B8 */
-                v = (uint32_t)src[x * 4] | (uint32_t)src[x * 4 + 1] << 8 | (uint32_t)src[x * 4 + 2] << 16;
-            } else if (x555) {  /* X1R5G5B5 */
-                uint32_t p = (uint32_t)src[x * 2] | (uint32_t)src[x * 2 + 1] << 8;
-                v = ((p >> 10 & 0x1F) * 255u / 31u) << 16 | ((p >> 5 & 0x1F) * 255u / 31u) << 8
-                    | (p & 0x1F) * 255u / 31u;
-            } else {            /* R5G6B5 */
-                uint32_t p = (uint32_t)src[x * 2] | (uint32_t)src[x * 2 + 1] << 8;
-                v = ((p >> 11 & 0x1F) * 255u / 31u) << 16 | ((p >> 5 & 0x3F) * 255u / 63u) << 8
-                    | (p & 0x1F) * 255u / 31u;
-            }
+    for (y = 0; y < h; y++) {
+        const uint8_t *src = px + (size_t)(h - 1 - y) * pitch;
+        for (x = 0; x < w; x++) {
+            uint32_t v = slot_rgb(src + (size_t)x * bypp, format);
             line[x * 3 + 0] = (uint8_t)v;
             line[x * 3 + 1] = (uint8_t)(v >> 8);
             line[x * 3 + 2] = (uint8_t)(v >> 16);
@@ -312,11 +396,38 @@ int xbox_FramebufferDumpBmp(const char *path)
         fwrite(line, 1, row, f);
     }
     free(line);
-    free(px);
     if (fclose(f) != 0)
         return -1;
-    fprintf(stderr, "  [FBWIN] wrote %s (%ux%u)\n", path, FB_W, FB_H);
+    fprintf(stderr, "  [FBWIN] wrote %s (%ux%u)\n", path, w, h);
     return 0;
+}
+
+/* The last published frame as a 24-bit BMP at its own size (640x480 for a
+ * guest frame, the back end's size for a host frame), from any thread. The
+ * ready slot is only swapped under s_lock and nobody writes it, so it is
+ * copied under the lock and written out after. -1: no frame yet, or the
+ * file could not be written. */
+int xbox_FramebufferDumpBmp(const char *path)
+{
+    uint32_t w = 0, h = 0, pitch = 0, format = 0;
+    uint8_t *px = NULL;
+    int rc;
+
+    pthread_mutex_lock(&s_lock);
+    if (s_ready_seq && s_slot[s_ready].px) {
+        w = s_slot[s_ready].w;
+        h = s_slot[s_ready].h;
+        pitch = s_slot[s_ready].pitch;
+        format = s_slot[s_ready].format;
+        if ((px = (uint8_t *)malloc((size_t)pitch * h)))
+            memcpy(px, s_slot[s_ready].px, (size_t)pitch * h);
+    }
+    pthread_mutex_unlock(&s_lock);
+    if (!px)
+        return -1;
+    rc = write_bmp(path, px, w, h, pitch, format);
+    free(px);
+    return rc;
 }
 
 /* ── The guest thread ─────────────────────────────────────────────────── */
@@ -397,7 +508,8 @@ int xbox_HostWindowMain(int (*guest_main)(void))
     SDL_Window *win;
     SDL_Renderer *ren;
     SDL_Texture *tex = NULL;
-    uint32_t tex_bpp = 0, tex_x555 = 0;
+    uint32_t tex_w = 0, tex_h = 0, tex_format = 0;
+    int tex_linear = 0;
     uint64_t shown_seq = 0, t_title = 0, flips_title = 0, t_overlay = 0;
     const char *e;
     int vsync, scale, quit = 0, guest_done = 0, dirty = 1, reupload = 0;
@@ -464,6 +576,17 @@ int xbox_HostWindowMain(int (*guest_main)(void))
                     " vsync %s); guest runs on a pthread\n",
                     FB_W, FB_H, ri.name, vsync ? "on" : "off");
     }
+#if defined(XBOXRECOMP_HAVE_GPU)
+    {
+        /* The drawable's real size (HiDPI pixels), for the GL back end's
+         * RECOMP_GPU_SCALE=auto; read on the executor thread after the
+         * guest starts. Headless runs never set it: scale 1, no host
+         * frames. */
+        int ow = 0, oh = 0;
+        if (SDL_GetRendererOutputSize(ren, &ow, &oh) == 0 && ow > 0 && oh > 0)
+            nv2a_gl_set_display_size((uint32_t)ow, (uint32_t)oh);
+    }
+#endif
 
     SDL_AddEventWatch(lifecycle_watch, NULL);
 
@@ -499,7 +622,7 @@ int xbox_HostWindowMain(int (*guest_main)(void))
         SDL_Event ev;
         uint64_t seq, now;
         const uint8_t *px = NULL;
-        uint32_t bpp = 0, pitch = 0, x555 = 0;
+        uint32_t fw = 0, fh = 0, pitch = 0, format = 0;
 
         /* Before the first flip, poll at the display rate: the window then
          * reads the display surface itself. After, the flip's event wakes
@@ -569,33 +692,62 @@ int xbox_HostWindowMain(int (*guest_main)(void))
         if (seq != shown_seq || (reupload && shown_seq)) {
             shown_seq = seq;
             px = s_slot[s_front].px;
-            bpp = s_slot[s_front].bpp;
-            x555 = s_slot[s_front].x555;
-            pitch = FB_W * bpp;
+            fw = s_slot[s_front].w;
+            fh = s_slot[s_front].h;
+            pitch = s_slot[s_front].pitch;
+            format = s_slot[s_front].format;
         } else if (!shown_seq && s_fb_va && s_fb_pitch) {
             /* No flip yet: the display surface, as the GDI window reads it. */
-            bpp = s_fb_pitch / FB_W;
-            x555 = bpp == 2 && s_fb_x555;
+            uint32_t bpp = s_fb_pitch / FB_W;
+            fw = FB_W;
+            fh = FB_H;
+            format = guest_format(bpp, bpp == 2 && s_fb_x555);
             pitch = s_fb_pitch;
             if (bpp == 2 || bpp == 4)
                 px = (const uint8_t *)((uintptr_t)s_fb_va + xbox_GetMemoryOffset());
         }
-        if (px) {
-            if (!tex || bpp != tex_bpp || x555 != tex_x555) {
+        if (px && fw && fh) {
+            if (!tex || fw != tex_w || fh != tex_h || format != tex_format) {
                 if (tex)
                     SDL_DestroyTexture(tex);
-                tex = SDL_CreateTexture(ren, bpp == 4 ? SDL_PIXELFORMAT_RGB888
-                                             : x555 ? SDL_PIXELFORMAT_RGB555
-                                                    : SDL_PIXELFORMAT_RGB565,
-                                        SDL_TEXTUREACCESS_STREAMING,
-                                        (int)FB_W, (int)FB_H);
-                tex_bpp = bpp;
-                tex_x555 = x555;
+                tex = SDL_CreateTexture(ren, format, SDL_TEXTUREACCESS_STREAMING,
+                                        (int)fw, (int)fh);
+                if (tex && (fw != tex_w || fh != tex_h))
+                    fprintf(stderr, "  [FBWIN] texture %ux%u (%s)\n", fw, fh,
+                            SDL_GetPixelFormatName(format));
+                tex_w = tex ? fw : 0;
+                tex_h = tex ? fh : 0;
+                tex_format = format;
+                tex_linear = -1;            /* chosen below */
             }
             if (tex)
                 SDL_UpdateTexture(tex, NULL, px, (int)pitch);
             dirty = 1;
             reupload = 0;
+        }
+        if (dirty && tex) {
+            /* A frame at the guest's 640x480 keeps the window's nearest
+             * filter; one at another size (a GPU back end's internal
+             * resolution) is filtered linearly unless it maps 1:1 onto the
+             * letterboxed rectangle it is shown in. */
+            int linear = 0;
+            if (tex_w != FB_W || tex_h != FB_H) {
+                int ow = 0, oh = 0;
+                uint32_t rw, rh;
+                SDL_GetRendererOutputSize(ren, &ow, &oh);
+                if ((uint64_t)ow * FB_H <= (uint64_t)oh * FB_W) {
+                    rw = (uint32_t)ow;
+                    rh = (uint32_t)((uint64_t)ow * FB_H / FB_W);
+                } else {
+                    rh = (uint32_t)oh;
+                    rw = (uint32_t)((uint64_t)oh * FB_W / FB_H);
+                }
+                linear = tex_w != rw || tex_h != rh;
+            }
+            if (linear != tex_linear) {
+                SDL_SetTextureScaleMode(tex, linear ? SDL_ScaleModeLinear : SDL_ScaleModeNearest);
+                tex_linear = linear;
+            }
         }
         if (dirty) {
             dirty = 0;

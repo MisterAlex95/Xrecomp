@@ -37,8 +37,11 @@
  * first call and stays current on that thread; no other thread touches GL.
  * The SDL presenter keeps its own renderer on the main thread and is fed
  * exactly as with the CPU rasteriser -- through guest memory, after the
- * present hook below (gl_present) has read the frame back. Presenting the FBO texture
- * directly (a context shared with the presenter) is stage 7e.
+ * present hook below (gl_present) has read the frame back -- or, with host
+ * present (RECOMP_GPU_PRESENT=host, or RECOMP_GPU_SCALE above 1, windowed),
+ * with the target read at its real size into a pack buffer and handed over
+ * as Nv2aPresentSurface.host_px. Presenting the FBO texture directly (a
+ * context shared with the presenter) is stage 7e.
  *
  * Selected with RECOMP_GPU=1 (nv2a_gl_install_from_env, called by the
  * presenter's xbox_HostWindowMain); the CPU rasteriser stays the default.
@@ -62,6 +65,7 @@
 #include <string.h>
 #include <dirent.h>
 #include <sys/stat.h>
+#include <time.h>
 
 extern ptrdiff_t xbox_GetMemoryOffset(void);
 
@@ -125,6 +129,27 @@ static void nv2a_gl_invalidate(GLsizei n, const GLenum *att)
  * every other target drawn since the last flip, as before 7d (for a title
  * whose CPU reads its render targets). */
 static int s_present_sync_mode, s_readback_all;
+/* Host present: the presented target goes to the window at its real GL size
+ * (Nv2aPresentSurface.host_px), read one frame late into a pack buffer of
+ * its own, never through guest memory. On with RECOMP_GPU_PRESENT=host, or
+ * with an internal resolution above 1 (s_scale), and only while a window
+ * shows frames (nv2a_gl_set_display_size was called). The native copy into
+ * guest memory then happens only with RECOMP_GPU_READBACK=present (every
+ * flip, as before) or =all. */
+static int s_present_host_env, s_readback_present;
+/* The window's drawable in real pixels (nv2a_gl_set_display_size), 0 x 0
+ * headless. Set on the main thread before the guest (and so the executor)
+ * starts. */
+static uint32_t s_display_w, s_display_h;
+/* Internal resolution, RECOMP_GPU_SCALE (scale_from_env, at ensure_init):
+ * 1 to 4, what the frame-buffer class of targets is drawn at (WP-S1). */
+static float s_scale = 1.0f;
+
+void nv2a_gl_set_display_size(uint32_t w, uint32_t h)
+{
+    s_display_w = w;
+    s_display_h = h;
+}
 
 /* ---- helpers ------------------------------------------------------------ */
 
@@ -385,6 +410,47 @@ static void unregister_self(void);
 static void pc_init(void);
 static void sig_init(void);
 
+/* RECOMP_GPU_SCALE: 1 (default), 2, 3, a decimal 1-4, or "auto" -- the
+ * window's drawable height / 480 (1080 -> 2.25, 1440x1080 shown 1:1),
+ * at most 3; 1 headless. Never more than GL_MAX_TEXTURE_SIZE / 640. Needs
+ * the context (called from ensure_init). */
+static float scale_from_env(void)
+{
+    const char *e = getenv("RECOMP_GPU_SCALE");
+    GLint max_tex = 0;
+    float sc = 1.0f;
+    char why[96];
+
+    if (!e || !*e)
+        return 1.0f;
+    snprintf(why, sizeof why, "RECOMP_GPU_SCALE=%s", e);
+    if (strcmp(e, "auto") == 0) {
+        if (s_display_h) {
+            sc = (float)s_display_h / 480.0f;
+            if (sc > 3.0f)
+                sc = 3.0f;
+            snprintf(why, sizeof why, "RECOMP_GPU_SCALE=auto, window drawable %ux%u",
+                     s_display_w, s_display_h);
+        } else {
+            snprintf(why, sizeof why, "RECOMP_GPU_SCALE=auto, no window");
+        }
+    } else {
+        char *end;
+        double v = strtod(e, &end);
+        if (end != e && *end == 0 && v >= 1.0 && v <= 4.0)
+            sc = (float)v;
+        else
+            fprintf(stderr, "  [GPUGL] RECOMP_GPU_SCALE=%s: expected 1-4 or auto; using 1\n", e);
+    }
+    if (sc < 1.0f)
+        sc = 1.0f;
+    glGetIntegerv(GL_MAX_TEXTURE_SIZE, &max_tex);
+    if (max_tex >= 640 && sc * 640.0f > (float)max_tex)
+        sc = (float)max_tex / 640.0f;
+    fprintf(stderr, "  [GPUGL] internal scale %.2f (%s; max texture %d)\n", sc, why, (int)max_tex);
+    return sc;
+}
+
 static int ensure_init(void)
 {
     if (s_init)
@@ -435,9 +501,17 @@ static int ensure_init(void)
             fprintf(stderr, "  [GPUGL] present read-back sync (frame generation)\n");
         }
 #endif
+        s_present_host_env = a && strcmp(a, "host") == 0;
         a = getenv("RECOMP_GPU_READBACK");
         s_readback_all = a && strcmp(a, "all") == 0;
+        s_readback_present = a && strcmp(a, "present") == 0;
     }
+    s_scale = scale_from_env();
+    if (s_present_host_env || s_scale > 1.0f)
+        fprintf(stderr, "  [GPUGL] host present %s (window %ux%u), native copy %s\n",
+                s_display_w ? "on" : "off: no window", s_display_w, s_display_h,
+                s_readback_present || s_readback_all || !s_display_w ? "every flip"
+                                                                     : "on demand");
     {
         const char *a = getenv("RECOMP_TEX_ANISO");
         s_bilinear = env_on("RECOMP_TEX_BILINEAR")
@@ -862,6 +936,28 @@ static struct {
     GlRT snap;
     Nv2aPresentSurface surf;
 } s_pend;
+
+/* Host present (s_present_host_env / s_scale): the presented target read
+ * at its real size into one of two pack buffers at flip N, mapped at flip
+ * N+1 and handed to the window as Nv2aPresentSurface.host_px, unmapped at
+ * that flip's gl_flip -- meanwhile flip N+1's read-back goes into the other
+ * buffer. s_rt_host_serial: the target's serial at its last host read
+ * (kept apart from `dirty`, which says the guest bytes are stale; a host
+ * frame leaves them so). */
+static GLuint s_hpbo[2];
+static size_t s_hpbo_size[2];
+static int s_hnext, s_hmapped = -1;
+static struct {
+    int pending, buf;
+    uint32_t w, h;
+    Nv2aPresentSurface surf;
+} s_hpend;
+static uint32_t s_rt_host_serial[NV_GL_MAX_RT];
+static struct {
+    uint32_t frames;
+    uint64_t ns;                          /* issue + map, this side */
+    uint32_t w, h;
+} s_hst;
 
 /* What the title drew or put there before the GPU target existed: upload
  * the guest bytes now, if a full clear has not made them moot. */
@@ -3321,6 +3417,8 @@ static void gl_reset_objects(int lost)
         for (i = 0; i < s_nwarm; i++)
             glDeleteProgram(s_warm[i].prog);
         if (s_pbo) glDeleteBuffers(1, &s_pbo);
+        for (i = 0; i < 2; i++)
+            if (s_hpbo[i]) glDeleteBuffers(1, &s_hpbo[i]);
         if (s_pvbo) glDeleteBuffers(1, &s_pvbo);
         if (s_pebo) glDeleteBuffers(1, &s_pebo);
         if (s_pvao) glDeleteVertexArrays(1, &s_pvao);
@@ -3368,6 +3466,10 @@ static void gl_reset_objects(int lost)
     s_pbo = 0;
     s_pbo_size = 0;
     memset(&s_pend, 0, sizeof s_pend);
+    memset(s_hpbo, 0, sizeof s_hpbo);
+    memset(s_hpbo_size, 0, sizeof s_hpbo_size);
+    memset(&s_hpend, 0, sizeof s_hpend);
+    s_hmapped = -1;
     s_near_program = 0;             /* ensure_init: depth clamp on, range 0..1 */
     s_near01 = 0.0f;
     s_target_fbo = 0;
@@ -3499,6 +3601,145 @@ static void pbo_issue(GlRT *r, const Nv2aPresentSurface *surf)
     s_st.readbacks++;
 }
 
+/* The pixels a host present reads for target r: the framebuffer that holds
+ * them and their real size in GL pixels, origin (0, 0), top row first, for
+ * the area of r's guest surface (r->w x r->h). The one place the present
+ * asks for a target's size: 1x today; with an internal resolution (WP-S1)
+ * it returns the scaled size of that area, the FBO staying r->fbo. */
+static GLuint rt_present_source(const GlRT *r, uint32_t *w, uint32_t *h)
+{
+    *w = r->w;
+    *h = r->h;
+    return r->fbo;
+}
+
+static int host_present_on(void)
+{
+    return s_display_w && (s_present_host_env || s_scale > 1.0f);
+}
+
+static uint64_t host_now_ns(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+
+/* Start reading target r at its real size into the next host pack buffer. */
+static void host_issue(GlRT *r, const Nv2aPresentSurface *surf)
+{
+    uint32_t w, h;
+    GLuint fbo = rt_present_source(r, &w, &h);
+    int b = s_hnext;
+    size_t n = (size_t)w * h * 4;
+
+    if (!fbo || !w || !h)
+        return;
+    if (b == s_hmapped)
+        b ^= 1;                           /* never into the buffer still mapped */
+    s_hnext = b ^ 1;
+    if (!s_hpbo[b])
+        glGenBuffers(1, &s_hpbo[b]);
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, s_hpbo[b]);
+    if (n > s_hpbo_size[b]) {
+        glBufferData(GL_PIXEL_PACK_BUFFER, (GLsizeiptr)n, NULL, GL_STREAM_READ);
+        s_hpbo_size[b] = n;
+    }
+    sh_fbo(fbo);
+    glReadPixels(0, 0, (GLsizei)w, (GLsizei)h, NV_GL_READ_FORMAT, NV_GL_READ_TYPE, NULL);
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+    s_hpend.pending = 1;
+    s_hpend.buf = b;
+    s_hpend.w = w;
+    s_hpend.h = h;
+    s_hpend.surf = *surf;
+    s_rt_host_serial[r - s_rt] = r->serial;
+}
+
+/* Map the host read-back in flight and describe it in *ready (host_px);
+ * it stays mapped until gl_flip. 0: none pending, or the map failed. */
+static int host_map(Nv2aPresentSurface *ready)
+{
+    const void *p;
+    int b = s_hpend.buf;
+
+    if (!s_hpend.pending)
+        return 0;
+    s_hpend.pending = 0;
+    if (!s_hpbo[b] || s_hmapped >= 0)
+        return 0;
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, s_hpbo[b]);
+    p = glMapBufferRange(GL_PIXEL_PACK_BUFFER, 0, (GLsizeiptr)((size_t)s_hpend.w * s_hpend.h * 4),
+                         GL_MAP_READ_BIT);
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+    if (!p)
+        return 0;
+    s_hmapped = b;
+    *ready = s_hpend.surf;
+    ready->host_px = p;
+    ready->host_w = s_hpend.w;
+    ready->host_h = s_hpend.h;
+    ready->host_pitch = s_hpend.w * 4;
+    ready->host_format = NV_GL_READ_ARGB ? NV2A_HOST_FORMAT_BGRX8888 : NV2A_HOST_FORMAT_RGBX8888;
+    s_hst.frames++;
+    s_hst.w = s_hpend.w;
+    s_hst.h = s_hpend.h;
+    return 1;
+}
+
+/* At gl_flip: the window has copied the mapped host frame. */
+static void host_unmap(void)
+{
+    if (s_hmapped < 0)
+        return;
+    if (s_hpbo[s_hmapped]) {
+        glBindBuffer(GL_PIXEL_PACK_BUFFER, s_hpbo[s_hmapped]);
+        glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
+        glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+    }
+    s_hmapped = -1;
+}
+
+/* The flip's present, host frames (host_present_on): target r goes to the
+ * window at its real size. The guest bytes are refreshed only with
+ * RECOMP_GPU_READBACK=present or =all; otherwise r stays dirty and is read
+ * back when something needs its bytes. Returns gl_present's answer. */
+static int host_present(GlRT *r, const Nv2aPresentSurface *now, Nv2aPresentSurface *ready)
+{
+    uint64_t t0 = host_now_ns();
+    int fresh = r->serial != s_rt_host_serial[r - s_rt], got;
+
+    if ((s_readback_present || s_readback_all) && r->dirty) {
+        if (s_present_sync_mode)
+            rt_readback(r);
+        else
+            pbo_issue(r, now);
+    }
+    if (s_present_sync_mode) {
+        /* This flip's own frame (frame generation times frame N by flip N). */
+        s_hpend.pending = 0;
+        if (fresh)
+            host_issue(r, now);
+        got = host_map(ready);
+    } else {
+        got = host_map(ready);            /* the previous flip's frame */
+        if (fresh)
+            host_issue(r, now);
+    }
+    s_hst.ns += host_now_ns() - t0;
+    if (got)
+        return 1;
+    *ready = *now;
+    /* Not drawn since its last host read and the guest bytes not stale:
+     * the guest CPU may have written the frame there (a movie over a
+     * former target), so show guest memory, as without host present. */
+    if (!fresh && !r->dirty)
+        return 1;
+    /* Nothing new on the host side (the pipeline starts, or the map
+     * failed): keep showing what is shown. */
+    return 0;
+}
+
 /* The flip's present (nv2a_backend_register_with_present): only the
  * presented surface comes back to guest memory. Other targets stay on the
  * GPU until something needs their bytes: a texture the GPU cannot sample
@@ -3521,8 +3762,12 @@ static int gl_present(const Nv2aPresentSurface *now, int sync, Nv2aPresentSurfac
             rt_readback(&s_rt[i]);
     }
     have_prev = pbo_complete(&prev);
+    if (!r || sync)
+        s_hpend.pending = 0;          /* a guest frame comes between: drop it */
     if (!r)
         return 1;                     /* not a GPU target: guest memory is current */
+    if (!sync && host_present_on())
+        return host_present(r, now, ready);
     if (sync || s_present_sync_mode) {
         rt_readback(r);
         return 1;
@@ -3540,6 +3785,8 @@ static int gl_present(const Nv2aPresentSurface *now, int sync, Nv2aPresentSurfac
 
 static void gl_flip(void)
 {
+    if (s_init > 0)
+        host_unmap();                 /* the window has its copy */
     sig_flip();
     s_frame++;
     s_st.frames++;
@@ -3577,7 +3824,13 @@ static void gl_flip(void)
                     (double)s_st.vbo_hash_kb / s_st.frames, s_nvb, s_vb_bytes >> 10,
                     s_nvao, s_st.vao_new, (double)s_st.ib_new / s_st.frames,
                     (double)s_st.ib_kb / s_st.frames, s_nib, s_ib_bytes >> 10);
+        if (s_hst.frames)
+            fprintf(stderr, "  [GPUGL] host present: %u frames at %ux%u, %.3f ms/frame"
+                            " (read-back issue + map)\n",
+                    s_hst.frames, s_hst.w, s_hst.h,
+                    (double)s_hst.ns / 1e6 / (double)s_hst.frames);
         memset(&s_st, 0, sizeof s_st);
+        memset(&s_hst, 0, sizeof s_hst);
     }
     gl_check_frame();
 }

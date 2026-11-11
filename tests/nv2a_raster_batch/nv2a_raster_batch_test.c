@@ -52,6 +52,9 @@ int nv2a_pb_dma_walk(void) { return 1; }
 void xbox_FramebufferWindowStart(void) {}
 void xbox_FramebufferWindowFrameStats(uint32_t draws) { (void)draws; }
 void xbox_FramebufferWindowPresent(uint32_t va, uint32_t pitch) { (void)va; (void)pitch; }
+int xbox_FramebufferWindowPresentHost(const void *px, uint32_t w, uint32_t h, uint32_t pitch,
+                                      uint32_t format)
+{ (void)px; (void)w; (void)h; (void)pitch; (void)format; return 0; }
 void xbox_Nv2aFrameCounterFlip(void) {}
 /* The flip hold (#192, nv2a_flip_hold.c, linked in): no vblank moves here,
  * so the executor never holds a flip. */

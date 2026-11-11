@@ -346,7 +346,26 @@ typedef struct {
     uint32_t bpp;               /* 2 or 4 */
     uint32_t format;            /* SET_SURFACE_FORMAT (colour format in bits 0-3) */
     uint32_t x, y, w, h;        /* the clip rectangle drawn, real pixels */
+    /* A frame the back end hands the window directly, not through guest
+     * memory (present hook only, `ready` only; zero in `now`). host_px
+     * non-NULL: FLIP_STALL shows these host_w x host_h pixels, rows
+     * host_pitch bytes apart, top row first, in NV2A_HOST_FORMAT_*
+     * host_format, through xbox_FramebufferWindowPresentHost instead of
+     * reading guest memory at va. The size is the back end's own (an
+     * internal resolution above the guest's, RECOMP_GPU_SCALE); the window
+     * scales it to its logical 640x480. The bytes must stay valid until the
+     * back end's flip() (the window copies them before present returns);
+     * guest memory at va need not hold the frame then. A back end only
+     * sets it while a window shows frames (sync == 0, never for a dump). */
+    const void *host_px;
+    uint32_t host_w, host_h, host_pitch, host_format;
 } Nv2aPresentSurface;
+
+/* Nv2aPresentSurface.host_format; the same values as the window's
+ * XBOX_FB_HOST_* (src/video/video_player.h). Alpha bytes are ignored. */
+#define NV2A_HOST_FORMAT_BGRX8888 1u    /* bytes B, G, R, X: 0xXXRRGGBB words
+                                         * (desktop GL GL_BGRA read-back) */
+#define NV2A_HOST_FORMAT_RGBX8888 2u    /* bytes R, G, B, X (GLES GL_RGBA) */
 
 /* Register a back end with a present hook instead of a present sync. At
  * every flip, before the window snapshot and the frame dump, the executor
@@ -360,6 +379,11 @@ typedef struct {
  *     has completed since (an asynchronous read-back is one frame behind);
  *     its bytes must stay valid until the window has copied them, which
  *     happens before present returns control to the title.
+ *   sync == 0, alternatively: ready->host_px set, the frame's pixels in
+ *     host memory at the back end's own size (see Nv2aPresentSurface);
+ *     guest memory then keeps whatever it held. A frame the guest CPU
+ *     wrote (no GPU target at va) still goes through guest memory, so the
+ *     window may switch between the two from one flip to the next.
  *
  * The back end stores surfaces in their own colour format (X1R5G5B5 for
  * colour formats 1 and 2, R5G6B5 for 3), and the window and frame dumps
