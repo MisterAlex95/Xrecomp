@@ -604,9 +604,13 @@ clamp and border clamp fall back as listed above. Occlusion counts on GLES
 are "any sample passed" (1), enough for Fable's visibility tests.
 
 Settings: the launcher's Graphics section offers **Renderer** (Auto /
-Software / GPU, `RECOMP_GPU`) and **Frame cap (GPU renderer)** (30 / 60 /
-Off, `RECOMP_GPU_FPS_CAP`), written to `recomp.cfg`
-([app-shell.md](../android/app-shell.md#settings)).
+Software / GPU, `RECOMP_GPU`) and **Frame cap (GPU renderer)** (Auto / 30 /
+60 / Off, `RECOMP_GPU_FPS_CAP`), written to `recomp.cfg`
+([app-shell.md](../android/app-shell.md#settings)). Auto is the title
+profile's choice: Fable's profile sets `RECOMP_GPU_FPS_CAP=30` on Android
+(`SETENV_DEFAULT`, `#ifdef __ANDROID__` in `titles/4d5300d1/title.c`), since
+an Oakvale frame does not fit 16.7 ms on the Thor and a 60 cap lets the rate
+wander; it does not turn `RECOMP_GPU` on.
 
 Not default on Android yet. The in-world blockers are not in this back end's
 context code: 341 synchronous visibility queries and mid-frame readbacks per

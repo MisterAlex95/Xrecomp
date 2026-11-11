@@ -120,6 +120,16 @@ void xba_title_configure(void)
      * ever (the movies were skipped with an override until now). The plain
      * ~50 Hz tick plays them slower than the game expects: paced. */
     SETENV_DEFAULT("RECOMP_VBLANK", "paced");
+#ifdef __ANDROID__
+    /* GPU renderer on Android: 30 fps, evenly paced. In Oakvale a frame
+     * takes the executor 17-22 ms on an M1 and more on the AYN Thor, so a
+     * 60 cap only lets the rate wander between 20 and 40; menus stay
+     * smooth at 30 and the device stays cooler. Only read with
+     * RECOMP_GPU=1, which is not this profile's default yet (see
+     * docs/technical/gpu-backend.md, Android). The launcher's Frame cap
+     * setting (recomp.cfg) wins. */
+    SETENV_DEFAULT("RECOMP_GPU_FPS_CAP", "30");
+#endif
     /* More than the default 8 worker threads alive during the front-end load. */
     SETENV_DEFAULT("RECOMP_THREAD_STACKS", "32");
     /* The pad (the template starts the USB model when RECOMP_USB is set); the

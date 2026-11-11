@@ -165,7 +165,7 @@
     <string name="VAL_GPU_GL">GPU</string>
     <string name="OPT_GPU_FPS_CAP">Frame cap (GPU renderer)</string>
     <string name="OPT_GPU_FPS_CAP_SUMMARY">Frames per second at most, to save battery</string>
-    <string name="OPT_GPU_FPS_CAP_DETAIL">With the GPU renderer, menus and pause screens can run at 200 frames per second or more, which only drains the battery and heats the device. The cap holds them to 60 (or 30). Off removes it, for testing. No effect with the software renderer. (RECOMP_GPU_FPS_CAP)</string>
+    <string name="OPT_GPU_FPS_CAP_DETAIL">With the GPU renderer, menus and pause screens can run at 200 frames per second or more, which only drains the battery and heats the device. The cap holds them to 60 (or 30). Auto: what this game\'s profile chooses (60, or 30 where the profile asks for even pacing, as Fable does). Off removes it, for testing. No effect with the software renderer. (RECOMP_GPU_FPS_CAP)</string>
     <string name="VAL_FPS_30" translatable="false">30</string>
     <string name="VAL_FPS_60" translatable="false">60</string>
     <string name="OPT_TEX">Texture filtering</string>
