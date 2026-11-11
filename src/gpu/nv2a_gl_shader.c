@@ -60,7 +60,12 @@ uint64_t nv2a_gl_shader_key_hash(const Nv2aGlShaderKey *key)
 
 const char *nv2a_gl_glsl_header(int gles)
 {
+    /* GLSL ES 3.00 defaults samplers to lowp (and sampler2DShadow to
+     * nothing): texel values and cube/projective lookups at full precision,
+     * as on desktop. */
     return gles ? "#version 300 es\nprecision highp float;\nprecision highp int;\n"
+                  "precision highp sampler2D;\nprecision highp samplerCube;\n"
+                  "precision highp sampler2DShadow;\n"
                 : "#version 330 core\n";
 }
 
@@ -87,6 +92,13 @@ const char *nv2a_gl_vertex_body(void)
         "  gl_Position = vec4((a_pos.x * u_vp.x - 1.0) * w,\n"
         "                     (a_pos.y * u_vp.y - 1.0) * w,\n"
         "                     (a_pos.z * u_vp.z - 1.0) * w, w);\n"
+        /* u_vp.w = 1 where the context has no depth clamp (GLES without
+         * GL_EXT_depth_clamp): clamp z per vertex instead, so window z
+         * outside the zeta range is not clipped away. Per vertex, not per
+         * fragment: a triangle crossing the range gets a slightly different
+         * depth slope than with real depth clamp. */
+        "  if (u_vp.w > 0.5)\n"
+        "    gl_Position.z = clamp(gl_Position.z, -w, w);\n"
         "  v_d0 = a_d0; v_d1 = a_d1; v_fog = a_fog;\n"
         "  v_t0 = a_t0; v_t1 = a_t1; v_t2 = a_t2; v_t3 = a_t3;\n"
         "}\n";

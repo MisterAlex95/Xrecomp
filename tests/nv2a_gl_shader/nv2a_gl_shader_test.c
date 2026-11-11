@@ -146,6 +146,10 @@ int main(void)
         GLuint fs, prog;
         GLint ok = 0;
 
+        /* Every other program through the vertex shader's depth-clamp
+         * fallback (GLES without GL_EXT_depth_clamp): z is in range, so
+         * the pixels must not change. */
+        vp[3] = (float)(prog_i & 1);
         memset(&ps, 0, sizeof ps);
         ps.shade = NV2A_SHADE_COMBINERS;
         n = 1 + rnd() % 8;

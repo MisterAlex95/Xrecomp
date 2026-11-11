@@ -52,6 +52,7 @@ extern ptrdiff_t xbox_GetMemoryOffset(void);
 
 static int s_init;                 /* 0 not tried, 1 ready, -1 failed */
 static int s_s3tc, s_depth_clamp, s_verbose;
+static int s_border_clamp;         /* GL_CLAMP_TO_BORDER usable */
 static int s_bilinear;             /* RECOMP_TEX_BILINEAR / _ANISO, as the CPU path */
 static int s_recheck_frame;        /* RECOMP_GPU_TEX_RECHECK=frame */
 static uint32_t s_frame;
@@ -164,6 +165,15 @@ static int ensure_init(void)
     s_s3tc = has_ext("GL_EXT_texture_compression_s3tc")
           && !(getenv("RECOMP_GPU_S3TC") && !env_on("RECOMP_GPU_S3TC"));
     s_depth_clamp = !NV2A_GL_ES || has_ext("GL_EXT_depth_clamp");
+    {
+        /* Core on desktop and in GLES 3.2; an extension before that. */
+        GLint maj = 0, min = 0;
+        glGetIntegerv(GL_MAJOR_VERSION, &maj);
+        glGetIntegerv(GL_MINOR_VERSION, &min);
+        s_border_clamp = !NV2A_GL_ES || maj > 3 || (maj == 3 && min >= 2)
+                      || has_ext("GL_EXT_texture_border_clamp")
+                      || has_ext("GL_OES_texture_border_clamp");
+    }
     s_verbose = env_on("RECOMP_GPU_VERBOSE");
     {
         const char *a = getenv("RECOMP_TEX_ANISO");
@@ -172,9 +182,10 @@ static int ensure_init(void)
         a = getenv("RECOMP_GPU_TEX_RECHECK");
         s_recheck_frame = a && strcmp(a, "frame") == 0;
     }
-    fprintf(stderr, "  [GPUGL] S3TC %s, depth clamp %s\n",
+    fprintf(stderr, "  [GPUGL] S3TC %s, depth clamp %s, border clamp %s\n",
             s_s3tc ? "on" : "off (DXT decoded on the CPU)",
-            s_depth_clamp ? "on" : "off");
+            s_depth_clamp ? "on" : "off (clamped in the vertex shader)",
+            s_border_clamp ? "on" : "off (clamp to edge)");
 
     s_vs = compile(GL_VERTEX_SHADER, nv2a_gl_vertex_body());
     if (!s_vs) {
@@ -654,7 +665,7 @@ static GLint wrap_mode(uint32_t a, int border)
     switch (a) {
     case 1:  return GL_REPEAT;
     case 2:  return GL_MIRRORED_REPEAT;
-    case 4:  return (border && !NV2A_GL_ES) ? GL_CLAMP_TO_BORDER : GL_CLAMP_TO_EDGE;
+    case 4:  return (border && s_border_clamp) ? GL_CLAMP_TO_BORDER : GL_CLAMP_TO_EDGE;
     default: return GL_CLAMP_TO_EDGE;
     }
 }
@@ -687,13 +698,11 @@ static void tex_bind(GlTex *e, const Nv2aTexture *t, int unit, uint32_t shade)
             glTexParameteri(target, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
         e->wrap_s = ws;
         e->wrap_t = wt;
-#if !NV2A_GL_ES
         if (ws == GL_CLAMP_TO_BORDER || wt == GL_CLAMP_TO_BORDER) {
             float bc[4];
             unpack4(t->border, bc);
             glTexParameterfv(target, GL_TEXTURE_BORDER_COLOR, bc);
         }
-#endif
     }
     s_bound[unit] = e;
 }
@@ -977,7 +986,7 @@ static void gl_draw(const Nv2aSurface *s, const Nv2aBatch *b)
     v[0] = 2.0f / (float)r->w;
     v[1] = 2.0f / (float)r->h;
     v[2] = 2.0f / zmax_of(s->format);
-    v[3] = 0.0f;
+    v[3] = s_depth_clamp ? 0.0f : 1.0f;    /* vertex-shader clamp instead */
     glUniform4fv(p->u_vp, 1, v);
     glUniform2fv(p->u_tscale, 4, tscale);
     if (ps->shade == NV2A_SHADE_COMBINERS) {
