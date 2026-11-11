@@ -170,6 +170,19 @@ The executor is itself opt-in: set `RECOMP_PB_EXEC=1` to execute the pushbuffer.
 | `RECOMP_FMV_HOST` | off | Plays a movie through the host player when the title asks to. A substitute for the title's own output. | `kernel_bridge.c` |
 | `RECOMP_FMV_DUMP=<prefix>` | off | Writes two frames of a movie as BMP evidence. | `video_pump.c` |
 
+## Frame generation
+
+Only in a build configured with `-DXBOXRECOMP_LSFG=ON` (POSIX hosts); see [Frame Generation](../technical/framegen.md#pacing). The presenter does not hand frames to the pacer yet (later package): today these variables set the pacer up and change the executor's cap and the GL back end's present mode.
+
+| Variable | Default | What it does | Where |
+|---|---|---|---|
+| `RECOMP_LSFG=1` | off | Frame generation on. While on, the effective `RECOMP_GPU_FPS_CAP` is min(cap, display rate / multiplier) (a cap of `0` becomes display rate / multiplier: 30 at 60 Hz, 2x) and `RECOMP_GPU_PRESENT=sync` is forced. Both stay for the run if the pacer later falls back to pass-through. | `src/framegen/framegen_policy.h`, `nv2a_pb_exec.c`, `src/gpu/nv2a_gl.c` |
+| `RECOMP_LSFG_MULT=2..4` | 2 | Frames shown per real frame (2: one generated frame between two real ones). | `framegen_policy.h` |
+| `RECOMP_LSFG_DISPLAY_HZ=N` | 60 | Display refresh rate used by the cap rule, until the presenter reports the real one. | `framegen_policy.h` |
+| `RECOMP_LSFG_BUDGET_MS=N` | cap period / multiplier (16.7 ms at 30 fps, 2x) | Generation cost above which a frame counts as over budget; 30 in a row (or 30 failed generations) turn frame generation off: `[LSFG] off: <reason>`. | `src/framegen/framegen_pacer.c` |
+| `RECOMP_LSFG_FAKE=1` | off | Use the fake generator (CPU linear blend of the two frames, no Vulkan) instead of the LSFG bridge: headless runs and tests. | `framegen_pacer.c` |
+| `RECOMP_LSFG_FAKE_MS=N` | 0 | With the fake generator: sleep N ms per generated pair, to exercise the budget fallback. | `src/framegen/framegen_fake.c` |
+
 ## Audio
 
 See the [APU](../../src/apu/README.md) and [DirectSound](../../src/audio/README.md) module references.

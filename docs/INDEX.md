@@ -47,6 +47,7 @@ One per stage, in the order you run them.
 - [NV2A Shader Translation](technical/nv2a-shaders.md) — Register combiners and vertex microcode to HLSL
 - [D3D8LTCG Device Context](technical/d3d8ltcg-device-context.md) — Device field map, PB ring management, stub calling conventions
 - [Pushbuffer Executor](technical/pushbuffer-executor.md) — Executing a statically linked XDK D3D title's pushbuffer: DMA-engine walk, answering the title, fixed-function transform and lighting, anti-aliased surfaces, render back ends
+- [Frame Generation](technical/framegen.md) — LSFG frame generation: pacing of generated and real frames, cap and present-mode rules, fallback
 
 ### Microsoft's own recompiler
 
