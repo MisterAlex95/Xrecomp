@@ -98,6 +98,38 @@ static int fable_software_method(uint32_t param)
     return 1;
 }
 
+/* ── Aspect ratio ─────────────────────────────────────────────────────────
+ *
+ * Fable can draw its 3D scenes for a 16:9 screen (overrides.c: the camera's
+ * display-size override and the cutscene bars); the presenter then shows
+ * those frames stretched to 16:9 and keeps menus and movies at 4:3. The
+ * calls are src/video's (aspect_policy.c, declared in video_player.h; Win32
+ * has stubs):
+ *   xbox_AspectSetting()            RECOMP_ASPECT: 0 auto, 1 4:3, 2 16:9
+ *   xbox_FramebufferWindowSetWide() this title's 3D frames are anamorphic 16:9 */
+extern int xbox_AspectSetting(void);
+extern void xbox_FramebufferWindowSetWide(int on);
+extern int g_fable_aspect_wide;     /* overrides.c */
+
+static void fable_aspect_configure(void)
+{
+    int setting = xbox_AspectSetting();
+    int wide;
+
+    /* Auto: wide on Android, where the screen is a 16:9 handheld (the AYN
+     * Thor); 4:3 on a desktop, whose window keeps the console's shape. */
+#ifdef __ANDROID__
+    wide = setting != 1;
+#else
+    wide = setting == 2;
+#endif
+    if (!wide)
+        return;
+    g_fable_aspect_wide = 1;
+    xbox_FramebufferWindowSetWide(1);
+    fprintf(stderr, "[ASPECT] 16:9 scenes (setting %d)\n", setting);
+}
+
 void xba_title_configure(void)
 {
     /* Fable reserves 608 MB of address space for its own allocator and
@@ -170,6 +202,8 @@ void xba_title_configure(void)
             xbox_SetDelayOverride(0x0020C3CCu, 50, (uint32_t)ms);
         }
     }
+    /* Aspect ratio, above. */
+    fable_aspect_configure();
 }
 
 #ifndef _WIN32

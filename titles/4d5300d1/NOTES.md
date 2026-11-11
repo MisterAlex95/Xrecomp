@@ -293,3 +293,43 @@ the lock stalls D3D init (RECOMP_GUEST_CPU_TRACE).
 - RECOMP_GPU_ZPASS=lazy, same spot: 56.2-56.4 fps, 0 flushes, 117-582 reports answered lazily per 5 s, but still
   18-22 single-report waits per 5 s: the 512-pending cap (zpass_queue), which lazy does not change. On a tiler that
   is still a mid-frame wait; answer the cap lazily too if the device shows it.
+
+## 2026-11-11: 16:9 scenes (aspect WP-2, branch xba-aspect-fable)
+- Fable ignores XC_VIDEO_FLAGS_WIDESCREEN/HDTV and always renders 640x480 (0x0003EB43 mov eax,0x280;
+  0x0003EB7B mov ecx,0x1E0 -> device creation sub_0003EEB0; config globals 0x912B64/68 read once, then ignored).
+  XGetVideoFlags is sub_00593E13; its two callers only test PAL60 (0x40).
+- Camera setup sub_00132D00 (from every scene pass via sub_00131FC0): w,h = viewport; p = [0x009A1188]; if p and
+  float[p+8] > 0 and float[p+0xC] > 0: w,h = those; aspect = w/h -> cam+0xD0; unless byte[param+0x54] (explicit
+  fov): t = ((0.75 - h/w)*0.5 + 1)*fov*0.5, xs = cot(t) -> cam+0xD4, ys = xs*aspect -> cam+0xD8 (folded into the
+  view matrix). [0x009A1188] stays 0 in normal play; writers sub_00125ED0, sub_00125A20 (a level reload can reset
+  it); the camera is its only reader. fov 60: 4:3 hfov 60 / vfov 46.8; 16:9 hfov 65.6 / vfov 39.9.
+- Cutscene bars: sub_003C0070 calls thiscall sub_0023EB70(0.5, 0.5, 16/9) at 0x003C01A4 (ret 12), target aspect
+  stored at this+0x8C (the object is [[0x00988C60]+0x28]); the bars are drawn over a full-frame render (picture
+  rows 53-420). 4/3 there: no bars, subtitles and Skip prompt unchanged.
+  The AutoSave cutscene reaches it through sub_00303170 (a tail jmp to sub_0023EB70, called at 0x004B7CB8), not
+  from 0x003C01A4, so the hook tests the value, not the caller.
+- Movies: story XMVs 640x360 letterboxed on rows 61-420 (pure black bars); logos 640x480; GUI clips 256x256.
+- overrides.c entry hooks (need the generated code regenerated with this overrides.c, --exclude-manual):
+  sub_00132D00_enter points [0x009A1188] at a zeroed 64-byte guest blob (xbox_HeapAlloc(64,16), once) when it is
+  0 and writes 16.0/9.0 at +8/+0xC of whatever it points to, before every camera setup, so a reload that resets
+  the pointer is covered on the next pass; sub_0023EB70_enter replaces a third argument in (1.7, 1.8) at
+  [esp+0xC] (entry, before its push ecx) with 4/3. Both do nothing unless g_fable_aspect_wide.
+- title.c fable_aspect_configure (from xba_title_configure): wide when xbox_AspectSetting() is 2 (16:9), or 0
+  (auto) on Android; desktop auto stays 4:3. Wide sets g_fable_aspect_wide and calls
+  xbox_FramebufferWindowSetWide(1); "[ASPECT] 16:9 scenes" is printed. Both functions belong to src/video
+  (src/video/aspect_policy.c, declared in video_player.h, every configuration).
+- The profile compiles into the Android pack too: there auto means 16:9 scenes.
+- Regenerate after changing the hooks (the generated sub_00132D00 and sub_0023EB70 call them):
+  `python -m tools.recomp <xbe> --all --split 250 ... --exclude-manual titles/4d5300d1/overrides.c`
+  (tools.prepare passes the profile's exclude_manual); only recomp_0020.c and recomp_0036.c change.
+- Mac, RECOMP_GPU=1, headless pad scripts, RECOMP_ASPECT=16:9: "[ASPECT] camera display size 16 x 9 at <blob>
+  (ours)" at the first scene, "[ASPECT] cutscene bars 16:9 -> 4:3" at the AutoSave cutscene; gameplay drawn
+  anamorphic, cutscene full frame with subtitles and Skip Scene, story XMVs unchanged (letterboxed), menus
+  unchanged. A pause-menu Load (a quick reboot of the title) re-applies both. Auto/4:3: no [ASPECT] line,
+  cutscene bars and proportions as before.
+- With the presenter (windowed, RECOMP_FB_WINDOW=1, RECOMP_ASPECT=16:9): [FBWIN] NORMAL on logos and menus, ZOOM
+  (rows 60-419) on the story movies, WIDE on the cutscene and gameplay (217,000-231,000 triangles).
+- Cost: headless, gameplay 57-60 fps either way (paced at 60). Windowed, back to back, the first ~40 s in Oakvale:
+  hooks off (presenter wide only) 45.9 -> 59.5-59.9 fps; hooks on 43.5 -> 46-52 fps, still climbing (~4 % more
+  triangles at the start; the wider view brings in more of the town). Menus are 40 fps windowed with 16:9 with or
+  without the hooks (60 with auto): the presenter's, not the camera's.
