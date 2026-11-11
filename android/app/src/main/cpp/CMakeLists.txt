@@ -21,6 +21,36 @@ set(XBA_TOOLKIT_LIBS xbox_kernel xbox_d3d8 xbox_dsound xbox_input xbox_input_map
                      recomp_storage recomp_app recomp_selftest recomp_pack)
 target_link_libraries(main PRIVATE -Wl,--whole-archive ${XBA_TOOLKIT_LIBS} -Wl,--no-whole-archive
                                    SDL2::SDL2 GLESv3 log android m)
+
+# Release flags for the runtime (the software GPU, the kernel, audio): what a frame on the device spends its time in.
+# Every toolkit library pins -O2 in its own CMakeLists, after the NDK's per-configuration flags, so the NDK's -O3 for
+# Release never reached them; and the NDK adds -fstack-protector-strong and -D_FORTIFY_SOURCE=2 to everything. In a
+# release build, -O2 becomes -O3 and both checks go, for these libraries only (SDL2 and the title keep theirs).
+# XBA_NATIVE_CPU (gradle -PxbaNativeCpu=...) picks the instruction set: empty (the default) keeps the arm64-v8a
+# baseline, so the APK still runs on any arm64 device, and only tunes scheduling for the AYN Thor's big cores
+# (Snapdragon 8 Gen 2: Cortex-X3, A715, A710); a core name (cortex-a715) compiles for that core's ISA (ARMv9 with
+# SVE2), which a Thor runs and an ARMv8 phone does not. Debug builds are left alone.
+set(XBA_NATIVE_CPU "" CACHE STRING "Release: -mcpu for the runtime libraries; empty = arm64 baseline, tuned for Cortex-A715")
+if(CMAKE_BUILD_TYPE AND NOT CMAKE_BUILD_TYPE STREQUAL "Debug")
+    if(XBA_NATIVE_CPU)
+        set(_xba_cpu "-mcpu=${XBA_NATIVE_CPU}")
+    else()
+        set(_xba_cpu "-mtune=cortex-a715")
+    endif()
+    foreach(_lib IN LISTS XBA_TOOLKIT_LIBS)
+        get_target_property(_type ${_lib} TYPE)
+        if(_type STREQUAL "INTERFACE_LIBRARY")
+            continue()
+        endif()
+        get_target_property(_opts ${_lib} COMPILE_OPTIONS)
+        if(_opts)
+            list(REMOVE_ITEM _opts -O2)
+            set_property(TARGET ${_lib} PROPERTY COMPILE_OPTIONS ${_opts})
+        endif()
+        target_compile_options(${_lib} PRIVATE -O3 ${_xba_cpu} -fno-stack-protector -U_FORTIFY_SOURCE)
+    endforeach()
+    message(STATUS "libmain.so: runtime libraries -O3 ${_xba_cpu}, no stack protector or fortify (${CMAKE_BUILD_TYPE})")
+endif()
 target_link_options(main PRIVATE -Wl,--no-undefined)
 
 # libxba_import.so (XBA-40, XBA-54): the game picker's ISO import, JNI around src/xiso. A library of its own: the

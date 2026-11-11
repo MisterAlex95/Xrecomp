@@ -133,7 +133,9 @@ android {
         externalNativeBuild {
             cmake {
                 arguments "-DXBOXRECOMP_SDL2_SOURCE_DIR=${sdl2Src}", "-DXBA_VERSION=${xbaVersion}",
-                          '-DXBOXRECOMP_BUILD_TESTS=OFF', "-DXBA_TITLE_DIR=${xbaTitleDir}"
+                          '-DXBOXRECOMP_BUILD_TESTS=OFF', "-DXBA_TITLE_DIR=${xbaTitleDir}",
+                          // Release only: -mcpu for the runtime libraries (cpp/CMakeLists.txt); empty = arm64 baseline.
+                          "-DXBA_NATIVE_CPU=${findProperty('xbaNativeCpu') ?: ''}"
             }
         }
     }
