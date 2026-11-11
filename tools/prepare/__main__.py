@@ -37,6 +37,7 @@ import time
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 TEMPLATE = os.path.join(ROOT, "templates", "new-game")
 PROFILES = os.path.join(ROOT, "profiles")
+DISCOVERY_FILE = "discovered.jsonl"     # in the work folder: src/kernel/recomp_discovery.h
 STEPS = 5
 
 
@@ -384,7 +385,9 @@ def main(argv=None):
     build = os.path.join(proj, "build")
     gen_args = ["-G", "Ninja"] if shutil.which("ninja") else []
     run(["cmake", "-S", proj, "-B", build, "-DCMAKE_BUILD_TYPE=Release",
-         "-DXBOXRECOMP_DIR=" + ROOT] + gen_args, log)
+         "-DXBOXRECOMP_DIR=" + ROOT,
+         # What a run meets that the analysis missed: the next prepare reads it.
+         "-DXBA_DISCOVERY_FILE=" + os.path.join(work, DISCOVERY_FILE).replace("\\", "/")] + gen_args, log)
     t = run(["cmake", "--build", build, "--parallel"], log)
     print("      built in %.0f s" % t, flush=True)
     exe = os.path.join(build, name)

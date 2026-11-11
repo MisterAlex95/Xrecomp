@@ -86,7 +86,7 @@ python -m tools.prepare SOURCE --android --work DIR --pack-dir DIR --cc PATH [--
 | Flag | Device value |
 |---|---|
 | `SOURCE` | The game folder (holds `default.xbe`; the app's ISO import extracted it), or a `default.xbe`, or an image (`.iso`/`.xiso`: only `default.xbe` is read out). |
-| `--work DIR` | Per title, internal storage, e.g. `<files dir>/prepare/<TITLEID>`. Holds the copy of the XBE, the analysis, the C project, the object cache, `stamp.json`, `prepare.log`. Keep it between runs: it is what makes a rerun cheap. Several hundred MB for a large title (the C alone is ~250 MB for one). |
+| `--work DIR` | Per title, internal storage, e.g. `<files dir>/prepare/<TITLEID>`. Holds the copy of the XBE, the analysis, the C project, the object cache, `stamp.json`, `prepare.log`, and `discovered.jsonl`, which the title's runs write ([discovery.md](../technical/discovery.md)). Keep it between runs: it is what makes a rerun cheap. Several hundred MB for a large title (the C alone is ~250 MB for one). |
 | `--pack-dir DIR` | `<files dir>/packs` |
 | `--cc PATH` | `<nativeLibraryDir>/libxbacc.so` |
 | `--cc-prefix-arg clang` | The multicall applet. With a prefix arg, the linker is `PATH ld.lld` unless `--ld` says otherwise. On a host: the NDK's `clang` and no prefix (ld.lld is taken next to it). |

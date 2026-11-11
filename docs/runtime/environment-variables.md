@@ -59,6 +59,7 @@ Start here when a title does not run. See [Step 6: Iterative Debugging](../pipel
 | `RECOMP_KERNEL_WATCH_ALL` | off | With the above: prints every sample, so a value that was already wrong at the first call shows. | `kernel_bridge.c` |
 | `RECOMP_KERNEL_LOG_BUDGET=N` | 200 | Number of kernel-call log lines kept before the log goes quiet. | `kernel_bridge.c` |
 | `RECOMP_IRQL_TRACE` | off | Prints the first IRQL transitions; a lower from a level the raise did not set is a calling-convention bug. | `kernel_hal.c` |
+| `RECOMP_DISCOVERY=<file>` | the prepare's work folder (desktop: set by `tools.prepare`; Android: `<files>/work/<TITLEID>/`) | Where a run records what the static analysis missed: unknown call targets, thread starts, untranslated instructions reached. `0` turns it off. [discovery.md](../technical/discovery.md) | `src/kernel/recomp_discovery.c` |
 | `RECOMP_UNIMPL_TRAP=1` | off | Stops at the first untranslated instruction that is actually reached, instead of logging it. | `templates/new-game/src/recomp_manual.c` |
 | `RECOMP_STUB_LOG=1` | off | Prints each unresolved stub the first time it runs, with return address and `esp`. Read by the generated stubs file. | `tools/recomp/translator.py` |
 | `RECOMP_TRACE_BUDGET=N` | 400000 | Lines of the call trace kept; a larger file is better than a hole. | `recomp_trace.c` |

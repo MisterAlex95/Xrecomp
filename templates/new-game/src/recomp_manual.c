@@ -51,6 +51,10 @@ typedef void (*recomp_func_t)(void);
 #include "xbox_memory_layout.h"
 extern ptrdiff_t g_xbox_mem_offset;
 
+/* What the run meets and the static analysis missed goes to the discovery
+ * file for the next prepare (XBA-64, src/kernel/recomp_discovery.h). */
+#include "recomp_discovery.h"
+
 /* ── Manual function overrides ─────────────────────────────── */
 
 /*
@@ -116,6 +120,9 @@ recomp_func_t recomp_lookup_manual(uint32_t xbox_va)
  */
 void recomp_icall_fail_log(uint32_t va)
 {
+    /* The call pushed its real return address: [g_esp] is the caller's next
+     * instruction. */
+    recomp_discovery_icall(va, *(volatile uint32_t *)((uintptr_t)g_esp + g_xbox_mem_offset));
     fprintf(stderr, "[ICALL] Failed to resolve VA 0x%08X (total calls: %llu)\n",
             va, (unsigned long long)g_icall_count);
 
@@ -189,6 +196,8 @@ void recomp_unimpl(const char *text, uint32_t va)
     static int printed;
     const char *trap = getenv("RECOMP_UNIMPL_TRAP");
     int stop = trap && *trap && *trap != '0';
+
+    recomp_discovery_unimpl(va, text);
 
     if (printed < 50 || stop) {
         printed++;

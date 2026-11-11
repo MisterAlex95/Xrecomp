@@ -31,6 +31,7 @@
 #include "xbox_memory_layout.h"
 #include "platform/host_time.h"
 #include "recomp_icall_feedback.h"
+#include "recomp_discovery.h"
 #include <stdio.h>
 /* stdlib.h is load-bearing, not tidiness. Without it C89 implicit declaration
  * makes malloc return `int`, so bridge_spawn_thread truncated its heap pointer
@@ -711,6 +712,18 @@ static uint32_t thobj_current(void)
     return g_thread_obj_va;
 }
 
+/* XBA-64: StartContext1 is often the title's real entry (the thread
+ * convention hands the wrapper its routine through it), and nothing calls it
+ * directly. One in the title's code range with no dispatch entry goes to the
+ * discovery file; tools.seed_from_log's gates decide whether it is code. */
+extern uint32_t g_xbox_code_lo, g_xbox_code_hi;
+static void bridge_discover_thread_ctx(uint32_t routine, uint32_t ctx1)
+{
+    if (g_xbox_code_hi && ctx1 >= g_xbox_code_lo && ctx1 < g_xbox_code_hi
+        && !recomp_lookup(ctx1) && !recomp_lookup_manual(ctx1))
+        recomp_discovery_thread_ctx(ctx1, routine);
+}
+
 static void bridge_run_thread_inline(recomp_func_t fn, uint32_t ctx1,
                                      uint32_t ctx2)
 {
@@ -876,6 +889,7 @@ static void bridge_PsCreateSystemThreadEx(void)
     fprintf(stderr, "  [KERNEL] PsCreateSystemThreadEx #%d: routine=0x%08X ctx1=0x%08X ctx2=0x%08X\n",
             g_thread_call_count, start_routine, start_context1, start_context2);
     fflush(stderr);
+    bridge_discover_thread_ctx(start_routine, start_context1);
 
     /* Write a fake handle to the output pointer */
     if (xbox_handle_ptr) {
@@ -984,6 +998,7 @@ static void bridge_PsCreateSystemThreadEx(void)
         } else {
             fprintf(stderr, "  [KERNEL] PsCreateSystemThreadEx: start routine 0x%08X not found in dispatch!\n",
                     start_routine);
+            recomp_discovery_thread(start_routine, start_context1);
         }
     }
 
@@ -9406,6 +9421,7 @@ static void bridge_PsCreateSystemThread(void)
                         && (g_thread_call_count == 0);
 
     g_thread_call_count++;
+    bridge_discover_thread_ctx(start_routine, start_context1);
 
     /* Fake handle until the worker path can write a real one. */
     if (xbox_handle_ptr)
@@ -9448,6 +9464,7 @@ static void bridge_PsCreateSystemThread(void)
         } else {
             fprintf(stderr, "  [KERNEL] PsCreateSystemThread: start routine 0x%08X not found in dispatch!\n",
                     start_routine);
+            recomp_discovery_thread(start_routine, start_context1);
         }
     }
     g_eax = 0;  /* STATUS_SUCCESS */
