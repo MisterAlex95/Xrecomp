@@ -111,6 +111,8 @@ The executor is itself opt-in: set `RECOMP_PB_EXEC=1` to execute the pushbuffer.
 | `RECOMP_NO_COMBINERS` | off | Skips the register combiners. | `nv2a_pb_exec.c` |
 | `RECOMP_NO_VSH` | off | Skips vertex programs. | `nv2a_pb_exec.c` |
 | `RECOMP_RASTER_THREADS=N` | auto | Worker threads for the software rasteriser, on Windows and POSIX. | `nv2a_pb_exec.c` |
+| `RECOMP_RASTER_SPIN_US=N` | 20 | POSIX: how long an idle rasteriser worker watches for the next job before it parks (`0`: park at once). The executor hands batches over back to back, and a wake costs tens of microseconds. | `nv2a_pb_exec.c` |
+| `RECOMP_VSH_POOL=0` | on | Shades every vertex-program batch on the executor thread instead of splitting batches of 192+ vertices across the rasteriser's worker threads (same output either way). | `nv2a_pb_exec.c` |
 | `RECOMP_TEX_BILINEAR=1` | off | CPU rasteriser blends the four nearest texels instead of taking the nearest. | `nv2a_pb_exec.c` |
 | `RECOMP_TEX_ANISO=8\|16` | off | Anisotropic filtering on the CPU rasteriser; implies `RECOMP_TEX_BILINEAR`. Slower. | `nv2a_pb_exec.c` |
 | `RECOMP_GPU=1` | off | Draw with the GL back end (desktop GL 3.3/4.1 core, GLES 3.0 on Android) instead of the CPU rasteriser; vertex programs still run on the CPU. Falls back to the CPU rasteriser if no GL context can be made. See [GPU Back End](../technical/gpu-backend.md). | `src/gpu/nv2a_gl.c` |

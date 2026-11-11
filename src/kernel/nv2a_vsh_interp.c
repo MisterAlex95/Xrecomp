@@ -587,19 +587,52 @@ static int vsh_run_decoded(const float in[NV2A_VSH_INPUTS][4], Nv2aVshOutput *ou
 
 static int vsh_run_fields(const float in[NV2A_VSH_INPUTS][4], Nv2aVshOutput *out);
 
-int nv2a_vsh_run(const float in[NV2A_VSH_INPUTS][4], Nv2aVshOutput *out)
+/* 0 fields, 1 decoded, 2 both, compared. Read once, on the executor thread. */
+static int vsh_mode(void)
 {
-    static int mode = -1;            /* 0 fields, 1 decoded, 2 both, compared */
+    static int mode = -1;
 
     if (mode < 0) {
         const char *d = getenv("RECOMP_VSH_DECODED");
         const char *c = getenv("RECOMP_VSH_CHECK");
-        mode = (d && d[0] == '0') ? 0 : 1;
+        int m = (d && d[0] == '0') ? 0 : 1;
         if (c && c[0] == '1')
-            mode = 2;
+            m = 2;
         if (getenv("RECOMP_VSH_DUMP"))
-            mode = 0;
+            m = 0;
+        mode = m;
     }
+    return mode;
+}
+
+/* Shading one batch on several threads.
+ *
+ * vsh_run_decoded keeps every register in locals and only reads the decoded
+ * program and c[], so once the program is decoded, runs on other threads are
+ * independent -- as long as nothing writes shared state meanwhile. Two things
+ * do: a program that writes c[] (CXT_WRITE_EN; the next vertex reads what the
+ * previous one wrote, so those must run in order, one thread), and the modes
+ * that keep per-run statics (the field() loop's dump, the comparing check).
+ * Those batches stay serial. Decoding happens here, on the calling thread,
+ * so the workers never race to decode. */
+int nv2a_vsh_prepare_parallel(void)
+{
+    if (vsh_mode() != 1 || s_cxt_write)
+        return 0;
+    if (!s_dec_valid || s_dec_rev != s_program_revision)
+        dec_program();
+    return 1;
+}
+
+int nv2a_vsh_run_prepared(const float in[NV2A_VSH_INPUTS][4], Nv2aVshOutput *out)
+{
+    return vsh_run_decoded(in, out);
+}
+
+int nv2a_vsh_run(const float in[NV2A_VSH_INPUTS][4], Nv2aVshOutput *out)
+{
+    int mode = vsh_mode();
+
     if (mode == 1)
         return vsh_run_decoded(in, out);
     if (mode == 2 && !s_cxt_write) {

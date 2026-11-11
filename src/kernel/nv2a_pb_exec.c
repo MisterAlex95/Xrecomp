@@ -37,6 +37,7 @@
 #if !defined(_WIN32)
 #include <pthread.h>              /* the raster worker pool */
 #include <unistd.h>               /* sysconf(_SC_NPROCESSORS_ONLN) */
+#include <sched.h>                /* sched_yield */
 #endif
 /* The swizzle decoder the D3D8 layer already uses -- one implementation of
  * Morton order, not a second one that can disagree with it. */
@@ -2970,6 +2971,7 @@ static void xf_rows(const XfTri *T, int y0, int step, XfCount *cnt)
  * may undercount; nothing depends on them. */
 #define NV_RASTER_MAX_THREADS 16
 #define NV_RASTER_MT_MIN_PIXELS 8192
+#define NV_RASTER_SPIN_US 20
 
 /* Worker k owns the rows y with y % n == k, for every triangle of the run,
  * in submission order. Each pixel therefore sees its triangles in the order
@@ -2990,14 +2992,21 @@ static void xf_rows_owned(const XfTri *tris, int ntris, int k, int n,
 static int s_raster_last_workers = 1;
 int nv2a_raster_last_workers(void) { return s_raster_last_workers; }
 
+/* The pool runs one job at a time for the executor thread: a function called
+ * as fn(k, n, ctx) on every thread, k = 0..n-1, the caller being k = n - 1.
+ * Rasterising a run of triangles is one job, shading a batch's vertices
+ * another. */
+typedef void (*PoolJob)(int k, int n, void *ctx);
+/* A job cut into chunks any thread may take: fn(chunk, thread, ctx). */
+typedef void (*PoolChunk)(int chunk, int thread, void *ctx);
+
 #if defined(_WIN32)
 static struct {
     int n;                                  /* threads incl. the caller */
     HANDLE start[NV_RASTER_MAX_THREADS], done;
     volatile LONG pending;
-    const XfTri *tris;
-    int ntris;
-    XfCount cnt[NV_RASTER_MAX_THREADS];
+    PoolJob fn;
+    void *ctx;
 } s_pool;
 
 static DWORD WINAPI raster_worker(LPVOID arg)
@@ -3005,8 +3014,7 @@ static DWORD WINAPI raster_worker(LPVOID arg)
     int k = (int)(intptr_t)arg;
     for (;;) {
         WaitForSingleObject(s_pool.start[k], INFINITE);
-        memset(&s_pool.cnt[k], 0, sizeof s_pool.cnt[k]);
-        xf_rows_owned(s_pool.tris, s_pool.ntris, k, s_pool.n, &s_pool.cnt[k]);
+        s_pool.fn(k, s_pool.n, s_pool.ctx);
         if (InterlockedDecrement(&s_pool.pending) == 0)
             SetEvent(s_pool.done);
     }
@@ -3038,39 +3046,38 @@ static int raster_pool_size(void)
     return s_pool.n;
 }
 
-static void xf_rows_parallel(const XfTri *T, int ntris, long px,
-                             XfCount *total)
+/* Run fn on every thread of the pool (size > 1) and wait for all of them. */
+static void pool_run(PoolJob fn, void *ctx)
 {
-    int n = raster_pool_size(), k;
+    int n = s_pool.n, k;
 
-    if (n <= 1 || px < NV_RASTER_MT_MIN_PIXELS) {
-        for (k = 0; k < ntris; k++)
-            xf_rows(&T[k], T[k].miny, 1, total);
-        return;
-    }
-    s_pool.tris = T;
-    s_pool.ntris = ntris;
+    s_pool.fn = fn;
+    s_pool.ctx = ctx;
     s_pool.pending = n - 1;
     for (k = 0; k < n - 1; k++)
         SetEvent(s_pool.start[k]);
-    {
-        XfCount mine = {0, 0, 0};
-        xf_rows_owned(T, ntris, n - 1, n, &mine);
-        WaitForSingleObject(s_pool.done, INFINITE);
-        total->depth_fail += mine.depth_fail;
-        total->pixels += mine.pixels;
-        total->zpass += mine.zpass;
-    }
-    {
-        int ran = 1;                          /* the caller always draws */
-        for (k = 0; k < n - 1; k++) {
-            if (s_pool.cnt[k].pixels) ran++;
-            total->depth_fail += s_pool.cnt[k].depth_fail;
-            total->pixels += s_pool.cnt[k].pixels;
-            total->zpass += s_pool.cnt[k].zpass;
-        }
-        s_raster_last_workers = ran;
-    }
+    fn(n - 1, n, ctx);                      /* the caller's share */
+    WaitForSingleObject(s_pool.done, INFINITE);
+}
+
+/* Chunks on this pool: thread k takes chunks k, k + n, ... (every thread
+ * joins every job here, so a static split costs nothing extra). */
+static struct { PoolChunk fn; void *ctx; int nchunks; } s_chunks;
+
+static void pool_chunks_static(int k, int n, void *ctx)
+{
+    int c;
+    (void)ctx;
+    for (c = k; c < s_chunks.nchunks; c += n)
+        s_chunks.fn(c, k, s_chunks.ctx);
+}
+
+static void pool_run_chunks(PoolChunk fn, void *ctx, int nchunks)
+{
+    s_chunks.fn = fn;
+    s_chunks.ctx = ctx;
+    s_chunks.nchunks = nchunks;
+    pool_run(pool_chunks_static, NULL);
 }
 #else
 /* The same pool on pthreads. One mutex and two conditions rather than a
@@ -3084,24 +3091,100 @@ static struct {
     pthread_cond_t start, done;
     unsigned long generation;
     int pending;
-    const XfTri *tris;
-    int ntris;
-    XfCount cnt[NV_RASTER_MAX_THREADS];
+    PoolJob fn;
+    void *ctx;
+    /* A chunked job (pool_run_chunks): workers take chunks while there are
+     * any and are not waited for. claim = generation << 32 | next chunk. */
+    int chunked, nchunks;
+    PoolChunk cfn;
+    uint64_t claim;
+    int chunks_done;
+    int sleepers;                           /* workers parked on `start` */
 } s_pool;
+
+/* RECOMP_RASTER_SPIN_US: how long an idle worker watches for the next job
+ * before it parks (0: park at once). */
+static long s_pool_spin_ns = -1;
+
+static int pool_spin_for_job(unsigned long seen)
+{
+    struct timespec t0, t;
+    int i = 0;
+
+    if (s_pool_spin_ns <= 0)
+        return 0;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    for (;;) {
+        if (__atomic_load_n(&s_pool.generation, __ATOMIC_ACQUIRE) != seen)
+            return 1;
+#if defined(__aarch64__)
+        __asm__ __volatile__("yield");
+#elif defined(__x86_64__) || defined(__i386__)
+        __asm__ __volatile__("pause");
+#endif
+        if (++i % 64 == 0) {
+            clock_gettime(CLOCK_MONOTONIC, &t);
+            if ((t.tv_sec - t0.tv_sec) * 1000000000L + (t.tv_nsec - t0.tv_nsec)
+                    > s_pool_spin_ns)
+                return 0;
+        }
+    }
+}
+
+/* Take and run chunks of job `gen` until none is left or the job is over. */
+static void pool_take_chunks(uint32_t gen, PoolChunk fn, void *ctx,
+                             int nchunks, int thread)
+{
+    for (;;) {
+        uint64_t c = __atomic_load_n(&s_pool.claim, __ATOMIC_ACQUIRE);
+        if ((uint32_t)(c >> 32) != gen || (int)(uint32_t)c >= nchunks)
+            return;
+        if (!__atomic_compare_exchange_n(&s_pool.claim, &c, c + 1, 0,
+                                         __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+            continue;
+        fn((int)(uint32_t)c, thread, ctx);
+        __atomic_add_fetch(&s_pool.chunks_done, 1, __ATOMIC_RELEASE);
+    }
+}
 
 static void *raster_worker(void *arg)
 {
     int k = (int)(intptr_t)arg;
     unsigned long seen = 0;
     for (;;) {
-        pthread_mutex_lock(&s_pool.lock);
-        while (s_pool.generation == seen)
-            pthread_cond_wait(&s_pool.start, &s_pool.lock);
+        PoolJob fn;
+        PoolChunk cfn;
+        void *ctx;
+        int chunked, nchunks;
+
+        /* The executor hands batches over back to back; a worker that
+         * parked after each would be woken for every one, and a wake costs
+         * tens of microseconds. So look for the next job a little before
+         * parking. */
+        if (seen && pool_spin_for_job(seen)) {
+            pthread_mutex_lock(&s_pool.lock);
+        } else {
+            pthread_mutex_lock(&s_pool.lock);
+            s_pool.sleepers++;
+            while (__atomic_load_n(&s_pool.generation, __ATOMIC_ACQUIRE) == seen)
+                pthread_cond_wait(&s_pool.start, &s_pool.lock);
+            s_pool.sleepers--;
+        }
         seen = s_pool.generation;
+        fn = s_pool.fn;
+        cfn = s_pool.cfn;
+        ctx = s_pool.ctx;
+        chunked = s_pool.chunked;
+        nchunks = s_pool.nchunks;
         pthread_mutex_unlock(&s_pool.lock);
 
-        memset(&s_pool.cnt[k], 0, sizeof s_pool.cnt[k]);
-        xf_rows_owned(s_pool.tris, s_pool.ntris, k, s_pool.n, &s_pool.cnt[k]);
+        if (chunked) {
+            /* Nobody waits for this worker: a job it wakes too late for
+             * is simply over, and the claim word says so. */
+            pool_take_chunks((uint32_t)seen, cfn, ctx, nchunks, k);
+            continue;
+        }
+        fn(k, s_pool.n, ctx);
 
         pthread_mutex_lock(&s_pool.lock);
         if (--s_pool.pending == 0)
@@ -3125,6 +3208,10 @@ static int raster_pool_size(void)
         if (n < 1) n = 1;
         if (n > NV_RASTER_MAX_THREADS) n = NV_RASTER_MAX_THREADS;
         s_pool.n = n;
+        {
+            const char *sp = getenv("RECOMP_RASTER_SPIN_US");
+            s_pool_spin_ns = (sp ? atol(sp) : NV_RASTER_SPIN_US) * 1000L;
+        }
         if (n > 1) {
             pthread_mutex_init(&s_pool.lock, NULL);
             pthread_cond_init(&s_pool.start, NULL);
@@ -3146,10 +3233,86 @@ static int raster_pool_size(void)
     return s_pool.n;
 }
 
+/* Run fn on every thread of the pool (size > 1) and wait for all of them. */
+static void pool_run(PoolJob fn, void *ctx)
+{
+    int n = s_pool.n;
+
+    pthread_mutex_lock(&s_pool.lock);
+    s_pool.chunked = 0;
+    s_pool.fn = fn;
+    s_pool.ctx = ctx;
+    s_pool.pending = n - 1;
+    __atomic_add_fetch(&s_pool.generation, 1, __ATOMIC_RELEASE);
+    if (s_pool.sleepers)
+        pthread_cond_broadcast(&s_pool.start);
+    pthread_mutex_unlock(&s_pool.lock);
+
+    fn(n - 1, n, ctx);                      /* the caller's share */
+
+    pthread_mutex_lock(&s_pool.lock);
+    while (s_pool.pending != 0)
+        pthread_cond_wait(&s_pool.done, &s_pool.lock);
+    pthread_mutex_unlock(&s_pool.lock);
+}
+
+/* Run fn on chunks 0..nchunks-1, each exactly once, on whichever threads of
+ * the pool are awake to take them, and return when every chunk is done.
+ *
+ * pool_run waits for every worker to wake, run its share and report; a
+ * thousand vertex batches a frame made that wake-and-join the cost (on a
+ * loaded machine a 480-vertex batch was slower on six threads than on one).
+ * Here the caller starts on the chunks at once and only waits for chunks
+ * already taken; a worker that wakes after the last one is claimed finds
+ * the job over and goes back to sleep. A job's chunks are claimed by
+ * compare-and-swap on generation << 32 | next, so a late worker can never
+ * take a chunk of a later job with the earlier job's function. */
+static void pool_run_chunks(PoolChunk fn, void *ctx, int nchunks)
+{
+    uint32_t gen;
+
+    pthread_mutex_lock(&s_pool.lock);
+    s_pool.chunked = 1;
+    s_pool.cfn = fn;
+    s_pool.ctx = ctx;
+    s_pool.nchunks = nchunks;
+    __atomic_store_n(&s_pool.chunks_done, 0, __ATOMIC_RELAXED);
+    gen = (uint32_t)(s_pool.generation + 1);
+    __atomic_store_n(&s_pool.claim, (uint64_t)gen << 32, __ATOMIC_RELEASE);
+    __atomic_add_fetch(&s_pool.generation, 1, __ATOMIC_RELEASE);
+    if (s_pool.sleepers)
+        pthread_cond_broadcast(&s_pool.start);
+    pthread_mutex_unlock(&s_pool.lock);
+
+    pool_take_chunks(gen, fn, ctx, nchunks, s_pool.n - 1);
+    /* Only chunks a worker is running are left: short, and that worker is
+     * awake, so spin rather than sleep. */
+    while (__atomic_load_n(&s_pool.chunks_done, __ATOMIC_ACQUIRE) < nchunks)
+        sched_yield();
+}
+#endif
+
+/* Each thread's counters on a cache line of their own. */
+typedef union { XfCount c; char line[64]; } XfCountLine;
+
+typedef struct {
+    const XfTri *tris;
+    int ntris;
+    XfCountLine cnt[NV_RASTER_MAX_THREADS];
+} RasterJob;
+
+static void raster_job(int k, int n, void *ctx)
+{
+    RasterJob *J = (RasterJob *)ctx;
+    memset(&J->cnt[k].c, 0, sizeof J->cnt[k].c);
+    xf_rows_owned(J->tris, J->ntris, k, n, &J->cnt[k].c);
+}
+
 static void xf_rows_parallel(const XfTri *T, int ntris, long px,
                              XfCount *total)
 {
-    int n = raster_pool_size(), k;
+    static RasterJob job;                   /* executor thread only */
+    int n = raster_pool_size(), k, ran = 1; /* the caller always draws */
 
     if (n <= 1 || px < NV_RASTER_MT_MIN_PIXELS) {
         s_raster_last_workers = 1;
@@ -3157,39 +3320,18 @@ static void xf_rows_parallel(const XfTri *T, int ntris, long px,
             xf_rows(&T[k], T[k].miny, 1, total);
         return;
     }
-
-    pthread_mutex_lock(&s_pool.lock);
-    s_pool.tris = T;
-    s_pool.ntris = ntris;
-    s_pool.pending = n - 1;
-    s_pool.generation++;
-    pthread_cond_broadcast(&s_pool.start);
-    pthread_mutex_unlock(&s_pool.lock);
-
-    {
-        XfCount mine = {0, 0, 0};
-        xf_rows_owned(T, ntris, n - 1, n, &mine);   /* the caller's share */
-        pthread_mutex_lock(&s_pool.lock);
-        while (s_pool.pending != 0)
-            pthread_cond_wait(&s_pool.done, &s_pool.lock);
-        pthread_mutex_unlock(&s_pool.lock);
-        total->depth_fail += mine.depth_fail;
-        total->pixels += mine.pixels;
-        total->zpass += mine.zpass;
+    job.tris = T;
+    job.ntris = ntris;
+    pool_run(raster_job, &job);
+    for (k = 0; k < n; k++) {
+        const XfCount *c = &job.cnt[k].c;
+        if (k < n - 1 && c->pixels) ran++;
+        total->depth_fail += c->depth_fail;
+        total->pixels += c->pixels;
+        total->zpass += c->zpass;
     }
-
-    {
-        int ran = 1;                          /* the caller always draws */
-        for (k = 0; k < n - 1; k++) {
-            if (s_pool.cnt[k].pixels) ran++;
-            total->depth_fail += s_pool.cnt[k].depth_fail;
-            total->pixels += s_pool.cnt[k].pixels;
-            total->zpass += s_pool.cnt[k].zpass;
-        }
-        s_raster_last_workers = ran;
-    }
+    s_raster_last_workers = ran;
 }
-#endif
 
 int nv2a_raster_pool_size(void) { return raster_pool_size(); }
 
@@ -3489,13 +3631,14 @@ static int batch_uses_program(void)
     return (s_gpu.xf_mode & 3) == 2 && !no_vsh;
 }
 
-static int transform_vertex(uint32_t index, Nv2aVshOutput *out)
+/* One vertex through the title's program. `prepared`: the batch was set up
+ * by nv2a_vsh_prepare_parallel, and this may run on any pool thread; it then
+ * reads only s_gpu and guest memory, writes only *out. */
+static int program_vertex(uint32_t index, Nv2aVshOutput *out, int prepared)
 {
     float in[NV2A_VSH_INPUTS][4];
     uint32_t a;
 
-    if (!batch_uses_program())
-        return ffp_vertex(index, out);
     for (a = 0; a < NV2A_VSH_INPUTS; a++) {
         /* An attribute with no array (size 0) reads its current value, the
          * one the SET_VERTEX_DATA* methods left -- as the hardware does --
@@ -3509,7 +3652,8 @@ static int transform_vertex(uint32_t index, Nv2aVshOutput *out)
         else
             fetch_attr(&s_gpu.attr[a], index, in[a]);   /* absent: 0,0,0,1 */
     }
-    if (!nv2a_vsh_run((const float (*)[4])in, out))
+    if (!(prepared ? nv2a_vsh_run_prepared((const float (*)[4])in, out)
+                   : nv2a_vsh_run((const float (*)[4])in, out)))
         return 0;
     /* oPos.w == 0 comes from a program that never divided by w: x, y and z
      * are already surface units. The hardware draws such a vertex (xemu
@@ -3522,6 +3666,83 @@ static int transform_vertex(uint32_t index, Nv2aVshOutput *out)
      * (anti-aliasing). */
     out->pos[0] *= s_gpu.aa_sx;
     out->pos[1] *= s_gpu.aa_sy;
+    return 1;
+}
+
+static int transform_vertex(uint32_t index, Nv2aVshOutput *out)
+{
+    if (!batch_uses_program())
+        return ffp_vertex(index, out);
+    return program_vertex(index, out, 0);
+}
+
+/* Shading a batch on the raster pool.
+ *
+ * In a 3D scene the vertex program is the executor's biggest single cost
+ * (Fable in-world: 41 % of the executor thread, ~455,000 vertices a frame),
+ * and every vertex is independent of the others. So a big enough batch is cut
+ * into chunks of its index list (pool_run_chunks), each shaded by whichever
+ * pool thread takes it into its own slots of s_xf: the outputs land where the
+ * serial loop puts them and come from the same code, so what is drawn is bit
+ * for bit the same.
+ * Small batches stay on the executor thread, where waking the pool costs more
+ * than it saves. RECOMP_VSH_POOL=0 shades every batch serially. */
+#define NV_VSH_MT_MIN_VERTICES 192
+
+typedef struct {
+    uint32_t n, chunk;                      /* vertices; vertices per chunk */
+    volatile int failed;                    /* only ever set to 1 */
+} VshJob;
+
+static int s_vsh_pool = -1;                 /* -1: read RECOMP_VSH_POOL */
+static int s_vsh_last_workers = 1;
+void nv2a_vsh_pool_enable(int on) { s_vsh_pool = on ? 1 : 0; }
+int nv2a_vsh_last_workers(void) { return s_vsh_last_workers; }
+
+static void vsh_chunk(int c, int thread, void *ctx)
+{
+    VshJob *J = (VshJob *)ctx;
+    uint32_t i = (uint32_t)c * J->chunk;
+    uint32_t end = i + J->chunk < J->n ? i + J->chunk : J->n;
+
+    (void)thread;
+    for (; i < end; i++)
+        if (!program_vertex(s_gpu.idx[i], &s_xf[i], 1)) {
+            J->failed = 1;                  /* no program: all fail alike */
+            return;
+        }
+}
+
+/* s_xf[0..n) for the batch's index list; 0 when there is no program to run. */
+static int transform_batch(uint32_t n)
+{
+    uint32_t i;
+
+    if (s_vsh_pool < 0) {
+        const char *e = getenv("RECOMP_VSH_POOL");
+        s_vsh_pool = !(e && e[0] == '0');
+    }
+    if (s_vsh_pool && n >= NV_VSH_MT_MIN_VERTICES && batch_uses_program()
+        && raster_pool_size() > 1 && nv2a_vsh_prepare_parallel()) {
+        static VshJob job;                    /* executor thread only */
+        int nt = raster_pool_size();
+        /* Four chunks a thread, so threads that wake late still get a
+         * share, but no chunk under 64 vertices. */
+        uint32_t chunk = n / (uint32_t)(nt * 4);
+
+        if (chunk < 64)
+            chunk = 64;
+        job.n = n;
+        job.chunk = chunk;
+        job.failed = 0;
+        pool_run_chunks(vsh_chunk, &job, (int)((n + chunk - 1) / chunk));
+        s_vsh_last_workers = nt;
+        return !job.failed;
+    }
+    s_vsh_last_workers = 1;
+    for (i = 0; i < n; i++)
+        if (!transform_vertex(s_gpu.idx[i], &s_xf[i]))
+            return 0;
     return 1;
 }
 
@@ -3540,9 +3761,8 @@ static void raster_batch_program(void)
 
     if (!s_xf && !(s_xf = (Nv2aVshOutput *)calloc(NV_MAX_INDICES, sizeof *s_xf)))
         return;
-    for (i = 0; i < n; i++)
-        if (!transform_vertex(s_gpu.idx[i], &s_xf[i]))
-            return;                                    /* no program loaded */
+    if (!transform_batch(n))
+        return;                                        /* no program loaded */
     xf_set_viewport();
     {
         const VertexAttr *tc = texcoord_attr();

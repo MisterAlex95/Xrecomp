@@ -50,6 +50,16 @@ void nv2a_vsh_set_cxt_write(uint32_t enable);         /* _CXT_WRITE_EN      */
  * transform this batch" rather than drawing garbage. */
 int  nv2a_vsh_run(const float in[NV2A_VSH_INPUTS][4], Nv2aVshOutput *out);
 
+/* Shading a batch on several threads (the executor's raster pool). Call
+ * nv2a_vsh_prepare_parallel on the executor thread before the batch: it
+ * returns 0 when the batch must run serially through nv2a_vsh_run (a program
+ * that writes c[], or the RECOMP_VSH_DECODED=0 / _CHECK / _DUMP modes), else
+ * decodes the program and nv2a_vsh_run_prepared may then run on any number of
+ * threads at once, with results identical to nv2a_vsh_run. Nothing may upload
+ * a program or a constant until those runs are over. */
+int  nv2a_vsh_prepare_parallel(void);
+int  nv2a_vsh_run_prepared(const float in[NV2A_VSH_INPUTS][4], Nv2aVshOutput *out);
+
 /* Direct access, for the self-test. */
 void nv2a_vsh_set_constant(uint32_t index, const float v[4]);
 const float *nv2a_vsh_constant(uint32_t index);   /* for traces */
