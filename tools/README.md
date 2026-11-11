@@ -125,6 +125,25 @@ py -3 -m tools.disasm game_files/default.xbe --text-only
 
 ---
 
+### xbe_ident — XDK version and engine (XBA-67)
+
+What an XBE was built with, from the XBE alone (no disassembly, a second on the device):
+
+```bash
+python -m tools.xbe_ident game_files/default.xbe            # one title: libraries, engines, layers
+python -m tools.xbe_ident discs/*/default.xbe --json t.json  # library triage: one line per title
+```
+
+- **XDK version**: the build of the XAPI library in the XBE's library table (the header points at its entry; else
+  `XAPILIB`; else the most common build). `mixed` when the libraries have different builds; all are listed.
+- **Engines and middleware**: marker strings from `tools/xbe_ident/engines.json` (RenderWare, Unreal Engine 2,
+  Gamebryo, id Tech 3/4, Source, LithTech; Havok, Bink, Miles). An entry needs `min` of its markers. Add engines
+  there; check new markers against the corpus first.
+- **Layers**: `xdk/<build>` and `engines/<name>` for each engine (not middleware), lowest first: the profile layers
+  of XBA-66. `tools.prepare` writes the result to `<work>/ident.json`.
+
+---
+
 ### 3. func_id — Function Identifier
 
 Classifies functions into categories to help you understand what you're looking at.

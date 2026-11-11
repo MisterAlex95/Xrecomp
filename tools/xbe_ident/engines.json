@@ -1,0 +1,31 @@
+{
+  "_comment": [
+    "Engines and middleware detected in an XBE by tools.xbe_ident (XBA-67). An entry matches when at least `min`",
+    "of its markers occur in the XBE's bytes (ASCII, case-sensitive). Markers come from what these engines are",
+    "known to embed (source ID strings, class names, console variables, copyright lines); check new ones against",
+    "the corpus triage (XBA-63) before relying on them. `layer` is the profile directory a match selects",
+    "(engines/<layer>/, XBA-66). kind: engine (a profile layer) or middleware (reported, a layer only if needed)."
+  ],
+  "engines": [
+    {"name": "RenderWare", "layer": "renderware", "kind": "engine", "min": 1,
+     "markers": ["//RenderWare/", "RenderWare Graphics", "rwsdk/"]},
+    {"name": "Unreal Engine 2", "layer": "unreal2", "kind": "engine", "min": 2,
+     "markers": ["Engine.GameEngine", "UnrealScript", "Unreal Engine", "Core.Object", "Engine.Actor"]},
+    {"name": "Gamebryo / NetImmerse", "layer": "gamebryo", "kind": "engine", "min": 2,
+     "markers": ["NiNode", "NiAVObject", "NiTriShape", "NiSourceTexture", "Gamebryo", "NetImmerse"]},
+    {"name": "id Tech 3", "layer": "idtech3", "kind": "engine", "min": 2,
+     "markers": ["com_hunkmegs", "cl_maxpackets", "sv_pure", "fs_basepath"]},
+    {"name": "id Tech 4", "layer": "idtech4", "kind": "engine", "min": 2,
+     "markers": ["idCVarSystem", "idFileSystem", "idRenderSystem", "idDeclManager"]},
+    {"name": "Source", "layer": "source", "kind": "engine", "min": 2,
+     "markers": ["VEngineClient", "VEngineServer", "VClient0", "VEngineCvar"]},
+    {"name": "LithTech", "layer": "lithtech", "kind": "engine", "min": 2,
+     "markers": ["LithTech", "ILTClient", "ILTServer", "ILTCommon"]},
+    {"name": "Havok", "layer": "havok", "kind": "middleware", "min": 2,
+     "markers": ["Havok", "hkBase", "hkMemory", "hkWorld"]},
+    {"name": "Bink", "layer": "bink", "kind": "middleware", "min": 2,
+     "markers": ["RAD Game Tools", "Bink"]},
+    {"name": "Miles Sound System", "layer": "miles", "kind": "middleware", "min": 1,
+     "markers": ["Miles Sound System"]}
+  ]
+}
