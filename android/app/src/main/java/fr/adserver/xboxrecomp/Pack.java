@@ -6,7 +6,12 @@ import org.json.JSONObject;
 import java.io.File;
 import java.io.IOException;
 import java.io.RandomAccessFile;
+import java.util.Collections;
+import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.Locale;
+import java.util.Map;
+import java.util.regex.Pattern;
 
 /**
  * A title pack made on the device by the on-device Prepare (docs/android/prepare.md): the game's generated C compiled
@@ -14,7 +19,9 @@ import java.util.Locale;
  * mounted noexec). This class only says whether a pack is there and usable; loading it is the native side's job.
  *
  * pack.json: {"format":1, "title_id", "title", "xbe_sha256", "abi":"arm64-v8a", "shell_abi":1, "toolkit",
- * "lib":"libtitle.so", "lib_sha256", "lib_size", "entry":"recomp_title_main", "cc", "built_at"}.
+ * "lib":"libtitle.so", "lib_sha256", "lib_size", "entry":"recomp_title_main", "cc", "built_at"}, and
+ * "env_force":{"RECOMP_LSFG":"0", ...} when the title profile forces options (the native loader sets them over
+ * recomp.cfg; the launcher only shows them).
  */
 final class Pack {
     private Pack() {}
@@ -84,6 +91,45 @@ final class Pack {
         } catch (IOException | JSONException e) {
             return null;
         }
+    }
+
+    /** The env_force names the native side accepts (src/platform/recomp_cfg.c recomp_cfg_force_key_ok). */
+    private static final Pattern ENV_FORCE_KEY = Pattern.compile("RECOMP_[A-Z0-9_]{1,56}");
+
+    /**
+     * The options the pack of titleId forces (pack.json's env_force: title.json's, copied by prepare), in their
+     * order; empty when there is no readable pack.json or it forces nothing. Entries the native side would refuse
+     * (a name not RECOMP_[A-Z0-9_]+, a value that is not a string) are left out.
+     */
+    static Map<String, String> envForce(File filesDir, String titleId) {
+        String id = normTitleId(titleId);
+        if (id == null)
+            return Collections.emptyMap();
+        File json = new File(packDir(filesDir, id), JSON);
+        if (!json.isFile())
+            return Collections.emptyMap();
+        JSONObject env;
+        try {
+            env = new JSONObject(PrepareProtocol.readText(json, 1 << 20)).optJSONObject("env_force");
+        } catch (IOException | JSONException e) {
+            return Collections.emptyMap();
+        }
+        if (env == null)
+            return Collections.emptyMap();
+        Map<String, String> out = new LinkedHashMap<>();
+        for (Iterator<String> it = env.keys(); it.hasNext();) {
+            String k = it.next();
+            Object v = env.opt(k);
+            if (ENV_FORCE_KEY.matcher(k).matches() && v instanceof String)
+                out.put(k, (String)v);
+        }
+        return out;
+    }
+
+    /** True when the pack of titleId forces key off: env_force sets it to "0" or "" (RECOMP_LSFG=0). */
+    static boolean forcesOff(File filesDir, String titleId, String key) {
+        String v = envForce(filesDir, titleId).get(key);
+        return v != null && (v.trim().isEmpty() || v.trim().equals("0"));
     }
 
     /**

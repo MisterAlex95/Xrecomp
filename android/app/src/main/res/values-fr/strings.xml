@@ -382,6 +382,8 @@
     <string name="LSFG_READY">Shaders prêts (LSFG 3.1)</string>
     <string name="LSFG_READY_PERF_ONLY">Shaders prêts (LSFG 3.1 performance seulement)</string>
     <string name="LSFG_UNSUPPORTED">Cette version de Lossless.dll n\'est pas prise en charge</string>
+    <string name="LSFG_TITLE_UNAVAILABLE">Génération d\'images indisponible pour ce jeu</string>
+    <string name="LSFG_TITLE_UNAVAILABLE_DETAIL">Le profil de ce jeu désactive la génération d\'images (pack.json env_force RECOMP_LSFG=0) : le jeu ne tourne pas correctement au rythme de 30 i/s de la génération d\'images (un jeu dont la logique suit la cadence d\'affichage tourne au ralenti). Le réglage reste pour vos autres jeux.</string>
     <string name="LSFG_NO_TRANSLATOR">Shaders trouvés, mais cette application ne sait pas les traduire (traducteur absent)</string>
     <string name="LSFG_NOT_A_DLL">%1$s n\'est pas une DLL : choisissez Lossless.dll.</string>
     <!-- Réglages › Lanceur › Thème du jeu (docs/android/app-shell.md « Game theme ») -->

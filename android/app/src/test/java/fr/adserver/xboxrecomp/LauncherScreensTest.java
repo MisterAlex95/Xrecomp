@@ -72,6 +72,7 @@ public class LauncherScreensTest {
         Toolchain.assetsOverride = null;
         Toolchain.nativeDirOverride = null;
         LauncherActivity.clock = android.os.SystemClock::uptimeMillis;
+        LauncherActivity.lsfgBuiltOverride = null;
         RuntimeEnvironment.setQualifiers("en-w1920dp-h1080dp-land-mdpi");
     }
 
@@ -584,5 +585,36 @@ public class LauncherScreensTest {
         assertEquals(app.getString(R.string.PLAY), a.homePrimaryForTest().title);
         List<UiFeedback.Cue> played = a.feedbackForTest().played;
         assertEquals(UiFeedback.Cue.DONE, played.get(played.size() - 1));
+    }
+
+    /** WP-E: a pack whose title profile forces RECOMP_LSFG=0 (env_force) shows it on the frame generation row. */
+    @Test
+    public void frameGenerationUnavailableForThisTitle() throws Exception {
+        LauncherActivity.lsfgBuiltOverride = true;
+        TestSupport.writePack(app.getFilesDir(), TID, 64);
+        LauncherActivity a = launch();
+        a.goForTest(LauncherActivity.Screen.SETTINGS);
+        idle(300);
+        Widgets.MenuRow r = row(a, app.getString(R.string.OPT_LSFG));
+        assertNotNull("Settings › Graphics › Frame generation", r);
+        assertEquals(app.getString(R.string.OPT_LSFG_SUMMARY), r.subtitle);
+        assertFalse(r.dim);
+
+        File json = new File(Pack.packDir(app.getFilesDir(), TID), "pack.json");
+        org.json.JSONObject o = new org.json.JSONObject(PrepareProtocol.readText(json, 1 << 16));
+        o.put("env_force", new org.json.JSONObject().put("RECOMP_LSFG", "0"));
+        TestSupport.write(json, o.toString());
+        a.goForTest(LauncherActivity.Screen.HOME);
+        idle(300);
+        a.goForTest(LauncherActivity.Screen.SETTINGS);
+        idle(300);
+        r = row(a, app.getString(R.string.OPT_LSFG));
+        assertNotNull(r);
+        assertEquals(app.getString(R.string.LSFG_TITLE_UNAVAILABLE), r.subtitle);
+        assertTrue(r.dim);
+        // The setting itself still cycles (it is global: the other games keep it).
+        r.requestFocusFromTouch();
+        key(a, KeyEvent.KEYCODE_DPAD_RIGHT);
+        assertEquals(app.getString(R.string.VAL_LSFG_2X), r.value);
     }
 }

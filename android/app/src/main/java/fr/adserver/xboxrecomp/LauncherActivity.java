@@ -1741,6 +1741,7 @@ public class LauncherActivity extends Activity {
         RecompConfig.Section section = null;
         List<MenuRow> optionRows = new ArrayList<>();
         List<RecompConfig.Option> shown = RecompConfig.shownOptions(lsfgBuilt());
+        lsfgOff = lsfgForcedOff();
         for (RecompConfig.Option o : shown) {
             if (o.section != section) {
                 section = o.section;
@@ -1757,6 +1758,12 @@ public class LauncherActivity extends Activity {
             r.cycler = d -> stepOption(r, o, d);
             r.setOnClickListener(v -> stepOption(r, o, 1));
             onFocus(r, () -> optionDetail(o));
+            if (o.needsLsfg && lsfgOff) {
+                // The game's pack forces it off (pack.json env_force RECOMP_LSFG=0): the setting stays, for the
+                // other games, but says it does nothing for this one.
+                r.setSubtitle(getString(R.string.LSFG_TITLE_UNAVAILABLE));
+                r.setDim(true);
+            }
             if (o.needsLsfg)
                 lsfgDllRow(list);
         }
@@ -1988,6 +1995,13 @@ public class LauncherActivity extends Activity {
 
     private void optionDetail(RecompConfig.Option o) {
         detailClear(getString(sectionTitle(o.section)), getString(o.title), getString(o.detail));
+        if (o.needsLsfg && lsfgOff) {
+            TextView t = Theme.text(this, Theme.T_SMALL, Theme.MEDIUM, Theme.WARN,
+                                    getString(R.string.LSFG_TITLE_UNAVAILABLE_DETAIL));
+            LinearLayout.LayoutParams p = lp(MATCH, WRAP);
+            p.topMargin = 12;
+            detail.addView(t, p);
+        }
         List<String> names = new ArrayList<>();
         for (RecompConfig.Choice c : o.choices)
             names.add(getString(c.label) + (c.isDefault() ? " " + getString(R.string.DEFAULT_MARK) : ""));
@@ -1999,9 +2013,24 @@ public class LauncherActivity extends Activity {
 
     // ---- Frame generation: « Choose Lossless.dll » ---------------------------------------------------------------
 
+    /** Tests: stands in for R.bool.xba_lsfg when set (the unit tests' APK is built without frame generation). */
+    static Boolean lsfgBuiltOverride;
+
+    /** The selected game's pack forces frame generation off (read when Settings is built). */
+    private boolean lsfgOff;
+
     /** True when this APK has frame generation (-PxbaLsfg=1 with the Vulkan bridge, docs/technical/framegen.md). */
     private boolean lsfgBuilt() {
-        return getResources().getBoolean(R.bool.xba_lsfg);
+        return lsfgBuiltOverride != null ? lsfgBuiltOverride : getResources().getBoolean(R.bool.xba_lsfg);
+    }
+
+    /**
+     * The selected game's pack forces frame generation off (pack.json env_force RECOMP_LSFG=0, from its title
+     * profile): the runtime sets it over recomp.cfg, so the Settings row says it is unavailable for this game.
+     */
+    private boolean lsfgForcedOff() {
+        String tid = titleId();
+        return tid != null && Pack.forcesOff(getFilesDir(), tid, "RECOMP_LSFG");
     }
 
     /** getFilesDir()/lsfg: the shader cache base (excluded from backups and from LogProvider). */

@@ -182,4 +182,35 @@ public class PackTest {
         assertNull(Pack.xbeSha256(files(), TID));
         assertNull(Pack.xbeSha256(files(), "zz"));
     }
+
+    /** pack.json's env_force (title.json's, copied by prepare): read in order, refused entries left out. */
+    @Test
+    public void envForce() throws Exception {
+        assertTrue(Pack.envForce(files(), TID).isEmpty());             // no pack
+        assertFalse(Pack.forcesOff(files(), TID, "RECOMP_LSFG"));
+        TestSupport.writePack(files(), TID, 16);
+        assertTrue(Pack.envForce(files(), TID).isEmpty());             // a pack that forces nothing
+        JSONObject env = new JSONObject();
+        env.put("RECOMP_LSFG", "0");
+        env.put("RECOMP_GPU_FPS_CAP", "60");
+        env.put("LD_PRELOAD", "x");                                    // not a RECOMP_* name
+        env.put("RECOMP_NUM", 1);                                      // not a string
+        edit("env_force", env);
+        java.util.Map<String, String> m = Pack.envForce(files(), "0x4d530004");
+        assertEquals(2, m.size());
+        assertEquals("0", m.get("RECOMP_LSFG"));
+        assertEquals("60", m.get("RECOMP_GPU_FPS_CAP"));
+        assertTrue(Pack.forcesOff(files(), TID, "RECOMP_LSFG"));
+        assertFalse(Pack.forcesOff(files(), TID, "RECOMP_GPU_FPS_CAP"));
+        assertFalse(Pack.forcesOff(files(), TID, "RECOMP_GPU"));
+        assertEquals(Pack.Check.VALID, Pack.check(files(), TID));      // env_force does not change validity
+        env.put("RECOMP_LSFG", "1");
+        edit("env_force", env);
+        assertFalse(Pack.forcesOff(files(), TID, "RECOMP_LSFG"));
+        edit("env_force", "RECOMP_LSFG=0");                            // not an object
+        assertTrue(Pack.envForce(files(), TID).isEmpty());
+        TestSupport.write(new File(Pack.packDir(files(), TID), "pack.json"), "{");
+        assertTrue(Pack.envForce(files(), TID).isEmpty());
+        assertTrue(Pack.envForce(files(), "zz").isEmpty());
+    }
 }

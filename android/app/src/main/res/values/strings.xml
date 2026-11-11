@@ -406,6 +406,8 @@
     <string name="LSFG_READY">Shaders ready (LSFG 3.1)</string>
     <string name="LSFG_READY_PERF_ONLY">Shaders ready (LSFG 3.1 performance only)</string>
     <string name="LSFG_UNSUPPORTED">This Lossless.dll version is not supported</string>
+    <string name="LSFG_TITLE_UNAVAILABLE">Frame generation unavailable for this title</string>
+    <string name="LSFG_TITLE_UNAVAILABLE_DETAIL">This game\'s profile turns frame generation off (pack.json env_force RECOMP_LSFG=0): the game does not run right at frame generation\'s 30 fps pacing (a game whose logic follows the frame rate runs in slow motion). The setting stays for your other games.</string>
     <string name="LSFG_NO_TRANSLATOR">Shaders found, but this app cannot translate them (translator missing)</string>
     <string name="LSFG_NOT_A_DLL">%1$s is not a DLL: choose Lossless.dll.</string>
     <!-- Settings › Launcher › Game theme (docs/android/app-shell.md « Game theme ») -->
