@@ -3089,6 +3089,8 @@ public class LauncherActivity extends Activity {
                 }
             }
             libArt.values().removeIf(java.util.Objects::isNull);   // art the scan made shows now
+            if (libEntries.isEmpty())
+                focusTid = null;   // the first games found: the focus goes to the selected one, not the folder tile
         }
         if (screen == Screen.LIBRARY)
             refreshKeepingFocus();
