@@ -416,6 +416,23 @@ CF_TRACKED = frozenset({
 # separately and _function_needs_cf treats them as CF producers.
 BT_MODIFY = frozenset({"bts", "btr", "btc"})
 
+# Read-modify-writes the lock prefix makes atomic and _lift_locked_rmw lifts
+# (xadd and cmpxchg have their own path; adc/sbb are left unhandled).
+LOCKED_RMW = frozenset({"add", "sub", "and", "or", "xor", "inc", "dec", "neg", "not",
+                        "bts", "btr", "btc"})
+
+
+class _Renamed:
+    """An instruction seen under another mnemonic (a locked form lifted as
+    its unlocked one); everything else is the original's."""
+
+    def __init__(self, insn, mnemonic):
+        self._insn = insn
+        self.mnemonic = mnemonic
+
+    def __getattr__(self, name):
+        return getattr(self._insn, name)
+
 # Arithmetic that writes its destination and leaves ZF as (destination == 0).
 # A join can unify two different setters from this set when they share a
 # destination register, because a je or jne then means the same thing on both
@@ -1555,6 +1572,13 @@ class Lifter:
         ops = insn.operands
         nops = len(ops)
 
+        # ── Locked read-modify-writes, and xchg with memory (XBA-78) ──
+        if (m.startswith("lock ") and m[5:] in LOCKED_RMW and nops >= 1
+                and ops[0].type == "mem"):
+            return self._lift_locked_rmw(insn, ops, m[5:])
+        if m in ("xchg", "lock xchg") and nops == 2 and "mem" in (ops[0].type, ops[1].type):
+            return self._lift_xchg_mem(insn, ops)
+
         # ── NOP ──
         if m == "nop" or (m == "lea" and nops == 2 and
                           ops[0].type == "reg" and ops[1].type == "mem" and
@@ -2123,6 +2147,71 @@ class Lifter:
             return [f"/* lea: unexpected operands */"]
         addr_expr = _fmt_mem(ops[1])
         return [_fmt_operand_write(ops[0], addr_expr)]
+
+    def _lift_locked_rmw(self, insn, ops, base):
+        """`lock OP [mem], ...`: atomic, with the unlocked form's flags.
+
+        These used to reach the unhandled path: a RECOMP_UNIMPL no-op, so a
+        `lock inc [refcount]` never counted and a `lock bts [bitmap], n` never
+        took the bit, on every host. Now:
+
+          * a bit string (`bts/btr/btc [mem], reg`: the register offset runs
+            past the addressed dword) is a fetch-or/and/xor on the dword that
+            holds the bit, CF from the old value;
+          * everything else is the unlocked instruction lifted on a local copy
+            `_lk` of the memory operand, inside a compare-and-swap loop: read,
+            compute (flags included, exactly as the unlocked form does), and
+            store only if memory still holds what was read, else again.
+
+        adc/sbb are left out: they read CF, which an earlier pass of the loop
+        has already overwritten.
+        """
+        dst = ops[0]
+        width = getattr(dst, "mem_size", None) or 4
+        if width not in (1, 2, 4):
+            return self._unimplemented(insn, insn.mnemonic)
+        if base in BT_MODIFY and len(ops) >= 2 and ops[1].type != "imm":
+            mem_base = _fmt_mem(dst)
+            off = _fmt_operand_read(ops[1])
+            fn = {"bts": "RECOMP_ATOMIC_OR32", "btr": "RECOMP_ATOMIC_AND32", "btc": "RECOMP_ATOMIC_XOR32"}[base]
+            mask = "~_lkm" if base == "btr" else "_lkm"
+            out = [f"{{ uint32_t _lka = ({mem_base}) + (((int32_t)({off}) >> 5) * 4);",
+                   f"  uint32_t _lkm = 1u << (({off}) & 31);",
+                   f"  uint32_t _lko = {fn}(XBOX_PTR(_lka), {mask});"]
+            if self.needs_cf:
+                out.append("  _cf = (int)((_lko & _lkm) != 0);")
+            out.append(f"  (void)_lko; }}  /* {insn.mnemonic} */")
+            return out
+        token = _fmt_mem_read(dst)
+        plain = self.lift_instruction(_Renamed(insn, base))
+        if any("RECOMP_UNIMPL(" in line for line in plain):
+            self.unimplemented.get(base, [None]).pop()
+            return self._unimplemented(insn, insn.mnemonic)
+        body = [line.replace(token, "_lk") for line in plain]
+        if not any("_lk" in line for line in body) or any(token in line for line in body):
+            return self._unimplemented(insn, insn.mnemonic, " (locked form not liftable)")
+        bits = width * 8
+        addr = _fmt_mem(dst)
+        return ([f"{{ uint{bits}_t _lko, _lk;",
+                 "  do {",
+                 f"    _lko = {token}; _lk = _lko;"]
+                + ["    " + line for line in body]
+                + [f"  }} while (RECOMP_ATOMIC_CAS{bits}(XBOX_PTR({addr}), _lko, _lk) != _lko);"
+                   f" }}  /* {insn.mnemonic} */"])
+
+    def _lift_xchg_mem(self, insn, ops):
+        """`xchg` with a memory operand: an atomic exchange. The hardware
+        locks it with or without the prefix -- it is the spinlock primitive --
+        and it used to lift to a plain load and a plain store."""
+        mem, reg = (ops[0], ops[1]) if ops[0].type == "mem" else (ops[1], ops[0])
+        width = getattr(mem, "mem_size", None) or 4
+        if width not in (1, 2, 4) or reg.type != "reg":
+            return self._unimplemented(insn, insn.mnemonic)
+        bits = width * 8
+        return [f"{{ uint{bits}_t _xo = RECOMP_ATOMIC_XCHG{bits}(XBOX_PTR({_fmt_mem(mem)}),"
+                f" (uint{bits}_t)({_fmt_operand_read(reg)}));",
+                "  " + _fmt_operand_write(reg, "_xo") + " }"
+                f"  /* {insn.mnemonic} */"]
 
     def _lift_xchg(self, insn, ops):
         if len(ops) < 2:
