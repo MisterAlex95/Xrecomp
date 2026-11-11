@@ -85,6 +85,7 @@ static struct {
      * uploaded into them and hashed to validate them, buffers created,
      * buffers whose bytes changed, vertex arrays created. */
     uint32_t vbo_draws, vbo_kb, vbo_hash_kb, vbo_new, vbo_changed, vao_new;
+    uint32_t ib_new, ib_kb;         /* index lists cached, their bytes */
 } s_st;
 
 /* RECOMP_GPU_RT_RELAYOUT_READBACK=1: read a target back when the title
@@ -2806,7 +2807,22 @@ typedef struct {
     GlVaoKey key;
     uint64_t hash;
     GLuint vao;                     /* 0: empty slot */
+    GLuint ebo;                     /* element buffer bound in it */
 } GlVao;
+
+/* Index lists of raw batches, by content: one GL element buffer per
+ * distinct triangle list (Fable sends the same ~1000 lists every frame).
+ * Dropped whole when full, with the vertex arrays (they bind them). */
+#define NV_GL_MAX_IB   8192         /* power of two */
+#define NV_GL_IB_BYTES (32u << 20)
+typedef struct {
+    uint64_t hash;
+    uint32_t len;                   /* 0: empty slot */
+    GLuint buf;
+} GlIb;
+static GlIb *s_ib;
+static uint32_t s_nib;
+static size_t s_ib_bytes;
 
 static GlVb s_vb[NV_GL_MAX_VB];
 static uint32_t s_nvb;
@@ -2814,7 +2830,7 @@ static size_t s_vb_bytes;
 static uint32_t s_vb_gen;           /* vb_drop_all calls */
 static GlVao *s_vao_cache;          /* NV_GL_MAX_VAO, allocated at first use */
 static uint32_t s_nvao;
-static int s_vbo_on;                /* RECOMP_GPU_VBO */
+static int s_vbo_on;                /* RECOMP_GPU_VBO, default on */
 
 /* hash_bytes in four independent lanes: vertex ranges are hashed every
  * frame (~3 MB in Oakvale), and one multiply chain is latency bound. */
@@ -2851,6 +2867,61 @@ static void vao_drop_all(void)
         }
     memset(s_vao_cache, 0, NV_GL_MAX_VAO * sizeof *s_vao_cache);
     s_nvao = 0;
+}
+
+static void ib_drop_all(void)
+{
+    uint32_t i;
+
+    if (!s_ib)
+        return;
+    vao_drop_all();
+    for (i = 0; i < NV_GL_MAX_IB; i++)
+        if (s_ib[i].buf)
+            glDeleteBuffers(1, &s_ib[i].buf);
+    memset(s_ib, 0, NV_GL_MAX_IB * sizeof *s_ib);
+    s_nib = 0;
+    s_ib_bytes = 0;
+}
+
+/* The element buffer holding `n` indices idx (uploaded the first time this
+ * list is seen). Binds nothing; 0 without memory. */
+static GLuint ib_get(const uint16_t *idx, uint32_t n)
+{
+    uint32_t len = n * 2u, i, slot;
+    uint64_t h = vb_hash((const uint8_t *)idx, len);
+    GlIb *e = NULL;
+
+    if (!s_ib && !(s_ib = (GlIb *)calloc(NV_GL_MAX_IB, sizeof *s_ib)))
+        return 0;
+    slot = (uint32_t)(h ^ (h >> 32)) & (NV_GL_MAX_IB - 1);
+    for (i = 0; i < NV_GL_MAX_IB; i++) {
+        GlIb *c = &s_ib[(slot + i) & (NV_GL_MAX_IB - 1)];
+        if (!c->len) {
+            e = c;
+            break;
+        }
+        if (c->hash == h && c->len == len)
+            return c->buf;
+    }
+    if (!e || s_nib >= NV_GL_MAX_IB * 3 / 4 || s_ib_bytes + len > NV_GL_IB_BYTES) {
+        if (s_verbose)
+            fprintf(stderr, "  [GPUGL] index buffer cache full (%u lists, %zu KB):"
+                            " dropping it at frame %u\n", s_nib, s_ib_bytes >> 10, s_frame);
+        ib_drop_all();
+        return ib_get(idx, n);
+    }
+    e->hash = h;
+    e->len = len;
+    glGenBuffers(1, &e->buf);
+    /* Through the copy target: the element binding is vertex-array state. */
+    glBindBuffer(GL_COPY_WRITE_BUFFER, e->buf);
+    glBufferData(GL_COPY_WRITE_BUFFER, (GLsizeiptr)len, idx, GL_STATIC_DRAW);
+    s_nib++;
+    s_ib_bytes += len;
+    s_st.ib_new++;
+    s_st.ib_kb += len >> 10;
+    return e->buf;
 }
 
 static void vb_drop_all(void)
@@ -2907,6 +2978,7 @@ static GLuint vb_get(uint32_t va, uint32_t len, uint32_t stride)
             fprintf(stderr, "  [GPUGL] vertex buffer cache full (%u buffers, %zu KB):"
                             " dropping it at frame %u\n", s_nvb, s_vb_bytes >> 10, s_frame);
         vb_drop_all();
+        ib_drop_all();
         return vb_get(va, len, stride);
     }
     e->va = va;
@@ -2924,7 +2996,7 @@ static GLuint vb_get(uint32_t va, uint32_t len, uint32_t stride)
     return e->buf;
 }
 
-static GLuint vao_get(const GlVaoKey *k)
+static GlVao *vao_get(const GlVaoKey *k)
 {
     uint64_t h = hash_str(0xCBF29CE484222325ull, "");
     const uint8_t *kb = (const uint8_t *)k;
@@ -2936,7 +3008,7 @@ static GLuint vao_get(const GlVaoKey *k)
         h = (h ^ kb[i]) * 0x100000001B3ull;
     if (!s_vao_cache
         && !(s_vao_cache = (GlVao *)calloc(NV_GL_MAX_VAO, sizeof *s_vao_cache)))
-        return 0;
+        return NULL;
     slot = (uint32_t)h & (NV_GL_MAX_VAO - 1);
     for (i = 0; i < NV_GL_MAX_VAO; i++) {
         GlVao *c = &s_vao_cache[(slot + i) & (NV_GL_MAX_VAO - 1)];
@@ -2945,7 +3017,7 @@ static GLuint vao_get(const GlVaoKey *k)
             break;
         }
         if (c->hash == h && memcmp(&c->key, k, sizeof *k) == 0)
-            return c->vao;
+            return c;
     }
     if (!e || s_nvao >= NV_GL_MAX_VAO * 3 / 4) {
         vao_drop_all();
@@ -2969,20 +3041,23 @@ static GLuint vao_get(const GlVaoKey *k)
                                   (const void *)(size_t)k->off[a]);
     }
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, s_pebo);
+    e->ebo = s_pebo;
     s_nvao++;
     s_st.vao_new++;
-    return e->vao;
+    return e;
 }
 
-/* Bind the vertex array for raw batch pb (its buffers up to date). The
- * streams group into buffers by interleaving. 0: cannot (no memory). */
+/* Bind the vertex array for raw batch pb (its buffers up to date) with
+ * its index list's element buffer. The streams group into buffers by
+ * interleaving. 0: cannot (no memory). */
 static int raw_bind(const Nv2aProgramBatch *pb)
 {
     GlVaoKey k;
     struct { uint32_t lo, hi, base, stride; } g[16];
     uint32_t gof[16], start[16], a, j, ng = 0, try;
     Nv2aGlVshAttr at[16];
-    GLuint vao;
+    GlVao *vao;
+    GLuint ebo;
 
     memset(&k, 0, sizeof k);
     k.streams = pb->streams;
@@ -3033,9 +3108,15 @@ static int raw_bind(const Nv2aProgramBatch *pb)
         k.comps[a] = (uint8_t)at[a].comps;
         k.stride[a] = (uint8_t)pb->raw[a].stride;
     }
-    if (!(vao = vao_get(&k)))
+    /* The index list first: dropping a full index cache drops the vertex
+     * arrays too. */
+    if (!(ebo = ib_get(pb->indices, pb->index_count)) || !(vao = vao_get(&k)))
         return 0;
-    sh_vao(vao);
+    sh_vao(vao->vao);
+    if (vao->ebo != ebo) {
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);
+        vao->ebo = ebo;
+    }
     return 1;
 }
 
@@ -3168,7 +3249,8 @@ bound:
             glVertexAttrib4fv(a, pb->imm[a]);
             memcpy(s_sh.pv_imm[a], pb->imm[a], sizeof s_sh.pv_imm[a]);
         }
-    glBufferData(GL_ELEMENT_ARRAY_BUFFER, (GLsizeiptr)(pb->index_count * sizeof(uint16_t)),
+    if (!pb->raw)
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER, (GLsizeiptr)(pb->index_count * sizeof(uint16_t)),
                  pb->indices, GL_STREAM_DRAW);
     if (rs->zpass_enable && s_qcount < NV_GL_MAX_QUERY) {
         GlQuery *q = &s_qring[(s_qhead + s_qcount) & (NV_GL_MAX_QUERY - 1)];
@@ -3190,8 +3272,9 @@ bound:
     }
     s_st.draws++;
     s_st.vsh_draws++;
-    s_st.vsh_kb += (uint32_t)(((pb->raw ? 0 : (size_t)pb->vertex_count * nstream * 16)
-                               + pb->index_count * 2) >> 10);
+    if (!pb->raw)
+        s_st.vsh_kb += (uint32_t)(((size_t)pb->vertex_count * nstream * 16
+                                   + pb->index_count * 2) >> 10);
     s_st.tris += pb->index_count / 3;
     return 1;
 }
@@ -3267,6 +3350,10 @@ static void gl_reset_objects(int lost)
     if (s_vao_cache)
         memset(s_vao_cache, 0, NV_GL_MAX_VAO * sizeof *s_vao_cache);
     s_nvao = 0;
+    if (s_ib)
+        memset(s_ib, 0, NV_GL_MAX_IB * sizeof *s_ib);
+    s_nib = 0;
+    s_ib_bytes = 0;
     s_pbo = 0;
     s_pbo_size = 0;
     memset(&s_pend, 0, sizeof s_pend);
@@ -3472,11 +3559,13 @@ static void gl_flip(void)
             fprintf(stderr, "  [GPUGL] vertex buffers: %.0f raw batches/frame,"
                             " %.1f KB/frame uploaded (%.1f new, %.1f changed buffers/frame),"
                             " %.0f KB/frame hashed, %u buffers (%zu KB), %u vertex arrays"
-                            " (%u new)\n",
+                            " (%u new); index lists: %.1f new/frame (%.1f KB/frame),"
+                            " %u cached (%zu KB)\n",
                     (double)s_st.vbo_draws / s_st.frames, (double)s_st.vbo_kb / s_st.frames,
                     (double)s_st.vbo_new / s_st.frames, (double)s_st.vbo_changed / s_st.frames,
                     (double)s_st.vbo_hash_kb / s_st.frames, s_nvb, s_vb_bytes >> 10,
-                    s_nvao, s_st.vao_new);
+                    s_nvao, s_st.vao_new, (double)s_st.ib_new / s_st.frames,
+                    (double)s_st.ib_kb / s_st.frames, s_nib, s_ib_bytes >> 10);
         memset(&s_st, 0, sizeof s_st);
     }
     gl_check_frame();
@@ -3505,8 +3594,9 @@ int nv2a_gl_install_from_env(void)
     s_cull = !(e && strcmp(e, "0") == 0);
     if (!s_cull)
         s_backend.caps &= ~NV2A_BACKEND_CAP_CULL;
-    /* RECOMP_GPU_VBO=1: vertex-program batches from cached guest vertex
-     * buffers in their own formats (raw_bind) instead of gathered floats. */
+    /* RECOMP_GPU_VBO (default on): vertex-program batches from cached
+     * guest vertex buffers in their own formats (raw_bind) instead of
+     * gathered floats; 0 gathers every batch, as before. */
     e = getenv("RECOMP_GPU_VBO");
     s_vbo_on = e && *e && strcmp(e, "0") != 0;
     if (s_vbo_on)
