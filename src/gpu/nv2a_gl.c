@@ -51,6 +51,9 @@
 #include "nv2a_gl_vsh.h"
 #include "nv2a_backend.h"
 #include "d3d/d3d8_swizzle.h"
+#ifdef XBOXRECOMP_LSFG
+#include "framegen/framegen_policy.h"   /* frame generation forces sync present */
+#endif
 
 #include <stddef.h>
 #include <stdint.h>
@@ -424,6 +427,14 @@ static int ensure_init(void)
     {
         const char *a = getenv("RECOMP_GPU_PRESENT");
         s_present_sync_mode = a && strcmp(a, "sync") == 0;
+#ifdef XBOXRECOMP_LSFG
+        /* RECOMP_LSFG=1: the pacer times frame N by flip N; the async path
+         * delivers it one flip later. */
+        if (!s_present_sync_mode && framegen_policy_force_present_sync()) {
+            s_present_sync_mode = 1;
+            fprintf(stderr, "  [GPUGL] present read-back sync (frame generation)\n");
+        }
+#endif
         a = getenv("RECOMP_GPU_READBACK");
         s_readback_all = a && strcmp(a, "all") == 0;
     }
