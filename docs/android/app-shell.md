@@ -18,12 +18,13 @@ The CI builds it on every push to `main`. The latest one is always the prereleas
 |---|---|
 | `LauncherActivity` | The launcher entry ([The launcher](#the-launcher)): welcome, game choice and import, home (the game's hero with Play / Prepare, then Settings, Controls, Game data, About), in its own process `:launcher`. `Theme.java` and `Widgets.java` draw it, `TitleArt.java` decodes the game's title image, `UiFeedback.java` plays its sounds and haptics; `RecompConfig.java` writes its settings to `recomp.cfg`. With a valid game and « Open the game directly next time » on, it starts `ShellActivity` at once and shows nothing. |
 | `ShellActivity` | Subclass of SDL's `SDLActivity`, which loads `libSDL2.so` and then `libmain.so`. SDL's Java side is compiled from the pinned sources (`$SDL2_SRC/android-project`), not copied here. Not exported: started by the launcher, after it sets `RECOMP_GAME_DIR`. Holds the [in-game menu](#in-game-menu) (`GameMenu`), a View layer over SDL's surface. |
-| `libxba_import.so` | The launcher's ISO import: `xiso_jni.c` around the static `xiso` target (`src/xiso`). Loaded only in `:launcher`. |
+| `libxba_import.so` | The launcher's ISO import: `xiso_jni.c` around the static `xiso` target (`src/xiso`); and « Choose Lossless.dll » ([Frame generation](#frame-generation)): `lsfg_jni.c` around the shader cache (and the DXBC translator in a `-PxbaLsfg=1` build with DXVK). Loaded only in `:launcher`. |
 | `libmain.so` | `shell_main.c` + the **whole** toolkit (`--whole-archive`) + the title, when one is linked (see [A title in the shell](#a-title-in-the-shell)). Loading it on a device proves that bionic resolves every symbol the runtime uses. Four symbols that a title provides are weak stubs in `shell_main.c`, and so is the title's hook `recomp_title_main`. |
 | logcat | `src/platform/android_log.c`: stdout (INFO) and stderr (WARN) go to the tag `xboxrecomp`, one entry per line. `xbox_android_log_init()` is the first call of `SDL_main`. |
 | Window | Black, fullscreen, landscape (`sensorLandscape` + `SDL_HINT_ORIENTATIONS`). |
 | Back | Opens and closes the [in-game menu](#in-game-menu) (ShellActivity takes it before SDL); quitting is in the menu (see [Quit](#quit)). A gamepad's own Back key stays that pad's Select for the game, as before. SDL still traps Back (`SDL_HINT_ANDROID_TRAP_BACK_BUTTON`); its old Back-twice path (`QUIT_PROMPT` toast, twice within 2 s quits) is only reached where nothing above SDL takes Back. |
 | Manifest | minSdk 30, target 35, arm64-v8a only, GLES 3.0 required, `allowNativeHeapPointerTagging="false"`, `isGame`. |
+| Frame generation | `-PxbaLsfg=1 -PlsfgVkSrc=… -PdxvkSrc=…` ([Frame generation](#frame-generation)); off by default. |
 | Per title | `-PxbaTitleDir=…` (the title's project), `-PxbaApplicationId=…`, `-PxbaLabel=…`, `-PxbaVersionCode=…`, `-PxbaXbeSha256=…` (the expected `default.xbe`, [WRONG_GAME](#wrong_game)). The title is linked next to `shell_main.c`, which stays the entry (XBA-52). |
 | Assets | `selftest.xbe`: the synthetic XBE of `tools/conformance` (ours, no game content), copied in at build time for the [self-test](#self-test-in-the-app-process). |
 | Signing | Debug key generated once per toolchain image, so updates install in place while the image is cached. The release key will be a build secret, never in the repo. |
@@ -248,6 +249,8 @@ exist in the runtime and mean something to a player are offered:
 | Graphics › Renderer | Auto (default: the title profile's choice, software today), Software, GPU | `RECOMP_GPU=0` / `1`; see [GPU back end](../technical/gpu-backend.md#android) |
 | Graphics › Frame cap (GPU renderer) | Auto (default: the title profile's choice, 60 unless the profile sets one; Fable: 30), 30, 60, Off | `RECOMP_GPU_FPS_CAP=30` / `60` / `0` |
 | Graphics › Internal resolution (GPU renderer) | Auto (default: the title profile's choice, 1× for now), 1× (original), 2×, 3×, Fit the screen | `RECOMP_GPU_SCALE=1` / `2` / `3` / `auto` (Fit: the screen's height / 480, at most 3); see [GPU back end](../technical/gpu-backend.md#internal-resolution) |
+| Graphics › Frame generation (only in a [frame generation](#frame-generation) APK) | Off (default), 2×, 2× performance | `RECOMP_LSFG=1`, `RECOMP_LSFG_MULT=2`, plus `RECOMP_LSFG_PERF=1` for 2× performance |
+| Graphics › Choose Lossless.dll (same) | a document picker; the row shows the shaders' state | `RECOMP_LSFG_DIR=<files>/lsfg/<key>` once the shaders are there (not removed by « Restore defaults ») |
 | Graphics › Texture filtering | Sharp (default), Smooth, Anisotropic 8×, Anisotropic 16× | `RECOMP_TEX_BILINEAR=1`, `RECOMP_TEX_ANISO=8` / `16` |
 | Audio › 3D audio (HRTF) | On (default), Off | `RECOMP_APU_HRTF=0` when off |
 | Audio › Audio buffer | Short (256), Normal (default, 512), Long (1024), Very long (2048) | `RECOMP_AUDIO_BUF_SAMPLES=…` |
@@ -279,6 +282,39 @@ Asked for in XBA-41 but left out, because no runtime option backs them on Androi
 `RECOMP_WINDOW_SCALE` only sizes a desktop window and `RECOMP_PRESENT_FILTER` is the D3D11 presenter's), an fps cap
 for the software renderer (only the GPU renderer has one, `RECOMP_GPU_FPS_CAP`), control remapping and a stats overlay (no such switch), and vibration (`RECOMP_RUMBLE` only gates the emulated USB
 pad, `RECOMP_USB`, a per-title opt-in). Bring-up and debug switches stay out on purpose.
+
+### Frame generation
+
+Lossless Scaling frame generation (LSFG 3.1, [Frame Generation](../technical/framegen.md)) in an APK built with:
+
+```bash
+cd android && JAVA_HOME=… SDL2_SRC=… gradle -PxbaLsfg=1 \
+    -PlsfgVkSrc=/path/to/lsfg-vk-android \
+    -PdxvkSrc=/path/to/dxvk \
+    assembleDebug assembleRelease            # + -PxbaTitleDir=… etc. for a title's APK
+```
+
+| Gradle property | Environment | What |
+|---|---|---|
+| `-PxbaLsfg=1` | | Builds `XBOXRECOMP_LSFG` (pacer, presenter path, shader cache) into `libmain.so`. Off by default. |
+| `-PlsfgVkSrc=<dir>` | `LSFG_VK_SRC` | GameNative/lsfg-vk-android at d33caceb with its `thirdparty/volk` submodule: the Vulkan bridge. Without it gradle warns and the launcher hides the rows (`R.bool.xba_lsfg`). |
+| `-PdxvkSrc=<dir>` | `DXVK_SRC` | DXVK v2.6.2 with `include/spirv`: the DXBC translator in `libxba_import.so`, so the phone translates at import. Without it gradle warns; the phone only extracts, and a cache translated on a desktop (`tools/lsfg/lsfg_translate --dir`) can be pushed into `<files>/lsfg/<key>`. |
+
+In the launcher, Settings › Graphics:
+
+- **Frame generation**: Off / 2× / 2× performance (above). The game then runs at 30 real fps (cap rule) and shows 60;
+  the overlay's `LSFG` line gives real / shown fps and generation time. Any failure (no Vulkan, no shaders, too slow
+  30 frames in a row) logs `[LSFG] off: <reason>`, shows one toast, and the game goes on with normal frames.
+- **Choose Lossless.dll**: `ACTION_OPEN_DOCUMENT`; the picked file's fd goes to `LsfgNative.importDll(fd,
+  <files>/lsfg, …)` on the import worker (the ring screen, « Preparing the frame generation shaders… »). The DLL is
+  read through the fd only, never copied into the app's storage; its shaders land in `<files>/lsfg/<key>` (key: the
+  first 16 hex digits of its SHA-256). The row then says **Shaders ready (LSFG 3.1)**, **This Lossless.dll version is
+  not supported**, or **… (translator missing)** (DXBC found, APK built without `-PdxvkSrc`); in the first and last
+  case `RECOMP_LSFG_DIR` goes into `recomp.cfg`.
+- `<files>/lsfg` is kept out of backups and device transfers (`res/xml/backup_rules.xml`,
+  `data_extraction_rules.xml`; `allowBackup` is off anyway) and `LogProvider` refuses any path under it.
+
+Device check: [framegen.md](../technical/framegen.md) and the Device checklist of the frame generation work.
 
 ## Choosing the game
 

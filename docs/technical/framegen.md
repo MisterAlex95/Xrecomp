@@ -5,7 +5,8 @@
 > and generated frames at even intervals.
 >
 > **Read this when:** you work on `src/framegen/`, the presenter's frame
-> generation path, or a log says `[LSFG] off: ...`.
+> generation path (`src/video/fb_present_sdl.c`), the launcher's Frame
+> generation settings, or a log says `[LSFG] off: ...`.
 >
 > Part of the [Documentation Index](../INDEX.md)
 
@@ -118,8 +119,9 @@ a translation can run later without the DLL), `<id>.fp16.spv` / `<id>.fp32.spv`
 SHA-256). Extraction goes through `<key>.partial` and a rename. The version
 check: one variant complete in one form, else "this Lossless.dll version is
 not supported". `<base>` is `getFilesDir()/lsfg` on Android (excluded from
-backups and from the log provider, launcher package), the desktop default
-otherwise (`RECOMP_LSFG_CACHE`).
+backups and device transfers by `res/xml/backup_rules.xml` and
+`data_extraction_rules.xml`, refused by `LogProvider`; Android below), the
+desktop default otherwise (`RECOMP_LSFG_CACHE`).
 
 **Binding renumbering.** framegen numbers each pass's descriptor bindings
 0..N-1 over its declared type list: uniform buffers, samplers, sampled images,
@@ -171,7 +173,7 @@ extracts, and a cache translated on a desktop can be pushed.
 | `-DXBOXRECOMP_LSFG=ON` | `xbox_framegen`: pacer, fake generator, shader-cache helpers (C only) |
 | + `-DXBOXRECOMP_LSFG_VK_SRC=<checkout>` (or `$LSFG_VK_SRC`) | + the bridge (C++20), volk, framegen; `XBOXRECOMP_LSFG_BRIDGE=1` on `xbox_framegen`; call `lsfg_bridge_register()` before `framegen_pacer_start()` |
 | + `-DXBOXRECOMP_LSFG_DXVK_SRC=<checkout>` (or `$DXVK_SRC`) | + `lsfg_dxbc` (the translator) |
-| Android `-PxbaLsfg=1` (+ `-PlsfgVkSrc`, `-PdxvkSrc` or the env vars) | the same in `libmain.so` / `libxba_import.so` |
+| Android `-PxbaLsfg=1` (+ `-PlsfgVkSrc`, `-PdxvkSrc` or the env vars) | the same in `libmain.so` / `libxba_import.so`; the launcher shows Frame generation only with the bridge (`R.bool.xba_lsfg`) |
 
 Sources:
 
@@ -205,7 +207,7 @@ flip (`framegen_pacer_submit`, CLOCK_MONOTONIC flip time); the pacer's thread
 asks the generator for the in-between frame(s) and hands real and generated
 frames back to the presenter's sink (`FramegenSink.show`) with the time each is
 due on screen. The presenter keeps a timed FIFO and shows each entry at its due
-time (presenter package, not wired yet).
+time (Presenter below).
 
 ### Interfaces
 
@@ -222,9 +224,12 @@ time (presenter package, not wired yet).
 - **Fake generator** (`framegen_fake.c`, `framegen_fake_generator`): CPU linear
   blend, `(prev * (M - k) + cur * k) / M` per byte. Used by
   `tests/framegen_pacer` and, under `RECOMP_LSFG_FAKE=1`, by headless runs.
-- **Pixels**: everything the sink receives is 32 bpp BGRX, packed. 16 bpp
-  R5G6B5 frames are expanded at submit, so the generator and the presenter's
-  texture see one format.
+- **Pixels**: everything the sink receives is 32 bpp BGRX, packed.
+  `framegen_pacer_submit_format` takes `FRAMEGEN_FMT_BGRX8888` (the guest's
+  X8R8G8B8, desktop GL read-backs), `RGBX8888` (GLES read-backs), `R5G6B5` and
+  `X1R5G5B5`, up to 8192 x 8192, and converts at submit (the copy it makes
+  anyway), so the generator and the presenter's texture see one format.
+  `framegen_pacer_submit(bpp)` is the 4 = BGRX / 2 = R5G6B5 shorthand.
 - **Statistics**: `framegen_pacer_stats` gives real fps, shown fps (x 100) and
   mean generation cost (us), latched about once a second, for the performance
   overlay; `framegen_pacer_counters` gives the raw counters (tests, logs).
@@ -255,7 +260,12 @@ end need not link the framegen library; included only in an
   value through `framegen_policy_fps_cap`: effective cap = min(cap, display
   rate / multiplier), and a cap of 0 (off) becomes display rate / multiplier.
   60 Hz at 2x gives 30 real fps for 60 shown. Display rate:
-  `RECOMP_LSFG_DISPLAY_HZ` (default 60) until the presenter reports it. Log:
+  `RECOMP_LSFG_DISPLAY_HZ` (default 60). The windowed presenter reads the
+  display's mode before the guest starts and passes a rate **below** 60 Hz on
+  (a 50 Hz display caps at 25); at 120 Hz it keeps 60, since a cap of 60 real
+  fps would put a title that runs at 30 (most do) over the budget and past the
+  skip threshold every other frame, while 60 shown fps sit evenly on 120 Hz.
+  Log: `[LSFG] display 120 Hz; pacing for 60 Hz`. Cap log:
   `[GPU] back end frame cap 30 fps for frame generation (was 60)`.
 - **Present mode**: the GL back end (`nv2a_gl.c`) forces
   `RECOMP_GPU_PRESENT=sync`, since the asynchronous read-back delivers frame N
@@ -290,6 +300,91 @@ projects, no `XBOXRECOMP_LSFG` needed): fake generator plus a fake clock
   `framegen_pacer_start` from the environment with `RECOMP_LSFG_FAKE=1`.
 
 Clean under ThreadSanitizer and UBSan (30 runs).
+
+## Presenter
+
+`src/video/fb_present_sdl.c`, built with `XBOXRECOMP_LSFG` (the root
+CMakeLists defines it on `xbox_video` and links `xbox_framegen`), active under
+`RECOMP_LSFG=1`:
+
+- **Start**: `xbox_HostWindowMain` calls `lsfg_bridge_register()` when the
+  bridge is built (`XBOXRECOMP_LSFG_BRIDGE`), then `framegen_pacer_start()`,
+  which picks the fake generator under `RECOMP_LSFG_FAKE=1` and otherwise the
+  registered one (none: `[LSFG] off: no generator in this build`). Windowed:
+  after the window exists, before the guest starts. Headless
+  (`RECOMP_FB_WINDOW=0`): before the guest, with a sink that only counts.
+  The generator opens at the first frame, on the pacer thread (device and
+  pipelines: 10-170 ms with the pipeline cache, about 2 s cold for the
+  performance set); frames that arrive meanwhile replace each other in the
+  input queue.
+- **Feeding**: both present paths hand their frame to
+  `framegen_pacer_submit_format()` instead of a slot while
+  `framegen_pacer_active()`: the guest flip (640x480, X8R8G8B8, R5G6B5 or
+  X1R5G5B5 as `xbox_FramebufferWindowSetFormat` says) and the GL back end's
+  host frames (`xbox_FramebufferWindowPresentHost`, BGRX on desktop GL, RGBX on
+  GLES, at the internal resolution). The flip time is `CLOCK_MONOTONIC` at the
+  call: the read-back is synchronous under frame generation. A size change
+  (guest frames, then host frames at `RECOMP_GPU_SCALE`) closes and reopens
+  the generator at the new size; the frame after primes it.
+- **Timed FIFO**: the sink (pacer thread) copies each frame into a ring of 4
+  entries (pixels, size, due time; a full ring loses its oldest entry) and
+  wakes the main loop. The loop sleeps in `SDL_WaitEventTimeout` until the next
+  event or the next due time (whole ms, the last ms counts as due), takes the
+  newest due entry (older due ones are skipped: "late"), uploads it as an
+  XRGB8888 texture and presents. With vsync on, the present itself waits for
+  the display.
+- **Overlay**: `perf_overlay_set_framegen()` adds a line
+  `LSFG <real> / <shown> FPS  GEN <ms> MS` (`LSFG OFF` after a fallback),
+  drawn after the picture on every shown frame, never generated. The title
+  bar's FPS stays the real (flip) rate.
+- **Lifecycle**: a listener (`recomp_lifecycle_listen`) calls
+  `framegen_pacer_reset()` and clears the FIFO on pause and on resume.
+- **Fallback**: once `framegen_pacer_active()` is 0, the next flip goes to the
+  slots again; the main loop logs `[FBWIN] frame generation off (<reason>);
+  normal present` and on Android shows one toast.
+- **Logs**: `[LSFG] real / shown fps, generation ms, frames ...` every 5 s
+  (headless: every 5 s of due time, and at exit; windowed: plus the window's
+  presented / FIFO-full / late counts) and when the window closes.
+- **Screenshot** (`xbox_FramebufferDumpBmp`, the companion's): the frame on
+  screen, the FIFO's last shown entry.
+- Closing the window stops the pacer (and closes the bridge) before SDL goes.
+
+Verification on the Mac (M1 Max, MoltenVK from an app bundle through
+`DYLD_LIBRARY_PATH`, other jobs running; Fable, `RECOMP_GPU=1 RECOMP_LSFG=1
+RECOMP_LSFG_PERF=1 RECOMP_LSFG_DIR=<Alex's translated cache>`, intro and title):
+
+| Run | Real fps | Shown fps | Generation | Notes |
+|---|---|---|---|---|
+| headless, 60 s | 29.9-30.3 | 59.6-60.5 | 10.0-10.5 ms | 0 failed; 118 inputs replaced while the device opened |
+| windowed, 45 s | 30.0-30.1 | 59.7-60.4 | 10.0-11.0 ms | window presented 2318 of 2336 handed over (17 late), FIFO never full |
+| headless, `RECOMP_LSFG_FAKE=1` | 30.0 | 60.0 | 0.85 ms | |
+| wrong `RECOMP_LSFG_DIR` | - | - | - | `[LSFG] off: lsfg: <dir>: no shader`, the game goes on |
+
+Generation here includes upload and read-back on a loaded machine (the
+bridge benchmark alone: 4.4 ms). Before the display-rate rule above, a 120 Hz
+Mac display gave a cap of 60: shown 44-48 fps, half the pairs skipped.
+
+## Android
+
+- **Build**: `-PxbaLsfg=1 -PlsfgVkSrc=<lsfg-vk-android checkout> -PdxvkSrc=<dxvk
+  v2.6.2>` (or `LSFG_VK_SRC` / `DXVK_SRC`) is a supported configuration; see
+  [App shell](../android/app-shell.md#frame-generation) for the full command.
+  Without `lsfgVkSrc` gradle warns and the launcher hides the rows; without
+  `dxvkSrc` the phone only extracts (a desktop-translated cache can be pushed
+  into the directory).
+- **Launcher**: Settings › Graphics › **Frame generation**: Off (default) /
+  2× / 2× performance writes `RECOMP_LSFG`, `RECOMP_LSFG_MULT`,
+  `RECOMP_LSFG_PERF` to `recomp.cfg`. **Choose Lossless.dll** below it opens
+  `ACTION_OPEN_DOCUMENT`; the picked document's fd goes to
+  `LsfgNative.importDll(fd, filesDir/lsfg, ...)` on a worker thread (the DLL is
+  read through the fd into memory, never copied into the app's storage), and
+  the row then says "Shaders ready (LSFG 3.1)", "This Lossless.dll version is
+  not supported" or "translator missing". When shaders are usable (or DXBC is
+  there for a later translation) `RECOMP_LSFG_DIR=<filesDir>/lsfg/<key>` goes
+  into `recomp.cfg`. Strings in English and French.
+- **Storage**: `files/lsfg` is excluded from backups (`allowBackup="false"`,
+  plus `fullBackupContent` and `dataExtractionRules`, which also cover a
+  device-to-device transfer) and never served by `LogProvider`.
 
 ## Measurements
 

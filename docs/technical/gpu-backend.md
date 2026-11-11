@@ -147,6 +147,12 @@ generation forcing it) the frame is read and mapped at its own flip.
   `xbox_FramebufferDumpBmp` (the companion's Screenshot) writes the shown
   frame at its own size. The Win32 GDI window takes no host frames (a stub
   returning 0) and never sets a display size.
+- **Frame generation** (`RECOMP_LSFG=1`, [Frame Generation](framegen.md#presenter)):
+  host frames go to the pacer (`framegen_pacer_submit_format`, BGRX or RGBX at
+  their own size) instead of a slot, and the window shows the pacer's real and
+  generated frames from its timed FIFO; the generator reopens when the size
+  changes. The `[FBWIN] host frames ...: copy` figure is then the pacer's
+  submit (copy and conversion) on the executor.
 - **Cost** (M1 Max, 1x, Fable intro to Oakvale, windowed): read-back issue +
   map 0.16-0.24 ms/frame on the executor, the window's copy 0.045-0.055
   ms/frame (`[GPUGL] host present: ...` and `[FBWIN] host frames ...: copy`
