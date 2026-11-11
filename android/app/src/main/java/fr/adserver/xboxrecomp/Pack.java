@@ -67,6 +67,35 @@ final class Pack {
     }
 
     /**
+     * The SHA-256 of the default.xbe the pack of titleId was built from (pack.json's xbe_sha256, lower case), or null
+     * when there is no readable pack.json or it does not say. The library compares it with the active source's XBE:
+     * another version of the game needs preparing again.
+     */
+    static String xbeSha256(File filesDir, String titleId) {
+        String id = normTitleId(titleId);
+        if (id == null)
+            return null;
+        File json = new File(packDir(filesDir, id), JSON);
+        if (!json.isFile())
+            return null;
+        try {
+            String h = new JSONObject(PrepareProtocol.readText(json, 1 << 20)).optString("xbe_sha256", "").trim();
+            return h.isEmpty() ? null : h.toLowerCase(Locale.ROOT);
+        } catch (IOException | JSONException e) {
+            return null;
+        }
+    }
+
+    /**
+     * False when the pack of titleId was built from another XBE than the one whose SHA-256 is xbeSha256. An unknown
+     * side (no pack.json, no field, no hash given) is not a mismatch.
+     */
+    static boolean builtFrom(File filesDir, String titleId, String xbeSha256) {
+        String h = xbeSha256(filesDir, titleId);
+        return h == null || xbeSha256 == null || xbeSha256.isEmpty() || h.equalsIgnoreCase(xbeSha256.trim());
+    }
+
+    /**
      * Removes packs/<titleId> (the native loader refused it): the next check says NO_PACK and the launcher offers
      * Prepare, which builds it again (its link step redoes a pack without pack.json).
      */

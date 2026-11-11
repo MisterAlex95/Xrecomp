@@ -160,4 +160,26 @@ public class PackTest {
         assertFalse(Pack.sameTitleId("zz", "zz"));
         assertFalse(Pack.sameTitleId("", ""));
     }
+
+    @Test
+    public void xbeHashOfThePack() throws Exception {
+        assertNull(Pack.xbeSha256(files(), TID));                      // no pack
+        assertTrue(Pack.builtFrom(files(), TID, "ab"));                // unknown is not a mismatch
+        TestSupport.writePack(files(), TID, 16);
+        String h = "0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF";
+        edit("xbe_sha256", h);
+        assertEquals(h.toLowerCase(java.util.Locale.ROOT), Pack.xbeSha256(files(), TID));
+        assertEquals(h.toLowerCase(java.util.Locale.ROOT), Pack.xbeSha256(files(), "0x4d530004"));
+        assertTrue(Pack.builtFrom(files(), TID, h.toLowerCase(java.util.Locale.ROOT)));
+        assertTrue(Pack.builtFrom(files(), TID, h));
+        assertFalse("another version of the game", Pack.builtFrom(files(), TID, "ff" + h.substring(2)));
+        assertTrue(Pack.builtFrom(files(), TID, null));
+        assertTrue(Pack.builtFrom(files(), TID, ""));
+        edit("xbe_sha256", null);                                      // an older pack.json
+        assertNull(Pack.xbeSha256(files(), TID));
+        assertTrue(Pack.builtFrom(files(), TID, h));
+        TestSupport.write(new File(Pack.packDir(files(), TID), "pack.json"), "{");
+        assertNull(Pack.xbeSha256(files(), TID));
+        assertNull(Pack.xbeSha256(files(), "zz"));
+    }
 }

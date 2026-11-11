@@ -52,6 +52,15 @@ final class TestSupport {
         return b;
     }
 
+    /** xbe() with the certificate's game region (+0xA0), disc number (+0xA8) and version (+0xAC) set. */
+    static byte[] xbe(int titleId, String name, int region, int disc, int version) {
+        byte[] b = xbe(titleId, name);
+        le32(b, 0x200 + 0xa0, region);
+        le32(b, 0x200 + 0xa8, disc);
+        le32(b, 0x200 + 0xac, version);
+        return b;
+    }
+
     /**
      * A minimal XBE as xbe() with one section, $$XTIMAGE, holding image (an XPR0 built by xpr0()): headers up to
      * 0x400 (section header at 0x300, its name at 0x340), the section's bytes from 0x400. Ours, no game content.
