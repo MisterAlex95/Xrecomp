@@ -4,5 +4,5 @@
   "project": "fable",
   "exclude_manual": ["overrides.c"],
   "seed_functions": ["seed_functions.json"],
-  "status": "Boots, intro movies skipped, title screen, menus and loading screens, pad works. Software rasteriser."
+  "status": "Boots; logo, intro and story movies play with sound; title screen, menus, AutoSave loads into Oakvale with music; pad works. Software rasteriser by default, GL back end with RECOMP_GPU=1."
 }

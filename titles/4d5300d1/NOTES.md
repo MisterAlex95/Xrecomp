@@ -210,3 +210,36 @@ the lock stalls D3D init (RECOMP_GUEST_CPU_TRACE).
 - Executor: vertex programs shaded on the raster pool; RECOMP_ACK_IDLE_US (off until the scan follows jumps).
 - Seen during these runs: 0-flip starts (D3D waiting in sub_00855260, GPU semaphore behind) in roughly 1 run in 4
   on a loaded Mac -- the init/semaphore race of the investigation (section 4.1), more frequent than its 2 in 14.
+
+## 2026-11-11: movies and sound on (cycle 3 WP-1..3, branch xba-fable-movies)
+- Movies: the lifted XMV decoder works; its clock is the vblank count at device+0x1DE8
+  (D3DDevice_GetDisplayFieldStatus, sub_0084F650), which only moves with vblanks. title.c now defaults
+  RECOMP_VBLANK=paced and the sub_006440AB "end of file" override is gone. **Regenerate the C after pulling**
+  (sub_006440AB needs its body back): tools.prepare, or
+  `python -m tools.recomp <default.xbe> --all --split 250 --game-name "Fable: The Lost Chapters"
+  --disasm-dir <analysis>/disasm --func-id-dir <analysis>/func_id --abi-dir <analysis>/abi
+  --gen-dir <project>/src/recomp/gen --exclude-manual titles/4d5300d1/overrides.c` (~4.5 min on the Mac).
+  Against the previous tree only sub_006440AB's body, its call sites and the chunk boundaries change.
+- With movies on, DirectSound hung in its AC'97 channel reset (sub_00832BFC) when two threads reset channels
+  at once: the POSIX trap opened the page for everyone. Toolkit: read-only shared page + writable view
+  (RECOMP_AC97_ALIAS=0 for the old window).
+- DirectSound reset the whole APU on every DoWork (10 ms stall each) because the EP canary at 0xFE85A018 read 0.
+  Toolkit keeps 0x00CCCCCC there (RECOMP_APU_EP_CANARY). Reset counter at 0x834934: 0 with it, ~1,300 per 80 s
+  of movies without it.
+- Silence outside the movies: the sound/music buffers live in the 608 MB reserve at 0x2xxxxxxx and the APU
+  folded their addresses to 28 bits (read zeros). Toolkit fix in mcpx_apu_phys; title screen music
+  (LOOKOUT_POINT.wma), Oakvale.wma and the world are audible (WAV rms 500-3,800 per 10 s window, was 0).
+- Mac, 10 no-input runs of 80 s: lionhead_logo, Microsoft_Logo, intro_comp in order every time; movie fps
+  29.8-30.4 when the machine was not saturated (20-27 under load average ~20); resets 0.
+  1 of the 10 stalled in intro_comp at 1,280 flips: the kernel timer thread never came back from the USB
+  driver's DPC (sub_00875EA1 -> sub_00875B3C -> sub_00875A48 loop, 930/930 samples; OHCI0 WDH interrupts),
+  so no other DPC ran, the vblank count stopped and the decoder with it. That is the OHCI done-queue race
+  (cycle 3, 5a), not the movies; the t1 stall at 272 flips was probably the same (it was not sampled).
+- Continue -> Load Game -> AutoSave plays dream_sequence_comp.xmv (not skippable) and reaches Oakvale.
+- RECOMP_GPU=1 in Oakvale after the AutoSave: 32.6-32.8 fps with this branch, 33.0-33.2 with the previous
+  profile and tree (movies skipped), 32.6-33.4 with the previous one plus RECOMP_VBLANK=paced: paced vblanks cost
+  nothing measurable in-world.
+- Open: in 2 of 3 GPU runs with movies on, pad input stopped for good right as the title screen appeared after
+  the intro was skipped (the guest stopped polling the interrupt endpoint: no more pad reports; in one of them the
+  attract movie then stalled at 0 fps). Not seen in 2 baseline GPU runs nor in 3 CPU-rasteriser drives. Same
+  symptoms as the OHCI race (5a) and the DPC stall above; not root-caused here.
