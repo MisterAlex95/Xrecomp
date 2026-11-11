@@ -275,3 +275,143 @@ def test_android_bad_args(capsys):
     assert prep.main(["x.xbe", "--android"]) == 1
     out = capsys.readouterr().out.strip()
     assert out.startswith("XBA_RESULT error code=BAD_ARGS msg=--android needs --work")
+
+
+# ── title.json "env_force" → pack.json, and the desktop project ──
+
+BO3_LIKE = {"title_id": "4541005B", "project": "synthetic", "env_force": {"RECOMP_LSFG": "0", "RECOMP_GPU_FPS_CAP": 60}}
+
+
+def test_env_force_of():
+    assert pack.env_force_of(None) == {}
+    assert pack.env_force_of({"title_id": "X"}) == {}
+    assert pack.env_force_of(BO3_LIKE) == {"RECOMP_LSFG": "0", "RECOMP_GPU_FPS_CAP": "60"}
+    assert list(pack.env_force_of(BO3_LIKE)) == ["RECOMP_LSFG", "RECOMP_GPU_FPS_CAP"]     # title.json order
+    for bad in ({"LD_PRELOAD": "x"}, {"RECOMP_": "1"}, {"recomp_lsfg": "0"}, {"RECOMP_A-B": "0"},
+                {"RECOMP_" + "A" * 57: "0"}, {"RECOMP_LSFG": True}, {"RECOMP_LSFG": None},
+                {"RECOMP_LSFG": ["0"]}, {"RECOMP_LSFG": "a\nb"}, {"RECOMP_LSFG": "é"},
+                {"RECOMP_LSFG": "x" * 256}, ["RECOMP_LSFG"],
+                {"RECOMP_T%d" % i: "1" for i in range(pack.ENV_FORCE_MAX + 1)}):
+        with pytest.raises(ValueError):
+            pack.env_force_of({"env_force": bad})
+    assert pack.env_force_of({"env_force": {"RECOMP_" + "A" * 56: "x" * 255}})
+
+
+def test_make_meta_env_force(tmp_path):
+    lib = _lib(str(tmp_path))
+    m = pack.make_meta(lib, "4541005b", "t", "x", "k", "c", env_force=pack.env_force_of(BO3_LIKE))
+    assert tuple(m) == pack.FIELDS + ("env_force",)
+    assert m["env_force"] == {"RECOMP_LSFG": "0", "RECOMP_GPU_FPS_CAP": "60"}
+    assert "env_force" not in pack.make_meta(lib, "AA", "t", "x", "k", "c", env_force={})
+    packs = str(tmp_path / "packs")
+    lib = _lib(pack.begin(packs, "4541005B"), b"good")
+    final = pack.publish(packs, "4541005B", pack.make_meta(lib, "4541005B", "t", "x", "k", "c",
+                                                          env_force={"RECOMP_LSFG": "0"}))
+    with open(os.path.join(final, "pack.json")) as f:
+        text = f.read()
+    assert json.loads(text)["env_force"] == {"RECOMP_LSFG": "0"}
+    assert pack.read(final)["env_force"] == {"RECOMP_LSFG": "0"} and pack.check(final) is None
+
+
+def _profile(tmp_path, obj):
+    d = tmp_path / "titles" / obj["title_id"].lower()
+    d.mkdir(parents=True)
+    (d / "title.json").write_text(json.dumps(obj))
+    (d / "title.c").write_text("void xba_title_configure(void) {}\n")
+    p = dict(obj)
+    p["dir"] = str(d)
+    return p
+
+
+def test_assemble_project_env_force_header(tmp_path):
+    import tools.prepare.__main__ as prep
+    proj = str(tmp_path / "project")
+    prof = _profile(tmp_path, dict(BO3_LIKE, env_force={"RECOMP_LSFG": "0", "RECOMP_X": 'a"b\\c??='}))
+    prep.assemble_project(proj, prof, {"title_id": "0x4541005B"})
+    with open(os.path.join(proj, "src", "title", "env_force.h")) as f:
+        h = f.read()
+    assert '#define XBA_TITLE_ENV_FORCE_TID "4541005B"' in h
+    assert '    { "RECOMP_LSFG", "0" },' in h
+    assert r'    { "RECOMP_X", "a\"b\\c\?\?=" },' in h
+    with open(os.path.join(proj, "CMakeLists.txt")) as f:
+        assert "src/title/env_force.h" in f.read()
+    # Without env_force (or without a profile) there is no header: XBA_TITLE_ENV_FORCE stays undefined.
+    prep.assemble_project(proj, dict(prof, env_force={}), {"title_id": "0x4541005B"})
+    assert not os.path.exists(os.path.join(proj, "src", "title", "env_force.h"))
+    prep.assemble_project(proj, None, {"title_id": "0x4541005B"})
+    assert not os.path.exists(os.path.join(proj, "src", "title"))
+    with pytest.raises(ValueError):
+        prep.assemble_project(proj, dict(prof, env_force={"PATH": "/"}), {"title_id": "0x4541005B"})
+
+
+def test_env_force_header_compiles(tmp_path):
+    """The generated header with the loop main.c runs over it, built by the host's cc."""
+    import shutil
+    import subprocess
+    import tools.prepare.__main__ as prep
+    cc_bin = shutil.which("cc")
+    if not cc_bin:
+        pytest.skip("no cc")
+    (tmp_path / "env_force.h").write_text(prep.env_force_header("4541005b", {"RECOMP_LSFG": "0",
+                                                                            "RECOMP_Q": 'x"?\\'}))
+    (tmp_path / "t.c").write_text(
+        '#include <stdio.h>\n#include "env_force.h"\nint main(void) {\n'
+        '    for (unsigned i = 0; i < sizeof xba_title_env_force / sizeof xba_title_env_force[0]; i++)\n'
+        '        printf("%s %s=%s\\n", XBA_TITLE_ENV_FORCE_TID, xba_title_env_force[i][0], xba_title_env_force[i][1]);\n'
+        '    return 0;\n}\n')
+    exe = str(tmp_path / "t")
+    subprocess.check_call([cc_bin, "-std=c11", "-Wall", "-Werror", "-o", exe, str(tmp_path / "t.c")])
+    assert subprocess.check_output([exe], text=True) == '4541005B RECOMP_LSFG=0\n4541005B RECOMP_Q=x"?\\\n'
+
+
+class _Args:
+    def __init__(self, tmp_path, shell_lib):
+        self.work = str(tmp_path / "work")
+        self.pack_dir = str(tmp_path / "packs")
+        self.shell_lib = shell_lib
+        self.shell_abi = 1
+        self.opt = "2"
+        self.python = None
+
+
+class _Tc:
+    def short_version(self):
+        return "clang 19"
+
+
+def _make_pack(tmp_path, monkeypatch, env_force):
+    from tools.prepare import android
+    links = []
+
+    def fake_link(objects, lib, tc, shell_lib, log=None):
+        links.append(lib)
+        with open(lib, "wb") as f:
+            f.write(b"\x7fELF title")
+    monkeypatch.setattr(android.cc, "link", fake_link)
+    monkeypatch.setattr(android.cc, "prune", lambda *a, **k: None)
+    shell = tmp_path / "libmain.so"
+    if not shell.exists():
+        shell.write_bytes(b"shell")
+    a = _Args(tmp_path, str(shell))
+    os.makedirs(a.work, exist_ok=True)
+    r = android.Run(a, None)
+    r.rep = Reporter()
+    if os.path.exists(r.stamp_path):
+        with open(r.stamp_path) as f:
+            r.stamp = json.load(f)
+    r.tid, r.objects, r.toolkit, r.xbe_sha, r.tc = "4541005B", [], "k", "ab" * 32, _Tc()
+    r.info = {"title": "Synthetic"}
+    r.env_force = env_force
+    final = r.make_pack()
+    return pack.read(final), links
+
+
+def test_android_pack_json_env_force(tmp_path, monkeypatch, capsys):
+    meta, links = _make_pack(tmp_path, monkeypatch, pack.env_force_of(BO3_LIKE))
+    assert meta["env_force"] == {"RECOMP_LSFG": "0", "RECOMP_GPU_FPS_CAP": "60"} and len(links) == 1
+    # Up to date: not linked again.
+    meta, links = _make_pack(tmp_path, monkeypatch, pack.env_force_of(BO3_LIKE))
+    assert links == [] and meta["env_force"]["RECOMP_LSFG"] == "0"
+    # Only title.json's env_force changed (same objects): pack.json is written again.
+    meta, links = _make_pack(tmp_path, monkeypatch, {})
+    assert len(links) == 1 and "env_force" not in meta

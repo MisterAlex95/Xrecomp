@@ -76,6 +76,11 @@ if(TITLE_PROFILE_SOURCES)
     list(APPEND GAME_SOURCES ${TITLE_PROFILE_SOURCES})
     add_compile_definitions(XBA_TITLE_PROFILE=1)
 endif()
+# The options the title forces (title.json "env_force"), set by main() before
+# anything reads the environment.
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/title/env_force.h")
+    add_compile_definitions(XBA_TITLE_ENV_FORCE=1)
+endif()
 
 # The recomp pipeline also generates a dispatch header and function declarations.
 # These are included by the generated .c files:

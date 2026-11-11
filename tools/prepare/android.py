@@ -36,6 +36,7 @@ class Run:
         self.log = os.path.join(self.work, "prepare.log")
         self.stamp_path = os.path.join(self.work, "stamp.json")
         self.stamp = {}
+        self.env_force = {}
 
     # ── helpers ──
 
@@ -95,6 +96,10 @@ class Run:
             with open(os.path.join(pdir, "title.json")) as f:
                 self.profile = json.load(f)
             self.profile["dir"] = pdir
+        try:
+            self.env_force = pack.env_force_of(self.profile)
+        except ValueError as e:
+            raise cc.StepError("BAD_PROFILE", "titles/%s: %s" % (self.tid.lower(), e))
         self.rep.progress(1, 100, "%s (title ID %s)%s" % (self.info.get("title", "?"), self.tid,
                                                          ", title profile" if self.profile else ""))
 
@@ -186,12 +191,15 @@ class Run:
             h.update(os.path.basename(o).encode() + b"\n")
         h.update(pack.sha256_file(a.shell_lib).encode())
         h.update(("|%s|%s" % (a.shell_abi, self.toolkit)).encode())
+        # pack.json's env_force comes from title.json: a change there alone
+        # (same objects) still writes the pack again.
+        h.update(("|env_force=%s" % json.dumps(self.env_force, sort_keys=True)).encode())
         key = h.hexdigest()
         pack.recover(packs, self.tid)
         final = pack.final_dir(packs, self.tid)
         meta = pack.read(final)
         if (self.stamp.get("link") == key and meta and meta["xbe_sha256"] == self.xbe_sha
-                and pack.check(final, a.shell_abi) is None):
+                and meta.get("env_force", {}) == self.env_force and pack.check(final, a.shell_abi) is None):
             self.rep.progress(5, 100, "pack up to date")
         else:
             try:
@@ -202,7 +210,8 @@ class Run:
             cc.link(self.objects, lib, self.tc, a.shell_lib, log=self.log)
             self.rep.progress(5, 70, "writing pack.json")
             meta = pack.make_meta(lib, self.tid, self.info.get("title", ""), self.xbe_sha, self.toolkit,
-                                  "%s -O%s" % (self.tc.short_version(), a.opt), shell_abi=a.shell_abi)
+                                  "%s -O%s" % (self.tc.short_version(), a.opt), shell_abi=a.shell_abi,
+                                  env_force=self.env_force)
             try:
                 pack.publish(packs, self.tid, meta)
             except OSError as e:

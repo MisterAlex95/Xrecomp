@@ -64,6 +64,16 @@ extern void xba_title_start(const char *game_dir, const char *save_dir);
 #include "platform/recomp_storage.h"
 #endif
 
+/* Options the title forces (title.json "env_force"): tools.prepare writes
+ * them to src/title/env_force.h and CMakeLists defines XBA_TITLE_ENV_FORCE.
+ * main() sets them over the environment before anything reads it -- the
+ * frame generation pacer and the window start before xba_title_configure.
+ * The Android app gets them from pack.json instead (recomp_pack.c). */
+#if defined(XBA_TITLE_ENV_FORCE) && !defined(XBOXRECOMP_SHELL_TITLE)
+#include "title/env_force.h"
+#include "platform/recomp_cfg.h"
+#endif
+
 /*
  * If xboxrecomp.h is not an umbrella header in your setup, include
  * the individual headers directly:
@@ -571,6 +581,10 @@ int main(int argc, char **argv)
 {
     (void)argc;
     (void)argv;
+#ifdef XBA_TITLE_ENV_FORCE
+    for (size_t i = 0; i < sizeof xba_title_env_force / sizeof xba_title_env_force[0]; i++)
+        recomp_cfg_force(XBA_TITLE_ENV_FORCE_TID, xba_title_env_force[i][0], xba_title_env_force[i][1]);
+#endif
 #ifdef _WIN32
     return WinMain(GetModuleHandle(NULL), NULL, GetCommandLineA(), SW_SHOW);
 #else

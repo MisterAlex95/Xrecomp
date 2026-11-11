@@ -10,6 +10,7 @@ import datetime
 import hashlib
 import json
 import os
+import re
 import shutil
 
 FORMAT = 1
@@ -20,6 +21,15 @@ ENTRY = "recomp_title_main"
 # when what a title may link against changes. The app passes its own value
 # (--shell-abi); this is the default.
 SHELL_ABI = 1
+
+# title.json "env_force": options the title forces at start-up, over recomp.cfg
+# and the launcher's settings (docs/runtime/environment-variables.md « Forced
+# by a title »). Same rule as src/platform/recomp_cfg.c recomp_cfg_force_key_ok /
+# _value_ok, and at most as many as recomp_pack.h RECOMP_PACK_ENV_FORCE_MAX.
+ENV_FORCE_KEY = re.compile(r"RECOMP_[A-Z0-9_]+\Z")
+ENV_FORCE_KEY_MAX = 63
+ENV_FORCE_VALUE_MAX = 255
+ENV_FORCE_MAX = 16
 
 FIELDS = ("format", "title_id", "title", "xbe_sha256", "abi", "shell_abi", "toolkit", "lib",
           "lib_sha256", "lib_size", "entry", "cc", "built_at")
@@ -33,9 +43,36 @@ def sha256_file(path):
     return h.hexdigest()
 
 
-def make_meta(lib_path, title_id, title, xbe_sha256, toolkit, cc, shell_abi=SHELL_ABI, now=None):
+def env_force_of(profile):
+    """A title profile's "env_force" as a {key: value} dict ({} when it has
+    none), checked: keys RECOMP_[A-Z0-9_]+ (63 characters at most), values
+    strings of printable ASCII (255 at most; a number is taken as its text),
+    16 entries at most. ValueError says which entry is wrong."""
+    env = (profile or {}).get("env_force") or {}
+    if not isinstance(env, dict):
+        raise ValueError("title.json env_force: an object of RECOMP_* names to strings expected")
+    if len(env) > ENV_FORCE_MAX:
+        raise ValueError("title.json env_force: %d entries, at most %d" % (len(env), ENV_FORCE_MAX))
+    out = {}
+    for k, v in env.items():
+        if not ENV_FORCE_KEY.match(k) or len(k) > ENV_FORCE_KEY_MAX:
+            raise ValueError("title.json env_force: %r is not a RECOMP_[A-Z0-9_]+ name" % k)
+        if isinstance(v, bool) or not isinstance(v, (str, int)):
+            raise ValueError("title.json env_force: %s must be a string" % k)
+        v = str(v)
+        if len(v) > ENV_FORCE_VALUE_MAX or any(not (0x20 <= ord(c) <= 0x7e) for c in v):
+            raise ValueError("title.json env_force: %s=%r is not printable ASCII of at most %d characters"
+                             % (k, v, ENV_FORCE_VALUE_MAX))
+        out[k] = v
+    return out
+
+
+def make_meta(lib_path, title_id, title, xbe_sha256, toolkit, cc, shell_abi=SHELL_ABI, now=None,
+              env_force=None):
+    """pack.json's content. env_force (env_force_of) goes in only when it is
+    not empty: a pack without it forces nothing."""
     now = now or datetime.datetime.now(datetime.timezone.utc)
-    return {
+    meta = {
         "format": FORMAT,
         "title_id": title_id.upper(),
         "title": title,
@@ -50,6 +87,9 @@ def make_meta(lib_path, title_id, title, xbe_sha256, toolkit, cc, shell_abi=SHEL
         "cc": cc,
         "built_at": now.replace(microsecond=0).isoformat().replace("+00:00", "Z"),
     }
+    if env_force:
+        meta["env_force"] = dict(env_force)
+    return meta
 
 
 def _fsync_dir(d):
