@@ -530,7 +530,7 @@ public class GameMenuTest {
         press(KeyEvent.KEYCODE_DPAD_RIGHT);
         assertEquals(GameStore.BottomScreen.BLACK, GameStore.bottomScreen(activity));
         assertEquals(1, host.bottomChanges);
-        // B: back to the main page, on Quick settings; B again closes.
+        // B: back to the main page, on Settings; B again closes.
         press(KeyEvent.KEYCODE_BUTTON_B);
         assertEquals(GameMenu.Page.MAIN, menu.page());
         assertTrue(menu.isOpen());

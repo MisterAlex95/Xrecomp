@@ -12,7 +12,7 @@ import java.util.Locale;
  *
  * Which one applies, first found wins:
  * <ol>
- *   <li>the title's own choice (in-game menu › Quick settings › Language), a small file per title ID;</li>
+ *   <li>the title's own choice (in-game menu › Settings › Language), a small file per title ID;</li>
  *   <li>Settings › Game › Language, a RECOMP_LANGUAGE line in recomp.cfg (or one written there by hand);</li>
  *   <li>the Android system language when it is one the Xbox has;</li>
  *   <li>English (the runtime's default when nothing is set).</li>

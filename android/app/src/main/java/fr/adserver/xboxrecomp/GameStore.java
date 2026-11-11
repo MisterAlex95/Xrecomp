@@ -103,7 +103,7 @@ final class GameStore {
     }
 
     /*
-     * The in-game menu's quick settings (GameMenu, docs/android/app-shell.md « In-game menu »), written by the game's
+     * The in-game menu's Settings page (GameMenu, docs/android/app-shell.md « In-game menu »), written by the game's
      * process and read again at its next start: the performance overlay and the game's volume (0..100, 0 = muted).
      */
     static final String PERF_OVERLAY_FILE = "perf_overlay", GAME_VOLUME_FILE = "game_volume";

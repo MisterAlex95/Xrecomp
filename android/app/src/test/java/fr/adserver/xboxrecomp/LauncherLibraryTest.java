@@ -489,7 +489,7 @@ public class LauncherLibraryTest {
         TestSupport.screenshot(a.getWindow().getDecorView(), "library-queued");
     }
 
-    /** The Source screen offers the library folder; « Change game » on Home's bottom screen reads « Library ». */
+    /** The Source screen offers the library folder (a row of its list). */
     @Test
     public void sourceOffersTheLibraryFolder() throws Exception {
         TestSupport.write(new File(GameStore.defaultGameDir(app), "default.xbe"), TestSupport.xbe(0x4D530004, "Sample"));
