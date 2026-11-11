@@ -55,6 +55,9 @@
 #include "perf_overlay.h"
 #include "keyboard_sdl.h"     /* src/input: keys into the pad stand-in */
 #include "xinput_xbox.h"
+#if defined(XBOXRECOMP_HAVE_GPU)
+#include "nv2a_gl.h"          /* src/gpu: RECOMP_GPU=1 */
+#endif
 
 extern ptrdiff_t xbox_GetMemoryOffset(void);
 
@@ -387,6 +390,13 @@ int xbox_HostWindowMain(int (*guest_main)(void))
      * into an SDL_QUIT that a headless run never reads. Set before the
      * headless return: audio and input start SDL subsystems there too. */
     SDL_SetHint(SDL_HINT_NO_SIGNAL_HANDLERS, "1");
+#if defined(XBOXRECOMP_HAVE_GPU)
+    /* RECOMP_GPU=1: the GL back end draws instead of the CPU rasteriser.
+     * Before the guest starts, windowed or not; its context lives on the
+     * executor thread, frames still reach this window through guest
+     * memory (src/gpu/nv2a_gl.c). */
+    nv2a_gl_install_from_env();
+#endif
     if (!env_on("RECOMP_FB_WINDOW") || env_on("RECOMP_HEADLESS"))
         return guest_main();
 
