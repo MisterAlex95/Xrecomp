@@ -2311,6 +2311,14 @@ static int gl_zpass_resolve(uint32_t ticket, int block, uint32_t *count)
     return 1;
 }
 
+/* A report the title may be spinning on: hand the driver what is queued,
+ * so its query result comes in (nv2a_backend.h zpass_flush). */
+static void gl_zpass_flush(void)
+{
+    if (s_init > 0)
+        glFlush();
+}
+
 /* ---- the back end ------------------------------------------------------- */
 
 static void gl_clear(const Nv2aSurface *s, const Nv2aRenderState *rs,
@@ -3139,7 +3147,7 @@ static void gl_flip(void)
 static Nv2aBackend s_backend = {
     gl_clear, gl_draw, gl_flip,
     NV2A_BACKEND_CAP_PIXEL | NV2A_BACKEND_CAP_CULL | NV2A_BACKEND_CAP_PROGRAM,
-    gl_zpass_read, gl_zpass_end, gl_zpass_resolve, gl_draw_program
+    gl_zpass_read, gl_zpass_end, gl_zpass_resolve, gl_draw_program, gl_zpass_flush
 };
 
 static void unregister_self(void)

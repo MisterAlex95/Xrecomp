@@ -288,12 +288,19 @@ typedef struct {
      * Return 0 to decline it (the executor then transforms on the CPU and
      * calls draw() with triangles); RECOMP_GPU_VSH=0 never calls it. */
     int (*draw_program)(const Nv2aSurface *s, const Nv2aBatch *b);
+    /* Optional, with zpass_resolve: submit the GPU work queued so far
+     * without waiting for it (glFlush), so the counts zpass_resolve polls
+     * for come in. The executor calls it at most once per report that a
+     * title may be spinning on (unresolved at the head of the queue for
+     * 300 us across idle calls), never with RECOMP_GPU_ZPASS=lazy. NULL:
+     * the executor waits for that report after 2 ms instead. */
+    void (*zpass_flush)(void);
 } Nv2aBackend;
 
 /* The NV2A poll loop calls this when a tick found nothing new to walk
- * (the walker has caught up with PUT): pending visibility reports are
- * waited for and written then, since a title waiting on one submits nothing
- * more until it has it. */
+ * (the walker has caught up with PUT): pending visibility reports the GPU
+ * has finished are written then, without waiting; one the title may be
+ * spinning on is flushed for, then waited for (see nv2a_pb_exec.c). */
 void nv2a_pb_exec_idle(void);
 
 /* Register (or, with NULL, remove) the back end. Call before the title starts

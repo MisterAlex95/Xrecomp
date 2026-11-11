@@ -1,21 +1,27 @@
-/* Deferred visibility reports (nv2a_backend.h zpass_end / zpass_resolve).
+/* Deferred visibility reports (nv2a_backend.h zpass_end / zpass_resolve /
+ * zpass_flush).
  *
  * A back end with zpass_end does not make the executor wait for the GPU at
  * every GET_REPORT: the report slot keeps the 0xFFFFFFFF D3D wrote at +0xC
  * until the count is in, and the executor writes it (stamp, count, 0) when
- * it resolves -- at FLIP_STALL, when the walker has caught up with PUT
- * (nv2a_pb_exec_idle, blocking: the guest may be waiting on the slot), or
- * when more than 512 are pending. Checked here with a fake back end whose
- * "GPU" finishes only when told to:
+ * it resolves -- when the walker has caught up with PUT (nv2a_pb_exec_idle),
+ * at FLIP_STALL, or when more than 512 are pending. Checked here with a fake
+ * back end whose "GPU" finishes only when told to, on a fake clock:
  *
- *   - nothing is written while pending, and a non-blocking point does not
- *     resolve what the GPU has not finished;
- *   - the idle hook and the flip resolve everything, in order, none lost;
+ *   - nothing is written while pending, and neither the idle hook nor the
+ *     flip resolves what the GPU has not finished (they do not wait);
+ *   - a head report the idle hook keeps seeing unresolved is flushed for
+ *     once after 300 us and waited for after 2 ms: a title spinning on it
+ *     is answered within 2 ms;
+ *   - everything is resolved in order, none lost;
  *   - the count is cumulative from CLEAR_REPORT_VALUE, as the synchronous
  *     path reports it;
  *   - past 512 pending the oldest are resolved;
- *   - RECOMP_GPU_ZPASS=always (second run of this test) reports 1 at once
- *     and hands the back end no counting batches. */
+ *   - RECOMP_GPU_ZPASS=lazy (another run): never a flush or a wait from the
+ *     idle hook; after 2 ms the pending reports read visible (1) and the
+ *     GPU's counts for them, once in, do not overwrite the slots;
+ *   - RECOMP_GPU_ZPASS=always (another run) reports 1 at once and hands the
+ *     back end no counting batches. */
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -51,7 +57,8 @@ void xbox_FramebufferWindowPresent(uint32_t va, uint32_t pitch) { (void)va; (voi
 void xbox_Nv2aFrameCounterFlip(void) {}
 int nv2a_pb_scan_in_call(void) { return 0; }
 uint32_t xbox_VblankCount(void) { return 0; }
-uint64_t xbox_HostNowNs(void) { return 0; }
+static uint64_t s_now_ns;
+uint64_t xbox_HostNowNs(void) { return s_now_ns; }
 void xbox_HostSleepNs(uint64_t ns) { (void)ns; }
 uint32_t xbox_Nv2aFrameCountersOwned(void) { return 0; }
 volatile uint32_t *xbox_Nv2aRegPtr(uint32_t offset) { (void)offset; return NULL; }
@@ -69,6 +76,7 @@ static uint32_t s_tickets;              /* last ticket handed out */
 static uint32_t s_done;                 /* the GPU has finished tickets <= this */
 static uint32_t s_last_resolved;
 static int s_out_of_order, s_counting_draws, s_sync_reads;
+static int s_flushes, s_blocking;      /* zpass_flush calls; resolves that had to wait */
 
 static void fake_draw(const Nv2aSurface *s, const Nv2aBatch *b)
 {
@@ -100,14 +108,17 @@ static int fake_resolve(uint32_t ticket, int block, uint32_t *count)
         s_out_of_order = 1;
     if (ticket > s_done && !block)
         return 0;
-    if (ticket > s_done)
+    if (ticket > s_done) {
         s_done = ticket;                /* blocking: wait for the GPU */
+        s_blocking++;
+    }
     s_last_resolved = ticket;
     *count = s_group_count[ticket];
     return 1;
 }
+static void fake_flush(void) { s_flushes++; }
 static Nv2aBackend s_backend = {
-    NULL, fake_draw, fake_flip, 0, fake_read, fake_end, fake_resolve
+    NULL, fake_draw, fake_flip, 0, fake_read, fake_end, fake_resolve, NULL, fake_flush
 };
 
 /* ---- helpers ---------------------------------------------------------- */
@@ -153,6 +164,7 @@ int main(void)
 {
     const char *mode = getenv("RECOMP_GPU_ZPASS");
     int always = mode && strcmp(mode, "always") == 0;
+    int lazy = mode && strcmp(mode, "lazy") == 0;
     uint32_t i;
 
     m(0x0208, 0x0008);                  /* A8R8G8B8 */
@@ -187,6 +199,51 @@ int main(void)
         return s_fail;
     }
 
+    if (lazy) {
+        /* Three tests; the GPU finishes nothing. */
+        visibility_test(0, 1);
+        visibility_test(1, 2);
+        visibility_test(2, 3);
+        s_now_ns = 1000000;
+        nv2a_pb_exec_idle();            /* the head is seen pending */
+        s_now_ns += 400000;
+        nv2a_pb_exec_idle();
+        CHECK(s_flushes == 0);          /* lazy: no mid-frame flush */
+        CHECK(slot_done(0) == 0xFFFFFFFFu);
+        s_now_ns += 1700000;            /* 2.1 ms */
+        nv2a_pb_exec_idle();
+        CHECK(s_blocking == 0 && s_flushes == 0);
+        CHECK(slot_done(0) == 0 && slot_done(1) == 0 && slot_done(2) == 0);
+        CHECK(slot_count(0) == 1 && slot_count(1) == 1 && slot_count(2) == 1);
+        /* The next test is not answered with them. */
+        visibility_test(3, 1);
+        CHECK(slot_done(3) == 0xFFFFFFFFu);
+        /* The GPU's counts come in: the answered slots stay as they were,
+         * the fourth gets its own count, in order. */
+        s_done = s_tickets;
+        m(0x0130, 0);                   /* FLIP_STALL */
+        CHECK(!s_out_of_order && s_blocking == 0);
+        CHECK(slot_count(0) == 1 && slot_count(1) == 1 && slot_count(2) == 1);
+        CHECK(slot_done(3) == 0 && slot_count(3) == 3);
+        /* A slot reused for a new test after its lazy answer is not
+         * overwritten by the old count either. */
+        visibility_test(4, 2);
+        s_now_ns += 100000;
+        nv2a_pb_exec_idle();
+        s_now_ns += 2100000;
+        nv2a_pb_exec_idle();
+        CHECK(slot_done(4) == 0 && slot_count(4) == 1);
+        visibility_test(4, 3);          /* same slot, new test */
+        CHECK(slot_done(4) == 0xFFFFFFFFu);
+        s_done = s_tickets;
+        nv2a_pb_exec_idle();
+        CHECK(slot_done(4) == 0 && slot_count(4) == 9);
+        CHECK(!s_out_of_order && s_blocking == 0 && s_flushes == 0);
+        if (!s_fail)
+            puts("NV2A deferred visibility reports (RECOMP_GPU_ZPASS=lazy): ok");
+        return s_fail;
+    }
+
     /* Three tests in a frame: nothing written while the GPU is busy. */
     visibility_test(0, 1);
     visibility_test(1, 2);
@@ -195,13 +252,39 @@ int main(void)
     CHECK(slot_done(0) == 0xFFFFFFFFu && slot_done(1) == 0xFFFFFFFFu
           && slot_done(2) == 0xFFFFFFFFu);
 
-    /* The GPU has finished nothing (s_done 0): reports do not appear until
-     * a resolve point; the idle hook blocks and resolves all three, in
-     * order. */
+    /* The GPU has finished nothing (s_done 0): the idle hook does not wait
+     * for it. */
+    s_now_ns = 1000000;
     nv2a_pb_exec_idle();
+    CHECK(slot_done(0) == 0xFFFFFFFFu && s_blocking == 0 && s_flushes == 0);
+    s_now_ns += 200000;
+    nv2a_pb_exec_idle();
+    CHECK(slot_done(0) == 0xFFFFFFFFu && s_flushes == 0);
+    /* Still the same head after 300 us: one flush, still no wait. */
+    s_now_ns += 150000;
+    nv2a_pb_exec_idle();
+    CHECK(s_flushes == 1 && s_blocking == 0 && slot_done(0) == 0xFFFFFFFFu);
+    s_now_ns += 500000;
+    nv2a_pb_exec_idle();
+    CHECK(s_flushes == 1 && s_blocking == 0);
+    /* The GPU finishes the first test (its CLEAR and its GET_REPORT, two
+     * tickets): written at the next idle call, the rest still pending, and
+     * their wait starts over. */
+    s_done = 2;
+    nv2a_pb_exec_idle();
+    CHECK(slot_done(0) == 0 && slot_count(0) == 3);
+    CHECK(slot_done(1) == 0xFFFFFFFFu && slot_done(2) == 0xFFFFFFFFu);
+    s_now_ns += 1500000;
+    nv2a_pb_exec_idle();
+    CHECK(slot_done(1) == 0xFFFFFFFFu && s_blocking == 0 && s_flushes == 2);
+    /* 2 ms after it was first seen pending, the head is waited for, with
+     * everything behind it: a title spinning on it has it within 2 ms. */
+    s_now_ns += 600000;
+    nv2a_pb_exec_idle();
+    CHECK(s_blocking > 0);
     CHECK(!s_out_of_order);
-    CHECK(slot_done(0) == 0 && slot_done(1) == 0 && slot_done(2) == 0);
-    CHECK(slot_count(0) == 3 && slot_count(1) == 6 && slot_count(2) == 9);
+    CHECK(slot_done(1) == 0 && slot_done(2) == 0);
+    CHECK(slot_count(1) == 6 && slot_count(2) == 9);
 
     /* Cumulative between clears, as the synchronous path reports: two
      * GET_REPORTs after one CLEAR, the second carries both batches. */
@@ -212,7 +295,10 @@ int main(void)
     counted_draw(2);
     m(0x17D0, REPORT_AT + 16u * 4);
     CHECK(slot_done(3) == 0xFFFFFFFFu && slot_done(4) == 0xFFFFFFFFu);
-    m(0x0130, 0);                       /* FLIP_STALL resolves */
+    m(0x0130, 0);                       /* FLIP_STALL does not wait either */
+    CHECK(slot_done(3) == 0xFFFFFFFFu && slot_done(4) == 0xFFFFFFFFu);
+    s_done = s_tickets;                 /* the GPU gets there */
+    m(0x0130, 0);
     CHECK(slot_done(3) == 0 && slot_count(3) == 3);
     CHECK(slot_done(4) == 0 && slot_count(4) == 9);
     CHECK(!s_out_of_order);
@@ -231,6 +317,7 @@ int main(void)
         visibility_test(8 + i, 1);
     CHECK(slot_done(8) == 0 && slot_count(8) == 3);
     CHECK(slot_done(8 + 599) == 0xFFFFFFFFu);
+    s_done = s_tickets;
     nv2a_pb_exec_idle();
     for (i = 0; i < 600; i++)
         if (slot_done(8 + i) != 0 || slot_count(8 + i) != 3) {
@@ -245,8 +332,10 @@ int main(void)
     /* Nothing pending: the idle hook does nothing. */
     {
         uint32_t t = s_tickets;
+        int f = s_flushes, b = s_blocking;
+        s_now_ns += 5000000;
         nv2a_pb_exec_idle();
-        CHECK(s_tickets == t);
+        CHECK(s_tickets == t && s_flushes == f && s_blocking == b);
     }
 
     if (!s_fail)

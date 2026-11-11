@@ -28,8 +28,10 @@ set_tests_properties(nv2a-present-sync PROPERTIES ENVIRONMENT
 # checks the unchanged order without it (the test above) and the swapped one with it.
 add_test(NAME nv2a-ffp-backend-strip-winding COMMAND nv2a-ffp-backend-test)
 set_tests_properties(nv2a-ffp-backend-strip-winding PROPERTIES ENVIRONMENT "RECOMP_STRIP_ALT_WINDING=1")
-# Deferred visibility reports with a fake back end; and RECOMP_GPU_ZPASS=always.
+# Deferred visibility reports with a fake back end; RECOMP_GPU_ZPASS=lazy and =always.
 add_test(NAME nv2a-zpass COMMAND nv2a-zpass-test)
+add_test(NAME nv2a-zpass-lazy COMMAND nv2a-zpass-test)
+set_tests_properties(nv2a-zpass-lazy PROPERTIES ENVIRONMENT "RECOMP_GPU_ZPASS=lazy")
 add_test(NAME nv2a-zpass-always COMMAND nv2a-zpass-test)
 set_tests_properties(nv2a-zpass-always PROPERTIES ENVIRONMENT "RECOMP_GPU_ZPASS=always")
 # RECOMP_GPU_FPS_CAP on a fake clock: fast frames held, slow frames not.

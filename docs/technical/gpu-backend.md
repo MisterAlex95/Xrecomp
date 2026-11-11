@@ -384,13 +384,27 @@ times a frame in Fable's world (a third of its time; on a tiler each wait
 also ends the render pass), so reports are deferred: `GET_REPORT` calls
 `zpass_end`, which closes the count and returns a ticket, and the executor
 queues the report slot, which keeps the 0xFFFFFFFF D3D wrote at +0xC (not
-done) until `zpass_resolve` has the count. Reports are resolved in order at
-`FLIP_STALL`, when the poll loop finds nothing new to walk
-(`nv2a_pb_exec_idle`, blocking: a title waiting for a result submits nothing
-until it has it), and past 512 pending. `CLEAR_REPORT_VALUE` goes through
-the same queue, so counts stay cumulative from the clear, as before.
+done) until `zpass_resolve` has the count. Reports are resolved in order,
+only as far as the GPU has got and without waiting, when the poll loop finds
+nothing new to walk (`nv2a_pb_exec_idle`), at `FLIP_STALL` and again after
+the present (its read-back has waited for the GPU anyway); past 512 pending
+the oldest are waited for. The idle hook used to wait for the GPU every
+time (9-14 times a frame, 17-22 % of the executor in Oakvale) although
+Fable reads frame N-1's results lazily and keeps the cached one while a test
+is pending. A title can still spin on one result (Fable's `sub_0012F7F0`)
+and submit nothing meanwhile, so a report that stays at the head of the
+queue across idle calls is pushed: after 300 us the back end's optional
+`zpass_flush` is called once (GL: `glFlush`, so the driver submits the
+query), after 2 ms the executor waits for it. `CLEAR_REPORT_VALUE` goes
+through the same queue, so counts stay cumulative from the clear, as before.
 `RECOMP_GPU_ZPASS=sync` reads synchronously, `=always` runs no queries and
-reports 1. GLES 3.0 only says whether any sample passed, which reports 1.
+reports 1, `=lazy` never flushes or waits from the idle hook: where it would
+wait, the reports pending then read 1 (visible) at once and their GPU counts
+are dropped when they come in (a candidate default for a tiler, where a
+mid-frame flush ends the render pass). The `[GPU] visibility reports` line
+counts reports written when idle and at the flip, waits, flushes and lazy
+answers, and the idle hook's time per frame (not part of `render`).
+GLES 3.0 only says whether any sample passed, which reports 1.
 
 ## Verification (2026-11-11, M1 Max, Fable title screen)
 

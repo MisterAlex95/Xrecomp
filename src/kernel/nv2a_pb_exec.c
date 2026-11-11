@@ -922,17 +922,32 @@ static int surface_color_valid(int masked)
  * closes the count and queues the slot; the 16 bytes are written when the
  * count is in. Until then the slot keeps the 0xFFFFFFFF D3D's
  * BeginVisibilityTest wrote at +0xC, which is exactly "not done yet" to the
- * title. Reports are resolved in order: at FLIP_STALL; whenever the walker
- * has caught up with PUT (nv2a_pb_exec_idle, which blocks, because a title
- * waiting for a result in GetVisibilityTestResult submits nothing until it
- * has it); and past NV_ZP_CAP pending. CLEAR_REPORT_VALUE closes the count
- * too, and the queue applies it in order, so the counts stay cumulative from
- * the clear exactly as the synchronous path reports them.
+ * title. Reports are resolved in order, and only what the GPU has finished,
+ * without waiting: whenever the walker has caught up with PUT
+ * (nv2a_pb_exec_idle), at FLIP_STALL and again after the present (whose
+ * read-back has waited for the GPU anyway). CLEAR_REPORT_VALUE closes the
+ * count too, and the queue applies it in order, so the counts stay
+ * cumulative from the clear exactly as the synchronous path reports them.
+ *
+ * Not waiting is what titles want: Fable reads frame N-1's results lazily,
+ * per object, and returns the cached one while a test is pending. The idle
+ * hook used to block until the GPU drained, 9-14 times a frame, 17-22 % of
+ * the executor in Oakvale for nothing. But a title can also spin on one
+ * result (Fable's sub_0012F7F0) and submit nothing until it has it, so a
+ * report at the head of the queue that stays unresolved across idle calls
+ * is pushed: after NV_ZP_FLUSH_NS the back end is asked once to submit its
+ * queued GPU work (zpass_flush: a GL driver may hold the query in its
+ * command buffer for ever), after NV_ZP_BLOCK_NS the executor waits for it.
+ * Past NV_ZP_CAP pending the oldest are waited for too.
  *
  * RECOMP_GPU_ZPASS=sync reads synchronously as before; =always runs no
- * queries at all and reports 1 (everything visible). The CPU rasteriser
+ * queries at all and reports 1 (everything visible); =lazy is the deferred
+ * path that never waits or flushes mid-frame: where it would wait, the
+ * reports pending then are answered 1 (visible) at once, and the GPU's
+ * counts for them are dropped when they come in -- a candidate default for a
+ * tiler, where a mid-frame flush ends the render pass. The CPU rasteriser
  * counts its own pixels and is not affected. */
-enum { ZPASS_DEFER = 0, ZPASS_SYNC = 1, ZPASS_ALWAYS = 2 };
+enum { ZPASS_DEFER = 0, ZPASS_SYNC = 1, ZPASS_ALWAYS = 2, ZPASS_LAZY = 3 };
 
 static int zpass_mode(void)
 {
@@ -944,15 +959,28 @@ static int zpass_mode(void)
         const char *e = getenv("RECOMP_GPU_ZPASS");
         mode = e && strcmp(e, "always") == 0 ? ZPASS_ALWAYS
              : e && strcmp(e, "sync") == 0   ? ZPASS_SYNC
+             : e && strcmp(e, "lazy") == 0   ? ZPASS_LAZY
              : ZPASS_DEFER;
     }
-    if (mode == ZPASS_DEFER && !(s_backend->zpass_end && s_backend->zpass_resolve))
+    if ((mode == ZPASS_DEFER || mode == ZPASS_LAZY)
+            && !(s_backend->zpass_end && s_backend->zpass_resolve))
         return ZPASS_SYNC;
     return mode;
 }
 
+/* Reports go through the queue (deferred or lazy). */
+static int zpass_queued(void)
+{
+    int mode = zpass_mode();
+    return mode == ZPASS_DEFER || mode == ZPASS_LAZY;
+}
+
 #define NV_ZP_MAX 1024                     /* ring size */
 #define NV_ZP_CAP 512                      /* pending past this: resolve the oldest */
+/* The head report unresolved across idle calls for this long: flush, then
+ * wait (see above). */
+#define NV_ZP_FLUSH_NS (300u * 1000u)
+#define NV_ZP_BLOCK_NS (2u * 1000u * 1000u)
 typedef struct {
     uint32_t ticket;                       /* from zpass_end; 0: nothing to wait for */
     uint32_t at;                           /* resolved slot address; 0: a CLEAR */
@@ -961,14 +989,33 @@ typedef struct {
 } ZpPending;
 static ZpPending s_zp[NV_ZP_MAX];
 static uint32_t s_zp_head, s_zp_count;
+static uint32_t s_zp_answered;             /* lazy: the head entries already answered 1 */
 static uint32_t s_zp_acc;                  /* back-end count since the last CLEAR, applied */
-static uint32_t s_zp_resolves, s_zp_blocks; /* per report period, for the log */
+/* Per report period, for the log: resolved (at the idle hook, at the flip
+ * and after the present), waited for, flushes asked, answered lazily, and
+ * the idle hook's time. */
+static uint32_t s_zp_resolves, s_zp_blocks;
+static uint32_t s_zp_res_idle, s_zp_res_flip, s_zp_flushes, s_zp_lazy, s_zp_waits;
+static uint64_t s_zp_idle_ns;
+enum { ZP_AT_OTHER, ZP_AT_IDLE, ZP_AT_FLIP };
+static int s_zp_at;                        /* where zpass_resolve_queue runs */
+
+/* Write a report slot as the GPU would: stamp, count, and 0 (done) at +0xC. */
+static void zpass_write(const ZpPending *e, uint32_t v)
+{
+    uint8_t *mem = (uint8_t *)xbox_GetMemoryOffset();
+    uint32_t zero = 0;
+
+    memcpy(mem + e->at, &e->stamp, 8);
+    memcpy(mem + e->at + 8, &v, 4);
+    memcpy(mem + e->at + 12, &zero, 4);
+}
 
 /* Resolve queued reports in order until at most `keep` remain; wait for the
  * GPU only when `block` (otherwise stop at the first count not yet in). */
 static void zpass_resolve_queue(int block, uint32_t keep)
 {
-    uint8_t *mem = (uint8_t *)xbox_GetMemoryOffset();
+    int blocked = 0;
 
     while (s_zp_count > keep || (s_zp_count && !block)) {
         ZpPending *e = &s_zp[s_zp_head];
@@ -976,6 +1023,10 @@ static void zpass_resolve_queue(int block, uint32_t keep)
 
         if (e->ticket && s_backend && s_backend->zpass_resolve) {
             int must = block && s_zp_count > keep;
+            if (must && !blocked) {
+                blocked = 1;      /* one wait, however many it resolves */
+                s_zp_waits++;
+            }
             if (!s_backend->zpass_resolve(e->ticket, must, &count))
                 break;                     /* not in yet, and not waiting */
             s_zp_blocks += must;
@@ -983,14 +1034,32 @@ static void zpass_resolve_queue(int block, uint32_t keep)
         if (!e->at) {
             s_zp_acc = 0;                  /* CLEAR_REPORT_VALUE */
         } else {
-            uint32_t v = e->cpu + (s_zp_acc += count), zero = 0;
-            memcpy(mem + e->at, &e->stamp, 8);
-            memcpy(mem + e->at + 8, &v, 4);
-            memcpy(mem + e->at + 12, &zero, 4);
-            s_zp_resolves++;
+            s_zp_acc += count;
+            if (!s_zp_answered) {          /* else answered already (lazy) */
+                zpass_write(e, e->cpu + s_zp_acc);
+                s_zp_resolves++;
+                s_zp_res_idle += s_zp_at == ZP_AT_IDLE;
+                s_zp_res_flip += s_zp_at == ZP_AT_FLIP;
+            }
         }
+        if (s_zp_answered)
+            s_zp_answered--;
         s_zp_head = (s_zp_head + 1) % NV_ZP_MAX;
         s_zp_count--;
+    }
+}
+
+/* RECOMP_GPU_ZPASS=lazy, instead of waiting: every report pending now and
+ * not answered yet is written as visible (count 1 on top of the executor's
+ * own); its GPU count is dropped when it resolves. */
+static void zpass_answer_lazily(void)
+{
+    for (; s_zp_answered < s_zp_count; s_zp_answered++) {
+        const ZpPending *e = &s_zp[(s_zp_head + s_zp_answered) % NV_ZP_MAX];
+        if (e->at) {
+            zpass_write(e, e->cpu + 1);
+            s_zp_lazy++;
+        }
     }
 }
 
@@ -1011,13 +1080,58 @@ static void zpass_queue(uint32_t at, uint32_t cpu, uint64_t stamp)
     s_zp_count++;
 }
 
-/* The walker has caught up with PUT: whatever the title is waiting for is
- * queued, so wait for the GPU and write every pending report. Called by the
- * NV2A poll loop when a tick had nothing new to walk. */
+/* The walker has caught up with PUT: whatever the title may be waiting for
+ * is queued. Write what the GPU has finished, without waiting; push a head
+ * report that stays unresolved (see "Visibility reports" above). Called by
+ * the NV2A poll loop when a tick had nothing new to walk. */
 void nv2a_pb_exec_idle(void)
 {
-    if (s_zp_count)
-        zpass_resolve_queue(1, 0);
+    static uint32_t stuck_ticket, stuck_at;    /* the head report seen stuck */
+    static uint64_t stuck_ns;
+    static int stuck, flushed;
+    const ZpPending *e;
+    uint64_t t0, now;
+
+    if (!s_zp_count) {
+        stuck = 0;
+        return;
+    }
+    t0 = xbox_HostNowNs();
+    s_zp_at = ZP_AT_IDLE;
+    zpass_resolve_queue(0, 0);
+    s_zp_at = ZP_AT_OTHER;
+    if (s_zp_answered >= s_zp_count) {         /* nothing left the title waits for */
+        stuck = 0;
+        s_zp_idle_ns += xbox_HostNowNs() - t0;
+        return;
+    }
+    /* The first report the title still sees pending. */
+    e = &s_zp[(s_zp_head + s_zp_answered) % NV_ZP_MAX];
+    now = xbox_HostNowNs();
+    if (!stuck || e->ticket != stuck_ticket || e->at != stuck_at) {
+        stuck = 1;
+        flushed = 0;
+        stuck_ticket = e->ticket;
+        stuck_at = e->at;
+        stuck_ns = now;
+    } else if (now - stuck_ns >= NV_ZP_BLOCK_NS) {
+        if (zpass_mode() == ZPASS_LAZY) {
+            zpass_answer_lazily();
+        } else {
+            s_zp_at = ZP_AT_IDLE;
+            zpass_resolve_queue(1, 0);
+            s_zp_at = ZP_AT_OTHER;
+        }
+        stuck = 0;
+    } else if (!flushed && now - stuck_ns >= NV_ZP_FLUSH_NS
+               && zpass_mode() != ZPASS_LAZY) {
+        flushed = 1;
+        if (s_backend && s_backend->zpass_flush) {
+            s_backend->zpass_flush();
+            s_zp_flushes++;
+        }
+    }
+    s_zp_idle_ns += xbox_HostNowNs() - t0;
 }
 
 static void current_surface(Nv2aSurface *out)
@@ -5365,7 +5479,7 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
     case 0x09C0: memcpy(&s_gpu.fog_param[0], &param, 4); break;
     case 0x09C4: memcpy(&s_gpu.fog_param[1], &param, 4); break;
     case 0x17C8:                                  /* CLEAR_REPORT_VALUE */
-        if (zpass_mode() == ZPASS_DEFER)
+        if (zpass_queued())
             zpass_queue(0, 0, 0);
         else if (zpass_mode() == ZPASS_SYNC && s_backend && s_backend->zpass_read)
             (void)s_backend->zpass_read();
@@ -5386,7 +5500,7 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
         uint32_t at = dma_resolve(param & 0x00FFFFFFu);
         uint64_t stamp = (uint64_t)s_gpu.reports++ * 1000u;
         int mode = zpass_mode();
-        if (mode == ZPASS_DEFER) {
+        if (mode == ZPASS_DEFER || mode == ZPASS_LAZY) {
             zpass_queue(at, s_gpu.zpass_count, stamp);
             break;
         }
@@ -5556,9 +5670,11 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
         /* And this is a completed swap, which is what a title's own swap
          * counter counts -- see xbox_Nv2aFrameCounterFlip. */
         xbox_Nv2aFrameCounterFlip();
-        if (s_zp_count) {                     /* the frame's reports, before the flip */
+        if (s_zp_count) {                     /* what is in of the frame's reports */
             uint64_t r0 = xbox_HostNowNs();
-            zpass_resolve_queue(1, 0);
+            s_zp_at = ZP_AT_FLIP;
+            zpass_resolve_queue(0, 0);
+            s_zp_at = ZP_AT_OTHER;
             s_render_ns += xbox_HostNowNs() - r0;
         }
         {
@@ -5610,6 +5726,13 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
                     && s_backend_present(&now, sync, &ready) && ready.va;
                 if (sync && have && ready.va != now.va)
                     ready = now;          /* the contract says otherwise: be safe */
+                /* The present's read-back waited for the GPU up to some
+                 * point: the reports drawn before it are in now. */
+                if (s_zp_count) {
+                    s_zp_at = ZP_AT_FLIP;
+                    zpass_resolve_queue(0, 0);
+                    s_zp_at = ZP_AT_OTHER;
+                }
                 s_render_ns += xbox_HostNowNs() - r0;
             } else {
                 if (s_backend_present_sync) {
@@ -6032,12 +6155,18 @@ void nv2a_pb_exec_report(void)
                     (double)s_render_max_ns / 1e6, s_render_frames,
                     backend_draws() ? "back end" : "CPU rasteriser", 10);
             if (s_gpu.reports && backend_draws())
-                fprintf(stderr, "[GPU] visibility reports: %s, %u written (%u waited"
-                                " on), %u pending%c",
+                fprintf(stderr, "[GPU] visibility reports: %s, %u written (%u when idle,"
+                                " %u at the flip; %u waited on in %u waits, %u flushes, %u"
+                                " answered lazily), %u pending; idle hook %.2f ms/frame%c",
                         zpass_mode() == ZPASS_DEFER ? "deferred"
+                        : zpass_mode() == ZPASS_LAZY ? "lazy"
                         : zpass_mode() == ZPASS_ALWAYS ? "always 1" : "synchronous",
-                        s_zp_resolves, s_zp_blocks, s_zp_count, 10);
+                        s_zp_resolves, s_zp_res_idle, s_zp_res_flip, s_zp_blocks,
+                        s_zp_waits, s_zp_flushes, s_zp_lazy, s_zp_count,
+                        (double)s_zp_idle_ns / s_render_frames / 1e6, 10);
             s_zp_resolves = s_zp_blocks = 0;
+            s_zp_res_idle = s_zp_res_flip = s_zp_flushes = s_zp_lazy = s_zp_waits = 0;
+            s_zp_idle_ns = 0;
             s_render_sum_ns = s_render_max_ns = 0;
             s_render_frames = 0;
         }
