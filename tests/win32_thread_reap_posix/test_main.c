@@ -9,7 +9,10 @@
  *
  *   1. 2000 threads (stackSize 0, every fourth ends with ExitThread) are
  *      started, waited for and closed: VmSize afterwards is within 64 MB of
- *      before (Linux and Android, from /proc/self/status).
+ *      before, plus 80 KB a thread for qemu-user's own per-thread leak
+ *      (Linux and Android, from /proc/self/status). "Before" is taken after
+ *      a warm-up of the same loop, so libc's one-time growth is not counted.
+ *      Kept stacks would be 16 GB.
  *   2. 64 more threads end while their handles stay open: the stacks are
  *      still given back, and each handle still reads signalled with its exit
  *      code, before and after CloseHandle of the other handles.
@@ -28,6 +31,10 @@
 #define LOOP_THREADS 2000u
 #define KEPT_THREADS 64u
 #define SLACK_KB     (64u * 1024u)
+/* Per ended thread, on top: qemu-user keeps about 40 KB of its own for every
+ * guest thread that ever ran (measured with bare detached pthreads, no shim:
+ * 338 -> 462 MB over 2000 threads). A kept stack is 8 MB, 100 times this. */
+#define PER_THREAD_KB 80u
 #define EXIT_BASE    0x1000u
 #define STILL_ACTIVE_CODE 259u
 
@@ -91,6 +98,14 @@ int main(void)
                 bad++;
         for (i = 0; i < 8; i++)
             if (h[i]) { WaitForSingleObject(h[i], INFINITE); CloseHandle(h[i]); }
+        /* Then the measured loop's own pattern, 200 times, so its first-run
+         * costs (libc, qemu-user's translation cache) are paid before. */
+        for (i = 0; i < 200; i++) {
+            HANDLE w = CreateThread(NULL, 0, worker, (LPVOID)(uintptr_t)i, 0, NULL);
+            if (!w) { bad++; break; }
+            WaitForSingleObject(w, INFINITE);
+            CloseHandle(w);
+        }
         check(bad == 0, "warm-up threads start");
         settle();
     }
@@ -110,7 +125,8 @@ int main(void)
     after = vm_size_kb();
     if (before) {
         printf("    VmSize %lu KB -> %lu KB\n", before, after);
-        check(after <= before + SLACK_KB, "2000 ended threads: VmSize within 64 MB");
+        check(after <= before + SLACK_KB + LOOP_THREADS * PER_THREAD_KB,
+              "2000 ended threads: VmSize within 64 MB (+80 KB a thread)");
     } else {
         printf("    no /proc/self/status: VmSize not checked\n");
     }
@@ -129,7 +145,7 @@ int main(void)
     after = vm_size_kb();
     if (before) {
         printf("    VmSize %lu KB -> %lu KB (64 open handles)\n", before, after);
-        check(after <= before + 64u * 1024u / 2u,
+        check(after <= before + 32u * 1024u + KEPT_THREADS * PER_THREAD_KB,
               "ended threads with open handles: stacks given back");
     }
 

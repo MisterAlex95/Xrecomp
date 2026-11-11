@@ -33,6 +33,7 @@
 #include <unistd.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <errno.h>
 #endif
 
 /* Provided by the generated title; nothing here calls a guest function. */
@@ -98,6 +99,34 @@ static int reexec_child(void)
 }
 #endif
 
+#if defined(__linux__) && !defined(__ANDROID__)
+/* Whether this process can exec its own binary, as the default restart
+ * handler does (execv /proc/self/exe). Under qemu-user it cannot: the exec
+ * reaches the host kernel with the arm64 binary and fails with ENOEXEC
+ * unless binfmt_misc is set up, a property of the emulator, not of the
+ * restart. 1 = it can. */
+static int self_exec_works(void)
+{
+    int status = -1;
+    pid_t pid;
+
+    fflush(NULL);
+    pid = fork();
+    if (pid == 0) {
+        setenv("XBR_REBOOT_PROBE", "1", 1);
+        execl("/proc/self/exe", "kernel_reboot_probe", (char *)NULL);
+        _exit(errno == ENOEXEC ? 21 : 22);
+    }
+    if (pid > 0)
+        waitpid(pid, &status, 0);
+    if (pid > 0 && WIFEXITED(status) && WEXITSTATUS(status) == 21)
+        return 0;
+    return 1;   /* anything else: run the check and let it say what fails */
+}
+#else
+static int self_exec_works(void) { return 1; }
+#endif
+
 int main(void)
 {
     char root[512], save[600], file[700];
@@ -106,6 +135,8 @@ int main(void)
     int n = -1;
 
 #if !defined(_WIN32) && !defined(__ANDROID__)
+    if (getenv("XBR_REBOOT_PROBE"))
+        return 0;
     if (getenv("XBR_REBOOT_CHILD"))
         return reexec_child();
 #endif
@@ -200,7 +231,9 @@ int main(void)
 
 #if !defined(_WIN32) && !defined(__ANDROID__)
     /* The default handler: execv of this binary, from a forked child. */
-    {
+    if (!self_exec_works()) {
+        printf("  %-66s SKIP\n", "default handler re-executes (this host cannot exec itself: qemu-user?)");
+    } else {
         char fdbuf[16];
         int status = -1;
         pid_t pid;
