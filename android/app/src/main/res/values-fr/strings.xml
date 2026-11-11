@@ -366,4 +366,18 @@
     <string name="CTL_DPAD_X">Croix, sticks</string>
     <string name="CTL_STICKS">L3 · R3</string>
     <string name="CTL_STICKS_X">Boutons des sticks (appui)</string>
+    <string name="OPT_LSFG">Génération d\'images</string>
+    <string name="OPT_LSFG_SUMMARY">Afficher une image générée entre deux images réelles</string>
+    <string name="OPT_LSFG_DETAIL">La génération d\'images de Lossless Scaling (LSFG 3.1) dessine une image entre chaque paire que le jeu calcule : le jeu tourne à 30 images par seconde et l\'écran en montre 60. Il faut votre propre copie de Lossless.dll (Choisir Lossless.dll ci-dessous) et Vulkan. Les textes en mouvement et l\'interface peuvent onduler, un changement de plan peut laisser un fantôme pendant une image, et les commandes répondent une image plus tard. 2× performance utilise le jeu de shaders allégé, quand 2× est trop lourd pour l\'appareil. Si la génération échoue ou est trop lente, le jeu revient de lui-même aux images normales. Le rythme à 30 i/s demande le rendu GPU. (RECOMP_LSFG, RECOMP_LSFG_MULT, RECOMP_LSFG_PERF)</string>
+    <string name="VAL_LSFG_2X_PERF">2× performance</string>
+    <string name="LSFG_CHOOSE_DLL">Choisir Lossless.dll</string>
+    <string name="LSFG_CHOOSE_DLL_DETAIL">La génération d\'images utilise les shaders de Lossless Scaling, que vous devez posséder (Steam). Copiez Lossless.dll depuis votre dossier Lossless Scaling (steamapps/common/Lossless Scaling) sur cet appareil et choisissez-le ici. Seuls ses shaders sont gardés, dans le stockage privé de l\'application ; la DLL elle-même est lue une fois et jamais conservée.</string>
+    <string name="LSFG_LEGAL_FOOTER">Lossless.dll n\'est jamais incluse dans l\'application ni partagée ; les shaders restent sur cet appareil.</string>
+    <string name="LSFG_IMPORTING">Préparation des shaders de génération d\'images…</string>
+    <string name="LSFG_NO_DLL">Aucune Lossless.dll choisie</string>
+    <string name="LSFG_READY">Shaders prêts (LSFG 3.1)</string>
+    <string name="LSFG_READY_PERF_ONLY">Shaders prêts (LSFG 3.1 performance seulement)</string>
+    <string name="LSFG_UNSUPPORTED">Cette version de Lossless.dll n\'est pas prise en charge</string>
+    <string name="LSFG_NO_TRANSLATOR">Shaders trouvés, mais cette application ne sait pas les traduire (traducteur absent)</string>
+    <string name="LSFG_NOT_A_DLL">%1$s n\'est pas une DLL : choisissez Lossless.dll.</string>
 </resources>

@@ -2,7 +2,8 @@ package fr.adserver.xboxrecomp;
 
 /**
  * JNI side of "Choose Lossless.dll" (libxba_import.so, android/app/src/main/cpp/lsfg_jni.c, around
- * src/framegen/lsfg_cache.c). The launcher UI that calls it comes later; docs/technical/framegen.md.
+ * src/framegen/lsfg_cache.c), called by the launcher's Settings › Graphics › « Choose Lossless.dll »;
+ * docs/technical/framegen.md.
  *
  * Result arrays: { status, rcdata, dxbc[3.1], dxbc[3.1p], translated[3.1], translated[3.1p], fp16[3.1], fp16[3.1p],
  * fp32[3.1], fp32[3.1p], needed[3.1], needed[3.1p], ready[3.1], ready[3.1p] }. status 0 = ok.

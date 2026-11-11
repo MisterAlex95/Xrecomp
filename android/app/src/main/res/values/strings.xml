@@ -387,4 +387,20 @@
     <string name="CTL_DPAD_X">D-pad, thumbsticks</string>
     <string name="CTL_STICKS">L3 · R3</string>
     <string name="CTL_STICKS_X">Thumbstick buttons (press a stick)</string>
+    <!-- Frame generation (docs/technical/framegen.md): only in an APK built with -PxbaLsfg=1 and the bridge. -->
+    <string name="OPT_LSFG">Frame generation</string>
+    <string name="OPT_LSFG_SUMMARY">Show an extra, generated frame between real ones</string>
+    <string name="OPT_LSFG_DETAIL">Lossless Scaling frame generation (LSFG 3.1) draws one frame between every two the game renders: the game runs at 30 frames per second and the screen shows 60. It needs your own copy of Lossless.dll (Choose Lossless.dll below) and Vulkan. Moving text and the HUD can wobble, a scene cut can ghost for one frame, and input waits one frame longer. 2× performance uses the lighter shader set, for when 2× is too heavy for the device. If generation fails or is too slow, the game goes back to normal frames on its own. Needs the GPU renderer for the 30 fps pacing. (RECOMP_LSFG, RECOMP_LSFG_MULT, RECOMP_LSFG_PERF)</string>
+    <string name="VAL_LSFG_2X" translatable="false">2×</string>
+    <string name="VAL_LSFG_2X_PERF">2× performance</string>
+    <string name="LSFG_CHOOSE_DLL">Choose Lossless.dll</string>
+    <string name="LSFG_CHOOSE_DLL_DETAIL">Frame generation uses the shaders of Lossless Scaling, which you must own (Steam). Copy Lossless.dll from your Lossless Scaling folder (steamapps/common/Lossless Scaling) to this device and choose it here. Only its shaders are kept, in the app\'s private storage; the DLL itself is read once and never stored.</string>
+    <string name="LSFG_LEGAL_FOOTER">Lossless.dll is never included in the app or shared; the shaders stay on this device.</string>
+    <string name="LSFG_IMPORTING">Preparing the frame generation shaders…</string>
+    <string name="LSFG_NO_DLL">No Lossless.dll chosen</string>
+    <string name="LSFG_READY">Shaders ready (LSFG 3.1)</string>
+    <string name="LSFG_READY_PERF_ONLY">Shaders ready (LSFG 3.1 performance only)</string>
+    <string name="LSFG_UNSUPPORTED">This Lossless.dll version is not supported</string>
+    <string name="LSFG_NO_TRANSLATOR">Shaders found, but this app cannot translate them (translator missing)</string>
+    <string name="LSFG_NOT_A_DLL">%1$s is not a DLL: choose Lossless.dll.</string>
 </resources>

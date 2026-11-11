@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Backups are off (allowBackup="false"); these rules also keep the frame generation shader cache (files/lsfg:
+     shaders taken from the player's own Lossless.dll, docs/technical/framegen.md) out of any backup on Android 11. -->
+<full-backup-content>
+    <exclude domain="file" path="lsfg/" />
+</full-backup-content>

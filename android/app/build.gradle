@@ -15,6 +15,10 @@ def xbaVersion = findProperty('xbaVersion') ?: 'dev'
 def xbaLsfg = ((findProperty('xbaLsfg') ?: '0') as String) == '1'
 def lsfgVkSrc = xbaLsfg ? ((findProperty('lsfgVkSrc') ?: System.getenv('LSFG_VK_SRC') ?: '') as String) : ''
 def dxvkSrc = xbaLsfg ? ((findProperty('dxvkSrc') ?: System.getenv('DXVK_SRC') ?: '') as String) : ''
+if (xbaLsfg && !lsfgVkSrc)
+    logger.warn('-PxbaLsfg=1 without -PlsfgVkSrc / LSFG_VK_SRC: no Vulkan bridge, the launcher hides frame generation')
+if (xbaLsfg && !dxvkSrc)
+    logger.warn('-PxbaLsfg=1 without -PdxvkSrc / DXVK_SRC: no DXBC translator, the phone needs a desktop-translated cache')
 // A title linked into libmain.so (XBA-52): its project directory, a copy of templates/new-game with its generated C.
 def xbaTitleDir = findProperty('xbaTitleDir') ?: ''
 // The SHA-256 of the default.xbe a title's APK is built for (XBA-54, XBA-40): the game picker refuses another disc
@@ -136,6 +140,8 @@ android {
         // Shown on the launcher's About screen (XBA-41).
         resValue 'string', 'xba_version', xbaVersion
         resValue 'string', 'xba_version_code', (findProperty('xbaVersionCode') ?: '1') as String
+        // The launcher offers Frame generation and « Choose Lossless.dll » only when the bridge is in libmain.so.
+        resValue 'bool', 'xba_lsfg', (xbaLsfg && lsfgVkSrc) ? 'true' : 'false'
         ndk { abiFilters 'arm64-v8a' }
         externalNativeBuild {
             cmake {
