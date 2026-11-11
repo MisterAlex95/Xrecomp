@@ -268,6 +268,11 @@ void xbox_FramebufferWindowFrameStats(uint32_t draws)
     InterlockedExchange(&s_frame_draws, (LONG)draws);
 }
 
+/* Aspect modes (aspect_policy.h) are the SDL window's: the GDI / D3D11
+ * window shows every frame at 4:3. */
+void xbox_FramebufferWindowSetWide(int on) { (void)on; }
+void xbox_FramebufferWindowFrameTris(uint32_t tris) { (void)tris; }
+
 /* Alt+Enter / F11: borderless fullscreen on the window's monitor, and back.
  * (DXGI's own Alt+Enter, exclusive mode at the frame's 640x480, is off --
  * gpu_present.c; both presenters letterbox to any size.) */

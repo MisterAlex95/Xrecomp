@@ -121,7 +121,10 @@ NTSTATUS __stdcall xbox_XeUnloadSection(PXBE_SECTION_HEADER Section)
  * settings. On real hardware these are stored in the 256-byte EEPROM on the
  * SMBus. For recompilation, we return sensible defaults:
  *   - Region: North America
- *   - Video: NTSC, widescreen+HDTV enabled
+ *   - Video: NTSC, XC_VIDEO_FLAGS_60Hz only (no widescreen, no HDTV modes:
+ *     a title that honours those flags would switch its own output; the
+ *     presenter widens a title that declares wide frames instead, see
+ *     src/video/aspect_policy.h)
  *   - Language: RECOMP_LANGUAGE, else English
  *   - Audio: Stereo, Dolby Digital
  *   - DVD Region: Region 1 (North America)

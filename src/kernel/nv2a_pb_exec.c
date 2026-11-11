@@ -4662,6 +4662,26 @@ static void frame_trace_flip(void)
     }
 }
 
+/* Triangles submitted this frame, whatever draws them (the CPU rasteriser,
+ * a back end's fixed-function or vertex-program batches): the window's
+ * aspect policy tells a 3D scene from a menu by it (aspect_policy.h). */
+static uint32_t s_frame_tris;
+
+/* Triangles a batch of n vertices of primitive prim makes; points and lines
+ * none. */
+static uint32_t prim_triangles(uint32_t prim, uint32_t n)
+{
+    switch (prim) {
+    case NV_PRIM_TRIANGLES:      return n / 3;
+    case NV_PRIM_TRIANGLE_STRIP:
+    case NV_PRIM_TRIANGLE_FAN:
+    case NV_PRIM_POLYGON:        return n > 2 ? n - 2 : 0;
+    case NV_PRIM_QUADS:          return n / 4 * 2;
+    case NV_PRIM_QUAD_STRIP:     return n > 3 ? (n - 2) / 2 * 2 : 0;
+    default:                     return 0;
+    }
+}
+
 static void draw_primitive(void)
 {
     float v[4];
@@ -4673,6 +4693,7 @@ static void draw_primitive(void)
     if ((s_gpu.draws % 200) == 0)
         fprintf(stderr, "  [GPU] draw #%u\n", s_gpu.draws);
     s_gpu.verts += s_gpu.idx_count;
+    s_frame_tris += prim_triangles(s_gpu.prim, s_gpu.idx_count);
 
     /* How many batches carry coordinates at all, and what range they span.
      * A pipeline that decodes perfectly and draws nothing is indistinguishable
@@ -5827,9 +5848,12 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
              * is still writing. */
             {
                 extern void xbox_FramebufferWindowFrameStats(uint32_t);
+                extern void xbox_FramebufferWindowFrameTris(uint32_t);
                 static uint32_t draws_at_flip;
                 xbox_FramebufferWindowFrameStats(s_gpu.draws - draws_at_flip);
                 draws_at_flip = s_gpu.draws;
+                xbox_FramebufferWindowFrameTris(s_frame_tris);
+                s_frame_tris = 0;
             }
             if (have && s_backend_present && ready.host_px) {
                 /* The back end's own pixels (an internal resolution above

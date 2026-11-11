@@ -33,6 +33,14 @@
  * the AvSetDisplayMode surface directly, as the GDI window does, for a title
  * that never flips.
  *
+ * Aspect modes (aspect_policy.h, RECOMP_ASPECT): each published frame is
+ * classed when it is published (or when it reaches the frame generation
+ * pacer) as NORMAL (4:3), WIDE (stretched to 16:9: a title's anamorphic 3D
+ * frame) or ZOOM (a letterboxed movie's picture rows shown at 16:9); the
+ * slot carries its class. The main loop switches the logical size between
+ * 640x480 and 1280x720 when the class of what it shows changes, and
+ * screenshots take the shape shown.
+ *
  * Closing the window ends the process: the window owns the main thread, and
  * lifted code cannot be stopped mid-flight. atexit handlers still run, except
  * on Android, where recomp_quit() flushes the logs and _exit()s instead
@@ -69,6 +77,7 @@
 #include "platform/recomp_quit.h"
 #include "video_player.h"
 #include "perf_overlay.h"
+#include "aspect_policy.h"
 #include "keyboard_sdl.h"     /* src/input: keys into the pad stand-in */
 #include "xinput_xbox.h"
 #if defined(XBOXRECOMP_HAVE_GPU)
@@ -106,6 +115,7 @@ struct fb_slot {
     size_t   cap;
     uint32_t w, h, pitch;
     uint32_t format;            /* SDL_PIXELFORMAT_* */
+    uint64_t aspect;            /* aspect_pack(): class, ZOOM rows */
 };
 
 /* What the window takes from SDL, and gives back on every way out. */
@@ -139,6 +149,78 @@ static uint64_t now_ms(void)
     return now_ns() / 1000000ull;
 }
 
+/* ── Aspect modes (aspect_policy.h) ───────────────────────────────────── */
+
+/* A frame's class and ZOOM crop in one word, so the reader never sees one
+ * frame's class with another's rows: class | y0 << 8 | rows << 32. */
+static uint64_t aspect_pack(int cls, uint32_t y0, uint32_t rows)
+{
+    return (uint64_t)(uint32_t)cls | (uint64_t)y0 << 8 | (uint64_t)rows << 32;
+}
+static int      aspect_cls(uint64_t a)  { return (int)(a & 0xFF); }
+static uint32_t aspect_y0(uint64_t a)   { return (uint32_t)(a >> 8) & 0xFFFFFFu; }
+static uint32_t aspect_rows(uint64_t a) { return (uint32_t)(a >> 32); }
+
+static AspectPolicy      s_aspect;           /* executor thread only */
+static int               s_aspect_ready;
+static volatile int      s_aspect_title_wide; /* xbox_FramebufferWindowSetWide */
+static volatile uint32_t s_aspect_tris;       /* xbox_FramebufferWindowFrameTris */
+static uint64_t          s_aspect_now;        /* the last frame's, for the FIFO */
+
+void xbox_FramebufferWindowSetWide(int on)
+{
+    __atomic_store_n(&s_aspect_title_wide, on != 0, __ATOMIC_RELAXED);
+}
+
+void xbox_FramebufferWindowFrameTris(uint32_t tris)
+{
+    __atomic_store_n(&s_aspect_tris, tris, __ATOMIC_RELAXED);
+}
+
+/* The class of a frame about to be shown, on the presenting thread; also
+ * kept as the current one for the frame generation sink. Class changes are
+ * logged. */
+static uint64_t aspect_classify(const uint8_t *px, uint32_t w, uint32_t h, uint32_t pitch,
+                                uint32_t format)
+{
+    static int last = -1;
+    int layout = SDL_BYTESPERPIXEL(format) == 4 ? ASPECT_PX_32
+               : format == SDL_PIXELFORMAT_RGB555 ? ASPECT_PX_555 : ASPECT_PX_565;
+    uint32_t tris = __atomic_load_n(&s_aspect_tris, __ATOMIC_RELAXED);
+    int cls;
+    uint64_t a;
+
+    if (!s_aspect_ready) {
+        aspect_policy_init_from_env(&s_aspect);
+        s_aspect_ready = 1;
+        fprintf(stderr, "  [FBWIN] aspect %s (RECOMP_ASPECT), 3D at %u triangles, zoom %s\n",
+                s_aspect.setting == ASPECT_SETTING_4_3 ? "4:3"
+                : s_aspect.setting == ASPECT_SETTING_16_9 ? "16:9" : "auto",
+                s_aspect.min_tris, s_aspect.zoom_on ? "on" : "off");
+    }
+    if (s_aspect.title_wide != __atomic_load_n(&s_aspect_title_wide, __ATOMIC_RELAXED)) {
+        aspect_policy_set_title_wide(&s_aspect, !s_aspect.title_wide);
+        fprintf(stderr, "  [FBWIN] aspect: the title %s wide 3D frames\n",
+                s_aspect.title_wide ? "draws" : "no longer draws");
+    }
+    cls = aspect_policy_frame(&s_aspect, tris, px, w, h, pitch, layout);
+    a = cls == ASPECT_ZOOM ? aspect_pack(cls, s_aspect.zoom_y0, s_aspect.zoom_h)
+                           : aspect_pack(cls, 0, 0);
+    if (cls != last) {
+        if (cls == ASPECT_ZOOM)
+            fprintf(stderr, "  [FBWIN] aspect %s -> ZOOM (%ux%u, rows %u-%u, %u triangles)\n",
+                    last < 0 ? "-" : aspect_class_name(last), w, h, s_aspect.zoom_y0,
+                    s_aspect.zoom_y0 + s_aspect.zoom_h - 1, tris);
+        else
+            fprintf(stderr, "  [FBWIN] aspect %s -> %s (%ux%u, %u triangles)\n",
+                    last < 0 ? "-" : aspect_class_name(last), aspect_class_name(cls), w, h,
+                    tris);
+        last = cls;
+    }
+    __atomic_store_n(&s_aspect_now, a, __ATOMIC_RELAXED);
+    return a;
+}
+
 /* Wake the main loop, once per batch of frames it has not looked at. */
 static void wake_main_loop(void)
 {
@@ -163,6 +245,7 @@ struct fg_entry {
     size_t   cap;
     uint32_t w, h;
     uint64_t due_ns;
+    uint64_t aspect;            /* the class when it reached the sink */
 };
 
 #define FG_FIFO 4
@@ -212,6 +295,9 @@ static void fg_sink_window(const uint8_t *px, uint32_t w, uint32_t h, uint32_t b
     e->w = w;
     e->h = h;
     e->due_ns = due_ns;
+    /* Real and generated frames alike: the class of the latest real frame
+     * (a generated frame sits between two of the same scene). */
+    e->aspect = __atomic_load_n(&s_aspect_now, __ATOMIC_RELAXED);
     s_fg_count++;
     pthread_mutex_unlock(&s_fg_lock);
     wake_main_loop();
@@ -410,6 +496,7 @@ static void publish(uint32_t w, uint32_t h, uint32_t pitch, uint32_t format)
     s_slot[s_back].h = h;
     s_slot[s_back].pitch = pitch;
     s_slot[s_back].format = format;
+    s_slot[s_back].aspect = aspect_classify(s_slot[s_back].px, w, h, pitch, format);
     pthread_mutex_lock(&s_lock);
     {
         int t = s_ready;
@@ -479,7 +566,10 @@ void xbox_FramebufferWindowPresent(uint32_t fb_va, uint32_t pitch)
     if (__atomic_load_n(&s_running, __ATOMIC_SEQ_CST)) {
 #if defined(XBOXRECOMP_LSFG)
         uint32_t bpp = pitch / FB_W;
-        if (fg_feeding() && (bpp == 2 || bpp == 4))
+        if (fg_feeding() && (bpp == 2 || bpp == 4)) {
+            const uint8_t *src = (const uint8_t *)((uintptr_t)fb_va + xbox_GetMemoryOffset());
+            (void)aspect_classify(src, FB_W, FB_H, pitch,
+                                  guest_format(bpp, bpp == 2 && s_fb_x555));
             /* The flip time is now: the read-back is synchronous under
              * frame generation (framegen_policy.h). */
             framegen_pacer_submit_format(
@@ -487,7 +577,7 @@ void xbox_FramebufferWindowPresent(uint32_t fb_va, uint32_t pitch)
                 bpp == 4 ? FRAMEGEN_FMT_BGRX8888
                          : s_fb_x555 ? FRAMEGEN_FMT_X1R5G5B5 : FRAMEGEN_FMT_R5G6B5,
                 pitch, now_ns());
-        else
+        } else
 #endif
         present_copy(fb_va, pitch);
     }
@@ -523,7 +613,8 @@ int xbox_FramebufferWindowPresentHost(const void *px, uint32_t w, uint32_t h,
         struct timespec t0, t1;
         clock_gettime(CLOCK_MONOTONIC, &t0);
 #if defined(XBOXRECOMP_LSFG)
-        if (fg_feeding())
+        if (fg_feeding()) {
+            (void)aspect_classify((const uint8_t *)px, w, h, pitch, sdl_format);
             /* At its own size: the pacer reopens the generator when it
              * changes. */
             framegen_pacer_submit_format((const uint8_t *)px, w, h,
@@ -531,7 +622,7 @@ int xbox_FramebufferWindowPresentHost(const void *px, uint32_t w, uint32_t h,
                                                                          : FRAMEGEN_FMT_RGBX8888,
                                          pitch, (uint64_t)t0.tv_sec * 1000000000ull
                                                 + (uint64_t)t0.tv_nsec);
-        else
+        } else
 #endif
         present_pixels((const uint8_t *)px, w, h, pitch, w * 4u, sdl_format);
         clock_gettime(CLOCK_MONOTONIC, &t1);
@@ -625,14 +716,24 @@ static uint32_t slot_rgb(const uint8_t *p, uint32_t format)
     }
 }
 
-/* w x h pixels of a slot as a 24-bit BMP. -1: the file could not be written. */
-static int write_bmp(const char *path, const uint8_t *px, uint32_t w, uint32_t h,
-                     uint32_t pitch, uint32_t format)
+/* w x h pixels of a slot as a 24-bit BMP, shaped as the window shows them
+ * (aspect: its class): a WIDE frame resampled linearly along x to 16:9
+ * (1440x1080 -> 1920x1080), a ZOOM frame cropped to its rows first.
+ * -1: the file could not be written. */
+static int write_bmp(const char *path, const uint8_t *px, uint32_t sw, uint32_t sh,
+                     uint32_t pitch, uint32_t format, uint64_t aspect)
 {
-    uint32_t bypp = SDL_BYTESPERPIXEL(format), row = (w * 3u + 3u) & ~3u;
-    uint32_t img = row * h, total = 54u + img, x, y;
+    uint32_t bypp = SDL_BYTESPERPIXEL(format), w, h, row, img, total, x, y, y0 = 0;
     uint8_t hdr[54], *line;
     FILE *f;
+    int cls = aspect_cls(aspect);
+
+    aspect_shot_size(cls, sw, sh, aspect_rows(aspect), &w, &h);
+    if (cls == ASPECT_ZOOM && h != sh)
+        y0 = aspect_y0(aspect) + h <= sh ? aspect_y0(aspect) : sh - h;
+    row = (w * 3u + 3u) & ~3u;
+    img = row * h;
+    total = 54u + img;
 
     line = (uint8_t *)calloc(1, row);
     f = line ? fopen(path, "wb") : NULL;
@@ -650,9 +751,31 @@ static int write_bmp(const char *path, const uint8_t *px, uint32_t w, uint32_t h
     memcpy(hdr + 34, &img, 4);
     fwrite(hdr, 1, sizeof hdr, f);
     for (y = 0; y < h; y++) {
-        const uint8_t *src = px + (size_t)(h - 1 - y) * pitch;
+        const uint8_t *src = px + (size_t)(y0 + h - 1 - y) * pitch;
         for (x = 0; x < w; x++) {
-            uint32_t v = slot_rgb(src + (size_t)x * bypp, format);
+            uint32_t v;
+            if (w == sw)
+                v = slot_rgb(src + (size_t)x * bypp, format);
+            else {
+                /* Pixel centres: source x = (x + 0.5) * sw / w - 0.5, in
+                 * 1/256ths, between two neighbours. */
+                int64_t fx = ((int64_t)(2 * x + 1) * sw * 256) / (2 * w) - 128;
+                uint32_t x0, x1, f, a, b, c;
+                if (fx < 0)
+                    fx = 0;
+                x0 = (uint32_t)(fx >> 8);
+                f = (uint32_t)(fx & 255);
+                if (x0 >= sw - 1) {
+                    x0 = sw - 1;
+                    f = 0;
+                }
+                x1 = f ? x0 + 1 : x0;
+                a = slot_rgb(src + (size_t)x0 * bypp, format);
+                b = slot_rgb(src + (size_t)x1 * bypp, format);
+                v = 0;
+                for (c = 0; c < 24; c += 8)
+                    v |= ((((a >> c) & 255) * (256 - f) + ((b >> c) & 255) * f + 128) >> 8) << c;
+            }
             line[x * 3 + 0] = (uint8_t)v;
             line[x * 3 + 1] = (uint8_t)(v >> 8);
             line[x * 3 + 2] = (uint8_t)(v >> 16);
@@ -666,14 +789,16 @@ static int write_bmp(const char *path, const uint8_t *px, uint32_t w, uint32_t h
     return 0;
 }
 
-/* The last published frame as a 24-bit BMP at its own size (640x480 for a
- * guest frame, the back end's size for a host frame), from any thread. The
+/* The last published frame as a 24-bit BMP at its own height (480 for a
+ * guest frame, the back end's height for a host frame) and its shown shape
+ * (write_bmp: 16:9 frames are widened), from any thread. The
  * ready slot is only swapped under s_lock and nobody writes it, so it is
  * copied under the lock and written out after. -1: no frame yet, or the
  * file could not be written. */
 int xbox_FramebufferDumpBmp(const char *path)
 {
     uint32_t w = 0, h = 0, pitch = 0, format = 0;
+    uint64_t aspect = 0;
     uint8_t *px = NULL;
     int rc;
 
@@ -686,12 +811,13 @@ int xbox_FramebufferDumpBmp(const char *path)
             h = s_fg_front.h;
             pitch = w * 4u;
             format = SDL_PIXELFORMAT_XRGB8888;
+            aspect = s_fg_front.aspect;
             if ((px = (uint8_t *)malloc((size_t)pitch * h)))
                 memcpy(px, s_fg_front.px, (size_t)pitch * h);
         }
         pthread_mutex_unlock(&s_fg_lock);
         if (px) {
-            rc = write_bmp(path, px, w, h, pitch, format);
+            rc = write_bmp(path, px, w, h, pitch, format, aspect);
             free(px);
             return rc;
         }
@@ -703,13 +829,14 @@ int xbox_FramebufferDumpBmp(const char *path)
         h = s_slot[s_ready].h;
         pitch = s_slot[s_ready].pitch;
         format = s_slot[s_ready].format;
+        aspect = s_slot[s_ready].aspect;
         if ((px = (uint8_t *)malloc((size_t)pitch * h)))
             memcpy(px, s_slot[s_ready].px, (size_t)pitch * h);
     }
     pthread_mutex_unlock(&s_lock);
     if (!px)
         return -1;
-    rc = write_bmp(path, px, w, h, pitch, format);
+    rc = write_bmp(path, px, w, h, pitch, format, aspect);
     free(px);
     return rc;
 }
@@ -800,9 +927,11 @@ int xbox_HostWindowMain(int (*guest_main)(void))
     SDL_Texture *tex = NULL;
     uint32_t tex_w = 0, tex_h = 0, tex_format = 0;
     int tex_linear = 0;
+    uint64_t tex_aspect = 0;            /* the shown frame's class (aspect_pack) */
+    int log_cls = ASPECT_NORMAL;        /* the renderer's logical size's class */
     uint64_t shown_seq = 0, t_title = 0, flips_title = 0, t_overlay = 0;
     const char *e;
-    int vsync, scale, quit = 0, guest_done = 0, dirty = 1, reupload = 0;
+    int vsync, scale, win_w, quit = 0, guest_done = 0, dirty = 1, reupload = 0;
     int stay_after_guest = 0;   /* Android: the window outlives the guest */
     uint64_t back_at = 0;
 #if defined(XBOXRECOMP_LSFG)
@@ -834,6 +963,9 @@ int xbox_HostWindowMain(int (*guest_main)(void))
     scale = e ? atoi(e) : 2;
     if (scale < 1 || scale > 8)
         scale = 2;
+    /* RECOMP_ASPECT=16:9: a 16:9 window (854 x 480 per scale step), so the
+     * wide frames fill it; the 4:3 ones get side bars. */
+    win_w = (int)(xbox_AspectSetting() == ASPECT_SETTING_16_9 ? 854u : FB_W) * scale;
 
     SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "nearest");
 #ifdef __ANDROID__
@@ -853,7 +985,7 @@ int xbox_HostWindowMain(int (*guest_main)(void))
         window_flags |= SDL_WINDOW_FULLSCREEN_DESKTOP;
 
     win = SDL_CreateWindow(s_title, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-                           (int)FB_W * scale, (int)FB_H * scale,
+                           win_w, (int)FB_H * scale,
                            window_flags);
     ren = win ? SDL_CreateRenderer(win, -1,
                                    vsync ? SDL_RENDERER_PRESENTVSYNC : 0)
@@ -931,6 +1063,7 @@ int xbox_HostWindowMain(int (*guest_main)(void))
         uint64_t seq, now;
         const uint8_t *px = NULL;
         uint32_t fw = 0, fh = 0, pitch = 0, format = 0;
+        uint64_t aspect = 0;
         int timeout = shown_seq ? 100 : 16;
 
 #if defined(XBOXRECOMP_LSFG)
@@ -1010,6 +1143,7 @@ int xbox_HostWindowMain(int (*guest_main)(void))
                     fh = s_fg_front.h;
                     pitch = fw * 4u;
                     format = SDL_PIXELFORMAT_XRGB8888;   /* bytes B, G, R, X */
+                    aspect = s_fg_front.aspect;
                     fg_any = 1;
                 } else if (reupload && fg_any) {
                     px = s_fg_front.px;                  /* only this thread swaps it */
@@ -1017,6 +1151,7 @@ int xbox_HostWindowMain(int (*guest_main)(void))
                     fh = s_fg_front.h;
                     pitch = fw * 4u;
                     format = SDL_PIXELFORMAT_XRGB8888;
+                    aspect = s_fg_front.aspect;
                 }
             } else if (!fg_off_seen) {
                 /* Fallen back: the flips fill the slots again from the
@@ -1055,6 +1190,7 @@ int xbox_HostWindowMain(int (*guest_main)(void))
             fh = s_slot[s_front].h;
             pitch = s_slot[s_front].pitch;
             format = s_slot[s_front].format;
+            aspect = s_slot[s_front].aspect;
         } else if (!shown_seq && FG_NONE_YET && s_fb_va && s_fb_pitch) {
             /* No flip yet: the display surface, as the GDI window reads it. */
             uint32_t bpp = s_fb_pitch / FB_W;
@@ -1081,27 +1217,42 @@ int xbox_HostWindowMain(int (*guest_main)(void))
             }
             if (tex)
                 SDL_UpdateTexture(tex, NULL, px, (int)pitch);
+            tex_aspect = aspect;
             dirty = 1;
             reupload = 0;
         }
+        if (aspect_cls(tex_aspect) != log_cls
+                && (aspect_cls(tex_aspect) == ASPECT_NORMAL || log_cls == ASPECT_NORMAL)) {
+            /* 4:3 <-> 16:9: the renderer letterboxes into the other shape
+             * (the perf overlay follows the logical height). */
+            if (aspect_cls(tex_aspect) == ASPECT_NORMAL)
+                SDL_RenderSetLogicalSize(ren, (int)FB_W, (int)FB_H);
+            else
+                SDL_RenderSetLogicalSize(ren, 1280, 720);
+            dirty = 1;
+        }
+        log_cls = aspect_cls(tex_aspect);
         if (dirty && tex) {
-            /* A frame at the guest's 640x480 keeps the window's nearest
-             * filter; one at another size (a GPU back end's internal
-             * resolution) is filtered linearly unless it maps 1:1 onto the
-             * letterboxed rectangle it is shown in. */
-            int linear = 0;
-            if (tex_w != FB_W || tex_h != FB_H) {
+            /* A 4:3 frame at the guest's 640x480 keeps the window's nearest
+             * filter; any other (a GPU back end's internal resolution, a
+             * frame widened to 16:9 or a ZOOM crop) is filtered linearly
+             * unless what is shown of it maps 1:1 onto the letterboxed
+             * rectangle of the current logical aspect it is shown in. */
+            int linear = 0, cls = aspect_cls(tex_aspect);
+            if (tex_w != FB_W || tex_h != FB_H || cls != ASPECT_NORMAL) {
                 int ow = 0, oh = 0;
-                uint32_t rw, rh;
+                uint32_t rw, rh, lw = cls == ASPECT_NORMAL ? FB_W : 16u;
+                uint32_t lh = cls == ASPECT_NORMAL ? FB_H : 9u;
+                uint32_t sh = cls == ASPECT_ZOOM ? aspect_rows(tex_aspect) : tex_h;
                 SDL_GetRendererOutputSize(ren, &ow, &oh);
-                if ((uint64_t)ow * FB_H <= (uint64_t)oh * FB_W) {
+                if ((uint64_t)ow * lh <= (uint64_t)oh * lw) {
                     rw = (uint32_t)ow;
-                    rh = (uint32_t)((uint64_t)ow * FB_H / FB_W);
+                    rh = (uint32_t)((uint64_t)ow * lh / lw);
                 } else {
                     rh = (uint32_t)oh;
-                    rw = (uint32_t)((uint64_t)oh * FB_W / FB_H);
+                    rw = (uint32_t)((uint64_t)oh * lw / lh);
                 }
-                linear = tex_w != rw || tex_h != rh;
+                linear = tex_w != rw || sh != rh;
             }
             if (linear != tex_linear) {
                 SDL_SetTextureScaleMode(tex, linear ? SDL_ScaleModeLinear : SDL_ScaleModeNearest);
@@ -1112,7 +1263,12 @@ int xbox_HostWindowMain(int (*guest_main)(void))
             dirty = 0;
             SDL_SetRenderDrawColor(ren, 0, 0, 0, 255);
             SDL_RenderClear(ren);
-            if (tex)
+            if (tex && aspect_cls(tex_aspect) == ASPECT_ZOOM
+                    && aspect_y0(tex_aspect) + aspect_rows(tex_aspect) <= tex_h) {
+                SDL_Rect src = { 0, (int)aspect_y0(tex_aspect), (int)tex_w,
+                                 (int)aspect_rows(tex_aspect) };
+                SDL_RenderCopy(ren, tex, &src, NULL);
+            } else if (tex)
                 SDL_RenderCopy(ren, tex, NULL, NULL);
             perf_overlay_draw(ren);
             SDL_RenderPresent(ren);

@@ -333,6 +333,10 @@ CMakeLists defines it on `xbox_video` and links `xbox_framegen`), active under
   newest due entry (older due ones are skipped: "late"), uploads it as an
   XRGB8888 texture and presents. With vsync on, the present itself waits for
   the display.
+- **Aspect modes** ([GPU back end](gpu-backend.md#aspect-modes)): each real
+  frame is classed (4:3, 16:9 stretch, letterbox crop) when it is submitted;
+  each FIFO entry, real or generated, takes the latest class when it reaches
+  the sink, and the main loop shows and screenshots it in that shape.
 - **Overlay**: `perf_overlay_set_framegen()` adds a line
   `LSFG <real> / <shown> FPS  GEN <ms> MS` (`LSFG OFF` after a fallback),
   drawn after the picture on every shown frame, never generated. The title

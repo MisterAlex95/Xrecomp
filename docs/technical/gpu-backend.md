@@ -287,6 +287,64 @@ Launcher: Settings › Graphics › **Internal resolution (GPU renderer)**: Auto
 (the profile's choice: 1 for now, no title sets it), 1× (original), 2×, 3×,
 Fit the screen (`auto`). The default stays 1 until the device check.
 
+## Aspect modes
+
+The console renders 640x480 whatever the screen. A title can still make
+16:9 pictures: it widens its camera and draws the 3D scene anamorphically,
+squeezed into 640x480 (Fable: titles/4d5300d1, the camera's aspect
+override), so the frame is right once stretched to 16:9; its menus and
+full-screen movies stay 4:3, and its story movies are 16:9 letterboxed
+inside 4:3. The SDL presenter therefore picks a shape per frame
+(`src/video/aspect_policy.{c,h}`, pure C, `tests/aspect_policy`):
+
+| Class | Shown | When |
+|---|---|---|
+| NORMAL | 4:3, logical size 640x480 (as before) | `RECOMP_ASPECT=4:3`; menus, logos, HUD-only frames |
+| WIDE | whole frame stretched to 16:9, logical 1280x720 | title declared wide and the frame drew >= `RECOMP_ASPECT_MIN_TRIS` (5000) triangles, two frames of hysteresis; or `RECOMP_ASPECT=16:9` for a title that never declared (a plain stretch) |
+| ZOOM | rows 60-419 (scaled by h/480) at 16:9 | wide policy and a NORMAL frame letterboxed for 6 frames in a row: every 4th row of 0-55 and 424-479, every 8th pixel, all channels <= 24; crop from the first picture row in 56-64 (movies start at 61) else 60; leaves at the first frame that is not letterboxed |
+
+API (`video_player.h`): `xbox_AspectSetting()` (RECOMP_ASPECT: 0 auto, 1
+4:3, 2 16:9, every configuration), `xbox_FramebufferWindowSetWide(int)`
+(the title, any thread), `xbox_FramebufferWindowFrameTris(uint32_t)` (the
+executor at each flip, next to `xbox_FramebufferWindowFrameStats`: the
+triangles `draw_primitive` was handed since the last flip, from the
+primitive type and vertex count, so the CPU rasteriser and the GL back end's
+fixed-function and vertex-program batches count alike). The Win32 window
+has no-op stubs; the unit tests that link the executor stub the call.
+
+Presenter (`fb_present_sdl.c`): each published frame is classed in
+`publish()` (or, under frame generation, when it is submitted to the pacer;
+the FIFO entry takes the latest class when it reaches the sink) and the
+slot carries class and crop rows. The main loop switches
+`SDL_RenderSetLogicalSize` between 640x480 and 1280x720 when the shown
+frame's class changes, copies the crop rectangle for ZOOM, and picks the
+filter from the current logical aspect: nearest for a 640x480 NORMAL frame
+(as before) or when the shown part maps 1:1 onto the letterboxed
+rectangle, linear otherwise. The perf overlay scales with the logical
+height. `xbox_FramebufferDumpBmp` (the Android companion's screenshot)
+writes the shown shape: WIDE resampled linearly along x to round(h·16/9)
+(1440x1080 -> 1920x1080, 640x480 -> 853x480), ZOOM cropped then the same
+(1440x810 from 1080 rows). `RECOMP_FB_DUMP` and headless runs are
+untouched (raw 640x480 guest frames; no classification without a window).
+
+Internal resolution in WIDE: the scale stays uniform (2.25 on the Thor:
+1440x1080 stretched 1.33x horizontally, linear, slightly soft along x). A
+non-uniform scale (1920x1080 rendered) would need the 640x480 assumptions
+to move (`FB_W/FB_H` in fb_present_sdl.c, `NV2A_GL_FRAME_W/H` in
+nv2a_gl_scale.h, the auto scale's /480 and 640 cap in nv2a_gl.c); later.
+
+Measured (M1 Max, Fable, windowed, RECOMP_GPU=1 RECOMP_GPU_SCALE=2.25
+RECOMP_ASPECT=16:9, wide declared by a test build of the title patch,
+2026-11-11): logos and title screen NORMAL (2 and 552 triangles), the
+intro story movie `NORMAL -> ZOOM (1440x1080, rows 135-944)` with 1440x810
+screenshots, the AutoSave cutscene `ZOOM -> WIDE (226876 triangles)`, the
+pause menu `WIDE -> NORMAL (316 triangles)` and back `NORMAL -> WIDE
+(361176 triangles)`, gameplay screenshots 1920x1080 with correct
+proportions. `RECOMP_ASPECT=4:3`: one `- -> NORMAL` line, every screenshot
+1440x1080. `RECOMP_ASPECT=16:9` without the declaration: every frame WIDE,
+1920x1080. With frame generation (RECOMP_LSFG=1, MoltenVK) the FIFO frames
+are shown and dumped ZOOM (1440x810) during the movie.
+
 ## Frame cap
 
 A menu frame costs the GL back end 2–3 ms, and a front end that does not pace

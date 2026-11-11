@@ -35,6 +35,7 @@ uint32_t xbox_Nv2aFenceWordVa(void) { return 0; }
 int nv2a_pb_dma_walk(void) { return 1; }
 void xbox_FramebufferWindowStart(void) {}
 void xbox_FramebufferWindowFrameStats(uint32_t draws) { (void)draws; }
+void xbox_FramebufferWindowFrameTris(uint32_t tris) { (void)tris; }
 void xbox_Nv2aFrameCounterFlip(void) {}
 int nv2a_pb_scan_in_call(void) { return 0; }
 uint32_t xbox_VblankCount(void) { return 0; }

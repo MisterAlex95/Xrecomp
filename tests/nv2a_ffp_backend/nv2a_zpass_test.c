@@ -53,6 +53,7 @@ uint32_t xbox_Nv2aFenceWordVa(void) { return 0; }
 int nv2a_pb_dma_walk(void) { return 1; }
 void xbox_FramebufferWindowStart(void) {}
 void xbox_FramebufferWindowFrameStats(uint32_t draws) { (void)draws; }
+void xbox_FramebufferWindowFrameTris(uint32_t tris) { (void)tris; }
 void xbox_FramebufferWindowPresent(uint32_t va, uint32_t pitch) { (void)va; (void)pitch; }
 int xbox_FramebufferWindowPresentHost(const void *px, uint32_t w, uint32_t h, uint32_t pitch,
                                       uint32_t format)

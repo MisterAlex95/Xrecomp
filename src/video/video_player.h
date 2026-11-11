@@ -88,6 +88,17 @@ void xbox_FramebufferWindowFrameStats(uint32_t draws);
  * before the first second) and the last frame's draw count. */
 void xbox_FramebufferWindowGetStats(uint32_t *fps_centi, uint32_t *draws);
 
+/* Aspect modes (aspect_policy.h). RECOMP_ASPECT: 0 auto (default), 1 4:3,
+ * 2 16:9; every configuration. */
+int  xbox_AspectSetting(void);
+/* The title draws its 3D frames anamorphically for 16:9 (it widened its
+ * camera): the window shows frames with many triangles at 16:9 and the rest
+ * (menus, movies) at 4:3. Any thread, any time. No-op on Win32. */
+void xbox_FramebufferWindowSetWide(int on);
+/* Triangles the frame about to be presented drew (the executor, once per
+ * flip, before the present). No-op on Win32. */
+void xbox_FramebufferWindowFrameTris(uint32_t tris);
+
 #if !defined(_WIN32)
 /* POSIX hosts: the framebuffer window needs the process main thread (AppKit
  * on macOS), so a title that wants it calls this from main() with its boot
