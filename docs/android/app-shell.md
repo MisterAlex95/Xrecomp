@@ -1157,6 +1157,11 @@ Device check (Alex, Thor): 1. start a game with the bottom screen on « Panel »
 `SDL: ... 1920x1080`; 2. swipe up from the bottom edge: the pill shows, then hides again; 3. open and close the in-game
 menu, then Home and back to the game: still full screen.
 
+
+Frame times (XBA-29): every 10 s the presenter logs `[FBWIN] frame times over 10 s: N presents, mean X ms (F fps), sd
+S ms, worst W ms` (intervals over 250 ms, a pause or a load, are left out). Device check on the Thor's 120 Hz screen:
+a title at 30 fps and one at 60 fps each show sd under 2 ms in-game.
+
 ## Background and resume
 
 (`src/platform/recomp_lifecycle.c`, XBA-24.) On Android SDL already blocks the thread that pumps its events while the

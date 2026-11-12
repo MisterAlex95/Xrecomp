@@ -63,6 +63,7 @@
  */
 #if !defined(_WIN32)
 
+#include "frame_times.h"   /* the frame-time log (XBA-29) */
 #include <SDL.h>
 #include <pthread.h>
 #include <sched.h>
@@ -1291,6 +1292,18 @@ int xbox_HostWindowMain(int (*guest_main)(void))
                 SDL_RenderCopy(ren, tex, NULL, NULL);
             perf_overlay_draw(ren);
             SDL_RenderPresent(ren);
+            /* XBA-29: how even the presents are (scenario 3: sd < 2 ms). */
+            {
+                static FrameTimes ft;
+                uint32_t n;
+                double mean, sd, worst;
+                uint64_t t = now_ns();
+                frame_times_add(&ft, t);
+                if (frame_times_take(&ft, t, 10000000000ull, &n, &mean, &sd, &worst))
+                    fprintf(stderr, "  [FBWIN] frame times over 10 s: %u presents, mean %.2f ms "
+                                    "(%.1f fps), sd %.2f ms, worst %.1f ms\n",
+                            n, mean, mean > 0 ? 1000.0 / mean : 0.0, sd, worst);
+            }
         }
 
         now = now_ms();
