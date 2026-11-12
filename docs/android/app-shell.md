@@ -146,7 +146,7 @@ One activity, a small state machine of screens (`LauncherActivity.Screen`) with 
 | Preparing the game (import) | A plain progress ring (percent), the step (« Checking », « Copying », « Extracting »), « X of Y », the current file, the free space. The screen stays on; B cancels (nothing to focus). | A picked folder or image. |
 | Home | No top bar: the game's title image (or a monogram) in the [game theme](#game-theme)'s colours, its title (the XBE certificate's name, else the folder's name), **one line** — when it was played (« Yesterday · 12 h 40 min played », « Not played yet »), or its state when it is not ready (« Needs preparing · once, about 20–30 min », « Prepare failed · CODE », the Prepare's progress, « Queued (n) », « Game data missing » with the folder, …) — and **one row of buttons**: a solid **Play** (or **Prepare**, **Preparing…**, **See what failed**, **Choose a game**) and three quiet pills, **Settings**, **Controls**, **Manage**. Before the first play the note says where the in-game menu is. | A finished import (Play focused), every start when « Start in the game » is off, the « Launcher » shortcut, B from the screens above. |
 | Settings | Four tabs (General, Graphics, Audio, Advanced; L1 / R1) of [options](#settings) as « label  value » rows, left / right (or A) to change, the focused option's description on the right. About ends Advanced. | Home, Options. |
-| Controls | A drawn handheld with, next to each control, the Xbox controller button the game gets, and the same as two quiet columns: A B X Y as they are, L1 = **Black**, R1 = **White**, L2 / R2 = the triggers, Start = Start, Select = **Back**, D-pad and sticks as they are, pressing a stick = its thumbstick button (`src/input/xinput_device.c`, SDL's game controller mapping), and Android's Back opens the [in-game menu](#in-game-menu) (also Select + Start held). | Home. |
+| Controls | The player's **remapping** ([Controls and remapping](#controls-and-remapping)): one row per Xbox control (A B X Y, Black, White, the triggers; Back, Start, the stick presses; the D-pad; the two sticks), its value the player's button, changed like a setting; « Reset controls » (also Y). The description column says what the focused row does and draws the handheld with, next to each control, what the game gets from it. | Home. |
 | Manage | **Change game** (another folder or image, or the same one again to re-import; **Library** when the [game library](#game-library) is on); **Delete the imported copy** (only when the game is the app's own copy, `files/games/<TID>/` or the older `files/game/`; its size as the value; press A twice within 5 s; saves are kept); the game's pack, Prepare files, caches and saves with their sizes, each deleted on its own ([Storage](#storage)). The technical facts (title ID, prepared date, pack size, folder, source, size, free space) are the first row's description. | Home. |
 | About | Version (`-PxbaVersion`), build (`-PxbaVersionCode`), app id, the game check (the first digits of `-PxbaXbeSha256`, or none), a one-line licence summary, and that no game data is included. **X**: Licences. | The end of Settings › Advanced, Options on the library. |
 | Licences | XBA-100. Every licence text the APK carries, monospaced, one after the other: `LICENSE`, `NOTICE`, then `LICENSES/*.txt` (copied into the assets `licences/` at build time by `xbaLicencesAsset`). D-pad up / down scroll, L1 / R1 page, a finger scrolls too. | X on About. |
@@ -413,8 +413,56 @@ title.
 Asked for in XBA-41 but left out, because no runtime option backs them on Android: the output scaling and its filter
 (the SDL presenter always letterboxes the 640 x 480 frame with nearest-neighbour sampling, `fb_present_sdl.c`;
 `RECOMP_WINDOW_SCALE` only sizes a desktop window and `RECOMP_PRESENT_FILTER` is the D3D11 presenter's), an fps cap
-for the software renderer (only the GPU renderer has one, `RECOMP_GPU_FPS_CAP`), control remapping and a stats overlay (no such switch), and vibration (`RECOMP_RUMBLE` only gates the emulated USB
+for the software renderer (only the GPU renderer has one, `RECOMP_GPU_FPS_CAP`), a stats overlay (no such switch; control remapping has its own screen since XBA-131, [Controls and remapping](#controls-and-remapping)), and vibration (`RECOMP_RUMBLE` only gates the emulated USB
 pad, `RECOMP_USB`, a per-title opt-in). Bring-up and debug switches stay out on purpose.
+
+### Controls and remapping
+
+XBA-131. One mapping for every title and every pad, `RECOMP_PAD_MAP` in `recomp.cfg` (`PadMapping`), which
+`src/input/xinput_device.c` reads when the game starts (`[INPUT] RECOMP_PAD_MAP: …` in the log). No line is the
+usual mapping: SDL's game controller layout by position (south = A as Android names it), L1 = **Black**, R1 =
+**White**, L2 / R2 = the triggers, Select = **Back**, the stick presses = the thumbstick buttons. The text is
+`control=source` entries for what differs, `left_stick=` / `right_stick=` (`left`, `right`, `none`), e.g.
+`a=east,b=south,black=left_trigger,right_stick=none`; the grammar is `xbox_InputMap_PadMapParse`
+([environment variables](../runtime/environment-variables.md#input)).
+
+The **Controls** screen (from Home) is a Settings-like list, pad only: the D-pad moves, left / right or A change the
+focused row's button (every source in turn: A B X Y, L1 R1 L2 R2, L3 R3, Select, Start, the D-pad's four, each stick's
+four directions, Not used), Y or « Reset controls » puts the usual mapping back (the line goes), B goes back. Each
+change is written at once (the « Saved » note; a running game takes it at its next start). The top right says how many
+controls differ. The description column says where the focused control comes from (and which other control the same
+button also gives: allowed, one press then gives both), and draws the handheld with each of the player's buttons and
+what the game gets from it.
+
+What it does not touch: the launcher's own navigation and the [in-game menu](#in-game-menu) (Android key events: A
+selects, B goes back, Select + Start held opens the menu, whatever the mapping), the companion panel's Back / Start /
+Black / White (Xbox buttons already, `input_overlay.h`), the keyboard (`RECOMP_KEYBOARD`, its own bindings) and the
+Windows backend. Deadzones stay as before (none added); triggers keep their travel, and a trigger or a stick direction
+used as a button counts as pressed from half way.
+
+**Towards the touch pad (XBA-42).** A phone without the Thor's second screen needs an on-screen pad. What it reuses:
+`input_overlay.h` (`xbox_InputOverlaySet`, merged into a real pad's state, a stand-in pad 0 without one; the
+companion panel already drives it through `CompanionNative.nativeOverlay`), `CompanionPanel`'s pointer handling (each
+pointer on its own, release on cancel and detach) and `PanelView`'s drawing, and `PadMapping.Control` with
+`ControlsLabels` for the buttons' names. The overlay's buttons are Xbox controls already, so the remapping does not
+apply to them (it maps a physical pad's buttons); the overlay needs analog sticks in `nativeOverlay` (today buttons
+only) and a layout of its own drawn over the game.
+
+### Device check (Controls, XBA-131), for Alex
+
+1. Home › Controls: the list starts on A = A; the right column draws the Thor with « L1 · Black », « R1 · White »,
+   « L2 · LT », « A B X Y ». Only the D-pad and A / B / Y move and change things. Screenshot.
+2. On A press right once: A = B, « 1 changed » top right, the note « Saved ». On B press left once: B = A.
+   `adb shell cat /sdcard/Android/data/<app id>/files/recomp.cfg` ends with `RECOMP_PAD_MAP=a=east,b=south`.
+3. Play: in the game, the right face button confirms and the bottom one goes back (logcat
+   `[INPUT] RECOMP_PAD_MAP: a=east,b=south`). The launcher and the in-game menu still use A to select.
+4. In-game menu › Controls: « Your mapping » first, then « B · A » and « A · B ».
+5. Back in Controls, Black = L2 (A twice on Black): in a game that uses Black, L2 does it, and L2 still pulls the
+   left trigger too.
+6. Right stick: Not used: the game's camera stick no longer moves. Then Y: everything back, the `RECOMP_PAD_MAP` line
+   is gone from recomp.cfg, the game plays as before.
+7. With an external pad paired (Bluetooth): the same mapping applies to it.
+8. French: the screen in French (« Commandes », « Noir », « Blanc »).
 
 ### Frame generation
 
@@ -1097,7 +1145,7 @@ less the display cutout, so 720p and 1080p look the same.
 |---|---|
 | Resume | Closes the menu. |
 | Settings | **Perf overlay** On / Off: fps and frame time (`xbox_FramebufferWindowGetStats`, twice a second) in the top right corner, in the menu's layer, not in the game frame; stays with the menu closed. **Volume** 0–100 % in steps of 10, A mutes / unmutes: one gain on the mixed APU output (`apu_volume.c`, the square of the fraction, after the WAV capture), set through JNI. **Bottom screen** Panel / Black / Off (only with a second screen): `GameStore.setBottomScreen` and the companion is refreshed at once. These three apply **now** (the rows say so) and are remembered (`files/settings/perf_overlay`, `game_volume`, `bottom_screen`); the volume is applied again at the next start. **Language** (only when the game's XBE gives a title ID): As in Settings, then the nine languages; this game's own [language](#game-language), applied at the next start. Screen filter and scaling are not offered: the SDL window's are fixed at start (`fb_present_sdl.c`: nearest, logical size 640 x 480). |
-| Controls | The launcher's Controls table, compact (plus Back and Select + Start: the menu). |
+| Controls | The usual mapping, compact (plus Back and Select + Start: the menu); with a remapping in `recomp.cfg`, first « Your mapping » and each changed control (your button, the Xbox control). |
 | Screenshot | Closes the menu first, then saves the game's last frame as `<external files>/screenshots/<date>.bmp` (`xbox_FramebufferDumpBmp`, the companion panel's), and says « Saved … » at the top of the screen (and on the panel). |
 | Settings › Share log | This process's logcat to `files/logs/game.log`, then the share sheet (the companion panel's `LogProvider` path). The menu stays open. |
 | Back to launcher | **The game stays alive** (the runtime maps its guest memory once per process: starting it again means a new process), held: the drawer goes at once, the launcher comes up (`ACTION_SHOW_LAUNCHER`), and the menu's hold is let go only in `onStop`, after SDL's pause has put the background hold in place, so no frame runs in between. The launcher's Play brings this task back and the game goes on (`launcher: game running, bringing it back`). |

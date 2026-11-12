@@ -78,7 +78,7 @@ import fr.adserver.xboxrecomp.Widgets.MenuRow;
  *   (or Prepare, Choose…) and three quiet pills, Settings, Controls, Manage;
  * - SETTINGS: four tabs (General, Graphics, Audio, Advanced): the launcher's preferences and a few RECOMP_* options
  *   saved to recomp.cfg (RecompConfig), applied at the next start; About ends Advanced;
- * - CONTROLS: the device's buttons and the Xbox controller buttons the game gets;
+ * - CONTROLS: the remapping of the pad (PadMapping, RECOMP_PAD_MAP in recomp.cfg), one row per Xbox control;
  * - GAME_DATA (« Manage »): change game, delete the imported copy and the game's stored things; ABOUT (X: LICENCES,
  *   the licence texts the APK carries, assets/licences/);
  * - PREPARE: Home's layout with the on-device Prepare's progress (dimmed after two idle minutes, for OLED screens).
@@ -1314,8 +1314,10 @@ public class LauncherActivity extends Activity {
     /** What the description column shows (tests). */
     String descriptionForTest() {
         StringBuilder b = new StringBuilder();
-        for (int i = 0; desc != null && i < desc.getChildCount(); i++)
-            b.append(i == 0 ? "" : "\n\n").append(((TextView)desc.getChildAt(i)).getText());
+        for (int i = 0; desc != null && i < desc.getChildCount(); i++) {
+            if (desc.getChildAt(i) instanceof TextView)   // Controls draws a pad below its text
+                b.append(b.length() == 0 ? "" : "\n\n").append(((TextView)desc.getChildAt(i)).getText());
+        }
         return b.toString();
     }
 
@@ -3357,49 +3359,139 @@ public class LauncherActivity extends Activity {
 
     // ---- CONTROLS ----------------------------------------------------------------------------------------------
 
+    /** The mapping the Controls screen edits (RECOMP_PAD_MAP in recomp.cfg, read when the screen is built). */
+    private PadMapping padMap = new PadMapping();
+
+    PadMapping padMapForTest() {
+        return padMap;
+    }
+
     /**
-     * The device's buttons and the Xbox controller buttons the game gets: the SDL game controller mapping of
-     * src/input/xinput_device.c (L1 = Black, R1 = White, L2 / R2 = the triggers, Select = Back, stick presses = the
-     * thumbstick buttons), and the shell's own Android Back, which opens the in-game menu (GameMenu).
+     * Controls (XBA-131): one mapping for every title and every pad, RECOMP_PAD_MAP in recomp.cfg (PadMapping), read
+     * by src/input/xinput_device.c at the game's start. One row per Xbox control, its value the player's button
+     * (left / right or A step it, as in Settings), grouped; the sticks; « Reset controls » (also Y). The description
+     * column says what the focused row does and draws the player's pad with what each control gives the game. The
+     * launcher's own navigation and the in-game menu keep the usual buttons (Android key events, not the game's pad).
      */
     private void buildControls() {
         screenTitle.setText(R.string.CONTROLS);
-        LinearLayout h = rowLayout();
-        Widgets.PadDiagram pad = new Widgets.PadDiagram(this);
-        int[] labels = { R.string.PAD_L1, R.string.PAD_L2, R.string.PAD_R1, R.string.PAD_R2, R.string.PAD_SELECT,
-                         R.string.PAD_START, R.string.PAD_DPAD, R.string.PAD_LSTICK, R.string.PAD_RSTICK,
-                         R.string.PAD_FACE, R.string.PAD_SCREEN };
-        for (int i = 0; i < labels.length; i++)
-            pad.labels[i] = getString(labels[i]);
-        h.addView(pad, lp(0, MATCH, 1));
-
-        // Your button, and the Xbox button the game gets: two quiet columns.
-        LinearLayout col = column();
-        int[][] rows = { { R.string.CTL_FACE, R.string.CTL_FACE_X }, { R.string.CTL_L1, R.string.CTL_L1_X },
-                         { R.string.CTL_R1, R.string.CTL_R1_X }, { R.string.CTL_TRIGGERS, R.string.CTL_TRIGGERS_X },
-                         { R.string.CTL_START, R.string.CTL_START_X }, { R.string.CTL_SELECT, R.string.CTL_SELECT_X },
-                         { R.string.CTL_DPAD, R.string.CTL_DPAD_X }, { R.string.CTL_STICKS, R.string.CTL_STICKS_X },
-                         { R.string.CTL_MENU, R.string.CTL_MENU_X } };
-        for (int[] r : rows) {
-            LinearLayout line = rowLayout();
-            line.addView(Theme.oneLine(Theme.text(this, Theme.T_BODY, Theme.MEDIUM, Theme.TEXT, getString(r[0]))),
-                         lp(220, WRAP));
-            TextView x = Theme.text(this, Theme.T_BODY, Theme.REGULAR, Theme.TEXT_DIM, getString(r[1]));
-            x.setMaxLines(2);
-            line.addView(x, lp(0, WRAP, 1));
-            LinearLayout.LayoutParams p = lp(MATCH, WRAP);
-            p.bottomMargin = Theme.S2;
-            col.addView(line, p);
+        cfg = RecompConfig.load(GameStore.externalFilesDir(this));
+        padMap = PadMapping.load(cfg);
+        LinearLayout list = listTemplate();
+        PadMapping.Source[] sources = PadMapping.Source.values();
+        String[] sourceLabels = new String[sources.length];
+        for (int i = 0; i < sources.length; i++)
+            sourceLabels[i] = getString(ControlsLabels.source(sources[i]));
+        for (int g = 0; g < ControlsLabels.GROUPS.length; g++) {
+            listLabel(list, getString(ControlsLabels.GROUPS[g]));
+            for (PadMapping.Control c : ControlsLabels.GROUP_ROWS[g]) {
+                MenuRow r = settingRow(list, getString(ControlsLabels.control(c)), "");
+                r.setChoices(sourceLabels);
+                r.setValue(getString(ControlsLabels.source(padMap.get(c))));
+                r.cycler = d -> {
+                    padMap.step(c, d);
+                    r.setValue(getString(ControlsLabels.source(padMap.get(c))));
+                    saveControls();
+                    feedback.play(UiFeedback.Cue.MOVE, r);
+                    controlDetail(c);
+                };
+                r.setOnClickListener(v -> r.cycler.step(1));
+                onFocus(r, () -> controlDetail(c));
+            }
         }
-        TextView foot = Theme.body(this, getString(R.string.CONTROLS_FOOTER));
-        LinearLayout.LayoutParams fl = lp(MATCH, WRAP);
-        fl.topMargin = Theme.S3;
-        col.addView(foot, fl);
-        LinearLayout.LayoutParams cl = lp(Theme.DESC_W, MATCH);
-        cl.leftMargin = Theme.S5;
-        h.addView(col, cl);
-        body.addView(h, new FrameLayout.LayoutParams(MATCH, MATCH));
+        listLabel(list, getString(R.string.CTL_GROUP_STICKS));
+        PadMapping.Stick[] sticks = PadMapping.Stick.values();
+        String[] stickLabels = new String[sticks.length];
+        for (int i = 0; i < sticks.length; i++)
+            stickLabels[i] = getString(ControlsLabels.stick(sticks[i]));
+        for (int side = 0; side < 2; side++) {
+            boolean left = side == 0;
+            int name = left ? R.string.XB_LSTICK : R.string.XB_RSTICK;
+            MenuRow r = settingRow(list, getString(name), "");
+            r.setChoices(stickLabels);
+            r.setValue(getString(ControlsLabels.stick(left ? padMap.leftStick : padMap.rightStick)));
+            r.cycler = d -> {
+                if (left)
+                    padMap.leftStick = PadMapping.stepStick(padMap.leftStick, d);
+                else
+                    padMap.rightStick = PadMapping.stepStick(padMap.rightStick, d);
+                r.setValue(getString(ControlsLabels.stick(left ? padMap.leftStick : padMap.rightStick)));
+                saveControls();
+                feedback.play(UiFeedback.Cue.MOVE, r);
+                stickDetail(left);
+            };
+            r.setOnClickListener(v -> r.cycler.step(1));
+            onFocus(r, () -> stickDetail(left));
+        }
+        MenuRow reset = listRow(list, getString(R.string.CTL_RESET), getString(R.string.CTL_RESET_DETAIL),
+                                this::resetControls);
+        onFocus(reset, () -> controlsDescribe(getString(R.string.CTL_RESET_DETAIL)));
+        controlsDescribe(getString(R.string.CTL_LEAD));
+        changedCount();
+        yAction = this::resetControls;
+        addHint("A", R.string.HINT_CHANGE, this::clickFocused);
+        addHint("Y", R.string.HINT_DEFAULTS, this::resetControls);
         addHint("B", R.string.HINT_BACK, this::back);
+    }
+
+    /** The focused control's line: where it comes from, and which other control shares that button. */
+    private void controlDetail(PadMapping.Control c) {
+        String name = getString(ControlsLabels.control(c));
+        PadMapping.Source s = padMap.get(c);
+        String text = s == PadMapping.Source.NONE ? getString(R.string.CTL_ROW_NONE, name)
+                      : getString(R.string.CTL_ROW, name, getString(ControlsLabels.source(s)));
+        java.util.List<PadMapping.Control> shared = padMap.sharing(c);
+        if (!shared.isEmpty()) {
+            StringBuilder b = new StringBuilder();
+            for (PadMapping.Control o : shared)
+                b.append(b.length() == 0 ? "" : ", ").append(getString(ControlsLabels.control(o)));
+            text += " " + getString(R.string.CTL_ROW_SHARED, getString(ControlsLabels.source(s)), b);
+        }
+        controlsDescribe(text);
+    }
+
+    private void stickDetail(boolean left) {
+        String name = getString(left ? R.string.XB_LSTICK : R.string.XB_RSTICK);
+        PadMapping.Stick s = left ? padMap.leftStick : padMap.rightStick;
+        controlsDescribe(s == PadMapping.Stick.NONE ? getString(R.string.CTL_STICK_NONE, name)
+                                                    : getString(R.string.CTL_STICK_ROW, name,
+                                                                getString(ControlsLabels.stick(s))));
+    }
+
+    /** The description column of Controls: the text, then the player's pad with what each control gives the game. */
+    private void controlsDescribe(String text) {
+        describe(text);
+        if (desc == null)
+            return;
+        Widgets.PadDiagram pad = new Widgets.PadDiagram(this);
+        pad.bodyFrac = 0.42f;   // room for the callouts in the narrow column
+        String[] labels = ControlsLabels.diagram(this, padMap);
+        System.arraycopy(labels, 0, pad.labels, 0, labels.length);
+        LinearLayout.LayoutParams p = lp(MATCH, 0, 1);
+        p.topMargin = Theme.S3;
+        desc.addView(pad, p);
+    }
+
+    /** « 3 changed » top right while the mapping is not the usual one. */
+    private void changedCount() {
+        int n = padMap.changedCount();
+        topRight.setText(n == 0 ? "" : getString(R.string.CTL_CHANGED, n));
+    }
+
+    private void saveControls() {
+        padMap.store(cfg);
+        saveSettings();
+        changedCount();
+        Log.i(TAG, "launcher: controls " + (padMap.isDefault() ? "(default)" : padMap.format()));
+    }
+
+    /** Y, or « Reset controls »: the usual mapping (the line goes from recomp.cfg). */
+    private void resetControls() {
+        padMap.reset();
+        padMap.store(cfg);
+        saveSettings();
+        show(Screen.CONTROLS, 0);
+        setNote(getString(R.string.CTL_RESET_DONE), NOTE_OK);
     }
 
     // ---- STORAGE (docs/android/app-shell.md « Game library », Storage) -------------------------------------------

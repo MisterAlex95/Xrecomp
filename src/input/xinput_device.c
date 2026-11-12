@@ -176,7 +176,90 @@ DWORD xbox_InputGetCapabilities(DWORD dwPort, DWORD dwFlags, XBOX_INPUT_CAPABILI
 /* ======================================================================== */
 
 #include <SDL.h>
+#include <stdio.h>
 #include "input_overlay.h"   /* touch buttons on a second screen (Android) */
+#include "input_map.h"       /* RECOMP_PAD_MAP: the player's remapping */
+
+/* RECOMP_PAD_MAP (XBA-131, the Android launcher's Controls screen writes it
+ * into recomp.cfg): which physical control of a pad each Xbox control takes,
+ * for every pad. Unset or empty: the fixed mapping below, as before. Set: the
+ * pad is read into an InputRaw and mapped by input_map.c, with no deadzone and
+ * no trigger threshold so that an identity map reads exactly as the fixed one;
+ * the sticks are copied raw (PadMap would round a diagonal onto the circle). */
+static InputPadMap g_padmap;
+static int g_padmap_on;
+
+static void padmap_init(void)
+{
+    const char *v = getenv("RECOMP_PAD_MAP");
+    char text[512];
+    int bad;
+
+    g_padmap_on = 0;
+    if (!v || !*v)
+        return;
+    xbox_InputMap_PadMapDefaults(&g_padmap);
+    g_padmap.deadzone_left = g_padmap.deadzone_right = 0;
+    g_padmap.trigger_threshold = 0;
+    bad = xbox_InputMap_PadMapParse(&g_padmap, v);
+    xbox_InputMap_PadMapFormat(&g_padmap, text, (int)sizeof text);
+    fprintf(stderr, "[INPUT] RECOMP_PAD_MAP: %s", text[0] ? text : "(the default mapping)");
+    if (bad > 0)
+        fprintf(stderr, " (%d entr%s not understood, ignored)", bad, bad == 1 ? "y" : "ies");
+    fputc('\n', stderr);
+    g_padmap_on = 1;
+}
+
+static int16_t half_axis(int v)   /* the positive half of a signed axis, 0..32767 */
+{
+    return (int16_t)(v > 0 ? (v > 32767 ? 32767 : v) : 0);
+}
+
+static void stick_of(int which, const InputRaw *r, SHORT *x, SHORT *y)
+{
+    *x = which == INPUT_STICK_LEFT ? r->lx : which == INPUT_STICK_RIGHT ? r->rx : 0;
+    *y = which == INPUT_STICK_LEFT ? r->ly : which == INPUT_STICK_RIGHT ? r->ry : 0;
+}
+
+/* The controller through g_padmap. Called with the joysticks locked. */
+static void padmap_read(SDL_GameController *c, XBOX_GAMEPAD *out)
+{
+    static const struct { int src, button; } k_buttons[] = {
+        { INPUT_SRC_SOUTH, SDL_CONTROLLER_BUTTON_A }, { INPUT_SRC_EAST, SDL_CONTROLLER_BUTTON_B },
+        { INPUT_SRC_WEST, SDL_CONTROLLER_BUTTON_X }, { INPUT_SRC_NORTH, SDL_CONTROLLER_BUTTON_Y },
+        { INPUT_SRC_BACK, SDL_CONTROLLER_BUTTON_BACK }, { INPUT_SRC_START, SDL_CONTROLLER_BUTTON_START },
+        { INPUT_SRC_LEFT_STICK_CLICK, SDL_CONTROLLER_BUTTON_LEFTSTICK },
+        { INPUT_SRC_RIGHT_STICK_CLICK, SDL_CONTROLLER_BUTTON_RIGHTSTICK },
+        { INPUT_SRC_LEFT_SHOULDER, SDL_CONTROLLER_BUTTON_LEFTSHOULDER },
+        { INPUT_SRC_RIGHT_SHOULDER, SDL_CONTROLLER_BUTTON_RIGHTSHOULDER },
+        { INPUT_SRC_DPAD_UP, SDL_CONTROLLER_BUTTON_DPAD_UP }, { INPUT_SRC_DPAD_DOWN, SDL_CONTROLLER_BUTTON_DPAD_DOWN },
+        { INPUT_SRC_DPAD_LEFT, SDL_CONTROLLER_BUTTON_DPAD_LEFT },
+        { INPUT_SRC_DPAD_RIGHT, SDL_CONTROLLER_BUTTON_DPAD_RIGHT },
+    };
+    InputRaw r;
+    size_t i;
+
+    memset(&r, 0, sizeof r);
+    for (i = 0; i < sizeof k_buttons / sizeof k_buttons[0]; i++)
+        r.src[k_buttons[i].src] = SDL_GameControllerGetButton(c, k_buttons[i].button) ? 32767 : 0;
+    r.src[INPUT_SRC_LEFT_TRIGGER] = half_axis(SDL_GameControllerGetAxis(c, SDL_CONTROLLER_AXIS_TRIGGERLEFT));
+    r.src[INPUT_SRC_RIGHT_TRIGGER] = half_axis(SDL_GameControllerGetAxis(c, SDL_CONTROLLER_AXIS_TRIGGERRIGHT));
+    r.lx = SDL_GameControllerGetAxis(c, SDL_CONTROLLER_AXIS_LEFTX);
+    r.ly = (int16_t)(-1 - SDL_GameControllerGetAxis(c, SDL_CONTROLLER_AXIS_LEFTY));
+    r.rx = SDL_GameControllerGetAxis(c, SDL_CONTROLLER_AXIS_RIGHTX);
+    r.ry = (int16_t)(-1 - SDL_GameControllerGetAxis(c, SDL_CONTROLLER_AXIS_RIGHTY));
+    r.src[INPUT_SRC_LSTICK_UP] = half_axis(r.ly);
+    r.src[INPUT_SRC_LSTICK_DOWN] = half_axis(-(int)r.ly);
+    r.src[INPUT_SRC_LSTICK_LEFT] = half_axis(-(int)r.lx);
+    r.src[INPUT_SRC_LSTICK_RIGHT] = half_axis(r.lx);
+    r.src[INPUT_SRC_RSTICK_UP] = half_axis(r.ry);
+    r.src[INPUT_SRC_RSTICK_DOWN] = half_axis(-(int)r.ry);
+    r.src[INPUT_SRC_RSTICK_LEFT] = half_axis(-(int)r.rx);
+    r.src[INPUT_SRC_RSTICK_RIGHT] = half_axis(r.rx);
+    xbox_InputMap_PadMap(&g_padmap, &r, out);
+    stick_of(g_padmap.left_stick, &r, &out->sThumbLX, &out->sThumbLY);
+    stick_of(g_padmap.right_stick, &r, &out->sThumbRX, &out->sThumbRY);
+}
 
 static SDL_GameController *g_pads[XBOX_MAX_CONTROLLERS];
 static BOOL  g_controller_connected[XBOX_MAX_CONTROLLERS];
@@ -289,6 +372,7 @@ void xbox_InputInit(void)
     SDL_LockJoysticks();
     refresh_controllers_locked();
     SDL_UnlockJoysticks();
+    padmap_init();
 }
 
 DWORD xbox_InputGetState(DWORD dwPort, XBOX_INPUT_STATE *pState)
@@ -312,6 +396,15 @@ DWORD xbox_InputGetState(DWORD dwPort, XBOX_INPUT_STATE *pState)
 
     memset(pState, 0, sizeof(XBOX_INPUT_STATE));
     pState->dwPacketNumber = ++g_packet[dwPort];
+
+    if (g_padmap_on) {
+        padmap_read(c, &pState->Gamepad);
+        SDL_UnlockJoysticks();
+        if (dwPort == 0)
+            keyboard_merge(pState);
+        xbox_InputOverlayMerge(dwPort, pState);
+        return ERROR_SUCCESS;
+    }
 
     WORD btn = 0;
     if (SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_DPAD_UP))    btn |= XBOX_GAMEPAD_DPAD_UP;
