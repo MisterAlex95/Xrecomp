@@ -197,6 +197,12 @@ uint32_t xbox_Nv2aPvideoStops(void);
  * through this, the ack thread sleeps until a kick instead of polling (see
  * xbox_memory_layout.c). For title overrides of D3D's KickOff wait. */
 void xbox_Nv2aKickWait(volatile uint32_t *reg, uint32_t mask);
+/* RECOMP_POLL_WAIT's runtime side (templates/runtime/recomp_types.h): lifted
+ * code polls `word` for `mask` in a loop with nothing else in it. Blocks on
+ * the ack thread's event when the word is the PFB flush kick; returns at
+ * once for any other word. 1 when it waited, 0 when it returned at once. */
+int xbox_GuestPollWait(volatile uint32_t *word, uint32_t mask, int while_set,
+                       uint32_t va);
 /* Registered counters the title turned out to move itself (its vblank DPC),
  * which the toolkit has stopped bumping; for the [GPU] report. */
 uint32_t xbox_Nv2aFrameCountersOwned(void);

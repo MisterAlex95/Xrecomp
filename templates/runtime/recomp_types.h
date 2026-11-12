@@ -1641,6 +1641,17 @@ void xbox_GuestCpuPreempt(uint32_t va);
     do { if (RECOMP_LOAD_RELAXED32(&g_xbox_guest_cpu_preempt)) \
              xbox_GuestCpuPreempt(va); } while (0)
 
+/* The back edge of a loop that only polls one memory word (`test [mem], imm;
+ * jne/je itself`; tools/recomp/translator.py, _mark_poll_loops): the thread
+ * is waiting for someone else to change the word, and the runtime may block
+ * it until that can have happened (xbox_memory_layout.c). while_set: the
+ * loop goes on while the masked bits are set (jne), else while they are
+ * clear. The loop tests the word again afterwards. */
+int xbox_GuestPollWait(volatile uint32_t *word, uint32_t mask, int while_set,
+                       uint32_t va);
+#define RECOMP_POLL_WAIT(addr, mask, while_set, va) \
+    (void)xbox_GuestPollWait((volatile uint32_t *)&MEM32(addr), (mask), (while_set), (va))
+
 /**
  * RECOMP_ICALL - Indirect call through the dispatch table.
  *

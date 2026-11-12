@@ -1760,6 +1760,32 @@ void xbox_Nv2aKickWait(volatile uint32_t *reg, uint32_t mask)
 #endif
 }
 
+/* RECOMP_POLL_WAIT: lifted code is in a loop that only polls `word` for
+ * `mask` (recomp_types.h). The one word the runtime answers by events is the
+ * PFB flush kick: D3D's KickOff set bit 16 and waits for the ack thread to
+ * clear it, in every XDK D3D8 build, so the title needs no override to get
+ * xbox_Nv2aKickWait. The bit is set already; setting it again changes
+ * nothing. Any other word: the loop polls as it always did.
+ * RECOMP_POLL_WAIT=0 keeps the bare spin for the flush kick too.
+ * Returns 1 when it waited for the ack thread, 0 when it returned at once. */
+int xbox_GuestPollWait(volatile uint32_t *word, uint32_t mask, int while_set,
+                       uint32_t va)
+{
+    static int on = -1;
+
+    (void)va;
+    if (on < 0) {
+        const char *e = getenv("RECOMP_POLL_WAIT");
+        on = !(e && e[0] == '0');
+    }
+    if (on && while_set && mask == 0x00010000u && g_nv2a_memory
+        && word == (volatile uint32_t *)((char *)g_nv2a_memory + 0x100410u)) {
+        xbox_Nv2aKickWait(word, mask);
+        return 1;
+    }
+    return 0;
+}
+
 /* The ack thread cleared the PFB flush bit: wake whoever waits for it. */
 static void kick_acked(void)
 {

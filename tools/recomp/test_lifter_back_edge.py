@@ -81,3 +81,21 @@ def test_a_switch_arm_going_backward_is_a_back_edge():
     assert "if (_jt == 0x00010000u) { RECOMP_BACK_EDGE(0x00010001u); goto loc_00010000; }" in code, code
     assert "if (_jt == 0x00010008u) goto loc_00010008;" in code, code
     assert code.count("RECOMP_BACK_EDGE") == 1
+
+
+# +0 mov eax, 0xFD000000 ; +5 L: test dword [eax+0x100410], 0x10000 ; +15 jne L ; +17 ret
+POLL = "b8000000fd" "f780100410000000010075f4" "c3"
+# +0 L: test dword [eax+0x100410], 0x10000 ; +10 dec ecx ; +11 jne L ; +13 ret -- a body
+POLL_WITH_BODY = "f78010041000000001004975f3c3"
+
+
+def test_a_loop_that_only_polls_a_word_tells_the_runtime():
+    code = _translate(POLL, back_edge_yield=None)
+    assert ("{ RECOMP_POLL_WAIT(eax + 0x100410, 0x10000u, 1, 0x%08Xu); goto loc_%08X; }"
+            % (BASE + 15, BASE + 5)) in code, code
+    assert code.count("RECOMP_POLL_WAIT") == 1
+
+
+def test_a_loop_with_a_body_is_left_alone():
+    code = _translate(POLL_WITH_BODY, back_edge_yield=None)
+    assert "RECOMP_POLL_WAIT" not in code, code

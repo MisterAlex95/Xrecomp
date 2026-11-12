@@ -517,6 +517,41 @@ def _mark_back_edges(bb, stmts):
     return stmts if out is None else out
 
 
+def _mark_poll_loops(bb, stmts):
+    """A block that is nothing but `test dword [mem], imm ; jne/je <itself>`
+    polls one memory word until another thread (or the hardware) changes it:
+    XDK D3D's KickOff sets the PFB flush bit and spins on it until the GPU
+    clears it. Nothing in such a loop tells the runtime the thread is waiting,
+    so it burnt a host core and the thread it waited for had to be polled for
+    in turn. The back edge calls RECOMP_POLL_WAIT (templates/runtime/
+    recomp_types.h) with the word, the mask and which way the loop waits; the
+    runtime may block there until the word can have changed, and the loop
+    then tests it again, so the flags are the instruction's own."""
+    insns = bb.instructions
+    if len(insns) != 2:
+        return stmts
+    test, jcc = insns
+    if test.mnemonic != "test" or jcc.mnemonic not in ("jne", "jnz", "je", "jz"):
+        return stmts
+    if jcc.jump_target != bb.start or len(test.operands) != 2:
+        return stmts
+    mem, imm = test.operands
+    if (mem.type != "mem" or imm.type != "imm" or mem.mem_size != 4
+            or getattr(mem, "mem_seg", None)):
+        return stmts
+    from .lifter import _fmt_mem
+    hook = "RECOMP_POLL_WAIT(%s, 0x%Xu, %d, 0x%08Xu); " % (
+        _fmt_mem(mem), imm.imm & 0xFFFFFFFF,
+        1 if jcc.mnemonic in ("jne", "jnz") else 0, jcc.address)
+    goto = "goto loc_%08X;" % bb.start
+    out = list(stmts)
+    for i, stmt in enumerate(out):
+        if goto in stmt:
+            out[i] = stmt.replace(goto, "{ " + hook + goto + " }", 1)
+            return out
+    return stmts
+
+
 class FunctionTranslator:
     """Translates individual x86 functions to C source code."""
 
@@ -3449,6 +3484,7 @@ class FunctionTranslator:
                                 edge_inits[var] = conds[None]
                             break
 
+            stmts = _mark_poll_loops(bb, stmts)
             if self.back_edge_yield:
                 stmts = _mark_back_edges(bb, stmts)
 

@@ -131,6 +131,7 @@ The executor is itself opt-in: set `RECOMP_PB_EXEC=1` to execute the pushbuffer.
 | `RECOMP_PB_SCAN` | off | Read-only survey of the pushbuffer; ranks what is not implemented. | `nv2a_pb_scan.c`, `xbox_memory_layout.c` |
 | `RECOMP_PB_WALK=dma` | off (on for XDK 5849 D3D8LTCG titles: `profiles/xdk/d3d8ltcg`, `XBA_D3D_DMA_WALK`) | Walks the pushbuffer as the DMA engine does, which delivers D3D's software-method interrupt. `RECOMP_PB_WALK=scan` turns it off where a layer turned it on. | `nv2a_pb_scan.c` |
 | `RECOMP_NV2A_TRACE` | off | Shows whether `DMA_PUT` moves at all. | `xbox_memory_layout.c` |
+| `RECOMP_POLL_WAIT=0` | on | The lifter marks loops that only poll one memory word (`test dword [mem], imm ; jne/je` to itself) with `RECOMP_POLL_WAIT`. For D3D KickOff's wait on the PFB flush bit (0x100410 bit 16) the thread then blocks until the ack thread clears the bit (`xbox_Nv2aKickWait`) instead of spinning a host core; other words still spin. `0` keeps the spin for the flush bit too. Takes effect on titles prepared with a toolkit that has the lifter change. | `xbox_memory_layout.c`, `tools/recomp/translator.py` |
 | `RECOMP_PB_REPORT_MS=N` | 10000 | Milliseconds between `[GPU]` reports (minimum 100). | `xbox_memory_layout.c` |
 | `RECOMP_PB_EXEC_VERBOSE` | off | Per-batch trace. | `nv2a_pb_exec.c` |
 | `RECOMP_PB_UNHANDLED_ALL` | top 10 | Lists every method the executor does not model, not only the top ten. | `nv2a_pb_exec.c` |
