@@ -620,11 +620,12 @@ static uint32_t attr_elem_bytes(const VertexAttr *a)
 /* Read attribute `a` of vertex `index` as floats. Only the float and the
  * normalised-byte types appear in practice; anything else returns 0 so a
  * caller sees a degenerate vertex rather than reading past the array. */
+static int decode_attr(uint32_t type, uint32_t size, const uint8_t *p, float out[4]);
+
 static int fetch_attr(const VertexAttr *a, uint32_t index, float out[4])
 {
     const uint8_t *mem = (const uint8_t *)xbox_GetMemoryOffset();
     const uint8_t *p;
-    uint32_t i;
 
     out[0] = out[1] = out[2] = 0.0f;
     out[3] = 1.0f;
@@ -646,8 +647,16 @@ static int fetch_attr(const VertexAttr *a, uint32_t index, float out[4])
             return 0;
         p = mem + at;
     }
+    return decode_attr(a->type, a->size, p, out);
+}
 
-    switch (a->type) {
+/* One element at `p` of an attribute of `type` and `size`, as floats; out
+ * already holds 0,0,0,1. 0 for a format the executor does not read. */
+static int decode_attr(uint32_t type, uint32_t size, const uint8_t *p, float out[4])
+{
+    uint32_t i;
+
+    switch (type) {
     case 0:                                  /* D3DCOLOR */
         /* A DWORD 0xAARRGGBB, so little-endian bytes are B,G,R,A -- not the
          * component order of every other format here. Returned as R,G,B,A so
@@ -658,20 +667,20 @@ static int fetch_attr(const VertexAttr *a, uint32_t index, float out[4])
         out[3] = (float)p[3] / 255.0f;
         return 1;
     case 2:                                  /* float */
-        for (i = 0; i < a->size && i < 4; i++)
+        for (i = 0; i < size && i < 4; i++)
             out[i] = ((const float *)p)[i];
         return 1;
     case 4:                                  /* unsigned byte, normalised */
-        for (i = 0; i < a->size && i < 4; i++)
+        for (i = 0; i < size && i < 4; i++)
             out[i] = (float)p[i] / 255.0f;
         return 1;
     /* The formats 3D geometry uses and screen-space quads never did. */
     case 1:                                  /* signed short, normalised */
-        for (i = 0; i < a->size && i < 4; i++)
+        for (i = 0; i < size && i < 4; i++)
             out[i] = (float)((const int16_t *)p)[i] / 32767.0f;
         return 1;
     case 5:                                  /* signed short, as is */
-        for (i = 0; i < a->size && i < 4; i++)
+        for (i = 0; i < size && i < 4; i++)
             out[i] = (float)((const int16_t *)p)[i];
         return 1;
     case 6: {                                /* packed 11:11:10 normal */
@@ -2524,6 +2533,236 @@ static int ffp_vertex(uint32_t index, Nv2aVshOutput *out)
     return 1;
 }
 
+/* ---- the same, with the batch's state resolved once ---------------------
+ *
+ * lit_color and ffp_vertex read every light's registers and resolve every
+ * attribute (which slot, inline or guest memory, which format) for each
+ * vertex: in a KOTOR dialogue close-up that was about 40 % of the executor's
+ * time. Nothing they read can change inside a batch, so ffp_batch_begin
+ * copies it into s_ffp once and ffp_batch_vertex reads only that and guest
+ * memory. The arithmetic is lit_color's and ffp_vertex's, expression for
+ * expression and light for light in the same order, so the result is bit for
+ * bit the same; and since it writes only *out, it may run on a pool thread.
+ * RECOMP_FFP_BATCH=0 keeps the per-vertex functions above. */
+typedef struct {
+    const uint8_t *base;    /* guest memory or the inline payload; NULL: absent */
+    uint64_t offset;
+    uint32_t stride, type, size, elem;
+    size_t   limit;         /* inline payload: bytes buffered */
+    int      inl;
+} FfpAttr;
+
+typedef struct {
+    int   kind;             /* 1 infinite, else local / spot */
+    float l[3];             /* direction (infinite) or eye-space position */
+    float range, att[3];
+    float amb[3], dif[3];
+} FfpLight;
+
+static struct {
+    FfpAttr pos, nrm, col, tex[4];
+    float   m[16], off[3], aa_sx, aa_sy;
+    int     lit, flip, amb_vc, dif_vc, nlights;
+    float   mv[12], scene[3], alpha;
+    FfpLight light[NV_LIGHTS];
+} s_ffp;
+
+static int s_ffp_batch = -1;                /* -1: read RECOMP_FFP_BATCH */
+void nv2a_ffp_batch_enable(int on) { s_ffp_batch = on ? 1 : 0; }
+
+static int ffp_batch_on(void)
+{
+    if (s_ffp_batch < 0) {
+        const char *e = getenv("RECOMP_FFP_BATCH");
+        s_ffp_batch = !(e && e[0] == '0');
+    }
+    return s_ffp_batch;
+}
+
+static void ffp_attr_resolve(FfpAttr *f, const VertexAttr *a)
+{
+    memset(f, 0, sizeof *f);
+    if (!a->size || !a->stride)
+        return;
+    f->offset = a->offset;
+    f->stride = a->stride;
+    f->type = a->type;
+    f->size = a->size;
+    f->elem = attr_elem_bytes(a);
+    f->inl = s_gpu.inline_active;
+    if (f->inl) {
+        f->base = (const uint8_t *)s_gpu.inline_buf;
+        f->limit = (size_t)s_gpu.inline_count * 4;
+    } else if (a->offset) {
+        f->base = (const uint8_t *)xbox_GetMemoryOffset();
+    }
+}
+
+/* fetch_attr on a resolved attribute. */
+static int ffp_fetch(const FfpAttr *f, uint32_t index, float out[4])
+{
+    out[0] = out[1] = out[2] = 0.0f;
+    out[3] = 1.0f;
+    if (!f->base)
+        return 0;
+    if (f->inl) {
+        size_t at = (size_t)f->offset + (size_t)index * f->stride;
+        if (at + 4 > f->limit)
+            return 0;
+        return decode_attr(f->type, f->size, f->base + at, out);
+    } else {
+        uint64_t at = f->offset + (uint64_t)index * f->stride;
+        if (!guest_span_ok(at, f->elem))
+            return 0;
+        return decode_attr(f->type, f->size, f->base + at, out);
+    }
+}
+
+static void ffp_batch_begin(void)
+{
+    const float *off = nv2a_vsh_constant(59);
+    uint32_t mask = s_reg[0x03BC / 4], colmat = s_reg[0x0298 / 4], i;
+    int k;
+
+    ffp_attr_resolve(&s_ffp.pos, &s_gpu.attr[0]);
+    ffp_attr_resolve(&s_ffp.nrm, &s_gpu.attr[2]);
+    ffp_attr_resolve(&s_ffp.col, color_attr());
+    ffp_attr_resolve(&s_ffp.tex[0], texcoord_attr());
+    for (i = 1; i < 4; i++)
+        ffp_attr_resolve(&s_ffp.tex[i], &s_gpu.attr[9 + i]);
+    memcpy(s_ffp.m, s_gpu.composite, sizeof s_ffp.m);
+    s_ffp.off[0] = off[0]; s_ffp.off[1] = off[1]; s_ffp.off[2] = off[2];
+    s_ffp.aa_sx = s_gpu.aa_sx;
+    s_ffp.aa_sy = s_gpu.aa_sy;
+
+    s_ffp.lit = s_reg[0x0314 / 4] && s_gpu.attr[2].size;
+    s_ffp.nlights = 0;
+    if (!s_ffp.lit)
+        return;
+    memcpy(s_ffp.mv, &s_reg[0x0480 / 4], sizeof s_ffp.mv);
+    s_ffp.flip = ffp_flip_normals();
+    s_ffp.amb_vc = ((colmat >> 2) & 3) == 1;
+    s_ffp.dif_vc = ((colmat >> 4) & 3) == 1;
+    s_ffp.scene[0] = reg_f(0x0A10);
+    s_ffp.scene[1] = reg_f(0x0A14);
+    s_ffp.scene[2] = reg_f(0x0A18);
+    s_ffp.alpha = reg_f(0x03B4);
+    for (i = 0; i < NV_LIGHTS; i++) {
+        uint32_t kind = (mask >> (2 * i)) & 3, b = 0x1000 + i * 0x80;
+        FfpLight *L = &s_ffp.light[s_ffp.nlights];
+
+        if (!kind)
+            continue;
+        L->kind = (int)kind;
+        if (kind == 1) {
+            L->l[0] = reg_f(b + 0x34); L->l[1] = reg_f(b + 0x38); L->l[2] = reg_f(b + 0x3C);
+        } else {
+            L->l[0] = reg_f(b + 0x5C); L->l[1] = reg_f(b + 0x60); L->l[2] = reg_f(b + 0x64);
+            L->range = reg_f(b + 0x24);
+            L->att[0] = reg_f(b + 0x68);
+            L->att[1] = reg_f(b + 0x6C);
+            L->att[2] = reg_f(b + 0x70);
+        }
+        for (k = 0; k < 3; k++) {
+            L->amb[k] = reg_f(b + 0x00 + 4 * (uint32_t)k);
+            L->dif[k] = reg_f(b + 0x0C + 4 * (uint32_t)k);
+        }
+        s_ffp.nlights++;
+    }
+}
+
+/* lit_color, for a vertex whose position `pos` is already fetched. */
+static int ffp_batch_lit(uint32_t index, const float pos[4], float out[4])
+{
+    const float *mv = s_ffp.mv;
+    float nrm[4], vc[4], e[3], n[3], len;
+    int i, have_vc;
+
+    if (!s_ffp.lit || !ffp_fetch(&s_ffp.nrm, index, nrm))
+        return 0;
+    have_vc = ffp_fetch(&s_ffp.col, index, vc);
+
+    for (i = 0; i < 3; i++) {
+        e[i] = mv[4 * i] * pos[0] + mv[4 * i + 1] * pos[1]
+             + mv[4 * i + 2] * pos[2] + mv[4 * i + 3];
+        n[i] = mv[4 * i] * nrm[0] + mv[4 * i + 1] * nrm[1]
+             + mv[4 * i + 2] * nrm[2];
+    }
+    len = sqrtf(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+    if (len > 1e-8f) { n[0] /= len; n[1] /= len; n[2] /= len; }
+    if (s_ffp.flip && n[0] * e[0] + n[1] * e[1] + n[2] * e[2] > 0.0f) {
+        n[0] = -n[0]; n[1] = -n[1]; n[2] = -n[2];
+    }
+
+    out[0] = s_ffp.scene[0]; out[1] = s_ffp.scene[1]; out[2] = s_ffp.scene[2];
+    for (i = 0; i < s_ffp.nlights; i++) {
+        const FfpLight *L = &s_ffp.light[i];
+        float l[3], att = 1.0f, ndl, amb[3], dif[3];
+        int k;
+
+        if (L->kind == 1) {
+            l[0] = L->l[0]; l[1] = L->l[1]; l[2] = L->l[2];
+        } else {
+            float d;
+            l[0] = L->l[0] - e[0];
+            l[1] = L->l[1] - e[1];
+            l[2] = L->l[2] - e[2];
+            d = sqrtf(l[0] * l[0] + l[1] * l[1] + l[2] * l[2]);
+            if (d > L->range && L->range > 0.0f)
+                continue;
+            if (d > 1e-8f) { l[0] /= d; l[1] /= d; l[2] /= d; }
+            att = L->att[0] + L->att[1] * d + L->att[2] * d * d;
+            att = att > 1e-8f ? 1.0f / att : 1.0f;
+        }
+        ndl = n[0] * l[0] + n[1] * l[1] + n[2] * l[2];
+        if (ndl < 0.0f) ndl = 0.0f;
+        for (k = 0; k < 3; k++) {
+            amb[k] = L->amb[k];
+            dif[k] = L->dif[k];
+            if (have_vc && s_ffp.amb_vc) amb[k] *= vc[k];
+            if (have_vc && s_ffp.dif_vc) dif[k] *= vc[k];
+            out[k] += att * (amb[k] + dif[k] * ndl);
+        }
+    }
+    out[3] = (have_vc && s_ffp.dif_vc) ? vc[3] : s_ffp.alpha;
+    for (i = 0; i < 4; i++)
+        out[i] = out[i] < 0.0f ? 0.0f : out[i] > 1.0f ? 1.0f : out[i];
+    return 1;
+}
+
+/* ffp_vertex after ffp_batch_begin. */
+static int ffp_batch_vertex(uint32_t index, Nv2aVshOutput *out)
+{
+    const float *m = s_ffp.m, *off = s_ffp.off;
+    float in[4], clip[4], c[4], w;
+    uint32_t st;
+    int i;
+
+    if (!ffp_fetch(&s_ffp.pos, index, in))
+        return 0;
+    for (i = 0; i < 4; i++)
+        clip[i] = m[4 * i] * in[0] + m[4 * i + 1] * in[1]
+                + m[4 * i + 2] * in[2] + m[4 * i + 3] * in[3];
+    w = clip[3];
+    if (fabsf(w) <= 1e-6f)
+        return 0;
+
+    memset(out, 0, sizeof *out);
+    out->pos[0] = (clip[0] / w + off[0]) * s_ffp.aa_sx;
+    out->pos[1] = (clip[1] / w + off[1]) * s_ffp.aa_sy;
+    out->pos[2] = clip[2] / w + off[2];
+    out->pos[3] = w;
+
+    if (!ffp_batch_lit(index, in, c) && !ffp_fetch(&s_ffp.col, index, c))
+        c[0] = c[1] = c[2] = c[3] = 1.0f;
+    for (i = 0; i < 4; i++)
+        out->d0[i] = c[i] < 0.0f ? 0.0f : c[i] > 1.0f ? 1.0f : c[i];
+
+    for (st = 0; st < 4; st++)
+        ffp_fetch(&s_ffp.tex[st], index, out->tex[st]);
+    return 1;
+}
+
 /* An untransformed batch drawn as if it were screen space smears a few pixels
  * into the corner, so the batch has to be classified before it is rasterised.
  *
@@ -4080,6 +4319,9 @@ static int transform_vertex(uint32_t index, Nv2aVshOutput *out)
 typedef struct {
     uint32_t n, chunk;                      /* vertices; vertices per chunk */
     volatile int failed;                    /* only ever set to 1 */
+    const uint32_t *idx;                    /* vertex i is element idx[i] ... */
+    const uint32_t *at;                     /* ... into s_xf[at[i]], or s_xf[i] */
+    int ffp;                                /* fixed function (ffp_batch_vertex) */
 } VshJob;
 
 static int s_vsh_pool = -1;                 /* -1: read RECOMP_VSH_POOL */
@@ -4094,43 +4336,161 @@ static void vsh_chunk(int c, int thread, void *ctx)
     uint32_t end = i + J->chunk < J->n ? i + J->chunk : J->n;
 
     (void)thread;
-    for (; i < end; i++)
-        if (!program_vertex(s_gpu.idx[i], &s_xf[i], 1)) {
-            J->failed = 1;                  /* no program: all fail alike */
+    for (; i < end; i++) {
+        Nv2aVshOutput *o = &s_xf[J->at ? J->at[i] : i];
+        if (J->ffp ? !ffp_batch_vertex(J->idx[i], o)
+                   : !program_vertex(J->idx[i], o, 1)) {
+            J->failed = 1;                  /* the batch is dropped either way */
             return;
         }
+    }
+}
+
+/* Fixed-function batches transform each unique index once: an indexed mesh
+ * names most of its vertices about six times, and ffp_batch_vertex depends on
+ * nothing but the index. s_ffp_u[0..u) are the unique indices, s_ffp_at[k]
+ * the position in the batch where index s_ffp_u[k] first appears, and
+ * s_ffp_src[i] that first position for batch vertex i. */
+static uint32_t *s_ffp_u, *s_ffp_at, *s_ffp_src;
+
+#define VMAP_BITS 17                    /* twice NV_MAX_INDICES */
+#define VMAP_SIZE (1u << VMAP_BITS)
+
+static struct {
+    float    *attrs;                    /* NV_MAX_INDICES x 16 x vec4 */
+    uint16_t *tris;                     /* 3 x NV_MAX_INDICES */
+    uint16_t *slot;                     /* NV_MAX_INDICES: batch vertex -> attrs row */
+    uint32_t *key, *gen;                /* VMAP_SIZE: index -> row, by generation */
+    uint16_t *row;
+    uint32_t  cur;
+} s_pv;
+
+static int gpu_vsh_enabled(void)
+{
+    static int on = -1;
+
+    if (on < 0) {
+        const char *e = getenv("RECOMP_GPU_VSH");
+        on = !(e && e[0] == '0');
+    }
+    return on;
+}
+
+static int pv_alloc(void)
+{
+    if (s_pv.attrs)
+        return 1;
+    s_pv.attrs = (float *)malloc((size_t)NV_MAX_INDICES * 16 * 4 * sizeof(float));
+    s_pv.tris = (uint16_t *)malloc((size_t)NV_MAX_INDICES * 3 * sizeof(uint16_t));
+    s_pv.slot = (uint16_t *)malloc((size_t)NV_MAX_INDICES * sizeof(uint16_t));
+    s_pv.key = (uint32_t *)malloc(VMAP_SIZE * sizeof(uint32_t));
+    s_pv.gen = (uint32_t *)calloc(VMAP_SIZE, sizeof(uint32_t));
+    s_pv.row = (uint16_t *)malloc(VMAP_SIZE * sizeof(uint16_t));
+    if (!s_pv.attrs || !s_pv.tris || !s_pv.slot || !s_pv.key || !s_pv.gen || !s_pv.row) {
+        free(s_pv.attrs); free(s_pv.tris); free(s_pv.slot);
+        free(s_pv.key); free(s_pv.gen); free(s_pv.row);
+        memset(&s_pv, 0, sizeof s_pv);
+        return 0;
+    }
+    return 1;
+}
+
+/* The unique indices of the batch (s_ffp_u, s_ffp_at, s_ffp_src); their
+ * count, or 0 when every index is already unique or there is no memory. */
+static uint32_t ffp_unique(uint32_t n)
+{
+    uint32_t i, u = 0;
+
+    for (i = 1; i < n && s_gpu.idx[i] == s_gpu.idx[0] + i; i++)
+        ;
+    if (i == n || !pv_alloc())
+        return 0;
+    if (!s_ffp_u) {
+        s_ffp_u = (uint32_t *)malloc((size_t)NV_MAX_INDICES * sizeof(uint32_t));
+        s_ffp_at = (uint32_t *)malloc((size_t)NV_MAX_INDICES * sizeof(uint32_t));
+        s_ffp_src = (uint32_t *)malloc((size_t)NV_MAX_INDICES * sizeof(uint32_t));
+        if (!s_ffp_u || !s_ffp_at || !s_ffp_src) {
+            free(s_ffp_u); free(s_ffp_at); free(s_ffp_src);
+            s_ffp_u = s_ffp_at = s_ffp_src = NULL;
+            return 0;
+        }
+    }
+    if (++s_pv.cur == 0) {
+        memset(s_pv.gen, 0, VMAP_SIZE * sizeof(uint32_t));
+        s_pv.cur = 1;
+    }
+    for (i = 0; i < n; i++) {
+        uint32_t ix = s_gpu.idx[i];
+        uint32_t h = (ix * 2654435761u) >> (32 - VMAP_BITS);
+        while (s_pv.gen[h] == s_pv.cur && s_pv.key[h] != ix)
+            h = (h + 1) & (VMAP_SIZE - 1);
+        if (s_pv.gen[h] != s_pv.cur) {
+            s_pv.gen[h] = s_pv.cur;
+            s_pv.key[h] = ix;
+            s_pv.row[h] = (uint16_t)u;
+            s_ffp_u[u] = ix;
+            s_ffp_at[u] = i;
+            u++;
+        }
+        s_ffp_src[i] = s_ffp_at[s_pv.row[h]];
+    }
+    return u;
 }
 
 /* s_xf[0..n) for the batch's index list; 0 when there is no program to run. */
 static int transform_batch(uint32_t n)
 {
-    uint32_t i;
+    uint32_t i, cnt = n;
+    int ffp = !batch_uses_program() && ffp_batch_on();
+    const uint32_t *idx = s_gpu.idx, *at = NULL;
 
     if (s_vsh_pool < 0) {
         const char *e = getenv("RECOMP_VSH_POOL");
         s_vsh_pool = !(e && e[0] == '0');
     }
-    if (s_vsh_pool && n >= NV_VSH_MT_MIN_VERTICES && batch_uses_program()
-        && raster_pool_size() > 1 && nv2a_vsh_prepare_parallel()) {
+    if (ffp) {
+        uint32_t u = ffp_unique(n);
+
+        ffp_batch_begin();
+        if (u) {
+            idx = s_ffp_u;
+            at = s_ffp_at;
+            cnt = u;
+        }
+    }
+    if (s_vsh_pool && cnt >= NV_VSH_MT_MIN_VERTICES && raster_pool_size() > 1
+        && (ffp || (batch_uses_program() && nv2a_vsh_prepare_parallel()))) {
         static VshJob job;                    /* executor thread only */
         int nt = raster_pool_size();
         /* Four chunks a thread, so threads that wake late still get a
          * share, but no chunk under 64 vertices. */
-        uint32_t chunk = n / (uint32_t)(nt * 4);
+        uint32_t chunk = cnt / (uint32_t)(nt * 4);
 
         if (chunk < 64)
             chunk = 64;
-        job.n = n;
+        job.n = cnt;
         job.chunk = chunk;
         job.failed = 0;
-        pool_run_chunks(vsh_chunk, &job, (int)((n + chunk - 1) / chunk));
+        job.idx = idx;
+        job.at = at;
+        job.ffp = ffp;
+        pool_run_chunks(vsh_chunk, &job, (int)((cnt + chunk - 1) / chunk));
         s_vsh_last_workers = nt;
-        return !job.failed;
-    }
-    s_vsh_last_workers = 1;
-    for (i = 0; i < n; i++)
-        if (!transform_vertex(s_gpu.idx[i], &s_xf[i]))
+        if (job.failed)
             return 0;
+    } else {
+        s_vsh_last_workers = 1;
+        for (i = 0; i < cnt; i++) {
+            Nv2aVshOutput *o = &s_xf[at ? at[i] : i];
+            if (ffp ? !ffp_batch_vertex(idx[i], o) : !transform_vertex(idx[i], o))
+                return 0;
+        }
+    }
+    /* Repeated indices take the first occurrence's result. */
+    if (at)
+        for (i = 0; i < n; i++)
+            if (s_ffp_src[i] != i)
+                s_xf[i] = s_xf[s_ffp_src[i]];
     return 1;
 }
 
@@ -4302,47 +4662,6 @@ static void raster_batch_program(void)
  * triangle order, the program and the constants. RECOMP_GPU_VSH=0 keeps the
  * CPU transform for every batch. Programs that write c[] with CXT_WRITE on
  * change the constants vertex by vertex and stay on the CPU. */
-#define VMAP_BITS 17                    /* twice NV_MAX_INDICES */
-#define VMAP_SIZE (1u << VMAP_BITS)
-
-static struct {
-    float    *attrs;                    /* NV_MAX_INDICES x 16 x vec4 */
-    uint16_t *tris;                     /* 3 x NV_MAX_INDICES */
-    uint16_t *slot;                     /* NV_MAX_INDICES: batch vertex -> attrs row */
-    uint32_t *key, *gen;                /* VMAP_SIZE: index -> row, by generation */
-    uint16_t *row;
-    uint32_t  cur;
-} s_pv;
-
-static int gpu_vsh_enabled(void)
-{
-    static int on = -1;
-
-    if (on < 0) {
-        const char *e = getenv("RECOMP_GPU_VSH");
-        on = !(e && e[0] == '0');
-    }
-    return on;
-}
-
-static int pv_alloc(void)
-{
-    if (s_pv.attrs)
-        return 1;
-    s_pv.attrs = (float *)malloc((size_t)NV_MAX_INDICES * 16 * 4 * sizeof(float));
-    s_pv.tris = (uint16_t *)malloc((size_t)NV_MAX_INDICES * 3 * sizeof(uint16_t));
-    s_pv.slot = (uint16_t *)malloc((size_t)NV_MAX_INDICES * sizeof(uint16_t));
-    s_pv.key = (uint32_t *)malloc(VMAP_SIZE * sizeof(uint32_t));
-    s_pv.gen = (uint32_t *)calloc(VMAP_SIZE, sizeof(uint32_t));
-    s_pv.row = (uint16_t *)malloc(VMAP_SIZE * sizeof(uint16_t));
-    if (!s_pv.attrs || !s_pv.tris || !s_pv.slot || !s_pv.key || !s_pv.gen || !s_pv.row) {
-        free(s_pv.attrs); free(s_pv.tris); free(s_pv.slot);
-        free(s_pv.key); free(s_pv.gen); free(s_pv.row);
-        memset(&s_pv, 0, sizeof s_pv);
-        return 0;
-    }
-    return 1;
-}
 
 /* RECOMP_GPU_VBO (NV2A_BACKEND_CAP_RAW_VERTEX): can the batch go to the back
  * end with its vertex arrays as stored? Every streamed input in a format
