@@ -151,6 +151,31 @@ def load_profile(tid, ident):
     return profiles.resolve(tid, ident, PROFILES)
 
 
+def sync_generated(new_dir, dest_dir):
+    """Move the files of a fresh lift (new_dir) into dest_dir, keeping every
+    file whose content did not change as it was -- same bytes, same mtime --
+    so the build recompiles only what the lift changed (XBA-65). Files the
+    lift no longer writes are removed. Returns (kept, written, removed)."""
+    import filecmp
+    os.makedirs(dest_dir, exist_ok=True)
+    new = set(os.listdir(new_dir))
+    kept = written = removed = 0
+    for fn in sorted(new):
+        src, dst = os.path.join(new_dir, fn), os.path.join(dest_dir, fn)
+        if os.path.isfile(dst) and filecmp.cmp(src, dst, shallow=False):
+            os.remove(src)
+            kept += 1
+        else:
+            os.replace(src, dst)
+            written += 1
+    for fn in os.listdir(dest_dir):
+        if fn not in new:
+            os.remove(os.path.join(dest_dir, fn))
+            removed += 1
+    shutil.rmtree(new_dir, ignore_errors=True)
+    return kept, written, removed
+
+
 def read_stamp(path):
     try:
         with open(path) as f:
@@ -362,17 +387,23 @@ def main(argv=None):
     if same and stamp.get("lift") and os.listdir(gen):
         print("      up to date", flush=True)
     else:
-        for fn in os.listdir(gen):
-            os.remove(os.path.join(gen, fn))
+        # Lift into a fresh folder, then keep the files that did not change
+        # (XBA-65): a re-prepare after a few new seeds rebuilds a few files,
+        # not all of them.
+        fresh = gen + ".new"
+        shutil.rmtree(fresh, ignore_errors=True)
+        os.makedirs(fresh)
         cmd = [py, "-m", "tools.recomp", xbe, "--all", "--split", "250",
                "--game-name", info["title"],
                "--disasm-dir", os.path.join(an, "disasm"),
                "--func-id-dir", os.path.join(an, "func_id"),
-               "--abi-dir", os.path.join(an, "abi"), "--gen-dir", gen]
+               "--abi-dir", os.path.join(an, "abi"), "--gen-dir", fresh]
         for fn in (profile or {}).get("exclude_manual", []):
             cmd += ["--exclude-manual", os.path.join(proj, "src", "title", fn)]
         t = run(cmd, log)
-        print("      %d C files in %.0f s" % (len(os.listdir(gen)), t), flush=True)
+        kept, written, removed = sync_generated(fresh, gen)
+        print("      %d C files in %.0f s (%d changed, %d unchanged, %d removed)"
+              % (len(os.listdir(gen)), t, written, kept, removed), flush=True)
         stamp["lift"] = True
         with open(stamp_path, "w") as f:
             json.dump(stamp, f)
