@@ -254,3 +254,69 @@ RUN printf 'sdk.dir=%s\ncmake.dir=/usr\n' "$ANDROID_HOME" > local.properties \
 
 FROM scratch AS prepare-apk-out
 COPY --from=prepare-apk /out/ /
+
+# The XRecomp APK (XBA-125, docs/android/toolchain.md « The XRecomp APK in CI »): the release build of the app with
+# the on-device toolchain (Prepare), optimised native code, debuggable (run-as), the version code from the commit
+# time. CI publishes it as xrecomp-latest. The toolchain comes from the stage xba-toolchain below, which CI replaces
+# with its cached toolchain-out (--build-context xba-toolchain=DIR); without that the toolchain is built here.
+# Signing: the BuildKit secrets xba_keystore (the keystore file), xba_keystore_password and xba_key_alias (optional,
+# default xrecomp). Without them the APK is signed with this image's debug key and the build says so; with
+# XBA_SIGNING=release a missing release key fails the build. Never a key in the image or its layers.
+#   docker build -f tools/docker/android.Dockerfile --target xrecomp-apk-out --build-context xba-toolchain=out/toolchain \
+#     --secret id=xba_keystore,src=xrecomp-release.p12 --secret id=xba_keystore_password,env=XBA_KEYSTORE_PASSWORD \
+#     --build-arg XBA_VERSION=$(git rev-parse --short=8 HEAD) --build-arg XBA_VERSION_CODE=$(( $(git log -1 --format=%ct) / 60 )) \
+#     --output type=local,dest=out .
+FROM toolchain-out AS xba-toolchain
+
+FROM android AS xrecomp-apk
+ARG XBA_VERSION=dev
+ARG XBA_VERSION_CODE=1
+# auto: the release key when its secrets are there, else the debug key; release: the release key or an error; debug.
+ARG XBA_SIGNING=auto
+ARG JOBS=4
+COPY --from=xba-toolchain / /opt/xba-toolchain/
+COPY . /src
+WORKDIR /src/android
+RUN --mount=type=secret,id=xba_keystore --mount=type=secret,id=xba_keystore_password \
+    --mount=type=secret,id=xba_key_alias \
+    set -e; \
+    case "$XBA_SIGNING" in auto|release|debug) ;; *) echo "XBA_SIGNING=$XBA_SIGNING: auto, release or debug"; exit 1;; esac; \
+    if [ -s /run/secrets/xba_keystore ] && [ "$XBA_SIGNING" != debug ]; then \
+        export XBA_KEYSTORE=/run/secrets/xba_keystore; \
+        XBA_KEYSTORE_PASSWORD=$(cat /run/secrets/xba_keystore_password 2>/dev/null || true); export XBA_KEYSTORE_PASSWORD; \
+        if [ -s /run/secrets/xba_key_alias ]; then XBA_KEY_ALIAS=$(cat /run/secrets/xba_key_alias); export XBA_KEY_ALIAS; fi; \
+    fi; \
+    require=0; [ "$XBA_SIGNING" != release ] || require=1; \
+    printf 'sdk.dir=%s\ncmake.dir=/usr\n' "$ANDROID_HOME" > local.properties; \
+    gradle --no-daemon --console=plain -PxbaVersion="$XBA_VERSION" -PxbaVersionCode="$XBA_VERSION_CODE" \
+        -PxbaToolchainDir=/opt/xba-toolchain -PxbaDebuggable=1 -PxbaJobs="$JOBS" -PxbaRequireReleaseKey=$require \
+        assembleRelease; \
+    mkdir -p /out; \
+    cp app/build/outputs/apk/release/app-release.apk /out/xrecomp.apk; \
+    rm -rf /root/.gradle/caches /root/.gradle/daemon app/build app/.cxx build .gradle local.properties
+# What is in it, checked: the toolchain, the licences of what it ships (NOTICE « The Android app »), no XBE but our
+# synthetic self-test, the version, debuggable, and who signed it (xrecomp-signing.txt: release or DEBUG).
+RUN set -e; bt=$(ls -d "$ANDROID_HOME"/build-tools/* | tail -1); apk=/out/xrecomp.apk; \
+    unzip -lv "$apk" | grep -E 'lib/|assets/' > /out/xrecomp-contents.txt; \
+    for f in lib/arm64-v8a/libmain.so lib/arm64-v8a/libSDL2.so lib/arm64-v8a/libxbacc.so \
+             lib/arm64-v8a/libxbapython.so lib/arm64-v8a/libpython3.13.so lib/arm64-v8a/libcapstone.so \
+             assets/prepare/python-stdlib.zip assets/prepare/sysroot.zip assets/prepare/toolkit.zip \
+             assets/prepare/toolkit.zip.sha256 assets/selftest.xbe \
+             assets/licences/LICENSE.txt assets/licences/NOTICE.txt \
+             assets/licences/Apache-2.0-WITH-LLVM-exception.txt assets/licences/PSF-2.0.txt \
+             assets/licences/BSD-3-Clause-capstone.txt; do \
+        grep -q " $f\$" /out/xrecomp-contents.txt || { echo "xrecomp.apk: missing $f"; exit 1; }; done; \
+    ! unzip -Z1 "$apk" | grep -iE '\.(xbe|iso|xiso)$' | grep -vx 'assets/selftest.xbe' \
+        || { echo "xrecomp.apk: an XBE or disc image other than the self-test"; exit 1; }; \
+    "$bt/aapt2" dump badging "$apk" | grep -E "^package:|application-debuggable" | tee /out/xrecomp-badging.txt; \
+    grep -q "versionCode='$XBA_VERSION_CODE'" /out/xrecomp-badging.txt; \
+    grep -q application-debuggable /out/xrecomp-badging.txt; \
+    "$bt/apksigner" verify --print-certs "$apk" | grep -E 'Signer #1 certificate (DN|SHA-256)' > /tmp/certs; \
+    if grep -q 'CN=Android Debug' /tmp/certs; then kind=DEBUG; else kind=release; fi; \
+    { echo "signed with: $kind key"; cat /tmp/certs; } | tee /out/xrecomp-signing.txt; \
+    [ "$XBA_SIGNING" != release ] || [ "$kind" = release ] || { echo "XBA_SIGNING=release but debug-signed"; exit 1; }; \
+    [ "$XBA_SIGNING" != debug ] || [ "$kind" = DEBUG ]; \
+    ls -la "$apk"
+
+FROM scratch AS xrecomp-apk-out
+COPY --from=xrecomp-apk /out/ /
