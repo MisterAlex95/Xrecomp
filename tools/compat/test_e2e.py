@@ -185,3 +185,47 @@ def test_a_wait_spin_is_caught_and_promoted(tmp_path):
     assert "promoted to a guest event" in log, log[-3000:]
     lines = [json.loads(l) for l in (work / "discovered.jsonl").read_text().splitlines()]
     assert any(l.get("t") == "wait_spin" and l.get("va") == "0x%08X" % evt for l in lines), lines
+
+
+@pytest.mark.skipif(os.environ.get("XBA_E2E") != "1", reason="XBA_E2E=1: builds and boots a title (minutes)")
+def test_a_launch_of_another_image_hands_over(tmp_path):
+    """XBA-82 (desktop): default.xbe launches d:\\game.xbe as the XDK's
+    XLaunchNewImage does (a contiguous page holding the path at +8, stored in
+    LaunchDataPage, then HalReturnToFirmware(2)). tools.prepare prepares both
+    images (game.xbe is named in default.xbe's strings) and writes images.map;
+    the kernel execs game.xbe's executable in the same process."""
+    import struct
+    if not shutil.which("cmake"):
+        pytest.skip("no cmake")
+    code = bytes.fromhex(
+        "558bec"
+        "6800100000" "ff1500080100"          # push 0x1000; call [MmAllocateContiguousMemory]
+        "c74008443a5c67"                     # mov dword [eax+8], "D:\\g"
+        "c7400c616d652e"                     # mov dword [eax+12], "ame."
+        "c7401078626500"                     # mov dword [eax+16], "xbe\\0"
+        "8b0d04080100" "8901"                # mov ecx, [LaunchDataPage]; mov [ecx], eax
+        "6a02" "ff1508080100"                # push 2; call [HalReturnToFirmware]
+        "ebfe")
+    text = bytearray(code + b"\x00" * (0x100 - len(code)) + b"d:\\game.xbe\x00" + b"\x00" * 0x20)
+    d = tmp_path / "launcher"
+    d.mkdir()
+    p = make_xbe(d / "default.xbe", libs=(("XAPILIB", 5849, 0),), text=bytes(text), title_id=0x58424105,
+                 title="Launcher")
+    b = bytearray(open(p, "rb").read())
+    # MmAllocateContiguousMemory, LaunchDataPage (data export), HalReturnToFirmware, end
+    struct.pack_into("<IIII", b, 0x800, 0x80000000 | 165, 0x80000000 | 164, 0x80000000 | 49, 0)
+    open(p, "wb").write(b)
+    make_xbe(d / "game.xbe", libs=(("XAPILIB", 5849, 0),), text=SPIN, title_id=0x58424105, title="Game2")
+    out = tmp_path / "results.jsonl"
+    r = subprocess.run([sys.executable, "-m", "tools.compat", "run", str(d), "--work-root", str(tmp_path / "cw"),
+                        "--seconds", "8", "--sustain", "3", "--out", str(out)],
+                       cwd=ROOT, capture_output=True, text=True, timeout=1800)
+    assert r.returncode == 0, r.stdout[-2000:] + r.stderr[-2000:]
+    work = tmp_path / "cw" / "launcher"
+    imap = (work / "images.map").read_text().splitlines()
+    assert imap[0].startswith("default.xbe\t") and imap[1].startswith("game.xbe\t"), imap
+    log = (work / "run-0.log").read_text(errors="replace")
+    assert "launch of 'D:\\game.xbe': handing over to" in log, log[-3000:]
+    assert "Game2" in log.split("handing over to", 1)[1], log[-3000:]     # game.xbe's runtime started
+    res = json.loads(out.read_text().splitlines()[-1])
+    assert "launches another XBE" not in (res.get("blocker") or ""), res

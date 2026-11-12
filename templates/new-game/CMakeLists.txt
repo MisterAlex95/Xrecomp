@@ -83,6 +83,12 @@ set(XBA_DISCOVERY_FILE "" CACHE STRING "default discovery file (RECOMP_DISCOVERY
 if(XBA_DISCOVERY_FILE)
     add_compile_definitions(XBA_DISCOVERY_FILE="${XBA_DISCOVERY_FILE}")
 endif()
+# The disc's other images (XBA-82): tools.prepare writes <work>/images.map, the
+# executable each one's launch hands over to (RECOMP_IMAGE_MAP).
+set(XBA_IMAGE_MAP "" CACHE STRING "default image map (RECOMP_IMAGE_MAP)")
+if(XBA_IMAGE_MAP)
+    add_compile_definitions(XBA_IMAGE_MAP="${XBA_IMAGE_MAP}")
+endif()
 # The options the title forces (title.json "env_force"), set by main() before
 # anything reads the environment.
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/title/env_force.h")

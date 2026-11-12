@@ -370,3 +370,92 @@ void xbox_quick_reboot(const uint8_t *page)
     fprintf(stderr, "  [KERNEL] quick reboot failed, exiting instead\n");
     fflush(stderr);
 }
+
+/* ---- Another image of the disc (XBA-82, desktop) ------------------------- */
+
+/* The disc-relative path of a launch path, lowercase, with '/':
+ * "\Device\CdRom0\game.xbe", "D:\game.xbe", "\??\D:\x\y.xbe" and
+ * "\Device\CdRom0;game.xbe" give "game.xbe" / "x/y.xbe". */
+void xbox_launch_rel_path(const char *launch_path, char *out, size_t n)
+{
+    const char *p = launch_path ? launch_path : "";
+    const char *semi = strchr(p, ';');
+    size_t o = 0;
+
+    if (semi) {
+        p = semi + 1;
+    } else {
+        static const char *const prefixes[] = { "\\device\\cdrom0\\", "\\??\\d:\\", "d:\\", "\\??\\" };
+        size_t i;
+        for (i = 0; i < sizeof prefixes / sizeof prefixes[0]; i++) {
+            size_t l = strlen(prefixes[i]), k;
+            for (k = 0; k < l && p[k] && (p[k] | 0x20) == (prefixes[i][k] | 0x20); k++)
+                ;
+            if (k == l) {
+                p += l;
+                break;
+            }
+        }
+    }
+    while (*p == '\\' || *p == '/')
+        p++;
+    for (; *p && o + 1 < n; p++) {
+        char c = *p == '\\' ? '/' : *p;
+        out[o++] = (char)(c >= 'A' && c <= 'Z' ? c - 'A' + 'a' : c);
+    }
+    out[o] = 0;
+}
+
+int xbox_launch_image(const char *launch_path, const uint8_t *page)
+{
+#if defined(_WIN32) || defined(__ANDROID__)
+    (void)launch_path; (void)page;
+    return -1;                  /* desktop POSIX only for now (XBA-82) */
+#else
+    const char *map = getenv("RECOMP_IMAGE_MAP");
+    char want[600], line[2048], exe[1536] = "", lpath[1024];
+    int64_t now = (int64_t)time(NULL);
+    FILE *f;
+
+    if (!map || !*map || !(f = fopen(map, "r")))
+        return -1;
+    xbox_launch_rel_path(launch_path, want, sizeof want);
+    while (fgets(line, sizeof line, f)) {
+        char *tab = strchr(line, '\t'), rel[600];
+        size_t l;
+        if (!tab)
+            continue;
+        *tab = 0;
+        xbox_launch_rel_path(line, rel, sizeof rel);
+        if (strcmp(rel, want))
+            continue;
+        snprintf(exe, sizeof exe, "%s", tab + 1);
+        l = strlen(exe);
+        while (l && (exe[l - 1] == '\n' || exe[l - 1] == '\r'))
+            exe[--l] = 0;
+        break;
+    }
+    fclose(f);
+    if (!exe[0] || access(exe, X_OK) != 0)
+        return -1;
+    if (launch_file_path(lpath, sizeof lpath) != 0 || xbox_launch_data_write(lpath, page, &now, 1) != 0) {
+        fprintf(stderr, "  [KERNEL] launch of '%s': cannot write the launch data, exiting instead\n", launch_path);
+        return -1;
+    }
+    fprintf(stderr, "  [KERNEL] launch of '%s': handing over to %s (RECOMP_IMAGE_MAP)\n", launch_path, exe);
+    {
+        char *args[2];
+        sigset_t none;
+        args[0] = exe;
+        args[1] = NULL;
+        close_on_exec_all();
+        sigemptyset(&none);
+        pthread_sigmask(SIG_SETMASK, &none, NULL);
+        fflush(NULL);
+        execv(exe, args);
+        fprintf(stderr, "  [KERNEL] launch of '%s': execv %s: %s\n", launch_path, exe, strerror(errno));
+    }
+    remove(lpath);
+    return -1;
+#endif
+}
