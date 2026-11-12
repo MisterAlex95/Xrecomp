@@ -115,6 +115,20 @@ def test_the_other_atomic_forms_lift(code, want):
     assert "RECOMP_UNIMPL" not in out and want in out, out
 
 
+@pytest.mark.parametrize("code", [
+    b"\xf0\x0f\xba\x28\x00\x72\x10",      # lock bts dword [eax], 0 / jc: a spinlock
+    b"\xf0\x0f\xba\x30\x00\x73\x10",      # lock btr dword [eax], 0 / jnc
+    b"\xf0\x01\x08\x72\x10",                # lock add [eax], ecx / jc
+])
+def test_a_carry_test_after_a_locked_form_declares_cf(code):
+    """The translator decides whether a function declares _cf from the
+    mnemonics; it did not know the lock-prefixed ones, so a `jc` after
+    `lock bts` emitted an undeclared _cf and the title did not compile."""
+    from tools.recomp.translator import FunctionTranslator
+    insns = list(Disassembler()._cfg_stream(code, 0, len(code), 0x1000))
+    assert FunctionTranslator._function_needs_cf(insns)
+
+
 def test_adc_stays_unhandled():
     out, _ = lift(b"\xf0\x11\x08")            # lock adc: reads CF, which a retry would see changed
     assert "RECOMP_UNIMPL" in out, out

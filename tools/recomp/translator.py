@@ -1917,6 +1917,11 @@ class FunctionTranslator:
         last_setter = None
         for insn in instructions:
             m = insn.mnemonic
+            # A lock-prefixed form sets the flags of its bare instruction
+            # (lift_basic_block tracks it so, XBA-71): `lock bts [x], 0 / jc`
+            # reads _cf, which has to be declared.
+            if m.startswith("lock "):
+                m = m[5:]
             if m in ("adc", "sbb", "stc", "clc", "cmc", "rcl", "rcr"):
                 return True
             cc = None
@@ -2086,6 +2091,8 @@ class FunctionTranslator:
 
         def sets(insn):
             m = insn.mnemonic
+            if m.startswith("lock "):
+                m = m[5:]             # the bare instruction's flags (XBA-71)
             if m in ("inc", "dec"):
                 return _OTHER_FLAGS
             if m in ("stc", "clc", "cmc"):
