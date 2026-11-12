@@ -99,7 +99,7 @@ Switches that change how the kernel layer behaves. Each fixes a class of titles;
 | `RECOMP_CONTIG_AVOID_IMAGE=1` | off | Keeps contiguous allocations out of the image range. | `xbox_memory_layout.c` |
 | `RECOMP_WIN_PLACEHOLDER` | off | Reserves the guest window with placeholders on Windows hosts where fixed bases are taken. | `xbox_memory_layout.c` |
 | `RECOMP_WAIT_SPIN=0` | on | Turns off the wait-spin detector: a thread that waits on one object 2,000 times within a second is reported (object, header, status, caller, frames; `wait_spin` in the discovery file), and an event header whose waits fail at once is promoted to a guest-built event, as `RECOMP_TITLE_KEVENTS` does for every object, once something has tried to set it (KeSetEvent, software method 5); `=promote` promotes without that evidence (XBA-93). | `kernel_bridge.c` |
-| `RECOMP_TITLE_KEVENTS=1` | off | Host events for events a title builds inline instead of through `KeInitializeEvent`. | `kernel_bridge.c` |
+| `RECOMP_TITLE_KEVENTS=1` | off | Host events for events a title builds inline instead of through `KeInitializeEvent`. Without it, the XDK D3D layer still adopts D3D's fence event alone when it finds the device at run time under the DMA walk (`xbox_KeAdoptGuestEvent`). | `kernel_bridge.c` |
 | `RECOMP_GUEST_LOCK=1` | off | Only one guest thread runs guest code at a time. | `kernel_guest_cpu.c` |
 | `RECOMP_GUEST_QUANTUM=ms` | 4 | With the lock: milliseconds before the lock is handed over (0 = at every call). | `kernel_guest_cpu.c` |
 | `RECOMP_GUEST_CPU_TRACE[=ms]` | off | With the lock: periodic trace of who holds it. | `kernel_guest_cpu.c` |
@@ -128,7 +128,7 @@ The executor is itself opt-in: set `RECOMP_PB_EXEC=1` to execute the pushbuffer.
 |---|---|---|---|
 | `RECOMP_PB_EXEC` | off (Android: on) | Executes the title's pushbuffer. On Android the app shell sets it unless `recomp.cfg` says `RECOMP_PB_EXEC=0` (docs/android/app-shell.md). | `nv2a_pb_scan.c`, `xbox_memory_layout.c` |
 | `RECOMP_PB_SCAN` | off | Read-only survey of the pushbuffer; ranks what is not implemented. | `nv2a_pb_scan.c`, `xbox_memory_layout.c` |
-| `RECOMP_PB_WALK=dma` | off | Walks the pushbuffer as the DMA engine does, which delivers D3D's software-method interrupt. | `nv2a_pb_scan.c` |
+| `RECOMP_PB_WALK=dma` | off (on for XDK 5849 D3D8LTCG titles: `profiles/xdk/d3d8ltcg`, `XBA_D3D_DMA_WALK`) | Walks the pushbuffer as the DMA engine does, which delivers D3D's software-method interrupt. `RECOMP_PB_WALK=scan` turns it off where a layer turned it on. | `nv2a_pb_scan.c` |
 | `RECOMP_NV2A_TRACE` | off | Shows whether `DMA_PUT` moves at all. | `xbox_memory_layout.c` |
 | `RECOMP_PB_REPORT_MS=N` | 10000 | Milliseconds between `[GPU]` reports (minimum 100). | `xbox_memory_layout.c` |
 | `RECOMP_PB_EXEC_VERBOSE` | off | Per-batch trace. | `nv2a_pb_exec.c` |

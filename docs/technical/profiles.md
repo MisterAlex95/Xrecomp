@@ -62,6 +62,7 @@ re-lifts the titles that use it.
 | `xdk/xapi` (XAPILIB, XPP) | the one-CPU DISPATCH gate for XPP's USB stack, paced vblanks, the pad (USB model, keyboard) | Fable, Burnout 3 |
 | `xdk/dsound` (DSOUND) | the AC'97 codec ready (`DirectSoundCreate` waits for it) | Fable, Burnout 3 |
 | `xdk/d3d8` (D3D8, D3D8LTCG) | the pushbuffer executor, paced vblanks; `d3d8.c`: D3D's GPU semaphore watch and its software methods (5: the fence event; 0xC-0xE: RunPushBuffer's return JUMP), with `XBA_D3D_DEVICE_PTR`, `XBA_D3D_DEVICE`, `XBA_D3D_SW_METHODS`, `XBA_D3D_DMA_WALK`, or the device found at run time | Fable, Burnout 3 |
+| `xdk/d3d8ltcg` (D3D8LTCG 5849) | `XBA_D3D_DMA_WALK` 1: the DMA walk, which D3D8LTCG's fence wait needs (DMA_GET and the 0x0310 latch); with it `d3d8.c` adopts the fence event (device + 0x1DCC) once it finds the device at run time | Black, Burnout 3 |
 | `engines/renderware` | Criterion's RenderWare on D3D8LTCG: the DMA walk, title-built KEVENTs, 60 fps cap, frame generation off | Burnout 3 (Black, XBA-92) |
 | `titles/4d5300d1` | Fable: map size, deferred I/O APCs, front-end sleep, 16:9, cache progress, fibers (`overrides.c`) | |
 | `titles/4541005b` | Burnout 3: D3D addresses, the XID seed, flip pacing on the software rasteriser | |
@@ -70,7 +71,10 @@ D3D is linked into each title, so its statics move from XBE to XBE. A title laye
 them, `xdk/d3d8` finds the device at run time (XBA-80): once D3D has made it, the title's image is scanned for the one
 dword `D` with `[D + 0x24A8] == D` (the pointer slot), a pushbuffer ring at `[D + 0x24]..[D + 0x28]` in the contiguous
 window, and the put pointer `[D]` inside it. A unique hit is printed (`[D3D] device found at ...`) and written to the
-discovery file as `{"t":"d3d",...}`; then the semaphore watch and every serviceable software method run on it. So a new
+discovery file as `{"t":"d3d",...}`; then the semaphore watch and every serviceable software method run on it. Under
+the DMA walk (`xdk/d3d8ltcg`, or `RECOMP_PB_WALK=dma`) the fence event at device + 0x1DCC, which D3D builds itself, is
+adopted as a guest event (`xbox_KeAdoptGuestEvent`, `[D3D] fence event ... set by software method 5`), so `BlockOnTime`
+sleeps until method 5 sets it; under the segment scan, which does not deliver method 5, it is left alone. So a new
 title on a known XDK build needs no title layer for D3D.
 
 ## Adding a title

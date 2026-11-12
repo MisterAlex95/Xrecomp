@@ -284,7 +284,11 @@ Turn the walk on for a project that delivers the GPU's software-method
 interrupt, or to bring up a title the segment scan draws wrongly. For the fence
 wait that is method 5: a software-method hook that sets the fence event with
 `xbox_KeSetGuestEvent()` (see [D3D Software Methods](#d3d-software-methods)),
-with `RECOMP_TITLE_KEVENTS=1` when D3D built the event itself.
+with `RECOMP_TITLE_KEVENTS=1` when D3D built the event itself, or that one
+event adopted with `xbox_KeAdoptGuestEvent()` (the XDK D3D layer does so for a
+device it found at run time). XDK 5849's D3D8LTCG gets the walk from its own
+layer (`profiles/xdk/d3d8ltcg`): its fence wait also spins on the 0x0310 latch
+(PGRAPH 0x400B10), which only the walk keeps honest.
 
 ## The Segment Scan Follows Jumps
 
