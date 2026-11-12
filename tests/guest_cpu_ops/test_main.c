@@ -2,7 +2,7 @@
  * The runtime side of lifted instructions that call into it.
  *
  *  - recomp_divide_error (the lifted div/idiv's #DE): with no guest
- *    exception dispatch it reports the fault and stops the way an unhandled
+ *    handler chain it reports the fault and stops the way an unhandled
  *    kernel-mode exception stops the console, KeBugCheckEx(0x1E, status,
  *    va): STATUS_INTEGER_DIVIDE_BY_ZERO for a zero divisor,
  *    STATUS_INTEGER_OVERFLOW for a quotient that does not fit. Run in a
@@ -79,6 +79,9 @@ static int divide_error_child(uint32_t va, uint32_t divisor, char *line,
     if (pid == 0) {
         dup2(fds[1], 2);
         close(fds[0]);
+        /* No TIB, so no guest handler chain: the unhandled path. (With one,
+         * the error is raised to the guest first: tests/seh_dispatch.) */
+        g_fs_base = 0;
         recomp_divide_error(va, divisor);
         _exit(99);                      /* it must not return */
     }

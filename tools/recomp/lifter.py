@@ -2754,8 +2754,8 @@ class Lifter:
 
         Both now call recomp_divide_error(va, divisor) and leave the
         registers as they were, as the CPU does before it dispatches the
-        exception; the runtime decides what happens next (today it stops
-        with a report). The fast path pays one compare for div: the
+        exception; the runtime raises it to the guest's handlers, and
+        stops with a report when none takes it (kernel_hal.c). The fast path pays one compare for div: the
         quotient fits iff the dividend's high half is below the divisor,
         which a zero divisor also fails. idiv pays the zero test (and at 32
         bits the one dividend whose division by -1 is itself undefined in

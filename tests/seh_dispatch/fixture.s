@@ -8,7 +8,7 @@
 #
 #   .text  0x00010000      code
 #   .rdata 0x00020000      scope tables, FuncInfo
-#   data   0x00030000      COUNTER, FILTER_RESULT, SEEN_CODE (absolute)
+#   data   0x00030000      COUNTER, FILTER_RESULT, SEEN_CODE, DIVISOR (absolute)
 #   RAISE  0x0001F000      host: RtlRaiseException(record), stdcall
 #   UNWIND 0x0001F010      host: RtlUnwind(frame, ip, record, value), stdcall
 
@@ -18,6 +18,7 @@
     .set COUNTER,       0x30000
     .set FILTER_RESULT, 0x30004
     .set SEEN_CODE,     0x30008
+    .set DIVISOR,       0x3000C
     .set RAISE,         0x1F000
     .set UNWIND,        0x1F010
 
@@ -372,6 +373,53 @@ cx_ret:
     pop ebx
     pop ebp
     ret
+
+# ---- a divide error under __except (XBA-110 x XBA-112) ---------------------
+
+# f_div: __try { 7 / DIVISOR (div ecx); eax = 0x111 } __except (filter) { eax = 0x555 }
+# A zero DIVISOR is #DE: the runtime raises STATUS_INTEGER_DIVIDE_BY_ZERO.
+    .globl f_div
+f_div:
+    push ebp
+    mov ebp, esp
+    push -1
+    push offset scope_div
+    push offset my_handler3
+    mov eax, dword ptr fs:0
+    push eax
+    mov dword ptr fs:0, esp
+    sub esp, 8
+    push ebx
+    push esi
+    push edi
+    mov dword ptr [ebp-0x18], esp
+    mov dword ptr [ebp-4], 0
+    mov eax, 7
+    xor edx, edx
+    mov ecx, dword ptr ds:DIVISOR
+    div ecx
+    mov eax, 0x111
+    jmp fd_out
+fd_except:
+    mov esp, dword ptr [ebp-0x18]
+    mov eax, 0x555
+fd_out:
+    mov dword ptr [ebp-4], -1
+    mov ecx, dword ptr [ebp-0x10]
+    mov dword ptr fs:0, ecx
+    pop edi
+    pop esi
+    pop ebx
+    mov esp, ebp
+    pop ebp
+    ret
+fd_filter:
+    mov ecx, dword ptr [ebp-0x14]
+    mov ecx, dword ptr [ecx]
+    mov ecx, dword ptr [ecx]
+    mov dword ptr ds:SEEN_CODE, ecx
+    mov eax, dword ptr ds:FILTER_RESULT
+    ret
     .globl text_end
 text_end:
 
@@ -395,3 +443,5 @@ funcinfo_inner:
     .long 0x19930520, 1, unwind_inner, 0, 0, 0, 0
 unwind_inner:
     .long -1, inner_unwind
+scope_div:
+    .long -1, fd_filter, fd_except

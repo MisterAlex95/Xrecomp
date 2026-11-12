@@ -32,7 +32,7 @@ TEXT_VA = 0x00010000
 RDATA_VA = 0x00020000
 FUNCTIONS = ("g_raises", "g_throw", "f_outer", "f_inner", "my_handler3",
              "f_cxx", "f_cxx_inner", "ehstub_cxx", "ehstub_inner",
-             "my_cxx_handler")
+             "my_cxx_handler", "f_div")
 
 
 def build(source=SOURCE, out=FIXTURE_JSON):

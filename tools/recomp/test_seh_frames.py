@@ -182,11 +182,11 @@ def test_fixture_json_matches_its_source():
 def test_fixture_frames_anchor_only_where_there_is_somewhere_to_resume():
     from tools.recomp import seh_fixture
     code = seh_fixture.lift()
-    # f_outer (__except) and f_cxx (catch) anchor; f_inner (__finally only)
-    # and f_cxx_inner (destructor only) do not.
-    assert code.count("recomp_seh_anchor(") == 4   # each anchored body twice
+    # f_outer and f_div (__except) and f_cxx (catch) anchor; f_inner
+    # (__finally only) and f_cxx_inner (destructor only) do not.
+    assert code.count("recomp_seh_anchor(") == 6   # each anchored body twice
     for name in ("f_outer__seh", "f_inner__seh", "f_cxx__seh",
-                 "f_cxx_inner__seh"):
+                 "f_cxx_inner__seh", "f_div__seh"):
         assert f"void {name}(uint32_t _seh_target)" in code
     # The __finally a normal path calls directly is the funclet entry.
     assert "void sub_00010133(void) { f_inner__seh(0x00010133u); }" in code

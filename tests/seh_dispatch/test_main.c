@@ -22,7 +22,9 @@
  *  - stack switching (XBA-101): an exception raised and handled on a guest
  *    stack the runtime switched to (its own host stack), and one raised on a
  *    fiber whose handler frame is on the stack that switched to it: refused
- *    and reported, never jumped to, whether the fiber's top is known or not.
+ *    and reported, never jumped to, whether the fiber's top is known or not;
+ *  - a lifted div by zero (XBA-110) inside an __except frame resumes in the
+ *    handler, or carries on when the filter continues execution.
  *
  * Each checks the result, the guest stack pointer, the chain head and the
  * dispatcher's counters. Runs the same on x86-64 and arm64 (qemu in CI).
@@ -51,6 +53,7 @@ extern const unsigned char seh_fixture_rdata[];
 extern const uint32_t seh_fixture_f_outer;
 void f_outer(void);
 void f_cxx(void);
+void f_div(void);
 
 #define GUEST_SIZE   0x00200000u
 #define TIB_VA       0x00004000u
@@ -59,6 +62,7 @@ void f_cxx(void);
 #define COUNTER      0x00030000u
 #define FILTER       0x00030004u
 #define SEEN_CODE    0x00030008u
+#define DIVISOR      0x0003000Cu
 #define SLOT         0x00030010u    /* the guest stack switch's esp slot */
 #define FIBER_HI_TOP 0x001C0000u    /* a fiber stack above the main one */
 #define FIBER_LO_TOP 0x000F0000u    /* one below it, within the dispatcher's
@@ -247,6 +251,7 @@ static void reset(int32_t filter)
     G32(SEEN_CODE) = 0;
     G32(TIB_VA) = END_OF_CHAIN;
     flip_host_stack = other_guest_stack = raise_on_fiber = 0;
+    G32(DIVISOR) = 0;
     {
         XboxSehStats s;
         xbox_SehStatsGet(&s, 1);
@@ -425,6 +430,33 @@ int main(void)
     } else {
         printf("  7-8. no guest stack switch on this host: skipped\n");
     }
+
+    /* 9. A lifted `div ecx` by zero (XBA-110) inside f_div's __try: the
+     *    runtime raises STATUS_INTEGER_DIVIDE_BY_ZERO and the __except
+     *    block runs. */
+    reset(1);
+    eax = guest_call(f_div, &esp);
+    xbox_SehStatsGet(&st, 0);
+    check(eax == 0x555, "div by zero: __except block ran (eax 0x555)");
+    check(G32(SEEN_CODE) == XBOX_STATUS_INTEGER_DIVIDE_BY_ZERO,
+          "filter saw STATUS_INTEGER_DIVIDE_BY_ZERO");
+    check(st.raises == 1 && st.resumes == 1, "raised once, resumed once");
+    check(esp == STACK_HI - 0x100 && G32(TIB_VA) == END_OF_CHAIN,
+          "stack and chain balanced");
+
+    /*    The filter continues execution: the div is skipped, the body goes on. */
+    reset(-1);
+    eax = guest_call(f_div, &esp);
+    xbox_SehStatsGet(&st, 0);
+    check(eax == 0x111 && st.handled == 1 && st.resumes == 0,
+          "div by zero, continue-execution: the body went on");
+
+    /*    A divisor that is not zero raises nothing. */
+    reset(1);
+    G32(DIVISOR) = 2;
+    eax = guest_call(f_div, &esp);
+    xbox_SehStatsGet(&st, 0);
+    check(eax == 0x111 && st.raises == 0, "div by 2: no exception");
 
 #ifndef _WIN32
     remove(disc_path);

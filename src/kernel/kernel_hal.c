@@ -14,6 +14,7 @@
 #include "kernel.h"
 #include "kernel_missing.h"
 #include "xbox_memory_layout.h"   /* RECOMP_TLS, g_fs_base */
+#include "xbox_seh.h"            /* recomp_divide_error raises #DE (XBA-112) */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -2176,21 +2177,43 @@ void xbox_Cpuid(uint32_t leaf, uint32_t subleaf, uint32_t out[4])
  * with no handler it is fatal: KMODE_EXCEPTION_NOT_HANDLED (0x1E), the
  * code and the address as the first two parameters.
  *
- * There is no guest exception dispatch yet, so every divide error takes the
- * unhandled path, with a report naming the instruction. This is the one
- * place to hook dispatch in: before, a zero divisor was C undefined
- * behaviour (SIGFPE on an x86 host, a silent zero on arm64) and an
- * overflowing quotient was silently truncated.
+ * So does the runtime (xbox_seh.c): when the thread has a guest handler
+ * chain, the exception is raised there. A handler that resumes at its
+ * __except block never comes back here. One that continues execution does:
+ * the CPU would retry the div with the registers the handler left, but the
+ * lifted code goes on after it (said once). Nothing on the chain, or nothing
+ * that handles it, or RECOMP_SEH_DISPATCH=0, is the fatal path with a report
+ * naming the instruction.
  * ========================================================================= */
 void recomp_divide_error(uint32_t va, uint32_t divisor)
 {
-    uint32_t code = divisor ? 0xC0000095u : 0xC0000094u;
+    uint32_t code = divisor ? XBOX_STATUS_INTEGER_OVERFLOW
+                            : XBOX_STATUS_INTEGER_DIVIDE_BY_ZERO;
+    /* fs:[0], the chain head; no TIB yet (a bare test harness) is no chain. */
+    uint32_t head = g_fs_base
+        ? *(volatile uint32_t *)((uintptr_t)g_fs_base + g_xbox_mem_offset)
+        : XBOX_SEH_END_OF_CHAIN;
+    const char *why = "no guest exception handler";
 
+    if (head != XBOX_SEH_END_OF_CHAIN && head != 0) {
+        if (!xbox_SehDispatchEnabled()) {
+            why = "guest exception dispatch is off (RECOMP_SEH_DISPATCH=0)";
+        } else if (xbox_RaiseGuestException(code, 0, va, 0, NULL)) {
+            static int said;
+            if (!said++) {
+                fprintf(stderr, "[#DE] a guest handler continued execution after the"
+                        " divide error at 0x%08X: the div is skipped, not retried\n", va);
+                fflush(stderr);
+            }
+            return;
+        } else {
+            why = "no guest handler took it";
+        }
+    }
     fprintf(stderr, "[#DE] integer divide error at 0x%08X: %s (status 0x%08X);"
-            " eax=%08X edx=%08X divisor=%08X esp=%08X -- no guest exception"
-            " dispatch, stopping\n",
+            " eax=%08X edx=%08X divisor=%08X esp=%08X -- %s, stopping\n",
             va, divisor ? "quotient overflow" : "divide by zero", code,
-            g_eax, g_edx, divisor, g_esp);
+            g_eax, g_edx, divisor, g_esp, why);
     fflush(stderr);
     xbox_KeBugCheckEx(0x1E, code, va, 0, 0);
 }

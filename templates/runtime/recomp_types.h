@@ -627,9 +627,10 @@ void     xbox_WriteDtr(int which, uint64_t value);
 
 /* #DE: a div/idiv at guest address `va` whose divisor is zero, or whose
  * quotient does not fit the destination. The lifted instruction has changed
- * no register when this is called, as on the CPU. Every divide error goes
- * through here so guest exception dispatch has one place to hook; until it
- * exists the runtime reports the fault and stops. */
+ * no register when this is called, as on the CPU. The runtime raises it as a
+ * guest exception (STATUS_INTEGER_DIVIDE_BY_ZERO / _OVERFLOW, xbox_seh.h):
+ * a handler that resumes at its __except block does not return here; with
+ * no handler it reports the fault and stops. */
 void recomp_divide_error(uint32_t va, uint32_t divisor);
 
 /* cpuid: out[0..3] = eax, ebx, ecx, edx for leaf `leaf` (subleaf unused).

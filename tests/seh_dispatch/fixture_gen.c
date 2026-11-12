@@ -19,6 +19,8 @@ void sub_00010296(void);
 void ehstub_cxx(void);
 void ehstub_inner(void);
 void my_cxx_handler(void);
+void f_div(void);
+void sub_0001039F(void);
 void sub_0001F000(void);  /* RAISE, the harness */
 void sub_0001F010(void);  /* UNWIND, the harness */
 
@@ -942,6 +944,164 @@ loc_00010337: ;
 
 }
 
+/**
+ * f_div
+ * Original: 0x0001033C - 0x000103B2 (118 bytes, 37 insns)
+ * CC: cdecl, 0 params, returns int_or_void
+ * Frame: fpo_leaf
+ */
+void f_div(void)
+{
+    uint32_t ebp = 0;
+    ebp = g_ebp;  /* prologue saves caller's frame */
+    uint32_t _fa = 0, _fb = 0;
+    int32_t _fas = 0, _fbs = 0;
+    (void)_fa; (void)_fb; (void)_fas; (void)_fbs;
+
+loc_0001033C: ;
+    PUSH32(esp, ebp);
+    ebp = esp;
+    g_ebp = ebp; /* publish frame for frameless callees */
+    g_seh_ebp = ebp;
+    PUSH32(esp, 0xFFFFFFFFu);
+    PUSH32(esp, 0x20084);
+    PUSH32(esp, 0x1013B);
+    eax = MEM32(XBOX_FS_BASE);
+    PUSH32(esp, eax);
+    MEM32(XBOX_FS_BASE) = esp;
+    { static const uint32_t _seh_resume[] = { 0x0001037Fu }; static const recomp_seh_desc _seh_desc = { 0x0001033Cu, 1u, _seh_resume }; /* eh3 frame, table 0x00020084 */
+    switch (RECOMP_SETJMP(*recomp_seh_anchor(MEM32(XBOX_FS_BASE), ebp, &_seh_desc))) {
+    case 0: break;
+    case 1: ebp = g_seh_ebp; goto loc_0001037F;
+    default: break; } }
+    _fb = (uint32_t)(8) & 0xFFFFFFFFu; _fbs = (int32_t)(int32_t)(_fb); /* sub source, before the write */
+    esp = esp - 8;
+    _fa = (uint32_t)(esp) & 0xFFFFFFFFu; _fas = (int32_t)(int32_t)(_fa); /* sub result */
+    PUSH32(esp, ebx);
+    PUSH32(esp, esi);
+    PUSH32(esp, edi);
+    MEM32(ebp + -24) = esp;
+    MEM32(ebp + -4) = 0;
+    eax = 7;
+    edx = 0; /* xor self */
+    _fa = (uint32_t)(edx) & 0xFFFFFFFFu; _fas = (int32_t)(int32_t)(_fa); /* xor result */
+    ecx = MEM32(0x3000C);
+    { uint32_t _dv = (uint32_t)(ecx);
+      if (RECOMP_UNLIKELY(edx >= _dv)) recomp_divide_error(0x00010376u, (uint32_t)_dv);
+      else { uint64_t _dn = ((uint64_t)edx << 32) | eax; eax = (uint32_t)(_dn / _dv); edx = (uint32_t)(_dn % _dv); } }
+    eax = 0x111;
+    goto loc_00010387;
+
+loc_0001037F: ;
+    esp = MEM32(ebp + -24);
+    eax = 0x555;
+
+loc_00010387: ;
+    MEM32(ebp + -4) = 0xFFFFFFFFu;
+    ecx = MEM32(ebp + -16);
+    MEM32(XBOX_FS_BASE) = ecx;
+    POP32(esp, edi);
+    POP32(esp, esi);
+    POP32(esp, ebx);
+    esp = ebp;
+    POP32(esp, ebp);
+    g_ebp = ebp; g_seh_ebp = ebp; esp += 4; return; /* ret */
+
+loc_0001039F: ;
+    ecx = MEM32(ebp + -20);
+    ecx = MEM32(ecx);
+    ecx = MEM32(ecx);
+    MEM32(0x30008) = ecx;
+    eax = MEM32(0x30004);
+    g_ebp = ebp; g_seh_ebp = ebp; esp += 4; return; /* ret */
+
+}
+
+/* 0x0001033C entered at its exception funclets */
+void f_div__seh(uint32_t _seh_target);
+/**
+ * f_div
+ * Original: 0x0001033C - 0x000103B2 (118 bytes, 37 insns)
+ * CC: cdecl, 0 params, returns int_or_void
+ * Frame: fpo_leaf
+ */
+void f_div__seh(uint32_t _seh_target)
+{
+    uint32_t ebp = 0;
+    ebp = g_ebp;  /* prologue saves caller's frame */
+    uint32_t _fa = 0, _fb = 0;
+    int32_t _fas = 0, _fbs = 0;
+    (void)_fa; (void)_fb; (void)_fas; (void)_fbs;
+
+    /* entered at an exception funclet of 0x0001033C */
+    ebp = g_seh_ebp; /* the funclet runs on its parent's frame */
+    switch (_seh_target) {
+    case 0x0001039Fu: goto loc_0001039F;
+    default: g_esp += 4; return; /* not a funclet: pop and return */
+    }
+
+loc_0001033C: ;
+    PUSH32(esp, ebp);
+    ebp = esp;
+    g_ebp = ebp; /* publish frame for frameless callees */
+    g_seh_ebp = ebp;
+    PUSH32(esp, 0xFFFFFFFFu);
+    PUSH32(esp, 0x20084);
+    PUSH32(esp, 0x1013B);
+    eax = MEM32(XBOX_FS_BASE);
+    PUSH32(esp, eax);
+    MEM32(XBOX_FS_BASE) = esp;
+    { static const uint32_t _seh_resume[] = { 0x0001037Fu }; static const recomp_seh_desc _seh_desc = { 0x0001033Cu, 1u, _seh_resume }; /* eh3 frame, table 0x00020084 */
+    switch (RECOMP_SETJMP(*recomp_seh_anchor(MEM32(XBOX_FS_BASE), ebp, &_seh_desc))) {
+    case 0: break;
+    case 1: ebp = g_seh_ebp; goto loc_0001037F;
+    default: break; } }
+    _fb = (uint32_t)(8) & 0xFFFFFFFFu; _fbs = (int32_t)(int32_t)(_fb); /* sub source, before the write */
+    esp = esp - 8;
+    _fa = (uint32_t)(esp) & 0xFFFFFFFFu; _fas = (int32_t)(int32_t)(_fa); /* sub result */
+    PUSH32(esp, ebx);
+    PUSH32(esp, esi);
+    PUSH32(esp, edi);
+    MEM32(ebp + -24) = esp;
+    MEM32(ebp + -4) = 0;
+    eax = 7;
+    edx = 0; /* xor self */
+    _fa = (uint32_t)(edx) & 0xFFFFFFFFu; _fas = (int32_t)(int32_t)(_fa); /* xor result */
+    ecx = MEM32(0x3000C);
+    { uint32_t _dv = (uint32_t)(ecx);
+      if (RECOMP_UNLIKELY(edx >= _dv)) recomp_divide_error(0x00010376u, (uint32_t)_dv);
+      else { uint64_t _dn = ((uint64_t)edx << 32) | eax; eax = (uint32_t)(_dn / _dv); edx = (uint32_t)(_dn % _dv); } }
+    eax = 0x111;
+    goto loc_00010387;
+
+loc_0001037F: ;
+    esp = MEM32(ebp + -24);
+    eax = 0x555;
+
+loc_00010387: ;
+    MEM32(ebp + -4) = 0xFFFFFFFFu;
+    ecx = MEM32(ebp + -16);
+    MEM32(XBOX_FS_BASE) = ecx;
+    POP32(esp, edi);
+    POP32(esp, esi);
+    POP32(esp, ebx);
+    esp = ebp;
+    POP32(esp, ebp);
+    g_ebp = ebp; g_seh_ebp = ebp; esp += 4; return; /* ret */
+
+loc_0001039F: ;
+    ecx = MEM32(ebp + -20);
+    ecx = MEM32(ecx);
+    ecx = MEM32(ecx);
+    MEM32(0x30008) = ecx;
+    eax = MEM32(0x30004);
+    g_ebp = ebp; g_seh_ebp = ebp; esp += 4; return; /* ret */
+
+}
+
+void f_div__seh(uint32_t _seh_target);
+void sub_0001039F(void) { f_div__seh(0x0001039Fu); } /* eh3 funclet of 0x0001033C */
+
 
 static const struct { uint32_t va; recomp_func_t fn; } seh_fixture_table[] = {
     { 0x00010000u, g_raises },
@@ -958,6 +1118,8 @@ static const struct { uint32_t va; recomp_func_t fn; } seh_fixture_table[] = {
     { 0x0001029Eu, ehstub_cxx },
     { 0x000102A5u, ehstub_inner },
     { 0x000102ACu, my_cxx_handler },
+    { 0x0001033Cu, f_div },
+    { 0x0001039Fu, sub_0001039F },
 };
 
 recomp_func_t recomp_lookup(uint32_t va)
@@ -974,7 +1136,7 @@ recomp_func_t seh_fixture_lookup_harness(uint32_t va);
 recomp_func_t recomp_lookup_manual(uint32_t va) { return seh_fixture_lookup_harness(va); }
 
 const uint32_t seh_fixture_text_va = 0x00010000u;
-const uint32_t seh_fixture_text_size = 828u;
+const uint32_t seh_fixture_text_size = 946u;
 const unsigned char seh_fixture_text[] = {
     0x55, 0x89, 0xE5, 0x83, 0xEC, 0x50, 0xC7, 0x04, 0x24, 0x01, 0x00, 0x00, 0xE0, 0xC7, 0x44, 0x24,
     0x04, 0x00, 0x00, 0x00, 0x00, 0xC7, 0x44, 0x24, 0x08, 0x00, 0x00, 0x00, 0x00, 0xC7, 0x44, 0x24,
@@ -1027,10 +1189,18 @@ const unsigned char seh_fixture_text[] = {
     0x6B, 0x0C, 0x8B, 0x65, 0xF0, 0xFF, 0xE0, 0xB8, 0x01, 0x00, 0x00, 0x00, 0xEB, 0x29, 0x8B, 0x73,
     0x08, 0x83, 0xFE, 0xFF, 0x74, 0x1C, 0x8B, 0x4F, 0x08, 0x8B, 0x54, 0xF1, 0x04, 0x8B, 0x34, 0xF1,
     0x89, 0x73, 0x08, 0x85, 0xD2, 0x74, 0xEA, 0x56, 0x55, 0x8D, 0x6B, 0x0C, 0xFF, 0xD2, 0x5D, 0x5E,
-    0xEB, 0xDF, 0xB8, 0x01, 0x00, 0x00, 0x00, 0x5F, 0x5E, 0x5B, 0x5D, 0xC3,
+    0xEB, 0xDF, 0xB8, 0x01, 0x00, 0x00, 0x00, 0x5F, 0x5E, 0x5B, 0x5D, 0xC3, 0x55, 0x89, 0xE5, 0x6A,
+    0xFF, 0x68, 0x84, 0x00, 0x02, 0x00, 0x68, 0x3B, 0x01, 0x01, 0x00, 0x64, 0xA1, 0x00, 0x00, 0x00,
+    0x00, 0x50, 0x64, 0x89, 0x25, 0x00, 0x00, 0x00, 0x00, 0x83, 0xEC, 0x08, 0x53, 0x56, 0x57, 0x89,
+    0x65, 0xE8, 0xC7, 0x45, 0xFC, 0x00, 0x00, 0x00, 0x00, 0xB8, 0x07, 0x00, 0x00, 0x00, 0x31, 0xD2,
+    0x8B, 0x0D, 0x0C, 0x00, 0x03, 0x00, 0xF7, 0xF1, 0xB8, 0x11, 0x01, 0x00, 0x00, 0xEB, 0x08, 0x8B,
+    0x65, 0xE8, 0xB8, 0x55, 0x05, 0x00, 0x00, 0xC7, 0x45, 0xFC, 0xFF, 0xFF, 0xFF, 0xFF, 0x8B, 0x4D,
+    0xF0, 0x64, 0x89, 0x0D, 0x00, 0x00, 0x00, 0x00, 0x5F, 0x5E, 0x5B, 0x89, 0xEC, 0x5D, 0xC3, 0x8B,
+    0x4D, 0xEC, 0x8B, 0x09, 0x8B, 0x09, 0x89, 0x0D, 0x08, 0x00, 0x03, 0x00, 0xA1, 0x04, 0x00, 0x03,
+    0x00, 0xC3,
 };
 const uint32_t seh_fixture_rdata_va = 0x00020000u;
-const uint32_t seh_fixture_rdata_size = 132u;
+const uint32_t seh_fixture_rdata_size = 144u;
 const unsigned char seh_fixture_rdata[] = {
     0xFF, 0xFF, 0xFF, 0xFF, 0xD1, 0x00, 0x01, 0x00, 0xB1, 0x00, 0x01, 0x00, 0xFF, 0xFF, 0xFF, 0xFF,
     0x00, 0x00, 0x00, 0x00, 0x33, 0x01, 0x01, 0x00, 0x20, 0x05, 0x93, 0x19, 0x01, 0x00, 0x00, 0x00,
@@ -1040,12 +1210,13 @@ const unsigned char seh_fixture_rdata[] = {
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x42, 0x02, 0x01, 0x00,
     0x20, 0x05, 0x93, 0x19, 0x01, 0x00, 0x00, 0x00, 0x7C, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF,
-    0x96, 0x02, 0x01, 0x00,
+    0x96, 0x02, 0x01, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0x9F, 0x03, 0x01, 0x00, 0x7F, 0x03, 0x01, 0x00,
 };
 const uint32_t seh_fixture_ehstub_cxx = 0x0001029Eu;
 const uint32_t seh_fixture_ehstub_inner = 0x000102A5u;
 const uint32_t seh_fixture_f_cxx = 0x000101FAu;
 const uint32_t seh_fixture_f_cxx_inner = 0x0001024Fu;
+const uint32_t seh_fixture_f_div = 0x0001033Cu;
 const uint32_t seh_fixture_f_inner = 0x000100E4u;
 const uint32_t seh_fixture_f_outer = 0x00010078u;
 const uint32_t seh_fixture_g_raises = 0x00010000u;
