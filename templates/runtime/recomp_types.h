@@ -509,6 +509,30 @@ static inline uint32_t recomp_ua_xor32(volatile uint32_t *p, uint32_t v)
 jmp_buf *recomp_setjmp_slot(uint32_t buf_va);
 int recomp_guest_longjmp(uint32_t buf_va, uint32_t value);
 
+/* Exception-frame anchors (XBA-112, src/kernel/xbox_seh.h).
+ *
+ * A function whose exception frame has resume targets (__except blocks,
+ * catch continuations) takes a native setjmp right after it registers the
+ * frame; a handler's jump to one of those targets becomes a longjmp back to
+ * it plus a goto. The BSD-style _setjmp on POSIX hosts: it does not save the
+ * signal mask, which on bionic (Android) would be a sigprocmask system call
+ * on every call of such a function. tools/recomp --no-seh-anchors leaves the
+ * anchors out. */
+#if defined(_WIN32)
+#  define RECOMP_SETJMP(jb)     setjmp(jb)
+#else
+#  define RECOMP_SETJMP(jb)     _setjmp(jb)
+#endif
+#ifndef RECOMP_SEH_DESC_DEFINED
+#define RECOMP_SEH_DESC_DEFINED
+typedef struct recomp_seh_desc {
+    uint32_t        func_va;
+    uint32_t        n_resume;
+    const uint32_t *resume;
+} recomp_seh_desc;
+#endif
+jmp_buf *recomp_seh_anchor(uint32_t reg, uint32_t ebp, const recomp_seh_desc *d);
+
 /* EFLAGS.DF, and the signed step the string instructions take because of it.
  *
  * `cld`/`std` used to lift to a comment and every string instruction stepped

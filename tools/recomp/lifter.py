@@ -4863,6 +4863,11 @@ def lift_basic_block(lifter, bb, flag_state=None):
                     stmts.append(f"_flags = ({zf[0]}) ? 1 : 0;"
                                  " /* ZF in: a zero count keeps it */")
         stmts.extend(results)
+        # An exception frame just became live: take its resume anchor
+        # (translator.seh_anchor_lines, XBA-112).
+        if (getattr(lifter, "seh_anchor_lines", None)
+                and curr.address == lifter.seh_anchor_after):
+            stmts.extend(lifter.seh_anchor_lines)
 
         # Track flag-setting instructions
         if (curr.mnemonic in _BARE_STRING_COMPARES
