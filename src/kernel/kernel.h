@@ -964,6 +964,11 @@ int     xbox_IrqSafePointsOn(void);
 void    xbox_IrqSetHandler(int line, void (*run)(void));
 int     xbox_IrqPost(int line);
 void    xbox_IrqSafePoint(void);
+/* A device model that fell behind its guest (see xbox_OhciCatchUp): the hook
+ * runs on a guest thread at its release point, before the pending lines are
+ * read, and raises its own line there with xbox_IrqRaiseHere. */
+void    xbox_IrqSetCatchUpHook(void (*hook)(void));
+void    xbox_IrqRaiseHere(int line);
 /* The [IRQ] summary line, once per 600 vblanks when anything was posted. */
 void    xbox_IrqReport(void);
 /* The thread holding the gate (0 when free), for the ungated-delivery logs. */

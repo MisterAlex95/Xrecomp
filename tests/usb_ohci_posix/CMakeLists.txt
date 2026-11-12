@@ -26,3 +26,8 @@ target_link_libraries(usb_ohci_posix_test PRIVATE xboxrecomp)
 enable_testing()
 add_test(NAME usb_ohci_posix_test COMMAND usb_ohci_posix_test ${TEST_XBE})
 set_tests_properties(usb_ohci_posix_test PROPERTIES SKIP_RETURN_CODE 77)
+# The same run with the guest-side catch-up switched off (its A/B switch):
+# the list and the USB line must be left to the controller thread.
+add_test(NAME usb_ohci_posix_catchup_off COMMAND usb_ohci_posix_test ${TEST_XBE})
+set_tests_properties(usb_ohci_posix_catchup_off PROPERTIES SKIP_RETURN_CODE 77
+                     ENVIRONMENT RECOMP_OHCI_CATCHUP=0)

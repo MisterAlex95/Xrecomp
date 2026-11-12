@@ -269,5 +269,6 @@ See [xbox_input](../../src/input/README.md).
 | `RECOMP_USB_PADS=1..4` | 1 | Number of pads plugged. | `ohci.c` |
 | `RECOMP_USB_PORT=0..3` | 2 with four ports | Root port the pad appears on. | `ohci.c` |
 | `RECOMP_USB_HC`, `RECOMP_USB_NDP` | model default | Host-controller selection and port count. | `ohci.c` |
+| `RECOMP_OHCI_CATCHUP` | on (needs the gate and safe points) | When the controller thread is more than 16 ms overdue and the driver has written ControlListFilled or BulkListFilled, a guest thread walks the lists at its release point and runs the USB interrupt there (log: `[OHCI0] controller thread N ms overdue; lists serviced on the guest thread`). Keeps a starved host thread from letting per-frame control transfers (rumble) pile up past XAPI's descriptor budget (KOTOR, K-8c). `0` restores the controller thread alone; an A/B switch kept for one release. | `ohci.c`, `kernel_hal.c` |
 | `RECOMP_USB_TRACE`, `RECOMP_USB_STATS` | off | Controller trace; completions every 5 s. | `ohci.c` |
 | `RECOMP_PAD_LIVE=<file>`, `RECOMP_PAD_SCRIPT`, `RECOMP_PAD_PRESS` | off | Test input: a file read live, a script, or a periodic press. | `usb_gamepad.c` |

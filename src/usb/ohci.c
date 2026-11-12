@@ -13,6 +13,7 @@
 #include "../kernel/xbox_memory_layout.h"
 #include "../kernel/kernel.h"
 #include "usb_gamepad.h"
+#include "../platform/host_time.h"
 #include "../input/xinput_xbox.h"   /* xbox_InputSetState: rumble */
 
 #include <stdio.h>
@@ -237,6 +238,42 @@ static uint64_t ohci_read(void *dev, uint32_t off, int size)
     return v;
 }
 
+/* The controller thread against the guest it serves.
+ *
+ * On the console the host controller is hardware: it retires a control
+ * transfer within a frame or two whatever the CPU is doing. Here it is a
+ * host thread on a 4 ms sleep, and a loaded host has left that sleep
+ * overrunning by 0.3 to 1.3 s (measured, ten titles running on ten cores)
+ * while the guest thread went on at full speed. KOTOR sends its rumble report
+ * every frame without looking at the previous one's status, which is fine on
+ * the console; here nine of them piled up, XAPI's control descriptor budget
+ * (36, four a request) ran out, the tenth left its URB waiting on the
+ * driver's queue and the eleventh linked that same URB behind itself. When
+ * the controller thread came back and retired a descriptor, the driver's
+ * queue walk (0x003E5071) looped on the URB for ever at DISPATCH_LEVEL.
+ *
+ * So the lists are also serviced from the guest's side: a driver that has
+ * written ControlListFilled or BulkListFilled and finds the controller
+ * thread overdue has them walked at its next release point
+ * (xbox_OhciCatchUp, called by kernel_hal.c), and the interrupt that follows
+ * runs there too. s_list_busy keeps the two walkers apart; the controller
+ * thread never waits for it. */
+static volatile int      s_list_kick;       /* CLF or BLF written, not walked yet */
+static volatile int      s_list_busy;       /* a thread is walking the lists      */
+static volatile uint64_t s_tick_ns;         /* the controller thread's last pass  */
+static volatile long     s_catchups;
+#define OHCI_OVERDUE_NS  (4ull * OHCI_TICK_MS * 1000000ull)
+
+static int list_try(void)
+{
+    return !__atomic_exchange_n(&s_list_busy, 1, __ATOMIC_ACQ_REL);
+}
+
+static void list_leave(void)
+{
+    __atomic_store_n(&s_list_busy, 0, __ATOMIC_RELEASE);
+}
+
 static void ohci_write(void *dev, uint32_t off, uint64_t val, int size)
 {
     OhciController *hc = (OhciController *)dev;
@@ -266,6 +303,8 @@ static void ohci_write(void *dev, uint32_t off, uint64_t val, int size)
          * anyone ever saw of this file. Atomic: the controller thread
          * clears the list-filled bits while the driver sets them. */
         __atomic_fetch_or(r, v, __ATOMIC_ACQ_REL);
+        if (v & 0x06u)                  /* CLF, BLF: see xbox_OhciCatchUp */
+            __atomic_store_n(&s_list_kick, 1, __ATOMIC_RELEASE);
         if (*r & CS_HCR) {
             *r &= ~CS_HCR;
             hc->reg[HcControl / 4] &= ~0xC0u;    /* back to UsbReset state  */
@@ -1170,6 +1209,139 @@ static void ohci_reset(OhciController *hc, uint32_t base, int index)
  * the interrupt it has been waiting for. Repeat delivery and the transfer
  * lists come after that answer, not before it.
  */
+/* One service of the three lists: what retires goes on one done queue.
+ * Returns 0 when the driver still owes an acknowledgement and nothing was
+ * walked. The caller holds s_list_busy. */
+static int ohci_service_lists(OhciController *hc, uint32_t control)
+{
+    uint32_t pass_done = 0;     /* this pass's done queue, newest first */
+
+    /* Be the bus master. ControlListEnable in HcControl says the driver
+     * wants the list walked; ControlListFilled says it has put something
+     * on it. Walking on the tick rather than only when CLF is written
+     * costs a read of a guest dword and means a descriptor queued without
+     * rewriting CLF is still moved -- which is legal, and drivers do it. */
+    /* Not while the driver still owes us an acknowledgement.
+     *
+     * HccaDoneHead belongs to the driver from the moment WDH is set
+     * until it clears it. Writing a second done list over the first
+     * loses every descriptor on it -- the driver walks a chain whose
+     * links now point into the new list, and the structures it keeps
+     * alongside go with it. At a twenty-millisecond tick that overlap
+     * was rare enough to look like bad luck; at four it corrupted the
+     * host controller's pending list within a second or two of the
+     * gamepad's reports starting. Leaving the descriptors on their
+     * endpoints for another pass costs a few milliseconds of latency
+     * and is what the controller is specified to do. */
+    if (hc->reg[HcInterruptStatus / 4] & INTR_WDH)
+        return 0;
+
+    /* Before the walk: a list-filled bit written while it runs is the next
+     * walk's. */
+    __atomic_store_n(&s_list_kick, 0, __ATOMIC_RELEASE);
+
+    /* PeriodicListEnable, bit 2 of HcControl. */
+    if (control & 0x04u) {
+        if (!hc->ple_seen) {
+            hc->ple_seen = 1;
+            fprintf(stderr, "  [OHCI%d] periodic list enabled "
+                    "(HcControl=%08X HCCA=%08X)\n",
+                    hc->index, control, hc->reg[HcHCCA / 4]);
+            fflush(stderr);
+        }
+        ohci_run_periodic_list(hc, &pass_done);
+    }
+
+    /* BulkListEnable, bit 5. Nothing on this device uses bulk, but the
+     * list is walked the same way and a driver that puts a transfer
+     * there is owed the same service. */
+    if ((control & 0x20u)
+     && guest_ok(hc->reg[HcBulkHeadED / 4] & ED_PTR_MASK, 16)) {
+        if (ohci_walk_eds(hc, hc->reg[HcBulkHeadED / 4] & ED_PTR_MASK,
+                          &pass_done))
+            __atomic_fetch_and(&hc->reg[HcCommandStatus / 4], ~0x04u,
+                               __ATOMIC_ACQ_REL);   /* BLF consumed */
+    }
+
+    if ((control & 0x10u)
+     && guest_ok(hc->reg[HcControlHeadED / 4] & ED_PTR_MASK, 16)) {
+        if (ohci_run_control_list(hc, &pass_done))
+            __atomic_fetch_and(&hc->reg[HcCommandStatus / 4], ~0x02u,
+                               __ATOMIC_ACQ_REL);   /* CLF consumed */
+    }
+
+    /* One done queue per pass, covering all three lists.
+     *
+     * The lists used to publish one after another, so the control list
+     * wrote HccaDoneHead straight over what the periodic list had just
+     * put there. That stayed invisible until a title used both at once:
+     * Burnout 3 sends its pad a rumble report (SET_REPORT, 21 09) on the
+     * control pipe every frame once its menus are up, the input report
+     * completing in the same pass was lost, and the driver -- which
+     * re-arms the interrupt endpoint from that completion -- stopped
+     * polling the pad. A real controller accumulates everything that
+     * retires in a frame and writes the queue back once; so does this. */
+    if (pass_done)
+        ohci_publish_done(hc, pass_done);
+    return 1;
+}
+
+static void ohci_isr_on_holder(void);
+
+/* The guest's side of the lists (see s_list_kick). Called by kernel_hal.c on
+ * a guest thread at its release point, with safe points on. Nothing happens
+ * unless the driver has filled a list and the controller thread is four
+ * ticks overdue, so a host that schedules the controller thread on time
+ * never comes past the second test. The frame clock stays the controller
+ * thread's. */
+void xbox_OhciCatchUp(void)
+{
+    static int on = -1;
+    OhciController *hc;
+    uint32_t control, enable;
+
+    if (!__atomic_load_n(&s_list_kick, __ATOMIC_RELAXED))
+        return;
+    /* RECOMP_OHCI_CATCHUP=0: the controller thread alone, as before (an A/B
+     * switch for one release). */
+    if (on < 0) {
+        const char *v = getenv("RECOMP_OHCI_CATCHUP");
+        on = !(v && *v == '0');
+    }
+    if (!on)
+        return;
+    if (xbox_HostNowNs() - __atomic_load_n(&s_tick_ns, __ATOMIC_RELAXED)
+        < OHCI_OVERDUE_NS)
+        return;
+    hc = &s_hc[s_device_hc];
+    control = hc->reg[HcControl / 4];
+    enable  = hc->reg[HcInterruptEnable / 4];
+    /* Not operational, or the driver's ISR has masked the controller and its
+     * DPC has not run yet: that DPC is drained at this same release point,
+     * and the next one comes back here. */
+    if ((control & 0xC0u) != 0x80u || !(enable & INTR_MIE))
+        return;
+    if (!list_try())
+        return;
+    ohci_service_lists(hc, control);
+    list_leave();
+    if (hc->reg[HcInterruptStatus / 4] & enable & 0x7Fu) {
+        long n = __atomic_add_fetch(&s_catchups, 1, __ATOMIC_RELAXED);
+        if (n <= 3 || (n & (n - 1)) == 0) {
+            fprintf(stderr, "  [OHCI%d] controller thread %llu ms overdue; "
+                    "lists serviced on the guest thread (%ld so far)\n",
+                    hc->index, (unsigned long long)
+                    ((xbox_HostNowNs() - __atomic_load_n(&s_tick_ns,
+                                                         __ATOMIC_RELAXED))
+                     / 1000000ull), n);
+            fflush(stderr);
+        }
+        s_posting_hc = hc->index;
+        xbox_IrqSetHandler(XBOX_IRQ_OHCI, ohci_isr_on_holder);
+        xbox_IrqRaiseHere(XBOX_IRQ_OHCI);
+    }
+}
+
 static DWORD WINAPI ohci_thread(LPVOID unused)
 {
     /* This thread calls recompiled code, so it needs what any thread running
@@ -1203,13 +1375,15 @@ static DWORD WINAPI ohci_thread(LPVOID unused)
         }
         g_fs_base = tib;
     }
+    __atomic_store_n(&s_tick_ns, xbox_HostNowNs(), __ATOMIC_RELAXED);
+    xbox_IrqSetCatchUpHook(xbox_OhciCatchUp);
 
     for (;;) {
         OhciController *hc = &s_hc[s_device_hc];
         uint32_t control, enable, status;
-        uint32_t pass_done = 0;     /* this pass's done queue, newest first */
 
         Sleep(OHCI_TICK_MS);
+        __atomic_store_n(&s_tick_ns, xbox_HostNowNs(), __ATOMIC_RELAXED);
         control = hc->reg[HcControl / 4];
         enable  = hc->reg[HcInterruptEnable / 4];
 
@@ -1325,71 +1499,13 @@ static DWORD WINAPI ohci_thread(LPVOID unused)
             }
         }
 
-        /* Be the bus master. ControlListEnable in HcControl says the driver
-         * wants the list walked; ControlListFilled says it has put something
-         * on it. Walking on the tick rather than only when CLF is written
-         * costs a read of a guest dword and means a descriptor queued without
-         * rewriting CLF is still moved -- which is legal, and drivers do it. */
-        /* Not while the driver still owes us an acknowledgement.
-         *
-         * HccaDoneHead belongs to the driver from the moment WDH is set
-         * until it clears it. Writing a second done list over the first
-         * loses every descriptor on it -- the driver walks a chain whose
-         * links now point into the new list, and the structures it keeps
-         * alongside go with it. At a twenty-millisecond tick that overlap
-         * was rare enough to look like bad luck; at four it corrupted the
-         * host controller's pending list within a second or two of the
-         * gamepad's reports starting. Leaving the descriptors on their
-         * endpoints for another pass costs a few milliseconds of latency
-         * and is what the controller is specified to do. */
-        if (hc->reg[HcInterruptStatus / 4] & INTR_WDH)
-            goto deliver;
-
-        /* PeriodicListEnable, bit 2 of HcControl. */
-        if (control & 0x04u) {
-            if (!hc->ple_seen) {
-                hc->ple_seen = 1;
-                fprintf(stderr, "  [OHCI%d] periodic list enabled "
-                        "(HcControl=%08X HCCA=%08X)\n",
-                        hc->index, control, hc->reg[HcHCCA / 4]);
-                fflush(stderr);
-            }
-            ohci_run_periodic_list(hc, &pass_done);
+        /* The lists, unless the guest's side is walking them right now
+         * (xbox_OhciCatchUp): then this pass has nothing left to do. */
+        if (list_try()) {
+            ohci_service_lists(hc, control);
+            list_leave();
         }
 
-        /* BulkListEnable, bit 5. Nothing on this device uses bulk, but the
-         * list is walked the same way and a driver that puts a transfer
-         * there is owed the same service. */
-        if ((control & 0x20u)
-         && guest_ok(hc->reg[HcBulkHeadED / 4] & ED_PTR_MASK, 16)) {
-            if (ohci_walk_eds(hc, hc->reg[HcBulkHeadED / 4] & ED_PTR_MASK,
-                              &pass_done))
-                __atomic_fetch_and(&hc->reg[HcCommandStatus / 4], ~0x04u,
-                                   __ATOMIC_ACQ_REL);   /* BLF consumed */
-        }
-
-        if ((control & 0x10u)
-         && guest_ok(hc->reg[HcControlHeadED / 4] & ED_PTR_MASK, 16)) {
-            if (ohci_run_control_list(hc, &pass_done))
-                __atomic_fetch_and(&hc->reg[HcCommandStatus / 4], ~0x02u,
-                                   __ATOMIC_ACQ_REL);   /* CLF consumed */
-        }
-
-        /* One done queue per pass, covering all three lists.
-         *
-         * The lists used to publish one after another, so the control list
-         * wrote HccaDoneHead straight over what the periodic list had just
-         * put there. That stayed invisible until a title used both at once:
-         * Burnout 3 sends its pad a rumble report (SET_REPORT, 21 09) on the
-         * control pipe every frame once its menus are up, the input report
-         * completing in the same pass was lost, and the driver -- which
-         * re-arms the interrupt endpoint from that completion -- stopped
-         * polling the pad. A real controller accumulates everything that
-         * retires in a frame and writes the queue back once; so does this. */
-        if (pass_done)
-            ohci_publish_done(hc, pass_done);
-
-    deliver:
         /* The frame clock, at the end of the pass.
          *
          * After the done queue is published, not before the walk: StartOfFrame

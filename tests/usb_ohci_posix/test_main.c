@@ -8,13 +8,23 @@
  * aperture stayed plain zeroed memory and xbox_OhciHandleMmio returned 0, so
  * a title's USB driver found no controller and no pad.
  *
+ * Then the guest's side of the lists (xbox_OhciCatchUp, K-8c): a driver
+ * that has written ControlListFilled while the controller thread is overdue
+ * has the control list walked and the USB line raised from its own thread.
+ * The synthetic image has no TLS, so the controller thread has no TIB and
+ * stops at once; its tick never runs and is therefore always overdue here.
+ * Run a second time with RECOMP_OHCI_CATCHUP=0 (a second CTest entry), the
+ * same calls must leave the list and the line alone.
+ *
  * A host without a trapped-MMIO decoder (anything but POSIX arm64 or Linux
  * x86-64 here) keeps the model off by design; the test checks that it says
  * so and exits 77.
  */
 #include "xbox_memory_layout.h"
+#include "kernel.h"
 #include "ohci.h"
 
+#include <pthread.h>
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -67,6 +77,105 @@ static unsigned char *load_file(const char *path, size_t *len)
     return buf;
 }
 
+/* ── The guest's side of the lists ─────────────────────────────────── */
+
+#define CU_ED      0x00400000u
+#define CU_TD0     0x00400100u
+#define CU_TD1     0x00400110u
+#define CU_HCCA    0x00401000u
+
+static volatile long s_line_runs;
+
+static void count_line(void)
+{
+    __atomic_add_fetch(&s_line_runs, 1, __ATOMIC_RELAXED);
+}
+
+/* A guest thread's raise and lower: the lower's release point runs what is
+ * pending on the USB line. */
+static void *release_point_thread(void *unused)
+{
+    int saved;
+
+    (void)unused;
+    xbox_DpcMarkGuestThread();
+    saved = xbox_IrqlEnterInterrupt(DISPATCH_LEVEL);
+    xbox_IrqlLeaveInterrupt(saved);
+    return NULL;
+}
+
+static long run_release_point(void)
+{
+    pthread_t t;
+    long before = s_line_runs;
+
+    xbox_IrqSetHandler(XBOX_IRQ_OHCI, count_line);
+    if (pthread_create(&t, NULL, release_point_thread, NULL) == 0)
+        pthread_join(t, NULL);
+    return s_line_runs - before;
+}
+
+static void catch_up(volatile uint32_t *hc0)
+{
+    uint32_t *mem = (uint32_t *)s_base;
+    const char *v = getenv("RECOMP_OHCI_CATCHUP");
+    int on = !(v && *v == '0');
+    uint32_t head, done, status;
+    long runs;
+    char detail[128];
+
+    printf("\n  catch-up %s (RECOMP_OHCI_CATCHUP=%s)\n", on ? "on" : "off",
+           v ? v : "unset");
+
+    /* One control ED for a function address no device has (so the transfer
+     * completes without a pad behind it), one IN descriptor queued ahead of
+     * the dummy tail. */
+    memset(mem + CU_ED / 4, 0, 0x2000);
+    mem[CU_ED / 4 + 0] = 0x7Fu;                 /* FA 127, endpoint 0     */
+    mem[CU_ED / 4 + 1] = CU_TD1;                /* TailP                  */
+    mem[CU_ED / 4 + 2] = CU_TD0;                /* HeadP                  */
+    mem[CU_ED / 4 + 3] = 0;                     /* NextED                 */
+    mem[CU_TD0 / 4 + 0] = (2u << 19) | (0xFu << 28);   /* IN, not accessed */
+    mem[CU_TD0 / 4 + 2] = CU_TD1;
+    mem[CU_TD1 / 4 + 2] = 0;
+
+    hc0[0x18 / 4] = CU_HCCA;                    /* HcHCCA                 */
+    hc0[0x20 / 4] = CU_ED;                      /* HcControlHeadED        */
+    hc0[0x10 / 4] = 0x80000002u;                /* enable MIE | WDH       */
+    hc0[0x04 / 4] = 0x00000090u;                /* operational, CLE       */
+
+    /* Nothing filled yet: nothing to catch up on. */
+    xbox_OhciCatchUp();
+    head = mem[CU_ED / 4 + 2] & ~0xFu;
+    snprintf(detail, sizeof detail, "HeadP 0x%08X", head);
+    check(head == CU_TD0, "no list filled: the guest side walks nothing",
+          detail);
+
+    hc0[0x08 / 4] = 0x00000002u;                /* ControlListFilled      */
+    xbox_OhciCatchUp();
+    head   = mem[CU_ED / 4 + 2] & ~0xFu;
+    done   = mem[(CU_HCCA + 0x84) / 4];
+    status = hc0[0x0C / 4];
+    runs   = run_release_point();
+    snprintf(detail, sizeof detail,
+             "HeadP 0x%08X done 0x%08X status 0x%08X line runs %ld",
+             head, done, status, runs);
+    if (on) {
+        check(head == CU_TD1 && done == CU_TD0,
+              "CLF with the controller overdue: the list is walked", detail);
+        check((status & 0x02u) && !(hc0[0x08 / 4] & 0x02u),
+              "the done queue is written back, CLF consumed", detail);
+        check(runs == 1,
+              "the USB line was raised and runs at the release point",
+              detail);
+    } else {
+        check(head == CU_TD0 && done == 0 && !(status & 0x02u),
+              "RECOMP_OHCI_CATCHUP=0: the list is left to the controller",
+              detail);
+        check(runs == 0, "RECOMP_OHCI_CATCHUP=0: no line raised", detail);
+    }
+}
+
 int main(int argc, char **argv)
 {
     size_t xbe_len = 0;
@@ -81,8 +190,10 @@ int main(int argc, char **argv)
                 argv[0]);
         return 2;
     }
-    /* The model is opt-in. */
+    /* The model is opt-in. The gate puts the safe points on, which the
+     * catch-up needs to raise its line. */
     setenv("RECOMP_USB", "1", 1);
+    setenv("RECOMP_DISPATCH_GATE", "1", 1);
     if (!xbox_MemoryLayoutInit(xbe, xbe_len)) {
         fprintf(stderr, "xbox_MemoryLayoutInit failed\n");
         return 2;
@@ -150,6 +261,8 @@ int main(int argc, char **argv)
                  (unsigned long long)q);
         check((uint32_t)q == 0x10u,
               "an 8-byte read is two register reads", detail);
+
+        catch_up(hc0);
     }
     check(!s_unhandled, "no access fell through to the crash path", NULL);
     xbox_OhciReport();

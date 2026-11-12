@@ -455,6 +455,35 @@ void xbox_IrqSetPostHook(void (*hook)(int line))
     s_irq_post_hook = hook;
 }
 
+/* A device model's controller thread is a host thread, and the host may not
+ * run it for hundreds of milliseconds while the guest thread that feeds the
+ * device keeps running: on the console the device is hardware and advances
+ * whenever the CPU does. A model registers a catch-up routine here; it runs
+ * on a guest thread at its release point (below DISPATCH_LEVEL, the gate
+ * given back, outside any ISR or DPC), does the device's overdue work and
+ * raises the line with xbox_IrqRaiseHere. The release point then runs the
+ * ISR and the DPC it queues on this thread, as it runs any posted line. */
+static void (*volatile s_irq_catchup)(void);
+
+void xbox_IrqSetCatchUpHook(void (*hook)(void))
+{
+    s_irq_catchup = hook;
+}
+
+/* From a catch-up routine only: leave the line for the release point that
+ * called it. */
+void xbox_IrqRaiseHere(int line)
+{
+    LONG bit = 1L << line;
+
+    if (line < 0 || line >= XBOX_IRQ_LINES || !xbox_IrqSafePointsOn())
+        return;
+    if (!(InterlockedOr(&s_irq_pending, bit) & bit)) {
+        s_irq_post_ns[line] = xbox_HostNowNs();
+        InterlockedIncrement(&s_irq.posted[line]);
+    }
+}
+
 void xbox_IrqSetReleaseHook(void (*hook)(void))
 {
     s_irq_release_hook = hook;
@@ -643,7 +672,15 @@ static void irq_release_point(void)
      * unlock is seen. A poster that tried the gate in that gap and found it
      * held would then post a bit this check had already missed, and the
      * line would wait for the next holder's safe point. */
-    LONG pending = InterlockedCompareExchange(&s_irq_pending, 0, 0);
+    LONG pending;
+
+    /* A device model behind its guest catches up here, before the lines are
+     * read: what it raises is run just below. Guest threads only, below
+     * DISPATCH_LEVEL and outside a routine this thread is already running. */
+    if (s_irq_catchup && t_guest_thread && !t_in_isr && !t_in_dpc
+        && g_current_irql < DISPATCH_LEVEL && s_irq_mode)
+        s_irq_catchup();
+    pending = InterlockedCompareExchange(&s_irq_pending, 0, 0);
 
     if ((!pending && !(t_guest_thread && xbox_DpcPending()))
         || t_in_isr || g_current_irql > DISPATCH_LEVEL)

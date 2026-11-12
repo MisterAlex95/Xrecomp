@@ -20,6 +20,8 @@
  *  - a post that lands inside the lower that gives the gate back, after its
  *    safe point and before the leave: the release point runs it on the
  *    holder once the new level is written, not at the poster's next try;
+ *  - a device model's catch-up routine runs at a guest thread's release
+ *    point and the line it raises there runs on that thread;
  *  - a holder that reaches no safe point: logged at irq_safe_ms, never run;
  *    with irq_safe_force=1 delivered beside it after irq_safe_ms;
  *  - 100k rounds of edits and random posts leave the list intact.
@@ -496,6 +498,57 @@ static void lower_window(void)
     check(after[1] == PASSIVE_LEVEL, "lower window: the holder ends at its new level");
 }
 
+/* A device model's catch-up routine (xbox_IrqSetCatchUpHook): called at a
+ * guest thread's release point, and the line it raises there runs on that
+ * thread before the lower returns. Never on a thread that runs no guest
+ * code. */
+static volatile LONG s_catchup_calls;
+
+static void catchup_hook(void)
+{
+    InterlockedIncrement(&s_catchup_calls);
+    xbox_IrqRaiseHere(XBOX_IRQ_OHCI);
+}
+
+static DWORD WINAPI catchup_thread(LPVOID p)
+{
+    int *out = (int *)p, saved;
+
+    g_fs_base = 0;
+    if (out[0])
+        xbox_DpcMarkGuestThread();
+    saved = xbox_IrqlEnterInterrupt(DISPATCH_LEVEL);
+    out[1] = (int)s_catchup_calls;          /* none while raised */
+    xbox_IrqlLeaveInterrupt(saved);
+    out[2] = (int)s_catchup_calls;
+    out[3] = (int)s_ohci_runs;
+    out[4] = xbox_IrqlCurrent();
+    return 0;
+}
+
+static void catch_up(void)
+{
+    int guest[5] = {1, -1, -1, -1, -1}, host[5] = {0, -1, -1, -1, -1};
+    HANDLE t;
+
+    reset_counts();
+    s_catchup_calls = 0;
+    xbox_IrqSetCatchUpHook(catchup_hook);
+    t = CreateThread(NULL, 0, catchup_thread, host, 0, NULL);
+    WaitForSingleObject(t, 10000);
+    CloseHandle(t);
+    check(host[2] == 0 && host[3] == 0,
+          "catch-up: not called on a thread that runs no guest code");
+    t = CreateThread(NULL, 0, catchup_thread, guest, 0, NULL);
+    WaitForSingleObject(t, 10000);
+    CloseHandle(t);
+    xbox_IrqSetCatchUpHook(NULL);
+    check(guest[1] == 0 && guest[2] == 1,
+          "catch-up: called once, at the guest thread's release point");
+    check(guest[3] == 1 && guest[4] == PASSIVE_LEVEL,
+          "catch-up: the line it raised ran there, the thread ends at its level");
+}
+
 static void wait_and_log(void)
 {
     Holder h = {0};
@@ -629,6 +682,7 @@ int main(void)
     coalescing();
     lost_post();
     lower_window();
+    catch_up();
     wait_and_log();
     stress();
     printf("%s\n", failures ? "FAILED" : "all passed");
