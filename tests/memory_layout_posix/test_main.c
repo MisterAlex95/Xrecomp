@@ -398,6 +398,93 @@ int main(int argc, char **argv)
         free(tls);
     }
 
+    /*
+     * 8. A map above 64 MB keeps the contiguous window (XBA-103).
+     *
+     * Fable asked for a 1 GB map (xbox_SetMapSize) and, on the desktop
+     * layout, lost the contiguous window: that layout reserves only base +
+     * mirrors, which a map past 64 MB caps at 2 GB, so the window at guest
+     * 0x80000000 has to be mapped at the host address right above the span,
+     * and whatever the host already put there wins. On the Mac it was the
+     * malloc zone (Guard Malloc made it plain: a fault at guest 0x80005000 in
+     * xbox_ContiguousAllocEx). The host neighbour is staged here: reserve
+     * the 2 GB the span will take plus one host page above it, give the
+     * 2 GB back and keep that page. Placement is top-down on Linux, so the
+     * span lands in the hole and the window on the page.
+     *
+     * The default layout holds the whole 4 GB window instead, carves the
+     * contiguous window out of it, and must keep it. The old layout
+     * (RECOMP_GUEST_WINDOW=0) is run too, for the record: an [info] line
+     * says whether the staging reproduced its loss, not a check, since the
+     * placement it relies on is the host's.
+     */
+    {
+        const size_t GB = (size_t)1 << 30;
+        const size_t span = 2 * GB;
+        size_t page = (size_t)host_page;
+        static const char *const modes[2] = { "0", NULL };   /* old, default */
+
+        for (int mode = 0; mode < 2; mode++) {
+            unsigned char *r = mmap(NULL, span + page, PROT_NONE,
+                                    MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE,
+                                    -1, 0);
+            unsigned char *neighbour = r == MAP_FAILED ? NULL : r + span;
+            BOOL up;
+
+            if (!neighbour) {
+                check(0, "stage a host mapping above a 2 GB hole", "mmap failed");
+                break;
+            }
+            munmap(r, span);                       /* the hole; the page stays */
+            if (modes[mode])
+                setenv("RECOMP_GUEST_WINDOW", modes[mode], 1);
+            else
+                unsetenv("RECOMP_GUEST_WINDOW");
+            xbox_SetMapSize(GB);
+            up = xbox_MemoryLayoutInit(xbe, n);
+            if (up) {
+                unsigned char *b = (unsigned char *)xbox_GetMemoryBase();
+                unsigned char *window = b + 0x80000000u;
+                int staged = window <= neighbour && neighbour < window + 0x4000000u;
+                unsigned char got = 0;
+                int mapped = read_byte_in_child(window + 0x5000, &got);
+                char d[160];
+
+                snprintf(d, sizeof d, "base %p, window %p, neighbour %p%s", (void *)b,
+                         (void *)window, (void *)neighbour,
+                         staged ? "" : " (the span went elsewhere)");
+                if (!modes[mode]) {
+                    /* Only once the window is known to be there: the
+                     * allocator writes the block, and on the old layout
+                     * that write is the crash this section is about (a
+                     * core of a process holding a 5 GB window is tens of
+                     * GB). */
+                    uint32_t c = 0;
+                    check(mapped, "1 GB map: the contiguous window is mapped", d);
+                    if (mapped)
+                        c = xbox_ContiguousAlloc(0x10000, 0x1000);
+                    if (mapped && c) {
+                        *(volatile uint32_t *)(b + c + 0x5000) = 0xC0DE1030u;
+                        check(*(volatile uint32_t *)(b + c + 0x5000) == 0xC0DE1030u,
+                              "1 GB map: a contiguous block is writable", NULL);
+                    }
+                    check(xbox_GuestWindowHeld(),
+                          "the 4 GB guest window is held by default", NULL);
+                } else {
+                    printf("  [info] old layout, 1 GB map, staged neighbour %s: "
+                           "contiguous window %s (%s)\n", staged ? "hit" : "missed",
+                           mapped ? "mapped" : "LOST", d);
+                }
+                xbox_MemoryLayoutShutdown();
+            } else {
+                check(0, "init with a 1 GB map", NULL);
+            }
+            xbox_SetMapSize(0);
+            unsetenv("RECOMP_GUEST_WINDOW");
+            munmap(neighbour, page);
+        }
+    }
+
     printf("\n%d failure(s)\n", failures);
     free(xbe);
     return failures ? 1 : 0;
