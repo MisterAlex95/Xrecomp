@@ -11,8 +11,11 @@
  * Then the guest's side of the lists (xbox_OhciCatchUp, K-8c): a driver
  * that has written ControlListFilled while the controller thread is overdue
  * has the control list walked and the USB line raised from its own thread.
- * The synthetic image has no TLS, so the controller thread has no TIB and
- * stops at once; its tick never runs and is therefore always overdue here.
+ * The synthetic image has no TLS and the test sets RECOMP_TIB_PER_THREAD=0,
+ * so the controller thread gets no TIB and stops at once; its tick never
+ * runs and is therefore always overdue here. (Since XBA-113 a no-TLS image
+ * gets a TIB per thread by default; the controller thread would then run
+ * and race the catch-up this checks.)
  * Run a second time with RECOMP_OHCI_CATCHUP=0 (a second CTest entry), the
  * same calls must leave the list and the line alone.
  *
@@ -182,6 +185,10 @@ int main(int argc, char **argv)
     unsigned char *xbe;
     struct sigaction sa;
     char detail[96];
+
+    /* Before the layout reads it: keep the controller thread from running
+     * (see the comment at the top). */
+    setenv("RECOMP_TIB_PER_THREAD", "0", 1);
 
     setvbuf(stdout, NULL, _IONBF, 0);
     xbe = argc > 1 ? load_file(argv[1], &xbe_len) : NULL;
