@@ -391,6 +391,31 @@ int main(int argc, char **argv)
                     check(sb == tib + 0x40 + 20 && slot0 == sb
                           && memcmp(mem + tib + 0x44, "ATA!", 4) == 0,
                           "fs:[4] sits above a copy of the TLS template", d);
+
+                    /* XBA-113: fs:[0x28] is the thread's KTHREAD. The main
+                     * one is the loader's, with the console's fields; a new
+                     * TIB names one of its own, sharing the main TlsData. */
+                    {
+                        uint32_t mkt, nkt, proc, mtls, ntls, mid, nid;
+                        char k[200];
+                        memcpy(&mkt, mem + XBOX_TIB_MAIN + 0x28, 4);
+                        memcpy(&nkt, mem + tib + 0x28, 4);
+                        memcpy(&proc, mem + mkt + 0x44, 4);
+                        memcpy(&mtls, mem + mkt + 0x28, 4);
+                        memcpy(&ntls, mem + nkt + 0x28, 4);
+                        memcpy(&mid, mem + mkt + 0x12C, 4);
+                        memcpy(&nid, mem + nkt + 0x12C, 4);
+                        snprintf(k, sizeof k, "main kt 0x%X type %u proc 0x%X base %u;"
+                                 " new kt 0x%X type %u tls 0x%X/0x%X id %u/%u",
+                                 mkt, mem[mkt], proc, proc ? mem[proc + 0x18] : 0,
+                                 nkt, mem[nkt], mtls, ntls, mid, nid);
+                        check(mkt && mem[mkt] == 6 && proc == xbox_GuestKprocess()
+                              && proc && mem[proc + 0x18] == 8 && mem[mkt + 0x32] == 8,
+                              "the main fs:[0x28] is a KTHREAD with the title's KPROCESS", k);
+                        check(nkt && nkt != mkt && mem[nkt] == 6 && ntls == mtls
+                              && nid && nid != mid,
+                              "a new TIB names its own KTHREAD, same TlsData, own id", k);
+                    }
                 }
                 xbox_MemoryLayoutShutdown();
             }
@@ -482,6 +507,41 @@ int main(int argc, char **argv)
             xbox_SetMapSize(0);
             unsetenv("RECOMP_GUEST_WINDOW");
             munmap(neighbour, page);
+        }
+    }
+
+    /*
+     * 9. An image without TLS gets a TIB per thread too (XBA-113,
+     *    RECOMP_TIB_PER_THREAD, on unless set to 0): its own SEH head, IRQL
+     *    byte and KTHREAD, with fs:[4] the main thread's. It used to get
+     *    none, and the timer thread, which needs one, ran no DPCs.
+     */
+    {
+        const char *sw = getenv("RECOMP_TIB_PER_THREAD");
+        BOOL ok8 = xbox_MemoryLayoutInit(xbe, n);
+        check(ok8, "init succeeds with the plain (no TLS) image", NULL);
+        if (ok8) {
+            unsigned char *mem = (unsigned char *)xbox_GetMemoryBase();
+            uint32_t tib = xbox_AllocThreadTib();
+            char d[160];
+            if (sw && sw[0] == '0') {
+                check(tib == 0, "RECOMP_TIB_PER_THREAD=0: no TIB for a no-TLS image", NULL);
+            } else if (tib) {
+                uint32_t seh, sb, msb, kt, mkt;
+                memcpy(&seh, mem + tib, 4);
+                memcpy(&sb, mem + tib + 4, 4);
+                memcpy(&msb, mem + XBOX_TIB_MAIN + 4, 4);
+                memcpy(&kt, mem + tib + 0x28, 4);
+                memcpy(&mkt, mem + XBOX_TIB_MAIN + 0x28, 4);
+                snprintf(d, sizeof d, "tib 0x%X seh 0x%X fs4 0x%X/0x%X kt 0x%X/0x%X",
+                         tib, seh, sb, msb, kt, mkt);
+                check(seh == 0xFFFFFFFFu && sb == msb && mem[tib + 0x24] == 0
+                      && kt && kt != mkt && mem[kt] == 6,
+                      "a no-TLS image gets a TIB per thread with its own KTHREAD", d);
+            } else {
+                check(0, "a no-TLS image gets a TIB per thread", "none");
+            }
+            xbox_MemoryLayoutShutdown();
         }
     }
 

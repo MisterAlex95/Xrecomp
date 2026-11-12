@@ -190,22 +190,41 @@ static void bridge_MmAllocateContiguousMemory(void) {
 }
 ```
 
-### Kernel Function Categories
+### Kernel Function Coverage
 
-| Category | Count | Approach |
-|----------|-------|----------|
-| Memory (MmAlloc, NtAllocateVirtualMemory, ...) | 12 | Bump allocator |
-| File I/O (NtCreateFile, NtReadFile, NtClose, ...) | 8 | Win32 CreateFile/ReadFile |
-| Threading (PsCreateSystemThreadEx, KeWaitFor...) | 15 | Mostly stubbed (single-threaded) |
-| Synchronization (RtlEnterCriticalSection, ...) | 10 | Win32 CriticalSection |
-| String/RTL (RtlInitAnsiString, RtlCompare...) | 20 | Direct reimplementation |
-| AV/Video (AvSetDisplayMode, ...) | 5 | Stubbed (using our own D3D) |
-| Hardware (HalReadSMBus, HalReturnToFirmware, ...) | 8 | Stubbed |
-| Network/Xbox Live (XNetStartup, ...) | 15 | Stubbed |
-| Data exports (KeTickCount, HardwareInfo, ...) | 12 | Static data in kernel data area |
-| Other | 42 | Case-by-case |
+Generated from `src/kernel/kernel_bridge.c` by `python3 -m tools.kernel_audit.stubs --write` (XBA-115); the test
+`tools/kernel_audit/test_stubs.py` fails when it is out of date. A *route* is an ordinal `bridge_for_ordinal()` hands a
+bridge function (data exports such as `KeTickCount` are not routes: their thunk points at kernel data). A *stub* is a
+bridge that only discards its arguments and returns a constant. *No-op by design* are the stubs whose doing nothing is
+right here (no debugger, IRQL not modelled, ...), listed with the reason in `tools/kernel_audit/stubs.py`. Every other
+stub is in `src/kernel/kernel_stub_table.c`: its first call (then the 10th, 100th ...) logs
+`[KERNEL] STUB ordinal N (Name) called from 0x...` and writes `{"t":"stub","ord":N,...}` to the discovery file, which
+`tools.compat` reports as a blocker. An ordinal with no route at all is reported the same way.
 
-For Burnout 3, approximately 68 kernel functions are bridged to actual Win32 implementations, and 79 are stubbed (return success without doing anything).
+<!-- kernel-coverage:begin (tools/kernel_audit/stubs.py --write) -->
+| Category | Routes | Implemented | No-op by design | Stub | Stubs (ordinal, name) |
+|---|---:|---:|---:|---:|---|
+| AV / video mode | 4 | 4 | 0 | 0 | - |
+| Debugger | 6 | 3 | 3 | 0 | - |
+| Executive (pool, locks, interlocked) | 16 | 15 | 0 | 1 | 25 ExReadWriteRefurbInfo |
+| File-system cache | 3 | 2 | 1 | 0 | - |
+| HAL (SMBus, interrupts, firmware) | 15 | 11 | 1 | 3 | 43 HalEnableSystemInterrupt, 47 HalRegisterShutdownNotification, 366 HalWriteSMCScratchRegister |
+| Interlocked / SList | 8 | 8 | 0 | 0 | - |
+| I/O manager | 27 | 18 | 0 | 9 | 60 IoBuildAsynchronousFsdRequest, 63 IoCheckShareAccess, 75 IoQueryFileInformation, 76 IoQueryVolumeInformation, 77 IoQueueThreadIrp, 78 IoRemoveShareAccess, 80 IoSetShareAccess, 90 IoDismountVolume, 91 IoDismountVolumeByName |
+| Kernel (threads, waits, timers, DPCs, APCs) | 65 | 57 | 4 | 4 | 92 KeAlertResumeThread, 130 KeRaiseIrqlToSynchLevel, 144 KeSetDisableBoostThread, 155 KeTestAlertThread |
+| Kernel (IRQL fastcalls) | 2 | 2 | 0 | 0 | - |
+| Kernel internals | 2 | 1 | 0 | 1 | 163 KiUnlockDispatcherDatabase |
+| Memory manager | 25 | 21 | 0 | 4 | 174 MmIsAddressValid, 178 MmPersistContiguousMemory, 376 MmDbgQueryAvailablePages, 377 MmDbgReleaseAddress |
+| Native API (files, events, memory) | 55 | 41 | 0 | 14 | 191 NtCreateIoCompletion, 201 NtOpenDirectoryObject, 206 NtQueueApcThread, 208 NtQueryDirectoryObject, 209 NtQueryEvent, 212 NtQueryIoCompletion, 213 NtQueryMutant, 214 NtQuerySemaphore, 216 NtQueryTimer, 220 NtReadFileScatter, 223 NtRemoveIoCompletion, 227 NtSetIoCompletion, 230 NtSignalAndWaitForSingleObjectEx, 237 NtWriteFileGather |
+| Object manager | 10 | 4 | 0 | 6 | 239 ObCreateObject, 241 ObInsertObject, 242 ObMakeTemporaryObject, 243 ObOpenObjectByName, 244 ObOpenObjectByPointer, 248 ObReferenceObjectByPointer |
+| Network PHY | 2 | 2 | 0 | 0 | - |
+| Process / thread | 5 | 4 | 0 | 1 | 257 PsSetCreateThreadNotifyRoutine |
+| Run-time library | 66 | 63 | 0 | 3 | 266 RtlCaptureStackBackTrace, 297 RtlMapGenericMask, 319 RtlWalkFrameChain |
+| Crypto | 17 | 17 | 0 | 0 | - |
+| XBE sections | 2 | 2 | 0 | 0 | - |
+| Other (port I/O, ...) | 17 | 14 | 0 | 3 | 88 KdDebuggerEnabled, 89 KdDebuggerNotPresent, 332 WRITE_PORT_BUFFER_UCHAR |
+| **All** | **347** | **289** | **9** | **49** | |
+<!-- kernel-coverage:end -->
 
 ### Data Exports
 

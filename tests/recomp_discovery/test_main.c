@@ -71,14 +71,17 @@ int main(void)
     recomp_discovery_launch("D:\\GAME.XBE");          /* the same image: one entry */
     recomp_discovery_stack_switch(0x00023450u, 0x00023480u, "a \"why\"");
     recomp_discovery_stack_switch(0x00023450u, 0x00012345u, "again");   /* the same site: one entry */
-    CHECK(recomp_discovery_written() == 7);
+    recomp_discovery_stub(136, "KeRemoveQueue", 0x00012340u);   /* XBA-115: keyed by ordinal */
+    recomp_discovery_stub(136, "KeRemoveQueue", 0x00099990u);
+    CHECK(recomp_discovery_written() == 8);
     CHECK(recomp_discovery_path() && !strcmp(recomp_discovery_path(), path));
     text = slurp(path);                                         /* written as it happened: no close needed */
     CHECK(text != NULL);
     if (text) {
-        CHECK(count(text, "\n") == 8);
+        CHECK(count(text, "\n") == 9);
         CHECK(strstr(text, "{\"t\":\"stack_switch\",\"va\":\"0x00023450\",\"to\":\"0x00023480\","
                            "\"why\":\"a \\\"why\\\"\"}\n") != NULL);
+        CHECK(strstr(text, "{\"t\":\"stub\",\"ord\":136,\"name\":\"KeRemoveQueue\",\"ret\":\"0x00012340\"}\n") != NULL);
         CHECK(strstr(text, "\"path\":\"d:\\\\game.xbe\"}\n") != NULL);
         CHECK(strstr(text, "{\"t\":\"d3d\",\"va\":\"0x0085FDE0\",\"slot\":\"0x00862288\"}\n") != NULL);
         CHECK(count(text, "{\"t\":\"run\",\"time\":\"20") == 1);
@@ -92,9 +95,12 @@ int main(void)
     recomp_discovery_reset();
     recomp_discovery_icall(0x00012345u, 0x00099999u);
     recomp_discovery_unimpl(0x00056780u, "bsf eax, ecx");
+    recomp_discovery_stub(136, "KeRemoveQueue", 0x00012340u);   /* read back by "ord" */
     CHECK(recomp_discovery_written() == 0);
-    recomp_discovery_icall(0x00067890u, 0x00011111u);
+    recomp_discovery_stub(0x00012345u, "Other", 0);               /* an ordinal equal to an icall va: its own key */
     CHECK(recomp_discovery_written() == 1);
+    recomp_discovery_icall(0x00067890u, 0x00011111u);
+    CHECK(recomp_discovery_written() == 2);
     text = slurp(path);
     if (text) {
         CHECK(count(text, "{\"t\":\"run\"") == 2);
