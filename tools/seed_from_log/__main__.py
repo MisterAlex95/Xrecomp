@@ -106,6 +106,45 @@ def scan_log(text):
     return out
 
 
+def gate(xbe, functions_path, candidates, existing=(), analysis_json=None, log=print):
+    """The seed entries to add for {address: reason}: those in an executable
+    section that read as a function body (the two gates in the module
+    docstring), not already in `existing` (seed entries). Each is
+    {"start", "observed", "note"}, ready for --seed-functions."""
+    if not candidates:
+        return []
+    image = load_image(str(xbe), str(analysis_json) if analysis_json else None)
+    engine = DisasmEngine(image)
+    for s in image.sections:
+        if s.executable and s.name not in DATA_SECTION_NAMES:
+            engine.linear_sweep(s)
+    executable = [(s.virtual_addr, s.virtual_addr + s.virtual_size)
+                  for s in image.sections
+                  if s.executable and s.name not in DATA_SECTION_NAMES]
+    funcs = json.loads(Path(functions_path).read_text())
+    as_int = lambda v: int(v, 0) if isinstance(v, str) else v
+    bounds = sorted((as_int(f["start"]), as_int(f["end"]), f["name"]) for f in funcs)
+    starts = [b[0] for b in bounds]
+    have = {e["start"].lower() for e in existing if isinstance(e, dict)}
+    out = []
+    for va, reason in sorted(candidates.items()):
+        key = "0x%08X" % va
+        if key.lower() in have:
+            log("  = %08X  already seeded" % va)
+            continue
+        if not any(lo <= va < hi for lo, hi in executable):
+            log("  - %08X  not in an executable section" % va)
+            continue
+        if not engine.probes_as_function_body(va):
+            log("  - %08X  does not read as a function body" % va)
+            continue
+        i = bisect.bisect_right(starts, va) - 1
+        inside = i >= 0 and bounds[i][0] < va < bounds[i][1]
+        log("  + %08X  %s  (%s)" % (va, ("alias inside " + bounds[i][2]) if inside else "new function", reason))
+        out.append({"start": key, "observed": True, "note": reason + "; decodes as a function body."})
+    return out
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -128,48 +167,10 @@ def main(argv=None):
         print("No seedable addresses in the log.")
         return 0
 
-    image = load_image(str(args.xbe),
-                       str(args.analysis_json) if args.analysis_json else None)
-    engine = DisasmEngine(image)
-    for s in image.sections:
-        if s.executable and s.name not in DATA_SECTION_NAMES:
-            engine.linear_sweep(s)
-
-    executable = [(s.virtual_addr, s.virtual_addr + s.virtual_size)
-                  for s in image.sections
-                  if s.executable and s.name not in DATA_SECTION_NAMES]
-
-    def in_executable(va):
-        return any(lo <= va < hi for lo, hi in executable)
-
-    funcs = json.loads(args.functions.read_text())
-    as_int = lambda v: int(v, 0) if isinstance(v, str) else v
-    bounds = sorted((as_int(f["start"]), as_int(f["end"]), f["name"])
-                    for f in funcs)
-    starts = [b[0] for b in bounds]
-
     existing = json.loads(args.seeds.read_text()) if args.seeds.exists() else []
-    have = {e["start"].lower() for e in existing if isinstance(e, dict)}
-
-    added = 0
-    for va, reason in sorted(candidates.items()):
-        key = "0x%08X" % va
-        if key.lower() in have:
-            print("  = %08X  already seeded" % va)
-            continue
-        if not in_executable(va):
-            print("  - %08X  not in an executable section" % va)
-            continue
-        if not engine.probes_as_function_body(va):
-            print("  - %08X  does not read as a function body" % va)
-            continue
-        i = bisect.bisect_right(starts, va) - 1
-        inside = i >= 0 and bounds[i][0] < va < bounds[i][1]
-        where = ("alias inside " + bounds[i][2]) if inside else "new function"
-        print("  + %08X  %s  (%s)" % (va, where, reason))
-        existing.append({"start": key, "observed": True,
-                         "note": reason + "; decodes as a function body."})
-        added += 1
+    new = gate(args.xbe, args.functions, candidates, existing, args.analysis_json)
+    existing += new
+    added = len(new)
 
     if args.dry_run:
         print("dry run: %d would be added" % added)
