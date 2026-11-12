@@ -379,7 +379,7 @@ class _Tc:
         return "clang 19"
 
 
-def _make_pack(tmp_path, monkeypatch, env_force, layers=()):
+def _make_pack(tmp_path, monkeypatch, env_force, layers=(), images=()):
     from tools.prepare import android
     links = []
 
@@ -403,6 +403,7 @@ def _make_pack(tmp_path, monkeypatch, env_force, layers=()):
     r.info = {"title": "Synthetic"}
     r.env_force = env_force
     r.layers = list(layers)
+    r.images = [(rel, ["/o/%s.o" % rel], str(tmp_path / "work" / "images" / rel)) for rel in images]
     final = r.make_pack()
     return pack.read(final), links
 
@@ -427,3 +428,53 @@ def test_android_pack_json_layers(tmp_path, monkeypatch):
     assert links == []
     meta, links = _make_pack(tmp_path, monkeypatch, {}, layers[1:])
     assert meta["layers"] == layers[1:] and len(links) == 1
+
+
+def test_android_pack_json_images(tmp_path, monkeypatch):
+    """XBA-82: one library per other image of the disc, named in pack.json "images"."""
+    meta, links = _make_pack(tmp_path, monkeypatch, {}, images=["game.xbe", "Sub/Menu.xbe"])
+    assert meta["images"] == {"game.xbe": "libimage-1.so", "Sub/Menu.xbe": "libimage-2.so"}
+    assert [os.path.basename(x) for x in links] == ["libtitle.so", "libimage-1.so", "libimage-2.so"]
+    final = pack.final_dir(str(tmp_path / "packs"), "4541005B")
+    assert pack.check(final) is None
+    meta, links = _make_pack(tmp_path, monkeypatch, {}, images=["game.xbe", "Sub/Menu.xbe"])
+    assert links == []
+    os.remove(os.path.join(final, "libimage-2.so"))
+    assert "Sub/Menu.xbe" in pack.check(final)
+    meta, links = _make_pack(tmp_path, monkeypatch, {})
+    assert "images" not in meta and len(links) == 1
+
+
+def test_android_other_images(tmp_path, monkeypatch):
+    """The images default.xbe names are prepared (a sub-run each), the others not; a failing one is left out."""
+    from tools.prepare import android
+    game = tmp_path / "game"
+    (game / "sub").mkdir(parents=True)
+    (game / "default.xbe").write_bytes(b"XBEH\0d:\\game.xbe\0menu.xbe\0")
+    (game / "game.xbe").write_bytes(b"XBEH")
+    (game / "sub" / "menu.xbe").write_bytes(b"XBEH")
+    (game / "unrelated.xbe").write_bytes(b"XBEH")
+    ran = []
+
+    def step(self, name):
+        def f():
+            ran.append((os.path.basename(self.a.source), name))
+            if name == "compile":
+                if self.a.source.endswith("menu.xbe"):
+                    raise android.cc.StepError("COMPILE_FAILED", "x")
+                self.objects = ["/o/a.o"]
+        return f
+    for name in ("identify", "analyse", "lift", "compile"):
+        monkeypatch.setattr(android.Run, name, lambda self, n=name: step(self, n)())
+    a = _Args(tmp_path, "libmain.so")
+    a.source = str(game)
+    os.makedirs(a.work, exist_ok=True)
+    r = android.Run(a, None)
+    lines = []
+    r.rep = type("R", (), {"progress": lambda self, s, p, m, e=None: lines.append(m)})()
+    r.xbe, r.data_dir = str(game / "default.xbe"), str(game)
+    r.other_images()
+    assert [rel for rel, _, _ in r.images] == ["game.xbe"]
+    assert ("unrelated.xbe", "identify") not in ran and ("menu.xbe", "compile") in ran
+    assert any("sub/menu.xbe left out: COMPILE_FAILED" in m for m in lines)
+    assert os.path.isdir(os.path.join(a.work, "images", "game.xbe"))

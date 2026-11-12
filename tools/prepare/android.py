@@ -8,6 +8,7 @@ leaves a stamp in <work>/stamp.json (and every object its cache entry), so a
 run that is killed starts again where it stopped.
 """
 
+import copy
 import errno
 import hashlib
 import json
@@ -23,6 +24,18 @@ from tools.prepare import pack
 from tools.prepare.progress import Reporter
 
 REQUIRED = ("work", "pack_dir", "cc", "sysroot", "shell_lib")
+# The disc's other images a pack carries (src/platform/recomp_pack.h RECOMP_PACK_IMAGES_MAX).
+IMAGES_MAX = 8
+
+
+class _ImageReporter:
+    """Another image's steps, shown inside step 4: « game.xbe: analysing: disasm »."""
+
+    def __init__(self, rep, label):
+        self.rep, self.label = rep, label
+
+    def progress(self, step, pct, msg, eta=None):
+        self.rep.progress(4, min(99, ((step - 1) * 100 + pct) / 4.0), "%s: %s" % (self.label, msg), eta)
 
 
 class Run:
@@ -38,6 +51,8 @@ class Run:
         self.stamp = {}
         self.env_force = {}
         self.layers = []
+        self.data_dir = None
+        self.images = []              # [(disc path, objects)], other_images()
 
     # ── helpers ──
 
@@ -63,7 +78,7 @@ class Run:
     def identify(self):
         self.rep.progress(1, 0, "finding default.xbe")
         try:
-            xbe, _, _ = self.m.find_xbe(self.a.source, self.work)
+            xbe, self.data_dir, _ = self.m.find_xbe(self.a.source, self.work)
         except SystemExit as e:
             raise cc.StepError("NO_XBE", str(e))
         # Our own copy, next to its analysis JSON (the tools look for
@@ -199,6 +214,44 @@ class Run:
         self.rep.progress(4, 100, "%d files, %d compiled" % (len(sources), n))
         self.compiled = n
 
+    def other_images(self):
+        """XBA-82: the disc's other images that default.xbe names (tools.triage's
+        test), each analysed, lifted and compiled in <work>/images/<path>/ with
+        this run's toolchain; make_pack links one library each. An image that
+        fails is left out (default.xbe still runs; its launch then exits as
+        before). Only from a folder: a disc image source has no other files here."""
+        if not self.data_dir or getattr(self.a, "no_images", False):
+            return
+        import re
+        from tools.triage import _named_xbes, _xbes_in_folder
+        with open(self.xbe, "rb") as f:
+            named = _named_xbes(f.read())
+        others = [(rel, p) for rel, p in _xbes_in_folder(self.data_dir)
+                  if rel.lower() != "default.xbe" and os.path.basename(rel).lower() in named]
+        for rel, p in others[:IMAGES_MAX]:
+            sub_a = copy.copy(self.a)
+            sub_a.source = p
+            sub_a.work = os.path.join(self.work, "images", re.sub(r"[^A-Za-z0-9._-]", "_", rel))
+            os.makedirs(sub_a.work, exist_ok=True)
+            r = Run(sub_a, self.m)
+            r.rep = _ImageReporter(self.rep, rel)
+            r.procs = self.procs        # a cancel reaches its compilers too
+            try:
+                r.identify()
+                r.analyse()
+                r.lift()
+                r.compile()
+            except cc.StepError as e:
+                self.rep.progress(4, 99, "%s left out: %s %s" % (rel, e.code, e.msg))
+                continue
+            self.images.append((rel, r.objects, r.work))
+        if others[IMAGES_MAX:]:
+            self.rep.progress(4, 99, "%d more image(s) left out (at most %d)" % (len(others) - IMAGES_MAX, IMAGES_MAX))
+
+    def image_libs(self):
+        """{disc path: library file name} for pack.json "images"."""
+        return {rel: "libimage-%d.so" % (i + 1) for i, (rel, _, _) in enumerate(self.images)}
+
     def make_pack(self):
         a = self.a
         packs = os.path.abspath(a.pack_dir)
@@ -213,12 +266,18 @@ class Run:
         # (same objects) still writes the pack again.
         h.update(("|env_force=%s" % json.dumps(self.env_force, sort_keys=True)).encode())
         h.update(("|layers=%s" % ",".join(self.layers)).encode())
+        for rel, objects, _ in self.images:
+            h.update(("|image=%s:" % rel).encode())
+            for o in objects:
+                h.update(os.path.basename(o).encode() + b"\n")
         key = h.hexdigest()
+        images = self.image_libs()
         pack.recover(packs, self.tid)
         final = pack.final_dir(packs, self.tid)
         meta = pack.read(final)
         if (self.stamp.get("link") == key and meta and meta["xbe_sha256"] == self.xbe_sha
                 and meta.get("env_force", {}) == self.env_force and meta.get("layers", []) == self.layers
+                and meta.get("images", {}) == images
                 and pack.check(final, a.shell_abi) is None):
             self.rep.progress(5, 100, "pack up to date")
         else:
@@ -228,10 +287,15 @@ class Run:
                 raise cc.StepError("NO_SPACE" if e.errno == errno.ENOSPC else "PACK_FAILED", str(e))
             lib = os.path.join(part, pack.LIB)
             cc.link(self.objects, lib, self.tc, a.shell_lib, log=self.log)
+            for i, (rel, objects, _) in enumerate(self.images):
+                self.rep.progress(5, 40 + 30 * i // max(1, len(self.images)), "linking %s" % rel)
+                cc.link(objects, os.path.join(part, images[rel]), self.tc, a.shell_lib, log=self.log)
             self.rep.progress(5, 70, "writing pack.json")
             meta = pack.make_meta(lib, self.tid, self.info.get("title", ""), self.xbe_sha, self.toolkit,
                                   "%s -O%s" % (self.tc.short_version(), a.opt), shell_abi=a.shell_abi,
                                   env_force=self.env_force, layers=self.layers)
+            if images:
+                meta["images"] = images
             try:
                 pack.publish(packs, self.tid, meta)
             except OSError as e:
@@ -239,6 +303,8 @@ class Run:
             self.save_stamp(link=key)
             self.rep.progress(5, 100, "pack %s, %d bytes" % (self.tid, meta["lib_size"]))
         cc.prune(os.path.join(self.work, "obj"), self.objects)
+        for _, objects, work in self.images:
+            cc.prune(os.path.join(work, "obj"), objects)
         return final
 
 
@@ -268,6 +334,7 @@ def run(a, host):
         r.analyse()
         r.lift()
         r.compile()
+        r.other_images()
         final = r.make_pack()
         rep.ok(final)
         return 0
