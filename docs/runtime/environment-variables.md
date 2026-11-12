@@ -102,7 +102,8 @@ Switches that change how the kernel layer behaves. Each fixes a class of titles;
 | `RECOMP_GUEST_LOCK=1` | off | Only one guest thread runs guest code at a time. | `kernel_guest_cpu.c` |
 | `RECOMP_GUEST_QUANTUM=ms` | 4 | With the lock: milliseconds before the lock is handed over (0 = at every call). | `kernel_guest_cpu.c` |
 | `RECOMP_GUEST_CPU_TRACE[=ms]` | off | With the lock: periodic trace of who holds it. | `kernel_guest_cpu.c` |
-| `RECOMP_GUEST_CPUS` | all | `all`, or a core number: pin the title's threads to one core. | `kernel_thread.c` |
+| `RECOMP_GUEST_CPUS` | `one` on arm64 Linux and Android, `all` elsewhere | `all`, `one`, or a core number: pin the title's threads to one core. On arm64 this gives the title's threads x86's store order among themselves (XBA-81). | `kernel_thread.c` |
+| `RECOMP_PUT_BARRIER=1` | off | Linux/Android: `membarrier` at each new DMA_PUT, so the executor never reads a pushbuffer word the title stored before PUT but another core has not seen yet (arm64). One IPI per kick. | `xbox_memory_layout.c` |
 | `RECOMP_CS_MODE=single` | per-section | Backs every critical section with one host lock. | `kernel_rtl.c` |
 | `RECOMP_CS_MODE=guest` | per-section | Runs critical sections on the guest's own structure (state at +0x10), falling back to the shadow for ones that don't read as critical sections. | `kernel_rtl.c` |
 | `RECOMP_WORKERS` | off | Runs requests of the title's worker threads inline. A bisecting tool for concurrency bugs. | `kernel_bridge.c` |

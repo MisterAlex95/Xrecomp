@@ -1888,6 +1888,53 @@ static int nv2a_ack_wanted(volatile uint32_t *regs, uint32_t put_seen)
  * RECOMP_ACK_IDLE_US instead of yielding, in the same 50 us steps (each
  * ended early by a kick), and yields only for the DMA_PUT that follows an
  * ack which released a waiter. */
+/* The pushbuffer hand-over on a weakly ordered host (XBA-81, RECOMP_PUT_BARRIER).
+ *
+ * The title writes the pushbuffer words, then DMA_PUT, with plain stores; this
+ * thread reads PUT and walks the words. x86 keeps the two stores in order for
+ * every other core; arm64 may let PUT be seen first, and the walk would read
+ * a word not yet written. A fence here alone cannot help: the writer's stores
+ * are what may be out of order. membarrier(PRIVATE_EXPEDITED) makes every
+ * thread of the process pass a full barrier before it returns, so once it has,
+ * each word stored before the PUT just seen is visible.
+ *
+ * Opt-in (RECOMP_PUT_BARRIER=1), Linux and Android only: one IPI per new PUT
+ * costs, the one-core pin of the guest threads already covers guest-to-guest
+ * order, and whether app seccomp allows the call varies with the Android
+ * release. Without it: an acquire fence, which orders this thread's reads. */
+#if defined(__linux__)
+#include <sys/syscall.h>
+#ifndef MEMBARRIER_CMD_PRIVATE_EXPEDITED
+#define MEMBARRIER_CMD_PRIVATE_EXPEDITED (1 << 3)
+#define MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED (1 << 4)
+#endif
+#endif
+static void nv2a_put_barrier(void)
+{
+#if defined(__linux__) && defined(__NR_membarrier)
+    static int state = -1;              /* -1 unknown, 0 off, 1 on */
+    if (state < 0) {
+        const char *e = getenv("RECOMP_PUT_BARRIER");
+        state = 0;
+        if (e && *e == '1') {
+            if (syscall(__NR_membarrier, MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED, 0, 0) == 0) {
+                state = 1;
+                fprintf(stderr, "  [NV2A] RECOMP_PUT_BARRIER: membarrier at each new DMA_PUT\n");
+            } else {
+                fprintf(stderr, "  [NV2A] RECOMP_PUT_BARRIER: membarrier unavailable, ignored\n");
+            }
+        }
+    }
+    if (state == 1)
+        (void)syscall(__NR_membarrier, MEMBARRIER_CMD_PRIVATE_EXPEDITED, 0, 0);
+#endif
+#if defined(_MSC_VER)
+    MemoryBarrier();
+#else
+    __atomic_thread_fence(__ATOMIC_ACQUIRE);
+#endif
+}
+
 #define NV2A_ACK_SPIN_NS  (2u * 1000u * 1000u)
 #define NV2A_ACK_STEP_US  50
 static void nv2a_ack_wait(volatile uint32_t *regs, int flip_held)
@@ -2058,6 +2105,10 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
                     extern void nv2a_pb_resync(uint32_t);
                     extern int  nv2a_pb_dma_walk(void);
                     extern void nv2a_pb_scan_segment(uint32_t, uint32_t);
+
+                    /* The words before PUT, as the title stored them (XBA-81). */
+                    if (put != last_put)
+                        nv2a_put_barrier();
 
                     if (nv2a_pb_dma_walk()) {
                         uint32_t get_now = *(volatile uint32_t *)
