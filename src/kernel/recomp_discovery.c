@@ -15,7 +15,6 @@
 #include <windows.h>
 #define d_open(p)      _open((p), _O_WRONLY | _O_APPEND | _O_CREAT | _O_BINARY, 0644)
 #define d_write        _write
-#define d_sync         _commit
 #define d_close        _close
 #define d_mkdir(p)     _mkdir(p)
 static SRWLOCK s_lock = SRWLOCK_INIT;
@@ -27,7 +26,6 @@ static SRWLOCK s_lock = SRWLOCK_INIT;
 #include <unistd.h>
 #define d_open(p)      open((p), O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC, 0644)
 #define d_write        write
-#define d_sync         fsync
 #define d_close        close
 #define d_mkdir(p)     mkdir((p), 0755)
 static pthread_mutex_t s_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -192,7 +190,10 @@ static void note(int kind, uint32_t va, const char *fields)
     }
     snprintf(line, sizeof line, "{\"t\":\"%s\",\"va\":\"0x%08X\"%s}\n", kind_name[kind], va, fields);
     put_line(line);
-    (void)d_sync(s_fd);
+    /* No fsync: a crash of the process keeps what write() handed the kernel
+     * (it is in the page cache); only a crash of the whole system would not,
+     * and an fsync per entry, under the lock, on a game thread, cost
+     * milliseconds on a phone's flash (review of XBA-64). */
     s_written++;
     UNLOCK();
 }

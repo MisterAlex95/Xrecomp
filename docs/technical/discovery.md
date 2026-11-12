@@ -17,8 +17,8 @@ prepare can seed them instead of a human reading the log (XBA-64; the loop that 
 
 ## Format
 
-One JSON object per line (JSON Lines). Each entry is appended and synced as it happens, so a crash keeps every
-entry written before it; a reader skips a torn last line. An entry already in the file (same kind and address, from
+One JSON object per line (JSON Lines). Each entry is appended as it happens (one write, no fsync), so a crash of the process keeps
+every entry written before it; a reader skips a torn last line. An entry already in the file (same kind and address, from
 this run or an earlier one) is not written again: the file only grows with what is new.
 
 ```
