@@ -311,6 +311,11 @@ typedef struct w32_object {
     /* event */
     int             signaled;
     int             manual_reset;
+    /* A set or a pulse releases the threads blocked on the event at that
+     * moment, whatever happens to its state afterwards (see wait_single). */
+    unsigned        ev_waiters;  /* threads blocked in wait_single on it */
+    unsigned        ev_grants;   /* auto-reset: releases handed to blocked waiters, not taken yet */
+    unsigned        ev_epoch;    /* manual-reset: one more per SetEvent or PulseEvent that released */
 
     /* semaphore */
     long            sem_count;
@@ -767,6 +772,21 @@ static int waitable_due(w32_object *o)
 /*
  * Wait on a single object. The object lock must NOT be held.
  * Returns WAIT_OBJECT_0 / WAIT_TIMEOUT.
+ *
+ * Events: NT satisfies a wait at the moment the event is set. A thread
+ * blocked here when SetEvent or PulseEvent runs is released by that call,
+ * even if the event is reset before the thread is scheduled again. Looking at
+ * the signaled flag alone, a second waiter that ran first and reset the event
+ * sent this one back to sleep: XDK code clears a notification event by hand
+ * and waits again (BlockUntilVerticalBlank, inlined), and a title whose main
+ * thread and stream thread both did so for the vblank event lost a wake-up at
+ * almost every vblank on one core (Black: 2-3 frames a second while loading).
+ * So a blocked waiter is counted in ev_waiters; a manual-reset set bumps
+ * ev_epoch, which every counted waiter sees; an auto-reset set with counted
+ * waiters hands one grant (ev_grants) to one of them and leaves the event
+ * unsignalled. A grant is taken before the signaled flag, and a waiter whose
+ * time ran out looks once more, so no grant is left behind with no waiter
+ * for it. A zero timeout is a poll: it never counts as a waiter.
  */
 static DWORD wait_single(w32_object *o, DWORD ms)
 {
@@ -776,11 +796,18 @@ static DWORD wait_single(w32_object *o, DWORD ms)
 
     pthread_mutex_lock(&o->lock);
     DWORD result = WAIT_OBJECT_0;
+    unsigned epoch = o->ev_epoch;
+    int counted = 0, granted = 0, expired = 0;
 
     for (;;) {
         int ready = 0;
         switch (o->kind) {
-        case K_EVENT:  ready = o->signaled; break;
+        case K_EVENT:
+            if (counted && (o->manual_reset ? o->ev_epoch != epoch : o->ev_grants > 0))
+                ready = granted = 1;
+            else
+                ready = o->signaled;
+            break;
         case K_THREAD: ready = o->exited;   break;
         case K_SEM:    ready = (o->sem_count > 0); break;
         case K_MUTEX:
@@ -790,6 +817,8 @@ static DWORD wait_single(w32_object *o, DWORD ms)
         default:       ready = 1; break;
         }
         if (ready) break;
+        if (expired || (timed && ms == 0)) { result = WAIT_TIMEOUT; break; }
+        if (o->kind == K_EVENT && !counted) { counted = 1; o->ev_waiters++; }
 
         /* An armed timer has its own deadline. Waiting on the caller's alone
          * would sleep straight past the due time, so take whichever comes
@@ -803,14 +832,17 @@ static DWORD wait_single(w32_object *o, DWORD ms)
         }
         int rc = bounded ? pthread_cond_timedwait(&o->cond, &o->lock, &until)
                          : pthread_cond_wait(&o->cond, &o->lock);
-        if (rc == ETIMEDOUT && timed && !timespec_before(&until, &ts)) {
-            result = WAIT_TIMEOUT; break;
-        }
+        if (rc == ETIMEDOUT && timed && !timespec_before(&until, &ts))
+            expired = 1;            /* one more look: a release may have come meanwhile */
     }
+    if (counted) o->ev_waiters--;
 
     if (result == WAIT_OBJECT_0) {
         switch (o->kind) {
-        case K_EVENT: if (!o->manual_reset) o->signaled = 0; break;
+        case K_EVENT:
+            if (granted) { if (!o->manual_reset) o->ev_grants--; }
+            else if (!o->manual_reset) o->signaled = 0;
+            break;
         case K_WAITABLE_TIMER:
             if (!o->waitable_manual_reset && o->waitable_period_ms > 0) {
                 /* Periodic synchronization timer: the next expiry is one
@@ -944,7 +976,20 @@ BOOL SetEvent(HANDLE h)
     w32_object *o = obj_from_handle(h);
     if (!o || o->kind != K_EVENT) return FALSE;
     pthread_mutex_lock(&o->lock);
-    o->signaled = 1;
+    if (o->manual_reset) {
+        if (!o->signaled)
+            o->ev_epoch++;          /* releases every thread blocked now */
+        o->signaled = 1;
+    } else if (!o->signaled && !o->ev_grants && o->ev_waiters) {
+        o->ev_grants = 1;           /* straight to one blocked thread; stays unsignalled */
+    } else if (!o->ev_grants) {
+        o->signaled = 1;
+    }
+    /* With a grant not taken yet the set changes nothing, as setting an event
+     * that is already signalled changes nothing. The kernel mirrors a guest
+     * KEVENT's SignalState into its host event before each wait (SetEvent when
+     * it reads 1): a KeSetEvent that went to a blocked thread as a grant would
+     * otherwise release a second thread when the next one prepares its wait. */
     pthread_cond_broadcast(&o->cond);
     pthread_mutex_unlock(&o->lock);
     return TRUE;
@@ -965,9 +1010,15 @@ BOOL PulseEvent(HANDLE h)
     w32_object *o = obj_from_handle(h);
     if (!o || o->kind != K_EVENT) return FALSE;
     pthread_mutex_lock(&o->lock);
-    o->signaled = 1;
-    pthread_cond_broadcast(&o->cond);
+    /* Releases the threads blocked now (manual reset), or one of them (auto
+     * reset), and leaves the event unsignalled. Setting the flag and clearing
+     * it under the lock released nobody: the waiters woke to a clear flag. */
+    if (o->manual_reset)
+        o->ev_epoch++;
+    else if (!o->signaled && o->ev_waiters > o->ev_grants)
+        o->ev_grants++;
     o->signaled = 0;
+    pthread_cond_broadcast(&o->cond);
     pthread_mutex_unlock(&o->lock);
     return TRUE;
 }
