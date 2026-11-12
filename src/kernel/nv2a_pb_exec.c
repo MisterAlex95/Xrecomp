@@ -5181,9 +5181,11 @@ void nv2a_pb_exec_walk_begin(void)
  * which still applies after. Default 60 on macOS and Android, off elsewhere
  * (a back end a game project registers may present with vsync itself);
  * 0 = off. */
+static int s_cap_value = -1;             /* gpu_fps_cap's, once computed */
+static int s_cap_pre_fg;                 /* the cap before frame generation lowered it */
 static int gpu_fps_cap(void)
 {
-    static int cap = -1;
+#define cap s_cap_value
     if (cap < 0) {
         const char *e = getenv("RECOMP_GPU_FPS_CAP");
 #if defined(__APPLE__) || defined(__ANDROID__)
@@ -5203,6 +5205,7 @@ static int gpu_fps_cap(void)
         if (framegen_policy_fps_cap(c) != c) {
             fprintf(stderr, "  [GPU] back end frame cap %d fps for frame generation (was %d)\n",
                     framegen_policy_fps_cap(c), c);
+            s_cap_pre_fg = c ? c : 60;
             c = framegen_policy_fps_cap(c);
         }
 #endif
@@ -5212,7 +5215,15 @@ static int gpu_fps_cap(void)
                     c, e);
     }
     return cap;
+#undef cap
 }
+
+#ifdef XBOXRECOMP_LSFG
+#include "frame_lock.h"
+extern void xbox_FramegenRequestStop(const char *why);
+static FrameLock s_frame_lock;
+static uint64_t s_cap_held_total, s_cap_held_seen;
+#endif
 
 /* Both on the executor (ack) thread, except s_cap_until_ns, which any thread
  * may read (nv2a_pb_exec_flip_cap_until_ns). */
@@ -5273,6 +5284,9 @@ static void flip_cap_wait(void)
     s_cap_until_ns = 0;
     s_cap_slept_ns += due - now;
     s_cap_waits++;
+#ifdef XBOXRECOMP_LSFG
+    s_cap_held_total++;
+#endif
     now = xbox_HostNowNs();
     if (now > due) {
         s_cap_over_ns += now - due;
@@ -5280,6 +5294,36 @@ static void flip_cap_wait(void)
             s_cap_over_max_ns = now - due;
     }
 }
+
+#ifdef XBOXRECOMP_LSFG
+/* XBA-96: a title that asks for every vblank and is held back by frame
+ * generation's cap on nearly every frame wants 60, and game logic that
+ * follows the flip rate runs in slow motion at 30 (frame_lock.h). Then frame
+ * generation goes off and the cap goes back to what it was before it, once,
+ * with a line saying why. RECOMP_FRAME_LOCK=0 leaves it alone. */
+static void frame_lock_at_flip(void)
+{
+    static int enabled = -1;
+    int held;
+    if (enabled < 0) {
+        const char *e = getenv("RECOMP_FRAME_LOCK");
+        enabled = !(e && *e == '0');
+    }
+    if (!enabled || !s_cap_pre_fg || s_frame_lock.verdict)
+        return;
+    held = s_cap_held_total != s_cap_held_seen;
+    s_cap_held_seen = s_cap_held_total;
+    if (frame_lock_flip(&s_frame_lock, held) != 1)
+        return;
+    fprintf(stderr, "  [GPU] the title asks for every vblank and %u of %u frames waited at frame generation's "
+                    "%d fps cap: its game logic likely follows the flip rate. Frame generation off, cap %d fps "
+                    "(RECOMP_FRAME_LOCK=0 keeps it)\n", s_frame_lock.held, s_frame_lock.flips, s_cap_value,
+            s_cap_pre_fg);
+    s_cap_value = s_cap_pre_fg;
+    s_cap_next_ns = s_cap_due_ns = 0;
+    xbox_FramegenRequestStop("the title follows the flip rate (XBA-96)");
+}
+#endif
 
 /* RECOMP_FLIP_PACING: unset or 0 off (flips complete at once and frame
  * counters are bumped on every flip, as before), edge (D3D's rule: a late
@@ -5709,6 +5753,10 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
          * Not the title's own handler: its DPC loops until PGRAPH_INTR
          * reads back zero after a write-1-to-clear, which plain-RAM
          * registers never do (docs/technical/pushbuffer-executor.md). */
+#ifdef XBOXRECOMP_LSFG
+        if ((param & 0x1Fu) == 1u)
+            frame_lock_swap(&s_frame_lock, param >> 5);
+#endif
         if (param && (param & 0x1Fu) != 1u) {
             int (*hook)(uint32_t) = s_swm_hook;
             if (hook && hook(param)) {
@@ -5897,6 +5945,9 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
         if (s_backend && s_backend->flip)
             s_backend->flip();
         flip_cap_book();
+#ifdef XBOXRECOMP_LSFG
+        frame_lock_at_flip();
+#endif
 
         if (verbose) {
             static unsigned n;

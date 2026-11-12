@@ -286,6 +286,17 @@ option travels in `pack.json` on Android (set by the pack loader after
 by `main()`). Log: `[TITLE] 4541005B forces RECOMP_LSFG=0 (title profile)`.
 See [Environment variables](../runtime/environment-variables.md#forced-by-a-title).
 
+### Titles locked to the flip rate
+
+The cap rule assumes a title that runs at 30. One whose game logic advances per flip at 60 runs in slow motion under
+it (Burnout 3; its engine layer still forces `RECOMP_LSFG=0`). The executor watches for that (XBA-96,
+`src/kernel/frame_lock.h`): over the first 180 flips under frame generation's cap, if at least 90 % of the title's
+swaps (software method 1) ask for every vblank (interval ONE or DEFAULT, not IMMEDIATE) and at least 90 % of its
+frames waited at the cap, frame generation stops (`xbox_FramegenRequestStop`, at the window loop's next turn) and the
+cap goes back to what it was before frame generation lowered it, with a line saying why. A cap that is not frame
+generation's (a profile's `RECOMP_GPU_FPS_CAP=30`, as Fable has on Android) is never touched. `RECOMP_FRAME_LOCK=0`
+turns the check off.
+
 ### Tests
 
 `tests/framegen_pacer` (C, POSIX, built on its own like the other test
