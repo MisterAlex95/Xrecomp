@@ -201,8 +201,10 @@
     <!-- About -->
     <string name="ABOUT_TAGLINE">Built on the xboxrecomp runtime</string>
     <string name="ABOUT_TEXT">A statically recompiled game, run by XRecomp (the xboxrecomp runtime) on Android arm64. No game data is included: the app reads the copy you set up from a disc you own.</string>
-    <string name="ABOUT_LICENCE">xboxrecomp: MIT. SDL2: zlib.</string>
+    <string name="ABOUT_LICENCE">XRecomp and xboxrecomp: MIT. SDL2: zlib. CPython: PSF. LLVM: Apache 2.0 with LLVM exceptions. Capstone: BSD.</string>
     <string name="ABOUT_LEGAL">Not affiliated with or endorsed by the console\'s or the game\'s makers. Use only games you own.</string>
+    <string name="LICENCES">Licences</string>
+    <string name="LICENCES_MISSING">The licence texts are missing from this build: see NOTICE and LICENSES/ in the source repository.</string>
     <string name="GAME_CHECK_NONE">None (any game)</string>
 
     <!-- Shortcuts (long-press on the app icon) -->

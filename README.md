@@ -3,23 +3,39 @@
 <h1 align="center">XRecomp</h1>
 
 <p align="center"><b>Original Xbox games, recompiled to native code, on Android.</b><br>
-Alex's private Android fork of xboxrecomp (below): one app for arm64 handhelds, AYN Thor first.</p>
+An Android arm64 fork of <a href="https://github.com/sp00nznet/xboxrecomp">xboxrecomp</a>: one app for arm64 handhelds and phones, the AYN Thor first.</p>
 
-- **Bring your own disc.** Pick the extracted game folder or an ISO you dumped from your own disc; nothing from any
-  game is in the repo or the APK.
+- **Bring your own disc.** Pick the extracted game folder or an ISO you dumped from your own disc. Nothing from any
+  game is in this repository, in the APK or in a CI artefact, and nothing the app makes leaves your device.
 - **Prepare on the device.** The app runs the recompilation pipeline itself (embedded Python, capstone, clang + lld)
   and builds a native pack for that game, in the background with progress: about 20–30 min once, no PC needed.
 - **Play.** A console-style launcher driven by the gamepad (title image read from the disc, settings, controls), and
   on the AYN Thor a touch panel on the bottom screen (White / Black / Back / Start, quick actions, fps and battery).
 
+**Status: experimental.** Few games go far yet; what works per title is in `profiles/titles/*/title.json`
+(« status ») and their `NOTES.md`. Expect crashes, and expect to prepare a game again after an update.
+
 | | |
 |---|---|
-| Get the APK | release [shell-latest](https://git.cf.adserver.fr/Alex/xboxrecomp-android/releases/tag/shell-latest) (`xrecomp-prepare-*.apk`) |
+| Get the APK | release [shell-latest](https://git.cf.adserver.fr/Alex/xboxrecomp-android/releases/tag/shell-latest) (`xrecomp-prepare-*.apk`), arm64-v8a, Android 11+, OpenGL ES 3.0 |
 | The app | [docs/android/app-shell.md](docs/android/app-shell.md): launcher, packs, dual screen, device check lists |
 | Prepare on the device | [docs/android/prepare.md](docs/android/prepare.md), [docs/android/toolchain.md](docs/android/toolchain.md) |
 | The fork | [docs/android/README.md](docs/android/README.md): branches, following upstream, CI |
+| Contributing, security | [CONTRIBUTING.md](CONTRIBUTING.md) (« This fork » first), [SECURITY.md](SECURITY.md) |
+| Licences | MIT ([LICENSE](LICENSE)), third-party parts in [NOTICE](NOTICE) and [LICENSES/](LICENSES/); the app shows them under About › Licences |
 
-Plan, decisions and tickets: Plane project **XBA**. The upstream README follows unchanged.
+### Relation to xboxrecomp
+
+The runtime (kernel, D3D8, NV2A, audio, input) and the recompilation pipeline are
+[sp00nznet/xboxrecomp](https://github.com/sp00nznet/xboxrecomp) by sp00nz and its contributors
+([CONTRIBUTORS.md](CONTRIBUTORS.md)); this fork follows it and adds the Android host, the app, the on-device Prepare
+and the per-title work. Issues about this fork belong here, not upstream. The upstream README follows unchanged.
+
+### Legal
+
+XRecomp is not affiliated with or endorsed by Microsoft or any game publisher; « Xbox » is a trademark of Microsoft.
+Use it only with games you own. Do not open issues or pull requests that contain game code, XBEs, disc images, game
+data, or C generated from a game: they are deleted.
 
 ---
 

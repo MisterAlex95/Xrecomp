@@ -30,7 +30,11 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # XBA-100: the runner is the maintainers' shared host and every job drives its Docker, so a pull request from a fork
+  # (someone else's code) never runs here; a maintainer pushes the branch to this repository to test it. Every other
+  # job needs linux, so this one guard stops them all.
   linux:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     container:
       image: docker:29.8.1-cli

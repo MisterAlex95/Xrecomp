@@ -314,6 +314,7 @@ public class LauncherScreensTest {
         render("game-data", true, a -> a.goForTest(LauncherActivity.Screen.GAME_DATA));
         render("storage", true, a -> a.goForTest(LauncherActivity.Screen.STORAGE));
         render("about", false, a -> a.goForTest(LauncherActivity.Screen.ABOUT));
+        render("licences", false, a -> a.goForTest(LauncherActivity.Screen.LICENCES));
         render("source", true, a -> a.goForTest(LauncherActivity.Screen.SOURCE));
     }
 
@@ -556,6 +557,29 @@ public class LauncherScreensTest {
         assertFalse(a.screenAnimatorForTest().isRunning());
     }
 
+    /** XBA-100: X on About opens the licence texts the APK carries, LICENSE first, the D-pad scrolls them. */
+    @Test
+    public void licencesFromAbout() throws Exception {
+        LauncherActivity a = launch();
+        a.goForTest(LauncherActivity.Screen.ABOUT);
+        idle(300);
+        key(a, KeyEvent.KEYCODE_BUTTON_X);
+        idle(300);
+        String t = a.licencesForTest();
+        assertNotNull("X opens Licences", t);
+        assertTrue(t, t.startsWith("──── LICENSE ────"));
+        assertTrue("sp00nz's MIT notice", t.contains("Copyright (c) 2026 sp00nz"));
+        for (String part : new String[] { "──── NOTICE ────", "SDL2 2.32.10", "──── LGPL-2.1 ────",
+                                          "LLVM Exceptions", "PYTHON SOFTWARE FOUNDATION LICENSE", "Capstone" })
+            assertTrue(part, t.contains(part));
+        key(a, KeyEvent.KEYCODE_DPAD_DOWN);   // scrolls, does not leave the screen
+        idle(300);
+        assertNotNull(a.licencesForTest());
+        key(a, KeyEvent.KEYCODE_BUTTON_B);
+        idle(300);
+        assertNull("B goes back to About", a.licencesForTest());
+    }
+
     /** Calm: every screen shows at most three hints, in one footer line. */
     @Test
     public void atMostThreeHints() throws Exception {
@@ -563,7 +587,7 @@ public class LauncherScreensTest {
         LauncherActivity a = launch();
         for (LauncherActivity.Screen s : new LauncherActivity.Screen[] { LauncherActivity.Screen.HOME,
                 LauncherActivity.Screen.SETTINGS, LauncherActivity.Screen.CONTROLS, LauncherActivity.Screen.GAME_DATA,
-                LauncherActivity.Screen.ABOUT, LauncherActivity.Screen.SOURCE, LauncherActivity.Screen.STORAGE,
+                LauncherActivity.Screen.ABOUT, LauncherActivity.Screen.LICENCES, LauncherActivity.Screen.SOURCE, LauncherActivity.Screen.STORAGE,
                 LauncherActivity.Screen.WELCOME }) {
             a.goForTest(s);
             idle(300);

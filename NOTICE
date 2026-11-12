@@ -162,4 +162,66 @@ Reference material (no code taken)
   for them.
 
 
+The Android app (XRecomp) — what the APK ships
+-----------------------------------------------
+
+  The Android host and app (android/, src/platform/android_*, tools/prepare
+  --android, tools/android/) are this fork's own work, MIT like the rest
+  (see LICENSE). The APK built from them carries, besides this repository's
+  code, the components below. The licence texts travel inside the APK: the
+  build copies LICENSE, NOTICE and LICENSES/ into its assets, and the app
+  shows them under About > Licences. Versions are pinned in
+  tools/docker/android.Dockerfile and tools/android/toolchain/versions.env.
+
+  SDL2 2.32.10, zlib licence (libmain.so, the SDLActivity Java classes)
+    https://github.com/libsdl-org/SDL
+    Copyright (C) 1997-2025 Sam Lantinga <slouken@libsdl.org>
+
+      This software is provided 'as-is', without any express or implied
+      warranty. In no event will the authors be held liable for any damages
+      arising from the use of this software.
+
+      Permission is granted to anyone to use this software for any purpose,
+      including commercial applications, and to alter it and redistribute it
+      freely, subject to the following restrictions:
+
+      1. The origin of this software must not be misrepresented; you must
+         not claim that you wrote the original software. If you use this
+         software in a product, an acknowledgment in the product
+         documentation would be appreciated but is not required.
+      2. Altered source versions must be plainly marked as such, and must
+         not be misrepresented as being the original software.
+      3. This notice may not be removed or altered from any source
+         distribution.
+
+  CPython 3.13.18, Python Software Foundation License Version 2
+    (libpython3.13.so, libxbapython.so, assets/prepare/python-stdlib.zip)
+    https://www.python.org
+    Copyright (c) 2001 Python Software Foundation; All Rights Reserved.
+    Full text: LICENSES/PSF-2.0.txt. The extension modules it ships link
+    bzip2 1.0.8 (BSD-style, Copyright (C) 1996-2010 Julian R Seward),
+    libffi 3.4.4 (MIT, Copyright (c) 1996-2022 Anthony Green, Red Hat, Inc
+    and others) and liblzma from XZ Utils 5.4.6 (public domain), built by
+    BeeWare's cpython-android-source-deps. OpenSSL and SQLite are not
+    shipped.
+
+  Capstone 5.0.9, BSD 3-Clause (libcapstone.so and its Python bindings)
+    https://www.capstone-engine.org
+    Copyright (c) 2013, COSEINC. Full text: LICENSES/BSD-3-Clause-capstone.txt
+
+  LLVM 19.1.7: clang, lld, compiler-rt builtins, libunwind
+    Apache License v2.0 with LLVM Exceptions (libxbacc.so, the clang resource
+    directory in assets/prepare/sysroot.zip)
+    https://llvm.org
+    Full text: LICENSES/Apache-2.0-WITH-LLVM-exception.txt
+
+  Android NDK r28c sysroot (assets/prepare/sysroot.zip: bionic headers and
+    stub libraries), Apache License 2.0 and BSD-style licences, each
+    header carrying its own notice. https://developer.android.com/ndk
+
+  The packs the app builds on the device (libtitle.so) are made from the
+  player's own disc and never leave the device; no game code or data is in
+  this repository, an APK or a CI artefact.
+
+
 Contributors to xboxrecomp itself are credited in CONTRIBUTORS.md.

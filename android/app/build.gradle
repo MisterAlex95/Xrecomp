@@ -42,6 +42,25 @@ abstract class XbaSelftestAsset extends DefaultTask {
 def selftestAsset = tasks.register('xbaSelftestAsset', XbaSelftestAsset) {
     xbe = rootProject.file('../tools/conformance/test.xbe')
 }
+// The licences the APK must carry (NOTICE « The Android app »): LICENSE, NOTICE and LICENSES/*.txt as assets
+// licences/, which About > Licences shows. Copied at build time, never kept twice in the repo.
+abstract class XbaLicencesAsset extends DefaultTask {
+    @InputFiles @PathSensitive(PathSensitivity.NAME_ONLY) abstract ConfigurableFileCollection getTexts()
+    @OutputDirectory abstract DirectoryProperty getOutputDir()
+    @TaskAction void copy() {
+        def dir = new File(outputDir.get().asFile, 'licences')
+        outputDir.get().asFile.deleteDir()
+        dir.mkdirs()
+        texts.files.findAll { it.isFile() }.each {
+            def name = it.name.endsWith('.txt') ? it.name : it.name + '.txt'
+            java.nio.file.Files.copy(it.toPath(), new File(dir, name).toPath())
+        }
+    }
+}
+def licencesAsset = tasks.register('xbaLicencesAsset', XbaLicencesAsset) {
+    texts.from(rootProject.file('../LICENSE'), rootProject.file('../NOTICE'),
+               fileTree(rootProject.file('../LICENSES')) { include '*.txt' })
+}
 // The on-device toolchain of the Prepare (docs/android/toolchain.md, docs/android/prepare.md): -PxbaToolchainDir=DIR,
 // made by tools/android/toolchain/ (the toolchain-out stage of tools/docker/android.Dockerfile). It adds the jniLibs
 // libxbapython.so, libpython3.13.so, libcapstone.so and libxbacc.so, the assets prepare/python-stdlib.zip and
@@ -120,6 +139,7 @@ def toolkitAsset = xbaToolchainDir ? tasks.register('xbaToolkitAsset', XbaToolki
 androidComponents {
     onVariants(selector().all()) { variant ->
         variant.sources.assets?.addGeneratedSourceDirectory(selftestAsset, XbaSelftestAsset::getOutputDir)
+        variant.sources.assets?.addGeneratedSourceDirectory(licencesAsset, XbaLicencesAsset::getOutputDir)
         if (toolkitAsset) variant.sources.assets?.addGeneratedSourceDirectory(toolkitAsset, XbaToolkitAsset::getOutputDir)
     }
 }

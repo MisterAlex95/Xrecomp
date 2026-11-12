@@ -78,7 +78,8 @@ import fr.adserver.xboxrecomp.Widgets.MenuRow;
  * - SETTINGS: four tabs (General, Graphics, Audio, Advanced): the launcher's preferences and a few RECOMP_* options
  *   saved to recomp.cfg (RecompConfig), applied at the next start; About ends Advanced;
  * - CONTROLS: the device's buttons and the Xbox controller buttons the game gets;
- * - GAME_DATA (« Manage »): change game, delete the imported copy and the game's stored things; ABOUT;
+ * - GAME_DATA (« Manage »): change game, delete the imported copy and the game's stored things; ABOUT (X: LICENCES,
+ *   the licence texts the APK carries, assets/licences/);
  * - PREPARE: Home's layout with the on-device Prepare's progress (dimmed after two idle minutes, for OLED screens).
  *
  * The « Calm » look (docs/android/app-shell.md « Look, motion and sound »): a title-only top bar, one footer line
@@ -117,7 +118,8 @@ public class LauncherActivity extends Activity {
     private static final long CONFIRM_MS = 5000;
 
     enum Screen {
-        WELCOME, SOURCE, FOLDER_ACCESS, IMPORT, HOME, SETTINGS, CONTROLS, GAME_DATA, ABOUT, PREPARE, LIBRARY, STORAGE
+        WELCOME, SOURCE, FOLDER_ACCESS, IMPORT, HOME, SETTINGS, CONTROLS, GAME_DATA, ABOUT, LICENCES, PREPARE, LIBRARY,
+        STORAGE
     }
 
     /** The Preparing screen dims after this long without input (OLED burn-in); any key or touch wakes it. */
@@ -781,6 +783,7 @@ public class LauncherActivity extends Activity {
         focusables.clear();
         defaultFocus = null;
         desc = null;
+        licencesScroll = null;
         xAction = yAction = startAction = l1Action = r1Action = null;
         topRight.setText("");
         topTabs.removeAllViews();
@@ -831,6 +834,9 @@ public class LauncherActivity extends Activity {
             break;
         case ABOUT:
             buildAbout();
+            break;
+        case LICENCES:
+            buildLicences();
             break;
         case PREPARE:
             buildPrepare();
@@ -1026,6 +1032,12 @@ public class LauncherActivity extends Activity {
             default:
                 break;
             }
+        }
+        if (licencesScroll != null && sheet == null
+                && (k == KeyEvent.KEYCODE_DPAD_UP || k == KeyEvent.KEYCODE_DPAD_DOWN)) {
+            if (down)   // repeats too: holding the D-pad keeps scrolling
+                licencesScroll.smoothScrollBy(0, (k == KeyEvent.KEYCODE_DPAD_UP ? -1 : 1) * Theme.ROW_H * 2);
+            return true;
         }
         switch (k) {
         case KeyEvent.KEYCODE_BACK:
@@ -3513,7 +3525,80 @@ public class LauncherActivity extends Activity {
         rl.leftMargin = Theme.S6;
         h.addView(right, rl);
         body.addView(h, new FrameLayout.LayoutParams(MATCH, MATCH));
+        xAction = () -> go(Screen.LICENCES);
+        addHint("X", R.string.LICENCES, xAction);
         addHint("B", R.string.HINT_BACK, this::back);
+    }
+
+    // ---- LICENCES ----------------------------------------------------------------------------------------------
+
+    /** The licence texts in the order the screen shows them; the rest of assets/licences/ follows, sorted. */
+    static final String[] LICENCE_ORDER = { "LICENSE.txt", "NOTICE.txt" };
+
+    /** The Licences screen's scroller: the D-pad scrolls it (dispatchKeyEvent), L1 / R1 page. Null elsewhere. */
+    private ScrollView licencesScroll;
+
+    /**
+     * Every licence text the APK carries (assets/licences/: LICENSE, NOTICE, LICENSES/*.txt, copied by the build),
+     * one after the other under their file names; a short note when the folder is missing (a build without it).
+     */
+    static String licencesText(android.content.res.AssetManager assets) {
+        List<String> names = new ArrayList<>();
+        try {
+            String[] all = assets.list("licences");
+            if (all != null)
+                names.addAll(java.util.Arrays.asList(all));
+        } catch (java.io.IOException e) {
+            Log.w(TAG, "licences: " + e);
+        }
+        java.util.Collections.sort(names);
+        List<String> order = new ArrayList<>();
+        for (String n : LICENCE_ORDER)
+            if (names.remove(n))
+                order.add(n);
+        order.addAll(names);
+        StringBuilder b = new StringBuilder();
+        for (String n : order) {
+            try (java.io.InputStream in = assets.open("licences/" + n)) {
+                java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+                byte[] buf = new byte[8192];
+                int k;
+                while ((k = in.read(buf)) > 0)
+                    out.write(buf, 0, k);
+                if (b.length() > 0)
+                    b.append("\n\n");
+                b.append("──── ").append(n.replaceAll("\\.txt$", "")).append(" ────\n\n");
+                b.append(new String(out.toByteArray(), java.nio.charset.StandardCharsets.UTF_8).trim());
+            } catch (java.io.IOException e) {
+                Log.w(TAG, "licences: " + n + ": " + e);
+            }
+        }
+        return b.toString();
+    }
+
+    /** About › Licences: the texts, monospaced (NOTICE is laid out in columns), scrolled with the D-pad or a finger. */
+    private void buildLicences() {
+        screenTitle.setText(R.string.LICENCES);
+        String text = licencesText(getAssets());
+        ScrollView scroll = new ScrollView(this);
+        scroll.setVerticalScrollBarEnabled(true);
+        scroll.setPadding(0, 0, 0, Theme.S3);
+        scroll.setClipToPadding(false);
+        TextView t = Theme.text(this, Theme.T_SMALL, Theme.REGULAR, Theme.TEXT_DIM,
+                                text.isEmpty() ? getString(R.string.LICENCES_MISSING) : text);
+        t.setTypeface(android.graphics.Typeface.MONOSPACE);
+        t.setTextIsSelectable(false);
+        scroll.addView(t, new FrameLayout.LayoutParams(MATCH, WRAP));
+        body.addView(scroll, new FrameLayout.LayoutParams(MATCH, MATCH));
+        licencesScroll = scroll;
+        l1Action = () -> scroll.smoothScrollBy(0, -scroll.getHeight() * 9 / 10);
+        r1Action = () -> scroll.smoothScrollBy(0, scroll.getHeight() * 9 / 10);
+        addHint("B", R.string.HINT_BACK, this::back);
+    }
+
+    /** What the Licences screen shows (tests). */
+    String licencesForTest() {
+        return licencesScroll == null ? null : ((TextView)licencesScroll.getChildAt(0)).getText().toString();
     }
 
     private String version() {
