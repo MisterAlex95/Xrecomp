@@ -15,7 +15,8 @@ enable_testing()
 
 set(XBE ${CMAKE_CURRENT_SOURCE_DIR}/../../tools/conformance/test.xbe)
 # One process per mode: RECOMP_TITLE_KEVENTS is read once and cached.
+add_test(NAME kernel_set_guest_event_off COMMAND kernel_set_guest_event_test off ${XBE})
 add_test(NAME kernel_set_guest_event_default COMMAND kernel_set_guest_event_test default ${XBE})
 add_test(NAME kernel_set_guest_event_title_kevents COMMAND kernel_set_guest_event_test title-kevents ${XBE})
-set_tests_properties(kernel_set_guest_event_default kernel_set_guest_event_title_kevents
+set_tests_properties(kernel_set_guest_event_off kernel_set_guest_event_default kernel_set_guest_event_title_kevents
                      PROPERTIES TIMEOUT 30)

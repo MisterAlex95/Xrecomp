@@ -8,7 +8,8 @@
  *
  * One process per mode, because the switch is read once:
  *
- *   default        No switch set. Pins what every title gets today: the guest
+ *   off            RECOMP_TITLE_KEVENTS=0 (title-built events are guest events
+ *                  by default since K-5). Pins the opted-out behaviour: the guest
  *                  address goes to Win32 as a HANDLE, so a set is lost and a
  *                  wait fails instead of reporting the event's state.
  *   title-kevents  RECOMP_TITLE_KEVENTS=1. Each check fails without it:
@@ -163,7 +164,7 @@ static unsigned char *load_file(const char *path, size_t *len)
 
 int main(int argc, char **argv)
 {
-    const char *mode = argc > 1 ? argv[1] : "default";
+    const char *mode = argc > 1 ? argv[1] : "off";
     const char *path = argc > 2 ? argv[2] : "tools/conformance/test.xbe";
     int on = !strcmp(mode, "title-kevents");
     size_t xbe_len = 0;
@@ -173,16 +174,15 @@ int main(int argc, char **argv)
     int i;
 
     setvbuf(stdout, NULL, _IONBF, 0);
-    if (!on && strcmp(mode, "default")) {
+    if (!on && strcmp(mode, "off")) {
         printf("unknown mode '%s'\n", mode);
         return 2;
     }
 
 #if defined(_WIN32)
-    _putenv_s("RECOMP_TITLE_KEVENTS", on ? "1" : "");
+    _putenv_s("RECOMP_TITLE_KEVENTS", on ? "1" : "0");
 #else
-    if (on) setenv("RECOMP_TITLE_KEVENTS", "1", 1);
-    else    unsetenv("RECOMP_TITLE_KEVENTS");
+    setenv("RECOMP_TITLE_KEVENTS", on ? "1" : "0", 1);
 #endif
 
     xbe = load_file(path, &xbe_len);

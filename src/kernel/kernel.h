@@ -521,20 +521,21 @@ ULONG_PTR xbox_resolve_ordinal(ULONG ordinal);
 /* Kernel bridge (kernel_bridge.c) - resolve kernel thunks in Xbox memory */
 void xbox_kernel_bridge_init(void);
 
-/* Set a KEVENT the title built by writing its header (RECOMP_TITLE_KEVENTS=1)
- * from a host thread, as the console's interrupt handlers do: SignalState 1 in
+/* Set a KEVENT the title built by writing its header (a guest event: the
+ * default, unless RECOMP_TITLE_KEVENTS=0, or adopted) from a host thread, as the console's interrupt handlers do: SignalState 1 in
  * guest memory and the host event set, so a guest KeWaitForSingleObject on it
  * returns. For title profiles and device models (D3D software method 5 sets
  * the fence event BlockOnTime sleeps on). Returns 1 when set, 0 when the
- * object is not such an event (switch off, KeInitializeEvent'ed, bad header). */
+ * object is not such an event (switch off and not adopted, KeInitializeEvent'ed,
+ * bad header). */
 int xbox_KeSetGuestEvent(uint32_t guest_va);
 
 /* Treat the KEVENT at guest_va, which the title builds itself, as a guest
- * event (the RECOMP_TITLE_KEVENTS behaviour for that one object): waits on it
- * block until something sets it instead of failing at once. Only for an event
- * whose setter the runtime models (D3D's fence event with software method 5
- * serviced under the DMA walk). Returns 1 when adopted, 0 when the table of
- * such objects is full. */
+ * event even with RECOMP_TITLE_KEVENTS=0 (the default behaviour, for that one
+ * object): waits on it block until something sets it instead of failing at
+ * once. Only for an event whose setter the runtime models (D3D's fence event
+ * with software method 5 serviced under the DMA walk). Returns 1 when adopted,
+ * 0 when the table of such objects is full. */
 int xbox_KeAdoptGuestEvent(uint32_t guest_va);
 
 /**

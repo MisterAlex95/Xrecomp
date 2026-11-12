@@ -11,5 +11,5 @@ enable_testing()
 set(XBE ${CMAKE_CURRENT_SOURCE_DIR}/../../tools/conformance/test.xbe)
 # One process per mode: the switches are read once and cached, so they cannot be
 # flipped inside a run.
-add_test(NAME kernel_events_default COMMAND kernel_events_test default ${XBE})
+add_test(NAME kernel_events_off COMMAND kernel_events_test off ${XBE})
 add_test(NAME kernel_events_title_kevents COMMAND kernel_events_test title-kevents ${XBE})

@@ -202,7 +202,7 @@ def test_fable_and_burnout_keep_their_own_values():
     for plat in ("android", "desktop"):
         assert bo3["env_default"][plat]["RECOMP_GPU_FPS_CAP"] == "60"
         assert bo3["env_default"][plat]["RECOMP_PB_WALK"] == "dma"
-        assert bo3["env_default"][plat]["RECOMP_TITLE_KEVENTS"] == "1"
+        assert "RECOMP_TITLE_KEVENTS" not in bo3["env_default"][plat]   # on by default in the kernel
 
 
 def test_a_renderware_title_with_no_profile_gets_the_engine_layer():

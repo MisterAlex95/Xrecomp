@@ -2108,7 +2108,7 @@ static HANDLE ke_guest_event_prepare(uint32_t guest_va, int *type)
  * standing in for the interrupt that calls KeSetEvent on the console (D3D's
  * software method 5, for one). Same effect as the KeSetEvent bridge on such an
  * event. Returns 0, and touches nothing, when the object is not one
- * (RECOMP_TITLE_KEVENTS off, a KeInitializeEvent shadow, a bad header). */
+ * (RECOMP_TITLE_KEVENTS=0, a KeInitializeEvent shadow, a bad header). */
 int xbox_KeSetGuestEvent(uint32_t guest_va)
 {
     int type;
@@ -8093,7 +8093,7 @@ static void ke_shadow_remove(uint32_t guest_va)
     LeaveCriticalSection(&g_ke_shadow_cs);
 }
 
-/* Events a title initialises itself (RECOMP_TITLE_KEVENTS=1, off by default).
+/* Events a title initialises itself (on by default, RECOMP_TITLE_KEVENTS=0 turns it off).
  *
  * Shadows are made by KeInitializeEvent, but XDK code can build a KEVENT by
  * writing its header directly: one title (T()NY) does not even import
@@ -8109,10 +8109,18 @@ static void ke_shadow_remove(uint32_t guest_va)
  * memory up to date, because XDK code resets it by writing 0 there.
  * Returns NULL for anything else (the old paths apply).
  *
- * Opt-in because it changes what every such wait does: a wait that failed at
- * once now blocks until the event is set, and on a title whose setter the
- * runtime does not model yet (a GPU interrupt, say) that turns a spin into a
- * hang. Turn it on for a title that waits on events it built itself. */
+ * On by default (K-5): XDK libraries build most of their events this way
+ * (KOTOR, Black and Burnout 3 do not import KeInitializeEvent at all: XAPI,
+ * XPP and D3D write the headers). With guest events off, KOTOR's synchronous
+ * USB request saw its wait fail at once, returned, and the URB on its stack
+ * was later completed into garbage ([ICALL] Failed to resolve VA 0x003067DF,
+ * inside LIBCMT free) -- one failed wait, which the wait-spin promotion below
+ * cannot catch. The cost: a wait that failed at once now blocks until the
+ * event is set, so on a title whose setter the runtime does not model yet (a
+ * GPU interrupt, say) a spin turns into a hang. RECOMP_TITLE_KEVENTS=0 brings
+ * the old behaviour back (the guest address goes to the host as a HANDLE, so
+ * the wait fails); the wait-spin promotion and xbox_KeAdoptGuestEvent still
+ * work then. */
 /* Objects promoted one by one by the wait-spin detector (XBA-93, see
  * bridge_wait_spin): the RECOMP_TITLE_KEVENTS behaviour for an event a thread
  * keeps failing to wait on, without turning it on for every object. */
@@ -8175,7 +8183,7 @@ static HANDLE ke_guest_event(uint32_t guest_va, int *type)
 
     if (enabled < 0) {
         const char *e = getenv("RECOMP_TITLE_KEVENTS");
-        enabled = e && *e == '1';
+        enabled = !(e && *e == '0');    /* on unless turned off */
     }
     if (!enabled && !ke_is_promoted(guest_va))
         return NULL;

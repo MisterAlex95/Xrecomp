@@ -13,8 +13,8 @@ ctest --test-dir build/kernel-events -C Release --output-on-failure
 
 | Test | What it checks |
 |---|---|
-| `kernel_events_default` | No switch set. Pins what every title gets today: the guest address goes to Win32 as a `HANDLE`, so after `KeSetEvent` the wait still fails. |
-| `kernel_events_title_kevents` | `RECOMP_TITLE_KEVENTS=1`. The table below. |
+| `kernel_events_off` | `RECOMP_TITLE_KEVENTS=0`. Pins the opted-out behaviour: the guest address goes to Win32 as a `HANDLE`, so after `KeSetEvent` the wait still fails. |
+| `kernel_events_title_kevents` | `RECOMP_TITLE_KEVENTS=1`, the same as the default since K-5. The table below. |
 
 Each check fails on v0.12.0 (every wait returns `0xC0000001`) and passes with
 the switch:
