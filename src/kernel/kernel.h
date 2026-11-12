@@ -527,7 +527,8 @@ void xbox_kernel_bridge_init(void);
  * returns. For title profiles and device models (D3D software method 5 sets
  * the fence event BlockOnTime sleeps on). Returns 1 when set, 0 when the
  * object is not such an event (switch off and not adopted, KeInitializeEvent'ed,
- * bad header). */
+ * bad header); with the switch off an event header still gets SignalState 1,
+ * so a later wait-spin promotion sees the set. */
 int xbox_KeSetGuestEvent(uint32_t guest_va);
 
 /* Treat the KEVENT at guest_va, which the title builds itself, as a guest

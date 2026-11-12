@@ -12,11 +12,15 @@
  *
  * Title-built KEVENTs are guest events by default (K-5); one process per mode:
  *
- *   off            RECOMP_TITLE_KEVENTS=0: returns 0 and leaves SignalState alone.
+ *   off            RECOMP_TITLE_KEVENTS=0: returns 0; SignalState 1 in guest memory
+ *                  all the same, as the console's KeSetEvent would leave it.
  *     4. xbox_KeAdoptGuestEvent makes one object a guest event with the
  *        switch off (the D3D layer's fence event): a zero-timeout wait times
  *        out instead of failing, a set returns 1 and the next wait succeeds;
  *        other objects stay as they were
+ *     5. a set that comes before the wait-spin detector promotes the object
+ *        (XBA-93) is not lost: once promoted, the next wait succeeds and
+ *        consumes it, and a guest thread then blocked on it is released
  *   default        No switch, and title-kevents (RECOMP_TITLE_KEVENTS=1):
  *     1. an object whose header is not an event: 0, memory untouched
  *     2. a synchronization event a guest thread waits on for ever: returns 1,
@@ -55,6 +59,7 @@ static uint32_t scratch;              /* guest VA of a 64 KB block */
 #define SYNC_VA    (scratch + 0x3000)
 #define NOTIF_VA   (scratch + 0x3100)
 #define OTHER_VA   (scratch + 0x3200)
+#define SPIN_VA    (scratch + 0x3300)
 
 static uint32_t wait_va;
 static int failures;
@@ -95,10 +100,12 @@ static uint32_t ke_wait(uint32_t stack, uint32_t va, uint32_t timeout_va)
 static volatile int waiter_done;
 static volatile uint32_t waiter_status;
 
+static uint32_t wait_target;           /* 0: SYNC_VA */
+
 static void *waiter(void *arg)
 {
     (void)arg;
-    waiter_status = ke_wait(STACK_WAIT, SYNC_VA, 0);   /* no timeout */
+    waiter_status = ke_wait(STACK_WAIT, wait_target ? wait_target : SYNC_VA, 0);   /* no timeout */
     waiter_done = 1;
     return NULL;
 }
@@ -174,8 +181,11 @@ int main(int argc, char **argv)
     build_event(SYNC_VA, 1, 0);
     if (!on) {
         r = xbox_KeSetGuestEvent(SYNC_VA);
-        check(r == 0 && G(SYNC_VA)[1] == 0,
-              "off: not a host event -- returns 0, SignalState untouched", NULL);
+        check(r == 0 && G(SYNC_VA)[1] == 1,
+              "off: not a host event -- returns 0, SignalState 1 in guest memory", NULL);
+        r = (int)ke_wait(STACK_MAIN, SYNC_VA, ZERO_VA);
+        snprintf(d, sizeof d, "status 0x%08X", (uint32_t)r);
+        check((uint32_t)r != 0 && (uint32_t)r != STATUS_TIMEOUT, "off: a wait on it still fails at once", d);
 
         /* 4. One object adopted. */
         build_event(NOTIF_VA, 0, 0);
@@ -189,7 +199,40 @@ int main(int argc, char **argv)
         snprintf(d, sizeof d, "status 0x%08X", (uint32_t)r);
         check(r == 0, "4d. the next wait succeeds", d);
         r = xbox_KeSetGuestEvent(SYNC_VA);
-        check(r == 0 && G(SYNC_VA)[1] == 0, "4e. another object is still not a host event", NULL);
+        r = r == 0 ? (int)ke_wait(STACK_MAIN, SYNC_VA, ZERO_VA) : 0;
+        check(r != 0 && (uint32_t)r != STATUS_TIMEOUT, "4e. another object is still not a host event", NULL);
+
+        /* 5. A set before the promotion (XBA-93) survives it. */
+        {
+            uint32_t n, st = 1, first_ok = 0;
+            build_event(SPIN_VA, 1, 0);
+            r = xbox_KeSetGuestEvent(SPIN_VA);                  /* lost before: no host event */
+            check(r == 0 && G(SPIN_VA)[1] == 1, "5a. set before promotion: returns 0, SignalState 1", NULL);
+            for (n = 0; n < 5000 && st != 0; n++) {
+                st = ke_wait(STACK_MAIN, SPIN_VA, ZERO_VA);
+                if (st == 0)
+                    first_ok = n + 1;
+                else if (st == STATUS_TIMEOUT)
+                    break;                                      /* promoted, set lost */
+            }
+            snprintf(d, sizeof d, "status 0x%08X after %u waits, SignalState %u", st, n, G(SPIN_VA)[1]);
+            check(st == 0 && first_ok > 1000 && G(SPIN_VA)[1] == 0,
+                  "5b. the spin promotes it and the next wait gets the earlier set", d);
+            /* Blocked for ever, then released from this host thread. */
+            wait_target = SPIN_VA;
+            waiter_done = 0;
+            pthread_create(&t, NULL, waiter, NULL);
+            usleep(100 * 1000);
+            check(!waiter_done, "5c. promoted: a wait without a timeout blocks", NULL);
+            r = xbox_KeSetGuestEvent(SPIN_VA);
+            if (!wait_done(5000)) {
+                check(0, "5d. a set releases it", "still waiting after 5 s");
+                printf("\n%d failure(s)\n", failures);
+                return 1;
+            }
+            pthread_join(t, NULL);
+            check(r == 1 && waiter_status == 0, "5d. a set releases it", NULL);
+        }
     } else {
         /* 1. Not an event header (type 5 = semaphore-like, size 4). */
         G(OTHER_VA)[0] = 5u | (4u << 16);

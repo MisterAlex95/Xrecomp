@@ -2104,11 +2104,36 @@ static HANDLE ke_guest_event_prepare(uint32_t guest_va, int *type)
     return h;
 }
 
+/* A set or reset on an event the title built itself that is not a guest event
+ * (RECOMP_TITLE_KEVENTS=0, not promoted yet): no host event to signal, but
+ * SignalState in guest memory is written as the console's KeSetEvent /
+ * KeResetEvent would. Otherwise a set that came before the wait-spin detector
+ * promoted the object (XBA-93) was lost: the promoted wait then blocked for
+ * good (Fable's fence event, method 5 arriving while BlockOnTime spun). The
+ * host event a promotion creates starts from SignalState, and
+ * ke_guest_event_prepare re-reads it before each wait. Only for a readable
+ * event header with no KeInitializeEvent shadow. */
+static void ke_lost_signal(uint32_t guest_va, uint32_t state)
+{
+    uint32_t hdr;
+    if (guest_va < 0x10000u || (guest_va & 3u))
+        return;
+    if (guest_va >= 0x04000000u && (guest_va < 0x80000000u || guest_va >= 0x84000000u))
+        return;
+    hdr = BRIDGE_MEM32(guest_va);
+    if (((hdr & 0xFFu) != 0 && (hdr & 0xFFu) != 1) || ((hdr >> 16) & 0xFFu) != 4)
+        return;
+    if (ke_shadow_lookup(guest_va))
+        return;
+    BRIDGE_MEM32(guest_va + 4) = state;
+}
+
 /* Set a KEVENT the title built itself, from a host thread: a device model
  * standing in for the interrupt that calls KeSetEvent on the console (D3D's
  * software method 5, for one). Same effect as the KeSetEvent bridge on such an
- * event. Returns 0, and touches nothing, when the object is not one
- * (RECOMP_TITLE_KEVENTS=0, a KeInitializeEvent shadow, a bad header). */
+ * event. Returns 0 when the object is not a guest event (RECOMP_TITLE_KEVENTS=0
+ * and not promoted or adopted, a KeInitializeEvent shadow, a bad header); an
+ * event header with no shadow still gets SignalState 1 (ke_lost_signal). */
 int xbox_KeSetGuestEvent(uint32_t guest_va)
 {
     int type;
@@ -2116,6 +2141,7 @@ int xbox_KeSetGuestEvent(uint32_t guest_va)
 
     if (!ge) {
         ke_note_set_attempt(guest_va);   /* a wait spin on it may be promoted (XBA-93) */
+        ke_lost_signal(guest_va, 1);
         return 0;
     }
     BRIDGE_MEM32(guest_va + 4) = 1;
@@ -2162,8 +2188,10 @@ static void bridge_KeSetEvent(void)
         }
     }
     h = ke_shadow_lookup(guest_va);
-    if (!h)
+    if (!h) {
         ke_note_set_attempt(guest_va);   /* no host event: a wait spin on it may be promoted (XBA-93) */
+        ke_lost_signal(guest_va, 1);     /* kept for that promotion */
+    }
     if (!h)
         h = bridge_resolve_handle(guest_va);
     if (!h)
@@ -9063,6 +9091,8 @@ static void bridge_KeResetEvent(void)
         }
     }
     h = ke_shadow_lookup(guest_va);
+    if (!h)
+        ke_lost_signal(guest_va, 0);     /* the matching reset (see KeSetEvent) */
     if (!h)
         h = XBOX_TO_NATIVE(guest_va);
     if (h)
