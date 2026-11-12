@@ -249,8 +249,7 @@ public class PrepareServiceTest {
         sc.withIntent(PrepareService.startIntent(app, "/games/a", TID, "First")).startCommand(0, 4);
         assertEquals(Collections.singletonList(TID2), PrepareService.queuedTitleIds());
 
-        go(TID);
-        go(TID2);
+        go(TID);        // the second stays gated until its checks below are done
         waitWorker();   // the first ends; its end starts the next
         Thread second = PrepareService.workerThread();
         assertTrue("the next one started", second != first);
@@ -258,6 +257,7 @@ public class PrepareServiceTest {
         assertTrue(PrepareService.queuedTitleIds().isEmpty());
         assertTrue(PrepareProtocol.readQueue(PrepareProtocol.queueFile(app.getFilesDir())).jobs.isEmpty());
         assertFalse("still running: not stopped", shadowOf(sc.get()).isStoppedBySelf());
+        go(TID2);
         waitWorker();
         assertEquals(PrepareProtocol.DONE, status(TID2).state);
         assertEquals(Pack.Check.VALID, Pack.check(app.getFilesDir(), TID));
