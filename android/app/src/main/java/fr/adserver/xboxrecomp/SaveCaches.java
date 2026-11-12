@@ -68,7 +68,7 @@ final class SaveCaches {
             File src = new File(saveDir, name), dst = new File(out, name);
             if (!src.exists() || dst.exists())
                 continue;
-            if (!out.isDirectory() && !out.mkdirs())
+            if (!(out.mkdirs() || out.isDirectory()))
                 throw new IOException("cannot create " + out);
             //noinspection ResultOfMethodCallIgnored
             src.renameTo(dst);

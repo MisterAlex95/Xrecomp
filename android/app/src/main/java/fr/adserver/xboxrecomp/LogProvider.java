@@ -48,7 +48,7 @@ public class LogProvider extends ContentProvider {
      */
     static boolean dumpOwnLogcat(File f) {
         File d = f.getParentFile();
-        if (d != null && !d.isDirectory() && !d.mkdirs())
+        if (d != null && !(d.mkdirs() || d.isDirectory()))
             return false;
         try {
             Process p = new ProcessBuilder("logcat", "-d", "-v", "threadtime", "-t", "20000",

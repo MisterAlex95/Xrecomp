@@ -104,7 +104,7 @@ final class PrepareRunner {
     /** Opens prepare.log (truncated) and writes the first status (running, the install phase). */
     void begin() throws IOException {
         File dir = statusFile.getParentFile();
-        if (dir != null && !dir.isDirectory() && !dir.mkdirs())
+        if (dir != null && !(dir.mkdirs() || dir.isDirectory()))
             throw new IOException("cannot create " + dir);
         log = new PrintStream(new FileOutputStream(logFile, false), true, "UTF-8");
         status.state = PrepareProtocol.RUNNING;

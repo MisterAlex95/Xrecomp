@@ -285,7 +285,7 @@ final class RecompConfig {
         if (!existed && onlyHeader)
             return;
         File dir = file.getParentFile();
-        if (dir != null && !dir.isDirectory() && !dir.mkdirs())
+        if (dir != null && !(dir.mkdirs() || dir.isDirectory()))
             throw new IOException("cannot create " + dir);
         File tmp = new File(dir, FILE_NAME + ".tmp");
         try (Writer w = new OutputStreamWriter(new FileOutputStream(tmp), StandardCharsets.UTF_8)) {
