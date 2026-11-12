@@ -285,8 +285,45 @@ static void test_parse(void)
     CHECK(nv2a_gl_scale_parse_targets(NULL, &cfg) == 0);
 }
 
+/* Anti-aliased presented surfaces (XBA-119): which ones the window cannot
+ * read through guest memory, and the factors their host frame is resolved
+ * by. */
+static void test_aa_present(void)
+{
+    Nv2aPresentSurface p;
+    uint32_t fx, fy;
+
+    memset(&p, 0, sizeof p);
+    p.bpp = 2; p.pitch = 1280; p.w = 640; p.h = 480;       /* Fable 0x121 */
+    p.format = 0x121;
+    CHECK(!nv2a_gl_present_needs_host(&p));
+    nv2a_gl_aa_factors(&p, &fx, &fy);
+    CHECK(fx == 1 && fy == 1);
+    p.format = 0x2121;                                     /* its AA 2x2 binding: 640 real */
+    nv2a_gl_aa_factors(&p, &fx, &fy);
+    CHECK(fx == 1 && fy == 1);
+    p.bpp = 4; p.pitch = 2560; p.y = 16; p.h = 448;        /* Burnout 3's HUD clip */
+    CHECK(!nv2a_gl_present_needs_host(&p));
+    nv2a_gl_aa_factors(&p, &fx, &fy);
+    CHECK(fx == 1 && fy == 1);
+    p.format = 0x0108;
+    p.pitch = 5120; p.y = 0; p.w = 1280; p.h = 960;        /* 1280x960, no AA mode */
+    CHECK(nv2a_gl_present_needs_host(&p));
+    nv2a_gl_aa_factors(&p, &fx, &fy);
+    CHECK(fx == 1 && fy == 1);
+    p.format = 0x2108;                                     /* AA 2x2, 32-bit */
+    nv2a_gl_aa_factors(&p, &fx, &fy);
+    CHECK(fx == 2 && fy == 2);
+    p.format = 0x1103;                                     /* AA 2x1, 16-bit */
+    p.bpp = 2; p.pitch = 2560; p.h = 480;
+    CHECK(nv2a_gl_present_needs_host(&p));
+    nv2a_gl_aa_factors(&p, &fx, &fy);
+    CHECK(fx == 2 && fy == 1);
+}
+
 int main(void)
 {
+    test_aa_present();
     test_policy();
     test_sticky();
     test_rects();

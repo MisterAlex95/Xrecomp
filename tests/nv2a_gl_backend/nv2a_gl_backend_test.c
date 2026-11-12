@@ -26,6 +26,11 @@
  * so the new depth and the clear went into another target:
  *   7. an 800x600 target cleared after the 64x32 ones is the one cleared,
  *      and the 64x32 target keeps its pixels.
+ *
+ * Anti-aliased presented surface (XBA-119): a 1280x960 AA 2x2 back buffer
+ * presented as is (the window cannot read it through guest memory) comes
+ * out as a 640x480 host frame, each pixel the mean of its four samples:
+ *   8. one green sample column over red reads half green, half red.
  * RECOMP_GPU_CPU_WRITES=0 (another ctest entry) checks that the same cases
  * fail without the merge, so the test tells the two apart. */
 #include "../../src/gpu/nv2a_gl.c"
@@ -35,6 +40,7 @@
 #define FB16   0x00200000u          /* 640x480 R5G6B5 (frame class: scaled) */
 #define FBSWZ  0x00400000u          /* 32x32 swizzled A8R8G8B8 */
 #define FBHOST 0x00500000u          /* 64x32 A8R8G8B8, host present */
+#define FBAA   0x00600000u          /* 1280x960 A8R8G8B8, AA 2x2 */
 #define FBBIG  0x00B00000u          /* 800x600 A8R8G8B8 */
 
 static uint8_t *s_mem;
@@ -329,6 +335,45 @@ int main(void)
                " -> 0x%08X\n", big, before, after);
         CHECK(big == 0xFF0000FFu);
         CHECK(after == before);
+    }
+
+    /* 8. AA 2x2 back buffer, presented. At scale 1 (the frame class would
+     * otherwise draw it at 2, and the host frame would keep every sample). */
+    {
+        Nv2aSurface a = surf(FBAA, 1280, 960, 5120, 4, 0x2108);
+        Nv2aPresentSurface ready;
+        uint32_t i, w = 0, h = 0, c0 = 0, c1 = 0;
+        float keep = s_scale_cfg.scale;
+        s_scale_cfg.scale = 1.0f;
+        a.aa_sx = a.aa_sy = 2;
+        clear(&a, 0xFFFF0000u);
+        {
+            Nv2aSurface g = clip(a, 0, 0, 1, 960);
+            clear(&g, 0xFF00FF00u);
+        }
+        for (i = 0; i < 2; i++) {
+            memset(&ready, 0, sizeof ready);
+            if (present(&a, 0, &ready) && ready.host_px) {
+                const uint8_t *p = (const uint8_t *)ready.host_px
+                                 + (size_t)(ready.host_h / 2) * ready.host_pitch;
+                int rgba = ready.host_format == NV2A_HOST_FORMAT_RGBX8888;
+                w = ready.host_w;
+                h = ready.host_h;
+                c0 = rgba ? ((uint32_t)p[0] << 16 | (uint32_t)p[1] << 8 | p[2])
+                          : ((uint32_t)p[2] << 16 | (uint32_t)p[1] << 8 | p[0]);
+                p += 4;
+                c1 = rgba ? ((uint32_t)p[0] << 16 | (uint32_t)p[1] << 8 | p[2])
+                          : ((uint32_t)p[2] << 16 | (uint32_t)p[1] << 8 | p[0]);
+            }
+            flip();
+        }
+        printf("8. AA 2x2 1280x960 presented: host frame %ux%u, pixel 0 0x%06X, pixel 1 0x%06X\n",
+               w, h, c0, c1);
+        CHECK(w == 640 && h == 480);
+        CHECK((c0 >> 16) >= 0x7E && (c0 >> 16) <= 0x81 && ((c0 >> 8) & 0xFF) >= 0x7E
+              && ((c0 >> 8) & 0xFF) <= 0x81 && (c0 & 0xFF) == 0);
+        CHECK(c1 == 0xFF0000u);
+        s_scale_cfg.scale = keep;
     }
 
     CHECK(glGetError() == GL_NO_ERROR);

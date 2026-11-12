@@ -1142,10 +1142,17 @@ static struct {
     Nv2aPresentSurface surf;
 } s_hpend;
 static uint32_t s_rt_host_serial[NV_GL_MAX_RT];
+/* An anti-aliased presented surface (1280 wide and/or 960 high for the
+ * 640x480 frame: AA 2x1 or 2x2) goes to the window as a host frame,
+ * resolved on the GPU: a linear blit to half its size in each doubled
+ * direction, an exact box filter over the 2 or 4 samples (host_issue). */
+static GLuint s_aa_tex, s_aa_fbo;
+static uint32_t s_aa_w, s_aa_h;
 static struct {
     uint32_t frames;
     uint64_t ns;                          /* issue + map, this side */
     uint32_t w, h;
+    uint32_t aa_frames;                   /* resolved from an anti-aliased surface */
 } s_hst;
 
 /* ---- guest CPU writes into targets (XBA-119) --------------------------- */
@@ -3917,6 +3924,8 @@ static void gl_reset_objects(int lost)
         if (s_pbo) glDeleteBuffers(1, &s_pbo);
         for (i = 0; i < 2; i++)
             if (s_hpbo[i]) glDeleteBuffers(1, &s_hpbo[i]);
+        if (s_aa_fbo) glDeleteFramebuffers(1, &s_aa_fbo);
+        if (s_aa_tex) glDeleteTextures(1, &s_aa_tex);
         if (s_pvbo) glDeleteBuffers(1, &s_pvbo);
         if (s_pebo) glDeleteBuffers(1, &s_pebo);
         if (s_pvao) glDeleteVertexArrays(1, &s_pvao);
@@ -3970,6 +3979,8 @@ static void gl_reset_objects(int lost)
     memset(s_hpbo_size, 0, sizeof s_hpbo_size);
     memset(&s_hpend, 0, sizeof s_hpend);
     s_hmapped = -1;
+    s_aa_tex = s_aa_fbo = 0;
+    s_aa_w = s_aa_h = 0;
     s_near_program = 0;             /* ensure_init: depth clamp on, range 0..1 */
     s_near01 = 0.0f;
     s_target_fbo = 0;
@@ -4129,13 +4140,41 @@ static uint64_t host_now_ns(void)
 /* Start reading target r at its real size into the next host pack buffer. */
 static void host_issue(GlRT *r, const Nv2aPresentSurface *surf)
 {
-    uint32_t w, h;
+    uint32_t w, h, fx, fy;
     GLuint fbo = rt_present_source(r, &w, &h);
     int b = s_hnext;
-    size_t n = (size_t)w * h * 4;
+    size_t n;
 
     if (!fbo || !w || !h)
         return;
+    nv2a_gl_aa_factors(surf, &fx, &fy);
+    if (fx > 1 || fy > 1) {
+        const GLint sr[4] = { 0, 0, (GLint)w, (GLint)h };
+        GLint dr[4] = { 0, 0, 0, 0 };
+        w /= fx;
+        h /= fy;
+        if (!s_aa_tex || s_aa_w != w || s_aa_h != h) {
+            if (!s_aa_tex) {
+                glGenTextures(1, &s_aa_tex);
+                glGenFramebuffers(1, &s_aa_fbo);
+            }
+            sh_tex_scratch(GL_TEXTURE_2D, s_aa_tex);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, (GLsizei)w, (GLsizei)h, 0, GL_RGBA,
+                         GL_UNSIGNED_BYTE, NULL);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
+            sh_fbo(s_aa_fbo);
+            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
+                                   s_aa_tex, 0);
+            s_aa_w = w;
+            s_aa_h = h;
+        }
+        dr[2] = (GLint)w;
+        dr[3] = (GLint)h;
+        sh_blit_rect(fbo, sr, s_aa_fbo, dr, GL_LINEAR);
+        fbo = s_aa_fbo;
+        s_hst.aa_frames++;
+    }
+    n = (size_t)w * h * 4;
     if (b == s_hmapped)
         b ^= 1;                           /* never into the buffer still mapped */
     s_hnext = b ^ 1;
@@ -4329,7 +4368,7 @@ static int gl_present(const Nv2aPresentSurface *now, int sync, Nv2aPresentSurfac
     rt_cpu_check(r, 0);
     if (sync && s_scale_dump)
         scaled_dump(r);
-    if (!sync && host_present_on())
+    if (!sync && (host_present_on() || (s_display_w && nv2a_gl_present_needs_host(now))))
         return host_present(r, now, ready);
     if (sync || s_present_sync_mode) {
         rt_readback(r);
@@ -4392,9 +4431,10 @@ static void gl_flip(void)
                     s_st.cpu_merges, s_st.cpu_kpx);
         if (s_hst.frames)
             fprintf(stderr, "  [GPUGL] host present: %u frames at %ux%u, %.3f ms/frame"
-                            " (read-back issue + map)\n",
+                            " (read-back issue + map), %u resolved from an anti-aliased"
+                            " surface\n",
                     s_hst.frames, s_hst.w, s_hst.h,
-                    (double)s_hst.ns / 1e6 / (double)s_hst.frames);
+                    (double)s_hst.ns / 1e6 / (double)s_hst.frames, s_hst.aa_frames);
         memset(&s_st, 0, sizeof s_st);
         memset(&s_hst, 0, sizeof s_hst);
         if (s_scale_cfg.scale != 1.0f)
