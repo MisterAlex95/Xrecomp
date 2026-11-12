@@ -110,6 +110,7 @@ Switches that change how the kernel layer behaves. Each fixes a class of titles;
 | `RECOMP_CS_MODE=guest` | per-section | Runs critical sections on the guest's own structure (state at +0x10), falling back to the shadow for ones that don't read as critical sections. | `kernel_rtl.c` |
 | `RECOMP_WORKERS` | off | Runs requests of the title's worker threads inline. A bisecting tool for concurrency bugs. | `kernel_bridge.c` |
 | `RECOMP_THREAD_STACKS=N` | 8 | Worker thread stacks alive at once (512 KB of guest heap each). Past the limit a new worker runs inline on its creator, which deadlocks a worker that waits for requests. | `xbox_memory_layout.c` |
+| `RECOMP_INLINE_APC=1` | off (deferred) | Runs a file request's completion APC (ReadFileEx, WriteFileEx) inline inside NtReadFile/NtWriteFile, the default before XBA-102, instead of at the issuing thread's next alertable user-mode wait (SleepEx, the Nt/Ke waits), which then returns STATUS_USER_APC as on the console. The status block and the event are set at the request either way. A/B switch kept for one release; `xbox_SetDeferredIoApc` wins over it. | `kernel_bridge.c` |
 | `RECOMP_ASYNC_IO` | off | Reports a read on an asynchronous handle as still in flight. The data is read synchronously either way. | `kernel_bridge.c` |
 | `RECOMP_DISPATCH_GATE=1` | off | The one-CPU gate: guest code runs only at safe points while interrupts are delivered. | `kernel_hal.c` |
 | `RECOMP_IRQ_SAFE_POINTS` | on with the gate | `0` disables safe-point delivery under the gate. | `kernel_hal.c` |

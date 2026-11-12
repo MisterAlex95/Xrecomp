@@ -12,7 +12,6 @@
 #include <string.h>
 
 extern void xbox_SetMapSize(size_t bytes);
-extern void xbox_SetDeferredIoApc(int on);
 extern void xbox_SetDelayOverride(uint32_t ret_va, uint32_t from_ms, uint32_t to_ms);
 
 #ifndef _WIN32
@@ -79,13 +78,10 @@ void fable_configure(void)
      * deferred RunPushBuffer (0x00855900; dispatcher sub_00859C40, helper
      * sub_00855860) with the addresses in title.json "params". */
     xbox_SetMapSize((size_t)1024 * 1024 * 1024);
-    /* File-I/O completion APCs at the next alertable wait, as the hardware
-     * does, not inline inside NtReadFile (kernel_bridge.c, deliver_one_apc).
-     * Delivered inline, the loader's completion ran before the read call had
-     * returned and its bookkeeping was set up. FABLE_INLINE_APC=1 restores
-     * the inline delivery for comparison. */
-    if (!getenv("FABLE_INLINE_APC"))
-        xbox_SetDeferredIoApc(1);
+    /* File-I/O completion APCs run at the next alertable wait, as the hardware
+     * does: the runtime's default since XBA-102 (inline, the loader's
+     * completion ran before the read call had returned and its bookkeeping
+     * was set up). RECOMP_INLINE_APC=1 restores the inline delivery. */
     /* The front end (title screen, menus, loading screens) runs
      * do { draw; Sleep(50); } while (!done) in sub_0020BBB5, the two
      * `push 0x32; call Sleep` at 0x0020BD93 and 0x0020C3C5: 20 fps at most

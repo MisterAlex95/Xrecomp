@@ -484,15 +484,34 @@ static RECOMP_TLS uint32_t g_thread_stack_top = 0;
 /* Deferred file I/O APCs; see xbox_SetDeferredIoApc and deliver_one_apc.
  *
  * Per thread, because an APC belongs to the thread that issued the request and
- * runs only when that thread waits alertably. 16 is generous: a title waits
- * between batches of reads, and an overflowing request is delivered inline
- * (the old behaviour) rather than dropped. */
-static int g_defer_io_apc = 0;
-#define IO_APC_QUEUE 16
+ * runs only when that thread waits alertably. A thread that exits with some
+ * still queued loses them with its thread-local storage, as the console's
+ * thread rundown flushes a dying thread's user APCs without running them.
+ * 64 is generous: a title waits between batches of reads, and an overflowing
+ * request is delivered inline (the old behaviour) rather than dropped.
+ *
+ * On by default, the console's rule (XBA-102). RECOMP_INLINE_APC=1 restores
+ * the inline delivery for one release, for A/B. -1: not decided yet. */
+static int g_defer_io_apc = -1;
+#define IO_APC_QUEUE 64
 static RECOMP_TLS uint32_t g_io_apc[IO_APC_QUEUE][3];   /* routine, ctx, iosb */
 static RECOMP_TLS int g_io_apc_count = 0;
 
-void xbox_SetDeferredIoApc(int on) { g_defer_io_apc = on; }
+void xbox_SetDeferredIoApc(int on) { g_defer_io_apc = on ? 1 : 0; }
+
+static int defer_io_apc(void)
+{
+    int v = g_defer_io_apc;
+    if (v < 0) {
+        const char *e = getenv("RECOMP_INLINE_APC");
+        v = !(e && *e && *e != '0');
+        if (!v)
+            fprintf(stderr, "  [KERNEL] file I/O APCs run inline at the request"
+                            " (RECOMP_INLINE_APC)\n");
+        g_defer_io_apc = v;
+    }
+    return v;
+}
 
 static int bridge_run_io_apcs(uint32_t alertable, uint32_t wait_mode);
 
@@ -2338,6 +2357,8 @@ static void bridge_KeWaitForSingleObject(void)
     uint64_t t0 = xbox_wait_stats_begin(bridge_timeout_is_poll(timeout_ptr));
     HANDLE h;
 
+    if (bridge_run_io_apcs(alertable, wait_mode))
+        return;
     {   /* An event the title built itself (see ke_guest_event). Its
          * SignalState in guest memory is the truth -- XDK code resets it by
          * writing 0 there -- so bring the host event in line first. */
@@ -4917,13 +4938,11 @@ static void bridge_NtOpenFile(void)
  * cache-partition setup does exactly that, gives up after its 5-second SleepEx,
  * and asserts "setup for new cache file failed (#0)".
  *
- * ponytail: by default the APC runs inline here rather than at the next
- * alertable wait (xbox_SetDeferredIoApc(1) defers it, as the hardware does).
- * The data really is ready by then, so the observable result matches; a title
- * that depends on the APC *not* having run yet would notice, and Fallout:
- * Brotherhood of Steel does (see bridge_run_io_apcs). Deferral made no
- * difference to Halo's map streamer (it still issues one 14 KB batch and
- * stops), so it stays opt-in until the other titles have been checked.
+ * The APC runs at the issuing thread's next alertable user-mode wait, as on
+ * the hardware (bridge_run_io_apcs), not inline here: a title that depends on
+ * the APC *not* having run yet notices, and Fallout: Brotherhood of Steel and
+ * Fable do. RECOMP_INLINE_APC=1 (or xbox_SetDeferredIoApc(0)) runs it inline,
+ * the old default.
  */
 recomp_func_t recomp_lookup_kernel(uint32_t xbox_va);
 
@@ -4971,7 +4990,10 @@ static void deliver_one_apc(uint32_t apc_routine, uint32_t apc_context,
 }
 
 /* Per-thread pending-APC ring. An APC is delivered on the thread that issued
- * the request, which is also the thread that waits, so thread-local is right. */
+ * the request, which is also the thread that waits, so thread-local is right.
+ * The status block is written and the event set before this, so a title that
+ * polls either, or waits on the event without being alertable, sees the
+ * request complete whether or not its APC has run -- as on the console. */
 static void bridge_complete_file_io(uint32_t event_token, uint32_t apc_routine,
                                     uint32_t apc_context, uint32_t iostatus)
 {
@@ -4980,17 +5002,32 @@ static void bridge_complete_file_io(uint32_t event_token, uint32_t apc_routine,
         if (ev) SetEvent(ev);
     }
     if (apc_routine) {
-        if (g_defer_io_apc && g_io_apc_count < IO_APC_QUEUE) {
+        if (defer_io_apc() && g_io_apc_count < IO_APC_QUEUE) {
             uint32_t *q = g_io_apc[g_io_apc_count++];
             q[0] = apc_routine; q[1] = apc_context; q[2] = iostatus;
         } else {
+            if (defer_io_apc()) {
+                static int told;
+                if (!told++)
+                    fprintf(stderr, "  [KERNEL] more than %d file I/O APCs queued"
+                                    " on one thread without an alertable wait:"
+                                    " the next ones run inline\n", IO_APC_QUEUE);
+            }
             deliver_one_apc(apc_routine, apc_context, iostatus);
         }
     }
 }
 
 /* An alertable user-mode wait with APCs queued runs them all and returns
- * STATUS_USER_APC without waiting, as the real kernel does. Fallout: Brotherhood
+ * STATUS_USER_APC without waiting, as the real kernel does. A non-alertable or
+ * kernel-mode wait leaves them queued.
+ *
+ * Checked before the object, even one already signalled. The console tests the
+ * object first, but there the request is still in flight when its thread
+ * starts waiting and the completion's APC ends the wait; here the request
+ * completed inside the call, so APC-first is what reproduces the console's
+ * timeline. Object-first, a wait on the file handle of a finished read would
+ * return at once with the APC still queued. Fallout: Brotherhood
  * of Steel's streamer (sub_00038EE0) marks a slot busy after ReadFileEx and
  * waits on the file handle for the completion to clear it; run inline, the
  * completion cleared the flag before it was set and the wait never ended.
@@ -6456,6 +6493,8 @@ static void bridge_KeWaitForMultipleObjects(void)
         g_eax = (uint32_t)STATUS_INVALID_PARAMETER;
         return;
     }
+    if (bridge_run_io_apcs(alertable, STACK_ARG(4)))
+        return;
     if (count > BRIDGE_MAXIMUM_WAIT_OBJECTS)
         count = BRIDGE_MAXIMUM_WAIT_OBJECTS;
     for (i = 0; i < count; i++) {

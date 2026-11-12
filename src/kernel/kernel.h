@@ -659,8 +659,9 @@ void xbox_SetCrtLockTable(uint32_t table_va, uint32_t count);
  * thread's next alertable wait, which then returns STATUS_USER_APC, instead of
  * inline at the request. That is what the hardware does, and a title whose
  * completion routine clears a flag it sets *after* issuing the read needs it.
- * Off by default: the inline path is what every other title was brought up
- * on. Call before the guest runs. */
+ * On by default (XBA-102); RECOMP_INLINE_APC=1 or xbox_SetDeferredIoApc(0)
+ * runs them inline, the old default. A call wins over the variable. Call
+ * before the guest runs. */
 void xbox_SetDeferredIoApc(int on);
 /* A title's Sleep(from_ms) whose call returns to ret_va sleeps to_ms instead
  * (kernel_bridge.c, KeDelayExecutionThread). Up to 8; call before the title

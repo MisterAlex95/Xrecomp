@@ -120,7 +120,7 @@ there), then follow the stream object (ebx) back to whoever filled its buffer.
   the parser's stream base ([ebx+0x18]) sometimes points 8 bytes past the end of the copied block, at a block whose
   first word links to the copied one (freed / reallocated block?). That bad record then yields a huge element
   count -> vector fill from NULL writes zeros over the kernel import table (0x876C94) -> null kernel calls.
-  Deferred file APCs (now default in main.c, FABLE_INLINE_APC=1 to disable) do not change it.
+  Deferred file APCs (now the runtime default, XBA-102; RECOMP_INLINE_APC=1 to disable) do not change it.
 - Generated C currently carries temporary traces ([STREAM], [RD], [WSTR]); a regen removes them.
 
 ### Session 2026-11-10 (fifth pass)
