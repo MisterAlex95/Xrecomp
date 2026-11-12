@@ -1,7 +1,8 @@
 /* What a run meets that the static analysis missed (XBA-64).
  *
  * The runtime appends one JSON object per line to the discovery file as it
- * happens (append + fsync: a crash keeps what was written), and only what is
+ * happens (an O_APPEND write per entry: a crash of the process keeps what was
+ * written), and only what is
  * new: entries already in the file, from this run or an earlier one, are not
  * written again. tools.prepare reads it to seed the next prepare (XBA-65);
  * tools.seed_from_log takes it too. Format: docs/technical/discovery.md.
