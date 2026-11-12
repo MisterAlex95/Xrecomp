@@ -134,6 +134,13 @@ the combiners and the depth buffer. The 16 floats apply as
 near `(0, 0)`. `RECOMP_FFP_TRACE` prints the matrix and a few raw and
 transformed vertices, which is how the order was found.
 
+Inline batches (`INLINE_ARRAY` and `SET_VERTEX4F`, which D3D's Begin/End and
+`DrawPrimitiveUP` produce) go through the same transform. They used to be left
+to the screen-space guess, which skipped *KOTOR*'s whole GUI: unit quads under a
+composite matrix of `640 0 0 0 / 0 -480 0 480`. `RECOMP_FFP_INLINE=0` brings
+the old reading back and `=2` transforms only the inline batches the guess
+would skip; both are an A/B switch for one release.
+
 Texture coordinates are taken from the attribute streams as they are, with no
 texture-coordinate generation or texture matrix; there is no fog coordinate,
 specular, or point sprite.
@@ -261,6 +268,7 @@ draws.
 | `RECOMP_FFP_TRACE` | composite matrix and sample vertices of the first fixed-function batches |
 | `RECOMP_TEX_BILINEAR` | the CPU rasteriser blends the four nearest texels of every textured pixel instead of taking the nearest one, whatever `SET_TEXTURE_FILTER` asked for. All three sampling paths: pixel-position batches, the perspective path and the register-combiner stages. Off by default: nearest texel. No mip levels, so a minified texture is not blurred by level. A GPU back end has its own filtering and is not affected |
 | `RECOMP_TEX_ANISO` | `8` or `16`: anisotropic filtering on the CPU rasteriser, implies `RECOMP_TEX_BILINEAR`. Up to that many bilinear taps along the longer of a pixel's two texel gradients, so a floor or wall seen at a slant averages along its stretched axis instead of aliasing. Any other value leaves it off. Gradients are exact per triangle for pixel-position batches and taken one pixel over on the perspective path, which costs two more texture-coordinate evaluations per pixel, so it is slower. No mip levels. Off by default |
+| `RECOMP_FFP_INLINE` | `1` (default) inline fixed-function batches go through the composite matrix; `0` the old screen-space guess; `2` transform only the inline batches the guess would skip. A/B switch for one release |
 | `RECOMP_FFP_FLIP_NORMALS` | light the side of a fixed-function mesh that faces the viewer, even when the title left two-sided lighting off. Not hardware behaviour: a compatibility option for a game project to turn on, off by default |
 | `RECOMP_STRIP_ALT_WINDING` | emit every odd triangle of a triangle strip with its first two vertices swapped, so all of a strip's triangles wind the same way, as a strip does on hardware. Off by default: the executor emits `(i, i+1, i+2)` for every `i`. A back end that culls, or lights two-sided, from the winding drops or back-lights every second strip triangle without it |
 

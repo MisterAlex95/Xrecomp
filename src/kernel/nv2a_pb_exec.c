@@ -2319,12 +2319,43 @@ static uint32_t vertex_color(uint32_t index)
  * coordinates are taken from the attribute streams as they are), no fog
  * coordinate, no specular, no point sprites. */
 
-/* Is this batch transformed by the fixed-function unit? Inline-array batches
- * are left to the screen-space path, as they were before. */
+static int batch_is_screen_space(void);
+
+/* RECOMP_FFP_INLINE: how an inline batch (INLINE_ARRAY or SET_VERTEX4F, i.e.
+ * D3D Begin/End and DrawPrimitiveUP) is drawn under the fixed-function unit.
+ *   1 (default) transformed by the composite matrix like any other batch, as
+ *     the hardware does;
+ *   0 the old way: left to the screen-space guess, which skips it when its
+ *     positions look like model units;
+ *   2 transformed only when the screen-space guess would skip it.
+ * KOTOR draws its whole GUI as unit quads under a 640/-480 composite matrix:
+ * under 0 every one of them was skipped. 0 and 2 are an A/B switch for one
+ * release, in case a title relied on the old reading. */
+static int ffp_inline_mode(void)
+{
+    static int mode = -1;
+
+    if (mode < 0) {
+        const char *e = getenv("RECOMP_FFP_INLINE");
+        mode = e && *e ? atoi(e) : 1;
+        if (mode < 0 || mode > 2)
+            mode = 1;
+    }
+    return mode;
+}
+
+/* Is this batch transformed by the fixed-function unit? */
 static int batch_is_ffp(void)
 {
-    return s_gpu.composite_set && (s_gpu.xf_mode & 3) != 2
-        && !s_gpu.inline_active;
+    if (!s_gpu.composite_set || (s_gpu.xf_mode & 3) == 2)
+        return 0;
+    if (!s_gpu.inline_active)
+        return 1;
+    switch (ffp_inline_mode()) {
+    case 0:  return 0;
+    case 2:  return !batch_is_screen_space();
+    default: return 1;
+    }
 }
 
 /* Fixed-function vertex lighting (SET_LIGHTING_ENABLE).

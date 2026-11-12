@@ -135,6 +135,7 @@ The executor is itself opt-in: set `RECOMP_PB_EXEC=1` to execute the pushbuffer.
 | `RECOMP_PB_UNHANDLED_ALL` | top 10 | Lists every method the executor does not model, not only the top ten. | `nv2a_pb_exec.c` |
 | `RECOMP_VBLANK[=paced]` | no vblanks | Raises vblanks: a ~50 Hz tick, or `paced` for the 60 Hz schedule. `0` or empty is off. | `kernel_bridge.c` |
 | `RECOMP_FLIP_PACING[=edge]` | off | Holds each flip to the vblank count. | `nv2a_pb_exec.c` |
+| `RECOMP_FFP_INLINE=<0\|1\|2>` | 1 | Inline (Begin/End) fixed-function batches: `1` transformed by the composite matrix, `0` the old screen-space guess, `2` transformed only when the guess would skip them. A/B switch for one release. | `nv2a_pb_exec.c` |
 | `RECOMP_FFP_FLIP_NORMALS` | off | Lights the side of a fixed-function mesh that faces the viewer. Not hardware behaviour. | `nv2a_pb_exec.c` |
 | `RECOMP_CLIP_NEAR_Z` | on | `0` turns off the near-plane clip (window z below `SET_CLIP_MIN`). | `nv2a_pb_exec.c` |
 | `RECOMP_SWIZZLED_RT` | on | `0` stops rendering into swizzled render targets. | `nv2a_pb_exec.c` |
