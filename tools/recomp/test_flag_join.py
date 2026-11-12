@@ -127,3 +127,27 @@ def test_ors_into_different_registers_join_on_each_edge():
         code = translate(bytes.fromhex('85c9740689d109d9eb0209da' + jcc + '0140c3'))
         assert code.count(f'_jf_0001000C = ({cond}) ? 1 : 0;') == 2, code
         assert 'if (_flags' not in code, code
+
+
+def test_same_destination_join_reads_the_snapshot_not_the_register():
+    # MSVC's signed `x % 2` followed by a reload of eax before the branch
+    # (KOTOR 0x001E4FF2): and eax,0x80000001; jns join; dec eax; or eax,-2;
+    # inc eax; join: mov eax,[esi+0xbc]; je out; nop; out: ret
+    # Both edges leave ZF as (eax == 0), but eax is a pointer by the je.
+    for jcc, cond in (('74', '(_fa == 0)'), ('75', '(_fa != 0)')):
+        code = translate(bytes.fromhex('2501000080' + '7905' + '48' + '83c8fe' + '40'
+                                       + '8b86bc000000' + jcc + '01' + '90c3'))
+        assert f'if ({cond}) goto' in code, code
+        assert '(eax == 0)' not in code and '(eax != 0)' not in code, code
+        assert 'if (_flags' not in code, code
+
+def test_same_destination_join_publishes_zf_from_the_snapshot():
+    # A call or pushfd after the same join publishes ZF into g_eflags through
+    # the same condition, so it must not re-read the register either.
+    from tools.recomp.lifter import publish_flags
+
+    class Reg:
+        type = 'reg'
+        reg = 'eax'
+    (line,) = publish_flags(('__zf_from_dest', [Reg()]))
+    assert '(_fa == 0)' in line and 'eax' not in line, line

@@ -582,12 +582,20 @@ def _make_condition(jcc, flag_setter, flag_ops):
     # Only ZF is answerable from it. dec does not write CF, so a jb after the
     # same join would be reading a flag one predecessor never set; returning
     # None there leaves the existing fallback in place.
+    #
+    # The answer is read from the result snapshot (_fa), never from the
+    # register: every setter in ZF_FROM_DEST publishes its result there at the
+    # destination's width, and the register may be reloaded between the join
+    # and the branch. MSVC's `x % 2` is `and eax, 0x80000001; jns +5; dec eax;
+    # or eax, -2; inc eax` and its join is free to reuse eax before the je:
+    # KOTOR's walkmesh parity test (0x001E4FF2..0x001E5022) loads a pointer
+    # into eax there, the je then asked "is the pointer null", an even crossing
+    # count was never seen, and the room walk above it never ended.
     if flag_setter == "__zf_from_dest" and flag_ops:
-        dest = _fmt_operand_read(flag_ops[0])
         if jcc in ("je", "jz"):
-            return f"({dest} == 0)", desc
+            return "(_fa == 0)", desc
         if jcc in ("jne", "jnz"):
-            return f"({dest} != 0)", desc
+            return "(_fa != 0)", desc
         return None
 
     # After stc/clc/cmc, CF is _cf (the lift writes it) and nothing else is
