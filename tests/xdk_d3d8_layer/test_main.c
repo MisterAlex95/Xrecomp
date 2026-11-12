@@ -189,7 +189,11 @@ int main(void)
     /* Method 5: the fence event, device + 0x1DCC. */
     CHECK(g_hook(5u) == 1 && g_event == 0x0085FDE0 + 0x1DCC);
 #else
-    CHECK(g_hook(5u) == 0);                       /* Fable's params: 0xC-0xE only */
+    /* Fable's params (0x7000): method 5 is serviced anyway, on the fence
+     * event read from the given device at the first call. */
+    kevent(0x0085FDE0 + 0x199C, 1);
+    kevent(0x0085FDE0 + 0x19AC, 1);
+    CHECK(g_hook(5u) == 1 && g_event == 0x0085FDE0 + 0x19AC);
 #endif
     /* Method 0xD, payload 2: node = device + 0x264 + 2*20; its slot gets the
      * JUMP, one pending run fewer, next = -1, bit 30 cleared. */

@@ -9,7 +9,8 @@
  *     XBA_D3D_DEVICE_PTR   the slot holding the device pointer (D3D's g_pDevice)
  *     XBA_D3D_DEVICE       the device itself (a static in D3D's section)
  *     XBA_D3D_SW_METHODS   the software methods to service, bit n = method n:
- *                          0x20 the fence event (5), 0x7000 RunPushBuffer (0xC-0xE)
+ *                          0x7000 RunPushBuffer (0xC-0xE); the fence event (5)
+ *                          is serviced whatever it says (see D3D_METHODS_FENCE)
  *     XBA_D3D_DMA_WALK     1: walk the pushbuffer as the DMA engine does
  *
  *   or found at run time (XBA-80), when the title gives neither address: once
@@ -114,10 +115,18 @@ extern int  xbox_DpcQueueGuestCall(uint32_t routine, uint32_t context);
  * unserviced, as before. */
 #define D3D_METHODS_CALLBACK 0x00C0u
 
+/* 5: the fence event, whenever the device is known, whatever
+ * XBA_D3D_SW_METHODS says. Title-built KEVENTs are guest events by default
+ * (kernel_bridge.c), so D3D's fence wait really blocks on that event, and this
+ * method is the only thing that sets it: Fable (params 0x7000) froze in
+ * Oakvale with its main thread blocked in sub_00855260's KeWaitForSingleObject
+ * right after one unserviced method 5. Its offset is read from the device. */
+#define D3D_METHODS_FENCE 0x0020u
+
 #ifdef XBA_D3D_SW_METHODS
-#define D3D_METHODS_DEFAULT ((XBA_D3D_SW_METHODS) | D3D_METHODS_ACK | D3D_METHODS_CALLBACK)
+#define D3D_METHODS_DEFAULT ((XBA_D3D_SW_METHODS) | D3D_METHODS_FENCE | D3D_METHODS_ACK | D3D_METHODS_CALLBACK)
 #elif D3D_GIVEN
-#define D3D_METHODS_DEFAULT (D3D_METHODS_ACK | D3D_METHODS_CALLBACK)
+#define D3D_METHODS_DEFAULT (D3D_METHODS_FENCE | D3D_METHODS_ACK | D3D_METHODS_CALLBACK)
 #else
 #define D3D_METHODS_DEFAULT (0x7020u | D3D_METHODS_ACK | D3D_METHODS_CALLBACK) /* found at run time: everything */
 #endif
@@ -126,7 +135,8 @@ static int d3d_mirror;
 static volatile uint32_t s_device;  /* the device, once known (0: not yet) */
 static volatile uint32_t s_slot;    /* its pointer slot */
 static uint32_t s_methods = D3D_METHODS_DEFAULT;
-static volatile uint32_t s_fence_event = D3D_FENCE_EVENT_5849;  /* offset in the device; read at run time (locate) */
+static volatile uint32_t s_fence_event = D3D_FENCE_EVENT_5849;  /* offset in the device; read at run time */
+static volatile int s_fence_known;  /* s_fence_event read from the device (locate, or the first method 5) */
 
 static int in_contig(uint32_t va) { return va >= CONTIG_LO && va < CONTIG_HI; }
 
@@ -247,6 +257,7 @@ int xba_d3d8_locate(void)
         return 0;
     if ((ev = xba_d3d8_fence_event_offset(d)) != 0)
         s_fence_event = ev;
+    s_fence_known = 1;
     s_slot = slot;
     s_device = d;
     fprintf(stderr, "[D3D] device found at 0x%08X (pointer slot 0x%08X, ring 0x%08X-0x%08X, fence event +0x%X%s)\n",
@@ -388,9 +399,18 @@ static int d3d_software_method(uint32_t param)
      * (no KeInitializeEvent import): a guest event by default (title-built
      * KEVENTs, kernel_bridge.c), or adopted alone under the DMA walk when the
      * device was found at run time (locate); the kernel checks the header
-     * reads as an event before it touches it. Its offset is the one locate
-     * read from the device, 5849's with the profile's addresses. */
+     * reads as an event before it touches it. Its offset is read from the
+     * device (locate, or here at the first method 5 with the profile's
+     * addresses), 5849's when the device holds no event pair. */
     if (type == 5u) {
+        if (!s_fence_known) {           /* the profile's device: read the offset once */
+            uint32_t ev = xba_d3d8_fence_event_offset(dev);
+            if (ev)
+                s_fence_event = ev;
+            s_fence_known = 1;
+            fprintf(stderr, "[D3D] fence event 0x%08X (+0x%X%s): set by software method 5\n",
+                    dev + s_fence_event, s_fence_event, ev ? "" : ", assumed");
+        }
         (void)xbox_KeSetGuestEvent(dev + s_fence_event);
         return 1;
     }

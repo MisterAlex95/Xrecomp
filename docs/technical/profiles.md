@@ -77,7 +77,9 @@ is read from the device: the one pair of KEVENT headers 16 bytes apart (5849 +0x
 when there is none). A unique hit is printed (`[D3D] device found at ... fence event +0x...`) and written to the
 discovery file as `{"t":"d3d",...}` with the slot actually found; then the semaphore watch and every serviceable
 software method run on it. Title-built KEVENTs are guest events by default, so `BlockOnTime` sleeps on the fence event
-until method 5 sets it; with `RECOMP_TITLE_KEVENTS=0`, the DMA walk (`xdk/d3d8ltcg`, or `RECOMP_PB_WALK=dma`) still
+until method 5 sets it. Method 5 is serviced whenever the device is known, also with a title's `XBA_D3D_SW_METHODS`
+(with the profile's addresses its offset is read at the first method 5): left unserviced, that blocking wait never
+ends (Fable froze in Oakvale that way). With `RECOMP_TITLE_KEVENTS=0`, the DMA walk (`xdk/d3d8ltcg`, or `RECOMP_PB_WALK=dma`) still
 adopts that one event (`xbox_KeAdoptGuestEvent`, `[D3D] fence event ... set by software method 5`). So a new
 title on a known XDK build needs no title layer for D3D.
 
