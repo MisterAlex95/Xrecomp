@@ -384,6 +384,127 @@ static inline uint64_t recomp_atomic_cas64(volatile uint64_t *p, uint64_t cmp, u
 }
 #endif
 
+/* arm64 faults on an atomic at an unaligned address; x86 allows it (a split
+ * lock), and a title can have one (XBA-71, from review). On arm64 a 16- or
+ * 32-bit atomic at an unaligned address goes under the same runtime-wide lock
+ * as cmpxchg8b's (g_recomp_cas64_lock); aligned ones are untouched. */
+#if !defined(_MSC_VER) && defined(__aarch64__)
+extern volatile int g_recomp_cas64_lock;
+static inline void recomp_ua_lock(void)
+{
+    while (__sync_lock_test_and_set(&g_recomp_cas64_lock, 1))
+        ;
+}
+static inline void recomp_ua_unlock(void)
+{
+    __sync_lock_release(&g_recomp_cas64_lock);
+}
+static inline uint16_t recomp_ua_cas16(volatile uint16_t *p, uint16_t cmp, uint16_t val)
+{
+    uint16_t old;
+    if (!((uintptr_t)p & 1u))
+        return __sync_val_compare_and_swap(p, cmp, val);
+    recomp_ua_lock();
+    __builtin_memcpy(&old, (const void *)p, sizeof old);
+    if (old == cmp) __builtin_memcpy((void *)p, &val, sizeof val);
+    recomp_ua_unlock();
+    return old;
+}
+static inline uint16_t recomp_ua_xchg16(volatile uint16_t *p, uint16_t v)
+{
+    uint16_t old;
+    if (!((uintptr_t)p & 1u))
+        return __atomic_exchange_n(p, v, __ATOMIC_SEQ_CST);
+    recomp_ua_lock();
+    __builtin_memcpy(&old, (const void *)p, sizeof old);
+    __builtin_memcpy((void *)p, &v, sizeof v);
+    recomp_ua_unlock();
+    return old;
+}
+static inline uint32_t recomp_ua_cas32(volatile uint32_t *p, uint32_t cmp, uint32_t val)
+{
+    uint32_t old;
+    if (!((uintptr_t)p & 3u))
+        return __sync_val_compare_and_swap(p, cmp, val);
+    recomp_ua_lock();
+    __builtin_memcpy(&old, (const void *)p, sizeof old);
+    if (old == cmp) __builtin_memcpy((void *)p, &val, sizeof val);
+    recomp_ua_unlock();
+    return old;
+}
+static inline uint32_t recomp_ua_xchg32(volatile uint32_t *p, uint32_t v)
+{
+    uint32_t old;
+    if (!((uintptr_t)p & 3u))
+        return __atomic_exchange_n(p, v, __ATOMIC_SEQ_CST);
+    recomp_ua_lock();
+    __builtin_memcpy(&old, (const void *)p, sizeof old);
+    __builtin_memcpy((void *)p, &v, sizeof v);
+    recomp_ua_unlock();
+    return old;
+}
+static inline uint32_t recomp_ua_add32(volatile uint32_t *p, uint32_t v)
+{
+    uint32_t old;
+    if (!((uintptr_t)p & 3u))
+        return __sync_fetch_and_add(p, v);
+    recomp_ua_lock();
+    __builtin_memcpy(&old, (const void *)p, sizeof old);
+    { uint32_t nv = old + v; __builtin_memcpy((void *)p, &nv, sizeof nv); }
+    recomp_ua_unlock();
+    return old;
+}
+static inline uint32_t recomp_ua_or32(volatile uint32_t *p, uint32_t v)
+{
+    uint32_t old;
+    if (!((uintptr_t)p & 3u))
+        return __sync_fetch_and_or(p, v);
+    recomp_ua_lock();
+    __builtin_memcpy(&old, (const void *)p, sizeof old);
+    { uint32_t nv = old | v; __builtin_memcpy((void *)p, &nv, sizeof nv); }
+    recomp_ua_unlock();
+    return old;
+}
+static inline uint32_t recomp_ua_and32(volatile uint32_t *p, uint32_t v)
+{
+    uint32_t old;
+    if (!((uintptr_t)p & 3u))
+        return __sync_fetch_and_and(p, v);
+    recomp_ua_lock();
+    __builtin_memcpy(&old, (const void *)p, sizeof old);
+    { uint32_t nv = old & v; __builtin_memcpy((void *)p, &nv, sizeof nv); }
+    recomp_ua_unlock();
+    return old;
+}
+static inline uint32_t recomp_ua_xor32(volatile uint32_t *p, uint32_t v)
+{
+    uint32_t old;
+    if (!((uintptr_t)p & 3u))
+        return __sync_fetch_and_xor(p, v);
+    recomp_ua_lock();
+    __builtin_memcpy(&old, (const void *)p, sizeof old);
+    { uint32_t nv = old ^ v; __builtin_memcpy((void *)p, &nv, sizeof nv); }
+    recomp_ua_unlock();
+    return old;
+}
+#undef RECOMP_ATOMIC_ADD32
+#undef RECOMP_ATOMIC_CAS32
+#undef RECOMP_ATOMIC_CAS16
+#undef RECOMP_ATOMIC_XCHG16
+#undef RECOMP_ATOMIC_XCHG32
+#undef RECOMP_ATOMIC_OR32
+#undef RECOMP_ATOMIC_AND32
+#undef RECOMP_ATOMIC_XOR32
+#define RECOMP_ATOMIC_ADD32(p, v)        recomp_ua_add32((volatile uint32_t *)(p), (uint32_t)(v))
+#define RECOMP_ATOMIC_CAS32(p, cmp, val) recomp_ua_cas32((volatile uint32_t *)(p), (uint32_t)(cmp), (uint32_t)(val))
+#define RECOMP_ATOMIC_CAS16(p, cmp, val) recomp_ua_cas16((volatile uint16_t *)(p), (uint16_t)(cmp), (uint16_t)(val))
+#define RECOMP_ATOMIC_XCHG16(p, v)       recomp_ua_xchg16((volatile uint16_t *)(p), (uint16_t)(v))
+#define RECOMP_ATOMIC_XCHG32(p, v)       recomp_ua_xchg32((volatile uint32_t *)(p), (uint32_t)(v))
+#define RECOMP_ATOMIC_OR32(p, v)         recomp_ua_or32((volatile uint32_t *)(p), (uint32_t)(v))
+#define RECOMP_ATOMIC_AND32(p, v)        recomp_ua_and32((volatile uint32_t *)(p), (uint32_t)(v))
+#define RECOMP_ATOMIC_XOR32(p, v)        recomp_ua_xor32((volatile uint32_t *)(p), (uint32_t)(v))
+#endif
+
 #include <setjmp.h>
 jmp_buf *recomp_setjmp_slot(uint32_t buf_va);
 int recomp_guest_longjmp(uint32_t buf_va, uint32_t value);
