@@ -115,6 +115,33 @@ abstract class XbaToolkitAsset extends DefaultTask {
         new File(dir, 'toolkit.zip.sha256').text = "${md.digest().encodeHex()}  toolkit.zip\n"
     }
 }
+// Release signing (XBA-125): see signingConfigs below.
+def xbaKeystore = (System.getenv('XBA_KEYSTORE') ?: findProperty('xbaKeystore') ?: '') as String
+def xbaKeystorePassword = (System.getenv('XBA_KEYSTORE_PASSWORD') ?: '') as String
+if (xbaKeystore && !new File(xbaKeystore).isFile())
+    throw new GradleException("XBA_KEYSTORE=${xbaKeystore}: no such file")
+if (xbaKeystore && !xbaKeystorePassword)
+    throw new GradleException('XBA_KEYSTORE is set but XBA_KEYSTORE_PASSWORD is empty')
+def xbaRequireReleaseKey = ((findProperty('xbaRequireReleaseKey') ?: '0') as String) == '1'
+def xbaDebuggable = ((findProperty('xbaDebuggable') ?: '0') as String) == '1'
+gradle.taskGraph.whenReady { graph ->
+    if (xbaKeystore || !graph.allTasks.any { it.project == project && it.name ==~ /(assemble|package|bundle)Release/ })
+        return
+    if (xbaRequireReleaseKey)
+        throw new GradleException('-PxbaRequireReleaseKey=1: no release keystore (XBA_KEYSTORE, XBA_KEYSTORE_PASSWORD)')
+    logger.warn('''
+        |################################################################################################
+        |# RELEASE BUILD SIGNED WITH THE DEBUG KEY: no XBA_KEYSTORE / XBA_KEYSTORE_PASSWORD.             #
+        |# This APK cannot update an install signed with the release key (and vice versa) without an    #
+        |# uninstall, which deletes the app's data (packs, saves, settings). docs/android/toolchain.md.   #
+        |################################################################################################'''
+        .stripMargin())
+}
+// -PxbaJobs=N caps the native build's parallel compiles and links (Ninja job pools); unset = Ninja's default
+// (all cores). The CI sets it: its host also serves Gitea and Plane.
+def xbaJobs = ((findProperty('xbaJobs') ?: '') as String).trim()
+if (xbaJobs && !(xbaJobs ==~ /[1-9][0-9]*/)) throw new GradleException("-PxbaJobs=${xbaJobs}: expected a positive number")
+
 def repoRoot = rootProject.file('..')
 def xbaCommit = providers.exec {
     commandLine 'git', '-C', repoRoot.path, 'rev-parse', 'HEAD'
@@ -171,6 +198,9 @@ android {
                           "-DXBA_NATIVE_CPU=${findProperty('xbaNativeCpu') ?: ''}",
                           "-DXBOXRECOMP_LSFG=${xbaLsfg ? 'ON' : 'OFF'}",
                           "-DXBOXRECOMP_LSFG_VK_SRC=${lsfgVkSrc}", "-DXBOXRECOMP_LSFG_DXVK_SRC=${dxvkSrc}"
+                if (xbaJobs)
+                    arguments "-DCMAKE_JOB_POOLS=xba_jobs=${xbaJobs}", '-DCMAKE_JOB_POOL_COMPILE=xba_jobs',
+                              '-DCMAKE_JOB_POOL_LINK=xba_jobs'
             }
         }
     }
@@ -190,10 +220,30 @@ android {
         }
     }
 
+    // The release key (XBA-125, docs/android/toolchain.md « Signing »): a keystore that never enters the repository
+    // or an image. XBA_KEYSTORE (or -PxbaKeystore) is its path, XBA_KEYSTORE_PASSWORD its password, XBA_KEY_ALIAS the
+    // key (default xrecomp), XBA_KEY_PASSWORD the key's password (default: the store's, as in a PKCS12 keystore).
+    // In CI they come from repository secrets through BuildKit secret mounts (the xrecomp-apk stage). Without them a
+    // release build is signed with the debug key, and says so loudly: such an APK cannot update a release-signed
+    // install. -PxbaRequireReleaseKey=1 makes the missing key an error instead.
+    if (xbaKeystore) {
+        signingConfigs {
+            xbaRelease {
+                storeFile file(xbaKeystore)
+                storePassword xbaKeystorePassword
+                keyAlias(System.getenv('XBA_KEY_ALIAS') ?: 'xrecomp')
+                keyPassword(System.getenv('XBA_KEY_PASSWORD') ?: xbaKeystorePassword)
+            }
+        }
+    }
+
     buildTypes {
         release {
             minifyEnabled false
-            signingConfig signingConfigs.debug   // the release key comes later, as a build secret (never in the repo)
+            signingConfig xbaKeystore ? signingConfigs.xbaRelease : signingConfigs.debug
+            // -PxbaDebuggable=1 (the CI's XRecomp APK): optimised native code, but `adb shell run-as` still works,
+            // which the device check lists and the data export of the signing switch rely on.
+            debuggable xbaDebuggable
         }
     }
 
