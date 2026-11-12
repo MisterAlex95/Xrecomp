@@ -1129,15 +1129,15 @@ VOID    __stdcall xbox_XcHMAC(const UCHAR* Key, ULONG KeyLength, const UCHAR* Da
 ULONG   __stdcall xbox_XcPKGetKeyLen(PVOID PublicKey);
 ULONG   __stdcall xbox_XcPKDecPrivate(PVOID PrivateKey, PVOID Input, PVOID Output);
 ULONG   __stdcall xbox_XcPKEncPublic(PVOID PublicKey, PVOID Input, PVOID Output);
-BOOLEAN __stdcall xbox_XcVerifyPKCS1Signature(PVOID Hash, PVOID PublicKey, PVOID Signature);
+BOOLEAN __stdcall xbox_XcVerifyPKCS1Signature(PVOID Signature, PVOID PublicKey, PVOID Digest);
 ULONG   __stdcall xbox_XcModExp(PULONG Result, PULONG Base, PULONG Exponent, PULONG Modulus, ULONG ModulusLength);
 
 VOID    __stdcall xbox_XcDESKeyParity(PUCHAR Key, ULONG KeyLength);
 VOID    __stdcall xbox_XcKeyTable(ULONG CipherSelect, PVOID KeyTable, const UCHAR* Key);
 VOID    __stdcall xbox_XcBlockCrypt(ULONG CipherSelect, PVOID Output, PVOID Input, PVOID KeyTable, ULONG Operation);
 VOID    __stdcall xbox_XcBlockCryptCBC(ULONG CipherSelect, ULONG OutputLength, PVOID Output, PVOID Input, PVOID KeyTable, ULONG Operation, PVOID FeedbackVector);
-VOID    __stdcall xbox_XcCryptService(ULONG Operation, PVOID Param);
-VOID    __stdcall xbox_XcUpdateCrypto(PVOID Param1, PVOID Param2);
+ULONG   __stdcall xbox_XcCryptService(ULONG Operation, PVOID Param);
+VOID    __stdcall xbox_XcUpdateCrypto(PVOID NewVector, PVOID RomVector);
 
 /* ============================================================================
  * Miscellaneous stubs

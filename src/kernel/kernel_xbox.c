@@ -51,8 +51,12 @@ void xbox_kernel_set_version(USHORT major, USHORT minor, USHORT build, USHORT qf
     xbox_KrnlVersion.Qfe   = qfe;
 }
 
-/* Crypto keys - zeroed, not needed for PC operation.
- * These are unique per-console on real hardware. */
+/* Console keys: zeros, the same on every host, on purpose.
+ * On the console the HD key is per machine and the others are Microsoft's;
+ * none is in the repo. XAPI keys save signatures with them (XcHMAC), so a
+ * key generated per device would make a save copied from the player's Mac to
+ * their phone fail its signature; a constant keeps saves portable between
+ * hosts. A save from a real console does not verify either way. */
 UCHAR xbox_EEPROMKey[16]              = {0};
 UCHAR xbox_HDKey[16]                  = {0};
 UCHAR xbox_SignatureKey[16]           = {0};

@@ -203,7 +203,9 @@ certificate. There is no disc, so `bridge_NtDeviceIoControlFile`
 title's check asks for and nothing else (zeros elsewhere): the certificate's
 time stamp (cert +4) at +0x4AB; at +0x4CF the SHA-1 of the dword 0x4CB
 followed by the 0x4CB bytes at +4; the signature at +0x4E3 is accepted by
-`XcVerifyPKCS1Signature`, which answers TRUE. The certificate is the one the
+`XcVerifyPKCS1Signature`, which checks it for real but accepts a failure
+(the sector has no signature and the runtime has no Microsoft key; `RECOMP_PKCS1_VERIFY=strict`
+rejects it). The certificate is the one the
 XBE header at 0x00010118 points to. Other commands, a shorter buffer, or a
 certificate without the bit get a zeroed buffer as before. Log:
 `[FILE] DVD SCSI command 0xAD, 1636 bytes -> security sector for this title's

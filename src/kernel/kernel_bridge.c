@@ -6960,13 +6960,11 @@ static void bridge_MmDeleteKernelStack(void)
 
 /* ── Xc* remaining crypto (ordinals 341-345, 347-351)
  *
- * Split into two kinds, both of which clear the memory-model bar:
- *  - the public-key / DES / ModExp entries are documented stubs that ignore
- *    their arguments (no Xbox Live, no on-console key derivation), so the
- *    pointers pass through without being dereferenced;
- *  - XcBlockCrypt/XcKeyTable/XcCryptService/XcUpdateCrypto are the same shape.
- * XcVerifyPKCS1Signature is worth singling out: it returns TRUE so that
- * signature checks succeed instead of rebooting the dashboard. */
+ * RSA, XcModExp and DES are real (kernel_crypto.c, which documents the buffer
+ * layouts): every pointer is a guest buffer, translated as is.
+ * XcVerifyPKCS1Signature checks for real but accepts a failure unless
+ * RECOMP_PKCS1_VERIFY=strict: what titles verify is signed with Microsoft's
+ * key, which is not here. */
 static void bridge_XcPKGetKeyLen(void)
 {
     g_eax = (uint32_t)xbox_XcPKGetKeyLen(XBOX_TO_NATIVE(STACK_ARG(0)));
@@ -7025,14 +7023,28 @@ static void bridge_XcBlockCryptCBC(void)
 
 static void bridge_XcCryptService(void)
 {
-    xbox_XcCryptService(STACK_ARG(0), XBOX_TO_NATIVE(STACK_ARG(1)));
-    g_eax = 0;
+    g_eax = (uint32_t)xbox_XcCryptService(STACK_ARG(0), XBOX_TO_NATIVE(STACK_ARG(1)));
 }
 
+/* The original CRYPTO_VECTOR (16 entries, ordinals 335-350) the title gets
+ * back holds the guest addresses of those exports: the synthetic thunk VA of
+ * the slot the title imported each through, 0 for one it did not import. */
 static void bridge_XcUpdateCrypto(void)
 {
-    xbox_XcUpdateCrypto(XBOX_TO_NATIVE(STACK_ARG(0)),
-        XBOX_TO_NATIVE(STACK_ARG(1)));
+    uint32_t rom = STACK_ARG(1);
+    int i, slot;
+
+    xbox_XcUpdateCrypto(XBOX_TO_NATIVE(STACK_ARG(0)), XBOX_TO_NATIVE(rom));
+    if (rom && bridge_va_mapped(rom, 16 * 4))
+        for (i = 0; i < 16; i++) {
+            uint32_t va = 0;
+            for (slot = 0; slot < XBOX_KERNEL_THUNK_TABLE_SIZE; slot++)
+                if (g_slot_ordinals[slot] == (ULONG)(335 + i)) {
+                    va = KERNEL_VA_BASE + (uint32_t)slot * 4;
+                    break;
+                }
+            BRIDGE_MEM32(rom + 4 * (uint32_t)i) = va;
+        }
     g_eax = 0;
 }
 
