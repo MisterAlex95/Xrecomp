@@ -960,6 +960,7 @@ void    xbox_IrqNoteUngated(int line);
  * DISPATCH and at its gate release (kernel_hal.c), and the timer thread
  * drains what no guest thread took, woken by KeInsertQueueDpc. */
 int     xbox_DpcQueue(uint32_t dpc_va, uint32_t arg1, uint32_t arg2);
+int     xbox_DpcQueueGuestCall(uint32_t routine, uint32_t context);   /* routine(context) at DPC level */
 int     xbox_DpcPending(void);          /* an unlocked look */
 int     xbox_DpcDrainHere(void);        /* the caller holds the gate; DPCs run */
 /* The timer thread's drain: takes the gate only when it is free, never

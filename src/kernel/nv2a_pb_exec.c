@@ -5236,6 +5236,17 @@ static uint64_t s_cap_slept_ns;         /* since the last report */
 static uint64_t s_cap_over_ns, s_cap_over_max_ns;   /* woke after the slot */
 static uint32_t s_cap_waits, s_cap_late;
 
+/* D3D's InsertCallback (software methods 6 and 7) passes its routine and
+ * context through the two clear values it sets just before: SET_ZSTENCIL_
+ * CLEAR_VALUE (0x1D8C, PGRAPH 0x401A88) is the routine, SET_COLOR_CLEAR_VALUE
+ * (0x1D90, PGRAPH 0x40186C) the context, which its interrupt handler reads
+ * back from PGRAPH (docs/technical/pushbuffer-executor.md). XBA-94. */
+void nv2a_pb_exec_insert_callback_args(uint32_t *routine, uint32_t *context)
+{
+    *routine = s_gpu.zstencil_clear;
+    *context = s_gpu.clear_color;
+}
+
 uint64_t nv2a_pb_exec_flip_cap_until_ns(void)
 {
     return s_cap_until_ns;

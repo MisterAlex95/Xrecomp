@@ -23,6 +23,9 @@ int xbox_KeSetGuestEvent(uint32_t va) { g_event = va; return 1; }
 int xbox_Nv2aMirrorFence(uint32_t a, uint32_t b, uint32_t c) { (void)a; (void)b; (void)c; return 0; }
 static uint32_t g_disc_dev, g_disc_slot;
 void recomp_discovery_d3d(uint32_t d, uint32_t s) { g_disc_dev = d; g_disc_slot = s; }
+static uint32_t g_cb_routine, g_cb_ctx;
+void nv2a_pb_exec_insert_callback_args(uint32_t *r, uint32_t *c) { *r = 0x00123450u; *c = 0xC0FFEEu; }
+int xbox_DpcQueueGuestCall(uint32_t r, uint32_t c) { g_cb_routine = r; g_cb_ctx = c; return 1; }
 
 void xba_d3d8_configure(void);
 int xba_d3d8_is_device(uint32_t d);
@@ -54,7 +57,10 @@ int main(void)
 
     /* 8 and 9 (PGRAPH RDI writes) are acknowledged in both variants, device or not (XBA-94). */
     CHECK(g_hook(0x123u << 5 | 8u) == 1 && g_hook(9u) == 1);
-    CHECK(g_hook(6u) == 0 && g_hook(7u) == 0);   /* InsertCallback: not serviced */
+    /* 6 and 7 (InsertCallback): the routine and context from the clear values, queued (XBA-94). */
+    CHECK(g_hook(6u) == 1 && g_cb_routine == 0x00123450u && g_cb_ctx == 0xC0FFEEu);
+    g_cb_routine = 0;
+    CHECK(g_hook(7u) == 1 && g_cb_routine == 0x00123450u);
 #ifndef TEST_GIVEN
     /* Before CreateDevice: nothing, and the hook does nothing. */
     CHECK(xba_d3d8_locate() == 0);

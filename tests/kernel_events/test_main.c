@@ -29,8 +29,16 @@
 
 /* Provided by the generated title; this harness has none. */
 typedef void (*recomp_func_t)(void);
+/* A guest routine for xbox_DpcQueueGuestCall (XBA-94): records its one
+ * stack argument, read as lifted code reads it ([esp+4]). */
+static uint32_t g_cb_arg, g_cb_calls;
+static void fake_callback(void)
+{
+    g_cb_arg = *(uint32_t *)((uintptr_t)g_esp + 4 + xbox_GetMemoryOffset());
+    g_cb_calls++;
+}
 recomp_func_t recomp_lookup(uint32_t xbox_va);
-recomp_func_t recomp_lookup(uint32_t xbox_va) { (void)xbox_va; return NULL; }
+recomp_func_t recomp_lookup(uint32_t xbox_va) { return xbox_va == 0x00123450u ? fake_callback : NULL; }
 recomp_func_t recomp_lookup_manual(uint32_t xbox_va);
 recomp_func_t recomp_lookup_manual(uint32_t xbox_va) { (void)xbox_va; return NULL; }
 
@@ -323,6 +331,21 @@ int main(int argc, char **argv)
         ke_set(scratch + 0x3900);
         st = ke_wait(scratch + 0x3900);
         check(st != 0 && st != STATUS_TIMEOUT, "the promotion is for that object only", NULL);
+    }
+
+    {
+        /* XBA-94: routine(context) on the DPC path, one argument, registers back after. */
+        uint32_t esp_before;
+        int ran = 0;
+        g_esp = STACK_VA + 0x800;
+        esp_before = g_esp;
+        check(xbox_DpcQueueGuestCall(0x00123450u, 0xC0FFEEu) == 1, "a guest call is queued", NULL);
+        check(xbox_DpcQueueGuestCall(0x00999990u, 1) == 0, "a routine that is not code is refused", NULL);
+        xbox_DpcDrainTimer(&ran);
+        snprintf(d, sizeof d, "calls %u, arg 0x%08X, esp %s", g_cb_calls, g_cb_arg,
+                 g_esp == esp_before ? "kept" : "moved");
+        check(g_cb_calls == 1 && g_cb_arg == 0xC0FFEEu && g_esp == esp_before,
+              "the DPC path calls routine(context) once, esp kept", d);
     }
 
     xbox_MemoryLayoutShutdown();

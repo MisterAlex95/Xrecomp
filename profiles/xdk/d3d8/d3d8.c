@@ -68,6 +68,8 @@ extern void nv2a_pb_set_semaphore_target(uint32_t guest_va);
 extern int  xbox_KeSetGuestEvent(uint32_t guest_va);
 extern int  xbox_Nv2aMirrorFence(uint32_t device_ptr_va, uint32_t put_off, uint32_t get_ptr_off);
 extern void recomp_discovery_d3d(uint32_t device, uint32_t slot);
+extern void nv2a_pb_exec_insert_callback_args(uint32_t *routine, uint32_t *context);
+extern int  xbox_DpcQueueGuestCall(uint32_t routine, uint32_t context);
 
 #define G32(a) (*(volatile uint32_t *)((uint8_t *)xbox_GetMemoryOffset() + (uint32_t)(a)))
 
@@ -86,12 +88,20 @@ extern void recomp_discovery_d3d(uint32_t device, uint32_t slot);
  * build (docs/technical/pushbuffer-executor.md). */
 #define D3D_METHODS_ACK 0x0300u
 
+/* 6 and 7 (XBA-94): D3DDevice_InsertCallback. The handler calls the routine
+ * the title gave, with its context, at DPC level; the two come in the clear
+ * values set just before (nv2a_pb_exec_insert_callback_args). Queued on the
+ * DPC path (xbox_DpcQueueGuestCall), which refuses a routine that is not
+ * code. For every title, device or not. RECOMP_D3D_CALLBACKS=0 leaves them
+ * unserviced, as before. */
+#define D3D_METHODS_CALLBACK 0x00C0u
+
 #ifdef XBA_D3D_SW_METHODS
-#define D3D_METHODS_DEFAULT ((XBA_D3D_SW_METHODS) | D3D_METHODS_ACK)
+#define D3D_METHODS_DEFAULT ((XBA_D3D_SW_METHODS) | D3D_METHODS_ACK | D3D_METHODS_CALLBACK)
 #elif D3D_GIVEN
-#define D3D_METHODS_DEFAULT D3D_METHODS_ACK
+#define D3D_METHODS_DEFAULT (D3D_METHODS_ACK | D3D_METHODS_CALLBACK)
 #else
-#define D3D_METHODS_DEFAULT (0x7020u | D3D_METHODS_ACK) /* found at run time: everything serviceable */
+#define D3D_METHODS_DEFAULT (0x7020u | D3D_METHODS_ACK | D3D_METHODS_CALLBACK) /* found at run time: everything */
 #endif
 
 static int d3d_mirror;
@@ -266,6 +276,19 @@ static int d3d_software_method(uint32_t param)
         }
         return 1;
     }
+    if (D3D_METHODS_CALLBACK & (1u << type)) {
+        uint32_t routine, context;
+        static int shown;
+        nv2a_pb_exec_insert_callback_args(&routine, &context);
+        if (!xbox_DpcQueueGuestCall(routine, context))
+            return 0;                   /* not code, or the pool busy: counted unserviced */
+        if (shown < 4) {
+            shown++;
+            fprintf(stderr, "[D3D] software method %u (InsertCallback): 0x%08X(0x%08X) queued at DPC level\n",
+                    type, routine, context);
+        }
+        return 1;
+    }
     if (!(dev = current_device()))
         return 0;
     /* 5: KeSetEvent on the fence event. BlockOnTime patches it into the
@@ -289,6 +312,11 @@ void xba_d3d8_configure(void)
     const char *fence = getenv("XBA_D3D_FENCE");
 
     d3d_mirror = fence && !strcmp(fence, "mirror");
+    {
+        const char *cb = getenv("RECOMP_D3D_CALLBACKS");
+        if (cb && *cb == '0')
+            s_methods &= ~D3D_METHODS_CALLBACK;
+    }
 #ifdef XBA_D3D_DEVICE_PTR
     s_slot = XBA_D3D_DEVICE_PTR;
 #endif

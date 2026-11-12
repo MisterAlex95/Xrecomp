@@ -2844,6 +2844,10 @@ long xbox_DpcOverlapCount(void)
     return (long)InterlockedCompareExchange(&s_dpc_overlaps, 0, 0);
 }
 
+/* A KDPC the kernel makes for xbox_DpcQueueGuestCall (Type byte; a real
+ * KDPC is type 19). */
+#define GUEST_CALL_DPC_TYPE 0xC0u
+
 static int kernel_run_dpc(uint32_t dpc_va, uint32_t arg1, uint32_t arg2)
 {
     uint32_t routine, context;
@@ -2873,10 +2877,17 @@ static int kernel_run_dpc(uint32_t dpc_va, uint32_t arg1, uint32_t arg2)
     {
         CallbackRegs saved;
         callback_regs_save(&saved);
-        g_esp -= 4; BRIDGE_MEM32(g_esp) = arg2;
-        g_esp -= 4; BRIDGE_MEM32(g_esp) = arg1;
-        g_esp -= 4; BRIDGE_MEM32(g_esp) = context;
-        g_esp -= 4; BRIDGE_MEM32(g_esp) = dpc_va;
+        if (BRIDGE_MEM8(dpc_va) == GUEST_CALL_DPC_TYPE) {
+            /* xbox_DpcQueueGuestCall: routine(context), cdecl, as D3D's
+             * interrupt handler calls an InsertCallback routine. The
+             * registers (esp too) are put back after, whatever it pops. */
+            g_esp -= 4; BRIDGE_MEM32(g_esp) = context;
+        } else {
+            g_esp -= 4; BRIDGE_MEM32(g_esp) = arg2;
+            g_esp -= 4; BRIDGE_MEM32(g_esp) = arg1;
+            g_esp -= 4; BRIDGE_MEM32(g_esp) = context;
+            g_esp -= 4; BRIDGE_MEM32(g_esp) = dpc_va;
+        }
         g_esp -= 4; BRIDGE_MEM32(g_esp) = 0;
         if (!xbox_DispatchGateOn()
             && xbox_IrqlRaisedCount() > (xbox_IrqlCurrent() >= 2 ? 1 : 0))
@@ -3046,6 +3057,41 @@ int xbox_DpcQueue(uint32_t dpc, uint32_t arg1, uint32_t arg2)
     if (xbox_DpcOnRaise())
         xbox_HostTimerWake();
     return 1;
+}
+
+/* Run routine(context) on the DPC path, at DISPATCH_LEVEL, as an interrupt's
+ * DPC would (XBA-94: D3D's InsertCallback, software methods 6 and 7, whose
+ * handler calls a guest routine). Takes a free KDPC from a small pool in
+ * guest memory, typed GUEST_CALL_DPC_TYPE so kernel_run_dpc calls the
+ * routine with the one argument. Returns 0 when the routine is not code or
+ * the pool is busy. Any thread. */
+#define GUEST_CALL_POOL 16
+int xbox_DpcQueueGuestCall(uint32_t routine, uint32_t context)
+{
+    static uint32_t pool;
+    int i;
+
+    if (!routine || (!recomp_lookup(routine) && !recomp_lookup_manual(routine)))
+        return 0;
+    if (!pool) {
+        uint32_t p = xbox_HeapAlloc(GUEST_CALL_POOL * 32u, 16);
+        if (!p)
+            return 0;
+        memset((void *)((uintptr_t)p + g_xbox_mem_offset), 0, GUEST_CALL_POOL * 32u);
+        if (InterlockedCompareExchange((volatile LONG *)&pool, (LONG)p, 0) != 0)
+            ;                           /* another thread made one first; this one stays unused */
+    }
+    for (i = 0; i < GUEST_CALL_POOL; i++) {
+        uint32_t d = pool + (uint32_t)i * 32u;
+        if (BRIDGE_MEM8(d + 2))
+            continue;                   /* queued, not run yet */
+        BRIDGE_MEM8(d) = (uint8_t)GUEST_CALL_DPC_TYPE;
+        BRIDGE_MEM32(d + 12) = routine;
+        BRIDGE_MEM32(d + 16) = context;
+        if (xbox_DpcQueue(d, 0, 0))
+            return 1;
+    }
+    return 0;
 }
 
 int xbox_DpcPending(void)
