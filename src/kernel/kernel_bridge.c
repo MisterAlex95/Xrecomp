@@ -2123,6 +2123,23 @@ int xbox_KeSetGuestEvent(uint32_t guest_va)
     return 1;
 }
 
+/* Treat one KEVENT the title builds itself as a guest event from now on, as
+ * RECOMP_TITLE_KEVENTS does for every object and the wait-spin detector does
+ * for one it caught spinning (XBA-93): for a device model that knows the
+ * event and sets it (the XDK D3D layer's fence event, once it has found the
+ * device at run time). The header is checked at each use, as for any guest
+ * event. Returns 1 when adopted (or already), 0 when the table is full. */
+int xbox_KeAdoptGuestEvent(uint32_t guest_va)
+{
+    if (ke_is_promoted(guest_va))
+        return 1;
+    if (!ke_promote(guest_va))
+        return 0;
+    fprintf(stderr, "  [KERNEL] event 0x%08X adopted as a guest event (its setter is modelled)\n", guest_va);
+    fflush(stderr);
+    return 1;
+}
+
 /* ── KeSetEvent (ordinal 145) ────────────────────────────── */
 static void bridge_KeSetEvent(void)
 {

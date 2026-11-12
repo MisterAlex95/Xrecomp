@@ -21,9 +21,15 @@
  *     [D + 0x24] <= [D] <= [D + 0x28]        the put pointer inside it
  *   A unique hit only; it is printed and written to the discovery file
  *   ({"t":"d3d","va":D,"slot":D+0x24A8}) for the next prepare. Found this way,
- *   all the serviceable methods are on unless XBA_D3D_SW_METHODS says otherwise
- *   (5 sets the event only when RECOMP_TITLE_KEVENTS is on, which the title opts
- *   into: it can turn a spin into a wait).
+ *   all the serviceable methods are on unless XBA_D3D_SW_METHODS says otherwise.
+ *   Method 5 sets the fence event (device + 0x1DCC), which D3D builds itself:
+ *   under the DMA walk, which delivers method 5, that one event is adopted as a
+ *   guest event (xbox_KeAdoptGuestEvent), so BlockOnTime's wait blocks until
+ *   the method comes instead of failing at once and spinning. Under the segment
+ *   scan it is left alone (a wait for a method 5 that never comes would hang),
+ *   unless RECOMP_TITLE_KEVENTS turns guest events on for every object.
+ *   The D3D8LTCG layer (profiles/xdk/d3d8ltcg) turns the DMA walk on for XDK
+ *   5849's D3D8LTCG, whose fence wait needs it (XBA_D3D_DMA_WALK).
  *
  * The offsets inside the device below were read on XDK 5849 (Burnout 3,
  * D3D8LTCG) and on Fable's D3D: the pointer slot is device + 0x24A8 in both
@@ -66,6 +72,8 @@ extern ptrdiff_t xbox_GetMemoryOffset(void);
 extern void nv2a_pb_set_software_method_hook(int (*hook)(uint32_t param));
 extern void nv2a_pb_set_semaphore_target(uint32_t guest_va);
 extern int  xbox_KeSetGuestEvent(uint32_t guest_va);
+extern int  xbox_KeAdoptGuestEvent(uint32_t guest_va);
+extern int  nv2a_pb_dma_walk(void);
 extern int  xbox_Nv2aMirrorFence(uint32_t device_ptr_va, uint32_t put_off, uint32_t get_ptr_off);
 extern void recomp_discovery_d3d(uint32_t device, uint32_t slot);
 extern void nv2a_pb_exec_insert_callback_args(uint32_t *routine, uint32_t *context);
@@ -165,6 +173,10 @@ int xba_d3d8_locate(void)
     fprintf(stderr, "[D3D] device found at 0x%08X (pointer slot 0x%08X, ring 0x%08X-0x%08X)\n",
             d, d + D3D_SLOT, G32(d + D3D_RING_START), G32(d + D3D_RING_END));
     recomp_discovery_d3d(d, d + D3D_SLOT);
+    /* The fence event, when method 5 will set it (see the top). */
+    if ((s_methods & (1u << 5)) && nv2a_pb_dma_walk() && xbox_KeAdoptGuestEvent(d + D3D_FENCE_EVENT))
+        fprintf(stderr, "[D3D] fence event 0x%08X: set by software method 5 under the DMA walk\n",
+                d + D3D_FENCE_EVENT);
     return 1;
 }
 
@@ -294,8 +306,9 @@ static int d3d_software_method(uint32_t param)
     /* 5: KeSetEvent on the fence event. BlockOnTime patches it into the
      * pushbuffer at the fence it waits for when the GPU is more than 0x2000
      * bytes behind, then waits without a timeout. D3D built that event itself
-     * (no KeInitializeEvent import), hence RECOMP_TITLE_KEVENTS; the kernel
-     * checks the header reads as an event before it touches it. */
+     * (no KeInitializeEvent import): RECOMP_TITLE_KEVENTS with the profile's
+     * addresses, adopted when the device was found at run time (locate); the
+     * kernel checks the header reads as an event before it touches it. */
     if (type == 5u) {
         (void)xbox_KeSetGuestEvent(dev + D3D_FENCE_EVENT);
         return 1;

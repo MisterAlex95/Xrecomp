@@ -1,0 +1,15 @@
+{
+  "name": "XDK Direct3D 8 LTCG, build 5849 (D3D8LTCG)",
+  "applies": {"libraries": ["D3D8LTCG"], "builds": [5849, 5849]},
+  "params": {
+    "XBA_D3D_DMA_WALK": 1
+  },
+  "_why": [
+    "XBA_D3D_DMA_WALK=1 (RECOMP_PB_WALK=dma unless set): D3D8LTCG's fence wait (BlockOnTime and its far-behind",
+    "probe sub_0026CBA0 in Black) reads DMA_GET and the 0x0310 latch (PGRAPH 0x400B10), which only the DMA walk keeps",
+    "honest; under the segment scan it can spin for good on the latch (Black froze at the menu under host load), and",
+    "software method 5 is never delivered. With the walk on, profiles/xdk/d3d8/d3d8.c adopts the fence event",
+    "(device + 0x1DCC) once it has found the device at run time, so BlockOnTime sleeps until method 5 sets it.",
+    "No hooks: the D3D8 layer's code does the work. Seen on: Black 45410083, Burnout 3 4541005B (XDK 5849)."
+  ]
+}

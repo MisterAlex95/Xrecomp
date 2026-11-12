@@ -11,6 +11,10 @@
  * tools/conformance, with the waits going through the thunk dispatcher.
  *
  *   default        No switch: returns 0 and leaves SignalState alone.
+ *     4. xbox_KeAdoptGuestEvent makes one object a guest event without the
+ *        switch (the D3D layer's fence event): a zero-timeout wait times out
+ *        instead of failing, a set returns 1 and the next wait succeeds;
+ *        other objects stay as they were
  *   title-kevents  RECOMP_TITLE_KEVENTS=1:
  *     1. an object whose header is not an event: 0, memory untouched
  *     2. a synchronization event a guest thread waits on for ever: returns 1,
@@ -167,6 +171,20 @@ int main(int argc, char **argv)
         r = xbox_KeSetGuestEvent(SYNC_VA);
         check(r == 0 && G(SYNC_VA)[1] == 0,
               "default: not a host event -- returns 0, SignalState untouched", NULL);
+
+        /* 4. One object adopted. */
+        build_event(NOTIF_VA, 0, 0);
+        check(xbox_KeAdoptGuestEvent(NOTIF_VA) == 1, "4a. xbox_KeAdoptGuestEvent returns 1", NULL);
+        r = (int)ke_wait(STACK_MAIN, NOTIF_VA, ZERO_VA);
+        snprintf(d, sizeof d, "status 0x%08X", (uint32_t)r);
+        check((uint32_t)r == STATUS_TIMEOUT, "4b. a zero-timeout wait on it times out (a host event now)", d);
+        r = xbox_KeSetGuestEvent(NOTIF_VA);
+        check(r == 1 && G(NOTIF_VA)[1] == 1, "4c. xbox_KeSetGuestEvent sets it: returns 1, SignalState 1", NULL);
+        r = (int)ke_wait(STACK_MAIN, NOTIF_VA, ZERO_VA);
+        snprintf(d, sizeof d, "status 0x%08X", (uint32_t)r);
+        check(r == 0, "4d. the next wait succeeds", d);
+        r = xbox_KeSetGuestEvent(SYNC_VA);
+        check(r == 0 && G(SYNC_VA)[1] == 0, "4e. another object is still not a host event", NULL);
     } else {
         /* 1. Not an event header (type 5 = semaphore-like, size 4). */
         G(OTHER_VA)[0] = 5u | (4u << 16);

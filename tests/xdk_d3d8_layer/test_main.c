@@ -20,6 +20,9 @@ void nv2a_pb_set_software_method_hook(int (*hook)(uint32_t)) { g_hook = hook; }
 void nv2a_pb_set_semaphore_target(uint32_t va) { (void)va; }
 static uint32_t g_event;
 int xbox_KeSetGuestEvent(uint32_t va) { g_event = va; return 1; }
+static uint32_t g_adopted;
+int xbox_KeAdoptGuestEvent(uint32_t va) { g_adopted = va; return 1; }
+int nv2a_pb_dma_walk(void) { const char *e = getenv("RECOMP_PB_WALK"); return e && !strcmp(e, "dma"); }
 int xbox_Nv2aMirrorFence(uint32_t a, uint32_t b, uint32_t c) { (void)a; (void)b; (void)c; return 0; }
 static uint32_t g_disc_dev, g_disc_slot;
 void recomp_discovery_d3d(uint32_t d, uint32_t s) { g_disc_dev = d; g_disc_slot = s; }
@@ -52,7 +55,13 @@ int main(void)
         return 77;
     }
     M32(0x10000 + 0x10C) = 0x00880000u;           /* SizeOfImage: image 0x10000-0x890000 */
+    unsetenv("RECOMP_PB_WALK");
     xba_d3d8_configure();
+#ifdef TEST_LTCG
+    CHECK(nv2a_pb_dma_walk());                    /* XBA_D3D_DMA_WALK: the walk by default */
+#else
+    CHECK(!nv2a_pb_dma_walk());
+#endif
     CHECK(g_hook != NULL);                        /* both variants service some methods */
 
     /* 8 and 9 (PGRAPH RDI writes) are acknowledged in both variants, device or not (XBA-94). */
@@ -81,6 +90,12 @@ int main(void)
     M32(0x00700000 + 0x24A8) = 0;
     CHECK(xba_d3d8_locate() == 1);
     CHECK(g_disc_dev == 0x0085FDE0 && g_disc_slot == 0x00862288);
+#ifdef TEST_LTCG
+    /* Method 5 is delivered under the DMA walk: the fence event becomes a guest event. */
+    CHECK(g_adopted == 0x0085FDE0 + 0x1DCC);
+#else
+    CHECK(g_adopted == 0);                        /* segment scan: a blocking wait could hang */
+#endif
     /* Method 5: the fence event, device + 0x1DCC. */
     CHECK(g_hook(5u) == 1 && g_event == 0x0085FDE0 + 0x1DCC);
 #else

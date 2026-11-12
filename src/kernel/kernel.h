@@ -529,6 +529,14 @@ void xbox_kernel_bridge_init(void);
  * object is not such an event (switch off, KeInitializeEvent'ed, bad header). */
 int xbox_KeSetGuestEvent(uint32_t guest_va);
 
+/* Treat the KEVENT at guest_va, which the title builds itself, as a guest
+ * event (the RECOMP_TITLE_KEVENTS behaviour for that one object): waits on it
+ * block until something sets it instead of failing at once. Only for an event
+ * whose setter the runtime models (D3D's fence event with software method 5
+ * serviced under the DMA walk). Returns 1 when adopted, 0 when the table of
+ * such objects is full. */
+int xbox_KeAdoptGuestEvent(uint32_t guest_va);
+
 /**
  * Per-title kernel ordinal remap.
  *
