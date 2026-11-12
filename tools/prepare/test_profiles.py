@@ -171,7 +171,8 @@ def test_the_first_titles_resolve(tid, libs):
     for ident_ in (ident(libs), None):          # also when the XBE cannot be identified
         p = profiles.resolve(tid, ident_)
         assert p["keys"][:3] == ["xdk/d3d8", "xdk/dsound", "xdk/xapi"] and p["keys"][-1] == "titles/" + tid.lower()
-        assert p["missing"] == ([] if ident_ else ["xdk/xapi", "xdk/dsound", "xdk/d3d8"])
+        asked = [k for k in p["layers"][-1]["json"]["layers"]]
+        assert p["missing"] == ([k for k in asked if k.startswith("engines/")] if ident_ else asked)
         # What both had in their own title.c before the layers: now from the XDK layers.
         common = {"RECOMP_PB_EXEC": "1", "RECOMP_AC97_READY": "1", "RECOMP_VBLANK": "paced",
                   "RECOMP_DISPATCH_GATE": "1", "RECOMP_USB": "1", "RECOMP_KEYBOARD": "1"}
@@ -188,10 +189,22 @@ def test_fable_and_burnout_keep_their_own_values():
                                "XBA_D3D_SW_METHODS": 0x7000}
     assert fable["exclude_manual"] == ["titles_4d5300d1__overrides.c"]
     bo3 = profiles.resolve("4541005B", ident(BO3_LIBS))
+    # The engine layer (XBA-95) carries what Burnout 3 needs as a RenderWare title.
+    assert "engines/renderware" in bo3["keys"]
     assert bo3["env_force"] == {"RECOMP_LSFG": "0"}
-    assert bo3["params"] == {"XBA_D3D_DEVICE_PTR": 0x0035FE48, "XBA_D3D_SW_METHODS": 0x20, "XBA_D3D_DMA_WALK": 1}
+    assert bo3["params"] == {"XBA_D3D_DEVICE_PTR": 0x0035FE48, "XBA_D3D_SW_METHODS": 0x20}
     for plat in ("android", "desktop"):
         assert bo3["env_default"][plat]["RECOMP_GPU_FPS_CAP"] == "60"
+        assert bo3["env_default"][plat]["RECOMP_PB_WALK"] == "dma"
+        assert bo3["env_default"][plat]["RECOMP_TITLE_KEVENTS"] == "1"
+
+
+def test_a_renderware_title_with_no_profile_gets_the_engine_layer():
+    """Black (45410083) has no title layer: the RenderWare markers pick the engine layer."""
+    black = profiles.resolve("45410083", ident({"XAPILIB": 5849, "D3D8LTCG": 5849, "DSOUND": 5849}, ["renderware"]))
+    assert black["keys"] == ["xdk/d3d8", "xdk/dsound", "xdk/xapi", "engines/renderware"] and not black["title"]
+    assert black["env_force"] == {"RECOMP_LSFG": "0"}
+    assert black["env_default"]["android"]["RECOMP_PB_WALK"] == "dma"
 
 
 def test_every_layer_in_the_tree_is_well_formed():

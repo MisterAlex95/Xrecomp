@@ -10,8 +10,9 @@ stall.
 
 ## What the profile does
 
-Since XBA-66 most of it comes from the XDK layers (`profiles/xdk/xapi`, `dsound`, `d3d8`; title.json `"layers"`), with
-D3D's addresses in title.json `"params"`; `title.c` keeps the flip pacing only. Rules: `docs/technical/profiles.md`.
+Since XBA-66 most of it comes from the XDK layers (`profiles/xdk/xapi`, `dsound`, `d3d8`) and, since XBA-95, the
+engine layer `profiles/engines/renderware` (DMA walk, title-built KEVENTs, 60 fps cap, frame generation off); D3D's
+addresses stay in title.json `"params"`; `title.c` keeps the flip pacing only. Rules: `docs/technical/profiles.md`.
 
 | Setting | Why |
 |---|---|

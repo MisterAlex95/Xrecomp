@@ -1,0 +1,23 @@
+{
+  "name": "RenderWare (Criterion) on XDK D3D8LTCG",
+  "env_default": {
+    "RECOMP_PB_WALK": "dma",
+    "RECOMP_TITLE_KEVENTS": "1",
+    "RECOMP_GPU_FPS_CAP": "60"
+  },
+  "env_force": {
+    "RECOMP_LSFG": "0"
+  },
+  "_why": [
+    "RECOMP_PB_WALK=dma: D3D8LTCG's fence wait (BlockOnTime and its far-behind probe) reads DMA_GET and the 0x0310",
+    "latch (PGRAPH 0x400B10), which only the DMA walk keeps honest; under the segment scan Burnout 3's front end",
+    "stalled at _FEMain.xmv.",
+    "RECOMP_TITLE_KEVENTS=1: D3D builds its fence KEVENT itself (no KeInitializeEvent import); software method 5",
+    "sets it (profiles/xdk/d3d8/d3d8.c). Without it every wait on it fails at once and BlockOnTime spins.",
+    "RECOMP_GPU_FPS_CAP=60 and frame generation off: Criterion's game logic follows the flip rate (Burnout 3 runs at",
+    "half speed at a 30 cap, and frame generation at 2x on a 60 Hz panel caps at 30). XBA-96 is to detect that at",
+    "run time instead.",
+    "XBA_D3D_FENCE=mirror (the A/B fallback) wants the segment scan: set RECOMP_PB_WALK=scan with it.",
+    "Seen on: Burnout 3 4541005B. Picked for: Black 45410083 (XBA-92), any title tools.xbe_ident finds RenderWare in."
+  ]
+}
