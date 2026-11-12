@@ -10,6 +10,7 @@
  */
 
 #include "kernel.h"
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -62,12 +63,21 @@ UCHAR xbox_AlternateSignatureKeys[16][16] = {{0}};
 UCHAR xbox_XePublicKeyData[284] = {0};
 
 /* Image filename - the XBE path as seen by the kernel */
-static char g_image_filename[] = "\\Device\\CdRom0\\default.xbe";
+static char g_image_filename[64] = "\\Device\\CdRom0\\default.xbe";
 XBOX_ANSI_STRING xbox_XeImageFileName = {
-    .Length        = sizeof(g_image_filename) - 1,
+    .Length        = sizeof("\\Device\\CdRom0\\default.xbe") - 1,
     .MaximumLength = sizeof(g_image_filename),
     .Buffer        = g_image_filename
 };
+
+/* $RECOMP_IMAGE names a secondary image of the disc (XBA-82): the host-side
+ * copy follows, as the guest's does (kernel_bridge.c). */
+void xbox_image_file_name_init(void)
+{
+    const char *n = xbox_image_file_name();
+    snprintf(g_image_filename, sizeof g_image_filename, "%s", n);
+    xbox_XeImageFileName.Length = (USHORT)strlen(g_image_filename);
+}
 
 /* Launch data page - used for title-to-title launches (e.g., Xbox Dashboard → game).
  * Allocated dynamically and zeroed for normal game boot. */

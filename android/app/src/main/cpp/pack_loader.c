@@ -16,6 +16,10 @@ typedef recomp_func_t (*lookup_fn)(uint32_t va);
 typedef int (*pb_state_fn)(void);
 
 static lookup_fn s_lookup, s_lookup_manual;
+/* XBA-82: <files>/work/<tid>/image.next (the image the next start runs) and
+ * the XBE of the image this start runs when it is not default.xbe. */
+static char s_next_path[RECOMP_PACK_PATH_MAX + 64];
+static char s_image_xbe[RECOMP_PACK_PATH_MAX + 300];
 static pb_state_fn s_pb_state;
 static int *s_fe_cursor;
 
@@ -81,6 +85,56 @@ int xba_pack_load(const char *files_dir, const char *xbe_path, xba_title_main_fn
         snprintf(disc, sizeof disc, "%s/work/%s/discovered.jsonl", files_dir, tid);
         setenv("RECOMP_DISCOVERY", disc, 0);
     }
+    /* The disc's other images (XBA-82): which one this start runs, and the
+     * map the kernel hands a launch of another one over with. */
+    if (files_dir) {
+        char work[RECOMP_PACK_PATH_MAX + 32], want[300] = "", key[256] = "default.xbe";
+        char pack_dir[RECOMP_PACK_PATH_MAX], img_lib[RECOMP_PACK_PATH_MAX + 300], ir[256];
+        char *slash;
+        FILE *f;
+
+        snprintf(work, sizeof work, "%s/work/%s", files_dir, tid);
+        snprintf(s_next_path, sizeof s_next_path, "%s/image.next", work);
+        if ((f = fopen(s_next_path, "r")) != NULL) {
+            if (!fgets(want, sizeof want, f))
+                want[0] = 0;
+            fclose(f);
+            remove(s_next_path);
+            want[strcspn(want, "\r\n")] = 0;
+        }
+        snprintf(pack_dir, sizeof pack_dir, "%s", lib);
+        if ((slash = strrchr(pack_dir, '/')) != NULL)
+            *slash = 0;
+        if (want[0]) {
+            if (recomp_pack_image_lib(&m, pack_dir, lib, want, img_lib, sizeof img_lib, key, sizeof key, ir,
+                                      sizeof ir) == 0) {
+                snprintf(lib, sizeof lib, "%s", img_lib);
+                if (strcmp(key, "default.xbe")) {
+                    snprintf(s_image_xbe, sizeof s_image_xbe, "%s", xbe_path);
+                    if ((slash = strrchr(s_image_xbe, '/')) != NULL)
+                        slash[1] = 0;
+                    else
+                        s_image_xbe[0] = 0;
+                    strncat(s_image_xbe, key, sizeof s_image_xbe - strlen(s_image_xbe) - 1);
+                    setenv("RECOMP_IMAGE", key, 1);
+                }
+                printf("PACK_IMAGE %s %s\n", key, lib);
+            } else {
+                printf("PACK_IMAGE_MISSING %s (%s), default.xbe instead\n", want, ir);
+            }
+        }
+        if (m.images_n > 0 && !getenv("RECOMP_IMAGE_MAP")) {
+            char map[RECOMP_PACK_PATH_MAX + 64];
+            snprintf(map, sizeof map, "%s/images.map", work);
+            if ((f = fopen(map, "w")) != NULL) {
+                fprintf(f, "default.xbe\tdefault.xbe\n");
+                for (int i = 0; i < m.images_n; i++)
+                    fprintf(f, "%s\t%s\n", m.images[i].path, m.images[i].path);
+                fclose(f);
+                setenv("RECOMP_IMAGE_MAP", map, 1);
+            }
+        }
+    }
     rc = recomp_pack_open(lib, m.entry, &syms, why, sizeof why);
     if (rc != RECOMP_PACK_OK) {
         printf("PACK_DLOPEN %s\n", why);
@@ -101,4 +155,21 @@ out:
     if (reason && reason_n)
         snprintf(reason, reason_n, "%s", why);
     return rc;
+}
+
+const char *xba_pack_image_xbe(void)
+{
+    return s_image_xbe[0] ? s_image_xbe : NULL;
+}
+
+int xba_pack_set_next_image(const char *target)
+{
+    FILE *f;
+
+    if (!s_next_path[0] || !target || !*target)
+        return -1;
+    if (!(f = fopen(s_next_path, "w")))
+        return -1;
+    fprintf(f, "%s\n", target);
+    return fclose(f) == 0 ? 0 : -1;
 }

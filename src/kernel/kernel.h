@@ -1393,13 +1393,29 @@ int xbox_restart_recent(const int64_t *times, int n, int64_t now);
  * handler. Returns only when the title was not restarted. */
 void xbox_quick_reboot(const uint8_t *page);
 
-/* XBA-82 (desktop POSIX): XLaunchNewImage to another image of the disc. Looks
- * the disc path up in $RECOMP_IMAGE_MAP (lines "<disc path>\t<executable>",
- * written by tools.prepare), writes the launch data page as a quick reboot
- * does, and execs that image's executable in this process. Returns only when
- * it could not (no map, no line, exec failed): the caller exits as before. */
+/* XBA-82: XLaunchNewImage to another image of the disc. Looks the disc path
+ * up in $RECOMP_IMAGE_MAP (lines "<disc path>\t<target>", written by
+ * tools.prepare or the Android pack loader), writes the launch data page as a
+ * quick reboot does, and hands over: the image handler when one is set, else
+ * (desktop POSIX) an exec of the target executable in this process. Returns
+ * only when it could not (no map, no line, exec failed): the caller exits as
+ * before. */
 int  xbox_launch_image(const char *launch_path, const uint8_t *page);
 void xbox_launch_rel_path(const char *launch_path, char *out, size_t n);
+
+/* A host with no exec hand-over (Android) takes the launch itself: the map's
+ * target for the image ("<disc path>\t<target>"), called after the launch data
+ * page is written; returns only when it could not hand over. Set, it is used
+ * on every host instead of the exec. NULL: none. */
+typedef void (*xbox_image_handler)(const char *target);
+void xbox_SetImageHandler(xbox_image_handler fn);
+
+/* XeImageFileName's text for the running image: "\Device\CdRom0\" and
+ * $RECOMP_IMAGE (the image's disc path, set by whoever started a secondary
+ * image), else "\Device\CdRom0\default.xbe". */
+const char *xbox_image_file_name(void);
+/* Kernel init: xbox_XeImageFileName (the host copy) set to it. */
+void xbox_image_file_name_init(void);
 
 /* The save directory as a UTF-8 path (kernel_path.c). */
 const char *xbox_path_save_dir_utf8(void);

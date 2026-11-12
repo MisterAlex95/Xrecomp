@@ -31,6 +31,8 @@ extern "C" {
 #define RECOMP_PACK_PATH_MAX 1024
 /* env_force entries a pack.json may carry (tools/prepare/pack.py ENV_FORCE_MAX). */
 #define RECOMP_PACK_ENV_FORCE_MAX 16
+/* Other images of the disc a pack.json may carry (tools/prepare/pack.py). */
+#define RECOMP_PACK_IMAGES_MAX 8
 
 /* Results of recomp_pack_find / recomp_pack_open. */
 enum {
@@ -56,6 +58,11 @@ typedef struct recomp_pack_meta {
      * key or value too long for the arrays, are counted in env_force_dropped. */
     int env_force_n, env_force_dropped;
     struct { char key[64]; char value[256]; } env_force[RECOMP_PACK_ENV_FORCE_MAX];
+    /* "images": {"game.xbe": "libimage-game.xbe.so", ...}: the disc's other
+     * images the title launches (XBA-82), each one's library in the pack
+     * folder. default.xbe is "lib". Older shells skip the key. */
+    int images_n, images_dropped;
+    struct { char path[256]; char lib[256]; } images[RECOMP_PACK_IMAGES_MAX];
 } recomp_pack_meta;
 
 #define RECOMP_PACK_HAVE_FORMAT    0x01u
@@ -102,6 +109,16 @@ int recomp_pack_apply_env_force(const recomp_pack_meta *m);
 int recomp_pack_validate(const recomp_pack_meta *m, const char *tid, long long shell_abi,
                          const char *pack_dir, char *lib_path, size_t lib_path_n,
                          char *reason, size_t reason_n);
+
+/* The library of image `path` (a disc path, any case, '\\' or '/', as
+ * xbox_launch_rel_path gives it) in a validated pack: "default.xbe" (or
+ * empty) is lib_path itself, another one an "images" entry, checked to be a
+ * plain file name present in pack_dir. Fills out (pack_dir/lib) and, when
+ * key is not NULL, the entry's path as pack.json spells it. Returns 0, or -1
+ * with a reason (not in the pack, missing file). */
+int recomp_pack_image_lib(const recomp_pack_meta *m, const char *pack_dir, const char *lib_path,
+                          const char *path, char *out, size_t out_n, char *key, size_t key_n,
+                          char *reason, size_t reason_n);
 
 /* <files_dir>/packs/<tid>/pack.json, read, parsed and validated. Returns
  * RECOMP_PACK_OK (m and lib_path filled), RECOMP_PACK_MISSING (no pack.json
