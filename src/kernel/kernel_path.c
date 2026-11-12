@@ -6,7 +6,8 @@
  *   D:\               -> <game_dir>/
  *   T:\               -> <save_dir>/TitleData/
  *   U:\               -> <save_dir>/UserData/
- *   Z:\               -> <save_dir>/Cache/
+ *   Z:\               -> <user root>/Cache/<title id>/  (user root: RECOMP_SAVE_DIR
+ *                        or the save dir)
  *
  * The Win32 build emits UTF-16 paths (for CreateFileW); the Linux build
  * emits UTF-8 paths with '/' separators (for open()).
@@ -43,7 +44,9 @@ typedef struct {
     const char* prefix;     /* Xbox path prefix (backslash form)         */
     int         to_save;    /* 1 = under save_dir, 0 = under game_dir,
                                2 = under the user-data root (save_dir, or
-                               RECOMP_SAVE_DIR when set)                  */
+                               RECOMP_SAVE_DIR when set),
+                               3 = the utility drive: <user root>/Cache/
+                               <title id> (utility_sub)                   */
     const char* sub_win;    /* sub-directory, Win32 backslash form       */
     const char* sub_posix;  /* sub-directory, POSIX slash form           */
 } path_rule;
@@ -69,7 +72,7 @@ static const path_rule s_rules[] = {
      * for the same reasons they do.
      *
      * Its folder is TitleCache, not CACHE: Z: and Partition3-5 (the cache
-     * partitions behind X:, Y: and Z:) already go to <save>/Cache, and on a
+     * partitions behind X:, Y: and Z:) go to <user root>/Cache, and on a
      * case-insensitive host (Windows, Proton, macOS) CACHE and Cache are one
      * folder, so the title's files would mix with the utility-drive caches
      * and could collide by name.
@@ -100,9 +103,18 @@ static const path_rule s_rules[] = {
     { "C:\\",                                 0, NULL,         NULL          },
     { "\\??\\C:\\",                           0, NULL,         NULL          },
     { "\\Device\\Harddisk0\\Partition2",     1, "\\SystemData", "/SystemData" },
-    { "\\Device\\Harddisk0\\Partition3",     1, "\\Cache",   "/Cache"      },
-    { "\\Device\\Harddisk0\\Partition4",     1, "\\Cache",   "/Cache"      },
-    { "\\Device\\Harddisk0\\Partition5",     1, "\\Cache",   "/Cache"      },
+    /* The utility drive. XAPI's XMountUtilityDrive links \??\Z: to one of
+     * partitions 3-5, picked per title on a console (the partition header
+     * names the title that owns it), so what a title finds on Z: is its own.
+     * One shared <save>/Cache for every title mixed KOTOR's currentgame\ and
+     * temp\ with Fable's data\ and PageFile.bin, and a scripted run with a
+     * fresh RECOMP_SAVE_DIR still started from the last run's Z:. So the
+     * three partitions, Z:\ and \??\Z:\ map to <user root>/Cache/<title id>
+     * (utility_sub), under RECOMP_SAVE_DIR when it is set, like the saves.
+     * The bare devices keep their images (xbox_partition_device_digit). */
+    { "\\Device\\Harddisk0\\Partition3",     3, "\\Cache",   "/Cache"      },
+    { "\\Device\\Harddisk0\\Partition4",     3, "\\Cache",   "/Cache"      },
+    { "\\Device\\Harddisk0\\Partition5",     3, "\\Cache",   "/Cache"      },
     { "D:\\",                                 0, NULL,         NULL          },
     { "d:\\",                                 0, NULL,         NULL          },
     /* Y: is the Xbox dashboard partition; the dashboard opens its assets
@@ -111,7 +123,8 @@ static const path_rule s_rules[] = {
     { "y:\\",                                 0, NULL,         NULL          },
     { "T:\\",                                 1, "\\TitleData","/TitleData"  },
     { "U:\\",                                 1, "\\UserData", "/UserData"   },
-    { "Z:\\",                                 1, "\\Cache",    "/Cache"      },
+    { "Z:\\",                                 3, "\\Cache",    "/Cache"      },
+    { "\\??\\Z:\\",                           3, "\\Cache",    "/Cache"      },
     { "\\??\\D:\\",                           0, NULL,         NULL          },
     { "\\??\\Y:\\",                           0, NULL,         NULL          },
     { "\\??\\y:\\",                           0, NULL,         NULL          },
@@ -126,9 +139,42 @@ static const path_rule s_rules[] = {
 static int rule_match(const char* path, const path_rule* r)
 {
     int skip = match_prefix(path, r->prefix);
-    if (skip && r->to_save == 2 && path[skip] && path[skip] != '\\')
+    if (skip && r->to_save >= 2 && r->prefix[skip - 1] != '\\'
+        && path[skip] && path[skip] != '\\')
         return 0;
     return skip;
+}
+
+/* The running title's ID, from the XBE certificate (xbox_MemoryLayoutInit
+ * sets it as it maps the image). 0 until then: the utility drive is then the
+ * bare <user root>/Cache, as it was for every title before. */
+static uint32_t s_title_id;
+
+void xbox_path_set_title_id(uint32_t title_id)
+{
+    s_title_id = title_id;
+}
+
+/* The sub-directory a to_save 3 rule joins to the user root: the rule's own
+ * (Cache) plus the title ID in lower case, as UDATA\<tid> is named. */
+static const char *utility_sub(const char *sub, char sep, char *buf, size_t n)
+{
+    if (!s_title_id)
+        return sub;
+    snprintf(buf, n, "%s%c%08x", sub, sep, (unsigned)s_title_id);
+    return buf;
+}
+
+/* Said once per title ID, the first time Z: is translated. */
+static void utility_note(const char *where)
+{
+    static uint32_t said = 0xFFFFFFFFu;
+    if (said == s_title_id)
+        return;
+    said = s_title_id;
+    xbox_log(XBOX_LOG_INFO, XBOX_LOG_PATH,
+             "utility drive (Z:, Partition3-5) -> %s%s", where,
+             s_title_id ? "" : " (no title ID yet: shared by every title)");
 }
 
 /* Saves left in the game dir. Builds before the UDATA/TDATA rules sent all
@@ -591,12 +637,31 @@ const char *xbox_path_save_dir_utf8(void)
     return utf8;
 }
 
+const char *xbox_path_utility_dir_utf8(void)
+{
+    static char utf8[MAX_PATH * 3];
+    char sub[64];
+    int n;
+
+    if (!s_initialized)
+        xbox_path_init(NULL, NULL);
+    n = WideCharToMultiByte(CP_UTF8, 0, s_user_dir, -1, utf8, (int)sizeof(utf8),
+                            NULL, NULL);
+    if (!n)
+        utf8[0] = 0;
+    else
+        snprintf(utf8 + n - 1, sizeof utf8 - (size_t)(n - 1), "%s",
+                 utility_sub("\\Cache", '\\', sub, sizeof sub));
+    return utf8;
+}
+
 BOOL xbox_translate_path(const char* xbox_path, xbox_host_char* host_path_buf, DWORD buf_size)
 {
     const char*  remainder = NULL;
     const WCHAR* base_dir  = NULL;
     const char*  sub_dir   = NULL;
-    int          skip;
+    char         sub_buf[64];
+    int          skip, utility = 0;
 
     if (!xbox_path || !host_path_buf || buf_size == 0)
         return FALSE;
@@ -620,9 +685,12 @@ BOOL xbox_translate_path(const char* xbox_path, xbox_host_char* host_path_buf, D
         skip = rule_match(xbox_path, &s_rules[i]);
         if (skip) {
             remainder = xbox_path + skip;
-            base_dir  = s_rules[i].to_save == 2 ? USER_RULE_DIR(&s_rules[i])
+            utility   = s_rules[i].to_save == 3;
+            base_dir  = utility ? s_user_dir
+                      : s_rules[i].to_save == 2 ? USER_RULE_DIR(&s_rules[i])
                       : s_rules[i].to_save     ? s_save_dir : s_game_dir;
-            sub_dir   = s_rules[i].sub_win;
+            sub_dir   = utility ? utility_sub(s_rules[i].sub_win, '\\', sub_buf, sizeof sub_buf)
+                                : s_rules[i].sub_win;
             goto translate;
         }
     }
@@ -652,6 +720,16 @@ translate:
             WCHAR dir_path[MAX_PATH];
             swprintf_s(dir_path, MAX_PATH, L"%s%s", base_dir, sub_wide);
             CreateDirectoryW(base_dir, NULL);
+            if (utility) {
+                /* Two levels: Cache, then the title's folder in it. */
+                WCHAR cache[MAX_PATH];
+                char utf8[MAX_PATH * 3];
+                swprintf_s(cache, MAX_PATH, L"%s\\Cache", base_dir);
+                CreateDirectoryW(cache, NULL);
+                if (WideCharToMultiByte(CP_UTF8, 0, dir_path, -1, utf8,
+                                        (int)sizeof utf8, NULL, NULL))
+                    utility_note(utf8);
+            }
             CreateDirectoryW(dir_path, NULL);
         } else {
             swprintf_s(host_path_buf, buf_size, L"%s\\%s", base_dir, remainder_wide);
@@ -888,12 +966,25 @@ const char *xbox_path_save_dir_utf8(void)
     return s_save_dir;
 }
 
+const char *xbox_path_utility_dir_utf8(void)
+{
+    static char out[MAX_PATH];
+    char sub[64];
+
+    if (!s_initialized)
+        xbox_path_init(NULL, NULL);
+    snprintf(out, sizeof out, "%s%s", s_user_dir,
+             utility_sub("/Cache", '/', sub, sizeof sub));
+    return out;
+}
+
 BOOL xbox_translate_path(const char* xbox_path, xbox_host_char* host_path_buf, DWORD buf_size)
 {
     const char* remainder = NULL;
     const char* base_dir  = NULL;
     const char* sub_dir   = NULL;
-    int         skip;
+    char        sub_buf[64];
+    int         skip, utility = 0;
 
     if (!xbox_path || !host_path_buf || buf_size == 0)
         return FALSE;
@@ -922,9 +1013,12 @@ BOOL xbox_translate_path(const char* xbox_path, xbox_host_char* host_path_buf, D
         skip = rule_match(xbox_path, &s_rules[i]);
         if (skip) {
             remainder = xbox_path + skip;
-            base_dir  = s_rules[i].to_save == 2 ? USER_RULE_DIR(&s_rules[i])
+            utility   = s_rules[i].to_save == 3;
+            base_dir  = utility ? s_user_dir
+                      : s_rules[i].to_save == 2 ? USER_RULE_DIR(&s_rules[i])
                       : s_rules[i].to_save     ? s_save_dir : s_game_dir;
-            sub_dir   = s_rules[i].sub_posix;
+            sub_dir   = utility ? utility_sub(s_rules[i].sub_posix, '/', sub_buf, sizeof sub_buf)
+                                : s_rules[i].sub_posix;
             goto translate;
         }
     }
@@ -953,6 +1047,8 @@ translate:
             char dir_path[MAX_PATH];
             snprintf(dir_path, sizeof(dir_path), "%s%s", base_dir, sub_dir);
             mkdir_p(dir_path);
+            if (utility)
+                utility_note(dir_path);
         } else {
             snprintf(host_path_buf, buf_size, "%s/%s", base_dir, remainder_posix);
         }

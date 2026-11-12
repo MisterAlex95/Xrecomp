@@ -134,7 +134,10 @@ typedef struct {
 } CacheItem;
 static CacheItem *s_items;
 static int s_n, s_cap;
-static char s_game_dir[1024], s_save_dir[1024];
+static char s_game_dir[1024];
+
+/* Z: on the host: <user root>/Cache/4d5300d1 (kernel_path.c). */
+extern const char *xbox_path_utility_dir_utf8(void);
 
 static void cache_scan(const char *dir, const char *rel, const char *cache_root)
 {
@@ -240,7 +243,7 @@ static void *cache_progress(void *unused)
     (void)unused;
 
     snprintf(data, sizeof data, "%s/Data", s_game_dir);
-    snprintf(cache, sizeof cache, "%s/Cache/data", s_save_dir);
+    snprintf(cache, sizeof cache, "%s/data", xbox_path_utility_dir_utf8());
     cache_scan(data, "", cache);
     for (i = 0; i < s_n; i++)
         have_lang |= s_items[i].lang;
@@ -320,17 +323,8 @@ void fable_start(const char *game_dir, const char *save_dir)
 {
     pthread_t t;
 
+    (void)save_dir;                     /* Z: is the kernel's to place */
     snprintf(s_game_dir, sizeof s_game_dir, "%s", game_dir ? game_dir : "game");
-    if (save_dir) {
-        snprintf(s_save_dir, sizeof s_save_dir, "%s", save_dir);
-    } else {
-        /* The kernel's default save directory (kernel_path.c). */
-        const char *x = getenv("XDG_DATA_HOME"), *h = getenv("HOME");
-        if (x && *x)
-            snprintf(s_save_dir, sizeof s_save_dir, "%s/xboxrecomp", x);
-        else
-            snprintf(s_save_dir, sizeof s_save_dir, "%s/.local/share/xboxrecomp", h ? h : ".");
-    }
     if (pthread_create(&t, NULL, cache_progress, NULL) == 0)
         pthread_detach(t);
 }

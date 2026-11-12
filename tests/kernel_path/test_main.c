@@ -11,6 +11,11 @@
  * behind X:, Y: and Z:) use <save>/Cache and the two names are one folder on
  * a case-insensitive host.
  *
+ * The utility drive (Z:, \??\Z:, Partition3-5) is per title, at
+ * <user root>/Cache/<title id>, and follows RECOMP_SAVE_DIR like the saves:
+ * one shared <save>/Cache mixed KOTOR's and Fable's files, and a scripted run
+ * with a fresh RECOMP_SAVE_DIR still saw the last run's Z:.
+ *
  * Cross-platform: Win32 backend on Windows and Proton, POSIX elsewhere, so
  * both forms of each rule (sub_win, sub_posix) are checked by the same cases.
  */
@@ -325,6 +330,109 @@ static void test_save_dir_root(void)
     }
 }
 
+static int file_exists(const char *p)
+{
+#if defined(_WIN32)
+    return GetFileAttributesA(p) != INVALID_FILE_ATTRIBUTES;
+#else
+    struct stat st;
+    return stat(p, &st) == 0;
+#endif
+}
+
+static void touch(const char *p)
+{
+    FILE *f = fopen(p, "wb");
+    if (f) fclose(f);
+}
+
+/* Z: per title, under the user-data root. */
+static void test_utility_drive(void)
+{
+    char want[1200], dir[1200], old[1200];
+    static const char *const forms[] = {
+        "Z:\\cache\\items.bif",
+        "\\??\\Z:\\cache\\items.bif",
+        "\\Device\\Harddisk0\\Partition3\\cache\\items.bif",
+        "\\Device\\Harddisk0\\Partition4\\cache\\items.bif",
+        "\\Device\\Harddisk0\\partition5\\cache\\items.bif",
+    };
+    char what[128];
+    size_t i;
+
+    printf("utility drive Z: per title\n");
+    set_env("RECOMP_SAVE_DIR", NULL);
+    xbox_path_set_title_id(0);
+    xbox_path_init(g_game, g_save);
+
+    /* No XBE mapped yet: the old shared folder. */
+    snprintf(want, sizeof want, "%s" SEP "Cache" SEP "a.bin", g_save);
+    expect("Z:\\a.bin", want, "no title ID: Z: is <save>/Cache, as before");
+
+    /* A file an earlier build left in the shared folder. */
+    snprintf(old, sizeof old, "%s" SEP "Cache" SEP "PageFile.bin", g_save);
+    touch(old);
+
+    xbox_path_set_title_id(0x4C410003u);
+    snprintf(want, sizeof want, "%s" SEP "Cache" SEP "4c410003" SEP "cache" SEP "items.bif",
+             g_save);
+    for (i = 0; i < sizeof forms / sizeof forms[0]; i++) {
+        snprintf(what, sizeof what, "%s -> <save>/Cache/4c410003", forms[i]);
+        expect(forms[i], want, what);
+    }
+    snprintf(dir, sizeof dir, "%s" SEP "Cache" SEP "4c410003", g_save);
+    check(is_dir(dir), "translating it made <save>/Cache/4c410003");
+    expect("Z:\\", dir, "the bare Z:\\ is the title's folder");
+    check(same(xbox_path_utility_dir_utf8(), dir), "xbox_path_utility_dir_utf8 names it");
+    check(xbox_path_tree("Z:\\cache\\items.bif") == XBOX_TREE_HDD,
+          "xbox_path_tree: Z: is still the HDD tree");
+    check(xbox_path_tree("\\??\\Z:\\x") == XBOX_TREE_HDD, "xbox_path_tree: \\??\\Z: too");
+    check(file_exists(old), "the old shared <save>/Cache is left as it was");
+    /* A name that only starts like a partition is not one. */
+    check(xbox_path_tree("\\Device\\Harddisk0\\Partition30\\x") == XBOX_TREE_UNKNOWN,
+          "Partition30 is not Partition3");
+    /* The bare devices keep their images. */
+    snprintf(want, sizeof want, "%s" SEP "Partition3.img", g_save);
+    expect("\\Device\\Harddisk0\\Partition3", want, "the bare Partition3 is still its image");
+
+    /* Another title: another folder. */
+    xbox_path_set_title_id(0x4D5300D1u);
+    snprintf(want, sizeof want, "%s" SEP "Cache" SEP "4d5300d1" SEP "cache" SEP "items.bif",
+             g_save);
+    expect("Z:\\cache\\items.bif", want, "another title's Z: is <save>/Cache/4d5300d1");
+
+    /* A title that maps Z: itself to a partition: the link then the rule. */
+    {
+        XBOX_ANSI_STRING l, t;
+        l.Buffer = (PCHAR)"\\??\\Z:"; l.Length = 6; l.MaximumLength = 7;
+        t.Buffer = (PCHAR)"\\Device\\Harddisk0\\Partition4";
+        t.Length = (USHORT)strlen(t.Buffer);
+        t.MaximumLength = (USHORT)(t.Length + 1);
+        xbox_IoCreateSymbolicLink(&l, &t);
+        expect("z:\\cache\\items.bif", want, "Z: linked to Partition4 lands there too");
+        xbox_IoDeleteSymbolicLink(&l);
+    }
+
+    /* RECOMP_SAVE_DIR: a fresh root starts with an empty Z:. */
+    snprintf(old, sizeof old, "%s" SEP "Cache" SEP "4d5300d1" SEP "cache", g_save);
+    make_dir(old);
+    snprintf(old, sizeof old, "%s" SEP "Cache" SEP "4d5300d1" SEP "cache" SEP "items.bif", g_save);
+    touch(old);
+    set_env("RECOMP_SAVE_DIR", g_user);
+    xbox_path_init(g_game, g_save);
+    snprintf(want, sizeof want, "%s" SEP "Cache" SEP "4d5300d1" SEP "cache" SEP "items.bif",
+             g_user);
+    expect("Z:\\cache\\items.bif", want, "with RECOMP_SAVE_DIR: <user>/Cache/4d5300d1");
+    expect("\\Device\\Harddisk0\\Partition3\\cache\\items.bif", want,
+           "and Partition3 with it");
+    check(!file_exists(want), "the save dir's Z: file is not there: Z: starts empty");
+    snprintf(dir, sizeof dir, "%s" SEP "Cache" SEP "4d5300d1", g_user);
+    check(same(xbox_path_utility_dir_utf8(), dir), "xbox_path_utility_dir_utf8 follows it");
+
+    set_env("RECOMP_SAVE_DIR", NULL);
+    xbox_path_set_title_id(0);
+}
+
 #if !defined(_WIN32)
 /* The Xbox's file systems ignore case; titles rely on it (a title asks for
  * Data\movies\INTRO.bik where the disc has Data/Movies/intro.bik). On a POSIX
@@ -392,6 +500,7 @@ int main(int argc, char **argv)
     test_default_root();
     test_save_dir_root();
     test_legacy_saves();
+    test_utility_drive();
 #if !defined(_WIN32)
     test_case_folding();
 #endif

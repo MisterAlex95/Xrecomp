@@ -74,7 +74,9 @@ Logs: analysis/run10.err, analysis/lldb-hang4.txt.
   232, ~360 reads). It stops right after opening d:\Data\misc\xbox\effects.biz (no read follows).
 - Ruled out: stale Z: cache (moved to ~/.local/share/xboxrecomp/Cache.old, fresh run stops at the same place);
   deferred file APCs (xbox_SetDeferredIoApc(1), no change, reverted).
-- RECOMP_SAVE_DIR moves T:/U: but not Z: (still ~/.local/share/xboxrecomp/Cache) -- toolkit inconsistency to check.
+- RECOMP_SAVE_DIR moved T:/U: but not Z: (then ~/.local/share/xboxrecomp/Cache, shared by every title). Fixed
+  2026-11-12 (K-9): Z: is <user root>/Cache/4d5300d1, under RECOMP_SAVE_DIR when set, so a scripted run with a fresh
+  RECOMP_SAVE_DIR unpacks the data again unless its save dir carries a Cache/4d5300d1.
 - Next: find which worker should issue the effects.biz reads and what event it waits on (sub_005ED160 job queue?).
 
 ### Session 2026-11-10 (later)

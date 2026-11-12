@@ -566,6 +566,15 @@ void xbox_kernel_set_ordinal_remap(const unsigned short *map, int count);
 /* Initialize path translation with base directories */
 void xbox_path_init(const char* game_dir, const char* save_dir);
 
+/* The running title's ID (XBE certificate), set by xbox_MemoryLayoutInit as it
+ * maps the image: the utility drive (Z:, Partition3-5) is per title, at
+ * <user root>/Cache/<title id in lower case>, the user root being
+ * RECOMP_SAVE_DIR when set and the save dir otherwise. */
+void xbox_path_set_title_id(uint32_t title_id);
+/* That folder on the host (UTF-8), for host code that watches what the title
+ * writes to Z: (Fable's data-preparation progress). */
+const char *xbox_path_utility_dir_utf8(void);
+
 /*
  * Character type of a translated host path. The Win32 file APIs take wide
  * chars; POSIX takes bytes. kernel_path.c and kernel_file.c are split on

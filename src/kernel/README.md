@@ -158,7 +158,7 @@ Xbox Path                    → Windows Path
 \Device\CdRom0\Data\foo.dat → <game_dir>\Data\foo.dat
 D:\Data\foo.dat              → <game_dir>\Data\foo.dat
 T:\save.dat                  → <save_dir>\save.dat
-Z:\cache.dat                 → <save_dir>\cache\cache.dat
+Z:\cache.dat                 → <save_dir>\Cache\<title id>\cache.dat
 ```
 
 ### Path Setup
@@ -174,9 +174,9 @@ xbox_path_init("Burnout 3 Takedown", "saves");
 go to `<save_dir>/UDATA` and `<save_dir>/TDATA`, and its scratch, `...\CACHE`,
 to `<save_dir>/TitleCache`, which keeps the cache a title writes out of the
 game dir. It is not `CACHE`: Z: and Partition3-5 (the cache partitions
-behind X:, Y: and Z:) already use `<save_dir>/Cache`, which is the same
-folder on a case-insensitive host. `RECOMP_SAVE_DIR=<dir>` moves just those
-three under `<dir>` (created if missing; absolute, and under Wine a DOS path
+behind X:, Y: and Z:) use `<save_dir>/Cache/<title id>`, and `Cache` is the
+same folder on a case-insensitive host. `RECOMP_SAVE_DIR=<dir>` moves those
+four under `<dir>` (created if missing; absolute, and under Wine a DOS path
 such as `Z:\home\me\run\save`), so a scripted run can start from an empty
 save without touching the rest of the save dir.
 

@@ -3432,6 +3432,11 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
             xbox_FramebufferWindowSetTitle(
                 (const uint16_t *)(xbe + cert_off + 0x0C), 40);
         }
+        /* The title ID (+8): the utility drive Z: is per title. */
+        if (cert_off + 0x0C <= xbe_size) {
+            extern void xbox_path_set_title_id(uint32_t);
+            xbox_path_set_title_id(*(const DWORD *)(xbe + cert_off + 8));
+        }
         int sections_short = 0;
         size_t total_bytes = 0;
 
