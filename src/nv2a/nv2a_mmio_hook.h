@@ -27,7 +27,9 @@
 void nv2a_hook_init(ptrdiff_t xbox_mem_offset);
 
 /* For the host scanout thread: copy the modeled PVIDEO registers (false
- * when there is no NV2A model), and mark a bank's frame as taken. */
+ * when there is no NV2A model), and mark a bank's frame as taken. On POSIX
+ * hosts there is no trap: both read and clear the block in guest memory,
+ * at xbox_mem_offset + 0xFD008000, once nv2a_hook_init has said where. */
 bool nv2a_hook_pvideo_snapshot(uint32_t regs[0x1000 / 4]);
 void nv2a_hook_pvideo_consume(unsigned bank);
 

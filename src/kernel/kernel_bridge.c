@@ -3470,6 +3470,22 @@ uint32_t xbox_VblankCount(void)
     return (uint32_t)g_vblank_total;
 }
 
+/* Run once per vblank on the timer thread, after the count (xbox_VblankHookSet).
+ * Set once before the guest starts; a pointer-sized volatile is enough. */
+static void (*volatile s_vblank_hook)(void);
+
+void xbox_VblankHookSet(void (*hook)(void))
+{
+    s_vblank_hook = hook;
+}
+
+static void kernel_vblank_hook(void)
+{
+    void (*hook)(void) = s_vblank_hook;
+    if (hook)
+        hook();
+}
+
 /* Count one vblank, and once per 600 print a line that
  * should read ~10000 ms. Also the shortest and longest gap between two, by
  * the performance counter rather than the clock the schedule runs on. */
@@ -3482,6 +3498,7 @@ static void kernel_vblank_count(long long now)
     LARGE_INTEGER q;
 
     InterlockedIncrement(&g_vblank_total);
+    kernel_vblank_hook();
     if (!qf.QuadPart)
         QueryPerformanceFrequency(&qf);
     QueryPerformanceCounter(&q);
@@ -3704,6 +3721,7 @@ static void kernel_vblank_tick(void)
         fflush(stderr);
         last_ms = now;
     }
+    kernel_vblank_hook();
 
     if (!xbox_GetConnectedInterrupt(NV2A_VECTOR))
         return;

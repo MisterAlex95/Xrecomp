@@ -45,6 +45,36 @@ static inline int pvideo_scanout(const uint32_t *regs, const uint8_t *source,
         (uint64_t)PV(NV_PVIDEO_OFFSET) + bytes > PV(NV_PVIDEO_LIMIT))
         return 0;
 
+    if (PV(NV_PVIDEO_DS_DX) == NV_PVIDEO_DIN_DOUT_UNITY &&
+        PV(NV_PVIDEO_DT_DY) == NV_PVIDEO_DIN_DOUT_UNITY && !PV(NV_PVIDEO_POINT_IN)) {
+        /* 1:1 from the image's corner, what a film normally is: source
+         * pixel = output pixel, so each YUY2 pair's chroma is worked out
+         * once for its two pixels. Same result as the general loop below. */
+        unsigned rows = oh < ih ? oh : ih, cols = ow < iw ? ow : iw;
+        int keyed = (format & NV_PVIDEO_FORMAT_DISPLAY) != 0;
+        uint32_t key = regs[NV_PVIDEO_COLOR_KEY / 4] & 0xffffffu;
+        if (oy >= height || ox >= width) return 1;
+        if (rows > height - oy) rows = height - oy;
+        if (cols > width - ox) cols = width - ox;
+        for (y = 0; y < rows; ++y) {
+            const uint8_t *row = source + (size_t)y * pitch;
+            uint32_t *out = dst + (size_t)(oy + y) * width + ox;
+            for (x = 0; x < cols; x += 2) {
+                const uint8_t *pair = row + (size_t)x * 2;
+                int u = pair[1] - 128, v = pair[3] - 128;
+                int rv = 409*v + 128, gv = -100*u - 208*v + 128, bv = 516*u + 128;
+                int c0 = 298 * (pair[0] - 16), c1 = 298 * (pair[2] - 16);
+                if (!keyed || (out[x] & 0xffffffu) == key)
+                    out[x] = 0xff000000u | (pvideo_clamp((c0 + rv) >> 8) << 16) |
+                             (pvideo_clamp((c0 + gv) >> 8) << 8) | pvideo_clamp((c0 + bv) >> 8);
+                if (x + 1 < cols && (!keyed || (out[x + 1] & 0xffffffu) == key))
+                    out[x + 1] = 0xff000000u | (pvideo_clamp((c1 + rv) >> 8) << 16) |
+                                 (pvideo_clamp((c1 + gv) >> 8) << 8) | pvideo_clamp((c1 + bv) >> 8);
+            }
+        }
+        return 1;
+    }
+
     for (y = 0; y < oh && (uint64_t)oy + y < height; ++y) {
         uint64_t sy = (start_t + (uint64_t)y * PV(NV_PVIDEO_DT_DY)) >> 20;
         if (sy >= ih) continue;

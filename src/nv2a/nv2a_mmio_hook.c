@@ -470,12 +470,38 @@ bool nv2a_hook_handle_vram(uintptr_t fault_addr, uint32_t fault_xbox_va)
 
 #else /* !_WIN32 -- SIGSEGV-based MMIO trapping deferred to main.c port */
 
+/* POSIX hosts do not trap the NV2A aperture: the register file is plain
+ * memory (xbox_memory_layout.c maps it), the title's D3D writes PVIDEO's
+ * registers there and the overlay scan-out (src/video/pvideo_posix.c) reads
+ * them in place. nv2a_hook_init only records where the block is. */
+static volatile uint32_t *volatile g_pvideo_live;
+
 bool nv2a_hook_pvideo_snapshot(uint32_t regs[0x1000 / 4])
-{ (void)regs; return false; }
-void nv2a_hook_pvideo_consume(unsigned bank) { (void)bank; }
+{
+    volatile uint32_t *live = g_pvideo_live;
+    unsigned i;
+    if (!live) return false;
+    for (i = 0; i < 0x1000 / 4; ++i)
+        regs[i] = live[i];
+    return true;
+}
+
+/* Clear only this bank's pending bit: the title sets the other one meanwhile. */
+void nv2a_hook_pvideo_consume(unsigned bank)
+{
+    volatile uint32_t *live = g_pvideo_live;
+    if (!live || bank > 1) return;
+    __atomic_and_fetch(&live[NV_PVIDEO_BUFFER / 4], ~(1u << (bank * 4)), __ATOMIC_SEQ_CST);
+}
 
 void nv2a_hook_init(ptrdiff_t xbox_mem_offset)
-{ (void)xbox_mem_offset; }
+{
+    g_mem_offset = xbox_mem_offset;
+    /* Unsigned arithmetic: the offset may be negative, and wrapping is the
+     * point (a test places the block anywhere this way). */
+    g_pvideo_live = (volatile uint32_t *)(uintptr_t)((uintptr_t)xbox_mem_offset
+                     + NV2A_MMIO_BASE + NV2A_PVIDEO_MMIO);
+}
 
 bool nv2a_hook_handle_mmio(PCONTEXT ctx, uintptr_t fault_addr,
                            uint32_t fault_xbox_va, int is_write)

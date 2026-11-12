@@ -79,6 +79,7 @@
 #include "video_player.h"
 #include "perf_overlay.h"
 #include "aspect_policy.h"
+#include "pvideo_posix.h"     /* the PVIDEO overlay's scan-out */
 #include "keyboard_sdl.h"     /* src/input: keys into the pad stand-in */
 #include "xinput_xbox.h"
 #if defined(XBOXRECOMP_HAVE_GPU)
@@ -117,6 +118,7 @@ struct fb_slot {
     uint32_t w, h, pitch;
     uint32_t format;            /* SDL_PIXELFORMAT_* */
     uint64_t aspect;            /* aspect_pack(): class, ZOOM rows */
+    uint64_t seq;               /* s_ready_seq it was published as */
 };
 
 /* What the window takes from SDL, and gives back on every way out. */
@@ -133,6 +135,11 @@ static volatile int    s_wake_pending;
 static volatile int    s_in_present;         /* executor inside Present */
 static volatile uint32_t s_fb_va, s_fb_pitch; /* AvSetDisplayMode surface */
 static volatile uint32_t s_fb_x555;           /* xbox_FramebufferWindowSetFormat */
+/* One presenter at a time: the executor's flips and the overlay scan-out's
+ * frames (pvideo_posix.c) both fill the back slot, class frames and feed
+ * the pacer, all of which assume a single producer. */
+static pthread_mutex_t s_present_mu = PTHREAD_MUTEX_INITIALIZER;
+static int             s_overlay_publishing;  /* under s_present_mu */
 
 /* Counted at the flip, read once a second for the title bar. */
 static uint64_t s_flips;
@@ -187,7 +194,9 @@ static uint64_t aspect_classify(const uint8_t *px, uint32_t w, uint32_t h, uint3
     static int last = -1;
     int layout = SDL_BYTESPERPIXEL(format) == 4 ? ASPECT_PX_32
                : format == SDL_PIXELFORMAT_RGB555 ? ASPECT_PX_555 : ASPECT_PX_565;
-    uint32_t tris = __atomic_load_n(&s_aspect_tris, __ATOMIC_RELAXED);
+    /* An overlay frame is a movie picture: no triangles, whatever the
+     * title's last flip drew. */
+    uint32_t tris = s_overlay_publishing ? 0u : __atomic_load_n(&s_aspect_tris, __ATOMIC_RELAXED);
     int cls;
     uint64_t a;
 
@@ -518,6 +527,7 @@ static void publish(uint32_t w, uint32_t h, uint32_t pitch, uint32_t format)
         s_ready = s_back;
         s_back = t;
         s_ready_seq++;
+        s_slot[s_ready].seq = s_ready_seq;
     }
     pthread_mutex_unlock(&s_lock);
 
@@ -552,13 +562,8 @@ static void present_copy(uint32_t fb_va, uint32_t pitch)
                    FB_W, FB_H, pitch, FB_W * bpp, guest_format(bpp, bpp == 2 && s_fb_x555));
 }
 
-/* Called by the pushbuffer executor when the title flips. */
-void xbox_FramebufferWindowPresent(uint32_t fb_va, uint32_t pitch)
+static void present_guest_locked(uint32_t fb_va, uint32_t pitch)
 {
-    /* App in the background: the flip waits here, and the title's other
-     * threads stop behind it (they wait for the GPU). Before the handshake
-     * below, so a window that closes meanwhile is not kept waiting. */
-    recomp_lifecycle_hold();
 #if defined(XBOXRECOMP_LSFG)
     /* Headless frame generation: the pacer takes the frame, nobody shows it. */
     if (!s_fg_window && fb_va && fg_feeding()) {
@@ -599,25 +604,41 @@ void xbox_FramebufferWindowPresent(uint32_t fb_va, uint32_t pitch)
     __atomic_sub_fetch(&s_in_present, 1, __ATOMIC_SEQ_CST);
 }
 
-/* A GPU back end's own frame (FLIP_STALL with Nv2aPresentSurface.host_px):
- * copied into a slot like a guest frame, at its own size. Returns 1 when
- * the window took it, 0 when there is no window (headless, closing) or the
- * frame is not one it can show. */
-int xbox_FramebufferWindowPresentHost(const void *px, uint32_t w, uint32_t h,
-                                      uint32_t pitch, uint32_t format)
+/* Called by the pushbuffer executor when the title flips. */
+void xbox_FramebufferWindowPresent(uint32_t fb_va, uint32_t pitch)
 {
-    uint32_t sdl_format;
+    uint32_t bpp = pitch / FB_W;
+
+    /* App in the background: the flip waits here, and the title's other
+     * threads stop behind it (they wait for the GPU). Before the handshake
+     * below, so a window that closes meanwhile is not kept waiting. */
+    recomp_lifecycle_hold();
+    pthread_mutex_lock(&s_present_mu);
+    /* While the video overlay is up the screen is the frame with the
+     * overlay on it: the overlay takes the frame (headless too, for the
+     * dumps). */
+    if (!fb_va || (bpp != 2 && bpp != 4)
+            || !pvideo_frame((const uint8_t *)((uintptr_t)fb_va + xbox_GetMemoryOffset()),
+                             FB_W, FB_H, pitch, guest_format(bpp, bpp == 2 && s_fb_x555)))
+        present_guest_locked(fb_va, pitch);
+    pthread_mutex_unlock(&s_present_mu);
+}
+
+static uint32_t host_sdl_format(uint32_t format)
+{
+    return format == XBOX_FB_HOST_BGRX8888 ? SDL_PIXELFORMAT_XRGB8888   /* 0xXXRRGGBB words */
+         : format == XBOX_FB_HOST_RGBX8888 ? SDL_PIXELFORMAT_XBGR8888   /* bytes R, G, B, X */
+         : 0;
+}
+
+static int present_host_locked(const void *px, uint32_t w, uint32_t h,
+                               uint32_t pitch, uint32_t format)
+{
+    uint32_t sdl_format = host_sdl_format(format);
     int taken = 0;
 
-    recomp_lifecycle_hold();
     if (!__atomic_load_n(&s_running, __ATOMIC_SEQ_CST) || !px || !w || !h
-            || w > 8192 || h > 8192 || pitch < w * 4u)
-        return 0;
-    if (format == XBOX_FB_HOST_BGRX8888)
-        sdl_format = SDL_PIXELFORMAT_XRGB8888;   /* 0xXXRRGGBB words */
-    else if (format == XBOX_FB_HOST_RGBX8888)
-        sdl_format = SDL_PIXELFORMAT_XBGR8888;   /* bytes R, G, B, X */
-    else
+            || w > 8192 || h > 8192 || pitch < w * 4u || !sdl_format)
         return 0;
     __atomic_add_fetch(&s_in_present, 1, __ATOMIC_SEQ_CST);
     if (__atomic_load_n(&s_running, __ATOMIC_SEQ_CST)) {
@@ -652,6 +673,107 @@ int xbox_FramebufferWindowPresentHost(const void *px, uint32_t w, uint32_t h,
         taken = 1;
     }
     __atomic_sub_fetch(&s_in_present, 1, __ATOMIC_SEQ_CST);
+    return taken;
+}
+
+/* A GPU back end's own frame (FLIP_STALL with Nv2aPresentSurface.host_px):
+ * copied into a slot like a guest frame, at its own size. Returns 1 when
+ * the window took it, 0 when there is no window (headless, closing) or the
+ * frame is not one it can show. While the video overlay is up
+ * the frame goes under it (pvideo_frame). */
+int xbox_FramebufferWindowPresentHost(const void *px, uint32_t w, uint32_t h,
+                                      uint32_t pitch, uint32_t format)
+{
+    int taken;
+
+    recomp_lifecycle_hold();
+    pthread_mutex_lock(&s_present_mu);
+    if (px && w && h && w <= 8192 && h <= 8192 && pitch >= w * 4u && host_sdl_format(format)
+            && pvideo_frame((const uint8_t *)px, w, h, pitch, host_sdl_format(format)))
+        taken = __atomic_load_n(&s_running, __ATOMIC_SEQ_CST);
+    else
+        taken = present_host_locked(px, w, h, pitch, format);
+    pthread_mutex_unlock(&s_present_mu);
+    return taken;
+}
+
+/* ── For the overlay scan-out (pvideo_posix.h) ────────────────────────── */
+
+void fbwin_present_lock(void)   { pthread_mutex_lock(&s_present_mu); }
+void fbwin_present_unlock(void) { pthread_mutex_unlock(&s_present_mu); }
+
+/* One pixel as 0xRRGGBB (defined with the screenshots below). */
+static uint32_t slot_rgb(const uint8_t *p, uint32_t format);
+
+void fbwin_to_xrgb(const uint8_t *src, uint32_t w, uint32_t h, uint32_t pitch,
+                   uint32_t format, uint32_t *dst)
+{
+    uint32_t bypp = SDL_BYTESPERPIXEL(format), x, y;
+
+    for (y = 0; y < PVIDEO_H; y++) {
+        const uint8_t *row = src + (size_t)(y * h / PVIDEO_H) * pitch;
+        uint32_t *out = dst + (size_t)y * PVIDEO_W;
+        if (w == PVIDEO_W && bypp == 4 && format == SDL_PIXELFORMAT_XRGB8888) {
+            for (x = 0; x < PVIDEO_W; x++)
+                out[x] = 0xFF000000u | ((const uint32_t *)row)[x];
+            continue;
+        }
+        for (x = 0; x < PVIDEO_W; x++)
+            out[x] = 0xFF000000u | slot_rgb(row + (size_t)(x * w / PVIDEO_W) * bypp, format);
+    }
+}
+
+/* The newest frame shown or about to be: the frame generation FIFO's front,
+ * else the newest published slot, else (headless, or before the first flip)
+ * the display surface in guest memory. */
+int fbwin_last_frame(uint32_t *dst)
+{
+    int got = 0;
+
+#if defined(XBOXRECOMP_LSFG)
+    if (fg_feeding() && s_fg_window) {
+        pthread_mutex_lock(&s_fg_lock);
+        if (s_fg_front.px && s_fg_front.w && s_fg_front.h) {
+            fbwin_to_xrgb(s_fg_front.px, s_fg_front.w, s_fg_front.h, s_fg_front.w * 4u,
+                          SDL_PIXELFORMAT_XRGB8888, dst);
+            got = 1;
+        }
+        pthread_mutex_unlock(&s_fg_lock);
+        if (got)
+            return 1;
+    }
+#endif
+    /* The back slot is only written under s_present_mu, which the caller
+     * holds; the main loop swaps ready and front under s_lock and only
+     * reads them. */
+    pthread_mutex_lock(&s_lock);
+    {
+        struct fb_slot *a = &s_slot[s_ready], *b = &s_slot[s_front];
+        struct fb_slot *n = a->seq >= b->seq ? a : b;
+        if (n->seq && n->px && n->w && n->h) {
+            fbwin_to_xrgb(n->px, n->w, n->h, n->pitch, n->format, dst);
+            got = 1;
+        }
+    }
+    pthread_mutex_unlock(&s_lock);
+    if (!got && s_fb_va && s_fb_pitch) {
+        uint32_t bpp = s_fb_pitch / FB_W;
+        if (bpp == 2 || bpp == 4) {
+            fbwin_to_xrgb((const uint8_t *)((uintptr_t)s_fb_va + xbox_GetMemoryOffset()),
+                          FB_W, FB_H, s_fb_pitch, guest_format(bpp, bpp == 2 && s_fb_x555), dst);
+            got = 1;
+        }
+    }
+    return got;
+}
+
+int fbwin_publish_overlay(const uint32_t *px)
+{
+    int taken;
+
+    s_overlay_publishing = 1;
+    taken = present_host_locked(px, PVIDEO_W, PVIDEO_H, PVIDEO_W * 4u, XBOX_FB_HOST_BGRX8888);
+    s_overlay_publishing = 0;
     return taken;
 }
 
@@ -856,6 +978,12 @@ int xbox_FramebufferDumpBmp(const char *path)
     return rc;
 }
 
+int fbwin_write_xrgb_bmp(const char *path, const uint32_t *px)
+{
+    return write_bmp(path, (const uint8_t *)px, PVIDEO_W, PVIDEO_H, PVIDEO_W * 4u,
+                     SDL_PIXELFORMAT_XRGB8888, aspect_pack(ASPECT_NORMAL, 0, 0));
+}
+
 #if defined(XBOXRECOMP_LSFG)
 #define FG_NONE_YET (!fg_any)
 #else
@@ -958,6 +1086,8 @@ int xbox_HostWindowMain(int (*guest_main)(void))
      * into an SDL_QUIT that a headless run never reads. Set before the
      * headless return: audio and input start SDL subsystems there too. */
     SDL_SetHint(SDL_HINT_NO_SIGNAL_HANDLERS, "1");
+    /* The video overlay's scan-out, windowed or not (vblank hook, dumps). */
+    pvideo_install();
 #if defined(XBOXRECOMP_HAVE_GPU)
     /* RECOMP_GPU=1: the GL back end draws instead of the CPU rasteriser.
      * Before the guest starts, windowed or not; its context lives on the

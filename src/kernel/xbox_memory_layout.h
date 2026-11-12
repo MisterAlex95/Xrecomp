@@ -182,6 +182,15 @@ void xbox_Nv2aFrameCounterFlip(void);
 /* A word of the NV2A register file (offset from the register base); NULL until
  * the aperture is mapped. */
 volatile uint32_t *xbox_Nv2aRegPtr(uint32_t offset);
+/* PVIDEO's STOP handshake on a host where the register page is plain memory
+ * (POSIX): with STOP's bit 0 set in `pvideo` (the 4 KB PVIDEO block, NV2A
+ * offset 0x8000) BUFFER and STOP are cleared and the stop count goes up;
+ * returns whether it did. The NV2A ack pass calls it; not static so tests can
+ * drive it against plain words. */
+int xbox_Nv2aPvideoStop(volatile uint32_t *pvideo);
+/* STOP requests answered so far: the overlay scan-out's sign that the overlay
+ * went down (STOP itself reads 0 again by then). */
+uint32_t xbox_Nv2aPvideoStops(void);
 /* A kick that waits for the GPU's ack, as events rather than a poll: set
  * `mask` in the register (an NV2A word, e.g. the PFB flush kick 0x100410)
  * and return once the NV2A ack thread has cleared it. While the title kicks

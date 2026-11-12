@@ -399,6 +399,14 @@ void nv2a_backend_register_with_present(const Nv2aBackend *backend,
                                                        int sync,
                                                        Nv2aPresentSurface *ready));
 
+/* RECOMP_FB_DUMP's pictures normally show the surface; while something
+ * else is on screen -- the video overlay's picture, which the GPU never
+ * draws -- `dump` writes that to `path` instead and returns 1 (0: nothing
+ * of its own, the surface is written as before). Called from the executor's
+ * thread. The POSIX overlay scan-out registers it (src/video/pvideo_posix.c);
+ * NULL removes it. */
+void nv2a_pb_exec_set_screen_dump(int (*dump)(const char *path));
+
 /* Decode a whole texture to 0xAARRGGBB, row-major, width*height entries.
  * Handles every format the executor can sample (swizzled, linear, DXT).
  * Returns 0 if the format is not supported. */

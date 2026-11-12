@@ -1308,6 +1308,12 @@ void xbox_log(int level, const char* subsystem, const char* fmt, ...);
  * one field per vblank, so its low bit is the field parity that the field pin
  * (port 0x80C0) reports. */
 uint32_t xbox_VblankCount(void);
+/* A function to run on every vblank, on the timer thread right after the
+ * count (either schedule); NULL removes it. One hook: a later call replaces
+ * it. It must be short and must not wait on guest threads -- the vblank's
+ * interrupt follows it. The POSIX overlay scan-out (src/video/pvideo_posix.c)
+ * registers here, so the kernel does not link against the window. */
+void xbox_VblankHookSet(void (*hook)(void));
 
 /* cpuid for lifted code (kernel_hal.c): the Xbox's Pentium III. Also declared
  * in templates/runtime/recomp_types.h for generated code. */

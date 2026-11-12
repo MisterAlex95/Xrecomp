@@ -758,6 +758,15 @@ static int s_dump_at_flip;
 static int (*s_backend_present)(const Nv2aPresentSurface *now, int sync,
                                 Nv2aPresentSurface *ready);
 
+/* What the screen shows when it is not the surface: the video overlay's
+ * picture while one is up (nv2a_pb_exec_set_screen_dump). */
+static int (*volatile s_screen_dump)(const char *path);
+
+void nv2a_pb_exec_set_screen_dump(int (*dump)(const char *path))
+{
+    s_screen_dump = dump;           /* set once, before the guest starts */
+}
+
 static void dump_surface_bmp(void)
 {
     const char *prefix = getenv("RECOMP_FB_DUMP");
@@ -780,6 +789,16 @@ static void dump_surface_bmp(void)
     uint8_t hdr[54];
     FILE *f;
 
+    if (prefix) {
+        int (*screen)(const char *) = s_screen_dump;
+        if (screen) {
+            snprintf(path, sizeof path, "%s%05d.bmp", prefix, seq);
+            if (screen(path) > 0) {
+                seq++;
+                return;
+            }
+        }
+    }
     if (!prefix || !w || !h || (bpp != 2 && bpp != 4) || !offset)
         return;
 

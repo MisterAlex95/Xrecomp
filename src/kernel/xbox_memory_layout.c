@@ -1782,12 +1782,45 @@ static void kick_acked(void)
  * and a level load, thousands of kickoffs long, looked frozen. Clearing them
  * from inside the walk answers the kickoff within a few hundred commands,
  * without a thread of its own spinning on a host core. */
+/* PVIDEO's STOP handshake (NV_PVIDEO_STOP 0x8704, NV_PVIDEO_BUFFER 0x8700).
+ * STOP is a command: bit 0 asks the overlay to stop, and the hardware then
+ * empties BUFFER, the banks pending for scan-out. XDK D3D's
+ * D3DDevice_EnableOverlay(FALSE) writes STOP and spins until BUFFER reads 0
+ * (KOTOR's film thread at 0x00352CE1). The Win32 MMIO hook models the write
+ * (nv2a_core.c, pvideo_write); against the plain memory of a POSIX host it is
+ * answered here, from the ack pass, and not from the vblank: the spinning
+ * thread may hold the one-CPU gate the vblank waits for. The stop count tells
+ * the overlay scan-out (src/video/pvideo_posix.c) that the overlay went down,
+ * since by the time it looks STOP reads 0 again. */
+#define NV2A_PVIDEO_BLOCK  0x8000u
+#define NV2A_PVIDEO_BUFFER 0x0700u
+#define NV2A_PVIDEO_STOP   0x0704u
+static volatile LONG s_pvideo_stops;
+
+int xbox_Nv2aPvideoStop(volatile uint32_t *pvideo)
+{
+    if (!(pvideo[NV2A_PVIDEO_STOP / 4] & 1u))
+        return 0;
+    pvideo[NV2A_PVIDEO_BUFFER / 4] = 0;
+    pvideo[NV2A_PVIDEO_STOP / 4] = 0;
+    InterlockedIncrement(&s_pvideo_stops);      /* a full barrier: the clears first */
+    return 1;
+}
+
+uint32_t xbox_Nv2aPvideoStops(void)
+{
+    return (uint32_t)InterlockedCompareExchange(&s_pvideo_stops, 0, 0);
+}
+
 static void nv2a_ack_busy_bits(int flip_held)
 {
     volatile uint32_t *regs = (volatile uint32_t *)g_nv2a_memory;
 
     if (!regs)
         return;
+#if !defined(_WIN32)
+    (void)xbox_Nv2aPvideoStop(regs + NV2A_PVIDEO_BLOCK / 4);
+#endif
     for (size_t i = 0; i < sizeof(NV2A_ACK) / sizeof(NV2A_ACK[0]); i++) {
         volatile uint32_t *r =
             (volatile uint32_t *)((char *)regs + NV2A_ACK[i].offset);
@@ -1841,6 +1874,10 @@ static int nv2a_ack_wanted(volatile uint32_t *regs, uint32_t put_seen)
 
     if (regs[NV2A_USER_DMA_PUT / 4] != put_seen)
         return 1;
+#if !defined(_WIN32)
+    if (regs[(NV2A_PVIDEO_BLOCK + NV2A_PVIDEO_STOP) / 4] & 1u)
+        return 1;                           /* an EnableOverlay(FALSE) spins on it */
+#endif
     for (i = 0; i < sizeof(NV2A_ACK) / sizeof(NV2A_ACK[0]); i++) {
         uint32_t mask = NV2A_ACK[i].busy_mask;
         if (NV2A_ACK[i].offset == NV2A_ACK_PMC_INTR_0)
