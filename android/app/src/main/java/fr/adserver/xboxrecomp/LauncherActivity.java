@@ -342,7 +342,7 @@ public class LauncherActivity extends Activity {
                 resumeShell();
                 return;
             }
-            if (GameStore.autoStart(this) && selectedIsLaunched()) {
+            if (GameStore.autoStart(this) && selectedIsLaunched() && !xbeChanged()) {
                 Log.i(TAG, "launcher: game ready and « open directly » on, starting it");
                 launchShell(false);
                 return;
@@ -1597,6 +1597,11 @@ public class LauncherActivity extends Activity {
         LinearLayout info = hero(title, st == State.NONE);
         String tid = st == State.NONE ? null : titleId();
         SelfHeal.State heal = st == State.READY && !preparing && tid != null ? selfHeal(tid, running, prep) : null;
+        // XBA-127: another default.xbe than the pack's (never run), or a pack from an older toolkit (still plays).
+        if (st == State.READY)
+            xbeShaLater(dir, tid);
+        boolean otherXbe = st == State.READY && preparing && prep == Prep.NEEDED && otherXbe(tid);
+        boolean olderToolkit = st == State.READY && prep == Prep.PLAYABLE && heal == null && olderToolkit(tid);
 
         // The one line: the state when it is not « Ready », else when it was last played.
         String statusText = null;
@@ -1616,8 +1621,9 @@ public class LauncherActivity extends Activity {
                 statusColor = Theme.ERROR;
                 break;
             default:
-                statusText = getString(R.string.HOME_NEEDS_PREPARE, getString(R.string.CHIP_NEEDS_PREPARE),
-                                       estimate());
+                statusText = otherXbe ? getString(R.string.HOME_OTHER_XBE)
+                                      : getString(R.string.HOME_NEEDS_PREPARE, getString(R.string.CHIP_NEEDS_PREPARE),
+                                                  estimate());
                 statusColor = Theme.WARN;
                 break;
             }
@@ -1628,6 +1634,10 @@ public class LauncherActivity extends Activity {
             statusText = heal.offer == SelfHeal.Offer.PREPARE_AGAIN ? getString(R.string.HOME_CRASHED_FINDS, heal.seeds)
                                                                   : getString(R.string.HOME_NEEDS_FIX);
             statusColor = heal.offer == SelfHeal.Offer.PREPARE_AGAIN ? Theme.WARN : Theme.ERROR;
+            heroLine(info, statusText, statusColor);
+        } else if (olderToolkit) {
+            statusText = getString(R.string.HOME_OLDER_TOOLKIT);
+            statusColor = Theme.WARN;
             heroLine(info, statusText, statusColor);
         } else if (st == State.READY) {
             Library.Record rec = rec();
@@ -1651,7 +1661,7 @@ public class LauncherActivity extends Activity {
             homePrep = prep;
         } else if (preparing) {
             int t = prep == Prep.RUNNING ? R.string.PREPARING : prep == Prep.FAILED ? R.string.PREPARE_SEE_WHY
-                    : R.string.PREPARE;
+                    : otherXbe ? R.string.PREPARE_AGAIN : R.string.PREPARE;
             play = pill(buttons, null, getString(t), true, this::onPlay);
             homePrep = prep;
         } else if (heal != null && heal.offer == SelfHeal.Offer.PREPARE_AGAIN) {
@@ -1661,6 +1671,8 @@ public class LauncherActivity extends Activity {
         } else {
             play = pill(buttons, Icon.PLAY, getString(R.string.PLAY), true, this::onPlay);
             play.setDim(st != State.READY);
+            if (olderToolkit)   // offered, never forced: Play stays first (a Prepare takes 10-30 min)
+                pill(buttons, null, getString(R.string.PREPARE_AGAIN), false, this::onPrepareNewToolkit);
         }
         homePrimary = play;
         homePills(buttons);
@@ -1680,6 +1692,8 @@ public class LauncherActivity extends Activity {
 
         if (preparing && prep == Prep.INTERRUPTED)
             setNote(getString(R.string.PREPARE_INTERRUPTED), NOTE_WARN);
+        else if (otherXbe)
+            setNote(getString(R.string.HOME_OTHER_XBE_NOTE), NOTE_WARN);
         else if (heal != null && heal.offer == SelfHeal.Offer.PREPARE_AGAIN)
             setNote(getString(R.string.HOME_PREPARE_AGAIN_NOTE), NOTE_WARN);
         else if (heal != null)
@@ -1688,6 +1702,8 @@ public class LauncherActivity extends Activity {
             setNote(getString(R.string.GAME_RUNNING_HOME), NOTE_INFO);
         else if (running && st == State.READY)
             setNote(getString(R.string.LIB_OTHER_RUNNING, runningTitle()), NOTE_INFO);
+        else if (olderToolkit)
+            setNote(getString(R.string.HOME_OLDER_TOOLKIT_NOTE, estimate()), NOTE_INFO);
         else if (st == State.READY && !preparing && (rec() != null ? rec().lastPlayed : GameStore.lastPlayed(this)) <= 0)
             setNote(getString(R.string.HOME_LEAD_READY), NOTE_INFO);   // before the first play: where the menu is
     }
@@ -1752,6 +1768,10 @@ public class LauncherActivity extends Activity {
             }
             if (p != Prep.OFF && p != Prep.PLAYABLE) {
                 startPrepare();
+                return;
+            }
+            if (xbeChanged()) {   // XBA-127: Home now says so and offers Prepare again
+                show(Screen.HOME, 0);
                 return;
             }
             if (!confirmSwitch())
@@ -2357,8 +2377,76 @@ public class LauncherActivity extends Activity {
 
     /** The pack of tid was built from the selected game's default.xbe (as far as both say: LibraryScreen). */
     private boolean packMatchesSelected(String tid) {
+        return LibraryScreen.packMatches(getFilesDir(), tid, selectedXbeSha());
+    }
+
+    // ---- A pack that no longer matches (XBA-127, PackFreshness) ------------------------------------------------
+
+    /**
+     * The selected game's default.xbe hash as far as known without reading it: hashed in this process and unchanged
+     * since (PackFreshness), else the record's (taken at import), else null.
+     */
+    private String selectedXbeSha() {
+        String d = gameDir();
+        String sha = d == null ? null : PackFreshness.knownXbeSha(GameStore.findXbe(new File(d)));
+        if (sha != null)
+            return sha;
         Library.Record r = rec();
-        return r == null || LibraryScreen.packMatches(getFilesDir(), tid, r.xbeSha256);
+        return r == null ? null : r.xbeSha256;
+    }
+
+    /** The pack of tid was built from another default.xbe than the selected game's (as far as known now). */
+    private boolean otherXbe(String tid) {
+        return tid != null && Toolchain.available(this)
+               && PackFreshness.of(getFilesDir(), tid, selectedXbeSha(), null) == PackFreshness.Verdict.OTHER_XBE;
+    }
+
+    /** The valid pack of tid was lifted by an older toolkit than this APK's (it still plays). */
+    private boolean olderToolkit(String tid) {
+        return tid != null && PackFreshness.of(getFilesDir(), tid, selectedXbeSha(), Toolchain.toolkitDigest(this))
+                              == PackFreshness.Verdict.OLDER_TOOLKIT;
+    }
+
+    /**
+     * Before a start: hashes the selected game's default.xbe (once per change of the file, a few MB) and says whether
+     * the pack was built from another one. Such a pack is never run: Home offers Prepare again.
+     */
+    private boolean xbeChanged() {
+        String tid = titleId(), d = gameDir();
+        if (tid == null || d == null || !Toolchain.available(this))
+            return false;
+        PackFreshness.xbeSha(GameStore.findXbe(new File(d)));
+        boolean other = otherXbe(tid);
+        if (other)
+            Log.w(TAG, "launcher: " + tid + "'s pack was built from another default.xbe ("
+                       + Pack.xbeSha256(getFilesDir(), tid) + "), not starting it");
+        return other;
+    }
+
+    private String xbeHashDir;
+
+    /** On Home: the same hash on a worker thread, so that a changed default.xbe shows before Play is pressed. */
+    private void xbeShaLater(String dir, String tid) {
+        if (dir == null || tid == null || dir.equals(xbeHashDir) || !Toolchain.available(this))
+            return;
+        File xbe = GameStore.findXbe(new File(dir));
+        if (xbe == null || PackFreshness.knownXbeSha(xbe) != null)
+            return;
+        xbeHashDir = dir;
+        new Thread(() -> {
+            PackFreshness.xbeSha(xbe);
+            runOnUiThread(() -> {
+                xbeHashDir = null;
+                if (screen == Screen.HOME && dir.equals(gameDir()) && otherXbe(tid))
+                    refreshKeepingFocus();
+            });
+        }, "xba-xbe-sha").start();
+    }
+
+    /** « Prepare again » for a pack lifted by an older toolkit: a plain Prepare (the game does not start after it). */
+    private void onPrepareNewToolkit() {
+        Log.i(TAG, "launcher: prepare again with the new toolkit " + titleId());
+        startPrepare();
     }
 
     /**

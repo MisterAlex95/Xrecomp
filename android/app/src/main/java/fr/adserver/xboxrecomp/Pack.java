@@ -19,7 +19,7 @@ import java.util.regex.Pattern;
  * mounted noexec). This class only says whether a pack is there and usable; loading it is the native side's job.
  *
  * pack.json: {"format":1, "title_id", "title", "xbe_sha256", "abi":"arm64-v8a", "shell_abi":1, "toolkit",
- * "lib":"libtitle.so", "lib_sha256", "lib_size", "entry":"recomp_title_main", "cc", "built_at"}, and
+ * "toolkit_sha256", "lib":"libtitle.so", "lib_sha256", "lib_size", "entry":"recomp_title_main", "cc", "built_at"}, and
  * "env_force":{"RECOMP_LSFG":"0", ...} when the title profile forces options (the native loader sets them over
  * recomp.cfg; the launcher only shows them).
  */
@@ -79,6 +79,19 @@ final class Pack {
      * another version of the game needs preparing again.
      */
     static String xbeSha256(File filesDir, String titleId) {
+        return hashField(filesDir, titleId, "xbe_sha256");
+    }
+
+    /**
+     * The toolkit digest the pack of titleId was lifted with (pack.json's toolkit_sha256, lower case; XBA-127), or null
+     * when there is no readable pack.json or it does not say (a pack from before the field). PackFreshness compares it
+     * with Toolchain.toolkitDigest.
+     */
+    static String toolkitSha256(File filesDir, String titleId) {
+        return hashField(filesDir, titleId, "toolkit_sha256");
+    }
+
+    private static String hashField(File filesDir, String titleId, String field) {
         String id = normTitleId(titleId);
         if (id == null)
             return null;
@@ -86,7 +99,7 @@ final class Pack {
         if (!json.isFile())
             return null;
         try {
-            String h = new JSONObject(PrepareProtocol.readText(json, 1 << 20)).optString("xbe_sha256", "").trim();
+            String h = new JSONObject(PrepareProtocol.readText(json, 1 << 20)).optString(field, "").trim();
             return h.isEmpty() ? null : h.toLowerCase(Locale.ROOT);
         } catch (IOException | JSONException e) {
             return null;

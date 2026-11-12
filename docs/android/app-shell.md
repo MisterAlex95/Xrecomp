@@ -791,9 +791,10 @@ Codes the app sets itself: `KILLED`, `CANCELLED`, `SPAWN_FAILED`, `NO_RESULT` (e
 
 **A pack is valid** when `pack.json` parses, `format` is 1, `title_id` is the game's, `shell_abi` is the app's
 `Pack.SHELL_ABI` (1), and `lib` exists with `lib_size` bytes. The native loader checks the same and `abi`, then
-dlopens it (« Title packs » below); neither checks `lib_sha256` at each start. `xbe_sha256` is not
-compared yet (hashing `default.xbe` at each Home is slow on a picked folder): another revision of a disc with the
-same title ID keeps the old pack until it is prepared again.
+dlopens it (« Title packs » below); neither checks `lib_sha256` at each start. A valid pack can still be stale
+(XBA-127, [prepare.md « When a pack is stale »](prepare.md#when-a-pack-is-stale)): built from another `default.xbe`
+(another revision or region under the same title ID: never run, Home offers **Prepare again**), or lifted by an older
+toolkit than the APK's (it still plays; Home keeps Play and offers **Prepare again** beside it with a note).
 
 **The launcher.** With a game ready and the toolchain present:
 
@@ -856,6 +857,27 @@ Needs an APK with the toolchain (the embedded-prepare branch merged) and the pac
 12. Low space: fill internal storage under 2 GB free, A on Prepare: the note says how much is needed and free, and
     nothing starts.
 13. Switch the Thor to French: Prepare, Preparing and Failed screens, the notification and the note in French.
+
+### Device check (stale packs, XBA-127), for Alex
+
+A toolchain APK and one prepared game (Play on Home).
+
+1. `adb shell run-as <app id> cat files/packs/<TID>/pack.json`: it has `toolkit_sha256` (64 hex digits) once the game
+   was prepared with this APK; `unzip -p <apk> assets/prepare/toolkit.zip.id` prints the same value.
+2. Another XBE: with the game read in place (or imported), replace its `default.xbe` by another revision or region of
+   the same disc (same title ID; keep the original aside). Open the app: within a second Home says « Another version
+   of the game · prepare it again » with an amber dot, the primary is **Prepare again**, and the note says saves are
+   kept. Screenshot. A on it starts a Prepare (from scratch: logcat `prepare: started`). Before it ends, nothing
+   starts the old pack (turn on « Open the game directly », restart the app: Home, no game).
+3. Put the original `default.xbe` back: Home shows **Play** again (the old pack matches it again, or the new one does
+   once the Prepare ended). Your saves in-game are all there.
+4. Older toolkit: install an APK built from a commit whose toolkit tree changed (any change under `tools/recomp/`) over
+   the current one, without clearing data. Home: « Prepared by an older version of the app », **Play** first and a
+   quiet **Prepare again** next to it, a note about the update's fixes. Play starts the game at once, as before.
+   Screenshot.
+5. Install an APK whose commit changed only Java (or docs): no « older version » line; Play as before.
+6. From step 4, **Prepare again**: a full Prepare runs; when it ends, Home shows Play without the line, and the game
+   does not start by itself.
 
 ## Dual screen (AYN Thor)
 

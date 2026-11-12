@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- A pack that no longer matches (XBA-127, PackFreshness, docs/android/prepare.md « When a pack is stale »). A file of
+     its own so that it does not collide with strings.xml edits. -->
+<resources>
+    <string name="HOME_OTHER_XBE">Another version of the game · prepare it again</string>
+    <string name="HOME_OTHER_XBE_NOTE">This game\'s files are not the version it was prepared from (another revision or region of the disc). Prepare again to play it; your saves are kept.</string>
+    <string name="HOME_OLDER_TOOLKIT">Prepared by an older version of the app</string>
+    <string name="HOME_OLDER_TOOLKIT_NOTE">This update translates games better. Prepare again (%1$s) to get its fixes; until then the game plays as before. Your saves are kept.</string>
+</resources>

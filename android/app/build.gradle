@@ -88,14 +88,21 @@ abstract class XbaToolkitAsset extends DefaultTask {
         def root = new File(repoRoot.get()).toPath()
         def files = toolkitFiles.files.collect { [root.relativize(it.toPath()).toString().replace('\\', '/'), it] }
                                 .sort { it[0] }
-        // tools/VERSION stands in for git, absent on the device (tools/prepare: toolkit_version): the commit, or
-        // without git (the Docker builds) a hash of the files, so that a changed toolkit still restarts the steps.
-        def id = commit.get()
-        if (id == 'unknown') {
-            def md = java.security.MessageDigest.getInstance('SHA-256')
-            files.each { md.update((it[0] + '\0').getBytes('UTF-8')); md.update(it[1].bytes) }
-            id = 'files-' + md.digest().encodeHex().toString()
+        // The toolkit digest (tools/prepare/toolkit.py, the same bytes): sha256 over the files in path order, each as
+        // path NUL size NUL bytes. pack.json's toolkit_sha256 is compared with it (XBA-127, docs/android/prepare.md
+        // « When a pack is stale »): an APK whose toolkit tree did not change keeps every pack current.
+        def tk = java.security.MessageDigest.getInstance('SHA-256')
+        files.each {
+            byte[] data = it[1].bytes
+            tk.update((it[0] + '\0' + data.length + '\0').getBytes('UTF-8'))
+            tk.update(data)
         }
+        def digest = tk.digest().encodeHex().toString()
+        // tools/VERSION stands in for git, absent on the device (tools/prepare: toolkit_version): the commit, or
+        // without git (the Docker builds) the digest.
+        def id = commit.get()
+        if (id == 'unknown')
+            id = 'files-' + digest
         // Same inputs, same bytes: sorted entries, fixed times.
         def zip = new File(dir, 'toolkit.zip')
         new java.util.zip.ZipOutputStream(new FileOutputStream(zip)).withCloseable { out ->
@@ -108,11 +115,14 @@ abstract class XbaToolkitAsset extends DefaultTask {
                 out.closeEntry()
             }
             put('tools/VERSION', "${id}\n".getBytes('UTF-8'))
+            put('tools/TOOLKIT_SHA256', "${digest}\n".getBytes('UTF-8'))
             files.each { put(it[0], it[1].bytes) }
         }
         def md = java.security.MessageDigest.getInstance('SHA-256')
         zip.withInputStream { is -> byte[] b = new byte[1 << 16]; int n; while ((n = is.read(b)) > 0) md.update(b, 0, n) }
         new File(dir, 'toolkit.zip.sha256').text = "${md.digest().encodeHex()}  toolkit.zip\n"
+        // The launcher reads the digest without opening the zip (Toolchain.toolkitDigest).
+        new File(dir, 'toolkit.zip.id').text = "${digest}\n"
     }
 }
 def repoRoot = rootProject.file('..')
@@ -123,16 +133,16 @@ def xbaCommit = providers.exec {
 def toolkitAsset = xbaToolchainDir ? tasks.register('xbaToolkitAsset', XbaToolkitAsset) {
     it.repoRoot = repoRoot.path
     // docs/android/prepare.md « Toolkit tree »: the pipeline (Python only: no tests, caches or per-game output),
-    // the title template and profiles, and the headers the generated C includes.
-    it.toolkitFiles.from(fileTree(repoRoot) {
-        include 'tools/**/*.py', 'tools/recomp/data/**', 'tools/xbe_ident/*.json'
-        exclude '**/test_*.py', '**/tests/**', '**/conftest.py', '**/__pycache__/**', 'tools/*/output/**',
-                'tools/android/**', 'tools/docker/**', 'tools/ci/**', 'tools/conformance/msvc-wine/**'
-    })
-    it.toolkitFiles.from(fileTree(repoRoot) {
-        include 'templates/new-game/**', 'templates/runtime/**', 'profiles/**', 'include/**', 'src/**/*.h'
-        exclude '**/build/**'
-    })
+    // the title template and profiles, and the headers the generated C includes. The patterns are in
+    // tools/prepare/toolkit_tree.json, so that tools/prepare/toolkit.py hashes the same files on a host.
+    def tree = new groovy.json.JsonSlurper().parse(new File(repoRoot, 'tools/prepare/toolkit_tree.json'))
+    tree.trees.each { t ->
+        it.toolkitFiles.from(fileTree(repoRoot) {
+            include t.include
+            exclude t.exclude
+            exclude tree.exclude_everywhere
+        })
+    }
     it.commit = xbaCommit
 } : null
 
