@@ -17,6 +17,7 @@
 #endif
 #include "recomp_status.h"
 #include "xbox_memory_layout.h"
+#include "xbox_seh.h"
 #include "kernel.h"
 #include "guest_vmem.h"
 #include "kernel_missing.h"
@@ -3671,6 +3672,8 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
      * g_esp is the global stack pointer shared by all translated functions.
      */
     g_esp = XBOX_STACK_TOP;
+    /* The exception dispatcher only follows SEH records on this stack. */
+    xbox_SehSetGuestStack(XBOX_STACK_BASE, XBOX_STACK_BASE + XBOX_STACK_SIZE);
     fprintf(stderr, "  Stack: %u KB at Xbox VA 0x%08X (ESP = 0x%08X)\n",
             XBOX_STACK_SIZE / 1024, XBOX_STACK_BASE, g_esp);
 
@@ -4593,7 +4596,6 @@ static uint32_t heap_carve_free(uint32_t size, uint32_t alignment)
  */
 uint32_t xbox_HeapAlloc(uint32_t size, uint32_t alignment);
 
-#define XBOX_THREAD_STACK_SIZE  (512 * 1024)
 #define XBOX_MAX_THREAD_STACKS  8
 
 /* RECOMP_THREAD_STACKS=N raises the number of worker stacks alive at once.

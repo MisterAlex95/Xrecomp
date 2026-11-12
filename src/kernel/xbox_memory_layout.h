@@ -580,6 +580,9 @@ extern uint32_t g_xbox_stack_size;
 /** Initial ESP value (top of stack, 16-byte aligned). */
 #define XBOX_STACK_TOP      (XBOX_STACK_BASE + XBOX_STACK_SIZE - 16)
 
+/** A spawned guest thread's stack (xbox_AllocThreadStack), from the heap. */
+#define XBOX_THREAD_STACK_SIZE  (512 * 1024)
+
 /* ================================================================
  * Worker stack slices (host-tick-driven titles)
  * ================================================================

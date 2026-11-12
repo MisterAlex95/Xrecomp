@@ -285,6 +285,13 @@ def main():
                              "a loop that makes no kernel call; it costs a "
                              "load and a branch per edge when the lock is "
                              "off. Off by default: edges stay bare")
+    parser.add_argument("--no-seh-anchors", action="store_true",
+                        help="Leave out the native setjmp a function with an "
+                             "__except or catch takes after registering its "
+                             "exception frame (XBA-112). Saves that setjmp on "
+                             "every call of such a function; a handler that "
+                             "then tries to resume in one is refused and "
+                             "reported at run time. Anchors are on by default")
     parser.add_argument("--seh-prolog", metavar="ADDR",
                         help="Address of __SEH_prolog (hex). Auto-detected if omitted")
     parser.add_argument("--seh-epilog", metavar="ADDR",
@@ -364,6 +371,7 @@ def main():
             "icall_sites.json"),
         back_edge_yield=args.back_edge_yield,
         entry_stubs=args.entry_stubs,
+        seh_anchors=not args.no_seh_anchors,
     )
 
     t_load = time.time() - t0

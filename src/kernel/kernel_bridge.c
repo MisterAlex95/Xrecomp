@@ -30,6 +30,7 @@
 #include "kernel_missing.h"
 #include "kernel_wait_stats.h"
 #include "xbox_memory_layout.h"
+#include "xbox_seh.h"
 #include "platform/host_time.h"
 #include "recomp_icall_feedback.h"
 #include "recomp_discovery.h"
@@ -762,6 +763,9 @@ static DWORD WINAPI bridge_thread_main(LPVOID param)
     g_is_spawned_thread = 1;
     g_esp = s->stack_top;
     g_thread_stack_top = s->stack_top;
+    /* xbox_AllocThreadStack hands out the top of the slice, less 16. */
+    xbox_SehSetGuestStack(s->stack_top + 16 - XBOX_THREAD_STACK_SIZE,
+                          s->stack_top + 16);
     g_thread_obj_va = s->obj_va;
     {
         uint32_t tib = xbox_AllocThreadTib();
@@ -5063,101 +5067,44 @@ static void bridge_XeUnloadSection(void) { bridge_XeSection(0); }
  *
  * Discards the SEH registration frames between the current one and
  * TargetFrame, letting each handler run its __finally blocks on the way past,
- * and leaves fs:[0] pointing at TargetFrame. fs:[0] is guest address 0 here,
- * because the runtime models the TIB at the bottom of guest memory.
+ * and leaves fs:[0] pointing at TargetFrame. The walk is xbox_SehUnwind
+ * (xbox_seh.c), which checks every record before following it.
  *
  * Left unbridged this returned 0 without touching anything, which is not a
  * harmless stub: MSVC's _global_unwind2 calls it and then carries on as if the
  * frames were gone, so the chain kept pointing into stack that had already
  * been reused and the next dispatch walked records built out of live locals.
  *
- * The walk is bounded and checked rather than trusting the chain, since it
- * lives in guest stack memory that a title can corrupt: records must climb
- * toward the stack top, stay inside the stack, and stay 4-byte aligned. A
- * chain that breaks any of those is truncated instead of followed.
+ * NT ends an unwind by continuing at TargetIp with eax = ReturnValue.
+ * _global_unwind2 passes the address right after its own call, so returning
+ * is the same thing; any other TargetIp cannot be reached from here.
  */
-#define XBOX_SEH_END_OF_CHAIN 0xFFFFFFFFu
-#define XBOX_EXCEPTION_UNWINDING  0x02u
-#define XBOX_EXCEPTION_EXIT_UNWIND 0x04u
-#define XBOX_SEH_MAX_FRAMES 64
-
 static void bridge_RtlUnwind(void)
 {
     uint32_t target_frame = STACK_ARG(0);
+    uint32_t target_ip    = STACK_ARG(1);
     uint32_t exc_record   = STACK_ARG(2);
-    uint32_t reg          = BRIDGE_MEM32(XBOX_FS_BASE);
-    uint32_t prev_reg     = 0;
-    uint32_t scratch      = 0;
-    int      guard;
+    uint32_t ret_value    = STACK_ARG(3);
+    uint32_t caller       = g_xbox_kernel_caller;
 
-    /* An unwind with no record of its own still has to tell the handlers it
-     * is an unwind, so synthesise one below the stack pointer. */
-    if (!exc_record) {
-        g_esp -= 0x50;
-        scratch = g_esp;
-        memset((uint8_t *)XBOX_TO_NATIVE(scratch), 0, 0x50);
-        BRIDGE_MEM32(scratch) = 0xC0000027u;   /* STATUS_UNWIND */
-        exc_record = scratch;
-    }
-    BRIDGE_MEM32(exc_record + 4) |= XBOX_EXCEPTION_UNWINDING
-        | (target_frame ? 0u : XBOX_EXCEPTION_EXIT_UNWIND);
-
-    for (guard = 0; guard < XBOX_SEH_MAX_FRAMES; guard++) {
-        uint32_t next, handler;
-
-        if (reg == XBOX_SEH_END_OF_CHAIN || reg == 0 || reg == target_frame)
-            break;
-        if ((reg & 3u) || reg < XBOX_STACK_BASE || reg >= XBOX_STACK_TOP)
-            break;                       /* not a stack frame: chain is broken */
-        if (prev_reg && reg <= prev_reg)
-            break;                       /* not climbing: cycle or corruption */
-
-        next    = BRIDGE_MEM32(reg);
-        handler = BRIDGE_MEM32(reg + 4);
-
-        /* Pop before dispatching. The handler may raise, and it must not see
-         * its own frame still on the chain. */
-        BRIDGE_MEM32(XBOX_FS_BASE) = next;
-
-        if (handler) {
-            recomp_func_t fn = recomp_lookup(handler);
-            if (!fn) fn = recomp_lookup_manual(handler);
-            if (!fn) fn = recomp_lookup_kernel(handler);
-            if (fn) {
-                /* EXCEPTION_DISPOSITION handler(record, frame, context,
-                 * dispatcher) -- cdecl, so the caller pops. */
-                g_esp -= 4; BRIDGE_MEM32(g_esp) = 0;
-                g_esp -= 4; BRIDGE_MEM32(g_esp) = 0;
-                g_esp -= 4; BRIDGE_MEM32(g_esp) = reg;
-                g_esp -= 4; BRIDGE_MEM32(g_esp) = exc_record;
-                g_esp -= 4; BRIDGE_MEM32(g_esp) = 0;  /* return address */
-                {
-                    /* The handler is the title's code on its own thread:
-                     * it holds the guest CPU the unwind call let go of. */
-                    int took = xbox_GuestCpuEnterCallback();
-                    fn();
-                    xbox_GuestCpuLeaveCallback(took);
-                }
-                /* 16, not 20: the handler's own `ret` has already taken the
-                 * return address off, leaving just the four arguments for the
-                 * caller to drop. Cleaning 20 leaves esp four bytes high, and
-                 * every argument the unwound-into frame reads after that comes
-                 * from one slot over. */
-                g_esp += 16;
-            }
-        }
-
-        prev_reg = reg;
-        reg      = next;
-    }
+    xbox_SehUnwind(target_frame, exc_record, caller);
 
     /* Land on the target even if the walk stopped early: leaving fs:[0] on a
      * discarded frame is worse than losing a __finally. */
     if (target_frame && target_frame != XBOX_SEH_END_OF_CHAIN)
         BRIDGE_MEM32(XBOX_FS_BASE) = target_frame;
 
-    if (scratch)
-        g_esp += 0x50;
+    if (target_ip && target_ip != caller) {
+        static int warned;
+        if (!warned) {
+            warned = 1;
+            fprintf(stderr, "  [SEH] RtlUnwind: TargetIp 0x%08X is not the "
+                    "return address 0x%08X; returning there instead\n",
+                    target_ip, caller);
+            fflush(stderr);
+        }
+    }
+    g_eax = ret_value;
 }
 
 
@@ -5917,38 +5864,48 @@ static void bridge_ObReferenceObjectByHandle(void)
 /* ── RtlRaiseException (ordinal 302) ─────────────────────
  * VOID RtlRaiseException(PEXCEPTION_RECORD ExceptionRecord)
  *
- * Called by CRT / SEH code to raise structured exceptions.
- * On Xbox this triggers the kernel exception dispatcher.
- * For recompilation, we log and continue (no real SEH dispatch yet).
+ * Dispatches through the guest's SEH chain (xbox_seh.c): the lifted handlers
+ * run, a handler may continue execution (the registers it left in the
+ * context come back), or resume at an __except block or a catch continuation
+ * (which does not return here). Unhandled, the raise is logged and returns,
+ * as it did before dispatch existed. RECOMP_SEH_DISPATCH=0 skips the dispatch.
  */
-static void bridge_RtlRaiseException(void)
+static void bridge_raise_record(const char *name, uint32_t record_ptr)
 {
-    uint32_t record_ptr = STACK_ARG(0);
     uint32_t code = record_ptr ? BRIDGE_MEM32(record_ptr) : 0;
+    int handled = 0;
 
     static int raise_count = 0;
     raise_count++;
     if (raise_count <= 10) {
-        fprintf(stderr, "  [KERNEL] RtlRaiseException: record=0x%08X code=0x%08X (#%d)\n",
-                record_ptr, code, raise_count);
+        fprintf(stderr, "  [KERNEL] %s: record=0x%08X code=0x%08X (#%d)\n",
+                name, record_ptr, code, raise_count);
         fflush(stderr);
     }
 
-    /* Handle float exceptions by clearing the FPU status.
+    if (record_ptr && xbox_SehDispatchEnabled())
+        handled = xbox_SehRaiseRecord(record_ptr, g_xbox_kernel_caller,
+                                      g_esp + 4);
+    if (handled)
+        return;
+
+    /* Unhandled float exceptions: clear the FPU status.
      *
-     * On the real Xbox, RtlRaiseException dispatches through the SEH chain.
-     * For float exceptions (0xC0000090-0xC0000096), the CRT exception handler
-     * clears the x87/SSE status word and continues execution. Without clearing,
-     * the caller re-checks the FPU status, sees the exception still pending,
-     * and re-raises in an infinite loop.
-     *
-     * _clearfp() clears both x87 and SSE exception flags on Windows x64.
+     * The CRT raises STATUS_FLOAT_* (0xC0000090-0xC0000096) after an x87/SSE
+     * fault and re-checks the FPU status when the raise returns. A handler
+     * that continues execution clears it through the context; with none, the
+     * caller would see the exception still pending and re-raise for ever.
      */
     if (code >= 0xC0000090u && code <= 0xC0000096u) {
         _clearfp();
     }
 
     g_eax = 0;
+}
+
+static void bridge_RtlRaiseException(void)
+{
+    bridge_raise_record("RtlRaiseException", STACK_ARG(0));
 }
 
 /* ── MmMapIoSpace (ordinal 177) ──────────────────────────
@@ -8564,17 +8521,23 @@ static void bridge_ExReadWriteRefurbInfo(void)
     g_eax = 0;
 }
 
-/* --- ExRaiseException (ordinal 26, 1 arg = 4 bytes) --- */
+/* --- ExRaiseException (ordinal 26, 1 arg = 4 bytes) ---
+ * The kernel-mode RtlRaiseException; the same dispatch. */
 static void bridge_ExRaiseException(void)
 {
-    (void)STACK_ARG(0);
-    g_eax = 0;
+    bridge_raise_record("ExRaiseException", STACK_ARG(0));
 }
 
-/* --- ExRaiseStatus (ordinal 27, 1 arg = 4 bytes) --- */
+/* --- ExRaiseStatus (ordinal 27, 1 arg = 4 bytes) ---
+ * Raises a noncontinuable exception with no parameters for the status. */
 static void bridge_ExRaiseStatus(void)
 {
-    (void)STACK_ARG(0);
+    uint32_t status = STACK_ARG(0);
+
+    /* Noncontinuable: a handler can only resume elsewhere (which does not
+     * return here), so either way the call returns as it used to. */
+    (void)xbox_RaiseGuestException(status, XBOX_EXCEPTION_NONCONTINUABLE,
+                                   g_xbox_kernel_caller, 0, NULL);
     g_eax = 0;
 }
 
@@ -11633,8 +11596,12 @@ recomp_func_t recomp_lookup_kernel(uint32_t xbox_va)
             g_kernel_dispatch_slot = slot;
             return kernel_thunk_dispatch;
         }
+        return NULL;
     }
-    return NULL;
+    /* A handler jumping to an __except block or a catch continuation of a
+     * live function (xbox_seh.c): not a function start, so every lookup
+     * before this one missed. Cheap when no frame is anchored. */
+    return (recomp_func_t)xbox_SehLookup(xbox_va);
 }
 
 /* ── Initialization ─────────────────────────────────────── */
