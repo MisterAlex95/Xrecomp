@@ -20,6 +20,7 @@ TMP="$(mktemp -d "${TMPDIR:-/tmp}/xrecomp-smoke.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT
 mkdir -p "$TMP/library/Synthetic Game" "$TMP/home"
 cp "$REPO/tools/conformance/test.xbe" "$TMP/library/Synthetic Game/default.xbe"
-OUT="$(XRECOMP_HOME="$TMP/home" "$BIN/XRecomp" --smoke --toolkit "$REPO")"
+OUT="$(XRECOMP_HOME="$TMP/home" "$BIN/XRecomp" --smoke --toolkit "$REPO" --library "$TMP/library")"
 echo "$OUT"
+echo "$OUT" | grep -q '"title_id" : "12345678"' || { echo "smoke: the synthetic title was not found" >&2; exit 1; }
 echo "== all green"

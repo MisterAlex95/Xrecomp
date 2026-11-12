@@ -93,7 +93,7 @@ public func writeAtomically(_ data: Data, to url: URL) throws {
 public extension JSONEncoder {
     static var pretty: JSONEncoder {
         let e = JSONEncoder()
-        e.outputFormatting = [.prettyPrinted, .sortedKeys]
+        e.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
         return e
     }
 }

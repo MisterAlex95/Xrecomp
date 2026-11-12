@@ -6,6 +6,7 @@ import Foundation
 ///
 ///     XBA_PROGRESS step=<i>/<n> id=<identify|analyse|project|lift|build> pct=<0-100> [eta=<s>] msg=<rest>
 ///     XBA_RESULT ok exe=<path>
+///     XBA_RESULT ok project=<dir>          (with --no-build)
 ///     XBA_RESULT error code=<UPPER_SNAKE> msg=<text>
 ///
 /// msg is last and takes the rest of the line; unknown keys are ignored. exe (like Android's pack) takes the rest of
@@ -21,6 +22,8 @@ public enum PrepareProtocol {
         "BAD_ARGS": "The launcher passed a wrong option to prepare.",
         "NO_XBE": "No default.xbe in this game's folder or disc image.",
         "BAD_XBE": "The game's default.xbe could not be read.",
+        "BAD_IMAGE": "The disc image could not be read (still being copied?).",
+        "BAD_PROFILE": "The title's profile in the toolkit is broken.",
         "ANALYSE_FAILED": "The analysis of the game's code failed.",
         "LIFT_FAILED": "Turning the game's code into C failed.",
         "COMPILE_FAILED": "The build failed.",
@@ -52,7 +55,7 @@ public enum PrepareProtocol {
 
     public struct Result: Equatable, Sendable {
         public var ok = false
-        public var exe = "", pack = "", code = "", msg = ""
+        public var exe = "", project = "", pack = "", code = "", msg = ""
 
         public init() {}
     }
@@ -138,7 +141,7 @@ public enum PrepareProtocol {
         var r = Result()
         var words = 0
         var valid = false
-        fields(rest, greedy: ["msg", "pack", "exe"]) { k, v in
+        fields(rest, greedy: ["msg", "pack", "exe", "project"]) { k, v in
             guard let v else {
                 if words == 0 {
                     if k == "ok" { r.ok = true; valid = true } else if k == "error" { valid = true }
@@ -148,6 +151,7 @@ public enum PrepareProtocol {
             }
             switch k {
             case "exe": r.exe = v
+            case "project": r.project = v
             case "pack": r.pack = v
             case "code": r.code = v
             case "msg": r.msg = v
