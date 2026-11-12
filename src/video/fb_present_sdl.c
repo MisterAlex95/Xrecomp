@@ -255,6 +255,7 @@ static struct fg_entry s_fg_front;           /* shown by the main loop */
 static pthread_mutex_t s_fg_lock = PTHREAD_MUTEX_INITIALIZER;
 static int             s_fg_on;              /* the pacer runs */
 static int             s_fg_window;          /* ... and feeds the window */
+static volatile int    s_fg_stop_req;        /* xbox_FramegenRequestStop asked */
 static uint64_t        s_fg_full_drops;      /* pushed out of a full FIFO */
 static uint64_t        s_fg_late_skips;      /* due, but a newer one was too */
 static uint64_t        s_fg_presented;       /* FIFO frames the window showed */
@@ -356,6 +357,15 @@ static void fg_fifo_clear(void)
     pthread_mutex_lock(&s_fg_lock);
     s_fg_head = s_fg_count = 0;
     pthread_mutex_unlock(&s_fg_lock);
+}
+
+/* The executor found the title wants every vblank (XBA-96, frame_lock.h):
+ * frame generation stops at the window loop's next turn, and frames go to
+ * the window as without it. Any thread. */
+void xbox_FramegenRequestStop(const char *why)
+{
+    if (s_fg_on && !__atomic_exchange_n(&s_fg_stop_req, 1, __ATOMIC_SEQ_CST))
+        fprintf(stderr, "[LSFG] frame generation off: %s\n", why ? why : "asked");
 }
 
 /* Lifecycle pause / resume: nothing from before the pause is blended with,
@@ -1067,6 +1077,15 @@ int xbox_HostWindowMain(int (*guest_main)(void))
         int timeout = shown_seq ? 100 : 16;
 
 #if defined(XBOXRECOMP_LSFG)
+        if (s_fg_on && __atomic_load_n(&s_fg_stop_req, __ATOMIC_ACQUIRE)) {
+            fg_log_stats();
+            framegen_pacer_stop();
+            fg_fifo_clear();
+            s_fg_on = s_fg_window = 0;
+            fg_any = 0;
+            fg_next_due = 0;
+            dirty = 1;
+        }
         if (fg_any && !shown_seq)
             timeout = 100;
         if (fg_next_due && s_fg_on) {
