@@ -11,6 +11,7 @@
  *   - Thread priorities use NT KPRIORITY increments
  */
 
+#include "platform/host_cpus.h"
 #include "kernel.h"
 #include "xbox_memory_layout.h"   /* XBOX_WORKER_STACK_* + worker-stack decls */
 #include <stdio.h>
@@ -534,7 +535,9 @@ void xbox_GuestThreadPin(const char *role)
         return;
     while (!((mask >> core) & 1))
         core++;
-    if (!SetThreadAffinityMask(GetCurrentThread(), mask)) {
+    if (SetThreadAffinityMask(GetCurrentThread(), mask))
+        recomp_host_cpus_track((uint64_t)mask);   /* restored after a resume (XBA-50) */
+    else {
         if (!failed) {
             failed = 1;
             fprintf(stderr, "  [KERNEL] guest threads: this host sets no thread"

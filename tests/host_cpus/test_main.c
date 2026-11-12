@@ -1,9 +1,10 @@
 /* recomp_big_core_mask (XBA-25): the fast cores of a big.LITTLE host, read
  * from a fake /sys/devices/system/cpu tree. */
 #if !defined(_WIN32)
-#define _POSIX_C_SOURCE 200809L
+#define _GNU_SOURCE   /* sched_getaffinity, CPU_* (XBA-50) */
 #endif
 #include "host_cpus.h"
+#include <sched.h>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -83,6 +84,32 @@ int main(void)
 #if !defined(__ANDROID__)
     unsetenv("RECOMP_BIG_CORES");
     CHECK(recomp_host_cpus_init() == 0, "off by default outside Android");
+#endif
+#if defined(__linux__)
+    {
+        /* XBA-50: a tracked thread whose mask Android widened (a cpuset move
+         * on going to the background) gets its own back on resume. */
+        cpu_set_t set, all;
+        int first = -1, n = 0;
+        sched_getaffinity(0, sizeof all, &all);
+        for (cpu = 0; cpu < 64 && cpu < CPU_SETSIZE; cpu++)
+            if (CPU_ISSET(cpu, &all)) { if (first < 0) first = cpu; n++; }
+        if (n >= 2) {
+            CPU_ZERO(&set);
+            CPU_SET(first, &set);
+            sched_setaffinity(0, sizeof set, &set);
+            recomp_host_cpus_track(0);                  /* intended: that one core */
+            CHECK(recomp_host_cpus_restore() == 0, "nothing drifted yet");
+            sched_setaffinity(0, sizeof all, &all);     /* the "cpuset move" */
+            CHECK(recomp_host_cpus_restore() == 1, "one thread put back");
+            sched_getaffinity(0, sizeof set, &set);
+            CHECK(CPU_COUNT(&set) == 1 && CPU_ISSET(first, &set), "back on cpu %d", first);
+            recomp_host_cpus_track((uint64_t)1 << first | (uint64_t)1 << (first + 1 < 64 ? first + 1 : first));
+            sched_setaffinity(0, sizeof all, &all);
+        } else {
+            puts("one core only: the restore check is skipped");
+        }
+    }
 #endif
     if (failures) { printf("%d failure(s)\n", failures); return 1; }
     puts("PASS: host cpus");

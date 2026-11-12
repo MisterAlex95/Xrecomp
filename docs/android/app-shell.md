@@ -1182,6 +1182,18 @@ every thread inherits that mask: guest threads, the rasteriser pool, SDL's. On t
 cpus 3-7 and not the three A510 cores. logcat: `host cpus: runtime on the fast cores 3-7 of 0-7 (...)`.
 `RECOMP_BIG_CORES=0` in `recomp.cfg` turns it off. On desktop it is off unless `RECOMP_BIG_CORES=1`.
 
+
+After a pass through the background (XBA-50): Android moves the app between cpusets (top-app, background), and on
+kernels before 6.2 (the Thor runs 5.15) that move overwrites the mask each thread set for itself and does not put it
+back. The runtime's threads note their mask when they start (the shim's CreateThread, the raster pool, the guest
+threads' one-core pin, the main thread) and `recomp_lifecycle_resume` sets them again
+(`recomp_host_cpus_restore`, one logcat line `host cpus: N runtime thread(s) back on their cores after resume`).
+Threads that are not ours (ART, binder, SDL's) are left alone.
+
+Device check (Alex, Thor): 1. start a game, note the `host cpus` line; 2. `for t in /proc/PID/task/*; do taskset -p
+${t##*/}; done`; 3. Home, 10 s, back; logcat shows the `back on their cores` line and step 2 gives the same masks
+as before.
+
 ## Fault handler (trapped MMIO and real crashes)
 
 Before SDL starts, the shell calls `xbox_PosixInstallMmioFaultHandler()` (XBA-22), and calls it again after
