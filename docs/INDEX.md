@@ -32,6 +32,7 @@ One per stage, in the order you run them.
 - [The Register Model](technical/register-model.md) — Why global registers work and how the stack is simulated
 - [Indirect Call Dispatch](technical/indirect-calls.md) — The RECOMP_ICALL problem and how to solve it
 - [SEH and Exception Handling](technical/seh-handling.md) — Structured exception handling in recompiled code
+- [Guest Stack Switching](technical/stack-switching.md) — Fibers and coroutines: one host stack per guest stack, and what a longjmp may not cross
 - [Recovering a Split Function](technical/function-coalescence.md) — When the detector splits one function at an interior branch target: `--coalesce-functions`
 - [MSVC RTTI Recovery](technical/rtti-recovery.md) — Class names, vtables and virtual methods from a title's RTTI, as seeds for disassembly
 - [Conformance Testing](technical/conformance-testing.md) — Lifted C against the real CPU, the oracle that cannot be wrong

@@ -16,6 +16,7 @@
 #define _GNU_SOURCE   /* glibc declares dladdr/Dl_info (RECOMP_WATCH) only under it */
 #endif
 #include "recomp_status.h"
+#include "recomp_stack_switch.h"
 #include "xbox_memory_layout.h"
 #include "kernel.h"
 #include "guest_vmem.h"
@@ -2445,11 +2446,20 @@ int g_force_return = 0;
  *
  * Keyed by guest buffer address, per thread. Buffers nest, so jumping to an
  * outer one discards every inner entry -- those frames are gone.
+ *
+ * A thread that switches guest stacks (recomp_stack_switch.c, XBA-101) runs
+ * on several host stacks, and a native longjmp is only valid on the stack the
+ * buffer was armed on. Each slot names its host context: a jump to a buffer
+ * armed on another one is refused (the guest's own longjmp runs instead, as
+ * for a buffer with no native counterpart), and a jump only discards the
+ * inner entries of its own context -- the others' frames are still alive,
+ * parked on their stacks. docs/technical/stack-switching.md « Limits ».
  */
 #define RECOMP_JMPBUF_SLOTS 32
 
 typedef struct {
     uint32_t buf_va;
+    uint32_t ctx;           /* recomp_stack_context() when armed */
     jmp_buf  native;
 } recomp_jmp_slot;
 
@@ -2458,25 +2468,38 @@ static RECOMP_TLS int             s_jmp_used;
 
 jmp_buf *recomp_setjmp_slot(uint32_t buf_va)
 {
+    uint32_t ctx = recomp_stack_context();
     int i;
 
     for (i = 0; i < s_jmp_used; i++)
-        if (s_jmp[i].buf_va == buf_va)
-            return &s_jmp[i].native;      /* the same buffer, re-armed */
+        if (s_jmp[i].buf_va == buf_va) {
+            s_jmp[i].ctx = ctx;           /* the same buffer, re-armed */
+            return &s_jmp[i].native;
+        }
     if (s_jmp_used >= RECOMP_JMPBUF_SLOTS)
         s_jmp_used = RECOMP_JMPBUF_SLOTS - 1;   /* keep the deepest */
     s_jmp[s_jmp_used].buf_va = buf_va;
+    s_jmp[s_jmp_used].ctx = ctx;
     return &s_jmp[s_jmp_used++].native;
 }
 
 int recomp_guest_longjmp(uint32_t buf_va, uint32_t value)
 {
     const uint8_t *mem = (const uint8_t *)g_memory_offset;
-    int i;
+    uint32_t ctx = recomp_stack_context();
+    int i, j, kept;
 
     for (i = s_jmp_used - 1; i >= 0; i--) {
         if (s_jmp[i].buf_va != buf_va)
             continue;
+        if (s_jmp[i].ctx != ctx) {
+            static int said;
+            if (said++ < 8)
+                fprintf(stderr, "[STACK] longjmp to jmp_buf 0x%08X armed on host stack %u from "
+                                "host stack %u: the guest's own longjmp runs instead\n",
+                        buf_va, s_jmp[i].ctx, ctx);
+            return 0;
+        }
 
         /* The callee-saved registers and the stack, exactly as the CRT's
          * longjmp restores them: esp is the setjmp-time esp plus the return
@@ -2492,7 +2515,12 @@ int recomp_guest_longjmp(uint32_t buf_va, uint32_t value)
         g_seh_ebp = *(const uint32_t *)(mem + buf_va + 0x00);
         g_ebp     = g_seh_ebp;
 
-        s_jmp_used = i + 1;   /* the inner buffers died with their frames */
+        /* The inner buffers of this context died with their frames; the
+         * other contexts' are still alive, parked on their stacks. */
+        for (j = kept = i + 1; j < s_jmp_used; j++)
+            if (s_jmp[j].ctx != ctx)
+                s_jmp[kept++] = s_jmp[j];
+        s_jmp_used = kept;
         longjmp(s_jmp[i].native, value ? (int)value : 1);
     }
     return 0;
