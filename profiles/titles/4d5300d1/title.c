@@ -63,9 +63,10 @@ void fable_configure(void)
      * mapping above 64 MB the desktop POSIX layout lost pages of the
      * contiguous window: title.json holds the whole 4 GB window
      * (RECOMP_GUEST_WINDOW=1, Android's default), which places every view
-     * inside one reservation. title.json also asks for more than the default
-     * 8 worker threads alive during the front-end load (RECOMP_THREAD_STACKS),
-     * and on Android caps the GPU renderer at 30 fps, evenly paced: in
+     * inside one reservation. Its 12+ worker threads alive during the
+     * front-end load need no setting: the stack pool grows with the guest
+     * heap (XBA-104). title.json on Android caps the GPU renderer at 30 fps,
+     * evenly paced: in
      * Oakvale a frame takes the executor 17-22 ms on an M1 and more on the
      * AYN Thor, so a 60 cap only lets the rate wander between 20 and 40
      * (docs/technical/gpu-backend.md, Android; the launcher's Frame cap wins).

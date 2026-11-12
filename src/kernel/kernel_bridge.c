@@ -1002,16 +1002,25 @@ static void bridge_PsCreateSystemThreadEx(void)
 
                 stack_top = xbox_AllocThreadStack();
 
-                if (!stack_top) {
-                    fprintf(stderr, "  [KERNEL] PsCreateSystemThreadEx: out of "
-                            "thread stacks, running worker 0x%08X inline\n",
-                            start_routine);
+                if (!stack_top
+                    || !bridge_spawn_guest_thread(fn, start_context1, start_context2,
+                                                  stack_top, xbox_handle_ptr,
+                                                  tls_size, create_suspended)) {
+                    /* An error, as on the console when no kernel stack can
+                     * be had (XBA-104). Running the worker inline instead
+                     * deadlocked a worker that waits for its creator's
+                     * requests. A host thread that fails to start gives its
+                     * stack back: it never ran. */
+                    fprintf(stderr, "  [KERNEL] PsCreateSystemThreadEx: no %s"
+                            " for worker 0x%08X: STATUS_INSUFFICIENT_RESOURCES\n",
+                            stack_top ? "host thread" : "stack", start_routine);
                     fflush(stderr);
-                    bridge_run_thread_inline(fn, start_context1, start_context2);
+                    xbox_FreeThreadStack(stack_top);
+                    if (xbox_handle_ptr)
+                        BRIDGE_MEM32(xbox_handle_ptr) = 0;
+                    g_eax = 0xC000009Au;
+                    return;
                 } else {
-                    bridge_spawn_guest_thread(fn, start_context1, start_context2,
-                                              stack_top, xbox_handle_ptr,
-                                              tls_size, create_suspended);
                     fprintf(stderr, "  [KERNEL] PsCreateSystemThreadEx: spawned "
                             "worker 0x%08X (ctx=0x%08X, stack top 0x%08X%s)\n",
                             start_routine, start_context1, stack_top,
@@ -9925,11 +9934,20 @@ static void bridge_PsCreateSystemThread(void)
                     return;
                 }
                 stack_top = xbox_AllocThreadStack();
-                if (!stack_top) {
-                    bridge_run_thread_inline(fn, start_context1, start_context2);
-                } else {
-                    bridge_spawn_guest_thread(fn, start_context1, start_context2,
-                                              stack_top, xbox_handle_ptr, 0, 0);
+                if (!stack_top
+                    || !bridge_spawn_guest_thread(fn, start_context1,
+                                                  start_context2, stack_top,
+                                                  xbox_handle_ptr, 0, 0)) {
+                    /* see PsCreateSystemThreadEx */
+                    fprintf(stderr, "  [KERNEL] PsCreateSystemThread: no %s"
+                            " for worker 0x%08X: STATUS_INSUFFICIENT_RESOURCES\n",
+                            stack_top ? "host thread" : "stack", start_routine);
+                    fflush(stderr);
+                    xbox_FreeThreadStack(stack_top);
+                    if (xbox_handle_ptr)
+                        BRIDGE_MEM32(xbox_handle_ptr) = 0;
+                    g_eax = 0xC000009Au;
+                    return;
                 }
             }
         } else {

@@ -57,7 +57,9 @@ start (Finder launch).
    0x00862288, device 0x0085FDE0, semaphore 0x80966000) to nv2a_pb_set_semaphore_target(). First flip, loads graphics.
 2. DirectSound wait (sub_00832BFC, DSOUND section): RECOMP_AC97_READY=1 (emulated APU). Loads shaders, xfrontend.bin.
 3. "out of thread stacks" at the 12th worker -> ran inline -> deadlock. Toolkit: RECOMP_THREAD_STACKS (commit on the
-   branch, not pushed); Fable sets 32. First draw call (1 draw, 2 flips).
+   branch, not pushed); Fable sets 32. First draw call (1 draw, 2 flips). Since XBA-104 (2026-11-12) the stack pool
+   grows with the guest heap and an exhausted heap fails PsCreateSystemThreadEx instead of running inline; the
+   profile sets nothing.
 4. Desktop POSIX layout with map > 64 MB loses contiguous-window pages (host malloc trap; guard malloc fault at
    0x80005000 in xbox_ContiguousAllocEx). Worked around with RECOMP_GUEST_WINDOW=1. Toolkit bug, not fixed yet.
 All of these are setenv() defaults in main.c, so a double-click runs the same thing.
