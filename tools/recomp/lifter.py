@@ -476,7 +476,7 @@ _BARE_STRING_COMPARES = ("cmpsb", "cmpsw", "cmpsd", "scasb", "scasw", "scasd")
 # Instructions that do NOT modify EFLAGS (preserve flag tracking)
 _EFLAGS_PRESERVE = frozenset({
     # General-purpose data movement / stack
-    "mov", "lea", "push", "pop", "nop", "leave", "ret",
+    "mov", "lea", "push", "pop", "nop", "leave", "enter", "ret",
     "movzx", "movsx", "xchg", "bswap",
     "cdq", "cwde", "cbw", "cwd",
     "lahf",
@@ -524,7 +524,7 @@ _EFLAGS_PRESERVE = frozenset({
     "paddb", "paddw", "paddd", "paddq",
     "psubb", "psubw", "psubd",
     "paddsb", "paddsw", "paddusb", "psubsb", "psubsw", "psubusb",
-    "pavgb", "pavgw", "pminsw", "pmaxsw", "psadbw",
+    "pavgb", "pavgw", "pminsw", "pmaxsw", "psadbw", "pminub", "pmaxub",
     "pmullw", "pmulhw", "pmulhuw", "pmaddwd",
     "pand", "pandn", "por", "pxor",
     "pcmpeqb", "pcmpeqw", "pcmpeqd",
@@ -1689,6 +1689,30 @@ class Lifter:
             return ["eax = SX16(eax); /* cwde */"]
         if m == "cbw":
             return ["SET_LO16(eax, SX8(eax)); /* cbw */"]
+        if m == "cwd":
+            return ["SET_LO16(edx, (eax & 0x8000u) ? 0xFFFFu : 0u); /* cwd */"]
+        # aam/aad (XBA-71): the ASCII adjusts hand-written digit code uses,
+        # `aam` (base 10 by default) splitting al into ah:al. Flags (SF, ZF,
+        # PF from al) are left to the tracking's "unknown"; a division by a
+        # zero base, a #DE on the console, leaves the registers alone.
+        if m in ("aam", "aad"):
+            base = ops[0].imm & 0xFF if ops and ops[0].type == "imm" else 10
+            if m == "aam":
+                if not base:
+                    return ["(void)0; /* aam 0: #DE on the console */"]
+                return [f"{{ uint32_t _al = eax & 0xFFu; SET_LO16(eax, ((_al / {base}u) << 8) | (_al % {base}u)); }}"
+                        " /* aam */"]
+            return [f"SET_LO16(eax, (uint8_t)((eax & 0xFFu) + ((eax >> 8) & 0xFFu) * {base}u)); /* aad */"]
+        # enter N, 0 (XBA-71): push ebp; mov ebp, esp; sub esp, N. Nesting
+        # levels above 0 (Pascal-style display) stay unhandled.
+        if m == "enter" and len(ops) >= 2 and ops[0].type == "imm" and ops[1].type == "imm":
+            if ops[1].imm & 0x1F:
+                return self._unimplemented(insn, m, " (nesting level)")
+            out = ["PUSH32(esp, ebp);", "ebp = esp;"]
+            if self.publishes_ebp:
+                out.append("g_ebp = ebp; /* frame stays current across calls */")
+            out.append(f"esp -= {ops[0].imm & 0xFFFF}u; /* enter */")
+            return out
         if m == "bswap" and nops >= 1 and ops[0].type == "reg":
             r = _fmt_reg(ops[0].reg)
             return [f"{r} = BSWAP32({r}); /* bswap */"]
@@ -3442,6 +3466,8 @@ class Lifter:
         "pmaddwd": "MMX_PMADDWD",
         "pavgb": "MMX_PAVGB", "pavgw": "MMX_PAVGW",
         "pminsw": "MMX_PMINSW", "pmaxsw": "MMX_PMAXSW",
+        # SSE1's MMX extensions, which the Pentium III has (XBA-71).
+        "pminub": "MMX_PMINUB", "pmaxub": "MMX_PMAXUB", "pmulhuw": "MMX_PMULHUW",
         "pcmpeqb": "MMX_PCMPEQB", "pcmpeqw": "MMX_PCMPEQW",
         "pcmpeqd": "MMX_PCMPEQD",
         "pcmpgtb": "MMX_PCMPGTB", "pcmpgtw": "MMX_PCMPGTW",
