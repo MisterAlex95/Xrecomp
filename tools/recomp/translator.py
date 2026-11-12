@@ -27,7 +27,7 @@ from .disasm import Disassembler
 from .lifter import (Lifter, lift_basic_block, detect_seh_helpers,
                      _RESULT_SNAPSHOT_SETTERS, _as_addr_set,
                      detect_setjmp_helpers, _func_ident, _operand_width,
-                     publish_flags)
+                     publish_flags, stack_switch_sites)
 
 
 # Float compares snapshot at the compare as well, and their conditions read
@@ -2997,6 +2997,12 @@ class FunctionTranslator:
             and following.operands[1].type == "imm"
             and following.operands[1].imm > 0
         }
+        # Esp loads that leave for another stack, a fiber or coroutine switch
+        # (XBA-101). Set before anything lifts, so no other function inherits
+        # them; their locals are declared with the others below.
+        switch_sites = stack_switch_sites(instructions)
+        self.lifter.stack_switch_sites = frozenset(switch_sites)
+        self.lifter.stack_switch_carried = any(i.is_ret for i in instructions)
         if not blocks:
             return None
 
@@ -3307,6 +3313,19 @@ class FunctionTranslator:
         # EBP is also a general register in frame-pointer-omitted code, so any
         # function that uses it or calls out publishes it, not only frame owners.
         self.lifter.publishes_ebp = "ebp" in used_regs
+
+        # A stack switch: the esp it leaves and lands on, where, and the
+        # return address the function was entered with, for the runtime at
+        # the ret (Lifter._lift_stack_switch, recomp_stack_switch.h).
+        if switch_sites:
+            lines.append("    uint32_t _ss_save = 0, _ss_load = 0, _ss_site = 0,"
+                         " _ss_entry = MEM32(esp); /* stack switch (XBA-101) */")
+            lines.append("    (void)_ss_load; (void)_ss_site; (void)_ss_entry;")
+            sites = ", ".join(f"0x{a:08X}" for a in switch_sites)
+            how = ("carried at its ret" if self.lifter.stack_switch_carried
+                   else "NOT carried: no ret, recorded at run time")
+            print(f"  stack switch: {name} loads esp from memory at {sites} ({how})",
+                  file=sys.stderr)
 
         # SSE and MMX are architectural state, declared globally by the
         # runtime exactly like the GPRs and the x87 stack. Declaring either

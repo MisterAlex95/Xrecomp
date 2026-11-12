@@ -1449,6 +1449,69 @@ def detect_setjmp_helpers(func_db, xbe_data, verbose=False):
     return found.get("setjmp"), found.get("longjmp")
 
 
+def _is_esp(op):
+    return op.type == "reg" and op.reg == "esp"
+
+
+def _foreign_stack_load(op):
+    """A memory operand an esp load from which leaves this stack: anything but
+    a slot of the current frame. `mov esp, [ebp-18h]` is MSVC's __except
+    block putting esp back where the function's own prologue left it."""
+    return op.type == "mem" and op.mem_base != "ebp"
+
+
+def _loaded_from_memory(instructions, i, reg, window=4):
+    """Whether `reg` was last written, within the few straight-line
+    instructions before instructions[i], by a load from a foreign stack slot
+    (`mov eax, [ecx+4]; mov esp, eax`). Anything else -- arithmetic on esp
+    (_chkstk's `lea ecx, [esp+8]; sub ecx, eax; mov esp, ecx`), a branch in
+    between, nothing found -- is not a switch."""
+    for j in range(i - 1, max(-1, i - 1 - window), -1):
+        prev = instructions[j]
+        if prev.is_branch or prev.is_call or prev.is_ret:
+            return False
+        ops = prev.operands
+        if ops and ops[0].type == "reg" and ops[0].reg == reg:
+            return (prev.mnemonic == "mov" and len(ops) == 2
+                    and _foreign_stack_load(ops[1]))
+    return False
+
+
+def stack_switch_sites(instructions):
+    """The instructions of one function that move esp to another stack (XBA-101).
+
+    A fiber or coroutine switch saves esp and loads the other side's from
+    memory, then returns on that stack:
+
+        xchg esp, [mem]                     (Fable's scheduler)
+        mov  [cur], esp / mov esp, [next]   (XAPI's SwitchToFiber shape)
+        mov  eax, [ecx+4] / mov esp, eax
+
+    Not a switch: esp from its own frame (`mov esp, ebp`, `lea esp, [ebp-N]`,
+    the __except block's `mov esp, [ebp-18h]`), arithmetic on esp (_chkstk,
+    _alloca_probe), and `pop esp`, which compiled code only emits to undo its
+    own `push esp` (the round-to-int idiom). Returns the addresses in order.
+    """
+    sites = []
+    for i, insn in enumerate(instructions):
+        ops = insn.operands
+        if len(ops) != 2:
+            continue
+        m = insn.mnemonic.removeprefix("lock ")
+        if m == "xchg":
+            if ((_is_esp(ops[0]) and ops[1].type == "mem")
+                    or (_is_esp(ops[1]) and ops[0].type == "mem")):
+                sites.append(insn.address)
+        elif m == "mov" and _is_esp(ops[0]):
+            src = ops[1]
+            if _foreign_stack_load(src):
+                sites.append(insn.address)
+            elif (src.type == "reg" and src.reg not in ("esp", "ebp")
+                  and _loaded_from_memory(instructions, i, src.reg)):
+                sites.append(insn.address)
+    return sites
+
+
 def normalise_zero_test(mnemonic, ops):
     """`test X, X` is `cmp X, 0`, and saying so keeps a branch alive.
 
@@ -1503,6 +1566,11 @@ class Lifter:
         self.flag_publish_sites = frozenset()
         self.flag_live_returns = frozenset()
         self.publishes_ebp = False  # Set per-function: has a real frame
+        # Set per-function by translator (XBA-101): the esp loads that leave
+        # for another stack (stack_switch_sites), and whether the function
+        # has a ret to carry them at. See _lift_stack_switch.
+        self.stack_switch_sites = frozenset()
+        self.stack_switch_carried = False
         self.trace_exit_name = None  # Set per-function when traced
         self.force_return_value = None   # Set per-function by --force-return
         # Every direct call target we emit a name for, as {addr: name}. The
@@ -1580,6 +1648,9 @@ class Lifter:
         m = insn.mnemonic
         ops = insn.operands
         nops = len(ops)
+
+        if self.stack_switch_sites and insn.address in self.stack_switch_sites:
+            return self._lift_stack_switch(insn)
 
         # ── Locked read-modify-writes, and xchg with memory (XBA-78) ──
         if (m.startswith("lock ") and m[5:] in LOCKED_RMW and nops >= 1
@@ -2939,6 +3010,29 @@ class Lifter:
             return [head + fallback + " /* indirect call */"]
         return ["/* call: no target */"]
 
+    def _lift_stack_switch(self, insn):
+        """An esp load that leaves for another stack (XBA-101).
+
+        The load itself lifts as usual. Around it the function notes the esp
+        it leaves and the one it lands on, and its ret hands both to
+        recomp_stack_switch_ret, which switches host stacks with the guest
+        one -- a C return would go back to the caller on the old stack. The
+        translator declares the _ss_ locals in every function that has a site.
+        A function with no ret to carry the switch (it leaves by a jump) says
+        so at run time, once: the discovery file names the blocker."""
+        saved = self.stack_switch_sites
+        self.stack_switch_sites = frozenset()
+        try:
+            body = self.lift_instruction(insn)
+        finally:
+            self.stack_switch_sites = saved
+        out = [f"_ss_save = esp; _ss_site = 0x{insn.address:08X}u; /* stack switch */"]
+        out += body
+        out.append("_ss_load = esp;")
+        if not self.stack_switch_carried:
+            out.append(f"recomp_stack_switch_unhandled(0x{insn.address:08X}u);")
+        return out
+
     def _lift_ret(self, insn, ops):
         # x86 'ret' pops return address from stack.
         # 'ret N' also pops N extra bytes (stdcall cleanup).
@@ -2970,8 +3064,15 @@ class Lifter:
             prefix = (f'if (g_force_return) eax = '
                       f'0x{self.force_return_value:X}U; ') + prefix
 
-        if len(ops) >= 1 and ops[0].type == "imm":
-            n = ops[0].imm
+        has_imm = len(ops) >= 1 and ops[0].type == "imm"
+        n = ops[0].imm if has_imm else 0
+        # A ret after an esp load from another stack continues on that stack:
+        # the runtime switches host stacks, and this returns when this side is
+        # resumed (see _lift_stack_switch).
+        if self.stack_switch_sites:
+            prefix += ("if (_ss_save) recomp_stack_switch_ret(_ss_save, _ss_load, "
+                       f"_ss_entry, {n}u, _ss_site); ")
+        if has_imm:
             return [f"{prefix}esp += {4 + n}; return; /* ret {n} */"]
         return [f"{prefix}esp += 4; return; /* ret */"]
 
