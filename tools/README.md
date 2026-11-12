@@ -125,6 +125,18 @@ py -3 -m tools.disasm game_files/default.xbe --text-only
 
 ---
 
+### triage — library triage (XBA-63)
+
+```bash
+python -m tools.triage /dumps/*.iso --json triage.json --markdown triage.md
+```
+
+Per disc: default.xbe's title, XDK build, engines and profile layers, every other XBE on the disc and whether
+default.xbe names it (a launcher disc needs XBA-82), whether a title profile exists; then the titles grouped by XDK
+build and engine, biggest first: the order to write shared fixes in.
+
+---
+
 ### compat — the compat runner (XBA-62)
 
 ```bash
