@@ -188,24 +188,68 @@ void recomp_icall_not_code_log(uint32_t va)
  * translation for, in place of the bare comment it used to leave. The
  * instruction is still a no-op; this only stops the omission being silent.
  * RECOMP_UNIMPL_TRAP=1 aborts at the first hit, at the guest address of the
- * cause rather than wherever the damage surfaces. */
+ * cause rather than wherever the damage surfaces.
+ *
+ * Rate-limited per address, at hits 1, 10, 100, 1000 ...: KOTOR's USB
+ * interrupt handler runs a `cli`/`sti` pair on every interrupt, which used to
+ * fill the first 50 lines -- the whole budget -- within a minute, so any other
+ * site reached later was never printed, and on the Thor it was one logcat
+ * line per interrupt. The progression still tells a site hit in a loop from
+ * one hit once. Past UNIMPL_SLOTS distinct addresses further sites are not
+ * printed; the discovery record (when on) still gets every site once. */
 #include <stdlib.h>
 
 void recomp_unimpl(const char *text, uint32_t va)
 {
-    static int printed;
-    const char *trap = getenv("RECOMP_UNIMPL_TRAP");
-    int stop = trap && *trap && *trap != '0';
+    enum { UNIMPL_SLOTS = 64 };
+    static uint32_t seen[UNIMPL_SLOTS];
+    static uint64_t hits[UNIMPL_SLOTS];
+    static int count, stop = -1, full_said;
+    uint64_t n;
+    int i;
 
-    recomp_discovery_unimpl(va, text);
+    if (stop < 0) {
+        const char *trap = getenv("RECOMP_UNIMPL_TRAP");
+        stop = trap && *trap && *trap != '0';
+    }
 
-    if (printed < 50 || stop) {
-        printed++;
+    for (i = 0; i < count; i++)
+        if (seen[i] == va)
+            break;
+    if (i == count) {
+        if (count == UNIMPL_SLOTS) {
+            recomp_discovery_unimpl(va, text);
+            if (!full_said) {
+                full_said = 1;
+                fprintf(stderr, "[UNIMPL] %d sites reached; further ones are"
+                                " not printed\n", count);
+                fflush(stderr);
+            }
+            return;
+        }
+        seen[count] = va;
+        hits[count] = 0;
+        count++;
+        recomp_discovery_unimpl(va, text);
+    }
+    n = ++hits[i];
+    /* 1, 10, 100, 1000 ... */
+    {
+        uint64_t k = n;
+        while (k >= 10 && k % 10 == 0)
+            k /= 10;
+        if (k != 1)
+            return;
+    }
+    if (n == 1)
         fprintf(stderr,
                 "[UNIMPL] untranslated instruction REACHED: `%s` at 0x%08X"
                 " (a no-op; set RECOMP_UNIMPL_TRAP=1 to stop here)\n",
                 text, va);
-        fflush(stderr);
-    }
+    else
+        fprintf(stderr,
+                "[UNIMPL] untranslated instruction REACHED: `%s` at 0x%08X"
+                " %llu times\n", text, va, (unsigned long long)n);
+    fflush(stderr);
     if (stop) abort();
 }
