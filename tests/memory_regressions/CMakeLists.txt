@@ -18,3 +18,4 @@ add_test(NAME memory_regressions_contig_avoid_image COMMAND memory_regressions_t
 add_test(NAME memory_regressions_contig_keep COMMAND memory_regressions_test contig-keep ${XBE})
 add_test(NAME memory_regressions_ext_vma COMMAND memory_regressions_test ext-vma ${XBE})
 add_test(NAME memory_regressions_ext_vma_128 COMMAND memory_regressions_test ext-vma-128 ${XBE})
+add_test(NAME memory_regressions_lazy_off COMMAND memory_regressions_test lazy-off ${XBE})

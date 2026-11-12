@@ -42,6 +42,15 @@
  *   ext-vma-128   The same switch on a 128 MB map, where the mirrors already
  *                 reach past user space. The tracker must stay out of the way
  *                 rather than reserve a range of negative size.
+ *
+ *   8. (default, POSIX) A title's large reservation without a map size
+ *      (XBA-103). Fable reserves 608 MB for its allocator: the heap cannot
+ *      back it, and it used to be clamped to what the heap could (38 MB) unless
+ *      the title called xbox_SetMapSize. It is granted whole, from the top of
+ *      user space down, not aliasing low RAM; commits, decommits and the
+ *      release work; the low mirrors and the contiguous window stay; and
+ *      MmQueryStatistics still reports a 64 MB console.
+ *   lazy-off      RECOMP_LAZY_RESERVE=0: the clamp again.
  */
 #include "kernel.h"
 #include "xbox_memory_layout.h"
@@ -61,11 +70,12 @@ recomp_func_t recomp_lookup_manual(uint32_t xbox_va) { (void)xbox_va; return NUL
 extern recomp_func_t recomp_lookup_kernel(uint32_t xbox_va);
 extern uint32_t g_xbox_image_lo, g_xbox_image_hi;
 
-enum { S_ALLOC, S_FREE, S_QUERY, N_SLOTS };
+enum { S_ALLOC, S_FREE, S_QUERY, S_STATS, N_SLOTS };
 static const uint32_t ORD[N_SLOTS] = {
     184,   /* NtAllocateVirtualMemory */
     199,   /* NtFreeVirtualMemory */
     217,   /* NtQueryVirtualMemory */
+    181,   /* MmQueryStatistics */
 };
 
 static uint32_t scratch;                 /* guest VA of a 64 KB block */
@@ -192,13 +202,14 @@ int main(int argc, char **argv)
     int ext = ext128 || !strcmp(mode, "ext-vma");
     int avoid = !strcmp(mode, "contig-avoid-image");
     int keep = !strcmp(mode, "contig-keep");
+    int lazy_off = !strcmp(mode, "lazy-off");
     size_t xbe_len = 0;
     unsigned char *xbe;
     char d[160];
     int i;
 
     setvbuf(stdout, NULL, _IONBF, 0);
-    if (!reclaim && !ext && !avoid && !keep && strcmp(mode, "default")) {
+    if (!reclaim && !ext && !avoid && !keep && !lazy_off && strcmp(mode, "default")) {
         printf("unknown mode '%s'\n", mode);
         return 2;
     }
@@ -210,6 +221,8 @@ int main(int argc, char **argv)
         set_env("RECOMP_CONTIG_AVOID_IMAGE", "1");
     if (keep)
         set_env("RECOMP_CONTIG_RECLAIM", "0");
+    if (lazy_off)
+        set_env("RECOMP_LAZY_RESERVE", "0");
     if (ext128)
         xbox_SetTotalRam(XBOX_DEVKIT_RAM);
 
@@ -481,6 +494,98 @@ int main(int argc, char **argv)
                   "reserving it again works, and the memory is zero", NULL);
         }
     }
+
+    /* 8. A 608 MB reservation without a map size (XBA-103). */
+    if (lazy_off) {
+        const uint32_t want = 608u << 20;
+        uint32_t base = 0, size = want, st;
+
+        st = nt_alloc_at(&base, &size, 0x2000);
+        snprintf(d, sizeof d, "status 0x%08X, base 0x%08X, size %u", st, base, size);
+        check(st == 0 && size < want && base < 0x04000000u,
+              "lazy-off: a 608 MB reserve is clamped to the heap", d);
+    }
+#if !defined(_WIN32)
+    if (!strcmp(mode, "default")) {
+        const uint32_t MB = 1024u * 1024u, want = 608u * MB, ram = 64u * MB;
+        uint32_t base = 0, size = want, st, b2 = 0, s2 = 304u * MB, cb, cs;
+        uint32_t low_before, mirror_probe = scratch + 0x3000, args[3];
+
+        *G(mirror_probe) = 0x6D697272u;
+        st = nt_alloc_at(&base, &size, 0x2000);
+        snprintf(d, sizeof d, "status 0x%08X, base 0x%08X, size %u", st, base, size);
+        check(st == 0 && size == want, "a 608 MB reserve is granted whole", d);
+        check(st == 0 && base >= ram && (uint64_t)base + size <= GUEST_VMEM_TOP,
+              "it sits above RAM, below the end of user space", d);
+        if (st == 0 && size == want) {
+            low_before = *G(base % ram);
+            *G(base) = ~low_before;
+            *G(base + size - 4) = 0xE4D0F608u;
+            snprintf(d, sizeof d, "guest 0x%08X now 0x%08X", base % ram, *G(base % ram));
+            check(*G(base % ram) == low_before && *G(base + size - 4) == 0xE4D0F608u,
+                  "a write in it does not reach low RAM", d);
+            check(xbox_ReserveHolds(base, size) && !xbox_ReserveHolds(base - 0x1000, 0x1000),
+                  "xbox_ReserveHolds covers exactly the reservation", NULL);
+
+            /* MEM_COMMIT inside: the pages are already there. */
+            cb = base + 0x100000; cs = 0x10000;
+            st = nt_alloc_at(&cb, &cs, 0x1000);
+            *G(cb) = 0xC0117u;
+            check(st == 0 && cb == base + 0x100000 && *G(cb) == 0xC0117u,
+                  "commit inside it succeeds and the memory is real", NULL);
+
+            /* A second one goes below the first. */
+            st = nt_alloc_at(&b2, &s2, 0x2000);
+            snprintf(d, sizeof d, "status 0x%08X, base 0x%08X, size %u", st, b2, s2);
+            check(st == 0 && s2 == 304u * MB && b2 >= ram && b2 + s2 <= base,
+                  "a second 304 MB reserve lands below it", d);
+
+            /* Decommit one page: zero, its neighbours kept. */
+            memset(G(base + 0x200000), 0xA5, 0x3000);
+            *G(OUT_VA) = base + 0x201000;
+            *G(OUT_VA + 4) = 0x1000;
+            args[0] = OUT_VA; args[1] = OUT_VA + 4; args[2] = 0x4000;
+            st = call(S_FREE, 3, args);
+            snprintf(d, sizeof d, "status 0x%08X, page 0x%08X, neighbours 0x%08X 0x%08X",
+                     st, *G(base + 0x201000), *G(base + 0x200000), *G(base + 0x202000));
+            check(st == 0 && *G(base + 0x201000) == 0 && *G(base + 0x201FFC) == 0
+                  && *G(base + 0x200000) == 0xA5A5A5A5u
+                  && *G(base + 0x202000) == 0xA5A5A5A5u,
+                  "a decommitted page reads zero, its neighbours kept", d);
+
+            /* MmQueryStatistics: still a 64 MB console. */
+            args[0] = OUT_VA + 0x200;
+            memset(G(OUT_VA + 0x200), 0, 0x40);
+            *G(OUT_VA + 0x200) = 0x24;
+            st = call(S_STATS, 1, args);
+            snprintf(d, sizeof d, "status 0x%08X, total %u pages, available %u",
+                     st, *G(OUT_VA + 0x204), *G(OUT_VA + 0x208));
+            check(st == 0 && *G(OUT_VA + 0x204) == 16384u
+                  && *G(OUT_VA + 0x208) <= 16384u,
+                  "MmQueryStatistics still reports 64 MB of RAM", d);
+
+            /* The low mirrors and the contiguous window are still there. */
+            check(*G(ram + mirror_probe) == 0x6D697272u,
+                  "the first RAM mirror still aliases low RAM", NULL);
+            {
+                uint32_t c = xbox_ContiguousAlloc(0x1000, 4096);
+                if (c)
+                    *G(c) = 0x5A5A5A5Au;
+                check(c && *G(c) == 0x5A5A5A5Au,
+                      "the contiguous window is still mapped", NULL);
+            }
+
+            /* Release: the whole reservation, zero afterwards. */
+            st = nt_release(base + 0x1000);
+            check(st == 0xC000009Fu, "a release inside it is refused (not at the base)", NULL);
+            st = nt_release(base);
+            snprintf(d, sizeof d, "status 0x%08X, size %u", st, *G(OUT_VA + 4));
+            check(st == 0 && *G(OUT_VA + 4) == want, "the release gives back 608 MB", d);
+            check(*G(base) == 0 && *G(base + size - 4) == 0 && *G(cb) == 0,
+                  "released pages read zero", NULL);
+        }
+    }
+#endif
 
     xbox_MemoryLayoutShutdown();
     free(xbe);

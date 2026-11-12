@@ -530,6 +530,9 @@ static int guest_ok(uint32_t va, uint32_t bytes)
             && (uint64_t)va + bytes <= (uint64_t)OHCI_CONTIG_BASE
                                      + OHCI_CONTIG_SIZE)
         return 1;
+    /* A buffer in a lazy reservation (xbox_ReserveAlloc, XBA-103). */
+    if (xbox_ReserveHolds(va, bytes))
+        return 1;
     return (uint64_t)va + bytes <= (uint64_t)mapped;
 }
 

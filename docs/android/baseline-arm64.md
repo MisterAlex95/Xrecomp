@@ -38,7 +38,7 @@ How the job checks it: [toolchain.md « CI gating »](toolchain.md#ci-gating).
 **Fixed, not qemu after all (XBA-21):** `kernel_memory_bridge_posix` (2) and `memory_regressions` (4 of 5) crashed
 because the contiguous window at base + 2 GB was mapped at a fixed address outside the reserved span, and Linux had
 already put something there (top-down placement). The layout now holds the whole 4 GB guest window and carves every
-view out of it: `RECOMP_GUEST_WINDOW`, on by default on Android. The arm64 image sets it, because an app process
+view out of it: `RECOMP_GUEST_WINDOW`, on by default on Android (and on every 64-bit POSIX host since XBA-103). The arm64 image sets it, because an app process
 crowded with libraries is in the same situation as qemu-user.
 
 **Fixed, ours too (XBA-55):** `memory_layout_posix`, `recomp_selftest_no_simd` (its reinit check) and

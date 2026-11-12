@@ -21,8 +21,9 @@
  *   layout       xbox_MemoryLayoutInit on the synthetic XBE (tools/conformance,
  *                ours, no game content); the base is host-page aligned
  *   window       when the 4 GB guest window is held (RECOMP_GUEST_WINDOW, the
- *                Android default), /proc/self/maps covers all of it; on
- *                Android, not holding it (the 4 GB reservation refused) fails
+ *                default on 64-bit hosts), /proc/self/maps covers all of it;
+ *                on a 64-bit host, not holding it (the 4 GB reservation
+ *                refused) fails
  *   mirrors      a write and a read through each of the 28 RAM mirrors
  *                (memfd views), seen at the base, and the other way round
  *   tiled_alias  the same through the tiled aperture and the contiguous
@@ -39,6 +40,9 @@
  *   exec_guest   xbox_MmSetAddressProtect with PAGE_EXECUTE_READ and
  *                PAGE_EXECUTE_READWRITE on guest RAM (a memfd view) takes
  *                effect without PROT_EXEC
+ *   reserve      a 608 MB reservation (xbox_ReserveAlloc) served lazily from
+ *                the held window: writable at both ends, not an alias of low
+ *                RAM, released pages read as zero (XBA-103)
  *   save_dir     a file created, written, synced, read back and removed in
  *                the save directory
  *   reinit       shutdown, a second init and shutdown again: the title maps

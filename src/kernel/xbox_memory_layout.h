@@ -62,9 +62,10 @@ extern size_t g_xbox_total_ram;
  * addresses on a 26-bit bus -- so anything a title allocates above the mapped
  * range silently shares storage with low memory.
  *
- * Half-Life 2 needs this: its allocator sub-allocates past the top of RAM, and
- * at 64 MB its first commit past the boundary (0x04F80000) aliases the base of
- * the live heap (0x00F80000). A CUtlRBTree element array landed at 0x0CB80000,
+ * Half-Life 2 needed this (before the lazy reservations, below): its
+ * allocator sub-allocates past the top of RAM, and at 64 MB its first commit
+ * past the boundary (0x04F80000) aliases the base of the live heap
+ * (0x00F80000). A CUtlRBTree element array landed at 0x0CB80000,
  * aliasing 0x00B80000, and its links were overwritten between one insert and
  * the next search.
  *
@@ -74,14 +75,37 @@ extern size_t g_xbox_total_ram;
  * alone.
  *
  * Zero means "same as RAM", which is the existing behaviour for every title
- * that does not ask. Set before xbox_MemoryLayoutInit(). */
+ * that does not ask. Set before xbox_MemoryLayoutInit().
+ *
+ * No title needs it any more on a POSIX host (XBA-103): a reservation the
+ * heap cannot back is served lazily from the held guest window
+ * (xbox_ReserveAlloc), with no size picked in advance. It stays for Windows,
+ * which keeps the old path, and as the A/B against the lazy reservations. */
 extern size_t g_xbox_map_size;
 void xbox_SetMapSize(size_t bytes);
 
-/* Carve a pure address-space reservation from the mapped range above RAM.
- * Returns 0 if the mapping is no larger than RAM, or if it is exhausted.
- * See the implementation for why reservations must not come from the heap. */
+/* Carve a pure address-space reservation. With a mapping larger than RAM
+ * (xbox_SetMapSize) it comes from the mapped range above RAM first. Otherwise,
+ * or once that is exhausted, POSIX hosts take it lazily from the top of guest
+ * user space down: guest [0x7FFE0000 - n, 0x7FFE0000), 64 KB granules, above
+ * the RAM view (or the xbox_SetMapSize mapping), replacing the RAM mirrors
+ * there with zero-filled read-write pages the host backs only once touched
+ * (RECOMP_LAZY_RESERVE=0 turns that off). Returns 0 when neither path has
+ * room. See the implementation for why reservations must not come from the
+ * heap. */
 uint32_t xbox_ReserveAlloc(uint32_t size, uint32_t align);
+
+/* Whether [va, va + bytes) lies inside the lazy reservations handed out since
+ * the layout came up: mapped guest memory, though above the RAM view. */
+int xbox_ReserveHolds(uint32_t va, uint32_t bytes);
+
+/* NtFreeVirtualMemory for a lazy reservation: release (the whole reservation,
+ * va its base) or decommit [va, va + size) (size 0: to its end). The pages go
+ * back to the host and read as zero afterwards; the address is not handed out
+ * again. Returns 1 with the page-rounded range in *out_base / *out_size, 0 when
+ * va is not a live lazy reservation, -1 for a release not at its base. */
+int xbox_ReserveFree(uint32_t va, uint32_t size, int release,
+                     uint32_t *out_base, uint32_t *out_size);
 
 /* Bounds of the guest's executable sections, derived from the XBE at load.
  *
