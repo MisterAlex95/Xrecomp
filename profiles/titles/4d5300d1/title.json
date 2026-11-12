@@ -14,8 +14,7 @@
     "XBA_D3D_SW_METHODS": "0x7000"
   },
   "env_default": {
-    "RECOMP_GUEST_WINDOW": "1",
-    "RECOMP_THREAD_STACKS": "32"
+    "RECOMP_GUEST_WINDOW": "1"
   },
   "env_default_android": {
     "RECOMP_GPU_FPS_CAP": "30"

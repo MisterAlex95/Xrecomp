@@ -4594,26 +4594,47 @@ static uint32_t heap_carve_free(uint32_t size, uint32_t alignment)
 uint32_t xbox_HeapAlloc(uint32_t size, uint32_t alignment);
 
 #define XBOX_THREAD_STACK_SIZE  (512 * 1024)
-#define XBOX_MAX_THREAD_STACKS  8
 
-/* RECOMP_THREAD_STACKS=N raises the number of worker stacks alive at once.
- * Eight was enough for every title so far; Fable: The Lost Chapters has more
- * workers than that alive during its front-end load, and the ninth fell back
- * to running inline, where it blocked the caller on an event only the caller
- * would have signalled. Each stack costs 512 KB of guest heap, so the default
- * stays at 8 and a title that needs more asks. */
+/* How many worker stacks may be alive at once: as many as the guest heap
+ * holds (XBA-104). Each is a 512 KB slice of it, so the real cap is
+ * (XBOX_HEAP_TOP - XBOX_HEAP_BASE) less what the title has allocated: about
+ * 100 stacks in a retail 64 MB window if the title took nothing, far more in a
+ * larger mapped window.
+ *
+ * The pool used to stop at 8, and an exhausted pool was a deadlock, not an
+ * error: PsCreateSystemThreadEx ran the worker inline on its creator, and a
+ * worker that loops waiting for requests never returned to the creator that
+ * would have sent them (Fable's 12th loader worker). Running out of guest heap
+ * now fails the call with STATUS_INSUFFICIENT_RESOURCES, as the console does
+ * when it cannot allocate a kernel stack.
+ *
+ * RECOMP_THREAD_STACKS=N still caps the count, for A/B against the old
+ * limit (8); unset or 0 means no cap. */
 static int max_thread_stacks(void)
 {
-    static int n;
-    if (!n) {
+    static int n = -1;
+    if (n < 0) {
         const char *e = getenv("RECOMP_THREAD_STACKS");
         int v = e ? atoi(e) : 0;
-        n = v > 0 ? v : XBOX_MAX_THREAD_STACKS;
+        n = v > 0 ? v : 0;
     }
     return n;
 }
 
+/* Alive now and the most ever alive, under g_thread_stacks_lock: threads are
+ * created and exit on different host threads. */
 static int g_thread_stacks_used = 0;
+static int g_thread_stacks_high = 0;
+static SRWLOCK g_thread_stacks_lock = SRWLOCK_INIT;
+
+int xbox_ThreadStacksHighWater(void)
+{
+    int h;
+    AcquireSRWLockShared(&g_thread_stacks_lock);
+    h = g_thread_stacks_high;
+    ReleaseSRWLockShared(&g_thread_stacks_lock);
+    return h;
+}
 
 /* A TIB and TLS block for a newly spawned guest thread.
  *
@@ -4680,10 +4701,17 @@ uint32_t xbox_AllocThreadTib(void)
 uint32_t xbox_AllocThreadStack(void)
 {
     uint32_t base;
+    int cap = max_thread_stacks(), used, high = 0;
 
-    if (g_thread_stacks_used >= max_thread_stacks()) {
+    AcquireSRWLockExclusive(&g_thread_stacks_lock);
+    if (cap && g_thread_stacks_used >= cap) {
+        ReleaseSRWLockExclusive(&g_thread_stacks_lock);
+        fprintf(stderr, "  [MEM] guest thread stacks: %d alive, the"
+                        " RECOMP_THREAD_STACKS cap\n", cap);
         return 0;
     }
+    g_thread_stacks_used++;          /* reserved; undone below on failure */
+    ReleaseSRWLockExclusive(&g_thread_stacks_lock);
 
     /* From the heap, not from XBOX_STACK_BASE.
      *
@@ -4700,9 +4728,29 @@ uint32_t xbox_AllocThreadStack(void)
      * for small ones.
      */
     base = xbox_HeapAlloc(XBOX_THREAD_STACK_SIZE, 4096);
-    if (!base)
+    AcquireSRWLockExclusive(&g_thread_stacks_lock);
+    if (!base) {
+        used = --g_thread_stacks_used;
+    } else {
+        used = g_thread_stacks_used;
+        if (used > g_thread_stacks_high)
+            high = g_thread_stacks_high = used;
+    }
+    ReleaseSRWLockExclusive(&g_thread_stacks_lock);
+    if (!base) {
+        fprintf(stderr, "  [MEM] guest thread stacks: guest heap exhausted with"
+                        " %d alive (%u KB each)\n", used,
+                XBOX_THREAD_STACK_SIZE / 1024);
+        fflush(stderr);
         return 0;
-    g_thread_stacks_used++;
+    }
+    /* The high-water mark at 8 (the old fixed pool) and each doubling. */
+    if (high >= 8 && !(high & (high - 1))) {
+        fprintf(stderr, "  [MEM] guest thread stacks: high-water mark %d alive"
+                        " (%u KB of guest heap)\n", high,
+                (unsigned)high * (XBOX_THREAD_STACK_SIZE / 1024));
+        fflush(stderr);
+    }
 
     /* Top of the slice, 16-byte aligned, growing down. */
     return base + XBOX_THREAD_STACK_SIZE - 16;
@@ -4713,7 +4761,7 @@ uint32_t xbox_AllocThreadStack(void)
  * The counter used to only ever go up, so a title that creates and destroys
  * threads ran the pool dry no matter how few were alive at once. The Xbox
  * Dashboard spawns one worker per ambient WAV and terminates it before loading
- * the next; after XBOX_MAX_THREAD_STACKS files the pool was empty and
+ * the next; after 8 files (the old fixed pool) the pool was empty and
  * PsCreateSystemThreadEx fell back to running the worker inline. That fallback
  * is a deadlock here rather than a slowdown: the worker ran to completion
  * before the caller reached its wait, so the main thread then waited forever on
@@ -4727,8 +4775,10 @@ void xbox_FreeThreadStack(uint32_t stack_top)
     if (!stack_top)
         return;
     xbox_HeapFree(stack_top + 16 - XBOX_THREAD_STACK_SIZE);
+    AcquireSRWLockExclusive(&g_thread_stacks_lock);
     if (g_thread_stacks_used > 0)
         g_thread_stacks_used--;
+    ReleaseSRWLockExclusive(&g_thread_stacks_lock);
 }
 
 /* Page allocator over the contiguous window mapped at XBOX_CONTIG_BASE.

@@ -690,9 +690,13 @@ HANDLE xbox_GetMappingHandle(void);
 #endif
 
 
-/* Carve a simulated stack for a spawned thread. Returns the Xbox VA of the
- * stack top, or 0 when the pool is exhausted. */
+/* Carve a simulated stack (512 KB of guest heap) for a spawned thread.
+ * Returns the Xbox VA of the stack top, or 0 when the guest heap is exhausted
+ * or the optional RECOMP_THREAD_STACKS cap is reached. */
 uint32_t xbox_AllocThreadStack(void);
+
+/* The most worker stacks ever alive at once (logged at 8 and each doubling). */
+int xbox_ThreadStacksHighWater(void);
 
 /* A TIB and TLS block for a newly spawned guest thread, copied from the
  * template the loader built. Returns the new TIB's Xbox VA, or 0. */
@@ -702,8 +706,7 @@ uint32_t xbox_AllocThreadTib(void);
  * Return a worker's stack when the worker ends. Takes the value
  * xbox_AllocThreadStack returned. Without this the pool counts threads ever
  * created rather than threads alive, and a title that cycles workers exhausts
- * it -- after which PsCreateSystemThreadEx runs them inline, which deadlocks
- * any caller that then waits for the worker it thought it had spawned.
+ * the guest heap.
  */
 void xbox_FreeThreadStack(uint32_t stack_top);
 
