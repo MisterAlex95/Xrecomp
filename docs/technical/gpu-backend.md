@@ -5,8 +5,9 @@ renders on the CPU by default. In a 3D scene that is the frame-rate limit: on
 Fable in-world, 41 % of the executor's time goes to the vertex-program
 interpreter and 47 % to the rasteriser, on one thread. The GPU back end moves
 the per-pixel half (rasteriser, texturing, register combiners, depth, stencil,
-blending) to OpenGL. `RECOMP_GPU=1` selects it; the CPU rasteriser stays the
-default and is unchanged.
+blending) to OpenGL. `RECOMP_GPU=1` selects it; it is the default on Android
+(XBA-119, `RECOMP_GPU=0` keeps the CPU rasteriser), the CPU rasteriser stays
+the default on desktop and is unchanged.
 
 Stages: **7a** interface (done), **7b** GL back end with CPU-transformed
 vertices (done), **7c** vertex programs in GLSL (7c-lite done: programs in
@@ -27,6 +28,15 @@ presenting from the GPU. The last section lists what 7c–7e have to do.
 | `tests/nv2a_gl_shader` | 400 random combiner programs through the generated shaders, each pixel compared with `nv2a_rc_eval`. |
 | `tests/nv2a_gl_scale` | The internal resolution policy (0x121 / 0x2121 back buffer, swizzled and depth-only targets), the scale sticking to a scaled target's memory (Burnout 3's HUD clip and menu scissor, promotion, other pitch / swizzled), scissor rounding at 2.25, visibility count scaling, `RECOMP_GPU_SCALE_TARGETS` parsing. |
 | `tests/nv2a_gl_vsh` | 600 random vertex programs plus ILU/a0 edge cases through the translator (transform feedback), compared with `nv2a_vsh_interp.c`; eight deliberate translator mutations must be caught. |
+| `tests/nv2a_gl_backend` | The back end itself (nv2a_gl.c included) on a real context and a fake guest memory: guest CPU writes into targets (clean, dirty, host present, scaled 16-bit, swizzled, none), the scratch depth growing, an anti-aliased surface presented. `-cpu-writes-off` runs the same cases with `RECOMP_GPU_CPU_WRITES=0` and expects them wrong. |
+
+The GL tests are built twice on Linux: for desktop GL 3.3 core and, with
+`NV2A_GL_FORCE_ES=1` (nv2a_gl_api.h), for the GLES 3.0 path Android runs
+(GLSL ES header, GLES read formats, `GL_ANY_SAMPLES_PASSED`), through
+libepoxy on an EGL ES context; the `-es` entries run with Mesa held to GLES
+3.0 (`MESA_GLES_VERSION_OVERRIDE=3.0`). In a container Mesa's EGL finds no
+display: every GL test sets `EGL_PLATFORM=surfaceless`, so CI runs them on
+llvmpipe instead of skipping (before XBA-119 they all skipped there).
 
 One code path for desktop GL 3.3 core / macOS 4.1 core and GLES 3.0: the
 GLSL is the common subset of `#version 330 core` and `#version 300 es`, and
@@ -161,15 +171,38 @@ generation forcing it) the frame is read and mapped at its own flip.
   differs by at most 7/255, mean 1.8-2.4/255 -- the X1R5G5B5 rounding of the
   guest path, which host frames do not have.
 
+#### Present of an anti-aliased surface
+
+The SDL window reads a guest frame as 640 pixels a row of pitch / 640 bytes.
+A title that presents its anti-aliased back buffer as is (1280 samples a
+row: AA 2x1 or 2x2 of the 640x480 frame) cannot go through guest memory: a
+32-bit one was refused ("8 bytes a pixel"), a 16-bit 2x1 one read as 32-bit
+garbage, with either rasteriser. With a window, the GL back end hands such a
+surface (`nv2a_gl_present_needs_host`: pitch != 640 x bytes per pixel) over
+as a host frame whatever `RECOMP_GPU_PRESENT` says, resolved on the GPU
+first: when its format has an anti-aliasing mode and it is 1280 wide and/or
+960 high (`nv2a_gl_aa_factors`), a linear blit to half size along each
+doubled axis -- an exact box filter over the 2 or 4 samples -- into a
+texture of its own (`s_aa_tex`), read back at 640x480 times the internal
+scale. Fable's 0x2121 binding (640 real pixels) and Burnout 3's HUD clip are
+not touched. Headless runs and frame dumps keep the full surface in guest
+memory. The `[GPUGL] host present` line counts the resolved frames.
+
 Rejected for 7b: a command queue to a GL thread (one more copy of every
 batch, and the executor would have to wait for readbacks anyway); a context
 shared with the presenter (SDL's renderer owns its context, is Metal on
 macOS, and sharing with it is stage 7e's problem, not a prerequisite).
 
-`RECOMP_GPU=1` is read by `xbox_HostWindowMain` (fb_present_sdl.c) before the
+`RECOMP_GPU` is read by `xbox_HostWindowMain` (fb_present_sdl.c) before the
 guest starts, windowed or headless, which registers the back end; the
-executor must be on (`RECOMP_PB_EXEC`). If the context cannot be created the
-back end unregisters itself at its first call and the CPU rasteriser draws.
+executor must be on (`RECOMP_PB_EXEC`). Unset, it means the platform's
+default (`gpu_selected` in nv2a_gl.c): on for Android, off elsewhere. If the
+context cannot be created (no EGL display, no GLES 3.0 config, a context the
+driver refuses) the back end unregisters itself at its first call, logs
+`[GPUGL] no GL context: falling back to the CPU rasteriser`, and the CPU
+rasteriser draws; the executor does not call a back end again once it has
+unregistered inside a call (the raw-batch retry did, through NULL, before
+XBA-119).
 
 ## Internal resolution
 
@@ -564,6 +597,26 @@ guest memory (in the surface's own format and swizzle) by the rules under
 A target is dirty only after a batch or clear that writes colour (colour
 mask non-zero).
 
+**Guest CPU writes (XBA-119).** A title may write a GPU target's memory
+with the CPU: a movie decoded into the back buffer, a loading bar or text
+drawn into the frame, a surface filled with memset. Before, the target kept
+the GPU's pixels, its next read-back overwrote the CPU's bytes, and a host
+frame never showed them. Each target now keeps a copy of its guest bytes as
+they were when guest memory and the target last agreed (`snap`: the seed
+upload, a read-back -- which refreshes the copy of every target it overlaps
+-- or a merge). `rt_cpu_check` compares guest memory with it when the target
+is first bound or sampled directly in a frame, before every read-back, and
+for the presented target at every flip; the pixels that differ go into the
+GL texture run by run along each row (a scaled target through its resolve,
+the box around them blitted up nearest), every other pixel stays as the GPU
+drew it -- a bar drawn over a GPU frame keeps the frame around it. Past 4096
+runs the bounding box goes up whole. A memcmp per check when nothing
+changed (Fable's back buffer: 600 KB). The statistics line `[GPUGL] guest
+CPU writes into targets: N merged (K kpx)` appears when any were;
+`RECOMP_GPU_VERBOSE=1` logs each merge. `RECOMP_GPU_CPU_WRITES=0` turns it
+off. Not covered: a CPU write into a target that is then sampled through
+the texture cache (another format) while the target is clean.
+
 **Clear on bind (tilers).** A new target is not seeded from the guest
 bytes at creation but at its first draw or sample (`rt_seed`); a clear of
 every channel over the whole guest surface before that skips the upload.
@@ -871,9 +924,10 @@ taken at the same flip: `touch sig flag; sleep 0.4; rm flag`.
   face is the opposite of the title's, because guest rows map to GL rows
   unflipped. `RECOMP_GPU_CULL=0` turns it off.
 - Points and lines are not drawn, like the CPU rasteriser.
-- A guest CPU write into a surface after the GPU created its target is not
-  seen (FMV written straight into the framebuffer, a CPU-drawn loading bar):
-  nothing tracks those writes yet.
+- Guest CPU writes into a GPU target are seen when the target is next bound
+  or sampled (once a frame), read back or presented ("Guest CPU writes"
+  below); a write between two batches of the same frame on the same target
+  is merged at the next of those points, not at once.
 
 ## What is left
 
@@ -915,19 +969,21 @@ The original list (the interpreter was 41 % of the in-world executor):
 ### 7d: surfaces, readback, reports
 
 1. Done: render to texture without readback (above, "Render to texture").
-2. Guest CPU writes into surfaces: hash the surface's guest bytes against
-   the last readback before drawing into it, or write-protect the pages, and
-   re-upload when they changed.
+2. Done (XBA-119): guest CPU writes into surfaces ("Guest CPU writes"
+   below).
 3. Done: the presented surface only, asynchronously (above, "Present");
    none once 7e presents from the GPU.
 4. Done on the GPU: depth surfaces read as shadow maps (above). Left: a
    depth surface read as plain texels, or by the guest CPU (Z16/Z24
    read-back into guest memory), and shadow maps on the CPU path.
-5. Anti-aliased surfaces (2×1, 2×2): render at the real size as today;
-   resolve on present.
-6. Asynchronous visibility queries: answer `GET_REPORT` when the result is
-   ready instead of stalling the pipeline (D3D polls the report slot).
-7. `SET_CLEAR_RECT` for swizzled surfaces (clears use the clip rectangle).
+5. Done (XBA-119): anti-aliased surfaces (2×1, 2×2) render at the real
+   size; a presented one is resolved on the GPU into a host frame ("Present
+   of an anti-aliased surface" below).
+6. Done: asynchronous visibility queries (deferred reports, "Visibility
+   tests" above).
+7. Done (XBA-119): `SET_CLEAR_RECT` for swizzled surfaces (the executor
+   hands a back end the clear rectangle as the clip, as the CPU path clears
+   it).
 8. Mip chains (upload every level, GL mip filters), which the CPU path never
    had either.
 
@@ -983,19 +1039,79 @@ are "any sample passed" (1), enough for Fable's visibility tests.
 Settings: the launcher's Graphics section offers **Renderer** (Auto /
 Software / GPU, `RECOMP_GPU`) and **Frame cap (GPU renderer)** (Auto / 30 /
 60 / Off, `RECOMP_GPU_FPS_CAP`), written to `recomp.cfg`
-([app-shell.md](../android/app-shell.md#settings)). Auto is the title
-profile's choice: Fable's profile sets `RECOMP_GPU_FPS_CAP=30` on Android
-(`env_default_android` in `profiles/titles/4d5300d1/title.json`), since
-an Oakvale frame does not fit 16.7 ms on the Thor and a 60 cap lets the rate
-wander; it does not turn `RECOMP_GPU` on.
+([app-shell.md](../android/app-shell.md#settings)). Auto writes nothing:
+the runtime's Android default applies. Fable's profile sets
+`RECOMP_GPU_FPS_CAP=30` on Android (`env_default_android` in
+`profiles/titles/4d5300d1/title.json`), since an Oakvale frame does not fit
+16.7 ms on the Thor and a 60 cap lets the rate wander.
 
-Not default on Android yet. The in-world blockers are not in this back end's
-context code: 341 synchronous visibility queries and mid-frame readbacks per
-frame each end the render pass on a tiler (deferred reports, G2, is the gate),
-and about 115 MB/frame of `glBufferData` of CPU-transformed vertices (vertex
-programs in GLSL, G3). A title profile turns it on
-(`SETENV_DEFAULT("RECOMP_GPU", "1")`) once those are in and the device check
-below passes.
+**Default on Android (XBA-119).** With `RECOMP_GPU` unset the GL back end
+draws on Android (`gpu_selected`, `NV2A_GL_DEFAULT_ON`); the runtime then
+sets `RECOMP_GPU=1` so code that reads it later sees the choice. The CPU
+rasteriser draws instead when the launcher says Software (`RECOMP_GPU=0`,
+the A/B switch), when a title's pack forces `RECOMP_GPU=0` (`env_force`:
+a title profile's default comes too late for this choice, which is made
+before the guest thread runs `xba_title_configure`), or by itself when the
+context cannot be made (no EGL display, no GLES 3.0 config, a context the
+driver refuses, the base shader failing), logged. Desktop keeps the CPU
+rasteriser by default: the GL path there is a development tool, macOS
+presents through Metal, and the CPU path is what the compat runner's
+reference screenshots were taken with.
+
+The blockers the earlier note listed, checked against the code then:
+
+| Blocker | State |
+|---|---|
+| Synchronous visibility queries ending the render pass | Gone with deferred reports (G2, "Visibility tests"): no wait at `GET_REPORT`, a flush after 300 us and a wait after 2 ms only for a report the title spins on. `RECOMP_GPU_ZPASS=lazy` (never flush or wait from the idle hook) stays the candidate for a tiler, to measure on the device. |
+| Per-frame vertex uploads (115 MB/frame) | Vertex-program batches come from cached guest vertex buffers (G3, `RECOMP_GPU_VBO`, on by default; 0 KB a frame in Oakvale's steady state). Fixed-function and screen-space batches are still transformed on the CPU and uploaded per batch; the frame line now gives that figure (`KB transformed on the CPU`), to read on the device before moving them. |
+| CPU writes into a surface the GPU does not see | Done: "Guest CPU writes". |
+| Clear rectangles on swizzled surfaces | Done: the executor hands a back end `SET_CLEAR_RECT` on a swizzled surface. |
+| Anti-aliased surfaces without a resolve | Done: "Present of an anti-aliased surface"; drawing and sampling them already worked at their real size. |
+
+Found on the way: a depth re-creation (the scratch depth growing for a
+target bigger than 640x480) left another target's framebuffer bound, so the
+clear or batch that caused it went into that target (`depth_free`, fixed);
+and a back end that unregistered inside `draw_program` was called again
+through NULL by the raw-batch retry (fixed in the executor).
+
+### Device check, GPU by default (XBA-119), for Alex
+
+On the Thor with a fresh install of the APK built from this branch, Settings
+› Graphics › Renderer left on Auto (`recomp.cfg` without `RECOMP_GPU`).
+`[FBWIN] frame times` and `[GPU] ... fps` come from logcat (tag
+`xboxrecomp`); screenshots from the companion panel › Screenshot.
+
+1. Start Fable. logcat: `[GPUGL] GPU back end by default on this platform`,
+   the EGL context line, `Adreno (TM) 740 | OpenGL ES 3.2`, no `no GL
+   context`, `shader compile failed`, `link failed` or `GL error` line.
+2. Fable, CPU vs GPU, same spots: logos, intro movie, title screen, main
+   menu, the AutoSave screen, Oakvale after the first cutscene, the pause
+   menu. Take a screenshot at each with Renderer: Auto, then again with
+   Renderer: Software (the game restarts when the setting changes). Note
+   any spot where the GPU picture misses something the software one has.
+3. The same for Burnout 3 (logos, attract movie, menus, the loading screen
+   before a race, a race), Black (intro movie, menus, the first mission's
+   loading screen, in-game) and KOTOR (logos, the movie, character
+   creation, the Endar Spire): movies and loading screens/bars must show on
+   the GPU (they are the CPU writes XBA-119 merges); logcat `[GPUGL] guest
+   CPU writes into targets: N merged` tells whether a title does that.
+4. For each title, in-game, 60 s on GPU then 60 s on Software: the
+   `[FBWIN] frame times` lines (median and p95) and `[GPU] ... fps`; copy
+   the `[GPUGL] frame ...` line (draws, `KB transformed on the CPU`, uploads,
+   readbacks) and the `[GPU] visibility reports` line.
+5. Fable in Oakvale on GPU: repeat 4 with `RECOMP_GPU_ZPASS=lazy` added to
+   `recomp.cfg` by hand (adb): frame times against the default.
+6. Thermal: 10 minutes in-game in Fable on GPU, then 10 minutes on
+   Software, from the same starting temperature; `adb shell dumpsys
+   thermalservice | grep -i temperature` (or the Thor's overlay) and the
+   battery percentage before and after each.
+7. A title that presents an anti-aliased back buffer (if any of the four
+   does: logcat `[GPUGL] host present: ... N resolved from an anti-aliased
+   surface` with N > 0): the picture is whole and 4:3, not a quarter or
+   garbage.
+8. Renderer: Software: no `[GPUGL]` line at all, the game draws as before;
+   Settings shows Frame cap and Resolution dimmed. Back to Auto: not
+   dimmed.
 
 ### Device check (AYN Thor, Adreno 740), for Alex
 
