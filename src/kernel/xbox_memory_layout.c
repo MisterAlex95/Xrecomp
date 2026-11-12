@@ -15,6 +15,7 @@
 #if !defined(_WIN32) && !defined(_GNU_SOURCE)
 #define _GNU_SOURCE   /* glibc declares dladdr/Dl_info (RECOMP_WATCH) only under it */
 #endif
+#include "recomp_status.h"
 #include "xbox_memory_layout.h"
 #include "kernel.h"
 #include "guest_vmem.h"
@@ -3028,6 +3029,7 @@ static void xbox_heap_reset_base(void);
 BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
 {
     g_force_return = getenv("RECOMP_FORCE_RETURN") != NULL;
+    recomp_status_start();      /* RECOMP_STATUS: the headless run's status file */
     DWORD old_protect;
     const uint8_t *xbe = (const uint8_t *)xbe_data;
 

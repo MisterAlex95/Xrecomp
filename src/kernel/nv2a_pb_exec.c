@@ -36,6 +36,7 @@
 #include "kernel.h"   /* XBOX_CONTIG_BASE / XBOX_CONTIG_SIZE */
 #include "xbox_memory_layout.h"   /* xbox_Nv2aFrameCounterFlip */
 #include "nv2a_flip_hold.h"
+#include "recomp_status.h"   /* RECOMP_STATUS: frames for the compat runner */
 #include "platform/host_time.h"   /* xbox_HostNowNs */
 #ifdef XBOXRECOMP_LSFG
 #include "framegen/framegen_policy.h"   /* frame generation's cap rule */
@@ -5855,6 +5856,14 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
                 xbox_FramebufferWindowFrameTris(s_frame_tris);
                 s_frame_tris = 0;
             }
+            /* The compat runner's view of the frame (recomp_status.h). */
+            if (have && s_backend_present && ready.host_px)
+                recomp_status_frame(ready.host_px, ready.host_w, ready.host_h, ready.host_pitch, 4);
+            else if (have)
+                recomp_status_frame((const void *)((uintptr_t)ready.va + (uintptr_t)xbox_GetMemoryOffset()),
+                                    ready.w, ready.h, ready.pitch, ready.bpp);
+            else
+                recomp_status_frame(NULL, 0, 0, 0, 0);
             if (have && s_backend_present && ready.host_px) {
                 /* The back end's own pixels (an internal resolution above
                  * the guest's, or RECOMP_GPU_PRESENT=host): straight to the
