@@ -391,6 +391,31 @@ int main(int argc, char **argv)
                     check(sb == tib + 0x40 + 20 && slot0 == sb
                           && memcmp(mem + tib + 0x44, "ATA!", 4) == 0,
                           "fs:[4] sits above a copy of the TLS template", d);
+
+                    /* XBA-113: fs:[0x28] is the thread's KTHREAD. The main
+                     * one is the loader's, with the console's fields; a new
+                     * TIB names one of its own, sharing the main TlsData. */
+                    {
+                        uint32_t mkt, nkt, proc, mtls, ntls, mid, nid;
+                        char k[200];
+                        memcpy(&mkt, mem + XBOX_TIB_MAIN + 0x28, 4);
+                        memcpy(&nkt, mem + tib + 0x28, 4);
+                        memcpy(&proc, mem + mkt + 0x44, 4);
+                        memcpy(&mtls, mem + mkt + 0x28, 4);
+                        memcpy(&ntls, mem + nkt + 0x28, 4);
+                        memcpy(&mid, mem + mkt + 0x12C, 4);
+                        memcpy(&nid, mem + nkt + 0x12C, 4);
+                        snprintf(k, sizeof k, "main kt 0x%X type %u proc 0x%X base %u;"
+                                 " new kt 0x%X type %u tls 0x%X/0x%X id %u/%u",
+                                 mkt, mem[mkt], proc, proc ? mem[proc + 0x18] : 0,
+                                 nkt, mem[nkt], mtls, ntls, mid, nid);
+                        check(mkt && mem[mkt] == 6 && proc == xbox_GuestKprocess()
+                              && proc && mem[proc + 0x18] == 8 && mem[mkt + 0x32] == 8,
+                              "the main fs:[0x28] is a KTHREAD with the title's KPROCESS", k);
+                        check(nkt && nkt != mkt && mem[nkt] == 6 && ntls == mtls
+                              && nid && nid != mid,
+                              "a new TIB names its own KTHREAD, same TlsData, own id", k);
+                    }
                 }
                 xbox_MemoryLayoutShutdown();
             }

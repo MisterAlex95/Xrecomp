@@ -13,6 +13,7 @@ set(KERNEL_SOURCES
     kernel_missing.c
     kernel_thread.c
     kernel_sync.c
+    kernel_ksync.c
     kernel_hal.c
     kernel_guest_cpu.c
     kernel_xbox.c

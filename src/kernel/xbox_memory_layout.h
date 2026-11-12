@@ -528,6 +528,7 @@ extern RECOMP_TLS RecompCpu g_cpu;
 #define XBOX_REGION_MIN         0x00700000u
 #define XBOX_REGION_KDATA_OFF   0x00040000u  /* kernel data exports */
 #define XBOX_REGION_TLS_OFF     0x00060000u  /* fake TLS structure (fs:[0x28]) */
+#define XBOX_REGION_KPROC_OFF   0x00060800u  /* the title's KPROCESS (XBA-113) */
 #define XBOX_REGION_PRCB_OFF    0x00061000u  /* zeroed KPCR Prcb stand-in */
 #define XBOX_REGION_TLSBLK_OFF  0x00070000u  /* image TLS block */
 #define XBOX_REGION_STACK_OFF   0x00080000u  /* main stack */
@@ -695,8 +696,23 @@ HANDLE xbox_GetMappingHandle(void);
 uint32_t xbox_AllocThreadStack(void);
 
 /* A TIB and TLS block for a newly spawned guest thread, copied from the
- * template the loader built. Returns the new TIB's Xbox VA, or 0. */
+ * template the loader built. Returns the new TIB's Xbox VA, or 0. The TIB
+ * names a KTHREAD of its own at fs:[0x28] (XBA-113). */
 uint32_t xbox_AllocThreadTib(void);
+
+/* The console's KTHREAD/ETHREAD fields that XAPI and lifted code read, written
+ * into the object at `kt` (XBA-113): header and empty lists, StackBase/Limit,
+ * TlsData (+0x28), State, Priority/BasePriority 8, ApcState with its Process
+ * (the title's one KPROCESS, xbox_GuestKprocess), ETHREAD.ExitStatus
+ * STILL_ACTIVE and a fresh UniqueThread (+0x12C). Fields past 0x140 are left
+ * alone. */
+#define XBOX_KTHREAD_SIZE 0x140u
+void xbox_InitGuestKthread(uint32_t kt, uint32_t tls_data,
+                           uint32_t stack_base, uint32_t stack_limit);
+
+/* The guest KPROCESS every KTHREAD's ApcState.Process names; 0 before the
+ * loader built it. */
+uint32_t xbox_GuestKprocess(void);
 
 /**
  * Return a worker's stack when the worker ends. Takes the value

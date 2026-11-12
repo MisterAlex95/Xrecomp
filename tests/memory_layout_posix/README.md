@@ -64,6 +64,9 @@ last, the test patches a TLS directory into a copy of the synthetic image --
 only TLS images get a TIB per thread -- sets the main TIB's IRQL byte
 (`fs:[0x24]`) to 2 and expects 0 in the new one. A copied 2 had KOTOR's
 DirectSound stream thread running unlocked beside the main thread (K-8b).
+The same check asks that `fs:[0x28]` be a KTHREAD (XBA-113): the main one the
+loader's, with the title's KPROCESS behind ApcState.Process, and the new TIB's
+one of its own, with the main TlsData and its own UniqueThread.
 
 Deliberately not asserted: the tiled aperture at `0xF0000000`. That is a
 specific architectural alias the layout protects by sacrificing a wrap mirror,
