@@ -226,6 +226,11 @@
     <string name="PREPARE_FAILED_HEAD">Preparation failed</string>
     <string name="PREPARE_CANCELLED_HEAD">Preparation stopped</string>
     <string name="PREPARE_CANCELLED_TEXT">The preparation was cancelled. What was done is kept: Resume carries on from there.</string>
+    <string name="PREPARE_AGAIN">Prepare again</string>
+    <string name="HOME_CRASHED_FINDS">Crashed · new code found (%1$d)</string>
+    <string name="HOME_PREPARE_AGAIN_NOTE">The game crashed, and this run found code the last preparation missed. Prepare again takes it in, then starts the game.</string>
+    <string name="HOME_NEEDS_FIX">Crashed · needs a fix</string>
+    <string name="HOME_NEEDS_FIX_NOTE">The game crashed and preparing again cannot help: %1$s.</string>
     <string name="PREPARE_INTERRUPTED">The preparation was interrupted (the system closed it). What was done is kept: Prepare carries on from there.</string>
     <string name="PREPARE_HINT_KILLED">The system stopped the compiler twice (not enough memory, or Android\'s limit on background processes). Close other apps and retry.</string>
     <string name="PREPARE_HINT_NO_SPACE">Internal storage is full (%1$s free). Free some space, then retry: what was done is kept.</string>

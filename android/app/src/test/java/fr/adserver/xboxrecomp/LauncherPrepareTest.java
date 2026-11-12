@@ -271,4 +271,53 @@ public class LauncherPrepareTest {
         assertEquals(LauncherActivity.Screen.HOME, a.screenForTest());
         assertNull(shadowOf(a).getNextStartedActivity());
     }
+
+    /** XBA-74: the last run crashed (the system's exit record), with what discovered.jsonl gained since the Prepare. */
+    private void crashedRun(String discovered) throws Exception {
+        withToolchain();
+        TestSupport.writePack(app.getFilesDir(), TID, 64);
+        status(PrepareProtocol.DONE, "pack", 5, 100, -1, "", "");
+        File work = new File(new File(app.getFilesDir(), "work"), TID);
+        SelfHeal.prepareStarted(work);
+        GameStore.rememberLaunch(app, GameStore.defaultGameDir(app).getAbsolutePath(), "Sample Game", TID);
+        long now = System.currentTimeMillis();
+        SelfHeal.launched(work, now - 60_000);
+        if (!discovered.isEmpty())
+            TestSupport.write(SelfHeal.discoveryFile(work), discovered);
+        ActivityManager am = app.getSystemService(ActivityManager.class);
+        shadowOf(am).setProcesses(java.util.Collections.emptyList());   // no game process now
+        shadowOf(am).addApplicationExitInfo(
+                org.robolectric.shadows.ShadowActivityManager.ApplicationExitInfoBuilder.newBuilder()
+                        .setProcessName(app.getPackageName())
+                        .setReason(android.app.ApplicationExitInfo.REASON_CRASH_NATIVE)
+                        .setTimestamp(now - 1000)
+                        .build());
+    }
+
+    @Test
+    public void crashWithNewCodeOffersPrepareAgain() throws Exception {
+        crashedRun("{\"t\":\"run\"}\n{\"t\":\"icall\",\"va\":\"0x0012ABCD\",\"ret\":\"0x00123456\"}\n");
+        LauncherActivity a = launch("7-prepare-again");
+        assertEquals(LauncherActivity.Screen.HOME, a.screenForTest());
+        assertEquals(app.getString(R.string.PREPARE_AGAIN), a.homePrimaryForTest().title);
+        assertEquals(app.getString(R.string.HOME_PREPARE_AGAIN_NOTE), a.noteForTest());
+
+        a.dispatchKeyEvent(new KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_BUTTON_START));
+        a.dispatchKeyEvent(new KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_BUTTON_START));
+        Intent started = shadowOf(app).getNextStartedService();
+        assertNotNull("PrepareService started", started);
+        assertEquals(PrepareService.ACTION_START, started.getAction());
+        SelfHeal.State s = SelfHeal.read(new File(new File(app.getFilesDir(), "work"), TID));
+        assertEquals(1, s.rounds);
+        assertTrue("the game starts again when the Prepare is done", s.relaunch);
+        assertEquals(SelfHeal.Offer.NONE, s.offer);
+    }
+
+    @Test
+    public void crashWithNothingNewNeedsAFix() throws Exception {
+        crashedRun("{\"t\":\"run\"}\n{\"t\":\"unimpl\",\"va\":\"0x00012345\",\"insn\":\"bsf eax, ecx\"}\n");
+        LauncherActivity a = launch("8-needs-fix");
+        assertEquals(app.getString(R.string.PLAY), a.homePrimaryForTest().title);
+        assertTrue(a.noteForTest(), a.noteForTest().contains("bsf eax, ecx at 0x00012345"));
+    }
 }
