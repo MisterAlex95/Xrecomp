@@ -64,6 +64,10 @@ bash macos/scripts/build-app.sh      # macos/build/XRecomp.app, ad-hoc signed
   found). With `--prepare` it runs the app's own prepare path (`PrepareRunner`, then `--check`) on every title found:
   the end-to-end test. A full desktop build of the synthetic `tools/conformance/test.xbe` does not link on macOS
   (`_xbe_entry_point`), so that one is tested with `--no-build`.
+- **`XRecomp --smoke --play TID [--seconds N]`** starts a prepared title the way Play does (its `recomp.cfg`, Default
+  settings, save folder, run log) and stops it after N seconds (TERM, then KILL, by PID). The environment is
+  inherited, so a scripted run can add `RECOMP_HEADLESS=1 SDL_AUDIODRIVER=dummy RECOMP_STATUS=<file>` from the shell;
+  the app itself never sets them.
 - **`XRecomp --demo [screen]`** shows every screen from mock data, without a toolkit: `library`, `home`,
   `preparing`, `failed`, `running`, `settings`, `controls`, `manage`, `log`, `setup`, `about`. The titles are
   invented and their art is drawn in code. In demo mode (or with `XRECOMP_PRINT_WINDOW=1`) the app prints

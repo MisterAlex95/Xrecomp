@@ -63,6 +63,9 @@ enum Smoke {
     }
 
     static func run(_ args: [String]) -> Int32 {
+        if let tid = values(args, "--play").last {
+            return play(tid, seconds: Double(values(args, "--seconds").last ?? "20") ?? 20)
+        }
         let paths = AppPaths.standard()
         var settings = Settings.load(from: paths.settingsFile)
         if let t = values(args, "--toolkit").last { settings.toolkitPath = t }
@@ -99,6 +102,50 @@ enum Smoke {
         let data = try! JSONEncoder.pretty.encode(report2)
         print(String(decoding: data, as: UTF8.self))
         return tk == nil ? 2 : (report2.prepared?.contains { !$0.outcome.hasPrefix("ok") } == true ? 1 : 0)
+    }
+
+    /// `XRecomp --smoke --play TID [--seconds N]`: the app's launch path without a window of the launcher: the
+    /// title's prepared executable with its recomp.cfg, Default settings and save folder (GameRunner), stopped after
+    /// N seconds with TERM then KILL by PID. Prints the exit and the run log. The environment is inherited, so a
+    /// test run can add RECOMP_HEADLESS=1 / SDL_AUDIODRIVER=dummy from the shell; the app never sets them.
+    static func play(_ tid: String, seconds: Double) -> Int32 {
+        let base = AppPaths.standard()
+        let settings = Settings.load(from: base.settingsFile)
+        let t = settings.paths(base: base).title(tid)
+        guard let exe = TitleState.projectExe(work: t.work) else {
+            print("{\"error\": \"\(tid) has no built executable in \(t.work.path)\"}")
+            return 1
+        }
+        let defaults = RecompConfig.load(dir: base.root.appendingPathComponent("defaults")).activePairs
+            .reduce(into: [String: String]()) { $0[$1.key] = $1.value }
+        let req = GameRunner.Request.forTitle(exe: exe, title: t, config: RecompConfig.load(dir: t.recompCfgDir),
+                                              globalDefaults: defaults, logs: RunLog(dir: t.logs))
+        try? FileManager.default.ensureDirectory(t.save)
+        final class Box: @unchecked Sendable { var exit: (ChildExit, Bool, Double)?; var lines = 0 }
+        let box = Box()
+        let g = GameRunner(req) { e in
+            switch e {
+            case .line: box.lines += 1
+            case .exited(let x, let u, let s): box.exit = (x, u, s)
+            }
+        }
+        do { try g.start() } catch {
+            print("{\"error\": \"\(error)\"}")
+            return 1
+        }
+        let selfExit = g.wait(timeout: seconds)
+        if selfExit == nil { g.stop() }
+        _ = g.wait(timeout: 8)
+        Thread.sleep(forTimeInterval: 0.3)
+        let e = box.exit
+        let out: [String: Any] = [
+            "exe": exe.path, "pid": Int(g.pid ?? 0), "ran_seconds": e?.2 ?? -1, "stopped_by_launcher": selfExit == nil,
+            "exit": e?.0.description ?? "still running", "output_lines": box.lines, "log": req.log?.path ?? "",
+            "problem": e.flatMap { GameRunner.exitProblem($0.0, stoppedByUser: $0.1) } ?? NSNull(),
+        ]
+        let data = try! JSONSerialization.data(withJSONObject: out, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
+        print(String(decoding: data, as: UTF8.self))
+        return e == nil ? 1 : 0
     }
 
     final class Collect: @unchecked Sendable {
