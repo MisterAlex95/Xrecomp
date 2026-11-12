@@ -63,6 +63,8 @@ prepare puts `.old` back if a kill fell between the two renames. So a reader see
 | `built_at` | string | ISO 8601, UTC (`Z`). |
 | `env_force` | object | Optional; only when the title profile declares it. `title.json`'s `"env_force"`, checked and copied: `RECOMP_[A-Z0-9_]+` names to strings (printable ASCII), 16 at most. The loader sets each one over `recomp.cfg` before the dlopen (log `[TITLE] <TID> forces KEY=VALUE (title profile)`); the launcher shows a forced `RECOMP_LSFG=0` on the frame generation row. Not a validity check: a pack without it, or with entries the loader refuses, still loads. See [Forced by a title](../runtime/environment-variables.md#forced-by-a-title). |
 
+| `images` | object | Optional (XBA-82): the disc's other images that `default.xbe` names, prepared from the game folder (one sub-run each in `<work>/images/<path>/`, shown inside step 4 as « game.xbe: ... », at most 8), disc path to library: `{"game.xbe": "libimage-1.so"}`. An image whose analysis or compile fails is left out (« left out » line): default.xbe still runs. Shells from before ignore it. See [multi-xbe.md](../technical/multi-xbe.md#android). |
+
 Readers ignore fields they do not know. `tools/prepare/pack.py` (`read`, `check`) is the reference for the checks.
 
 ### What a pack exports
