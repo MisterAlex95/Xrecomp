@@ -84,6 +84,7 @@ static GLuint s_vao, s_vbo, s_vs;
 static struct {
     uint32_t draws, tris, clears, uploads, upload_kb, readbacks, compiles, hashes_kb;
     uint32_t vsh_draws, vsh_kb;     /* vertex-program batches, their upload */
+    uint32_t ffp_kb;                /* CPU-transformed vertices uploaded (gl_draw) */
     uint32_t rt_creates, relayouts, rt_direct, rt_copies, rt_grows, shadow_binds;
     uint32_t seeds, seeds_skipped, invalidates;
     uint32_t bump_draws;            /* batches with a bump-env stage */
@@ -3318,6 +3319,7 @@ static void gl_draw(const Nv2aSurface *s, const Nv2aBatch *b)
     sh_array_buffer(s_vbo);
     glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)b->count * (GLsizeiptr)sizeof(Nv2aVertexFull),
                  b->full, GL_STREAM_DRAW);
+    s_st.ffp_kb += (uint32_t)(((size_t)b->count * sizeof(Nv2aVertexFull) + 1023) / 1024);
     if (rs->zpass_enable && s_qcount < NV_GL_MAX_QUERY) {
         GlQuery *q = &s_qring[(s_qhead + s_qcount) & (NV_GL_MAX_QUERY - 1)];
         q->q = query_new();
@@ -4400,15 +4402,15 @@ static void gl_flip(void)
             nrt += s_rt[i].tex != 0;
         for (i = 0; i < NV_GL_MAX_PROG; i++)
             nprog += s_prog[i].prog != 0;
-        fprintf(stderr, "  [GPUGL] frame %u: %u draws (%u vertex programs, %u KB),"
-                        " %u tris, %u clears, %u readbacks,"
+        fprintf(stderr, "  [GPUGL] frame %u: %u draws (%u vertex programs, %u KB;"
+                        " %u KB transformed on the CPU), %u tris, %u clears, %u readbacks,"
                         " targets: %u created, %u relayouts, %u grown, %u sampled directly"
                         " (%u copies), %u shadow maps, %u bump-env, %u seeded, %u seeds skipped, %u invalidates,"
                         " %u uploads (%u KB), %u KB hashed, %d textures,"
                         " %d targets, %d programs (%u compiled, %u from cache;"
                         " run %u/%u),"
                         " %.1f target switches/frame\n",
-                s_frame, s_st.draws, s_st.vsh_draws, s_st.vsh_kb, s_st.tris,
+                s_frame, s_st.draws, s_st.vsh_draws, s_st.vsh_kb, s_st.ffp_kb, s_st.tris,
                 s_st.clears, s_st.readbacks, s_st.rt_creates, s_st.relayouts, s_st.rt_grows,
                 s_st.rt_direct, s_st.rt_copies, s_st.shadow_binds, s_st.bump_draws, s_st.seeds,
                 s_st.seeds_skipped, s_st.invalidates,
