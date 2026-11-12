@@ -20,6 +20,7 @@ An Android arm64 fork of <a href="https://github.com/sp00nznet/xboxrecomp">xboxr
 | Get the APK | release [xrecomp-latest](https://git.cf.adserver.fr/Alex/xboxrecomp-android/releases/tag/xrecomp-latest) (`xrecomp-<commit>.apk`, built by CI from `main`, with Prepare), arm64-v8a, Android 11+, OpenGL ES 3.0. Each build updates the previous one in place; the first install over an older debug build needs an uninstall: [Signing](docs/android/toolchain.md#signing) |
 | The app | [docs/android/app-shell.md](docs/android/app-shell.md): launcher, packs, dual screen, device check lists |
 | Prepare on the device | [docs/android/prepare.md](docs/android/prepare.md), [docs/android/toolchain.md](docs/android/toolchain.md) |
+| On a Mac | [docs/macos/launcher.md](docs/macos/launcher.md): the XRecomp launcher app (`macos/`), library, prepare, play |
 | The fork | [docs/android/README.md](docs/android/README.md): branches, following upstream, CI |
 | Contributing, security | [CONTRIBUTING.md](CONTRIBUTING.md) (« This fork » first), [SECURITY.md](SECURITY.md) |
 | Licences | MIT ([LICENSE](LICENSE)), third-party parts in [NOTICE](NOTICE) and [LICENSES/](LICENSES/); the app shows them under About › Licences |

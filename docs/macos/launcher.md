@@ -1,5 +1,209 @@
 # macOS launcher
 
+XRecomp for the Mac: a native SwiftUI app in [`macos/`](../../macos/) that lists the games in your library, prepares
+them with the desktop pipeline (`python -m tools.prepare`) and starts the built title, with per-title settings, saves
+and storage. It is a front end to the toolkit, not a copy of it: the app drives the checkout it sits in.
+
+- **Build**: `bash macos/scripts/build-app.sh`, then open `macos/build/XRecomp.app` (Finder or `open`).
+- **Checks**: `bash macos/scripts/check.sh` (build, `xrecomp-check`, a smoke run). Command Line Tools are enough; no
+  Xcode project.
+- **Look without a toolkit**: `swift run --package-path macos XRecomp --demo [screen]`.
+- **Mac checklist** for a real test: [at the end](#mac-checklist).
+
+## Contents
+
+- [Features](#features)
+- [Building and checking](#building-and-checking)
+- [Layout of the code](#layout-of-the-code)
+- [Toolkit, Python and PATH](#toolkit-python-and-path)
+- [Storage](#storage)
+- [Prepare, play, stop](#prepare-play-stop)
+- [Per-title settings](#per-title-settings)
+- [Look](#look)
+- [Licence, legal, CI](#licence-legal-ci)
+- [Prepare interface](#prepare-interface)
+- [Mac checklist](#mac-checklist)
+
+## Features
+
+The Android launcher's screens ([app-shell.md](../android/app-shell.md)), as a Mac window: a sidebar (Library, the
+games, Setup, Default settings, About) and the detail pane.
+
+| Screen | What it does |
+|---|---|
+| Library | A grid of cards: the title image (decoded from the game's own `default.xbe`) or a monogram, the name, one status line with a dot. Right-click: Settings, Manage, Show source in Finder. Drop an `.iso` or a game folder on the window, or use **Add game…**: its folder joins the library. |
+| Home | The blurred title image behind, the title, one status line, a solid **Play** / **Prepare** / **Stop** and three quiet pills: Settings, Controls, Manage. Below: the prepare's progress or failure, a run's problem and log tail, the facts (title ID, source, size, play time, options the title forces). |
+| Preparing | Step *i* of 5 with its name, the overall bar, five step dots, the step's message (`compiling 12/345`), elapsed time, Show log. One prepare at a time, the others queued ("Queued (2)"). Cancel stops the whole process group; the next Prepare resumes. |
+| Prepare failed | The error code in words, prepare's message, the last 40 lines of `prepare.log`, Reveal log in Finder, Copy log. |
+| Settings | Per title, four tabs (General, Graphics, Audio, Advanced) over the [option table](#per-title-settings), saved to the title's `recomp.cfg` at once; Advanced has a free editor for your own lines. **Default settings** (sidebar) is the same for every title. |
+| Controls | The pad mapping the game gets (L1 = Black, R1 = White, View = Back) and the connected controller's name (GameController). |
+| Manage | Per title: the size of the work folder, the extracted disc, saves, the Z: cache, logs and the title image, each deletable after a confirmation and revealable in Finder; "Re-prepare…" (`--force`); "Import saves from command-line runs". |
+| Log | The live output of the running game (or prepare), copyable; run logs are kept in `logs/`. |
+| Setup | The toolkit found (and from where), every dependency with the command that installs it, the Python environment (with **Create it**), the library folders, the work folder location. Shown first when the toolkit is not found. |
+| About | Version, the toolkit's commit, "No game data included", the licence texts read from the toolkit (`LICENSE`, `NOTICE`, `LICENSES/*.txt`). |
+
+Not in v1: the in-game menu, dual screen and the companion (the game is a separate SDL window; the launcher has
+Stop), frame generation, gamepad navigation of the launcher itself, live fps.
+
+## Building and checking
+
+```
+bash macos/scripts/check.sh          # swift build, swift run xrecomp-check, XRecomp --smoke on a temp library
+bash macos/scripts/build-app.sh      # macos/build/XRecomp.app, ad-hoc signed
+```
+
+- **No Xcode.** The package builds with the Command Line Tools (Swift 6.x). XCTest and swift-testing are not
+  available there, so the checks are an executable, `xrecomp-check`, with a small assert harness
+  (`Sources/xrecomp-check/Harness.swift`); `swift run xrecomp-check [filter]` runs the checks whose name contains
+  the filter. They build all their inputs (XBE headers, XPR0 textures, fake prepare scripts, `/bin/sh` games) in a
+  temporary folder: no game file is ever read.
+- **No `@State`.** In the Command Line Tools' SDK SwiftUI's `@State` is a macro whose plugin ships only with Xcode;
+  the views use `@Local` (`Sources/XRecomp/Local.swift`), a property wrapper over `@StateObject` with the same use.
+- **`XRecomp --smoke [--toolkit DIR] [--library DIR]... [--prepare [--no-build]]`** handles itself before the app
+  starts: it resolves the toolkit and Python, scans, prints the library as JSON and exits (0 when the toolkit was
+  found). With `--prepare` it runs the app's own prepare path (`PrepareRunner`, then `--check`) on every title found:
+  the end-to-end test. A full desktop build of the synthetic `tools/conformance/test.xbe` does not link on macOS
+  (`_xbe_entry_point`), so that one is tested with `--no-build`.
+- **`XRecomp --demo [screen]`** shows every screen from mock data, without a toolkit: `library`, `home`,
+  `preparing`, `failed`, `running`, `settings`, `controls`, `manage`, `log`, `setup`, `about`. The titles are
+  invented and their art is drawn in code. In demo mode (or with `XRECOMP_PRINT_WINDOW=1`) the app prints
+  `XRECOMP_WINDOW <id>` for `screencapture -l <id>`.
+- **`XRECOMP_HOME=DIR`** moves the whole Application Support tree (tests, a second library).
+- **Packaging**: `build-app.sh` runs `swift build -c release`, writes `Contents/Info.plist` from `macos/Info.plist.in`
+  (bundle id `fr.adserver.xboxrecomp.mac`, macOS 14, `XBAToolkitPath` = this checkout), renders `AppIcon.icns` from
+  [`docs/images/xrecomp-icon.svg`](../images/xrecomp-icon.svg) (`scripts/mkicon.swift` + `iconutil`) and signs ad hoc
+  (`codesign -s -`). Built and run on the same Mac it needs no Developer ID or notarization. The app is not
+  sandboxed: it spawns compilers and reads your folders.
+
+## Layout of the code
+
+```
+macos/
+  Package.swift              swift-tools 5.9, macOS 14; no third-party packages
+  Sources/XRecompCore/       all logic, Foundation (+ CoreGraphics/ImageIO for art), no SwiftUI
+    Paths Settings Toolkit PythonEnv ChildEnvironment DependencyCheck      setup
+    PrepareProtocol PrepareRunner ProcessGroup TitleState                  prepare
+    LibraryScanner LibraryIndex XbeInfo TitleArt Xpr Dxt Accent            library and art
+    GameRunner RecompConfig OptionTable Storage PlayTime SaveImport        play and storage
+  Sources/XRecomp/           the SwiftUI app: main (--smoke/--demo), XRecompApp, AppStore, LauncherModel, views
+  Sources/xrecomp-check/     the checks
+  scripts/                   check.sh, build-app.sh, mkicon.swift
+  Info.plist.in
+```
+
+The views see a `LauncherModel` (published state) and call a `LauncherActions` protocol; `AppStore` implements it
+with Core, `PreviewStore` (`--demo`) with mock data. Swift ports of our own Java: `RecompConfig` (RecompConfig.java),
+`TitleArt`/`Xpr`/`Dxt` (TitleArt.java), `PrepareProtocol` (PrepareProtocol.java and `tools/prepare/progress.py`); their
+checks reuse the Java tests' cases, so change both sides together.
+
+## Toolkit, Python and PATH
+
+- **The toolkit is the checkout, side by side, not bundled**: prepare needs the whole tree (tools, templates,
+  profiles, `src/`) and stamps titles with `git rev-parse HEAD`. It is found, in order, from the Setup choice,
+  `$XBA_TOOLKIT`, the `XBAToolkitPath` that `build-app.sh` wrote into `Info.plist`, then the folders above the
+  executable. A folder counts when it holds `tools/prepare/__main__.py` and `templates/new-game/`.
+- **Python**: the Setup choice, else `<toolkit>/.venv/bin/python3` (`tools/macos/setup.sh` makes one with Python 3.10
+  or later), else the app's own venv in Application Support, the first that imports `capstone`, `pefile` and
+  `numpy`. Setup's **Create it** makes that venv from the first Python 3.10+ found (Homebrew's `python3.1x` first;
+  macOS's `/usr/bin/python3` is 3.9) and pip-installs the three packages.
+- **PATH**: an app opened from Finder gets launchd's PATH, without Homebrew. Every child (prepare, the checks, the
+  game) gets `/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin` first, then the
+  inherited entries; otherwise prepare fails at `cmake` only when started from Finder.
+- **Dependencies** (Setup): CMake, Ninja (optional), Clang, Git, `pkg-config` finding `sdl2` (Homebrew's `sdl2-compat`
+  is fine) and `epoxy`, and the Python packages. Each missing item shows its command; the app never runs `brew`.
+
+## Storage
+
+Everything the app writes is under `~/Library/Application Support/xboxrecomp/` (`$XRECOMP_HOME`):
+
+```
+settings.json           toolkit path, library folders, work root, Python, global defaults
+library.json            scan cache: source path, size, mtime -> title ID, name, default.xbe
+scan/                   default.xbe files identify pulled out of disc images (for their art)
+venv/                   only when the toolkit has no usable .venv
+defaults/recomp.cfg     Default settings
+titles/<TID>/
+  work/                 prepare --work: analysis, project, build, stamp.json, discovered.jsonl, prepare.log,
+                        launcher-prepare.log (prepare's stdout as the app saw it); game/ = the extracted disc
+  recomp.cfg            the title's settings (the Android file format)
+  save/                 RECOMP_SAVE_DIR: UDATA/<TID>, TDATA/<TID>, Cache/<TID> (Z:)
+  art.png               the decoded title image
+  logs/run-*.log        the last 10 runs
+  state.json            source path, last played, play time, runs, last prepare result
+```
+
+- **Work folders can move** (Setup › Work folders) to another disk: an ISO source is extracted into `work/game`,
+  several GB per title. A folder source is only linked (`project/build/game` points at your folder).
+- **Deletes never follow a symbolic link**: deleting a work folder removes the link to your game folder, never the
+  folder. Your ISOs and folders are only read.
+- **Saves are per title** (`RECOMP_SAVE_DIR`), so "Delete saves" is one folder. The partition images and the GL
+  shader cache stay in the runtime's default save dir (`~/.local/share/xboxrecomp`). Saves made by command-line runs
+  live there too (`UDATA/<TID>`): Manage › Import copies them in once, overwriting nothing.
+
+## Prepare, play, stop
+
+- **Scan**: every library folder (default `~/Documents/xbox`), 3 levels deep, by content: a folder holding
+  `default.xbe` (any case) or an `.iso`/`.xiso`. Images are identified with `python -m tools.prepare.identify`
+  (cached in `library.json` by path, size and mtime); folders are read in Swift. A partial ISO (still being copied)
+  is listed as "Not readable yet" and retried at the next scan. One entry per title ID: the first found wins, the
+  others are listed under "Also at".
+- **State**: `prepare --check --json` per title after each scan, prepare and run: Needs preparing (absent), Ready,
+  Prepare again (stale: toolkit updated, profile changed, improvements found while playing, ...), or an error. A
+  stale title can still be played.
+- **Prepare**: `python -u -m tools.prepare SOURCE --work titles/<TID>/work --progress` from the toolkit, in its own
+  process group; the [Prepare interface](#prepare-interface) lines drive the screen. Before a first prepare the free
+  space is checked against an estimate (the image's size + 2 GB). **Cancel**: SIGTERM to the group, SIGKILL after
+  5 s.
+- **Play**: `work/project/build/<name>` (from `XBA_RESULT ok exe=` or `--check`), cwd its build folder, with the
+  environment: the fixed PATH, then Default settings, then the title's `recomp.cfg` lines (first line for a key
+  wins), then `RECOMP_SAVE_DIR`. The desktop `main.c` does not read `recomp.cfg`; the app passes it as environment.
+  Output goes to `logs/run-<time>.log` and the Log screen. One game at a time.
+- **Stop**: SIGTERM by PID, SIGKILL after 5 s, never by name. A non-zero exit or a signal shows "Stopped unexpectedly
+  (signal N)" with the log's tail. Quitting the app stops a running game and prepare.
+
+## Per-title settings
+
+`recomp.cfg`, as on Android: one `KEY=VALUE` per line, `#` comments, the first line for a key wins; the Settings rows
+rewrite their key's first line in place, a default value removes the line, and lines you wrote yourself stay
+(Advanced edits them; Reset to defaults keeps them).
+
+| Tab | Option | Key | Choices |
+|---|---|---|---|
+| General | Language | `RECOMP_LANGUAGE` | System (the Mac's, when the disc has it), en, fr, de, es, it, pt, ja, ko, zh |
+| General | Window | `RECOMP_FULLSCREEN` | Window, Fullscreen |
+| General | Window size | `RECOMP_WINDOW_SCALE` | 2x (default), 1x, 3x, 4x |
+| Graphics | Renderer | `RECOMP_GPU` | CPU (default), GPU (OpenGL 4.1, opt-in) |
+| Graphics | Frame cap | `RECOMP_GPU_FPS_CAP` | Auto (60), 30, 60, Off; GPU only |
+| Graphics | Internal resolution | `RECOMP_GPU_SCALE` | 1x, 2x, 3x, Fit; GPU only |
+| Graphics | Aspect ratio | `RECOMP_ASPECT` | Auto, 4:3, 16:9 |
+| Graphics | VSync | `RECOMP_PRESENT_VSYNC` | On, Off |
+| Graphics | Texture filtering | `RECOMP_TEX_BILINEAR`, `RECOMP_TEX_ANISO` | Sharp, Smooth, Anisotropic 8x / 16x |
+| Audio | 3D audio (HRTF) | `RECOMP_APU_HRTF` | On, Off |
+| Audio | Audio buffer | `RECOMP_AUDIO_BUF_SAMPLES` | Short, Normal, Long, Longest |
+| Advanced | Raster threads | `RECOMP_RASTER_THREADS` | Auto, 1, 2, 4, 6, 8 |
+
+Options a title's profile forces (`env_force`, compiled into the binary, they win) show "Set by the title" and are
+locked. Frame generation, `RECOMP_BIG_CORES` and the Android shell switches are left out. Every key:
+[environment-variables.md](../runtime/environment-variables.md).
+
+## Look
+
+The Android launcher's stock theme (`GamePalette.STOCK`, ours): background `#0C110F` to `#060807`, accent `#4FE38C`,
+text `#F3EEE4`, dim `#A9AFA6`, warn `#F2BA52`, error `#FF6F61`; dark only, the system font, an 8-pt grid, capsule
+buttons (a solid Play, quiet pills), rounded glass panels, the standard Mac window and sidebar. Each game gets an
+accent from its title image (the dominant hue, lightened until the Play label keeps 4.5:1 and kept away from the
+error red); `xrecomp-check` holds the tokens equal to the Java array and checks the contrast pairs. The full OKLCH
+`GamePalette` port is later work.
+
+## Licence, legal, CI
+
+- The Swift code is MIT like the repo; there are no third-party Swift packages and nothing is bundled, so `NOTICE`
+  and `LICENSES/` are unchanged. The only asset is the app icon, original art.
+- Title images, extracted XBEs and discs, generated C and logs stay in Application Support; nothing of a game enters
+  the repo or the app. The checks use synthetic bytes and `tools/conformance/test.xbe` (ours).
+- Linux CI is unaffected: `macos/` is not referenced by the root `CMakeLists.txt` and holds no Python. There is no
+  macOS runner; `check.sh` is the local gate.
+
 ## Prepare interface
 
 The launcher drives the desktop prepare through three machine-readable entry points. They are the contract between
@@ -137,3 +341,28 @@ XBA_PROGRESS step=5/5 id=build pct=13 msg=compiling 10/104
 XBA_PROGRESS step=5/5 id=build pct=100 msg=ready
 XBA_RESULT ok exe=/tmp/w/project/build/title_12345678
 ```
+
+## Mac checklist
+
+For Alex, on the Mac (agents cannot click through Finder):
+
+1. `bash macos/scripts/check.sh`. Expected: build OK, all checks pass, the smoke run prints JSON with title ID
+   `12345678` and "all green".
+2. `bash macos/scripts/build-app.sh`, then open `macos/build/XRecomp.app` **from Finder**, not from Terminal.
+3. Setup: the toolkit is found by itself ("Found from the app (build-app.sh)"). Every dependency is green, or shows
+   the exact command for what is missing. If no Python with the packages exists yet, press **Create it** (or run
+   `tools/macos/setup.sh`), then Check again.
+4. Library shows the games in `~/Documents/xbox` with names and title images (Black, Fable, Burnout 3, KOTOR). Add
+   `~/Downloads/xboxrecomp/titles` in Setup: no second card for a title already there (the other copy is under
+   "Also at" on Home).
+5. Prepare Burnout 3. The step and percent advance, also during the build ("compiling i/n"). Press Cancel once
+   mid-build, then Prepare again: it resumes without redoing the analysis.
+6. When it is Ready, press Play: the game window opens and Play becomes Stop. Check the pad. Press Stop: the game
+   closes within 5 s and Log keeps the output.
+7. Settings › Graphics: Renderer GPU, Frame cap 30, then Play. Log (or `titles/<TID>/logs/run-*.log`) shows
+   `# RECOMP_GPU=1` and `# RECOMP_GPU_FPS_CAP=30`. Add a line in Advanced, Reset to defaults: the line stays.
+8. Save in game, quit, play again: the save is there. Manage shows the sizes; Delete saves removes only that title's.
+9. Manage on a title prepared from a **folder** source (`~/Downloads/xboxrecomp/titles/black/game`): delete its work
+   folder; the original folder is untouched.
+10. `git status` in the checkout shows nothing new besides code. Send screenshots of Library, Home, Preparing and
+    Settings, and `~/Library/Application Support/xboxrecomp/titles/<TID>/work/prepare.log` if something failed.
