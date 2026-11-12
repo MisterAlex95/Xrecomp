@@ -41,3 +41,7 @@ tools/split/output/
 # tools.capture output holds extracted game bytes
 cases/local/
 tools/VERSION
+
+# macOS launcher (macos/)
+macos/.build/
+macos/build/
