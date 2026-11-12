@@ -163,6 +163,10 @@
     <string name="VAL_SCALE_2" translatable="false">2×</string>
     <string name="VAL_SCALE_3" translatable="false">3×</string>
     <string name="VAL_SCALE_FIT">Fit the screen</string>
+    <string name="OPT_WIDESCREEN">Widescreen</string>
+    <string name="OPT_WIDESCREEN_DETAIL">Tells the game the TV is 16:9, as the Xbox dashboard setting did. A game that supports it then draws a wider picture; set Aspect ratio to 16:9 to show it full width. A game without widescreen support ignores it. Applies the next time the game starts. (RECOMP_WIDESCREEN)</string>
+    <string name="OPT_480P" translatable="false">480p</string>
+    <string name="OPT_480P_DETAIL">Tells the game the TV takes progressive 480p, as the Xbox dashboard setting did with the HD cable. A game that offers it renders full frames instead of interlaced ones; others ignore it. Applies the next time the game starts. (RECOMP_480P)</string>
     <string name="OPT_ASPECT">Aspect ratio</string>
     <string name="OPT_ASPECT_DETAIL">Auto shows the game in 16:9 when it can draw a wider picture, and keeps menus and videos in their original shape. 4:3 always shows the console\'s original picture with side bars. 16:9 always fills the screen; a game without widescreen support is stretched.</string>
     <string name="VAL_ASPECT_4_3">4:3</string>

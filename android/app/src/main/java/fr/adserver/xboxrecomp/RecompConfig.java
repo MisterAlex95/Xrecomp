@@ -76,6 +76,10 @@ final class RecompConfig {
         }
     }
 
+    /** The console's widescreen and 480p settings (XBA-121). */
+    static final String ENV_WIDESCREEN = "RECOMP_WIDESCREEN";
+    static final String ENV_480P = "RECOMP_480P";
+
     private static String[] keys(String... k) {
         return k;
     }
@@ -112,6 +116,12 @@ final class RecompConfig {
                    keys("RECOMP_ASPECT"),
                    new Choice(R.string.VAL_AUTO, (String)null), new Choice(R.string.VAL_ASPECT_4_3, "4:3"),
                    new Choice(R.string.VAL_ASPECT_16_9, "16:9")),
+        // The console's video settings (XBA-121), read by the title from the EEPROM and the AV capabilities
+        // (src/kernel/kernel_xbox.c): off is the runtime default, so off writes no line.
+        new Option(Section.GRAPHICS, R.string.OPT_WIDESCREEN, R.string.OPT_WIDESCREEN_DETAIL, keys(ENV_WIDESCREEN),
+                   new Choice(R.string.VAL_OFF, (String)null), new Choice(R.string.VAL_ON, "1")),
+        new Option(Section.GRAPHICS, R.string.OPT_480P, R.string.OPT_480P_DETAIL, keys(ENV_480P),
+                   new Choice(R.string.VAL_OFF, (String)null), new Choice(R.string.VAL_ON, "1")),
         // Frame generation (docs/technical/framegen.md): RECOMP_LSFG_DIR, the app-private shader cache, is written by
         // « Choose Lossless.dll » (LSFG_DIR_KEY), not by this option.
         new Option(Section.GRAPHICS, R.string.OPT_LSFG, R.string.OPT_LSFG_DETAIL,

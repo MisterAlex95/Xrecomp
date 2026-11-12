@@ -470,6 +470,50 @@ public class LauncherScreensTest {
         assertEquals(before, GameStore.autoStart(app));
     }
 
+    /** XBA-121: Graphics, Widescreen and 480p write RECOMP_WIDESCREEN / RECOMP_480P to recomp.cfg; Off removes them. */
+    @Test
+    public void settingsConsoleVideo() throws Exception {
+        LauncherActivity a = launch();
+        a.goForTest(LauncherActivity.Screen.SETTINGS);
+        idle(300);
+        assertNull("not on General", row(a, app.getString(R.string.OPT_WIDESCREEN)));
+        key(a, KeyEvent.KEYCODE_BUTTON_R1);
+        Widgets.MenuRow wide = row(a, app.getString(R.string.OPT_WIDESCREEN));
+        Widgets.MenuRow p480 = row(a, app.getString(R.string.OPT_480P));
+        assertNotNull("Settings, Graphics, Widescreen", wide);
+        assertNotNull("Settings, Graphics, 480p", p480);
+        assertEquals(app.getString(R.string.VAL_OFF), wide.value);
+        assertEquals(app.getString(R.string.VAL_OFF), p480.value);
+        assertEquals(app.getString(R.string.OPT_WIDESCREEN_DETAIL), wide.description);
+        File ext = GameStore.externalFilesDir(app);
+        assertNotNull(ext);
+
+        // Each step is saved at once.
+        wide.requestFocusFromTouch();
+        key(a, KeyEvent.KEYCODE_DPAD_RIGHT);
+        assertEquals(app.getString(R.string.VAL_ON), wide.value);
+        p480.requestFocusFromTouch();
+        key(a, KeyEvent.KEYCODE_DPAD_RIGHT);
+        assertEquals(app.getString(R.string.VAL_ON), p480.value);
+        RecompConfig c = RecompConfig.load(ext);
+        assertEquals("1", c.get(RecompConfig.ENV_WIDESCREEN));
+        assertEquals("1", c.get(RecompConfig.ENV_480P));
+
+        // A fresh Settings screen reads them back; Off is the runtime default and writes no line.
+        a = launch();
+        a.goForTest(LauncherActivity.Screen.SETTINGS);
+        idle(300);
+        key(a, KeyEvent.KEYCODE_BUTTON_R1);
+        wide = row(a, app.getString(R.string.OPT_WIDESCREEN));
+        assertEquals("read back from recomp.cfg", app.getString(R.string.VAL_ON), wide.value);
+        wide.requestFocusFromTouch();
+        key(a, KeyEvent.KEYCODE_DPAD_RIGHT);   // wraps to Off
+        assertEquals(app.getString(R.string.VAL_OFF), wide.value);
+        c = RecompConfig.load(ext);
+        assertNull(c.get(RecompConfig.ENV_WIDESCREEN));
+        assertEquals("1", c.get(RecompConfig.ENV_480P));
+    }
+
     /** Calm: Settings' tabs: L1 / R1 switch them (wrapping), each keeps its focus; Frame cap follows the renderer. */
     @Test
     public void settingsTabs() throws Exception {

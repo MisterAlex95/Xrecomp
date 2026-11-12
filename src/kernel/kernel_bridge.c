@@ -3766,8 +3766,8 @@ static void kernel_vblank_raise(void)
     }
 }
 
-/* Vblank N is due at t0 + N * 1000 / 60 ms: an absolute schedule, so the
- * rate is 60 Hz however coarse the timer thread's sleep. It used to be
+/* Vblank N is due at t0 + N * 1000 / 60 ms (50 for PAL): an absolute
+ * schedule, so the rate holds however coarse the timer thread's sleep. It used to be
  * "now + 16" checked on a 10 ms tick, which fired every 20 ms -- 50 Hz -- and
  * a title's frame limiter counts these. Kept in nanoseconds: whole
  * milliseconds put each vblank up to a millisecond off its edge, and a title
@@ -3778,26 +3778,30 @@ static void kernel_vblank_raise(void)
  * edge, 0 when vblanks are off. */
 #define VBLANK_RESTART_NS 100000000ull
 
-static uint64_t vblank_due(uint64_t t0_ns, uint64_t n)
+static uint64_t vblank_due(uint64_t t0_ns, uint64_t n, uint32_t hz)
 {
-    return t0_ns + n * 1000000000ull / 60u;
+    return t0_ns + n * 1000000000ull / hz;
 }
 
+/* The rate is the display's: 50 Hz once a title sets a PAL-I mode, else 60
+ * (xbox_AvRefreshHz, XBA-121); a change restarts the schedule. */
 static int kernel_vblank_tick_ns(uint64_t now_ns, uint64_t *next_due_ns)
 {
     static uint64_t t0_ns, count;
-    static int started;
+    static uint32_t hz;
+    uint32_t want_hz;
     uint64_t due;
 
     *next_due_ns = 0;
     if (kernel_vblank_mode() != XBOX_VBLANK_PACED)
         return 0;
-    if (!started) {
-        started = 1;
+    want_hz = (uint32_t)xbox_AvRefreshHz();
+    if (hz != want_hz) {
+        hz = want_hz;
         t0_ns = now_ns;
         count = 0;
     }
-    due = vblank_due(t0_ns, count);
+    due = vblank_due(t0_ns, count, hz);
     if (now_ns < due) {
         *next_due_ns = due;
         return 0;
@@ -3807,7 +3811,7 @@ static int kernel_vblank_tick_ns(uint64_t now_ns, uint64_t *next_due_ns)
         count = 0;
     }
     count++;
-    *next_due_ns = vblank_due(t0_ns, count);
+    *next_due_ns = vblank_due(t0_ns, count, hz);
     kernel_vblank_count(kernel_clock_ms());
     kernel_vblank_raise();
     return 1;
