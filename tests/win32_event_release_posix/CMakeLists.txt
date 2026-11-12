@@ -1,6 +1,7 @@
 cmake_minimum_required(VERSION 3.20)
 project(win32_event_release_posix_test C)
-# A set or a pulse releases the threads waiting at that moment, even when the event is reset before they run.
+# A set or a pulse releases the threads waiting at that moment, even when the event is reset before they run;
+# multiple-object waits too (wait-any, atomic wait-all).
 if(WIN32)
     message(FATAL_ERROR "This regression covers the POSIX shim; Windows has the real events")
 endif()

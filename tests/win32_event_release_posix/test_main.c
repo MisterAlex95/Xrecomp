@@ -2,7 +2,11 @@
  * wait at that moment. A reset that comes before a released thread is
  * scheduled must not send it back to sleep: XDK code resets a notification
  * event by hand and waits again (BlockUntilVerticalBlank), and two threads
- * doing so on one core starved each other. */
+ * doing so on one core starved each other.
+ *
+ * Cases 10-16: WaitForMultipleObjects blocks with the same rules (L-4); it
+ * used to poll every millisecond, so a pulse released nobody and wait-all
+ * took the objects that were ready one at a time. */
 #define _GNU_SOURCE
 #include "win32_compat.h"
 
@@ -32,6 +36,134 @@ static HANDLE start(Waiter *w, HANDLE ev, DWORD ms)
     while (!w->waiting) Sleep(1);
     Sleep(20);                              /* into the wait itself */
     return t;
+}
+
+/* Multiple-object waits (L-4): a thread in WaitForMultipleObjects. */
+typedef struct { HANDLE h[4]; DWORD n, ms; BOOL all; volatile LONG ret, waiting; } MWaiter;
+
+static DWORD WINAPI mwaiter_main(LPVOID p)
+{
+    MWaiter *w = (MWaiter *)p;
+    InterlockedExchange(&w->waiting, 1);
+    InterlockedExchange(&w->ret, (LONG)WaitForMultipleObjects(w->n, w->h, w->all, w->ms));
+    return 0;
+}
+
+static HANDLE mstart(MWaiter *w, BOOL all, DWORD ms, DWORD n, HANDLE a, HANDLE b)
+{
+    HANDLE t;
+    w->h[0] = a; w->h[1] = b; w->n = n; w->all = all; w->ms = ms;
+    w->ret = -1; w->waiting = 0;
+    t = CreateThread(NULL, 0, mwaiter_main, w, 0, NULL);
+    while (!w->waiting) Sleep(1);
+    Sleep(20);                              /* into the wait itself */
+    return t;
+}
+
+static void join(HANDLE t) { WaitForSingleObject(t, INFINITE); CloseHandle(t); }
+
+static void multi_waits(int rounds)
+{
+    MWaiter a, b;
+    HANDLE ta, tb, m1, m2, a1, a2, sem;
+    int i, bad;
+    struct timespec t0, t1;
+    long ms;
+
+    m1 = CreateEventA(NULL, TRUE, FALSE, NULL);
+    m2 = CreateEventA(NULL, TRUE, FALSE, NULL);
+    a1 = CreateEventA(NULL, FALSE, FALSE, NULL);
+    a2 = CreateEventA(NULL, FALSE, FALSE, NULL);
+
+    /* 10. wait-any released by a pulse of its second object, manual and auto */
+    for (i = bad = 0; i < rounds; i++) {
+        ta = mstart(&a, FALSE, 1000, 2, m1, m2);
+        PulseEvent(m2);
+        join(ta);
+        if (a.ret != (LONG)(WAIT_OBJECT_0 + 1)) bad++;
+    }
+    CHECK(bad == 0, "wait-any: %d of %d manual pulses did not release it", bad, rounds);
+    CHECK(WaitForSingleObject(m2, 0) == WAIT_TIMEOUT, "wait-any: manual pulse left signalled");
+    for (i = bad = 0; i < rounds; i++) {
+        ta = mstart(&a, FALSE, 1000, 2, a1, a2);
+        PulseEvent(a2);
+        join(ta);
+        if (a.ret != (LONG)(WAIT_OBJECT_0 + 1)) bad++;
+    }
+    CHECK(bad == 0, "wait-any: %d of %d auto pulses did not release it", bad, rounds);
+    CHECK(WaitForSingleObject(a2, 0) == WAIT_TIMEOUT, "wait-any: auto pulse left signalled");
+
+    /* 11. wait-any: a manual set reset at once still releases both waiters */
+    for (i = bad = 0; i < rounds; i++) {
+        ta = mstart(&a, FALSE, 1000, 2, m1, m2);
+        tb = mstart(&b, FALSE, 1000, 2, m2, m1);
+        SetEvent(m1);
+        ResetEvent(m1);
+        join(ta); join(tb);
+        if (a.ret != (LONG)WAIT_OBJECT_0 || b.ret != (LONG)(WAIT_OBJECT_0 + 1)) bad++;
+    }
+    CHECK(bad == 0, "wait-any: %d of %d rounds lost a set reset at once", bad, rounds);
+
+    /* 12. auto reset: one set releases one of two wait-any waiters, and is consumed */
+    for (i = bad = 0; i < rounds && i < 10; i++) {   /* each round sits out one timeout */
+        ta = mstart(&a, FALSE, 200, 2, a1, m1);
+        tb = mstart(&b, FALSE, 200, 2, m1, a1);
+        SetEvent(a1);
+        join(ta); join(tb);
+        if ((a.ret == (LONG)WAIT_OBJECT_0) + (b.ret == (LONG)(WAIT_OBJECT_0 + 1)) != 1) bad++;
+        if (WaitForSingleObject(a1, 0) != WAIT_TIMEOUT) bad++;
+    }
+    CHECK(bad == 0, "wait-any, auto reset: %d of %d rounds did not release exactly one waiter", bad, i);
+
+    /* 13. wait-any: only the object it returns is consumed; a grant it did
+     * not take stays a set */
+    ta = mstart(&a, FALSE, 1000, 2, a1, a2);
+    SetEvent(a2);
+    SetEvent(a1);
+    join(ta);
+    CHECK(a.ret == (LONG)WAIT_OBJECT_0 || a.ret == (LONG)(WAIT_OBJECT_0 + 1), "wait-any: returned %ld", (long)a.ret);
+    bad = (WaitForSingleObject(a1, 0) == WAIT_OBJECT_0) + (WaitForSingleObject(a2, 0) == WAIT_OBJECT_0);
+    CHECK(bad == 1, "wait-any on two set auto events: %d left signalled, want 1", bad);
+
+    /* 14. wait-all is atomic: one of two auto events set takes nothing, a
+     * single waiter can still have it; with both set it takes both */
+    ta = mstart(&a, TRUE, 1000, 2, a1, a2);
+    SetEvent(a1);
+    Sleep(30);
+    CHECK(a.ret == -1, "wait-all returned with one of two objects set");
+    CHECK(WaitForSingleObject(a1, 0) == WAIT_OBJECT_0, "wait-all consumed a1 without a2");
+    SetEvent(a2);
+    Sleep(30);
+    CHECK(a.ret == -1, "wait-all returned with a1 taken by another waiter");
+    SetEvent(a1);
+    join(ta);
+    CHECK(a.ret == (LONG)WAIT_OBJECT_0, "wait-all: returned %ld once both were set", (long)a.ret);
+    CHECK(WaitForSingleObject(a1, 0) == WAIT_TIMEOUT && WaitForSingleObject(a2, 0) == WAIT_TIMEOUT,
+          "wait-all: did not consume both auto events");
+
+    /* 15. wait-any on a semaphore and an event: a release wakes it, takes one count */
+    sem = CreateSemaphoreA(NULL, 0, 4, NULL);
+    ta = mstart(&a, FALSE, 1000, 2, m1, sem);
+    ReleaseSemaphore(sem, 2, NULL);
+    join(ta);
+    CHECK(a.ret == (LONG)(WAIT_OBJECT_0 + 1), "wait-any: semaphore release gave %ld", (long)a.ret);
+    CHECK(WaitForSingleObject(sem, 0) == WAIT_OBJECT_0 && WaitForSingleObject(sem, 0) == WAIT_TIMEOUT,
+          "wait-any: took other than one semaphore count");
+
+    /* 16. timeout: no set, WAIT_TIMEOUT after the time; nothing left behind */
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    CHECK(WaitForMultipleObjects(2, (HANDLE[]){ a1, a2 }, FALSE, 60) == WAIT_TIMEOUT, "wait-any: no timeout");
+    CHECK(WaitForMultipleObjects(2, (HANDLE[]){ a1, m1 }, TRUE, 60) == WAIT_TIMEOUT, "wait-all: no timeout");
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    ms = (t1.tv_sec - t0.tv_sec) * 1000L + (t1.tv_nsec - t0.tv_nsec) / 1000000L;
+    CHECK(ms >= 115 && ms < 1000, "two 60 ms timeouts took %ld ms", ms);
+    SetEvent(a1);
+    CHECK(WaitForSingleObject(a1, 0) == WAIT_OBJECT_0, "a set after timed-out multiple waits went to nobody");
+    CHECK(WaitForMultipleObjects(2, (HANDLE[]){ a1, a2 }, FALSE, 0) == WAIT_TIMEOUT, "zero-timeout poll");
+    SetEvent(a2);
+    CHECK(WaitForMultipleObjects(2, (HANDLE[]){ a1, a2 }, FALSE, 0) == WAIT_OBJECT_0 + 1, "poll finds a2");
+
+    CloseHandle(m1); CloseHandle(m2); CloseHandle(a1); CloseHandle(a2); CloseHandle(sem);
 }
 
 /* 7. the title's pattern: two threads each clear a notification event and
@@ -193,6 +325,7 @@ int main(int argc, char **argv)
           (a.woke != 0) + (b.woke != 0));
 
     two_blockers(200);
+    multi_waits(rounds < 20 ? rounds : 20);
 
     printf(failures ? "%d FAILED\n" : "all passed\n", failures);
     return failures ? 1 : 0;

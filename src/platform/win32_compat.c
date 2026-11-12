@@ -301,6 +301,21 @@ typedef enum { K_EVENT, K_SEM, K_MUTEX, K_THREAD, K_TIMER, K_HEAP,
 
 #define W32_MAX_APC 16
 
+/* A thread blocked in WaitForMultipleObjectsEx: one wait block of its own,
+ * linked into every object it waits on (w32_waitlink). Whatever changes an
+ * object's state wakes the object's own waiters and bumps each linked
+ * block's seq (obj_wake). Lock order: object lock, then the block's. */
+typedef struct w32_waitblock {
+    pthread_mutex_t m;
+    pthread_cond_t  c;
+    unsigned        seq;
+} w32_waitblock;
+
+typedef struct w32_waitlink {
+    struct w32_waitlink *next;
+    w32_waitblock       *wb;
+} w32_waitlink;
+
 typedef struct w32_object {
     w32_kind        kind;
     LONG            refcount;
@@ -316,6 +331,7 @@ typedef struct w32_object {
     unsigned        ev_waiters;  /* threads blocked in wait_single on it */
     unsigned        ev_grants;   /* auto-reset: releases handed to blocked waiters, not taken yet */
     unsigned        ev_epoch;    /* manual-reset: one more per SetEvent or PulseEvent that released */
+    w32_waitlink   *mw_list;     /* multiple-object waiters linked to it, under lock */
 
     /* semaphore */
     long            sem_count;
@@ -720,6 +736,20 @@ BOOL DuplicateHandle(HANDLE srcProc, HANDLE src, HANDLE dstProc, PHANDLE dst,
     return TRUE;
 }
 
+/* The object's state changed: wake the threads waiting on it alone and the
+ * multiple-object waiters linked to it. Caller holds o->lock. */
+static void obj_wake(w32_object *o)
+{
+    w32_waitlink *l;
+    pthread_cond_broadcast(&o->cond);
+    for (l = o->mw_list; l; l = l->next) {
+        pthread_mutex_lock(&l->wb->m);
+        l->wb->seq++;
+        pthread_cond_signal(&l->wb->c);
+        pthread_mutex_unlock(&l->wb->m);
+    }
+}
+
 /* ---- deadline helper -------------------------------------------------- */
 static void deadline_from_ms(DWORD ms, struct timespec *ts)
 {
@@ -788,6 +818,57 @@ static int waitable_due(w32_object *o)
  * time ran out looks once more, so no grant is left behind with no waiter
  * for it. A zero timeout is a poll: it never counts as a waiter.
  */
+/* Whether a waiter may take o now. counted: the waiter is one of
+ * ev_waiters and saw ev_epoch == epoch when it started; a release meant for
+ * the blocked waiters (epoch moved, grant pending) sets *granted. Caller
+ * holds o->lock. */
+static int obj_ready_locked(w32_object *o, int counted, unsigned epoch, int *granted)
+{
+    *granted = 0;
+    switch (o->kind) {
+    case K_EVENT:
+        if (counted && (o->manual_reset ? o->ev_epoch != epoch : o->ev_grants > 0))
+            return *granted = 1;
+        return o->signaled;
+    case K_THREAD: return o->exited;
+    case K_SEM:    return o->sem_count > 0;
+    case K_MUTEX:  return o->mtx_owner == 0 || o->mtx_owner == GetCurrentThreadId();
+    case K_WAITABLE_TIMER: return waitable_due(o);
+    default:       return 1;
+    }
+}
+
+/* A satisfied wait takes what it consumes. Caller holds o->lock. */
+static void obj_consume_locked(w32_object *o, int granted)
+{
+    switch (o->kind) {
+    case K_EVENT:
+        if (granted) { if (!o->manual_reset) o->ev_grants--; }
+        else if (!o->manual_reset) o->signaled = 0;
+        break;
+    case K_WAITABLE_TIMER:
+        if (!o->waitable_manual_reset && o->waitable_period_ms > 0) {
+            /* Periodic synchronization timer: the next expiry is one
+             * period after the last due time (on the grid, catching up
+             * if the waiter was late), and it stays armed. */
+            struct timespec now;
+            clock_gettime(W32_WAIT_CLOCK, &now);
+            do {
+                long long ns = o->waitable_due_time.tv_nsec + (long long)o->waitable_period_ms * 1000000LL;
+                o->waitable_due_time.tv_sec += (time_t)(ns / 1000000000LL);
+                o->waitable_due_time.tv_nsec = (long)(ns % 1000000000LL);
+            } while (!timespec_before(&now, &o->waitable_due_time));
+            o->waitable_triggered = 0;
+        } else if (!o->waitable_manual_reset) {
+            o->waitable_triggered = 0; o->waitable_armed = 0;
+        }
+        break;
+    case K_SEM:   o->sem_count--; break;
+    case K_MUTEX: o->mtx_owner = GetCurrentThreadId(); o->mtx_recursion++; break;
+    default: break;
+    }
+}
+
 static DWORD wait_single(w32_object *o, DWORD ms)
 {
     struct timespec ts;
@@ -800,23 +881,7 @@ static DWORD wait_single(w32_object *o, DWORD ms)
     int counted = 0, granted = 0, expired = 0;
 
     for (;;) {
-        int ready = 0;
-        switch (o->kind) {
-        case K_EVENT:
-            if (counted && (o->manual_reset ? o->ev_epoch != epoch : o->ev_grants > 0))
-                ready = granted = 1;
-            else
-                ready = o->signaled;
-            break;
-        case K_THREAD: ready = o->exited;   break;
-        case K_SEM:    ready = (o->sem_count > 0); break;
-        case K_MUTEX:
-            ready = (o->mtx_owner == 0 || o->mtx_owner == GetCurrentThreadId());
-            break;
-        case K_WAITABLE_TIMER: ready = waitable_due(o); break;
-        default:       ready = 1; break;
-        }
-        if (ready) break;
+        if (obj_ready_locked(o, counted, epoch, &granted)) break;
         if (expired || (timed && ms == 0)) { result = WAIT_TIMEOUT; break; }
         if (o->kind == K_EVENT && !counted) { counted = 1; o->ev_waiters++; }
 
@@ -837,34 +902,8 @@ static DWORD wait_single(w32_object *o, DWORD ms)
     }
     if (counted) o->ev_waiters--;
 
-    if (result == WAIT_OBJECT_0) {
-        switch (o->kind) {
-        case K_EVENT:
-            if (granted) { if (!o->manual_reset) o->ev_grants--; }
-            else if (!o->manual_reset) o->signaled = 0;
-            break;
-        case K_WAITABLE_TIMER:
-            if (!o->waitable_manual_reset && o->waitable_period_ms > 0) {
-                /* Periodic synchronization timer: the next expiry is one
-                 * period after the last due time (on the grid, catching up
-                 * if the waiter was late), and it stays armed. */
-                struct timespec now;
-                clock_gettime(W32_WAIT_CLOCK, &now);
-                do {
-                    long long ns = o->waitable_due_time.tv_nsec + (long long)o->waitable_period_ms * 1000000LL;
-                    o->waitable_due_time.tv_sec += (time_t)(ns / 1000000000LL);
-                    o->waitable_due_time.tv_nsec = (long)(ns % 1000000000LL);
-                } while (!timespec_before(&now, &o->waitable_due_time));
-                o->waitable_triggered = 0;
-            } else if (!o->waitable_manual_reset) {
-                o->waitable_triggered = 0; o->waitable_armed = 0;
-            }
-            break;
-        case K_SEM:   o->sem_count--; break;
-        case K_MUTEX: o->mtx_owner = GetCurrentThreadId(); o->mtx_recursion++; break;
-        default: break;
-        }
-    }
+    if (result == WAIT_OBJECT_0)
+        obj_consume_locked(o, granted);
     pthread_mutex_unlock(&o->lock);
     return result;
 }
@@ -885,10 +924,6 @@ DWORD WaitForSingleObjectEx(HANDLE h, DWORD ms, BOOL alertable)
     return WaitForSingleObject(h, ms);
 }
 
-/*
- * WaitForMultipleObjects: polling implementation. Adequate for the light
- * multi-object waits the Xbox kernel HLE issues; not a high-throughput path.
- */
 DWORD WaitForMultipleObjects(DWORD count, const HANDLE *handles, BOOL waitAll, DWORD ms)
 {
     return WaitForMultipleObjectsEx(count, handles, waitAll, ms, FALSE);
@@ -906,51 +941,262 @@ static int wait_handle_ok(HANDLE h)
     return obj_from_handle(h) != NULL;
 }
 
+/* One multiple-object wait in progress. obj[i] is NULL for a pseudo-handle,
+ * which is always signalled; uniq[] is each object once, by address, for
+ * wait-all's locking. */
+typedef struct {
+    DWORD        count, nuniq;
+    BOOL         wait_all;
+    w32_object  *obj[MAXIMUM_WAIT_OBJECTS];
+    w32_object  *uniq[MAXIMUM_WAIT_OBJECTS];
+    unsigned     epoch[MAXIMUM_WAIT_OBJECTS];
+    int          counted[MAXIMUM_WAIT_OBJECTS];
+    int          has_due;           /* an armed waitable timer: its due time */
+    struct timespec due;
+} w32_multiwait;
+
+static void multi_note_due(w32_multiwait *w, w32_object *o)
+{
+    if (o->kind == K_WAITABLE_TIMER && o->waitable_armed && !o->waitable_triggered &&
+        (!w->has_due || timespec_before(&o->waitable_due_time, &w->due))) {
+        w->due = o->waitable_due_time;
+        w->has_due = 1;
+    }
+}
+
+/* Wait-any: the lowest index that may be taken now, taken; or -1. */
+static int multi_take_any(w32_multiwait *w)
+{
+    DWORD i;
+    w->has_due = 0;
+    for (i = 0; i < w->count; i++) {
+        w32_object *o = w->obj[i];
+        int granted;
+        if (!o) return (int)i;
+        pthread_mutex_lock(&o->lock);
+        if (obj_ready_locked(o, w->counted[i], w->epoch[i], &granted)) {
+            obj_consume_locked(o, granted);
+            pthread_mutex_unlock(&o->lock);
+            return (int)i;
+        }
+        multi_note_due(w, o);
+        pthread_mutex_unlock(&o->lock);
+    }
+    return -1;
+}
+
+/* Wait-all: every object at once, under all their locks, or none. A wait-all
+ * waiter is never counted on an event (a set while it waits for the others
+ * stays a set others can see); a manual-reset event set or pulsed since the
+ * last look counts as signalled for this look. */
+static int multi_take_all(w32_multiwait *w)
+{
+    DWORD i, j;
+    int all = 1;
+    w->has_due = 0;
+    for (j = 0; j < w->nuniq; j++)
+        pthread_mutex_lock(&w->uniq[j]->lock);
+    for (i = 0; i < w->count && all; i++) {
+        w32_object *o = w->obj[i];
+        int granted;
+        if (o && !obj_ready_locked(o, o->kind == K_EVENT && o->manual_reset, w->epoch[i], &granted))
+            all = 0;
+    }
+    for (j = 0; j < w->nuniq; j++) {
+        w32_object *o = w->uniq[j];
+        if (all)
+            obj_consume_locked(o, 0);
+        else
+            multi_note_due(w, o);
+    }
+    for (i = 0; i < w->count; i++)
+        if (w->obj[i])
+            w->epoch[i] = w->obj[i]->ev_epoch;
+    for (j = w->nuniq; j-- > 0; )
+        pthread_mutex_unlock(&w->uniq[j]->lock);
+    return all ? 0 : -1;
+}
+
+static int multi_take(w32_multiwait *w)
+{
+    return w->wait_all ? multi_take_all(w) : multi_take_any(w);
+}
+
+static void link_add(w32_object *o, w32_waitlink *l, w32_waitblock *wb)
+{
+    l->wb = wb;
+    l->next = o->mw_list;
+    o->mw_list = l;
+}
+
+static void link_remove(w32_object *o, w32_waitlink *l)
+{
+    w32_waitlink **pp;
+    for (pp = &o->mw_list; *pp; pp = &(*pp)->next)
+        if (*pp == l) { *pp = l->next; break; }
+}
+
+static int ptr_cmp(const void *a, const void *b)
+{
+    uintptr_t x = (uintptr_t)*(w32_object *const *)a, y = (uintptr_t)*(w32_object *const *)b;
+    return x < y ? -1 : x > y;
+}
+
+/*
+ * Blocks until one object (wait-any) or every object at once (wait-all) can
+ * be taken. It used to poll every object with a zero timeout and sleep 1 ms
+ * between rounds: a pulse, or a set another thread reset within the
+ * millisecond, released nobody, and every wait cost a wake-up per
+ * millisecond. Now the waiting thread links one wait block of its own into
+ * each object; whatever changes an object's state (set, pulse, release,
+ * thread exit, timer arm, an APC for an alertable wait) bumps the block, and
+ * the thread looks again.
+ *
+ * Wait-any takes the semantics of wait_single: it counts as a waiter on each
+ * event, so a manual-reset set or pulse while it is blocked releases it (the
+ * epoch moved) and an auto-reset one may hand it the grant -- which it takes,
+ * consuming that one object only. Grants left on other events when it
+ * returns, more than their remaining waiters, go back to the signalled flag:
+ * on NT those events would simply have stayed signalled. Wait-all takes
+ * every object under all their locks (address order), so it is atomic; it is
+ * not counted on events, so an auto-reset pulse while it waits for the other
+ * objects is not seen, and a manual-reset one counts as signalled at its next
+ * look. Ties go to the lowest index, as on Win32.
+ */
 DWORD WaitForMultipleObjectsEx(DWORD count, const HANDLE *handles, BOOL waitAll,
                                DWORD ms, BOOL alertable)
 {
     struct timespec ts;
-    int timed = (ms != INFINITE);
-    DWORD k;
+    int timed = (ms != INFINITE), r, expired = 0;
+    DWORD i, j, result;
+    w32_multiwait w;
+    w32_waitblock wb;
+    w32_waitlink links[MAXIMUM_WAIT_OBJECTS + 1];
+    w32_object *self = alertable ? t_self_obj : NULL;
 
     /* Win32 rejects the whole call when any handle is not one, before waiting
-     * on any of them. Polling each with a zero timeout instead -- which is how
-     * the loop below asks -- never reports a bad handle as anything but "not
-     * signalled", so the call used to sit out its timeout and answer
-     * STATUS_TIMEOUT where a title expects STATUS_UNSUCCESSFUL. A title that
-     * reads a timeout as "not yet" retries forever. */
-    if (!handles && count)
+     * on any of them. Polling each with a zero timeout instead never reported
+     * a bad handle as anything but "not signalled", so the call used to sit
+     * out its timeout and answer STATUS_TIMEOUT where a title expects
+     * STATUS_UNSUCCESSFUL. A title that reads a timeout as "not yet" retries
+     * forever. */
+    if (count == 0 || count > MAXIMUM_WAIT_OBJECTS)
+        { SetLastError(ERROR_INVALID_PARAMETER); return WAIT_FAILED; }
+    if (!handles)
         { SetLastError(ERROR_INVALID_HANDLE); return WAIT_FAILED; }
-    for (k = 0; k < count; k++)
-        if (!wait_handle_ok(handles[k]))
+    for (i = 0; i < count; i++)
+        if (!wait_handle_ok(handles[i]))
             { SetLastError(ERROR_INVALID_HANDLE); return WAIT_FAILED; }
 
+    if (alertable && drain_apcs() > 0)
+        return WAIT_IO_COMPLETION;
     if (timed) deadline_from_ms(ms, &ts);
 
-    for (;;) {
-        if (alertable && drain_apcs() > 0)
-            return WAIT_IO_COMPLETION;
-
-        if (waitAll) {
-            DWORD got = 0;
-            for (DWORD i = 0; i < count; i++)
-                if (WaitForSingleObject(handles[i], 0) == WAIT_OBJECT_0) got++;
-            if (got == count) return WAIT_OBJECT_0;
-        } else {
-            for (DWORD i = 0; i < count; i++)
-                if (WaitForSingleObject(handles[i], 0) == WAIT_OBJECT_0)
-                    return WAIT_OBJECT_0 + i;
-        }
-
-        if (timed) {
-            struct timespec now;
-            clock_gettime(W32_WAIT_CLOCK, &now);
-            if (now.tv_sec > ts.tv_sec ||
-                (now.tv_sec == ts.tv_sec && now.tv_nsec >= ts.tv_nsec))
-                return WAIT_TIMEOUT;
-        }
-        usleep(1000);
+    memset(&w, 0, sizeof w);
+    w.count = count;
+    w.wait_all = waitAll;
+    for (i = 0; i < count; i++) {
+        HANDLE h = handles[i];
+        w32_object *o = (h == PSEUDO_CURRENT_THREAD || h == PSEUDO_CURRENT_PROCESS)
+                        ? NULL : obj_from_handle(h);
+        if (o) InterlockedIncrement(&o->refcount);   /* stays alive while we wait */
+        w.obj[i] = o;
+        if (o) w.uniq[w.nuniq++] = o;
     }
+    qsort(w.uniq, w.nuniq, sizeof w.uniq[0], ptr_cmp);
+    for (i = j = 0; i < w.nuniq; i++)
+        if (!j || w.uniq[j - 1] != w.uniq[i])
+            w.uniq[j++] = w.uniq[i];
+    w.nuniq = j;
+    for (i = 0; i < count; i++)
+        if (w.obj[i]) {
+            pthread_mutex_lock(&w.obj[i]->lock);
+            w.epoch[i] = w.obj[i]->ev_epoch;   /* wait-all: a pulse from here on counts */
+            pthread_mutex_unlock(&w.obj[i]->lock);
+        }
+
+    r = multi_take(&w);
+    if (r >= 0 || (timed && ms == 0)) {
+        result = r >= 0 ? WAIT_OBJECT_0 + (DWORD)r : WAIT_TIMEOUT;
+        goto done;
+    }
+
+    /* Block: link the wait block into every object (and our own thread, for
+     * an APC), counting as a waiter on each event for wait-any. */
+    pthread_mutex_init(&wb.m, NULL);
+    cond_init_wait_clock(&wb.c);
+    wb.seq = 0;
+    for (i = 0; i < count; i++) {
+        w32_object *o = w.obj[i];
+        if (!o) continue;
+        pthread_mutex_lock(&o->lock);
+        link_add(o, &links[i], &wb);
+        if (!waitAll && o->kind == K_EVENT) {
+            w.counted[i] = 1;
+            w.epoch[i] = o->ev_epoch;
+            o->ev_waiters++;
+        }
+        pthread_mutex_unlock(&o->lock);
+    }
+    if (self) {
+        pthread_mutex_lock(&self->lock);
+        link_add(self, &links[count], &wb);
+        pthread_mutex_unlock(&self->lock);
+    }
+
+    for (;;) {
+        unsigned seq;
+        struct timespec until = ts;
+        int bounded = timed, rc = 0;
+
+        pthread_mutex_lock(&wb.m);
+        seq = wb.seq;                /* before looking: a change after it wakes us */
+        pthread_mutex_unlock(&wb.m);
+        if (self && drain_apcs() > 0) { result = WAIT_IO_COMPLETION; break; }
+        r = multi_take(&w);
+        if (r >= 0) { result = WAIT_OBJECT_0 + (DWORD)r; break; }
+        if (expired) { result = WAIT_TIMEOUT; break; }
+        if (w.has_due && (!timed || timespec_before(&w.due, &ts))) {
+            until = w.due;           /* an armed timer comes due on its own */
+            bounded = 1;
+        }
+        pthread_mutex_lock(&wb.m);
+        while (wb.seq == seq && rc != ETIMEDOUT)
+            rc = bounded ? pthread_cond_timedwait(&wb.c, &wb.m, &until)
+                         : pthread_cond_wait(&wb.c, &wb.m);
+        pthread_mutex_unlock(&wb.m);
+        if (rc == ETIMEDOUT && timed && !timespec_before(&until, &ts))
+            expired = 1;             /* one more look: a release may have come meanwhile */
+    }
+
+    for (i = 0; i < count; i++) {
+        w32_object *o = w.obj[i];
+        if (!o) continue;
+        pthread_mutex_lock(&o->lock);
+        link_remove(o, &links[i]);
+        if (w.counted[i]) {
+            o->ev_waiters--;
+            if (!o->manual_reset && o->ev_grants > o->ev_waiters) {
+                /* A grant handed to us that we did not take: the set stays. */
+                o->ev_grants = o->ev_waiters;
+                o->signaled = 1;
+                obj_wake(o);
+            }
+        }
+        pthread_mutex_unlock(&o->lock);
+    }
+    if (self) {
+        pthread_mutex_lock(&self->lock);
+        link_remove(self, &links[count]);
+        pthread_mutex_unlock(&self->lock);
+    }
+    pthread_cond_destroy(&wb.c);
+    pthread_mutex_destroy(&wb.m);
+
+done:
+    for (i = 0; i < count; i++)
+        if (w.obj[i]) obj_release(w.obj[i]);
+    return result;
 }
 
 /* ===================================================================== */
@@ -990,7 +1236,7 @@ BOOL SetEvent(HANDLE h)
      * KEVENT's SignalState into its host event before each wait (SetEvent when
      * it reads 1): a KeSetEvent that went to a blocked thread as a grant would
      * otherwise release a second thread when the next one prepares its wait. */
-    pthread_cond_broadcast(&o->cond);
+    obj_wake(o);
     pthread_mutex_unlock(&o->lock);
     return TRUE;
 }
@@ -1018,7 +1264,7 @@ BOOL PulseEvent(HANDLE h)
     else if (!o->signaled && o->ev_waiters > o->ev_grants)
         o->ev_grants++;
     o->signaled = 0;
-    pthread_cond_broadcast(&o->cond);
+    obj_wake(o);
     pthread_mutex_unlock(&o->lock);
     return TRUE;
 }
@@ -1049,7 +1295,7 @@ BOOL ReleaseSemaphore(HANDLE h, LONG releaseCount, PLONG previousCount)
     if (previousCount) *previousCount = (LONG)o->sem_count;
     o->sem_count += releaseCount;
     if (o->sem_max && o->sem_count > o->sem_max) o->sem_count = o->sem_max;
-    pthread_cond_broadcast(&o->cond);
+    obj_wake(o);
     pthread_mutex_unlock(&o->lock);
     return TRUE;
 }
@@ -1087,7 +1333,7 @@ BOOL ReleaseMutex(HANDLE h)
     if (--o->mtx_recursion <= 0) {
         o->mtx_owner = 0;
         o->mtx_recursion = 0;
-        pthread_cond_broadcast(&o->cond);
+        obj_wake(o);
     }
     pthread_mutex_unlock(&o->lock);
     return TRUE;
@@ -1215,7 +1461,7 @@ static void *thread_trampoline(void *arg)
     o->exit_code = rc;
     o->exited    = 1;
     o->signaled  = 1;
-    pthread_cond_broadcast(&o->cond);
+    obj_wake(o);
     pthread_mutex_unlock(&o->lock);
 
     obj_release(o);   /* drop the trampoline's reference */
@@ -1265,7 +1511,7 @@ VOID ExitThread(DWORD exitCode)
         o->exit_code = exitCode;
         o->exited    = 1;
         o->signaled  = 1;
-        pthread_cond_broadcast(&o->cond);
+        obj_wake(o);
         pthread_mutex_unlock(&o->lock);
         obj_release(o);
     }
@@ -1345,7 +1591,7 @@ BOOL TerminateThread(HANDLE h, DWORD exitCode)
     o->exit_code = exitCode;
     o->exited    = 1;
     o->signaled  = 1;
-    pthread_cond_broadcast(&o->cond);
+    obj_wake(o);
     pthread_mutex_unlock(&o->lock);
     return TRUE;
 }
@@ -1437,6 +1683,7 @@ DWORD QueueUserAPC(PAPCFUNC func, HANDLE thread, ULONG_PTR data)
         o->apc_data[o->apc_count] = data;
         o->apc_count++;
         ok = 1;
+        obj_wake(o);               /* an alertable WaitForMultipleObjectsEx runs it */
     }
     pthread_mutex_unlock(&o->lock);
     return ok;
@@ -1627,8 +1874,8 @@ BOOL SetWaitableTimer(HANDLE h, const LARGE_INTEGER *dueTime, LONG period,
     o->waitable_period_ms = period > 0 ? period : 0;
     o->waitable_armed = 1;
     o->waitable_triggered = 0;
+    obj_wake(o);
     pthread_mutex_unlock(&o->lock);
-    pthread_cond_broadcast(&o->cond);
     return TRUE;
 }
 
