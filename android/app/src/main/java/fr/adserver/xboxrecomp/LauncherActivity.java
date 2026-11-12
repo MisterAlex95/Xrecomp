@@ -6,6 +6,7 @@ import android.app.Activity;
 import android.app.ActivityManager;
 import android.content.ActivityNotFoundException;
 import android.content.ContentResolver;
+import android.content.Context;
 import android.content.Intent;
 import android.content.pm.ShortcutInfo;
 import android.content.pm.ShortcutManager;
@@ -110,6 +111,14 @@ public class LauncherActivity extends Activity {
      * launch data waits in the save dir (kernel_reboot.c); the play session goes on. Explicit intents only.
      */
     static final String ACTION_RESTART_GAME = "fr.adserver.xboxrecomp.RESTART_GAME";
+    /**
+     * Set by ShellActivity when the title left by itself (HalReturnToFirmware to the dashboard, an image this build
+     * cannot start, a shutdown; kernel_reboot.c xbox_title_exit): why, in the kernel's words. Home says so; the game's
+     * process ends by itself right after (it is waited for, then ended), so its play session closes here.
+     */
+    static final String EXTRA_TITLE_EXITED = "fr.adserver.xboxrecomp.TITLE_EXITED";
+    /** How long the launcher waits for the game's process to end by itself after EXTRA_TITLE_EXITED. */
+    static final long TITLE_EXIT_WAIT_MS = 2000;
 
     private static final int REQ_TREE = 1;
     private static final int REQ_ISO = 2;
@@ -296,7 +305,10 @@ public class LauncherActivity extends Activity {
         boolean showLauncher = ACTION_SHOW_LAUNCHER.equals(action);
         String noData = in.getStringExtra(EXTRA_NO_GAME_DATA);
         String badPack = in.getStringExtra(EXTRA_BAD_PACK);
-        boolean forced = change || showLauncher || noData != null || badPack != null;
+        String exited = in.getStringExtra(EXTRA_TITLE_EXITED);
+        boolean forced = change || showLauncher || noData != null || badPack != null || exited != null;
+        if (exited != null && savedInstanceState == null)
+            awaitGameExit();
         // Back from the game: its play session ends here (Home's « Play time »), then the library is read: the
         // one-game state becomes its first record the first time (Library.migrate moves no file).
         long sessionStart = GameStore.sessionStartedAt(this);
@@ -341,6 +353,7 @@ public class LauncherActivity extends Activity {
         String dir = GameStore.chosenDir(this);
         Log.i(TAG, "launcher: shown (" + (noData != null ? "NO_GAME_DATA in " + noData
                                           : badPack != null ? "pack refused: " + badPack
+                                          : exited != null ? "game exited: " + exited
                                           : change ? "change game"
                                           : showLauncher ? "launcher shortcut"
                                           : dir != null && !gameReady() ? "remembered folder unusable: " + dir
@@ -355,7 +368,7 @@ public class LauncherActivity extends Activity {
             if (!lib)
                 history.push(Screen.HOME);
             first = lib ? Screen.LIBRARY : Screen.SOURCE;
-        } else if (badPack != null) {
+        } else if (badPack != null || exited != null) {
             if (lib)
                 history.push(Screen.LIBRARY);
             first = Screen.HOME;
@@ -395,6 +408,8 @@ public class LauncherActivity extends Activity {
             setNote(getString(R.string.GAME_RUNNING), NOTE_INFO);
         else if (badPack != null)
             setNote(getString(R.string.PACK_BAD, badPack), NOTE_ERROR);
+        else if (exited != null)
+            setNote(titleExitedNote(this, exited), NOTE_INFO);
         if (toPrepare)
             go(Screen.PREPARE);
         // The library folder through the Storage Access Framework: scanned at a cold start (and on Y) only.
@@ -4110,6 +4125,27 @@ public class LauncherActivity extends Activity {
         if (r != null && !r.title.isEmpty())
             return r.title;
         return t.isEmpty() ? getString(R.string.LIB_ANOTHER_GAME) : t;
+    }
+
+    /**
+     * EXTRA_TITLE_EXITED: the game's process ends by itself once the shell has asked for this screen (the kernel's
+     * recomp_quit: logs flushed, _exit). It is given TITLE_EXIT_WAIT_MS, then ended, so that Home sees no running game
+     * (play session closed, the exit record read as a clean one, not a crash).
+     */
+    private void awaitGameExit() {
+        long until = SystemClock.uptimeMillis() + TITLE_EXIT_WAIT_MS;
+        while (mainProcessPid() != 0 && SystemClock.uptimeMillis() < until)
+            SystemClock.sleep(50);
+        if (mainProcessPid() != 0) {
+            Log.w(TAG, "launcher: the game said it exited but its process is still there");
+            endRunningGame();
+        }
+    }
+
+    /** Home's note after the title left by itself: « The game ended: <the kernel's reason>. » */
+    static String titleExitedNote(Context c, String why) {
+        String w = why == null ? "" : why.trim();
+        return w.isEmpty() ? c.getString(R.string.TITLE_EXITED_PLAIN) : c.getString(R.string.TITLE_EXITED, w);
     }
 
     /**

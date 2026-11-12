@@ -10,6 +10,8 @@
     <string name="GAME_RUNNING_HOME">Le jeu est lancé : Jouer le ramène.</string>
     <string name="READY_TO_PLAY">%1$s est prêt. Appuyez sur A sur Jouer.</string>
     <string name="PACK_BAD">Le jeu préparé n’a pas pu être chargé (%1$s). Préparez-le à nouveau.</string>
+    <string name="TITLE_EXITED">Le jeu s’est arrêté : %1$s.</string>
+    <string name="TITLE_EXITED_PLAIN">Le jeu s’est arrêté.</string>
     <string name="STATE_READY">Prêt</string>
     <string name="STATE_NONE">Aucun jeu</string>
     <string name="STATE_MISSING">Données du jeu absentes</string>

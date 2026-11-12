@@ -1417,6 +1417,43 @@ const char *xbox_image_file_name(void);
 /* Kernel init: xbox_XeImageFileName (the host copy) set to it. */
 void xbox_image_file_name_init(void);
 
+/* ============================================================================
+ * The title leaving by itself (kernel_reboot.c, XBA K-2)
+ *
+ * HalReturnToFirmware with nothing to hand over to (the dashboard, an image
+ * this build cannot start, a refused restart) and HalInitiateShutdown end the
+ * run. They are called on a guest thread while the window, audio and the other
+ * guest threads still run, so exit() there runs atexit handlers and C++
+ * destructors under them: on Android that ended in « FORTIFY:
+ * pthread_mutex_lock called on a destroyed mutex », SIGABRT and a crash report
+ * for a title that merely quit. docs/runtime/README.md « The title leaving ».
+ * ============================================================================ */
+
+/* Called with a one-line reason (xbox_exit_reason) before the process ends.
+ * Android's shell installs one that opens the launcher saying why
+ * (shell_main.c). Returns only when it could not hand over; the process then
+ * ends as below. NULL: none (desktop default). Any thread. */
+typedef void (*xbox_exit_handler)(const char *why);
+void xbox_SetExitHandler(xbox_exit_handler fn);
+
+/* The reason, for the player: "the game returned to the dashboard (routine
+ * 2)", "... (routine 2, dashboard reason 3)", "the game asked to start
+ * d:\x.xbe, which this build cannot start (routine 2)", "the game shut the
+ * console down". launch_path: the launch data page's path, or NULL when there
+ * is no page; dash_reason: the first dword of its launch data (XapiBootToDash
+ * puts its reason there), 0 when none. */
+void xbox_exit_reason(char *out, size_t n, int shutdown, unsigned routine,
+                      const char *launch_path, uint32_t dash_reason);
+
+/* Ends the run: "[EXIT] <why>" on stderr, the exit handler, then on Android
+ * recomp_quit(0) (exit hook, flush, log drain, _exit: no atexit, no
+ * destructors), elsewhere ExitProcess(0) as before. why NULL: the routine's
+ * default reason. Does not return. */
+void xbox_title_exit(unsigned routine, const char *why);
+
+/* xbox_HalReturnToFirmware with the bridge's reason (kernel_hal.c). */
+void xbox_HalReturnToFirmwareWhy(ULONG Routine, const char *why);
+
 /* The save directory as a UTF-8 path (kernel_path.c). */
 const char *xbox_path_save_dir_utf8(void);
 

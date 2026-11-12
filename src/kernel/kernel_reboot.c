@@ -556,3 +556,60 @@ const char *xbox_image_file_name(void)
     name[o] = 0;
     return name;
 }
+
+/* ---- The title leaving by itself (K-2) ------------------------------------ */
+
+static xbox_exit_handler s_exit_handler;
+
+void xbox_SetExitHandler(xbox_exit_handler fn)
+{
+    s_exit_handler = fn;
+}
+
+void xbox_exit_reason(char *out, size_t n, int shutdown, unsigned routine,
+                      const char *launch_path, uint32_t dash_reason)
+{
+    if (!out || !n)
+        return;
+    if (shutdown)
+        snprintf(out, n, "the game shut the console down");
+    else if (launch_path && launch_path[0])
+        snprintf(out, n, "the game asked to start %s, which this build cannot"
+                         " start (routine %u)", launch_path, routine);
+    else if (launch_path && dash_reason)
+        snprintf(out, n, "the game returned to the dashboard (routine %u,"
+                         " dashboard reason %u)", routine, (unsigned)dash_reason);
+    else
+        snprintf(out, n, "the game returned to the dashboard (routine %u)",
+                 routine);
+}
+
+#if defined(__ANDROID__)
+#include "platform/recomp_quit.h"
+#endif
+
+void xbox_title_exit(unsigned routine, const char *why)
+{
+    char text[640];
+
+    if (!why || !why[0]) {
+        xbox_exit_reason(text, sizeof text, 0, routine, NULL, 0);
+        why = text;
+    }
+    fprintf(stderr, "[EXIT] %s\n", why);
+    fflush(stdout);
+    fflush(stderr);
+    if (s_exit_handler) {
+        s_exit_handler(why);
+        fprintf(stderr, "  [KERNEL] exit handler returned, exiting here\n");
+        fflush(stderr);
+    }
+#if defined(__ANDROID__)
+    /* Not exit(): the guest's other threads, SDL's and the GPU executor are
+     * still running, and atexit handlers / destructors pull their mutexes
+     * from under them (FORTIFY abort, a tombstone for a title that quit). */
+    recomp_quit(0);
+#else
+    ExitProcess(0);
+#endif
+}

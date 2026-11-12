@@ -127,8 +127,10 @@ The runtime does the same across a host restart (`src/kernel/kernel_reboot.c`):
    `XBOX_RESTART_WINDOW_S`; the times travel in the file) the title exits as
    before (`quick reboot refused`), so a title that reboots into itself at
    once cannot loop.
-4. Any other target (another XBE, the dashboard, no page) and any other
-   routine exit as before: there is nothing to hand over to.
+4. Another image of the disc goes through `xbox_launch_image` (XBA-82,
+   [docs/technical/multi-xbe.md](../technical/multi-xbe.md)). An empty path
+   (XapiBootToDash: the dashboard), no page, any other routine, and whatever
+   could not be handed over end the run (« The title leaving », below).
 
 `xbox_SetRestartHandler(fn)` (`kernel.h`) sets how the process restarts. The
 default, on desktop hosts:
@@ -160,6 +162,33 @@ then deleted; a corrupt file deleted too), the path match, the cap, and on
 POSIX the default handler end to end (a forked child re-executes the test,
 which takes the page back and checks that a descriptor opened before the exec
 is closed).
+
+## The title leaving
+
+`HalReturnToFirmware` with nothing to hand over to, and
+`HalInitiateShutdown`, end the run through `xbox_title_exit(routine, why)`
+(`kernel_reboot.c`). The bridge words the reason from the launch data page
+(`xbox_exit_reason`):
+
+| Case | Reason |
+|---|---|
+| empty launch path, or no page | `the game returned to the dashboard (routine N)` |
+| empty path, XapiBootToDash's reason (first launch-data dword) non-zero | `… (routine N, dashboard reason R)` |
+| another image this build has no target for | `the game asked to start <path>, which this build cannot start (routine N)` |
+| `HalInitiateShutdown` | `the game shut the console down` |
+
+A refused or failed restart into the running image reads as the dashboard.
+`xbox_title_exit` prints `[EXIT] <reason>`, calls the exit handler
+(`xbox_SetExitHandler`, `kernel.h`; the Android shell's opens the launcher
+with the reason, [docs/android/app-shell.md](../android/app-shell.md) « The
+title leaving by itself »), then ends the process: on Android with
+`recomp_quit(0)` (exit hook, flush, log drain, `_exit`), because the guest's
+other threads, SDL's and the GPU executor are still running and `exit()`'s
+atexit handlers and destructors would pull their mutexes away (it aborted with
+`FORTIFY: pthread_mutex_lock called on a destroyed mutex`); elsewhere with
+`ExitProcess(0)`, as before (status 0). Desktop hosts set no handler.
+`tests/kernel_reboot` checks the wording and, on POSIX, that a forked child's
+handler gets the reason and the process then exits with status 0.
 
 ## DVD security sector
 

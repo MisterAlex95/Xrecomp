@@ -25,7 +25,9 @@
  *   window and the lifecycle; quitting is the in-game menu's (Android Back
  *   opens it in ShellActivity: GameMenu, menu_jni.c), which ends the
  *   process with recomp_quit (flush, drain logcat, _exit(0): « clean
- *   exit »);
+ *   exit »); a title that leaves by itself (the dashboard, an image this
+ *   build cannot start) goes back to the launcher, which says why
+ *   (exit_via_launcher, ShellActivity.titleExited), then recomp_quit;
  * - no title linked in and default.xbe found: the title pack for its title
  *   ID, <internal files dir>/packs/<TITLEID>/ (pack_loader.h), dlopened and
  *   run the same way (PACK_LOADED). An invalid pack or a dlopen error
@@ -223,6 +225,25 @@ static void restart_image_via_launcher(void)
     restart_via_launcher();
 }
 
+/* The title left by itself (HalReturnToFirmware to the dashboard, an image
+ * this build cannot start, HalInitiateShutdown; xbox_title_exit in
+ * src/kernel/kernel_reboot.c). ShellActivity.titleExited(why) opens the
+ * launcher, which shows why, and finishes this activity; it returns once the
+ * launcher was asked. The kernel then ends this process with recomp_quit
+ * (flush, drain logcat, _exit): no exit() under the running guest threads,
+ * no tombstone. Called on the guest thread. */
+typedef void (*xbox_exit_handler)(const char *why);
+void xbox_SetExitHandler(xbox_exit_handler fn);
+
+static void exit_via_launcher(const char *why)
+{
+    if (call_activity("titleExited", why ? why : "") != 0) {
+        fprintf(stderr, "xboxrecomp: title exit: ShellActivity.titleExited failed\n");
+        return;
+    }
+    printf("xboxrecomp: title exit: launcher opened (%s)\n", why ? why : "");
+}
+
 /* Background / foreground (XBA-24): the same watch as the title's window
  * (fb_present_sdl.c), so logcat shows "lifecycle: paused" / "resumed after
  * N ms" on the shell too. */
@@ -287,6 +308,7 @@ int main(int argc, char *argv[])
         s_title_store = &store;
         xbox_SetRestartHandler(xba_pack_image_xbe() ? restart_image_via_launcher : restart_via_launcher);
         xbox_SetImageHandler(image_via_launcher);
+        xbox_SetExitHandler(exit_via_launcher);
         int rc = xbox_HostWindowMain(title_boot);
         printf("xboxrecomp: title returned %d\n", rc);
         recomp_quit(rc);

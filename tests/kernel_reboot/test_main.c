@@ -14,7 +14,10 @@
  *   - POSIX desktop: the default handler, end to end. A forked child opens a
  *     file and asks for a quick reboot; the process that execv starts is
  *     this test again, which takes the page, checks it and that the file
- *     descriptor did not survive the exec, and exits with the verdict.
+ *     descriptor did not survive the exec, and exits with the verdict;
+ *   - the title leaving by itself (K-2): xbox_exit_reason's wording, and on
+ *     POSIX desktop xbox_title_exit from a forked child: the exit handler gets
+ *     the reason, the process then ends with status 0.
  * Otherwise nothing is restarted: the handler is one that counts.
  */
 #ifndef _WIN32
@@ -46,6 +49,17 @@ recomp_func_t recomp_lookup_manual(uint32_t xbox_va) { (void)xbox_va; return NUL
 static int failures;
 static int restarts;
 static char handed[256];
+
+#if !defined(_WIN32) && !defined(__ANDROID__)
+static int exit_fd = -1;
+
+/* The exit handler of the forked child: the reason, down the pipe. */
+static void record_exit(const char *why)
+{
+    if (exit_fd >= 0 && write(exit_fd, why, strlen(why)) < 0)
+        _exit(31);
+}
+#endif
 
 static void count_image(const char *target)
 {
@@ -312,6 +326,66 @@ int main(void)
         if (!(WIFEXITED(status) && WEXITSTATUS(status) == 0))
             printf("    child status 0x%X\n", status);
         check(!exists(file), "the restarted process took the file");
+    }
+#endif
+
+    /* The title leaving by itself: the reason the launcher shows. */
+    {
+        char why[640];
+
+        xbox_exit_reason(why, sizeof why, 0, 2, "", 0);
+        check(strcmp(why, "the game returned to the dashboard (routine 2)") == 0,
+              "reason: dashboard, empty launch path");
+        xbox_exit_reason(why, sizeof why, 0, 2, "", 3);
+        check(strcmp(why, "the game returned to the dashboard (routine 2,"
+                          " dashboard reason 3)") == 0,
+              "reason: dashboard with XapiBootToDash's reason");
+        xbox_exit_reason(why, sizeof why, 0, 1, NULL, 7);
+        check(strcmp(why, "the game returned to the dashboard (routine 1)") == 0,
+              "reason: no launch data page");
+        xbox_exit_reason(why, sizeof why, 0, 2, "\\Device\\CdRom0;other.xbe", 0);
+        check(strcmp(why, "the game asked to start \\Device\\CdRom0;other.xbe,"
+                          " which this build cannot start (routine 2)") == 0,
+              "reason: another image this build cannot start");
+        xbox_exit_reason(why, sizeof why, 1, 0, NULL, 0);
+        check(strcmp(why, "the game shut the console down") == 0,
+              "reason: HalInitiateShutdown");
+    }
+
+#if !defined(_WIN32) && !defined(__ANDROID__)
+    /* xbox_title_exit: the handler first, with the reason; then the process
+     * ends with status 0 although the handler returned. */
+    {
+        int pfd[2], status = -1;
+        pid_t pid = -1;
+        char got[700];
+        ssize_t n = 0;
+
+        fflush(NULL);
+        if (pipe(pfd) == 0) {
+            pid = fork();
+            if (pid == 0) {
+                close(pfd[0]);
+                exit_fd = pfd[1];
+                xbox_SetExitHandler(record_exit);
+                xbox_title_exit(2, "the game returned to the dashboard (routine 2)");
+                _exit(30);                                   /* returned: wrong */
+            }
+            close(pfd[1]);
+            if (pid > 0) {
+                ssize_t r;
+                while (n < (ssize_t)sizeof(got) - 1 &&
+                       (r = read(pfd[0], got + n, sizeof(got) - 1 - n)) > 0)
+                    n += r;
+                waitpid(pid, &status, 0);
+            }
+            close(pfd[0]);
+        }
+        got[n > 0 ? n : 0] = 0;
+        check(strcmp(got, "the game returned to the dashboard (routine 2)") == 0,
+              "title exit: the handler gets the reason");
+        check(pid > 0 && WIFEXITED(status) && WEXITSTATUS(status) == 0,
+              "title exit: the process then ends with status 0");
     }
 #endif
 

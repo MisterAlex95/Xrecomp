@@ -1462,6 +1462,31 @@ Logcat: `[KERNEL] quick reboot: launch data in …`, `xboxrecomp: quick reboot: 
 reboot)`, `launcher: ending the running game (pid …)`, then the new process's `Launch data: quick reboot page at …`.
 Past 3 restarts in 30 s the kernel refuses and the title exits.
 
+### The title leaving by itself
+
+A title that ends its own run — `HalReturnToFirmware` to the dashboard (XapiBootToDash, an empty launch path; a failed
+start-up check such as KOTOR's before the DVD security sector existed), to an image this build cannot start, a
+restart refused by the cap, or `HalInitiateShutdown` — goes back to the launcher, which says why. It used to call
+`exit()` from the guest thread while the window, SDL and the other guest threads still ran: atexit handlers and
+destructors pulled mutexes from under them, `FORTIFY: pthread_mutex_lock called on a destroyed mutex`, SIGABRT, and a
+crash report (and a « Prepare again » offer) for a title that had merely quit.
+
+`xbox_title_exit` (`src/kernel/kernel_reboot.c`, [docs/runtime/README.md](../runtime/README.md) « The title leaving »)
+calls the exit handler `shell_main.c` sets before the title starts (`exit_via_launcher`). It calls
+`ShellActivity.titleExited(why)` through JNI from the guest thread; that starts `LauncherActivity` with
+`EXTRA_TITLE_EXITED` (the kernel's reason, English) and `NEW_TASK | CLEAR_TASK`, finishes the activity, and returns
+once the UI thread has done so (at most 2 s). The kernel then ends the process with `recomp_quit(0)` (flush, log drain,
+`_exit`): no atexit handlers, no tombstone, `ApplicationExitInfo` says the process exited by itself. The launcher waits
+up to 2 s for the game's process to be gone (else ends it), so the play session closes and the exit is not taken for a
+crash, then opens Home (Library beneath when the library is on) with the note « The game ended: the game returned to
+the dashboard (routine 2). »; « Open the game directly » does not start it again. If the JNI call fails, the process
+still ends through `recomp_quit`.
+
+Logcat: `[EXIT] the game returned to the dashboard (routine 2)`, `shell: the game exited by itself (…), back to the
+launcher`, `xboxrecomp: title exit: launcher opened (…)`, `xboxrecomp: clean exit`, then in `:launcher`
+`launcher: shown (game exited: …)`. The quick reboot and the other image of the disc (XBA-82) are handled before any
+of this and are unchanged. Test: `LauncherPrepareTest.titleExitShowsWhyOnHome` (Robolectric).
+
 ### Last lines before a crash
 
 stdout and stderr reach logcat through pipes read by two pump threads (`src/platform/android_log.c`); a line still in

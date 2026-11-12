@@ -1897,13 +1897,16 @@ static void bridge_HalReturnToFirmware(void)
 
     /* Routine 2 with a page naming this title's own image: a restart, not an
      * exit (kernel_reboot.c). Fable's Pause -> Quit -> Confirm goes back to
-     * its main menu this way. Another image, or no page, exits as before:
-     * there is no dashboard or second XBE to hand over to. */
+     * its main menu this way. Another image of the disc is handed over to
+     * when the build has it (XBA-82). An empty path is XapiBootToDash: the
+     * dashboard, nothing to hand over to. Whatever is left ends the run, with
+     * a reason the Android launcher shows (xbox_title_exit). */
     {
         uint32_t page = BRIDGE_MEM32(XBOX_KERNEL_DATA_BASE + KDATA_LAUNCH_DATA_PAGE);
+        char path[520] = "";
+        char why[640];
 
-        if (routine == 2 && page) {
-            char path[520];
+        if (page) {
             uint32_t i;
 
             for (i = 0; i < sizeof(path) - 1; i++) {
@@ -1911,6 +1914,8 @@ static void bridge_HalReturnToFirmware(void)
                 if (!path[i]) break;
             }
             path[i] = 0;
+        }
+        if (routine == 2 && page && path[0]) {
             if (xbox_launch_path_is_image(path, xbox_XeImageFileName.Buffer))
                 xbox_quick_reboot((const uint8_t *)((uintptr_t)page +
                                                     g_xbox_mem_offset));
@@ -1923,9 +1928,23 @@ static void bridge_HalReturnToFirmware(void)
                 recomp_discovery_launch(path);
             }
         }
+        /* The reason. XapiBootToDash's own reason (the first launch-data
+         * dword) only with an empty path: anything else's launch data is the
+         * title's. A path matters only for routine 2 (a launch), and a
+         * refused or failed restart into this image reads as the dashboard:
+         * there is nothing better to say. */
+        if (!page)
+            xbox_exit_reason(why, sizeof why, 0, routine, NULL, 0);
+        else if (!path[0])
+            xbox_exit_reason(why, sizeof why, 0, routine, "",
+                             BRIDGE_MEM32(page + 1024));
+        else if (routine == 2 &&
+                 !xbox_launch_path_is_image(path, xbox_XeImageFileName.Buffer))
+            xbox_exit_reason(why, sizeof why, 0, routine, path, 0);
+        else
+            xbox_exit_reason(why, sizeof why, 0, routine, NULL, 0);
+        xbox_HalReturnToFirmwareWhy(routine, why);
     }
-
-    xbox_HalReturnToFirmware(routine);
 }
 
 static void bridge_ExAllocatePool(void)

@@ -263,6 +263,30 @@ public class LauncherPrepareTest {
         assertNull("« open directly » does not restart the shell", shadowOf(a).getNextStartedActivity());
     }
 
+    /**
+     * K-2: the title left by itself (HalReturnToFirmware to the dashboard). The shell hands back with the kernel's
+     * reason; Home says it, the pack stays, and « open directly » does not start the game again at once.
+     */
+    @Test
+    public void titleExitShowsWhyOnHome() throws Exception {
+        withToolchain();
+        GameStore.setAutoStart(app, true);
+        File dir = TestSupport.writePack(app.getFilesDir(), TID, 64);
+        status(PrepareProtocol.DONE, "pack", 5, 100, -1, "", "");
+        ActivityManager am = app.getSystemService(ActivityManager.class);
+        shadowOf(am).setProcesses(java.util.Collections.emptyList());   // the game's process already ended
+        Intent in = ShellActivity.titleExitedIntent(app, "the game returned to the dashboard (routine 2)");
+        assertTrue((in.getFlags() & Intent.FLAG_ACTIVITY_CLEAR_TASK) != 0);
+        LauncherActivity a = Robolectric.buildActivity(LauncherActivity.class, in).setup().get();
+        shadowOf(Looper.getMainLooper()).idle();
+        assertEquals(LauncherActivity.Screen.HOME, a.screenForTest());
+        assertTrue(a.noteForTest(), a.noteForTest().contains("returned to the dashboard (routine 2)"));
+        assertTrue("the pack stays", dir.exists());
+        assertEquals(Pack.Check.VALID, Pack.check(app.getFilesDir(), TID));
+        assertNull("« open directly » does not restart the game", shadowOf(a).getNextStartedActivity());
+        assertEquals("The game ended.", LauncherActivity.titleExitedNote(app, " "));
+    }
+
     @Test
     public void autoStartDoesNotSkipPrepare() throws Exception {
         withToolchain();

@@ -1,8 +1,10 @@
 package fr.adserver.xboxrecomp;
 
 import android.content.ActivityNotFoundException;
+import android.content.Context;
 import android.content.Intent;
 import android.os.Bundle;
+import android.os.Looper;
 import android.system.ErrnoException;
 import android.system.Os;
 import android.util.Log;
@@ -16,6 +18,8 @@ import java.io.File;
 import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.Locale;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 /**
  * The app shell every title uses: SDL loads libSDL2.so, then libmain.so, and calls its SDL_main.
@@ -470,6 +474,49 @@ public class ShellActivity extends SDLActivity {
             startActivity(i);
             finish();
         });
+    }
+
+    /** How long titleExited waits for the UI thread to have asked for the launcher. */
+    static final long TITLE_EXIT_HANDOFF_MS = 2000;
+
+    /**
+     * Called by shell_main.c (the guest thread, through JNI) when the title left by itself: HalReturnToFirmware to
+     * the dashboard, an image this build cannot start, a shutdown (src/kernel/kernel_reboot.c xbox_title_exit). The
+     * launcher opens saying why (LauncherActivity.EXTRA_TITLE_EXITED) and this activity finishes. Returns once that
+     * is asked (at most TITLE_EXIT_HANDOFF_MS): the native side then ends this process itself (recomp_quit).
+     */
+    @SuppressWarnings("unused")
+    public void titleExited(String why) {
+        String w = why == null ? "" : why;
+        Log.i(LauncherActivity.TAG, "shell: the game exited by itself (" + w + "), back to the launcher");
+        CountDownLatch asked = new CountDownLatch(1);
+        Runnable open = () -> {
+            try {
+                startActivity(titleExitedIntent(this, w));
+                finish();
+                overridePendingTransition(0, 0);
+            } finally {
+                asked.countDown();
+            }
+        };
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            open.run();
+            return;
+        }
+        runOnUiThread(open);
+        try {
+            if (!asked.await(TITLE_EXIT_HANDOFF_MS, TimeUnit.MILLISECONDS))
+                Log.w(LauncherActivity.TAG, "shell: the launcher was not asked within " + TITLE_EXIT_HANDOFF_MS + " ms");
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    /** The launcher, on Home with the title's reason for leaving. */
+    static Intent titleExitedIntent(Context c, String why) {
+        return new Intent(c, LauncherActivity.class)
+                .putExtra(LauncherActivity.EXTRA_TITLE_EXITED, why == null ? "" : why)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK);
     }
 
     /**

@@ -1263,24 +1263,35 @@ VOID __stdcall xbox_HalReadWritePCISpace(
  * HAL Firmware & Shutdown
  *
  * HalReturnToFirmware returns to the Xbox dashboard. For us, this means
- * exit the game cleanly.
+ * the run ends (xbox_title_exit, kernel_reboot.c): on Android back to the
+ * launcher with the reason, elsewhere ExitProcess as before. The bridge's
+ * HalReturnToFirmware handles the quick reboot and the other image first and
+ * passes its own reason.
  * ============================================================================ */
 
-VOID __stdcall xbox_HalReturnToFirmware(ULONG Routine)
+void xbox_HalReturnToFirmwareWhy(ULONG Routine, const char *why)
 {
     xbox_log(XBOX_LOG_INFO, XBOX_LOG_HAL,
         "HalReturnToFirmware: routine=%u (exiting)", Routine);
     /* stderr too: the kernel log file is rewritten on every run, so a title
      * that ends itself otherwise leaves no trace in the run's own log. */
     fprintf(stderr, "[EXIT] HalReturnToFirmware routine=%u\n", (unsigned)Routine);
-    ExitProcess(0);
+    xbox_title_exit((unsigned)Routine, why);
+}
+
+VOID __stdcall xbox_HalReturnToFirmware(ULONG Routine)
+{
+    xbox_HalReturnToFirmwareWhy(Routine, NULL);
 }
 
 VOID __stdcall xbox_HalInitiateShutdown(void)
 {
+    char why[64];
+
     xbox_log(XBOX_LOG_INFO, XBOX_LOG_HAL, "HalInitiateShutdown (exiting)");
     fprintf(stderr, "[EXIT] HalInitiateShutdown\n");
-    ExitProcess(0);
+    xbox_exit_reason(why, sizeof why, 1, 0, NULL, 0);
+    xbox_title_exit(0, why);
 }
 
 BOOLEAN __stdcall xbox_HalIsResetOrShutdownPending(void)
