@@ -28,6 +28,8 @@ this run or an earlier one) is not written again: the file only grows with what 
 {"t":"thread_ctx","va":"0x00045670","routine":"0x00034560"}  StartContext1 inside the title's code with no dispatch entry
 {"t":"unimpl","va":"0x00056780","insn":"bsf eax, ecx"}       untranslated instruction reached (RECOMP_UNIMPL)
 {"t":"d3d","va":"0x0085FDE0","slot":"0x00862288"}            D3D's device found at run time (profiles/xdk/d3d8/d3d8.c)
+{"t":"wait_spin","va":"0x0027B91C","ret":"0x00025701","header":"0x00040001","status":"0xC0000001"}
+                                                             a thread waited on it 2,000 times in a second (kernel_bridge.c)
 ```
 
 Addresses are guest VAs, 8 hex digits. At most 6,144 distinct entries per file.

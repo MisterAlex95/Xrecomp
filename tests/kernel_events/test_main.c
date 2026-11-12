@@ -294,6 +294,30 @@ int main(int argc, char **argv)
               "mixed header and explicitly initialized event resolves", NULL);
     }
 
+    if (!on) {
+        /* XBA-93: a thread failing to wait on a title-built event thousands of
+         * times a second is a spin; the event is promoted to a guest event
+         * for good, and from then on behaves as with RECOMP_TITLE_KEVENTS. */
+        uint32_t spin_va = scratch + 0x3800, n, fails = 0;
+        build_event(spin_va, 1, 0);
+        for (n = 0; n < 2500; n++)
+            fails += ke_wait(spin_va) != 0 && g_eax != STATUS_TIMEOUT;
+        snprintf(d, sizeof d, "%u immediate failures of 2500", fails);
+        check(fails >= 2000 && fails < 2500, "a wait spin is caught within 2,000 waits", d);
+        st = ke_wait(spin_va);
+        snprintf(d, sizeof d, "status 0x%08X", st);
+        check(st == STATUS_TIMEOUT, "promoted: an unset event now times out instead of failing", d);
+        ke_set(spin_va);
+        st = ke_wait(spin_va);
+        snprintf(d, sizeof d, "status 0x%08X, SignalState %u", st, G(spin_va)[1]);
+        check(st == 0 && G(spin_va)[1] == 0, "promoted: KeSetEvent wakes the wait", d);
+        /* Another title-built event is left alone: the promotion is per object. */
+        build_event(scratch + 0x3900, 1, 0);
+        ke_set(scratch + 0x3900);
+        st = ke_wait(scratch + 0x3900);
+        check(st != 0 && st != STATUS_TIMEOUT, "the promotion is for that object only", NULL);
+    }
+
     xbox_MemoryLayoutShutdown();
     free(xbe);
     printf("\n%d failure(s)\n", failures);

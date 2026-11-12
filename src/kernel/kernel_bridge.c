@@ -2057,6 +2057,7 @@ static HANDLE ke_shadow_lookup(uint32_t guest_va);
 static void ke_shadow_insert(uint32_t guest_va, HANDLE host);
 static HANDLE bridge_resolve_handle(uint32_t token);
 static HANDLE ke_guest_event(uint32_t guest_va, int *type);
+static int ke_promote(uint32_t guest_va);
 
 /* Bring a header-owned host event in line with guest SignalState before a
  * wait. Explicitly initialized shadows keep their existing host-state policy. */
@@ -2125,6 +2126,99 @@ static void bridge_KeSetEvent(void)
 }
 
 /* ── KeWaitForSingleObject (ordinal 159) ─────────────────── */
+/* ── Wait spins (XBA-93) ─────────────────────────────────────
+ *
+ * A thread that waits on the same object thousands of times a second is
+ * stuck: the wait either fails at once or times out at once, and nothing ever
+ * signals the object. Black's worker did it ~500,000 times a second. Seen
+ * causes: an event the title built by writing its header (no
+ * KeInitializeEvent), which without RECOMP_TITLE_KEVENTS reaches the host as a
+ * bad handle and fails immediately; and an object only the hardware would
+ * signal (a GPU interrupt, a DPC) that the runtime does not deliver.
+ *
+ * After WAIT_SPIN_CALLS consecutive waits on one object within
+ * WAIT_SPIN_MS, it is reported once: the object, its dispatcher header, the
+ * wait's result, the caller's return address and a frame walk, in the log and
+ * in the discovery file ({"t":"wait_spin"}). An event header whose waits
+ * failed (not timed out) is then promoted to a guest-built event, which is
+ * what RECOMP_TITLE_KEVENTS does for every object: the next wait blocks until
+ * KeSetEvent, a software method 5 or the guest itself sets it.
+ * RECOMP_WAIT_SPIN=0 turns the detector off. */
+#define WAIT_SPIN_CALLS 2000u
+#define WAIT_SPIN_MS    1000u
+
+typedef struct {
+    uint32_t object;
+    uint32_t calls;
+    DWORD    t0;
+    uint32_t reported;          /* last object reported by this thread */
+} WaitSpin;
+static XBOX_THREAD_LOCAL WaitSpin t_wait_spin;
+
+static const char *dispatcher_type_name(uint32_t type)
+{
+    switch (type) {
+    case 0: return "notification event";
+    case 1: return "synchronization event";
+    case 2: return "mutant";
+    case 3: return "process";
+    case 4: return "queue";
+    case 5: return "semaphore";
+    case 6: return "thread";
+    case 8: return "notification timer";
+    case 9: return "synchronization timer";
+    default: return "unknown";
+    }
+}
+
+static void bridge_wait_spin(uint32_t object, uint32_t status, uint32_t timeout_ptr, uint32_t ret_va)
+{
+    static int enabled = -1;
+    WaitSpin *w = &t_wait_spin;
+    DWORD now;
+
+    if (enabled < 0) {
+        const char *e = getenv("RECOMP_WAIT_SPIN");
+        enabled = !(e && *e == '0');
+    }
+    if (!enabled)
+        return;
+    now = GetTickCount();
+    if (object != w->object || now - w->t0 > WAIT_SPIN_MS) {
+        w->object = object;
+        w->calls = 0;
+        w->t0 = now;
+    }
+    if (++w->calls != WAIT_SPIN_CALLS || w->reported == object)
+        return;
+    w->reported = object;
+    {
+        int readable = object >= 0x10000u && !(object & 3u)
+                    && (object < 0x04000000u || (object >= 0x80000000u && object < 0x84000000u));
+        uint32_t hdr = readable ? BRIDGE_MEM32(object) : 0;
+        uint32_t type = hdr & 0xFFu, size = (hdr >> 16) & 0xFFu;
+        uint32_t signal = readable ? BRIDGE_MEM32(object + 4) : 0;
+        uint32_t frames[4] = { 0, 0, 0, 0 }, ebp = g_ebp;
+        int k, failed = status != 0 && status != (uint32_t)STATUS_TIMEOUT
+                     && status != 0x101u && status != 0xC0u;
+        const char *timeout = !timeout_ptr ? "none"
+                            : (BRIDGE_MEM32(timeout_ptr) | BRIDGE_MEM32(timeout_ptr + 4)) ? "set" : "zero";
+        for (k = 0; k < 4 && ebp >= 0x10000u && ebp < 0x04000000u && !(ebp & 3u); k++) {
+            frames[k] = BRIDGE_MEM32(ebp + 4);
+            ebp = BRIDGE_MEM32(ebp);
+        }
+        fprintf(stderr, "  [KERNEL] wait spin: %u waits in under %u ms on 0x%08X (%s, header 0x%08X, size %u, "
+                        "signal %u), status 0x%08X, timeout %s, from 0x%08X; frames 0x%08X 0x%08X 0x%08X 0x%08X\n",
+                WAIT_SPIN_CALLS, WAIT_SPIN_MS, object, readable ? dispatcher_type_name(type) : "not guest memory",
+                hdr, size, signal, status, timeout, ret_va, frames[0], frames[1], frames[2], frames[3]);
+        recomp_discovery_wait_spin(object, ret_va, hdr, status);
+        if (failed && readable && (type == 0 || type == 1) && size == 4 && ke_promote(object))
+            fprintf(stderr, "  [KERNEL] wait spin: 0x%08X looks like an event the title built itself: "
+                            "promoted to a guest event (RECOMP_TITLE_KEVENTS for this object)\n", object);
+        fflush(stderr);
+    }
+}
+
 static void bridge_KeWaitForSingleObject(void)
 {
     uint32_t object = STACK_ARG(0);
@@ -2132,6 +2226,7 @@ static void bridge_KeWaitForSingleObject(void)
     uint32_t wait_mode = STACK_ARG(2);
     uint32_t alertable = STACK_ARG(3);
     uint32_t timeout_ptr = STACK_ARG(4);
+    uint32_t ret_va = BRIDGE_MEM32(g_esp - 4);   /* the call's return address */
     HANDLE h;
 
     {   /* An event the title built itself (see ke_guest_event). Its
@@ -2145,6 +2240,8 @@ static void bridge_KeWaitForSingleObject(void)
                 (BOOLEAN)alertable, XBOX_TO_NATIVE(timeout_ptr));
             if (g_eax == 0 && type == 1)               /* synchronization: consumed */
                 BRIDGE_MEM32(object + 4) = 0;
+            if (g_eax != 0)
+                bridge_wait_spin(object, g_eax, timeout_ptr, ret_va);
             return;
         }
     }
@@ -2158,6 +2255,8 @@ static void bridge_KeWaitForSingleObject(void)
     g_eax = (uint32_t)xbox_KeWaitForSingleObject(
         h, wait_reason, wait_mode,
         (BOOLEAN)alertable, XBOX_TO_NATIVE(timeout_ptr));
+    if (g_eax != 0)
+        bridge_wait_spin(object, g_eax, timeout_ptr, ret_va);
 }
 
 /* ── NtWaitForSingleObject (ordinal 233) ─────────────────── */
@@ -7812,6 +7911,34 @@ static void ke_shadow_remove(uint32_t guest_va)
  * once now blocks until the event is set, and on a title whose setter the
  * runtime does not model yet (a GPU interrupt, say) that turns a spin into a
  * hang. Turn it on for a title that waits on events it built itself. */
+/* Objects promoted one by one by the wait-spin detector (XBA-93, see
+ * bridge_wait_spin): the RECOMP_TITLE_KEVENTS behaviour for an event a thread
+ * keeps failing to wait on, without turning it on for every object. */
+#define KE_PROMOTED_MAX 64
+static volatile uint32_t g_ke_promoted[KE_PROMOTED_MAX];
+static volatile LONG g_ke_promoted_n;
+
+static int ke_is_promoted(uint32_t guest_va)
+{
+    LONG i, n = g_ke_promoted_n;
+    for (i = 0; i < n && i < KE_PROMOTED_MAX; i++)
+        if (g_ke_promoted[i] == guest_va)
+            return 1;
+    return 0;
+}
+
+static int ke_promote(uint32_t guest_va)
+{
+    LONG i;
+    if (ke_is_promoted(guest_va))
+        return 1;
+    i = InterlockedIncrement(&g_ke_promoted_n) - 1;
+    if (i >= KE_PROMOTED_MAX)
+        return 0;
+    g_ke_promoted[i] = guest_va;
+    return 1;
+}
+
 static HANDLE ke_guest_event(uint32_t guest_va, int *type)
 {
     static int enabled = -1;
@@ -7822,7 +7949,7 @@ static HANDLE ke_guest_event(uint32_t guest_va, int *type)
         const char *e = getenv("RECOMP_TITLE_KEVENTS");
         enabled = e && *e == '1';
     }
-    if (!enabled)
+    if (!enabled && !ke_is_promoted(guest_va))
         return NULL;
     if (guest_va < 0x10000u || (guest_va & 3u))
         return NULL;

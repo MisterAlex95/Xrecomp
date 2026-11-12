@@ -35,8 +35,8 @@ static pthread_mutex_t s_lock = PTHREAD_MUTEX_INITIALIZER;
 #define UNLOCK() pthread_mutex_unlock(&s_lock)
 #endif
 
-enum { K_ICALL = 1, K_THREAD, K_THREAD_CTX, K_UNIMPL, K_D3D };
-static const char *const kind_name[] = { "", "icall", "thread", "thread_ctx", "unimpl", "d3d" };
+enum { K_ICALL = 1, K_THREAD, K_THREAD_CTX, K_UNIMPL, K_D3D, K_WAIT_SPIN };
+static const char *const kind_name[] = { "", "icall", "thread", "thread_ctx", "unimpl", "d3d", "wait_spin" };
 
 /* What is already in the file: kind << 32 | va, open addressing. A title that
  * fills it is beyond what one file can help with; the rest is dropped. */
@@ -69,7 +69,7 @@ static int seen_add(uint64_t key)       /* 1 when new */
 
 static int kind_of(const char *s, size_t n)
 {
-    for (int k = K_ICALL; k <= K_D3D; k++)
+    for (int k = K_ICALL; k <= K_WAIT_SPIN; k++)
         if (strlen(kind_name[k]) == n && !memcmp(s, kind_name[k], n))
             return k;
     return 0;
@@ -240,6 +240,14 @@ void recomp_discovery_d3d(uint32_t device, uint32_t slot)
     char f[48];
     snprintf(f, sizeof f, ",\"slot\":\"0x%08X\"", slot);
     note(K_D3D, device, f);
+}
+
+void recomp_discovery_wait_spin(uint32_t object, uint32_t ret_va, uint32_t header, uint32_t status)
+{
+    char f[120];
+    snprintf(f, sizeof f, ",\"ret\":\"0x%08X\",\"header\":\"0x%08X\",\"status\":\"0x%08X\"",
+             ret_va, header, status);
+    note(K_WAIT_SPIN, object, f);
 }
 
 const char *recomp_discovery_path(void)
