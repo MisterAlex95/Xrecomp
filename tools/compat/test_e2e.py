@@ -229,3 +229,78 @@ def test_a_launch_of_another_image_hands_over(tmp_path):
     assert "Game2" in log.split("handing over to", 1)[1], log[-3000:]     # game.xbe's runtime started
     res = json.loads(out.read_text().splitlines()[-1])
     assert "launches another XBE" not in (res.get("blocker") or ""), res
+
+
+def _coroutine_xbe(tmp_path):
+    """Two coroutines on two guest stacks (XBA-101). The entry (A) builds B's
+    stack -- the four registers the switch pops, then B's entry, stored as an
+    immediate as CreateFiber would -- and calls the switch 1000 times,
+    checking after each that B ran once more; then HalReturnToFirmware(2),
+    which ends the run with « [EXIT] ». B counts and switches back, for ever.
+    The switch is Fable's shape: push ebx, ebp, esi, edi / xchg [slot], esp /
+    pop them / ret. If B never runs (the switch returns as a plain C return),
+    A's check fails and it spins."""
+    import struct
+    slot, a_n, b_n, b_esp = 0x11F00, 0x11F10, 0x11F14, 0x11EE8
+    sw, b = 0x11040, 0x11060
+
+    def rel(at, target):                 # e8 rel32 at `at`
+        return struct.pack("<i", target - (at + 5))
+
+    a = bytearray(bytes.fromhex("558bec"))
+    a += b"\xc7\x05" + struct.pack("<II", slot, b_esp)           # mov [slot], B's esp
+    a += b"\xc7\x05" + struct.pack("<II", b_esp + 16, b)         # mov [B's ret slot], B
+    loop = len(a)
+    a += b"\xff\x05" + struct.pack("<I", a_n)                   # inc dword [a_n]
+    a += b"\xe8" + rel(0x11000 + len(a), sw)                    # call sw
+    a += b"\xa1" + struct.pack("<I", a_n)                       # mov eax, [a_n]
+    a += b"\x3b\x05" + struct.pack("<I", b_n)                   # cmp eax, [b_n]
+    a += b"\x75\x0f"                                            # jne hang
+    a += b"\x3d" + struct.pack("<I", 1000)                      # cmp eax, 1000
+    a += b"\x72" + bytes([(loop - (len(a) + 2)) & 0xFF])        # jb loop
+    a += bytes.fromhex("6a02" "ff1500080100")                   # push 2; call [HalReturnToFirmware]
+    a += b"\xeb\xfe"                                            # hang: jmp $
+    text = bytearray(a.ljust(sw - 0x11000, b"\xcc"))
+    text += bytes.fromhex("53555657") + b"\x87\x25" + struct.pack("<I", slot) + bytes.fromhex("5f5e5d5b" "c3")
+    text = text.ljust(b - 0x11000, b"\xcc")
+    bb = b"\xff\x05" + struct.pack("<I", b_n)                   # inc dword [b_n]
+    bb += b"\xe8" + rel(b + len(bb), sw)                        # call sw
+    bb += b"\xeb" + bytes([(-(len(bb) + 2)) & 0xFF])            # jmp B
+    text += bb
+    text = text.ljust(0xF20, b"\x00")
+    d = tmp_path / "coro"
+    d.mkdir()
+    p = make_xbe(d / "default.xbe", libs=(("XAPILIB", 5849, 0),), text=bytes(text), title_id=0x58424106,
+                 title="Coroutines")
+    xbe = bytearray(open(p, "rb").read())
+    struct.pack_into("<II", xbe, 0x800, 0x80000000 | 49, 0)     # HalReturnToFirmware, end
+    open(p, "wb").write(xbe)
+    return d
+
+
+@pytest.mark.skipif(os.environ.get("XBA_E2E") != "1", reason="XBA_E2E=1: builds and boots a title (minutes)")
+def test_two_coroutines_switch_stacks(tmp_path):
+    """XBA-101 in the real pipeline: the lifter marks the switch, the runtime
+    gives B a host stack of its own, and A sees B run between each of its
+    1000 switches, then leaves. With RECOMP_STACK_SWITCH=0 (the behaviour
+    before) B never runs and A spins."""
+    if not shutil.which("cmake"):
+        pytest.skip("no cmake")
+    d, out, cw = _coroutine_xbe(tmp_path), tmp_path / "results.jsonl", tmp_path / "cw"
+
+    def run(**env):
+        r = subprocess.run([sys.executable, "-m", "tools.compat", "run", str(d), "--work-root", str(cw),
+                            "--seconds", "5", "--sustain", "3", "--out", str(out)],
+                           cwd=ROOT, capture_output=True, text=True, timeout=1800, env=dict(os.environ, **env))
+        assert r.returncode == 0, r.stdout[-2000:] + r.stderr[-2000:]
+        return (cw / "coro" / "run-0.log").read_text(errors="replace")
+
+    log = run()
+    assert "[STACK] context 1: new guest stack at esp 0x00011EFC, starts at 0x00011060" in log, log[-3000:]
+    assert "[EXIT] the game returned to the dashboard (routine 2)" in log, log[-3000:]
+    disc = cw / "coro" / "discovered.jsonl"
+    lines = [json.loads(l) for l in disc.read_text().splitlines()] if disc.exists() else []
+    assert not [l for l in lines if l.get("t") == "stack_switch"], lines
+
+    log = run(RECOMP_STACK_SWITCH="0")
+    assert "[STACK] context" not in log and "[EXIT]" not in log, log[-3000:]
