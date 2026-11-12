@@ -1,0 +1,11 @@
+cmake_minimum_required(VERSION 3.20)
+project(frame_times_test C)
+set(CMAKE_C_STANDARD 11)
+# src/video/frame_times.h is header-only (XBA-29).
+add_executable(frame_times_test test_main.c)
+target_include_directories(frame_times_test PRIVATE ../../src/video)
+if(NOT MSVC)
+    target_link_libraries(frame_times_test PRIVATE m)
+endif()
+enable_testing()
+add_test(NAME frame_times COMMAND frame_times_test)
