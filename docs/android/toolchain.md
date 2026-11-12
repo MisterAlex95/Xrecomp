@@ -36,8 +36,8 @@ The spec said SDL2 2.30.x. We took 2.32.10, the latest SDL2 release: the same AP
 
 ## Secrets
 
-The release keystore is never in the image. When an APK is signed, it comes in at build time as a BuildKit secret
-(`--secret id=keystore,...`), as in Table Factory.
+The release keystore is never in the repository, an image or a layer. When an APK is signed with it, it comes in at
+build time as a BuildKit secret: see [Signing](#signing).
 
 ## The toolkit for Android
 
@@ -72,7 +72,8 @@ docker build -f tools/docker/android.Dockerfile --target prepare-apk-out --outpu
 ```
 
 Without `-PxbaToolchainDir` the APK is the plain shell, unchanged (the app hides Prepare when the toolchain is
-absent); the CI targets do not build the toolchain.
+absent). CI builds the toolchain only when its inputs change and publishes the APK with it: see
+[The XRecomp APK in CI](#the-xrecomp-apk-in-ci).
 
 **On a macOS host, without Docker.** The scripts also run on macOS (Apple silicon or Intel): `common.sh` takes the
 NDK's `darwin-x86_64` prebuilts (universal binaries, native on Apple silicon) and falls back to `shasum -a 256` and
@@ -175,6 +176,119 @@ Run by hand on 2026-11-10 (`XBA_TC_ANDROID_ROOT` set), all green:
 Build times on the CI host (6 jobs): LLVM 20 min (host tablegen 80 s, cross build 19 min), CPython 1.5 min (2.5 min
 at 3 jobs), capstone seconds. Disk: about 9 GB of LLVM build tree during the build (removed by the stage).
 
+## The XRecomp APK in CI
+
+XBA-125. The APK a player installs is built by CI on every push to `main` and published as the rolling prerelease
+[`xrecomp-latest`](https://git.cf.adserver.fr/Alex/xboxrecomp-android/releases/tag/xrecomp-latest), asset
+`xrecomp-<commit>.apk`. It is the `xrecomp-apk` stage of `android.Dockerfile`:
+
+- the **release** build type (the runtime libraries at `-O3`, `cpp/CMakeLists.txt`), still **debuggable**
+  (`-PxbaDebuggable=1`) so that `adb shell run-as` works for the device check lists and the data export below;
+- **with the toolchain** (`-PxbaToolchainDir`): Prepare is there;
+- version name = the commit (8 digits), **version code = the commit time in minutes** (`git log -1 --format=%ct` / 60,
+  about 29.9 million in 2026, far below Android's limit of 2.1 billion): each build of `main` is newer than the one
+  before, so it installs over it; the same commit always gets the same code;
+- native compiles capped at `JOBS=4` (`-PxbaJobs`: Ninja job pools, since Gradle runs Ninja with all cores);
+- checked before it leaves the stage: every toolchain file, the licence texts of what it ships (`assets/licences/`:
+  LICENSE, NOTICE, Apache-2.0 WITH LLVM-exception, PSF-2.0, BSD-3-Clause capstone), no `.xbe`/`.iso` other than our
+  synthetic `assets/selftest.xbe`, the version code, `application-debuggable`, and who signed it
+  (`xrecomp-signing.txt`: `release` or `DEBUG`, with the certificate's SHA-256).
+
+### The toolchain cache
+
+LLVM alone takes about 20 minutes at 6 jobs, so the toolchain is not built on every push. `tools/ci/toolchain_key.sh`
+prints a key (16 hex digits of a SHA-256) over every file of `tools/android/toolchain/` (`versions.env`, the build
+scripts, `check.sh`, `xbapython.c`) and, in `android.Dockerfile`, the base image and NDK version lines and the
+toolchain stages (`toolchain-base` to `toolchain-out`). Nothing else counts.
+
+| Job | Key found | Key missing |
+|---|---|---|
+| `android-toolchain` | seconds, no lock | under the heavy-job lock: `toolchain-python` (JOBS=4), then `toolchain-out` (LLVM at JOBS=4, then `check.sh`), one after the other, never side by side; about 35 min. The output plus LICENSE, NOTICE and LICENSES/ go into `xba-toolchain-<key>.tar.xz` (+ `.sha256`), asset of the prerelease `toolchain-<key>`; older `toolchain-*` releases are deleted. |
+| `android-apk` | downloads the archive, checks its SHA-256, and passes it to the build as `--build-context xba-toolchain=out/toolchain` (it replaces the Dockerfile stage of that name, so nothing of the toolchain is rebuilt) | (cannot happen: it needs `android-toolchain`) |
+
+Why a release asset and not a Docker tag: the host's Docker is pruned when its disk fills (Coolify), a release on
+Gitea is not, and anyone can download the toolchain to build an APK by hand (with
+`--build-context xba-toolchain=<dir>`, or `gradle -PxbaToolchainDir=<dir>`). The archive holds only open-source
+binaries we built, with their licence texts; no game content.
+
+To force a rebuild (a broken archive): delete the `toolchain-<key>` release in Gitea and run the workflow by hand.
+
+### Signing
+
+An Android update keeps the app's data (packs in `files/packs`, saves in `files/save`, settings, the library,
+`shared_prefs`) only if the new APK has the **same application id, the same signing certificate, and a version code
+not lower** than the installed one. The first two never change for the XRecomp APK (`fr.adserver.xboxrecomp.shell`
+and the release key); the version code grows with each commit.
+
+How the build gets the key (`android/app/build.gradle`):
+
+| Variable | What |
+|---|---|
+| `XBA_KEYSTORE` (or `-PxbaKeystore`) | path of the keystore (PKCS12) |
+| `XBA_KEYSTORE_PASSWORD` | its password |
+| `XBA_KEY_ALIAS` | the key's alias, default `xrecomp` |
+| `XBA_KEY_PASSWORD` | the key's password, default the store's (a PKCS12 keystore has one password) |
+
+Without `XBA_KEYSTORE`, a release build is signed with the debug key and Gradle prints a banner saying so;
+`-PxbaRequireReleaseKey=1` turns that into an error. In Docker, the `xrecomp-apk` stage takes the BuildKit secrets
+`xba_keystore` (file), `xba_keystore_password`, `xba_key_alias`; `--build-arg XBA_SIGNING=release` fails the build
+when the result is not release-signed, `debug` forces the debug key, `auto` (default) takes what is there. In CI, the
+`android-apk` job reads the repository secrets below and passes them as BuildKit secrets (never build args, so they
+are in no layer, no image history and no log); without them it warns (`::warning::` in the log) and the release
+notes say **Debug-signed**.
+
+| Gitea secret | Value |
+|---|---|
+| `XBA_RELEASE_KEYSTORE_B64` | the keystore file, base64 on one line |
+| `XBA_RELEASE_KEYSTORE_PASSWORD` | its password |
+| `XBA_RELEASE_KEY_ALIAS` | optional, when the alias is not `xrecomp` |
+
+**Creating the key (once, by the maintainer).** No agent and no CI job can do it: the key must exist only with you.
+
+1. On your Mac: `keytool -genkeypair -v -keystore xrecomp-release.p12 -storetype PKCS12 -alias xrecomp
+   -keyalg RSA -keysize 4096 -validity 36500 -dname "CN=XRecomp, O=adserver.fr"`. Choose a long password (keytool
+   asks for it twice).
+2. Save `xrecomp-release.p12` and its password in your password manager **and** one other place (an encrypted
+   backup). If the key is lost, no later APK can update an installed one: every device must uninstall, and loses its
+   data. Never commit it, never put it in `android/`.
+3. `base64 -i xrecomp-release.p12 | tr -d '\n' | pbcopy` (one line, in the clipboard).
+4. Gitea › Alex/xboxrecomp-android › Settings › Actions › Secrets › Add secret: `XBA_RELEASE_KEYSTORE_B64` = paste;
+   again for `XBA_RELEASE_KEYSTORE_PASSWORD` = the password. (`XBA_RELEASE_KEY_ALIAS` only if you changed `-alias`.)
+5. `keytool -list -v -keystore xrecomp-release.p12 -alias xrecomp | grep SHA256`: note the fingerprint.
+6. Actions › CI › Run workflow (branch `main`), or wait for the next merge. In the `android-apk` job log:
+   `signed with: release key` and `Signer #1 certificate SHA-256 digest` = the fingerprint of step 5 (without
+   colons, lower case). The `xrecomp-latest` notes no longer say Debug-signed.
+
+**Switching an installed debug-signed app to the release key.** Every APK installed so far (the shell from
+`shell-latest`, a `prepare-apk` built on a Mac, CI's earlier builds) is signed with *some* debug key: CI's changes
+whenever its Android image is rebuilt, a Mac's is in `~/.android/debug.keystore`. Android refuses to install the
+release-signed APK over it (`INSTALL_FAILED_UPDATE_INCOMPATIBLE`, « App not installed » on the device): the app must
+be uninstalled first, and **uninstalling deletes its data**: packs, saves, settings, library, title art, and the
+imported game copy in `Android/data/fr.adserver.xboxrecomp.shell/`. It is a one-time cost; every later
+`xrecomp-latest` updates in place. The least painful way: both the old build and the XRecomp APK are debuggable, so
+the data goes out and back with `run-as`:
+
+```bash
+PKG=fr.adserver.xboxrecomp.shell
+adb exec-out run-as $PKG tar -cf - files shared_prefs > xrecomp-data.tar   # 1. export (the old build)
+tar -tf xrecomp-data.tar | grep -E '^files/(save|packs|settings)/' | head   #    check it holds what you expect
+adb uninstall $PKG                                                          # 2. data gone from the device
+adb install xrecomp-<commit>.apk                                            # 3. the release-signed APK
+adb exec-in run-as $PKG tar -xf - < xrecomp-data.tar                         # 4. restore, before the first start
+```
+
+The imported game copy is not in the archive (it is the size of the game): choose the game folder or the ISO again
+after the switch. A pack built by the old version may be refused by the new one and prepared again (« expect to
+prepare a game again after an update », README); saves and settings are kept. Options not taken: making a debug key
+the release key (its password is `android`, its name says debug, CI's is in an image layer), or a second application
+id (two apps side by side, but saves split between them).
+
+The rolling `shell-latest` (the plain shell, debug-signed by CI's image) has the same application id: do not install
+it on a device that has the XRecomp APK; it is for the shell checks of [app-shell.md](app-shell.md).
+
+A local build that must update a release-signed install needs the key too:
+`XBA_KEYSTORE=… XBA_KEYSTORE_PASSWORD=… gradle assembleRelease -PxbaDebuggable=1 -PxbaToolchainDir=… -PxbaVersionCode=<above the installed one>`.
+
 ## CI gating
 
 XBA-53. `.gitea/workflows/ci.yml` runs on the Docker of the host that also serves Gitea and Plane, so what runs when
@@ -184,7 +298,7 @@ is chosen to keep that host up (on 2026-11-09, heavy jobs in parallel took Gitea
 |---|---|---|
 | Every PR from a branch of this repository | `linux`, then `android-toolkit` | a Linux test fails; the toolkit does not build with the NDK |
 | A PR from a fork | nothing (XBA-100: someone else's code never drives the host's Docker); a maintainer pushes the branch here to test it | |
-| Push to `main`, or by hand | `linux`, then `linux-arm64`, then `android-image` (publishes `shell-latest`) | a Linux test fails; an arm64 failure that is not expected; the image, the toolkit or the shell APK does not build |
+| Push to `main`, or by hand | `linux`, then `linux-arm64`, then `android-image` (publishes `shell-latest`), then `android-toolchain` (builds only on a key miss), then `android-apk` (publishes `xrecomp-latest`) | a Linux test fails; an arm64 failure that is not expected; the image, the toolkit or the shell APK does not build; the toolchain does not build or check; the XRecomp APK does not build or lacks a toolchain file or a licence |
 | Monday 02:30 (server time), or by hand with `device_tests` | `linux`, then `device-tests` | a test project that should build for Android does not |
 
 - **`android-toolkit`** builds the `toolkit` target of `android.Dockerfile` (compile only, `JOBS=4`) when the PR
