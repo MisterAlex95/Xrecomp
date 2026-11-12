@@ -69,12 +69,16 @@ re-lifts the titles that use it.
 
 D3D is linked into each title, so its statics move from XBE to XBE. A title layer can give them as `params`; without
 them, `xdk/d3d8` finds the device at run time (XBA-80): once D3D has made it, the title's image is scanned for the one
-dword `D` with `[D + 0x24A8] == D` (the pointer slot), a pushbuffer ring at `[D + 0x24]..[D + 0x28]` in the contiguous
-window, and the put pointer `[D]` inside it. A unique hit is printed (`[D3D] device found at ...`) and written to the
-discovery file as `{"t":"d3d",...}`; then the semaphore watch and every serviceable software method run on it. Under
-the DMA walk (`xdk/d3d8ltcg`, or `RECOMP_PB_WALK=dma`) the fence event at device + 0x1DCC, which D3D builds itself, is
-adopted as a guest event (`xbox_KeAdoptGuestEvent`, `[D3D] fence event ... set by software method 5`), so `BlockOnTime`
-sleeps until method 5 sets it; under the segment scan, which does not deliver method 5, it is left alone. So a new
+dword `D` with `[D + 0x24A8] == D` (the pointer slot, XDK 5849), a pushbuffer ring at `[D + 0x24]..[D + 0x28]` in the
+contiguous window, and the put pointer `[D]` inside it. When nothing passes that slot rule (XDK 5455, KOTOR: the slot is
+`D - 8`), any image dword naming a `D` that passes the ring and put tests, has its GPU semaphore pointer `[D + 0x30]` in
+the contiguous window and holds D3D's vblank/fence KEVENT pair is taken, if there is only one. The fence event's offset
+is read from the device: the one pair of KEVENT headers 16 bytes apart (5849 +0x1DCC, 5455 +0x19AC; 5849's is assumed
+when there is none). A unique hit is printed (`[D3D] device found at ... fence event +0x...`) and written to the
+discovery file as `{"t":"d3d",...}` with the slot actually found; then the semaphore watch and every serviceable
+software method run on it. Title-built KEVENTs are guest events by default, so `BlockOnTime` sleeps on the fence event
+until method 5 sets it; with `RECOMP_TITLE_KEVENTS=0`, the DMA walk (`xdk/d3d8ltcg`, or `RECOMP_PB_WALK=dma`) still
+adopts that one event (`xbox_KeAdoptGuestEvent`, `[D3D] fence event ... set by software method 5`). So a new
 title on a known XDK build needs no title layer for D3D.
 
 ## Adding a title

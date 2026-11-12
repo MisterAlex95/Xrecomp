@@ -19,21 +19,31 @@
  *     [D + 0x24] < [D + 0x28], both in the contiguous window, 4 KB to 64 MB apart
  *                                            the pushbuffer ring
  *     [D + 0x24] <= [D] <= [D + 0x28]        the put pointer inside it
- *   A unique hit only; it is printed and written to the discovery file
- *   ({"t":"d3d","va":D,"slot":D+0x24A8}) for the next prepare. Found this way,
- *   all the serviceable methods are on unless XBA_D3D_SW_METHODS says otherwise.
- *   Method 5 sets the fence event (device + 0x1DCC), which D3D builds itself:
- *   under the DMA walk, which delivers method 5, that one event is adopted as a
- *   guest event (xbox_KeAdoptGuestEvent), so BlockOnTime's wait blocks until
- *   the method comes instead of failing at once and spinning. Under the segment
- *   scan it is left alone (a wait for a method 5 that never comes would hang),
- *   unless RECOMP_TITLE_KEVENTS turns guest events on for every object.
+ *   That slot rule is XDK 5849's layout (and Fable's). When nothing passes it,
+ *   the slot may sit anywhere (XDK 5455, KOTOR: device - 8), so any dword P of
+ *   the image naming a D inside the image is tried with the ring and put tests,
+ *   [D + 0x30] (the GPU semaphore pointer) in the contiguous window, and D3D's
+ *   two adjacent KEVENTs inside D (below). A unique D only, both ways; it is
+ *   printed and written to the discovery file ({"t":"d3d","va":D,"slot":P})
+ *   for the next prepare. Found this way, all the serviceable methods are on
+ *   unless XBA_D3D_SW_METHODS says otherwise.
+ *   Method 5 sets the fence event, which D3D builds itself right after its
+ *   vblank event: two KEVENT headers 16 bytes apart, the only such pair in the
+ *   device (5849: +0x1DBC/+0x1DCC; 5455: +0x199C/+0x19AC). Its offset is read
+ *   from the device found (xba_d3d8_fence_event_offset); with no pair the
+ *   5849 offset is assumed. Title-built KEVENTs are guest events by default
+ *   (kernel_bridge.c, RECOMP_TITLE_KEVENTS), so BlockOnTime's wait blocks until
+ *   the method comes instead of failing at once and spinning. With
+ *   RECOMP_TITLE_KEVENTS=0, the one fence event is still adopted under the DMA
+ *   walk, which delivers method 5 (xbox_KeAdoptGuestEvent).
  *   The D3D8LTCG layer (profiles/xdk/d3d8ltcg) turns the DMA walk on for XDK
  *   5849's D3D8LTCG, whose fence wait needs it (XBA_D3D_DMA_WALK).
  *
- * The offsets inside the device below were read on XDK 5849 (Burnout 3,
- * D3D8LTCG) and on Fable's D3D: the pointer slot is device + 0x24A8 in both
- * and in the original Burnout 3 build (docs/technical/d3d8ltcg-device-context.md).
+ * The other offsets inside the device below were read on XDK 5849 (Burnout 3,
+ * D3D8LTCG) and on Fable's D3D, and are the same on XDK 5455 (KOTOR): ring
+ * +0x24/+0x28, fence count +0x2C, semaphore pointer +0x30. The pointer slot is
+ * device + 0x24A8 on 5849, Fable and the original Burnout 3 build
+ * (docs/technical/d3d8ltcg-device-context.md).
  *
  * Switch: XBA_D3D_FENCE=mirror is the A/B fallback Burnout 3 was brought up
  * with (needs XBA_D3D_DEVICE_PTR): no software methods, no semaphore watch, no
@@ -61,7 +71,7 @@
 #define D3D_SEMAPHORE    0x30u      /* -> the GPU semaphore (contiguous memory) */
 #define D3D_RPB_PENDING  0x50u      /* RunPushBuffer calls waiting for the GPU */
 #define D3D_RPB_NODES    0x264u     /* RunPushBuffer's node table, 20 bytes a node */
-#define D3D_FENCE_EVENT  0x1DCCu    /* the KEVENT BlockOnTime sleeps on */
+#define D3D_FENCE_EVENT_5849 0x1DCCu /* the KEVENT BlockOnTime sleeps on, XDK 5849 (and the profiles' titles) */
 #define D3D_SLOT         0x24A8u    /* the device pointer slot, from the device */
 
 #define CONTIG_LO 0x80000000u
@@ -116,6 +126,7 @@ static int d3d_mirror;
 static volatile uint32_t s_device;  /* the device, once known (0: not yet) */
 static volatile uint32_t s_slot;    /* its pointer slot */
 static uint32_t s_methods = D3D_METHODS_DEFAULT;
+static volatile uint32_t s_fence_event = D3D_FENCE_EVENT_5849;  /* offset in the device; read at run time (locate) */
 
 static int in_contig(uint32_t va) { return va >= CONTIG_LO && va < CONTIG_HI; }
 
@@ -140,9 +151,7 @@ uint32_t xba_d3d8_scan(uint32_t lo, uint32_t hi)
 {
     uint32_t found = 0, d;
     lo = (lo + 3u) & ~3u;
-    if (hi < D3D_SLOT + 4u)
-        return 0;
-    for (d = lo; d + D3D_SLOT + 4u <= hi; d += 4u) {
+    for (d = lo; d < hi && hi - d >= D3D_SLOT + 4u; d += 4u) {
         if (G32(d + D3D_SLOT) != d || !xba_d3d8_is_device(d))
             continue;
         if (found)
@@ -159,24 +168,94 @@ static uint32_t image_end(void)
     return size > 0x1000u && size < 0x04000000u ? XBE_BASE + size : 0;
 }
 
+/* A KEVENT header D3D wrote itself: Type 0 (notification) or 1
+ * (synchronization), Size 4 dwords, an empty wait list (Flink == Blink == the
+ * list head at +8). */
+static int is_kevent(uint32_t va)
+{
+    uint32_t hdr = G32(va);
+    if (((hdr & 0xFFu) != 0 && (hdr & 0xFFu) != 1) || ((hdr >> 16) & 0xFFu) != 4)
+        return 0;
+    return G32(va + 8) == va + 8 && G32(va + 12) == va + 8;
+}
+
+#define D3D_EVENTS_LO 0x400u        /* where the event pair is looked for in the device */
+#define D3D_EVENTS_HI 0x4000u
+
+/* The device's two events sit side by side (vblank, then fence), 16 bytes
+ * each: the offset of the second when exactly one such pair lies in
+ * [0x400, 0x4000), else 0. */
+uint32_t xba_d3d8_fence_event_offset(uint32_t d)
+{
+    uint32_t off, found = 0;
+    if (d > 0xFFFFFFFFu - D3D_EVENTS_HI - 32u)
+        return 0;
+    for (off = D3D_EVENTS_LO; off < D3D_EVENTS_HI; off += 4u) {
+        if (is_kevent(d + off) && is_kevent(d + off + 16u)) {
+            if (found)
+                return 0;
+            found = off + 16u;
+        }
+    }
+    return found;
+}
+
+/* D without the slot rule: the ring, the put pointer inside it, the GPU
+ * semaphore pointer in the contiguous window. */
+static int is_device_core(uint32_t d)
+{
+    uint32_t s = G32(d + D3D_RING_START), e = G32(d + D3D_RING_END), p = G32(d);
+    return in_contig(s) && e <= CONTIG_HI && s < e && e - s >= 0x1000u && e - s <= 0x4000000u
+        && p >= s && p <= e && in_contig(G32(d + D3D_SEMAPHORE));
+}
+
+/* The device in [lo, hi) through any dword P of it that names D, D inside
+ * [lo, hi) with the whole event window before hi (XDK 5455: P = D - 8). The
+ * device when exactly one D passes, its first P in *slot; else 0. */
+uint32_t xba_d3d8_scan_slots(uint32_t lo, uint32_t hi, uint32_t *slot)
+{
+    uint32_t found = 0, first = 0, p, d;
+    lo = (lo + 3u) & ~3u;
+    if (hi < lo + 4u)
+        return 0;
+    for (p = lo; p <= hi - 4u; p += 4u) {
+        d = G32(p);
+        /* hi - d, not d + window: d may be anywhere up to 0xFFFFFFFF */
+        if (d < lo || d >= hi || (d & 3u) || hi - d < D3D_EVENTS_HI + 32u || d == found)
+            continue;
+        if (!is_device_core(d) || !xba_d3d8_fence_event_offset(d))
+            continue;
+        if (found)
+            return 0;
+        found = d;
+        first = p;
+    }
+    if (found && slot)
+        *slot = first;
+    return found;
+}
+
 /* Try once; on success remember it, say so and record it. */
 int xba_d3d8_locate(void)
 {
-    uint32_t end = image_end(), d;
+    uint32_t end = image_end(), d, slot = 0, ev;
     if (s_device || !end)
         return s_device != 0;
-    d = xba_d3d8_scan(XBE_BASE, end);
-    if (!d)
+    if ((d = xba_d3d8_scan(XBE_BASE, end)) != 0)
+        slot = d + D3D_SLOT;
+    else if (!(d = xba_d3d8_scan_slots(XBE_BASE, end, &slot)))
         return 0;
-    s_slot = d + D3D_SLOT;
+    if ((ev = xba_d3d8_fence_event_offset(d)) != 0)
+        s_fence_event = ev;
+    s_slot = slot;
     s_device = d;
-    fprintf(stderr, "[D3D] device found at 0x%08X (pointer slot 0x%08X, ring 0x%08X-0x%08X)\n",
-            d, d + D3D_SLOT, G32(d + D3D_RING_START), G32(d + D3D_RING_END));
-    recomp_discovery_d3d(d, d + D3D_SLOT);
+    fprintf(stderr, "[D3D] device found at 0x%08X (pointer slot 0x%08X, ring 0x%08X-0x%08X, fence event +0x%X%s)\n",
+            d, slot, G32(d + D3D_RING_START), G32(d + D3D_RING_END), s_fence_event, ev ? "" : " assumed");
+    recomp_discovery_d3d(d, slot);
     /* The fence event, when method 5 will set it (see the top). */
-    if ((s_methods & (1u << 5)) && nv2a_pb_dma_walk() && xbox_KeAdoptGuestEvent(d + D3D_FENCE_EVENT))
+    if ((s_methods & (1u << 5)) && nv2a_pb_dma_walk() && xbox_KeAdoptGuestEvent(d + s_fence_event))
         fprintf(stderr, "[D3D] fence event 0x%08X: set by software method 5 under the DMA walk\n",
-                d + D3D_FENCE_EVENT);
+                d + s_fence_event);
     return 1;
 }
 
@@ -306,11 +385,13 @@ static int d3d_software_method(uint32_t param)
     /* 5: KeSetEvent on the fence event. BlockOnTime patches it into the
      * pushbuffer at the fence it waits for when the GPU is more than 0x2000
      * bytes behind, then waits without a timeout. D3D built that event itself
-     * (no KeInitializeEvent import): RECOMP_TITLE_KEVENTS with the profile's
-     * addresses, adopted when the device was found at run time (locate); the
-     * kernel checks the header reads as an event before it touches it. */
+     * (no KeInitializeEvent import): a guest event by default (title-built
+     * KEVENTs, kernel_bridge.c), or adopted alone under the DMA walk when the
+     * device was found at run time (locate); the kernel checks the header
+     * reads as an event before it touches it. Its offset is the one locate
+     * read from the device, 5849's with the profile's addresses. */
     if (type == 5u) {
-        (void)xbox_KeSetGuestEvent(dev + D3D_FENCE_EVENT);
+        (void)xbox_KeSetGuestEvent(dev + s_fence_event);
         return 1;
     }
     if (type >= 0xCu && type <= 0xEu) {
@@ -347,10 +428,6 @@ void xba_d3d8_configure(void)
     /* D3D's fence wait reads DMA_GET and the 0x0310 latch (PGRAPH 0x400B10),
      * which only the DMA walk keeps honest. */
     SETENV_DEFAULT("RECOMP_PB_WALK", "dma");
-#endif
-#if D3D_GIVEN
-    if (s_methods & (1u << 5))
-        SETENV_DEFAULT("RECOMP_TITLE_KEVENTS", "1");
 #endif
     if (s_methods)
         nv2a_pb_set_software_method_hook(d3d_software_method);

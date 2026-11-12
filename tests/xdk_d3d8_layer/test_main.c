@@ -34,6 +34,8 @@ void xba_d3d8_configure(void);
 int xba_d3d8_is_device(uint32_t d);
 uint32_t xba_d3d8_scan(uint32_t lo, uint32_t hi);
 int xba_d3d8_locate(void);
+uint32_t xba_d3d8_fence_event_offset(uint32_t d);
+uint32_t xba_d3d8_scan_slots(uint32_t lo, uint32_t hi, uint32_t *slot);
 
 #define M32(a) (*(uint32_t *)(g_mem + (uint32_t)(a)))
 static int failures;
@@ -45,6 +47,28 @@ static void plant(uint32_t d, uint32_t ring_lo, uint32_t ring_hi, uint32_t put)
     M32(d + 0x24) = ring_lo;
     M32(d + 0x28) = ring_hi;
     M32(d + 0x24A8) = d;
+}
+
+/* A KEVENT header as D3D writes it: type, Size 4, empty wait list. */
+static void kevent(uint32_t va, uint32_t type)
+{
+    M32(va) = type | (4u << 16);
+    M32(va + 4) = 0;
+    M32(va + 8) = va + 8;
+    M32(va + 12) = va + 8;
+}
+
+/* An XDK 5455 device (KOTOR): no slot at +0x24A8, the pointer at D - 8, the
+ * GPU semaphore pointer at +0x30, vblank and fence events at +0x199C/+0x19AC. */
+static void plant_5455(uint32_t d, uint32_t ring_lo, uint32_t ring_hi, uint32_t put)
+{
+    M32(d - 8) = d;
+    M32(d) = put;
+    M32(d + 0x24) = ring_lo;
+    M32(d + 0x28) = ring_hi;
+    M32(d + 0x30) = 0x8006B000u;
+    kevent(d + 0x199C, 1);
+    kevent(d + 0x19AC, 1);
 }
 
 int main(void)
@@ -70,7 +94,70 @@ int main(void)
     CHECK(g_hook(6u) == 1 && g_cb_routine == 0x00123450u && g_cb_ctx == 0xC0FFEEu);
     g_cb_routine = 0;
     CHECK(g_hook(7u) == 1 && g_cb_routine == 0x00123450u);
+#ifdef TEST_5455
+    /* An XDK 5455 title (KOTOR's layout), no params: found through D - 8, the
+     * fence event read from the device; the walk on, so it is adopted. */
+    setenv("RECOMP_PB_WALK", "dma", 1);
+    CHECK(xba_d3d8_locate() == 0);
+    plant_5455(0x003550F0, 0x8006C000, 0x800EC000, 0x8006C100);
+    CHECK(xba_d3d8_scan(0x10000, 0x890000) == 0);
+    CHECK(xba_d3d8_locate() == 1);
+    CHECK(g_disc_dev == 0x003550F0 && g_disc_slot == 0x003550E8);
+    CHECK(g_adopted == 0x003550F0 + 0x19AC);
+    CHECK(g_hook(5u) == 1 && g_event == 0x003550F0 + 0x19AC);
+    if (failures)
+        return 1;
+    puts("xdk_d3d8_layer: ok");
+    return 0;
+#endif
 #ifndef TEST_GIVEN
+    /* The fence event's offset: the one pair of KEVENTs 16 bytes apart. */
+    {
+        uint32_t d = 0x00600000, slot = 0;
+        CHECK(xba_d3d8_fence_event_offset(d) == 0);         /* no events */
+        plant_5455(d, 0x80100000, 0x80200000, 0x80100000);
+        CHECK(xba_d3d8_fence_event_offset(d) == 0x19AC);
+        CHECK(xba_d3d8_scan(0x10000, 0x890000) == 0);       /* not 5849's slot rule */
+        CHECK(xba_d3d8_scan_slots(0x10000, 0x890000, &slot) == d && slot == d - 8);
+        /* A second pair: the offset is not trusted. */
+        kevent(d + 0x800, 0);
+        kevent(d + 0x810, 0);
+        CHECK(xba_d3d8_fence_event_offset(d) == 0);
+        M32(d + 0x800) = M32(d + 0x810) = 0;
+        /* A wait list that is not empty, a Size that is not 4: not an event. */
+        M32(d + 0x19AC + 8) = 0x80001234u;
+        CHECK(xba_d3d8_fence_event_offset(d) == 0);
+        kevent(d + 0x19AC, 1);
+        M32(d + 0x199C) = 1u | (5u << 16);
+        CHECK(xba_d3d8_fence_event_offset(d) == 0);
+        kevent(d + 0x199C, 1);
+        /* No semaphore pointer yet: not the device. */
+        M32(d + 0x30) = 0;
+        CHECK(xba_d3d8_scan_slots(0x10000, 0x890000, &slot) == 0);
+        M32(d + 0x30) = 0x8006B000u;
+        /* A second pointer to the same device: still one device, the first slot. */
+        M32(0x00200000) = d;
+        slot = 0;
+        CHECK(xba_d3d8_scan_slots(0x10000, 0x890000, &slot) == d && slot == 0x00200000);
+        M32(0x00200000) = 0;
+        /* Two devices that pass: neither is trusted. */
+        plant_5455(0x00680000, 0x80300000, 0x80400000, 0x80300000);
+        CHECK(xba_d3d8_scan_slots(0x10000, 0x890000, &slot) == 0);
+        M32(0x00680000 - 8) = 0;
+        /* Pointers near the top of the 4 GB: skipped without wrapping (d + a
+         * window would overflow), and no read past 0xFFFFFFFF. */
+        M32(0x00210000) = 0xFFFFFFF0u;
+        M32(0x00210004) = 0xFFFFC000u;
+        slot = 0;
+        CHECK(xba_d3d8_scan_slots(0x10000, 0x890000, &slot) == d && slot == d - 8);
+        CHECK(xba_d3d8_fence_event_offset(0xFFFFFFF0u) == 0);
+        CHECK(xba_d3d8_scan_slots(0xFFFF0000u, 0xFFFFFFFCu, &slot) == 0);
+        CHECK(xba_d3d8_scan(0xFFFF0000u, 0xFFFFFFFCu) == 0);
+        /* A device too close to the end of the range for its event window. */
+        CHECK(xba_d3d8_scan_slots(0x10000, d + 0x1000, &slot) == 0);
+        M32(0x00210000) = M32(0x00210004) = 0;
+        M32(d - 8) = 0;                                     /* gone for what follows */
+    }
     /* Before CreateDevice: nothing, and the hook does nothing. */
     CHECK(xba_d3d8_locate() == 0);
     CHECK(g_hook(0x7u << 5 | 0xDu) == 0);
@@ -80,8 +167,11 @@ int main(void)
     plant(0x00310000, 0x00400000, 0x00500000, 0x00400010);
     plant(0x00320000, 0x80010000, 0x80090000, 0x800A0000);
     CHECK(xba_d3d8_scan(0x10000, 0x890000) == 0);
-    /* D3D's device. */
+    /* D3D's device, with its vblank and fence events (5849: +0x1DBC/+0x1DCC). */
     plant(0x0085FDE0, 0x80010000, 0x80090000, 0x80012340);
+    kevent(0x0085FDE0 + 0x1DBC, 1);
+    kevent(0x0085FDE0 + 0x1DCC, 1);
+    CHECK(xba_d3d8_fence_event_offset(0x0085FDE0) == 0x1DCC);
     CHECK(xba_d3d8_is_device(0x0085FDE0));
     CHECK(xba_d3d8_scan(0x10000, 0x890000) == 0x0085FDE0);
     /* Two that pass: neither is trusted. */
