@@ -5,7 +5,8 @@
 #
 # Gating (XBA-53, docs/android/toolchain.md « CI gating »):
 #   pull request   linux, then android-toolkit (NDK compile, app unit tests) when the PR touches the Android build
-#   push to main   linux, then linux-arm64 (fails on a failure not in tools/ci/arm64-expected.txt), then android-image
+#   push to main   linux, then linux-arm64 (fails on a failure not in tools/ci/arm64-expected.txt), then android-image,
+#                  then android-toolchain (rebuilt only when its key changes, XBA-125), then android-apk (xrecomp-latest)
 #   weekly         linux, then device-tests (the device test bundle; fails when a project stops building)
 # Heavy jobs (everything but linux) take tools/ci/heavy_lock.sh: one at a time on the shared host, queued, never
 # cancelled. Gitea's `concurrency:` keeps one pending job per group and cancels the others, hence the lock.
@@ -279,6 +280,214 @@ jobs:
         run: |
           docker rmi "$IMAGE_TAG" "$IMAGE_TAG-toolkit" "$IMAGE_TAG-apk" >/dev/null 2>&1 || true
           rm -rf out
+          sh tools/ci/heavy_lock.sh release || true
+
+  # XBA-125: the on-device toolchain of the Prepare (LLVM, CPython, capstone: docs/android/toolchain.md) is built only
+  # when its cache key changes: tools/ci/toolchain_key.sh hashes tools/android/toolchain/ (versions.env, the scripts)
+  # and the toolchain stages of android.Dockerfile. The result is kept as the asset of the prerelease
+  # « toolchain-<key> » on this Gitea, which outlives the host's Docker cache (pruned when the disk fills). On a hit
+  # this job takes seconds and no lock. On a miss (about 35 min) it builds under the heavy-job lock, CPython then LLVM,
+  # one after the other at JOBS=4 each (not side by side as one BuildKit build would run them), with no tmpfs, and
+  # publishes the archive with the licence texts of what it holds.
+  android-toolchain:
+    needs: android-image
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    runs-on: ubuntu-latest
+    container:
+      image: docker:29.8.1-cli
+    steps:
+      - name: Checkout
+        env:
+          TOKEN: ${{ github.token }}
+        run: |
+          apk add --no-cache git >/dev/null
+          git init -q .
+          git fetch -q --depth 1 "$(printf '%s' "$GITHUB_SERVER_URL" | sed "s#://#://ci:$TOKEN@#")/$GITHUB_REPOSITORY.git" "$GITHUB_SHA"
+          git checkout -q FETCH_HEAD
+
+      - name: Is the toolchain cached?
+        id: cache
+        env:
+          TOKEN: ${{ github.token }}
+        run: |
+          apk add --no-cache curl jq >/dev/null
+          key=$(sh tools/ci/toolchain_key.sh)
+          echo "key=$key" >> "$GITHUB_OUTPUT"
+          # 404: not cached. Any other failure stops here rather than start a 35-minute build for nothing.
+          http=$(curl -sS -o rel.json -w '%{http_code}' -H "Authorization: token $TOKEN" \
+                   "$GITHUB_SERVER_URL/api/v1/repos/$GITHUB_REPOSITORY/releases/tags/toolchain-$key")
+          case "$http" in
+            200) n=$(jq --arg a "xba-toolchain-$key.tar.xz" \
+                       '[.assets[]? | select(.name == $a or .name == ($a + ".sha256"))] | length' rel.json) ;;
+            404) n=0 ;;
+            *) echo "Gitea API answered $http for releases/tags/toolchain-$key"; exit 1 ;;
+          esac
+          rm -f rel.json
+          if [ "$n" = 2 ]; then
+            echo "Toolchain $key is cached (release toolchain-$key): nothing to build."
+            echo "hit=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Toolchain $key is not cached: building it (about 35 min)."
+            echo "hit=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Wait for the heavy-job lock
+        if: steps.cache.outputs.hit != 'true'
+        run: sh tools/ci/heavy_lock.sh acquire
+
+      # check.sh runs in the toolchain stage: aarch64 ELFs, clang under qemu-aarch64, the stub title's pack.
+      - name: Build the toolchain (CPython + capstone, then LLVM)
+        if: steps.cache.outputs.hit != 'true'
+        run: |
+          docker build -f tools/docker/android.Dockerfile --target toolchain-python --build-arg JOBS=4 --progress=plain .
+          docker build -f tools/docker/android.Dockerfile --target toolchain-out --build-arg JOBS=4 --progress=plain \
+            --output type=local,dest=out/toolchain .
+          tail -n 20 out/toolchain/check.txt
+
+      - name: Publish the toolchain (toolchain-<key>)
+        if: steps.cache.outputs.hit != 'true'
+        env:
+          TOKEN: ${{ github.token }}
+          KEY: ${{ steps.cache.outputs.key }}
+        run: |
+          apk add --no-cache xz >/dev/null
+          mkdir -p out/toolchain/LICENSES
+          cp LICENSE NOTICE out/toolchain/ && cp LICENSES/*.txt out/toolchain/LICENSES/
+          a="xba-toolchain-$KEY.tar.xz"
+          tar -C out/toolchain -cf - . | xz -T2 -6 > "out/$a"
+          (cd out && sha256sum "$a" > "$a.sha256" && cat "$a.sha256" && ls -la "$a")
+          api="$GITHUB_SERVER_URL/api/v1/repos/$GITHUB_REPOSITORY"
+          auth="Authorization: token $TOKEN"
+          old=$(curl -fsS -H "$auth" "$api/releases/tags/toolchain-$KEY" 2>/dev/null | jq -r '.id // empty' || true)
+          if [ -n "$old" ]; then   # a partial upload of a failed run
+            curl -fsS -X DELETE -H "$auth" "$api/releases/$old"
+            curl -fsS -X DELETE -H "$auth" "$api/tags/toolchain-$KEY" || true
+          fi
+          body=$(jq -n --arg k "$KEY" --arg s "$GITHUB_SHA" \
+            '{tag_name: ("toolchain-" + $k), target_commitish: $s, name: ("On-device toolchain " + $k), prerelease: true,
+              body: ("CI cache of the toolchain-out stage of tools/docker/android.Dockerfile (CPython, capstone, clang + lld for arm64-v8a, Android 30), key " + $k + " (tools/ci/toolchain_key.sh), built at " + $s + ". The XRecomp APK job takes it from here. Licence texts inside (LICENSE, NOTICE, LICENSES/). No game content.")}')
+          id=$(curl -fsS -X POST -H "$auth" -H "Content-Type: application/json" -d "$body" "$api/releases" | jq -r .id)
+          for f in "$a" "$a.sha256"; do
+            curl -fsS -X POST -H "$auth" -F "attachment=@out/$f;type=application/octet-stream" \
+              "$api/releases/$id/assets?name=$f" | jq -r .browser_download_url
+          done
+          # The older toolchains are not needed any more (the APK job only takes the current key).
+          curl -fsS -H "$auth" "$api/releases?limit=50" \
+            | jq -r --arg t "toolchain-$KEY" '.[] | select((.tag_name | startswith("toolchain-")) and .tag_name != $t) | "\(.id) \(.tag_name)"' \
+            | while read -r rid tag; do
+                echo "Removing the old $tag"
+                curl -fsS -X DELETE -H "$auth" "$api/releases/$rid" && curl -fsS -X DELETE -H "$auth" "$api/tags/$tag" || true
+              done
+
+      - name: Clean up
+        if: always()
+        run: |
+          rm -rf out
+          sh tools/ci/heavy_lock.sh release || true
+
+  # XBA-125: the XRecomp APK, what a player installs: the release build of the app with the toolchain above inside
+  # (Prepare), optimised native code, debuggable (run-as for the device check lists), version code = commit time in
+  # minutes (so each main build updates the previous one in place). Published as the rolling prerelease
+  # « xrecomp-latest » (xrecomp-<commit>.apk). Signed with the release key from the repository secrets
+  # XBA_RELEASE_KEYSTORE_B64 (base64 of the PKCS12 keystore), XBA_RELEASE_KEYSTORE_PASSWORD and, optional,
+  # XBA_RELEASE_KEY_ALIAS (default xrecomp); they reach Gradle as BuildKit secrets, never as build args or layers.
+  # Without them the APK is debug-signed, with a warning in the log and in the release notes
+  # (docs/android/toolchain.md « Signing »).
+  android-apk:
+    needs: android-toolchain
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    runs-on: ubuntu-latest
+    container:
+      image: docker:29.8.1-cli
+    steps:
+      - name: Checkout
+        env:
+          TOKEN: ${{ github.token }}
+        run: |
+          apk add --no-cache git >/dev/null
+          git init -q .
+          git fetch -q --depth 1 "$(printf '%s' "$GITHUB_SERVER_URL" | sed "s#://#://ci:$TOKEN@#")/$GITHUB_REPOSITORY.git" "$GITHUB_SHA"
+          git checkout -q FETCH_HEAD
+
+      # One heavy job at a time on the shared host (XBA-53): waits here, never cancelled.
+      - name: Wait for the heavy-job lock
+        run: sh tools/ci/heavy_lock.sh acquire
+
+      - name: Fetch the toolchain (toolchain-<key>)
+        env:
+          TOKEN: ${{ github.token }}
+        run: |
+          apk add --no-cache curl jq xz >/dev/null
+          key=$(sh tools/ci/toolchain_key.sh)
+          a="xba-toolchain-$key.tar.xz"
+          rel=$(curl -fsS -H "Authorization: token $TOKEN" \
+                  "$GITHUB_SERVER_URL/api/v1/repos/$GITHUB_REPOSITORY/releases/tags/toolchain-$key")
+          mkdir -p out/toolchain
+          for f in "$a" "$a.sha256"; do
+            url=$(printf '%s' "$rel" | jq -r --arg f "$f" '.assets[] | select(.name == $f) | .browser_download_url')
+            [ -n "$url" ] || { echo "toolchain-$key has no $f"; exit 1; }
+            curl -fsSL -u "ci:$TOKEN" -o "out/$f" "$url"
+          done
+          (cd out && sha256sum -c "$a.sha256")
+          xz -dc "out/$a" | tar -C out/toolchain -xf -
+          rm "out/$a"
+          ls -la out/toolchain/jniLibs/arm64-v8a out/toolchain/assets/prepare
+
+      - name: XRecomp APK (release build with the toolchain)
+        env:
+          KS_B64: ${{ secrets.XBA_RELEASE_KEYSTORE_B64 }}
+          XBA_KEYSTORE_PASSWORD: ${{ secrets.XBA_RELEASE_KEYSTORE_PASSWORD }}
+          XBA_KEY_ALIAS: ${{ secrets.XBA_RELEASE_KEY_ALIAS }}
+        run: |
+          sha8=$(printf '%s' "$GITHUB_SHA" | cut -c1-8)
+          code=$(( $(git log -1 --format=%ct) / 60 ))
+          set --
+          if [ -n "$KS_B64" ] && [ -n "$XBA_KEYSTORE_PASSWORD" ]; then
+            (umask 077 && mkdir -p sec && printf '%s' "$KS_B64" | base64 -d > sec/release.p12)
+            set -- --secret id=xba_keystore,src=sec/release.p12 --secret id=xba_keystore_password,env=XBA_KEYSTORE_PASSWORD
+            [ -z "$XBA_KEY_ALIAS" ] || set -- "$@" --secret id=xba_key_alias,env=XBA_KEY_ALIAS
+            signing=release
+          else
+            echo "::warning::XRecomp APK DEBUG-SIGNED: the secrets XBA_RELEASE_KEYSTORE_B64 / XBA_RELEASE_KEYSTORE_PASSWORD are not set. It cannot update a release-signed install (docs/android/toolchain.md, Signing)."
+            signing=debug
+          fi
+          docker build -f tools/docker/android.Dockerfile --target xrecomp-apk-out --progress=plain \
+            --build-context xba-toolchain=out/toolchain "$@" --build-arg JOBS=4 --build-arg XBA_SIGNING="$signing" \
+            --build-arg XBA_VERSION="$sha8" --build-arg XBA_VERSION_CODE="$code" --output type=local,dest=out/apk .
+          rm -rf sec
+          cat out/apk/xrecomp-badging.txt out/apk/xrecomp-signing.txt
+          ls -la out/apk
+
+      # No game content anywhere: the APK holds this repository's code, the toolchain and their licences (checked by
+      # the xrecomp-apk stage: no XBE but our synthetic self-test).
+      - name: Publish the XRecomp APK (xrecomp-latest)
+        env:
+          TOKEN: ${{ github.token }}
+        run: |
+          api="$GITHUB_SERVER_URL/api/v1/repos/$GITHUB_REPOSITORY"
+          auth="Authorization: token $TOKEN"
+          sha8=$(printf '%s' "$GITHUB_SHA" | cut -c1-8)
+          signer=$(cat out/apk/xrecomp-signing.txt)
+          case "$signer" in
+            *"DEBUG key"*) sig="**Debug-signed** (no release key in the CI secrets): it cannot update a release-signed install, and its key changes when the CI image is rebuilt." ;;
+            *) sig="Signed with the release key: it updates any earlier xrecomp-latest in place, keeping packs, saves and settings." ;;
+          esac
+          old=$(curl -fsS -H "$auth" "$api/releases/tags/xrecomp-latest" 2>/dev/null | jq -r '.id // empty' || true)
+          if [ -n "$old" ]; then
+            curl -fsS -X DELETE -H "$auth" "$api/releases/$old"
+            curl -fsS -X DELETE -H "$auth" "$api/tags/xrecomp-latest" || true
+          fi
+          body=$(jq -n --arg sha "$GITHUB_SHA" --arg s "$sha8" --arg sig "$sig" --arg signer "$signer" \
+            '{tag_name: "xrecomp-latest", target_commitish: $sha, name: ("XRecomp, latest main (" + $s + ")"), prerelease: true,
+              body: ("XRecomp for Android built by CI from main at " + $s + ": the app with the on-device Prepare (Python, capstone, clang + lld). No game inside. arm64-v8a, Android 11+.\n\n" + $sig + "\n\n```\n" + $signer + "\n```\n\nInstall: open xrecomp-" + $s + ".apk on the device, or adb install -r xrecomp-" + $s + ".apk. Switching from a build signed with another key: docs/android/toolchain.md, Signing.")}')
+          id=$(curl -fsS -X POST -H "$auth" -H "Content-Type: application/json" -d "$body" "$api/releases" | jq -r .id)
+          curl -fsS -X POST -H "$auth" -F "attachment=@out/apk/xrecomp.apk;type=application/vnd.android.package-archive" \
+            "$api/releases/$id/assets?name=xrecomp-$sha8.apk" | jq -r .browser_download_url
+
+      - name: Clean up
+        if: always()
+        run: |
+          rm -rf out sec
           sh tools/ci/heavy_lock.sh release || true
 
   # XBA-53: the device test bundle (XBA-19) still builds. Weekly at night, or by hand with device_tests ticked;
