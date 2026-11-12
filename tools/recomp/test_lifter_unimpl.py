@@ -53,13 +53,15 @@ class UnimplementedMarkerTest(unittest.TestCase):
         self.assertIn("/* TODO: daa */", out)
         self.assertEqual(lifter.unimplemented, {"daa": [0x00012340]})
 
-    def test_hlt_is_not_an_ignored_instruction(self):
-        # The lifter's own comment says hlt is deliberately NOT in the ignored
-        # set, because a no-op there turns a wait into a spin. It must be an
-        # unimplemented site, with the marker, not a silent decision.
+    def test_hlt_waits_rather_than_being_ignored(self):
+        # hlt was deliberately kept out of the ignored set, because a no-op
+        # there turns a wait into a spin. It now has a translation that
+        # waits (XBA-111): the runtime's xbox_Halt, named with its address.
         lifter, out = _lift("hlt", address=0x00ABCDEF)
-        self.assertIn('RECOMP_UNIMPL("hlt", 0x00ABCDEFu);', out)
-        self.assertIn("hlt", lifter.unimplemented)
+        self.assertIn("xbox_Halt(0x00ABCDEFu);", out)
+        self.assertNotIn("RECOMP_UNIMPL", out)
+        self.assertNotIn("(void)0", out)
+        self.assertEqual(lifter.unimplemented, {})
 
     def test_mmx_path_records_and_marks(self):
         # Before the helper, the MMX paths returned the comment WITHOUT

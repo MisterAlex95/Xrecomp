@@ -24,10 +24,11 @@ import sys
 from .config import va_to_file_offset, is_code_address
 from . import config as _config
 from .disasm import Disassembler
+from .seh_frames import analyze_seh_frame
 from .lifter import (Lifter, lift_basic_block, detect_seh_helpers,
                      _RESULT_SNAPSHOT_SETTERS, _as_addr_set,
                      detect_setjmp_helpers, _func_ident, _operand_width,
-                     publish_flags)
+                     publish_flags, stack_switch_sites)
 
 
 # Float compares snapshot at the compare as well, and their conditions read
@@ -373,6 +374,32 @@ def xbe_title(xbe_data, xbe_path):
     return os.path.splitext(os.path.basename(xbe_path))[0]
 
 
+def seh_anchor_lines(func_va, frame):
+    """C that takes a frame's resume anchor (src/kernel/xbox_seh.c).
+
+    A native setjmp, keyed by the registration record just written to fs:[0]
+    and by this function's frame pointer. A handler's jump to one of the
+    frame's resume targets longjmps back here with 1 + the target's index,
+    and the function goes to that label: the C frames between the raise and
+    here are left for real, as the guest's own jump leaves its frames. ebp is
+    read back from g_seh_ebp, where the handler's jump published it -- the
+    local itself is indeterminate after a longjmp."""
+    targets = ", ".join(f"0x{t:08X}u" for t in frame.resume)
+    lines = [
+        f"{{ static const uint32_t _seh_resume[] = {{ {targets} }};"
+        f" static const recomp_seh_desc _seh_desc = {{ 0x{func_va:08X}u,"
+        f" {len(frame.resume)}u, _seh_resume }}; /* {frame.kind} frame,"
+        f" table 0x{frame.table:08X} */",
+        "switch (RECOMP_SETJMP(*recomp_seh_anchor(MEM32(XBOX_FS_BASE), ebp,"
+        " &_seh_desc))) {",
+        "case 0: break;",
+    ]
+    for k, t in enumerate(frame.resume, 1):
+        lines.append(f"case {k}: ebp = g_seh_ebp; goto loc_{t:08X};")
+    lines.append("default: break; } }")
+    return lines
+
+
 def _seh_prologs_of(lifter):
     """Every __SEH_prolog address a lifter knows about, as a set.
 
@@ -612,6 +639,13 @@ class FunctionTranslator:
         # The guest CPU's quantum check at every loop back edge
         # (RECOMP_BACK_EDGE), with --back-edge-yield; off, edges stay bare.
         self.back_edge_yield = False
+        # XBA-112: a function whose exception frame has resume targets takes
+        # a native setjmp anchor after registering it (see seh_anchor_lines).
+        # --no-seh-anchors turns that off: a resume is then refused at run
+        # time instead of costing every call of such a function a setjmp.
+        self.seh_anchors = True
+        self._seh_frame = None
+        self._seh_reported = set()
 
     def discover_static_indirect_targets(self, *, coalescing=False):
         """Recover callbacks and the gap entries their bodies reference."""
@@ -2808,6 +2842,33 @@ class FunctionTranslator:
         return (imm_refs, computed_jump_edges, debug_slide_int3s,
                 debug_slide_bypasses, switch_leaders)
 
+    def _read_u32(self, va):
+        """A guest dword from the image, or None outside it."""
+        offset = va_to_file_offset(va)
+        if offset is None or not self.xbe_data or offset + 4 > len(self.xbe_data):
+            return None
+        return int.from_bytes(self.xbe_data[offset:offset + 4], "little")
+
+    def _seh_frame_of(self, instructions, start, end):
+        """The exception frame [start, end) registers (seh_frames.py)."""
+        prologs = _seh_prologs_of(self.lifter)
+        if start in prologs:
+            return None
+        frame = analyze_seh_frame(instructions, start, end, self._read_u32,
+                                  prologs, is_code=is_code_address)
+        if frame and frame.outside:
+            # A funclet the function finder split off is a function of its
+            # own and dispatches as one; anything else is unreachable.
+            lost = sorted(t for t in frame.outside if t not in self.func_db)
+            reported = self.__dict__.setdefault("_seh_reported", set())
+            if lost and start not in reported:
+                reported.add(start)
+                import sys
+                print(f"  SEH: 0x{start:08X} ({frame.kind}) has handler "
+                      f"targets outside it and outside every function: "
+                      + ", ".join(f"0x{t:08X}" for t in lost), file=sys.stderr)
+        return frame
+
     def decode_function(self, start, end):
         """Recover instructions and blocks, including indirect-entry leaders."""
         recovered = self._recovered_cfg.get(start)
@@ -2843,6 +2904,14 @@ class FunctionTranslator:
              instructions, start, end, coalesced,
              jump_table_targets=authoritative_jump_tables)
 
+        # Exception-frame entries (seh_frames.py): the funclets a handler
+        # calls and the blocks it resumes at are reached only through the
+        # compiler's tables, so the walk below would drop them as dead code.
+        # They are leaders and reachable like a switch arm.
+        self._seh_frame = self._seh_frame_of(instructions, start, end)
+        seh_targets = self._seh_frame.targets if self._seh_frame else set()
+        switch_leaders = set(switch_leaders) | seh_targets
+
         # A switch target the decode never produced an instruction for cannot
         # become a block leader, so it gets no label and its `goto` is dropped
         # as dead code. Re-decode at every newly discovered leader and refresh
@@ -2864,6 +2933,7 @@ class FunctionTranslator:
                  debug_slide_bypasses,
                  switch_leaders) = self._control_flow_census(
                      instructions, start, end, coalesced)
+                switch_leaders = set(switch_leaders) | seh_targets
 
         self.lifter.imm_code_refs = imm_refs
 
@@ -2908,7 +2978,7 @@ class FunctionTranslator:
         # the CFG could not prove (_lift_jmp).
         by_start = {block.start: block for block in blocks}
         reachable = set()
-        pending = [start, *imm_refs]
+        pending = [start, *imm_refs, *seh_targets]
         while pending:
             address = pending.pop()
             if address in reachable or address not in by_start:
@@ -2918,6 +2988,50 @@ class FunctionTranslator:
         blocks = [block for block in blocks if block.start in reachable]
         instructions = [insn for block in blocks for insn in block.instructions]
         return instructions, blocks
+
+    def seh_funclet_entries(self, func_va, name, code, frame):
+        """Dispatchable entries for a function's exception funclets (XBA-112).
+
+        A handler calls an __except filter, a __finally block, a catch block
+        or a destructor action through a pointer in the compiler's tables, and
+        the function's own normal path calls its __finally directly. Each is a
+        stretch of the function's code that ends in its own `ret` and runs on
+        the function's frame (ebp as the caller set it). So: the function
+        translated once more as `<name>__seh(target)`, entered with a goto at
+        the funclet, and one `void sub_<funclet>(void)` per funclet that calls
+        it -- dispatchable, and the name a direct call already uses.
+
+        Returns [(funclet_va, entry_name, code)]; the first carries the copy.
+        """
+        if not frame or not frame.funclets or not code:
+            return []
+        head = f"void {name}(void)"
+        first = code.find("\nloc_")
+        if head not in code or first < 0:
+            return []
+        funclets = sorted(t for t in frame.funclets if f"loc_{t:08X}:" in code)
+        if not funclets:
+            return []
+        copy_name = f"{name}__seh"
+        proto = f"void {copy_name}(uint32_t _seh_target);"
+        frame_line = ("    ebp = g_seh_ebp; /* the funclet runs on its parent's frame */\n"
+                      if "uint32_t ebp" in code[:first] else "")
+        arms = "".join(f"    case 0x{t:08X}u: goto loc_{t:08X};\n" for t in funclets)
+        entry = (f"\n    /* entered at an exception funclet of 0x{func_va:08X} */\n"
+                 f"{frame_line}"
+                 f"    switch (_seh_target) {{\n{arms}"
+                 f"    default: g_esp += 4; return; /* not a funclet: pop and return */\n"
+                 f"    }}\n")
+        copy = code[:first] + entry + code[first:]
+        copy = copy.replace(head, f"void {copy_name}(uint32_t _seh_target)", 1)
+        copy = f"/* 0x{func_va:08X} entered at its exception funclets */\n{proto}\n" + copy
+        out = []
+        for k, t in enumerate(funclets):
+            entry_name = self.lifter._call_target_name(t)
+            body = (f"{proto}\nvoid {entry_name}(void) {{ {copy_name}(0x{t:08X}u); }}"
+                    f" /* {frame.kind} funclet of 0x{func_va:08X} */\n")
+            out.append((t, entry_name, (copy + "\n" + body) if k == 0 else body))
+        return out
 
     def entry_stub(self, addr, name):
         """C for a call/jump target in the middle of another function.
@@ -2997,6 +3111,12 @@ class FunctionTranslator:
             and following.operands[1].type == "imm"
             and following.operands[1].imm > 0
         }
+        # Esp loads that leave for another stack, a fiber or coroutine switch
+        # (XBA-101). Set before anything lifts, so no other function inherits
+        # them; their locals are declared with the others below.
+        switch_sites = stack_switch_sites(instructions)
+        self.lifter.stack_switch_sites = frozenset(switch_sites)
+        self.lifter.stack_switch_carried = any(i.is_ret for i in instructions)
         if not blocks:
             return None
 
@@ -3308,6 +3428,30 @@ class FunctionTranslator:
         # function that uses it or calls out publishes it, not only frame owners.
         self.lifter.publishes_ebp = "ebp" in used_regs
 
+        # The exception frame's resume anchor (XBA-112), emitted by
+        # lift_basic_block right after the instruction that makes the frame
+        # live. Only frames with somewhere to resume pay for it.
+        seh = getattr(self, "_seh_frame", None)
+        self.lifter.seh_anchor_after = None
+        self.lifter.seh_anchor_lines = None
+        if (seh and seh.resume and getattr(self, "seh_anchors", True)
+                and "ebp" in used_regs):
+            self.lifter.seh_anchor_after = seh.anchor_after
+            self.lifter.seh_anchor_lines = seh_anchor_lines(start, seh)
+
+        # A stack switch: the esp it leaves and lands on, where, and the
+        # return address the function was entered with, for the runtime at
+        # the ret (Lifter._lift_stack_switch, recomp_stack_switch.h).
+        if switch_sites:
+            lines.append("    uint32_t _ss_save = 0, _ss_load = 0, _ss_site = 0,"
+                         " _ss_entry = MEM32(esp); /* stack switch (XBA-101) */")
+            lines.append("    (void)_ss_load; (void)_ss_site; (void)_ss_entry;")
+            sites = ", ".join(f"0x{a:08X}" for a in switch_sites)
+            how = ("carried at its ret" if self.lifter.stack_switch_carried
+                   else "NOT carried: no ret, recorded at run time")
+            print(f"  stack switch: {name} loads esp from memory at {sites} ({how})",
+                  file=sys.stderr)
+
         # SSE and MMX are architectural state, declared globally by the
         # runtime exactly like the GPRs and the x87 stack. Declaring either
         # here would shadow the global with a fresh zeroed local, so a value
@@ -3350,6 +3494,11 @@ class FunctionTranslator:
         label_addrs |= self.lifter.imm_code_refs
         label_addrs.update(debug_slide_bypasses.values())
         label_addrs.update(switch_leaders)
+        # Exception funclets and resume targets (XBA-112): entered from a
+        # handler, by a funclet entry's or an anchor's goto.
+        seh_frame = getattr(self, "_seh_frame", None)
+        if seh_frame:
+            label_addrs.update(seh_frame.targets)
 
         # Which blocks can reach each block. Flag state has to follow control
         # flow, not address order: an optimising compiler routinely lets a jcc
@@ -3630,6 +3779,7 @@ class BatchTranslator:
     """Translates multiple functions and writes C source files."""
 
     entry_stubs = False     # --entry-stubs; see translate_batch_split
+    seh_anchors = True      # --no-seh-anchors turns it off (XBA-112)
 
     def __init__(self, xbe_path, func_json_path, labels_json_path=None,
                  identified_json_path=None, abi_json_path=None,
@@ -3637,13 +3787,16 @@ class BatchTranslator:
                  trace_functions=None, force_returns=None,
                  coalesce_json_paths=None, protected_function_starts=None,
                  icall_sites_json_path=None, back_edge_yield=False,
-                 entry_stubs=False):
+                 entry_stubs=False, seh_anchors=True):
         """back_edge_yield: RECOMP_BACK_EDGE at every loop back edge
         (--back-edge-yield; off by default). entry_stubs: an unresolved
-        target inside a function enters a copy of it (--entry-stubs)."""
+        target inside a function enters a copy of it (--entry-stubs).
+        seh_anchors: resume anchors in functions with an __except or a catch
+        (on by default; --no-seh-anchors)."""
         self.xbe_path = xbe_path
         self.back_edge_yield = back_edge_yield
         self.entry_stubs = entry_stubs
+        self.seh_anchors = seh_anchors
         # Per-site indirect-call targets. A saturated site reached more
         # targets than the runtime records, so it is never guarded.
         self.icall_sites = {}
@@ -3704,6 +3857,7 @@ class BatchTranslator:
             trace_functions=trace_functions,
             force_returns=force_returns, icall_sites=self.icall_sites)
         self.translator.back_edge_yield = self.back_edge_yield
+        self.translator.seh_anchors = self.seh_anchors
         self.translator.protected_function_starts = set(
             protected_function_starts or ())
         for explicit_helper in (seh_prolog, seh_epilog):
@@ -3934,6 +4088,7 @@ class BatchTranslator:
 
         # Translate all functions first, collecting results
         translations = []
+        funclet_entries = []
         stats = {
             "total": len(func_list),
             "translated": 0,
@@ -3957,12 +4112,29 @@ class BatchTranslator:
                 translations.append((addr, name, code))
                 stats["translated"] += 1
                 stats["total_lines"] += code.count("\n")
+                seh_entries = getattr(self.translator, "seh_funclet_entries", None)
+                if seh_entries:
+                    funclet_entries.extend(seh_entries(
+                        addr, name, code,
+                        getattr(self.translator, "_seh_frame", None)))
             else:
                 # Stub for failed translations
                 stub = f"/* FAILED: {name} at 0x{addr:08X} */\n"
                 stub += f"void {name}(void) {{ /* translation failed */ }}\n"
                 translations.append((addr, name, stub))
                 stats["failed"] += 1
+
+        # Exception funclets (XBA-112): a handler calls them through the
+        # dispatch table and their own function calls them directly, so they
+        # are entries like any function -- unless something already is.
+        taken = {a for a, _, _ in translations} | set(manual_decls)
+        taken_names = {n for _, n, _ in translations}
+        for entry in funclet_entries:
+            if entry[0] not in taken and entry[1] not in taken_names:
+                translations.append(entry)
+                taken.add(entry[0])
+                taken_names.add(entry[1])
+        stats["seh_funclets"] = len(funclet_entries)
 
         # A wrapped function's body is sub_X_gen; the hand-written sub_X is
         # what callers and indirect dispatch must reach, so declare it like

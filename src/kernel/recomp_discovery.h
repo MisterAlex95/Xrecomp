@@ -19,6 +19,13 @@
  *                                                          a thread waits on it thousands of times a second
  *   {"t":"launch","va":"0x5A1C33E0","path":"d:\\game.xbe"}  the title launched another image (XBA-82);
  *                                                          va is a hash of the path
+ *   {"t":"stack_switch","va":"0x00023450","to":"0x00023480","why":"..."}
+ *                                                          a guest stack switch the runtime could not
+ *                                                          carry (XBA-101, recomp_stack_switch.c);
+ *                                                          va is the esp load, to where it went;
+ *                                                          or an SEH resume refused across host
+ *                                                          stacks (xbox_seh.c): va is the resume
+ *                                                          target, to its function
  *
  * The file: $RECOMP_DISCOVERY (recomp.cfg can set it); unset, empty or "0":
  * nothing is written. The desktop title project gets a default from
@@ -40,6 +47,7 @@ void recomp_discovery_unimpl(uint32_t va, const char *insn);
 void recomp_discovery_d3d(uint32_t device, uint32_t slot);
 void recomp_discovery_wait_spin(uint32_t object, uint32_t ret_va, uint32_t header, uint32_t status);
 void recomp_discovery_launch(const char *path);
+void recomp_discovery_stack_switch(uint32_t site, uint32_t to, const char *why);
 
 /* The file in use, or NULL when discovery is off (opens it on first use). */
 const char *recomp_discovery_path(void);

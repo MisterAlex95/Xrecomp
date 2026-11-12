@@ -509,6 +509,42 @@ static inline uint32_t recomp_ua_xor32(volatile uint32_t *p, uint32_t v)
 jmp_buf *recomp_setjmp_slot(uint32_t buf_va);
 int recomp_guest_longjmp(uint32_t buf_va, uint32_t value);
 
+/* Exception-frame anchors (XBA-112, src/kernel/xbox_seh.h).
+ *
+ * A function whose exception frame has resume targets (__except blocks,
+ * catch continuations) takes a native setjmp right after it registers the
+ * frame; a handler's jump to one of those targets becomes a longjmp back to
+ * it plus a goto. The BSD-style _setjmp on POSIX hosts: it does not save the
+ * signal mask, which on bionic (Android) would be a sigprocmask system call
+ * on every call of such a function. tools/recomp --no-seh-anchors leaves the
+ * anchors out. */
+#if defined(_WIN32)
+#  define RECOMP_SETJMP(jb)     setjmp(jb)
+#else
+#  define RECOMP_SETJMP(jb)     _setjmp(jb)
+#endif
+#ifndef RECOMP_SEH_DESC_DEFINED
+#define RECOMP_SEH_DESC_DEFINED
+typedef struct recomp_seh_desc {
+    uint32_t        func_va;
+    uint32_t        n_resume;
+    const uint32_t *resume;
+} recomp_seh_desc;
+#endif
+jmp_buf *recomp_seh_anchor(uint32_t reg, uint32_t ebp, const recomp_seh_desc *d);
+
+/* Guest stack switches (XBA-101): a function that loads esp from memory and
+ * returns on the other stack (a fiber or coroutine switch) calls
+ * recomp_stack_switch_ret at its ret, and the runtime switches host stacks
+ * with it -- one host stack per guest stack. recomp_stack_context() names the
+ * host stack the thread runs on (0: its own); a native longjmp is only valid
+ * within one. Contract: src/kernel/recomp_stack_switch.h; design and limits:
+ * docs/technical/stack-switching.md. */
+void recomp_stack_switch_ret(uint32_t saved_esp, uint32_t loaded_esp, uint32_t entry_ret,
+                             uint32_t ret_imm, uint32_t site);
+void recomp_stack_switch_unhandled(uint32_t site);
+uint32_t recomp_stack_context(void);
+
 /* EFLAGS.DF, and the signed step the string instructions take because of it.
  *
  * `cld`/`std` used to lift to a comment and every string instruction stepped
@@ -537,17 +573,65 @@ int recomp_guest_longjmp(uint32_t buf_va, uint32_t value);
  * here.
  *
  * recomp_pushfd builds the pushed word from g_eflags, with DF from g_df,
- * which std/cld keep. cli and sti do not update IF (they have no lift that
- * touches it), so a pushfd after them reports the IF of the last popfd image:
- * set, unless the guest popped it clear. */
+ * which std/cld keep. IF (bit 9) is kept by cli and sti (recomp_cli,
+ * recomp_sti), and a popfd that changes it tells the runtime as they do:
+ * `pushfd; cli; ...; popfd` is how ring-0 code brackets a critical section,
+ * and the popfd is what lets interrupts in again. */
 #define RECOMP_EFL_WRITABLE 0x00247FD5u
+#define RECOMP_EFL_IF       0x00000200u
+
+/* The guest's EFLAGS.IF changed on this thread (cli, sti, popfd). The
+ * runtime masks device interrupts while it is clear, on the same gate a
+ * raise to DISPATCH_LEVEL takes (kernel_hal.c). Called on a change only. */
+void xbox_GuestInterruptFlag(int enabled);
+
 static inline uint32_t recomp_pushfd(void) {
     return (g_eflags & ~0x400u) | 0x2u | (g_df ? 0x400u : 0u);
 }
 static inline void recomp_popfd(uint32_t v) {
+    uint32_t was = g_eflags;
     g_eflags = (v & RECOMP_EFL_WRITABLE) | 0x2u;
     g_df = (int)((v >> 10) & 1u);
+    if ((was ^ g_eflags) & RECOMP_EFL_IF)
+        xbox_GuestInterruptFlag((g_eflags & RECOMP_EFL_IF) != 0);
 }
+static inline void recomp_cli(void) {
+    if (g_eflags & RECOMP_EFL_IF) {
+        g_eflags &= ~RECOMP_EFL_IF;
+        xbox_GuestInterruptFlag(0);
+    }
+}
+static inline void recomp_sti(void) {
+    if (!(g_eflags & RECOMP_EFL_IF)) {
+        g_eflags |= RECOMP_EFL_IF;
+        xbox_GuestInterruptFlag(1);
+    }
+}
+
+/* hlt at guest address va: wait for the next interrupt. The runtime runs
+ * what is pending, then lets the host thread and the guest CPU go briefly. */
+void xbox_Halt(uint32_t va);
+
+/* sgdt/sidt and lgdt/lidt: which = 0 GDTR, 1 IDTR; the value is the
+ * pseudo-descriptor, limit in bits 0-15 and base in bits 16-47. */
+uint64_t xbox_ReadDtr(int which);
+void     xbox_WriteDtr(int which, uint64_t value);
+
+/* A branch the generated code expects never to take: the divide error below,
+ * and other faults the CPU would raise. */
+#if defined(__GNUC__) || defined(__clang__)
+#define RECOMP_UNLIKELY(x) __builtin_expect(!!(x), 0)
+#else
+#define RECOMP_UNLIKELY(x) (x)
+#endif
+
+/* #DE: a div/idiv at guest address `va` whose divisor is zero, or whose
+ * quotient does not fit the destination. The lifted instruction has changed
+ * no register when this is called, as on the CPU. The runtime raises it as a
+ * guest exception (STATUS_INTEGER_DIVIDE_BY_ZERO / _OVERFLOW, xbox_seh.h):
+ * a handler that resumes at its __except block does not return here; with
+ * no handler it reports the fault and stops. */
+void recomp_divide_error(uint32_t va, uint32_t divisor);
 
 /* cpuid: out[0..3] = eax, ebx, ecx, edx for leaf `leaf` (subleaf unused).
  * The runtime answers as the Xbox's Coppermine-class Pentium III. */
@@ -936,6 +1020,142 @@ static inline void recomp_frstor(uint32_t address, int short_env) {
         uint32_t slot = address + env + 10u * i;
         uint64_t mant = ((uint64_t)MEM32(slot + 4) << 32) | MEM32(slot);
         g_fp_stack[(g_fp_top + i) & 7u] = recomp_f80_load(mant, MEM16(slot + 8));
+    }
+}
+
+/* FNINIT: the state FNSAVE leaves (control word 0x037F, TOP 0, no
+ * condition codes); the registers keep their values, as their tags (not
+ * modelled) would say empty. */
+static inline void recomp_fninit(void) {
+    g_fp_control_word = 0x037fu;
+    g_fp_top = 0;
+    g_fp_cc = 0;
+    g_fp_cmp = 0;
+}
+
+/* FNSTENV / FLDENV: the environment at the head of the FSAVE image (28
+ * bytes, or 14 with an operand-size prefix). Like FNSAVE's, the tag word
+ * and the instruction and data pointers read 0. FNSTENV then masks every
+ * x87 exception, as the CPU does; FLDENV takes CW, TOP and C0-C3 back. */
+static inline void recomp_fnstenv(uint32_t address, int short_env) {
+    unsigned stride = short_env ? 2u : 4u;
+    unsigned i;
+    for (i = 0; i < 7u * stride; ++i) MEM8(address + i) = 0;
+    MEM16(address) = g_fp_control_word;
+    MEM16(address + stride) = (uint16_t)((g_fp_top << 11) | g_fp_cc);
+    g_fp_control_word |= 0x003fu;
+}
+static inline void recomp_fldenv(uint32_t address, int short_env) {
+    unsigned stride = short_env ? 2u : 4u;
+    uint16_t status = MEM16(address + stride);
+    g_fp_control_word = MEM16(address);
+    g_fp_top = (status >> 11) & 7u;
+    g_fp_cc = status & 0x4700u;
+    g_fp_cmp = (g_fp_cc & 0x0400u) ? 2 : (g_fp_cc & 0x4000u) ? 0
+        : (g_fp_cc & 0x0100u) ? -1 : 1;
+}
+
+/* FXTRACT: returns the unbiased exponent (the new ST1) and stores the
+ * significand, in [1, 2) with x's sign (the new ST0). A zero gives -inf and
+ * the zero (divide-by-zero, masked); an infinity +inf and itself; a NaN
+ * itself twice. */
+static inline double recomp_fxtract(double x, double *significand) {
+    int e;
+    *significand = x;
+    if (x != x) return x;
+    if (x == 0.0) return -INFINITY;
+    if (isinf(x)) return INFINITY;
+    *significand = frexp(x, &e) * 2.0;
+    return (double)(e - 1);
+}
+
+/* FBLD / FBSTP: an 18-digit packed BCD integer in 10 bytes, two digits a
+ * byte from the least significant, the sign in bit 7 of byte 9. FBSTP rounds
+ * under the guest RC bits; a value that does not fit (|x| >= 10^18, or not
+ * finite) stores the packed-BCD indefinite (invalid, masked). */
+static inline double recomp_fbld(uint32_t address) {
+    double v = 0.0;
+    int i;
+    for (i = 8; i >= 0; --i) {
+        uint8_t b = MEM8(address + (uint32_t)i);
+        v = v * 100.0 + (double)((b >> 4) * 10 + (b & 15));
+    }
+    return (MEM8(address + 9) & 0x80u) ? -v : v;
+}
+static inline void recomp_fbstp(uint32_t address, double value, uint16_t control) {
+    double r = recomp_frndint(value, control);
+    uint64_t n;
+    int i;
+    if (!(fabs(r) < 1e18)) {
+        for (i = 0; i < 7; ++i) MEM8(address + (uint32_t)i) = 0;
+        MEM8(address + 7) = 0xC0u;
+        MEM8(address + 8) = 0xFFu;
+        MEM8(address + 9) = 0xFFu;
+        return;
+    }
+    n = (uint64_t)fabs(r);
+    for (i = 0; i < 9; ++i) {
+        unsigned lo = (unsigned)(n % 10u), hi = (unsigned)(n / 10u % 10u);
+        MEM8(address + (uint32_t)i) = (uint8_t)((hi << 4) | lo);
+        n /= 100u;
+    }
+    MEM8(address + 9) = signbit(r) ? 0x80u : 0u;
+}
+
+/* FXSAVE / FXRSTOR: the 512-byte image (Intel SDM vol. 1, 10.5.1). FCW,
+ * FSW, MXCSR, ST0-ST7 (16-byte slots, stack order) and XMM0-XMM7 are kept;
+ * the abridged tag byte reads all valid (0xFF) as FNSAVE's tag word does,
+ * the pointers and MXCSR_MASK read 0 (a Pentium III's), and the reserved
+ * tail is left alone. The mm registers are not aliased onto the x87 stack
+ * here, so an image saved after MMX code holds the x87 values. */
+static inline void recomp_fxsave(uint32_t address) {
+    unsigned i;
+    for (i = 0; i < 32u; ++i) MEM8(address + i) = 0;
+    MEM16(address) = g_fp_control_word;
+    MEM16(address + 2) = (uint16_t)((g_fp_top << 11) | g_fp_cc);
+    MEM8(address + 4) = 0xFFu;
+    MEM32(address + 24) = g_mxcsr;
+    for (i = 0; i < 8; ++i) {
+        uint64_t mant;
+        uint16_t se = recomp_f80_store(g_fp_stack[(g_fp_top + i) & 7u], &mant);
+        uint32_t slot = address + 32u + 16u * i;
+        MEM32(slot) = (uint32_t)mant;
+        MEM32(slot + 4) = (uint32_t)(mant >> 32);
+        MEM16(slot + 8) = se;
+        MEM16(slot + 10) = 0; MEM32(slot + 12) = 0;
+    }
+    {
+        const RecompXmm *x[8] = { &g_xmm0, &g_xmm1, &g_xmm2, &g_xmm3,
+                                  &g_xmm4, &g_xmm5, &g_xmm6, &g_xmm7 };
+        for (i = 0; i < 8; ++i) {
+            unsigned k;
+            for (k = 0; k < 4; ++k)
+                MEM32(address + 160u + 16u * i + 4u * k) = x[i]->u[k];
+        }
+    }
+}
+static inline void recomp_fxrstor(uint32_t address) {
+    unsigned i;
+    uint16_t status = MEM16(address + 2);
+    g_fp_control_word = MEM16(address);
+    g_fp_top = (status >> 11) & 7u;
+    g_fp_cc = status & 0x4700u;
+    g_fp_cmp = (g_fp_cc & 0x0400u) ? 2 : (g_fp_cc & 0x4000u) ? 0
+        : (g_fp_cc & 0x0100u) ? -1 : 1;
+    g_mxcsr = MEM32(address + 24);
+    for (i = 0; i < 8; ++i) {
+        uint32_t slot = address + 32u + 16u * i;
+        uint64_t mant = ((uint64_t)MEM32(slot + 4) << 32) | MEM32(slot);
+        g_fp_stack[(g_fp_top + i) & 7u] = recomp_f80_load(mant, MEM16(slot + 8));
+    }
+    {
+        RecompXmm *x[8] = { &g_xmm0, &g_xmm1, &g_xmm2, &g_xmm3,
+                            &g_xmm4, &g_xmm5, &g_xmm6, &g_xmm7 };
+        for (i = 0; i < 8; ++i) {
+            unsigned k;
+            for (k = 0; k < 4; ++k)
+                x[i]->u[k] = MEM32(address + 160u + 16u * i + 4u * k);
+        }
     }
 }
 

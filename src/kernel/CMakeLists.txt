@@ -24,10 +24,12 @@ set(KERNEL_SOURCES
     kernel_bridge.c
     kernel_wait_stats.c
     xbox_memory_layout.c
+    xbox_seh.c
     guest_vmem.c
     icall_feedback.c
     recomp_trace.c
     recomp_discovery.c
+    recomp_stack_switch.c
     recomp_status.c
     recomp_diff.c
     nv2a_pb_scan.c

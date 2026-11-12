@@ -11,7 +11,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-extern void xbox_SetMapSize(size_t bytes);
 extern void xbox_SetDelayOverride(uint32_t ret_va, uint32_t from_ms, uint32_t to_ms);
 
 #ifndef _WIN32
@@ -57,16 +56,15 @@ static void fable_aspect_configure(void)
 void fable_configure(void)
 {
     /* Fable reserves 608 MB of address space for its own allocator and
-     * sub-allocates across all of it. With the mapping the size of RAM the
-     * reserve was clamped to 38 MB, the allocator walked into the RAM mirrors
-     * and two of its strings shared storage. RAM stays 64 MB. With the
-     * mapping above 64 MB the desktop POSIX layout lost pages of the
-     * contiguous window: title.json holds the whole 4 GB window
-     * (RECOMP_GUEST_WINDOW=1, Android's default), which places every view
-     * inside one reservation. Its 12+ worker threads alive during the
-     * front-end load need no setting: the stack pool grows with the guest
-     * heap (XBA-104). title.json on Android caps the GPU renderer at 30 fps,
-     * evenly paced: in
+     * sub-allocates across all of it. That used to need xbox_SetMapSize(1 GB)
+     * here, and RECOMP_GUEST_WINDOW=1 in title.json because the desktop layout
+     * then lost the contiguous window. Neither is set any more (XBA-103): the
+     * whole 4 GB window is the default layout on every 64-bit host, and the
+     * reserve is granted whole as a lazy reservation at the top of user space
+     * (RECOMP_LAZY_RESERVE). Its 12+ worker threads alive during the
+     * front-end load need no setting either: the stack pool grows with the
+     * guest heap (XBA-104). title.json on Android caps the GPU renderer at
+     * 30 fps, evenly paced: in
      * Oakvale a frame takes the executor 17-22 ms on an M1 and more on the
      * AYN Thor, so a 60 cap only lets the rate wander between 20 and 40
      * (docs/technical/gpu-backend.md, Android; the launcher's Frame cap wins).
@@ -78,7 +76,6 @@ void fable_configure(void)
      * (0x0086E480-0x00876C3C), the pad, and service D3D's GPU semaphore and
      * deferred RunPushBuffer (0x00855900; dispatcher sub_00859C40, helper
      * sub_00855860) with the addresses in title.json "params". */
-    xbox_SetMapSize((size_t)1024 * 1024 * 1024);
     /* File-I/O completion APCs run at the next alertable wait, as the hardware
      * does: the runtime's default since XBA-102 (inline, the loader's
      * completion ran before the read call had returned and its bookkeeping

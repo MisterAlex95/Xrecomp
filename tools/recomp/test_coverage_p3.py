@@ -40,9 +40,10 @@ def test_lifts(code, mnemonic):
     assert m == mnemonic and "RECOMP_UNIMPL" not in out, out
 
 
-def test_enter_with_a_nesting_level_stays_unhandled():
+def test_enter_with_a_nesting_level_lifts():
+    # XBA-111: the nesting forms lift too (semantics in test_lifter_system.py).
     out, _ = lift(b"\xc8\x10\x00\x01")
-    assert "RECOMP_UNIMPL" in out
+    assert "RECOMP_UNIMPL" not in out and "_enter_frame" in out, out
 
 
 HARNESS = r"""

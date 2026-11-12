@@ -61,7 +61,8 @@ start (Finder launch).
    grows with the guest heap and an exhausted heap fails PsCreateSystemThreadEx instead of running inline; the
    profile sets nothing.
 4. Desktop POSIX layout with map > 64 MB loses contiguous-window pages (host malloc trap; guard malloc fault at
-   0x80005000 in xbox_ContiguousAllocEx). Worked around with RECOMP_GUEST_WINDOW=1. Toolkit bug, not fixed yet.
+   0x80005000 in xbox_ContiguousAllocEx). Worked around with RECOMP_GUEST_WINDOW=1. Fixed in the toolkit on
+   2026-11-12 (XBA-103), see below.
 All of these are setenv() defaults in main.c, so a double-click runs the same thing.
 
 ## Now: everyone waiting
@@ -342,3 +343,15 @@ the lock stalls D3D init (RECOMP_GUEST_CPU_TRACE).
   hooks off (presenter wide only) 45.9 -> 59.5-59.9 fps; hooks on 43.5 -> 46-52 fps, still climbing (~4 % more
   triangles at the start; the wider view brings in more of the town). Menus are 40 fps windowed with 16:9 with or
   without the hooks (60 with auto): the presenter's, not the camera's.
+
+## 2026-11-12: no map size, no RECOMP_GUEST_WINDOW (XBA-103)
+- The profile no longer calls `xbox_SetMapSize(1 GB)` or sets `RECOMP_GUEST_WINDOW=1`.
+- The whole 4 GB window is now the default layout on every 64-bit POSIX host. The old desktop layout's contiguous
+  window loss (bring-up item 4) is staged in tests/memory_layout_posix: the old layout logs « contiguous window ...
+  failed » and segfaults on the first contiguous allocation; the default layout keeps the window.
+- The 608 MB reserve is granted whole without a map size, as a lazy reservation carved top-down from guest
+  0x7FFE0000 (expect `[MEM] lazy reservation: 622592 KB at guest 0x59FE0000-0x7FFE0000` in the log). Its pages
+  are backed only once touched. Under the 1 GB map it sat at 0x04000000+; the APU (sound buffers in the reserve),
+  the bridge's buffer checks and the OHCI accept lazy reservations too.
+- A/B: `RECOMP_LAZY_RESERVE=0` clamps the reserve again (the 38 MB crash); `RECOMP_GUEST_WINDOW=0` is the old layout.
+- Not run on Fable yet (no title on the CI host): Mac check list on XBA-103.

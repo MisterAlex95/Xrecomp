@@ -16,7 +16,9 @@
 #define _GNU_SOURCE   /* glibc declares dladdr/Dl_info (RECOMP_WATCH) only under it */
 #endif
 #include "recomp_status.h"
+#include "recomp_stack_switch.h"
 #include "xbox_memory_layout.h"
+#include "xbox_seh.h"
 #include "kernel.h"
 #include "guest_vmem.h"
 #include "kernel_missing.h"
@@ -2461,11 +2463,20 @@ int g_force_return = 0;
  *
  * Keyed by guest buffer address, per thread. Buffers nest, so jumping to an
  * outer one discards every inner entry -- those frames are gone.
+ *
+ * A thread that switches guest stacks (recomp_stack_switch.c, XBA-101) runs
+ * on several host stacks, and a native longjmp is only valid on the stack the
+ * buffer was armed on. Each slot names its host context: a jump to a buffer
+ * armed on another one is refused (the guest's own longjmp runs instead, as
+ * for a buffer with no native counterpart), and a jump only discards the
+ * inner entries of its own context -- the others' frames are still alive,
+ * parked on their stacks. docs/technical/stack-switching.md « Limits ».
  */
 #define RECOMP_JMPBUF_SLOTS 32
 
 typedef struct {
     uint32_t buf_va;
+    uint32_t ctx;           /* recomp_stack_context() when armed */
     jmp_buf  native;
 } recomp_jmp_slot;
 
@@ -2474,29 +2485,62 @@ static RECOMP_TLS int             s_jmp_used;
 
 jmp_buf *recomp_setjmp_slot(uint32_t buf_va)
 {
+    uint32_t ctx = recomp_stack_context();
     int i;
 
     for (i = 0; i < s_jmp_used; i++)
-        if (s_jmp[i].buf_va == buf_va)
-            return &s_jmp[i].native;      /* the same buffer, re-armed */
+        if (s_jmp[i].buf_va == buf_va) {
+            s_jmp[i].ctx = ctx;           /* the same buffer, re-armed */
+            return &s_jmp[i].native;
+        }
     if (s_jmp_used >= RECOMP_JMPBUF_SLOTS)
         s_jmp_used = RECOMP_JMPBUF_SLOTS - 1;   /* keep the deepest */
     s_jmp[s_jmp_used].buf_va = buf_va;
+    s_jmp[s_jmp_used].ctx = ctx;
     return &s_jmp[s_jmp_used++].native;
 }
 
 int recomp_guest_longjmp(uint32_t buf_va, uint32_t value)
 {
-    const uint8_t *mem = (const uint8_t *)g_memory_offset;
-    int i;
+    const uint8_t *mem = (const uint8_t *)g_xbox_mem_offset;
+    uint32_t ctx = recomp_stack_context();
+    int i, j, kept;
 
     for (i = s_jmp_used - 1; i >= 0; i--) {
         if (s_jmp[i].buf_va != buf_va)
             continue;
+        if (s_jmp[i].ctx != ctx) {
+            static int said;
+            if (said++ < 8)
+                fprintf(stderr, "[STACK] longjmp to jmp_buf 0x%08X armed on host stack %u from "
+                                "host stack %u: the guest's own longjmp runs instead\n",
+                        buf_va, s_jmp[i].ctx, ctx);
+            return 0;
+        }
 
         /* The callee-saved registers and the stack, exactly as the CRT's
          * longjmp restores them: esp is the setjmp-time esp plus the return
          * address that setjmp's own ret would have popped. */
+        /* The CRT's longjmp also unwinds the exception frames it leaves:
+         * _rt_unwind, RtlUnwind up to the registration its setjmp saved at
+         * +0x18, so their __finally blocks and destructors run and fs:[0] is
+         * that registration again. The native jump replaces the guest's
+         * longjmp, so it does that part here, before esp moves (the handlers
+         * run below it). Left out, fs:[0] kept naming dead frames below esp,
+         * which the dispatcher (XBA-112) rejects as a broken chain: the next
+         * exception went unhandled. The registration must be on the chain (or
+         * the end of it), else nothing is unwound. The try-level unwind
+         * inside the setjmp caller's own frame (_local_unwind2) is not done. */
+        if (xbox_SehDispatchEnabled() && g_fs_base) {
+            uint32_t reg = *(const uint32_t *)(mem + buf_va + 0x18);
+            uint32_t eip = *(const uint32_t *)(mem + buf_va + 0x14);
+            uint32_t head = *(const uint32_t *)(mem + g_fs_base);
+            if (reg != head && (reg == XBOX_SEH_END_OF_CHAIN || xbox_SehOnChain(reg))) {
+                xbox_SehUnwind(reg == XBOX_SEH_END_OF_CHAIN ? 0 : reg, 0, eip);
+                *(uint32_t *)((uint8_t *)mem + g_fs_base) = reg;
+            }
+        }
+
         g_ebx = *(const uint32_t *)(mem + buf_va + 0x04);
         g_edi = *(const uint32_t *)(mem + buf_va + 0x08);
         g_esi = *(const uint32_t *)(mem + buf_va + 0x0C);
@@ -2508,7 +2552,12 @@ int recomp_guest_longjmp(uint32_t buf_va, uint32_t value)
         g_seh_ebp = *(const uint32_t *)(mem + buf_va + 0x00);
         g_ebp     = g_seh_ebp;
 
-        s_jmp_used = i + 1;   /* the inner buffers died with their frames */
+        /* The inner buffers of this context died with their frames; the
+         * other contexts' are still alive, parked on their stacks. */
+        for (j = kept = i + 1; j < s_jmp_used; j++)
+            if (s_jmp[j].ctx != ctx)
+                s_jmp[kept++] = s_jmp[j];
+        s_jmp_used = kept;
         longjmp(s_jmp[i].native, value ? (int)value : 1);
     }
     return 0;
@@ -3689,6 +3738,8 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
      * g_esp is the global stack pointer shared by all translated functions.
      */
     g_esp = XBOX_STACK_TOP;
+    /* The exception dispatcher only follows SEH records on this stack. */
+    xbox_SehSetGuestStack(XBOX_STACK_BASE, XBOX_STACK_BASE + XBOX_STACK_SIZE);
     fprintf(stderr, "  Stack: %u KB at Xbox VA 0x%08X (ESP = 0x%08X)\n",
             XBOX_STACK_SIZE / 1024, XBOX_STACK_BASE, g_esp);
 
@@ -4807,8 +4858,6 @@ static uint32_t heap_carve_free(uint32_t size, uint32_t alignment)
  * stack through MEM32() like any other Xbox pointer.
  */
 uint32_t xbox_HeapAlloc(uint32_t size, uint32_t alignment);
-
-#define XBOX_THREAD_STACK_SIZE  (512 * 1024)
 
 /* How many worker stacks may be alive at once: as many as the guest heap
  * holds (XBA-104). Each is a 512 KB slice of it, so the real cap is

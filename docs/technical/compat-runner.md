@@ -43,7 +43,10 @@ Playable (30 minutes, saves kept) is a person's check. With `--repeat N` the tit
 the best one, and `failure_rate` the share of runs below the best: a race that loses one boot in four shows.
 
 The blocker is the first of: a crash (signal and fault line), an early exit, no status line, no flip, a hang (no flip
-for 30 s at the end), each with the first untranslated instruction or the last discovery when there is one.
+for 30 s at the end), each with the first untranslated instruction or the last discovery when there is one. A
+guest stack switch the runtime could not carry (a `stack_switch` discovery entry, XBA-101,
+[stack-switching.md](stack-switching.md)) is named after any of them: « hang: ...; stack switch at 0x... to 0x...:
+<why> (XBA-101) ».
 
 ## The « Compatibility » page (XBA-73)
 

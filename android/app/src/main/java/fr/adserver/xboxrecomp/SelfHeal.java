@@ -16,7 +16,8 @@ import org.json.JSONObject;
  * the next Prepare seeds the analysis with it. When a run of a title ends on a crash, the launcher looks at what the
  * file gained since the last Prepare began: code addresses (icall, thread, thread_ctx) → « Prepare again », which
  * prepares and relaunches; nothing of the kind, or {@link #MAX_ROUNDS} rounds already done → the title needs a fix,
- * with the blocker (an untranslated instruction when one was reached, else the crash).
+ * with the blocker (an untranslated instruction when one was reached, else a guest stack switch the runtime could
+ * not carry, else the crash).
  *
  * <p>The state is per title, in {@code <work>/selfheal.json}: the file's length when the last Prepare began, the
  * rounds done in a row, when the game was last launched, the last exit handled, and the standing offer. The
@@ -41,6 +42,10 @@ final class SelfHeal {
         int unimpl;
         /** The first untranslated instruction, « bsf eax, ecx at 0x00012345 », or "". */
         String firstUnimpl = "";
+        /** Guest stack switches the runtime could not carry (XBA-101, docs/technical/stack-switching.md). */
+        int stackSwitch;
+        /** The first of them, « at 0x00012345 to 0x00023456: <why> », or "". */
+        String firstStackSwitch = "";
     }
 
     /** How the game's process last ended (ApplicationExitInfo, or a test's). */
@@ -209,6 +214,11 @@ final class SelfHeal {
                 if (f.unimpl++ == 0)
                     f.firstUnimpl = o.optString("insn", "?") + " at " + o.optString("va", "?");
                 break;
+            case "stack_switch":
+                if (f.stackSwitch++ == 0)
+                    f.firstStackSwitch = "at " + o.optString("va", "?") + " to " + o.optString("to", "?") + ": "
+                            + o.optString("why", "?");
+                break;
             default:   // run, d3d, wait_spin, launch: the runtime acts on them, the analysis does not
                 break;
             }
@@ -225,6 +235,9 @@ final class SelfHeal {
     static String blocker(Finds f, int rounds, Exit e) {
         if (f.unimpl > 0)
             return "untranslated instruction: " + f.firstUnimpl + (f.unimpl > 1 ? " (+" + (f.unimpl - 1) + ")" : "");
+        if (f.stackSwitch > 0)
+            return "stack switch " + f.firstStackSwitch
+                    + (f.stackSwitch > 1 ? " (+" + (f.stackSwitch - 1) + ")" : "");
         String crash = "crash" + (e.why.isEmpty() ? "" : " (" + e.why + ")");
         if (f.seeds > 0)
             return crash + ", still after " + rounds + " Prepare again round" + (rounds == 1 ? "" : "s");

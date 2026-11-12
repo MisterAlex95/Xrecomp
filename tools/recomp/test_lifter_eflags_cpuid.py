@@ -204,6 +204,8 @@ static uint8_t g_mem[0x10000];
 ptrdiff_t g_xbox_mem_offset;
 RECOMP_TLS RecompCpu g_cpu = { .r_df = 0, .r_eflags = 0x00000202u };
 void recomp_unimpl(const char *text, uint32_t va) { (void)text; (void)va; }
+/* popfd tells the runtime when IF changes (cli/sti, XBA-111). */
+void xbox_GuestInterruptFlag(int enabled) { (void)enabled; }
 /* xbox_Cpuid reads RECOMP_CPUID_NO_SIMD; the test pins its value per build. */
 #define getenv(name) ((void)(name), (const char *)CPUID_NO_SIMD_ENV)
 %(cpuid)s
