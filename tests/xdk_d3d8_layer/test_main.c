@@ -93,11 +93,17 @@ int main(void)
         CHECK(M32(0x80020000u) == 0x00020001u);
         CHECK(M32(dev + 0x50) == 2);
         CHECK(M32(node + 4) == 0xFFFFFFFFu && M32(node) == (0x80000000u | 0x00020000u));
-        /* A slot outside the contiguous window is not written. */
+        /* A slot outside the contiguous window: not written for a device
+         * found at run time (its layout is assumed); written as D3D's handler
+         * does with the profile's addresses (Fable's code, unchanged). */
         M32(node + 8) = 0x00400000u;
         M32(0x00400000u) = 0x12345678u;
         CHECK(g_hook(2u << 5 | 0xDu) == 1);
+#ifdef TEST_GIVEN
+        CHECK(M32(0x00400000u) == 0x00020001u);
+#else
         CHECK(M32(0x00400000u) == 0x12345678u);
+#endif
     }
     if (failures)
         return 1;

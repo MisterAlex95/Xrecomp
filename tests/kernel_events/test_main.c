@@ -296,14 +296,21 @@ int main(int argc, char **argv)
 
     if (!on) {
         /* XBA-93: a thread failing to wait on a title-built event thousands of
-         * times a second is a spin; the event is promoted to a guest event
-         * for good, and from then on behaves as with RECOMP_TITLE_KEVENTS. */
+         * times a second is a spin. With nothing ever trying to set the event
+         * it is only reported (promoted, the wait would block for ever); once
+         * a KeSetEvent has been seen on it, the next spin window promotes it,
+         * and from then on it behaves as with RECOMP_TITLE_KEVENTS. */
         uint32_t spin_va = scratch + 0x3800, n, fails = 0;
         build_event(spin_va, 1, 0);
         for (n = 0; n < 2500; n++)
             fails += ke_wait(spin_va) != 0 && g_eax != STATUS_TIMEOUT;
         snprintf(d, sizeof d, "%u immediate failures of 2500", fails);
-        check(fails >= 2000 && fails < 2500, "a wait spin is caught within 2,000 waits", d);
+        check(fails == 2500, "no setter seen: reported, not promoted (the waits still fail)", d);
+        ke_set(spin_va);                       /* fails (no host event) but counts as a setter */
+        for (n = 0, fails = 0; n < 2500; n++)
+            fails += ke_wait(spin_va) != 0 && g_eax != STATUS_TIMEOUT;
+        snprintf(d, sizeof d, "%u immediate failures of 2500", fails);
+        check(fails < 2500, "a setter seen: the next spin window promotes it", d);
         st = ke_wait(spin_va);
         snprintf(d, sizeof d, "status 0x%08X", st);
         check(st == STATUS_TIMEOUT, "promoted: an unset event now times out instead of failing", d);

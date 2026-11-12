@@ -11,6 +11,11 @@ static int run(uint32_t payload, int held_pct, uint32_t n)
 {
     FrameLock f = { 0 };
     int v = 0;
+    for (uint32_t i = 0; i < FRAME_LOCK_SKIP; i++) {    /* logos, movies: not judged */
+        frame_lock_swap(&f, 1u);
+        if (frame_lock_flip(&f, 1))
+            return 99;
+    }
     for (uint32_t i = 0; i < n; i++) {
         frame_lock_swap(&f, payload);
         v = frame_lock_flip(&f, (int)(i % 100u) < held_pct);
@@ -29,13 +34,13 @@ int main(void)
     {
         FrameLock f = { 0 };                                 /* no swap methods seen at all */
         int v = 0;
-        for (uint32_t i = 0; i < 400u; i++)
+        for (uint32_t i = 0; i < FRAME_LOCK_SKIP + 400u; i++)
             v = frame_lock_flip(&f, 1);
         CHECK(v == -1);
     }
     {
         FrameLock f = { 0 };                                 /* the verdict is kept */
-        for (uint32_t i = 0; i < FRAME_LOCK_WINDOW; i++) {
+        for (uint32_t i = 0; i < FRAME_LOCK_SKIP + FRAME_LOCK_WINDOW; i++) {
             frame_lock_swap(&f, 2u);
             frame_lock_flip(&f, 1);
         }

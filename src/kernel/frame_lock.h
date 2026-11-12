@@ -22,9 +22,11 @@
 
 #include <stdint.h>
 
-#define FRAME_LOCK_WINDOW 180u          /* flips looked at: 6 s at the 30 cap */
+#define FRAME_LOCK_SKIP   600u          /* flips left out first: logos and movies (20 s at 30) */
+#define FRAME_LOCK_WINDOW 180u          /* flips looked at then: 6 s at the 30 cap */
 
 typedef struct {
+    uint32_t skipped;                   /* flips before the window */
     uint32_t flips, held, swaps, every_vblank;
     int verdict;                        /* 0 undecided, 1 wants 60, -1 fine at the cap */
 } FrameLock;
@@ -33,6 +35,8 @@ typedef struct {
 static inline void frame_lock_swap(FrameLock *f, uint32_t payload)
 {
     uint32_t interval = payload & 7u;
+    if (f->skipped < FRAME_LOCK_SKIP)
+        return;
     f->swaps++;
     if (!(payload & 8u) && interval <= 1u)
         f->every_vblank++;
@@ -44,6 +48,12 @@ static inline int frame_lock_flip(FrameLock *f, int held)
 {
     if (f->verdict)
         return f->verdict;
+    /* Logos and movies are presented every vblank and held by the cap
+     * whatever the game itself does: judge the game, after them. */
+    if (f->skipped < FRAME_LOCK_SKIP) {
+        f->skipped++;
+        return 0;
+    }
     f->flips++;
     f->held += held ? 1u : 0u;
     if (f->flips < FRAME_LOCK_WINDOW)

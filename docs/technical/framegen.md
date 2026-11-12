@@ -290,7 +290,7 @@ See [Environment variables](../runtime/environment-variables.md#forced-by-a-titl
 
 The cap rule assumes a title that runs at 30. One whose game logic advances per flip at 60 runs in slow motion under
 it (Burnout 3; its engine layer still forces `RECOMP_LSFG=0`). The executor watches for that (XBA-96,
-`src/kernel/frame_lock.h`): over the first 180 flips under frame generation's cap, if at least 90 % of the title's
+`src/kernel/frame_lock.h`): over 180 flips under frame generation's cap, after the first 600 (logos and movies, presented every vblank whatever the game does), if at least 90 % of the title's
 swaps (software method 1) ask for every vblank (interval ONE or DEFAULT, not IMMEDIATE) and at least 90 % of its
 frames waited at the cap, frame generation stops (`xbox_FramegenRequestStop`, at the window loop's next turn) and the
 cap goes back to what it was before frame generation lowered it, with a line saying why. A cap that is not frame

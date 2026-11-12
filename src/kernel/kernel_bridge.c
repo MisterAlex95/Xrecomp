@@ -2062,6 +2062,9 @@ static void ke_shadow_insert(uint32_t guest_va, HANDLE host);
 static HANDLE bridge_resolve_handle(uint32_t token);
 static HANDLE ke_guest_event(uint32_t guest_va, int *type);
 static int ke_promote(uint32_t guest_va);
+static void ke_note_set_attempt(uint32_t guest_va);
+static int ke_set_seen(uint32_t guest_va);
+static int ke_is_promoted(uint32_t guest_va);
 
 /* Bring a header-owned host event in line with guest SignalState before a
  * wait. Explicitly initialized shadows keep their existing host-state policy. */
@@ -2090,8 +2093,10 @@ int xbox_KeSetGuestEvent(uint32_t guest_va)
     int type;
     HANDLE ge = ke_guest_event(guest_va, &type);
 
-    if (!ge)
+    if (!ge) {
+        ke_note_set_attempt(guest_va);   /* a wait spin on it may be promoted (XBA-93) */
         return 0;
+    }
     BRIDGE_MEM32(guest_va + 4) = 1;
     SetEvent(ge);
     return 1;
@@ -2120,6 +2125,8 @@ static void bridge_KeSetEvent(void)
     }
     h = ke_shadow_lookup(guest_va);
     if (!h)
+        ke_note_set_attempt(guest_va);   /* no host event: a wait spin on it may be promoted (XBA-93) */
+    if (!h)
         h = bridge_resolve_handle(guest_va);
     if (!h)
         h = XBOX_TO_NATIVE(guest_va);
@@ -2145,9 +2152,13 @@ static void bridge_KeSetEvent(void)
  * wait's result, the caller's return address and a frame walk, in the log and
  * in the discovery file ({"t":"wait_spin"}). An event header whose waits
  * failed (not timed out) is then promoted to a guest-built event, which is
- * what RECOMP_TITLE_KEVENTS does for every object: the next wait blocks until
- * KeSetEvent, a software method 5 or the guest itself sets it.
- * RECOMP_WAIT_SPIN=0 turns the detector off. */
+ * what RECOMP_TITLE_KEVENTS does for every object, but only once something
+ * has tried to set it (KeSetEvent, a software method 5): promoted with no
+ * setter, a wait that used to fail and re-poll would block for ever (Fable's
+ * fence wait, whose method 5 its profile does not service, would hang).
+ * The check runs at every spin window, so a setter seen later still counts.
+ * RECOMP_WAIT_SPIN=0 turns the detector off; =promote promotes without the
+ * evidence (bring-up). */
 #define WAIT_SPIN_CALLS 2000u
 #define WAIT_SPIN_MS    1000u
 
@@ -2177,13 +2188,14 @@ static const char *dispatcher_type_name(uint32_t type)
 
 static void bridge_wait_spin(uint32_t object, uint32_t status, uint32_t timeout_ptr, uint32_t ret_va)
 {
-    static int enabled = -1;
+    static int enabled = -1, promote_always;
     WaitSpin *w = &t_wait_spin;
     DWORD now;
 
     if (enabled < 0) {
         const char *e = getenv("RECOMP_WAIT_SPIN");
         enabled = !(e && *e == '0');
+        promote_always = e && !strcmp(e, "promote");
     }
     if (!enabled)
         return;
@@ -2193,9 +2205,10 @@ static void bridge_wait_spin(uint32_t object, uint32_t status, uint32_t timeout_
         w->calls = 0;
         w->t0 = now;
     }
-    if (++w->calls != WAIT_SPIN_CALLS || w->reported == object)
+    if (++w->calls != WAIT_SPIN_CALLS)
         return;
-    w->reported = object;
+    w->calls = 0;               /* a new window: the setter check runs again */
+    w->t0 = now;
     {
         int readable = object >= 0x10000u && !(object & 3u)
                     && (object < 0x04000000u || (object >= 0x80000000u && object < 0x84000000u));
@@ -2207,6 +2220,18 @@ static void bridge_wait_spin(uint32_t object, uint32_t status, uint32_t timeout_
                      && status != 0x101u && status != 0xC0u;
         const char *timeout = !timeout_ptr ? "none"
                             : (BRIDGE_MEM32(timeout_ptr) | BRIDGE_MEM32(timeout_ptr + 4)) ? "set" : "zero";
+        int promotable = failed && readable && (type == 0 || type == 1) && size == 4;
+        if (w->reported == object) {
+            /* Reported already: only a setter seen since can change things. */
+            if (promotable && !ke_is_promoted(object) && (promote_always || ke_set_seen(object))
+                    && ke_promote(object)) {
+                fprintf(stderr, "  [KERNEL] wait spin: 0x%08X now has a setter: promoted to a guest event\n",
+                        object);
+                fflush(stderr);
+            }
+            return;
+        }
+        w->reported = object;
         for (k = 0; k < 4 && ebp >= 0x10000u && ebp < 0x04000000u && !(ebp & 3u); k++) {
             frames[k] = BRIDGE_MEM32(ebp + 4);
             ebp = BRIDGE_MEM32(ebp);
@@ -2216,9 +2241,13 @@ static void bridge_wait_spin(uint32_t object, uint32_t status, uint32_t timeout_
                 WAIT_SPIN_CALLS, WAIT_SPIN_MS, object, readable ? dispatcher_type_name(type) : "not guest memory",
                 hdr, size, signal, status, timeout, ret_va, frames[0], frames[1], frames[2], frames[3]);
         recomp_discovery_wait_spin(object, ret_va, hdr, status);
-        if (failed && readable && (type == 0 || type == 1) && size == 4 && ke_promote(object))
-            fprintf(stderr, "  [KERNEL] wait spin: 0x%08X looks like an event the title built itself: "
-                            "promoted to a guest event (RECOMP_TITLE_KEVENTS for this object)\n", object);
+        if (promotable && (promote_always || ke_set_seen(object)) && ke_promote(object))
+            fprintf(stderr, "  [KERNEL] wait spin: 0x%08X looks like an event the title built itself and "
+                            "something sets it: promoted to a guest event (RECOMP_TITLE_KEVENTS for this "
+                            "object)\n", object);
+        else if (promotable)
+            fprintf(stderr, "  [KERNEL] wait spin: 0x%08X looks like an event the title built itself, but "
+                            "nothing has tried to set it yet: left as it is\n", object);
         fflush(stderr);
     }
 }
@@ -7927,6 +7956,32 @@ static int ke_is_promoted(uint32_t guest_va)
     LONG i, n = g_ke_promoted_n;
     for (i = 0; i < n && i < KE_PROMOTED_MAX; i++)
         if (g_ke_promoted[i] == guest_va)
+            return 1;
+    return 0;
+}
+
+/* Objects something tried to set while they were not host events yet
+ * (KeSetEvent on a title-built header, a software method 5): the evidence a
+ * spinning wait on one of them will be woken once it blocks (XBA-93). */
+static volatile uint32_t g_ke_set_seen[KE_PROMOTED_MAX];
+static volatile LONG g_ke_set_seen_n;
+
+static void ke_note_set_attempt(uint32_t guest_va)
+{
+    LONG i, n = g_ke_set_seen_n;
+    for (i = 0; i < n && i < KE_PROMOTED_MAX; i++)
+        if (g_ke_set_seen[i] == guest_va)
+            return;
+    i = InterlockedIncrement(&g_ke_set_seen_n) - 1;
+    if (i < KE_PROMOTED_MAX)
+        g_ke_set_seen[i] = guest_va;
+}
+
+static int ke_set_seen(uint32_t guest_va)
+{
+    LONG i, n = g_ke_set_seen_n;
+    for (i = 0; i < n && i < KE_PROMOTED_MAX; i++)
+        if (g_ke_set_seen[i] == guest_va)
             return 1;
     return 0;
 }
