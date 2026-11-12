@@ -1144,6 +1144,19 @@ With a title from a European (multi-language) disc, Fable's PAL disc for instanc
    breaks.
 6. Say which languages Fable's disc offers, for the profile notes.
 
+## Full screen
+
+The game window hides the status bar and the navigation (gesture pill); a swipe from an edge shows them for a moment
+(`SystemBars.java`, XBA-99). SDLActivity hides them with the old `systemUiVisibility` flags, which a focus change
+clears: on the AYN Thor the companion Presentation on the second display took the focus, the bars came back and SDL's
+surface was 1920x970. `ShellActivity` applies `WindowInsetsController.hide(systemBars())` with
+`BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE` and the cutout mode `shortEdges` in `onCreate`, `onResume`, on every focus
+gain, and 300 ms after `onStart` (once the companion screen is up).
+
+Device check (Alex, Thor): 1. start a game with the bottom screen on « Panel »: no status bar, no pill, logcat
+`SDL: ... 1920x1080`; 2. swipe up from the bottom edge: the pill shows, then hides again; 3. open and close the in-game
+menu, then Home and back to the game: still full screen.
+
 ## Background and resume
 
 (`src/platform/recomp_lifecycle.c`, XBA-24.) On Android SDL already blocks the thread that pumps its events while the
