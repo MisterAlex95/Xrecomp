@@ -22,6 +22,7 @@ import android.text.TextUtils;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.view.View;
+import android.widget.LinearLayout;
 import android.view.ViewGroup;
 import android.view.ViewTreeObserver;
 import android.view.WindowInsets;
@@ -201,12 +202,22 @@ final class Widgets {
             if (hero != null) {
                 // Cover-fit, centred; gone left of 30 % of the width, at HERO_ALPHA from 85 %; gone in the bottom 40 %,
                 // where the buttons and hints stay on the plain gradient.
-                android.graphics.BitmapShader bs = new android.graphics.BitmapShader(hero, Shader.TileMode.CLAMP,
+                // The hero is tiny (GamePalette.HERO_SIDE); HWUI samples a BitmapShader inside a ComposeShader
+                // nearest-neighbour, which showed 40-pixel blocks. Upscale it smoothly first, and ask for linear
+                // filtering where the platform has it.
+                android.graphics.Bitmap img = hero;
+                int up = Math.max(1, Math.round(Math.max(w, h) / 4 / Math.max(hero.getWidth(), hero.getHeight())));
+                if (up > 1)
+                    img = android.graphics.Bitmap.createScaledBitmap(hero, hero.getWidth() * up,
+                                                                     hero.getHeight() * up, true);
+                android.graphics.BitmapShader bs = new android.graphics.BitmapShader(img, Shader.TileMode.CLAMP,
                                                                                      Shader.TileMode.CLAMP);
-                float sc = Math.max(w / hero.getWidth(), h / hero.getHeight());
+                if (android.os.Build.VERSION.SDK_INT >= 33)
+                    bs.setFilterMode(android.graphics.BitmapShader.FILTER_MODE_LINEAR);
+                float sc = Math.max(w / img.getWidth(), h / img.getHeight());
                 android.graphics.Matrix m = new android.graphics.Matrix();
                 m.setScale(sc, sc);
-                m.postTranslate((w - hero.getWidth() * sc) / 2, (h - hero.getHeight() * sc) / 2);
+                m.postTranslate((w - img.getWidth() * sc) / 2, (h - img.getHeight() * sc) / 2);
                 bs.setLocalMatrix(m);
                 int top = Theme.alpha(0xFF000000, HERO_ALPHA);
                 Shader fx = new LinearGradient(w * 0.30f, 0, w * 0.85f, 0, 0x00000000, top, Shader.TileMode.CLAMP);
@@ -460,6 +471,8 @@ final class Widgets {
             super(c);
             setFocusable(true);
             setClickable(true);
+            // The plate is drawn here; Android's own focus highlight (API 26+) would add a grey square behind it.
+            setDefaultFocusHighlightEnabled(false);
         }
 
         /** The focus plate inside the view: its inset on the sides and at the top and bottom, and its corner. */
@@ -730,6 +743,8 @@ final class Widgets {
     static final class PillButton extends Selectable {
         Icon icon;
         private boolean primary;
+        /** Icon only, a circle (PillRow, when the labels do not fit on one line). */
+        private boolean compact;
         private final Paint fillP = fill(0), iconP = stroke(Theme.TEXT, 3.5f);
         private final TextPaint labelP = textPaint(Theme.T_ROW, Theme.MEDIUM, Theme.TEXT);
         private final RectF r = new RectF();
@@ -751,8 +766,29 @@ final class Widgets {
             return primary;
         }
 
+        boolean canCompact() {
+            return icon != null && !primary;
+        }
+
+        boolean isCompact() {
+            return compact;
+        }
+
+        /** Icon only (the label becomes the content description), or back to icon and label. */
+        void setCompact(boolean on) {
+            on = on && canCompact();
+            if (on == compact)
+                return;
+            compact = on;
+            setContentDescription(on ? title : null);
+            requestLayout();
+            invalidate();
+        }
+
         /** The width the label and icon need, padding included. */
         int naturalWidth() {
+            if (compact)
+                return Theme.BUTTON_H;
             float w = labelP.measureText(title) + 2 * Theme.S5;
             if (icon != null)
                 w += 28 + Theme.S2;
@@ -807,12 +843,58 @@ final class Widgets {
             labelP.setColor(ink);
             iconP.setColor(ink);
             float iw = icon != null ? 28 : 0, ig = icon != null ? Theme.S2 : 0;
+            if (compact) {
+                drawIcon(c, icon, w / 2, h / 2, iw, iconP);
+                return;
+            }
             String label = fit(title, labelP, Math.max(10, w - 2 * Theme.S4 - iw - ig));
             float lw = labelP.measureText(label), total = iw + ig + lw, x = (w - total) / 2;
             if (icon != null)
                 drawIcon(c, icon, x + iw / 2, h / 2, iw, iconP);
             Paint.FontMetrics fm = labelP.getFontMetrics();
             c.drawText(label, x + iw + ig, h / 2 - (fm.ascent + fm.descent) / 2, labelP);
+        }
+    }
+
+    /**
+     * A row of PillButtons that stays on one line: when the buttons do not fit, the quiet pills with an icon turn
+     * into icon-only circles, from the last one back, until they do.
+     */
+    static final class PillRow extends LinearLayout {
+        PillRow(Context c) {
+            super(c);
+            setOrientation(HORIZONTAL);
+        }
+
+        @Override
+        protected void onMeasure(int wSpec, int hSpec) {
+            for (int i = 0; i < getChildCount(); i++)
+                if (getChildAt(i) instanceof PillButton)
+                    ((PillButton)getChildAt(i)).setCompact(false);
+            super.onMeasure(wSpec, hSpec);
+            if (MeasureSpec.getMode(wSpec) == MeasureSpec.UNSPECIFIED)
+                return;
+            int avail = MeasureSpec.getSize(wSpec) - getPaddingLeft() - getPaddingRight();
+            for (int i = getChildCount() - 1; i >= 0 && used() > avail; i--) {
+                View v = getChildAt(i);
+                if (v instanceof PillButton && ((PillButton)v).canCompact()) {
+                    ((PillButton)v).setCompact(true);
+                    super.onMeasure(wSpec, hSpec);
+                }
+            }
+        }
+
+        /** The children's measured widths and margins. */
+        private int used() {
+            int u = 0;
+            for (int i = 0; i < getChildCount(); i++) {
+                View v = getChildAt(i);
+                if (v.getVisibility() == GONE)
+                    continue;
+                LayoutParams p = (LayoutParams)v.getLayoutParams();
+                u += v.getMeasuredWidth() + p.leftMargin + p.rightMargin;
+            }
+            return u;
         }
     }
 
