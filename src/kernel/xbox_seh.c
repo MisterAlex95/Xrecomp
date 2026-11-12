@@ -205,6 +205,11 @@ static int seh_on_chain(const seh_thread *t, uint32_t reg)
     return 0;
 }
 
+int xbox_SehOnChain(uint32_t reg)
+{
+    return seh_on_chain(seh_self(), reg);
+}
+
 static recomp_func_t seh_resolve(uint32_t va)
 {
     recomp_func_t fn = recomp_lookup_manual(va);

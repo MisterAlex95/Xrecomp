@@ -124,6 +124,10 @@ int xbox_SehRaiseRecord(uint32_t record_va, uint32_t eip, uint32_t esp_after);
  * eip is the caller's return address, for the context the handlers see. */
 void xbox_SehUnwind(uint32_t target_frame, uint32_t exc_record, uint32_t eip);
 
+/* 1 when reg is a record on the current thread's chain (fs:[0] onwards, every
+ * record checked as the dispatcher checks it). */
+int xbox_SehOnChain(uint32_t reg);
+
 /* The current thread's guest stack, [lo, hi). Set by the runtime when a guest
  * thread starts, and by whatever switches guest stacks (XBA-101) on every
  * switch. Unset, the dispatcher accepts frames from the raising esp up to

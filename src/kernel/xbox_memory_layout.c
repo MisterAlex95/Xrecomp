@@ -2502,7 +2502,7 @@ jmp_buf *recomp_setjmp_slot(uint32_t buf_va)
 
 int recomp_guest_longjmp(uint32_t buf_va, uint32_t value)
 {
-    const uint8_t *mem = (const uint8_t *)g_memory_offset;
+    const uint8_t *mem = (const uint8_t *)g_xbox_mem_offset;
     uint32_t ctx = recomp_stack_context();
     int i, j, kept;
 
@@ -2521,6 +2521,26 @@ int recomp_guest_longjmp(uint32_t buf_va, uint32_t value)
         /* The callee-saved registers and the stack, exactly as the CRT's
          * longjmp restores them: esp is the setjmp-time esp plus the return
          * address that setjmp's own ret would have popped. */
+        /* The CRT's longjmp also unwinds the exception frames it leaves:
+         * _rt_unwind, RtlUnwind up to the registration its setjmp saved at
+         * +0x18, so their __finally blocks and destructors run and fs:[0] is
+         * that registration again. The native jump replaces the guest's
+         * longjmp, so it does that part here, before esp moves (the handlers
+         * run below it). Left out, fs:[0] kept naming dead frames below esp,
+         * which the dispatcher (XBA-112) rejects as a broken chain: the next
+         * exception went unhandled. The registration must be on the chain (or
+         * the end of it), else nothing is unwound. The try-level unwind
+         * inside the setjmp caller's own frame (_local_unwind2) is not done. */
+        if (xbox_SehDispatchEnabled() && g_fs_base) {
+            uint32_t reg = *(const uint32_t *)(mem + buf_va + 0x18);
+            uint32_t eip = *(const uint32_t *)(mem + buf_va + 0x14);
+            uint32_t head = *(const uint32_t *)(mem + g_fs_base);
+            if (reg != head && (reg == XBOX_SEH_END_OF_CHAIN || xbox_SehOnChain(reg))) {
+                xbox_SehUnwind(reg == XBOX_SEH_END_OF_CHAIN ? 0 : reg, 0, eip);
+                *(uint32_t *)((uint8_t *)mem + g_fs_base) = reg;
+            }
+        }
+
         g_ebx = *(const uint32_t *)(mem + buf_va + 0x04);
         g_edi = *(const uint32_t *)(mem + buf_va + 0x08);
         g_esi = *(const uint32_t *)(mem + buf_va + 0x0C);

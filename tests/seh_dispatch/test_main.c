@@ -24,7 +24,9 @@
  *    fiber whose handler frame is on the stack that switched to it: refused
  *    and reported, never jumped to, whether the fiber's top is known or not;
  *  - a lifted div by zero (XBA-110) inside an __except frame resumes in the
- *    handler, or carries on when the filter continues execution.
+ *    handler, or carries on when the filter continues execution;
+ *  - a guest longjmp out of exception frames unwinds them first (__finally
+ *    runs, fs:[0] is the setjmp-time head again), as the CRT's longjmp does.
  *
  * Each checks the result, the guest stack pointer, the chain head and the
  * dispatcher's counters. Runs the same on x86-64 and arm64 (qemu in CI).
@@ -39,6 +41,7 @@
 
 #include "xbox_seh.h"
 #include "recomp_stack_switch.h"
+#include <setjmp.h>
 
 /* The guest state, as the generated code and the runtime both see it. */
 #include "xbox_memory_layout.h"
@@ -54,6 +57,8 @@ extern const uint32_t seh_fixture_f_outer;
 void f_outer(void);
 void f_cxx(void);
 void f_div(void);
+jmp_buf *recomp_setjmp_slot(uint32_t buf_va);
+int recomp_guest_longjmp(uint32_t buf_va, uint32_t value);
 
 #define GUEST_SIZE   0x00200000u
 #define TIB_VA       0x00004000u
@@ -64,6 +69,7 @@ void f_div(void);
 #define SEEN_CODE    0x00030008u
 #define DIVISOR      0x0003000Cu
 #define SLOT         0x00030010u    /* the guest stack switch's esp slot */
+#define JMPBUF       0x00030100u    /* a guest jmp_buf (MSVC layout) */
 #define FIBER_HI_TOP 0x001C0000u    /* a fiber stack above the main one */
 #define FIBER_LO_TOP 0x000F0000u    /* one below it, within the dispatcher's
                                      * window when its bounds are unknown */
@@ -83,6 +89,7 @@ static int flip_host_stack;     /* RAISE runs under another host stack token */
 static int other_guest_stack;   /* RAISE runs with another guest stack's bounds */
 static int raise_on_fiber;      /* RAISE switches to a fiber that raises (1: its
                                  * top unknown, 2: known) */
+static int longjmp_from_raise;  /* RAISE longjmps to JMPBUF instead */
 
 static void check(int ok, const char *what)
 {
@@ -111,6 +118,8 @@ void sub_0001F000(void)
     uint32_t lo, hi;
     void raise_from_fiber(uint32_t rec, uint32_t ret);
 
+    if (longjmp_from_raise)
+        recomp_guest_longjmp(JMPBUF, 1);    /* does not return */
     if (raise_on_fiber) {
         raise_from_fiber(rec, ret);
     } else {
@@ -250,7 +259,7 @@ static void reset(int32_t filter)
     G32(FILTER) = (uint32_t)filter;
     G32(SEEN_CODE) = 0;
     G32(TIB_VA) = END_OF_CHAIN;
-    flip_host_stack = other_guest_stack = raise_on_fiber = 0;
+    flip_host_stack = other_guest_stack = raise_on_fiber = longjmp_from_raise = 0;
     G32(DIVISOR) = 0;
     {
         XboxSehStats s;
@@ -457,6 +466,39 @@ int main(void)
     eax = guest_call(f_div, &esp);
     xbox_SehStatsGet(&st, 0);
     check(eax == 0x111 && st.raises == 0, "div by 2: no exception");
+
+    /* 10. A guest longjmp (the native one, recomp_guest_longjmp) from inside
+     *     f_outer -> f_inner -> g_raises to a setjmp taken before f_outer:
+     *     the frames it leaves are unwound first, as the CRT's longjmp does
+     *     (RtlUnwind to the registration setjmp saved at +0x18), so
+     *     f_inner's __finally runs and fs:[0] is the end of the chain again
+     *     rather than a dead frame below esp. */
+    {
+        static volatile int landed;
+        reset(0);
+        landed = 0;
+        g_esp = STACK_HI - 0x100 - 4;               /* at setjmp's return address */
+        G32(JMPBUF + 0x00) = g_ebp;
+        G32(JMPBUF + 0x04) = g_ebx;
+        G32(JMPBUF + 0x08) = g_edi;
+        G32(JMPBUF + 0x0C) = g_esi;
+        G32(JMPBUF + 0x10) = g_esp;
+        G32(JMPBUF + 0x14) = 0xDEAD0001u;
+        G32(JMPBUF + 0x18) = G32(TIB_VA);           /* Registration */
+        G32(JMPBUF + 0x1C) = 0xFFFFFFFFu;           /* TryLevel */
+        if (setjmp(*recomp_setjmp_slot(JMPBUF)) == 0) {
+            longjmp_from_raise = 1;
+            guest_call(f_outer, &esp);
+        } else {
+            landed = 1;
+        }
+        longjmp_from_raise = 0;
+        xbox_SehStatsGet(&st, 0);
+        check(landed == 1 && g_esp == STACK_HI - 0x100, "guest longjmp landed");
+        check(G32(COUNTER) == 1, "the __finally of the frame it left ran");
+        check(G32(TIB_VA) == END_OF_CHAIN, "fs:[0] is the setjmp-time head");
+        check(st.raises == 0, "no exception raised");
+    }
 
 #ifndef _WIN32
     remove(disc_path);
