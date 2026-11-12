@@ -125,6 +125,17 @@ py -3 -m tools.disasm game_files/default.xbe --text-only
 
 ---
 
+### compat — the compat runner (XBA-62)
+
+```bash
+python -m tools.compat run /dumps/*.iso --seconds 180 --repeat 3   # prepare, boot headless, stage reached
+python -m tools.compat report compat-results.jsonl                 # Markdown table
+```
+
+Stages, blockers and limits: `docs/technical/compat-runner.md`.
+
+---
+
 ### xbe_ident — XDK version and engine (XBA-67)
 
 What an XBE was built with, from the XBE alone (no disassembly, a second on the device):
