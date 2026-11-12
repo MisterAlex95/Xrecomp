@@ -21,7 +21,10 @@ WORKDIR /src
 COPY . .
 # Headless: SDL picks its dummy drivers, the tests that need a real display or audio device skip (exit 77).
 ARG JOBS=4
-ENV SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy JOBS=${JOBS}
+ENV SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy JOBS=${JOBS} \
+    XBA_E2E=1
+# XBA_E2E=1: tools/compat/test_e2e.py builds a synthetic title against this tree and boots it through the compat
+# runner (a few seconds): the profile layers, the template and the runtime linked together, run headless.
 # Builds and temp files go to /work (and some tests write to /tmp directly), both emptied at the end of the same RUN:
 # some tests write multi-GB sparse partition
 # images to the temp dir (kernel_fd_limit), which would fill the disk once frozen into an image layer. Only the

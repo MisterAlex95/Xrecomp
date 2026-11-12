@@ -63,4 +63,7 @@ how many titles are at each stage; and the regressions. `plane` writes the Plane
 - `responsive` is a heuristic: an animated screen changes on its own. The press times and the status clock start a
   fraction of a second apart.
 - `tools/conformance/test.xbe` is a lifter test image with no entry point: it prepares but does not boot. The tool's
-  own test (`tools/compat/test_compat.py`) drives a stand-in title.
+  own tests use a stand-in title (`tools/compat/test_compat.py`) and a synthetic XBE of our own
+  (`tools/compat/test_e2e.py`: XAPILIB/D3D8/DSOUND in its library table, one `jmp $` function), which the linux CI
+  image prepares, builds against the tree and boots through the runner (`XBA_E2E=1`): the profile layers, the
+  template and the runtime linked and run together on every PR.
