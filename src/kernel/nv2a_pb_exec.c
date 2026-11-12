@@ -4916,7 +4916,10 @@ gathered:
     if (!t)
         return 1;                       /* nothing to draw: done all the same */
     if (!s_backend->draw_program(&surf, &batch)) {
-        if (raw) {
+        /* The back end may have gone in the call: the GL back end
+         * unregisters itself when it cannot make its context (no GLES 3.0
+         * on the device), and the CPU path draws from then on. */
+        if (raw && s_backend && s_backend->draw_program) {
             raw = 0;                    /* declined as stored: send it gathered */
             goto retry;
         }
