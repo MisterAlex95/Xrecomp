@@ -4630,6 +4630,20 @@ uint32_t xbox_AllocThreadTib(void)
     memset(TIB_VA(thread_data), 0, g_tls_thread_size);
 
     *(uint32_t *)TIB_VA(tib + 0x00) = 0xFFFFFFFFu;   /* own SEH chain    */
+    /* KPCR.Irql, fs:[0x24]: a new thread starts at PASSIVE_LEVEL, whatever
+     * the first thread is at while this copy is taken. The byte is where
+     * guest code reads the level (kernel_hal.c, irql_publish) and it is
+     * written only when this thread's own level changes. Copied from a main
+     * thread that was at DISPATCH_LEVEL (inside a DSOUND or USB call, a DPC
+     * drained on it) or at a device level (a posted ISR), it read 2 or 16 on
+     * the new thread until that thread made a kernel raise of its own -- and
+     * DirectSound's lock is what would have made it: it reads the byte and,
+     * at DISPATCH_LEVEL and above, takes neither its critical section nor a
+     * raise. KOTOR's stream thread (0x00155C50) then ran DirectSoundDoWork
+     * with no lock at all, beside the main thread, the DPCs and the APU
+     * interrupt; a callback node of its timer queue was linked twice and the
+     * main thread's DoWork (0x003AC0B8) looped on it for ever. */
+    *(uint8_t  *)TIB_VA(tib + 0x24) = 0;
     *(uint32_t *)TIB_VA(block)      = thread_data;   /* slot 0           */
     *(uint32_t *)TIB_VA(tib + 0x04) = block + total; /* fs:[4], see above*/
 

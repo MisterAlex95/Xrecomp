@@ -57,6 +57,14 @@ distinct way that went wrong on arm64 macOS:
    Silicon host. Asserting only "page zero faults" would be satisfied by a fix
    that traps it and clobbers the TIB, which is why the TIB is checked too.
 
+Two later checks, outside the arm64 list: the toolkit region (kernel data,
+stack, heap) moves above an image that ends past `0x00700000` (6), and a
+thread TIB from `xbox_AllocThreadTib` starts at PASSIVE_LEVEL (7). For the
+last, the test patches a TLS directory into a copy of the synthetic image --
+only TLS images get a TIB per thread -- sets the main TIB's IRQL byte
+(`fs:[0x24]`) to 2 and expects 0 in the new one. A copied 2 had KOTOR's
+DirectSound stream thread running unlocked beside the main thread (K-8b).
+
 Deliberately not asserted: the tiled aperture at `0xF0000000`. That is a
 specific architectural alias the layout protects by sacrificing a wrap mirror,
 and whether it survives relocation to a high host base is a question about what

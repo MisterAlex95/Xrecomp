@@ -341,6 +341,63 @@ int main(int argc, char **argv)
         free(big);
     }
 
+    /*
+     * 7. A new thread's TIB starts at PASSIVE_LEVEL.
+     *
+     * xbox_AllocThreadTib copies the main thread's TIB, and byte 0x24 of it
+     * is KPCR.Irql, which guest code reads directly (fs:[0x24]). Copied while
+     * the main thread was at DISPATCH_LEVEL, KOTOR's stream thread read 2 for
+     * good and DirectSound's lock took nothing. Only an image with a TLS
+     * directory gets a TIB per thread, so the copy of test.xbe here gets one:
+     * a directory in the header page's padding (file 0x600, VA 0x10600; the
+     * whole 0x1000-byte header is mapped) with 8 bytes of initialised data
+     * at 0x10640 and 8 of zero fill.
+     */
+    {
+        unsigned char *tls = malloc(n);
+        if (tls && n >= 0x1000) {
+            const uint32_t dir_va = XBOX_BASE_ADDRESS + 0x600;
+            const uint32_t data_va = XBOX_BASE_ADDRESS + 0x640;
+            uint32_t dir[6] = { data_va, data_va + 8, 0, 0, 8, 0 };
+
+            memcpy(tls, xbe, n);
+            memcpy(tls + 0x12C, &dir_va, 4);         /* TLS directory address */
+            memcpy(tls + 0x600, dir, sizeof dir);
+            memcpy(tls + 0x640, "TLSDATA!", 8);
+
+            BOOL ok7 = xbox_MemoryLayoutInit(tls, n);
+            check(ok7, "init succeeds with a TLS directory", NULL);
+            if (ok7) {
+                unsigned char *mem = (unsigned char *)xbox_GetMemoryBase();
+                mem[XBOX_TIB_MAIN + 0x24] = 2;       /* main thread at DISPATCH */
+                uint32_t tib = xbox_AllocThreadTib();
+                char d[96];
+                snprintf(d, sizeof d, "tib 0x%08X irql %u", tib,
+                         tib ? mem[tib + 0x24] : 0xFFu);
+                check(tib != 0, "a TLS image gets a TIB per thread", d);
+                if (tib) {
+                    uint32_t seh, sb, slot0;
+                    check(mem[tib + 0x24] == 0,
+                          "the new TIB's IRQL byte is PASSIVE_LEVEL, not the main thread's",
+                          d);
+                    check(mem[XBOX_TIB_MAIN + 0x24] == 2,
+                          "the main thread's IRQL byte is left alone", d);
+                    memcpy(&seh, mem + tib, 4);
+                    memcpy(&sb, mem + tib + 4, 4);
+                    memcpy(&slot0, mem + tib + 0x40, 4);
+                    check(seh == 0xFFFFFFFFu, "the new TIB has its own SEH chain", d);
+                    /* Block of 20 (16 rounded, + 4) below fs:[4]; its first
+                     * dword is slot 0, over the template's first four bytes. */
+                    check(sb == tib + 0x40 + 20 && slot0 == sb
+                          && memcmp(mem + tib + 0x44, "ATA!", 4) == 0,
+                          "fs:[4] sits above a copy of the TLS template", d);
+                }
+                xbox_MemoryLayoutShutdown();
+            }
+        }
+        free(tls);
+    }
+
     printf("\n%d failure(s)\n", failures);
     free(xbe);
     return failures ? 1 : 0;
