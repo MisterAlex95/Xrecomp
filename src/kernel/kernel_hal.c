@@ -212,6 +212,7 @@ static XBOX_THREAD_LOCAL int t_irql_counted;
  * routines as it always did, and the device models hold their interrupts
  * off on the raised-IRQL count (xbox_IrqlBlocksInterrupts). */
 static int s_gate_on;                          /* RECOMP_DISPATCH_GATE */
+static int s_cli_gate;                         /* RECOMP_CLI_GATE, see xbox_GuestInterruptFlag */
 static void irq_config_once(void);
 
 int xbox_DispatchGateOn(void)
@@ -339,6 +340,9 @@ static volatile LONG s_irq_pending;
 static void (*volatile s_irq_run[XBOX_IRQ_LINES])(void);
 static uint64_t s_irq_post_ns[XBOX_IRQ_LINES]; /* when the bit went up */
 static XBOX_THREAD_LOCAL int t_in_isr;
+/* The guest cleared EFLAGS.IF on this thread (cli, popfd): no interrupt and
+ * no DPC is run here until it sets it again (xbox_GuestInterruptFlag). */
+static XBOX_THREAD_LOCAL int t_cli;
 static void (*s_irq_post_hook)(int line);
 static void (*s_irq_release_hook)(void);   /* tests: the lower's window */
 static int s_irq_mode;          /* RECOMP_IRQ_SAFE_POINTS, under the gate */
@@ -376,6 +380,8 @@ static void irq_config(void)
 
     v = getenv("RECOMP_DISPATCH_GATE");
     s_gate_on = (v && *v) ? atoi(v) != 0 : 0;
+    v = getenv("RECOMP_CLI_GATE");
+    s_cli_gate = !(v && *v == '0');
     v = getenv("RECOMP_IRQ_SAFE_POINTS");
     s_irq_mode = s_gate_on && ((v && *v) ? atoi(v) != 0 : 1);
     v = getenv("RECOMP_IRQ_SAFE_FORCE");
@@ -562,7 +568,7 @@ static void dpc_run_here(void)
 {
     IrqRegs saved;
 
-    if (!xbox_DpcPending() || !t_guest_thread || t_in_dpc || t_in_isr)
+    if (!xbox_DpcPending() || !t_guest_thread || t_in_dpc || t_in_isr || t_cli)
         return;
     if (!xbox_DpcOnRaise())
         return;
@@ -645,7 +651,7 @@ void xbox_IrqSafePoint(void)
         return;
     if (!t_gate_depth)
         return;
-    if (t_in_isr || g_current_irql > DISPATCH_LEVEL) {
+    if (t_in_isr || t_cli || g_current_irql > DISPATCH_LEVEL) {
         InterlockedIncrement(&s_irq_points_refused);
         return;
     }
@@ -683,7 +689,7 @@ static void irq_release_point(void)
     pending = InterlockedCompareExchange(&s_irq_pending, 0, 0);
 
     if ((!pending && !(t_guest_thread && xbox_DpcPending()))
-        || t_in_isr || g_current_irql > DISPATCH_LEVEL)
+        || t_in_isr || t_cli || g_current_irql > DISPATCH_LEVEL)
         return;
     if (!gate_try())
         return;                         /* the new holder has it now */
@@ -984,6 +990,98 @@ int xbox_IrqlThisThreadBlocksDpcs(void)
 int xbox_IrqlCurrent(void)
 {
     return (int)g_current_irql;
+}
+
+/* ============================================================================
+ * The guest's interrupt flag (cli / sti / popfd)
+ *
+ * Titles run in ring 0 and some mask interrupts by hand: KOTOR's USB
+ * interrupt handler runs cli ... sti on every interrupt. Lifted as no-ops
+ * (RECOMP_UNIMPL), such a section was open to every device interrupt.
+ *
+ * On the console a cli masks every interrupt on the one CPU, which is what
+ * a raise to a device IRQL does here. So a cli on a thread that is not
+ * already masking takes the path of a raise from below DISPATCH_LEVEL
+ * (irql_track_gated): the thread is counted in the raised count the device
+ * models hold their interrupts off on, and with RECOMP_DISPATCH_GATE it
+ * holds the one-CPU gate, so an interrupt is posted to it instead of
+ * running beside it. The guest-visible IRQL (KPCR) does not change, as a
+ * cli does not change it on the console. While IF is clear no safe point
+ * runs a posted interrupt or a DPC on this thread. sti gives the gate back
+ * through the lower's path, whose safe point runs what was posted, as the
+ * CPU takes a pending interrupt right after sti.
+ *
+ * A thread already at DISPATCH_LEVEL or above, or inside an ISR (KOTOR's
+ * case: the handler runs at its device level), already masks: its cli and
+ * sti change only IF. RECOMP_CLI_GATE=0 makes every cli and sti change only
+ * IF, as when they were no-ops.
+ * ============================================================================ */
+static XBOX_THREAD_LOCAL int t_cli_took;   /* this cli counted the thread */
+#define CLI_LEVEL ((KIRQL)31)                /* HIGH_LEVEL: every interrupt masked */
+
+void xbox_GuestInterruptFlag(int enabled)
+{
+    irq_config_once();
+    if (!enabled) {
+        if (t_cli)
+            return;
+        t_cli = 1;
+        if (!s_cli_gate || t_in_isr || t_irql_counted
+            || g_current_irql >= DISPATCH_LEVEL)
+            return;
+        t_cli_took = 1;
+        irql_track_gated(g_current_irql, CLI_LEVEL, IRQL_CALLER(), 1);
+        return;
+    }
+    if (!t_cli)
+        return;
+    t_cli = 0;
+    if (!t_cli_took)
+        return;
+    t_cli_took = 0;
+    {
+        /* As in KfLowerIrql, the lower's safe point runs while the level
+         * still says the thread holds the CPU: a routine run there enters
+         * and leaves its device level against DISPATCH_LEVEL, and does not
+         * give back the gate and the count this sti is about to. The
+         * guest-visible level is written back afterwards. */
+        KIRQL level = g_current_irql;
+        g_current_irql = DISPATCH_LEVEL;
+        irql_track(CLI_LEVEL, level, IRQL_CALLER());
+        g_current_irql = level;
+        irql_publish();
+    }
+}
+
+/* For tests and reports: whether IF is clear on this thread. */
+int xbox_GuestInterruptsMasked(void)
+{
+    return t_cli;
+}
+
+/* hlt: wait for the next interrupt. What is posted to this thread runs at
+ * the safe point; then the guest CPU and the host thread are let go for a
+ * millisecond, as NtYieldExecution lets them go, so the threads and device
+ * models that raise the interrupt can run. A guest that halts in a loop
+ * (`hlt; jmp $-1`) waits that way without spinning a host core. With IF
+ * clear the console would stop there for good; that is reported once. */
+void xbox_Halt(uint32_t va)
+{
+    int held;
+
+    if (t_cli) {
+        static volatile LONG said;
+        if (!InterlockedExchange(&said, 1)) {
+            fprintf(stderr, "  [HLT] hlt at 0x%08X with interrupts disabled"
+                    " (cli): the console would halt here for good\n", va);
+            fflush(stderr);
+        }
+    }
+    xbox_IrqSafePoint();
+    held = xbox_GuestCpuRelease(XBOX_GUEST_CPU_KERNEL, 238 /* NtYieldExecution */);
+    Sleep(1);
+    if (held)
+        xbox_GuestCpuAcquire();
 }
 
 /*
@@ -1974,6 +2072,36 @@ void xbox_WriteDr(int n, uint32_t value)
     s_dr[n & 7] = value;
     if (value != old)
         special_reg_first_write('d', n & 7, old, value);
+}
+
+/* GDTR and IDTR, for sgdt/sidt and lgdt/lidt: limit in bits 0-15, base in
+ * bits 16-47. Like the control registers, one plain value each, which a
+ * title reads back after it loads it. The start values have the console's
+ * shape (a 256-entry IDT, a small GDT in kernel space) but not its
+ * addresses, which nothing here knows: no table is behind them, and a title
+ * that walks one through the base reads whatever is mapped there. The first
+ * load of each is logged. */
+static volatile uint64_t s_dtr[2] = {
+    ((uint64_t)0x80000000u << 16) | 0x00FFu,    /* GDTR: 32 descriptors */
+    ((uint64_t)0x80000800u << 16) | 0x07FFu,    /* IDTR: 256 gates */
+};
+
+uint64_t xbox_ReadDtr(int which)
+{
+    return s_dtr[which & 1];
+}
+
+void xbox_WriteDtr(int which, uint64_t value)
+{
+    static volatile LONG seen;
+    value &= 0xFFFFFFFFFFFFull;
+    s_dtr[which & 1] = value;
+    if (!(InterlockedOr(&seen, 1L << (which & 1)) & (1L << (which & 1)))) {
+        fprintf(stderr, "  [DTR] l%cdt base 0x%08X limit 0x%04X (kept, no"
+                " effect on the host)\n", (which & 1) ? 'i' : 'g',
+                (unsigned)(value >> 16), (unsigned)(value & 0xFFFFu));
+        fflush(stderr);
+    }
 }
 
 /* =========================================================================

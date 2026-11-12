@@ -7,6 +7,14 @@
  *    va): STATUS_INTEGER_DIVIDE_BY_ZERO for a zero divisor,
  *    STATUS_INTEGER_OVERFLOW for a quotient that does not fit. Run in a
  *    child process, since it does not return (POSIX only).
+ *  - xbox_GuestInterruptFlag (the lifted cli/sti/popfd): a cli on a thread
+ *    below DISPATCH_LEVEL masks device interrupts the way a raise does --
+ *    counted in xbox_IrqlBlocksInterrupts, and with RECOMP_DISPATCH_GATE
+ *    holding the one-CPU gate, so an interrupt posted meanwhile does not
+ *    run at a safe point inside the section but at the sti -- without
+ *    changing the guest-visible IRQL. Nested and redundant calls count
+ *    once; on a thread already at DISPATCH_LEVEL they change nothing;
+ *    RECOMP_CLI_GATE=0 turns the masking off.
  */
 #include "kernel.h"
 #include "xbox_memory_layout.h"
@@ -28,6 +36,23 @@ recomp_func_t recomp_lookup_manual(uint32_t xbox_va);
 recomp_func_t recomp_lookup_manual(uint32_t xbox_va) { (void)xbox_va; return NULL; }
 
 void recomp_divide_error(uint32_t va, uint32_t divisor);
+void xbox_GuestInterruptFlag(int enabled);
+int  xbox_GuestInterruptsMasked(void);
+
+extern ptrdiff_t g_xbox_mem_offset;
+
+static void set_env(const char *name, const char *v)
+{
+#ifdef _WIN32
+    _putenv_s(name, v ? v : "");
+#else
+    if (v)
+        setenv(name, v, 1);
+    else
+        unsetenv(name);
+#endif
+    xbox_IrqReloadConfig();
+}
 
 static int failures;
 
@@ -92,6 +117,84 @@ static void test_divide_error(void)
 }
 #endif
 
+static volatile LONG s_runs;
+static unsigned long s_run_tid;
+
+static void apu_routine(void)
+{
+    InterlockedIncrement(&s_runs);
+    s_run_tid = (unsigned long)GetCurrentThreadId();
+}
+
+static volatile LONG s_post_result;
+
+static DWORD WINAPI poster(LPVOID p)
+{
+    (void)p;
+    InterlockedExchange(&s_post_result, xbox_IrqPost(XBOX_IRQ_APU));
+    return 0;
+}
+
+static int post_from_other_thread(void)
+{
+    HANDLE t = CreateThread(NULL, 0, poster, NULL, 0, NULL);
+    WaitForSingleObject(t, 10000);
+    CloseHandle(t);
+    return (int)s_post_result;
+}
+
+static void test_interrupt_flag(void)
+{
+    unsigned long me = (unsigned long)GetCurrentThreadId();
+    KIRQL old;
+
+    printf("xbox_GuestInterruptFlag, gate off\n");
+    check(xbox_IrqlRaisedCount() == 0 && !xbox_GuestInterruptsMasked(),
+          "starts unmasked");
+    xbox_GuestInterruptFlag(0);
+    check(xbox_IrqlBlocksInterrupts() && xbox_IrqlRaisedCount() == 1,
+          "cli at PASSIVE_LEVEL holds device interrupts off");
+    check(xbox_IrqlCurrent() == PASSIVE_LEVEL && xbox_GuestInterruptsMasked(),
+          "and leaves the guest-visible IRQL alone");
+    xbox_GuestInterruptFlag(0);
+    check(xbox_IrqlRaisedCount() == 1, "a second cli counts nothing more");
+    xbox_GuestInterruptFlag(1);
+    check(xbox_IrqlRaisedCount() == 0 && !xbox_GuestInterruptsMasked(),
+          "sti lets them in again");
+    xbox_GuestInterruptFlag(1);
+    check(xbox_IrqlRaisedCount() == 0, "an sti without a cli takes nothing off");
+
+    old = xbox_KfRaiseIrql(DISPATCH_LEVEL);
+    xbox_GuestInterruptFlag(0);
+    check(xbox_IrqlRaisedCount() == 1, "cli at DISPATCH_LEVEL: already masked");
+    xbox_GuestInterruptFlag(1);
+    check(xbox_IrqlRaisedCount() == 1, "and its sti does not lower anything");
+    xbox_KfLowerIrql(old);
+    check(xbox_IrqlRaisedCount() == 0, "the lower still balances");
+
+    set_env("RECOMP_CLI_GATE", "0");
+    xbox_GuestInterruptFlag(0);
+    check(xbox_IrqlRaisedCount() == 0 && xbox_GuestInterruptsMasked(),
+          "RECOMP_CLI_GATE=0: IF only, nothing masked");
+    xbox_GuestInterruptFlag(1);
+    set_env("RECOMP_CLI_GATE", NULL);
+
+    printf("xbox_GuestInterruptFlag, RECOMP_DISPATCH_GATE=1\n");
+    set_env("RECOMP_DISPATCH_GATE", "1");
+    xbox_GuestInterruptFlag(0);
+    check(xbox_DispatchGateOwner() == me, "cli takes the one-CPU gate");
+    check(post_from_other_thread() == XBOX_IRQ_POSTED && s_runs == 0,
+          "an interrupt meanwhile is posted, not run beside the section");
+    xbox_IrqSafePoint();
+    check(s_runs == 0, "a safe point inside the section does not run it");
+    xbox_GuestInterruptFlag(1);
+    check(s_runs == 1 && s_run_tid == me,
+          "sti runs it, on this thread, as the CPU takes it after sti");
+    check(xbox_DispatchGateOwner() == 0 && xbox_IrqlRaisedCount() == 0,
+          "and gives the gate back");
+    set_env("RECOMP_DISPATCH_GATE", NULL);
+}
+
 int main(void)
 {
 #ifndef _WIN32
@@ -99,6 +202,14 @@ int main(void)
 #else
     printf("recomp_divide_error: POSIX only (fork), skipped\n");
 #endif
+    /* Guest memory only where the worker stacks are: a posted routine runs
+     * on one (as in tests/irq_safe_points). */
+    g_fs_base = 0;
+    g_xbox_mem_offset = (ptrdiff_t)(uintptr_t)calloc(
+        XBOX_WORKER_STACK_COUNT, XBOX_WORKER_STACK_SIZE)
+        - (ptrdiff_t)XBOX_WORKER_STACK_BASE;
+    xbox_IrqSetHandler(XBOX_IRQ_APU, apu_routine);
+    test_interrupt_flag();
     if (failures) {
         printf("%d failure(s)\n", failures);
         return 1;
