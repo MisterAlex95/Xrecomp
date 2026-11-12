@@ -6,7 +6,7 @@ Some discs start with a launcher image that hands over to another XBE on the sam
 writes the path into a contiguous page, stores it in `LaunchDataPage`, then calls `HalReturnToFirmware(2)`). A
 recompiled title is one executable per image, so the hand-over is a process exec (XBA-82).
 
-## Desktop (Linux, macOS)
+## Desktop (Linux, macOS, Windows)
 
 - `tools.prepare` reads the disc's other `.xbe` files that `default.xbe` names in its strings (`tools.triage`'s test),
   prepares each into `<work>/images/<path>/`, and writes `<work>/images.map`, one line per image:
@@ -14,7 +14,8 @@ recompiled title is one executable per image, so the hand-over is a process exec
   read as `RECOMP_IMAGE_MAP`).
 - When the title launches a path that is not its own image, the kernel (`xbox_launch_image`, `kernel_reboot.c`) looks
   it up in the map, writes the launch data page where the next start reads it (as a quick reboot does), and execs
-  that image's executable in the same process. Not found, or the exec failed: the title exits as before, the launch
+  that image's executable in the same process (Windows: `CreateProcess`, then this process ends, as the quick reboot
+  does; not built or run by our CI). Not found, or the exec failed: the title exits as before, the launch
   is recorded in the discovery file (`{"t":"launch"}`) and the compat runner names it.
 - Tested end to end in CI on a two-image synthetic disc (`tools/compat/test_e2e.py::test_a_launch_of_another_image_hands_over`).
 
@@ -41,5 +42,5 @@ is then a hand-over, and a launch of the running image a quick reboot. A launch 
 
 ## Not yet
 
-Windows (a `CreateProcess` like the quick reboot's), and the on-device Prepare building the other images' libraries
-into the pack (`images`). Design in Plane XBA-82.
+A secondary image prepared on its first launch on the device (today the Prepare builds them all up front), and a
+Windows build in CI. Design in Plane XBA-82.
