@@ -195,6 +195,20 @@ void recomp_host_cpus_track(uint64_t mask)
 #endif
 }
 
+void recomp_host_cpus_untrack(void)
+{
+#if defined(__linux__)
+    pid_t tid = (pid_t)syscall(SYS_gettid);
+    pthread_mutex_lock(&s_track_lock);
+    for (int i = 0; i < s_track_n; i++)
+        if (s_track[i].tid == tid) {
+            s_track[i] = s_track[--s_track_n];
+            break;
+        }
+    pthread_mutex_unlock(&s_track_lock);
+#endif
+}
+
 int recomp_host_cpus_restore(void)
 {
 #if defined(__linux__)

@@ -1159,6 +1159,7 @@ static void *thread_trampoline(void *arg)
 
     DWORD rc = o->start ? o->start(o->start_param) : 0;
 
+    recomp_host_cpus_untrack();   /* its tid may go to a thread that is not ours */
     pthread_mutex_lock(&o->lock);
     o->exit_code = rc;
     o->exited    = 1;
@@ -1217,6 +1218,7 @@ VOID ExitThread(DWORD exitCode)
         pthread_mutex_unlock(&o->lock);
         obj_release(o);
     }
+    recomp_host_cpus_untrack();
     pthread_exit(NULL);
 }
 

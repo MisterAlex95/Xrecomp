@@ -48,6 +48,10 @@ uint64_t recomp_big_core_mask(const char *root, uint64_t allowed,
  * call from the same thread replaces the first. */
 void recomp_host_cpus_track(uint64_t mask);
 
+/* The calling thread is ending: forget it, so its tid, once the kernel
+ * hands it to another thread (ART's, a binder's), is never moved. */
+void recomp_host_cpus_untrack(void);
+
 /* Set every tracked thread that still exists back to its mask. Returns how
  * many had drifted (and prints one line when any had). */
 int recomp_host_cpus_restore(void);

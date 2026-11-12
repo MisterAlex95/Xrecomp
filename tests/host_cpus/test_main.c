@@ -104,8 +104,9 @@ int main(void)
             CHECK(recomp_host_cpus_restore() == 1, "one thread put back");
             sched_getaffinity(0, sizeof set, &set);
             CHECK(CPU_COUNT(&set) == 1 && CPU_ISSET(first, &set), "back on cpu %d", first);
-            recomp_host_cpus_track((uint64_t)1 << first | (uint64_t)1 << (first + 1 < 64 ? first + 1 : first));
+            recomp_host_cpus_untrack();                 /* an ending thread: no longer moved */
             sched_setaffinity(0, sizeof all, &all);
+            CHECK(recomp_host_cpus_restore() == 0, "untracked: left alone");
         } else {
             puts("one core only: the restore check is skipped");
         }
