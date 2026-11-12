@@ -65,3 +65,20 @@ def test_profile_digest_follows_the_files(tmp_path):
     c = prep.profile_digest(profiles.resolve("4541005B", ident, str(tmp_path)))
     (x / "d3d8.c").write_text("/* */\n")
     assert prep.profile_digest(profiles.resolve("4541005B", ident, str(tmp_path))) not in (b, c)
+
+
+def test_sync_generated_keeps_unchanged_files(tmp_path):
+    """XBA-65: a re-lift rewrites only what changed, so the build recompiles only that."""
+    gen, new = tmp_path / "gen", tmp_path / "gen.new"
+    gen.mkdir()
+    new.mkdir()
+    for fn, text in (("a.c", "same"), ("b.c", "old"), ("gone.c", "x")):
+        (gen / fn).write_text(text)
+    os.utime(gen / "a.c", (1000, 1000))
+    (new / "a.c").write_text("same")
+    (new / "b.c").write_text("new")
+    (new / "c.c").write_text("added")
+    assert prep.sync_generated(str(new), str(gen)) == (1, 2, 1)
+    assert sorted(os.listdir(gen)) == ["a.c", "b.c", "c.c"] and not new.exists()
+    assert os.stat(gen / "a.c").st_mtime == 1000             # untouched: no rebuild
+    assert (gen / "b.c").read_text() == "new"
