@@ -128,3 +128,36 @@ def test_boot_presses_reads_and_kills(tmp_path, monkeypatch):
     status, presses, exit_info, run_s, _ = cm.boot(_fake(tmp_path, "crash"), str(tmp_path), 10)
     assert exit_info == ("signal", 11) and run_s < 9
     assert classify(status, presses, exit_info, run_s, 3)[1].startswith("crash (signal 11)")
+
+
+def test_matrix_and_regressions():
+    from tools.compat.__main__ import matrix, plane_sync, regressions
+    res = [{"source": "Fable", "title_id": "4D5300D1", "stage": "sustained", "toolkit": "aaa", "xdk": 5849},
+           {"source": "Burnout 3", "title_id": "4541005B", "stage": "renders", "toolkit": "aaa",
+            "layers": ["xdk/d3d8", "engines/renderware"]},
+           {"source": "Fable", "title_id": "4D5300D1", "stage": "boots", "blocker": "hang: no flip", "toolkit": "bbb"},
+           {"source": "Burnout 3", "title_id": "4541005B", "stage": "sustained", "toolkit": "bbb"}]
+    reg = regressions(res)
+    assert reg == [{"title": "4D5300D1", "source": "Fable", "from": "sustained", "to": "boots",
+                    "blocker": "hang: no flip", "toolkit_from": "aaa", "toolkit_to": "bbb"}]
+    md = matrix(res)
+    assert md.startswith("**2 titles.** sustained: 1 (50 %); boots: 1 (50 %)")
+    assert "| Burnout 3 | 4541005B | sustained | up from renders |" in md
+    assert "| Fable | 4D5300D1 | boots | **down from sustained** | hang: no flip |  |" in md
+    assert "**Regressions** (a Bug each): Fable sustained -> boots (aaa -> bbb)" in md
+    calls = []
+
+    class R:
+        stdout = "Regression: Fable sustained -> boots (toolkit bbb)"
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        return R()
+    # The page is written; the Bug is already open, so none is created.
+    assert plane_sync(res, run=fake_run) == []
+    assert calls[0][:3] == ["plane", "page", "write"]
+    R.stdout = ""
+    calls.clear()
+    assert plane_sync(res, run=fake_run) == ["Regression: Fable sustained -> boots (toolkit bbb)"]
+    assert any(c[:2] == ["plane", "create"] and "Bug" in c for c in calls)
+    assert plane_sync(res, dry_run=True) == ["Regression: Fable sustained -> boots (toolkit bbb)"]

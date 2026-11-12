@@ -275,6 +275,97 @@ def report(results):
     return "\n".join(rows)
 
 
+def _key(r):
+    return r.get("title_id") or r.get("source")
+
+
+def history(results):
+    """{title: [results in file order]}."""
+    by = {}
+    for r in results:
+        by.setdefault(_key(r), []).append(r)
+    return by
+
+
+def regressions(results):
+    """Titles whose last run reached a lower stage than the run before it
+    (XBA-73): [{"title", "source", "from", "to", "blocker", "toolkit_from", "toolkit_to"}]."""
+    out = []
+    for k, runs in history(results).items():
+        if len(runs) < 2:
+            continue
+        prev, last = runs[-2], runs[-1]
+        a, b = STAGES.index(prev.get("stage", "none")), STAGES.index(last.get("stage", "none"))
+        if b < a:
+            out.append({"title": k, "source": last.get("source", k), "from": prev.get("stage"),
+                        "to": last.get("stage"), "blocker": last.get("blocker"),
+                        "toolkit_from": prev.get("toolkit"), "toolkit_to": last.get("toolkit")})
+    return out
+
+
+def matrix(results):
+    """The « Compatibility » page (XBA-73): a summary of how many titles are
+    at each stage, one row per title (its last run, the change since the run
+    before), and the regressions."""
+    by = history(results)
+    rows, counts = [], {s: 0 for s in STAGES}
+    for k, runs in sorted(by.items(), key=lambda kv: (-STAGES.index(kv[1][-1].get("stage", "none")),
+                                                      str(kv[1][-1].get("source", kv[0])).lower())):
+        last = runs[-1]
+        stage = last.get("stage", "none")
+        counts[stage] += 1
+        change = ""
+        if len(runs) > 1:
+            d = STAGES.index(stage) - STAGES.index(runs[-2].get("stage", "none"))
+            change = "up from %s" % runs[-2].get("stage") if d > 0 else \
+                     "**down from %s**" % runs[-2].get("stage") if d < 0 else "same"
+        rows.append("| %s | %s | %s | %s | %s | %s | %s | %s |" % (
+            str(last.get("source", k)).replace("|", "/"), last.get("title_id") or "", stage, change,
+            (last.get("blocker") or "").replace("|", "/"), last.get("xdk") or "",
+            ", ".join(l for l in (last.get("layers") or []) if l.startswith("engines/")) or "",
+            "%s %s" % (last.get("toolkit", ""), (last.get("time") or "")[:10])))
+    total = sum(counts.values()) or 1
+    out = ["**%d titles.** " % sum(counts.values()) + "; ".join(
+               "%s: %d (%d %%)" % (s, counts[s], counts[s] * 100 // total) for s in reversed(STAGES) if counts[s]),
+           "",
+           "| Title | Title ID | Stage | Since the run before | Blocker | XDK | Engine | Toolkit, date |",
+           "|---|---|---|---|---|---|---|---|"] + rows
+    reg = regressions(results)
+    out += ["", "**Regressions** (a Bug each): " + ("none" if not reg else "; ".join(
+        "%s %s -> %s (%s -> %s)" % (r["source"], r["from"], r["to"], r["toolkit_from"], r["toolkit_to"])
+        for r in reg))]
+    return "\n".join(out)
+
+
+def plane_sync(results, project="XBA", page="Compatibility", dry_run=False, run=subprocess.run):
+    """Write the matrix to the Plane page and open a Bug per regression not
+    already open (the plane CLI, as on the agents' host). Returns the bug
+    titles it created (or would create)."""
+    import tempfile
+    md = "# Compatibility\n\nWritten by `python -m tools.compat plane` from the compat runner's results " \
+         "(docs/technical/compat-runner.md).\n\n" + matrix(results) + "\n"
+    created = []
+    existing = ""
+    if not dry_run:
+        with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as f:
+            f.write(md)
+        run(["plane", "page", "write", "-p", project, "-t", page, "-f", f.name], check=False)
+        os.remove(f.name)
+        existing = run(["plane", "list", "-p", project], capture_output=True, text=True, check=False).stdout or ""
+    for r in regressions(results):
+        title = "Regression: %s %s -> %s (toolkit %s)" % (r["source"], r["from"], r["to"], r["toolkit_to"])
+        if title in existing:
+            continue
+        created.append(title)
+        if not dry_run:
+            run(["plane", "create", "-p", project, "-T", "Bug", "-t", title, "--parent", "XBA-60", "-m",
+                 "Found by the compat runner (XBA-73). Was %s with toolkit %s, now %s with toolkit %s. Blocker: %s. "
+                 "Results: the run's compat-results.jsonl; bisect between the two toolkit commits."
+                 % (r["from"], r["toolkit_from"], r["to"], r["toolkit_to"], r["blocker"] or "none")],
+                check=False)
+    return created
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="tools.compat", description=__doc__)
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -288,9 +379,19 @@ def main(argv=None):
     r.add_argument("--out", default="compat-results.jsonl", help="results, appended (default compat-results.jsonl)")
     p = sub.add_parser("report", help="Markdown table from a results file")
     p.add_argument("results")
+    p.add_argument("--matrix", action="store_true", help="the « Compatibility » page instead (summary, changes, regressions)")
+    q = sub.add_parser("plane", help="write the matrix to the Plane page, a Bug per regression (agents' host)")
+    q.add_argument("results")
+    q.add_argument("--project", default="XBA")
+    q.add_argument("--dry-run", action="store_true")
     a = ap.parse_args(argv)
     if a.cmd == "report":
-        print(report(read_jsonl(a.results)))
+        res = read_jsonl(a.results)
+        print(matrix(res) if a.matrix else report(res))
+        return 0
+    if a.cmd == "plane":
+        for t in plane_sync(read_jsonl(a.results), a.project, dry_run=a.dry_run):
+            print(("would open: " if a.dry_run else "opened: ") + t)
         return 0
     for src in a.sources:
         res = run_one(src, a)
