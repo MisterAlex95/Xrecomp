@@ -182,7 +182,8 @@ is chosen to keep that host up (on 2026-11-09, heavy jobs in parallel took Gitea
 
 | When | Jobs | Red when |
 |---|---|---|
-| Every PR | `linux`, then `android-toolkit` | a Linux test fails; the toolkit does not build with the NDK |
+| Every PR from a branch of this repository | `linux`, then `android-toolkit` | a Linux test fails; the toolkit does not build with the NDK |
+| A PR from a fork | nothing (XBA-100: someone else's code never drives the host's Docker); a maintainer pushes the branch here to test it | |
 | Push to `main`, or by hand | `linux`, then `linux-arm64`, then `android-image` (publishes `shell-latest`) | a Linux test fails; an arm64 failure that is not expected; the image, the toolkit or the shell APK does not build |
 | Monday 02:30 (server time), or by hand with `device_tests` | `linux`, then `device-tests` | a test project that should build for Android does not |
 

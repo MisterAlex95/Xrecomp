@@ -10,3 +10,15 @@ and remaining the copyright of espes, Jannik Vogel and Matt Borgerson.
 
 Shipping the verbatim text alongside those files is an LGPL requirement, not
 a courtesy.
+
+## Shipped by the Android app
+
+The Android APK (XRecomp) also carries the components below, listed with their versions under « The Android app »
+in NOTICE. Their binary distribution requires the licence text to travel with them: the app build copies this folder,
+`LICENSE` and `NOTICE` into its assets, and the app shows them (About › Licences).
+
+| File | Applies to |
+|---|---|
+| `Apache-2.0-WITH-LLVM-exception.txt` | LLVM: clang, lld, compiler-rt builtins and libunwind of the on-device toolchain (`libxbacc.so`, the sysroot's `lib/clang/`), verbatim from the LLVM project's `LICENSE.TXT` (its third-party and legacy parts left out: none of that code is built in) |
+| `PSF-2.0.txt` | CPython (`libpython3.13.so`, `libxbapython.so`, the standard library zip), verbatim `LICENSE` of the CPython sources |
+| `BSD-3-Clause-capstone.txt` | Capstone (`libcapstone.so` and its Python bindings), verbatim from the Capstone distribution |

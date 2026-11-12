@@ -179,8 +179,10 @@
     <!-- À propos -->
     <string name="ABOUT_TAGLINE">Basé sur le runtime xboxrecomp</string>
     <string name="ABOUT_TEXT">Un jeu recompilé statiquement, exécuté par XRecomp (le runtime xboxrecomp) sur Android arm64. Aucune donnée de jeu n\'est incluse : l\'application lit la copie que vous avez configurée depuis un disque que vous possédez.</string>
-    <string name="ABOUT_LICENCE">xboxrecomp : MIT. SDL2 : zlib.</string>
+    <string name="ABOUT_LICENCE">XRecomp et xboxrecomp : MIT. SDL2 : zlib. CPython : PSF. LLVM : Apache 2.0 avec exceptions LLVM. Capstone : BSD.</string>
     <string name="ABOUT_LEGAL">Ni affilié ni approuvé par les fabricants de la console ou du jeu. N\'utilisez que des jeux que vous possédez.</string>
+    <string name="LICENCES">Licences</string>
+    <string name="LICENCES_MISSING">Les textes des licences manquent dans cette version : voir NOTICE et LICENSES/ dans le dépôt des sources.</string>
     <string name="GAME_CHECK_NONE">Aucun (tout jeu)</string>
 
     <!-- Raccourcis (appui long sur l'icône) -->

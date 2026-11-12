@@ -1,13 +1,14 @@
 # Android port (fork)
 
-This repository is a private fork of [sp00nznet/xboxrecomp](https://github.com/sp00nznet/xboxrecomp) that adds
-**Android arm64** as a host. Plan, decisions and tickets: Plane project **XBA**.
+This repository is a fork of [sp00nznet/xboxrecomp](https://github.com/sp00nznet/xboxrecomp) that adds
+**Android arm64** as a host. The maintainers plan in a private tracker (Plane project **XBA**: the `XBA-nn` in
+commits and docs); public bug reports go to this repository's issues.
 
 ## Branches and remotes
 
 | Remote | URL |
 |---|---|
-| `origin` | `ssh://git@git.cf.adserver.fr:22222/Alex/xboxrecomp-android.git` (this fork, private) |
+| `origin` | `https://git.cf.adserver.fr/Alex/xboxrecomp-android.git` (this fork; maintainers push over SSH) |
 | `upstream` | `https://github.com/sp00nznet/xboxrecomp` |
 
 | Branch | Role |
@@ -53,8 +54,10 @@ docker build -f tools/docker/linux.Dockerfile --target test .
 
 ## Legal
 
-Personal builds only: no game code, XBE, disc image or game data in this repo, in CI, or in any release.
-Per-title repos (generated C) are separate and private.
+No game code, XBE, disc image or game data in this repo, in CI, or in any release: the app builds a game's pack on
+the player's device from the player's disc. Per-title repos (generated C) are separate and private. The licences the
+APK carries (SDL2, CPython, capstone, LLVM, the NDK sysroot) are listed in NOTICE « The Android app » and shown by the
+app (About › Licences, from `LICENSE`, `NOTICE` and `LICENSES/*.txt`, copied into the assets at build time).
 
 ## Android toolchain
 
