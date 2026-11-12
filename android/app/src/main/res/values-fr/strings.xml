@@ -204,6 +204,11 @@
     <string name="PREPARE_FAILED_HEAD">La préparation a échoué</string>
     <string name="PREPARE_CANCELLED_HEAD">Préparation arrêtée</string>
     <string name="PREPARE_CANCELLED_TEXT">La préparation a été annulée. Ce qui a été fait est gardé : Reprendre continue à partir de là.</string>
+    <string name="PREPARE_AGAIN">Préparer à nouveau</string>
+    <string name="HOME_CRASHED_FINDS">Plantage · code nouveau trouvé (%1$d)</string>
+    <string name="HOME_PREPARE_AGAIN_NOTE">Le jeu a planté, et cette partie a trouvé du code que la dernière préparation avait manqué. Préparer à nouveau le prend en compte, puis relance le jeu.</string>
+    <string name="HOME_NEEDS_FIX">Plantage · correction nécessaire</string>
+    <string name="HOME_NEEDS_FIX_NOTE">Le jeu a planté et préparer à nouveau n\'y peut rien : %1$s.</string>
     <string name="PREPARE_INTERRUPTED">La préparation a été interrompue (le système l\'a fermée). Ce qui a été fait est gardé : Préparer continue à partir de là.</string>
     <string name="PREPARE_HINT_KILLED">Le système a arrêté le compilateur deux fois (pas assez de mémoire, ou la limite d\'Android sur les processus en arrière-plan). Fermez les autres applications et réessayez.</string>
     <string name="PREPARE_HINT_NO_SPACE">Le stockage interne est plein (%1$s libres). Libérez de la place, puis réessayez : ce qui a été fait est gardé.</string>

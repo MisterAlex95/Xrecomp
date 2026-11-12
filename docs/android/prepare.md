@@ -220,6 +220,24 @@ Its format belongs to the app (prepare-app branch, `android/app`), not to this p
 One Prepare runs at a time: a start for another title while one runs waits in `files/prepare/queue.json` (that
 title's status says `queued`) and starts when the running one ends, whatever its outcome (`PrepareService`).
 
+## Prepare again (XBA-74)
+
+A run writes what the static analysis missed to `<work>/discovered.jsonl`
+([discovery.md](../technical/discovery.md)) and the next Prepare seeds the analysis with it. The app closes the loop
+(`SelfHeal.java`, state in `<work>/selfheal.json`):
+
+- PrepareService records the file's length when a Prepare begins (`offset`): what the runs add after it is new.
+- The launcher records each launch (`launched_at`). Back on Home with no game process, it reads the system's record
+  of how the game's process last ended (`ActivityManager.getHistoricalProcessExitReasons`, the main process only).
+  An exit before the launch, or already looked at (`handled`), changes nothing.
+- A crash (`REASON_CRASH`, `REASON_CRASH_NATIVE`, `REASON_ANR`) with new `icall`, `thread` or `thread_ctx` entries:
+  Home's primary button is « Prepare again » (Play stays next to it). It counts a round, runs the Prepare, and starts
+  the game when the pack is ready.
+- A crash with nothing the Prepare can seed, or after 3 rounds in a row: Home says « Crashed · needs a fix » with the
+  blocker in the note: the first untranslated instruction reached (`unimpl`) when there is one, else the crash and the
+  system's words for it.
+- An exit without a crash ends the rounds. The offer stays until the next launch or Prepare again.
+
 ## Measurements
 
 One real title's generated C (Alex's own disc, kept outside the repository; numbers only): 163 files, 256 MB of C

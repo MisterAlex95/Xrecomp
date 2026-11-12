@@ -234,6 +234,8 @@ public class LauncherActivity extends Activity {
     private final android.os.Handler poller = new android.os.Handler(android.os.Looper.getMainLooper());
     private boolean resumed;
     private Prep homePrep;
+    /** Home's primary is « Prepare again » (XBA-74). */
+    private boolean homeAgain;
     private PrepareProtocol.Status prepShown;
     private Widgets.Chip prepStatus;
     private Widgets.Meter prepMeter;
@@ -788,6 +790,7 @@ public class LauncherActivity extends Activity {
         storageArmedKey = null;
         cancelArmedAt = 0;
         homePrep = null;
+        homeAgain = false;
         prepShown = null;
         prepStatus = null;
         prepMeter = null;
@@ -1566,6 +1569,7 @@ public class LauncherActivity extends Activity {
         String title = st == State.NONE ? getString(R.string.NO_GAME_HEAD) : gameTitle(dir);
         LinearLayout info = hero(title, st == State.NONE);
         String tid = st == State.NONE ? null : titleId();
+        SelfHeal.State heal = st == State.READY && !preparing && tid != null ? selfHeal(tid, running, prep) : null;
 
         // The one line: the state when it is not « Ready », else when it was last played.
         String statusText = null;
@@ -1593,6 +1597,11 @@ public class LauncherActivity extends Activity {
             View line = heroLine(info, statusText, statusColor);
             if (prep == Prep.RUNNING)
                 homeStatus = (Widgets.Chip)line;
+        } else if (st == State.READY && heal != null) {
+            statusText = heal.offer == SelfHeal.Offer.PREPARE_AGAIN ? getString(R.string.HOME_CRASHED_FINDS, heal.seeds)
+                                                                  : getString(R.string.HOME_NEEDS_FIX);
+            statusColor = heal.offer == SelfHeal.Offer.PREPARE_AGAIN ? Theme.WARN : Theme.ERROR;
+            heroLine(info, statusText, statusColor);
         } else if (st == State.READY) {
             Library.Record rec = rec();
             heroLine(info, homeMeta(rec != null ? rec.lastPlayed : GameStore.lastPlayed(this),
@@ -1618,6 +1627,10 @@ public class LauncherActivity extends Activity {
                     : R.string.PREPARE;
             play = pill(buttons, null, getString(t), true, this::onPlay);
             homePrep = prep;
+        } else if (heal != null && heal.offer == SelfHeal.Offer.PREPARE_AGAIN) {
+            play = pill(buttons, null, getString(R.string.PREPARE_AGAIN), true, this::onPrepareAgain);
+            homeAgain = true;
+            pill(buttons, Icon.PLAY, getString(R.string.PLAY), false, this::onPlay);
         } else {
             play = pill(buttons, Icon.PLAY, getString(R.string.PLAY), true, this::onPlay);
             play.setDim(st != State.READY);
@@ -1632,7 +1645,7 @@ public class LauncherActivity extends Activity {
         }
 
         defaultFocus = play;
-        startAction = this::onPlay;
+        startAction = homeAgain ? this::onPrepareAgain : this::onPlay;
         addHint("A", R.string.HINT_SELECT, this::clickFocused);
         addHint("B", libraryOn() && history.isEmpty() ? R.string.LIB_TITLE : history.isEmpty() ? R.string.HINT_QUIT
                                                                                                 : R.string.HINT_BACK,
@@ -1640,6 +1653,10 @@ public class LauncherActivity extends Activity {
 
         if (preparing && prep == Prep.INTERRUPTED)
             setNote(getString(R.string.PREPARE_INTERRUPTED), NOTE_WARN);
+        else if (heal != null && heal.offer == SelfHeal.Offer.PREPARE_AGAIN)
+            setNote(getString(R.string.HOME_PREPARE_AGAIN_NOTE), NOTE_WARN);
+        else if (heal != null)
+            setNote(getString(R.string.HOME_NEEDS_FIX_NOTE, heal.blocker), NOTE_ERROR);
         else if (running && selectedIsLaunched())
             setNote(getString(R.string.GAME_RUNNING_HOME), NOTE_INFO);
         else if (running && st == State.READY)
@@ -2612,6 +2629,8 @@ public class LauncherActivity extends Activity {
         } else if (screen == Screen.HOME && homePrep != null) {
             Prep now = prep();
             if (now != homePrep) {
+                if (now == Prep.PLAYABLE && relaunchAfterPrepare(titleId()))
+                    return;
                 refreshKeepingFocus();
                 if (now == Prep.PLAYABLE)
                     setNote(getString(R.string.READY_TO_PLAY, gameTitle(gameDir())), NOTE_OK);
@@ -2631,6 +2650,8 @@ public class LauncherActivity extends Activity {
         String tid = titleId();
         boolean ok = tid != null && Pack.check(getFilesDir(), tid) == Pack.Check.VALID;
         Log.i(TAG, "launcher: prepare done, pack " + (ok ? "valid" : "not valid"));
+        if (ok && relaunchAfterPrepare(tid))
+            return;
         history.clear();
         focusMemory.remove(Screen.HOME);
         show(Screen.HOME);
@@ -3782,6 +3803,87 @@ public class LauncherActivity extends Activity {
 
     // ---- Starting the game ----------------------------------------------------------------------------------
 
+    // ---- Prepare again (XBA-74, docs/android/prepare.md « Prepare again ») ---------------------------------------
+
+    private File workDir(String tid) {
+        return new File(new File(getFilesDir(), "work"), tid);
+    }
+
+    /**
+     * The self-healing state of tid when it has something to show on Home, else null: the last run of tid ended (no
+     * game process now) on a crash, with new code found (« Prepare again », only when Prepare is possible) or not (the
+     * title needs a fix).
+     */
+    private SelfHeal.State selfHeal(String tid, boolean running, Prep prep) {
+        File work = workDir(tid);
+        if (!running && mainProcessPid() == 0 && tid.equals(GameStore.launchedTitleId(this))) {
+            try {
+                if (SelfHeal.onExit(work, lastGameExit())) {
+                    SelfHeal.State s = SelfHeal.read(work);
+                    Log.i(TAG, "launcher: " + tid + "'s last run: " + s.offer
+                               + (s.blocker.isEmpty() ? "" : " (" + s.blocker + ")") + ", rounds " + s.rounds);
+                }
+            } catch (IOException e) {
+                Log.w(TAG, "launcher: cannot update " + tid + "'s selfheal.json", e);
+            }
+        }
+        SelfHeal.State s = SelfHeal.read(work);
+        if (s.offer == SelfHeal.Offer.NONE || (s.offer == SelfHeal.Offer.PREPARE_AGAIN && prep != Prep.PLAYABLE))
+            return null;
+        return s;
+    }
+
+    /** How the game's process (the main one) last ended, from the system's record; null when it has none. */
+    private SelfHeal.Exit lastGameExit() {
+        ActivityManager am = getSystemService(ActivityManager.class);
+        if (am == null)
+            return null;
+        List<android.app.ApplicationExitInfo> exits;
+        try {
+            exits = am.getHistoricalProcessExitReasons(getPackageName(), 0, 16);
+        } catch (RuntimeException e) {
+            return null;
+        }
+        for (android.app.ApplicationExitInfo x : exits) {   // newest first
+            if (!getPackageName().equals(x.getProcessName()))
+                continue;
+            int r = x.getReason();
+            boolean crashed = r == android.app.ApplicationExitInfo.REASON_CRASH
+                              || r == android.app.ApplicationExitInfo.REASON_CRASH_NATIVE
+                              || r == android.app.ApplicationExitInfo.REASON_ANR;
+            String why = x.getDescription();
+            if (why == null || why.isEmpty())
+                why = r == android.app.ApplicationExitInfo.REASON_CRASH_NATIVE ? "native crash"
+                      : r == android.app.ApplicationExitInfo.REASON_ANR ? "not responding"
+                      : r == android.app.ApplicationExitInfo.REASON_CRASH ? "Java exception" : "";
+            return new SelfHeal.Exit(x.getTimestamp(), crashed, why);
+        }
+        return null;
+    }
+
+    /** « Prepare again »: one more round; the game starts again when the Prepare is done. */
+    private void onPrepareAgain() {
+        String tid = titleId();
+        if (tid == null)
+            return;
+        try {
+            SelfHeal.prepareAgain(workDir(tid));
+        } catch (IOException e) {
+            Log.w(TAG, "launcher: cannot update " + tid + "'s selfheal.json", e);
+        }
+        Log.i(TAG, "launcher: prepare again " + tid);
+        startPrepare();
+    }
+
+    /** A Prepare of tid is done with a valid pack: start the game when it was a « Prepare again ». */
+    private boolean relaunchAfterPrepare(String tid) {
+        if (tid == null || !SelfHeal.read(workDir(tid)).relaunch || state() != State.READY)
+            return false;
+        Log.i(TAG, "launcher: prepared again, relaunching " + tid);
+        launchShell(false);
+        return true;
+    }
+
     /** The main process, where ShellActivity and the runtime live, when it is running. */
     private int mainProcessPid() {
         ActivityManager am = getSystemService(ActivityManager.class);
@@ -3869,6 +3971,13 @@ public class LauncherActivity extends Activity {
         if (!resume) {
             long now = System.currentTimeMillis();
             GameStore.sessionStart(this, now, owner);
+            if (owner != null) {
+                try {   // the next exit is this run's (XBA-74)
+                    SelfHeal.launched(workDir(owner), now);
+                } catch (IOException e) {
+                    Log.w(TAG, "launcher: cannot update " + owner + "'s selfheal.json", e);
+                }
+            }
             if (owner != null) {
                 Library.sessionStart(games, owner, now);
                 writeGames();

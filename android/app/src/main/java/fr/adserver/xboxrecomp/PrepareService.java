@@ -380,6 +380,11 @@ public class PrepareService extends Service {
         work.mkdirs();
         //noinspection ResultOfMethodCallIgnored
         packs.mkdirs();
+        try {   // what the runs find from now on is new to this Prepare's analysis (XBA-74)
+            SelfHeal.prepareStarted(work);
+        } catch (IOException e) {
+            runner.logLine("selfheal.json not updated: " + e.getMessage());
+        }
         return new PrepareRunner.CommandFactory() {
             @Override
             public List<String> command(int jobs) {

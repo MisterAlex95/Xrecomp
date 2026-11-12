@@ -45,6 +45,9 @@ Addresses are guest VAs, 8 hex digits. At most 6,144 distinct entries per file.
   `thread_ctx` addresses go through the same gates, the ones that pass are kept in `<work>/discovered-seeds.json` and
   handed to the disassembler, the others in `<work>/discovered-rejected.json` so they are not tried again. A new seed
   changes the stamp: the next prepare analyses and lifts again (all of it for now; only what changed is XBA-65).
+- The Android app, after a run that crashed (XBA-74, [prepare.md « Prepare again »](../android/prepare.md)): new
+  `icall`, `thread` or `thread_ctx` entries since the last Prepare → « Prepare again »; none → the title needs a fix,
+  with the first `unimpl` entry as the blocker.
 
 The whole loop runs in CI on a synthetic title of our own (`tools/compat/test_e2e.py::test_the_self_healing_loop`):
 its thread routine is invisible to the static analysis (its address is computed), the first run records it as a
