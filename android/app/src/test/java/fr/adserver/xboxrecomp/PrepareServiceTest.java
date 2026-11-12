@@ -49,6 +49,9 @@ public class PrepareServiceTest {
 
     @After
     public void tearDown() throws Exception {
+        // A gated script still waiting (a failed check above) must not outlive its test.
+        go(TID);
+        go(TID2);
         PrepareService.environmentOverride = null;
         PrepareService.forgetQueue();
         Thread w = PrepareService.workerThread();
@@ -205,13 +208,30 @@ public class PrepareServiceTest {
      * the queue while the first title runs must not depend on how fast a loaded CI host runs a 1 s sleep (the first
      * title used to finish before the queue file was read, now and then).
      */
-    private static final String GATED_PACK_SCRIPT = "i=0; while [ ! -e \"$2.go\" ] && [ $i -lt 600 ]; do sleep 0.05;"
+    private static final String GATED_PACK_SCRIPT = "i=0; while [ ! -e \"$2.go\" ] && [ $i -lt 1200 ]; do sleep 0.1;"
             + " i=$((i+1)); done\n" + PACK_SCRIPT;
 
     private void go(String tid) throws Exception {
         File f = new File(Pack.packDir(app.getFilesDir(), tid).getAbsolutePath() + ".go");
         f.getParentFile().mkdirs();
         TestSupport.write(f, "");
+    }
+
+    /** For a failure message: the title's state, code and the end of its log. */
+    private String describe(String tid) {
+        PrepareProtocol.Status st = status(tid);
+        if (st == null)
+            return "no status";
+        String log = "";
+        try {
+            if (st.log != null) {
+                String all = new String(java.nio.file.Files.readAllBytes(new File(st.log).toPath()));
+                log = all.substring(Math.max(0, all.length() - 400));
+            }
+        } catch (Exception e) {
+            log = "(log unreadable: " + e + ")";
+        }
+        return st.state + " " + st.code + " " + st.msg + " | log: " + log;
     }
 
     private PrepareProtocol.Status status(String tid) {
@@ -241,7 +261,7 @@ public class PrepareServiceTest {
         assertNotNull(q);
         assertTrue(q.queued());
         PrepareProtocol.Queue file = PrepareProtocol.readQueue(PrepareProtocol.queueFile(app.getFilesDir()));
-        assertEquals(1, file.jobs.size());
+        assertEquals("the queue file while the first runs (first: " + describe(TID) + ")", 1, file.jobs.size());
         assertEquals("/games/b", file.jobs.get(0).gameDir);
         assertEquals("Second", file.jobs.get(0).title);
         // Starting a waiting title again, or the running one, changes nothing.
