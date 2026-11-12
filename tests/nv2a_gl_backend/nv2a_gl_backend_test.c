@@ -19,15 +19,23 @@
  *   4. a 16-bit target at internal scale 2 (the resolve path);
  *   5. a swizzled target;
  *   6. nothing merged while the CPU writes nothing.
+ *
+ * Depth re-creation (a bug found on the way): a target bigger than the
+ * scratch depth (zeta 0, 640x480 at least) makes it grow; depth_free
+ * rebinds the framebuffers that had it, and left the last of them bound,
+ * so the new depth and the clear went into another target:
+ *   7. an 800x600 target cleared after the 64x32 ones is the one cleared,
+ *      and the 64x32 target keeps its pixels.
  * RECOMP_GPU_CPU_WRITES=0 (another ctest entry) checks that the same cases
  * fail without the merge, so the test tells the two apart. */
 #include "../../src/gpu/nv2a_gl.c"
 
-#define MEM_BYTES (8u << 20)
+#define MEM_BYTES (16u << 20)
 #define FB32   0x00100000u          /* 64x32 A8R8G8B8, pitch 256 */
 #define FB16   0x00200000u          /* 640x480 R5G6B5 (frame class: scaled) */
 #define FBSWZ  0x00400000u          /* 32x32 swizzled A8R8G8B8 */
 #define FBHOST 0x00500000u          /* 64x32 A8R8G8B8, host present */
+#define FBBIG  0x00B00000u          /* 800x600 A8R8G8B8 */
 
 static uint8_t *s_mem;
 static int s_fail, s_cpu_on = 1;
@@ -297,6 +305,30 @@ int main(void)
         }
         printf("6. 20 frames without CPU writes: %u merges\n", s_st.cpu_merges - before);
         CHECK(s_st.cpu_merges == before);
+    }
+
+    /* 7. Scratch depth growth. */
+    {
+        Nv2aSurface b = surf(FBBIG, 800, 600, 3200, 4, 0x0108);
+        uint32_t before, after, big;
+        present(&s32, 1, NULL);
+        flip();
+        before = px32(FB32, 256, 63, 31);
+        clear(&b, 0xFF0000FFu);
+        present(&b, 1, NULL);
+        flip();
+        big = px32(FBBIG, 3200, 700, 550);
+        {
+            Nv2aSurface g = clip(s32, 0, 0, 1, 1);  /* make it dirty: read back again */
+            clear(&g, 0xFF00FF00u);
+        }
+        present(&s32, 1, NULL);
+        flip();
+        after = px32(FB32, 256, 63, 31);
+        printf("7. 800x600 target after 64x32 ones: reads 0x%08X; the 64x32 target 0x%08X"
+               " -> 0x%08X\n", big, before, after);
+        CHECK(big == 0xFF0000FFu);
+        CHECK(after == before);
     }
 
     CHECK(glGetError() == GL_NO_ERROR);

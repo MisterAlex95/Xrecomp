@@ -1576,9 +1576,15 @@ static uint32_t zeta_bpp(const Nv2aSurface *s)
 
 static void depth_free(GlDepth *d)
 {
+    GLuint fbo = s_sh.fbo;
     int i;
 
-    /* Colour targets that have it attached drop it (re-attached at bind). */
+    /* Colour targets that have it attached drop it (re-attached at bind).
+     * The framebuffer bound before is bound again: bind_target binds its
+     * target and then asks depth_get, which comes here when the depth must
+     * grow -- left on another target's framebuffer, the new depth was
+     * attached there and the batch or clear went into that target (an
+     * anti-aliased 1280x960 target cleared after 640x480 ones: XBA-119). */
     for (i = 0; i < NV_GL_MAX_RT; i++)
         if (s_rt[i].depth == d->tex && d->tex) {
             sh_fbo(s_rt[i].fbo);
@@ -1586,6 +1592,8 @@ static void depth_free(GlDepth *d)
                                    GL_TEXTURE_2D, 0, 0);
             s_rt[i].depth = 0;
         }
+    if (fbo != 0xFFFFFFFFu && fbo != d->fbo)
+        sh_fbo(fbo);
     if (d->fbo) sh_delete_fbo(d->fbo);
     if (d->tex) sh_delete_textures(1, &d->tex);
     memset(d, 0, sizeof *d);
