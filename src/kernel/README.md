@@ -12,6 +12,7 @@ All 371 ordinals are routed: every export now has either a per-ordinal `bridge_*
 | `xbox_memory_layout.h` | 204 | Memory layout constants and API |
 | `xbox_memory_layout.c` | 534 | Memory mapping (CreateFileMapping + 28 mirror views) |
 | `kernel_bridge.c` | 8,390 | Core dispatcher — thunk table, ICALL resolution, all 371 per-ordinal bridges, kernel data exports |
+| `kernel_wait_stats.c` | 230 | Per-site wait accounting for the periodic summary (`[KERNEL] waits:`, `RECOMP_WAIT_REPORT`) |
 | `kernel_file.c` | 834 | File I/O — NtCreateFile, NtReadFile, path translation |
 | `kernel_thread.c` | 344 | Threading — PsCreateSystemThreadEx, thread priorities |
 | `kernel_sync.c` | 547 | Synchronization — events, semaphores, mutexes, critical sections |

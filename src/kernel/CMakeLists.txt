@@ -22,6 +22,7 @@ set(KERNEL_SOURCES
     kernel_crypto.c
     kernel_thunks.c
     kernel_bridge.c
+    kernel_wait_stats.c
     xbox_memory_layout.c
     guest_vmem.c
     icall_feedback.c

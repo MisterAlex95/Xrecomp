@@ -28,6 +28,7 @@
 #include "kernel.h"
 #include "guest_vmem.h"
 #include "kernel_missing.h"
+#include "kernel_wait_stats.h"
 #include "xbox_memory_layout.h"
 #include "platform/host_time.h"
 #include "recomp_icall_feedback.h"
@@ -2087,6 +2088,12 @@ static void ke_note_set_attempt(uint32_t guest_va);
 static int ke_set_seen(uint32_t guest_va);
 static int ke_is_promoted(uint32_t guest_va);
 
+/* Wait accounting (kernel_wait_stats.h): a zero timeout is a poll, not timed. */
+static int bridge_timeout_is_poll(uint32_t timeout_ptr)
+{
+    return timeout_ptr && !(BRIDGE_MEM32(timeout_ptr) | BRIDGE_MEM32(timeout_ptr + 4));
+}
+
 /* Bring a header-owned host event in line with guest SignalState before a
  * wait. Explicitly initialized shadows keep their existing host-state policy. */
 static HANDLE ke_guest_event_prepare(uint32_t guest_va, int *type)
@@ -2144,6 +2151,7 @@ int xbox_KeSetGuestEvent(uint32_t guest_va)
         ke_lost_signal(guest_va, 1);
         return 0;
     }
+    xbox_wait_stats_set(guest_va);
     BRIDGE_MEM32(guest_va + 4) = 1;
     SetEvent(ge);
     return 1;
@@ -2177,6 +2185,7 @@ static void bridge_KeSetEvent(void)
     (void)increment;
     (void)wait;
 
+    xbox_wait_stats_set(guest_va);
     {   /* An event the title built itself (see ke_guest_event). */
         int type;
         HANDLE ge = ke_guest_event(guest_va, &type);
@@ -2326,6 +2335,7 @@ static void bridge_KeWaitForSingleObject(void)
     uint32_t alertable = STACK_ARG(3);
     uint32_t timeout_ptr = STACK_ARG(4);
     uint32_t ret_va = BRIDGE_MEM32(g_esp - 4);   /* the call's return address */
+    uint64_t t0 = xbox_wait_stats_begin(bridge_timeout_is_poll(timeout_ptr));
     HANDLE h;
 
     {   /* An event the title built itself (see ke_guest_event). Its
@@ -2339,6 +2349,7 @@ static void bridge_KeWaitForSingleObject(void)
                 (BOOLEAN)alertable, XBOX_TO_NATIVE(timeout_ptr));
             if (g_eax == 0 && type == 1)               /* synchronization: consumed */
                 BRIDGE_MEM32(object + 4) = 0;
+            xbox_wait_stats_wait(object, ret_va, g_eax, t0);
             if (g_eax != 0)
                 bridge_wait_spin(object, g_eax, timeout_ptr, ret_va);
             return;
@@ -2354,6 +2365,7 @@ static void bridge_KeWaitForSingleObject(void)
     g_eax = (uint32_t)xbox_KeWaitForSingleObject(
         h, wait_reason, wait_mode,
         (BOOLEAN)alertable, XBOX_TO_NATIVE(timeout_ptr));
+    xbox_wait_stats_wait(object, ret_va, g_eax, t0);
     if (g_eax != 0)
         bridge_wait_spin(object, g_eax, timeout_ptr, ret_va);
 }
@@ -2370,11 +2382,16 @@ static void bridge_NtWaitForSingleObject(void)
     HANDLE   handle      = bridge_resolve_handle(STACK_ARG(0));
     uint32_t alertable   = STACK_ARG(1);
     uint32_t timeout_ptr = STACK_ARG(2);
+    uint32_t token       = STACK_ARG(0);
+    uint32_t site        = g_xbox_kernel_caller;
+    uint64_t t0;
 
     if (bridge_run_io_apcs(alertable, 1))
         return;
+    t0 = xbox_wait_stats_begin(bridge_timeout_is_poll(timeout_ptr));
     g_eax = (uint32_t)xbox_NtWaitForSingleObject(
         handle, (BOOLEAN)alertable, XBOX_TO_NATIVE(timeout_ptr));
+    xbox_wait_stats_wait(token, site, g_eax, t0);
 }
 
 /* ── NtClearEvent (ordinal 186) ──────────────────────────── */
@@ -2395,6 +2412,7 @@ static void bridge_NtSetEvent(void)
 {
     HANDLE   handle = bridge_resolve_handle(STACK_ARG(0));
     uint32_t prev   = STACK_ARG(1);
+    xbox_wait_stats_set(STACK_ARG(0));
     g_eax = (uint32_t)xbox_NtSetEvent(handle, XBOX_TO_NATIVE(prev));
 }
 
@@ -2406,6 +2424,7 @@ static void bridge_NtSetEvent(void)
 static void bridge_NtPulseEvent(void)
 {
     HANDLE handle = bridge_resolve_handle(STACK_ARG(0));
+    xbox_wait_stats_set(STACK_ARG(0));
     if (handle) PulseEvent(handle);
     g_eax = 0;
 }
@@ -2437,9 +2456,14 @@ static void bridge_NtWaitForSingleObjectEx(void)
 
     if (bridge_run_io_apcs(alertable, wait_mode))
         return;
-    g_eax = (uint32_t)xbox_NtWaitForSingleObjectEx(
-        handle, (KPROCESSOR_MODE)wait_mode, (BOOLEAN)alertable,
-        XBOX_TO_NATIVE(timeout_ptr));
+    {
+        uint32_t token = STACK_ARG(0), site = g_xbox_kernel_caller;
+        uint64_t t0 = xbox_wait_stats_begin(bridge_timeout_is_poll(timeout_ptr));
+        g_eax = (uint32_t)xbox_NtWaitForSingleObjectEx(
+            handle, (KPROCESSOR_MODE)wait_mode, (BOOLEAN)alertable,
+            XBOX_TO_NATIVE(timeout_ptr));
+        xbox_wait_stats_wait(token, site, g_eax, t0);
+    }
 }
 
 /* ── MmQueryAddressProtect (ordinal 179) ─────────────────── */
@@ -2510,9 +2534,14 @@ static void bridge_NtWaitForMultipleObjectsEx(void)
 
     if (bridge_run_io_apcs(alertable, wait_mode))
         return;
-    g_eax = (uint32_t)xbox_NtWaitForMultipleObjectsEx(
-        count, handles, wait_type, (BOOLEAN)alertable,
-        XBOX_TO_NATIVE(timeout_ptr));
+    {   /* Filed under the first object (kernel_wait_stats.h). */
+        uint32_t site = g_xbox_kernel_caller;
+        uint64_t t0 = xbox_wait_stats_begin(bridge_timeout_is_poll(timeout_ptr));
+        g_eax = (uint32_t)xbox_NtWaitForMultipleObjectsEx(
+            count, handles, wait_type, (BOOLEAN)alertable,
+            XBOX_TO_NATIVE(timeout_ptr));
+        xbox_wait_stats_wait(BRIDGE_MEM32(handles_va), site, g_eax, t0);
+    }
 }
 
 /*
@@ -6441,11 +6470,16 @@ static void bridge_KeWaitForMultipleObjects(void)
         }
     }
 
-    g_eax = (uint32_t)xbox_KeWaitForMultipleObjects(
-        count, (PVOID *)handles, wait_type,
-        STACK_ARG(3), (KPROCESSOR_MODE)STACK_ARG(4),
-        (BOOLEAN)alertable, XBOX_TO_NATIVE(timeout_va),
-        XBOX_TO_NATIVE(STACK_ARG(7)));
+    {   /* Filed under the first object (kernel_wait_stats.h). */
+        uint32_t site = g_xbox_kernel_caller;
+        uint64_t t0 = xbox_wait_stats_begin(bridge_timeout_is_poll(timeout_va));
+        g_eax = (uint32_t)xbox_KeWaitForMultipleObjects(
+            count, (PVOID *)handles, wait_type,
+            STACK_ARG(3), (KPROCESSOR_MODE)STACK_ARG(4),
+            (BOOLEAN)alertable, XBOX_TO_NATIVE(timeout_va),
+            XBOX_TO_NATIVE(STACK_ARG(7)));
+        xbox_wait_stats_wait(objects_va ? BRIDGE_MEM32(objects_va) : 0, site, g_eax, t0);
+    }
 
     /* Only a successful wait consumes synchronization events. WaitAny's
      * result selects one member; WaitAll consumes every signalled member. */
@@ -9012,6 +9046,7 @@ static void bridge_KePulseEvent(void)
     (void)increment;
     (void)wait;
 
+    xbox_wait_stats_set(guest_va);
     {
         int type;
         HANDLE ge = ke_guest_event(guest_va, &type);
@@ -11482,6 +11517,9 @@ static void kernel_thunk_dispatch_body(void)
                             (unsigned long long)g_ordinal_calls[best]);
                 }
             }
+            /* And what the threads are waiting on, from where
+             * (kernel_wait_stats.h, RECOMP_WAIT_REPORT). */
+            xbox_wait_stats_report(stderr);
             fflush(stderr);
             last_summary_tick = now;
         }
