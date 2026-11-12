@@ -472,9 +472,12 @@ int xbox_launch_image(const char *launch_path, const uint8_t *page)
 
     if (launch_map_lookup(launch_path, target, sizeof target) != 0)
         return -1;
-#if defined(_WIN32) || defined(__ANDROID__)
+#if defined(__ANDROID__)
     if (!s_image_handler)
-        return -1;              /* no exec hand-over on these hosts */
+        return -1;              /* the shell's handler, or nothing */
+#elif defined(_WIN32)
+    if (!s_image_handler && GetFileAttributesA(target) == INVALID_FILE_ATTRIBUTES)
+        return -1;
 #else
     if (!s_image_handler && access(target, X_OK) != 0)
         return -1;
@@ -491,7 +494,31 @@ int xbox_launch_image(const char *launch_path, const uint8_t *page)
         remove(lpath);
         return -1;
     }
-#if !defined(_WIN32) && !defined(__ANDROID__)
+#if defined(_WIN32)
+    fprintf(stderr, "  [KERNEL] launch of '%s': handing over to %s (RECOMP_IMAGE_MAP)\n", launch_path, target);
+    {
+        WCHAR exe[MAX_PATH], cmd[MAX_PATH + 3];
+        STARTUPINFOW si;
+        PROCESS_INFORMATION pi;
+
+        if (MultiByteToWideChar(CP_UTF8, 0, target, -1, exe, MAX_PATH) > 0) {
+            _snwprintf(cmd, MAX_PATH + 3, L"\"%ls\"", exe);
+            cmd[MAX_PATH + 2] = 0;
+            memset(&si, 0, sizeof(si));
+            si.cb = sizeof(si);
+            memset(&pi, 0, sizeof(pi));
+            /* As the quick reboot: no inherited handles, this process ends at once. */
+            if (CreateProcessW(exe, cmd, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
+                CloseHandle(pi.hThread);
+                CloseHandle(pi.hProcess);
+                fflush(NULL);
+                ExitProcess(0);
+            }
+            fprintf(stderr, "  [KERNEL] launch of '%s': CreateProcess %s failed (%lu)\n", launch_path, target,
+                    (unsigned long)GetLastError());
+        }
+    }
+#elif !defined(__ANDROID__)
     fprintf(stderr, "  [KERNEL] launch of '%s': handing over to %s (RECOMP_IMAGE_MAP)\n", launch_path, target);
     {
         char *args[2];
