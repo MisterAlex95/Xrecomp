@@ -2320,7 +2320,8 @@ class FunctionTranslator:
             "scasb": {"edi"}, "scasw": {"edi"}, "scasd": {"edi"},
             "cmpsb": {"esi", "edi"}, "cmpsw": {"esi", "edi"},
             "loop": {"ecx"}, "loope": {"ecx"}, "loopne": {"ecx"},
-            "leave": {"esp", "ebp"}, "popad": set(full_registers),
+            "leave": {"esp", "ebp"}, "enter": {"esp", "ebp"},
+            "popad": set(full_registers),
             "popal": set(full_registers), "pushal": {"esp"}, "pushad": {"esp"},
             "xlat": {"eax"}, "xlatb": {"eax"},
         }
@@ -2989,8 +2990,12 @@ class FunctionTranslator:
         # to the global variables via preprocessor macros.
         volatile_regs = {"eax", "ecx", "edx", "esp"}
 
-        # Ensure ebp tracked if function uses 'leave' (implicit ebp)
-        if any(insn.mnemonic == "leave" for insn in instructions):
+        # Ensure ebp tracked if function uses 'leave' or 'enter' (implicit
+        # ebp, no register operand). enter's lift pushes and writes ebp; a
+        # function whose only ebp is an enter (Fable's sub_002EE2CE, bytes
+        # the sweep decoded as `mov edi, edi; enter 0x2EE2, 0; ret`) emitted
+        # C that named an undeclared ebp and did not compile.
+        if any(insn.mnemonic in ("leave", "enter") for insn in instructions):
             used_regs.add("ebp")
 
         # PUSHAD/POPAD implicitly read or restore every register.

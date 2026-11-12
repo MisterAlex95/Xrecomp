@@ -94,3 +94,20 @@ def test_semantics(tmp_path):
                    "0101808010100303",    # pminub
                    "0202F0FFFF200404",    # pmaxub
                    "FFFE000100000000"]    # pmulhuw: high words (0xFFFF*0xFFFF, 0x8000*2, 2*3, 1*4)
+
+
+def test_a_function_whose_only_ebp_is_enter_declares_it():
+    # Fable 0x002EE2CE: mov edi, edi; enter 0x2EE2, 0; ret. enter names ebp
+    # through no operand, so the translator's register scan missed it and the
+    # C used an undeclared ebp.
+    from tools.recomp import config
+    from tools.recomp.translator import FunctionTranslator
+    base = 0x10000
+    image = bytes.fromhex("8bffc8e22e00c3")
+    config._install([config.Section(".text", base, len(image), 0, len(image), True)],
+                    entry_point=base, kernel_thunk_addr=base, origin="enter-test")
+    db = {base: {"start": hex(base), "end": base + len(image),
+                 "_addr": base, "size": len(image)}}
+    code = FunctionTranslator(image, db).translate_function(base, db[base])
+    assert "/* enter */" in code, code
+    assert "uint32_t ebp" in code, code
