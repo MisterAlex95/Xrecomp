@@ -46,6 +46,10 @@ Addresses are guest VAs, 8 hex digits. At most 6,144 distinct entries per file.
   handed to the disassembler, the others in `<work>/discovered-rejected.json` so they are not tried again. A new seed
   changes the stamp: the next prepare analyses and lifts again (all of it for now; only what changed is XBA-65).
 
+The whole loop runs in CI on a synthetic title of our own (`tools/compat/test_e2e.py::test_the_self_healing_loop`):
+its thread routine is invisible to the static analysis (its address is computed), the first run records it as a
+`thread` entry, the next prepare seeds it and rebuilds, and the second run starts the thread.
+
 Code: `src/kernel/recomp_discovery.c` (the writer, no dependency on the rest of the runtime), callers in
 `kernel_bridge.c` (threads) and `templates/new-game/src/recomp_manual.c` (indirect calls, untranslated instructions);
 test `tests/recomp_discovery`.

@@ -14,7 +14,8 @@
  *               pixel is brighter than near-black
  *   audio_ms    output audio that was not silence
  *   pad_reads   pad reports the title read
- *   threads     guest threads the kernel started
+ *   threads     guest threads the kernel started (the first, run inline as the
+ *               title's main thread, counts)
  *   discovered  new discovery-file entries (recomp_discovery.h)
  *
  * Unset: nothing is counted beyond a load and a branch per call.
