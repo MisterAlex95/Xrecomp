@@ -155,7 +155,9 @@ def test_a_wait_spin_is_caught_and_promoted(tmp_path):
     header (no KeInitializeEvent), calls KeSetEvent on it once, then polls it
     with KeWaitForSingleObject in a loop. The waits fail at once (no host
     event yet), the spin is reported and recorded, and since a set was seen
-    the event is promoted."""
+    the event is promoted. Run with RECOMP_TITLE_KEVENTS=0: since title-built
+    KEVENTs are guest events by default (d38f10b) there is nothing left to
+    promote otherwise, and the loop is only a zero-timeout poll."""
     import struct
     if not shutil.which("cmake"):
         pytest.skip("no cmake")
@@ -177,7 +179,8 @@ def test_a_wait_spin_is_caught_and_promoted(tmp_path):
     out = tmp_path / "results.jsonl"
     r = subprocess.run([sys.executable, "-m", "tools.compat", "run", str(d), "--work-root", str(tmp_path / "cw"),
                         "--seconds", "5", "--sustain", "3", "--out", str(out)],
-                       cwd=ROOT, capture_output=True, text=True, timeout=1800)
+                       cwd=ROOT, capture_output=True, text=True, timeout=1800,
+                       env=dict(os.environ, RECOMP_TITLE_KEVENTS="0"))
     assert r.returncode == 0, r.stdout[-2000:] + r.stderr[-2000:]
     work = tmp_path / "cw" / "spin"
     log = (work / "run-0.log").read_text()
