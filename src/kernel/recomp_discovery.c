@@ -33,8 +33,9 @@ static pthread_mutex_t s_lock = PTHREAD_MUTEX_INITIALIZER;
 #define UNLOCK() pthread_mutex_unlock(&s_lock)
 #endif
 
-enum { K_ICALL = 1, K_THREAD, K_THREAD_CTX, K_UNIMPL, K_D3D, K_WAIT_SPIN, K_LAUNCH };
-static const char *const kind_name[] = { "", "icall", "thread", "thread_ctx", "unimpl", "d3d", "wait_spin", "launch" };
+enum { K_ICALL = 1, K_THREAD, K_THREAD_CTX, K_UNIMPL, K_D3D, K_WAIT_SPIN, K_LAUNCH, K_STUB };
+static const char *const kind_name[] = { "", "icall", "thread", "thread_ctx", "unimpl", "d3d", "wait_spin", "launch",
+                                         "stub" };
 
 /* What is already in the file: kind << 32 | va, open addressing. A title that
  * fills it is beyond what one file can help with; the rest is dropped. */
@@ -67,7 +68,7 @@ static int seen_add(uint64_t key)       /* 1 when new */
 
 static int kind_of(const char *s, size_t n)
 {
-    for (int k = K_ICALL; k <= K_LAUNCH; k++)
+    for (int k = K_ICALL; k <= K_STUB; k++)
         if (strlen(kind_name[k]) == n && !memcmp(s, kind_name[k], n))
             return k;
     return 0;
@@ -82,14 +83,26 @@ static void load_existing(const char *path)
         return;
     while (fgets(line, sizeof line, f)) {
         const char *t = strstr(line, "\"t\":\""), *va = strstr(line, "\"va\":\"0x");
+        const char *ord = strstr(line, "\"ord\":");
         const char *e;
+        uint32_t key;
         int k;
-        if (!t || !va)
+        if (!t || (!va && !ord))
             continue;
         t += 5;
         if (!(e = strchr(t, '"')) || !(k = kind_of(t, (size_t)(e - t))))
             continue;
-        (void)seen_add((uint64_t)k << 32 | (uint32_t)strtoul(va + 6, NULL, 16));
+        /* A stub entry is keyed by its ordinal, the others by "va". */
+        if (k == K_STUB) {
+            if (!ord)
+                continue;
+            key = (uint32_t)strtoul(ord + 6, NULL, 10);
+        } else {
+            if (!va)
+                continue;
+            key = (uint32_t)strtoul(va + 6, NULL, 16);
+        }
+        (void)seen_add((uint64_t)k << 32 | key);
     }
     fclose(f);
 }
@@ -188,7 +201,10 @@ static void note(int kind, uint32_t va, const char *fields)
         put_line(line);
         s_run_written = 1;
     }
-    snprintf(line, sizeof line, "{\"t\":\"%s\",\"va\":\"0x%08X\"%s}\n", kind_name[kind], va, fields);
+    if (kind == K_STUB)     /* keyed by ordinal: no address of its own */
+        snprintf(line, sizeof line, "{\"t\":\"stub\",\"ord\":%u%s}\n", va, fields);
+    else
+        snprintf(line, sizeof line, "{\"t\":\"%s\",\"va\":\"0x%08X\"%s}\n", kind_name[kind], va, fields);
     put_line(line);
     /* No fsync: a crash of the process keeps what write() handed the kernel
      * (it is in the page cache); only a crash of the whole system would not,
@@ -270,6 +286,22 @@ void recomp_discovery_launch(const char *path)
     f[o++] = '"';
     f[o] = 0;
     note(K_LAUNCH, h, f);
+}
+
+void recomp_discovery_stub(uint32_t ordinal, const char *name, uint32_t ret_va)
+{
+    /* ,"name":"...","ret":"0x..." -- the name is an identifier, but it is
+     * escaped like any other text. */
+    char f[160];
+    size_t o = (size_t)snprintf(f, sizeof f, ",\"name\":\"");
+    for (const char *s = name ? name : ""; *s && o < sizeof f - 40; s++) {
+        unsigned char c = (unsigned char)*s;
+        if (c == '"' || c == '\\')
+            f[o++] = '\\';
+        f[o++] = (c >= 0x20 && c < 0x7F) ? (char)c : '?';
+    }
+    snprintf(f + o, sizeof f - o, "\",\"ret\":\"0x%08X\"", ret_va);
+    note(K_STUB, ordinal, f);
 }
 
 const char *recomp_discovery_path(void)

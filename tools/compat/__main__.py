@@ -83,13 +83,35 @@ def classify(status, presses_ms, exit_info, run_s, sustain_s, log_text="", disco
         u = UNIMPL_RE.search(log_text or "")
         if u:
             blocker += "; first untranslated instruction reached: %s at %s" % (u.group(1), u.group(2))
-        elif discovered:
-            d = discovered[-1]
-            blocker += "; last discovery: %s %s" % (d.get("t"), d.get("va"))
+        else:
+            addressed = [d for d in discovered if d.get("t") != "stub"]   # stubs: below
+            if addressed:
+                d = addressed[-1]
+                blocker += "; last discovery: %s %s" % (d.get("t"), d.get("va"))
     if blocker is None and stage != "sustained":
         blocker = {"boots": "nothing lit on screen", "renders": "no response to the pad",
                    "responsive": "not sustained"}.get(stage)
+    # A stub kernel route the title called (XBA-115): named with whatever else
+    # stopped the run, short of a crash or a launch, which have their own cause.
+    stubs = stub_calls(discovered)
+    if stubs and blocker and not blocker.startswith(("crash", "launches")):
+        blocker += "; calls stub " + ", ".join(stubs)
     return stage, blocker, summary
+
+
+def stub_calls(discovered, limit=4):
+    """["ordinal 136 (KeRemoveQueue)", ...] from the discovery file's stub
+    entries, in the order they were first called, at most `limit` (then "+N")."""
+    out = []
+    for d in discovered or ():
+        if d.get("t") != "stub" or "ord" not in d:
+            continue
+        s = "ordinal %s" % d["ord"] + (" (%s)" % d["name"] if d.get("name") else "")
+        if s not in out:
+            out.append(s)
+    if len(out) > limit:
+        out = out[:limit] + ["+%d more" % (len(out) - limit)]
+    return out
 
 
 def _responds(status, presses_ms):

@@ -29,6 +29,7 @@
 #include "guest_vmem.h"
 #include "kernel_missing.h"
 #include "kernel_ksync.h"
+#include "kernel_stubs.h"
 #include "kernel_wait_stats.h"
 #include "xbox_memory_layout.h"
 #include "platform/host_time.h"
@@ -11679,6 +11680,11 @@ static void kernel_thunk_dispatch_body(void)
             }
         }
     }
+
+    /* A stub route, or no route at all: say so the first time (XBA-115,
+     * kernel_stubs.h). */
+    if (!bridge || xbox_kernel_is_stub(ordinal))
+        xbox_kernel_stub_note(ordinal, bridge != NULL, g_xbox_kernel_caller);
 
     /* Queued APCs (KeInsertQueueApc, XBA-113) run at this thread's kernel
      * calls; an alertable wait they answer is not made. */

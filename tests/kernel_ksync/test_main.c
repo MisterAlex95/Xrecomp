@@ -26,9 +26,12 @@
  *      thread runs at once; a user APC runs at the next alertable wait,
  *      which returns STATUS_USER_APC; a second insert of a queued APC fails.
  *   8. KeSetPriorityThread / KeSetPriorityProcess / KeBoostPriorityThread.
+ *   9. XBA-115: a call of a route still in the stub table is counted, and
+ *      its first call lands in the discovery file as {"t":"stub","ord":N}.
  */
 #include "kernel.h"
 #include "xbox_memory_layout.h"
+#include "kernel_stubs.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -81,16 +84,16 @@ enum {
     S_DQINIT, S_DQINS, S_DQINSKEY, S_DQREM, S_DQREMKEY, S_DQREMENT,
     S_RWINIT, S_RWEXCL, S_RWSHARED, S_RWREL,
     S_APCINIT, S_APCINS, S_DELAY,
-    S_SETPRI, S_SETPRIPROC, S_BOOST,
+    S_SETPRI, S_SETPRIPROC, S_BOOST, S_STUB,
     S_COUNT
 };
-static const uint32_t slot_ord[S_COUNT] = {
+static uint32_t slot_ord[S_COUNT] = {
     58, 57, 56, 104,
     111, 117, 116, 136, 141,
     106, 115, 114, 134, 133, 135,
     18, 12, 13, 28,
     105, 118, 99,
-    148, 147, 94,
+    148, 147, 94, 0 /* S_STUB: the first ordinal of the stub table */,
 };
 
 static RECOMP_TLS int t_index;
@@ -623,9 +626,43 @@ static void test_priority(void)
           "KeSetPriorityProcess: old base priority back, field set", NULL);
 }
 
+/* ═══════════════════ 9. Stub report (XBA-115) ═══════════════════ */
+
+static void test_stub_report(const char *disc_path)
+{
+    char d[200], buf[4096];
+    uint32_t ord = slot_ord[S_STUB];
+    FILE *f;
+    size_t n = 0;
+    int i;
+
+    become_thread(0);
+    check(g_kernel_stub_count > 0 && xbox_kernel_is_stub(ord) && !xbox_kernel_is_stub(57),
+          "stub table: generated, a stub is in it, InterlockedPopEntrySList is not", NULL);
+    for (i = 0; i < 10; i++)
+        call(S_STUB, NULL, 0);
+    snprintf(d, sizeof d, "ordinal %u: %u calls", ord, xbox_kernel_stub_calls(ord));
+    check(xbox_kernel_stub_calls(ord) == 10, "every call of a stub route is counted", d);
+    check(xbox_kernel_stub_calls(57) == 0, "an implemented route is not", NULL);
+    f = fopen(disc_path, "rb");
+    if (f) {
+        n = fread(buf, 1, sizeof buf - 1, f);
+        fclose(f);
+    }
+    buf[n] = 0;
+    snprintf(d, sizeof d, "{\"t\":\"stub\",\"ord\":%u,\"name\":\"%s\",\"ret\":\"0xBEEF00%02X\"}\n",
+             ord, xbox_kernel_stub_name(ord), S_STUB);
+    check(strstr(buf, d) != NULL, "its first call is in the discovery file", buf);
+    {
+        const char *p = strstr(buf, "\"t\":\"stub\"");
+        check(p && !strstr(p + 1, "\"t\":\"stub\""), "...once", NULL);
+    }
+}
+
 int main(void)
 {
     int i;
+    char disc_path[256];
 
     setvbuf(stdout, NULL, _IONBF, 0);
     mem = VirtualAlloc(NULL, 16 * 1024 * 1024, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
@@ -634,6 +671,20 @@ int main(void)
         return 1;
     }
     g_xbox_mem_offset = (ptrdiff_t)mem;
+
+    /* Discovery to a fresh file, for check 9. */
+    {
+        const char *tmp = getenv("TMPDIR");
+        snprintf(disc_path, sizeof disc_path, "%s/xba_ksync_%u.jsonl",
+                 tmp && *tmp ? tmp : "/tmp", (unsigned)GetCurrentProcessId());
+        remove(disc_path);
+#ifdef _WIN32
+        _putenv_s("RECOMP_DISCOVERY", disc_path);
+#else
+        setenv("RECOMP_DISCOVERY", disc_path, 1);
+#endif
+    }
+    slot_ord[S_STUB] = g_kernel_stub_count ? g_kernel_stub_table[0].ordinal : 1;
 
     for (i = 0; i < S_COUNT; i++)
         M32(THUNK_VA + 4 * i) = 0x80000000u | slot_ord[i];
@@ -648,6 +699,8 @@ int main(void)
     test_rwlock();
     test_apc();
     test_priority();
+    test_stub_report(disc_path);
+    remove(disc_path);
 
     printf("\n%d failure(s)\n", failures);
     return failures ? 1 : 0;

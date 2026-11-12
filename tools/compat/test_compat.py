@@ -68,6 +68,26 @@ def test_crash_and_exit():
     assert classify(st, [8000], ("exit", 0), 40, 60)[1] == "exited with code 0 after 40 s"
 
 
+def test_a_called_stub_is_named_as_a_blocker():
+    # XBA-115: the runtime records {"t":"stub","ord":N,...} the first time a
+    # stub kernel route is called; the matrix names it instead of a bare hang.
+    st = [line(t, threads=2) for t in range(1000, 60001, 1000)]
+    disc = [{"t": "icall", "va": "0x00045678"},
+            {"t": "stub", "ord": 136, "name": "KeRemoveQueue", "ret": "0x00012345"},
+            {"t": "stub", "ord": 206, "name": "NtQueueApcThread", "ret": "0x00012399"}]
+    stage, blocker, _ = classify(st, [], None, 60, 60, "", disc)
+    assert stage == "boots"
+    assert blocker == ("no flip; last discovery: icall 0x00045678; calls stub ordinal 136 (KeRemoveQueue),"
+                       " ordinal 206 (NtQueueApcThread)")
+    # Also beside a stage blocker, but not beside a crash, which has its own cause.
+    st2 = [line(t, flips=t // 16, frames=1, lit=0, threads=3) for t in range(1000, 30001, 1000)]
+    assert classify(st2, [8000], None, 30, 60, "", disc[1:2])[1] == \
+        "nothing lit on screen; calls stub ordinal 136 (KeRemoveQueue)"
+    assert "stub" not in classify(playing(40), [8000], ("signal", 11), 40, 60, "", disc)[1]
+    # Only stubs: no "last discovery: stub None".
+    assert classify(st, [], None, 60, 60, "", disc[1:2])[1] == "no flip; calls stub ordinal 136 (KeRemoveQueue)"
+
+
 def test_a_launch_of_another_image_is_named():
     st = playing(20)
     log = "  [KERNEL] launch of 'd:\\game.xbe' is not this title (default.xbe): exiting"
