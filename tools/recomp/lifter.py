@@ -547,6 +547,27 @@ _EFLAGS_PRESERVE = frozenset({
 })
 
 
+_PREFIX_BYTES = frozenset((0x26, 0x2E, 0x36, 0x3E, 0x64, 0x65, 0x66, 0x67,
+                           0xF0, 0xF2, 0xF3))
+
+
+def _opcode_bytes(insn):
+    """The instruction's bytes after its legacy prefixes."""
+    raw = bytes.fromhex(insn.bytes_hex or "")
+    i = 0
+    while i < len(raw) and raw[i] in _PREFIX_BYTES:
+        i += 1
+    return raw[i:]
+
+
+def _is_far_call_mem(insn):
+    """`call far [mem]` (FF /3). Capstone names it `call ptr [mem]`, with
+    the same operand as the near FF /2, so only the ModRM reg field tells
+    them apart."""
+    b = _opcode_bytes(insn)
+    return len(b) >= 2 and b[0] == 0xFF and (b[1] >> 3) & 7 == 3
+
+
 def _has_xmm_operand(ops):
     """True for the SSE reading of a mnemonic the string operations share.
 
@@ -1702,21 +1723,28 @@ class Lifter:
         # aam/aad (XBA-71): the ASCII adjusts hand-written digit code uses,
         # `aam` (base 10 by default) splitting al into ah:al. Flags (SF, ZF,
         # PF from al) are left to the tracking's "unknown"; a division by a
-        # zero base, a #DE on the console, leaves the registers alone.
+        # zero base is a #DE on the console, and goes where div's does.
         if m in ("aam", "aad"):
             base = ops[0].imm & 0xFF if ops and ops[0].type == "imm" else 10
             if m == "aam":
                 if not base:
-                    return ["(void)0; /* aam 0: #DE on the console */"]
+                    return [f"recomp_divide_error(0x{insn.address:08X}u, 0u); /* aam 0: #DE */"]
                 return [f"{{ uint32_t _al = eax & 0xFFu; SET_LO16(eax, ((_al / {base}u) << 8) | (_al % {base}u)); }}"
                         " /* aam */"]
             return [f"SET_LO16(eax, (uint8_t)((eax & 0xFFu) + ((eax >> 8) & 0xFFu) * {base}u)); /* aad */"]
-        # enter N, 0 (XBA-71): push ebp; mov ebp, esp; sub esp, N. Nesting
-        # levels above 0 (Pascal-style display) stay unhandled.
+        # enter N, L: push ebp; frame = esp; with a nesting level L > 0 (a
+        # Pascal-style display), copy the L-1 enclosing frame pointers from
+        # the old frame (ebp - 4, ebp - 8, ...) and push frame itself; then
+        # ebp = frame and esp -= N. The level is taken modulo 32, as the CPU
+        # does, and unrolled here since it is an immediate.
         if m == "enter" and len(ops) >= 2 and ops[0].type == "imm" and ops[1].type == "imm":
-            if ops[1].imm & 0x1F:
-                return self._unimplemented(insn, m, " (nesting level)")
-            out = ["PUSH32(esp, ebp);", "ebp = esp;"]
+            level = ops[1].imm & 0x1F
+            if level:
+                out = ["PUSH32(esp, ebp);", "{ uint32_t _enter_frame = esp;"]
+                out += ["  ebp -= 4; PUSH32(esp, MEM32(ebp));"] * (level - 1)
+                out += ["  PUSH32(esp, _enter_frame);", "  ebp = _enter_frame; }"]
+            else:
+                out = ["PUSH32(esp, ebp);", "ebp = esp;"]
             if self.publishes_ebp:
                 out.append("g_ebp = ebp; /* frame stays current across calls */")
             out.append(f"esp -= {ops[0].imm & 0xFFFF}u; /* enter */")
@@ -1952,6 +1980,56 @@ class Lifter:
             if self.needs_cf:
                 out.append("_cf = (int)(g_eflags & 1u); /* popfd: CF */")
             return out
+
+        # ── Interrupt flag, halt and descriptor tables (XBA-111) ──
+        #
+        # Titles run in ring 0, and KOTOR's USB interrupt handler runs a
+        # cli/sti pair on every interrupt. They were RECOMP_UNIMPL no-ops.
+        # Now they clear and set EFLAGS.IF in g_eflags (so pushfd and popfd
+        # see it) and tell the runtime, which masks device interrupts on the
+        # same gate a raise to DISPATCH_LEVEL and above uses (kernel_hal.c,
+        # xbox_GuestInterruptFlag). popfd restores IF through the same call.
+        if m == "cli":
+            return ["recomp_cli(); /* cli */"]
+        if m == "sti":
+            return ["recomp_sti(); /* sti */"]
+        # hlt waits for the next interrupt: the runtime takes what is
+        # pending and lets the host thread (and the guest CPU) go briefly.
+        if m == "hlt":
+            return [f"xbox_Halt(0x{insn.address:08X}u); /* hlt */"]
+        # No TLB and no cache to model; `pause` is a spin-wait hint.
+        if m == "invlpg":
+            return [f"(void)0; /* invlpg {insn.op_str}: no guest TLB */"]
+        if m == "pause":
+            return ["(void)0; /* pause: spin-wait hint */"]
+        # sgdt/sidt store the 6-byte pseudo-descriptor (limit, then base);
+        # lgdt/lidt load it. The runtime keeps one value per table, as it
+        # does for the control registers.
+        if m in ("sgdt", "sidt", "lgdt", "lidt") and ops and ops[0].type == "mem":
+            which = 1 if m.endswith("idt") else 0
+            a = _fmt_mem(ops[0])
+            if m[0] == "s":
+                return [f"{{ uint64_t _dt = xbox_ReadDtr({which}); MEM16({a}) = (uint16_t)_dt;"
+                        f" MEM32(({a}) + 2) = (uint32_t)(_dt >> 16); }} /* {m} {insn.op_str} */"]
+            return [f"xbox_WriteDtr({which}, (uint64_t)MEM16({a}) | ((uint64_t)MEM32(({a}) + 2) << 16));"
+                    f" /* {m} {insn.op_str} */"]
+
+        # ── Far transfers ──
+        #
+        # The Xbox runs flat: every code selector has base 0, so a far jump
+        # or call goes to its offset. A far call also pushes CS before the
+        # return address, and the far return pops both (see _lift_ret).
+        if m in ("ljmp", "lcall") and len(ops) == 2 and all(o.type == "imm" for o in ops):
+            sel, off = ops[0].imm & 0xFFFF, ops[1].imm & 0xFFFFFFFF
+            if m == "ljmp":
+                return [self._forced_tail(
+                    f"g_seh_ebp = ebp; RECOMP_ITAIL(0x{off:08X}u); return;"
+                    f" /* ljmp 0x{sel:X}:0x{off:08X} */")]
+            publish = "g_ebp = ebp; g_seh_ebp = ebp; " if self.publishes_ebp else ""
+            return [publish + f"{{ uint32_t _icall_target = 0x{off:08X}u; "
+                    f"PUSH32(esp, 0x{sel:X}u); PUSH32(esp, 0x{insn.end_address:08X}u); "
+                    f"RECOMP_ICALL_SAFE_AT(_icall_target, _icall_esp, 0x{insn.address:08X}u); }}"
+                    f" /* lcall 0x{sel:X}:0x{off:08X} */"]
 
         # ── Time stamp counter ──
         #
@@ -2565,22 +2643,74 @@ class Lifter:
     def _lift_muldiv(self, insn, ops, m):
         if len(ops) < 1:
             return [f"/* {m}: no operand */"]
-        src = _fmt_operand_read(ops[0])
         if m == "mul":
             return self._lift_product(ops, signed=False)
-        elif m == "div":
-            return [
-                f"{{ uint64_t _dividend = ((uint64_t)edx << 32) | eax;",
-                f"  eax = (uint32_t)(_dividend / (uint32_t){src});",
-                f"  edx = (uint32_t)(_dividend % (uint32_t){src}); }}"
-            ]
-        elif m == "idiv":
-            return [
-                f"{{ int64_t _dividend = ((int64_t)(int32_t)edx << 32) | eax;",
-                f"  eax = (uint32_t)((int32_t)(_dividend / (int32_t){src}));",
-                f"  edx = (uint32_t)((int32_t)(_dividend % (int32_t){src})); }}"
-            ]
+        if m in ("div", "idiv"):
+            return self._lift_divide(insn, ops, signed=(m == "idiv"))
         return [f"/* {m}: unhandled */"]
+
+    # The dividend, quotient and remainder of div/idiv at each operand width.
+    # 8-bit: AX / r8 -> AL quotient, AH remainder. 16-bit: DX:AX / r16 -> AX,
+    # DX. 32-bit: EDX:EAX / r32 -> EAX, EDX. The upper halves of EAX and EDX
+    # are untouched by the narrow forms.
+    _DIV_FORMS = {
+        8: ("HI8(eax)", "LO16(eax)",
+            "SET_LO16(eax, ((_dn % _dv) << 8) | (_dn / _dv));"),
+        16: ("LO16(edx)", "((uint32_t)LO16(edx) << 16) | LO16(eax)",
+             "SET_LO16(eax, _dn / _dv); SET_LO16(edx, _dn % _dv);"),
+        32: ("edx", "((uint64_t)edx << 32) | eax",
+             "eax = (uint32_t)(_dn / _dv); edx = (uint32_t)(_dn % _dv);"),
+    }
+    _IDIV_FORMS = {
+        8: ("(int16_t)LO16(eax)",
+            "SET_LO16(eax, ((uint32_t)(uint8_t)(_dn - _dq * _dv) << 8)"
+            " | (uint8_t)_dq);"),
+        16: ("(int32_t)(((uint32_t)LO16(edx) << 16) | LO16(eax))",
+             "SET_LO16(eax, _dq); SET_LO16(edx, _dn - _dq * _dv);"),
+        32: ("(int64_t)(((uint64_t)edx << 32) | eax)",
+             "eax = (uint32_t)_dq; edx = (uint32_t)(_dn - _dq * _dv);"),
+    }
+
+    def _lift_divide(self, insn, ops, signed):
+        """div / idiv at the operand's width, with the divide error.
+
+        This used to emit the 32-bit EDX:EAX form whatever the operand, so
+        `div bl` (AX / BL -> AL, AH) read EDX into its dividend and wrote all
+        of EAX and EDX. And a zero divisor or a quotient too wide for the
+        destination, which raise #DE on x86, were C undefined behaviour
+        (SIGFPE on an x86 host, a silent value on arm64) or a silent
+        truncation.
+
+        Both now call recomp_divide_error(va, divisor) and leave the
+        registers as they were, as the CPU does before it dispatches the
+        exception; the runtime decides what happens next (today it stops
+        with a report). The fast path pays one compare for div: the
+        quotient fits iff the dividend's high half is below the divisor,
+        which a zero divisor also fails. idiv pays the zero test (and at 32
+        bits the one dividend whose division by -1 is itself undefined in
+        C), then a range check of the quotient.
+        """
+        width = (_operand_width(ops[0]) or 4) * 8
+        src = _fmt_operand_read(ops[0])
+        trap = (f"recomp_divide_error(0x{insn.address:08X}u,"
+                f" (uint{width}_t)_dv);")
+        if not signed:
+            high, dividend, write = self._DIV_FORMS[width]
+            wide = "uint64_t" if width == 32 else "uint32_t"
+            return [f"{{ uint32_t _dv = (uint32_t)({src});",
+                    f"  if (RECOMP_UNLIKELY({high} >= _dv)) {trap}",
+                    f"  else {{ {wide} _dn = {dividend}; {write} }} }}"]
+        dividend, write = self._IDIV_FORMS[width]
+        narrow = f"int{width}_t"
+        # The quotient is computed in int64_t, where only INT64_MIN / -1 can
+        # overflow, and that dividend only exists at 32 bits.
+        guard = ("_dv == 0 || (_dv == -1 && _dn == INT64_MIN)" if width == 32
+                 else "_dv == 0")
+        return [f"{{ int64_t _dv = ({narrow})({src}); int64_t _dn = {dividend};"
+                f" int64_t _dq = 0;",
+                f"  if (RECOMP_UNLIKELY({guard}"
+                f" || (_dq = _dn / _dv) != ({narrow})_dq)) {trap}",
+                f"  else {{ {write} }} }}"]
 
     def _lift_shift(self, insn, ops, c_op):
         if len(ops) < 2:
@@ -2921,8 +3051,14 @@ class Lifter:
             # low and dispatches through the wrong slot.
             site = insn.address
             publish = "g_ebp = ebp; g_seh_ebp = ebp; " if self.publishes_ebp else ""
+            # A far call through memory (m16:32) also pushes the selector
+            # stored after the offset, which the callee's retf pops; the
+            # flat code segment makes the offset the target (XBA-111).
+            far = ""
+            if ops[0].type == "mem" and _is_far_call_mem(insn):
+                far = f"PUSH32(esp, (uint32_t)MEM16(({_fmt_mem(ops[0])}) + 4)); "
             head = (publish + f"{{ uint32_t _icall_target = {target}; "
-                    f"PUSH32(esp, 0x{ret_va:08X}u); ")
+                    f"{far}PUSH32(esp, 0x{ret_va:08X}u); ")
             fallback = (f"{safe_at_macro}(_icall_target, _icall_esp, "
                         f"0x{site:08X}u); }}")
             recorded = self.icall_site_targets.get(site)
@@ -2970,10 +3106,20 @@ class Lifter:
             prefix = (f'if (g_force_return) eax = '
                       f'0x{self.force_return_value:X}U; ') + prefix
 
+        # A far return pops CS as well as EIP: the far call pushed both.
+        far = insn.mnemonic == "retf"
+        frame, label = (8, "retf") if far else (4, "ret")
+        if far:
+            # CA iw: the operand parse reports 0 for retf's immediate, so
+            # it is read from the bytes.
+            b = _opcode_bytes(insn)
+            if len(b) >= 3 and b[0] == 0xCA:
+                n = b[1] | (b[2] << 8)
+                return [f"{prefix}esp += {frame + n}; return; /* {label} {n} */"]
         if len(ops) >= 1 and ops[0].type == "imm":
             n = ops[0].imm
-            return [f"{prefix}esp += {4 + n}; return; /* ret {n} */"]
-        return [f"{prefix}esp += 4; return; /* ret */"]
+            return [f"{prefix}esp += {frame + n}; return; /* {label} {n} */"]
+        return [f"{prefix}esp += {frame}; return; /* {label} */"]
 
     def _forced_tail(self, tail):
         """Apply --force-return to a tail jump.
@@ -3523,6 +3669,14 @@ class Lifter:
             return [f"(void)0; /* {m}: mm/x87 aliasing is not modelled */"]
 
         dst = ops[0]
+
+        # maskmovq mmA, mmB: store each byte of mmA whose mask byte in mmB
+        # has its top bit set, to ds:[edi] (SSE1, XBA-111). Only the selected
+        # bytes are written: a full 8-byte store would clobber the others.
+        if m == "maskmovq" and len(ops) >= 2 and is_mm(dst) and is_mm(ops[1]):
+            return [f"{{ RecompMmx _mv = {dst.reg}, _mk = {ops[1].reg}; int _mi;"
+                    " for (_mi = 0; _mi < 8; _mi++) if (_mk.ub[_mi] & 0x80u)"
+                    " MEM8(edi + (uint32_t)_mi) = _mv.ub[_mi]; } /* maskmovq */"]
 
         if m in self._MMX_BINARY and len(ops) >= 2:
             a, b = src(dst), src(ops[1])
@@ -4388,7 +4542,43 @@ class Lifter:
             # untracked flag reader falls back to (see _lift_cmovcc).
             return [_fcmov_statement(insn, f"_flags /* {m} */")]
 
-        return [f"/* FPU: {m} {insn.op_str} */"]
+        # ── x87 state and housekeeping (XBA-111) ──
+        #
+        # These fell to the comment below, which compiles to nothing: an
+        # fninit left the control word and TOP as they were, an fnstenv
+        # stored nothing, an `ffreep st(0)` (a cheap pop) did not pop.
+        # The model has no tag word and no exception flags (see
+        # recomp_fnsave), so the instructions that only touch those are
+        # explicit no-ops, and the images that hold them read "all valid,
+        # no exceptions".
+        if m == "fninit":
+            return ["recomp_fninit(); /* fninit */"]
+        if m in ("fnclex", "fnop", "fsetpm", "fneni", "fndisi", "feni", "fdisi"):
+            return [f"(void)0; /* {m}: no exception flags or 287 modes modelled */"]
+        if m == "ffree":
+            return [f"(void)0; /* ffree {insn.op_str}: tags not modelled */"]
+        if m in ("ffreep", "fincstp"):
+            # TOP + 1 with no value moved: ffreep frees and pops.
+            return [f"fp_pop(); /* {m} {insn.op_str} */"]
+        if m == "fdecstp":
+            return ["g_fp_top = (g_fp_top + 7u) & 7u; /* fdecstp */"]
+        if m == "fxtract":
+            # st0 = exponent, then push the significand.
+            return ["{ double _sig; fp_top() = recomp_fxtract(fp_top(), &_sig);"
+                    " fp_push(_sig); } /* fxtract */"]
+        if m == "fbld" and ops and ops[0].type == "mem":
+            return [f"fp_push(recomp_fbld({_fmt_mem(ops[0])})); /* fbld {insn.op_str} */"]
+        if m == "fbstp" and ops and ops[0].type == "mem":
+            return [f"recomp_fbstp({_fmt_mem(ops[0])}, fp_top(), g_fp_control_word);"
+                    f" fp_pop(); /* fbstp {insn.op_str} */"]
+        if m in ("fnstenv", "fldenv") and ops and ops[0].type == "mem":
+            # The 66 prefix, not the operand, selects the 14-byte image.
+            short_env = int(bytes.fromhex(insn.bytes_hex).split(b"\xd9", 1)[0].find(b"\x66") >= 0)
+            return [f"recomp_{m}({_fmt_mem(ops[0])}, {short_env}); /* {m} {insn.op_str} */"]
+        if m in ("fxsave", "fxrstor") and ops and ops[0].type == "mem":
+            return [f"recomp_{m}({_fmt_mem(ops[0])}); /* {m} {insn.op_str} */"]
+
+        return self._unimplemented(insn, m)
 
 
 # FCMOVcc moves st(i) into st(0) when an EFLAGS condition holds; each one

@@ -118,6 +118,7 @@ Switches that change how the kernel layer behaves. Each fixes a class of titles;
 | `RECOMP_IRQ_SAFE_FORCE` | off | Forces delivery at a safe point. | `kernel_hal.c` |
 | `RECOMP_IRQ_SAFE_MS=N` | 250 | Milliseconds the gate waits for a safe point. | `kernel_hal.c` |
 | `RECOMP_DPC_ON_RAISE` | on with the gate | `0` stops DPCs running when IRQL is raised. | `kernel_hal.c` |
+| `RECOMP_CLI_GATE` | on | A guest `cli` below DISPATCH_LEVEL masks device interrupts until `sti` (or a `popfd` that sets IF) as a raise does: counted for the device models' hold-off, and under `RECOMP_DISPATCH_GATE` the one-CPU gate is held, so an interrupt is posted and runs at the `sti`. The guest-visible IRQL does not change. `0`: `cli`/`sti` only change EFLAGS.IF, as when they were no-ops. | `kernel_hal.c` |
 | `RECOMP_CPUID_NO_SIMD` | off | Hides SIMD from `cpuid`. | `kernel_hal.c` |
 | `RECOMP_AC97_READY=1` | off | Reports the AC'97 codec ready and routes the APU aperture to the emulated APU. | `xbox_memory_layout.c`, `templates/new-game/src/main.c` |
 | `RECOMP_AC97_ALIAS=0` | on (POSIX) | With `RECOMP_AC97_READY`: arm the AC'97 bus-master write trap with the old `mprotect` window instead of a read-only shared page plus a writable view. The window lets a second thread's store keep the RR bit, so a channel reset can spin (Fable during movies); for A/B only. | `xbox_memory_layout.c` |
