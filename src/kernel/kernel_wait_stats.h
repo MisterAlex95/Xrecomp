@@ -18,7 +18,7 @@
  *
  * Cheap on purpose: two fixed tables (no allocation), relaxed atomics, no
  * lock; a full table drops new keys and says how many. Multi-object waits are
- * filed under their first object.
+ * filed under their first object and marked "(any of N)" / "(all of N)".
  *
  * RECOMP_WAIT_REPORT  unset: on, top 4 sites per report
  *                     0:     off, nothing counted, no line
@@ -51,6 +51,11 @@ uint64_t xbox_wait_stats_begin(int poll);
 /* Count one wait on `object` from guest return address `site` that returned
  * `status`; t0 from xbox_wait_stats_begin. */
 void xbox_wait_stats_wait(uint32_t object, uint32_t site, uint32_t status, uint64_t t0);
+
+/* The same for a multiple-object wait on `count` objects filed under the
+ * first; the line then says "(any of N)" or "(all of N)". */
+void xbox_wait_stats_wait_multi(uint32_t object, uint32_t site, uint32_t status, uint64_t t0,
+                                uint32_t count, int wait_all);
 
 /* Write the report lines (each "  [KERNEL] waits: ...\n") into buf and
  * return how many; 0 lines when nothing waited since the last call. Marks

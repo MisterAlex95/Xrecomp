@@ -2540,7 +2540,7 @@ static void bridge_NtWaitForMultipleObjectsEx(void)
         g_eax = (uint32_t)xbox_NtWaitForMultipleObjectsEx(
             count, handles, wait_type, (BOOLEAN)alertable,
             XBOX_TO_NATIVE(timeout_ptr));
-        xbox_wait_stats_wait(BRIDGE_MEM32(handles_va), site, g_eax, t0);
+        xbox_wait_stats_wait_multi(BRIDGE_MEM32(handles_va), site, g_eax, t0, count, wait_type == 0);
     }
 }
 
@@ -6478,7 +6478,8 @@ static void bridge_KeWaitForMultipleObjects(void)
             STACK_ARG(3), (KPROCESSOR_MODE)STACK_ARG(4),
             (BOOLEAN)alertable, XBOX_TO_NATIVE(timeout_va),
             XBOX_TO_NATIVE(STACK_ARG(7)));
-        xbox_wait_stats_wait(objects_va ? BRIDGE_MEM32(objects_va) : 0, site, g_eax, t0);
+        xbox_wait_stats_wait_multi(objects_va ? BRIDGE_MEM32(objects_va) : 0, site, g_eax, t0,
+                                   count, wait_type == 0);
     }
 
     /* Only a successful wait consumes synchronization events. WaitAny's

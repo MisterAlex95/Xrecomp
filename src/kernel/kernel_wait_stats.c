@@ -40,6 +40,7 @@ typedef struct {
     volatile uint32_t waits;
     volatile uint32_t wakes;
     volatile uint64_t blocked_ns;
+    volatile uint32_t multi;        /* count | wait_all << 8 of a multiple-object wait; 0 single */
     uint32_t reported_waits;        /* reporter only */
 } WaitSite;
 
@@ -115,7 +116,20 @@ uint64_t xbox_wait_stats_begin(int poll)
     return xbox_HostNowNs();
 }
 
+static void wait_count(uint32_t object, uint32_t site, uint32_t status, uint64_t t0, uint32_t multi);
+
 void xbox_wait_stats_wait(uint32_t object, uint32_t site, uint32_t status, uint64_t t0)
+{
+    wait_count(object, site, status, t0, 0);
+}
+
+void xbox_wait_stats_wait_multi(uint32_t object, uint32_t site, uint32_t status, uint64_t t0,
+                                uint32_t count, int wait_all)
+{
+    wait_count(object, site, status, t0, (count & 0xFFu) | (wait_all ? 0x100u : 0u));
+}
+
+static void wait_count(uint32_t object, uint32_t site, uint32_t status, uint64_t t0, uint32_t multi)
 {
     uint64_t key = (uint64_t)object << 32 | site;
     uint32_t i, n;
@@ -135,6 +149,8 @@ void xbox_wait_stats_wait(uint32_t object, uint32_t site, uint32_t status, uint6
             if (now > t0)
                 ADD64(&w->blocked_ns, now - t0);
         }
+        if (multi && LOAD32(&w->multi) != multi)
+            w->multi = multi;       /* a plain store: the last one wins */
         if (status < 0x40u)         /* STATUS_WAIT_0 + n, STATUS_ABANDONED is 0x80 */
             ADD32(&w->wakes, 1);
         ADD32(&w->waits, 1);
@@ -173,13 +189,16 @@ int xbox_wait_stats_format(char *buf, size_t size)
         uint64_t key = LOAD64(&w->key);
         uint32_t object = (uint32_t)(key >> 32), site = (uint32_t)key;
         SetCount *s = set_slot(object, 0);
-        char sets[32] = "";
+        uint32_t multi = LOAD32(&w->multi);
+        char sets[32] = "", kind[24] = "";
         int n;
         if (s)
             snprintf(sets, sizeof sets, " set x%u;", (unsigned)LOAD32(&s->sets));
+        if (multi)
+            snprintf(kind, sizeof kind, " (%s of %u)", multi & 0x100u ? "all" : "any", (unsigned)(multi & 0xFFu));
         n = snprintf(buf + used, used < size ? size - used : 0,
-                     "  [KERNEL] waits: 0x%08X%s from 0x%08X woke x%u of %u, blocked %llu ms\n",
-                     (unsigned)object, sets, (unsigned)site, (unsigned)LOAD32(&w->wakes),
+                     "  [KERNEL] waits: 0x%08X%s from 0x%08X%s woke x%u of %u, blocked %llu ms\n",
+                     (unsigned)object, sets, (unsigned)site, kind, (unsigned)LOAD32(&w->wakes),
                      (unsigned)LOAD32(&w->waits),
                      (unsigned long long)(LOAD64(&w->blocked_ns) / 1000000u));
         if (n > 0 && used + (size_t)n < size) {
@@ -205,7 +224,7 @@ int xbox_wait_stats_format(char *buf, size_t size)
 
 int xbox_wait_stats_report(FILE *out)
 {
-    char buf[(MAX_TOP + 1) * 112];
+    char buf[(MAX_TOP + 1) * 128];
     int lines;
 
     if (!xbox_wait_stats_top() || !CAS32(&g_reporting, 0u, 1u))

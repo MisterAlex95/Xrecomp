@@ -121,6 +121,13 @@ int main(void)
     check(strstr(buf, "0x00400070") < strstr(buf, "0x00400060"), "in order");
     check(!strstr(buf, " set x") , "an object never set has no set count");
 
+    /* 2b. A multiple-object wait is marked. */
+    xbox_wait_stats_wait_multi(0x00600000u, 0x00061000u, 1, xbox_wait_stats_begin(0), 3, 0);
+    xbox_wait_stats_wait_multi(0x00600000u, 0x00062000u, 0x102u, xbox_wait_stats_begin(0), 2, 1);
+    xbox_wait_stats_format(buf, sizeof buf);
+    check(strstr(buf, "from 0x00061000 (any of 3) woke x1 of 1") && strstr(buf, "from 0x00062000 (all of 2) woke x0 of 1"),
+          "multiple-object waits: (any of 3), (all of 2)");
+
     /* 3. A poll is counted, not timed. */
     for (i = 0; i < 1000; i++)
         xbox_wait_stats_wait(0x00500000u, 0x00060000u, 0x102u, xbox_wait_stats_begin(1));
