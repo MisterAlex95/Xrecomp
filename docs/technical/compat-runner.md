@@ -1,0 +1,49 @@
+# The compat runner
+
+> Part of the [Documentation Index](../INDEX.md)
+
+`tools.compat` prepares titles from the player's own discs, boots each one headless with a pad script, and says how
+far it got, so the « Compatibility » matrix (XBA-73) comes from runs rather than impressions (XBA-62).
+
+```bash
+python -m tools.compat run /dumps/*.iso --work-root /scratch/compat --seconds 180 --repeat 3
+python -m tools.compat report compat-results.jsonl     # Markdown table, one row per title
+```
+
+One title at a time, at `nice 10`, each boot stopped by PID after `--seconds`. Run it on a machine of your own
+(Linux arm64 first, then x86-64 and macOS); never on the LXC that hosts Gitea and Plane. The results hold numbers,
+stage names and the first line of an error: nothing from the game.
+
+## What it reads
+
+| Source | What |
+|---|---|
+| `RECOMP_STATUS` file | flips, picture changes (a hash of a 32x24 grid at each flip), lit, non-silent audio, pad reads, guest threads (`src/kernel/recomp_status.h`) |
+| `discovered.jsonl` | what the analysis missed ([discovery.md](discovery.md)) |
+| the run's stderr | a crash line, the first untranslated instruction reached |
+
+The pad: `start` three times from 8 s, then `a`, every 2 s, through `RECOMP_PAD_LIVE`.
+
+## Stages
+
+| Stage | Means |
+|---|---|
+| `none` | prepare failed, or no executable |
+| `prepares` | built; the runtime wrote no status line |
+| `boots` | the title did something: a flip, a thread, a pad read, a sound |
+| `renders` | a presented frame was not near-black |
+| `responsive` | the picture changed within 5 s of a press, and the title reads the pad |
+| `sustained` | over the last `--sustain` seconds (default 60): flips in every 10 s, the picture still changing, no exit |
+
+Playable (30 minutes, saves kept) is a person's check. With `--repeat N` the title's stage is the worst run, `best`
+the best one, and `failure_rate` the share of runs below the best: a race that loses one boot in four shows.
+
+The blocker is the first of: a crash (signal and fault line), an early exit, no status line, no flip, a hang (no flip
+for 30 s at the end), each with the first untranslated instruction or the last discovery when there is one.
+
+## Limits
+
+- `responsive` is a heuristic: an animated screen changes on its own. The press times and the status clock start a
+  fraction of a second apart.
+- `tools/conformance/test.xbe` is a lifter test image with no entry point: it prepares but does not boot. The tool's
+  own test (`tools/compat/test_compat.py`) drives a stand-in title.

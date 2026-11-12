@@ -46,6 +46,7 @@ One per stage, in the order you run them.
 - [D3D8 to D3D11 Translation](technical/d3d-translation.md) — Bridging Xbox's graphics API to modern DirectX
 - [NV2A Shader Translation](technical/nv2a-shaders.md) — Register combiners and vertex microcode to HLSL
 - [D3D8LTCG Device Context](technical/d3d8ltcg-device-context.md) — Device field map, PB ring management, stub calling conventions
+- [The Compat Runner](technical/compat-runner.md) — Prepare, boot headless with a pad script, and record the stage each title reaches
 - [The Discovery File](technical/discovery.md) — What a run meets that the static analysis missed, recorded for the next prepare
 - [Profiles in Layers](technical/profiles.md) — A title's switches and fixes in `profiles/`: XDK library, engine and title layers, picked from the XBE by `tools.prepare`
 - [Pushbuffer Executor](technical/pushbuffer-executor.md) — Executing a statically linked XDK D3D title's pushbuffer: DMA-engine walk, answering the title, fixed-function transform and lighting, anti-aliased surfaces, render back ends
