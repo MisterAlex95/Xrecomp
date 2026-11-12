@@ -77,7 +77,9 @@ public class SaveCachesTest {
         // The other title runs and makes its own caches.
         liveSet("other");
         assertTrue(SaveCaches.switchTo(save, owner, FABLE));
-        assertEquals("fable", read(new File(save, "Cache/unpacked.bin")));
+        // Stashed before per-title Z: (K-9): back in Cache/<title id>.
+        assertEquals("fable", read(new File(save, "Cache/4d5300d1/unpacked.bin")));
+        assertFalse(new File(save, "Cache/unpacked.bin").exists());
         assertEquals("fable", read(new File(save, "TitleCache/LocalCache00.bin")));
         assertEquals("other", read(new File(SaveCaches.stashDir(save, OTHER), "Partition4.img")));
         assertFalse("an emptied stash is removed", stash.exists());
@@ -110,6 +112,53 @@ public class SaveCachesTest {
         assertTrue(SaveCaches.switchTo(save, owner, FABLE));
         assertEquals("other new", read(new File(save, "Partition3.img")));
         assertEquals("fable", read(new File(SaveCaches.stashDir(save, FABLE), "Partition3.img")));
+    }
+
+    /** The update to per-title Z: (K-9): the owner's old Z: moves into Cache/<owner> and is not rebuilt. */
+    @Test
+    public void ownerKeepsItsOldZ() throws Exception {
+        TestSupport.write(new File(save, "Cache/data/misc/xbox/effects.big"), "unpacked");
+        TestSupport.write(new File(save, "Cache/PageFile.bin"), "page");
+        TestSupport.write(new File(save, "Cache/4c410003/currentgame/x"), "kotor");   // another title's folder
+        TestSupport.write(new File(save, "TitleCache/LocalCache00.bin"), "title cache");
+        SaveCaches.writeOwner(owner, FABLE);
+
+        assertFalse(SaveCaches.switchTo(save, owner, FABLE));
+        assertEquals("unpacked", read(new File(save, "Cache/4d5300d1/data/misc/xbox/effects.big")));
+        assertEquals("page", read(new File(save, "Cache/4d5300d1/PageFile.bin")));
+        assertFalse(new File(save, "Cache/data").exists());
+        assertFalse(new File(save, "Cache/PageFile.bin").exists());
+        assertEquals("a title folder stays", "kotor", read(new File(save, "Cache/4c410003/currentgame/x")));
+        assertEquals("only Cache moves", "title cache", read(new File(save, "TitleCache/LocalCache00.bin")));
+
+        // Idempotent: nothing left to move, nothing moves twice.
+        assertEquals(0, SaveCaches.migrateLegacyCache(save, FABLE));
+        assertFalse(SaveCaches.switchTo(save, owner, FABLE));
+        assertEquals("unpacked", read(new File(save, "Cache/4d5300d1/data/misc/xbox/effects.big")));
+        // Storage counts the moved files under the owner.
+        assertEquals("unpacked".length() + "page".length() + "kotor".length() + "title cache".length(),
+                     SaveCaches.bytes(save, owner, FABLE));
+    }
+
+    @Test
+    public void migrationNeverReplaces() throws Exception {
+        TestSupport.write(new File(save, "Cache/PageFile.bin"), "old");
+        TestSupport.write(new File(save, "Cache/4d5300d1/PageFile.bin"), "new");
+        TestSupport.write(new File(save, "Cache/Saves/a"), "old saves");
+        assertEquals(1, SaveCaches.migrateLegacyCache(save, FABLE));
+        assertEquals("new", read(new File(save, "Cache/4d5300d1/PageFile.bin")));
+        assertEquals("old", read(new File(save, "Cache/PageFile.bin")));
+        assertEquals("old saves", read(new File(save, "Cache/4d5300d1/Saves/a")));
+    }
+
+    @Test
+    public void noMigrationWithoutAKnownOwner() throws Exception {
+        TestSupport.write(new File(save, "Cache/data/a.big"), "x");
+        assertFalse(SaveCaches.switchTo(save, owner, FABLE));            // no owner: adopted, not migrated
+        assertEquals("x", read(new File(save, "Cache/data/a.big")));
+        assertEquals(0, SaveCaches.migrateLegacyCache(save, "local-0a1b2c3d"));   // not a title ID folder
+        assertEquals("x", read(new File(save, "Cache/data/a.big")));
+        assertEquals(0, SaveCaches.migrateLegacyCache(new File(tmp.getRoot(), "none"), FABLE));
     }
 
     @Test

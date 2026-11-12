@@ -29,7 +29,8 @@ the mapping and the overwrite of an existing save.
 Before Z: was per title it was `<save dir>/Cache` itself, shared by every title (KOTOR's `currentgame` beside
 Fable's `data` and `PageFile.bin`). That folder's old contents are left where they are: which title wrote what
 cannot be told on a desktop, and a title rebuilds its utility drive (Fable unpacks its data again once). They can be
-deleted by hand. Until an XBE is mapped (no title ID) Z: is still the bare `Cache`.
+deleted by hand. On Android the live set has a known owner (`cache_owner`), so the app moves them into
+`Cache/<owner>` at that title's next launch (`SaveCaches.migrateLegacyCache`). Until an XBE is mapped (no title ID) Z: is still the bare `Cache`.
 
 On Android the folders that are not per title (`Cache`, `TitleCache`, the cache partitions) move aside when another
 title is launched (`SaveCaches.java`, « Game library » in [app-shell.md](../android/app-shell.md)); `UDATA` and

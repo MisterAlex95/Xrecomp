@@ -128,6 +128,23 @@ public class StorageTest {
         assertFalse(new File(d.saveDir(), "Cache").exists());
     }
 
+    /** Z: per title (K-9): the owner's caches are Cache/<tid> inside the live set; sized and cleared with it. */
+    @Test
+    public void cachesWithPerTitleZ() throws Exception {
+        TestSupport.write(new File(d.saveDir(), "Cache/4d5300d1/data/a.big"), new byte[40]);
+        TestSupport.write(new File(d.saveDir(), "TitleCache/c.bin"), new byte[2]);
+        TestSupport.write(new File(SaveCaches.stashDir(d.saveDir(), OTHER), "Cache/4541000d/y"), new byte[30]);
+        SaveCaches.writeOwner(d.ownerFile(), FABLE);
+        Storage.Item fable = Storage.items(d, FABLE, null).get(0);
+        assertEquals(Storage.Kind.CACHES, fable.kind);
+        assertEquals(42, Storage.measure(fable));
+        Storage.Item other = Storage.items(d, OTHER, null).get(0);
+        assertEquals(30, Storage.measure(other));
+        Storage.delete(d, fable, null);
+        assertFalse(new File(d.saveDir(), "Cache").exists());
+        assertTrue("another title's stash stays", SaveCaches.stashDir(d.saveDir(), OTHER).exists());
+    }
+
     @Test
     public void titlesLeftBehind() throws Exception {
         Library.Games g = new Library.Games();

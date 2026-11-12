@@ -646,7 +646,9 @@ writes nothing there; `GameStore.rememberLaunch` runs only in `launchShell()`. T
 launched game; « Open the last game directly » starts it.
 
 **Caches.** Saves (`UDATA/<tid>`, `TDATA/<tid>`) are per title, and so is Z: (`save/Cache/<tid>`, since K-9; the
-stash below still moves `save/Cache` as a whole, which is harmless). `save/Cache` (Z: and the cache partitions),
+stash below still moves `save/Cache` as a whole, which is harmless). Entries of `save/Cache` from before K-9 belong
+to the owner: `SaveCaches.migrateLegacyCache` renames them into `Cache/<owner>` when that title is launched (owner
+unchanged, or its stash restored), once and without replacing anything, so Fable does not unpack its data again. `save/Cache` (Z: and the cache partitions),
 `save/TitleCache` (E:\CACHE), `Partition3-5.img` and `launch_data.bin` are not: `files/library/cache_owner` names their
 title, and `launchShell()` calls `SaveCaches.switchTo` (only while no game process runs): the live set moves by rename
 into `save/.stash/<owner>/`, the new title's stash comes back, `launch_data.bin` (a quick-reboot hand-off) is
