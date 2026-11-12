@@ -33,6 +33,17 @@ def test_boots_but_no_flip_names_the_untranslated_instruction():
     assert blocker == "no flip; last discovery: icall 0x00045678"
 
 
+def test_a_stack_switch_the_runtime_cannot_carry_is_named():
+    st = [line(t, threads=1) for t in range(1000, 60001, 1000)]
+    disc = [{"t": "stack_switch", "va": "0x00023454", "to": "0x00023481",
+             "why": "resumes where no context is parked and no function starts"},
+            {"t": "icall", "va": "0x00023481", "ret": "0x00023454"}]
+    expect = ("; stack switch at 0x00023454 to 0x00023481: resumes where no context is parked and no function"
+              " starts (XBA-101)")
+    assert classify(st, [], None, 60, 60, "", disc)[1] == "no flip" + expect
+    assert classify(st, [], ("signal", 6), 20, 60, "", disc)[1] == "crash (signal 6)" + expect
+
+
 def test_black_screen_is_boots():
     st = [line(t, flips=t // 16, frames=1, lit=0, threads=3) for t in range(1000, 30001, 1000)]
     assert classify(st, [8000], None, 30, 60)[:2] == ("boots", "nothing lit on screen")
