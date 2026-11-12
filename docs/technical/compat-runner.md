@@ -41,6 +41,19 @@ the best one, and `failure_rate` the share of runs below the best: a race that l
 The blocker is the first of: a crash (signal and fault line), an early exit, no status line, no flip, a hang (no flip
 for 30 s at the end), each with the first untranslated instruction or the last discovery when there is one.
 
+## The « Compatibility » page (XBA-73)
+
+```bash
+python -m tools.compat report compat-results.jsonl --matrix   # the page as Markdown
+python -m tools.compat plane compat-results.jsonl             # agents' host: write it to Plane, a Bug per regression
+```
+
+The results file keeps every run (append). The matrix shows, per title, its last run: stage, the change since the run
+before (`up from`, `**down from**`, `same`), blocker, XDK build, engine layer, toolkit commit and date; a summary of
+how many titles are at each stage; and the regressions. `plane` writes the Plane page « Compatibility » with the
+`plane` CLI and opens one Bug per regression not already open (title `Regression: <title> <from> -> <to> (toolkit
+<commit>)`, under XBA-60), to bisect between the two toolkit commits.
+
 ## Limits
 
 - `responsive` is a heuristic: an animated screen changes on its own. The press times and the status clock start a
