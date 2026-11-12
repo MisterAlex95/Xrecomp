@@ -160,3 +160,26 @@ then deleted; a corrupt file deleted too), the path match, the cap, and on
 POSIX the default handler end to end (a forked child re-executes the test,
 which takes the page back and checks that a descriptor opened before the exec
 is closed).
+
+## DVD security sector
+
+XAPI start-up of a title whose certificate has bit 0 set in the dword at
++0x1D8 (only certificates longer than 0x1D8 bytes have that field; KOTOR's is
+0x1EC bytes, value 3) reads the disc's security sector with
+`IOCTL_SCSI_PASS_THROUGH_DIRECT`, READ DVD STRUCTURE (SCSI 0xAD, 1636 bytes: a
+4-byte header and the 1632-byte sector), and returns to the dashboard
+(`HalReturnToFirmware(2)`, empty launch path) unless it matches the
+certificate. There is no disc, so `bridge_NtDeviceIoControlFile`
+(`bridge_dvd_security_sector`, `kernel_bridge.c`) synthesises what the
+title's check asks for and nothing else (zeros elsewhere): the certificate's
+time stamp (cert +4) at +0x4AB; at +0x4CF the SHA-1 of the dword 0x4CB
+followed by the 0x4CB bytes at +4; the signature at +0x4E3 is accepted by
+`XcVerifyPKCS1Signature`, which answers TRUE. The certificate is the one the
+XBE header at 0x00010118 points to. Other commands, a shorter buffer, or a
+certificate without the bit get a zeroed buffer as before. Log:
+`[FILE] DVD SCSI command 0xAD, 1636 bytes -> security sector for this title's
+certificate`. Measured on the Mac with KOTOR (folder with only its
+`default.xbe`): the start-up check passes and the title goes on to open
+`d:\DATAXBOX\…`; Black issues no DVD SCSI command. `tests/kernel_dvd_scsi`
+covers the sector (time stamp, digest against a hashlib value, zeros
+elsewhere, nothing past the buffer) and the zeroed cases.

@@ -5489,6 +5489,65 @@ static void bridge_IoCreateFile(void)
 #define XBOX_DISK_TRACKS_PER_CYL     255u
 #define XBOX_DISK_CYLINDERS          1216u    /* ~10 GB, a retail 8 GB drive */
 
+/* The Xbox DVD security sector, answered to READ DVD STRUCTURE (SCSI 0xAD)
+ * from the running title's own certificate.
+ *
+ * XAPI start-up reads this sector when bit 0 of the certificate's dword at
+ * +0x1D8 is set (only certificates longer than 0x1D8 bytes have that field)
+ * and returns to the dashboard (HalReturnToFirmware) unless the sector matches
+ * the certificate. The check itself is the only specification there is; it
+ * looks at three fields of the DataBuffer (a 4-byte header, then the
+ * 1632-byte sector):
+ *   - the dword at +0x4AB is the certificate's time stamp (cert + 4);
+ *   - the 20 bytes at +0x4CF are SHA-1 of the length 0x4CB, as a
+ *     little-endian dword, followed by the 0x4CB bytes at +4;
+ *   - the signature at +0x4E3 verifies (XcVerifyPKCS1Signature, which
+ *     answers TRUE here).
+ * There is no disc to read, so the sector holds nothing else (zeros): only
+ * what the title's certificate asks for. Returns 1 when it wrote a sector,
+ * 0 when the title does not ask for one (DataBuffer left as it was). */
+#define DVD_SECTOR_TIMESTAMP   0x4ABu
+#define DVD_SECTOR_HASHED_LEN  0x4CBu
+#define DVD_SECTOR_DIGEST      0x4CFu
+#define DVD_SECTOR_SIGNATURE   0x4E3u
+#define XBE_HEADER_CERT_VA     (0x00010000u + 0x118u)
+#define XBE_CERT_SECURITY_FLAGS 0x1D8u
+
+static int bridge_dvd_security_sector(uint32_t data_va, uint32_t data_len)
+{
+    uint32_t cert = BRIDGE_MEM32(XBE_HEADER_CERT_VA);
+    uint32_t cert_size, n = DVD_SECTOR_HASHED_LEN;
+    uint8_t len_le[4];
+    XBOX_SHA_CONTEXT sha;
+    UCHAR digest[20];
+    uint32_t i;
+
+    if (!data_va || data_len < DVD_SECTOR_SIGNATURE)
+        return 0;
+    /* The certificate lives in the image header mapped at 0x10000. */
+    if (cert < 0x00010000u || cert >= 0x00020000u)
+        return 0;
+    cert_size = BRIDGE_MEM32(cert);
+    if (cert_size < XBE_CERT_SECURITY_FLAGS + 4 || cert_size > 0x1000u)
+        return 0;
+    if (!(BRIDGE_MEM32(cert + XBE_CERT_SECURITY_FLAGS) & 1u))
+        return 0;
+
+    for (i = 0; i < data_len; i++)
+        BRIDGE_MEM8(data_va + i) = 0;
+    BRIDGE_MEM32(data_va + DVD_SECTOR_TIMESTAMP) = BRIDGE_MEM32(cert + 4);
+
+    len_le[0] = (uint8_t)n;         len_le[1] = (uint8_t)(n >> 8);
+    len_le[2] = (uint8_t)(n >> 16); len_le[3] = (uint8_t)(n >> 24);
+    xbox_XcSHAInit(&sha);
+    xbox_XcSHAUpdate(&sha, len_le, 4);
+    xbox_XcSHAUpdate(&sha, (const UCHAR *)XBOX_TO_NATIVE(data_va + 4), n);
+    xbox_XcSHAFinal(&sha, digest);
+    for (i = 0; i < 20; i++)
+        BRIDGE_MEM8(data_va + DVD_SECTOR_DIGEST + i) = digest[i];
+    return 1;
+}
+
 static void bridge_NtDeviceIoControlFile(void)
 {
     uint32_t handle  = STACK_ARG(0);
@@ -5570,17 +5629,25 @@ static void bridge_NtDeviceIoControlFile(void)
          * STRUCTURE, INQUIRY, ...) is answered the same way: the drive reports
          * GOOD and the DataBuffer holds defined bytes, not what the title's
          * heap happened to contain. There is no disc to describe, so the
-         * contents are zero. */
+         * contents are zero -- except the security sector a title whose
+         * certificate asks for one gets (bridge_dvd_security_sector). */
         if (ioctl == 0x4D014u && in_va && in_len >= 44) {
             uint32_t data_va  = BRIDGE_MEM32(in_va + 20);
             uint32_t data_len = BRIDGE_MEM32(in_va + 12);
+            uint32_t opcode   = BRIDGE_MEM8(in_va + 28);
             uint32_t i;
 
-            fprintf(stderr, "  [FILE] DVD SCSI command 0x%02X, %u bytes "
-                            "-> zeroed\n", BRIDGE_MEM8(in_va + 28), data_len);
-            if (data_va)
-                for (i = 0; i < data_len; i++)
-                    BRIDGE_MEM8(data_va + i) = 0;
+            if (opcode == 0xAD && bridge_dvd_security_sector(data_va, data_len)) {
+                fprintf(stderr, "  [FILE] DVD SCSI command 0xAD, %u bytes "
+                                "-> security sector for this title's "
+                                "certificate\n", data_len);
+            } else {
+                fprintf(stderr, "  [FILE] DVD SCSI command 0x%02X, %u bytes "
+                                "-> zeroed\n", opcode, data_len);
+                if (data_va)
+                    for (i = 0; i < data_len; i++)
+                        BRIDGE_MEM8(data_va + i) = 0;
+            }
             BRIDGE_MEM8(in_va + 2) = 0;              /* ScsiStatus = GOOD */
             bridge_write_iostatus(ios_va, 0, in_len);
             g_eax = 0;
