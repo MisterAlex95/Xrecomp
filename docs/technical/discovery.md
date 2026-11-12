@@ -40,7 +40,10 @@ Addresses are guest VAs, 8 hex digits. At most 6,144 distinct entries per file.
   `thread` and `thread_ctx` addresses through its gates (executable section, decodes as a function body: an address
   is never seeded just because a run mentioned it).
 - `unimpl` entries are not seeds: they feed the lifter coverage report (XBA-71).
-- `tools.prepare` will read it itself and re-lift only what changed (XBA-65).
+- `tools.prepare` reads it before analysing (XBA-97, `tools/prepare/discovered.py`): new `icall`, `thread` and
+  `thread_ctx` addresses go through the same gates, the ones that pass are kept in `<work>/discovered-seeds.json` and
+  handed to the disassembler, the others in `<work>/discovered-rejected.json` so they are not tried again. A new seed
+  changes the stamp: the next prepare analyses and lifts again (all of it for now; only what changed is XBA-65).
 
 Code: `src/kernel/recomp_discovery.c` (the writer, no dependency on the rest of the runtime), callers in
 `kernel_bridge.c` (threads) and `templates/new-game/src/recomp_manual.c` (indirect calls, untranslated instructions);

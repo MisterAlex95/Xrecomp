@@ -322,12 +322,23 @@ def main(argv=None):
 
     stamp_path = os.path.join(work, "stamp.json")
     stamp = {} if a.force else read_stamp(stamp_path)
-    # The profile counts too: its seeds go to the disassembler, its
-    # exclude_manual to the lift.
-    want = {"xbe": sha256(xbe), "toolkit": toolkit_version(), "profile": profile_digest(profile)}
-    same = all(stamp.get(k) == v for k, v in want.items())
     an = os.path.join(work, "analysis")
     xjson = os.path.splitext(xbe)[0] + "_analysis.json"
+    # What earlier runs found (discovered.jsonl), gated into seeds (XBA-97).
+    from tools.prepare import discovered
+    disc_seeds = None
+    try:
+        disc_seeds = discovered.refresh(work, xbe, os.path.join(an, "disasm", "functions.json"),
+                                        xjson if os.path.isfile(xjson) else None,
+                                        log=lambda m: print(m, flush=True))
+    except Exception as e:          # never let a bad discovery file stop a prepare
+        print("      discovered.jsonl not used: %s" % e, flush=True)
+    # The profile counts too: its seeds go to the disassembler, its
+    # exclude_manual to the lift; and the seeds earlier runs found.
+    want = {"xbe": sha256(xbe), "toolkit": toolkit_version(), "profile": profile_digest(profile),
+            "discovered": discovered.digest(disc_seeds)}
+    # A stamp from before XBA-97 has no "discovered": the same as none.
+    same = all(stamp.get(k, "" if k == "discovered" else None) == v for k, v in want.items())
 
     step(2, "analysing the executable (a few minutes the first time)")
     if same and stamp.get("analysis"):
@@ -339,6 +350,8 @@ def main(argv=None):
         # files in the profile layers, tools.seed_from_log's format).
         for fn in (profile or {}).get("seed_functions", []):
             cmd += ["--seed-functions", fn]
+        if disc_seeds:
+            cmd += ["--seed-functions", disc_seeds]
         t = run(cmd, log)
         print("      disassembled in %.0f s" % t, flush=True)
         run([py, "-m", "tools.func_id", xbe,

@@ -111,6 +111,22 @@ class Run:
         # Function starts the analysis cannot find (the layers' "seed_functions").
         for fn in (self.profile or {}).get("seed_functions", []):
             disasm += ["--seed-functions", fn]
+        # And what earlier runs of the title found (discovered.jsonl, XBA-97):
+        # new seeds redo the analysis from disasm on.
+        from tools.prepare import discovered
+        disc = None
+        try:
+            disc = discovered.refresh(self.work, self.xbe, os.path.join(d, "functions.json"),
+                                      self.xjson, log=lambda m: self.rep.progress(2, 0, m.strip()))
+        except Exception as e:
+            self.rep.progress(2, 0, "discovered.jsonl not used: %s" % e)
+        if disc:
+            disasm += ["--seed-functions", disc]
+            key = discovered.digest(disc)
+            if self.stamp.get("discovered") != key:
+                for name in ("disasm", "func_id", "abi", "lift"):
+                    self.stamp.pop(name, None)
+                self.save_stamp(discovered=key)
         steps = (
             ("disasm", 0, 55, 20 * mb, disasm),
             ("func_id", 55, 70, 5 * mb, ["tools.func_id", self.xbe,
