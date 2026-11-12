@@ -161,3 +161,15 @@ def test_matrix_and_regressions():
     assert plane_sync(res, run=fake_run) == ["Regression: Fable sustained -> boots (toolkit bbb)"]
     assert any(c[:2] == ["plane", "create"] and "Bug" in c for c in calls)
     assert plane_sync(res, dry_run=True) == ["Regression: Fable sustained -> boots (toolkit bbb)"]
+
+
+def test_the_last_screenshot_is_kept(tmp_path):
+    from tools.compat.__main__ import keep_last_shot
+    shots = tmp_path / "shots-0"
+    assert keep_last_shot(str(shots), str(tmp_path / "shot-0.bmp")) is None      # no folder
+    shots.mkdir()
+    assert keep_last_shot(str(shots), str(tmp_path / "shot-0.bmp")) is None      # nothing dumped
+    for n in range(3):
+        (shots / ("f%05d.bmp" % n)).write_bytes(b"BM%d" % n)
+    assert keep_last_shot(str(shots), str(tmp_path / "shot-0.bmp")) == str(tmp_path / "shot-0.bmp")
+    assert (tmp_path / "shot-0.bmp").read_bytes() == b"BM2" and not shots.exists()
