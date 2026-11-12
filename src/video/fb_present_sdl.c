@@ -264,7 +264,11 @@ static uint64_t        s_fg_presented;       /* FIFO frames the window showed */
 /* Frames go to the pacer rather than the slots. */
 static int fg_feeding(void)
 {
-    return s_fg_on && framegen_pacer_active();
+    /* Not once a stop is asked (XBA-96): the window loop then waits for the
+     * presents in flight (s_in_present) before it stops the pacer, so no
+     * submit can reach a pacer being torn down. seq_cst on both sides: a
+     * present either sees the request or is counted in s_in_present. */
+    return s_fg_on && !__atomic_load_n(&s_fg_stop_req, __ATOMIC_SEQ_CST) && framegen_pacer_active();
 }
 
 /* The window's sink, on the pacer thread: copy into the FIFO and wake the
@@ -1078,7 +1082,11 @@ int xbox_HostWindowMain(int (*guest_main)(void))
         int timeout = shown_seq ? 100 : 16;
 
 #if defined(XBOXRECOMP_LSFG)
-        if (s_fg_on && __atomic_load_n(&s_fg_stop_req, __ATOMIC_ACQUIRE)) {
+        if (s_fg_on && __atomic_load_n(&s_fg_stop_req, __ATOMIC_SEQ_CST)) {
+            /* A present that passed fg_feeding before the request may still
+             * be submitting: let it finish first. */
+            while (__atomic_load_n(&s_in_present, __ATOMIC_SEQ_CST))
+                sched_yield();
             fg_log_stats();
             framegen_pacer_stop();
             fg_fifo_clear();

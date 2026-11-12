@@ -186,13 +186,24 @@ static uint32_t current_device(void)
  * A node is { return target | flags, next, slot, fixups, base }. As the
  * handler does, for each node of the chain: *slot = JUMP(target); with flag
  * bit 29, copy each fixup { size, offset, bytes } to base + offset until size
- * 0xFFFFFFFF; next = -1; with bit 31, clear bit 30. Every address written to
- * (the slot, a fixup) is checked to be in the contiguous window, where D3D's
- * pushbuffers live: with a device found at run time the layout is assumed,
- * and a wrong guess must not write into the title's data.
+ * 0xFFFFFFFF; next = -1; with bit 31, clear bit 30. With a device found at
+ * run time the layout is assumed, so every address written to (the slot, a
+ * fixup) must be in the contiguous window, where D3D's pushbuffers live: a
+ * wrong guess must not write into the title's data (refusals are printed).
+ * With the profile's addresses it writes as D3D's handler does, unchecked.
  *
  * Runs on the executor thread, while the main thread may be in RunPushBuffer
  * bumping the same pending count. */
+/* A write the run-time guards refused (device found at run time only: with
+ * the profile's addresses the handler writes as D3D's does). */
+static void skip_note(const char *what, uint32_t va)
+{
+    static int shown;
+    if (shown++ < 4)
+        fprintf(stderr, "[D3D] RunPushBuffer method: %s 0x%08X outside the contiguous window, not written\n",
+                what, va);
+}
+
 static void d3d_run_pushbuffer_method(uint32_t dev, uint32_t type, uint32_t payload)
 {
     uint8_t *mem = (uint8_t *)xbox_GetMemoryOffset();
@@ -211,15 +222,19 @@ static void d3d_run_pushbuffer_method(uint32_t dev, uint32_t type, uint32_t payl
 
         target = G32(node);
         slot = G32(node + 8);
-        if (!in_contig(slot))
+        if (!D3D_GIVEN && !in_contig(slot)) {
+            skip_note("slot", slot);
             break;
+        }
         G32(slot) = (target & 0x0FFFFFFFu) + 1u;            /* JUMP target */
         if (target & 0x20000000u) {
             uint32_t base = G32(node + 16), fix = G32(node + 12), size;
-            while (in_contig(fix) && (size = G32(fix)) != 0xFFFFFFFFu) {
+            while ((D3D_GIVEN || in_contig(fix)) && (size = G32(fix)) != 0xFFFFFFFFu) {
                 uint32_t to = base + G32(fix + 4);
-                if (size > 0x10000u || !in_contig(to) || !in_contig(to + size - 1u))
+                if (!D3D_GIVEN && size && (size > 0x10000u || !in_contig(to) || !in_contig(to + size - 1u))) {
+                    skip_note("fixup", to);
                     break;
+                }
                 memcpy(mem + to, mem + fix + 8, size);
                 fix += 8u + size;
             }

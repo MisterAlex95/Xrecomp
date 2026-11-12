@@ -122,11 +122,13 @@ class Run:
             self.rep.progress(2, 0, "discovered.jsonl not used: %s" % e)
         if disc:
             disasm += ["--seed-functions", disc]
-            key = discovered.digest(disc)
-            if self.stamp.get("discovered") != key:
-                for name in ("disasm", "func_id", "abi", "lift"):
-                    self.stamp.pop(name, None)
-                self.save_stamp(discovered=key)
+        # Also when the seeds file went away (removed to drop a bad seed): the
+        # analysis made with it must not be kept.
+        key = discovered.digest(disc)
+        if self.stamp.get("discovered", "") != key:
+            for name in ("disasm", "func_id", "abi", "lift"):
+                self.stamp.pop(name, None)
+            self.save_stamp(discovered=key)
         steps = (
             ("disasm", 0, 55, 20 * mb, disasm),
             ("func_id", 55, 70, 5 * mb, ["tools.func_id", self.xbe,
