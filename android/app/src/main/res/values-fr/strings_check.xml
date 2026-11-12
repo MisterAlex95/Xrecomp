@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- « Vérifier ma bibliothèque » (XBA-130). Les noms d'étapes (sustained, responsive, renders, boots, prepares, none)
+     sont ceux de tools.compat et restent tels quels : le rapport et la matrice les emploient. -->
+<resources>
+    <string name="CHECK_LIBRARY">Vérifier ma bibliothèque</string>
+    <string name="CHECK_TITLE">Vérifier ma bibliothèque</string>
+    <string name="CHECK_CHANNEL">Vérification de la bibliothèque</string>
+    <plurals name="CHECK_GAMES">
+        <item quantity="one">%d jeu</item>
+        <item quantity="other">%d jeux</item>
+    </plurals>
+    <plurals name="CHECK_NOT_IMPORTED">
+        <item quantity="one">%d jeu n\'est pas dans l\'app : il est préparé, pas lancé (importez-le pour le lancer)</item>
+        <item quantity="other">%d jeux ne sont pas dans l\'app : ils sont préparés, pas lancés (importez-les pour les lancer)</item>
+    </plurals>
+    <string name="CHECK_PLAN">%1$d à préparer · %2$d à lancer · environ %3$s</string>
+    <string name="CHECK_INTRO">Chaque jeu est préparé s\'il le faut, puis lancé 3 minutes avec une manette scriptée (Start, puis A), et noté : prepares, boots, renders, responsive, sustained. Le rapport ne contient aucune donnée du jeu : ID du titre, nom, XDK, moteurs, étape et premier blocage. Laissez l\'appareil sur cet écran, branché.</string>
+    <string name="CHECK_NOTHING">Aucun jeu à vérifier : choisissez d\'abord un dossier de bibliothèque ou un jeu.</string>
+    <string name="CHECK_START_ALL">Vérifier les %d</string>
+    <string name="CHECK_START_ONE">Vérifier %s seul</string>
+    <string name="CHECK_SHARE">Partager le rapport</string>
+    <string name="CHECK_NOT_CHARGING">Pas en charge : une vérification prend des heures, branchez l\'appareil.</string>
+    <string name="CHECK_NOT_CHARGING_CONFIRM">Pas en charge. Appuyez encore pour lancer quand même.</string>
+    <string name="CHECK_PROGRESS">%1$d sur %2$d</string>
+    <string name="CHECK_DONE_TITLE">%d jeux vérifiés</string>
+    <string name="CHECK_PAUSE">Pause</string>
+    <string name="CHECK_CONTINUE">Reprendre</string>
+    <string name="CHECK_STOP">Arrêter</string>
+    <string name="CHECK_STOP_CONFIRM">Appuyez encore sur Arrêter pour finir. Les résultats déjà obtenus restent dans le rapport.</string>
+    <string name="CHECK_KEEP_HERE">Laissez l\'appareil sur cet écran : la vérification lance chaque jeu d\'ici.</string>
+    <string name="CHECK_BACK_RUNNING">La vérification tourne. Arrêtez-la pour quitter, ou mettez-la en pause.</string>
+    <string name="CHECK_AGAIN">Nouvelle vérification</string>
+    <string name="CHECK_DONE">Terminé</string>
+    <string name="CHECK_REPORT_NOTE">Partager le rapport envoie compat-results.jsonl : une ligne par jeu, aucune donnée du jeu.</string>
+    <string name="CHECK_NO_REPORT">Pas encore de rapport.</string>
+    <string name="CHECK_NO_RESULT_YET">Aucun jeu noté pour l\'instant</string>
+    <string name="CHECK_STATUS_DONE">Terminé. Partagez le rapport.</string>
+    <string name="CHECK_STATUS_STOPPED">Arrêtée après %1$d sur %2$d</string>
+    <string name="CHECK_STATUS_PREPARING">Préparation de %1$s · %2$s</string>
+    <string name="CHECK_STATUS_BOOTING">%1$s tourne · %2$d s sur %3$d</string>
+    <string name="CHECK_STATUS_NEXT">Ensuite : %s</string>
+    <string name="CHECK_PAUSED">En pause</string>
+    <string name="CHECK_PAUSED_AWAY">En pause : revenez sur cet écran et elle reprend</string>
+    <string name="CHECK_PAUSED_HOT">En pause : l\'appareil est trop chaud, elle reprend une fois refroidi</string>
+    <string name="CHECK_PAUSED_BATTERY">En pause : batterie faible, branchez l\'appareil</string>
+</resources>

@@ -83,6 +83,26 @@
                 android:value="Compiles the user's own game files into native code on the device (a one-time, user-started build of 20 to 60 minutes, with progress and Cancel in the notification)" />
         </service>
 
+        <!-- « Check my library » (XBA-130): its screen and the service that drives it, in the launcher's process; the
+             service keeps that process alive while a checked game runs in front of it. -->
+        <activity
+            android:name=".CheckActivity"
+            android:exported="false"
+            android:process=":launcher"
+            android:launchMode="singleTask"
+            android:theme="@style/Launcher"
+            android:screenOrientation="sensorLandscape"
+            android:configChanges="layoutDirection|locale|orientation|uiMode|screenLayout|screenSize|smallestScreenSize|keyboard|keyboardHidden|navigation" />
+        <service
+            android:name=".CheckService"
+            android:exported="false"
+            android:process=":launcher"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Checks the user's own games one after the other on the device, at the user's request (prepares each, starts it for three minutes, writes a compatibility report), with progress and Stop in the notification" />
+        </service>
+
         <!-- « Share log » on the launcher: the Prepare's log, read-only, by a temporary grant. -->
         <provider
             android:name=".LogProvider"
