@@ -630,6 +630,11 @@ uint32_t ks_apc_take(uint32_t kthread, int mode)
     if (!kthread || !s_apc_pending)
         return 0;
     h = kthread + 0x34 + (mode ? 8u : 0u);
+    /* Unlocked first look: an APC queued for some other thread must not cost
+     * every kernel call of this one the lock. One inserted meanwhile is seen
+     * at the next call. */
+    if (M32(h) == 0 || M32(h) == h)
+        return 0;
     ks_lock();
     if (M32(h) && !list_empty(h)) {
         apc = list_remove_head(h) - 8;
