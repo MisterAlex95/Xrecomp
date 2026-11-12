@@ -16,6 +16,7 @@ enable_testing()
 add_test(NAME seh_dispatch_test COMMAND seh_dispatch_test)
 
 # What an anchor costs per call (not a test): ./seh_anchor_bench [iterations]
-add_executable(seh_anchor_bench anchor_bench.c ../../src/kernel/xbox_seh.c)
+add_executable(seh_anchor_bench anchor_bench.c ../../src/kernel/xbox_seh.c
+    ../../src/kernel/recomp_discovery.c)
 target_include_directories(seh_anchor_bench PRIVATE ../../src/kernel ../../src)
 target_link_libraries(seh_anchor_bench PRIVATE platform)

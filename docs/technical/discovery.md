@@ -34,7 +34,10 @@ this run or an earlier one) is not written again: the file only grows with what 
 {"t":"stack_switch","va":"0x00023454","to":"0x00023480","why":"..."}
                                                              a guest stack switch the runtime could not carry (XBA-101):
                                                              va = the esp load, to = where its ret went
-                                                             (stack-switching.md)
+                                                             (stack-switching.md); or an exception handler's
+                                                             resume refused because its frame is on another
+                                                             host stack (XBA-112): va = the resume target,
+                                                             to = its function (seh-handling.md)
 ```
 
 Addresses are guest VAs, 8 hex digits. At most 6,144 distinct entries per file.

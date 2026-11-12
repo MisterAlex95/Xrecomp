@@ -969,7 +969,9 @@ recomp_func_t recomp_lookup(uint32_t va)
     return 0;
 }
 
-recomp_func_t recomp_lookup_manual(uint32_t va) { (void)va; return 0; }
+/* The harness's own guest functions (a stack switch, a fiber body). */
+recomp_func_t seh_fixture_lookup_harness(uint32_t va);
+recomp_func_t recomp_lookup_manual(uint32_t va) { return seh_fixture_lookup_harness(va); }
 
 const uint32_t seh_fixture_text_va = 0x00010000u;
 const uint32_t seh_fixture_text_size = 828u;

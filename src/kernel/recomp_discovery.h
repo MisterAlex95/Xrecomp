@@ -22,7 +22,10 @@
  *   {"t":"stack_switch","va":"0x00023450","to":"0x00023480","why":"..."}
  *                                                          a guest stack switch the runtime could not
  *                                                          carry (XBA-101, recomp_stack_switch.c);
- *                                                          va is the esp load, to where it went
+ *                                                          va is the esp load, to where it went;
+ *                                                          or an SEH resume refused across host
+ *                                                          stacks (xbox_seh.c): va is the resume
+ *                                                          target, to its function
  *
  * The file: $RECOMP_DISCOVERY (recomp.cfg can set it); unset, empty or "0":
  * nothing is written. The desktop title project gets a default from

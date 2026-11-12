@@ -88,9 +88,12 @@ and then every power of two.
 - **SEH resumption must not cross host stacks either.** Resuming into a lifted function after an exception (XBA-112:
   a `_setjmp` anchor per EH frame, `longjmp` to it) is the same native longjmp and has the same limit: an exception
   raised on one guest stack whose handler frame lives on another (a handler registered by the fiber's creator, reached
-  through a chain that spans stacks) cannot be resumed natively. The anchor must record `recomp_stack_context()` when
-  it is taken, and the dispatcher compare it with the current one before the longjmp and fall back (search on, or the
-  unhandled-exception path) when they differ. Within one guest stack nothing changes.
+  through a chain that spans stacks) cannot be resumed natively. Every switch therefore hands the dispatcher the
+  context id as its host stack token (`xbox_SehSetHostStack`) and the guest stack's bounds (`xbox_SehSetGuestStack`:
+  the side left keeps its own, a new stack in a heap block gets its top, any other is unknown). Each anchor records
+  the token it was taken under, and a resume under another one is refused and reported (`[SEH] resume at ... refused:
+  its anchor is on another host stack`), the exception then being unhandled. Within one guest stack nothing changes.
+  [seh-handling.md « Other stacks »](seh-handling.md).
 - **One host thread.** Contexts never leave the thread they were made on: lifted code caches the address of the
   thread's `g_cpu` across calls (one TLS lookup per function), so a frame resumed on another thread would run on the
   first thread's registers. An engine that resumes a fiber on another thread than the one that last ran it gets a new

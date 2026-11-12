@@ -20,6 +20,10 @@
  *   4. a switch to a place no context is parked at and no function starts is
  *      the old behaviour, recorded in the discovery file
  *   5. the same coroutines on another host thread: its own contexts
+ *   every switch hands the exception dispatcher (xbox_seh.h, stubbed here) the
+ *   context id as host stack token and the guest stack's bounds: the root's
+ *   own back when it resumes, and for a new stack in a heap block, its top
+ *   (scenario 1's B; scenario 5's B is not in one: unknown)
  *   off: RECOMP_STACK_SWITCH=0 (argv[1] = "off") is the old behaviour
  */
 #define RECOMP_GENERATED_CODE
@@ -55,6 +59,18 @@ static int failures;
 #define VA_EXIT_RET  0x00011360u
 #define VA_NOWHERE   0x00011401u    /* the middle of some function */
 
+/* The exception dispatcher's side of a switch (src/kernel/xbox_seh.c), and the
+ * heap's block lookup it uses for a new stack's top: [HEAP_LO, HEAP_HI) is one
+ * block here. */
+#define HEAP_LO 0x00130000u
+#define HEAP_HI 0x00140000u
+static RECOMP_TLS uintptr_t t_seh_token;
+static RECOMP_TLS uint32_t t_seh_lo, t_seh_hi;
+void xbox_SehSetHostStack(uintptr_t token) { t_seh_token = token; }
+void xbox_SehSetGuestStack(uint32_t lo, uint32_t hi) { t_seh_lo = lo; t_seh_hi = hi; }
+void xbox_SehGetGuestStack(uint32_t *lo, uint32_t *hi) { *lo = t_seh_lo; *hi = t_seh_hi; }
+uint32_t xbox_HeapBlockSize(uint32_t va) { return va >= HEAP_LO && va < HEAP_HI ? HEAP_HI - va : 0; }
+
 /* Guest data: per-thread slot so two threads can run scenario 1 at once. */
 static RECOMP_TLS uint32_t t_slot;
 
@@ -83,8 +99,8 @@ static void sub_00011000(void)      /* the switch, as lifted */
 
 /* ── 1. two coroutines ── */
 
-static RECOMP_TLS unsigned t_a_count, t_b_count, t_b_bad;
-static RECOMP_TLS uint32_t t_b_ctx;
+static RECOMP_TLS unsigned t_a_count, t_b_count, t_b_bad, t_seh_bad;
+static RECOMP_TLS uint32_t t_b_ctx, t_b_hi;     /* t_b_hi: B's expected stack top */
 
 static void sub_00011100(void)      /* B: count, check A is in step, give the CPU back */
 {
@@ -94,6 +110,8 @@ static void sub_00011100(void)      /* B: count, check A is in step, give the CP
         t_b_count++;
         if (t_a_count != t_b_count || mine != 0xB0B0B000u || ebx != 0x0000B0B0u)
             t_b_bad++;
+        if (t_seh_token != t_b_ctx || t_seh_lo != 0 || t_seh_hi != t_b_hi)
+            t_seh_bad++;
         ebx = 0x0000B0B0u;          /* B's own callee-saved register */
         PUSH32(esp, VA_CO_B_RET);
         sub_00011000();
@@ -117,7 +135,9 @@ static uint32_t make_b_stack(uint32_t top)
 static void two_coroutines(uint32_t slot, uint32_t a_top, uint32_t b_top, int rounds)
 {
     t_slot = slot;
-    t_a_count = t_b_count = t_b_bad = 0;
+    t_a_count = t_b_count = t_b_bad = t_seh_bad = 0;
+    t_b_hi = b_top > HEAP_LO && b_top <= HEAP_HI ? b_top : 0;
+    xbox_SehSetGuestStack(a_top - 0x10000u, a_top);     /* the thread's own stack */
     esp = a_top;
     MEM32(slot) = make_b_stack(b_top);
     for (int i = 0; i < rounds; i++) {
@@ -126,6 +146,8 @@ static void two_coroutines(uint32_t slot, uint32_t a_top, uint32_t b_top, int ro
         ebx = 0x0000A0A0u;
         PUSH32(esp, VA_A_RET);
         sub_00011000();
+        if (t_seh_token != 0 || t_seh_lo != a_top - 0x10000u || t_seh_hi != a_top)
+            t_seh_bad++;
         if (esp != before || ebx != 0x0000A0A0u || t_b_count != t_a_count) {
             fprintf(stderr, "  round %d: esp %08X (want %08X) ebx %08X counts %u/%u\n",
                     i, esp, before, ebx, t_a_count, t_b_count);
@@ -220,6 +242,7 @@ static void *thread_main(void *arg)
     (void)arg;
     two_coroutines(0x00100010u, 0x001F0000u, 0x001E0000u, 1000);
     CHECK(t_b_bad == 0);
+    CHECK(t_seh_bad == 0);
     CHECK(recomp_stack_switch_live() == 2);     /* its own, not the main thread's */
     return NULL;
 }
@@ -273,6 +296,7 @@ int main(int argc, char **argv)
     CHECK(recomp_stack_context() == 0);
     two_coroutines(0x00100000u, 0x00180000u, 0x00140000u, 10000);
     CHECK(t_b_bad == 0);
+    CHECK(t_seh_bad == 0);      /* the dispatcher followed every switch */
     CHECK(t_b_ctx != 0);
     CHECK(recomp_stack_context() == 0);
     CHECK(recomp_stack_switch_started() == 1);

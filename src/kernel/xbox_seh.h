@@ -130,6 +130,13 @@ void xbox_SehUnwind(uint32_t target_frame, uint32_t exc_record, uint32_t eip);
  * 1 MB above it. */
 void xbox_SehSetGuestStack(uint32_t lo, uint32_t hi);
 
+/* The bounds xbox_SehSetGuestStack set on this thread (0, 0: unknown). A
+ * stack switch saves them with the side it leaves and gives them back when it
+ * resumes that side. lo = 0 with hi set means "the top is known, the bottom
+ * is not": records above hi are on another stack, records below esp are dead
+ * anyway. */
+void xbox_SehGetGuestStack(uint32_t *lo, uint32_t *hi);
+
 /* An opaque token naming the host stack the thread is on now (0 by default).
  * A guest stack switch that also switches host stacks (XBA-101) sets it on
  * every switch: an anchor taken under one token is never longjmp'd to under

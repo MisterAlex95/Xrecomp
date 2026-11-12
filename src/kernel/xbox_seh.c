@@ -16,6 +16,7 @@
  */
 #include "xbox_seh.h"
 #include "kernel.h"
+#include "recomp_discovery.h"
 #include "xbox_memory_layout.h"
 
 #include <stdio.h>
@@ -114,6 +115,13 @@ void xbox_SehSetGuestStack(uint32_t lo, uint32_t hi)
     seh_thread *t = seh_self();
     t->stack_lo = lo;
     t->stack_hi = hi;
+}
+
+void xbox_SehGetGuestStack(uint32_t *lo, uint32_t *hi)
+{
+    seh_thread *t = seh_self();
+    *lo = t->stack_lo;
+    *hi = t->stack_hi;
 }
 
 void xbox_SehSetHostStack(uintptr_t token)
@@ -625,6 +633,11 @@ static void seh_resume_thunk(void)
     }
     if (t->a[best].host != t->host) {
         seh_refuse(t, "its anchor is on another host stack", va, &t->a[best]);
+        /* A stack switch the runtime cannot carry (XBA-101's blocker kind):
+         * the compat report and the app name it. */
+        recomp_discovery_stack_switch(va, t->a[best].desc ? t->a[best].desc->func_va : 0,
+                                      "an exception handler resumes into a frame on another "
+                                      "host stack (SEH, XBA-112)");
         return;
     }
     if (seh_on_other_stack(t, t->a[best].reg)) {

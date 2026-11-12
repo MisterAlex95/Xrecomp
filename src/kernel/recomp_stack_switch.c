@@ -18,10 +18,16 @@
  *
  * Contexts never leave the host thread they were made on: lifted code caches
  * the address of the thread's g_cpu across calls, so a frame resumed on
- * another thread would run on the first thread's registers. */
+ * another thread would run on the first thread's registers.
+ *
+ * Every switch also tells the exception dispatcher (xbox_seh.h) where it now
+ * is: the host stack token (the context id) and the guest stack's bounds, so
+ * a raise on one stack never follows a record or resumes an anchor that lives
+ * on another (stack-switching.md « Limits », seh-handling.md). */
 #include "recomp_stack_switch.h"
 #include "recomp_discovery.h"
 #include "xbox_memory_layout.h"
+#include "xbox_seh.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -248,6 +254,7 @@ typedef struct ss_ctx {
     uint32_t ret_imm;       /* suspended: N of that function's `ret N` */
     uint32_t start_va;      /* new: the guest address it starts at */
     uint32_t start_esp;     /* new: the guest esp it starts with */
+    uint32_t seh_lo, seh_hi;    /* its guest stack for the dispatcher (0: unknown) */
     uint64_t last;          /* suspend tick, for eviction */
     void    *map;           /* host stack mapping (guard page + stack); NULL: root */
     void    *sp;            /* host stack pointer while not running */
@@ -432,6 +439,20 @@ static ss_ctx *ss_alloc(ss_thread *t, uint32_t site)
     return c;
 }
 
+/* A new guest stack's bounds for the exception dispatcher. Its top is known
+ * when it is a heap block (xbox_HeapAlloc, as the runtime's own thread stacks
+ * are): records above it are on another stack. Its bottom never is, and need
+ * not be: records below esp are dead. Anything else is unknown (0, 0), and
+ * the dispatcher falls back to its window above esp; a frame on another stack
+ * it then follows still cannot be resumed into, since its anchor carries
+ * another host stack token. */
+static void ss_guest_bounds(uint32_t esp, uint32_t *lo, uint32_t *hi)
+{
+    uint32_t left = xbox_HeapBlockSize(esp);
+    *lo = 0;
+    *hi = left && esp + left > esp ? esp + left : 0;
+}
+
 static recomp_func_t ss_func(uint32_t va)
 {
     recomp_func_t f = recomp_lookup_manual(va);
@@ -497,6 +518,7 @@ void recomp_stack_switch_ret(uint32_t saved_esp, uint32_t loaded_esp, uint32_t e
         }
         to->start_va = ret_va;
         to->start_esp = g_esp + 4 + ret_imm;
+        ss_guest_bounds(to->start_esp, &to->seh_lo, &to->seh_hi);
         to->sp = ss_make((char *)to->map + s_page + s_stack_bytes, ss_main, to);
         {
             unsigned n = __atomic_add_fetch(&s_started, 1, __ATOMIC_RELAXED);
@@ -513,6 +535,12 @@ void recomp_stack_switch_ret(uint32_t saved_esp, uint32_t loaded_esp, uint32_t e
     ss_snap(cur->snap, saved_esp);
     cur->state = SS_SUSPENDED;
     cur->last = ++t->tick;
+    /* The dispatcher follows the switch: the side left keeps its guest stack
+     * bounds (the thread's own, for the root), the side resumed gets its own
+     * back, and its context id is the host stack token its anchors carry. */
+    xbox_SehGetGuestStack(&cur->seh_lo, &cur->seh_hi);
+    xbox_SehSetGuestStack(to->seh_lo, to->seh_hi);
+    xbox_SehSetHostStack((uintptr_t)to->id);
     to->state = SS_RUNNING;
     t->cur = to;
     recomp_ss_switch(&cur->sp, to->sp);

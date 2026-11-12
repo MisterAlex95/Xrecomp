@@ -141,7 +141,9 @@ def lift(data=None, *, seh_anchors=True):
             "            return seh_fixture_table[i].fn;",
             "    return 0;",
             "}", "",
-            "recomp_func_t recomp_lookup_manual(uint32_t va) { (void)va; return 0; }",
+            "/* The harness's own guest functions (a stack switch, a fiber body). */",
+            "recomp_func_t seh_fixture_lookup_harness(uint32_t va);",
+            "recomp_func_t recomp_lookup_manual(uint32_t va) { return seh_fixture_lookup_harness(va); }",
             ""]
     for label, va, blob in (("text", data["text_va"], text),
                             ("rdata", data["rdata_va"], rdata)):
