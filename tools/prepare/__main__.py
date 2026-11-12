@@ -298,6 +298,9 @@ def main(argv=None):
     an.add_argument("--extra-src", action="append", default=[], metavar="FILE.c",
                     help="an extra C file compiled into the pack (src/extra/)")
     an.add_argument("--include-dir", action="append", default=[], metavar="DIR", help="an extra -I")
+    mi = ap.add_argument_group("the disc's other images (XBA-82; set by the top-level prepare)")
+    mi.add_argument("--image-map", help=argparse.SUPPRESS)   # the map file every image's build bakes in
+    mi.add_argument("--game-dir", help=argparse.SUPPRESS)    # D:\ for an image that is not the disc root's
     a = ap.parse_args(argv)
     if a.android:
         from tools.prepare import android
@@ -309,6 +312,8 @@ def main(argv=None):
 
     step(1, "finding default.xbe")
     xbe, data_dir, image = find_xbe(src, tmp_work)
+    if a.game_dir:
+        data_dir = os.path.abspath(a.game_dir)
     tmp_json = os.path.join(tmp_work, "xbe_info.json")
     log = os.path.join(tmp_work, "prepare.log")
     run([py, "-m", "tools.xbe_parser", xbe, "--json", tmp_json], log)
@@ -431,7 +436,9 @@ def main(argv=None):
     run(["cmake", "-S", proj, "-B", build, "-DCMAKE_BUILD_TYPE=Release",
          "-DXBOXRECOMP_DIR=" + ROOT,
          # What a run meets that the analysis missed: the next prepare reads it.
-         "-DXBA_DISCOVERY_FILE=" + os.path.join(work, DISCOVERY_FILE).replace("\\", "/")] + gen_args, log)
+         "-DXBA_DISCOVERY_FILE=" + os.path.join(work, DISCOVERY_FILE).replace("\\", "/"),
+         # Where a launch of another image of the disc finds its executable (XBA-82).
+         "-DXBA_IMAGE_MAP=" + (a.image_map or os.path.join(work, IMAGE_MAP)).replace("\\", "/")] + gen_args, log)
     t = run(["cmake", "--build", build, "--parallel"], log)
     print("      built in %.0f s" % t, flush=True)
     exe = os.path.join(build, name)
@@ -444,8 +451,45 @@ def main(argv=None):
             os.remove(link) if os.path.islink(link) else None
         if not os.path.exists(link):
             os.symlink(data_dir, link)
+    if not a.image_map and data_dir:
+        prepare_other_images(a, py, xbe, data_dir, work, exe, log)
     print("\nReady: %s\n  game data: %s" % (exe, data_dir or "(none: put the disc's files in %s)" % link))
     return 0
+
+
+IMAGE_MAP = "images.map"
+
+
+def prepare_other_images(a, py, xbe, data_dir, work, exe, log):
+    """XBA-82 (desktop): the disc's other images that default.xbe names
+    (tools.triage's test, e.g. "d:\\game.xbe") are prepared too, each into
+    <work>/images/<path>/, and <work>/images.map lists every image's
+    executable; a launch of one execs it in the same process (the kernel's
+    xbox_launch_image, RECOMP_IMAGE_MAP)."""
+    import re
+    from tools.triage import _named_xbes, _xbes_in_folder
+    with open(xbe, "rb") as f:
+        named = _named_xbes(f.read())
+    others = [(rel, p) for rel, p in _xbes_in_folder(data_dir)
+              if rel.lower() != "default.xbe" and os.path.basename(rel).lower() in named]
+    if not others:
+        return
+    map_path = os.path.join(work, IMAGE_MAP)
+    lines = ["default.xbe\t%s" % exe]
+    for rel, p in others:
+        sub = os.path.join(work, "images", re.sub(r"[^A-Za-z0-9._-]", "_", rel))
+        print("      another image the title launches: %s" % rel, flush=True)
+        cmd = [py, "-m", "tools.prepare", p, "--work", sub, "--image-map", map_path, "--game-dir", data_dir]
+        if a.force:
+            cmd.append("--force")
+        run(cmd, log)
+        from tools.compat.__main__ import project_exe
+        sub_exe = project_exe(sub)
+        if sub_exe:
+            lines.append("%s\t%s" % (rel, sub_exe))
+    with open(map_path, "w") as f:
+        f.write("\n".join(lines) + "\n")
+    print("      %d image(s) in %s" % (len(lines), map_path), flush=True)
 
 
 if __name__ == "__main__":

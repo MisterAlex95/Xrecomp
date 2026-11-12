@@ -587,6 +587,16 @@ int main(int argc, char **argv)
     for (size_t i = 0; i < sizeof xba_title_env_force / sizeof xba_title_env_force[0]; i++)
         recomp_cfg_force(XBA_TITLE_ENV_FORCE_TID, xba_title_env_force[i][0], xba_title_env_force[i][1]);
 #endif
+#ifdef XBA_IMAGE_MAP
+    /* The disc's other images and their executables (tools.prepare, XBA-82). */
+    if (!getenv("RECOMP_IMAGE_MAP")) {
+#ifdef _WIN32
+        _putenv_s("RECOMP_IMAGE_MAP", XBA_IMAGE_MAP);
+#else
+        setenv("RECOMP_IMAGE_MAP", XBA_IMAGE_MAP, 0);
+#endif
+    }
+#endif
 #ifdef XBA_DISCOVERY_FILE
     /* The discovery file in the prepare's work folder (CMake XBA_DISCOVERY_FILE,
      * set by tools.prepare; src/kernel/recomp_discovery.h). RECOMP_DISCOVERY

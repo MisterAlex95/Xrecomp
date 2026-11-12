@@ -1393,6 +1393,14 @@ int xbox_restart_recent(const int64_t *times, int n, int64_t now);
  * handler. Returns only when the title was not restarted. */
 void xbox_quick_reboot(const uint8_t *page);
 
+/* XBA-82 (desktop POSIX): XLaunchNewImage to another image of the disc. Looks
+ * the disc path up in $RECOMP_IMAGE_MAP (lines "<disc path>\t<executable>",
+ * written by tools.prepare), writes the launch data page as a quick reboot
+ * does, and execs that image's executable in this process. Returns only when
+ * it could not (no map, no line, exec failed): the caller exits as before. */
+int  xbox_launch_image(const char *launch_path, const uint8_t *page);
+void xbox_launch_rel_path(const char *launch_path, char *out, size_t n);
+
 /* The save directory as a UTF-8 path (kernel_path.c). */
 const char *xbox_path_save_dir_utf8(void);
 
