@@ -37,6 +37,7 @@
 #include "xbox_memory_layout.h"   /* xbox_Nv2aFrameCounterFlip */
 #include "nv2a_flip_hold.h"
 #include "recomp_status.h"   /* RECOMP_STATUS: frames for the compat runner */
+#include "platform/host_cpus.h"   /* recomp_host_cpus_track (XBA-50) */
 #include "platform/host_time.h"   /* xbox_HostNowNs */
 #ifdef XBOXRECOMP_LSFG
 #include "framegen/framegen_policy.h"   /* frame generation's cap rule */
@@ -3467,6 +3468,7 @@ static void *raster_worker(void *arg)
 {
     int k = (int)(intptr_t)arg;
     unsigned long seen = 0;
+    recomp_host_cpus_track(0);          /* its mask, restored after a resume (XBA-50) */
     for (;;) {
         PoolJob fn;
         PoolChunk cfn;

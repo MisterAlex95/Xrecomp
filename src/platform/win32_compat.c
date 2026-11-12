@@ -10,12 +10,14 @@
 
 #if !defined(_WIN32)
 
-/* Enable memfd_create, MAP_FIXED_NOREPLACE, timegm. Must precede all #includes. */
+/* Enable memfd_create, MAP_FIXED_NOREPLACE, timegm. Must precede all
+#includes. */
 #define _GNU_SOURCE
 /* Darwin: exposes memset_s, its explicit_bzero equivalent. */
 #define __STDC_WANT_LIB_EXT1__ 1
 
 #include "win32_compat.h"
+#include "host_cpus.h"   /* recomp_host_cpus_track (XBA-50) */
 
 #include <pthread.h>
 #include <stdlib.h>
@@ -1134,6 +1136,7 @@ static void *thread_trampoline(void *arg)
     w32_object *o = (w32_object *)arg;
     t_self_obj = o;
     t_tid      = o->tid;
+    recomp_host_cpus_track(s_process_mask);   /* restored after a resume (XBA-50) */
 
 #if defined(__linux__)
     /* The process mask, not the creator's: see process_mask_capture. */
@@ -1156,6 +1159,7 @@ static void *thread_trampoline(void *arg)
 
     DWORD rc = o->start ? o->start(o->start_param) : 0;
 
+    recomp_host_cpus_untrack();   /* its tid may go to a thread that is not ours */
     pthread_mutex_lock(&o->lock);
     o->exit_code = rc;
     o->exited    = 1;
@@ -1214,6 +1218,7 @@ VOID ExitThread(DWORD exitCode)
         pthread_mutex_unlock(&o->lock);
         obj_release(o);
     }
+    recomp_host_cpus_untrack();
     pthread_exit(NULL);
 }
 

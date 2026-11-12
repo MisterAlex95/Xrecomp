@@ -2,6 +2,7 @@
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #endif
+#include "host_cpus.h"   /* recomp_host_cpus_restore on resume (XBA-50) */
 #include "recomp_lifecycle.h"
 
 #include <pthread.h>
@@ -117,7 +118,10 @@ void recomp_lifecycle_resume_for(unsigned reasons)
     n = snapshot(fns, users);
     pthread_mutex_unlock(&s_lock);
 
-    /* Listeners first (the audio device is running again when the guest
+    /* The cores first (XBA-50): back from the background, Android may have
+     * moved the runtime's threads to the little cores and left them there. */
+    recomp_host_cpus_restore();
+    /* Listeners, then (the audio device is running again when the guest
      * submits its next samples), then the guest. */
     for (int i = n - 1; i >= 0; i--)
         fns[i](0, users[i]);

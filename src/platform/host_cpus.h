@@ -32,6 +32,30 @@ uint64_t recomp_host_cpus_init(void);
 uint64_t recomp_big_core_mask(const char *root, uint64_t allowed,
                               unsigned long *slow_khz, unsigned long *fast_khz);
 
+/* The runtime's threads and the cores each should run on (XBA-50).
+ *
+ * Android moves an app between cpusets as it goes to the background and
+ * back; on kernels before 6.2 (the AYN Thor runs 5.15) the move overwrites
+ * the mask a thread set for itself and does not put it back, so after a
+ * notification the game ran on the little cores. Each runtime thread notes
+ * its intended mask here (the shim's CreateThread, the raster pool, the
+ * guest threads' one-core pin, the main thread after recomp_host_cpus_init);
+ * recomp_lifecycle_resume calls recomp_host_cpus_restore, which sets them
+ * again. Threads that are not ours (ART, binder, SDL's) are never touched.
+ * Linux and Android; elsewhere both do nothing. */
+
+/* The calling thread's intended mask; 0 = its affinity right now. A second
+ * call from the same thread replaces the first. */
+void recomp_host_cpus_track(uint64_t mask);
+
+/* The calling thread is ending: forget it, so its tid, once the kernel
+ * hands it to another thread (ART's, a binder's), is never moved. */
+void recomp_host_cpus_untrack(void);
+
+/* Set every tracked thread that still exists back to its mask. Returns how
+ * many had drifted (and prints one line when any had). */
+int recomp_host_cpus_restore(void);
+
 #ifdef __cplusplus
 }
 #endif

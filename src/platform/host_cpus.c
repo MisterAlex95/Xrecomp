@@ -10,6 +10,12 @@
 
 #if defined(__linux__)
 #include <sched.h>
+#if defined(__linux__)
+#include <errno.h>
+#include <pthread.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+#endif
 #endif
 
 /* One number from <root>/cpu<n>/<file>, 0 if absent or unreadable. */
@@ -118,7 +124,117 @@ uint64_t recomp_host_cpus_init(void)
     printf("host cpus: runtime on the fast cores %s of %s (max %lu vs %lu on the slow ones; RECOMP_BIG_CORES=0 to undo)\n",
            b, a, fast, slow);
     fflush(stdout);
+    recomp_host_cpus_track(big);
     return big;
+#else
+    return 0;
+#endif
+}
+
+/* ── The runtime's threads (XBA-50) ─────────────────────────────────────── */
+
+#if defined(__linux__)
+#define TRACK_MAX 256
+static struct { pid_t tid; uint64_t mask; } s_track[TRACK_MAX];
+static int s_track_n;
+static pthread_mutex_t s_track_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static uint64_t mask_of(pid_t tid)
+{
+    cpu_set_t set;
+    uint64_t m = 0;
+    if (sched_getaffinity(tid, sizeof set, &set) != 0)
+        return 0;
+    for (int cpu = 0; cpu < 64 && cpu < CPU_SETSIZE; cpu++)
+        if (CPU_ISSET(cpu, &set)) m |= (uint64_t)1 << cpu;
+    return m;
+}
+
+static int set_mask(pid_t tid, uint64_t m)
+{
+    cpu_set_t set;
+    CPU_ZERO(&set);
+    for (int cpu = 0; cpu < 64 && cpu < CPU_SETSIZE; cpu++)
+        if (m >> cpu & 1) CPU_SET(cpu, &set);
+    return sched_setaffinity(tid, sizeof set, &set);
+}
+#endif
+
+void recomp_host_cpus_track(uint64_t mask)
+{
+#if defined(__linux__)
+    pid_t tid = (pid_t)syscall(SYS_gettid);
+    int i;
+    if (!mask)
+        mask = mask_of(tid);
+    if (!mask)
+        return;
+    pthread_mutex_lock(&s_track_lock);
+    for (i = 0; i < s_track_n; i++)
+        if (s_track[i].tid == tid)
+            break;
+    if (i == s_track_n) {
+        /* Full: reuse the slot of a thread that has gone. */
+        if (s_track_n == TRACK_MAX) {
+            for (i = 0; i < TRACK_MAX; i++)
+                if (sched_getaffinity(s_track[i].tid, sizeof(cpu_set_t), &(cpu_set_t){0}) != 0 && errno == ESRCH)
+                    break;
+            if (i == TRACK_MAX) {
+                pthread_mutex_unlock(&s_track_lock);
+                return;
+            }
+        } else {
+            s_track_n++;
+        }
+    }
+    s_track[i].tid = tid;
+    s_track[i].mask = mask;
+    pthread_mutex_unlock(&s_track_lock);
+#else
+    (void)mask;
+#endif
+}
+
+void recomp_host_cpus_untrack(void)
+{
+#if defined(__linux__)
+    pid_t tid = (pid_t)syscall(SYS_gettid);
+    pthread_mutex_lock(&s_track_lock);
+    for (int i = 0; i < s_track_n; i++)
+        if (s_track[i].tid == tid) {
+            s_track[i] = s_track[--s_track_n];
+            break;
+        }
+    pthread_mutex_unlock(&s_track_lock);
+#endif
+}
+
+int recomp_host_cpus_restore(void)
+{
+#if defined(__linux__)
+    int changed = 0, gone = 0, failed = 0;
+    pthread_mutex_lock(&s_track_lock);
+    for (int i = 0; i < s_track_n; i++) {
+        uint64_t now = mask_of(s_track[i].tid);
+        if (!now) {
+            gone++;             /* exited (ESRCH): its slot is reused later */
+            continue;
+        }
+        if (now == s_track[i].mask)
+            continue;
+        if (set_mask(s_track[i].tid, s_track[i].mask) == 0)
+            changed++;
+        else
+            failed++;
+    }
+    pthread_mutex_unlock(&s_track_lock);
+    if (changed || failed) {
+        printf("host cpus: %d runtime thread(s) back on their cores after resume%s\n", changed,
+               failed ? " (some could not be moved)" : "");
+        fflush(stdout);
+    }
+    (void)gone;
+    return changed;
 #else
     return 0;
 #endif
