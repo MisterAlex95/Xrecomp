@@ -2272,6 +2272,11 @@ uint32_t g_xbox_image_hi = 0;
 uint32_t g_xbox_region_base = XBOX_REGION_MIN;
 uint32_t g_xbox_stack_base  = XBOX_REGION_MIN + XBOX_REGION_STACK_OFF;
 uint32_t g_xbox_stack_size  = 8u * 1024 * 1024;
+/* recomp_types.h's lock for a cmpxchg8b on a qword that is not 8-byte
+ * aligned (XBA-71): one for the whole runtime, so every generated file uses
+ * the same. */
+volatile int g_recomp_cas64_lock;
+
 uint32_t g_xbox_code_lo = 0;
 uint32_t g_xbox_code_hi = 0;
 

@@ -349,6 +349,7 @@ extern RECOMP_TLS RecompCpu g_cpu;
 #define RECOMP_ATOMIC_OR32(p, v)    ((uint32_t)_InterlockedOr((volatile long *)(p), (long)(v)))
 #define RECOMP_ATOMIC_AND32(p, v)   ((uint32_t)_InterlockedAnd((volatile long *)(p), (long)(v)))
 #define RECOMP_ATOMIC_XOR32(p, v)   ((uint32_t)_InterlockedXor((volatile long *)(p), (long)(v)))
+#define RECOMP_ATOMIC_CAS64(p, cmp, val) ((uint64_t)_InterlockedCompareExchange64((volatile __int64 *)(p), (__int64)(val), (__int64)(cmp)))
 #else
 #define RECOMP_ATOMIC_CAS8(p, cmp, val)  ((uint8_t)__sync_val_compare_and_swap((volatile uint8_t *)(p), (uint8_t)(cmp), (uint8_t)(val)))
 #define RECOMP_ATOMIC_CAS16(p, cmp, val) ((uint16_t)__sync_val_compare_and_swap((volatile uint16_t *)(p), (uint16_t)(cmp), (uint16_t)(val)))
@@ -358,6 +359,29 @@ extern RECOMP_TLS RecompCpu g_cpu;
 #define RECOMP_ATOMIC_OR32(p, v)    ((uint32_t)__sync_fetch_and_or((volatile uint32_t *)(p), (uint32_t)(v)))
 #define RECOMP_ATOMIC_AND32(p, v)   ((uint32_t)__sync_fetch_and_and((volatile uint32_t *)(p), (uint32_t)(v)))
 #define RECOMP_ATOMIC_XOR32(p, v)   ((uint32_t)__sync_fetch_and_xor((volatile uint32_t *)(p), (uint32_t)(v)))
+/* cmpxchg8b. The guest qword may be only 4-byte aligned, which a 64-bit
+ * atomic on arm64 does not allow: an aligned one is a real 64-bit CAS, an
+ * unaligned one goes under a lock. */
+#define RECOMP_ATOMIC_CAS64(p, cmp, val) recomp_atomic_cas64((volatile uint64_t *)(p), (uint64_t)(cmp), (uint64_t)(val))
+static inline uint64_t recomp_atomic_cas64(volatile uint64_t *p, uint64_t cmp, uint64_t val)
+{
+    if (((uintptr_t)p & 7u) == 0) {
+        __atomic_compare_exchange_n(p, &cmp, val, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+        return cmp;     /* the old value either way */
+    }
+    {   /* unaligned: a CAS on each aligned dword would not be atomic as a
+         * pair; one runtime-wide lock (xbox_memory_layout.c) for them all */
+        extern volatile int g_recomp_cas64_lock;
+        uint64_t old;
+        while (__sync_lock_test_and_set(&g_recomp_cas64_lock, 1))
+            ;
+        __builtin_memcpy(&old, (const void *)p, 8);
+        if (old == cmp)
+            __builtin_memcpy((void *)p, &val, 8);
+        __sync_lock_release(&g_recomp_cas64_lock);
+        return old;
+    }
+}
 #endif
 
 #include <setjmp.h>

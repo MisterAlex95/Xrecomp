@@ -78,18 +78,57 @@ def test_flags_as_the_unlocked_form():
     assert got[3:3 + len(want)] == want, (plain, locked)
 
 
+def block(code):
+    """A basic block lifted with flag tracking, as the translator does."""
+    from tools.recomp.disasm import BasicBlock
+    from tools.recomp.lifter import lift_basic_block
+    insns = list(Disassembler()._cfg_stream(code, 0, len(code), 0x1000))
+    out, state = lift_basic_block(Lifter(), BasicBlock(start=0x1000, instructions=insns))
+    return "\n".join(out), state
+
+
+@pytest.mark.parametrize("code,setter", [
+    (b"\xf0\xff\x08\x75\x10", "dec"),          # lock dec [eax]; jnz: InterlockedDecrement
+    (b"\xf0\xff\x00\x75\x10", "inc"),
+    (b"\xf0\x01\x08\x75\x10", "add"),
+    (b"\xf0\x0f\xc7\x08\x75\x10", "cmpxchg8b"),
+])
+def test_a_jcc_after_a_locked_form_reads_its_flags(code, setter):
+    """The jnz after `lock dec [x]` read the unassigned _flags: the tracking
+    did not know the prefixed mnemonic (fixed with XBA-71)."""
+    out, state = block(code)
+    assert state and state[0] == setter, state
+    assert "if (_flags" not in out, out
+
+
+@pytest.mark.parametrize("code,want", [
+    (b"\xf0\x0f\xc0\x08", "RECOMP_ATOMIC_CAS8"),       # lock xadd byte [eax], cl
+    (b"\xf0\x66\x0f\xc1\x08", "RECOMP_ATOMIC_CAS16"), # lock xadd word [eax], cx
+    (b"\xf0\x0f\xb0\x08", "RECOMP_ATOMIC_CAS8"),       # lock cmpxchg byte [eax], cl
+    (b"\xf0\x66\x0f\xb1\x08", "RECOMP_ATOMIC_CAS16"), # lock cmpxchg word [eax], cx
+    (b"\xf0\x0f\xc7\x08", "RECOMP_ATOMIC_CAS64"),      # lock cmpxchg8b [eax]
+    (b"\x0f\xc1\xc8", "_s = (uint32_t)(_a + _b)"),      # xadd eax, ecx
+    (b"\x0f\xb1\xd1", "if (_old == _cmp)"),             # cmpxchg ecx, edx
+])
+def test_the_other_atomic_forms_lift(code, want):
+    out, _ = lift(code)
+    assert "RECOMP_UNIMPL" not in out and want in out, out
+
+
 def test_adc_stays_unhandled():
     out, _ = lift(b"\xf0\x11\x08")            # lock adc: reads CF, which a retry would see changed
     assert "RECOMP_UNIMPL" in out, out
 
 
 def _atomic_macros():
-    """The POSIX RECOMP_ATOMIC_* definitions from the runtime header."""
+    """The POSIX RECOMP_ATOMIC_* definitions from the runtime header, and the
+    cmpxchg8b helper they use."""
     with open(os.path.join(ROOT, "templates", "runtime", "recomp_types.h")) as f:
         text = f.read()
     lines = [l for l in text.splitlines() if l.startswith("#define RECOMP_ATOMIC_") and "_Interlocked" not in l]
-    assert len(lines) >= 10
-    return "\n".join(lines)
+    assert len(lines) >= 11
+    helper = re.search(r"static inline uint64_t recomp_atomic_cas64\(.*?\n\}\n", text, re.S).group(0)
+    return "volatile int g_recomp_cas64_lock;\n" + "\n".join(lines) + "\n" + helper
 
 
 HARNESS = r"""
@@ -103,11 +142,12 @@ static uintptr_t g_xbox_mem_offset;
 #define MEM16(addr)  (*(volatile uint16_t *)XBOX_PTR(addr))
 #define MEM32(addr)  (*(volatile uint32_t *)XBOX_PTR(addr))
 #define LO8(x) ((uint8_t)(x))
+#define SET_LO8(r, v) ((r) = ((r) & ~0xFFu) | ((uint32_t)(v) & 0xFFu))
 %(macros)s
 #define N 200000
 static void *worker(void *arg)
 {
-    uint32_t eax, ecx;
+    uint32_t eax, ecx, edx, ebx;
     uint32_t _fa, _fb; int32_t _fas, _fbs; int _cf;
     int t = (int)(intptr_t)arg;
     (void)_fa; (void)_fb; (void)_fas; (void)_fbs; (void)_cf;
@@ -115,6 +155,16 @@ static void *worker(void *arg)
         eax = 0x100; %(inc)s
         eax = 0x104; ecx = 3; %(add)s
         eax = 0x200; ecx = (uint32_t)(t * 64 + (i & 63)); %(bts)s
+        eax = 0x140; ecx = 1; %(xadd8)s
+        /* A 64-bit counter bumped with lock cmpxchg8b [esi], retried until ZF. */
+        for (;;) {
+            uint32_t esi = 0x150;
+            uint64_t v = *(volatile uint64_t *)XBOX_PTR(esi), nv = v + 0x100000001ull;
+            eax = (uint32_t)v; edx = (uint32_t)(v >> 32); ebx = (uint32_t)nv; ecx = (uint32_t)(nv >> 32);
+            %(cas8b)s
+            if (_fa == _fb)
+                break;
+        }
         /* A spinlock on xchg around a plain increment. */
         do { eax = 0x108; ecx = 1; %(xchg)s } while (ecx);
         MEM32(0x10C) = MEM32(0x10C) + 1;
@@ -130,7 +180,8 @@ int main(void)
     for (int t = 0; t < 4; t++) pthread_join(th[t], NULL);
     unsigned bits = 0;
     for (int b = 0; b < 256; b++) bits += (MEM32(0x200 + (b >> 5) * 4) >> (b & 31)) & 1u;
-    printf("%%u %%u %%u %%u\n", MEM32(0x100), MEM32(0x104), bits, MEM32(0x10C));
+    printf("%%u %%u %%u %%u %%u %%u %%u\n", MEM32(0x100), MEM32(0x104), bits, MEM32(0x10C), (unsigned)MEM8(0x140),
+           MEM32(0x150), MEM32(0x154));
     return 0;
 }
 """
@@ -144,11 +195,13 @@ def test_four_threads_lose_no_update(tmp_path):
                      "inc": lift(b"\xf0\xff\x00")[0],
                      "add": lift(b"\xf0\x01\x08")[0],
                      "bts": lift(b"\xf0\x0f\xab\x08")[0],
-                     "xchg": lift(b"\x87\x08")[0]}
+                     "xchg": lift(b"\x87\x08")[0],
+                     "xadd8": lift(b"\xf0\x0f\xc0\x08")[0],
+                     "cas8b": lift(b"\xf0\x0f\xc7\x0e")[0]}       # lock cmpxchg8b [esi]
     (tmp_path / "t.c").write_text(src)
     exe = str(tmp_path / "t")
     subprocess.check_call([cc, "-O2", "-pthread", "-std=gnu11", "-w", "-o", exe, str(tmp_path / "t.c")])
     n = 200000 * 4
     # A spinlock on a non-atomic xchg can hang outright (the lifting before XBA-78 did).
     out = subprocess.check_output([exe], text=True, timeout=60)
-    assert out.split() == [str(n), str(3 * n), "256", str(n)]
+    assert out.split() == [str(n), str(3 * n), "256", str(n), str(n & 0xFF), str(n), str(n)]
