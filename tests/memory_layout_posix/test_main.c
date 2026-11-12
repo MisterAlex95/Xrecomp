@@ -423,6 +423,41 @@ int main(int argc, char **argv)
         free(tls);
     }
 
+    /*
+     * 8. An image without TLS gets a TIB per thread too (XBA-113,
+     *    RECOMP_TIB_PER_THREAD, on unless set to 0): its own SEH head, IRQL
+     *    byte and KTHREAD, with fs:[4] the main thread's. It used to get
+     *    none, and the timer thread, which needs one, ran no DPCs.
+     */
+    {
+        const char *sw = getenv("RECOMP_TIB_PER_THREAD");
+        BOOL ok8 = xbox_MemoryLayoutInit(xbe, n);
+        check(ok8, "init succeeds with the plain (no TLS) image", NULL);
+        if (ok8) {
+            unsigned char *mem = (unsigned char *)xbox_GetMemoryBase();
+            uint32_t tib = xbox_AllocThreadTib();
+            char d[160];
+            if (sw && sw[0] == '0') {
+                check(tib == 0, "RECOMP_TIB_PER_THREAD=0: no TIB for a no-TLS image", NULL);
+            } else if (tib) {
+                uint32_t seh, sb, msb, kt, mkt;
+                memcpy(&seh, mem + tib, 4);
+                memcpy(&sb, mem + tib + 4, 4);
+                memcpy(&msb, mem + XBOX_TIB_MAIN + 4, 4);
+                memcpy(&kt, mem + tib + 0x28, 4);
+                memcpy(&mkt, mem + XBOX_TIB_MAIN + 0x28, 4);
+                snprintf(d, sizeof d, "tib 0x%X seh 0x%X fs4 0x%X/0x%X kt 0x%X/0x%X",
+                         tib, seh, sb, msb, kt, mkt);
+                check(seh == 0xFFFFFFFFu && sb == msb && mem[tib + 0x24] == 0
+                      && kt && kt != mkt && mem[kt] == 6,
+                      "a no-TLS image gets a TIB per thread with its own KTHREAD", d);
+            } else {
+                check(0, "a no-TLS image gets a TIB per thread", "none");
+            }
+            xbox_MemoryLayoutShutdown();
+        }
+    }
+
     printf("\n%d failure(s)\n", failures);
     free(xbe);
     return failures ? 1 : 0;

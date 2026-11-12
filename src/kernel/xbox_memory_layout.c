@@ -3823,6 +3823,11 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
         {
             DWORD tls_dir_va = *(const DWORD *)(xbe + XBE_TLS_ADDR_OFFSET);
 
+            /* This image's, not a previous init's (xbox_AllocThreadTib
+             * reads them). */
+            g_tls_template_va = 0;
+            g_tls_total       = 0;
+
             if (tls_dir_va) {
                 const uint32_t *tls = (const uint32_t *)XBOX_VA(tls_dir_va);
                 uint32_t data_start = tls[0];
@@ -4689,7 +4694,24 @@ static int g_thread_stacks_used = 0;
  * The new block is a copy of the template the loader built, so a thread starts
  * with the image's initialised thread-local data rather than zeros, and its
  * own per-thread structure behind slot 0.
+ *
+ * An image without a TLS directory gets a TIB per thread too (XBA-113): its
+ * own SEH chain head, IRQL byte and KTHREAD at fs:[0x28], with fs:[4] the
+ * main thread's as before. It used to get none, so every thread shared the
+ * main TIB -- and the timer thread, which will not run without a TIB of its
+ * own, ran no timer DPCs at all for such an image. RECOMP_TIB_PER_THREAD=0
+ * restores that.
  */
+static int tib_per_thread_without_tls(void)
+{
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("RECOMP_TIB_PER_THREAD");
+        v = !(e && e[0] == '0');
+    }
+    return v;
+}
+
 uint32_t xbox_AllocThreadTib(void)
 {
     /* XBOX_VA is scoped to the loader; the same arithmetic, spelled here. */
@@ -4697,23 +4719,27 @@ uint32_t xbox_AllocThreadTib(void)
     const uint32_t tib_size = 0x40;
     uint32_t tib, block, thread_data, total, kt, main_kt;
 
-    if (!g_tls_total)
-        return 0;                    /* image has no TLS; nothing to copy */
+    uint32_t thread_size = g_tls_total ? g_tls_thread_size : 0;
 
-    total = g_tls_total;
-    tib = xbox_HeapAlloc(tib_size + total + g_tls_thread_size
+    if (!g_tls_total && !tib_per_thread_without_tls())
+        return 0;                    /* RECOMP_TIB_PER_THREAD=0: the old way */
+
+    total = g_tls_total;             /* 0: a TIB and a KTHREAD only */
+    tib = xbox_HeapAlloc(tib_size + total + thread_size
                          + XBOX_KTHREAD_SIZE, 16);
     if (!tib)
         return 0;
     block       = tib + tib_size;
     thread_data = block + total;
-    kt          = thread_data + g_tls_thread_size;
+    kt          = thread_data + thread_size;
 
     /* The TIB itself, copied so stack bounds and the fields the title filled
      * in are inherited, then the two that must not be. */
     memcpy(TIB_VA(tib), TIB_VA(XBOX_TIB_MAIN), tib_size);
-    memcpy(TIB_VA(block), TIB_VA(g_tls_template_va), total);
-    memset(TIB_VA(thread_data), 0, g_tls_thread_size);
+    if (total) {
+        memcpy(TIB_VA(block), TIB_VA(g_tls_template_va), total);
+        memset(TIB_VA(thread_data), 0, thread_size);
+    }
 
     *(uint32_t *)TIB_VA(tib + 0x00) = 0xFFFFFFFFu;   /* own SEH chain    */
     /* KPCR.Irql, fs:[0x24]: a new thread starts at PASSIVE_LEVEL, whatever
@@ -4730,8 +4756,10 @@ uint32_t xbox_AllocThreadTib(void)
      * interrupt; a callback node of its timer queue was linked twice and the
      * main thread's DoWork (0x003AC0B8) looped on it for ever. */
     *(uint8_t  *)TIB_VA(tib + 0x24) = 0;
-    *(uint32_t *)TIB_VA(block)      = thread_data;   /* slot 0           */
-    *(uint32_t *)TIB_VA(tib + 0x04) = block + total; /* fs:[4], see above*/
+    if (total) {
+        *(uint32_t *)TIB_VA(block)      = thread_data;   /* slot 0           */
+        *(uint32_t *)TIB_VA(tib + 0x04) = block + total; /* fs:[4], see above*/
+    }
 
     /* fs:[0x28], KPCR.PrcbData.CurrentThread: a KTHREAD of this thread's own
      * (XBA-113), so KeGetCurrentThread and code reading fs:[0x28] directly

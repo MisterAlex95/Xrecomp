@@ -109,6 +109,7 @@ Switches that change how the kernel layer behaves. Each fixes a class of titles;
 | `RECOMP_CS_MODE=single` | per-section | Backs every critical section with one host lock. | `kernel_rtl.c` |
 | `RECOMP_CS_MODE=guest` | per-section | Runs critical sections on the guest's own structure (state at +0x10), falling back to the shadow for ones that don't read as critical sections. | `kernel_rtl.c` |
 | `RECOMP_WORKERS` | off | Runs requests of the title's worker threads inline. A bisecting tool for concurrency bugs. | `kernel_bridge.c` |
+| `RECOMP_TIB_PER_THREAD=0` | on | An image without a TLS directory gets no TIB per thread, as before XBA-113: every thread shares the main TIB (SEH head, IRQL byte, `fs:[0x28]` KTHREAD) and the timer thread, which needs a TIB of its own, runs no timer DPCs. An image with TLS always gets one. | `xbox_memory_layout.c` |
 | `RECOMP_THREAD_STACKS=N` | 8 | Worker thread stacks alive at once (512 KB of guest heap each). Past the limit a new worker runs inline on its creator, which deadlocks a worker that waits for requests. | `xbox_memory_layout.c` |
 | `RECOMP_ASYNC_IO` | off | Reports a read on an asynchronous handle as still in flight. The data is read synchronously either way. | `kernel_bridge.c` |
 | `RECOMP_DISPATCH_GATE=1` | off | The one-CPU gate: guest code runs only at safe points while interrupts are delivered. | `kernel_hal.c` |
