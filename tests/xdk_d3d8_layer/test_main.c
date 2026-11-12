@@ -52,6 +52,9 @@ int main(void)
     xba_d3d8_configure();
     CHECK(g_hook != NULL);                        /* both variants service some methods */
 
+    /* 8 and 9 (PGRAPH RDI writes) are acknowledged in both variants, device or not (XBA-94). */
+    CHECK(g_hook(0x123u << 5 | 8u) == 1 && g_hook(9u) == 1);
+    CHECK(g_hook(6u) == 0 && g_hook(7u) == 0);   /* InsertCallback: not serviced */
 #ifndef TEST_GIVEN
     /* Before CreateDevice: nothing, and the hook does nothing. */
     CHECK(xba_d3d8_locate() == 0);
