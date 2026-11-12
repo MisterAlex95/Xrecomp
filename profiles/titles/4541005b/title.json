@@ -5,19 +5,13 @@
   "layers": [
     "xdk/xapi",
     "xdk/dsound",
-    "xdk/d3d8"
+    "xdk/d3d8",
+    "engines/renderware"
   ],
   "hooks": "bo3",
   "params": {
     "XBA_D3D_DEVICE_PTR": "0x0035FE48",
-    "XBA_D3D_SW_METHODS": "0x20",
-    "XBA_D3D_DMA_WALK": 1
-  },
-  "env_default": {
-    "RECOMP_GPU_FPS_CAP": "60"
-  },
-  "env_force": {
-    "RECOMP_LSFG": "0"
+    "XBA_D3D_SW_METHODS": "0x20"
   },
   "seed_functions": [
     "seed_functions.json"

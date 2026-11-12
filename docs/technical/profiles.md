@@ -62,8 +62,9 @@ re-lifts the titles that use it.
 | `xdk/xapi` (XAPILIB, XPP) | the one-CPU DISPATCH gate for XPP's USB stack, paced vblanks, the pad (USB model, keyboard) | Fable, Burnout 3 |
 | `xdk/dsound` (DSOUND) | the AC'97 codec ready (`DirectSoundCreate` waits for it) | Fable, Burnout 3 |
 | `xdk/d3d8` (D3D8, D3D8LTCG) | the pushbuffer executor, paced vblanks; `d3d8.c`: D3D's GPU semaphore watch and its software methods (5: the fence event; 0xC-0xE: RunPushBuffer's return JUMP), with `XBA_D3D_DEVICE_PTR`, `XBA_D3D_DEVICE`, `XBA_D3D_SW_METHODS`, `XBA_D3D_DMA_WALK`, or the device found at run time | Fable, Burnout 3 |
+| `engines/renderware` | Criterion's RenderWare on D3D8LTCG: the DMA walk, title-built KEVENTs, 60 fps cap, frame generation off | Burnout 3 (Black, XBA-92) |
 | `titles/4d5300d1` | Fable: map size, deferred I/O APCs, front-end sleep, 16:9, cache progress, fibers (`overrides.c`) | |
-| `titles/4541005b` | Burnout 3: frame cap 60, frame generation off, flip pacing on the software rasteriser | |
+| `titles/4541005b` | Burnout 3: D3D addresses, the XID seed, flip pacing on the software rasteriser | |
 
 D3D is linked into each title, so its statics move from XBE to XBE. A title layer can give them as `params`; without
 them, `xdk/d3d8` finds the device at run time (XBA-80): once D3D has made it, the title's image is scanned for the one

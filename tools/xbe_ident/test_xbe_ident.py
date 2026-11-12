@@ -78,8 +78,8 @@ def test_engines_need_their_minimum(tmp_path):
     r = identify(make_xbe(tmp_path / "f.xbe", text=text))
     names = [e["name"] for e in r["engines"]]
     assert names == ["RenderWare", "Bink"]
-    # No profiles/engines/renderware yet: not a layer (tools/prepare/test_profiles.py has one that is).
-    assert r["layers"] == ["xdk/d3d8", "xdk/xapi"]
+    # profiles/engines/renderware exists (XBA-95); middleware (Bink) is never a layer.
+    assert r["layers"] == ["xdk/d3d8", "xdk/xapi", "engines/renderware"]
     assert summary(r) == "XDK 5849, RenderWare; middleware Bink"
 
 
