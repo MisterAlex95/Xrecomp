@@ -63,6 +63,7 @@ public class ShellActivity extends SDLActivity {
         super.onCreate(savedInstanceState);
         if (mBrokenLibraries)
             return;   // SDLActivity shows its error dialog and finishes
+        SystemBars.hide(this);   // full screen: no status bar, no gesture pill (XBA-99)
         applyGameTheme();
         menu = new GameMenu(this, new MenuHost());
         menu.attach();
@@ -121,11 +122,15 @@ public class ShellActivity extends SDLActivity {
         fpsLog.postDelayed(fpsTick, 10_000);
         if (menu != null)
             menu.onStart();
+        /* The companion Presentation (shown in onStart above) takes the focus for a moment on some devices and the
+         * bars came back with it: hide them again once it is up. */
+        getWindow().getDecorView().postDelayed(() -> SystemBars.hide(this), 300);
     }
 
     @Override
     protected void onResume() {
         super.onResume();
+        SystemBars.hide(this);
         if (menu != null)
             menu.onResume();
     }
@@ -292,6 +297,8 @@ public class ShellActivity extends SDLActivity {
             return;
         }
         super.onWindowFocusChanged(hasFocus);
+        if (hasFocus)
+            SystemBars.hide(this);   // after SDL's own handling, which uses the old flags
     }
 
     @Override
