@@ -139,10 +139,14 @@ def _atomic_macros():
     cmpxchg8b helper they use."""
     with open(os.path.join(ROOT, "templates", "runtime", "recomp_types.h")) as f:
         text = f.read()
-    lines = [l for l in text.splitlines() if l.startswith("#define RECOMP_ATOMIC_") and "_Interlocked" not in l]
+    lines = [l for l in text.splitlines() if l.startswith("#define RECOMP_ATOMIC_")
+             and "_Interlocked" not in l and "recomp_ua_" not in l]
     assert len(lines) >= 11
     helper = re.search(r"static inline uint64_t recomp_atomic_cas64\(.*?\n\}\n", text, re.S).group(0)
-    return "volatile int g_recomp_cas64_lock;\n" + "\n".join(lines) + "\n" + helper
+    # arm64's unaligned fallbacks (compiled in on arm64 only, as in the header).
+    ua = re.search(r"#if !defined\(_MSC_VER\) && defined\(__aarch64__\)\nextern volatile int g_recomp_cas64_lock;.*?\n#endif\n",
+                   text, re.S).group(0)
+    return "volatile int g_recomp_cas64_lock;\n" + "\n".join(lines) + "\n" + helper + ua
 
 
 HARNESS = r"""
@@ -168,6 +172,7 @@ static void *worker(void *arg)
     for (int i = 0; i < N; i++) {
         eax = 0x100; %(inc)s
         eax = 0x104; ecx = 3; %(add)s
+        eax = 0x161; ecx = 1; %(add)s       /* an unaligned counter: a split lock on x86 */
         eax = 0x200; ecx = (uint32_t)(t * 64 + (i & 63)); %(bts)s
         eax = 0x140; ecx = 1; %(xadd8)s
         /* A 64-bit counter bumped with lock cmpxchg8b [esi], retried until ZF. */
@@ -194,8 +199,8 @@ int main(void)
     for (int t = 0; t < 4; t++) pthread_join(th[t], NULL);
     unsigned bits = 0;
     for (int b = 0; b < 256; b++) bits += (MEM32(0x200 + (b >> 5) * 4) >> (b & 31)) & 1u;
-    printf("%%u %%u %%u %%u %%u %%u %%u\n", MEM32(0x100), MEM32(0x104), bits, MEM32(0x10C), (unsigned)MEM8(0x140),
-           MEM32(0x150), MEM32(0x154));
+    printf("%%u %%u %%u %%u %%u %%u %%u %%u\n", MEM32(0x100), MEM32(0x104), bits, MEM32(0x10C), (unsigned)MEM8(0x140),
+           MEM32(0x150), MEM32(0x154), MEM32(0x161));
     return 0;
 }
 """
@@ -218,4 +223,4 @@ def test_four_threads_lose_no_update(tmp_path):
     n = 200000 * 4
     # A spinlock on a non-atomic xchg can hang outright (the lifting before XBA-78 did).
     out = subprocess.check_output([exe], text=True, timeout=60)
-    assert out.split() == [str(n), str(3 * n), "256", str(n), str(n & 0xFF), str(n), str(n)]
+    assert out.split() == [str(n), str(3 * n), "256", str(n), str(n & 0xFF), str(n), str(n), str(n)]
