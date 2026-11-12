@@ -549,6 +549,21 @@ static inline void recomp_popfd(uint32_t v) {
     g_df = (int)((v >> 10) & 1u);
 }
 
+/* A branch the generated code expects never to take: the divide error below,
+ * and other faults the CPU would raise. */
+#if defined(__GNUC__) || defined(__clang__)
+#define RECOMP_UNLIKELY(x) __builtin_expect(!!(x), 0)
+#else
+#define RECOMP_UNLIKELY(x) (x)
+#endif
+
+/* #DE: a div/idiv at guest address `va` whose divisor is zero, or whose
+ * quotient does not fit the destination. The lifted instruction has changed
+ * no register when this is called, as on the CPU. Every divide error goes
+ * through here so guest exception dispatch has one place to hook; until it
+ * exists the runtime reports the fault and stops. */
+void recomp_divide_error(uint32_t va, uint32_t divisor);
+
 /* cpuid: out[0..3] = eax, ebx, ecx, edx for leaf `leaf` (subleaf unused).
  * The runtime answers as the Xbox's Coppermine-class Pentium III. */
 void xbox_Cpuid(uint32_t leaf, uint32_t subleaf, uint32_t out[4]);

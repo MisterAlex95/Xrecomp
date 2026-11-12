@@ -2037,3 +2037,32 @@ void xbox_Cpuid(uint32_t leaf, uint32_t subleaf, uint32_t out[4])
         break;
     }
 }
+
+/* =========================================================================
+ * Divide error (#DE)
+ *
+ * The lifted div/idiv calls this, with no register changed, when the
+ * divisor is zero or the quotient does not fit the destination. On the
+ * console the CPU raises #DE and the kernel dispatches it to the guest's
+ * SEH handlers as STATUS_INTEGER_DIVIDE_BY_ZERO or STATUS_INTEGER_OVERFLOW;
+ * with no handler it is fatal: KMODE_EXCEPTION_NOT_HANDLED (0x1E), the
+ * code and the address as the first two parameters.
+ *
+ * There is no guest exception dispatch yet, so every divide error takes the
+ * unhandled path, with a report naming the instruction. This is the one
+ * place to hook dispatch in: before, a zero divisor was C undefined
+ * behaviour (SIGFPE on an x86 host, a silent zero on arm64) and an
+ * overflowing quotient was silently truncated.
+ * ========================================================================= */
+void recomp_divide_error(uint32_t va, uint32_t divisor)
+{
+    uint32_t code = divisor ? 0xC0000095u : 0xC0000094u;
+
+    fprintf(stderr, "[#DE] integer divide error at 0x%08X: %s (status 0x%08X);"
+            " eax=%08X edx=%08X divisor=%08X esp=%08X -- no guest exception"
+            " dispatch, stopping\n",
+            va, divisor ? "quotient overflow" : "divide by zero", code,
+            g_eax, g_edx, divisor, g_esp);
+    fflush(stderr);
+    xbox_KeBugCheckEx(0x1E, code, va, 0, 0);
+}

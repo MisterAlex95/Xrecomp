@@ -2565,22 +2565,74 @@ class Lifter:
     def _lift_muldiv(self, insn, ops, m):
         if len(ops) < 1:
             return [f"/* {m}: no operand */"]
-        src = _fmt_operand_read(ops[0])
         if m == "mul":
             return self._lift_product(ops, signed=False)
-        elif m == "div":
-            return [
-                f"{{ uint64_t _dividend = ((uint64_t)edx << 32) | eax;",
-                f"  eax = (uint32_t)(_dividend / (uint32_t){src});",
-                f"  edx = (uint32_t)(_dividend % (uint32_t){src}); }}"
-            ]
-        elif m == "idiv":
-            return [
-                f"{{ int64_t _dividend = ((int64_t)(int32_t)edx << 32) | eax;",
-                f"  eax = (uint32_t)((int32_t)(_dividend / (int32_t){src}));",
-                f"  edx = (uint32_t)((int32_t)(_dividend % (int32_t){src})); }}"
-            ]
+        if m in ("div", "idiv"):
+            return self._lift_divide(insn, ops, signed=(m == "idiv"))
         return [f"/* {m}: unhandled */"]
+
+    # The dividend, quotient and remainder of div/idiv at each operand width.
+    # 8-bit: AX / r8 -> AL quotient, AH remainder. 16-bit: DX:AX / r16 -> AX,
+    # DX. 32-bit: EDX:EAX / r32 -> EAX, EDX. The upper halves of EAX and EDX
+    # are untouched by the narrow forms.
+    _DIV_FORMS = {
+        8: ("HI8(eax)", "LO16(eax)",
+            "SET_LO16(eax, ((_dn % _dv) << 8) | (_dn / _dv));"),
+        16: ("LO16(edx)", "((uint32_t)LO16(edx) << 16) | LO16(eax)",
+             "SET_LO16(eax, _dn / _dv); SET_LO16(edx, _dn % _dv);"),
+        32: ("edx", "((uint64_t)edx << 32) | eax",
+             "eax = (uint32_t)(_dn / _dv); edx = (uint32_t)(_dn % _dv);"),
+    }
+    _IDIV_FORMS = {
+        8: ("(int16_t)LO16(eax)",
+            "SET_LO16(eax, ((uint32_t)(uint8_t)(_dn - _dq * _dv) << 8)"
+            " | (uint8_t)_dq);"),
+        16: ("(int32_t)(((uint32_t)LO16(edx) << 16) | LO16(eax))",
+             "SET_LO16(eax, _dq); SET_LO16(edx, _dn - _dq * _dv);"),
+        32: ("(int64_t)(((uint64_t)edx << 32) | eax)",
+             "eax = (uint32_t)_dq; edx = (uint32_t)(_dn - _dq * _dv);"),
+    }
+
+    def _lift_divide(self, insn, ops, signed):
+        """div / idiv at the operand's width, with the divide error.
+
+        This used to emit the 32-bit EDX:EAX form whatever the operand, so
+        `div bl` (AX / BL -> AL, AH) read EDX into its dividend and wrote all
+        of EAX and EDX. And a zero divisor or a quotient too wide for the
+        destination, which raise #DE on x86, were C undefined behaviour
+        (SIGFPE on an x86 host, a silent value on arm64) or a silent
+        truncation.
+
+        Both now call recomp_divide_error(va, divisor) and leave the
+        registers as they were, as the CPU does before it dispatches the
+        exception; the runtime decides what happens next (today it stops
+        with a report). The fast path pays one compare for div: the
+        quotient fits iff the dividend's high half is below the divisor,
+        which a zero divisor also fails. idiv pays the zero test (and at 32
+        bits the one dividend whose division by -1 is itself undefined in
+        C), then a range check of the quotient.
+        """
+        width = (_operand_width(ops[0]) or 4) * 8
+        src = _fmt_operand_read(ops[0])
+        trap = (f"recomp_divide_error(0x{insn.address:08X}u,"
+                f" (uint{width}_t)_dv);")
+        if not signed:
+            high, dividend, write = self._DIV_FORMS[width]
+            wide = "uint64_t" if width == 32 else "uint32_t"
+            return [f"{{ uint32_t _dv = (uint32_t)({src});",
+                    f"  if (RECOMP_UNLIKELY({high} >= _dv)) {trap}",
+                    f"  else {{ {wide} _dn = {dividend}; {write} }} }}"]
+        dividend, write = self._IDIV_FORMS[width]
+        narrow = f"int{width}_t"
+        # The quotient is computed in int64_t, where only INT64_MIN / -1 can
+        # overflow, and that dividend only exists at 32 bits.
+        guard = ("_dv == 0 || (_dv == -1 && _dn == INT64_MIN)" if width == 32
+                 else "_dv == 0")
+        return [f"{{ int64_t _dv = ({narrow})({src}); int64_t _dn = {dividend};"
+                f" int64_t _dq = 0;",
+                f"  if (RECOMP_UNLIKELY({guard}"
+                f" || (_dq = _dn / _dv) != ({narrow})_dq)) {trap}",
+                f"  else {{ {write} }} }}"]
 
     def _lift_shift(self, insn, ops, c_op):
         if len(ops) < 2:
