@@ -133,7 +133,7 @@
     <string name="OPT_VSYNC">Synchro verticale</string>
     <string name="OPT_VSYNC_DETAIL">Activée : les images s\'affichent au rythme de l\'écran, sans déchirure. Désactivée : chaque image s\'affiche dès qu\'elle est prête ; un peu moins de délai, mais l\'image peut se déchirer. (RECOMP_PRESENT_VSYNC)</string>
     <string name="OPT_GPU">Rendu</string>
-    <string name="OPT_GPU_DETAIL">Logiciel : le jeu est dessiné par le processeur, le chemin testé. GPU : dessiné avec OpenGL ES, bien plus rapide dans les menus ; encore expérimental, certains effets peuvent manquer ou être faux. Auto : ce que choisit le profil du jeu (logiciel pour l\'instant). Si le GPU ne peut pas démarrer, le jeu repasse en logiciel. (RECOMP_GPU)</string>
+    <string name="OPT_GPU_DETAIL">GPU : le jeu est dessiné avec OpenGL ES, bien plus vite qu\'en logiciel. Logiciel : dessiné par le processeur, plus lent, pour comparer ou quand un jeu affiche quelque chose de faux sur le GPU. Auto : GPU, sauf si le profil du jeu demande le logiciel. Si le GPU ne peut pas démarrer (pas d\'OpenGL ES 3.0), le jeu repasse en logiciel tout seul. (RECOMP_GPU)</string>
     <string name="VAL_GPU_CPU">Logiciel</string>
     <string name="VAL_GPU_GL">GPU</string>
     <string name="OPT_GPU_FPS_CAP">Limite d\'images</string>

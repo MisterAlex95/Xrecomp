@@ -150,7 +150,7 @@
     <string name="OPT_VSYNC">Vertical sync</string>
     <string name="OPT_VSYNC_DETAIL">On: frames are shown in step with the display, without tearing. Off: frames are shown as soon as they are ready; a little less delay, but the picture can tear. (RECOMP_PRESENT_VSYNC)</string>
     <string name="OPT_GPU">Renderer</string>
-    <string name="OPT_GPU_DETAIL">Software: the game is drawn by the CPU, the tested path. GPU: drawn with OpenGL ES, much faster in menus; still experimental, some effects may be missing or wrong. Auto: what this game\'s profile chooses (software for now). If the GPU cannot start, the game falls back to software. (RECOMP_GPU)</string>
+    <string name="OPT_GPU_DETAIL">GPU: the game is drawn with OpenGL ES, many times faster than software. Software: drawn by the CPU, slower, for comparing or when a game shows something wrong on the GPU. Auto: GPU, unless this game\'s profile asks for software. If the GPU cannot start (no OpenGL ES 3.0), the game falls back to software on its own. (RECOMP_GPU)</string>
     <string name="VAL_GPU_CPU">Software</string>
     <string name="VAL_GPU_GL">GPU</string>
     <string name="OPT_GPU_FPS_CAP">Frame cap</string>

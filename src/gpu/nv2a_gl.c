@@ -44,9 +44,11 @@
  * context shared with the presenter) is stage 7e.
  *
  * Selected with RECOMP_GPU=1 (nv2a_gl_install_from_env, called by the
- * presenter's xbox_HostWindowMain); the CPU rasteriser stays the default.
- * If no context can be created the back end unregisters itself and the
- * CPU rasteriser draws.
+ * presenter's xbox_HostWindowMain); the default on Android (XBA-119), where
+ * RECOMP_GPU=0 keeps the CPU rasteriser, which stays the default elsewhere.
+ * If no context can be created (no EGL display, no GLES 3.0 config, a
+ * context the driver refuses) the back end unregisters itself and the CPU
+ * rasteriser draws.
  */
 #include "nv2a_gl.h"
 #include "nv2a_gl_api.h"
@@ -611,6 +613,8 @@ static int ensure_init(void)
 
     s_vs = compile(GL_VERTEX_SHADER, nv2a_gl_vertex_body());
     if (!s_vs) {
+        fprintf(stderr, "  [GPUGL] the base vertex shader does not compile: falling back"
+                        " to the CPU rasteriser\n");
         unregister_self();
         return 0;
     }
@@ -4461,12 +4465,37 @@ static void unregister_self(void)
     nv2a_backend_register(NULL);
 }
 
+/* RECOMP_GPU as set (NULL: not set) -> whether the GL back end draws. Not
+ * set: the platform's default, on for Android (the launcher's Renderer
+ * "Auto"; "Software" writes RECOMP_GPU=0, a title profile forces it with
+ * env_force), off elsewhere. */
+static int gpu_selected(const char *e, int platform_default)
+{
+    if (!e || !*e)
+        return platform_default;
+    return strcmp(e, "0") != 0;
+}
+
+#if defined(__ANDROID__)
+#define NV2A_GL_DEFAULT_ON 1
+#else
+#define NV2A_GL_DEFAULT_ON 0
+#endif
+
 int nv2a_gl_install_from_env(void)
 {
     const char *e = getenv("RECOMP_GPU");
+    int by_default = !e || !*e;
 
-    if (!e || !*e || strcmp(e, "0") == 0)
+    if (!gpu_selected(e, NV2A_GL_DEFAULT_ON))
         return 0;
+    if (by_default) {
+        /* Code that asks getenv("RECOMP_GPU") later (a title layer, the
+         * frame pacing choice) sees what was chosen. */
+        setenv("RECOMP_GPU", "1", 0);
+        fprintf(stderr, "  [GPUGL] GPU back end by default on this platform"
+                        " (RECOMP_GPU=0 for the software renderer)\n");
+    }
     /* RECOMP_GPU_CULL=0: draw both faces (and strips as the CPU path
      * assembles them). Read here: the caps are part of the registration. */
     e = getenv("RECOMP_GPU_CULL");

@@ -31,6 +31,7 @@
  * presented as is (the window cannot read it through guest memory) comes
  * out as a 640x480 host frame, each pixel the mean of its four samples:
  *   8. one green sample column over red reads half green, half red.
+ * Also: RECOMP_GPU unset selects the platform's default (gpu_selected).
  * RECOMP_GPU_CPU_WRITES=0 (another ctest entry) checks that the same cases
  * fail without the merge, so the test tells the two apart. */
 #include "../../src/gpu/nv2a_gl.c"
@@ -169,6 +170,14 @@ int main(void)
 
     s_cpu_on = !(e && strcmp(e, "0") == 0);
     s_mem = (uint8_t *)calloc(1, MEM_BYTES);
+    /* Which renderer (XBA-119): RECOMP_GPU unset means the platform's
+     * default -- the GL back end on Android, the CPU rasteriser elsewhere;
+     * "0" is always the CPU rasteriser, anything else the GL back end. */
+    CHECK(gpu_selected(NULL, 1) && !gpu_selected(NULL, 0) && gpu_selected("", 1));
+    CHECK(!gpu_selected("0", 1) && gpu_selected("1", 0) && gpu_selected("1", 1));
+    unsetenv("RECOMP_GPU");
+    CHECK(nv2a_gl_install_from_env() == NV2A_GL_DEFAULT_ON);
+    CHECK(!s_be == !NV2A_GL_DEFAULT_ON);
     setenv("RECOMP_GPU", "1", 1);
     setenv("RECOMP_GPU_SCALE", "2", 1);
     setenv("RECOMP_GPU_PRESENT", "host", 1);
