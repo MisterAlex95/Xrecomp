@@ -360,12 +360,12 @@ final class Toolchain {
                 if (!canon.startsWith(root) && !(canon + File.separator).equals(root))
                     throw new IOException(asset + ": entry outside the target: " + e.getName());
                 if (e.isDirectory()) {
-                    if (!f.isDirectory() && !f.mkdirs())
+                    if (!(f.mkdirs() || f.isDirectory()))
                         throw new IOException("cannot create " + f);
                     continue;
                 }
                 File parent = f.getParentFile();
-                if (parent != null && !parent.isDirectory() && !parent.mkdirs())
+                if (parent != null && !(parent.mkdirs() || parent.isDirectory()))
                     throw new IOException("cannot create " + parent);
                 try (OutputStream o = new FileOutputStream(f)) {
                     int n;

@@ -157,7 +157,7 @@ final class GameStore {
     private static boolean writeSmall(Context c, String name, String value) {
         File f = smallFile(c, name), tmp = new File(f.getPath() + ".tmp");
         File d = f.getParentFile();
-        if (d != null && !d.isDirectory() && !d.mkdirs())
+        if (d != null && !(d.mkdirs() || d.isDirectory()))
             return false;
         try (java.io.FileOutputStream o = new java.io.FileOutputStream(tmp)) {
             o.write((value + "\n").getBytes(StandardCharsets.UTF_8));
@@ -451,7 +451,7 @@ final class GameStore {
         if (game == null)
             return null;
         File parent = game.getParentFile();
-        if (parent != null && !parent.isDirectory() && !parent.mkdirs())
+        if (parent != null && !(parent.mkdirs() || parent.isDirectory()))
             return null;
         File old = new File(parent, game.getName() + ".old");
         deleteTree(old);

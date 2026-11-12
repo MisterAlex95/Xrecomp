@@ -2096,7 +2096,7 @@ public class LauncherActivity extends Activity {
             if (pfd == null)
                 throw new IOException("cannot open " + name);
             File base = lsfgBase();
-            if (!base.isDirectory() && !base.mkdirs())
+            if (!(base.mkdirs() || base.isDirectory()))
                 throw new IOException("cannot create " + base);
             m = LsfgNative.importDll(pfd.getFd(), base.getAbsolutePath(), dir, err);
         }

@@ -212,7 +212,7 @@ final class GameTheme {
             p = GamePalette.build(new GamePalette.Analysis(0, new java.util.ArrayList<>(), 0), fallbackHue);
         }
         File dir = artDir(c);
-        if (!dir.isDirectory() && !dir.mkdirs())
+        if (!(dir.mkdirs() || dir.isDirectory()))
             throw new IOException("cannot create " + dir);
         if (art != null) {
             File png = TitleArt.cacheFile(c.getFilesDir(), key(tid));

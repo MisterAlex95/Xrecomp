@@ -199,6 +199,12 @@ android {
                 systemProperty 'robolectric.graphicsMode', 'NATIVE'
                 systemProperty 'xba.screenshots', "${buildDir}/screenshots"
                 maxHeapSize = '2g'
+                // The assertion's message in the CI log, not just its line: a failure seen
+                // only on the loaded CI host must say what it saw.
+                testLogging {
+                    events 'failed'
+                    exceptionFormat 'full'
+                }
                 // Robolectric fetches its android-all jars from Maven Central at the first run; another repository
                 // (a mirror of Central) with -ProbolectricRepoUrl=...
                 if (findProperty('robolectricRepoUrl'))

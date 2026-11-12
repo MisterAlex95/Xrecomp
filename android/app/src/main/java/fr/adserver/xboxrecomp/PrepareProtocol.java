@@ -295,7 +295,7 @@ final class PrepareProtocol {
 
     static void writeStatus(File file, Status s) throws IOException {
         File dir = file.getParentFile();
-        if (dir != null && !dir.isDirectory() && !dir.mkdirs())
+        if (dir != null && !(dir.mkdirs() || dir.isDirectory()))
             throw new IOException("cannot create " + dir);
         File tmp = new File(file.getPath() + ".tmp");
         byte[] bytes;
@@ -428,7 +428,7 @@ final class PrepareProtocol {
 
     static void writeQueue(File f, Queue q) throws IOException {
         File dir = f.getParentFile();
-        if (dir != null && !dir.isDirectory() && !dir.mkdirs())
+        if (dir != null && !(dir.mkdirs() || dir.isDirectory()))
             throw new IOException("cannot create " + dir);
         File tmp = new File(f.getPath() + ".tmp");
         try (FileOutputStream out = new FileOutputStream(tmp)) {

@@ -317,7 +317,7 @@ final class LibraryScanner {
             String name = info.titleId + "-" + sha.substring(0, 8);
             File dir = new File(cache, name), dst = new File(dir, "default.xbe");
             if (!dst.isFile()) {
-                if ((!dir.isDirectory() && !dir.mkdirs()) || !tmp.renameTo(dst)) {
+                if ((!(dir.mkdirs() || dir.isDirectory())) || !tmp.renameTo(dst)) {
                     i.status = LibraryIndex.UNREADABLE;
                     return;
                 }
@@ -333,7 +333,7 @@ final class LibraryScanner {
         }
 
         File tmpFile() {
-            if (!cache.isDirectory() && !cache.mkdirs())
+            if (!(cache.mkdirs() || cache.isDirectory()))
                 return null;
             File f = new File(cache, ".scan-" + Thread.currentThread().getId() + ".tmp");
             //noinspection ResultOfMethodCallIgnored
