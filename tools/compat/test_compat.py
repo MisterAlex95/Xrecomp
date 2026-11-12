@@ -102,7 +102,9 @@ while True:
         f.write(json.dumps({"ms": ms, "flips": flips, "frames": frames, "lit": 1, "audio_ms": 0,
                             "pad_reads": pad, "threads": 3, "discovered": 0}) + "\n")
     if mode == "crash" and ms > 4000:
-        os.kill(os.getpid(), signal.SIGSEGV)
+        # Die by SIGSEGV through a plain shell under the same PID: on macOS a Python that
+        # kills itself is Python.app, and ReportCrash shows a "quit unexpectedly" dialog.
+        os.execv("/bin/sh", ["sh", "-c", "kill -SEGV $$"])
 '''
 
 
