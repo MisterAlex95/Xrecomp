@@ -1507,7 +1507,7 @@ public class LauncherActivity extends Activity {
 
     /** The row of buttons under the title: one solid primary and quiet pills. */
     private LinearLayout heroButtons(LinearLayout info) {
-        LinearLayout row = rowLayout();
+        LinearLayout row = new Widgets.PillRow(this);
         row.setGravity(Gravity.CENTER_VERTICAL);
         row.setClipChildren(false);
         LinearLayout.LayoutParams p = lp(MATCH, Theme.BUTTON_H);
