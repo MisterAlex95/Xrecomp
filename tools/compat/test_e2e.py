@@ -232,3 +232,67 @@ def test_a_launch_of_another_image_hands_over(tmp_path):
     assert "Game2" in log.split("handing over to", 1)[1], log[-3000:]     # game.xbe's runtime started
     res = json.loads(out.read_text().splitlines()[-1])
     assert "launches another XBE" not in (res.get("blocker") or ""), res
+
+
+@pytest.mark.skipif(os.environ.get("XBA_E2E") != "1", reason="XBA_E2E=1: builds and boots a title (minutes)")
+def test_a_check_run_as_the_device_makes_it(tmp_path):
+    """XBA-130: the app's library check boots a title headed with
+    device.check_env (no RECOMP_HEADLESS, no screenshots), presses through
+    RECOMP_PAD_LIVE on the status clock, ends it by PID, and grades the files
+    with `tools.compat grade`: same stage and blocker as `tools.compat run`,
+    the desktop schema plus the device's fields."""
+    import signal
+    import time
+    from tools.compat import device
+    from tools.compat.__main__ import PRESS_EVERY, PRESS_FIRST, project_exe, read_jsonl
+    if not shutil.which("cmake"):
+        pytest.skip("no cmake")
+    disc = os.path.dirname(_xbe(tmp_path))
+    out = tmp_path / "compat-results.jsonl"
+    r = subprocess.run([sys.executable, "-m", "tools.compat", "run", disc, "--work-root", str(tmp_path / "cw"),
+                        "--seconds", "8", "--sustain", "4", "--out", str(out)],
+                       cwd=ROOT, capture_output=True, text=True, timeout=1800)
+    assert r.returncode == 0, r.stdout[-2000:] + r.stderr[-2000:]
+    desk = json.loads(out.read_text().splitlines()[-1])
+    work = tmp_path / "cw" / "disc"
+    exe = project_exe(str(work))
+    run = tmp_path / "check" / "run" / "58424101"
+    run.mkdir(parents=True)
+    (run / "pad-live.txt").write_text("")
+    env = {k: v for k, v in os.environ.items() if k not in ("RECOMP_HEADLESS", "RECOMP_FB_DUMP", "DISPLAY")}
+    env.update(device.check_env(str(run)))   # headed; this host has no screen, SDL falls back by itself
+    log = run / "run.log"
+    t0 = time.time()
+    with open(log, "w") as f:
+        p = subprocess.Popen([exe], cwd=os.path.dirname(exe), env=env, stdout=f, stderr=subprocess.STDOUT,
+                             start_new_session=True)
+    presses, origin, n = [], None, 0
+    while time.time() - t0 < 12 and p.poll() is None:
+        st = read_jsonl(str(run / "status.jsonl"))
+        if st and origin is None:
+            origin = time.time() - st[-1]["ms"] / 1000.0      # the status clock, as the app finds it
+        if origin is not None:
+            sms = int((time.time() - origin) * 1000)
+            if sms >= (PRESS_FIRST + n * PRESS_EVERY) * 1000:
+                with open(run / "pad-live.txt", "a") as f:
+                    f.write(("start" if n < 3 else "a") + "\n")
+                presses.append(sms)
+                n += 1
+        time.sleep(0.2)
+    run_s = time.time() - t0
+    os.kill(p.pid, signal.SIGKILL)                           # by PID, as the app's watchdog
+    p.wait(10)
+    assert presses and read_jsonl(str(run / "status.jsonl")), log.read_text(errors="replace")[-3000:]
+    g = subprocess.run([sys.executable, "-m", "tools.compat", "grade", "--out", str(out), "--source", "Smoke",
+                        "--work", str(work), "--status", str(run / "status.jsonl"), "--log", str(log),
+                        "--presses", ",".join(map(str, presses)), "--exit", "none", "--run-s", "%.1f" % run_s,
+                        "--sustain", "4", "--field", "device=Test host", "--field", "android=0"],
+                       cwd=ROOT, capture_output=True, text=True, timeout=120)
+    assert g.returncode == 0, g.stderr
+    dev = json.loads(out.read_text().splitlines()[-1])
+    assert (dev["stage"], dev["blocker"].split(";")[0]) == (desk["stage"], desk["blocker"].split(";")[0]), (dev, desk)
+    assert dev["title_id"] == desk["title_id"] == "58424101" and dev["xdk"] == desk["xdk"] == 5849
+    assert set(desk) - {"prepare_s"} <= set(dev) and dev["device"] == "Test host"
+    m = subprocess.run([sys.executable, "-m", "tools.compat", "report", str(out), "--matrix"], cwd=ROOT,
+                       capture_output=True, text=True, timeout=60)
+    assert "Test host" in m.stdout, m.stdout
