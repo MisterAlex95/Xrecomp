@@ -101,6 +101,11 @@ func registerPrepareChecks() {
         expectNil(PrepareProtocol.parseResult("XBA_RESULTS ok"))
         expectNil(PrepareProtocol.parseResult("XBA_PROGRESS step=1/5 id=lift pct=3"))
         expectNil(PrepareProtocol.parseResult("[5/5] building for this computer"))
+        let proj = PrepareProtocol.parseResult("XBA_RESULT ok project=/Users/a/Application Support/w/project")
+        expectEq(proj?.project, "/Users/a/Application Support/w/project", "--no-build")
+        expectEq(proj?.exe, "")
+        let c = PrepareProtocol.parseResult("XBA_RESULT error code=CANCELLED msg=cancelled (signal 15)")
+        expectEq(PrepareRunner.outcome(result: c, exit: .exited(130), cancelled: true, lastLine: ""), .cancelled)
     }
 
     check("protocol: progress.py's own lines round-trip (desktop ids)") {
@@ -241,6 +246,14 @@ func registerPrepareChecks() {
         expect(absent?.playable == false)
         expectEq(TitleState.decode("{\"state\": \"ready\", \"exe\": \"\"}")?.exe, nil)
         expectNil(TitleState.decode("Traceback"))
+        let err = TitleState.decode(#"{"state": "error", "code": "BAD_PROFILE", "msg": "profiles/titles/x/title.json: bad"}"#)
+        expectEq(err?.state, .error)
+        expectEq(err?.code, "BAD_PROFILE")
+        expect(err?.playable == false)
+        let stale = TitleState.decode(#"{"state": "stale", "reasons": ["not_built"], "exe": "/bin/sh", "work": "/w"}"#)
+        expect(stale?.playable == true, "the old binary of a stale title plays")
+        expectEq(stale?.work, "/w")
+        expectEq(stale?.reasonText, "The last build did not finish: prepare again")
         expectEq(TitleState.describe(["toolkit"]), "Prepare again (toolkit updated)")
         expectEq(TitleState.describe([]), "Prepare again")
     }

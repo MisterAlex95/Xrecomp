@@ -1,0 +1,73 @@
+import Foundation
+
+/// titles/<TID>/state.json: what the launcher remembers about a title between runs.
+public struct TitleRecord: Codable, Equatable, Sendable {
+    public var sourcePath: String?
+    public var lastPlayed: Date?
+    /// Seconds played in all.
+    public var playSeconds: Double = 0
+    public var runs: Int = 0
+    public var lastPrepare: PrepareRecord?
+
+    public struct PrepareRecord: Codable, Equatable, Sendable {
+        public var ok: Bool
+        public var code: String?
+        public var message: String?
+        public var at: Date
+
+        public init(ok: Bool, code: String? = nil, message: String? = nil, at: Date = Date()) {
+            self.ok = ok
+            self.code = code
+            self.message = message
+            self.at = at
+        }
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case sourcePath = "source_path", lastPlayed = "last_played", playSeconds = "play_seconds", runs
+        case lastPrepare = "last_prepare"
+    }
+
+    public init(sourcePath: String? = nil) {
+        self.sourcePath = sourcePath
+    }
+
+    static var decoder: JSONDecoder {
+        let d = JSONDecoder()
+        d.dateDecodingStrategy = .iso8601
+        return d
+    }
+
+    static var encoder: JSONEncoder {
+        let e = JSONEncoder.pretty
+        e.dateEncodingStrategy = .iso8601
+        return e
+    }
+
+    public static func load(from url: URL) -> TitleRecord {
+        guard let d = try? Data(contentsOf: url), let r = try? decoder.decode(TitleRecord.self, from: d) else {
+            return TitleRecord()
+        }
+        return r
+    }
+
+    public func save(to url: URL) throws {
+        try writeAtomically(try TitleRecord.encoder.encode(self), to: url)
+    }
+
+    /// A run that lasted `seconds` and ended at `end`.
+    public mutating func recordRun(seconds: TimeInterval, end: Date = Date()) {
+        playSeconds += max(0, seconds)
+        runs += 1
+        lastPlayed = Date(timeIntervalSince1970: end.timeIntervalSince1970.rounded(.down))   // what ISO 8601 keeps
+    }
+
+    /// « Not played yet », « 12 min played », « 3 h 05 played ».
+    public var playTimeText: String {
+        if runs == 0 || playSeconds < 1 { return "Not played yet" }
+        let m = Int(playSeconds / 60)
+        if m < 1 { return "Under a minute played" }
+        if m < 60 { return "\(m) min played" }
+        return String(format: "%d h %02d played", m / 60, m % 60)
+    }
+}

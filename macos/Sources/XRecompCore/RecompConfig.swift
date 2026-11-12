@@ -27,10 +27,10 @@ public struct RecompConfig: Equatable, Sendable {
         let f = dir.appendingPathComponent(fileName)
         var c = RecompConfig(file: f)
         if let data = try? Data(contentsOf: f) {
-            var text = String(decoding: data, as: UTF8.self)
+            // "\r\n" is one Character in Swift: normalise line ends first.
+            var text = String(decoding: data, as: UTF8.self).replacingOccurrences(of: "\r\n", with: "\n")
             if text.hasSuffix("\n") { text.removeLast() }
             c.lines = text.isEmpty ? [] : text.components(separatedBy: "\n")
-                .map { $0.hasSuffix("\r") ? String($0.dropLast()) : $0 }
             c.existed = true
         }
         return c
