@@ -65,12 +65,15 @@ int main(void)
     recomp_discovery_thread_ctx(0x00045670u, 0x00034560u);
     recomp_discovery_unimpl(0x00056780u, "bsf eax, \"ecx\"\\\x01");
     recomp_discovery_unimpl(0x00056780u, "bsf eax, ecx");
-    CHECK(recomp_discovery_written() == 4);
+    recomp_discovery_d3d(0x0085FDE0u, 0x00862288u);
+    recomp_discovery_d3d(0x0085FDE0u, 0x00862288u);
+    CHECK(recomp_discovery_written() == 5);
     CHECK(recomp_discovery_path() && !strcmp(recomp_discovery_path(), path));
     text = slurp(path);                                         /* written as it happened: no close needed */
     CHECK(text != NULL);
     if (text) {
-        CHECK(count(text, "\n") == 5);
+        CHECK(count(text, "\n") == 6);
+        CHECK(strstr(text, "{\"t\":\"d3d\",\"va\":\"0x0085FDE0\",\"slot\":\"0x00862288\"}\n") != NULL);
         CHECK(count(text, "{\"t\":\"run\",\"time\":\"20") == 1);
         CHECK(strstr(text, "{\"t\":\"icall\",\"va\":\"0x00012345\",\"ret\":\"0x00011111\"}\n") != NULL);
         CHECK(strstr(text, "{\"t\":\"thread\",\"va\":\"0x00034560\",\"ctx1\":\"0x00045670\"}\n") != NULL);

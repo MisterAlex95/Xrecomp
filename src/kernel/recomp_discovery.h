@@ -12,6 +12,8 @@
  *   {"t":"thread_ctx","va":"0x00045678","routine":"0x00012345"}
  *                                                          StartContext1 in the code range, not dispatchable
  *   {"t":"unimpl","va":"0x00012345","insn":"bsf eax, ecx"} untranslated instruction reached
+ *   {"t":"d3d","va":"0x0085FDE0","slot":"0x00862288"}      D3D's device found at run time
+ *                                                          (profiles/xdk/d3d8/d3d8.c)
  *
  * The file: $RECOMP_DISCOVERY (recomp.cfg can set it); unset, empty or "0":
  * nothing is written. The desktop title project gets a default from
@@ -30,6 +32,7 @@ void recomp_discovery_icall(uint32_t va, uint32_t ret_va);
 void recomp_discovery_thread(uint32_t routine, uint32_t ctx1);
 void recomp_discovery_thread_ctx(uint32_t ctx1, uint32_t routine);
 void recomp_discovery_unimpl(uint32_t va, const char *insn);
+void recomp_discovery_d3d(uint32_t device, uint32_t slot);
 
 /* The file in use, or NULL when discovery is off (opens it on first use). */
 const char *recomp_discovery_path(void);

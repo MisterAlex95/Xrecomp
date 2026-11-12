@@ -27,6 +27,7 @@ this run or an earlier one) is not written again: the file only grows with what 
 {"t":"thread","va":"0x00034560","ctx1":"0x00045670"}         thread start routine with no dispatch entry
 {"t":"thread_ctx","va":"0x00045670","routine":"0x00034560"}  StartContext1 inside the title's code with no dispatch entry
 {"t":"unimpl","va":"0x00056780","insn":"bsf eax, ecx"}       untranslated instruction reached (RECOMP_UNIMPL)
+{"t":"d3d","va":"0x0085FDE0","slot":"0x00862288"}            D3D's device found at run time (profiles/xdk/d3d8/d3d8.c)
 ```
 
 Addresses are guest VAs, 8 hex digits. At most 6,144 distinct entries per file.
