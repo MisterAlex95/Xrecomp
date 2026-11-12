@@ -200,6 +200,20 @@ public class PrepareServiceTest {
             + " > \"$2/pack.json\"\n"
             + "echo \"XBA_RESULT ok pack=$2\"\n";
 
+    /**
+     * PACK_SCRIPT that waits for a go file next to its pack dir ("<pack>.go") before it starts: a test that looks at
+     * the queue while the first title runs must not depend on how fast a loaded CI host runs a 1 s sleep (the first
+     * title used to finish before the queue file was read, now and then).
+     */
+    private static final String GATED_PACK_SCRIPT = "i=0; while [ ! -e \"$2.go\" ] && [ $i -lt 600 ]; do sleep 0.05;"
+            + " i=$((i+1)); done\n" + PACK_SCRIPT;
+
+    private void go(String tid) throws Exception {
+        File f = new File(Pack.packDir(app.getFilesDir(), tid).getAbsolutePath() + ".go");
+        f.getParentFile().mkdirs();
+        TestSupport.write(f, "");
+    }
+
     private PrepareProtocol.Status status(String tid) {
         return PrepareProtocol.readStatus(PrepareService.statusFile(app, tid));
     }
@@ -217,7 +231,7 @@ public class PrepareServiceTest {
 
     @Test
     public void anotherTitleWaitsAndRunsNext() throws Exception {
-        useScript(PACK_SCRIPT);
+        useScript(GATED_PACK_SCRIPT);
         ServiceController<PrepareService> sc = start();
         Thread first = PrepareService.workerThread();
         sc.withIntent(PrepareService.startIntent(app, "/games/b", TID2, "Second")).startCommand(0, 2);
@@ -235,6 +249,7 @@ public class PrepareServiceTest {
         sc.withIntent(PrepareService.startIntent(app, "/games/a", TID, "First")).startCommand(0, 4);
         assertEquals(Collections.singletonList(TID2), PrepareService.queuedTitleIds());
 
+        go(TID);        // the second stays gated until its checks below are done
         waitWorker();   // the first ends; its end starts the next
         Thread second = PrepareService.workerThread();
         assertTrue("the next one started", second != first);
@@ -242,6 +257,7 @@ public class PrepareServiceTest {
         assertTrue(PrepareService.queuedTitleIds().isEmpty());
         assertTrue(PrepareProtocol.readQueue(PrepareProtocol.queueFile(app.getFilesDir())).jobs.isEmpty());
         assertFalse("still running: not stopped", shadowOf(sc.get()).isStoppedBySelf());
+        go(TID2);
         waitWorker();
         assertEquals(PrepareProtocol.DONE, status(TID2).state);
         assertEquals(Pack.Check.VALID, Pack.check(app.getFilesDir(), TID));
