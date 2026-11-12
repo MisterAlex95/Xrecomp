@@ -118,3 +118,70 @@ def test_the_self_healing_loop(tmp_path):
     seeds = json.loads((work / "discovered-seeds.json").read_text())
     assert [s["start"] for s in seeds] == ["0x00011040"]
     assert second["runs"][0]["threads"] >= 1 and second["stage"] == "boots", second
+
+
+@pytest.mark.skipif(os.environ.get("XBA_E2E") != "1", reason="XBA_E2E=1: builds and boots a title (minutes)")
+def test_the_d3d_device_is_found_at_run_time(tmp_path):
+    """XBA-80 in the real runtime: a title that links D3D8 and whose image
+    holds a D3D-like device (its pointer slot at +0x24A8 naming it, a ring in
+    the contiguous window, the put pointer inside) has it found by the XDK D3D
+    layer's scan and recorded in discovered.jsonl -- no title profile."""
+    import struct
+    if not shutil.which("cmake"):
+        pytest.skip("no cmake")
+    dev_off = 0x400                                   # in .text, at 0x11400
+    text = bytearray(SPIN + b"\x00" * (dev_off + 0x24A8 + 0x10 - len(SPIN)))
+    dev = 0x00011000 + dev_off
+    struct.pack_into("<I", text, dev_off + 0x00, 0x80012340)     # put
+    struct.pack_into("<II", text, dev_off + 0x24, 0x80010000, 0x80090000)   # ring
+    struct.pack_into("<I", text, dev_off + 0x24A8, dev)          # the pointer slot
+    d = tmp_path / "d3d"
+    d.mkdir()
+    make_xbe(d / "default.xbe", libs=LIBS, text=bytes(text), title_id=0x58424103, title="D3D")
+    out = tmp_path / "results.jsonl"
+    r = subprocess.run([sys.executable, "-m", "tools.compat", "run", str(d), "--work-root", str(tmp_path / "cw"),
+                        "--seconds", "5", "--sustain", "3", "--out", str(out)],
+                       cwd=ROOT, capture_output=True, text=True, timeout=1800)
+    assert r.returncode == 0, r.stdout[-2000:] + r.stderr[-2000:]
+    work = tmp_path / "cw" / "d3d"
+    lines = [json.loads(l) for l in (work / "discovered.jsonl").read_text().splitlines()]
+    assert {"t": "d3d", "va": "0x%08X" % dev, "slot": "0x%08X" % (dev + 0x24A8)} in lines, lines
+    assert "[D3D] device found at 0x%08X" % dev in (work / "run-0.log").read_text()
+
+
+@pytest.mark.skipif(os.environ.get("XBA_E2E") != "1", reason="XBA_E2E=1: builds and boots a title (minutes)")
+def test_a_wait_spin_is_caught_and_promoted(tmp_path):
+    """XBA-93 in the real runtime: a title that builds a KEVENT by writing its
+    header (no KeInitializeEvent), calls KeSetEvent on it once, then polls it
+    with KeWaitForSingleObject in a loop. The waits fail at once (no host
+    event yet), the spin is reported and recorded, and since a set was seen
+    the event is promoted."""
+    import struct
+    if not shutil.which("cmake"):
+        pytest.skip("no cmake")
+    evt, tmo = 0x00011300, 0x00011320
+    code = bytes.fromhex("558bec" "6a00" "6a00" "68") + struct.pack("<I", evt) + bytes.fromhex("ff1500080100")
+    loop = (bytes.fromhex("68") + struct.pack("<I", tmo) + bytes.fromhex("6a00" "6a00" "6a00" "68")
+            + struct.pack("<I", evt) + bytes.fromhex("ff1504080100"))
+    loop += bytes([0xEB, (-(len(loop) + 2)) & 0xFF])            # jmp back to the push
+    text = bytearray(code + loop)
+    text += b"\x00" * (0x340 - len(text))
+    struct.pack_into("<IIII", text, evt - 0x11000, 0x00040001, 0, evt + 8, evt + 8)   # sync event, unset
+    d = tmp_path / "spin"
+    d.mkdir()
+    p = make_xbe(d / "default.xbe", libs=(("XAPILIB", 5849, 0),), text=bytes(text), title_id=0x58424104,
+                 title="Spin")
+    b = bytearray(open(p, "rb").read())
+    struct.pack_into("<III", b, 0x800, 0x80000000 | 145, 0x80000000 | 159, 0)   # KeSetEvent, KeWaitForSingleObject
+    open(p, "wb").write(b)
+    out = tmp_path / "results.jsonl"
+    r = subprocess.run([sys.executable, "-m", "tools.compat", "run", str(d), "--work-root", str(tmp_path / "cw"),
+                        "--seconds", "5", "--sustain", "3", "--out", str(out)],
+                       cwd=ROOT, capture_output=True, text=True, timeout=1800)
+    assert r.returncode == 0, r.stdout[-2000:] + r.stderr[-2000:]
+    work = tmp_path / "cw" / "spin"
+    log = (work / "run-0.log").read_text()
+    assert "wait spin: 2000 waits" in log and "on 0x%08X (synchronization event" % evt in log, log[-3000:]
+    assert "promoted to a guest event" in log, log[-3000:]
+    lines = [json.loads(l) for l in (work / "discovered.jsonl").read_text().splitlines()]
+    assert any(l.get("t") == "wait_spin" and l.get("va") == "0x%08X" % evt for l in lines), lines
