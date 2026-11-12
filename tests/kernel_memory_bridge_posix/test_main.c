@@ -465,15 +465,18 @@ int main(int argc, char **argv)
     setvbuf(stdout, NULL, _IONBF, 0);
     if (!mkdtemp(tmpl)) return 2;
     setenv("XDG_DATA_HOME", tmpl, 1);
-    snprintf(cache, sizeof cache, "%s/xboxrecomp/Cache", tmpl);
-    snprintf(cmd, sizeof cmd, "mkdir -p '%s'", cache);
-    if (system(cmd) != 0) return 2;
 
     xbe = load(argc > 1 ? argv[1] : "tools/conformance/test.xbe", &n);
     if (!xbe || !xbox_MemoryLayoutInit(xbe, n)) {
         printf("cannot map guest memory (run tools/conformance/mkxbe.py)\n");
         return 2;
     }
+    /* Z: is <save root>/Cache/<title id, lower-case hex> since K-9: the ID is
+     * the certificate's (header +0x118 -> certificate, +8 -> title ID). */
+    snprintf(cache, sizeof cache, "%s/xboxrecomp/Cache/%08x", tmpl,
+             (unsigned)G32(G32(0x00010118u) + 8u));
+    snprintf(cmd, sizeof cmd, "mkdir -p '%s'", cache);
+    if (system(cmd) != 0) return 2;
 
     g_thunks  = xbox_HeapAlloc(0x1000, 4096);
     g_stack   = xbox_HeapAlloc(0x1000, 4096);
