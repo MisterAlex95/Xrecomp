@@ -14,16 +14,21 @@
 #
 # XBR_JUNIT_DIR=dir also writes ctest's JUnit file per project, dir/<project>.xml (ctest 3.21+), which
 # tools/ci/check_expected.py reads (the arm64 job, XBA-53).
+#
+# Runs on macOS's bash 3.2: an empty array is expanded as ${a[@]+"${a[@]}"}, since "${a[@]}" of an empty
+# array is an unbound variable there under set -u. Tests that open an SDL audio device stay silent unless
+# SDL_AUDIODRIVER says otherwise.
 set -uo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 OUT=${1:-$ROOT/build/c-tests}
 REPORT=${2:-$OUT/report.md}
-JOBS=${JOBS:-$(nproc 2>/dev/null || echo 4)}
+JOBS=${JOBS:-$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)}
 GEN=()
 read -r -a EXTRA <<< "${XBR_CMAKE_ARGS:-}"
 command -v ninja >/dev/null 2>&1 && GEN=(-G Ninja)
 JUNIT_DIR=${XBR_JUNIT_DIR:-}
+export SDL_AUDIODRIVER=${SDL_AUDIODRIVER:-dummy}
 [ -z "$JUNIT_DIR" ] || { mkdir -p "$JUNIT_DIR" && JUNIT_DIR=$(cd "$JUNIT_DIR" && pwd); }   # ctest: relative to the build dir
 
 # Projects that only build for Windows (a FATAL_ERROR under if(NOT WIN32), or an unconditional <windows.h>).
@@ -50,14 +55,14 @@ for dir in "$ROOT"/tests/*/; do
         printf '%-32s windows only\n' "$name"
         continue
     fi
-    if ! cmake -S "$dir" -B "$bdir" "${GEN[@]}" -DCMAKE_BUILD_TYPE=RelWithDebInfo "${EXTRA[@]}" >"$log" 2>&1; then
+    if ! cmake -S "$dir" -B "$bdir" ${GEN[@]+"${GEN[@]}"} -DCMAKE_BUILD_TYPE=RelWithDebInfo ${EXTRA[@]+"${EXTRA[@]}"} >"$log" 2>&1; then
         conf=FAIL; build=-; fail=1
     elif ! cmake --build "$bdir" -j"$JOBS" >>"$log" 2>&1; then
         build=FAIL; fail=1
     else
         junit=()
         [ -z "$JUNIT_DIR" ] || junit=(--output-junit "$JUNIT_DIR/$name.xml")
-        ctest --test-dir "$bdir" --output-on-failure --timeout 300 -j"$JOBS" "${junit[@]}" >>"$log" 2>&1
+        ctest --test-dir "$bdir" --output-on-failure --timeout 300 -j"$JOBS" ${junit[@]+"${junit[@]}"} >>"$log" 2>&1
         # ctest's summary lines: "Test #n: name ...   Passed", "***Skipped", "***Failed", "***Timeout", "***Exception"
         pass=$(grep -cE 'Test +#[0-9]+: .* Passed' "$log")
         skip=$(grep -cE 'Test +#[0-9]+: .*\*\*\*(Skipped|Not Run)' "$log")
