@@ -58,6 +58,18 @@ typedef int (*xba_title_main_fn)(const recomp_storage *store);
 int xba_pack_load(const char *files_dir, const char *xbe_path, xba_title_main_fn *main_out,
                   char *reason, size_t reason_n);
 
+/* The disc's other images (XBA-82, docs/technical/multi-xbe.md « Android »).
+ * pack.json "images" names them; xba_pack_load writes <files>/work/<tid>/
+ * images.map for the kernel (RECOMP_IMAGE_MAP) and, when <work>/image.next
+ * names one (written by the last run's hand-over), loads that image's
+ * library instead of default.xbe's and sets RECOMP_IMAGE ("PACK_IMAGE <path>
+ * <lib>"; not in the pack: "PACK_IMAGE_MISSING", default.xbe runs).
+ * xba_pack_image_xbe: that image's XBE (next to default.xbe), or NULL for
+ * default.xbe. xba_pack_set_next_image: the image the next start runs (the
+ * kernel's image handler, before the restart); 0 when written. */
+const char *xba_pack_image_xbe(void);
+int xba_pack_set_next_image(const char *target);
+
 #ifdef __cplusplus
 }
 #endif

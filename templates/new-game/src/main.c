@@ -597,6 +597,15 @@ int main(int argc, char **argv)
 #endif
     }
 #endif
+#ifdef XBA_IMAGE_NAME
+    /* This executable is that image of the disc, not default.xbe: a launch
+     * back to default.xbe is then a hand-over, not a restart of this one. */
+#ifdef _WIN32
+    _putenv_s("RECOMP_IMAGE", XBA_IMAGE_NAME);
+#else
+    setenv("RECOMP_IMAGE", XBA_IMAGE_NAME, 1);
+#endif
+#endif
 #ifdef XBA_DISCOVERY_FILE
     /* The discovery file in the prepare's work folder (CMake XBA_DISCOVERY_FILE,
      * set by tools.prepare; src/kernel/recomp_discovery.h). RECOMP_DISCOVERY

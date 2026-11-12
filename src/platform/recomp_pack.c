@@ -290,14 +290,38 @@ static int jskip(jr *r, int depth)
 
 /* "env_force": {"KEY": "VALUE", ...} into m->env_force. A value that is not
  * a string is an error; an entry that does not fit is counted and dropped. */
-static int jenv_force(jr *r, recomp_pack_meta *m, char *err, size_t errn)
+/* One "key": "value" pair of an object of strings; 0 kept, 1 dropped. */
+typedef int (*jpair_fn)(recomp_pack_meta *m, const char *key, int kfit, const char *value, int vfit);
+
+static int env_force_pair(recomp_pack_meta *m, const char *key, int kfit, const char *value, int vfit)
 {
-    if (r->p >= r->end || *r->p != '{') { say(err, errn, "env_force: object expected"); return -1; }
+    if (!kfit || !vfit || m->env_force_n >= RECOMP_PACK_ENV_FORCE_MAX || strlen(key) >= sizeof m->env_force[0].key)
+        return 1;
+    snprintf(m->env_force[m->env_force_n].key, sizeof m->env_force[0].key, "%s", key);
+    snprintf(m->env_force[m->env_force_n].value, sizeof m->env_force[0].value, "%s", value);
+    m->env_force_n++;
+    return 0;
+}
+
+static int image_pair(recomp_pack_meta *m, const char *key, int kfit, const char *value, int vfit)
+{
+    if (!kfit || !vfit || m->images_n >= RECOMP_PACK_IMAGES_MAX || strlen(value) >= sizeof m->images[0].lib)
+        return 1;
+    snprintf(m->images[m->images_n].path, sizeof m->images[0].path, "%s", key);
+    snprintf(m->images[m->images_n].lib, sizeof m->images[0].lib, "%s", value);
+    m->images_n++;
+    return 0;
+}
+
+/* An object of strings ("env_force", "images"), each pair through fn. */
+static int jstrmap(jr *r, const char *name, recomp_pack_meta *m, jpair_fn fn, int *dropped, char *err, size_t errn)
+{
+    if (r->p >= r->end || *r->p != '{') { say(err, errn, "%s: object expected", name); return -1; }
     r->p++;
     ws(r);
     if (r->p < r->end && *r->p == '}') { r->p++; return 0; }
     for (;;) {
-        char key[64], value[256];
+        char key[256], value[256];
         int kfit = 1, vfit = 1;
         ws(r);
         if (jstring(r, key, sizeof key, &kfit)) goto bad;
@@ -305,15 +329,10 @@ static int jenv_force(jr *r, recomp_pack_meta *m, char *err, size_t errn)
         if (r->p >= r->end || *r->p != ':') { r->err = "':' expected"; goto bad; }
         r->p++;
         ws(r);
-        if (r->p >= r->end || *r->p != '"') { say(err, errn, "env_force: string values expected"); return -1; }
+        if (r->p >= r->end || *r->p != '"') { say(err, errn, "%s: string values expected", name); return -1; }
         if (jstring(r, value, sizeof value, &vfit)) goto bad;
-        if (kfit && vfit && m->env_force_n < RECOMP_PACK_ENV_FORCE_MAX) {
-            memcpy(m->env_force[m->env_force_n].key, key, sizeof key);
-            memcpy(m->env_force[m->env_force_n].value, value, sizeof value);
-            m->env_force_n++;
-        } else {
-            m->env_force_dropped++;
-        }
+        if (fn(m, key, kfit, value, vfit))
+            (*dropped)++;
         ws(r);
         if (r->p < r->end && *r->p == ',') { r->p++; continue; }
         if (r->p < r->end && *r->p == '}') { r->p++; return 0; }
@@ -369,8 +388,9 @@ int recomp_pack_parse(const char *json, size_t len, recomp_pack_meta *m, char *e
         const field *f = NULL;
         for (size_t i = 0; full && i < sizeof FIELDS / sizeof FIELDS[0]; i++)
             if (!strcmp(key, FIELDS[i].key)) f = &FIELDS[i];
-        if (full && !strcmp(key, "env_force")) {
-            int rc = jenv_force(&r, m, err, errn);
+        if (full && (!strcmp(key, "env_force") || !strcmp(key, "images"))) {
+            int rc = key[0] == 'e' ? jstrmap(&r, key, m, env_force_pair, &m->env_force_dropped, err, errn)
+                                   : jstrmap(&r, key, m, image_pair, &m->images_dropped, err, errn);
             if (rc == -1) return -1;
             if (rc) goto bad;
         } else if (!f) {
@@ -469,6 +489,58 @@ int recomp_pack_validate(const recomp_pack_meta *m, const char *tid, long long s
         return -1;
     }
     return 0;
+}
+
+/* An image path for comparison: lowercase, '/', no leading separator. */
+static void image_norm(const char *p, char *out, size_t n)
+{
+    size_t o = 0;
+    while (*p == '/' || *p == '\\')
+        p++;
+    for (; *p && o + 1 < n; p++) {
+        char c = *p == '\\' ? '/' : *p;
+        out[o++] = (char)(c >= 'A' && c <= 'Z' ? c - 'A' + 'a' : c);
+    }
+    out[o] = 0;
+}
+
+int recomp_pack_image_lib(const recomp_pack_meta *m, const char *pack_dir, const char *lib_path,
+                          const char *path, char *out, size_t out_n, char *key, size_t key_n,
+                          char *reason, size_t reason_n)
+{
+    char want[256], have[256];
+    struct stat st;
+
+    image_norm(path ? path : "", want, sizeof want);
+    if (!want[0] || !strcmp(want, "default.xbe")) {
+        snprintf(out, out_n, "%s", lib_path);
+        if (key && key_n)
+            snprintf(key, key_n, "default.xbe");
+        return 0;
+    }
+    for (int i = 0; i < m->images_n; i++) {
+        const char *lib = m->images[i].lib;
+        image_norm(m->images[i].path, have, sizeof have);
+        if (strcmp(have, want))
+            continue;
+        if (!lib[0] || strchr(lib, '/') || !strcmp(lib, ".") || !strcmp(lib, "..")) {
+            say(reason, reason_n, "image %s: lib \"%s\" is not a file name", path, lib);
+            return -1;
+        }
+        if ((size_t)snprintf(out, out_n, "%s/%s", pack_dir, lib) >= out_n) {
+            say(reason, reason_n, "path too long");
+            return -1;
+        }
+        if (stat(out, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size <= 0) {
+            say(reason, reason_n, "image %s: %s missing", path, lib);
+            return -1;
+        }
+        if (key && key_n)
+            snprintf(key, key_n, "%s", m->images[i].path);
+        return 0;
+    }
+    say(reason, reason_n, "image %s is not in the pack", path);
+    return -1;
 }
 
 int recomp_pack_find(const char *files_dir, const char *tid, long long shell_abi,

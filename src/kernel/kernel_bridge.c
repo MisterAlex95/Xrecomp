@@ -368,7 +368,7 @@ static void kernel_data_init(void)
              * uninitialised bytes as a char*, and dereferenced 0x68737572
              * (the ASCII "rush"). A disc-booted title's value looks like this. */
             { KDATA_XE_IMAGE_FILENAME, KDATA_XE_IMAGE_BUF,
-              "\\Device\\CdRom0\\default.xbe" },
+              xbox_image_file_name() },   /* default.xbe, or $RECOMP_IMAGE (XBA-82) */
         };
         for (int k = 0; k < (int)(sizeof(d) / sizeof(d[0])); k++) {
             uint32_t str_va = XBOX_KERNEL_DATA_BASE + d[k].str_off;
@@ -381,6 +381,7 @@ static void kernel_data_init(void)
         }
     }
 
+    xbox_image_file_name_init();
     fprintf(stderr, "  Kernel data exports: initialized at Xbox VA 0x%08X\n",
             XBOX_KERNEL_DATA_BASE);
 }

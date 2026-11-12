@@ -197,6 +197,32 @@ static void restart_via_launcher(void)
     recomp_quit(0);
 }
 
+/* XLaunchNewImage to another image of the disc (XBA-82): the kernel has
+ * written the launch data and looked the image up in the pack's images.map;
+ * the next start runs that image's library (pack_loader.c), the restart is
+ * the quick reboot's. Returns only when it could not. */
+typedef void (*xbox_image_handler)(const char *target);
+void xbox_SetImageHandler(xbox_image_handler fn);
+
+static void image_via_launcher(const char *target)
+{
+    if (xba_pack_set_next_image(target) != 0) {
+        fprintf(stderr, "xboxrecomp: launch of %s: cannot write image.next\n", target);
+        return;
+    }
+    printf("xboxrecomp: launch of %s: restarting into it\n", target);
+    restart_via_launcher();
+}
+
+/* A quick reboot of a secondary image restarts that image, not default.xbe. */
+static void restart_image_via_launcher(void)
+{
+    const char *img = getenv("RECOMP_IMAGE");
+    if (img && *img && xba_pack_set_next_image(img) != 0)
+        fprintf(stderr, "xboxrecomp: quick reboot of %s: cannot write image.next\n", img);
+    restart_via_launcher();
+}
+
 /* Background / foreground (XBA-24): the same watch as the title's window
  * (fb_present_sdl.c), so logcat shows "lifecycle: paused" / "resumed after
  * N ms" on the shell too. */
@@ -244,6 +270,8 @@ int main(int argc, char *argv[])
         pack_rc = xba_pack_load(SDL_AndroidGetInternalStoragePath(), store.xbe, &s_title_main,
                                 pack_reason, sizeof pack_reason);
     int run_title = have_game > 0 && s_title_main != NULL;
+    if (run_title && xba_pack_image_xbe())   /* another image of the disc (XBA-82) */
+        SDL_strlcpy(store.xbe, xba_pack_image_xbe(), sizeof store.xbe);
 
     SDL_version sdl;
     SDL_GetVersion(&sdl);
@@ -257,7 +285,8 @@ int main(int argc, char *argv[])
          * off (RECOMP_HEADLESS=1, RECOMP_FB_WINDOW=0, SDL video failing) and
          * the title returned. */
         s_title_store = &store;
-        xbox_SetRestartHandler(restart_via_launcher);
+        xbox_SetRestartHandler(xba_pack_image_xbe() ? restart_image_via_launcher : restart_via_launcher);
+        xbox_SetImageHandler(image_via_launcher);
         int rc = xbox_HostWindowMain(title_boot);
         printf("xboxrecomp: title returned %d\n", rc);
         recomp_quit(rc);

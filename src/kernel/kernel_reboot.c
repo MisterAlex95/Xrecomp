@@ -376,46 +376,71 @@ void xbox_quick_reboot(const uint8_t *page)
 /* The disc-relative path of a launch path, lowercase, with '/':
  * "\Device\CdRom0\game.xbe", "D:\game.xbe", "\??\D:\x\y.xbe" and
  * "\Device\CdRom0;game.xbe" give "game.xbe" / "x/y.xbe". */
+/* The disc-relative part of p (one of the prefixes below stripped), lowercase,
+ * with '/', appended to out at *o. */
+static void rel_append(const char *p, size_t len, char *out, size_t n, size_t *o)
+{
+    static const char *const prefixes[] = { "\\device\\cdrom0", "\\??\\d:", "d:", "\\??" };
+    size_t i;
+
+    for (i = 0; i < sizeof prefixes / sizeof prefixes[0]; i++) {
+        size_t l = strlen(prefixes[i]), k;
+        for (k = 0; k < l && k < len && (p[k] | 0x20) == (prefixes[i][k] | 0x20); k++)
+            ;
+        if (k == l && (len == l || p[l] == '\\' || p[l] == '/')) {
+            p += l;
+            len -= l;
+            break;
+        }
+    }
+    while (len && (*p == '\\' || *p == '/')) {
+        p++;
+        len--;
+    }
+    for (; len && *o + 1 < n; p++, len--) {
+        char c = *p == '\\' ? '/' : *p;
+        out[(*o)++] = (char)(c >= 'A' && c <= 'Z' ? c - 'A' + 'a' : c);
+    }
+    out[*o] = 0;
+}
+
 void xbox_launch_rel_path(const char *launch_path, char *out, size_t n)
 {
     const char *p = launch_path ? launch_path : "";
     const char *semi = strchr(p, ';');
     size_t o = 0;
 
-    if (semi) {
-        p = semi + 1;
-    } else {
-        static const char *const prefixes[] = { "\\device\\cdrom0\\", "\\??\\d:\\", "d:\\", "\\??\\" };
-        size_t i;
-        for (i = 0; i < sizeof prefixes / sizeof prefixes[0]; i++) {
-            size_t l = strlen(prefixes[i]), k;
-            for (k = 0; k < l && p[k] && (p[k] | 0x20) == (prefixes[i][k] | 0x20); k++)
-                ;
-            if (k == l) {
-                p += l;
-                break;
-            }
+    if (!n)
+        return;
+    out[0] = 0;
+    if (semi) {                 /* "<directory>;<file>", as XLaunchNewImage writes it */
+        rel_append(p, (size_t)(semi - p), out, n, &o);
+        while (o && out[o - 1] == '/')
+            out[--o] = 0;
+        if (o && o + 1 < n) {
+            out[o++] = '/';
+            out[o] = 0;
         }
+        p = semi + 1;
     }
-    while (*p == '\\' || *p == '/')
-        p++;
-    for (; *p && o + 1 < n; p++) {
-        char c = *p == '\\' ? '/' : *p;
-        out[o++] = (char)(c >= 'A' && c <= 'Z' ? c - 'A' + 'a' : c);
-    }
-    out[o] = 0;
+    rel_append(p, strlen(p), out, n, &o);
 }
 
-int xbox_launch_image(const char *launch_path, const uint8_t *page)
+static xbox_image_handler s_image_handler;
+
+void xbox_SetImageHandler(xbox_image_handler fn)
 {
-#if defined(_WIN32) || defined(__ANDROID__)
-    (void)launch_path; (void)page;
-    return -1;                  /* desktop POSIX only for now (XBA-82) */
-#else
+    s_image_handler = fn;
+}
+
+/* The map line for launch_path: its target (executable, or what the image
+ * handler takes) in out. 0 when found. */
+static int launch_map_lookup(const char *launch_path, char *out, size_t n)
+{
     const char *map = getenv("RECOMP_IMAGE_MAP");
-    char want[600], line[2048], exe[1536] = "", lpath[1024];
-    int64_t now = (int64_t)time(NULL);
+    char want[600], line[2048];
     FILE *f;
+    int found = -1;
 
     if (!map || !*map || !(f = fopen(map, "r")))
         return -1;
@@ -429,33 +454,78 @@ int xbox_launch_image(const char *launch_path, const uint8_t *page)
         xbox_launch_rel_path(line, rel, sizeof rel);
         if (strcmp(rel, want))
             continue;
-        snprintf(exe, sizeof exe, "%s", tab + 1);
-        l = strlen(exe);
-        while (l && (exe[l - 1] == '\n' || exe[l - 1] == '\r'))
-            exe[--l] = 0;
+        snprintf(out, n, "%s", tab + 1);
+        l = strlen(out);
+        while (l && (out[l - 1] == '\n' || out[l - 1] == '\r'))
+            out[--l] = 0;
+        found = l ? 0 : -1;
         break;
     }
     fclose(f);
-    if (!exe[0] || access(exe, X_OK) != 0)
+    return found;
+}
+
+int xbox_launch_image(const char *launch_path, const uint8_t *page)
+{
+    char target[1536], lpath[1024];
+    int64_t now = (int64_t)time(NULL);
+
+    if (launch_map_lookup(launch_path, target, sizeof target) != 0)
         return -1;
+#if defined(_WIN32) || defined(__ANDROID__)
+    if (!s_image_handler)
+        return -1;              /* no exec hand-over on these hosts */
+#else
+    if (!s_image_handler && access(target, X_OK) != 0)
+        return -1;
+#endif
     if (launch_file_path(lpath, sizeof lpath) != 0 || xbox_launch_data_write(lpath, page, &now, 1) != 0) {
         fprintf(stderr, "  [KERNEL] launch of '%s': cannot write the launch data, exiting instead\n", launch_path);
         return -1;
     }
-    fprintf(stderr, "  [KERNEL] launch of '%s': handing over to %s (RECOMP_IMAGE_MAP)\n", launch_path, exe);
+    if (s_image_handler) {
+        fprintf(stderr, "  [KERNEL] launch of '%s': handing over to %s (image handler)\n", launch_path, target);
+        fflush(NULL);
+        s_image_handler(target);
+        fprintf(stderr, "  [KERNEL] launch of '%s': the image handler returned\n", launch_path);
+        remove(lpath);
+        return -1;
+    }
+#if !defined(_WIN32) && !defined(__ANDROID__)
+    fprintf(stderr, "  [KERNEL] launch of '%s': handing over to %s (RECOMP_IMAGE_MAP)\n", launch_path, target);
     {
         char *args[2];
         sigset_t none;
-        args[0] = exe;
+        args[0] = target;
         args[1] = NULL;
         close_on_exec_all();
         sigemptyset(&none);
         pthread_sigmask(SIG_SETMASK, &none, NULL);
         fflush(NULL);
-        execv(exe, args);
-        fprintf(stderr, "  [KERNEL] launch of '%s': execv %s: %s\n", launch_path, exe, strerror(errno));
+        execv(target, args);
+        fprintf(stderr, "  [KERNEL] launch of '%s': execv %s: %s\n", launch_path, target, strerror(errno));
     }
+#endif
     remove(lpath);
     return -1;
-#endif
+}
+
+/* XeImageFileName's text: "\Device\CdRom0\" + $RECOMP_IMAGE ('/' as '\'),
+ * or default.xbe. At most 63 bytes: the guest's copy has 64
+ * (KDATA_XE_IMAGE_BUF). */
+const char *xbox_image_file_name(void)
+{
+    static char name[64];
+    const char *rel = getenv("RECOMP_IMAGE");
+    size_t o, i;
+
+    if (!rel || !*rel || strlen(rel) > 47 || strstr(rel, ".."))
+        rel = "default.xbe";
+    while (*rel == '/' || *rel == '\\')
+        rel++;
+    o = (size_t)snprintf(name, sizeof name, "\\Device\\CdRom0\\");
+    for (i = 0; rel[i] && o + 1 < sizeof name; i++)
+        name[o++] = rel[i] == '/' ? '\\' : rel[i];
+    name[o] = 0;
+    return name;
 }

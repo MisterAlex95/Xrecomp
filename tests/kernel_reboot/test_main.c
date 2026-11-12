@@ -45,6 +45,12 @@ recomp_func_t recomp_lookup_manual(uint32_t xbox_va) { (void)xbox_va; return NUL
 
 static int failures;
 static int restarts;
+static char handed[256];
+
+static void count_image(const char *target)
+{
+    snprintf(handed, sizeof handed, "%s", target);
+}
 
 static void check(int ok, const char *what)
 {
@@ -196,6 +202,49 @@ int main(void)
           "the dashboard is not");
     check(!xbox_launch_path_is_image("", "\\Device\\CdRom0\\default.xbe"),
           "an empty path is not");
+
+    /* XBA-82: the running image's name, and a hand-over through the image
+     * handler (Android's), whatever the host. */
+    check(strcmp(xbox_image_file_name(), "\\Device\\CdRom0\\default.xbe") == 0,
+          "no RECOMP_IMAGE: the image is default.xbe");
+#ifdef _WIN32
+    _putenv_s("RECOMP_IMAGE", "sub/game.xbe");
+#else
+    setenv("RECOMP_IMAGE", "sub/game.xbe", 1);
+#endif
+    check(strcmp(xbox_image_file_name(), "\\Device\\CdRom0\\sub\\game.xbe") == 0,
+          "RECOMP_IMAGE=sub/game.xbe names \\Device\\CdRom0\\sub\\game.xbe");
+    check(!xbox_launch_path_is_image("\\Device\\CdRom0;default.xbe", xbox_image_file_name()),
+          "from that image, default.xbe is another image");
+#ifdef _WIN32
+    _putenv_s("RECOMP_IMAGE", "../x.xbe");
+#else
+    setenv("RECOMP_IMAGE", "../x.xbe", 1);
+#endif
+    check(strcmp(xbox_image_file_name(), "\\Device\\CdRom0\\default.xbe") == 0,
+          "a path with .. is refused");
+    {
+        char map[700];
+        FILE *f;
+        snprintf(map, sizeof map, "%s/images.map", root);
+        f = fopen(map, "w");
+        if (f) { fputs("default.xbe\tdefault.xbe\nSub/Game.xbe\tSub/Game.xbe\n", f); fclose(f); }
+#ifdef _WIN32
+        _putenv_s("RECOMP_IMAGE_MAP", map);
+#else
+        setenv("RECOMP_IMAGE_MAP", map, 1);
+#endif
+        fill_page(page, 9);
+        check(xbox_launch_image("\\Device\\CdRom0;nothere.xbe", page) != 0 && !handed[0],
+              "an image not in the map: no hand-over");
+        xbox_SetImageHandler(count_image);
+        check(xbox_launch_image("\\Device\\CdRom0\\sub;game.xbe", page) != 0,
+              "the handler returned: the launch reports failure");
+        check(strcmp(handed, "Sub/Game.xbe") == 0, "the handler got the map's target (any case)");
+        check(!exists(file), "and the launch data is not left behind");
+        xbox_SetImageHandler(NULL);
+        remove(map);
+    }
 
     /* The window. */
     times[0] = 1000; times[1] = 1020; times[2] = 1029;

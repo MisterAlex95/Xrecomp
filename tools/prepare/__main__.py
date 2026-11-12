@@ -301,6 +301,7 @@ def main(argv=None):
     mi = ap.add_argument_group("the disc's other images (XBA-82; set by the top-level prepare)")
     mi.add_argument("--image-map", help=argparse.SUPPRESS)   # the map file every image's build bakes in
     mi.add_argument("--game-dir", help=argparse.SUPPRESS)    # D:\ for an image that is not the disc root's
+    mi.add_argument("--image-name", help=argparse.SUPPRESS)  # that image's disc path (XeImageFileName)
     a = ap.parse_args(argv)
     if a.android:
         from tools.prepare import android
@@ -438,7 +439,9 @@ def main(argv=None):
          # What a run meets that the analysis missed: the next prepare reads it.
          "-DXBA_DISCOVERY_FILE=" + os.path.join(work, DISCOVERY_FILE).replace("\\", "/"),
          # Where a launch of another image of the disc finds its executable (XBA-82).
-         "-DXBA_IMAGE_MAP=" + (a.image_map or os.path.join(work, IMAGE_MAP)).replace("\\", "/")] + gen_args, log)
+         "-DXBA_IMAGE_MAP=" + (a.image_map or os.path.join(work, IMAGE_MAP)).replace("\\", "/"),
+         # Which image this is, when not default.xbe (RECOMP_IMAGE: XeImageFileName).
+         "-DXBA_IMAGE_NAME=" + (a.image_name or "")] + gen_args, log)
     t = run(["cmake", "--build", build, "--parallel"], log)
     print("      built in %.0f s" % t, flush=True)
     exe = os.path.join(build, name)
@@ -479,7 +482,8 @@ def prepare_other_images(a, py, xbe, data_dir, work, exe, log):
     for rel, p in others:
         sub = os.path.join(work, "images", re.sub(r"[^A-Za-z0-9._-]", "_", rel))
         print("      another image the title launches: %s" % rel, flush=True)
-        cmd = [py, "-m", "tools.prepare", p, "--work", sub, "--image-map", map_path, "--game-dir", data_dir]
+        cmd = [py, "-m", "tools.prepare", p, "--work", sub, "--image-map", map_path, "--game-dir", data_dir,
+               "--image-name", rel.replace(os.sep, "/")]
         if a.force:
             cmd.append("--force")
         run(cmd, log)

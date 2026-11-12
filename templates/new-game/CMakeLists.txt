@@ -89,6 +89,11 @@ set(XBA_IMAGE_MAP "" CACHE STRING "default image map (RECOMP_IMAGE_MAP)")
 if(XBA_IMAGE_MAP)
     add_compile_definitions(XBA_IMAGE_MAP="${XBA_IMAGE_MAP}")
 endif()
+# This image's disc path when it is not default.xbe (RECOMP_IMAGE, XeImageFileName).
+set(XBA_IMAGE_NAME "" CACHE STRING "the image's disc path (RECOMP_IMAGE)")
+if(XBA_IMAGE_NAME)
+    add_compile_definitions(XBA_IMAGE_NAME="${XBA_IMAGE_NAME}")
+endif()
 # The options the title forces (title.json "env_force"), set by main() before
 # anything reads the environment.
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/title/env_force.h")

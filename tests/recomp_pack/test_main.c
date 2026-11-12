@@ -169,6 +169,37 @@ static void test_env_force(void)
     }
 }
 
+/* "images" (XBA-82): the disc's other images, each one's library in the pack folder. */
+static void test_images(void)
+{
+    recomp_pack_meta m;
+    char err[160], dir[1024], lib[1200], out[1200], key[256];
+    const char *j = "{\"format\":1,\"lib\":\"libtitle.so\",\"images\":{\"Sub/Game.xbe\":\"libimage-1.so\","
+                    "\"bad.xbe\":\"../x.so\",\"gone.xbe\":\"libimage-3.so\"}}";
+
+    CHECK(recomp_pack_parse(j, strlen(j), &m, err, sizeof err) == 0);
+    CHECK(m.images_n == 3 && m.images_dropped == 0);
+    CHECK(!strcmp(m.images[0].path, "Sub/Game.xbe") && !strcmp(m.images[0].lib, "libimage-1.so"));
+    snprintf(dir, sizeof dir, "%s/images", root);
+    mkdirs(dir);
+    snprintf(lib, sizeof lib, "%s/libtitle.so", dir);
+    write_file(lib, "x", 1);
+    snprintf(out, sizeof out, "%s/libimage-1.so", dir);
+    write_file(out, "y", 1);
+    CHECK(recomp_pack_image_lib(&m, dir, lib, "default.xbe", out, sizeof out, key, sizeof key, err, sizeof err) == 0
+          && !strcmp(out, lib) && !strcmp(key, "default.xbe"));
+    CHECK(recomp_pack_image_lib(&m, dir, lib, "", out, sizeof out, NULL, 0, err, sizeof err) == 0 && !strcmp(out, lib));
+    CHECK(recomp_pack_image_lib(&m, dir, lib, "\\SUB\\game.XBE", out, sizeof out, key, sizeof key, err, sizeof err) == 0
+          && strstr(out, "/libimage-1.so") && !strcmp(key, "Sub/Game.xbe"));
+    CHECK(recomp_pack_image_lib(&m, dir, lib, "bad.xbe", out, sizeof out, NULL, 0, err, sizeof err) == -1
+          && strstr(err, "not a file name"));
+    CHECK(recomp_pack_image_lib(&m, dir, lib, "gone.xbe", out, sizeof out, NULL, 0, err, sizeof err) == -1
+          && strstr(err, "missing"));
+    CHECK(recomp_pack_image_lib(&m, dir, lib, "other.xbe", out, sizeof out, NULL, 0, err, sizeof err) == -1
+          && strstr(err, "not in the pack"));
+    CHECK(recomp_pack_parse("{\"images\":[]}", 13, &m, err, sizeof err) == -1 && strstr(err, "images"));
+}
+
 static void test_validate_and_find(void)
 {
     recomp_pack_meta m;
@@ -324,6 +355,60 @@ static void test_routing(const char *shell_path, const char *title_path, const c
         CHECK(frame(&cursor) == 5 && cursor == 4);
     }
 
+    /* XBA-82: the last run handed over to another image of the disc
+     * (work/<tid>/image.next): that image's library runs, with its XBE. */
+    {
+        const char *(*image_xbe)(void) = (const char *(*)(void))dlsym(shell, "xba_pack_image_xbe");
+        int (*set_next)(const char *) = (int (*)(const char *))dlsym(shell, "xba_pack_set_next_image");
+        char dir[1100], path[1300], text[2600], next[1300];
+        long n;
+        FILE *f;
+
+        CHECK(image_xbe && set_next);
+        setup_game("image", 0x4D530005, title_path, 1, files, xbe);
+        snprintf(dir, sizeof dir, "%s/packs/4D530005", files);
+        snprintf(path, sizeof path, "%s/libimage-1.so", dir);
+        copy_file(title_min_path, path);
+        snprintf(path, sizeof path, "%s/libtitle.so", dir);
+        f = fopen(path, "rb");
+        fseek(f, 0, SEEK_END);
+        n = ftell(f);
+        fclose(f);
+        snprintf(text, sizeof text,
+                 "{\"format\":1,\"title_id\":\"4D530005\",\"abi\":\"%s\",\"shell_abi\":1,\"lib\":\"libtitle.so\","
+                 "\"lib_size\":%ld,\"images\":{\"Game2.xbe\":\"libimage-1.so\"}}", recomp_pack_host_abi(), n);
+        snprintf(path, sizeof path, "%s/pack.json", dir);
+        write_file(path, text, strlen(text));
+        snprintf(dir, sizeof dir, "%s/work/4D530005", files);
+        mkdirs(dir);
+        snprintf(next, sizeof next, "%s/image.next", dir);
+        write_file(next, "game2.XBE\n", 10);
+        unsetenv("RECOMP_IMAGE");
+        unsetenv("RECOMP_IMAGE_MAP");
+        CHECK(load(files, xbe, &main_fn, reason, sizeof reason) == RECOMP_PACK_OK);
+        CHECK(main_fn && main_fn(NULL) == 7);                /* the image's library */
+        CHECK(access(next, F_OK) != 0);                      /* taken once */
+        CHECK(getenv("RECOMP_IMAGE") && !strcmp(getenv("RECOMP_IMAGE"), "Game2.xbe"));
+        if (image_xbe) {
+            const char *ix = image_xbe();
+            CHECK(ix && strstr(ix, "/image/game/Game2.xbe"));
+        }
+        CHECK(getenv("RECOMP_IMAGE_MAP") && strstr(getenv("RECOMP_IMAGE_MAP"), "/work/4D530005/images.map"));
+        if (getenv("RECOMP_IMAGE_MAP")) {
+            f = fopen(getenv("RECOMP_IMAGE_MAP"), "r");
+            CHECK(f != NULL);
+            if (f) {
+                n = (long)fread(text, 1, sizeof text - 1, f);
+                text[n] = 0;
+                fclose(f);
+                CHECK(!strcmp(text, "default.xbe\tdefault.xbe\nGame2.xbe\tGame2.xbe\n"));
+            }
+        }
+        CHECK(set_next && set_next("default.xbe") == 0 && access(next, F_OK) == 0);
+        unsetenv("RECOMP_IMAGE");
+        unsetenv("RECOMP_IMAGE_MAP");
+    }
+
     /* A title linked into the shell: its strong symbols, not the forwarders. */
     void *st = dlopen(static_path, RTLD_NOW | RTLD_LOCAL);
     if (!st) { fprintf(stderr, "FAIL dlopen static shell: %s\n", dlerror()); failures++; return; }
@@ -347,6 +432,7 @@ int main(int argc, char **argv)
     test_title_id();
     test_parse();
     test_env_force();
+    test_images();
     test_validate_and_find();
     if (argc >= 5)
         test_routing(argv[1], argv[2], argv[3], argv[4]);
