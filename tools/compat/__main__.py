@@ -165,6 +165,26 @@ def prepare(source, work, log):
     return rc, time.time() - t0, tail
 
 
+def keep_last_shot(shots_dir, dest):
+    """The runtime's RECOMP_FB_DUMP writes one BMP per report into shots_dir;
+    keep the last as dest (the screen when the run ended) and drop the rest.
+    Returns dest, or None when the run dumped nothing."""
+    try:
+        files = sorted(f for f in os.listdir(shots_dir) if f.lower().endswith(".bmp"))
+    except OSError:
+        return None
+    if not files:
+        return None
+    os.replace(os.path.join(shots_dir, files[-1]), dest)
+    for f in files[:-1]:
+        os.remove(os.path.join(shots_dir, f))
+    try:
+        os.rmdir(shots_dir)
+    except OSError:
+        pass
+    return dest
+
+
 def boot(exe, work, seconds, run_index=0):
     """Run exe headless for `seconds`; returns (status, presses_ms, exit_info, run_s, log_text)."""
     status_path = os.path.join(work, "status-%d.jsonl" % run_index)
@@ -174,8 +194,13 @@ def boot(exe, work, seconds, run_index=0):
         if os.path.exists(p):
             os.remove(p)
     open(live, "w").close()
+    # A screenshot per report (RECOMP_FB_DUMP); the last one is kept. It stays
+    # in the work folder, on this machine: it is the game's picture.
+    shots = os.path.join(work, "shots-%d" % run_index)
+    os.makedirs(shots, exist_ok=True)
     env = dict(os.environ, RECOMP_HEADLESS="1", RECOMP_STATUS=status_path, RECOMP_STATUS_MS="1000",
-               RECOMP_PAD_LIVE=live, RECOMP_USB=os.environ.get("RECOMP_USB", "1"))
+               RECOMP_PAD_LIVE=live, RECOMP_USB=os.environ.get("RECOMP_USB", "1"),
+               RECOMP_FB_DUMP=os.path.join(shots, "f"))
     t0 = time.time()
     with open(log, "w") as out:
         proc = subprocess.Popen([exe], cwd=os.path.dirname(exe), env=env, stdout=out,
@@ -213,6 +238,7 @@ def boot(exe, work, seconds, run_index=0):
                 continue
     with open(log, errors="replace") as f:
         log_text = f.read()
+    keep_last_shot(shots, os.path.join(work, "shot-%d.bmp" % run_index))
     return read_jsonl(status_path), presses, exit_info, run_s, log_text
 
 
@@ -252,7 +278,9 @@ def run_one(source, a):
         status, presses, exit_info, run_s, log_text = boot(exe, work, a.seconds, i)
         disc = [d for d in read_jsonl(os.path.join(work, "discovered.jsonl")) if d.get("t") != "run"]
         stage, blocker, summary = classify(status, presses, exit_info, run_s, a.sustain, log_text, disc)
-        runs.append({"stage": stage, "blocker": blocker, "run_s": round(run_s), **summary})
+        shot = os.path.join(work, "shot-%d.bmp" % i)
+        runs.append({"stage": stage, "blocker": blocker, "run_s": round(run_s), **summary,
+                     "screenshot": shot if os.path.isfile(shot) else None})
     # The title's stage: the lowest over the runs (a race that loses 1 run in 4 is not "sustained").
     worst = min(runs, key=lambda r: STAGES.index(r["stage"]))
     best = max(runs, key=lambda r: STAGES.index(r["stage"]))

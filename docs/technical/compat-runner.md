@@ -24,6 +24,10 @@ stage names and the first line of an error: nothing from the game.
 
 The pad: `start` three times from 8 s, then `a`, every 2 s, through `RECOMP_PAD_LIVE`.
 
+The screen: `RECOMP_FB_DUMP` writes a BMP per report; the last one of each run is kept as `<work>/shot-<n>.bmp`
+and named in the results (`runs[].screenshot`). It stays in the work folder: it is the game's picture, never part of
+the matrix.
+
 ## Stages
 
 | Stage | Means |
