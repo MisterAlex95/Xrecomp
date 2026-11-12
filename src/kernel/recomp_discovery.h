@@ -16,6 +16,8 @@
  *                                                          (profiles/xdk/d3d8/d3d8.c)
  *   {"t":"wait_spin","va":"0x0027B91C","ret":"0x00025701","header":"0x00040001","status":"0xC0000001"}
  *                                                          a thread waits on it thousands of times a second
+ *   {"t":"launch","va":"0x5A1C33E0","path":"d:\\game.xbe"}  the title launched another image (XBA-82);
+ *                                                          va is a hash of the path
  *
  * The file: $RECOMP_DISCOVERY (recomp.cfg can set it); unset, empty or "0":
  * nothing is written. The desktop title project gets a default from
@@ -36,6 +38,7 @@ void recomp_discovery_thread_ctx(uint32_t ctx1, uint32_t routine);
 void recomp_discovery_unimpl(uint32_t va, const char *insn);
 void recomp_discovery_d3d(uint32_t device, uint32_t slot);
 void recomp_discovery_wait_spin(uint32_t object, uint32_t ret_va, uint32_t header, uint32_t status);
+void recomp_discovery_launch(const char *path);
 
 /* The file in use, or NULL when discovery is off (opens it on first use). */
 const char *recomp_discovery_path(void);

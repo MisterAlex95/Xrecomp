@@ -68,6 +68,13 @@ def test_crash_and_exit():
     assert classify(st, [8000], ("exit", 0), 40, 60)[1] == "exited with code 0 after 40 s"
 
 
+def test_a_launch_of_another_image_is_named():
+    st = playing(20)
+    log = "  [KERNEL] launch of 'd:\\game.xbe' is not this title (default.xbe): exiting"
+    assert classify(st, [8000], ("exit", 0), 20, 60, log)[1] == \
+        "launches another XBE: d:\\game.xbe (multi-XBE discs, XBA-82)"
+
+
 def test_report_table():
     rows = [{"source": "a", "stage": "boots", "blocker": "no flip", "toolkit": "abc"},
             {"source": "b", "title_id": "4D5300D1", "stage": "sustained", "toolkit": "abc", "xdk": 5849},
