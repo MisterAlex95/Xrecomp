@@ -481,17 +481,33 @@ void xbox_worker_stack_free(int slot)
  * behind a main thread spinning in its frame wait. The GPU and the audio
  * keep their cores for the same reason.
  *
- * Opt-in, like the one-CPU gate it was made beside: RECOMP_GUEST_CPUS=one
- * pins to the lowest core the process may use, =<n> picks the core (cpu 0
- * takes most of the IRQ work on Linux). Unset or =all, the title's threads
- * go wherever the host scheduler puts them, as before.
+ * RECOMP_GUEST_CPUS=one pins to the lowest core the process may use, =<n>
+ * picks the core (cpu 0 takes most of the IRQ work on Linux), =all lets the
+ * title's threads go wherever the host scheduler puts them.
+ *
+ * Unset: one on arm64 Linux and Android, all elsewhere (XBA-81). Lifted code
+ * stores to guest memory with plain stores and assumes x86's ordering (TSO):
+ * a thread that fills a buffer and then sets a flag expects every other
+ * thread to see them in that order. x86 hosts keep it; arm64 does not,
+ * between cores. On one core the title's threads see each other's stores in
+ * program order again, as they did on the console's one CPU. On Android the
+ * process runs on the fast cores (host_cpus.c), so the lowest core it may use
+ * is a fast one. macOS cannot pin a thread: there the pin does nothing.
  */
+#if defined(__aarch64__) && defined(__linux__)
+#define GUEST_CPUS_DEFAULT "one"
+#else
+#define GUEST_CPUS_DEFAULT "all"
+#endif
+
 DWORD_PTR xbox_GuestCpuMask(void)
 {
     const char *mode = getenv("RECOMP_GUEST_CPUS");
     DWORD_PTR proc = 0, sys = 0;
 
-    if (!mode || !*mode || !strcmp(mode, "all"))
+    if (!mode || !*mode)
+        mode = GUEST_CPUS_DEFAULT;
+    if (!strcmp(mode, "all"))
         return 0;
     if (!GetProcessAffinityMask(GetCurrentProcess(), &proc, &sys) || !proc)
         return 0;
@@ -531,7 +547,8 @@ void xbox_GuestThreadPin(const char *role)
         announced = 1;
         fprintf(stderr, "  [KERNEL] guest threads on one host core (cpu %d),"
                         " as on the console (RECOMP_GUEST_CPUS=%s)\n",
-                core, getenv("RECOMP_GUEST_CPUS"));
+                core, getenv("RECOMP_GUEST_CPUS") ? getenv("RECOMP_GUEST_CPUS")
+                                                  : GUEST_CPUS_DEFAULT " by default");
         fflush(stderr);
     }
     xbox_log(XBOX_LOG_DEBUG, XBOX_LOG_THREAD, "guest thread %s on cpu %d",

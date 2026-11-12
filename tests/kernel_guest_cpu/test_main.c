@@ -133,12 +133,24 @@ int main(void)
     DWORD_PTR proc = 0, sys = 0, mask, again;
     HANDLE th;
 
-    test_setenv("RECOMP_GUEST_CPUS", NULL);
-    CHECK(xbox_GuestCpuMask() == 0, "unset, nothing is pinned (opt-in)");
-    test_setenv("RECOMP_GUEST_CPUS", "");
-    CHECK(xbox_GuestCpuMask() == 0, "empty, nothing is pinned");
     test_setenv("RECOMP_GUEST_CPUS", "one");
     mask = xbox_GuestCpuMask();
+    /* Unset or empty: one core on arm64 Linux and Android, where it gives the
+     * title's threads x86's store order among themselves (XBA-81); every core
+     * elsewhere. */
+    test_setenv("RECOMP_GUEST_CPUS", NULL);
+#if defined(__aarch64__) && defined(__linux__)
+    CHECK(xbox_GuestCpuMask() == mask, "unset on arm64 Linux: one core, as =one");
+#else
+    CHECK(xbox_GuestCpuMask() == 0, "unset, nothing is pinned");
+#endif
+    test_setenv("RECOMP_GUEST_CPUS", "");
+#if defined(__aarch64__) && defined(__linux__)
+    CHECK(xbox_GuestCpuMask() == mask, "empty on arm64 Linux: one core");
+#else
+    CHECK(xbox_GuestCpuMask() == 0, "empty, nothing is pinned");
+#endif
+    test_setenv("RECOMP_GUEST_CPUS", "one");
     again = xbox_GuestCpuMask();
     CHECK(mask != 0, "=one is one core, got no mask");
     CHECK((mask & (mask - 1)) == 0, "the mask is one core: %#lx", (unsigned long)mask);
