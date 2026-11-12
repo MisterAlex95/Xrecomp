@@ -29,6 +29,7 @@
 #if !defined(_WIN32)
 #include <unistd.h>   /* _exit */
 #include <time.h>     /* nanosleep: the ack thread's idle wait */
+#include <sys/mman.h> /* lazy reservations: anonymous memory over the mirrors */
 #endif
 
 /* XBE header field offsets (per xboxdevwiki.net/Xbe) */
@@ -121,6 +122,15 @@ static int span_holds(const void *addr, size_t size)
 #endif
 }
 static void *g_tiled_view = NULL;
+
+/* Lazy reservations (XBA-103): see lazy_reserve, by xbox_ReserveAlloc. */
+#define LAZY_RESERVE_MAX 256
+static struct { uint32_t base, size; int released; } g_lazy[LAZY_RESERVE_MAX];
+static int g_lazy_count;
+static uint32_t g_lazy_floor, g_lazy_top;
+static volatile uint32_t g_lazy_next;     /* in use: [g_lazy_next, g_lazy_top) */
+static SRWLOCK g_lazy_lock = SRWLOCK_INIT;
+static void lazy_reset(void);
 
 /* Contiguous / physical memory window (see MemoryLayoutInit).
  * XBOX_CONTIG_BASE / XBOX_CONTIG_SIZE come from kernel.h - the bridges need
@@ -296,18 +306,24 @@ static uint64_t ext_vma_span(uint64_t mirror_top)
  * the host range just above a fresh span is often taken already: under
  * qemu-user, and in a process full of libraries like an Android app, the
  * contiguous window at base + 2 GB then fails (ENOMEM) and the first pinned
- * allocation faults. =1 on, =0 off; unset, on for Android and off elsewhere
- * (the desktop layout stays as it was). RECOMP_EXT_VMA implies it. */
+ * allocation faults. =1 on, =0 off; unset, on for every 64-bit POSIX host.
+ * RECOMP_EXT_VMA implies it.
+ *
+ * It used to be on for Android only. The desktop layout it replaced caps its
+ * span at 2 GB once the map passes 64 MB, so the contiguous window lands on
+ * the host range right above the span; on the Mac the malloc zone was there
+ * and Fable's first contiguous allocation faulted at guest 0x80005000 (XBA-103,
+ * staged in tests/memory_layout_posix). One layout everywhere: the 4 GB
+ * reservation is PROT_NONE address space, which costs a 64-bit host nothing.
+ * A 32-bit host cannot reserve it at all, so it keeps the old layout. */
 static int hold_guest_window(void)
 {
     const char *e = getenv("RECOMP_GUEST_WINDOW");
+    if (sizeof(void *) < 8)
+        return 0;
     if (e && *e)
         return *e != '0';
-#if defined(__ANDROID__)
     return 1;
-#else
-    return 0;
-#endif
 }
 
 /* Map a view of `mapping` at a fixed host address. On Windows, inside the
@@ -3256,8 +3272,10 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
          * GUEST_VMEM_TOP pushed the contiguous window onto the neighbour
          * instead. Each fixed window is carved out of the span as it is
          * mapped, and guest_vmem's range is handed over just before
-         * guest_vmem_init. Off by default; the stock span is unchanged. */
-        if (ext_vma_span(g_span_size) || hold_guest_window()) {
+         * guest_vmem_init. RECOMP_GUEST_WINDOW (the default on 64-bit
+         * hosts, XBA-103) holds the same window without the tracker. */
+        if (sizeof(void *) >= 8
+                && (ext_vma_span(g_span_size) || hold_guest_window())) {
             /* The 4 GB window plus one view past it: the first RAM mirror
              * above 4 GB is the wrap of a guest access that runs over the
              * top (a dword read at 0xFFFFFFFF, guest+disp carrying out of 32
@@ -4268,6 +4286,7 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
     if (g_win_window_size)
         win_settle_placeholders();
 #endif
+    lazy_reset();
     xbox_WatchInit();
     fprintf(stderr, "xbox_MemoryLayoutInit: complete\n");
     return TRUE;
@@ -4292,6 +4311,10 @@ void xbox_ProtectMirrorsForDebug(void)
     int n = 0;
     for (int m = 0; m < XBOX_NUM_MIRRORS; m++) {
         DWORD old;
+        uint64_t lo = (uint64_t)(m + 1) * g_memory_size;
+        /* Not a mirror any more where a lazy reservation replaced it. */
+        if (g_lazy_next < g_lazy_top && lo + g_memory_size > g_lazy_next)
+            continue;
         if (g_mirror_views[m] &&
             VirtualProtect(g_mirror_views[m], g_memory_size,
                            PAGE_READONLY, &old)) {
@@ -4352,6 +4375,11 @@ void xbox_MemoryLayoutShutdown(void)
         g_memory_base = NULL;
         g_memory_size = 0;
     }
+    /* The lazy reservations go with the span below; nothing is held now. */
+    AcquireSRWLockExclusive(&g_lazy_lock);
+    g_lazy_count = 0;
+    g_lazy_top = g_lazy_next = g_lazy_floor = 0;
+    ReleaseSRWLockExclusive(&g_lazy_lock);
     /* The apertures. Left mapped, a second init cannot place them: the first
      * run still owns 0x80000000, 0xFD000000, 0xFE800000, 0xFF000000 and the
      * tiled alias, and every one of those comes back as "failed" while init
@@ -4438,8 +4466,9 @@ void xbox_MemoryLayoutShutdown(void)
  * are already backed and distinct, nothing else hands them out, and a commit
  * inside one is a no-op because it is real memory already.
  *
- * Returns 0 when the mapping is no larger than RAM -- the default for titles
- * that never call xbox_SetMapSize -- which leaves the old behaviour untouched.
+ * That range only exists when the title asked for a mapping larger than RAM
+ * (xbox_SetMapSize). Without one, reservations come from lazy_reserve below,
+ * which needs no up-front size (XBA-103).
  *
  * ponytail: a bump allocator with no free. A reservation is address space, the
  * range is large, and a title that reserves and releases repeatedly would need
@@ -4447,22 +4476,208 @@ void xbox_MemoryLayoutShutdown(void)
  */
 static uint32_t g_reserve_next;
 
+/* Lazy reservations (XBA-103): address space the title reserves, taken from
+ * the window the layout already holds, with no map size set in advance.
+ *
+ * Fable reserves 608 MB for its own allocator and Half-Life 2 reserves 128 MB
+ * and then 200 MB. Both used to need xbox_SetMapSize, which grows the RAM
+ * mapping for every title-visible address up to that size, moves the mirrors
+ * out by the same amount, and has to be picked per title. Here a reservation
+ * is carved top-down from GUEST_VMEM_TOP (0x7FFE0000, the end of Xbox user
+ * space) and its host range is replaced, in one mmap(MAP_FIXED) inside the span
+ * we hold, by fresh anonymous memory: MAP_NORESERVE, so it costs no commit
+ * charge, and its pages exist only once the title touches them (zero-filled,
+ * which is what a commit gives on the console). Nothing else is ever placed
+ * in the span, so MAP_FIXED can only replace our own views.
+ *
+ * Top-down, because what it replaces are RAM mirrors, and the ones titles walk
+ * into (RenderWare's memory walker, writes that wrap past 64 MB) are the low
+ * ones: a title that never reserves more than its heap keeps all 28, and one
+ * that reserves 608 MB loses mirrors 22-28 only. The range is
+ * [g_lazy_floor, g_lazy_top): the floor is the top of the RAM view (or of the
+ * xbox_SetMapSize mapping), so it never overlaps what the old path hands out.
+ *
+ * POSIX only, and only while the span holds the range (the whole-window
+ * layout, or the old base + mirrors span below 2 GB); not under RECOMP_EXT_VMA,
+ * whose tracker owns everything above the mirrors and refuses addresses inside
+ * them. Windows keeps the old path. RECOMP_LAZY_RESERVE=0 turns it off: an
+ * over-large reserve is then clamped to what the heap can back, as before.
+ *
+ * Reservations are listed so a release can find its size and give the pages
+ * back; the address is not handed out again (a bump allocator, like the old
+ * path). */
+
+static void lazy_reset(void)
+{
+    AcquireSRWLockExclusive(&g_lazy_lock);
+    g_lazy_count = 0;
+    g_lazy_floor = (uint32_t)(g_memory_size < GUEST_VMEM_TOP ? g_memory_size : GUEST_VMEM_TOP);
+    g_lazy_top = GUEST_VMEM_TOP;
+    /* The old base + mirrors span (RECOMP_GUEST_WINDOW=0) stops at 1.8 GB. */
+    if (g_span_base && g_span_size < GUEST_VMEM_TOP)
+        g_lazy_top = (uint32_t)g_span_size & ~0xFFFFu;
+    if (g_lazy_top < g_lazy_floor)
+        g_lazy_top = g_lazy_floor;
+    g_lazy_next = g_lazy_top;
+    g_reserve_next = 0;     /* the old path's cursor: a re-init starts over too */
+    ReleaseSRWLockExclusive(&g_lazy_lock);
+}
+
+static int lazy_reserve_enabled(void)
+{
+    const char *e = getenv("RECOMP_LAZY_RESERVE");
+    return !(e && *e == '0');
+}
+
+#if !defined(_WIN32)
+/* Fresh zero-filled pages over [va, va + size), all inside the span. */
+static int lazy_fresh_pages(uint32_t va, uint32_t size)
+{
+    void *host = (void *)((uintptr_t)va + (uintptr_t)g_memory_offset);
+    int flags = MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED;
+#if defined(MAP_NORESERVE)
+    flags |= MAP_NORESERVE;
+#endif
+    if (!span_holds(host, size))
+        return 0;
+    if (mmap(host, size, PROT_READ | PROT_WRITE, flags, -1, 0) == host)
+        return 1;
+    /* A failed MAP_FIXED may have unmapped the range already: hold it again
+     * so nothing else lands in the span. */
+    mmap(host, size, PROT_NONE, flags, -1, 0);
+    return 0;
+}
+#endif
+
+static uint32_t lazy_reserve(uint32_t size, uint32_t align)
+{
+#if defined(_WIN32)
+    (void)size; (void)align;
+    return 0;
+#else
+    uint64_t rounded = ((uint64_t)size + 0xFFFFu) & ~(uint64_t)0xFFFFu;
+    uint32_t base = 0;
+
+    if (!size || !g_span_base || !lazy_reserve_enabled() || guest_vmem_active())
+        return 0;
+    if (align < 0x10000u)
+        align = 0x10000u;           /* the allocation granule */
+    if (align & (align - 1))
+        return 0;
+    AcquireSRWLockExclusive(&g_lazy_lock);
+    if (g_lazy_count < LAZY_RESERVE_MAX
+            && rounded <= (uint64_t)g_lazy_next - g_lazy_floor) {
+        uint32_t want = (uint32_t)((g_lazy_next - rounded) & ~(uint64_t)(align - 1));
+        /* The whole run down from the cursor, alignment slack included, so
+         * [g_lazy_next, g_lazy_top) stays one run of our own pages. */
+        if (want >= g_lazy_floor && lazy_fresh_pages(want, g_lazy_next - want)) {
+            base = want;
+            g_lazy[g_lazy_count].base = base;
+            g_lazy[g_lazy_count].size = (uint32_t)rounded;
+            g_lazy[g_lazy_count].released = 0;
+            g_lazy_count++;
+            g_lazy_next = base;
+        }
+    }
+    ReleaseSRWLockExclusive(&g_lazy_lock);
+    if (base)
+        fprintf(stderr, "  [MEM] lazy reservation: %u KB at guest 0x%08X-0x%08X"
+                " (%u MB of lazy reservations, floor 0x%08X)\n",
+                (unsigned)(rounded >> 10), base, (uint32_t)(base + rounded),
+                (unsigned)((g_lazy_top - base) >> 20), g_lazy_floor);
+    return base;
+#endif
+}
+
+int xbox_ReserveHolds(uint32_t va, uint32_t bytes)
+{
+    uint32_t next = g_lazy_next;
+    return next < g_lazy_top && va >= next
+        && (uint64_t)va + bytes <= (uint64_t)g_lazy_top;
+}
+
+/* Index of the reservation holding va, or -1. Caller holds g_lazy_lock. */
+static int lazy_find(uint32_t va)
+{
+    for (int i = 0; i < g_lazy_count; i++)
+        if (va >= g_lazy[i].base && va - g_lazy[i].base < g_lazy[i].size)
+            return i;
+    return -1;
+}
+
+int xbox_ReserveFree(uint32_t va, uint32_t size, int release,
+                     uint32_t *out_base, uint32_t *out_size)
+{
+#if defined(_WIN32)
+    (void)va; (void)size; (void)release; (void)out_base; (void)out_size;
+    return 0;
+#else
+    int i, ok = 0;
+    uint32_t page_base = va & ~0xFFFu, end, lo, hi;
+    uint64_t end64;
+    long hp = sysconf(_SC_PAGESIZE);
+    uint32_t host_page = hp > 0 ? (uint32_t)hp : 4096u;
+
+    AcquireSRWLockExclusive(&g_lazy_lock);
+    i = lazy_find(page_base);
+    if (i < 0 || g_lazy[i].released) {
+        ReleaseSRWLockExclusive(&g_lazy_lock);
+        return 0;
+    }
+    if (release) {
+        if (va != g_lazy[i].base) {
+            ReleaseSRWLockExclusive(&g_lazy_lock);
+            return -1;                         /* not at the allocation base */
+        }
+        page_base = g_lazy[i].base;
+        end = g_lazy[i].base + g_lazy[i].size;
+        g_lazy[i].released = 1;
+    } else {
+        end64 = size ? (((uint64_t)va + size + 0xFFFu) & ~(uint64_t)0xFFFu)
+                     : (uint64_t)g_lazy[i].base + g_lazy[i].size;
+        if (end64 > (uint64_t)g_lazy[i].base + g_lazy[i].size)
+            end64 = (uint64_t)g_lazy[i].base + g_lazy[i].size;
+        end = (uint32_t)end64;
+    }
+    /* The pages go back to the host: fresh ones over every whole host page
+     * (16 KB on Apple Silicon), zeroes on the guest pages at either edge. */
+    lo = (page_base + host_page - 1) & ~(host_page - 1);
+    hi = end & ~(host_page - 1);
+    if (lo < hi) {
+        ok = lazy_fresh_pages(lo, hi - lo);
+        if (page_base < lo)
+            memset((void *)((uintptr_t)page_base + (uintptr_t)g_memory_offset), 0, lo - page_base);
+        if (hi < end)
+            memset((void *)((uintptr_t)hi + (uintptr_t)g_memory_offset), 0, end - hi);
+    } else {
+        memset((void *)((uintptr_t)page_base + (uintptr_t)g_memory_offset), 0, end - page_base);
+        ok = 1;
+    }
+    ReleaseSRWLockExclusive(&g_lazy_lock);
+    if (out_base) *out_base = page_base;
+    if (out_size) *out_size = end - page_base;
+    return ok ? 1 : 0;
+#endif
+}
+
 uint32_t xbox_ReserveAlloc(uint32_t size, uint32_t align)
 {
     uint32_t base;
 
-    if (g_memory_size <= g_xbox_total_ram || size == 0)
+    if (size == 0)
         return 0;
     if (!align)
         align = 4096;
-    if (!g_reserve_next)
-        g_reserve_next = (uint32_t)g_xbox_total_ram;
-
-    base = (g_reserve_next + align - 1) & ~(align - 1);
-    if ((size_t)base + size > g_memory_size)
-        return 0;
-    g_reserve_next = base + size;
-    return base;
+    if (g_memory_size > g_xbox_total_ram) {
+        if (!g_reserve_next)
+            g_reserve_next = (uint32_t)g_xbox_total_ram;
+        base = (g_reserve_next + align - 1) & ~(align - 1);
+        if ((size_t)base + size <= g_memory_size) {
+            g_reserve_next = base + size;
+            return base;
+        }
+    }
+    return lazy_reserve(size, align);
 }
 
 BOOL xbox_IsXboxAddress(uintptr_t address)

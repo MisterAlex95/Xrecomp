@@ -93,6 +93,7 @@ extern uint32_t g_xbox_image_lo, g_xbox_image_hi;
 extern uint32_t xbox_ContiguousAllocatedBytes(void);
 extern size_t g_xbox_total_ram;
 extern size_t g_xbox_map_size;     /* host mapping; 0 means same as RAM */
+extern int xbox_ReserveHolds(uint32_t va, uint32_t bytes);
 
 /* How far up the host actually mapped guest RAM: the map size when it was
  * set apart from the RAM size (xbox_SetMapSize), else the RAM size. */
@@ -112,6 +113,10 @@ uint8_t *mcpx_apu_phys(uint64_t addr)
      * 0x20000000 -- zeros, so the front end and the world were silent while
      * the movies (buffers in low RAM) played. */
     if ((uint32_t)addr >= (256u << 20) && (uint32_t)addr < apu_mapped_ram())
+        return g_apu_ram_ptr + (uint32_t)addr;
+    /* The same reserve without a map size: a lazy reservation at the top of
+     * user space (xbox_ReserveAlloc, XBA-103), at host offset + VA too. */
+    if (xbox_ReserveHolds((uint32_t)addr, 1))
         return g_apu_ram_ptr + (uint32_t)addr;
     /* RAM above the window's 64 MB. On a 128 MB layout (a devkit) most of
      * the heap sits above 0x04000000, and so do the sound buffers a title
@@ -164,6 +169,8 @@ const char *mcpx_apu_phys_class(uint64_t addr)
 {
     uint32_t a = (uint32_t)addr & 0x0FFFFFFFu;
     if ((uint32_t)addr >= (256u << 20) && (uint32_t)addr < apu_mapped_ram())
+        return "ram";
+    if (xbox_ReserveHolds((uint32_t)addr, 1))
         return "ram";
     if (a >= (64u << 20))
         return a < apu_mapped_ram() ? "ram" : "wrap";

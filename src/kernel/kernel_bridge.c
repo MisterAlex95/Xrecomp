@@ -92,6 +92,8 @@ static int bridge_va_mapped(uint32_t va, uint32_t bytes)
         return 0;
     if (end <= mapped)
         return 1;
+    if (xbox_ReserveHolds(va, bytes))   /* a lazy reservation (XBA-103) */
+        return 1;
     return va >= XBOX_CONTIG_BASE
         && end <= (uint64_t)XBOX_CONTIG_BASE + XBOX_CONTIG_SIZE;
 }
@@ -1312,7 +1314,8 @@ static void bridge_NtAllocateVirtualMemory(void)
      * Until then, say so: silent aliasing surfaces as corrupted data
      * structures far from here, which is the worst way to find it.
      */
-    if (base_hint >= (g_xbox_map_size ? g_xbox_map_size : g_xbox_total_ram)) {
+    if (base_hint >= (g_xbox_map_size ? g_xbox_map_size : g_xbox_total_ram)
+            && !xbox_ReserveHolds(base_hint, 1)) {
         static unsigned warned;
         if (warned++ < 8)
             fprintf(stderr,
@@ -1374,8 +1377,10 @@ static void bridge_NtAllocateVirtualMemory(void)
          * believed it owned. That walks past the top of RAM, where the mirrors
          * alias low memory, so its containers quietly shared storage with the
          * live heap. Granting the full range is both more honest and less
-         * damaging. Returns 0 unless the title asked for a mapping larger than
-         * RAM, so nothing changes for titles that did not. */
+         * damaging. Without a mapping larger than RAM (xbox_SetMapSize) the
+         * range is a lazy reservation at the top of user space, backed only
+         * where the title touches it (XBA-103); RECOMP_LAZY_RESERVE=0 brings
+         * the clamp below back. */
         xbox_va = xbox_ReserveAlloc(size, 4096);
         if (xbox_va) {
             fprintf(stderr, "  [KERNEL] NtAllocateVirtualMemory: reserve of %u"
@@ -1586,6 +1591,30 @@ static void bridge_free_guest_pages(uint32_t base_ptr, uint32_t size_ptr,
             fflush(stderr);
         }
         return;
+    }
+
+    /* A lazy reservation (xbox_ReserveAlloc, XBA-103): its pages go back to
+     * the host and read as zero afterwards. */
+    {
+        uint32_t lb = 0, ls = 0;
+        int r = xbox_ReserveFree(base, size, free_type == BRIDGE_MEM_RELEASE,
+                                 &lb, &ls);
+        if (r < 0) {
+            g_eax = BRIDGE_FREE_VM_NOT_AT_BASE;
+            return;
+        }
+        if (r > 0) {
+            BRIDGE_MEM32(base_ptr) = lb;
+            BRIDGE_MEM32(size_ptr) = ls;
+            g_eax = 0;
+            if (free_type == BRIDGE_MEM_RELEASE)
+                releases++;
+            else {
+                decommits++;
+                decommit_bytes += ls;
+            }
+            return;
+        }
     }
 
     /* Only the dynamic heap and the reservations above RAM are ever handed

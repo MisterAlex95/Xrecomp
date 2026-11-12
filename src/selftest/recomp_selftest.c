@@ -399,11 +399,10 @@ static const char *check_window(char *note, size_t note_len)
     const char *e = getenv("RECOMP_GUEST_WINDOW");
 
     if (!xbox_GuestWindowHeld()) {
-#if defined(__ANDROID__)
-        if (!e || !*e || *e != '0')
+        /* The default on every 64-bit host (XBA-103; Android since XBA-21). */
+        if (sizeof(void *) >= 8 && (!e || !*e || *e != '0'))
             return "not held: the 4 GB reservation was refused (layout fell back to fixed addresses)";
-#endif
-        snprintf(note, note_len, "not held: %s", e && *e ? "RECOMP_GUEST_WINDOW=0" : "desktop default");
+        snprintf(note, note_len, "not held: %s", e && *e ? "RECOMP_GUEST_WINDOW=0" : "32-bit host");
         return NULL;
     }
     if (access("/proc/self/maps", R_OK) != 0) {
@@ -540,6 +539,45 @@ static const char *check_exec_guest(void)
     return NULL;
 }
 
+/* A title's large reservation, served lazily from the held window (XBA-103):
+ * Fable reserves 608 MB for its allocator. The first and last byte are
+ * writable, a write there does not reach low RAM through a mirror, and a
+ * release gives back pages that read as zero. Run after the mirror and MMIO
+ * checks: the reservation replaces the top mirrors until the next init. */
+static const char *check_reserve(char *note, size_t note_len)
+{
+    const uint32_t size = 608u << 20;
+    uint32_t va = xbox_ReserveAlloc(size, 0x10000), fb = 0, fs = 0;
+    size_t ram = xbox_GetMappedSize();
+    volatile uint8_t *lo, *hi, *alias;
+    uint8_t before;
+
+    if (!va) {
+        if (!xbox_GuestWindowHeld()) {
+            snprintf(note, note_len, "no lazy reservations: the guest window is not held");
+            return NULL;
+        }
+        return "xbox_ReserveAlloc(608 MB) failed with the guest window held";
+    }
+    lo = guest(va);
+    hi = guest((uint64_t)va + size - 1);
+    alias = guest(va % ram);
+    before = *alias;
+    if (!probe_write(lo, (uint8_t)(before ^ 0xFF)) || !probe_write(hi, 0xA5))
+        return why("the reservation at guest 0x%08X is not writable", va);
+    if (*alias != before)
+        return why("a write at guest 0x%08X reached low RAM at 0x%08X", va,
+                   (unsigned)(va % ram));
+    if (!xbox_ReserveHolds(va, size))
+        return "xbox_ReserveHolds does not cover the reservation";
+    if (xbox_ReserveFree(va, 0, 1, &fb, &fs) != 1 || fb != va || fs != size)
+        return why("release: base 0x%08X size %u", fb, fs);
+    if (!probe_read(lo) || *lo != 0 || *hi != 0)
+        return "released pages do not read as zero";
+    snprintf(note, note_len, "608 MB at guest 0x%08X", va);
+    return NULL;
+}
+
 static const char *check_save_dir(const char *dir)
 {
     char path[1024];
@@ -656,6 +694,7 @@ int recomp_selftest_run(const void *xbe, size_t xbe_len, const char *save_dir)
 
     RUN("exec_alloc", check_exec_alloc());
     RUN("exec_guest", up ? check_exec_guest() : NEEDS_LAYOUT);
+    RUN("reserve", up ? check_reserve(note, sizeof note) : NEEDS_LAYOUT);
     RUN("save_dir", check_save_dir(save_dir));
 
     if (up) {
