@@ -332,7 +332,7 @@ say which method, the rest is its payload. Seen in *Fable* (dispatcher
 | 1 | swap bookkeeping: the flip hold uses its interval (`nv2a_flip_hold.c`) |
 | 5 | `KeSetEvent` on a fence event: the one D3D's `BlockOnTime` sleeps on, with no timeout, after patching this method in at the fence it waits for when the GPU is more than 0x2000 bytes behind. Often a KEVENT D3D built itself (no `KeInitializeEvent`), so it needs `RECOMP_TITLE_KEVENTS=1`; a hook sets it with `xbox_KeSetGuestEvent()` (`kernel.h`) |
 | 6, 7 | `D3DDevice_InsertCallback`: calls `[0x401A88]` with `[0x40186C]` (methods `0x1D8C`/`0x1D90` pushed just before) |
-| 8, 9 | PGRAPH RDI writes, a register poke |
+| 8, 9 | PGRAPH RDI writes, a register poke: GPU-internal state the executor does not read (it keeps its own), so `xdk/d3d8` acknowledges them; the first payloads are printed (`[D3D] software method 8 ...`). Seen: *Fable* ~30 a frame in-world, *Burnout 3* ~80 a second in a race, *Black* 1 x 8 and 12 x 9 at start |
 | 0xC, 0xD, 0xE | deferred `RunPushBuffer`: patch the return `JUMP` (and fixups) of a recorded pushbuffer that is run again before the GPU passed its previous run |
 
 The 0xC–0xE ones matter for the walk: until the handler has run, the recorded
@@ -367,5 +367,9 @@ type without a per-title hook. It does not work against this runtime yet:
   it synchronously on the executor thread races that delivery (both mask and
   unmask `PMC_INTR_EN_0`), and the executor thread has no guest stack or TIB.
 
-Until then a title that needs other types (InsertCallback callbacks, register
-pokes) has to service them in its hook.
+What `xdk/d3d8` services without any title address (XBA-80, XBA-94): 5 and
+0xC–0xE on the device it finds, 8 and 9 acknowledged. Not yet: 6 and 7
+(`D3DDevice_InsertCallback`), whose handler calls a guest routine at DPC level:
+it needs the routine and its context from the methods before it and a guest
+call on the DPC thread (`xbox_DpcQueue` takes a KDPC, not a bare routine).
+They stay counted as not serviced in the report.

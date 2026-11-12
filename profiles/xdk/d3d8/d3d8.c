@@ -77,12 +77,21 @@ extern void recomp_discovery_d3d(uint32_t device, uint32_t slot);
 #define D3D_GIVEN 0
 #endif
 
+/* 8 and 9 (XBA-94): D3D's handler pokes PGRAPH through its RDI (RAM data
+ * interface) window, 0x400750 / 0x400754 -- internal GPU state no part of this
+ * runtime reads, since the executor keeps its own. On the console the GPU
+ * stops until the handler has run and then goes on; here going on is all
+ * there is to do, so they are acknowledged (counted as serviced) whatever the
+ * profile says. The first few payloads are printed, to document them per XDK
+ * build (docs/technical/pushbuffer-executor.md). */
+#define D3D_METHODS_ACK 0x0300u
+
 #ifdef XBA_D3D_SW_METHODS
-#define D3D_METHODS_DEFAULT (XBA_D3D_SW_METHODS)
+#define D3D_METHODS_DEFAULT ((XBA_D3D_SW_METHODS) | D3D_METHODS_ACK)
 #elif D3D_GIVEN
-#define D3D_METHODS_DEFAULT 0u
+#define D3D_METHODS_DEFAULT D3D_METHODS_ACK
 #else
-#define D3D_METHODS_DEFAULT 0x7020u /* found at run time: everything serviceable */
+#define D3D_METHODS_DEFAULT (0x7020u | D3D_METHODS_ACK) /* found at run time: everything serviceable */
 #endif
 
 static int d3d_mirror;
@@ -231,7 +240,18 @@ static int d3d_software_method(uint32_t param)
 {
     uint32_t type = param & 0x1Fu, dev;
 
-    if (!(s_methods & (1u << type)) || !(dev = current_device()))
+    if (!(s_methods & (1u << type)))
+        return 0;
+    if (D3D_METHODS_ACK & (1u << type)) {
+        static int shown;
+        if (shown < 8) {
+            shown++;
+            fprintf(stderr, "[D3D] software method %u (PGRAPH RDI write), payload 0x%07X: acknowledged\n",
+                    type, param >> 5);
+        }
+        return 1;
+    }
+    if (!(dev = current_device()))
         return 0;
     /* 5: KeSetEvent on the fence event. BlockOnTime patches it into the
      * pushbuffer at the fence it waits for when the GPU is more than 0x2000
