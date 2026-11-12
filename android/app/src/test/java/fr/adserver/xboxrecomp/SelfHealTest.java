@@ -27,6 +27,8 @@ public class SelfHealTest {
     private static final String THREAD = "{\"t\":\"thread\",\"va\":\"0x00012345\",\"ctx1\":\"0x00045678\"}\n";
     private static final String UNIMPL = "{\"t\":\"unimpl\",\"va\":\"0x00012345\",\"insn\":\"bsf eax, ecx\"}\n";
     private static final String D3D = "{\"t\":\"d3d\",\"va\":\"0x0085FDE0\",\"slot\":\"0x00862288\"}\n";
+    private static final String STACK_SWITCH = "{\"t\":\"stack_switch\",\"va\":\"0x00023454\",\"to\":\"0x00023481\","
+            + "\"why\":\"resumes where no context is parked and no function starts\"}\n";
 
     private void append(File work, String text) throws Exception {
         assertTrue(work.mkdirs() || work.isDirectory());
@@ -89,6 +91,21 @@ public class SelfHealTest {
         assertEquals(SelfHeal.Offer.NEEDS_FIX, s.offer);
         assertTrue(s.blocker, s.blocker.contains("after 3 Prepare again rounds"));
         assertFalse(s.relaunch);
+    }
+
+    @Test
+    public void aStackSwitchTheRuntimeCannotCarryIsTheBlocker() throws Exception {
+        File work = tmp.newFolder("w");
+        SelfHeal.launched(work, 1000);
+        append(work, RUN + STACK_SWITCH);
+        SelfHeal.Finds f = SelfHeal.scan(SelfHeal.discoveryFile(work), 0);
+        assertEquals(0, f.seeds);
+        assertEquals(1, f.stackSwitch);
+        assertTrue(SelfHeal.onExit(work, crash(2000)));
+        SelfHeal.State s = SelfHeal.read(work);
+        assertEquals(SelfHeal.Offer.NEEDS_FIX, s.offer);
+        assertEquals("stack switch at 0x00023454 to 0x00023481: resumes where no context is parked and no function "
+                + "starts", s.blocker);
     }
 
     @Test

@@ -533,6 +533,18 @@ typedef struct recomp_seh_desc {
 #endif
 jmp_buf *recomp_seh_anchor(uint32_t reg, uint32_t ebp, const recomp_seh_desc *d);
 
+/* Guest stack switches (XBA-101): a function that loads esp from memory and
+ * returns on the other stack (a fiber or coroutine switch) calls
+ * recomp_stack_switch_ret at its ret, and the runtime switches host stacks
+ * with it -- one host stack per guest stack. recomp_stack_context() names the
+ * host stack the thread runs on (0: its own); a native longjmp is only valid
+ * within one. Contract: src/kernel/recomp_stack_switch.h; design and limits:
+ * docs/technical/stack-switching.md. */
+void recomp_stack_switch_ret(uint32_t saved_esp, uint32_t loaded_esp, uint32_t entry_ret,
+                             uint32_t ret_imm, uint32_t site);
+void recomp_stack_switch_unhandled(uint32_t site);
+uint32_t recomp_stack_context(void);
+
 /* EFLAGS.DF, and the signed step the string instructions take because of it.
  *
  * `cld`/`std` used to lift to a comment and every string instruction stepped

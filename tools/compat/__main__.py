@@ -79,7 +79,13 @@ def classify(status, presses_ms, exit_info, run_s, sustain_s, log_text="", disco
         stall = _stalled_for(status)
         if stall >= STALL_S:
             blocker = "hang: no flip for the last %d s" % stall
-    if blocker and (blocker == "no flip" or blocker.startswith(("hang", "no status"))):
+    # A guest stack switch the runtime could not carry (XBA-101) explains a
+    # hang, a crash or an exit alike: the side that should have run never did.
+    switch = next((d for d in discovered if d.get("t") == "stack_switch"), None)
+    if blocker and switch and not launch:
+        blocker += "; stack switch at %s to %s: %s (XBA-101)" % (switch.get("va"), switch.get("to"),
+                                                                   switch.get("why"))
+    elif blocker and (blocker == "no flip" or blocker.startswith(("hang", "no status"))):
         u = UNIMPL_RE.search(log_text or "")
         if u:
             blocker += "; first untranslated instruction reached: %s at %s" % (u.group(1), u.group(2))

@@ -69,12 +69,16 @@ int main(void)
     recomp_discovery_d3d(0x0085FDE0u, 0x00862288u);
     recomp_discovery_launch("d:\\game.xbe");
     recomp_discovery_launch("D:\\GAME.XBE");          /* the same image: one entry */
-    CHECK(recomp_discovery_written() == 6);
+    recomp_discovery_stack_switch(0x00023450u, 0x00023480u, "a \"why\"");
+    recomp_discovery_stack_switch(0x00023450u, 0x00012345u, "again");   /* the same site: one entry */
+    CHECK(recomp_discovery_written() == 7);
     CHECK(recomp_discovery_path() && !strcmp(recomp_discovery_path(), path));
     text = slurp(path);                                         /* written as it happened: no close needed */
     CHECK(text != NULL);
     if (text) {
-        CHECK(count(text, "\n") == 7);
+        CHECK(count(text, "\n") == 8);
+        CHECK(strstr(text, "{\"t\":\"stack_switch\",\"va\":\"0x00023450\",\"to\":\"0x00023480\","
+                           "\"why\":\"a \\\"why\\\"\"}\n") != NULL);
         CHECK(strstr(text, "\"path\":\"d:\\\\game.xbe\"}\n") != NULL);
         CHECK(strstr(text, "{\"t\":\"d3d\",\"va\":\"0x0085FDE0\",\"slot\":\"0x00862288\"}\n") != NULL);
         CHECK(count(text, "{\"t\":\"run\",\"time\":\"20") == 1);
