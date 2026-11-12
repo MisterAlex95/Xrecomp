@@ -448,6 +448,7 @@ _EFLAGS_SETTERS = frozenset({
     "bsf", "bsr",       # Bit scan sets ZF
     "bt", "bts", "btr", "btc",  # Bit test sets CF
     "cmpxchg",           # Compare-and-exchange sets ZF
+    "cmpxchg8b",         # ... and its 64-bit form, ZF only
     "xadd",              # Exchange-and-add sets flags
 })
 
@@ -1147,7 +1148,7 @@ def _make_condition(jcc, flag_setter, flag_ops):
         return None
 
     # ── cmpxchg: compares accumulator with dest, sets ZF on match ──
-    if flag_setter == "cmpxchg":
+    if flag_setter in ("cmpxchg", "cmpxchg8b"):
         # ZF comes from the compare the instruction already did, and the lift
         # snapshots it into _fa/_fb. Re-reading eax here would test a value
         # cmpxchg may have just replaced.
@@ -2018,6 +2019,65 @@ class Lifter:
         # unlocked xadd on memory is single-CPU-safe on the console and
         # costs nothing extra to make safe here.
         atomic_m = m[5:] if m.startswith("lock ") else m
+        if atomic_m == "cmpxchg8b" and len(ops) >= 1 and ops[0].type == "mem":
+            # edx:eax against the qword; equal: store ecx:ebx, else load it
+            # into edx:eax. ZF only, snapshotted as cmpxchg's (_fa == _fb).
+            addr = _fmt_mem(ops[0])
+            return [
+                "{ uint64_t _cmp = ((uint64_t)edx << 32) | eax;",
+                "  uint64_t _old = RECOMP_ATOMIC_CAS64("
+                f"XBOX_PTR({addr}), _cmp, ((uint64_t)ecx << 32) | ebx);",
+                "  _fa = (_old == _cmp) ? 0u : 1u; _fb = 0u; _fas = (int32_t)_fa; _fbs = 0;",
+                "  if (_old != _cmp) { eax = (uint32_t)_old; edx = (uint32_t)(_old >> 32); } }"
+                f"  /* {m} */",
+            ]
+        if atomic_m in ("xadd", "cmpxchg") and len(ops) >= 2 and ops[0].type == "reg":
+            # Register destination: nothing to share, so no atomic -- but the
+            # same results and flag snapshots as the memory forms.
+            width = _operand_width(ops[0]) or 4
+            bits = width * 8
+            dst, src = _fmt_operand_read(ops[0]), _fmt_operand_read(ops[1])
+            if atomic_m == "xadd":
+                return [
+                    f"{{ uint{bits}_t _a = (uint{bits}_t)({dst}), _b = (uint{bits}_t)({src});",
+                    f"  uint{bits}_t _s = (uint{bits}_t)(_a + _b);",
+                    f"  _fa = (uint32_t)_s; _fas = (int32_t)(int{bits}_t)_s; /* {m} result */",
+                    "  " + _fmt_operand_write(ops[1], "_a"),
+                    "  " + _fmt_operand_write(ops[0], "_s") + " }" f"  /* {m} */",
+                ]
+            acc = {1: "al", 2: "ax", 4: "eax"}[width]
+            acc_read = _fmt_reg(acc)
+            acc_write = _fmt_set_reg(acc, "_old")
+            return [
+                f"{{ uint{bits}_t _cmp = (uint{bits}_t)({acc_read}), _old = (uint{bits}_t)({dst});",
+                "  _fa = _old; _fb = _cmp;",
+                f"  _fas = (int32_t)(int{bits}_t)_fa; _fbs = (int32_t)(int{bits}_t)_fb;",
+                "  if (_old == _cmp) { " + _fmt_operand_write(ops[0], f"(uint{bits}_t)({src})") + " }",
+                "  else { " + acc_write + " } }" f"  /* {m} */",
+            ]
+        if atomic_m in ("xadd", "cmpxchg") and len(ops) >= 2 and ops[0].type == "mem" \
+                and (_operand_width(ops[0]) or 4) in (1, 2):
+            # 8- and 16-bit memory forms: a compare-and-swap of that width.
+            width = _operand_width(ops[0])
+            bits = width * 8
+            addr = _fmt_mem(ops[0])
+            src = _fmt_operand_read(ops[1])
+            if atomic_m == "xadd":
+                return [
+                    f"{{ uint{bits}_t _add = (uint{bits}_t)({src}), _old, _new;",
+                    f"  do {{ _old = MEM{bits}({addr}); _new = (uint{bits}_t)(_old + _add); }}",
+                    f"  while (RECOMP_ATOMIC_CAS{bits}(XBOX_PTR({addr}), _old, _new) != _old);",
+                    f"  _fa = (uint32_t)_new; _fas = (int32_t)(int{bits}_t)_new; /* {m} result */",
+                    "  " + _fmt_operand_write(ops[1], "_old") + " }" f"  /* {m} */",
+                ]
+            acc = {1: "al", 2: "ax"}[width]
+            return [
+                f"{{ uint{bits}_t _cmp = (uint{bits}_t)({_fmt_reg(acc)});",
+                f"  uint{bits}_t _old = RECOMP_ATOMIC_CAS{bits}(XBOX_PTR({addr}), _cmp, (uint{bits}_t)({src}));",
+                "  _fa = _old; _fb = _cmp;",
+                f"  _fas = (int32_t)(int{bits}_t)_fa; _fbs = (int32_t)(int{bits}_t)_fb;",
+                "  if (_old != _cmp) { " + _fmt_set_reg(acc, "_old") + " } }" f"  /* {m} */",
+            ]
         if atomic_m in ("xadd", "cmpxchg") and len(ops) >= 2:
             width = _operand_width(ops[0]) or 4
             if width == 4 and ops[0].type == "mem":
@@ -4605,11 +4665,23 @@ def lift_basic_block(lifter, bb, flag_state=None):
             # Flags are undefined after these - clear tracking
             last_flag_setter = None
             last_flag_ops = []
-        elif curr.mnemonic in ("lock xadd", "lock cmpxchg"):
+        elif curr.mnemonic in ("lock xadd", "lock cmpxchg", "lock cmpxchg8b"):
             # Capstone keeps the lock prefix in the mnemonic; the flags are
             # those of the bare instruction, which the lowering snapshots.
             last_flag_setter = curr.mnemonic[5:]
             last_flag_ops = list(curr.operands)
+        elif curr.mnemonic.startswith("lock ") and curr.mnemonic[5:] in _EFLAGS_PRESERVE:
+            pass  # lock not: no flags, as without the prefix
+        elif curr.mnemonic.startswith("lock ") and (curr.mnemonic[5:] in FLAG_SETTERS
+                                                    or curr.mnemonic[5:] in _EFLAGS_SETTERS):
+            # lock inc/dec/add/... (XBA-78): the lowering lifts the bare
+            # instruction on a copy inside a compare-and-swap loop and leaves
+            # the same snapshots (_fa, _fas, _cf), so the flags are the bare
+            # instruction's. Without this a `lock dec [x]; jnz`, the shape of
+            # InterlockedDecrement, cleared the tracking and the jnz read the
+            # unassigned _flags.
+            last_flag_setter, last_flag_ops = normalise_zero_test(
+                curr.mnemonic[5:], list(curr.operands))
         elif curr.mnemonic in _EFLAGS_SETTERS:
             # Additional flag-setting instructions
             last_flag_setter, last_flag_ops = normalise_zero_test(
