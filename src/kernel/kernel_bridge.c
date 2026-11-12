@@ -930,6 +930,7 @@ static void bridge_PsCreateSystemThreadEx(void)
                 }
                 xbox_DpcMarkGuestThread();
                 xbox_GuestThreadPin("guest-main");
+                recomp_status_thread_started();   /* the title's main thread, run here (XBA-79) */
                 g_esp -= 4; BRIDGE_MEM32(g_esp) = start_context2;
                 g_esp -= 4; BRIDGE_MEM32(g_esp) = start_context1;
                 g_esp -= 4; BRIDGE_MEM32(g_esp) = 0;
@@ -9669,6 +9670,7 @@ static void bridge_PsCreateSystemThread(void)
             if (is_first_call) {
                 xbox_DpcMarkGuestThread();
                 xbox_GuestThreadPin("guest-main");
+                recomp_status_thread_started();   /* the title's main thread, run here (XBA-79) */
                 g_esp -= 4; BRIDGE_MEM32(g_esp) = start_context2;
                 g_esp -= 4; BRIDGE_MEM32(g_esp) = start_context1;
                 g_esp -= 4; BRIDGE_MEM32(g_esp) = 0;
