@@ -8,7 +8,7 @@ REPO="$(cd "$HERE/.." && pwd)"
 cd "$HERE"
 
 echo "== swift build"
-swift build 2>&1 | grep -E "error|warning: |Build complete" || true
+swift build 2>&1 | grep -v "search path" | grep -E "error|warning: |Build complete" || true
 swift build >/dev/null 2>&1   # fails the script on a build error
 BIN="$(swift build --show-bin-path)"
 

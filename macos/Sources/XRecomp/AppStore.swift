@@ -1,29 +1,513 @@
 import AppKit
 import XRecompCore
 
+/// The real launcher: drives XRecompCore for the views. Settings and per-title files live under AppPaths
+/// (Application Support); the toolkit is the checkout next to the app. One prepare at a time (the others queue),
+/// one game at a time. Slow work (scan, --check, dependency checks, the venv) runs off the main thread.
 @MainActor
 final class AppStore: LauncherActions {
+    /// The one store of the process (the delegate stops its children at quit).
+    static weak var current: AppStore?
     let model = LauncherModel()
-    init() { model.actions = self }
-    func start() {}
-    func rescan() {}
-    func addGame(_ url: URL) {}
-    func prepare(_ id: String, force: Bool) {}
-    func cancelPrepare(_ id: String) {}
-    func play(_ id: String) {}
-    func stop(_ id: String) {}
-    func loadConfig(_ id: String?) -> RecompConfig { RecompConfig() }
-    func saveConfig(_ config: RecompConfig, for id: String?) {}
-    func storage(_ id: String) -> [(Storage.Item, Int64)] { [] }
-    func delete(_ item: Storage.Item, of id: String) {}
-    func importSaves(_ id: String) -> Int { 0 }
-    func reveal(_ url: URL) {}
-    func titlePaths(_ id: String) -> TitlePaths? { nil }
-    func setToolkit(_ path: String) {}
-    func addLibraryFolder(_ path: String) {}
-    func removeLibraryFolder(_ path: String) {}
-    func setWorkRoot(_ path: String?) {}
-    func recheckSetup() {}
-    func createVenv() {}
-    func licences() -> [(String, String)] { [] }
+    private let basePaths = AppPaths.standard()
+    private var settings: Settings
+    private var paths: AppPaths
+    private var toolkit: Toolkit?
+    private var python: URL?
+    private var queue: [String] = []
+    private var preparing: (id: String, runner: PrepareRunner)?
+    private var game: (id: String, runner: GameRunner)?
+    private var ticker: Timer?
+    private let work = DispatchQueue(label: "xrecomp.store", qos: .userInitiated)
+
+    init() {
+        settings = Settings.load(from: basePaths.settingsFile)
+        paths = settings.paths(base: basePaths)
+        model.actions = self
+        AppStore.current = self
+    }
+
+    func start() {
+        model.setup.appHome = basePaths.root.path
+        model.setup.libraryFolders = settings.libraryFolders
+        model.setup.workRoot = settings.workRoot
+        ticker = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                guard let self, self.preparing != nil || self.game != nil else { return }
+                self.model.tick += 1
+            }
+        }
+        recheckSetup(then: { [weak self] in self?.rescan() })
+    }
+
+    // ---- setup ---------------------------------------------------------------------------------------------------
+
+    func recheckSetup() { recheckSetup(then: nil) }
+
+    private func recheckSetup(then: (() -> Void)?) {
+        model.setup.checking = true
+        let s = settings, base = basePaths
+        work.async {
+            let tk = Toolkit.resolveForApp(settings: s)
+            let py = PythonEnv.resolve(settingPath: s.pythonPath, toolkit: tk?.root, appVenv: base.venv)
+            let commit = tk?.commit()
+            let deps = DependencyCheck.run(python: py)
+            DispatchQueue.main.async { [self] in
+                toolkit = tk
+                python = py
+                model.setup.toolkit = tk?.root.path
+                model.setup.toolkitSource = tk.map(sourceName)
+                model.setup.toolkitCommit = commit
+                model.setup.python = py?.path
+                model.setup.dependencies = deps
+                model.setup.checking = false
+                if tk == nil && model.route == .library { model.route = .setup }
+                then?()
+            }
+        }
+    }
+
+    private func sourceName(_ t: Toolkit) -> String {
+        switch t.source {
+        case .setting: return "your setting"
+        case .environment: return "XBA_TOOLKIT"
+        case .infoPlist: return "the app (build-app.sh)"
+        case .bundle: return "the folders around the app"
+        }
+    }
+
+    private func saveSettings() {
+        do { try settings.save(to: basePaths.settingsFile) } catch { model.notice = "Cannot save the settings: \(error.localizedDescription)" }
+        paths = settings.paths(base: basePaths)
+        model.setup.libraryFolders = settings.libraryFolders
+        model.setup.workRoot = settings.workRoot
+    }
+
+    func setToolkit(_ path: String) {
+        guard Toolkit.isValid(URL(fileURLWithPath: path)) else {
+            model.notice = "\(path) is not an xboxrecomp-android checkout (no tools/prepare or templates/new-game)."
+            return
+        }
+        settings.toolkitPath = path
+        saveSettings()
+        recheckSetup(then: { [weak self] in self?.rescan() })
+    }
+
+    func addLibraryFolder(_ path: String) {
+        let tilde = (path as NSString).abbreviatingWithTildeInPath
+        if !settings.libraryFolders.contains(tilde) && !settings.libraryFolders.contains(path) {
+            settings.libraryFolders.append(tilde)
+            saveSettings()
+        }
+        rescan()
+    }
+
+    func removeLibraryFolder(_ path: String) {
+        settings.libraryFolders.removeAll { $0 == path }
+        if settings.libraryFolders.isEmpty { settings.libraryFolders = [Settings.defaultLibrary] }
+        saveSettings()
+        rescan()
+    }
+
+    func setWorkRoot(_ path: String?) {
+        settings.workRoot = path
+        saveSettings()
+        refreshStates()
+    }
+
+    func createVenv() {
+        guard let base = PythonEnv.findBase() else {
+            model.notice = "No Python 3.10 or later found. Install one with: brew install python@3.12"
+            return
+        }
+        model.setup.creatingVenv = true
+        model.setup.venvLog = []
+        let venv = basePaths.venv
+        work.async {
+            let ok = PythonEnv.createVenv(at: venv, base: base) { line in
+                DispatchQueue.main.async { self.model.setup.venvLog.append(line) }
+            }
+            DispatchQueue.main.async { [self] in
+                model.setup.creatingVenv = false
+                if !ok { model.notice = "Creating the Python environment failed; see its log in Setup." }
+                recheckSetup(then: { [weak self] in self?.rescan() })
+            }
+        }
+    }
+
+    func licences() -> [(String, String)] {
+        guard let tk = toolkit else { return [] }
+        return tk.licenceFiles().map { u in
+            (u.path.replacingOccurrences(of: tk.root.path + "/", with: ""),
+             (try? String(contentsOf: u, encoding: .utf8)) ?? "")
+        }
+    }
+
+    // ---- library -------------------------------------------------------------------------------------------------
+
+    func rescan() {
+        guard !model.scanning else { return }
+        model.scanning = true
+        let folders = settings.libraryURLs, p = paths, tk = toolkit, py = python
+        work.async {
+            var scanner = LibraryScanner { _ in .failure(.init("Needs the Python environment (Setup)")) }
+            if let tk, let py {
+                scanner.identifyImage = LibraryScanner.pythonIdentify(python: py.path, toolkit: tk.root, scanDir: p.scanDir)
+            }
+            var index = LibraryIndex.load(from: p.libraryFile)
+            let entries = scanner.scan(folders, index: &index)
+            try? index.save(to: p.libraryFile)
+            let items = entries.map { AppStore.item(for: $0, paths: p) }
+            DispatchQueue.main.async { [self] in
+                merge(items)
+                model.scanning = false
+                refreshStates()
+            }
+        }
+    }
+
+    /// A GameItem for a scanned entry: art (cached art.png, else decoded from the XBE), accent, state.json.
+    nonisolated static func item(for e: LibraryEntry, paths: AppPaths) -> GameItem {
+        var art: NSImage?
+        var accent = Accent.color(hue: Double(TitleArt.titleHue(e.titleId ?? e.path)))
+        var record = TitleRecord()
+        if let tid = e.titleId {
+            let t = paths.title(tid)
+            if let cg = TitleArt.load(cache: t.art, xbe: e.xbe.map { URL(fileURLWithPath: $0) }) {
+                art = NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height))
+                accent = Accent.forTitle(image: TitleArt.argb(cg), titleId: tid)
+            }
+            record = TitleRecord.load(from: t.state)
+        }
+        var g = GameItem(id: e.id, entry: e, name: e.displayName, titleId: e.titleId, art: art, accent: accent)
+        g.record = record
+        if let why = e.problem { g.status = .unreadable(why) }
+        return g
+    }
+
+    /// New scan results in, keeping what the running prepare and game know.
+    private func merge(_ items: [GameItem]) {
+        var out: [GameItem] = []
+        for var n in items {
+            if let old = model.game(n.id) {
+                n.prepare = old.prepare
+                n.runningSince = old.runningSince
+                n.lastExit = old.lastExit
+                n.lastExitTail = old.lastExitTail
+                if case .unreadable = n.status {} else {
+                    n.status = old.status
+                    n.exe = old.exe
+                    n.envForce = old.envForce
+                }
+            }
+            out.append(n)
+        }
+        // A game that runs or prepares stays listed even if its folder went away meanwhile.
+        for old in model.games where !out.contains(where: { $0.id == old.id })
+            && (old.runningSince != nil || old.prepare != nil) {
+            out.append(old)
+        }
+        model.games = out
+    }
+
+    func addGame(_ url: URL) {
+        let isDir = FileManager.default.isDirectory(url)
+        if isDir {
+            addLibraryFolder(url.path)
+        } else if LibraryScanner.imageExtensions.contains(url.pathExtension.lowercased()) {
+            addLibraryFolder(url.deletingLastPathComponent().path)
+        } else if url.lastPathComponent.lowercased() == "default.xbe" {
+            addLibraryFolder(url.deletingLastPathComponent().path)
+        } else {
+            model.notice = "\(url.lastPathComponent) is not a disc image (.iso) or a folder holding default.xbe."
+        }
+    }
+
+    // ---- title state ---------------------------------------------------------------------------------------------
+
+    private func refreshStates() {
+        for g in model.games where g.titleId != nil { refreshState(g.id) }
+    }
+
+    /// `prepare --check --json` for one title, off the main thread.
+    private func refreshState(_ id: String) {
+        guard let g = model.game(id), let tid = g.titleId, let tk = toolkit, let py = python else { return }
+        if case .unreadable = g.status { return }
+        let source = URL(fileURLWithPath: g.entry.path), workDir = paths.title(tid).work
+        work.async {
+            let st = TitleState.check(python: py.path, toolkit: tk.root, source: source, work: workDir)
+            DispatchQueue.main.async { [self] in
+                model.update(id) { item in
+                    guard let st else {
+                        item.status = .error(code: "CHECK_FAILED", message: "prepare --check did not answer")
+                        return
+                    }
+                    if let t = st.title, !t.isEmpty { item.name = t }
+                    item.envForce = st.envForce
+                    item.exe = st.playable ? st.exe : nil
+                    switch st.state {
+                    case .ready: item.status = .ready
+                    case .stale: item.status = .stale(reasons: st.reasons)
+                    case .absent: item.status = .absent
+                    case .error: item.status = .error(code: st.code ?? "ERROR", message: st.msg ?? "")
+                    }
+                }
+            }
+        }
+    }
+
+    func titlePaths(_ id: String) -> TitlePaths? {
+        model.game(id)?.titleId.map { paths.title($0) }
+    }
+
+    // ---- prepare -------------------------------------------------------------------------------------------------
+
+    func prepare(_ id: String, force: Bool) {
+        guard let g = model.game(id), let tid = g.titleId else { return }
+        guard toolkit != nil, python != nil else {
+            model.notice = "Finish Setup first: XRecomp needs the toolkit and its Python environment."
+            model.route = .setup
+            return
+        }
+        let t = paths.title(tid)
+        // A first prepare of an image extracts the disc: check the room for it.
+        if g.status == .absent, let free = Storage.freeSpace(at: t.work) {
+            let need = Storage.estimate(sourceKind: g.entry.kind, sourceSize: g.entry.size)
+            if free < need {
+                model.notice = "Not enough free space: preparing \(g.name) needs about \(Storage.format(need)), "
+                    + "\(Storage.format(free)) is free on that disk. Free some space or move the work folders (Setup)."
+                return
+            }
+        }
+        if preparing != nil {
+            if !queue.contains(id) && preparing?.id != id { queue.append(id) }
+            updateQueuePositions()
+            return
+        }
+        startPrepare(id, force: force)
+    }
+
+    private func startPrepare(_ id: String, force: Bool) {
+        guard let g = model.game(id), let tid = g.titleId, let tk = toolkit, let py = python else { return }
+        let t = paths.title(tid)
+        var req = PrepareRunner.Request(python: py.path, toolkit: tk.root, source: URL(fileURLWithPath: g.entry.path),
+                                        work: t.work)
+        req.force = force
+        var record = TitleRecord.load(from: t.state)
+        record.sourcePath = g.entry.path
+        try? record.save(to: t.state)
+        let runner = PrepareRunner(req) { [weak self] e in
+            DispatchQueue.main.async { self?.prepareEvent(id, e) }
+        }
+        model.liveLog = []
+        model.liveLogTitle = "\(g.name) · prepare"
+        model.update(id) {
+            $0.prepare = .running(PrepareProtocol.Progress(step: 0, n: 5, pct: 0, id: "", msg: "starting"), started: Date())
+        }
+        do {
+            try runner.start()
+            preparing = (id, runner)
+        } catch {
+            model.update(id) {
+                $0.prepare = .failed(code: "START_FAILED", message: "\(error)", logTail: [], log: nil)
+            }
+            nextInQueue()
+        }
+    }
+
+    private func prepareEvent(_ id: String, _ e: PrepareRunner.Event) {
+        switch e {
+        case .progress(let p):
+            model.appendLog("· \(p.id) \(p.pct) % \(p.msg)")
+            model.update(id) { item in
+                if case .running(_, let started)? = item.prepare { item.prepare = .running(p, started: started) }
+            }
+        case .line(let l):
+            model.appendLog(l)
+        case .finished(let outcome):
+            preparing = nil
+            guard let tid = model.game(id)?.titleId else { return nextInQueue() }
+            let t = paths.title(tid)
+            var record = TitleRecord.load(from: t.state)
+            switch outcome {
+            case .ok:
+                model.update(id) { $0.prepare = nil }
+                record.lastPrepare = .init(ok: true)
+            case .cancelled:
+                model.update(id) { $0.prepare = nil }
+                record.lastPrepare = .init(ok: false, code: "CANCELLED")
+            case .failed(let code, let message):
+                var tail = tailLines(t.work.appendingPathComponent(PrepareRunner.logName), 40)
+                    .filter { !$0.hasPrefix("XBA_PROGRESS") }
+                let toolLog = tailLines(t.prepareLog, 40)
+                if !toolLog.isEmpty { tail = toolLog }
+                model.update(id) {
+                    $0.prepare = .failed(code: code, message: message, logTail: tail,
+                                         log: FileManager.default.fileExists(atPath: t.prepareLog.path) ? t.prepareLog
+                                             : t.work.appendingPathComponent(PrepareRunner.logName))
+                }
+                record.lastPrepare = .init(ok: false, code: code, message: message)
+            }
+            try? record.save(to: t.state)
+            refreshState(id)
+            nextInQueue()
+        }
+    }
+
+    private func nextInQueue() {
+        guard preparing == nil, !queue.isEmpty else { return updateQueuePositions() }
+        let id = queue.removeFirst()
+        updateQueuePositions()
+        startPrepare(id, force: false)
+    }
+
+    private func updateQueuePositions() {
+        for g in model.games {
+            if let i = queue.firstIndex(of: g.id) {
+                model.update(g.id) { $0.prepare = .queued(position: i + 1) }
+            } else if case .queued? = g.prepare {
+                model.update(g.id) { $0.prepare = nil }
+            }
+        }
+    }
+
+    func cancelPrepare(_ id: String) {
+        if let i = queue.firstIndex(of: id) {
+            queue.remove(at: i)
+            updateQueuePositions()
+            return
+        }
+        if preparing?.id == id { preparing?.runner.cancel() }
+        if case .failed? = model.game(id)?.prepare { model.update(id) { $0.prepare = nil } }
+    }
+
+    // ---- play ----------------------------------------------------------------------------------------------------
+
+    func play(_ id: String) {
+        guard game == nil else { return model.notice = "Another game is running: stop it first." }
+        guard let g = model.game(id), let tid = g.titleId, let exe = g.exe else { return }
+        let t = paths.title(tid)
+        let cfg = RecompConfig.load(dir: t.recompCfgDir)
+        let defaults = loadConfig(nil).activePairs.reduce(into: [String: String]()) { $0[$1.key] = $1.value }
+        let req = GameRunner.Request.forTitle(exe: URL(fileURLWithPath: exe), title: t, config: cfg,
+                                              globalDefaults: defaults, logs: RunLog(dir: t.logs))
+        try? FileManager.default.ensureDirectory(t.save)
+        let runner = GameRunner(req) { [weak self] e in
+            DispatchQueue.main.async { self?.gameEvent(id, e) }
+        }
+        model.liveLog = []
+        model.liveLogTitle = "\(g.name) · run started \(Date().formatted(date: .omitted, time: .shortened))"
+        do {
+            try runner.start()
+            game = (id, runner)
+            model.update(id) {
+                $0.runningSince = Date()
+                $0.lastExit = nil
+                $0.lastExitTail = []
+            }
+        } catch {
+            model.notice = "Cannot start \(g.name): \(error)"
+        }
+    }
+
+    private func gameEvent(_ id: String, _ e: GameRunner.Event) {
+        switch e {
+        case .line(let l):
+            model.appendLog(l)
+        case .exited(let exit, let byUser, let seconds):
+            game = nil
+            let problem = GameRunner.exitProblem(exit, stoppedByUser: byUser)
+            let tail = Array(model.liveLog.suffix(40))
+            model.update(id) {
+                $0.runningSince = nil
+                $0.lastExit = problem
+                $0.lastExitTail = problem == nil ? [] : tail
+            }
+            if let tid = model.game(id)?.titleId {
+                let t = paths.title(tid)
+                var r = TitleRecord.load(from: t.state)
+                r.recordRun(seconds: seconds)
+                try? r.save(to: t.state)
+                model.update(id) { $0.record = r }
+            }
+            // A run may have found new code (discovered.jsonl): the title can turn stale.
+            refreshState(id)
+        }
+    }
+
+    func stop(_ id: String) {
+        if game?.id == id { game?.runner.stop() }
+    }
+
+    // ---- settings ------------------------------------------------------------------------------------------------
+
+    private var defaultsDir: URL { basePaths.root.appendingPathComponent("defaults", isDirectory: true) }
+
+    func loadConfig(_ id: String?) -> RecompConfig {
+        if let id, let t = titlePaths(id) { return RecompConfig.load(dir: t.recompCfgDir) }
+        return RecompConfig.load(dir: defaultsDir)
+    }
+
+    func saveConfig(_ config: RecompConfig, for id: String?) {
+        var c = config
+        if c.file == nil {
+            // A config built in memory: put its lines in the right file.
+            var target = id.flatMap { titlePaths($0) }.map { RecompConfig.load(dir: $0.recompCfgDir) }
+                ?? RecompConfig.load(dir: defaultsDir)
+            target.setUnmanagedText(c.unmanagedText())
+            for o in OptionTable.all { if let i = c.choiceIndex(o) { target.set(o, o.choices[i]) } }
+            c = target
+        }
+        do {
+            try c.save()
+        } catch {
+            model.notice = "Cannot save the settings: \(error.localizedDescription)"
+        }
+        if id == nil {
+            settings.globalDefaults = c.activePairs.reduce(into: [:]) { $0[$1.key] = $1.value }
+            saveSettings()
+        }
+    }
+
+    // ---- storage -------------------------------------------------------------------------------------------------
+
+    func storage(_ id: String) -> [(Storage.Item, Int64)] {
+        guard let t = titlePaths(id) else { return [] }
+        return Storage.sizes(t)
+    }
+
+    func delete(_ item: Storage.Item, of id: String) {
+        guard let t = titlePaths(id) else { return }
+        if game?.id == id || preparing?.id == id { return model.notice = "Stop the game or the prepare first." }
+        do {
+            try Storage.delete(item, t)
+        } catch {
+            model.notice = "Cannot delete: \(error.localizedDescription)"
+        }
+        if item == .work || item == .extractedDisc { refreshState(id) }
+    }
+
+    func importSaves(_ id: String) -> Int {
+        guard let t = titlePaths(id) else { return 0 }
+        do { return try SaveImport.run(titleId: t.titleId, to: t.save) } catch {
+            model.notice = "Import failed: \(error.localizedDescription)"
+            return 0
+        }
+    }
+
+    func reveal(_ url: URL) {
+        if FileManager.default.fileExists(atPath: url.path) {
+            NSWorkspace.shared.activateFileViewerSelecting([url])
+        } else {
+            NSWorkspace.shared.open(url.deletingLastPathComponent())
+        }
+    }
+
+    /// Quitting stops a running game and a prepare (by PID / process group), so nothing outlives the launcher.
+    func shutdown() {
+        game?.runner.stop()
+        preparing?.runner.cancel()
+        _ = game?.runner.wait(timeout: 6)
+        _ = preparing?.runner.wait(timeout: 6)
+    }
 }

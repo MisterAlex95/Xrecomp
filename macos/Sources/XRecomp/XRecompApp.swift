@@ -11,7 +11,7 @@ enum LaunchOptions {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.activate(ignoringOtherApps: true)
-        if LaunchOptions.demoScreen != nil {
+        if LaunchOptions.demoScreen != nil || ProcessInfo.processInfo.environment["XRECOMP_PRINT_WINDOW"] != nil {
             // For screenshots (screencapture -l <id>): the window's number once it is on screen.
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
                 if let w = NSApp.windows.first(where: { $0.isVisible && $0.contentView != nil }) {
@@ -20,6 +20,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             }
         }
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        MainActor.assumeIsolated { AppStore.current?.shutdown() }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
