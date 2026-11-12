@@ -36,6 +36,7 @@ def read_jsonl(path):
     return out
 
 
+LAUNCH_RE = re.compile(r"\[KERNEL\] launch of '([^']*)' is not this title")
 CRASH_RE = re.compile(r"(SIGSEGV|SIGBUS|SIGILL|SIGABRT|unhandled exception|access violation|"
                       r"\[FAULT\][^\n]*|fault at [^\n]*)", re.I)
 UNIMPL_RE = re.compile(r"\[UNIMPL\] untranslated instruction REACHED: `([^`]*)` at (0x[0-9A-Fa-f]+)")
@@ -63,7 +64,10 @@ def classify(status, presses_ms, exit_info, run_s, sustain_s, log_text="", disco
 
     blocker = None
     m = CRASH_RE.search(log_text or "")
-    if exit_info and exit_info[0] == "signal":
+    launch = LAUNCH_RE.search(log_text or "")
+    if launch:
+        blocker = "launches another XBE: %s (multi-XBE discs, XBA-82)" % launch.group(1)
+    elif exit_info and exit_info[0] == "signal":
         blocker = "crash (signal %d)%s" % (exit_info[1], ": " + m.group(1)[:120] if m else "")
     elif exit_info:
         blocker = "exited with code %d after %.0f s" % (exit_info[1], run_s)

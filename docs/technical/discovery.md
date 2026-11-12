@@ -30,6 +30,7 @@ this run or an earlier one) is not written again: the file only grows with what 
 {"t":"d3d","va":"0x0085FDE0","slot":"0x00862288"}            D3D's device found at run time (profiles/xdk/d3d8/d3d8.c)
 {"t":"wait_spin","va":"0x0027B91C","ret":"0x00025701","header":"0x00040001","status":"0xC0000001"}
                                                              a thread waited on it 2,000 times in a second (kernel_bridge.c)
+{"t":"launch","va":"0x5A1C33E0","path":"d:\\game.xbe"}           the title launched another image (XBA-82); va: a hash of the path
 ```
 
 Addresses are guest VAs, 8 hex digits. At most 6,144 distinct entries per file.

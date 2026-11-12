@@ -35,8 +35,8 @@ static pthread_mutex_t s_lock = PTHREAD_MUTEX_INITIALIZER;
 #define UNLOCK() pthread_mutex_unlock(&s_lock)
 #endif
 
-enum { K_ICALL = 1, K_THREAD, K_THREAD_CTX, K_UNIMPL, K_D3D, K_WAIT_SPIN };
-static const char *const kind_name[] = { "", "icall", "thread", "thread_ctx", "unimpl", "d3d", "wait_spin" };
+enum { K_ICALL = 1, K_THREAD, K_THREAD_CTX, K_UNIMPL, K_D3D, K_WAIT_SPIN, K_LAUNCH };
+static const char *const kind_name[] = { "", "icall", "thread", "thread_ctx", "unimpl", "d3d", "wait_spin", "launch" };
 
 /* What is already in the file: kind << 32 | va, open addressing. A title that
  * fills it is beyond what one file can help with; the rest is dropped. */
@@ -69,7 +69,7 @@ static int seen_add(uint64_t key)       /* 1 when new */
 
 static int kind_of(const char *s, size_t n)
 {
-    for (int k = K_ICALL; k <= K_WAIT_SPIN; k++)
+    for (int k = K_ICALL; k <= K_LAUNCH; k++)
         if (strlen(kind_name[k]) == n && !memcmp(s, kind_name[k], n))
             return k;
     return 0;
@@ -248,6 +248,27 @@ void recomp_discovery_wait_spin(uint32_t object, uint32_t ret_va, uint32_t heade
     snprintf(f, sizeof f, ",\"ret\":\"0x%08X\",\"header\":\"0x%08X\",\"status\":\"0x%08X\"",
              ret_va, header, status);
     note(K_WAIT_SPIN, object, f);
+}
+
+void recomp_discovery_launch(const char *path)
+{
+    /* ,"path":"..." as printable ASCII, quotes and backslashes escaped; the
+     * key is a hash of the lowercased path. */
+    char f[300];
+    size_t o = (size_t)snprintf(f, sizeof f, ",\"path\":\"");
+    uint32_t h = 2166136261u;
+    for (const char *s = path ? path : ""; *s; s++) {
+        unsigned char c = (unsigned char)*s;
+        h = (h ^ (uint8_t)(c >= 'A' && c <= 'Z' ? c + 32 : c)) * 16777619u;
+        if (o < sizeof f - 4) {
+            if (c == '"' || c == '\\')
+                f[o++] = '\\';
+            f[o++] = (c >= 0x20 && c < 0x7F) ? (char)c : '?';
+        }
+    }
+    f[o++] = '"';
+    f[o] = 0;
+    note(K_LAUNCH, h, f);
 }
 
 const char *recomp_discovery_path(void)

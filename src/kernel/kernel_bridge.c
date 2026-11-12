@@ -1912,10 +1912,14 @@ static void bridge_HalReturnToFirmware(void)
             if (xbox_launch_path_is_image(path, xbox_XeImageFileName.Buffer))
                 xbox_quick_reboot((const uint8_t *)((uintptr_t)page +
                                                     g_xbox_mem_offset));
-            else
+            else {
                 fprintf(stderr, "  [KERNEL] launch of '%s' is not this title"
                                 " (%s): exiting\n", path,
                         xbox_XeImageFileName.Buffer);
+                /* A disc that hands over to another image needs XBA-82; the
+                 * compat runner names it from this (XBA-62). */
+                recomp_discovery_launch(path);
+            }
         }
     }
 
