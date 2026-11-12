@@ -2542,8 +2542,8 @@ static int ffp_vertex(uint32_t index, Nv2aVshOutput *out)
  * copies it into s_ffp once and ffp_batch_vertex reads only that and guest
  * memory. The arithmetic is lit_color's and ffp_vertex's, expression for
  * expression and light for light in the same order, so the result is bit for
- * bit the same; and since it writes only *out, it may run on a pool thread.
- * RECOMP_FFP_BATCH=0 keeps the per-vertex functions above. */
+ * bit the same; and since it writes only *out, it may run on a pool thread
+ * (RECOMP_FFP_POOL). RECOMP_FFP_BATCH=0 keeps the per-vertex functions above. */
 typedef struct {
     const uint8_t *base;    /* guest memory or the inline payload; NULL: absent */
     uint64_t offset;
@@ -4210,12 +4210,16 @@ static void raster_xf_clipped(const Nv2aVshOutput *a, const Nv2aVshOutput *b,
     }
     planes = near_z ? 2 : 1;
     in[0] = a; in[1] = b; in[2] = c;
+    /* The plane distances need only the position (xf_clip_dist on the
+     * w-multiplied copy below); the whole vertex is copied only for a
+     * triangle that is actually clipped. */
     for (i = 0; i < 3; i++) {
-        p0[i] = *in[i];
+        Nv2aVshOutput q;
         for (j = 0; j < 3; j++)
-            p0[i].pos[j] = in[i]->pos[j] * in[i]->pos[3];
+            q.pos[j] = in[i]->pos[j] * in[i]->pos[3];
+        q.pos[3] = in[i]->pos[3];
         for (pl = 0; pl < planes; pl++) {
-            float d = xf_clip_dist(&p0[i], pl);
+            float d = xf_clip_dist(&q, pl);
             if (d != d || d - d != 0.0f)
                 return;                       /* not finite: no position at all */
             if (d < 0.0f)
@@ -4225,6 +4229,11 @@ static void raster_xf_clipped(const Nv2aVshOutput *a, const Nv2aVshOutput *b,
     if (inside) {
         raster_xf_triangle(a, b, c);
         return;
+    }
+    for (i = 0; i < 3; i++) {
+        p0[i] = *in[i];
+        for (j = 0; j < 3; j++)
+            p0[i].pos[j] = in[i]->pos[j] * in[i]->pos[3];
     }
     n = xf_clip_poly(p0, n, 0, p1);
     if (planes > 1 && n)
@@ -4353,6 +4362,15 @@ static void vsh_chunk(int c, int thread, void *ctx)
  * s_ffp_src[i] that first position for batch vertex i. */
 static uint32_t *s_ffp_u, *s_ffp_at, *s_ffp_src;
 
+/* Fixed-function batches on the pool: opt-in, RECOMP_FFP_POOL=1. Once
+ * deduplicated a batch is cheap (KOTOR: a few hundred unique vertices), and
+ * a worker that claims a chunk and is then descheduled keeps the executor
+ * yielding far longer than the chunk would have taken it: KOTOR close-ups
+ * measured 8.0 ms/frame back end with the pool, 7.2 without (Mac, load 6). */
+#define NV_FFP_MT_MIN_VERTICES 192
+static int s_ffp_pool = -1;
+void nv2a_ffp_pool_enable(int on) { s_ffp_pool = on ? 1 : 0; }
+
 #define VMAP_BITS 17                    /* twice NV_MAX_INDICES */
 #define VMAP_SIZE (1u << VMAP_BITS)
 
@@ -4458,8 +4476,13 @@ static int transform_batch(uint32_t n)
             cnt = u;
         }
     }
+    if (s_ffp_pool < 0) {
+        const char *e = getenv("RECOMP_FFP_POOL");
+        s_ffp_pool = e ? atoi(e) : 0;
+    }
     if (s_vsh_pool && cnt >= NV_VSH_MT_MIN_VERTICES && raster_pool_size() > 1
-        && (ffp || (batch_uses_program() && nv2a_vsh_prepare_parallel()))) {
+        && (ffp ? s_ffp_pool && cnt >= NV_FFP_MT_MIN_VERTICES
+                : batch_uses_program() && nv2a_vsh_prepare_parallel())) {
         static VshJob job;                    /* executor thread only */
         int nt = raster_pool_size();
         /* Four chunks a thread, so threads that wake late still get a

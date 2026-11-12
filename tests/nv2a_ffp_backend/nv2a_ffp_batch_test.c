@@ -77,6 +77,7 @@ static const Nv2aBackend s_backend = { be_clear, be_draw, be_flip, NV2A_BACKEND_
 extern void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param);
 extern void nv2a_ffp_batch_enable(int on);
 extern void nv2a_vsh_pool_enable(int on);
+extern void nv2a_ffp_pool_enable(int on);
 extern int nv2a_vsh_last_workers(void);
 static void m(uint32_t method, uint32_t param) { nv2a_pb_exec_method(0, method, param); }
 static uint32_t f2u(float f) { uint32_t u; memcpy(&u, &f, 4); return u; }
@@ -134,6 +135,7 @@ static int same_three_ways(uint32_t arrays, const char *what)
     for (k = 0; k < 2; k++) {
         nv2a_ffp_batch_enable(1);
         nv2a_vsh_pool_enable(k);
+        nv2a_ffp_pool_enable(k);
         s_ngot = 0;
         draw(arrays);
         if (s_ngot != nref || memcmp(ref, s_got, nref * sizeof *ref)
