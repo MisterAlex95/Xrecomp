@@ -129,6 +129,15 @@ entries this process wrote, `src/kernel/recomp_status.h`) make the miss visible 
 - `cut_body` entries are not seeds: they name an analysis error (a function start that cut the body before it).
   `tools.prepare` already prints the count of trapped bodies after the lift (« cut bodies ... »), so they are known
   before any run.
+- An `unimpl` entry also comes from string port I/O (`ins*`, `outs*`) in lifted code (XBA-139): taken for data
+  decoded as code, it lifts to `recomp_misdecoded`, which writes the entry and stops the title
+  (`RECOMP_MISDECODE_TRAP=0` carries on).
+- After the lift, `tools.recomp` prints one line `lift health: {"seh_lost": n, "unresolved_calls": n,
+  "unimplemented": n, "misdecoded": n, "cut_bodies": n}` (XBA-139): exception handler targets no function enters,
+  call targets left as stubs (each listed once with its first call site: « unresolved call targets (stubbed): »),
+  untranslated instructions, string port I/O sites, cut bodies. `tools.prepare` (desktop and Android) shows the
+  non-zero counts after the lift and keeps them in the stamp as `lift_health`, which `--check --json` reports, so a
+  library check can rank titles by them.
 - `d3d_layout` entries are not seeds: they say what to add to `k_layouts` in `src/kernel/recomp_d3d_service.c` for that
   build (XBA-105); `tools.compat` (and the device grader) add « D3D layout guessed for D3D8LTCG 5933:
   fence_event, ... » after a blocker other than a crash or a launch (`tools/compat/blockers.py`).

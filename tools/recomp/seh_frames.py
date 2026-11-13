@@ -67,15 +67,76 @@ def _is_fs0(op):
             and not op.mem_index and (op.mem_disp or 0) == 0)
 
 
-def _ebp_minus4_store(insn):
-    """The try level a `mov dword ptr [ebp-4], imm` stores, or None."""
-    ops = insn.operands
-    if (insn.mnemonic == "mov" and len(ops) == 2 and ops[0].type == "mem"
-            and ops[0].mem_base == "ebp" and not ops[0].mem_index
-            and ops[0].mem_disp == -4 and not ops[0].mem_seg
-            and ops[1].type == "imm"):
-        return ops[1].imm & 0xFFFFFFFF
-    return None
+def _is_ebp_minus4(op):
+    return (op.type == "mem" and op.mem_base == "ebp" and not op.mem_index
+            and op.mem_disp == -4 and not op.mem_seg)
+
+
+_UNKNOWN = object()
+_REG32 = {"eax": "eax", "ax": "eax", "al": "eax", "ah": "eax",
+          "ebx": "ebx", "bx": "ebx", "bl": "ebx", "bh": "ebx",
+          "ecx": "ecx", "cx": "ecx", "cl": "ecx", "ch": "ecx",
+          "edx": "edx", "dx": "edx", "dl": "edx", "dh": "edx",
+          "esi": "esi", "si": "esi", "edi": "edi", "di": "edi",
+          "ebp": "ebp", "bp": "ebp", "esp": "esp", "sp": "esp"}
+
+
+def _try_level_stores(instructions):
+    """The try levels the function stores at [ebp-4], in order; _UNKNOWN for
+    a store whose value a linear read cannot tell.
+
+    MSVC enters a level three ways: `mov dword ptr [ebp-4], imm`, `and dword
+    ptr [ebp-4], 0` (level 0, three bytes shorter), and `mov [ebp-4], reg`
+    with a register it zeroed or loaded before (`xor ebx, ebx`). Reading
+    only the first left the table count at _MAX_SCOPE for a function that
+    enters level 0 with `and`, and the scope table of the function linked
+    after it -- its entries start at enclosing level -1 too -- was read as
+    this one's: its handlers came out as "targets outside" this function.
+    """
+    regs = {}
+    out = []
+    for insn in instructions:
+        m, ops = insn.mnemonic, insn.operands
+        if len(ops) == 2 and _is_ebp_minus4(ops[0]):
+            src = ops[1]
+            if m == "mov":
+                if src.type == "imm":
+                    out.append(src.imm & 0xFFFFFFFF)
+                elif src.type == "reg":
+                    out.append(regs.get(src.reg, _UNKNOWN))
+                else:
+                    out.append(_UNKNOWN)
+            elif m == "and" and src.type == "imm" and src.imm & 0xFFFFFFFF == 0:
+                out.append(0)
+            elif m == "or" and src.type == "imm" and src.imm & 0xFFFFFFFF == _MINUS_ONE:
+                out.append(_MINUS_ONE)
+            elif m in ("inc", "dec", "add", "sub", "xor", "and", "or"):
+                out.append(_UNKNOWN)
+            continue
+        if len(ops) == 1 and m in ("inc", "dec") and _is_ebp_minus4(ops[0]):
+            out.append(_UNKNOWN)
+            continue
+        # A register's value, read straight down (no CFG): only the three
+        # shapes a compiler loads a try level with; any other write forgets.
+        if m == "call":
+            for r in ("eax", "ecx", "edx"):
+                regs.pop(r, None)
+            continue
+        if not ops or ops[0].type != "reg":
+            continue
+        dst = ops[0].reg
+        full = _REG32.get(dst)
+        if full is None:
+            continue
+        if (m in ("xor", "sub") and len(ops) == 2 and ops[1].type == "reg"
+                and ops[1].reg == dst and dst == full):
+            regs[full] = 0
+        elif (m == "mov" and len(ops) == 2 and ops[1].type == "imm"
+              and dst == full):
+            regs[full] = ops[1].imm & 0xFFFFFFFF
+        elif m not in ("push", "cmp", "test") and not m.startswith("j"):
+            regs.pop(full, None)
+    return out
 
 
 def _registration(instructions, seh_prologs):
@@ -142,8 +203,10 @@ def analyze_seh_frame(instructions, start, end, read_u32, seh_prologs=(),
 
 
 def _read_scope_table(frame, instructions, read_u32, is_code):
-    levels = [v for v in map(_ebp_minus4_store, instructions)
-              if v is not None and v != _MINUS_ONE and v < _MAX_SCOPE]
+    stores = _try_level_stores(instructions)
+    levels = [v for v in stores
+              if v is not _UNKNOWN and v != _MINUS_ONE and v < _MAX_SCOPE]
+    # A store the read cannot tell counts for nothing, as before it did.
     count = (max(levels) + 1) if levels else _MAX_SCOPE
     for i in range(count):
         base = frame.table + 12 * i

@@ -471,6 +471,8 @@ _SSE_CMP_PRED = {"eq": 0, "lt": 1, "le": 2, "unord": 3,
 _SSE_CMP_NAMED = {f"cmp{p}{w}": (n, w) for p, n in _SSE_CMP_PRED.items()
                   for w in ("ps", "ss")}
 _BARE_STRING_COMPARES = ("cmpsb", "cmpsw", "cmpsd", "scasb", "scasw", "scasd")
+# String port I/O, the rep forms included: see Lifter._misdecoded.
+PORT_STRING_OPS = frozenset({"insb", "insw", "insd", "outsb", "outsw", "outsd"})
 
 
 # Instructions that do NOT modify EFLAGS (preserve flag tracking)
@@ -1621,6 +1623,10 @@ class Lifter:
         # batch translator diffs this against the functions it actually defined
         # so it can stub out the remainder (see translate_batch_split).
         self.referenced_calls = {}
+        # The first call site of each, as {addr: (call va, its function)}:
+        # what the lift report names for a target it stubbed (XBA-139).
+        self.call_sites = {}
+        self._insn_va = None
         # Mnemonics that fell through to the TODO comment, as
         # {mnemonic: [addr, ...]}. An unimplemented instruction becomes a
         # comment, which is a silent no-op in the generated C: Wreckless spent
@@ -1630,6 +1636,9 @@ class Lifter:
         # The translator reports this at the end of a run, so the next one
         # costs a line of output instead of an afternoon.
         self.unimplemented = {}
+        # String port I/O met in lifted code, {va: (text, function)}: see
+        # _misdecoded (XBA-139).
+        self.misdecoded = {}
 
         # Detect if either is missing, so overriding one does not silently
         # leave the other unset -- that is the bug this whole path fixes.
@@ -1682,6 +1691,10 @@ class Lifter:
             name = f"sub_{addr:08X}"
         name = _func_ident(addr, name)
         self.referenced_calls[addr] = name
+        site = getattr(self, "_insn_va", None)
+        if site is not None:
+            self.__dict__.setdefault("call_sites", {}).setdefault(
+                addr, (site, self.func_start))
         return name
 
     def lift_instruction(self, insn):
@@ -1692,6 +1705,7 @@ class Lifter:
         m = insn.mnemonic
         ops = insn.operands
         nops = len(ops)
+        self._insn_va = getattr(insn, "address", None)
 
         if self.stack_switch_sites and insn.address in self.stack_switch_sites:
             return self._lift_stack_switch(insn)
@@ -1781,6 +1795,10 @@ class Lifter:
             return self._lift_jmp(insn, ops)
         if insn.is_cond_jump:
             return self._lift_jcc(insn)
+
+        # ── String port I/O: a sign of misdecoding (XBA-139) ──
+        if m.split()[-1] in PORT_STRING_OPS:
+            return self._misdecoded(insn, m)
 
         # ── String operations ──
         if m.startswith("rep ") or m.startswith("repe ") or m.startswith("repne "):
@@ -3670,7 +3688,8 @@ class Lifter:
             step, acc = (4, "MEM32") if wide else (2, "MEM16")
             value = "eax" if wide else "LO16(eax)"
             return self._rep_compare(m, value, f"{acc}(edi)", step, False)
-        return [f"/* {m} */"]
+        # (rep lods*, ...: was a bare comment, a no-op nothing counted.)
+        return self._unimplemented(insn, m)
 
     def _rep_compare(self, m, first, second, step, uses_esi):
         """REPE/REPNE CMPS and SCAS: compare element by element.
@@ -3921,6 +3940,25 @@ class Lifter:
             return [f"MMX_STORE({_fmt_mem(dst)}, {ops[1].reg}); /* movntq */"]
 
         return self._unimplemented(insn, m)
+
+    def _misdecoded(self, insn, m):
+        """String port I/O (ins*/outs*, with or without rep): a title does
+        its port I/O through the kernel and the few `in`/`out` of the XDK's
+        own drivers, so one of these in lifted code is almost always data
+        or padding decoded as code, or a body measured past its end
+        (XBA-139: an `outsb` in a title's prepare log).
+
+        It lifts to recomp_misdecoded(text, va): reached, the runtime prints
+        one [MISDECODE] line, records the site in the discovery file and
+        stops the title there, at the cause; RECOMP_MISDECODE_TRAP=0 makes
+        it the no-op RECOMP_UNIMPL was. Counted apart from the unimplemented
+        instructions (self.misdecoded): the lift report and the prepare
+        summary name each site with its function."""
+        text = f"{m} {insn.op_str}".strip()
+        self.__dict__.setdefault("misdecoded", {})[insn.address] = (
+            text, self.func_start)
+        return [f'recomp_misdecoded("{text}", 0x{insn.address:08X}u);'
+                f" /* TODO: {text} (misdecoded?) */"]
 
     def _unimplemented(self, insn, m, note=""):
         """The one way out for an instruction this lifter cannot translate.

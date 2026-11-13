@@ -228,9 +228,16 @@ class Run:
             self.py_step(args, 3, 2, 100, "lifting to C", 30 * mb, "LIFT_FAILED")
             # Bodies the analysis cut short (WP2): reaching one stops the title.
             cut = self.m.lift_cut_bodies(self.log, log_at)
-            self.save_stamp(lift=key)
+            # What the title cannot reach, by class (XBA-139).
+            health = self.m.lift_health(self.log, log_at)
+            words = self.m.health_line(health)
+            if health is not None:
+                self.save_stamp(lift=key, lift_health=health)
+            else:
+                self.save_stamp(lift=key)
             self.rep.progress(3, 100, "%d C files" % len(os.listdir(gen))
-                              + ("; cut bodies " + cut if cut else ""))
+                              + ("; cut bodies " + cut if cut else "")
+                              + ("; lift health: " + words if words else ""))
         self.proj = proj
 
     def compile(self):

@@ -11,6 +11,9 @@
  *    [CUT] line naming the last instruction, a {"t":"cut_body"} discovery
  *    entry, then it stops like the divide error, KeBugCheckEx(0x1E,
  *    STATUS_ILLEGAL_INSTRUCTION, va), and never returns into the caller.
+ *  - recomp_misdecoded (string port I/O in lifted code, XBA-139): one
+ *    [MISDECODE] line, an "unimpl" discovery entry, the same stop; with
+ *    RECOMP_MISDECODE_TRAP=0 it reports and returns.
  *  - xbox_GuestInterruptFlag (the lifted cli/sti/popfd): a cli on a thread
  *    below DISPATCH_LEVEL masks device interrupts the way a raise does --
  *    counted in xbox_IrqlBlocksInterrupts, and with RECOMP_DISPATCH_GATE
@@ -41,6 +44,7 @@ recomp_func_t recomp_lookup_manual(uint32_t xbox_va) { (void)xbox_va; return NUL
 
 void recomp_divide_error(uint32_t va, uint32_t divisor);
 void recomp_cut_body(uint32_t va);
+void recomp_misdecoded(const char *text, uint32_t va);
 void xbox_GuestInterruptFlag(int enabled);
 int  xbox_GuestInterruptsMasked(void);
 
@@ -71,6 +75,7 @@ static void check(int ok, const char *what)
 /* Run recomp_divide_error(va, divisor) in a child -- or recomp_cut_body(va)
  * when divisor is CUT -- ; its exit code and what it printed to stderr. */
 #define CUT 0xFFFFFFFFu
+#define MISDECODE 0xFFFFFFFEu   /* recomp_misdecoded("outsb ...", va) */
 static int divide_error_child(uint32_t va, uint32_t divisor, char *line,
                               size_t cap)
 {
@@ -90,6 +95,8 @@ static int divide_error_child(uint32_t va, uint32_t divisor, char *line,
         g_fs_base = 0;
         if (divisor == CUT)
             recomp_cut_body(va);
+        else if (divisor == MISDECODE)
+            recomp_misdecoded("outsb dx, byte ptr [esi]", va);
         else
             recomp_divide_error(va, divisor);
         _exit(99);                      /* it must not return */
@@ -156,6 +163,40 @@ static void test_cut_body(void)
     remove(path);
     check(strstr(text, "{\"t\":\"cut_body\",\"va\":\"0x001C1208\"}") != NULL,
           "and writes a cut_body discovery entry");
+}
+
+static void test_misdecoded(void)
+{
+    char line[1024], path[256];
+    char text[512] = "";
+    FILE *f;
+    int rc;
+
+    printf("recomp_misdecoded\n");
+    const char *tmp = getenv("TMPDIR");
+    snprintf(path, sizeof path, "%s/guest_cpu_ops_misdecode_%d.jsonl",
+             tmp && *tmp ? tmp : "/tmp", (int)getpid());
+    remove(path);
+    setenv("RECOMP_DISCOVERY", path, 1);
+    rc = divide_error_child(0x00034560u, MISDECODE, line, sizeof line);
+    unsetenv("RECOMP_DISCOVERY");
+    check(rc == 0x1E, "string port I/O stops as KeBugCheckEx(0x1E)");
+    check(strstr(line, "[MISDECODE]") && strstr(line, "0x00034560")
+          && strstr(line, "outsb"), "one [MISDECODE] line names the site");
+    f = fopen(path, "rb");
+    if (f) {
+        size_t n = fread(text, 1, sizeof text - 1, f);
+        text[n] = 0;
+        fclose(f);
+    }
+    remove(path);
+    check(strstr(text, "\"t\":\"unimpl\"") && strstr(text, "0x00034560"),
+          "and writes an unimpl discovery entry");
+    setenv("RECOMP_MISDECODE_TRAP", "0", 1);
+    rc = divide_error_child(0x00034560u, MISDECODE, line, sizeof line);
+    unsetenv("RECOMP_MISDECODE_TRAP");
+    check(rc == 99 && strstr(line, "[MISDECODE]") != NULL,
+          "RECOMP_MISDECODE_TRAP=0 reports it and returns");
 }
 #endif
 
@@ -242,6 +283,7 @@ int main(void)
 #ifndef _WIN32
     test_divide_error();
     test_cut_body();
+    test_misdecoded();
 #else
     printf("recomp_divide_error: POSIX only (fork), skipped\n");
 #endif

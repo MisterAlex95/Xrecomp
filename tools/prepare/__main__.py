@@ -188,10 +188,9 @@ def run(args, log, cwd=ROOT, on_line=None, tick=None):
 CUT_BODIES_PREFIX = "cut bodies trapped (recomp_cut_body):"
 
 
-def lift_cut_bodies(log, offset):
-    """The cut-body report tools.recomp wrote into `log` past byte `offset`
-    ("N: sub_X (last 0x...), ..."), or None when the lift had none. Each is
-    a body the analysis cut short; reaching its end stops the title."""
+def _lift_line(log, offset, prefix):
+    """What follows `prefix` on the first line of `log` past byte `offset`
+    that starts with it, or None."""
     try:
         with open(log, "rb") as f:
             f.seek(offset)
@@ -199,9 +198,50 @@ def lift_cut_bodies(log, offset):
     except OSError:
         return None
     for line in text.splitlines():
-        if line.startswith(CUT_BODIES_PREFIX):
-            return line[len(CUT_BODIES_PREFIX):].strip()
+        if line.startswith(prefix):
+            return line[len(prefix):].strip()
     return None
+
+
+def lift_cut_bodies(log, offset):
+    """The cut-body report tools.recomp wrote into `log` past byte `offset`
+    ("N: sub_X (last 0x...), ..."), or None when the lift had none. Each is
+    a body the analysis cut short; reaching its end stops the title."""
+    return _lift_line(log, offset, CUT_BODIES_PREFIX)
+
+
+# The line tools.recomp prints with the counts of each class of code the
+# title cannot reach (tools/recomp/__main__.py LIFT_HEALTH_PREFIX, XBA-139).
+LIFT_HEALTH_PREFIX = "lift health:"
+LIFT_HEALTH_KEYS = ("seh_lost", "unresolved_calls", "unimplemented", "misdecoded", "cut_bodies")
+
+
+def lift_health(log, offset):
+    """The counts tools.recomp reported past byte `offset` of `log`, as
+    {key: int} over LIFT_HEALTH_KEYS, or None (an older lift, or none)."""
+    text = _lift_line(log, offset, LIFT_HEALTH_PREFIX)
+    if text is None:
+        return None
+    try:
+        raw = json.loads(text)
+    except ValueError:
+        return None
+    if not isinstance(raw, dict):
+        return None
+    return {k: int(raw.get(k) or 0) for k in LIFT_HEALTH_KEYS}
+
+
+def health_line(health):
+    """The prepare summary's words for lift_health()'s counts, or None
+    when every count is zero."""
+    if not health or not any(health.values()):
+        return None
+    words = (("seh_lost", "exception handler targets no function enters"),
+             ("unresolved_calls", "unresolved call targets"),
+             ("unimplemented", "unimplemented instructions"),
+             ("misdecoded", "misdecoded sites (string port I/O)"),
+             ("cut_bodies", "cut bodies"))
+    return ", ".join("%d %s" % (health[k], w) for k, w in words if health.get(k))
 
 
 def sha256(path):
@@ -760,10 +800,18 @@ def desktop(a):
         cut = lift_cut_bodies(log, log_at)
         if cut:
             note("cut bodies (the analysis stopped them short; reaching one stops the title): " + cut)
+        # The counts a library check ranks titles by (XBA-139): kept in the
+        # stamp, reported by --check --json.
+        health = lift_health(log, log_at)
+        words = health_line(health)
+        if words:
+            note("lift health: " + words)
         note("%d C files in %.0f s (%d changed, %d unchanged, %d removed)"
              % (len(os.listdir(gen)), t, written, kept, removed), 100)
         # The executable no longer matches the lift until a build succeeds (--check).
         stamp["lift"], stamp["built"] = True, False
+        if health is not None:
+            stamp["lift_health"] = health
         with open(stamp_path, "w") as f:
             json.dump(stamp, f)
 
@@ -820,7 +868,9 @@ IMAGE_MAP = "images.map"
 def check_state(source, work=None):
     """--check: {"state": "absent" | "stale" | "ready", "reasons": [...],
     "exe", "title", "title_id", "env_force", "work", and "title_layer": "on" |
-    "off" when the toolkit has optional enhancements for the title} for SOURCE, from what
+    "off" when the toolkit has optional enhancements for the title, and "lift_health":
+    {seh_lost, unresolved_calls, unimplemented, misdecoded, cut_bodies} when the
+    last lift reported them (XBA-139)} for SOURCE, from what
     a prepare would compare (the stamp: XBE, toolkit commit, profile layers,
     seeds from earlier runs) and what it built. Reads only: nothing is
     written, not even the work folder. identify.IdentifyError when SOURCE is
@@ -864,6 +914,8 @@ def check_state(source, work=None):
         out["title_layer"] = tl
     stamp = read_stamp(os.path.join(work, "stamp.json"))
     reasons = []
+    if stamp and isinstance(stamp.get("lift_health"), dict):
+        out["lift_health"] = stamp["lift_health"]   # what the last lift could not reach (XBA-139)
     if stamp:
         if stamp.get("xbe") != hashlib.sha256(data).hexdigest():
             reasons.append("xbe")
