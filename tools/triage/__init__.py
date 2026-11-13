@@ -50,16 +50,37 @@ def _xbes_in_folder(root):
                 yield os.path.relpath(p, root).replace(os.sep, "/"), p
 
 
+def disc_xbes(data_dir, work, named):
+    """[(disc path, file)] for the disc's .xbe files whose base name is in
+    `named`: from a folder as they are, from a disc image (XBA-126) copied out
+    into <work>/disc-xbe/ (only those few files: nothing else is extracted)."""
+    if os.path.isdir(data_dir):
+        return [(rel, p) for rel, p in _xbes_in_folder(data_dir) if os.path.basename(rel).lower() in named]
+    from tools.xiso.xdvdfs import Xiso
+    out = []
+    with Xiso(data_dir) as iso:
+        for d, e in sorted(iso.walk(), key=lambda x: (x[0], x[1].name)):
+            if not e.name.lower().endswith(".xbe") or e.name.lower() not in named:
+                continue
+            rel = (d + "/" + e.name).lstrip("/")
+            p = os.path.join(work, "disc-xbe", *rel.split("/"))
+            if not (os.path.isfile(p) and os.path.getsize(p) == e.size):
+                iso.extract(e, p)
+            out.append((rel, p))
+    return out
+
+
 def triage_disc(source, profiles_root=None):
     """One disc's record (see the module docstring); "error" set when it
     could not be read."""
     from tools.prepare import profiles
+    from tools.xiso.source import is_image_name
     rec = {"source": os.path.basename(os.path.normpath(source)), "xbes": []}
     tmp = None
     try:
         if os.path.isdir(source):
             items = list(_xbes_in_folder(source))
-        elif source.lower().endswith((".iso", ".xiso")):
+        elif is_image_name(source):                                 # also split parts, .cso (XBA-126)
             from tools.xiso.xdvdfs import Xiso
             tmp = tempfile.mkdtemp(prefix="xba-triage-")
             items = []
