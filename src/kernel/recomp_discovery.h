@@ -29,6 +29,11 @@
  *   {"t":"stub","ord":136,"name":"KeRemoveQueue","ret":"0x00012345"}
  *                                                          a kernel route that is still a stub was
  *                                                          called (XBA-115; keyed by ord, no va)
+ *   {"t":"d3d_layout","va":"0x1A2B3C4D","lib":"D3D8LTCG","build":5933,"rule":"fence_event","used":"0x00001DCC"}
+ *                                                          the XDK D3D layer met a D3D build its table does
+ *                                                          not know and fell back to another build's value
+ *                                                          for that rule (XBA-105, profiles/xdk/d3d8/d3d8.c);
+ *                                                          va is a hash of lib, build and rule
  *
  * The file: $RECOMP_DISCOVERY (recomp.cfg can set it); unset, empty or "0":
  * nothing is written. The desktop title project gets a default from
@@ -52,6 +57,7 @@ void recomp_discovery_wait_spin(uint32_t object, uint32_t ret_va, uint32_t heade
 void recomp_discovery_launch(const char *path);
 void recomp_discovery_stack_switch(uint32_t site, uint32_t to, const char *why);
 void recomp_discovery_stub(uint32_t ordinal, const char *name, uint32_t ret_va);
+void recomp_discovery_d3d_layout(const char *lib, uint32_t build, const char *rule, uint32_t used);
 
 /* The file in use, or NULL when discovery is off (opens it on first use). */
 const char *recomp_discovery_path(void);

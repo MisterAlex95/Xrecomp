@@ -33,9 +33,10 @@ static pthread_mutex_t s_lock = PTHREAD_MUTEX_INITIALIZER;
 #define UNLOCK() pthread_mutex_unlock(&s_lock)
 #endif
 
-enum { K_ICALL = 1, K_THREAD, K_THREAD_CTX, K_UNIMPL, K_D3D, K_WAIT_SPIN, K_LAUNCH, K_STACK_SWITCH, K_STUB };
+enum { K_ICALL = 1, K_THREAD, K_THREAD_CTX, K_UNIMPL, K_D3D, K_WAIT_SPIN, K_LAUNCH, K_STACK_SWITCH, K_STUB,
+       K_D3D_LAYOUT };
 static const char *const kind_name[] = { "", "icall", "thread", "thread_ctx", "unimpl", "d3d", "wait_spin", "launch",
-                                         "stack_switch", "stub" };
+                                         "stack_switch", "stub", "d3d_layout" };
 
 /* What is already in the file: kind << 32 | va, open addressing. A title that
  * fills it is beyond what one file can help with; the rest is dropped. */
@@ -68,7 +69,7 @@ static int seen_add(uint64_t key)       /* 1 when new */
 
 static int kind_of(const char *s, size_t n)
 {
-    for (int k = K_ICALL; k <= K_STUB; k++)
+    for (int k = K_ICALL; k <= K_D3D_LAYOUT; k++)
         if (strlen(kind_name[k]) == n && !memcmp(s, kind_name[k], n))
             return k;
     return 0;
@@ -319,6 +320,33 @@ void recomp_discovery_stub(uint32_t ordinal, const char *name, uint32_t ret_va)
     }
     snprintf(f + o, sizeof f - o, "\",\"ret\":\"0x%08X\"", ret_va);
     note(K_STUB, ordinal, f);
+}
+
+void recomp_discovery_d3d_layout(const char *lib, uint32_t build, const char *rule, uint32_t used)
+{
+    /* ,"lib":"...","build":N,"rule":"...","used":"0x..." -- lib and rule are
+     * ours or the XBE's library name (8 characters): escaped all the same.
+     * Keyed by a hash of lib, build and rule: one line per rule and build. */
+    char f[200];
+    uint32_t h = 2166136261u;
+    size_t o = (size_t)snprintf(f, sizeof f, ",\"lib\":\"");
+    for (int part = 0; part < 2; part++) {
+        const char *s = part ? (rule ? rule : "") : (lib ? lib : "");
+        for (; *s; s++) {
+            unsigned char c = (unsigned char)*s;
+            h = (h ^ c) * 16777619u;
+            if (o < sizeof f - 60) {
+                if (c == '"' || c == '\\')
+                    f[o++] = '\\';
+                f[o++] = (c >= 0x20 && c < 0x7F) ? (char)c : '?';
+            }
+        }
+        h = (h ^ 0xFFu) * 16777619u;
+        if (!part)
+            o += (size_t)snprintf(f + o, sizeof f - o, "\",\"build\":%u,\"rule\":\"", build);
+    }
+    snprintf(f + o, sizeof f - o, "\",\"used\":\"0x%08X\"", used);
+    note(K_D3D_LAYOUT, h ^ (build * 2654435761u), f);
 }
 
 const char *recomp_discovery_path(void)

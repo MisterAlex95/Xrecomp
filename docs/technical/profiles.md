@@ -12,7 +12,7 @@ Universal titles », section 3.
 | Layer | Folder | Picked when |
 |---|---|---|
 | Toolkit | none: `src/` (runtime) and `tools/` (lifter) | always |
-| XDK library | `profiles/xdk/<name>/layer.json` | the XBE's library table has one of its `applies.libraries`, at a build in `applies.builds` (no `builds`: any) |
+| XDK library | `profiles/xdk/<name>/layer.json` | the XBE's library table has one of its `applies.libraries`, at a build in `applies.builds` (no `builds`: any), and every code probe in `applies.probes` matched (`tools.xbe_ident`, XBA-105) |
 | Engine | `profiles/engines/<name>/layer.json` | `tools.xbe_ident` finds the engine whose `layer` (in `tools/xbe_ident/engines.json`) is `<name>` |
 | Title | `profiles/titles/<title id>/title.json` | the title ID matches |
 
@@ -30,7 +30,7 @@ Every key is optional. The same keys work in every layer; a higher layer's value
 | Key | What |
 |---|---|
 | `name` | what it is |
-| `applies` | XDK layers: `{"libraries": ["D3D8", "D3D8LTCG"], "builds": [5558, 5849]}` |
+| `applies` | XDK layers: `{"libraries": ["D3D8", "D3D8LTCG"], "builds": [5558, 5849], "probes": ["d3d_latch_wait"]}`; a probe is what the title's linked code does, found by `tools.xbe_ident` (`"probes"` in its answer), for a choice that depends on that rather than on a build number |
 | `hooks` | a C prefix `p`: the layer's `.c` files define `p_configure(void)` and `p_start(const char *game_dir, const char *save_dir)` |
 | `env_default` | `{"RECOMP_*": "value"}`: set before the hooks run unless the environment or `recomp.cfg` already set it |
 | `env_default_android`, `env_default_desktop` | the same for one platform; within a layer it wins over `env_default` |
@@ -62,7 +62,7 @@ re-lifts the titles that use it.
 | `xdk/xapi` (XAPILIB, XPP) | the one-CPU DISPATCH gate for XPP's USB stack, paced vblanks, the pad (USB model, keyboard) | Fable, Burnout 3 |
 | `xdk/dsound` (DSOUND) | the AC'97 codec ready (`DirectSoundCreate` waits for it) | Fable, Burnout 3 |
 | `xdk/d3d8` (D3D8, D3D8LTCG) | the pushbuffer executor, paced vblanks; `d3d8.c`: D3D's GPU semaphore watch and its software methods (5: the fence event; 0xC-0xE: RunPushBuffer's return JUMP), with `XBA_D3D_DEVICE_PTR`, `XBA_D3D_DEVICE`, `XBA_D3D_SW_METHODS`, `XBA_D3D_DMA_WALK`, or the device found at run time | Fable, Burnout 3 |
-| `xdk/d3d8ltcg` (D3D8LTCG 5849) | `XBA_D3D_DMA_WALK` 1: the DMA walk, which D3D8LTCG's fence wait needs (DMA_GET and the 0x0310 latch); with it `d3d8.c` adopts the fence event (device + 0x1DCC) once it finds the device at run time | Black, Burnout 3 |
+| `xdk/d3d8ltcg` (D3D8LTCG with the `d3d_latch_wait` probe, any build) | `XBA_D3D_DMA_WALK` 1: the DMA walk, which a D3D8LTCG fence wait that spins on the 0x0310 latch needs (DMA_GET and PGRAPH 0x400B10); with it `d3d8.c` adopts the fence event once it finds the device at run time. Picked by the probe since XBA-105 (it was builds 5849-5849) | Black, Burnout 3 |
 | `engines/renderware` | Criterion's RenderWare on D3D8LTCG: the DMA walk, title-built KEVENTs, 60 fps cap, frame generation off | Burnout 3 (Black, XBA-92) |
 | `titles/4d5300d1` | Fable: map size, deferred I/O APCs, front-end sleep, 16:9, cache progress, fibers (`overrides.c`) | |
 | `titles/4541005b` | Burnout 3: D3D addresses, the XID seed, flip pacing on the software rasteriser | |
@@ -82,6 +82,22 @@ until method 5 sets it. Method 5 is serviced whenever the device is known, also 
 ends (Fable froze in Oakvale that way). With `RECOMP_TITLE_KEVENTS=0`, the DMA walk (`xdk/d3d8ltcg`, or `RECOMP_PB_WALK=dma`) still
 adopts that one event (`xbox_KeAdoptGuestEvent`, `[D3D] fence event ... set by software method 5`). So a new
 title on a known XDK build needs no title layer for D3D.
+
+**Other XDK builds (XBA-105).** What cannot be read from the device's structure is looked up in one table in
+`d3d8.c` (`k_layouts`), keyed by the title's D3D library and build from its XBE header: the pointer slot's offset, the
+fence event's offset when the device holds no KEVENT pair, RunPushBuffer's pending count and node table. Known:
+D3D8LTCG 5849 (Burnout 3, Black: slot +0x24A8, fence event +0x1DCC) and D3D8 5455 (KOTOR: slot -8, +0x19AC). A build the
+table does not know uses the fallback's value for each such rule (5849's slot and fence event, Fable's RunPushBuffer
+offsets +0x50/+0x264) and says it once per rule — `[D3D] unknown XDK build 5933 (D3D8LTCG): fence event (no KEVENT pair in
+the device) fell back to +0x1DCC (...)` — with a `{"t":"d3d_layout","lib","build","rule","used"}` line in the discovery
+file; on such a build a found device's pending count is decremented only when it reads as a count (1-4096). A run of a
+title on a new build therefore says what to add to the table. `tests/xdk_d3d8_layer` has one synthetic device per
+layout: 5849 LTCG, 5455, Fable's params, an unknown LTCG 5933 on 5849's slot rule without an event pair, an unknown
+D3D8 4627 with its slot and events elsewhere (found by structure, nothing to fall back on but the ring offsets).
+What only real titles on other builds can confirm: that the ring, put and semaphore offsets (+0x24/+0x28/+0/+0x30)
+hold on every build (they are what finds the device: a build where they moved is not found at all, and needs params);
+the fence-event pair shape; RunPushBuffer's offsets beyond Fable; and that `d3d_latch_wait` matches the far-behind probe
+of every D3D8LTCG build that needs the walk (and no D3D8 that does not).
 
 ## Adding a title
 

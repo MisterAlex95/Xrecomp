@@ -41,6 +41,10 @@ this run or an earlier one) is not written again: the file only grows with what 
 {"t":"stub","ord":136,"name":"KeRemoveQueue","ret":"0x00012345"}
                                                              a kernel route that is still a stub (or has no route) was called;
                                                              keyed by ord, no va (XBA-115, src/kernel/kernel_stubs.h)
+{"t":"d3d_layout","va":"0x1A2B3C4D","lib":"D3D8LTCG","build":5933,"rule":"fence_event","used":"0x00001DCC"}
+                                                             the XDK D3D layer met a D3D build its layout table does not
+                                                             know and used another build's value for that rule (XBA-105,
+                                                             profiles.md « Other XDK builds »); va: a hash of lib, build, rule
 ```
 
 Addresses are guest VAs, 8 hex digits. At most 6,144 distinct entries per file.
@@ -54,6 +58,8 @@ Addresses are guest VAs, 8 hex digits. At most 6,144 distinct entries per file.
   they name a blocker ([stack-switching.md](stack-switching.md)).
 - `stub` entries are not seeds either: `tools.compat` adds « calls stub ordinal N (Name) » to the run's blocker
   (XBA-115).
+- `d3d_layout` entries are not seeds: they say what to add to `k_layouts` in `profiles/xdk/d3d8/d3d8.c` for that
+  build (XBA-105).
 - `tools.prepare` reads it before analysing (XBA-97, `tools/prepare/discovered.py`): new `icall`, `thread` and
   `thread_ctx` addresses go through the same gates, the ones that pass are kept in `<work>/discovered-seeds.json` and
   handed to the disassembler, the others in `<work>/discovered-rejected.json` so they are not tried again. A new seed
