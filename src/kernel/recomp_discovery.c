@@ -33,9 +33,10 @@ static pthread_mutex_t s_lock = PTHREAD_MUTEX_INITIALIZER;
 #define UNLOCK() pthread_mutex_unlock(&s_lock)
 #endif
 
-enum { K_ICALL = 1, K_THREAD, K_THREAD_CTX, K_UNIMPL, K_D3D, K_WAIT_SPIN, K_LAUNCH, K_STACK_SWITCH, K_STUB };
+enum { K_ICALL = 1, K_THREAD, K_THREAD_CTX, K_UNIMPL, K_D3D, K_WAIT_SPIN, K_LAUNCH, K_STACK_SWITCH, K_STUB,
+       K_EXCEPTION, K_LAST = K_EXCEPTION };
 static const char *const kind_name[] = { "", "icall", "thread", "thread_ctx", "unimpl", "d3d", "wait_spin", "launch",
-                                         "stack_switch", "stub" };
+                                         "stack_switch", "stub", "exception" };
 
 /* What is already in the file: kind << 32 | va, open addressing. A title that
  * fills it is beyond what one file can help with; the rest is dropped. */
@@ -47,6 +48,7 @@ static int s_state;             /* 0 not opened yet, 1 open, -1 off */
 static int s_fd = -1;
 static char s_path[1024];
 static unsigned s_written;
+static unsigned s_seeds;        /* icall / thread / thread_ctx entries written by this process */
 static int s_run_written;
 
 static int seen_add(uint64_t key)       /* 1 when new */
@@ -68,7 +70,7 @@ static int seen_add(uint64_t key)       /* 1 when new */
 
 static int kind_of(const char *s, size_t n)
 {
-    for (int k = K_ICALL; k <= K_STUB; k++)
+    for (int k = K_ICALL; k <= K_LAST; k++)
         if (strlen(kind_name[k]) == n && !memcmp(s, kind_name[k], n))
             return k;
     return 0;
@@ -206,6 +208,13 @@ static void note(int kind, uint32_t va, const char *fields)
     else
         snprintf(line, sizeof line, "{\"t\":\"%s\",\"va\":\"0x%08X\"%s}\n", kind_name[kind], va, fields);
     put_line(line);
+    /* The first code the analysis missed in this run (XBA-129): an indirect
+     * call to it was skipped (the title goes on, maybe wrong) or a thread did
+     * not start. Said once, so a log shows it without a crash; the app reads
+     * the entry from the file and the status line's "seeds". */
+    if ((kind == K_ICALL || kind == K_THREAD || kind == K_THREAD_CTX) && !s_seeds++)
+        fprintf(stderr, "[DISCOVERY] first code the analysis missed in this run: %s 0x%08X"
+                " (skipped; the next Prepare adds it)\n", kind_name[kind], va);
     /* No fsync: a crash of the process keeps what write() handed the kernel
      * (it is in the page cache); only a crash of the whole system would not,
      * and an fsync per entry, under the lock, on a game thread, cost
@@ -321,6 +330,22 @@ void recomp_discovery_stub(uint32_t ordinal, const char *name, uint32_t ret_va)
     note(K_STUB, ordinal, f);
 }
 
+void recomp_discovery_exception(uint32_t va, uint32_t code, const char *why)
+{
+    /* ,"code":"0x...","why":"..." -- the reason is ours, quoted like the others. */
+    char f[200];
+    size_t o = (size_t)snprintf(f, sizeof f, ",\"code\":\"0x%08X\",\"why\":\"", code);
+    for (const char *s = why ? why : ""; *s && o < sizeof f - 4; s++) {
+        unsigned char c = (unsigned char)*s;
+        if (c == '"' || c == '\\')
+            f[o++] = '\\';
+        f[o++] = (c >= 0x20 && c < 0x7F) ? (char)c : '?';
+    }
+    f[o++] = '"';
+    f[o] = 0;
+    note(K_EXCEPTION, va, f);
+}
+
 const char *recomp_discovery_path(void)
 {
     int on;
@@ -335,6 +360,11 @@ unsigned recomp_discovery_written(void)
     return s_written;
 }
 
+unsigned recomp_discovery_seeds(void)
+{
+    return s_seeds;
+}
+
 void recomp_discovery_reset(void)
 {
     LOCK();
@@ -343,6 +373,7 @@ void recomp_discovery_reset(void)
     s_fd = -1;
     s_state = 0;
     s_written = 0;
+    s_seeds = 0;
     s_run_written = 0;
     s_seen_n = 0;
     memset(s_seen, 0, sizeof s_seen);

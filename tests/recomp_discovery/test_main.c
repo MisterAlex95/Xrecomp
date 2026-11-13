@@ -73,12 +73,17 @@ int main(void)
     recomp_discovery_stack_switch(0x00023450u, 0x00012345u, "again");   /* the same site: one entry */
     recomp_discovery_stub(136, "KeRemoveQueue", 0x00012340u);   /* XBA-115: keyed by ordinal */
     recomp_discovery_stub(136, "KeRemoveQueue", 0x00099990u);
-    CHECK(recomp_discovery_written() == 8);
+    recomp_discovery_exception(0x00012350u, 0xC0000094u, "divide by zero");   /* XBA-129 */
+    recomp_discovery_exception(0x00012350u, 0xC0000094u, "again");
+    CHECK(recomp_discovery_written() == 9);
+    CHECK(recomp_discovery_seeds() == 3);                       /* icall, thread, thread_ctx */
     CHECK(recomp_discovery_path() && !strcmp(recomp_discovery_path(), path));
     text = slurp(path);                                         /* written as it happened: no close needed */
     CHECK(text != NULL);
     if (text) {
-        CHECK(count(text, "\n") == 9);
+        CHECK(count(text, "\n") == 10);
+        CHECK(strstr(text, "{\"t\":\"exception\",\"va\":\"0x00012350\",\"code\":\"0xC0000094\","
+                           "\"why\":\"divide by zero\"}\n") != NULL);
         CHECK(strstr(text, "{\"t\":\"stack_switch\",\"va\":\"0x00023450\",\"to\":\"0x00023480\","
                            "\"why\":\"a \\\"why\\\"\"}\n") != NULL);
         CHECK(strstr(text, "{\"t\":\"stub\",\"ord\":136,\"name\":\"KeRemoveQueue\",\"ret\":\"0x00012340\"}\n") != NULL);
@@ -99,8 +104,11 @@ int main(void)
     CHECK(recomp_discovery_written() == 0);
     recomp_discovery_stub(0x00012345u, "Other", 0);               /* an ordinal equal to an icall va: its own key */
     CHECK(recomp_discovery_written() == 1);
+    CHECK(recomp_discovery_seeds() == 0);
+    recomp_discovery_exception(0x00012350u, 0xC0000094u, "read back");     /* known from the file */
+    CHECK(recomp_discovery_written() == 1);
     recomp_discovery_icall(0x00067890u, 0x00011111u);
-    CHECK(recomp_discovery_written() == 2);
+    CHECK(recomp_discovery_written() == 2 && recomp_discovery_seeds() == 1);
     text = slurp(path);
     if (text) {
         CHECK(count(text, "{\"t\":\"run\"") == 2);

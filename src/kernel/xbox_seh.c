@@ -433,6 +433,7 @@ static int seh_raise(uint32_t rec, uint32_t eip, uint32_t esp_after)
         g_seh_ebp = saved.seh_ebp;
     } else {
         seh_regs_load(&saved);
+        recomp_discovery_exception(SEH_MEM32(rec + XBOX_EXCREC_ADDRESS), code, "no guest handler took it");
         if (seh_log_budget()) {
             fprintf(stderr, "  [SEH] unhandled exception 0x%08X at 0x%08X "
                     "(record 0x%08X); execution continues after the raise\n",

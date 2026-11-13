@@ -29,6 +29,12 @@
  *   {"t":"stub","ord":136,"name":"KeRemoveQueue","ret":"0x00012345"}
  *                                                          a kernel route that is still a stub was
  *                                                          called (XBA-115; keyed by ord, no va)
+ *   {"t":"exception","va":"0x00012345","code":"0xC0000094","why":"..."}
+ *                                                          a guest exception nothing handled: a
+ *                                                          divide error that stops the title
+ *                                                          (kernel_hal.c) or a raise no handler
+ *                                                          took (xbox_seh.c); a Prepare cannot fix
+ *                                                          it (XBA-129)
  *
  * The file: $RECOMP_DISCOVERY (recomp.cfg can set it); unset, empty or "0":
  * nothing is written. The desktop title project gets a default from
@@ -52,12 +58,17 @@ void recomp_discovery_wait_spin(uint32_t object, uint32_t ret_va, uint32_t heade
 void recomp_discovery_launch(const char *path);
 void recomp_discovery_stack_switch(uint32_t site, uint32_t to, const char *why);
 void recomp_discovery_stub(uint32_t ordinal, const char *name, uint32_t ret_va);
+void recomp_discovery_exception(uint32_t va, uint32_t code, const char *why);
 
 /* The file in use, or NULL when discovery is off (opens it on first use). */
 const char *recomp_discovery_path(void);
 
 /* Entries written by this process (tests, the exit report). */
 unsigned recomp_discovery_written(void);
+
+/* Of them, the code addresses the next Prepare can seed (icall, thread,
+ * thread_ctx): the status line's "seeds" (XBA-129). */
+unsigned recomp_discovery_seeds(void);
 
 /* Tests: forget the open file and what was seen, read $RECOMP_DISCOVERY again. */
 void recomp_discovery_reset(void);

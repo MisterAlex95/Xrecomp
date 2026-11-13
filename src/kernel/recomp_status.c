@@ -41,11 +41,11 @@ void recomp_status_write_now(void)
     if (!s_on || !s_file)
         return;
     fprintf(s_file, "{\"ms\":%llu,\"flips\":%llu,\"frames\":%llu,\"hash\":\"0x%08X\",\"lit\":%u,"
-                    "\"audio_ms\":%llu,\"pad_reads\":%llu,\"threads\":%llu,\"discovered\":%u}\n",
+                    "\"audio_ms\":%llu,\"pad_reads\":%llu,\"threads\":%llu,\"discovered\":%u,\"seeds\":%u}\n",
             (unsigned long long)(now_ms() - s_t0_ms), (unsigned long long)s_flips,
             (unsigned long long)s_frames, s_hash, s_lit ? 1u : 0u,
             (unsigned long long)(s_audio_samples / 48u), (unsigned long long)s_pad_reads,
-            (unsigned long long)s_threads, recomp_discovery_written());
+            (unsigned long long)s_threads, recomp_discovery_written(), recomp_discovery_seeds());
     fflush(s_file);
 }
 
