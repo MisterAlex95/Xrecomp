@@ -210,7 +210,7 @@ public enum TitleApp {
             NSAttributedString.Key(kCTForegroundColorAttributeName as String): cgColor(Palette.textBright),
         ]
         let line = CTLineCreateWithAttributedString(NSAttributedString(string: text, attributes: attrs) as CFAttributedString)
-        let b = CTLineGetBounds(line, .useGlyphPathBounds)
+        let b = CTLineGetBoundsWithOptions(line, .useGlyphPathBounds)
         ctx.textMatrix = .identity
         ctx.textPosition = CGPoint(x: tile.midX - b.width / 2 - b.minX, y: tile.midY - b.height / 2 - b.minY)
         CTLineDraw(line, ctx)
