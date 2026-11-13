@@ -3005,16 +3005,18 @@ public class LauncherActivity extends Activity {
             runWorker(R.string.COPYING, () -> copyTree(t, docId, false));
             return;
         }
-        String name = it.name;
-        runWorker(R.string.EXTRACTING, () -> {
-            ParcelFileDescriptor pfd = f != null
-                    ? ParcelFileDescriptor.open(f, ParcelFileDescriptor.MODE_READ_ONLY)
-                    : getContentResolver().openFileDescriptor(
-                              DocumentsContract.buildDocumentUriUsingTree(Uri.parse(tree), docId), "r");
-            if (pfd == null)
-                throw new IOException("cannot open " + name);
-            extractIso(pfd, name);
-        });
+        // XBA-126: the image is read in place where it is (a path, or its documents under the library folder's
+        // tree, whose permission persists), split parts included; extracted only with RECOMP_DISC_IMAGE=0.
+        List<String> locs = it.parts.isEmpty() ? Collections.singletonList(it.loc) : it.parts;
+        List<Uri> uris = new ArrayList<>();
+        List<String> names = new ArrayList<>();
+        for (String loc : locs) {
+            File lf = LibraryIndex.locFile(loc);
+            names.add(lf != null ? lf.getName() : loc.substring(loc.lastIndexOf('/') + 1));
+            if (lf == null && loc.startsWith("doc:") && tree != null)
+                uris.add(DocumentsContract.buildDocumentUriUsingTree(Uri.parse(tree), loc.substring(4)));
+        }
+        runWorker(R.string.CHECKING, () -> importImage(uris, names, f, f == null));
     }
 
     /** The library folder was picked: remembered (path with All files access, else the tree), then scanned. */
@@ -3554,6 +3556,8 @@ public class LauncherActivity extends Activity {
         switch (k) {
         case DATA:
             return R.string.LIB_ST_DATA;
+        case IMAGE:
+            return R.string.LIB_ST_IMAGE;
         case PACK:
             return R.string.LIB_ST_PACK;
         case WORK:
@@ -3577,6 +3581,9 @@ public class LauncherActivity extends Activity {
         case DATA:
             detailText = R.string.LIB_ST_DATA_DETAIL;
             break;
+        case IMAGE:
+            detailText = R.string.LIB_ST_IMAGE_DETAIL;
+            break;
         case PACK:
             detailText = R.string.LIB_ST_PACK_DETAIL;
             break;
@@ -3591,10 +3598,15 @@ public class LauncherActivity extends Activity {
             break;
         }
         MenuRow r = listRow(list, getString(storageLabel(it.kind)), getString(detailText), null);
-        r.setValue(storageSize(it));
+        DiscImages.Disc disc = Storage.disc(it);
+        r.setValue(disc == null ? storageSize(it)
+                                : getString(R.string.LIB_ST_IMAGE_VALUE, storageSize(it), size(disc.stored)));
         r.setOnClickListener(v -> onStorageDelete(r, it));
         onFocus(r, () -> {
             List<String> paths = new ArrayList<>();
+            if (disc != null)   // where the image is: its path, or the document it was picked as
+                paths.add(kv(R.string.KV_SOURCE, disc.viaPath() ? disc.path : DiscImages.label(disc)
+                                                                  + " (" + disc.kind + ")"));
             for (File f : it.files) {
                 if (f.exists())
                     paths.add(kv(R.string.KV_FOLDER, f.getAbsolutePath()));
@@ -3664,7 +3676,7 @@ public class LauncherActivity extends Activity {
             runOnUiThread(() -> {
                 deleting = false;
                 storageSizes.remove(key);
-                if (it.kind == Storage.Kind.DATA) {
+                if (it.kind == Storage.Kind.DATA || it.kind == Storage.Kind.IMAGE) {
                     String dir = it.files.get(0).getAbsolutePath();
                     for (Library.Record r : games.games.values()) {
                         if (dir.equals(r.dataDir)) {
@@ -3683,7 +3695,7 @@ public class LauncherActivity extends Activity {
                     titleIdDir = null;
                     artTid = null;
                 }
-                if (screen == Screen.GAME_DATA && it.kind == Storage.Kind.DATA) {
+                if (screen == Screen.GAME_DATA && (it.kind == Storage.Kind.DATA || it.kind == Storage.Kind.IMAGE)) {
                     history.clear();
                     show(libraryOn() ? (rec() != null ? Screen.HOME : Screen.LIBRARY)
                                      : state() == State.NONE ? Screen.WELCOME : Screen.HOME);
@@ -3994,6 +4006,9 @@ public class LauncherActivity extends Activity {
     }
 
     private String sourceLabel(String dir) {
+        DiscImages.Disc disc = DiscImages.read(new File(dir));
+        if (disc != null)   // XBA-126: the image itself, read in place
+            return getString(R.string.SOURCE_IMAGE, DiscImages.label(disc), disc.kind, size(disc.stored));
         if (ownedCopy(dir))
             return getString(R.string.SOURCE_IMPORTED);
         if (fromCfg())
@@ -4380,7 +4395,8 @@ public class LauncherActivity extends Activity {
         else if (r.title.isEmpty())
             r.title = d.getName();
         r.dataDir = d.getAbsolutePath();
-        r.dataKind = Storage.ownedCopy(storageDirs(), dir) ? Library.KIND_IMPORTED : Library.KIND_IN_PLACE;
+        r.dataKind = DiscImages.isCompanion(dir) ? Library.KIND_IMAGE
+                   : Storage.ownedCopy(storageDirs(), dir) ? Library.KIND_IMPORTED : Library.KIND_IN_PLACE;
         if (Library.KIND_IN_PLACE.equals(r.dataKind) && r.source.isEmpty())
             r.source = LibraryIndex.fileLoc(d);
         if (chosenSha != null)
@@ -4609,7 +4625,9 @@ public class LauncherActivity extends Activity {
     // ---- ISO -----------------------------------------------------------------------------------------------
 
     private void openIsoPicker() {
-        Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("*/*");
+        Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("*/*")
+                .putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)   // every part of a split image at once (XBA-126)
+                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
         try {
             startActivityForResult(i, REQ_ISO);
         } catch (ActivityNotFoundException e) {
@@ -4628,29 +4646,90 @@ public class LauncherActivity extends Activity {
         return last == null ? "" : last;
     }
 
-    private void onIsoPicked(Uri uri) {
-        String name = displayName(uri);
-        String lower = name.toLowerCase(Locale.ROOT);
-        Log.i(TAG, "launcher: image " + uri + " (" + name + ")");
-        if (!lower.endsWith(".iso") && !lower.endsWith(".xiso")) {
-            setNote(getString(R.string.NOT_AN_ISO, name), NOTE_ERROR);
+    /** The picker's answer: one image, or every part of a split one (XBA-126), in any order. */
+    private void onIsoPicked(Intent data) {
+        List<Uri> uris = new ArrayList<>();
+        if (data.getClipData() != null) {
+            for (int k = 0; k < data.getClipData().getItemCount(); k++)
+                uris.add(data.getClipData().getItemAt(k).getUri());
+        } else if (data.getData() != null) {
+            uris.add(data.getData());
+        }
+        if (uris.isEmpty())
+            return;
+        List<String> names = new ArrayList<>();
+        for (Uri u : uris)
+            names.add(displayName(u));
+        Log.i(TAG, "launcher: image " + uris + " (" + names + ")");
+        for (String n : names) {
+            if (!DiscImages.isImageName(n)) {
+                setNote(getString(R.string.NOT_AN_ISO, n), NOTE_ERROR);
+                return;
+            }
+        }
+        int[] order = DiscImages.orderParts(names);
+        if (order == null) {
+            setNote(getString(R.string.SPLIT_PARTS_INCOMPLETE, TextUtils.join(", ", names)), NOTE_ERROR);
             return;
         }
-        runWorker(R.string.EXTRACTING, () -> extractIso(uri, name));
+        List<Uri> u2 = new ArrayList<>();
+        List<String> n2 = new ArrayList<>();
+        for (int k : order) {
+            u2.add(uris.get(k));
+            n2.add(names.get(k));
+        }
+        runWorker(R.string.CHECKING, () -> importImage(u2, n2, null, false));
     }
 
-    /** Worker: probe, check the space, extract into the staging dir (libxba_import.so), check the hash, swap. */
-    private void extractIso(Uri uri, String name) throws IOException {
-        extractIso(getContentResolver().openFileDescriptor(uri, "r"), name);
-    }
-
-    /** extractIso() of an image already open (the library's: a file, or a document of the library folder). */
-    private void extractIso(ParcelFileDescriptor opened, String name) throws IOException {
-        try (ParcelFileDescriptor pfd = opened) {
-            if (pfd == null)
-                throw new IOException("cannot open " + name);
+    /**
+     * Worker (XBA-126): an image picked (uris, its parts in order) or from the library (file, or uris under the
+     * library folder's tree: treeGranted). Read in place when the app can reach it again at every start -- a path
+     * with All files access, or documents whose read permission persists -- else extracted as before. In place,
+     * only its XBEs are copied, into the companion folder (DiscImages).
+     */
+    private void importImage(List<Uri> uris, List<String> names, File file, boolean treeGranted) throws IOException {
+        DiscImages.Disc disc = new DiscImages.Disc();
+        List<ParcelFileDescriptor> pfds = new ArrayList<>();
+        try {
+            String path = file != null ? file.getAbsolutePath()
+                        : Environment.isExternalStorageManager() && uris.size() == 1
+                          ? DiscImages.documentUriToPath(uris.get(0)) : null;
+            if (path != null && new File(path).isFile()) {
+                for (File p : DiscImages.splitParts(new File(path))) {
+                    pfds.add(ParcelFileDescriptor.open(p, ParcelFileDescriptor.MODE_READ_ONLY));
+                    disc.names.add(p.getName());
+                }
+                disc.path = path;
+            } else {
+                boolean persisted = treeGranted;
+                for (Uri u : uris) {
+                    if (treeGranted)
+                        break;
+                    try {
+                        getContentResolver().takePersistableUriPermission(u, Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                        persisted = true;
+                    } catch (SecurityException e) {
+                        persisted = false;
+                        break;
+                    }
+                }
+                for (Uri u : uris) {
+                    ParcelFileDescriptor p = getContentResolver().openFileDescriptor(u, "r");
+                    if (p == null)
+                        throw new IOException("cannot open " + u);
+                    pfds.add(p);
+                }
+                if (persisted)
+                    for (Uri u : uris)
+                        disc.uris.add(u.toString());
+                disc.names.addAll(names);
+            }
+            int[] fds = new int[pfds.size()];
+            for (int k = 0; k < fds.length; k++)
+                fds[k] = pfds.get(k).getFd();
+            String name = disc.name();
             String[] title = new String[1];
-            long[] p = XisoNative.probe(pfd.getFd(), title);
+            long[] p = XisoNative.probeParts(fds, title);
             if (p[0] != 0) {
                 fail(getString(R.string.NOT_A_GAME_IMAGE, name + ": " + XisoNative.strerror((int)p[0])));
                 return;
@@ -4659,28 +4738,98 @@ public class LauncherActivity extends Activity {
                 fail(getString(R.string.NOT_A_GAME_IMAGE, name));
                 return;
             }
-            if (!enoughSpace(p[1]))
-                return;
-            File staged = stagingDir();
-            int rc = XisoNative.extract(pfd.getFd(), staged.getAbsolutePath(), (done, total, path) -> {
-                progress(done, total, path);
-                return cancelRequested;
-            });
-            if (rc == XisoNative.canceledCode()) {
-                GameStore.deleteTree(staged);
-                cancelled();
+            disc.kind = kindName((int)p[3]);
+            disc.files = p[1];
+            disc.stored = p[4];
+            boolean inPlace = DiscImages.inPlaceAllowed(this) && (disc.viaPath() || !disc.uris.isEmpty());
+            Log.i(TAG, "launcher: image " + name + ": " + disc.kind + ", " + fds.length + " part(s), "
+                       + (inPlace ? "read in place" : "extracted"));
+            if (!inPlace) {
+                extractParts(fds, name, p[1]);
                 return;
             }
-            if (rc != 0) {
+            progressIndeterminate(R.string.READING_IN_PLACE);
+            File staged = new File(DiscImages.discsDir(this), ".import");
+            GameStore.deleteTree(staged);
+            if (!staged.mkdirs() && !staged.isDirectory())
+                throw new IOException("cannot create " + staged);
+            int n = XisoNative.extractXbes(fds, staged.getAbsolutePath(), DiscImages.MAX_XBE);
+            if (n < 0) {
                 GameStore.deleteTree(staged);
-                if (rc == XisoNative.noSpaceCode())
-                    fail(getString(R.string.NOT_ENOUGH_SPACE, size(p[1]), size(freeSpace())));
-                else
-                    fail(getString(R.string.IMPORT_FAILED, XisoNative.strerror(rc)));
+                fail(getString(R.string.IMPORT_FAILED, XisoNative.strerror(n)));
                 return;
             }
-            finishImport(staged);
+            DiscImages.write(staged, disc);
+            finishImage(staged, disc);
+        } finally {
+            for (ParcelFileDescriptor p : pfds)
+                try {
+                    p.close();
+                } catch (IOException ignored) {
+                }
         }
+    }
+
+    private static String kindName(int kind) {
+        String k = (kind & 0xFF) == XisoNative.KIND_CSO ? "cso" : (kind & 0xFF) == XisoNative.KIND_ZSO ? "zso"
+                 : (kind & 0xFF) == XisoNative.KIND_CCI ? "cci" : "iso";
+        return (kind & XisoNative.KIND_SPLIT) != 0 ? k + " split" : k;
+    }
+
+    /** Worker: the companion folder holds the image's XBEs and disc.json; default.xbe checked, then games' record. */
+    private void finishImage(File staged, DiscImages.Disc disc) throws IOException {
+        progressIndeterminate(R.string.CHECKING);
+        File xbe = GameStore.findXbe(staged);
+        if (xbe == null) {
+            GameStore.deleteTree(staged);
+            fail(getString(R.string.NOT_A_GAME_IMAGE, disc.name()));
+            return;
+        }
+        String sha = GameStore.sha256(xbe);
+        Log.i(TAG, "launcher: image default.xbe sha256 " + sha);
+        if (!GameStore.hashMatches(this, sha)) {
+            GameStore.deleteTree(staged);
+            fail(getString(R.string.WRONG_GAME));
+            return;
+        }
+        String title = GameStore.xbeTitle(xbe);
+        String tid = Pack.xbeTitleId(xbe);
+        if (tid == null)
+            tid = Library.localKey(sha);
+        File game = GameStore.swapInto(staged, DiscImages.companionDir(this, tid));
+        if (game == null) {
+            GameStore.deleteTree(staged);
+            fail(getString(R.string.IMPORT_FAILED, "rename"));
+            return;
+        }
+        Log.i(TAG, "launcher: library: " + tid + " read in place from " + (disc.viaPath() ? disc.path
+                                                                                          : disc.uris.toString()));
+        chosen(game.getAbsolutePath(), title);
+    }
+
+    /** Worker: extraction of an image given as its parts (RECOMP_DISC_IMAGE=0, or no lasting access to it). */
+    private void extractParts(int[] fds, String name, long total) throws IOException {
+        if (!enoughSpace(total))
+            return;
+        File staged = stagingDir();
+        int rc = XisoNative.extractParts(fds, staged.getAbsolutePath(), (done, all, path) -> {
+            progress(done, all, path);
+            return cancelRequested;
+        });
+        if (rc == XisoNative.canceledCode()) {
+            GameStore.deleteTree(staged);
+            cancelled();
+            return;
+        }
+        if (rc != 0) {
+            GameStore.deleteTree(staged);
+            if (rc == XisoNative.noSpaceCode())
+                fail(getString(R.string.NOT_ENOUGH_SPACE, size(total), size(freeSpace())));
+            else
+                fail(getString(R.string.IMPORT_FAILED, XisoNative.strerror(rc)));
+            return;
+        }
+        finishImport(staged);
     }
 
     // ---- Shared import steps -------------------------------------------------------------------------------
@@ -4888,14 +5037,14 @@ public class LauncherActivity extends Activity {
             openTreePicker();   // in place when granted, copied otherwise
             return;
         }
-        if (resultCode != RESULT_OK || data == null || data.getData() == null)
+        if (resultCode != RESULT_OK || data == null || (data.getData() == null && data.getClipData() == null))
             return;
         if (requestCode == REQ_TREE)
             onTreePicked(data.getData());
         else if (requestCode == REQ_LIBRARY_TREE)
             onLibraryTreePicked(data.getData());
         else if (requestCode == REQ_ISO)
-            onIsoPicked(data.getData());
+            onIsoPicked(data);
         else if (requestCode == REQ_LSFG_DLL)
             onLsfgDllPicked(data.getData());
     }

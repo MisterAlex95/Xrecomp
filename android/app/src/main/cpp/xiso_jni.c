@@ -8,8 +8,13 @@
  * closes) around each call; nothing here closes it. */
 #include <jni.h>
 #include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <strings.h>
+#include <sys/stat.h>
 #include <time.h>
+#include <unistd.h>
 
 #include <android/log.h>
 
@@ -170,4 +175,188 @@ Java_fr_adserver_xboxrecomp_XisoNative_noSpaceCode(JNIEnv *env, jclass cls)
 {
     (void)env; (void)cls;
     return XISO_ENOSPC;
+}
+
+/* ── Several fds: split parts, compressed images (XBA-126) ──────────────────────────────────────────────────────
+ * The fds are the parts of one image in order (one for a plain or compressed file), owned by Java's
+ * ParcelFileDescriptors as above: the source does not close them. */
+
+static int open_parts(JNIEnv *env, jintArray fds, xiso_source **src)
+{
+    jint n = fds ? (*env)->GetArrayLength(env, fds) : 0;
+    jint buf[XISO_SOURCE_MAX_PARTS];
+    int ifds[XISO_SOURCE_MAX_PARTS];
+    if (n < 1 || n > XISO_SOURCE_MAX_PARTS)
+        return XISO_EINVAL;
+    (*env)->GetIntArrayRegion(env, fds, 0, n, buf);
+    for (jint i = 0; i < n; i++)
+        ifds[i] = buf[i];
+    return xiso_source_open_fds(ifds, n, 0, src);
+}
+
+/* XisoNative.probeParts(int[] fds, String[] titleOut) -> long[] { status, totalBytes, hasDefaultXbe, kind, stored } */
+JNIEXPORT jlongArray JNICALL
+Java_fr_adserver_xboxrecomp_XisoNative_probeParts(JNIEnv *env, jclass cls, jintArray fds, jobjectArray title_out)
+{
+    char title[256] = "";
+    uint64_t total = 0, stored = 0;
+    int has_xbe = 0, kind = 0;
+    xiso_source *src = NULL;
+    (void)cls;
+
+    int rc = open_parts(env, fds, &src);
+    if (!rc) {
+        kind = xiso_source_kind(src);
+        stored = xiso_source_stored_size(src);
+        rc = xiso_probe_source(src, title, sizeof title, &total, &has_xbe);
+    }
+    __android_log_print(ANDROID_LOG_INFO, TAG, "import: xiso probe (%s): %d (%s), title \"%s\", %llu bytes, "
+                        "default.xbe %s", kind ? xiso_source_kind_name(kind) : "?", rc,
+                        rc == 0 ? "ok" : xiso_strerror(rc), title, (unsigned long long)total,
+                        has_xbe ? "found" : "missing");
+    xiso_source_close(src);
+    if (title_out && (*env)->GetArrayLength(env, title_out) > 0) {
+        jstring t = ascii_string(env, title);
+        (*env)->SetObjectArrayElement(env, title_out, 0, t);
+        (*env)->DeleteLocalRef(env, t);
+    }
+    jlong vals[5] = { rc, (jlong)total, has_xbe ? 1 : 0, kind, (jlong)stored };
+    jlongArray out = (*env)->NewLongArray(env, 5);
+    if (out)
+        (*env)->SetLongArrayRegion(env, out, 0, 5, vals);
+    return out;
+}
+
+/* XisoNative.extractParts(int[] fds, String outDir, Progress listener) -> int: xiso_extract over the parts. */
+JNIEXPORT jint JNICALL
+Java_fr_adserver_xboxrecomp_XisoNative_extractParts(JNIEnv *env, jclass cls, jintArray fds, jstring out_dir,
+                                                    jobject listener)
+{
+    (void)cls;
+    if (!out_dir || !listener)
+        return XISO_EINVAL;
+    jclass lc = (*env)->GetObjectClass(env, listener);
+    struct progress_ctx ctx = {
+        .env = env,
+        .listener = listener,
+        .on_progress = (*env)->GetMethodID(env, lc, "onProgress", "(JJLjava/lang/String;)Z"),
+        .last_ns = 0,
+    };
+    (*env)->DeleteLocalRef(env, lc);
+    if (!ctx.on_progress)
+        return XISO_EINVAL;
+    xiso_source *src = NULL;
+    int rc = open_parts(env, fds, &src);
+    if (rc)
+        return rc;
+    const char *dir = (*env)->GetStringUTFChars(env, out_dir, NULL);
+    if (!dir) {
+        xiso_source_close(src);
+        return XISO_ENOMEM;
+    }
+    __android_log_print(ANDROID_LOG_INFO, TAG, "import: extracting the image (%s) into %s",
+                        xiso_source_kind_name(xiso_source_kind(src)), dir);
+    rc = xiso_extract_source(src, dir, progress_cb, &ctx);
+    __android_log_print(ANDROID_LOG_INFO, TAG, "import: xiso extract: %d (%s)", rc, rc == 0 ? "ok" : xiso_strerror(rc));
+    (*env)->ReleaseStringUTFChars(env, out_dir, dir);
+    xiso_source_close(src);
+    return rc;
+}
+
+/* XisoNative.extractFileParts(int[] fds, String pathInImage, String outFile, long maxBytes) -> int */
+JNIEXPORT jint JNICALL
+Java_fr_adserver_xboxrecomp_XisoNative_extractFileParts(JNIEnv *env, jclass cls, jintArray fds, jstring path_in_image,
+                                                        jstring out_file, jlong max_bytes)
+{
+    (void)cls;
+    if (!path_in_image || !out_file || max_bytes < 0)
+        return XISO_EINVAL;
+    xiso_source *src = NULL;
+    int rc = open_parts(env, fds, &src);
+    if (rc)
+        return rc;
+    const char *path = (*env)->GetStringUTFChars(env, path_in_image, NULL);
+    const char *out = path ? (*env)->GetStringUTFChars(env, out_file, NULL) : NULL;
+    if (!path || !out) {
+        if (path)
+            (*env)->ReleaseStringUTFChars(env, path_in_image, path);
+        xiso_source_close(src);
+        return XISO_ENOMEM;
+    }
+    rc = xiso_extract_file_source(src, path, out, (uint64_t)max_bytes);
+    if (rc)
+        __android_log_print(ANDROID_LOG_INFO, TAG, "library: xiso extract %s: %d (%s)", path, rc, xiso_strerror(rc));
+    (*env)->ReleaseStringUTFChars(env, out_file, out);
+    (*env)->ReleaseStringUTFChars(env, path_in_image, path);
+    xiso_source_close(src);
+    return rc;
+}
+
+/* XisoNative.extractXbes(int[] fds, String outDir, long maxBytes) -> int: every *.xbe of the image (any directory,
+ * at most 16, each at most maxBytes) copied into outDir with its directory, nothing else: the companion folder of an
+ * image read in place (default.xbe for the art, hash and Prepare, the other images for XBA-82). Returns the count,
+ * or a negative XISO_* code. */
+static int xbes_walk(xiso_image *img, const xiso_stat *dir, const char *out_dir, const char *rel, int depth,
+                     uint64_t max_bytes, xiso_source *src, int *count)
+{
+    xiso_dirent *d = NULL;
+    size_t n = 0;
+    int rc = xiso_list(img, dir, &d, &n);
+    if (rc)
+        return rc;
+    for (size_t i = 0; i < n && !rc; i++) {
+        char sub[1024];
+        snprintf(sub, sizeof sub, "%s%s%s", rel, rel[0] ? "/" : "", d[i].name);
+        if (d[i].is_dir) {
+            if (depth < 8) {
+                xiso_stat st = { d[i].offset, d[i].size, 1 };
+                rc = xbes_walk(img, &st, out_dir, sub, depth + 1, max_bytes, src, count);
+            }
+            continue;
+        }
+        size_t nl = strlen(d[i].name);
+        if (nl < 4 || strcasecmp(d[i].name + nl - 4, ".xbe") != 0 || d[i].size > max_bytes || *count >= 16)
+            continue;
+        char path[2048];
+        snprintf(path, sizeof path, "%s/%s", out_dir, sub);
+        for (char *p = path + strlen(out_dir) + 1; *p; p++) {   /* the directories on the way */
+            if (*p != '/')
+                continue;
+            *p = 0;
+            mkdir(path, 0755);
+            *p = '/';
+        }
+        unlink(path);
+        rc = xiso_extract_file_source(src, sub, path, max_bytes);
+        if (!rc)
+            (*count)++;
+    }
+    free(d);
+    return rc;
+}
+
+JNIEXPORT jint JNICALL
+Java_fr_adserver_xboxrecomp_XisoNative_extractXbes(JNIEnv *env, jclass cls, jintArray fds, jstring out_dir,
+                                                   jlong max_bytes)
+{
+    (void)cls;
+    if (!out_dir || max_bytes < 0)
+        return XISO_EINVAL;
+    xiso_source *src = NULL;
+    xiso_image *img = NULL;
+    int rc = open_parts(env, fds, &src), count = 0;
+    if (!rc)
+        rc = xiso_open_source(src, &img);
+    const char *dir = rc ? NULL : (*env)->GetStringUTFChars(env, out_dir, NULL);
+    if (!rc && !dir)
+        rc = XISO_ENOMEM;
+    if (!rc)
+        rc = xbes_walk(img, NULL, dir, "", 0, (uint64_t)max_bytes, src, &count);
+    __android_log_print(ANDROID_LOG_INFO, TAG, "import: %d XBE(s) copied out of the image: %d (%s)", count, rc,
+                        rc == 0 ? "ok" : xiso_strerror(rc));
+    if (dir)
+        (*env)->ReleaseStringUTFChars(env, out_dir, dir);
+    xiso_close(img);
+    xiso_source_close(src);
+    return rc ? rc : count;
 }

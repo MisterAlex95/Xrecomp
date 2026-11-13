@@ -75,9 +75,12 @@ final class LibraryScanner {
         Opened open(Node file) throws IOException;
     }
 
-    /** Copies one file out of a disc image (XisoNative.extractFile); 0 or an XISO_E* code. */
+    /**
+     * Copies one file out of a disc image (XisoNative.extractFileParts); 0 or an XISO_E* code. fds: the image's
+     * parts in order, one for a plain or compressed file (XBA-126).
+     */
     interface ImagePeek {
-        int extractFile(int fd, String pathInImage, File out, long maxBytes);
+        int extractFile(int[] fds, String pathInImage, File out, long maxBytes);
     }
 
     /** Called for each game found (new or not), with its cached XBE: the title art and theme caches. */
@@ -189,7 +192,10 @@ final class LibraryScanner {
                     if (depth + 1 < MAX_DEPTH)
                         dir(k, depth + 1);
                 } else if (isImage(k.name)) {
-                    add(image(k));
+                    List<Node> parts = splitSet(kids, k);
+                    if (parts == null)
+                        continue;                       // a later part of a split image: its first stands for it
+                    add(image(parts));
                 }
             }
         }
@@ -226,27 +232,49 @@ final class LibraryScanner {
             return p;
         }
 
-        LibraryIndex.Item image(Node n) {
-            LibraryIndex.Item old = reuse(n.loc, n.size, n.mtime);
+        /** An image, or the parts of a split image in order (their sizes summed, the newest time). */
+        LibraryIndex.Item image(List<Node> parts) {
+            Node n = parts.get(0);
+            long size = 0, mtime = 0;
+            for (Node p : parts) {
+                size += p.size;
+                mtime = Math.max(mtime, p.mtime);
+            }
+            LibraryIndex.Item old = reuse(n.loc, size, mtime);
             if (old != null)
                 return old;
-            LibraryIndex.Item i = item(n.loc, LibraryIndex.KIND_ISO, n.name, n.size, n.mtime);
+            LibraryIndex.Item i = item(n.loc, LibraryIndex.KIND_ISO, n.name, size, mtime);
+            if (parts.size() > 1)
+                for (Node p : parts)
+                    i.parts.add(p.loc);
             File tmp = tmpFile();
             if (tmp == null) {
                 i.status = LibraryIndex.UNREADABLE;
                 return i;
             }
             int rc;
-            try (Opened o = t.open(n)) {
+            List<Opened> opened = new ArrayList<>();
+            try {
+                int[] fds = new int[parts.size()];
+                for (int k = 0; k < fds.length; k++) {
+                    opened.add(t.open(parts.get(k)));
+                    fds[k] = opened.get(k).fd();
+                }
                 r.peeks++;
-                rc = peek.extractFile(o.fd(), "default.xbe", tmp, MAX_XBE);
+                rc = peek.extractFile(fds, "default.xbe", tmp, MAX_XBE);
             } catch (IOException | RuntimeException e) {
                 warn("launcher: library: cannot open " + n.loc + ": " + e);
                 rc = 1;
+            } finally {
+                for (Opened o : opened)
+                    try {
+                        o.close();
+                    } catch (IOException ignored) {
+                    }
             }
             switch (rc) {
             case 0:
-                cacheXbe(i, tmp, stripExtension(n.name));
+                cacheXbe(i, tmp, stripExtension(parts.size() > 1 ? DiscImages.part(n.name).prefix : n.name));
                 break;
             case XisoNative.ENOENT:
                 i.status = LibraryIndex.NO_XBE;
@@ -363,9 +391,35 @@ final class LibraryScanner {
         return i;
     }
 
+    /** A disc image or one part of a split image (DiscImages.isImageName: .iso .xiso .cso .ciso .zso .cci). */
     static boolean isImage(String name) {
-        String n = name.toLowerCase(Locale.ROOT);
-        return n.endsWith(".iso") || n.endsWith(".xiso");
+        return DiscImages.isImageName(name);
+    }
+
+    /**
+     * k's split set among its directory's entries, in order, when k is its first part; [k] when k is not a split
+     * part or its set is incomplete (then read as one file); null when k is a later part of a complete set.
+     */
+    static List<Node> splitSet(List<Node> kids, Node k) {
+        DiscImages.Part p = DiscImages.part(k.name);
+        List<Node> one = java.util.Collections.singletonList(k);
+        if (p == null)
+            return one;
+        int first = p.number == 0 ? 0 : 1;
+        List<Node> parts = new ArrayList<>();
+        for (int n = first; n < first + DiscImages.MAX_PARTS; n++) {
+            String want = p.name(n);
+            Node hit = null;
+            for (Node c : kids)
+                if (!c.dir && c.name.equals(want))
+                    hit = c;
+            if (hit == null)
+                break;
+            parts.add(hit);
+        }
+        if (parts.size() < 2 || !parts.contains(k))
+            return one;
+        return parts.get(0) == k ? parts : null;
     }
 
     static String stripExtension(String name) {
@@ -541,8 +595,8 @@ final class LibraryScanner {
     }
 
     /** The production ImagePeek: libxba_import.so. */
-    static final ImagePeek NATIVE_PEEK = (fd, path, out, max) ->
-            XisoNative.extractFile(fd, path, out.getAbsolutePath(), max);
+    static final ImagePeek NATIVE_PEEK = (fds, path, out, max) ->
+            XisoNative.extractFileParts(fds, path, out.getAbsolutePath(), max);
 
     /** The production art hook: TitleArt's PNG cache, decoded once per title. */
     static Art titleArt(File filesDir) {

@@ -19,7 +19,9 @@
     <string name="STATE_WRONG">Mauvais jeu</string>
 
     <string name="NOT_A_GAME_FOLDER">Ce dossier ne contient pas de default.xbe : ce n\'est pas un disque Xbox extrait. Choisissez le dossier qui contient default.xbe.</string>
-    <string name="NOT_AN_ISO">%1$s n\'est pas une image disque : choisissez un fichier .iso ou .xiso.</string>
+    <string name="NOT_AN_ISO">%1$s n\'est pas une image disque : choisissez un fichier .iso, .xiso, .cso, .zso ou .cci, ou les parties d\'une image découpée.</string>
+    <string name="SPLIT_PARTS_INCOMPLETE">Ces fichiers ne forment pas une image disque complète : %1$s. Pour une image découpée, choisissez toutes les parties (Jeu.1.iso, Jeu.2.iso, …) en une fois.</string>
+    <string name="READING_IN_PLACE">Lecture de l\'image disque sur place…</string>
     <string name="NOT_A_GAME_IMAGE">Pas une image disque Xbox, ou pas de default.xbe dedans : %1$s</string>
     <string name="WRONG_GAME">Ce n\'est pas le jeu prévu pour cette application (autre jeu ou autre région) : son default.xbe ne correspond pas. Rien n\'a été modifié.</string>
     <string name="WRONG_GAME_HOME">Le default.xbe de ce dossier n\'est pas le jeu prévu pour cette application (autre jeu ou autre région). Choisissez le bon jeu dans Données du jeu.</string>
@@ -55,6 +57,7 @@
     <string name="SIZE_COUNTING">calcul…</string>
     <string name="SOURCE_IN_PLACE">Lu sur place</string>
     <string name="SOURCE_IMPORTED">Copie importée (stockage de l\'app)</string>
+    <string name="SOURCE_IMAGE">Image disque lue sur place, rien de copié (%1$s, %2$s, %3$s)</string>
     <string name="SOURCE_CFG">Défini dans recomp.cfg</string>
 
     <!-- Bienvenue -->

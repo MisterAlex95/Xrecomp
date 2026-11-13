@@ -22,7 +22,9 @@
     <string name="STATE_WRONG">Wrong game</string>
 
     <string name="NOT_A_GAME_FOLDER">This folder holds no default.xbe: it is not an extracted Xbox disc. Choose the folder that contains default.xbe.</string>
-    <string name="NOT_AN_ISO">%1$s is not a disc image: choose a file ending in .iso or .xiso.</string>
+    <string name="NOT_AN_ISO">%1$s is not a disc image: choose a .iso, .xiso, .cso, .zso or .cci file, or the parts of a split image.</string>
+    <string name="SPLIT_PARTS_INCOMPLETE">These files are not one whole disc image: %1$s. For a split image, choose every part (Game.1.iso, Game.2.iso, …) at once.</string>
+    <string name="READING_IN_PLACE">Reading the disc image in place…</string>
     <string name="NOT_A_GAME_IMAGE">Not an Xbox disc image, or no default.xbe in it: %1$s</string>
     <string name="WRONG_GAME">This is not the game this app was made for (another game, or another region): its default.xbe does not match. Nothing was changed.</string>
     <string name="WRONG_GAME_HOME">This folder\'s default.xbe is not the game this app was made for (another game, or another region). Choose the right game in Game data.</string>
@@ -58,6 +60,7 @@
     <string name="SIZE_COUNTING">counting…</string>
     <string name="SOURCE_IN_PLACE">Read in place</string>
     <string name="SOURCE_IMPORTED">Imported copy (app storage)</string>
+    <string name="SOURCE_IMAGE">Disc image read in place, nothing copied (%1$s, %2$s, %3$s)</string>
     <string name="SOURCE_CFG">Set in recomp.cfg</string>
 
     <!-- Welcome -->

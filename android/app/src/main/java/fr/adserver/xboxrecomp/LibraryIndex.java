@@ -43,6 +43,8 @@ final class LibraryIndex {
         String tid = "", title = "";
         int region, disc, version;
         String xbeSha256 = "", xbe = "";
+        /** A split image (XBA-126): every part's loc in order (loc is the first); empty for one file. */
+        final java.util.List<String> parts = new java.util.ArrayList<>();
 
         boolean ok() {
             return OK.equals(status);
@@ -66,6 +68,8 @@ final class LibraryIndex {
             o.put("size", size);
             o.put("mtime", mtime);
             o.put("status", status);
+            if (!parts.isEmpty())
+                o.put("parts", new org.json.JSONArray(parts));
             if (ok()) {
                 o.put("tid", tid);
                 o.put("title", title);
@@ -93,6 +97,9 @@ final class LibraryIndex {
             i.version = o.optInt("version", 0);
             i.xbeSha256 = o.optString("xbe_sha256", "");
             i.xbe = o.optString("xbe", "");
+            org.json.JSONArray parts = o.optJSONArray("parts");
+            for (int k = 0; parts != null && k < parts.length(); k++)
+                i.parts.add(parts.optString(k));
             if (i.ok() && i.tid.isEmpty())
                 i.status = BAD_XBE;
             return i;
