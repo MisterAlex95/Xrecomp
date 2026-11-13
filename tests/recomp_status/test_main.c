@@ -21,7 +21,7 @@ static int failures;
 
 static char *last_line(const char *path)
 {
-    static char line[512], buf[512];
+    static char line[2048], buf[2048];
     FILE *f = fopen(path, "r");
     line[0] = 0;
     if (!f)
@@ -98,6 +98,25 @@ int main(void)
     CHECK(field(l, "pad_reads") == 2 && field(l, "threads") == 1 && field(l, "discovered") == 0);
     CHECK(field(l, "seeds") == 0);   /* XBA-129: code the analysis missed, written by this run */
     CHECK(strstr(l, "\"hash\":\"0x") != NULL && l[strlen(l) - 2] == '}');
+    /* Nothing unsupported or unmodelled yet: neither key. */
+    CHECK(strstr(l, "unsupported") == NULL && strstr(l, "unmodelled") == NULL);
+
+    /* What the renderer could not draw (XBA-120): counted by name, in the
+     * order first met; unmodelled methods carry the count last set. */
+    {
+        static const char *pts = "points", *fmt = "texture format 0x26 LU_IMAGE_A8CR8CB8Y8",
+                          *lop = "SET_LOGIC_OP";
+        recomp_status_unsupported(pts, 2);
+        recomp_status_unsupported(fmt, 5);
+        recomp_status_unsupported(pts, 1);
+        recomp_status_unmodelled(lop, 7);
+        recomp_status_unmodelled(lop, 9);
+        recomp_status_write_now();
+        l = last_line(path);
+        CHECK(strstr(l, ",\"unsupported\":{\"points\":3,\"texture format 0x26 LU_IMAGE_A8CR8CB8Y8\":5}") != NULL);
+        CHECK(strstr(l, ",\"unmodelled\":{\"SET_LOGIC_OP\":9}}") != NULL);
+        CHECK(field(l, "flips") == 9 && l[strlen(l) - 2] == '}');
+    }
 
     recomp_status_reset();
     remove(path);

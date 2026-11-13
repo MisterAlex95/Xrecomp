@@ -119,6 +119,15 @@ def classify(status, presses_ms, exit_info, run_s, sustain_s, log_text="", disco
     stubs = stub_calls(discovered)
     if stubs and blocker and not blocker.startswith(("crash", "launches")):
         blocker += "; calls stub " + ", ".join(stubs)
+    # What the renderer met and could not draw (XBA-120, the status file's
+    # "unsupported"): kept in the summary, and named with the blocker on the
+    # same terms as stubs -- a missing format or primitive is a likely cause
+    # of "nothing lit" or of a picture the player cannot read.
+    gaps = renderer_gaps(last)
+    if gaps:
+        summary["unsupported"] = dict(last.get("unsupported"))
+        if blocker and not blocker.startswith(("crash", "launches")):
+            blocker += "; renderer lacks " + ", ".join(gaps)
     # Code the title wrote or made at run time (XBA-118): the lifted C cannot
     # run it, whatever the stage, so it is named even on a sustained run.
     smc = [d for d in discovered or () if d.get("t") == "smc"]
@@ -141,6 +150,19 @@ def smc_sites(smc, limit=3):
                                                 d.get("ret", "?")))
     if len(out) > limit:
         out = out[:limit] + ["+%d more" % (len(out) - limit)]
+    return out
+
+
+def renderer_gaps(last, limit=3):
+    """["points (12 batches)", ...] from a status line's "unsupported", the
+    most used first, at most `limit` (then "+N more")."""
+    u = last.get("unsupported") if isinstance(last, dict) else None
+    if not isinstance(u, dict) or not u:
+        return []
+    items = sorted(u.items(), key=lambda kv: (-int(kv[1]), kv[0]))
+    out = ["%s (%d batches)" % (k, int(v)) for k, v in items[:limit]]
+    if len(items) > limit:
+        out.append("+%d more" % (len(items) - limit))
     return out
 
 

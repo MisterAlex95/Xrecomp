@@ -28,6 +28,9 @@ presenting from the GPU. The last section lists what 7c–7e have to do.
 | `tests/nv2a_gl_shader` | 400 random combiner programs through the generated shaders, each pixel compared with `nv2a_rc_eval`. |
 | `tests/nv2a_gl_scale` | The internal resolution policy (0x121 / 0x2121 back buffer, swizzled and depth-only targets), the scale sticking to a scaled target's memory (Burnout 3's HUD clip and menu scissor, promotion, other pitch / swizzled), scissor rounding at 2.25, visibility count scaling, `RECOMP_GPU_SCALE_TARGETS` parsing. |
 | `tests/nv2a_gl_vsh` | 600 random vertex programs plus ILU/a0 edge cases through the translator (transform feedback), compared with `nv2a_vsh_interp.c`; eight deliberate translator mutations must be caught. |
+| `src/kernel/nv2a_coverage.c` | What is not drawn, by name (XBA-120): the NV2A texture format table, xemu's method names, the registry the report and the status file read. |
+| `tests/nv2a_coverage` | The executor over a fake guest memory: the format table against the decoder, method names, each gap counted once per batch and reaching the status file. |
+| `tests/nv2a_gl_coverage` | Pushbuffer methods through the real executor into the back end (GL and forced GLES 3.0), pixels read back: points and lines from the screen-space, fixed-function and vertex-program paths, point sprites; then mip chains, cube and volume textures, the added formats (XBA-120). |
 | `tests/nv2a_gl_backend` | The back end itself (nv2a_gl.c included) on a real context and a fake guest memory: guest CPU writes into targets (clean, dirty, host present, scaled 16-bit, swizzled, none), the scratch depth growing, an anti-aliased surface presented. `-cpu-writes-off` runs the same cases with `RECOMP_GPU_CPU_WRITES=0` and expects them wrong. |
 
 The GL tests are built twice on Linux: for desktop GL 3.3 core and, with
@@ -560,6 +563,26 @@ vertex buffers (4.6 MB), 979 index lists (2.3 MB), 730 vertex arrays. No GL
 errors; the frame dump differs from the gathered run only where the scene
 animates (sky, grass, the character, the pulsing button).
 
+**Fixed function on the GPU (`RECOMP_GPU_FFP=1`, XBA-134).** Off by
+default. A fixed-function batch then reaches `draw_program` like a
+vertex-program batch, with `Nv2aProgramBatch.ffp` set instead of program
+words: the state `ffp_batch_begin` resolves once a batch (commit 511f2c1)
+as a key (which inputs are streamed, lighting, the light kinds, colour
+material, normal flipping) and as constants (composite and model-view rows,
+viewport offset, scene ambient and material alpha, four per light; layout
+in `nv2a_backend.h`, change stamps so a program uploads only what moved).
+`nv2a_gl_vsh_ffp_body` writes `ffp_vertex` / `lit_color` expression for
+expression as a body for the program translator's own wrapper (same inputs
+-- gathered or `RECOMP_GPU_VBO` raw --, same `oPos` mapping, near plane and
+fog), one shader per key. So the batch is no longer transformed, lit and
+uploaded on the CPU each time (the `KB transformed on the CPU` of the frame
+line). `tests/nv2a_gl_coverage` compares it with the CPU transform output by
+output over 41 random states (worst difference 1.2e-7 on llvmpipe) and
+draws the same picture both ways. Differences left: a vertex with clip w
+within 1e-6 of 0 drops the whole batch on the CPU and is drawn on the GPU;
+texgen, texture matrices, specular, skinning and spot cones are modelled by
+neither (counted, "What is not drawn").
+
 **Vertices.** Otherwise the executor transforms: vertex programs run in
 `nv2a_vsh_interp.c`, fixed-function vertices in `ffp_vertex`, and triangles
 are clipped at the near plane. The back end gets surface-pixel x/y, window z,
@@ -568,6 +591,30 @@ per vertex, already as a triangle list. The vertex shader maps them back to
 clip space (`(x·2/W − 1)·w`, …, `w`), so the GPU interpolates with 1/w as
 the CPU rasteriser interpolates texture coordinates, and `Nv2aVertexFull` is
 uploaded as it is (one `glBufferData` per batch).
+
+**Points and lines (XBA-120).** With `NV2A_BACKEND_CAP_POINTS_LINES` the
+executor hands points and lines over as such (`Nv2aBatch.prim`) from every
+path: screen-space batches gathered like their triangles, fixed-function and
+CPU-transformed batches clipped at the same two planes as triangles (a point
+is dropped behind them, a segment cut), vertex-program batches as an index
+list for the GLSL program. Strips and loops arrive as segment pairs (a
+loop's closing segment last). The back end draws `GL_POINTS` / `GL_LINES`.
+Point size is `SET_POINT_SIZE` (0x043C) read as xemu reads it, 6.3 fixed
+point in logical pixels (1 while never sent), times the anti-aliasing factor
+and the internal scale, written to `gl_PointSize` by both vertex shaders and
+clamped to `GL_ALIASED_POINT_SIZE_RANGE` (desktop core enables
+`GL_PROGRAM_POINT_SIZE`). Point sprites: `SET_POINT_SMOOTH_ENABLE` (0x031C)
+is the NV2A's sprite switch (xemu); every stage then samples at
+`gl_PointCoord`, its t turned over since guest rows are GL rows, (0,0) at
+the point's top left. Not modelled, counted as unsupported: distance
+attenuation (`SET_POINT_PARAMS_ENABLE`, the point keeps `SET_POINT_SIZE`)
+and a vertex program's `oPts`. Lines are one pixel wide times the internal
+scale on GLES, clamped to `GL_ALIASED_LINE_WIDTH_RANGE` (Adreno offers
+wide lines), and one pixel on desktop GL, where a forward-compatible core
+context refuses wider ones; the NV2A's own line width is not modelled
+(xemu's register list does not name it). The CPU rasteriser still draws
+neither. The statistics line gains `[GPUGL] N point batches, M line
+batches` when there were any.
 
 **Render targets.** One RGBA8 texture + FBO per colour surface address and
 bytes per pixel, up to 16, least recently drawn evicted. Created from the
@@ -708,10 +755,63 @@ the old policy (every frame and every unit switch, no target rule). DXT
 goes up compressed when S3TC exists (`RECOMP_GPU_S3TC=0` turns it off);
 every other format is decoded once by the executor's own sampler through
 `nv2a_backend_decode_texture`, so the CPU and GPU paths cannot disagree on a
-format. Level 0 only, like the CPU rasteriser. Filtering follows the CPU
+format. Filtering follows the CPU
 rasteriser's choice: combiner batches honour the title's TENT filters,
 the two simpler colour rules take the nearest texel unless
 `RECOMP_TEX_BILINEAR`/`RECOMP_TEX_ANISO`.
+
+**Mip chains (XBA-120).** Every level a swizzled or DXT texture declares
+(`MIPMAP_LEVELS`) goes up, down to 1x1: NV2A levels follow one another,
+each in the base level's own layout (`nv2a_backend_texture_level` gives a
+level's offset and size; the cache key includes the level count), cube
+faces each with their chain. The minifying filter takes the title's level
+mode from `SET_TEXTURE_FILTER` MIN (xemu: 3 BOX_NEARESTLOD, 4
+TENT_NEARESTLOD, 5 BOX_TENT_LOD, 6 TENT_TENT_LOD -- trilinear), the texel
+filter staying the one the rule above chose; the LOD0 modes sample level 0.
+`SET_TEXTURE_CONTROL0`'s LOD clamps (MIN bits 18-29, MAX bits 6-17, 4.8
+fixed point as xemu reads them) go to `GL_TEXTURE_MIN_LOD`/`MAX_LOD`; the
+LOD bias (`SET_TEXTURE_FILTER` bits 0-12, signed 5.8) is a shader uniform
+(`u_lodb`, the `texture()` bias argument: GLES has no
+`GL_TEXTURE_LOD_BIAS`). Linear (LU_IMAGE) textures have no levels.
+`RECOMP_GPU_MIPS=0` keeps level 0 only. The CPU rasteriser still samples
+level 0 (minified textures shimmer there); that is not counted as a gap.
+
+**Formats (XBA-120).** The decoder both paths share (`sample_tex` /
+`decode_texel`) now reads 51 of the 59 NV2A formats (the table in
+`nv2a_coverage.c`): added the swizzled twins SZ_A8Y8, SZ_R6G5B5, SZ_G8B8,
+SZ_R8B8, SZ_Y16, SZ_YB16YA16, SZ_R5G5B5A1, SZ_R4G4B4A4, SZ_A8B8G8R8,
+SZ_B8G8R8A8, SZ_R8G8B8A8 and the linear LU_IMAGE_SY8, X7SY9, R8B8, G8B8,
+SG8SB8, A8Y8, R6G5B5, Y16, YB16YA16, R5G5B5A1, R4G4B4A4, and the fixed depth
+formats LU_IMAGE_DEPTH_X8_Y24_FIXED (depth in the top 24 bits, as a Z24S8
+surface stores it) and _Y16_FIXED read as grey. Bump-map formats (D3D's
+V8U8 = G8B8, L6V5U5 = R6G5B5, V16U16 = YB16YA16) hand their bytes over as
+they are; a channel a format lacks reads 1, as alpha does (an assumption
+xemu's own table should confirm); 16-bit values keep their top byte. Still
+counted as unsupported: LU_IMAGE_A8CR8CB8Y8 and LC_IMAGE_A4V6YB6A4U6YA6
+(`d3d8_format_is_swizzled` calls them swizzled, which they are not), the
+swizzled depth formats (0x2A-0x2D, which the same helper calls linear) and
+the float depth formats. A depth format on a projective combiner stage is
+still a shadow map: compared on the GPU, white on the CPU path (which no
+longer reaches the decoder for it). `SET_TEXTURE_FILTER`'s signed channels
+(bits 28-31: A, R, G, B) are honoured on both paths: the texel's byte read
+as two's complement over 127 after the fetch (`rc_signed`, `nv_s8`), except
+on a stage a bump-env stage reads, which signs dU/dV itself.
+
+**Cube and volume textures (XBA-120).** Cube maps (FORMAT bit 2, a
+CUBEMAP stage) were already sampled as `samplerCube` from six faces, each
+face's levels padded to 128 bytes; they now carry their mip chains too.
+Volumes (FORMAT `DIMENSIONALITY` 3, `BASE_SIZE_P` slices; ADDRESS bits
+16-19 the third axis' wrap) reach a back end with
+`NV2A_BACKEND_CAP_VOLUME` as `Nv2aTexture.depth`: the executor decodes each
+level whole through its own texel decoder (`decode_texel`, the format
+switch of `sample_tex` split out), one 3D Morton order per level (xemu
+`swizzle.c`: a bit of x, y and z in turn; `xbox_swizzle_offset_3d`), each
+level halving all three sizes, and the back end uploads it with
+`glTexImage3D` and samples it as `sampler3D` at (s/q, t/q, r/q) on a
+PROJECT2D/3D stage or through the colour rule without combiners. Swizzled
+formats only; a DXT volume is counted (`volume texture, DXT`) and reads
+white. The CPU rasteriser samples neither its slices nor its levels and
+counts every volume (`volume texture`).
 
 **Pixels.** `nv2a_gl_shader.c` writes a fragment shader per pipeline key: the
 combiner words, stage count and flags, stage-program modes, which stages hold
@@ -899,6 +999,40 @@ while the title streams. Off by default.
 With `RECOMP_FB_DUMP_FLIPS=<flag file>` a frame dump and a table can be
 taken at the same flip: `touch sig flag; sleep 0.4; rm flag`.
 
+## What is not drawn (XBA-120)
+
+What a batch needs and the path drawing it (the GL back end or the CPU
+rasteriser) leaves out is counted under a fixed name, once per batch, by
+`note_batch_gaps` in `nv2a_pb_exec.c` (registry: `src/kernel/nv2a_coverage.c`).
+A back end says what it draws through its caps; what neither path models is
+counted for both. The names:
+
+| Name | Counted when |
+|---|---|
+| `texture format 0xNN <xemu name>` | a stage in use samples a format the decoder (`sample_tex`, shared by both paths) cannot read: the stage reads white. The table in `nv2a_coverage.c` lists every NV2A format with its texel size, swizzle and whether it is decoded; `tests/nv2a_coverage` checks it against the decoder code by code. |
+| `shadow map (CPU rasteriser)` | a depth format in a projective stage on the CPU path (the GPU compares with its zeta surface instead). |
+| `points`, `lines`, `line strip`, `line loop` | the primitive, on a path that does not draw it (the CPU rasteriser, a back end without `NV2A_BACKEND_CAP_POINTS_LINES`). |
+| `point size attenuation` | points with `SET_POINT_PARAMS_ENABLE` on (drawn at `SET_POINT_SIZE`). |
+| `volume texture` | a stage in use has `DIMENSIONALITY` 3, on a path without `NV2A_BACKEND_CAP_VOLUME` (the CPU rasteriser). |
+| `volume texture, DXT` | a DXT volume on the GPU (not decoded: white). |
+| `texture stage mode 0xNN <name>` | dot-product and dependent-read modes (8 and up) on both paths, bump-env (6, 7) on the CPU path: they read zero. |
+| `logic op`, `polygon mode point`, `polygon mode line`, `flat shading` | the state is set for the batch; nothing models it. |
+| `stencil test (CPU rasteriser)` | stencil on, CPU path. |
+| `fixed-function texgen`, `fixed-function texture matrix`, `fixed-function vertex blending (skinning)`, `fixed-function specular`, `two-sided lighting`, `spot lights` | a fixed-function batch with that state on (`ffp_vertex` / `lit_color` model the composite matrix and lights without specular or cones). |
+| `batch with no vertex program, matrix or screen-space positions` | the batch is skipped. |
+
+The report prints them every period, most used first (`[GPU] unsupported
+(batches): points x12, texture format 0x26 LU_IMAGE_A8CR8CB8Y8 x40, ...`), and
+the status file carries them as `"unsupported":{name: batches}`
+(`recomp_status.h`), which the compat runner and Check my library append to a
+run's blocker ([compat-runner.md](compat-runner.md)). Methods the executor
+does not model at all are named too: each line of the report's unhandled
+table carries xemu's name (`nv2a_regs.h`), "(read from the register file)"
+for those modelled through `s_reg` (lights, culling, stencil, polygon
+offset); the 16 most frequent unmodelled ones go to the status file as
+`"unmodelled":{name: count}` (not a blocker: D3D sends many it never
+relies on).
+
 ## Known differences from the CPU rasteriser (7b)
 
 - Colours and fog are interpolated with perspective (GL's default); the CPU
@@ -923,7 +1057,8 @@ taken at the same flip: `touch sig flag; sleep 0.4; rm flag`.
   `NV2A_BACKEND_CAP_CULL`, so strips arrive with one winding; GL's front
   face is the opposite of the title's, because guest rows map to GL rows
   unflipped. `RECOMP_GPU_CULL=0` turns it off.
-- Points and lines are not drawn, like the CPU rasteriser.
+- Points and lines are drawn on the GPU only ("Points and lines" above);
+  the CPU rasteriser draws neither and counts them as unsupported.
 - Guest CPU writes into a GPU target are seen when the target is next bound
   or sampled (once a frame), read back or presented ("Guest CPU writes"
   below); a write between two batches of the same frame on the same target
@@ -963,7 +1098,8 @@ The original list (the interpreter was 41 % of the in-world executor):
    11:11:10 normals, unsigned bytes.
 5. Fog: the CPU computes the fog factor per vertex (`fog_factor`); move it
    into the vertex shader from `oFog.x` and the fog mode/parameters.
-6. Fixed-function T&L (`ffp_vertex`, `lit_color`) either as a second
+6. Done behind `RECOMP_GPU_FFP=1` (XBA-134, "Fixed function on the GPU"
+   above); the original note: fixed-function T&L (`ffp_vertex`, `lit_color`) either as a second
    generated vertex shader or kept on the CPU (menus only use it lightly).
 
 ### 7d: surfaces, readback, reports
@@ -984,8 +1120,8 @@ The original list (the interpreter was 41 % of the in-world executor):
 7. Done (XBA-119): `SET_CLEAR_RECT` for swizzled surfaces (the executor
    hands a back end the clear rectangle as the clip, as the CPU path clears
    it).
-8. Mip chains (upload every level, GL mip filters), which the CPU path never
-   had either.
+8. Done on the GPU (XBA-120): mip chains ("Mip chains" above). The CPU
+   path still samples level 0.
 
 ### 7e: presenting from the GPU
 
@@ -1063,7 +1199,7 @@ The blockers the earlier note listed, checked against the code then:
 | Blocker | State |
 |---|---|
 | Synchronous visibility queries ending the render pass | Gone with deferred reports (G2, "Visibility tests"): no wait at `GET_REPORT`, a flush after 300 us and a wait after 2 ms only for a report the title spins on. `RECOMP_GPU_ZPASS=lazy` (never flush or wait from the idle hook) stays the candidate for a tiler, to measure on the device. |
-| Per-frame vertex uploads (115 MB/frame) | Vertex-program batches come from cached guest vertex buffers (G3, `RECOMP_GPU_VBO`, on by default; 0 KB a frame in Oakvale's steady state). Fixed-function and screen-space batches are still transformed on the CPU and uploaded per batch; the frame line now gives that figure (`KB transformed on the CPU`), to read on the device before moving them. |
+| Per-frame vertex uploads (115 MB/frame) | Vertex-program batches come from cached guest vertex buffers (G3, `RECOMP_GPU_VBO`, on by default; 0 KB a frame in Oakvale's steady state). Fixed-function and screen-space batches are still transformed on the CPU and uploaded per batch by default; the frame line gives that figure (`KB transformed on the CPU`). `RECOMP_GPU_FFP=1` (XBA-134) moves fixed-function batches to a generated vertex shader over cached vertex buffers: to measure on the device before it becomes the default. |
 | CPU writes into a surface the GPU does not see | Done: "Guest CPU writes". |
 | Clear rectangles on swizzled surfaces | Done: the executor hands a back end `SET_CLEAR_RECT` on a swizzled surface. |
 | Anti-aliased surfaces without a resolve | Done: "Present of an anti-aliased surface"; drawing and sampling them already worked at their real size. |

@@ -37,7 +37,10 @@ enum {
      * give the depth format's range (Y16: 0xFFFF, X8_Y24: 0xFFFFFF), the
      * units the stage's r/q is in. */
     NV2A_GL_TEX_SHADOW16 = 3,
-    NV2A_GL_TEX_SHADOW24 = 4
+    NV2A_GL_TEX_SHADOW24 = 4,
+    /* A volume texture (sampler3D, XBA-120): PROJECT2D/3D stages sample at
+     * (s/q, t/q, r/q). */
+    NV2A_GL_TEX_3D       = 5
 };
 
 typedef struct {
@@ -59,6 +62,16 @@ typedef struct {
      * clamping at the edge; 0, from the filtered texel (xemu's way). */
     uint32_t bump_src[4];
     uint32_t bump_fetch[4];
+    /* A point batch with point sprites on (SET_POINT_SMOOTH_ENABLE, as xemu
+     * reads it): every stage samples at the position inside the point. Set
+     * by the caller after nv2a_gl_shader_key (the batch, not the pixel
+     * state, knows it). */
+    uint32_t point_sprite;
+    /* SET_TEXTURE_FILTER's signed channels per combiner stage (bits 0-3:
+     * A, R, G, B), read as two's complement over 127 after the fetch
+     * (nv_s8); not for a stage a bump-env stage reads (it signs dU/dV
+     * itself). */
+    uint32_t tex_signed[4];
 } Nv2aGlShaderKey;
 
 enum {

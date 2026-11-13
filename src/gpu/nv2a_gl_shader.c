@@ -60,6 +60,17 @@ void nv2a_gl_shader_key(const Nv2aPixelState *ps, const Nv2aRenderState *rs,
             }
         }
     }
+    if (ps->shade == NV2A_SHADE_COMBINERS)
+        for (s = 0; s < 4; s++) {
+            uint32_t mode = (key->stage_program >> (s * 5)) & 0x1F, b, src = 0;
+            for (b = 1; b < 4; b++)
+                if ((key->bump_src[b] & 0x10) && (key->bump_src[b] & 0xF) == s)
+                    src = 1;
+            if (mode >= 1 && mode <= 3 && tex_kind[s] != NV2A_GL_TEX_NONE
+                && tex_kind[s] != NV2A_GL_TEX_SHADOW16 && tex_kind[s] != NV2A_GL_TEX_SHADOW24
+                && !src && ps->stage[s].valid)
+                key->tex_signed[s] = ps->stage[s].tex.filter >> 28;
+        }
     /* alpha_test_pass(): ALWAYS and anything unknown pass, so they are "off".
      * The screen-space path never alpha-tests. */
     if (rs->alpha_test_enable && ps->shade != NV2A_SHADE_REPLACE
@@ -87,7 +98,7 @@ const char *nv2a_gl_glsl_header(int gles)
      * as on desktop. */
     return gles ? "#version 300 es\nprecision highp float;\nprecision highp int;\n"
                   "precision highp sampler2D;\nprecision highp samplerCube;\n"
-                  "precision highp sampler2DShadow;\n"
+                  "precision highp sampler2DShadow;\nprecision highp sampler3D;\n"
                 : "#version 330 core\n";
 }
 
@@ -103,6 +114,7 @@ const char *nv2a_gl_vertex_body(void)
         "layout(location = 6) in vec4 a_t2;\n"
         "layout(location = 7) in vec4 a_t3;\n"
         "uniform vec4 u_vp;\n"
+        "uniform float u_psize;\n"
         "out vec4 v_d0;\nout vec4 v_d1;\nout float v_fog;\n"
         "out vec4 v_t0;\nout vec4 v_t1;\nout vec4 v_t2;\nout vec4 v_t3;\n"
         "void main() {\n"
@@ -123,6 +135,9 @@ const char *nv2a_gl_vertex_body(void)
         "    gl_Position.z = clamp(gl_Position.z, -w, w);\n"
         "  v_d0 = a_d0; v_d1 = a_d1; v_fog = a_fog;\n"
         "  v_t0 = a_t0; v_t1 = a_t1; v_t2 = a_t2; v_t3 = a_t3;\n"
+        /* Points (XBA-120): SET_POINT_SIZE in surface pixels, clamped by
+         * the back end to the context's range. */
+        "  gl_PointSize = u_psize;\n"
         "}\n";
 }
 
@@ -320,16 +335,22 @@ static void emit_fetch(Sb *b, const Nv2aGlShaderKey *k, uint32_t st)
             sb(b, "  vec4 T%u = vec4(1.0);\n", st);  /* unusable: white */
             return;
         }
+        if (kind == NV2A_GL_TEX_3D) {
+            sb(b, "  float q%u = v_t%u.w != 0.0 ? v_t%u.w : 1.0;\n", st, st, st);
+            sb(b, "  vec4 T%u = texture(u_t%u, vec3(v_t%u.xy / q%u * u_tscale[%u], v_t%u.z / q%u),"
+                  " u_lodb[%u]);\n", st, st, st, st, st, st, st, st);
+            return;
+        }
         sb(b, "  float q%u = v_t%u.w != 0.0 ? v_t%u.w : 1.0;\n", st, st, st);
-        sb(b, "  vec4 T%u = texture(u_t%u, v_t%u.xy / q%u * u_tscale[%u]);\n",
-           st, st, st, st, st);
+        sb(b, "  vec4 T%u = texture(u_t%u, v_t%u.xy / q%u * u_tscale[%u], u_lodb[%u]);\n",
+           st, st, st, st, st, st);
         return;
     case 3:                                       /* CUBEMAP */
         if (kind == NV2A_GL_TEX_CUBE)
-            sb(b, "  vec4 T%u = texture(u_t%u, v_t%u.xyz);\n", st, st, st);
+            sb(b, "  vec4 T%u = texture(u_t%u, v_t%u.xyz, u_lodb[%u]);\n", st, st, st, st);
         else if (kind == NV2A_GL_TEX_2D)          /* not a cube: plain 2D, no divide */
-            sb(b, "  vec4 T%u = texture(u_t%u, v_t%u.xy * u_tscale[%u]);\n",
-               st, st, st, st);
+            sb(b, "  vec4 T%u = texture(u_t%u, v_t%u.xy * u_tscale[%u], u_lodb[%u]);\n",
+               st, st, st, st, st);
         else
             sb(b, "  vec4 T%u = vec4(1.0);\n", st);
         return;
@@ -366,8 +387,8 @@ static void emit_fetch(Sb *b, const Nv2aGlShaderKey *k, uint32_t st)
             return;
         }
         sb(b, "  vec2 D%u = mat2(u_bm[%u].xy, u_bm[%u].zw) * B%u.xy;\n", st, st, st, st);
-        sb(b, "  vec4 T%u = texture(u_t%u, (v_t%u.xy + D%u) * u_tscale[%u]);\n",
-           st, st, st, st, st);
+        sb(b, "  vec4 T%u = texture(u_t%u, (v_t%u.xy + D%u) * u_tscale[%u], u_lodb[%u]);\n",
+           st, st, st, st, st, st);
         if (mode == 7)
             sb(b, "  T%u *= u_bso[%u].x * B%u.z + u_bso[%u].y;\n", st, st, st, st);
         return;
@@ -442,21 +463,38 @@ size_t nv2a_gl_fragment_body(const Nv2aGlShaderKey *k, char *buf, size_t cap)
     for (st = 0; st < 4; st++)
         sb(&b, "uniform %s u_t%u;\n",
            k->tex_kind[st] == NV2A_GL_TEX_CUBE ? "samplerCube"
+           : k->tex_kind[st] == NV2A_GL_TEX_3D ? "sampler3D"
            : k->tex_kind[st] == NV2A_GL_TEX_SHADOW16 || k->tex_kind[st] == NV2A_GL_TEX_SHADOW24
            ? "sampler2DShadow" : "sampler2D", st);
     sb(&b, "uniform vec2 u_tscale[4];\nuniform vec4 u_c0[8];\nuniform vec4 u_c1[8];\n"
            "uniform vec4 u_fc0;\nuniform vec4 u_fc1;\nuniform vec4 u_fogc;\n"
            "uniform float u_aref;\n"
            "uniform vec4 u_bm[4];\nuniform vec2 u_bso[4];\n"
+           "uniform vec4 u_lodb;\n"
            "layout(location = 0) out vec4 o_color;\n");
+    /* Point sprites: every stage's coordinates are the position inside the
+     * point, (0,0) at its top left -- gl_PointCoord's t runs from the top in
+     * window space, and guest row 0 is GL row 0 (no flip), so t is turned
+     * over -- divided by the stage's scale, which the fetch multiplies by. */
+    if (k->point_sprite)
+        for (st = 0; st < 4; st++)
+            sb(&b, "#define v_t%u vec4(vec2(gl_PointCoord.x, 1.0 - gl_PointCoord.y)"
+                   " / u_tscale[%u], 0.0, 1.0)\n", st, st);
     if (k->shade == NV2A_SHADE_COMBINERS
-        && (k->bump_src[1] | k->bump_src[2] | k->bump_src[3]))
+        && (k->bump_src[1] | k->bump_src[2] | k->bump_src[3]
+            | k->tex_signed[0] | k->tex_signed[1] | k->tex_signed[2] | k->tex_signed[3]))
         emit_bump_helpers(&b);
     sb(&b, "void main() {\n  vec4 o;\n");
 
     if (k->shade == NV2A_SHADE_COMBINERS) {
-        for (st = 0; st < 4; st++)
+        for (st = 0; st < 4; st++) {
+            static const char ch[4] = { 'a', 'r', 'g', 'b' };
+            uint32_t c;
             emit_fetch(&b, k, st);
+            for (c = 0; c < 4; c++)
+                if ((k->tex_signed[st] >> c) & 1)
+                    sb(&b, "  T%u.%c = nv_s8(T%u.%c);\n", st, ch[c], st, ch[c]);
+        }
         /* Only the registers a program can read before writing need a value:
          * zero, r0, r1 and the final-combiner specials. */
         sb(&b, "  vec4 R0 = vec4(0.0), R1 = vec4(0.0), R2 = vec4(0.0);\n"
@@ -477,13 +515,17 @@ size_t nv2a_gl_fragment_body(const Nv2aGlShaderKey *k, char *buf, size_t cap)
     } else if (k->shade == NV2A_SHADE_MODULATE) {
         /* xf_rows without combiners: stage 0 texel * diffuse. */
         if (k->tex_kind[0] != NV2A_GL_TEX_NONE)
-            sb(&b, "  o = texture(u_t0, v_t0.xy * u_tscale[0]) * clamp(v_d0, 0.0, 1.0);\n");
+            sb(&b, "  o = texture(u_t0, %s, u_lodb[0]) * clamp(v_d0, 0.0, 1.0);\n",
+               k->tex_kind[0] == NV2A_GL_TEX_3D ? "vec3(v_t0.xy * u_tscale[0], v_t0.z)"
+                                                : "v_t0.xy * u_tscale[0]");
         else
             sb(&b, "  o = clamp(v_d0, 0.0, 1.0);\n");
     } else {
         /* raster_triangle: the texel as it is, else the flat colour. */
         if (k->tex_kind[0] != NV2A_GL_TEX_NONE)
-            sb(&b, "  o = texture(u_t0, v_t0.xy * u_tscale[0]);\n");
+            sb(&b, "  o = texture(u_t0, %s, u_lodb[0]);\n",
+               k->tex_kind[0] == NV2A_GL_TEX_3D ? "vec3(v_t0.xy * u_tscale[0], v_t0.z)"
+                                                : "v_t0.xy * u_tscale[0]");
         else
             sb(&b, "  o = clamp(v_d0, 0.0, 1.0);\n");
     }

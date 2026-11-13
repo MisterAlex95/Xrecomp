@@ -80,6 +80,10 @@ static int s_recheck_frame;        /* RECOMP_GPU_TEX_RECHECK=frame */
 static int s_recheck_switch;       /* RECOMP_GPU_TEX_RECHECK=switch: the old policy */
 static int s_cull = 1;             /* RECOMP_GPU_CULL (default on) */
 static int s_cpu_writes = 1;       /* RECOMP_GPU_CPU_WRITES (default on): rt_cpu_check */
+static float s_point_max = 1.0f;   /* GL_ALIASED_POINT_SIZE_RANGE's top */
+static float s_line_max = 1.0f;    /* GL_ALIASED_LINE_WIDTH_RANGE's top (GLES only) */
+static int s_mips = 1;             /* RECOMP_GPU_MIPS (default on): every mip level */
+static float s_lodb[4];            /* each stage's LOD bias this batch (u_lodb) */
 static uint32_t s_frame;
 static GLuint s_vao, s_vbo, s_vs;
 
@@ -99,7 +103,9 @@ static struct {
     uint32_t vbo_draws, vbo_kb, vbo_hash_kb, vbo_new, vbo_changed, vao_new;
     uint32_t ib_new, ib_kb;         /* index lists cached, their bytes */
     uint32_t cpu_merges, cpu_kpx;   /* guest CPU writes merged into targets, kilopixels */
+    uint32_t points, lines;         /* point and line batches (XBA-120) */
 } s_st;
+static float s_line_width = 1.0f;  /* glLineWidth as last set */
 
 /* RECOMP_GPU_RT_RELAYOUT_READBACK=1: read a target back when the title
  * switches it between swizzled and linear (the old behaviour). */
@@ -273,7 +279,7 @@ static struct {
     GLuint fbo, prog, vao, array_buf;
     GLint vp[4], sc[4];
     GLint unit;                             /* active texture unit, 0-based */
-    GLuint tex[SH_UNITS][2];                /* per unit: 2D, cube */
+    GLuint tex[SH_UNITS][3];                /* per unit: 2D, cube, 3D */
     GLint cap[SH_NCAP];
     GLenum blend_src, blend_dst, blend_eq;
     float blend_color[4];
@@ -367,7 +373,7 @@ static void sh_active(int unit)
  * shadowed). For sampling: the caller has made the stage's unit active. */
 static void sh_tex(GLenum target, GLuint t)
 {
-    int k = target == GL_TEXTURE_CUBE_MAP;
+    int k = target == GL_TEXTURE_CUBE_MAP ? 1 : target == GL_TEXTURE_3D ? 2 : 0;
 
     if (s_sh.unit >= 0 && s_sh.unit < SH_UNITS) {
         if (s_sh.tex[s_sh.unit][k] == t)
@@ -402,7 +408,7 @@ static void sh_delete_textures(GLsizei n, const GLuint *t)
 
     for (i = 0; i < n; i++)
         for (u = 0; u < SH_UNITS; u++)
-            for (k = 0; k < 2; k++)
+            for (k = 0; k < 3; k++)
                 if (s_sh.tex[u][k] == t[i])
                     s_sh.tex[u][k] = 0xFFFFFFFFu;
     glDeleteTextures(n, t);
@@ -559,6 +565,24 @@ static int ensure_init(void)
         if (getenv("RECOMP_GPU_INVALIDATE") && !env_on("RECOMP_GPU_INVALIDATE"))
             s_invalidate = 0;
     }
+    {
+        /* Points and lines (XBA-120): a vertex shader sets the point size
+         * (core desktop GL needs that turned on; GLES always does it). Wide
+         * lines only on GLES: a forward-compatible desktop context refuses
+         * widths over 1, and macOS reports [1, 1] anyway. */
+        GLfloat r[2] = { 1.0f, 1.0f };
+        s_line_width = 1.0f;            /* a new context's */
+        glGetFloatv(GL_ALIASED_POINT_SIZE_RANGE, r);
+        s_point_max = r[1] >= 1.0f ? r[1] : 1.0f;
+#if NV2A_GL_ES
+        r[0] = r[1] = 1.0f;
+        glGetFloatv(GL_ALIASED_LINE_WIDTH_RANGE, r);
+        s_line_max = r[1] >= 1.0f ? r[1] : 1.0f;
+#else
+        glEnable(GL_PROGRAM_POINT_SIZE);
+#endif
+    }
+    s_mips = !(getenv("RECOMP_GPU_MIPS") && !env_on("RECOMP_GPU_MIPS"));
     s_verbose = env_on("RECOMP_GPU_VERBOSE");
     s_cpu_writes = !(getenv("RECOMP_GPU_CPU_WRITES") && !env_on("RECOMP_GPU_CPU_WRITES"));
     s_readback_layout_switch = env_on("RECOMP_GPU_RT_RELAYOUT_READBACK");
@@ -1895,6 +1919,7 @@ static GlRT *rt_for_texture(const Nv2aTexture *t, uint32_t cube, GLint *alpha)
 
 typedef struct {
     uint32_t offset, color, width, height, pitch, palette, cube;   /* key */
+    uint32_t levels, depth;                                        /* key */
     uint32_t bytes;
     uint64_t hash;
     GLuint tex;
@@ -1911,6 +1936,13 @@ typedef struct {
     uint32_t changed;
     int changes;
     uint32_t serial;
+    /* Mip chain (XBA-120): levels uploaded; GL_TEXTURE_MIN_FILTER and the
+     * LOD clamps as last set (samp_set resets MIN with MAG: min_seen is the
+     * samp.filter it last saw). */
+    uint32_t nlev;
+    GLint min_cur, min_seen;
+    float lod_lo, lod_hi;
+    GLint wrap_r;                   /* a volume's GL_TEXTURE_WRAP_R as last set */
 } GlTex;
 
 #define NV_GL_MAX_TEX 512           /* power of two */
@@ -1944,8 +1976,9 @@ static uint64_t tex_hash(const Nv2aTexture *t, uint32_t bytes)
     return h;
 }
 
-/* Upload one 2D image (a texture, or one cube face at `target`). */
-static int tex_upload_image(GLenum target, const Nv2aTexture *t)
+/* Upload one 2D image (a texture, or one cube face at `target`) as mip
+ * level `level`. */
+static int tex_upload_image(GLenum target, GLint level, const Nv2aTexture *t)
 {
     uint32_t bb = d3d8_format_dxt_block_bytes(t->color), n, i;
     uint32_t *argb;
@@ -1956,7 +1989,7 @@ static int tex_upload_image(GLenum target, const Nv2aTexture *t)
                  : t->color == 0x0E ? GL_COMPRESSED_RGBA_S3TC_DXT3_EXT
                  : GL_COMPRESSED_RGBA_S3TC_DXT5_EXT;
         uint32_t size = ((t->width + 3) / 4) * ((t->height + 3) / 4) * bb;
-        glCompressedTexImage2D(target, 0, f, (GLsizei)t->width, (GLsizei)t->height,
+        glCompressedTexImage2D(target, level, f, (GLsizei)t->width, (GLsizei)t->height,
                                0, (GLsizei)size, guest(t->offset));
         s_st.upload_kb += size >> 10;
         return 1;
@@ -1972,33 +2005,102 @@ static int tex_upload_image(GLenum target, const Nv2aTexture *t)
     }
     for (i = 0; i < n; i++)
         argb_to_rgba(argb[i], buf + (size_t)i * 4);
-    glTexImage2D(target, 0, GL_RGBA8, (GLsizei)t->width, (GLsizei)t->height, 0,
+    glTexImage2D(target, level, GL_RGBA8, (GLsizei)t->width, (GLsizei)t->height, 0,
                  GL_RGBA, GL_UNSIGNED_BYTE, buf);
     s_st.upload_kb += n >> 8;
     free(buf);
     return 1;
 }
 
+/* Every level of one face (or of a 2D texture) at `target`, as many as
+ * RECOMP_GPU_MIPS allows. Returns the levels uploaded, 0 on failure. */
+static uint32_t tex_upload_levels(GLenum target, const Nv2aTexture *face)
+{
+    uint32_t n = s_mips && face->levels > 1 ? face->levels : 1, lv;
+    Nv2aTexture one;
+
+    for (lv = 0; lv < n; lv++) {
+        if (!nv2a_backend_texture_level(face, lv, &one)) {
+            if (!lv)
+                one = *face;            /* a back end's own struct: level 0 as is */
+            else
+                break;
+        }
+        one.cube = 0;
+        if (!tex_upload_image(target, (GLint)lv, &one))
+            return lv ? lv : 0;
+        if (one.width == 1 && one.height == 1)
+            return lv + 1;
+    }
+    return lv;
+}
+
+/* A volume's levels (XBA-120): each decoded whole (w*h*d texels) and
+ * uploaded with glTexImage3D. Returns the levels uploaded, 0 on failure. */
+static uint32_t tex_upload_volume(const Nv2aTexture *t)
+{
+    uint32_t n = s_mips && t->levels > 1 ? t->levels : 1, lv, i;
+    Nv2aTexture one;
+
+    for (lv = 0; lv < n; lv++) {
+        uint32_t texels;
+        uint32_t *argb;
+        uint8_t *buf;
+        if (!nv2a_backend_texture_level(t, lv, &one))
+            break;
+        texels = one.width * one.height * one.depth;
+        buf = (uint8_t *)malloc((size_t)texels * 8);
+        if (!buf)
+            break;
+        argb = (uint32_t *)(buf + (size_t)texels * 4);
+        if (!nv2a_backend_decode_texture(&one, argb)) {
+            free(buf);
+            break;
+        }
+        for (i = 0; i < texels; i++)
+            argb_to_rgba(argb[i], buf + (size_t)i * 4);
+        glTexImage3D(GL_TEXTURE_3D, (GLint)lv, GL_RGBA8, (GLsizei)one.width,
+                     (GLsizei)one.height, (GLsizei)one.depth, 0, GL_RGBA, GL_UNSIGNED_BYTE, buf);
+        s_st.upload_kb += texels >> 8;
+        free(buf);
+        if (one.width == 1 && one.height == 1 && one.depth == 1)
+            return lv + 1;
+    }
+    return lv;
+}
+
 static int tex_upload(GlTex *e, const Nv2aTexture *t)
 {
-    GLenum target = e->cube ? GL_TEXTURE_CUBE_MAP : GL_TEXTURE_2D;
+    GLenum target = e->depth ? GL_TEXTURE_3D : e->cube ? GL_TEXTURE_CUBE_MAP : GL_TEXTURE_2D;
     Nv2aTexture one = *t;
+    uint32_t nlev = 0;
     int ok = 1, f;
 
     if (!e->tex)
         glGenTextures(1, &e->tex);
     sh_tex_scratch(target, e->tex);
     one.cube = 0;
-    if (e->cube) {
+    e->wrap_r = -1;
+    if (e->depth) {
+        nlev = tex_upload_volume(t);
+        ok = nlev != 0;
+    } else if (e->cube) {
         uint32_t stride = e->bytes / 6;
         for (f = 0; f < 6 && ok; f++) {
+            uint32_t n;
             one.offset = t->offset + (uint32_t)f * stride;
-            ok = tex_upload_image(GL_TEXTURE_CUBE_MAP_POSITIVE_X + (GLenum)f, &one);
+            n = tex_upload_levels(GL_TEXTURE_CUBE_MAP_POSITIVE_X + (GLenum)f, &one);
+            ok = n != 0;
+            nlev = f ? (n < nlev ? n : nlev) : n;
         }
     } else {
-        ok = tex_upload_image(GL_TEXTURE_2D, &one);   /* a cube seen as 2D: face 0 */
+        nlev = tex_upload_levels(GL_TEXTURE_2D, &one);   /* a cube seen as 2D: face 0 */
+        ok = nlev != 0;
     }
-    glTexParameteri(target, GL_TEXTURE_MAX_LEVEL, 0);
+    e->nlev = nlev ? nlev : 1;
+    glTexParameteri(target, GL_TEXTURE_MAX_LEVEL, (GLint)e->nlev - 1);
+    e->min_cur = e->min_seen = -1;
+    e->lod_lo = e->lod_hi = -1.0f;
     e->samp.wrap_s = e->samp.wrap_t = e->samp.filter = e->samp.swz_a = -1;
     s_st.uploads++;
     return ok;
@@ -2051,7 +2153,8 @@ static GlTex *tex_get(const Nv2aTexture *t, uint32_t cube, int unit)
         }
         if (c->offset == t->offset && c->color == t->color && c->width == t->width
             && c->height == t->height && c->pitch == t->pitch
-            && c->palette == t->palette && c->cube == cube) {
+            && c->palette == t->palette && c->cube == cube && c->levels == t->levels
+            && c->depth == (t->depth > 1 ? t->depth : 0)) {
             e = c;
             break;
         }
@@ -2115,6 +2218,8 @@ static GlTex *tex_get(const Nv2aTexture *t, uint32_t cube, int unit)
     e->offset = t->offset; e->color = t->color; e->width = t->width;
     e->height = t->height; e->pitch = t->pitch; e->palette = t->palette;
     e->cube = cube;
+    e->levels = t->levels;
+    e->depth = t->depth > 1 ? t->depth : 0;
     e->bytes = bytes;
     readback_overlapping(t->offset, bytes);
     {
@@ -2185,15 +2290,69 @@ static GLint tex_filter(const Nv2aTexture *t, uint32_t shade)
     return lin ? GL_LINEAR : GL_NEAREST;
 }
 
+/* The minifying filter with a mip chain (XBA-120): SET_TEXTURE_FILTER's
+ * MIN (xemu: 3 BOX_NEARESTLOD, 4 TENT_NEARESTLOD, 5 BOX_TENT_LOD, 6
+ * TENT_TENT_LOD) picks the level filter; the texel filter stays the one
+ * tex_filter chose (the CPU path's rule). Without levels, or for the LOD0
+ * modes, the base filter. */
+static GLint tex_min_filter(const Nv2aTexture *t, uint32_t nlev, GLint base)
+{
+    uint32_t min = (t->filter >> 16) & 0xFF;
+    int lin = base == GL_LINEAR;
+
+    if (nlev < 2 || min < 3 || min > 6)
+        return base;
+    if (min == 3 || min == 4)
+        return lin ? GL_LINEAR_MIPMAP_NEAREST : GL_NEAREST_MIPMAP_NEAREST;
+    return lin ? GL_LINEAR_MIPMAP_LINEAR : GL_NEAREST_MIPMAP_LINEAR;
+}
+
+/* SET_TEXTURE_FILTER's MIPMAP_LOD_BIAS: signed 5.8 fixed point. */
+static float tex_lod_bias(const Nv2aTexture *t)
+{
+    int32_t b = (int32_t)(t->filter << 19) >> 19;
+    return (float)b / 256.0f;
+}
+
 static void tex_bind(GlTex *e, const Nv2aTexture *t, int unit, uint32_t shade)
 {
-    GLenum target = e->cube ? GL_TEXTURE_CUBE_MAP : GL_TEXTURE_2D;
+    GLenum target = e->depth ? GL_TEXTURE_3D : e->cube ? GL_TEXTURE_CUBE_MAP : GL_TEXTURE_2D;
+    GLint f = tex_filter(t, shade), minf = tex_min_filter(t, e->nlev, f);
 
     sh_active((int)unit);
     sh_tex(target, e->tex);
-    samp_set(target, &e->samp, tex_filter(t, shade),
+    samp_set(target, &e->samp, f,
              wrap_mode(t->addr_u, (int)t->border_color),
              wrap_mode(t->addr_v, (int)t->border_color), t->border, GL_ALPHA);
+    if (e->min_seen != e->samp.filter) {    /* samp_set set MIN to f */
+        e->min_seen = e->samp.filter;
+        e->min_cur = e->samp.filter;
+    }
+    if (e->min_cur != minf) {
+        glTexParameteri(target, GL_TEXTURE_MIN_FILTER, minf);
+        e->min_cur = minf;
+    }
+    if (e->depth) {
+        GLint wr = wrap_mode(t->addr_p, 0);
+        if (wr == GL_CLAMP_TO_BORDER)
+            wr = GL_CLAMP_TO_EDGE;
+        if (e->wrap_r != wr) {
+            glTexParameteri(target, GL_TEXTURE_WRAP_R, wr);
+            e->wrap_r = wr;
+        }
+    }
+    if (e->nlev > 1) {
+        /* SET_TEXTURE_CONTROL0's LOD clamps (4.8 fixed point, xemu). */
+        float lo = (float)((t->control0 >> 18) & 0xFFF) / 256.0f;
+        float hi = (float)((t->control0 >> 6) & 0xFFF) / 256.0f;
+        if (lo != e->lod_lo || hi != e->lod_hi) {
+            glTexParameterf(target, GL_TEXTURE_MIN_LOD, lo);
+            glTexParameterf(target, GL_TEXTURE_MAX_LOD, hi);
+            e->lod_lo = lo;
+            e->lod_hi = hi;
+        }
+        s_lodb[unit] = tex_lod_bias(t);
+    }
     s_bound[unit] = e;
 }
 
@@ -2206,6 +2365,8 @@ typedef struct {
     int failed;
     GLint u_vp, u_tscale, u_c0, u_c1, u_fc0, u_fc1, u_fogc, u_aref;
     GLint u_bm, u_bso;              /* -1 without a bump-env stage */
+    GLint u_psize;                  /* the vertex shader's point size */
+    GLint u_lodb;                   /* each stage's LOD bias (vec4) */
     /* With a translated vertex program (vsh_hash != 0): its uniforms, the
      * location of each c[i] (-1 where the compiler dropped it), and the
      * constant serial this program's copy of c[] is synced to. */
@@ -2270,10 +2431,14 @@ static GlVsh *vsh_get(const Nv2aProgramBatch *pb, uint64_t fmt)
     v->hash = h;
     v->count = pb->ins_count;
     v->fmt = fmt;
-    if (!nv2a_gl_vsh_body_fmt(pb->ins, pb->ins_count,
-                              NV2A_GL_ES ? NV2A_GL_VSH_RENDER
-                                         : NV2A_GL_VSH_RENDER | NV2A_GL_VSH_CLIP_DISTANCE,
-                              fmt, body, sizeof body, NULL)
+    if (!(pb->ffp
+          ? nv2a_gl_vsh_ffp_body(pb->ffp, NV2A_GL_ES ? NV2A_GL_VSH_RENDER
+                                                     : NV2A_GL_VSH_RENDER | NV2A_GL_VSH_CLIP_DISTANCE,
+                                 fmt, body, sizeof body)
+          : nv2a_gl_vsh_body_fmt(pb->ins, pb->ins_count,
+                                 NV2A_GL_ES ? NV2A_GL_VSH_RENDER
+                                            : NV2A_GL_VSH_RENDER | NV2A_GL_VSH_CLIP_DISTANCE,
+                                 fmt, body, sizeof body, NULL))
         || !(v->src = strdup(body))) {
         v->failed = 1;
         return NULL;
@@ -2565,6 +2730,8 @@ static void prog_setup(GlProg *p, int program)
     p->u_aref = glGetUniformLocation(p->prog, "u_aref");
     p->u_bm = glGetUniformLocation(p->prog, "u_bm");
     p->u_bso = glGetUniformLocation(p->prog, "u_bso");
+    p->u_psize = glGetUniformLocation(p->prog, "u_psize");
+    p->u_lodb = glGetUniformLocation(p->prog, "u_lodb");
     if (program) {
         p->u_xf = glGetUniformLocation(p->prog, "u_xf");
         p->u_fog = glGetUniformLocation(p->prog, "u_fog");
@@ -3120,6 +3287,7 @@ static void bind_stage_textures(const Nv2aPixelState *ps, uint32_t kind[4], floa
 {
     uint32_t st;
 
+    memset(s_lodb, 0, sizeof s_lodb);
     for (st = 0; st < 4; st++) {
         const Nv2aTexStage *ts = &ps->stage[st];
         uint32_t mode = ts->mode, cube = 0;
@@ -3144,6 +3312,17 @@ static void bind_stage_textures(const Nv2aPixelState *ps, uint32_t kind[4], floa
              * decoder knows no depth format). */
             if (bind_shadow(ps, &ts->tex, (int)st, &tscale[st * 2]))
                 kind[st] = shadow_kind(ts->tex.color);
+            continue;
+        }
+        if (ts->tex.depth > 1) {
+            /* A volume (XBA-120): PROJECT2D/3D on the combiners, stage 0
+             * otherwise; never a render target. */
+            if (ps->shade == NV2A_SHADE_COMBINERS && mode != 1 && mode != 2)
+                continue;
+            if (!(e = tex_get(&ts->tex, 0, (int)st)))
+                continue;
+            tex_bind(e, &ts->tex, (int)st, ps->shade);
+            kind[st] = NV2A_GL_TEX_3D;
             continue;
         }
         if ((r = rt_for_texture(&ts->tex, cube, &alpha)) != NULL) {
@@ -3209,6 +3388,8 @@ static void set_pixel_uniforms(const GlProg *p, const Nv2aPixelState *ps,
     float c0[32], c1[32], v[4];
 
     glUniform2fv(p->u_tscale, 4, tscale);
+    if (p->u_lodb >= 0)
+        glUniform4fv(p->u_lodb, 1, s_lodb);
     if (ps->shade == NV2A_SHADE_COMBINERS) {
         int i;
         for (i = 0; i < 8; i++) {
@@ -3280,6 +3461,34 @@ static void set_near_mode(int program, float near01)
     s_near01 = near01;
 }
 
+/* The GL primitive for a batch (Nv2aBatch.prim), with the point size and
+ * line width it draws at: surface pixels times the internal scale, clamped
+ * to what the context offers (desktop lines stay 1, see ensure_init). */
+static GLenum prim_setup(const Nv2aBatch *b, const GlProg *p, float sc)
+{
+    if (b->prim == NV2A_PRIM_POINTS) {
+        float size = b->point_size * sc;
+        if (size < 1.0f) size = 1.0f;
+        if (size > s_point_max) size = s_point_max;
+        if (p->u_psize >= 0)
+            glUniform1f(p->u_psize, size);
+        s_st.points++;
+        return GL_POINTS;
+    }
+    if (p->u_psize >= 0)
+        glUniform1f(p->u_psize, 1.0f);
+    if (b->prim == NV2A_PRIM_LINES) {
+        float w = sc < 1.0f ? 1.0f : (sc > s_line_max ? s_line_max : sc);
+        if (w != s_line_width) {
+            glLineWidth(w);
+            s_line_width = w;
+        }
+        s_st.lines++;
+        return GL_LINES;
+    }
+    return GL_TRIANGLES;
+}
+
 static void gl_draw(const Nv2aSurface *s, const Nv2aBatch *b)
 {
     const Nv2aPixelState *ps = b->pixel;
@@ -3291,7 +3500,8 @@ static void gl_draw(const Nv2aSurface *s, const Nv2aBatch *b)
     GlTarget t;
     int query = 0;
 
-    if (!b->full || !ps || b->count < 3)
+    if (!b->full || !ps
+        || b->count < (b->prim == NV2A_PRIM_POINTS ? 1u : b->prim == NV2A_PRIM_LINES ? 2u : 3u))
         return;
     if (!ensure_init())
         return;
@@ -3300,6 +3510,7 @@ static void gl_draw(const Nv2aSurface *s, const Nv2aBatch *b)
     if (s_sig_on && sig_batch(s, b, kind, b->count / 3))
         return;
     nv2a_gl_shader_key(ps, rs, kind, &key);
+    key.point_sprite = b->prim == NV2A_PRIM_POINTS && b->point_sprite;
     if (key.bump_src[1] | key.bump_src[2] | key.bump_src[3])
         s_st.bump_draws++;
     p = prog_get(&key, NULL);
@@ -3332,7 +3543,7 @@ static void gl_draw(const Nv2aSurface *s, const Nv2aBatch *b)
         glBeginQuery(NV2A_GL_ES ? GL_ANY_SAMPLES_PASSED : GL_SAMPLES_PASSED, q->q);
         query = 1;
     }
-    glDrawArrays(GL_TRIANGLES, 0, (GLsizei)b->count);
+    glDrawArrays(prim_setup(b, p, t.rt ? t.sc : 1.0f), 0, (GLsizei)b->count);
     if (query) {
         glEndQuery(NV2A_GL_ES ? GL_ANY_SAMPLES_PASSED : GL_SAMPLES_PASSED);
         s_qcount++;
@@ -3344,7 +3555,8 @@ static void gl_draw(const Nv2aSurface *s, const Nv2aBatch *b)
         t.rt->serial = ++s_rt_serial;
     }
     s_st.draws++;
-    s_st.tris += b->count / 3;
+    if (b->prim == NV2A_PRIM_TRIANGLES)
+        s_st.tris += b->count / 3;
 }
 
 /* Upload what changed in c[] since this program last drew (nv2a_backend.h:
@@ -3786,6 +3998,7 @@ static int gl_draw_program(const Nv2aSurface *s, const Nv2aBatch *b)
     if (s_sig_on && sig_batch(s, b, kind, pb->index_count / 3))
         return 1;                   /* skipped: drawn by nobody */
     nv2a_gl_shader_key(ps, rs, kind, &key);
+    key.point_sprite = b->prim == NV2A_PRIM_POINTS && b->point_sprite;
     if (key.bump_src[1] | key.bump_src[2] | key.bump_src[3])
         s_st.bump_draws++;
     p = prog_get(&key, vsh);
@@ -3875,7 +4088,8 @@ bound:
         glBeginQuery(NV2A_GL_ES ? GL_ANY_SAMPLES_PASSED : GL_SAMPLES_PASSED, q->q);
         query = 1;
     }
-    glDrawElements(GL_TRIANGLES, (GLsizei)pb->index_count, GL_UNSIGNED_SHORT, NULL);
+    glDrawElements(prim_setup(b, p, t.rt ? t.sc : 1.0f), (GLsizei)pb->index_count,
+                   GL_UNSIGNED_SHORT, NULL);
     if (query) {
         glEndQuery(NV2A_GL_ES ? GL_ANY_SAMPLES_PASSED : GL_SAMPLES_PASSED);
         s_qcount++;
@@ -3891,7 +4105,8 @@ bound:
     if (!pb->raw)
         s_st.vsh_kb += (uint32_t)(((size_t)pb->vertex_count * nstream * 16
                                    + pb->index_count * 2) >> 10);
-    s_st.tris += pb->index_count / 3;
+    if (b->prim == NV2A_PRIM_TRIANGLES)
+        s_st.tris += pb->index_count / 3;
     return 1;
 }
 
@@ -4435,6 +4650,10 @@ static void gl_flip(void)
         if (s_st.cpu_merges)
             fprintf(stderr, "  [GPUGL] guest CPU writes into targets: %u merged (%u kpx)\n",
                     s_st.cpu_merges, s_st.cpu_kpx);
+        if (s_st.points || s_st.lines)
+            fprintf(stderr, "  [GPUGL] %u point batches, %u line batches (points up to %.0f px,"
+                            " lines up to %.0f px)\n",
+                    s_st.points, s_st.lines, (double)s_point_max, (double)s_line_max);
         if (s_hst.frames)
             fprintf(stderr, "  [GPUGL] host present: %u frames at %ux%u, %.3f ms/frame"
                             " (read-back issue + map), %u resolved from an anti-aliased"
@@ -4456,7 +4675,8 @@ static void gl_flip(void)
 
 static Nv2aBackend s_backend = {
     gl_clear, gl_draw, gl_flip,
-    NV2A_BACKEND_CAP_PIXEL | NV2A_BACKEND_CAP_CULL | NV2A_BACKEND_CAP_PROGRAM,
+    NV2A_BACKEND_CAP_PIXEL | NV2A_BACKEND_CAP_CULL | NV2A_BACKEND_CAP_PROGRAM
+        | NV2A_BACKEND_CAP_POINTS_LINES | NV2A_BACKEND_CAP_VOLUME,
     gl_zpass_read, gl_zpass_end, gl_zpass_resolve, gl_draw_program, gl_zpass_flush
 };
 

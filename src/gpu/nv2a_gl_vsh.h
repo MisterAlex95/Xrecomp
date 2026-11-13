@@ -40,6 +40,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include "nv2a_backend.h"   /* Nv2aFfpKey */
 
 #define NV2A_GL_VSH_RENDER         0x0u
 #define NV2A_GL_VSH_CAPTURE        0x1u
@@ -89,6 +90,15 @@ int nv2a_gl_vsh_attr(uint32_t type, uint32_t size, Nv2aGlVshAttr *out);
 size_t nv2a_gl_vsh_body_fmt(const uint32_t (*ins)[4], uint32_t count, uint32_t flags,
                             uint64_t formats, char *buf, size_t cap,
                             Nv2aGlVshInfo *info);
+
+/* The fixed-function unit (XBA-134) as a shader body with the same inputs,
+ * constants and endings as a program's: ffp_vertex / lit_color in
+ * nv2a_pb_exec.c expression for expression, from the state in `key` and
+ * the constants laid out as nv2a_backend.h's Nv2aFfpKey says. Returns the
+ * length, or 0 if it did not fit. tests/nv2a_gl_coverage compares it with
+ * the CPU transform vertex by vertex. */
+size_t nv2a_gl_vsh_ffp_body(const Nv2aFfpKey *key, uint32_t flags, uint64_t formats,
+                            char *buf, size_t cap);
 
 /* The transform feedback varyings of NV2A_GL_VSH_CAPTURE, 8 vec4s. */
 extern const char *const nv2a_gl_vsh_capture_names[8];
