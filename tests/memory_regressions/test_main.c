@@ -39,6 +39,12 @@
  *                 above the RAM mirrors gets it, can commit inside it and use
  *                 the memory, is told the truth when it asks, and is refused
  *                 cleanly for an address that would alias live memory.
+ *   ext-vma-stress  RECOMP_EXT_VMA=1, the layout brought up and down 40 times
+ *                 while four threads map and unmap host memory as fast as
+ *                 they can (malloc arenas, thread stacks): the tracker must
+ *                 come up every time. The range used to be released and
+ *                 reserved again at the same fixed host address, and a
+ *                 mapping landing in that gap left it off (POSIX).
  *   ext-vma-128   The same switch on a 128 MB map, where the mirrors already
  *                 reach past user space. The tracker must stay out of the way
  *                 rather than reserve a range of negative size.
@@ -193,6 +199,45 @@ static void set_env(const char *name, const char *value)
 #endif
 }
 
+#if !defined(_WIN32)
+#include <pthread.h>
+#include <sys/mman.h>
+static volatile int churn_stop;
+static void *churn(void *arg)
+{
+    unsigned seed = (unsigned)(uintptr_t)arg * 2654435761u;
+    while (!churn_stop) {
+        size_t mb = 1 + (seed = seed * 1103515245u + 12345u) % 256;
+        void *p = mmap(NULL, mb << 20, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+        if (p != MAP_FAILED)
+            munmap(p, mb << 20);
+    }
+    return NULL;
+}
+
+static int ext_vma_stress(const unsigned char *xbe, size_t len)
+{
+    pthread_t th[4];
+    int i, up = 0, active = 0;
+
+    set_env("RECOMP_EXT_VMA", "1");
+    for (i = 0; i < 4; i++)
+        pthread_create(&th[i], NULL, churn, (void *)(uintptr_t)(i + 1));
+    for (i = 0; i < 40; i++) {
+        if (!xbox_MemoryLayoutInit(xbe, len))
+            continue;
+        up++;
+        active += guest_vmem_active();
+        xbox_MemoryLayoutShutdown();
+    }
+    churn_stop = 1;
+    for (i = 0; i < 4; i++)
+        pthread_join(th[i], NULL);
+    printf("  layout up %d/40, tracker on %d/%d\n", up, active, up);
+    return up == 40 && active == 40 ? 0 : 1;
+}
+#endif
+
 int main(int argc, char **argv)
 {
     const char *mode = argc > 1 ? argv[1] : "default";
@@ -209,6 +254,22 @@ int main(int argc, char **argv)
     int i;
 
     setvbuf(stdout, NULL, _IONBF, 0);
+    if (!strcmp(mode, "ext-vma-stress")) {
+#if defined(_WIN32)
+        puts("ext-vma-stress: POSIX only");
+        return 77;
+#else
+        int rc;
+        xbe = load_file(path, &xbe_len);
+        if (!xbe) {
+            printf("cannot read %s\n", path);
+            return 2;
+        }
+        rc = ext_vma_stress(xbe, xbe_len);
+        free(xbe);
+        return rc;
+#endif
+    }
     if (!reclaim && !ext && !avoid && !keep && !lazy_off && strcmp(mode, "default")) {
         printf("unknown mode '%s'\n", mode);
         return 2;
