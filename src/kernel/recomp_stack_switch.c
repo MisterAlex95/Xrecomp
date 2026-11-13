@@ -11,10 +11,15 @@
  *
  * Two suspended contexts can share both keys: an engine that copies each
  * fiber's stack bytes into one shared area (Fable's loader and scripts) parks
- * every fiber at the same esp and the same yield. Each context also keeps the
- * first SNAP bytes of its guest stack at suspend time, and the one whose bytes
- * match the guest stack best is resumed: the engine copied that fiber's bytes
- * back before switching to it.
+ * every fiber at the same esp and the same yield. Each context of such a
+ * thread also keeps its whole guest stack at suspend time (from the esp it
+ * left up to the esp it started with), and the one whose bytes are the guest
+ * stack now is resumed: the engine copied that fiber's bytes back before
+ * switching to it (past what the switching function popped before its ret:
+ * dead bytes by then, see ss_score). The whole stack, not its first bytes:
+ * fibers that run the same job park under the same frames and can differ
+ * only further up, and one resumed on another's host frames returns into the
+ * wrong callers. Two that agree on every byte are interchangeable.
  *
  * Contexts never leave the host thread they were made on: lifted code caches
  * the address of the thread's g_cpu across calls, so a frame resumed on
@@ -169,6 +174,7 @@ static void *ss_make(void *top, void (*fn)(void *), void *arg)
 /* ── Settings ───────────────────────────────────────────────────────── */
 
 static int s_enabled = -1;          /* RECOMP_STACK_SWITCH, read once */
+static int s_whole = 1;             /* RECOMP_STACK_SWITCH_WHOLE */
 static size_t s_stack_bytes;        /* RECOMP_STACK_SWITCH_STACK_MB */
 static unsigned s_max;              /* RECOMP_STACK_SWITCH_MAX */
 static volatile unsigned s_started; /* contexts started, every thread */
@@ -201,6 +207,7 @@ int recomp_stack_switch_enabled(void)
 #endif
         s_stack_bytes = (size_t)env_uint("RECOMP_STACK_SWITCH_STACK_MB", 8, 1, 256) << 20;
         s_max = env_uint("RECOMP_STACK_SWITCH_MAX", 1024, 4, 65536);
+        s_whole = (int)env_uint("RECOMP_STACK_SWITCH_WHOLE", 1, 0, 1);
         s_enabled = on;
     }
     return s_enabled;
@@ -242,7 +249,8 @@ unsigned recomp_stack_switch_live(void) { return 0; }
 
 /* ── Contexts ───────────────────────────────────────────────────────── */
 
-#define SNAP 64     /* bytes of guest stack kept to tell twins apart */
+#define SNAP 64                 /* bytes of guest stack kept when no stack is shared */
+#define SNAP_MAX (1u << 20)     /* a deeper stack than this keeps SNAP bytes */
 
 enum { SS_FREE, SS_RUNNING, SS_SUSPENDED };
 
@@ -258,7 +266,8 @@ typedef struct ss_ctx {
     uint64_t last;          /* suspend tick, for eviction */
     void    *map;           /* host stack mapping (guard page + stack); NULL: root */
     void    *sp;            /* host stack pointer while not running */
-    uint8_t  snap[SNAP];
+    uint8_t *snap;          /* suspended: its guest stack from saved_esp */
+    uint32_t snap_len, snap_cap;
 } ss_ctx;
 
 typedef struct ss_thread {
@@ -267,6 +276,7 @@ typedef struct ss_thread {
     unsigned n, cap;
     ss_ctx  *cur;
     uint64_t tick;
+    int      shared;        /* contexts of this thread share a guest stack area */
 } ss_thread;
 
 static RECOMP_TLS ss_thread *t_ss;
@@ -283,10 +293,13 @@ static void ss_thread_free(void *p)
         ss_ctx *c = t->ctx[i];
         if (c != t->cur && c->map)
             munmap(c->map, s_stack_bytes + s_page);
-        if (c != t->cur)
+        if (c != t->cur) {
+            free(c->snap);
             free(c);
+        }
     }
     free(t->ctx);
+    free(t->root.snap);
     if (t->cur == &t->root)
         free(t);
 }
@@ -329,55 +342,103 @@ unsigned recomp_stack_switch_live(void)
     return live + 1;
 }
 
-/* Bytes of guest stack kept from esp: SNAP, but never past the end of esp's
- * guest page. A stack can end at a page boundary with nothing mapped after
- * it (a fiber that yields at once from a freshly allocated stack), and what
- * lies past its top is not the context's anyway. The same esp always gives
- * the same length, so twins compare equal lengths. */
-static unsigned ss_snap_len(uint32_t esp)
+/* Bytes of guest stack kept from esp when the context leaves it.
+ *
+ * On a thread whose contexts share a guest stack area: all of it, up to the
+ * esp the context started with (everything below that is its own, and the
+ * engine copies exactly that back before it resumes it). The thread's own
+ * stack, a context that left the stack it started on, or one deeper than
+ * SNAP_MAX has no such bound.
+ *
+ * Otherwise SNAP bytes, but never past the end of esp's guest page: a stack
+ * can end at a page boundary with nothing mapped after it (a fiber that
+ * yields at once from a freshly allocated stack), and what lies past its top
+ * is not the context's anyway. */
+static unsigned ss_snap_len(const ss_thread *t, const ss_ctx *c, uint32_t esp)
 {
     unsigned to_page_end = 0x1000u - (esp & 0xFFFu);
+    if (s_whole && t->shared && c->map && c->start_esp > esp && c->start_esp - esp <= SNAP_MAX)
+        return c->start_esp - esp;
     return to_page_end < SNAP ? to_page_end : SNAP;
 }
 
-static void ss_snap(uint8_t *dst, uint32_t esp)
+static void ss_snap(const ss_thread *t, ss_ctx *c, uint32_t esp)
 {
-    memcpy(dst, SS_PTR(esp), ss_snap_len(esp));
+    unsigned n = ss_snap_len(t, c, esp);
+    if (n > c->snap_cap) {
+        uint8_t *grown = realloc(c->snap, n);
+        if (!grown)
+            n = c->snap_cap;    /* its first bytes then */
+        else {
+            c->snap = grown;
+            c->snap_cap = n;
+        }
+    }
+    memcpy(c->snap, SS_PTR(esp), n);
+    c->snap_len = n;
 }
 
-/* Matching leading bytes of a context's snapshot and the guest stack now. */
-static unsigned ss_score(const ss_ctx *c, uint32_t esp)
+/* Matching leading bytes of a context's snapshot and the guest stack now,
+ * past the first `popped`: those the switching function has popped already
+ * (the registers it restores), which are dead and may have been written over
+ * since -- its sti lets in a posted interrupt, whose handler runs on this
+ * stack below the return address, before the ret that brings it here. */
+static unsigned ss_score(const ss_ctx *c, uint32_t esp, unsigned popped)
 {
     const uint8_t *now = SS_PTR(esp);
-    unsigned n = ss_snap_len(esp), k = 0;
+    unsigned n = c->snap_len, k = popped < n ? popped : n;
     while (k < n && c->snap[k] == now[k])
         k++;
     return k;
 }
 
-static ss_ctx *ss_find(ss_thread *t, uint32_t esp, uint32_t ret)
+/* The suspended context to resume at esp, returning to ret. Among twins: one
+ * whose whole snapshot is the guest stack now (the longest such snapshot, then
+ * the one parked last), else the one that agrees furthest. */
+static ss_ctx *ss_find(ss_thread *t, uint32_t esp, uint32_t ret, unsigned popped)
 {
     ss_ctx *best = NULL;
-    unsigned best_score = 0, twins = 0;
+    unsigned best_score = 0, twins = 0, alike = 0;
+    int best_exact = 0;
 
     for (unsigned i = 0; i <= t->n; i++) {
         ss_ctx *c = i < t->n ? t->ctx[i] : &t->root;
         unsigned score;
+        int exact, better;
         if (c->state != SS_SUSPENDED || c->saved_esp != esp || c->entry_ret != ret)
             continue;
         twins++;
-        score = ss_score(c, esp);
-        if (!best || score > best_score || (score == best_score && c->last > best->last)) {
+        score = ss_score(c, esp, popped);
+        exact = score == c->snap_len;
+        alike += score >= SNAP || exact;
+        if (!best)
+            better = 1;
+        else if (exact != best_exact)
+            better = exact;
+        else if (score != best_score)
+            better = score > best_score;
+        else
+            better = c->last > best->last;
+        if (better) {
             best = c;
             best_score = score;
+            best_exact = exact;
         }
     }
-    if (twins > 1 && best_score < ss_snap_len(esp)) {
+    if (twins > 1)
+        t->shared = 1;
+    if (twins > 1 && !best_exact) {
         static volatile unsigned said;
         if (said++ < 8)
             fprintf(stderr, "[STACK] %u contexts parked at esp 0x%08X returning to 0x%08X; "
                             "resuming the closest (%u of %u bytes match)\n",
-                    twins, esp, ret, best_score, ss_snap_len(esp));
+                    twins, esp, ret, best_score, best->snap_len);
+    } else if (alike > 1 && best_score > SNAP) {
+        static volatile unsigned said;
+        if (said++ < 4)
+            fprintf(stderr, "[STACK] %u of %u contexts parked at esp 0x%08X returning to 0x%08X "
+                            "agree on their first %u bytes; the whole stack (%u bytes) names the "
+                            "one to resume\n", alike, twins, esp, ret, SNAP, best_score);
     }
     return best;
 }
@@ -498,7 +559,10 @@ void recomp_stack_switch_ret(uint32_t saved_esp, uint32_t loaded_esp, uint32_t e
     cur = t->cur;
     ret_va = SS_MEM32(g_esp);
 
-    to = ss_find(t, loaded_esp, ret_va);    /* never cur: it is running */
+    /* g_esp is at the return address: what lies between the esp loaded and
+     * it has been popped. */
+    to = ss_find(t, loaded_esp, ret_va,     /* never cur: it is running */
+                 g_esp - loaded_esp <= SNAP ? g_esp - loaded_esp : 0);
     if (to) {
         /* It pops `ret N` of its own function: leave esp where this one's
          * ret would have left it. */
@@ -518,6 +582,17 @@ void recomp_stack_switch_ret(uint32_t saved_esp, uint32_t loaded_esp, uint32_t e
         }
         to->start_va = ret_va;
         to->start_esp = g_esp + 4 + ret_imm;
+        /* A stack that starts inside another live one, or where another one
+         * started: the engine copies its stacks in and out of one area. */
+        for (unsigned i = 0; i < t->n && !t->shared; i++) {
+            const ss_ctx *x = t->ctx[i];
+            if (x == to || x->state == SS_FREE)
+                continue;
+            if (x->start_esp == to->start_esp ||
+                (x->state == SS_SUSPENDED && to->start_esp > x->saved_esp &&
+                 to->start_esp <= x->start_esp))
+                t->shared = 1;
+        }
         ss_guest_bounds(to->start_esp, &to->seh_lo, &to->seh_hi);
         to->sp = ss_make((char *)to->map + s_page + s_stack_bytes, ss_main, to);
         {
@@ -532,7 +607,7 @@ void recomp_stack_switch_ret(uint32_t saved_esp, uint32_t loaded_esp, uint32_t e
     cur->saved_esp = saved_esp;
     cur->entry_ret = entry_ret;
     cur->ret_imm = ret_imm;
-    ss_snap(cur->snap, saved_esp);
+    ss_snap(t, cur, saved_esp);
     cur->state = SS_SUSPENDED;
     cur->last = ++t->tick;
     /* The dispatcher follows the switch: the side left keeps its guest stack

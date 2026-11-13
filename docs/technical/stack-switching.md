@@ -46,7 +46,7 @@ stack is context 0, every other one owns a host stack (`mmap`, 8 MB by default, 
 below). At the ret of a switching function:
 
 - the side being left is **suspended** inside that call, keyed by the esp it left and the return address it was called
-  with, plus the first 64 bytes of its guest stack;
+  with, plus a copy of its guest stack (« Twins »);
 - the guest esp it loaded and the address the ret pops pick the side to run: a suspended context with that esp and that
   return address is **resumed** -- it comes back out of the call it was suspended in, and its own function pops its
   return address as usual;
@@ -59,9 +59,25 @@ switching function popped is what the other side sees. ebp, a C local, travels t
 any ret.
 
 **Twins.** An engine that copies each fiber's stack bytes into one shared area (Fable) parks every fiber at the same
-esp, returning to the same yield: both keys match several contexts. The one whose saved 64 bytes match the guest stack
-best is resumed -- the engine copied that fiber's bytes back before switching to it. A resume that is not an exact
-match says so (`[STACK] N contexts parked at esp ... resuming the closest`).
+esp, returning to the same yield: both keys match several contexts. The one whose saved stack bytes are the guest
+stack now is resumed -- the engine copied that fiber's bytes back before switching to it. Two rules keep that
+comparison honest:
+
+- It starts **past what the switching function popped** before its ret (the registers it restores). Those bytes are
+  dead by then and can have been written over: Fable's switch ends `pop ... / sti / ret`, the `sti` lets in a posted
+  interrupt (XBA-111), and its handler runs on that stack, below the return address. Compared, they made every
+  candidate score 0, the context parked last was resumed for whichever fiber the engine meant, and it returned into
+  another fiber's callers (wild indirect calls and a divide error some seconds into Fable's AutoSave load).
+- On a thread whose contexts share a stack area (a new stack starts where another one started or inside a parked one,
+  or two contexts are parked under the same keys) the copy is the context's **whole** stack, from the esp it left up
+  to the esp it started with (up to 1 MB); elsewhere it is the first 64 bytes. Fibers that run the same job park
+  under the same frames and can differ only further up; two that agree on every byte are interchangeable.
+  `RECOMP_STACK_SWITCH_WHOLE=0` compares the first 64 bytes only.
+
+The log says when the first 64 bytes would not have been enough (`[STACK] K of N contexts parked at esp ... agree on
+their first 64 bytes; the whole stack (B bytes) names the one to resume`, four times), and a resume that is not an
+exact match (`[STACK] N contexts parked at esp ... resuming the closest`): that one means a context is about to run
+on bytes that are not its own.
 
 **What cannot be carried** is the old behaviour (the plain C return), said once in the log and recorded in the
 discovery file as a `stack_switch` entry, so the compatibility matrix and the app name the blocker:
@@ -101,7 +117,10 @@ and then every power of two.
 - **Contexts are not freed while the thread lives.** The guest never says a fiber is dead; a context is parked until it
   is resumed. At `RECOMP_STACK_SWITCH_MAX` (default 1024) contexts the one parked longest is dropped and its host stack
   reused for the new one (`[STACK] ... dropping the one parked longest`); resuming a dropped one later is the
-  « resumes where no context is parked » blocker. A thread that ends gives its stacks back.
+  « resumes where no context is parked » blocker. A thread that ends gives its stacks back. **Open issue:** the one
+  parked longest is not known to be dead -- a live fiber that waits long (a loader parked for the whole of a level)
+  would be dropped and its next resume would miss; an engine that makes and drops fibers without end will get there.
+  Each context of a thread with a shared stack area also keeps its stack snapshot (up to 1 MB) while it lives.
 - **Host stack size** is fixed per context (`RECOMP_STACK_SWITCH_STACK_MB`): deep recursion on a fiber overflows into
   the guard page (SIGSEGV), where on the thread's own stack it would have had `RECOMP_THREAD_STACK_MB`.
 
@@ -112,12 +131,14 @@ and then every power of two.
 | `RECOMP_STACK_SWITCH=0` | on | The behaviour before XBA-101: the switch's ret is a plain C return. Read once. |
 | `RECOMP_STACK_SWITCH_STACK_MB=N` | 8 | Host stack of each context, 1 to 256 MB, reserved and committed as used. |
 | `RECOMP_STACK_SWITCH_MAX=N` | 1024 | Contexts per thread before the one parked longest is dropped (4 to 65536). |
+| `RECOMP_STACK_SWITCH_WHOLE=0` | 1 | A/B: twins are told apart by their first 64 bytes only, as before. |
 
 ## Tests
 
 - `tests/stack_switch`: the runtime against guest code in the shape the lifter emits -- two coroutines (10,000
-  rounds), copy-stack twins (Fable's shape), a body returning into an exit routine, a switch with nowhere to go
-  (recorded), another host thread; and `RECOMP_STACK_SWITCH=0`. x86-64 and arm64 (qemu).
+  rounds), copy-stack twins (Fable's shape; then twins alike over their first 64 bytes), a body returning into an exit routine, a switch with nowhere to go
+  (recorded), another host thread; `RECOMP_STACK_SWITCH=0`; and `RECOMP_STACK_SWITCH_WHOLE=0`, under which the
+  twins alike over their first 64 bytes are mixed up (checked as such). x86-64 and arm64 (qemu).
 - `tools/recomp/test_stack_switch.py`: what is a switch and what is not, what the lifter emits.
 - `tools/compat/test_e2e.py::test_two_coroutines_switch_stacks` (`XBA_E2E=1`): a synthetic XBE of ours with two
   coroutines, through the whole pipeline -- the prepare marks the switch, the runtime starts the second coroutine, the
