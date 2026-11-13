@@ -3778,6 +3778,34 @@ class FunctionTranslator:
         return regs
 
 
+def place_funclet_entries(translations, funclet_entries, manual=()):
+    """Add the exception funclet entries to `translations`, in place.
+
+    funclet_entries: [(parent_va, parent_name, (va, name, code))]. An entry
+    whose address or name something already defines (a detected function, a
+    hand-written one) is dropped. The first entry of a function carries its
+    `<name>__seh` copy, which every other entry calls: when that one is
+    dropped, the copy goes with its parent's translation instead, or the
+    other entries do not link (seen on a title's dashboard-update XBE).
+    """
+    taken = {a for a, _, _ in translations} | set(manual)
+    taken_names = {n for _, n, _ in translations}
+    parent_index = {a: k for k, (a, _, _) in enumerate(translations)}
+    for parent_va, parent_name, entry in funclet_entries:
+        if entry[0] not in taken and entry[1] not in taken_names:
+            translations.append(entry)
+            taken.add(entry[0])
+            taken_names.add(entry[1])
+            continue
+        marker = (f"void {parent_name}__seh(uint32_t _seh_target);\n"
+                  f"void {entry[1]}(void) {{")
+        cut = entry[2].rfind(marker)
+        if cut > 0 and parent_va in parent_index:
+            k = parent_index[parent_va]
+            a, n, c = translations[k]
+            translations[k] = (a, n, c + "\n" + entry[2][:cut])
+
+
 class BatchTranslator:
     """Translates multiple functions and writes C source files."""
 
@@ -4131,26 +4159,7 @@ class BatchTranslator:
         # Exception funclets (XBA-112): a handler calls them through the
         # dispatch table and their own function calls them directly, so they
         # are entries like any function -- unless something already is.
-        taken = {a for a, _, _ in translations} | set(manual_decls)
-        # The first entry of a function carries its `<name>__seh` copy, which
-        # every other entry calls: when that entry is dropped (the funclet is
-        # already a detected function), the copy goes with its parent instead,
-        # or the other entries do not link (Burnout 3's dashupdate.xbe).
-        taken_names = {n for _, n, _ in translations}
-        parent_index = {a: k for k, (a, _, _) in enumerate(translations)}
-        for parent_va, parent_name, entry in funclet_entries:
-            if entry[0] not in taken and entry[1] not in taken_names:
-                translations.append(entry)
-                taken.add(entry[0])
-                taken_names.add(entry[1])
-                continue
-            marker = (f"void {parent_name}__seh(uint32_t _seh_target);\n"
-                      f"void {entry[1]}(void) {{")
-            cut = entry[2].rfind(marker)
-            if cut > 0 and parent_va in parent_index:
-                k = parent_index[parent_va]
-                a, n, c = translations[k]
-                translations[k] = (a, n, c + "\n" + entry[2][:cut])
+        place_funclet_entries(translations, funclet_entries, set(manual_decls))
         stats["seh_funclets"] = len(funclet_entries)
 
         # A wrapped function's body is sub_X_gen; the hand-written sub_X is

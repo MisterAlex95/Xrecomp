@@ -197,3 +197,30 @@ def test_no_seh_anchors_keeps_the_funclets_and_drops_the_setjmp():
     code = seh_fixture.lift(seh_anchors=False)
     assert "recomp_seh_anchor(" not in code and "RECOMP_SETJMP" not in code
     assert "void sub_00010133(void) { f_inner__seh(0x00010133u); }" in code
+
+
+def test_the_seh_copy_stays_when_its_first_funclet_is_already_a_function():
+    from tools.recomp.translator import place_funclet_entries
+    proto = "void sub_00001000__seh(uint32_t _seh_target);"
+    copy = f"/* copy */\n{proto}\nvoid sub_00001000__seh(uint32_t _seh_target) {{ }}\n"
+    first = (0x1100, "sub_00001100",
+             copy + "\n" + proto + "\nvoid sub_00001100(void) { sub_00001000__seh(0x00001100u); }\n")
+    second = (0x1200, "sub_00001200",
+              proto + "\nvoid sub_00001200(void) { sub_00001000__seh(0x00001200u); }\n")
+    entries = [(0x1000, "sub_00001000", first), (0x1000, "sub_00001000", second)]
+
+    # Nothing in the way: both entries are added, the copy with the first.
+    plain = [(0x1000, "sub_00001000", "void sub_00001000(void) { }\n")]
+    place_funclet_entries(plain, entries)
+    assert [a for a, _, _ in plain] == [0x1000, 0x1100, 0x1200]
+    assert "".join(c for _, _, c in plain).count("__seh(uint32_t _seh_target) {") == 1
+
+    # The first funclet is a detected function: its entry goes, the copy stays.
+    split = [(0x1000, "sub_00001000", "void sub_00001000(void) { }\n"),
+             (0x1100, "sub_00001100", "void sub_00001100(void) { /* own */ }\n")]
+    place_funclet_entries(split, entries)
+    assert [a for a, _, _ in split] == [0x1000, 0x1100, 0x1200]
+    code = "".join(c for _, _, c in split)
+    assert code.count("__seh(uint32_t _seh_target) {") == 1
+    assert code.count("void sub_00001100(void) {") == 1
+    assert "__seh(uint32_t _seh_target) {" in split[0][2]
