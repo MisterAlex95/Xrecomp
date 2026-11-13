@@ -58,6 +58,8 @@ struct xiso_source {
     uint32_t *slot_block;                        /* UINT32_MAX: empty */
     uint8_t *cache;                              /* slots * block_size */
     uint8_t *batch;                              /* BATCH_BYTES + 2 * block_size */
+    uint32_t raw_first, raw_end;                 /* the blocks whose stored bytes are in batch */
+    uint32_t seq_next;                           /* the block after the last one decoded: a read there streams */
 };
 
 static uint32_t rd32(const uint8_t *p) { return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24; }
@@ -460,12 +462,12 @@ static long decode_block(const xiso_source *s, uint32_t b, const uint8_t *d, siz
     }
 }
 
-/* Decodes the uncached blocks from b on (at most a batch) into the cache. Called with the lock held. */
-static int fill(xiso_source *s, uint32_t b)
+/* Reads the stored bytes of blocks [b, b + want) -- fewer when they exceed a batch, at least one -- into batch. */
+static int load_raw(xiso_source *s, uint32_t b, uint32_t want)
 {
-    uint32_t end = b, max = s->slots < 64 ? s->slots : 64;
+    uint32_t end = b;
     uint64_t start = block_pos(s, b);
-    while (end < s->nblocks && end - b < max && s->slot_block[end % s->slots] != end) {
+    while (end < s->nblocks && end - b < want) {
         uint64_t e = block_pos(s, end + 1);
         if (e < start || e - start > BATCH_BYTES)
             break;
@@ -476,22 +478,37 @@ static int fill(xiso_source *s, uint32_t b)
     uint64_t stop = block_pos(s, end);
     if (stop < start || stop - start > BATCH_BYTES + 2ull * s->block_size)
         return XISO_ECORRUPT;
+    s->raw_first = s->raw_end = 0;
     long n = raw_pread(s, s->batch, (size_t)(stop - start), start);
     if (n < 0)
         return (int)n;
     if ((uint64_t)n != stop - start)
         return XISO_ECORRUPT;                            /* the index points past the end of the file */
-    for (uint32_t k = b; k < end; k++) {
-        uint64_t p = block_pos(s, k), q = block_pos(s, k + 1);
-        if (q < p || q - p > 2ull * s->block_size + 64)
-            return XISO_ECORRUPT;
-        uint32_t slot = k % s->slots;
-        s->slot_block[slot] = UINT32_MAX;
-        if (decode_block(s, k, s->batch + (p - start), (size_t)(q - p),
-                         s->cache + (size_t)slot * s->block_size) < 0)
-            return XISO_ECORRUPT;
-        s->slot_block[slot] = k;
+    s->raw_first = b;
+    s->raw_end = end;
+    return 0;
+}
+
+/* Decodes block b into its cache slot. A streaming read (b follows the last block decoded) loads a batch of stored
+ * bytes ahead in one pread, decoded as the reads get there; a random one loads only the blocks the read covers
+ * (need), so a 4 KB seek decodes one or two blocks, not a batch. Called with the lock held. */
+static int fill(xiso_source *s, uint32_t b, uint32_t need)
+{
+    if (!(s->raw_first <= b && b < s->raw_end)) {
+        uint32_t max = s->slots < 64 ? s->slots : 64;
+        int rc = load_raw(s, b, b == s->seq_next ? max : (need < max ? need : max));
+        if (rc)
+            return rc;
     }
+    uint64_t base = block_pos(s, s->raw_first), p = block_pos(s, b), q = block_pos(s, b + 1);
+    if (q < p || q - p > 2ull * s->block_size + 64)
+        return XISO_ECORRUPT;
+    uint32_t slot = b % s->slots;
+    s->slot_block[slot] = UINT32_MAX;
+    if (decode_block(s, b, s->batch + (p - base), (size_t)(q - p), s->cache + (size_t)slot * s->block_size) < 0)
+        return XISO_ECORRUPT;
+    s->slot_block[slot] = b;
+    s->seq_next = b + 1;
     return 0;
 }
 
@@ -509,8 +526,11 @@ static long compressed_pread(xiso_source *s, void *buf, size_t len, uint64_t off
         uint64_t at = off + done;
         uint32_t b = (uint32_t)(at / s->block_size), in = (uint32_t)(at % s->block_size);
         uint32_t slot = b % s->slots;
-        if (s->slot_block[slot] != b && (rc = fill(s, b)) != 0)
-            break;
+        if (s->slot_block[slot] != b) {
+            uint64_t last = (off + len - 1) / s->block_size;   /* the blocks this read still covers */
+            if ((rc = fill(s, b, (uint32_t)(last - b + 1))) != 0)
+                break;
+        }
         size_t avail = s->block_size - in;
         if (avail > len - done)
             avail = len - done;

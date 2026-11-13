@@ -13,6 +13,11 @@ add_executable(kernel_disc_test test_main.c
     ../../src/kernel/kernel_file.c ../../src/kernel/kernel_path.c ../../src/kernel/kernel_disc.c)
 target_include_directories(kernel_disc_test PRIVATE ../../src/kernel)
 target_link_libraries(kernel_disc_test PRIVATE platform xiso)
+# Read throughput, folder vs image vs CSO (not a test: tools/xiso/bench_disc.sh runs it).
+add_executable(kernel_disc_bench bench.c
+    ../../src/kernel/kernel_file.c ../../src/kernel/kernel_path.c ../../src/kernel/kernel_disc.c)
+target_include_directories(kernel_disc_bench PRIVATE ../../src/kernel)
+target_link_libraries(kernel_disc_bench PRIVATE platform xiso)
 
 enable_testing()
 find_package(Python3 COMPONENTS Interpreter)
