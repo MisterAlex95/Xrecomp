@@ -633,6 +633,15 @@ void     xbox_WriteDtr(int which, uint64_t value);
  * no handler it reports the fault and stops. */
 void recomp_divide_error(uint32_t va, uint32_t divisor);
 
+/* A lifted body ran off its end: its last instruction (at `va`) is not a
+ * terminator and no function starts where the analysis stopped it, so the
+ * body was cut short (tools/recomp, WP2). Returning would skip the rest of
+ * the guest function, its pops and its `ret n`, and leave the guest stack
+ * off for every caller. The runtime prints one line, writes a discovery
+ * entry ({"t":"cut_body"}) and stops the way an unhandled exception does;
+ * it does not return. */
+void recomp_cut_body(uint32_t va);
+
 /* cpuid: out[0..3] = eax, ebx, ecx, edx for leaf `leaf` (subleaf unused).
  * The runtime answers as the Xbox's Coppermine-class Pentium III. */
 void xbox_Cpuid(uint32_t leaf, uint32_t subleaf, uint32_t out[4]);

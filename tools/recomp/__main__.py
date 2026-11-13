@@ -191,6 +191,25 @@ def _report_unimplemented(stats):
         print(f"    ... and {len(ranked) - 20} more", file=sys.stderr)
 
 
+def _report_cut_bodies(stats):
+    """The bodies lifted with a recomp_cut_body trap at their end (WP2).
+
+    Each one does not end on a terminator and has no function start where it
+    stops, so the analysis cut it short; reaching the bottom stops the title
+    with a report instead of returning without the epilogue. The line is
+    what tools.prepare reads back (CUT_BODIES_PREFIX)."""
+    cut = stats.get("cut_bodies") or {}
+    if not cut:
+        return
+    shown = ", ".join(f"sub_{a:08X} (last 0x{last:08X})"
+                      for a, last in sorted(cut.items())[:8])
+    more = f", ... {len(cut) - 8} more" if len(cut) > 8 else ""
+    print(f"{CUT_BODIES_PREFIX} {len(cut)}: {shown}{more}", file=sys.stderr)
+
+
+CUT_BODIES_PREFIX = "cut bodies trapped (recomp_cut_body):"
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Xbox x86 -> C Static Recompiler")
@@ -540,6 +559,7 @@ def main():
                   f"(addresses called but not detected as functions)",
                   file=sys.stderr)
         _report_unimplemented(stats)
+        _report_cut_bodies(stats)
         for f_path in stats.get("files", []):
             print(f"  {f_path}", file=sys.stderr)
     else:

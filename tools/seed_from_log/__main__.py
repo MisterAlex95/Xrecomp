@@ -93,7 +93,7 @@ DISCOVERY_KINDS = {
 # Entries that say the run went wrong from there on (the taint rule). A
 # `wild` entry is an indirect call to an address that is not code (a v2
 # runtime writes it; an older one wrote such a target as an `icall`).
-TAINT_KINDS = ("wild", "smc", "exception")
+TAINT_KINDS = ("wild", "smc", "exception", "cut_body")
 
 
 def _hex(v):

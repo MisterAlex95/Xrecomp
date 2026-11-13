@@ -14,6 +14,7 @@ import argparse
 import sys
 
 from .disasm import Disassembler
+from .functions import OverlappingBodies
 
 
 def main():
@@ -149,6 +150,11 @@ def main():
 
     except FileNotFoundError as e:
         print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    except OverlappingBodies as e:
+        # An analysis error, not a warning: lifted, the cut body would fall
+        # off its end without its epilogue (WP2).
+        print(f"Error: analysis invariant: {e}", file=sys.stderr)
         sys.exit(1)
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)

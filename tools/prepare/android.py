@@ -212,9 +212,13 @@ class Run:
             for fn in (self.profile or {}).get("exclude_manual", []):
                 args += ["--exclude-manual", os.path.join(proj, "src", "title", fn)]
             mb = max(1.0, os.path.getsize(self.xbe) / 1e6)
+            log_at = os.path.getsize(self.log) if os.path.exists(self.log) else 0
             self.py_step(args, 3, 2, 100, "lifting to C", 30 * mb, "LIFT_FAILED")
+            # Bodies the analysis cut short (WP2): reaching one stops the title.
+            cut = self.m.lift_cut_bodies(self.log, log_at)
             self.save_stamp(lift=key)
-            self.rep.progress(3, 100, "%d C files" % len(os.listdir(gen)))
+            self.rep.progress(3, 100, "%d C files" % len(os.listdir(gen))
+                              + ("; cut bodies " + cut if cut else ""))
         self.proj = proj
 
     def compile(self):

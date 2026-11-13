@@ -4,6 +4,7 @@ Main disassembly orchestrator.
 Coordinates all analysis passes and produces the final output.
 """
 
+import bisect
 import time
 from pathlib import Path
 from typing import List, Optional
@@ -59,8 +60,9 @@ class Disassembler:
         self.static_discovery = (level_from_env() if static_discovery is None
                                  else static_discovery)
         self.discovery_cap = cap_from_env() if discovery_cap is None else discovery_cap
-        # Seeds a run actually reached (see _load_seed_functions). They are
-        # not guesses, so the mid-instruction guard below does not apply.
+        # Seeds a run reported (see _load_seed_functions). Kept for the
+        # report; they get no extra trust against a detected body (WP2): a
+        # wild indirect call reports garbage that "decodes as a body" too.
         self.observed_seeds = observed_seeds or set()
 
         # Components (initialized during run)
@@ -72,15 +74,19 @@ class Disassembler:
         self.strings: List[dict] = []
 
     def _trust_mid_instruction_seed(self, addr: int) -> bool:
-        """A seed inside an instruction the sweep decoded: keep it anyway?
+        """A seed inside an instruction of a detected body: keep it anyway?
 
-        Yes when a run reached it (observed_seeds; Halo's XPP init at
-        0x001CF6AC), or when it decodes as a prologue, which means the sweep
-        is the one out of phase (default.xbe's push ebp at 0x00069538). An
-        RTTI guess six bytes into a mov (HL2's 0x00202C2E) is neither.
+        Only when it decodes as a prologue, which means the sweep is the one
+        out of phase (default.xbe's push ebp at 0x00069538). An RTTI guess six
+        bytes into a mov (HL2's 0x00202C2E) is not, and neither is an
+        "observed" seed alone: Fable's discovery file held 0x001C120A, a
+        garbage target of a wild indirect call two bytes into a `mov`, and
+        trusting it cut sub_001C1190 before its pops and `ret 8`, so every
+        call left the guest stack 20 bytes off (WP2). A seed in bytes no
+        body claims (Halo's XPP init at 0x001CF6AC after a pointer table)
+        does not come here: unclaimed bytes yield to any seed.
         """
-        return (addr in self.observed_seeds
-                or self.engine.probes_as_prologue(addr))
+        return self.engine.probes_as_prologue(addr)
 
     def run(self) -> bool:
         """
@@ -207,14 +213,35 @@ class Disassembler:
             realigned = 0
             mid_instruction = 0
             accepted = []
+            refused = []
+            inside = []
+            # The body containing an address, by bisection (seed files run to
+            # thousands of entries; get_function_at scans every function).
+            pre = sorted(self.func_detector.functions.values(),
+                         key=lambda f: f.start)
+            pre_starts = [f.start for f in pre]
+            pre_reach = []
+            for f in pre:               # the furthest end so far: bodies may nest
+                pre_reach.append(max(f.end, pre_reach[-1] if pre_reach else 0))
+
+            def body_at(addr):
+                j = bisect.bisect_right(pre_starts, addr) - 1
+                while j >= 0 and pre_reach[j] > addr:
+                    if addr < pre[j].end:
+                        return pre[j]
+                    j -= 1
+                return None
+
             for addr in self.seed_functions:
                 covering = self.engine.instruction_covering(addr)
                 if covering is not None:
                     # Unclaimed sweep bytes may be replaced by the seed's
-                    # decode; a detected body only yields to trusted seeds.
-                    unclaimed = self.func_detector.get_function_at(addr) is None
+                    # decode; a detected body only yields to a prologue.
+                    body = body_at(addr)
+                    unclaimed = body is None
                     if not (unclaimed or self._trust_mid_instruction_seed(addr)):
                         mid_instruction += 1
+                        refused.append((addr, covering, body))
                         continue
                     if not self.engine.decode_at(addr, replace_overlaps=unclaimed):
                         continue
@@ -222,6 +249,13 @@ class Disassembler:
                 elif addr not in self.engine.instructions:
                     if self.engine.decode_at(addr):
                         realigned += 1
+                else:
+                    # On an instruction boundary inside a detected body: an
+                    # alias entry, never a start that splits the body (WP2).
+                    body = body_at(addr)
+                    if body is not None and body.start != addr:
+                        inside.append(addr)
+                        continue
                 accepted.append(addr)
 
             # Rebuild from the corrected stream, without candidates or xrefs
@@ -230,12 +264,22 @@ class Disassembler:
             self.func_detector = self._detector()
             for addr in accepted:
                 self.func_detector._add_candidate(addr, 0.95, "seed_vtable_thunk")
+            self.func_detector.seed_aliases = set(inside)
+            if inside:
+                print(f"  {len(inside)} seed(s) inside a detected body kept as "
+                      f"alias entries")
             if realigned:
                 print(f"  Realigned {realigned} seeded address(es) the sweep "
                       f"stepped over")
             if mid_instruction:
                 print(f"  Rejected {mid_instruction} seed(s) landing inside an "
-                      f"already-decoded instruction")
+                      f"instruction of a detected body:")
+                for addr, covering, body in refused[:8]:
+                    print(f"    0x{addr:08X}: inside `{covering.mnemonic} "
+                          f"{covering.op_str}` at 0x{covering.address:08X} "
+                          f"of {body.name}")
+                if len(refused) > 8:
+                    print(f"    ... and {len(refused) - 8} more")
             if self.verbose:
                 print(f"  Seeded {len(self.seed_functions)} function addresses")
 

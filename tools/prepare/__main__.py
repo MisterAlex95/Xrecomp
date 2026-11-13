@@ -184,6 +184,27 @@ def run(args, log, cwd=ROOT, on_line=None, tick=None):
     return time.time() - t0
 
 
+# The line tools.recomp prints for bodies lifted with a recomp_cut_body trap
+# (tools/recomp/__main__.py CUT_BODIES_PREFIX, WP2).
+CUT_BODIES_PREFIX = "cut bodies trapped (recomp_cut_body):"
+
+
+def lift_cut_bodies(log, offset):
+    """The cut-body report tools.recomp wrote into `log` past byte `offset`
+    ("N: sub_X (last 0x...), ..."), or None when the lift had none. Each is
+    a body the analysis cut short; reaching its end stops the title."""
+    try:
+        with open(log, "rb") as f:
+            f.seek(offset)
+            text = f.read().decode("utf-8", "replace")
+    except OSError:
+        return None
+    for line in text.splitlines():
+        if line.startswith(CUT_BODIES_PREFIX):
+            return line[len(CUT_BODIES_PREFIX):].strip()
+    return None
+
+
 def sha256(path):
     h = hashlib.sha256()
     with open(path, "rb") as f:
@@ -720,8 +741,12 @@ def desktop(a):
         for fn in (profile or {}).get("exclude_manual", []):
             cmd += ["--exclude-manual", os.path.join(proj, "src", "title", fn)]
         progress(2, "lifting")
+        log_at = os.path.getsize(log) if os.path.exists(log) else 0
         t = run(cmd, log, tick=(2, 98, "lifting", 100))
         kept, written, removed = sync_generated(fresh, gen)
+        cut = lift_cut_bodies(log, log_at)
+        if cut:
+            note("cut bodies (the analysis stopped them short; reaching one stops the title): " + cut)
         note("%d C files in %.0f s (%d changed, %d unchanged, %d removed)"
              % (len(os.listdir(gen)), t, written, kept, removed), 100)
         # The executable no longer matches the lift until a build succeeds (--check).

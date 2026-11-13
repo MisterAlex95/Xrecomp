@@ -34,10 +34,11 @@ static pthread_mutex_t s_lock = PTHREAD_MUTEX_INITIALIZER;
 #endif
 
 enum { K_ICALL = 1, K_THREAD, K_THREAD_CTX, K_UNIMPL, K_D3D, K_WAIT_SPIN, K_LAUNCH, K_STACK_SWITCH, K_STUB,
-       K_SMC_EXEC, K_SMC_WRITE, K_EXCEPTION, K_D3D_LAYOUT, K_WILD, K_LAST = K_WILD };
+       K_SMC_EXEC, K_SMC_WRITE, K_EXCEPTION, K_D3D_LAYOUT, K_WILD, K_CUT_BODY, K_LAST = K_CUT_BODY };
 /* The two smc kinds share "t":"smc" and differ by "kind" (XBA-118). */
 static const char *const kind_name[] = { "", "icall", "thread", "thread_ctx", "unimpl", "d3d", "wait_spin", "launch",
-                                         "stack_switch", "stub", "smc", "smc", "exception", "d3d_layout", "wild" };
+                                         "stack_switch", "stub", "smc", "smc", "exception", "d3d_layout", "wild",
+                                         "cut_body" };
 /* A seed entry written after the process went wrong is keyed apart (profile-free WP1):
  * an untainted entry for the same address, from a later healthy run, is
  * still new and gets written, which is what releases it as a seed. */
@@ -208,7 +209,8 @@ static void note(int kind, uint32_t va, const char *fields)
      * executable bytes), so seed entries carry "tainted":true and the next
      * Prepare takes them only when a healthy run reports them too. Set even
      * when the entry itself is already in the file: the sign is this run's. */
-    if ((kind == K_WILD || kind == K_SMC_EXEC || kind == K_SMC_WRITE || kind == K_EXCEPTION) && !s_tainted) {
+    if ((kind == K_WILD || kind == K_SMC_EXEC || kind == K_SMC_WRITE || kind == K_EXCEPTION || kind == K_CUT_BODY)
+        && !s_tainted) {
         s_tainted = 1;
         fprintf(stderr, "[DISCOVERY] the run went wrong here (%s 0x%08X): code addresses it reports from now on"
                 " are marked tainted, the next Prepare does not seed them on their own\n", kind_name[kind], va);
@@ -419,6 +421,11 @@ void recomp_discovery_exception(uint32_t va, uint32_t code, const char *why)
     size_t o = (size_t)snprintf(f, sizeof f, ",\"code\":\"0x%08X\"", code);
     (void)put_str(f, o, sizeof f, "why", why);
     note(K_EXCEPTION, va, f);
+}
+
+void recomp_discovery_cut_body(uint32_t va)
+{
+    note(K_CUT_BODY, va, "");
 }
 
 void recomp_discovery_d3d_layout(const char *lib, uint32_t build, const char *rule, uint32_t used)

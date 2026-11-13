@@ -634,6 +634,10 @@ class FunctionTranslator:
         # (end, last instruction) of cut bodies already warned about: the
         # tail_jump_aliases that share a cut parent's end would repeat it.
         self._teardown_reported = set()
+        # Bodies that run off their end with nowhere to go, by start: the
+        # address of their last instruction. Each ends in a
+        # recomp_cut_body trap (WP2); translate_batch_split counts them.
+        self.cut_bodies = {}
         # _flag_boundaries, computed once the function list is final.
         self._flag_plan = None
         # The guest CPU's quantum check at every loop back edge
@@ -3207,6 +3211,19 @@ class FunctionTranslator:
                   f"0x{last_insn.address:08X} with no terminator "
                   f"(section raw end {raw_end})", file=sys.stderr)
 
+        # A body that runs off its end with no function start there was cut
+        # short by the analysis (Fable's sub_001C1190, cut at 0x001C120C by a
+        # wild seed, returned without its pops and `ret 8`, leaving the guest
+        # stack 20 bytes off). Returning from the C function is the worst
+        # outcome: stop with a report instead (recomp_cut_body, WP2).
+        # A call followed by int3 padding is a call that does not return
+        # (Fable's `push 4; call [abort]; int3`): the trap stays, unreachable,
+        # but the body is not counted as cut.
+        cut_body = continues_past_end and fallthrough_target is None
+        if (cut_body and not (last_insn.is_call
+                              and self._read_func_bytes(end, end + 1) == b"\xcc")):
+            self.cut_bodies[start] = last_insn.address
+
         # Ensure ebp tracked if function has tail jumps (lifter emits
         # g_seh_ebp = ebp before external jmp, external jcc, and indirect jmp,
         # and translate_function emits it before a fallthrough tail call).
@@ -3689,6 +3706,10 @@ class FunctionTranslator:
             ft_name = self.lifter._call_target_name(fallthrough_target)
             lines.append(f"    g_seh_ebp = ebp; {ft_name}(); return;"
                          f" /* fallthrough 0x{fallthrough_target:08X} */")
+            lines.append(f"")
+        elif cut_body:
+            lines.append(f"    recomp_cut_body(0x{last_insn.address:08X}u); return;"
+                         f" /* body cut at 0x{end:08X}: no terminator, no function there */")
             lines.append(f"")
 
         # Insert _icall_esp save points before RECOMP_ICALL_SAFE arg pushes.
@@ -4185,6 +4206,12 @@ class BatchTranslator:
             if name not in defined
         }
         stats["unresolved_stubs"] = len(unresolved)
+        # Bodies that end in the recomp_cut_body trap (WP2), by start.
+        lifted = {a for a, _ in func_list} - manual
+        stats["cut_bodies"] = {
+            addr: last for addr, last
+            in getattr(self.translator, "cut_bodies", {}).items()
+            if addr in lifted}
         stats["manual_functions"] = len(manual_decls)
         # Instructions the lifter has no translation for become a comment, and
         # a comment is a silent no-op. Surfacing the tally is the difference
