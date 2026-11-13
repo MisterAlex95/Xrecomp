@@ -61,6 +61,33 @@ def test_prepare_lifts_a_synthetic_title(tmp_path):
     assert "    recomp_d3d_configure();" in main_c and "    recomp_d3d_start(s_game_dir, s_save_dir);" in main_c
 
 
+def test_prepare_summary_counts_what_the_title_cannot_reach(tmp_path):
+    """XBA-139: the lift's counts by class reach the prepare summary and
+    the stamp (--check --json reports them): here one `outsb` taken for
+    misdecoding and one call into a data section."""
+    from tools.disasm.synthetic import DATA, Title
+    t = Title()
+    x = t.section(".text")
+    r = t.section(".rdata", DATA)
+    x.label("entry").hex("558bec").call("f").call("g").hex("ebfe").align(16)
+    x.label("f").hex("8b442404 6e c3").align(16)          # mov eax, [esp+4] ; outsb ; ret
+    x.label("g").hex("e8").rel("blob").hex("c3").align(16)  # call into .rdata
+    r.label("blob").u32(0x12345678).u32(0x9ABCDEF0)
+    d = tmp_path / "disc"
+    d.mkdir()
+    xbe = t.write(str(d / "default.xbe"), "entry", title_id=0x58424139, title="Health")
+    work = tmp_path / "work"
+    r = _prepare(xbe, work, "--no-build")
+    assert r.returncode == 0, r.stdout[-2000:] + r.stderr[-2000:]
+    stamp = json.loads((work / "stamp.json").read_text())
+    health = stamp["lift_health"]
+    assert health["misdecoded"] == 1 and health["unresolved_calls"] == 1, health
+    assert "lift health: " in r.stdout and "1 misdecoded sites (string port I/O)" in r.stdout
+    c = subprocess.run([sys.executable, "-m", "tools.prepare", xbe, "--work", str(work), "--check", "--json"],
+                       cwd=ROOT, capture_output=True, text=True, timeout=300)
+    assert json.loads(c.stdout)["lift_health"] == health, c.stdout + c.stderr
+
+
 @pytest.mark.skipif(os.environ.get("XBA_E2E") != "1", reason="XBA_E2E=1: builds and boots a title (minutes)")
 def test_build_and_boot_through_the_compat_runner(tmp_path):
     if not shutil.which("cmake"):

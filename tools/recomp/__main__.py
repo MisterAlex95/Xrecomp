@@ -210,6 +210,67 @@ def _report_cut_bodies(stats):
 CUT_BODIES_PREFIX = "cut bodies trapped (recomp_cut_body):"
 
 
+def _report_unresolved(stats):
+    """The call targets no function defines, each once with its first call
+    site (XBA-139). Static analysis already made a function of every direct
+    call target that is code and reads as a body (tools/disasm functions.py
+    _pass_call_targets); what is left is a call into data, into bytes that
+    do not decode, or one only the lift's own decode saw: most likely data
+    decoded as code at the caller."""
+    calls = stats.get("unresolved_calls") or {}
+    if not calls:
+        return
+    shown = []
+    for addr, site in sorted(calls.items())[:8]:
+        if site:
+            shown.append(f"0x{addr:08X} (call at 0x{site[0]:08X} in sub_{site[1]:08X})")
+        else:
+            shown.append(f"0x{addr:08X}")
+    more = f", ... {len(calls) - 8} more" if len(calls) > 8 else ""
+    print(f"{UNRESOLVED_PREFIX} {len(calls)}: {', '.join(shown)}{more}",
+          file=sys.stderr)
+
+
+def _report_misdecoded(stats):
+    """String port I/O met in lifted code (XBA-139): each site, with its
+    function, lifted to recomp_misdecoded (stops the title if reached)."""
+    sites = stats.get("misdecoded") or {}
+    if not sites:
+        return
+    shown = ", ".join(f"`{text}` at 0x{va:08X} in sub_{func:08X}"
+                      for va, (text, func) in sorted(sites.items())[:8])
+    more = f", ... {len(sites) - 8} more" if len(sites) > 8 else ""
+    print(f"misdecoded code? string port I/O lifted as a stop "
+          f"(recomp_misdecoded): {len(sites)}: {shown}{more}", file=sys.stderr)
+
+
+def lift_health(stats):
+    """The counts a library check ranks titles by (XBA-139), each a class
+    of code the title cannot reach or should not run: exception handler
+    targets no function enters, unresolved call targets (stubs),
+    unimplemented instructions, string port I/O taken for misdecoding, and
+    bodies cut short."""
+    unimpl = stats.get("unimplemented") or {}
+    return {
+        "seh_lost": sum(len(t) for t in (stats.get("seh_lost") or {}).values()),
+        "unresolved_calls": len(stats.get("unresolved_calls") or {}),
+        "unimplemented": sum(len(a) for a in unimpl.values()),
+        "misdecoded": len(stats.get("misdecoded") or {}),
+        "cut_bodies": len(stats.get("cut_bodies") or {}),
+    }
+
+
+def _report_health(stats):
+    """One line, always printed: what tools.prepare reads back
+    (LIFT_HEALTH_PREFIX, then the counts as JSON)."""
+    print(f"{LIFT_HEALTH_PREFIX} {json.dumps(lift_health(stats))}",
+          file=sys.stderr)
+
+
+UNRESOLVED_PREFIX = "unresolved call targets (stubbed):"
+LIFT_HEALTH_PREFIX = "lift health:"
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Xbox x86 -> C Static Recompiler")
@@ -558,8 +619,11 @@ def main():
             print(f"{stats['unresolved_stubs']} unresolved call targets stubbed "
                   f"(addresses called but not detected as functions)",
                   file=sys.stderr)
+        _report_unresolved(stats)
         _report_unimplemented(stats)
+        _report_misdecoded(stats)
         _report_cut_bodies(stats)
+        _report_health(stats)
         for f_path in stats.get("files", []):
             print(f"  {f_path}", file=sys.stderr)
     else:

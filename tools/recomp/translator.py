@@ -638,6 +638,9 @@ class FunctionTranslator:
         # address of their last instruction. Each ends in a
         # recomp_cut_body trap (WP2); translate_batch_split counts them.
         self.cut_bodies = {}
+        # Exception frames whose handler targets no function enters, by the
+        # frame's function: the targets (_seh_frame_of, XBA-139).
+        self.seh_lost = {}
         # _flag_boundaries, computed once the function list is final.
         self._flag_plan = None
         # The guest CPU's quantum check at every loop back edge
@@ -2864,14 +2867,36 @@ class FunctionTranslator:
             # A funclet the function finder split off is a function of its
             # own and dispatches as one; anything else is unreachable.
             lost = sorted(t for t in frame.outside if t not in self.func_db)
-            reported = self.__dict__.setdefault("_seh_reported", set())
-            if lost and start not in reported:
-                reported.add(start)
+            seh_lost = self.__dict__.setdefault("seh_lost", {})
+            if lost and start not in seh_lost:
+                seh_lost[start] = lost
                 import sys
                 print(f"  SEH: 0x{start:08X} ({frame.kind}) has handler "
-                      f"targets outside it and outside every function: "
-                      + ", ".join(f"0x{t:08X}" for t in lost), file=sys.stderr)
+                      f"targets outside it that no function enters: "
+                      + ", ".join(f"0x{t:08X} ({self._holder_of(t)})"
+                                  for t in lost), file=sys.stderr)
         return frame
+
+    def _holder_of(self, va):
+        """Which function body holds `va`, for a report: "in sub_X" or
+        "in no function" (a gap the function finder left)."""
+        starts = self.__dict__.get("_holder_starts")
+        if starts is None or len(starts) != len(self.func_db):
+            starts = sorted(self.func_db)
+            self._holder_starts = starts
+        k = bisect.bisect_right(starts, va) - 1
+        alias = None
+        while k >= 0 and va - starts[k] <= 0x10000:
+            info = self.func_db[starts[k]]
+            end = info.get("end") or starts[k] + info.get("size", 0)
+            name = info.get("name", f"sub_{starts[k]:08X}")
+            if va < end:
+                # An alias entry shares its parent's end: name the parent.
+                if info.get("detection_method") != "tail_jump_alias":
+                    return "in " + name
+                alias = alias or name
+            k -= 1
+        return "in " + alias if alias else "in no function"
 
     def decode_function(self, start, end):
         """Recover instructions and blocks, including indirect-entry leaders."""
@@ -4212,6 +4237,17 @@ class BatchTranslator:
             addr: last for addr, last
             in getattr(self.translator, "cut_bodies", {}).items()
             if addr in lifted}
+        # What the title cannot reach at run time, by class (XBA-139): the
+        # lift health line and the prepare summary count these.
+        stats["seh_lost"] = {
+            addr: list(targets) for addr, targets
+            in getattr(self.translator, "seh_lost", {}).items()
+            if addr in lifted}
+        sites = getattr(self.translator.lifter, "call_sites", {})
+        stats["unresolved_calls"] = {
+            addr: sites.get(addr) for addr in sorted(unresolved)}
+        stats["misdecoded"] = dict(
+            getattr(self.translator.lifter, "misdecoded", {}))
         stats["manual_functions"] = len(manual_decls)
         # Instructions the lifter has no translation for become a comment, and
         # a comment is a silent no-op. Surfacing the tally is the difference

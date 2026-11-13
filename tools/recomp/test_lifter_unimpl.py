@@ -124,5 +124,53 @@ class UnimplementedReportTest(unittest.TestCase):
         self.assertEqual(stderr.getvalue(), "")
 
 
+class LiftHealthTest(unittest.TestCase):
+    """The classes of code a title cannot reach, counted (XBA-139)."""
+
+    STATS = {
+        "seh_lost": {0x11010: [0x110A1, 0x110B0]},
+        "unresolved_calls": {0x20000: (0x11234, 0x11200), 0x20010: None},
+        "unimplemented": {"daa": [0x12340, 0x12350]},
+        "misdecoded": {0x13000: ("outsb dx, byte ptr [esi]", 0x12F00)},
+        "cut_bodies": {},
+    }
+
+    def _stderr(self, fn, stats):
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            fn(stats)
+        return stderr.getvalue()
+
+    def test_counts(self):
+        from .__main__ import lift_health
+        self.assertEqual(lift_health(self.STATS), {
+            "seh_lost": 2, "unresolved_calls": 2, "unimplemented": 2,
+            "misdecoded": 1, "cut_bodies": 0})
+        self.assertEqual(set(lift_health({}).values()), {0})
+
+    def test_the_health_line_is_what_prepare_reads(self):
+        import json
+        from tools.prepare import __main__ as prepare
+        from .__main__ import LIFT_HEALTH_PREFIX, _report_health, lift_health
+        self.assertEqual(LIFT_HEALTH_PREFIX, prepare.LIFT_HEALTH_PREFIX)
+        self.assertEqual(tuple(lift_health({})), prepare.LIFT_HEALTH_KEYS)
+        line = self._stderr(_report_health, self.STATS).strip()
+        self.assertTrue(line.startswith(LIFT_HEALTH_PREFIX))
+        self.assertEqual(json.loads(line[len(LIFT_HEALTH_PREFIX):]),
+                         lift_health(self.STATS))
+
+    def test_unresolved_targets_are_named_with_their_caller(self):
+        from .__main__ import _report_unresolved
+        out = self._stderr(_report_unresolved, self.STATS)
+        self.assertIn("unresolved call targets (stubbed): 2: 0x00020000 (call at "
+                      "0x00011234 in sub_00011200), 0x00020010", out)
+        self.assertEqual(self._stderr(_report_unresolved, {}), "")
+
+    def test_misdecoded_sites_are_named_with_their_function(self):
+        from .__main__ import _report_misdecoded
+        out = self._stderr(_report_misdecoded, self.STATS)
+        self.assertIn("`outsb dx, byte ptr [esi]` at 0x00013000 in sub_00012F00", out)
+
+
 if __name__ == "__main__":
     unittest.main()

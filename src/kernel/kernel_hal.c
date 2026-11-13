@@ -2277,3 +2277,38 @@ void recomp_cut_body(uint32_t va)
     recomp_discovery_cut_body(va);
     xbox_KeBugCheckEx(0x1E, 0xC000001Du, va, 0, 0);
 }
+
+/* String port I/O in lifted code (templates/runtime/recomp_types.h,
+ * XBA-139): a sign the analysis decoded data as code. Stop there, at the
+ * cause, as recomp_cut_body does; RECOMP_MISDECODE_TRAP=0 reports each site
+ * once and carries on with the instruction a no-op, as RECOMP_UNIMPL did. */
+void recomp_misdecoded(const char *text, uint32_t va)
+{
+    static int trap = -1;
+    static uint32_t said[16];
+    static unsigned said_n;
+    unsigned i;
+
+    if (trap < 0) {
+        const char *e = getenv("RECOMP_MISDECODE_TRAP");
+        trap = !(e && e[0] == '0' && !e[1]);
+    }
+    recomp_discovery_unimpl(va, text);
+    if (!trap) {
+        for (i = 0; i < said_n; i++)
+            if (said[i] == va)
+                return;
+        if (said_n == sizeof said / sizeof said[0])
+            return;
+        said[said_n++] = va;
+        fprintf(stderr, "[MISDECODE] `%s` at 0x%08X reached: data decoded as code?"
+                " (RECOMP_MISDECODE_TRAP=0: a no-op)\n", text, va);
+        fflush(stderr);
+        return;
+    }
+    fprintf(stderr, "[MISDECODE] `%s` at 0x%08X reached: string port I/O in title code is"
+            " data or padding decoded as code (or a function measured past its end); esp=%08X"
+            " -- stopping (RECOMP_MISDECODE_TRAP=0 carries on)\n", text, va, g_esp);
+    fflush(stderr);
+    xbox_KeBugCheckEx(0x1E, 0xC000001Du, va, 0, 0);
+}

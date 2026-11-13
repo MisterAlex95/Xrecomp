@@ -642,6 +642,14 @@ void recomp_divide_error(uint32_t va, uint32_t divisor);
  * it does not return. */
 void recomp_cut_body(uint32_t va);
 
+/* String port I/O (ins*, outs*) met in lifted code, at `va`: almost always
+ * data or padding decoded as code (tools/recomp Lifter._misdecoded,
+ * XBA-139). Reached, the runtime prints one [MISDECODE] line, writes an
+ * "unimpl" discovery entry and stops the way recomp_cut_body does; with
+ * RECOMP_MISDECODE_TRAP=0 it reports the site once and returns, and the
+ * instruction stays the no-op it was. */
+void recomp_misdecoded(const char *text, uint32_t va);
+
 /* cpuid: out[0..3] = eax, ebx, ecx, edx for leaf `leaf` (subleaf unused).
  * The runtime answers as the Xbox's Coppermine-class Pentium III. */
 void xbox_Cpuid(uint32_t leaf, uint32_t subleaf, uint32_t out[4]);
