@@ -156,6 +156,31 @@ missed anything, and `report` / `report --matrix` get a Recall column (« recall
 Tested on synthetic titles only (`tools/compat/test_heal.py`, and `test_e2e.py::test_the_self_healing_loop`: three
 threads found one round at a time, the third refused, four rounds); a real title's numbers are XBA-75.
 
+### Recording hits by default (XBA-138): measured, not done
+
+A default build does not record hits because `RECOMP_ICALL_OBSERVE` sits in every `RECOMP_ICALL*` macro, the hottest
+path of the generated code. What it would cost, from `tools/compat/icall_record_bench.c` (the macro's work: trace
+ring, global count, range check, direct-map lookup, call), x86-64 container on the shared host, gcc -O2, 40 M
+calls, two runs:
+
+| Variant | 1 thread, 64 targets | 1 thread, 4096 targets | 2 threads, 64 targets | 2 threads, 4096 targets |
+|---|---|---|---|---|
+| no record (today's default) | 2.5 ns | 2.7–2.9 ns | 21–27 ns | 21–25 ns |
+| `\|=` on every call (the `RECOMP_ICALL_FEEDBACK` build) | 2.8 ns | 3.7 ns | 41–43 ns | 40–50 ns |
+| test-before-set (a store the first time only) | 2.8 ns | 3.6 ns | 15 ns | 19 ns |
+
+One thread pays a load of the 8 MiB seen array per call (+0.3 ns when it stays cached, +0.8 ns over 4096 scattered
+targets). With two threads the instrumented build's `|=` dirties a shared cache line on every call and doubles the
+cost; test-before-set writes nothing once a target is known and stays within the noise of today's build, whose own
+shared `g_icall_count++` dominates. Even at a million indirect calls a second, +1 ns is 0.1 % of a core.
+
+So the cheap variant is: the seen array and `RECOMP_ICALL_OBSERVE` in every build, as test-before-set on resolved
+targets only (the per-site cache stays opt-in), dumped next to `discovered.jsonl` at exit and on the crash path,
+with an A/B switch, and `recall` reading that dump from the work folder instead of asking for `--icall-dump`. Not
+done here: it changes `templates/runtime/recomp_types.h` and `src/kernel/icall_feedback.c` (the runtime), and has
+to be measured on a real title first (a frame-time A/B on the Thor). Thread starts need no hot-path hook (the kernel
+sees each one).
+
 Each run keeps the status file's `apu_dsp` object (what the title asked of the APU's DSPs, XBA-122:
 [APU DSP](apu-dsp.md)); once one title has it, `report` gets a DSP column (« GP image 9cd378fc (1500 words), 13 cmds,
 sends: reverb+FX, 1 stall(s) »). Titles sharing a GP image hash share DirectSound's effects image.
