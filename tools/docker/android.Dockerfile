@@ -307,7 +307,7 @@ RUN set -e; bt=$(ls -d "$ANDROID_HOME"/build-tools/* | tail -1); apk=/out/xrecom
              assets/prepare/toolkit.zip.sha256 assets/selftest.xbe \
              assets/licences/LICENSE.txt assets/licences/NOTICE.txt \
              assets/licences/Apache-2.0-WITH-LLVM-exception.txt assets/licences/PSF-2.0.txt \
-             assets/licences/BSD-3-Clause-capstone.txt; do \
+             assets/licences/BSD-3-Clause-capstone.txt assets/licences/Apache-2.0-apksig.txt; do \
         grep -q " $f\$" /out/xrecomp-contents.txt || { echo "xrecomp.apk: missing $f"; exit 1; }; done; \
     ! unzip -Z1 "$apk" | grep -iE '\.(xbe|iso|xiso)$' | grep -vx 'assets/selftest.xbe' \
         || { echo "xrecomp.apk: an XBE or disc image other than the self-test"; exit 1; }; \

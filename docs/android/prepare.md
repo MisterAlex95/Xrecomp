@@ -26,7 +26,8 @@ Nothing from the game leaves the device: the pack is built from the player's dis
 `<files dir>` is the app's **internal** storage (`Context.getFilesDir()`). External storage
 (`/sdcard/Android/data/<app>/files`) is mounted `noexec`: dlopen of a library there fails. An external `packs/` folder
 is only an import/export drop: the app copies a pack in from there after checking `lib_sha256`, never loads it in
-place (planned; not implemented yet, see « The loader »).
+place (planned; not implemented yet, see « The loader »). A game's own app (app-shell.md « A game's own app ») has
+its own private storage and prepares again until a pack handover exists (planned there).
 
 `TITLEID` is the XBE's title ID in 8 upper-case hex digits (`4D5300D1`).
 

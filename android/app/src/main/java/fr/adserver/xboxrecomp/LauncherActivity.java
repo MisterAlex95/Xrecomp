@@ -79,7 +79,9 @@ import fr.adserver.xboxrecomp.Widgets.MenuRow;
  * - SETTINGS: four tabs (General, Graphics, Audio, Advanced): the launcher's preferences and a few RECOMP_* options
  *   saved to recomp.cfg (RecompConfig), applied at the next start; About ends Advanced;
  * - CONTROLS: the remapping of the pad (PadMapping, RECOMP_PAD_MAP in recomp.cfg), one row per Xbox control;
- * - GAME_DATA (« Manage »): change game, delete the imported copy and the game's stored things; ABOUT (X: LICENCES,
+ * - GAME_DATA (« Manage »): change game, a home-screen shortcut for the game (TitleShortcut, ACTION_PLAY_TITLE),
+ *   the game's own app (Create an app: TitleApp, TitleApk), delete the imported copy and the game's stored things;
+ *   ABOUT (X: LICENCES,
  *   the licence texts the APK carries, assets/licences/);
  * - PREPARE: Home's layout with the on-device Prepare's progress (dimmed after two idle minutes, for OLED screens).
  *
@@ -98,6 +100,14 @@ public class LauncherActivity extends Activity {
     static final String ACTION_CHOOSE_GAME = "fr.adserver.xboxrecomp.CHOOSE_GAME";
     /** Open the home screen even when « Open the game directly » is on (the « Launcher » shortcut). */
     static final String ACTION_SHOW_LAUNCHER = "fr.adserver.xboxrecomp.SHOW_LAUNCHER";
+    /**
+     * A game's home-screen shortcut (TitleShortcut, EXTRA_TITLE_ID): that game is selected and played when it is
+     * ready (the rules of « Open the game directly »), else its Home shows its state; a title ID no longer in the
+     * library opens the library with a note.
+     */
+    static final String ACTION_PLAY_TITLE = "fr.adserver.xboxrecomp.PLAY_TITLE";
+    /** The title ID (8 hex digits, the library's key) of ACTION_PLAY_TITLE. */
+    static final String EXTRA_TITLE_ID = "fr.adserver.xboxrecomp.TITLE_ID";
     /** Set by ShellActivity when the native side found no default.xbe: the folder it looked in. */
     static final String EXTRA_NO_GAME_DATA = "fr.adserver.xboxrecomp.NO_GAME_DATA";
     /**
@@ -312,10 +322,11 @@ public class LauncherActivity extends Activity {
         }
         boolean change = ACTION_CHOOSE_GAME.equals(action);
         boolean showLauncher = ACTION_SHOW_LAUNCHER.equals(action);
+        boolean playTitle = ACTION_PLAY_TITLE.equals(action);
         String noData = in.getStringExtra(EXTRA_NO_GAME_DATA);
         String badPack = in.getStringExtra(EXTRA_BAD_PACK);
         String exited = in.getStringExtra(EXTRA_TITLE_EXITED);
-        boolean forced = change || showLauncher || noData != null || badPack != null || exited != null;
+        boolean forced = change || showLauncher || playTitle || noData != null || badPack != null || exited != null;
         if (exited != null && savedInstanceState == null)
             awaitGameExit();
         // Back from the game: its play session ends here (Home's « Play time »), then the library is read: the
@@ -340,8 +351,28 @@ public class LauncherActivity extends Activity {
             if (launched != null && games.get(launched) != null)
                 games.selected = launched;
         }
+        // A game's home-screen shortcut: that game becomes the selected one (as A on its card would make it).
+        boolean shortcutGone = playTitle && savedInstanceState == null
+                               && !selectShortcutTitle(in.getStringExtra(EXTRA_TITLE_ID));
         if (badPack != null && savedInstanceState == null)
             dropBadPack(badPack);
+        boolean switchWarn = false;
+        if (playTitle && !shortcutGone && savedInstanceState == null && shortcutPlayable()) {
+            // Played as « Open the game directly » would: brought back when it runs, started when nothing runs.
+            // Another game running: its Home, Play armed to end it (one more press), as from the library.
+            boolean running = gameRunning();
+            if (running && selectedIsLaunched()) {
+                Log.i(TAG, "launcher: shortcut " + games.selected + ": running, bringing it back");
+                resumeShell();
+                return;
+            }
+            if (!running) {
+                Log.i(TAG, "launcher: shortcut " + games.selected + ": ready, starting it");
+                launchShell(false);
+                return;
+            }
+            switchWarn = true;
+        }
         if (!forced && savedInstanceState == null && gameReady() && !prepareBlocksPlay()) {
             /* The app icon while the game runs in the background: straight back to it (the « Launcher » shortcut
              * reaches this screen then). Otherwise only with « Open the game directly next time » on. */
@@ -365,6 +396,8 @@ public class LauncherActivity extends Activity {
                                           : exited != null ? "game exited: " + exited
                                           : change ? "change game"
                                           : showLauncher ? "launcher shortcut"
+                                          : playTitle ? "game shortcut " + in.getStringExtra(EXTRA_TITLE_ID)
+                                                        + (shortcutGone ? ", not in the library" : "")
                                           : dir != null && !gameReady() ? "remembered folder unusable: " + dir
                                           : lib ? "library, " + games.games.size() + " games"
                                           : gameReady() ? "home" : "no game set up") + ")");
@@ -377,10 +410,14 @@ public class LauncherActivity extends Activity {
             if (!lib)
                 history.push(Screen.HOME);
             first = lib ? Screen.LIBRARY : Screen.SOURCE;
-        } else if (badPack != null || exited != null) {
+        } else if (badPack != null || exited != null || playTitle && !shortcutGone) {
             if (lib)
                 history.push(Screen.LIBRARY);
             first = Screen.HOME;
+            Prep p = prep();
+            toPrepare = playTitle && (p == Prep.RUNNING || p == Prep.FAILED);   // its Prepare, as from its card
+        } else if (shortcutGone) {
+            first = lib ? Screen.LIBRARY : state() == State.NONE ? Screen.WELCOME : Screen.HOME;
         } else if (lib) {
             first = Screen.LIBRARY;
             Prep p = prep();
@@ -419,6 +456,10 @@ public class LauncherActivity extends Activity {
             setNote(getString(R.string.PACK_BAD, badPack), NOTE_ERROR);
         else if (exited != null)
             setNote(titleExitedNote(this, exited), NOTE_INFO);
+        else if (shortcutGone)
+            setNote(getString(R.string.SHORTCUT_GAME_GONE), NOTE_WARN);
+        else if (switchWarn)
+            confirmSwitch();   // « X is running and will close », Play armed
         if (toPrepare)
             go(Screen.PREPARE);
         // The library folder through the Storage Access Framework: scanned at a cold start (and on Y) only.
@@ -430,6 +471,8 @@ public class LauncherActivity extends Activity {
     protected void onResume() {
         super.onResume();
         resumed = true;
+        TitleAppReceiver.listener = () -> runOnUiThread(this::showTitleAppOutcome);
+        showTitleAppOutcome();
         poller.removeCallbacks(pollTick);
         poller.postDelayed(pollTick, PREPARE_POLL_MS);
     }
@@ -437,6 +480,7 @@ public class LauncherActivity extends Activity {
     @Override
     protected void onPause() {
         resumed = false;
+        TitleAppReceiver.listener = null;
         poller.removeCallbacks(pollTick);
         super.onPause();
     }
@@ -985,6 +1029,9 @@ public class LauncherActivity extends Activity {
             }
             Log.i(TAG, "launcher: title image " + (art != null ? art.getWidth() + "x" + art.getHeight() : "none")
                        + " for " + key);
+            // A pinned shortcut of this game follows its image and title (the image may have come after the pin).
+            if (tid != null)
+                TitleShortcut.refresh(this, tid, gameTitle(dir), art);
         }
         // The art tile's glow: the game theme's (stock: the accent); the monogram keeps the title ID's colour.
         if (key != null)
@@ -2287,6 +2334,18 @@ public class LauncherActivity extends Activity {
                                        getString(R.string.CHANGE_GAME_DETAIL), () -> go(Screen.SOURCE));
         onFocus(change, () -> describe(change.description, facts, Theme.TEXT_DIM));
         defaultFocus = change;
+        // A home-screen shortcut for this game (TitleShortcut): only for a real title ID (the library's key; not a
+        // folder-only record) and a home screen that takes pin requests.
+        String pinTid = shortcutTid();
+        if (pinTid != null && TitleShortcut.supported(this))
+            listRow(list, getString(R.string.SHORTCUT_ADD), getString(R.string.SHORTCUT_ADD_DETAIL),
+                    () -> onAddShortcut(pinTid));
+        // A game's own app (TitleApp, TitleApk): the same title ID rule; not in a game's own app itself, nor from a
+        // split install (nothing to copy).
+        File template = pinTid != null && TitleApp.ownTitleId(this) == null ? TitleApp.template(this) : null;
+        if (template != null)
+            listRow(list, getString(R.string.TITLE_APP_ADD),
+                    getString(R.string.TITLE_APP_ADD_DETAIL, size(template.length())), () -> onCreateApp(pinTid));
 
         if (dir != null && ownedCopy(dir)) {
             MenuRow del = listRow(list, getString(R.string.DELETE_COPY), getString(R.string.DELETE_COPY_DETAIL, dir),
@@ -2311,6 +2370,127 @@ public class LauncherActivity extends Activity {
         describe(change.description, facts, Theme.TEXT_DIM);
         addHint("A", R.string.HINT_SELECT, this::clickFocused);
         addHint("B", R.string.HINT_BACK, this::back);
+    }
+
+    /**
+     * The title ID a shortcut of the current game carries: its library record's key when that is a title ID (what
+     * ACTION_PLAY_TITLE looks up), else the XBE's; null for a game without one.
+     */
+    private String shortcutTid() {
+        Library.Record r = rec();
+        String tid = r != null && !Library.isLocalKey(r.titleId) ? r.titleId : titleId();
+        return tid == null || Library.isLocalKey(tid) ? null : tid;
+    }
+
+    /** Manage › Add to home screen: the home screen shows its own dialog; the note says the request went out. */
+    private void onAddShortcut(String tid) {
+        refreshIdentity();   // the title image of this game (or none: the monogram)
+        boolean ok = TitleShortcut.request(this, tid, gameTitle(gameDir()), art);
+        Log.i(TAG, "launcher: shortcut " + TitleShortcut.id(tid) + (ok ? " requested" : " refused"));
+        setNote(getString(ok ? R.string.SHORTCUT_REQUESTED : R.string.SHORTCUT_REFUSED), ok ? NOTE_OK : NOTE_ERROR);
+    }
+
+    /**
+     * Manage › Create an app (docs/android/app-shell.md « A game's own app »): this APK copied as the game's own
+     * app (TitleApk), behind the progress screen, then handed to Android's installer, whose confirmation
+     * TitleAppReceiver shows. Without « Install unknown apps » for this app, its settings screen first.
+     */
+    private void onCreateApp(String tid) {
+        if (!TitleApp.canInstall(this)) {
+            Log.i(TAG, "launcher: game app: Install unknown apps is off, opening its settings");
+            setNote(getString(R.string.TITLE_APP_ALLOW), NOTE_WARN);
+            try {
+                startActivity(new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                                         Uri.parse("package:" + getPackageName())));
+            } catch (ActivityNotFoundException e) {
+                Log.w(TAG, "launcher: no Install unknown apps screen", e);
+            }
+            return;
+        }
+        File template = TitleApp.template(this);
+        if (template == null)
+            return;
+        long need = TitleApp.spaceNeeded(template), free = getFilesDir().getUsableSpace();
+        if (free < need) {
+            setNote(getString(R.string.NOT_ENOUGH_SPACE, size(need), size(free)), NOTE_ERROR);
+            return;
+        }
+        refreshIdentity();   // the title image of this game (or none: the monogram)
+        String dir = gameDir();
+        String title = gameTitle(dir);
+        String label = TitleApk.label(title == null || title.trim().isEmpty() ? tid : title);
+        Library.Record r = rec();
+        String knownSha = r != null && tid.equals(r.titleId) ? r.xbeSha256 : "";
+        Bitmap icon = art;
+        Log.i(TAG, "launcher: game app " + TitleApk.packageName(tid) + " « " + label + " »: building from "
+                   + template + " (" + template.length() + " bytes)");
+        runWorker(R.string.TITLE_APP_BUILDING, () -> {
+            try {
+                TitleApk.Spec spec = new TitleApk.Spec();
+                spec.titleId = tid;
+                spec.label = label;
+                spec.parent = getPackageName();
+                spec.xbeSha256 = knownSha;
+                if (spec.xbeSha256 == null || spec.xbeSha256.isEmpty()) {
+                    File xbe = dir == null ? null : GameStore.findXbe(new File(dir));
+                    spec.xbeSha256 = xbe == null ? "" : GameStore.sha256(xbe);
+                }
+                if (spec.xbeSha256.isEmpty())
+                    Log.w(TAG, "launcher: game app " + spec.packageName() + ": no default.xbe hash, not locked");
+                spec.iconPng = TitleApp.iconPng(icon, tid, label);
+                spec.iconEntry = TitleApp.iconEntry(this);
+                spec.iconRes = R.mipmap.xba_title_icon;
+                TitleApp.Key key = TitleApp.key();
+                File apk = TitleApp.build(this, spec, key, new TitleApp.Progress() {
+                    @Override
+                    public void update(long done, long total) {
+                        progress(done, total, label);
+                    }
+
+                    @Override
+                    public void signing() {
+                        progressIndeterminate(R.string.TITLE_APP_SIGNING);
+                    }
+                }, () -> cancelRequested);
+                Log.i(TAG, "launcher: game app " + spec.packageName() + ": " + apk.length() + " bytes, signed");
+                progressIndeterminate(R.string.TITLE_APP_HANDING);
+                TitleApp.install(this, apk, spec.packageName(), label, (done, total) -> progress(done, total, label),
+                                 () -> cancelRequested);
+                //noinspection ResultOfMethodCallIgnored
+                apk.delete();   // the session has its own copy
+                workerNoteKind = NOTE_INFO;
+                workerNote = getString(R.string.TITLE_APP_CONFIRM, label);
+            } catch (java.io.InterruptedIOException e) {
+                TitleApp.clean(this);
+                cancelled();
+            } catch (IOException | RuntimeException e) {
+                Log.w(TAG, "launcher: game app " + TitleApk.packageName(tid) + " failed", e);
+                TitleApp.clean(this);
+                fail(getString(R.string.TITLE_APP_BUILD_FAILED, String.valueOf(e.getMessage())));
+            }
+        });
+    }
+
+    /** The installer's last outcome for a game's own app (TitleAppReceiver), as a note; nothing when none is new. */
+    private void showTitleAppOutcome() {
+        String[] o = TitleApp.takeOutcome(this);
+        if (o == null)
+            return;
+        int status = Integer.parseInt(o[0]);
+        String msg = o[1], label = o[2].isEmpty() ? o[3] : o[2];
+        switch (status) {
+        case android.content.pm.PackageInstaller.STATUS_SUCCESS:
+            setNote(getString(R.string.TITLE_APP_INSTALLED, label), NOTE_OK);
+            break;
+        case android.content.pm.PackageInstaller.STATUS_FAILURE_ABORTED:
+            setNote(getString(R.string.TITLE_APP_CANCELLED), NOTE_INFO);
+            break;
+        case android.content.pm.PackageInstaller.STATUS_FAILURE_CONFLICT:
+            setNote(getString(R.string.TITLE_APP_CONFLICT, label), NOTE_ERROR);
+            break;
+        default:
+            setNote(getString(R.string.TITLE_APP_FAILED, msg.isEmpty() ? String.valueOf(status) : msg), NOTE_ERROR);
+        }
     }
 
     /** The game's technical facts, one per line: title ID, when it was prepared and its pack's size, its files. */
@@ -2981,6 +3161,35 @@ public class LauncherActivity extends Activity {
         artTid = null;
     }
 
+    /**
+     * ACTION_PLAY_TITLE: tid becomes the selected game when Home can show it (a record with its files set, or a
+     * game of the library folder; a record is made for the latter, as A on its card does). False when it cannot (no
+     * title ID, deleted from the library, its source gone with no files): the library opens with a note.
+     */
+    private boolean selectShortcutTitle(String tid) {
+        if (tid == null || tid.isEmpty())
+            return false;
+        Library.Record r = games.get(tid);
+        boolean inFolder = indexGames.containsKey(tid);
+        if (!inFolder && (r == null || r.dataDir.isEmpty()))
+            return false;
+        selectEntry(LibraryScreen.entry(getFilesDir(), tid, games, index, libEnv()));
+        return true;
+    }
+
+    /**
+     * The selected game would start from the shortcut: what « Open the game directly » asks (its files, no Prepare
+     * needed or running, the pack built from this default.xbe), not a wrong game, and no crash round for Home to
+     * offer (« Prepare again », « Needs a fix »). Otherwise its Home shows why.
+     */
+    private boolean shortcutPlayable() {
+        if (state() != State.READY || prepareBlocksPlay() || xbeChanged())
+            return false;
+        String tid = titleId();
+        SelfHeal.State heal = tid == null ? null : selfHeal(tid, gameRunning(), prep());
+        return heal == null || heal.offer == SelfHeal.Offer.IMPROVE;
+    }
+
     /** A on a card: the game's Home, in its colours. */
     private void openGame(LibraryScreen.Entry e) {
         selectEntry(e);
@@ -3173,6 +3382,10 @@ public class LauncherActivity extends Activity {
 
     Thread scannerForTest() {
         return scanner;
+    }
+
+    Thread workerForTest() {
+        return worker;
     }
 
     private volatile long scanPaintedAt;

@@ -222,6 +222,26 @@
     <string name="SHORTCUT_LAUNCHER">Launcher</string>
     <string name="SHORTCUT_LAUNCHER_LONG">Launcher: settings and game data</string>
 
+    <!-- A pinned home-screen shortcut for one game (Manage › Add to home screen) -->
+    <string name="SHORTCUT_ADD">Add to home screen</string>
+    <string name="SHORTCUT_ADD_DETAIL">A shortcut on your home screen with this game\'s logo. Tapping it opens this game: it starts when it is ready, otherwise its page shows what it needs.</string>
+    <string name="SHORTCUT_REQUESTED">Shortcut requested: confirm it in your home screen\'s dialog.</string>
+    <string name="SHORTCUT_REFUSED">Your home screen did not accept the shortcut.</string>
+    <string name="SHORTCUT_GAME_GONE">The game of this shortcut is no longer in the library: choose one here.</string>
+    <!-- A game's own app (Manage › Create an app; TitleApp, docs/android/app-shell.md « A game's own app »). -->
+    <string name="TITLE_APP_ADD">Create an app</string>
+    <string name="TITLE_APP_ADD_DETAIL">Makes this game an app of its own on this device: its name and logo in your apps, locked to this disc, opening straight into it. It is a copy of XRecomp, so it takes about %1$s. Android asks you to confirm the install. For your own use only.</string>
+    <string name="TITLE_APP_ALLOW">Allow XRecomp to install apps on the screen that opened, then come back and press Create an app again.</string>
+    <string name="TITLE_APP_BUILDING">Creating the app</string>
+    <string name="TITLE_APP_SIGNING">Signing the app</string>
+    <string name="TITLE_APP_HANDING">Handing the app to Android</string>
+    <string name="TITLE_APP_CONFIRM">%1$s is ready: confirm the install in Android\'s dialog.</string>
+    <string name="TITLE_APP_INSTALLED">%1$s is installed: find it in your apps. Open it and choose this game once; it opens straight into it from then on.</string>
+    <string name="TITLE_APP_CANCELLED">The app was not installed (cancelled).</string>
+    <string name="TITLE_APP_CONFLICT">An app %1$s signed by another key is installed: uninstall it, then create the app again.</string>
+    <string name="TITLE_APP_FAILED">The app was not installed: %1$s</string>
+    <string name="TITLE_APP_BUILD_FAILED">The app could not be created: %1$s. Nothing was installed.</string>
+
     <!-- The on-device Prepare (docs/android/prepare.md): Home's Prepare row, the Preparing screen, the notification -->
     <string name="PREPARE">Prepare</string>
     <string name="PREPARING">Preparing…</string>

@@ -153,7 +153,7 @@ One activity, a small state machine of screens (`LauncherActivity.Screen`) with 
 | Home | No top bar: the game's title image (or a monogram) in the [game theme](#game-theme)'s colours, its title (the XBE certificate's name, else the folder's name), **one line** — when it was played (« Yesterday · 12 h 40 min played », « Not played yet »), or its state when it is not ready (« Needs preparing · once, about 20–30 min », « Prepare failed · CODE », the Prepare's progress, « Queued (n) », « Game data missing » with the folder, …) — and **one row of buttons**: a solid **Play** (or **Prepare**, **Preparing…**, **See what failed**, **Choose a game**) and three quiet pills, **Settings**, **Controls**, **Manage**. Before the first play the note says where the in-game menu is. | A finished import (Play focused), every start when « Start in the game » is off, the « Launcher » shortcut, B from the screens above. |
 | Settings | Four tabs (General, Graphics, Audio, Advanced; L1 / R1) of [options](#settings) as « label  value » rows, left / right (or A) to change, the focused option's description on the right. About ends Advanced. | Home, Options. |
 | Controls | The player's **remapping** ([Controls and remapping](#controls-and-remapping)): one row per Xbox control (A B X Y, Black, White, the triggers; Back, Start, the stick presses; the D-pad; the two sticks), its value the player's button, changed like a setting; « Reset controls » (also Y). The description column says what the focused row does and draws the handheld with, next to each control, what the game gets from it. | Home. |
-| Manage | **Change game** (another folder or image, or the same one again to re-import; **Library** when the [game library](#game-library) is on); **Delete the imported copy** (only when the game is the app's own copy, `files/games/<TID>/` or the older `files/game/`; its size as the value; press A twice within 5 s; saves are kept); the game's pack, Prepare files, caches and saves with their sizes, each deleted on its own ([Storage](#storage)). The technical facts (title ID, prepared date, pack size, folder, source, size, free space) are the first row's description. | Home. |
+| Manage | **Change game** (another folder or image, or the same one again to re-import; **Library** when the [game library](#game-library) is on); **Delete the imported copy** (only when the game is the app's own copy, `files/games/<TID>/` or the older `files/game/`; its size as the value; press A twice within 5 s; saves are kept); **Add to home screen** (a [shortcut for this game](#a-game-on-the-home-screen), only when the home screen takes pin requests); **Create an app** (the game's [own app](#a-games-own-app), made and installed on the device; its size as the description; not in a game's own app); the game's pack, Prepare files, caches and saves with their sizes, each deleted on its own ([Storage](#storage)). The technical facts (title ID, prepared date, pack size, folder, source, size, free space) are the first row's description. | Home. |
 | About | Version (`-PxbaVersion`), build (`-PxbaVersionCode`), app id, the game check (the first digits of `-PxbaXbeSha256`, or none), a one-line licence summary, and that no game data is included. **X**: Licences. | The end of Settings › Advanced, Options on the library. |
 | Licences | XBA-100. Every licence text the APK carries, monospaced, one after the other: `LICENSE`, `NOTICE`, then `LICENSES/*.txt` (copied into the assets `licences/` at build time by `xbaLicencesAsset`). D-pad up / down scroll, L1 / R1 page, a finger scrolls too. | X on About. |
 
@@ -177,14 +177,146 @@ settings saved, errors).
 | The native side found no `default.xbe` (`NO_GAME_DATA`) | `shell_main.c` calls `ShellActivity.openGamePicker(dir)`; the launcher opens on Choose your game with `NO_GAME_DATA` and that folder in the note; B goes to Home. |
 | Long-press on the app icon, « Change game » | Choose your game, even with a game set up; B goes to Home. If the game is running, the note says it will close when another game is chosen; saves are in internal storage and stay. |
 | Long-press on the app icon, « Launcher » | Home, even with « Start in the game » on or the game running. |
+| A game's home-screen shortcut, the game ready | That game becomes the selected one and starts (the rules of « Start in the game »: its files, no Prepare needed or running, a pack from this `default.xbe`, not a wrong game, no crash round to offer), whatever « Start in the game » says. Already running: back to it. Another game running: its Home, the note says that game will close, one press of Play goes on. |
+| A game's home-screen shortcut, the game not ready | That game's Home with its state (Needs preparing, Not imported, Game data missing, …), B to the library; its Prepare screen when one runs or failed. Nothing starts by itself (no Prepare, no import). |
+| A game's home-screen shortcut, the game no longer in the library | The library (or Home / Welcome without one), the note « The game of this shortcut is no longer in the library ». |
 
 The two shortcuts are dynamic (the package name differs per title, which a static `shortcuts.xml` cannot follow),
 published each time the launcher runs, so they appear after the first start.
+
+### A game on the home screen
+
+Manage › **Add to home screen** asks the home screen to pin a shortcut for the game shown (`ShortcutManager.
+requestPinShortcut`; `TitleShortcut`); the home screen shows its own dialog, the note says « Shortcut requested ».
+The row is hidden when `isRequestPinShortcutSupported()` is false, or when the game has no title ID.
+
+| What | Value |
+|---|---|
+| Id | `game_<TID>` (one per game; asking again updates it) |
+| Label | The game's title: up to 12 characters under the icon (cut at a word, « Burnout 3… »), 25 in the long label |
+| Icon | Adaptive, 432 x 432 (108 dp at xxxhdpi): the [title image](#game-theme) (`files/art/<TID>.png`) centred at two thirds, so the mask barely cuts it, on the average colour of its outer pixels (the dark launcher green when they are transparent); without an image the monogram (initials on the title ID's hue, as on the library's cards) |
+| Intent | Explicit to `LauncherActivity`, action `fr.adserver.xboxrecomp.PLAY_TITLE`, extra `fr.adserver.xboxrecomp.TITLE_ID` = the title ID, a fresh task (as the app icon's shortcuts) |
+| Update | When the launcher loads that game's title image (Home, after a scan or a theme bake), a pinned `game_<TID>` gets the current icon and title (`updateShortcuts`); nothing when it is not pinned |
+
+Pinned, not dynamic: the long-press menu keeps « Change game » and « Launcher ». What a tap does is in
+[When it shows](#when-it-shows). logcat: `launcher: shortcut game_<TID> requested`, then at a tap `launcher: shown (game
+shortcut <TID>)` or `launcher: shortcut <TID>: ready, starting it`. Tests: `LauncherShortcutTest` (the row and the
+request, the three cases of a tap, the icon → `build/screenshots/shortcut-icon-*.png`, the labels).
+
+### Device check (home-screen shortcut), for Alex
+
+`adb logcat -s xboxrecomp` throughout; a library with Fable (prepared) and Burnout 3 (not imported), and a stock or
+Pixel-like home screen (AYN Thor's launcher, then another one if installed).
+
+1. Fable › Home › Manage: the row **Add to home screen** is there, its description on the right. Press A: the home
+   screen's dialog shows Fable's logo and « Fable »; the launcher's note says « Shortcut requested… ». Accept.
+2. The home screen: the icon is Fable's title image, whole (not cut by the mask), on a matching background; the
+   label is « Fable ». Send a screenshot.
+3. Close the app (recents › swipe away). Tap the shortcut: Fable starts straight away, no launcher screen (logcat
+   `launcher: shortcut 4D5300D1: ready, starting it`).
+4. Home button while Fable runs, tap the shortcut again: back into the running game, no restart.
+5. Burnout 3 › Manage › Add to home screen, accept; tap its shortcut: Burnout 3's Home with **Not imported** (or its
+   state), nothing starts by itself; B goes to the library.
+6. With Fable running in the background, tap Burnout 3's shortcut after it was imported and prepared: its Home, the
+   note says Fable is running and will close; Play once more starts Burnout 3.
+7. A game without a title image (or a test XBE): its shortcut shows the monogram (two letters on a colour), legible.
+8. Delete a game from the library (Storage › its imported copy, and its file from the library folder, then Y), tap
+   its shortcut: the library opens with « The game of this shortcut is no longer in the library », no crash.
+9. Long-press the app icon: still only « Change game » and « Launcher ».
+10. In French: the row « Ajouter à l'écran d'accueil », the notes in French.
 
 A new game, once checked, becomes a record of the [game library](#game-library) and the selected game; the launcher
 goes to Home with Play focused and « TITLE is ready » in the note, instead of starting the game by itself. It
 becomes the launched game (the preferences ShellActivity reads) and a running other game is ended only when it is
 played.
+
+### A game's own app
+
+Manage › **Create an app** makes, on the phone itself, a real app for the game shown: its own package, the game's
+name under the icon, the game's title image as the icon, locked to that disc. Android's installer installs it (its
+own dialog). The [home-screen shortcut](#a-game-on-the-home-screen) stays; [A title's own APK](#a-titles-own-apk) is
+the same idea built on a host. The row is there for a game with a title ID, not in a game's own app, and not when
+XRecomp itself is installed as split APKs; its description gives the size the app will take (it is a copy of the
+whole of XRecomp, toolchain included).
+
+| What | Value |
+|---|---|
+| Package | `fr.adserver.xboxrecomp.t<titleid>` (lower case, `4d5300d1`), as `tools/android/title_apk.sh` names it |
+| Label | The game's title (XBE certificate, else folder), whole up to 50 characters: a literal in the manifest |
+| Icon | `mipmap/xba_title_icon`, an adaptive icon whose background layer is `drawable-nodpi/xba_title_icon_art.png`: the generator puts there `TitleShortcut.icon` (432 x 432, the title image on its border's colour, else the monogram), the same picture as the shortcut's |
+| Lock | Manifest meta-data `fr.adserver.xboxrecomp.XBE_SHA256` = the library record's `xbe_sha256` (else the hash of `default.xbe`): `GameStore.expectedSha256` reads it before the `xba_xbe_sha256` resource, so another disc gets [WRONG_GAME](#wrong_game). Also `…TITLE_ID` (the title ID) and `…PARENT` (XRecomp's package) |
+| Version | XRecomp's own `versionCode` / `versionName` (a copy) |
+| Signature | APK Signature Scheme v2 only (minSdk 30: no v1; v3's key rotation is not needed), by apksig (`com.android.tools.build:apksig`, AOSP, Apache-2.0) |
+| Key | EC P-256 in the AndroidKeyStore, alias `xba_title_apps`, made at the first « Create an app », never exported; the same for every game's app, so **creating it again updates the installed one**. It lives as long as XRecomp's install: after an uninstall of XRecomp (an update keeps it), an app made before must be uninstalled before it can be made again (« signed by another key ») |
+
+**How it is made** (`TitleApk`, `ApkZip`, `BinaryXml`; no build tools on the device). The template is XRecomp's
+installed APK (`ApplicationInfo.sourceDir`), copied entry by entry into `files/title-app/` without recompressing:
+
+1. `AndroidManifest.xml` (binary XML) patched: `package`; `android:label` as a string; `android:icon` and
+   `android:roundIcon` to the slot (`R.mipmap.xba_title_icon`, the same id since the template is this APK); every
+   provider authority (`<package>.logs`) and package-derived name (permissions, task affinity, process) moved to the
+   new package; component class names written in full against the old package (AGP's merged manifest has them in
+   full already), so they stay `fr.adserver.xboxrecomp.*`; the three meta-data added (replaced when present).
+   Attributes stay sorted by resource id; a manifest read and written back unchanged gives the same bytes.
+2. The slot's PNG replaced (its path is what `Resources.getValue` says, `res/drawable-nodpi-v4/…`, so a release build
+   with shortened resource paths works too); `resources.arsc` is not touched.
+3. `META-INF/*.SF`, `.RSA`, `.DSA`, `.EC`, `MANIFEST.MF` and `stamp-cert-sha256` left out.
+4. Stored entries aligned (4 bytes; a stored `.so` 16 KB; this app's libraries are compressed,
+   `useLegacyPackaging`), then apksig signs into a second file and realigns. Free space needed: twice the APK plus
+   64 MB (checked first: « Not enough space »).
+
+**Installing.** Without « Install unknown apps » for XRecomp (`canRequestPackageInstalls`), the row opens that
+settings screen for XRecomp and the note says to come back and press it again. Otherwise the progress screen
+(Creating the app, with the bytes; Signing the app; Handing the app to Android; Cancel works until the commit), then a
+`PackageInstaller` session written from the signed file (deleted right after) and committed with `TitleAppReceiver`
+as its status receiver: `STATUS_PENDING_USER_ACTION` opens Android's dialog; the outcome becomes a note on the
+launcher (at once, or at its next resume): « … is installed », « The app was not installed (cancelled) », « An app …
+signed by another key is installed », « The app was not installed: <installer message> ».
+
+The game's app is XRecomp with one game: its own private storage, its own settings. At its first start it asks for
+the game like XRecomp's first start (folder or image), refuses another disc, then prepares the game. **Not done
+yet**: handing the parent's pack over so the app does not prepare again (the [import drop](prepare.md#where-packs-live)
+is not implemented). The planned way: the game's app asks XRecomp (`…PARENT`) through an explicit activity
+result for its pack; XRecomp checks the caller is `fr.adserver.xboxrecomp.t<tid>`, grants read access to `pack.json`
+and `libtitle.so` through its provider, and the app copies them into `packs/<TID>.partial/`, checks `lib_sha256`
+and `lib_size`, and publishes atomically.
+
+logcat: `launcher: game app fr.adserver.xboxrecomp.t<tid> « <label> »: building from <apk> (<n> bytes)`, `…: <n>
+bytes, signed`, `… handed to the installer (session <id>)`, then `launcher: game app <pkg>: installer status <n>`.
+Tests: `TitleApkTest` (the binary manifest round trip and patch, the zip copy and its alignment, the v2 signature
+checked by apksig's `ApkVerifier`, a regeneration keeping the certificate; the template is the build's resource APK,
+`android_resource_apk`), `LauncherTitleAppTest` (the row and its size, the settings screen first, the build handed to
+a session, the installer's outcomes as notes, a game's app locked by its meta-data and without the row). The signed
+copy is left in `app/build/title-app/title-app.apk`, for `aapt2 dump badging` (package, label, icon
+`res/mipmap-anydpi-v26/xba_title_icon.xml`) and `apksigner verify` (v2) in the build image.
+
+The app carries the game's icon and, once prepared, code made from the player's own disc: it is for the player's own
+use and is never distributed.
+
+### Device check (game's own app), for Alex
+
+`adb logcat -s xboxrecomp` throughout; XRecomp (xrecomp-latest) with Fable in the library, prepared and played once.
+
+1. Fable › Home › Manage: the row **Create an app**, its description with the size (about the APK's size). Press A.
+   If « Install unknown apps » is off for XRecomp, Android's screen for it opens and the note says to come back:
+   allow it, Back, press **Create an app** again.
+2. The progress screen: « Creating the app » with the bytes going up, then « Signing the app » (some seconds), then
+   « Handing the app to Android ». Note how long the whole thing takes. Android's install dialog then shows
+   « Fable » with Fable's logo: Install.
+3. Back on Manage, the note says « Fable is installed… ». In the app drawer: an app **Fable** with Fable's title
+   image as its icon, whole (not cut by the mask), next to XRecomp's own icon, which has not changed. Screenshot.
+4. Open Fable (the new app): XRecomp's welcome / game choice; choose Fable's folder or image: it is accepted. Choose
+   another game's folder instead first: « WRONG_GAME » (the app is locked to Fable's disc). About shows the game
+   check with Fable's hash and the app id `fr.adserver.xboxrecomp.t4d5300d1`.
+5. Prepare Fable in the new app (the pack is not handed over yet: this is the known follow-up), then Play: the game
+   starts. With « Open the game directly next time » on, tapping the icon goes straight into the game.
+6. In XRecomp, Manage › Create an app once more for Fable: Android's dialog says it is an **update**; after it, the
+   new app keeps its data (still prepared, the folder still chosen).
+7. Uninstall the game's app (long-press › Uninstall): XRecomp is untouched (its library, Fable's pack, saves).
+8. A game without a title image: Create an app gives an app with the monogram as its icon, legible.
+9. In French: the row « Créer une app », the progress labels and the notes in French.
+10. `adb shell pm dump fr.adserver.xboxrecomp.t4d5300d1 | grep -E "versionCode|signatures"`: the same versionCode as
+    XRecomp's; send the line.
 
 ### Controls
 
@@ -1617,6 +1749,29 @@ cd android && gradle assembleDebug -PxbaTitleDir=/path/to/my_xbox_game \
     -PxbaApplicationId=fr.adserver.xboxrecomp.mygame -PxbaLabel="My game"
 # or the NDK alone: cmake -S android/app/src/main/cpp -DXBA_TITLE_DIR=/path/to/my_xbox_game (+ the NDK toolchain)
 ```
+
+### A title's own APK
+
+The launcher with one game's name, its own package and **the game's title image as its icon**, locked to that disc
+(`-PxbaXbeSha256`, [WRONG_GAME](#wrong_game)). One command from a host with the Android build environment
+(`tools/docker/android.Dockerfile`):
+
+```bash
+tools/android/title_apk.sh /path/to/game            # a disc image, a folder with default.xbe, or default.xbe
+tools/android/title_apk.sh /path/to/game --title-dir /path/to/my_xbox_game -- -PxbaVersionCode=2
+tools/android/title_apk.sh /path/to/game --dry-run  # print the Gradle command
+```
+
+| Step | What |
+|---|---|
+| Identify | `tools.prepare.identify`: title ID, name (certificate), `default.xbe` extracted from an image. |
+| Icon | `python -m tools.title_art default.xbe --android-res DIR`: the `$$XTIMAGE` texture (else `$$XSIMAGE`) decoded like `TitleArt.java`, as the foreground layer of an adaptive icon (432 px, the image centred at 72/108 of it, the part every launcher mask shows); the background is the average colour of the image's border. No title image: XRecomp's glyph on the title's colour (`TitleArt.monogramColor`). |
+| Build | Gradle with `-PxbaApplicationId=fr.adserver.xboxrecomp.t<titleid>`, `-PxbaLabel=<name>`, `-PxbaXbeSha256=…`, `-PxbaIconRes=DIR` (+ `-PxbaTitleDir` with `--title-dir`, + everything after `--`). `-PxbaIconRes` goes into the build types' resource source sets, so its `mipmap/ic_launcher` overrides main's. |
+
+Without `--title-dir` the APK runs the title from the pack its own Prepare builds (add `-PxbaToolchainDir=…` after
+`--`). The extracted `default.xbe` and the icon go to `~/.cache/xrecomp/title-apk/<TITLEID>` (`--work`; the script
+refuses a folder inside the repository): they come from the player's disc, like the APK itself, which is for their
+own use and is not distributed.
 
 ### Title packs (the loader)
 

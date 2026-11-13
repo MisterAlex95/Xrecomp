@@ -21,4 +21,5 @@ in NOTICE. Their binary distribution requires the licence text to travel with th
 |---|---|
 | `Apache-2.0-WITH-LLVM-exception.txt` | LLVM: clang, lld, compiler-rt builtins and libunwind of the on-device toolchain (`libxbacc.so`, the sysroot's `lib/clang/`), verbatim from the LLVM project's `LICENSE.TXT` (its third-party and legacy parts left out: none of that code is built in) |
 | `PSF-2.0.txt` | CPython (`libpython3.13.so`, `libxbapython.so`, the standard library zip), verbatim `LICENSE` of the CPython sources |
+| `Apache-2.0-apksig.txt` | apksig (in `classes.dex`: signs the game apps of Manage › Create an app), verbatim `LICENSE` of the `com.android.tools.build:apksig` jar (its copyright line, then the Apache License 2.0) |
 | `BSD-3-Clause-capstone.txt` | Capstone (`libcapstone.so` and its Python bindings), verbatim from the Capstone distribution |
