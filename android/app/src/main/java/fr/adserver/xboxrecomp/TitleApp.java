@@ -91,6 +91,12 @@ final class TitleApp {
         return s == null ? "" : s;
     }
 
+    /** The package of the app this one was generated from (XRecomp), or null for XRecomp itself. */
+    static String ownParent(Context c) {
+        String p = meta(c).getString(TitleApk.META_PARENT);
+        return p == null || p.isEmpty() || p.equals(c.getPackageName()) ? null : p;
+    }
+
     // ---- The template --------------------------------------------------------------------------------------------
 
     /** This app's installed APK, or null when it is split (a copy of base.apk alone would not run). */
@@ -193,6 +199,25 @@ final class TitleApp {
             return new Key(k, cert);
         } catch (GeneralSecurityException | RuntimeException e) {
             throw new IOException("signing key: " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * The certificate of the game apps' key when it exists, without making it (PackHandover: an XRecomp that never
+     * made a game app has no key and serves no pack). Null when there is none or the keystore cannot be read.
+     */
+    static X509Certificate existingCert() {
+        if (testKey != null)
+            return testKey.cert;
+        try {
+            KeyStore ks = KeyStore.getInstance("AndroidKeyStore");
+            ks.load(null);
+            if (!ks.containsAlias(KEY_ALIAS))
+                return null;
+            return (X509Certificate)ks.getCertificate(KEY_ALIAS);
+        } catch (GeneralSecurityException | IOException | RuntimeException e) {
+            Log.w(LauncherActivity.TAG, "launcher: game apps' key: " + e);
+            return null;
         }
     }
 

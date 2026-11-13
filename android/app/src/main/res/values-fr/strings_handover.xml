@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- La reprise du pack (XBA-176, PackHandover) : l'app d'un jeu reprend le jeu préparé par XRecomp au lieu de le
+     préparer à nouveau. -->
+<resources>
+    <string name="HANDOVER_COPYING">Copie du jeu préparé depuis XRecomp… %1$d %%</string>
+    <string name="HANDOVER_COPYING_BUTTON">Copie…</string>
+    <string name="HANDOVER_COPYING_NOTE">XRecomp a déjà préparé ce jeu : sa copie est reprise, en quelques secondes. Inutile de le préparer à nouveau ici.</string>
+    <string name="HANDOVER_BUSY">Patientez quelques secondes : le jeu préparé est copié depuis XRecomp.</string>
+    <string name="HANDOVER_DONE">Le jeu préparé a été copié depuis XRecomp : appuyez sur Jouer.</string>
+    <string name="HANDOVER_DONE_OLDER">Le jeu préparé a été copié depuis XRecomp. Une autre version de l\'app l\'a préparé : il se lance, et Préparer à nouveau apporte les corrections de cette version.</string>
+    <string name="HANDOVER_NO_PARENT">XRecomp n\'est pas installée : cette app prépare le jeu elle-même.</string>
+    <string name="HANDOVER_NO_PACK">XRecomp n\'a pas préparé ce jeu : préparez-le ici, ou préparez-le dans XRecomp puis rouvrez cette app.</string>
+    <string name="HANDOVER_REFUSED">XRecomp n\'a pas transmis son jeu préparé (%1$s) : préparez-le ici.</string>
+    <string name="HANDOVER_UNFIT">Le jeu préparé par XRecomp a été fait pour une autre version de cette app : préparez-le ici, ou recréez cette app depuis XRecomp.</string>
+    <string name="HANDOVER_OTHER_XBE">XRecomp a préparé une autre version de ce disque : préparez-le ici.</string>
+    <string name="HANDOVER_NO_SPACE">Pas assez de place pour copier le jeu préparé par XRecomp (il faut %1$s) : libérez de la place et rouvrez cette app, ou préparez-le ici.</string>
+    <string name="HANDOVER_FAILED">La copie du jeu préparé par XRecomp a échoué (%1$s) : rouvrez cette app pour réessayer, ou préparez-le ici.</string>
+</resources>
