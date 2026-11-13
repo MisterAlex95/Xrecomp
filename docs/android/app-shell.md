@@ -927,6 +927,102 @@ A toolchain APK and one prepared game (Play on Home).
 6. From step 4, **Prepare again**: a full Prepare runs; when it ends, Home shows Play without the line, and the game
    does not start by itself.
 
+## Library check (XBA-130)
+
+« Check my library » (library › Options (Y), shown with the on-device toolchain) gives the state of the whole library
+on the device: it prepares every title that needs it, boots each one for 3 minutes with the compat runner's pad script
+and status file, grades it with the compat runner's own rules, and writes one line per title to
+`<files>/check/compat-results.jsonl`, the desktop schema ([compat-runner.md](../technical/compat-runner.md)) plus the
+device's fields. **Share report** sends that file (`content://<app id>.logs/check/compat-results.jsonl`, as Share
+log). On a desktop: `python -m tools.compat report compat-results.jsonl --matrix` and `python -m tools.compat plane
+compat-results.jsonl` read it (a Device column appears).
+
+| Piece | What |
+|---|---|
+| `CheckActivity` (`:launcher`) | The screen: what a check would do (games, how many to prepare and to start, about how long; **Check all n**, **Check <selected game> only**), a check under way (n of N, the title and its step, the last results, the stage counts; **Pause** / **Continue**, **Stop** (twice), **Share report**), the summary when done. Keeps the screen on, dimmed. The launcher opens it instead of itself while a check runs (also when a checked game leaves by itself). |
+| `CheckService` (`:launcher`, foreground `specialUse`) | Keeps the launcher's process alive while the game runs in front of it, holds a partial wake lock, ticks the driver twice a second on its own thread; the notification shows where the check is, with **Stop**. |
+| `CheckDriver` | The steps (a state machine, every device effect behind `Platform`, so the JVM tests drive it with fakes and a fake clock). |
+| `CheckPlatform` | The device: PrepareService, ShellActivity in a fresh main process, ActivityManager (the game's process, `ApplicationExitInfo`), `/proc/<pid>/status` (VmHWM), logcat of the game's PID, the thermal status and the battery, and the embedded CPython for the grade. |
+| `LibraryCheck` | `check.json` (the state), `current.json` (the run the game process belongs to), the plan, `needsPrepare`. |
+
+**Per title.** Needs a Prepare when it has no valid pack, or one built from another `default.xbe` (« disc changed »)
+or by another toolkit than the installed one (« toolkit changed »): the check measures this APK's toolkit. The Prepare
+is PrepareService's, as from Home (its notification, its `status.json`); failed → the title's line is stage `none`,
+blocker `prepare failed: CODE: msg`; interrupted (killed, cancelled by the system) → started again, at most 3 times.
+A title whose files are not in the app (an image not imported) is prepared from the cached `default.xbe` and not
+started: stage `prepares`, blocker `not booted: the game's files are not in the app`. Then the boot:
+
+1. `current.json` (title ID, `<files>/check/run/<TID>/`, until when); the launcher's launch steps (the launched game,
+   the shared caches, the self-heal stamp); ShellActivity with `NEW_TASK | CLEAR_TASK`, a new main process.
+2. ShellActivity puts the run's environment in place before SDL starts (`LibraryCheck.applyRunEnv`):
+   `RECOMP_STATUS=<run>/status.jsonl`, `RECOMP_STATUS_MS=1000`, `RECOMP_PAD_LIVE=<run>/pad-live.txt`, `RECOMP_USB=1`
+   (recomp.cfg's value when it has one): `tools.compat`'s `boot()` minus `RECOMP_HEADLESS` and the screenshots. The
+   game is on screen, headed, as played. A quick reboot keeps it (same title, same `current.json`).
+3. The pad: `start` three times from 8 s, then `a`, every 2 s, on the **status clock** (the runtime's first status
+   line gives its origin: the time from tap to runtime start is not counted, as on a desktop).
+4. The watchdog: after 180 s the check screen is brought to the front (allowed while the game is still visible), the
+   game's process is killed by PID, its logcat dumped to `<run>/run.log`. A process that ends earlier is read from
+   `ApplicationExitInfo` (exit code, signal, native crash, Java exception, ANR, low memory); a window that closes (no
+   game data, a refused pack) ends the run too.
+5. The grade: `libxbapython.so -m tools.compat grade` (tools/compat/device.py) with the status file, the log, the press
+   times, how it ended, the work folder (`ident.json`, `discovered.jsonl`) and the device's fields; it appends the
+   line. If the Python cannot run, the app writes a short line itself (`"graded_by": "app"`, stage `prepares` or
+   `none`).
+
+**The line** (no game data): the desktop's `source` (the certificate's title name), `title_id`, `title`, `xdk`,
+`xdk_libraries` (each XDK library's build), `engines` (names), `layers`, `stage`, `best`, `blocker`, `runs` (the
+status numbers), `toolkit`, `time`, `prepare_s`; plus `host` `android`, `device` (« AYN Thor »), `android`, `api`,
+`soc`, `app_build`, `renderer` (`GL: <GL_RENDERER>` from the runtime's `[GPUGL]` line, or the CPU rasteriser),
+`seconds`, `peak_mem_mb` (the game process's VmHWM). The status files and logs stay in `<files>/check/run/`.
+
+**Resumable.** `check.json` is written at every step. After a crash of the app or a reboot, opening the app shows the
+check (the launcher hands over) and it goes on: a Prepare it waited for is waited for or started again (the stamps
+skip what was done); a boot it was in the middle of is graded from what that run left, blocker « the check was
+interrupted during this boot », and the check goes on with the next title (a title that takes the device down does not
+loop).
+
+**Pauses.** Android lets the app start an activity, or a foreground service, only from its screen: the check screen
+must be in front for the next Prepare or boot (« Paused: come back to this screen »; the notification opens it).
+The game leaving the screen during its boot (Home, the screen off) ends that run, which is done again on return
+(a game in the background is held by the runtime: its numbers would mean nothing); after 3 such interruptions the title
+is graded as it stands. A severe thermal status (`PowerManager`, `THERMAL_STATUS_SEVERE`) cancels a running Prepare
+and starts nothing until it is back to moderate (the Prepare then resumes from its stamps). Not charging: Start
+warns and asks again; below 20 % and not charging the check pauses until it is charging or at 30 %. A pause during a
+boot lets the boot finish.
+
+**Tests.** `CheckDriverTest` (the steps with a fake device: Prepare → boot → grade, the pad on the status clock, the
+watchdog, a crash, a failed and an interrupted Prepare, a title not imported, leaving during a boot, thermal, battery,
+pause, stop, a restart in the middle of a boot), `LibraryCheckTest` (files, plan, stale packs, exit reasons, the
+grade's arguments, the app's own line, Share report's URI), `CheckActivityTest` (the screens →
+`build/screenshots/check-*.png`, Start, Stop, the launcher's hand-over); `tools/compat/test_device.py` (the grade and
+the schema, report / matrix / plane on a device file) and `test_e2e.py::test_a_check_run_as_the_device_makes_it`
+(`XBA_E2E=1`: the synthetic title booted with the device's environment, headed, pressed on the status clock, killed by
+PID, graded: same stage and blocker as `tools.compat run`).
+
+### Device check (library check), for Alex
+
+Needs the toolchain APK, the library on (`/sdcard/xbox`), the Thor plugged in. `adb logcat -s xboxrecomp` throughout.
+
+1. Library › Options (Y): **Check my library**. The screen says how many games, how many to prepare and to start, about
+   how long, and the games not imported (prepared, not started). Screenshot.
+2. Select Fable in the library, Y › Check my library › **Check Fable only**. Expected: Fable's Prepare if needed (its
+   notification), then the game on screen, Start and A pressed by themselves from about 8 s in, then after 3 minutes
+   back to the check screen with Fable's line (`check: 4D5300D1: <stage> ...` in logcat). Note the stage and blocker.
+3. The same for Burnout 3, Black and KOTOR, one at a time. During one of them press Home within the 3 minutes:
+   logcat `check: ... left the screen`, the screen says « Paused: come back... »; open the app: the check screen
+   comes back and boots that game again.
+4. **Share report**: the share sheet with `compat-results.jsonl`; send it to yourself. Open it: one line per run, no
+   game data (title ID, name, XDK, engines, stage, blocker, numbers, device fields).
+5. During a Prepare: `adb shell am kill fr.adserver.xboxrecomp.shell` is not enough (foreground); kill the launcher's
+   process: `adb shell run-as <app id> kill -9 $(adb shell pidof <app id>:launcher)`. Open the app: the check screen,
+   carrying on.
+6. During a boot, reboot the Thor (`adb reboot`). Open the app: the check carries on with the next title; the
+   interrupted one's line says « the check was interrupted during this boot ».
+7. The whole library: **Check all n**, leave it overnight on the check screen, plugged in. In the morning: « n games
+   checked » and the stage counts; Share report and send the file. Also send `adb shell dumpsys thermalservice | head
+   -20` if the screen said « too hot » at any point.
+8. On the desktop: `python -m tools.compat report compat-results.jsonl --matrix` shows the matrix with a Device column.
+
 ## Dual screen (AYN Thor)
 
 The AYN Thor has two screens: the top one (6", 1920 x 1080, 120 Hz) is the main display, the bottom one (3.92",

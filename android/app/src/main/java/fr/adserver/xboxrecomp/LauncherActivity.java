@@ -301,6 +301,13 @@ public class LauncherActivity extends Activity {
             restartGame();
             return;
         }
+        if (savedInstanceState == null && LibraryCheck.active(getFilesDir())) {
+            // A library check runs (XBA-130): its screen, also when a checked game left by itself.
+            Log.i(TAG, "launcher: a library check runs, showing it");
+            startActivity(CheckActivity.intent(this).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+            finish();
+            return;
+        }
         boolean change = ACTION_CHOOSE_GAME.equals(action);
         boolean showLauncher = ACTION_SHOW_LAUNCHER.equals(action);
         String noData = in.getStringExtra(EXTRA_NO_GAME_DATA);
@@ -3230,6 +3237,8 @@ public class LauncherActivity extends Activity {
         sheetRow(getString(R.string.LIB_FOLDER_TILE), this::onChooseLibraryFolder)
                 .setValue(tree == null ? getString(R.string.LIB_FOLDER_NONE)
                           : path != null ? new File(path).getName() : getString(R.string.LIB_FOLDER_SAF));
+        if (Toolchain.available(this))   // XBA-130: prepares and boots every game, a report
+            sheetRow(getString(R.string.CHECK_LIBRARY), () -> startActivity(CheckActivity.intent(this)));
         sheetRow(getString(R.string.SETTINGS), () -> go(Screen.SETTINGS));
         sheetRow(getString(R.string.ABOUT), () -> go(Screen.ABOUT));
         sheetReady();

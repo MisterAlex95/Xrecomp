@@ -37,6 +37,15 @@ public class LogProvider extends ContentProvider {
                 .appendPath("game.log").build();
     }
 
+    /**
+     * The library check's report (« Share report », XBA-130): content://<app id>.logs/check/compat-results.jsonl, the
+     * file LibraryCheck.resultsFile names (one line per title: no game data).
+     */
+    static Uri reportUri(Context c) {
+        return new Uri.Builder().scheme("content").authority(authority(c)).appendPath(LibraryCheck.DIR)
+                .appendPath(LibraryCheck.RESULTS).build();
+    }
+
     /** <files>/logs/game.log: the game process's logcat, dumped by {@link #dumpOwnLogcat}. */
     static File gameLogFile(Context c) {
         return new File(new File(c.getFilesDir(), "logs"), "game.log");
@@ -92,6 +101,8 @@ public class LogProvider extends ContentProvider {
         java.util.List<String> seg = uri.getPathSegments();
         if (seg.size() == 2 && seg.get(0).equals("game") && seg.get(1).equals("game.log"))
             return gameLogFile(c);
+        if (seg.size() == 2 && seg.get(0).equals(LibraryCheck.DIR) && seg.get(1).equals(LibraryCheck.RESULTS))
+            return LibraryCheck.resultsFile(c.getFilesDir());
         if (seg.size() != 3 || !seg.get(0).equals("prepare") || !seg.get(2).equals("prepare.log"))
             return null;
         String tid = seg.get(1);
@@ -130,7 +141,8 @@ public class LogProvider extends ContentProvider {
         for (int i = 0; i < cols.length; i++) {
             if (OpenableColumns.DISPLAY_NAME.equals(cols[i]))
                 row[i] = uri.getPathSegments().get(0).equals("game") ? "game.log"
-                                                                     : "prepare-" + uri.getPathSegments().get(1) + ".log";
+                         : uri.getPathSegments().get(0).equals(LibraryCheck.DIR) ? LibraryCheck.RESULTS
+                         : "prepare-" + uri.getPathSegments().get(1) + ".log";
             else if (OpenableColumns.SIZE.equals(cols[i]))
                 row[i] = f.length();
         }

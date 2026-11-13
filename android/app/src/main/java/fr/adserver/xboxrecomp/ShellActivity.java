@@ -64,6 +64,7 @@ public class ShellActivity extends SDLActivity {
             }
         }
         applyLanguage();
+        LibraryCheck.applyRunEnv(this);   // a library check's run: status file and pad script (XBA-130)
         super.onCreate(savedInstanceState);
         if (mBrokenLibraries)
             return;   // SDLActivity shows its error dialog and finishes

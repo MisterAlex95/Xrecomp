@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- « Check my library » (XBA-130, docs: « Library check »). A file of its own so that it does not collide with other
+     strings edits. Stage names (sustained, responsive, renders, boots, prepares, none) are tools.compat's and stay
+     as they are in every language: the report and the matrix use them. -->
+<resources>
+    <string name="CHECK_LIBRARY">Check my library</string>
+    <string name="CHECK_TITLE">Check my library</string>
+    <string name="CHECK_CHANNEL">Library check</string>
+    <plurals name="CHECK_GAMES">
+        <item quantity="one">%d game</item>
+        <item quantity="other">%d games</item>
+    </plurals>
+    <plurals name="CHECK_NOT_IMPORTED">
+        <item quantity="one">%d game is not in the app: it is prepared, not started (import it to start it)</item>
+        <item quantity="other">%d games are not in the app: they are prepared, not started (import them to start them)</item>
+    </plurals>
+    <string name="CHECK_PLAN">%1$d to prepare · %2$d to start · about %3$s</string>
+    <string name="CHECK_INTRO">Each game is prepared if it needs it, then started for 3 minutes with a scripted pad (Start, then A), and graded: prepares, boots, renders, responsive, sustained. The report holds no game data: title ID, name, XDK, engines, stage and the first blocker. Leave the device on this screen, plugged in.</string>
+    <string name="CHECK_NOTHING">No game to check: choose a library folder or a game first.</string>
+    <string name="CHECK_START_ALL">Check all %d</string>
+    <string name="CHECK_START_ONE">Check %s only</string>
+    <string name="CHECK_SHARE">Share report</string>
+    <string name="CHECK_NOT_CHARGING">Not charging: a check takes hours, plug the device in.</string>
+    <string name="CHECK_NOT_CHARGING_CONFIRM">Not charging. Press again to start anyway.</string>
+    <string name="CHECK_PROGRESS">%1$d of %2$d</string>
+    <string name="CHECK_DONE_TITLE">%d games checked</string>
+    <string name="CHECK_PAUSE">Pause</string>
+    <string name="CHECK_CONTINUE">Continue</string>
+    <string name="CHECK_STOP">Stop</string>
+    <string name="CHECK_STOP_CONFIRM">Press Stop again to end the check. The results so far stay in the report.</string>
+    <string name="CHECK_KEEP_HERE">Keep the device on this screen: the check starts each game from here.</string>
+    <string name="CHECK_BACK_RUNNING">The check is running. Stop it to leave, or Pause.</string>
+    <string name="CHECK_AGAIN">New check</string>
+    <string name="CHECK_DONE">Done</string>
+    <string name="CHECK_REPORT_NOTE">Share report sends compat-results.jsonl: one line per game, no game data.</string>
+    <string name="CHECK_NO_REPORT">No report yet.</string>
+    <string name="CHECK_NO_RESULT_YET">No game graded yet</string>
+    <string name="CHECK_STATUS_DONE">Done. Share the report.</string>
+    <string name="CHECK_STATUS_STOPPED">Stopped after %1$d of %2$d</string>
+    <string name="CHECK_STATUS_PREPARING">Preparing %1$s · %2$s</string>
+    <string name="CHECK_STATUS_BOOTING">Running %1$s · %2$d s of %3$d</string>
+    <string name="CHECK_STATUS_NEXT">Next: %s</string>
+    <string name="CHECK_PAUSED">Paused</string>
+    <string name="CHECK_PAUSED_AWAY">Paused: come back to this screen and it carries on</string>
+    <string name="CHECK_PAUSED_HOT">Paused: the device is too hot, it carries on once it cools down</string>
+    <string name="CHECK_PAUSED_BATTERY">Paused: battery low, plug the device in</string>
+</resources>
