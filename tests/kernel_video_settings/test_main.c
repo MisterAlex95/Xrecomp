@@ -5,7 +5,8 @@
  *
  *  - the region follows the XBE certificate's allowed regions (NA first,
  *    then Japan, then rest of world), RECOMP_GAME_REGION overrides it;
- *  - NTSC-M / NTSC-J are 60 Hz, PAL-I 50 Hz unless RECOMP_PAL60=1;
+ *  - NTSC-M / NTSC-J are 60 Hz; PAL-I offers PAL 60 by default and is 50 Hz
+ *    with RECOMP_PAL60=0 (the console's own default);
  *  - RECOMP_WIDESCREEN / RECOMP_480P set their XC_VIDEO bits, and the same
  *    bits appear in the AV capabilities word;
  *  - a PAL-I display mode makes the vblank 50 Hz, a PAL 60 or NTSC mode 60.
@@ -92,7 +93,7 @@ int main(void)
     xbox_ConsoleSetTitleRegions(XC_GAME_REGION_JAPAN);
     expect("Japan disc", XC_GAME_REGION_JAPAN, XC_AV_REGION_NTSC_J, F60, 60);
     xbox_ConsoleSetTitleRegions(XC_GAME_REGION_RESTOFWORLD);
-    expect("PAL disc", XC_GAME_REGION_RESTOFWORLD, XC_AV_REGION_PAL_I, 0, 50);
+    expect("PAL disc (PAL 60 by default)", XC_GAME_REGION_RESTOFWORLD, XC_AV_REGION_PAL_I, F60, 60);
     xbox_ConsoleSetTitleRegions(XC_GAME_REGION_JAPAN | XC_GAME_REGION_RESTOFWORLD);
     expect("Japan + rest of world disc", XC_GAME_REGION_JAPAN, XC_AV_REGION_NTSC_J, F60, 60);
     xbox_ConsoleSetTitleRegions(XC_GAME_REGION_MANUFACTURING);
@@ -101,11 +102,15 @@ int main(void)
     /* PAL 60 and the player's flags. */
     xbox_ConsoleSetTitleRegions(XC_GAME_REGION_RESTOFWORLD);
     env("RECOMP_PAL60", "1");
-    expect("PAL disc, PAL 60", XC_GAME_REGION_RESTOFWORLD, XC_AV_REGION_PAL_I, F60, 60);
-    env("RECOMP_PAL60", NULL);
+    expect("PAL disc, RECOMP_PAL60=1", XC_GAME_REGION_RESTOFWORLD, XC_AV_REGION_PAL_I, F60, 60);
+    env("RECOMP_PAL60", "0");
+    expect("PAL disc, RECOMP_PAL60=0 (50 Hz)", XC_GAME_REGION_RESTOFWORLD, XC_AV_REGION_PAL_I, 0, 50);
     env("RECOMP_WIDESCREEN", "1");
-    expect("PAL disc, widescreen", XC_GAME_REGION_RESTOFWORLD, XC_AV_REGION_PAL_I,
+    expect("PAL disc, 50 Hz, widescreen", XC_GAME_REGION_RESTOFWORLD, XC_AV_REGION_PAL_I,
            XC_VIDEO_FLAGS_WIDESCREEN, 50);
+    env("RECOMP_PAL60", NULL);
+    expect("PAL disc, widescreen", XC_GAME_REGION_RESTOFWORLD, XC_AV_REGION_PAL_I,
+           F60 | XC_VIDEO_FLAGS_WIDESCREEN, 60);
     env("RECOMP_480P", "1");
     xbox_ConsoleSetTitleRegions(XC_GAME_REGION_NA);
     expect("NA disc, widescreen + 480p", XC_GAME_REGION_NA, XC_AV_REGION_NTSC_M,
@@ -117,14 +122,14 @@ int main(void)
 
     /* RECOMP_GAME_REGION wins over the certificate. */
     env("RECOMP_GAME_REGION", "eu");
-    expect("NA disc, RECOMP_GAME_REGION=eu", XC_GAME_REGION_RESTOFWORLD, XC_AV_REGION_PAL_I, 0, 50);
+    expect("NA disc, RECOMP_GAME_REGION=eu", XC_GAME_REGION_RESTOFWORLD, XC_AV_REGION_PAL_I, F60, 60);
     env("RECOMP_GAME_REGION", "jp");
     expect("NA disc, RECOMP_GAME_REGION=jp", XC_GAME_REGION_JAPAN, XC_AV_REGION_NTSC_J, F60, 60);
     xbox_ConsoleSetTitleRegions(XC_GAME_REGION_RESTOFWORLD);
     env("RECOMP_GAME_REGION", "na");
     expect("PAL disc, RECOMP_GAME_REGION=na", XC_GAME_REGION_NA, XC_AV_REGION_NTSC_M, F60, 60);
     env("RECOMP_GAME_REGION", "mars");
-    expect("PAL disc, unknown RECOMP_GAME_REGION", XC_GAME_REGION_RESTOFWORLD, XC_AV_REGION_PAL_I, 0, 50);
+    expect("PAL disc, unknown RECOMP_GAME_REGION", XC_GAME_REGION_RESTOFWORLD, XC_AV_REGION_PAL_I, F60, 60);
     env("RECOMP_GAME_REGION", NULL);
 
     /* The display mode the title sets decides the vblank rate. */

@@ -135,7 +135,8 @@ NTSTATUS __stdcall xbox_XeUnloadSection(PXBE_SECTION_HEADER Section)
  * settings. On real hardware these are stored in the 256-byte EEPROM on the
  * SMBus. For recompilation, we return sensible defaults:
  *   - Region and video standard: from the title's certificate (below)
- *   - Video: 60Hz on NTSC (on PAL with RECOMP_PAL60=1), widescreen and 480p
+ *   - Video: 60Hz on NTSC and, by default, on PAL (PAL 60; RECOMP_PAL60=0 is
+ *     the console's own 50 Hz default), widescreen and 480p
  *     when the player turns them on (RECOMP_WIDESCREEN, RECOMP_480P). A
  *     title that honours widescreen draws anamorphic 16:9 frames; showing
  *     them wide is the presenter's aspect setting (src/video/aspect_policy.h)
@@ -310,12 +311,22 @@ ULONG xbox_ConsoleAvRegion(void)
 }
 
 /* XC_VIDEO, the dashboard's video settings. On a PAL console 60Hz is the
- * "PAL 60" choice, off by default: a title without PAL 60 support runs at
- * 50 Hz whatever it says, and the vblank pacing follows the mode it sets. */
+ * "PAL 60" choice. A console leaves it off, but here it is on unless
+ * RECOMP_PAL60=0: before XBA-121 every title saw an NTSC console, and a PAL
+ * title that supports PAL 60 (Burnout 3's PAL release, for one) ran at
+ * 60 fps; the default must not take that away. A title without PAL 60
+ * support still sets a PAL-I mode and runs at 50 Hz, and the vblank pacing
+ * follows the mode it sets. */
+static int env_off(const char *name)
+{
+    const char *e = getenv(name);
+    return e && (!strcmp(e, "0") || !strcmp(e, "off") || !strcmp(e, "false") || !strcmp(e, "no"));
+}
+
 ULONG xbox_ConsoleVideoFlags(void)
 {
     ULONG v = 0;
-    if (xbox_ConsoleAvRegion() != XC_AV_REGION_PAL_I || env_on("RECOMP_PAL60"))
+    if (xbox_ConsoleAvRegion() != XC_AV_REGION_PAL_I || !env_off("RECOMP_PAL60"))
         v |= XC_VIDEO_FLAGS_60Hz;
     if (env_on("RECOMP_WIDESCREEN"))
         v |= XC_VIDEO_FLAGS_WIDESCREEN;
