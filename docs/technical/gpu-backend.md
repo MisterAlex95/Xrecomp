@@ -550,14 +550,104 @@ tonight's profile values:
 
 In every steady case the flips' standard deviation is under 2 ms (wake-up
 jitter of up to 1 ms included). What the window shows also depends on where
-the host schedule falls against the panel's refresh, which nothing aligns
-yet: flips close to a refresh edge land on either side of it, and the
-presents' standard deviation then reaches 5-11 ms at a steady 30 in the
-simulation. The test checks the presents with the edge half a refresh from
-the flips (sd 0.00 in every steady case); aligning the schedule or the
-present time to the display (Choreographer or `EGL_ANDROID_presentation_time`
-on Android, the vsync timestamps on desktop) is the follow-up that makes the
-`[FBWIN] frame times` line meet 2 ms whatever the phase.
+the host schedule falls against the panel's refresh: flips close to a
+refresh edge land on either side of it, and the presents' standard deviation
+then reaches 5-11 ms at a steady 30 in the simulation. tests/frame_pacing
+checks the presents with the edge half a refresh from the flips (sd 0.00 in
+every steady case); the next section keeps them there.
+
+### Flips in phase with the display (XBA-136)
+
+Under `RECOMP_PACING=auto` (and `=ask`), the executor moves each booked
+slot so the frame lands at a fixed phase of the display's refresh. Off
+switch: `RECOMP_PACING_ALIGN=0`. Pieces:
+
+- **The display's grid** (`src/video/display_clock.h`, pure): a reference
+  time and the measured refresh period, from vsync samples. It locks after
+  8 samples whose mean residual is under a 20th of a refresh. It drops
+  outliers, takes a skipped vsync as a sample n refreshes later, and
+  restarts after 8 rejects in a row or when the nominal rate changes by more
+  than 1 % (a panel switching 120 -> 60 Hz). Its `gen` changes with each new
+  grid. Sources:
+  - Android (`display_vsync_android.c`): a thread with its own ALooper and
+    AChoreographer. On Android 13+ (looked up at run time; the app's
+    minimum is API 30) it uses `AChoreographer_postVsyncCallback`, and the
+    sample is the preferred frame timeline's *deadline*, the latch edge
+    itself. On Android 11-12 it uses `AChoreographer_postFrameCallback64`'s
+    vsync tick. The refresh-rate callback (API 30) gives the nominal
+    period. It takes a callback every refresh until locked, then one every
+    100 ms.
+  - Desktop (`fb_present_sdl.c`): the return time of a vsynced
+    `SDL_RenderPresent` that blocked for at least 2 ms, since it waited for
+    the refresh. A present that never blocks gives no grid. Neither does a
+    variable-refresh display, whose returns form no grid. No source with
+    `RECOMP_PRESENT_VSYNC=0`.
+  The presenter publishes the grid to the executor
+  (`nv2a_pb_exec_display_clock`, a seqlock), together with its mean time
+  from a flip's publish to its present call
+  (`nv2a_pb_exec_present_latency`). Both renderers present through the
+  same window, so the GPU back end and the CPU rasteriser are aligned
+  alike. The Windows presenters and headless runs publish nothing, so
+  nothing changes there.
+- **The aligner** (`frame_pacing_align_slot` in `frame_pacing.h`, pure,
+  called from `flip_cap_book`). It predicts the frame's present call:
+  slot + the mean slot -> flip time of the frames held at the cap + the
+  presenter's flip -> present time. It moves the slot so that call falls
+  at `RECOMP_PACING_ALIGN`'s phase of the grid (0.5 by default: half a
+  refresh from the latch edge on both sides, the most room for the jitter
+  of a frame's cost and the host's wake-up). The schedule then advances by
+  n measured refreshes rather than the nominal period, so the host and
+  display clocks do not drift apart. The correction is at most a 32nd of a
+  refresh per frame (0.52 ms at 60 Hz, 0.26 ms at 120 Hz: no frame visibly
+  longer or shorter), so half a refresh off takes 16 frames. It snaps at
+  once where the schedule restarts anyway: the first frame or first grid, a
+  rate change, a frame late by a whole period, and the resume after a pause
+  (the schedule restarts). A later grid (a panel switching rate) is sought
+  slowly.
+- **What it leaves alone.** A frame period that is not a whole number of
+  refreshes (within 2 %) is not aligned: 60 fps on a 90 Hz panel is 1.5
+  refreshes, and no phase makes it even (11.1 / 22.2 ms alternate, sd 5.6
+  ms). 30 on 90 Hz (3 refreshes) is aligned. It also leaves the slots alone
+  with no grid, or one older than 1 s (the app paused, callbacks stopped).
+  It gives up, until the next grid, when its corrections keep pushing one
+  way (two runs of 64 frames averaging over a 256th of a refresh), as a
+  grid that follows the flips would drag the rate.
+- **Variable refresh.** A VRR display shows each present when it comes,
+  and the absolute schedule is already even there. The desktop source does
+  not lock on it. On Android the Choreographer still reports the panel's
+  current rate; aligning to it is harmless.
+- **Frame generation** shows its own frames on its own clock. The aligner
+  only moves the real flips, which frame generation then takes as before.
+
+Logs: `[FBWIN] display clock: Choreographer (frame deadlines)` at start;
+`[GPU] pacing: flips in phase with the display (120.00 Hz, 4 refreshes per
+frame, present at 50% of a refresh)` or `[GPU] pacing: flips not aligned to
+the display: <why>` on each change; in each `[GPU]` report `[GPU] pacing
+display phase: in phase with the display, 4 refreshes of 8.333 ms per frame,
+error 0.02 ms, slot->flip 18.3 ms, flip->present 1.2 ms, 1 snaps`.
+
+Tests: tests/frame_pacing `frame_pacing_align` runs the executor's schedule
+with the aligner against a fake display (a 1 ms flip -> present, the walk's
+cost jittered, wake-ups up to 1 ms late, true rates 59.94 / 119.88 against a
+nominal 60 / 120). For each of 32 starting phases of the display, at 30 and
+60 fps on 60 and 120 Hz, the displayed frame times' sd is 0.00 ms aligned.
+Unaligned, the same runs reach 3.1-11.4 ms, and 8 to 32 of the 32 phases
+fail the 2 ms bound. The other cases: 90 Hz (30 aligned, 60 left alone),
+VRR, 40 % of vsync callbacks lost, a 5 s pause and resume, a panel switching
+120 -> 60 Hz, the desktop's noisy source, a grid that follows the flips (no
+drag, no jump), and the full auto pacer (a 20 ms IMMEDIATE title on 120 Hz
+goes to 40 = 3 refreshes, in phase). tests/nv2a_ffp_backend
+`nv2a-pacing-align` / `-alignoff` drive the executor itself. With a grid
+published, the presents land within 0.3 ms of half a refresh (0.00 in the
+run). With `RECOMP_PACING_ALIGN=0` they keep the schedule's phase (5.4 ms
+off).
+
+Not proven without the device: where the latch edge really is on Android
+11-12 (the vsync tick's distance to it is the device's). There
+`RECOMP_PACING_ALIGN=0.25` / `0.75` are the knobs. Also untested: whether
+the Thor's Choreographer keeps calling back while the app is paused. A
+follow-up worth having: `ANativeWindow_setFrameRate` would let Android pick
+a panel mode that is a multiple of the paced rate (60 rather than 90).
 
 ### Context loss and GL_OUT_OF_MEMORY
 
