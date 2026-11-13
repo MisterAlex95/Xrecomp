@@ -36,7 +36,12 @@
  *                                                          va is the esp load, to where it went;
  *                                                          or an SEH resume refused across host
  *                                                          stacks (xbox_seh.c): va is the resume
- *                                                          target, to its function
+ *                                                          target, to its function; or a parked
+ *                                                          context resumed although no saved stack
+ *                                                          matched (why "resumed a parked context
+ *                                                          whose stack does not match"): va is where
+ *                                                          it resumes, to the esp it parked at. A
+ *                                                          sign the run went wrong from there on
  *   {"t":"stub","ord":136,"name":"KeRemoveQueue","ret":"0x00012345"}
  *                                                          a kernel route that is still a stub was
  *                                                          called (XBA-115; keyed by ord, no va)

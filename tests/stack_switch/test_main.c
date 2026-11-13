@@ -19,7 +19,8 @@
  *   2. copy-stack fibers (Fable's shape): two fibers parked at the same esp and
  *      the same return address, told apart by their stack bytes; then two
  *      that only differ past their first 64 bytes (the same job under the same
- *      frames with the same registers, Fable's loader fibers)
+ *      frames with the same registers, Fable's loader fibers); a resume that
+ *      matches neither is recorded in the discovery file
  *   3. a coroutine whose body returns into an exit routine continues there
  *   4. a switch to a place no context is parked at and no function starts is
  *      the old behaviour, recorded in the discovery file
@@ -376,6 +377,24 @@ int main(int argc, char **argv)
         printf("  2. copy-stack fibers alike over 64 bytes%s, %u + %u resumes: %s\n",
                first64 ? " (first 64 bytes only: mixed up, as expected)" : "", want[0],
                want[1], failures > before ? "FAIL" : "ok");
+
+        /* A resume no snapshot matches is the first sign of a run going
+         * wrong (WP8: Fable's wild calls of 02:29 followed one, when the
+         * popped bytes still counted), so it is in the discovery file, keyed
+         * by where the context resumes. None so far; then fiber 2's bytes
+         * come back with a word of its frames changed (past what the switch
+         * pops, inside the first 64 bytes): neither twin matches. */
+        before = failures;
+        text = slurp(disc);
+        CHECK(!text || !strstr(text, "does not match"));
+        MEM32(fiber_save[2] + 0x18) ^= 0x01000000u;
+        resume_fiber(2);
+        text = slurp(disc);
+        CHECK(text && strstr(text, "{\"t\":\"stack_switch\",\"va\":\"0x000112A0\","
+                                   "\"to\":\"0x0016FF98\",\"why\":\"resumed a parked "
+                                   "context whose stack does not match\"}"));
+        printf("  2. a resume no snapshot matches is recorded: %s\n",
+               failures > before ? "FAIL" : "ok");
     }
 
     /* 3 */

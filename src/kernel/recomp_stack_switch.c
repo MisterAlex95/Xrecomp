@@ -433,6 +433,15 @@ static ss_ctx *ss_find(ss_thread *t, uint32_t esp, uint32_t ret, unsigned popped
             fprintf(stderr, "[STACK] %u contexts parked at esp 0x%08X returning to 0x%08X; "
                             "resuming the closest (%u of %u bytes match)\n",
                     twins, esp, ret, best_score, best->snap_len);
+        /* Also in the discovery file: a fiber resumed on another's host
+         * frames returns into the wrong callers, and what the run records
+         * after this (Fable's wild indirect calls of 02:29, before the
+         * popped-bytes skip) is the fallout, not code to discover. This is
+         * the first sign, for the discovery gate to taint the rest by.
+         * Keyed by where the context resumes (va) with the esp it parked at
+         * (to): the switch site's own key stays free for its blockers. */
+        recomp_discovery_stack_switch(ret, esp,
+                                      "resumed a parked context whose stack does not match");
     } else if (alike > 1 && best_score > SNAP) {
         static volatile unsigned said;
         if (said++ < 4)
