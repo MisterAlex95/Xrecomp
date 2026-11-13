@@ -880,6 +880,22 @@ int fbwin_publish_overlay(const uint32_t *px)
  * thread; a torn read shows one stale value for a second. */
 static char s_title[128] = "Xbox Recomp";
 
+/* src/kernel/prep_progress.h: "preparing data <n> MB" while the title fills
+ * its utility drive (Z:), else 0 and an empty string (WP7). */
+int recomp_prep_status(char *buf, size_t n);
+
+/* The status the title bar and the overlay show: the XBE title, then the
+ * preparation line while there is one. */
+static const char *window_status(char *buf, size_t n)
+{
+    char prep[64];
+
+    if (!recomp_prep_status(prep, sizeof prep))
+        return s_title;
+    snprintf(buf, n, "%s - %s", s_title, prep);
+    return buf;
+}
+
 void xbox_FramebufferWindowSetTitle(const uint16_t *name, int max_chars)
 {
     char buf[sizeof s_title];
@@ -1565,16 +1581,18 @@ int xbox_HostWindowMain(int (*guest_main)(void))
         }
 #endif
         if (perf_overlay_enabled() && now - t_overlay >= 500) {
+            char st[192];
+            const char *status = window_status(st, sizeof st);
             if (perf_overlay_tick(now, __atomic_load_n(&s_flips, __ATOMIC_RELAXED),
                                   __atomic_load_n(&s_frame_draws, __ATOMIC_RELAXED),
-                                  strcmp(s_title, "Xbox Recomp") ? s_title : NULL))
+                                  strcmp(status, "Xbox Recomp") ? status : NULL))
                 dirty = 1;
             t_overlay = now;
         }
         if (now - t_title >= 1000) {
             uint64_t f = __atomic_load_n(&s_flips, __ATOMIC_RELAXED);
-            char tb[192];
-            snprintf(tb, sizeof tb, "%s | FPS: %.1f | draws: %u", s_title,
+            char tb[320], st[192];
+            snprintf(tb, sizeof tb, "%s | FPS: %.1f | draws: %u", window_status(st, sizeof st),
                      t_title ? (double)(f - flips_title) * 1000.0 / (double)(now - t_title)
                              : 0.0,
                      (unsigned)__atomic_load_n(&s_frame_draws, __ATOMIC_RELAXED));

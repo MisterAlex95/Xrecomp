@@ -40,6 +40,7 @@ set(KERNEL_SOURCES
     recomp_smc.c
     recomp_stack_switch.c
     recomp_status.c
+    prep_progress.c
     recomp_diff.c
     nv2a_pb_scan.c
     nv2a_pb_exec.c
