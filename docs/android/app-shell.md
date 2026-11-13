@@ -1618,6 +1618,29 @@ cd android && gradle assembleDebug -PxbaTitleDir=/path/to/my_xbox_game \
 # or the NDK alone: cmake -S android/app/src/main/cpp -DXBA_TITLE_DIR=/path/to/my_xbox_game (+ the NDK toolchain)
 ```
 
+### A title's own APK
+
+The launcher with one game's name, its own package and **the game's title image as its icon**, locked to that disc
+(`-PxbaXbeSha256`, [WRONG_GAME](#wrong_game)). One command from a host with the Android build environment
+(`tools/docker/android.Dockerfile`):
+
+```bash
+tools/android/title_apk.sh /path/to/game            # a disc image, a folder with default.xbe, or default.xbe
+tools/android/title_apk.sh /path/to/game --title-dir /path/to/my_xbox_game -- -PxbaVersionCode=2
+tools/android/title_apk.sh /path/to/game --dry-run  # print the Gradle command
+```
+
+| Step | What |
+|---|---|
+| Identify | `tools.prepare.identify`: title ID, name (certificate), `default.xbe` extracted from an image. |
+| Icon | `python -m tools.title_art default.xbe --android-res DIR`: the `$$XTIMAGE` texture (else `$$XSIMAGE`) decoded like `TitleArt.java`, as the foreground layer of an adaptive icon (432 px, the image centred at 72/108 of it, the part every launcher mask shows); the background is the average colour of the image's border. No title image: XRecomp's glyph on the title's colour (`TitleArt.monogramColor`). |
+| Build | Gradle with `-PxbaApplicationId=fr.adserver.xboxrecomp.t<titleid>`, `-PxbaLabel=<name>`, `-PxbaXbeSha256=…`, `-PxbaIconRes=DIR` (+ `-PxbaTitleDir` with `--title-dir`, + everything after `--`). `-PxbaIconRes` goes into the build types' resource source sets, so its `mipmap/ic_launcher` overrides main's. |
+
+Without `--title-dir` the APK runs the title from the pack its own Prepare builds (add `-PxbaToolchainDir=…` after
+`--`). The extracted `default.xbe` and the icon go to `~/.cache/xrecomp/title-apk/<TITLEID>` (`--work`; the script
+refuses a folder inside the repository): they come from the player's disc, like the APK itself, which is for their
+own use and is not distributed.
+
 ### Title packs (the loader)
 
 The one app runs any title from the pack the on-device Prepare built for it

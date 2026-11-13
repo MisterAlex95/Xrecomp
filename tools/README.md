@@ -148,6 +148,14 @@ Stages, blockers and limits: `docs/technical/compat-runner.md`.
 
 ---
 
+### title_art — the title image and app icons
+
+`python -m tools.title_art SOURCE [--png FILE] [--android-res DIR] [--json]`: the XBE's `$$XTIMAGE` (else `$$XSIMAGE`)
+XPR0 texture decoded in pure Python (DXT1/3/5, swizzled and linear A8R8G8B8 / X8R8G8B8 / R5G6B5, the formats of the
+launchers' `TitleArt`), written as a PNG or as the adaptive icon resources of a title's own APK
+(`tools/android/title_apk.sh`, docs/android/app-shell.md « A title's own APK »). What it writes comes from your game:
+keep it out of the repository.
+
 ### xbe_ident — XDK version and engine (XBA-67)
 
 What an XBE was built with, from the XBE alone (no disassembly, a second on the device):

@@ -1,5 +1,5 @@
-// One APK per title: the title's build passes its own applicationId and label (-PxbaApplicationId=..., -PxbaLabel=...)
-// and its project (-PxbaTitleDir=...).
+// One APK per title: the title's build passes its own applicationId and label (-PxbaApplicationId=..., -PxbaLabel=...),
+// its project (-PxbaTitleDir=...) and its icon (-PxbaIconRes=...); tools/android/title_apk.sh fills them all in.
 // SDL2's Java side (org.libsdl.app) is compiled from the pinned SDL2 sources, not copied into this repo.
 plugins {
     id 'com.android.application'
@@ -26,6 +26,15 @@ def xbaTitleDir = findProperty('xbaTitleDir') ?: ''
 def xbaXbeSha256 = ((findProperty('xbaXbeSha256') ?: '') as String).trim().toLowerCase()
 if (xbaXbeSha256 && !(xbaXbeSha256 ==~ /[0-9a-f]{64}/))
     throw new GradleException("-PxbaXbeSha256=${xbaXbeSha256}: expected 64 hex digits (sha256sum default.xbe)")
+
+// A title's own icon (docs/android/app-shell.md « A title's own APK »): -PxbaIconRes=DIR, the res/ tree that
+// `python -m tools.title_art SOURCE --android-res DIR` makes from the player's default.xbe (tools/android/title_apk.sh
+// does both). It defines mipmap/ic_launcher again, so it goes into the build types' source sets, which override main's.
+// It comes from the game: it lives outside the repository, like the title's generated C.
+def xbaIconRes = ((findProperty('xbaIconRes') ?: '') as String).trim()
+if (xbaIconRes && !new File(xbaIconRes, 'mipmap-anydpi-v26/ic_launcher.xml').isFile())
+    throw new GradleException("-PxbaIconRes=${xbaIconRes}: no mipmap-anydpi-v26/ic_launcher.xml " +
+                              '(python -m tools.title_art SOURCE --android-res DIR)')
 
 // The synthetic XBE of tools/conformance (ours: five leaf functions, no game content) as the asset selftest.xbe, for
 // the in-app self-test (XBA-51, RECOMP_SHELL_SELFTEST=1). Copied at build time rather than kept twice in the repo.
@@ -216,6 +225,10 @@ android {
     }
 
     sourceSets.main.java.srcDirs += "${sdl2Src}/android-project/app/src/main/java"
+    if (xbaIconRes) {
+        sourceSets.debug.res.srcDirs += xbaIconRes
+        sourceSets.release.res.srcDirs += xbaIconRes
+    }
 
     if (xbaToolchainDir) {
         sourceSets.main.jniLibs.srcDirs += "${xbaToolchainDir}/jniLibs"
