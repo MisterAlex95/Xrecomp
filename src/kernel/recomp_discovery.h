@@ -26,6 +26,9 @@
  *                                                          or an SEH resume refused across host
  *                                                          stacks (xbox_seh.c): va is the resume
  *                                                          target, to its function
+ *   {"t":"stub","ord":136,"name":"KeRemoveQueue","ret":"0x00012345"}
+ *                                                          a kernel route that is still a stub was
+ *                                                          called (XBA-115; keyed by ord, no va)
  *
  * The file: $RECOMP_DISCOVERY (recomp.cfg can set it); unset, empty or "0":
  * nothing is written. The desktop title project gets a default from
@@ -48,6 +51,7 @@ void recomp_discovery_d3d(uint32_t device, uint32_t slot);
 void recomp_discovery_wait_spin(uint32_t object, uint32_t ret_va, uint32_t header, uint32_t status);
 void recomp_discovery_launch(const char *path);
 void recomp_discovery_stack_switch(uint32_t site, uint32_t to, const char *why);
+void recomp_discovery_stub(uint32_t ordinal, const char *name, uint32_t ret_va);
 
 /* The file in use, or NULL when discovery is off (opens it on first use). */
 const char *recomp_discovery_path(void);

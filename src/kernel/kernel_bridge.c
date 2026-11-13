@@ -28,6 +28,8 @@
 #include "kernel.h"
 #include "guest_vmem.h"
 #include "kernel_missing.h"
+#include "kernel_ksync.h"
+#include "kernel_stubs.h"
 #include "kernel_wait_stats.h"
 #include "xbox_memory_layout.h"
 #include "xbox_seh.h"
@@ -728,12 +730,26 @@ static void thobj_detach_token(uint32_t token)
         thobj_unref(va);
 }
 
-/* The calling thread's object; the main thread gets one on first use and
- * keeps it (it never ends while the title runs). */
+/* The calling thread's object, which is also its KTHREAD: what fs:[0x28]
+ * names (XBA-113). A spawned guest thread has had its own since it started;
+ * the main thread's is the KTHREAD the loader built, and each TIB from
+ * xbox_AllocThreadTib carries one. A thread whose TIB names none gets a pool
+ * object, bound to fs:[0x28] so the two answers stay one. */
 static uint32_t thobj_current(void)
 {
-    if (!g_thread_obj_va)
-        g_thread_obj_va = thobj_alloc();
+    if (!g_thread_obj_va) {
+        uint32_t kt = g_fs_base ? BRIDGE_MEM32(g_fs_base + 0x28) : 0;
+        if (!kt) {
+            kt = thobj_alloc();
+            if (kt) {
+                xbox_InitGuestKthread(kt, 0, g_fs_base ? BRIDGE_MEM32(g_fs_base + 4) : 0,
+                                      g_fs_base ? BRIDGE_MEM32(g_fs_base + 8) : 0);
+                if (g_fs_base)
+                    BRIDGE_MEM32(g_fs_base + 0x28) = kt;
+            }
+        }
+        g_thread_obj_va = kt;
+    }
     return g_thread_obj_va;
 }
 
@@ -796,11 +812,18 @@ static DWORD WINAPI bridge_thread_main(LPVOID param)
             fprintf(stderr, "  [KERNEL] worker thread has no TIB of its own;"
                             " it shares the main thread's\n");
         /* The thread object stands in for the KTHREAD, so fs:[0x28] names it
-         * and its TlsData is this thread's own, at the top of its stack. */
-        if (tib && s->obj_va && s->tls_size) {
+         * and its TlsData is this thread's own, at the top of its stack.
+         * Without a TlsDataSize it keeps the TIB's (the main thread's), and
+         * it is the KTHREAD all the same: KeGetCurrentThread returns it and
+         * the fields XAPI reads are filled in (XBA-113). */
+        if (tib && s->obj_va) {
             uint32_t top = (s->stack_top + 16) & ~0xFu;
+            uint32_t tib_kt = BRIDGE_MEM32(tib + 0x28);
+            xbox_InitGuestKthread(s->obj_va,
+                                  tib_kt ? BRIDGE_MEM32(tib_kt + 0x28) : 0,
+                                  top, top - 0x80000u);
             BRIDGE_MEM32(tib + 0x28) = s->obj_va;
-            if (bridge_layout_tls(s->obj_va, top, s->tls_size))
+            if (s->tls_size && bridge_layout_tls(s->obj_va, top, s->tls_size))
                 g_esp = ((top - s->tls_size) & ~0xFu) - 16;
         }
     }
@@ -8471,23 +8494,21 @@ static void bridge_DbgUnLoadImageSymbols(void)
 /* --- ExAcquireReadWriteLockExclusive (ordinal 12, 1 arg = 4 bytes) --- */
 static void bridge_ExAcquireReadWriteLockExclusive(void)
 {
-    (void)STACK_ARG(0);
+    ks_rwlock_acquire_exclusive(STACK_ARG(0));   /* kernel_ksync.c */
     g_eax = 0;
 }
 
 /* --- ExAcquireReadWriteLockShared (ordinal 13, 1 arg = 4 bytes) --- */
 static void bridge_ExAcquireReadWriteLockShared(void)
 {
-    (void)STACK_ARG(0);
+    ks_rwlock_acquire_shared(STACK_ARG(0));
     g_eax = 0;
 }
 
 /* --- ExInitializeReadWriteLock (ordinal 18, 1 arg = 4 bytes) --- */
 static void bridge_ExInitializeReadWriteLock(void)
 {
-    uint32_t lock_va = STACK_ARG(0);
-    if (lock_va)
-        memset(XBOX_TO_NATIVE(lock_va), 0, 24);
+    ks_rwlock_init(STACK_ARG(0));   /* the 0x34-byte ERWLOCK, LockCount -1 */
     g_eax = 0;
 }
 
@@ -8621,7 +8642,7 @@ static void bridge_ExRaiseStatus(void)
 /* --- ExReleaseReadWriteLock (ordinal 28, 1 arg = 4 bytes) --- */
 static void bridge_ExReleaseReadWriteLock(void)
 {
-    (void)STACK_ARG(0);
+    ks_rwlock_release(STACK_ARG(0));
     g_eax = 0;
 }
 
@@ -8819,26 +8840,24 @@ static void bridge_InterlockedExchangeAdd(void)
     g_eax = (uint32_t)InterlockedExchangeAdd(dst, (LONG)g_edx);
 }
 
-/* --- InterlockedFlushSList (ordinal 56, fastcall) --- */
+/* --- InterlockedFlushSList (ordinal 56, fastcall: ecx=ListHead)
+ * SLists are kernel_ksync.c: a real 64-bit CAS on the header (XBA-113). */
 static void bridge_InterlockedFlushSList(void)
 {
-    (void)g_ecx;
-    g_eax = 0;
+    g_eax = ks_slist_flush(g_ecx);
 }
 
-/* --- InterlockedPopEntrySList (ordinal 57, fastcall) --- */
+/* --- InterlockedPopEntrySList (ordinal 57, fastcall: ecx=ListHead) --- */
 static void bridge_InterlockedPopEntrySList(void)
 {
-    (void)g_ecx;
-    g_eax = 0;
+    g_eax = ks_slist_pop(g_ecx);
 }
 
-/* --- InterlockedPushEntrySList (ordinal 58, fastcall) --- */
+/* --- InterlockedPushEntrySList (ordinal 58, fastcall: ecx=ListHead,
+ * edx=ListEntry) --- */
 static void bridge_InterlockedPushEntrySList(void)
 {
-    (void)g_ecx;
-    (void)g_edx;
-    g_eax = 0;
+    g_eax = ks_slist_push(g_ecx, g_edx);
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -9213,8 +9232,19 @@ static void bridge_KeAlertResumeThread(void)
 /* --- KeBoostPriorityThread (ordinal 94, 2 args = 8 bytes) --- */
 static void bridge_KeBoostPriorityThread(void)
 {
-    (void)STACK_ARG(0);
-    (void)STACK_ARG(1);
+    /* KTHREAD.Priority (+0x32) rises to BasePriority (+0x70) + Increment,
+     * never into the real-time range. A boost is transient on the console
+     * and the host scheduler has no counterpart: the field moves, the host
+     * thread does not. */
+    uint32_t t = STACK_ARG(0);
+    int32_t inc = (int32_t)STACK_ARG(1);
+
+    if (t && (int8_t)BRIDGE_MEM8(t + 0x32) < 16) {
+        int32_t p = (int8_t)BRIDGE_MEM8(t + 0x70) + inc;
+        if (p > 15) p = 15;
+        if (p > (int8_t)BRIDGE_MEM8(t + 0x32))
+            BRIDGE_MEM8(t + 0x32) = (uint8_t)p;
+    }
     g_eax = 0;
 }
 
@@ -9224,105 +9254,174 @@ static void bridge_KeEnterCriticalRegion(void)
     g_eax = 0;
 }
 
-/* --- KeInitializeApc (ordinal 105, 6 args = 24 bytes) --- */
+/* --- KeInitializeApc (ordinal 105, 7 args = 28 bytes)
+ * VOID KeInitializeApc(PRKAPC Apc, PRKTHREAD Thread,
+ *                      PKKERNEL_ROUTINE KernelRoutine,
+ *                      PKRUNDOWN_ROUTINE RundownRoutine,
+ *                      PKNORMAL_ROUTINE NormalRoutine,
+ *                      KPROCESSOR_MODE ProcessorMode, PVOID NormalContext);
+ * Seven arguments (nxdk xboxkrnl.h; NT's ApcStateIndex is not there). The
+ * table said six, which left one dword on the caller's stack. */
 static void bridge_KeInitializeApc(void)
 {
-    uint32_t apc_va = STACK_ARG(0);
-
-    if (apc_va) {
-        BRIDGE_MEM8(apc_va + 0)  = 0;
-        BRIDGE_MEM8(apc_va + 1)  = 0;
-        BRIDGE_MEM8(apc_va + 2)  = 0;
-        BRIDGE_MEM8(apc_va + 3)  = 0;
-        BRIDGE_MEM32(apc_va + 4) = 0;
-        BRIDGE_MEM32(apc_va + 8) = 0;
-        BRIDGE_MEM32(apc_va + 12) = 0;
-        BRIDGE_MEM32(apc_va + 16) = 0;
-        BRIDGE_MEM32(apc_va + 20) = 0;
-    }
+    ks_apc_init(STACK_ARG(0), STACK_ARG(1), STACK_ARG(2), STACK_ARG(3),
+                STACK_ARG(4), STACK_ARG(5) & 0xFF, STACK_ARG(6));
     g_eax = 0;
 }
 
 /* --- KeInitializeDeviceQueue (ordinal 106, 1 arg = 4 bytes) --- */
 static void bridge_KeInitializeDeviceQueue(void)
 {
-    uint32_t queue_va = STACK_ARG(0);
-
-    if (queue_va) {
-        BRIDGE_MEM8(queue_va + 0)  = 0;
-        BRIDGE_MEM8(queue_va + 1)  = 0;
-        BRIDGE_MEM8(queue_va + 2)  = 0;
-        BRIDGE_MEM8(queue_va + 3)  = 0;
-        BRIDGE_MEM32(queue_va + 4) = 0;  /* DeviceLock */
-        BRIDGE_MEM32(queue_va + 8) = 0;  /* DeviceListHead.Flink */
-        BRIDGE_MEM32(queue_va + 12) = 0; /* DeviceListHead.Blink */
-    }
+    ks_devq_init(STACK_ARG(0));   /* kernel_ksync.c (XBA-113) */
     g_eax = 0;
 }
 
 /* --- KeInitializeQueue (ordinal 111, 2 args = 8 bytes) --- */
 static void bridge_KeInitializeQueue(void)
 {
-    uint32_t queue_va = STACK_ARG(0);
-    uint32_t count = STACK_ARG(1);
-
-    if (queue_va) {
-        BRIDGE_MEM8(queue_va + 0)  = 0;
-        BRIDGE_MEM8(queue_va + 1)  = 0;
-        BRIDGE_MEM8(queue_va + 2)  = 0;
-        BRIDGE_MEM8(queue_va + 3)  = 1;
-        BRIDGE_MEM32(queue_va + 4) = 0;  /* Count */
-        BRIDGE_MEM32(queue_va + 8) = 0;  /* EntryCount */
-        BRIDGE_MEM32(queue_va + 12) = (LONG)count; /* MaximumCount */
-        BRIDGE_MEM32(queue_va + 16) = 0; /* ThreadListHead */
-        BRIDGE_MEM32(queue_va + 20) = 0; /* ThreadListHead */
-        BRIDGE_MEM32(queue_va + 24) = 0; /* Lock */
-        BRIDGE_MEM32(queue_va + 28) = 0; /* Lock */
-    }
-    g_eax = queue_va;
+    ks_queue_init(STACK_ARG(0), STACK_ARG(1));   /* kernel_ksync.c */
+    g_eax = 0;
 }
 
 /* --- KeInsertByKeyDeviceQueue (ordinal 114, 3 args = 12 bytes) --- */
 static void bridge_KeInsertByKeyDeviceQueue(void)
 {
-    (void)STACK_ARG(0);
-    (void)STACK_ARG(1);
-    (void)STACK_ARG(2);
-    g_eax = 0;
+    g_eax = (uint32_t)ks_devq_insert_by_key(STACK_ARG(0), STACK_ARG(1),
+                                            STACK_ARG(2));
 }
 
 /* --- KeInsertDeviceQueue (ordinal 115, 2 args = 8 bytes) --- */
 static void bridge_KeInsertDeviceQueue(void)
 {
-    (void)STACK_ARG(0);
-    (void)STACK_ARG(1);
-    g_eax = 0;
+    g_eax = (uint32_t)ks_devq_insert(STACK_ARG(0), STACK_ARG(1));
 }
 
 /* --- KeInsertHeadQueue (ordinal 116, 2 args = 8 bytes) --- */
 static void bridge_KeInsertHeadQueue(void)
 {
-    (void)STACK_ARG(0);
-    (void)STACK_ARG(1);
-    g_eax = 0;
+    g_eax = (uint32_t)ks_queue_insert(STACK_ARG(0), STACK_ARG(1), 1);
 }
 
 /* --- KeInsertQueue (ordinal 117, 2 args = 8 bytes) --- */
 static void bridge_KeInsertQueue(void)
 {
-    (void)STACK_ARG(0);
-    (void)STACK_ARG(1);
-    g_eax = 0;
+    g_eax = (uint32_t)ks_queue_insert(STACK_ARG(0), STACK_ARG(1), 0);
 }
 
 /* --- KeInsertQueueApc (ordinal 118, 4 args = 16 bytes) --- */
+static void bridge_apc_run_kernel(void);
+
 static void bridge_KeInsertQueueApc(void)
 {
-    (void)STACK_ARG(0);
-    (void)STACK_ARG(1);
-    (void)STACK_ARG(2);
-    (void)STACK_ARG(3);
-    g_eax = 1;
+    uint32_t apc = STACK_ARG(0);
+    int ok = ks_apc_insert(apc, STACK_ARG(1), STACK_ARG(2));
+
+    /* A kernel-mode APC for the calling thread runs before the call returns,
+     * as on the console when the insert drops back below APC_LEVEL. One for
+     * another thread runs at that thread's next kernel call; a user-mode one
+     * at its next alertable user-mode wait (bridge_apc_safe_point). */
+    if (ok && BRIDGE_MEM8(apc + 2) == 0 && BRIDGE_MEM32(apc + 4) == thobj_current())
+        bridge_apc_run_kernel();
+    g_eax = (uint32_t)ok;
+}
+
+/* Run a guest stdcall routine on this thread with `n` arguments, putting the
+ * caller's registers back afterwards (see callback_regs_save). */
+static void bridge_call_guest(uint32_t va, const uint32_t *args, int n)
+{
+    recomp_func_t fn = recomp_lookup(va);
+    CallbackRegs saved;
+    int i;
+
+    if (!fn) fn = recomp_lookup_manual(va);
+    if (!fn) fn = recomp_lookup_kernel(va);
+    if (!fn) {
+        fprintf(stderr, "  [KERNEL] APC routine 0x%08X unresolved\n", va);
+        fflush(stderr);
+        return;
+    }
+    callback_regs_save(&saved);
+    for (i = n - 1; i >= 0; i--) {
+        g_esp -= 4; BRIDGE_MEM32(g_esp) = args[i];
+    }
+    g_esp -= 4; BRIDGE_MEM32(g_esp) = 0;          /* dummy return address */
+    {
+        int took = xbox_GuestCpuEnterCallback();
+        fn();
+        xbox_GuestCpuLeaveCallback(took);
+    }
+    callback_regs_restore(&saved, 0);
+}
+
+/* Deliver one APC taken off its thread's queue: KernelRoutine(Apc,
+ * &NormalRoutine, &NormalContext, &SystemArgument1, &SystemArgument2), which
+ * may change or clear what follows, then NormalRoutine(NormalContext,
+ * SystemArgument1, SystemArgument2). The four values live just below esp
+ * for the length of the delivery. */
+static void bridge_apc_deliver(uint32_t apc)
+{
+    uint32_t save_esp = g_esp, area;
+    uint32_t kr = BRIDGE_MEM32(apc + 0x10);
+
+    g_esp -= 16;
+    area = g_esp;
+    BRIDGE_MEM32(area + 0)  = BRIDGE_MEM32(apc + 0x18);   /* NormalRoutine */
+    BRIDGE_MEM32(area + 4)  = BRIDGE_MEM32(apc + 0x1C);   /* NormalContext */
+    BRIDGE_MEM32(area + 8)  = BRIDGE_MEM32(apc + 0x20);   /* SystemArgument1 */
+    BRIDGE_MEM32(area + 12) = BRIDGE_MEM32(apc + 0x24);   /* SystemArgument2 */
+    if (kr) {
+        uint32_t a[5] = { apc, area, area + 4, area + 8, area + 12 };
+        bridge_call_guest(kr, a, 5);
+    }
+    if (BRIDGE_MEM32(area + 0)) {
+        uint32_t a[3] = { BRIDGE_MEM32(area + 4), BRIDGE_MEM32(area + 8),
+                          BRIDGE_MEM32(area + 12) };
+        bridge_call_guest(BRIDGE_MEM32(area + 0), a, 3);
+    }
+    g_esp = save_esp;
+}
+
+static void bridge_apc_run_kernel(void)
+{
+    uint32_t kt = thobj_current(), apc;
+    while ((apc = ks_apc_take(kt, 0)) != 0)
+        bridge_apc_deliver(apc);
+}
+
+/* At the top of every kernel call while any APC is queued (cheap gate:
+ * ks_apc_pending). Kernel-mode APCs for this thread run first. If the call
+ * is an alertable user-mode wait and user-mode APCs are queued for this
+ * thread, they run and the wait returns STATUS_USER_APC without waiting, as
+ * on the console. Returns 1 when the call is answered that way. esp points
+ * at the arguments.
+ *
+ * Not covered: a user-mode APC queued while its thread is already blocked
+ * in an alertable wait does not wake it; it runs at the next such wait. */
+static int bridge_apc_safe_point(ULONG ordinal)
+{
+    uint32_t kt, apc;
+    int alertable = 0, ran = 0;
+
+    bridge_apc_run_kernel();
+    switch (ordinal) {
+    case  99: alertable = (STACK_ARG(0) & 0xFF) == 1 && (STACK_ARG(1) & 0xFF); break;
+    case 158: alertable = (STACK_ARG(4) & 0xFF) == 1 && (STACK_ARG(5) & 0xFF); break;
+    case 159: alertable = (STACK_ARG(2) & 0xFF) == 1 && (STACK_ARG(3) & 0xFF); break;
+    case 233: alertable = (STACK_ARG(1) & 0xFF) != 0; break;
+    case 234: alertable = (STACK_ARG(1) & 0xFF) == 1 && (STACK_ARG(2) & 0xFF); break;
+    case 235: alertable = (STACK_ARG(3) & 0xFF) == 1 && (STACK_ARG(4) & 0xFF); break;
+    default: break;
+    }
+    if (!alertable)
+        return 0;
+    kt = thobj_current();
+    while ((apc = ks_apc_take(kt, 1)) != 0) {
+        bridge_apc_deliver(apc);
+        ran = 1;
+    }
+    if (ran)
+        g_eax = 0x000000C0u;                 /* STATUS_USER_APC */
+    return ran;
 }
 
 /* --- KeInsertQueueDpc (ordinal 119) ---
@@ -9352,31 +9451,29 @@ static void bridge_KeRaiseIrqlToSynchLevel(void)
 /* --- KeRemoveByKeyDeviceQueue (ordinal 133, 2 args = 8 bytes) --- */
 static void bridge_KeRemoveByKeyDeviceQueue(void)
 {
-    (void)STACK_ARG(0);
-    (void)STACK_ARG(1);
-    g_eax = 0;
+    g_eax = ks_devq_remove_by_key(STACK_ARG(0), STACK_ARG(1));
 }
 
 /* --- KeRemoveDeviceQueue (ordinal 134, 1 arg = 4 bytes) --- */
 static void bridge_KeRemoveDeviceQueue(void)
 {
-    (void)STACK_ARG(0);
-    g_eax = 0;
+    g_eax = ks_devq_remove(STACK_ARG(0));
 }
 
 /* --- KeRemoveEntryDeviceQueue (ordinal 135, 2 args = 8 bytes) --- */
 static void bridge_KeRemoveEntryDeviceQueue(void)
 {
-    (void)STACK_ARG(0);
-    (void)STACK_ARG(1);
-    g_eax = 0;
+    g_eax = (uint32_t)ks_devq_remove_entry(STACK_ARG(0), STACK_ARG(1));
 }
 
-/* --- KeRemoveQueue (ordinal 136, 1 arg = 4 bytes) --- */
+/* --- KeRemoveQueue (ordinal 136, 3 args = 12 bytes)
+ * PLIST_ENTRY KeRemoveQueue(PRKQUEUE Queue, KPROCESSOR_MODE WaitMode,
+ *                           PLARGE_INTEGER Timeout);
+ * Three arguments (nxdk xboxkrnl.h); the table said one. Returns the entry,
+ * or STATUS_TIMEOUT. */
 static void bridge_KeRemoveQueue(void)
 {
-    (void)STACK_ARG(0);
-    g_eax = 0;
+    g_eax = ks_queue_remove(STACK_ARG(0), STACK_ARG(2));
 }
 
 /* --- KeRemoveQueueDpc (ordinal 137, 1 arg = 4 bytes) ---
@@ -9387,8 +9484,7 @@ static void bridge_KeRemoveQueue(void)
 /* --- KeRundownQueue (ordinal 141, 1 arg = 4 bytes) --- */
 static void bridge_KeRundownQueue(void)
 {
-    (void)STACK_ARG(0);
-    g_eax = 0;
+    g_eax = ks_queue_rundown(STACK_ARG(0));
 }
 
 /* --- KeSetEventBoostPriority (ordinal 146, 2 args = 8 bytes) --- */
@@ -9412,17 +9508,35 @@ static void bridge_KeSetEventBoostPriority(void)
 /* --- KeSetPriorityProcess (ordinal 147, 2 args = 8 bytes) --- */
 static void bridge_KeSetPriorityProcess(void)
 {
-    (void)STACK_ARG(0);
-    (void)STACK_ARG(1);
+    /* KPRIORITY KeSetPriorityProcess(PKPROCESS, KPRIORITY BasePriority):
+     * KPROCESS.BasePriority (+0x18), the old value back. Host threads keep
+     * their own priorities, which are relative to it already. */
+    uint32_t p = STACK_ARG(0);
     g_eax = 0;
+    if (p) {
+        g_eax = (uint32_t)(int32_t)(int8_t)BRIDGE_MEM8(p + 0x18);
+        BRIDGE_MEM8(p + 0x18) = (uint8_t)STACK_ARG(1);
+    }
 }
 
 /* --- KeSetPriorityThread (ordinal 148, 2 args = 8 bytes) --- */
 static void bridge_KeSetPriorityThread(void)
 {
-    (void)STACK_ARG(0);
-    (void)STACK_ARG(1);
+    /* KPRIORITY KeSetPriorityThread(PKTHREAD, KPRIORITY): KTHREAD.Priority
+     * (+0x32), the old value back, and the host thread follows relative to
+     * the normal priority 8, as KeSetBasePriorityThread's increment does. */
+    uint32_t t = STACK_ARG(0);
+    int32_t pri = (int32_t)STACK_ARG(1);
+    HANDLE h;
+
     g_eax = 0;
+    if (!t)
+        return;
+    g_eax = (uint32_t)(int32_t)(int8_t)BRIDGE_MEM8(t + 0x32);
+    BRIDGE_MEM8(t + 0x32) = (uint8_t)pri;
+    h = bridge_thread_host(t);
+    if (h)
+        xbox_KeSetBasePriorityThread(h, pri - 8);
 }
 
 /* --- KeTestAlertThread (ordinal 155, 1 arg = 4 bytes) --- */
@@ -9456,7 +9570,8 @@ static void bridge_KeGetCurrentIrql(void)
 /* --- KeGetCurrentThread (ordinal 104, 0 args = 0 bytes) --- */
 static void bridge_KeGetCurrentThread(void)
 {
-    g_eax = 0;
+    /* The thread's KTHREAD, the one fs:[0x28] names (XBA-113). */
+    g_eax = thobj_current();
 }
 
 /* --- KeSetDisableBoostThread (ordinal 144, 2 args = 8 bytes) --- */
@@ -10798,7 +10913,7 @@ static int stdcall_args_for_ordinal(ULONG ordinal)
     case 101: return  0;  /* KeEnterCriticalRegion (void) */
     case 103: return  0;  /* KeGetCurrentIrql (void) */
     case 104: return  0;  /* KeGetCurrentThread (void) */
-    case 105: return 24;  /* KeInitializeApc (6) */
+    case 105: return 28;  /* KeInitializeApc (7) */
     case 106: return  4;  /* KeInitializeDeviceQueue (1) */
     case 108: return 12;  /* KeInitializeEvent (3) */
     case 110: return  8;  /* KeInitializeMutant (2) */
@@ -10818,7 +10933,7 @@ static int stdcall_args_for_ordinal(ULONG ordinal)
     case 133: return  8;  /* KeRemoveByKeyDeviceQueue (2) */
     case 134: return  4;  /* KeRemoveDeviceQueue (1) */
     case 135: return  8;  /* KeRemoveEntryDeviceQueue (2) */
-    case 136: return  4;  /* KeRemoveQueue (1) */
+    case 136: return 12;  /* KeRemoveQueue (3) */
     case 138: return  4;  /* KeResetEvent (1) */
     case 140: return  4;  /* KeResumeThread (1) */
     case 141: return  4;  /* KeRundownQueue (1) */
@@ -11615,7 +11730,16 @@ static void kernel_thunk_dispatch_body(void)
         }
     }
 
-    if (bridge) {
+    /* A stub route, or no route at all: say so the first time (XBA-115,
+     * kernel_stubs.h). */
+    if (!bridge || xbox_kernel_is_stub(ordinal))
+        xbox_kernel_stub_note(ordinal, bridge != NULL, g_xbox_kernel_caller);
+
+    /* Queued APCs (KeInsertQueueApc, XBA-113) run at this thread's kernel
+     * calls; an alertable wait they answer is not made. */
+    if (ks_apc_pending() && bridge_apc_safe_point(ordinal)) {
+        /* answered: STATUS_USER_APC */
+    } else if (bridge) {
         bridge();
     } else {
         /* No specific bridge - return 0. Warn once per ordinal rather than

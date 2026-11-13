@@ -2390,6 +2390,48 @@ RECOMP_TLS RecompCpu g_cpu = {
  * at is. Zero total means the image had no TLS directory. */
 static uint32_t g_tls_template_va, g_tls_total, g_tls_thread_size = 64;
 
+/* The title's KPROCESS (XBA-113); see xbox_InitGuestKthread. */
+static uint32_t g_kprocess_va;
+static volatile LONG g_next_unique_thread;
+
+uint32_t xbox_GuestKprocess(void) { return g_kprocess_va; }
+
+/* Layout from nxdk's xboxkrnl.h (KTHREAD 0x110 bytes, ETHREAD after it):
+ *   +0x00 Header (Type 6 = ThreadObject, Size, SignalState +4, WaitListHead +8)
+ *   +0x10 MutantListHead  +0x1C StackBase  +0x20 StackLimit  +0x28 TlsData
+ *   +0x2C State  +0x32 Priority  +0x34 ApcState.ApcListHead[2]
+ *   +0x44 ApcState.Process  +0x4B ApcState.ApcQueueable  +0x70 BasePriority
+ *   +0x78 Queue  +0x7C QueueListEntry
+ *   ETHREAD: +0x120 ExitStatus  +0x12C UniqueThread  +0x134 IrpList */
+void xbox_InitGuestKthread(uint32_t kt, uint32_t tls_data,
+                           uint32_t stack_base, uint32_t stack_limit)
+{
+    #define KT8(o)  (*(volatile uint8_t  *)((uintptr_t)(kt + (o)) + g_xbox_mem_offset))
+    #define KT32(o) (*(volatile uint32_t *)((uintptr_t)(kt + (o)) + g_xbox_mem_offset))
+    if (!kt)
+        return;
+    KT8(0x00) = 6;                               /* ThreadObject */
+    if (!KT8(0x02))
+        KT8(0x02) = (uint8_t)(0x110 / 4);
+    KT32(0x08) = kt + 0x08; KT32(0x0C) = kt + 0x08;   /* WaitListHead   */
+    KT32(0x10) = kt + 0x10; KT32(0x14) = kt + 0x10;   /* MutantListHead */
+    KT32(0x1C) = stack_base;
+    KT32(0x20) = stack_limit;
+    KT32(0x28) = tls_data;
+    KT8(0x2C) = 2;                               /* State: Running */
+    KT8(0x32) = 8;                               /* Priority */
+    KT32(0x34) = kt + 0x34; KT32(0x38) = kt + 0x34;   /* KernelMode APCs */
+    KT32(0x3C) = kt + 0x3C; KT32(0x40) = kt + 0x3C;   /* UserMode APCs   */
+    KT32(0x44) = g_kprocess_va;
+    KT8(0x4B) = 1;                               /* ApcQueueable */
+    KT8(0x70) = 8;                               /* BasePriority */
+    KT32(0x120) = 0x103;                         /* STILL_ACTIVE */
+    KT32(0x12C) = (uint32_t)InterlockedIncrement(&g_next_unique_thread) * 4;
+    KT32(0x134) = kt + 0x134; KT32(0x138) = kt + 0x134; /* IrpList */
+    #undef KT8
+    #undef KT32
+}
+
 #ifdef RECOMP_ABI_CHECK
 /* Report a lifted function that returned without restoring ebx/esi/edi.
  *
@@ -3801,6 +3843,22 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
         /* TLS[0x28] = pointer to RW data area */
         MEM32_INIT(FAKE_TLS_VA + 0x28, FAKE_RWDATA_VA);
 
+        /* fs:[0x28] is KPCR.PrcbData.CurrentThread on the console, and +0x28
+         * of it is KTHREAD.TlsData, which is what the "RW engine" above reads.
+         * The structure is the main thread's KTHREAD, then: KeGetCurrentThread
+         * returns it, and the fields XAPI reads get console values (XBA-113).
+         * Its ApcState.Process is the title's one KPROCESS. */
+        g_kprocess_va = g_xbox_region_base + XBOX_REGION_KPROC_OFF;
+        memset(XBOX_VA(g_kprocess_va), 0, 0x20);
+        MEM32_INIT(g_kprocess_va + 0x00, g_kprocess_va);        /* ReadyListHead  */
+        MEM32_INIT(g_kprocess_va + 0x04, g_kprocess_va);
+        MEM32_INIT(g_kprocess_va + 0x08, g_kprocess_va + 0x08); /* ThreadListHead */
+        MEM32_INIT(g_kprocess_va + 0x0C, g_kprocess_va + 0x08);
+        MEM32_INIT(g_kprocess_va + 0x14, 60);                   /* ThreadQuantum  */
+        *(uint8_t *)XBOX_VA(g_kprocess_va + 0x18) = 8;          /* BasePriority   */
+        xbox_InitGuestKthread(FAKE_TLS_VA, FAKE_RWDATA_VA,
+                              XBOX_STACK_TOP, XBOX_STACK_BASE);
+
         /*
          * XBE TLS directory.
          *
@@ -3833,6 +3891,11 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
         #define FAKE_TLS_THREAD_VA (g_xbox_region_base + XBOX_REGION_TLSBLK_OFF + 0x200)  /* what slot 0 points at   */
         {
             DWORD tls_dir_va = *(const DWORD *)(xbe + XBE_TLS_ADDR_OFFSET);
+
+            /* This image's, not a previous init's (xbox_AllocThreadTib
+             * reads them). */
+            g_tls_template_va = 0;
+            g_tls_total       = 0;
 
             if (tls_dir_va) {
                 const uint32_t *tls = (const uint32_t *)XBOX_VA(tls_dir_va);
@@ -4916,29 +4979,52 @@ int xbox_ThreadStacksHighWater(void)
  * The new block is a copy of the template the loader built, so a thread starts
  * with the image's initialised thread-local data rather than zeros, and its
  * own per-thread structure behind slot 0.
+ *
+ * An image without a TLS directory gets a TIB per thread too (XBA-113): its
+ * own SEH chain head, IRQL byte and KTHREAD at fs:[0x28], with fs:[4] the
+ * main thread's as before. It used to get none, so every thread shared the
+ * main TIB -- and the timer thread, which will not run without a TIB of its
+ * own, ran no timer DPCs at all for such an image. RECOMP_TIB_PER_THREAD=0
+ * restores that.
  */
+static int tib_per_thread_without_tls(void)
+{
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("RECOMP_TIB_PER_THREAD");
+        v = !(e && e[0] == '0');
+    }
+    return v;
+}
+
 uint32_t xbox_AllocThreadTib(void)
 {
     /* XBOX_VA is scoped to the loader; the same arithmetic, spelled here. */
     #define TIB_VA(va) ((void *)((uintptr_t)(va) + g_memory_offset))
     const uint32_t tib_size = 0x40;
-    uint32_t tib, block, thread_data, total;
+    uint32_t tib, block, thread_data, total, kt, main_kt;
 
-    if (!g_tls_total)
-        return 0;                    /* image has no TLS; nothing to copy */
+    uint32_t thread_size = g_tls_total ? g_tls_thread_size : 0;
 
-    total = g_tls_total;
-    tib = xbox_HeapAlloc(tib_size + total + g_tls_thread_size, 16);
+    if (!g_tls_total && !tib_per_thread_without_tls())
+        return 0;                    /* RECOMP_TIB_PER_THREAD=0: the old way */
+
+    total = g_tls_total;             /* 0: a TIB and a KTHREAD only */
+    tib = xbox_HeapAlloc(tib_size + total + thread_size
+                         + XBOX_KTHREAD_SIZE, 16);
     if (!tib)
         return 0;
     block       = tib + tib_size;
     thread_data = block + total;
+    kt          = thread_data + thread_size;
 
     /* The TIB itself, copied so stack bounds and the fields the title filled
      * in are inherited, then the two that must not be. */
     memcpy(TIB_VA(tib), TIB_VA(XBOX_TIB_MAIN), tib_size);
-    memcpy(TIB_VA(block), TIB_VA(g_tls_template_va), total);
-    memset(TIB_VA(thread_data), 0, g_tls_thread_size);
+    if (total) {
+        memcpy(TIB_VA(block), TIB_VA(g_tls_template_va), total);
+        memset(TIB_VA(thread_data), 0, thread_size);
+    }
 
     *(uint32_t *)TIB_VA(tib + 0x00) = 0xFFFFFFFFu;   /* own SEH chain    */
     /* KPCR.Irql, fs:[0x24]: a new thread starts at PASSIVE_LEVEL, whatever
@@ -4955,8 +5041,22 @@ uint32_t xbox_AllocThreadTib(void)
      * interrupt; a callback node of its timer queue was linked twice and the
      * main thread's DoWork (0x003AC0B8) looped on it for ever. */
     *(uint8_t  *)TIB_VA(tib + 0x24) = 0;
-    *(uint32_t *)TIB_VA(block)      = thread_data;   /* slot 0           */
-    *(uint32_t *)TIB_VA(tib + 0x04) = block + total; /* fs:[4], see above*/
+    if (total) {
+        *(uint32_t *)TIB_VA(block)      = thread_data;   /* slot 0           */
+        *(uint32_t *)TIB_VA(tib + 0x04) = block + total; /* fs:[4], see above*/
+    }
+
+    /* fs:[0x28], KPCR.PrcbData.CurrentThread: a KTHREAD of this thread's own
+     * (XBA-113), so KeGetCurrentThread and code reading fs:[0x28] directly
+     * agree and differ between threads. TlsData stays the main thread's, as
+     * it was when the whole TIB was copied; PsCreateSystemThreadEx gives a
+     * guest thread its own when it asks for a TlsDataSize. */
+    main_kt = *(uint32_t *)TIB_VA(XBOX_TIB_MAIN + 0x28);
+    memset(TIB_VA(kt), 0, XBOX_KTHREAD_SIZE);
+    xbox_InitGuestKthread(kt, main_kt ? *(uint32_t *)TIB_VA(main_kt + 0x28) : 0,
+                          *(uint32_t *)TIB_VA(tib + 0x04),
+                          *(uint32_t *)TIB_VA(tib + 0x08));
+    *(uint32_t *)TIB_VA(tib + 0x28) = kt;
 
     return tib;
     #undef TIB_VA

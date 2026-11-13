@@ -46,7 +46,8 @@ The blocker is the first of: a crash (signal and fault line), an early exit, no 
 for 30 s at the end), each with the first untranslated instruction or the last discovery when there is one. A
 guest stack switch the runtime could not carry (a `stack_switch` discovery entry, XBA-101,
 [stack-switching.md](stack-switching.md)) is named after any of them: « hang: ...; stack switch at 0x... to 0x...:
-<why> (XBA-101) ».
+<why> (XBA-101) ». Any blocker but a crash or a launch also names the stub kernel routes the run called, from the
+discovery file's `stub` entries: « no flip; calls stub ordinal 136 (KeRemoveQueue) » (XBA-115).
 
 ## The « Compatibility » page (XBA-73)
 
