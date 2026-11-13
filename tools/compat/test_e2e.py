@@ -647,6 +647,10 @@ def test_static_discovery_needs_no_round(tmp_path):
     assert rc.returncode == 0 and rc.stdout.strip() == "no miss", rc.stdout + rc.stderr
     funcs = {int(f["start"], 16) for f in json.loads((work / "analysis" / "disasm" / "functions.json").read_text())}
     assert {t.va(n) for n in ("thread_fn", "m1", "gap_fn")} <= funcs
-    assert not [n for n, add in E2E_DECOYS if t.va(n) + add in funcs]
+    # The run needs no round in the default mode. Keeping the title's decoys
+    # out of the functions is RECOMP_STATIC_DISCOVERY_STRICT's (off by
+    # default, wave 5): tools/disasm/test_static_discovery.py's
+    # test_the_e2e_title_needs_no_run checks them with it on.
+    assert E2E_DECOYS
     summary = json.loads((work / "analysis" / "disasm" / "summary.json").read_text())
     assert summary["discovery"]["added"]["gap_body"] >= 1, summary["discovery"]
