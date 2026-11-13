@@ -190,8 +190,8 @@ XBA-125. The APK a player installs is built by CI on every push to `main` and pu
   before, so it installs over it; the same commit always gets the same code;
 - native compiles capped at `JOBS=4` (`-PxbaJobs`: Ninja job pools, since Gradle runs Ninja with all cores);
 - checked before it leaves the stage: every toolchain file, the licence texts of what it ships (`assets/licences/`:
-  LICENSE, NOTICE, Apache-2.0 WITH LLVM-exception, PSF-2.0, BSD-3-Clause capstone), no `.xbe`/`.iso` other than our
-  synthetic `assets/selftest.xbe`, the version code, `application-debuggable`, and who signed it
+  LICENSE, NOTICE, Apache-2.0 WITH LLVM-exception, PSF-2.0, BSD-3-Clause capstone, Apache-2.0 apksig), no
+  `.xbe`/`.iso` other than our synthetic `assets/selftest.xbe`, the version code, `application-debuggable`, and who signed it
   (`xrecomp-signing.txt`: `release` or `DEBUG`, with the certificate's SHA-256).
 
 ### The toolchain cache

@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The icon slot of a game's own app (« Create an app », TitleApk; docs/android/app-shell.md « A game's own app »).
+     XRecomp itself never shows it (its manifest says @mipmap/ic_launcher); a generated app's manifest points here, and
+     the generator replaces the PNG of drawable-nodpi/xba_title_icon_art with the game's icon (432 x 432, the whole
+     108 dp canvas, opaque: TitleShortcut.icon). The PNG here is only a placeholder. -->
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@drawable/xba_title_icon_art" />
+    <foreground android:drawable="@android:color/transparent" />
+</adaptive-icon>

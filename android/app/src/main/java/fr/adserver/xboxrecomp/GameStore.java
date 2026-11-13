@@ -330,8 +330,15 @@ final class GameStore {
         return null;
     }
 
-    /** The SHA-256 of default.xbe this APK was built for (-PxbaXbeSha256), lower case; "" = no check. */
+    /**
+     * The SHA-256 of default.xbe this APK is for, lower case; "" = no check. A game's own app made on the device
+     * (« Create an app », TitleApk) says it in its manifest's meta-data; a title APK built on a host in its
+     * resources (-PxbaXbeSha256).
+     */
     static String expectedSha256(Context c) {
+        String own = TitleApp.ownXbeSha256(c).trim();
+        if (!own.isEmpty())
+            return own.toLowerCase(Locale.ROOT);
         return c.getString(R.string.xba_xbe_sha256).trim().toLowerCase(Locale.ROOT);
     }
 

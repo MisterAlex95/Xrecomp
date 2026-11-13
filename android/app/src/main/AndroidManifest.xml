@@ -20,6 +20,9 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- « Create an app » (Manage; docs/android/app-shell.md « A game's own app »): the generated APK goes to Android's
+         installer, which asks the player to confirm. Allowed per app by the player (« Install unknown apps »). -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
     <!-- allowNativeHeapPointerTagging: lifted code may squeeze host pointers; tagged heap pointers would break it
          (see the Plane page « Reference · BananaNative »). -->
@@ -107,6 +110,13 @@
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="Checks the user's own games one after the other on the device, at the user's request (prepares each, starts it for three minutes, writes a compatibility report), with progress and Stop in the notification" />
         </service>
+
+        <!-- « Create an app »: the installer's status (confirmation, then installed / cancelled / failed), from this
+             app's own PendingIntent only. -->
+        <receiver
+            android:name=".TitleAppReceiver"
+            android:exported="false"
+            android:process=":launcher" />
 
         <!-- « Share log » on the launcher: the Prepare's log, read-only, by a temporary grant. -->
         <provider
