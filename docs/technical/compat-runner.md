@@ -22,7 +22,10 @@ stage names and the first line of an error: nothing from the game.
 | `discovered.jsonl` | what the analysis missed ([discovery.md](discovery.md)) |
 | the run's stderr | a crash line, the first untranslated instruction reached |
 
-The pad: `start` three times from 8 s, then `a`, every 2 s, through `RECOMP_PAD_LIVE`.
+The pad: `start` three times from 8 s, then `a`, every 2 s, through `RECOMP_PAD_LIVE`. Each run has its own data home,
+`<work>/data-<n>` (`XDG_DATA_HOME`, made empty for the run): saves, the launch data a quick reboot or a hand-over to
+another XBE reads back, the partition images. Not the user's `~/.local/share/xboxrecomp`, which carried one run's state
+into the next and needed a writable HOME.
 
 The screen: `RECOMP_FB_DUMP` writes a BMP per report; the last one of each run is kept as `<work>/shot-<n>.bmp`
 and named in the results (`runs[].screenshot`). It stays in the work folder: it is the game's picture, never part of

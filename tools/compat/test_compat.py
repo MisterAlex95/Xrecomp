@@ -322,3 +322,19 @@ def test_every_column_of_the_report_at_once():
     assert t[1].count("|") == t[0].count("|")
     assert t[2].startswith("| a (network stack) | renders |")
     assert "| 12 of 13 known functions | AYN Thor, Android 13 | GP image abcdef01 (10 words), 3 cmds |" in t[2], t[2]
+
+
+def test_a_run_has_its_own_data_home(tmp_path, monkeypatch):
+    """Wave 4 (XBA-82's launch hand-over failed as a non-root uid): a run's
+    saves and launch data go to <work>/data-<n>, made empty for each run, not
+    to the user's ~/.local/share."""
+    from tools.compat.__main__ import boot_env
+    monkeypatch.setenv("HOME", "/nonexistent")
+    monkeypatch.delenv("XDG_DATA_HOME", raising=False)
+    old = tmp_path / "data-0" / "xboxrecomp"
+    old.mkdir(parents=True)
+    (old / "launch.bin").write_bytes(b"x")                     # a previous run's
+    env = boot_env(str(tmp_path), 0, "s", "l", str(tmp_path))
+    assert env["XDG_DATA_HOME"] == str(tmp_path / "data-0") and os.path.isdir(env["XDG_DATA_HOME"])
+    assert not (old / "launch.bin").exists()
+    assert boot_env(str(tmp_path), 1, "s", "l", str(tmp_path))["XDG_DATA_HOME"] == str(tmp_path / "data-1")

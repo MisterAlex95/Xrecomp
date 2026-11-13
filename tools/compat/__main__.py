@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -268,6 +269,23 @@ def keep_last_shot(shots_dir, dest):
     return dest
 
 
+def boot_env(work, run_index, status_path, live, shots):
+    """The run's environment. Its data home (saves, the launch data a quick
+    reboot or a hand-over to another XBE reads back, the partition images) is
+    <work>/data-<n>, made empty for each run: the kernel's default is the
+    user's ~/.local/share/xboxrecomp, which carried one run's saves and launch
+    data into the next (and the player's own into a run), and which a runner
+    without a writable HOME (a container under another uid) could not write,
+    so a hand-over failed with "cannot write the launch data"."""
+    data = os.path.join(work, "data-%d" % run_index)
+    if os.path.isdir(data):
+        shutil.rmtree(data, ignore_errors=True)
+    os.makedirs(data, exist_ok=True)
+    return dict(os.environ, RECOMP_HEADLESS="1", RECOMP_STATUS=status_path, RECOMP_STATUS_MS="1000",
+                RECOMP_PAD_LIVE=live, RECOMP_USB=os.environ.get("RECOMP_USB", "1"),
+                RECOMP_FB_DUMP=os.path.join(shots, "f"), XDG_DATA_HOME=data)
+
+
 def boot(exe, work, seconds, run_index=0):
     """Run exe headless for `seconds`; returns (status, presses_ms, exit_info, run_s, log_text)."""
     status_path = os.path.join(work, "status-%d.jsonl" % run_index)
@@ -281,9 +299,7 @@ def boot(exe, work, seconds, run_index=0):
     # in the work folder, on this machine: it is the game's picture.
     shots = os.path.join(work, "shots-%d" % run_index)
     os.makedirs(shots, exist_ok=True)
-    env = dict(os.environ, RECOMP_HEADLESS="1", RECOMP_STATUS=status_path, RECOMP_STATUS_MS="1000",
-               RECOMP_PAD_LIVE=live, RECOMP_USB=os.environ.get("RECOMP_USB", "1"),
-               RECOMP_FB_DUMP=os.path.join(shots, "f"))
+    env = boot_env(work, run_index, status_path, live, shots)
     t0 = time.time()
     with open(log, "w") as out:
         proc = subprocess.Popen([exe], cwd=os.path.dirname(exe), env=env, stdout=out,
