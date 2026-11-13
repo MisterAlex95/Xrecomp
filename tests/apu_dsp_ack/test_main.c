@@ -81,6 +81,60 @@ int main(void)
     check(*dword(ram, DOORBELL + 0x1000u) == 0 && *dword(ram, DOORBELL) == 0x33,
           "SGE[0] moved: the new page is cleared, the old one left");
 
+    /* What a guest store to GPRST does on a real run (XBA-138): only
+     * 0x00000-0x2FFFF of the aperture is trapped, so the title's store to
+     * 0xFE83FFFC lands in plain memory and mcpx_apu_dsp_gprst_write is never
+     * called. A buffer stands in for the aperture; the store is a plain
+     * write into it, as the lifted code's would be, and the poll has to see
+     * it there. */
+    {
+        uint8_t *ap = (uint8_t *)calloc(1, 0x80000u);
+        volatile uint32_t *gprst;
+
+        if (!ap) { fprintf(stderr, "out of memory\n"); return 2; }
+        gprst = (volatile uint32_t *)(ap + 0x30000u + NV_PAPU_GPRST);
+        mcpx_apu_dsp_init(d);          /* fresh ack state: GP running */
+        mcpx_apu_dsp_set_aperture(ap);
+        *dword(ram, SGE_TABLE) = GP_PAGE;
+
+        *dword(ram, DOORBELL) = 0x55;
+        mcpx_apu_dsp_ack_poll(d);
+        check(*dword(ram, DOORBELL) == 0,
+              "aperture GPRST never written (0): GP counts as running");
+
+        *gprst = run;
+        *dword(ram, DOORBELL) = 0x56;
+        mcpx_apu_dsp_ack_poll(d);
+        check(*dword(ram, DOORBELL) == 0, "guest store GPRST=3: poll clears it");
+
+        *gprst = 0;
+        *dword(ram, DOORBELL) = 0x57;
+        mcpx_apu_dsp_ack_poll(d);
+        check(*dword(ram, DOORBELL) == 0x57,
+              "guest store GPRST=0 into the aperture: GP held, doorbell left");
+
+        *gprst = NV_PAPU_GPRST_GPRST;
+        mcpx_apu_dsp_ack_poll(d);
+        check(*dword(ram, DOORBELL) == 0x57,
+              "guest store GPRST=1 (DSP still held): doorbell left");
+
+        *gprst = run;
+        mcpx_apu_dsp_ack_poll(d);
+        check(*dword(ram, DOORBELL) == 0, "guest store GPRST=3 again: cleared");
+
+        /* A trapping host (the whole window unmapped) still reaches the
+         * handler; the aperture word it never wrote must not undo that. */
+        mcpx_apu_dsp_gprst_write(0);
+        *dword(ram, DOORBELL) = 0x58;
+        mcpx_apu_dsp_ack_poll(d);
+        check(*dword(ram, DOORBELL) == 0x58,
+              "trapped GPRST write 0 wins over an unchanged aperture word");
+
+        mcpx_apu_dsp_set_aperture(NULL);
+        mcpx_apu_dsp_finalize(d);
+        free(ap);
+    }
+
     printf("%s: %d failure(s)\n", failures ? "FAIL" : "PASS", failures);
     free(ram);
     free(d);

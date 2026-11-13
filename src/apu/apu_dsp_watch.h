@@ -20,7 +20,8 @@
  *
  * GP and EP memory is plain RAM in the aperture (xbox_memory_layout.c traps
  * only 0x00000-0x2FFFF), so a title's *reads* of DSP memory are invisible
- * here: only what it wrote is seen. docs/technical/apu-dsp.md.
+ * here: only what it wrote is seen. The GPRST word is also read back by the
+ * doorbell ack every frame (apu_dsp.c, XBA-138). docs/technical/apu-dsp.md.
  *
  * Everything runs on the APU frame thread. This project's own code (MIT).
  */
@@ -44,7 +45,7 @@ extern "C" {
 
 /* Why a doorbell could not be answered. */
 enum {
-    APU_DSP_PEND_RESET = 0,     /* GP held in reset (trapped GPRST write) */
+    APU_DSP_PEND_RESET = 0,     /* GP held in reset (GPRST, trapped or polled) */
     APU_DSP_PEND_COUNT
 };
 

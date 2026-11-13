@@ -1,8 +1,8 @@
 cmake_minimum_required(VERSION 3.20)
 project(apu_dsp_ack_test C)
 # RECOMP_APU_DSP_ACK=auto: the doorbell found from GPSADDR, and held off while
-# GPRST keeps the GP in reset. No title tested writes GPRST, so this is the
-# only place the gate runs.
+# GPRST keeps the GP in reset, whether the GPRST write is trapped or lands in
+# the aperture's plain memory as a title's store does (XBA-138).
 set(CMAKE_C_STANDARD 11)
 add_subdirectory(../.. runtime)
 add_executable(apu_dsp_ack_test test_main.c)

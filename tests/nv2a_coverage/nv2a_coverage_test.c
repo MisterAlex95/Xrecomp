@@ -145,6 +145,35 @@ static void check_format_table(void)
     CHECK(nv2a_tex_format(0x77)->name == NULL);
 }
 
+/* 1b. d3d8_format_is_swizzled agrees with the table's SZ_ / L* split
+ * (XBA-138): LU_IMAGE_A8CR8CB8Y8 (0x26) and LC_IMAGE_A4V6YB6A4U6YA6 (0x34)
+ * are linear, which it called swizzled. The SZ_DEPTH formats 0x2A-0x2D are
+ * left out on purpose: the table has them swizzled (xemu), the classifier
+ * linear, and the D3D side treats those codes as depth surfaces -- a
+ * separate question from the ticket's two formats. */
+static void check_swizzle_classifier(void)
+{
+    uint32_t fmt;
+    int mism = 0;
+
+    for (fmt = 0; fmt < 0x42; fmt++) {
+        const Nv2aTexFormat *f = nv2a_tex_format(fmt);
+        int linear_block = fmt == 0x0C || fmt == 0x0E || fmt == 0x0F;   /* DXT: neither */
+        if (!f->name || linear_block || (fmt >= 0x2A && fmt <= 0x2D))
+            continue;
+        if (!!d3d8_format_is_swizzled(fmt) != !!f->swizzled) {
+            printf("format 0x%02X %s: table %s, d3d8_format_is_swizzled %s\n", fmt, f->name,
+                   f->swizzled ? "swizzled" : "linear",
+                   d3d8_format_is_swizzled(fmt) ? "swizzled" : "linear");
+            mism++;
+        }
+    }
+    printf("1b. swizzle classifier: %d disagreements with the format table\n", mism);
+    CHECK(mism == 0);
+    CHECK(!d3d8_format_is_swizzled(0x26));
+    CHECK(!d3d8_format_is_swizzled(0x34));
+}
+
 /* 2. Method names. */
 static void check_method_names(void)
 {
@@ -324,6 +353,7 @@ int main(void)
     recomp_status_reset();
 
     check_format_table();
+    check_swizzle_classifier();
     check_method_names();
     check_levels();
     check_new_formats();

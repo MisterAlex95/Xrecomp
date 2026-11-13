@@ -607,16 +607,18 @@ static uint32_t seh_fault_build_esp(const seh_thread *t, uint32_t esp)
  * free to keep any of them in host registers between two accesses to that
  * memory. What is in g_cpu at a faulting guest access:
  *
- *  - an 8-bit or 32-bit access (MEM8/MEM32 and their signed forms, which is
- *    every push, pop and ordinary load or store) may alias any uint32_t
- *    member of g_cpu, so every earlier write to eax..edi, esp, ebp (the
- *    published frame) and seh_ebp is in memory before it: the CONTEXT is
- *    exact;
- *  - a 16-bit, 64-bit or floating-point access cannot alias a uint32_t under
- *    the C aliasing rules, so writes since the last 8/32-bit access or call
- *    may still be pending (gcc and clang both sink an `esp -= 8` past a
- *    MEM16 load): those registers read their previous value, and esp may be
- *    too high by a pending allocation, which SEH_FAULT_GAP covers;
+ *  - every guest access may alias the registers: MEM8/MEM32 by the C
+ *    aliasing rules, MEM16/SMEM16/SMEM64/MEMF/MEMD through may_alias types
+ *    (recomp_types.h, XBA-138; before, gcc and clang sank an `esp -= 8` past
+ *    a MEM16 load). So at a faulting LOAD every earlier write to eax..edi,
+ *    esp, ebp (the published frame) and seh_ebp is in memory: exact;
+ *  - at a faulting STORE, of any width, a register written before it and
+ *    overwritten after it without being read in between may still hold its
+ *    older value: the compiler drops the first write as dead, since in C a
+ *    store cannot trap. Registers the code reads after the store (esp
+ *    across a push, for one) are exact. esp can be too high by a dropped
+ *    allocation (`sub esp; store; mov esp, ebp`), which SEH_FAULT_GAP
+ *    covers. tests/seh_fault_regs pins both;
  *  - EFlags is the last image published (the arithmetic flags are lazy C
  *    locals), and Eip is 0, as is the record's ExceptionAddress: lifted code
  *    keeps no guest pc.

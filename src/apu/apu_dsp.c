@@ -69,6 +69,8 @@ static int s_dsp_ack_count = -1;
 static int s_dsp_ack_auto;                /* =auto: derive from GPSADDR */
 static uint32_t s_dsp_ack_auto_page;      /* the page last reported */
 static volatile int s_gp_in_reset;        /* last GPRST write held the GP */
+static uint32_t s_gprst_seen;             /* aperture GPRST word last polled */
+static int s_gprst_poll = -1;             /* RECOMP_APU_GPRST_POLL, -1: unread */
 
 static void dsp_ack_init(void)
 {
@@ -281,6 +283,42 @@ static void ep_canary_poll(void)
         *w = EP_CANARY_VALUE;
 }
 
+/* ── GPRST as the title writes it ────────────────────────────────────────
+ *
+ * GPRST is the last word of the GP window (aperture 0x3FFFC, VA 0xFE83FFFC).
+ * The window is plain memory (only 0x00000-0x2FFFF is trapped, see the EP
+ * canary above and xbox_memory_layout.c), so a title's store there never
+ * reaches mcpx_apu_dsp_gprst_write: on a real run the GP-in-reset pause of
+ * the ack never triggered (XBA-138). Trapping the page instead would trap
+ * the GP P memory sharing it, which DirectSound bulk-copies with a host
+ * memcpy that cannot be resumed after a fault.
+ *
+ * So the word is read back from the aperture on every poll, before the
+ * doorbell, and a change is handed to mcpx_apu_dsp_gprst_write as the
+ * trapped write would be. Granularity is one APU frame: a hold and release
+ * between two polls is not seen, which is harmless for the ack (the title
+ * cannot ring and be answered in between). The aperture starts zeroed, so a
+ * first store of 0 is not a change: the GP keeps counting as running until
+ * the title writes something else, as with no GPRST write at all.
+ * RECOMP_APU_GPRST_POLL=0 turns the poll off (the ack before XBA-138). */
+static void gprst_poll(void)
+{
+    const uint8_t *ap;
+    uint32_t v;
+
+    if (s_gprst_poll < 0) {
+        const char *e = getenv("RECOMP_APU_GPRST_POLL");
+        s_gprst_poll = (e && *e) ? (atoi(e) != 0) : 1;
+    }
+    if (!s_gprst_poll || !(ap = dsp_aperture()))
+        return;
+    v = *(const volatile uint32_t *)(ap + 0x30000u + NV_PAPU_GPRST);
+    if (v != s_gprst_seen) {
+        s_gprst_seen = v;
+        mcpx_apu_dsp_gprst_write(v);
+    }
+}
+
 int mcpx_apu_dsp_mem_read(uint64_t addr, uint64_t *val)
 {
     if (addr == EP_CANARY_OFFSET && ep_canary_on()) {
@@ -297,6 +335,7 @@ void mcpx_apu_dsp_ack_poll(MCPXAPUState *d)
     if (s_dsp_ack_count < 0)
         dsp_ack_init();
     ep_canary_poll();
+    gprst_poll();
     if (!d->ram_ptr)
         return;
     if (s_dsp_ack_auto) {
@@ -336,6 +375,8 @@ void mcpx_apu_dsp_init(MCPXAPUState *d)
     s_dsp_ack_auto = 0;
     s_dsp_ack_auto_page = 0;
     s_gp_in_reset = 0;
+    s_gprst_seen = 0;
+    s_gprst_poll = -1;
     apu_dsp_watch_reset();
     reverb_init();
 
