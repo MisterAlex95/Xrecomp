@@ -14,10 +14,11 @@ add_executable(nv2a-ffp-backend-test nv2a_ffp_backend_test.c ${NV2A_BACKEND_TEST
 add_executable(nv2a-present-sync-test nv2a_present_sync_test.c ${NV2A_BACKEND_TEST_SOURCES})
 add_executable(nv2a-zpass-test nv2a_zpass_test.c ${NV2A_BACKEND_TEST_SOURCES})
 add_executable(nv2a-flip-cap-test nv2a_flip_cap_test.c ${NV2A_BACKEND_TEST_SOURCES})
+add_executable(nv2a-pacing-test nv2a_pacing_test.c ${NV2A_BACKEND_TEST_SOURCES})
 add_executable(nv2a-ffp-inline-test nv2a_ffp_inline_test.c ${NV2A_BACKEND_TEST_SOURCES})
 add_executable(nv2a-ffp-batch-test nv2a_ffp_batch_test.c ${NV2A_BACKEND_TEST_SOURCES})
 add_executable(nv2a-clear-rect-test nv2a_clear_rect_test.c ${NV2A_BACKEND_TEST_SOURCES})
-foreach(target nv2a-ffp-backend-test nv2a-present-sync-test nv2a-zpass-test nv2a-flip-cap-test
+foreach(target nv2a-ffp-backend-test nv2a-present-sync-test nv2a-zpass-test nv2a-flip-cap-test nv2a-pacing-test
                nv2a-ffp-inline-test nv2a-ffp-batch-test nv2a-clear-rect-test)
     target_include_directories(${target} PRIVATE ../../src/kernel ../../src)
     if(MSVC)
@@ -44,6 +45,11 @@ add_test(NAME nv2a-zpass-always COMMAND nv2a-zpass-test)
 set_tests_properties(nv2a-zpass-always PROPERTIES ENVIRONMENT "RECOMP_GPU_ZPASS=always")
 # RECOMP_GPU_FPS_CAP on a fake clock: fast frames held, slow frames not.
 add_test(NAME nv2a-flip-cap COMMAND nv2a-flip-cap-test)
+# RECOMP_PACING=auto (XBA-107, XBA-135): synthetic titles of 10, 20, 40 ms, a flip-locked one,
+# a fixed cap that wins, PAL 50 Hz vblanks, the CPU rasteriser; one case per process.
+foreach(case fast slow slower locked capwins pal cpu)
+    add_test(NAME nv2a-pacing-${case} COMMAND nv2a-pacing-test ${case})
+endforeach()
 # Inline (Begin/End) fixed-function batches: transformed (default), the old screen-space
 # guess (RECOMP_FFP_INLINE=0), and only what the guess would skip (=2).
 add_test(NAME nv2a-ffp-inline COMMAND nv2a-ffp-inline-test)

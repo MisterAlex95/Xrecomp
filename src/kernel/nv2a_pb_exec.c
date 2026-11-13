@@ -36,6 +36,7 @@
 #include "kernel.h"   /* XBOX_CONTIG_BASE / XBOX_CONTIG_SIZE */
 #include "xbox_memory_layout.h"   /* xbox_Nv2aFrameCounterFlip */
 #include "nv2a_flip_hold.h"
+#include "frame_pacing.h"     /* RECOMP_PACING=auto */
 #include "recomp_status.h"   /* RECOMP_STATUS: frames for the compat runner */
 #include "platform/host_cpus.h"   /* recomp_host_cpus_track (XBA-50) */
 #include "platform/host_time.h"   /* xbox_HostNowNs */
@@ -6307,6 +6308,7 @@ void nv2a_pb_exec_walk_begin(void)
  * 0 = off. */
 static int s_cap_value = -1;             /* gpu_fps_cap's, once computed */
 static int s_cap_pre_fg;                 /* the cap before frame generation lowered it */
+static int pacing_auto(void);
 static int gpu_fps_cap(void)
 {
 #define cap s_cap_value
@@ -6317,6 +6319,8 @@ static int gpu_fps_cap(void)
 #else
         int c = 0;
 #endif
+        if (pacing_auto())
+            c = 0;          /* RECOMP_PACING=auto picks the rate (pacing_cap_at_flip) */
         if (e && *e)
             c = atoi(e);
         if (c < 0)
@@ -6374,13 +6378,79 @@ uint64_t nv2a_pb_exec_flip_cap_until_ns(void)
     return s_cap_until_ns;
 }
 
+/* RECOMP_PACING=auto (XBA-107, XBA-135): with no RECOMP_GPU_FPS_CAP set (a
+ * profile's value or the launcher's Frame cap wins as it is), the cap's
+ * rate is chosen at every flip from the title's presentation interval and
+ * the frame cost the host sustains (frame_pacing.h), on either renderer;
+ * frame generation's lower cap still bounds it. =ask: the title's ask only.
+ * Unset or anything else: the fixed cap as before. RECOMP_PACING_LOCK=1/0
+ * forces the "locked to its ask" verdict; RECOMP_DISPLAY_HZ (set by the SDL
+ * presenter) bounds an IMMEDIATE title. Vblanks keep the console's rate:
+ * only the flips are paced. */
+static FramePacer s_pacer;
+static uint64_t s_pace_slept_ns;        /* slept at the cap since the last flip */
+static uint32_t s_pace_rate, s_pace_logged;
+
+static int pacing_auto(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("RECOMP_PACING"), *c = getenv("RECOMP_GPU_FPS_CAP");
+        const char *l = getenv("RECOMP_PACING_LOCK"), *d = getenv("RECOMP_DISPLAY_HZ");
+        int want = e && (!strcmp(e, "auto") || !strcmp(e, "ask"));
+        on = want && !(c && *c);
+        if (on) {
+            long hz = d && *d ? strtol(d, NULL, 10) : 0;
+            frame_pacing_init(&s_pacer, hz >= 24 && hz <= 480 ? (uint32_t)hz : 0u,
+                              l && *l ? (*l != '0') : -1, strcmp(e, "ask") != 0);
+            fprintf(stderr, "  [GPU] pacing %s: the title's presentation interval%s; display %u Hz\n",
+                    e, s_pacer.adaptive ? ", then the highest even rate the host sustains" : "",
+                    frame_pacing_display(&s_pacer));
+        } else if (want) {
+            fprintf(stderr, "  [GPU] pacing %s off: RECOMP_GPU_FPS_CAP=%s wins\n", e, c);
+        }
+    }
+    return on;
+}
+
+/* At FLIP_STALL, under auto: the rate for the next frame, bounded by a
+ * lower cap that frame generation set (hard > 0). A new rate restarts the
+ * schedule. */
+static int pacing_cap_at_flip(int hard)
+{
+    uint64_t now = xbox_HostNowNs();
+    uint32_t r;
+
+    frame_pacing_vblank(&s_pacer, xbox_VblankCount(), now);
+    r = frame_pacing_flip(&s_pacer, now, s_pace_slept_ns);
+    s_pace_slept_ns = 0;
+    if (s_pacer.changes != s_pace_logged) {
+        s_pace_logged = s_pacer.changes;
+        fprintf(stderr, "  [GPU] pacing: %u fps (%s; ask %u fps: %u Hz vblank, interval %s%u)\n",
+                s_pacer.rate, s_pacer.why ? s_pacer.why : "-", frame_pacing_ask(&s_pacer),
+                s_pacer.vblank_hz, s_pacer.ask_iv ? "" : "IMMEDIATE, display ",
+                s_pacer.ask_iv ? s_pacer.ask_iv : frame_pacing_display(&s_pacer));
+    }
+    if (hard > 0 && (uint32_t)hard < r)
+        r = (uint32_t)hard;
+    if (r != s_pace_rate) {
+        s_pace_rate = r;
+        s_cap_next_ns = 0;
+    }
+    return (int)r;
+}
+
 /* At FLIP_STALL: book the slot the next walk waits for. */
 static void flip_cap_book(void)
 {
     uint64_t period, now;
     int cap;
 
-    if (!backend_draws() || (cap = gpu_fps_cap()) <= 0) {
+    if (pacing_auto())
+        cap = pacing_cap_at_flip(gpu_fps_cap());
+    else
+        cap = backend_draws() ? gpu_fps_cap() : 0;
+    if (cap <= 0) {
         s_cap_next_ns = s_cap_due_ns = 0;
         return;
     }
@@ -6422,6 +6492,7 @@ static void flip_cap_wait(void)
 #ifdef XBOXRECOMP_LSFG
     s_cap_held_total++;
 #endif
+    s_pace_slept_ns += xbox_HostNowNs() - now;
     now = xbox_HostNowNs();
     if (now > due) {
         s_cap_over_ns += now - due;
@@ -6518,11 +6589,20 @@ int nv2a_pb_exec_flip_poll(void)
 /* The cap's line in the periodic [GPU] report, then reset. */
 static void flip_cap_report(void)
 {
-    if (!backend_draws() || gpu_fps_cap() <= 0)
+    if (pacing_auto() && s_pace_rate)
+        fprintf(stderr, "[GPU] pacing %u fps: ask %u fps (vblank %u Hz, interval %s%u), %s, "
+                "frame cost p90 %.1f ms, %u%% of frames missed their slot\n",
+                s_pace_rate, frame_pacing_ask(&s_pacer), s_pacer.vblank_hz,
+                s_pacer.ask_iv ? "" : "IMMEDIATE, display ",
+                s_pacer.ask_iv ? s_pacer.ask_iv : frame_pacing_display(&s_pacer),
+                s_pacer.lock_force > 0 || s_pacer.locked > 0 ? "locked to its ask"
+                : frame_pacing_free(&s_pacer) ? "adaptive" : "at its ask until judged",
+                s_pacer.last_p90_us / 1e3, s_pacer.last_miss_pct);
+    else if (!backend_draws() || gpu_fps_cap() <= 0)
         return;
     fprintf(stderr, "[GPU] frame cap %d: waits %u slept %.1f ms, woke %.2f ms"
             " late avg (%.2f max), frames over a period (not held) %u\n",
-            gpu_fps_cap(), s_cap_waits, s_cap_slept_ns / 1e6,
+            pacing_auto() ? (int)s_pace_rate : gpu_fps_cap(), s_cap_waits, s_cap_slept_ns / 1e6,
             s_cap_waits ? s_cap_over_ns / 1e6 / s_cap_waits : 0.0,
             s_cap_over_max_ns / 1e6, s_cap_late);
     s_cap_waits = s_cap_late = 0;
@@ -6892,6 +6972,8 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
         if ((param & 0x1Fu) == 1u)
             frame_lock_swap(&s_frame_lock, param >> 5);
 #endif
+        if ((param & 0x1Fu) == 1u && pacing_auto())     /* RECOMP_PACING=auto: the title's ask */
+            frame_pacing_swap(&s_pacer, param >> 5);
         if (param && (param & 0x1Fu) != 1u) {
             int (*hook)(uint32_t) = s_swm_hook;
             if (hook && hook(param)) {
