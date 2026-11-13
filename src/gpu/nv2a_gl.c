@@ -2431,10 +2431,14 @@ static GlVsh *vsh_get(const Nv2aProgramBatch *pb, uint64_t fmt)
     v->hash = h;
     v->count = pb->ins_count;
     v->fmt = fmt;
-    if (!nv2a_gl_vsh_body_fmt(pb->ins, pb->ins_count,
-                              NV2A_GL_ES ? NV2A_GL_VSH_RENDER
-                                         : NV2A_GL_VSH_RENDER | NV2A_GL_VSH_CLIP_DISTANCE,
-                              fmt, body, sizeof body, NULL)
+    if (!(pb->ffp
+          ? nv2a_gl_vsh_ffp_body(pb->ffp, NV2A_GL_ES ? NV2A_GL_VSH_RENDER
+                                                     : NV2A_GL_VSH_RENDER | NV2A_GL_VSH_CLIP_DISTANCE,
+                                 fmt, body, sizeof body)
+          : nv2a_gl_vsh_body_fmt(pb->ins, pb->ins_count,
+                                 NV2A_GL_ES ? NV2A_GL_VSH_RENDER
+                                            : NV2A_GL_VSH_RENDER | NV2A_GL_VSH_CLIP_DISTANCE,
+                                 fmt, body, sizeof body, NULL))
         || !(v->src = strdup(body))) {
         v->failed = 1;
         return NULL;

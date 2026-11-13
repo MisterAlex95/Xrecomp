@@ -236,6 +236,33 @@ typedef struct {
     uint32_t offset, type, size, stride;
 } Nv2aRawAttr;
 
+/* A fixed-function batch for a back end's generated vertex shader
+ * (Nv2aProgramBatch.ffp, RECOMP_GPU_FFP=1; XBA-134). What ffp_vertex and
+ * lit_color in nv2a_pb_exec.c compute, as state the shader is built from;
+ * the numbers are in Nv2aProgramBatch.constants:
+ *   c[0..3]   the composite matrix's rows (clip = c[i] . v0)
+ *   c[4]      the viewport offset c[59] (xyz), added after the divide
+ *   c[5..7]   the model-view matrix's rows (eye = c[i].xyz . v0.xyz + c[i].w;
+ *             normals by c[i].xyz)
+ *   c[8]      scene ambient (rgb), material alpha (w)
+ *   c[9 + 4 i .. 12 + 4 i], light i of nlights: direction or eye-space
+ *             position (xyz) and range (w); attenuation (xyz); ambient;
+ *             diffuse.
+ * Inputs: v0 the position; v[nrm] the normal, v[col] the colour (D3DCOLOR
+ * as r, g, b, a), v[tex[s]] stage s's coordinates, each only when its bit is
+ * in Nv2aProgramBatch.streams (else: no normal -- unlit --, white, 0,0,0,1).
+ * The position comes out as a vertex program's oPos would: (clip.xyz /
+ * clip.w + c[4].xyz, clip.w), logical pixels. */
+typedef struct {
+    uint32_t streams;               /* = Nv2aProgramBatch.streams: inputs present */
+    uint32_t nrm, col, tex[4];      /* input slots */
+    uint32_t lit;                   /* SET_LIGHTING_ENABLE with a normal array */
+    uint32_t flip;                  /* RECOMP_FFP_FLIP_NORMALS */
+    uint32_t amb_vc, dif_vc;        /* SET_COLOR_MATERIAL: ambient / diffuse from v[col] */
+    uint32_t nlights;
+    uint32_t light_kind[8];         /* 1 infinite, else local (no spot cone) */
+} Nv2aFfpKey;
+
 typedef struct {
     const uint32_t (*ins)[4];
     uint32_t        ins_count;
@@ -261,6 +288,11 @@ typedef struct {
      * sends the same batch gathered (raw NULL). */
     const Nv2aRawAttr *raw;
     uint32_t        raw_first;
+    /* Non-NULL: no program (ins NULL, ins_count 0) but the fixed-function
+     * unit, as Nv2aFfpKey says; `hash` is equal for equal keys and differs
+     * from every program's. A back end that does not build such shaders
+     * returns 0 (the executor then transforms on the CPU). */
+    const Nv2aFfpKey *ffp;
 } Nv2aProgramBatch;
 
 /* Nv2aBatch.prim: what vertices[] / Nv2aProgramBatch.indices list. */

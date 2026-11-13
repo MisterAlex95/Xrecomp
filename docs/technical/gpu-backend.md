@@ -563,6 +563,26 @@ vertex buffers (4.6 MB), 979 index lists (2.3 MB), 730 vertex arrays. No GL
 errors; the frame dump differs from the gathered run only where the scene
 animates (sky, grass, the character, the pulsing button).
 
+**Fixed function on the GPU (`RECOMP_GPU_FFP=1`, XBA-134).** Off by
+default. A fixed-function batch then reaches `draw_program` like a
+vertex-program batch, with `Nv2aProgramBatch.ffp` set instead of program
+words: the state `ffp_batch_begin` resolves once a batch (commit 511f2c1)
+as a key (which inputs are streamed, lighting, the light kinds, colour
+material, normal flipping) and as constants (composite and model-view rows,
+viewport offset, scene ambient and material alpha, four per light; layout
+in `nv2a_backend.h`, change stamps so a program uploads only what moved).
+`nv2a_gl_vsh_ffp_body` writes `ffp_vertex` / `lit_color` expression for
+expression as a body for the program translator's own wrapper (same inputs
+-- gathered or `RECOMP_GPU_VBO` raw --, same `oPos` mapping, near plane and
+fog), one shader per key. So the batch is no longer transformed, lit and
+uploaded on the CPU each time (the `KB transformed on the CPU` of the frame
+line). `tests/nv2a_gl_coverage` compares it with the CPU transform output by
+output over 41 random states (worst difference 1.2e-7 on llvmpipe) and
+draws the same picture both ways. Differences left: a vertex with clip w
+within 1e-6 of 0 drops the whole batch on the CPU and is drawn on the GPU;
+texgen, texture matrices, specular, skinning and spot cones are modelled by
+neither (counted, "What is not drawn").
+
 **Vertices.** Otherwise the executor transforms: vertex programs run in
 `nv2a_vsh_interp.c`, fixed-function vertices in `ffp_vertex`, and triangles
 are clipped at the near plane. The back end gets surface-pixel x/y, window z,
@@ -1078,7 +1098,8 @@ The original list (the interpreter was 41 % of the in-world executor):
    11:11:10 normals, unsigned bytes.
 5. Fog: the CPU computes the fog factor per vertex (`fog_factor`); move it
    into the vertex shader from `oFog.x` and the fog mode/parameters.
-6. Fixed-function T&L (`ffp_vertex`, `lit_color`) either as a second
+6. Done behind `RECOMP_GPU_FFP=1` (XBA-134, "Fixed function on the GPU"
+   above); the original note: fixed-function T&L (`ffp_vertex`, `lit_color`) either as a second
    generated vertex shader or kept on the CPU (menus only use it lightly).
 
 ### 7d: surfaces, readback, reports
@@ -1178,7 +1199,7 @@ The blockers the earlier note listed, checked against the code then:
 | Blocker | State |
 |---|---|
 | Synchronous visibility queries ending the render pass | Gone with deferred reports (G2, "Visibility tests"): no wait at `GET_REPORT`, a flush after 300 us and a wait after 2 ms only for a report the title spins on. `RECOMP_GPU_ZPASS=lazy` (never flush or wait from the idle hook) stays the candidate for a tiler, to measure on the device. |
-| Per-frame vertex uploads (115 MB/frame) | Vertex-program batches come from cached guest vertex buffers (G3, `RECOMP_GPU_VBO`, on by default; 0 KB a frame in Oakvale's steady state). Fixed-function and screen-space batches are still transformed on the CPU and uploaded per batch; the frame line now gives that figure (`KB transformed on the CPU`), to read on the device before moving them. |
+| Per-frame vertex uploads (115 MB/frame) | Vertex-program batches come from cached guest vertex buffers (G3, `RECOMP_GPU_VBO`, on by default; 0 KB a frame in Oakvale's steady state). Fixed-function and screen-space batches are still transformed on the CPU and uploaded per batch by default; the frame line gives that figure (`KB transformed on the CPU`). `RECOMP_GPU_FFP=1` (XBA-134) moves fixed-function batches to a generated vertex shader over cached vertex buffers: to measure on the device before it becomes the default. |
 | CPU writes into a surface the GPU does not see | Done: "Guest CPU writes". |
 | Clear rectangles on swizzled surfaces | Done: the executor hands a back end `SET_CLEAR_RECT` on a swizzled surface. |
 | Anti-aliased surfaces without a resolve | Done: "Present of an anti-aliased surface"; drawing and sampling them already worked at their real size. |

@@ -4849,6 +4849,85 @@ static int gpu_vsh_enabled(void)
     return on;
 }
 
+/* RECOMP_GPU_FFP=1 (XBA-134): fixed-function batches go to a back end
+ * with NV2A_BACKEND_CAP_PROGRAM as a program batch with Nv2aProgramBatch.ffp
+ * set, transformed and lit by a vertex shader generated from the state
+ * (nv2a_gl_vsh.c) instead of on the CPU and uploaded per batch. Off by
+ * default while it is measured on the device. */
+static int s_gpu_ffp = -1;
+void nv2a_gpu_ffp_enable(int on) { s_gpu_ffp = on ? 1 : 0; }
+
+static int gpu_ffp_enabled(void)
+{
+    if (s_gpu_ffp < 0) {
+        const char *e = getenv("RECOMP_GPU_FFP");
+        s_gpu_ffp = e && e[0] == '1';
+    }
+    return s_gpu_ffp;
+}
+
+/* The fixed-function state as constants (Nv2aFfpKey's layout), with change
+ * stamps for the back end's sync. */
+#define NV_FFPC 41
+static float s_ffpc[NV2A_VSH_CONSTANTS][4];
+static uint64_t s_ffpc_stamp[NV2A_VSH_CONSTANTS], s_ffpc_serial;
+static Nv2aFfpKey s_ffpk;
+
+static void ffpc_set(uint32_t i, float x, float y, float z, float w)
+{
+    const float v[4] = { x, y, z, w };
+    if (memcmp(s_ffpc[i], v, sizeof v) != 0) {
+        memcpy(s_ffpc[i], v, sizeof v);
+        s_ffpc_stamp[i] = ++s_ffpc_serial;
+    }
+}
+
+/* ffp_batch_begin's state (s_ffp) into s_ffpk and s_ffpc. Inputs read:
+ * position, colour, the four texture coordinate sets, the normal when lit;
+ * returns them as a mask. */
+static uint32_t ffp_program_state(void)
+{
+    uint32_t i, inputs = 1u;
+    const float *m;
+
+    ffp_batch_begin();
+    memset(&s_ffpk, 0, sizeof s_ffpk);
+    s_ffpk.col = (uint32_t)(color_attr() - s_gpu.attr);
+    s_ffpk.tex[0] = (uint32_t)(texcoord_attr() - s_gpu.attr);
+    for (i = 1; i < 4; i++)
+        s_ffpk.tex[i] = 9 + i;
+    s_ffpk.nrm = 2;
+    inputs |= 1u << s_ffpk.col;
+    for (i = 0; i < 4; i++)
+        inputs |= 1u << s_ffpk.tex[i];
+    s_ffpk.lit = (uint32_t)s_ffp.lit;
+    if (s_ffp.lit)
+        inputs |= 1u << 2;
+    m = s_ffp.m;
+    for (i = 0; i < 4; i++)
+        ffpc_set(i, m[4 * i], m[4 * i + 1], m[4 * i + 2], m[4 * i + 3]);
+    ffpc_set(4, s_ffp.off[0], s_ffp.off[1], s_ffp.off[2], 0.0f);
+    if (!s_ffp.lit)
+        return inputs;
+    s_ffpk.flip = (uint32_t)s_ffp.flip;
+    s_ffpk.amb_vc = (uint32_t)s_ffp.amb_vc;
+    s_ffpk.dif_vc = (uint32_t)s_ffp.dif_vc;
+    s_ffpk.nlights = (uint32_t)s_ffp.nlights;
+    for (i = 0; i < 3; i++)
+        ffpc_set(5 + i, s_ffp.mv[4 * i], s_ffp.mv[4 * i + 1], s_ffp.mv[4 * i + 2],
+                 s_ffp.mv[4 * i + 3]);
+    ffpc_set(8, s_ffp.scene[0], s_ffp.scene[1], s_ffp.scene[2], s_ffp.alpha);
+    for (i = 0; i < s_ffpk.nlights; i++) {
+        const FfpLight *L = &s_ffp.light[i];
+        s_ffpk.light_kind[i] = L->kind == 1 ? 1u : 2u;
+        ffpc_set(9 + 4 * i, L->l[0], L->l[1], L->l[2], L->range);
+        ffpc_set(10 + 4 * i, L->att[0], L->att[1], L->att[2], 0.0f);
+        ffpc_set(11 + 4 * i, L->amb[0], L->amb[1], L->amb[2], 0.0f);
+        ffpc_set(12 + 4 * i, L->dif[0], L->dif[1], L->dif[2], 0.0f);
+    }
+    return inputs;
+}
+
 static int pv_alloc(void)
 {
     if (s_pv.attrs)
@@ -5205,19 +5284,28 @@ static int raster_batch_backend_program(void)
     uint32_t inputs, streams = 0, nstream = 0, n = s_gpu.idx_count, rows = 0;
     uint32_t i, a, t = 0, lo = 0, hi = 0;
     static int no_rc = -1;
-    int raw;
+    int raw, ffp = !batch_uses_program();
 
     if (!s_backend || !s_backend->draw_program
         || (s_backend->caps & (NV2A_BACKEND_CAP_PROGRAM | NV2A_BACKEND_CAP_PIXEL))
                != (NV2A_BACKEND_CAP_PROGRAM | NV2A_BACKEND_CAP_PIXEL)
-        || !gpu_vsh_enabled())
+        || !(ffp ? gpu_ffp_enabled() : gpu_vsh_enabled()))
         return 0;
     memset(&pb, 0, sizeof pb);
     if (prim_is_point_line(s_gpu.prim) && !backend_points_lines())
         return 1;                       /* not drawn (counted as unsupported) */
-    pb.ins_count = nv2a_vsh_program(&pb.ins, &pb.hash, &inputs);
-    if (!pb.ins_count || nv2a_vsh_program_writes_constants() || !pv_alloc())
-        return 0;
+    if (ffp) {
+        /* The fixed-function unit as a generated shader (XBA-134); the
+         * key's hash once the streams are known, below. */
+        inputs = ffp_program_state();
+        pb.ffp = &s_ffpk;
+        if (!pv_alloc())
+            return 0;
+    } else {
+        pb.ins_count = nv2a_vsh_program(&pb.ins, &pb.hash, &inputs);
+        if (!pb.ins_count || nv2a_vsh_program_writes_constants() || !pv_alloc())
+            return 0;
+    }
 
     /* What each input reads (transform_vertex): an array, else the current
      * value; an array fetch_attr cannot read gives 0,0,0,1 per vertex. */
@@ -5233,6 +5321,16 @@ static int raster_batch_backend_program(void)
             streams |= 1u << a;
             nstream++;
         }
+    }
+
+    if (ffp) {
+        const uint8_t *k = (const uint8_t *)&s_ffpk;
+        size_t j;
+        s_ffpk.streams = streams;
+        pb.hash = 0xFF9ull << 52;
+        for (j = 0; j < sizeof s_ffpk; j++)
+            pb.hash = (pb.hash ^ k[j]) * 0x100000001B3ull;
+        pb.hash |= 1;
     }
 
     /* RECOMP_GPU_VBO: no gather, the back end reads the arrays itself;
@@ -5341,8 +5439,14 @@ gathered:
     }
 #undef PV_TRI
 
-    pb.constants = nv2a_vsh_constants();
-    pb.const_stamp = nv2a_vsh_constant_stamps(&pb.const_serial);
+    if (ffp) {
+        pb.constants = (const float (*)[4])s_ffpc;
+        pb.const_stamp = s_ffpc_stamp;
+        pb.const_serial = s_ffpc_serial;
+    } else {
+        pb.constants = nv2a_vsh_constants();
+        pb.const_stamp = nv2a_vsh_constant_stamps(&pb.const_serial);
+    }
     pb.attrs = raw ? NULL : s_pv.attrs;
     pb.raw = raw ? s_raw : NULL;
     pb.raw_first = raw ? lo : 0;
@@ -5362,8 +5466,11 @@ gathered:
     current_render_state(&rs);
     if (no_rc < 0)
         no_rc = getenv("RECOMP_NO_COMBINERS") != NULL;
+    /* A fixed-function batch without coordinates draws untextured, as
+     * raster_batch_program has it (s_xf_no_tex). */
     current_pixel_state(&ps, (s_gpu.rc_seen && !no_rc) ? NV2A_SHADE_COMBINERS
-                                                       : NV2A_SHADE_MODULATE, 1);
+                                                       : NV2A_SHADE_MODULATE,
+                        ffp ? (streams >> s_ffpk.tex[0]) & 1 : 1);
     memset(&batch, 0, sizeof batch);
     batch.state = &rs;
     batch.pixel = &ps;
@@ -5388,7 +5495,10 @@ gathered:
         return 0;
     }
 
-    s_gpu.batches_program++;
+    if (ffp)
+        s_gpu.batches_ffp++;
+    else
+        s_gpu.batches_program++;
     s_gpu.verts_program += n;
     if (!prim_is_point_line(s_gpu.prim))
         s_gpu.tris_drawn += t / 3;
@@ -5408,7 +5518,7 @@ static void raster_batch(void)
                            : prim_is_point_line(s_gpu.prim) ? 2u : 3u))
         return;
     if (batch_uses_program() || batch_is_ffp()) {
-        if (batch_uses_program() && raster_batch_backend_program())
+        if ((batch_uses_program() || gpu_ffp_enabled()) && raster_batch_backend_program())
             return;
         raster_batch_program();
         return;

@@ -32,9 +32,15 @@
  *
  * Formats:
  *  10. swizzled A8Y8 and R4G4B4A4 (added), and SET_TEXTURE_FILTER's signed
- *      channels on an A8R8G8B8 texel, through the combiners. */
+ *      channels on an A8R8G8B8 texel, through the combiners.
+ *
+ * Fixed function on the GPU (XBA-134 item 1):
+ *  11. the generated vertex shader against the CPU transform, output by
+ *      output over random states, and the same picture both ways. */
 #include "../../src/gpu/nv2a_gl.c"
 #include "nv2a_coverage.h"
+#include "nv2a_vsh_interp.h"   /* Nv2aVshOutput: the capture layout */
+#include <math.h>
 
 #define MEM_BYTES (8u << 20)
 #define FB      0x00100000u         /* 64x64 A8R8G8B8, pitch 256 */
@@ -165,6 +171,238 @@ static void draw(uint32_t prim, uint32_t first, uint32_t n)
     m(0x17FC, prim);
     m(0x1810, first | ((n - 1) << 24));
     m(0x17FC, 0);
+}
+
+/* ---- XBA-134 item 1: the fixed-function unit as a generated shader ------
+ * A spy around the GL back end records what each path hands it: the CPU
+ * transform's vertices (draw) and the fixed-function program batch
+ * (draw_program with ffp set), then passes the batch on. */
+extern void nv2a_gpu_ffp_enable(int on);
+#define REC_MAX 256
+static struct {
+    uint32_t count;                         /* CPU path: vertices */
+    Nv2aVertexFull full[REC_MAX];
+    int got_ffp;                            /* GPU path: a fixed-function batch */
+    Nv2aFfpKey key;
+    uint32_t rows, streams;
+    float attrs[REC_MAX * 16 * 4];
+    float cst[64][4];
+} s_rec;
+static Nv2aBackend s_spy;
+
+static void spy_draw(const Nv2aSurface *s, const Nv2aBatch *b)
+{
+    if (b->full && b->count <= REC_MAX) {
+        s_rec.count = b->count;
+        memcpy(s_rec.full, b->full, b->count * sizeof *b->full);
+    }
+    gl_draw(s, b);
+}
+
+static int spy_draw_program(const Nv2aSurface *s, const Nv2aBatch *b)
+{
+    const Nv2aProgramBatch *pb = b->program;
+    if (pb->ffp && pb->attrs && pb->vertex_count <= REC_MAX) {
+        uint32_t a, ns = 0;
+        for (a = 0; a < 16; a++)
+            ns += (pb->streams >> a) & 1;
+        s_rec.got_ffp = 1;
+        s_rec.key = *pb->ffp;
+        s_rec.rows = pb->vertex_count;
+        s_rec.streams = pb->streams;
+        memcpy(s_rec.attrs, pb->attrs, (size_t)pb->vertex_count * ns * 4 * sizeof(float));
+        memcpy(s_rec.cst, pb->constants, sizeof s_rec.cst);
+    }
+    return gl_draw_program(s, b);
+}
+
+static void spy_install(void)
+{
+    s_spy = s_backend;
+    s_spy.caps &= ~NV2A_BACKEND_CAP_RAW_VERTEX;     /* gathered: the spy copies the rows */
+    s_spy.draw = spy_draw;
+    s_spy.draw_program = spy_draw_program;
+    nv2a_backend_register_with_present(&s_spy, gl_present);
+}
+
+/* Run the fixed-function body for s_rec on the GPU, capturing what it
+ * writes (transform feedback, Nv2aVshOutput order). */
+static int ffp_capture(Nv2aVshOutput *out)
+{
+    static char body[65536];
+    static const char *fs_body = "out vec4 o;\nvoid main() { o = vec4(0.0); }\n";
+    const char *src[2];
+    GLuint vs, fs, prog, vao, vbo, tfb;
+    GLint ok = 0;
+    uint32_t a, k, ns = 0, i;
+    void *map;
+
+    if (!nv2a_gl_vsh_ffp_body(&s_rec.key, NV2A_GL_VSH_CAPTURE, 0, body, sizeof body))
+        return 0;
+    src[0] = nv2a_gl_glsl_header(NV2A_GL_ES);
+    vs = glCreateShader(GL_VERTEX_SHADER);
+    src[1] = body;
+    glShaderSource(vs, 2, src, NULL);
+    glCompileShader(vs);
+    glGetShaderiv(vs, GL_COMPILE_STATUS, &ok);
+    if (!ok) {
+        char log[2048];
+        glGetShaderInfoLog(vs, sizeof log, NULL, log);
+        printf("ffp body compile failed: %s\n%s\n", log, body);
+        return 0;
+    }
+    fs = glCreateShader(GL_FRAGMENT_SHADER);
+    src[1] = fs_body;
+    glShaderSource(fs, 2, src, NULL);
+    glCompileShader(fs);
+    prog = glCreateProgram();
+    glAttachShader(prog, vs);
+    glAttachShader(prog, fs);
+    glTransformFeedbackVaryings(prog, 8, nv2a_gl_vsh_capture_names, GL_INTERLEAVED_ATTRIBS);
+    glLinkProgram(prog);
+    glDeleteShader(vs);
+    glDeleteShader(fs);
+    glGetProgramiv(prog, GL_LINK_STATUS, &ok);
+    if (!ok)
+        return 0;
+    sh_forget();                            /* raw GL below: the back end's shadow is stale */
+    glUseProgram(prog);
+    for (i = 0; i < 64; i++) {
+        char name[12];
+        GLint loc;
+        snprintf(name, sizeof name, "c[%u]", i);
+        if ((loc = glGetUniformLocation(prog, name)) >= 0)
+            glUniform4fv(loc, 1, s_rec.cst[i]);
+    }
+    for (a = 0; a < 16; a++)
+        ns += (s_rec.streams >> a) & 1;
+    glGenVertexArrays(1, &vao);
+    glGenBuffers(1, &vbo);
+    glGenBuffers(1, &tfb);
+    glBindVertexArray(vao);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(s_rec.rows * ns * 16), s_rec.attrs, GL_STREAM_DRAW);
+    for (a = 0, k = 0; a < 16; a++)
+        if (s_rec.streams & (1u << a)) {
+            glEnableVertexAttribArray(a);
+            glVertexAttribPointer(a, 4, GL_FLOAT, GL_FALSE, (GLsizei)(ns * 16),
+                                  (const void *)((size_t)k++ * 16));
+        }
+    glBindBufferBase(GL_TRANSFORM_FEEDBACK_BUFFER, 0, tfb);
+    glBufferData(GL_TRANSFORM_FEEDBACK_BUFFER, (GLsizeiptr)(s_rec.rows * sizeof(Nv2aVshOutput)),
+                 NULL, GL_STREAM_READ);
+    glEnable(GL_RASTERIZER_DISCARD);
+    glBeginTransformFeedback(GL_POINTS);
+    glDrawArrays(GL_POINTS, 0, (GLsizei)s_rec.rows);
+    glEndTransformFeedback();
+    glDisable(GL_RASTERIZER_DISCARD);
+    map = glMapBufferRange(GL_TRANSFORM_FEEDBACK_BUFFER, 0,
+                           (GLsizeiptr)(s_rec.rows * sizeof(Nv2aVshOutput)), GL_MAP_READ_BIT);
+    if (map) {
+        memcpy(out, map, s_rec.rows * sizeof(Nv2aVshOutput));
+        glUnmapBuffer(GL_TRANSFORM_FEEDBACK_BUFFER);
+    }
+    glBindBufferBase(GL_TRANSFORM_FEEDBACK_BUFFER, 0, 0);
+    glBindVertexArray(0);
+    glDeleteBuffers(1, &vbo);
+    glDeleteBuffers(1, &tfb);
+    glDeleteVertexArrays(1, &vao);
+    glDeleteProgram(prog);
+    sh_forget();
+    return map != NULL;
+}
+
+static uint32_t s_rng = 12345;
+static float frand(float lo, float hi)
+{
+    s_rng = s_rng * 1664525u + 1013904223u;
+    return lo + (hi - lo) * (float)(s_rng >> 8) / 16777216.0f;
+}
+
+/* One random fixed-function state and batch (trial t), drawn through the
+ * CPU transform and through the generated shader; the vertices compared.
+ * Returns the worst difference. */
+static float ffp_trial(int t)
+{
+    static Nv2aVshOutput gpu[REC_MAX];
+    uint32_t i, k, n = 48, nl = (uint32_t)t % 9, mask = 0;
+    int lit = t % 4 != 3, col = t % 5 != 4, nrm = t % 7 != 6;
+    float worst = 0.0f;
+
+    /* Composite: viewport-ish scale, a little perspective, w in [1, 2]. */
+    {
+        const float M[16] = { 32 * frand(0.5f, 1.5f), frand(-4, 4), frand(-4, 4), 32,
+                              frand(-4, 4), -32 * frand(0.5f, 1.5f), frand(-4, 4), 32,
+                              frand(-0.1f, 0.1f), frand(-0.1f, 0.1f), 0.2f, 0.5f,
+                              frand(-0.2f, 0.2f), frand(-0.2f, 0.2f), frand(-0.2f, 0.2f), 1.5f };
+        for (i = 0; i < 16; i++)
+            mf(0x0680 + 4 * i, M[i]);
+    }
+    for (i = 0; i < 12; i++)                 /* model-view rows 0-2 */
+        mf(0x0480 + 4 * i, (i % 5 == 0) ? frand(0.5f, 1.5f) : frand(-0.5f, 0.5f));
+    m(0x0314, (uint32_t)lit);
+    for (i = 0; i < nl; i++) {
+        uint32_t b = 0x1000 + i * 0x80, kind = frand(0, 1) < 0.5f ? 1u : 2u;
+        mask |= kind << (2 * i);
+        for (k = 0; k < 3; k++) {
+            mf(b + 4 * k, frand(0, 0.2f));                 /* ambient */
+            mf(b + 0x0C + 4 * k, frand(0, 0.6f));          /* diffuse */
+            mf(b + 0x34 + 4 * k, frand(-1, 1));            /* direction */
+            mf(b + 0x5C + 4 * k, frand(-3, 3));            /* position */
+            mf(b + 0x68 + 4 * k, k == 0 ? frand(0.5f, 1.5f) : frand(0, 0.3f));
+        }
+        mf(b + 0x24, frand(0, 1) < 0.3f ? frand(0.5f, 2.0f) : 0.0f);   /* range */
+    }
+    m(0x03BC, mask);
+    m(0x0298, (uint32_t)(t & 3) << 2 | (uint32_t)((t >> 2) & 1) << 4);   /* colour material */
+    for (k = 0; k < 3; k++)
+        mf(0x0A10 + 4 * k, frand(0, 0.3f));
+    mf(0x03B4, frand(0, 1));
+    mf(0x0A20, frand(-2, 2)); mf(0x0A24, frand(-2, 2)); mf(0x0A28, frand(0, 1));
+    /* Vertices: position, D3DCOLOR, normal, texcoord 0 (float2) and 1 (float4). */
+    for (i = 0; i < n; i++) {
+        uint32_t at = VB + 64 * i;
+        putf(at, frand(-1, 1)); putf(at + 4, frand(-1, 1)); putf(at + 8, frand(0, 1));
+        put32(at + 12, s_rng ^ (i * 0x9E3779B9u));
+        putf(at + 16, frand(-1, 1)); putf(at + 20, frand(-1, 1)); putf(at + 24, frand(-1, 1));
+        putf(at + 28, frand(0, 1)); putf(at + 32, frand(0, 1));
+        putf(at + 36, frand(-2, 2)); putf(at + 40, frand(-2, 2)); putf(at + 44, frand(-2, 2));
+        putf(at + 48, frand(0.5f, 2));
+    }
+    for (k = 0; k < 16; k++)
+        m(0x1760 + 4 * k, 2);
+    m(0x1720, VB);      m(0x1760, 2 | (3 << 4) | (64 << 8));
+    if (col) { m(0x172C, VB + 12); m(0x176C, 0 | (4 << 4) | (64 << 8)); }
+    if (nrm) { m(0x1728, VB + 16); m(0x1768, 2 | (3 << 4) | (64 << 8)); }
+    m(0x1744, VB + 28); m(0x1784, 2 | (2 << 4) | (64 << 8));
+    m(0x1748, VB + 36); m(0x1788, 2 | (4 << 4) | (64 << 8));
+
+    memset(&s_rec, 0, sizeof s_rec);
+    nv2a_gpu_ffp_enable(0);
+    draw(5, 0, n);                           /* TRIANGLES: the CPU transform */
+    nv2a_gpu_ffp_enable(1);
+    draw(5, 0, n);                           /* the generated shader */
+    nv2a_gpu_ffp_enable(0);
+    if (s_rec.count != n || !s_rec.got_ffp || s_rec.rows != n || !ffp_capture(gpu)) {
+        printf("  trial %d: CPU %u vertices, shader batch %d with %u rows\n", t, s_rec.count,
+               s_rec.got_ffp, s_rec.rows);
+        return 1e9f;
+    }
+    for (i = 0; i < n; i++) {
+        const Nv2aVertexFull *c = &s_rec.full[i];
+        const Nv2aVshOutput *g = &gpu[i];
+        for (k = 0; k < 4; k++) {
+            float dp = fabsf(c->pos[k] - g->pos[k]) / (1.0f + fabsf(c->pos[k]));
+            float dc = fabsf(c->d0[k] - g->d0[k]);
+            float d0t = fabsf(c->tex[0][k] - g->tex[0][k]), d1t = fabsf(c->tex[1][k] - g->tex[1][k]);
+            float d = dp > dc ? dp : dc;
+            d = d > d0t ? d : d0t;
+            d = d > d1t ? d : d1t;
+            if (d > worst)
+                worst = d;
+        }
+    }
+    return worst;
 }
 
 /* NDC of pixel position (x, y) on the 64x64 viewport above. */
@@ -522,6 +760,60 @@ int main(void)
     nv2a_gl_install_from_env();
     printf("6. gaps: points on the GPU 0, on the CPU rasteriser %llu\n",
            (unsigned long long)nv2a_gap_count("points"));
+
+    /* 11. XBA-134 item 1: the fixed-function unit as a generated vertex
+     * shader (RECOMP_GPU_FFP=1), against the CPU transform: 41 random
+     * states (lit with 0-8 infinite and local lights, colour material,
+     * ranges; unlit; no colour; no normal), 48 vertices each, every output
+     * compared; then the same lit picture drawn both ways. */
+    {
+        float worst = 0.0f, w;
+        int t, pdiff = 0, lit_px = 0;
+        uint32_t x, y, ref[W * H];
+        spy_install();
+        m(0x0288, 0x04);                     /* final combiner: D = diffuse */
+        m(0x028C, 0x14u << 8);
+        surface();
+        m(0x1E70, 0);
+        m(0x1B00, 0);
+        for (t = 0; t < 41; t++) {        /* the last (40): lit, 4 lights */
+            w = ffp_trial(t);
+            if (w > worst)
+                worst = w;
+        }
+        printf("11. fixed-function shader vs CPU transform: 41 states x 48 vertices,"
+               " worst difference %.2g\n", (double)worst);
+        CHECK(worst < 2e-4f);
+        /* The picture: the last state, drawn by each path. */
+        clear_black();
+        nv2a_gpu_ffp_enable(0);
+        draw(5, 0, 48);
+        readback();
+        for (y = 0; y < H; y++)
+            for (x = 0; x < W; x++)
+                lit_px += (ref[y * W + x] = px(x, y)) != 0;
+        clear_black();
+        nv2a_gpu_ffp_enable(1);
+        draw(5, 0, 48);
+        readback();
+        nv2a_gpu_ffp_enable(0);
+        for (y = 0; y < H; y++)
+            for (x = 0; x < W; x++) {
+                uint32_t a = ref[y * W + x], b = px(x, y), c;
+                for (c = 0; c < 24; c += 8) {
+                    int d = (int)((a >> c) & 0xFF) - (int)((b >> c) & 0xFF);
+                    if (d > 2 || d < -2) {
+                        pdiff++;
+                        break;
+                    }
+                }
+            }
+        printf("    the same picture both ways: %d of 4096 pixels differ by more than 2"
+               " (%d drawn)\n", pdiff, lit_px);
+        CHECK(pdiff <= 4 && lit_px > 200);
+        m(0x0314, 0);
+        nv2a_gl_install_from_env();
+    }
 
     CHECK(glGetError() == GL_NO_ERROR);
     if (!s_fail)
