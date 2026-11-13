@@ -4084,8 +4084,10 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
              * loaded and then a fault, versus one asset and a stall in audio
              * init. Until the DSP handshake is answered, the honest default is
              * the failure that gets further, with the correct behaviour one
-             * variable away. */
-            if (getenv("RECOMP_AC97_READY")) {
+             * variable away. (XBA-106: the emulated APU answers it now, and
+             * the title project sets it by default, recomp_xdk_defaults.) */
+            const char *ac97_ready = getenv("RECOMP_AC97_READY");   /* "0": off (XBA-106) */
+            if (ac97_ready && *ac97_ready && *ac97_ready != '0') {
                 /* The APU's registers have to fault so they can be routed to
                  * the emulated APU, which is the half that answers the DSP
                  * handshake. Backed as plain memory the guest's writes go

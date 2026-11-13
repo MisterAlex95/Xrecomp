@@ -1639,8 +1639,12 @@ void xbox_OhciInit(void)
     /* Opt-in. Without a descriptor list walker behind it a driver that finds
      * a port has nothing to enumerate, so this must not change how a title
      * behaves until the rest of it exists. */
-    if (!getenv("RECOMP_USB"))
-        return;
+    {
+        /* "0" is off too (XBA-106: on by default through recomp_xdk_defaults). */
+        const char *on = getenv("RECOMP_USB");
+        if (!on || !*on || *on == '0')
+            return;
+    }
 
     s_enabled = 1;
     s_trace   = getenv("RECOMP_USB_TRACE") != NULL;

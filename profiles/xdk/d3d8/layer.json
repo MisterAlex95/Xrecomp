@@ -1,6 +1,7 @@
 {
   "name": "XDK Direct3D 8 (D3D8, D3D8LTCG)",
-  "applies": {"libraries": ["D3D8", "D3D8LTCG"]},
+  "applies": {"libraries": ["D3D8", "D3D8LTCG"],
+              "imports": {"ordinals": [3, 2, 1, 4, 168], "min": 2}},
   "hooks": "xba_d3d8",
   "env_default": {
     "RECOMP_PB_EXEC": "1",
@@ -16,6 +17,11 @@
     "busy loops, 5 runs with the segment scan and 5 with RECOMP_PB_WALK=dma, title-built KEVENTs on: 0 freezes either",
     "way; software method 5 came under the segment scan too (serviced in 3 of 5 scan runs, 2 of 5 walk runs), and no wait",
     "for it was left hanging; fps medians overlapped (scan 14-38, walk 16-47). The latch spin that made",
-    "D3D8LTCG 5849 need the walk (profiles/xdk/d3d8ltcg) was not seen. RECOMP_PB_WALK=dma stays the fallback to try."
+    "D3D8LTCG 5849 need the walk (profiles/xdk/d3d8ltcg) was not seen. RECOMP_PB_WALK=dma stays the fallback to try.",
+    "XBA-106: RECOMP_VBLANK=paced is also a runtime default (recomp_xdk_defaults.c), RECOMP_PB_EXEC already was",
+    "(templates/new-game main(), the Android shell). applies.imports: D3D's video mode and GPU calls (AvSetDisplayMode,",
+    "AvSendTVEncoderOption, Av{Get,Set}SavedDataAddress, MmClaimGpuInstanceMemory) pick this layer, and with it",
+    "d3d8.c (device found at run time, software methods), when the library table names no D3D8: a first guess, to",
+    "check on the library triage (XBA-63). d3d8.c finds no device in a title without D3D and stays idle there."
   ]
 }

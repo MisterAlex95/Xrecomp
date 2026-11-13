@@ -19,6 +19,21 @@ them there for the player (`RECOMP_LANGUAGE`, `RECOMP_WIDESCREEN`, `RECOMP_480P`
 `RECOMP_AUDIO_BUF_SAMPLES`, `RECOMP_RASTER_THREADS`, `RECOMP_BIG_CORES`, `RECOMP_SHELL_SELFTEST`) and keeps every
 other line as written: see [Settings](../android/app-shell.md#settings).
 
+### XDK defaults
+
+The switches every XDK title needs because the console works that way are set by the title project itself
+(`recomp_xdk_defaults()`, `src/kernel/recomp_xdk_defaults.c`, called by `templates/new-game` main right after the profile
+layers' `xba_title_configure`), unless the environment, `recomp.cfg`, a forced option or a profile layer already set them:
+`RECOMP_DISPATCH_GATE=1`, `RECOMP_VBLANK=paced`, `RECOMP_USB=1`, `RECOMP_KEYBOARD=1`, `RECOMP_AC97_READY=1`
+(`RECOMP_PB_EXEC=1` already was a default of the title project and of the Android shell). The XDK layers
+(`profiles/xdk/*`) set the same values, so a title they match is unchanged; a title whose library table they do not
+match (stripped, renamed, unknown build) still boots with picture, sound and pad (XBA-106). When it sets any, one line:
+`[XDK] defaults: RECOMP_DISPATCH_GATE=1 ... (no profile layer set them; RECOMP_XDK_DEFAULTS=0 turns them off)`.
+
+| Variable | Default | What it does | Where |
+|---|---|---|---|
+| `RECOMP_XDK_DEFAULTS=0` | on | Sets none of the XDK defaults: the profile layers alone, as before XBA-106 (A/B). Each switch can also be turned off on its own with `=0`. | `recomp_xdk_defaults.c` |
+
 ### Forced by a title
 
 A title profile (`profiles/titles/<title id>/title.json`, or any profile layer: [profiles.md](../technical/profiles.md)) can force options that the title cannot run right without, over
@@ -123,14 +138,14 @@ Switches that change how the kernel layer behaves. Each fixes a class of titles;
 | `RECOMP_THREAD_STACKS=N` | unset (no cap) | Optional cap on worker thread stacks alive at once, for A/B (`8` was the old fixed pool). Each stack is 512 KB of guest heap; without a cap the pool grows until the heap is exhausted (about 100 stacks in a 64 MB window if the title took nothing). Past the cap or the heap, `PsCreateSystemThread(Ex)` fails with `STATUS_INSUFFICIENT_RESOURCES` (it used to run the worker inline, which deadlocked a worker that waits for requests). The high-water mark is logged at 8 and at each doubling (`[MEM] guest thread stacks: high-water mark`); `xbox_ThreadStacksHighWater()` reads it (XBA-104). | `xbox_memory_layout.c` |
 | `RECOMP_INLINE_APC=1` | off (deferred) | Runs a file request's completion APC (ReadFileEx, WriteFileEx) inline inside NtReadFile/NtWriteFile, the default before XBA-102, instead of at the issuing thread's next alertable user-mode wait (SleepEx, the Nt/Ke waits), which then returns STATUS_USER_APC as on the console. The status block and the event are set at the request either way. A/B switch kept for one release; `xbox_SetDeferredIoApc` wins over it. | `kernel_bridge.c` |
 | `RECOMP_ASYNC_IO` | off | Reports a read on an asynchronous handle as still in flight. The data is read synchronously either way. | `kernel_bridge.c` |
-| `RECOMP_DISPATCH_GATE=1` | off | The one-CPU gate: guest code runs only at safe points while interrupts are delivered. | `kernel_hal.c` |
+| `RECOMP_DISPATCH_GATE=1` | on in a title project (XDK default) | The one-CPU gate: guest code runs only at safe points while interrupts are delivered. Off in the runtime library itself (tests); a title project sets it ([XDK defaults](#xdk-defaults)); `0` turns it off. | `kernel_hal.c` |
 | `RECOMP_IRQ_SAFE_POINTS` | on with the gate | `0` disables safe-point delivery under the gate. | `kernel_hal.c` |
 | `RECOMP_IRQ_SAFE_FORCE` | off | Forces delivery at a safe point. | `kernel_hal.c` |
 | `RECOMP_IRQ_SAFE_MS=N` | 250 | Milliseconds the gate waits for a safe point. | `kernel_hal.c` |
 | `RECOMP_DPC_ON_RAISE` | on with the gate | `0` stops DPCs running when IRQL is raised. | `kernel_hal.c` |
 | `RECOMP_CLI_GATE` | on | A guest `cli` below DISPATCH_LEVEL masks device interrupts until `sti` (or a `popfd` that sets IF) as a raise does: counted for the device models' hold-off, and under `RECOMP_DISPATCH_GATE` the one-CPU gate is held, so an interrupt is posted and runs at the `sti`. The guest-visible IRQL does not change. `0`: `cli`/`sti` only change EFLAGS.IF, as when they were no-ops. | `kernel_hal.c` |
 | `RECOMP_CPUID_NO_SIMD` | off | Hides SIMD from `cpuid`. | `kernel_hal.c` |
-| `RECOMP_AC97_READY=1` | off | Reports the AC'97 codec ready and routes the APU aperture to the emulated APU. | `xbox_memory_layout.c`, `templates/new-game/src/main.c` |
+| `RECOMP_AC97_READY=1` | on in a title project (XDK default) | Reports the AC'97 codec ready and routes the APU aperture to the emulated APU. `0` (or empty) is off. | `xbox_memory_layout.c`, `templates/new-game/src/main.c` |
 | `RECOMP_AC97_ALIAS=0` | on (POSIX) | With `RECOMP_AC97_READY`: arm the AC'97 bus-master write trap with the old `mprotect` window instead of a read-only shared page plus a writable view. The window lets a second thread's store keep the RR bit, so a channel reset can spin (Fable during movies); for A/B only. | `xbox_memory_layout.c` |
 | `RECOMP_DSP_ACK=va[,...]` | off | Guest addresses to acknowledge as the DSP's doorbell. | `xbox_memory_layout.c` |
 
@@ -148,7 +163,7 @@ The executor is itself opt-in: set `RECOMP_PB_EXEC=1` to execute the pushbuffer.
 | `RECOMP_PB_REPORT_MS=N` | 10000 | Milliseconds between `[GPU]` reports (minimum 100). | `xbox_memory_layout.c` |
 | `RECOMP_PB_EXEC_VERBOSE` | off | Per-batch trace. | `nv2a_pb_exec.c` |
 | `RECOMP_PB_UNHANDLED_ALL` | top 10 | Lists every method the executor does not model, not only the top ten. | `nv2a_pb_exec.c` |
-| `RECOMP_VBLANK[=paced]` | no vblanks | Raises vblanks: a ~50 Hz tick, or `paced` for the display's schedule: 60 Hz, or 50 Hz once the title sets a PAL-I mode (before any mode, 50 Hz on a PAL console with `RECOMP_PAL60=0`; XBA-121). `0` or empty is off. | `kernel_bridge.c`, `kernel_hal.c` |
+| `RECOMP_VBLANK[=paced]` | `paced` in a title project (XDK default); no vblanks in the bare runtime | Raises vblanks: a ~50 Hz tick, or `paced` for the display's schedule: 60 Hz, or 50 Hz once the title sets a PAL-I mode (before any mode, 50 Hz on a PAL console with `RECOMP_PAL60=0`; XBA-121). `0` or empty is off. | `kernel_bridge.c`, `kernel_hal.c` |
 | `RECOMP_FLIP_PACING[=edge]` | off | Holds each flip to the vblank count. | `nv2a_pb_exec.c` |
 | `RECOMP_FFP_INLINE=<0\|1\|2>` | 1 | Inline (Begin/End) fixed-function batches: `1` transformed by the composite matrix, `0` the old screen-space guess, `2` transformed only when the guess would skip them. A/B switch for one release. | `nv2a_pb_exec.c` |
 | `RECOMP_FFP_FLIP_NORMALS` | off | Lights the side of a fixed-function mesh that faces the viewer. Not hardware behaviour. | `nv2a_pb_exec.c` |
@@ -277,13 +292,13 @@ See [xbox_input](../../src/input/README.md).
 
 | Variable | Default | What it does | Where |
 |---|---|---|---|
-| `RECOMP_KEYBOARD` | off | Keyboard acts as a controller. | `keyboard.c`, `usb_gamepad.c` |
+| `RECOMP_KEYBOARD` | on in a title project (XDK default) | Keyboard acts as a controller. `0` is off. | `keyboard.c`, `usb_gamepad.c` |
 | `RECOMP_PAD_MAP` | unset (the fixed mapping) | Remaps every pad's controls (XBA-131; the Android launcher's Controls screen writes it into `recomp.cfg`). `control=source` entries for the Xbox controls that differ from the fixed mapping, comma separated: controls `a b x y black white left_trigger right_trigger start back left_thumb right_thumb dpad_up dpad_down dpad_left dpad_right`, sources SDL's positional names `south east west north left_shoulder right_shoulder left_trigger right_trigger left_stick_click right_stick_click back start dpad_*`, a stick direction `left_stick_up` … `right_stick_right`, or `none`; plus `left_stick=` / `right_stick=` `left`, `right` or `none`. Example `a=east,b=south,black=left_trigger`. Unknown entries are ignored (logged). Unset or empty: exactly the fixed mapping (the A/B switch). SDL backend only. | `xinput_device.c`, `input_map.c` |
 | `RECOMP_MKB` | off | Keyboard-and-mouse layer; tuned by `RECOMP_MKB_SENS`, `_DZ`, `_ACC`, `_FULL`, `_INVERT_Y`, `_SWAP_STICKS` or an `RECOMP_MKB_INI` file. | `mkb_input.c` |
 | `RECOMP_KEY_TRACE` | off | Prints the first 40 key-downs. | `keyboard_sdl.c`, `fb_present.c` |
 | `RECOMP_INPUT_DIAG` | off | Reports whether the input chain is wired. | `usb_gamepad.c` |
 | `RECOMP_RUMBLE` | on | `0` turns rumble off. | `ohci.c` |
-| `RECOMP_USB` | off | Enables the USB controller model. The title project calls `xbox_OhciInit()` after the memory layout (the template does). | `ohci.c` |
+| `RECOMP_USB` | on in a title project (XDK default) | Enables the USB controller model; `0` (or empty) is off. The title project calls `xbox_OhciInit()` after the memory layout (the template does). | `ohci.c` |
 | `RECOMP_USB_PADS=1..4` | 1 | Number of pads plugged. | `ohci.c` |
 | `RECOMP_USB_PORT=0..3` | 2 with four ports | Root port the pad appears on. | `ohci.c` |
 | `RECOMP_USB_HC`, `RECOMP_USB_NDP` | model default | Host-controller selection and port count. | `ohci.c` |

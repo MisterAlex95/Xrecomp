@@ -118,6 +118,9 @@ class Run:
         except ValueError as e:
             raise cc.StepError("BAD_PROFILE", "profiles: %s" % e)
         self.layers = self.profile["keys"] if self.profile else []
+        from tools.prepare import profiles
+        for line in profiles.xdk_report(self.ident, self.m.PROFILES):     # XBA-106
+            self.rep.progress(1, 99, line)
         self.rep.progress(1, 100, "%s (title ID %s)%s%s" % (self.info.get("title", "?"), self.tid,
                                                            ", title profile" if self.profile and self.profile["title"]
                                                            else "",

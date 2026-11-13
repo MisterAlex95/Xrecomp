@@ -566,13 +566,15 @@ def desktop(a):
     ident = identify_xbe(xbe, work)
     if ident:
         print("      built with: %s" % ident["summary"], flush=True)
-    from tools.prepare import pack
+    from tools.prepare import pack, profiles
     try:
         profile = load_profile(tid, ident)
         env = pack.env_force_of(profile)
     except ValueError as e:
         _CODE = "BAD_PROFILE"
         raise SystemExit("profiles: %s" % e)
+    for line in profiles.xdk_report(ident, PROFILES):
+        print("      " + line, flush=True)
     if profile:
         print("      profile layers: %s" % " ".join(profile["keys"]), flush=True)
         for k in profile["missing"]:

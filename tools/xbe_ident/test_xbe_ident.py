@@ -12,9 +12,11 @@ HDR = 0x1000
 
 
 def make_xbe(path, libs=(("XAPILIB", 5849, 0), ("D3D8", 5849, 0)), xapi_index=0, text=b"",
-             title_id=0x4D530001, title="Test"):
+             title_id=0x4D530001, title="Test", imports=()):
     """Header + certificate + library table in the first page, one section holding `text`.
-    xapi_index: the library entry the header's XAPI pointer names (None: no pointer)."""
+    xapi_index: the library entry the header's XAPI pointer names (None: no pointer).
+    imports: kernel ordinals for the thunk table (at most 63)."""
+    assert len(imports) < 64
     raw = text + b"\0" * 16
     buf = bytearray(HDR + len(raw))
     buf[0:4] = b"XBEH"
@@ -22,7 +24,9 @@ def make_xbe(path, libs=(("XAPILIB", 5849, 0), ("D3D8", 5849, 0)), xapi_index=0,
     struct.pack_into("<I", buf, 0x118, BASE + 0x200)                    # certificate
     struct.pack_into("<II", buf, 0x11C, 1, BASE + 0x600)                # one section header
     struct.pack_into("<I", buf, 0x128, (BASE + HDR) ^ 0xA8FC57AB)       # retail entry
-    struct.pack_into("<I", buf, 0x158, (BASE + 0x800) ^ 0x5B6D40B6)     # empty thunk table
+    struct.pack_into("<I", buf, 0x158, (BASE + 0x800) ^ 0x5B6D40B6)     # thunk table
+    for i, o in enumerate(imports):
+        struct.pack_into("<I", buf, 0x800 + 4 * i, 0x80000000 | o)
     lib_va = BASE + 0x900
     struct.pack_into("<II", buf, 0x160, len(libs), lib_va)
     if xapi_index is not None:
@@ -67,7 +71,10 @@ def test_a_header_pointer_outside_the_table_is_ignored(tmp_path):
 
 def test_no_library_table(tmp_path):
     r = identify(make_xbe(tmp_path / "e.xbe", libs=()))
-    assert r["xdk"]["build"] == 0 and r["layers"] == []
+    assert r["xdk"]["build"] == 0 and r["layers"] == [] and r["imports"] == []
+    # Stripped, but D3D's kernel calls are there (XBA-106): the D3D8 layer by its imports.
+    r = identify(make_xbe(tmp_path / "e2.xbe", libs=(), imports=(3, 1, 168, 49)))
+    assert r["imports"] == [1, 3, 49, 168] and r["layers"] == ["xdk/d3d8"]
     assert summary(r).startswith("XDK unknown, no known engine")
 
 
