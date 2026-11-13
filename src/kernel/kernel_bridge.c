@@ -6313,11 +6313,28 @@ static void bridge_NtDeviceIoControlFile(void)
 }
 
 /* ── NtFsControlFile (ordinal 200, 10 args = 40 bytes) ──── */
+/* The one FSCTL with a contract nxdk documents is FSCTL_DISMOUNT_VOLUME
+ * (CTL_CODE(FILE_DEVICE_FILE_SYSTEM, 8, METHOD_BUFFERED, FILE_ANY_ACCESS) =
+ * 0x00090020): XAPI dismounts a volume before it formats it or lets a memory
+ * unit go. The host files behind a volume have no cache to flush or mount
+ * to drop, as for IoDismountVolume (no-op by design), so it succeeds and the
+ * event, if any, is set (XBA-138). Any other code stays
+ * STATUS_NOT_SUPPORTED, logged with its code. */
+#define FSCTL_DISMOUNT_VOLUME_ 0x00090020u
 static void bridge_NtFsControlFile(void)
 {
     uint32_t fsctl = STACK_ARG(5);
     uint32_t ios_va = STACK_ARG(4);
-    fprintf(stderr, "  [FILE] NtFsControlFile(0x%X) - stub\n", fsctl);
+
+    if (fsctl == FSCTL_DISMOUNT_VOLUME_) {
+        fprintf(stderr, "  [FILE] NtFsControlFile(FSCTL_DISMOUNT_VOLUME) - nothing to flush\n");
+        bridge_write_iostatus(ios_va, 0, 0);
+        bridge_complete_file_io(STACK_ARG(0), STACK_ARG(1), STACK_ARG(2),
+                                STACK_ARG(3), ios_va, 0, 0, 0);
+        g_eax = 0;
+        return;
+    }
+    fprintf(stderr, "  [FILE] NtFsControlFile(0x%X) - not supported\n", fsctl);
     bridge_write_iostatus(ios_va, 0xC00000BBu, 0);
     g_eax = 0xC00000BBu;
 }
@@ -6566,7 +6583,8 @@ static void bridge_ExFreePool(void)
  * VA 0. The crash surfaced in SetLastError, thousands of calls later.
  *
  * Layout is the Xbox DEVICE_OBJECT: Flags at 0x14, DeviceExtension at 0x18,
- * DeviceType at 0x1C, StackSize at 0x1D, header 0x38 bytes. Only the fields a
+ * DeviceType at 0x1C, StackSize at 0x1E (nxdk xboxkrnl.h; written to 0x1D,
+ * StartIoFlags, until XBA-138), header 0x38 bytes. Only the fields a
  * title actually reads are filled; the rest is zero, which is what a freshly
  * created device object holds anyway.
  */
@@ -6598,7 +6616,7 @@ static void bridge_IoCreateDevice(void)
     BRIDGE_MEM32(object_va + 0x18) =                    /* DeviceExtension  */
         extension_size ? object_va + XBOX_DEVICE_OBJECT_SIZE : 0;
     BRIDGE_MEM8(object_va + 0x1C)  = (uint8_t)device_type;
-    BRIDGE_MEM8(object_va + 0x1D)  = 1;                 /* StackSize        */
+    BRIDGE_MEM8(object_va + 0x1E)  = 1;                 /* StackSize        */
 
     BRIDGE_MEM32(out_va) = object_va;
     g_eax = 0;                                          /* STATUS_SUCCESS   */
@@ -7256,6 +7274,240 @@ static void bridge_WRITE_PORT_BUFFER_USHORT(void)
  * arguments live in ecx/edx, never on the stack -- the arg-size entries are 0
  * and reading STACK_ARG would dereference whatever the caller left there.
  */
+/* ── IRPs in guest memory (XBA-138) ──
+ *
+ * Layout source. The IRP header is nxdk's xboxkrnl.h (struct _IRP, CC0),
+ * whose offsets Cxbx-Reloaded's xboxkrnl types state field by field up to
+ * Tail (0x3C): Type 0x00, Size 0x02, Flags 0x04, ThreadListEntry 0x08,
+ * IoStatus 0x10, StackCount 0x18, CurrentLocation 0x19, PendingReturned
+ * 0x1A, Cancel 0x1B, UserIosb 0x1C, UserEvent 0x20, Overlay (8-aligned)
+ * 0x28, UserBuffer 0x30, SegmentArray 0x34, LockedBufferLength 0x38, Tail
+ * 0x3C. Tail.Overlay is nxdk's (DriverContext[5], so Thread 0x50,
+ * ListEntry 0x54, CurrentStackLocation 0x5C, OriginalFileObject 0x60;
+ * Cxbx has DriverContext[4], which would move those four down by 4) and
+ * the size is 0x3C + KAPC (0x28) rounded to 8 = 0x68. There is no
+ * MdlAddress or SystemBuffer: the console's IRP carries the caller's
+ * buffer in UserBuffer.
+ *
+ * IO_STACK_LOCATION: MajorFunction..Control in the first four bytes and
+ * Parameters at 0x04 (Read/Write: Length 0x04, Key 0x08, ByteOffset 0x0C)
+ * are Cxbx's. The rest -- DeviceObject 0x14, FileObject 0x18,
+ * CompletionRoutine 0x1C, Context 0x20, 0x24 bytes in all -- is the NT x86
+ * stack location from memory, NOT checked against a console source: nxdk
+ * does not define the structure and Cxbx's (0x18 bytes, no completion
+ * routine) cannot be the whole of it, since Xbox drivers set completion
+ * routines. The semantics (IoInitializeIrp, IoBuildAsynchronousFsdRequest,
+ * IofCallDriver, IofCompleteRequest) are NT's, from memory. If a title's
+ * driver shows another stack-location size, IRP_SL_SIZE is the one number
+ * to change. RECOMP_IRP_DISPATCH=0 puts back the stubs of before XBA-138
+ * (IofCallDriver answers success without dispatching, IofCompleteRequest
+ * does nothing, IoBuildAsynchronousFsdRequest answers NULL). */
+#define IRP_SIZE              0x68u
+#define IRP_SL_SIZE           0x24u
+#define IRP_TYPE              6u      /* IO_TYPE_IRP */
+#define IRP_O_TYPE            0x00u
+#define IRP_O_SIZE            0x02u
+#define IRP_O_THREADLIST      0x08u
+#define IRP_O_STATUS          0x10u
+#define IRP_O_INFORMATION     0x14u
+#define IRP_O_STACKCOUNT      0x18u
+#define IRP_O_CURLOC          0x19u
+#define IRP_O_PENDING         0x1Au
+#define IRP_O_USERIOSB        0x1Cu
+#define IRP_O_USEREVENT       0x20u
+#define IRP_O_USERBUFFER      0x30u
+#define IRP_O_THREAD          0x50u
+#define IRP_O_CURSTACK        0x5Cu
+#define SL_O_MAJOR            0x00u
+#define SL_O_CONTROL          0x03u
+#define SL_O_LENGTH           0x04u
+#define SL_O_BYTEOFFSET       0x0Cu
+#define SL_O_DEVICE           0x14u
+#define SL_O_COMPLETION       0x1Cu
+#define SL_O_CONTEXT          0x20u
+#define SL_PENDING_RETURNED   0x01u
+#define SL_INVOKE_ON_SUCCESS  0x40u
+#define SL_INVOKE_ON_ERROR    0x80u
+#define DEVOBJ_O_DRIVER       0x08u
+#define DEVOBJ_O_STACKSIZE    0x1Eu   /* nxdk: DeviceType 0x1C, StartIoFlags 0x1D */
+#define DRVOBJ_O_MAJOR        0x0Cu   /* after StartIo, DeleteDevice, DismountVolume */
+#define IRP_MJ_READ_          0x02u
+#define IRP_MJ_WRITE_         0x03u
+#define IRP_MJ_MAXIMUM_       0x0Du
+#define STATUS_MORE_PROCESSING_REQUIRED_ 0xC0000016u
+#define STATUS_INVALID_DEVICE_REQUEST_   0xC0000010u
+
+static int irp_dispatch_on(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("RECOMP_IRP_DISPATCH");
+        on = (e && *e) ? (atoi(e) != 0) : 1;
+    }
+    return on;
+}
+
+/* IoInitializeIrp: zeroed, Type/Size/StackCount, CurrentLocation one past
+ * the last stack location and CurrentStackLocation pointing there, as NT's
+ * does; ThreadListEntry an empty list. */
+static void irp_init(uint32_t irp, uint32_t packet_size, uint32_t stack_size)
+{
+    memset(XBOX_TO_NATIVE(irp), 0, packet_size);
+    BRIDGE_MEM16(irp + IRP_O_TYPE) = (uint16_t)IRP_TYPE;
+    BRIDGE_MEM16(irp + IRP_O_SIZE) = (uint16_t)packet_size;
+    BRIDGE_MEM8(irp + IRP_O_STACKCOUNT) = (uint8_t)stack_size;
+    BRIDGE_MEM8(irp + IRP_O_CURLOC) = (uint8_t)(stack_size + 1);
+    BRIDGE_MEM32(irp + IRP_O_THREADLIST) = irp + IRP_O_THREADLIST;
+    BRIDGE_MEM32(irp + IRP_O_THREADLIST + 4) = irp + IRP_O_THREADLIST;
+    BRIDGE_MEM32(irp + IRP_O_CURSTACK) = irp + IRP_SIZE + stack_size * IRP_SL_SIZE;
+}
+
+/* IoAllocateIrp's body: the guest heap, freed by IoFreeIrp. 0 on failure. */
+static uint32_t irp_alloc(uint32_t stack_size)
+{
+    uint32_t total, va;
+
+    stack_size &= 0xFFu;                  /* CCHAR */
+    total = IRP_SIZE + stack_size * IRP_SL_SIZE;
+    va = xbox_HeapAlloc(total, 16);
+    if (!va) {
+        fprintf(stderr, "  [KERNEL] IoAllocateIrp: %u bytes REFUSED\n", total);
+        return 0;
+    }
+    irp_init(va, total, stack_size);
+    return va;
+}
+
+/* A guest stdcall routine's NTSTATUS: bridge_call_guest, keeping eax (the
+ * caller's other registers come back). `missing` when it is not in the
+ * dispatch. */
+static uint32_t irp_call_guest(uint32_t va, const uint32_t *args, int n,
+                               uint32_t missing)
+{
+    recomp_func_t fn = recomp_lookup(va);
+    CallbackRegs saved;
+    int i;
+
+    if (!fn) fn = recomp_lookup_manual(va);
+    if (!fn) fn = recomp_lookup_kernel(va);
+    if (!fn) {
+        fprintf(stderr, "  [KERNEL] IRP routine 0x%08X unresolved\n", va);
+        return missing;
+    }
+    callback_regs_save(&saved);
+    for (i = n - 1; i >= 0; i--) {
+        g_esp -= 4; BRIDGE_MEM32(g_esp) = args[i];
+    }
+    g_esp -= 4; BRIDGE_MEM32(g_esp) = 0;          /* dummy return address */
+    {
+        int took = xbox_GuestCpuEnterCallback();
+        fn();
+        xbox_GuestCpuLeaveCallback(took);
+    }
+    {
+        uint32_t r = g_eax;
+        callback_regs_restore(&saved, 0);
+        return r;
+    }
+}
+
+/* KeSetEvent on a guest KEVENT, through its bridge, on a frame of its own
+ * laid out as the dispatcher hands one over (return address already
+ * popped: the first argument at esp). */
+static void bridge_KeSetEvent(void);
+static void irp_set_event(uint32_t ev)
+{
+    uint32_t esp = g_esp, eax = g_eax;
+    g_esp -= 12;
+    BRIDGE_MEM32(g_esp) = ev;
+    BRIDGE_MEM32(g_esp + 4) = 0;
+    BRIDGE_MEM32(g_esp + 8) = 0;
+    bridge_KeSetEvent();
+    g_esp = esp;
+    g_eax = eax;
+}
+
+/* IofCompleteRequest (NT's, from memory): from the current stack location
+ * up, each completion routine whose SL_INVOKE_ON_* bit matches the status
+ * runs as Routine(DeviceObject, Irp, Context); STATUS_MORE_PROCESSING_REQUIRED
+ * stops there (the routine owns the IRP: it frees or reuses it). Otherwise
+ * the status goes to *UserIosb and UserEvent is set. The IRP is never freed
+ * here: one built by IoBuildAsynchronousFsdRequest is the caller's to free
+ * (IoFreeIrp), on the console as in NT. */
+static void irp_complete(uint32_t irp)
+{
+    uint32_t count = BRIDGE_MEM8(irp + IRP_O_STACKCOUNT);
+    uint32_t iosb, ev;
+
+    for (;;) {
+        uint32_t loc = BRIDGE_MEM8(irp + IRP_O_CURLOC);
+        uint32_t sl = BRIDGE_MEM32(irp + IRP_O_CURSTACK);
+        uint32_t status, ctl, routine, invoke;
+
+        if (loc > count)
+            break;
+        /* Step up first, as NT does: the routine sees its caller's location. */
+        BRIDGE_MEM8(irp + IRP_O_CURLOC) = (uint8_t)(loc + 1);
+        BRIDGE_MEM32(irp + IRP_O_CURSTACK) = sl + IRP_SL_SIZE;
+        ctl = BRIDGE_MEM8(sl + SL_O_CONTROL);
+        BRIDGE_MEM8(irp + IRP_O_PENDING) = (uint8_t)(ctl & SL_PENDING_RETURNED);
+        status = BRIDGE_MEM32(irp + IRP_O_STATUS);
+        routine = BRIDGE_MEM32(sl + SL_O_COMPLETION);
+        invoke = (int32_t)status >= 0 ? SL_INVOKE_ON_SUCCESS : SL_INVOKE_ON_ERROR;
+        if (routine && (ctl & invoke)) {
+            uint32_t dev = loc + 1 <= count
+                         ? BRIDGE_MEM32(sl + IRP_SL_SIZE + SL_O_DEVICE) : 0;
+            uint32_t a[3] = { dev, irp, BRIDGE_MEM32(sl + SL_O_CONTEXT) };
+            if (irp_call_guest(routine, a, 3, 0) == STATUS_MORE_PROCESSING_REQUIRED_)
+                return;
+        }
+    }
+    iosb = BRIDGE_MEM32(irp + IRP_O_USERIOSB);
+    if (iosb) {
+        BRIDGE_MEM32(iosb) = BRIDGE_MEM32(irp + IRP_O_STATUS);
+        BRIDGE_MEM32(iosb + 4) = BRIDGE_MEM32(irp + IRP_O_INFORMATION);
+    }
+    ev = BRIDGE_MEM32(irp + IRP_O_USEREVENT);
+    if (ev)
+        irp_set_event(ev);
+}
+
+/* IofCallDriver (NT's, from memory): the next stack location becomes the
+ * current one and takes the device, and the device's driver dispatches on
+ * the major function: DriverObject->MajorFunction[major](DeviceObject, Irp).
+ * Only a title's own driver has one (IoCreateDevice keeps the title's
+ * DRIVER_OBJECT; this runtime hands out no kernel device objects). No
+ * dispatch: the IRP completes with STATUS_INVALID_DEVICE_REQUEST, which is
+ * IoInvalidDeviceRequest's answer, and that is returned. */
+static uint32_t irp_call_driver(uint32_t dev, uint32_t irp)
+{
+    uint32_t loc, sl, major, drv, dispatch = 0;
+
+    if (!dev || !irp)
+        return STATUS_INVALID_PARAMETER;
+    loc = BRIDGE_MEM8(irp + IRP_O_CURLOC);
+    if (loc <= 1) {
+        fprintf(stderr, "  [KERNEL] IofCallDriver: IRP 0x%08X has no stack location left\n", irp);
+        return STATUS_INVALID_PARAMETER;
+    }
+    BRIDGE_MEM8(irp + IRP_O_CURLOC) = (uint8_t)(loc - 1);
+    sl = BRIDGE_MEM32(irp + IRP_O_CURSTACK) - IRP_SL_SIZE;
+    BRIDGE_MEM32(irp + IRP_O_CURSTACK) = sl;
+    BRIDGE_MEM32(sl + SL_O_DEVICE) = dev;
+    major = BRIDGE_MEM8(sl + SL_O_MAJOR);
+    drv = BRIDGE_MEM32(dev + DEVOBJ_O_DRIVER);
+    if (drv && major <= IRP_MJ_MAXIMUM_)
+        dispatch = BRIDGE_MEM32(drv + DRVOBJ_O_MAJOR + 4 * major);
+    if (dispatch) {
+        uint32_t a[2] = { dev, irp };
+        return irp_call_guest(dispatch, a, 2, STATUS_INVALID_DEVICE_REQUEST_);
+    }
+    BRIDGE_MEM32(irp + IRP_O_STATUS) = STATUS_INVALID_DEVICE_REQUEST_;
+    BRIDGE_MEM32(irp + IRP_O_INFORMATION) = 0;
+    irp_complete(irp);
+    return STATUS_INVALID_DEVICE_REQUEST_;
+}
+
 static void bridge_IoBuildDeviceIoControlRequest(void)
 {
     g_eax = (uint32_t)xbox_IoBuildDeviceIoControlRequest(
@@ -7293,8 +7545,11 @@ static void bridge_IoDeleteSymbolicLink(void)
 
 static void bridge_IoInitializeIrp(void)
 {
-    xbox_IoInitializeIrp(XBOX_TO_NATIVE(STACK_ARG(0)),
-        (USHORT)STACK_ARG(1), (CCHAR)STACK_ARG(2));
+    if (!irp_dispatch_on())
+        xbox_IoInitializeIrp(XBOX_TO_NATIVE(STACK_ARG(0)),
+            (USHORT)STACK_ARG(1), (CCHAR)STACK_ARG(2));
+    else if (STACK_ARG(0))
+        irp_init(STACK_ARG(0), STACK_ARG(1) & 0xFFFFu, STACK_ARG(2) & 0xFFu);
     g_eax = 0;
 }
 
@@ -7359,13 +7614,19 @@ static void bridge_IoSynchronousFsdRequest(void)
 
 static void bridge_IofCallDriver(void)
 {
-    g_eax = (uint32_t)xbox_IofCallDriver(XBOX_TO_NATIVE(g_ecx),
-                                        XBOX_TO_NATIVE(g_edx));
+    if (!irp_dispatch_on())
+        g_eax = (uint32_t)xbox_IofCallDriver(XBOX_TO_NATIVE(g_ecx),
+                                            XBOX_TO_NATIVE(g_edx));
+    else
+        g_eax = irp_call_driver(g_ecx, g_edx);
 }
 
 static void bridge_IofCompleteRequest(void)
 {
-    xbox_IofCompleteRequest(XBOX_TO_NATIVE(g_ecx), (CCHAR)g_edx);
+    if (irp_dispatch_on() && g_ecx)
+        irp_complete(g_ecx);
+    else
+        xbox_IofCompleteRequest(XBOX_TO_NATIVE(g_ecx), (CCHAR)g_edx);
     g_eax = 0;
 }
 
@@ -9445,36 +9706,49 @@ static void bridge_InterlockedPushEntrySList(void)
  * ═══════════════════════════════════════════════════════════════════════════
  */
 
-/* --- IoAllocateIrp (ordinal 59, 2 args = 8 bytes)
- * PIRP IoAllocateIrp(CCHAR StackSize, BOOLEAN ChargeQuota);
- * Allocates an IRP header plus StackSize IO_STACK_LOCATIONs from the guest
- * heap. Pair with IoFreeIrp (ordinal 72), which frees through the same heap. */
+/* --- IoAllocateIrp (ordinal 59, 1 arg = 4 bytes)
+ * PIRP IoAllocateIrp(CCHAR StackSize) -- one argument (nxdk xboxkrnl.h; the
+ * NT ChargeQuota is gone, and popping it leaked 4 bytes of the caller's
+ * stack). An initialised IRP plus StackSize stack locations from the guest
+ * heap (layout above bridge_IoBuildDeviceIoControlRequest); IoFreeIrp
+ * (ordinal 72) frees it through the same heap. */
 static void bridge_IoAllocateIrp(void)
 {
-    uint32_t stack_size = STACK_ARG(0);
-    uint32_t charge_quota = STACK_ARG(1);
-    uint32_t total = 0x28 + stack_size * 0x20;  /* header + stack locations */
-    uint32_t va;
-
-    (void)charge_quota;
-    va = xbox_HeapAlloc(total, 16);
-    if (va)
-        memset((void *)((uintptr_t)va + g_xbox_mem_offset), 0, total);
-    else
-        fprintf(stderr, "  [KERNEL] IoAllocateIrp: %u bytes REFUSED\n", total);
-    g_eax = va;
+    g_eax = irp_alloc(STACK_ARG(0));
 }
 
-/* --- IoBuildAsynchronousFsdRequest (ordinal 60, 7 args = 28 bytes) --- */
+/* --- IoBuildAsynchronousFsdRequest (ordinal 60, 6 args = 24 bytes)
+ * PIRP IoBuildAsynchronousFsdRequest(MajorFunction, DeviceObject, Buffer,
+ * Length, StartingOffset, IoStatusBlock) (nxdk xboxkrnl.h). NT's, from
+ * memory: an IRP for DeviceObject->StackSize locations, the caller's thread,
+ * UserIosb, and the next stack location (the one IofCallDriver makes
+ * current) holding the major function; for a read or write also UserBuffer
+ * (the console's IRP has no MDL), Parameters.Read.Length and ByteOffset
+ * (StartingOffset, or 0). NULL when the heap refuses or with no device.
+ * RECOMP_IRP_DISPATCH=0: NULL always, as before XBA-138. */
 static void bridge_IoBuildAsynchronousFsdRequest(void)
 {
-    /* PIRP IoBuildAsynchronousFsdRequest(MajorFunction, DeviceObject, Buffer,
-     * Length, StartingOffset, IoStatusBlock): six arguments (nxdk
-     * xboxkrnl.h; the table said seven). Still a stub, answering NULL (no
-     * IRP): building one needs the IRP and stack-location layout, which
-     * IoAllocateIrp does not fill in yet -- a title driver's own requests
-     * (XBA-114). */
+    uint32_t major = STACK_ARG(0), dev = STACK_ARG(1), buf = STACK_ARG(2);
+    uint32_t len = STACK_ARG(3), off = STACK_ARG(4), iosb = STACK_ARG(5);
+    uint32_t irp, sl;
+
     g_eax = 0;
+    if (!irp_dispatch_on() || !dev)
+        return;
+    irp = irp_alloc(BRIDGE_MEM8(dev + DEVOBJ_O_STACKSIZE));
+    if (!irp)
+        return;
+    BRIDGE_MEM32(irp + IRP_O_THREAD) = thobj_current();
+    BRIDGE_MEM32(irp + IRP_O_USERIOSB) = iosb;
+    sl = BRIDGE_MEM32(irp + IRP_O_CURSTACK) - IRP_SL_SIZE;
+    BRIDGE_MEM8(sl + SL_O_MAJOR) = (uint8_t)major;
+    if (major == IRP_MJ_READ_ || major == IRP_MJ_WRITE_) {
+        BRIDGE_MEM32(irp + IRP_O_USERBUFFER) = buf;
+        BRIDGE_MEM32(sl + SL_O_LENGTH) = len;
+        BRIDGE_MEM32(sl + SL_O_BYTEOFFSET) = off ? BRIDGE_MEM32(off) : 0;
+        BRIDGE_MEM32(sl + SL_O_BYTEOFFSET + 4) = off ? BRIDGE_MEM32(off + 4) : 0;
+    }
+    g_eax = irp;
 }
 
 /* ── Share access (XBA-114) ──
@@ -12433,7 +12707,7 @@ static int stdcall_args_for_ordinal(ULONG ordinal)
     case  58: return  0;  /* InterlockedPushEntrySList (fastcall) */
 
     /* Io */
-    case  59: return  8;  /* IoAllocateIrp (2) */
+    case  59: return  4;  /* IoAllocateIrp (1): nxdk xboxkrnl.h */
     case  60: return 24;  /* IoBuildAsynchronousFsdRequest (6): nxdk xboxkrnl.h */
     case  63: return 20;  /* IoCheckShareAccess (5) */
     case  72: return  4;  /* IoFreeIrp (1) */

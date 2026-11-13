@@ -210,7 +210,7 @@ stub is in `src/kernel/kernel_stub_table.c`: its first call (then the 10th, 100t
 | File-system cache | 3 | 2 | 1 | 0 | - |
 | HAL (SMBus, interrupts, firmware) | 15 | 13 | 2 | 0 | - |
 | Interlocked / SList | 8 | 8 | 0 | 0 | - |
-| I/O manager | 27 | 21 | 5 | 1 | 60 IoBuildAsynchronousFsdRequest |
+| I/O manager | 27 | 22 | 5 | 0 | - |
 | Kernel (threads, waits, timers, DPCs, APCs) | 65 | 61 | 4 | 0 | - |
 | Kernel (IRQL fastcalls) | 2 | 2 | 0 | 0 | - |
 | Kernel internals | 2 | 2 | 0 | 0 | - |
@@ -223,7 +223,7 @@ stub is in `src/kernel/kernel_stub_table.c`: its first call (then the 10th, 100t
 | Crypto | 17 | 17 | 0 | 0 | - |
 | XBE sections | 2 | 2 | 0 | 0 | - |
 | Other (port I/O, ...) | 15 | 14 | 1 | 0 | - |
-| **All** | **345** | **326** | **18** | **1** | |
+| **All** | **345** | **327** | **18** | **0** | |
 <!-- kernel-coverage:end -->
 
 ### Data Exports

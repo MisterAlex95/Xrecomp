@@ -715,6 +715,24 @@ static void test_stub_report(const char *disc_path)
     int i;
 
     become_thread(0);
+    if (g_kernel_stub_count == 0) {
+        /* XBA-138 implemented the last one: the table is a placeholder
+         * entry counted out. No route is a stub, and a call of a routed
+         * ordinal is neither counted nor reported. */
+        for (i = 0; i < 3; i++)
+            call(S_STUB, NULL, 0);
+        check(!xbox_kernel_is_stub(ord) && !xbox_kernel_is_stub(0) && !xbox_kernel_is_stub(57)
+              && xbox_kernel_stub_calls(ord) == 0,
+              "stub table empty (0 stubs): nothing is a stub, nothing counted", NULL);
+        f = fopen(disc_path, "rb");
+        if (f) {
+            n = fread(buf, 1, sizeof buf - 1, f);
+            fclose(f);
+        }
+        buf[n] = 0;
+        check(!strstr(buf, "\"t\":\"stub\""), "...and nothing in the discovery file", buf);
+        return;
+    }
     check(g_kernel_stub_count > 0 && xbox_kernel_is_stub(ord) && !xbox_kernel_is_stub(57),
           "stub table: generated, a stub is in it, InterlockedPopEntrySList is not", NULL);
     for (i = 0; i < 10; i++)

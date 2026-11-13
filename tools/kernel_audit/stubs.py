@@ -162,10 +162,15 @@ def render_table_c(stubs, names):
     ]
     for o in stubs:
         lines.append("    { %3d, \"%s\" }," % (o, names.get(o, "ordinal_%d" % o)))
+    if not stubs:
+        # C has no empty array (MSVC refuses one, GCC/Clang only as an
+        # extension): one placeholder entry, counted out.
+        lines.append("    { 0, 0 },   /* no stubs: placeholder, not counted */")
     lines += [
         "};",
         "",
-        "const unsigned g_kernel_stub_count = sizeof g_kernel_stub_table / sizeof g_kernel_stub_table[0];",
+        "const unsigned g_kernel_stub_count = %s;" % (
+            "sizeof g_kernel_stub_table / sizeof g_kernel_stub_table[0]" if stubs else "0"),
         "",
     ]
     return "\n".join(lines)
