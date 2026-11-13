@@ -848,22 +848,14 @@ def check_state(source, work=None):
 def discovered_changed(work, stamp):
     """True when the next prepare would analyse again for what runs found:
     the seeds file differs from the stamp's, or discovered.jsonl holds
-    addresses neither seeded nor rejected yet (they may become seeds)."""
+    addresses neither seeded, refused nor held yet (they may become seeds),
+    or a held one a healthy run has since reported (profile-free WP1)."""
     from tools.prepare import discovered
     seeds_path = os.path.join(work, discovered.SEEDS)
     if (discovered.digest(seeds_path if os.path.isfile(seeds_path) else None) + discovered.mode_suffix()
             != stamp.get("discovered", "")):
         return True
-    disc = os.path.join(work, discovered.DISCOVERY)
-    if not os.path.isfile(disc):
-        return False
-    from tools.seed_from_log.__main__ import scan_discovery
-    with open(disc, encoding="utf-8", errors="replace") as f:
-        candidates = scan_discovery(f.read())
-    seeds = discovered._read_json(seeds_path, [])
-    rejected = discovered._read_json(os.path.join(work, discovered.REJECTED), [])
-    known = {e["start"].lower() for e in seeds if isinstance(e, dict)} | {r.lower() for r in rejected}
-    return any(("0x%08x" % va) not in known for va in candidates)
+    return discovered.changed(work)
 
 
 def check(a):

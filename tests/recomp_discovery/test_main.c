@@ -112,16 +112,59 @@ int main(void)
     recomp_discovery_stub(0x00012345u, "Other", 0);               /* an ordinal equal to an icall va: its own key */
     CHECK(recomp_discovery_written() == 1);
     CHECK(recomp_discovery_seeds() == 0);
-    recomp_discovery_exception(0x00012350u, 0xC0000094u, "read back");     /* known from the file */
-    CHECK(recomp_discovery_written() == 1);
     recomp_discovery_icall(0x00067890u, 0x00011111u);
     CHECK(recomp_discovery_written() == 2 && recomp_discovery_seeds() == 1);
+    CHECK(!recomp_discovery_tainted());
+    recomp_discovery_exception(0x00012350u, 0xC0000094u, "read back");     /* known from the file */
+    CHECK(recomp_discovery_written() == 2);
+    CHECK(recomp_discovery_tainted());       /* profile-free WP1: the sign is this run's, written or not */
     text = slurp(path);
     if (text) {
         CHECK(count(text, "{\"t\":\"run\"") == 2);
+        CHECK(count(text, ",\"v\":2}\n") == 2);
         CHECK(count(text, "\"va\":\"0x00012345\"") == 1);
-        CHECK(strstr(text, "{\"t\":\"icall\",\"va\":\"0x00067890\"") != NULL);
+        CHECK(strstr(text, "{\"t\":\"icall\",\"va\":\"0x00067890\",\"ret\":\"0x00011111\"}\n") != NULL);
     }
+
+    /* profile-free WP1, taint: a wild call taints the process; the seed entries after
+     * it say so and are not counted as seeds; one already in the file
+     * untainted is not written again. */
+    recomp_discovery_reset();
+    recomp_discovery_icall(0x00070000u, 0x00011111u);                      /* before: clean */
+    CHECK(!recomp_discovery_tainted() && recomp_discovery_seeds() == 1);
+    recomp_discovery_wild(0xFF084E8Bu, 0x000CFA7Au);
+    CHECK(recomp_discovery_tainted());
+    recomp_discovery_icall(0x00525000u, 0x000CFA7Au);
+    recomp_discovery_thread(0x00071000u, 0u);
+    recomp_discovery_icall(0x00067890u, 0x00022222u);                      /* in the file, untainted */
+    recomp_discovery_icall(0x00525000u, 0x000CFA7Au);                      /* the same tainted one */
+    CHECK(recomp_discovery_written() == 4 && recomp_discovery_seeds() == 1);
+    text = slurp(path);
+    if (text) {
+        CHECK(strstr(text, "{\"t\":\"wild\",\"va\":\"0xFF084E8B\",\"ret\":\"0x000CFA7A\"}\n") != NULL);
+        CHECK(strstr(text, "{\"t\":\"icall\",\"va\":\"0x00070000\",\"ret\":\"0x00011111\"}\n") != NULL);
+        CHECK(strstr(text, "{\"t\":\"icall\",\"va\":\"0x00525000\",\"ret\":\"0x000CFA7A\",\"tainted\":true}\n") != NULL);
+        CHECK(strstr(text, "{\"t\":\"thread\",\"va\":\"0x00071000\",\"ctx1\":\"0x00000000\",\"tainted\":true}\n") != NULL);
+        CHECK(count(text, "\"va\":\"0x00067890\"") == 1);
+        CHECK(count(text, "\"va\":\"0x00525000\"") == 1);
+    }
+    /* A later healthy run reports the tainted address: written again,
+     * untainted (that releases it as a seed); a tainted repeat is not. */
+    recomp_discovery_reset();
+    recomp_discovery_icall(0x00525000u, 0x00033333u);
+    CHECK(recomp_discovery_written() == 1 && recomp_discovery_seeds() == 1);
+    recomp_discovery_smc_exec(0x62C1C1B8u, 0x001C1A70u, "heap", "");      /* taints too */
+    CHECK(recomp_discovery_tainted());
+    recomp_discovery_thread(0x00071000u, 0u);                              /* tainted already in the file */
+    CHECK(recomp_discovery_written() == 2);
+    text = slurp(path);
+    if (text) {
+        CHECK(strstr(text, "{\"t\":\"icall\",\"va\":\"0x00525000\",\"ret\":\"0x00033333\"}\n") != NULL);
+        CHECK(count(text, "\"va\":\"0x00071000\"") == 1);
+    }
+    /* The taint is per process: a new one starts clean. */
+    recomp_discovery_reset();
+    CHECK(!recomp_discovery_tainted());
 
     /* XBA-118: the two smc kinds, each once, each keyed apart (the same va for both). */
     recomp_discovery_reset();

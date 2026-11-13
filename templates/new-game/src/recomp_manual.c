@@ -132,7 +132,16 @@ void recomp_icall_fail_log(uint32_t va)
     uint32_t ret = *(volatile uint32_t *)((uintptr_t)g_esp + g_xbox_mem_offset);
     if (xbox_SmcExecOutside(va, ret))
         return;
-    recomp_discovery_icall(va, ret);
+    /* Outside the image's code (the kernel thunk range lets 0xFFxxxxxx
+     * through, an indirect tail jump checks nothing): a wild pointer, not a
+     * function the analysis missed. Written as such, which also marks the
+     * run tainted (profile-free WP1): Fable's corrupted run sent 34 garbage targets
+     * through one call site, and the 14 that fell in executable bytes were
+     * seeded and cut a real function in half. */
+    if (g_xbox_code_hi != 0u && (va < g_xbox_code_lo || va >= g_xbox_code_hi))
+        recomp_discovery_wild(va, ret);
+    else
+        recomp_discovery_icall(va, ret);
     fprintf(stderr, "[ICALL] Failed to resolve VA 0x%08X (total calls: %llu)\n",
             va, (unsigned long long)g_icall_count);
 
@@ -171,9 +180,14 @@ void recomp_icall_not_code_log(uint32_t va)
         /* The first time: mapped guest memory (heap, stack, data) is code
          * made at run time, named once by the runtime (the push of the
          * return address is still on the stack); then quiet here. */
-        int made = xbox_SmcExecOutside(va, *(volatile uint32_t *)((uintptr_t)g_esp + g_xbox_mem_offset));
+        uint32_t ret = *(volatile uint32_t *)((uintptr_t)g_esp + g_xbox_mem_offset);
+        int made = xbox_SmcExecOutside(va, ret);
         if (count == SLOTS)
             return;
+        /* Otherwise a wild pointer: in the discovery file it names its call
+         * site as wild and marks the run tainted (profile-free WP1). */
+        if (!made)
+            recomp_discovery_wild(va, ret);
         seen[count] = va;
         hits[count] = 0;
         smc[count] = (unsigned char)made;

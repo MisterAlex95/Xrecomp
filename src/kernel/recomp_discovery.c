@@ -34,10 +34,16 @@ static pthread_mutex_t s_lock = PTHREAD_MUTEX_INITIALIZER;
 #endif
 
 enum { K_ICALL = 1, K_THREAD, K_THREAD_CTX, K_UNIMPL, K_D3D, K_WAIT_SPIN, K_LAUNCH, K_STACK_SWITCH, K_STUB,
-       K_SMC_EXEC, K_SMC_WRITE, K_EXCEPTION, K_D3D_LAYOUT, K_LAST = K_D3D_LAYOUT };
+       K_SMC_EXEC, K_SMC_WRITE, K_EXCEPTION, K_D3D_LAYOUT, K_WILD, K_LAST = K_WILD };
 /* The two smc kinds share "t":"smc" and differ by "kind" (XBA-118). */
 static const char *const kind_name[] = { "", "icall", "thread", "thread_ctx", "unimpl", "d3d", "wait_spin", "launch",
-                                         "stack_switch", "stub", "smc", "smc", "exception", "d3d_layout" };
+                                         "stack_switch", "stub", "smc", "smc", "exception", "d3d_layout", "wild" };
+/* A seed entry written after the process went wrong is keyed apart (profile-free WP1):
+ * an untainted entry for the same address, from a later healthy run, is
+ * still new and gets written, which is what releases it as a seed. */
+#define K_TAINTED 0x80
+
+static int is_seed_kind(int k) { return k == K_ICALL || k == K_THREAD || k == K_THREAD_CTX; }
 
 /* What is already in the file: kind << 32 | va, open addressing. A title that
  * fills it is beyond what one file can help with; the rest is dropped. */
@@ -49,8 +55,9 @@ static int s_state;             /* 0 not opened yet, 1 open, -1 off */
 static int s_fd = -1;
 static char s_path[1024];
 static unsigned s_written;
-static unsigned s_seeds;        /* icall / thread / thread_ctx entries written by this process */
+static unsigned s_seeds;        /* untainted icall / thread / thread_ctx entries written by this process */
 static int s_run_written;
+static int s_tainted;           /* the process went wrong: a wild call, an smc or an exception (profile-free WP1) */
 
 static int seen_add(uint64_t key)       /* 1 when new */
 {
@@ -67,6 +74,18 @@ static int seen_add(uint64_t key)       /* 1 when new */
         }
     }
     return -1;
+}
+
+static int seen_has(uint64_t key)
+{
+    uint32_t h = (uint32_t)((key * 0x9E3779B97F4A7C15ull) >> 40) & (SEEN_SLOTS - 1);
+    for (unsigned i = 0; i < SEEN_SLOTS; i++, h = (h + 1) & (SEEN_SLOTS - 1)) {
+        if (s_seen[h] == key)
+            return 1;
+        if (s_seen[h] == 0)
+            return 0;
+    }
+    return 0;
 }
 
 static int kind_of(const char *s, size_t n)
@@ -107,6 +126,8 @@ static void load_existing(const char *path)
                 continue;
             key = (uint32_t)strtoul(va + 6, NULL, 16);
         }
+        if (is_seed_kind(k) && strstr(line, "\"tainted\":true"))
+            k |= K_TAINTED;
         (void)seen_add((uint64_t)k << 32 | key);
     }
     fclose(f);
@@ -173,14 +194,33 @@ static void put_line(const char *line)
 static void note(int kind, uint32_t va, const char *fields)
 {
     char line[512];
-    int added;
+    int added, tainted;
 
     LOCK();
     if (!open_locked()) {
         UNLOCK();
         return;
     }
-    added = seen_add((uint64_t)kind << 32 | va);
+    /* The first sign the process went wrong (profile-free WP1): an indirect call to
+     * an address that is not code, code run or written outside what was
+     * lifted, an exception nothing handled. From then on a call can go
+     * through garbage (Fable: 34 targets from one call site, 14 of them in
+     * executable bytes), so seed entries carry "tainted":true and the next
+     * Prepare takes them only when a healthy run reports them too. Set even
+     * when the entry itself is already in the file: the sign is this run's. */
+    if ((kind == K_WILD || kind == K_SMC_EXEC || kind == K_SMC_WRITE || kind == K_EXCEPTION) && !s_tainted) {
+        s_tainted = 1;
+        fprintf(stderr, "[DISCOVERY] the run went wrong here (%s 0x%08X): code addresses it reports from now on"
+                " are marked tainted, the next Prepare does not seed them on their own\n", kind_name[kind], va);
+    }
+    tainted = s_tainted && is_seed_kind(kind);
+    /* A tainted entry adds nothing when the address is already in the file
+     * untainted; an untainted one is new even when a tainted one is there. */
+    if (tainted && seen_has((uint64_t)kind << 32 | va)) {
+        UNLOCK();
+        return;
+    }
+    added = seen_add((uint64_t)(kind | (tainted ? K_TAINTED : 0)) << 32 | va);
     if (added == 0) {
         UNLOCK();
         return;
@@ -202,20 +242,24 @@ static void note(int kind, uint32_t va, const char *fields)
         if (gmtime_r(&now, &tm))
 #endif
             strftime(ts, sizeof ts, "%Y-%m-%dT%H:%M:%SZ", &tm);
-        snprintf(line, sizeof line, "{\"t\":\"run\",\"time\":\"%s\"}\n", ts);
+        /* "v":2: this writer marks tainted entries and writes "wild" ones
+         * (profile-free WP1); a reader derives the taint itself for an older run. */
+        snprintf(line, sizeof line, "{\"t\":\"run\",\"time\":\"%s\",\"v\":2}\n", ts);
         put_line(line);
         s_run_written = 1;
     }
     if (kind == K_STUB)     /* keyed by ordinal: no address of its own */
         snprintf(line, sizeof line, "{\"t\":\"stub\",\"ord\":%u%s}\n", va, fields);
     else
-        snprintf(line, sizeof line, "{\"t\":\"%s\",\"va\":\"0x%08X\"%s}\n", kind_name[kind], va, fields);
+        snprintf(line, sizeof line, "{\"t\":\"%s\",\"va\":\"0x%08X\"%s%s}\n", kind_name[kind], va, fields,
+                 tainted ? ",\"tainted\":true" : "");
     put_line(line);
     /* The first code the analysis missed in this run (XBA-129): an indirect
      * call to it was skipped (the title goes on, maybe wrong) or a thread did
      * not start. Said once, so a log shows it without a crash; the app reads
-     * the entry from the file and the status line's "seeds". */
-    if ((kind == K_ICALL || kind == K_THREAD || kind == K_THREAD_CTX) && !s_seeds++)
+     * the entry from the file and the status line's "seeds". A tainted entry
+     * is not counted: the next Prepare will not seed it on its own. */
+    if (is_seed_kind(kind) && !tainted && !s_seeds++)
         fprintf(stderr, "[DISCOVERY] first code the analysis missed in this run: %s 0x%08X"
                 " (skipped; the next Prepare adds it)\n", kind_name[kind], va);
     /* No fsync: a crash of the process keeps what write() handed the kernel
@@ -404,6 +448,18 @@ void recomp_discovery_d3d_layout(const char *lib, uint32_t build, const char *ru
     note(K_D3D_LAYOUT, h ^ (build * 2654435761u), f);
 }
 
+void recomp_discovery_wild(uint32_t va, uint32_t ret_va)
+{
+    char f[48];
+    snprintf(f, sizeof f, ",\"ret\":\"0x%08X\"", ret_va);
+    note(K_WILD, va, f);
+}
+
+int recomp_discovery_tainted(void)
+{
+    return s_tainted;
+}
+
 const char *recomp_discovery_path(void)
 {
     int on;
@@ -433,6 +489,7 @@ void recomp_discovery_reset(void)
     s_written = 0;
     s_seeds = 0;
     s_run_written = 0;
+    s_tainted = 0;
     s_seen_n = 0;
     memset(s_seen, 0, sizeof s_seen);
     UNLOCK();

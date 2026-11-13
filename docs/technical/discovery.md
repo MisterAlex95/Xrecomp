@@ -22,8 +22,14 @@ every entry written before it; a reader skips a torn last line. An entry already
 this run or an earlier one) is not written again: the file only grows with what is new.
 
 ```
-{"t":"run","time":"2026-11-11T18:00:00Z"}                    a process wrote entries from here on
+{"t":"run","time":"2026-11-11T18:00:00Z","v":2}              a process wrote entries from here on; "v":2: it marks taint
+                                                             and writes "wild" entries (below; absent before profile-free WP1)
 {"t":"icall","va":"0x0012ABCD","ret":"0x00123456"}           indirect call to code with no dispatch entry; ret = the caller's next instruction
+{"t":"icall","va":"0x00525000","ret":"0x000CFA7A","tainted":true}
+                                                             the same, written after the process went wrong (below)
+{"t":"wild","va":"0xFF084E8B","ret":"0x000CFA7A"}            indirect call to an address that is not code (a null or wild
+                                                             pointer, outside the image's code); never a seed, it marks
+                                                             its call site (ret) as wild and taints the process (profile-free WP1)
 {"t":"thread","va":"0x00034560","ctx1":"0x00045670"}         thread start routine with no dispatch entry
 {"t":"thread_ctx","va":"0x00045670","routine":"0x00034560"}  StartContext1 inside the title's code with no dispatch entry
 {"t":"unimpl","va":"0x00056780","insn":"bsf eax, ecx"}       untranslated instruction reached (RECOMP_UNIMPL)
@@ -67,6 +73,34 @@ from a wild pointer into data; nothing longer is ever written. Rules and the wri
 
 Addresses are guest VAs, 8 hex digits. At most 6,144 distinct entries per file.
 
+### Taint: what a run that went wrong reports is not a seed (profile-free WP1)
+
+A run that went wrong calls through garbage. Fable's corrupted run sent 34 different targets through one call site
+(`ret 0x000CFA7A`), most of them `0xFFxxxxxx`; 14 fell in executable bytes that decode, the gates of the time took
+them as seeds, 12 of them sat inside an instruction of a real function, and one (`0x001C120A`) cut a function in half:
+the next build returned from it without its `pop`s and `ret 8`, and the guest stack was off from then on. That looked
+like a profile problem for a day. So:
+
+- The runtime marks the process **tainted** at the first `wild`, `smc` or `exception` entry (even one already in the
+  file: the sign is this run's), says so once on stderr (`[DISCOVERY] the run went wrong here (wild 0xFF084E8B): ...`),
+  and writes its later `icall`, `thread` and `thread_ctx` entries with `"tainted":true`. They do not count in the
+  status line's `seeds`. A tainted entry is keyed apart: a later healthy run that meets the same address writes it
+  again, untainted.
+- `recomp_icall_fail_log` writes a target outside the image's code (`g_xbox_code_lo`/`hi`) as `wild`, not `icall`;
+  `recomp_icall_not_code_log` writes the first 16 non-code targets as `wild` (`templates/new-game/src/recomp_manual.c`).
+- The readers (`tools/seed_from_log` `classify_discovery`) apply two rules per run segment, from one `run` line to
+  the next. **Call site**: an `icall` whose `ret` also produced a target outside the executable sections in that run
+  (a `wild` entry, or an older file's `icall` to a non-code address) is never a seed. **Taint**: entries after the
+  first `wild` / non-code `icall` / `smc` / `exception` entry of the segment, or marked `"tainted":true`, are held.
+  An address becomes a seed only when some entry of it is clean: a healthy run repeats it.
+- And a static gate: an address inside an instruction of a body `functions.json` established (decoded from the
+  body's start along its control flow, not the linear sweep) is refused unless a prologue starts there. Bodies that
+  start at a run's own seeds do not count, but a real body an earlier seed cut still does.
+
+On the launcher's poisoned Fable folder these rules keep `0x00584074` and `0x005861C5` and refuse all 14 (the call-site
+rule alone takes all 14; the instruction gate alone 11). A test that a dword equal to the address occurs in the image
+was tried and does not discriminate (8 of the 14 occur by coincidence, one 841 times).
+
 The first `icall`, `thread` or `thread_ctx` entry a process writes is also said on stderr, once: `[DISCOVERY] first
 code the analysis missed in this run: icall 0x0012ABCD (skipped; the next Prepare adds it)`. A skipped indirect call
 does not crash, the title goes on (maybe wrong): that line, the entry, and the status line's `seeds` (how many such
@@ -75,8 +109,9 @@ entries this process wrote, `src/kernel/recomp_status.h`) make the miss visible 
 ## Who reads it
 
 - `python -m tools.seed_from_log <work>/discovered.jsonl <xbe> --functions ... --seeds ...` takes the `icall`,
-  `thread` and `thread_ctx` addresses through its gates (executable section, decodes as a function body: an address
-  is never seeded just because a run mentioned it).
+  `thread` and `thread_ctx` addresses through its gates (executable section, decodes as a function body, not inside
+  an instruction of a known body, and the call-site and taint rules above: an address is never seeded just because a
+  run mentioned it). `wild` entries are not seeds.
 - `unimpl` entries are not seeds: they feed the lifter coverage report (XBA-71). Nor are `stack_switch` entries:
   they name a blocker ([stack-switching.md](stack-switching.md)).
 - `stub` entries are not seeds either: `tools.compat` adds « calls stub ordinal N (Name) » to the run's blocker
@@ -89,10 +124,15 @@ entries this process wrote, `src/kernel/recomp_status.h`) make the miss visible 
 - `d3d_layout` entries are not seeds: they say what to add to `k_layouts` in `profiles/xdk/d3d8/d3d8.c` for that
   build (XBA-105); `tools.compat` (and the device grader) add « D3D layout guessed for D3D8LTCG 5933:
   fence_event, ... » after a blocker other than a crash or a launch (`tools/compat/blockers.py`).
-- `tools.prepare` reads it before analysing (XBA-97, `tools/prepare/discovered.py`): new `icall`, `thread` and
+- `tools.prepare` reads it before analysing (XBA-97, `tools/prepare/discovered.py`): the `icall`, `thread` and
   `thread_ctx` addresses go through the same gates, the ones that pass are kept in `<work>/discovered-seeds.json` and
-  handed to the disassembler, the others in `<work>/discovered-rejected.json` so they are not tried again. A new seed
-  changes the stamp: the next prepare analyses and lifts again (all of it for now; only what changed is XBA-65).
+  handed to the disassembler, the ones a static gate refuses are listed in `<work>/discovered-rejected.json`, the ones
+  only a wild site or a tainted stretch reported in `<work>/discovered-held.json` (until a healthy run reports them).
+  Every prepare re-gates the whole file, the seeds already kept included (profile-free WP1): a seed an older toolkit took that
+  today's gates refuse is dropped and said (`- 001C120A  dropped from discovered-seeds.json: from a wild call site
+  ...`, `14 seed(s) dropped: ...`), so a poisoned work folder heals at its next Prepare, on a desktop or a phone,
+  without anyone deleting files. Only changes are printed. A seed added or dropped changes the stamp: the next
+  prepare analyses and lifts again (all of it for now; only what changed is XBA-65).
 - The Android app, after every run (XBA-74, XBA-129, [prepare.md « Self-healing »](../android/prepare.md)): new
   `icall`, `thread` or `thread_ctx` entries since the last Prepare → a Prepare that takes them in (at once and a
   relaunch after a crash, in the background after a run that ended well); a crash with `exception`, `stack_switch` or

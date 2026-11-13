@@ -7,8 +7,19 @@
  * written again. tools.prepare reads it to seed the next prepare (XBA-65);
  * tools.seed_from_log takes it too. Format: docs/technical/discovery.md.
  *
- *   {"t":"run","time":"2026-11-11T18:00:00Z"}             once per process, before its first entry
+ *   {"t":"run","time":"2026-11-11T18:00:00Z","v":2}       once per process, before its first entry; "v":2:
+ *                                                          this writer marks taint and writes "wild" (profile-free WP1)
  *   {"t":"icall","va":"0x0012ABCD","ret":"0x00123456"}    indirect call to code with no dispatch entry
+ *   {"t":"wild","va":"0xFF084E8B","ret":"0x000CFA7A"}     indirect call to an address that is not code
+ *                                                          (a null or wild pointer; profile-free WP1): never a seed,
+ *                                                          it names its call site (ret) as wild
+ *
+ * Taint (profile-free WP1): from the first wild, smc or exception entry of a process
+ * (written or already in the file) on, its icall / thread / thread_ctx
+ * entries end with ,"tainted":true: the run may be calling through garbage.
+ * A tainted entry is keyed apart from an untainted one, so a later healthy
+ * run still writes the address, untainted; tools.seed_from_log seeds only
+ * what a healthy stretch of a run reported.
  *   {"t":"thread","va":"0x00012345","ctx1":"0x00045678"}  thread start routine with no dispatch entry
  *   {"t":"thread_ctx","va":"0x00045678","routine":"0x00012345"}
  *                                                          StartContext1 in the code range, not dispatchable
@@ -74,6 +85,10 @@ void recomp_discovery_smc_exec(uint32_t target, uint32_t ret_va, const char *whe
 void recomp_discovery_smc_write(uint32_t page, uint32_t at, const char *section, const char *by, uint32_t ret_va);
 void recomp_discovery_exception(uint32_t va, uint32_t code, const char *why);
 void recomp_discovery_d3d_layout(const char *lib, uint32_t build, const char *rule, uint32_t used);
+void recomp_discovery_wild(uint32_t va, uint32_t ret_va);
+
+/* 1 once the process went wrong (the taint above), else 0. */
+int recomp_discovery_tainted(void);
 
 /* The file in use, or NULL when discovery is off (opens it on first use). */
 const char *recomp_discovery_path(void);
@@ -82,7 +97,7 @@ const char *recomp_discovery_path(void);
 unsigned recomp_discovery_written(void);
 
 /* Of them, the code addresses the next Prepare can seed (icall, thread,
- * thread_ctx): the status line's "seeds" (XBA-129). */
+ * thread_ctx, untainted): the status line's "seeds" (XBA-129). */
 unsigned recomp_discovery_seeds(void);
 
 /* Tests: forget the open file and what was seen, read $RECOMP_DISCOVERY again. */
