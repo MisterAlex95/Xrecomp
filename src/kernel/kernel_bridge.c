@@ -1084,6 +1084,8 @@ static int  bridge_handle_is_async(uint32_t token);
 static void   bridge_write_handle(uint32_t handle_va, HANDLE h);
 static HANDLE bridge_take_handle(uint32_t token);
 
+static int ob_close_token(uint32_t token);   /* objects of ObCreateObject's */
+
 static void bridge_NtClose(void)
 {
     uint32_t raw_handle = STACK_ARG(0);
@@ -1095,6 +1097,7 @@ static void bridge_NtClose(void)
 
     bridge_forget_async_handle(raw_handle);
     thobj_detach_token(raw_handle);
+    ob_close_token(raw_handle);
 
     /* Close real handles but skip fake/synthetic ones */
     if (raw_handle && raw_handle != 0xDEAD0001u && raw_handle != 0xBEEF0010u) {
@@ -6009,6 +6012,9 @@ static void bridge_IoCreateSymbolicLink(void)
                                                 target_va ? &target : NULL);
 }
 
+static uint32_t ob_from_token(uint32_t token);
+static int ob_type_ok(uint32_t body, uint32_t type);
+
 /* ── ObReferenceObjectByHandle (ordinal 246) ─────────────── */
 static void bridge_ObReferenceObjectByHandle(void)
 {
@@ -6021,7 +6027,22 @@ static void bridge_ObReferenceObjectByHandle(void)
     uint32_t thread = handle == 0xFFFFFFFEu ? thobj_current()
                                             : thobj_from_token(handle);
 
-    (void)obj_type;
+    /* An object of ObCreateObject's (XBA-114): its body, one more
+     * reference, and the type checked as the console does. */
+    {
+        uint32_t body = ob_from_token(handle);
+        if (body) {
+            if (!ob_type_ok(body, obj_type)) {
+                if (object_ptr) BRIDGE_MEM32(object_ptr) = 0;
+                g_eax = 0xC0000024u;         /* STATUS_OBJECT_TYPE_MISMATCH */
+                return;
+            }
+            InterlockedIncrement((volatile LONG *)XBOX_TO_NATIVE(body - 0x10u));
+            if (object_ptr) BRIDGE_MEM32(object_ptr) = body;
+            g_eax = 0;
+            return;
+        }
+    }
     if (thread) {
         thobj_ref(thread);
         if (object_ptr) BRIDGE_MEM32(object_ptr) = thread;
@@ -6377,8 +6398,16 @@ static void bridge_NtResumeThread(void)
  * Not STACK_ARG(0). Xbox uses __fastcall here, so the argument never reaches
  * the stack and the arg-size entry is 0. Reading it off the stack would
  * dereference whatever the caller happened to leave there. */
+static int  ob_is(uint32_t body);
+static void ob_deref(uint32_t body);
+
 static void bridge_ObfDereferenceObject(void)
 {
+    if (ob_is(g_ecx)) {   /* an object of ObCreateObject's (XBA-114) */
+        ob_deref(g_ecx);
+        g_eax = 0;
+        return;
+    }
     thobj_unref(g_ecx);   /* no-op unless ecx is a thread object */
     xbox_ObfDereferenceObject(XBOX_TO_NATIVE(g_ecx));
     g_eax = 0;
@@ -6398,6 +6427,8 @@ static void bridge_ObfDereferenceObject(void)
  * dereference whatever the caller happened to leave there. */
 static void bridge_ObfReferenceObject(void)
 {
+    if (ob_is(g_ecx))     /* PointerCount, in its OBJECT_HEADER (XBA-114) */
+        InterlockedIncrement((volatile LONG *)XBOX_TO_NATIVE(g_ecx - 0x10u));
     thobj_ref(g_ecx);     /* no-op unless ecx is a thread object */
     xbox_ObfReferenceObject(XBOX_TO_NATIVE(g_ecx));
     g_eax = 0;
@@ -9809,12 +9840,127 @@ static void bridge_NtCreateTimer(void)
     g_eax = 0;  /* STATUS_SUCCESS */
 }
 
-/* --- NtOpenDirectoryObject (ordinal 201, 3 args = 12 bytes) --- */
+/* ── The object namespace, as far as a title can see it (XBA-114) ──
+ *
+ * Directory objects are not kept as objects: the console's namespace holds
+ * a fixed set of directories and what the title adds to them, so a handle
+ * to a directory is a token naming one of these (0xD1A0000n, untagged:
+ * NtClose leaves it alone) and its contents are made up on each query:
+ *   \                   ?? and Device (directories)
+ *   \??                 the DOS-device links: D: (the title's disc), and
+ *                       every link IoCreateSymbolicLink made (kernel_io.c)
+ *   \Device             CdRom0 (device), Harddisk0 (directory)
+ *   \Device\Harddisk0   Partition0-5 (devices)
+ * plus, in each, the named objects ObInsertObject put there. An entry's
+ * Type is its object type's pool tag ('Dire', 'Symb', 'Devi', or the tag
+ * of the title's OBJECT_TYPE): nxdk's OBJECT_DIRECTORY_INFORMATION only
+ * says "ULONG Type", and the tag is what the Xbox object types carry. */
+#define OBDIR_TOKEN      0xD1A00000u
+#define OBDIR_COUNT      4
+#define OBTAG_DIRECTORY  0x65726944u   /* 'Dire' */
+#define OBTAG_SYMLINK    0x626D7953u   /* 'Symb' */
+#define OBTAG_DEVICE     0x69766544u   /* 'Devi' */
+
+static const char *const s_obdir_path[OBDIR_COUNT] = {
+    "\\", "\\??", "\\Device", "\\Device\\Harddisk0",
+};
+
+static int obdir_from_token(uint32_t token)
+{
+    return (token & 0xFFFFFFF0u) == OBDIR_TOKEN && (token & 0xFu) < OBDIR_COUNT
+         ? (int)(token & 0xFu) : -1;
+}
+
+/* The directory a full name (no trailing backslash) names, or -1. */
+static int obdir_find(const char *name)
+{
+    int i;
+    for (i = 0; i < OBDIR_COUNT; i++)
+        if (!_stricmp(name, s_obdir_path[i]))
+            return i;
+    return -1;
+}
+
+/* The full name an OBJECT_ATTRIBUTES names, RootDirectory a directory token
+ * or none; NULL when it has none. Trailing backslashes go, but "\" stays. */
+static const char *ob_attr_name(uint32_t oa_va, char *out, size_t n)
+{
+    const char *rel = oa_va ? bridge_get_xbox_path(oa_va) : NULL;
+    int root = oa_va ? obdir_from_token(BRIDGE_MEM32(oa_va)) : -1;
+    size_t len;
+
+    if (!rel)
+        return NULL;
+    if (root >= 0 && rel[0] != '\\')
+        snprintf(out, n, "%s%s%s", s_obdir_path[root], root ? "\\" : "", rel);
+    else
+        snprintf(out, n, "%s", rel);
+    len = strlen(out);
+    while (len > 1 && out[len - 1] == '\\')
+        out[--len] = '\0';
+    return out;
+}
+
+static int ob_named_entry(int dir, uint32_t index, char *name, size_t n, uint32_t *tag);
+
+/* Entry `index` of directory `dir`: its name and type tag, 0 past the end. */
+static int obdir_entry(int dir, uint32_t index, char *name, size_t n, uint32_t *tag)
+{
+    static const struct { int dir; const char *name; uint32_t tag; } fixed[] = {
+        { 0, "??", OBTAG_DIRECTORY }, { 0, "Device", OBTAG_DIRECTORY },
+        { 2, "CdRom0", OBTAG_DEVICE }, { 2, "Harddisk0", OBTAG_DIRECTORY },
+        { 3, "Partition0", OBTAG_DEVICE }, { 3, "Partition1", OBTAG_DEVICE },
+        { 3, "Partition2", OBTAG_DEVICE }, { 3, "Partition3", OBTAG_DEVICE },
+        { 3, "Partition4", OBTAG_DEVICE }, { 3, "Partition5", OBTAG_DEVICE },
+    };
+    uint32_t k = 0;
+    size_t i;
+    int s, r;
+
+    for (i = 0; i < sizeof fixed / sizeof fixed[0]; i++)
+        if (fixed[i].dir == dir && k++ == index) {
+            snprintf(name, n, "%s", fixed[i].name);
+            *tag = fixed[i].tag;
+            return 1;
+        }
+    if (dir == 1) {
+        const char *link, *target;
+        if (!xbox_LookupSymbolicLink("\\??\\D:") && k++ == index) {
+            snprintf(name, n, "D:");
+            *tag = OBTAG_SYMLINK;
+            return 1;
+        }
+        for (s = 0; (r = xbox_SymbolicLinkAt(s, &link, &target)) >= 0; s++)
+            if (r && !_strnicmp(link, "\\??\\", 4) && !strchr(link + 4, '\\') && k++ == index) {
+                snprintf(name, n, "%s", link + 4);
+                *tag = OBTAG_SYMLINK;
+                return 1;
+            }
+    }
+    return ob_named_entry(dir, index - k, name, n, tag);
+}
+
+/* --- NtOpenDirectoryObject (ordinal 201, 2 args = 8 bytes)
+ * NTSTATUS NtOpenDirectoryObject(PHANDLE DirectoryHandle,
+ *                                POBJECT_ATTRIBUTES ObjectAttributes);
+ * Two arguments (nxdk xboxkrnl.h); the table said three. */
 static void bridge_NtOpenDirectoryObject(void)
 {
-    (void)STACK_ARG(0);
-    (void)STACK_ARG(1);
-    (void)STACK_ARG(2);
+    uint32_t handle_va = STACK_ARG(0);
+    char full[256];
+    const char *name = ob_attr_name(STACK_ARG(1), full, sizeof full);
+    int dir = name ? obdir_find(name) : -1;
+
+    if (!handle_va || !bridge_buf_ok(handle_va, 4, "NtOpenDirectoryObject")) {
+        g_eax = 0xC0000005u;
+        return;
+    }
+    if (dir < 0) {
+        g_eax = name ? 0xC0000034u           /* STATUS_OBJECT_NAME_NOT_FOUND */
+                     : 0xC0000033u;          /* STATUS_OBJECT_NAME_INVALID */
+        return;
+    }
+    BRIDGE_MEM32(handle_va) = OBDIR_TOKEN | (uint32_t)dir;
     g_eax = 0;
 }
 
@@ -9853,16 +9999,52 @@ static void bridge_NtQueueApcThread(void)
     g_eax = 0;
 }
 
-/* --- NtQueryDirectoryObject (ordinal 208, 7 args = 28 bytes) --- */
+/* --- NtQueryDirectoryObject (ordinal 208, 6 args = 24 bytes)
+ * NTSTATUS NtQueryDirectoryObject(HANDLE DirectoryHandle, PVOID Buffer,
+ *                                 ULONG Length, BOOLEAN RestartScan,
+ *                                 PULONG Context, PULONG ReturnLength);
+ * Six arguments (nxdk xboxkrnl.h); the table said seven. One entry per
+ * call, as the console's has no ReturnSingleEntry: an
+ * OBJECT_DIRECTORY_INFORMATION { OBJECT_STRING Name; ULONG Type; } (12
+ * bytes) with the name's characters right after it. Context is the index
+ * of the next entry; STATUS_NO_MORE_ENTRIES past the last, and
+ * STATUS_BUFFER_TOO_SMALL with the size needed in ReturnLength. */
 static void bridge_NtQueryDirectoryObject(void)
 {
-    (void)STACK_ARG(0);
-    (void)STACK_ARG(1);
-    (void)STACK_ARG(2);
-    (void)STACK_ARG(3);
-    (void)STACK_ARG(4);
-    (void)STACK_ARG(5);
-    (void)STACK_ARG(6);
+    int dir = obdir_from_token(STACK_ARG(0));
+    uint32_t buf = STACK_ARG(1), length = STACK_ARG(2);
+    uint32_t restart = STACK_ARG(3) & 0xFF, ctx_va = STACK_ARG(4), ret_va = STACK_ARG(5);
+    uint32_t index, need, tag = 0;
+    char name[128];
+    size_t len;
+
+    if (dir < 0) {
+        g_eax = 0xC0000008u;                 /* STATUS_INVALID_HANDLE */
+        return;
+    }
+    if (!ctx_va || !bridge_buf_ok(ctx_va, 4, "NtQueryDirectoryObject")) {
+        g_eax = 0xC0000005u;
+        return;
+    }
+    index = restart ? 0 : BRIDGE_MEM32(ctx_va);
+    if (!obdir_entry(dir, index, name, sizeof name, &tag)) {
+        g_eax = 0x8000001Au;                 /* STATUS_NO_MORE_ENTRIES */
+        return;
+    }
+    len = strlen(name);
+    need = 12u + (uint32_t)len + 1u;
+    if (ret_va && bridge_buf_ok(ret_va, 4, "NtQueryDirectoryObject"))
+        BRIDGE_MEM32(ret_va) = need;
+    if (length < need || !bridge_buf_ok(buf, need, "NtQueryDirectoryObject")) {
+        g_eax = 0xC0000023u;                 /* STATUS_BUFFER_TOO_SMALL */
+        return;
+    }
+    BRIDGE_MEM16(buf + 0) = (uint16_t)len;
+    BRIDGE_MEM16(buf + 2) = (uint16_t)(len + 1);
+    BRIDGE_MEM32(buf + 4) = buf + 12;
+    BRIDGE_MEM32(buf + 8) = tag;
+    memcpy(XBOX_TO_NATIVE(buf + 12), name, len + 1);
+    BRIDGE_MEM32(ctx_va) = index + 1;
     g_eax = 0;
 }
 
@@ -10138,63 +10320,440 @@ static void bridge_NtWriteFileGather(void)
  * ═══════════════════════════════════════════════════════════════════════════
  */
 
-/* --- ObCreateObject (ordinal 239, 7 args = 28 bytes) --- */
+/* ── Objects with a body in guest memory (XBA-114) ──
+ *
+ * ObCreateObject lays an object out as the console does: an OBJECT_HEADER
+ * { PointerCount, HandleCount, Type, Flags } right before the body, and for
+ * a named object an OBJECT_HEADER_NAME_INFO { ChainLink, Directory,
+ * OBJECT_STRING Name } before that (Flags 1 = named, 2 = permanent). The
+ * memory comes from the pool (xbox_HeapAlloc) whatever the type's
+ * Allocate/FreeProcedure say: the console's own types use ExAllocatePool
+ * there anyway, and calling a title's allocator from here would need its
+ * result back across the guest call. The type's CloseProcedure(Object,
+ * HandleCount) and DeleteProcedure(Object) are called, on the calling
+ * thread, as on the console.
+ *
+ * A handle to such an object is a fresh token (its host side a spare
+ * event); s_ob_token maps it to the body. Closing the last handle of a
+ * temporary object takes its name out of the namespace; the last reference
+ * deletes it. */
+#define OB_MAX       256
+#define OB_NAME_MAX  128
+#define OB_PERMANENT 2u
+
+static struct {
+    uint32_t body, base;        /* 0: free */
+    int      inserted;          /* its name is in the namespace */
+    char     name[OB_NAME_MAX]; /* full name, "" when unnamed */
+} s_ob[OB_MAX];
+static uint32_t s_ob_token[BRIDGE_HANDLE_MAX];
+static volatile LONG s_ob_lock;
+
+static void ob_lock(void)
+{
+    while (InterlockedCompareExchange(&s_ob_lock, 1, 0) != 0)
+        SwitchToThread();
+}
+
+static void ob_unlock(void) { InterlockedExchange(&s_ob_lock, 0); }
+
+static int ob_slot(uint32_t body)    /* lock held */
+{
+    int i;
+    if (!body)
+        return -1;
+    for (i = 0; i < OB_MAX; i++)
+        if (s_ob[i].body == body)
+            return i;
+    return -1;
+}
+
+static int ob_is(uint32_t body)
+{
+    int s;
+    ob_lock();
+    s = ob_slot(body);
+    ob_unlock();
+    return s >= 0;
+}
+
+#define OB_HDR(body)   ((body) - 0x10u)
+#define OB_PTRS(body)  (*(volatile LONG *)XBOX_TO_NATIVE(OB_HDR(body) + 0))
+#define OB_HANDLES(body) (*(volatile LONG *)XBOX_TO_NATIVE(OB_HDR(body) + 4))
+#define OB_TYPE(body)  BRIDGE_MEM32(OB_HDR(body) + 8)
+#define OB_FLAGS(body) BRIDGE_MEM32(OB_HDR(body) + 12)
+
+/* A type procedure (OBJECT_TYPE +8 Close, +0xC Delete), or 0. */
+static uint32_t ob_type_proc(uint32_t body, uint32_t off)
+{
+    uint32_t type = OB_TYPE(body);
+    return type && bridge_va_mapped(type, 0x1C) ? BRIDGE_MEM32(type + off) : 0;
+}
+
+static int ob_type_ok(uint32_t body, uint32_t type)
+{
+    return !type || OB_TYPE(body) == type;
+}
+
+static void ob_unname(uint32_t body)
+{
+    int s;
+    ob_lock();
+    s = ob_slot(body);
+    if (s >= 0)
+        s_ob[s].inserted = 0;
+    ob_unlock();
+}
+
+/* Drop one reference; the last deletes the object. */
+static void ob_deref(uint32_t body)
+{
+    uint32_t del, base = 0;
+    int s;
+
+    if (InterlockedDecrement(&OB_PTRS(body)) > 0)
+        return;
+    del = ob_type_proc(body, 0xC);
+    if (del) {
+        uint32_t a[1] = { body };
+        bridge_call_guest(del, a, 1);
+    }
+    ob_lock();
+    s = ob_slot(body);
+    if (s >= 0) {
+        base = s_ob[s].base;
+        memset(&s_ob[s], 0, sizeof s_ob[s]);
+    }
+    ob_unlock();
+    if (base)
+        xbox_HeapFree(base);
+}
+
+/* A handle for the body: one more handle and pointer reference. */
+static uint32_t ob_new_token(uint32_t body)
+{
+    HANDLE h = CreateEventA(NULL, TRUE, FALSE, NULL);
+    uint32_t token = h ? bridge_handle_token_ex(h, 1) : 0;
+
+    if (!token) {
+        if (h) CloseHandle(h);
+        return 0;
+    }
+    s_ob_token[token & BRIDGE_HANDLE_MASK] = body;
+    InterlockedIncrement(&OB_HANDLES(body));
+    return token;
+}
+
+static uint32_t ob_from_token(uint32_t token)
+{
+    if ((token & 0xFF000000u) != BRIDGE_HANDLE_TAG || !(token & BRIDGE_HANDLE_MASK)
+            || (token & BRIDGE_HANDLE_MASK) >= BRIDGE_HANDLE_MAX)
+        return 0;
+    return s_ob_token[token & BRIDGE_HANDLE_MASK];
+}
+
+/* NtClose of an object's handle: 1 when the token was one. The host event
+ * behind it is closed by NtClose as usual. */
+static int ob_close_token(uint32_t token)
+{
+    uint32_t body = ob_from_token(token), close_proc;
+    LONG left;
+
+    if (!body)
+        return 0;
+    s_ob_token[token & BRIDGE_HANDLE_MASK] = 0;
+    close_proc = ob_type_proc(body, 0x8);
+    if (close_proc) {
+        uint32_t a[2] = { body, (uint32_t)OB_HANDLES(body) };
+        bridge_call_guest(close_proc, a, 2);
+    }
+    left = InterlockedDecrement(&OB_HANDLES(body));
+    if (left <= 0 && !(OB_FLAGS(body) & OB_PERMANENT))
+        ob_unname(body);
+    ob_deref(body);
+    return 1;
+}
+
+/* The inserted object of that full name, or 0. */
+static uint32_t ob_lookup(const char *name)
+{
+    uint32_t body = 0;
+    int i;
+    ob_lock();
+    for (i = 0; i < OB_MAX; i++)
+        if (s_ob[i].body && s_ob[i].inserted && !_stricmp(s_ob[i].name, name)) {
+            body = s_ob[i].body;
+            break;
+        }
+    ob_unlock();
+    return body;
+}
+
+/* Entry `index` among the named objects directly in directory `dir`. */
+static int ob_named_entry(int dir, uint32_t index, char *name, size_t n, uint32_t *tag)
+{
+    const char *path = s_obdir_path[dir];
+    size_t plen = strlen(path);
+    uint32_t k = 0;
+    int i, found = 0;
+
+    ob_lock();
+    for (i = 0; i < OB_MAX && !found; i++) {
+        const char *nm = s_ob[i].name, *leaf;
+        if (!s_ob[i].body || !s_ob[i].inserted)
+            continue;
+        if (dir == 0 ? nm[0] != '\\'
+                     : (_strnicmp(nm, path, plen) || nm[plen] != '\\'))
+            continue;
+        leaf = nm + (dir == 0 ? 1 : plen + 1);
+        if (!*leaf || strchr(leaf, '\\') || k++ != index)
+            continue;
+        snprintf(name, n, "%s", leaf);
+        {
+            uint32_t type = OB_TYPE(s_ob[i].body);
+            *tag = type && bridge_va_mapped(type, 0x1C) ? BRIDGE_MEM32(type + 0x18) : 0;
+        }
+        found = 1;
+    }
+    ob_unlock();
+    return found;
+}
+
+/* --- ObCreateObject (ordinal 239, 4 args = 16 bytes)
+ * NTSTATUS ObCreateObject(POBJECT_TYPE ObjectType,
+ *                         POBJECT_ATTRIBUTES ObjectAttributes,
+ *                         ULONG ObjectBodySize, PVOID *Object);
+ * Four arguments (nxdk xboxkrnl.h); the table said seven. */
 static void bridge_ObCreateObject(void)
 {
-    (void)STACK_ARG(0);
-    (void)STACK_ARG(1);
-    (void)STACK_ARG(2);
-    (void)STACK_ARG(3);
-    (void)STACK_ARG(4);
-    (void)STACK_ARG(5);
-    (void)STACK_ARG(6);
+    uint32_t type = STACK_ARG(0), oa = STACK_ARG(1), size = STACK_ARG(2);
+    uint32_t out_va = STACK_ARG(3), base, hdr, body;
+    char full[OB_NAME_MAX];
+    const char *name = ob_attr_name(oa, full, sizeof full);
+    size_t len = name ? strlen(name) : 0;
+    int i;
+
+    if (!out_va || !bridge_buf_ok(out_va, 4, "ObCreateObject") || size > 0x01000000u) {
+        g_eax = 0xC000000Du;                 /* STATUS_INVALID_PARAMETER */
+        return;
+    }
+    base = xbox_HeapAlloc((name ? 0x10u : 0u) + 0x10u + size + (uint32_t)len + 1u, 16);
+    if (!base) {
+        g_eax = 0xC000009Au;                 /* STATUS_INSUFFICIENT_RESOURCES */
+        return;
+    }
+    hdr = base + (name ? 0x10u : 0u);
+    body = hdr + 0x10u;
+    memset(XBOX_TO_NATIVE(base), 0, (name ? 0x10u : 0u) + 0x10u + size + len + 1u);
+    BRIDGE_MEM32(hdr + 0)  = 1;              /* PointerCount */
+    BRIDGE_MEM32(hdr + 4)  = 0;              /* HandleCount */
+    BRIDGE_MEM32(hdr + 8)  = type;
+    BRIDGE_MEM32(hdr + 12) = name ? 1u : 0u; /* OB_FLAG_NAMED_OBJECT */
+    if (name) {
+        memcpy(XBOX_TO_NATIVE(body + size), name, len + 1);
+        BRIDGE_MEM16(base + 8)  = (uint16_t)len;
+        BRIDGE_MEM16(base + 10) = (uint16_t)(len + 1);
+        BRIDGE_MEM32(base + 12) = body + size;
+    }
+    ob_lock();
+    for (i = 0; i < OB_MAX; i++)
+        if (!s_ob[i].body) {
+            s_ob[i].body = body;
+            s_ob[i].base = base;
+            s_ob[i].inserted = 0;
+            snprintf(s_ob[i].name, sizeof s_ob[i].name, "%s", name ? name : "");
+            break;
+        }
+    ob_unlock();
+    if (i == OB_MAX) {
+        xbox_HeapFree(base);
+        g_eax = 0xC000009Au;
+        return;
+    }
+    BRIDGE_MEM32(out_va) = body;
     g_eax = 0;
 }
 
-/* --- ObInsertObject (ordinal 241, 6 args = 24 bytes) --- */
+/* --- ObInsertObject (ordinal 241, 4 args = 16 bytes)
+ * NTSTATUS ObInsertObject(PVOID Object, POBJECT_ATTRIBUTES ObjectAttributes,
+ *                         ULONG ObjectPointerBias, PHANDLE Handle);
+ * Four arguments (nxdk xboxkrnl.h); the table said six. Puts a named
+ * object's name in the namespace (STATUS_OBJECT_NAME_COLLISION, and the
+ * object dereferenced, when the name is taken), adds ObjectPointerBias
+ * references, and opens a handle that owns the creation reference. */
 static void bridge_ObInsertObject(void)
 {
-    (void)STACK_ARG(0);
-    (void)STACK_ARG(1);
-    (void)STACK_ARG(2);
-    (void)STACK_ARG(3);
-    (void)STACK_ARG(4);
-    (void)STACK_ARG(5);
+    uint32_t body = STACK_ARG(0), oa = STACK_ARG(1), bias = STACK_ARG(2);
+    uint32_t handle_va = STACK_ARG(3), token;
+    int s, taken = 0, i;
+
+    if (handle_va && !bridge_buf_ok(handle_va, 4, "ObInsertObject")) {
+        g_eax = 0xC0000005u;
+        return;
+    }
+    ob_lock();
+    s = ob_slot(body);
+    if (s >= 0 && s_ob[s].name[0]) {
+        for (i = 0; i < OB_MAX; i++)
+            if (i != s && s_ob[i].body && s_ob[i].inserted
+                    && !_stricmp(s_ob[i].name, s_ob[s].name))
+                taken = 1;
+        if (!taken)
+            s_ob[s].inserted = 1;
+    }
+    ob_unlock();
+    if (s < 0) {
+        g_eax = 0xC000000Du;                 /* STATUS_INVALID_PARAMETER: not ours */
+        return;
+    }
+    if (taken) {
+        ob_deref(body);
+        g_eax = 0xC0000035u;                 /* STATUS_OBJECT_NAME_COLLISION */
+        return;
+    }
+    if (oa && (BRIDGE_MEM32(oa + 8) & 0x10u))   /* OBJ_PERMANENT */
+        OB_FLAGS(body) |= OB_PERMANENT;
+    InterlockedExchangeAdd(&OB_PTRS(body), (LONG)bias);
+    if (!handle_va) {
+        g_eax = 0;
+        return;
+    }
+    token = ob_new_token(body);
+    if (!token) {
+        g_eax = 0xC000009Au;
+        return;
+    }
+    BRIDGE_MEM32(handle_va) = token;
     g_eax = 0;
 }
 
-/* --- ObMakeTemporaryObject (ordinal 242, 1 arg = 4 bytes) --- */
+/* --- ObMakeTemporaryObject (ordinal 242, 1 arg = 4 bytes)
+ * Clears the permanent flag; with no handle left the name goes at once. */
 static void bridge_ObMakeTemporaryObject(void)
 {
-    (void)STACK_ARG(0);
+    uint32_t body = STACK_ARG(0);
+
+    if (ob_is(body)) {
+        OB_FLAGS(body) &= ~OB_PERMANENT;
+        if (OB_HANDLES(body) <= 0)
+            ob_unname(body);
+    }
     g_eax = 0;
 }
 
-/* --- ObOpenObjectByName (ordinal 243, 4 args = 16 bytes) --- */
+/* --- ObOpenObjectByName (ordinal 243, 4 args = 16 bytes)
+ * NTSTATUS ObOpenObjectByName(POBJECT_ATTRIBUTES ObjectAttributes,
+ *                             POBJECT_TYPE ObjectType, PVOID ParseContext,
+ *                             PHANDLE Handle);
+ * A directory of the namespace above, or an object ObInsertObject named.
+ * Device and file names are NtOpenFile's business and are not parsed here. */
 static void bridge_ObOpenObjectByName(void)
 {
-    (void)STACK_ARG(0);
-    (void)STACK_ARG(1);
-    (void)STACK_ARG(2);
-    (void)STACK_ARG(3);
+    uint32_t type = STACK_ARG(1), handle_va = STACK_ARG(3), body, token;
+    char full[OB_NAME_MAX];
+    const char *name = ob_attr_name(STACK_ARG(0), full, sizeof full);
+    int dir;
+
+    if (!handle_va || !bridge_buf_ok(handle_va, 4, "ObOpenObjectByName")) {
+        g_eax = 0xC0000005u;
+        return;
+    }
+    if (!name) {
+        g_eax = 0xC0000033u;                 /* STATUS_OBJECT_NAME_INVALID */
+        return;
+    }
+    dir = obdir_find(name);
+    if (dir >= 0) {
+        BRIDGE_MEM32(handle_va) = OBDIR_TOKEN | (uint32_t)dir;
+        g_eax = 0;
+        return;
+    }
+    body = ob_lookup(name);
+    if (!body) {
+        g_eax = 0xC0000034u;                 /* STATUS_OBJECT_NAME_NOT_FOUND */
+        return;
+    }
+    if (!ob_type_ok(body, type)) {
+        g_eax = 0xC0000024u;                 /* STATUS_OBJECT_TYPE_MISMATCH */
+        return;
+    }
+    InterlockedIncrement(&OB_PTRS(body));
+    token = ob_new_token(body);
+    if (!token) {
+        ob_deref(body);
+        g_eax = 0xC000009Au;
+        return;
+    }
+    BRIDGE_MEM32(handle_va) = token;
     g_eax = 0;
 }
 
-/* --- ObOpenObjectByPointer (ordinal 244, 5 args = 20 bytes) --- */
+/* --- ObOpenObjectByPointer (ordinal 244, 3 args = 12 bytes)
+ * NTSTATUS ObOpenObjectByPointer(PVOID Object, POBJECT_TYPE ObjectType,
+ *                                PHANDLE Handle);
+ * Three arguments (nxdk xboxkrnl.h); the table said five. An object of
+ * ObCreateObject's gets a new handle; so does a guest thread object, a
+ * duplicate of its host thread like PsCreateSystemThreadEx's. Anything else
+ * has no handle to give: STATUS_OBJECT_TYPE_MISMATCH. */
 static void bridge_ObOpenObjectByPointer(void)
 {
-    (void)STACK_ARG(0);
-    (void)STACK_ARG(1);
-    (void)STACK_ARG(2);
-    (void)STACK_ARG(3);
-    (void)STACK_ARG(4);
-    g_eax = 0;
+    uint32_t body = STACK_ARG(0), type = STACK_ARG(1), handle_va = STACK_ARG(2), token;
+
+    if (!handle_va || !bridge_buf_ok(handle_va, 4, "ObOpenObjectByPointer")) {
+        g_eax = 0xC0000005u;
+        return;
+    }
+    if (ob_is(body)) {
+        if (!ob_type_ok(body, type)) {
+            g_eax = 0xC0000024u;
+            return;
+        }
+        InterlockedIncrement(&OB_PTRS(body));
+        token = ob_new_token(body);
+        if (!token) {
+            ob_deref(body);
+            g_eax = 0xC000009Au;
+            return;
+        }
+        BRIDGE_MEM32(handle_va) = token;
+        g_eax = 0;
+        return;
+    }
+    {
+        HANDLE th = ke_shadow_lookup(body), dup = NULL;
+        int is_thread;
+        thobj_lock();
+        is_thread = thobj_slot(body) >= 0;
+        thobj_unlock();
+        if (is_thread && th && DuplicateHandle(GetCurrentProcess(), th, GetCurrentProcess(),
+                                               &dup, 0, FALSE, DUPLICATE_SAME_ACCESS)) {
+            BRIDGE_MEM32(handle_va) = bridge_handle_token_ex(dup, 1);
+            thobj_attach_token(BRIDGE_MEM32(handle_va), body);
+            g_eax = 0;
+            return;
+        }
+    }
+    g_eax = 0xC0000024u;                     /* STATUS_OBJECT_TYPE_MISMATCH */
 }
 
-/* --- ObReferenceObjectByPointer (ordinal 248, 1 arg = 4 bytes) --- */
+/* --- ObReferenceObjectByPointer (ordinal 248, 2 args = 8 bytes)
+ * NTSTATUS ObReferenceObjectByPointer(PVOID Object, POBJECT_TYPE ObjectType);
+ * Two arguments (nxdk xboxkrnl.h); the table said one. One more reference
+ * to an object of ObCreateObject's or a guest thread object; other objects
+ * are not counted here (ObfDereferenceObject is a no-op for them too). */
 static void bridge_ObReferenceObjectByPointer(void)
 {
-    (void)STACK_ARG(0);
+    uint32_t body = STACK_ARG(0), type = STACK_ARG(1);
+
+    if (ob_is(body)) {
+        if (!ob_type_ok(body, type)) {
+            g_eax = 0xC0000024u;
+            return;
+        }
+        InterlockedIncrement(&OB_PTRS(body));
+    } else {
+        thobj_ref(body);                     /* a no-op unless a thread object */
+    }
     g_eax = 0;
 }
 
@@ -11169,8 +11728,8 @@ static int stdcall_args_for_ordinal(ULONG ordinal)
     case 378: return  8;  /* MmDbgWriteCheck (2) */
 
     /* Nt */
-    case 201: return 12;  /* NtOpenDirectoryObject (3) */
-    case 208: return 28;  /* NtQueryDirectoryObject (7) */
+    case 201: return  8;  /* NtOpenDirectoryObject (2): nxdk xboxkrnl.h */
+    case 208: return 24;  /* NtQueryDirectoryObject (6): nxdk xboxkrnl.h */
     case 209: return 16;  /* NtQueryEvent (4) */
     case 212: return  8;  /* NtQueryIoCompletion (2): nxdk xboxkrnl.h */
     case 213: return 20;  /* NtQueryMutant (5) */
@@ -11178,11 +11737,11 @@ static int stdcall_args_for_ordinal(ULONG ordinal)
     case 216: return 20;  /* NtQueryTimer (5) */
 
     /* Ob */
-    case 239: return 28;  /* ObCreateObject (7) */
-    case 241: return 24;  /* ObInsertObject (6) */
+    case 239: return 16;  /* ObCreateObject (4): nxdk xboxkrnl.h */
+    case 241: return 16;  /* ObInsertObject (4): nxdk xboxkrnl.h */
     case 242: return  4;  /* ObMakeTemporaryObject (1) */
-    case 244: return 20;  /* ObOpenObjectByPointer (5) */
-    case 248: return  4;  /* ObReferenceObjectByPointer (1) */
+    case 244: return 12;  /* ObOpenObjectByPointer (3): nxdk xboxkrnl.h */
+    case 248: return  8;  /* ObReferenceObjectByPointer (2): nxdk xboxkrnl.h */
 
     /* Ps */
     case 254: return 28;  /* PsCreateSystemThread (7) */

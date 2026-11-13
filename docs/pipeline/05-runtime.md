@@ -215,15 +215,15 @@ stub is in `src/kernel/kernel_stub_table.c`: its first call (then the 10th, 100t
 | Kernel (IRQL fastcalls) | 2 | 2 | 0 | 0 | - |
 | Kernel internals | 2 | 1 | 0 | 1 | 163 KiUnlockDispatcherDatabase |
 | Memory manager | 25 | 21 | 0 | 4 | 174 MmIsAddressValid, 178 MmPersistContiguousMemory, 376 MmDbgQueryAvailablePages, 377 MmDbgReleaseAddress |
-| Native API (files, events, memory) | 55 | 48 | 0 | 7 | 201 NtOpenDirectoryObject, 206 NtQueueApcThread, 208 NtQueryDirectoryObject, 209 NtQueryEvent, 213 NtQueryMutant, 214 NtQuerySemaphore, 216 NtQueryTimer |
-| Object manager | 10 | 4 | 0 | 6 | 239 ObCreateObject, 241 ObInsertObject, 242 ObMakeTemporaryObject, 243 ObOpenObjectByName, 244 ObOpenObjectByPointer, 248 ObReferenceObjectByPointer |
+| Native API (files, events, memory) | 55 | 50 | 0 | 5 | 206 NtQueueApcThread, 209 NtQueryEvent, 213 NtQueryMutant, 214 NtQuerySemaphore, 216 NtQueryTimer |
+| Object manager | 10 | 10 | 0 | 0 | - |
 | Network PHY | 2 | 2 | 0 | 0 | - |
 | Process / thread | 5 | 4 | 0 | 1 | 257 PsSetCreateThreadNotifyRoutine |
 | Run-time library | 66 | 63 | 0 | 3 | 266 RtlCaptureStackBackTrace, 297 RtlMapGenericMask, 319 RtlWalkFrameChain |
 | Crypto | 17 | 17 | 0 | 0 | - |
 | XBE sections | 2 | 2 | 0 | 0 | - |
 | Other (port I/O, ...) | 17 | 14 | 0 | 3 | 88 KdDebuggerEnabled, 89 KdDebuggerNotPresent, 332 WRITE_PORT_BUFFER_UCHAR |
-| **All** | **347** | **296** | **9** | **42** | |
+| **All** | **347** | **304** | **9** | **34** | |
 <!-- kernel-coverage:end -->
 
 ### Data Exports

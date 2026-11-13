@@ -1112,6 +1112,7 @@ NTSTATUS __stdcall xbox_IoCreateSymbolicLink(PXBOX_ANSI_STRING SymbolicLinkName,
 /* Target of a link registered by xbox_IoCreateSymbolicLink, or NULL.
  * Looked up by exact link name, e.g. "\\??\\Z:". */
 const char* xbox_LookupSymbolicLink(const char* link);
+int xbox_SymbolicLinkAt(int index, const char **link, const char **target);
 NTSTATUS __stdcall xbox_IoDeleteSymbolicLink(PXBOX_ANSI_STRING SymbolicLinkName);
 
 /* ============================================================================
