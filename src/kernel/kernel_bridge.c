@@ -150,6 +150,13 @@ static int bridge_buf_ok(uint32_t va, uint32_t bytes, const char *export_name)
 #define BRIDGE_MEM16(addr) (*(volatile uint16_t *)((uintptr_t)(addr) + g_xbox_mem_offset))
 #define BRIDGE_MEM8(addr)  (*(volatile uint8_t  *)((uintptr_t)(addr) + g_xbox_mem_offset))
 
+/* KdDebuggerEnabled / KdDebuggerNotPresent (88, 89) are BOOLEAN data
+ * exports (nxdk xboxkrnl.h): a title reads *KdDebuggerNotPresent through its
+ * thunk. They were routed as functions returning 0 and 1, so the read found
+ * whatever byte the synthetic thunk address held (XBA-114). */
+#define KDATA_KD_DEBUGGER_ENABLED     0x0F0  /* BOOLEAN, FALSE */
+#define KDATA_KD_DEBUGGER_NOT_PRESENT 0x0F4  /* BOOLEAN, TRUE  */
+
 /**
  * Get the Xbox VA of data for a kernel DATA export ordinal.
  * Returns 0 if the ordinal is not a data export (i.e., it's a function).
@@ -179,6 +186,8 @@ static uint32_t kernel_data_va_for_ordinal(ULONG ordinal)
     case  42: return XBOX_KERNEL_DATA_BASE + KDATA_DISK_SERIAL_STR;
     case  64: return XBOX_KERNEL_DATA_BASE + KDATA_IO_COMPLETION_TYPE;
     case  70: return XBOX_KERNEL_DATA_BASE + KDATA_IO_DEVICE_TYPE;
+    case  88: return XBOX_KERNEL_DATA_BASE + KDATA_KD_DEBUGGER_ENABLED;
+    case  89: return XBOX_KERNEL_DATA_BASE + KDATA_KD_DEBUGGER_NOT_PRESENT;
     case  71: return XBOX_KERNEL_DATA_BASE + KDATA_FILE_OBJ_TYPE;
     case 156: return XBOX_KERNEL_DATA_BASE + KDATA_TICK_COUNT;
     case 157: return XBOX_KERNEL_DATA_BASE + KDATA_TIME_INCREMENT;
@@ -227,6 +236,10 @@ static void kernel_data_init(void)
     /* KeTickCount (ordinal 156) - initialized to current tick count.
      * A background thread in main.c updates this every ~1ms. */
     BRIDGE_MEM32(XBOX_KERNEL_DATA_BASE + KDATA_TICK_COUNT) = GetTickCount();
+
+    /* No kernel debugger (ordinals 88, 89). */
+    BRIDGE_MEM8(XBOX_KERNEL_DATA_BASE + KDATA_KD_DEBUGGER_ENABLED) = 0;
+    BRIDGE_MEM8(XBOX_KERNEL_DATA_BASE + KDATA_KD_DEBUGGER_NOT_PRESENT) = 1;
 
     /* LaunchDataPage (ordinal 164).
      *
@@ -8414,15 +8427,50 @@ static void bridge_RtlGetCallersAddress(void)
 }
 
 /* 297: VOID RtlMapGenericMask(PACCESS_MASK AccessMask, PRTL_GENERIC_MAPPING) */
+/* --- RtlMapGenericMask (ordinal 297, 2 args = 8 bytes)
+ * VOID RtlMapGenericMask(PACCESS_MASK AccessMask,
+ *                        PGENERIC_MAPPING GenericMapping);
+ * GENERIC_READ / WRITE / EXECUTE / ALL (bits 31-28) are replaced by the
+ * mapping's GenericRead, GenericWrite, GenericExecute, GenericAll, as NT
+ * does (XBA-114). */
 static void bridge_RtlMapGenericMask(void)
 {
+    uint32_t mask_va = STACK_ARG(0), map_va = STACK_ARG(1), m;
+
+    if (!bridge_buf_ok(mask_va, 4, "RtlMapGenericMask") || !bridge_buf_ok(map_va, 16, "RtlMapGenericMask")) {
+        g_eax = 0;
+        return;
+    }
+    m = BRIDGE_MEM32(mask_va);
+    if (m & 0x80000000u) m |= BRIDGE_MEM32(map_va + 0);
+    if (m & 0x40000000u) m |= BRIDGE_MEM32(map_va + 4);
+    if (m & 0x20000000u) m |= BRIDGE_MEM32(map_va + 8);
+    if (m & 0x10000000u) m |= BRIDGE_MEM32(map_va + 12);
+    BRIDGE_MEM32(mask_va) = m & 0x0FFFFFFFu;
     g_eax = 0;
 }
 
 /* 319: ULONG RtlWalkFrameChain(PVOID *Callers, ULONG Count, ULONG Flags) */
+static uint32_t bridge_walk_frames(uint32_t *out, uint32_t max);   /* below */
+
+/* --- RtlWalkFrameChain (ordinal 319, 3 args = 12 bytes)
+ * ULONG RtlWalkFrameChain(PVOID *Callers, ULONG Count, ULONG Flags): up to
+ * Count return addresses, their number back. Flags (user-mode frames on NT)
+ * means nothing on the console. */
 static void bridge_RtlWalkFrameChain(void)
 {
-    g_eax = 0;
+    uint32_t out = STACK_ARG(0), want = STACK_ARG(1), frames[64], n, i;
+
+    if (want > 64)
+        want = 64;
+    n = bridge_walk_frames(frames, want);
+    if (!out || !bridge_buf_ok(out, n * 4, "RtlWalkFrameChain")) {
+        g_eax = 0;
+        return;
+    }
+    for (i = 0; i < n; i++)
+        BRIDGE_MEM32(out + i * 4) = frames[i];
+    g_eax = n;
 }
 
 /* 321: XboxEEPROMKey (data export, 0 args)
@@ -8472,9 +8520,51 @@ static void bridge_RtlCaptureContext(void)
 /* 266: ULONG RtlCaptureStackBackTrace(FramesToSkip, FramesToCapture,
  *       BackTrace, BackTraceHash) - stub, returns 0 frames. Stack is cleaned
  *       up per stdcall_args_for_ordinal (20 bytes in kernel_bridge.c). */
+/* ── Guest stack walks (XBA-114) ──
+ *
+ * The return addresses up the guest's frame-pointer chain, as the
+ * console's x86 RtlWalkFrameChain finds them: the first is where the call
+ * into the kernel returns, then [ebp+4] for each saved ebp. A frame whose
+ * ebp is unmapped, misaligned or not above the last ends the walk -- a
+ * function built without a frame pointer ends it early, as on the console. */
+static uint32_t bridge_walk_frames(uint32_t *out, uint32_t max)
+{
+    uint32_t n = 0, ebp = g_ebp, prev = 0;
+
+    if (max && g_xbox_kernel_caller)
+        out[n++] = g_xbox_kernel_caller;
+    while (n < max && ebp > prev && !(ebp & 3u) && bridge_va_mapped(ebp, 8)) {
+        uint32_t ret = BRIDGE_MEM32(ebp + 4);
+        if (!ret)
+            break;
+        out[n++] = ret;
+        prev = ebp;
+        ebp = BRIDGE_MEM32(ebp);
+    }
+    return n;
+}
+
+/* --- RtlCaptureStackBackTrace (ordinal 266, 4 args = 16 bytes)
+ * USHORT RtlCaptureStackBackTrace(ULONG FramesToSkip, ULONG FramesToCapture,
+ *                                 PVOID *BackTrace, PULONG BackTraceHash);
+ * Four arguments (nxdk xboxkrnl.h); the table said five. The frames after
+ * the first FramesToSkip, their count back, and their sum as the hash. */
 static void bridge_RtlCaptureStackBackTrace(void)
 {
-    g_eax = 0;
+    uint32_t skip = STACK_ARG(0), want = STACK_ARG(1), out = STACK_ARG(2), hash_va = STACK_ARG(3);
+    uint32_t frames[64], n, i, hash = 0, got = 0;
+
+    if (want > 64)
+        want = 64;
+    n = bridge_walk_frames(frames, skip + want < 64 ? skip + want : 64);
+    if (out && bridge_buf_ok(out, want * 4, "RtlCaptureStackBackTrace"))
+        for (i = skip; i < n && got < want; i++, got++) {
+            BRIDGE_MEM32(out + got * 4) = frames[i];
+            hash += frames[i];
+        }
+    if (hash_va && bridge_buf_ok(hash_va, 4, "RtlCaptureStackBackTrace"))
+        BRIDGE_MEM32(hash_va) = hash;
+    g_eax = got;
 }
 
 
@@ -8981,12 +9071,31 @@ static void bridge_ExInterlockedCompareExchange64(void)
     g_edx = (uint32_t)((uint64_t)old >> 32);
 }
 
-/* --- ExReadWriteRefurbInfo (ordinal 25, 3 args = 12 bytes) --- */
+/* --- ExReadWriteRefurbInfo (ordinal 25, 3 args = 12 bytes)
+ * NTSTATUS ExReadWriteRefurbInfo(XBOX_REFURB_INFO *RefurbInfo,
+ *                                ULONG ValueLength, BOOLEAN DoWrite);
+ * The console keeps XBOX_REFURB_INFO { Signature, PowerCycleCount,
+ * FirstSetTime } (16 bytes) in a sector of the hard disk; here it lives in
+ * memory for the run: a write is read back, a first read is all zeros
+ * (XBA-114). Another length is STATUS_INVALID_PARAMETER. */
+static uint8_t s_refurb_info[16];
+
 static void bridge_ExReadWriteRefurbInfo(void)
 {
-    (void)STACK_ARG(0);
-    (void)STACK_ARG(1);
-    (void)STACK_ARG(2);
+    uint32_t va = STACK_ARG(0);
+
+    if (STACK_ARG(1) != sizeof s_refurb_info) {
+        g_eax = 0xC000000Du;
+        return;
+    }
+    if (!bridge_buf_ok(va, sizeof s_refurb_info, "ExReadWriteRefurbInfo")) {
+        g_eax = 0xC0000005u;
+        return;
+    }
+    if (STACK_ARG(2) & 0xFF)
+        memcpy(s_refurb_info, XBOX_TO_NATIVE(va), sizeof s_refurb_info);
+    else
+        memcpy(XBOX_TO_NATIVE(va), s_refurb_info, sizeof s_refurb_info);
     g_eax = 0;
 }
 
@@ -9134,11 +9243,14 @@ static void bridge_HalEnableSecureTrayEject(void)
     g_eax = 0;
 }
 
-/* --- HalWriteSMCScratchRegister (ordinal 366, 1 arg = 4 bytes) --- */
+/* --- HalWriteSMCScratchRegister (ordinal 366, 1 arg = 4 bytes)
+ * NTSTATUS HalWriteSMCScratchRegister(ULONG ScratchRegister): the SMC's
+ * scratch register (command 0x1B), which a later SMBus read of it returns
+ * (kernel_hal.c, XBA-114). */
 static void bridge_HalWriteSMCScratchRegister(void)
 {
-    (void)STACK_ARG(0);
-    g_eax = 0;
+    g_eax = (uint32_t)xbox_HalWriteSMBusValue(SMC_SLAVE_ADDRESS, SMC_CMD_SCRATCH,
+                                              FALSE, STACK_ARG(0));
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -9259,24 +9371,83 @@ static void bridge_IoAllocateIrp(void)
 /* --- IoBuildAsynchronousFsdRequest (ordinal 60, 7 args = 28 bytes) --- */
 static void bridge_IoBuildAsynchronousFsdRequest(void)
 {
-    (void)STACK_ARG(0);
-    (void)STACK_ARG(1);
-    (void)STACK_ARG(2);
-    (void)STACK_ARG(3);
-    (void)STACK_ARG(4);
-    (void)STACK_ARG(5);
-    (void)STACK_ARG(6);
+    /* PIRP IoBuildAsynchronousFsdRequest(MajorFunction, DeviceObject, Buffer,
+     * Length, StartingOffset, IoStatusBlock): six arguments (nxdk
+     * xboxkrnl.h; the table said seven). Still a stub, answering NULL (no
+     * IRP): building one needs the IRP and stack-location layout, which
+     * IoAllocateIrp does not fill in yet -- a title driver's own requests
+     * (XBA-114). */
     g_eax = 0;
 }
 
-/* --- IoCheckShareAccess (ordinal 63, 5 args = 20 bytes) --- */
+/* ── Share access (XBA-114) ──
+ *
+ * NT's rules, on the console's structures (nxdk xboxkrnl.h): a FILE_OBJECT
+ * carries the access it was opened for and what it shares as bits in its
+ * byte at +2 (DeletePending 0, ReadAccess 1, WriteAccess 2, DeleteAccess 3,
+ * SharedRead 4, SharedWrite 5, SharedDelete 6), and a SHARE_ACCESS counts
+ * opens as seven UCHARs (OpenCount, Readers, Writers, Deleters, SharedRead,
+ * SharedWrite, SharedDelete). Read access is FILE_READ_DATA or
+ * FILE_EXECUTE, write FILE_WRITE_DATA or FILE_APPEND_DATA, delete DELETE;
+ * the share bits are FILE_SHARE_READ / WRITE / DELETE. A title's own file
+ * system driver keeps these; the host files of NtCreateFile do not. */
+static uint32_t share_bits(uint32_t access, uint32_t share)
+{
+    uint32_t r = (access & 0x21u) != 0, w = (access & 0x06u) != 0, d = (access & 0x10000u) != 0;
+    uint32_t bits = (r << 1) | (w << 2) | (d << 3);
+    if (r || w || d)
+        bits |= ((share & 1u) << 4) | ((share & 2u) << 4) | ((share & 4u) << 4);
+    return bits;
+}
+
+/* The FILE_OBJECT's byte at +2 takes `bits` for its access and share bits. */
+static void share_set_fo(uint32_t fo, uint32_t bits)
+{
+    BRIDGE_MEM8(fo + 2) = (uint8_t)((BRIDGE_MEM8(fo + 2) & 0x81u) | bits);
+}
+
+/* --- IoCheckShareAccess (ordinal 63, 5 args = 20 bytes)
+ * NTSTATUS IoCheckShareAccess(ACCESS_MASK DesiredAccess,
+ *                             ULONG DesiredShareAccess,
+ *                             PFILE_OBJECT FileObject,
+ *                             PSHARE_ACCESS ShareAccess, BOOLEAN Update);
+ * STATUS_SHARING_VIOLATION when the open would conflict with the opens
+ * counted; otherwise the file object takes its bits and, with Update, the
+ * counts take the open. */
 static void bridge_IoCheckShareAccess(void)
 {
-    (void)STACK_ARG(0);
-    (void)STACK_ARG(1);
-    (void)STACK_ARG(2);
-    (void)STACK_ARG(3);
-    (void)STACK_ARG(4);
+    uint32_t bits = share_bits(STACK_ARG(0), STACK_ARG(1));
+    uint32_t fo = STACK_ARG(2), sa = STACK_ARG(3), update = STACK_ARG(4) & 0xFF;
+    uint32_t r = (bits >> 1) & 1, w = (bits >> 2) & 1, d = (bits >> 3) & 1;
+    uint32_t sr = (bits >> 4) & 1, sw = (bits >> 5) & 1, sd = (bits >> 6) & 1;
+    uint8_t open, readers, writers, deleters, shr, shw, shd;
+
+    if (!bridge_buf_ok(fo, 4, "IoCheckShareAccess") || !bridge_buf_ok(sa, 7, "IoCheckShareAccess")) {
+        g_eax = 0xC0000005u;
+        return;
+    }
+    share_set_fo(fo, bits);
+    if (!(r || w || d)) {
+        g_eax = 0;
+        return;
+    }
+    open = BRIDGE_MEM8(sa + 0); readers = BRIDGE_MEM8(sa + 1); writers = BRIDGE_MEM8(sa + 2);
+    deleters = BRIDGE_MEM8(sa + 3); shr = BRIDGE_MEM8(sa + 4); shw = BRIDGE_MEM8(sa + 5);
+    shd = BRIDGE_MEM8(sa + 6);
+    if ((r && shr < open) || (w && shw < open) || (d && shd < open)
+            || (readers && !sr) || (writers && !sw) || (deleters && !sd)) {
+        g_eax = 0xC0000043u;                 /* STATUS_SHARING_VIOLATION */
+        return;
+    }
+    if (update) {
+        BRIDGE_MEM8(sa + 0) = (uint8_t)(open + 1);
+        BRIDGE_MEM8(sa + 1) = (uint8_t)(readers + r);
+        BRIDGE_MEM8(sa + 2) = (uint8_t)(writers + w);
+        BRIDGE_MEM8(sa + 3) = (uint8_t)(deleters + d);
+        BRIDGE_MEM8(sa + 4) = (uint8_t)(shr + sr);
+        BRIDGE_MEM8(sa + 5) = (uint8_t)(shw + sw);
+        BRIDGE_MEM8(sa + 6) = (uint8_t)(shd + sd);
+    }
     g_eax = 0;
 }
 
@@ -9316,21 +9487,44 @@ static void bridge_IoQueueThreadIrp(void)
     g_eax = 0;
 }
 
-/* --- IoRemoveShareAccess (ordinal 78, 2 args = 8 bytes) --- */
+/* --- IoRemoveShareAccess (ordinal 78, 2 args = 8 bytes)
+ * VOID IoRemoveShareAccess(PFILE_OBJECT FileObject, PSHARE_ACCESS):
+ * takes the file object's open out of the counts. */
 static void bridge_IoRemoveShareAccess(void)
 {
-    (void)STACK_ARG(0);
-    (void)STACK_ARG(1);
+    uint32_t fo = STACK_ARG(0), sa = STACK_ARG(1), b;
+    int k;
+
+    g_eax = 0;
+    if (!bridge_buf_ok(fo, 4, "IoRemoveShareAccess") || !bridge_buf_ok(sa, 7, "IoRemoveShareAccess"))
+        return;
+    b = BRIDGE_MEM8(fo + 2);
+    if (!(b & 0x0Eu))
+        return;
+    BRIDGE_MEM8(sa + 0) = (uint8_t)(BRIDGE_MEM8(sa + 0) - 1);
+    for (k = 1; k <= 6; k++)                 /* Readers..SharedDelete <- bits 1..6 */
+        BRIDGE_MEM8(sa + (uint32_t)k) = (uint8_t)(BRIDGE_MEM8(sa + (uint32_t)k) - ((b >> k) & 1u));
 }
 
-/* --- IoSetShareAccess (ordinal 80, 5 args = 20 bytes) --- */
+/* --- IoSetShareAccess (ordinal 80, 4 args = 16 bytes)
+ * VOID IoSetShareAccess(ACCESS_MASK DesiredAccess, ULONG DesiredShareAccess,
+ *                       PFILE_OBJECT FileObject, PSHARE_ACCESS ShareAccess);
+ * Four arguments (nxdk xboxkrnl.h); the table said five. The first open:
+ * the counts become this open alone (or none, for an open without data
+ * access). */
 static void bridge_IoSetShareAccess(void)
 {
-    (void)STACK_ARG(0);
-    (void)STACK_ARG(1);
-    (void)STACK_ARG(2);
-    (void)STACK_ARG(3);
-    (void)STACK_ARG(4);
+    uint32_t bits = share_bits(STACK_ARG(0), STACK_ARG(1));
+    uint32_t fo = STACK_ARG(2), sa = STACK_ARG(3);
+    int k, any = (bits & 0x0Eu) != 0;
+
+    g_eax = 0;
+    if (!bridge_buf_ok(fo, 4, "IoSetShareAccess") || !bridge_buf_ok(sa, 7, "IoSetShareAccess"))
+        return;
+    share_set_fo(fo, bits);
+    BRIDGE_MEM8(sa + 0) = (uint8_t)any;
+    for (k = 1; k <= 6; k++)
+        BRIDGE_MEM8(sa + (uint32_t)k) = (uint8_t)(any ? (bits >> k) & 1u : 0u);
 }
 
 /* --- IoDismountVolume (ordinal 90, 1 arg = 4 bytes) --- */
@@ -9352,17 +9546,8 @@ static void bridge_IoDismountVolumeByName(void)
  * ═══════════════════════════════════════════════════════════════════════════
  */
 
-/* --- KdDebuggerEnabled (ordinal 88, 0 args = 0 bytes) --- */
-static void bridge_KdDebuggerEnabled(void)
-{
-    g_eax = 0;  /* not connected */
-}
-
-/* --- KdDebuggerNotPresent (ordinal 89, 0 args = 0 bytes) --- */
-static void bridge_KdDebuggerNotPresent(void)
-{
-    g_eax = 1;  /* true: no debugger present */
-}
+/* KdDebuggerEnabled and KdDebuggerNotPresent (88, 89) are data exports:
+ * see kernel_data_va_for_ordinal. */
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * Ke -- shadow-table object bridges (92-163)
@@ -9824,10 +10009,13 @@ static void bridge_KeLeaveCriticalRegion(void)
     g_eax = 0;
 }
 
-/* --- KeRaiseIrqlToSynchLevel (ordinal 130, 0 args = 0 bytes) --- */
+/* --- KeRaiseIrqlToSynchLevel (ordinal 130, 0 args = 0 bytes)
+ * The console's kernel is uniprocessor (NT_UP), where SYNCH_LEVEL is
+ * DISPATCH_LEVEL: the same raise as KeRaiseIrqlToDpcLevel, the old IRQL
+ * back (XBA-114). */
 static void bridge_KeRaiseIrqlToSynchLevel(void)
 {
-    g_eax = 0;  /* PASSIVE_LEVEL; IRQL is not modelled */
+    g_eax = (uint32_t)xbox_KeRaiseIrqlToDpcLevel();
 }
 
 /* --- KeRemoveByKeyDeviceQueue (ordinal 133, 2 args = 8 bytes) --- */
@@ -9937,10 +10125,14 @@ static void bridge_KiBugCheckData(void)
     g_eax = XBOX_KERNEL_DATA_BASE + 0x500;
 }
 
-/* --- KiUnlockDispatcherDatabase (ordinal 163, 1 arg = 4 bytes) --- */
+/* --- KiUnlockDispatcherDatabase (ordinal 163, fastcall: OldIrql in cl)
+ * Releases the dispatcher lock, which on a uniprocessor kernel is the IRQL
+ * raise: lowers back to OldIrql as KfLowerIrql does, running what became
+ * runnable (XBA-114). Fastcall, so nothing on the stack: the table said
+ * four bytes. */
 static void bridge_KiUnlockDispatcherDatabase(void)
 {
-    (void)STACK_ARG(0);
+    xbox_KfLowerIrql((UCHAR)g_ecx);
     g_eax = 0;
 }
 
@@ -9959,12 +10151,21 @@ static void bridge_KeGetCurrentThread(void)
     g_eax = thobj_current();
 }
 
-/* --- KeSetDisableBoostThread (ordinal 144, 2 args = 8 bytes) --- */
+/* --- KeSetDisableBoostThread (ordinal 144, 2 args = 8 bytes)
+ * LOGICAL KeSetDisableBoostThread(PKTHREAD Thread, LOGICAL Disable): sets
+ * KTHREAD.DisableBoost (+0x73, nxdk's layout) and returns the old value
+ * (XAPI's SetThreadPriorityBoost). The host scheduler has no boost to turn
+ * off, as for KeBoostPriorityThread; the field is what a title reads. */
 static void bridge_KeSetDisableBoostThread(void)
 {
-    (void)STACK_ARG(0);
-    (void)STACK_ARG(1);
-    g_eax = 0;
+    uint32_t t = STACK_ARG(0);
+
+    if (!t || !bridge_va_mapped(t + 0x73, 1)) {
+        g_eax = 0;
+        return;
+    }
+    g_eax = BRIDGE_MEM8(t + 0x73);
+    BRIDGE_MEM8(t + 0x73) = (uint8_t)(STACK_ARG(1) != 0);
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -9972,11 +10173,14 @@ static void bridge_KeSetDisableBoostThread(void)
  * ═══════════════════════════════════════════════════════════════════════════
  */
 
-/* --- MmIsAddressValid (ordinal 174, 1 arg = 4 bytes) --- */
+/* --- MmIsAddressValid (ordinal 174, 1 arg = 4 bytes)
+ * BOOLEAN MmIsAddressValid(PVOID VirtualAddress): whether a read there
+ * would not fault -- the guest window, a lazy reservation, contiguous
+ * memory (bridge_va_mapped). It answered TRUE for every address,
+ * page zero included (XBA-114). */
 static void bridge_MmIsAddressValid(void)
 {
-    (void)STACK_ARG(0);
-    g_eax = 1;  /* assume every guest address is valid */
+    g_eax = (uint32_t)bridge_va_mapped(STACK_ARG(0), 1);
 }
 
 /* --- MmDbgAllocateMemory (ordinal 374, 2 args = 8 bytes)
@@ -10008,10 +10212,16 @@ static void bridge_MmDbgFreeMemory(void)
     g_eax = 0;
 }
 
-/* --- MmDbgQueryAvailablePages (ordinal 376, 0 args = 0 bytes) --- */
+/* --- MmDbgQueryAvailablePages (ordinal 376, 0 args = 0 bytes)
+ * The pages the debug kit's extra memory has left; with no debug memory
+ * here, the free pages MmQueryStatistics reports (XBA-114). */
 static void bridge_MmDbgQueryAvailablePages(void)
 {
-    g_eax = 0x10000;  /* large made-up free-page count */
+    XBOX_MM_STATISTICS st;
+
+    memset(&st, 0, sizeof st);
+    st.Length = sizeof st;
+    g_eax = xbox_MmQueryStatistics(&st) == STATUS_SUCCESS ? st.AvailablePages : 0;
 }
 
 /* --- MmDbgReleaseAddress (ordinal 377, 2 args = 8 bytes) --- */
@@ -11905,7 +12115,7 @@ static int stdcall_args_for_ordinal(ULONG ordinal)
     case 263: return  8;  /* RtlAppendUnicodeToString (2) */
     case 264: return 12;  /* RtlAssert (3) */
     case 265: return  4;  /* RtlCaptureContext (1) */
-    case 266: return 20;  /* RtlCaptureStackBackTrace (5) */
+    case 266: return 16;  /* RtlCaptureStackBackTrace (4): nxdk xboxkrnl.h */
     case 267: return 12;  /* RtlCharToInteger (3) */
     case 271: return 12;  /* RtlCompareUnicodeString (3) */
     case 272: return  8;  /* RtlCopyString (2) */
@@ -12074,14 +12284,14 @@ static int stdcall_args_for_ordinal(ULONG ordinal)
 
     /* Io */
     case  59: return  8;  /* IoAllocateIrp (2) */
-    case  60: return 28;  /* IoBuildAsynchronousFsdRequest (7) */
+    case  60: return 24;  /* IoBuildAsynchronousFsdRequest (6): nxdk xboxkrnl.h */
     case  63: return 20;  /* IoCheckShareAccess (5) */
     case  72: return  4;  /* IoFreeIrp (1) */
     case  75: return 20;  /* IoQueryFileInformation (5) */
     case  76: return 20;  /* IoQueryVolumeInformation (5) */
     case  77: return  4;  /* IoQueueThreadIrp (1) */
     case  78: return  8;  /* IoRemoveShareAccess (2) */
-    case  80: return 20;  /* IoSetShareAccess (5) */
+    case  80: return 16;  /* IoSetShareAccess (4): nxdk xboxkrnl.h */
 
     /* Kd */
     case  88: return  0;  /* KdDebuggerEnabled (void) */
@@ -12123,7 +12333,7 @@ static int stdcall_args_for_ordinal(ULONG ordinal)
     case 152: return  4;  /* KeSuspendThread (1) */
     case 155: return  4;  /* KeTestAlertThread (1) */
     case 162: return  0;  /* KiBugCheckData (void/data) */
-    case 163: return  4;  /* KiUnlockDispatcherDatabase (1) */
+    case 163: return  0;  /* KiUnlockDispatcherDatabase: fastcall, OldIrql in cl */
 
     /* Mm */
     case 174: return  4;  /* MmIsAddressValid (1) */
@@ -12608,8 +12818,6 @@ static bridge_func_t bridge_for_ordinal(ULONG ordinal)
     case  91: return bridge_IoDismountVolumeByName;
 
     /* Kd */
-    case  88: return bridge_KdDebuggerEnabled;
-    case  89: return bridge_KdDebuggerNotPresent;
 
     /* Ke (new) */
     case  92: return bridge_KeAlertResumeThread;

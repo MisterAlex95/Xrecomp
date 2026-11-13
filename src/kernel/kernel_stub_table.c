@@ -7,33 +7,9 @@
 #include "kernel_stubs.h"
 
 const KernelStubEntry g_kernel_stub_table[] = {
-    {  25, "ExReadWriteRefurbInfo" },
-    {  43, "HalEnableSystemInterrupt" },
     {  47, "HalRegisterShutdownNotification" },
     {  60, "IoBuildAsynchronousFsdRequest" },
-    {  63, "IoCheckShareAccess" },
-    {  75, "IoQueryFileInformation" },
-    {  76, "IoQueryVolumeInformation" },
-    {  77, "IoQueueThreadIrp" },
-    {  78, "IoRemoveShareAccess" },
-    {  80, "IoSetShareAccess" },
-    {  88, "KdDebuggerEnabled" },
-    {  89, "KdDebuggerNotPresent" },
-    {  90, "IoDismountVolume" },
-    {  91, "IoDismountVolumeByName" },
-    { 130, "KeRaiseIrqlToSynchLevel" },
-    { 144, "KeSetDisableBoostThread" },
-    { 163, "KiUnlockDispatcherDatabase" },
-    { 174, "MmIsAddressValid" },
-    { 178, "MmPersistContiguousMemory" },
     { 257, "PsSetCreateThreadNotifyRoutine" },
-    { 266, "RtlCaptureStackBackTrace" },
-    { 297, "RtlMapGenericMask" },
-    { 319, "RtlWalkFrameChain" },
-    { 332, "WRITE_PORT_BUFFER_UCHAR" },
-    { 366, "HalWriteSMCScratchRegister" },
-    { 376, "MmDbgQueryAvailablePages" },
-    { 377, "MmDbgReleaseAddress" },
 };
 
 const unsigned g_kernel_stub_count = sizeof g_kernel_stub_table / sizeof g_kernel_stub_table[0];

@@ -28,6 +28,13 @@
  *      which returns STATUS_USER_APC; a handle that is no thread is
  *      STATUS_INVALID_HANDLE. (Waking another thread's wait is the same path
  *      as KeInsertQueueApc's, checked in tests/kernel_io_apc.)
+ *   4. The rest of the stub list (XBA-114): RtlWalkFrameChain and
+ *      RtlCaptureStackBackTrace up a frame-pointer chain, RtlMapGenericMask,
+ *      KeSetDisableBoostThread on KTHREAD.DisableBoost, MmIsAddressValid,
+ *      KeRaiseIrqlToSynchLevel / KiUnlockDispatcherDatabase, the SMC scratch
+ *      register read back, ExReadWriteRefurbInfo, MmDbgQueryAvailablePages,
+ *      IoSetShareAccess / IoCheckShareAccess / IoRemoveShareAccess, and
+ *      KdDebuggerEnabled / KdDebuggerNotPresent as data exports.
  */
 #include "kernel.h"
 #include "xbox_memory_layout.h"
@@ -51,6 +58,7 @@ static uint32_t B;                /* our guest scratch area */
 
 #define G32(va) (*(volatile uint32_t *)XBOX_TO_NATIVE(va))
 #define G16(va) (*(volatile uint16_t *)XBOX_TO_NATIVE(va))
+#define G8(va)  (*(volatile uint8_t  *)XBOX_TO_NATIVE(va))
 
 static void check(int ok, const char *what, const char *detail)
 {
@@ -71,10 +79,14 @@ enum {
 
 enum {
     S_CLOSE, S_OPENDIR, S_QUERYDIR, S_SYMLINK, S_CREATE, S_INSERT, S_MKTEMP,
-    S_OPENNAME, S_OPENPTR, S_REFPTR, S_REFHANDLE, S_DEREF, S_QAPC, S_DELAY, S_COUNT
+    S_OPENNAME, S_OPENPTR, S_REFPTR, S_REFHANDLE, S_DEREF, S_QAPC, S_DELAY,
+    S_WALK, S_BACKTRACE, S_MAPMASK, S_NOBOOST, S_ISVALID, S_SYNCH, S_KIUNLOCK,
+    S_SMCSCRATCH, S_SMBREAD, S_REFURB, S_DBGPAGES, S_SETSHARE, S_CHECKSHARE,
+    S_REMOVESHARE, S_KDENABLED, S_KDNOTPRESENT, S_COUNT
 };
 static const uint32_t ord[S_COUNT] = {
     187, 201, 208, 67, 239, 241, 242, 243, 244, 248, 246, 250, 206, 99,
+    319, 266, 297, 144, 174, 130, 163, 366, 45, 25, 376, 80, 63, 78, 88, 89,
 };
 
 static uint32_t call(int slot, const uint32_t *args, int n)
@@ -361,6 +373,97 @@ static void test_queue_apc(void)
     check(g_eax == 0xC0000008u, "a handle that is no thread: STATUS_INVALID_HANDLE", NULL);
 }
 
+/* ═══════════════════ 4. The rest of the stub list ═══════════════════ */
+
+static void test_misc(void)
+{
+    uint32_t f1 = V(O_BUF), f2 = V(O_BUF) + 0x40, out = V(O_BUF) + 0x100, r;
+
+    /* A frame-pointer chain: f1 -> f2 -> end. */
+    G32(f1) = f2;  G32(f1 + 4) = 0x00011111u;
+    G32(f2) = 0;   G32(f2 + 4) = 0x00022222u;
+    g_ebp = f1;
+    CALL(S_WALK, out, 8, 0);
+    snprintf(d, sizeof d, "n %u: 0x%X 0x%X 0x%X", g_eax, G32(out), G32(out + 4), G32(out + 8));
+    check(g_eax == 3 && (G32(out) & 0xFFFF0000u) == 0xBEEF0000u && G32(out + 4) == 0x11111
+          && G32(out + 8) == 0x22222 && esp_ok(3),
+          "RtlWalkFrameChain: the call's return, then up the ebp chain", d);
+    g_ebp = f1;
+    CALL(S_BACKTRACE, 1, 8, out, out + 0x40);
+    check(g_eax == 2 && G32(out) == 0x11111 && G32(out + 4) == 0x22222
+          && G32(out + 0x40) == 0x33333 && esp_ok(4),
+          "RtlCaptureStackBackTrace: skips, counts, hashes (4 arguments)", NULL);
+
+    G32(out) = 0x80000001u | 0x20000000u;     /* GENERIC_READ | GENERIC_EXECUTE | 1 */
+    G32(out + 4) = 0x10; G32(out + 8) = 0x20; G32(out + 12) = 0x40; G32(out + 16) = 0x80;
+    CALL(S_MAPMASK, out, out + 4);
+    check(G32(out) == 0x51u, "RtlMapGenericMask maps the generic bits", NULL);
+
+    G8(V(O_KT) + 0x73) = 0;
+    CALL(S_NOBOOST, V(O_KT), 1);
+    r = g_eax;
+    CALL(S_NOBOOST, V(O_KT), 0);
+    check(r == 0 && g_eax == 1 && G8(V(O_KT) + 0x73) == 0,
+          "KeSetDisableBoostThread: KTHREAD.DisableBoost, the old value back", NULL);
+
+    CALL(S_ISVALID, V(O_BUF));
+    r = g_eax;
+    CALL(S_ISVALID, 0x10);
+    check(r == 1 && g_eax == 0, "MmIsAddressValid: the window yes, page zero no", NULL);
+
+    call(S_SYNCH, NULL, 0);
+    r = g_eax;
+    call(S_SYNCH, NULL, 0);
+    check(r == 0 && g_eax == 2, "KeRaiseIrqlToSynchLevel raises to DISPATCH_LEVEL", NULL);
+    g_ecx = 0;
+    call(S_KIUNLOCK, NULL, 0);
+    check(g_esp == V(O_STACK) + 0x800 + 4, "KiUnlockDispatcherDatabase is fastcall (no stack argument)", NULL);
+    call(S_SYNCH, NULL, 0);
+    r = g_eax;
+    g_ecx = 0;
+    call(S_KIUNLOCK, NULL, 0);
+    check(r == 0, "...and lowered the IRQL back", NULL);
+
+    CALL(S_SMCSCRATCH, 0x04);
+    G32(out) = 0;
+    CALL(S_SMBREAD, 0x20, 0x1B, 0, out);
+    check(G32(out) == 0x04, "HalWriteSMCScratchRegister: the SMC's scratch reads it back", NULL);
+
+    memset(XBOX_TO_NATIVE(out), 0xAB, 16);
+    CALL(S_REFURB, out, 16, 1);
+    memset(XBOX_TO_NATIVE(out), 0, 16);
+    CALL(S_REFURB, out, 16, 0);
+    r = G32(out) == 0xABABABABu && G32(out + 12) == 0xABABABABu;
+    CALL(S_REFURB, out, 8, 0);
+    check(r && g_eax == 0xC000000Du, "ExReadWriteRefurbInfo: a write is read back; 8 bytes refused", NULL);
+
+    call(S_DBGPAGES, NULL, 0);
+    check(g_eax > 0, "MmDbgQueryAvailablePages: the free pages", NULL);
+
+    {   /* Share access: SHARE_ACCESS at out, file objects A and B. */
+        uint32_t sa = out, fa = out + 0x20, fb = out + 0x40;
+        memset(XBOX_TO_NATIVE(out), 0, 0x60);
+        CALL(S_SETSHARE, 0x1 /* FILE_READ_DATA */, 1 /* FILE_SHARE_READ */, fa, sa);
+        check(G8(sa) == 1 && G8(sa + 1) == 1 && G8(sa + 4) == 1 && G8(fa + 2) == 0x12 && esp_ok(4),
+              "IoSetShareAccess: one reader sharing read (4 arguments)", NULL);
+        CALL(S_CHECKSHARE, 0x2 /* FILE_WRITE_DATA */, 3, fb, sa, 1);
+        check(g_eax == 0xC0000043u && G8(sa) == 1,
+              "IoCheckShareAccess: a writer against it: STATUS_SHARING_VIOLATION", NULL);
+        CALL(S_CHECKSHARE, 0x1, 1, fb, sa, 1);
+        check(g_eax == 0 && G8(sa) == 2 && G8(sa + 1) == 2 && G8(sa + 4) == 2,
+              "a second reader sharing read: counted", NULL);
+        CALL(S_REMOVESHARE, fb, sa);
+        check(G8(sa) == 1 && G8(sa + 1) == 1 && G8(sa + 4) == 1, "IoRemoveShareAccess takes it out", NULL);
+    }
+
+    {   /* Data exports: the thunk points at a BOOLEAN. */
+        uint32_t en = G32(V(O_THUNK) + 4 * S_KDENABLED), np = G32(V(O_THUNK) + 4 * S_KDNOTPRESENT);
+        snprintf(d, sizeof d, "thunks 0x%08X 0x%08X", en, np);
+        check(en < 0xFE000000u && np < 0xFE000000u && G8(en) == 0 && G8(np) == 1,
+              "KdDebuggerEnabled / KdDebuggerNotPresent: data, FALSE / TRUE", d);
+    }
+}
+
 static unsigned char *load(const char *path, size_t *n)
 {
     FILE *f = fopen(path, "rb");
@@ -398,6 +501,7 @@ int main(int argc, char **argv)
     test_directories();
     test_objects();
     test_queue_apc();
+    test_misc();
 
     printf("\n%d failure(s)\n", failures);
     return failures ? 1 : 0;

@@ -1736,6 +1736,10 @@ VOID __stdcall xbox_AvSetDisplayMode(
  *   - Temperature sensor (0x98): CPU/board temperatures
  * ============================================================================ */
 
+/* The SMC's scratch register: HalWriteSMCScratchRegister and SMBus writes
+ * of command 0x1B store it, reads give it back. */
+static volatile ULONG s_smc_scratch;
+
 NTSTATUS __stdcall xbox_HalReadSMBusValue(
     UCHAR SlaveAddress, UCHAR CommandCode, BOOLEAN ReadWordValue, PULONG DataValue)
 {
@@ -1777,6 +1781,9 @@ NTSTATUS __stdcall xbox_HalReadSMBusValue(
             break;
         case SMC_CMD_ERROR_CODE:
             *DataValue = 0;  /* No error */
+            break;
+        case SMC_CMD_SCRATCH:
+            *DataValue = s_smc_scratch;   /* what was written (XBA-114) */
             break;
         default:
             xbox_log(XBOX_LOG_DEBUG, XBOX_LOG_HAL,
@@ -1824,7 +1831,9 @@ NTSTATUS __stdcall xbox_HalWriteSMBusValue(
         "HalWriteSMBusValue: slave=0x%02X cmd=0x%02X word=%d val=0x%X (ignored)",
         SlaveAddress, CommandCode, WriteWordValue, DataValue);
 
-    /* Writes to SMC (LED control, fan speed, etc.) are silently accepted */
+    if (SlaveAddress == SMC_SLAVE_ADDRESS && CommandCode == SMC_CMD_SCRATCH)
+        s_smc_scratch = DataValue;
+    /* Other writes to SMC (LED control, fan speed, etc.) are silently accepted */
     return STATUS_SUCCESS;
 }
 
