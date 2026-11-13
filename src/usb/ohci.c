@@ -13,6 +13,7 @@
 #include "../kernel/xbox_memory_layout.h"
 #include "../kernel/kernel.h"
 #include "usb_gamepad.h"
+#include "usb_hotplug.h"
 #include "../platform/host_time.h"
 #include "../input/xinput_xbox.h"   /* xbox_InputSetState: rumble */
 
@@ -180,7 +181,14 @@ static int s_device_hc;
 /* Downstream ports the root hub reports in HcRhDescriptorA (RECOMP_USB_NDP,
  * 1-4). Which slot XAPI gives a pad is decided by its port: see OHCI_PORTS. */
 static unsigned s_ndp = OHCI_PORTS;
-static int s_npads = 1;          /* RECOMP_USB_PADS */
+/* RECOMP_USB_PADS: that many pads, always plugged (the behaviour before
+ * XBA-123); 0, the default, plugs and unplugs them as controllers come and go
+ * (usb_hotplug.h). */
+static int s_npads = 0;
+/* The root port pad 0 appears on (RECOMP_USB_PORT; root port 3 with four,
+ * which XAPI calls controller port 1); pad n is on the n-th port after it. */
+static unsigned s_first_port;
+static UsbHotplug s_hotplug;
 static int s_enabled;
 static int s_trace;
 
@@ -459,6 +467,7 @@ static void ohci_write(void *dev, uint32_t off, uint64_t val, int size)
 #define TD_DP_IN       2u
 #define TD_CC_NOERROR  0u
 #define TD_CC_STALL    4u
+#define TD_CC_DEVICENOTRESPONDING 5u
 #define TD_CC_DATAUNDERRUN 9u
 #define TD_ROUNDING    (1u << 18)   /* bufferRounding: a short packet is fine */
 
@@ -485,8 +494,14 @@ static int     g_ctrl_sent_[USB_GAMEPAD_MAX];
 #define g_ctrl_len  g_ctrl_len_[pad]
 #define g_ctrl_sent g_ctrl_sent_[pad]
 
-/* Pads plugged in so far, in port order. */
-static int s_plugged_pads;
+/* The pads plugged in now (bit n = pad n, on root port port_of(n)): set and
+ * cleared by the controller thread's hotplug (usb_hotplug.h, XBA-123), read by
+ * whoever walks the lists. */
+static volatile unsigned s_present;
+
+/* Addresses of pads pulled out since (bit a of 128): a transfer still queued
+ * for one gets no answer, as on the wire. */
+static volatile uint32_t s_gone_addr[4];
 
 /* Which pad an endpoint descriptor talks to: by its function address, and
  * address 0 -- the default address a device answers before SET_ADDRESS --
@@ -496,11 +511,19 @@ static int s_plugged_pads;
 static int ohci_pad_for(uint32_t ed0)
 {
     uint32_t fa = ed0 & 0x7Fu;
+    unsigned present = __atomic_load_n(&s_present, __ATOMIC_ACQUIRE);
     int d;
-    for (d = 0; d < s_plugged_pads; d++)
-        if (fa ? usb_gamepad_address(d) == fa : usb_gamepad_address(d) == 0)
+    for (d = 0; d < USB_GAMEPAD_MAX; d++)
+        if ((present & (1u << d))
+            && (fa ? usb_gamepad_address(d) == fa : usb_gamepad_address(d) == 0))
             return d;
     return -1;
+}
+
+static int ohci_addr_gone(uint32_t ed0)
+{
+    uint32_t fa = ed0 & 0x7Fu;
+    return fa && (__atomic_load_n(&s_gone_addr[fa >> 5], __ATOMIC_RELAXED) & (1u << (fa & 31u)));
 }
 
 /* Every address below came out of guest memory, so none of them are trusted.
@@ -612,8 +635,14 @@ static uint32_t ohci_do_td(OhciController *hc, uint32_t ed0, uint32_t td)
     int      moved = 0;
     int      pad = ohci_pad_for(ed0);
 
-    if (pad < 0)
+    if (pad < 0) {
+        /* A pad pulled out: nobody answers its address any more, which a
+         * controller reports as DEVICE NOT RESPONDING and the walker halts
+         * the endpoint for, until the driver tears the pipe down. */
+        if (ohci_addr_gone(ed0))
+            return TD_CC_DEVICENOTRESPONDING;
         return TD_CC_NOERROR;   /* no device at that address: ignore */
+    }
 
     if (s_trace) {
         static unsigned n;
@@ -1201,6 +1230,84 @@ static void ohci_reset(OhciController *hc, uint32_t base, int index)
     }
 }
 
+/* ---- hotplug (XBA-123) ------------------------------------------------- */
+
+static unsigned port_of(int pad)
+{
+    return (s_first_port + (unsigned)pad) % s_ndp;
+}
+
+/* The pads that should be plugged now: RECOMP_USB_PADS fixed, or the ports
+ * with a controller (plus pad 1 for the bring-up inputs). */
+static unsigned hotplug_wanted(void)
+{
+    if (s_npads > 0)
+        return (1u << s_npads) - 1u;
+    return usb_hotplug_auto_wanted(&s_hotplug, xbox_InputPortMask()) | usb_gamepad_scripted();
+}
+
+/* One hotplug decision, made visible on the root hub the way a console's hub
+ * shows it: an insertion sets CurrentConnectStatus and its change bit; a
+ * removal clears CurrentConnectStatus and PortEnableStatus and sets both change
+ * bits (a disconnect is a hardware event, so PESC too). Either raises
+ * RootHubStatusChange, and the hub driver's scan of the port is what tells
+ * XAPI a device came or went (XGetDeviceChanges in a title). Returns the event
+ * (usb_hotplug_step) and its pad. */
+static int ohci_hotplug(OhciController *hc, unsigned wanted, unsigned long now_ms, int *pad_out)
+{
+    unsigned configured = 0;
+    int pad, ev, d;
+    uint32_t *ps;
+
+    for (d = 0; d < USB_GAMEPAD_MAX; d++)
+        if (usb_gamepad_configured(d))
+            configured |= 1u << d;
+    ev = usb_hotplug_step(&s_hotplug, wanted, configured, now_ms ? now_ms : 1, &pad);
+    if (!ev)
+        return 0;
+    ps = &hc->reg[(HcRhPortStatus1 + port_of(pad) * 4) / 4];
+    if (ev > 0) {
+        __atomic_fetch_or(&s_present, 1u << pad, __ATOMIC_ACQ_REL);
+        __atomic_fetch_or(ps, PORT_CCS | PORT_CSC, __ATOMIC_ACQ_REL);
+    } else {
+        uint8_t addr = usb_gamepad_address(pad);
+        if (addr)
+            __atomic_fetch_or(&s_gone_addr[addr >> 5], 1u << (addr & 31u), __ATOMIC_RELAXED);
+        __atomic_fetch_and(&s_present, ~(1u << pad), __ATOMIC_ACQ_REL);
+        usb_gamepad_unplugged(pad);
+        g_setup_pending_[pad] = 0;
+        g_ctrl_len_[pad] = -1;
+        __atomic_fetch_and(ps, ~(PORT_CCS | PORT_PES | PORT_PSS), __ATOMIC_ACQ_REL);
+        __atomic_fetch_or(ps, PORT_CSC | PORT_PESC, __ATOMIC_ACQ_REL);
+    }
+    status_set(hc, INTR_RHSC);
+    fprintf(stderr, "  [OHCI%d] pad %d %s on root port %u (controller port %d)\n", hc->index, pad + 1,
+            ev > 0 ? "plugged in" : "pulled out", port_of(pad) + 1, pad + 1);
+    fflush(stderr);
+    *pad_out = pad;
+    return ev;
+}
+
+int xbox_OhciHotplugStepForTest(unsigned wanted, unsigned long now_ms, int *pad)
+{
+    static int ready;
+
+    if (!ready) {
+        ready = 1;
+        s_first_port = s_ndp >= 4 ? 2u : 0u;
+        usb_hotplug_init(&s_hotplug, (1u << s_ndp) - 1u);
+        ohci_reset(&s_hc[0], XBOX_OHCI0_BASE, 0);
+    }
+    return ohci_hotplug(&s_hc[0], wanted, now_ms, pad);
+}
+
+uint32_t xbox_OhciPortStatusForTest(int port, uint32_t *int_status)
+{
+    if (int_status)
+        *int_status = s_hc[0].reg[HcInterruptStatus / 4];
+    return s_hc[0].reg[(HcRhPortStatus1 + (unsigned)(port & 3) * 4) / 4];
+}
+
 /* The controller, running on its own thread.
  *
  * It has to be its own thread for a reason that is easy to get wrong: the
@@ -1385,7 +1492,7 @@ static DWORD WINAPI ohci_thread(LPVOID unused)
     unsigned long mie_off_since = 0;    /* GetTickCount when MIE went off */
     int      mie_warned = 0, mie_warnings = 0;
     unsigned last_ack = 0;
-    unsigned first_port = 0, settle = 0;
+    unsigned wanted = 0, wanted_age = 0;
 
     (void)unused;
     {
@@ -1490,40 +1597,28 @@ static DWORD WINAPI ohci_thread(LPVOID unused)
          * change during its own bring-up scan, and a reset clears interrupt
          * status, so a device that was always there is one that never
          * arrives. */
-        if (!plugged && (enable & INTR_RHSC)) {
-            /* Which port the device appears on decides which controller slot
-             * XAPI assigns it, and a title that reads "player 1" without
-             * asking which port pressed Start looks at slot 0. The default is
-             * root port 3 (index 2), controller port 1, when there are four;
-             * RECOMP_USB_PORT (0..3) picks another. */
-            const char *pspec = getenv("RECOMP_USB_PORT");
-            unsigned port = pspec ? (unsigned)atoi(pspec) : (s_ndp >= 4 ? 2u : 0u);
-            if (port >= s_ndp) port = s_ndp - 1u;
-            hc->reg[(HcRhPortStatus1 + port * 4) / 4] |= PORT_CCS | PORT_CSC;
-            status_set(hc, INTR_RHSC);
-            plugged = 1;
-            s_plugged_pads = 1;
-            first_port = port;
-            fprintf(stderr, "  [OHCI0] operational after %u ms; device "
-                            "arriving on port %u\n", waited * 20, port + 1);
-            fflush(stderr);
-        }
-
-        /* More pads, one at a time: each arrives after the previous one is
-         * configured, on the next port, so the driver enumerates them in
-         * turn and there is only ever one device at the default address.
-         * RECOMP_USB_PADS sets how many (1-4). */
-        if (plugged && s_plugged_pads < s_npads
-            && usb_gamepad_configured(s_plugged_pads - 1)) {
-            if (++settle > 50) {                 /* ~1 s after the last */
-                unsigned port = (first_port + (unsigned)s_plugged_pads) % s_ndp;
-                hc->reg[(HcRhPortStatus1 + port * 4) / 4] |= PORT_CCS | PORT_CSC;
-                status_set(hc, INTR_RHSC);
-                fprintf(stderr, "  [OHCI0] pad %d arriving on port %u%c",
-                        s_plugged_pads + 1, port + 1, 10);
+        /* Which port a pad appears on decides which controller slot XAPI
+         * gives it, and a title that reads "player 1" without asking which
+         * port pressed Start looks at slot 0: pad n goes on port_of(n), so
+         * pad 0 is root port 3 (index 2), controller port 1, with four ports.
+         *
+         * Then the pads follow the controllers (XBA-123): plugged in one at a
+         * time as they come, pulled out a second after they go, each on its
+         * own port (usb_hotplug.h). The wanted set is asked for every
+         * twelfth pass (about 50 ms): it locks the host's joysticks. The
+         * first event waits for the root hub interrupt to be enabled. */
+        if (plugged || (enable & INTR_RHSC)) {
+            int pad, ev;
+            if (!plugged || ++wanted_age >= 12) {
+                wanted = hotplug_wanted();
+                wanted_age = 0;
+            }
+            ev = ohci_hotplug(hc, wanted, (unsigned long)GetTickCount(), &pad);
+            if (ev > 0 && !plugged) {
+                plugged = 1;
+                fprintf(stderr, "  [OHCI0] operational after %u ms; device "
+                                "arriving on port %u\n", waited * 20, port_of(pad) + 1);
                 fflush(stderr);
-                s_plugged_pads++;
-                settle = 0;
             }
         }
 
@@ -1682,12 +1777,22 @@ void xbox_OhciInit(void)
             int n = atoi(ndpspec);
             if (n >= 1 && n <= 4) s_ndp = (unsigned)n;
         }
+        const char *pspec = getenv("RECOMP_USB_PORT");
         if (padspec) {
             int n = atoi(padspec);
             if (n >= 1 && n <= USB_GAMEPAD_MAX) s_npads = n;
         }
         if ((unsigned)s_npads > s_ndp)
             s_ndp = (unsigned)s_npads;      /* a port for every pad */
+        s_first_port = pspec ? (unsigned)atoi(pspec) : (s_ndp >= 4 ? 2u : 0u);
+        if (s_first_port >= s_ndp)
+            s_first_port = s_ndp - 1u;
+        /* One pad per root port at most. */
+        usb_hotplug_init(&s_hotplug, (1u << s_ndp) - 1u);
+        if (s_npads > 0)
+            fprintf(stderr, "  OHCI: RECOMP_USB_PADS=%d: that many pads, always plugged\n", s_npads);
+        else
+            fprintf(stderr, "  OHCI: pads follow the controllers connected (RECOMP_USB_PADS=n for a fixed count)\n");
     }
 #if !defined(OHCI_TRAP_WIN32) && !defined(OHCI_TRAP_POSIX)
     /* No decoder for this host's instructions, so a trapped access could not

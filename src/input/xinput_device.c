@@ -13,6 +13,7 @@
 #include "xinput_xbox.h"
 #include "keyboard.h"
 #include "mkb_input.h"
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -152,6 +153,35 @@ BOOL xbox_InputIsConnected(DWORD dwPort)
     return g_controller_connected[dwPort];
 }
 
+/* XInput's slots are the ports already; the keyboard and mouse stand in on 1. */
+unsigned xbox_InputPortMask(void)
+{
+    unsigned mask = 0;
+    const char *kb = getenv("RECOMP_KEYBOARD");
+
+    for (DWORD i = 0; i < XBOX_MAX_CONTROLLERS; i++) {
+        XINPUT_STATE state;
+        if (XInputGetState(i, &state) == ERROR_SUCCESS)
+            mask |= 1u << i;
+    }
+    if ((kb && *kb && *kb != '0') || mkb_enabled())
+        mask |= 1u;
+    return mask;
+}
+
+int xbox_InputPortName(DWORD dwPort, char *out, int size)
+{
+    XINPUT_STATE state;
+
+    if (!out || size <= 0)
+        return 0;
+    out[0] = 0;
+    if (dwPort >= XBOX_MAX_CONTROLLERS || XInputGetState(dwPort, &state) != ERROR_SUCCESS)
+        return 0;
+    snprintf(out, (size_t)size, "XInput %lu", (unsigned long)dwPort + 1);
+    return 1;
+}
+
 DWORD xbox_InputGetCapabilities(DWORD dwPort, DWORD dwFlags, XBOX_INPUT_CAPABILITIES *pCaps)
 {
     XINPUT_CAPABILITIES xi_caps;
@@ -176,9 +206,11 @@ DWORD xbox_InputGetCapabilities(DWORD dwPort, DWORD dwFlags, XBOX_INPUT_CAPABILI
 /* ======================================================================== */
 
 #include <SDL.h>
+#include <pthread.h>
 #include <stdio.h>
 #include "input_overlay.h"   /* touch buttons on a second screen (Android) */
 #include "input_map.h"       /* RECOMP_PAD_MAP: the player's remapping */
+#include "input_ports.h"     /* which controller is which port (XBA-123) */
 
 /* RECOMP_PAD_MAP (XBA-131, the Android launcher's Controls screen writes it
  * into recomp.cfg): which physical control of a pad each Xbox control takes,
@@ -282,6 +314,61 @@ static void update_controllers(void)
         SDL_GameControllerUpdate();
 }
 
+/* Which controller is which port (XBA-123, input_ports.h): first come, kept
+ * across a disconnect, RECOMP_PAD_PORTS pins (the app's Controls screen) and
+ * RECOMP_PAD_BUILTIN (the handheld's own pad: port 1 unless pinned otherwise).
+ * Guarded by the joystick lock, like g_pads. */
+static InputPorts g_ports;
+static char g_names[XBOX_MAX_CONTROLLERS][64];
+
+static void ports_init(void)
+{
+    const char *pins = getenv("RECOMP_PAD_PORTS");
+    const char *builtin = getenv("RECOMP_PAD_BUILTIN");
+    int bad = xbox_InputPortsInit(&g_ports, pins, builtin);
+
+    if ((pins && *pins) || (builtin && *builtin))
+        fprintf(stderr, "[INPUT] ports: RECOMP_PAD_PORTS=%s RECOMP_PAD_BUILTIN=%s%s\n", pins ? pins : "",
+                builtin ? builtin : "", bad > 0 ? " (entries not understood, ignored)" : "");
+}
+
+/* Set up once, by whoever comes first: xbox_InputInit (the tests) or the
+ * first read. Nothing in the runtime calls xbox_InputInit, so RECOMP_PAD_MAP
+ * (padmap_init) never applied in a real run before this (XBA-123). */
+static pthread_once_t g_once = PTHREAD_ONCE_INIT;
+
+static void init_once(void)
+{
+    padmap_init();
+    ports_init();
+}
+
+static void ensure_init(void)
+{
+    pthread_once(&g_once, init_once);
+}
+
+static void port_opened_locked(int port, int index, SDL_GameController *controller, const char *key)
+{
+    const char *name = SDL_JoystickNameForIndex(index);
+
+    g_pads[port] = controller;
+    g_controller_connected[port] = TRUE;
+    snprintf(g_names[port], sizeof g_names[port], "%s", name ? name : "Controller");
+    fprintf(stderr, "[INPUT] port %d: %s (%s) connected\n", port + 1, g_names[port], key);
+}
+
+/* A controller that went away: the port stays its own (input_ports.h).
+ * Called with the joysticks locked. */
+static void port_closed_locked(int port)
+{
+    xbox_InputPortsDetach(&g_ports, g_ports.id[port]);
+    SDL_GameControllerClose(g_pads[port]);
+    g_pads[port] = NULL;
+    g_controller_connected[port] = FALSE;
+    fprintf(stderr, "[INPUT] port %d: %s disconnected (the port waits for it)\n", port + 1, g_names[port]);
+}
+
 static int controller_is_open_locked(SDL_JoystickID instance_id)
 {
     for (int slot = 0; slot < XBOX_MAX_CONTROLLERS; slot++) {
@@ -294,39 +381,53 @@ static int controller_is_open_locked(SDL_JoystickID instance_id)
     return 0;
 }
 
+#define MAX_SEEN 16
+
 static void refresh_controllers_locked(void)
 {
-    int count;
+    int count, n = 0;
+    int index[MAX_SEEN], ids[MAX_SEEN], ports[MAX_SEEN];
+    char keys[MAX_SEEN][INPUT_PORT_KEY];
+    const char *keyp[MAX_SEEN];
 
-    for (int slot = 0; slot < XBOX_MAX_CONTROLLERS; slot++) {
-        if (g_pads[slot] && !SDL_GameControllerGetAttached(g_pads[slot])) {
-            SDL_GameControllerClose(g_pads[slot]);
-            g_pads[slot] = NULL;
-            g_controller_connected[slot] = FALSE;
-        }
-    }
+    for (int slot = 0; slot < XBOX_MAX_CONTROLLERS; slot++)
+        if (g_pads[slot] && !SDL_GameControllerGetAttached(g_pads[slot]))
+            port_closed_locked(slot);
 
     count = SDL_NumJoysticks();
-    for (int i = 0; i < count; i++) {
-        SDL_GameController *controller;
+    for (int i = 0; i < count && n < MAX_SEEN; i++) {
         SDL_JoystickID instance_id;
-        int slot;
 
         if (!SDL_IsGameController(i))
             continue;
         instance_id = SDL_JoystickGetDeviceInstanceID(i);
         if (instance_id < 0 || controller_is_open_locked(instance_id))
             continue;
-        for (slot = 0; slot < XBOX_MAX_CONTROLLERS; slot++)
-            if (!g_pads[slot])
-                break;
-        if (slot == XBOX_MAX_CONTROLLERS)
-            break;
-        controller = SDL_GameControllerOpen(i);
-        if (controller) {
-            g_pads[slot] = controller;
-            g_controller_connected[slot] = TRUE;
+        index[n] = i;
+        ids[n] = (int)instance_id;
+        xbox_InputPortsKey(keys[n], SDL_JoystickGetDeviceVendor(i), SDL_JoystickGetDeviceProduct(i));
+        keyp[n] = keys[n];
+        n++;
+    }
+    /* The first look packs whoever is there from port 1 (pins, the built-in
+     * pad, the rest); later arrivals take a port by the hotplug rules. */
+    if (!g_ports.started) {
+        xbox_InputPortsStart(&g_ports, n, keyp, ids, ports);
+    } else {
+        for (int i = 0; i < n; i++)
+            ports[i] = xbox_InputPortsAttach(&g_ports, keys[i], ids[i]);
+    }
+    for (int i = 0; i < n; i++) {
+        SDL_GameController *controller;
+
+        if (ports[i] < 0)
+            continue;   /* a fifth controller: no port */
+        controller = SDL_GameControllerOpen(index[i]);
+        if (!controller) {
+            xbox_InputPortsDetach(&g_ports, ids[i]);
+            continue;
         }
+        port_opened_locked(ports[i], index[i], controller, keys[i]);
     }
 }
 
@@ -348,14 +449,12 @@ int xbox_InputAnyOpen(void)
 {
     int any = 0;
 
+    ensure_init();
     update_controllers();
     SDL_LockJoysticks();
     for (int i = 0; i < XBOX_MAX_CONTROLLERS; i++) {
-        if (g_pads[i] && !SDL_GameControllerGetAttached(g_pads[i])) {
-            SDL_GameControllerClose(g_pads[i]);
-            g_pads[i] = NULL;
-            g_controller_connected[i] = FALSE;
-        }
+        if (g_pads[i] && !SDL_GameControllerGetAttached(g_pads[i]))
+            port_closed_locked(i);
         any |= g_pads[i] != NULL;
     }
     SDL_UnlockJoysticks();
@@ -369,10 +468,63 @@ void xbox_InputInit(void)
     SDL_SetHint(SDL_HINT_NO_SIGNAL_HANDLERS, "1");
     if (!SDL_WasInit(SDL_INIT_GAMECONTROLLER))
         SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER);
+    ensure_init();
+    /* Again on every call: the tests change the variables between calls. The
+     * ports start over, with whoever is attached now. */
+    padmap_init();
     SDL_LockJoysticks();
+    for (int i = 0; i < XBOX_MAX_CONTROLLERS; i++) {
+        if (g_pads[i])
+            SDL_GameControllerClose(g_pads[i]);
+        g_pads[i] = NULL;
+        g_controller_connected[i] = FALSE;
+    }
+    ports_init();
     refresh_controllers_locked();
     SDL_UnlockJoysticks();
-    padmap_init();
+}
+
+unsigned xbox_InputPortMask(void)
+{
+    unsigned mask = 0;
+    XBOX_GAMEPAD pad;
+
+    ensure_init();
+    update_controllers();
+    SDL_LockJoysticks();
+    refresh_controllers_locked();
+    for (int i = 0; i < XBOX_MAX_CONTROLLERS; i++)
+        if (g_pads[i] && SDL_GameControllerGetAttached(g_pads[i]))
+            mask |= 1u << i;
+    SDL_UnlockJoysticks();
+    /* The stand-ins of port 1: the keyboard, the touch overlay. */
+    {
+        const char *kb = getenv("RECOMP_KEYBOARD");
+        if (kb && *kb && *kb != '0')
+            mask |= 1u;
+    }
+    for (int i = 0; i < XBOX_MAX_CONTROLLERS; i++)
+        if (xbox_InputOverlayGet(i, &pad, NULL))
+            mask |= 1u << i;
+    return mask;
+}
+
+int xbox_InputPortName(DWORD dwPort, char *out, int size)
+{
+    int on;
+
+    if (!out || size <= 0)
+        return 0;
+    out[0] = 0;
+    if (dwPort >= XBOX_MAX_CONTROLLERS)
+        return 0;
+    ensure_init();
+    SDL_LockJoysticks();
+    on = g_pads[dwPort] != NULL;
+    if (on)
+        snprintf(out, (size_t)size, "%s", g_names[dwPort]);
+    SDL_UnlockJoysticks();
+    return on;
 }
 
 DWORD xbox_InputGetState(DWORD dwPort, XBOX_INPUT_STATE *pState)
@@ -380,6 +532,7 @@ DWORD xbox_InputGetState(DWORD dwPort, XBOX_INPUT_STATE *pState)
     if (dwPort >= XBOX_MAX_CONTROLLERS || !pState)
         return ERROR_DEVICE_NOT_CONNECTED;
 
+    ensure_init();
     update_controllers();
     SDL_LockJoysticks();
     SDL_GameController *c = controller_for_port_locked(dwPort);
@@ -457,6 +610,7 @@ DWORD xbox_InputSetState(DWORD dwPort, const XBOX_VIBRATION *pVibration)
     if (dwPort >= XBOX_MAX_CONTROLLERS || !pVibration)
         return ERROR_DEVICE_NOT_CONNECTED;
 
+    ensure_init();
     update_controllers();
     SDL_LockJoysticks();
     SDL_GameController *c = controller_for_port_locked(dwPort);
@@ -479,6 +633,7 @@ BOOL xbox_InputIsConnected(DWORD dwPort)
 
     if (dwPort >= XBOX_MAX_CONTROLLERS)
         return FALSE;
+    ensure_init();
     update_controllers();
     SDL_LockJoysticks();
     connected = controller_for_port_locked(dwPort) != NULL;
@@ -492,6 +647,7 @@ DWORD xbox_InputGetCapabilities(DWORD dwPort, DWORD dwFlags, XBOX_INPUT_CAPABILI
     if (dwPort >= XBOX_MAX_CONTROLLERS || !pCaps)
         return ERROR_DEVICE_NOT_CONNECTED;
 
+    ensure_init();
     update_controllers();
     SDL_LockJoysticks();
     if (!controller_for_port_locked(dwPort)) {

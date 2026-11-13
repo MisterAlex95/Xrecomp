@@ -3,6 +3,7 @@
  * quit. Called on the UI thread (the overlay, quit) or a worker thread (the screenshot). */
 #include <jni.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "input_overlay.h"
@@ -23,6 +24,55 @@ JNIEXPORT void JNICALL JNI_FN(nativeOverlay)(JNIEnv *env, jclass cls, jint butto
     for (i = 0; i < 8; i++)
         pad.bAnalogButtons[i] = (analog_mask >> i) & 1 ? 255 : 0;
     xbox_InputOverlaySet(0, &pad);
+}
+
+static SHORT clamp16(jint v)
+{
+    return (SHORT)(v > 32767 ? 32767 : v < -32767 ? -32767 : v);
+}
+
+/* The whole overlay pad (XBA-42, the on-screen pad, merged with the companion panel's buttons by OverlayMixer):
+ * wButtons, the analog mask for A B X Y Black White (bit i = button i at 255), the triggers 0..255 and the sticks
+ * (Y up, -32767..32767). */
+JNIEXPORT void JNICALL JNI_FN(nativeOverlayPad)(JNIEnv *env, jclass cls, jint buttons, jint analog_mask, jint lt,
+                                                jint rt, jint lx, jint ly, jint rx, jint ry)
+{
+    XBOX_GAMEPAD pad;
+    int i;
+
+    (void)env;
+    (void)cls;
+    memset(&pad, 0, sizeof pad);
+    pad.wButtons = (WORD)(buttons & 0xFFFF);
+    for (i = 0; i < 6; i++)
+        pad.bAnalogButtons[i] = (analog_mask >> i) & 1 ? 255 : 0;
+    pad.bAnalogButtons[XBOX_BUTTON_LTRIGGER] = (BYTE)(lt < 0 ? 0 : lt > 255 ? 255 : lt);
+    pad.bAnalogButtons[XBOX_BUTTON_RTRIGGER] = (BYTE)(rt < 0 ? 0 : rt > 255 ? 255 : rt);
+    pad.sThumbLX = clamp16(lx);
+    pad.sThumbLY = clamp16(ly);
+    pad.sThumbRX = clamp16(rx);
+    pad.sThumbRY = clamp16(ry);
+    xbox_InputOverlaySet(0, &pad);
+}
+
+/* "Port 1: <name>" lines for the ports that have a host controller now (XBA-123), '\n' separated. */
+JNIEXPORT jstring JNICALL JNI_FN(nativePorts)(JNIEnv *env, jclass cls)
+{
+    char out[512], name[96];
+    size_t len = 0;
+    DWORD p;
+
+    (void)cls;
+    out[0] = 0;
+    for (p = 0; p < XBOX_MAX_CONTROLLERS; p++) {
+        if (!xbox_InputPortName(p, name, (int)sizeof name))
+            continue;
+        len += (size_t)snprintf(out + len, sizeof out - len, "%s%lu\t%s", len ? "\n" : "", (unsigned long)p + 1,
+                                name);
+        if (len >= sizeof out)
+            break;
+    }
+    return (*env)->NewStringUTF(env, out);
 }
 
 JNIEXPORT void JNICALL JNI_FN(nativeOverlayOff)(JNIEnv *env, jclass cls)

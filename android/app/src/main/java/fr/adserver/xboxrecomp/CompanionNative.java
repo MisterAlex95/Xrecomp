@@ -10,6 +10,15 @@ final class CompanionNative {
     /** The touch overlay pad on port 0 (input_overlay.h): wButtons bits, analog mask (bit i = button i at 255). */
     static native void nativeOverlay(int buttons, int analogMask);
 
+    /**
+     * The whole overlay pad on port 0 (XBA-42, OverlayMixer): wButtons bits, analog mask for A B X Y Black White (bit
+     * i at 255), triggers 0..255, sticks -32767..32767 with Y up.
+     */
+    static native void nativeOverlayPad(int buttons, int analogMask, int lt, int rt, int lx, int ly, int rx, int ry);
+
+    /** "1\tname" lines for the ports with a host controller now (XBA-123, xbox_InputPortName). */
+    static native String nativePorts();
+
     /** Overlay off: nothing held, no stand-in pad. */
     static native void nativeOverlayOff();
 

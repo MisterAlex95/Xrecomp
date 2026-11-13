@@ -65,6 +65,15 @@ int  xbox_OhciFrameAdvanceForTest(uint32_t from, uint32_t frames, uint32_t *to);
  * did not within 2 s (it is not running). */
 int  xbox_OhciHoldControllerForTest(int hold);
 
+/* Tests only (XBA-123): one hotplug decision on controller 0 for the pads
+ * `wanted` at time now_ms (usb_hotplug.h), applied to its root hub as the
+ * controller thread does: +1 a pad plugged in, -1 pulled out (*pad), 0 none. */
+int  xbox_OhciHotplugStepForTest(unsigned wanted, unsigned long now_ms, int *pad);
+
+/* Tests only: HcRhPortStatus of root port `port` (0-3) of controller 0, and
+ * its HcInterruptStatus in *int_status (may be NULL). */
+uint32_t xbox_OhciPortStatusForTest(int port, uint32_t *int_status);
+
 /* The lists serviced from the guest's side when the controller thread is
  * overdue; kernel_hal.c calls it at a guest thread's release point.
  * RECOMP_OHCI_CATCHUP=0 turns it off (docs/runtime/environment-variables.md). */

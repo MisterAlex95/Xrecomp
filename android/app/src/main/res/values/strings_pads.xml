@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Controls: which controller is which port (XBA-123) and the on-screen pad (XBA-42). -->
+<resources>
+    <string name="CTL_GROUP_PORTS">Players</string>
+    <string name="CTL_PORT">Port %1$d</string>
+    <string name="CTL_PORT_AUTO">First come</string>
+    <string name="CTL_PORT_BUILTIN">%1$s (built in)</string>
+    <string name="CTL_PORT_ABSENT">%1$s (not connected)</string>
+    <string name="CTL_PORT_NOBODY">nobody</string>
+    <string name="CTL_PORT_NOW">When the game starts with the controllers connected now: %1$s.</string>
+    <string name="CTL_PORT_LINE">port %1$d, %2$s</string>
+    <string name="CTL_PORT_DETAIL">Port %1$d is player %1$d in the game. Left and right choose a controller for it; First come gives it to the next one, in the order they are connected (the built-in pad first). A controller that disconnects keeps its port until it comes back.</string>
+    <string name="CTL_GROUP_TOUCH">On-screen pad</string>
+    <string name="CTL_TOUCH">Show</string>
+    <string name="CTL_TOUCH_AUTO">Without a controller</string>
+    <string name="CTL_TOUCH_ON">Always</string>
+    <string name="CTL_TOUCH_OFF">Never</string>
+    <string name="CTL_TOUCH_DETAIL">Both sticks, the D-pad, A B X Y, Black and White, the triggers, Back and Start, and the stick presses (LS, RS) on the game\'s screen. Without a controller: shown while no controller is connected, hidden as soon as one is used. Never on a handheld\'s top screen while the bottom screen shows the panel.</string>
+    <string name="CTL_TOUCH_OPACITY">Opacity</string>
+    <string name="CTL_TOUCH_OPACITY_DETAIL">How much of the game shows through the on-screen pad.</string>
+    <string name="CTL_TOUCH_SIZE">Size</string>
+    <string name="CTL_TOUCH_SIZE_DETAIL">The size of the on-screen pad\'s controls.</string>
+    <string name="CTL_SIZE_SMALL">Small</string>
+    <string name="CTL_SIZE_NORMAL">Normal</string>
+    <string name="CTL_SIZE_LARGE">Large</string>
+    <string name="PERCENT">%1$d %%</string>
+</resources>

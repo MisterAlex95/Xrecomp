@@ -3491,6 +3491,8 @@ public class LauncherActivity extends Activity {
             r.setOnClickListener(v -> r.cycler.step(1));
             onFocus(r, () -> stickDetail(left));
         }
+        controlsPorts(list);   // XBA-123
+        controlsTouch(list);   // XBA-42
         MenuRow reset = listRow(list, getString(R.string.CTL_RESET), getString(R.string.CTL_RESET_DETAIL),
                                 this::resetControls);
         onFocus(reset, () -> controlsDescribe(getString(R.string.CTL_RESET_DETAIL)));
@@ -3500,6 +3502,78 @@ public class LauncherActivity extends Activity {
         addHint("A", R.string.HINT_CHANGE, this::clickFocused);
         addHint("Y", R.string.HINT_DEFAULTS, this::resetControls);
         addHint("B", R.string.HINT_BACK, this::back);
+    }
+
+    /**
+     * Controls › Players (XBA-123): a row per port, First come or a controller pinned to it (RECOMP_PAD_PORTS,
+     * PadPorts, read by src/input/input_ports.c at the game's start); the description says what the game would give
+     * each port with the controllers connected now.
+     */
+    private void controlsPorts(LinearLayout list) {
+        PadPorts ports = PadPorts.load(cfg);
+        java.util.List<PadPorts.Device> present = PadDevices.connected(this);
+        listLabel(list, getString(R.string.CTL_GROUP_PORTS));
+        MenuRow[] rows = new MenuRow[PadPorts.PORTS];
+        for (int i = 0; i < PadPorts.PORTS; i++)
+            rows[i] = settingRow(list, getString(R.string.CTL_PORT, i + 1), "");
+        Runnable values = () -> {   // all four: a pin moved to one port leaves another
+            for (int i = 0; i < PadPorts.PORTS; i++)
+                rows[i].setValue(PadPortsLabels.pin(this, ports, i, present));
+        };
+        values.run();
+        for (int i = 0; i < PadPorts.PORTS; i++) {
+            int port = i;
+            MenuRow r = rows[i];
+            Runnable detail = () -> describe(getString(R.string.CTL_PORT_DETAIL, port + 1) + "\n\n"
+                                             + PadPortsLabels.now(this, ports, present));
+            r.cycler = d -> {
+                ports.step(port, d, present);
+                ports.store(cfg);
+                saveSettings();
+                values.run();
+                detail.run();
+                Log.i(TAG, "launcher: controller ports " + (ports.isDefault() ? "(first come)" : ports.format()));
+                feedback.play(UiFeedback.Cue.MOVE, r);
+            };
+            r.setOnClickListener(v -> r.cycler.step(1));
+            onFocus(r, detail);
+        }
+    }
+
+    /** Controls › On-screen pad (XBA-42): when it shows, its opacity, its size (TouchSettings, files/settings). */
+    private void controlsTouch(LinearLayout list) {
+        TouchSettings t = TouchSettings.load(this);
+        listLabel(list, getString(R.string.CTL_GROUP_TOUCH));
+        MenuRow mode = settingRow(list, getString(R.string.CTL_TOUCH), "");
+        MenuRow opacity = settingRow(list, getString(R.string.CTL_TOUCH_OPACITY), "");
+        MenuRow size = settingRow(list, getString(R.string.CTL_TOUCH_SIZE), "");
+        Runnable values = () -> {
+            mode.setValue(PadPortsLabels.mode(this, t.mode));
+            opacity.setValue(PadPortsLabels.percent(this, t.opacity));
+            size.setValue(PadPortsLabels.size(this, t.size));
+        };
+        values.run();
+        Widgets.Cycler[] steps = {
+            d -> t.mode = TouchSettings.Mode.values()[Math.floorMod(t.mode.ordinal() + d, 3)],
+            d -> t.opacity = TouchSettings.step(TouchSettings.OPACITIES, t.opacity, d),
+            d -> t.size = TouchSettings.step(TouchSettings.SIZES, t.size, d),
+        };
+        MenuRow[] rows = { mode, opacity, size };
+        int[] details = { R.string.CTL_TOUCH_DETAIL, R.string.CTL_TOUCH_OPACITY_DETAIL, R.string.CTL_TOUCH_SIZE_DETAIL };
+        for (int i = 0; i < rows.length; i++) {
+            MenuRow r = rows[i];
+            Widgets.Cycler step = steps[i];
+            r.cycler = d -> {
+                step.step(d);
+                t.save(this);
+                values.run();
+                Log.i(TAG, "launcher: touch controls " + t.format());
+                feedback.play(UiFeedback.Cue.MOVE, r);
+            };
+            r.setOnClickListener(v -> r.cycler.step(1));
+            String text = getString(details[i]);
+            onFocus(r, () -> describe(text));
+        }
     }
 
     /** The focused control's line: where it comes from, and which other control shares that button. */

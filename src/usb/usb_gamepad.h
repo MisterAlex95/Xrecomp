@@ -41,8 +41,18 @@ int usb_gamepad_report(int pad, uint8_t *out, int max);
 uint8_t usb_gamepad_address(int pad);
 int usb_gamepad_configured(int pad);
 
-/* Up to four pads, one per Xbox controller port. Pad n is driven by host
- * XInput pad n and by pad-script steps prefixed "p<n+1>-". */
+/* Pad `pad` was pulled out of its port: back to the default address,
+ * unconfigured, as a device that is plugged in again starts (XBA-123). */
+void usb_gamepad_unplugged(int pad);
+
+/* The pads that must stay plugged whatever the host has, for the bring-up
+ * inputs: pad 1 with RECOMP_PAD_PRESS, RECOMP_PAD_SCRIPT or RECOMP_PAD_LIVE
+ * set (bit n = pad n). */
+unsigned usb_gamepad_scripted(void);
+
+/* Up to four pads, one per Xbox controller port. Pad n is driven by the host
+ * controller on port n (xinput_xbox.h, input_ports.h) and by pad-script steps
+ * prefixed "p<n+1>-". */
 #define USB_GAMEPAD_MAX 4
 
 #endif /* XBOX_USB_GAMEPAD_H */

@@ -63,6 +63,13 @@ int SDL_GameControllerRumble(SDL_GameController *controller,
                              uint16_t low_frequency_rumble,
                              uint16_t high_frequency_rumble,
                              Uint32 duration_ms);
+/* The device's identity (XBA-123, input_ports.h). fake_sdl_ids.c gives weak
+ * defaults (vendor 0x045e, product 0x0289, "Fake controller"); a test that
+ * cares defines its own. */
+typedef uint16_t Uint16;
+Uint16 SDL_JoystickGetDeviceVendor(int device_index);
+Uint16 SDL_JoystickGetDeviceProduct(int device_index);
+const char *SDL_JoystickNameForIndex(int device_index);
 void SDL_LockJoysticks(void);
 void SDL_UnlockJoysticks(void);
 int SDL_AtomicGet(SDL_atomic_t *value);
