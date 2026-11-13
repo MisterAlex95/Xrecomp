@@ -465,6 +465,24 @@ static int fg_take_due(uint64_t now, uint64_t *next_due)
 }
 #endif /* XBOXRECOMP_LSFG */
 
+/* The display's refresh rate for RECOMP_PACING=auto (nv2a_pb_exec.c,
+ * frame_pacing.h), which bounds a title that presents IMMEDIATE by it:
+ * RECOMP_DISPLAY_HZ, unless already set. Before the guest starts: the
+ * executor reads it once, at its first flip. */
+static void report_display_hz(SDL_Window *win)
+{
+    SDL_DisplayMode mode;
+    int idx = SDL_GetWindowDisplayIndex(win);
+    const char *e = getenv("RECOMP_DISPLAY_HZ");
+    char hz[16];
+
+    if ((e && *e) || idx < 0 || SDL_GetCurrentDisplayMode(idx, &mode) != 0
+            || mode.refresh_rate < 24 || mode.refresh_rate > 480)
+        return;
+    snprintf(hz, sizeof hz, "%d", mode.refresh_rate);
+    setenv("RECOMP_DISPLAY_HZ", hz, 1);
+}
+
 void xbox_FramebufferWindowSet(uint32_t fb_va, uint32_t pitch)
 {
     s_fb_va = fb_va;
@@ -1183,6 +1201,7 @@ int xbox_HostWindowMain(int (*guest_main)(void))
      * game controllers; the input layer then only reads them. */
     xbox_InputSetMainPump(1);
     xbox_InputSdlInit();
+    report_display_hz(win);
 #if defined(XBOXRECOMP_LSFG)
     fg_report_display_rate(win);
     fg_start(1);
