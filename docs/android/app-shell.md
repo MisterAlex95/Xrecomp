@@ -973,7 +973,7 @@ started: stage `prepares`, blocker `not booted: the game's files are not in the 
 **The line** (no game data): the desktop's `source` (the certificate's title name), `title_id`, `title`, `xdk`,
 `xdk_libraries` (each XDK library's build), `engines` (names), `layers`, `stage`, `best`, `blocker`, `runs` (the
 status numbers), `toolkit`, `time`, `prepare_s`; plus `host` `android`, `device` (« AYN Thor »), `android`, `api`,
-`soc`, `app_build`, `renderer` (`GL: <GL_RENDERER>` from the runtime's `[GPUGL]` line, or the CPU rasteriser),
+`soc`, `app_build`, `renderer` (what really drew, from the runtime's `[GPUGL]` lines: `GL: <GL_RENDERER>`; `CPU rasteriser (<why>)` for `RECOMP_GPU=0`, no GL context, a base shader that does not compile or a GPU given up after resets; `GPU selected (no frame drawn)`),
 `seconds`, `peak_mem_mb` (the game process's VmHWM). The status files and logs stay in `<files>/check/run/`.
 
 **Resumable.** `check.json` is written at every step. After a crash of the app or a reboot, opening the app shows the

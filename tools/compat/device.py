@@ -35,6 +35,11 @@ def check_env(run_dir, cfg_usb=None):
 
 GPUGL_RE = re.compile(r"\[GPUGL\] ([^|\n]+?) \|")
 NO_GL_RE = re.compile(r"\[GPUGL\] no GL context")
+# After the renderer line: the base shader did not compile, or the context was
+# lost too often (src/gpu/nv2a_gl.c); either way the CPU rasteriser drew.
+GL_FELL_BACK_RE = re.compile(r"\[GPUGL\] (the base vertex shader does not compile|.*the CPU rasteriser takes over)")
+GPU_SELECTED_RE = re.compile(r"\[GPUGL\] GPU back end (selected|by default)")
+CPU_SELECTED_RE = re.compile(r"\[GPUGL\] CPU rasteriser selected \(RECOMP_GPU=([^)]*)\)")
 FATAL_SIGNAL_RE = re.compile(r"Fatal signal (\d+)")
 
 # --exit values besides none / exit:N / signal:N: how Android said the
@@ -96,12 +101,26 @@ def parse_exit(arg, log_text=""):
 
 
 def renderer_of(log_text):
-    """The GPU path the runtime took, from its log: the GL renderer's name, or the CPU rasteriser."""
-    m = GPUGL_RE.search(log_text or "")
+    """What really drew, from the runtime's log (XBA-119's GPU default and its
+    CPU fallbacks): "GL: <GL_RENDERER>", "CPU rasteriser (<why>)", "GPU selected
+    (no frame drawn)" when the run ended before the context was made, or None
+    for a log from before these lines."""
+    t = log_text or ""
+    m = GPUGL_RE.search(t)
     if m:
-        return "GL: " + m.group(1).strip()
-    if NO_GL_RE.search(log_text or ""):
+        name = m.group(1).strip()
+        f = GL_FELL_BACK_RE.search(t, m.end())
+        if f:
+            why = "shader failed" if f.group(1).startswith("the base") else "gave up after GL resets"
+            return "CPU rasteriser (GL %s: %s)" % (name, why)
+        return "GL: " + name
+    if NO_GL_RE.search(t):
         return "CPU rasteriser (no GL context)"
+    c = CPU_SELECTED_RE.search(t)
+    if c:
+        return "CPU rasteriser (RECOMP_GPU=%s)" % c.group(1)
+    if GPU_SELECTED_RE.search(t):
+        return "GPU selected (no frame drawn)"
     return None
 
 

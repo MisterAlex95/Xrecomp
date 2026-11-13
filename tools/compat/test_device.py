@@ -152,3 +152,21 @@ def test_the_cli_reads_the_file_the_device_wrote(tmp_path):
     r = subprocess.run([sys.executable, "-m", "tools.compat", "report", str(out), "--matrix"], cwd=ROOT,
                        capture_output=True, text=True, timeout=60)
     assert "AYN Thor" in r.stdout and "| Smoke |" in r.stdout
+
+
+def test_the_renderer_is_what_really_drew():
+    """XBA-130 x XBA-119: the GPU by default, and each way it falls back."""
+    from tools.compat.device import renderer_of
+    gl = "  [GPUGL] GPU back end by default on this platform (RECOMP_GPU=0 for the software renderer)\n" \
+         "  [GPUGL] GPU back end selected (RECOMP_GPU=1); the context is created on the executor thread\n"
+    line = "  [GPUGL] Adreno (TM) 740 | OpenGL ES 3.2 | GLSL 3.20\n"
+    assert renderer_of(gl + line) == "GL: Adreno (TM) 740"
+    assert renderer_of(gl + line + "  [GPUGL] the base vertex shader does not compile: falling back to the CPU "
+                       "rasteriser\n") == "CPU rasteriser (GL Adreno (TM) 740: shader failed)"
+    assert renderer_of(gl + line + "  [GPUGL] context lost at frame 812: dropping every GL object; the CPU "
+                       "rasteriser takes over\n") == "CPU rasteriser (GL Adreno (TM) 740: gave up after GL resets)"
+    assert renderer_of(gl + "  [GPUGL] no GL context: falling back to the CPU rasteriser\n") \
+        == "CPU rasteriser (no GL context)"
+    assert renderer_of("  [GPUGL] CPU rasteriser selected (RECOMP_GPU=0)\n") == "CPU rasteriser (RECOMP_GPU=0)"
+    assert renderer_of(gl) == "GPU selected (no frame drawn)"
+    assert renderer_of("no GPU lines at all\n") is None

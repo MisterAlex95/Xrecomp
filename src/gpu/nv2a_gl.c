@@ -4487,8 +4487,13 @@ int nv2a_gl_install_from_env(void)
     const char *e = getenv("RECOMP_GPU");
     int by_default = !e || !*e;
 
-    if (!gpu_selected(e, NV2A_GL_DEFAULT_ON))
+    if (!gpu_selected(e, NV2A_GL_DEFAULT_ON)) {
+        /* Said, so a log (the library check's renderer field, XBA-130)
+         * tells a software run from one that never drew. */
+        fprintf(stderr, "  [GPUGL] CPU rasteriser selected (RECOMP_GPU=%s)\n",
+                e && *e ? e : "unset");
         return 0;
+    }
     if (by_default) {
         /* Code that asks getenv("RECOMP_GPU") later (a title layer, the
          * frame pacing choice) sees what was chosen. */
