@@ -13,7 +13,9 @@ set(CMAKE_C_STANDARD 11)
 #   unknown  D3D8LTCG 5933, a build the layout table does not know (XBA-105): 5849's slot
 #            rule, no event pair, every fallback said and recorded
 #   x4627    D3D8 4627 with its slot and events elsewhere (found by structure)
-foreach(variant auto given scan off x5455 unknown x4627)
+#   devonly  RECOMP_D3D_DEVICE alone, no RECOMP_D3D_SW_METHODS: every method serviced
+#   swmask   RECOMP_D3D_SW_METHODS=0x1000 on a found device: 0xD and 0xE left unserviced
+foreach(variant auto given scan off x5455 unknown x4627 devonly swmask)
     add_executable(recomp_d3d_service_${variant} test_main.c ../../src/kernel/recomp_d3d_service.c)
     target_include_directories(recomp_d3d_service_${variant} PRIVATE ../../src/kernel)
     if(NOT WIN32)
@@ -27,8 +29,10 @@ target_compile_definitions(recomp_d3d_service_off PRIVATE TEST_OFF=1)
 target_compile_definitions(recomp_d3d_service_x5455 PRIVATE TEST_5455=1)
 target_compile_definitions(recomp_d3d_service_unknown PRIVATE TEST_UNKNOWN=1)
 target_compile_definitions(recomp_d3d_service_x4627 PRIVATE TEST_4627=1)
+target_compile_definitions(recomp_d3d_service_devonly PRIVATE TEST_DEVONLY=1)
+target_compile_definitions(recomp_d3d_service_swmask PRIVATE TEST_SWMASK=1)
 enable_testing()
-foreach(variant auto given scan off x5455 unknown x4627)
+foreach(variant auto given scan off x5455 unknown x4627 devonly swmask)
     add_test(NAME recomp_d3d_service_${variant} COMMAND recomp_d3d_service_${variant})
     set_tests_properties(recomp_d3d_service_${variant} PROPERTIES SKIP_RETURN_CODE 77)
 endforeach()

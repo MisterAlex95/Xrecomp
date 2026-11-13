@@ -164,11 +164,16 @@ way). With `RECOMP_TITLE_KEVENTS=0`, the DMA walk still adopts that one event (`
 The addresses Fable's and Burnout 3's title layers used to give (`XBA_D3D_DEVICE_PTR`, `XBA_D3D_DEVICE`,
 `XBA_D3D_SW_METHODS`) are what the search finds; for an A/B they are run-time overrides now:
 `RECOMP_D3D_DEVICE_PTR=0x...`, `RECOMP_D3D_DEVICE=0x...`, `RECOMP_D3D_SW_METHODS=0x...`
-([environment-variables.md](../runtime/environment-variables.md#d3d-service)). With an address given, RunPushBuffer's
-methods write as D3D's handler does, without the run-time guards. With the device found, those guards check each
-write against the node D3D built, not against where the title keeps its data: the return slot in the contiguous
-window, the fixup list anywhere in mapped guest memory (bounded: 64 KB an entry, 1 MB a list), each fixup inside the
-node's own pushbuffer. A refusal is printed and counted (`[GPU] software methods: ...; fixup lists refused N`):
+([environment-variables.md](../runtime/environment-variables.md#d3d-service)). Either address alone is enough: the
+device is not searched for, every software method is answered as for a found device unless `RECOMP_D3D_SW_METHODS`
+says otherwise (a given address used to leave RunPushBuffer's methods off, and Fable then stopped flipping after its
+load), and RunPushBuffer's methods write as D3D's handler does, without the run-time guards; start-up says so
+(`[D3D] device given ...`), and says when `RECOMP_D3D_SW_METHODS` leaves a RunPushBuffer method out. With the device
+found, those guards check each write against the node D3D built, not against where the title keeps its data: the node
+in mapped guest memory, the return slot in the contiguous window, the fixup list anywhere in mapped guest memory
+(bounded: 64 KB an entry, 1 MB a list), each fixup inside the node's own pushbuffer, the pending count left alone on an
+unconfirmed layout when it does not read as one, a chain cut at 4096 nodes. Every refusal is printed (the first four
+of each kind) and counted by kind (`[GPU] software methods: ...; fixup lists refused N; slots refused N`):
 [pushbuffer-executor.md](pushbuffer-executor.md#d3d-software-methods).
 
 **Other XDK builds (XBA-105).** What cannot be read from the device's structure is looked up in one table in
