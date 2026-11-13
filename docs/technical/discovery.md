@@ -98,6 +98,45 @@ through `tools.compat heal`): its thread routines are invisible to the static an
 computed); each run records the next one as a `thread` entry, the next prepare seeds it and rebuilds, and the run
 after starts it; the third is not code, the gates refuse it, and the loop stops after that round without progress.
 
+## Static discovery at the first Prepare (XBA-137)
+
+Every entry above costs the player a crash or a wrong behaviour, then a re-prepare of minutes on a phone. So the
+analysis looks, before any run, for what a run would reveal (`tools/disasm/discovery.py`, run by
+`tools/disasm/functions.py`):
+
+| Pass (`functions.json` method) | Evidence | Gates |
+|---|---|---|
+| noreturn kernel calls | `call [HalReturnToFirmware / KeBugCheck(Ex) / PsTerminateSystemThread]` ends a body, so the function packed after it (the CRT's `_threadstartex` after `_endthreadex`) is no longer swallowed | - |
+| `callback_arg` | the routine pushed for `PsCreateSystemThread(Ex)` (start routine and StartContext1), `KeInitializeDpc`, `KeInitializeApc`, `NtQueueApcThread`, `KeInitializeInterrupt`, as `push imm32` or `push reg` after `mov reg, imm32` | in a gap: seed_from_log's (reads as a function body), on an instruction boundary, a prologue or right after padding; inside a body: a clean split (the instruction before ends a path, no branch or switch arm crosses, a prologue or a closed body) |
+| `ctor_vtable` | a constructor's `mov dword ptr [reg(+n)], vtable` with the vtable in a data section: its words that point into code | the same |
+| `rtti_vtable` | the methods MSVC RTTI names (`tools/rtti`) | the same |
+| `seh_funclet` | an exception frame's handlers and filters (`tools/recomp/seh_frames.py`): a funclet or resume target in the gap after its function extends the function; a funclet elsewhere becomes a function | the same |
+| switch tables | a table in `.rdata`/`.data` bounded by the `cmp; ja` before its dispatch, a byte-indexed two-level table, `mov reg, [idx*4 + table]; jmp reg`: the arms stay in their function and are never entries (`engine.py`) | every entry in the dispatch's section |
+| `gap_body` (level 2) | bytes in a gap, after padding or a terminator, nothing references (code reached through a computed address) | a closed body in the gap, a balanced stack, callee-saved registers saved before they are written, whole-argument `ret N`, none of what data decodes into, three instructions or a prologue, aligned after padding or a prologue when packed unaligned |
+
+The weak passes that were there before (table words, padding boundaries) take the same body gates at level 1 and up:
+a table word that names the middle of a path inside a function (the `mov ebp, esp` after `push ebp`, the `ret` after a
+`pop`) is no longer an alias, nor bytes in a gap that close by chance.
+
+**Switches**: `RECOMP_STATIC_DISCOVERY` (`2` default, `1` strong evidence only, `0` as before) and
+`RECOMP_STATIC_DISCOVERY_CAP` (at most this many percent more functions), or `tools.disasm --static-discovery /
+--discovery-cap` ([environment-variables.md](../runtime/environment-variables.md)). Off their default they change
+the prepare's stamp.
+
+**What each pass found** is in `analysis/disasm/summary.json` (`"discovery": {"level", "cap", "capped", "added":
+{pass: n}, "refused": {why: n}}`), on the Prepare's analysis line (`disassembled in 12 s: 22140 functions, static
+discovery +45 (callback_arg 3, gap_body 30, ...)`) and in `pack.json`'s `"analysis"` (`functions`, `by_method`,
+`static_discovery`), for the owner's library report.
+
+**Measured** on synthetic titles of our own (`tools/disasm/test_static_discovery.py`, run with `-s` for the report):
+every target of the corpus (vtable methods, callbacks, a thread routine after a noreturn call, gap code, code after
+`jmp $`, switch arms, an `__except` block) found at the first analysis in five layouts (int3, nop and zero padding,
+packed); 0 decoys seeded out of 7,160 decoy addresses over 40 decoy titles (words naming every non-entry byte of their
+code, floats, colours, strings, offsets near the image base); with static discovery off, the passes before it made 55
+of them functions or aliases, in 34 of the 40 titles. On the corpus the function count goes down 6 to 14 % and the
+bytes lifted move between -19 % and +1 %: aliases of decoys and of switch arms go, the missing targets come. End to end, `tools/compat/test_e2e.py::test_static_discovery_needs_no_round` boots a title whose run
+reaches only such code: one round, nothing to seed, `tools.compat recall` says `no miss`.
+
 Code: `src/kernel/recomp_discovery.c` (the writer, no dependency on the rest of the runtime), callers in
 `kernel_bridge.c` (threads) and `templates/new-game/src/recomp_manual.c` (indirect calls, untranslated instructions);
 test `tests/recomp_discovery`.
