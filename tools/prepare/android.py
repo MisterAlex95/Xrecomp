@@ -20,6 +20,7 @@ import sys
 import traceback
 
 from tools.prepare import compile as cc
+from tools.prepare import metrics
 from tools.prepare import pack
 from tools.prepare import toolkit
 from tools.prepare.progress import Reporter
@@ -54,7 +55,13 @@ class Run:
         self.layers = []
         self.toolkit_sha = ""         # tools/prepare/toolkit.py: what a stale pack is judged by
         self.data_dir = None
+        self.image = None             # a disc image source (XBA-126): the other images come out of it
         self.images = []              # [(disc path, objects)], other_images()
+        self.steps = metrics.Steps()  # what this run cost (XBA-128): pack.json "prepare"
+        self.compile_stats = {}
+        self.jobs = 0
+        self.sources = []
+        self.tools_peak_kb = 0
 
     # ── helpers ──
 
@@ -80,7 +87,7 @@ class Run:
     def identify(self):
         self.rep.progress(1, 0, "finding default.xbe")
         try:
-            xbe, self.data_dir, _ = self.m.find_xbe(self.a.source, self.work)
+            xbe, self.data_dir, self.image = self.m.find_xbe(self.a.source, self.work)
         except SystemExit as e:
             raise cc.StepError("NO_XBE", str(e))
         # Our own copy, next to its analysis JSON (the tools look for
@@ -101,6 +108,8 @@ class Run:
         if self.stamp.get("xbe") != h or self.stamp.get("toolkit_sha256") != self.toolkit_sha:
             self.stamp = {}
             self.save_stamp(xbe=h, toolkit=self.toolkit, toolkit_sha256=self.toolkit_sha)
+        # Steps a killed or repeated Prepare finds done already (pack.json "prepare" "skipped", XBA-128).
+        self.steps.skipped = [k for k in ("parse", "disasm", "func_id", "abi", "lift", "link") if self.stamp.get(k)]
         self.xjson = os.path.join(self.work, "xbe", "default_analysis.json")
         if not (self.stamp.get("parse") and os.path.isfile(self.xjson)):
             rc, _ = self.procs.run_logged([self.py, "-m", "tools.xbe_parser", mine, "--json", self.xjson],
@@ -118,6 +127,9 @@ class Run:
         except ValueError as e:
             raise cc.StepError("BAD_PROFILE", "profiles: %s" % e)
         self.layers = self.profile["keys"] if self.profile else []
+        from tools.prepare import profiles
+        for line in profiles.xdk_report(self.ident, self.m.PROFILES):     # XBA-106
+            self.rep.progress(1, 99, line)
         self.rep.progress(1, 100, "%s (title ID %s)%s%s" % (self.info.get("title", "?"), self.tid,
                                                            ", title profile" if self.profile and self.profile["title"]
                                                            else "",
@@ -209,13 +221,17 @@ class Run:
             any(fn.endswith(".c") for fn in os.listdir(os.path.join(self.proj, "src", "title")))
         flags = cc.compile_flags(a.opt, self.m.ROOT, self.proj, self.tc.sysroot, has_profile, a.include_dir)
         jobs = a.jobs or cc.default_jobs(cc.mem_available(), os.cpu_count())
+        self.jobs, self.sources = jobs, sources
+        self.tools_peak_kb = metrics.children_peak_kb()     # the pipeline tools so far (disasm, lift, ...)
+        device_log = getattr(a, "device_log", None)
+        limit = (lambda: metrics.jobs_now(device_log, jobs)) if device_log else None
         self.rep.progress(4, 0, "compiling %d files, %d jobs, -O%s" % (len(sources), jobs, a.opt))
 
         def prog(done, total, now, eta):
             self.rep.progress(4, done * 100 // max(1, total), "%d/%d files (%d compiled)" % (done, total, now),
                               eta)
         self.objects, n = cc.compile_all(sources, flags, self.tc, os.path.join(self.work, "obj"), jobs,
-                                         log=self.log, on_progress=prog)
+                                         log=self.log, on_progress=prog, limit=limit, stats=self.compile_stats)
         self.rep.progress(4, 100, "%d files, %d compiled" % (len(sources), n))
         self.compiled = n
 
@@ -224,15 +240,16 @@ class Run:
         test), each analysed, lifted and compiled in <work>/images/<path>/ with
         this run's toolchain; make_pack links one library each. An image that
         fails is left out (default.xbe still runs; its launch then exits as
-        before). Only from a folder: a disc image source has no other files here."""
-        if not self.data_dir or getattr(self.a, "no_images", False):
+        before). From a folder, or from a disc image (XBA-126: the named XBEs
+        are copied out of it, nothing else); a lone default.xbe has no others."""
+        disc = self.data_dir or self.image
+        if not disc or getattr(self.a, "no_images", False):
             return
         import re
-        from tools.triage import _named_xbes, _xbes_in_folder
+        from tools.triage import _named_xbes, disc_xbes
         with open(self.xbe, "rb") as f:
             named = _named_xbes(f.read())
-        others = [(rel, p) for rel, p in _xbes_in_folder(self.data_dir)
-                  if rel.lower() != "default.xbe" and os.path.basename(rel).lower() in named]
+        others = [(rel, p) for rel, p in disc_xbes(disc, self.work, named) if rel.lower() != "default.xbe"]
         for rel, p in others[:IMAGES_MAX]:
             sub_a = copy.copy(self.a)
             sub_a.source = p
@@ -303,6 +320,9 @@ class Run:
                                   toolkit_sha256=self.toolkit_sha)
             if images:
                 meta["images"] = images
+            # What this run cost (XBA-128): step times, compile peak RSS, sizes, the device's thermal samples.
+            meta["prepare"] = metrics.summary(self.steps, self.compile_stats, self.sources, self.objects, self.jobs,
+                                              a.opt, part, getattr(a, "device_log", None), self.tools_peak_kb)
             try:
                 pack.publish(packs, self.tid, meta)
             except OSError as e:
@@ -337,12 +357,13 @@ def run(a, host):
     signal.signal(signal.SIGINT, on_signal)
     signal.signal(signal.SIGTERM, on_signal)
     try:
-        r.identify()
-        r.analyse()
-        r.lift()
-        r.compile()
-        r.other_images()
-        final = r.make_pack()
+        st = r.steps
+        st.run("identify", r.identify)
+        st.run("analyse", r.analyse)
+        st.run("lift", r.lift)
+        st.run("compile", r.compile)
+        st.run("images", r.other_images)
+        final = st.run("pack", r.make_pack)
         rep.ok(final)
         return 0
     except cc.Cancelled as e:

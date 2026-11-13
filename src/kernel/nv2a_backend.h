@@ -91,6 +91,16 @@ typedef struct {
      * nv2a_backend_texture_bytes() / 6 apart). Zero in a struct a back end
      * builds itself means: no palette, no border, not a cube. */
     uint32_t palette, border, border_color, cube;
+    /* SET_TEXTURE_CONTROL0 as sent: MIN_LOD_CLAMP bits 18-29 and
+     * MAX_LOD_CLAMP bits 6-17, 4.8 fixed point (xemu). The LOD bias is in
+     * `filter` bits 0-12, signed 5.8. 0 in a struct a back end builds
+     * itself: level 0 only. */
+    uint32_t control0;
+    /* A volume (FORMAT DIMENSIONALITY 3): depth slices (BASE_SIZE_P), 0 or
+     * 1 for a 2D texture; addr_p the third axis' wrap mode (ADDRESS bits
+     * 16-19). Swizzled volumes are one 3D Morton order per level
+     * (xbox_swizzle_offset_3d), each level halving all three sizes. */
+    uint32_t depth, addr_p;
 } Nv2aTexture;
 
 typedef struct {
@@ -226,6 +236,33 @@ typedef struct {
     uint32_t offset, type, size, stride;
 } Nv2aRawAttr;
 
+/* A fixed-function batch for a back end's generated vertex shader
+ * (Nv2aProgramBatch.ffp, RECOMP_GPU_FFP=1; XBA-134). What ffp_vertex and
+ * lit_color in nv2a_pb_exec.c compute, as state the shader is built from;
+ * the numbers are in Nv2aProgramBatch.constants:
+ *   c[0..3]   the composite matrix's rows (clip = c[i] . v0)
+ *   c[4]      the viewport offset c[59] (xyz), added after the divide
+ *   c[5..7]   the model-view matrix's rows (eye = c[i].xyz . v0.xyz + c[i].w;
+ *             normals by c[i].xyz)
+ *   c[8]      scene ambient (rgb), material alpha (w)
+ *   c[9 + 4 i .. 12 + 4 i], light i of nlights: direction or eye-space
+ *             position (xyz) and range (w); attenuation (xyz); ambient;
+ *             diffuse.
+ * Inputs: v0 the position; v[nrm] the normal, v[col] the colour (D3DCOLOR
+ * as r, g, b, a), v[tex[s]] stage s's coordinates, each only when its bit is
+ * in Nv2aProgramBatch.streams (else: no normal -- unlit --, white, 0,0,0,1).
+ * The position comes out as a vertex program's oPos would: (clip.xyz /
+ * clip.w + c[4].xyz, clip.w), logical pixels. */
+typedef struct {
+    uint32_t streams;               /* = Nv2aProgramBatch.streams: inputs present */
+    uint32_t nrm, col, tex[4];      /* input slots */
+    uint32_t lit;                   /* SET_LIGHTING_ENABLE with a normal array */
+    uint32_t flip;                  /* RECOMP_FFP_FLIP_NORMALS */
+    uint32_t amb_vc, dif_vc;        /* SET_COLOR_MATERIAL: ambient / diffuse from v[col] */
+    uint32_t nlights;
+    uint32_t light_kind[8];         /* 1 infinite, else local (no spot cone) */
+} Nv2aFfpKey;
+
 typedef struct {
     const uint32_t (*ins)[4];
     uint32_t        ins_count;
@@ -251,7 +288,19 @@ typedef struct {
      * sends the same batch gathered (raw NULL). */
     const Nv2aRawAttr *raw;
     uint32_t        raw_first;
+    /* Non-NULL: no program (ins NULL, ins_count 0) but the fixed-function
+     * unit, as Nv2aFfpKey says; `hash` is equal for equal keys and differs
+     * from every program's. A back end that does not build such shaders
+     * returns 0 (the executor then transforms on the CPU). */
+    const Nv2aFfpKey *ffp;
 } Nv2aProgramBatch;
+
+/* Nv2aBatch.prim: what vertices[] / Nv2aProgramBatch.indices list. */
+enum {
+    NV2A_PRIM_TRIANGLES = 0,        /* a triangle list (count a multiple of 3) */
+    NV2A_PRIM_POINTS    = 1,        /* one vertex a point */
+    NV2A_PRIM_LINES     = 2         /* a line list: two vertices a segment */
+};
 
 typedef struct {
     const Nv2aVertex  *vertices;    /* triangle list: count is a multiple of 3 */
@@ -265,6 +314,16 @@ typedef struct {
     /* draw_program only (NULL in draw()): vertices and full are NULL then,
      * count is 0, and pixel is always set. */
     const Nv2aProgramBatch *program;
+    /* NV2A_BACKEND_CAP_POINTS_LINES only (0 otherwise): NV2A_PRIM_POINTS or
+     * _LINES, the vertex / index list then being points or segment pairs
+     * (strips and loops arrive as pairs). point_size: SET_POINT_SIZE in
+     * surface pixels (logical size times the anti-aliasing factor);
+     * point_sprite: SET_POINT_SMOOTH_ENABLE, which the NV2A uses for point
+     * sprites (xemu): every stage samples at the position inside the point,
+     * (0,0) at its top left, instead of the vertex's coordinates. */
+    uint32_t prim;
+    float    point_size;
+    uint32_t point_sprite;
 } Nv2aBatch;
 
 #define NV2A_BACKEND_CAP_PIXEL 0x1u
@@ -278,6 +337,14 @@ typedef struct {
  * INLINE_ARRAY) may arrive with their arrays as the title stored them
  * (Nv2aProgramBatch.raw) instead of gathered. */
 #define NV2A_BACKEND_CAP_RAW_VERTEX 0x8u
+/* With CAP_PIXEL: points and lines arrive as such (Nv2aBatch.prim) from
+ * every path (screen space, fixed function, vertex programs); without it
+ * they are not drawn (the CPU rasteriser draws none either) and counted as
+ * unsupported (nv2a_coverage.h). */
+#define NV2A_BACKEND_CAP_POINTS_LINES 0x10u
+/* With CAP_PIXEL: the back end samples volume textures (Nv2aTexture.depth);
+ * without it a stage holding one is counted as unsupported. */
+#define NV2A_BACKEND_CAP_VOLUME 0x20u
 
 typedef struct {
     /* flags: CLEAR_SURFACE bits (Z 0x1, stencil 0x2, colour 0xF0).
@@ -407,10 +474,18 @@ void nv2a_backend_register_with_present(const Nv2aBackend *backend,
  * NULL removes it. */
 void nv2a_pb_exec_set_screen_dump(int (*dump)(const char *path));
 
-/* Decode a whole texture to 0xAARRGGBB, row-major, width*height entries.
- * Handles every format the executor can sample (swizzled, linear, DXT).
- * Returns 0 if the format is not supported. */
+/* Decode a whole texture to 0xAARRGGBB, row-major, width*height entries
+ * (width*height*depth, slice after slice, for a volume: Nv2aTexture.depth >
+ * 1, swizzled formats only). Handles every format the executor can sample
+ * (swizzled, linear, DXT). Returns 0 if the format is not supported. */
 int nv2a_backend_decode_texture(const Nv2aTexture *tex, uint32_t *argb_out);
+
+/* Mip level `level` of a swizzled or DXT texture as a texture of its own:
+ * *out is *tex with the level's offset, width and height (halved per level,
+ * at least 1) and one level. NV2A levels follow one another, each in the
+ * base level's layout (its own Morton order or blocks). Returns 0 past the
+ * texture's levels or for a linear texture's levels past 0. */
+int nv2a_backend_texture_level(const Nv2aTexture *tex, uint32_t level, Nv2aTexture *out);
 
 /* Bytes of guest memory a texture occupies: every mip level it declares
  * (rounded to the NV2A's 128-byte face alignment) times six for a cube map,

@@ -1,9 +1,13 @@
 {
   "name": "XDK DirectSound (DSOUND)",
-  "applies": {"libraries": ["DSOUND", "DSOUNDLTCG"]},
+  "applies": {"libraries": ["DSOUND", "DSOUNDLTCG"],
+              "imports": {"ordinals": [175, 173, 44, 98], "min": 4}},
   "env_default": {"RECOMP_AC97_READY": "1"},
   "_why": [
     "DirectSoundCreate waits for the AC'97 codec: the emulated APU with a ready codec, else a hang after the USB",
-    "start and no flip. Seen on: Fable 4D5300D1, Burnout 3 4541005B (XDK 5849)."
+    "start and no flip. Seen on: Fable 4D5300D1, Burnout 3 4541005B (XDK 5849).",
+    "XBA-106: also a runtime default (recomp_xdk_defaults.c). applies.imports (MmLockUnlockBufferPages,",
+    "MmGetPhysicalAddress, the APU interrupt through HalGetInterruptVector/KeConnectInterrupt): a first guess, to",
+    "check on the library triage (XBA-63); D3D and XPP connect interrupts too, hence all four."
   ]
 }

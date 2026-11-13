@@ -29,6 +29,9 @@ void xbox_path_init(const char *game_dir, const char *save_dir)
     snprintf(s_path_save, sizeof s_path_save, "%s", save_dir ? save_dir : "(null)");
 }
 int xbox_PosixInstallMmioFaultHandler(void) { s_handler_calls++; return 0; }
+/* kernel_disc.c's (XBA-126): no disc image in these cases. */
+int xbox_disc_spec_is_image(const char *spec) { (void)spec; return 0; }
+int xbox_disc_mounted(void) { return 0; }
 /* android_log.c's, stubbed: on a device it would move this test's output to logcat. */
 static int s_log_calls;
 int xbox_android_log_init(void) { s_log_calls++; return 0; }

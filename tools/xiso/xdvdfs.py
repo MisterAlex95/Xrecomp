@@ -12,10 +12,17 @@ tree of fixed-size directory entries is not worth a dependency.
 
 Deliberately not implemented: writing, the video partition, and file timestamps.
 Nothing in the pipeline reads them.
+
+The image may be split into parts or compressed (.cso, .zso, .cci): tools/xiso/source.py reads its bytes (XBA-126).
 """
 
 import os
 import struct
+
+try:
+    from .source import Source, SourceError
+except ImportError:                     # loaded as a top-level module (tests/xiso/make_fixtures.py's sys.path)
+    from source import Source, SourceError
 
 SECTOR = 2048
 MAGIC = b"MICROSOFT*XBOX*MEDIA"
@@ -58,10 +65,36 @@ class XisoError(Exception):
     pass
 
 
+class _Reader:
+    """seek/read over a Source, for the code below that reads like a file."""
+
+    def __init__(self, src):
+        self.src = src
+        self.pos = 0
+
+    def seek(self, pos):
+        self.pos = pos
+
+    def read(self, n):
+        try:
+            data = self.src.read_at(self.pos, n)
+        except SourceError as e:
+            raise XisoError(str(e))
+        self.pos += len(data)
+        return data
+
+    def close(self):
+        self.src.close()
+
+
 class Xiso:
     def __init__(self, path):
         self.path = path
-        self._f = open(path, "rb")
+        try:
+            self.source = Source(path)
+        except SourceError as e:
+            raise XisoError(str(e))
+        self._f = _Reader(self.source)
         self.base = self._find_base()
         self._f.seek(self.base + 32 * SECTOR)
         desc = self._f.read(SECTOR)

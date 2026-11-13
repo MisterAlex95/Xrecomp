@@ -15,6 +15,7 @@
 #include "kernel_missing.h"
 #include "xbox_memory_layout.h"   /* RECOMP_TLS, g_fs_base */
 #include "xbox_seh.h"            /* recomp_divide_error raises #DE (XBA-112) */
+#include "recomp_discovery.h"     /* an unhandled #DE is recorded (XBA-129) */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1645,7 +1646,7 @@ VOID __stdcall xbox_AvSendTVEncoderOption(
         return;
 
     switch (Option) {
-    case AV_OPTION_QUERY_AVPACK:
+    case AV_QUERY_AV_CAPABILITIES:
         /* Pack type, video standard and refresh rate, in one word.
          *
          * D3D keys its display-mode table on all three: the row flags carry
@@ -1661,34 +1662,35 @@ VOID __stdcall xbox_AvSendTVEncoderOption(
         break;
 
     case AV_OPTION_QUERY_MODE:
-        /* Return current display mode */
+        /* The mode AvSetDisplayMode last set. */
         *Result = g_av_display_mode;
         break;
 
-    case AV_OPTION_QUERY_AV_CAPABILITIES:
-        /* Used to claim 480p, 720p and widescreen in bits of its own while
-         * the EEPROM said none: the same word as above now. */
-        *Result = xbox_AvCapabilities();
-        break;
-
-    case AV_OPTION_QUERY_ENCODER_TYPE:
+    case AV_QUERY_ENCODER_TYPE:
         /* Conexant CX25871 (common in retail Xboxes) */
         *Result = 4;
         break;
 
-    case AV_OPTION_QUERY_MODE_CAPS:
-        *Result = xbox_AvCapabilities();
-        break;
-
-    case AV_OPTION_SET_MODE:
-        g_av_display_mode = Param;
+    case AV_QUERY_CC_STATUS:
+    case AV_QUERY_MODE_TABLE_VERSION:
         *Result = 0;
         break;
 
-    case AV_OPTION_BLANK_SCREEN:
+    /* Settings of the TV encoder, which has nothing here to drive: closed
+     * captions, Macrovision, blanking, the flicker and luma filters, CGMS,
+     * widescreen signalling. None of them changes the display mode. */
     case AV_OPTION_MACROVISION_MODE:
+    case AV_OPTION_ENABLE_CC:
+    case AV_OPTION_DISABLE_CC:
+    case AV_OPTION_SEND_CC_DATA:
+    case AV_OPTION_BLANK_SCREEN:
+    case AV_OPTION_MACROVISION_COMMIT:
     case AV_OPTION_FLICKER_FILTER:
     case AV_OPTION_ZERO_MODE:
+    case AV_OPTION_ENABLE_LUMA_FILTER:
+    case AV_OPTION_GUESS_FIELD:
+    case AV_OPTION_CGMS:
+    case AV_OPTION_WIDESCREEN:
         *Result = 0;
         break;
 
@@ -1735,6 +1737,10 @@ VOID __stdcall xbox_AvSetDisplayMode(
  *   - Temperature sensor (0x98): CPU/board temperatures
  * ============================================================================ */
 
+/* The SMC's scratch register: HalWriteSMCScratchRegister and SMBus writes
+ * of command 0x1B store it, reads give it back. */
+static volatile ULONG s_smc_scratch;
+
 NTSTATUS __stdcall xbox_HalReadSMBusValue(
     UCHAR SlaveAddress, UCHAR CommandCode, BOOLEAN ReadWordValue, PULONG DataValue)
 {
@@ -1776,6 +1782,9 @@ NTSTATUS __stdcall xbox_HalReadSMBusValue(
             break;
         case SMC_CMD_ERROR_CODE:
             *DataValue = 0;  /* No error */
+            break;
+        case SMC_CMD_SCRATCH:
+            *DataValue = s_smc_scratch;   /* what was written (XBA-114) */
             break;
         default:
             xbox_log(XBOX_LOG_DEBUG, XBOX_LOG_HAL,
@@ -1823,7 +1832,9 @@ NTSTATUS __stdcall xbox_HalWriteSMBusValue(
         "HalWriteSMBusValue: slave=0x%02X cmd=0x%02X word=%d val=0x%X (ignored)",
         SlaveAddress, CommandCode, WriteWordValue, DataValue);
 
-    /* Writes to SMC (LED control, fan speed, etc.) are silently accepted */
+    if (SlaveAddress == SMC_SLAVE_ADDRESS && CommandCode == SMC_CMD_SCRATCH)
+        s_smc_scratch = DataValue;
+    /* Other writes to SMC (LED control, fan speed, etc.) are silently accepted */
     return STATUS_SUCCESS;
 }
 
@@ -2247,5 +2258,6 @@ void recomp_divide_error(uint32_t va, uint32_t divisor)
             va, divisor ? "quotient overflow" : "divide by zero", code,
             g_eax, g_edx, divisor, g_esp, why);
     fflush(stderr);
+    recomp_discovery_exception(va, code, divisor ? "quotient overflow" : "divide by zero");   /* XBA-129 */
     xbox_KeBugCheckEx(0x1E, code, va, 0, 0);
 }

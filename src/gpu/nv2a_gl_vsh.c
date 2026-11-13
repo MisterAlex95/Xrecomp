@@ -269,6 +269,9 @@ size_t nv2a_gl_vsh_body(const uint32_t (*ins)[4], uint32_t count, uint32_t flags
     return nv2a_gl_vsh_body_fmt(ins, count, flags, 0, buf, cap, info_out);
 }
 
+static size_t vsh_emit(Sb b, const char *prog, Nv2aGlVshInfo info, uint32_t flags,
+                       uint64_t formats, Nv2aGlVshInfo *info_out);
+
 size_t nv2a_gl_vsh_body_fmt(const uint32_t (*ins)[4], uint32_t count, uint32_t flags,
                             uint64_t formats, char *buf, size_t cap,
                             Nv2aGlVshInfo *info_out)
@@ -328,6 +331,90 @@ size_t nv2a_gl_vsh_body_fmt(const uint32_t (*ins)[4], uint32_t count, uint32_t f
         return 0;
     info.count = n;
 
+    return vsh_emit(b, prog, info, flags, formats, info_out);
+}
+
+size_t nv2a_gl_vsh_ffp_body(const Nv2aFfpKey *k, uint32_t flags, uint64_t formats,
+                            char *buf, size_t cap)
+{
+    static char prog[16384];
+    Sb b = { buf, cap, 0, 0 }, body = { prog, sizeof prog, 0, 0 };
+    Nv2aGlVshInfo info;
+    uint32_t st, i, has_col = (k->streams >> k->col) & 1;
+
+    memset(&info, 0, sizeof info);
+    if (!cap)
+        return 0;
+    buf[0] = 0;
+    info.inputs = k->streams & 0xFFFFu;
+    /* ffp_batch_vertex: clip = M v0; oPos = (clip.xyz / w + offset, w). */
+    sb(&body, "  vec4 P = v0;\n"
+              "  vec4 clip = vec4(c[0].x * P.x + c[0].y * P.y + c[0].z * P.z + c[0].w * P.w,\n"
+              "                   c[1].x * P.x + c[1].y * P.y + c[1].z * P.z + c[1].w * P.w,\n"
+              "                   c[2].x * P.x + c[2].y * P.y + c[2].z * P.z + c[2].w * P.w,\n"
+              "                   c[3].x * P.x + c[3].y * P.y + c[3].z * P.z + c[3].w * P.w);\n"
+              "  R12 = vec4(clip.xyz / clip.w + c[4].xyz, clip.w);\n");
+    if (has_col)
+        sb(&body, "  vec4 vc = v%u;\n", k->col);
+    if (k->lit && ((k->streams >> k->nrm) & 1)) {
+        /* ffp_batch_lit. */
+        sb(&body, "  vec4 N = v%u;\n"
+                  "  vec3 e = vec3(c[5].x * P.x + c[5].y * P.y + c[5].z * P.z + c[5].w,\n"
+                  "                c[6].x * P.x + c[6].y * P.y + c[6].z * P.z + c[6].w,\n"
+                  "                c[7].x * P.x + c[7].y * P.y + c[7].z * P.z + c[7].w);\n"
+                  "  vec3 n = vec3(c[5].x * N.x + c[5].y * N.y + c[5].z * N.z,\n"
+                  "                c[6].x * N.x + c[6].y * N.y + c[6].z * N.z,\n"
+                  "                c[7].x * N.x + c[7].y * N.y + c[7].z * N.z);\n"
+                  "  float len = sqrt(n.x * n.x + n.y * n.y + n.z * n.z);\n"
+                  "  if (len > 1e-8) n /= len;\n", k->nrm);
+        if (k->flip)
+            sb(&body, "  if (n.x * e.x + n.y * e.y + n.z * e.z > 0.0) n = -n;\n");
+        sb(&body, "  vec4 col = vec4(c[8].rgb, 0.0);\n"
+                  "  vec3 l, amb, dif; float d, att, ndl;\n");
+        for (i = 0; i < k->nlights && i < 8; i++) {
+            uint32_t base = 9 + 4 * i;
+            if (k->light_kind[i] == 1) {
+                sb(&body, "  l = c[%u].xyz; att = 1.0;\n", base);
+                sb(&body, "  {\n");
+            } else {
+                sb(&body, "  l = c[%u].xyz - e;\n"
+                          "  d = sqrt(l.x * l.x + l.y * l.y + l.z * l.z);\n"
+                          "  if (!(d > c[%u].w && c[%u].w > 0.0)) {\n"
+                          "    if (d > 1e-8) l /= d;\n"
+                          "    att = c[%u].x + c[%u].y * d + c[%u].z * d * d;\n"
+                          "    att = att > 1e-8 ? 1.0 / att : 1.0;\n",
+                   base, base, base, base + 1, base + 1, base + 1);
+            }
+            sb(&body, "    ndl = max(n.x * l.x + n.y * l.y + n.z * l.z, 0.0);\n"
+                      "    amb = c[%u].rgb; dif = c[%u].rgb;\n", base + 2, base + 3);
+            if (has_col && k->amb_vc)
+                sb(&body, "    amb *= vc.rgb;\n");
+            if (has_col && k->dif_vc)
+                sb(&body, "    dif *= vc.rgb;\n");
+            sb(&body, "    col.rgb += att * (amb + dif * ndl);\n  }\n");
+        }
+        sb(&body, "  col.a = %s;\n", has_col && k->dif_vc ? "vc.a" : "c[8].w");
+        sb(&body, "  o_d0 = clamp(col, 0.0, 1.0);\n");
+    } else {
+        sb(&body, "  o_d0 = clamp(%s, 0.0, 1.0);\n", has_col ? "vc" : "vec4(1.0)");
+    }
+    sb(&body, "  o_d1 = vec4(0.0);\n");          /* ffp_vertex leaves d1 zero */
+    for (st = 0; st < 4; st++)
+        if ((k->streams >> k->tex[st]) & 1)
+            sb(&body, "  o_t%u = v%u;\n", st, k->tex[st]);
+    if (body.overflow)
+        return 0;
+    return vsh_emit(b, prog, info, flags, formats, NULL);
+}
+
+/* The shader around a body (`prog`, which reads v0..v15 and writes R12, o_d0,
+ * o_d1, o_fog, o_t0..o_t3): constants, inputs (info.inputs, `formats`), the
+ * ending `flags` asks for. Shared by programs and the fixed-function body. */
+static size_t vsh_emit(Sb b, const char *prog, Nv2aGlVshInfo info, uint32_t flags,
+                       uint64_t formats, Nv2aGlVshInfo *info_out)
+{
+    uint32_t k;
+
     sb(&b, "uniform vec4 c[192];\n");
     for (k = 0; k < 16; k++) {
         uint32_t f = (uint32_t)(formats >> (4 * k)) & 3u;
@@ -344,7 +431,7 @@ size_t nv2a_gl_vsh_body_fmt(const uint32_t (*ins)[4], uint32_t count, uint32_t f
         for (k = 0; k < 8; k++)
             sb(&b, "out vec4 %s;\n", nv2a_gl_vsh_capture_names[k]);
     } else {
-        sb(&b, "uniform vec4 u_vp;\nuniform vec4 u_xf;\n%s", k_fog);
+        sb(&b, "uniform vec4 u_vp;\nuniform vec4 u_xf;\nuniform float u_psize;\n%s", k_fog);
         sb(&b, "out vec4 v_d0;\nout vec4 v_d1;\nout float v_fog;\n"
                "out vec4 v_t0;\nout vec4 v_t1;\nout vec4 v_t2;\nout vec4 v_t3;\n");
     }
@@ -410,7 +497,8 @@ size_t nv2a_gl_vsh_body_fmt(const uint32_t (*ins)[4], uint32_t count, uint32_t f
         if (flags & NV2A_GL_VSH_CLIP_DISTANCE)
             sb(&b, "  gl_ClipDistance[0] = (p.z - u_xf.z) * p.w;\n");
         sb(&b, "  v_d0 = vsh_sat(o_d0); v_d1 = vsh_sat(o_d1); v_fog = vsh_fog(o_fog.x);\n"
-               "  v_t0 = o_t0; v_t1 = o_t1; v_t2 = o_t2; v_t3 = o_t3;\n");
+               "  v_t0 = o_t0; v_t1 = o_t1; v_t2 = o_t2; v_t3 = o_t3;\n"
+               "  gl_PointSize = u_psize;\n");
     }
     sb(&b, "}\n");
     if (b.overflow)

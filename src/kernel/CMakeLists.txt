@@ -10,6 +10,7 @@ set(KERNEL_SOURCES
     kernel_rtl.c
     kernel_memory.c
     kernel_file.c
+    kernel_disc.c
     kernel_missing.c
     kernel_thread.c
     kernel_sync.c
@@ -28,15 +29,19 @@ set(KERNEL_SOURCES
     kernel_wait_stats.c
     xbox_memory_layout.c
     xbox_seh.c
+    xbox_seh_fault.c
     guest_vmem.c
     icall_feedback.c
     recomp_trace.c
     recomp_discovery.c
+    recomp_xdk_defaults.c
+    recomp_smc.c
     recomp_stack_switch.c
     recomp_status.c
     recomp_diff.c
     nv2a_pb_scan.c
     nv2a_pb_exec.c
+    nv2a_coverage.c
     nv2a_flip_hold.c
     nv2a_vsh_interp.c
     nv2a_combiner.c
@@ -68,6 +73,15 @@ if(MSVC)
     target_compile_definitions(xbox_kernel PRIVATE _CRT_SECURE_NO_WARNINGS)
 else()
     target_compile_options(xbox_kernel PRIVATE -Wall -Wextra -Wno-unused-parameter -O2)
+endif()
+
+# D: read in place from a disc image (kernel_disc.c, XBA-126): src/xiso's
+# sources (plain, split, CSO / ZSO / CCI). POSIX only, as src/xiso is.
+if(NOT WIN32)
+    if(NOT TARGET xiso)
+        add_subdirectory(${XBOXRECOMP_SRC_DIR}/xiso ${CMAKE_CURRENT_BINARY_DIR}/xiso)
+    endif()
+    target_link_libraries(xbox_kernel PUBLIC xiso)
 endif()
 
 # The trapped-MMIO dispatch (xbox_VehMmioFault, xbox_PosixMmioFault) routes

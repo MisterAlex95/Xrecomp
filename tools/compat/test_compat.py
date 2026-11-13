@@ -39,7 +39,7 @@ def test_a_stack_switch_the_runtime_cannot_carry_is_named():
              "why": "resumes where no context is parked and no function starts"},
             {"t": "icall", "va": "0x00023481", "ret": "0x00023454"}]
     expect = ("; stack switch at 0x00023454 to 0x00023481: resumes where no context is parked and no function"
-              " starts (XBA-101)")
+              " starts")
     assert classify(st, [], None, 60, 60, "", disc)[1] == "no flip" + expect
     assert classify(st, [], ("signal", 6), 20, 60, "", disc)[1] == "crash (signal 6)" + expect
 
@@ -97,6 +97,48 @@ def test_a_called_stub_is_named_as_a_blocker():
     assert "stub" not in classify(playing(40), [8000], ("signal", 11), 40, 60, "", disc)[1]
     # Only stubs: no "last discovery: stub None".
     assert classify(st, [], None, 60, 60, "", disc[1:2])[1] == "no flip; calls stub ordinal 136 (KeRemoveQueue)"
+
+
+def test_code_written_or_run_at_run_time_is_named_and_counted():
+    # XBA-118: {"t":"smc"} records, after the other causes, whatever the stage; the count in the summary.
+    disc = [{"t": "icall", "va": "0x00045678"},
+            {"t": "smc", "va": "0x00400000", "kind": "exec_outside_image", "ret": "0x00011234", "where": "heap",
+             "bytes": "5589E583EC10C390"},
+            {"t": "smc", "va": "0x00012000", "kind": "code_write", "at": "0x00012345", "section": ".text",
+             "by": "a store"}]
+    stage, blocker, summary = classify(playing(90), [8000], None, 90, 60, "", disc)
+    assert stage == "sustained" and summary["smc"] == 2
+    assert blocker == ("code written or run at run time x2: exec_outside_image 0x00400000 (heap, from 0x00011234),"
+                       " code_write 0x00012345 (.text)")
+    st = [line(t, threads=2) for t in range(1000, 60001, 1000)]
+    assert classify(st, [], None, 60, 60, "", disc)[1] == \
+        "no flip; last discovery: smc 0x00012000; " + blocker
+    assert classify(st, [], None, 60, 60, "", disc[:1])[2]["smc"] == 0
+    many = [dict(disc[2], at="0x0001%04X" % i) for i in range(5)]
+    assert classify(playing(90), [8000], None, 90, 60, "", many)[1].endswith(", +2 more")
+    # The matrix counts the titles that have any.
+    from tools.compat.__main__ import matrix
+    md = matrix([{"source": "A", "stage": "boots", "smc": 3}, {"source": "B", "stage": "boots"}])
+    assert md.startswith("**2 titles.** boots: 2 (100 %); code written or run at run time (XBA-118): 1")
+
+
+def test_what_the_renderer_could_not_draw_is_named():
+    # XBA-120: the status file's "unsupported" (src/kernel/nv2a_coverage.h)
+    # names what the renderer met and could not draw, most used first.
+    st = [line(t, flips=t // 16, frames=1, lit=0, threads=3) for t in range(1000, 30001, 1000)]
+    st[-1]["unsupported"] = {"points": 12, "texture format 0x26 LU_IMAGE_A8CR8CB8Y8": 40,
+                             "volume texture": 3, "logic op": 1}
+    stage, blocker, summary = classify(st, [8000], None, 30, 60)
+    assert stage == "boots"
+    assert blocker == ("nothing lit on screen; renderer lacks texture format 0x26 LU_IMAGE_A8CR8CB8Y8"
+                       " (40 batches), points (12 batches), volume texture (3 batches), +1 more")
+    assert summary["unsupported"]["points"] == 12
+    # Kept in the summary of a sustained run (no blocker), not beside a crash.
+    good = playing(40)
+    good[-1]["unsupported"] = {"lines": 2}
+    stage, blocker, summary = classify(good, [8000], None, 40, 30)
+    assert stage == "sustained" and blocker is None and summary["unsupported"] == {"lines": 2}
+    assert "renderer" not in classify(good, [8000], ("signal", 11), 40, 60)[1]
 
 
 def test_a_launch_of_another_image_is_named():
@@ -217,9 +259,16 @@ def test_guest_exceptions_are_named():
           "[EXIT] KeBugCheckEx 0x0000001E\n")
     st = [{"ms": 1000, "flips": 0, "draws": 0, "pad_reads": 0}]
     blocker = classify(st, [], ("code", 30), 3, 60, de)[1]
-    assert blocker == ("exited with code 30 after 3 s; divide error at 0x00012340: divide by zero "
-                       "(no guest handler took it)"), blocker
+    assert blocker == "exited with code 30 after 3 s; guest exception 0xC0000094 at 0x00012340: divide by zero", blocker
     seh = "  [SEH] unhandled exception 0xC0000005 at 0x00045678 (record 0x0017FE00); execution continues after the raise\n"
-    assert classify(st, [], None, 60, 60, seh)[1] == "no flip; unhandled guest exception 0xC0000005 at 0x00045678"
+    assert classify(st, [], None, 60, 60, seh)[1] == \
+        "no flip; guest exception 0xC0000005 at 0x00045678: no guest handler took it"
     crash = classify(st, [], ("signal", 11), 40, 60, seh + "SIGSEGV at 0x1234\n")[1]
-    assert crash.startswith("crash (signal 11): SIGSEGV") and "unhandled guest" not in crash, crash
+    assert crash.startswith("crash (signal 11): SIGSEGV") and "guest exception" not in crash, crash
+    # The discovery file's "exception" entries (XBA-129) win over the log, and name a crash too (a host
+    # fault no guest handler took, XBA-132, ends in one).
+    disc = [{"t": "exception", "va": "0x00040000", "code": "0xC0000005",
+             "why": "host fault on a guest address no guest handler took"}]
+    crash = classify(st, [], ("signal", 11), 40, 60, "SIGSEGV at 0x1234\n", disc)[1]
+    assert crash.endswith("; guest exception 0xC0000005 at 0x00040000: host fault on a guest address no guest handler"
+                          " took"), crash

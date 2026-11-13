@@ -19,3 +19,6 @@ if(NOT WIN32)
                      ${CMAKE_CURRENT_SOURCE_DIR}/../../tools/conformance/test.xbe)
     set_tests_properties(kernel_ksync_thread_id PROPERTIES TIMEOUT 120)
 endif()
+# The A/B switch of XBA-133: no concurrency limit on KQUEUEs.
+add_test(NAME kernel_ksync_nolimit_test COMMAND kernel_ksync_test)
+set_tests_properties(kernel_ksync_nolimit_test PROPERTIES ENVIRONMENT "RECOMP_QUEUE_LIMIT=0")

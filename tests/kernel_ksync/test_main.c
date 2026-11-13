@@ -19,6 +19,11 @@
  *   4. KQUEUE: insert/insert-head/remove/rundown, SignalState, a zero timeout
  *      on an empty queue, a remover on another thread woken by an insert, and
  *      esp exact after the 3-argument KeRemoveQueue.
+ *   4b. XBA-133, the concurrency limit (MaximumCount 1): while the thread
+ *      that took an entry runs guest code it counts in CurrentCount and a
+ *      second remover gets nothing; once that thread blocks in a kernel call
+ *      the second one gets the next entry. RECOMP_QUEUE_LIMIT=0 (second
+ *      ctest entry): every remover gets one, as before.
  *   5. KDEVICE_QUEUE: busy/idle, by-key order, remove-entry.
  *   6. ERWLOCK: init values, readers share, a writer waits for them and
  *      readers wait for it; 4 threads mixing both keep exclusion.
@@ -385,6 +390,11 @@ static void test_queue(void)
 
     {
         HANDLE th;
+        /* This thread took entries above, so it is one of the queue's
+         * running threads; with MaximumCount 1 its insert would not let
+         * the remover go until it blocks (XBA-133). A rundown ends that. */
+        a[0] = QUEUE_VA;
+        call(S_QRUNDOWN, a, 1);
         remover_got = 0;
         th = CreateThread(NULL, 0, queue_remover, NULL, 0, NULL);
         Sleep(50);
@@ -392,9 +402,77 @@ static void test_queue(void)
         a[1] = e0; call(S_QINS, a, 2);
         r = WaitForSingleObject(th, 5000);
         CloseHandle(th);
-        snprintf(d, sizeof d, "wait %u got 0x%X", r, remover_got);
+        snprintf(d, sizeof d, "wait %u got 0x%X current %d", r, remover_got,
+                 (int32_t)M32(QUEUE_VA + 0x18));
         check(r == 0 && remover_got == e0, "KeInsertQueue wakes the blocked remover with the entry", d);
     }
+}
+
+/* ═══════════════════ 4b. Concurrency limit ═══════════════════ */
+
+static volatile int worker_took, worker_go_block, worker_blocked;
+static volatile uint32_t worker_entry;
+
+static DWORD WINAPI queue_worker(LPVOID p)
+{
+    uint32_t a[3] = { QUEUE_VA, 0, 0 };
+    (void)p;
+    become_thread(6);
+    worker_entry = call(S_QREM, a, 3);
+    worker_took = 1;
+    while (!worker_go_block)            /* "guest code": no kernel call */
+        Sleep(1);
+    worker_blocked = 1;
+    *(int64_t *)(mem + TIMEOUT_VA + 8) = -3000000;   /* 300 ms */
+    a[0] = 0 /* KernelMode */; a[1] = 0; a[2] = TIMEOUT_VA + 8;
+    call(S_DELAY, a, 3);
+    return 0;
+}
+
+static void test_queue_limit(void)
+{
+    char d[160];
+    uint32_t a[3], r, e0 = QENT_VA, e1 = QENT_VA + 8;
+    int limit = getenv("RECOMP_QUEUE_LIMIT") == NULL;
+    HANDLE th;
+    DWORD t0;
+
+    become_thread(0);
+    a[0] = QUEUE_VA; a[1] = 1;
+    call(S_QINIT, a, 2);
+    a[1] = e0; call(S_QINS, a, 2);
+    a[1] = e1; call(S_QINS, a, 2);
+    worker_took = worker_go_block = worker_blocked = 0;
+    th = CreateThread(NULL, 0, queue_worker, NULL, 0, NULL);
+    for (t0 = 0; !worker_took && t0 < 5000; t0++)
+        Sleep(1);
+    snprintf(d, sizeof d, "entry 0x%X current %d", worker_entry, (int32_t)M32(QUEUE_VA + 0x18));
+    check(worker_entry == e0 && M32(QUEUE_VA + 0x18) == (limit ? 1u : 1u),
+          "a worker takes an entry and counts in CurrentCount", d);
+
+    *(int64_t *)(mem + TIMEOUT_VA) = -1000000;       /* 100 ms */
+    a[0] = QUEUE_VA; a[1] = 0; a[2] = TIMEOUT_VA;
+    r = call(S_QREM, a, 3);
+    snprintf(d, sizeof d, "got 0x%X", r);
+    if (limit) {
+        check(r == 0x102u, "while it runs, a second remover gets nothing (MaximumCount 1)", d);
+        worker_go_block = 1;
+        for (t0 = 0; !worker_blocked && t0 < 5000; t0++)
+            Sleep(1);
+        t0 = GetTickCount();
+        a[2] = 0;                                     /* forever */
+        r = call(S_QREM, a, 3);
+        t0 = GetTickCount() - t0;
+        snprintf(d, sizeof d, "got 0x%X after %lu ms", r, (unsigned long)t0);
+        check(r == e1 && t0 < 250, "once it blocks in a kernel call, the next entry goes", d);
+    } else {
+        check(r == e1, "RECOMP_QUEUE_LIMIT=0: a second remover gets one at once", d);
+        worker_go_block = 1;
+    }
+    WaitForSingleObject(th, 5000);
+    CloseHandle(th);
+    a[0] = QUEUE_VA;
+    call(S_QRUNDOWN, a, 1);
 }
 
 /* ═══════════════════ 5. KDEVICE_QUEUE ═══════════════════ */
@@ -695,6 +773,7 @@ int main(void)
     test_slist();
     test_current_thread();
     test_queue();
+    test_queue_limit();
     test_device_queue();
     test_rwlock();
     test_apc();

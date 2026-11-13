@@ -264,6 +264,11 @@ static volatile uint64_t s_tick_ns;         /* the controller thread's last pass
 static volatile long     s_catchups;
 #define OHCI_OVERDUE_NS  (4ull * OHCI_TICK_MS * 1000000ull)
 
+/* Tests only (xbox_OhciHoldControllerForTest, XBA-133): the controller
+ * thread stands still between passes while s_test_hold is set, and says so
+ * in s_test_held; a held controller is overdue by definition. */
+static volatile int s_test_hold, s_test_held;
+
 static int list_try(void)
 {
     return !__atomic_exchange_n(&s_list_busy, 1, __ATOMIC_ACQ_REL);
@@ -1313,8 +1318,9 @@ void xbox_OhciCatchUp(void)
     }
     if (!on)
         return;
-    if (xbox_HostNowNs() - __atomic_load_n(&s_tick_ns, __ATOMIC_RELAXED)
-        < OHCI_OVERDUE_NS)
+    if (!__atomic_load_n(&s_test_held, __ATOMIC_ACQUIRE)
+        && xbox_HostNowNs() - __atomic_load_n(&s_tick_ns, __ATOMIC_RELAXED)
+           < OHCI_OVERDUE_NS)
         return;
     hc = &s_hc[s_device_hc];
     control = hc->reg[HcControl / 4];
@@ -1343,6 +1349,20 @@ void xbox_OhciCatchUp(void)
         xbox_IrqSetHandler(XBOX_IRQ_OHCI, ohci_isr_on_holder);
         xbox_IrqRaiseHere(XBOX_IRQ_OHCI);
     }
+}
+
+int xbox_OhciHoldControllerForTest(int hold)
+{
+    int t;
+    __atomic_store_n(&s_test_hold, hold ? 1 : 0, __ATOMIC_RELEASE);
+    if (!hold)
+        return 1;
+    for (t = 0; t < 2000; t++) {         /* a pass is OHCI_TICK_MS apart */
+        if (__atomic_load_n(&s_test_held, __ATOMIC_ACQUIRE))
+            return 1;
+        Sleep(1);
+    }
+    return 0;
 }
 
 static DWORD WINAPI ohci_thread(LPVOID unused)
@@ -1386,6 +1406,11 @@ static DWORD WINAPI ohci_thread(LPVOID unused)
         uint32_t control, enable, status;
 
         Sleep(OHCI_TICK_MS);
+        if (__atomic_load_n(&s_test_hold, __ATOMIC_ACQUIRE)) {
+            __atomic_store_n(&s_test_held, 1, __ATOMIC_RELEASE);
+            continue;
+        }
+        __atomic_store_n(&s_test_held, 0, __ATOMIC_RELEASE);
         __atomic_store_n(&s_tick_ns, xbox_HostNowNs(), __ATOMIC_RELAXED);
         control = hc->reg[HcControl / 4];
         enable  = hc->reg[HcInterruptEnable / 4];
@@ -1639,8 +1664,12 @@ void xbox_OhciInit(void)
     /* Opt-in. Without a descriptor list walker behind it a driver that finds
      * a port has nothing to enumerate, so this must not change how a title
      * behaves until the rest of it exists. */
-    if (!getenv("RECOMP_USB"))
-        return;
+    {
+        /* "0" is off too (XBA-106: on by default through recomp_xdk_defaults). */
+        const char *on = getenv("RECOMP_USB");
+        if (!on || !*on || *on == '0')
+            return;
+    }
 
     s_enabled = 1;
     s_trace   = getenv("RECOMP_USB_TRACE") != NULL;

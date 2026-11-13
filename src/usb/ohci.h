@@ -59,6 +59,12 @@ int  xbox_OhciWalkListForTest(uint32_t ed, uint32_t *done_head);
  * return 1 if FrameNumberOverflow was raised. */
 int  xbox_OhciFrameAdvanceForTest(uint32_t from, uint32_t frames, uint32_t *to);
 
+/* Tests only: hold (1) or release (0) the controller thread between two
+ * passes, so that it is deterministically overdue for xbox_OhciCatchUp and
+ * does not race it. Holding returns 1 once the thread stands still, 0 if it
+ * did not within 2 s (it is not running). */
+int  xbox_OhciHoldControllerForTest(int hold);
+
 /* The lists serviced from the guest's side when the controller thread is
  * overdue; kernel_hal.c calls it at a guest thread's release point.
  * RECOMP_OHCI_CATCHUP=0 turns it off (docs/runtime/environment-variables.md). */

@@ -22,7 +22,9 @@
     <string name="STATE_WRONG">Wrong game</string>
 
     <string name="NOT_A_GAME_FOLDER">This folder holds no default.xbe: it is not an extracted Xbox disc. Choose the folder that contains default.xbe.</string>
-    <string name="NOT_AN_ISO">%1$s is not a disc image: choose a file ending in .iso or .xiso.</string>
+    <string name="NOT_AN_ISO">%1$s is not a disc image: choose a .iso, .xiso, .cso, .zso or .cci file, or the parts of a split image.</string>
+    <string name="SPLIT_PARTS_INCOMPLETE">These files are not one whole disc image: %1$s. For a split image, choose every part (Game.1.iso, Game.2.iso, …) at once.</string>
+    <string name="READING_IN_PLACE">Reading the disc image in place…</string>
     <string name="NOT_A_GAME_IMAGE">Not an Xbox disc image, or no default.xbe in it: %1$s</string>
     <string name="WRONG_GAME">This is not the game this app was made for (another game, or another region): its default.xbe does not match. Nothing was changed.</string>
     <string name="WRONG_GAME_HOME">This folder\'s default.xbe is not the game this app was made for (another game, or another region). Choose the right game in Game data.</string>
@@ -58,6 +60,7 @@
     <string name="SIZE_COUNTING">counting…</string>
     <string name="SOURCE_IN_PLACE">Read in place</string>
     <string name="SOURCE_IMPORTED">Imported copy (app storage)</string>
+    <string name="SOURCE_IMAGE">Disc image read in place, nothing copied (%1$s, %2$s, %3$s)</string>
     <string name="SOURCE_CFG">Set in recomp.cfg</string>
 
     <!-- Welcome -->
@@ -239,6 +242,12 @@
     <string name="HOME_PREPARE_AGAIN_NOTE">The game crashed, and this run found code the last preparation missed. Prepare again takes it in, then starts the game.</string>
     <string name="HOME_NEEDS_FIX">Crashed · needs a fix</string>
     <string name="HOME_NEEDS_FIX_NOTE">The game crashed and preparing again cannot help: %1$s.</string>
+    <string name="HOME_IMPROVING">Improving in the background · %1$s</string>
+    <string name="HOME_IMPROVING_NOTE">The last run met code the preparation had missed: the game is prepared again with it, in the background. You can play meanwhile; the next start uses the new version. Stop ends it.</string>
+    <string name="HOME_IMPROVE_NOTE">The last run met code the preparation had missed (%1$d). Prepare again takes it in, in the background; Play stays.</string>
+    <string name="SELF_HEAL_ROUND_NOTE">The game crashed on code the preparation had missed: preparing it again with it (round %1$d), then the game starts by itself. B stops it; Settings › General › Self-healing turns this off.</string>
+    <string name="SELF_HEAL_STOP">Stop</string>
+    <string name="SELF_HEAL_STOPPED">Stopped. The game keeps its current preparation.</string>
     <string name="PREPARE_INTERRUPTED">The preparation was interrupted (the system closed it). What was done is kept: Prepare carries on from there.</string>
     <string name="PREPARE_HINT_KILLED">The system stopped the compiler twice (not enough memory, or Android\'s limit on background processes). Close other apps and retry.</string>
     <string name="PREPARE_HINT_NO_SPACE">Internal storage is full (%1$s free). Free some space, then retry: what was done is kept.</string>
@@ -280,6 +289,12 @@
     <string name="PREPARE_SEE_WHY">See what failed</string>
     <string name="KV_PREPARED">Prepared</string>
     <string name="KV_PACK_SIZE">Pack size</string>
+    <string name="KV_PREPARE_TOOK">Preparation took</string>
+    <string name="PREPARE_TOOK">%1$s · %2$d jobs · -O%3$s (%4$d files, %5$d compiled)</string>
+    <string name="KV_PREPARE_MEMORY">Memory per compile job</string>
+    <string name="PREPARE_MEMORY">%1$d MB at most, %2$d MB typical</string>
+    <string name="KV_PREPARE_HEAT">Hottest during it</string>
+    <string name="PREPARE_HOT_FOR">%1$s (%2$s at severe or above)</string>
     <string name="VAL_NEVER">Never</string>
     <string name="VAL_NONE">—</string>
     <string name="PLAYTIME_MIN">%1$d min</string>
@@ -297,6 +312,10 @@
     <string name="UI_HAPTICS_DETAIL">On: the device gives a light buzz when the selection moves, a press, an error and when the game is ready. Android\'s own « touch feedback » setting must be on too. Off: no buzz from the launcher.</string>
     <string name="UI_HAPTICS_ON">Vibration on.</string>
     <string name="UI_HAPTICS_OFF">Vibration off.</string>
+    <string name="SELF_HEAL">Self-healing</string>
+    <string name="SELF_HEAL_DETAIL">On: when a run meets code the preparation missed, the app prepares the game again by itself (after a crash, then starts it again), with a note you can act on. Off: it offers Prepare again instead.</string>
+    <string name="SELF_HEAL_ON">Self-healing on.</string>
+    <string name="SELF_HEAL_OFF">Self-healing off: Prepare again is offered instead.</string>
     <string name="BOTTOM_SCREEN">Bottom screen</string>
     <string name="BOTTOM_SCREEN_DETAIL">Panel: the game\'s card and buttons here, and in the game the Xbox buttons the device lacks (Black, White, Back, Start) and a few tools. Black: the second screen stays black. Off: the app leaves it to the system.</string>
     <string name="BOTTOM_SCREEN_SAVED">Bottom screen: %1$s.</string>

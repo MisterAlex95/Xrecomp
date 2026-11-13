@@ -381,10 +381,18 @@ final class LibraryCheck {
         return out;
     }
 
-    /** The folder the game runs from, "" when its files are not here. */
+    /**
+     * What the game runs from: its folder, or a disc image the library scan found and the app can read in place by its
+     * path (XBA-126: the runtime serves D:\ from it, Prepare reads it without extracting, ShellActivity hands a path
+     * that is not a companion folder to the runtime as is); "" when its files are not here. An image reached only
+     * through a document (content:) is not: the check cannot open it without the launcher's import.
+     */
     static String gameDir(LibraryScreen.Entry e) {
-        if (e.facts == null || !e.facts.hasData)
-            return "";
+        if (e.facts == null || !e.facts.hasData) {
+            LibraryIndex.Item i = e.active;
+            File img = i != null && LibraryIndex.KIND_ISO.equals(i.kind) && i.ok() ? LibraryIndex.locFile(i.loc) : null;
+            return img != null && img.isFile() && img.canRead() ? img.getAbsolutePath() : "";
+        }
         if (e.record != null && e.record.hasData())
             return e.record.dataDir;
         File f = LibraryScreen.inPlaceDir(e.active);

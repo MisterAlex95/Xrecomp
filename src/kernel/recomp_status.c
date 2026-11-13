@@ -25,6 +25,67 @@ static unsigned s_period_ms = 1000;
 static volatile uint64_t s_flips, s_frames, s_audio_samples, s_pad_reads, s_threads;
 static volatile uint32_t s_hash, s_lit;
 
+/* "unsupported" and "unmodelled" (XBA-120): names by pointer, appended by
+ * one writer; the entry is filled before the count of entries grows, so the
+ * status thread never reads a half-made one. */
+#define STATUS_GAPS 32
+#define STATUS_UNMOD 16
+typedef struct { const char *name; volatile uint64_t count; } StatusNamed;
+static StatusNamed s_gaps[STATUS_GAPS], s_unmod[STATUS_UNMOD];
+static volatile int s_ngaps, s_nunmod;
+
+static void named_add(StatusNamed *t, volatile int *n, int max, const char *name,
+                      uint64_t v, int set)
+{
+    int i, have = *n;
+
+    for (i = 0; i < have; i++)
+        if (t[i].name == name) {
+            t[i].count = set ? v : t[i].count + v;
+            return;
+        }
+    if (have >= max)
+        return;
+    t[have].name = name;
+    t[have].count = v;
+#ifdef _WIN32
+    MemoryBarrier();
+#else
+    __atomic_thread_fence(__ATOMIC_RELEASE);
+#endif
+    *n = have + 1;
+}
+
+void recomp_status_unsupported(const char *name, uint32_t n)
+{
+    if (s_on && name)
+        named_add(s_gaps, &s_ngaps, STATUS_GAPS, name, n, 0);
+}
+
+void recomp_status_unmodelled(const char *name, uint64_t count)
+{
+    if (s_on && name)
+        named_add(s_unmod, &s_nunmod, STATUS_UNMOD, name, count, 1);
+}
+
+/* ,"key":{"name":count,...} for a non-empty table, into f. */
+static void named_write(FILE *f, const char *key, const StatusNamed *t, int n)
+{
+    int i;
+
+    if (!n)
+        return;
+#ifdef _WIN32
+    MemoryBarrier();
+#else
+    __atomic_thread_fence(__ATOMIC_ACQUIRE);
+#endif
+    fprintf(f, ",\"%s\":{", key);
+    for (i = 0; i < n; i++)
+        fprintf(f, "%s\"%s\":%llu", i ? "," : "", t[i].name, (unsigned long long)t[i].count);
+    fputc('}', f);
+}
+
 static uint64_t now_ms(void)
 {
 #ifdef _WIN32
@@ -41,11 +102,14 @@ void recomp_status_write_now(void)
     if (!s_on || !s_file)
         return;
     fprintf(s_file, "{\"ms\":%llu,\"flips\":%llu,\"frames\":%llu,\"hash\":\"0x%08X\",\"lit\":%u,"
-                    "\"audio_ms\":%llu,\"pad_reads\":%llu,\"threads\":%llu,\"discovered\":%u}\n",
+                    "\"audio_ms\":%llu,\"pad_reads\":%llu,\"threads\":%llu,\"discovered\":%u,\"seeds\":%u",
             (unsigned long long)(now_ms() - s_t0_ms), (unsigned long long)s_flips,
             (unsigned long long)s_frames, s_hash, s_lit ? 1u : 0u,
             (unsigned long long)(s_audio_samples / 48u), (unsigned long long)s_pad_reads,
-            (unsigned long long)s_threads, recomp_discovery_written());
+            (unsigned long long)s_threads, recomp_discovery_written(), recomp_discovery_seeds());
+    named_write(s_file, "unsupported", s_gaps, s_ngaps);
+    named_write(s_file, "unmodelled", s_unmod, s_nunmod);
+    fputs("}\n", s_file);
     fflush(s_file);
 }
 
@@ -179,6 +243,7 @@ void recomp_status_reset(void)
     s_on = 0;
     s_flips = s_frames = s_audio_samples = s_pad_reads = s_threads = 0;
     s_hash = s_lit = 0;
+    s_ngaps = s_nunmod = 0;
     s_period_ms = 1000;
     (void)open_file();          /* tests call write_now themselves: no thread */
 }

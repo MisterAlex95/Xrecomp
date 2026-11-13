@@ -158,6 +158,7 @@ def test_no_build_output_unchanged_by_progress(tmp_path, capsys):
 
 @needs_pipeline
 def test_full_prepare_from_an_image(tmp_path, capsys, monkeypatch):
+    """XBA-126: the build reads the image in place (build/game links to it), nothing is extracted."""
     _fake_build(monkeypatch)
     iso = _image(tmp_path)
     work = tmp_path / "w"
@@ -169,6 +170,25 @@ def test_full_prepare_from_an_image(tmp_path, capsys, monkeypatch):
     pcts = [p["pct"] for p in build]
     assert pcts == sorted(pcts) and pcts[-1] == 100
     assert any(p["msg"] == "compiling 2/4" for p in build)
+    assert not any(p["msg"].startswith("extracting the disc") for p in build)
+    assert not (work / "game").exists()
+    assert os.path.realpath(work / "project" / "build" / "game") == os.path.realpath(iso)
+    # And --check agrees.
+    st = prep.check_state(str(iso), str(work))
+    assert (st["state"], st["reasons"], st["exe"]) == ("ready", [], exe)
+
+
+@needs_pipeline
+def test_full_prepare_from_an_image_extracted(tmp_path, capsys, monkeypatch):
+    """--extract: the image is unpacked into <work>/game as before XBA-126."""
+    _fake_build(monkeypatch)
+    iso = _image(tmp_path)
+    work = tmp_path / "w"
+    assert prep.main([str(iso), "--work", str(work), "--progress", "--extract"]) == 0
+    proto = _protocol(capsys.readouterr().out)
+    exe = str(work / "project" / "build" / NAME)
+    assert proto[-1][0] == "XBA_RESULT ok exe=" + exe
+    build = [p for _, p in proto if p["kind"] == "progress" and p["id"] == "build"]
     assert any(p["msg"].startswith("extracting the disc") for p in build)
     assert (work / "game" / "media" / "data.bin").read_bytes() == b"\x02" * 3000
     # And --check agrees.

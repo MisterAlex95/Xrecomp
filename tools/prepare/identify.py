@@ -42,10 +42,11 @@ class IdentifyError(Exception):
 
 def source_kind(src):
     """"folder", "image" or "xbe", or IdentifyError."""
+    from tools.xiso.source import is_image_name
     if os.path.isdir(src):
         return "folder"
     low = src.lower()
-    if low.endswith(IMAGE_EXT) and os.path.isfile(src):
+    if is_image_name(src) and os.path.isfile(src):      # also .cso/.zso/.cci and split parts (XBA-126)
         return "image"
     if low.endswith(".xbe") and os.path.isfile(src):
         return "xbe"

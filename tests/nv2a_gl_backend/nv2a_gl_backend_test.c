@@ -56,6 +56,8 @@ const char *xbox_path_save_dir_utf8(void) { return NULL; }
 int nv2a_backend_decode_texture(const Nv2aTexture *tex, uint32_t *argb_out)
 { (void)tex; (void)argb_out; return 0; }
 uint32_t nv2a_backend_texture_bytes(const Nv2aTexture *tex) { (void)tex; return 0; }
+int nv2a_backend_texture_level(const Nv2aTexture *tex, uint32_t level, Nv2aTexture *out)
+{ (void)tex; (void)level; (void)out; return 0; }
 
 static const Nv2aBackend *s_be;
 static int (*s_present)(const Nv2aPresentSurface *, int, Nv2aPresentSurface *);

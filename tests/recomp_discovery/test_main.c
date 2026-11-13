@@ -73,12 +73,17 @@ int main(void)
     recomp_discovery_stack_switch(0x00023450u, 0x00012345u, "again");   /* the same site: one entry */
     recomp_discovery_stub(136, "KeRemoveQueue", 0x00012340u);   /* XBA-115: keyed by ordinal */
     recomp_discovery_stub(136, "KeRemoveQueue", 0x00099990u);
-    CHECK(recomp_discovery_written() == 8);
+    recomp_discovery_exception(0x00012350u, 0xC0000094u, "divide by zero");   /* XBA-129 */
+    recomp_discovery_exception(0x00012350u, 0xC0000094u, "again");
+    CHECK(recomp_discovery_written() == 9);
+    CHECK(recomp_discovery_seeds() == 3);                       /* icall, thread, thread_ctx */
     CHECK(recomp_discovery_path() && !strcmp(recomp_discovery_path(), path));
     text = slurp(path);                                         /* written as it happened: no close needed */
     CHECK(text != NULL);
     if (text) {
-        CHECK(count(text, "\n") == 9);
+        CHECK(count(text, "\n") == 10);
+        CHECK(strstr(text, "{\"t\":\"exception\",\"va\":\"0x00012350\",\"code\":\"0xC0000094\","
+                           "\"why\":\"divide by zero\"}\n") != NULL);
         CHECK(strstr(text, "{\"t\":\"stack_switch\",\"va\":\"0x00023450\",\"to\":\"0x00023480\","
                            "\"why\":\"a \\\"why\\\"\"}\n") != NULL);
         CHECK(strstr(text, "{\"t\":\"stub\",\"ord\":136,\"name\":\"KeRemoveQueue\",\"ret\":\"0x00012340\"}\n") != NULL);
@@ -99,14 +104,39 @@ int main(void)
     CHECK(recomp_discovery_written() == 0);
     recomp_discovery_stub(0x00012345u, "Other", 0);               /* an ordinal equal to an icall va: its own key */
     CHECK(recomp_discovery_written() == 1);
+    CHECK(recomp_discovery_seeds() == 0);
+    recomp_discovery_exception(0x00012350u, 0xC0000094u, "read back");     /* known from the file */
+    CHECK(recomp_discovery_written() == 1);
     recomp_discovery_icall(0x00067890u, 0x00011111u);
-    CHECK(recomp_discovery_written() == 2);
+    CHECK(recomp_discovery_written() == 2 && recomp_discovery_seeds() == 1);
     text = slurp(path);
     if (text) {
         CHECK(count(text, "{\"t\":\"run\"") == 2);
         CHECK(count(text, "\"va\":\"0x00012345\"") == 1);
         CHECK(strstr(text, "{\"t\":\"icall\",\"va\":\"0x00067890\"") != NULL);
     }
+
+    /* XBA-118: the two smc kinds, each once, each keyed apart (the same va for both). */
+    recomp_discovery_reset();
+    recomp_discovery_smc_exec(0x00400000u, 0x00011234u, "heap", "5589E583EC10C390");
+    recomp_discovery_smc_exec(0x00400000u, 0x00099999u, "heap", "5589E583EC10C390");
+    recomp_discovery_smc_write(0x00400000u, 0x00400010u, ".te\"xt", "a store", 0u);
+    recomp_discovery_smc_write(0x00400000u, 0x00400020u, ".text", "a store", 0u);
+    CHECK(recomp_discovery_written() == 2);
+    text = slurp(path);
+    if (text) {
+        CHECK(strstr(text, "{\"t\":\"smc\",\"va\":\"0x00400000\",\"kind\":\"exec_outside_image\",\"ret\":\"0x00011234\","
+                           "\"where\":\"heap\",\"bytes\":\"5589E583EC10C390\"}\n") != NULL);
+        CHECK(strstr(text, "{\"t\":\"smc\",\"va\":\"0x00400000\",\"kind\":\"code_write\",\"at\":\"0x00400010\","
+                           "\"section\":\".te\\\"xt\",\"by\":\"a store\",\"ret\":\"0x00000000\"}\n") != NULL);
+    }
+    /* Read back with their kinds: a new process writes neither again. */
+    recomp_discovery_reset();
+    recomp_discovery_smc_write(0x00400000u, 0x00400010u, ".text", "a store", 0u);
+    recomp_discovery_smc_exec(0x00400000u, 0x00011234u, "heap", "");
+    CHECK(recomp_discovery_written() == 0);
+    recomp_discovery_smc_write(0x00401000u, 0x00401000u, ".text", "a store", 0u);
+    CHECK(recomp_discovery_written() == 1);
 
     /* An unwritable path: off, with one line on stderr, no crash. */
     set_env("RECOMP_DISCOVERY", "/nonexistent-dir/x/y/discovered.jsonl");

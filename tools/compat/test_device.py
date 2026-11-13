@@ -15,8 +15,8 @@ from tools.compat.test_compat import line, playing                   # noqa: E40
 
 # The keys every line has, desktop or device: report, matrix and plane read these.
 SCHEMA = {"source", "toolkit", "time", "stage", "blocker"}
-RUN_KEYS = {"stage", "blocker", "run_s", "flips", "frames", "audio_ms", "pad_reads", "threads", "discovered", "lit",
-            "screenshot"}
+RUN_KEYS = {"stage", "blocker", "run_s", "flips", "frames", "audio_ms", "pad_reads", "threads", "discovered", "seeds",
+            "lit", "smc", "screenshot"}   # smc: XBA-118; seeds: XBA-129
 
 
 def _files(tmp_path, status, log="", ident=None, discovered=()):
@@ -196,6 +196,6 @@ def test_the_device_names_the_new_blockers_as_the_desktop_does(tmp_path):
         if discovered:
             assert "stack switch at 0x000100B1" in want and "calls stub ordinal 136 (KeRemoveQueue)" in want, want
         elif log is de:
-            assert "divide error at 0x00012340: divide by zero (no guest handler took it)" in want, want
+            assert "guest exception 0xC0000094 at 0x00012340: divide by zero" in want, want
         else:
-            assert want.endswith("unhandled guest exception 0xC0000005 at 0x00045678"), want
+            assert want.endswith("guest exception 0xC0000005 at 0x00045678: no guest handler took it"), want

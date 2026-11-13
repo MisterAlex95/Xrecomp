@@ -17,6 +17,7 @@
 #endif
 #include "recomp_status.h"
 #include "recomp_stack_switch.h"
+#include "recomp_smc.h"
 #include "xbox_memory_layout.h"
 #include "xbox_seh.h"
 #include "kernel.h"
@@ -1115,7 +1116,18 @@ static void mmio_fault_handler(int sig, siginfo_t *si, void *ucv)
 {
     struct sigaction *prev;
 
+    /* XBA-118, first and on its own: the first write into a write-protected
+     * lifted code page (recomp_smc.c) is recorded, the page opened and the
+     * write retried. Only those pages: any other address goes on below. */
+    if (xbox_SmcFault((uintptr_t)si->si_addr))
+        return;
     if (xbox_PosixMmioFault(ucv, (uintptr_t)si->si_addr))
+        return;
+    /* Any other guest address, on a thread with a guest handler chain: a
+     * guest access violation, raised from a trampoline on the thread's own
+     * stack (xbox_seh_fault.c, XBA-132). One nothing handles comes back here
+     * with the original context and goes down the chain below. */
+    if (xbox_SehPosixFault(sig, si, ucv))
         return;
     /* A real crash: let the log pump hand the last lines to logcat before
      * debuggerd writes the tombstone and the process goes (XBA-52). Bounded,
@@ -1167,6 +1179,7 @@ int xbox_PosixInstallMmioFaultHandler(void)
         g_mmio_handler_installed = 1;
         return 0;
     }
+    xbox_SehFaultInit();     /* the guest fault path's restore page; off without it */
     memset(&sa, 0, sizeof sa);
     sa.sa_sigaction = mmio_fault_handler;
     sa.sa_flags = SA_SIGINFO | SA_ONSTACK | SA_RESTART;
@@ -1179,6 +1192,11 @@ int xbox_PosixInstallMmioFaultHandler(void)
     }
     g_mmio_handler_installed = 1;
     return 0;
+}
+
+int xbox_PosixMmioFaultHandlerInstalled(void)
+{
+    return g_mmio_handler_installed != 0;
 }
 #endif
 
@@ -2362,6 +2380,10 @@ volatile int g_recomp_cas64_lock;
 uint32_t g_xbox_code_lo = 0;
 uint32_t g_xbox_code_hi = 0;
 
+/* recomp_smc.c (XBA-118): the guest esp of the thread that faulted. */
+uint32_t xbox_SmcGuestEsp(void);
+uint32_t xbox_SmcGuestEsp(void) { return g_esp; }
+
 /* The guest CPU registers for recompiled code (see RecompCpu in
  * xbox_memory_layout.h). One thread-local block per host thread; every
  * thread starts from these values.
@@ -2528,6 +2550,7 @@ int g_force_return = 0;
 typedef struct {
     uint32_t buf_va;
     uint32_t ctx;           /* recomp_stack_context() when armed */
+    uint32_t runtime;       /* xbox_SehRuntimeSnapshot() when armed */
     jmp_buf  native;
 } recomp_jmp_slot;
 
@@ -2542,12 +2565,14 @@ jmp_buf *recomp_setjmp_slot(uint32_t buf_va)
     for (i = 0; i < s_jmp_used; i++)
         if (s_jmp[i].buf_va == buf_va) {
             s_jmp[i].ctx = ctx;           /* the same buffer, re-armed */
+            s_jmp[i].runtime = xbox_SehRuntimeSnapshot();
             return &s_jmp[i].native;
         }
     if (s_jmp_used >= RECOMP_JMPBUF_SLOTS)
         s_jmp_used = RECOMP_JMPBUF_SLOTS - 1;   /* keep the deepest */
     s_jmp[s_jmp_used].buf_va = buf_va;
     s_jmp[s_jmp_used].ctx = ctx;
+    s_jmp[s_jmp_used].runtime = xbox_SehRuntimeSnapshot();
     return &s_jmp[s_jmp_used++].native;
 }
 
@@ -2580,17 +2605,10 @@ int recomp_guest_longjmp(uint32_t buf_va, uint32_t value)
          * run below it). Left out, fs:[0] kept naming dead frames below esp,
          * which the dispatcher (XBA-112) rejects as a broken chain: the next
          * exception went unhandled. The registration must be on the chain (or
-         * the end of it), else nothing is unwound. The try-level unwind
-         * inside the setjmp caller's own frame (_local_unwind2) is not done. */
-        if (xbox_SehDispatchEnabled() && g_fs_base) {
-            uint32_t reg = *(const uint32_t *)(mem + buf_va + 0x18);
-            uint32_t eip = *(const uint32_t *)(mem + buf_va + 0x14);
-            uint32_t head = *(const uint32_t *)(mem + g_fs_base);
-            if (reg != head && (reg == XBOX_SEH_END_OF_CHAIN || xbox_SehOnChain(reg))) {
-                xbox_SehUnwind(reg == XBOX_SEH_END_OF_CHAIN ? 0 : reg, 0, eip);
-                *(uint32_t *)((uint8_t *)mem + g_fs_base) = reg;
-            }
-        }
+         * the end of it), else nothing is unwound. Then the try levels inside
+         * the setjmp caller's own frame (the jmp_buf's UnwindFunc, or
+         * _local_unwind2 for an old buffer), XBA-132. xbox_seh.c. */
+        xbox_SehLongjmpUnwind(buf_va);
 
         g_ebx = *(const uint32_t *)(mem + buf_va + 0x04);
         g_edi = *(const uint32_t *)(mem + buf_va + 0x08);
@@ -2609,6 +2627,7 @@ int recomp_guest_longjmp(uint32_t buf_va, uint32_t value)
             if (s_jmp[j].ctx != ctx)
                 s_jmp[kept++] = s_jmp[j];
         s_jmp_used = kept;
+        xbox_SehRuntimeRestore(s_jmp[i].runtime);   /* the bridges it leaves are gone */
         longjmp(s_jmp[i].native, value ? (int)value : 1);
     }
     return 0;
@@ -3592,6 +3611,7 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
          * the title then maps its own in the same process. */
         g_xbox_image_lo = g_xbox_image_hi = 0;
         g_xbox_code_lo = g_xbox_code_hi = 0;
+        xbox_SmcReset();            /* opens the previous image's code pages (XBA-118) */
 
         fprintf(stderr, "  XBE sections: %u (headers at file offset 0x%08X)\n",
                 num_sections, sect_headers_off);
@@ -3668,6 +3688,9 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
                 sections_loaded++;
                 total_bytes += copy_size;
             }
+            /* The code pages to write-protect once the loader is done (XBA-118). */
+            xbox_SmcNoteSection(sec_va, sec_vsize, have_data ? copy_size : 0,
+                                *(const DWORD *)(sh + SECTHDR_FLAGS), sec_name);
 
             fprintf(stderr, "  [%2u] %-12s VA=0x%08X vsize=%-8u raw=0x%08X rsize=%-8u%s\n",
                     si, sec_name, sec_va, sec_vsize, sec_raw_off, sec_raw_size,
@@ -4092,8 +4115,10 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
              * loaded and then a fault, versus one asset and a stall in audio
              * init. Until the DSP handshake is answered, the honest default is
              * the failure that gets further, with the correct behaviour one
-             * variable away. */
-            if (getenv("RECOMP_AC97_READY")) {
+             * variable away. (XBA-106: the emulated APU answers it now, and
+             * the title project sets it by default, recomp_xdk_defaults.) */
+            const char *ac97_ready = getenv("RECOMP_AC97_READY");   /* "0": off (XBA-106) */
+            if (ac97_ready && *ac97_ready && *ac97_ready != '0') {
                 /* The APU's registers have to fault so they can be routed to
                  * the emulated APU, which is the half that answers the DSP
                  * handshake. Backed as plain memory the guest's writes go
@@ -4462,6 +4487,7 @@ int xbox_GuestWindowHeld(void)
 
 void xbox_MemoryLayoutShutdown(void)
 {
+    xbox_SmcReset();                /* no code page left read-only (XBA-118) */
     /* The ack thread first: every tick writes the NV2A aperture and guest RAM
      * (KeTickCount), so nothing it touches may go before it has stopped. It
      * used to be given 1000 ms and then left running, with g_kernel_memory

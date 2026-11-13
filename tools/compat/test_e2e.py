@@ -74,19 +74,32 @@ def test_build_and_boot_through_the_compat_runner(tmp_path):
 
 
 def _heal_xbe(tmp_path):
-    """A title whose thread routine the static analysis cannot see: the entry
-    computes its address (mov eax, 0x11000; add eax, 0x40) and hands it to
-    PsCreateSystemThreadEx through the kernel thunk table (ordinal 255); the
-    routine waits on a zero dword for ever. Then loops."""
+    """A title whose code the static analysis finds one thread at a time
+    (XBA-64, XBA-129). Each start routine's address is computed (mov eax,
+    0x11000; add eax, N) and handed to PsCreateSystemThreadEx through the kernel
+    thunk table (ordinal 255), so only a run sees it:
+
+      entry    0x11000  starts A, then loops
+      A        0x11040  starts B, then waits on a zero dword for ever
+      B        0x11080  starts C, then waits
+      C        0x11108  not code: zeros up to the end of the section, which
+                        seed_from_log's gates refuse
+    """
     import struct
-    entry = bytes.fromhex("558bec" "b800100100" "83c040" "50" + "6a00" * 9 + "ff1500080100" "ebfe")
-    entry += b"\x90" * (0x40 - len(entry))
-    routine = bytes.fromhex("833d0011010000" "74f7" "c3")   # L: cmp dword [0x11100], 0 / je L / ret
-    text = entry + routine
-    text += b"\x00" * (0x110 - len(text))
+
+    def starter(off, wait):
+        code = bytes.fromhex("b800100100" "05") + struct.pack("<I", off) + bytes.fromhex(
+            "50" + "6a00" * 9 + "ff1500080100")
+        return code + (bytes.fromhex("833d0011010000" "74f7" "c3") if wait else bytes.fromhex("ebfe"))
+    entry = bytes.fromhex("558bec") + starter(0x40, False)
+    text = bytearray(0x110)
+    text[0:len(entry)] = entry
+    a, b = starter(0x80, True), starter(0x108, True)
+    text[0x40:0x40 + len(a)] = a
+    text[0x80:0x80 + len(b)] = b
     d = tmp_path / "heal"
     d.mkdir()
-    p = make_xbe(d / "default.xbe", libs=(("XAPILIB", 5849, 0),), text=text, title_id=0x58424102, title="Heal")
+    p = make_xbe(d / "default.xbe", libs=(("XAPILIB", 5849, 0),), text=bytes(text), title_id=0x58424102, title="Heal")
     b = bytearray(open(p, "rb").read())
     struct.pack_into("<II", b, 0x800, 0x80000000 | 255, 0)   # thunk table: PsCreateSystemThreadEx, end
     open(p, "wb").write(b)
@@ -95,29 +108,38 @@ def _heal_xbe(tmp_path):
 
 @pytest.mark.skipif(os.environ.get("XBA_E2E") != "1", reason="XBA_E2E=1: builds and boots a title (minutes)")
 def test_the_self_healing_loop(tmp_path):
-    """XBA-64 + XBA-97 + XBA-65 end to end: the first run meets a thread
-    routine with no dispatch entry and records it; the next prepare seeds it
-    from discovered.jsonl and rebuilds; the second run starts the thread."""
+    """XBA-64 + XBA-97 + XBA-65 + XBA-129 end to end, through `tools.compat
+    heal`: round 1 meets thread A with no dispatch entry and records it; the
+    next prepare seeds it and rebuilds, round 2 starts A, which meets B; round
+    3 starts B, which meets C; C is not code, the gates refuse it, so round 4's
+    prepare accepts nothing: the loop stops there, a round without progress,
+    not at a fixed count. The result carries the recall measure (3 misses, all
+    thread starts)."""
     if not shutil.which("cmake"):
         pytest.skip("no cmake")
-    disc, out, cw = _heal_xbe(tmp_path), tmp_path / "results.jsonl", tmp_path / "cw"
-
-    def run():
-        r = subprocess.run([sys.executable, "-m", "tools.compat", "run", disc, "--work-root", str(cw),
-                            "--seconds", "6", "--sustain", "3", "--out", str(out)],
-                           cwd=ROOT, capture_output=True, text=True, timeout=1800)
-        assert r.returncode == 0, r.stdout[-2000:] + r.stderr[-2000:]
-        return json.loads(out.read_text().splitlines()[-1])
-
-    first = run()
+    src, out, cw = _heal_xbe(tmp_path), tmp_path / "results.jsonl", tmp_path / "cw"
+    r = subprocess.run([sys.executable, "-m", "tools.compat", "heal", src, "--work-root", str(cw),
+                        "--seconds", "6", "--sustain", "3", "--out", str(out)],
+                       cwd=ROOT, capture_output=True, text=True, timeout=3600)
+    assert r.returncode == 0, r.stdout[-2000:] + r.stderr[-2000:]
+    res = json.loads(out.read_text().splitlines()[-1])
+    h = res["heal"]
     work = cw / "heal"
-    disc_lines = [json.loads(l) for l in (work / "discovered.jsonl").read_text().splitlines()]
-    assert {"t": "thread", "va": "0x00011040", "ctx1": "0x00000000"} in disc_lines, disc_lines
-    assert first["runs"][0]["threads"] == 0
-    second = run()
+    lines = [json.loads(l) for l in (work / "discovered.jsonl").read_text().splitlines()]
+    for va in ("0x00011040", "0x00011080", "0x00011108"):
+        assert {"t": "thread", "va": va, "ctx1": "0x00000000"} in lines, lines
+    assert [x["new_seeds"] for x in h["history"]] == [1, 1, 1, 0], h
+    assert [x["accepted"] for x in h["history"]] == [None, 1, 1, 0], h
+    assert h["rounds"] == 4 and h["stop"] == "no progress: the prepare accepted no new seed", h
     seeds = json.loads((work / "discovered-seeds.json").read_text())
-    assert [s["start"] for s in seeds] == ["0x00011040"]
-    assert second["runs"][0]["threads"] >= 1 and second["stage"] == "boots", second
+    assert [s["start"] for s in seeds] == ["0x00011040", "0x00011080"]
+    assert json.loads((work / "discovered-rejected.json").read_text()) == ["0x00011108"]
+    assert res["runs"][0]["threads"] >= 2 and res["stage"] == "boots", res
+    rc = res["recall"]
+    assert rc["misses"] == 3 and rc["seeded"] == 2 and rc["rejected"] == 1, rc
+    assert rc["categories"]["thread start"] == 3, rc
+    # The runtime's own count of what it met that the analysis missed (the status line's "seeds").
+    assert [x["run_seeds"] for x in h["history"]] == [1, 1, 1, 0], h
 
 
 @pytest.mark.skipif(os.environ.get("XBA_E2E") != "1", reason="XBA_E2E=1: builds and boots a title (minutes)")
@@ -190,16 +212,11 @@ def test_a_wait_spin_is_caught_and_promoted(tmp_path):
     assert any(l.get("t") == "wait_spin" and l.get("va") == "0x%08X" % evt for l in lines), lines
 
 
-@pytest.mark.skipif(os.environ.get("XBA_E2E") != "1", reason="XBA_E2E=1: builds and boots a title (minutes)")
-def test_a_launch_of_another_image_hands_over(tmp_path):
-    """XBA-82 (desktop): default.xbe launches d:\\game.xbe as the XDK's
-    XLaunchNewImage does (a contiguous page holding the path at +8, stored in
-    LaunchDataPage, then HalReturnToFirmware(2)). tools.prepare prepares both
-    images (game.xbe is named in default.xbe's strings) and writes images.map;
-    the kernel execs game.xbe's executable in the same process."""
+def _launcher_disc(tmp_path):
+    """A two-image synthetic disc: default.xbe launches d:\\game.xbe as the
+    XDK's XLaunchNewImage does (a contiguous page holding the path at +8,
+    stored in LaunchDataPage, then HalReturnToFirmware(2)); game.xbe spins."""
     import struct
-    if not shutil.which("cmake"):
-        pytest.skip("no cmake")
     code = bytes.fromhex(
         "558bec"
         "6800100000" "ff1500080100"          # push 0x1000; call [MmAllocateContiguousMemory]
@@ -219,6 +236,17 @@ def test_a_launch_of_another_image_hands_over(tmp_path):
     struct.pack_into("<IIII", b, 0x800, 0x80000000 | 165, 0x80000000 | 164, 0x80000000 | 49, 0)
     open(p, "wb").write(b)
     make_xbe(d / "game.xbe", libs=(("XAPILIB", 5849, 0),), text=SPIN, title_id=0x58424105, title="Game2")
+    return d
+
+
+@pytest.mark.skipif(os.environ.get("XBA_E2E") != "1", reason="XBA_E2E=1: builds and boots a title (minutes)")
+def test_a_launch_of_another_image_hands_over(tmp_path):
+    """XBA-82 (desktop): tools.prepare prepares both images of _launcher_disc
+    (game.xbe is named in default.xbe's strings) and writes images.map; the
+    kernel execs game.xbe's executable in the same process."""
+    if not shutil.which("cmake"):
+        pytest.skip("no cmake")
+    d = _launcher_disc(tmp_path)
     out = tmp_path / "results.jsonl"
     r = subprocess.run([sys.executable, "-m", "tools.compat", "run", str(d), "--work-root", str(tmp_path / "cw"),
                         "--seconds", "8", "--sustain", "3", "--out", str(out)],
@@ -230,6 +258,45 @@ def test_a_launch_of_another_image_hands_over(tmp_path):
     log = (work / "run-0.log").read_text(errors="replace")
     assert "launch of 'D:\\game.xbe': handing over to" in log, log[-3000:]
     assert "Game2" in log.split("handing over to", 1)[1], log[-3000:]     # game.xbe's runtime started
+    res = json.loads(out.read_text().splitlines()[-1])
+    assert "launches another XBE" not in (res.get("blocker") or ""), res
+
+
+@pytest.mark.skipif(os.environ.get("XBA_E2E") != "1", reason="XBA_E2E=1: builds and boots a title (minutes)")
+def test_a_multi_image_disc_boots_from_its_image(tmp_path):
+    """XBA-126: the same two-image disc as a split, compressed image (Disc.1.cso,
+    Disc.2.cso): tools.prepare reads default.xbe and game.xbe out of it (nothing
+    else is extracted), each build's game links to the image, the runtime
+    mounts it (kernel_disc.c) for D:\\ and the XBE load, and the hand-over to
+    game.xbe runs from the image too."""
+    if not shutil.which("cmake"):
+        pytest.skip("no cmake")
+    sys.path.insert(0, os.path.join(ROOT, "tools", "xiso"))
+    import mkcso
+    import mkxiso
+    d = _launcher_disc(tmp_path)
+    iso = tmp_path / "plain.iso"
+    mkxiso.build(str(d), str(iso))
+    cso = mkcso.compress(iso.read_bytes(), "cso2")
+    parts = mkcso.write_split(cso, str(tmp_path / "Disc.cso"), len(cso) // 2 + 1, "dot")
+    assert len(parts) == 2
+    shutil.rmtree(d)                                 # only the image is left
+    iso.unlink()
+    out = tmp_path / "results.jsonl"
+    r = subprocess.run([sys.executable, "-m", "tools.compat", "run", parts[0], "--work-root", str(tmp_path / "cw"),
+                        "--seconds", "8", "--sustain", "3", "--out", str(out)],
+                       cwd=ROOT, capture_output=True, text=True, timeout=1800)
+    assert r.returncode == 0, r.stdout[-2000:] + r.stderr[-2000:]
+    work = tmp_path / "cw" / "Disc.1.cso"
+    assert not (work / "game").exists()                              # nothing extracted
+    assert [f for f in os.listdir(work / "disc-xbe") if f.endswith(".xbe")] == ["game.xbe"]   # only that copied out
+    assert os.path.realpath(work / "project" / "build" / "game") == os.path.realpath(parts[0])
+    imap = (work / "images.map").read_text().splitlines()
+    assert imap[0].startswith("default.xbe\t") and imap[1].startswith("game.xbe\t"), imap
+    log = (work / "run-0.log").read_text(errors="replace")
+    assert "[DISC] mounted" in log and "cso split, 2 part(s)" in log, log[-3000:]
+    assert "launch of 'D:\\game.xbe': handing over to" in log, log[-3000:]
+    assert "Game2" in log.split("handing over to", 1)[1], log[-3000:]
     res = json.loads(out.read_text().splitlines()[-1])
     assert "launches another XBE" not in (res.get("blocker") or ""), res
 
@@ -279,6 +346,66 @@ def _coroutine_xbe(tmp_path):
     struct.pack_into("<II", xbe, 0x800, 0x80000000 | 49, 0)     # HalReturnToFirmware, end
     open(p, "wb").write(xbe)
     return d
+
+
+@pytest.mark.skipif(os.environ.get("XBA_E2E") != "1", reason="XBA_E2E=1: builds and boots a title (minutes)")
+def test_a_stripped_library_table_still_gets_the_xdk_switches(tmp_path):
+    """XBA-106 in the real runtime: no library table at all, but D3D's kernel imports (AvSetDisplayMode,
+    AvSendTVEncoderOption, MmClaimGpuInstanceMemory). prepare picks xdk/d3d8 by its imports and says so; the
+    title project sets the switches no layer set (the DISPATCH gate, the pad, AC'97) itself."""
+    if not shutil.which("cmake"):
+        pytest.skip("no cmake")
+    d = tmp_path / "bare"
+    d.mkdir()
+    make_xbe(d / "default.xbe", libs=(), text=SPIN, title_id=0x58424107, title="Bare", imports=(3, 2, 168))
+    out = tmp_path / "results.jsonl"
+    r = subprocess.run([sys.executable, "-m", "tools.compat", "run", str(d), "--work-root", str(tmp_path / "cw"),
+                        "--seconds", "4", "--sustain", "2", "--out", str(out)],
+                       cwd=ROOT, capture_output=True, text=True, timeout=1800)
+    assert r.returncode == 0, r.stdout[-2000:] + r.stderr[-2000:]
+    work = tmp_path / "cw" / "bare"
+    prep = (work / "compat-prepare.log").read_text()
+    assert "XDK layers: xdk/d3d8 (kernel imports)" in prep and "warning: xdk/d3d8: the library table" in prep, prep
+    log = (work / "run-0.log").read_text()
+    assert "[XDK] defaults: RECOMP_DISPATCH_GATE=1 RECOMP_KEYBOARD=1 RECOMP_AC97_READY=1" in log, log[-3000:]
+    assert "emulated APU up" in log, log[-3000:]          # RECOMP_AC97_READY took effect
+
+
+@pytest.mark.skipif(os.environ.get("XBA_E2E") != "1", reason="XBA_E2E=1: builds and boots a title (minutes)")
+def test_code_written_and_run_at_run_time_are_named(tmp_path):
+    """XBA-118 in the real runtime: a title that patches its own code (a store into its second code page) and then
+    calls into the heap. The store is trapped once through the write-protected code page and goes on; the call is
+    skipped as before; both are {"t":"smc"} records, and tools.compat names them in the blocker with the count."""
+    if not shutil.which("cmake"):
+        pytest.skip("no cmake")
+    code = bytes.fromhex("558bec"                   # push ebp; mov ebp, esp
+                         "c705" "00200100" "90909090"   # mov dword [0x12000], 0x90909090: into the code
+                         "b8" "00004000"                # mov eax, 0x00400000
+                         "ffd0"                         # call eax: the heap
+                         "ebfe")                        # jmp $
+    text = code + b"\xcc" * (0x2000 - len(code))       # two whole code pages, 0x11000 and 0x12000
+    d = tmp_path / "smc"
+    d.mkdir()
+    make_xbe(d / "default.xbe", libs=LIBS, text=text, title_id=0x58424106, title="SMC")
+    out = tmp_path / "results.jsonl"
+    r = subprocess.run([sys.executable, "-m", "tools.compat", "run", str(d), "--work-root", str(tmp_path / "cw"),
+                        "--seconds", "5", "--sustain", "3", "--out", str(out)],
+                       cwd=ROOT, capture_output=True, text=True, timeout=1800)
+    assert r.returncode == 0, r.stdout[-2000:] + r.stderr[-2000:]
+    work = tmp_path / "cw" / "smc"
+    log = (work / "run-0.log").read_text()
+    assert "[SMC] 2 code page(s) of 4096 bytes write-protected" in log or "[SMC] 0 code page" in log, log[-3000:]
+    lines = [json.loads(l) for l in (work / "discovered.jsonl").read_text().splitlines()]
+    smc = [l for l in lines if l.get("t") == "smc"]
+    assert {"t": "smc", "va": "0x00400000", "kind": "exec_outside_image", "where": "heap",
+            "bytes": "0000000000000000"}.items() <= smc[-1].items(), lines
+    res = json.loads(out.read_text().splitlines()[-1])
+    if "[SMC] 2 code page(s)" in log:              # 4 KB host pages: the store is trapped
+        assert {"t": "smc", "va": "0x00012000", "kind": "code_write", "at": "0x00012000",
+                "section": ".text", "by": "a store"}.items() <= smc[0].items(), lines
+        assert res["smc"] == 2 and "code written or run at run time x2: code_write 0x00012000 (.text)" \
+            in res["blocker"], res
+    assert res["blocker"].startswith("no flip") and "exec_outside_image 0x00400000 (heap" in res["blocker"], res
 
 
 @pytest.mark.skipif(os.environ.get("XBA_E2E") != "1", reason="XBA_E2E=1: builds and boots a title (minutes)")

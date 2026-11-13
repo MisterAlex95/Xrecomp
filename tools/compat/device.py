@@ -209,7 +209,7 @@ def record(a):
     r = renderer_of(log_text)
     if r and "renderer" not in res:
         res["renderer"] = r
-    res.update(stage=stage, blocker=blocker, best=stage,
+    res.update(stage=stage, blocker=blocker, best=stage, smc=summary.get("smc", 0),
                runs=[dict({"stage": stage, "blocker": blocker, "run_s": round(a.run_s)}, **summary,
                           screenshot=None)])
     return res

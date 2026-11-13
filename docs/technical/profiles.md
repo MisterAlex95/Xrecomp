@@ -11,8 +11,8 @@ Universal titles », section 3.
 
 | Layer | Folder | Picked when |
 |---|---|---|
-| Toolkit | none: `src/` (runtime) and `tools/` (lifter) | always |
-| XDK library | `profiles/xdk/<name>/layer.json` | the XBE's library table has one of its `applies.libraries`, at a build in `applies.builds` (no `builds`: any) |
+| Toolkit | none: `src/` (runtime) and `tools/` (lifter); `recomp_xdk_defaults()` in the title project | always |
+| XDK library | `profiles/xdk/<name>/layer.json` | the XBE's library table has one of its `applies.libraries`, at a build in `applies.builds` (no `builds`: any); or the table names none of them and the XBE imports `applies.imports.min` of the kernel ordinals in `applies.imports.ordinals` (XBA-106) |
 | Engine | `profiles/engines/<name>/layer.json` | `tools.xbe_ident` finds the engine whose `layer` (in `tools/xbe_ident/engines.json`) is `<name>` |
 | Title | `profiles/titles/<title id>/title.json` | the title ID matches |
 
@@ -23,6 +23,40 @@ detection needs a fix). `python -m tools.xbe_ident default.xbe` prints the layer
 **A fix goes to the lowest layer where it is true.** What every XDK title needs because the console works that way
 goes to an XDK layer (or the toolkit); what one title's own code needs stays with the title.
 
+## When the library table is odd (XBA-106)
+
+The XDK layers are picked from the XBE's library table; a table that is stripped, renamed or from a build nobody
+listed used to leave a title with none of them: no DISPATCH gate, no vblanks, no pad, no sound. Two things now stand
+in:
+
+- **The switches are toolkit defaults.** `RECOMP_DISPATCH_GATE=1`, `RECOMP_VBLANK=paced`, `RECOMP_USB=1`,
+  `RECOMP_KEYBOARD=1` and `RECOMP_AC97_READY=1` are set by the title project itself (`recomp_xdk_defaults()`, called by
+  `templates/new-game` main after `xba_title_configure`) unless something already set them; `RECOMP_PB_EXEC=1` already
+  was. They are the console's hardware, not a title's taste: every retail title links XAPI (and with it XPP's USB
+  stack and its DISPATCH-level locking), and real hardware always has vblanks, the APU and the OHCI controllers. The
+  XDK layers keep their identical `env_default`s, so a title they match merges exactly as before (tested against the
+  four reference titles in `tools/prepare/test_profiles.py`). `RECOMP_XDK_DEFAULTS=0` sets none of them (A/B), and each
+  switch reads `0` as off ([environment-variables.md](../runtime/environment-variables.md#xdk-defaults)).
+- **An XDK layer can be picked by its kernel imports.** `applies.imports` lists kernel ordinals typical of the library
+  (D3D8: `AvSetDisplayMode`, `AvSendTVEncoderOption`, `Av{Get,Set}SavedDataAddress`, `MmClaimGpuInstanceMemory`, two
+  of them; XAPI: `XeImageFileName`, `XeLoadSection`, `XeUnloadSection`, `IoCreateSymbolicLink`,
+  `ExQueryNonVolatileSetting`, three; DSOUND: `MmLockUnlockBufferPages`, `MmGetPhysicalAddress`,
+  `HalGetInterruptVector`, `KeConnectInterrupt`, all four). When the library table names none of the layer's libraries
+  and the XBE imports enough of them, the layer is picked and prepare warns. This matters for `xdk/d3d8`, whose code
+  (`d3d8.c`: the device found at run time, the software methods, the GPU semaphore) the env defaults cannot replace;
+  in a title without D3D it finds no device and stays idle. A layer whose library is named at a build it does not
+  take (`xdk/d3d8ltcg`, 5849 only) is not picked by imports. The lists are a first guess from what each library does
+  on the console, to check on the library triage (XBA-63).
+
+prepare prints which XDK layers matched and how:
+
+```
+      XDK layers: xdk/d3d8 (kernel imports), xdk/dsound (DSOUND 5849), xdk/xapi (XAPILIB 5849)
+      warning: xdk/d3d8: the library table names none of D3D8, D3D8LTCG, but the XBE imports AvSetDisplayMode, ...: picked by its kernel imports (a stripped or renamed library table?)
+```
+
+or `XDK layers: none matched; the runtime's XDK defaults apply (recomp_xdk_defaults)`.
+
 ## What a layer holds
 
 Every key is optional. The same keys work in every layer; a higher layer's value wins.
@@ -30,7 +64,7 @@ Every key is optional. The same keys work in every layer; a higher layer's value
 | Key | What |
 |---|---|
 | `name` | what it is |
-| `applies` | XDK layers: `{"libraries": ["D3D8", "D3D8LTCG"], "builds": [5558, 5849]}` |
+| `applies` | XDK layers: `{"libraries": ["D3D8", "D3D8LTCG"], "builds": [5558, 5849], "imports": {"ordinals": [3, 2, 1, 4, 168], "min": 2}}` |
 | `hooks` | a C prefix `p`: the layer's `.c` files define `p_configure(void)` and `p_start(const char *game_dir, const char *save_dir)` |
 | `env_default` | `{"RECOMP_*": "value"}`: set before the hooks run unless the environment or `recomp.cfg` already set it |
 | `env_default_android`, `env_default_desktop` | the same for one platform; within a layer it wins over `env_default` |

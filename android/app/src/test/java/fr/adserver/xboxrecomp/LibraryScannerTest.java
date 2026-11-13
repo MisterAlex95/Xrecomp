@@ -151,12 +151,18 @@ public class LibraryScannerTest {
             this.t = t;
         }
 
+        int lastParts;
+
         @Override
-        public int extractFile(int fd, String pathInImage, File out, long maxBytes) {
+        public int extractFile(int[] fds, String pathInImage, File out, long maxBytes) {
             calls++;
+            lastParts = fds.length;
             assertEquals("default.xbe", pathInImage);
             assertEquals(LibraryScanner.MAX_XBE, maxBytes);
-            byte[] b = t.opened.get(fd);
+            java.io.ByteArrayOutputStream cat = new java.io.ByteArrayOutputStream();   // the parts, in order
+            for (int fd : fds)
+                cat.write(t.opened.get(fd), 0, t.opened.get(fd).length);
+            byte[] b = cat.toByteArray();
             String head = new String(b, 0, Math.min(5, b.length), StandardCharsets.US_ASCII);
             if (head.startsWith("NOXBE"))
                 return XisoNative.ENOENT;
@@ -184,6 +190,36 @@ public class LibraryScannerTest {
         for (LibraryIndex.Item i : x.items)
             l.add(i.name);
         return l;
+    }
+
+    /** XBA-126: a split image is one item (its first part, the parts in order, their sizes summed), compressed
+     * names are images, a lone later part is read as one file. */
+    @Test
+    public void splitAndCompressedImages() throws Exception {
+        byte[] whole = iso(0x4D5300D1, "Fable");
+        int cut = whole.length / 3;
+        FakeTree t = new FakeTree()
+                .file("Fable.2.iso", Arrays.copyOfRange(whole, cut, 2 * cut), 11)
+                .file("Fable.1.iso", Arrays.copyOfRange(whole, 0, cut), 10)
+                .file("Fable.3.iso", Arrays.copyOfRange(whole, 2 * cut, whole.length), 12)
+                .file("Halo.cso", iso(0x4D530004, "Halo"), 20)
+                .file("Burnout.iso.002", iso(0x4541000D, "Burnout 3"), 30);   // no .001: one file
+        FakePeek peek = new FakePeek(t);
+        LibraryScanner.Result r = LibraryScanner.scan(t, null, peek, cache, null);
+        assertEquals(3, r.index.items.size());
+        LibraryIndex.Item fable = r.index.find("fake:/Fable.1.iso");
+        assertTrue(fable.ok());
+        assertEquals("4D5300D1", fable.tid);
+        assertEquals(Arrays.asList("fake:/Fable.1.iso", "fake:/Fable.2.iso", "fake:/Fable.3.iso"), fable.parts);
+        assertEquals(whole.length, fable.size);
+        assertNull(r.index.find("fake:/Fable.2.iso"));
+        assertTrue(r.index.find("fake:/Halo.cso").ok());
+        assertTrue(r.index.find("fake:/Burnout.iso.002").parts.isEmpty());
+        // An unchanged set is reused without being opened (LibraryStoreTest: the parts in the index's JSON).
+        int peeks = peek.calls;
+        LibraryScanner.Result again = LibraryScanner.scan(t, r.index, peek, cache, null);
+        assertEquals(peeks, peek.calls);
+        assertTrue(again.index.find("fake:/Fable.1.iso").ok());
     }
 
     @Test
@@ -434,9 +470,9 @@ public class LibraryScannerTest {
         TestSupport.write(new File(root, "Android/data/x.iso"), iso(1, "no"));
         TestSupport.write(new File(root, "notes.txt"), "x");
         TestPathTree t = new TestPathTree(root);
-        LibraryScanner.ImagePeek peek = (fd, path, out, max) -> {
+        LibraryScanner.ImagePeek peek = (fds, path, out, max) -> {
             try {
-                byte[] b = Files.readAllBytes(t.opened.get(fd).toPath());
+                byte[] b = Files.readAllBytes(t.opened.get(fds[0]).toPath());
                 Files.write(out.toPath(), Arrays.copyOfRange(b, 4, b.length));
                 return 0;
             } catch (IOException e) {

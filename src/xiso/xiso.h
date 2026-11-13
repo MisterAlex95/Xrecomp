@@ -22,6 +22,9 @@
  *
  * Thread-safety: no global state. Two calls may run at the same time on
  * different fds. The progress callback runs on the calling thread.
+ *
+ * Split and compressed images (XBA-126): see « Sources » at the end. Every
+ * call has a source form; the fd forms read one plain file, as before.
  */
 #ifndef XISO_H
 #define XISO_H
@@ -115,6 +118,75 @@ int xiso_extract_file_fd(int fd, const char *path, const char *out_file, uint64_
 
 /* A static English message for an XISO_* code (or "success" for 0). */
 const char *xiso_strerror(int err);
+
+/* ── Sources: split parts and compressed images (XBA-126, xiso_source.c) ──
+ *
+ * A source is the byte stream of a disc image, whatever holds it:
+ *   - one file (fd or path);
+ *   - a FAT32 split: parts concatenated in order. By name (xiso_source_open_path): "Game.1.iso" / "Game.2.iso",
+ *     "Game.part1.iso", "Game.iso.1" / "Game.iso.001", and the same with .xiso / .cso / .ciso / .zso / .cci;
+ *     any part may be named, the lowest number found is the first.
+ *   - a compressed image, recognised by its magic (never by its name), over one file or the split parts:
+ *     CSO ("CISO", version 0/1 deflate, version 2 deflate or LZ4, the Xbox tools' LZ4 layout too), ZSO ("ZISO",
+ *     LZ4) and CCI ("CCIM", LZ4). Blocks are decoded on demand into a small cache (self-contained inflate and LZ4
+ *     decoders: no zlib). CHD, 7z and zip are not read.
+ * xiso_source_pread is thread-safe (the runtime's threads read the disc at once); the cache has its own lock.
+ * Every other xiso_* call taking a source reads it through xiso_source_pread. */
+typedef struct xiso_source xiso_source;
+
+#define XISO_SOURCE_MAX_PARTS 16
+
+/* What a source is, for logs and the app: XISO_KIND_* (the low byte) | XISO_KIND_SPLIT when it has several parts. */
+#define XISO_KIND_PLAIN   1
+#define XISO_KIND_CSO     2
+#define XISO_KIND_ZSO     3
+#define XISO_KIND_CCI     4
+#define XISO_KIND_SPLIT   0x100
+
+/* One file or the split parts in order (n <= XISO_SOURCE_MAX_PARTS). own: close the fds in xiso_source_close.
+ * Returns 0 and *out, or XISO_EINVAL, XISO_ENOMEM, XISO_EIO, XISO_ECORRUPT (a compressed header or index that does
+ * not hold together). Does not look for an XDVDFS volume: xiso_open_source does. */
+int xiso_source_open_fds(const int *fds, int n, int own, xiso_source **out);
+
+/* Opens path read-only and, when its name is one of a split's parts, every other part (see above). */
+int xiso_source_open_path(const char *path, xiso_source **out);
+
+/* The split parts path belongs to, in order, into parts[i] (each cap bytes). Returns their number: 1 when path is
+ * not a split part name or its siblings are missing (parts[0] = path), 0 when path does not exist, or a negative
+ * XISO_* code (a name too long). */
+int xiso_split_parts(const char *path, char (*parts)[1024], int max);
+
+/* Reads len bytes at off of the image (decompressed). Returns the bytes read: len, fewer only at the end of the
+ * image, or a negative XISO_* code (XISO_EIO, XISO_ECORRUPT for a block that does not decode). */
+long xiso_source_pread(xiso_source *s, void *buf, size_t len, uint64_t off);
+
+uint64_t xiso_source_size(const xiso_source *s);          /* the image's size (decompressed) */
+uint64_t xiso_source_stored_size(const xiso_source *s);   /* bytes on the storage: the sum of the parts */
+int xiso_source_kind(const xiso_source *s);               /* XISO_KIND_* */
+int xiso_source_parts(const xiso_source *s);
+const char *xiso_source_kind_name(int kind);              /* "iso", "cso", "zso", "cci" (+ " split") */
+void xiso_source_close(xiso_source *s);                   /* NULL is fine */
+
+/* The fd-based calls above, on a source (which is not owned). */
+int xiso_open_source(xiso_source *src, xiso_image **out);
+int xiso_probe_source(xiso_source *src, char *title_out, size_t title_cap, uint64_t *total_bytes,
+                      int *has_default_xbe);
+int xiso_extract_source(xiso_source *src, const char *out_dir, xiso_progress_fn progress, void *user);
+int xiso_extract_file_source(xiso_source *src, const char *path, const char *out_file, uint64_t max_bytes);
+
+/* One directory's entries (xiso_lookup gave dir, or dir NULL for the root), sorted by name (strcmp). *out is
+ * malloc'd (free it), *count entries. Same checks as xiso_lookup. */
+typedef struct {
+    char name[256];
+    uint64_t offset;   /* absolute byte offset of the data (or directory table) in the image */
+    uint32_t size;
+    int is_dir;
+} xiso_dirent;
+int xiso_list(xiso_image *img, const xiso_stat *dir, xiso_dirent **out, size_t *count);
+
+/* The game partition: its byte offset in the image and the volume's FILETIME (100 ns since 1601, 0 when unset). */
+uint64_t xiso_partition_offset(const xiso_image *img);
+uint64_t xiso_volume_time(const xiso_image *img);
 
 #ifdef __cplusplus
 }

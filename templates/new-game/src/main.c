@@ -51,6 +51,7 @@
  * folder has sources). configure runs before the memory layout -- switches, map size --
  * and start right before the guest's entry point, with the kernel up; it gets
  * the game and save directories (save_dir NULL = the kernel's default). */
+extern int recomp_xdk_defaults(void);
 #ifdef XBA_TITLE_PROFILE
 extern void xba_title_configure(void);
 extern void xba_title_start(const char *game_dir, const char *save_dir);
@@ -375,6 +376,11 @@ static int game_main(void *hInstance, void *hPrevInstance, char *lpCmdLine,
 #ifdef XBA_TITLE_PROFILE
     xba_title_configure();
 #endif
+    /* The XDK switches (DISPATCH gate, paced vblanks, the USB pad, AC'97
+     * ready) for a title whose library table the XDK layers did not match:
+     * after the layers, so theirs and the environment's win
+     * (src/kernel/recomp_xdk_defaults.h; RECOMP_XDK_DEFAULTS=0: none). */
+    recomp_xdk_defaults();
 
     /* Step 2: Initialize Xbox memory layout */
     printf("Initializing Xbox memory layout...\n");
@@ -408,7 +414,8 @@ static int game_main(void *hInstance, void *hPrevInstance, char *lpCmdLine,
      * and a model nothing traps into never sees a register. The APU walks
      * Xbox physical RAM to find voice buffers, so it gets the guest RAM
      * base. */
-    if (getenv("RECOMP_AC97_READY")) {
+    if (getenv("RECOMP_AC97_READY") && *getenv("RECOMP_AC97_READY")
+            && *getenv("RECOMP_AC97_READY") != '0') {   /* "0": off (XBA-106) */
         g_apu_state = mcpx_apu_init_standalone((uint8_t *)xbox_GetMemoryBase());
         fprintf(stderr, "[BOOT] emulated APU %s\n",
                 g_apu_state ? "up" : "FAILED to initialise");
@@ -478,6 +485,14 @@ static int game_main(void *hInstance, void *hPrevInstance, char *lpCmdLine,
     xba_title_start(s_game_dir, s_save_dir);
 #endif
 
+    /* Code written at run time (XBA-118): the loader is done, so the lifted
+     * code pages go read-only and the first write to each is named
+     * (src/kernel/recomp_smc.h; RECOMP_SMC=0: off). */
+    {
+        extern int xbox_SmcArm(void);
+        (void)xbox_SmcArm();
+    }
+
     /* Step 7: Call the recompiled entry point */
     printf("\nStarting game...\n");
     fflush(stdout);
@@ -499,6 +514,17 @@ static int game_main(void *hInstance, void *hPrevInstance, char *lpCmdLine,
 static BOOL load_xbe(const char *path, void **out_data, size_t *out_size)
 {
     FILE *f = fopen(path, "rb");
+#ifndef _WIN32
+    /* The game directory may be a disc image read in place (XBA-126):
+     * "game" a link to Game.iso / .cso / a split part, or the shell's
+     * "fd:N". The XBE then comes out of the image, which stays mounted
+     * for D:\ (src/kernel/kernel_disc.h). */
+    if (!f) {
+        extern int xbox_disc_slurp(const char *host_path, void **data, size_t *size);
+        if (xbox_disc_slurp(path, out_data, out_size) == 0)
+            return TRUE;
+    }
+#endif
     if (!f) {
         fprintf(stderr, "Cannot open XBE: %s\n", path);
         return FALSE;

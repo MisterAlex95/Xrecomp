@@ -18,7 +18,8 @@ import java.util.TreeSet;
 final class Storage {
     private Storage() {}
 
-    enum Kind { DATA, PACK, WORK, CACHES, SAVES }
+    /** IMAGE: a disc image read in place (XBA-126): only its companion folder is the app's (a few MB of XBEs). */
+    enum Kind { DATA, IMAGE, PACK, WORK, CACHES, SAVES }
 
     /** The app's directories, so the JVM tests can point them at a temporary folder. */
     static final class Dirs {
@@ -76,6 +77,20 @@ final class Storage {
                && !f.getName().startsWith(".");
     }
 
+    /** True when dir is a disc image's companion folder: <files>/discs/<TID> holding disc.json (DiscImages). */
+    static boolean companion(Dirs d, String dir) {
+        if (dir == null || dir.isEmpty())
+            return false;
+        File f = new File(dir).getAbsoluteFile(), p = f.getParentFile();
+        return p != null && p.equals(new File(d.filesDir, DiscImages.DISCS_SUBDIR).getAbsoluteFile())
+               && !f.getName().startsWith(".") && new File(f, DiscImages.DISC_JSON).isFile();
+    }
+
+    /** The image a companion item stands for (its size on its storage, its name), or null. */
+    static DiscImages.Disc disc(Item i) {
+        return i.kind == Kind.IMAGE && !i.files.isEmpty() ? DiscImages.read(i.files.get(0)) : null;
+    }
+
     /** The save folders of a title: UDATA/<tid> and TDATA/<tid> (the kernel names them in lower case). */
     static List<File> saves(Dirs d, String tid) {
         List<File> l = new ArrayList<>();
@@ -114,6 +129,11 @@ final class Storage {
         List<Item> out = new ArrayList<>();
         if (r != null && ownedCopy(d, r.dataDir) && Library.KIND_IMPORTED.equals(r.dataKind)) {
             Item i = new Item(tid, Kind.DATA);
+            i.files.add(new File(r.dataDir));
+            out.add(i);
+        }
+        if (r != null && Library.KIND_IMAGE.equals(r.dataKind) && companion(d, r.dataDir)) {
+            Item i = new Item(tid, Kind.IMAGE);
             i.files.add(new File(r.dataDir));
             out.add(i);
         }
@@ -193,7 +213,7 @@ final class Storage {
                 continue;   // defensive: never outside the app's storage
             GameStore.deleteTree(f);
         }
-        if (i.kind == Kind.DATA && g != null) {
+        if ((i.kind == Kind.DATA || i.kind == Kind.IMAGE) && g != null) {
             Library.Record r = g.get(i.tid);
             if (r != null && !i.files.isEmpty() && i.files.get(0).getPath().equals(r.dataDir)) {
                 r.dataDir = "";

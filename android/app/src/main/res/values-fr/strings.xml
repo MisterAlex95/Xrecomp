@@ -19,7 +19,9 @@
     <string name="STATE_WRONG">Mauvais jeu</string>
 
     <string name="NOT_A_GAME_FOLDER">Ce dossier ne contient pas de default.xbe : ce n\'est pas un disque Xbox extrait. Choisissez le dossier qui contient default.xbe.</string>
-    <string name="NOT_AN_ISO">%1$s n\'est pas une image disque : choisissez un fichier .iso ou .xiso.</string>
+    <string name="NOT_AN_ISO">%1$s n\'est pas une image disque : choisissez un fichier .iso, .xiso, .cso, .zso ou .cci, ou les parties d\'une image découpée.</string>
+    <string name="SPLIT_PARTS_INCOMPLETE">Ces fichiers ne forment pas une image disque complète : %1$s. Pour une image découpée, choisissez toutes les parties (Jeu.1.iso, Jeu.2.iso, …) en une fois.</string>
+    <string name="READING_IN_PLACE">Lecture de l\'image disque sur place…</string>
     <string name="NOT_A_GAME_IMAGE">Pas une image disque Xbox, ou pas de default.xbe dedans : %1$s</string>
     <string name="WRONG_GAME">Ce n\'est pas le jeu prévu pour cette application (autre jeu ou autre région) : son default.xbe ne correspond pas. Rien n\'a été modifié.</string>
     <string name="WRONG_GAME_HOME">Le default.xbe de ce dossier n\'est pas le jeu prévu pour cette application (autre jeu ou autre région). Choisissez le bon jeu dans Données du jeu.</string>
@@ -55,6 +57,7 @@
     <string name="SIZE_COUNTING">calcul…</string>
     <string name="SOURCE_IN_PLACE">Lu sur place</string>
     <string name="SOURCE_IMPORTED">Copie importée (stockage de l\'app)</string>
+    <string name="SOURCE_IMAGE">Image disque lue sur place, rien de copié (%1$s, %2$s, %3$s)</string>
     <string name="SOURCE_CFG">Défini dans recomp.cfg</string>
 
     <!-- Bienvenue -->
@@ -216,6 +219,12 @@
     <string name="HOME_PREPARE_AGAIN_NOTE">Le jeu a planté, et cette partie a trouvé du code que la dernière préparation avait manqué. Préparer à nouveau le prend en compte, puis relance le jeu.</string>
     <string name="HOME_NEEDS_FIX">Plantage · correction nécessaire</string>
     <string name="HOME_NEEDS_FIX_NOTE">Le jeu a planté et préparer à nouveau n\'y peut rien : %1$s.</string>
+    <string name="HOME_IMPROVING">Amélioration en arrière-plan · %1$s</string>
+    <string name="HOME_IMPROVING_NOTE">La dernière partie a rencontré du code que la préparation avait manqué : le jeu est préparé à nouveau avec, en arrière-plan. Vous pouvez jouer en attendant ; le prochain lancement utilise la nouvelle version. Arrêter l\'interrompt.</string>
+    <string name="HOME_IMPROVE_NOTE">La dernière partie a rencontré du code que la préparation avait manqué (%1$d). Préparer à nouveau le prend en compte, en arrière-plan ; Jouer reste disponible.</string>
+    <string name="SELF_HEAL_ROUND_NOTE">Le jeu a planté sur du code que la préparation avait manqué : nouvelle préparation avec ce code (tour %1$d), puis le jeu se relance seul. B l\'arrête ; Réglages › Général › Auto-réparation désactive ce comportement.</string>
+    <string name="SELF_HEAL_STOP">Arrêter</string>
+    <string name="SELF_HEAL_STOPPED">Arrêté. Le jeu garde sa préparation actuelle.</string>
     <string name="PREPARE_INTERRUPTED">La préparation a été interrompue (le système l\'a fermée). Ce qui a été fait est gardé : Préparer continue à partir de là.</string>
     <string name="PREPARE_HINT_KILLED">Le système a arrêté le compilateur deux fois (pas assez de mémoire, ou la limite d\'Android sur les processus en arrière-plan). Fermez les autres applications et réessayez.</string>
     <string name="PREPARE_HINT_NO_SPACE">Le stockage interne est plein (%1$s libres). Libérez de la place, puis réessayez : ce qui a été fait est gardé.</string>
@@ -257,6 +266,12 @@
     <string name="PREPARE_SEE_WHY">Voir l\'erreur</string>
     <string name="KV_PREPARED">Préparé le</string>
     <string name="KV_PACK_SIZE">Taille du pack</string>
+    <string name="KV_PREPARE_TOOK">Durée de la préparation</string>
+    <string name="PREPARE_TOOK">%1$s · %2$d tâches · -O%3$s (%4$d fichiers, %5$d compilés)</string>
+    <string name="KV_PREPARE_MEMORY">Mémoire par tâche de compilation</string>
+    <string name="PREPARE_MEMORY">%1$d Mo au plus, %2$d Mo en général</string>
+    <string name="KV_PREPARE_HEAT">Le plus chaud pendant ce temps</string>
+    <string name="PREPARE_HOT_FOR">%1$s (%2$s au niveau sévère ou plus)</string>
     <string name="VAL_NEVER">Jamais</string>
     <string name="VAL_NONE">—</string>
     <string name="PLAYTIME_MIN">%1$d min</string>
@@ -274,6 +289,10 @@
     <string name="UI_HAPTICS_DETAIL">Activé : l\'appareil vibre légèrement quand la sélection bouge, à un appui, à une erreur et quand le jeu est prêt. Le réglage Android « retour tactile » doit aussi être activé. Désactivé : le lanceur ne vibre pas.</string>
     <string name="UI_HAPTICS_ON">Vibration activée.</string>
     <string name="UI_HAPTICS_OFF">Vibration désactivée.</string>
+    <string name="SELF_HEAL">Auto-réparation</string>
+    <string name="SELF_HEAL_DETAIL">Activée : quand une partie rencontre du code que la préparation a manqué, l\'application prépare à nouveau le jeu d\'elle-même (après un plantage, puis le relance), avec une note sur laquelle agir. Désactivée : elle propose Préparer à nouveau à la place.</string>
+    <string name="SELF_HEAL_ON">Auto-réparation activée.</string>
+    <string name="SELF_HEAL_OFF">Auto-réparation désactivée : Préparer à nouveau est proposé à la place.</string>
     <string name="BOTTOM_SCREEN">Écran du bas</string>
     <string name="BOTTOM_SCREEN_DETAIL">Panneau : la carte du jeu et ses boutons, et en jeu les boutons Xbox absents de l\'appareil (Noir, Blanc, Back, Start) et quelques outils. Noir : le second écran reste noir. Désactivé : l\'application le laisse au système.</string>
     <string name="BOTTOM_SCREEN_SAVED">Écran du bas : %1$s.</string>

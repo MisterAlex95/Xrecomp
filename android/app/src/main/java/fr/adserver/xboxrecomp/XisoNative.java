@@ -27,6 +27,30 @@ final class XisoNative {
      */
     static native int extractFile(int fd, String pathInImage, String outFile, long maxBytes);
 
+    // ---- XBA-126: an image given as its parts in order (one fd for a plain or compressed file) ----
+
+    /**
+     * probe() over the parts of one image (a split .1/.2, a .cso, ...): { status, total bytes of the files, 1 if
+     * default.xbe is in the root, kind (KIND_*, | KIND_SPLIT), bytes stored (the parts' sizes) }.
+     */
+    static native long[] probeParts(int[] fds, String[] titleOut);
+
+    /** extract() over the parts of one image. 0 or an XISO_E* code. */
+    static native int extractParts(int[] fds, String outDir, Progress progress);
+
+    /** extractFile() over the parts of one image. */
+    static native int extractFileParts(int[] fds, String pathInImage, String outFile, long maxBytes);
+
+    /**
+     * Copies every *.xbe of the image (any directory, at most 16, each at most maxBytes) into outDir, keeping their
+     * directories, and nothing else: the companion folder of an image read in place. Returns the count, or an
+     * XISO_E* code (negative).
+     */
+    static native int extractXbes(int[] fds, String outDir, long maxBytes);
+
+    /** src/xiso/xiso.h XISO_KIND_*. */
+    static final int KIND_PLAIN = 1, KIND_CSO = 2, KIND_ZSO = 3, KIND_CCI = 4, KIND_SPLIT = 0x100;
+
     /** XISO_* codes (src/xiso/xiso.h), for the callers that tell them apart. */
     static final int ENOTXISO = -2, ECORRUPT = -3, EINVAL = -8, ENOENT = -9;
 

@@ -545,3 +545,57 @@ def test_android_other_images(tmp_path, monkeypatch):
     assert ("unrelated.xbe", "identify") not in ran and ("menu.xbe", "compile") in ran
     assert any("sub/menu.xbe left out: COMPILE_FAILED" in m for m in lines)
     assert os.path.isdir(os.path.join(a.work, "images", "game.xbe"))
+
+
+@pytest.mark.parametrize("fmt", ["iso", "cso", "split"])
+def test_android_other_images_from_an_image(tmp_path, monkeypatch, fmt):
+    """XBA-126: the same from a disc image (plain, compressed, split): the named XBEs are copied out of it into
+    <work>/disc-xbe/ and prepared, nothing else is extracted."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "xiso"))
+    import mkcso
+    import mkxiso
+    from tools.prepare import android
+    from tools.prepare import __main__ as host
+    game = tmp_path / "game"
+    (game / "sub").mkdir(parents=True)
+    (game / "default.xbe").write_bytes(b"XBEH\0d:\\game.xbe\0menu.xbe\0")
+    (game / "game.xbe").write_bytes(b"XBEH game")
+    (game / "sub" / "menu.xbe").write_bytes(b"XBEH menu")
+    (game / "unrelated.xbe").write_bytes(b"XBEH")
+    (game / "big.bin").write_bytes(b"\x07" * 200000)
+    iso = tmp_path / "Game.iso"
+    mkxiso.build(str(game), str(iso))
+    src = str(iso)
+    if fmt == "cso":
+        src = str(tmp_path / "Game.cso")
+        with open(src, "wb") as f:
+            f.write(mkcso.compress(iso.read_bytes(), "cso2"))
+    elif fmt == "split":
+        parts = mkcso.write_split(iso.read_bytes(), str(tmp_path / "Disc.iso"), 70000, "dot")
+        src = parts[1]                          # any part names the image
+    ran = []
+
+    def step(self, name):
+        def f():
+            ran.append((os.path.basename(self.a.source), name, open(self.a.source, "rb").read()))
+            if name == "compile":
+                self.objects = ["/o/a.o"]
+        return f
+    for name in ("identify", "analyse", "lift", "compile"):
+        monkeypatch.setattr(android.Run, name, lambda self, n=name: step(self, n)())
+    a = _Args(tmp_path, "libmain.so")
+    a.source = src
+    os.makedirs(a.work, exist_ok=True)
+    r = android.Run(a, host)
+    r.rep = type("R", (), {"progress": lambda self, s, p, m, e=None: None})()
+    xbe, r.data_dir, r.image = host.find_xbe(src, a.work)
+    assert r.data_dir is None and r.image
+    r.xbe = xbe
+    r.other_images()
+    assert sorted(rel for rel, _, _ in r.images) == ["game.xbe", "sub/menu.xbe"]
+    assert ("game.xbe", "identify", b"XBEH game") in ran and ("menu.xbe", "identify", b"XBEH menu") in ran
+    assert not any(n == "unrelated.xbe" for n, _, _ in ran)
+    copied = sorted(os.path.relpath(os.path.join(d, f), os.path.join(a.work, "disc-xbe"))
+                    for d, _, fs in os.walk(os.path.join(a.work, "disc-xbe")) for f in fs)
+    assert copied == ["game.xbe", os.path.join("sub", "menu.xbe")]

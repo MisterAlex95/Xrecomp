@@ -9,7 +9,7 @@ import subprocess
 import sys
 import time
 
-from tools.compat import STAGES, device
+from tools.compat import STAGES, blockers, device
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
@@ -57,7 +57,8 @@ def classify(status, presses_ms, exit_info, run_s, sustain_s, log_text="", disco
     in the status clock; exit_info: None when the runner stopped it, else
     ("exit", code) or ("signal", n)."""
     last = status[-1] if status else {}
-    summary = {k: last.get(k, 0) for k in ("flips", "frames", "audio_ms", "pad_reads", "threads", "discovered")}
+    summary = {k: last.get(k, 0) for k in ("flips", "frames", "audio_ms", "pad_reads", "threads", "discovered",
+                                           "seeds")}
     summary["lit"] = int(any(s.get("lit") for s in status))
     stage = "prepares"
     if status and any(s.get("flips") or s.get("threads") or s.get("pad_reads") or s.get("audio_ms")
@@ -89,10 +90,9 @@ def classify(status, presses_ms, exit_info, run_s, sustain_s, log_text="", disco
             blocker = "hang: no flip for the last %d s" % stall
     # A guest stack switch the runtime could not carry (XBA-101) explains a
     # hang, a crash or an exit alike: the side that should have run never did.
-    switch = next((d for d in discovered if d.get("t") == "stack_switch"), None)
-    if blocker and switch and not launch:
-        blocker += "; stack switch at %s to %s: %s (XBA-101)" % (switch.get("va"), switch.get("to"),
-                                                                   switch.get("why"))
+    switches = blockers.of_kind(discovered, "stack_switch")
+    if blocker and switches and not launch:
+        blocker += "; " + blockers.stack_switch_words(switches)
     elif blocker and (blocker == "no flip" or blocker.startswith(("hang", "no status"))):
         u = UNIMPL_RE.search(log_text or "")
         if u:
@@ -102,14 +102,21 @@ def classify(status, presses_ms, exit_info, run_s, sustain_s, log_text="", disco
             if addressed:
                 d = addressed[-1]
                 blocker += "; last discovery: %s %s" % (d.get("t"), d.get("va"))
-    # The guest's exceptions (XBA-110 x XBA-112), with the same words on the
-    # device (tools/compat/device.py grades through this function).
+    # The guest's exceptions nothing handled (XBA-110, XBA-112, XBA-129,
+    # XBA-132): the discovery file's "exception" entries, or, for a run from
+    # before them, the runtime's [#DE] and [SEH] lines; the same words as
+    # heal.py and the app's SelfHeal (tools/compat/blockers.py).
+    excs = blockers.of_kind(discovered, "exception")
     de = DE_RE.search(log_text or "")
     seh = SEH_UNHANDLED_RE.search(log_text or "")
-    if blocker and de and not launch:
-        blocker += "; divide error at %s: %s (%s)" % (de.group(1), de.group(2), de.group(3))
+    if blocker and excs and not launch:
+        blocker += "; " + blockers.exception_words(excs)
+    elif blocker and de and not launch:
+        code = "0xC0000094" if de.group(2) == "divide by zero" else "0xC0000095"
+        blocker += "; " + blockers.exception_words([{"code": code, "va": de.group(1), "why": de.group(2)}])
     elif blocker and seh and not launch and not blocker.startswith("crash"):
-        blocker += "; unhandled guest exception %s at %s" % (seh.group(1), seh.group(2))
+        blocker += "; " + blockers.exception_words([{"code": seh.group(1), "va": seh.group(2),
+                                                      "why": "no guest handler took it"}])
     if blocker is None and stage != "sustained":
         blocker = {"boots": "nothing lit on screen", "renders": "no response to the pad",
                    "responsive": "not sustained"}.get(stage)
@@ -118,22 +125,47 @@ def classify(status, presses_ms, exit_info, run_s, sustain_s, log_text="", disco
     stubs = stub_calls(discovered)
     if stubs and blocker and not blocker.startswith(("crash", "launches")):
         blocker += "; calls stub " + ", ".join(stubs)
+    # What the renderer met and could not draw (XBA-120, the status file's
+    # "unsupported"): kept in the summary, and named with the blocker on the
+    # same terms as stubs -- a missing format or primitive is a likely cause
+    # of "nothing lit" or of a picture the player cannot read.
+    gaps = renderer_gaps(last)
+    if gaps:
+        summary["unsupported"] = dict(last.get("unsupported"))
+        if blocker and not blocker.startswith(("crash", "launches")):
+            blocker += "; renderer lacks " + ", ".join(gaps)
+    # Code the title wrote or made at run time (XBA-118): the lifted C cannot
+    # run it, whatever the stage, so it is named even on a sustained run.
+    smc = [d for d in discovered or () if d.get("t") == "smc"]
+    summary["smc"] = len(smc)
+    if smc and not launch:
+        named = blockers.smc_words(smc)
+        blocker = blocker + "; " + named if blocker else named
     return stage, blocker, summary
 
 
-def stub_calls(discovered, limit=4):
-    """["ordinal 136 (KeRemoveQueue)", ...] from the discovery file's stub
-    entries, in the order they were first called, at most `limit` (then "+N")."""
-    out = []
-    for d in discovered or ():
-        if d.get("t") != "stub" or "ord" not in d:
-            continue
-        s = "ordinal %s" % d["ord"] + (" (%s)" % d["name"] if d.get("name") else "")
-        if s not in out:
-            out.append(s)
-    if len(out) > limit:
-        out = out[:limit] + ["+%d more" % (len(out) - limit)]
+def smc_sites(smc, limit=3):
+    """The smc entries' sites, as blockers.smc_words lists them."""
+    sites = [blockers.smc_site(e) for e in smc]
+    return sites[:limit] + ["+%d more" % (len(sites) - limit)] if len(sites) > limit else sites
+
+
+def renderer_gaps(last, limit=3):
+    """["points (12 batches)", ...] from a status line's "unsupported", the
+    most used first, at most `limit` (then "+N more")."""
+    u = last.get("unsupported") if isinstance(last, dict) else None
+    if not isinstance(u, dict) or not u:
+        return []
+    items = sorted(u.items(), key=lambda kv: (-int(kv[1]), kv[0]))
+    out = ["%s (%d batches)" % (k, int(v)) for k, v in items[:limit]]
+    if len(items) > limit:
+        out.append("+%d more" % (len(items) - limit))
     return out
+
+
+def stub_calls(discovered, limit=4):
+    """["ordinal 136 (KeRemoveQueue)", ...] (blockers.stub_names)."""
+    return blockers.stub_names(blockers.of_kind(discovered, "stub"), limit)
 
 
 def _responds(status, presses_ms):
@@ -294,7 +326,30 @@ def toolkit_commit():
         return "unknown"
 
 
-def run_one(source, a):
+def recall_of(work, source):
+    """The title's prepare-time recall (tools/compat/recall.py) for its result
+    line, without the per-address rows; None when no run missed anything."""
+    from tools.compat import recall
+    try:
+        xbe = None
+        src = os.path.abspath(source)
+        if os.path.isdir(src):
+            xbe = os.path.join(src, "default.xbe")
+        elif src.lower().endswith(".xbe"):
+            xbe = src
+        elif os.path.isfile(os.path.join(work, "xbe", "default.xbe")):
+            xbe = os.path.join(work, "xbe", "default.xbe")
+        r = recall.report(work, xbe)
+    except Exception:               # never let the measure spoil the result
+        return None
+    if not r["misses"]:
+        return None
+    r.pop("rows", None)
+    r["summary"] = recall.summary(r)
+    return r
+
+
+def run_one(source, a, marks=None):
     name = os.path.basename(os.path.normpath(source))
     work = os.path.join(os.path.abspath(a.work_root), re.sub(r"[^A-Za-z0-9._-]", "_", name))
     os.makedirs(work, exist_ok=True)
@@ -317,6 +372,11 @@ def run_one(source, a):
         res["layers"] = ident.get("layers")
     except (OSError, ValueError):
         pass
+    if marks is not None:           # tools/compat/heal.py: where this run's discoveries begin
+        try:
+            marks["disc_offset"] = os.path.getsize(os.path.join(work, "discovered.jsonl"))
+        except OSError:
+            marks["disc_offset"] = 0
     runs = []
     for i in range(a.repeat):
         status, presses, exit_info, run_s, log_text = boot(exe, work, a.seconds, i)
@@ -328,9 +388,13 @@ def run_one(source, a):
     # The title's stage: the lowest over the runs (a race that loses 1 run in 4 is not "sustained").
     worst = min(runs, key=lambda r: STAGES.index(r["stage"]))
     best = max(runs, key=lambda r: STAGES.index(r["stage"]))
-    res.update(stage=worst["stage"], blocker=worst["blocker"], best=best["stage"], runs=runs)
+    res.update(stage=worst["stage"], blocker=worst["blocker"], best=best["stage"], runs=runs,
+               smc=max(r.get("smc", 0) for r in runs))
     if a.repeat > 1:
         res["failure_rate"] = round(sum(r["stage"] != best["stage"] for r in runs) / len(runs), 2)
+    rc = recall_of(work, source)
+    if rc:
+        res["recall"] = rc
     return res
 
 
@@ -340,14 +404,23 @@ def report(results):
     for r in results:
         last[r.get("title_id") or r.get("source")] = r
     on_device = any(r.get("device") for r in results)
-    rows = ["| Title | Stage | Best of runs | Blocker | XDK | Toolkit |" + (" Device |" if on_device else ""),
-            "|---|---|---|---|---|---|" + ("---|" if on_device else "")]
+    with_recall = any(r.get("recall") for r in results)
+    rows = ["| Title | Stage | Best of runs | Blocker | XDK | Toolkit |" + (" Recall |" if with_recall else "")
+            + (" Device |" if on_device else ""),
+            "|---|---|---|---|---|---|" + ("---|" if with_recall else "") + ("---|" if on_device else "")]
     for k, r in sorted(last.items(), key=lambda kv: -STAGES.index(kv[1].get("stage", "none"))):
         rows.append("| %s | %s | %s | %s | %s | %s |" % (
             r.get("source", k), r.get("stage"), r.get("best", r.get("stage")),
             (r.get("blocker") or "").replace("|", "/"), r.get("xdk") or "", r.get("toolkit", ""))
+            + (" %s |" % recall_label(r) if with_recall else "")
             + (" %s |" % device.device_label(r).replace("|", "/") if on_device else ""))
     return "\n".join(rows)
+
+
+def recall_label(r):
+    """The Recall column: the line's prepare-time recall summary (XBA-129), "" without one."""
+    rc = r.get("recall")
+    return (rc.get("summary") or "").replace("|", "/") if isinstance(rc, dict) else ""
 
 
 def _key(r):
@@ -385,6 +458,7 @@ def matrix(results):
     by = history(results)
     rows, counts = [], {s: 0 for s in STAGES}
     on_device = any(r.get("device") for r in results)    # lines from the app (XBA-130): a Device column
+    with_recall = any(r.get("recall") for r in results)   # prepare-time recall (XBA-129)
     for k, runs in sorted(by.items(), key=lambda kv: (-STAGES.index(kv[1][-1].get("stage", "none")),
                                                       str(kv[1][-1].get("source", kv[0])).lower())):
         last = runs[-1]
@@ -400,14 +474,17 @@ def matrix(results):
             (last.get("blocker") or "").replace("|", "/"), last.get("xdk") or "",
             ", ".join(l for l in (last.get("layers") or []) if l.startswith("engines/")) or "",
             "%s %s" % (last.get("toolkit", ""), (last.get("time") or "")[:10]))
+            + (" %s |" % recall_label(last) if with_recall else "")
             + (" %s |" % device.device_label(last).replace("|", "/") if on_device else ""))
     total = sum(counts.values()) or 1
+    smc = sum(1 for runs in by.values() if runs[-1].get("smc"))
     out = ["**%d titles.** " % sum(counts.values()) + "; ".join(
-               "%s: %d (%d %%)" % (s, counts[s], counts[s] * 100 // total) for s in reversed(STAGES) if counts[s]),
+               "%s: %d (%d %%)" % (s, counts[s], counts[s] * 100 // total) for s in reversed(STAGES) if counts[s])
+           + ("; code written or run at run time (XBA-118): %d" % smc if smc else ""),
            "",
            "| Title | Title ID | Stage | Since the run before | Blocker | XDK | Engine | Toolkit, date |"
-           + (" Device |" if on_device else ""),
-           "|---|---|---|---|---|---|---|---|" + ("---|" if on_device else "")] + rows
+           + (" Recall |" if with_recall else "") + (" Device |" if on_device else ""),
+           "|---|---|---|---|---|---|---|---|" + ("---|" if with_recall else "") + ("---|" if on_device else "")] + rows
     reg = regressions(results)
     out += ["", "**Regressions** (a Bug each): " + ("none" if not reg else "; ".join(
         "%s %s -> %s (%s -> %s)" % (r["source"], r["from"], r["to"], r["toolkit_from"], r["toolkit_to"])
@@ -445,6 +522,10 @@ def plane_sync(results, project="XBA", page="Compatibility", dry_run=False, run=
 
 
 def main(argv=None):
+    argv = sys.argv[1:] if argv is None else list(argv)
+    if argv[:1] == ["recall"]:          # its own parser (tools/compat/recall.py)
+        from tools.compat import recall
+        return recall.main(argv[1:])
     ap = argparse.ArgumentParser(prog="tools.compat", description=__doc__)
     sub = ap.add_subparsers(dest="cmd", required=True)
     r = sub.add_parser("run", help="prepare and boot titles, append results")
@@ -464,9 +545,28 @@ def main(argv=None):
     q.add_argument("--dry-run", action="store_true")
     g = sub.add_parser("grade", help="grade a run made elsewhere (the app's library check), append its line")
     device.add_arguments(g)
+    h = sub.add_parser("heal", help="rounds of prepare + boot until a round brings nothing (XBA-129)")
+    h.add_argument("sources", nargs="+")
+    h.add_argument("--work-root", default="compat-work")
+    h.add_argument("--seconds", type=float, default=180)
+    h.add_argument("--sustain", type=float, default=60)
+    h.add_argument("--max-idle", type=int, default=1, help="rounds without progress in a row that stop it")
+    h.add_argument("--max-rounds", type=int, default=12, help="a safety net, not the cap (default 12)")
+    h.add_argument("--out", default="compat-results.jsonl")
+    sub.add_parser("recall", help="prepare-time recall of a title's work folder (XBA-129): recall --help")
     a = ap.parse_args(argv)
     if a.cmd == "grade":
         return device.grade_cmd(a)
+    if a.cmd == "heal":
+        from tools.compat import heal
+        a.repeat, a.no_prepare = 1, False
+        for src in a.sources:
+            res = heal.heal(src, a, run_one, out=lambda m: print(m, flush=True))
+            with open(a.out, "a") as f:
+                f.write(json.dumps(res) + "\n")
+            print("%-40s %-10s %s (%d round(s): %s)" % (res["source"], res["stage"], res.get("blocker") or "",
+                                                       res["heal"]["rounds"], res["heal"]["stop"]), flush=True)
+        return 0
     if a.cmd == "report":
         res = read_jsonl(a.results)
         print(matrix(res) if a.matrix else report(res))

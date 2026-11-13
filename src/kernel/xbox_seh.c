@@ -43,6 +43,19 @@ recomp_func_t recomp_lookup_kernel(uint32_t xbox_va);
 #define SEH_MAX_NEST    16
 /* Without known stack bounds, how far above the raising esp a frame may be. */
 #define SEH_DEFAULT_SPAN 0x00100000u
+/* Guest stacks a thread enters and leaves (worker slices) at once. */
+#define SEH_MAX_PUSHED  4
+/* A host fault's dispatch builds its frames this far below the published
+ * guest esp. At an 8- or 32-bit guest access the published registers are
+ * exact (see xbox_SehRaiseHostFault); at a 16-bit, 64-bit or floating-point
+ * one the compiler may still hold the latest `sub esp, n` in a host register,
+ * and MSVC calls _chkstk for any frame of a page or more, so one pending
+ * allocation is under 4 KB. Twice that, for two. */
+#define SEH_FAULT_GAP   0x2000u
+/* What the dispatch itself needs below that: record, CONTEXT, handler
+ * frames. Below this much room the gap shrinks rather than leaving the
+ * stack. */
+#define SEH_FAULT_ROOM  0x1000u
 
 typedef struct {
     uint32_t               reg;      /* the registration record (fs:[0] value) */
@@ -50,6 +63,8 @@ typedef struct {
     const recomp_seh_desc *desc;
     uintptr_t              host;     /* host stack token when taken */
     int                    depth;    /* dispatch nesting when taken */
+    int                    faults;   /* host-fault trampolines in flight when taken */
+    uint32_t               runtime;  /* xbox_SehRuntimeSnapshot() when taken */
     jmp_buf                jb;
 } seh_anchor;
 
@@ -67,10 +82,17 @@ typedef struct {
     seh_outer    outer[SEH_MAX_NEST];
     uint32_t     pending;              /* resume target the lookup matched */
     int          refused;              /* a resume in this dispatch was refused */
+    int          faults;               /* host-fault trampolines in flight */
+    struct { uint32_t lo, hi; } pushed[SEH_MAX_PUSHED];   /* xbox_SehPushGuestStack */
+    int          npushed;
     XboxSehStats st;
 } seh_thread;
 
 static RECOMP_TLS seh_thread *t_seh;
+
+/* xbox_seh_fault.c: the thread's host-fault state, made here so the signal
+ * handler never has to allocate. */
+void xbox_SehFaultThreadInit(void);
 
 static seh_thread *seh_self(void)
 {
@@ -86,8 +108,55 @@ static seh_thread *seh_self(void)
             abort();
         }
         t_seh = t;
+        xbox_SehFaultThreadInit();
     }
     return t;
+}
+
+/* xbox_seh.h « Runtime code on this thread ». Plain TLS: read in the fault
+ * handler, before the thread may have dispatcher state. */
+#define SEH_CB_NEST 16
+static RECOMP_TLS int t_rt_depth;               /* bridges entered */
+static RECOMP_TLS int t_rt_cb;                  /* guest callbacks from inside them */
+static RECOMP_TLS int t_rt_saved[SEH_CB_NEST];
+
+void xbox_SehRuntimeEnter(void) { t_rt_depth++; }
+void xbox_SehRuntimeLeave(void) { if (t_rt_depth > 0) t_rt_depth--; }
+
+void xbox_SehCallbackEnter(void)
+{
+    if (t_rt_cb < SEH_CB_NEST)
+        t_rt_saved[t_rt_cb] = t_rt_depth;
+    t_rt_cb++;
+    t_rt_depth = 0;
+}
+
+void xbox_SehCallbackLeave(void)
+{
+    if (t_rt_cb <= 0)
+        return;
+    t_rt_cb--;
+    if (t_rt_cb < SEH_CB_NEST)
+        t_rt_depth = t_rt_saved[t_rt_cb];
+}
+
+int xbox_SehInRuntime(void) { return t_rt_depth > 0; }
+
+uint32_t xbox_SehRuntimeSnapshot(void)
+{
+    return ((uint32_t)t_rt_cb << 16) | ((uint32_t)t_rt_depth & 0xFFFFu);
+}
+
+void xbox_SehRuntimeRestore(uint32_t snap)
+{
+    t_rt_cb = (int)(snap >> 16);
+    t_rt_depth = (int)(snap & 0xFFFFu);
+}
+
+int *xbox_SehFaultDepthSlot(void)
+{
+    seh_thread *t = t_seh;
+    return t ? &t->faults : NULL;
 }
 
 int xbox_SehDispatchEnabled(void)
@@ -122,6 +191,32 @@ void xbox_SehGetGuestStack(uint32_t *lo, uint32_t *hi)
     seh_thread *t = seh_self();
     *lo = t->stack_lo;
     *hi = t->stack_hi;
+}
+
+void xbox_SehPushGuestStack(uint32_t lo, uint32_t hi)
+{
+    seh_thread *t = seh_self();
+
+    if (t->npushed < SEH_MAX_PUSHED) {
+        t->pushed[t->npushed].lo = t->stack_lo;
+        t->pushed[t->npushed].hi = t->stack_hi;
+        t->stack_lo = lo;
+        t->stack_hi = hi;
+    }
+    t->npushed++;           /* counted even past the limit, so pops pair */
+}
+
+void xbox_SehPopGuestStack(void)
+{
+    seh_thread *t = seh_self();
+
+    if (t->npushed <= 0)
+        return;
+    t->npushed--;
+    if (t->npushed < SEH_MAX_PUSHED) {
+        t->stack_lo = t->pushed[t->npushed].lo;
+        t->stack_hi = t->pushed[t->npushed].hi;
+    }
 }
 
 void xbox_SehSetHostStack(uintptr_t token)
@@ -410,7 +505,9 @@ static void seh_regs_load(const seh_regs *r)
     g_eflags = r->eflags;
 }
 
-static int seh_raise(uint32_t rec, uint32_t eip, uint32_t esp_after)
+/* quiet: the caller reports an unhandled exception itself (a host fault,
+ * which does not go on after the raise). */
+static int seh_raise(uint32_t rec, uint32_t eip, uint32_t esp_after, int quiet)
 {
     seh_thread *t = seh_self();
     uint32_t esp0 = g_esp, ctx, code;
@@ -433,7 +530,9 @@ static int seh_raise(uint32_t rec, uint32_t eip, uint32_t esp_after)
         g_seh_ebp = saved.seh_ebp;
     } else {
         seh_regs_load(&saved);
-        if (seh_log_budget()) {
+        if (!quiet)
+            recomp_discovery_exception(SEH_MEM32(rec + XBOX_EXCREC_ADDRESS), code, "no guest handler took it");
+        if (!quiet && seh_log_budget()) {
             fprintf(stderr, "  [SEH] unhandled exception 0x%08X at 0x%08X "
                     "(record 0x%08X); execution continues after the raise\n",
                     code, SEH_MEM32(rec + XBOX_EXCREC_ADDRESS), rec);
@@ -450,17 +549,18 @@ int xbox_SehRaiseRecord(uint32_t record_va, uint32_t eip, uint32_t esp_after)
         return 0;
     /* RtlRaiseException stores the caller's Eip as the exception address. */
     SEH_MEM32(record_va + XBOX_EXCREC_ADDRESS) = eip;
-    return seh_raise(record_va, eip, esp_after);
+    return seh_raise(record_va, eip, esp_after, 0);
 }
 
-int xbox_RaiseGuestException(uint32_t code, uint32_t flags, uint32_t address,
-                             uint32_t nparams, const uint32_t *params)
+/* A new record below g_esp, then dispatch. ctx_esp is the Esp the CONTEXT
+ * reports (the guest esp at the fault). */
+static int seh_raise_new(uint32_t code, uint32_t flags, uint32_t address,
+                         uint32_t nparams, const uint32_t *params,
+                         uint32_t ctx_esp, int quiet)
 {
     uint32_t esp0 = g_esp, rec, i;
     int handled;
 
-    if (!xbox_SehDispatchEnabled())
-        return 0;
     if (nparams > XBOX_EXCREC_MAXPARAMS)
         nparams = XBOX_EXCREC_MAXPARAMS;
 
@@ -474,8 +574,103 @@ int xbox_RaiseGuestException(uint32_t code, uint32_t flags, uint32_t address,
     for (i = 0; i < nparams; i++)
         SEH_MEM32(rec + XBOX_EXCREC_PARAMS + 4 * i) = params ? params[i] : 0;
 
-    handled = seh_raise(rec, address, esp0);
+    handled = seh_raise(rec, address, ctx_esp, quiet);
     g_esp = esp0;
+    return handled;
+}
+
+int xbox_RaiseGuestException(uint32_t code, uint32_t flags, uint32_t address,
+                             uint32_t nparams, const uint32_t *params)
+{
+    if (!xbox_SehDispatchEnabled())
+        return 0;
+    return seh_raise_new(code, flags, address, nparams, params, g_esp, 0);
+}
+
+/* Where a host fault's dispatch may build its frames: SEH_FAULT_GAP below
+ * the published esp, shrunk when the thread's guest stack has less room. */
+static uint32_t seh_fault_build_esp(const seh_thread *t, uint32_t esp)
+{
+    uint32_t gap = SEH_FAULT_GAP;
+
+    if (t->stack_hi > t->stack_lo && esp > t->stack_lo && esp <= t->stack_hi) {
+        uint32_t room = esp - t->stack_lo;
+        if (room < gap + SEH_FAULT_ROOM)
+            gap = room > SEH_FAULT_ROOM ? room - SEH_FAULT_ROOM : 0;
+    }
+    return (esp - gap) & ~0xFu;
+}
+
+/*
+ * The registers a handler sees. Lifted code keeps the guest registers in
+ * g_cpu (thread-local memory) and ebp in a C local, and the C compiler is
+ * free to keep any of them in host registers between two accesses to that
+ * memory. What is in g_cpu at a faulting guest access:
+ *
+ *  - an 8-bit or 32-bit access (MEM8/MEM32 and their signed forms, which is
+ *    every push, pop and ordinary load or store) may alias any uint32_t
+ *    member of g_cpu, so every earlier write to eax..edi, esp, ebp (the
+ *    published frame) and seh_ebp is in memory before it: the CONTEXT is
+ *    exact;
+ *  - a 16-bit, 64-bit or floating-point access cannot alias a uint32_t under
+ *    the C aliasing rules, so writes since the last 8/32-bit access or call
+ *    may still be pending (gcc and clang both sink an `esp -= 8` past a
+ *    MEM16 load): those registers read their previous value, and esp may be
+ *    too high by a pending allocation, which SEH_FAULT_GAP covers;
+ *  - EFlags is the last image published (the arithmetic flags are lazy C
+ *    locals), and Eip is 0, as is the record's ExceptionAddress: lifted code
+ *    keeps no guest pc.
+ *
+ * None of that matters to the common handlers: _except_handler3 and
+ * __CxxFrameHandler take the frame from the registration record, the
+ * try level from the frame, and resume through the anchor; the faulting
+ * address is in the record. A handler that continues execution gets the
+ * host context back as it was, so the lifted code goes on with its own
+ * registers, cached or not: that is why the CONTEXT's registers are not
+ * applied, and g_cpu is put back as captured.
+ */
+int xbox_SehRaiseHostFault(uint32_t va, uint32_t access, uintptr_t host_pc)
+{
+    seh_thread *t = seh_self();
+    RecompCpu saved = g_cpu;
+    uint32_t params[2], esp = g_esp;
+    int handled;
+
+    params[0] = access;
+    params[1] = va;
+    t->st.host_faults++;
+    if (seh_log_budget()) {
+        fprintf(stderr, "  [SEH] host fault on guest 0x%08X (%s, host pc %p): "
+                "raised to the guest's handlers as STATUS_ACCESS_VIOLATION\n",
+                va, access == 1 ? "write" : access == 8 ? "execute" : "read",
+                (void *)host_pc);
+        fflush(stderr);
+    }
+
+    g_esp = seh_fault_build_esp(t, esp);
+    handled = seh_raise_new(XBOX_STATUS_ACCESS_VIOLATION, 0, 0, 2, params,
+                            esp, 1);
+    if (handled) {
+        if ((g_eax != saved.r_eax || g_ecx != saved.r_ecx || g_edx != saved.r_edx
+                || g_ebx != saved.r_ebx || g_esi != saved.r_esi
+                || g_edi != saved.r_edi) && seh_log_budget()) {
+            fprintf(stderr, "  [SEH] the handler of the fault on guest 0x%08X "
+                    "changed registers in the CONTEXT; not applied, the access "
+                    "runs again with the registers it had\n", va);
+            fflush(stderr);
+        }
+    } else {
+        /* The same discovery kind as an unhandled raise (XBA-129): the
+         * blocker is named the same way, here before the crash it becomes. */
+        recomp_discovery_exception(va, XBOX_STATUS_ACCESS_VIOLATION,
+                                   "host fault on a guest address no guest handler took");
+        if (seh_log_budget()) {
+            fprintf(stderr, "  [SEH] host fault on guest 0x%08X: no guest handler "
+                    "took it; it goes to the host's handler\n", va);
+            fflush(stderr);
+        }
+    }
+    g_cpu = saved;
     return handled;
 }
 
@@ -547,6 +742,107 @@ void xbox_SehUnwind(uint32_t target_frame, uint32_t exc_record, uint32_t eip)
     g_esp = esp0;
 }
 
+/* ---- longjmp ----------------------------------------------------------- */
+
+#define XBOX_JMPBUF_EBP          0x00u
+#define XBOX_JMPBUF_EIP          0x14u
+#define XBOX_JMPBUF_REGISTRATION 0x18u
+#define XBOX_JMPBUF_TRYLEVEL     0x1Cu
+#define XBOX_JMPBUF_COOKIE       0x20u
+#define XBOX_JMPBUF_UNWINDFUNC   0x24u
+#define XBOX_JMPBUF_VC20         0x56433230u   /* 'VC20': a _setjmp3 buffer */
+
+/* Call guest code at va with nargs dword arguments (args[0] nearest the
+ * return address), handing it ebp the way a lifted callee inherits a frame
+ * (g_ebp, and g_seh_ebp for a funclet). 0 when va is not lifted. */
+static int seh_call_guest(uint32_t va, const uint32_t *args, int nargs,
+                          uint32_t ebp)
+{
+    recomp_func_t fn = va ? seh_resolve(va) : NULL;
+    uint32_t esp0 = g_esp, ebp0 = g_ebp, seh_ebp0 = g_seh_ebp;
+    int took, i;
+
+    if (!fn)
+        return 0;
+    for (i = nargs - 1; i >= 0; i--) {
+        g_esp -= 4;
+        SEH_MEM32(g_esp) = args[i];
+    }
+    g_esp -= 4; SEH_MEM32(g_esp) = 0;      /* return address */
+    g_ebp = g_seh_ebp = ebp;
+    took = xbox_GuestCpuEnterCallback();
+    fn();
+    xbox_GuestCpuLeaveCallback(took);
+    g_esp = esp0;
+    g_ebp = ebp0;
+    g_seh_ebp = seh_ebp0;
+    return 1;
+}
+
+/* The CRT's _local_unwind2(reg, stop) for an EH3 frame: run the __finally
+ * blocks of the try levels above `stop`, innermost first, each with the
+ * frame's ebp (registration + 0x10). The level is lowered before its block
+ * runs, as the CRT does, so a raise inside the block does not run it again. */
+static void seh_local_unwind2(uint32_t reg, uint32_t stop)
+{
+    uint32_t scope = SEH_MEM32(reg + 8);
+    int guard;
+
+    for (guard = 0; guard < SEH_MAX_FRAMES; guard++) {
+        uint32_t tl = SEH_MEM32(reg + 0xC), ent, handler;
+
+        if (tl == 0xFFFFFFFFu || tl == stop || tl > 0xFFFFu)
+            break;
+        ent = scope + tl * 12u;
+        SEH_MEM32(reg + 0xC) = SEH_MEM32(ent);           /* enclosing level */
+        if (SEH_MEM32(ent + 4))
+            continue;                                    /* an __except: nothing to run */
+        handler = SEH_MEM32(ent + 8);
+        if (!seh_call_guest(handler, NULL, 0, reg + 0x10) && seh_log_budget()) {
+            fprintf(stderr, "  [SEH] longjmp: __finally 0x%08X of frame 0x%08X "
+                    "is not lifted; skipped\n", handler, reg);
+            fflush(stderr);
+        }
+    }
+}
+
+void xbox_SehLongjmpUnwind(uint32_t buf)
+{
+    uint32_t reg, head;
+
+    if (!xbox_SehDispatchEnabled() || !g_fs_base)
+        return;
+    reg  = SEH_MEM32(buf + XBOX_JMPBUF_REGISTRATION);
+    head = SEH_MEM32(XBOX_FS_BASE);
+
+    /* Global: the frames between here and the setjmp caller's. The
+     * registration must be on the chain (or its end), else nothing is
+     * unwound: a buffer whose frame has gone says nothing reliable. */
+    if (reg != head) {
+        if (reg != XBOX_SEH_END_OF_CHAIN && !xbox_SehOnChain(reg))
+            return;
+        xbox_SehUnwind(reg == XBOX_SEH_END_OF_CHAIN ? 0 : reg, 0,
+                       SEH_MEM32(buf + XBOX_JMPBUF_EIP));
+        SEH_MEM32(XBOX_FS_BASE) = reg;
+    }
+    if (reg == 0 || reg == XBOX_SEH_END_OF_CHAIN)
+        return;
+
+    /* Local: the try levels the setjmp caller entered after its setjmp. */
+    if (SEH_MEM32(buf + XBOX_JMPBUF_COOKIE) == XBOX_JMPBUF_VC20) {
+        uint32_t fn = SEH_MEM32(buf + XBOX_JMPBUF_UNWINDFUNC);
+        if (fn && !seh_call_guest(fn, &buf, 1, SEH_MEM32(buf + XBOX_JMPBUF_EBP))
+                && seh_log_budget()) {
+            fprintf(stderr, "  [SEH] longjmp: the jmp_buf's unwind function "
+                    "0x%08X is not lifted; the setjmp caller's try levels are "
+                    "not unwound\n", fn);
+            fflush(stderr);
+        }
+        return;
+    }
+    seh_local_unwind2(reg, SEH_MEM32(buf + XBOX_JMPBUF_TRYLEVEL));
+}
+
 /* ---- anchors and resume ------------------------------------------------ */
 
 jmp_buf *recomp_seh_anchor(uint32_t reg, uint32_t ebp, const recomp_seh_desc *d)
@@ -571,6 +867,8 @@ jmp_buf *recomp_seh_anchor(uint32_t reg, uint32_t ebp, const recomp_seh_desc *d)
     a->desc  = d;
     a->host  = t->host;
     a->depth = t->depth;
+    a->faults = t->faults;
+    a->runtime = xbox_SehRuntimeSnapshot();
     t->n = n + 1;
     t->st.anchors++;
     return &a->jb;
@@ -659,6 +957,9 @@ static void seh_resume_thunk(void)
      * anchors and the dispatches this jump abandons. */
     t->n = best + 1;
     t->depth = t->a[best].depth;
+    /* The host-fault trampolines below the anchor go with the C frames. */
+    t->faults = t->a[best].faults;
+    xbox_SehRuntimeRestore(t->a[best].runtime);
     t->refused = 0;
     t->st.resumes++;
     t->st.handled++;

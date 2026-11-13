@@ -129,10 +129,34 @@ BOOL  DuplicateHandle(HANDLE srcProc, HANDLE src, HANDLE dstProc,
 HANDLE      w32_open_handle(int fd, const char *host_path);
 int         w32_handle_fd(HANDLE h);
 const char *w32_handle_path(HANDLE h);
+/* A file handle backed by the file layer's own object instead of (or as well
+ * as) a host fd: ext_free(ext) runs when the last reference goes. The disc
+ * image backing (kernel_disc.c, XBA-126) opens D:'s files this way, fd -1. */
+HANDLE      w32_open_handle_ext(int fd, const char *host_path, void *ext, void (*ext_free)(void *));
+void       *w32_handle_ext(HANDLE h);
 /* After a rename: later path-based operations on h follow the file. */
 void        w32_handle_set_path(HANDLE h, const char *host_path);
 /* Raise the soft RLIMIT_NOFILE as far as the host allows; see the .c. */
 int         w32_raise_fd_limit(unsigned long long *before, unsigned long long *after);
+/* A handle (one more reference, for CloseHandle) to the calling thread's
+ * thread object, the one QueueUserAPC queues to and an alertable wait of
+ * this thread wakes for. A thread CreateThread did not start -- the main
+ * thread -- gets one of its own here, kept for its lifetime; GetCurrentThread
+ * still answers the pseudo-handle for it. On Windows: DuplicateHandle of
+ * GetCurrentThread() (XBA-133). */
+HANDLE      w32_thread_apc_handle(void);
+/* The state of a waitable object, for the kernel's NtQuery* (XBA-114).
+ * Returns the kind (W32_QUERY_*) or 0 for a handle that is none of them:
+ *   EVENT: info[0] 0 notification / 1 synchronization, info[1] signalled
+ *   SEMAPHORE: info[0] count, info[1] maximum
+ *   MUTEX: info[0] 1 free / 1 - recursion when owned, info[1] owned by caller
+ *   TIMER: info[0..1] the 100 ns left (low, high; 0 once due), info[2]
+ *          signalled */
+#define W32_QUERY_EVENT     1
+#define W32_QUERY_SEMAPHORE 2
+#define W32_QUERY_MUTEX     3
+#define W32_QUERY_TIMER     4
+int         w32_query_object(HANDLE h, LONG info[3]);
 
 /* ---- Events ----------------------------------------------------------- */
 HANDLE CreateEventA(LPSECURITY_ATTRIBUTES sa, BOOL manualReset, BOOL initialState, LPCSTR name);

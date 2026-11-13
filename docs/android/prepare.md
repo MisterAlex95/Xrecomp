@@ -66,7 +66,35 @@ prepare puts `.old` back if a kill fell between the two renames. So a reader see
 
 | `images` | object | Optional (XBA-82): the disc's other images that `default.xbe` names, prepared from the game folder (one sub-run each in `<work>/images/<path>/`, shown inside step 4 as « game.xbe: ... », at most 8), disc path to library: `{"game.xbe": "libimage-1.so"}`. An image whose analysis or compile fails is left out (« left out » line): default.xbe still runs. Shells from before ignore it. See [multi-xbe.md](../technical/multi-xbe.md#android). |
 
+| `prepare` | object | Optional (XBA-128): what the Prepare that wrote this pack cost, measured as it ran (`tools/prepare/metrics.py`). See below. Informative: no check reads it. |
+
 Readers ignore fields they do not know. `tools/prepare/pack.py` (`read`, `check`) is the reference for the checks.
+
+**`prepare`** (written by the run that links the pack; a run that finds the pack up to date leaves it as it was):
+
+```json
+"prepare": {"total_s": 372.4, "steps_s": {"identify": 2.1, "analyse": 61.0, "lift": 48.2, "compile": 255.0,
+            "images": 0.0, "pack": 6.1}, "skipped": ["parse", "disasm"], "jobs": 4, "opt": "2", "files": 163,
+            "compiled": 163, "c_mb": 256.0, "obj_mb": 149.0, "pack_mb": 61.2, "cpus": 8,
+            "peak_rss_mb": {"max": 589, "p90": 302, "median": 163}, "tools_peak_mb": 900, "held_s": 40,
+            "thermal": {"samples": 74, "max": 3, "severe_s": 95, "jobs_min": 1, "temp_c_max": 41.5,
+                        "curve": [[0, 1], [60, 2], [120, 3]]}}
+```
+
+| Key | Meaning |
+|---|---|
+| `total_s`, `steps_s` | Wall time of this run, and of each step. A resumed run counts only itself; `skipped` names the stamps it found done (`parse`, `disasm`, `func_id`, `abi`, `lift`, `link`). |
+| `jobs`, `opt`, `files`, `compiled` | The compile: jobs started with, `-O`, C files, how many compiled now (the rest came from the object cache). |
+| `c_mb`, `obj_mb`, `pack_mb`, `cpus` | Sizes of the C, the objects, the libraries in the pack; the CPU count. |
+| `peak_rss_mb` | Each compile's own peak resident set (`wait4`'s `ru_maxrss`, one per clang): max, p90, median. Absent where the host has no `wait4`. |
+| `tools_peak_mb` | The largest pipeline tool (disasm, lift: `RUSAGE_CHILDREN` before the compile). |
+| `held_s` | Wall time the device log held every compile (`jobs` 0: critical heat, or a background Prepare while the game ran). |
+| `thermal` | From the device log (below): samples, the hottest status, seconds at severe or above, the fewest jobs allowed, the battery's hottest temperature, up to 24 points of the curve `[seconds into the run, status]`. Absent without a device log (a host). |
+
+The launcher shows it in Manage (« Preparation took 6 min 12 s · 4 jobs · -O2 », « Memory per compile job », « Hottest
+during it »; `PrepareFacts`), and the library check adds it to each title's report line (`prepare_s` when the check did
+not time a Prepare itself, `prepare_peak_mb`, `pack_mb`, `prepare_jobs`, `prepare_opt`, `prepare_thermal_max`,
+`prepare_temp_c_max`, `prepare_steps_s`; `peak_mem_mb` stays the game process's own peak).
 
 ### What a pack exports
 
@@ -83,7 +111,7 @@ so the loader fetches these with `dlsym` and the forwarders call through them (�
 python -m tools.prepare SOURCE --android --work DIR --pack-dir DIR --cc PATH [--cc-prefix-arg clang]
        --sysroot DIR --shell-lib PATH [--jobs N] [--opt 2] [--shell-abi N]
        [--ld PATH [--ld-prefix-arg ARG]] [--builtins PATH] [--python PATH]
-       [--extra-src FILE.c]... [--include-dir DIR]... [--force]
+       [--extra-src FILE.c]... [--include-dir DIR]... [--device-log FILE] [--force]
 ```
 
 | Flag | Device value |
@@ -101,6 +129,7 @@ python -m tools.prepare SOURCE --android --work DIR --pack-dir DIR --cc PATH [--
 | `--opt N` | clang `-O` level, default 2 (see Measurements). |
 | `--python PATH` | The interpreter for the pipeline steps; default `$XBA_PYTHON`, else `sys.executable`. |
 | `--extra-src`, `--include-dir` | Development: an extra C file in the pack, an extra `-I`. |
+| `--device-log FILE` | `<work>/device.jsonl`, the app's device log ([below](#the-device-log-xba-128)): compiles allowed now, thermal samples. Absent: `--jobs` all the way. |
 | `--force` | Redo every step (the object cache still applies). |
 
 The steps, each one subprocess (`python -m tools.<tool>`) or a pool of compiler processes, never the
@@ -200,6 +229,58 @@ ld.lld -EL --fix-cortex-a53-843419 -z now -z relro -z max-page-size=16384 -z noe
 `max-page-size=16384`: 16 KB-page devices (Android 15+). `--no-undefined` turns a symbol the shell does not export
 into a link error on the device rather than a dlopen failure at start.
 
+## The device log (XBA-128)
+
+While a Prepare runs, `PrepareMonitor` (in the `:prepare` process) appends a line to `<work>/device.jsonl` every 5 s
+(the file is new for each Prepare):
+
+```
+{"t": 1731456000, "thermal": 3, "jobs": 1, "temp_c": 41.5}
+```
+
+`t` epoch seconds, `thermal` PowerManager's thermal status (0 none … 6 shutdown), `jobs` the compiles allowed from now
+on, `temp_c` the battery's temperature, `game: true` when a background Prepare holds for the game. tools.prepare reads
+the last whole line before each compile starts (`metrics.jobs_now`, never above `--jobs`); running compiles are never
+killed. `DeviceGuard` (shared with the library check, XBA-130) decides:
+
+| Thermal status | Compiles at once |
+|---|---|
+| none, light, moderate (0–2) | all the jobs (`--jobs`) |
+| severe (3) | 1 |
+| critical and above (4–6) | 0: held, the running ones finish, none starts until it cools down |
+| any, a background Prepare while the game runs | 0 |
+
+So a hot device keeps going slowly instead of being stopped. The library check no longer cancels a Prepare when the
+device is hot: it pauses (nothing new starts after it) and lets the Prepare drop its own jobs.
+
+## When the Prepare's process dies (XBA-128)
+
+What a kill costs, step by step: identify, analyse (`disasm`, `func_id`, `abi`) and link have their stamps, so a
+finished sub-step is never redone; the compile keeps every finished object (cache, temp name + rename), so only the
+files in flight are lost; **the lift is one step**: a kill during it redoes the whole lift (it writes all the C at
+once; on the real title of « Measurements » the lift is under a minute of a 10–30 min Prepare).
+
+The app's side:
+
+- The service returns `START_REDELIVER_INTENT`: when the system kills `:prepare` (low memory, the phantom process
+  killer), Android starts it again with the same intent, and the Prepare goes on from its stamps. `status.json` counts
+  `resumes`; the log of the killed attempt is kept and appended to (« resumed after the Prepare's process died »).
+  After `MAX_RESUMES` (3) the title is failed with `KILLED`. A redelivered start of a Prepare that is not `running`
+  any more does nothing. If the system does not let it go to the foreground then, it stops, and the launcher shows the
+  Prepare as interrupted (« Resume », as before).
+- tools.prepare runs under `setsid`, out of the app's process group: a kill of the app's process can leave it and its
+  compilers running. Its group id is written to `<files>/prepare/<TID>/pgid` when it starts; the next Prepare of the
+  title ends that group before anything else (`PrepareRunner.killOrphans`).
+- A killed compiler (not the whole process) is the runner's retry with half the jobs, as before.
+
+## The quick first build (XBA-128): a switch, off
+
+With `<files>/prepare/quick-first` present (`adb shell run-as fr.adserver.xboxrecomp.shell touch
+files/prepare/quick-first`), a Prepare that is not a background one builds at `-O1`; when its pack is published, an
+`-O2` rebuild of the same title is queued **in the background** (Play is not blocked; it holds while the game runs).
+Off by default: on the x86 host, `-O1` saves 4–6 % of the compile and costs a second full compile afterwards (see
+« Measurements »). To be kept only if the device's numbers say otherwise.
+
 ## What the app provides
 
 **Environment** of the prepare process (set by the service):
@@ -262,23 +343,49 @@ sysroot) is not in it: a new clang does not make an old pack wrong.
 checkout (`tools/prepare/toolkit.py`; `pytest tools/prepare/test_toolkit.py` checks the selection), writes it into
 `pack.json` and keys its stamps on it.
 
-## Prepare again (XBA-74)
+## Self-healing (XBA-74, XBA-129)
 
 A run writes what the static analysis missed to `<work>/discovered.jsonl`
 ([discovery.md](../technical/discovery.md)) and the next Prepare seeds the analysis with it. The app closes the loop
-(`SelfHeal.java`, state in `<work>/selfheal.json`):
+by itself, with no question asked (`SelfHeal.java`, state in `<work>/selfheal.json`):
 
 - PrepareService records the file's length when a Prepare begins (`offset`): what the runs add after it is new.
 - The launcher records each launch (`launched_at`). Back on Home with no game process, it reads the system's record
   of how the game's process last ended (`ActivityManager.getHistoricalProcessExitReasons`, the main process only).
   An exit before the launch, or already looked at (`handled`), changes nothing.
-- A crash (`REASON_CRASH`, `REASON_CRASH_NATIVE`, `REASON_ANR`) with new `icall`, `thread` or `thread_ctx` entries:
-  Home's primary button is « Prepare again » (Play stays next to it). It counts a round, runs the Prepare, and starts
-  the game when the pack is ready.
-- A crash with nothing the Prepare can seed, or after 3 rounds in a row: Home says « Crashed · needs a fix » with the
-  blocker in the note: the first untranslated instruction reached (`unimpl`) when there is one, else the crash and the
-  system's words for it.
-- An exit without a crash ends the rounds. The offer stays until the next launch or Prepare again.
+- **A crash** (`REASON_CRASH`, `REASON_CRASH_NATIVE`, `REASON_ANR`) with new `icall`, `thread` or `thread_ctx`
+  entries: a round at once, the Preparing screen with a note (« The game crashed on code the preparation had missed:
+  preparing it again with it (round N), then the game starts by itself. B stops it; Settings › General ›
+  Self-healing turns this off. »), then the game starts again when the pack is ready.
+- **A run that ended well** with such entries (a skipped indirect call does not crash: the title goes on, maybe
+  wrong; the runtime says the first one in its log and counts them in the status line's `seeds`): a round **in the
+  background**. The Prepare runs with `background: true` in `status.json` (and in the queue): Home keeps **Play**
+  as the primary (the valid pack plays until the new one replaces it, atomic publish), its line says « Improving in
+  the background · Compile · 68 % », a note explains, and a quiet **Stop** cancels it. Nothing starts by itself
+  afterwards; the next start uses the new pack. PrepareService ends a background round, the launcher the others.
+- **What a Prepare cannot fix**: a crash with a guest exception nothing handled (`exception`), a guest stack switch
+  the runtime could not carry (`stack_switch`) or an untranslated instruction (`unimpl`), named in that order, even
+  when the run also found new code; or a crash with nothing new (« crash (…), nothing new found », with « ; calls stub
+  ordinal N (Name) » when the run called stub kernel routes). Home says « Crashed · needs a fix », the blocker in the
+  note. No round.
+- **The cap is on rounds without progress**, not on rounds. A round's progress is `discovered-seeds.json` growing
+  (the seeds tools.prepare took through seed_from_log's gates). A crash round whose Prepare took nothing stops the
+  loop at once (its pack is the same: no relaunch; « needs a fix », « the Prepare could not use what the run found
+  (N addresses, none of them code) »). `MAX_IDLE_ROUNDS` (2) such rounds in a row and new finds no longer start a
+  round by themselves until a run ends well with nothing new. On the device a crash is known only by the system's
+  words for it, so « the same blocker twice » is a crash that brought nothing new: the discovery file never writes
+  an address twice, a repeat of the same miss adds nothing. 12 rounds in a row is a safety net only.
+- **The player sees and stops it**: the notes, Stop (background) or B / Cancel (Preparing screen), and **Settings ›
+  General › Self-healing** (on by default, only with the toolchain). Off: a crash with new code offers **Prepare
+  again** as the primary (the button of XBA-74); a good run with new code offers a quiet **Prepare again** next to
+  Play (a background round). A stopped round starts nothing.
+- A crash round whose Prepare ended while the launcher was away is counted when Home next shows (and relaunches the
+  game if it took new code in).
+
+The same rules on a desktop: `python -m tools.compat heal` ([compat-runner.md](../technical/compat-runner.md#self-healing-rounds-and-recall-xba-129)),
+which `tools/compat/test_e2e.py::test_the_self_healing_loop` runs on a synthetic title (three rounds with progress,
+the fourth without: stop). Tests on the app side: `SelfHealTest`, `LauncherSelfHealTest` (screenshots
+`prepare-11` … `prepare-15`).
 
 ## Measurements
 
@@ -296,6 +403,21 @@ One real title's generated C (Alex's own disc, kept outside the repository; numb
 
 **`--opt`: default 2.** -O2 costs 6 % more compile time than -O1 and the same memory, for the code the game then
 runs all the time. -O1 stays an option for a low-end device.
+
+**-O1 then -O2 (XBA-128), measured again through the Prepare's own driver** (`compile_all` with its new per-job
+`wait4` peak RSS), on the generated C of a synthetic title of our own (40,000 small functions in a chain: 164 files,
+77.4 MB of C, the largest 2.0 MB), NDK r28c clang 19, 3 jobs in a container limited to 3 CPUs on the same host,
+2026-11-13:
+
+| | -O1 | -O2 |
+|---|---|---|
+| Wall time, 3 jobs | 43.1 s | 44.8 s |
+| Peak RSS per job: median / max | 86 / 121 MB | 86 / 120 MB |
+| Objects | 24.8 MB | 24.8 MB |
+
+Same story as the real title: -O1 is 4 % (synthetic) to 6 % (real) faster to first play and needs the same memory,
+and the background -O2 rebuild then costs a whole compile again (time, heat, battery). Not the default; the switch
+above is there to measure it on the Thor.
 
 **Jobs: 1 GB per job instead of 1.5.** The worst file peaks at 0.6 GB, 90 % of them under 0.3 GB, and the files are
 compiled largest first, so the big ones never run all at once. `min(5, (MemAvailable − 3 GB) / 1 GB)` gives a

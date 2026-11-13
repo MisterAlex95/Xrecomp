@@ -321,6 +321,7 @@ public class LauncherPrepareTest {
 
     @Test
     public void crashWithNewCodeOffersPrepareAgain() throws Exception {
+        SelfHeal.setAuto(app, false);   // XBA-129: on (the default), the launcher starts the round itself
         crashedRun("{\"t\":\"run\"}\n{\"t\":\"icall\",\"va\":\"0x0012ABCD\",\"ret\":\"0x00123456\"}\n");
         LauncherActivity a = launch("7-prepare-again");
         assertEquals(LauncherActivity.Screen.HOME, a.screenForTest());

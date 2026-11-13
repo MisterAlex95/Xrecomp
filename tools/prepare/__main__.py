@@ -224,8 +224,9 @@ def find_xbe(source, work):
     low = src.lower()
     if low.endswith(".xbe"):
         return src, os.path.dirname(src), None
-    if low.endswith((".iso", ".xiso")):
-        sys.path.insert(0, ROOT)
+    sys.path.insert(0, ROOT)
+    from tools.xiso.source import is_image_name
+    if is_image_name(src):                  # .iso/.xiso/.cso/.zso/.cci, or a split part (XBA-126)
         from tools.xiso.xdvdfs import Xiso
         dest = os.path.join(work, "xbe", "default.xbe")
         if not os.path.isfile(dest):
@@ -236,7 +237,8 @@ def find_xbe(source, work):
                     raise SystemExit("%s: no default.xbe in the image" % src)
                 iso.extract(e, dest)
         return dest, None, src
-    raise SystemExit("%s: expected a .iso/.xiso, a folder with default.xbe, or default.xbe" % src)
+    raise SystemExit("%s: expected a disc image (.iso/.xiso/.cso/.zso/.cci, or a split part), a folder with "
+                     "default.xbe, or default.xbe" % src)
 
 
 def unpack_image(image, dest):
@@ -399,11 +401,15 @@ def assemble_project(proj, profile, info):
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="tools.prepare", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("source", help=".iso/.xiso, a folder with default.xbe, or default.xbe")
+    ap.add_argument("source", help="a disc image (.iso/.xiso/.cso/.zso/.cci, or a split part), a folder with "
+                                   "default.xbe, or default.xbe")
     ap.add_argument("--work", help="work folder (default: <title id>-work next to SOURCE)")
     ap.add_argument("--no-build", action="store_true", help="stop after the C lift")
     ap.add_argument("--no-data", action="store_true",
-                    help="do not extract the disc image for the desktop build")
+                    help="no game data for the desktop build (the image is neither linked nor extracted)")
+    ap.add_argument("--extract", action="store_true",
+                    help="extract the disc image into <work>/game for the desktop build, as before XBA-126 "
+                         "(default: the build reads the image in place)")
     ap.add_argument("--force", action="store_true", help="redo every step")
     mi = ap.add_argument_group("for a launcher (docs/macos/launcher.md « Prepare interface »)")
     mi.add_argument("--progress", action="store_true",
@@ -429,6 +435,8 @@ def main(argv=None):
     an.add_argument("--extra-src", action="append", default=[], metavar="FILE.c",
                     help="an extra C file compiled into the pack (src/extra/)")
     an.add_argument("--include-dir", action="append", default=[], metavar="DIR", help="an extra -I")
+    an.add_argument("--device-log", metavar="FILE",
+                    help="the app's device log (JSON lines: thermal status, compiles allowed now; XBA-128)")
     mi = ap.add_argument_group("the disc's other images (XBA-82; set by the top-level prepare)")
     mi.add_argument("--image-map", help=argparse.SUPPRESS)   # the map file every image's build bakes in
     mi.add_argument("--game-dir", help=argparse.SUPPRESS)    # D:\ for an image that is not the disc root's
@@ -566,13 +574,15 @@ def desktop(a):
     ident = identify_xbe(xbe, work)
     if ident:
         print("      built with: %s" % ident["summary"], flush=True)
-    from tools.prepare import pack
+    from tools.prepare import pack, profiles
     try:
         profile = load_profile(tid, ident)
         env = pack.env_force_of(profile)
     except ValueError as e:
         _CODE = "BAD_PROFILE"
         raise SystemExit("profiles: %s" % e)
+    for line in profiles.xdk_report(ident, PROFILES):
+        print("      " + line, flush=True)
     if profile:
         print("      profile layers: %s" % " ".join(profile["keys"]), flush=True)
         for k in profile["missing"]:
@@ -696,12 +706,18 @@ def desktop(a):
             json.dump(stamp, f)
     exe = os.path.join(build, name)
     if image and not a.no_data:
-        data_dir = os.path.join(work, "game")
-        unpack_image(image, data_dir)
+        if a.extract:
+            data_dir = os.path.join(work, "game")
+            unpack_image(image, data_dir)
+        else:
+            # Read in place (XBA-126): build/game links to the image, the
+            # runtime mounts it (src/kernel/kernel_disc.c); nothing is copied.
+            data_dir = image
+            print("      the game data is read from the disc image in place: %s" % image, flush=True)
     link = os.path.join(build, "game")
     if data_dir:
-        if os.path.islink(link) or os.path.exists(link):
-            os.remove(link) if os.path.islink(link) else None
+        if os.path.islink(link) or os.path.isfile(link):
+            os.remove(link)
         if not os.path.exists(link):
             os.symlink(data_dir, link)
     if not a.image_map and data_dir:
@@ -828,11 +844,11 @@ def prepare_other_images(a, py, xbe, data_dir, work, exe, log):
     executable; a launch of one execs it in the same process (the kernel's
     xbox_launch_image, RECOMP_IMAGE_MAP)."""
     import re
-    from tools.triage import _named_xbes, _xbes_in_folder
+    from tools.triage import _named_xbes, disc_xbes
     with open(xbe, "rb") as f:
         named = _named_xbes(f.read())
-    others = [(rel, p) for rel, p in _xbes_in_folder(data_dir)
-              if rel.lower() != "default.xbe" and os.path.basename(rel).lower() in named]
+    # From a folder or straight from a disc image (XBA-126).
+    others = [(rel, p) for rel, p in disc_xbes(data_dir, work, named) if rel.lower() != "default.xbe"]
     if not others:
         return
     map_path = os.path.join(work, IMAGE_MAP)

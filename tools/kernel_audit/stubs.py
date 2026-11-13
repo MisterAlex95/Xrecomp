@@ -48,6 +48,24 @@ NOOP_OK = {
     103: "KeGetCurrentIrql: IRQL is read from KPCR.Irql by guest code; PASSIVE is the answer outside a raise",
     121: "KeIsExecutingDpc: DPCs run on their own thread, never inside the caller",
     365: "HalEnableSecureTrayEject: no tray lock to arm",
+    # XBA-114: the rest of the stub list, read against nxdk xboxkrnl.h.
+    43: "HalEnableSystemInterrupt: the interrupt controller's mask is not modelled; "
+        "the device models raise their lines through kernel_hal.c (HalDisableSystemInterrupt "
+        "does nothing either)",
+    75: "IoQueryFileInformation: takes a FILE_OBJECT, and none is handed out for host files "
+        "(ObReferenceObjectByHandle of a file gives none); a title driver's own is not ours "
+        "to answer: STATUS_INVALID_PARAMETER",
+    76: "IoQueryVolumeInformation: see IoQueryFileInformation",
+    77: "IoQueueThreadIrp: the thread's IRP list only serves cancelling a dying thread's "
+        "requests, and every request here completes inside its call",
+    90: "IoDismountVolume: host files have no mounted-volume state or cache to flush; the "
+        "next open finds them as they are",
+    91: "IoDismountVolumeByName: see IoDismountVolume",
+    178: "MmPersistContiguousMemory: a quick reboot restarts the process (kernel_reboot.c); "
+         "the launch data page is carried over by its own path and no other memory survives",
+    332: "WRITE_PORT_BUFFER_UCHAR: no device here is reached through x86 I/O ports "
+         "(the USHORT and ULONG forms do nothing either)",
+    377: "MmDbgReleaseAddress: no debug-kit memory to map or release",
 }
 
 CATEGORIES = [

@@ -3,6 +3,7 @@ project(nv2a_ffp_backend_regression C)
 enable_testing()
 set(NV2A_BACKEND_TEST_SOURCES
     ../../src/kernel/nv2a_pb_exec.c
+    ../../src/kernel/nv2a_coverage.c
     ../../src/kernel/recomp_status.c
     ../../src/kernel/recomp_discovery.c
     ../../src/platform/host_cpus.c

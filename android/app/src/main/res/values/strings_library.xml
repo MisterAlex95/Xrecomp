@@ -68,6 +68,9 @@
     <string name="LIB_ST_CACHES">Game caches</string>
     <string name="LIB_ST_SAVES">Saves</string>
     <string name="LIB_ST_DATA_DETAIL">The copy the app made when importing the game. Deleting it frees the space; the game stays in the library and can be imported again. Your disc image or folder is never touched.</string>
+    <string name="LIB_ST_IMAGE">Disc image, read in place</string>
+    <string name="LIB_ST_IMAGE_DETAIL">The game is read straight from your disc image, where it is: nothing was copied or extracted. The app keeps only the image\'s XBE files (for the title, the art and the Prepare). Deleting forgets the image; the image itself is never touched.</string>
+    <string name="LIB_ST_IMAGE_VALUE">%1$s in the app · image %2$s</string>
     <string name="LIB_ST_PACK_DETAIL">What the Prepare built for this game. Once deleted, the game needs preparing again (20 to 60 minutes).</string>
     <string name="LIB_ST_WORK_DETAIL">The Prepare\'s work files (generated code, objects). Only needed to resume or redo a Prepare faster.</string>
     <string name="LIB_ST_CACHES_DETAIL">The game\'s own caches (Z:, the cache partitions, E:\\CACHE), kept aside while another game plays. The game rebuilds them at its next start, which can take a few minutes.</string>

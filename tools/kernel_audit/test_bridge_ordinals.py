@@ -190,6 +190,8 @@ def load_data_exports():
 # the mapping cannot be derived from the export table and has to be stated.
 KDATA_OWNER = {
     "KDATA_EVENT_OBJ_TYPE": "ExEventObjectType",
+    "KDATA_KD_DEBUGGER_ENABLED": "KdDebuggerEnabled",
+    "KDATA_KD_DEBUGGER_NOT_PRESENT": "KdDebuggerNotPresent",
     "KDATA_MUTANT_OBJ_TYPE": "ExMutantObjectType",
     "KDATA_SEMAPHORE_OBJ_TYPE": "ExSemaphoreObjectType",
     "KDATA_TIMER_OBJ_TYPE": "ExTimerObjectType",

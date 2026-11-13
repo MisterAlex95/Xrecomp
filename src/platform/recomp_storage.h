@@ -30,6 +30,11 @@ typedef struct recomp_storage {
  * data into is there to see). default.xbe is looked up case-insensitively
  * in game_dir, as the kernel's path lookup does.
  *
+ * game_dir may also be a disc image read in place (XBA-126): a regular file
+ * (.iso, .cso, a split part...) or "fd:N[,M...]" (descriptors the shell
+ * opened). It is then not created, out->xbe is "<game_dir>/default.xbe" and
+ * 1 is returned; the kernel mounts the image and reports a bad one.
+ *
  * Returns 1 when default.xbe was found, 0 when it was not (out->xbe is ""),
  * -1 on bad arguments or a path too long. Prints one line on stdout:
  * "storage: game=... save=... (default.xbe found|missing)". */

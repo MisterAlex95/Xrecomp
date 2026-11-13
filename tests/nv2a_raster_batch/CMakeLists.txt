@@ -3,6 +3,7 @@ project(nv2a_raster_batch_regression C)
 enable_testing()
 add_executable(nv2a-raster-batch-test nv2a_raster_batch_test.c
     ../../src/kernel/nv2a_pb_exec.c
+    ../../src/kernel/nv2a_coverage.c
     ../../src/kernel/recomp_status.c
     ../../src/kernel/recomp_discovery.c
     ../../src/platform/host_cpus.c

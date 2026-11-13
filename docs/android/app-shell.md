@@ -96,8 +96,9 @@ Device check (XBA-23):
 
 ### Extracting a disc image in the app (XBA-40)
 
-When the player picks an Xbox disc image (XISO), the app extracts it once into the game folder, because the runtime
-reads plain files. It does this with `src/xiso` (target `xiso`, header `xiso.h`, libc only), which takes the fd that
+When the player picks an Xbox disc image (XISO) and it cannot be read in place
+([Disc images read in place](#disc-images-read-in-place-xba-126), the default since XBA-126), the app extracts it
+once into the game folder. It does this with `src/xiso` (target `xiso`, header `xiso.h`, libc only), which takes the fd that
 the ContentResolver opened and only needs `pread` on it:
 
 - `xiso_probe_fd` reads the volume, checks the whole directory tree and returns the title from `default.xbe`'s
@@ -504,7 +505,8 @@ Device check: [framegen.md](../technical/framegen.md) and the Device checklist o
 (XBA-54, and the import half of XBA-40.) The runtime reads the game with POSIX calls (`open`, `opendir`, the kernel's
 case-insensitive lookup), so it needs a real path, not a `content://` URI. The launcher's source screens therefore
 end with a folder path the runtime can open: the folder itself, or the app's `files/game/` after a copy or an
-extraction.
+extraction. A disc image is the exception (XBA-126): the runtime reads it itself, by path or through fds the game
+process opens from its documents ([Disc images read in place](#disc-images-read-in-place-xba-126)).
 
 ### Choose game folder
 
@@ -530,18 +532,47 @@ An error or a Cancel ends on Choose your game with the reason in the note; the p
 
 ### Choose disc image (ISO)
 
-1. The system file picker (`ACTION_OPEN_DOCUMENT`, any type: providers rarely know a MIME type for `.iso`); a name
-   that does not end in `.iso` or `.xiso` gives `NOT_AN_ISO`.
-2. A `ParcelFileDescriptor` is opened on it, and its fd goes to `libxba_import.so` (`XisoNative`, JNI in
-   `android/app/src/main/cpp/xiso_jni.c`): `xiso_probe_fd` gives the title, the total size of the files and whether
-   `default.xbe` is in the root. Not an XISO, or no `default.xbe`: `NOT_A_GAME_IMAGE` with the reason
-   (`xiso_strerror`).
-3. Free space in the external files dir must be the total plus 64 MB, or `NOT_ENOUGH_SPACE` names both.
-4. `xiso_extract_fd` extracts into `files/game.import/` (through `.partial`, renamed at the end) on the background
+1. The system file picker (`ACTION_OPEN_DOCUMENT`, any type: providers rarely know a MIME type for `.iso`; several
+   files at once, for the parts of a split image); a name that is not an image (`.iso .xiso .cso .ciso .zso .cci` or
+   a split part) gives `NOT_AN_ISO`, several files that are not one split set from its first part
+   `SPLIT_PARTS_INCOMPLETE`.
+2. `ParcelFileDescriptor`s are opened on its parts (with All files access and a storage-volume document: its path,
+   the other parts found by name), and their fds go to `libxba_import.so` (`XisoNative`, JNI in
+   `android/app/src/main/cpp/xiso_jni.c`): `probeParts` gives the title, the total size of the files, whether
+   `default.xbe` is in the root, the kind (iso, cso, split...) and the bytes stored. Not an XISO, or no `default.xbe`:
+   `NOT_A_GAME_IMAGE` with the reason (`xiso_strerror`).
+3. **Read in place** (the default, XBA-126) when the image can be reached at every start: a path, or documents whose
+   read permission persisted (`takePersistableUriPermission`). See
+   [Disc images read in place](#disc-images-read-in-place-xba-126). Otherwise, or with `RECOMP_DISC_IMAGE=0` in
+   `recomp.cfg`, it is extracted:
+4. Free space in the external files dir must be the total plus 64 MB, or `NOT_ENOUGH_SPACE` names both.
+5. `extractParts` extracts into `games/.import/` (through `.partial`, renamed at the end) on the background
    thread; its progress callback calls back into Java (at each file start and at most ten times a second), which
-   updates the ring and returns Cancel. A cancel or an error leaves `files/game/` untouched.
-5. The extracted `default.xbe` is hashed ([WRONG_GAME](#wrong_game)), then `game.import/` is swapped in place of
-   `game/` as above and remembered.
+   updates the ring and returns Cancel. A cancel or an error leaves the previous game untouched.
+6. The extracted `default.xbe` is hashed ([WRONG_GAME](#wrong_game)), then `.import/` is swapped in as
+   `games/<TID>/` and remembered.
+
+### Disc images read in place (XBA-126)
+
+An image is not extracted when the app can open it again at every game start. Only its XBE files (`extractXbes`: every
+`*.xbe`, at most 16 of 32 MB) are copied, with their directories, into a **companion folder** `files/discs/<TID>/`,
+next to `disc.json` (`DiscImages`): `path` (with All files access) or `uris` (the documents, in part order), `names`,
+`kind`, `stored`, `files`. The folder is checked like an import ([WRONG_GAME](#wrong_game) on its `default.xbe`), staged
+in `files/discs/.import/` and swapped in; it is the record's `data_dir` (`data_kind` `image`). Everything that reads a
+game folder works on it: title, art and theme, hash, the Prepare (the other images included, XBA-82), Home.
+
+At each game start `ShellActivity` reads `disc.json` and sets `RECOMP_GAME_DIR` to the image's path, or to
+`fd:N[,M...]` from the documents opened there (`openFileDescriptor`, `detachFd`: the fds live as long as the game
+process). A quick reboot or a hand-over to another image restarts the process, which opens them again. The runtime
+mounts the image ([disc-images.md](../technical/disc-images.md)); the pack loader reads the title ID out of it.
+Unreachable (SD card out, permission revoked): `fd:-1`, and the shell shows its no-game-data message; with a path,
+Home already says the source is gone (`SOURCE_GONE`). logcat: `launcher: image <name>: cso split, 2 part(s), read in
+place`, `shell: disc image <name> (<kind>) -> <spec>`, then `[DISC] mounted ...`.
+
+Storage and Manage show the row **Disc image, read in place**: what the app holds (a few MB) against the image's
+size, the image's path or name in the description. Deleting it forgets the image (the companion folder goes; the
+record stays in the library); the image itself is never touched. The library's **Import** of an image does the same
+(its documents under the library folder's tree, whose permission persists, or its path).
 
 Why a separate JNI library rather than `libmain.so`: `libmain.so` needs `libSDL2.so` loaded first and brings the
 whole runtime (`--whole-archive` toolkit, the title) into a process that would never run it. `libxba_import.so` is
@@ -628,10 +659,12 @@ Use the Thor's gamepad for everything unless a step says touch.
 
 ## Game library
 
-One APK, several games. A **library folder** (for example `/sdcard/xbox`) holds disc images (`*.iso`, `*.xiso`) and
-extracted game folders (a folder with a `default.xbe`); the launcher lists them, and the player imports the ones he
-plays. Games are never run from the image: an image is extracted once into `<external files>/games/<TID>/`, a game
-folder read as files is played in place (no copy). Prepare packs, Prepare status, the title image, the game theme,
+One APK, several games. A **library folder** (for example `/sdcard/xbox`) holds disc images (`*.iso`, `*.xiso`,
+`*.cso`, `*.zso`, `*.cci`, split sets such as `Game.1.iso` + `Game.2.iso`) and extracted game folders (a folder with
+a `default.xbe`); the launcher lists them, and the player imports the ones he plays. An image is read in place
+([Disc images read in place](#disc-images-read-in-place-xba-126): only its XBEs are copied, into
+`files/discs/<TID>/`), or extracted into `<external files>/games/<TID>/` with `RECOMP_DISC_IMAGE=0`; a game folder
+read as files is played in place (no copy). Prepare packs, Prepare status, the title image, the game theme,
 the language and the saves were already per title ID; the few caches that are not (see below) change hands when the
 launched game changes.
 
@@ -650,8 +683,9 @@ as before (Welcome, Home of the one game, Change game): the one-game launcher an
 ### Scan
 
 `LibraryScanner` on a worker: at most four levels, 5,000 entries; names starting with « . » and `Android/` skipped; a
-folder holding `default.xbe` is a game folder (not descended). Each new or changed image gives its `default.xbe` only
-(`XisoNative.extractFile`, at most 32 MB) into `files/library/xbe/<TID>-<sha8>/` (art, theme, hash, and the Prepare's
+folder holding `default.xbe` is a game folder (not descended). A split set is one item (its first part; the parts'
+locations in the index's `parts`, their sizes summed); a later part alone is not listed. Each new or changed image
+gives its `default.xbe` only (`XisoNative.extractFileParts` over its parts, at most 32 MB) into `files/library/xbe/<TID>-<sha8>/` (art, theme, hash, and the Prepare's
 source before an import); an unchanged one (location, size, modification time) is not opened again. The title image
 and the game theme are cached there and then (`files/art/<TID>.png`, `<TID>.theme`). Files that are not games (not
 an Xbox image, no or a bad `default.xbe`, unreadable) make the dimmed « Other files (n) » line under the grid. The
@@ -723,10 +757,11 @@ left the library folder.
 
 | What | Where |
 |---|---|
-| Records (launcher only; temporary file, then rename) | `files/library/games.json`: `selected`, per title ID `title`, `source`, `data_dir`, `data_kind` (`imported`, `in_place`, `cfg`), `xbe_sha256`, `added_at`, `last_played`, `play_ms` |
+| Records (launcher only; temporary file, then rename) | `files/library/games.json`: `selected`, per title ID `title`, `source`, `data_dir`, `data_kind` (`imported`, `in_place`, `cfg`, `image`), `xbe_sha256`, `added_at`, `last_played`, `play_ms` |
 | Scan index (rebuildable) | `files/library/index.json` |
 | Cached `default.xbe` | `files/library/xbe/<TID>-<sha8>/default.xbe` |
 | Imported games | `<external files>/games/<TID>/` (staged in `games/.import`, swapped once checked) |
+| Disc images read in place | `files/discs/<TID>/`: the image's XBEs and `disc.json` (staged in `discs/.import`) |
 | Owner of the shared caches, stashes | `files/library/cache_owner`, `files/save/.stash/<TID>/` |
 
 **Migration.** The first start of this version (`Library.migrate`, no file moves): the game a launcher without the
@@ -952,7 +987,9 @@ from another `default.xbe` (« disc changed ») or by an older toolkit than this
 changed »; Home keeps Play there, the check prepares, since it measures this APK's toolkit). The Prepare
 is PrepareService's, as from Home (its notification, its `status.json`); failed → the title's line is stage `none`,
 blocker `prepare failed: CODE: msg`; interrupted (killed, cancelled by the system) → started again, at most 3 times.
-A title whose files are not in the app (an image not imported) is prepared from the cached `default.xbe` and not
+A disc image the library scan found and never imported is prepared from and booted from the image itself when the
+app can read it by its path (XBA-126: D:\ served from the image, nothing extracted). A title whose files are not in
+the app otherwise (an image reached only through a document) is prepared from the cached `default.xbe` and not
 started: stage `prepares`, blocker `not booted: the game's files are not in the app`. Then the boot:
 
 1. `current.json` (title ID, `<files>/check/run/<TID>/`, until when); the launcher's launch steps (the launched game,

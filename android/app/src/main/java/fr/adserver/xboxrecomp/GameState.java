@@ -88,7 +88,7 @@ final class GameState {
         default:
             break;
         }
-        if (Library.KIND_IN_PLACE.equals(f.dataKind))
+        if (Library.KIND_IN_PLACE.equals(f.dataKind) || Library.KIND_IMAGE.equals(f.dataKind))
             return Chip.SOURCE_GONE;
         if (Library.KIND_CFG.equals(f.dataKind))
             return Chip.DATA_MISSING;

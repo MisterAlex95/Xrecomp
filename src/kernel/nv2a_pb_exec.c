@@ -53,6 +53,7 @@
 #include "nv2a_vsh_interp.h"
 #include "nv2a_combiner.h"
 #include "nv2a_backend.h"
+#include "nv2a_coverage.h"     /* what is not drawn, by name (XBA-120) */
 #if defined(_WIN32)
 #include <windows.h>
 #define NV_TLS __declspec(thread)
@@ -276,12 +277,16 @@ typedef struct {
     uint32_t pitch;                     /* bytes per row, from CONTROL1  */
     uint32_t color;                     /* NV097 colour-format code      */
     uint32_t addr_u, addr_v;            /* wrap mode per axis            */
+    uint32_t addr_p;                    /* a volume's third axis         */
     uint32_t palette;                   /* guest address of the CLUT, P8 */
     uint32_t levels;                    /* mip levels, from FORMAT       */
     uint32_t filter;                    /* SET_TEXTURE_FILTER            */
+    uint32_t control0;                  /* SET_TEXTURE_CONTROL0: LOD clamps */
     uint32_t border;                    /* SET_TEXTURE_BORDER_COLOR      */
     int      border_color;              /* FORMAT: BORDER reads `border` */
     int      cube;                      /* FORMAT: six faces, not one    */
+    uint32_t dims;                      /* FORMAT: DIMENSIONALITY (2, 3) */
+    uint32_t depth;                     /* FORMAT: BASE_SIZE_P, volumes  */
     int      valid;
 } Texture;
 
@@ -570,6 +575,25 @@ static void note_texture_use(void)
  * executor does not model, millions of times a second, so no search. The
  * report sorts s_unhandled and rebuilds the slots afterwards. */
 static uint16_t s_unhandled_slot[0x2000 / 4];
+
+/* Methods the switch in nv2a_pb_exec_method does not take but that are
+ * modelled all the same, read from the register mirror s_reg where they
+ * matter (lighting, culling, stencil, polygon offset, shadow compare): not
+ * "unmodelled" in the status file. Keep in step with the s_reg reads. */
+static int method_modelled(uint32_t m)
+{
+    m &= 0x1FFC;
+    return m == 0x0298 || m == 0x0308 || m == 0x0314 || m == 0x032C || m == 0x0338
+        || (m >= 0x0360 && m <= 0x0378) || m == 0x0384 || m == 0x0388
+        || m == 0x039C || m == 0x03A0 || m == 0x03B4 || m == 0x03BC
+        || (m >= 0x0480 && m < 0x04C0)                  /* MODEL_VIEW_MATRIX0 */
+        || (m >= 0x0A10 && m < 0x0A1C)                  /* SCENE_AMBIENT_COLOR */
+        || m == 0x1E6C                                  /* SHADOW_DEPTH_FUNC */
+        || (m >= 0x1000 && m < 0x1400                   /* lights: colours, range, */
+            && ((m & 0x7F) < 0x18 || (m & 0x7F) == 0x24 /* direction, position, */
+                || ((m & 0x7F) >= 0x34 && (m & 0x7F) < 0x40)   /* attenuation */
+                || (m & 0x7F) >= 0x5C));
+}
 
 static void note_unhandled(uint32_t method, uint32_t param)
 {
@@ -1193,7 +1217,13 @@ static void texture_to_backend(const Texture *t, Nv2aTexture *o)
     o->color  = t->color;
     o->addr_u = t->addr_u;
     o->addr_v = t->addr_v;
-    o->levels = t->pitch ? 1 : t->levels;
+    /* By the format, not by a pitch: CONTROL1 is not sent again for a
+     * swizzled texture, so a stale pitch from an earlier linear one took
+     * every later texture's levels away. */
+    o->levels = tex_size_from_format(t->color) ? (t->levels ? t->levels : 1) : 1;
+    o->control0 = t->control0;
+    o->depth = t->dims == 3 && tex_size_from_format(t->color) ? t->depth : 0;
+    o->addr_p = t->addr_p;
     o->filter = t->filter;
     o->palette = t->palette;
     o->border = t->border;
@@ -1240,6 +1270,10 @@ static void current_render_state(Nv2aRenderState *r)
 
 static int sample_texture(uint32_t u, uint32_t v, uint32_t *argb);
 static uint32_t tex_face_stride(const Texture *t);
+static uint32_t tex_texel_bytes(uint32_t fmt);
+static uint32_t linear_twin(uint32_t fmt);
+static int decode_texel(const Texture *t, uint32_t fmt, const uint8_t *p, uint32_t u,
+                        uint32_t *argb);
 
 uint32_t nv2a_backend_texture_bytes(const Nv2aTexture *tex)
 {
@@ -1253,7 +1287,43 @@ uint32_t nv2a_backend_texture_bytes(const Nv2aTexture *tex)
     t.levels = tex->levels;
     if (!tex_size_from_format(t.color))
         return t.pitch * t.height;
+    if (tex->depth > 1) {                   /* a volume: every level, w*h*d */
+        uint32_t lv, w = t.width, h = t.height, d = tex->depth, total = 0;
+        uint32_t block = d3d8_format_dxt_block_bytes(t.color);
+        for (lv = 0; lv < (t.levels ? t.levels : 1); lv++) {
+            total += (block ? ((w + 3) / 4) * ((h + 3) / 4) * block
+                            : w * h * tex_texel_bytes(t.color)) * d;
+            w = w > 1 ? w >> 1 : 1;
+            h = h > 1 ? h >> 1 : 1;
+            d = d > 1 ? d >> 1 : 1;
+        }
+        return total;
+    }
     return tex_face_stride(&t) * (tex->cube ? 6u : 1u);
+}
+
+int nv2a_backend_texture_level(const Nv2aTexture *tex, uint32_t level, Nv2aTexture *out)
+{
+    uint32_t lv, w = tex->width, h = tex->height, d = tex->depth > 1 ? tex->depth : 1, off = 0;
+    uint32_t block = d3d8_format_dxt_block_bytes(tex->color);
+
+    if (level >= (tex->levels ? tex->levels : 1) || (level && !tex_size_from_format(tex->color)))
+        return 0;
+    for (lv = 0; lv < level; lv++) {
+        off += (block ? ((w + 3) / 4) * ((h + 3) / 4) * block
+                      : w * h * tex_texel_bytes(tex->color)) * d;
+        w = w > 1 ? w >> 1 : 1;
+        h = h > 1 ? h >> 1 : 1;
+        d = d > 1 ? d >> 1 : 1;
+    }
+    *out = *tex;
+    out->offset = tex->offset + off;
+    out->width = w;
+    out->height = h;
+    if (tex->depth > 1)
+        out->depth = d;
+    out->levels = 1;
+    return 1;
 }
 
 int nv2a_backend_decode_texture(const Nv2aTexture *tex, uint32_t *argb_out)
@@ -1276,6 +1346,25 @@ int nv2a_backend_decode_texture(const Nv2aTexture *tex, uint32_t *argb_out)
     s_gpu.texs[0].filter = 0;
     s_gpu.texs[0].cube   = 0;
     s_gpu.texs[0].valid  = 1;
+    if (tex->depth > 1) {
+        /* A volume: one 3D Morton order (xemu swizzle.c: x, y, z bits in
+         * turn), swizzled formats only. */
+        const uint8_t *mem = (const uint8_t *)xbox_GetMemoryOffset();
+        uint32_t z, fmt = linear_twin(tex->color);
+        ok = d3d8_format_is_swizzled(tex->color) && !d3d8_format_dxt_block_bytes(tex->color);
+        for (z = 0; z < tex->depth && ok; z++)
+            for (y = 0; y < tex->height && ok; y++)
+                for (x = 0; x < tex->width; x++)
+                    if (!decode_texel(&s_gpu.texs[0], fmt, mem + tex->offset,
+                                      xbox_swizzle_offset_3d(x, y, z, tex->width, tex->height,
+                                                             tex->depth),
+                                      &argb_out[((size_t)z * tex->height + y) * tex->width + x])) {
+                        ok = 0;
+                        break;
+                    }
+        s_gpu.texs[0] = saved;
+        return ok;
+    }
     for (y = 0; y < tex->height && ok; y++)
         for (x = 0; x < tex->width; x++)
             if (!sample_texture(x, y, &argb_out[(size_t)y * tex->width + x])) {
@@ -1592,6 +1681,18 @@ static uint32_t linear_twin(uint32_t fmt)
     case 0x06: return 0x12;                /* A8R8G8B8  -> LIN_A8R8G8B8  */
     case 0x07: return 0x1E;                /* X8R8G8B8  -> LIN_X8R8G8B8  */
     case 0x19: return 0x1F;                /* A8        -> LIN_A8        */
+    /* XBA-120: the rest of xemu's SZ_ list. */
+    case 0x1A: return 0x20;                /* SZ_A8Y8       -> LU_IMAGE_A8Y8       */
+    case 0x27: return 0x37;                /* SZ_R6G5B5     -> LU_IMAGE_R6G5B5     */
+    case 0x28: return 0x17;                /* SZ_G8B8       -> LU_IMAGE_G8B8       */
+    case 0x29: return 0x16;                /* SZ_R8B8       -> LU_IMAGE_R8B8       */
+    case 0x32: return 0x35;                /* SZ_Y16        -> LU_IMAGE_Y16        */
+    case 0x33: return 0x36;                /* SZ_YB16YA16   -> LU_IMAGE_YB16YA16   */
+    case 0x38: return 0x3D;                /* SZ_R5G5B5A1   -> LU_IMAGE_R5G5B5A1   */
+    case 0x39: return 0x3E;                /* SZ_R4G4B4A4   -> LU_IMAGE_R4G4B4A4   */
+    case 0x3A: return 0x3F;                /* SZ_A8B8G8R8   -> LU_IMAGE_A8B8G8R8   */
+    case 0x3B: return 0x40;                /* SZ_B8G8R8A8   -> LU_IMAGE_B8G8R8A8   */
+    case 0x3C: return 0x41;                /* SZ_R8G8B8A8   -> LU_IMAGE_R8G8B8A8   */
     default:   return fmt;                 /* already linear, or unhandled */
     }
 }
@@ -1671,6 +1772,16 @@ static int sample_tex(const Texture *t, uint32_t face_offset,
     } else {
         p = mem + base + (size_t)v * t->pitch;
     }
+    return decode_texel(t, fmt, p, u, argb);
+}
+
+/* Texel u of the row (or swizzled image) at p, in linear format fmt (a
+ * swizzled format's linear twin): the format switch of sample_tex, apart so
+ * that a volume's 3D Morton index reads through it too. */
+static int decode_texel(const Texture *t, uint32_t fmt, const uint8_t *p, uint32_t u,
+                        uint32_t *argb)
+{
+    const uint8_t *mem = (const uint8_t *)xbox_GetMemoryOffset();
 
     switch (fmt) {
 
@@ -1763,6 +1874,81 @@ static int sample_tex(const Texture *t, uint32_t face_offset,
     case 0x1B: {                                    /* LIN_AL8 */
         uint32_t t = p[u];
         *argb = (t << 24) | (t << 16) | (t << 8) | t;
+        return 1;
+    }
+
+    /* XBA-120: the formats of xemu's list nothing read. Bump-map formats
+     * (D3D's V8U8 is G8B8, L6V5U5 R6G5B5, V16U16 YB16YA16) hand their
+     * bytes over as they are: the bump stages (and SET_TEXTURE_FILTER's
+     * signed channels, rc_signed) read them as two's complement. A channel
+     * a format lacks reads 1, as alpha does. Luminance repeats in R, G, B;
+     * 16-bit values keep their top byte. */
+    case 0x14: {                                    /* LU_IMAGE_SY8 (signed Y8) */
+        uint32_t t = p[u];
+        *argb = 0xFF000000u | (t << 16) | (t << 8) | t;
+        return 1;
+    }
+    case 0x15: {                                    /* LU_IMAGE_X7SY9: signed 9-bit Y */
+        uint32_t t = (((const uint16_t *)p)[u] >> 1) & 0xFFu;
+        *argb = 0xFF000000u | (t << 16) | (t << 8) | t;
+        return 1;
+    }
+    case 0x16: {                                    /* LU_IMAGE_R8B8 */
+        uint32_t t = ((const uint16_t *)p)[u];
+        *argb = 0xFF00FF00u | ((t >> 8) << 16) | (t & 0xFFu);
+        return 1;
+    }
+    case 0x17:                                      /* LU_IMAGE_G8B8 */
+    case 0x18: {                                    /* LU_IMAGE_SG8SB8 */
+        uint32_t t = ((const uint16_t *)p)[u];
+        *argb = 0xFFFF0000u | t;                    /* G high byte, B low */
+        return 1;
+    }
+    case 0x20: {                                    /* LU_IMAGE_A8Y8 */
+        uint32_t t = ((const uint16_t *)p)[u], y = t & 0xFFu;
+        *argb = ((t >> 8) << 24) | (y << 16) | (y << 8) | y;
+        return 1;
+    }
+    case 0x37: {                                    /* LU_IMAGE_R6G5B5 */
+        uint32_t t = ((const uint16_t *)p)[u];
+        *argb = 0xFF000000u
+              | (expand((t >> 10) & 0x3F, 6) << 16)
+              | (expand((t >>  5) & 0x1F, 5) <<  8)
+              |  expand( t        & 0x1F, 5);
+        return 1;
+    }
+    case 0x2E: {                                    /* LU_IMAGE_DEPTH_X8_Y24_FIXED */
+        /* Depth in the top 24 bits, as a Z24S8 surface stores it (xemu
+         * uploads it as GL_UNSIGNED_INT_24_8): its top byte, as grey. */
+        uint32_t t = ((const uint32_t *)p)[u] >> 24;
+        *argb = 0xFF000000u | (t << 16) | (t << 8) | t;
+        return 1;
+    }
+    case 0x30:                                      /* LU_IMAGE_DEPTH_Y16_FIXED */
+    case 0x35: {                                    /* LU_IMAGE_Y16 */
+        uint32_t t = ((const uint16_t *)p)[u] >> 8;
+        *argb = 0xFF000000u | (t << 16) | (t << 8) | t;
+        return 1;
+    }
+    case 0x36: {                                    /* LU_IMAGE_YB16YA16 */
+        uint32_t t = ((const uint32_t *)p)[u];
+        *argb = 0xFFFF0000u | ((t >> 24) << 8) | ((t >> 8) & 0xFFu);
+        return 1;
+    }
+    case 0x3D: {                                    /* LU_IMAGE_R5G5B5A1 */
+        uint32_t t = ((const uint16_t *)p)[u];
+        *argb = ((t & 1u) ? 0xFF000000u : 0u)
+              | (expand((t >> 11) & 0x1F, 5) << 16)
+              | (expand((t >>  6) & 0x1F, 5) <<  8)
+              |  expand((t >>  1) & 0x1F, 5);
+        return 1;
+    }
+    case 0x3E: {                                    /* LU_IMAGE_R4G4B4A4 */
+        uint32_t t = ((const uint16_t *)p)[u];
+        *argb = (expand( t        & 0x0F, 4) << 24)
+              | (expand((t >> 12) & 0x0F, 4) << 16)
+              | (expand((t >>  8) & 0x0F, 4) <<  8)
+              |  expand((t >>  4) & 0x0F, 4);
         return 1;
     }
 
@@ -2886,6 +3072,9 @@ static uint32_t   s_bcount;
 /* The full vertices, for a back end with NV2A_BACKEND_CAP_PIXEL (about 23 MB,
  * allocated only then). Same index as s_bverts. */
 static Nv2aVertexFull *s_bfull;
+/* What s_bverts holds: NV2A_PRIM_TRIANGLES, or points / segment pairs for
+ * a back end with NV2A_BACKEND_CAP_POINTS_LINES. backend_flush resets it. */
+static uint32_t s_bprim;
 
 static int backend_wants_pixel(void)
 {
@@ -2976,6 +3165,60 @@ static void current_pixel_state(Nv2aPixelState *p, uint32_t shade, int textured)
     p->other_stage_input = s_reg[0x1E78 / 4];          /* SET_SHADER_OTHER_STAGE_INPUT */
 }
 
+/* ---- points and lines (XBA-120) -----------------------------------------
+ *
+ * A back end with NV2A_BACKEND_CAP_POINTS_LINES gets them as such, from
+ * every path: points one vertex each, lines as segment pairs (a strip's
+ * segments i, i+1; a loop's closing segment last). The CPU rasteriser draws
+ * neither (note_batch_gaps counts them). */
+static int prim_is_point_line(uint32_t prim)
+{
+    return prim >= NV_PRIM_POINTS && prim <= NV_PRIM_LINE_STRIP;
+}
+
+static int backend_points_lines(void)
+{
+    return backend_draws()
+        && (s_backend->caps & (NV2A_BACKEND_CAP_PIXEL | NV2A_BACKEND_CAP_POINTS_LINES))
+               == (NV2A_BACKEND_CAP_PIXEL | NV2A_BACKEND_CAP_POINTS_LINES);
+}
+
+/* Segments a line primitive of n vertices makes, and segment k's two
+ * vertices (batch positions). */
+static uint32_t line_segments(uint32_t prim, uint32_t n)
+{
+    switch (prim) {
+    case NV_PRIM_LINES:      return n / 2;
+    case NV_PRIM_LINE_STRIP: return n > 1 ? n - 1 : 0;
+    case NV_PRIM_LINE_LOOP:  return n > 2 ? n : (n == 2 ? 1 : 0);
+    default:                 return 0;
+    }
+}
+
+static void line_segment(uint32_t prim, uint32_t n, uint32_t k, uint32_t *a, uint32_t *b)
+{
+    if (prim == NV_PRIM_LINES) {
+        *a = 2 * k;
+        *b = 2 * k + 1;
+    } else {
+        *a = k;
+        *b = (k + 1) % n;
+    }
+}
+
+/* The batch's prim, point size and sprite flag for a back end. The size is
+ * SET_POINT_SIZE (0x043C), 6.3 fixed point in logical pixels (xemu reads it
+ * as value / 8), 1 while the title never sent it, times the anti-aliasing
+ * factor. */
+static void batch_prim_fields(Nv2aBatch *b, uint32_t prim)
+{
+    uint32_t v = s_reg[0x043C / 4] & 0x1FFu;
+
+    b->prim = prim;
+    b->point_size = (v ? (float)v / 8.0f : 1.0f) * aa_scale_x();
+    b->point_sprite = prim == NV2A_PRIM_POINTS && s_reg[0x031C / 4] != 0;
+}
+
 /* `textured`: the batch carried texture coordinates, so the bound texture is
  * part of it. `screen`: the batch came down the screen-space path (no
  * combiners, no depth on the CPU rasteriser). */
@@ -2998,6 +3241,7 @@ static void backend_flush(int textured, int screen)
     batch.full = NULL;
     batch.pixel = NULL;
     batch.program = NULL;
+    batch_prim_fields(&batch, s_bprim);
     if (textured && s_gpu.texs[0].valid) {
         texture_to_backend(&s_gpu.texs[0], &tex);
         batch.texture = &tex;
@@ -3015,8 +3259,10 @@ static void backend_flush(int textured, int screen)
         batch.pixel = &ps;
     }
     s_backend->draw(&surf, &batch);
-    s_gpu.tris_drawn += s_bcount / 3;
+    if (s_bprim == NV2A_PRIM_TRIANGLES)
+        s_gpu.tris_drawn += s_bcount / 3;
     s_bcount = 0;
+    s_bprim = NV2A_PRIM_TRIANGLES;
     note_drawn();
 }
 
@@ -3081,6 +3327,67 @@ static void raster_indexed(uint32_t i0, uint32_t i1, uint32_t i2, uint32_t argb)
     }
     raster_triangle(p[0], p[1], p[2], argb,
                     textured ? (const float (*)[2])uv : NULL);
+}
+
+/* One screen-space vertex for a back end's point or line batch, as
+ * raster_indexed gathers a triangle's: colour argb, flat. */
+static void screen_vertex(uint32_t ix, uint32_t argb)
+{
+    Nv2aVertex *o = backend_slot();
+    float p[4], uv[2];
+    int textured;
+
+    if (!o || !fetch_attr(&s_gpu.attr[0], ix, p))
+        return;
+    p[0] *= aa_scale_x();
+    p[1] *= aa_scale_y();
+    textured = fetch_texcoord(ix, uv);
+    o->x = p[0];
+    o->y = p[1];
+    o->z = p[2];
+    o->rhw = p[3];
+    o->diffuse = argb;
+    o->u = textured ? uv[0] : 0.0f;
+    o->v = textured ? uv[1] : 0.0f;
+    if (s_bfull) {
+        Nv2aVertexFull *f = &s_bfull[s_bcount];
+        memset(f, 0, sizeof *f);
+        f->pos[0] = p[0];
+        f->pos[1] = p[1];
+        f->pos[2] = p[2];
+        f->pos[3] = 1.0f;
+        nv2a_rc_unpack(argb, f->d0);
+        f->fog = 1.0f;
+        f->tex[0][0] = o->u;
+        f->tex[0][1] = o->v;
+        f->tex[0][3] = 1.0f;
+    }
+    s_bcount++;
+}
+
+/* A screen-space point or line batch, for a back end that draws them. */
+static void screen_points_lines(int textured)
+{
+    uint32_t n = s_gpu.idx_count, i, k, a, b;
+
+    s_bprim = s_gpu.prim == NV_PRIM_POINTS ? NV2A_PRIM_POINTS : NV2A_PRIM_LINES;
+    if (s_gpu.prim == NV_PRIM_POINTS) {
+        for (i = 0; i < n; i++)
+            screen_vertex(s_gpu.idx[i], vertex_color(s_gpu.idx[i]));
+    } else {
+        for (k = 0; k < line_segments(s_gpu.prim, n); k++) {
+            uint32_t c;
+            line_segment(s_gpu.prim, n, k, &a, &b);
+            c = vertex_color(s_gpu.idx[a]);
+            if (s_bcount + 3 > NV_BACKEND_MAX_VERTS)
+                break;
+            screen_vertex(s_gpu.idx[a], c);
+            screen_vertex(s_gpu.idx[b], c);
+            if (s_bcount & 1)
+                s_bcount--;                    /* half a segment: drop it */
+        }
+    }
+    backend_flush(textured, 1);
 }
 
 /* ---- 3D: vertex programs and depth -------------------------------------
@@ -3180,17 +3487,14 @@ static uint32_t modulate(uint32_t t, const float c[4])
 }
 
 /* Bytes one texel of a (non-DXT) format takes, for cube-face strides. */
+/* From the format table (nv2a_coverage.c), which knows every NV2A format:
+ * the list here had only the formats the sampler read, so a 16-bit format
+ * it did not know (A8Y8, R6G5B5, G8B8, Y16 ...) counted 4 bytes a texel and
+ * put every mip level and cube face after the first in the wrong place. */
 static uint32_t tex_texel_bytes(uint32_t fmt)
 {
-    switch (fmt) {
-    case 0x00: case 0x01: case 0x0B: case 0x13: case 0x19: case 0x1F:
-        return 1;
-    case 0x02: case 0x03: case 0x04: case 0x05: case 0x10: case 0x11:
-    case 0x1C: case 0x1D:
-        return 2;
-    default:
-        return 4;
-    }
+    uint32_t b = nv2a_tex_format(fmt)->bytes;
+    return b ? b : 4;
 }
 
 /* Bytes between cube faces: one face with all its mip levels, rounded up to
@@ -3310,6 +3614,27 @@ static void rc_texel(const Texture *t, uint32_t face, float u, float v,
         out[0] = out[1] = out[2] = out[3] = 1.0f;
 }
 
+/* SET_TEXTURE_FILTER's signed channels (bits 28-31: A, R, G, B; XBA-120):
+ * the texel's byte read as two's complement over 127, the bump stages'
+ * reading (nv_s8 in nv2a_gl_shader.c), so a signed normal map reaches the
+ * combiners in [-1, 1]. */
+static float rc_s8(float x)
+{
+    float b = floorf(x * 255.0f + 0.5f);
+    return (b >= 128.0f ? b - 256.0f : b) / 127.0f;
+}
+
+static void rc_signed(const Texture *t, float out[4])
+{
+    uint32_t sg = t->filter >> 28;
+    if (!sg)
+        return;
+    if (sg & 1) out[3] = rc_s8(out[3]);
+    if (sg & 2) out[0] = rc_s8(out[0]);
+    if (sg & 4) out[1] = rc_s8(out[1]);
+    if (sg & 8) out[2] = rc_s8(out[2]);
+}
+
 /* What texture stage `st` contributes, by its SHADER_STAGE_PROGRAM mode
  * (xemu psh.c). Returns 0 when a clip-plane stage kills the pixel. */
 static int rc_stage_fetch(int st, const float c[4], const float *cx,
@@ -3324,15 +3649,24 @@ static int rc_stage_fetch(int st, const float c[4], const float *cx,
         out[0] = out[1] = out[2] = 0.0f; out[3] = 1.0f;
         return 1;
     case 1: case 2:                               /* PROJECT2D / 3D */
+        if (t->color >= 0x2A && t->color <= 0x31) {
+            /* A shadow map: this path has no depth compare, and reading the
+             * depth as a colour (decoded since XBA-120) would darken what
+             * white leaves lit, as before. */
+            out[0] = out[1] = out[2] = out[3] = 1.0f;
+            return 1;
+        }
         if (cx && cy) {                           /* neighbours: the gradient */
             float qx = cx[3] != 0.0f ? cx[3] : 1.0f, qy = cy[3] != 0.0f ? cy[3] : 1.0f;
             float u = c[0] / q, v = c[1] / q;
             float g[4] = { cx[0] / qx - u, cx[1] / qx - v,
                            cy[0] / qy - u, cy[1] / qy - v };
             rc_texel(t, 0, u, v, g, out);
+            rc_signed(t, out);
             return 1;
         }
         rc_texel(t, 0, c[0] / q, c[1] / q, NULL, out);
+        rc_signed(t, out);
         return 1;
     case 3: {                                     /* CUBEMAP */
         float x = c[0], y = c[1], z = c[2];
@@ -3340,6 +3674,7 @@ static int rc_stage_fetch(int st, const float c[4], const float *cx,
         uint32_t face;
         if (!t->cube) {
             rc_texel(t, 0, c[0], c[1], NULL, out);
+            rc_signed(t, out);
             return 1;
         }
         if (ax >= ay && ax >= az) {
@@ -3353,6 +3688,7 @@ static int rc_stage_fetch(int st, const float c[4], const float *cx,
             ma = 1.0f;
         rc_texel(t, face * tex_face_stride(t), (sc / ma + 1.0f) * 0.5f,
                  (tc / ma + 1.0f) * 0.5f, NULL, out);
+        rc_signed(t, out);
         return 1;
     }
     case 4:                                       /* PASSTHRU */
@@ -4270,6 +4606,107 @@ static void raster_xf_clipped(const Nv2aVshOutput *a, const Nv2aVshOutput *b,
         raster_xf_triangle(&p0[0], &p0[i], &p0[i + 1]);
 }
 
+/* Points and lines from transformed vertices, for a back end that draws
+ * them: a point is kept when it lies in front of both planes the triangle
+ * clipper uses (w > NV_CLIP_W, z at or past the near plane); a segment is
+ * cut at them, in the same homogeneous space. */
+static int xf_clip_on(void)
+{
+    static int near_z = -1;
+    if (near_z < 0) {
+        const char *e = getenv("RECOMP_CLIP_NEAR_Z");
+        near_z = !(e && e[0] == '0');
+    }
+    return near_z ? 2 : 1;
+}
+
+static void xf_backend_vertex(const Nv2aVshOutput *v)
+{
+    Nv2aVertex *o = backend_slot();
+    if (!o)
+        return;
+    backend_from_xf(v, o);
+    s_bcount++;
+}
+
+static void xf_point(const Nv2aVshOutput *v)
+{
+    Nv2aVshOutput q;
+    int pl, j;
+
+    for (j = 0; j < 3; j++)
+        q.pos[j] = v->pos[j] * v->pos[3];
+    q.pos[3] = v->pos[3];
+    for (pl = 0; pl < xf_clip_on(); pl++) {
+        float d = xf_clip_dist(&q, pl);
+        if (!(d >= 0.0f) || d - d != 0.0f)
+            return;                            /* behind, or not finite */
+    }
+    xf_backend_vertex(v);
+}
+
+static void xf_line(const Nv2aVshOutput *a, const Nv2aVshOutput *b)
+{
+    Nv2aVshOutput h[2], o[2];
+    float t0 = 0.0f, t1 = 1.0f;
+    int pl, i, j;
+
+    for (i = 0; i < 2; i++) {
+        h[i] = i ? *b : *a;
+        for (j = 0; j < 3; j++)
+            h[i].pos[j] *= h[i].pos[3];
+    }
+    for (pl = 0; pl < xf_clip_on(); pl++) {
+        float da = xf_clip_dist(&h[0], pl), db = xf_clip_dist(&h[1], pl);
+        if (da - da != 0.0f || db - db != 0.0f)
+            return;
+        if (da < 0.0f && db < 0.0f)
+            return;
+        if (da < 0.0f) {
+            float t = da / (da - db);
+            if (t > t0) t0 = t;
+        } else if (db < 0.0f) {
+            float t = da / (da - db);
+            if (t < t1) t1 = t;
+        }
+    }
+    if (t0 >= t1) {
+        s_gpu.tris_behind++;
+        return;
+    }
+    xf_lerp(&h[0], &h[1], t0, &o[0]);
+    xf_lerp(&h[0], &h[1], t1, &o[1]);
+    for (i = 0; i < 2; i++) {
+        if (o[i].pos[3] < NV_CLIP_W)
+            o[i].pos[3] = NV_CLIP_W;          /* on the plane: rounding */
+        for (j = 0; j < 3; j++)
+            o[i].pos[j] /= o[i].pos[3];
+    }
+    if (s_bcount + 3 > NV_BACKEND_MAX_VERTS)
+        return;
+    xf_backend_vertex(&o[0]);
+    xf_backend_vertex(&o[1]);
+    if (s_bcount & 1)
+        s_bcount--;
+}
+
+static void xf_points_lines(const Nv2aVshOutput *xf, uint32_t n)
+{
+    uint32_t i, k, a, b;
+
+    s_bprim = s_gpu.prim == NV_PRIM_POINTS ? NV2A_PRIM_POINTS : NV2A_PRIM_LINES;
+    if (s_gpu.prim == NV_PRIM_POINTS) {
+        for (i = 0; i < n; i++)
+            xf_point(&xf[i]);
+    } else {
+        for (k = 0; k < line_segments(s_gpu.prim, n); k++) {
+            line_segment(s_gpu.prim, n, k, &a, &b);
+            xf_line(&xf[a], &xf[b]);
+        }
+    }
+    backend_flush(!s_xf_no_tex, 0);
+}
+
 /* About 7 MB, so allocated by the first batch that transforms rather than
  * carried in every build that never turns the executor on. */
 static Nv2aVshOutput *s_xf;
@@ -4410,6 +4847,85 @@ static int gpu_vsh_enabled(void)
         on = !(e && e[0] == '0');
     }
     return on;
+}
+
+/* RECOMP_GPU_FFP=1 (XBA-134): fixed-function batches go to a back end
+ * with NV2A_BACKEND_CAP_PROGRAM as a program batch with Nv2aProgramBatch.ffp
+ * set, transformed and lit by a vertex shader generated from the state
+ * (nv2a_gl_vsh.c) instead of on the CPU and uploaded per batch. Off by
+ * default while it is measured on the device. */
+static int s_gpu_ffp = -1;
+void nv2a_gpu_ffp_enable(int on) { s_gpu_ffp = on ? 1 : 0; }
+
+static int gpu_ffp_enabled(void)
+{
+    if (s_gpu_ffp < 0) {
+        const char *e = getenv("RECOMP_GPU_FFP");
+        s_gpu_ffp = e && e[0] == '1';
+    }
+    return s_gpu_ffp;
+}
+
+/* The fixed-function state as constants (Nv2aFfpKey's layout), with change
+ * stamps for the back end's sync. */
+#define NV_FFPC 41
+static float s_ffpc[NV2A_VSH_CONSTANTS][4];
+static uint64_t s_ffpc_stamp[NV2A_VSH_CONSTANTS], s_ffpc_serial;
+static Nv2aFfpKey s_ffpk;
+
+static void ffpc_set(uint32_t i, float x, float y, float z, float w)
+{
+    const float v[4] = { x, y, z, w };
+    if (memcmp(s_ffpc[i], v, sizeof v) != 0) {
+        memcpy(s_ffpc[i], v, sizeof v);
+        s_ffpc_stamp[i] = ++s_ffpc_serial;
+    }
+}
+
+/* ffp_batch_begin's state (s_ffp) into s_ffpk and s_ffpc. Inputs read:
+ * position, colour, the four texture coordinate sets, the normal when lit;
+ * returns them as a mask. */
+static uint32_t ffp_program_state(void)
+{
+    uint32_t i, inputs = 1u;
+    const float *m;
+
+    ffp_batch_begin();
+    memset(&s_ffpk, 0, sizeof s_ffpk);
+    s_ffpk.col = (uint32_t)(color_attr() - s_gpu.attr);
+    s_ffpk.tex[0] = (uint32_t)(texcoord_attr() - s_gpu.attr);
+    for (i = 1; i < 4; i++)
+        s_ffpk.tex[i] = 9 + i;
+    s_ffpk.nrm = 2;
+    inputs |= 1u << s_ffpk.col;
+    for (i = 0; i < 4; i++)
+        inputs |= 1u << s_ffpk.tex[i];
+    s_ffpk.lit = (uint32_t)s_ffp.lit;
+    if (s_ffp.lit)
+        inputs |= 1u << 2;
+    m = s_ffp.m;
+    for (i = 0; i < 4; i++)
+        ffpc_set(i, m[4 * i], m[4 * i + 1], m[4 * i + 2], m[4 * i + 3]);
+    ffpc_set(4, s_ffp.off[0], s_ffp.off[1], s_ffp.off[2], 0.0f);
+    if (!s_ffp.lit)
+        return inputs;
+    s_ffpk.flip = (uint32_t)s_ffp.flip;
+    s_ffpk.amb_vc = (uint32_t)s_ffp.amb_vc;
+    s_ffpk.dif_vc = (uint32_t)s_ffp.dif_vc;
+    s_ffpk.nlights = (uint32_t)s_ffp.nlights;
+    for (i = 0; i < 3; i++)
+        ffpc_set(5 + i, s_ffp.mv[4 * i], s_ffp.mv[4 * i + 1], s_ffp.mv[4 * i + 2],
+                 s_ffp.mv[4 * i + 3]);
+    ffpc_set(8, s_ffp.scene[0], s_ffp.scene[1], s_ffp.scene[2], s_ffp.alpha);
+    for (i = 0; i < s_ffpk.nlights; i++) {
+        const FfpLight *L = &s_ffp.light[i];
+        s_ffpk.light_kind[i] = L->kind == 1 ? 1u : 2u;
+        ffpc_set(9 + 4 * i, L->l[0], L->l[1], L->l[2], L->range);
+        ffpc_set(10 + 4 * i, L->att[0], L->att[1], L->att[2], 0.0f);
+        ffpc_set(11 + 4 * i, L->amb[0], L->amb[1], L->amb[2], 0.0f);
+        ffpc_set(12 + 4 * i, L->dif[0], L->dif[1], L->dif[2], 0.0f);
+    }
+    return inputs;
 }
 
 static int pv_alloc(void)
@@ -4655,6 +5171,13 @@ static void raster_batch_program(void)
     if (s_gpu.texs[0].valid)
         note_texture_use();
 
+    if (prim_is_point_line(s_gpu.prim)) {
+        /* A back end that draws them; the CPU rasteriser draws none. */
+        if (backend_points_lines())
+            xf_points_lines(s_xf, n);
+        return;
+    }
+
     switch (s_gpu.prim) {
     case NV_PRIM_TRIANGLES:
         for (i = 0; i + 2 < n; i += 3)
@@ -4761,17 +5284,28 @@ static int raster_batch_backend_program(void)
     uint32_t inputs, streams = 0, nstream = 0, n = s_gpu.idx_count, rows = 0;
     uint32_t i, a, t = 0, lo = 0, hi = 0;
     static int no_rc = -1;
-    int raw;
+    int raw, ffp = !batch_uses_program();
 
     if (!s_backend || !s_backend->draw_program
         || (s_backend->caps & (NV2A_BACKEND_CAP_PROGRAM | NV2A_BACKEND_CAP_PIXEL))
                != (NV2A_BACKEND_CAP_PROGRAM | NV2A_BACKEND_CAP_PIXEL)
-        || !gpu_vsh_enabled())
+        || !(ffp ? gpu_ffp_enabled() : gpu_vsh_enabled()))
         return 0;
     memset(&pb, 0, sizeof pb);
-    pb.ins_count = nv2a_vsh_program(&pb.ins, &pb.hash, &inputs);
-    if (!pb.ins_count || nv2a_vsh_program_writes_constants() || !pv_alloc())
-        return 0;
+    if (prim_is_point_line(s_gpu.prim) && !backend_points_lines())
+        return 1;                       /* not drawn (counted as unsupported) */
+    if (ffp) {
+        /* The fixed-function unit as a generated shader (XBA-134); the
+         * key's hash once the streams are known, below. */
+        inputs = ffp_program_state();
+        pb.ffp = &s_ffpk;
+        if (!pv_alloc())
+            return 0;
+    } else {
+        pb.ins_count = nv2a_vsh_program(&pb.ins, &pb.hash, &inputs);
+        if (!pb.ins_count || nv2a_vsh_program_writes_constants() || !pv_alloc())
+            return 0;
+    }
 
     /* What each input reads (transform_vertex): an array, else the current
      * value; an array fetch_attr cannot read gives 0,0,0,1 per vertex. */
@@ -4787,6 +5321,16 @@ static int raster_batch_backend_program(void)
             streams |= 1u << a;
             nstream++;
         }
+    }
+
+    if (ffp) {
+        const uint8_t *k = (const uint8_t *)&s_ffpk;
+        size_t j;
+        s_ffpk.streams = streams;
+        pb.hash = 0xFF9ull << 52;
+        for (j = 0; j < sizeof s_ffpk; j++)
+            pb.hash = (pb.hash ^ k[j]) * 0x100000001B3ull;
+        pb.hash |= 1;
     }
 
     /* RECOMP_GPU_VBO: no gather, the back end reads the arrays itself;
@@ -4877,13 +5421,32 @@ gathered:
             PV_TRI(i, i + 3, i + 2);
         }
         break;
+    case NV_PRIM_POINTS:                    /* backend_points_lines() only */
+        for (i = 0; i < n; i++)
+            s_pv.tris[t++] = s_pv.slot[i];
+        break;
+    case NV_PRIM_LINES: case NV_PRIM_LINE_STRIP: case NV_PRIM_LINE_LOOP: {
+        uint32_t k, sa, sb;
+        for (k = 0; k < line_segments(s_gpu.prim, n); k++) {
+            line_segment(s_gpu.prim, n, k, &sa, &sb);
+            s_pv.tris[t++] = s_pv.slot[sa];
+            s_pv.tris[t++] = s_pv.slot[sb];
+        }
+        break;
+    }
     default:
         break;
     }
 #undef PV_TRI
 
-    pb.constants = nv2a_vsh_constants();
-    pb.const_stamp = nv2a_vsh_constant_stamps(&pb.const_serial);
+    if (ffp) {
+        pb.constants = (const float (*)[4])s_ffpc;
+        pb.const_stamp = s_ffpc_stamp;
+        pb.const_serial = s_ffpc_serial;
+    } else {
+        pb.constants = nv2a_vsh_constants();
+        pb.const_stamp = nv2a_vsh_constant_stamps(&pb.const_serial);
+    }
     pb.attrs = raw ? NULL : s_pv.attrs;
     pb.raw = raw ? s_raw : NULL;
     pb.raw_first = raw ? lo : 0;
@@ -4903,12 +5466,18 @@ gathered:
     current_render_state(&rs);
     if (no_rc < 0)
         no_rc = getenv("RECOMP_NO_COMBINERS") != NULL;
+    /* A fixed-function batch without coordinates draws untextured, as
+     * raster_batch_program has it (s_xf_no_tex). */
     current_pixel_state(&ps, (s_gpu.rc_seen && !no_rc) ? NV2A_SHADE_COMBINERS
-                                                       : NV2A_SHADE_MODULATE, 1);
+                                                       : NV2A_SHADE_MODULATE,
+                        ffp ? (streams >> s_ffpk.tex[0]) & 1 : 1);
     memset(&batch, 0, sizeof batch);
     batch.state = &rs;
     batch.pixel = &ps;
     batch.program = &pb;
+    if (prim_is_point_line(s_gpu.prim))
+        batch_prim_fields(&batch, s_gpu.prim == NV_PRIM_POINTS ? NV2A_PRIM_POINTS
+                                                                : NV2A_PRIM_LINES);
     if (s_gpu.texs[0].valid) {
         texture_to_backend(&s_gpu.texs[0], &tex);
         batch.texture = &tex;
@@ -4926,9 +5495,13 @@ gathered:
         return 0;
     }
 
-    s_gpu.batches_program++;
+    if (ffp)
+        s_gpu.batches_ffp++;
+    else
+        s_gpu.batches_program++;
     s_gpu.verts_program += n;
-    s_gpu.tris_drawn += t / 3;
+    if (!prim_is_point_line(s_gpu.prim))
+        s_gpu.tris_drawn += t / 3;
     if (s_gpu.texs[0].valid)
         note_texture_use();
     note_drawn();
@@ -4941,10 +5514,11 @@ static void raster_batch(void)
     uint32_t before = s_gpu.tris_drawn;
     int textured = 0;
 
-    if (s_gpu.idx_count < 3)
+    if (s_gpu.idx_count < (s_gpu.prim == NV_PRIM_POINTS ? 1u
+                           : prim_is_point_line(s_gpu.prim) ? 2u : 3u))
         return;
     if (batch_uses_program() || batch_is_ffp()) {
-        if (batch_uses_program() && raster_batch_backend_program())
+        if ((batch_uses_program() || gpu_ffp_enabled()) && raster_batch_backend_program())
             return;
         raster_batch_program();
         return;
@@ -4967,6 +5541,13 @@ static void raster_batch(void)
             textured = 1;
             note_texture_use();
         }
+    }
+
+    if (prim_is_point_line(s_gpu.prim)) {
+        /* A back end that draws them; the CPU rasteriser draws none. */
+        if (backend_points_lines())
+            screen_points_lines(textured);
+        return;
     }
 
     switch (s_gpu.prim) {
@@ -5098,6 +5679,124 @@ static uint32_t prim_triangles(uint32_t prim, uint32_t n)
     }
 }
 
+/* ---- what this batch needs that its path does not draw (XBA-120) --------
+ *
+ * Once per batch, before it is drawn: every texture format the sampler
+ * cannot read, primitive, texture dimensionality, stage mode and piece of
+ * state the path taking the batch (a back end or the CPU rasteriser) leaves
+ * out, counted under its name (nv2a_coverage.h). A back end says what it
+ * draws through its caps; what neither path models is counted for both. */
+static int backend_caps(uint32_t cap)
+{
+    return backend_draws() && (s_backend->caps & cap) == cap;
+}
+
+static void note_batch_gaps(void)
+{
+    static int no_rc = -1;
+    int gpu = backend_caps(NV2A_BACKEND_CAP_PIXEL), combiners, st;
+    uint32_t used = 0;
+
+    if (no_rc < 0)
+        no_rc = getenv("RECOMP_NO_COMBINERS") != NULL;
+    combiners = s_gpu.rc_seen && !no_rc;
+
+    if (prim_is_point_line(s_gpu.prim) && !backend_points_lines()) {
+        switch (s_gpu.prim) {
+        case NV_PRIM_POINTS:     nv2a_gap_note("points", 1); break;
+        case NV_PRIM_LINES:      nv2a_gap_note("lines", 1); break;
+        case NV_PRIM_LINE_LOOP:  nv2a_gap_note("line loop", 1); break;
+        default:                 nv2a_gap_note("line strip", 1); break;
+        }
+        return;
+    }
+    /* Points whose size the distance scales (SET_POINT_PARAMS_ENABLE):
+     * drawn at SET_POINT_SIZE. A vertex program's oPts is not read either. */
+    if (s_gpu.prim == NV_PRIM_POINTS && s_reg[0x0318 / 4])
+        nv2a_gap_note("point size attenuation", 1);
+    if ((s_gpu.xf_mode & 3) != 2 && !batch_is_ffp() && !batch_is_screen_space()) {
+        nv2a_gap_note("batch with no vertex program, matrix or screen-space positions", 1);
+        return;
+    }
+
+    for (st = 0; st < 4; st++) {
+        const Texture *t = &s_gpu.texs[st];
+        const Nv2aTexFormat *f;
+        uint32_t mode = combiners ? (s_gpu.rc.stage_program >> (st * 5)) & 0x1F
+                                  : (st == 0 && t->valid);
+        if (!mode)
+            continue;
+        /* Stage modes: bump-env (6, 7) on the GPU only, the dot-product
+         * and dependent-read modes (8 and up) nowhere; both read zero. */
+        if (mode >= 8 || (mode >= 6 && !(gpu && st > 0))) {
+            const char *m = nv2a_stage_mode_name(mode);
+            nv2a_gap_note(m ? m : "texture stage mode (not an NV2A mode)", 1);
+        }
+        if (!((mode >= 1 && mode <= 3) || mode == 6 || mode == 7) || !t->valid)
+            continue;
+        used |= 1u << st;
+        f = nv2a_tex_format(t->color);
+        if (t->color >= 0x2A && t->color <= 0x31 && combiners && (mode == 1 || mode == 2)) {
+            /* A depth format in a projective stage is a shadow map: the
+             * GPU compares with the zeta surface it holds, the CPU path
+             * reads white. */
+            if (!gpu)
+                nv2a_gap_note("shadow map (CPU rasteriser)", 1);
+        } else if (!f->decoded) {
+            nv2a_gap_note(f->gap, 1);
+        }
+        if (t->dims == 3 && !backend_caps(NV2A_BACKEND_CAP_PIXEL | NV2A_BACKEND_CAP_VOLUME))
+            nv2a_gap_note("volume texture", 1);
+        else if (t->dims == 3 && d3d8_format_dxt_block_bytes(t->color))
+            nv2a_gap_note("volume texture, DXT", 1);
+    }
+
+    if (s_reg[0x17BC / 4])                              /* SET_LOGIC_OP_ENABLE */
+        nv2a_gap_note("logic op", 1);
+    {
+        uint32_t pm[2] = { s_reg[0x038C / 4], s_reg[0x0390 / 4] }, k;  /* FRONT/BACK_POLYGON_MODE */
+        for (k = 0; k < 2; k++) {
+            if (pm[k] == 0x1B00)                        /* GL_POINT */
+                nv2a_gap_note("polygon mode point", 1);
+            else if (pm[k] == 0x1B01)                   /* GL_LINE */
+                nv2a_gap_note("polygon mode line", 1);
+        }
+    }
+    if (s_reg[0x037C / 4] == 0x1D00)                    /* SET_SHADE_MODE: GL_FLAT */
+        nv2a_gap_note("flat shading", 1);
+    if (!gpu && s_reg[0x032C / 4])                      /* SET_STENCIL_TEST_ENABLE */
+        nv2a_gap_note("stencil test (CPU rasteriser)", 1);
+    if (batch_is_ffp()) {
+        /* The fixed-function unit as ffp_vertex / lit_color model it:
+         * composite matrix, lights without specular or spot cones. */
+        uint32_t mask = s_reg[0x03BC / 4], k;
+        for (st = 0; st < 4; st++) {
+            if (!(used & (1u << st)))
+                continue;
+            for (k = 0; k < 4; k++)
+                if (s_reg[(0x03C0u + 16u * (uint32_t)st + 4u * k) / 4]) {  /* SET_TEXGEN_S..Q */
+                    nv2a_gap_note("fixed-function texgen", 1);
+                    break;
+                }
+            if (s_reg[(0x0420u + 4u * (uint32_t)st) / 4])  /* SET_TEXTURE_MATRIX_ENABLE */
+                nv2a_gap_note("fixed-function texture matrix", 1);
+        }
+        if (s_reg[0x0328 / 4])                          /* SET_SKIN_MODE */
+            nv2a_gap_note("fixed-function vertex blending (skinning)", 1);
+        if (s_reg[0x0314 / 4]) {                        /* SET_LIGHTING_ENABLE */
+            if (s_reg[0x03B8 / 4])                      /* SET_SPECULAR_ENABLE */
+                nv2a_gap_note("fixed-function specular", 1);
+            if (s_reg[0x17C4 / 4])                      /* SET_TWO_SIDE_LIGHT_EN */
+                nv2a_gap_note("two-sided lighting", 1);
+            for (k = 0; k < NV_LIGHTS; k++)
+                if (((mask >> (2 * k)) & 3) == 3) {
+                    nv2a_gap_note("spot lights", 1);
+                    break;
+                }
+        }
+    }
+}
+
 static void draw_primitive(void)
 {
     float v[4];
@@ -5105,6 +5804,7 @@ static void draw_primitive(void)
 
     if (!s_gpu.prim || !s_gpu.idx_count)
         return;
+    note_batch_gaps();
     s_gpu.draws++;
     if ((s_gpu.draws % 200) == 0)
         fprintf(stderr, "  [GPU] draw #%u\n", s_gpu.draws);
@@ -5515,6 +6215,8 @@ static void tex_stage_method(uint32_t method, uint32_t param)
         t->cube = (param >> 2) & 1;
         t->border_color = (param >> 3) & 1;    /* BORDER_SOURCE: colour */
         t->levels = (param >> 16) & 0xF;
+        t->dims = (param >> 4) & 0xF;
+        t->depth = 1u << ((param >> 28) & 0xF);
         /* A swizzled texture carries its own dimensions here, as log2 in
          * BASE_SIZE_U/V. It has to: IMAGE_RECT describes a linear image, and
          * a title that only uses swizzled textures never sends one. */
@@ -5532,9 +6234,13 @@ static void tex_stage_method(uint32_t method, uint32_t param)
          * (the border colour when FORMAT selects it, else clamped). */
         t->addr_u =  param        & 0xF;
         t->addr_v = (param >>  8) & 0xF;
+        t->addr_p = (param >> 16) & 0xF;
         break;
     case NV097_SET_TEXTURE_CONTROL1:
         t->pitch = param >> 16;          /* linear formats only */
+        break;
+    case 0x1B0C:                                  /* SET_TEXTURE_CONTROL0 */
+        t->control0 = param;
         break;
     case NV097_SET_TEXTURE_IMAGE_RECT:
         t->width  = param >> 16;
@@ -6841,6 +7547,21 @@ void nv2a_pb_exec_report(void)
                     : d3d8_format_is_swizzled(s_tex_use[i].color) ? " swz" : " lin",
                 s_tex_use[i].batches);
 
+    /* What batches needed and their path did not draw (XBA-120), by name;
+     * the same counts are in the status file's "unsupported". */
+    {
+        const char *names[12];
+        uint64_t counts[12];
+        int n = nv2a_gap_list(names, counts, 12), k;
+        if (n) {
+            fprintf(stderr, "[GPU] unsupported (batches):");
+            for (k = 0; k < n; k++)
+                fprintf(stderr, "%s %s x%llu", k ? "," : "", names[k],
+                        (unsigned long long)counts[k]);
+            fputc(10, stderr);
+        }
+    }
+
     if (getenv("RECOMP_TEX_STATE")) {
         uint32_t k;
         for (k = 0; k < sizeof s_tex_set / sizeof s_tex_set[0]; k++)
@@ -6876,14 +7597,36 @@ void nv2a_pb_exec_report(void)
              * glance, and that is what says which vertex encoding a title
              * is using. */
             union { uint32_t u; float f; } v;
+            const char *nm = nv2a_method_name(s_unhandled[i].method);
             v.u = s_unhandled[i].last_param;
-            fprintf(stderr, "  [GPU]   0x%04X x%-8u last=0x%08X (%.4f)\n",
-                    s_unhandled[i].method, s_unhandled[i].count,
-                    v.u, v.f);
+            fprintf(stderr, "  [GPU]   0x%04X %-30s x%-8u last=0x%08X (%.4f)%s\n",
+                    s_unhandled[i].method, nm ? nm : "?", s_unhandled[i].count,
+                    v.u, v.f, method_modelled(s_unhandled[i].method)
+                              ? " (read from the register file)" : "");
         }
     }
     }
     for (i = 0; i < s_unhandled_count; i++)       /* the sort moved them */
         s_unhandled_slot[(s_unhandled[i].method & 0x1FFC) / 4] = (uint16_t)(i + 1);
+    /* The status file's "unmodelled": the 16 most frequent methods of the
+     * 3D class that nothing models (the table is sorted from here up only
+     * as far as the report printed; good enough for the top). */
+    {
+        static char hex[0x2000 / 4][8];
+        int sent = 0;
+        for (i = 0; i < s_unhandled_count && sent < 16; i++) {
+            uint32_t m = s_unhandled[i].method & 0x1FFC;
+            const char *nm;
+            if (method_modelled(m))
+                continue;
+            nm = nv2a_method_name(m);
+            if (!nm) {
+                snprintf(hex[m / 4], sizeof hex[0], "0x%04X", (unsigned)m);
+                nm = hex[m / 4];
+            }
+            recomp_status_unmodelled(nm, s_unhandled[i].count);
+            sent++;
+        }
+    }
     fflush(stderr);
 }
