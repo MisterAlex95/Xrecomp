@@ -5064,9 +5064,24 @@ static void deliver_one_apc(uint32_t apc_routine, uint32_t apc_context,
  * The status block is written and the event set before this, so a title that
  * polls either, or waits on the event without being alertable, sees the
  * request complete whether or not its APC has run -- as on the console. */
-static void bridge_complete_file_io(uint32_t event_token, uint32_t apc_routine,
-                                    uint32_t apc_context, uint32_t iostatus)
+/* A request that fails synchronously -- an error status (NT_ERROR) the call
+ * returns itself, not STATUS_PENDING -- queues no APC: the I/O manager
+ * completes it without a completion APC and the caller learns of it from
+ * the return value. XAPI's ReadFileEx then returns FALSE and its caller does
+ * not expect the completion routine; running it as well handled the failure
+ * twice (XBA-133). The event is still set and the status block written, as
+ * before: a title that waits on it regardless does not hang here. */
+static int bridge_io_failed_sync(uint32_t status, int pending)
 {
+    return ((status >> 30) == 3u) && !pending;
+}
+
+static void bridge_complete_file_io(uint32_t event_token, uint32_t apc_routine,
+                                    uint32_t apc_context, uint32_t iostatus,
+                                    uint32_t status, int pending)
+{
+    if (bridge_io_failed_sync(status, pending))
+        apc_routine = 0;
     if (event_token) {
         HANDLE ev = bridge_resolve_handle(event_token);
         if (ev) SetEvent(ev);
@@ -5345,7 +5360,8 @@ static void bridge_NtReadFile(void)
     }
     bridge_write_iostatus(iostatus, ios.Status, (uint32_t)ios.Information);
     bridge_complete_file_io(STACK_ARG(1), STACK_ARG(2), STACK_ARG(3),
-                            iostatus);
+                            iostatus, g_eax,
+                            bridge_async_io_enabled() && bridge_handle_is_async(STACK_ARG(0)));
 
     /* An asynchronous request returns STATUS_PENDING, even when the data was
      * already there.
@@ -5393,7 +5409,7 @@ static void bridge_NtWriteFile(void)
                 XBOX_TO_NATIVE(buffer_va), length, poff);
     bridge_write_iostatus(iostatus, ios.Status, (uint32_t)ios.Information);
     bridge_complete_file_io(STACK_ARG(1), STACK_ARG(2), STACK_ARG(3),
-                            iostatus);
+                            iostatus, g_eax, 0);
 }
 
 /* ── NtQueryInformationFile (ordinal 211, 5 args = 20 bytes) */

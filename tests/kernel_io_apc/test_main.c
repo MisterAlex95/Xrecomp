@@ -27,6 +27,8 @@
  *   - a thread that exits with an APC queued takes it with it: another
  *     thread's alertable wait does not run it;
  *   - past the queue (64) a request's APC runs inline rather than being lost;
+ *   - a request that fails synchronously (a read past the end) queues no
+ *     APC, deferred or inline (XBA-133);
  *   - xbox_SetDeferredIoApc(0) still selects the inline delivery;
  *   - with KeInsertQueueApc's user APCs (XBA-113) as well: one alertable
  *     wait runs both sources, the file-I/O completions first; an APC queued
@@ -74,6 +76,7 @@ enum {
     EVENT_VA = 0x30408,
     OBJS_VA  = 0x30410,   /* handle array for the multiple-object waits */
     OFFSET_VA = 0x30420,  /* LARGE_INTEGER 0 */
+    EOF_OFFSET_VA = 0x30428, /* LARGE_INTEGER 4096: past the end of the file */
     BUF_VA   = 0x31000,
     TIMEOUT_VA = 0x32000, /* LARGE_INTEGER 0: a regression returns, not hangs */
     TIMEOUT2_VA = 0x32010, /* LARGE_INTEGER -400 ms, relative */
@@ -119,6 +122,14 @@ static void read_with_apc(uint32_t context, uint32_t event)
 {
     uint32_t args[8] = { file_handle, event, APC_VA, context, IOSB_VA,
                          BUF_VA, 4, OFFSET_VA };
+    call(S_READ, args, 8);
+}
+
+/* A read past the end: it fails synchronously with STATUS_END_OF_FILE. */
+static void read_past_end(uint32_t context)
+{
+    uint32_t args[8] = { file_handle, 0, APC_VA, context, IOSB_VA,
+                         BUF_VA, 4, EOF_OFFSET_VA };
     call(S_READ, args, 8);
 }
 
@@ -348,6 +359,15 @@ static void run_deferred(uint32_t ev)
     check(ok && g_eax == 0xC0u, "the wait then runs the 64 queued, in order", detail);
     check_esp(STACK_VA, "esp is exact after 65 requests and a wait");
 
+    /* A request that fails synchronously queues no APC (XBA-133): the
+     * caller has the error from the return value, as ReadFileEx's FALSE. */
+    apc_runs = 0;
+    read_past_end(0x404u);
+    snprintf(detail, sizeof detail, "status 0x%08X", g_eax);
+    check(g_eax == 0xC0000011u, "a read past the end fails with STATUS_END_OF_FILE", detail);
+    delay_alertable();
+    check_wait(0, 0, "a synchronously failed request queues no APC");
+
     /* The call still selects inline. */
     xbox_SetDeferredIoApc(0);
     apc_runs = 0;
@@ -444,6 +464,9 @@ static void run_inline(void)
     delay_alertable();
     check(g_eax != 0xC0u && apc_runs == 1,
           "inline: a later alertable wait finds nothing queued", NULL);
+    read_past_end(0x404u);
+    check(g_eax == 0xC0000011u && apc_runs == 1,
+          "inline: a synchronously failed request runs no APC", NULL);
 }
 
 int main(void)
@@ -486,6 +509,7 @@ int main(void)
         *(uint32_t *)(mem + THUNK_VA + 4 * i) = 0x80000000u | ordinals[i];
     memset(mem + TIMEOUT_VA, 0, 8);
     memset(mem + OFFSET_VA, 0, 8);
+    *(int64_t *)(mem + EOF_OFFSET_VA) = 4096;
     xbox_kernel_set_thunk_address(THUNK_VA, S_COUNT);
     xbox_kernel_init();
     xbox_path_init(dir, dir);
