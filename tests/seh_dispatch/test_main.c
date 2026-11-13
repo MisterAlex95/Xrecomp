@@ -64,6 +64,8 @@
 #endif
 
 #include "xbox_seh.h"
+int  xbox_GuestCpuEnterCallback(void);   /* kernel.h */
+void xbox_GuestCpuLeaveCallback(int took);
 #include "recomp_stack_switch.h"
 #include <setjmp.h>
 
@@ -464,6 +466,44 @@ static void test_host_faults(void)
               && G32(SEEN_CODE) == XBOX_STATUS_ACCESS_VIOLATION, "after the filter declined it");
         check(depth && *depth == 0, "no trampoline left in flight");
     }
+    probe_protect(PROT_READ | PROT_WRITE);
+    check(strstr(disc_text(), "{\"t\":\"exception\",\"va\":\"0x00040000\",\"code\":\"0xC0000005\"") != NULL,
+          "unhandled: recorded as an exception discovery entry (XBA-129's kind)");
+
+    /* 16. The same fault inside one of the runtime's own bridges (a kernel
+     *     call copying into a bad guest buffer, kernel_thunk_dispatch): never
+     *     raised to the guest, even with a handler that would take it; the
+     *     previous handler gets it, as before XBA-132. */
+    reset(1);
+    probe_protect(PROT_NONE);
+    s_prev_calls = 0;
+    xbox_SehRuntimeEnter();
+    if (sigsetjmp(s_prev_jump, 1) == 0) {
+        guest_call(f_probe, &esp);
+        check(0, "in a bridge: the fault went down the chain");
+    } else {
+        xbox_SehStatsGet(&st, 0);
+        check(s_prev_calls == 1 && st.host_faults == 0 && G32(SEEN_CODE) == 0,
+              "in a bridge: not raised to the guest, the previous handler got it");
+    }
+    xbox_SehRuntimeLeave();
+    probe_protect(PROT_READ | PROT_WRITE);
+
+    /*     A guest routine a bridge runs (an APC, a handler: the callback
+     *     entry) is lifted code again: its fault is raised and resumed. */
+    reset(1);
+    probe_protect(PROT_NONE);
+    xbox_SehRuntimeEnter();
+    {
+        int took = xbox_GuestCpuEnterCallback();
+        eax = guest_call(f_probe, &esp);
+        xbox_GuestCpuLeaveCallback(took);
+    }
+    check(xbox_SehInRuntime(), "after the callback: back inside the bridge");
+    xbox_SehRuntimeLeave();
+    xbox_SehStatsGet(&st, 0);
+    check(eax == 0x777 && st.host_faults == 1 && st.resumes == 1 && !xbox_SehInRuntime(),
+          "a callback from inside a bridge: raised, resumed, the bridge state put back");
     probe_protect(PROT_READ | PROT_WRITE);
 
     /* 15. ... and with the default action the process dies of the fault. */

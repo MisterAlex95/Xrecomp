@@ -11663,7 +11663,9 @@ static void kernel_thunk_dispatch(void)
     int held = xbox_GuestCpuRelease(XBOX_GUEST_CPU_KERNEL,
                                     slot >= 0 && slot < XBOX_KERNEL_THUNK_TABLE_SIZE
                                     ? g_slot_ordinals[slot] : 0);
+    xbox_SehRuntimeEnter();      /* a host fault in the bridge stays the runtime's (XBA-132) */
     kernel_thunk_dispatch_body();
+    xbox_SehRuntimeLeave();
     if (held)
         xbox_GuestCpuAcquire();
 }

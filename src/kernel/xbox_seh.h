@@ -221,6 +221,24 @@ int xbox_SehRaiseHostFault(uint32_t va, uint32_t access, uintptr_t host_pc);
  * puts back the depth its anchor was taken at. */
 int *xbox_SehFaultDepthSlot(void);
 
+/* Runtime code on this thread: a host fault is raised to the guest only from
+ * lifted code, never from inside one of the runtime's own bridges (a kernel
+ * call copying into a bad guest buffer would be resumed into the guest with
+ * the runtime's locks held). kernel_thunk_dispatch enters and leaves around
+ * every bridge; a guest routine a bridge runs (a handler, an APC, a DPC: the
+ * xbox_GuestCpuEnterCallback / LeaveCallback pair) is lifted code again for
+ * its length. A text range of the title's code could not tell them apart on
+ * a desktop, where the runtime is linked into the title's executable.
+ * Snapshot / Restore: an SEH resume or a guest longjmp that leaves bridge
+ * frames behind puts back the state of the frame it lands in. */
+void     xbox_SehRuntimeEnter(void);
+void     xbox_SehRuntimeLeave(void);
+void     xbox_SehCallbackEnter(void);
+void     xbox_SehCallbackLeave(void);
+int      xbox_SehInRuntime(void);          /* async-signal-safe */
+uint32_t xbox_SehRuntimeSnapshot(void);
+void     xbox_SehRuntimeRestore(uint32_t snap);
+
 /* Counters, for tests and the status report. */
 typedef struct {
     uint32_t raises;        /* dispatches started */

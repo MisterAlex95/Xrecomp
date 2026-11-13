@@ -47,6 +47,7 @@
  * (ms) prints each turn held at least that long and where it ended.
  */
 #include "kernel.h"
+#include "xbox_seh.h"         /* xbox_SehCallbackEnter / Leave */
 #include "platform/host_time.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -425,6 +426,7 @@ void xbox_GuestCpuPreempt(uint32_t va)
  * call. 1 when this took it, for the leave. */
 int xbox_GuestCpuEnterCallback(void)
 {
+    xbox_SehCallbackEnter();     /* lifted code again, for host faults (XBA-132) */
     if (!t_guest || t_held || !xbox_GuestCpuOn())
         return 0;
     guest_cpu_acquire(1);
@@ -433,6 +435,7 @@ int xbox_GuestCpuEnterCallback(void)
 
 void xbox_GuestCpuLeaveCallback(int took)
 {
+    xbox_SehCallbackLeave();
     if (took && t_held)
         guest_cpu_soft_release(XBOX_GUEST_CPU_CALLBACK, 0, 0);
 }

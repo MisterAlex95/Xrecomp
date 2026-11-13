@@ -2542,6 +2542,7 @@ int g_force_return = 0;
 typedef struct {
     uint32_t buf_va;
     uint32_t ctx;           /* recomp_stack_context() when armed */
+    uint32_t runtime;       /* xbox_SehRuntimeSnapshot() when armed */
     jmp_buf  native;
 } recomp_jmp_slot;
 
@@ -2556,12 +2557,14 @@ jmp_buf *recomp_setjmp_slot(uint32_t buf_va)
     for (i = 0; i < s_jmp_used; i++)
         if (s_jmp[i].buf_va == buf_va) {
             s_jmp[i].ctx = ctx;           /* the same buffer, re-armed */
+            s_jmp[i].runtime = xbox_SehRuntimeSnapshot();
             return &s_jmp[i].native;
         }
     if (s_jmp_used >= RECOMP_JMPBUF_SLOTS)
         s_jmp_used = RECOMP_JMPBUF_SLOTS - 1;   /* keep the deepest */
     s_jmp[s_jmp_used].buf_va = buf_va;
     s_jmp[s_jmp_used].ctx = ctx;
+    s_jmp[s_jmp_used].runtime = xbox_SehRuntimeSnapshot();
     return &s_jmp[s_jmp_used++].native;
 }
 
@@ -2616,6 +2619,7 @@ int recomp_guest_longjmp(uint32_t buf_va, uint32_t value)
             if (s_jmp[j].ctx != ctx)
                 s_jmp[kept++] = s_jmp[j];
         s_jmp_used = kept;
+        xbox_SehRuntimeRestore(s_jmp[i].runtime);   /* the bridges it leaves are gone */
         longjmp(s_jmp[i].native, value ? (int)value : 1);
     }
     return 0;

@@ -47,8 +47,11 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* macOS is left out: its arm64 context code below has never been compiled
+ * (no macOS toolchain where XBA-132 was written) and the reference titles run
+ * on a Mac; there every fault goes down the chain as before, said once. */
 #if !defined(_WIN32) && ((defined(__x86_64__) && defined(__linux__)) \
-        || (defined(__aarch64__) && (defined(__linux__) || defined(__APPLE__))))
+        || (defined(__aarch64__) && defined(__linux__)))
 #define SEH_FAULT_HOST 1
 #endif
 
@@ -499,6 +502,8 @@ int xbox_SehPosixFault(int sig, void *siv, void *ucv)
 
     if (!g_faults_on || !g_trap_page)
         return 0;
+    if (xbox_SehInRuntime())
+        return 0;               /* inside a bridge: the old path, never the guest */
     rel = (uint64_t)addr - (uint64_t)base;
     if (addr < base || rel >= 0x100000000ull)
         return 0;
@@ -527,7 +532,15 @@ int xbox_SehPosixFault(int sig, void *siv, void *ucv)
 
 int xbox_SehFaultsEnabled(void) { return 0; }
 void xbox_SehFaultThreadInit(void) { }
-int xbox_SehFaultInit(void) { return -1; }
+int xbox_SehFaultInit(void)
+{
+#if defined(__APPLE__)
+    static int said;
+    if (!said++)
+        fprintf(stderr, "  [SEH] host faults as guest exceptions: not on macOS yet\n");
+#endif
+    return -1;
+}
 int xbox_SehPosixFault(int sig, void *siginfo, void *ucontext)
 {
     (void)sig; (void)siginfo; (void)ucontext;

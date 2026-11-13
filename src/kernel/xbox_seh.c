@@ -64,6 +64,7 @@ typedef struct {
     uintptr_t              host;     /* host stack token when taken */
     int                    depth;    /* dispatch nesting when taken */
     int                    faults;   /* host-fault trampolines in flight when taken */
+    uint32_t               runtime;  /* xbox_SehRuntimeSnapshot() when taken */
     jmp_buf                jb;
 } seh_anchor;
 
@@ -110,6 +111,46 @@ static seh_thread *seh_self(void)
         xbox_SehFaultThreadInit();
     }
     return t;
+}
+
+/* xbox_seh.h « Runtime code on this thread ». Plain TLS: read in the fault
+ * handler, before the thread may have dispatcher state. */
+#define SEH_CB_NEST 16
+static RECOMP_TLS int t_rt_depth;               /* bridges entered */
+static RECOMP_TLS int t_rt_cb;                  /* guest callbacks from inside them */
+static RECOMP_TLS int t_rt_saved[SEH_CB_NEST];
+
+void xbox_SehRuntimeEnter(void) { t_rt_depth++; }
+void xbox_SehRuntimeLeave(void) { if (t_rt_depth > 0) t_rt_depth--; }
+
+void xbox_SehCallbackEnter(void)
+{
+    if (t_rt_cb < SEH_CB_NEST)
+        t_rt_saved[t_rt_cb] = t_rt_depth;
+    t_rt_cb++;
+    t_rt_depth = 0;
+}
+
+void xbox_SehCallbackLeave(void)
+{
+    if (t_rt_cb <= 0)
+        return;
+    t_rt_cb--;
+    if (t_rt_cb < SEH_CB_NEST)
+        t_rt_depth = t_rt_saved[t_rt_cb];
+}
+
+int xbox_SehInRuntime(void) { return t_rt_depth > 0; }
+
+uint32_t xbox_SehRuntimeSnapshot(void)
+{
+    return ((uint32_t)t_rt_cb << 16) | ((uint32_t)t_rt_depth & 0xFFFFu);
+}
+
+void xbox_SehRuntimeRestore(uint32_t snap)
+{
+    t_rt_cb = (int)(snap >> 16);
+    t_rt_depth = (int)(snap & 0xFFFFu);
 }
 
 int *xbox_SehFaultDepthSlot(void)
@@ -827,6 +868,7 @@ jmp_buf *recomp_seh_anchor(uint32_t reg, uint32_t ebp, const recomp_seh_desc *d)
     a->host  = t->host;
     a->depth = t->depth;
     a->faults = t->faults;
+    a->runtime = xbox_SehRuntimeSnapshot();
     t->n = n + 1;
     t->st.anchors++;
     return &a->jb;
@@ -917,6 +959,7 @@ static void seh_resume_thunk(void)
     t->depth = t->a[best].depth;
     /* The host-fault trampolines below the anchor go with the C frames. */
     t->faults = t->a[best].faults;
+    xbox_SehRuntimeRestore(t->a[best].runtime);
     t->refused = 0;
     t->st.resumes++;
     t->st.handled++;
