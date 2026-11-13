@@ -2008,17 +2008,35 @@ int xbox_GuestPollWait(volatile uint32_t *word, uint32_t mask, int while_set,
  * No return address is pushed - reuses the current frame's return addr.
  * Used for tail-call optimization where the original code uses
  * jmp [reg] instead of call [reg].
+ *
+ * A target that cannot be run returns to the caller as the jumping function
+ * itself would have: its return address popped and, with RECOMP_ITAIL_RET,
+ * the N bytes of its own `ret N` (the lifter passes N when every ret of the
+ * function agrees on it). The target would have popped the same arguments,
+ * since it runs on the jumper's frame. Popping the return address alone left
+ * a stdcall's arguments on the guest stack: Fable's `mov ecx, [ecx+8];
+ * mov eax, [ecx]; jmp [eax+0x38]` thunk (ret 0x18) moved its caller's esp
+ * 24 bytes down at every null slot it met, and the callers above then popped
+ * object pointers as return addresses (WP8 of the profile-free report).
+ * A target outside the code goes through recomp_icall_not_code_log, as in
+ * RECOMP_ICALL: a null or wild pointer, not a function to discover.
  */
-#define RECOMP_ITAIL(xbox_va) do { \
+#define RECOMP_ITAIL_RET(xbox_va, ret_imm) do { \
     uint32_t _va = (uint32_t)(xbox_va); \
+    if (!RECOMP_ICALL_IS_CODE(_va)) { \
+        recomp_icall_not_code_log(_va); \
+        g_esp += 4u + (uint32_t)(ret_imm); g_eax = 0; break; \
+    } \
     recomp_func_t _fn = recomp_lookup_manual(_va); \
     if (!_fn) _fn = recomp_lookup(_va); \
     if (!_fn) _fn = recomp_lookup_kernel(_va); \
     if (_fn) { RECOMP_ICALL_OBSERVE(_va, RECOMP_ICALL_SEEN_RESOLVED); \
                RECOMP_ABI_CALL(_va, _fn); } \
     else { RECOMP_ICALL_OBSERVE(_va, RECOMP_ICALL_SEEN_UNRESOLVED); \
-           recomp_icall_fail_log(_va); g_esp += 4; g_eax = 0; } \
+           recomp_icall_fail_log(_va); \
+           g_esp += 4u + (uint32_t)(ret_imm); g_eax = 0; } \
 } while(0)
+#define RECOMP_ITAIL(xbox_va) RECOMP_ITAIL_RET(xbox_va, 0u)
 
 /* ================================================================
  * Register name aliases for generated code

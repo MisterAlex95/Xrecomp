@@ -28,7 +28,7 @@ from .seh_frames import analyze_seh_frame
 from .lifter import (Lifter, lift_basic_block, detect_seh_helpers,
                      _RESULT_SNAPSHOT_SETTERS, _as_addr_set,
                      detect_setjmp_helpers, _func_ident, _operand_width,
-                     publish_flags, stack_switch_sites)
+                     publish_flags, stack_switch_sites, ret_cleanup)
 
 
 # Float compares snapshot at the compare as well, and their conditions read
@@ -3117,6 +3117,7 @@ class FunctionTranslator:
         switch_sites = stack_switch_sites(instructions)
         self.lifter.stack_switch_sites = frozenset(switch_sites)
         self.lifter.stack_switch_carried = any(i.is_ret for i in instructions)
+        self.lifter.ret_cleanup = ret_cleanup(instructions)
         if not blocks:
             return None
 

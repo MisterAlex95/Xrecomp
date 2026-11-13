@@ -214,18 +214,25 @@ An indirect jump (not call) reuses the current frame's return address:
 jmp [eax+0x0C]    ; tail call through vtable
 ```
 
-No dummy return address is pushed. The RECOMP_ITAIL macro handles this:
+No dummy return address is pushed: the target runs on the jumper's frame and
+pops the jumper's return address and arguments itself.
+
+When the target cannot run (null or wild pointer, untranslated function), the
+dispatch returns to the caller in place of the jumper, so it pops what the
+jumper's own `ret N` pops. The lifter emits `RECOMP_ITAIL_RET(target, N)` when
+every near `ret` of the function agrees on N (and N is not 0), and plain
+`RECOMP_ITAIL(target)` (N = 0) otherwise:
 
 ```c
-#define RECOMP_ITAIL(xbox_va) do { \
-    recomp_func_t _fn = recomp_lookup_manual((uint32_t)(xbox_va)); \
-    if (!_fn) _fn = recomp_lookup((uint32_t)(xbox_va)); \
-    if (!_fn) _fn = recomp_lookup_kernel((uint32_t)(xbox_va)); \
-    if (_fn) _fn(); \
-} while(0)
+g_seh_ebp = ebp; RECOMP_ITAIL_RET(MEM32(eax + 0x38), 24u); return; /* indirect tail jmp */
 ```
 
-No stack cleanup on failure -- there is nothing to clean up.
+Popping only the return address left a stdcall's arguments on the guest
+stack: a vtable thunk `mov eax, [ecx]; jmp [eax+0x38]` next to a `ret 0x18`
+moved its caller's esp 24 bytes down at every null slot, and the frameless
+callers above it then returned through object pointers. A target outside the
+code goes through `recomp_icall_not_code_log`, as in `RECOMP_ICALL`.
+Test: `tools/recomp/test_itail_cleanup.py`.
 
 ## ICALL Diagnostics
 

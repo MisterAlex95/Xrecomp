@@ -1533,6 +1533,24 @@ def stack_switch_sites(instructions):
     return sites
 
 
+def ret_cleanup(instructions):
+    """N of the function's `ret N` when every near ret in it agrees, else None.
+
+    0 for a plain `ret`. None when there is no ret, when two rets pop
+    different amounts, or when a far return is among them: then nothing says
+    what a tail jump's target would have popped (Lifter._itail).
+    """
+    seen = set()
+    for insn in instructions:
+        if not insn.is_ret:
+            continue
+        if insn.mnemonic == "retf":
+            return None
+        ops = insn.operands
+        seen.add(ops[0].imm & 0xFFFF if ops and ops[0].type == "imm" else 0)
+    return seen.pop() if len(seen) == 1 else None
+
+
 def normalise_zero_test(mnemonic, ops):
     """`test X, X` is `cmp X, 0`, and saying so keeps a branch alive.
 
@@ -1592,6 +1610,11 @@ class Lifter:
         # has a ret to carry them at. See _lift_stack_switch.
         self.stack_switch_sites = frozenset()
         self.stack_switch_carried = False
+        # Set per-function by translator: N of the function's `ret N` when
+        # every near ret in it agrees (0 for a plain ret), else None. An
+        # indirect tail jmp whose target cannot run leaves as that ret would
+        # (RECOMP_ITAIL_RET, see _itail).
+        self.ret_cleanup = None
         self.trace_exit_name = None  # Set per-function when traced
         self.force_return_value = None   # Set per-function by --force-return
         # Every direct call target we emit a name for, as {addr: name}. The
@@ -3426,7 +3449,7 @@ class Lifter:
                 lines = [f"{{ uint32_t _jt = {target_expr}; /* switch: {len(switch_targets)} entries, {len(unique_targets)} targets */"]
                 for t in unique_targets:
                     lines.append(f"if (_jt == 0x{t:08X}u) goto loc_{t:08X};")
-                lines.append(f"g_seh_ebp = ebp; RECOMP_ITAIL(_jt); return; }}")
+                lines.append(f"g_seh_ebp = ebp; {self._itail('_jt')} return; }}")
                 return lines
             # `jmp <reg>` where the register was loaded with an address
             # inside this same function: a hand-written continuation chain,
@@ -3451,13 +3474,29 @@ class Lifter:
                              f" {len(inside)} targets */"]
                     for t in inside:
                         lines.append(f"if (_jt == 0x{t:08X}u) goto loc_{t:08X};")
-                    lines.append("g_seh_ebp = ebp; RECOMP_ITAIL(_jt); return; }")
+                    lines.append(f"g_seh_ebp = ebp; {self._itail('_jt')} return; }}")
                     return lines
             target = _fmt_operand_read(ops[0])
             return [self._forced_tail(
-                f"g_seh_ebp = ebp; RECOMP_ITAIL({target}); return;"
+                f"g_seh_ebp = ebp; {self._itail(target)} return;"
                 f" /* indirect tail jmp */")]
         return ["/* jmp: no target */"]
+
+    def _itail(self, target):
+        """The dispatch of an indirect tail jmp through `target`.
+
+        A target that cannot run (null, wild, not translated) returns to the
+        caller in place of the jumper, so it must pop what the jumper's own
+        `ret N` pops: the target runs on the jumper's frame and would have.
+        RECOMP_ITAIL pops the return address only, which leaves a stdcall's
+        arguments on the guest stack -- Fable's vtable thunks (`jmp
+        [eax+0x38]` next to a `ret 0x18`) moved their callers' esp 24 bytes
+        at every null slot. A function with no ret, or rets that disagree,
+        keeps RECOMP_ITAIL: there is nothing to go by.
+        """
+        if self.ret_cleanup:
+            return f"RECOMP_ITAIL_RET({target}, {self.ret_cleanup}u);"
+        return f"RECOMP_ITAIL({target});"
 
     def _lift_jcc(self, insn):
         """Standalone conditional jump (no flag-setter tracked)."""
