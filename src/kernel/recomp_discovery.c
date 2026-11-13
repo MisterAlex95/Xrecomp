@@ -34,10 +34,11 @@ static pthread_mutex_t s_lock = PTHREAD_MUTEX_INITIALIZER;
 #endif
 
 enum { K_ICALL = 1, K_THREAD, K_THREAD_CTX, K_UNIMPL, K_D3D, K_WAIT_SPIN, K_LAUNCH, K_STACK_SWITCH, K_STUB,
-       K_SMC_EXEC, K_SMC_WRITE, K_EXCEPTION, K_D3D_LAYOUT, K_LAST = K_D3D_LAYOUT };
+       K_SMC_EXEC, K_SMC_WRITE, K_EXCEPTION, K_D3D_LAYOUT, K_CUT_BODY, K_LAST = K_CUT_BODY };
 /* The two smc kinds share "t":"smc" and differ by "kind" (XBA-118). */
 static const char *const kind_name[] = { "", "icall", "thread", "thread_ctx", "unimpl", "d3d", "wait_spin", "launch",
-                                         "stack_switch", "stub", "smc", "smc", "exception", "d3d_layout" };
+                                         "stack_switch", "stub", "smc", "smc", "exception", "d3d_layout",
+                                         "cut_body" };
 
 /* What is already in the file: kind << 32 | va, open addressing. A title that
  * fills it is beyond what one file can help with; the rest is dropped. */
@@ -375,6 +376,11 @@ void recomp_discovery_exception(uint32_t va, uint32_t code, const char *why)
     size_t o = (size_t)snprintf(f, sizeof f, ",\"code\":\"0x%08X\"", code);
     (void)put_str(f, o, sizeof f, "why", why);
     note(K_EXCEPTION, va, f);
+}
+
+void recomp_discovery_cut_body(uint32_t va)
+{
+    note(K_CUT_BODY, va, "");
 }
 
 void recomp_discovery_d3d_layout(const char *lib, uint32_t build, const char *rule, uint32_t used)

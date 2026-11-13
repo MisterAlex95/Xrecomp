@@ -7,6 +7,10 @@
  *    va): STATUS_INTEGER_DIVIDE_BY_ZERO for a zero divisor,
  *    STATUS_INTEGER_OVERFLOW for a quotient that does not fit. Run in a
  *    child process, since it does not return (POSIX only).
+ *  - recomp_cut_body (a lifted body that ran off its end, WP2): one
+ *    [CUT] line naming the last instruction, a {"t":"cut_body"} discovery
+ *    entry, then it stops like the divide error, KeBugCheckEx(0x1E,
+ *    STATUS_ILLEGAL_INSTRUCTION, va), and never returns into the caller.
  *  - xbox_GuestInterruptFlag (the lifted cli/sti/popfd): a cli on a thread
  *    below DISPATCH_LEVEL masks device interrupts the way a raise does --
  *    counted in xbox_IrqlBlocksInterrupts, and with RECOMP_DISPATCH_GATE
@@ -36,6 +40,7 @@ recomp_func_t recomp_lookup_manual(uint32_t xbox_va);
 recomp_func_t recomp_lookup_manual(uint32_t xbox_va) { (void)xbox_va; return NULL; }
 
 void recomp_divide_error(uint32_t va, uint32_t divisor);
+void recomp_cut_body(uint32_t va);
 void xbox_GuestInterruptFlag(int enabled);
 int  xbox_GuestInterruptsMasked(void);
 
@@ -63,8 +68,9 @@ static void check(int ok, const char *what)
 }
 
 #ifndef _WIN32
-/* Run recomp_divide_error(va, divisor) in a child; its exit code and the
- * first line it printed to stderr. */
+/* Run recomp_divide_error(va, divisor) in a child -- or recomp_cut_body(va)
+ * when divisor is CUT -- ; its exit code and what it printed to stderr. */
+#define CUT 0xFFFFFFFFu
 static int divide_error_child(uint32_t va, uint32_t divisor, char *line,
                               size_t cap)
 {
@@ -82,7 +88,10 @@ static int divide_error_child(uint32_t va, uint32_t divisor, char *line,
         /* No TIB, so no guest handler chain: the unhandled path. (With one,
          * the error is raised to the guest first: tests/seh_dispatch.) */
         g_fs_base = 0;
-        recomp_divide_error(va, divisor);
+        if (divisor == CUT)
+            recomp_cut_body(va);
+        else
+            recomp_divide_error(va, divisor);
         _exit(99);                      /* it must not return */
     }
     close(fds[1]);
@@ -117,6 +126,36 @@ static void test_divide_error(void)
     check(strstr(line, "0x00056780") && strstr(line, "quotient overflow")
           && strstr(line, "0xC0000095"),
           "and is reported as STATUS_INTEGER_OVERFLOW");
+}
+
+static void test_cut_body(void)
+{
+    char line[1024], path[256];
+    char text[512] = "";
+    FILE *f;
+    int rc;
+
+    printf("recomp_cut_body\n");
+    const char *tmp = getenv("TMPDIR");
+    snprintf(path, sizeof path, "%s/guest_cpu_ops_cut_%d.jsonl",
+             tmp && *tmp ? tmp : "/tmp", (int)getpid());
+    remove(path);
+    setenv("RECOMP_DISCOVERY", path, 1);
+    rc = divide_error_child(0x001C1208u, CUT, line, sizeof line);
+    unsetenv("RECOMP_DISCOVERY");
+    check(rc == 0x1E, "a cut body stops as KeBugCheckEx(0x1E), never returns");
+    check(strstr(line, "[CUT]") && strstr(line, "0x001C1208")
+          && !strstr(strstr(line, "[CUT]") + 5, "[CUT]"),
+          "one [CUT] line names the last instruction");
+    f = fopen(path, "rb");
+    if (f) {
+        size_t n = fread(text, 1, sizeof text - 1, f);
+        text[n] = 0;
+        fclose(f);
+    }
+    remove(path);
+    check(strstr(text, "{\"t\":\"cut_body\",\"va\":\"0x001C1208\"}") != NULL,
+          "and writes a cut_body discovery entry");
 }
 #endif
 
@@ -202,6 +241,7 @@ int main(void)
 {
 #ifndef _WIN32
     test_divide_error();
+    test_cut_body();
 #else
     printf("recomp_divide_error: POSIX only (fork), skipped\n");
 #endif

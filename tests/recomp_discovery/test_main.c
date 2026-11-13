@@ -78,13 +78,16 @@ int main(void)
     recomp_discovery_d3d_layout("D3D8LTCG", 5933, "fence_event", 0x1DCCu);   /* XBA-105 */
     recomp_discovery_d3d_layout("D3D8LTCG", 5933, "fence_event", 0x1DCCu);   /* the same rule: one entry */
     recomp_discovery_d3d_layout("D3D8LTCG", 5933, "rpb_nodes", 0x264u);      /* another rule: its own */
-    CHECK(recomp_discovery_written() == 11);
+    recomp_discovery_cut_body(0x001C1208u);                                  /* WP2 */
+    recomp_discovery_cut_body(0x001C1208u);
+    CHECK(recomp_discovery_written() == 12);
     CHECK(recomp_discovery_seeds() == 3);                       /* icall, thread, thread_ctx */
     CHECK(recomp_discovery_path() && !strcmp(recomp_discovery_path(), path));
     text = slurp(path);                                         /* written as it happened: no close needed */
     CHECK(text != NULL);
     if (text) {
-        CHECK(count(text, "\n") == 12);
+        CHECK(count(text, "\n") == 13);
+        CHECK(strstr(text, "{\"t\":\"cut_body\",\"va\":\"0x001C1208\"}\n") != NULL);
         CHECK(strstr(text, "{\"t\":\"exception\",\"va\":\"0x00012350\",\"code\":\"0xC0000094\","
                            "\"why\":\"divide by zero\"}\n") != NULL);
         CHECK(strstr(text, "\"lib\":\"D3D8LTCG\",\"build\":5933,\"rule\":\"fence_event\",\"used\":\"0x00001DCC\"}\n")
@@ -113,6 +116,7 @@ int main(void)
     CHECK(recomp_discovery_written() == 1);
     CHECK(recomp_discovery_seeds() == 0);
     recomp_discovery_exception(0x00012350u, 0xC0000094u, "read back");     /* known from the file */
+    recomp_discovery_cut_body(0x001C1208u);                                  /* read back by kind */
     CHECK(recomp_discovery_written() == 1);
     recomp_discovery_icall(0x00067890u, 0x00011111u);
     CHECK(recomp_discovery_written() == 2 && recomp_discovery_seeds() == 1);

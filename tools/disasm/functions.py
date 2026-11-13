@@ -58,6 +58,29 @@ class Function:
         }
 
 
+class OverlappingBodies(Exception):
+    """Two function bodies share bytes: the analysis is wrong (WP2).
+
+    A body that ends inside an instruction another body starts in was cut by
+    a function start that is not an instruction boundary of it; lifted, it
+    falls off its end without its epilogue (Fable's sub_001C1190, cut at
+    0x001C120A by a wild run's seed, returned without `ret 8`). Alias entries
+    (tail_jump_alias) share their parent's tail on purpose and are exempt.
+    """
+
+    def __init__(self, pairs):
+        self.pairs = pairs
+        shown = ", ".join(f"{a.name} 0x{a.start:08X}-0x{a.end:08X} and "
+                          f"{b.name} 0x{b.start:08X}-0x{b.end:08X}"
+                          for a, b in pairs[:5])
+        more = f" (and {len(pairs) - 5} more)" if len(pairs) > 5 else ""
+        super().__init__(f"{len(pairs)} overlapping function bodies: "
+                         f"{shown}{more}")
+
+
+ALIAS_METHOD = "tail_jump_alias"
+
+
 class FunctionDetector:
     """
     Multi-pass function boundary detector.
@@ -71,6 +94,9 @@ class FunctionDetector:
     # discovery off. See _disc.
     discovery = None
     _noreturn_slots: frozenset = frozenset()
+    # Seeds on an instruction boundary inside a body (Disassembler.run): alias
+    # entries only, never function starts (WP2). See _pass_seed_aliases.
+    seed_aliases: frozenset = frozenset()
     _extra_targets: Dict[int, Set[int]] = {}
 
     def _disc(self):
@@ -224,10 +250,74 @@ class FunctionDetector:
             self._close_tail_jump_targets(sections)
             self._build_alias_entries()
 
+        # A start inside the last instruction of the body before it cut that
+        # body short (WP2): make it an alias, so both stay callable and the
+        # body keeps its tail. Then no two bodies may overlap.
+        self._demote_cutting_starts(sections)
+
         # Populate call graph
         self._build_call_graph()
 
+        self.check_no_overlap()
         return len(self.functions)
+
+    def _demote_cutting_starts(self, sections: List[SectionInfo]) -> int:
+        """Turn function starts that cut the body before them into aliases.
+
+        A body is measured up to the next function start; when that start
+        lies inside an instruction of the body (an out-of-phase call target,
+        a target decoded in data), the body's last instruction runs past it
+        and the body ends with no terminator. Lifted, it falls off its end
+        without its epilogue: Fable's sub_006372E8 stopped at 0x0063736C,
+        cut by a call target two bytes into a `mov ax, [esi+4]`. An alias
+        entry (the tail-jump shape, _build_alias_entries) keeps the start
+        callable without truncating the body. Returns how many starts it
+        demoted; reported, since each is an analysis inconsistency.
+        """
+        demoted = []
+        for _ in range(4):                 # a rebuild can expose another one
+            cut = [b for a, b in self.overlapping_bodies()
+                   if b.start in self._candidates and a.start < b.start]
+            if not cut:
+                break
+            for b in cut:
+                del self._candidates[b.start]
+                demoted.append(b.start)
+            self.functions.clear()
+            self._build_functions(sections)
+            # Each runs to the end of the body it now lies in, as a seed
+            # alias does (_pass_seed_aliases).
+            bodies = sorted((f.start, f.end) for f in self.functions.values())
+            starts = [b[0] for b in bodies]
+            for addr in demoted:
+                i = bisect.bisect_right(starts, addr) - 1
+                if i >= 0 and addr < bodies[i][1]:
+                    self._alias_entries[addr] = bodies[i][1]
+                else:               # in a gap now: measured as its own body
+                    sec = self.image.get_section_at_va(addr)
+                    if sec is not None:
+                        self._alias_entries.setdefault(
+                            addr, sec.virtual_addr + sec.virtual_size)
+            self._build_alias_entries()
+        if demoted:
+            shown = ", ".join(f"0x{a:08X}" for a in demoted[:8])
+            more = f" (and {len(demoted) - 8} more)" if len(demoted) > 8 else ""
+            print(f"  {len(demoted)} function start(s) inside an instruction of "
+                  f"the body before them made aliases: {shown}{more}")
+        return len(demoted)
+
+    def overlapping_bodies(self) -> List[Tuple[Function, Function]]:
+        """Pairs of non-alias bodies that share bytes, in address order."""
+        bodies = sorted((f for f in self.functions.values()
+                         if f.detection_method != ALIAS_METHOD),
+                        key=lambda f: (f.start, f.end))
+        return [(a, b) for a, b in zip(bodies, bodies[1:]) if a.end > b.start]
+
+    def check_no_overlap(self) -> None:
+        """The output invariant: no two bodies overlap (OverlappingBodies)."""
+        pairs = self.overlapping_bodies()
+        if pairs:
+            raise OverlappingBodies(pairs)
 
     def _pass_static_discovery(self, sections: List[SectionInfo]) -> None:
         """discovery.StaticDiscovery's level-1 passes, until they find
@@ -691,8 +781,8 @@ class FunctionDetector:
         Runs after the bodies exist, since "inside a function" is not knowable
         before that.
         """
-        seeded = sorted(addr for addr, (_conf, method) in self._candidates.items()
-                        if method == "seed_vtable_thunk")
+        seeded = sorted({addr for addr, (_conf, method) in self._candidates.items()
+                         if method == "seed_vtable_thunk"} | set(self.seed_aliases))
         if not seeded:
             return
         bodies = sorted((f.start, f.end) for f in self.functions.values())
@@ -701,13 +791,18 @@ class FunctionDetector:
             if addr in self.functions:
                 continue
             i = bisect.bisect_right(starts, addr) - 1
-            if i < 0:
-                continue
-            body_start, body_end = bodies[i]
-            if not (body_start < addr < body_end):
+            inside = i >= 0 and bodies[i][0] < addr < bodies[i][1]
+            if not inside:
+                # A seed alias whose body moved away (later passes) is
+                # measured in its gap like any gap alias.
+                sec = (self.image.get_section_at_va(addr)
+                       if addr in self.seed_aliases else None)
+                if sec is not None:
+                    self._alias_entries.setdefault(
+                        addr, sec.virtual_addr + sec.virtual_size)
                 continue
             if addr not in self._alias_entries:
-                self._alias_entries[addr] = body_end
+                self._alias_entries[addr] = bodies[i][1]
 
     def _add_candidate(self, addr: int, confidence: float, method: str) -> None:
         """Add a function start candidate, keeping highest confidence."""

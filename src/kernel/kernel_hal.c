@@ -2261,3 +2261,19 @@ void recomp_divide_error(uint32_t va, uint32_t divisor)
     recomp_discovery_exception(va, code, divisor ? "quotient overflow" : "divide by zero");   /* XBA-129 */
     xbox_KeBugCheckEx(0x1E, code, va, 0, 0);
 }
+
+/* A lifted body that ran off its end (templates/runtime/recomp_types.h, WP2):
+ * the analysis cut the guest function short, so returning would skip its
+ * epilogue and leave the guest stack off for every caller. Report it once,
+ * record it for the next Prepare, and stop as an unhandled exception stops
+ * the console: KeBugCheckEx(KMODE_EXCEPTION_NOT_HANDLED,
+ * STATUS_ILLEGAL_INSTRUCTION, va). Does not return. */
+void recomp_cut_body(uint32_t va)
+{
+    fprintf(stderr, "[CUT] lifted body ran off its end after 0x%08X: the analysis cut this"
+            " function short (no terminator, no function start after it); esp=%08X -- stopping"
+            " instead of returning without its epilogue\n", va, g_esp);
+    fflush(stderr);
+    recomp_discovery_cut_body(va);
+    xbox_KeBugCheckEx(0x1E, 0xC000001Du, va, 0, 0);
+}

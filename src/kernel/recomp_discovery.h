@@ -47,6 +47,10 @@
  *                                                          not know and fell back to another build's value
  *                                                          for that rule (XBA-105, profiles/xdk/d3d8/d3d8.c);
  *                                                          va is a hash of lib, build and rule
+ *   {"t":"cut_body","va":"0x001C1208"}                     a lifted body ran off its end: the analysis
+ *                                                          cut it short (WP2, recomp_cut_body in
+ *                                                          kernel_hal.c); va is its last instruction.
+ *                                                          The title stops; not a seed
  *
  * The file: $RECOMP_DISCOVERY (recomp.cfg can set it); unset, empty or "0":
  * nothing is written. The desktop title project gets a default from
@@ -74,6 +78,7 @@ void recomp_discovery_smc_exec(uint32_t target, uint32_t ret_va, const char *whe
 void recomp_discovery_smc_write(uint32_t page, uint32_t at, const char *section, const char *by, uint32_t ret_va);
 void recomp_discovery_exception(uint32_t va, uint32_t code, const char *why);
 void recomp_discovery_d3d_layout(const char *lib, uint32_t build, const char *rule, uint32_t used);
+void recomp_discovery_cut_body(uint32_t va);
 
 /* The file in use, or NULL when discovery is off (opens it on first use). */
 const char *recomp_discovery_path(void);

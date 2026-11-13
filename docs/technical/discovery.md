@@ -58,6 +58,11 @@ this run or an earlier one) is not written again: the file only grows with what 
                                                              the XDK D3D layer met a D3D build its layout table does not
                                                              know and used another build's value for that rule (XBA-105,
                                                              profiles.md « Other XDK builds »); va: a hash of lib, build, rule
+{"t":"cut_body","va":"0x001C1208"}
+                                                             a lifted body ran off its end (WP2): its last instruction (va)
+                                                             is not a terminator and no function starts after it, so the
+                                                             analysis cut it short; recomp_cut_body (kernel_hal.c) stops
+                                                             the title instead of returning without the epilogue
 ```
 
 `bytes` is the first 8 bytes at the target of an `exec_outside_image`, as hex. They are code the title made at run time
@@ -86,6 +91,9 @@ entries this process wrote, `src/kernel/recomp_status.h`) make the miss visible 
   blocker, whatever the stage, and the result line carries the count (`"smc": N`); the Compatibility page counts the
   titles that have any (XBA-118). An `exec_outside_image` used to be an `icall` entry when it came through the lookup,
   and a seed candidate.
+- `cut_body` entries are not seeds: they name an analysis error (a function start that cut the body before it).
+  `tools.prepare` already prints the count of trapped bodies after the lift (« cut bodies ... »), so they are known
+  before any run.
 - `d3d_layout` entries are not seeds: they say what to add to `k_layouts` in `profiles/xdk/d3d8/d3d8.c` for that
   build (XBA-105); `tools.compat` (and the device grader) add « D3D layout guessed for D3D8LTCG 5933:
   fence_event, ... » after a blocker other than a crash or a launch (`tools/compat/blockers.py`).

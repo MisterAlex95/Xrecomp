@@ -1,11 +1,14 @@
-"""Seeds a run actually reached survive the mid-instruction guard.
+"""The mid-instruction guard and observed seeds.
 
-The guard rejects a seed that lands inside an instruction the linear sweep
-already decoded, unless the seed decodes as a prologue. It was written for
-RTTI vtable slots, which are inferences (HL2 had two bad ones in 12,288). A
-seed from tools.seed_from_log is where the CPU actually went, so it is kept
-even without a prologue: Halo's XPP init at 0x001CF6AC opens `cmp [flag], 0`
-right after a pointer table the sweep had walked as code.
+The guard rejects a seed that lands inside an instruction of a detected body
+unless the seed decodes as a prologue. It was written for RTTI vtable slots,
+which are inferences (HL2 had two bad ones in 12,288). A seed from
+tools.seed_from_log used to bypass it as "where the CPU actually went"; it no
+longer does (WP2): a wild indirect call reports garbage too, and Fable's
+0x001C120A, two bytes into a `mov`, cut sub_001C1190 before its `ret 8`. A
+seed in bytes no body claims (Halo's XPP init at 0x001CF6AC, `cmp [flag], 0`
+right after a pointer table the sweep had walked as code) never reaches the
+guard: see test_cut_seed.py.
 """
 import json
 import os
@@ -35,9 +38,10 @@ def _disasm(observed, prologues):
 
 
 class ObservedSeedTest(unittest.TestCase):
-    def test_observed_seed_is_trusted_without_a_prologue(self):
-        d = _disasm(observed={0x001CF6AC}, prologues=())
-        self.assertTrue(d._trust_mid_instruction_seed(0x001CF6AC))
+    def test_observed_seed_is_not_trusted_without_a_prologue(self):
+        # Fable's wild-call seed, two bytes into a mov of sub_001C1190.
+        d = _disasm(observed={0x001C120A}, prologues=())
+        self.assertFalse(d._trust_mid_instruction_seed(0x001C120A))
 
     def test_unobserved_non_prologue_seed_is_still_rejected(self):
         # The HL2 RTTI case: six bytes into a mov, decodes as nothing.
