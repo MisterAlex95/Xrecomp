@@ -686,6 +686,7 @@ static int ensure_init(void)
 }
 
 /* ---- batch signatures (RECOMP_GPU_SIGDUMP, RECOMP_GPU_SIGSKIP) ---------- */
+/*      and the per-batch record (RECOMP_GPU_BATCHLOG)                       */
 
 /* A diagnosis tool for wrong pixels: which batches draw a spot, and what is
  * left of the picture without them. Each batch gets a 32-bit signature of
@@ -701,8 +702,16 @@ static int ensure_init(void)
  *       first batch's texture addresses), and one "[GPUSEQ]" line with the
  *       frame's target runs, address(width x height)x batches (a depth-only
  *       target shows its zeta address | 1);
+ *       With RECOMP_GPU_SIGDUMP_KEEP=1 the file is kept: every frame is
+ *       printed for as long as it exists;
  *   RECOMP_GPU_SIGSKIP=<file>  batches whose signature is listed in <file>
- *       (hex words, re-read every 16 flips) are not drawn.
+ *       (hex words, re-read every 16 flips) are not drawn;
+ *   RECOMP_GPU_BATCHLOG=<file>  one binary record per batch (BLG_* below:
+ *       frame, signature, target, vertex buffer, stage textures, hashes of
+ *       the program, indices, vertices and constants) is written to <file>,
+ *       every frame, or with RECOMP_GPU_BATCHLOG_FLIPS=<flag file> only the
+ *       frames that start while the flag file exists. What
+ *       tools/frame_outliers reads: "same batches, other textures".
  * Off by default (one test per batch). */
 #define NV_GL_MAX_SIG 512
 #define NV_GL_MAX_SEQ 512
@@ -716,19 +725,126 @@ static GlSig *s_sig;
 static uint32_t s_nsig, s_skip[64], s_nskip;
 static struct { uint32_t va, wh, n; } s_seq[NV_GL_MAX_SEQ];
 static uint32_t s_nseq;
+static int s_sigkeep;
+/* Batch record, little-endian 32-bit words (host order; every host is
+ * little-endian). Word 1 is the record size in words, so a reader can skip
+ * words it does not know. Keep in step with tools/frame_outliers/records.py. */
+#define BLG_MAGIC 0x31474C42u           /* "BLG1" */
+enum {
+    BLG_MAGIC_W, BLG_SIZE_W, BLG_FRAME, BLG_INDEX, BLG_SIG, BLG_TARGET, BLG_TARGET_WH,
+    BLG_ZETA, BLG_FLAGS, BLG_COUNT, BLG_VCOUNT, BLG_FIRST, BLG_VB, BLG_STRIDE, BLG_STREAMS,
+    BLG_PROG, BLG_PROG_HI, BLG_IDX, BLG_IDX_HI, BLG_VTX, BLG_VTX_HI, BLG_CONST, BLG_CONST_HI,
+    BLG_TEX0, BLG_TEXFMT0 = BLG_TEX0 + 4, BLG_CMASK = BLG_TEXFMT0 + 4, BLG_LOOK, BLG_WORDS
+};
+static FILE *s_blog;
+static const char *s_blog_flag;
+static int s_blog_active;
+static uint32_t s_blog_n;
 
 static void sig_init(void)
 {
     const char *d = getenv("RECOMP_GPU_SIGDUMP"), *k = getenv("RECOMP_GPU_SIGSKIP");
+    const char *bl = getenv("RECOMP_GPU_BATCHLOG"), *bf = getenv("RECOMP_GPU_BATCHLOG_FLIPS");
+    const char *kp = getenv("RECOMP_GPU_SIGDUMP_KEEP");
 
     s_sigdump = d && *d ? d : NULL;
     s_sigskip = k && *k ? k : NULL;
-    if (!s_sig && (s_sigdump || s_sigskip))
+    s_sigkeep = kp && *kp && strcmp(kp, "0") != 0;
+    if (bl && *bl && !s_blog) {
+        s_blog = fopen(bl, "wb");
+        if (!s_blog)
+            fprintf(stderr, "  [GPUGL] batch log: cannot open %s\n", bl);
+        s_blog_flag = bf && *bf && strcmp(bf, "1") != 0 ? bf : NULL;
+        s_blog_active = s_blog && !s_blog_flag;
+        if (s_blog)
+            fprintf(stderr, "  [GPUGL] batch log: %s, %s%s\n", bl,
+                    s_blog_flag ? "while this file exists: " : "every frame",
+                    s_blog_flag ? s_blog_flag : "");
+    }
+    if (!s_sig && (s_sigdump || s_sigskip || s_blog))
         s_sig = (GlSig *)calloc(NV_GL_MAX_SIG, sizeof *s_sig);
     s_sig_on = s_sig != NULL;
     if (s_sig_on)
-        fprintf(stderr, "  [GPUGL] batch signatures: dump when %s exists, skip list %s\n",
-                s_sigdump ? s_sigdump : "(none)", s_sigskip ? s_sigskip : "(none)");
+        fprintf(stderr, "  [GPUGL] batch signatures: dump when %s exists%s, skip list %s\n",
+                s_sigdump ? s_sigdump : "(none)", s_sigdump && s_sigkeep ? " (every frame)" : "",
+                s_sigskip ? s_sigskip : "(none)");
+}
+
+/* One record of batch b to the batch log: sig is its signature, look the
+ * same hash without the target address (swapped buffers keep it). */
+static void blog_batch(const Nv2aSurface *s, const Nv2aBatch *b, uint32_t sig, uint32_t look)
+{
+    const Nv2aProgramBatch *pb = b->program;
+    const Nv2aPixelState *ps = b->pixel;
+    const Nv2aRenderState *rs = b->state;
+    uint32_t w[BLG_WORDS], i;
+    uint64_t h;
+
+    memset(w, 0, sizeof w);
+    w[BLG_MAGIC_W] = BLG_MAGIC;
+    w[BLG_SIZE_W] = BLG_WORDS;
+    w[BLG_FRAME] = s_frame;
+    w[BLG_INDEX] = s_blog_n++;
+    w[BLG_SIG] = sig;
+    w[BLG_TARGET] = s->color_valid ? s->color_va : 0;
+    w[BLG_TARGET_WH] = s->width | s->height << 16;
+    w[BLG_ZETA] = rs->zeta_va;
+    w[BLG_FLAGS] = b->prim | (pb ? 0x100u : 0) | (pb && pb->ffp ? 0x200u : 0)
+                 | (pb && pb->raw ? 0x400u : 0);
+    if (pb) {
+        w[BLG_COUNT] = pb->index_count;
+        w[BLG_VCOUNT] = pb->vertex_count;
+        w[BLG_FIRST] = pb->raw_first;
+        w[BLG_STREAMS] = pb->streams;
+        w[BLG_PROG] = (uint32_t)pb->hash;
+        w[BLG_PROG_HI] = (uint32_t)(pb->hash >> 32);
+        if (pb->indices && pb->index_count) {
+            h = hash_bytes((const uint8_t *)pb->indices, pb->index_count * 2u);
+            w[BLG_IDX] = (uint32_t)h;
+            w[BLG_IDX_HI] = (uint32_t)(h >> 32);
+        }
+        if (pb->raw) {
+            /* The first stream present; its elements raw_first .. +vertex_count
+             * are inside guest memory (nv2a_backend.h). */
+            for (i = 0; i < 16 && !((pb->streams >> i) & 1); i++)
+                ;
+            if (i < 16) {
+                const Nv2aRawAttr *r = &pb->raw[i];
+                w[BLG_VB] = r->offset;
+                w[BLG_STRIDE] = r->stride;
+                if (r->stride && pb->vertex_count) {
+                    h = hash_bytes(guest(r->offset + pb->raw_first * r->stride),
+                                   (size_t)pb->vertex_count * r->stride);
+                    w[BLG_VTX] = (uint32_t)h;
+                    w[BLG_VTX_HI] = (uint32_t)(h >> 32);
+                }
+            }
+        }
+        if (pb->constants) {
+            h = hash_bytes((const uint8_t *)pb->constants, 192u * 16u);
+            w[BLG_CONST] = (uint32_t)h;
+            w[BLG_CONST_HI] = (uint32_t)(h >> 32);
+        }
+    } else {
+        w[BLG_COUNT] = b->count;
+        w[BLG_VCOUNT] = b->count;
+        if (b->vertices && b->count) {
+            h = hash_bytes((const uint8_t *)b->vertices, (size_t)b->count * sizeof *b->vertices);
+            w[BLG_VTX] = (uint32_t)h;
+            w[BLG_VTX_HI] = (uint32_t)(h >> 32);
+        }
+    }
+    for (i = 0; i < 4; i++) {
+        const Nv2aTexStage *t = &ps->stage[i];
+        if (!t->valid)
+            continue;
+        w[BLG_TEX0 + i] = t->tex.offset;
+        w[BLG_TEXFMT0 + i] = (t->tex.color & 0xFFu) | ((t->tex.width - 1u) & 0xFFFu) << 8
+                           | ((t->tex.height - 1u) & 0xFFFu) << 20;
+    }
+    w[BLG_CMASK] = rs->color_mask;
+    w[BLG_LOOK] = look;
+    fwrite(w, sizeof w, 1, s_blog);
 }
 
 /* A target switch, for the [GPUSEQ] line. */
@@ -781,6 +897,14 @@ static int sig_batch(const Nv2aSurface *s, const Nv2aBatch *b, const uint32_t ki
     }
     for (i = 0; i < n * 4; i++)
         h = (h ^ ((const uint8_t *)w)[i]) * 16777619u;
+    if (s_blog_active) {
+        uint32_t look = 2166136261u;
+        w[1] = 0;
+        for (i = 0; i < n * 4; i++)
+            look = (look ^ ((const uint8_t *)w)[i]) * 16777619u;
+        w[1] = s->color_valid ? s->color_va : 0;
+        blog_batch(s, b, h, look);
+    }
 
     for (i = 0; i < s_nsig && s_sig[i].sig != h; i++)
         ;
@@ -834,9 +958,20 @@ static void sig_flip(void)
 
     if (!s_sig_on)
         return;
+    if (s_blog) {
+        if (s_blog_active)
+            fflush(s_blog);         /* complete frames even if the run is killed */
+        if (s_blog_flag) {
+            s_blog_active = (f = fopen(s_blog_flag, "rb")) != NULL;
+            if (f)
+                fclose(f);
+        }
+        s_blog_n = 0;
+    }
     if (s_sigdump && (f = fopen(s_sigdump, "rb")) != NULL) {
         fclose(f);
-        remove(s_sigdump);
+        if (!s_sigkeep)
+            remove(s_sigdump);
         fprintf(stderr, "[GPUSIG] frame %u: %u signatures, %u target runs\n",
                 s_frame, s_nsig, s_nseq);
         fprintf(stderr, "[GPUSEQ]");
