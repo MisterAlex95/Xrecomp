@@ -7,3 +7,6 @@ target_include_directories(kernel_ksync_test PRIVATE ../../src/kernel)
 target_link_libraries(kernel_ksync_test PRIVATE xboxrecomp)
 enable_testing()
 add_test(NAME kernel_ksync_test COMMAND kernel_ksync_test)
+# The A/B switch of XBA-133: no concurrency limit on KQUEUEs.
+add_test(NAME kernel_ksync_nolimit_test COMMAND kernel_ksync_test)
+set_tests_properties(kernel_ksync_nolimit_test PROPERTIES ENVIRONMENT "RECOMP_QUEUE_LIMIT=0")

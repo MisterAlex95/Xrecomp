@@ -206,24 +206,24 @@ stub is in `src/kernel/kernel_stub_table.c`: its first call (then the 10th, 100t
 |---|---:|---:|---:|---:|---|
 | AV / video mode | 4 | 4 | 0 | 0 | - |
 | Debugger | 6 | 3 | 3 | 0 | - |
-| Executive (pool, locks, interlocked) | 16 | 15 | 0 | 1 | 25 ExReadWriteRefurbInfo |
+| Executive (pool, locks, interlocked) | 16 | 16 | 0 | 0 | - |
 | File-system cache | 3 | 2 | 1 | 0 | - |
-| HAL (SMBus, interrupts, firmware) | 15 | 11 | 1 | 3 | 43 HalEnableSystemInterrupt, 47 HalRegisterShutdownNotification, 366 HalWriteSMCScratchRegister |
+| HAL (SMBus, interrupts, firmware) | 15 | 13 | 2 | 0 | - |
 | Interlocked / SList | 8 | 8 | 0 | 0 | - |
-| I/O manager | 27 | 18 | 0 | 9 | 60 IoBuildAsynchronousFsdRequest, 63 IoCheckShareAccess, 75 IoQueryFileInformation, 76 IoQueryVolumeInformation, 77 IoQueueThreadIrp, 78 IoRemoveShareAccess, 80 IoSetShareAccess, 90 IoDismountVolume, 91 IoDismountVolumeByName |
-| Kernel (threads, waits, timers, DPCs, APCs) | 65 | 57 | 4 | 4 | 92 KeAlertResumeThread, 130 KeRaiseIrqlToSynchLevel, 144 KeSetDisableBoostThread, 155 KeTestAlertThread |
+| I/O manager | 27 | 21 | 5 | 1 | 60 IoBuildAsynchronousFsdRequest |
+| Kernel (threads, waits, timers, DPCs, APCs) | 65 | 61 | 4 | 0 | - |
 | Kernel (IRQL fastcalls) | 2 | 2 | 0 | 0 | - |
-| Kernel internals | 2 | 1 | 0 | 1 | 163 KiUnlockDispatcherDatabase |
-| Memory manager | 25 | 21 | 0 | 4 | 174 MmIsAddressValid, 178 MmPersistContiguousMemory, 376 MmDbgQueryAvailablePages, 377 MmDbgReleaseAddress |
-| Native API (files, events, memory) | 55 | 41 | 0 | 14 | 191 NtCreateIoCompletion, 201 NtOpenDirectoryObject, 206 NtQueueApcThread, 208 NtQueryDirectoryObject, 209 NtQueryEvent, 212 NtQueryIoCompletion, 213 NtQueryMutant, 214 NtQuerySemaphore, 216 NtQueryTimer, 220 NtReadFileScatter, 223 NtRemoveIoCompletion, 227 NtSetIoCompletion, 230 NtSignalAndWaitForSingleObjectEx, 237 NtWriteFileGather |
-| Object manager | 10 | 4 | 0 | 6 | 239 ObCreateObject, 241 ObInsertObject, 242 ObMakeTemporaryObject, 243 ObOpenObjectByName, 244 ObOpenObjectByPointer, 248 ObReferenceObjectByPointer |
+| Kernel internals | 2 | 2 | 0 | 0 | - |
+| Memory manager | 25 | 23 | 2 | 0 | - |
+| Native API (files, events, memory) | 55 | 55 | 0 | 0 | - |
+| Object manager | 10 | 10 | 0 | 0 | - |
 | Network PHY | 2 | 2 | 0 | 0 | - |
-| Process / thread | 5 | 4 | 0 | 1 | 257 PsSetCreateThreadNotifyRoutine |
-| Run-time library | 66 | 63 | 0 | 3 | 266 RtlCaptureStackBackTrace, 297 RtlMapGenericMask, 319 RtlWalkFrameChain |
+| Process / thread | 5 | 5 | 0 | 0 | - |
+| Run-time library | 66 | 66 | 0 | 0 | - |
 | Crypto | 17 | 17 | 0 | 0 | - |
 | XBE sections | 2 | 2 | 0 | 0 | - |
-| Other (port I/O, ...) | 17 | 14 | 0 | 3 | 88 KdDebuggerEnabled, 89 KdDebuggerNotPresent, 332 WRITE_PORT_BUFFER_UCHAR |
-| **All** | **347** | **289** | **9** | **49** | |
+| Other (port I/O, ...) | 15 | 14 | 1 | 0 | - |
+| **All** | **345** | **326** | **18** | **1** | |
 <!-- kernel-coverage:end -->
 
 ### Data Exports

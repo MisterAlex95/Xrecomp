@@ -86,6 +86,9 @@ int main(void)
     }
     {
         static const struct { ULONG index, off; } f[] = {
+            /* nxdk's numbers, spelled out (XBA-133): 1 standard name,
+             * 2 standard date, 3 standard bias, 4-6 the daylight ones. */
+            {1, 0x08}, {2, 0x18}, {3, 0x28}, {4, 0x0C}, {5, 0x1C}, {6, 0x2C},
             {XC_TZ_STD_BIAS, 0x28}, {XC_TZ_DLT_BIAS, 0x2C}, {XC_LANGUAGE, 0x30},
             {XC_VIDEO, 0x34}, {XC_AUDIO, 0x38}, {XC_MISC, 0x58}, {XC_DVD_REGION, 0x5C},
         };

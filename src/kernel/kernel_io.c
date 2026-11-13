@@ -372,6 +372,20 @@ const char* xbox_LookupSymbolicLink(const char* link)
     return entry ? entry->target : NULL;
 }
 
+/* The links in table order, for NtQueryDirectoryObject on \?? (XBA-114):
+ * 1 and the link's name and target for a slot in use, 0 for a free slot,
+ * -1 past the end. */
+int xbox_SymbolicLinkAt(int index, const char **link, const char **target)
+{
+    if (index < 0 || index >= XBOX_MAX_SYMLINKS)
+        return -1;
+    if (!g_symlinks[index].used)
+        return 0;
+    if (link) *link = g_symlinks[index].link;
+    if (target) *target = g_symlinks[index].target;
+    return 1;
+}
+
 NTSTATUS __stdcall xbox_IoCreateSymbolicLink(
     PXBOX_ANSI_STRING SymbolicLinkName,
     PXBOX_ANSI_STRING DeviceName)

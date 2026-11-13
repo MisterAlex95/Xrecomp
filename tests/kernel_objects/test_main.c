@@ -1,0 +1,634 @@
+/*
+ * The object namespace and objects with a body in guest memory (XBA-114).
+ *
+ * Driven through the thunk table against a real guest window
+ * (xbox_MemoryLayoutInit on tools/conformance/test.xbe): ObCreateObject
+ * allocates from the guest pool. Layouts and argument counts are nxdk's
+ * xboxkrnl.h (OBJECT_HEADER, OBJECT_DIRECTORY_INFORMATION, OBJECT_TYPE);
+ * every call checks esp after it.
+ *
+ * Checked:
+ *   1. NtOpenDirectoryObject opens \, \??, \Device (also relative to the
+ *      root's handle) and refuses a name that is no directory;
+ *      NtQueryDirectoryObject lists one entry per call, with its type tag,
+ *      Context counting, STATUS_NO_MORE_ENTRIES at the end, RestartScan,
+ *      STATUS_BUFFER_TOO_SMALL with the size needed; \?? lists D: and a
+ *      link IoCreateSymbolicLink made.
+ *   2. ObCreateObject lays out OBJECT_HEADER and the name info;
+ *      ObInsertObject names it (listed in its directory, with its type's
+ *      pool tag) and opens a handle; a second object of the same name is
+ *      refused and deleted; ObOpenObjectByName finds it (and checks the
+ *      type); ObReferenceObjectByHandle / ByPointer and ObfDereferenceObject
+ *      move PointerCount; closing the handles calls the type's
+ *      CloseProcedure with the handle count, the last one takes the name out
+ *      and the last reference calls DeleteProcedure. A permanent object
+ *      keeps its name after its last handle until ObMakeTemporaryObject.
+ *   3. NtQueueApcThread (XBA-133) on the current thread: the routine runs at
+ *      the next alertable user-mode wait as ApcRoutine(Arg1, Arg2, Arg3),
+ *      which returns STATUS_USER_APC; a handle that is no thread is
+ *      STATUS_INVALID_HANDLE. (Waking another thread's wait is the same path
+ *      as KeInsertQueueApc's, checked in tests/kernel_io_apc.)
+ *   4. The rest of the stub list (XBA-114): RtlWalkFrameChain and
+ *      RtlCaptureStackBackTrace up a frame-pointer chain, RtlMapGenericMask,
+ *      KeSetDisableBoostThread on KTHREAD.DisableBoost, MmIsAddressValid,
+ *      KeRaiseIrqlToSynchLevel / KiUnlockDispatcherDatabase, the SMC scratch
+ *      register read back, ExReadWriteRefurbInfo, MmDbgQueryAvailablePages,
+ *      IoSetShareAccess / IoCheckShareAccess / IoRemoveShareAccess, and
+ *      KdDebuggerEnabled / KdDebuggerNotPresent as data exports.
+ *   5. PsSetCreateThreadNotifyRoutine: a routine registered is called with
+ *      Create TRUE on the creating thread before PsCreateSystemThreadEx's
+ *      worker runs, and with FALSE on the worker as it ends; the ninth
+ *      registration is refused. HalRegisterShutdownNotification (POSIX, in a
+ *      forked child, since HalReturnToFirmware ends the process): the
+ *      routines run in priority order, an unregistered one does not.
+ */
+#include "kernel.h"
+#include "xbox_memory_layout.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#ifndef _WIN32
+#include <sys/wait.h>
+#include <unistd.h>
+#endif
+
+typedef void (*recomp_func_t)(void);
+extern recomp_func_t recomp_lookup_kernel(uint32_t xbox_va);
+extern ptrdiff_t g_xbox_mem_offset;
+#define XBOX_TO_NATIVE(va) ((void *)((uintptr_t)(va) + g_xbox_mem_offset))
+
+#define CLOSE_VA  0x00007100u     /* "guest" addresses of the type procedures */
+#define DELETE_VA 0x00007200u
+#define APC_VA    0x00007300u
+#define NOTIFY_VA 0x00007400u
+#define WORKER_VA 0x00007500u
+#define SHUT_A_VA 0x00007600u
+#define SHUT_B_VA 0x00007700u
+
+static int failures;
+static char d[256];
+static uint32_t B;                /* our guest scratch area */
+
+#define G32(va) (*(volatile uint32_t *)XBOX_TO_NATIVE(va))
+#define G16(va) (*(volatile uint16_t *)XBOX_TO_NATIVE(va))
+#define G8(va)  (*(volatile uint8_t  *)XBOX_TO_NATIVE(va))
+
+static void check(int ok, const char *what, const char *detail)
+{
+    printf("  %-70s %s", what, ok ? "PASS" : "FAIL");
+    if (!ok && detail) printf(" -- %s", detail);
+    putchar('\n');
+    if (!ok) failures++;
+}
+
+/* Offsets in the scratch area. */
+enum {
+    O_THUNK = 0x0000, O_STACK = 0x2000, O_HANDLE = 0x3000, O_OUT = 0x3100,
+    O_ANSI = 0x3200, O_OA = 0x3300, O_NAME = 0x3400, O_ANSI2 = 0x3500,
+    O_NAME2 = 0x3600, O_BUF = 0x4000, O_TYPE = 0x5000, O_TYPE2 = 0x5100,
+    O_TIB = 0x6000, O_KT = 0x6100, O_ZERO = 0x6400,
+};
+#define V(o) (B + (uint32_t)(o))
+
+enum {
+    S_CLOSE, S_OPENDIR, S_QUERYDIR, S_SYMLINK, S_CREATE, S_INSERT, S_MKTEMP,
+    S_OPENNAME, S_OPENPTR, S_REFPTR, S_REFHANDLE, S_DEREF, S_QAPC, S_DELAY,
+    S_WALK, S_BACKTRACE, S_MAPMASK, S_NOBOOST, S_ISVALID, S_SYNCH, S_KIUNLOCK,
+    S_SMCSCRATCH, S_SMBREAD, S_REFURB, S_DBGPAGES, S_SETSHARE, S_CHECKSHARE,
+    S_REMOVESHARE, S_KDENABLED, S_KDNOTPRESENT, S_NOTIFY, S_PSCREATE, S_WAIT1,
+    S_SHUTREG, S_FIRMWARE, S_COUNT
+};
+static const uint32_t ord[S_COUNT] = {
+    187, 201, 208, 67, 239, 241, 242, 243, 244, 248, 246, 250, 206, 99,
+    319, 266, 297, 144, 174, 130, 163, 366, 45, 25, 376, 80, 63, 78, 88, 89,
+    257, 255, 233, 47, 49,
+};
+
+static uint32_t call(int slot, const uint32_t *args, int n)
+{
+    uint32_t sp = V(O_STACK) + 0x800;
+    int i;
+    G32(sp) = 0xBEEF0000u | (uint32_t)slot;
+    for (i = 0; i < n; i++)
+        G32(sp + 4 + 4 * (uint32_t)i) = args[i];
+    g_esp = sp;
+    g_eax = 0xDEADBEEFu;
+    recomp_lookup_kernel(G32(V(O_THUNK) + 4 * (uint32_t)slot))();
+    return g_eax;
+}
+#define CALL(slot, ...) do { uint32_t a_[] = { __VA_ARGS__ }; \
+    call(slot, a_, (int)(sizeof a_ / sizeof a_[0])); } while (0)
+static int esp_ok(int n) { return g_esp == V(O_STACK) + 0x800 + 4 + 4 * (uint32_t)n; }
+
+/* The type procedures: stdcall, so they pop their return address and
+ * arguments. */
+static int closes, deletes;
+static uint32_t last_close_obj, last_close_count, last_delete_obj;
+
+static void close_proc(void)
+{
+    last_close_obj = G32(g_esp + 4);
+    last_close_count = G32(g_esp + 8);
+    closes++;
+    g_esp += 12;
+}
+
+static void delete_proc(void)
+{
+    last_delete_obj = G32(g_esp + 4);
+    deletes++;
+    g_esp += 8;
+}
+
+static int apc_runs;
+static uint32_t apc_args[3];
+
+static void apc_proc(void)       /* ApcRoutine(Arg1, Arg2, Arg3), stdcall */
+{
+    apc_args[0] = G32(g_esp + 4);
+    apc_args[1] = G32(g_esp + 8);
+    apc_args[2] = G32(g_esp + 12);
+    apc_runs++;
+    g_esp += 16;
+}
+
+/* Thread notify routine (Thread, ThreadId, Create) and the worker. */
+static volatile int notes, worker_ran, notes_before_run;
+static volatile uint32_t note_thread[4], note_create[4];
+static volatile unsigned long note_tid[4], worker_tid;
+
+static void notify_proc(void)
+{
+    int i = notes < 4 ? notes : 3;
+    note_thread[i] = G32(g_esp + 4);
+    note_create[i] = G32(g_esp + 12) & 0xFF;
+    note_tid[i] = (unsigned long)GetCurrentThreadId();
+    notes++;
+    g_esp += 16;
+}
+
+static void worker_proc(void)       /* VOID (PVOID ctx1, PVOID ctx2) */
+{
+    notes_before_run = notes;
+    worker_tid = (unsigned long)GetCurrentThreadId();
+    worker_ran = 1;
+    g_esp += 12;
+}
+
+static int shut_fd = -1;
+static void shut_proc(char c)
+{
+#ifndef _WIN32
+    if (shut_fd >= 0) { ssize_t w = write(shut_fd, &c, 1); (void)w; }
+#else
+    (void)c;
+#endif
+    g_esp += 8;
+}
+static void shut_a(void) { shut_proc('A'); }
+static void shut_b(void) { shut_proc('B'); }
+
+recomp_func_t recomp_lookup(uint32_t va);
+recomp_func_t recomp_lookup(uint32_t va)
+{
+    return va == CLOSE_VA ? close_proc : va == DELETE_VA ? delete_proc
+         : va == APC_VA ? apc_proc : va == NOTIFY_VA ? notify_proc
+         : va == WORKER_VA ? worker_proc : va == SHUT_A_VA ? shut_a
+         : va == SHUT_B_VA ? shut_b : NULL;
+}
+recomp_func_t recomp_lookup_manual(uint32_t va);
+recomp_func_t recomp_lookup_manual(uint32_t va) { (void)va; return NULL; }
+
+/* OBJECT_ATTRIBUTES { RootDirectory, ObjectName, Attributes } naming `name`. */
+static uint32_t oa(uint32_t root, const char *name, uint32_t attrs)
+{
+    strcpy((char *)XBOX_TO_NATIVE(V(O_NAME)), name);
+    G16(V(O_ANSI)) = (uint16_t)strlen(name);
+    G16(V(O_ANSI) + 2) = (uint16_t)(strlen(name) + 1);
+    G32(V(O_ANSI) + 4) = V(O_NAME);
+    G32(V(O_OA)) = root;
+    G32(V(O_OA) + 4) = V(O_ANSI);
+    G32(V(O_OA) + 8) = attrs;
+    return V(O_OA);
+}
+
+static uint32_t open_dir(uint32_t root, const char *name)
+{
+    G32(V(O_HANDLE)) = 0;
+    CALL(S_OPENDIR, V(O_HANDLE), oa(root, name, 0x40));
+    return g_eax == 0 ? G32(V(O_HANDLE)) : 0;
+}
+
+/* All the entries of a directory, "name/TAG " each. */
+static void list_dir(uint32_t h, char *out, size_t n)
+{
+    uint32_t restart = 1;
+    out[0] = 0;
+    for (;;) {
+        CALL(S_QUERYDIR, h, V(O_BUF), 0x200, restart, V(O_OUT), V(O_OUT) + 4);
+        restart = 0;
+        if (g_eax)
+            break;
+        {
+            uint32_t tag = G32(V(O_BUF) + 8);
+            size_t l = strlen(out);
+            snprintf(out + l, n - l, "%.*s/%.4s ", (int)G16(V(O_BUF)),
+                     (const char *)XBOX_TO_NATIVE(G32(V(O_BUF) + 4)), (const char *)&tag);
+        }
+    }
+}
+
+/* ═══════════════════ 1. Directories ═══════════════════ */
+
+static void test_directories(void)
+{
+    char list[512];
+    uint32_t root, dev, dos, h;
+
+    root = open_dir(0, "\\");
+    check(root != 0 && esp_ok(2), "NtOpenDirectoryObject \\ (2 arguments)", NULL);
+    dev = open_dir(0, "\\Device");
+    check(dev != 0, "NtOpenDirectoryObject \\Device", NULL);
+    h = open_dir(root, "Device");
+    check(h == dev, "relative to the root's handle: the same directory", NULL);
+    open_dir(0, "\\Nope");
+    snprintf(d, sizeof d, "status 0x%08X", g_eax);
+    check(g_eax == 0xC0000034u, "a name that is no directory: STATUS_OBJECT_NAME_NOT_FOUND", d);
+
+    list_dir(root, list, sizeof list);
+    check(!strcmp(list, "??/Dire Device/Dire "), "\\ lists ?? and Device", list);
+
+    CALL(S_QUERYDIR, dev, V(O_BUF), 0x200, 1, V(O_OUT), V(O_OUT) + 4);
+    snprintf(d, sizeof d, "status 0x%08X len %u ctx %u ret %u", g_eax, G16(V(O_BUF)),
+             G32(V(O_OUT)), G32(V(O_OUT) + 4));
+    check(g_eax == 0 && esp_ok(6) && G16(V(O_BUF)) == 6 && G32(V(O_BUF) + 4) == V(O_BUF) + 12
+          && !memcmp(XBOX_TO_NATIVE(V(O_BUF) + 12), "CdRom0", 7) && G32(V(O_OUT)) == 1
+          && G32(V(O_OUT) + 4) == 12 + 7,
+          "NtQueryDirectoryObject: one entry, name after it, Context 1 (6 arguments)", d);
+    CALL(S_QUERYDIR, dev, V(O_BUF), 0x200, 0, V(O_OUT), 0);
+    check(g_eax == 0 && G16(V(O_BUF)) == 9 && G32(V(O_OUT)) == 2, "the next call: Harddisk0", NULL);
+    CALL(S_QUERYDIR, dev, V(O_BUF), 0x200, 0, V(O_OUT), 0);
+    check(g_eax == 0x8000001Au, "then STATUS_NO_MORE_ENTRIES", NULL);
+    CALL(S_QUERYDIR, dev, V(O_BUF), 8, 1, V(O_OUT), V(O_OUT) + 4);
+    check(g_eax == 0xC0000023u && G32(V(O_OUT) + 4) == 19,
+          "too small: STATUS_BUFFER_TOO_SMALL and the size needed", NULL);
+
+    h = open_dir(dev, "Harddisk0");
+    list_dir(h, list, sizeof list);
+    check(strstr(list, "Partition1/Devi ") != NULL, "\\Device\\Harddisk0 lists the partitions", list);
+
+    /* A drive letter the title links itself. */
+    strcpy((char *)XBOX_TO_NATIVE(V(O_NAME2)), "\\??\\Q:");
+    G16(V(O_ANSI2)) = 6; G16(V(O_ANSI2) + 2) = 7; G32(V(O_ANSI2) + 4) = V(O_NAME2);
+    oa(0, "\\Device\\Harddisk0\\Partition1", 0);
+    CALL(S_SYMLINK, V(O_ANSI2), V(O_ANSI));
+    dos = open_dir(0, "\\??");
+    list_dir(dos, list, sizeof list);
+    check(strstr(list, "D:/Symb ") && strstr(list, "Q:/Symb "),
+          "\\?? lists D: and the link IoCreateSymbolicLink made", list);
+    CALL(S_CLOSE, dev);
+    check(g_eax == 0, "NtClose of a directory handle", NULL);
+}
+
+/* ═══════════════════ 2. Objects ═══════════════════ */
+
+static uint32_t create(uint32_t type, const char *name, uint32_t attrs, uint32_t size)
+{
+    G32(V(O_OUT)) = 0;
+    CALL(S_CREATE, type, name ? oa(0, name, attrs) : 0, size, V(O_OUT));
+    return g_eax == 0 ? G32(V(O_OUT)) : 0;
+}
+
+#define PTRS(o)    G32((o) - 0x10)
+#define HANDLES(o) G32((o) - 0x0C)
+
+static void test_objects(void)
+{
+    uint32_t type = V(O_TYPE), obj, obj2, h, h2, p;
+    char list[512];
+
+    memset(XBOX_TO_NATIVE(type), 0, 0x1C);
+    G32(type + 0x08) = CLOSE_VA;
+    G32(type + 0x0C) = DELETE_VA;
+    G32(type + 0x18) = 0x74736554u;          /* 'Test' */
+    memset(XBOX_TO_NATIVE(V(O_TYPE2)), 0, 0x1C);
+
+    obj = create(type, "\\Device\\Widget", 0x40, 0x20);
+    snprintf(d, sizeof d, "status 0x%08X obj 0x%08X", g_eax, obj);
+    check(obj && esp_ok(4), "ObCreateObject returns a body (4 arguments)", d);
+    if (!obj)
+        return;
+    snprintf(d, sizeof d, "ptrs %u handles %u type 0x%X flags %u name %u@0x%X",
+             PTRS(obj), HANDLES(obj), G32(obj - 8), G32(obj - 4), G16(obj - 0x18), G32(obj - 0x14));
+    check(PTRS(obj) == 1 && HANDLES(obj) == 0 && G32(obj - 8) == type && G32(obj - 4) == 1
+          && G16(obj - 0x18) == 14
+          && !memcmp(XBOX_TO_NATIVE(G32(obj - 0x14)), "\\Device\\Widget", 14),
+          "OBJECT_HEADER and name info as the console lays them out", d);
+
+    G32(V(O_HANDLE)) = 0;
+    CALL(S_INSERT, obj, oa(0, "\\Device\\Widget", 0x40), 0, V(O_HANDLE));
+    h = G32(V(O_HANDLE));
+    check(g_eax == 0 && h && HANDLES(obj) == 1 && PTRS(obj) == 1 && esp_ok(4),
+          "ObInsertObject opens a handle (4 arguments)", NULL);
+    {
+        uint32_t dev = open_dir(0, "\\Device");
+        list_dir(dev, list, sizeof list);
+        check(strstr(list, "Widget/Test ") != NULL, "its name is listed in \\Device with the type's tag", list);
+    }
+
+    obj2 = create(type, "\\Device\\Widget", 0x40, 0x10);
+    deletes = 0;
+    CALL(S_INSERT, obj2, oa(0, "\\Device\\Widget", 0x40), 0, V(O_HANDLE));
+    check(g_eax == 0xC0000035u && deletes == 1 && last_delete_obj == obj2,
+          "the same name again: STATUS_OBJECT_NAME_COLLISION, that object deleted", NULL);
+
+    G32(V(O_HANDLE)) = 0;
+    CALL(S_OPENNAME, oa(0, "\\Device\\Widget", 0x40), type, 0, V(O_HANDLE));
+    h2 = G32(V(O_HANDLE));
+    check(g_eax == 0 && h2 && h2 != h && HANDLES(obj) == 2 && PTRS(obj) == 2 && esp_ok(4),
+          "ObOpenObjectByName: a second handle", NULL);
+    CALL(S_OPENNAME, oa(0, "\\Device\\Widget", 0x40), V(O_TYPE2), 0, V(O_HANDLE));
+    check(g_eax == 0xC0000024u, "of another type: STATUS_OBJECT_TYPE_MISMATCH", NULL);
+
+    G32(V(O_OUT)) = 0;
+    CALL(S_REFHANDLE, h2, type, V(O_OUT));
+    p = G32(V(O_OUT));
+    check(g_eax == 0 && p == obj && PTRS(obj) == 3, "ObReferenceObjectByHandle: the body, one more reference", NULL);
+    g_ecx = obj;
+    call(S_DEREF, NULL, 0);
+    check(PTRS(obj) == 2, "ObfDereferenceObject: one less", NULL);
+    CALL(S_REFPTR, obj, type);
+    check(g_eax == 0 && PTRS(obj) == 3 && esp_ok(2), "ObReferenceObjectByPointer (2 arguments)", NULL);
+    g_ecx = obj;
+    call(S_DEREF, NULL, 0);
+    G32(V(O_HANDLE)) = 0;
+    CALL(S_OPENPTR, obj, type, V(O_HANDLE));
+    check(g_eax == 0 && G32(V(O_HANDLE)) && HANDLES(obj) == 3 && esp_ok(3),
+          "ObOpenObjectByPointer: a third handle (3 arguments)", NULL);
+    CALL(S_CLOSE, G32(V(O_HANDLE)));
+
+    closes = deletes = 0;
+    CALL(S_CLOSE, h2);
+    snprintf(d, sizeof d, "closes %d obj 0x%X count %u handles %u", closes, last_close_obj,
+             last_close_count, HANDLES(obj));
+    check(closes == 1 && last_close_obj == obj && last_close_count == 2 && HANDLES(obj) == 1
+          && deletes == 0, "closing a handle calls CloseProcedure with the handle count", d);
+    CALL(S_CLOSE, h);
+    check(closes == 2 && last_close_count == 1 && deletes == 1 && last_delete_obj == obj,
+          "the last handle: CloseProcedure, then DeleteProcedure (no reference left)", NULL);
+    CALL(S_OPENNAME, oa(0, "\\Device\\Widget", 0x40), 0, 0, V(O_HANDLE));
+    check(g_eax == 0xC0000034u, "and the name is gone", NULL);
+
+    /* A permanent object, kept alive by a bias. */
+    obj = create(type, "\\Device\\Keep", 0x50 /* OBJ_PERMANENT */, 0x10);
+    CALL(S_INSERT, obj, oa(0, "\\Device\\Keep", 0x50), 1, V(O_HANDLE));
+    h = G32(V(O_HANDLE));
+    check(g_eax == 0 && PTRS(obj) == 2, "ObInsertObject adds ObjectPointerBias", NULL);
+    CALL(S_CLOSE, h);
+    CALL(S_OPENNAME, oa(0, "\\Device\\Keep", 0x40), 0, 0, V(O_HANDLE));
+    check(g_eax == 0, "a permanent object keeps its name after its last handle", NULL);
+    CALL(S_CLOSE, G32(V(O_HANDLE)));
+    CALL(S_MKTEMP, obj);
+    CALL(S_OPENNAME, oa(0, "\\Device\\Keep", 0x40), 0, 0, V(O_HANDLE));
+    check(g_eax == 0xC0000034u && esp_ok(4), "ObMakeTemporaryObject takes the name out", NULL);
+    deletes = 0;
+    g_ecx = obj;
+    call(S_DEREF, NULL, 0);
+    check(deletes == 1, "the last reference deletes it", NULL);
+}
+
+/* ═══════════════════ 3. NtQueueApcThread ═══════════════════ */
+
+static void test_queue_apc(void)
+{
+    /* A TIB whose fs:[0x28] names this thread's KTHREAD, as the loader
+     * builds them. */
+    memset(XBOX_TO_NATIVE(V(O_TIB)), 0, 0x40);
+    memset(XBOX_TO_NATIVE(V(O_KT)), 0, 0x200);
+    G32(V(O_TIB)) = 0xFFFFFFFFu;
+    G32(V(O_TIB) + 0x28) = V(O_KT);
+    xbox_InitGuestKthread(V(O_KT), 0, V(O_STACK) + 0x1000, V(O_STACK));
+    g_fs_base = V(O_TIB);
+    G32(V(O_ZERO)) = 0; G32(V(O_ZERO) + 4) = 0;
+
+    apc_runs = 0;
+    CALL(S_QAPC, 0xFFFFFFFEu /* NtCurrentThread */, APC_VA, 0x11, 0x22, 0x33);
+    check(g_eax == 0 && apc_runs == 0 && esp_ok(5),
+          "NtQueueApcThread queues, nothing runs yet (5 arguments)", NULL);
+    CALL(S_DELAY, 1 /* UserMode */, 1, V(O_ZERO));
+    snprintf(d, sizeof d, "status 0x%08X runs %d args 0x%X 0x%X 0x%X", g_eax, apc_runs,
+             apc_args[0], apc_args[1], apc_args[2]);
+    check(g_eax == 0xC0u && apc_runs == 1 && apc_args[0] == 0x11 && apc_args[1] == 0x22
+          && apc_args[2] == 0x33, "the next alertable wait runs ApcRoutine(1, 2, 3)", d);
+    CALL(S_DELAY, 1, 1, V(O_ZERO));
+    check(g_eax != 0xC0u && apc_runs == 1, "once", NULL);
+    CALL(S_QAPC, 0x12345678u, APC_VA, 0, 0, 0);
+    check(g_eax == 0xC0000008u, "a handle that is no thread: STATUS_INVALID_HANDLE", NULL);
+}
+
+/* ═══════════════════ 4. The rest of the stub list ═══════════════════ */
+
+static void test_misc(void)
+{
+    uint32_t f1 = V(O_BUF), f2 = V(O_BUF) + 0x40, out = V(O_BUF) + 0x100, r;
+
+    /* A frame-pointer chain: f1 -> f2 -> end. */
+    G32(f1) = f2;  G32(f1 + 4) = 0x00011111u;
+    G32(f2) = 0;   G32(f2 + 4) = 0x00022222u;
+    g_ebp = f1;
+    CALL(S_WALK, out, 8, 0);
+    snprintf(d, sizeof d, "n %u: 0x%X 0x%X 0x%X", g_eax, G32(out), G32(out + 4), G32(out + 8));
+    check(g_eax == 3 && (G32(out) & 0xFFFF0000u) == 0xBEEF0000u && G32(out + 4) == 0x11111
+          && G32(out + 8) == 0x22222 && esp_ok(3),
+          "RtlWalkFrameChain: the call's return, then up the ebp chain", d);
+    g_ebp = f1;
+    CALL(S_BACKTRACE, 1, 8, out, out + 0x40);
+    check(g_eax == 2 && G32(out) == 0x11111 && G32(out + 4) == 0x22222
+          && G32(out + 0x40) == 0x33333 && esp_ok(4),
+          "RtlCaptureStackBackTrace: skips, counts, hashes (4 arguments)", NULL);
+
+    G32(out) = 0x80000001u | 0x20000000u;     /* GENERIC_READ | GENERIC_EXECUTE | 1 */
+    G32(out + 4) = 0x10; G32(out + 8) = 0x20; G32(out + 12) = 0x40; G32(out + 16) = 0x80;
+    CALL(S_MAPMASK, out, out + 4);
+    check(G32(out) == 0x51u, "RtlMapGenericMask maps the generic bits", NULL);
+
+    G8(V(O_KT) + 0x73) = 0;
+    CALL(S_NOBOOST, V(O_KT), 1);
+    r = g_eax;
+    CALL(S_NOBOOST, V(O_KT), 0);
+    check(r == 0 && g_eax == 1 && G8(V(O_KT) + 0x73) == 0,
+          "KeSetDisableBoostThread: KTHREAD.DisableBoost, the old value back", NULL);
+
+    CALL(S_ISVALID, V(O_BUF));
+    r = g_eax;
+    CALL(S_ISVALID, 0x10);
+    check(r == 1 && g_eax == 0, "MmIsAddressValid: the window yes, page zero no", NULL);
+
+    call(S_SYNCH, NULL, 0);
+    r = g_eax;
+    call(S_SYNCH, NULL, 0);
+    check(r == 0 && g_eax == 2, "KeRaiseIrqlToSynchLevel raises to DISPATCH_LEVEL", NULL);
+    g_ecx = 0;
+    call(S_KIUNLOCK, NULL, 0);
+    check(g_esp == V(O_STACK) + 0x800 + 4, "KiUnlockDispatcherDatabase is fastcall (no stack argument)", NULL);
+    call(S_SYNCH, NULL, 0);
+    r = g_eax;
+    g_ecx = 0;
+    call(S_KIUNLOCK, NULL, 0);
+    check(r == 0, "...and lowered the IRQL back", NULL);
+
+    CALL(S_SMCSCRATCH, 0x04);
+    G32(out) = 0;
+    CALL(S_SMBREAD, 0x20, 0x1B, 0, out);
+    check(G32(out) == 0x04, "HalWriteSMCScratchRegister: the SMC's scratch reads it back", NULL);
+
+    memset(XBOX_TO_NATIVE(out), 0xAB, 16);
+    CALL(S_REFURB, out, 16, 1);
+    memset(XBOX_TO_NATIVE(out), 0, 16);
+    CALL(S_REFURB, out, 16, 0);
+    r = G32(out) == 0xABABABABu && G32(out + 12) == 0xABABABABu;
+    CALL(S_REFURB, out, 8, 0);
+    check(r && g_eax == 0xC000000Du, "ExReadWriteRefurbInfo: a write is read back; 8 bytes refused", NULL);
+
+    call(S_DBGPAGES, NULL, 0);
+    check(g_eax > 0, "MmDbgQueryAvailablePages: the free pages", NULL);
+
+    {   /* Share access: SHARE_ACCESS at out, file objects A and B. */
+        uint32_t sa = out, fa = out + 0x20, fb = out + 0x40;
+        memset(XBOX_TO_NATIVE(out), 0, 0x60);
+        CALL(S_SETSHARE, 0x1 /* FILE_READ_DATA */, 1 /* FILE_SHARE_READ */, fa, sa);
+        check(G8(sa) == 1 && G8(sa + 1) == 1 && G8(sa + 4) == 1 && G8(fa + 2) == 0x12 && esp_ok(4),
+              "IoSetShareAccess: one reader sharing read (4 arguments)", NULL);
+        CALL(S_CHECKSHARE, 0x2 /* FILE_WRITE_DATA */, 3, fb, sa, 1);
+        check(g_eax == 0xC0000043u && G8(sa) == 1,
+              "IoCheckShareAccess: a writer against it: STATUS_SHARING_VIOLATION", NULL);
+        CALL(S_CHECKSHARE, 0x1, 1, fb, sa, 1);
+        check(g_eax == 0 && G8(sa) == 2 && G8(sa + 1) == 2 && G8(sa + 4) == 2,
+              "a second reader sharing read: counted", NULL);
+        CALL(S_REMOVESHARE, fb, sa);
+        check(G8(sa) == 1 && G8(sa + 1) == 1 && G8(sa + 4) == 1, "IoRemoveShareAccess takes it out", NULL);
+    }
+
+    {   /* Data exports: the thunk points at a BOOLEAN. */
+        uint32_t en = G32(V(O_THUNK) + 4 * S_KDENABLED), np = G32(V(O_THUNK) + 4 * S_KDNOTPRESENT);
+        snprintf(d, sizeof d, "thunks 0x%08X 0x%08X", en, np);
+        check(en < 0xFE000000u && np < 0xFE000000u && G8(en) == 0 && G8(np) == 1,
+              "KdDebuggerEnabled / KdDebuggerNotPresent: data, FALSE / TRUE", d);
+    }
+}
+
+/* ═══════════════════ 5. Notify routines ═══════════════════ */
+
+static void test_notify(void)
+{
+    uint32_t h, i, r = 0;
+    unsigned long me = (unsigned long)GetCurrentThreadId();
+
+    CALL(S_NOTIFY, NOTIFY_VA);
+    check(g_eax == 0 && esp_ok(1), "PsSetCreateThreadNotifyRoutine registers (1 argument)", NULL);
+    for (i = 0; i < 8; i++) {
+        CALL(S_NOTIFY, CLOSE_VA + 0x1000 + i);   /* no routine there: called, logged, skipped */
+        r = g_eax;
+    }
+    check(r == 0xC000009Au, "the ninth routine is refused: STATUS_INSUFFICIENT_RESOURCES", NULL);
+
+    xbox_SetThreadMode(XBOX_THREAD_MODE_SPAWN);
+    notes = worker_ran = 0;
+    G32(V(O_HANDLE)) = 0;
+    /* ThreadHandle, ExtraSize, KStack, Tls, ThreadId, ctx1, ctx2, Suspended, Debug, Routine */
+    CALL(S_PSCREATE, V(O_HANDLE), 0, 0, 0, 0, 1, 2, 0, 0, WORKER_VA);
+    h = G32(V(O_HANDLE));
+    CALL(S_WAIT1, h, 0, 0);
+    snprintf(d, sizeof d, "status 0x%08X notes %d ran %d before %d create %u/%u tid %lu/%lu",
+             g_eax, notes, worker_ran, notes_before_run, note_create[0], note_create[1],
+             note_tid[0], note_tid[1]);
+    check(worker_ran && notes == 2 && notes_before_run == 1 && note_create[0] == 1
+          && note_tid[0] == me && note_thread[0] != 0,
+          "Create TRUE on the creating thread, before the worker runs", d);
+    check(note_create[1] == 0 && note_tid[1] == worker_tid && note_thread[1] == note_thread[0],
+          "Create FALSE on the worker as it ends, same thread", d);
+    CALL(S_CLOSE, h);
+
+#ifndef _WIN32
+    {   /* Shutdown notifications, in a child: HalReturnToFirmware ends it. */
+        int pfd[2], status = -1;
+        char got[8] = "";
+        ssize_t n = 0, k;
+        pid_t pid;
+
+        fflush(NULL);
+        if (pipe(pfd) != 0)
+            return;
+        pid = fork();
+        if (pid == 0) {
+            uint32_t ra = V(O_BUF) + 0x200, rb = V(O_BUF) + 0x220, rc = V(O_BUF) + 0x240;
+            close(pfd[0]);
+            shut_fd = pfd[1];
+            G32(ra) = SHUT_A_VA; G32(ra + 4) = 1;
+            G32(rb) = SHUT_B_VA; G32(rb + 4) = 5;
+            G32(rc) = SHUT_A_VA; G32(rc + 4) = 9;
+            CALL(S_SHUTREG, ra, 1);
+            CALL(S_SHUTREG, rb, 1);
+            CALL(S_SHUTREG, rc, 1);
+            CALL(S_SHUTREG, rc, 0);            /* taken back */
+            CALL(S_FIRMWARE, 1);
+            _exit(30);
+        }
+        close(pfd[1]);
+        if (pid > 0) {
+            while (n < (ssize_t)sizeof got - 1 && (k = read(pfd[0], got + n, sizeof got - 1 - n)) > 0)
+                n += k;
+            waitpid(pid, &status, 0);
+        }
+        close(pfd[0]);
+        got[n > 0 ? n : 0] = 0;
+        snprintf(d, sizeof d, "got '%s'", got);
+        check(!strcmp(got, "BA"), "HalReturnToFirmware runs the shutdown routines, highest priority first", d);
+    }
+#endif
+}
+
+static unsigned char *load(const char *path, size_t *n)
+{
+    FILE *f = fopen(path, "rb");
+    unsigned char *b;
+    long len;
+    if (!f) return NULL;
+    fseek(f, 0, SEEK_END);
+    len = ftell(f);
+    rewind(f);
+    b = malloc((size_t)len);
+    if (b && fread(b, 1, (size_t)len, f) != (size_t)len) { free(b); b = NULL; }
+    fclose(f);
+    *n = (size_t)len;
+    return b;
+}
+
+int main(int argc, char **argv)
+{
+    size_t len = 0;
+    unsigned char *xbe;
+    int i;
+
+    setvbuf(stdout, NULL, _IONBF, 0);
+    xbe = load(argc > 1 ? argv[1] : "tools/conformance/test.xbe", &len);
+    if (!xbe || !xbox_MemoryLayoutInit(xbe, len)) {
+        printf("cannot map guest memory (run tools/conformance/mkxbe.py)\n");
+        return 2;
+    }
+    B = xbox_HeapAlloc(0x8000, 4096);
+    for (i = 0; i < S_COUNT; i++)
+        G32(V(O_THUNK) + 4 * (uint32_t)i) = 0x80000000u | ord[i];
+    xbox_kernel_set_thunk_address(V(O_THUNK), S_COUNT);
+    xbox_kernel_bridge_init();
+
+    test_directories();
+    test_objects();
+    test_queue_apc();
+    test_misc();
+    test_notify();
+
+    printf("\n%d failure(s)\n", failures);
+    return failures ? 1 : 0;
+}

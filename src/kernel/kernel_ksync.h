@@ -37,6 +37,35 @@ int32_t  ks_queue_insert(uint32_t q, uint32_t entry, int at_head);
 uint32_t ks_queue_remove(uint32_t q, uint32_t timeout_va);
 uint32_t ks_queue_rundown(uint32_t q);
 
+/* The concurrency limit of KQUEUEs and I/O completion objects (XBA-133):
+ * a thread associated with one counts as running except inside a kernel
+ * call. kernel_thunk_dispatch calls enter/leave around every call (they
+ * nest); a guest thread that ends calls exit. */
+void     ks_thread_kernel_enter(void);
+void     ks_thread_kernel_leave(void);
+void     ks_thread_exit(void);
+
+/* I/O completion objects (NtCreateIoCompletion 191, NtSetIoCompletion 227,
+ * NtRemoveIoCompletion 223, NtQueryIoCompletion 212; XBA-114), host-side.
+ * `ident` is the host HANDLE behind the title's token, a manual-reset event
+ * signalled while packets are queued. Create returns 0 when the table is
+ * full. Post returns 0, or -1 for a handle that is no port. Remove returns
+ * 0 with out[] = key, ApcContext, status, information, or STATUS_TIMEOUT,
+ * or STATUS_INVALID_HANDLE. Depth is -1 for no port. A file joins a port
+ * with associate (FileCompletionInformation); post_for_file posts a request
+ * of that file's (1) or does nothing (0). forget drops a closed handle,
+ * port or file. */
+int      ks_port_create(void *ident, uint32_t count);
+int      ks_port_is(void *ident);
+int      ks_port_post(void *ident, uint32_t key, uint32_t ctx, uint32_t status,
+                      uint32_t info);
+uint32_t ks_port_remove(void *ident, uint32_t timeout_va, uint32_t out[4]);
+int32_t  ks_port_depth(void *ident);
+int      ks_port_associate(void *file, void *port, uint32_t key);
+int      ks_port_post_for_file(void *file, uint32_t ctx, uint32_t status,
+                               uint32_t info);
+void     ks_port_forget(void *handle);
+
 /* KDEVICE_QUEUE (106, 114, 115, 133, 134, 135). */
 void     ks_devq_init(uint32_t dq);
 int      ks_devq_insert(uint32_t dq, uint32_t entry);

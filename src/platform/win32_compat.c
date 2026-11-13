@@ -482,6 +482,16 @@ static void obj_unregister(w32_object *o)
 
 static __thread w32_object *t_self_obj = NULL;
 static __thread DWORD       t_tid      = 0;
+/* The thread object of a thread CreateThread did not start, made by
+ * w32_thread_apc_handle so that its alertable waits can be woken by a
+ * QueueUserAPC from another thread (XBA-133). Never released. */
+static __thread w32_object *t_adopted  = NULL;
+
+/* The object APCs for this thread are queued on. */
+static w32_object *self_apc_obj(void)
+{
+    return t_self_obj ? t_self_obj : t_adopted;
+}
 static volatile LONG        s_next_tid = 1000;
 
 DWORD GetCurrentThreadId(void)
@@ -785,7 +795,7 @@ static void deadline_from_ms(DWORD ms, struct timespec *ts)
 /* Run any pending user-APCs for the calling thread. Returns count run. */
 static int drain_apcs(void)
 {
-    w32_object *o = t_self_obj;
+    w32_object *o = self_apc_obj();
     int run = 0;
     if (!o) return 0;
     pthread_mutex_lock(&o->lock);
@@ -940,10 +950,16 @@ DWORD WaitForSingleObject(HANDLE h, DWORD ms)
     return wait_single(o, ms);
 }
 
+/* Alertable: an APC queued while the thread is blocked ends the wait
+ * (WAIT_IO_COMPLETION), as on Win32 -- the multiple-object wait links the
+ * thread's own object for that. It used to look for APCs only before
+ * blocking (XBA-133). */
 DWORD WaitForSingleObjectEx(HANDLE h, DWORD ms, BOOL alertable)
 {
     if (alertable && drain_apcs() > 0)
         return WAIT_IO_COMPLETION;
+    if (alertable && self_apc_obj() && h && obj_from_handle(h))
+        return WaitForMultipleObjectsEx(1, &h, FALSE, ms, TRUE);
     return WaitForSingleObject(h, ms);
 }
 
@@ -1095,7 +1111,7 @@ DWORD WaitForMultipleObjectsEx(DWORD count, const HANDLE *handles, BOOL waitAll,
     w32_multiwait w;
     w32_waitblock wb;
     w32_waitlink links[MAXIMUM_WAIT_OBJECTS + 1];
-    w32_object *self = alertable ? t_self_obj : NULL;
+    w32_object *self = alertable ? self_apc_obj() : NULL;
 
     /* Win32 rejects the whole call when any handle is not one, before waiting
      * on any of them. Polling each with a zero timeout instead never reported
@@ -1388,6 +1404,50 @@ BOOL ReleaseMutex(HANDLE h)
     }
     pthread_mutex_unlock(&o->lock);
     return TRUE;
+}
+
+int w32_query_object(HANDLE h, LONG info[3])
+{
+    w32_object *o = obj_from_handle(h);
+    int kind = 0;
+    if (!o || !info) return 0;
+    pthread_mutex_lock(&o->lock);
+    switch (o->kind) {
+    case K_EVENT:
+        kind = W32_QUERY_EVENT;
+        info[0] = o->manual_reset ? 0 : 1;
+        info[1] = o->signaled ? 1 : 0;
+        break;
+    case K_SEM:
+        kind = W32_QUERY_SEMAPHORE;
+        info[0] = (LONG)o->sem_count;
+        info[1] = (LONG)o->sem_max;
+        break;
+    case K_MUTEX:
+        kind = W32_QUERY_MUTEX;
+        info[0] = o->mtx_owner ? 1 - o->mtx_recursion : 1;
+        info[1] = o->mtx_owner && o->mtx_owner == GetCurrentThreadId();
+        break;
+    case K_WAITABLE_TIMER: {
+        long long left = 0;
+        kind = W32_QUERY_TIMER;
+        info[2] = waitable_due(o);
+        if (o->waitable_armed && !info[2]) {
+            struct timespec now;
+            clock_gettime(W32_WAIT_CLOCK, &now);
+            left = (long long)(o->waitable_due_time.tv_sec - now.tv_sec) * 10000000LL
+                 + (o->waitable_due_time.tv_nsec - now.tv_nsec) / 100;
+            if (left < 0) left = 0;
+        }
+        info[0] = (LONG)(uint32_t)left;
+        info[1] = (LONG)(left >> 32);
+        break;
+    }
+    default:
+        break;
+    }
+    pthread_mutex_unlock(&o->lock);
+    return kind;
 }
 
 /* ===================================================================== */
@@ -1725,7 +1785,7 @@ VOID SwitchToThread(void) { sched_yield(); }
 
 DWORD QueueUserAPC(PAPCFUNC func, HANDLE thread, ULONG_PTR data)
 {
-    w32_object *o = (thread == PSEUDO_CURRENT_THREAD) ? t_self_obj : obj_from_handle(thread);
+    w32_object *o = (thread == PSEUDO_CURRENT_THREAD) ? self_apc_obj() : obj_from_handle(thread);
     if (!o || o->kind != K_THREAD) return 0;
     pthread_mutex_lock(&o->lock);
     DWORD ok = 0;
@@ -1751,14 +1811,68 @@ VOID Sleep(DWORD ms)
     while (nanosleep(&ts, &ts) == -1 && errno == EINTR) { }
 }
 
+/* Alertable: an APC queued meanwhile ends the sleep (WAIT_IO_COMPLETION)
+ * rather than waiting for its end; the thread's own object carries a wait
+ * block for it, as in WaitForMultipleObjectsEx (XBA-133). */
 DWORD SleepEx(DWORD ms, BOOL alertable)
 {
+    w32_object *self = alertable ? self_apc_obj() : NULL;
+    struct timespec ts;
+    w32_waitblock wb;
+    w32_waitlink link;
+    int rc = 0;
+
     if (alertable && drain_apcs() > 0)
         return WAIT_IO_COMPLETION;
-    Sleep(ms);
-    if (alertable && drain_apcs() > 0)
-        return WAIT_IO_COMPLETION;
-    return 0;
+    if (!self || ms == 0) {
+        Sleep(ms);
+        if (alertable && drain_apcs() > 0)
+            return WAIT_IO_COMPLETION;
+        return 0;
+    }
+    if (ms != INFINITE) deadline_from_ms(ms, &ts);
+    pthread_mutex_init(&wb.m, NULL);
+    cond_init_wait_clock(&wb.c);
+    wb.seq = 0;
+    pthread_mutex_lock(&self->lock);
+    link_add(self, &link, &wb);
+    pthread_mutex_unlock(&self->lock);
+    for (;;) {
+        unsigned seq;
+        int queued;
+        pthread_mutex_lock(&wb.m);
+        seq = wb.seq;
+        pthread_mutex_unlock(&wb.m);
+        pthread_mutex_lock(&self->lock);
+        queued = self->apc_count > 0;
+        pthread_mutex_unlock(&self->lock);
+        if (queued || rc == ETIMEDOUT)
+            break;
+        pthread_mutex_lock(&wb.m);
+        while (wb.seq == seq && rc != ETIMEDOUT)
+            rc = ms == INFINITE ? pthread_cond_wait(&wb.c, &wb.m)
+                                : pthread_cond_timedwait(&wb.c, &wb.m, &ts);
+        pthread_mutex_unlock(&wb.m);
+    }
+    pthread_mutex_lock(&self->lock);
+    link_remove(self, &link);
+    pthread_mutex_unlock(&self->lock);
+    pthread_cond_destroy(&wb.c);
+    pthread_mutex_destroy(&wb.m);
+    return drain_apcs() > 0 ? WAIT_IO_COMPLETION : 0;
+}
+
+HANDLE w32_thread_apc_handle(void)
+{
+    w32_object *o = self_apc_obj();
+    if (!o) {
+        o = obj_alloc(K_THREAD);
+        o->thread = pthread_self();
+        o->tid = GetCurrentThreadId();
+        t_adopted = o;
+    }
+    InterlockedIncrement(&o->refcount);
+    return obj_handle(o);
 }
 
 /* ===================================================================== */
