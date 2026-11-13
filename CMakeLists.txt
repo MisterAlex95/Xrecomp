@@ -80,6 +80,13 @@ add_subdirectory(src/usb)
 # Input: Xbox gamepad → XInput
 add_subdirectory(src/input)
 
+# The host layer (XBA-145, src/platform/HOST_LAYER.md): xbr_host, the console-agnostic window + GL present, pads,
+# audio out, pacing, frame generation, storage, lifecycle and config every runtime links (the Xbox libraries and
+# consoles/*). POSIX hosts.
+if(NOT WIN32)
+    add_subdirectory(src/host)
+endif()
+
 # The GPU render back end (XBA-27): POSIX hosts, selected with RECOMP_GPU=1.
 option(XBOXRECOMP_BUILD_GPU "Build the GL render back end for the pushbuffer executor" ON)
 if(XBOXRECOMP_BUILD_GPU AND NOT WIN32)

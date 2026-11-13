@@ -13,3 +13,4 @@ kernel_regressions       # Windows VirtualAlloc
 mmio_decode              # windows.h (the arm64 decoder is mmio_decode_a64)
 nv2a_pvideo              # Windows-only PVIDEO hook
 xaudio2                  # windows.h
+host_layer               # needs SDL2 found by CMake (src/host); the window test runs on desktop, the app has its own
