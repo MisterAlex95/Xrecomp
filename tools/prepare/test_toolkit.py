@@ -93,3 +93,37 @@ def test_tree_file_is_what_gradle_reads():
     assert "tools/recomp/lifter.py" in files and "tools/prepare/toolkit.py" in files
     assert not any(f.startswith(("android/", "docs/")) or "/test_" in f or f.endswith(".c") and f.startswith("src/")
                    for f in files)
+
+
+# What a pack's bytes depend on besides the XBE (docs/android/prepare.md « When a pack is stale »): the lifter and
+# its modules, the generated code's runtime header and the kernel headers it names, the profiles (compiled into
+# libtitle.so) and the kernel stub table's generator. The runtime's .c files are the shell's (libmain.so), not the
+# pack's. A file here that the tree stopped selecting would leave packs lifted by an older lifter marked current.
+PACK_INPUTS = (
+    "tools/recomp/lifter.py", "tools/recomp/translator.py", "tools/recomp/seh_frames.py",   # XBA-112, XBA-101
+    "tools/recomp/__main__.py", "tools/kernel_audit/stubs.py",                              # XBA-115
+    "templates/runtime/recomp_types.h", "src/kernel/xbox_seh.h", "src/kernel/recomp_stack_switch.h",
+    "src/kernel/recomp_discovery.h", "src/kernel/kernel_stubs.h",
+    "profiles/titles/4d5300d1/overrides.c", "profiles/titles/4d5300d1/title.json",
+)
+
+
+def test_the_tree_covers_what_a_pack_is_made_of():
+    sel = set(toolkit.files())
+    missing = [p for p in PACK_INPUTS if os.path.exists(os.path.join(toolkit.ROOT, p)) and p not in sel]
+    assert not missing, missing
+    assert not [p for p in PACK_INPUTS if not os.path.exists(os.path.join(toolkit.ROOT, p))], "renamed? update the list"
+    assert "tools/recomp/test_seh_frames.py" not in sel and "src/kernel/xbox_seh.c" not in sel
+
+
+def test_a_lifter_change_changes_the_digest(tmp_path):
+    tree = toolkit.load_tree()
+    for rel in ("tools/recomp/seh_frames.py", "templates/runtime/recomp_types.h", "src/kernel/xbox_seh.c"):
+        dst = tmp_path / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        dst.write_text("one\n")
+    before = toolkit.compute(str(tmp_path), tree)
+    (tmp_path / "tools/recomp/seh_frames.py").write_text("two\n")
+    after = toolkit.compute(str(tmp_path), tree)
+    (tmp_path / "src/kernel/xbox_seh.c").write_text("two\n")              # the shell's: no new Prepare
+    assert before != after and toolkit.compute(str(tmp_path), tree) == after
