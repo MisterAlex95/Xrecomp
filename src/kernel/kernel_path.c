@@ -155,6 +155,11 @@ void xbox_path_set_title_id(uint32_t title_id)
     s_title_id = title_id;
 }
 
+uint32_t xbox_path_title_id(void)
+{
+    return s_title_id;
+}
+
 /* The sub-directory a to_save 3 rule joins to the user root: the rule's own
  * (Cache) plus the title ID in lower case, as UDATA\<tid> is named. */
 static const char *utility_sub(const char *sub, char sep, char *buf, size_t n)
