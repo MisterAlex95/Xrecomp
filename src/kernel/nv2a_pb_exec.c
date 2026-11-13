@@ -2908,6 +2908,9 @@ static uint32_t   s_bcount;
 /* The full vertices, for a back end with NV2A_BACKEND_CAP_PIXEL (about 23 MB,
  * allocated only then). Same index as s_bverts. */
 static Nv2aVertexFull *s_bfull;
+/* What s_bverts holds: NV2A_PRIM_TRIANGLES, or points / segment pairs for
+ * a back end with NV2A_BACKEND_CAP_POINTS_LINES. backend_flush resets it. */
+static uint32_t s_bprim;
 
 static int backend_wants_pixel(void)
 {
@@ -2998,6 +3001,60 @@ static void current_pixel_state(Nv2aPixelState *p, uint32_t shade, int textured)
     p->other_stage_input = s_reg[0x1E78 / 4];          /* SET_SHADER_OTHER_STAGE_INPUT */
 }
 
+/* ---- points and lines (XBA-120) -----------------------------------------
+ *
+ * A back end with NV2A_BACKEND_CAP_POINTS_LINES gets them as such, from
+ * every path: points one vertex each, lines as segment pairs (a strip's
+ * segments i, i+1; a loop's closing segment last). The CPU rasteriser draws
+ * neither (note_batch_gaps counts them). */
+static int prim_is_point_line(uint32_t prim)
+{
+    return prim >= NV_PRIM_POINTS && prim <= NV_PRIM_LINE_STRIP;
+}
+
+static int backend_points_lines(void)
+{
+    return backend_draws()
+        && (s_backend->caps & (NV2A_BACKEND_CAP_PIXEL | NV2A_BACKEND_CAP_POINTS_LINES))
+               == (NV2A_BACKEND_CAP_PIXEL | NV2A_BACKEND_CAP_POINTS_LINES);
+}
+
+/* Segments a line primitive of n vertices makes, and segment k's two
+ * vertices (batch positions). */
+static uint32_t line_segments(uint32_t prim, uint32_t n)
+{
+    switch (prim) {
+    case NV_PRIM_LINES:      return n / 2;
+    case NV_PRIM_LINE_STRIP: return n > 1 ? n - 1 : 0;
+    case NV_PRIM_LINE_LOOP:  return n > 2 ? n : (n == 2 ? 1 : 0);
+    default:                 return 0;
+    }
+}
+
+static void line_segment(uint32_t prim, uint32_t n, uint32_t k, uint32_t *a, uint32_t *b)
+{
+    if (prim == NV_PRIM_LINES) {
+        *a = 2 * k;
+        *b = 2 * k + 1;
+    } else {
+        *a = k;
+        *b = (k + 1) % n;
+    }
+}
+
+/* The batch's prim, point size and sprite flag for a back end. The size is
+ * SET_POINT_SIZE (0x043C), 6.3 fixed point in logical pixels (xemu reads it
+ * as value / 8), 1 while the title never sent it, times the anti-aliasing
+ * factor. */
+static void batch_prim_fields(Nv2aBatch *b, uint32_t prim)
+{
+    uint32_t v = s_reg[0x043C / 4] & 0x1FFu;
+
+    b->prim = prim;
+    b->point_size = (v ? (float)v / 8.0f : 1.0f) * aa_scale_x();
+    b->point_sprite = prim == NV2A_PRIM_POINTS && s_reg[0x031C / 4] != 0;
+}
+
 /* `textured`: the batch carried texture coordinates, so the bound texture is
  * part of it. `screen`: the batch came down the screen-space path (no
  * combiners, no depth on the CPU rasteriser). */
@@ -3020,6 +3077,7 @@ static void backend_flush(int textured, int screen)
     batch.full = NULL;
     batch.pixel = NULL;
     batch.program = NULL;
+    batch_prim_fields(&batch, s_bprim);
     if (textured && s_gpu.texs[0].valid) {
         texture_to_backend(&s_gpu.texs[0], &tex);
         batch.texture = &tex;
@@ -3037,8 +3095,10 @@ static void backend_flush(int textured, int screen)
         batch.pixel = &ps;
     }
     s_backend->draw(&surf, &batch);
-    s_gpu.tris_drawn += s_bcount / 3;
+    if (s_bprim == NV2A_PRIM_TRIANGLES)
+        s_gpu.tris_drawn += s_bcount / 3;
     s_bcount = 0;
+    s_bprim = NV2A_PRIM_TRIANGLES;
     note_drawn();
 }
 
@@ -3103,6 +3163,67 @@ static void raster_indexed(uint32_t i0, uint32_t i1, uint32_t i2, uint32_t argb)
     }
     raster_triangle(p[0], p[1], p[2], argb,
                     textured ? (const float (*)[2])uv : NULL);
+}
+
+/* One screen-space vertex for a back end's point or line batch, as
+ * raster_indexed gathers a triangle's: colour argb, flat. */
+static void screen_vertex(uint32_t ix, uint32_t argb)
+{
+    Nv2aVertex *o = backend_slot();
+    float p[4], uv[2];
+    int textured;
+
+    if (!o || !fetch_attr(&s_gpu.attr[0], ix, p))
+        return;
+    p[0] *= aa_scale_x();
+    p[1] *= aa_scale_y();
+    textured = fetch_texcoord(ix, uv);
+    o->x = p[0];
+    o->y = p[1];
+    o->z = p[2];
+    o->rhw = p[3];
+    o->diffuse = argb;
+    o->u = textured ? uv[0] : 0.0f;
+    o->v = textured ? uv[1] : 0.0f;
+    if (s_bfull) {
+        Nv2aVertexFull *f = &s_bfull[s_bcount];
+        memset(f, 0, sizeof *f);
+        f->pos[0] = p[0];
+        f->pos[1] = p[1];
+        f->pos[2] = p[2];
+        f->pos[3] = 1.0f;
+        nv2a_rc_unpack(argb, f->d0);
+        f->fog = 1.0f;
+        f->tex[0][0] = o->u;
+        f->tex[0][1] = o->v;
+        f->tex[0][3] = 1.0f;
+    }
+    s_bcount++;
+}
+
+/* A screen-space point or line batch, for a back end that draws them. */
+static void screen_points_lines(int textured)
+{
+    uint32_t n = s_gpu.idx_count, i, k, a, b;
+
+    s_bprim = s_gpu.prim == NV_PRIM_POINTS ? NV2A_PRIM_POINTS : NV2A_PRIM_LINES;
+    if (s_gpu.prim == NV_PRIM_POINTS) {
+        for (i = 0; i < n; i++)
+            screen_vertex(s_gpu.idx[i], vertex_color(s_gpu.idx[i]));
+    } else {
+        for (k = 0; k < line_segments(s_gpu.prim, n); k++) {
+            uint32_t c;
+            line_segment(s_gpu.prim, n, k, &a, &b);
+            c = vertex_color(s_gpu.idx[a]);
+            if (s_bcount + 3 > NV_BACKEND_MAX_VERTS)
+                break;
+            screen_vertex(s_gpu.idx[a], c);
+            screen_vertex(s_gpu.idx[b], c);
+            if (s_bcount & 1)
+                s_bcount--;                    /* half a segment: drop it */
+        }
+    }
+    backend_flush(textured, 1);
 }
 
 /* ---- 3D: vertex programs and depth -------------------------------------
@@ -4289,6 +4410,107 @@ static void raster_xf_clipped(const Nv2aVshOutput *a, const Nv2aVshOutput *b,
         raster_xf_triangle(&p0[0], &p0[i], &p0[i + 1]);
 }
 
+/* Points and lines from transformed vertices, for a back end that draws
+ * them: a point is kept when it lies in front of both planes the triangle
+ * clipper uses (w > NV_CLIP_W, z at or past the near plane); a segment is
+ * cut at them, in the same homogeneous space. */
+static int xf_clip_on(void)
+{
+    static int near_z = -1;
+    if (near_z < 0) {
+        const char *e = getenv("RECOMP_CLIP_NEAR_Z");
+        near_z = !(e && e[0] == '0');
+    }
+    return near_z ? 2 : 1;
+}
+
+static void xf_backend_vertex(const Nv2aVshOutput *v)
+{
+    Nv2aVertex *o = backend_slot();
+    if (!o)
+        return;
+    backend_from_xf(v, o);
+    s_bcount++;
+}
+
+static void xf_point(const Nv2aVshOutput *v)
+{
+    Nv2aVshOutput q;
+    int pl, j;
+
+    for (j = 0; j < 3; j++)
+        q.pos[j] = v->pos[j] * v->pos[3];
+    q.pos[3] = v->pos[3];
+    for (pl = 0; pl < xf_clip_on(); pl++) {
+        float d = xf_clip_dist(&q, pl);
+        if (!(d >= 0.0f) || d - d != 0.0f)
+            return;                            /* behind, or not finite */
+    }
+    xf_backend_vertex(v);
+}
+
+static void xf_line(const Nv2aVshOutput *a, const Nv2aVshOutput *b)
+{
+    Nv2aVshOutput h[2], o[2];
+    float t0 = 0.0f, t1 = 1.0f;
+    int pl, i, j;
+
+    for (i = 0; i < 2; i++) {
+        h[i] = i ? *b : *a;
+        for (j = 0; j < 3; j++)
+            h[i].pos[j] *= h[i].pos[3];
+    }
+    for (pl = 0; pl < xf_clip_on(); pl++) {
+        float da = xf_clip_dist(&h[0], pl), db = xf_clip_dist(&h[1], pl);
+        if (da - da != 0.0f || db - db != 0.0f)
+            return;
+        if (da < 0.0f && db < 0.0f)
+            return;
+        if (da < 0.0f) {
+            float t = da / (da - db);
+            if (t > t0) t0 = t;
+        } else if (db < 0.0f) {
+            float t = da / (da - db);
+            if (t < t1) t1 = t;
+        }
+    }
+    if (t0 >= t1) {
+        s_gpu.tris_behind++;
+        return;
+    }
+    xf_lerp(&h[0], &h[1], t0, &o[0]);
+    xf_lerp(&h[0], &h[1], t1, &o[1]);
+    for (i = 0; i < 2; i++) {
+        if (o[i].pos[3] < NV_CLIP_W)
+            o[i].pos[3] = NV_CLIP_W;          /* on the plane: rounding */
+        for (j = 0; j < 3; j++)
+            o[i].pos[j] /= o[i].pos[3];
+    }
+    if (s_bcount + 3 > NV_BACKEND_MAX_VERTS)
+        return;
+    xf_backend_vertex(&o[0]);
+    xf_backend_vertex(&o[1]);
+    if (s_bcount & 1)
+        s_bcount--;
+}
+
+static void xf_points_lines(const Nv2aVshOutput *xf, uint32_t n)
+{
+    uint32_t i, k, a, b;
+
+    s_bprim = s_gpu.prim == NV_PRIM_POINTS ? NV2A_PRIM_POINTS : NV2A_PRIM_LINES;
+    if (s_gpu.prim == NV_PRIM_POINTS) {
+        for (i = 0; i < n; i++)
+            xf_point(&xf[i]);
+    } else {
+        for (k = 0; k < line_segments(s_gpu.prim, n); k++) {
+            line_segment(s_gpu.prim, n, k, &a, &b);
+            xf_line(&xf[a], &xf[b]);
+        }
+    }
+    backend_flush(!s_xf_no_tex, 0);
+}
+
 /* About 7 MB, so allocated by the first batch that transforms rather than
  * carried in every build that never turns the executor on. */
 static Nv2aVshOutput *s_xf;
@@ -4674,6 +4896,13 @@ static void raster_batch_program(void)
     if (s_gpu.texs[0].valid)
         note_texture_use();
 
+    if (prim_is_point_line(s_gpu.prim)) {
+        /* A back end that draws them; the CPU rasteriser draws none. */
+        if (backend_points_lines())
+            xf_points_lines(s_xf, n);
+        return;
+    }
+
     switch (s_gpu.prim) {
     case NV_PRIM_TRIANGLES:
         for (i = 0; i + 2 < n; i += 3)
@@ -4788,6 +5017,8 @@ static int raster_batch_backend_program(void)
         || !gpu_vsh_enabled())
         return 0;
     memset(&pb, 0, sizeof pb);
+    if (prim_is_point_line(s_gpu.prim) && !backend_points_lines())
+        return 1;                       /* not drawn (counted as unsupported) */
     pb.ins_count = nv2a_vsh_program(&pb.ins, &pb.hash, &inputs);
     if (!pb.ins_count || nv2a_vsh_program_writes_constants() || !pv_alloc())
         return 0;
@@ -4896,6 +5127,19 @@ gathered:
             PV_TRI(i, i + 3, i + 2);
         }
         break;
+    case NV_PRIM_POINTS:                    /* backend_points_lines() only */
+        for (i = 0; i < n; i++)
+            s_pv.tris[t++] = s_pv.slot[i];
+        break;
+    case NV_PRIM_LINES: case NV_PRIM_LINE_STRIP: case NV_PRIM_LINE_LOOP: {
+        uint32_t k, sa, sb;
+        for (k = 0; k < line_segments(s_gpu.prim, n); k++) {
+            line_segment(s_gpu.prim, n, k, &sa, &sb);
+            s_pv.tris[t++] = s_pv.slot[sa];
+            s_pv.tris[t++] = s_pv.slot[sb];
+        }
+        break;
+    }
     default:
         break;
     }
@@ -4928,6 +5172,9 @@ gathered:
     batch.state = &rs;
     batch.pixel = &ps;
     batch.program = &pb;
+    if (prim_is_point_line(s_gpu.prim))
+        batch_prim_fields(&batch, s_gpu.prim == NV_PRIM_POINTS ? NV2A_PRIM_POINTS
+                                                                : NV2A_PRIM_LINES);
     if (s_gpu.texs[0].valid) {
         texture_to_backend(&s_gpu.texs[0], &tex);
         batch.texture = &tex;
@@ -4947,7 +5194,8 @@ gathered:
 
     s_gpu.batches_program++;
     s_gpu.verts_program += n;
-    s_gpu.tris_drawn += t / 3;
+    if (!prim_is_point_line(s_gpu.prim))
+        s_gpu.tris_drawn += t / 3;
     if (s_gpu.texs[0].valid)
         note_texture_use();
     note_drawn();
@@ -4960,7 +5208,8 @@ static void raster_batch(void)
     uint32_t before = s_gpu.tris_drawn;
     int textured = 0;
 
-    if (s_gpu.idx_count < 3)
+    if (s_gpu.idx_count < (s_gpu.prim == NV_PRIM_POINTS ? 1u
+                           : prim_is_point_line(s_gpu.prim) ? 2u : 3u))
         return;
     if (batch_uses_program() || batch_is_ffp()) {
         if (batch_uses_program() && raster_batch_backend_program())
@@ -4986,6 +5235,13 @@ static void raster_batch(void)
             textured = 1;
             note_texture_use();
         }
+    }
+
+    if (prim_is_point_line(s_gpu.prim)) {
+        /* A back end that draws them; the CPU rasteriser draws none. */
+        if (backend_points_lines())
+            screen_points_lines(textured);
+        return;
     }
 
     switch (s_gpu.prim) {
@@ -5139,13 +5395,19 @@ static void note_batch_gaps(void)
         no_rc = getenv("RECOMP_NO_COMBINERS") != NULL;
     combiners = s_gpu.rc_seen && !no_rc;
 
-    switch (s_gpu.prim) {
-    case NV_PRIM_POINTS:     nv2a_gap_note("points", 1); return;
-    case NV_PRIM_LINES:      nv2a_gap_note("lines", 1); return;
-    case NV_PRIM_LINE_LOOP:  nv2a_gap_note("line loop", 1); return;
-    case NV_PRIM_LINE_STRIP: nv2a_gap_note("line strip", 1); return;
-    default: break;
+    if (prim_is_point_line(s_gpu.prim) && !backend_points_lines()) {
+        switch (s_gpu.prim) {
+        case NV_PRIM_POINTS:     nv2a_gap_note("points", 1); break;
+        case NV_PRIM_LINES:      nv2a_gap_note("lines", 1); break;
+        case NV_PRIM_LINE_LOOP:  nv2a_gap_note("line loop", 1); break;
+        default:                 nv2a_gap_note("line strip", 1); break;
+        }
+        return;
     }
+    /* Points whose size the distance scales (SET_POINT_PARAMS_ENABLE):
+     * drawn at SET_POINT_SIZE. A vertex program's oPts is not read either. */
+    if (s_gpu.prim == NV_PRIM_POINTS && s_reg[0x0318 / 4])
+        nv2a_gap_note("point size attenuation", 1);
     if ((s_gpu.xf_mode & 3) != 2 && !batch_is_ffp() && !batch_is_screen_space()) {
         nv2a_gap_note("batch with no vertex program, matrix or screen-space positions", 1);
         return;

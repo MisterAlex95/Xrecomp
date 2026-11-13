@@ -30,6 +30,7 @@ presenting from the GPU. The last section lists what 7c–7e have to do.
 | `tests/nv2a_gl_vsh` | 600 random vertex programs plus ILU/a0 edge cases through the translator (transform feedback), compared with `nv2a_vsh_interp.c`; eight deliberate translator mutations must be caught. |
 | `src/kernel/nv2a_coverage.c` | What is not drawn, by name (XBA-120): the NV2A texture format table, xemu's method names, the registry the report and the status file read. |
 | `tests/nv2a_coverage` | The executor over a fake guest memory: the format table against the decoder, method names, each gap counted once per batch and reaching the status file. |
+| `tests/nv2a_gl_coverage` | Pushbuffer methods through the real executor into the back end (GL and forced GLES 3.0), pixels read back: points and lines from the screen-space, fixed-function and vertex-program paths, point sprites; then mip chains, cube and volume textures, the added formats (XBA-120). |
 | `tests/nv2a_gl_backend` | The back end itself (nv2a_gl.c included) on a real context and a fake guest memory: guest CPU writes into targets (clean, dirty, host present, scaled 16-bit, swizzled, none), the scratch depth growing, an anti-aliased surface presented. `-cpu-writes-off` runs the same cases with `RECOMP_GPU_CPU_WRITES=0` and expects them wrong. |
 
 The GL tests are built twice on Linux: for desktop GL 3.3 core and, with
@@ -571,6 +572,30 @@ clip space (`(x·2/W − 1)·w`, …, `w`), so the GPU interpolates with 1/w as
 the CPU rasteriser interpolates texture coordinates, and `Nv2aVertexFull` is
 uploaded as it is (one `glBufferData` per batch).
 
+**Points and lines (XBA-120).** With `NV2A_BACKEND_CAP_POINTS_LINES` the
+executor hands points and lines over as such (`Nv2aBatch.prim`) from every
+path: screen-space batches gathered like their triangles, fixed-function and
+CPU-transformed batches clipped at the same two planes as triangles (a point
+is dropped behind them, a segment cut), vertex-program batches as an index
+list for the GLSL program. Strips and loops arrive as segment pairs (a
+loop's closing segment last). The back end draws `GL_POINTS` / `GL_LINES`.
+Point size is `SET_POINT_SIZE` (0x043C) read as xemu reads it, 6.3 fixed
+point in logical pixels (1 while never sent), times the anti-aliasing factor
+and the internal scale, written to `gl_PointSize` by both vertex shaders and
+clamped to `GL_ALIASED_POINT_SIZE_RANGE` (desktop core enables
+`GL_PROGRAM_POINT_SIZE`). Point sprites: `SET_POINT_SMOOTH_ENABLE` (0x031C)
+is the NV2A's sprite switch (xemu); every stage then samples at
+`gl_PointCoord`, its t turned over since guest rows are GL rows, (0,0) at
+the point's top left. Not modelled, counted as unsupported: distance
+attenuation (`SET_POINT_PARAMS_ENABLE`, the point keeps `SET_POINT_SIZE`)
+and a vertex program's `oPts`. Lines are one pixel wide times the internal
+scale on GLES, clamped to `GL_ALIASED_LINE_WIDTH_RANGE` (Adreno offers
+wide lines), and one pixel on desktop GL, where a forward-compatible core
+context refuses wider ones; the NV2A's own line width is not modelled
+(xemu's register list does not name it). The CPU rasteriser still draws
+neither. The statistics line gains `[GPUGL] N point batches, M line
+batches` when there were any.
+
 **Render targets.** One RGBA8 texture + FBO per colour surface address and
 bytes per pixel, up to 16, least recently drawn evicted. Created from the
 guest bytes (a title may draw over a picture the CPU put there). The GL
@@ -913,7 +938,8 @@ counted for both. The names:
 |---|---|
 | `texture format 0xNN <xemu name>` | a stage in use samples a format the decoder (`sample_tex`, shared by both paths) cannot read: the stage reads white. The table in `nv2a_coverage.c` lists every NV2A format with its texel size, swizzle and whether it is decoded; `tests/nv2a_coverage` checks it against the decoder code by code. |
 | `shadow map (CPU rasteriser)` | a depth format in a projective stage on the CPU path (the GPU compares with its zeta surface instead). |
-| `points`, `lines`, `line strip`, `line loop` | the primitive, on a path that does not draw it. |
+| `points`, `lines`, `line strip`, `line loop` | the primitive, on a path that does not draw it (the CPU rasteriser, a back end without `NV2A_BACKEND_CAP_POINTS_LINES`). |
+| `point size attenuation` | points with `SET_POINT_PARAMS_ENABLE` on (drawn at `SET_POINT_SIZE`). |
 | `volume texture` | a stage in use has `DIMENSIONALITY` 3. |
 | `texture stage mode 0xNN <name>` | dot-product and dependent-read modes (8 and up) on both paths, bump-env (6, 7) on the CPU path: they read zero. |
 | `logic op`, `polygon mode point`, `polygon mode line`, `flat shading` | the state is set for the batch; nothing models it. |
@@ -957,7 +983,8 @@ relies on).
   `NV2A_BACKEND_CAP_CULL`, so strips arrive with one winding; GL's front
   face is the opposite of the title's, because guest rows map to GL rows
   unflipped. `RECOMP_GPU_CULL=0` turns it off.
-- Points and lines are not drawn, like the CPU rasteriser.
+- Points and lines are drawn on the GPU only ("Points and lines" above);
+  the CPU rasteriser draws neither and counts them as unsupported.
 - Guest CPU writes into a GPU target are seen when the target is next bound
   or sampled (once a frame), read back or presented ("Guest CPU writes"
   below); a write between two batches of the same frame on the same target

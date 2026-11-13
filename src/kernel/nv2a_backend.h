@@ -253,6 +253,13 @@ typedef struct {
     uint32_t        raw_first;
 } Nv2aProgramBatch;
 
+/* Nv2aBatch.prim: what vertices[] / Nv2aProgramBatch.indices list. */
+enum {
+    NV2A_PRIM_TRIANGLES = 0,        /* a triangle list (count a multiple of 3) */
+    NV2A_PRIM_POINTS    = 1,        /* one vertex a point */
+    NV2A_PRIM_LINES     = 2         /* a line list: two vertices a segment */
+};
+
 typedef struct {
     const Nv2aVertex  *vertices;    /* triangle list: count is a multiple of 3 */
     uint32_t           count;
@@ -265,6 +272,16 @@ typedef struct {
     /* draw_program only (NULL in draw()): vertices and full are NULL then,
      * count is 0, and pixel is always set. */
     const Nv2aProgramBatch *program;
+    /* NV2A_BACKEND_CAP_POINTS_LINES only (0 otherwise): NV2A_PRIM_POINTS or
+     * _LINES, the vertex / index list then being points or segment pairs
+     * (strips and loops arrive as pairs). point_size: SET_POINT_SIZE in
+     * surface pixels (logical size times the anti-aliasing factor);
+     * point_sprite: SET_POINT_SMOOTH_ENABLE, which the NV2A uses for point
+     * sprites (xemu): every stage samples at the position inside the point,
+     * (0,0) at its top left, instead of the vertex's coordinates. */
+    uint32_t prim;
+    float    point_size;
+    uint32_t point_sprite;
 } Nv2aBatch;
 
 #define NV2A_BACKEND_CAP_PIXEL 0x1u
@@ -278,6 +295,11 @@ typedef struct {
  * INLINE_ARRAY) may arrive with their arrays as the title stored them
  * (Nv2aProgramBatch.raw) instead of gathered. */
 #define NV2A_BACKEND_CAP_RAW_VERTEX 0x8u
+/* With CAP_PIXEL: points and lines arrive as such (Nv2aBatch.prim) from
+ * every path (screen space, fixed function, vertex programs); without it
+ * they are not drawn (the CPU rasteriser draws none either) and counted as
+ * unsupported (nv2a_coverage.h). */
+#define NV2A_BACKEND_CAP_POINTS_LINES 0x10u
 
 typedef struct {
     /* flags: CLEAR_SURFACE bits (Z 0x1, stencil 0x2, colour 0xF0).

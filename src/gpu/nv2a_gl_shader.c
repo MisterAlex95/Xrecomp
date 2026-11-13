@@ -103,6 +103,7 @@ const char *nv2a_gl_vertex_body(void)
         "layout(location = 6) in vec4 a_t2;\n"
         "layout(location = 7) in vec4 a_t3;\n"
         "uniform vec4 u_vp;\n"
+        "uniform float u_psize;\n"
         "out vec4 v_d0;\nout vec4 v_d1;\nout float v_fog;\n"
         "out vec4 v_t0;\nout vec4 v_t1;\nout vec4 v_t2;\nout vec4 v_t3;\n"
         "void main() {\n"
@@ -123,6 +124,9 @@ const char *nv2a_gl_vertex_body(void)
         "    gl_Position.z = clamp(gl_Position.z, -w, w);\n"
         "  v_d0 = a_d0; v_d1 = a_d1; v_fog = a_fog;\n"
         "  v_t0 = a_t0; v_t1 = a_t1; v_t2 = a_t2; v_t3 = a_t3;\n"
+        /* Points (XBA-120): SET_POINT_SIZE in surface pixels, clamped by
+         * the back end to the context's range. */
+        "  gl_PointSize = u_psize;\n"
         "}\n";
 }
 
@@ -449,6 +453,14 @@ size_t nv2a_gl_fragment_body(const Nv2aGlShaderKey *k, char *buf, size_t cap)
            "uniform float u_aref;\n"
            "uniform vec4 u_bm[4];\nuniform vec2 u_bso[4];\n"
            "layout(location = 0) out vec4 o_color;\n");
+    /* Point sprites: every stage's coordinates are the position inside the
+     * point, (0,0) at its top left -- gl_PointCoord's t runs from the top in
+     * window space, and guest row 0 is GL row 0 (no flip), so t is turned
+     * over -- divided by the stage's scale, which the fetch multiplies by. */
+    if (k->point_sprite)
+        for (st = 0; st < 4; st++)
+            sb(&b, "#define v_t%u vec4(vec2(gl_PointCoord.x, 1.0 - gl_PointCoord.y)"
+                   " / u_tscale[%u], 0.0, 1.0)\n", st, st);
     if (k->shade == NV2A_SHADE_COMBINERS
         && (k->bump_src[1] | k->bump_src[2] | k->bump_src[3]))
         emit_bump_helpers(&b);

@@ -80,6 +80,8 @@ static int s_recheck_frame;        /* RECOMP_GPU_TEX_RECHECK=frame */
 static int s_recheck_switch;       /* RECOMP_GPU_TEX_RECHECK=switch: the old policy */
 static int s_cull = 1;             /* RECOMP_GPU_CULL (default on) */
 static int s_cpu_writes = 1;       /* RECOMP_GPU_CPU_WRITES (default on): rt_cpu_check */
+static float s_point_max = 1.0f;   /* GL_ALIASED_POINT_SIZE_RANGE's top */
+static float s_line_max = 1.0f;    /* GL_ALIASED_LINE_WIDTH_RANGE's top (GLES only) */
 static uint32_t s_frame;
 static GLuint s_vao, s_vbo, s_vs;
 
@@ -99,7 +101,9 @@ static struct {
     uint32_t vbo_draws, vbo_kb, vbo_hash_kb, vbo_new, vbo_changed, vao_new;
     uint32_t ib_new, ib_kb;         /* index lists cached, their bytes */
     uint32_t cpu_merges, cpu_kpx;   /* guest CPU writes merged into targets, kilopixels */
+    uint32_t points, lines;         /* point and line batches (XBA-120) */
 } s_st;
+static float s_line_width = 1.0f;  /* glLineWidth as last set */
 
 /* RECOMP_GPU_RT_RELAYOUT_READBACK=1: read a target back when the title
  * switches it between swizzled and linear (the old behaviour). */
@@ -558,6 +562,23 @@ static int ensure_init(void)
 #endif
         if (getenv("RECOMP_GPU_INVALIDATE") && !env_on("RECOMP_GPU_INVALIDATE"))
             s_invalidate = 0;
+    }
+    {
+        /* Points and lines (XBA-120): a vertex shader sets the point size
+         * (core desktop GL needs that turned on; GLES always does it). Wide
+         * lines only on GLES: a forward-compatible desktop context refuses
+         * widths over 1, and macOS reports [1, 1] anyway. */
+        GLfloat r[2] = { 1.0f, 1.0f };
+        s_line_width = 1.0f;            /* a new context's */
+        glGetFloatv(GL_ALIASED_POINT_SIZE_RANGE, r);
+        s_point_max = r[1] >= 1.0f ? r[1] : 1.0f;
+#if NV2A_GL_ES
+        r[0] = r[1] = 1.0f;
+        glGetFloatv(GL_ALIASED_LINE_WIDTH_RANGE, r);
+        s_line_max = r[1] >= 1.0f ? r[1] : 1.0f;
+#else
+        glEnable(GL_PROGRAM_POINT_SIZE);
+#endif
     }
     s_verbose = env_on("RECOMP_GPU_VERBOSE");
     s_cpu_writes = !(getenv("RECOMP_GPU_CPU_WRITES") && !env_on("RECOMP_GPU_CPU_WRITES"));
@@ -2206,6 +2227,7 @@ typedef struct {
     int failed;
     GLint u_vp, u_tscale, u_c0, u_c1, u_fc0, u_fc1, u_fogc, u_aref;
     GLint u_bm, u_bso;              /* -1 without a bump-env stage */
+    GLint u_psize;                  /* the vertex shader's point size */
     /* With a translated vertex program (vsh_hash != 0): its uniforms, the
      * location of each c[i] (-1 where the compiler dropped it), and the
      * constant serial this program's copy of c[] is synced to. */
@@ -2565,6 +2587,7 @@ static void prog_setup(GlProg *p, int program)
     p->u_aref = glGetUniformLocation(p->prog, "u_aref");
     p->u_bm = glGetUniformLocation(p->prog, "u_bm");
     p->u_bso = glGetUniformLocation(p->prog, "u_bso");
+    p->u_psize = glGetUniformLocation(p->prog, "u_psize");
     if (program) {
         p->u_xf = glGetUniformLocation(p->prog, "u_xf");
         p->u_fog = glGetUniformLocation(p->prog, "u_fog");
@@ -3280,6 +3303,34 @@ static void set_near_mode(int program, float near01)
     s_near01 = near01;
 }
 
+/* The GL primitive for a batch (Nv2aBatch.prim), with the point size and
+ * line width it draws at: surface pixels times the internal scale, clamped
+ * to what the context offers (desktop lines stay 1, see ensure_init). */
+static GLenum prim_setup(const Nv2aBatch *b, const GlProg *p, float sc)
+{
+    if (b->prim == NV2A_PRIM_POINTS) {
+        float size = b->point_size * sc;
+        if (size < 1.0f) size = 1.0f;
+        if (size > s_point_max) size = s_point_max;
+        if (p->u_psize >= 0)
+            glUniform1f(p->u_psize, size);
+        s_st.points++;
+        return GL_POINTS;
+    }
+    if (p->u_psize >= 0)
+        glUniform1f(p->u_psize, 1.0f);
+    if (b->prim == NV2A_PRIM_LINES) {
+        float w = sc < 1.0f ? 1.0f : (sc > s_line_max ? s_line_max : sc);
+        if (w != s_line_width) {
+            glLineWidth(w);
+            s_line_width = w;
+        }
+        s_st.lines++;
+        return GL_LINES;
+    }
+    return GL_TRIANGLES;
+}
+
 static void gl_draw(const Nv2aSurface *s, const Nv2aBatch *b)
 {
     const Nv2aPixelState *ps = b->pixel;
@@ -3291,7 +3342,8 @@ static void gl_draw(const Nv2aSurface *s, const Nv2aBatch *b)
     GlTarget t;
     int query = 0;
 
-    if (!b->full || !ps || b->count < 3)
+    if (!b->full || !ps
+        || b->count < (b->prim == NV2A_PRIM_POINTS ? 1u : b->prim == NV2A_PRIM_LINES ? 2u : 3u))
         return;
     if (!ensure_init())
         return;
@@ -3300,6 +3352,7 @@ static void gl_draw(const Nv2aSurface *s, const Nv2aBatch *b)
     if (s_sig_on && sig_batch(s, b, kind, b->count / 3))
         return;
     nv2a_gl_shader_key(ps, rs, kind, &key);
+    key.point_sprite = b->prim == NV2A_PRIM_POINTS && b->point_sprite;
     if (key.bump_src[1] | key.bump_src[2] | key.bump_src[3])
         s_st.bump_draws++;
     p = prog_get(&key, NULL);
@@ -3332,7 +3385,7 @@ static void gl_draw(const Nv2aSurface *s, const Nv2aBatch *b)
         glBeginQuery(NV2A_GL_ES ? GL_ANY_SAMPLES_PASSED : GL_SAMPLES_PASSED, q->q);
         query = 1;
     }
-    glDrawArrays(GL_TRIANGLES, 0, (GLsizei)b->count);
+    glDrawArrays(prim_setup(b, p, t.rt ? t.sc : 1.0f), 0, (GLsizei)b->count);
     if (query) {
         glEndQuery(NV2A_GL_ES ? GL_ANY_SAMPLES_PASSED : GL_SAMPLES_PASSED);
         s_qcount++;
@@ -3344,7 +3397,8 @@ static void gl_draw(const Nv2aSurface *s, const Nv2aBatch *b)
         t.rt->serial = ++s_rt_serial;
     }
     s_st.draws++;
-    s_st.tris += b->count / 3;
+    if (b->prim == NV2A_PRIM_TRIANGLES)
+        s_st.tris += b->count / 3;
 }
 
 /* Upload what changed in c[] since this program last drew (nv2a_backend.h:
@@ -3786,6 +3840,7 @@ static int gl_draw_program(const Nv2aSurface *s, const Nv2aBatch *b)
     if (s_sig_on && sig_batch(s, b, kind, pb->index_count / 3))
         return 1;                   /* skipped: drawn by nobody */
     nv2a_gl_shader_key(ps, rs, kind, &key);
+    key.point_sprite = b->prim == NV2A_PRIM_POINTS && b->point_sprite;
     if (key.bump_src[1] | key.bump_src[2] | key.bump_src[3])
         s_st.bump_draws++;
     p = prog_get(&key, vsh);
@@ -3875,7 +3930,8 @@ bound:
         glBeginQuery(NV2A_GL_ES ? GL_ANY_SAMPLES_PASSED : GL_SAMPLES_PASSED, q->q);
         query = 1;
     }
-    glDrawElements(GL_TRIANGLES, (GLsizei)pb->index_count, GL_UNSIGNED_SHORT, NULL);
+    glDrawElements(prim_setup(b, p, t.rt ? t.sc : 1.0f), (GLsizei)pb->index_count,
+                   GL_UNSIGNED_SHORT, NULL);
     if (query) {
         glEndQuery(NV2A_GL_ES ? GL_ANY_SAMPLES_PASSED : GL_SAMPLES_PASSED);
         s_qcount++;
@@ -3891,7 +3947,8 @@ bound:
     if (!pb->raw)
         s_st.vsh_kb += (uint32_t)(((size_t)pb->vertex_count * nstream * 16
                                    + pb->index_count * 2) >> 10);
-    s_st.tris += pb->index_count / 3;
+    if (b->prim == NV2A_PRIM_TRIANGLES)
+        s_st.tris += pb->index_count / 3;
     return 1;
 }
 
@@ -4435,6 +4492,10 @@ static void gl_flip(void)
         if (s_st.cpu_merges)
             fprintf(stderr, "  [GPUGL] guest CPU writes into targets: %u merged (%u kpx)\n",
                     s_st.cpu_merges, s_st.cpu_kpx);
+        if (s_st.points || s_st.lines)
+            fprintf(stderr, "  [GPUGL] %u point batches, %u line batches (points up to %.0f px,"
+                            " lines up to %.0f px)\n",
+                    s_st.points, s_st.lines, (double)s_point_max, (double)s_line_max);
         if (s_hst.frames)
             fprintf(stderr, "  [GPUGL] host present: %u frames at %ux%u, %.3f ms/frame"
                             " (read-back issue + map), %u resolved from an anti-aliased"
@@ -4456,7 +4517,8 @@ static void gl_flip(void)
 
 static Nv2aBackend s_backend = {
     gl_clear, gl_draw, gl_flip,
-    NV2A_BACKEND_CAP_PIXEL | NV2A_BACKEND_CAP_CULL | NV2A_BACKEND_CAP_PROGRAM,
+    NV2A_BACKEND_CAP_PIXEL | NV2A_BACKEND_CAP_CULL | NV2A_BACKEND_CAP_PROGRAM
+        | NV2A_BACKEND_CAP_POINTS_LINES,
     gl_zpass_read, gl_zpass_end, gl_zpass_resolve, gl_draw_program, gl_zpass_flush
 };
 

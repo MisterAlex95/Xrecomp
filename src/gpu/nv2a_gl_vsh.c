@@ -344,7 +344,7 @@ size_t nv2a_gl_vsh_body_fmt(const uint32_t (*ins)[4], uint32_t count, uint32_t f
         for (k = 0; k < 8; k++)
             sb(&b, "out vec4 %s;\n", nv2a_gl_vsh_capture_names[k]);
     } else {
-        sb(&b, "uniform vec4 u_vp;\nuniform vec4 u_xf;\n%s", k_fog);
+        sb(&b, "uniform vec4 u_vp;\nuniform vec4 u_xf;\nuniform float u_psize;\n%s", k_fog);
         sb(&b, "out vec4 v_d0;\nout vec4 v_d1;\nout float v_fog;\n"
                "out vec4 v_t0;\nout vec4 v_t1;\nout vec4 v_t2;\nout vec4 v_t3;\n");
     }
@@ -410,7 +410,8 @@ size_t nv2a_gl_vsh_body_fmt(const uint32_t (*ins)[4], uint32_t count, uint32_t f
         if (flags & NV2A_GL_VSH_CLIP_DISTANCE)
             sb(&b, "  gl_ClipDistance[0] = (p.z - u_xf.z) * p.w;\n");
         sb(&b, "  v_d0 = vsh_sat(o_d0); v_d1 = vsh_sat(o_d1); v_fog = vsh_fog(o_fog.x);\n"
-               "  v_t0 = o_t0; v_t1 = o_t1; v_t2 = o_t2; v_t3 = o_t3;\n");
+               "  v_t0 = o_t0; v_t1 = o_t1; v_t2 = o_t2; v_t3 = o_t3;\n"
+               "  gl_PointSize = u_psize;\n");
     }
     sb(&b, "}\n");
     if (b.overflow)

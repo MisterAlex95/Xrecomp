@@ -59,6 +59,11 @@ typedef struct {
      * clamping at the edge; 0, from the filtered texel (xemu's way). */
     uint32_t bump_src[4];
     uint32_t bump_fetch[4];
+    /* A point batch with point sprites on (SET_POINT_SMOOTH_ENABLE, as xemu
+     * reads it): every stage samples at the position inside the point. Set
+     * by the caller after nv2a_gl_shader_key (the batch, not the pixel
+     * state, knows it). */
+    uint32_t point_sprite;
 } Nv2aGlShaderKey;
 
 enum {
