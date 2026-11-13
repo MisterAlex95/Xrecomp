@@ -47,11 +47,21 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* macOS is left out: its arm64 context code below has never been compiled
- * (no macOS toolchain where XBA-132 was written) and the reference titles run
- * on a Mac; there every fault goes down the chain as before, said once. */
+/* macOS arm64 is built only on request: -DXBR_SEH_FAULTS_DARWIN=1 (e.g.
+ * CMAKE_C_FLAGS, or XBR_CMAKE_ARGS for tools/run_c_tests.sh). Its context
+ * code below has NEVER been compiled or run -- there is no macOS toolchain
+ * where XBA-132 and XBA-138 were written -- and the reference titles run on
+ * a Mac, so a default build keeps every fault going down the chain as
+ * before, said once. XBA-138 reviewed it against the Darwin headers as they
+ * are known (sys/ucontext.h, mach/arm/_structs.h: uc_mcontext is a pointer
+ * to struct __darwin_mcontext64 with __es/__ss/__ns; plain __ss fields on
+ * arm64, which is what this runtime builds, as mmio_decode_a64.h already
+ * relies on in the macOS CI build) and with the same checks
+ * mmio_decode_a64.h compiles under; it is still unbuilt. */
 #if !defined(_WIN32) && ((defined(__x86_64__) && defined(__linux__)) \
-        || (defined(__aarch64__) && defined(__linux__)))
+        || (defined(__aarch64__) && defined(__linux__)) \
+        || (defined(__aarch64__) && defined(__APPLE__) && defined(XBR_SEH_FAULTS_DARWIN) \
+            && XBR_SEH_FAULTS_DARWIN))
 #define SEH_FAULT_HOST 1
 #endif
 
@@ -368,10 +378,15 @@ static uint32_t ctx_access(const ucontext_t *uc)
 
 static void ctx_redirect(ucontext_t *uc, void (*fn)(void))
 {
-    /* Darwin arm64 has a 128-byte red zone. */
+    /* Darwin arm64 has a 128-byte red zone. BTYPE cleared, as on Linux
+     * (macOS does not enforce BTI in user space today; harmless). t_fault,
+     * which the trampoline reads, is a thread-local variable: on Darwin its
+     * block is allocated on first touch (malloc), which happened at
+     * xbox_SehFaultThreadInit, outside any handler. */
     uc->uc_mcontext->__ss.__lr = uc->uc_mcontext->__ss.__pc;
     uc->uc_mcontext->__ss.__sp = (ctx_sp(uc) - 128 - 256) & ~(uint64_t)15;
     uc->uc_mcontext->__ss.__pc = (uint64_t)(uintptr_t)fn;
+    uc->uc_mcontext->__ss.__cpsr &= ~(uint32_t)(3u << 10);
 }
 #endif
 
@@ -537,7 +552,8 @@ int xbox_SehFaultInit(void)
 #if defined(__APPLE__)
     static int said;
     if (!said++)
-        fprintf(stderr, "  [SEH] host faults as guest exceptions: not on macOS yet\n");
+        fprintf(stderr, "  [SEH] host faults as guest exceptions: not built on macOS"
+                        " (XBR_SEH_FAULTS_DARWIN=1 builds the untested Darwin path)\n");
 #endif
     return -1;
 }

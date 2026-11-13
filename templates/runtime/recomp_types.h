@@ -975,20 +975,41 @@ void recomp_trace_esp(const char *name, const char *tag);
  */
 #define XBOX_PTR(addr) ((uintptr_t)(uint32_t)(addr) + g_xbox_mem_offset)
 
+/* The 16-bit, 64-bit and floating-point accesses go through may_alias types
+ * (XBA-138). A host fault on a guest access becomes a guest exception built
+ * from g_cpu (xbox_seh_fault.c), so every guest register written before the
+ * access must be in g_cpu when it faults. 8- and 32-bit accesses may alias
+ * the uint32_t registers under the C aliasing rules and get that for free;
+ * a uint16_t, int64_t, float or double access cannot, and gcc and clang
+ * sank (or merged away) `esp -= 8` and other register writes past it, so a
+ * handler saw esp 8 too high and stale registers (tests/seh_fault_regs).
+ * may_alias makes them alias like a char access. MSVC does no type-based
+ * alias analysis, so nothing changes there. */
+#if defined(__GNUC__) || defined(__clang__)
+#  define RECOMP_MAY_ALIAS __attribute__((__may_alias__))
+#else
+#  define RECOMP_MAY_ALIAS
+#endif
+typedef uint16_t RECOMP_MAY_ALIAS recomp_u16_alias;
+typedef int16_t  RECOMP_MAY_ALIAS recomp_s16_alias;
+typedef int64_t  RECOMP_MAY_ALIAS recomp_s64_alias;
+typedef float    RECOMP_MAY_ALIAS recomp_f32_alias;
+typedef double   RECOMP_MAY_ALIAS recomp_f64_alias;
+
 /** Read/write N bytes at a flat Xbox memory address. */
 #define MEM8(addr)   (*(volatile uint8_t  *)XBOX_PTR(addr))
-#define MEM16(addr)  (*(volatile uint16_t *)XBOX_PTR(addr))
+#define MEM16(addr)  (*(volatile recomp_u16_alias *)XBOX_PTR(addr))
 #define MEM32(addr)  (*(volatile uint32_t *)XBOX_PTR(addr))
 
 /** Signed memory reads. */
 #define SMEM8(addr)  (*(volatile int8_t   *)XBOX_PTR(addr))
-#define SMEM16(addr) (*(volatile int16_t  *)XBOX_PTR(addr))
+#define SMEM16(addr) (*(volatile recomp_s16_alias *)XBOX_PTR(addr))
 #define SMEM32(addr) (*(volatile int32_t  *)XBOX_PTR(addr))
-#define SMEM64(addr) (*(volatile int64_t  *)XBOX_PTR(addr))
+#define SMEM64(addr) (*(volatile recomp_s64_alias *)XBOX_PTR(addr))
 
 /** Float/double memory access. */
-#define MEMF(addr)   (*(volatile float    *)XBOX_PTR(addr))
-#define MEMD(addr)   (*(volatile double   *)XBOX_PTR(addr))
+#define MEMF(addr)   (*(volatile recomp_f32_alias *)XBOX_PTR(addr))
+#define MEMD(addr)   (*(volatile recomp_f64_alias *)XBOX_PTR(addr))
 
 /* FSAVE's protected-mode image. Only state represented by the double-stack
  * model is restored: CW, TOP, condition codes and eight registers.
