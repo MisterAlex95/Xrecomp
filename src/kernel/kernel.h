@@ -1269,12 +1269,15 @@ NTSTATUS __stdcall xbox_ExSaveNonVolatileSetting(ULONG ValueIndex, ULONG Type, P
  * and boots to the dashboard when it loses the comparison, which it always
  * did against 0x00010001.
  */
+/* The time-zone indices are nxdk's (xboxkrnl.h, XC_TZ_*): the standard
+ * name, date and bias come first, then the daylight ones. They were listed
+ * as name, name, date, date, so 2-5 answered the wrong field (XBA-133). */
 #define XC_TIMEZONE_BIAS          0x00
 #define XC_TZ_STD_NAME            0x01
-#define XC_TZ_DLT_NAME            0x02
-#define XC_TZ_STD_DATE            0x03
-#define XC_TZ_DLT_DATE            0x04
-#define XC_TZ_STD_BIAS            0x05
+#define XC_TZ_STD_DATE            0x02
+#define XC_TZ_STD_BIAS            0x03
+#define XC_TZ_DLT_NAME            0x04
+#define XC_TZ_DLT_DATE            0x05
 #define XC_TZ_DLT_BIAS            0x06
 #define XC_LANGUAGE               0x07
 #define XC_VIDEO                  0x08
