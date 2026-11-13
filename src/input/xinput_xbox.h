@@ -109,6 +109,20 @@ BOOL xbox_InputIsConnected(DWORD dwPort);
  */
 DWORD xbox_InputGetCapabilities(DWORD dwPort, DWORD dwFlags, XBOX_INPUT_CAPABILITIES *pCaps);
 
+/**
+ * The ports that have a controller now (bit n = port n): a host pad assigned
+ * to the port (input_ports.h), and on port 0 the keyboard (RECOMP_KEYBOARD)
+ * or an active touch overlay. The USB model plugs and unplugs its emulated
+ * pads from this (XBA-123).
+ */
+unsigned xbox_InputPortMask(void);
+
+/**
+ * The name of the host controller on a port into out (empty when none);
+ * returns 1 when one is attached.
+ */
+int xbox_InputPortName(DWORD dwPort, char *out, int size);
+
 #if !defined(_WIN32)
 /* The POSIX SDL presenter owns event pumping while its main-thread window is
  * active, and keeps SDL alive at shutdown while controller handles are open. */

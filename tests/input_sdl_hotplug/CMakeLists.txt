@@ -14,7 +14,9 @@ add_executable(input_sdl_hotplug_test
     test_main.c
     ../../src/input/xinput_device.c
     ../../src/input/input_overlay.c     # merged into the SDL backend's GetState
-    ../../src/input/input_map.c)
+    ../../src/input/input_map.c
+    ../../src/input/input_ports.c       # which controller is which port (XBA-123)
+    fake_sdl/fake_sdl_ids.c)
 target_include_directories(input_sdl_hotplug_test PRIVATE
     fake_sdl
     ../../src/input

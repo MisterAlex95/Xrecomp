@@ -29,6 +29,7 @@
  */
 #include "xbox_memory_layout.h"
 #include "ohci.h"
+#include "usb_gamepad.h"
 
 #include <pthread.h>
 #include <sched.h>
@@ -360,6 +361,62 @@ int main(int argc, char **argv)
         CHECK(!fno && to == 0x1238u, "a tick inside one half does not");
         fno = xbox_OhciFrameAdvanceForTest(0x8000u, 4, &to);
         CHECK(!fno && to == 0x8004u, "nor one just past 0x8000");
+    }
+
+    /* Hotplug (XBA-123): the pads follow the controllers, and the root hub
+     * shows each change as a console's does. Pad n is on root port index
+     * (2 + n) % 4, which XAPI calls controller port n + 1. */
+    {
+        const uint32_t CCS = 1u, PES = 2u, CSC = 1u << 16, PESC = 1u << 17, RHSC = 0x40u;
+        UsbSetup set_addr = { 0x00, 0x05, 1, 0, 0 }, set_conf = { 0x00, 0x09, 1, 0, 0 };
+        uint8_t buf[8];
+        uint32_t ists, ps;
+        int pad = -1, ev;
+
+        ev = xbox_OhciHotplugStepForTest(1u, 1000, &pad);
+        ps = xbox_OhciPortStatusForTest(2, &ists);
+        CHECK(ev == 1 && pad == 0, "a controller on port 1: pad 1 plugged in");
+        CHECK((ps & (CCS | CSC)) == (CCS | CSC) && (ists & RHSC), "on root port 3, connect change, RHSC raised");
+        ev = xbox_OhciHotplugStepForTest(3u, 1300, &pad);
+        CHECK(ev == 0, "a second controller waits while pad 1 enumerates");
+        usb_gamepad_control(0, &set_addr, buf, (int)sizeof buf);
+        usb_gamepad_control(0, &set_conf, buf, (int)sizeof buf);
+        ev = xbox_OhciHotplugStepForTest(3u, 1350, &pad);
+        ps = xbox_OhciPortStatusForTest(3, NULL);
+        CHECK(ev == 1 && pad == 1 && (ps & CCS), "pad 1 configured: pad 2 plugged in on root port 4");
+        st(ED_VA + 0, ld(ED_VA + 0) | ED_SKIP);   /* the walker's ED: out of the way */
+
+        ev = xbox_OhciHotplugStepForTest(2u, 2000, &pad);
+        CHECK(ev == 0, "controller 1 gone: nothing for a second");
+        ev = xbox_OhciHotplugStepForTest(2u, 3000, &pad);
+        ps = xbox_OhciPortStatusForTest(2, NULL);
+        CHECK(ev == -1 && pad == 0, "then pad 1 is pulled out");
+        CHECK(!(ps & (CCS | PES)) && (ps & (CSC | PESC)) == (CSC | PESC),
+              "root port 3: disconnected, disabled, both change bits");
+        CHECK(usb_gamepad_address(0) == 0 && !usb_gamepad_configured(0), "pad 1 back to the default address");
+        CHECK(xbox_OhciPortStatusForTest(3, NULL) & CCS, "pad 2 stays plugged");
+        {
+            /* An input transfer still queued for pad 1's old address: device not responding, endpoint halted. */
+            const uint32_t ed = 0x00402000u, td = 0x00402100u, tail = 0x00402110u, data = 0x00402200u;
+            uint32_t done = 0;
+            st(ed + 0, 1u | (1u << 7) | (2u << 11) | (8u << 16));
+            st(ed + 4, tail);
+            st(ed + 8, td);
+            st(ed + 12, 0);
+            st(td + 0, (2u << 19) | (0xFu << 28));
+            st(td + 4, data);
+            st(td + 8, tail);
+            st(td + 12, data + 19);
+            xbox_OhciWalkListForTest(ed, &done);
+            CHECK(done == td && (ld(td) >> 28) == 5u && (ld(ed + 8) & HEAD_HALT),
+                  "a transfer to the pulled pad: DEVICE NOT RESPONDING, ED halted");
+        }
+        set_addr.wValue = 2;
+        usb_gamepad_control(1, &set_addr, buf, (int)sizeof buf);
+        usb_gamepad_control(1, &set_conf, buf, (int)sizeof buf);
+        ev = xbox_OhciHotplugStepForTest(3u, 3100, &pad);
+        ps = xbox_OhciPortStatusForTest(2, NULL);
+        CHECK(ev == 1 && pad == 0 && (ps & CCS), "controller 1 back: pad 1 plugged in again on root port 3");
     }
     printf("\n%d failure(s)\n", failures);
     return failures ? 1 : 0;

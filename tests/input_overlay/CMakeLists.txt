@@ -16,7 +16,9 @@ else()
         test_main.c
         ../../src/input/xinput_device.c
         ../../src/input/input_overlay.c
-        ../../src/input/input_map.c)
+        ../../src/input/input_map.c
+        ../../src/input/input_ports.c
+        ../input_sdl_hotplug/fake_sdl/fake_sdl_ids.c)
     target_include_directories(input_overlay_test PRIVATE
         ../input_sdl_hotplug/fake_sdl
         ../../src/input

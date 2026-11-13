@@ -2,7 +2,8 @@
 # pad remapping, deadzones and merging. Its own target so a port, or
 # tests/input_map, can build it without SDL or the rest of the runtime;
 # xbox_input links it, as keyboard.c resolves its key map through it.
-add_library(xbox_input_map STATIC ../input_map.c)
+add_library(xbox_input_map STATIC ../input_map.c
+    ../input_ports.c)   # which host controller is which port (XBA-123)
 target_include_directories(xbox_input_map PUBLIC
     ${CMAKE_CURRENT_LIST_DIR}/..          # input_map.h, keyboard.h, xinput_xbox.h
     ${CMAKE_CURRENT_LIST_DIR}/../..)      # platform/xbox_winnt.h

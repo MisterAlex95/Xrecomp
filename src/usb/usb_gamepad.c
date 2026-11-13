@@ -58,6 +58,12 @@ static uint8_t s_configuration[USB_GAMEPAD_MAX];
 uint8_t usb_gamepad_address(int pad) { return s_address[pad & 3]; }
 int usb_gamepad_configured(int pad) { return s_configuration[pad & 3] != 0; }
 
+void usb_gamepad_unplugged(int pad)
+{
+    s_address[pad & 3] = 0;
+    s_configuration[pad & 3] = 0;
+}
+
 /* ---- control transfers ------------------------------------------------- */
 
 #define REQ_GET_STATUS         0x00
@@ -556,6 +562,19 @@ static void pad_script_apply(int pad, uint8_t *out)
             memcpy(&out[12], ax, sizeof ax);
         }
     }
+}
+
+unsigned usb_gamepad_scripted(void)
+{
+    static const char *const vars[] = { "RECOMP_PAD_PRESS", "RECOMP_PAD_SCRIPT", "RECOMP_PAD_LIVE" };
+    size_t i;
+
+    for (i = 0; i < sizeof vars / sizeof vars[0]; i++) {
+        const char *v = getenv(vars[i]);
+        if (v && *v)
+            return 1u;
+    }
+    return 0;
 }
 
 int usb_gamepad_report(int pad, uint8_t *out, int max)

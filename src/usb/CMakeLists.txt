@@ -3,6 +3,7 @@
 add_library(xbox_usb STATIC
     ohci.c
     usb_gamepad.c
+    usb_hotplug.c       # when the pads come and go (XBA-123)
 )
 
 target_include_directories(xbox_usb PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
