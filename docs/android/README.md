@@ -69,13 +69,14 @@ The toolchain the APK can carry for the embedded Prepare (Python + capstone, cla
 
 The APK every title starts from (SDLActivity + `libmain.so` + logcat): see [app-shell.md](app-shell.md).
 
-## GPU renderer (experimental)
+## GPU renderer
 
-`RECOMP_GPU=1` (launcher › Settings › Graphics › Renderer) draws with OpenGL ES 3 on a headless EGL context
-instead of the CPU rasteriser; `RECOMP_GPU_FPS_CAP` (Frame cap, default 60, or the title profile's: 30 for Fable) keeps menus from running at 200+ fps;
+The default (XBA-119): the GL back end draws with OpenGL ES 3 on a headless EGL context instead of the CPU
+rasteriser, unless launcher › Settings › Graphics › Renderer says Software (`RECOMP_GPU=0`) or the title's profile
+forces it off; a device without GLES 3.0 falls back to the CPU rasteriser by itself; `RECOMP_GPU_FPS_CAP` (Frame cap, default 60, or the title profile's: 30 for Fable) keeps menus from running at 200+ fps;
 `RECOMP_GPU_SCALE` (Internal resolution: 1×, 2×, 3×, Fit the screen; default 1×) draws the 3D picture above 640×480
 and hands it to the window at that size.
-Not the default yet. Context, GLES details and the device check list:
+Context, GLES details and the device check lists:
 [gpu-backend.md « Android »](../technical/gpu-backend.md#android).
 
 ## Prepare on the device

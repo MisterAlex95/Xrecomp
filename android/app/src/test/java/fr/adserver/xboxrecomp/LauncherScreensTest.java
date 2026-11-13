@@ -487,11 +487,17 @@ public class LauncherScreensTest {
         assertEquals(LauncherActivity.TAB_GRAPHICS, a.settingsTabForTest());
         assertNull(row(a, app.getString(R.string.UI_SOUND)));
         assertNotNull(row(a, app.getString(R.string.OPT_VSYNC)));
-        // Frame cap and Resolution only matter with the GPU renderer: dimmed until it is chosen.
+        // Frame cap and Resolution only matter with the GPU renderer: Auto is the GPU renderer (XBA-119), so they
+        // are dimmed only with Software.
         Widgets.MenuRow cap = row(a, app.getString(R.string.OPT_GPU_FPS_CAP));
-        assertTrue(cap.dim);
         Widgets.MenuRow gpu = row(a, app.getString(R.string.OPT_GPU));
+        assertEquals(app.getString(R.string.VAL_AUTO), gpu.value);
+        assertFalse(cap.dim);
         gpu.requestFocusFromTouch();
+        while (!app.getString(R.string.VAL_GPU_CPU).equals(gpu.value))
+            key(a, KeyEvent.KEYCODE_DPAD_RIGHT);
+        assertTrue(cap.dim);
+        assertTrue(row(a, app.getString(R.string.OPT_GPU_SCALE)).dim);
         while (!app.getString(R.string.VAL_GPU_GL).equals(gpu.value))
             key(a, KeyEvent.KEYCODE_DPAD_RIGHT);
         assertFalse(cap.dim);

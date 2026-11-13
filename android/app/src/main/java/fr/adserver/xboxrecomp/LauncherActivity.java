@@ -1895,13 +1895,19 @@ public class LauncherActivity extends Activity {
         switchingTab = false;
     }
 
-    /** Frame cap and Resolution only apply to the GPU renderer: dimmed (still changeable) otherwise. */
+    /**
+     * Frame cap and Resolution only apply to the GPU renderer: dimmed (still changeable) otherwise. Auto is the GPU
+     * renderer (the runtime's default on Android, XBA-119) unless the game's pack forces RECOMP_GPU=0, which wins
+     * over any choice here.
+     */
     private void refreshRendererDims() {
-        boolean gpu = false;
+        String tid = titleId();
+        boolean gpu = tid == null || !Pack.forcesOff(getFilesDir(), tid, "RECOMP_GPU");
         for (RecompConfig.Option o : RecompConfig.OPTIONS) {
             if (o.title == R.string.OPT_GPU) {
                 int i = cfg.choiceIndex(o);
-                gpu = i >= 0 && o.choices[i].label == R.string.VAL_GPU_GL;
+                if (i >= 0 && o.choices[i].label == R.string.VAL_GPU_CPU)
+                    gpu = false;
             }
         }
         for (java.util.Map.Entry<RecompConfig.Option, MenuRow> e : optionRows.entrySet()) {

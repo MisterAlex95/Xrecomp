@@ -114,6 +114,7 @@ static struct {
     int has_pixel, has_texture_ptr;
     /* NV2A_BACKEND_CAP_RAW_VERTEX: the last batch's arrays as stored. */
     int raw, decline_raw;
+    int unregister;                 /* give up in the call, as GL without a context */
     uint32_t raw_first;
     Nv2aRawAttr raw0, raw3;
 } s_pg;
@@ -125,6 +126,10 @@ static int be_draw_program(const Nv2aSurface *s, const Nv2aBatch *b)
 
     (void)s;
     s_pg.calls++;
+    if (s_pg.unregister) {
+        nv2a_backend_register(NULL);
+        return 0;
+    }
     if (s_pg.decline || (p->raw && s_pg.decline_raw))
         return 0;
     s_pg.raw = p->raw != NULL;
@@ -488,6 +493,19 @@ int main(void)
         CHECK(s_pg.calls == 6 && !s_pg.raw && s_pg.vertex_count == 3);
         CHECK(near_(s_pg.attrs[0][0], 1) && near_(s_pg.attrs[0][1], -1));   /* element 1 */
         s_pg.decline_raw = 0;
+        /* A back end that unregisters itself in draw_program and declines
+         * (the GL back end when its context cannot be made, XBA-119): the
+         * batch goes to the CPU path, not back to a back end that is gone
+         * (the retry used to call it through a NULL pointer). */
+        s_pg.unregister = 1;
+        m(0x17FC, 5);
+        m(0x1800, 1u | (2u << 16));
+        m(0x1800, 3u | (3u << 16));
+        m(0x1800, 2u | (1u << 16));
+        m(0x17FC, 0);
+        CHECK(s_pg.calls == 7);
+        s_pg.unregister = 0;
+        nv2a_backend_register(&s_backend_raw);
         m(0x1E94, 0);
         nv2a_backend_register(&s_backend);
     }

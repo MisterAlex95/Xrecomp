@@ -44,9 +44,11 @@
  * context shared with the presenter) is stage 7e.
  *
  * Selected with RECOMP_GPU=1 (nv2a_gl_install_from_env, called by the
- * presenter's xbox_HostWindowMain); the CPU rasteriser stays the default.
- * If no context can be created the back end unregisters itself and the
- * CPU rasteriser draws.
+ * presenter's xbox_HostWindowMain); the default on Android (XBA-119), where
+ * RECOMP_GPU=0 keeps the CPU rasteriser, which stays the default elsewhere.
+ * If no context can be created (no EGL display, no GLES 3.0 config, a
+ * context the driver refuses) the back end unregisters itself and the CPU
+ * rasteriser draws.
  */
 #include "nv2a_gl.h"
 #include "nv2a_gl_api.h"
@@ -77,12 +79,14 @@ static int s_bilinear;             /* RECOMP_TEX_BILINEAR / _ANISO, as the CPU p
 static int s_recheck_frame;        /* RECOMP_GPU_TEX_RECHECK=frame */
 static int s_recheck_switch;       /* RECOMP_GPU_TEX_RECHECK=switch: the old policy */
 static int s_cull = 1;             /* RECOMP_GPU_CULL (default on) */
+static int s_cpu_writes = 1;       /* RECOMP_GPU_CPU_WRITES (default on): rt_cpu_check */
 static uint32_t s_frame;
 static GLuint s_vao, s_vbo, s_vs;
 
 static struct {
     uint32_t draws, tris, clears, uploads, upload_kb, readbacks, compiles, hashes_kb;
     uint32_t vsh_draws, vsh_kb;     /* vertex-program batches, their upload */
+    uint32_t ffp_kb;                /* CPU-transformed vertices uploaded (gl_draw) */
     uint32_t rt_creates, relayouts, rt_direct, rt_copies, rt_grows, shadow_binds;
     uint32_t seeds, seeds_skipped, invalidates;
     uint32_t bump_draws;            /* batches with a bump-env stage */
@@ -94,6 +98,7 @@ static struct {
      * buffers whose bytes changed, vertex arrays created. */
     uint32_t vbo_draws, vbo_kb, vbo_hash_kb, vbo_new, vbo_changed, vao_new;
     uint32_t ib_new, ib_kb;         /* index lists cached, their bytes */
+    uint32_t cpu_merges, cpu_kpx;   /* guest CPU writes merged into targets, kilopixels */
 } s_st;
 
 /* RECOMP_GPU_RT_RELAYOUT_READBACK=1: read a target back when the title
@@ -426,8 +431,8 @@ static void sh_color_mask(int r, int g, int b, int a)
  * for the blit and back afterwards, and the framebuffer bound before is
  * bound again, so a blit between bind_target and the draw (seeding) leaves
  * the batch's state as it was. */
-static void sh_blit(GLuint src, GLint sw, GLint sh, GLuint dst, GLint dw, GLint dh,
-                    GLenum filter)
+static void sh_blit_rect(GLuint src, const GLint sr[4], GLuint dst, const GLint dr[4],
+                         GLenum filter)
 {
     GLuint fbo = s_sh.fbo;
     GLint scissor = s_sh.cap[SH_SCISSOR], cm = s_sh.cmask;
@@ -436,7 +441,8 @@ static void sh_blit(GLuint src, GLint sw, GLint sh, GLuint dst, GLint dw, GLint 
     sh_color_mask(1, 1, 1, 1);
     glBindFramebuffer(GL_READ_FRAMEBUFFER, src);
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, dst);
-    glBlitFramebuffer(0, 0, sw, sh, 0, 0, dw, dh, GL_COLOR_BUFFER_BIT, filter);
+    glBlitFramebuffer(sr[0], sr[1], sr[2], sr[3], dr[0], dr[1], dr[2], dr[3],
+                      GL_COLOR_BUFFER_BIT, filter);
     s_sh.fbo = 0xFFFFFFFFu;
     if (fbo != 0xFFFFFFFFu)
         sh_fbo(fbo);
@@ -444,6 +450,14 @@ static void sh_blit(GLuint src, GLint sw, GLint sh, GLuint dst, GLint dw, GLint 
         sh_cap(SH_SCISSOR, GL_SCISSOR_TEST, 1);
     if (cm >= 0 && cm <= 15)
         sh_color_mask(cm & 1, cm & 2, cm & 4, cm & 8);
+}
+
+static void sh_blit(GLuint src, GLint sw, GLint sh, GLuint dst, GLint dw, GLint dh,
+                    GLenum filter)
+{
+    const GLint sr[4] = { 0, 0, sw, sh }, dr[4] = { 0, 0, dw, dh };
+
+    sh_blit_rect(src, sr, dst, dr, filter);
 }
 
 static void sh_depth_mask(int on)
@@ -546,6 +560,7 @@ static int ensure_init(void)
             s_invalidate = 0;
     }
     s_verbose = env_on("RECOMP_GPU_VERBOSE");
+    s_cpu_writes = !(getenv("RECOMP_GPU_CPU_WRITES") && !env_on("RECOMP_GPU_CPU_WRITES"));
     s_readback_layout_switch = env_on("RECOMP_GPU_RT_RELAYOUT_READBACK");
     s_rt_direct_off = getenv("RECOMP_GPU_RT_DIRECT") && !env_on("RECOMP_GPU_RT_DIRECT");
     {
@@ -598,6 +613,8 @@ static int ensure_init(void)
 
     s_vs = compile(GL_VERTEX_SHADER, nv2a_gl_vertex_body());
     if (!s_vs) {
+        fprintf(stderr, "  [GPUGL] the base vertex shader does not compile: falling back"
+                        " to the CPU rasteriser\n");
         unregister_self();
         return 0;
     }
@@ -849,6 +866,14 @@ typedef struct {
                                            * the target it draws into */
     uint32_t copy_w, copy_h;
     GlSamp copy_samp;
+    /* Guest CPU writes (rt_cpu_check): the guest bytes of the surface
+     * ([va, va + snap_len)) as they were when guest memory and the target
+     * last agreed -- the seed upload, a read-back, a merge. A byte that
+     * differs from it now was written by the guest CPU since. cpu_frame:
+     * s_frame + 1 at the last once-a-frame check (bind, direct sampling). */
+    uint8_t *snap;
+    uint32_t snap_len;
+    uint32_t cpu_frame;
 } GlRT;
 
 /* Depth/stencil per zeta surface: a D24S8 texture (not a renderbuffer), so
@@ -958,6 +983,38 @@ static GLuint rt_resolve(GlRT *r)
     return r->rfbo;
 }
 
+/* One guest pixel of target r (its own format) as RGBA bytes. */
+static void rt_guest_rgba(const GlRT *r, const uint8_t *p, uint8_t *o)
+{
+    if (r->bpp == 4) {
+        uint32_t c;
+        memcpy(&c, p, 4);
+        argb_to_rgba(c, o);
+    } else if (r->cfmt == 0x1 || r->cfmt == 0x2) {   /* X1R5G5B5 */
+        uint32_t t = (uint32_t)p[0] | ((uint32_t)p[1] << 8);
+        o[0] = (uint8_t)((((t >> 10) & 0x1F) * 255u + 15u) / 31u);
+        o[1] = (uint8_t)((((t >> 5) & 0x1F) * 255u + 15u) / 31u);
+        o[2] = (uint8_t)(((t & 0x1F) * 255u + 15u) / 31u);
+        o[3] = 0xFF;
+    } else {
+        uint32_t t = (uint32_t)p[0] | ((uint32_t)p[1] << 8);
+        o[0] = (uint8_t)(((t >> 11) & 0x1F) << 3);
+        o[1] = (uint8_t)(((t >> 5) & 0x3F) << 2);
+        o[2] = (uint8_t)((t & 0x1F) << 3);
+        o[3] = 0xFF;
+    }
+}
+
+/* Bytes of guest memory target r's surface spans in its current layout. */
+static uint32_t rt_guest_len(const GlRT *r)
+{
+    if (r->swz)
+        return r->w * r->h * r->bpp;
+    return r->h ? r->pitch * (r->h - 1) + r->w * r->bpp : 0;
+}
+
+static void rt_snap_take(GlRT *r);
+
 /* Guest bytes -> the render target (on creation: what was there before the
  * GPU drew counts, a title may draw over a CPU-written picture). A scaled
  * target gets them at guest size in its resolve, blitted up (nearest: an
@@ -971,27 +1028,9 @@ static void rt_upload(GlRT *r)
     if (!buf)
         return;
     for (y = 0; y < r->h; y++)
-        for (x = 0; x < r->w; x++) {
-            const uint8_t *p = mem + rt_offset(r, x, y);
-            uint8_t *o = buf + ((size_t)y * r->w + x) * 4;
-            if (r->bpp == 4) {
-                uint32_t c;
-                memcpy(&c, p, 4);
-                argb_to_rgba(c, o);
-            } else if (r->cfmt == 0x1 || r->cfmt == 0x2) {   /* X1R5G5B5 */
-                uint32_t t = (uint32_t)p[0] | ((uint32_t)p[1] << 8);
-                o[0] = (uint8_t)((((t >> 10) & 0x1F) * 255u + 15u) / 31u);
-                o[1] = (uint8_t)((((t >> 5) & 0x1F) * 255u + 15u) / 31u);
-                o[2] = (uint8_t)(((t & 0x1F) * 255u + 15u) / 31u);
-                o[3] = 0xFF;
-            } else {
-                uint32_t t = (uint32_t)p[0] | ((uint32_t)p[1] << 8);
-                o[0] = (uint8_t)(((t >> 11) & 0x1F) << 3);
-                o[1] = (uint8_t)(((t >> 5) & 0x3F) << 2);
-                o[2] = (uint8_t)((t & 0x1F) << 3);
-                o[3] = 0xFF;
-            }
-        }
+        for (x = 0; x < r->w; x++)
+            rt_guest_rgba(r, mem + rt_offset(r, x, y), buf + ((size_t)y * r->w + x) * 4);
+    rt_snap_take(r);
     if (r->sc != 1.0f) {
         rt_resolve_alloc(r);
         sh_tex_scratch(GL_TEXTURE_2D, r->rtex);
@@ -1108,11 +1147,203 @@ static struct {
     Nv2aPresentSurface surf;
 } s_hpend;
 static uint32_t s_rt_host_serial[NV_GL_MAX_RT];
+/* An anti-aliased presented surface (1280 wide and/or 960 high for the
+ * 640x480 frame: AA 2x1 or 2x2) goes to the window as a host frame,
+ * resolved on the GPU: a linear blit to half its size in each doubled
+ * direction, an exact box filter over the 2 or 4 samples (host_issue). */
+static GLuint s_aa_tex, s_aa_fbo;
+static uint32_t s_aa_w, s_aa_h;
 static struct {
     uint32_t frames;
     uint64_t ns;                          /* issue + map, this side */
     uint32_t w, h;
+    uint32_t aa_frames;                   /* resolved from an anti-aliased surface */
 } s_hst;
+
+/* ---- guest CPU writes into targets (XBA-119) --------------------------- */
+
+/* A title may write a GPU target's memory with the CPU: a movie decoded
+ * straight into the back buffer, a loading bar or text drawn into the frame,
+ * a surface filled with memset. The CPU rasteriser sees those bytes as it
+ * draws in guest memory; the GPU target would not, and its next read-back
+ * would even overwrite them. Each target keeps a copy of its guest bytes as
+ * they were when the two last agreed (snap: the seed, a read-back, a merge);
+ * rt_cpu_check compares guest memory with it and merges the pixels that
+ * differ into the GL texture, leaving every other pixel as the GPU drew it,
+ * so a bar drawn over a GPU frame keeps the frame around it. Checked when a
+ * target is first bound or sampled in a frame, before any read-back (which
+ * would otherwise lose the writes) and for the presented target at every
+ * flip. A memcmp per check when nothing changed. RECOMP_GPU_CPU_WRITES=0
+ * turns it off (the old behaviour: CPU writes into a target are not seen). */
+
+static void rt_snap_take(GlRT *r)
+{
+    uint32_t len = rt_guest_len(r);
+
+    if (!len) {
+        free(r->snap);
+        r->snap = NULL;
+        r->snap_len = 0;
+        return;
+    }
+    if (len != r->snap_len || !r->snap) {
+        uint8_t *p = (uint8_t *)realloc(r->snap, len);
+        if (!p) {
+            free(r->snap);
+            r->snap = NULL;
+            r->snap_len = 0;
+            return;
+        }
+        r->snap = p;
+        r->snap_len = len;
+    }
+    memcpy(r->snap, guest(r->va), len);
+}
+
+/* The back end itself wrote guest bytes [va, va + len) (a read-back): they
+ * are not the guest CPU's, for any target whose memory they overlap. */
+static void snap_refresh(uint32_t va, uint32_t len)
+{
+    int i;
+
+    for (i = 0; i < NV_GL_MAX_RT; i++) {
+        GlRT *r = &s_rt[i];
+        uint32_t lo, hi;
+        if (!r->snap)
+            continue;
+        lo = va > r->va ? va : r->va;
+        hi = va + len < r->va + r->snap_len ? va + len : r->va + r->snap_len;
+        if (lo < hi)
+            memcpy(r->snap + (lo - r->va), guest(lo), hi - lo);
+    }
+}
+
+/* Past this many runs of changed pixels the bounding box goes up whole:
+ * inside it the guest bytes win, also where the GPU drew since. */
+#define NV_GL_CPU_MAX_RUNS 4096
+
+static size_t rt_px_off(const GlRT *r, uint32_t x, uint32_t y, uint32_t mx, uint32_t my)
+{
+    return r->swz ? (size_t)(swizzle_deposit(x, mx) | swizzle_deposit(y, my)) * r->bpp
+                  : (size_t)y * r->pitch + (size_t)x * r->bpp;
+}
+
+/* The pixels of target r whose guest bytes differ from r->snap, into the GL
+ * texture: run by run along each row (a movie frame is one run a row), at
+ * guest size -- a scaled target gets them in its resolve (made current
+ * first), and the box around them is blitted up (nearest). */
+static void rt_cpu_merge(GlRT *r)
+{
+    const uint8_t *mem = guest(r->va);
+    uint8_t *buf = scratch((size_t)r->w * r->h * 4), *mask;
+    uint32_t x, y, mx = 0, my = 0, x0 = r->w, y0 = r->h, x1 = 0, y1 = 0, runs = 0, px = 0;
+    GLuint dst;
+
+    if (!buf || !(mask = (uint8_t *)malloc((size_t)r->w * r->h)))
+        return;
+    if (r->swz)
+        xbox_swizzle_masks(r->w, r->h, &mx, &my);
+    for (y = 0; y < r->h; y++) {
+        int prev = 0;
+        for (x = 0; x < r->w; x++) {
+            size_t off = rt_px_off(r, x, y, mx, my);
+            int ch = memcmp(mem + off, r->snap + off, r->bpp) != 0;
+            mask[(size_t)y * r->w + x] = (uint8_t)ch;
+            if (ch) {
+                rt_guest_rgba(r, mem + off, buf + ((size_t)y * r->w + x) * 4);
+                if (!prev)
+                    runs++;
+                px++;
+                if (x < x0) x0 = x;
+                if (x >= x1) x1 = x + 1;
+                if (y < y0) y0 = y;
+                if (y >= y1) y1 = y + 1;
+            }
+            prev = ch;
+        }
+    }
+    if (!px) {
+        free(mask);
+        return;
+    }
+    if (r->sc != 1.0f) {
+        rt_resolve(r);
+        dst = r->rtex;
+    } else {
+        dst = r->tex;
+    }
+    sh_tex_scratch(GL_TEXTURE_2D, dst);
+    if (runs > NV_GL_CPU_MAX_RUNS) {
+        for (y = y0; y < y1; y++)
+            for (x = x0; x < x1; x++)
+                if (!mask[(size_t)y * r->w + x])
+                    rt_guest_rgba(r, mem + rt_px_off(r, x, y, mx, my),
+                                  buf + ((size_t)y * r->w + x) * 4);
+        glPixelStorei(GL_UNPACK_ROW_LENGTH, (GLint)r->w);
+        glTexSubImage2D(GL_TEXTURE_2D, 0, (GLint)x0, (GLint)y0, (GLsizei)(x1 - x0),
+                        (GLsizei)(y1 - y0), GL_RGBA, GL_UNSIGNED_BYTE,
+                        buf + ((size_t)y0 * r->w + x0) * 4);
+        glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+    } else {
+        for (y = y0; y < y1; y++) {
+            const uint8_t *m = mask + (size_t)y * r->w;
+            for (x = x0; x < x1; ) {
+                uint32_t e;
+                if (!m[x]) {
+                    x++;
+                    continue;
+                }
+                for (e = x; e < x1 && m[e]; e++)
+                    ;
+                glTexSubImage2D(GL_TEXTURE_2D, 0, (GLint)x, (GLint)y, (GLsizei)(e - x), 1,
+                                GL_RGBA, GL_UNSIGNED_BYTE, buf + ((size_t)y * r->w + x) * 4);
+                x = e;
+            }
+        }
+    }
+    r->serial = ++s_rt_serial;
+    if (r->sc != 1.0f) {
+        const GLint sr[4] = { (GLint)x0, (GLint)y0, (GLint)x1, (GLint)y1 };
+        const GLint dr[4] = { (GLint)rt_real_px(r, x0), (GLint)rt_real_px(r, y0),
+                              (GLint)rt_real_px(r, x1), (GLint)rt_real_px(r, y1) };
+        sh_blit_rect(r->rfbo, sr, r->fbo, dr, GL_NEAREST);
+        r->rserial = r->serial;
+    }
+    s_st.cpu_merges++;
+    s_st.cpu_kpx += (px + 999) / 1000;
+    if (s_verbose)
+        fprintf(stderr, "  [GPUGL] guest CPU wrote target 0x%08X: %u pixels in %u runs,"
+                        " box %u,%u-%u,%u%s\n", r->va, px, runs, x0, y0, x1, y1,
+                r->dirty ? " (merged over GPU pixels)" : "");
+    free(mask);
+}
+
+/* once: at most once a frame for this target (binds, direct sampling). */
+static void rt_cpu_check(GlRT *r, int once)
+{
+    uint32_t len;
+
+    if (!s_cpu_writes || !r || !r->tex || r->seed)
+        return;
+    if (once) {
+        if (r->cpu_frame == s_frame + 1)
+            return;
+        r->cpu_frame = s_frame + 1;
+    }
+    len = rt_guest_len(r);
+    if (!len)
+        return;
+    if (!r->snap || r->snap_len != len) {
+        /* First check, or the surface's layout or size changed: the bytes
+         * from now on are compared with these. */
+        rt_snap_take(r);
+        return;
+    }
+    if (memcmp(guest(r->va), r->snap, len) == 0)
+        return;
+    rt_cpu_merge(r);
+    rt_snap_take(r);
+}
 
 /* What the title drew or put there before the GPU target existed: upload
  * the guest bytes now, if a full clear has not made them moot. */
@@ -1132,12 +1363,16 @@ static void rt_readback(GlRT *r)
 
     if (!r->dirty || !r->fbo)
         return;
+    /* What the guest CPU wrote there goes into the target first: the
+     * read-back would overwrite it. */
+    rt_cpu_check(r, 0);
     buf = scratch((size_t)r->w * r->h * 4);
     if (!buf)
         return;
     sh_fbo(rt_resolve(r));
     glReadPixels(0, 0, (GLsizei)r->w, (GLsizei)r->h, NV_GL_READ_FORMAT, NV_GL_READ_TYPE, buf);
     rt_store(r, buf);
+    snap_refresh(r->va, rt_guest_len(r));
     if (s_pend.pending && s_pend.snap.va == r->va)
         s_pend.dropped = 1;           /* these pixels are newer than the PBO's */
     r->dirty = 0;
@@ -1161,6 +1396,7 @@ static void rt_free(GlRT *r)
     if (r->copy) sh_delete_textures(1, &r->copy);
     if (r->rfbo) sh_delete_fbo(r->rfbo);
     if (r->rtex) sh_delete_textures(1, &r->rtex);
+    free(r->snap);
     memset(r, 0, sizeof *r);
 }
 
@@ -1352,9 +1588,15 @@ static uint32_t zeta_bpp(const Nv2aSurface *s)
 
 static void depth_free(GlDepth *d)
 {
+    GLuint fbo = s_sh.fbo;
     int i;
 
-    /* Colour targets that have it attached drop it (re-attached at bind). */
+    /* Colour targets that have it attached drop it (re-attached at bind).
+     * The framebuffer bound before is bound again: bind_target binds its
+     * target and then asks depth_get, which comes here when the depth must
+     * grow -- left on another target's framebuffer, the new depth was
+     * attached there and the batch or clear went into that target (an
+     * anti-aliased 1280x960 target cleared after 640x480 ones: XBA-119). */
     for (i = 0; i < NV_GL_MAX_RT; i++)
         if (s_rt[i].depth == d->tex && d->tex) {
             sh_fbo(s_rt[i].fbo);
@@ -1362,6 +1604,8 @@ static void depth_free(GlDepth *d)
                                    GL_TEXTURE_2D, 0, 0);
             s_rt[i].depth = 0;
         }
+    if (fbo != 0xFFFFFFFFu && fbo != d->fbo)
+        sh_fbo(fbo);
     if (d->fbo) sh_delete_fbo(d->fbo);
     if (d->tex) sh_delete_textures(1, &d->tex);
     memset(d, 0, sizeof *d);
@@ -1540,6 +1784,7 @@ static int bind_target(const Nv2aSurface *s, uint32_t zeta_va, GlTarget *t)
     leave_target(r ? r->fbo : 0);
     if (!(r = rt_get(s)))
         return 0;
+    rt_cpu_check(r, 1);
     sh_fbo(r->fbo);
     note_target(r->fbo, r->va, s->width, s->height);
     s_target_scratch_depth = zeta_va == 0;
@@ -1640,6 +1885,7 @@ static GlRT *rt_for_texture(const Nv2aTexture *t, uint32_t cube, GLint *alpha)
         } else if (!r->swz && t->pitch != r->pitch) {
             return NULL;
         }
+        rt_cpu_check(r, 1);
         return r;
     }
     return NULL;
@@ -3077,6 +3323,7 @@ static void gl_draw(const Nv2aSurface *s, const Nv2aBatch *b)
     sh_array_buffer(s_vbo);
     glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)b->count * (GLsizeiptr)sizeof(Nv2aVertexFull),
                  b->full, GL_STREAM_DRAW);
+    s_st.ffp_kb += (uint32_t)(((size_t)b->count * sizeof(Nv2aVertexFull) + 1023) / 1024);
     if (rs->zpass_enable && s_qcount < NV_GL_MAX_QUERY) {
         GlQuery *q = &s_qring[(s_qhead + s_qcount) & (NV_GL_MAX_QUERY - 1)];
         q->q = query_new();
@@ -3683,6 +3930,8 @@ static void gl_reset_objects(int lost)
         if (s_pbo) glDeleteBuffers(1, &s_pbo);
         for (i = 0; i < 2; i++)
             if (s_hpbo[i]) glDeleteBuffers(1, &s_hpbo[i]);
+        if (s_aa_fbo) glDeleteFramebuffers(1, &s_aa_fbo);
+        if (s_aa_tex) glDeleteTextures(1, &s_aa_tex);
         if (s_pvbo) glDeleteBuffers(1, &s_pvbo);
         if (s_pebo) glDeleteBuffers(1, &s_pebo);
         if (s_pvao) glDeleteVertexArrays(1, &s_pvao);
@@ -3697,6 +3946,8 @@ static void gl_reset_objects(int lost)
         while (glGetError() != GL_NO_ERROR)
             ;
     }
+    for (i = 0; i < NV_GL_MAX_RT; i++)
+        free(s_rt[i].snap);
     memset(s_rt, 0, sizeof s_rt);
     memset(s_depth, 0, sizeof s_depth);
     memset(s_tex, 0, sizeof s_tex);
@@ -3734,6 +3985,8 @@ static void gl_reset_objects(int lost)
     memset(s_hpbo_size, 0, sizeof s_hpbo_size);
     memset(&s_hpend, 0, sizeof s_hpend);
     s_hmapped = -1;
+    s_aa_tex = s_aa_fbo = 0;
+    s_aa_w = s_aa_h = 0;
     s_near_program = 0;             /* ensure_init: depth clamp on, range 0..1 */
     s_near01 = 0.0f;
     s_target_fbo = 0;
@@ -3836,6 +4089,7 @@ static int pbo_complete(Nv2aPresentSurface *done)
                                           GL_MAP_READ_BIT);
     if (p) {
         rt_store(&s_pend.snap, p);
+        snap_refresh(s_pend.snap.va, rt_guest_len(&s_pend.snap));
         glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
     }
     glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
@@ -3892,13 +4146,41 @@ static uint64_t host_now_ns(void)
 /* Start reading target r at its real size into the next host pack buffer. */
 static void host_issue(GlRT *r, const Nv2aPresentSurface *surf)
 {
-    uint32_t w, h;
+    uint32_t w, h, fx, fy;
     GLuint fbo = rt_present_source(r, &w, &h);
     int b = s_hnext;
-    size_t n = (size_t)w * h * 4;
+    size_t n;
 
     if (!fbo || !w || !h)
         return;
+    nv2a_gl_aa_factors(surf, &fx, &fy);
+    if (fx > 1 || fy > 1) {
+        const GLint sr[4] = { 0, 0, (GLint)w, (GLint)h };
+        GLint dr[4] = { 0, 0, 0, 0 };
+        w /= fx;
+        h /= fy;
+        if (!s_aa_tex || s_aa_w != w || s_aa_h != h) {
+            if (!s_aa_tex) {
+                glGenTextures(1, &s_aa_tex);
+                glGenFramebuffers(1, &s_aa_fbo);
+            }
+            sh_tex_scratch(GL_TEXTURE_2D, s_aa_tex);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, (GLsizei)w, (GLsizei)h, 0, GL_RGBA,
+                         GL_UNSIGNED_BYTE, NULL);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
+            sh_fbo(s_aa_fbo);
+            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
+                                   s_aa_tex, 0);
+            s_aa_w = w;
+            s_aa_h = h;
+        }
+        dr[2] = (GLint)w;
+        dr[3] = (GLint)h;
+        sh_blit_rect(fbo, sr, s_aa_fbo, dr, GL_LINEAR);
+        fbo = s_aa_fbo;
+        s_hst.aa_frames++;
+    }
+    n = (size_t)w * h * 4;
     if (b == s_hmapped)
         b ^= 1;                           /* never into the buffer still mapped */
     s_hnext = b ^ 1;
@@ -4087,9 +4369,12 @@ static int gl_present(const Nv2aPresentSurface *now, int sync, Nv2aPresentSurfac
         s_hpend.pending = 0;          /* a guest frame comes between: drop it */
     if (!r)
         return 1;                     /* not a GPU target: guest memory is current */
+    /* A frame the guest CPU wrote into (a movie, a loading bar) reaches the
+     * target before it is read back or shown from the GPU. */
+    rt_cpu_check(r, 0);
     if (sync && s_scale_dump)
         scaled_dump(r);
-    if (!sync && host_present_on())
+    if (!sync && (host_present_on() || (s_display_w && nv2a_gl_present_needs_host(now))))
         return host_present(r, now, ready);
     if (sync || s_present_sync_mode) {
         rt_readback(r);
@@ -4121,15 +4406,15 @@ static void gl_flip(void)
             nrt += s_rt[i].tex != 0;
         for (i = 0; i < NV_GL_MAX_PROG; i++)
             nprog += s_prog[i].prog != 0;
-        fprintf(stderr, "  [GPUGL] frame %u: %u draws (%u vertex programs, %u KB),"
-                        " %u tris, %u clears, %u readbacks,"
+        fprintf(stderr, "  [GPUGL] frame %u: %u draws (%u vertex programs, %u KB;"
+                        " %u KB transformed on the CPU), %u tris, %u clears, %u readbacks,"
                         " targets: %u created, %u relayouts, %u grown, %u sampled directly"
                         " (%u copies), %u shadow maps, %u bump-env, %u seeded, %u seeds skipped, %u invalidates,"
                         " %u uploads (%u KB), %u KB hashed, %d textures,"
                         " %d targets, %d programs (%u compiled, %u from cache;"
                         " run %u/%u),"
                         " %.1f target switches/frame\n",
-                s_frame, s_st.draws, s_st.vsh_draws, s_st.vsh_kb, s_st.tris,
+                s_frame, s_st.draws, s_st.vsh_draws, s_st.vsh_kb, s_st.ffp_kb, s_st.tris,
                 s_st.clears, s_st.readbacks, s_st.rt_creates, s_st.relayouts, s_st.rt_grows,
                 s_st.rt_direct, s_st.rt_copies, s_st.shadow_binds, s_st.bump_draws, s_st.seeds,
                 s_st.seeds_skipped, s_st.invalidates,
@@ -4147,11 +4432,15 @@ static void gl_flip(void)
                     (double)s_st.vbo_hash_kb / s_st.frames, s_nvb, s_vb_bytes >> 10,
                     s_nvao, s_st.vao_new, (double)s_st.ib_new / s_st.frames,
                     (double)s_st.ib_kb / s_st.frames, s_nib, s_ib_bytes >> 10);
+        if (s_st.cpu_merges)
+            fprintf(stderr, "  [GPUGL] guest CPU writes into targets: %u merged (%u kpx)\n",
+                    s_st.cpu_merges, s_st.cpu_kpx);
         if (s_hst.frames)
             fprintf(stderr, "  [GPUGL] host present: %u frames at %ux%u, %.3f ms/frame"
-                            " (read-back issue + map)\n",
+                            " (read-back issue + map), %u resolved from an anti-aliased"
+                            " surface\n",
                     s_hst.frames, s_hst.w, s_hst.h,
-                    (double)s_hst.ns / 1e6 / (double)s_hst.frames);
+                    (double)s_hst.ns / 1e6 / (double)s_hst.frames, s_hst.aa_frames);
         memset(&s_st, 0, sizeof s_st);
         memset(&s_hst, 0, sizeof s_hst);
         if (s_scale_cfg.scale != 1.0f)
@@ -4176,12 +4465,37 @@ static void unregister_self(void)
     nv2a_backend_register(NULL);
 }
 
+/* RECOMP_GPU as set (NULL: not set) -> whether the GL back end draws. Not
+ * set: the platform's default, on for Android (the launcher's Renderer
+ * "Auto"; "Software" writes RECOMP_GPU=0, a title profile forces it with
+ * env_force), off elsewhere. */
+static int gpu_selected(const char *e, int platform_default)
+{
+    if (!e || !*e)
+        return platform_default;
+    return strcmp(e, "0") != 0;
+}
+
+#if defined(__ANDROID__)
+#define NV2A_GL_DEFAULT_ON 1
+#else
+#define NV2A_GL_DEFAULT_ON 0
+#endif
+
 int nv2a_gl_install_from_env(void)
 {
     const char *e = getenv("RECOMP_GPU");
+    int by_default = !e || !*e;
 
-    if (!e || !*e || strcmp(e, "0") == 0)
+    if (!gpu_selected(e, NV2A_GL_DEFAULT_ON))
         return 0;
+    if (by_default) {
+        /* Code that asks getenv("RECOMP_GPU") later (a title layer, the
+         * frame pacing choice) sees what was chosen. */
+        setenv("RECOMP_GPU", "1", 0);
+        fprintf(stderr, "  [GPUGL] GPU back end by default on this platform"
+                        " (RECOMP_GPU=0 for the software renderer)\n");
+    }
     /* RECOMP_GPU_CULL=0: draw both faces (and strips as the CPU path
      * assembles them). Read here: the caps are part of the registration. */
     e = getenv("RECOMP_GPU_CULL");
