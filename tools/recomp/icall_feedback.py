@@ -438,7 +438,7 @@ def main(argv=None):
     ap.add_argument("--functions", default=None, metavar="JSON",
                     help="functions.json to cross-reference against. Defaults to "
                          "the in-repo disasm output; a per-title project keeps its "
-                         "own (Halo: build/disasm/functions.json).")
+                         "own (e.g. build/disasm/functions.json).")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     m = sub.add_parser("merge", help="merge runtime dumps into the database")
