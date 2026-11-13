@@ -66,6 +66,7 @@ public class LauncherPrepareTest {
     public void tearDown() {
         Toolchain.assetsOverride = null;
         Toolchain.nativeDirOverride = null;
+        PackFreshness.forget();
     }
 
     private void withToolchain() throws Exception {
@@ -343,5 +344,170 @@ public class LauncherPrepareTest {
         LauncherActivity a = launch("8-needs-fix");
         assertEquals(app.getString(R.string.PLAY), a.homePrimaryForTest().title);
         assertTrue(a.noteForTest(), a.noteForTest().contains("bsf eax, ecx at 0x00012345"));
+    }
+
+    // ---- XBA-127: a pack that no longer matches ----------------------------------------------------------------
+
+    private static String hex(String two) {
+        StringBuilder b = new StringBuilder();
+        for (int i = 0; i < 32; i++)
+            b.append(two);
+        return b.toString();
+    }
+
+    /** pack.json of TID with one more field, or one changed. */
+    private void packField(String key, String value) throws Exception {
+        File json = new File(Pack.packDir(app.getFilesDir(), TID), "pack.json");
+        org.json.JSONObject o = new org.json.JSONObject(PrepareProtocol.readText(json, 1 << 16));
+        o.put(key, value);
+        TestSupport.write(json, o.toString(1));
+    }
+
+    private static Widgets.PillButton pillNamed(View v, String title) {
+        if (v instanceof Widgets.PillButton && title.equals(((Widgets.PillButton)v).title))
+            return (Widgets.PillButton)v;
+        if (v instanceof android.view.ViewGroup) {
+            android.view.ViewGroup g = (android.view.ViewGroup)v;
+            for (int i = 0; i < g.getChildCount(); i++) {
+                Widgets.PillButton p = pillNamed(g.getChildAt(i), title);
+                if (p != null)
+                    return p;
+            }
+        }
+        return null;
+    }
+
+    private void press(LauncherActivity a, int key) {
+        a.dispatchKeyEvent(new KeyEvent(KeyEvent.ACTION_DOWN, key));
+        a.dispatchKeyEvent(new KeyEvent(KeyEvent.ACTION_UP, key));
+        shadowOf(Looper.getMainLooper()).idle();
+    }
+
+    /** Another revision of the disc (same title ID, another default.xbe): Play never runs the pack; Prepare again. */
+    @Test
+    public void otherXbeIsNeverRun() throws Exception {
+        withToolchain();
+        File dir = TestSupport.writePack(app.getFilesDir(), TID, 64);
+        packField("xbe_sha256", hex("ab"));   // not the game folder's default.xbe
+        status(PrepareProtocol.DONE, "pack", 5, 100, -1, "", "");
+        File save = new File(GameTheme.saveDir(app), "UDATA/4d530004/slot0.sav");
+        TestSupport.write(save, "my progress");
+
+        LauncherActivity a = launch(null);
+        // Home hashes default.xbe on a worker thread, then shows the mismatch.
+        File xbe = new File(GameStore.defaultGameDir(app), "default.xbe");
+        for (int i = 0; i < 500 && PackFreshness.knownXbeSha(xbe) == null; i++)
+            Thread.sleep(10);
+        shadowOf(Looper.getMainLooper()).idle();
+        Intent next = shadowOf(a).getNextStartedActivity();
+        assertTrue("the game did not start", next == null || next.getComponent() == null
+                                             || !ShellActivity.class.getName().equals(next.getComponent().getClassName()));
+        assertEquals(LauncherActivity.Screen.HOME, a.screenForTest());
+        assertEquals(LauncherActivity.Prep.NEEDED, a.homePrepForTest());
+        assertEquals(app.getString(R.string.PREPARE_AGAIN), a.homePrimaryForTest().title);
+        assertEquals(app.getString(R.string.HOME_OTHER_XBE_NOTE), a.noteForTest());
+        shot(a, "9-other-xbe");
+
+        // A on Prepare again: a Prepare starts; the saves are untouched.
+        press(a, KeyEvent.KEYCODE_BUTTON_START);
+        Intent started = shadowOf(app).getNextStartedService();
+        assertNotNull("PrepareService started", started);
+        assertEquals(PrepareService.ACTION_START, started.getAction());
+        assertTrue(save.isFile());
+        assertEquals("my progress", PrepareProtocol.readText(save, 1 << 10));
+        assertTrue("the old pack stays until the new one replaces it", dir.isDirectory());
+    }
+
+    /** « Open the game directly » with another default.xbe than the pack's: hashed before the start, not started. */
+    @Test
+    public void otherXbeStopsOpenDirectly() throws Exception {
+        withToolchain();
+        GameStore.setAutoStart(app, true);
+        TestSupport.writePack(app.getFilesDir(), TID, 64);
+        packField("xbe_sha256", hex("ab"));
+        status(PrepareProtocol.DONE, "pack", 5, 100, -1, "", "");
+        GameStore.rememberLaunch(app, GameStore.defaultGameDir(app).getAbsolutePath(), "Sample Game", TID);
+        ActivityManager am = app.getSystemService(ActivityManager.class);
+        shadowOf(am).setProcesses(java.util.Collections.emptyList());
+        LauncherActivity a = launch(null);
+        assertNull("not started", shadowOf(a).getNextStartedActivity());
+        assertEquals(LauncherActivity.Screen.HOME, a.screenForTest());
+        assertEquals(LauncherActivity.Prep.NEEDED, a.homePrepForTest());
+        assertEquals(app.getString(R.string.HOME_OTHER_XBE_NOTE), a.noteForTest());
+    }
+
+    /** The same default.xbe as the pack's: Play starts the game (the hash is the game folder's, read once). */
+    @Test
+    public void sameXbePlays() throws Exception {
+        withToolchain();
+        TestSupport.writePack(app.getFilesDir(), TID, 64);
+        File xbe = new File(GameStore.defaultGameDir(app), "default.xbe");
+        packField("xbe_sha256", GameStore.sha256(xbe));
+        status(PrepareProtocol.DONE, "pack", 5, 100, -1, "", "");
+        LauncherActivity a = launch(null);
+        press(a, KeyEvent.KEYCODE_BUTTON_START);
+        Intent next = shadowOf(a).getNextStartedActivity();
+        assertNotNull(next);
+        assertEquals(ShellActivity.class.getName(), next.getComponent().getClassName());
+    }
+
+    private void withToolkitDigest(String digest) throws Exception {
+        File assets = tmp.newFolder("assets");
+        Toolchain.assetsOverride = TestSupport.toolAssets(assets, "1");
+        TestSupport.write(new File(assets, "prepare/toolkit.zip.id"), digest + "\n");
+        Toolchain.nativeDirOverride = TestSupport.fakeNativeDir(tmp.getRoot()).getAbsolutePath();
+    }
+
+    /**
+     * After an app update whose toolkit changed: the pack still plays (same shell ABI), Home says it was prepared by an
+     * older version and offers Prepare again next to Play, never in its place.
+     */
+    @Test
+    public void olderToolkitStillPlaysAndOffersPrepareAgain() throws Exception {
+        withToolkitDigest(hex("11"));
+        TestSupport.writePack(app.getFilesDir(), TID, 64);
+        packField("toolkit_sha256", hex("22"));
+        status(PrepareProtocol.DONE, "pack", 5, 100, -1, "", "");
+        LauncherActivity a = launch("10-older-toolkit");
+        assertEquals(LauncherActivity.Screen.HOME, a.screenForTest());
+        assertNull("playable", a.homePrepForTest());
+        assertEquals(app.getString(R.string.PLAY), a.homePrimaryForTest().title);
+        assertTrue(a.noteForTest(), a.noteForTest().startsWith("This update translates games better"));
+        Widgets.PillButton again = pillNamed(a.getWindow().getDecorView(), app.getString(R.string.PREPARE_AGAIN));
+        assertNotNull("Prepare again is offered", again);
+
+        // Prepare again: a plain Prepare.
+        again.performClick();
+        shadowOf(Looper.getMainLooper()).idle();
+        Intent started = shadowOf(app).getNextStartedService();
+        assertNotNull("PrepareService started", started);
+        assertEquals(PrepareService.ACTION_START, started.getAction());
+        assertTrue("not a self-healing round: the game does not start by itself after it",
+                   !SelfHeal.read(new File(new File(app.getFilesDir(), "work"), TID)).relaunch);
+    }
+
+    @Test
+    public void olderToolkitPlayIsNotBlocked() throws Exception {
+        withToolkitDigest(hex("11"));
+        TestSupport.writePack(app.getFilesDir(), TID, 64);   // from before toolkit_sha256: an older toolkit
+        status(PrepareProtocol.DONE, "pack", 5, 100, -1, "", "");
+        LauncherActivity a = launch(null);
+        assertTrue(a.noteForTest(), a.noteForTest().startsWith("This update translates games better"));
+        press(a, KeyEvent.KEYCODE_BUTTON_START);
+        Intent next = shadowOf(a).getNextStartedActivity();
+        assertNotNull(next);
+        assertEquals(ShellActivity.class.getName(), next.getComponent().getClassName());
+    }
+
+    @Test
+    public void currentToolkitSaysNothing() throws Exception {
+        withToolkitDigest(hex("11"));
+        TestSupport.writePack(app.getFilesDir(), TID, 64);
+        packField("toolkit_sha256", hex("11"));
+        status(PrepareProtocol.DONE, "pack", 5, 100, -1, "", "");
+        LauncherActivity a = launch(null);
+        assertNull(pillNamed(a.getWindow().getDecorView(), app.getString(R.string.PREPARE_AGAIN)));
+        String note = a.noteForTest();
+        assertTrue(note, note == null || !note.startsWith("This update translates games better"));
     }
 }

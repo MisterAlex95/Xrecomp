@@ -389,6 +389,103 @@ void xbox_InputMap_PadMap(const InputPadMap *m, const InputRaw *raw, XBOX_GAMEPA
     }
 }
 
+/* ---- pad mapping as text (RECOMP_PAD_MAP) ---------------------------------- */
+
+static const char *const k_stick_names[] = { "left", "right", "none" };
+
+static int stick_from_name(const char *name)
+{
+    int i;
+    for (i = 0; i < 3; i++)
+        if (equal_nocase(name, k_stick_names[i])) return i;
+    return -1;
+}
+
+static int padmap_entry(InputPadMap *m, const char *name, const char *value)
+{
+    int c, s;
+    if (equal_nocase(name, "left_stick") || equal_nocase(name, "right_stick")) {
+        s = stick_from_name(value);
+        if (s < 0) return 0;
+        if (equal_nocase(name, "left_stick")) m->left_stick = (uint8_t)s;
+        else m->right_stick = (uint8_t)s;
+        return 1;
+    }
+    c = xbox_InputMap_ControlFromName(name);
+    if (c < 0 || c >= INPUT_PAD_CONTROL_COUNT) return 0;
+    s = xbox_InputMap_SourceFromName(value);
+    if (s < 0) return 0;
+    m->source[c] = (uint8_t)s;
+    return 1;
+}
+
+static int padmap_sep(int ch)
+{
+    return ch == ',' || ch == ';' || ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r';
+}
+
+int xbox_InputMap_PadMapParse(InputPadMap *m, const char *text)
+{
+    int rejected = 0;
+    if (!m) return -1;
+    if (!text) return 0;
+    while (*text) {
+        char entry[64], *eq;
+        size_t n = 0;
+        while (*text && padmap_sep((unsigned char)*text)) text++;
+        if (!*text) break;
+        while (text[n] && !padmap_sep((unsigned char)text[n])) n++;
+        if (n >= sizeof entry) {
+            rejected++;
+        } else {
+            memcpy(entry, text, n);
+            entry[n] = '\0';
+            eq = strchr(entry, '=');
+            if (!eq) {
+                rejected++;
+            } else {
+                *eq = '\0';
+                if (!padmap_entry(m, entry, eq + 1)) rejected++;
+            }
+        }
+        text += n;
+    }
+    return rejected;
+}
+
+const char *xbox_InputMap_PadMapFormat(const InputPadMap *m, char *buf, int size)
+{
+    InputPadMap d;
+    int i, used = 0;
+    if (!buf || size <= 0) return buf;
+    buf[0] = '\0';
+    if (!m) return buf;
+    xbox_InputMap_PadMapDefaults(&d);
+    for (i = 0; i < INPUT_PAD_CONTROL_COUNT + 2; i++) {
+        const char *name, *value;
+        int n;
+        if (i < INPUT_PAD_CONTROL_COUNT) {
+            if (m->source[i] == d.source[i]) continue;
+            name = k_control_names[i];
+            value = xbox_InputMap_SourceName(m->source[i]);
+        } else {
+            int s = i == INPUT_PAD_CONTROL_COUNT ? m->left_stick : m->right_stick;
+            int ds = i == INPUT_PAD_CONTROL_COUNT ? d.left_stick : d.right_stick;
+            if (s == ds || s > INPUT_STICK_NONE) continue;
+            name = i == INPUT_PAD_CONTROL_COUNT ? "left_stick" : "right_stick";
+            value = k_stick_names[s];
+        }
+        if (!value) continue;
+        n = snprintf(buf + used, (size_t)(size - used), "%s%s=%s", used ? "," : "", name, value);
+        if (n < 0 || n >= size - used) {   /* full: keep whole entries only */
+            buf[used] = '\0';
+            break;
+        }
+        used += n;
+    }
+    return buf;
+}
+
 /* The layout the loops above rely on. */
 #define INPUT_MAP_ASSERT(name, cond) typedef char input_map_assert_##name[(cond) ? 1 : -1]
 INPUT_MAP_ASSERT(dpad_up_bit0, XBOX_GAMEPAD_DPAD_UP == 1u << (INPUT_DPAD_UP - INPUT_DPAD_UP));

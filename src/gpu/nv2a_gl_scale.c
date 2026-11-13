@@ -95,3 +95,16 @@ uint32_t nv2a_gl_scale_count(uint32_t samples, float sc)
     n = (double)samples / ((double)sc * (double)sc) + 0.5;
     return n < 1.0 ? 1u : (uint32_t)n;
 }
+
+int nv2a_gl_present_needs_host(const Nv2aPresentSurface *s)
+{
+    return s->bpp && s->pitch != NV2A_GL_FRAME_W * s->bpp;
+}
+
+void nv2a_gl_aa_factors(const Nv2aPresentSurface *s, uint32_t *fx, uint32_t *fy)
+{
+    int aa = ((s->format >> 12) & 0xF) != 0;    /* SET_SURFACE_FORMAT anti-aliasing */
+
+    *fx = aa && s->x + s->w == 2 * NV2A_GL_FRAME_W ? 2u : 1u;
+    *fy = aa && s->y + s->h == 2 * NV2A_GL_FRAME_H ? 2u : 1u;
+}

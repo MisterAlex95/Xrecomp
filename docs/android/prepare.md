@@ -42,7 +42,7 @@ prepare puts `.old` back if a kill fell between the two renames. So a reader see
 
 ```json
 {"format": 1, "title_id": "4D5300D1", "title": "...", "xbe_sha256": "...", "abi": "arm64-v8a", "shell_abi": 1,
- "toolkit": "<commit>", "lib": "libtitle.so", "lib_sha256": "...", "lib_size": 123456,
+ "toolkit": "<commit>", "toolkit_sha256": "...", "lib": "libtitle.so", "lib_sha256": "...", "lib_size": 123456,
  "entry": "recomp_title_main", "cc": "clang 19.0.1 -O1", "built_at": "2026-11-10T21:10:35Z",
  "env_force": {"RECOMP_LSFG": "0"}}
 ```
@@ -52,10 +52,11 @@ prepare puts `.old` back if a kill fell between the two renames. So a reader see
 | `format` | int | 1. A loader refuses a format it does not know. |
 | `title_id` | string | 8 upper-case hex digits, = the directory name. |
 | `title` | string | The XBE's title name, for display. |
-| `xbe_sha256` | hex | The XBE the pack was built from. The app compares it with the game folder's `default.xbe`. |
+| `xbe_sha256` | hex | The XBE the pack was built from. The app compares it with the game folder's `default.xbe` before a start ([When a pack is stale](#when-a-pack-is-stale)). |
 | `abi` | string | `arm64-v8a`. |
 | `shell_abi` | int | The shell ABI the pack was linked against. The shell exports its own integer; **the loader refuses a mismatch** (the app then offers to prepare again). |
-| `toolkit` | string | The toolkit commit (`git rev-parse HEAD`, or `tools/VERSION` in the assets), `unknown` if neither. |
+| `toolkit` | string | The toolkit commit (`git rev-parse HEAD`, or `tools/VERSION` in the assets), `unknown` if neither. Informative: the commit of the run that last relinked the pack. |
+| `toolkit_sha256` | hex | The toolkit digest (`tools/prepare/toolkit.py`) the pack was lifted with (XBA-127). The app compares it with its own ([When a pack is stale](#when-a-pack-is-stale)). Packs from before it lack it. |
 | `lib` | string | `libtitle.so`, relative to the pack directory. |
 | `lib_sha256`, `lib_size` | hex, int | Of `lib`. The loader checks both before dlopen. |
 | `entry` | string | `recomp_title_main`: `int recomp_title_main(const recomp_storage *)` (templates/new-game/src/main.c). |
@@ -113,7 +114,8 @@ The steps, each one subprocess (`python -m tools.<tool>`) or a pool of compiler 
 | 4 | `compile` | every C file to an object, largest first, cached | the object cache |
 | 5 | `pack` | `ld.lld` → `packs/<TID>.partial/libtitle.so`, `pack.json`, publish | `link` |
 
-Stamps live in `<work>/stamp.json` with the XBE's sha256 and the toolkit commit: another XBE or another toolkit
+Stamps live in `<work>/stamp.json` with the XBE's sha256 and the toolkit digest (`toolkit_sha256`, not the commit:
+an app update that changed only Java or the shell keeps the steps done; XBA-127): another XBE or another toolkit
 starts over; a redone step drops the stamps after it. Objects are written to a temp name and renamed. So a run killed
 at any point (SIGKILL included) loses at most the sub-step or the objects in flight.
 
@@ -215,12 +217,50 @@ The working directory does not matter; `python -m tools.prepare` needs the toolk
 (`PYTHONPATH=<toolkit root>`).
 
 **Toolkit tree** in the assets (read-only): `tools/` (Python, plus the data files the tools read: `tools/recomp/data/`, `tools/xbe_ident/engines.json`), `include/`, the headers of `src/` (`src/**/*.h`),
-`templates/new-game/`, `templates/runtime/` (the `recomp_types.h` the lifter copies next to the generated C), `profiles/`, and `tools/VERSION` (one line: the commit; written by the asset build, git-ignored).
+`templates/new-game/`, `templates/runtime/` (the `recomp_types.h` the lifter copies next to the generated C), `profiles/`, `tools/VERSION` (one line: the commit; written by the asset build, git-ignored), and `tools/TOOLKIT_SHA256` (the toolkit digest, written by the asset build). The patterns are in
+`tools/prepare/toolkit_tree.json`, read by both `android/app/build.gradle` (the zip) and `tools/prepare/toolkit.py`
+(the digest on a host).
 
 **status.json**: the service writes it from the progress lines for the UI and for a restart after the app was killed.
 Its format belongs to the app (prepare-app branch, `android/app`), not to this page; prepare never reads it.
 One Prepare runs at a time: a start for another title while one runs waits in `files/prepare/queue.json` (that
 title's status says `queued`) and starts when the running one ends, whatever its outcome (`PrepareService`).
+
+## When a pack is stale
+
+A valid pack (the checks above) can still be the wrong one (XBA-127). The launcher (`PackFreshness`) tells two cases
+apart:
+
+| Case | How it is seen | What the player gets |
+|---|---|---|
+| **Another XBE**: the folder now holds another revision or region of the disc under the same title ID | `xbe_sha256` ≠ SHA-256 of the game folder's `default.xbe` | The pack is **never run**. Home: « Another version of the game · prepare it again », the primary is **Prepare again**, a note says saves are kept. « Open the game directly » does not start it either. |
+| **Older toolkit**: the app was updated and its toolkit changed since the pack was lifted | `toolkit_sha256` ≠ the APK's digest (`assets/prepare/toolkit.zip.id`), or no `toolkit_sha256` at all | The pack **still plays** (its `shell_abi` matches, or it would not be valid). Home: « Prepared by an older version of the app », **Play** stays the primary and a quiet **Prepare again** sits next to it, with a note (about 20–30 min, saves kept). Never queued by itself: a Prepare blocks Play while it runs. |
+
+When both hold, another XBE wins. An unknown side is not a mismatch: a pack.json without `xbe_sha256` (or one that is not
+64 hex digits), an APK without the toolchain or without `toolkit.zip.id`. Saves are never touched in either case
+(they live in `files/save/`, the Prepare writes only `work/` and `packs/`); the old pack stays until the new one replaces
+it (atomic publish).
+
+**The XBE hash.** `default.xbe` only (a few MB; game data is never hashed), once per change of the file: the hash is
+kept for the process by path, size and mtime. Home hashes it on a worker thread and redraws when it does not match;
+Play and « Open the game directly » hash it on the spot when Home has not yet. The record's `xbe_sha256` (taken at
+import) is the fallback before that. The native loader does not compare it.
+
+**What « the toolkit changed » means.** Not the commit: a new APK whose commit changed only Java, the docs, the tests
+or the shell's `.c` files would otherwise send every player back to a 10–30 min Prepare for nothing. The toolkit digest
+is SHA-256 over the **toolkit tree** (above: the pipeline's Python, `tools/recomp/data`, the profiles, the title
+template, `include/` and the headers of `src/`), each file as `path NUL size NUL bytes` in path order; this is what
+ends up in a pack's bytes besides the player's XBE. What the shell's `.c` files change reaches packs without a Prepare
+(they call into `libmain.so`), and a change of that contract bumps `shell_abi`, which makes the pack invalid instead.
+The tree also holds Python that is not on the lift path (`tools/compat`, `tools/diff`, …): a change there asks for a
+Prepare that was not strictly needed; acceptable, and the tree stays one simple rule. The compiler (`libxbacc.so`, the
+sysroot) is not in it: a new clang does not make an old pack wrong.
+
+`android/app/build.gradle` computes the digest when it zips the toolkit and writes it into the zip
+(`tools/TOOLKIT_SHA256`) and beside it (`prepare/toolkit.zip.id`, which the launcher reads without opening the zip).
+`tools.prepare` reads `tools/TOOLKIT_SHA256` when there is one (the device), else computes the same digest from the
+checkout (`tools/prepare/toolkit.py`; `pytest tools/prepare/test_toolkit.py` checks the selection), writes it into
+`pack.json` and keys its stamps on it.
 
 ## Prepare again (XBA-74)
 

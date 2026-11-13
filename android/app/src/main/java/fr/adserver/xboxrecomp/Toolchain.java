@@ -135,6 +135,37 @@ final class Toolchain {
         return true;
     }
 
+    private static volatile String digestCache;
+    /** The assetsOverride the cached digest was read with (null: the APK's own assets). */
+    private static volatile AssetSource digestFrom;
+
+    /**
+     * The toolkit digest of this APK (XBA-127): the 64 hex digits of <toolkit zip>.id, which android/app/build.gradle
+     * writes next to toolkit.zip (tools/prepare/toolkit.py, the same value as tools/TOOLKIT_SHA256 inside it); "" when
+     * the APK has no toolkit or no digest (then no pack is judged by its toolkit). Read once per process.
+     */
+    static String toolkitDigest(Context c) {
+        AssetSource over = assetsOverride, a = assets(c);
+        String d = digestCache;
+        if (d != null && digestFrom == over)
+            return d;
+        d = "";
+        String zip = findAsset(a, Kind.TOOLKIT);
+        if (zip != null) {
+            try (InputStream in = a.open(zip + ".id")) {
+                byte[] b = new byte[128];
+                int n = in.read(b);
+                String s = n <= 0 ? "" : new String(b, 0, n, StandardCharsets.US_ASCII).trim().toLowerCase(Locale.ROOT);
+                if (LibraryScreen.isSha256(s))
+                    d = s;
+            } catch (IOException ignored) {
+            }
+        }
+        digestFrom = over;
+        digestCache = d;
+        return d;
+    }
+
     /** The Prepare feature is offered: the executables and the three zips are in this APK. */
     static boolean available(Context c) {
         return libsPresent(c) && assetsPresent(c);

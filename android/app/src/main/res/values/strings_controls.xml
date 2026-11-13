@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The Controls screen's remapping (XBA-131, PadMapping, docs/android/app-shell.md « Controls »). A file of its own so
+     that it does not collide with strings.xml edits. -->
+<resources>
+    <string name="CTL_GROUP_BUTTONS">Buttons</string>
+    <string name="CTL_GROUP_SYSTEM">Back, Start and stick presses</string>
+    <string name="CTL_GROUP_DPAD">D-pad</string>
+    <string name="CTL_GROUP_STICKS">Sticks</string>
+
+    <!-- The Xbox controller's controls (what the game gets). -->
+    <string name="XB_A">A</string>
+    <string name="XB_B">B</string>
+    <string name="XB_X">X</string>
+    <string name="XB_Y">Y</string>
+    <string name="XB_BLACK">Black</string>
+    <string name="XB_WHITE">White</string>
+    <string name="XB_LT">Left trigger</string>
+    <string name="XB_RT">Right trigger</string>
+    <string name="XB_BACK">Back</string>
+    <string name="XB_START">Start</string>
+    <string name="XB_LTHUMB">Left stick press</string>
+    <string name="XB_RTHUMB">Right stick press</string>
+    <string name="XB_DPAD_UP">D-pad up</string>
+    <string name="XB_DPAD_DOWN">D-pad down</string>
+    <string name="XB_DPAD_LEFT">D-pad left</string>
+    <string name="XB_DPAD_RIGHT">D-pad right</string>
+    <string name="XB_LSTICK">Left stick</string>
+    <string name="XB_RSTICK">Right stick</string>
+
+    <!-- The player's pad, as Android names its controls (by position). -->
+    <string name="SRC_SOUTH">A</string>
+    <string name="SRC_EAST">B</string>
+    <string name="SRC_WEST">X</string>
+    <string name="SRC_NORTH">Y</string>
+    <string name="SRC_L1">L1</string>
+    <string name="SRC_R1">R1</string>
+    <string name="SRC_L2">L2</string>
+    <string name="SRC_R2">R2</string>
+    <string name="SRC_L3">L3</string>
+    <string name="SRC_R3">R3</string>
+    <string name="SRC_SELECT">Select</string>
+    <string name="SRC_START">Start</string>
+    <string name="SRC_DPAD_UP">D-pad up</string>
+    <string name="SRC_DPAD_DOWN">D-pad down</string>
+    <string name="SRC_DPAD_LEFT">D-pad left</string>
+    <string name="SRC_DPAD_RIGHT">D-pad right</string>
+    <string name="SRC_LSTICK_UP">L stick up</string>
+    <string name="SRC_LSTICK_DOWN">L stick down</string>
+    <string name="SRC_LSTICK_LEFT">L stick left</string>
+    <string name="SRC_LSTICK_RIGHT">L stick right</string>
+    <string name="SRC_RSTICK_UP">R stick up</string>
+    <string name="SRC_RSTICK_DOWN">R stick down</string>
+    <string name="SRC_RSTICK_LEFT">R stick left</string>
+    <string name="SRC_RSTICK_RIGHT">R stick right</string>
+    <string name="SRC_NONE">Not used</string>
+    <string name="STICK_LEFT">Your left stick</string>
+    <string name="STICK_RIGHT">Your right stick</string>
+
+    <string name="CTL_LEAD">What the game gets from your pad. Left and right change the button. One mapping for every game and every pad; the launcher and the game\'s menu keep the usual buttons.</string>
+    <string name="CTL_ROW">The game\'s %1$s comes from %2$s on your pad.</string>
+    <string name="CTL_ROW_NONE">The game\'s %1$s is on no button.</string>
+    <string name="CTL_ROW_SHARED">%1$s also gives %2$s: one press, both.</string>
+    <string name="CTL_STICK_ROW">The game\'s %1$s follows %2$s.</string>
+    <string name="CTL_STICK_NONE">The game\'s %1$s stays centred.</string>
+    <string name="CTL_RESET">Reset controls</string>
+    <string name="CTL_RESET_DETAIL">Every button back to its usual place: L1 = Black, R1 = White, L2 and R2 = the triggers, Select = Back.</string>
+    <string name="CTL_RESET_DONE">Controls back to the usual buttons.</string>
+    <string name="CTL_CHANGED">%1$d changed</string>
+    <string name="MENU_CTL_REMAPPED">Your mapping</string>
+    <string name="MENU_CTL_REMAPPED_X">%1$d controls changed in the launcher\'s Controls; the list below is the usual one.</string>
+</resources>

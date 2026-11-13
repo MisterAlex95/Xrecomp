@@ -1338,6 +1338,24 @@ static void clear_surface(uint32_t param)
             return;
         if (!surf.color_valid && !rs.zeta_va)
             return;
+        /* A swizzled surface clears SET_CLEAR_RECT, as the CPU path below
+         * does (SSX 3's 128x128 shadow maps, cleared whole and drawn
+         * through a 124x124 clip): the back end clears the clip rectangle
+         * it is handed, so it is handed the clear rectangle. */
+        if (((s_gpu.format >> 8) & 0xF) == 2 && (s_gpu.clear_rect_set & 3) == 3) {
+            uint32_t sw = 1u << ((s_gpu.format >> 16) & 0xF);
+            uint32_t sh = 1u << ((s_gpu.format >> 24) & 0xF);
+            uint32_t x0 = s_gpu.clear_rect_h & 0xFFFF, x1 = (s_gpu.clear_rect_h >> 16) + 1;
+            uint32_t y0 = s_gpu.clear_rect_v & 0xFFFF, y1 = (s_gpu.clear_rect_v >> 16) + 1;
+            if (x1 > sw) x1 = sw;
+            if (y1 > sh) y1 = sh;
+            if (x0 >= x1 || y0 >= y1)
+                return;
+            surf.clip_x = x0;
+            surf.clip_y = y0;
+            surf.width = x1 - x0;
+            surf.height = y1 - y0;
+        }
         s_backend->clear(&surf, &rs, param, s_gpu.clear_color,
                          s_gpu.zstencil_clear);
         s_gpu.clears++;
@@ -4898,7 +4916,10 @@ gathered:
     if (!t)
         return 1;                       /* nothing to draw: done all the same */
     if (!s_backend->draw_program(&surf, &batch)) {
-        if (raw) {
+        /* The back end may have gone in the call: the GL back end
+         * unregisters itself when it cannot make its context (no GLES 3.0
+         * on the device), and the CPU path draws from then on. */
+        if (raw && s_backend && s_backend->draw_program) {
             raw = 0;                    /* declined as stored: send it gathered */
             goto retry;
         }

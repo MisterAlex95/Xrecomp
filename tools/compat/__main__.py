@@ -9,7 +9,7 @@ import subprocess
 import sys
 import time
 
-from tools.compat import STAGES
+from tools.compat import STAGES, device
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
@@ -37,8 +37,16 @@ def read_jsonl(path):
 
 
 LAUNCH_RE = re.compile(r"\[KERNEL\] launch of '([^']*)' is not this title")
-CRASH_RE = re.compile(r"(SIGSEGV|SIGBUS|SIGILL|SIGABRT|unhandled exception|access violation|"
+# "[SEH] unhandled exception ..." (XBA-112) is a guest raise nothing handled,
+# after which the title goes on: not the crash, so not its detail.
+CRASH_RE = re.compile(r"(SIGSEGV|SIGBUS|SIGILL|SIGABRT|(?<!\[SEH\] )unhandled exception|access violation|"
                       r"\[FAULT\][^\n]*|fault at [^\n]*)", re.I)
+# A lifted div/idiv's #DE that no guest handler took: the runtime reports it
+# and bugchecks (0x1E), kernel_hal.c recomp_divide_error.
+DE_RE = re.compile(r"\[#DE\] integer divide error at (0x[0-9A-Fa-f]+): ([a-z ]+) \(status 0x[0-9A-Fa-f]+\)"
+                   r"[^\n]*-- ([^\n]*?), stopping")
+# A guest exception nothing handled (xbox_seh.c): the raise returns.
+SEH_UNHANDLED_RE = re.compile(r"\[SEH\] unhandled exception (0x[0-9A-Fa-f]{8}) at (0x[0-9A-Fa-f]{8})")
 UNIMPL_RE = re.compile(r"\[UNIMPL\] untranslated instruction REACHED: `([^`]*)` at (0x[0-9A-Fa-f]+)")
 
 
@@ -94,6 +102,14 @@ def classify(status, presses_ms, exit_info, run_s, sustain_s, log_text="", disco
             if addressed:
                 d = addressed[-1]
                 blocker += "; last discovery: %s %s" % (d.get("t"), d.get("va"))
+    # The guest's exceptions (XBA-110 x XBA-112), with the same words on the
+    # device (tools/compat/device.py grades through this function).
+    de = DE_RE.search(log_text or "")
+    seh = SEH_UNHANDLED_RE.search(log_text or "")
+    if blocker and de and not launch:
+        blocker += "; divide error at %s: %s (%s)" % (de.group(1), de.group(2), de.group(3))
+    elif blocker and seh and not launch and not blocker.startswith("crash"):
+        blocker += "; unhandled guest exception %s at %s" % (seh.group(1), seh.group(2))
     if blocker is None and stage != "sustained":
         blocker = {"boots": "nothing lit on screen", "renders": "no response to the pad",
                    "responsive": "not sustained"}.get(stage)
@@ -323,11 +339,14 @@ def report(results):
     last = {}
     for r in results:
         last[r.get("title_id") or r.get("source")] = r
-    rows = ["| Title | Stage | Best of runs | Blocker | XDK | Toolkit |", "|---|---|---|---|---|---|"]
+    on_device = any(r.get("device") for r in results)
+    rows = ["| Title | Stage | Best of runs | Blocker | XDK | Toolkit |" + (" Device |" if on_device else ""),
+            "|---|---|---|---|---|---|" + ("---|" if on_device else "")]
     for k, r in sorted(last.items(), key=lambda kv: -STAGES.index(kv[1].get("stage", "none"))):
         rows.append("| %s | %s | %s | %s | %s | %s |" % (
             r.get("source", k), r.get("stage"), r.get("best", r.get("stage")),
-            (r.get("blocker") or "").replace("|", "/"), r.get("xdk") or "", r.get("toolkit", "")))
+            (r.get("blocker") or "").replace("|", "/"), r.get("xdk") or "", r.get("toolkit", ""))
+            + (" %s |" % device.device_label(r).replace("|", "/") if on_device else ""))
     return "\n".join(rows)
 
 
@@ -365,6 +384,7 @@ def matrix(results):
     before), and the regressions."""
     by = history(results)
     rows, counts = [], {s: 0 for s in STAGES}
+    on_device = any(r.get("device") for r in results)    # lines from the app (XBA-130): a Device column
     for k, runs in sorted(by.items(), key=lambda kv: (-STAGES.index(kv[1][-1].get("stage", "none")),
                                                       str(kv[1][-1].get("source", kv[0])).lower())):
         last = runs[-1]
@@ -379,13 +399,15 @@ def matrix(results):
             str(last.get("source", k)).replace("|", "/"), last.get("title_id") or "", stage, change,
             (last.get("blocker") or "").replace("|", "/"), last.get("xdk") or "",
             ", ".join(l for l in (last.get("layers") or []) if l.startswith("engines/")) or "",
-            "%s %s" % (last.get("toolkit", ""), (last.get("time") or "")[:10])))
+            "%s %s" % (last.get("toolkit", ""), (last.get("time") or "")[:10]))
+            + (" %s |" % device.device_label(last).replace("|", "/") if on_device else ""))
     total = sum(counts.values()) or 1
     out = ["**%d titles.** " % sum(counts.values()) + "; ".join(
                "%s: %d (%d %%)" % (s, counts[s], counts[s] * 100 // total) for s in reversed(STAGES) if counts[s]),
            "",
-           "| Title | Title ID | Stage | Since the run before | Blocker | XDK | Engine | Toolkit, date |",
-           "|---|---|---|---|---|---|---|---|"] + rows
+           "| Title | Title ID | Stage | Since the run before | Blocker | XDK | Engine | Toolkit, date |"
+           + (" Device |" if on_device else ""),
+           "|---|---|---|---|---|---|---|---|" + ("---|" if on_device else "")] + rows
     reg = regressions(results)
     out += ["", "**Regressions** (a Bug each): " + ("none" if not reg else "; ".join(
         "%s %s -> %s (%s -> %s)" % (r["source"], r["from"], r["to"], r["toolkit_from"], r["toolkit_to"])
@@ -440,7 +462,11 @@ def main(argv=None):
     q.add_argument("results")
     q.add_argument("--project", default="XBA")
     q.add_argument("--dry-run", action="store_true")
+    g = sub.add_parser("grade", help="grade a run made elsewhere (the app's library check), append its line")
+    device.add_arguments(g)
     a = ap.parse_args(argv)
+    if a.cmd == "grade":
+        return device.grade_cmd(a)
     if a.cmd == "report":
         res = read_jsonl(a.results)
         print(matrix(res) if a.matrix else report(res))

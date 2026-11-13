@@ -4,10 +4,12 @@
 
 #include <stdint.h>
 
-/* With RECOMP_GPU set (and not "0"), register the GL back end with the
- * executor. Call before the title submits work, from any thread: the GL
- * context itself is created on the executor thread at its first call.
- * Returns 1 if the back end was registered. */
+/* With RECOMP_GPU set (and not "0"), or unset on Android (the GL back end
+ * is the default there; RECOMP_GPU=0 keeps the CPU rasteriser), register
+ * the GL back end with the executor. Call before the title submits work,
+ * from any thread: the GL context itself is created on the executor thread
+ * at its first call, and if it cannot be made the back end unregisters and
+ * the CPU rasteriser draws. Returns 1 if the back end was registered. */
 int nv2a_gl_install_from_env(void);
 
 /* The window's drawable size in real (HiDPI) pixels. The SDL presenter

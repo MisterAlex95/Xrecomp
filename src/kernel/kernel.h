@@ -868,6 +868,7 @@ typedef struct {
     long max_turn_us, max_wait_us;
     int max_turn_kind;                  /* XBOX_GUEST_CPU_* */
     uint32_t max_turn_where;
+    long poll_takes;    /* of the waits, ones that took the CPU at the waiter's own 2 ms look, not on a wake */
 } XboxGuestCpuStats;
 void     xbox_GuestCpuStatsGet(XboxGuestCpuStats *out, int reset);
 void     xbox_GuestCpuReport(void);     /* the [GUEST] line, once per 600 vblanks */

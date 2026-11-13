@@ -78,7 +78,7 @@ import fr.adserver.xboxrecomp.Widgets.MenuRow;
  *   (or Prepare, Choose…) and three quiet pills, Settings, Controls, Manage;
  * - SETTINGS: four tabs (General, Graphics, Audio, Advanced): the launcher's preferences and a few RECOMP_* options
  *   saved to recomp.cfg (RecompConfig), applied at the next start; About ends Advanced;
- * - CONTROLS: the device's buttons and the Xbox controller buttons the game gets;
+ * - CONTROLS: the remapping of the pad (PadMapping, RECOMP_PAD_MAP in recomp.cfg), one row per Xbox control;
  * - GAME_DATA (« Manage »): change game, delete the imported copy and the game's stored things; ABOUT (X: LICENCES,
  *   the licence texts the APK carries, assets/licences/);
  * - PREPARE: Home's layout with the on-device Prepare's progress (dimmed after two idle minutes, for OLED screens).
@@ -301,6 +301,13 @@ public class LauncherActivity extends Activity {
             restartGame();
             return;
         }
+        if (savedInstanceState == null && LibraryCheck.active(getFilesDir())) {
+            // A library check runs (XBA-130): its screen, also when a checked game left by itself.
+            Log.i(TAG, "launcher: a library check runs, showing it");
+            startActivity(CheckActivity.intent(this).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+            finish();
+            return;
+        }
         boolean change = ACTION_CHOOSE_GAME.equals(action);
         boolean showLauncher = ACTION_SHOW_LAUNCHER.equals(action);
         String noData = in.getStringExtra(EXTRA_NO_GAME_DATA);
@@ -342,7 +349,7 @@ public class LauncherActivity extends Activity {
                 resumeShell();
                 return;
             }
-            if (GameStore.autoStart(this) && selectedIsLaunched()) {
+            if (GameStore.autoStart(this) && selectedIsLaunched() && !xbeChanged()) {
                 Log.i(TAG, "launcher: game ready and « open directly » on, starting it");
                 launchShell(false);
                 return;
@@ -1314,8 +1321,10 @@ public class LauncherActivity extends Activity {
     /** What the description column shows (tests). */
     String descriptionForTest() {
         StringBuilder b = new StringBuilder();
-        for (int i = 0; desc != null && i < desc.getChildCount(); i++)
-            b.append(i == 0 ? "" : "\n\n").append(((TextView)desc.getChildAt(i)).getText());
+        for (int i = 0; desc != null && i < desc.getChildCount(); i++) {
+            if (desc.getChildAt(i) instanceof TextView)   // Controls draws a pad below its text
+                b.append(b.length() == 0 ? "" : "\n\n").append(((TextView)desc.getChildAt(i)).getText());
+        }
         return b.toString();
     }
 
@@ -1597,6 +1606,11 @@ public class LauncherActivity extends Activity {
         LinearLayout info = hero(title, st == State.NONE);
         String tid = st == State.NONE ? null : titleId();
         SelfHeal.State heal = st == State.READY && !preparing && tid != null ? selfHeal(tid, running, prep) : null;
+        // XBA-127: another default.xbe than the pack's (never run), or a pack from an older toolkit (still plays).
+        if (st == State.READY)
+            xbeShaLater(dir, tid);
+        boolean otherXbe = st == State.READY && preparing && prep == Prep.NEEDED && otherXbe(tid);
+        boolean olderToolkit = st == State.READY && prep == Prep.PLAYABLE && heal == null && olderToolkit(tid);
 
         // The one line: the state when it is not « Ready », else when it was last played.
         String statusText = null;
@@ -1616,8 +1630,9 @@ public class LauncherActivity extends Activity {
                 statusColor = Theme.ERROR;
                 break;
             default:
-                statusText = getString(R.string.HOME_NEEDS_PREPARE, getString(R.string.CHIP_NEEDS_PREPARE),
-                                       estimate());
+                statusText = otherXbe ? getString(R.string.HOME_OTHER_XBE)
+                                      : getString(R.string.HOME_NEEDS_PREPARE, getString(R.string.CHIP_NEEDS_PREPARE),
+                                                  estimate());
                 statusColor = Theme.WARN;
                 break;
             }
@@ -1628,6 +1643,10 @@ public class LauncherActivity extends Activity {
             statusText = heal.offer == SelfHeal.Offer.PREPARE_AGAIN ? getString(R.string.HOME_CRASHED_FINDS, heal.seeds)
                                                                   : getString(R.string.HOME_NEEDS_FIX);
             statusColor = heal.offer == SelfHeal.Offer.PREPARE_AGAIN ? Theme.WARN : Theme.ERROR;
+            heroLine(info, statusText, statusColor);
+        } else if (olderToolkit) {
+            statusText = getString(R.string.HOME_OLDER_TOOLKIT);
+            statusColor = Theme.WARN;
             heroLine(info, statusText, statusColor);
         } else if (st == State.READY) {
             Library.Record rec = rec();
@@ -1651,7 +1670,7 @@ public class LauncherActivity extends Activity {
             homePrep = prep;
         } else if (preparing) {
             int t = prep == Prep.RUNNING ? R.string.PREPARING : prep == Prep.FAILED ? R.string.PREPARE_SEE_WHY
-                    : R.string.PREPARE;
+                    : otherXbe ? R.string.PREPARE_AGAIN : R.string.PREPARE;
             play = pill(buttons, null, getString(t), true, this::onPlay);
             homePrep = prep;
         } else if (heal != null && heal.offer == SelfHeal.Offer.PREPARE_AGAIN) {
@@ -1661,6 +1680,8 @@ public class LauncherActivity extends Activity {
         } else {
             play = pill(buttons, Icon.PLAY, getString(R.string.PLAY), true, this::onPlay);
             play.setDim(st != State.READY);
+            if (olderToolkit)   // offered, never forced: Play stays first (a Prepare takes 10-30 min)
+                pill(buttons, null, getString(R.string.PREPARE_AGAIN), false, this::onPrepareNewToolkit);
         }
         homePrimary = play;
         homePills(buttons);
@@ -1680,6 +1701,8 @@ public class LauncherActivity extends Activity {
 
         if (preparing && prep == Prep.INTERRUPTED)
             setNote(getString(R.string.PREPARE_INTERRUPTED), NOTE_WARN);
+        else if (otherXbe)
+            setNote(getString(R.string.HOME_OTHER_XBE_NOTE), NOTE_WARN);
         else if (heal != null && heal.offer == SelfHeal.Offer.PREPARE_AGAIN)
             setNote(getString(R.string.HOME_PREPARE_AGAIN_NOTE), NOTE_WARN);
         else if (heal != null)
@@ -1688,6 +1711,8 @@ public class LauncherActivity extends Activity {
             setNote(getString(R.string.GAME_RUNNING_HOME), NOTE_INFO);
         else if (running && st == State.READY)
             setNote(getString(R.string.LIB_OTHER_RUNNING, runningTitle()), NOTE_INFO);
+        else if (olderToolkit)
+            setNote(getString(R.string.HOME_OLDER_TOOLKIT_NOTE, estimate()), NOTE_INFO);
         else if (st == State.READY && !preparing && (rec() != null ? rec().lastPlayed : GameStore.lastPlayed(this)) <= 0)
             setNote(getString(R.string.HOME_LEAD_READY), NOTE_INFO);   // before the first play: where the menu is
     }
@@ -1752,6 +1777,10 @@ public class LauncherActivity extends Activity {
             }
             if (p != Prep.OFF && p != Prep.PLAYABLE) {
                 startPrepare();
+                return;
+            }
+            if (xbeChanged()) {   // XBA-127: Home now says so and offers Prepare again
+                show(Screen.HOME, 0);
                 return;
             }
             if (!confirmSwitch())
@@ -1895,13 +1924,19 @@ public class LauncherActivity extends Activity {
         switchingTab = false;
     }
 
-    /** Frame cap and Resolution only apply to the GPU renderer: dimmed (still changeable) otherwise. */
+    /**
+     * Frame cap and Resolution only apply to the GPU renderer: dimmed (still changeable) otherwise. Auto is the GPU
+     * renderer (the runtime's default on Android, XBA-119) unless the game's pack forces RECOMP_GPU=0, which wins
+     * over any choice here.
+     */
     private void refreshRendererDims() {
-        boolean gpu = false;
+        String tid = titleId();
+        boolean gpu = tid == null || !Pack.forcesOff(getFilesDir(), tid, "RECOMP_GPU");
         for (RecompConfig.Option o : RecompConfig.OPTIONS) {
             if (o.title == R.string.OPT_GPU) {
                 int i = cfg.choiceIndex(o);
-                gpu = i >= 0 && o.choices[i].label == R.string.VAL_GPU_GL;
+                if (i >= 0 && o.choices[i].label == R.string.VAL_GPU_CPU)
+                    gpu = false;
             }
         }
         for (java.util.Map.Entry<RecompConfig.Option, MenuRow> e : optionRows.entrySet()) {
@@ -2357,8 +2392,76 @@ public class LauncherActivity extends Activity {
 
     /** The pack of tid was built from the selected game's default.xbe (as far as both say: LibraryScreen). */
     private boolean packMatchesSelected(String tid) {
+        return LibraryScreen.packMatches(getFilesDir(), tid, selectedXbeSha());
+    }
+
+    // ---- A pack that no longer matches (XBA-127, PackFreshness) ------------------------------------------------
+
+    /**
+     * The selected game's default.xbe hash as far as known without reading it: hashed in this process and unchanged
+     * since (PackFreshness), else the record's (taken at import), else null.
+     */
+    private String selectedXbeSha() {
+        String d = gameDir();
+        String sha = d == null ? null : PackFreshness.knownXbeSha(GameStore.findXbe(new File(d)));
+        if (sha != null)
+            return sha;
         Library.Record r = rec();
-        return r == null || LibraryScreen.packMatches(getFilesDir(), tid, r.xbeSha256);
+        return r == null ? null : r.xbeSha256;
+    }
+
+    /** The pack of tid was built from another default.xbe than the selected game's (as far as known now). */
+    private boolean otherXbe(String tid) {
+        return tid != null && Toolchain.available(this)
+               && PackFreshness.of(getFilesDir(), tid, selectedXbeSha(), null) == PackFreshness.Verdict.OTHER_XBE;
+    }
+
+    /** The valid pack of tid was lifted by an older toolkit than this APK's (it still plays). */
+    private boolean olderToolkit(String tid) {
+        return tid != null && PackFreshness.of(getFilesDir(), tid, selectedXbeSha(), Toolchain.toolkitDigest(this))
+                              == PackFreshness.Verdict.OLDER_TOOLKIT;
+    }
+
+    /**
+     * Before a start: hashes the selected game's default.xbe (once per change of the file, a few MB) and says whether
+     * the pack was built from another one. Such a pack is never run: Home offers Prepare again.
+     */
+    private boolean xbeChanged() {
+        String tid = titleId(), d = gameDir();
+        if (tid == null || d == null || !Toolchain.available(this))
+            return false;
+        PackFreshness.xbeSha(GameStore.findXbe(new File(d)));
+        boolean other = otherXbe(tid);
+        if (other)
+            Log.w(TAG, "launcher: " + tid + "'s pack was built from another default.xbe ("
+                       + Pack.xbeSha256(getFilesDir(), tid) + "), not starting it");
+        return other;
+    }
+
+    private String xbeHashDir;
+
+    /** On Home: the same hash on a worker thread, so that a changed default.xbe shows before Play is pressed. */
+    private void xbeShaLater(String dir, String tid) {
+        if (dir == null || tid == null || dir.equals(xbeHashDir) || !Toolchain.available(this))
+            return;
+        File xbe = GameStore.findXbe(new File(dir));
+        if (xbe == null || PackFreshness.knownXbeSha(xbe) != null)
+            return;
+        xbeHashDir = dir;
+        new Thread(() -> {
+            PackFreshness.xbeSha(xbe);
+            runOnUiThread(() -> {
+                xbeHashDir = null;
+                if (screen == Screen.HOME && dir.equals(gameDir()) && otherXbe(tid))
+                    refreshKeepingFocus();
+            });
+        }, "xba-xbe-sha").start();
+    }
+
+    /** « Prepare again » for a pack lifted by an older toolkit: a plain Prepare (the game does not start after it). */
+    private void onPrepareNewToolkit() {
+        Log.i(TAG, "launcher: prepare again with the new toolkit " + titleId());
+        startPrepare();
     }
 
     /**
@@ -3134,6 +3237,8 @@ public class LauncherActivity extends Activity {
         sheetRow(getString(R.string.LIB_FOLDER_TILE), this::onChooseLibraryFolder)
                 .setValue(tree == null ? getString(R.string.LIB_FOLDER_NONE)
                           : path != null ? new File(path).getName() : getString(R.string.LIB_FOLDER_SAF));
+        if (Toolchain.available(this))   // XBA-130: prepares and boots every game, a report
+            sheetRow(getString(R.string.CHECK_LIBRARY), () -> startActivity(CheckActivity.intent(this)));
         sheetRow(getString(R.string.SETTINGS), () -> go(Screen.SETTINGS));
         sheetRow(getString(R.string.ABOUT), () -> go(Screen.ABOUT));
         sheetReady();
@@ -3269,49 +3374,139 @@ public class LauncherActivity extends Activity {
 
     // ---- CONTROLS ----------------------------------------------------------------------------------------------
 
+    /** The mapping the Controls screen edits (RECOMP_PAD_MAP in recomp.cfg, read when the screen is built). */
+    private PadMapping padMap = new PadMapping();
+
+    PadMapping padMapForTest() {
+        return padMap;
+    }
+
     /**
-     * The device's buttons and the Xbox controller buttons the game gets: the SDL game controller mapping of
-     * src/input/xinput_device.c (L1 = Black, R1 = White, L2 / R2 = the triggers, Select = Back, stick presses = the
-     * thumbstick buttons), and the shell's own Android Back, which opens the in-game menu (GameMenu).
+     * Controls (XBA-131): one mapping for every title and every pad, RECOMP_PAD_MAP in recomp.cfg (PadMapping), read
+     * by src/input/xinput_device.c at the game's start. One row per Xbox control, its value the player's button
+     * (left / right or A step it, as in Settings), grouped; the sticks; « Reset controls » (also Y). The description
+     * column says what the focused row does and draws the player's pad with what each control gives the game. The
+     * launcher's own navigation and the in-game menu keep the usual buttons (Android key events, not the game's pad).
      */
     private void buildControls() {
         screenTitle.setText(R.string.CONTROLS);
-        LinearLayout h = rowLayout();
-        Widgets.PadDiagram pad = new Widgets.PadDiagram(this);
-        int[] labels = { R.string.PAD_L1, R.string.PAD_L2, R.string.PAD_R1, R.string.PAD_R2, R.string.PAD_SELECT,
-                         R.string.PAD_START, R.string.PAD_DPAD, R.string.PAD_LSTICK, R.string.PAD_RSTICK,
-                         R.string.PAD_FACE, R.string.PAD_SCREEN };
-        for (int i = 0; i < labels.length; i++)
-            pad.labels[i] = getString(labels[i]);
-        h.addView(pad, lp(0, MATCH, 1));
-
-        // Your button, and the Xbox button the game gets: two quiet columns.
-        LinearLayout col = column();
-        int[][] rows = { { R.string.CTL_FACE, R.string.CTL_FACE_X }, { R.string.CTL_L1, R.string.CTL_L1_X },
-                         { R.string.CTL_R1, R.string.CTL_R1_X }, { R.string.CTL_TRIGGERS, R.string.CTL_TRIGGERS_X },
-                         { R.string.CTL_START, R.string.CTL_START_X }, { R.string.CTL_SELECT, R.string.CTL_SELECT_X },
-                         { R.string.CTL_DPAD, R.string.CTL_DPAD_X }, { R.string.CTL_STICKS, R.string.CTL_STICKS_X },
-                         { R.string.CTL_MENU, R.string.CTL_MENU_X } };
-        for (int[] r : rows) {
-            LinearLayout line = rowLayout();
-            line.addView(Theme.oneLine(Theme.text(this, Theme.T_BODY, Theme.MEDIUM, Theme.TEXT, getString(r[0]))),
-                         lp(220, WRAP));
-            TextView x = Theme.text(this, Theme.T_BODY, Theme.REGULAR, Theme.TEXT_DIM, getString(r[1]));
-            x.setMaxLines(2);
-            line.addView(x, lp(0, WRAP, 1));
-            LinearLayout.LayoutParams p = lp(MATCH, WRAP);
-            p.bottomMargin = Theme.S2;
-            col.addView(line, p);
+        cfg = RecompConfig.load(GameStore.externalFilesDir(this));
+        padMap = PadMapping.load(cfg);
+        LinearLayout list = listTemplate();
+        PadMapping.Source[] sources = PadMapping.Source.values();
+        String[] sourceLabels = new String[sources.length];
+        for (int i = 0; i < sources.length; i++)
+            sourceLabels[i] = getString(ControlsLabels.source(sources[i]));
+        for (int g = 0; g < ControlsLabels.GROUPS.length; g++) {
+            listLabel(list, getString(ControlsLabels.GROUPS[g]));
+            for (PadMapping.Control c : ControlsLabels.GROUP_ROWS[g]) {
+                MenuRow r = settingRow(list, getString(ControlsLabels.control(c)), "");
+                r.setChoices(sourceLabels);
+                r.setValue(getString(ControlsLabels.source(padMap.get(c))));
+                r.cycler = d -> {
+                    padMap.step(c, d);
+                    r.setValue(getString(ControlsLabels.source(padMap.get(c))));
+                    saveControls();
+                    feedback.play(UiFeedback.Cue.MOVE, r);
+                    controlDetail(c);
+                };
+                r.setOnClickListener(v -> r.cycler.step(1));
+                onFocus(r, () -> controlDetail(c));
+            }
         }
-        TextView foot = Theme.body(this, getString(R.string.CONTROLS_FOOTER));
-        LinearLayout.LayoutParams fl = lp(MATCH, WRAP);
-        fl.topMargin = Theme.S3;
-        col.addView(foot, fl);
-        LinearLayout.LayoutParams cl = lp(Theme.DESC_W, MATCH);
-        cl.leftMargin = Theme.S5;
-        h.addView(col, cl);
-        body.addView(h, new FrameLayout.LayoutParams(MATCH, MATCH));
+        listLabel(list, getString(R.string.CTL_GROUP_STICKS));
+        PadMapping.Stick[] sticks = PadMapping.Stick.values();
+        String[] stickLabels = new String[sticks.length];
+        for (int i = 0; i < sticks.length; i++)
+            stickLabels[i] = getString(ControlsLabels.stick(sticks[i]));
+        for (int side = 0; side < 2; side++) {
+            boolean left = side == 0;
+            int name = left ? R.string.XB_LSTICK : R.string.XB_RSTICK;
+            MenuRow r = settingRow(list, getString(name), "");
+            r.setChoices(stickLabels);
+            r.setValue(getString(ControlsLabels.stick(left ? padMap.leftStick : padMap.rightStick)));
+            r.cycler = d -> {
+                if (left)
+                    padMap.leftStick = PadMapping.stepStick(padMap.leftStick, d);
+                else
+                    padMap.rightStick = PadMapping.stepStick(padMap.rightStick, d);
+                r.setValue(getString(ControlsLabels.stick(left ? padMap.leftStick : padMap.rightStick)));
+                saveControls();
+                feedback.play(UiFeedback.Cue.MOVE, r);
+                stickDetail(left);
+            };
+            r.setOnClickListener(v -> r.cycler.step(1));
+            onFocus(r, () -> stickDetail(left));
+        }
+        MenuRow reset = listRow(list, getString(R.string.CTL_RESET), getString(R.string.CTL_RESET_DETAIL),
+                                this::resetControls);
+        onFocus(reset, () -> controlsDescribe(getString(R.string.CTL_RESET_DETAIL)));
+        controlsDescribe(getString(R.string.CTL_LEAD));
+        changedCount();
+        yAction = this::resetControls;
+        addHint("A", R.string.HINT_CHANGE, this::clickFocused);
+        addHint("Y", R.string.HINT_DEFAULTS, this::resetControls);
         addHint("B", R.string.HINT_BACK, this::back);
+    }
+
+    /** The focused control's line: where it comes from, and which other control shares that button. */
+    private void controlDetail(PadMapping.Control c) {
+        String name = getString(ControlsLabels.control(c));
+        PadMapping.Source s = padMap.get(c);
+        String text = s == PadMapping.Source.NONE ? getString(R.string.CTL_ROW_NONE, name)
+                      : getString(R.string.CTL_ROW, name, getString(ControlsLabels.source(s)));
+        java.util.List<PadMapping.Control> shared = padMap.sharing(c);
+        if (!shared.isEmpty()) {
+            StringBuilder b = new StringBuilder();
+            for (PadMapping.Control o : shared)
+                b.append(b.length() == 0 ? "" : ", ").append(getString(ControlsLabels.control(o)));
+            text += " " + getString(R.string.CTL_ROW_SHARED, getString(ControlsLabels.source(s)), b);
+        }
+        controlsDescribe(text);
+    }
+
+    private void stickDetail(boolean left) {
+        String name = getString(left ? R.string.XB_LSTICK : R.string.XB_RSTICK);
+        PadMapping.Stick s = left ? padMap.leftStick : padMap.rightStick;
+        controlsDescribe(s == PadMapping.Stick.NONE ? getString(R.string.CTL_STICK_NONE, name)
+                                                    : getString(R.string.CTL_STICK_ROW, name,
+                                                                getString(ControlsLabels.stick(s))));
+    }
+
+    /** The description column of Controls: the text, then the player's pad with what each control gives the game. */
+    private void controlsDescribe(String text) {
+        describe(text);
+        if (desc == null)
+            return;
+        Widgets.PadDiagram pad = new Widgets.PadDiagram(this);
+        pad.bodyFrac = 0.42f;   // room for the callouts in the narrow column
+        String[] labels = ControlsLabels.diagram(this, padMap);
+        System.arraycopy(labels, 0, pad.labels, 0, labels.length);
+        LinearLayout.LayoutParams p = lp(MATCH, 0, 1);
+        p.topMargin = Theme.S3;
+        desc.addView(pad, p);
+    }
+
+    /** « 3 changed » top right while the mapping is not the usual one. */
+    private void changedCount() {
+        int n = padMap.changedCount();
+        topRight.setText(n == 0 ? "" : getString(R.string.CTL_CHANGED, n));
+    }
+
+    private void saveControls() {
+        padMap.store(cfg);
+        saveSettings();
+        changedCount();
+        Log.i(TAG, "launcher: controls " + (padMap.isDefault() ? "(default)" : padMap.format()));
+    }
+
+    /** Y, or « Reset controls »: the usual mapping (the line goes from recomp.cfg). */
+    private void resetControls() {
+        padMap.reset();
+        padMap.store(cfg);
+        saveSettings();
+        show(Screen.CONTROLS, 0);
+        setNote(getString(R.string.CTL_RESET_DONE), NOTE_OK);
     }
 
     // ---- STORAGE (docs/android/app-shell.md « Game library », Storage) -------------------------------------------

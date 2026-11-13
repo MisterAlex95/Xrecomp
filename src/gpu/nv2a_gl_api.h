@@ -2,7 +2,10 @@
  *
  *   macOS    OpenGL 4.1 core from the system framework, headless CGL context
  *   Android  OpenGL ES 3.0 (libGLESv3), EGL pbuffer context
- *   Linux    desktop GL through libepoxy, EGL (pbuffer or surfaceless)
+ *   Linux    desktop GL through libepoxy, EGL (pbuffer or surfaceless);
+ *            with NV2A_GL_FORCE_ES=1 (test builds) the GLES 3.0 path of
+ *            Android, through libepoxy on an EGL ES context, so the tests
+ *            run what the device runs on a host without one
  *
  * One code path for all three: nv2a_gl.c uses only what GL 3.3 core and
  * GLES 3.0 have in common, and asks at run time for the rest (S3TC, depth
@@ -16,6 +19,9 @@
 #define NV2A_GL_ES 0
 #elif defined(__ANDROID__)
 #include <GLES3/gl3.h>
+#define NV2A_GL_ES 1
+#elif defined(NV2A_GL_FORCE_ES) && NV2A_GL_FORCE_ES
+#include <epoxy/gl.h>
 #define NV2A_GL_ES 1
 #else
 #include <epoxy/gl.h>

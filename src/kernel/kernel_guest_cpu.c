@@ -99,6 +99,7 @@ static XBOX_THREAD_LOCAL uint32_t t_soft_where;
 
 /* The window's counters (xbox_GuestCpuReport resets them). */
 static volatile LONG s_turns, s_releases, s_switches, s_waits, s_preempts;
+static volatile LONG s_poll_takes;   /* waits that ended at a poll, not on a wake */
 static volatile LONG s_max_turn_us, s_max_wait_us;
 static volatile LONG s_max_turn_kind, s_max_turn_where;
 static volatile LONG s_trace_lines;
@@ -219,6 +220,7 @@ static void guest_cpu_acquire(int barge)
 {
     unsigned my;
     uint64_t t0 = 0;
+    BOOL woken = TRUE;      /* the last wait ended on a wake, not at its timeout */
 
     EnterCriticalSection(&s_lock);
     if (s_free && !s_granted && (barge || !s_waiting)) {
@@ -230,7 +232,7 @@ static void guest_cpu_acquire(int barge)
         if (barge && !s_free)
             preempt_set(1);
         while (!(s_free && my == s_head)) {
-            SleepConditionVariableCS(&s_cv, &s_lock, GUEST_CPU_POLL_MS);
+            woken = SleepConditionVariableCS(&s_cv, &s_lock, GUEST_CPU_POLL_MS);
             /* Ask the holder to hand over at its next loop back edge
              * (RECOMP_BACK_EDGE) or kernel call: a woken thread at once,
              * a queued one past the quantum (the console's timer tick).
@@ -240,6 +242,8 @@ static void guest_cpu_acquire(int barge)
                 && (barge || xbox_HostNowNs() - t0 >= s_quantum_ns))
                 preempt_set(1);
         }
+        if (!woken)
+            InterlockedIncrement(&s_poll_takes);
         s_free = 0;
         s_granted = 0;
         s_head++;
@@ -462,6 +466,7 @@ void xbox_GuestCpuStatsGet(XboxGuestCpuStats *out, int reset)
     out->max_wait_us = GC_TAKE(s_max_wait_us);
     out->max_turn_kind = (int)GC_TAKE(s_max_turn_kind);
     out->max_turn_where = (uint32_t)GC_TAKE(s_max_turn_where);
+    out->poll_takes = GC_TAKE(s_poll_takes);
 #undef GC_TAKE
 }
 

@@ -1337,6 +1337,8 @@ final class Widgets {
     static final class PadDiagram extends View {
         /** Labels, in order: L1, L2, R1, R2, Select, Start, D-pad, left stick, right stick, face buttons, screen. */
         String[] labels = new String[11];
+        /** The body's width, a fraction of the view's (narrower in the Controls screen's description column). */
+        float bodyFrac = 0.52f;
         private final Paint bodyP = fill(Theme.opaque(Theme.PANEL)), lineP = stroke(Theme.alpha(Theme.TEXT, 0.22f), 2.5f);
         private final Paint ctlP = fill(Theme.blend(Theme.PANEL_HI, Theme.LINE, 0.65f)), ctlLine = stroke(Theme.alpha(Theme.TEXT, 0.35f), 2);
         private final Paint screenP = fill(Theme.BG_BOTTOM), accentP = stroke(Theme.alpha(Theme.ACCENT, 0.75f), 2);
@@ -1374,7 +1376,7 @@ final class Widgets {
         @Override
         protected void onDraw(Canvas c) {
             float w = getWidth(), h = getHeight();
-            float bw = Math.min(w * 0.52f, 640), bh = bw * 0.48f;
+            float bw = Math.min(w * bodyFrac, 640), bh = bw * 0.48f;
             float bx = (w - bw) / 2, by = h * 0.30f;
             // shoulders
             float sw = bw * 0.2f;

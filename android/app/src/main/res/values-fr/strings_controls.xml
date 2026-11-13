@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="CTL_GROUP_BUTTONS">Boutons</string>
+    <string name="CTL_GROUP_SYSTEM">Back, Start et appuis sur les sticks</string>
+    <string name="CTL_GROUP_DPAD">Croix</string>
+    <string name="CTL_GROUP_STICKS">Sticks</string>
+
+    <string name="XB_A">A</string>
+    <string name="XB_B">B</string>
+    <string name="XB_X">X</string>
+    <string name="XB_Y">Y</string>
+    <string name="XB_BLACK">Noir</string>
+    <string name="XB_WHITE">Blanc</string>
+    <string name="XB_LT">Gâchette gauche</string>
+    <string name="XB_RT">Gâchette droite</string>
+    <string name="XB_BACK">Back</string>
+    <string name="XB_START">Start</string>
+    <string name="XB_LTHUMB">Appui stick gauche</string>
+    <string name="XB_RTHUMB">Appui stick droit</string>
+    <string name="XB_DPAD_UP">Croix haut</string>
+    <string name="XB_DPAD_DOWN">Croix bas</string>
+    <string name="XB_DPAD_LEFT">Croix gauche</string>
+    <string name="XB_DPAD_RIGHT">Croix droite</string>
+    <string name="XB_LSTICK">Stick gauche</string>
+    <string name="XB_RSTICK">Stick droit</string>
+
+    <string name="SRC_SOUTH">A</string>
+    <string name="SRC_EAST">B</string>
+    <string name="SRC_WEST">X</string>
+    <string name="SRC_NORTH">Y</string>
+    <string name="SRC_L1">L1</string>
+    <string name="SRC_R1">R1</string>
+    <string name="SRC_L2">L2</string>
+    <string name="SRC_R2">R2</string>
+    <string name="SRC_L3">L3</string>
+    <string name="SRC_R3">R3</string>
+    <string name="SRC_SELECT">Select</string>
+    <string name="SRC_START">Start</string>
+    <string name="SRC_DPAD_UP">Croix haut</string>
+    <string name="SRC_DPAD_DOWN">Croix bas</string>
+    <string name="SRC_DPAD_LEFT">Croix gauche</string>
+    <string name="SRC_DPAD_RIGHT">Croix droite</string>
+    <string name="SRC_LSTICK_UP">Stick G haut</string>
+    <string name="SRC_LSTICK_DOWN">Stick G bas</string>
+    <string name="SRC_LSTICK_LEFT">Stick G gauche</string>
+    <string name="SRC_LSTICK_RIGHT">Stick G droite</string>
+    <string name="SRC_RSTICK_UP">Stick D haut</string>
+    <string name="SRC_RSTICK_DOWN">Stick D bas</string>
+    <string name="SRC_RSTICK_LEFT">Stick D gauche</string>
+    <string name="SRC_RSTICK_RIGHT">Stick D droite</string>
+    <string name="SRC_NONE">Aucun</string>
+    <string name="STICK_LEFT">Votre stick gauche</string>
+    <string name="STICK_RIGHT">Votre stick droit</string>
+
+    <string name="CTL_LEAD">Ce que le jeu reçoit de votre manette. Gauche et droite changent le bouton. Une seule configuration pour tous les jeux et toutes les manettes ; le lanceur et le menu du jeu gardent les boutons habituels.</string>
+    <string name="CTL_ROW">Pour le jeu, %1$s vient de %2$s sur votre manette.</string>
+    <string name="CTL_ROW_NONE">Pour le jeu, %1$s n\'est sur aucun bouton.</string>
+    <string name="CTL_ROW_SHARED">%1$s donne aussi %2$s : un appui, les deux.</string>
+    <string name="CTL_STICK_ROW">Pour le jeu, %1$s suit %2$s.</string>
+    <string name="CTL_STICK_NONE">Pour le jeu, %1$s reste au centre.</string>
+    <string name="CTL_RESET">Réinitialiser les commandes</string>
+    <string name="CTL_RESET_DETAIL">Chaque bouton à sa place habituelle : L1 = Noir, R1 = Blanc, L2 et R2 = les gâchettes, Select = Back.</string>
+    <string name="CTL_RESET_DONE">Commandes remises aux boutons habituels.</string>
+    <string name="CTL_CHANGED">%1$d modifiés</string>
+    <string name="MENU_CTL_REMAPPED">Votre configuration</string>
+    <string name="MENU_CTL_REMAPPED_X">%1$d commandes modifiées dans les Commandes du lanceur ; la liste ci-dessous est l\'habituelle.</string>
+</resources>

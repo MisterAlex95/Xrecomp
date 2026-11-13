@@ -4,6 +4,7 @@ script, and say how far it got.
 
     python -m tools.compat run SOURCE [SOURCE...] [--seconds 180] [--repeat N]
     python -m tools.compat report results.jsonl
+    python -m tools.compat grade --source NAME --status FILE ...   # a run made elsewhere (the app, device.py)
 
 One title at a time, at low priority, killed by PID at the end. What it reads
 from the run (no screen needed):

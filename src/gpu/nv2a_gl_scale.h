@@ -86,4 +86,19 @@ void nv2a_gl_scale_rect(uint32_t x, uint32_t y, uint32_t w, uint32_t h, float sc
  * (a visible object stays visible). */
 uint32_t nv2a_gl_scale_count(uint32_t samples, float sc);
 
+/* The SDL window reads a guest frame as 640 pixels a row of pitch / 640
+ * bytes each (fb_present_sdl.c): a presented surface with another pitch --
+ * an anti-aliased back buffer, 1280 samples a row -- shows as garbage or
+ * not at all through guest memory, on either rasteriser. 1: the GL back
+ * end hands such a surface over as a host frame while a window shows
+ * frames. */
+int nv2a_gl_present_needs_host(const Nv2aPresentSurface *s);
+
+/* The anti-aliasing factors of a presented surface whose format has an
+ * anti-aliasing mode (bits 12-15): 2 along x when it is 1280 real pixels
+ * wide (clip origin + size: the 640 frame's samples, AA
+ * 2x1 and 2x2), 2 along y when 960 high, else 1. Its host frame is
+ * resolved by them (a box filter over the samples). */
+void nv2a_gl_aa_factors(const Nv2aPresentSurface *s, uint32_t *fx, uint32_t *fy);
+
 #endif

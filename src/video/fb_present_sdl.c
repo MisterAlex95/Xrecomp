@@ -1089,7 +1089,8 @@ int xbox_HostWindowMain(int (*guest_main)(void))
     /* The video overlay's scan-out, windowed or not (vblank hook, dumps). */
     pvideo_install();
 #if defined(XBOXRECOMP_HAVE_GPU)
-    /* RECOMP_GPU=1: the GL back end draws instead of the CPU rasteriser.
+    /* RECOMP_GPU=1 (the default on Android): the GL back end draws instead
+     * of the CPU rasteriser.
      * Before the guest starts, windowed or not; its context lives on the
      * executor thread, frames still reach this window through guest
      * memory (src/gpu/nv2a_gl.c). */

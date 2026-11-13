@@ -219,8 +219,20 @@ static LONG run_rmw(void)
 
     s_shared = 0;
     s_rmw_started = 0;
+    /* With the lock on, this thread holds the guest CPU until all four are
+     * queued for it, so they contend whatever the host's scheduler does: on
+     * a loaded host they used to run one after another, each done before
+     * the next joined, nobody waited, and "on: the threads waited" failed
+     * now and then. */
+    if (xbox_GuestCpuOn())
+        xbox_GuestCpuJoin();
     for (i = 0; i < RMW_THREADS; i++)
         t[i] = CreateThread(NULL, 0, rmw_thread, NULL, 0, NULL);
+    if (xbox_GuestCpuOn()) {
+        if (!wait_waiting(RMW_THREADS, 5000))
+            printf("    (the RMW threads did not all queue)\n");
+        xbox_GuestCpuPart();
+    }
     for (i = 0; i < RMW_THREADS; i++)
         join(t[i]);
     return s_shared;
@@ -551,12 +563,18 @@ static void wake(void)
      * a call that does not wake the waiters, then blocks on the host; the
      * Blocked hook wakes them so one takes the CPU, and the thread takes
      * it back (and preempts) on its return. Without the hook the waiter's
-     * 2 ms poll would take the CPU all the same, so the gap from the hook
-     * to the waiter's run is what tells: eight rounds, none over 1.5 ms
-     * and under 4 ms in all (the poll alone would spend about 8). */
+     * 2 ms poll would take the CPU all the same, so how the waiter got it
+     * is what tells: on a wake, not at its poll (poll_takes). This used to
+     * time the gap from the hook to the waiter's run (none over 1.5 ms,
+     * under 4 ms in eight rounds), which a loaded host (the CI host, the
+     * GL tests beside it) broke now and then. A waiter can still take it
+     * at a poll that times out in the instant between the release and the
+     * hook, so 2 of 8 are allowed; without the hook all 8 are. */
     {
         int i, ok = 1;
         uint64_t sum = 0, worst = 0;
+        XboxGuestCpuStats ps;
+        xbox_GuestCpuStatsGet(&ps, 1);
         for (i = 0; i < 8; i++) {
             uint64_t gap;
             s_wk_ran = 0;
@@ -576,10 +594,10 @@ static void wake(void)
             ok &= xbox_GuestCpuHeld();
         }
         check(ok, "blocked: told, the waiter took the free CPU each round, and the thread took it back");
-        check(worst < 1500000ull && sum < 4000000ull,
-              "blocked: the waiter ran on the hook, not on its poll");
-        if (!(worst < 1500000ull && sum < 4000000ull))
-            printf("    (worst %.2f ms, sum %.2f ms)\n", worst / 1e6, sum / 1e6);
+        xbox_GuestCpuStatsGet(&ps, 0);
+        check(ps.poll_takes <= 2, "blocked: the waiter ran on the hook, not on its poll");
+        printf("    (%ld of 8 at a poll; gap worst %.2f ms, sum %.2f ms)\n", ps.poll_takes,
+               worst / 1e6, sum / 1e6);
     }
     xbox_GuestCpuPart();
     set_env("RECOMP_GUEST_QUANTUM", NULL);

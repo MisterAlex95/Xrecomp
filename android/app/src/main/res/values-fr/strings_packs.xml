@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="HOME_OTHER_XBE">Une autre version du jeu · à préparer à nouveau</string>
+    <string name="HOME_OTHER_XBE_NOTE">Les fichiers de ce jeu ne sont pas la version à partir de laquelle il a été préparé (une autre révision ou région du disque). Préparez-le à nouveau pour y jouer ; vos sauvegardes sont gardées.</string>
+    <string name="HOME_OLDER_TOOLKIT">Préparé par une version plus ancienne de l\'app</string>
+    <string name="HOME_OLDER_TOOLKIT_NOTE">Cette mise à jour traduit mieux les jeux. Préparer à nouveau (%1$s) pour en profiter ; d\'ici là, le jeu se lance comme avant. Vos sauvegardes sont gardées.</string>
+</resources>
