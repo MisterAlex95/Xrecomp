@@ -93,6 +93,15 @@ final class PrepareRunner {
         return statusFile;
     }
 
+    /** A background Prepare (XBA-129): said in status.json, which the launcher reads (before begin()). */
+    void setBackground(boolean b) {
+        status.background = b;
+    }
+
+    boolean background() {
+        return status.background;
+    }
+
     File logFile() {
         return logFile;
     }

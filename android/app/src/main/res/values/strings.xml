@@ -239,6 +239,12 @@
     <string name="HOME_PREPARE_AGAIN_NOTE">The game crashed, and this run found code the last preparation missed. Prepare again takes it in, then starts the game.</string>
     <string name="HOME_NEEDS_FIX">Crashed · needs a fix</string>
     <string name="HOME_NEEDS_FIX_NOTE">The game crashed and preparing again cannot help: %1$s.</string>
+    <string name="HOME_IMPROVING">Improving in the background · %1$s</string>
+    <string name="HOME_IMPROVING_NOTE">The last run met code the preparation had missed: the game is prepared again with it, in the background. You can play meanwhile; the next start uses the new version. Stop ends it.</string>
+    <string name="HOME_IMPROVE_NOTE">The last run met code the preparation had missed (%1$d). Prepare again takes it in, in the background; Play stays.</string>
+    <string name="SELF_HEAL_ROUND_NOTE">The game crashed on code the preparation had missed: preparing it again with it (round %1$d), then the game starts by itself. B stops it; Settings › General › Self-healing turns this off.</string>
+    <string name="SELF_HEAL_STOP">Stop</string>
+    <string name="SELF_HEAL_STOPPED">Stopped. The game keeps its current preparation.</string>
     <string name="PREPARE_INTERRUPTED">The preparation was interrupted (the system closed it). What was done is kept: Prepare carries on from there.</string>
     <string name="PREPARE_HINT_KILLED">The system stopped the compiler twice (not enough memory, or Android\'s limit on background processes). Close other apps and retry.</string>
     <string name="PREPARE_HINT_NO_SPACE">Internal storage is full (%1$s free). Free some space, then retry: what was done is kept.</string>
@@ -297,6 +303,10 @@
     <string name="UI_HAPTICS_DETAIL">On: the device gives a light buzz when the selection moves, a press, an error and when the game is ready. Android\'s own « touch feedback » setting must be on too. Off: no buzz from the launcher.</string>
     <string name="UI_HAPTICS_ON">Vibration on.</string>
     <string name="UI_HAPTICS_OFF">Vibration off.</string>
+    <string name="SELF_HEAL">Self-healing</string>
+    <string name="SELF_HEAL_DETAIL">On: when a run meets code the preparation missed, the app prepares the game again by itself (after a crash, then starts it again), with a note you can act on. Off: it offers Prepare again instead.</string>
+    <string name="SELF_HEAL_ON">Self-healing on.</string>
+    <string name="SELF_HEAL_OFF">Self-healing off: Prepare again is offered instead.</string>
     <string name="BOTTOM_SCREEN">Bottom screen</string>
     <string name="BOTTOM_SCREEN_DETAIL">Panel: the game\'s card and buttons here, and in the game the Xbox buttons the device lacks (Black, White, Back, Start) and a few tools. Black: the second screen stays black. Off: the app leaves it to the system.</string>
     <string name="BOTTOM_SCREEN_SAVED">Bottom screen: %1$s.</string>

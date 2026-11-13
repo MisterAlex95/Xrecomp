@@ -43,6 +43,8 @@ public class PrepareService extends Service {
     static final String ACTION_START = "fr.adserver.xboxrecomp.PREPARE_START";
     static final String ACTION_CANCEL = "fr.adserver.xboxrecomp.PREPARE_CANCEL";
     static final String EXTRA_GAME_DIR = "game_dir", EXTRA_TITLE_ID = "title_id", EXTRA_TITLE = "title";
+    /** A background Prepare (a self-healing round after a good run, XBA-129): see PrepareProtocol.Status.background. */
+    static final String EXTRA_BACKGROUND = "background";
     static final String CHANNEL = "prepare";
     static final int NOTIF_ID = 41, NOTIF_DONE_ID = 42;
     /** A Prepare holds the CPU at most this long (the wake lock's timeout). */
@@ -156,6 +158,7 @@ public class PrepareService extends Service {
         String gameDir = intent.getStringExtra(EXTRA_GAME_DIR);
         String titleId = intent.getStringExtra(EXTRA_TITLE_ID);
         String title = intent.getStringExtra(EXTRA_TITLE);
+        boolean background = intent.getBooleanExtra(EXTRA_BACKGROUND, false);
         // startForegroundService() needs startForeground() even when nothing new starts.
         goForeground(notification(null));
         boolean busy = busy();
@@ -169,11 +172,13 @@ public class PrepareService extends Service {
         }
         loadQueue();
         if (busy) {
-            enqueue(new PrepareProtocol.Job(titleId, gameDir, title));
+            PrepareProtocol.Job j = new PrepareProtocol.Job(titleId, gameDir, title);
+            j.background = background;
+            enqueue(j);
             return START_NOT_STICKY;
         }
         titleName = title == null ? "" : title;
-        startJob(gameDir, titleId);
+        startJob(gameDir, titleId, background);
         return START_NOT_STICKY;
     }
 
@@ -221,6 +226,7 @@ public class PrepareService extends Service {
         s.titleId = j.titleId;
         s.startedAt = s.updatedAt = System.currentTimeMillis();
         s.log = logFile(this, j.titleId).getAbsolutePath();
+        s.background = j.background;
         File f = statusFile(this, j.titleId);
         try {
             PrepareProtocol.writeStatus(f, s);
@@ -280,7 +286,7 @@ public class PrepareService extends Service {
         stopSelf();
     }
 
-    private void startJob(String gameDir, String titleId) {
+    private void startJob(String gameDir, String titleId, boolean background) {
         int jobs = Toolchain.jobs(this);
         File filesDir = filesDir(this);
         PrepareRunner.CommandFactory[] factory = new PrepareRunner.CommandFactory[1];
@@ -304,6 +310,7 @@ public class PrepareService extends Service {
                 },
                 () -> Pack.check(filesDir, titleId) == Pack.Check.VALID ? null : PrepareRunner.PACK_INVALID,
                 this::onStatus);
+        runner.setBackground(background);
         current = runner;
         currentTid = titleId;
         PowerManager pm = getSystemService(PowerManager.class);
@@ -343,6 +350,14 @@ public class PrepareService extends Service {
         }
         Log.i(TAG, "prepare: " + end.state + (end.code.isEmpty() ? "" : " " + end.code)
                    + (end.msg.isEmpty() ? "" : ": " + end.msg));
+        if (runner.background()) {   // XBA-129: the launcher ends the other rounds (it relaunches the game)
+            try {
+                SelfHeal.roundEnded(new File(new File(filesDir(this), "work"), titleId),
+                                    PrepareProtocol.DONE.equals(end.state));
+            } catch (IOException e) {
+                Log.w(TAG, "prepare: cannot update " + titleId + "'s selfheal.json: " + e);
+            }
+        }
         PrepareProtocol.Status fin = end;
         new android.os.Handler(getMainLooper()).post(() -> onJobEnd(fin));
     }
@@ -453,7 +468,7 @@ public class PrepareService extends Service {
             titleName = next.title;
             lastNotifyId = "";
             goForeground(notification(null));
-            startJob(next.gameDir, next.titleId);
+            startJob(next.gameDir, next.titleId, next.background);
             return;
         }
         stopForeground(STOP_FOREGROUND_REMOVE);

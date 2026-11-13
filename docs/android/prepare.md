@@ -262,23 +262,49 @@ sysroot) is not in it: a new clang does not make an old pack wrong.
 checkout (`tools/prepare/toolkit.py`; `pytest tools/prepare/test_toolkit.py` checks the selection), writes it into
 `pack.json` and keys its stamps on it.
 
-## Prepare again (XBA-74)
+## Self-healing (XBA-74, XBA-129)
 
 A run writes what the static analysis missed to `<work>/discovered.jsonl`
 ([discovery.md](../technical/discovery.md)) and the next Prepare seeds the analysis with it. The app closes the loop
-(`SelfHeal.java`, state in `<work>/selfheal.json`):
+by itself, with no question asked (`SelfHeal.java`, state in `<work>/selfheal.json`):
 
 - PrepareService records the file's length when a Prepare begins (`offset`): what the runs add after it is new.
 - The launcher records each launch (`launched_at`). Back on Home with no game process, it reads the system's record
   of how the game's process last ended (`ActivityManager.getHistoricalProcessExitReasons`, the main process only).
   An exit before the launch, or already looked at (`handled`), changes nothing.
-- A crash (`REASON_CRASH`, `REASON_CRASH_NATIVE`, `REASON_ANR`) with new `icall`, `thread` or `thread_ctx` entries:
-  Home's primary button is « Prepare again » (Play stays next to it). It counts a round, runs the Prepare, and starts
-  the game when the pack is ready.
-- A crash with nothing the Prepare can seed, or after 3 rounds in a row: Home says « Crashed · needs a fix » with the
-  blocker in the note: the first untranslated instruction reached (`unimpl`) when there is one, else the crash and the
-  system's words for it.
-- An exit without a crash ends the rounds. The offer stays until the next launch or Prepare again.
+- **A crash** (`REASON_CRASH`, `REASON_CRASH_NATIVE`, `REASON_ANR`) with new `icall`, `thread` or `thread_ctx`
+  entries: a round at once, the Preparing screen with a note (« The game crashed on code the preparation had missed:
+  preparing it again with it (round N), then the game starts by itself. B stops it; Settings › General ›
+  Self-healing turns this off. »), then the game starts again when the pack is ready.
+- **A run that ended well** with such entries (a skipped indirect call does not crash: the title goes on, maybe
+  wrong; the runtime says the first one in its log and counts them in the status line's `seeds`): a round **in the
+  background**. The Prepare runs with `background: true` in `status.json` (and in the queue): Home keeps **Play**
+  as the primary (the valid pack plays until the new one replaces it, atomic publish), its line says « Improving in
+  the background · Compile · 68 % », a note explains, and a quiet **Stop** cancels it. Nothing starts by itself
+  afterwards; the next start uses the new pack. PrepareService ends a background round, the launcher the others.
+- **What a Prepare cannot fix**: a crash with a guest exception nothing handled (`exception`), a guest stack switch
+  the runtime could not carry (`stack_switch`) or an untranslated instruction (`unimpl`), named in that order, even
+  when the run also found new code; or a crash with nothing new (« crash (…), nothing new found », with « ; calls stub
+  ordinal N (Name) » when the run called stub kernel routes). Home says « Crashed · needs a fix », the blocker in the
+  note. No round.
+- **The cap is on rounds without progress**, not on rounds. A round's progress is `discovered-seeds.json` growing
+  (the seeds tools.prepare took through seed_from_log's gates). A crash round whose Prepare took nothing stops the
+  loop at once (its pack is the same: no relaunch; « needs a fix », « the Prepare could not use what the run found
+  (N addresses, none of them code) »). `MAX_IDLE_ROUNDS` (2) such rounds in a row and new finds no longer start a
+  round by themselves until a run ends well with nothing new. On the device a crash is known only by the system's
+  words for it, so « the same blocker twice » is a crash that brought nothing new: the discovery file never writes
+  an address twice, a repeat of the same miss adds nothing. 12 rounds in a row is a safety net only.
+- **The player sees and stops it**: the notes, Stop (background) or B / Cancel (Preparing screen), and **Settings ›
+  General › Self-healing** (on by default, only with the toolchain). Off: a crash with new code offers **Prepare
+  again** as the primary (the button of XBA-74); a good run with new code offers a quiet **Prepare again** next to
+  Play (a background round). A stopped round starts nothing.
+- A crash round whose Prepare ended while the launcher was away is counted when Home next shows (and relaunches the
+  game if it took new code in).
+
+The same rules on a desktop: `python -m tools.compat heal` ([compat-runner.md](../technical/compat-runner.md#self-healing-rounds-and-recall-xba-129)),
+which `tools/compat/test_e2e.py::test_the_self_healing_loop` runs on a synthetic title (three rounds with progress,
+the fourth without: stop). Tests on the app side: `SelfHealTest`, `LauncherSelfHealTest` (screenshots
+`prepare-11` … `prepare-15`).
 
 ## Measurements
 

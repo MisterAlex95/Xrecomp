@@ -247,6 +247,8 @@ public class LauncherActivity extends Activity {
     private Prep homePrep;
     /** Home's primary is « Prepare again » (XBA-74). */
     private boolean homeAgain;
+    /** A crash round that ended while the launcher was not watching was looked at (XBA-129), once per launcher. */
+    private boolean roundChecked;
     private PrepareProtocol.Status prepShown;
     private Widgets.Chip prepStatus;
     private Widgets.Meter prepMeter;
@@ -1611,6 +1613,11 @@ public class LauncherActivity extends Activity {
             xbeShaLater(dir, tid);
         boolean otherXbe = st == State.READY && preparing && prep == Prep.NEEDED && otherXbe(tid);
         boolean olderToolkit = st == State.READY && prep == Prep.PLAYABLE && heal == null && olderToolkit(tid);
+        // XBA-129: a self-healing round in the background (Play stays), or one to start / offer after a good run.
+        PrepareProtocol.Status healing = prep == Prep.PLAYABLE && !running ? backgroundPrepare(tid) : null;
+        boolean improve = heal != null && heal.offer == SelfHeal.Offer.IMPROVE;
+        if (improve)
+            heal = null;   // a run that ended well: Home as usual, plus the note and (setting off) a quiet button
 
         // The one line: the state when it is not « Ready », else when it was last played.
         String statusText = null;
@@ -1643,6 +1650,10 @@ public class LauncherActivity extends Activity {
             statusText = heal.offer == SelfHeal.Offer.PREPARE_AGAIN ? getString(R.string.HOME_CRASHED_FINDS, heal.seeds)
                                                                   : getString(R.string.HOME_NEEDS_FIX);
             statusColor = heal.offer == SelfHeal.Offer.PREPARE_AGAIN ? Theme.WARN : Theme.ERROR;
+            heroLine(info, statusText, statusColor);
+        } else if (healing != null) {
+            statusText = getString(R.string.HOME_IMPROVING, progressLine(healing));
+            statusColor = Theme.ACCENT;
             heroLine(info, statusText, statusColor);
         } else if (olderToolkit) {
             statusText = getString(R.string.HOME_OLDER_TOOLKIT);
@@ -1682,6 +1693,10 @@ public class LauncherActivity extends Activity {
             play.setDim(st != State.READY);
             if (olderToolkit)   // offered, never forced: Play stays first (a Prepare takes 10-30 min)
                 pill(buttons, null, getString(R.string.PREPARE_AGAIN), false, this::onPrepareNewToolkit);
+            else if (healing != null)
+                pill(buttons, null, getString(R.string.SELF_HEAL_STOP), false, this::onStopHealing);
+            else if (improve && !SelfHeal.auto(this))
+                pill(buttons, null, getString(R.string.PREPARE_AGAIN), false, this::onImprove);
         }
         homePrimary = play;
         homePills(buttons);
@@ -1705,6 +1720,10 @@ public class LauncherActivity extends Activity {
             setNote(getString(R.string.HOME_OTHER_XBE_NOTE), NOTE_WARN);
         else if (heal != null && heal.offer == SelfHeal.Offer.PREPARE_AGAIN)
             setNote(getString(R.string.HOME_PREPARE_AGAIN_NOTE), NOTE_WARN);
+        else if (healing != null)
+            setNote(getString(R.string.HOME_IMPROVING_NOTE), NOTE_INFO);
+        else if (improve)
+            setNote(getString(R.string.HOME_IMPROVE_NOTE, SelfHeal.read(workDir(tid)).seeds), NOTE_INFO);
         else if (heal != null)
             setNote(getString(R.string.HOME_NEEDS_FIX_NOTE, heal.blocker), NOTE_ERROR);
         else if (running && selectedIsLaunched())
@@ -1715,6 +1734,18 @@ public class LauncherActivity extends Activity {
             setNote(getString(R.string.HOME_OLDER_TOOLKIT_NOTE, estimate()), NOTE_INFO);
         else if (st == State.READY && !preparing && (rec() != null ? rec().lastPlayed : GameStore.lastPlayed(this)) <= 0)
             setNote(getString(R.string.HOME_LEAD_READY), NOTE_INFO);   // before the first play: where the menu is
+        // XBA-129: the setting on, the launcher starts the round itself (a note says so, the Prepare can be stopped).
+        boolean crashRound = heal != null && heal.offer == SelfHeal.Offer.PREPARE_AGAIN;
+        if (SelfHeal.auto(this) && !running && (improve || crashRound))
+            poller.post(() -> autoRound(tid));
+        else if (!roundChecked && prep == Prep.PLAYABLE && healing == null && !running && tid != null
+                 && SelfHeal.read(workDir(tid)).roundOpen) {
+            roundChecked = true;   // its Prepare ended while the launcher was away: count it, relaunch if it helped
+            poller.post(() -> {
+                if (!relaunchAfterPrepare(tid) && screen == Screen.HOME)
+                    show(Screen.HOME, 0);   // the round's outcome, its note included
+            });
+        }
     }
 
     private String lastPlayedText(long last, long now) {
@@ -1854,6 +1885,9 @@ public class LauncherActivity extends Activity {
                            GameStore::setUiSound, R.string.UI_SOUND_ON, R.string.UI_SOUND_OFF);
             launcherToggle(list, R.string.UI_HAPTICS, R.string.UI_HAPTICS_DETAIL, GameStore::uiHaptics,
                            GameStore::setUiHaptics, R.string.UI_HAPTICS_ON, R.string.UI_HAPTICS_OFF);
+            if (Toolchain.available(this))   // XBA-129: only where the app prepares games
+                launcherToggle(list, R.string.SELF_HEAL, R.string.SELF_HEAL_DETAIL, SelfHeal::auto, SelfHeal::setAuto,
+                               R.string.SELF_HEAL_ON, R.string.SELF_HEAL_OFF);
             if (DualScreen.available(this, CompanionScreen.ownDisplayId(this)))
                 bottomScreenRow(list);
             String dir = gameDir();
@@ -2370,8 +2404,9 @@ public class LauncherActivity extends Activity {
         if (tid == null)
             return Prep.OFF;
         PrepareProtocol.Status s = PrepareProtocol.readStatus(PrepareService.statusFile(this, tid));
-        if (statusAlive(s))
-            return Prep.RUNNING;
+        if (statusAlive(s))   // a background one (XBA-129) leaves a valid pack playable
+            return s.background && Pack.check(getFilesDir(), tid) == Pack.Check.VALID && packMatchesSelected(tid)
+                   ? Prep.PLAYABLE : Prep.RUNNING;
         if (s != null && s.queued())   // waiting behind another title's Prepare; no :prepare process = cut off
             return prepareProcessAlive() ? Prep.QUEUED : Prep.INTERRUPTED;
         if (Pack.check(getFilesDir(), tid) == Pack.Check.VALID && packMatchesSelected(tid))
@@ -2517,6 +2552,14 @@ public class LauncherActivity extends Activity {
 
     /** Checks the space, then starts PrepareService and shows the Preparing screen. */
     private void startPrepare() {
+        startPrepare(false);
+    }
+
+    /**
+     * background (XBA-129, a self-healing round after a run that ended well): the Prepare runs while Home stays, Play
+     * included (the valid pack plays until the new one replaces it).
+     */
+    private void startPrepare(boolean background) {
         // SOURCE: the game's files, or, before an import, the library's cached default.xbe (tools.prepare needs
         // only the XBE).
         String tid = titleId(), dir = gameDir();
@@ -2545,10 +2588,12 @@ public class LauncherActivity extends Activity {
         s.startedAt = s.updatedAt = System.currentTimeMillis();
         s.msg = getString(R.string.PREPARE_STARTING);
         s.log = PrepareService.logFile(this, tid).getAbsolutePath();
+        s.background = background;
         File sf = PrepareService.statusFile(this, tid);
         try {
             PrepareProtocol.writeStatus(sf, s);
-            startForegroundService(PrepareService.startIntent(this, dir, tid, gameTitle(gameDir())));
+            startForegroundService(PrepareService.startIntent(this, dir, tid, gameTitle(gameDir()))
+                                           .putExtra(PrepareService.EXTRA_BACKGROUND, background));
         } catch (IOException | RuntimeException e) {
             Log.w(TAG, "launcher: cannot start the Prepare", e);
             s.state = PrepareProtocol.FAILED;
@@ -2561,8 +2606,13 @@ public class LauncherActivity extends Activity {
             setNote(getString(R.string.PREPARE_START_FAILED, String.valueOf(e.getMessage())), NOTE_ERROR);
             return;
         }
-        Log.i(TAG, "launcher: prepare started for " + tid + " (" + dir + ")");
+        Log.i(TAG, "launcher: prepare started for " + tid + " (" + dir + ")"
+                   + (background ? ", in the background" : ""));
         cancelSent = false;
+        if (background) {
+            refreshKeepingFocus();
+            return;
+        }
         go(Screen.PREPARE);
         long ram = Toolchain.totalRam(this);
         if (ram > 0 && ram < PREPARE_RAM_WARN)
@@ -4123,7 +4173,7 @@ public class LauncherActivity extends Activity {
             }
         }
         SelfHeal.State s = SelfHeal.read(work);
-        if (s.offer == SelfHeal.Offer.NONE || (s.offer == SelfHeal.Offer.PREPARE_AGAIN && prep != Prep.PLAYABLE))
+        if (s.offer == SelfHeal.Offer.NONE || (s.offer != SelfHeal.Offer.NEEDS_FIX && prep != Prep.PLAYABLE))
             return null;
         return s;
     }
@@ -4168,12 +4218,82 @@ public class LauncherActivity extends Activity {
         }
         Log.i(TAG, "launcher: prepare again " + tid);
         startPrepare();
+        if (screen == Screen.PREPARE)
+            setNote(getString(R.string.SELF_HEAL_ROUND_NOTE, SelfHeal.read(workDir(tid)).rounds), NOTE_INFO);
     }
 
-    /** A Prepare of tid is done with a valid pack: start the game when it was a « Prepare again ». */
+    /**
+     * XBA-129, the setting on: the round Home offers starts by itself (Home may be built several times before this
+     * runs: only an offer still standing starts one).
+     */
+    private void autoRound(String tid) {
+        if (tid == null || !tid.equals(titleId()) || screen != Screen.HOME)
+            return;
+        SelfHeal.Offer o = SelfHeal.read(workDir(tid)).offer;
+        Log.i(TAG, "launcher: self-healing " + tid + ": " + o);
+        if (o == SelfHeal.Offer.PREPARE_AGAIN)
+            onPrepareAgain();
+        else if (o == SelfHeal.Offer.IMPROVE)
+            onImprove();
+    }
+
+    /** XBA-129: a run that ended well found code the analysis missed: a round in the background, Play stays. */
+    private void onImprove() {
+        String tid = titleId();
+        if (tid == null || prep() != Prep.PLAYABLE)
+            return;
+        try {
+            SelfHeal.startRound(workDir(tid), true);
+        } catch (IOException e) {
+            Log.w(TAG, "launcher: cannot update " + tid + "'s selfheal.json", e);
+        }
+        Log.i(TAG, "launcher: self-healing round in the background for " + tid);
+        startPrepare(true);
+    }
+
+    /** The background round's Stop: its Prepare is cancelled; the pack it would have replaced stays. */
+    private void onStopHealing() {
+        String tid = titleId();
+        if (tid == null)
+            return;
+        Log.i(TAG, "launcher: self-healing round stopped for " + tid);
+        try {
+            startService(PrepareService.cancelIntent(this, tid));
+        } catch (RuntimeException e) {
+            Log.w(TAG, "launcher: cannot stop the Prepare", e);
+        }
+        setNote(getString(R.string.SELF_HEAL_STOPPED), NOTE_INFO);
+    }
+
+    /** The status of tid's background Prepare while it runs (XBA-129), else null. */
+    private PrepareProtocol.Status backgroundPrepare(String tid) {
+        PrepareProtocol.Status s = tid == null ? null
+                                   : PrepareProtocol.readStatus(PrepareService.statusFile(this, tid));
+        return s != null && s.background && statusAlive(s) ? s : null;
+    }
+
+    /**
+     * A Prepare of tid ended and its pack is valid: when it was a crash round, count the round (SelfHeal.roundEnded:
+     * a round that accepted no new seed stops the loop) and start the game.
+     */
     private boolean relaunchAfterPrepare(String tid) {
-        if (tid == null || !SelfHeal.read(workDir(tid)).relaunch || state() != State.READY)
+        if (tid == null || !SelfHeal.read(workDir(tid)).roundOpen)
             return false;
+        PrepareProtocol.Status s = readPrepStatus();
+        if (s != null && s.background)
+            return false;   // PrepareService ends a background round
+        boolean go;
+        try {
+            go = SelfHeal.roundEnded(workDir(tid), s != null && PrepareProtocol.DONE.equals(s.state));
+        } catch (IOException e) {
+            Log.w(TAG, "launcher: cannot update " + tid + "'s selfheal.json", e);
+            return false;
+        }
+        if (!go || state() != State.READY) {
+            Log.i(TAG, "launcher: " + tid + "'s round ended without a relaunch ("
+                       + SelfHeal.read(workDir(tid)).offer + ")");
+            return false;
+        }
         Log.i(TAG, "launcher: prepared again, relaunching " + tid);
         launchShell(false);
         return true;

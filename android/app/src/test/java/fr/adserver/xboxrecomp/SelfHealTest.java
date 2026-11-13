@@ -15,7 +15,7 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.nio.charset.StandardCharsets;
 
-/** XBA-74: what a crashed run found since the last Prepare, and the offer made of it. */
+/** XBA-74, XBA-129: what a run found since the last Prepare, the offer made of it, and the rounds. */
 @RunWith(RobolectricTestRunner.class)
 @Config(sdk = 34)
 public class SelfHealTest {
@@ -71,26 +71,126 @@ public class SelfHealTest {
         assertEquals(1, s.seeds);
     }
 
+    /** tools.prepare kept n seeds from discovered.jsonl (discovered-seeds.json). */
+    private static void seeds(File work, int n) throws Exception {
+        StringBuilder b = new StringBuilder("[");
+        for (int i = 0; i < n; i++)
+            b.append(i == 0 ? "" : ",").append("{\"start\":\"0x0010").append(String.format("%04X", i)).append("\"}");
+        TestSupport.write(new File(work, SelfHeal.SEEDS), b.append("]").toString());
+    }
+
+    /** XBA-129: no cap on rounds as such: every round that takes in new code may be followed by another. */
     @Test
-    public void roundsAreCapped() throws Exception {
+    public void roundsWithProgressAreNotCapped() throws Exception {
         File work = tmp.newFolder("w");
         long t = 1000;
-        for (int round = 0; round < SelfHeal.MAX_ROUNDS; round++) {
+        for (int round = 0; round < 6; round++) {
             SelfHeal.launched(work, t++);
             append(work, RUN + "{\"t\":\"icall\",\"va\":\"0x0010000" + round + "\",\"ret\":\"0x00123456\"}\n");
             assertTrue(SelfHeal.onExit(work, crash(t++)));
-            assertEquals(SelfHeal.Offer.PREPARE_AGAIN, SelfHeal.read(work).offer);
+            assertEquals("round " + round, SelfHeal.Offer.PREPARE_AGAIN, SelfHeal.read(work).offer);
             SelfHeal.prepareAgain(work);
-            assertTrue(SelfHeal.read(work).relaunch);
             SelfHeal.prepareStarted(work);
+            seeds(work, round + 1);   // the Prepare took the new address
+            assertTrue("relaunch after a round with progress", SelfHeal.roundEnded(work, true));
+            assertFalse("a round ends once", SelfHeal.roundEnded(work, true));
+            assertEquals(round + 1, SelfHeal.read(work).rounds);
+            assertEquals(0, SelfHeal.read(work).idle);
         }
-        SelfHeal.launched(work, t++);
+    }
+
+    /** XBA-129: the cap is on rounds without progress: the Prepare took none of the new addresses. */
+    @Test
+    public void aRoundWithoutProgressStopsTheLoop() throws Exception {
+        File work = tmp.newFolder("w");
+        seeds(work, 2);
+        SelfHeal.launched(work, 1000);
         append(work, RUN + ICALL);
-        assertTrue(SelfHeal.onExit(work, crash(t++)));
+        assertTrue(SelfHeal.onExit(work, crash(2000)));
+        SelfHeal.prepareAgain(work);
+        SelfHeal.prepareStarted(work);
+        // tools.prepare's gates refused the address: discovered-seeds.json is as it was.
+        assertFalse("no relaunch: the same pack would crash the same way", SelfHeal.roundEnded(work, true));
         SelfHeal.State s = SelfHeal.read(work);
         assertEquals(SelfHeal.Offer.NEEDS_FIX, s.offer);
-        assertTrue(s.blocker, s.blocker.contains("after 3 Prepare again rounds"));
+        assertEquals(1, s.idle);
+        assertTrue(s.blocker, s.blocker.contains("none of them code"));
         assertFalse(s.relaunch);
+    }
+
+    /** XBA-129: the player's Stop (a cancelled Prepare) ends the round quietly, nothing starts. */
+    @Test
+    public void aStoppedRoundStartsNothing() throws Exception {
+        File work = tmp.newFolder("w");
+        SelfHeal.launched(work, 1000);
+        append(work, RUN + ICALL);
+        assertTrue(SelfHeal.onExit(work, crash(2000)));
+        SelfHeal.prepareAgain(work);
+        assertFalse(SelfHeal.roundEnded(work, false));
+        SelfHeal.State s = SelfHeal.read(work);
+        assertEquals(SelfHeal.Offer.NONE, s.offer);
+        assertFalse(s.relaunch || s.roundOpen);
+    }
+
+    /** XBA-129: a run that ended well but skipped code (an indirect call, a thread): a background round. */
+    @Test
+    public void aGoodRunWithNewCodeImprovesInTheBackground() throws Exception {
+        File work = tmp.newFolder("w");
+        SelfHeal.launched(work, 1000);
+        append(work, RUN + ICALL + THREAD);
+        assertTrue(SelfHeal.onExit(work, new SelfHeal.Exit(2000, false, "")));
+        SelfHeal.State s = SelfHeal.read(work);
+        assertEquals(SelfHeal.Offer.IMPROVE, s.offer);
+        assertEquals(2, s.seeds);
+        SelfHeal.startRound(work, true);
+        s = SelfHeal.read(work);
+        assertTrue(s.roundOpen && s.background);
+        assertFalse("nothing starts by itself after a background round", s.relaunch);
+        seeds(work, 2);
+        assertFalse(SelfHeal.roundEnded(work, true));
+        s = SelfHeal.read(work);
+        assertEquals(2, s.lastAccepted);
+        assertFalse(s.roundOpen || s.background);
+        // The next good run met nothing new: the rounds end.
+        SelfHeal.prepareStarted(work);
+        SelfHeal.launched(work, 3000);
+        assertTrue(SelfHeal.onExit(work, new SelfHeal.Exit(4000, false, "")));
+        s = SelfHeal.read(work);
+        assertEquals(SelfHeal.Offer.NONE, s.offer);
+        assertEquals(0, s.rounds);
+    }
+
+    /** XBA-129: never a round on what a Prepare cannot fix, even with new code in the same run. */
+    @Test
+    public void aGuestExceptionIsTheBlocker() throws Exception {
+        File work = tmp.newFolder("w");
+        SelfHeal.launched(work, 1000);
+        append(work, RUN + ICALL + "{\"t\":\"exception\",\"va\":\"0x00011020\",\"code\":\"0xC0000094\","
+                + "\"why\":\"divide by zero\"}\n");
+        assertTrue(SelfHeal.onExit(work, crash(2000)));
+        SelfHeal.State s = SelfHeal.read(work);
+        assertEquals(SelfHeal.Offer.NEEDS_FIX, s.offer);
+        assertEquals("guest exception 0xC0000094 at 0x00011020: divide by zero", s.blocker);
+    }
+
+    @Test
+    public void aStubIsNamedWhenNothingElseIs() throws Exception {
+        File work = tmp.newFolder("w");
+        SelfHeal.launched(work, 1000);
+        append(work, RUN + "{\"t\":\"stub\",\"ord\":136,\"name\":\"KeRemoveQueue\",\"ret\":\"0x00012345\"}\n");
+        assertTrue(SelfHeal.onExit(work, crash(2000)));
+        SelfHeal.State s = SelfHeal.read(work);
+        assertEquals(SelfHeal.Offer.NEEDS_FIX, s.offer);
+        assertEquals("crash (signal 11 (SIGSEGV)), nothing new found; calls stub ordinal 136 (KeRemoveQueue)",
+                     s.blocker);
+    }
+
+    @Test
+    public void theSettingIsOnByDefault() {
+        android.app.Application app = org.robolectric.RuntimeEnvironment.getApplication();
+        assertTrue(SelfHeal.auto(app));
+        SelfHeal.setAuto(app, false);
+        assertFalse(SelfHeal.auto(app));
     }
 
     @Test
@@ -123,7 +223,9 @@ public class SelfHealTest {
     public void aCleanExitEndsTheRoundsAndOldExitsAreIgnored() throws Exception {
         File work = tmp.newFolder("w");
         SelfHeal.prepareAgain(work);
+        SelfHeal.roundEnded(work, true);
         SelfHeal.prepareAgain(work);
+        SelfHeal.roundEnded(work, true);
         SelfHeal.launched(work, 5000);
         assertFalse("an exit before the launch is another run's", SelfHeal.onExit(work, crash(4000)));
         assertFalse(SelfHeal.onExit(work, null));
