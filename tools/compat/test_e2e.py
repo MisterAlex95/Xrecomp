@@ -528,7 +528,11 @@ def test_static_discovery_needs_no_round(tmp_path):
     h = res["heal"]
     assert h["rounds"] == 1 and h["history"][0]["new_seeds"] == 0, h
     assert "recall" not in res, res["recall"]                  # no miss: compat attaches none
-    assert res["runs"][0]["threads"] >= 2 and res["stage"] == "boots", res
+    # The thread the title starts runs (its routine was found: no "thread" entry).
+    assert res["runs"][0]["threads"] >= 1 and res["stage"] == "boots", res
+    disc = cw / "disco" / "discovered.jsonl"
+    lines = disc.read_text().splitlines() if disc.exists() else []
+    assert not [l for l in lines if '"t":"icall"' in l or '"t":"thread' in l], lines
     work = cw / "disco"
     rc = subprocess.run([sys.executable, "-m", "tools.compat", "recall", str(work), str(d / "default.xbe")],
                         cwd=ROOT, capture_output=True, text=True, timeout=120)
