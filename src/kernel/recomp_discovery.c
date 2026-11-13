@@ -33,9 +33,11 @@ static pthread_mutex_t s_lock = PTHREAD_MUTEX_INITIALIZER;
 #define UNLOCK() pthread_mutex_unlock(&s_lock)
 #endif
 
-enum { K_ICALL = 1, K_THREAD, K_THREAD_CTX, K_UNIMPL, K_D3D, K_WAIT_SPIN, K_LAUNCH, K_STACK_SWITCH, K_STUB };
+enum { K_ICALL = 1, K_THREAD, K_THREAD_CTX, K_UNIMPL, K_D3D, K_WAIT_SPIN, K_LAUNCH, K_STACK_SWITCH, K_STUB,
+       K_SMC_EXEC, K_SMC_WRITE };
+/* The two smc kinds share "t":"smc" and differ by "kind" (XBA-118). */
 static const char *const kind_name[] = { "", "icall", "thread", "thread_ctx", "unimpl", "d3d", "wait_spin", "launch",
-                                         "stack_switch", "stub" };
+                                         "stack_switch", "stub", "smc", "smc" };
 
 /* What is already in the file: kind << 32 | va, open addressing. A title that
  * fills it is beyond what one file can help with; the rest is dropped. */
@@ -68,7 +70,7 @@ static int seen_add(uint64_t key)       /* 1 when new */
 
 static int kind_of(const char *s, size_t n)
 {
-    for (int k = K_ICALL; k <= K_STUB; k++)
+    for (int k = K_ICALL; k <= K_SMC_EXEC; k++)
         if (strlen(kind_name[k]) == n && !memcmp(s, kind_name[k], n))
             return k;
     return 0;
@@ -92,6 +94,8 @@ static void load_existing(const char *path)
         t += 5;
         if (!(e = strchr(t, '"')) || !(k = kind_of(t, (size_t)(e - t))))
             continue;
+        if (k == K_SMC_EXEC && strstr(line, "\"kind\":\"code_write\""))
+            k = K_SMC_WRITE;
         /* A stub entry is keyed by its ordinal, the others by "va". */
         if (k == K_STUB) {
             if (!ord)
@@ -319,6 +323,41 @@ void recomp_discovery_stub(uint32_t ordinal, const char *name, uint32_t ret_va)
     }
     snprintf(f + o, sizeof f - o, "\",\"ret\":\"0x%08X\"", ret_va);
     note(K_STUB, ordinal, f);
+}
+
+/* ,"key":"..." with printable ASCII, quotes and backslashes escaped, into f at o. */
+static size_t put_str(char *f, size_t o, size_t cap, const char *key, const char *v)
+{
+    o += (size_t)snprintf(f + o, cap - o, ",\"%s\":\"", key);
+    for (const char *s = v ? v : ""; *s && o < cap - 4; s++) {
+        unsigned char c = (unsigned char)*s;
+        if (c == '"' || c == '\\')
+            f[o++] = '\\';
+        f[o++] = (c >= 0x20 && c < 0x7F) ? (char)c : '?';
+    }
+    f[o++] = '"';
+    f[o] = 0;
+    return o;
+}
+
+void recomp_discovery_smc_exec(uint32_t target, uint32_t ret_va, const char *where, const char *bytes)
+{
+    char f[200];
+    size_t o = (size_t)snprintf(f, sizeof f, ",\"kind\":\"exec_outside_image\",\"ret\":\"0x%08X\"", ret_va);
+    o = put_str(f, o, sizeof f, "where", where);
+    if (bytes && *bytes)
+        (void)put_str(f, o, sizeof f, "bytes", bytes);
+    note(K_SMC_EXEC, target, f);
+}
+
+void recomp_discovery_smc_write(uint32_t page, uint32_t at, const char *section, const char *by, uint32_t ret_va)
+{
+    char f[240];
+    size_t o = (size_t)snprintf(f, sizeof f, ",\"kind\":\"code_write\",\"at\":\"0x%08X\"", at);
+    o = put_str(f, o, sizeof f, "section", section);
+    o = put_str(f, o, sizeof f, "by", by);
+    snprintf(f + o, sizeof f - o, ",\"ret\":\"0x%08X\"", ret_va);
+    note(K_SMC_WRITE, page, f);
 }
 
 const char *recomp_discovery_path(void)

@@ -492,7 +492,7 @@ Maintain a checklist of required patches and re-apply them after every regenerat
 
 ## Limitations
 
-1. **Self-modifying code**: the lifter assumes code is static. Xbox games rarely use self-modifying code, but some copy protection schemes do.
+1. **Self-modifying code**: the lifter assumes code is static. Xbox games rarely use self-modifying code, but some copy protection schemes do. There is no fallback (no interpreter, no JIT), but the runtime names it (XBA-118, `src/kernel/recomp_smc.h`): the lifted code pages are write-protected once the loader is done, and the first write into each, or an indirect call into the heap, the stack or the image's data, becomes a `{"t":"smc"}` discovery entry and a blocker in `tools.compat`.
 
 2. **FS segment**: x86 `fs:` segment overrides (used for Thread Information Block access) are dropped. The lifter translates `mov eax, fs:[0x28]` as `MEM32(0x28)`, which reads from the wrong memory. This affects ~35 instructions in Burnout 3.
 

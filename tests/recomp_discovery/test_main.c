@@ -108,6 +108,28 @@ int main(void)
         CHECK(strstr(text, "{\"t\":\"icall\",\"va\":\"0x00067890\"") != NULL);
     }
 
+    /* XBA-118: the two smc kinds, each once, each keyed apart (the same va for both). */
+    recomp_discovery_reset();
+    recomp_discovery_smc_exec(0x00400000u, 0x00011234u, "heap", "5589E583EC10C390");
+    recomp_discovery_smc_exec(0x00400000u, 0x00099999u, "heap", "5589E583EC10C390");
+    recomp_discovery_smc_write(0x00400000u, 0x00400010u, ".te\"xt", "a store", 0u);
+    recomp_discovery_smc_write(0x00400000u, 0x00400020u, ".text", "a store", 0u);
+    CHECK(recomp_discovery_written() == 2);
+    text = slurp(path);
+    if (text) {
+        CHECK(strstr(text, "{\"t\":\"smc\",\"va\":\"0x00400000\",\"kind\":\"exec_outside_image\",\"ret\":\"0x00011234\","
+                           "\"where\":\"heap\",\"bytes\":\"5589E583EC10C390\"}\n") != NULL);
+        CHECK(strstr(text, "{\"t\":\"smc\",\"va\":\"0x00400000\",\"kind\":\"code_write\",\"at\":\"0x00400010\","
+                           "\"section\":\".te\\\"xt\",\"by\":\"a store\",\"ret\":\"0x00000000\"}\n") != NULL);
+    }
+    /* Read back with their kinds: a new process writes neither again. */
+    recomp_discovery_reset();
+    recomp_discovery_smc_write(0x00400000u, 0x00400010u, ".text", "a store", 0u);
+    recomp_discovery_smc_exec(0x00400000u, 0x00011234u, "heap", "");
+    CHECK(recomp_discovery_written() == 0);
+    recomp_discovery_smc_write(0x00401000u, 0x00401000u, ".text", "a store", 0u);
+    CHECK(recomp_discovery_written() == 1);
+
     /* An unwritable path: off, with one line on stderr, no crash. */
     set_env("RECOMP_DISCOVERY", "/nonexistent-dir/x/y/discovered.jsonl");
     recomp_discovery_reset();

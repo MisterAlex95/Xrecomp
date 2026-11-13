@@ -41,7 +41,20 @@ this run or an earlier one) is not written again: the file only grows with what 
 {"t":"stub","ord":136,"name":"KeRemoveQueue","ret":"0x00012345"}
                                                              a kernel route that is still a stub (or has no route) was called;
                                                              keyed by ord, no va (XBA-115, src/kernel/kernel_stubs.h)
+{"t":"smc","va":"0x00400000","kind":"exec_outside_image","ret":"0x00011234","where":"heap","bytes":"5589E583EC10C390"}
+                                                             an indirect call or jump into mapped guest memory outside
+                                                             the image's code (where: heap, stack, image_data,
+                                                             contiguous, kernel); skipped as before (XBA-118)
+{"t":"smc","va":"0x00012000","kind":"code_write","at":"0x00012345","section":".text","by":"a store","ret":"0x..."}
+                                                             the first write into a lifted code page: va = the page,
+                                                             at = the address written, by = a store or a system call,
+                                                             ret = the word at the guest stack top (XBA-118)
 ```
+
+`bytes` is the first 8 bytes at the target of an `exec_outside_image`, as hex. They are code the title made at run time
+(decompressed, generated or copied), not bytes of the XBE, and only a short prefix, enough to tell code (a prologue)
+from a wild pointer into data; nothing longer is ever written. Rules and the write protection behind `code_write`:
+`src/kernel/recomp_smc.h`.
 
 Addresses are guest VAs, 8 hex digits. At most 6,144 distinct entries per file.
 
@@ -54,6 +67,11 @@ Addresses are guest VAs, 8 hex digits. At most 6,144 distinct entries per file.
   they name a blocker ([stack-switching.md](stack-switching.md)).
 - `stub` entries are not seeds either: `tools.compat` adds « calls stub ordinal N (Name) » to the run's blocker
   (XBA-115).
+- `smc` entries are not seeds: what they name is not in the XBE as lifted. `tools.compat` and the device grader add
+  « code written or run at run time xN: exec_outside_image 0x... (heap, from 0x...), code_write 0x... (.text) » to the
+  blocker, whatever the stage, and the result line carries the count (`"smc": N`); the Compatibility page counts the
+  titles that have any (XBA-118). An `exec_outside_image` used to be an `icall` entry when it came through the lookup,
+  and a seed candidate.
 - `tools.prepare` reads it before analysing (XBA-97, `tools/prepare/discovered.py`): new `icall`, `thread` and
   `thread_ctx` addresses go through the same gates, the ones that pass are kept in `<work>/discovered-seeds.json` and
   handed to the disassembler, the others in `<work>/discovered-rejected.json` so they are not tried again. A new seed

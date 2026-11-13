@@ -17,6 +17,7 @@
 #endif
 #include "recomp_status.h"
 #include "recomp_stack_switch.h"
+#include "recomp_smc.h"
 #include "xbox_memory_layout.h"
 #include "xbox_seh.h"
 #include "kernel.h"
@@ -1115,6 +1116,11 @@ static void mmio_fault_handler(int sig, siginfo_t *si, void *ucv)
 {
     struct sigaction *prev;
 
+    /* XBA-118, first and on its own: the first write into a write-protected
+     * lifted code page (recomp_smc.c) is recorded, the page opened and the
+     * write retried. Only those pages: any other address goes on below. */
+    if (xbox_SmcFault((uintptr_t)si->si_addr))
+        return;
     if (xbox_PosixMmioFault(ucv, (uintptr_t)si->si_addr))
         return;
     /* A real crash: let the log pump hand the last lines to logcat before
@@ -1179,6 +1185,11 @@ int xbox_PosixInstallMmioFaultHandler(void)
     }
     g_mmio_handler_installed = 1;
     return 0;
+}
+
+int xbox_PosixMmioFaultHandlerInstalled(void)
+{
+    return g_mmio_handler_installed != 0;
 }
 #endif
 
@@ -2361,6 +2372,10 @@ volatile int g_recomp_cas64_lock;
 
 uint32_t g_xbox_code_lo = 0;
 uint32_t g_xbox_code_hi = 0;
+
+/* recomp_smc.c (XBA-118): the guest esp of the thread that faulted. */
+uint32_t xbox_SmcGuestEsp(void);
+uint32_t xbox_SmcGuestEsp(void) { return g_esp; }
 
 /* The guest CPU registers for recompiled code (see RecompCpu in
  * xbox_memory_layout.h). One thread-local block per host thread; every
@@ -3584,6 +3599,7 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
          * the title then maps its own in the same process. */
         g_xbox_image_lo = g_xbox_image_hi = 0;
         g_xbox_code_lo = g_xbox_code_hi = 0;
+        xbox_SmcReset();            /* opens the previous image's code pages (XBA-118) */
 
         fprintf(stderr, "  XBE sections: %u (headers at file offset 0x%08X)\n",
                 num_sections, sect_headers_off);
@@ -3660,6 +3676,9 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
                 sections_loaded++;
                 total_bytes += copy_size;
             }
+            /* The code pages to write-protect once the loader is done (XBA-118). */
+            xbox_SmcNoteSection(sec_va, sec_vsize, have_data ? copy_size : 0,
+                                *(const DWORD *)(sh + SECTHDR_FLAGS), sec_name);
 
             fprintf(stderr, "  [%2u] %-12s VA=0x%08X vsize=%-8u raw=0x%08X rsize=%-8u%s\n",
                     si, sec_name, sec_va, sec_vsize, sec_raw_off, sec_raw_size,
@@ -4456,6 +4475,7 @@ int xbox_GuestWindowHeld(void)
 
 void xbox_MemoryLayoutShutdown(void)
 {
+    xbox_SmcReset();                /* no code page left read-only (XBA-118) */
     /* The ack thread first: every tick writes the NV2A aperture and guest RAM
      * (KeTickCount), so nothing it touches may go before it has stopped. It
      * used to be given 1000 ms and then left running, with g_kernel_memory

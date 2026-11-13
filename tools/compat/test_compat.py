@@ -99,6 +99,29 @@ def test_a_called_stub_is_named_as_a_blocker():
     assert classify(st, [], None, 60, 60, "", disc[1:2])[1] == "no flip; calls stub ordinal 136 (KeRemoveQueue)"
 
 
+def test_code_written_or_run_at_run_time_is_named_and_counted():
+    # XBA-118: {"t":"smc"} records, after the other causes, whatever the stage; the count in the summary.
+    disc = [{"t": "icall", "va": "0x00045678"},
+            {"t": "smc", "va": "0x00400000", "kind": "exec_outside_image", "ret": "0x00011234", "where": "heap",
+             "bytes": "5589E583EC10C390"},
+            {"t": "smc", "va": "0x00012000", "kind": "code_write", "at": "0x00012345", "section": ".text",
+             "by": "a store"}]
+    stage, blocker, summary = classify(playing(90), [8000], None, 90, 60, "", disc)
+    assert stage == "sustained" and summary["smc"] == 2
+    assert blocker == ("code written or run at run time x2: exec_outside_image 0x00400000 (heap, from 0x00011234),"
+                       " code_write 0x00012345 (.text) (XBA-118)")
+    st = [line(t, threads=2) for t in range(1000, 60001, 1000)]
+    assert classify(st, [], None, 60, 60, "", disc)[1] == \
+        "no flip; last discovery: smc 0x00012000; " + blocker
+    assert classify(st, [], None, 60, 60, "", disc[:1])[2]["smc"] == 0
+    many = [dict(disc[2], at="0x0001%04X" % i) for i in range(5)]
+    assert classify(playing(90), [8000], None, 90, 60, "", many)[1].endswith(", +2 more (XBA-118)")
+    # The matrix counts the titles that have any.
+    from tools.compat.__main__ import matrix
+    md = matrix([{"source": "A", "stage": "boots", "smc": 3}, {"source": "B", "stage": "boots"}])
+    assert md.startswith("**2 titles.** boots: 2 (100 %); code written or run at run time (XBA-118): 1")
+
+
 def test_a_launch_of_another_image_is_named():
     st = playing(20)
     log = "  [KERNEL] launch of 'd:\\game.xbe' is not this title (default.xbe): exiting"

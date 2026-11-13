@@ -485,6 +485,14 @@ static int game_main(void *hInstance, void *hPrevInstance, char *lpCmdLine,
     xba_title_start(s_game_dir, s_save_dir);
 #endif
 
+    /* Code written at run time (XBA-118): the loader is done, so the lifted
+     * code pages go read-only and the first write to each is named
+     * (src/kernel/recomp_smc.h; RECOMP_SMC=0: off). */
+    {
+        extern int xbox_SmcArm(void);
+        (void)xbox_SmcArm();
+    }
+
     /* Step 7: Call the recompiled entry point */
     printf("\nStarting game...\n");
     fflush(stdout);

@@ -16,6 +16,7 @@
 
 #define _GNU_SOURCE   /* FNM_CASEFOLD */
 #include "kernel.h"
+#include "recomp_smc.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -1302,6 +1303,9 @@ NTSTATUS __stdcall xbox_NtReadFile(
     if (ByteOffset && ByteOffset->QuadPart >= 0)
         lseek(fd, (off_t)ByteOffset->QuadPart, SEEK_SET);
 
+    /* read() into a write-protected code page would fail with EFAULT, not
+     * fault: open it first, which names it (XBA-118, recomp_smc.h). */
+    xbox_SmcHostWrite(Buffer, Length);
     ssize_t n = read(fd, Buffer, Length);
     if (n < 0) {
         XBOX_TRACE(XBOX_LOG_FILE, "NtReadFile(handle=%p) errno=%d", FileHandle, errno);
