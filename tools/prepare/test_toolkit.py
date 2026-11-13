@@ -109,6 +109,9 @@ PACK_INPUTS = (
     "tools/xiso/source.py", "tools/xiso/xdvdfs.py", "tools/prepare/android.py", "tools/prepare/profiles.py",
     "templates/new-game/src/main.c", "profiles/xdk/d3d8/layer.json", "src/kernel/recomp_smc.h",
     "src/kernel/kernel_disc.h", "src/kernel/recomp_xdk_defaults.h", "src/kernel/nv2a_coverage.h",
+    # Wave 4: the D3D layout table and the layer pick by code probes (XBA-105), the XBE reader (XBA-124).
+    "profiles/xdk/d3d8/d3d8.c", "profiles/xdk/d3d8ltcg/layer.json", "tools/xbe_ident/__init__.py",
+    "tools/xbe_parser/xbe_parser.py", "src/kernel/xbox_xbe_sections.h",
 )
 
 
