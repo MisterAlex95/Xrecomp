@@ -27,7 +27,12 @@
  *   - a thread that exits with an APC queued takes it with it: another
  *     thread's alertable wait does not run it;
  *   - past the queue (64) a request's APC runs inline rather than being lost;
- *   - xbox_SetDeferredIoApc(0) still selects the inline delivery.
+ *   - xbox_SetDeferredIoApc(0) still selects the inline delivery;
+ *   - with KeInsertQueueApc's user APCs (XBA-113) as well: one alertable
+ *     wait runs both sources, the file-I/O completions first; an APC queued
+ *     from another thread while this one is blocked in an alertable wait
+ *     does not wake it (a known gap, kernel_bridge.c bridge_apc_safe_point)
+ *     and runs on this thread at its next alertable wait.
  * Inline (RECOMP_INLINE_APC=1):
  *   - the routine runs during NtReadFile with its context, and esp comes back
  *     exactly past NtReadFile's arguments (deliver_one_apc used to add 12
@@ -51,6 +56,7 @@ extern ptrdiff_t g_xbox_mem_offset;
 #define CHAIN_CONTEXT 0x0000C4A1u  /* this APC issues one more read */
 
 static uint8_t *mem;
+static volatile unsigned long apc_tid;   /* host thread of the last APC */
 static int apc_runs;
 static uint32_t apc_seen[256];     /* contexts, in delivery order */
 static uint32_t file_handle;
@@ -70,10 +76,16 @@ enum {
     OFFSET_VA = 0x30420,  /* LARGE_INTEGER 0 */
     BUF_VA   = 0x31000,
     TIMEOUT_VA = 0x32000, /* LARGE_INTEGER 0: a regression returns, not hangs */
+    TIMEOUT2_VA = 0x32010, /* LARGE_INTEGER -400 ms, relative */
+    STACK3_VA = 0x2C000,  /* the APC-queueing thread's stack */
+    KAPC_VA  = 0x33000,   /* KAPCs (0x28 bytes each) */
+    KAPC2_VA = 0x33040,
+    TIB_VA   = 0x34000,   /* this thread's TIB and KTHREAD, as the loader */
+    KT_VA    = 0x34100,   /* builds them (xbox_AllocThreadTib) */
 };
 
 enum { S_OPEN, S_READ, S_WAIT1EX, S_DELAY, S_WAITNEX, S_KEWAIT1, S_KEWAITN,
-       S_EVENT, S_COUNT };
+       S_EVENT, S_GETCUR, S_APCINIT, S_APCINS, S_COUNT };
 static const uint32_t ordinals[S_COUNT] = {
     202, /* NtOpenFile */
     219, /* NtReadFile */
@@ -83,6 +95,9 @@ static const uint32_t ordinals[S_COUNT] = {
     159, /* KeWaitForSingleObject */
     158, /* KeWaitForMultipleObjects */
     189, /* NtCreateEvent */
+    104, /* KeGetCurrentThread */
+    105, /* KeInitializeApc */
+    118, /* KeInsertQueueApc */
 };
 
 /* stdcall from the current guest esp: push the arguments and a return
@@ -116,6 +131,7 @@ static void test_apc(void)
     if (apc_runs < (int)(sizeof apc_seen / sizeof apc_seen[0]))
         apc_seen[apc_runs] = ctx;
     apc_runs++;
+    apc_tid = (unsigned long)GetCurrentThreadId();
     if (ctx == CHAIN_CONTEXT)       /* the next read, as a streamer does */
         read_with_apc(APC_CONTEXT, 0);
     g_esp += 16;
@@ -340,6 +356,81 @@ static void run_deferred(uint32_t ev)
     xbox_SetDeferredIoApc(1);
 }
 
+/* ── KeInsertQueueApc's user APCs next to the file-I/O ones (XBA-113) ──
+ * The KAPC's NormalRoutine is the same test routine: NormalRoutine(Context,
+ * SystemArgument1, SystemArgument2), stdcall, the shape of a file-I/O APC. */
+static void queue_user_apc(uint32_t apc, uint32_t kt, uint32_t context)
+{
+    uint32_t init[7] = { apc, kt, 0 /* KernelRoutine */, 0, APC_VA,
+                         1 /* UserMode */, context };
+    uint32_t ins[4] = { apc, 0, 0, 0 };
+    call(S_APCINIT, init, 7);
+    call(S_APCINS, ins, 4);
+}
+
+static uint32_t s_target_kt;
+
+static DWORD WINAPI apc_queuer_thread(LPVOID param)
+{
+    (void)param;
+    Sleep(100);                    /* the target is in its wait by now */
+    g_esp = STACK3_VA;
+    queue_user_apc(KAPC2_VA, s_target_kt, 0x303u);
+    return 0;
+}
+
+static void run_ksync_apcs(void)
+{
+    uint32_t kt, ev2, args[4];
+    unsigned long me = (unsigned long)GetCurrentThreadId();
+    HANDLE th;
+
+    ev2 = create_event();          /* never signalled */
+    /* A TIB whose fs:[0x28] names this thread's KTHREAD, in the stand-in. */
+    memset(mem + TIB_VA, 0, 0x40);
+    memset(mem + KT_VA, 0, 0x200);
+    *(uint32_t *)(mem + TIB_VA) = 0xFFFFFFFFu;
+    *(uint32_t *)(mem + TIB_VA + 0x28) = KT_VA;
+    xbox_InitGuestKthread(KT_VA, 0, STACK_VA, STACK_VA - 0x2000);
+    g_fs_base = TIB_VA;
+    g_esp = STACK_VA;
+    call(S_GETCUR, NULL, 0);
+    kt = g_eax;
+    check(kt == KT_VA, "KeGetCurrentThread names this thread's KTHREAD", NULL);
+
+    /* Both sources pending: one alertable wait runs both, I/O first. */
+    apc_runs = 0;
+    read_with_apc(0x301u, 0);
+    queue_user_apc(KAPC_VA, kt, 0x302u);
+    check(apc_runs == 0, "a file-I/O APC and a KeInsertQueueApc user APC queued", NULL);
+    delay_alertable();
+    snprintf(detail, sizeof detail, "runs %d [0x%X 0x%X] status 0x%08X", apc_runs,
+             apc_seen[0], apc_seen[1], g_eax);
+    check(apc_runs == 2 && apc_seen[0] == 0x301u && apc_seen[1] == 0x302u && g_eax == 0xC0u,
+          "one alertable wait runs both sources, the file-I/O completion first", detail);
+    check_esp(STACK_VA, "esp is exact after both");
+    delay_alertable();
+    check(apc_runs == 2 && g_eax != 0xC0u, "the next alertable wait finds nothing", NULL);
+
+    /* Queued from another thread while this one is blocked alertably. */
+    apc_runs = 0;
+    s_target_kt = kt;
+    *(int64_t *)(mem + TIMEOUT2_VA) = -4000000;     /* 400 ms */
+    th = CreateThread(NULL, 0, apc_queuer_thread, NULL, 0, NULL);
+    args[0] = ev2; args[1] = 1 /* UserMode */; args[2] = 1; args[3] = TIMEOUT2_VA;
+    call(S_WAIT1EX, args, 4);
+    WaitForSingleObject(th, INFINITE);
+    CloseHandle(th);
+    snprintf(detail, sizeof detail, "status 0x%08X runs %d", g_eax, apc_runs);
+    check(apc_runs == 0 && g_eax == 0x102u,
+          "an APC queued meanwhile does not wake the wait (known gap): it times out", detail);
+    check_esp(STACK_VA, "esp is exact after the timed-out wait");
+    delay_alertable();
+    snprintf(detail, sizeof detail, "runs %d ctx 0x%X status 0x%08X", apc_runs, apc_seen[0], g_eax);
+    check(apc_runs == 1 && apc_seen[0] == 0x303u && g_eax == 0xC0u && apc_tid == me,
+          "it runs at the next alertable wait, on the target thread", detail);
+}
+
 static void run_inline(void)
 {
     apc_runs = 0;
@@ -413,8 +504,10 @@ int main(void)
                        : "default: deferred delivery");
     if (inl)
         run_inline();
-    else
+    else {
         run_deferred(ev);
+        run_ksync_apcs();
+    }
 
 done:
     DeleteFileA(file);
