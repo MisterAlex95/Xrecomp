@@ -293,33 +293,33 @@ if __name__ == '__main__':
     ti = Image.open(os.path.join(art_dir, 'default-XTIMAGE.png')).convert('RGB')
     frame = Image.open(sys.argv[3]).convert('RGB') if len(sys.argv) > 3 else None
     an, tf = P.from_image(os.path.join(art_dir, 'default-XTIMAGE.png'))
-    T, TID = 'Fable: The Lost Chapters', '4D5300D1'
-    home(os.path.join(out, 'fable-home-0-stock.png'), stock, ti, T, TID, label='MOCK · stock theme (today)')
-    home(os.path.join(out, 'fable-home-1-themed.png'), tf, ti, T, TID, hero=bake_hero(ti), label='MOCK · game theme from $$XTIMAGE: palette + blurred hero backdrop')
-    home(os.path.join(out, 'fable-home-2-themed-flat.png'), tf, ti, T, TID, label='MOCK · game theme, palette only (hero backdrop off)')
+    T, TID = 'Sample Game', '58420001'   # your title's name and ID go here
+    home(os.path.join(out, 'game-home-0-stock.png'), stock, ti, T, TID, label='MOCK · stock theme (today)')
+    home(os.path.join(out, 'game-home-1-themed.png'), tf, ti, T, TID, hero=bake_hero(ti), label='MOCK · game theme from $$XTIMAGE: palette + blurred hero backdrop')
+    home(os.path.join(out, 'game-home-2-themed-flat.png'), tf, ti, T, TID, label='MOCK · game theme, palette only (hero backdrop off)')
     if frame is not None:
-        home(os.path.join(out, 'fable-home-3-themed-lastframe.png'), tf, ti, T, TID, hero=bake_hero(frame, side=160, blur=1.6), label='MOCK · game theme + "where you left off" frame as hero backdrop (phase 2)')
-        game_menu(os.path.join(out, 'fable-gamemenu-themed.png'), tf, frame, T)
-        game_menu(os.path.join(out, 'fable-gamemenu-stock.png'), stock, frame, T)
-    companion(os.path.join(out, 'fable-companion-themed.png'), tf, ti, T)
-    companion(os.path.join(out, 'fable-companion-stock.png'), stock, None, T)
-    home(os.path.join(out, 'fable-home-4-needs-preparing.png'), tf, ti, T, TID, hero=bake_hero(ti), status=('Needs preparing', 'WARN'),
+        home(os.path.join(out, 'game-home-3-themed-lastframe.png'), tf, ti, T, TID, hero=bake_hero(frame, side=160, blur=1.6), label='MOCK · game theme + "where you left off" frame as hero backdrop (phase 2)')
+        game_menu(os.path.join(out, 'game-gamemenu-themed.png'), tf, frame, T)
+        game_menu(os.path.join(out, 'game-gamemenu-stock.png'), stock, frame, T)
+    companion(os.path.join(out, 'game-companion-themed.png'), tf, ti, T)
+    companion(os.path.join(out, 'game-companion-stock.png'), stock, None, T)
+    home(os.path.join(out, 'game-home-4-needs-preparing.png'), tf, ti, T, TID, hero=bake_hero(ti), status=('Needs preparing', 'WARN'),
          lead='This game has to be prepared once before it can be played.', facts=(('TAKES ABOUT', '25 min'), ('INTERNAL FREE', '38 GB'), ('MEMORY', '12 GB')), primary=('Prepare', 'Once, about 25 min, on this device'),
-         note=('Fable: The Lost Chapters is ready', 'OK'), label='MOCK · semantic colours stay: WARN chip amber, OK note green, accent periwinkle')
+         note=(T + ' is ready', 'OK'), label='MOCK · semantic colours stay: WARN chip amber, OK note green, accent periwinkle')
     syn = synthetic_racer(); syn.save(os.path.join(out, 'synthetic-racer-title.png'))
     an2 = P.analyse(syn.resize((64, 64), Image.BOX).convert('RGBA').getdata()); tb = P.build(an2)
-    home(os.path.join(out, 'burnout3-home-expected-SYNTHETIC.png'), tb, syn, 'Burnout 3: Takedown', '4541XXXX', hero=bake_hero(syn),
+    home(os.path.join(out, 'racer-home-expected-SYNTHETIC.png'), tb, syn, 'Sample Racer', '5842XXXX', hero=bake_hero(syn),
          label='MOCK · SYNTHETIC placeholder art (not the game\'s image): what a warm, flame-coloured title image would give')
-    home(os.path.join(out, 'burnout3-home-expected-SYNTHETIC-warn.png'), tb, syn, 'Burnout 3: Takedown', '4541XXXX', hero=bake_hero(syn), status=('Needs preparing', 'WARN'),
+    home(os.path.join(out, 'racer-home-expected-SYNTHETIC-warn.png'), tb, syn, 'Sample Racer', '5842XXXX', hero=bake_hero(syn), status=('Needs preparing', 'WARN'),
          lead='This game has to be prepared once before it can be played.', facts=(('TAKES ABOUT', '25 min'), ('INTERNAL FREE', '38 GB'), ('MEMORY', '12 GB')), primary=('Prepare', 'Once, about 25 min, on this device'),
          label='MOCK · SYNTHETIC placeholder art: an orange accent next to the amber WARN chip (the clash to judge)')
     grey = Image.new('RGB', (128, 128), (90, 90, 92))
     hh = 212.0
     tg = P.build(P.analyse(grey.convert('RGBA').getdata()), fallback_hue=hh); tg['GLOW'] = P.oklch(0.80, 0.16, hh)
-    home(os.path.join(out, 'fallback-home-monogram.png'), tg, None, 'Sample Game', '4D530004', initials='SG', label='MOCK · no usable title image: monogram, hue from the title ID')
-    palette_sheet(os.path.join(out, 'palettes.png'), [('Stock (Theme.java today)', None, stock), ('Fable: The Lost Chapters · $$XTIMAGE 128x128 DXT1', ti, tf),
-        ('Fable · Data/Misc/saveimage.xbx 64x64 (alternative source)', Image.open(os.path.join(art_dir, 'saveimage.png')).convert('RGB'), P.from_image(os.path.join(art_dir, 'saveimage.png'))[1]),
+    home(os.path.join(out, 'fallback-home-monogram.png'), tg, None, 'Sample Game', '58420002', initials='SG', label='MOCK · no usable title image: monogram, hue from the title ID')
+    palette_sheet(os.path.join(out, 'palettes.png'), [('Stock (Theme.java today)', None, stock), (T + ' · $$XTIMAGE 128x128 DXT1', ti, tf),
+        (T + ' · Data/Misc/saveimage.xbx 64x64 (alternative source)', Image.open(os.path.join(art_dir, 'saveimage.png')).convert('RGB'), P.from_image(os.path.join(art_dir, 'saveimage.png'))[1]),
         ('SYNTHETIC warm placeholder (stand-in for a flame-coloured title image)', syn, tb), ('Grey image -> fallback (hue from title ID)', grey, tg)])
-    for n, t in (('fable', tf), ('synthetic', tb)):
+    for n, t in (('game', tf), ('synthetic', tb)):
         print(n, {k: P.hexs(v) for k, v in t.items() if not k.startswith('_')}, t['_hues'])
         for c in P.checks(t): print('   %-36s %5.2f (min %.1f) %s' % (c[0], c[1], c[2], 'ok' if c[1] >= c[2] else 'FAIL'))
