@@ -99,21 +99,28 @@ public class LibraryCheckTest {
 
     @Test
     public void aTitleNeedsPrepareWithoutAPackOrWithAStaleOne() throws Exception {
+        // XBA-130 x XBA-127: the same verdict as Home's (PackFreshness), on the toolkit's content digest.
         String tid = "58420001";
-        assertTrue(LibraryCheck.needsPrepare(files, tid, "", ""));
-        TestSupport.writePack(files, tid, 64);   // toolkit "test", xbe_sha256 "00" (unknown)
-        assertFalse(LibraryCheck.needsPrepare(files, tid, "", ""));
-        assertFalse(LibraryCheck.needsPrepare(files, tid, "", "test"));
-        assertTrue(LibraryCheck.needsPrepare(files, tid, "", "other"));                // toolkit changed
+        String a = new String(new char[64]).replace('\0', 'a'), b = a.replace('a', 'b');
+        String t1 = a.replace('a', '1'), t2 = a.replace('a', '2');
+        assertTrue("no pack", LibraryCheck.needsPrepare(files, tid, "", ""));
+        TestSupport.writePack(files, tid, 64);   // xbe_sha256 "00" (unknown), no toolkit_sha256
+        assertFalse("nothing known on either side", LibraryCheck.needsPrepare(files, tid, "", ""));
+        assertTrue("a pack from before toolkit_sha256 under an APK with a digest: older toolkit",
+                   LibraryCheck.needsPrepare(files, tid, "", t1));
         File pj = new File(Pack.packDir(files, tid), Pack.JSON);
         JSONObject o = new JSONObject(new String(Files.readAllBytes(pj.toPath()), StandardCharsets.UTF_8));
-        String a = new String(new char[64]).replace('\0', 'a'), b = a.replace('a', 'b');
-        TestSupport.write(pj, o.put("xbe_sha256", a).toString());
-        assertFalse(LibraryCheck.needsPrepare(files, tid, a, "test"));
-        assertTrue(LibraryCheck.needsPrepare(files, tid, b, "test"));                 // disc changed
-        assertTrue(LibraryCheck.sameToolkit("0123456789ab", "0123456789abcdef"));
-        assertTrue(LibraryCheck.sameToolkit("unknown", "x"));
-        assertFalse(LibraryCheck.sameToolkit("aaaa", "bbbb"));
+        TestSupport.write(pj, o.put("xbe_sha256", a).put("toolkit_sha256", t1).toString());
+        assertFalse("same XBE, same toolkit: current", LibraryCheck.needsPrepare(files, tid, a, t1));
+        assertTrue("another XBE (disc changed)", LibraryCheck.needsPrepare(files, tid, b, t1));
+        assertTrue("an older toolkit: Home keeps Play, the check prepares",
+                   LibraryCheck.needsPrepare(files, tid, a, t2));
+        assertFalse("an APK without a digest judges no toolkit", LibraryCheck.needsPrepare(files, tid, a, ""));
+        // A commit change that leaves the toolkit tree alone (pack.json's "toolkit" differs) is no reason.
+        TestSupport.write(pj, o.put("toolkit", "0123abcd").toString());
+        assertFalse("another commit, same toolkit digest: current", LibraryCheck.needsPrepare(files, tid, a, t1));
+        assertEquals(PackFreshness.judge(a, b, t1, t1) != PackFreshness.Verdict.CURRENT,
+                     LibraryCheck.needsPrepare(files, tid, b, t1));
     }
 
     @Test

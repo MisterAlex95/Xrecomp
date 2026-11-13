@@ -60,7 +60,7 @@ class CheckPlatform implements CheckDriver.Platform {
     @Override
     public boolean needsPrepare(LibraryCheck.Title t) {
         File f = filesDir();
-        return LibraryCheck.needsPrepare(f, t.tid, t.xbeSha256, LibraryCheck.installedToolkit(f));
+        return LibraryCheck.needsPrepare(f, t.tid, t.xbeSha256, Toolchain.toolkitDigest(c));
     }
 
     /** As the launcher's Prepare: a fresh status first (no stale outcome is read), then PrepareService. */

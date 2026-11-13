@@ -231,7 +231,7 @@ public class CheckActivity extends Activity {
         planAll = plan(null);
         int prep = 0, boot = 0;
         File f = getFilesDir();
-        String tk = LibraryCheck.installedToolkit(f);
+        String tk = Toolchain.toolkitDigest(this);
         for (LibraryCheck.Title t : planAll) {
             if (LibraryCheck.needsPrepare(f, t.tid, t.xbeSha256, tk))
                 prep++;

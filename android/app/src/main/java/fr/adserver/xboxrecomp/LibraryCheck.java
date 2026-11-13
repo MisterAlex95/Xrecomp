@@ -340,33 +340,17 @@ final class LibraryCheck {
         return "";
     }
 
-    /** pack.json's toolkit, or "". */
-    static String packToolkit(File filesDir, String tid) {
-        File f = new File(Pack.packDir(filesDir, tid), Pack.JSON);
-        try {
-            return new JSONObject(PrepareProtocol.readText(f, 1 << 20)).optString("toolkit", "");
-        } catch (IOException | JSONException e) {
-            return "";
-        }
-    }
-
-    /** Two toolkit ids name the same commit (one may be the short form); unknown ones never differ. */
-    static boolean sameToolkit(String a, String b) {
-        if (a == null || b == null || a.isEmpty() || b.isEmpty() || a.equals("unknown") || b.equals("unknown"))
-            return true;
-        return a.startsWith(b) || b.startsWith(a);
-    }
-
     /**
-     * The title needs a Prepare: no valid pack, a pack built from another default.xbe (« disc changed »), or by
-     * another toolkit than the installed one (« toolkit changed »): the check measures the toolkit of this APK.
+     * The title needs a Prepare: no valid pack, or one PackFreshness (XBA-127) does not call current: built from
+     * another default.xbe (« disc changed »), or by an older toolkit than this APK's (« toolkit changed »; Home
+     * still offers Play there, but the check measures this APK's toolkit, so it prepares again). The toolkit is
+     * judged by its content digest (pack.json toolkit_sha256 against Toolchain.toolkitDigest), as Home does: an
+     * update that changed only Java or the shell keeps every pack current.
      */
-    static boolean needsPrepare(File filesDir, String tid, String xbeSha256, String toolkit) {
+    static boolean needsPrepare(File filesDir, String tid, String xbeSha256, String appToolkitDigest) {
         if (Pack.check(filesDir, tid) != Pack.Check.VALID)
             return true;
-        if (!LibraryScreen.packMatches(filesDir, tid, xbeSha256))
-            return true;
-        return !sameToolkit(packToolkit(filesDir, tid), toolkit);
+        return PackFreshness.of(filesDir, tid, xbeSha256, appToolkitDigest) != PackFreshness.Verdict.CURRENT;
     }
 
     /**

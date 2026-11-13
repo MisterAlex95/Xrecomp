@@ -945,8 +945,9 @@ compat-results.jsonl` read it (a Device column appears).
 | `CheckPlatform` | The device: PrepareService, ShellActivity in a fresh main process, ActivityManager (the game's process, `ApplicationExitInfo`), `/proc/<pid>/status` (VmHWM), logcat of the game's PID, the thermal status and the battery, and the embedded CPython for the grade. |
 | `LibraryCheck` | `check.json` (the state), `current.json` (the run the game process belongs to), the plan, `needsPrepare`. |
 
-**Per title.** Needs a Prepare when it has no valid pack, or one built from another `default.xbe` (« disc changed »)
-or by another toolkit than the installed one (« toolkit changed »): the check measures this APK's toolkit. The Prepare
+**Per title.** Needs a Prepare when it has no valid pack, or one Home's pack freshness (XBA-127) does not call current: built
+from another `default.xbe` (« disc changed ») or by an older toolkit than this APK's, by content digest (« toolkit
+changed »; Home keeps Play there, the check prepares, since it measures this APK's toolkit). The Prepare
 is PrepareService's, as from Home (its notification, its `status.json`); failed → the title's line is stage `none`,
 blocker `prepare failed: CODE: msg`; interrupted (killed, cancelled by the system) → started again, at most 3 times.
 A title whose files are not in the app (an image not imported) is prepared from the cached `default.xbe` and not
