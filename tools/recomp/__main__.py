@@ -255,7 +255,7 @@ def main():
                              "--manual-functions, but read straight from the "
                              "source of truth so the two cannot drift. Handles "
                              "sub_X_gen wrappers and pins referenced sub_ names. "
-                             "Ported from the Burnout 3 fork.")
+                             "Ported from an earlier per-title fork.")
     parser.add_argument("--trace-functions", metavar="FILE",
                         help="JSON list of addresses to emit an entry trace "
                              "for (RECOMP_TRACE_ENTER). For bring-up: shows "

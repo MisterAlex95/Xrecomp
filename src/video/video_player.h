@@ -109,4 +109,4 @@ void xbox_FramebufferWindowFrameTris(uint32_t tris);
 int  xbox_HostWindowMain(int (*guest_main)(void));
 #endif
 
-#endif /* BURNOUT3_VIDEO_PLAYER_H */
+#endif /* XBOXRECOMP_VIDEO_PLAYER_H */

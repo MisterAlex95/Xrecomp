@@ -139,3 +139,24 @@ of every D3D8LTCG build that needs the walk (and no D3D8 that does not).
 2. A fix that one title needs: `profiles/titles/<title id>/` (`title.json`, `title.c` with `hooks`, `NOTES.md`).
 3. Once a second title needs the same fix, move it down to the XDK or engine layer and make the title-specific part
    (addresses) a `param`.
+
+## No per-title code outside profiles/titles (XBA-109)
+
+A title ID, a game's name or one game's guest address belongs in `profiles/titles/<title id>/`, never in `src/`,
+`include/`, `templates/`, `tools/` or `android/`. `tools/ci/title_guard.py` checks it in the linux CI job (through
+`tools/ci/test_title_guard.py`, part of `pytest tools/`); run it by hand with `python3 tools/ci/title_guard.py`.
+
+It reads **code tokens**, not prose. Comments are history and stay free: « Fable does X, hence this generic path »
+explains why generic code exists. Identifiers and string literals may carry none of the three. A Python docstring is
+prose for names, but not for title IDs and addresses (it is printed by `--help` and holds copy-paste usage examples).
+
+- **Retail title ID**: 8 hex digits whose two high bytes are upper-case letters (the publisher code, `4D53` « MS ») and
+  whose low word is below `0x1000`. `5842xxxx` (« XB ») is ours: tests and the synthetic library use it.
+- **Game name**: a short list of distinctive names in the guard, matched on whole words (`isFableHook` and
+  `BURNOUT3_X` match, `Halogen` does not).
+- **Game address**: a `0x` value or `sub_XXXXXXXX` that a title's profile names (its `.json` values, the `sub_`
+  functions of its `.c`), plus a few known former defaults.
+
+Not scanned: Markdown, tests (`tools/**/test_*.py`, `android/**/src/test/**`), `docs/`, `profiles/`, `tests/`. A real
+exception goes into `tools/ci/title_guard_allow.txt` with its reason (today: upstream's reference section tables,
+kept byte-identical for `tools/sync_upstream.sh`, and a French word that is also a game's name).
