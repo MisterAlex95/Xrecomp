@@ -20,6 +20,8 @@
  * layout header into the platform directory. */
 extern void xbox_path_init(const char *game_dir, const char *save_dir);
 extern int xbox_PosixInstallMmioFaultHandler(void);
+extern int xbox_disc_spec_is_image(const char *spec);
+extern int xbox_disc_mounted(void);
 
 void recomp_app_set_defaults(int android)
 {
@@ -80,6 +82,13 @@ int recomp_app_start(const char *external, const char *internal,
         have_game = recomp_storage_resolve(external, internal, store);
     if (have_game >= 0)
         xbox_path_init(store->game_dir, store->save_dir);
+    /* A disc image the kernel could not mount (kernel_disc.c said why): no
+     * game, as for a folder without default.xbe. */
+    if (have_game > 0 && xbox_disc_spec_is_image(store->game_dir) && !xbox_disc_mounted()) {
+        fprintf(stderr, "xboxrecomp: %s: the disc image cannot be read\n", store->game_dir);
+        store->xbe[0] = '\0';
+        have_game = 0;
+    }
     else
         fprintf(stderr, "xboxrecomp: no usable storage paths (external %s)\n",
                 external ? external : "none");

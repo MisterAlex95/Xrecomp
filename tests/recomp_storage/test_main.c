@@ -63,6 +63,30 @@ int main(void)
     CHECK(recomp_storage_resolve(NULL, in, &s) == 0);
     unsetenv("RECOMP_GAME_DIR");
 
+    /* 4b. A disc image read in place (XBA-126): a file, or "fd:N", is not created and names default.xbe inside. */
+    {
+        char img[600], fdspec[32];
+        struct stat st;
+        snprintf(img, sizeof img, "%s/Game.iso", root);
+        touch(img);
+        setenv("RECOMP_GAME_DIR", img, 1);
+        CHECK(recomp_storage_resolve(ext, in, &s) == 1);
+        CHECK(strcmp(s.game_dir, img) == 0);
+        snprintf(p, sizeof p, "%s/default.xbe", img);
+        CHECK(strcmp(s.xbe, p) == 0);
+        CHECK(stat(img, &st) == 0 && S_ISREG(st.st_mode));          /* still the file */
+        FILE *f = fopen(img, "rb");
+        snprintf(fdspec, sizeof fdspec, "fd:%d", f ? fileno(f) : -1);
+        setenv("RECOMP_GAME_DIR", fdspec, 1);
+        CHECK(recomp_storage_resolve(ext, in, &s) == 1);
+        CHECK(strcmp(s.game_dir, fdspec) == 0 && strncmp(s.xbe, fdspec, strlen(fdspec)) == 0);
+        if (f)
+            fclose(f);
+        CHECK(recomp_storage_resolve(ext, in, &s) == 0);             /* the descriptor is gone */
+        CHECK(s.xbe[0] == '\0');
+        unsetenv("RECOMP_GAME_DIR");
+    }
+
     /* 5. Bad arguments. */
     CHECK(recomp_storage_resolve(ext, NULL, &s) == -1);
     CHECK(recomp_storage_resolve(NULL, in, &s) == -1);

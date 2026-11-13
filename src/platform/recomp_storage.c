@@ -9,8 +9,21 @@
 #include <strings.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <fcntl.h>
+#include <unistd.h>
 
 #define mkdir_one(p) mkdir((p), 0755)
+
+/* A disc image read in place (XBA-126): "fd:N[,M...]" from the shell, or a
+ * regular file. Its default.xbe is checked when the kernel mounts it
+ * (xbox_path_init, kernel_disc.c), not here: this file links no runtime. */
+static int image_spec(const char *game_dir)
+{
+    struct stat st;
+    if (strncmp(game_dir, "fd:", 3) == 0)
+        return fcntl(atoi(game_dir + 3), F_GETFD) != -1 ? 1 : -1;
+    return stat(game_dir, &st) == 0 && S_ISREG(st.st_mode) ? 1 : 0;
+}
 
 static int fmt(char *dst, const char *a, const char *b)
 {
@@ -88,10 +101,20 @@ int recomp_storage_resolve(const char *external, const char *internal,
     if (fmt(out->save_dir, internal, "save") != 0)
         return -1;
 
-    mkdir_p(out->game_dir);
     mkdir_p(out->save_dir);
-
-    int found = find_xbe(out->game_dir, out->xbe);
+    int image = image_spec(out->game_dir);
+    int found;
+    if (image) {
+        found = image > 0 && fmt(out->xbe, out->game_dir, "default.xbe") == 0;
+        if (!found)
+            out->xbe[0] = '\0';
+        printf("storage: game=%s (disc image%s) save=%s\n", out->game_dir,
+               image > 0 ? "" : ", descriptor not open", out->save_dir);
+        fflush(stdout);
+        return found;
+    }
+    mkdir_p(out->game_dir);
+    found = find_xbe(out->game_dir, out->xbe);
     printf("storage: game=%s save=%s (default.xbe %s)\n",
            out->game_dir, out->save_dir, found ? "found" : "missing");
     fflush(stdout);
