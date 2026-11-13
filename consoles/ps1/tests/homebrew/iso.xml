@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- mkpsxiso layout of every PS1 homebrew disc (XBA-149), configured by CMakeLists.txt per program.
+     Paths are relative to the build directory. No licence data: our discs are for emulators and
+     the recompiler, not for booting a retail console. -->
+<iso_project>
+	<track type="data">
+		<identifiers
+			system        ="PLAYSTATION"
+			volume        ="XBA_${XBA_PROG_UPPER}"
+			volume_set    ="XBA_${XBA_PROG_UPPER}"
+			publisher     ="XBA HOMEBREW CORPUS"
+			data_preparer ="PSN00BSDK ${PSN00BSDK_VERSION}"
+			application   ="PLAYSTATION"
+			copyright     ="README.TXT;1"
+		/>
+		<directory_tree>
+			<file name="SYSTEM.CNF" type="data" source="${XBA_PROG}.cnf" />
+			<file name="${XBA_DISC_NAME}.EXE" type="data" source="${XBA_PROG}.exe" />
+${XBA_EXTRA_FILES}
+			<dummy sectors="64"/>
+		</directory_tree>
+	</track>
+</iso_project>
