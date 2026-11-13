@@ -30,7 +30,8 @@ else()
     # The SDL window's key and focus events into that table; the touch overlay
     # pad (input_overlay.h, the Android companion panel).
     target_sources(xbox_input PRIVATE keyboard_sdl.c input_overlay.c)
-    target_link_libraries(xbox_input PUBLIC platform SDL2::SDL2)
+    # xbr_host: the host layer (src/host, XBA-145), which carries input_ports since then.
+    target_link_libraries(xbox_input PUBLIC platform xbr_host SDL2::SDL2)
 endif()
 
 if(MSVC)

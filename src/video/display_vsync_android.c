@@ -15,7 +15,8 @@
  * every 100 ms (the grid drifts by microseconds per second), so the thread
  * wakes ~10 times a second. The refresh-rate callback (API 30) gives the
  * nominal period and restarts the grid when the panel switches rate. Each
- * sample republishes the grid to the executor (nv2a_pb_exec_display_clock);
+ * sample republishes the grid to the sink given at start (the Xbox
+ * presenter passes the executor's nv2a_pb_exec_display_clock, XBA-145);
  * a grid lost is published as none.
  *
  * Paused (app in the background), callbacks may stop: the grid then goes
@@ -31,7 +32,7 @@
 #include <stdio.h>
 #include <time.h>
 
-extern void nv2a_pb_exec_display_clock(uint64_t vsync_ns, uint64_t period_ns, uint32_t gen);
+static display_vsync_sink s_sink;      /* who gets the grid (the Xbox executor: nv2a_pb_exec_display_clock) */
 
 typedef void (*post_vsync_fn)(AChoreographer *, AChoreographer_vsyncCallback, void *);
 typedef size_t (*preferred_fn)(const AChoreographerFrameCallbackData *);
@@ -64,9 +65,9 @@ static void publish(int was_locked, uint32_t was_gen)
 {
     uint64_t ref, per;
     if (display_clock_get(&s_dc, &ref, &per))
-        nv2a_pb_exec_display_clock(ref, per, s_dc.gen);
+        s_sink(ref, per, s_dc.gen);
     else if (was_locked || was_gen != s_dc.gen)
-        nv2a_pb_exec_display_clock(0, 0, s_dc.gen);
+        s_sink(0, 0, s_dc.gen);
 }
 
 static void sample(uint64_t t_ns)
@@ -141,18 +142,21 @@ static void *vsync_thread(void *arg)
         ALooper_pollOnce(timeout, NULL, NULL, NULL);
     }
     AChoreographer_unregisterRefreshRateCallback(s_ch, on_refresh_rate, NULL);
-    nv2a_pb_exec_display_clock(0, 0, s_dc.gen + 1u);
+    s_sink(0, 0, s_dc.gen + 1u);
     ALooper_release(s_looper);
     return NULL;
 }
 
-int display_vsync_android_start(uint64_t nominal_ns)
+int display_vsync_android_start(uint64_t nominal_ns, display_vsync_sink sink)
 {
     void *lib;
     int ok;
 
     if (s_run)
         return 1;
+    if (!sink)
+        return 0;
+    s_sink = sink;
     lib = dlopen("libandroid.so", RTLD_NOW);
     if (lib) {
         s_post_vsync = (post_vsync_fn)dlsym(lib, "AChoreographer_postVsyncCallback");

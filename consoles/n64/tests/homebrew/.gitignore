@@ -1,0 +1,9 @@
+# Build outputs of the homebrew corpus (XBA-149): never committed. The normal output dir is the
+# repo-level build/homebrew/ (already ignored); these cover an in-tree build by hand.
+build/
+*.elf
+*.map
+*.o
+*.z64
+*.v64
+*.n64

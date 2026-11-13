@@ -41,6 +41,14 @@ typedef struct recomp_storage {
 int recomp_storage_resolve(const char *external, const char *internal,
                            recomp_storage *out);
 
+/* The console-agnostic form (XBA-145, src/platform/HOST_LAYER.md): the same
+ * directories, with `entry` the file looked up case-insensitively in game_dir
+ * instead of default.xbe (its path goes to out->xbe, the field keeps the Xbox
+ * name). entry NULL or "" looks for nothing: the directories only, return 0.
+ * recomp_storage_resolve is this with "default.xbe". */
+int recomp_storage_resolve_entry(const char *external, const char *internal,
+                                 const char *entry, recomp_storage *out);
+
 #ifdef __cplusplus
 }
 #endif

@@ -34,7 +34,7 @@ ENV SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy JOBS=${JOBS} \
 # job made it thrash on 2026-11-09. JOBS caps the parallel compiles for the same reason.
 # 1. the toolkit itself, and the two tests the root build lists
 # 2. every self-contained C test project under tests/ (report in /reports/c-tests.md)
-# 3. the Python side (lifter unit tests)
+# 3. the Python side (lifter unit tests, and the console pipelines' under consoles/, XBA-146)
 RUN mkdir -p /work && trap 'rm -rf /work; find /tmp -mindepth 1 -delete' EXIT \
     && export TMPDIR=/work TMP=/work TEMP=/work \
     && mkdir -p /reports \
@@ -42,4 +42,4 @@ RUN mkdir -p /work && trap 'rm -rf /work; find /tmp -mindepth 1 -delete' EXIT \
     && cmake --build /work/build/root -j"$JOBS" \
     && ctest --test-dir /work/build/root --output-on-failure --timeout 300 \
     && tools/run_c_tests.sh /work/build/c-tests /reports/c-tests.md \
-    && python3 -m pytest -q -p no:cacheprovider tools/ | tee /reports/pytest.txt
+    && python3 -m pytest -q -p no:cacheprovider tools/ consoles/ | tee /reports/pytest.txt

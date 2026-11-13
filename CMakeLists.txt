@@ -80,6 +80,35 @@ add_subdirectory(src/usb)
 # Input: Xbox gamepad → XInput
 add_subdirectory(src/input)
 
+# The host layer (XBA-145, src/platform/HOST_LAYER.md): xbr_host, the console-agnostic window + GL present, pads,
+# audio out, pacing, frame generation, storage, lifecycle and config every runtime links (the Xbox libraries and
+# consoles/*). POSIX hosts.
+if(NOT WIN32)
+    add_subdirectory(src/host)
+endif()
+
+# Other consoles (XBA-146, consoles/README.md): each runtime links xbr_host only. ON by default on Linux and macOS,
+# OFF on Android and Windows until each one is ready there.
+if(ANDROID OR WIN32)
+    set(_xbr_console_default OFF)
+else()
+    set(_xbr_console_default ON)
+endif()
+option(XBR_CONSOLE_GBA "Build the Game Boy Advance runtime (consoles/gba)" ${_xbr_console_default})
+option(XBR_CONSOLE_PS1 "Build the PlayStation runtime (consoles/ps1)" ${_xbr_console_default})
+option(XBR_CONSOLE_N64 "Build the Nintendo 64 runtime (consoles/n64)" ${_xbr_console_default})
+set(XBR_CONSOLES "")
+foreach(_c gba ps1 n64)
+    string(TOUPPER ${_c} _C)
+    if(XBR_CONSOLE_${_C})
+        if(WIN32)
+            message(FATAL_ERROR "XBR_CONSOLE_${_C}: the console runtimes are POSIX-only (xbr_host)")
+        endif()
+        add_subdirectory(consoles/${_c}/runtime)
+        list(APPEND XBR_CONSOLES ${_c})
+    endif()
+endforeach()
+
 # The GPU render back end (XBA-27): POSIX hosts, selected with RECOMP_GPU=1.
 option(XBOXRECOMP_BUILD_GPU "Build the GL render back end for the pushbuffer executor" ON)
 if(XBOXRECOMP_BUILD_GPU AND NOT WIN32)
@@ -172,5 +201,8 @@ if(XBOXRECOMP_BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests/mmx_helpers)
     add_subdirectory(tests/xmm_helpers)
+    foreach(_c IN LISTS XBR_CONSOLES)
+        add_subdirectory(consoles/${_c}/tests)
+    endforeach()
 endif()
 
