@@ -109,6 +109,50 @@ def test_scope_table_stops_at_an_entry_that_is_not_one():
     assert f.funclets == {START + 0x40} and f.resume == [START + 0x30]
 
 
+def _prolog_frame(*level_stores):
+    return [_insn(START, "push", imm(0x20)), _insn(START + 1, "push", imm(SCOPE)),
+            _insn(START + 2, "call", imm(PROLOG), call_target=PROLOG)] + [
+        _insn(START + 3 + k, *ops) for k, ops in enumerate(level_stores)]
+
+
+# The next function's scope table follows this one's in .rdata; its first
+# entry starts at enclosing level -1 as well, so only the try levels this
+# function enters bound its own (XBA-139).
+_NEIGHBOURS = _table(SCOPE, -1, START + 0x40, START + 0x30,
+                     -1, 0x00013540, 0x00013530)
+
+
+def test_and_ebp_minus4_zero_enters_level_zero():
+    """MSVC's short form `and dword ptr [ebp-4], 0`: one entry, not the
+    neighbour's too."""
+    insns = _prolog_frame(("and", ebp_m4(), imm(0)),
+                          ("or", ebp_m4(), imm(-1)))
+    f = analyze_seh_frame(insns, START, END, _reader(_NEIGHBOURS), {PROLOG},
+                          is_code=_code)
+    assert f.funclets == {START + 0x40} and f.resume == [START + 0x30]
+    assert f.outside == set()
+
+
+def test_a_level_stored_from_a_zeroed_register():
+    insns = _prolog_frame(("xor", reg("ebx"), reg("ebx")),
+                          ("mov", ebp_m4(), reg("ebx")))
+    f = analyze_seh_frame(insns, START, END, _reader(_NEIGHBOURS), {PROLOG},
+                          is_code=_code)
+    assert f.outside == set() and f.funclets == {START + 0x40}
+
+
+def test_a_register_overwritten_is_not_known():
+    """`mov [ebp-4], ebx` after ebx changed says nothing: with no other
+    store the table is read as before (until an entry fails)."""
+    insns = _prolog_frame(("xor", reg("ebx"), reg("ebx")),
+                          ("mov", reg("ebx"), Operand(type="mem", mem_base="ebp",
+                                                      mem_disp=8)),
+                          ("mov", ebp_m4(), reg("ebx")))
+    f = analyze_seh_frame(insns, START, END, _reader(_NEIGHBOURS), {PROLOG},
+                          is_code=_code)
+    assert f.outside == {0x00013540, 0x00013530}
+
+
 def test_cxx_frame_gives_unwind_actions_catches_and_continuations():
     catch = START + 0x60
     insns = [
