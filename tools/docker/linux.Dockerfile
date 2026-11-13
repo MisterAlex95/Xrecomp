@@ -17,6 +17,8 @@ ENV PATH=/opt/venv/bin:$PATH
 
 FROM deps AS test
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+# git for tools/test_sync_upstream.py (fixture repositories). Its own layer, so the deps layer above stays cached.
+RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY . .
 # Headless: SDL picks its dummy drivers, the tests that need a real display or audio device skip (exit 77).

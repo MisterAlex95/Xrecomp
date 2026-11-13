@@ -5,7 +5,9 @@
 #
 # 1. fetches upstream/main;
 # 2. merges it into main with a merge commit;
-# 3. on the first conflict, aborts the merge, lists the conflicting files and exits 1;
+# 3. on conflicts, first resolves those that come only from text we renamed in upstream's files (include guards, the
+#    thunk table's default: tools/sync_upstream_resolve.py); if any other is left, aborts the merge, lists the
+#    conflicting files and exits 1;
 # 4. with --push, pushes main to origin (the Gitea fork).
 # The merge runs in the worktree that has main checked out (it must be clean), or in a temporary worktree.
 set -euo pipefail
@@ -13,6 +15,7 @@ set -euo pipefail
 PUSH=0
 [ "${1:-}" = "--push" ] && PUSH=1
 
+here=$(cd "$(dirname "$0")" && pwd)
 cd "$(git rev-parse --show-toplevel)"
 git remote get-url upstream >/dev/null 2>&1 \
     || git remote add upstream https://github.com/sp00nznet/xboxrecomp
@@ -36,10 +39,14 @@ else
         exit 2
     fi
     if ! git -C "$wt" merge --no-ff -q -m "Merge upstream $(git describe --tags --always upstream/main) into main" upstream/main; then
-        echo "Conflict merging upstream into main. Files:" >&2
-        git -C "$wt" diff --name-only --diff-filter=U | sed 's/^/  /' >&2
-        git -C "$wt" merge --abort
-        exit 1
+        if python3 "$here/sync_upstream_resolve.py" --repo "$wt"; then
+            git -C "$wt" commit -q --no-edit
+        else
+            echo "Conflict merging upstream into main. Files:" >&2
+            git -C "$wt" diff --name-only --diff-filter=U | sed 's/^/  /' >&2
+            git -C "$wt" merge --abort
+            exit 1
+        fi
     fi
     echo "Merged: $(git log -1 --format='%h %s' main)"
 fi
