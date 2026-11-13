@@ -133,9 +133,18 @@ class BuildProgress:
             progress(pct, "compiling %s" % got[1])
 
 
-def run(args, log, cwd=ROOT, on_line=None):
+def _elapsed(sec):
+    sec = int(sec)
+    return "%d s" % sec if sec < 60 else "%d min %02d s" % (sec // 60, sec % 60)
+
+
+def run(args, log, cwd=ROOT, on_line=None, tick=None):
     """Run a command, its output appended to `log`; raise with the tail on failure.
-    With on_line, each output line is also handed to it as it comes."""
+    With on_line, each output line is also handed to it as it comes. With
+    tick=(pct_from, pct_to, msg, typical_s) and --progress, a long silent step
+    still moves: every few seconds the step's percent creeps from pct_from
+    towards pct_to (never reaching it) and the message carries the elapsed
+    time, so a launcher does not look stuck on "disassembling"."""
     t0 = time.time()
     with open(log, "a") as f:
         f.write("\n$ %s\n" % " ".join(args))
@@ -152,7 +161,18 @@ def run(args, log, cwd=ROOT, on_line=None):
                     on_line(line)
                 p.stdout.close()
                 f.flush()
-            rc = p.wait()
+            if tick is not None and on_line is None and _REP is not None:
+                lo, hi, msg, typical = tick
+                while True:
+                    try:
+                        rc = p.wait(timeout=5)
+                        break
+                    except subprocess.TimeoutExpired:
+                        el = time.time() - t0
+                        frac = el / (el + max(typical, 1.0))     # 0 -> 1, never 1
+                        progress(int(lo + (hi - lo) * frac), "%s (%s)" % (msg, _elapsed(el)))
+            else:
+                rc = p.wait()
         except BaseException:       # as subprocess.call: never leave the child running
             p.kill()
             p.wait()
@@ -600,18 +620,20 @@ def desktop(a):
         if disc_seeds:
             cmd += ["--seed-functions", disc_seeds]
         progress(5, "disassembling")
-        t = run(cmd, log)
+        t = run(cmd, log, tick=(5, 58, "disassembling", 90))
         note("disassembled in %.0f s" % t, 60)
         progress(60, "identifying library functions")
         run([py, "-m", "tools.func_id", xbe,
              "--functions", os.path.join(an, "disasm", "functions.json"),
              "--strings", os.path.join(an, "disasm", "strings.json"),
              "--xrefs", os.path.join(an, "disasm", "xrefs.json"),
-             "-o", os.path.join(an, "func_id")], log)
+             "-o", os.path.join(an, "func_id")], log,
+            tick=(60, 78, "identifying library functions", 30))
         progress(80, "ABI analysis")
         run([py, "-m", "tools.abi_analysis", xbe, "--disasm-dir", os.path.join(an, "disasm"),
              "--func-id-dir", os.path.join(an, "func_id"),
-             "--output-dir", os.path.join(an, "abi")], log)
+             "--output-dir", os.path.join(an, "abi")], log,
+            tick=(80, 98, "ABI analysis", 30))
         stamp = dict(want, analysis=True)
         with open(stamp_path, "w") as f:
             json.dump(stamp, f)
@@ -640,7 +662,8 @@ def desktop(a):
                "--abi-dir", os.path.join(an, "abi"), "--gen-dir", fresh]
         for fn in (profile or {}).get("exclude_manual", []):
             cmd += ["--exclude-manual", os.path.join(proj, "src", "title", fn)]
-        t = run(cmd, log)
+        progress(2, "lifting")
+        t = run(cmd, log, tick=(2, 98, "lifting", 100))
         kept, written, removed = sync_generated(fresh, gen)
         note("%d C files in %.0f s (%d changed, %d unchanged, %d removed)"
              % (len(os.listdir(gen)), t, written, kept, removed), 100)

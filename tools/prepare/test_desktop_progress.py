@@ -64,7 +64,7 @@ def _fake_build(monkeypatch, lines=("[1/4] Building C object a.o", "[2/4] Buildi
     on_line and leaves the executable (or fails like a compile error)."""
     real = prep.run
 
-    def run(args, log, cwd=prep.ROOT, on_line=None):
+    def run(args, log, cwd=prep.ROOT, on_line=None, tick=None):
         if args[0] != "cmake":
             return real(args, log, cwd, on_line)
         if "--build" in args:
@@ -213,7 +213,7 @@ def test_early_errors(tmp_path, capsys, make, code):
 def test_sigterm_cancels(tmp_path, capsys, monkeypatch):
     real = prep.run
 
-    def run(args, log, cwd=prep.ROOT, on_line=None):
+    def run(args, log, cwd=prep.ROOT, on_line=None, tick=None):
         if "tools.func_id" in args:
             os.kill(os.getpid(), signal.SIGTERM)
         return real(args, log, cwd, on_line)
@@ -372,3 +372,38 @@ def test_a_second_prepare_of_the_same_work_folder_is_refused(tmp_path, capsys):
     again = pm._lock_work(str(tmp_path))
     assert again
     again.close()
+
+
+def test_a_long_silent_step_ticks_with_elapsed_time(tmp_path, monkeypatch):
+    # Fable's disassembly is minutes of silence; the launcher sat on
+    # "analyse 5 % disassembling". With tick=, progress creeps and says how long.
+    import sys
+    from tools.prepare import __main__ as pm
+    from tools.prepare.progress import Reporter, parse_line
+    import io
+    buf = io.StringIO()
+    monkeypatch.setattr(pm, "_REP", Reporter(stream=buf))
+    monkeypatch.setattr(pm, "_STEP", 2)
+    real_wait = pm.subprocess.Popen.wait
+    calls = {"n": 0}
+
+    def fast_wait(self, timeout=None):
+        if timeout is not None and calls["n"] < 3:
+            calls["n"] += 1
+            raise pm.subprocess.TimeoutExpired(self.args, timeout)
+        return real_wait(self)
+    monkeypatch.setattr(pm.subprocess.Popen, "wait", fast_wait)
+    clock = {"t": 1000.0}
+
+    class FakeTime:
+        @staticmethod
+        def time():
+            clock["t"] += 30.0          # each look at the clock: 30 s later
+            return clock["t"]
+    monkeypatch.setattr(pm, "time", FakeTime)
+    pm.run([sys.executable, "-c", "pass"], str(tmp_path / "log"), tick=(5, 58, "disassembling", 90))
+    lines = [parse_line(l) for l in buf.getvalue().splitlines() if l.startswith("XBA_PROGRESS")]
+    assert len(lines) == 3, buf.getvalue()
+    pcts = [l["pct"] for l in lines]
+    assert all(5 <= p < 58 for p in pcts) and pcts == sorted(pcts), pcts
+    assert all("disassembling (" in l["msg"] for l in lines), lines
