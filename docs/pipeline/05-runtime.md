@@ -215,7 +215,7 @@ stub is in `src/kernel/kernel_stub_table.c`: its first call (then the 10th, 100t
 | Kernel (IRQL fastcalls) | 2 | 2 | 0 | 0 | - |
 | Kernel internals | 2 | 1 | 0 | 1 | 163 KiUnlockDispatcherDatabase |
 | Memory manager | 25 | 21 | 0 | 4 | 174 MmIsAddressValid, 178 MmPersistContiguousMemory, 376 MmDbgQueryAvailablePages, 377 MmDbgReleaseAddress |
-| Native API (files, events, memory) | 55 | 51 | 0 | 4 | 209 NtQueryEvent, 213 NtQueryMutant, 214 NtQuerySemaphore, 216 NtQueryTimer |
+| Native API (files, events, memory) | 55 | 55 | 0 | 0 | - |
 | Object manager | 10 | 10 | 0 | 0 | - |
 | Network PHY | 2 | 2 | 0 | 0 | - |
 | Process / thread | 5 | 4 | 0 | 1 | 257 PsSetCreateThreadNotifyRoutine |
@@ -223,7 +223,7 @@ stub is in `src/kernel/kernel_stub_table.c`: its first call (then the 10th, 100t
 | Crypto | 17 | 17 | 0 | 0 | - |
 | XBE sections | 2 | 2 | 0 | 0 | - |
 | Other (port I/O, ...) | 17 | 14 | 0 | 3 | 88 KdDebuggerEnabled, 89 KdDebuggerNotPresent, 332 WRITE_PORT_BUFFER_UCHAR |
-| **All** | **347** | **307** | **9** | **31** | |
+| **All** | **347** | **311** | **9** | **27** | |
 <!-- kernel-coverage:end -->
 
 ### Data Exports

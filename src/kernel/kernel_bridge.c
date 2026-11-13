@@ -10376,14 +10376,65 @@ static void bridge_NtQueryDirectoryObject(void)
     g_eax = 0;
 }
 
-/* --- NtQueryEvent (ordinal 209, 4 args = 16 bytes) --- */
+/* ── NtQueryEvent / NtQueryMutant / NtQuerySemaphore / NtQueryTimer ──
+ *
+ * Each takes a handle and a basic-information structure (nxdk xboxkrnl.h:
+ * two arguments each; the table said four or five). The object's state is
+ * the host object's: the POSIX shim answers w32_query_object, Windows its
+ * own ntdll NtQuery* on the same handle (the host objects are real NT
+ * objects there, with the same structures). A handle that is no object is
+ * STATUS_INVALID_HANDLE, one of another kind STATUS_OBJECT_TYPE_MISMATCH. */
+#ifndef W32_QUERY_EVENT                     /* Windows: no shim header */
+#define W32_QUERY_EVENT     1
+#define W32_QUERY_SEMAPHORE 2
+#define W32_QUERY_MUTEX     3
+#define W32_QUERY_TIMER     4
+#endif
+
+static uint32_t bridge_query_host(uint32_t token, int want, LONG info[3])
+{
+    HANDLE h = bridge_resolve_handle(token);
+#ifdef _WIN32
+    typedef LONG (NTAPI *nt_query_fn)(HANDLE, ULONG, PVOID, ULONG, PULONG);
+    static const char *const names[5] = { NULL, "NtQueryEvent", "NtQuerySemaphore",
+                                          "NtQueryMutant", "NtQueryTimer" };
+    LONG buf[4] = { 0, 0, 0, 0 };
+    ULONG ret = 0;
+    nt_query_fn f = (nt_query_fn)(void *)GetProcAddress(GetModuleHandleA("ntdll.dll"), names[want]);
+    LONG st;
+    if (!h || !f)
+        return 0xC0000008u;
+    st = f(h, 0, buf, sizeof buf, &ret);
+    if (st < 0)
+        return (uint32_t)st;
+    info[0] = buf[0];
+    info[1] = want == W32_QUERY_MUTEX ? ((UCHAR *)&buf[1])[0] : buf[1];
+    info[2] = want == W32_QUERY_TIMER ? ((UCHAR *)&buf[2])[0] : 0;
+    return 0;
+#else
+    int kind = h ? w32_query_object(h, info) : 0;
+    if (!kind)
+        return 0xC0000008u;                  /* STATUS_INVALID_HANDLE */
+    return kind == want ? 0 : 0xC0000024u;   /* STATUS_OBJECT_TYPE_MISMATCH */
+#endif
+}
+
+/* --- NtQueryEvent (ordinal 209, 2 args = 8 bytes)
+ * EVENT_BASIC_INFORMATION { EVENT_TYPE EventType; LONG EventState; } */
 static void bridge_NtQueryEvent(void)
 {
-    (void)STACK_ARG(0);
-    (void)STACK_ARG(1);
-    (void)STACK_ARG(2);
-    (void)STACK_ARG(3);
-    g_eax = 0;
+    LONG info[3];
+    uint32_t out = STACK_ARG(1);
+
+    if (!out || !bridge_buf_ok(out, 8, "NtQueryEvent")) {
+        g_eax = 0xC0000005u;
+        return;
+    }
+    g_eax = bridge_query_host(STACK_ARG(0), W32_QUERY_EVENT, info);
+    if (g_eax == 0) {
+        BRIDGE_MEM32(out) = (uint32_t)info[0];
+        BRIDGE_MEM32(out + 4) = (uint32_t)info[1];
+    }
 }
 
 /* --- NtQueryIoCompletion (ordinal 212, 2 args = 8 bytes)
@@ -10406,37 +10457,63 @@ static void bridge_NtQueryIoCompletion(void)
     g_eax = 0;
 }
 
-/* --- NtQueryMutant (ordinal 213, 5 args = 20 bytes) --- */
+/* --- NtQueryMutant (ordinal 213, 2 args = 8 bytes)
+ * MUTANT_BASIC_INFORMATION { LONG CurrentCount; UCHAR OwnedByCaller;
+ * UCHAR AbandonedState; }: 1 when free, 1 - recursion when owned. */
 static void bridge_NtQueryMutant(void)
 {
-    (void)STACK_ARG(0);
-    (void)STACK_ARG(1);
-    (void)STACK_ARG(2);
-    (void)STACK_ARG(3);
-    (void)STACK_ARG(4);
-    g_eax = 0;
+    LONG info[3];
+    uint32_t out = STACK_ARG(1);
+
+    if (!out || !bridge_buf_ok(out, 6, "NtQueryMutant")) {
+        g_eax = 0xC0000005u;
+        return;
+    }
+    g_eax = bridge_query_host(STACK_ARG(0), W32_QUERY_MUTEX, info);
+    if (g_eax == 0) {
+        BRIDGE_MEM32(out) = (uint32_t)info[0];
+        BRIDGE_MEM8(out + 4) = (uint8_t)(info[1] != 0);
+        BRIDGE_MEM8(out + 5) = 0;            /* a thread exiting owning it is not tracked */
+    }
 }
 
-/* --- NtQuerySemaphore (ordinal 214, 5 args = 20 bytes) --- */
+/* --- NtQuerySemaphore (ordinal 214, 2 args = 8 bytes)
+ * SEMAPHORE_BASIC_INFORMATION { LONG CurrentCount; LONG MaximumCount; } */
 static void bridge_NtQuerySemaphore(void)
 {
-    (void)STACK_ARG(0);
-    (void)STACK_ARG(1);
-    (void)STACK_ARG(2);
-    (void)STACK_ARG(3);
-    (void)STACK_ARG(4);
-    g_eax = 0;
+    LONG info[3];
+    uint32_t out = STACK_ARG(1);
+
+    if (!out || !bridge_buf_ok(out, 8, "NtQuerySemaphore")) {
+        g_eax = 0xC0000005u;
+        return;
+    }
+    g_eax = bridge_query_host(STACK_ARG(0), W32_QUERY_SEMAPHORE, info);
+    if (g_eax == 0) {
+        BRIDGE_MEM32(out) = (uint32_t)info[0];
+        BRIDGE_MEM32(out + 4) = (uint32_t)info[1];
+    }
 }
 
-/* --- NtQueryTimer (ordinal 216, 5 args = 20 bytes) --- */
+/* --- NtQueryTimer (ordinal 216, 2 args = 8 bytes)
+ * TIMER_BASIC_INFORMATION { LARGE_INTEGER RemainingTime; BOOLEAN
+ * TimerState; }: the 100 ns left until it is due, and whether it is
+ * signalled. */
 static void bridge_NtQueryTimer(void)
 {
-    (void)STACK_ARG(0);
-    (void)STACK_ARG(1);
-    (void)STACK_ARG(2);
-    (void)STACK_ARG(3);
-    (void)STACK_ARG(4);
-    g_eax = 0;
+    LONG info[3];
+    uint32_t out = STACK_ARG(1);
+
+    if (!out || !bridge_buf_ok(out, 9, "NtQueryTimer")) {
+        g_eax = 0xC0000005u;
+        return;
+    }
+    g_eax = bridge_query_host(STACK_ARG(0), W32_QUERY_TIMER, info);
+    if (g_eax == 0) {
+        BRIDGE_MEM32(out) = (uint32_t)info[0];
+        BRIDGE_MEM32(out + 4) = (uint32_t)info[1];
+        BRIDGE_MEM8(out + 8) = (uint8_t)(info[2] != 0);
+    }
 }
 
 /* --- NtReadFileScatter (ordinal 220, 8 args = 32 bytes)
@@ -12059,11 +12136,11 @@ static int stdcall_args_for_ordinal(ULONG ordinal)
     /* Nt */
     case 201: return  8;  /* NtOpenDirectoryObject (2): nxdk xboxkrnl.h */
     case 208: return 24;  /* NtQueryDirectoryObject (6): nxdk xboxkrnl.h */
-    case 209: return 16;  /* NtQueryEvent (4) */
+    case 209: return  8;  /* NtQueryEvent (2): nxdk xboxkrnl.h */
     case 212: return  8;  /* NtQueryIoCompletion (2): nxdk xboxkrnl.h */
-    case 213: return 20;  /* NtQueryMutant (5) */
-    case 214: return 20;  /* NtQuerySemaphore (5) */
-    case 216: return 20;  /* NtQueryTimer (5) */
+    case 213: return  8;  /* NtQueryMutant (2): nxdk xboxkrnl.h */
+    case 214: return  8;  /* NtQuerySemaphore (2): nxdk xboxkrnl.h */
+    case 216: return  8;  /* NtQueryTimer (2): nxdk xboxkrnl.h */
 
     /* Ob */
     case 239: return 16;  /* ObCreateObject (4): nxdk xboxkrnl.h */

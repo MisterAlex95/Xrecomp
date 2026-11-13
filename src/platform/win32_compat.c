@@ -1355,6 +1355,50 @@ BOOL ReleaseMutex(HANDLE h)
     return TRUE;
 }
 
+int w32_query_object(HANDLE h, LONG info[3])
+{
+    w32_object *o = obj_from_handle(h);
+    int kind = 0;
+    if (!o || !info) return 0;
+    pthread_mutex_lock(&o->lock);
+    switch (o->kind) {
+    case K_EVENT:
+        kind = W32_QUERY_EVENT;
+        info[0] = o->manual_reset ? 0 : 1;
+        info[1] = o->signaled ? 1 : 0;
+        break;
+    case K_SEM:
+        kind = W32_QUERY_SEMAPHORE;
+        info[0] = (LONG)o->sem_count;
+        info[1] = (LONG)o->sem_max;
+        break;
+    case K_MUTEX:
+        kind = W32_QUERY_MUTEX;
+        info[0] = o->mtx_owner ? 1 - o->mtx_recursion : 1;
+        info[1] = o->mtx_owner && o->mtx_owner == GetCurrentThreadId();
+        break;
+    case K_WAITABLE_TIMER: {
+        long long left = 0;
+        kind = W32_QUERY_TIMER;
+        info[2] = waitable_due(o);
+        if (o->waitable_armed && !info[2]) {
+            struct timespec now;
+            clock_gettime(W32_WAIT_CLOCK, &now);
+            left = (long long)(o->waitable_due_time.tv_sec - now.tv_sec) * 10000000LL
+                 + (o->waitable_due_time.tv_nsec - now.tv_nsec) / 100;
+            if (left < 0) left = 0;
+        }
+        info[0] = (LONG)(uint32_t)left;
+        info[1] = (LONG)(left >> 32);
+        break;
+    }
+    default:
+        break;
+    }
+    pthread_mutex_unlock(&o->lock);
+    return kind;
+}
+
 /* ===================================================================== */
 /* Threads                                                               */
 /* ===================================================================== */

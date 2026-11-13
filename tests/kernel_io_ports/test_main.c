@@ -27,6 +27,10 @@
  *      or a mutant, then waits; a mutant the caller does not own and an
  *      object that cannot be signalled fail without waiting; the wait times
  *      out; a ping-pong with another thread.
+ *   4. NtQueryEvent / NtQuerySemaphore / NtQueryMutant / NtQueryTimer: the
+ *      basic information of each kind (2 arguments each), a handle of
+ *      another kind is STATUS_OBJECT_TYPE_MISMATCH, a bad one
+ *      STATUS_INVALID_HANDLE.
  */
 #include "kernel.h"
 #include "xbox_memory_layout.h"
@@ -90,6 +94,7 @@ enum {
     S_IOC_CREATE, S_IOC_SET, S_IOC_REMOVE, S_IOC_QUERY,
     S_SCATTER, S_GATHER, S_EVENT,
     S_SIGWAIT, S_SEM, S_MUTANT, S_DELAY,
+    S_QEVENT, S_QSEM, S_QMUTANT, S_QTIMER, S_TIMER, S_SETTIMER,
     S_COUNT
 };
 static const uint32_t slot_ord[S_COUNT] = {
@@ -97,6 +102,7 @@ static const uint32_t slot_ord[S_COUNT] = {
     191, 227, 223, 212,
     220, 237, 189,
     230, 193, 192, 99,
+    209, 214, 213, 216, 194, 229,
 };
 
 static RECOMP_TLS int t_index;
@@ -450,6 +456,58 @@ static void test_signal_and_wait(uint32_t file)
     CALL(S_CLOSE, g_go); CALL(S_CLOSE, g_done);
 }
 
+/* ═══════════════════ 4. Object queries ═══════════════════ */
+
+static void test_queries(void)
+{
+    uint32_t ev, sem, mut, mut2, tim;
+
+    become_thread(0);
+    ev = make_event(1 /* synchronization */, 1);
+    CALL(S_QEVENT, ev, OUT_VA);
+    snprintf(d, sizeof d, "status 0x%08X type %u state %u", g_eax, M32(OUT_VA), M32(OUT_VA + 4));
+    check(g_eax == 0 && M32(OUT_VA) == 1 && M32(OUT_VA + 4) == 1 && esp_ok(2),
+          "NtQueryEvent: synchronization, signalled (2 arguments)", d);
+    CALL(S_WAIT1, ev, 0, TIMEOUT_VA);
+    CALL(S_QEVENT, ev, OUT_VA);
+    check(g_eax == 0 && M32(OUT_VA + 4) == 0, "after a wait took it: not signalled", NULL);
+
+    CALL(S_SEM, HANDLE_VA, 0, 2, 5);
+    sem = M32(HANDLE_VA);
+    CALL(S_QSEM, sem, OUT_VA);
+    check(g_eax == 0 && M32(OUT_VA) == 2 && M32(OUT_VA + 4) == 5 && esp_ok(2),
+          "NtQuerySemaphore: count 2 of 5", NULL);
+
+    CALL(S_MUTANT, HANDLE_VA, 0, 1 /* owned */);
+    mut = M32(HANDLE_VA);
+    CALL(S_QMUTANT, mut, OUT_VA);
+    snprintf(d, sizeof d, "count %d owned %u", (int32_t)M32(OUT_VA), M8(OUT_VA + 4));
+    check(g_eax == 0 && M32(OUT_VA) == 0 && M8(OUT_VA + 4) == 1 && esp_ok(2),
+          "NtQueryMutant: owned by the caller, CurrentCount 0", d);
+    CALL(S_MUTANT, HANDLE_VA, 0, 0);
+    mut2 = M32(HANDLE_VA);
+    CALL(S_QMUTANT, mut2, OUT_VA);
+    check(g_eax == 0 && M32(OUT_VA) == 1 && M8(OUT_VA + 4) == 0, "a free one: 1, not owned", NULL);
+
+    CALL(S_TIMER, HANDLE_VA, 0, 0 /* notification */);
+    tim = M32(HANDLE_VA);
+    *(int64_t *)(mem + TIMEOUT2_VA) = -10000000;    /* 1 s */
+    CALL(S_SETTIMER, tim, TIMEOUT2_VA, 0, 0, 0, 0, 0, 0);
+    CALL(S_QTIMER, tim, OUT_VA);
+    {
+        int64_t left = *(int64_t *)(mem + OUT_VA);
+        snprintf(d, sizeof d, "status 0x%08X left %lld state %u", g_eax, (long long)left, M8(OUT_VA + 8));
+        check(g_eax == 0 && left > 5000000 && left <= 10000000 && M8(OUT_VA + 8) == 0 && esp_ok(2),
+              "NtQueryTimer: about 1 s left, not signalled", d);
+    }
+
+    CALL(S_QSEM, ev, OUT_VA);
+    check(g_eax == 0xC0000024u, "an event as a semaphore: STATUS_OBJECT_TYPE_MISMATCH", NULL);
+    CALL(S_QEVENT, 0x48FFFFF0u, OUT_VA);
+    check(g_eax == 0xC0000008u, "a bad handle: STATUS_INVALID_HANDLE", NULL);
+    CALL(S_CLOSE, ev); CALL(S_CLOSE, sem); CALL(S_CLOSE, mut); CALL(S_CLOSE, mut2); CALL(S_CLOSE, tim);
+}
+
 int main(void)
 {
     char dir[MAX_PATH], path[MAX_PATH];
@@ -497,6 +555,7 @@ int main(void)
     if (file)
         test_scatter_gather(file);
     test_signal_and_wait(file);
+    test_queries();
 
     if (file)
         CALL(S_CLOSE, file);
