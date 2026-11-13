@@ -42,21 +42,26 @@ One per stage, in the order you run them.
 
 - [Memory Layout Reproduction](technical/memory-layout.md) — CreateFileMapping, mirror views, and address space tricks
 - [Xbox Kernel Replacement](technical/kernel-replacement.md) — Mapping Xbox kernel ordinals to Win32, and the gotchas
+- [Playing from the Disc Image](technical/disc-images.md) — D:\ served straight from an ISO, a split image or a CSO/ZSO/CCI: no extraction; prepare from the image; read speeds; device checks
+- [Discs with Several XBEs](technical/multi-xbe.md) — A launcher image handing over to another XBE: one executable per image, the kernel execs the next
+- [Saves](technical/saves.md) — The XDK save APIs on one host layout for every title: UDATA/TDATA per title in the save dir, no memory units, kept across prepares
 - [Network: a Console with No Cable](technical/network.md) — The Ethernet controller model, what a title with Live or system link sees, and the device check list
+- [APU DSP](technical/apu-dsp.md) — The GP/EP: what titles ask of them, handshakes, mixdown, native reverb; check list
 
 ### Graphics
 
 - [D3D8 to D3D11 Translation](technical/d3d-translation.md) — Bridging Xbox's graphics API to modern DirectX
 - [NV2A Shader Translation](technical/nv2a-shaders.md) — Register combiners and vertex microcode to HLSL
 - [D3D8LTCG Device Context](technical/d3d8ltcg-device-context.md) — Device field map, PB ring management, stub calling conventions
-- [The Compat Runner](technical/compat-runner.md) — Prepare, boot headless with a pad script, and record the stage each title reaches
-- [Discs with Several XBEs](technical/multi-xbe.md) — A launcher image handing over to another XBE: one executable per image, the kernel execs the next
-- [Playing from the Disc Image](technical/disc-images.md) — D:\ served straight from an ISO, a split image or a CSO/ZSO/CCI: no extraction; prepare from the image; read speeds; device checks
-- [The Discovery File](technical/discovery.md) — What a run meets that the static analysis missed, recorded for the next prepare
-- [Saves](technical/saves.md) — The XDK save APIs on one host layout for every title: UDATA/TDATA per title in the save dir, no memory units, kept across prepares
-- [Profiles in Layers](technical/profiles.md) — A title's switches and fixes in `profiles/`: XDK library, engine and title layers, picked from the XBE by `tools.prepare`
 - [Pushbuffer Executor](technical/pushbuffer-executor.md) — Executing a statically linked XDK D3D title's pushbuffer: DMA-engine walk, answering the title, fixed-function transform and lighting, anti-aliased surfaces, render back ends
+- [GPU Back End](technical/gpu-backend.md) — The pushbuffer drawn with GL 3.3 / GLES 3.0: vertex programs and fixed function as shaders, render targets on the GPU, present, internal resolution, aspect modes, frame cap and pacing, the default on Android, device checks
 - [Frame Generation](technical/framegen.md) — LSFG frame generation: Vulkan compute bridge, shader cache from the user's Lossless.dll (DXBC translation), pacing of generated and real frames, cap and present-mode rules, fallback, licences and legal rules
+
+### Preparing and checking a title
+
+- [Profiles in Layers](technical/profiles.md) — A title's switches and fixes in `profiles/`: XDK library, engine and title layers, picked from the XBE by `tools.prepare`; no per-title code outside `profiles/titles` (the CI guard)
+- [The Discovery File](technical/discovery.md) — What a run meets that the static analysis missed, recorded for the next prepare: the entry kinds, and who reads them
+- [The Compat Runner](technical/compat-runner.md) — Prepare, boot headless with a pad script, and record the stage each title reaches; heal / recall; the library report
 
 ### Microsoft's own recompiler
 
@@ -74,6 +79,16 @@ One per stage, in the order you run them.
 - [Burnout 3 Reunification](technical/burnout3-reunification.md) — Bringing the origin title back onto the extracted toolkit
 - [xemu GDB Debugging](technical/xemu-debugging.md) — xemu's GDB stub as a reference debugger for runtime state
 
+## Android Port
+
+- [Android Port](android/README.md) — What the fork adds: NDK build, GLES, the app shell, one pack per title
+- [Android Toolchain](android/toolchain.md) — The NDK build, the embedded Prepare toolchain, CI gating and the signed APK
+- [Linux arm64 Baseline](android/baseline-arm64.md) — The toolkit on arm64 Linux first: what passes, what is expected to fail
+- [Android App Shell](android/app-shell.md) — Launcher, library, Controls, settings, in-game menu, dual screen, library check; each feature's device check
+- [Prepare on the Device](android/prepare.md) — The title pack, `pack.json`, the device log, resume after a kill, stale packs, self-healing, measurements
+- [The Toolkit's Tests on a Device](android/device-tests.md) — The device test bundle and how to read its result
+- [Checks for Alex — 2026-11-13](android/checks-2026-11-13.md) — Every device and Mac check of the night of 2026-11-12/13 in one order: Mac first, then the AYN Thor
+
 ## Xbox Formats
 
 - [XBE File Format](formats/xbe.md) — Xbox executable format reference
@@ -87,7 +102,6 @@ One per stage, in the order you run them.
 - [xbox_d3d8](../src/d3d/README.md) — D3D8 interface, register combiners, vertex shaders, texture unswizzle
 - [xbox_dsound](../src/audio/README.md) — DirectSound buffers, 3D audio, mixbins
 - [xbox_apu](../src/apu/README.md) — MCPX APU voice processor, mixer, MMIO
-- [APU DSP](technical/apu-dsp.md) — the GP/EP: what titles ask of them, handshakes, mixdown, native reverb
 - [xbox_nv2a](../src/nv2a/README.md) — NV2A GPU registers, push buffer, PGRAPH→D3D11
 - [xbox_input](../src/input/README.md) — Gamepad state, vibration, button mapping
 
