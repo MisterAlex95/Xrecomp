@@ -133,6 +133,11 @@ def classify(status, presses_ms, exit_info, run_s, sustain_s, log_text="", disco
     stubs = stub_calls(discovered)
     if stubs and blocker and not blocker.startswith(("crash", "launches")):
         blocker += "; calls stub " + ", ".join(stubs)
+    # A D3D build the XDK layer's layout table does not know (XBA-105): the
+    # offsets it guessed are a likely cause, named on the same terms as stubs.
+    layout = blockers.d3d_layout_words(blockers.of_kind(discovered, "d3d_layout"))
+    if layout and blocker and not blocker.startswith(("crash", "launches")):
+        blocker += "; " + layout
     # What the renderer met and could not draw (XBA-120, the status file's
     # "unsupported"): kept in the summary, and named with the blocker on the
     # same terms as stubs -- a missing format or primitive is a likely cause

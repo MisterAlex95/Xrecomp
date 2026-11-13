@@ -359,6 +359,52 @@ def test_check_states(tmp_path, monkeypatch):
     assert state() == ("absent", ["not_built"], None)
 
 
+def test_check_keys_on_the_content_digests(tmp_path, monkeypatch):
+    """XBA-134: the toolkit is compared by its content digest (the Android packs' one), not by the commit: a commit
+    that changes no file of the toolkit tree keeps the title ready. The runtime the executable links (src/) has its
+    own digest: a change there asks for a rebuild ("runtime"), not a lift. A stamp from before keeps the commit rule
+    (test_check_states)."""
+    from tools.prepare import toolkit
+    work, stamp = _ready_work(tmp_path, monkeypatch)
+    exe = str(work / "project" / "build" / NAME)
+    monkeypatch.setattr(toolkit, "digest", lambda root=None: "d" * 64)
+    monkeypatch.setattr(toolkit, "runtime_digest", lambda root=None: "r" * 64)
+    (work / "stamp.json").write_text(json.dumps(dict(stamp, toolkit_sha256="d" * 64, runtime_sha256="r" * 64)))
+
+    def state():
+        st = prep.check_state(TEST_XBE, str(work))
+        return st["state"], st["reasons"], st["exe"]
+    assert state() == ("ready", [], exe)
+    monkeypatch.setattr(prep, "toolkit_version", lambda: "beef")          # another commit, the same files
+    assert state() == ("ready", [], exe)
+    monkeypatch.setattr(toolkit, "digest", lambda root=None: "e" * 64)    # the toolkit's files changed
+    assert state() == ("stale", ["toolkit"], exe)
+    monkeypatch.setattr(toolkit, "digest", lambda root=None: "d" * 64)
+    monkeypatch.setattr(toolkit, "runtime_digest", lambda root=None: "s" * 64)   # only the runtime
+    assert state() == ("stale", ["runtime"], exe)
+    (work / "stamp.json").write_text(json.dumps(dict(stamp, toolkit_sha256="d" * 64, runtime_sha256="r" * 64,
+                                                     built=False)))
+    assert state() == ("stale", ["not_built"], exe)                       # the build is coming anyway
+
+
+def test_the_runtime_digest_covers_the_runtime_only(tmp_path):
+    from tools.prepare import toolkit
+    (tmp_path / "src" / "kernel").mkdir(parents=True)
+    (tmp_path / "src" / "kernel" / "a.c").write_text("int a;\n")
+    (tmp_path / "CMakeLists.txt").write_text("project(x C)\n")
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "x.md").write_text("doc\n")
+    toolkit._cache.clear()
+    a = toolkit.runtime_digest(str(tmp_path))
+    (tmp_path / "docs" / "x.md").write_text("another doc\n")
+    toolkit._cache.clear()
+    assert toolkit.runtime_digest(str(tmp_path)) == a
+    (tmp_path / "src" / "kernel" / "a.c").write_text("int b;\n")
+    toolkit._cache.clear()
+    assert toolkit.runtime_digest(str(tmp_path)) != a
+    toolkit._cache.clear()
+
+
 def test_check_env_force_and_title(tmp_path, monkeypatch):
     t = tmp_path / "profiles" / "titles" / "12345678"
     t.mkdir(parents=True)

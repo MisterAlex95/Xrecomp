@@ -20,6 +20,7 @@
 #include "recomp_smc.h"
 #include "xbox_memory_layout.h"
 #include "xbox_seh.h"
+#include "xbox_xbe_sections.h"
 #include "kernel.h"
 #include "guest_vmem.h"
 #include "kernel_missing.h"
@@ -3595,7 +3596,11 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
         /* The certificate's title name (UTF-16, 40 chars at +0x0C), for
          * the framebuffer window's title bar. */
         DWORD cert_off = *(const DWORD *)(xbe + 0x118) - base_addr;
-        if (cert_off + 0x0C + 80 <= xbe_size) {
+        /* No certificate (address 0, or outside the file): none of the reads
+         * below, rather than an offset that wraps back into the buffer. */
+        if (*(const DWORD *)(xbe + 0x118) < base_addr || cert_off >= xbe_size)
+            cert_off = (DWORD)xbe_size;
+        if ((uint64_t)cert_off + 0x0C + 80 <= xbe_size) {
             extern void xbox_FramebufferWindowSetTitle(const uint16_t *, int);
             xbox_FramebufferWindowSetTitle(
                 (const uint16_t *)(xbe + cert_off + 0x0C), 40);
@@ -3622,7 +3627,8 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
                 num_sections, sect_headers_off);
 
         for (DWORD si = 0; si < num_sections; si++) {
-            if (sect_headers_off + (si + 1) * SECTHDR_SIZE > xbe_size) break;
+            /* 64-bit: an odd header's offsets must not wrap back into the buffer. */
+            if ((uint64_t)sect_headers_off + (uint64_t)(si + 1) * SECTHDR_SIZE > xbe_size) break;
 
             const uint8_t *sh = xbe + sect_headers_off + si * SECTHDR_SIZE;
             DWORD sec_va       = *(const DWORD *)(sh + SECTHDR_VA);
@@ -3638,7 +3644,7 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
                 sec_name = (const char *)(xbe + name_off);
 
             /* Validate: section must fit within our 64MB mapped region */
-            if (sec_va < XBOX_BASE_ADDRESS || sec_va + sec_vsize > XBOX_TOTAL_RAM)
+            if (sec_va < XBOX_BASE_ADDRESS || (uint64_t)sec_va + sec_vsize > XBOX_TOTAL_RAM)
                 continue;
 
             /* Determine copy size (raw_size may exceed vsize due to alignment) */
@@ -3659,7 +3665,7 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
              * and looked like a title that calls no kernel functions.
              */
             int have_data = (copy_size == 0) ||
-                            (sec_raw_off + copy_size <= xbe_size);
+                            ((uint64_t)sec_raw_off + copy_size <= xbe_size);
             if (copy_size > 0 && have_data) {
                 memcpy(XBOX_VA(sec_va), xbe + sec_raw_off, copy_size);
             } else if (!have_data) {
@@ -3710,6 +3716,8 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
                     "is truncated or was read short; the title will not run\n",
                     sections_short);
         }
+        /* Reference counts, overlaps, copies for XeLoadSection (XBA-124). */
+        xbox_XbeSectionsInit(xbe, xbe_size);
     }
 
     /*
@@ -4610,6 +4618,7 @@ void xbox_MemoryLayoutShutdown(void)
     if (g_win_window_size)
         win_release_window();
 #endif
+    xbox_XbeSectionsShutdown();
     fprintf(stderr, "xbox_MemoryLayoutShutdown: released\n");
 }
 

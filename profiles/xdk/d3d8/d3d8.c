@@ -32,19 +32,32 @@
  *   vblank event: two KEVENT headers 16 bytes apart, the only such pair in the
  *   device (5849: +0x1DBC/+0x1DCC; 5455: +0x199C/+0x19AC). Its offset is read
  *   from the device found (xba_d3d8_fence_event_offset); with no pair the
- *   5849 offset is assumed. Title-built KEVENTs are guest events by default
+ *   table's offset for the build (k_layouts), else 5849's, said. Title-built KEVENTs are guest events by default
  *   (kernel_bridge.c, RECOMP_TITLE_KEVENTS), so BlockOnTime's wait blocks until
  *   the method comes instead of failing at once and spinning. With
  *   RECOMP_TITLE_KEVENTS=0, the one fence event is still adopted under the DMA
  *   walk, which delivers method 5 (xbox_KeAdoptGuestEvent).
- *   The D3D8LTCG layer (profiles/xdk/d3d8ltcg) turns the DMA walk on for XDK
- *   5849's D3D8LTCG, whose fence wait needs it (XBA_D3D_DMA_WALK).
+ *   The D3D8LTCG layer (profiles/xdk/d3d8ltcg) turns the DMA walk on for a
+ *   D3D8LTCG whose fence wait spins on the 0x0310 latch, which needs it
+ *   (XBA_D3D_DMA_WALK): tools.xbe_ident's d3d_latch_wait probe finds that loop
+ *   in the title's code, whatever the build (XBA-105).
  *
- * The other offsets inside the device below were read on XDK 5849 (Burnout 3,
+ * The other offsets inside the device were read on XDK 5849 (Burnout 3,
  * D3D8LTCG) and on Fable's D3D, and are the same on XDK 5455 (KOTOR): ring
  * +0x24/+0x28, fence count +0x2C, semaphore pointer +0x30. The pointer slot is
  * device + 0x24A8 on 5849, Fable and the original Burnout 3 build
  * (docs/technical/d3d8ltcg-device-context.md).
+ *
+ * Every offset is either read from the device's structure (the device
+ * itself, its slot, its fence event) or looked up in k_layouts below, keyed by
+ * the title's D3D library and build as its XBE header says (XBA-105). A build
+ * the table does not know takes the offsets of the closest known layout for
+ * each rule that cannot be read from the structure, and says so once per rule:
+ *   [D3D] unknown XDK build N (D3D8LTCG): fence event fell back to +0x1DCC (D3D8LTCG 5849's)
+ * with a {"t":"d3d_layout",...} line in the discovery file, so a run on a new
+ * build tells what to add to the table. Run-time guards stay on such
+ * fallbacks: a found device's RunPushBuffer methods write only into the
+ * contiguous window, and decrement a pending count only when it reads as one.
  *
  * Switch: XBA_D3D_FENCE=mirror is the A/B fallback Burnout 3 was brought up
  * with (needs XBA_D3D_DEVICE_PTR): no software methods, no semaphore watch, no
@@ -66,20 +79,50 @@
 #define SETENV_DEFAULT(k, v) do { if (!getenv(k)) _putenv_s((k), (v)); } while (0)
 #endif
 
-#define D3D_FENCE_COUNT  0x2Cu      /* fences submitted */
-#define D3D_RING_START   0x24u      /* the pushbuffer ring, absolute VAs */
-#define D3D_RING_END     0x28u
-#define D3D_SEMAPHORE    0x30u      /* -> the GPU semaphore (contiguous memory) */
-#define D3D_RPB_PENDING  0x50u      /* RunPushBuffer calls waiting for the GPU */
-#define D3D_RPB_NODES    0x264u     /* RunPushBuffer's node table, 20 bytes a node */
-#define D3D_FENCE_EVENT_5849 0x1DCCu /* the KEVENT BlockOnTime sleeps on, XDK 5849 (and the profiles' titles) */
-#define D3D_SLOT         0x24A8u    /* the device pointer slot, from the device */
+/* ── D3D's device layouts, by library and build (XBA-105) ──────────────────
+ *
+ * What cannot be read from the device's structure. 0 in a field: not known
+ * for that build (the fallback's value is used, and said). slot: the device
+ * pointer slot relative to the device, 0 when it is found by any pointer
+ * (xba_d3d8_scan_slots). Ring, put, fence count and semaphore are the same in
+ * every layout seen; they are what finds the device, so a build where they
+ * moved would not be found at all (the title's params then say where). */
+typedef struct {
+    const char *lib;            /* the XBE library name */
+    unsigned build;
+    int32_t  slot;
+    uint32_t ring_start, ring_end;      /* the pushbuffer ring, absolute VAs */
+    uint32_t fence_count;               /* fences submitted */
+    uint32_t semaphore;                 /* -> the GPU semaphore (contiguous memory) */
+    uint32_t fence_event;               /* the KEVENT BlockOnTime sleeps on (the pair read from the device wins) */
+    uint32_t rpb_pending;               /* RunPushBuffer calls waiting for the GPU */
+    uint32_t rpb_nodes;                 /* RunPushBuffer's node table, 20 bytes a node */
+    const char *seen;
+} D3dLayout;
+
+static const D3dLayout k_layouts[] = {
+    { "D3D8LTCG", 5849, 0x24A8, 0x24, 0x28, 0x2C, 0x30, 0x1DCC, 0,    0,     "Burnout 3, Black" },
+    { "D3D8",     5455, -8,     0x24, 0x28, 0x2C, 0x30, 0x19AC, 0,    0,     "KOTOR" },
+};
+/* What a rule falls back to: 5849's slot and fence event, the RunPushBuffer
+ * offsets of Fable's D3D (the only one they were read on; its library and
+ * build were not recorded: a run of Fable prints them, see the check list in
+ * XBA-105). */
+static const D3dLayout k_fallback =
+    { "D3D8LTCG", 5849, 0x24A8, 0x24, 0x28, 0x2C, 0x30, 0x1DCC, 0x50, 0x264, "D3D8LTCG 5849's / Fable's" };
+
+#define D3D_FENCE_COUNT  (layout()->fence_count)
+#define D3D_RING_START   (layout()->ring_start)
+#define D3D_RING_END     (layout()->ring_end)
+#define D3D_SEMAPHORE    (layout()->semaphore)
+#define D3D_SLOT_5849    0x24A8u    /* the slot rule tried first on any build */
 
 #define CONTIG_LO 0x80000000u
 #define CONTIG_HI 0x84000000u
 #define XBE_BASE  0x00010000u
 
 extern ptrdiff_t xbox_GetMemoryOffset(void);
+extern void *xbox_GetMemoryBase(void);
 extern void nv2a_pb_set_software_method_hook(int (*hook)(uint32_t param));
 extern void nv2a_pb_set_semaphore_target(uint32_t guest_va);
 extern int  xbox_KeSetGuestEvent(uint32_t guest_va);
@@ -87,6 +130,7 @@ extern int  xbox_KeAdoptGuestEvent(uint32_t guest_va);
 extern int  nv2a_pb_dma_walk(void);
 extern int  xbox_Nv2aMirrorFence(uint32_t device_ptr_va, uint32_t put_off, uint32_t get_ptr_off);
 extern void recomp_discovery_d3d(uint32_t device, uint32_t slot);
+extern void recomp_discovery_d3d_layout(const char *lib, uint32_t build, const char *rule, uint32_t used);
 extern void nv2a_pb_exec_insert_callback_args(uint32_t *routine, uint32_t *context);
 extern int  xbox_DpcQueueGuestCall(uint32_t routine, uint32_t context);
 
@@ -135,10 +179,87 @@ static int d3d_mirror;
 static volatile uint32_t s_device;  /* the device, once known (0: not yet) */
 static volatile uint32_t s_slot;    /* its pointer slot */
 static uint32_t s_methods = D3D_METHODS_DEFAULT;
-static volatile uint32_t s_fence_event = D3D_FENCE_EVENT_5849;  /* offset in the device; read at run time */
+static volatile uint32_t s_fence_event;  /* offset in the device; read at run time */
 static volatile int s_fence_known;  /* s_fence_event read from the device (locate, or the first method 5) */
 
 static int in_contig(uint32_t va) { return va >= CONTIG_LO && va < CONTIG_HI; }
+
+/* The title's D3D library and build, from the XBE header the kernel maps at
+ * 0x10000 (its library table), and the layout for them. Read on first use:
+ * xba_d3d8_configure runs before guest memory is mapped. */
+static char s_lib[9];
+static unsigned s_build;
+static const D3dLayout *s_layout;   /* the table's entry, or NULL: unknown build */
+static int s_layout_read;
+
+static void read_library(void)
+{
+    uint32_t n, va, i;
+    int found = 0;
+    if (s_layout_read || !xbox_GetMemoryBase())  /* not mapped yet (configure runs before) */
+        return;
+    if (G32(0x10000u) != 0x48454258u)           /* "XBEH": the header is not mapped yet */
+        return;
+    s_layout_read = 1;
+    n = G32(0x10000u + 0x160u);
+    va = G32(0x10000u + 0x164u);
+    if (n > 64 || va < 0x10000u || va >= 0x20000u)
+        n = 0;
+    for (i = 0; i < n; i++) {
+        char name[9];
+        uint32_t e = va + i * 16u, w0 = G32(e), w1 = G32(e + 4);
+        memcpy(name, &w0, 4);
+        memcpy(name + 4, &w1, 4);
+        name[8] = 0;
+        /* D3D8LTCG first: a title links one of the two. */
+        if (!strcmp(name, "D3D8LTCG") || (!found && !strcmp(name, "D3D8"))) {
+            memcpy(s_lib, name, sizeof s_lib);
+            s_build = G32(e + 12) & 0xFFFFu;
+            found = 1;
+        }
+    }
+    for (i = 0; found && i < sizeof k_layouts / sizeof k_layouts[0]; i++)
+        if (!strcmp(k_layouts[i].lib, s_lib) && k_layouts[i].build == s_build)
+            s_layout = &k_layouts[i];
+    if (found)
+        fprintf(stderr, "[D3D] %s build %u: %s\n", s_lib, s_build,
+                s_layout ? "a known device layout" : "not in the layout table (XBA-105): fallbacks are said");
+}
+
+static const D3dLayout *layout(void)
+{
+    read_library();
+    return s_layout ? s_layout : &k_fallback;
+}
+
+/* A rule the table cannot answer for this build: the fallback's value, said
+ * and recorded once per rule. Silent for a known build (the table answered)
+ * and before the library is read. Returns value. */
+static uint32_t fell_back(const char *rule, const char *what, uint32_t value)
+{
+    static const char *said[8];
+    unsigned i;
+    read_library();
+    if (s_layout || !s_layout_read)
+        return value;
+    for (i = 0; i < 8 && said[i]; i++)
+        if (!strcmp(said[i], rule))
+            return value;
+    if (i < 8)
+        said[i] = rule;
+    fprintf(stderr, "[D3D] unknown XDK build %u (%s): %s fell back to +0x%X (%s)\n",
+            s_build, s_lib[0] ? s_lib : "no D3D library", what, value, k_fallback.seen);
+    recomp_discovery_d3d_layout(s_lib[0] ? s_lib : "?", s_build, rule, value);
+    return value;
+}
+
+/* The device pointer slot rule for this build: the table's offset when it
+ * names one after the device, else 5849's (tried first on any build). */
+static uint32_t slot_offset(void)
+{
+    const D3dLayout *l = layout();
+    return l->slot > 0 ? (uint32_t)l->slot : D3D_SLOT_5849;
+}
 
 /* ── Finding the device (XBA-80) ─────────────────────────────────────────── */
 
@@ -146,7 +267,7 @@ static int in_contig(uint32_t va) { return va >= CONTIG_LO && va < CONTIG_HI; }
 int xba_d3d8_is_device(uint32_t d)
 {
     uint32_t s, e, p;
-    if (G32(d + D3D_SLOT) != d)
+    if (G32(d + slot_offset()) != d)
         return 0;
     s = G32(d + D3D_RING_START);
     e = G32(d + D3D_RING_END);
@@ -159,10 +280,10 @@ int xba_d3d8_is_device(uint32_t d)
  * (none yet, or two: then nothing is trusted). */
 uint32_t xba_d3d8_scan(uint32_t lo, uint32_t hi)
 {
-    uint32_t found = 0, d;
+    uint32_t found = 0, d, so = slot_offset();
     lo = (lo + 3u) & ~3u;
-    for (d = lo; d < hi && hi - d >= D3D_SLOT + 4u; d += 4u) {
-        if (G32(d + D3D_SLOT) != d || !xba_d3d8_is_device(d))
+    for (d = lo; d < hi && hi - d >= so + 4u; d += 4u) {
+        if (G32(d + so) != d || !xba_d3d8_is_device(d))
             continue;
         if (found)
             return 0;
@@ -245,23 +366,44 @@ uint32_t xba_d3d8_scan_slots(uint32_t lo, uint32_t hi, uint32_t *slot)
     return found;
 }
 
+/* The fence event's offset in device d: the KEVENT pair read from it, else
+ * the table's for this build, else the fallback's (said). *read: 1 when it
+ * came from the device. */
+static uint32_t fence_event_of(uint32_t d, int *read)
+{
+    uint32_t ev = xba_d3d8_fence_event_offset(d);
+    *read = ev != 0;
+    if (ev)
+        return ev;
+    if (layout() != &k_fallback)
+        return layout()->fence_event;
+    return fell_back("fence_event", "fence event (no KEVENT pair in the device)", k_fallback.fence_event);
+}
+
 /* Try once; on success remember it, say so and record it. */
 int xba_d3d8_locate(void)
 {
     uint32_t end = image_end(), d, slot = 0, ev;
+    int read;
     if (s_device || !end)
         return s_device != 0;
-    if ((d = xba_d3d8_scan(XBE_BASE, end)) != 0)
-        slot = d + D3D_SLOT;
-    else if (!(d = xba_d3d8_scan_slots(XBE_BASE, end, &slot)))
+    if ((d = xba_d3d8_scan(XBE_BASE, end)) != 0) {
+        slot = d + slot_offset();
+        /* Found by a slot offset the table did not give for this build. */
+        (void)fell_back("slot", "device pointer slot", slot_offset());
+    } else if (!(d = xba_d3d8_scan_slots(XBE_BASE, end, &slot))) {
         return 0;
-    if ((ev = xba_d3d8_fence_event_offset(d)) != 0)
-        s_fence_event = ev;
+    }
+    /* The ring, put and semaphore offsets are what found it; on a build the
+     * table does not know they are the known layouts' (said once). */
+    (void)fell_back("device_core", "ring/put/semaphore offsets (+0x24/+0x28/+0/+0x30)", D3D_RING_START);
+    ev = fence_event_of(d, &read);
+    s_fence_event = ev;
     s_fence_known = 1;
     s_slot = slot;
     s_device = d;
     fprintf(stderr, "[D3D] device found at 0x%08X (pointer slot 0x%08X, ring 0x%08X-0x%08X, fence event +0x%X%s)\n",
-            d, slot, G32(d + D3D_RING_START), G32(d + D3D_RING_END), s_fence_event, ev ? "" : " assumed");
+            d, slot, G32(d + D3D_RING_START), G32(d + D3D_RING_END), s_fence_event, read ? "" : " assumed");
     recomp_discovery_d3d(d, slot);
     /* The fence event, when method 5 will set it (see the top). */
     if ((s_methods & (1u << 5)) && nv2a_pb_dma_walk() && xbox_KeAdoptGuestEvent(d + s_fence_event))
@@ -316,18 +458,57 @@ static void skip_note(const char *what, uint32_t va)
                 what, va);
 }
 
+/* RunPushBuffer's two device offsets for this build: the table's, else the
+ * fallback's (Fable's D3D), said once each. */
+static uint32_t rpb_offset(int nodes)
+{
+    const D3dLayout *l = layout();
+    uint32_t v = nodes ? l->rpb_nodes : l->rpb_pending;
+    if (v && l != &k_fallback)
+        return v;
+    if (l != &k_fallback) {             /* a known build without them: the fallback's, said */
+        static int said[2];
+        v = nodes ? k_fallback.rpb_nodes : k_fallback.rpb_pending;
+        if (!said[nodes]++) {
+            fprintf(stderr, "[D3D] %s build %u: RunPushBuffer %s not in the layout table, +0x%X (%s) used\n",
+                    s_lib, s_build, nodes ? "node table" : "pending count", v, k_fallback.seen);
+            recomp_discovery_d3d_layout(s_lib, s_build, nodes ? "rpb_nodes" : "rpb_pending", v);
+        }
+        return v;
+    }
+    return nodes ? fell_back("rpb_nodes", "RunPushBuffer node table", k_fallback.rpb_nodes)
+                 : fell_back("rpb_pending", "RunPushBuffer pending count", k_fallback.rpb_pending);
+}
+
+/* Offsets the table did not confirm for this build (a found device only):
+ * the pending count is decremented only when it reads as a small count. */
+static int rpb_confirmed(void)
+{
+    const D3dLayout *l = layout();
+    return D3D_GIVEN || (l != &k_fallback && l->rpb_pending && l->rpb_nodes);
+}
+
 static void d3d_run_pushbuffer_method(uint32_t dev, uint32_t type, uint32_t payload)
 {
     uint8_t *mem = (uint8_t *)xbox_GetMemoryOffset();
-    uint32_t node = type == 0xDu ? dev + D3D_RPB_NODES + payload * 20u : payload | 0x80000000u;
+    uint32_t pending = dev + rpb_offset(0);
+    uint32_t node = type == 0xDu ? dev + rpb_offset(1) + payload * 20u : payload | 0x80000000u;
     int guard;
 
     if (type != 0xEu) {
+        uint32_t n = G32(pending);
+        if (!rpb_confirmed() && (n == 0 || n > 0x1000u)) {
+            static int shown;
+            if (shown++ < 4)
+                fprintf(stderr, "[D3D] RunPushBuffer method: pending count +0x%X reads %u, not a count: "
+                        "left alone\n", pending - dev, n);
+        } else {
 #if defined(__GNUC__) || defined(__clang__)
-        __atomic_fetch_sub((uint32_t *)(mem + dev + D3D_RPB_PENDING), 1u, __ATOMIC_SEQ_CST);
+            __atomic_fetch_sub((uint32_t *)(mem + pending), 1u, __ATOMIC_SEQ_CST);
 #else
-        G32(dev + D3D_RPB_PENDING) -= 1u;
+            G32(pending) -= 1u;
 #endif
+        }
     }
     for (guard = 0; guard < 4096; guard++) {
         uint32_t target, next, slot;
@@ -404,12 +585,11 @@ static int d3d_software_method(uint32_t param)
      * addresses), 5849's when the device holds no event pair. */
     if (type == 5u) {
         if (!s_fence_known) {           /* the profile's device: read the offset once */
-            uint32_t ev = xba_d3d8_fence_event_offset(dev);
-            if (ev)
-                s_fence_event = ev;
+            int read;
+            s_fence_event = fence_event_of(dev, &read);
             s_fence_known = 1;
             fprintf(stderr, "[D3D] fence event 0x%08X (+0x%X%s): set by software method 5\n",
-                    dev + s_fence_event, s_fence_event, ev ? "" : ", assumed");
+                    dev + s_fence_event, s_fence_event, read ? "" : ", assumed");
         }
         (void)xbox_KeSetGuestEvent(dev + s_fence_event);
         return 1;

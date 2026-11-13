@@ -34,20 +34,24 @@ The XBE header begins at file offset 0 and contains the following fields:
 | 0x0130 | 4 | PeStackCommit | Default thread stack commit size |
 | 0x0134 | 4 | PeHeapReserve | Default heap reserve size |
 | 0x0138 | 4 | PeHeapCommit | Default heap commit size |
-| 0x013C | 4 | PeSizeOfImage | PE-compatible image size |
-| 0x0140 | 4 | PeChecksum | PE-compatible checksum |
-| 0x0144 | 4 | PeTimeDateStamp | PE-compatible timestamp |
-| 0x0148 | 4 | DebugPathnameAddress | VA of debug build path string |
-| 0x014C | 4 | DebugFilenameAddress | VA of debug build filename string |
-| 0x0150 | 4 | DebugUnicodeFilenameAddress | VA of Unicode debug filename |
-| 0x0154 | 4 | KernelThunkAddress | Encoded kernel thunk table address |
-| 0x0158 | 4 | NonKernelImportDirectoryAddress | Non-kernel import directory |
-| 0x015C | 4 | NumberOfLibraryVersions | Number of library version entries |
-| 0x0160 | 4 | LibraryVersionsAddress | VA of library version array |
-| 0x0164 | 4 | KernelLibraryVersionAddress | VA of kernel lib version entry |
-| 0x0168 | 4 | XapiLibraryVersionAddress | VA of XAPI lib version entry |
-| 0x016C | 4 | LogoBitmapAddress | VA of the Xbox logo bitmap |
-| 0x0170 | 4 | LogoBitmapSize | Size of the logo bitmap |
+| 0x013C | 4 | PeBaseAddress | Base address of the original PE image |
+| 0x0140 | 4 | PeSizeOfImage | PE-compatible image size |
+| 0x0144 | 4 | PeChecksum | PE-compatible checksum |
+| 0x0148 | 4 | PeTimeDateStamp | PE-compatible timestamp |
+| 0x014C | 4 | DebugPathnameAddress | VA of debug build path string |
+| 0x0150 | 4 | DebugFilenameAddress | VA of debug build filename string |
+| 0x0154 | 4 | DebugUnicodeFilenameAddress | VA of Unicode debug filename |
+| 0x0158 | 4 | KernelThunkAddress | Encoded kernel thunk table address |
+| 0x015C | 4 | NonKernelImportDirectoryAddress | Non-kernel import directory |
+| 0x0160 | 4 | NumberOfLibraryVersions | Number of library version entries |
+| 0x0164 | 4 | LibraryVersionsAddress | VA of library version array |
+| 0x0168 | 4 | KernelLibraryVersionAddress | VA of kernel lib version entry |
+| 0x016C | 4 | XapiLibraryVersionAddress | VA of XAPI lib version entry |
+| 0x0170 | 4 | LogoBitmapAddress | VA of the Xbox logo bitmap |
+| 0x0174 | 4 | LogoBitmapSize | Size of the logo bitmap |
+
+(Before XBA-124 this table skipped PeBaseAddress and gave every field from 0x013C on 4 bytes early;
+`tools/xbe_parser` and the loader always used the offsets above.)
 
 ### Base Address
 
@@ -78,12 +82,37 @@ if (entry_retail >= text_va && entry_retail < text_va + text_size) {
 
 ### Kernel Thunk Address Encoding
 
-The kernel thunk table address at offset 0x0154 is similarly XOR-encoded:
+The kernel thunk table address at offset 0x0158 is similarly XOR-encoded:
 
 - **Retail XBEs**: XOR key = `0x5B6D40B6`
 - **Debug XBEs**: XOR key = `0xEFB1F152`
 
 The decoded address points to an array of 32-bit ordinal values (terminated by 0) that index into the Xbox kernel's export table.
+
+### Which key pair (tools/xbe_parser)
+
+One key set signs an image, so the entry point and the thunk address are decoded with the same pair. The parser
+scores both pairs (entry point inside an executable section: 2; entry point inside the image: 1; thunk address inside
+the image: 1) and keeps the better one, retail on a tie. When neither scores, it keeps the retail decoding and adds a
+warning. `XBEHeader.entry_key` says which (`retail`, `debug`, `unknown`); the triage reports it.
+
+### Odd headers (XBA-124)
+
+What the parser and the loader (`xbox_MemoryLayoutInit`) accept, with a warning, and what they refuse:
+
+| Case | Parser (`tools/xbe_parser`) | Loader |
+|---|---|---|
+| `SizeOfHeaders` over a page | VAs below base + `SizeOfHeaders` are the header's | copies up to 64 KB of header |
+| No certificate (address 0 or outside the file) | title ID 0, empty name, warning | no title ID, region or window title read |
+| Certificate cut by the end of the file | the missing fields read 0, warning | only the fields inside the file are read |
+| Library table missing or cut short | the entries inside the file, warning | not read |
+| Thunk table or TLS directory outside the file | none, warning | as before |
+| Section raw data past the end of the file | warning | section left zeroed, `ERROR` line |
+| Header cut before 0x178, bad magic, section table outside the file | `ValueError` | sections not loaded |
+
+All offsets are compared in 64 bits in the loader: an odd address no longer wraps back into the buffer (a certificate
+at `0x0000FFF0` read 4 GB past it). Tests: `tools/xbe_parser/test_xbe_parser.py` on images from our own writer
+(`tools/xbe_parser/synth.py`), `tests/xbe_sections` (layout).
 
 ## Section Table
 
@@ -112,6 +141,54 @@ The section header array begins at `SectionHeadersAddress` and contains `NumberO
 | 3 | InsertedFile | Section was inserted by the linker |
 | 4 | HeadPageReadOnly | First page is read-only |
 | 5 | TailPageReadOnly | Last page is read-only |
+
+### Sections loaded on demand (XBA-124)
+
+On the console the loader maps only the sections marked **Preload**, each with `SectionReferenceCount` 1 and one count
+more on the shared head and tail pages (`HeadSharedPageRefCountAddress` / `Tail...` point at 16-bit counters in the
+header: two sections that meet inside a page share it). A title brings the others in with XAPI's `XLoadSection(name)`,
+which calls the kernel's `XeLoadSection(header)`: on 0 → 1 the kernel commits the pages and reads the section from the
+image (file data, the rest zero); `XeUnloadSection` on 1 → 0 releases them. A section unloaded and loaded again comes
+back as it is in the file. Sections may share virtual addresses: they are alternatives (overlays), one at a time.
+
+Here (`src/kernel/xbox_xbe_sections.c`): every section is copied at boot and stays mapped, which covers a title that
+only loads. On top of that the module keeps the console's reference counts (Preload: 1 at boot, the shared-page
+counters), and on 0 → 1 copies a section again from the image when its bytes may have changed: a writable one (fresh
+data, zeroed BSS after a full unload) or one whose addresses another section held. Read-only sections are not copied
+again (nothing writes them, their pages are never released). At boot, of two overlapping sections the Preload one is in
+memory (the layout copies in table order, so the later one used to win), and each overlap is printed
+(`[XBE] sections A and B share ...`). `RECOMP_XBE_SECTIONS=0` keeps the old bookkeeping (the count only).
+
+**Overlapping code is a blocker.** The lifter has one function per address and reads the bytes of the first section
+that covers it, so of two code sections at one address only one is in the C; when the title loads the other, its calls
+run the first one's code. `tools.triage` and `tools.prepare` (`BLOCKER: sections A and B both hold code ...`) name it.
+Supporting it means tagging lifted functions with their section and switching the dispatch entries on
+`XeLoadSection`, which no title in the library has needed so far (the triage's « Overlaps » column will say).
+What breaks with everything at boot, in short: nothing for a title that loads before use and never relies on a reload;
+a reloaded data section's state (fixed here); overlapping data (fixed here); overlapping code (blocker).
+
+## Title updates and downloadable content (XBA-124)
+
+**On a console.** An Xbox Live title update is downloaded by the title (the online APIs) into the hard disk's
+`E:\TDATA\<title id>\$u\` — an updated `default.xbe` and the files it replaces — and the launch path then runs that
+`default.xbe` instead of the disc's, with `D:` still the disc. Downloadable content goes to
+`E:\TDATA\<title id>\$c\<offering id>\` (a `ContentMeta.xbx` and the package's files). XAPI mounts `T:` on
+`TDATA\<title id>`; the title lists its content with `XFindFirstContent` / `XFindNextContent` (a directory search of
+`T:\$c` plus a signed metadata file per package), and `XMountAlternateTitle` mounts another title's TDATA as a drive
+(sharing data between titles of one publisher). `XLaunchNewImage` starts another XBE (the dashboard, a demo, an update).
+All of these except the kernel calls under them are XAPI code linked into the title, so they are lifted with it.
+
+**Here.** `T:` maps to `<user data>/TDATA/<title id>` (the save folder, `kernel_path.c`). Nothing prepares or runs an
+update XBE: the title was lifted from the disc's `default.xbe`, and that is what runs.
+- With nothing installed (every player), `T:\$c` does not exist: the open fails with a not-found status and
+  `XFindFirstContent` returns `INVALID_HANDLE_VALUE` — no content, cleanly. An empty `$c` lists nothing.
+  `tests/kernel_content_posix` pins both.
+- Content the owner copies into `TDATA/<title id>/$c/` is listed like any folder; whether the title then accepts the
+  package (its signature check) is untested, and the runtime counts the packages at start-up
+  (`[PATH] ... content package(s), left to the title's own XContent calls`).
+- An update XBE the owner copies to `TDATA/<title id>/$u/default.xbe` is **not used**; the runtime says so at start-up
+  (`a title update for <id>, not used`) and `tools.triage --tdata DIR` reports it (version, newer than the disc's or
+  not). Using one would mean preparing the update XBE instead of the disc's (a different lift, its own pack): not done.
 
 ### Common Sections
 
@@ -172,6 +249,10 @@ Located at `CertificateAddress`, the certificate contains game metadata:
 | 0xB0 | 16 | LanKey | LAN encryption key |
 | 0xC0 | 16 | SignatureKey | Title signature key |
 | 0xD0 | 256 | AlternateSignatureKeys | 16 alternate signature keys |
+| 0x1D0 | 4 | OriginalCertificateSize | newer certificates only (`Size` 0x1EC): the fields from here on |
+| 0x1D4 | 4 | OnlineServiceId | |
+| 0x1D8 | 4 | SecurityFlags | |
+| 0x1DC | 16 | CodeEncryptionKey | |
 
 ### Allowed Media Types
 

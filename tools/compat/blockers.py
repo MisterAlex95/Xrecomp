@@ -71,5 +71,27 @@ def stub_words(entries, limit=4):
     return "calls stub " + ", ".join(names) if names else None
 
 
+def d3d_layout_words(entries, limit=3):
+    """{"t":"d3d_layout"} (XBA-105): the XDK D3D layer met a D3D build its
+    layout table does not know and used another build's value for a rule:
+    « D3D layout guessed for D3D8LTCG 5933: fence_event, rpb_nodes », or None."""
+    by = []
+    for e in entries:
+        key = "%s %s" % (e.get("lib", "?"), e.get("build", "?"))
+        rule = e.get("rule", "?")
+        for k, rules in by:
+            if k == key:
+                if rule not in rules:
+                    rules.append(rule)
+                break
+        else:
+            by.append((key, [rule]))
+    if not by:
+        return None
+    parts = ["%s: %s" % (k, ", ".join(r[:limit] + (["+%d more" % (len(r) - limit)] if len(r) > limit else [])))
+             for k, r in by]
+    return "D3D layout guessed for " + "; ".join(parts)
+
+
 def of_kind(discovered, kind):
     return [d for d in discovered or () if isinstance(d, dict) and d.get("t") == kind]

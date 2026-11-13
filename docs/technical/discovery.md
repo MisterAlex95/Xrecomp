@@ -54,6 +54,10 @@ this run or an earlier one) is not written again: the file only grows with what 
                                                              divide error that stops the title (kernel_hal.c) or a
                                                              raise no handler took (xbox_seh.c), or a host fault on a guest
                                                              address no guest handler took (XBA-132)
+{"t":"d3d_layout","va":"0x1A2B3C4D","lib":"D3D8LTCG","build":5933,"rule":"fence_event","used":"0x00001DCC"}
+                                                             the XDK D3D layer met a D3D build its layout table does not
+                                                             know and used another build's value for that rule (XBA-105,
+                                                             profiles.md « Other XDK builds »); va: a hash of lib, build, rule
 ```
 
 `bytes` is the first 8 bytes at the target of an `exec_outside_image`, as hex. They are code the title made at run time
@@ -82,6 +86,9 @@ entries this process wrote, `src/kernel/recomp_status.h`) make the miss visible 
   blocker, whatever the stage, and the result line carries the count (`"smc": N`); the Compatibility page counts the
   titles that have any (XBA-118). An `exec_outside_image` used to be an `icall` entry when it came through the lookup,
   and a seed candidate.
+- `d3d_layout` entries are not seeds: they say what to add to `k_layouts` in `profiles/xdk/d3d8/d3d8.c` for that
+  build (XBA-105); `tools.compat` (and the device grader) add « D3D layout guessed for D3D8LTCG 5933:
+  fence_event, ... » after a blocker other than a crash or a launch (`tools/compat/blockers.py`).
 - `tools.prepare` reads it before analysing (XBA-97, `tools/prepare/discovered.py`): new `icall`, `thread` and
   `thread_ctx` addresses go through the same gates, the ones that pass are kept in `<work>/discovered-seeds.json` and
   handed to the disassembler, the others in `<work>/discovered-rejected.json` so they are not tried again. A new seed

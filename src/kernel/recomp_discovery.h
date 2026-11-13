@@ -42,6 +42,11 @@
  *                                                          (kernel_hal.c) or a raise no handler
  *                                                          took (xbox_seh.c); a Prepare cannot fix
  *                                                          it (XBA-129)
+ *   {"t":"d3d_layout","va":"0x1A2B3C4D","lib":"D3D8LTCG","build":5933,"rule":"fence_event","used":"0x00001DCC"}
+ *                                                          the XDK D3D layer met a D3D build its table does
+ *                                                          not know and fell back to another build's value
+ *                                                          for that rule (XBA-105, profiles/xdk/d3d8/d3d8.c);
+ *                                                          va is a hash of lib, build and rule
  *
  * The file: $RECOMP_DISCOVERY (recomp.cfg can set it); unset, empty or "0":
  * nothing is written. The desktop title project gets a default from
@@ -68,6 +73,7 @@ void recomp_discovery_stub(uint32_t ordinal, const char *name, uint32_t ret_va);
 void recomp_discovery_smc_exec(uint32_t target, uint32_t ret_va, const char *where, const char *bytes);
 void recomp_discovery_smc_write(uint32_t page, uint32_t at, const char *section, const char *by, uint32_t ret_va);
 void recomp_discovery_exception(uint32_t va, uint32_t code, const char *why);
+void recomp_discovery_d3d_layout(const char *lib, uint32_t build, const char *rule, uint32_t used);
 
 /* The file in use, or NULL when discovery is off (opens it on first use). */
 const char *recomp_discovery_path(void);

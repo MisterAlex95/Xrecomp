@@ -90,6 +90,31 @@ def compute(root=ROOT, tree=None):
 
 _cache = {}
 
+# The runtime a desktop title executable links (XBA-134): its CMake project
+# builds src/ itself, so a change there needs a rebuild -- not a new lift.
+# The Android packs link libmain.so instead (shell_abi guards that), so this
+# is the desktop's alone.
+RUNTIME_TREES = [{"include": ["src/**", "include/**", "cmake/**"], "exclude": ["**/build/**"]}]
+RUNTIME_FILES = ["CMakeLists.txt"]
+
+
+def runtime_digest(root=ROOT):
+    """sha256 over the runtime tree (RUNTIME_TREES and the root CMakeLists.txt),
+    the same way as compute(); once per process."""
+    key = ("runtime", root)
+    if key in _cache:
+        return _cache[key]
+    tree = {"trees": RUNTIME_TREES, "exclude_everywhere": load_tree().get("exclude_everywhere", [])}
+    rels = files(root, tree) + [f for f in RUNTIME_FILES if os.path.isfile(os.path.join(root, f))]
+    h = hashlib.sha256()
+    for rel in sorted(rels):
+        with open(os.path.join(root, rel), "rb") as f:
+            data = f.read()
+        h.update(rel.encode("utf-8") + b"\0" + str(len(data)).encode() + b"\0")
+        h.update(data)
+    _cache[key] = h.hexdigest()
+    return _cache[key]
+
 
 def digest(root=ROOT):
     """The toolkit digest: tools/TOOLKIT_SHA256 when the app build wrote it,

@@ -29,6 +29,7 @@ set(KERNEL_SOURCES
     kernel_wait_stats.c
     xbox_memory_layout.c
     xbox_nic.c
+    xbox_xbe_sections.c
     xbox_seh.c
     xbox_seh_fault.c
     guest_vmem.c

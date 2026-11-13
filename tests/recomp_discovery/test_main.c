@@ -75,15 +75,21 @@ int main(void)
     recomp_discovery_stub(136, "KeRemoveQueue", 0x00099990u);
     recomp_discovery_exception(0x00012350u, 0xC0000094u, "divide by zero");   /* XBA-129 */
     recomp_discovery_exception(0x00012350u, 0xC0000094u, "again");
-    CHECK(recomp_discovery_written() == 9);
+    recomp_discovery_d3d_layout("D3D8LTCG", 5933, "fence_event", 0x1DCCu);   /* XBA-105 */
+    recomp_discovery_d3d_layout("D3D8LTCG", 5933, "fence_event", 0x1DCCu);   /* the same rule: one entry */
+    recomp_discovery_d3d_layout("D3D8LTCG", 5933, "rpb_nodes", 0x264u);      /* another rule: its own */
+    CHECK(recomp_discovery_written() == 11);
     CHECK(recomp_discovery_seeds() == 3);                       /* icall, thread, thread_ctx */
     CHECK(recomp_discovery_path() && !strcmp(recomp_discovery_path(), path));
     text = slurp(path);                                         /* written as it happened: no close needed */
     CHECK(text != NULL);
     if (text) {
-        CHECK(count(text, "\n") == 10);
+        CHECK(count(text, "\n") == 12);
         CHECK(strstr(text, "{\"t\":\"exception\",\"va\":\"0x00012350\",\"code\":\"0xC0000094\","
                            "\"why\":\"divide by zero\"}\n") != NULL);
+        CHECK(strstr(text, "\"lib\":\"D3D8LTCG\",\"build\":5933,\"rule\":\"fence_event\",\"used\":\"0x00001DCC\"}\n")
+              != NULL);
+        CHECK(count(text, "{\"t\":\"d3d_layout\",\"va\":\"0x") == 2);
         CHECK(strstr(text, "{\"t\":\"stack_switch\",\"va\":\"0x00023450\",\"to\":\"0x00023480\","
                            "\"why\":\"a \\\"why\\\"\"}\n") != NULL);
         CHECK(strstr(text, "{\"t\":\"stub\",\"ord\":136,\"name\":\"KeRemoveQueue\",\"ret\":\"0x00012340\"}\n") != NULL);
@@ -101,6 +107,7 @@ int main(void)
     recomp_discovery_icall(0x00012345u, 0x00099999u);
     recomp_discovery_unimpl(0x00056780u, "bsf eax, ecx");
     recomp_discovery_stub(136, "KeRemoveQueue", 0x00012340u);   /* read back by "ord" */
+    recomp_discovery_d3d_layout("D3D8LTCG", 5933, "rpb_nodes", 0x264u);
     CHECK(recomp_discovery_written() == 0);
     recomp_discovery_stub(0x00012345u, "Other", 0);               /* an ordinal equal to an icall va: its own key */
     CHECK(recomp_discovery_written() == 1);

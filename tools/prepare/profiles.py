@@ -16,10 +16,15 @@ A layer's JSON (every key optional):
 
     "name"            what it is
     "applies"         xdk only: {"libraries": ["D3D8", ...], "builds": [min, max],
-                      "imports": {"ordinals": [kernel ordinals], "min": n}}
+                      "imports": {"ordinals": [kernel ordinals], "min": n},
+                      "probes": ["d3d_latch_wait", ...], "or_builds": [min, max]}
                       (no "builds": every build of those libraries; "imports":
                       also picked when the library table names none of the
-                      libraries and the XBE imports `min` of those ordinals)
+                      libraries and the XBE imports `min` of those ordinals;
+                      "probes": tools.xbe_ident's code probes that must all have
+                      matched, XBA-105, unless the library's build is within
+                      "or_builds": the builds known to need the layer, kept
+                      when a probe was added so a missed scan cannot drop it)
     "hooks"           a C prefix: the layer's .c files define <prefix>_configure(void)
                       and <prefix>_start(const char *game_dir, const char *save_dir)
     "env_default"     {RECOMP_*: value} set before the hooks when nothing (the
@@ -88,9 +93,16 @@ def _libraries_matched(layer, ident):
     if not want:
         return []
     builds = a.get("builds")
+    # XBA-105: code probes that must all have matched (tools.xbe_ident), unless
+    # the build is one known to need the layer ("or_builds"): a probe added
+    # later must not drop a title the build rule picked and was tested with.
+    found = (ident or {}).get("probes") or {}
+    probes_ok = all(found.get(p) for p in a.get("probes", []))
+    or_builds = a.get("or_builds")
     return ["%s %d" % (name, build)
             for name, build in sorted(((ident or {}).get("xdk", {}).get("libraries") or {}).items())
-            if name.upper() in want and (not builds or builds[0] <= build <= builds[1])]
+            if name.upper() in want and (not builds or builds[0] <= build <= builds[1])
+            and (probes_ok or (or_builds and or_builds[0] <= build <= or_builds[1]))]
 
 
 def _names_libraries(layer, ident):

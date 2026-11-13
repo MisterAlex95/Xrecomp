@@ -17,8 +17,12 @@ from tools.prepare import __main__ as prep            # noqa: E402
 ROOT = profiles.ROOT
 
 
-def ident(libs, engines=()):
-    return {"xdk": {"libraries": dict(libs)}, "engines": [{"layer": e, "kind": "engine"} for e in engines]}
+def ident(libs, engines=(), probes=None):
+    return {"xdk": {"libraries": dict(libs)}, "engines": [{"layer": e, "kind": "engine"} for e in engines],
+            "probes": dict(probes or {})}
+
+
+LATCH = {"d3d_latch_wait": 1}       # tools.xbe_ident: D3D's fence wait spins on the 0x0310 latch (XBA-105)
 
 
 def layer(root, key, obj, **files):
@@ -168,7 +172,7 @@ BO3_LIBS = {"XAPILIB": 5849, "D3D8LTCG": 5849, "DSOUND": 5849, "XMV": 5849}
 
 @pytest.mark.parametrize("tid,libs", [("4D5300D1", FABLE_LIBS), ("4541005B", BO3_LIBS)])
 def test_the_first_titles_resolve(tid, libs):
-    for ident_ in (ident(libs), None):          # also when the XBE cannot be identified
+    for ident_ in (ident(libs, probes=LATCH), None):          # also when the XBE cannot be identified
         p = profiles.resolve(tid, ident_)
         xdk = [k for k in p["keys"] if k.startswith("xdk/")]
         assert p["keys"][-1] == "titles/" + tid.lower()
@@ -193,7 +197,7 @@ def test_fable_and_burnout_keep_their_own_values():
     assert fable["params"] == {"XBA_D3D_DEVICE_PTR": 0x00862288, "XBA_D3D_DEVICE": 0x0085FDE0,
                                "XBA_D3D_SW_METHODS": 0x7000}
     assert fable["exclude_manual"] == ["titles_4d5300d1__overrides.c"]
-    bo3 = profiles.resolve("4541005B", ident(BO3_LIBS))
+    bo3 = profiles.resolve("4541005B", ident(BO3_LIBS, probes=LATCH))
     # The engine layer (XBA-95) carries what Burnout 3 needs as a RenderWare title.
     assert "engines/renderware" in bo3["keys"]
     assert bo3["env_force"] == {"RECOMP_LSFG": "0"}
@@ -207,25 +211,36 @@ def test_fable_and_burnout_keep_their_own_values():
 
 def test_a_renderware_title_with_no_profile_gets_the_engine_layer():
     """Black (45410083) has no title layer: the RenderWare markers pick the engine layer."""
-    black = profiles.resolve("45410083", ident({"XAPILIB": 5849, "D3D8LTCG": 5849, "DSOUND": 5849}, ["renderware"]))
+    black = profiles.resolve("45410083", ident({"XAPILIB": 5849, "D3D8LTCG": 5849, "DSOUND": 5849}, ["renderware"], LATCH))
     assert black["keys"] == ["xdk/d3d8", "xdk/d3d8ltcg", "xdk/dsound", "xdk/xapi", "engines/renderware"]
     assert not black["title"]
     assert black["env_force"] == {"RECOMP_LSFG": "0"}
     assert black["env_default"]["android"]["RECOMP_PB_WALK"] == "dma"
 
 
-def test_d3d8ltcg_5849_gets_the_dma_walk_without_a_title_profile():
-    """XDK 5849's D3D8LTCG (Black, Burnout 3): its fence wait needs the DMA walk, so the D3D8LTCG layer turns it on
-    for any such title (XBA_D3D_DMA_WALK), and the D3D8 layer then adopts the fence event once it finds the device.
-    D3D8 (Fable) and other D3D8LTCG builds are left as they were."""
-    black = profiles.resolve("45410083", ident({"XAPILIB": 5849, "D3D8LTCG": 5849, "DSOUND": 5849}))
+def test_a_d3d8ltcg_latch_wait_gets_the_dma_walk_without_a_title_profile():
+    """D3D8LTCG whose fence wait spins on the 0x0310 latch (Black, Burnout 3 at XDK 5849) needs the DMA walk, so the
+    D3D8LTCG layer turns it on (XBA_D3D_DMA_WALK), and the D3D8 layer then adopts the fence event once it finds the
+    device. Decided by tools.xbe_ident's probe, whatever the build (XBA-105), or by build 5849, the build it was
+    picked by before the probe and is known to need it (or_builds, wave 4: the probe was never run on Black or Burnout
+    3, and without the walk Black is a black screen); D3D8LTCG of another build without the loop and plain D3D8
+    (Fable) are left as they were."""
+    black = profiles.resolve("45410083", ident({"XAPILIB": 5849, "D3D8LTCG": 5849, "DSOUND": 5849}, probes=LATCH))
     assert black["keys"] == ["xdk/d3d8", "xdk/d3d8ltcg", "xdk/dsound", "xdk/xapi"] and not black["title"]
     assert black["params"] == {"XBA_D3D_DMA_WALK": 1}
     assert "#define XBA_D3D_DMA_WALK 0x00000001u" in profiles.params_header(black)
-    for libs in ({"D3D8": 5849}, {"D3D8LTCG": 5788}):
-        p = profiles.resolve("4D530001", ident(libs))
+    for libs in ({"D3D8LTCG": 5788}, {"D3D8LTCG": 4627}):          # another build with the loop: the walk too
+        assert "xdk/d3d8ltcg" in profiles.resolve("4D530001", ident(libs, probes=LATCH))["keys"]
+    for probes in ({}, {"d3d_latch_wait": 0}):                     # 5849 whatever the scan found: never dropped
+        for tid, libs in (("45410083", {"XAPILIB": 5849, "D3D8LTCG": 5849, "DSOUND": 5849}),
+                          ("4541005B", {"XAPILIB": 5849, "D3D8LTCG": 5849, "DSOUND": 5849})):
+            p = profiles.resolve(tid, ident(libs, probes=probes))
+            assert "xdk/d3d8ltcg" in p["keys"] and p["params"].get("XBA_D3D_DMA_WALK") == 1, (tid, probes)
+    for libs, probes in (({"D3D8LTCG": 5788}, {}), ({"D3D8LTCG": 5788}, {"d3d_latch_wait": 0}),
+                         ({"D3D8": 5849}, LATCH)):
+        p = profiles.resolve("4D530001", ident(libs, probes=probes))
         assert "xdk/d3d8ltcg" not in p["keys"] and "XBA_D3D_DMA_WALK" not in p["params"]
-    assert "XBA_D3D_DMA_WALK" not in profiles.resolve("4D5300D1", ident(FABLE_LIBS))["params"]
+    assert "XBA_D3D_DMA_WALK" not in profiles.resolve("4D5300D1", ident(FABLE_LIBS, probes=LATCH))["params"]
 
 
 def test_every_layer_in_the_tree_is_well_formed():

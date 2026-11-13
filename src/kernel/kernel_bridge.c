@@ -33,6 +33,7 @@
 #include "kernel_wait_stats.h"
 #include "xbox_memory_layout.h"
 #include "xbox_seh.h"
+#include "xbox_xbe_sections.h"
 #include "platform/host_time.h"
 #include "recomp_icall_feedback.h"
 #include "recomp_discovery.h"
@@ -5540,8 +5541,10 @@ static void bridge_wait_done(uint32_t alertable, uint32_t wait_mode)
  * On hardware a section marked non-preload is paged in from disc on demand,
  * and a title that keeps its video decoder in one -- Wreckless keeps WMVDEC
  * there -- calls this before touching it. Every section is already resident
- * here, so the work is the bookkeeping: hand back success and keep the
- * reference count the title can read.
+ * here; xbox_xbe_sections.c keeps the reference counts the console keeps and
+ * copies a section again from the image where its bytes may have changed
+ * (a writable one reloaded after a full unload, one of two sections at the
+ * same addresses) -- XBA-124, RECOMP_XBE_SECTIONS=0 for the count only.
  *
  * Done against guest memory rather than the PXBE_SECTION_HEADER struct: the
  * on-disc header is nine 32-bit fields and a digest, and the native struct
@@ -5555,23 +5558,11 @@ static void bridge_wait_done(uint32_t alertable, uint32_t wait_mode)
 static void bridge_XeSection(int load)
 {
     uint32_t section = STACK_ARG(0);
-    uint32_t count;
 
-    if (!section) {
-        g_eax = 0xC000000Du;              /* STATUS_INVALID_PARAMETER */
-        return;
-    }
-    count = BRIDGE_MEM32(section + XBE_SECTION_REFCOUNT_OFFSET);
-    if (load)
-        count++;
-    else if (count)
-        count--;
-    BRIDGE_MEM32(section + XBE_SECTION_REFCOUNT_OFFSET) = count;
-
-    if (KERNEL_LOG_ON())
+    g_eax = load ? xbox_XbeSectionLoad(section) : xbox_XbeSectionUnload(section);
+    if (KERNEL_LOG_ON() && g_eax == 0)
         fprintf(stderr, "  [XBE] Xe%sSection(0x%08X) refcount=%u\n",
-                load ? "Load" : "Unload", section, count);
-    g_eax = 0;
+                load ? "Load" : "Unload", section, BRIDGE_MEM32(section + XBE_SECTION_REFCOUNT_OFFSET));
 }
 
 static void bridge_XeLoadSection(void)   { bridge_XeSection(1); }

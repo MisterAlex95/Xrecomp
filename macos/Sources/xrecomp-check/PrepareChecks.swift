@@ -255,6 +255,7 @@ func registerPrepareChecks() {
         expectEq(stale?.work, "/w")
         expectEq(stale?.reasonText, "The last build did not finish: prepare again")
         expectEq(TitleState.describe(["toolkit"]), "Prepare again (toolkit updated)")
+        expectEq(TitleState.describe(["runtime"]), "Prepare again to rebuild (runtime updated, a few minutes)")
         expectEq(TitleState.describe([]), "Prepare again")
     }
 

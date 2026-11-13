@@ -849,6 +849,42 @@ static void fold_case(char *path, size_t keep)
     }
 }
 
+/* A title update or content the owner copied into this title's TDATA
+ * (XBA-124): T:\$u\default.xbe is never launched -- the disc's default.xbe
+ * runs, as the title was lifted from it -- so say so rather than leave it
+ * silently unused; content packages under T:\$c are the title's own to
+ * enumerate (XFindFirstContent), and are only counted. */
+static void report_title_update(void)
+{
+    char dir[MAX_PATH], path[MAX_PATH];
+    const char *root = s_user_in_game[1] ? s_game_dir : s_user_dir;
+    struct stat st;
+    DIR *d;
+    struct dirent *e;
+    int packages = 0;
+
+    if (!s_title_id)
+        return;
+    snprintf(dir, sizeof(dir), "%s/TDATA/%08x", root, (unsigned)s_title_id);
+    snprintf(path, sizeof(path), "%s/$u/default.xbe", dir);
+    fold_case(path, strlen(root));
+    if (stat(path, &st) == 0 && S_ISREG(st.st_mode))
+        xbox_log(XBOX_LOG_WARN, XBOX_LOG_PATH,
+                 "%s: a title update for %08X, not used -- the disc's default.xbe runs "
+                 "(docs/formats/xbe.md, title updates)", path, (unsigned)s_title_id);
+    snprintf(path, sizeof(path), "%s/$c", dir);
+    fold_case(path, strlen(root));
+    if ((d = opendir(path)) != NULL) {
+        while ((e = readdir(d)) != NULL)
+            if (e->d_name[0] != '.')
+                packages++;
+        closedir(d);
+        if (packages)
+            xbox_log(XBOX_LOG_INFO, XBOX_LOG_PATH,
+                     "%s: %d content package(s), left to the title's own XContent calls", path, packages);
+    }
+}
+
 void xbox_path_init(const char* game_dir, const char* save_dir)
 {
     if (game_dir) {
@@ -965,6 +1001,7 @@ void xbox_path_init(const char* game_dir, const char* save_dir)
     s_initialized = TRUE;
     xbox_log(XBOX_LOG_INFO, XBOX_LOG_PATH, "Path init: game=%s, save=%s, user data=%s",
              s_game_dir, s_save_dir, s_user_dir);
+    report_title_update();
 }
 
 const char *xbox_path_save_dir_utf8(void)

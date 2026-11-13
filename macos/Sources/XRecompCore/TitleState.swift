@@ -88,6 +88,7 @@ public struct TitleState: Codable, Equatable, Sendable {
         if r.contains(where: { $0.contains("profile") }) { return "Prepare again (title profile changed)" }
         if r.contains(where: { $0.contains("xbe") }) { return "Prepare again (the game's files changed)" }
         if r.contains("not_built") { return "The last build did not finish: prepare again" }
+        if r.contains("runtime") { return "Prepare again to rebuild (runtime updated, a few minutes)" }
         if r.contains("no_stamp") { return "Prepare again (made outside the launcher)" }
         return reasons.isEmpty ? "Prepare again" : "Prepare again (\(reasons.joined(separator: ", ")))"
     }

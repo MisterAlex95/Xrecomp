@@ -15,6 +15,7 @@ int main(void) { puts("skipped: POSIX mapping"); return 77; }
 
 static uint8_t *g_mem;
 ptrdiff_t xbox_GetMemoryOffset(void) { return (ptrdiff_t)g_mem; }
+void *xbox_GetMemoryBase(void) { return g_mem; }
 static int (*g_hook)(uint32_t);
 void nv2a_pb_set_software_method_hook(int (*hook)(uint32_t)) { g_hook = hook; }
 void nv2a_pb_set_semaphore_target(uint32_t va) { (void)va; }
@@ -26,6 +27,15 @@ int nv2a_pb_dma_walk(void) { const char *e = getenv("RECOMP_PB_WALK"); return e 
 int xbox_Nv2aMirrorFence(uint32_t a, uint32_t b, uint32_t c) { (void)a; (void)b; (void)c; return 0; }
 static uint32_t g_disc_dev, g_disc_slot;
 void recomp_discovery_d3d(uint32_t d, uint32_t s) { g_disc_dev = d; g_disc_slot = s; }
+/* XBA-105: the rules that fell back, "rule=value;" each, in order. */
+static char g_fallbacks[512];
+void recomp_discovery_d3d_layout(const char *lib, uint32_t build, const char *rule, uint32_t used)
+{
+    char e[96];
+    snprintf(e, sizeof e, "%s %u %s=0x%X;", lib, build, rule, used);
+    if (strlen(g_fallbacks) + strlen(e) < sizeof g_fallbacks)
+        strcat(g_fallbacks, e);
+}
 static uint32_t g_cb_routine, g_cb_ctx;
 void nv2a_pb_exec_insert_callback_args(uint32_t *r, uint32_t *c) { *r = 0x00123450u; *c = 0xC0FFEEu; }
 int xbox_DpcQueueGuestCall(uint32_t r, uint32_t c) { g_cb_routine = r; g_cb_ctx = c; return 1; }
@@ -71,6 +81,19 @@ static void plant_5455(uint32_t d, uint32_t ring_lo, uint32_t ring_hi, uint32_t 
     kevent(d + 0x19AC, 1);
 }
 
+/* The XBE header the kernel maps at 0x10000, with one library entry: the
+ * title's D3D (XBA-105: the layer keys its layout table on it). */
+static void plant_header(const char *lib, uint32_t build)
+{
+    memcpy(g_mem + 0x10000, "XBEH", 4);
+    M32(0x10000 + 0x10C) = 0x00880000u;           /* SizeOfImage: image 0x10000-0x890000 */
+    M32(0x10000 + 0x160) = 1;
+    M32(0x10000 + 0x164) = 0x10900;
+    memset(g_mem + 0x10900, 0, 16);
+    memcpy(g_mem + 0x10900, lib, strlen(lib) < 8 ? strlen(lib) : 8);
+    *(uint16_t *)(g_mem + 0x10900 + 12) = (uint16_t)build;
+}
+
 int main(void)
 {
     g_mem = mmap(NULL, 0x100000000ull, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
@@ -78,7 +101,17 @@ int main(void)
         puts("skipped: cannot reserve 4 GB");
         return 77;
     }
-    M32(0x10000 + 0x10C) = 0x00880000u;           /* SizeOfImage: image 0x10000-0x890000 */
+#if defined(TEST_5455)
+    plant_header("D3D8", 5455);                   /* KOTOR's: in the table */
+#elif defined(TEST_GIVEN)
+    plant_header("D3D8", 5849);                   /* Fable's profile: a build the table leaves out */
+#elif defined(TEST_UNKNOWN)
+    plant_header("D3D8LTCG", 5933);               /* not in the table */
+#elif defined(TEST_4627)
+    plant_header("D3D8", 4627);                   /* not in the table either */
+#else
+    plant_header("D3D8LTCG", 5849);               /* Burnout 3's, Black's */
+#endif
     unsetenv("RECOMP_PB_WALK");
     xba_d3d8_configure();
 #ifdef TEST_LTCG
@@ -105,6 +138,69 @@ int main(void)
     CHECK(g_disc_dev == 0x003550F0 && g_disc_slot == 0x003550E8);
     CHECK(g_adopted == 0x003550F0 + 0x19AC);
     CHECK(g_hook(5u) == 1 && g_event == 0x003550F0 + 0x19AC);
+    CHECK(g_fallbacks[0] == 0);                   /* a known build: nothing fell back */
+    if (failures)
+        return 1;
+    puts("xdk_d3d8_layer: ok");
+    return 0;
+#endif
+#ifdef TEST_UNKNOWN
+    /* XBA-105: a D3D8LTCG build the table does not know (5933), 5849's slot
+     * rule, no KEVENT pair: found, and every rule that fell back is said and
+     * recorded; the RunPushBuffer methods guard what they were not told. */
+    {
+        uint32_t dev = 0x00600000, node = dev + 0x264 + 20;
+        setenv("RECOMP_PB_WALK", "dma", 1);
+        plant(dev, 0x80010000, 0x80090000, 0x80012340);
+        M32(dev + 0x30) = 0x8006B000u;
+        CHECK(xba_d3d8_locate() == 1 && g_disc_dev == dev && g_disc_slot == dev + 0x24A8);
+        CHECK(strstr(g_fallbacks, "D3D8LTCG 5933 slot=0x24A8;") != NULL);
+        CHECK(strstr(g_fallbacks, "D3D8LTCG 5933 device_core=0x24;") != NULL);
+        CHECK(strstr(g_fallbacks, "D3D8LTCG 5933 fence_event=0x1DCC;") != NULL);
+        CHECK(g_hook(5u) == 1 && g_event == dev + 0x1DCC);
+        /* Method 0xD on an unconfirmed layout: the pending count is left
+         * alone while it does not read as a count, decremented when it does;
+         * the node offsets used are said once. */
+        M32(dev + 0x50) = 0;
+        M32(node) = 0x80000000u | 0x00030000u;
+        M32(node + 4) = 0;
+        M32(node + 8) = 0x80030000u;
+        CHECK(g_hook(1u << 5 | 0xDu) == 1 && M32(0x80030000u) == 0x00030001u && M32(dev + 0x50) == 0);
+        M32(dev + 0x50) = 0x12345678u;
+        CHECK(g_hook(1u << 5 | 0xDu) == 1 && M32(dev + 0x50) == 0x12345678u);
+        M32(dev + 0x50) = 3;
+        CHECK(g_hook(1u << 5 | 0xDu) == 1 && M32(dev + 0x50) == 2);
+        CHECK(strstr(g_fallbacks, "D3D8LTCG 5933 rpb_pending=0x50;") != NULL);
+        CHECK(strstr(g_fallbacks, "D3D8LTCG 5933 rpb_nodes=0x264;") != NULL);
+        /* Each rule once. */
+        CHECK(strstr(strstr(g_fallbacks, "fence_event") + 1, "fence_event") == NULL);
+    }
+    if (failures)
+        return 1;
+    puts("xdk_d3d8_layer: ok");
+    return 0;
+#endif
+#ifdef TEST_4627
+    /* XBA-105: another plausible layout on a build the table does not know:
+     * the pointer slot well after the device (+0x1E00, not 5849's +0x24A8),
+     * the event pair at +0x1500/+0x1510. Found by structure (any pointer, the
+     * ring, the semaphore, the pair): no slot or fence-event fallback, only
+     * the ring offsets the search itself assumes are said. */
+    {
+        uint32_t dev = 0x00480000;
+        M32(dev) = 0x80100100u;
+        M32(dev + 0x24) = 0x80100000u;
+        M32(dev + 0x28) = 0x80180000u;
+        M32(dev + 0x30) = 0x8006B000u;
+        M32(dev + 0x1E00) = dev;
+        kevent(dev + 0x1500, 1);
+        kevent(dev + 0x1510, 1);
+        CHECK(xba_d3d8_scan(0x10000, 0x890000) == 0);
+        CHECK(xba_d3d8_locate() == 1 && g_disc_dev == dev && g_disc_slot == dev + 0x1E00);
+        CHECK(strstr(g_fallbacks, "slot=") == NULL && strstr(g_fallbacks, "fence_event=") == NULL);
+        CHECK(strstr(g_fallbacks, "D3D8 4627 device_core=0x24;") != NULL);
+        CHECK(g_hook(5u) == 1 && g_event == dev + 0x1510);
+    }
     if (failures)
         return 1;
     puts("xdk_d3d8_layer: ok");
@@ -180,6 +276,7 @@ int main(void)
     M32(0x00700000 + 0x24A8) = 0;
     CHECK(xba_d3d8_locate() == 1);
     CHECK(g_disc_dev == 0x0085FDE0 && g_disc_slot == 0x00862288);
+    CHECK(g_fallbacks[0] == 0);                   /* D3D8LTCG 5849 is in the table */
 #ifdef TEST_LTCG
     /* Method 5 is delivered under the DMA walk: the fence event becomes a guest event. */
     CHECK(g_adopted == 0x0085FDE0 + 0x1DCC);
@@ -216,6 +313,8 @@ int main(void)
         CHECK(g_hook(2u << 5 | 0xDu) == 1);
 #ifdef TEST_GIVEN
         CHECK(M32(0x00400000u) == 0x00020001u);
+        /* Fable's offsets, on a D3D8 build the table leaves out: used, and said. */
+        CHECK(strstr(g_fallbacks, "D3D8 5849 rpb_nodes=0x264;") != NULL);
 #else
         CHECK(M32(0x00400000u) == 0x12345678u);
 #endif

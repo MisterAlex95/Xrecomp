@@ -1,6 +1,6 @@
 {
-  "name": "XDK Direct3D 8 LTCG, build 5849 (D3D8LTCG)",
-  "applies": {"libraries": ["D3D8LTCG"], "builds": [5849, 5849]},
+  "name": "XDK Direct3D 8 LTCG whose fence wait spins on the 0x0310 latch (D3D8LTCG, any build)",
+  "applies": {"libraries": ["D3D8LTCG"], "probes": ["d3d_latch_wait"], "or_builds": [5849, 5849]},
   "params": {
     "XBA_D3D_DMA_WALK": 1
   },
@@ -8,8 +8,14 @@
     "XBA_D3D_DMA_WALK=1 (RECOMP_PB_WALK=dma unless set): D3D8LTCG's fence wait (BlockOnTime and its far-behind",
     "probe sub_0026CBA0 in Black) reads DMA_GET and the 0x0310 latch (PGRAPH 0x400B10), which only the DMA walk keeps",
     "honest; under the segment scan it can spin for good on the latch (Black froze at the menu under host load), and",
-    "software method 5 is never delivered. With the walk on, profiles/xdk/d3d8/d3d8.c adopts the fence event",
-    "(device + 0x1DCC) once it has found the device at run time, so BlockOnTime sleeps until method 5 sets it.",
+    "software method 5 is never delivered. With the walk on, profiles/xdk/d3d8/d3d8.c adopts the fence event once it",
+    "has found the device at run time, so BlockOnTime sleeps until method 5 sets it.",
+    "Picked by what the title's D3D does, not by its build (XBA-105): tools.xbe_ident's d3d_latch_wait probe finds the",
+    "latch loop (mov r32, [reg + 0x400B10] then test/and with the fence bits 0x7C) in the executable sections. Before,",
+    "builds [5849, 5849] only: other D3D8LTCG builds got no walk, silently. Plain D3D8 stays out (Fable, KOTOR run on",
+    "the segment scan, K-7); the triage's probe column shows which D3D8 titles carry the loop too.",
+    "or_builds [5849, 5849]: build 5849 keeps the walk whatever the probe says. Black and Burnout 3 (both 5849) need it",
+    "(without it Black shows a black screen) and the probe was never run on them: a scan that misses must not drop it.",
     "No hooks: the D3D8 layer's code does the work. Seen on: Black 45410083, Burnout 3 4541005B (XDK 5849)."
   ]
 }

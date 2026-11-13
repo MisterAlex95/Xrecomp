@@ -42,3 +42,14 @@ def test_heal_and_classify_say_them():
     assert EXC in blocker and SMC in blocker, blocker
     hang = classify(st, [], None, 60, 60, "", FIXTURE)[1]
     assert EXC in hang and SMC in hang and STUB in hang, hang
+
+
+def test_a_guessed_d3d_layout_is_named():
+    """XBA-105's d3d_layout entries, after the blocker (not after a crash)."""
+    disc = [{"t": "d3d_layout", "va": "0x1", "lib": "D3D8LTCG", "build": 5933, "rule": "fence_event", "used": "0x1DCC"},
+            {"t": "d3d_layout", "va": "0x2", "lib": "D3D8LTCG", "build": 5933, "rule": "rpb_nodes", "used": "0x264"}]
+    words = "D3D layout guessed for D3D8LTCG 5933: fence_event, rpb_nodes"
+    assert blockers.d3d_layout_words(disc) == words
+    st = [line(t, threads=2) for t in range(1000, 60001, 1000)]
+    assert classify(st, [], None, 60, 60, "", disc)[1].endswith("; " + words)
+    assert words not in classify(st, [], ("signal", 11), 60, 60, "SIGSEGV\n", disc)[1]
