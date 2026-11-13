@@ -44,7 +44,10 @@ jobs:
           if JOBS=4 XBR_BUILD_ONLY=1 co/tools/run_c_tests.sh build/c-tests build/c-tests.md; then
             echo "every C test project builds"
           else
-            grep -E '\| FAIL \||FAIL' build/c-tests.md || true
+            for name in $(awk -F'|' '/FAIL/ {gsub(/ /, "", $2); print $2}' build/c-tests.md); do
+              echo "== $name"
+              grep -E "error|Undefined symbols|ld: " -A3 "build/c-tests/$name.log" | head -30 || true
+            done
             echo "::warning::some C test projects do not build on macOS (report above); not gating yet"
           fi
       - name: Clean
