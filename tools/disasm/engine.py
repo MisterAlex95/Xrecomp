@@ -131,6 +131,9 @@ class DisasmEngine:
         # when the displacement is not the table's first slot.
         self._jt_sites: Dict[int, List[Tuple[int, int]]] = {}
         self._jt_base: Dict[int, int] = {}
+        # Table -> the `mov reg, [idx*4 + table]` loads of a register
+        # dispatch (find_register_dispatch), where its bound check is found.
+        self._jt_bounds: Dict[int, List[int]] = {}
         # Byte-sized tables read through an index, `movzx eax, byte ptr
         # [eax + disp]`. MSVC's two-level switch maps a sparse case value to a
         # dense arm number this way and parks the byte table straight after
@@ -395,6 +398,114 @@ class DisasmEngine:
             resynced += 1
 
         return resynced
+
+    def find_register_dispatch(self) -> int:
+        """`mov reg, [idx*4 + table] ; jmp reg`: a switch dispatched through
+        a register (XBA-137). Recorded like `jmp [idx*4 + table]`, so
+        resync_jump_tables measures an inline table and
+        measure_external_tables one in a data section. Returns how many."""
+        found = 0
+        for insn in list(self.instructions.values()):
+            if insn.mnemonic != "mov" or "*4" not in insn.op_str.replace(" ", ""):
+                continue
+            ops = insn.op_str.replace(" ", "")
+            reg, _, mem = ops.partition(",")
+            if (reg not in ("eax", "ebx", "ecx", "edx", "esi", "edi", "ebp")
+                    or not mem.startswith("dwordptr[") or not mem.endswith("]")):
+                continue
+            inner = mem[len("dwordptr["):-1]
+            idx, _, disp = inner.partition("*4+")
+            if "+" in idx or not disp.startswith("0x"):
+                continue
+            table = int(disp, 16)
+            if not (self.image.base_address <= table
+                    < self.image.base_address + self.image.image_size):
+                continue
+            jmp = self.instructions.get(insn.end_address)
+            if jmp is None or jmp.mnemonic != "jmp" or jmp.op_str.strip() != reg:
+                continue
+            jmp.jump_table = table
+            self._jt_candidates.add(table)
+            self._jt_sites.setdefault(table, []).append((jmp.address, jmp.end_address))
+            self._jt_bounds.setdefault(table, []).append(insn.address)
+            found += 1
+        return found
+
+    def decode_table_arms(self) -> int:
+        """Decode every arm of every measured jump table that the sweep
+        stepped over (XBA-137). An arm packed after a short case that ends
+        in ret (`xor eax, eax ; ret` as the default, then the cases) is not
+        reached by decode_at's resync, which stops at the ret, so the body
+        measure stopped there and the arms fell outside their function."""
+        added = 0
+        for tbl in list(self.jump_tables):
+            for arm in self.jump_table_entries(tbl):
+                if arm and arm not in self.instructions:
+                    added += 1 if self.decode_at(arm) else 0
+        return added
+
+    def _bound_before(self, site: int) -> Optional[int]:
+        """Entries a switch dispatch at `site` can index, from the bound
+        check in front of it: `cmp idx, N ; ja default` (N + 1) or `jae` (N),
+        possibly through a byte table (`movzx idx, byte ptr [idx + B]`, the
+        two-level form: one more than its largest byte)."""
+        prev = self._instruction_ending_at(site)
+        if prev is not None and prev.mnemonic in ("movzx",) and prev.address in {
+                a for sites in self.byte_tables.values() for a in sites}:
+            for tbl, sites in self.byte_tables.items():
+                if prev.address in sites:
+                    n = self.index_table_length(tbl)
+                    data = self.image.read_bytes_at_va(tbl, n) if n else None
+                    return (max(data) + 1) if data else None
+            return None
+        ja = prev
+        if ja is None or ja.mnemonic not in ("ja", "jae"):
+            return None
+        cmp = self._instruction_ending_at(ja.address)
+        if cmp is None or cmp.mnemonic != "cmp":
+            return None
+        _, _, imm = cmp.op_str.replace(" ", "").partition(",")
+        try:
+            bound = int(imm, 0)
+        except ValueError:
+            return None
+        if bound < 0 or bound > 1023:
+            return None
+        return bound + 1 if ja.mnemonic == "ja" else bound
+
+    def measure_external_tables(self, code_ranges) -> int:
+        """Switch tables the sweep could not measure because they are not in
+        the code they dispatch to (XBA-137): a table in .rdata or .data that
+        resync_jump_tables skips, its entries pointing into another section.
+        Measured only from the bound check in front of the dispatch (see
+        _bound_before), and kept only when every entry lands in the code
+        section of the dispatch. Nothing is decoded or dropped: the table is
+        data the sweep never read as code. Returns how many."""
+        in_code = lambda va: any(lo <= va < hi for lo, hi in code_ranges)
+        found = 0
+        for tbl in sorted(self._jt_candidates):
+            if tbl in self.jump_tables or tbl in self._jt_base or in_code(tbl):
+                continue
+            n = None
+            for site, _ in self._jt_sites.get(tbl, ()):
+                anchor = self.instructions.get(site)
+                load = [a for a in self._jt_bounds.get(tbl, ())
+                        if self.instructions.get(a) is not None
+                        and self.instructions[a].end_address == site]
+                n = self._bound_before(load[0] if load else site)
+                if n:
+                    home = self.image.get_section_at_va(site)
+                    break
+            if not n or anchor is None:
+                continue
+            lo, hi = home.virtual_addr, home.virtual_addr + home.virtual_size
+            entries = [self.image.read_u32_at_va(tbl + 4 * k) for k in range(n)]
+            if any(e is None or not (lo <= e < hi) or e not in self.instructions
+                   for e in entries):
+                continue
+            self.jump_tables[tbl] = tbl + 4 * n
+            found += 1
+        return found
 
     def index_table_length(self, table: int) -> Optional[int]:
         """Entries in the byte index table at `table`, read from the bound
