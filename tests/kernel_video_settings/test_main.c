@@ -153,6 +153,26 @@ int main(void)
     if (xbox_AvRefreshHz() != 60) { fprintf(stderr, "FAIL: 480p mode is not 60 Hz\n"); failures++; }
     env("RECOMP_PAL60", NULL);
 
+    /* The XDK's option numbers (XBA-133): 2 enables closed captions and
+     * leaves the display mode alone, 13 reads the mode back, 6 is the
+     * capabilities word (nxdk's VIDEO_ENC_GET_SETTINGS). */
+    {
+        ULONG r = 0xDEADBEEF;
+        xbox_AvSetDisplayMode(NULL, 0, 0x88070701u, 0, 2560, 0);
+        xbox_AvSendTVEncoderOption(NULL, 2 /* AV_OPTION_ENABLE_CC */, 0x44030307u, &r);
+        xbox_AvSendTVEncoderOption(NULL, 13 /* AV_OPTION_QUERY_MODE */, 0, &r);
+        if (r != 0x88070701u || xbox_AvRefreshHz() != 60) {
+            fprintf(stderr, "FAIL: option 2 changed the display mode (0x%08lX)\n", (unsigned long)r);
+            failures++;
+        }
+        r = 0xDEADBEEF;
+        xbox_AvSendTVEncoderOption(NULL, 6, 0, &r);
+        if ((r & 0xFFu) != AV_PACK_HDTV) {
+            fprintf(stderr, "FAIL: option 6 is not the capabilities word (0x%08lX)\n", (unsigned long)r);
+            failures++;
+        }
+    }
+
     if (failures) {
         fprintf(stderr, "%d failure(s)\n", failures);
         return 1;

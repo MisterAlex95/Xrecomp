@@ -1645,7 +1645,7 @@ VOID __stdcall xbox_AvSendTVEncoderOption(
         return;
 
     switch (Option) {
-    case AV_OPTION_QUERY_AVPACK:
+    case AV_QUERY_AV_CAPABILITIES:
         /* Pack type, video standard and refresh rate, in one word.
          *
          * D3D keys its display-mode table on all three: the row flags carry
@@ -1661,34 +1661,35 @@ VOID __stdcall xbox_AvSendTVEncoderOption(
         break;
 
     case AV_OPTION_QUERY_MODE:
-        /* Return current display mode */
+        /* The mode AvSetDisplayMode last set. */
         *Result = g_av_display_mode;
         break;
 
-    case AV_OPTION_QUERY_AV_CAPABILITIES:
-        /* Used to claim 480p, 720p and widescreen in bits of its own while
-         * the EEPROM said none: the same word as above now. */
-        *Result = xbox_AvCapabilities();
-        break;
-
-    case AV_OPTION_QUERY_ENCODER_TYPE:
+    case AV_QUERY_ENCODER_TYPE:
         /* Conexant CX25871 (common in retail Xboxes) */
         *Result = 4;
         break;
 
-    case AV_OPTION_QUERY_MODE_CAPS:
-        *Result = xbox_AvCapabilities();
-        break;
-
-    case AV_OPTION_SET_MODE:
-        g_av_display_mode = Param;
+    case AV_QUERY_CC_STATUS:
+    case AV_QUERY_MODE_TABLE_VERSION:
         *Result = 0;
         break;
 
-    case AV_OPTION_BLANK_SCREEN:
+    /* Settings of the TV encoder, which has nothing here to drive: closed
+     * captions, Macrovision, blanking, the flicker and luma filters, CGMS,
+     * widescreen signalling. None of them changes the display mode. */
     case AV_OPTION_MACROVISION_MODE:
+    case AV_OPTION_ENABLE_CC:
+    case AV_OPTION_DISABLE_CC:
+    case AV_OPTION_SEND_CC_DATA:
+    case AV_OPTION_BLANK_SCREEN:
+    case AV_OPTION_MACROVISION_COMMIT:
     case AV_OPTION_FLICKER_FILTER:
     case AV_OPTION_ZERO_MODE:
+    case AV_OPTION_ENABLE_LUMA_FILTER:
+    case AV_OPTION_GUESS_FIELD:
+    case AV_OPTION_CGMS:
+    case AV_OPTION_WIDESCREEN:
         *Result = 0;
         break;
 

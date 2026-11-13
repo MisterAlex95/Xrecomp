@@ -1197,17 +1197,32 @@ NTSTATUS __stdcall xbox_ExSaveNonVolatileSetting(ULONG ValueIndex, ULONG Type, P
 #define AV_REFRESH_60Hz         0x00400000
 #define AV_REFRESH_50Hz         0x00800000
 
-/* ---- AV option codes for AvSendTVEncoderOption ---- */
-#define AV_OPTION_QUERY_MODE            0x01
-#define AV_OPTION_SET_MODE              0x02
-#define AV_OPTION_QUERY_AVPACK          0x06
-#define AV_OPTION_QUERY_ENCODER_TYPE    0x08
-#define AV_OPTION_QUERY_AV_CAPABILITIES 0x09
-#define AV_OPTION_BLANK_SCREEN          0x0A
-#define AV_OPTION_MACROVISION_MODE      0x0C
-#define AV_OPTION_FLICKER_FILTER        0x0B
-#define AV_OPTION_ZERO_MODE             0x0D
-#define AV_OPTION_QUERY_MODE_CAPS       0x0E
+/* ---- AV option codes for AvSendTVEncoderOption ----
+ *
+ * The XDK's numbering (XBA-133). nxdk's hal/video.h pins 6, 9, 11 and 14
+ * (VIDEO_ENC_GET_SETTINGS, _VIDEOENABLE, _FLICKERFILTER, _SOFTEN_FILTER);
+ * the rest follow the public list Cxbx-Reloaded keeps (EmuKrnlAv), which
+ * agrees on those four. The old table had its own numbers: option 2 is
+ * "enable closed captions", and its parameter was taken as a display mode. */
+#define AV_OPTION_MACROVISION_MODE      1
+#define AV_OPTION_ENABLE_CC             2
+#define AV_OPTION_DISABLE_CC            3
+#define AV_OPTION_SEND_CC_DATA          4
+#define AV_QUERY_CC_STATUS              5
+#define AV_QUERY_AV_CAPABILITIES        6
+#define AV_OPTION_BLANK_SCREEN          9
+#define AV_OPTION_MACROVISION_COMMIT    10
+#define AV_OPTION_FLICKER_FILTER        11
+#define AV_OPTION_ZERO_MODE             12
+#define AV_OPTION_QUERY_MODE            13
+#define AV_OPTION_ENABLE_LUMA_FILTER    14
+#define AV_OPTION_GUESS_FIELD           15
+#define AV_QUERY_ENCODER_TYPE           16
+#define AV_QUERY_MODE_TABLE_VERSION     17
+#define AV_OPTION_CGMS                  18
+#define AV_OPTION_WIDESCREEN            19
+/* The capabilities word carries the pack (see above): the name callers used. */
+#define AV_OPTION_QUERY_AVPACK          AV_QUERY_AV_CAPABILITIES
 
 /* ---- AV flags (for capabilities / display mode) ---- */
 #define AV_FLAGS_HDTV_480i      0x00000001
