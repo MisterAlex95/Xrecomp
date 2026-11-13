@@ -176,6 +176,20 @@ void xbox_InputMap_PadMapDefaults(InputPadMap *m);
 /* Apply `m` to a raw pad. */
 void xbox_InputMap_PadMap(const InputPadMap *m, const InputRaw *raw, XBOX_GAMEPAD *out);
 
+/* Parse a remapping into `m`, over what it holds (start from PadMapDefaults):
+ * entries "control=source" separated by commas, semicolons or spaces, where
+ * control is one of the sixteen pad control names ("a", "black",
+ * "left_trigger", "dpad_up", ...) and source a source name or "none"; plus
+ * "left_stick=" and "right_stick=" with "left", "right" or "none". The text
+ * RECOMP_PAD_MAP holds (docs/runtime/environment-variables.md). Entries that
+ * do not parse are skipped and counted: returns that count, or -1 for a NULL
+ * map. NULL or "" changes nothing. Deadzones and thresholds are left alone. */
+int xbox_InputMap_PadMapParse(InputPadMap *m, const char *text);
+
+/* The sources and sticks of `m` that differ from PadMapDefaults, as text
+ * PadMapParse reads back ("" when none differs), truncated to `size`. */
+const char *xbox_InputMap_PadMapFormat(const InputPadMap *m, char *buf, int size);
+
 /* A radial deadzone (percent clamped to 0..95): a stick inside `deadzone_pct` of full deflection reads as
  * centred, and the range beyond it is stretched so full deflection is still
  * full. The direction is preserved. */

@@ -821,6 +821,16 @@ final class GameMenu {
                            { R.string.CTL_TRIGGERS, R.string.CTL_TRIGGERS_X },
                            { R.string.CTL_START, R.string.CTL_START_X }, { R.string.CTL_SELECT, R.string.CTL_SELECT_X },
                            { R.string.CTL_DPAD, R.string.CTL_DPAD_X }, { R.string.CTL_STICKS, R.string.CTL_STICKS_X } };
+            // XBA-131: the player's remapping (the launcher's Controls), first: each changed control, then the usual list.
+            PadMapping map = PadMapping.load(RecompConfig.load(GameStore.externalFilesDir(activity)));
+            if (!map.isDefault()) {
+                kvRow(s(R.string.MENU_CTL_REMAPPED),
+                      activity.getString(R.string.MENU_CTL_REMAPPED_X, map.changedCount()));
+                for (PadMapping.Control c : PadMapping.Control.values()) {
+                    if (map.get(c) != c.def)
+                        kvRow(s(ControlsLabels.source(map.get(c))), s(ControlsLabels.control(c)));
+                }
+            }
             for (int[] r : kv)
                 kvRow(s(r[0]), s(r[1]));
             row(Item.BACK, s(R.string.MENU_BACK));

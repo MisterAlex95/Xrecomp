@@ -379,7 +379,7 @@ class _Tc:
         return "clang 19"
 
 
-def _make_pack(tmp_path, monkeypatch, env_force, layers=(), images=()):
+def _make_pack(tmp_path, monkeypatch, env_force, layers=(), images=(), toolkit_sha="cd" * 32):
     from tools.prepare import android
     links = []
 
@@ -400,6 +400,7 @@ def _make_pack(tmp_path, monkeypatch, env_force, layers=(), images=()):
         with open(r.stamp_path) as f:
             r.stamp = json.load(f)
     r.tid, r.objects, r.toolkit, r.xbe_sha, r.tc = "4541005B", [], "k", "ab" * 32, _Tc()
+    r.toolkit_sha = toolkit_sha
     r.info = {"title": "Synthetic"}
     r.env_force = env_force
     r.layers = list(layers)
@@ -428,6 +429,72 @@ def test_android_pack_json_layers(tmp_path, monkeypatch):
     assert links == []
     meta, links = _make_pack(tmp_path, monkeypatch, {}, layers[1:])
     assert meta["layers"] == layers[1:] and len(links) == 1
+
+
+def test_android_pack_json_toolkit_sha256(tmp_path, monkeypatch):
+    """XBA-127: pack.json carries the toolkit digest the app compares with its own; another digest links again."""
+    meta, links = _make_pack(tmp_path, monkeypatch, {})
+    assert meta["toolkit_sha256"] == "cd" * 32 and meta["toolkit"] == "k" and len(links) == 1
+    meta, links = _make_pack(tmp_path, monkeypatch, {})
+    assert links == []
+    meta, links = _make_pack(tmp_path, monkeypatch, {}, toolkit_sha="ef" * 32)
+    assert meta["toolkit_sha256"] == "ef" * 32 and len(links) == 1
+
+
+def test_android_stamps_follow_the_toolkit_digest(tmp_path, monkeypatch):
+    """A new commit with the same toolkit tree keeps the steps done; another tree starts over (XBA-127)."""
+    from tools.prepare import android
+    xbe = tmp_path / "default.xbe"
+    xbe.write_bytes(b"XBEH synthetic")
+
+    class Host:
+        ROOT = str(tmp_path)
+        commit = "c1"
+
+        def find_xbe(self, source, work):
+            return str(xbe), None, None
+
+        def sha256(self, p):
+            return pack.sha256_file(p)
+
+        def toolkit_version(self):
+            return self.commit
+
+        def read_stamp(self, p):
+            try:
+                with open(p) as f:
+                    return json.load(f)
+            except OSError:
+                return {}
+
+    class Stop(Exception):
+        pass
+
+    def no_parse(*a, **k):
+        raise Stop()
+    host = Host()
+    digest = ["11" * 32]
+    monkeypatch.setattr(android.toolkit, "digest", lambda: digest[0])
+    a = _Args(tmp_path, "libmain.so")
+    a.source, a.force = str(tmp_path), False
+    os.makedirs(a.work, exist_ok=True)
+
+    def identify():
+        r = android.Run(a, host)
+        monkeypatch.setattr(r.procs, "run_logged", no_parse)
+        try:
+            r.identify()
+        except Stop:
+            pass
+        return r
+    r = identify()
+    r.save_stamp(parse=True, disasm=True)
+    host.commit = "c2"                          # an app update that changed only Java
+    r = identify()
+    assert r.stamp.get("disasm") and r.stamp["toolkit_sha256"] == "11" * 32
+    digest[0] = "22" * 32                       # the lifter changed
+    r = identify()
+    assert "disasm" not in r.stamp and r.stamp["toolkit_sha256"] == "22" * 32 and r.stamp["toolkit"] == "c2"
 
 
 def test_android_pack_json_images(tmp_path, monkeypatch):

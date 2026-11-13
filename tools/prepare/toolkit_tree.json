@@ -1,0 +1,16 @@
+{
+  "_comment": "The toolkit tree of the Android app (docs/android/prepare.md « Toolkit tree » and « When a pack is stale »): what android/app/build.gradle zips into assets/prepare/toolkit.zip, and what tools/prepare/toolkit.py hashes into the toolkit digest (pack.json toolkit_sha256). Ant patterns, relative to the repository root; one list of trees, each with its include and exclude patterns. The last exclude block repeats Gradle's default excludes so that both sides select the same files.",
+  "trees": [
+    {
+      "include": ["tools/**/*.py", "tools/recomp/data/**", "tools/xbe_ident/*.json", "tools/prepare/toolkit_tree.json"],
+      "exclude": ["**/test_*.py", "**/tests/**", "**/conftest.py", "**/__pycache__/**", "tools/*/output/**",
+                  "tools/android/**", "tools/docker/**", "tools/ci/**", "tools/conformance/msvc-wine/**"]
+    },
+    {
+      "include": ["templates/new-game/**", "templates/runtime/**", "profiles/**", "include/**", "src/**/*.h"],
+      "exclude": ["**/build/**"]
+    }
+  ],
+  "exclude_everywhere": ["**/.git", "**/.git/**", "**/.gitignore", "**/.gitattributes", "**/.gitmodules",
+                         "**/*~", "**/#*#", "**/.#*", "**/%*%", "**/._*", "**/.DS_Store", "**/*.pyc"]
+}

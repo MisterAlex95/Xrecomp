@@ -21,6 +21,7 @@ import traceback
 
 from tools.prepare import compile as cc
 from tools.prepare import pack
+from tools.prepare import toolkit
 from tools.prepare.progress import Reporter
 
 REQUIRED = ("work", "pack_dir", "cc", "sysroot", "shell_lib")
@@ -51,6 +52,7 @@ class Run:
         self.stamp = {}
         self.env_force = {}
         self.layers = []
+        self.toolkit_sha = ""         # tools/prepare/toolkit.py: what a stale pack is judged by
         self.data_dir = None
         self.images = []              # [(disc path, objects)], other_images()
 
@@ -92,10 +94,13 @@ class Run:
         self.xbe = mine
         self.xbe_sha = h
         self.toolkit = self.m.toolkit_version()
+        # The toolkit's content, not its commit: an app update that changed
+        # only Java or the shell's .c files keeps the steps done (XBA-127).
+        self.toolkit_sha = toolkit.digest()
         self.stamp = {} if self.a.force else self.m.read_stamp(self.stamp_path)
-        if self.stamp.get("xbe") != h or self.stamp.get("toolkit") != self.toolkit:
+        if self.stamp.get("xbe") != h or self.stamp.get("toolkit_sha256") != self.toolkit_sha:
             self.stamp = {}
-            self.save_stamp(xbe=h, toolkit=self.toolkit)
+            self.save_stamp(xbe=h, toolkit=self.toolkit, toolkit_sha256=self.toolkit_sha)
         self.xjson = os.path.join(self.work, "xbe", "default_analysis.json")
         if not (self.stamp.get("parse") and os.path.isfile(self.xjson)):
             rc, _ = self.procs.run_logged([self.py, "-m", "tools.xbe_parser", mine, "--json", self.xjson],
@@ -261,7 +266,7 @@ class Run:
         for o in self.objects:
             h.update(os.path.basename(o).encode() + b"\n")
         h.update(pack.sha256_file(a.shell_lib).encode())
-        h.update(("|%s|%s" % (a.shell_abi, self.toolkit)).encode())
+        h.update(("|%s|%s" % (a.shell_abi, self.toolkit_sha)).encode())
         # pack.json's env_force comes from title.json: a change there alone
         # (same objects) still writes the pack again.
         h.update(("|env_force=%s" % json.dumps(self.env_force, sort_keys=True)).encode())
@@ -278,6 +283,7 @@ class Run:
         if (self.stamp.get("link") == key and meta and meta["xbe_sha256"] == self.xbe_sha
                 and meta.get("env_force", {}) == self.env_force and meta.get("layers", []) == self.layers
                 and meta.get("images", {}) == images
+                and meta.get("toolkit_sha256", "") == self.toolkit_sha
                 and pack.check(final, a.shell_abi) is None):
             self.rep.progress(5, 100, "pack up to date")
         else:
@@ -293,7 +299,8 @@ class Run:
             self.rep.progress(5, 70, "writing pack.json")
             meta = pack.make_meta(lib, self.tid, self.info.get("title", ""), self.xbe_sha, self.toolkit,
                                   "%s -O%s" % (self.tc.short_version(), a.opt), shell_abi=a.shell_abi,
-                                  env_force=self.env_force, layers=self.layers)
+                                  env_force=self.env_force, layers=self.layers,
+                                  toolkit_sha256=self.toolkit_sha)
             if images:
                 meta["images"] = images
             try:

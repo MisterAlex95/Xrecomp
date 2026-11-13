@@ -273,6 +273,7 @@ See [xbox_input](../../src/input/README.md).
 | Variable | Default | What it does | Where |
 |---|---|---|---|
 | `RECOMP_KEYBOARD` | off | Keyboard acts as a controller. | `keyboard.c`, `usb_gamepad.c` |
+| `RECOMP_PAD_MAP` | unset (the fixed mapping) | Remaps every pad's controls (XBA-131; the Android launcher's Controls screen writes it into `recomp.cfg`). `control=source` entries for the Xbox controls that differ from the fixed mapping, comma separated: controls `a b x y black white left_trigger right_trigger start back left_thumb right_thumb dpad_up dpad_down dpad_left dpad_right`, sources SDL's positional names `south east west north left_shoulder right_shoulder left_trigger right_trigger left_stick_click right_stick_click back start dpad_*`, a stick direction `left_stick_up` … `right_stick_right`, or `none`; plus `left_stick=` / `right_stick=` `left`, `right` or `none`. Example `a=east,b=south,black=left_trigger`. Unknown entries are ignored (logged). Unset or empty: exactly the fixed mapping (the A/B switch). SDL backend only. | `xinput_device.c`, `input_map.c` |
 | `RECOMP_MKB` | off | Keyboard-and-mouse layer; tuned by `RECOMP_MKB_SENS`, `_DZ`, `_ACC`, `_FULL`, `_INVERT_Y`, `_SWAP_STICKS` or an `RECOMP_MKB_INI` file. | `mkb_input.c` |
 | `RECOMP_KEY_TRACE` | off | Prints the first 40 key-downs. | `keyboard_sdl.c`, `fb_present.c` |
 | `RECOMP_INPUT_DIAG` | off | Reports whether the input chain is wired. | `usb_gamepad.c` |

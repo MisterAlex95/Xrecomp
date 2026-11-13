@@ -522,6 +522,62 @@ static void test_properties(void)
     }
 }
 
+/* RECOMP_PAD_MAP's text (XBA-131): parse over the defaults, format the
+ * differences, round trip, and what is rejected. */
+static void test_padmap_text(void)
+{
+    InputPadMap m, d, back;
+    char buf[512];
+    int i;
+
+    xbox_InputMap_PadMapDefaults(&d);
+    m = d;
+    CHECK(xbox_InputMap_PadMapParse(&m, NULL) == 0 && memcmp(&m, &d, sizeof m) == 0);
+    CHECK(xbox_InputMap_PadMapParse(&m, "") == 0 && memcmp(&m, &d, sizeof m) == 0);
+    CHECK(xbox_InputMap_PadMapParse(NULL, "a=east") == -1);
+    CHECK(strcmp(xbox_InputMap_PadMapFormat(&m, buf, sizeof buf), "") == 0);
+
+    /* A and B swapped, Black on the left trigger, the right stick off. */
+    CHECK(xbox_InputMap_PadMapParse(&m, "a=east, B=South;black=left_trigger right_stick=none") == 0);
+    CHECK(m.source[INPUT_A] == INPUT_SRC_EAST && m.source[INPUT_B] == INPUT_SRC_SOUTH);
+    CHECK(m.source[INPUT_BLACK] == INPUT_SRC_LEFT_TRIGGER && m.right_stick == INPUT_STICK_NONE);
+    CHECK(m.source[INPUT_X] == INPUT_SRC_WEST && m.left_stick == INPUT_STICK_LEFT);
+    CHECK(m.deadzone_left == d.deadzone_left && m.button_threshold == d.button_threshold);
+    CHECK(strcmp(xbox_InputMap_PadMapFormat(&m, buf, sizeof buf),
+                 "a=east,b=south,black=left_trigger,right_stick=none") == 0);
+    back = d;
+    CHECK(xbox_InputMap_PadMapParse(&back, buf) == 0 && memcmp(&back, &m, sizeof m) == 0);
+
+    /* Rejected entries are counted and change nothing: an unknown source, a
+     * keyboard-only control, an unknown control, no '=', an empty pair, a
+     * bad stick, an entry too long to be a name. */
+    m = d;
+    CHECK(xbox_InputMap_PadMapParse(&m, "a=banana,left_stick_up=south,z=east,x,=,y=north,"
+                                        "left_stick=sideways,"
+                                        "averyveryveryveryveryveryveryveryverylongname=southsouthsouthsouth") == 7);
+    CHECK(m.source[INPUT_A] == INPUT_SRC_SOUTH && m.source[INPUT_Y] == INPUT_SRC_NORTH);
+    CHECK(m.left_stick == INPUT_STICK_LEFT);
+
+    /* A button can be unbound; the sticks can swap. */
+    m = d;
+    CHECK(xbox_InputMap_PadMapParse(&m, "start=none,left_stick=right,right_stick=left") == 0);
+    CHECK(m.source[INPUT_START] == INPUT_SRC_NONE && m.left_stick == INPUT_STICK_RIGHT);
+
+    /* Every control and source round-trips through the text. */
+    for (i = 0; i < INPUT_PAD_CONTROL_COUNT; i++)
+        m.source[i] = (uint8_t)((i * 7 + 3) % INPUT_SRC_COUNT);
+    xbox_InputMap_PadMapFormat(&m, buf, sizeof buf);
+    back = d;
+    CHECK(xbox_InputMap_PadMapParse(&back, buf) == 0 && memcmp(back.source, m.source, sizeof m.source) == 0);
+    CHECK(back.left_stick == m.left_stick && back.right_stick == m.right_stick);
+
+    /* A small buffer keeps whole entries only. */
+    m = d;
+    xbox_InputMap_PadMapParse(&m, "a=east,b=south");
+    CHECK(strcmp(xbox_InputMap_PadMapFormat(&m, buf, 12), "a=east") == 0);
+    CHECK(strcmp(xbox_InputMap_PadMapFormat(&m, buf, 4), "") == 0);
+}
+
 int main(void)
 {
     test_key_names();
@@ -531,6 +587,7 @@ int main(void)
     test_merge();
     test_deadzone();
     test_padmap();
+    test_padmap_text();
     test_api_edges();
     test_properties();
     if (g_failed) { printf("%d check(s) failed\n", g_failed); return 1; }
