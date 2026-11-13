@@ -1396,7 +1396,14 @@ NTSTATUS __stdcall xbox_NtReadFile(
         if (df || device) {
             uint64_t off = ByteOffset && ByteOffset->QuadPart >= 0 ? (uint64_t)ByteOffset->QuadPart
                          : df ? (uint64_t)df->pos : 0;
-            long n = df && xbox_disc_node_is_dir(df->node) ? -1
+            long n;
+            /* The image is read by the runtime straight into the guest's
+             * buffer: a write-protected lifted code page (XBA-118) is opened
+             * first, as for read() below, else the copy faults inside the
+             * runtime (and that fault is never the guest's, XBA-132). */
+            if (xbox_SmcHostWrite && Length)
+                xbox_SmcHostWrite(Buffer, Length);
+            n = df && xbox_disc_node_is_dir(df->node) ? -1
                    : df ? xbox_disc_read(df->node, Buffer, Length, off)
                    : xbox_disc_raw_read(Buffer, Length, off);
             if (n < 0) {

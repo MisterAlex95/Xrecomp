@@ -8,7 +8,9 @@
  * against the folder and against each image (bare, redump layout, CSO v1 and v2, split, split CSO, an fd), and
  * every image's transcript must equal the folder's. Then what only an image does: read-only answers, raw reads of
  * the DVD device (NtReadFile and SCSI READ), the boot's XBE load (xbox_disc_slurp), saves still written, and four
- * threads reading through one compressed image at once. */
+ * threads reading through one compressed image at once. And a read from an image into a write-protected lifted
+ * code page (XBA-118): the image branch of NtReadFile opens it first (xbox_SmcHostWrite) instead of faulting
+ * inside the runtime. */
 #define _GNU_SOURCE
 #include "kernel.h"
 #include "kernel_disc.h"
@@ -20,6 +22,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -29,6 +32,20 @@ const char *xbox_LookupSymbolicLink(const char *link)
 { (void)link; return NULL; }
 
 extern uint32_t xbox_LastFileError(void);
+
+/* recomp_smc.c's call, which kernel_file.c names weakly: here it opens the stand-in code page and says where. */
+static uint8_t *g_code_page;
+static long g_page;
+static int g_smc_calls;
+static size_t g_smc_len;
+void xbox_SmcHostWrite(const void *p, size_t len)
+{
+    if (g_code_page && (const uint8_t *)p >= g_code_page && (const uint8_t *)p < g_code_page + g_page) {
+        g_smc_calls++;
+        g_smc_len = len;
+        mprotect(g_code_page, (size_t)g_page, PROT_READ | PROT_WRITE);
+    }
+}
 
 static int g_fail;
 static char g_fx[1024], g_save[1100];
@@ -257,6 +274,28 @@ static void scenario(void)
     relative();
 }
 
+/* ── a read from the image into a write-protected code page (XBA-126 x XBA-118) ── */
+
+static void read_into_code_page(void)
+{
+    HANDLE h;
+    XBOX_IO_STATUS_BLOCK ios = { 0 };
+    uint8_t want[512];
+    g_page = sysconf(_SC_PAGESIZE);
+    g_code_page = mmap(NULL, (size_t)g_page, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    CHECK(g_code_page != MAP_FAILED);
+    if (g_code_page == MAP_FAILED)
+        return;
+    g_smc_calls = 0;
+    CHECK(open_ro("D:\\default.xbe", 0, &h) == 0);
+    CHECK(xbox_NtReadFile(h, NULL, NULL, NULL, &ios, g_code_page + 64, sizeof want, NULL) == 0);
+    CHECK(ios.Information == sizeof want && memcmp(g_code_page + 64, "XBEH", 4) == 0);
+    CHECK(g_smc_calls == 1 && g_smc_len == sizeof want);          /* opened once, for the whole buffer, first */
+    xbox_NtClose(h);
+    munmap(g_code_page, (size_t)g_page);
+    g_code_page = NULL;
+}
+
 /* ── image-only behaviour ── */
 
 static void read_only(void)
@@ -439,6 +478,8 @@ int main(int argc, char **argv)
         }
         read_only();
         device_reads();
+        if (i == 0)
+            read_into_code_page();
         if (fd < 0)
             slurp(spec);
         if (!strcmp(images[i], "game_v2.cso"))
