@@ -96,6 +96,11 @@ typedef struct {
      * `filter` bits 0-12, signed 5.8. 0 in a struct a back end builds
      * itself: level 0 only. */
     uint32_t control0;
+    /* A volume (FORMAT DIMENSIONALITY 3): depth slices (BASE_SIZE_P), 0 or
+     * 1 for a 2D texture; addr_p the third axis' wrap mode (ADDRESS bits
+     * 16-19). Swizzled volumes are one 3D Morton order per level
+     * (xbox_swizzle_offset_3d), each level halving all three sizes. */
+    uint32_t depth, addr_p;
 } Nv2aTexture;
 
 typedef struct {
@@ -305,6 +310,9 @@ typedef struct {
  * they are not drawn (the CPU rasteriser draws none either) and counted as
  * unsupported (nv2a_coverage.h). */
 #define NV2A_BACKEND_CAP_POINTS_LINES 0x10u
+/* With CAP_PIXEL: the back end samples volume textures (Nv2aTexture.depth);
+ * without it a stage holding one is counted as unsupported. */
+#define NV2A_BACKEND_CAP_VOLUME 0x20u
 
 typedef struct {
     /* flags: CLEAR_SURFACE bits (Z 0x1, stencil 0x2, colour 0xF0).
@@ -434,9 +442,10 @@ void nv2a_backend_register_with_present(const Nv2aBackend *backend,
  * NULL removes it. */
 void nv2a_pb_exec_set_screen_dump(int (*dump)(const char *path));
 
-/* Decode a whole texture to 0xAARRGGBB, row-major, width*height entries.
- * Handles every format the executor can sample (swizzled, linear, DXT).
- * Returns 0 if the format is not supported. */
+/* Decode a whole texture to 0xAARRGGBB, row-major, width*height entries
+ * (width*height*depth, slice after slice, for a volume: Nv2aTexture.depth >
+ * 1, swizzled formats only). Handles every format the executor can sample
+ * (swizzled, linear, DXT). Returns 0 if the format is not supported. */
 int nv2a_backend_decode_texture(const Nv2aTexture *tex, uint32_t *argb_out);
 
 /* Mip level `level` of a swizzled or DXT texture as a texture of its own:

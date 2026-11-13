@@ -277,6 +277,7 @@ typedef struct {
     uint32_t pitch;                     /* bytes per row, from CONTROL1  */
     uint32_t color;                     /* NV097 colour-format code      */
     uint32_t addr_u, addr_v;            /* wrap mode per axis            */
+    uint32_t addr_p;                    /* a volume's third axis         */
     uint32_t palette;                   /* guest address of the CLUT, P8 */
     uint32_t levels;                    /* mip levels, from FORMAT       */
     uint32_t filter;                    /* SET_TEXTURE_FILTER            */
@@ -1221,6 +1222,8 @@ static void texture_to_backend(const Texture *t, Nv2aTexture *o)
      * every later texture's levels away. */
     o->levels = tex_size_from_format(t->color) ? (t->levels ? t->levels : 1) : 1;
     o->control0 = t->control0;
+    o->depth = t->dims == 3 && tex_size_from_format(t->color) ? t->depth : 0;
+    o->addr_p = t->addr_p;
     o->filter = t->filter;
     o->palette = t->palette;
     o->border = t->border;
@@ -1268,6 +1271,9 @@ static void current_render_state(Nv2aRenderState *r)
 static int sample_texture(uint32_t u, uint32_t v, uint32_t *argb);
 static uint32_t tex_face_stride(const Texture *t);
 static uint32_t tex_texel_bytes(uint32_t fmt);
+static uint32_t linear_twin(uint32_t fmt);
+static int decode_texel(const Texture *t, uint32_t fmt, const uint8_t *p, uint32_t u,
+                        uint32_t *argb);
 
 uint32_t nv2a_backend_texture_bytes(const Nv2aTexture *tex)
 {
@@ -1281,26 +1287,41 @@ uint32_t nv2a_backend_texture_bytes(const Nv2aTexture *tex)
     t.levels = tex->levels;
     if (!tex_size_from_format(t.color))
         return t.pitch * t.height;
+    if (tex->depth > 1) {                   /* a volume: every level, w*h*d */
+        uint32_t lv, w = t.width, h = t.height, d = tex->depth, total = 0;
+        uint32_t block = d3d8_format_dxt_block_bytes(t.color);
+        for (lv = 0; lv < (t.levels ? t.levels : 1); lv++) {
+            total += (block ? ((w + 3) / 4) * ((h + 3) / 4) * block
+                            : w * h * tex_texel_bytes(t.color)) * d;
+            w = w > 1 ? w >> 1 : 1;
+            h = h > 1 ? h >> 1 : 1;
+            d = d > 1 ? d >> 1 : 1;
+        }
+        return total;
+    }
     return tex_face_stride(&t) * (tex->cube ? 6u : 1u);
 }
 
 int nv2a_backend_texture_level(const Nv2aTexture *tex, uint32_t level, Nv2aTexture *out)
 {
-    uint32_t lv, w = tex->width, h = tex->height, off = 0;
+    uint32_t lv, w = tex->width, h = tex->height, d = tex->depth > 1 ? tex->depth : 1, off = 0;
     uint32_t block = d3d8_format_dxt_block_bytes(tex->color);
 
     if (level >= (tex->levels ? tex->levels : 1) || (level && !tex_size_from_format(tex->color)))
         return 0;
     for (lv = 0; lv < level; lv++) {
-        off += block ? ((w + 3) / 4) * ((h + 3) / 4) * block
-                     : w * h * tex_texel_bytes(tex->color);
+        off += (block ? ((w + 3) / 4) * ((h + 3) / 4) * block
+                      : w * h * tex_texel_bytes(tex->color)) * d;
         w = w > 1 ? w >> 1 : 1;
         h = h > 1 ? h >> 1 : 1;
+        d = d > 1 ? d >> 1 : 1;
     }
     *out = *tex;
     out->offset = tex->offset + off;
     out->width = w;
     out->height = h;
+    if (tex->depth > 1)
+        out->depth = d;
     out->levels = 1;
     return 1;
 }
@@ -1325,6 +1346,25 @@ int nv2a_backend_decode_texture(const Nv2aTexture *tex, uint32_t *argb_out)
     s_gpu.texs[0].filter = 0;
     s_gpu.texs[0].cube   = 0;
     s_gpu.texs[0].valid  = 1;
+    if (tex->depth > 1) {
+        /* A volume: one 3D Morton order (xemu swizzle.c: x, y, z bits in
+         * turn), swizzled formats only. */
+        const uint8_t *mem = (const uint8_t *)xbox_GetMemoryOffset();
+        uint32_t z, fmt = linear_twin(tex->color);
+        ok = d3d8_format_is_swizzled(tex->color) && !d3d8_format_dxt_block_bytes(tex->color);
+        for (z = 0; z < tex->depth && ok; z++)
+            for (y = 0; y < tex->height && ok; y++)
+                for (x = 0; x < tex->width; x++)
+                    if (!decode_texel(&s_gpu.texs[0], fmt, mem + tex->offset,
+                                      xbox_swizzle_offset_3d(x, y, z, tex->width, tex->height,
+                                                             tex->depth),
+                                      &argb_out[((size_t)z * tex->height + y) * tex->width + x])) {
+                        ok = 0;
+                        break;
+                    }
+        s_gpu.texs[0] = saved;
+        return ok;
+    }
     for (y = 0; y < tex->height && ok; y++)
         for (x = 0; x < tex->width; x++)
             if (!sample_texture(x, y, &argb_out[(size_t)y * tex->width + x])) {
@@ -1720,6 +1760,16 @@ static int sample_tex(const Texture *t, uint32_t face_offset,
     } else {
         p = mem + base + (size_t)v * t->pitch;
     }
+    return decode_texel(t, fmt, p, u, argb);
+}
+
+/* Texel u of the row (or swizzled image) at p, in linear format fmt (a
+ * swizzled format's linear twin): the format switch of sample_tex, apart so
+ * that a volume's 3D Morton index reads through it too. */
+static int decode_texel(const Texture *t, uint32_t fmt, const uint8_t *p, uint32_t u,
+                        uint32_t *argb)
+{
+    const uint8_t *mem = (const uint8_t *)xbox_GetMemoryOffset();
 
     switch (fmt) {
 
@@ -5467,8 +5517,10 @@ static void note_batch_gaps(void)
             else
                 nv2a_gap_note(f->gap, 1);
         }
-        if (t->dims == 3)
+        if (t->dims == 3 && !backend_caps(NV2A_BACKEND_CAP_PIXEL | NV2A_BACKEND_CAP_VOLUME))
             nv2a_gap_note("volume texture", 1);
+        else if (t->dims == 3 && d3d8_format_dxt_block_bytes(t->color))
+            nv2a_gap_note("volume texture, DXT", 1);
     }
 
     if (s_reg[0x17BC / 4])                              /* SET_LOGIC_OP_ENABLE */
@@ -5954,6 +6006,7 @@ static void tex_stage_method(uint32_t method, uint32_t param)
          * (the border colour when FORMAT selects it, else clamped). */
         t->addr_u =  param        & 0xF;
         t->addr_v = (param >>  8) & 0xF;
+        t->addr_p = (param >> 16) & 0xF;
         break;
     case NV097_SET_TEXTURE_CONTROL1:
         t->pitch = param >> 16;          /* linear formats only */

@@ -26,6 +26,7 @@
 #include "nv2a_backend.h"
 #include "nv2a_coverage.h"
 #include "recomp_status.h"
+#include "d3d/d3d8_swizzle.h"
 
 #ifdef _WIN32
 #include <process.h>
@@ -183,7 +184,38 @@ static void check_levels(void)
     CHECK(nv2a_backend_texture_level(&t, 0, &l) && !nv2a_backend_texture_level(&t, 1, &l));
     t.color = 0x28; t.width = t.height = 4; t.levels = 2;   /* SZ_G8B8: 2 bytes */
     CHECK(nv2a_backend_texture_level(&t, 1, &l) && l.offset == 0x10000 + 32);
-    printf("2b. mip levels: ok\n");
+    /* Volumes: xemu's 3D Morton order takes one bit of x, y, z in turn
+     * while each axis has bits left; levels halve all three sizes. */
+    CHECK(xbox_swizzle_offset_3d(1, 0, 0, 4, 4, 4) == 1 && xbox_swizzle_offset_3d(0, 1, 0, 4, 4, 4) == 2
+          && xbox_swizzle_offset_3d(0, 0, 1, 4, 4, 4) == 4 && xbox_swizzle_offset_3d(2, 0, 0, 4, 4, 4) == 8);
+    CHECK(xbox_swizzle_offset_3d(0, 1, 0, 4, 2, 1) == 2 && xbox_swizzle_offset_3d(2, 0, 0, 4, 2, 1) == 4);
+    memset(&t, 0, sizeof t);
+    t.offset = 0x20000;
+    t.width = t.height = t.depth = 4;
+    t.color = 0x06;
+    t.levels = 3;
+    CHECK(nv2a_backend_texture_bytes(&t) == (64 + 8 + 1) * 4);
+    CHECK(nv2a_backend_texture_level(&t, 1, &l) && l.offset == 0x20000 + 256 && l.depth == 2
+          && l.width == 2);
+    {
+        uint32_t x, y, z, out[64], bad = 0;
+        for (z = 0; z < 4; z++)
+            for (y = 0; y < 4; y++)
+                for (x = 0; x < 4; x++) {
+                    uint32_t v = 0xFF000000u | z << 16 | y << 8 | x;
+                    memcpy(s_mem + 0x20000 + 4 * xbox_swizzle_offset_3d(x, y, z, 4, 4, 4), &v, 4);
+                }
+        t.levels = 1;
+        CHECK(nv2a_backend_decode_texture(&t, out));
+        for (z = 0; z < 4; z++)
+            for (y = 0; y < 4; y++)
+                for (x = 0; x < 4; x++)
+                    bad += out[(z * 4 + y) * 4 + x] != (0xFF000000u | z << 16 | y << 8 | x);
+        CHECK(bad == 0);
+        t.color = 0x0C;                      /* DXT volumes: not decoded */
+        CHECK(!nv2a_backend_decode_texture(&t, out));
+    }
+    printf("2b. mip levels, volumes: ok\n");
 }
 
 /* A fixed-function quad over a 64x64 surface (composite = viewport), 4 vertices

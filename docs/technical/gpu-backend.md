@@ -756,6 +756,22 @@ LOD bias (`SET_TEXTURE_FILTER` bits 0-12, signed 5.8) is a shader uniform
 `RECOMP_GPU_MIPS=0` keeps level 0 only. The CPU rasteriser still samples
 level 0 (minified textures shimmer there); that is not counted as a gap.
 
+**Cube and volume textures (XBA-120).** Cube maps (FORMAT bit 2, a
+CUBEMAP stage) were already sampled as `samplerCube` from six faces, each
+face's levels padded to 128 bytes; they now carry their mip chains too.
+Volumes (FORMAT `DIMENSIONALITY` 3, `BASE_SIZE_P` slices; ADDRESS bits
+16-19 the third axis' wrap) reach a back end with
+`NV2A_BACKEND_CAP_VOLUME` as `Nv2aTexture.depth`: the executor decodes each
+level whole through its own texel decoder (`decode_texel`, the format
+switch of `sample_tex` split out), one 3D Morton order per level (xemu
+`swizzle.c`: a bit of x, y and z in turn; `xbox_swizzle_offset_3d`), each
+level halving all three sizes, and the back end uploads it with
+`glTexImage3D` and samples it as `sampler3D` at (s/q, t/q, r/q) on a
+PROJECT2D/3D stage or through the colour rule without combiners. Swizzled
+formats only; a DXT volume is counted (`volume texture, DXT`) and reads
+white. The CPU rasteriser samples neither its slices nor its levels and
+counts every volume (`volume texture`).
+
 **Pixels.** `nv2a_gl_shader.c` writes a fragment shader per pipeline key: the
 combiner words, stage count and flags, stage-program modes, which stages hold
 a texture of which kind, the alpha-test function. Combiner factors, the final
@@ -956,7 +972,8 @@ counted for both. The names:
 | `shadow map (CPU rasteriser)` | a depth format in a projective stage on the CPU path (the GPU compares with its zeta surface instead). |
 | `points`, `lines`, `line strip`, `line loop` | the primitive, on a path that does not draw it (the CPU rasteriser, a back end without `NV2A_BACKEND_CAP_POINTS_LINES`). |
 | `point size attenuation` | points with `SET_POINT_PARAMS_ENABLE` on (drawn at `SET_POINT_SIZE`). |
-| `volume texture` | a stage in use has `DIMENSIONALITY` 3. |
+| `volume texture` | a stage in use has `DIMENSIONALITY` 3, on a path without `NV2A_BACKEND_CAP_VOLUME` (the CPU rasteriser). |
+| `volume texture, DXT` | a DXT volume on the GPU (not decoded: white). |
 | `texture stage mode 0xNN <name>` | dot-product and dependent-read modes (8 and up) on both paths, bump-env (6, 7) on the CPU path: they read zero. |
 | `logic op`, `polygon mode point`, `polygon mode line`, `flat shading` | the state is set for the batch; nothing models it. |
 | `stencil test (CPU rasteriser)` | stencil on, CPU path. |

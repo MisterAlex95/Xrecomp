@@ -87,7 +87,7 @@ const char *nv2a_gl_glsl_header(int gles)
      * as on desktop. */
     return gles ? "#version 300 es\nprecision highp float;\nprecision highp int;\n"
                   "precision highp sampler2D;\nprecision highp samplerCube;\n"
-                  "precision highp sampler2DShadow;\n"
+                  "precision highp sampler2DShadow;\nprecision highp sampler3D;\n"
                 : "#version 330 core\n";
 }
 
@@ -324,6 +324,12 @@ static void emit_fetch(Sb *b, const Nv2aGlShaderKey *k, uint32_t st)
             sb(b, "  vec4 T%u = vec4(1.0);\n", st);  /* unusable: white */
             return;
         }
+        if (kind == NV2A_GL_TEX_3D) {
+            sb(b, "  float q%u = v_t%u.w != 0.0 ? v_t%u.w : 1.0;\n", st, st, st);
+            sb(b, "  vec4 T%u = texture(u_t%u, vec3(v_t%u.xy / q%u * u_tscale[%u], v_t%u.z / q%u),"
+                  " u_lodb[%u]);\n", st, st, st, st, st, st, st, st);
+            return;
+        }
         sb(b, "  float q%u = v_t%u.w != 0.0 ? v_t%u.w : 1.0;\n", st, st, st);
         sb(b, "  vec4 T%u = texture(u_t%u, v_t%u.xy / q%u * u_tscale[%u], u_lodb[%u]);\n",
            st, st, st, st, st, st);
@@ -446,6 +452,7 @@ size_t nv2a_gl_fragment_body(const Nv2aGlShaderKey *k, char *buf, size_t cap)
     for (st = 0; st < 4; st++)
         sb(&b, "uniform %s u_t%u;\n",
            k->tex_kind[st] == NV2A_GL_TEX_CUBE ? "samplerCube"
+           : k->tex_kind[st] == NV2A_GL_TEX_3D ? "sampler3D"
            : k->tex_kind[st] == NV2A_GL_TEX_SHADOW16 || k->tex_kind[st] == NV2A_GL_TEX_SHADOW24
            ? "sampler2DShadow" : "sampler2D", st);
     sb(&b, "uniform vec2 u_tscale[4];\nuniform vec4 u_c0[8];\nuniform vec4 u_c1[8];\n"
@@ -490,13 +497,17 @@ size_t nv2a_gl_fragment_body(const Nv2aGlShaderKey *k, char *buf, size_t cap)
     } else if (k->shade == NV2A_SHADE_MODULATE) {
         /* xf_rows without combiners: stage 0 texel * diffuse. */
         if (k->tex_kind[0] != NV2A_GL_TEX_NONE)
-            sb(&b, "  o = texture(u_t0, v_t0.xy * u_tscale[0], u_lodb[0]) * clamp(v_d0, 0.0, 1.0);\n");
+            sb(&b, "  o = texture(u_t0, %s, u_lodb[0]) * clamp(v_d0, 0.0, 1.0);\n",
+               k->tex_kind[0] == NV2A_GL_TEX_3D ? "vec3(v_t0.xy * u_tscale[0], v_t0.z)"
+                                                : "v_t0.xy * u_tscale[0]");
         else
             sb(&b, "  o = clamp(v_d0, 0.0, 1.0);\n");
     } else {
         /* raster_triangle: the texel as it is, else the flat colour. */
         if (k->tex_kind[0] != NV2A_GL_TEX_NONE)
-            sb(&b, "  o = texture(u_t0, v_t0.xy * u_tscale[0], u_lodb[0]);\n");
+            sb(&b, "  o = texture(u_t0, %s, u_lodb[0]);\n",
+               k->tex_kind[0] == NV2A_GL_TEX_3D ? "vec3(v_t0.xy * u_tscale[0], v_t0.z)"
+                                                : "v_t0.xy * u_tscale[0]");
         else
             sb(&b, "  o = clamp(v_d0, 0.0, 1.0);\n");
     }

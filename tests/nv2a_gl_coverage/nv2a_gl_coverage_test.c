@@ -22,7 +22,13 @@
  *   7. a 16x16 texture of five one-colour levels over 4x4 pixels: level 2
  *      with BOX_NEARESTLOD, level 3 with a LOD bias of +1, level 1 with the
  *      LOD clamped to 1, half level 2 half level 3 trilinear at LOD 2.5,
- *      level 0 with a LOD0 filter and with RECOMP_GPU_MIPS=0. */
+ *      level 0 with a LOD0 filter and with RECOMP_GPU_MIPS=0.
+ *
+ * Cube and volume textures:
+ *   8. a cube map's six faces, one colour each, on a CUBEMAP stage;
+ *   9. a 4x4x4 volume, one colour a slice: each slice by its r through the
+ *      colour rule without combiners, then on a PROJECT3D stage with q = 2;
+ *      the CPU rasteriser counts it as unsupported. */
 #include "../../src/gpu/nv2a_gl.c"
 #include "nv2a_coverage.h"
 
@@ -348,6 +354,106 @@ int main(void)
         CHECK((c[6] >> 16) >= 0x78 && (c[6] >> 16) <= 0x88 && ((c[6] >> 8) & 0xFF) >= 0x78
               && ((c[6] >> 8) & 0xFF) <= 0x88 && (c[6] & 0xFF) >= 0x78 && (c[6] & 0xFF) <= 0x88);
         m(0x1B0C, 0);
+        m(0x1B00, 0);
+    }
+
+    /* 8, 9: a quad over [8,12)^2 with texcoords (s, t, r) as given, float3
+     * texcoords from here on. */
+    m(0x1784, 2 | (3 << 4) | (32 << 8));
+    {
+        /* 9a. A volume through the colour rule without combiners: 4x4x4
+         * swizzled A8R8G8B8, slice z one colour, nearest; r picks the
+         * slice. */
+        static const uint32_t slice[4] = { 0xFFFF0000u, 0xFF00FF00u, 0xFF0000FFu, 0xFFFFFFFFu };
+        uint32_t x, y, z, k, c[4];
+        for (z = 0; z < 4; z++)
+            for (y = 0; y < 4; y++)
+                for (x = 0; x < 4; x++)
+                    put32(TEX + 4 * xbox_swizzle_offset_3d(x, y, z, 4, 4, 4), slice[z]);
+        m(0x1B00, TEX);
+        m(0x1B04, (0x06u << 8) | (3u << 4) | (1u << 16) | (2u << 20) | (2u << 24) | (2u << 28));
+        m(0x1B08, 0x030303);
+        m(0x1B0C, 1u << 30);
+        m(0x1B14, (1u << 16) | (1u << 24));
+        for (z = 0; z < 4; z++) {
+            for (k = 0; k < 4; k++) {
+                vtx(k, nx(k == 1 || k == 2 ? 12 : 8), ny(k >= 2 ? 12 : 8), 0.5f, 0xFFFFFFFFu,
+                    0.5f, 0.5f);
+                putf(VB + 32 * k + 24, ((float)z + 0.5f) / 4.0f);
+            }
+            clear_black();
+            draw(8, 0, 4);
+            readback();
+            c[z] = px(10, 10);
+        }
+        printf("9a. volume, no combiners: slices %06X %06X %06X %06X\n", c[0], c[1], c[2], c[3]);
+        for (z = 0; z < 4; z++)
+            CHECK(c[z] == (slice[z] & 0xFFFFFFu));
+        CHECK(nv2a_gap_count("volume texture") == 0);
+    }
+    {
+        /* 8. A cube map (combiners, stage 0 CUBEMAP, final combiner = the
+         * texel): 4x4 faces, one colour each, 128 bytes apart. */
+        static const uint32_t face[6] = { 0xFFFF0000u, 0xFF00FF00u, 0xFF0000FFu,
+                                          0xFFFFFF00u, 0xFFFFFFFFu, 0xFF00FFFFu };
+        static const float dir[6][3] = { { 1, 0, 0 }, { -1, 0, 0 }, { 0, 1, 0 },
+                                         { 0, -1, 0 }, { 0, 0, 1 }, { 0, 0, -1 } };
+        uint32_t f, i, k, c[6], bad = 0;
+        for (f = 0; f < 6; f++)
+            for (i = 0; i < 16; i++)
+                put32(TEX + 128 * f + 4 * i, face[f]);
+        m(0x1E60, 1);                           /* COMBINER_CONTROL: 1 stage */
+        m(0x0288, 0x08);                        /* final: D = texture 0 */
+        m(0x028C, 0x18u << 8);                  /* G = texture 0 alpha */
+        m(0x1E70, 3);                           /* stage 0 CUBEMAP */
+        m(0x1B00, TEX);
+        m(0x1B04, (0x06u << 8) | (2u << 4) | (1u << 2) | (1u << 16) | (2u << 20) | (2u << 24));
+        for (f = 0; f < 6; f++) {
+            for (k = 0; k < 4; k++) {
+                vtx(k, nx(k == 1 || k == 2 ? 12 : 8), ny(k >= 2 ? 12 : 8), 0.5f, 0xFFFFFFFFu,
+                    dir[f][0], dir[f][1]);
+                putf(VB + 32 * k + 24, dir[f][2]);
+            }
+            clear_black();
+            draw(8, 0, 4);
+            readback();
+            c[f] = px(10, 10);
+            bad += c[f] != (face[f] & 0xFFFFFFu);
+        }
+        printf("8. cube map: faces %06X %06X %06X %06X %06X %06X\n", c[0], c[1], c[2], c[3],
+               c[4], c[5]);
+        CHECK(bad == 0);
+    }
+    {
+        /* 9b. The volume on the combiners, PROJECT3D, and with q = 2. */
+        static const uint32_t slice[4] = { 0xFFFF0000u, 0xFF00FF00u, 0xFF0000FFu, 0xFFFFFFFFu };
+        uint32_t x, y, z, k, c;
+        for (z = 0; z < 4; z++)
+            for (y = 0; y < 4; y++)
+                for (x = 0; x < 4; x++)
+                    put32(TEX + 4 * xbox_swizzle_offset_3d(x, y, z, 4, 4, 4), slice[z]);
+        m(0x1E70, 2);                           /* stage 0 PROJECT3D */
+        m(0x1B04, (0x06u << 8) | (3u << 4) | (1u << 16) | (2u << 20) | (2u << 24) | (2u << 28));
+        m(0x1784, 2 | (4 << 4) | (32 << 8));    /* texcoord float4: q */
+        for (k = 0; k < 4; k++) {
+            vtx(k, nx(k == 1 || k == 2 ? 12 : 8), ny(k >= 2 ? 12 : 8), 0.5f, 0xFFFFFFFFu,
+                1.0f, 1.0f);
+            putf(VB + 32 * k + 24, 2.5f / 4.0f * 2.0f);   /* r/q: slice 2 */
+            putf(VB + 32 * k + 28, 2.0f);
+        }
+        clear_black();
+        draw(8, 0, 4);
+        readback();
+        c = px(10, 10);
+        printf("9b. volume, PROJECT3D, q 2: %06X\n", c);
+        CHECK(c == 0x0000FFu);
+        /* The CPU rasteriser does not sample volumes: counted there. */
+        nv2a_backend_register(NULL);
+        draw(8, 0, 4);
+        CHECK(nv2a_gap_count("volume texture") == 1);
+        nv2a_gl_install_from_env();
+        m(0x1784, 2 | (2 << 4) | (32 << 8));
+        m(0x1E70, 0);
         m(0x1B00, 0);
     }
 

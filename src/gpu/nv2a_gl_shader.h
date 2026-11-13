@@ -37,7 +37,10 @@ enum {
      * give the depth format's range (Y16: 0xFFFF, X8_Y24: 0xFFFFFF), the
      * units the stage's r/q is in. */
     NV2A_GL_TEX_SHADOW16 = 3,
-    NV2A_GL_TEX_SHADOW24 = 4
+    NV2A_GL_TEX_SHADOW24 = 4,
+    /* A volume texture (sampler3D, XBA-120): PROJECT2D/3D stages sample at
+     * (s/q, t/q, r/q). */
+    NV2A_GL_TEX_3D       = 5
 };
 
 typedef struct {

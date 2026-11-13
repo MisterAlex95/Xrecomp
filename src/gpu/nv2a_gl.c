@@ -279,7 +279,7 @@ static struct {
     GLuint fbo, prog, vao, array_buf;
     GLint vp[4], sc[4];
     GLint unit;                             /* active texture unit, 0-based */
-    GLuint tex[SH_UNITS][2];                /* per unit: 2D, cube */
+    GLuint tex[SH_UNITS][3];                /* per unit: 2D, cube, 3D */
     GLint cap[SH_NCAP];
     GLenum blend_src, blend_dst, blend_eq;
     float blend_color[4];
@@ -373,7 +373,7 @@ static void sh_active(int unit)
  * shadowed). For sampling: the caller has made the stage's unit active. */
 static void sh_tex(GLenum target, GLuint t)
 {
-    int k = target == GL_TEXTURE_CUBE_MAP;
+    int k = target == GL_TEXTURE_CUBE_MAP ? 1 : target == GL_TEXTURE_3D ? 2 : 0;
 
     if (s_sh.unit >= 0 && s_sh.unit < SH_UNITS) {
         if (s_sh.tex[s_sh.unit][k] == t)
@@ -408,7 +408,7 @@ static void sh_delete_textures(GLsizei n, const GLuint *t)
 
     for (i = 0; i < n; i++)
         for (u = 0; u < SH_UNITS; u++)
-            for (k = 0; k < 2; k++)
+            for (k = 0; k < 3; k++)
                 if (s_sh.tex[u][k] == t[i])
                     s_sh.tex[u][k] = 0xFFFFFFFFu;
     glDeleteTextures(n, t);
@@ -1919,7 +1919,7 @@ static GlRT *rt_for_texture(const Nv2aTexture *t, uint32_t cube, GLint *alpha)
 
 typedef struct {
     uint32_t offset, color, width, height, pitch, palette, cube;   /* key */
-    uint32_t levels;                                               /* key */
+    uint32_t levels, depth;                                        /* key */
     uint32_t bytes;
     uint64_t hash;
     GLuint tex;
@@ -1942,6 +1942,7 @@ typedef struct {
     uint32_t nlev;
     GLint min_cur, min_seen;
     float lod_lo, lod_hi;
+    GLint wrap_r;                   /* a volume's GL_TEXTURE_WRAP_R as last set */
 } GlTex;
 
 #define NV_GL_MAX_TEX 512           /* power of two */
@@ -2034,9 +2035,43 @@ static uint32_t tex_upload_levels(GLenum target, const Nv2aTexture *face)
     return lv;
 }
 
+/* A volume's levels (XBA-120): each decoded whole (w*h*d texels) and
+ * uploaded with glTexImage3D. Returns the levels uploaded, 0 on failure. */
+static uint32_t tex_upload_volume(const Nv2aTexture *t)
+{
+    uint32_t n = s_mips && t->levels > 1 ? t->levels : 1, lv, i;
+    Nv2aTexture one;
+
+    for (lv = 0; lv < n; lv++) {
+        uint32_t texels;
+        uint32_t *argb;
+        uint8_t *buf;
+        if (!nv2a_backend_texture_level(t, lv, &one))
+            break;
+        texels = one.width * one.height * one.depth;
+        buf = (uint8_t *)malloc((size_t)texels * 8);
+        if (!buf)
+            break;
+        argb = (uint32_t *)(buf + (size_t)texels * 4);
+        if (!nv2a_backend_decode_texture(&one, argb)) {
+            free(buf);
+            break;
+        }
+        for (i = 0; i < texels; i++)
+            argb_to_rgba(argb[i], buf + (size_t)i * 4);
+        glTexImage3D(GL_TEXTURE_3D, (GLint)lv, GL_RGBA8, (GLsizei)one.width,
+                     (GLsizei)one.height, (GLsizei)one.depth, 0, GL_RGBA, GL_UNSIGNED_BYTE, buf);
+        s_st.upload_kb += texels >> 8;
+        free(buf);
+        if (one.width == 1 && one.height == 1 && one.depth == 1)
+            return lv + 1;
+    }
+    return lv;
+}
+
 static int tex_upload(GlTex *e, const Nv2aTexture *t)
 {
-    GLenum target = e->cube ? GL_TEXTURE_CUBE_MAP : GL_TEXTURE_2D;
+    GLenum target = e->depth ? GL_TEXTURE_3D : e->cube ? GL_TEXTURE_CUBE_MAP : GL_TEXTURE_2D;
     Nv2aTexture one = *t;
     uint32_t nlev = 0;
     int ok = 1, f;
@@ -2045,7 +2080,11 @@ static int tex_upload(GlTex *e, const Nv2aTexture *t)
         glGenTextures(1, &e->tex);
     sh_tex_scratch(target, e->tex);
     one.cube = 0;
-    if (e->cube) {
+    e->wrap_r = -1;
+    if (e->depth) {
+        nlev = tex_upload_volume(t);
+        ok = nlev != 0;
+    } else if (e->cube) {
         uint32_t stride = e->bytes / 6;
         for (f = 0; f < 6 && ok; f++) {
             uint32_t n;
@@ -2114,7 +2153,8 @@ static GlTex *tex_get(const Nv2aTexture *t, uint32_t cube, int unit)
         }
         if (c->offset == t->offset && c->color == t->color && c->width == t->width
             && c->height == t->height && c->pitch == t->pitch
-            && c->palette == t->palette && c->cube == cube && c->levels == t->levels) {
+            && c->palette == t->palette && c->cube == cube && c->levels == t->levels
+            && c->depth == (t->depth > 1 ? t->depth : 0)) {
             e = c;
             break;
         }
@@ -2179,6 +2219,7 @@ static GlTex *tex_get(const Nv2aTexture *t, uint32_t cube, int unit)
     e->height = t->height; e->pitch = t->pitch; e->palette = t->palette;
     e->cube = cube;
     e->levels = t->levels;
+    e->depth = t->depth > 1 ? t->depth : 0;
     e->bytes = bytes;
     readback_overlapping(t->offset, bytes);
     {
@@ -2275,7 +2316,7 @@ static float tex_lod_bias(const Nv2aTexture *t)
 
 static void tex_bind(GlTex *e, const Nv2aTexture *t, int unit, uint32_t shade)
 {
-    GLenum target = e->cube ? GL_TEXTURE_CUBE_MAP : GL_TEXTURE_2D;
+    GLenum target = e->depth ? GL_TEXTURE_3D : e->cube ? GL_TEXTURE_CUBE_MAP : GL_TEXTURE_2D;
     GLint f = tex_filter(t, shade), minf = tex_min_filter(t, e->nlev, f);
 
     sh_active((int)unit);
@@ -2290,6 +2331,15 @@ static void tex_bind(GlTex *e, const Nv2aTexture *t, int unit, uint32_t shade)
     if (e->min_cur != minf) {
         glTexParameteri(target, GL_TEXTURE_MIN_FILTER, minf);
         e->min_cur = minf;
+    }
+    if (e->depth) {
+        GLint wr = wrap_mode(t->addr_p, 0);
+        if (wr == GL_CLAMP_TO_BORDER)
+            wr = GL_CLAMP_TO_EDGE;
+        if (e->wrap_r != wr) {
+            glTexParameteri(target, GL_TEXTURE_WRAP_R, wr);
+            e->wrap_r = wr;
+        }
     }
     if (e->nlev > 1) {
         /* SET_TEXTURE_CONTROL0's LOD clamps (4.8 fixed point, xemu). */
@@ -3258,6 +3308,17 @@ static void bind_stage_textures(const Nv2aPixelState *ps, uint32_t kind[4], floa
              * decoder knows no depth format). */
             if (bind_shadow(ps, &ts->tex, (int)st, &tscale[st * 2]))
                 kind[st] = shadow_kind(ts->tex.color);
+            continue;
+        }
+        if (ts->tex.depth > 1) {
+            /* A volume (XBA-120): PROJECT2D/3D on the combiners, stage 0
+             * otherwise; never a render target. */
+            if (ps->shade == NV2A_SHADE_COMBINERS && mode != 1 && mode != 2)
+                continue;
+            if (!(e = tex_get(&ts->tex, 0, (int)st)))
+                continue;
+            tex_bind(e, &ts->tex, (int)st, ps->shade);
+            kind[st] = NV2A_GL_TEX_3D;
             continue;
         }
         if ((r = rt_for_texture(&ts->tex, cube, &alpha)) != NULL) {
@@ -4611,7 +4672,7 @@ static void gl_flip(void)
 static Nv2aBackend s_backend = {
     gl_clear, gl_draw, gl_flip,
     NV2A_BACKEND_CAP_PIXEL | NV2A_BACKEND_CAP_CULL | NV2A_BACKEND_CAP_PROGRAM
-        | NV2A_BACKEND_CAP_POINTS_LINES,
+        | NV2A_BACKEND_CAP_POINTS_LINES | NV2A_BACKEND_CAP_VOLUME,
     gl_zpass_read, gl_zpass_end, gl_zpass_resolve, gl_draw_program, gl_zpass_flush
 };
 
