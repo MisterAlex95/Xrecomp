@@ -1192,7 +1192,79 @@ while the title streams. Off by default.
   `<file>` (hex words, re-read every 16 flips) are not drawn.
 
 With `RECOMP_FB_DUMP_FLIPS=<flag file>` a frame dump and a table can be
-taken at the same flip: `touch sig flag; sleep 0.4; rm flag`.
+taken at the same flip: `touch sig flag; sleep 0.4; rm flag`. With
+`RECOMP_GPU_SIGDUMP_KEEP=1` the file is kept and every frame is printed while
+it exists.
+
+## Checking for one-frame glitches
+
+A surface that shows the wrong texture or state for one or two frames and is
+right again (the Fable texture glitch of 2026-11-13: deferred `RunPushBuffer`
+fixups dropped by the D3D service, the main pass drawing with the shadow
+pass's placeholder texture) is hard to see by eye and easy to count.
+`tools/frame_outliers` counts it, from three sources:
+
+- **Frame dumps** (`RECOMP_FB_DUMP` + `RECOMP_FB_DUMP_FLIPS=<flag file>`):
+  `flash` reports frames (runs of up to `--max-run` 2) that differ from the
+  frame before and the frame after `--ratio` (3) times more than those two
+  differ from each other, so camera motion and cuts do not count; `black`
+  reports frames whose near-black pixel count jumps above the medians of the
+  six frames before and the six after by more than 1 % of the area, those two
+  medians agreeing (a spike, not a fade or a cut), and the frames just before
+  and after it differing by less than 10 % of the area (`--steady`: not in a
+  transition where every frame is another picture). `--crop` limits both to
+  the 3D viewport.
+- **Batch records** (`RECOMP_GPU_BATCHLOG=<file>`,
+  `RECOMP_GPU_BATCHLOG_FLIPS=<flag file>`): one record per batch. A batch is
+  identified within a frame by what it draws (targets, vertex buffer, index
+  count and bytes, first element, vertex program); its look is its stage
+  textures (address, format, size) and its state signature without the target
+  address. Batches drawing the same thing (one quad for many billboards) are
+  compared as a multiset of looks, so a new drawing order is no change; colour
+  target addresses, as targets and as textures, are replaced by their rank in
+  the frame, so double buffering is no change either. Reported: frames where
+  some batch looks different from both neighbours while they agree (or two
+  frames that agree with each other against both neighbours), with the
+  substitutions aggregated (`t0 80CE6080(32x32 f0C) instead of
+  801C2380(256x256 f0C)`) and the batches involved; and frames whose batch set
+  differs from both neighbours (culling flicker). A change of one batch that
+  recurs at a fixed interval of 3 frames or more (Fable re-renders something
+  every 6 frames) is the title's own rhythm: listed, not counted. Vertex bytes
+  and constants do not count (skinning and camera change them every frame;
+  `--with-constants` to include them).
+- **Signature tables** (`RECOMP_GPU_SIGDUMP=<flag file>`
+  `RECOMP_GPU_SIGDUMP_KEEP=1`): frames whose table differs from both
+  neighbours while those agree, signatures grouped by their description with
+  the target address replaced by its rank (a coarser view than the records:
+  one class can hide a substitution between two textures of one size).
+
+`run` does a whole check: it starts the executable headless (`RECOMP_GPU=1`,
+`RECOMP_FB_WINDOW=0`, dummy audio, discovery file and a copy of the save
+directory inside `--out`), with the pad script, creates the flag file for the
+window, kills the run by PID after `--total` seconds, analyses, keeps only the
+outlier frames and their neighbours, and exits 1 above `--max-outliers` (0):
+
+```
+python3 -m tools.frame_outliers run --exe <build>/fable --pad-script fable.pad \
+    --start 94 --length 20 --total 118 --out /tmp/check --save-from <save dir> \
+    --env RECOMP_PACING=off --batchlog --crop 0,62,640,412
+```
+
+`frames <dir>`, `batches <file>` and `sigs <log>` analyse what a run left.
+numpy is used when present (the launcher's venv has it); without it the same
+numbers come out of pure Python, slowly. Frame numbers are each source's own:
+dump sequence numbers for frames, GL back end frames for records and tables.
+
+Measured on Fable, 2026-11-13 (M1 Max, Oakvale intro after the AutoSave,
+94-114 s, the launcher's objects linked against this toolkit): main 98bb6bb,
+which has the bug, `RECOMP_PACING=off`: 24 and 54 outlier frames of about
+1150 in two runs; the same with the prototype fixup guard of the report's
+WP-A: 0 and 0; at the 30 fps lock 0 either way (the bug is rare there). With
+`--batchlog` (60 fps, about 1000 frames recorded): 379 flicker frames with
+the bug, the top substitutions `t0 80CE6080(32x32 f0C) instead of
+801C2380(256x256 f0C)` and the like on the well's vertex buffers, against 9
+with the guard (single changes involving the shadow map; the records' noise
+floor). Signature tables: 42 against 4.
 
 ## What is not drawn (XBA-120)
 

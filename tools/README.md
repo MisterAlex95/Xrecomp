@@ -156,6 +156,20 @@ launchers' `TitleArt`), written as a PNG or as the adaptive icon resources of a 
 (`tools/android/title_apk.sh`, docs/android/app-shell.md « A title's own APK »). What it writes comes from your game:
 keep it out of the repository.
 
+### frame_outliers — one-frame glitches in a headless run
+
+```bash
+python -m tools.frame_outliers run --exe build/fable --pad-script fable.pad --start 94 --length 20 --out /tmp/check
+python -m tools.frame_outliers frames /tmp/check/fb          # or: batches <RECOMP_GPU_BATCHLOG file>, sigs <log>
+```
+
+Frames that are wrong for one or two frames and right again (frame dumps), batches that draw the same thing as in
+both neighbouring frames with other textures or state (`RECOMP_GPU_BATCHLOG`), signature tables
+(`RECOMP_GPU_SIGDUMP_KEEP`); exit 1 above `--max-outliers`. `docs/technical/gpu-backend.md`, "Checking for
+one-frame glitches".
+
+---
+
 ### xbe_ident — XDK version and engine (XBA-67)
 
 What an XBE was built with, from the XBE alone (no disassembly, a second on the device):
