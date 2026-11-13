@@ -282,6 +282,29 @@ def _coroutine_xbe(tmp_path):
 
 
 @pytest.mark.skipif(os.environ.get("XBA_E2E") != "1", reason="XBA_E2E=1: builds and boots a title (minutes)")
+def test_a_stripped_library_table_still_gets_the_xdk_switches(tmp_path):
+    """XBA-106 in the real runtime: no library table at all, but D3D's kernel imports (AvSetDisplayMode,
+    AvSendTVEncoderOption, MmClaimGpuInstanceMemory). prepare picks xdk/d3d8 by its imports and says so; the
+    title project sets the switches no layer set (the DISPATCH gate, the pad, AC'97) itself."""
+    if not shutil.which("cmake"):
+        pytest.skip("no cmake")
+    d = tmp_path / "bare"
+    d.mkdir()
+    make_xbe(d / "default.xbe", libs=(), text=SPIN, title_id=0x58424107, title="Bare", imports=(3, 2, 168))
+    out = tmp_path / "results.jsonl"
+    r = subprocess.run([sys.executable, "-m", "tools.compat", "run", str(d), "--work-root", str(tmp_path / "cw"),
+                        "--seconds", "4", "--sustain", "2", "--out", str(out)],
+                       cwd=ROOT, capture_output=True, text=True, timeout=1800)
+    assert r.returncode == 0, r.stdout[-2000:] + r.stderr[-2000:]
+    work = tmp_path / "cw" / "bare"
+    prep = (work / "compat-prepare.log").read_text()
+    assert "XDK layers: xdk/d3d8 (kernel imports)" in prep and "warning: xdk/d3d8: the library table" in prep, prep
+    log = (work / "run-0.log").read_text()
+    assert "[XDK] defaults: RECOMP_DISPATCH_GATE=1 RECOMP_KEYBOARD=1 RECOMP_AC97_READY=1" in log, log[-3000:]
+    assert "emulated APU up" in log, log[-3000:]          # RECOMP_AC97_READY took effect
+
+
+@pytest.mark.skipif(os.environ.get("XBA_E2E") != "1", reason="XBA_E2E=1: builds and boots a title (minutes)")
 def test_code_written_and_run_at_run_time_are_named(tmp_path):
     """XBA-118 in the real runtime: a title that patches its own code (a store into its second code page) and then
     calls into the heap. The store is trapped once through the write-protected code page and goes on; the call is
