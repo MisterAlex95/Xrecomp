@@ -1,8 +1,11 @@
+import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 import XRecompCore
 
 /// A title's storage: what each folder takes, each deletable after a confirmation, revealable in Finder; a forced
-/// re-prepare and the one-shot import of command-line saves.
+/// re-prepare, the one-shot import of command-line saves, and « Create an app for this game » (not inside a game
+/// app).
 struct ManageView: View {
     @EnvironmentObject var model: LauncherModel
     let gameId: String
@@ -62,6 +65,10 @@ struct ManageView: View {
                             }
                             .buttonStyle(PillButtonStyle())
                         }
+                        if model.singleTitle == nil && game?.titleId != nil {
+                            Divider().overlay(Theme.lineSoft)
+                            titleAppRow
+                        }
                     }
                 }
             }
@@ -107,6 +114,42 @@ struct ManageView: View {
                 .toggleStyle(.switch).labelsHidden()
                 .disabled(game?.runningSince != nil || isPreparing)
         }
+    }
+
+    /// docs/macos/launcher.md « Game apps »: a copy of XRecomp.app named after the game, its logo as the icon, that
+    /// opens straight on this game. It points at the library entry; nothing of the game goes in it.
+    private var titleAppRow: some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Create an app for this game").foregroundStyle(Theme.text)
+                Text("An app with the game's logo as its icon, for the Dock or Launchpad, that opens straight on "
+                     + "this game. It holds no game data: it uses this library, its settings and saves.")
+                    .font(.caption).foregroundStyle(Theme.textFaint)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer()
+            if model.creatingApp == gameId { ProgressView().controlSize(.small) }
+            Button("Create app…") { pickAppDestination() }
+                .buttonStyle(PillButtonStyle())
+                .disabled(model.creatingApp != nil)
+        }
+    }
+
+    /// The save panel: `<Game title>.app` in ~/Applications by default (made when missing).
+    private func pickAppDestination() {
+        guard let g = game else { return }
+        let fm = FileManager.default
+        let apps = fm.homeDirectoryForCurrentUser.appendingPathComponent("Applications", isDirectory: true)
+        if !model.demo { try? fm.createDirectory(at: apps, withIntermediateDirectories: true) }
+        let p = NSSavePanel()
+        p.directoryURL = apps
+        p.nameFieldStringValue = TitleApp.fileName(title: g.name)
+        p.allowedContentTypes = [.applicationBundle]
+        p.canCreateDirectories = true
+        p.isExtensionHidden = false
+        p.prompt = "Create"
+        p.message = "Where to put the app for \(g.name)"
+        if p.runModal() == .OK, let u = p.url { model.actions?.createTitleApp(gameId, at: u) }
     }
 
     private func row(_ item: Storage.Item, _ size: Int64) -> some View {

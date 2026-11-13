@@ -43,9 +43,11 @@ struct XRecompApp: App {
         .windowToolbarStyle(.unifiedCompact)
         .commands {
             CommandGroup(replacing: .newItem) {}
-            CommandMenu("Library") {
+            // A game app (single-game mode) has a « Game » menu: Home instead of the Library.
+            CommandMenu(holder.model.singleTitle == nil ? "Library" : "Game") {
                 Button("Scan again") { holder.model.actions?.rescan() }.keyboardShortcut("r", modifiers: .command)
-                Button("Library") { holder.model.route = .library }.keyboardShortcut("1", modifiers: .command)
+                Button(holder.model.singleTitle == nil ? "Library" : "Home") { holder.model.route = holder.model.homeRoute }
+                    .keyboardShortcut("1", modifiers: .command)
                 Button("Setup") { holder.model.route = .setup }.keyboardShortcut(",", modifiers: [.command, .shift])
             }
             CommandGroup(replacing: .appInfo) {

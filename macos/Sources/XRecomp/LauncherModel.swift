@@ -133,6 +133,10 @@ protocol LauncherActions: AnyObject {
     func importSaves(_ id: String) -> Int
     /// The title's optional enhancements on or off for its next prepare (profile-free WP6).
     func setEnhancements(_ id: String, on: Bool)
+    /// « Create an app for this game »: `<Game title>.app` at url (docs/macos/launcher.md « Game apps »).
+    func createTitleApp(_ id: String, at url: URL)
+    /// A game app's « Open XRecomp »: the main app it was made from.
+    func openMainApp()
     func reveal(_ url: URL)
     func titlePaths(_ id: String) -> TitlePaths?
     func setToolkit(_ path: String)
@@ -158,15 +162,42 @@ final class LauncherModel: ObservableObject {
     @Published var notice: String?
     /// Ticks once a second while something runs, so elapsed times refresh.
     @Published var tick = 0
+    /// The game app being made (Manage shows a spinner).
+    @Published var creatingApp: String?
+    /// The library was scanned at least once (a game app says « not in the library » only after that).
+    @Published var scannedOnce = false
     weak var actions: LauncherActions?
     let demo: Bool
+    /// Single-game mode (a game app, Info.plist `XBASingleTitle`): the title ID, upper case. The window then shows
+    /// that game's screens only: no sidebar, no Library, no « Create an app ».
+    let singleTitle: String?
     static let logCap = 5000
 
-    init(demo: Bool = false) {
+    init(demo: Bool = false, singleTitle: String? = nil) {
         self.demo = demo
+        self.singleTitle = singleTitle
+        if let singleTitle { route = .home(singleTitle) }
     }
 
     func game(_ id: String) -> GameItem? { games.first { $0.id == id } }
+
+    /// A game app's game, when the library has it.
+    var singleGame: GameItem? {
+        guard let s = singleTitle else { return nil }
+        return games.first { $0.titleId?.uppercased() == s }
+    }
+
+    /// Where « back » ends: the Library, or a game app's one Home.
+    var homeRoute: Route {
+        guard let s = singleTitle else { return .library }
+        return .home(singleGame?.id ?? s)
+    }
+
+    /// In a game app, only its own title is listed.
+    func accepts(_ g: GameItem) -> Bool {
+        guard let s = singleTitle else { return true }
+        return g.titleId?.uppercased() == s
+    }
 
     func update(_ id: String, _ change: (inout GameItem) -> Void) {
         guard let i = games.firstIndex(where: { $0.id == id }) else { return }

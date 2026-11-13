@@ -11,7 +11,7 @@ let package = Package(
         .executable(name: "xrecomp-check", targets: ["xrecomp-check"]),
     ],
     targets: [
-        // All logic, Foundation (and CoreGraphics / ImageIO for the title art) only: no SwiftUI.
+        // All logic, Foundation (and CoreGraphics / ImageIO / CoreText for the title art and game-app icons) only: no SwiftUI.
         .target(name: "XRecompCore"),
         // The SwiftUI app: views, theme, the store that drives XRecompCore.
         .executableTarget(name: "XRecomp", dependencies: ["XRecompCore"]),

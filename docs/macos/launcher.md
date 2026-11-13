@@ -20,6 +20,7 @@ and storage. It is a front end to the toolkit, not a copy of it: the app drives 
 - [Prepare, play, stop](#prepare-play-stop)
 - [Per-title settings](#per-title-settings)
 - [Look](#look)
+- [Game apps](#game-apps)
 - [Licence, legal, CI](#licence-legal-ci)
 - [Prepare interface](#prepare-interface)
 - [Mac checklist](#mac-checklist)
@@ -37,7 +38,7 @@ games, Setup, Default settings, About) and the detail pane.
 | Prepare failed | The error code in words, prepare's message, the last 40 lines of `prepare.log`, Reveal log in Finder, Copy log. |
 | Settings | Per title, four tabs (General, Graphics, Audio, Advanced) over the [option table](#per-title-settings), saved to the title's `recomp.cfg` at once; Advanced has a free editor for your own lines. **Default settings** (sidebar) is the same for every title. |
 | Controls | The pad mapping the game gets (L1 = Black, R1 = White, View = Back) and the connected controller's name (GameController). |
-| Manage | Per title: the size of the work folder, the extracted disc, saves, the Z: cache, logs and the title image, each deletable after a confirmation and revealable in Finder; "Re-prepare…" (`--force`); "Import saves from command-line runs"; for a title the toolkit has optional enhancements for (`--check`'s `title_layer`), an **Enhancements** switch (on by default; off, the title's prepares and checks run with `--no-title-layer` / `XBA_NO_TITLE_LAYER=1`, kept in `state.json` `"enhancements": false`, and a build made the other way shows « Prepare again (enhancements or title profile changed) »). |
+| Manage | Per title: the size of the work folder, the extracted disc, saves, the Z: cache, logs and the title image, each deletable after a confirmation and revealable in Finder; "Re-prepare…" (`--force`); "Import saves from command-line runs"; for a title the toolkit has optional enhancements for (`--check`'s `title_layer`), an **Enhancements** switch (on by default; off, the title's prepares and checks run with `--no-title-layer` / `XBA_NO_TITLE_LAYER=1`, kept in `state.json` `"enhancements": false`, and a build made the other way shows « Prepare again (enhancements or title profile changed) »); **Create an app for this game** ([Game apps](#game-apps)). |
 | Log | The live output of the running game (or prepare), copyable; run logs are kept in `logs/`. |
 | Setup | The toolkit found (and from where), every dependency with the command that installs it, the Python environment (with **Create it**), the library folders, the work folder location. Shown first when the toolkit is not found. |
 | About | Version, the toolkit's commit, "No game data included", the licence texts read from the toolkit (`LICENSE`, `NOTICE`, `LICENSES/*.txt`). |
@@ -69,10 +70,13 @@ bash macos/scripts/build-app.sh      # macos/build/XRecomp.app, ad-hoc signed
   inherited, so a scripted run can add `RECOMP_HEADLESS=1 SDL_AUDIODRIVER=dummy RECOMP_STATUS=<file>` from the shell;
   the app itself never sets them.
 - **`XRecomp --demo [screen]`** shows every screen from mock data, without a toolkit: `library`, `home`,
-  `preparing`, `failed`, `running`, `settings`, `controls`, `manage`, `log`, `setup`, `about`. The titles are
+  `preparing`, `failed`, `running`, `settings`, `controls`, `manage`, `log`, `setup`, `about`, `single` (a game
+  app on its game), `single-missing` (a game app whose game left the library). The titles are
   invented and their art is drawn in code. In demo mode (or with `XRECOMP_PRINT_WINDOW=1`) the app prints
   `XRECOMP_WINDOW <id>` for `screencapture -l <id>`.
 - **`XRECOMP_HOME=DIR`** moves the whole Application Support tree (tests, a second library).
+- **`XRECOMP_SINGLE_TITLE=TID`** runs any launcher (`swift run`, the bare binary) in the single-game mode of a
+  [game app](#game-apps).
 - **Packaging**: `build-app.sh` runs `swift build -c release`, writes `Contents/Info.plist` from `macos/Info.plist.in`
   (bundle id `fr.adserver.xboxrecomp.mac`, macOS 14, `XBAToolkitPath` = this checkout), renders `AppIcon.icns` from
   [`docs/images/xrecomp-icon.svg`](../images/xrecomp-icon.svg) (`scripts/mkicon.swift` + `iconutil`) and signs ad hoc
@@ -89,6 +93,7 @@ macos/
     PrepareProtocol PrepareRunner ProcessGroup TitleState                  prepare
     LibraryScanner LibraryIndex XbeInfo TitleArt Xpr Dxt Accent            library and art
     GameRunner RecompConfig OptionTable Storage PlayTime SaveImport        play and storage
+    TitleApp                                                               game apps: names, Info.plist, icon, ICNS
   Sources/XRecomp/           the SwiftUI app: main (--smoke/--demo), XRecompApp, AppStore, LauncherModel, views
   Sources/xrecomp-check/     the checks
   scripts/                   check.sh, build-app.sh, mkicon.swift
@@ -200,6 +205,48 @@ buttons (a solid Play, quiet pills), rounded glass panels, the standard Mac wind
 accent from its title image (the dominant hue, lightened until the Play label keeps 4.5:1 and kept away from the
 error red); `xrecomp-check` holds the tokens equal to the Java array and checks the contrast pairs. The full OKLCH
 `GamePalette` port is later work.
+
+## Game apps
+
+Manage › **Create an app for this game** makes `<Game title>.app` (a save panel, `~/Applications` by default, made
+when missing): an app of its own for the Dock, Launchpad or Spotlight that opens straight on that game.
+
+- **What it is**: a copy of the running `XRecomp.app` (`Bundle.main.bundleURL`; from `swift run` there is no bundle
+  and the app says so) with a rewritten `Info.plist`: `CFBundleName` and `CFBundleDisplayName` = the game title,
+  `CFBundleIdentifier` = `fr.adserver.xboxrecomp.mac.title.<title ID in lower case>`, `CFBundleIconFile` =
+  `TitleIcon` (`CFBundleIconName` removed), and three keys of ours: `XBASingleTitle` = the title ID,
+  `XBAMainAppPath` and `XBAMainBundleIdentifier` = the XRecomp.app it was made from. `XBAToolkitPath` is kept, or set
+  to the toolkit the main app uses right now, so the copy still finds the checkout from outside it. The edit breaks
+  the copied signature: the app re-signs it ad hoc (`/usr/bin/codesign --force --deep --sign - <app>`) and shows
+  codesign's output if that fails. Launch Services is told of the new bundle (`LSRegisterURL`) and Finder shows it.
+- **File name**: the title with « : » as « - », any other `/` or `:` as `-`, control characters and leading dots
+  removed, at most 120 characters (`TitleApp.fileName`). Making it again at the same place replaces it; an existing
+  app there that is not a game app of ours is never replaced (pick another name), and the app never writes over or
+  inside XRecomp.app itself.
+- **Icon**: the title image (`$$XTIMAGE` of the game's own `default.xbe`, the cached `art.png`) on a macOS-style
+  rounded tile, rendered at 1024 px: the tile is 824 px on the standard icon grid with a soft shadow, its colour the
+  average of the image's border (when at least half of the border is opaque) else a deep shade of the game's accent,
+  and the image is scaled with high-quality interpolation to 80 % of the tile (title images are often 128 x 128, so
+  expect a soft picture). Without a title image: the Library's monogram (the initials on the title ID's hue). The
+  `.icns` is written directly (`TitleApp.icns`: « icns », the big-endian total length, then type + length + PNG per
+  entry: ic10 1024, ic09 512, ic08 256, ic07 128, ic14 512, ic13 256, ic12 64, ic11 32) into
+  `Contents/Resources/TitleIcon.icns`; no `iconutil`.
+- **Single-game mode**: when `Info.plist` has `XBASingleTitle` (or `$XRECOMP_SINGLE_TITLE` is set) the launcher lists
+  only that title and opens on its Home: no sidebar, no Library, no way back to it; Settings, Controls, Manage and Log
+  are there, and Home's « … » menu has Setup, Default settings, About and **Open XRecomp (all games)**. There is no
+  « Create an app » inside a game app. The menu bar shows the game's name and a « Game » menu (Home = ⌘1).
+- **Same data**: nothing the launcher stores depends on the bundle ID or the app name: the whole tree is
+  `~/Library/Application Support/xboxrecomp/` (`AppPaths.standard`), the app has no `UserDefaults` of its own, so a
+  game app and XRecomp.app share settings, library, work folders, saves, play time and logs. Only window positions
+  (kept by macOS per bundle ID) are separate. Do not prepare or play the same game from both at once: each app runs
+  its own processes.
+- **When the game leaves the library** (removed, its image moved, a disk not connected) the game app shows « This
+  game is not in your library » with **Open XRecomp**, Scan again and Setup. There is nothing to clean up: the app
+  only names a title ID. Delete it from Finder when you no longer want it.
+- **Updates**: a game app is a copy of the launcher as it was when it was made; after rebuilding XRecomp.app, make the
+  game apps again to get the new launcher (they keep working on the shared data meanwhile).
+- **Legal**: a game app holds no game code or data, only our launcher, the title's name and ID and an icon drawn from
+  the player's own disc at run time. It is fine to keep locally; like the title images, it is not shared or committed.
 
 ## Licence, legal, CI
 
@@ -374,3 +421,27 @@ For Alex, on the Mac (agents cannot click through Finder):
    folder; the original folder is untouched.
 10. `git status` in the checkout shows nothing new besides code. Send screenshots of Library, Home, Preparing and
     Settings, and `~/Library/Application Support/xboxrecomp/titles/<TID>/work/prepare.log` if something failed.
+
+Game apps ([Game apps](#game-apps)), with `macos/build/XRecomp.app` opened from Finder:
+
+11. `swift run --package-path macos XRecomp --demo manage`: the « Create an app for this game » row is last in More;
+    `--demo single` opens straight on Sample Racer's Home with the « … » menu and no sidebar; `--demo
+    single-missing` shows « This game is not in your library ».
+12. Burnout 3 › Manage › **Create app…**: the save panel opens in `~/Applications` with « Burnout 3 - Takedown.app »
+    (or the XBE's title). Create: no error, Finder shows the new app selected. `codesign --verify --deep --strict
+    ~/Applications/<name>.app` prints nothing, and `plutil -p <app>/Contents/Info.plist` shows `XBASingleTitle`,
+    the `...mac.title.<tid>` bundle ID and `CFBundleIconFile` `TitleIcon`.
+13. Icon: Finder (icon view, Get Info) and the Dock (open it, Options › Keep in Dock) show the game's logo on a
+    rounded tile, not XRecomp's icon, sharp enough at Dock size. Send a screenshot.
+14. Double-click the game app: it opens straight on Burnout 3's Home (window title and menu bar name = the game, no
+    sidebar, no back arrow, « … » menu instead). Play, Settings, Controls, Manage and Log work; Manage has no « Create
+    an app ». « … » › Setup / Default settings / About each have a way back to the game.
+15. Shared data: change a setting (Settings › Graphics) in the game app, quit it, open XRecomp: the setting is there,
+    and the play time and saves made from the game app show in XRecomp (and the other way round).
+16. Make an app for a title **without a title image** (or delete Manage › Title image first, then create): the icon
+    is the monogram (initials on a coloured tile), not a blank or the XRecomp icon.
+17. Make the same game's app again at the same place: it is replaced, no error. Try to save it as an existing
+    non-XRecomp app name in `~/Applications`: refused with a clear message, that app untouched.
+18. Remove the game from the library (take its folder out of the library folders, or rename its ISO), then open its
+    game app: after the scan it says « This game is not in your library »; **Open XRecomp** opens the main app. Put
+    the game back, Scan again: the game's Home comes back.
