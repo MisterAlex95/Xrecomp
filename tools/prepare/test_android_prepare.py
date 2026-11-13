@@ -643,6 +643,12 @@ def test_android_killed_lift_never_passes_as_up_to_date(tmp_path, monkeypatch):
         def lift_cut_bodies(self, log, at):
             return ""
 
+        def lift_health(self, log, at):     # XBA-139: an older lift's answer
+            return None
+
+        def health_line(self, health):
+            return None
+
     a = _Args(tmp_path, "libmain.so")
     a.extra_src = []
     os.makedirs(a.work)

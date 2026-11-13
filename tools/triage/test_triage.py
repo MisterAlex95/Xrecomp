@@ -112,7 +112,8 @@ def test_the_image_facts(tmp_path):
 def test_the_stub_table_is_read_from_the_tree():
     from tools.triage import kernel_stubs
     s = kernel_stubs()
-    assert s and all(isinstance(o, int) and n for o, n in s.items())
+    # Empty since XBA-138 implemented the last stub; the placeholder entry of the generated table is no route.
+    assert isinstance(s, dict) and all(isinstance(o, int) and o > 0 and n for o, n in s.items())
     assert kernel_stubs("/nonexistent/kernel_stub_table.c") == {}
 
 
