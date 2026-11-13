@@ -8,6 +8,9 @@ your own discs, and keep those outside the repository.
 | `python3 -m tools.xiso ls / get / unpack` (`xdvdfs.py`) | The pipeline's first step: getting `default.xbe` out of an image ([docs/formats/disc-image.md](../../docs/formats/disc-image.md)). |
 | `xiso_extract image.iso outdir` (C, `xiso_extract.c`) | Extracting a whole image on Linux with the library the Android app uses (`src/xiso`, XBA-40). |
 | `mkxiso.py SRC_DIR OUT.iso` | Building synthetic images for the tests. |
+| `source.py` | XBA-126: the image's bytes whatever holds them, split parts (`Game.1.iso`, `.part1`, `.iso.001`) or compressed (CSO, ZSO, CCI); `xdvdfs.py` reads through it, so every command above takes them. The Python twin of `src/xiso/xiso_source.c`. |
+| `mkcso.py IN.iso OUT --format cso1\|cso2\|cso2-framed\|cso2-maxcso\|zso\|cci` / `--split BYTES` | Compressing or splitting a synthetic image the way the usual tools do, for the tests. |
+| `bench_disc.sh BUILD_DIR WORK_DIR` | Read throughput of D: through the runtime's file layer: folder vs image vs split vs CSO ([docs/technical/disc-images.md](../../docs/technical/disc-images.md)). |
 
 ## xiso_extract
 
