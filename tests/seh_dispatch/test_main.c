@@ -28,15 +28,39 @@
  *  - a guest longjmp out of exception frames unwinds them first (__finally
  *    runs, fs:[0] is the setjmp-time head again), as the CRT's longjmp does.
  *
+ * XBA-132:
+ *
+ *  - host faults on guest addresses: a 32-bit load or store of lifted code
+ *    on a PROT_NONE guest page under __except becomes
+ *    STATUS_ACCESS_VIOLATION with { read/write, address } and the registers
+ *    of the fault; resumed at the __except block, or (a guard page the filter
+ *    commits) continued so the access runs again and succeeds; nothing
+ *    handles it: the previous SIGSEGV handler gets the original fault, and
+ *    with the default action the process dies of SIGSEGV;
+ *    RECOMP_SEH_FAULTS=0 (the faults-off run) sends it down the chain at
+ *    once;
+ *  - a guest longjmp also unwinds the try levels of the setjmp caller's own
+ *    frame: through the jmp_buf's UnwindFunc ('VC20' buffer) or the native
+ *    _local_unwind2 (an old buffer);
+ *  - a worker stack slice gives the thread exact guest stack bounds while it
+ *    runs there: a raise on the slice resumes.
+ *
  * Each checks the result, the guest stack pointer, the chain head and the
  * dispatcher's counters. Runs the same on x86-64 and arm64 (qemu in CI).
  */
+#ifndef _WIN32
+#define _GNU_SOURCE
+#endif
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #ifndef _WIN32
 #include <unistd.h>
+#include <signal.h>
+#include <setjmp.h>
+#include <sys/mman.h>
+#include <sys/wait.h>
 #endif
 
 #include "xbox_seh.h"
@@ -54,13 +78,18 @@ extern const unsigned char seh_fixture_text[];
 extern const uint32_t seh_fixture_rdata_va, seh_fixture_rdata_size;
 extern const unsigned char seh_fixture_rdata[];
 extern const uint32_t seh_fixture_f_outer;
+extern const uint32_t seh_fixture_my_lj_unwind;
 void f_outer(void);
 void f_cxx(void);
 void f_div(void);
+void f_probe(void);
+int  xbox_PosixInstallMmioFaultHandler(void);
+int  xbox_worker_stack_alloc(void);
+void xbox_worker_stack_free(int slot);
 jmp_buf *recomp_setjmp_slot(uint32_t buf_va);
 int recomp_guest_longjmp(uint32_t buf_va, uint32_t value);
 
-#define GUEST_SIZE   0x00200000u
+#define GUEST_SIZE   0x01000000u    /* the worker stack slices too (0x00780000+) */
 #define TIB_VA       0x00004000u
 #define STACK_LO     0x00100000u
 #define STACK_HI     0x00180000u
@@ -81,6 +110,15 @@ int recomp_guest_longjmp(uint32_t buf_va, uint32_t value);
 #define VA_MAIN_RET    0x0001F140u
 #define VA_STUB_RET    0x0001F150u
 #define END_OF_CHAIN 0xFFFFFFFFu
+/* XBA-132 (fixture.s) */
+#define PROBE        0x00040000u    /* 256 KB-aligned: a page on any host */
+#define PROBE_MODE   0x00030020u
+#define SEEN_INFO0   0x00030024u
+#define SEEN_INFO1   0x00030028u
+#define SEEN_ESI     0x0003002Cu
+#define SEEN_ESP     0x00030030u
+#define SEEN_EBP     0x00030034u
+#define VC20         0x56433230u
 
 #define G32(va) (*(volatile uint32_t *)((uintptr_t)(va) + g_xbox_mem_offset))
 
@@ -89,7 +127,12 @@ static int flip_host_stack;     /* RAISE runs under another host stack token */
 static int other_guest_stack;   /* RAISE runs with another guest stack's bounds */
 static int raise_on_fiber;      /* RAISE switches to a fiber that raises (1: its
                                  * top unknown, 2: known) */
-static int longjmp_from_raise;  /* RAISE longjmps to JMPBUF instead */
+static int longjmp_from_raise;  /* RAISE longjmps to JMPBUF instead (2: the
+                                 * buffer names the current head as its
+                                 * registration, as a setjmp inside f_inner's
+                                 * frame would) */
+static uint8_t *g_mem;
+static size_t g_page = 4096;
 
 static void check(int ok, const char *what)
 {
@@ -118,6 +161,11 @@ void sub_0001F000(void)
     uint32_t lo, hi;
     void raise_from_fiber(uint32_t rec, uint32_t ret);
 
+    if (longjmp_from_raise == 2) {
+        uint32_t head = G32(TIB_VA);
+        G32(JMPBUF + 0x00) = head + 0x10;       /* that frame's ebp */
+        G32(JMPBUF + 0x18) = head;              /* Registration */
+    }
     if (longjmp_from_raise)
         recomp_guest_longjmp(JMPBUF, 1);    /* does not return */
     if (raise_on_fiber) {
@@ -148,6 +196,52 @@ void sub_0001F010(void)
     g_esp += 20;
     g_eax = value;
 }
+
+/* ---- host faults (XBA-132) ---------------------------------------------- */
+
+#ifndef _WIN32
+static void probe_protect(int prot)
+{
+    if (mprotect(g_mem + PROBE, g_page, prot) != 0) {
+        perror("mprotect");
+        exit(2);
+    }
+}
+
+/* COMMIT, stdcall, no arguments: the guard page's filter commits it. */
+void sub_0001F020(void)
+{
+    probe_protect(PROT_READ | PROT_WRITE);
+    G32(PROBE) = 0x41;
+    g_esp += 4;
+}
+
+/* The handler that was there before the toolkit's (debuggerd's, ART's). */
+static sigjmp_buf s_prev_jump;
+static volatile int s_prev_calls;
+static void *volatile s_prev_addr;
+
+static void previous_handler(int sig, siginfo_t *si, void *uc)
+{
+    (void)sig; (void)uc;
+    s_prev_calls++;
+    s_prev_addr = si->si_addr;
+    siglongjmp(s_prev_jump, 1);
+}
+
+static void install_previous(void)
+{
+    struct sigaction sa;
+
+    memset(&sa, 0, sizeof sa);
+    sa.sa_sigaction = previous_handler;
+    sa.sa_flags = SA_SIGINFO;
+    sigaction(SIGSEGV, &sa, NULL);
+    sigaction(SIGBUS, &sa, NULL);
+}
+#else
+void sub_0001F020(void) { g_esp += 4; }
+#endif
 
 /* ---- a guest stack switch, as tools/recomp lifts one (XBA-101) ---------
  *
@@ -243,14 +337,19 @@ recomp_func_t seh_fixture_lookup_harness(uint32_t va)
 }
 
 /* A guest call from the host: push a return address, call, check balance. */
-static uint32_t guest_call(recomp_func_t fn, uint32_t *esp_after)
+static uint32_t guest_call_at(recomp_func_t fn, uint32_t top, uint32_t *esp_after)
 {
-    g_esp = STACK_HI - 0x100;
+    g_esp = top;
     g_esp -= 4;
     G32(g_esp) = 0xDEAD0000u;
     fn();
     *esp_after = g_esp;
     return g_eax;
+}
+
+static uint32_t guest_call(recomp_func_t fn, uint32_t *esp_after)
+{
+    return guest_call_at(fn, STACK_HI - 0x100, esp_after);
 }
 
 static void reset(int32_t filter)
@@ -261,6 +360,8 @@ static void reset(int32_t filter)
     G32(TIB_VA) = END_OF_CHAIN;
     flip_host_stack = other_guest_stack = raise_on_fiber = longjmp_from_raise = 0;
     G32(DIVISOR) = 0;
+    G32(PROBE_MODE) = 0;
+    G32(SEEN_INFO0) = G32(SEEN_INFO1) = G32(SEEN_ESI) = G32(SEEN_ESP) = G32(SEEN_EBP) = 0;
     {
         XboxSehStats s;
         xbox_SehStatsGet(&s, 1);
@@ -283,11 +384,216 @@ static const char *disc_text(void)
     return buf;
 }
 
-int main(void)
+#ifndef _WIN32
+/* f_probe's access: its entry esp (the return address pushed) less ebp, the
+ * four EH3 dwords, 8 bytes of locals, three registers and esi. */
+#define PROBE_ENTRY (STACK_HI - 0x100 - 4)
+#define PROBE_ESP   (PROBE_ENTRY - 4 - 16 - 8 - 12 - 4)
+
+static void test_host_faults(void)
 {
-    uint8_t *mem = (uint8_t *)calloc(1, GUEST_SIZE);
     uint32_t eax, esp;
     XboxSehStats st;
+    int *depth;
+    int status = 0;
+    pid_t pid;
+
+    printf("host faults on guest addresses (XBA-132)\n");
+
+    /* 11. A load from a PROT_NONE guest page inside f_probe's __try: the
+     *     filter sees STATUS_ACCESS_VIOLATION { read, address } and the
+     *     registers of the access, and the __except block runs. */
+    reset(1);
+    probe_protect(PROT_NONE);
+    g_esi = 0xABCD0123u;
+    eax = guest_call(f_probe, &esp);
+    xbox_SehStatsGet(&st, 0);
+    depth = xbox_SehFaultDepthSlot();
+    check(eax == 0x777, "read fault: __except block ran (eax 0x777)");
+    check(G32(SEEN_CODE) == XBOX_STATUS_ACCESS_VIOLATION && G32(SEEN_INFO0) == 0
+          && G32(SEEN_INFO1) == PROBE, "filter saw STATUS_ACCESS_VIOLATION { read, 0x00040000 }");
+    check(G32(SEEN_ESI) == 0x5EED0001u && G32(SEEN_ESP) == PROBE_ESP
+          && G32(SEEN_EBP) == PROBE_ENTRY - 4, "CONTEXT: esi, esp and ebp of the faulting access");
+    check(st.host_faults == 1 && st.raises == 1 && st.resumes == 1, "one host fault, raised once, resumed once");
+    check(esp == STACK_HI - 0x100 && G32(TIB_VA) == END_OF_CHAIN && g_esi == 0xABCD0123u,
+          "stack, chain and esi balanced");
+    check(depth && *depth == 0, "no trampoline left in flight after the resume");
+
+    /* 12. A store. */
+    reset(1);
+    G32(PROBE_MODE) = 1;
+    probe_protect(PROT_NONE);
+    eax = guest_call(f_probe, &esp);
+    check(eax == 0x777 && G32(SEEN_INFO0) == 1 && G32(SEEN_INFO1) == PROBE + 4,
+          "write fault: { write, 0x00040004 }, __except block ran");
+
+    /* 13. A guard page: the filter commits it and continues execution; the
+     *     faulting host context comes back and the access runs again. */
+    reset(-1);
+    probe_protect(PROT_NONE);
+    g_esi = 0xABCD0123u;
+    eax = guest_call(f_probe, &esp);
+    xbox_SehStatsGet(&st, 0);
+    check(eax == 0x42, "guard page: committed by the filter, the load ran again (0x41 + 1)");
+    check(st.host_faults == 1 && st.handled == 1 && st.resumes == 0, "handled by continuing, no resume");
+    check(esp == STACK_HI - 0x100 && G32(TIB_VA) == END_OF_CHAIN && g_esi == 0xABCD0123u,
+          "stack, chain and esi balanced");
+    check(depth && *depth == 0, "the trampoline put the context back");
+
+    reset(-1);
+    G32(PROBE_MODE) = 1;
+    probe_protect(PROT_NONE);
+    eax = guest_call(f_probe, &esp);
+    check(eax == 0x5EED0002u && G32(PROBE + 4) == 0x5EED0001u,
+          "guard page, store: it ran again and landed");
+
+    /* 14. Nothing handles it: the handler that was there before ours gets
+     *     the original fault, once, with its address. */
+    reset(0);
+    probe_protect(PROT_NONE);
+    s_prev_calls = 0;
+    s_prev_addr = NULL;
+    if (sigsetjmp(s_prev_jump, 1) == 0) {
+        guest_call(f_probe, &esp);
+        check(0, "unhandled: the fault reached the previous handler");
+    } else {
+        xbox_SehStatsGet(&st, 0);
+        check(s_prev_calls == 1 && s_prev_addr == (void *)(g_mem + PROBE),
+              "unhandled: the previous handler got the original fault, once");
+        check(st.host_faults == 1 && st.unhandled == 1
+              && G32(SEEN_CODE) == XBOX_STATUS_ACCESS_VIOLATION, "after the filter declined it");
+        check(depth && *depth == 0, "no trampoline left in flight");
+    }
+    probe_protect(PROT_READ | PROT_WRITE);
+
+    /* 15. ... and with the default action the process dies of the fault. */
+    fflush(stdout);
+    pid = fork();
+    if (pid == 0) {
+        struct sigaction dfl;
+        memset(&dfl, 0, sizeof dfl);
+        dfl.sa_handler = SIG_DFL;
+        sigaction(SIGSEGV, &dfl, NULL);
+        sigaction(SIGBUS, &dfl, NULL);
+        alarm(10);
+        if (xbox_PosixInstallMmioFaultHandler() != 0)   /* back in front, SIG_DFL behind */
+            _exit(3);
+        reset(0);
+        probe_protect(PROT_NONE);
+        guest_call(f_probe, &esp);
+        _exit(0);
+    }
+    if (pid > 0)
+        waitpid(pid, &status, 0);
+    check(pid > 0 && WIFSIGNALED(status)
+          && (WTERMSIG(status) == SIGSEGV || WTERMSIG(status) == SIGBUS),
+          "unhandled, default action: the process dies of the original signal");
+}
+
+/* RECOMP_SEH_FAULTS=0: the fault goes down the chain at once. */
+static void test_faults_off(void)
+{
+    uint32_t esp;
+    XboxSehStats st;
+
+    printf("RECOMP_SEH_FAULTS=0\n");
+    reset(1);
+    probe_protect(PROT_NONE);
+    s_prev_calls = 0;
+    if (sigsetjmp(s_prev_jump, 1) == 0) {
+        guest_call(f_probe, &esp);
+        check(0, "faults off: the fault reached the previous handler");
+    } else {
+        xbox_SehStatsGet(&st, 0);
+        check(s_prev_calls == 1 && s_prev_addr == (void *)(g_mem + PROBE),
+              "faults off: straight to the previous handler");
+        check(st.raises == 0 && st.host_faults == 0 && G32(SEEN_CODE) == 0,
+              "nothing raised, no filter ran");
+    }
+    probe_protect(PROT_READ | PROT_WRITE);
+}
+#endif
+
+/* 16. A guest longjmp from inside f_inner's __try (try level 0) to a buffer
+ *     its setjmp filled before the __try (try level -1): the frame stays,
+ *     its try levels are unwound -- by the jmp_buf's UnwindFunc (a 'VC20'
+ *     buffer, guest code) or by the native _local_unwind2 (an old one). */
+static void test_longjmp_local(int vc20)
+{
+    static volatile int landed;
+    uint32_t esp, reg;
+
+    reset(0);
+    landed = 0;
+    g_esp = STACK_HI - 0x100 - 4;
+    G32(JMPBUF + 0x04) = g_ebx;
+    G32(JMPBUF + 0x08) = g_edi;
+    G32(JMPBUF + 0x0C) = g_esi;
+    G32(JMPBUF + 0x10) = g_esp;
+    G32(JMPBUF + 0x14) = 0xDEAD0002u;
+    G32(JMPBUF + 0x1C) = 0xFFFFFFFFu;               /* TryLevel at setjmp */
+    G32(JMPBUF + 0x20) = vc20 ? VC20 : 0;           /* Cookie */
+    G32(JMPBUF + 0x24) = vc20 ? seh_fixture_my_lj_unwind : 0;
+    if (setjmp(*recomp_setjmp_slot(JMPBUF)) == 0) {
+        longjmp_from_raise = 2;
+        guest_call(f_outer, &esp);
+    } else {
+        landed = 1;
+    }
+    longjmp_from_raise = 0;
+    reg = G32(JMPBUF + 0x18);
+    check(landed == 1 && g_esp == STACK_HI - 0x100, vc20 ? "VC20 buffer: guest longjmp landed"
+                                                        : "old buffer: guest longjmp landed");
+    check(G32(COUNTER) == (vc20 ? 0x101u : 1u),
+          vc20 ? "the UnwindFunc ran f_inner's __finally, once"
+               : "the native _local_unwind2 ran f_inner's __finally, once");
+    check(G32(reg + 0xC) == 0xFFFFFFFFu && G32(TIB_VA) == reg,
+          "the frame stays registered, at the setjmp-time try level");
+}
+
+/* 17. A worker stack slice: while the thread runs there, its guest stack
+ *     bounds are the slice's, so a raise on it walks its frames and resumes;
+ *     freeing the slice gives the thread's bounds back. */
+static void test_worker_slice(void)
+{
+    uint32_t lo0, hi0, lo, hi, eax, esp, top;
+    int slot;
+
+    reset(1);
+    xbox_SehGetGuestStack(&lo0, &hi0);
+    slot = xbox_worker_stack_alloc();
+    if (slot < 0) {
+        check(0, "a worker stack slice is free");
+        return;
+    }
+    top = XBOX_WORKER_STACK_TOP(slot);
+    xbox_SehGetGuestStack(&lo, &hi);
+    check(lo == top + 16 - XBOX_WORKER_STACK_SIZE && hi == top + 16,
+          "worker slice: the thread's guest stack bounds are the slice");
+    eax = guest_call_at(f_outer, top, &esp);
+    check(eax == 0x222 && G32(COUNTER) == 1 && esp == top,
+          "a raise on the slice resumes at f_outer's __except");
+    xbox_worker_stack_free(slot);
+    xbox_SehGetGuestStack(&lo, &hi);
+    check(lo == lo0 && hi == hi0, "freeing the slice gives the thread's bounds back");
+}
+
+int main(int argc, char **argv)
+{
+    uint8_t *mem;
+    uint32_t eax, esp;
+    XboxSehStats st;
+    int faults_off = argc > 1 && strcmp(argv[1], "faults-off") == 0;
+#ifndef _WIN32
+    mem = (uint8_t *)mmap(NULL, GUEST_SIZE, PROT_READ | PROT_WRITE,
+                          MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (mem == (uint8_t *)MAP_FAILED)
+        mem = NULL;
+    g_page = (size_t)sysconf(_SC_PAGESIZE);
+#else
+    mem = (uint8_t *)calloc(1, GUEST_SIZE);
+#endif
+    g_mem = mem;
 #ifndef _WIN32
     {
         const char *tmp = getenv("TMPDIR");
@@ -307,6 +613,25 @@ int main(void)
     memcpy(mem + seh_fixture_rdata_va, seh_fixture_rdata, seh_fixture_rdata_size);
     g_fs_base = TIB_VA;
     xbox_SehSetGuestStack(STACK_LO, STACK_HI);
+#ifndef _WIN32
+    /* What a title's process has: someone's handler first (debuggerd, ART),
+     * the toolkit's in front of it. */
+    install_previous();
+    if (xbox_PosixInstallMmioFaultHandler() != 0) {
+        printf("could not install the fault handler\n");
+        return 1;
+    }
+    if (faults_off) {
+        test_faults_off();
+        munmap(mem, GUEST_SIZE);
+        printf("%s (%d failure%s)\n", failures ? "FAIL" : "PASS", failures,
+               failures == 1 ? "" : "s");
+        return failures ? 1 : 0;
+    }
+#else
+    if (faults_off)
+        return 77;
+#endif
 
     printf("seh_dispatch: lifted __try/__except, __finally, C++ catch\n");
 
@@ -500,11 +825,23 @@ int main(void)
         check(st.raises == 0, "no exception raised");
     }
 
+    /* XBA-132 */
+#ifndef _WIN32
+    test_host_faults();
+#endif
+    test_longjmp_local(1);
+    test_longjmp_local(0);
+    test_worker_slice();
+
 #ifndef _WIN32
     remove(disc_path);
 #endif
     printf("%s (%d failure%s)\n", failures ? "FAIL" : "PASS", failures,
            failures == 1 ? "" : "s");
+#ifndef _WIN32
+    munmap(mem, GUEST_SIZE);
+#else
     free(mem);
+#endif
     return failures ? 1 : 0;
 }

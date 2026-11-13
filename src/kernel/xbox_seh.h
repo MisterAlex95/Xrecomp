@@ -141,6 +141,14 @@ void xbox_SehSetGuestStack(uint32_t lo, uint32_t hi);
  * anyway. */
 void xbox_SehGetGuestStack(uint32_t *lo, uint32_t *hi);
 
+/* A guest stack this thread runs on for a while and then leaves: a worker
+ * stack slice (xbox_worker_stack_alloc) taken for an interrupt routine, a DPC
+ * or a host-driven tick. Push names its bounds, pop gives the previous ones
+ * back. Nests a few deep (a slice taken on a thread that already runs on
+ * one); past that the bounds are left as they are. */
+void xbox_SehPushGuestStack(uint32_t lo, uint32_t hi);
+void xbox_SehPopGuestStack(void);
+
 /* An opaque token naming the host stack the thread is on now (0 by default).
  * A guest stack switch that also switches host stacks (XBA-101) sets it on
  * every switch: an anchor taken under one token is never longjmp'd to under
@@ -153,6 +161,66 @@ void xbox_SehSetHostStack(uintptr_t token);
 typedef void (*xbox_seh_func_t)(void);
 xbox_seh_func_t xbox_SehLookup(uint32_t va);
 
+/* The guest side of a native longjmp to guest jmp_buf buf_va (the MSVC
+ * layout: +0x00 ebp ... +0x18 Registration, +0x1C TryLevel, +0x20 Cookie,
+ * +0x24 UnwindFunc), as the CRT's longjmp does it before it moves esp:
+ *  - global unwind: RtlUnwind up to Registration, so the frames the jump
+ *    leaves run their __finally blocks and destructors and fs:[0] is that
+ *    registration again;
+ *  - local unwind, inside the setjmp caller's own frame: with the 'VC20'
+ *    cookie, the UnwindFunc _setjmp3 recorded (the CRT's
+ *    _seh_longjmp_unwind, or __CxxLongjmpUnwind for C++ frames: guest code,
+ *    called stdcall with the buffer); without it (an old jmp_buf), the
+ *    try-level unwind of an EH3 frame (_local_unwind2) down to TryLevel.
+ * Nothing when dispatch is off or Registration is not on the chain. */
+void xbox_SehLongjmpUnwind(uint32_t buf_va);
+
+/* ---- host faults on guest addresses (XBA-132) ---------------------------
+ *
+ * A load or store of lifted code (or of the runtime on the guest's behalf)
+ * that faults on a guest address that is not trapped MMIO becomes a guest
+ * STATUS_ACCESS_VIOLATION, dispatched through the thread's chain as on the
+ * console: guard pages, IsBadReadPtr-style probes, __try around a pointer
+ * the title does not trust. The signal handler does not dispatch: it saves
+ * the faulting host context, points the thread at a trampoline on the
+ * thread's own stack and returns. The trampoline raises; then
+ *  - a handler that resumes at an __except block or a catch longjmps to its
+ *    anchor, as for any raise;
+ *  - a handler that continues execution gets the faulting host context back,
+ *    exactly, and the access runs again (a guard page it committed now
+ *    succeeds; one it did not faults again, and is dispatched again);
+ *  - nothing handled: the context is put back with the next fault at the same
+ *    place marked to go down the chain, so the access faults again and ends
+ *    as it did before this existed (ART's handler, debuggerd's tombstone with
+ *    the original pc and registers, or the default action).
+ * RECOMP_SEH_FAULTS=0 (or RECOMP_SEH_DISPATCH=0) turns it off: every such
+ * fault goes down the chain at once. Linux x86-64, Linux/Android arm64 and
+ * macOS arm64; elsewhere it is off. src/kernel/xbox_seh_fault.c. */
+int xbox_SehFaultsEnabled(void);
+
+/* Called by the POSIX SIGSEGV/SIGBUS handler (xbox_memory_layout.c) after
+ * trapped MMIO declined the fault: 1 when it was taken (the context now
+ * points at the trampoline, or the trampoline's restore was applied) and the
+ * handler must return, 0 to go down the chain as before. */
+int xbox_SehPosixFault(int sig, void *siginfo, void *ucontext);
+
+/* Once, when the handler is installed (it maps the restore trap page). */
+int xbox_SehFaultInit(void);
+
+/* The trampoline's guest half: raise STATUS_ACCESS_VIOLATION for guest
+ * address va, ExceptionInformation = { access (0 read, 1 write, 8 execute),
+ * va }. Returns 1 when a handler continued execution, 0 when nothing handled
+ * it; a resume does not return. g_cpu is as it was at the fault on both
+ * returns: registers a handler changed in the CONTEXT are not applied (the
+ * lifted code holds some of them in host registers; said once in the log).
+ * host_pc only names the place in the log. */
+int xbox_SehRaiseHostFault(uint32_t va, uint32_t access, uintptr_t host_pc);
+
+/* How many host faults this thread is inside (trampolines on its stack).
+ * NULL until the thread has dispatcher state; async-signal-safe. A resume
+ * puts back the depth its anchor was taken at. */
+int *xbox_SehFaultDepthSlot(void);
+
 /* Counters, for tests and the status report. */
 typedef struct {
     uint32_t raises;        /* dispatches started */
@@ -161,6 +229,7 @@ typedef struct {
     uint32_t resumes;       /* longjmps to an anchor */
     uint32_t refused;       /* resumes / frames refused (other stack, dead frame) */
     uint32_t anchors;       /* anchors taken */
+    uint32_t host_faults;   /* host faults raised as guest exceptions */
 } XboxSehStats;
 void xbox_SehStatsGet(XboxSehStats *out, int reset);
 

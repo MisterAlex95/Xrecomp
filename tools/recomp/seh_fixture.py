@@ -32,7 +32,7 @@ TEXT_VA = 0x00010000
 RDATA_VA = 0x00020000
 FUNCTIONS = ("g_raises", "g_throw", "f_outer", "f_inner", "my_handler3",
              "f_cxx", "f_cxx_inner", "ehstub_cxx", "ehstub_inner",
-             "my_cxx_handler", "f_div")
+             "my_cxx_handler", "f_div", "f_probe", "my_lj_unwind")
 
 
 def build(source=SOURCE, out=FIXTURE_JSON):
@@ -127,7 +127,8 @@ def lift(data=None, *, seh_anchors=True):
     ]
     out += [f"void {name}(void);" for _, name in entries]
     out += ["void sub_0001F000(void);  /* RAISE, the harness */",
-            "void sub_0001F010(void);  /* UNWIND, the harness */", ""]
+            "void sub_0001F010(void);  /* UNWIND, the harness */",
+            "void sub_0001F020(void);  /* COMMIT, the harness */", ""]
     out += bodies
     out += ["", "static const struct { uint32_t va; recomp_func_t fn; } "
             "seh_fixture_table[] = {"]

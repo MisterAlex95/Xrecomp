@@ -1117,6 +1117,12 @@ static void mmio_fault_handler(int sig, siginfo_t *si, void *ucv)
 
     if (xbox_PosixMmioFault(ucv, (uintptr_t)si->si_addr))
         return;
+    /* Any other guest address, on a thread with a guest handler chain: a
+     * guest access violation, raised from a trampoline on the thread's own
+     * stack (xbox_seh_fault.c, XBA-132). One nothing handles comes back here
+     * with the original context and goes down the chain below. */
+    if (xbox_SehPosixFault(sig, si, ucv))
+        return;
     /* A real crash: let the log pump hand the last lines to logcat before
      * debuggerd writes the tombstone and the process goes (XBA-52). Bounded,
      * async-signal-safe, and immediate when the pipes are empty or no pump
@@ -1167,6 +1173,7 @@ int xbox_PosixInstallMmioFaultHandler(void)
         g_mmio_handler_installed = 1;
         return 0;
     }
+    xbox_SehFaultInit();     /* the guest fault path's restore page; off without it */
     memset(&sa, 0, sizeof sa);
     sa.sa_sigaction = mmio_fault_handler;
     sa.sa_flags = SA_SIGINFO | SA_ONSTACK | SA_RESTART;
@@ -2572,17 +2579,10 @@ int recomp_guest_longjmp(uint32_t buf_va, uint32_t value)
          * run below it). Left out, fs:[0] kept naming dead frames below esp,
          * which the dispatcher (XBA-112) rejects as a broken chain: the next
          * exception went unhandled. The registration must be on the chain (or
-         * the end of it), else nothing is unwound. The try-level unwind
-         * inside the setjmp caller's own frame (_local_unwind2) is not done. */
-        if (xbox_SehDispatchEnabled() && g_fs_base) {
-            uint32_t reg = *(const uint32_t *)(mem + buf_va + 0x18);
-            uint32_t eip = *(const uint32_t *)(mem + buf_va + 0x14);
-            uint32_t head = *(const uint32_t *)(mem + g_fs_base);
-            if (reg != head && (reg == XBOX_SEH_END_OF_CHAIN || xbox_SehOnChain(reg))) {
-                xbox_SehUnwind(reg == XBOX_SEH_END_OF_CHAIN ? 0 : reg, 0, eip);
-                *(uint32_t *)((uint8_t *)mem + g_fs_base) = reg;
-            }
-        }
+         * the end of it), else nothing is unwound. Then the try levels inside
+         * the setjmp caller's own frame (the jmp_buf's UnwindFunc, or
+         * _local_unwind2 for an old buffer), XBA-132. xbox_seh.c. */
+        xbox_SehLongjmpUnwind(buf_va);
 
         g_ebx = *(const uint32_t *)(mem + buf_va + 0x04);
         g_edi = *(const uint32_t *)(mem + buf_va + 0x08);

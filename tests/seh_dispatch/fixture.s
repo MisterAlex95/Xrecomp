@@ -21,6 +21,15 @@
     .set DIVISOR,       0x3000C
     .set RAISE,         0x1F000
     .set UNWIND,        0x1F010
+    # XBA-132: host faults and the longjmp local unwind
+    .set COMMIT,        0x1F020     # host: make the PROBE page accessible
+    .set PROBE,         0x40000     # a guest page the harness can make fault
+    .set PROBE_MODE,    0x30020     # 0: f_probe reads PROBE, 1: writes it
+    .set SEEN_INFO0,    0x30024     # what fp_filter saw
+    .set SEEN_INFO1,    0x30028
+    .set SEEN_ESI,      0x3002C
+    .set SEEN_ESP,      0x30030
+    .set SEEN_EBP,      0x30034
 
     .text
 
@@ -420,6 +429,121 @@ fd_filter:
     mov dword ptr ds:SEEN_CODE, ecx
     mov eax, dword ptr ds:FILTER_RESULT
     ret
+
+# ---- a host fault under __except (XBA-132) ---------------------------------
+
+# f_probe: __try { esi = 0x5EED0001; push esi; eax = [PROBE] (or [PROBE+4] =
+# esi; eax = [PROBE+4]); pop esi; eax += 1 } __except (filter) { eax = 0x777 }
+# The access is a plain 32-bit load or store on a page the harness makes
+# PROT_NONE: the host fault becomes STATUS_ACCESS_VIOLATION. The filter
+# records what it saw; with FILTER_RESULT -1 it commits the page first (a
+# guard page) and continues execution, so the access runs again.
+    .globl f_probe
+f_probe:
+    push ebp
+    mov ebp, esp
+    push -1
+    push offset scope_probe
+    push offset my_handler3
+    mov eax, dword ptr fs:0
+    push eax
+    mov dword ptr fs:0, esp
+    sub esp, 8
+    push ebx
+    push esi
+    push edi
+    mov dword ptr [ebp-0x18], esp
+    mov dword ptr [ebp-4], 0
+    mov esi, 0x5EED0001
+    push esi
+    cmp dword ptr ds:PROBE_MODE, 0
+    jne fp_write
+    mov eax, dword ptr ds:PROBE
+    jmp fp_done
+fp_write:
+    mov dword ptr ds:PROBE+4, esi
+    mov eax, dword ptr ds:PROBE+4
+fp_done:
+    pop esi
+    add eax, 1
+    jmp fp_out
+fp_except:
+    mov esp, dword ptr [ebp-0x18]
+    mov eax, 0x777
+fp_out:
+    mov dword ptr [ebp-4], -1
+    mov ecx, dword ptr [ebp-0x10]
+    mov dword ptr fs:0, ecx
+    pop edi
+    pop esi
+    pop ebx
+    mov esp, ebp
+    pop ebp
+    ret
+fp_filter:
+    mov ecx, dword ptr [ebp-0x14]
+    mov edx, dword ptr [ecx]
+    mov eax, dword ptr [edx]
+    mov dword ptr ds:SEEN_CODE, eax
+    mov eax, dword ptr [edx+0x14]
+    mov dword ptr ds:SEEN_INFO0, eax
+    mov eax, dword ptr [edx+0x18]
+    mov dword ptr ds:SEEN_INFO1, eax
+    mov edx, dword ptr [ecx+4]
+    mov eax, dword ptr [edx+0x20C]
+    mov dword ptr ds:SEEN_ESI, eax
+    mov eax, dword ptr [edx+0x230]
+    mov dword ptr ds:SEEN_ESP, eax
+    mov eax, dword ptr [edx+0x220]
+    mov dword ptr ds:SEEN_EBP, eax
+    mov eax, dword ptr ds:FILTER_RESULT
+    cmp eax, -1
+    jne fpf_ret
+    call COMMIT
+    mov eax, -1
+fpf_ret:
+    ret
+
+# ---- a jmp_buf's unwind function (XBA-132) --------------------------------
+
+# my_lj_unwind(jmp_buf), stdcall: what the CRT's _seh_longjmp_unwind does
+# (_local_unwind2 of the setjmp caller's EH3 frame down to the saved try
+# level), then COUNTER += 0x100 to say it ran.
+    .globl my_lj_unwind
+my_lj_unwind:
+    push ebp
+    push ebx
+    push esi
+    push edi
+    mov ecx, dword ptr [esp+0x14]
+    mov ebp, dword ptr [ecx]
+    mov ebx, dword ptr [ecx+0x18]
+    mov edx, dword ptr [ecx+0x1C]
+    mov edi, dword ptr [ebx+8]
+lu_loop:
+    mov esi, dword ptr [ebx+0xC]
+    cmp esi, -1
+    je lu_done
+    cmp esi, edx
+    je lu_done
+    lea ecx, [esi+esi*2]
+    mov eax, dword ptr [edi+ecx*4]
+    mov dword ptr [ebx+0xC], eax
+    mov eax, dword ptr [edi+ecx*4+4]
+    test eax, eax
+    jnz lu_loop
+    mov eax, dword ptr [edi+ecx*4+8]
+    push edx
+    call eax
+    pop edx
+    jmp lu_loop
+lu_done:
+    add dword ptr ds:COUNTER, 0x100
+    pop edi
+    pop esi
+    pop ebx
+    pop ebp
+    ret 4
     .globl text_end
 text_end:
 
@@ -445,3 +569,5 @@ unwind_inner:
     .long -1, inner_unwind
 scope_div:
     .long -1, fd_filter, fd_except
+scope_probe:
+    .long -1, fp_filter, fp_except
