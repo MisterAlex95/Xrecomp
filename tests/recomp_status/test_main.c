@@ -96,6 +96,7 @@ int main(void)
     CHECK(field(l, "lit") == 1);
     CHECK(field(l, "audio_ms") == 10);
     CHECK(field(l, "pad_reads") == 2 && field(l, "threads") == 1 && field(l, "discovered") == 0);
+    CHECK(field(l, "seeds") == 0);   /* XBA-129: code the analysis missed, written by this run */
     CHECK(strstr(l, "\"hash\":\"0x") != NULL && l[strlen(l) - 2] == '}');
 
     recomp_status_reset();

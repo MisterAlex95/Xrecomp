@@ -15,8 +15,8 @@ from tools.compat.test_compat import line, playing                   # noqa: E40
 
 # The keys every line has, desktop or device: report, matrix and plane read these.
 SCHEMA = {"source", "toolkit", "time", "stage", "blocker"}
-RUN_KEYS = {"stage", "blocker", "run_s", "flips", "frames", "audio_ms", "pad_reads", "threads", "discovered", "lit",
-            "smc", "screenshot"}   # smc: XBA-118
+RUN_KEYS = {"stage", "blocker", "run_s", "flips", "frames", "audio_ms", "pad_reads", "threads", "discovered", "seeds",
+            "lit", "smc", "screenshot"}   # smc: XBA-118; seeds: XBA-129
 
 
 def _files(tmp_path, status, log="", ident=None, discovered=()):

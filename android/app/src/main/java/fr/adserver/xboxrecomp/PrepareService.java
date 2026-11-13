@@ -43,12 +43,25 @@ public class PrepareService extends Service {
     static final String ACTION_START = "fr.adserver.xboxrecomp.PREPARE_START";
     static final String ACTION_CANCEL = "fr.adserver.xboxrecomp.PREPARE_CANCEL";
     static final String EXTRA_GAME_DIR = "game_dir", EXTRA_TITLE_ID = "title_id", EXTRA_TITLE = "title";
+    /** A background Prepare (a self-healing round after a good run, XBA-129): see PrepareProtocol.Status.background. */
+    static final String EXTRA_BACKGROUND = "background";
+    /** clang -O level for this Prepare (XBA-128); absent: OPT, or 1 with the quick first build on. */
+    static final String EXTRA_OPT = "opt";
     static final String CHANNEL = "prepare";
     static final int NOTIF_ID = 41, NOTIF_DONE_ID = 42;
     /** A Prepare holds the CPU at most this long (the wake lock's timeout). */
     static final long WAKE_LOCK_MS = 6L * 3600 * 1000;
     /** clang -O level: 2, tools.prepare's default (docs/android/prepare.md « Measurements »: 6 % slower than -O1). */
     static final int OPT = 2;
+    /**
+     * XBA-128, a measured option, off: with {@code <files>/prepare/quick-first} present, a Prepare builds at -O1 and,
+     * once its pack is published, queues a background -O2 rebuild (Play is not blocked by it).
+     */
+    static final String QUICK_FIRST = "quick-first";
+    /** Starts again after the Prepare's process died (START_REDELIVER_INTENT) before it is reported as killed. */
+    static final int MAX_RESUMES = 3;
+    /** Tests: the device's thermal status, battery and game, else the real ones. */
+    static volatile PrepareMonitor.Probe probeOverride;
 
     /** Builds the command for a run; tests substitute a script. */
     interface Environment {
@@ -67,6 +80,8 @@ public class PrepareService extends Service {
     private static PrepareProtocol.Queue queue;
 
     private PowerManager.WakeLock wakeLock;
+    private PrepareMonitor monitor;
+    private String lastGameDir = "";
     private NotificationManager nm;
     private String titleName = "";
     private long lastNotify;
@@ -156,8 +171,38 @@ public class PrepareService extends Service {
         String gameDir = intent.getStringExtra(EXTRA_GAME_DIR);
         String titleId = intent.getStringExtra(EXTRA_TITLE_ID);
         String title = intent.getStringExtra(EXTRA_TITLE);
+        boolean background = intent.getBooleanExtra(EXTRA_BACKGROUND, false);
+        int opt = intent.getIntExtra(EXTRA_OPT, 0);
+        if (opt <= 0)
+            opt = !background && quickFirst(this) ? 1 : OPT;
         // startForegroundService() needs startForeground() even when nothing new starts.
-        goForeground(notification(null));
+        try {
+            goForeground(notification(null));
+        } catch (RuntimeException e) {   // a redelivered start the system does not let run in the foreground now
+            Log.w(TAG, "prepare: cannot go to the foreground: " + e);
+            stopSelf(startId);
+            return START_NOT_STICKY;
+        }
+        int resumes = 0;
+        if ((flags & START_FLAG_REDELIVERY) != 0 && titleId != null) {
+            // XBA-128: the Prepare's process died (the system killed it) and Android started it again with its intent.
+            PrepareProtocol.Status prev = PrepareProtocol.readStatus(statusFile(this, titleId));
+            boolean waiting = prev != null && prev.queued();   // it was queued: a plain start
+            if (prev != null && !prev.running() && !waiting) {
+                Log.i(TAG, "prepare: " + titleId + " redelivered but " + prev.state + ": nothing to resume");
+                dropStart(startId);
+                return START_NOT_STICKY;
+            }
+            resumes = waiting ? 0 : (prev == null ? 0 : prev.resumes) + 1;
+            if (resumes > MAX_RESUMES) {
+                Log.w(TAG, "prepare: " + titleId + "'s process died " + resumes + " times: given up");
+                markKilled(titleId, resumes);
+                dropStart(startId);
+                return START_NOT_STICKY;
+            }
+            if (resumes > 0)
+                Log.i(TAG, "prepare: resuming " + titleId + " after its process died (" + resumes + ")");
+        }
         boolean busy = busy();
         if (gameDir == null || titleId == null || titleId.isEmpty()) {
             Log.w(TAG, "prepare: start without a game or title ID");
@@ -169,12 +214,17 @@ public class PrepareService extends Service {
         }
         loadQueue();
         if (busy) {
-            enqueue(new PrepareProtocol.Job(titleId, gameDir, title));
-            return START_NOT_STICKY;
+            PrepareProtocol.Job j = new PrepareProtocol.Job(titleId, gameDir, title);
+            j.background = background;
+            j.opt = opt;
+            enqueue(j);
+            return START_REDELIVER_INTENT;
         }
         titleName = title == null ? "" : title;
-        startJob(gameDir, titleId);
-        return START_NOT_STICKY;
+        startJob(gameDir, titleId, background, opt, resumes);
+        // XBA-128: if this process dies (low memory, the phantom process killer), Android starts the service again
+        // with this intent; the stamps skip what was done (MAX_RESUMES times).
+        return START_REDELIVER_INTENT;
     }
 
     /**
@@ -221,6 +271,7 @@ public class PrepareService extends Service {
         s.titleId = j.titleId;
         s.startedAt = s.updatedAt = System.currentTimeMillis();
         s.log = logFile(this, j.titleId).getAbsolutePath();
+        s.background = j.background;
         File f = statusFile(this, j.titleId);
         try {
             PrepareProtocol.writeStatus(f, s);
@@ -280,7 +331,42 @@ public class PrepareService extends Service {
         stopSelf();
     }
 
-    private void startJob(String gameDir, String titleId) {
+    /** A start that runs nothing: out of the foreground and stopped, unless a Prepare runs. */
+    private void dropStart(int startId) {
+        if (busy())
+            return;
+        stopForeground(STOP_FOREGROUND_REMOVE);
+        stopSelf(startId);
+    }
+
+    /** XBA-128: the quick first build (-O1, then a background -O2) is on (a file, for measuring it on a device). */
+    static boolean quickFirst(Context c) {
+        return new File(new File(filesDir(c), "prepare"), QUICK_FIRST).isFile();
+    }
+
+    /** A Prepare whose process died too often: failed, KILLED. */
+    private void markKilled(String titleId, int resumes) {
+        File f = statusFile(this, titleId);
+        PrepareProtocol.Status s = PrepareProtocol.readStatus(f);
+        if (s == null)
+            return;
+        s.state = PrepareProtocol.FAILED;
+        s.code = PrepareRunner.KILLED;
+        s.msg = "the Prepare's process was killed " + resumes + " times";
+        s.resumes = resumes;
+        s.updatedAt = System.currentTimeMillis();
+        try {
+            PrepareProtocol.writeStatus(f, s);
+        } catch (IOException e) {
+            Log.w(TAG, "prepare: cannot write " + f + ": " + e);
+        }
+    }
+
+    static File workDir(Context c, String titleId) {
+        return new File(new File(filesDir(c), "work"), titleId);
+    }
+
+    private void startJob(String gameDir, String titleId, boolean background, int opt, int resumes) {
         int jobs = Toolchain.jobs(this);
         File filesDir = filesDir(this);
         PrepareRunner.CommandFactory[] factory = new PrepareRunner.CommandFactory[1];
@@ -304,8 +390,15 @@ public class PrepareService extends Service {
                 },
                 () -> Pack.check(filesDir, titleId) == Pack.Check.VALID ? null : PrepareRunner.PACK_INVALID,
                 this::onStatus);
+        runner.setBackground(background);
+        runner.setOpt(opt);
+        runner.setResumes(resumes);
+        PrepareMonitor.Probe probe = probeOverride != null ? probeOverride : PrepareMonitor.deviceProbe(this);
+        monitor = new PrepareMonitor(workDir(this, titleId), jobs, background, probe);
+        monitor.start();
         current = runner;
         currentTid = titleId;
+        lastGameDir = gameDir;
         PowerManager pm = getSystemService(PowerManager.class);
         if (pm != null) {
             wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "xboxrecomp:prepare");
@@ -315,7 +408,8 @@ public class PrepareService extends Service {
         Thread t = new Thread(() -> runJob(runner, factory, gameDir, titleId), "xba-prepare");
         worker = t;
         t.start();
-        Log.i(TAG, "prepare: started for " + titleId + " (" + gameDir + "), " + jobs + " jobs");
+        Log.i(TAG, "prepare: started for " + titleId + " (" + gameDir + "), " + jobs + " jobs, -O" + opt
+                   + (background ? ", in the background" : "") + (resumes > 0 ? ", resumed " + resumes : ""));
     }
 
     /** The worker: install, then the runner. */
@@ -343,6 +437,14 @@ public class PrepareService extends Service {
         }
         Log.i(TAG, "prepare: " + end.state + (end.code.isEmpty() ? "" : " " + end.code)
                    + (end.msg.isEmpty() ? "" : ": " + end.msg));
+        if (runner.background()) {   // XBA-129: the launcher ends the other rounds (it relaunches the game)
+            try {
+                SelfHeal.roundEnded(new File(new File(filesDir(this), "work"), titleId),
+                                    PrepareProtocol.DONE.equals(end.state));
+            } catch (IOException e) {
+                Log.w(TAG, "prepare: cannot update " + titleId + "'s selfheal.json: " + e);
+            }
+        }
         PrepareProtocol.Status fin = end;
         new android.os.Handler(getMainLooper()).post(() -> onJobEnd(fin));
     }
@@ -409,7 +511,9 @@ public class PrepareService extends Service {
                 a.add("--jobs");
                 a.add(String.valueOf(jobs));
                 a.add("--opt");
-                a.add(String.valueOf(OPT));
+                a.add(String.valueOf(runner.opt() > 0 ? runner.opt() : OPT));
+                a.add("--device-log");   // XBA-128: PrepareMonitor's samples, read before each compile
+                a.add(PrepareMonitor.logFile(work).getAbsolutePath());
                 a.add("--shell-abi");
                 a.add(String.valueOf(Pack.SHELL_ABI));
                 return a;
@@ -438,8 +542,23 @@ public class PrepareService extends Service {
     }
 
     private void onJobEnd(PrepareProtocol.Status s) {
+        PrepareRunner done = current;
         current = null;
         currentTid = null;
+        if (monitor != null)
+            monitor.stop();
+        monitor = null;
+        // XBA-128, quick first: the -O1 pack is published; the -O2 rebuild follows in the background.
+        if (done != null && done.opt() == 1 && PrepareProtocol.DONE.equals(s.state) && quickFirst(this)) {
+            loadQueue();
+            PrepareProtocol.Job o2 = new PrepareProtocol.Job(s.titleId, lastGameDir, titleName);
+            o2.background = true;
+            o2.opt = 2;
+            if (queue.add(o2)) {
+                saveQueue();
+                Log.i(TAG, "prepare: " + s.titleId + " built at -O1, the -O2 rebuild queued in the background");
+            }
+        }
         if (wakeLock != null && wakeLock.isHeld())
             wakeLock.release();
         wakeLock = null;
@@ -453,7 +572,7 @@ public class PrepareService extends Service {
             titleName = next.title;
             lastNotifyId = "";
             goForeground(notification(null));
-            startJob(next.gameDir, next.titleId);
+            startJob(next.gameDir, next.titleId, next.background, next.opt > 0 ? next.opt : OPT, 0);
             return;
         }
         stopForeground(STOP_FOREGROUND_REMOVE);
@@ -462,6 +581,8 @@ public class PrepareService extends Service {
 
     @Override
     public void onDestroy() {
+        if (monitor != null)
+            monitor.stop();
         PrepareRunner r = current;
         if (r != null && busy())
             r.cancel();   // the system stops us: do not leave compilers behind

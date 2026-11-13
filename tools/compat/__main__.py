@@ -57,7 +57,8 @@ def classify(status, presses_ms, exit_info, run_s, sustain_s, log_text="", disco
     in the status clock; exit_info: None when the runner stopped it, else
     ("exit", code) or ("signal", n)."""
     last = status[-1] if status else {}
-    summary = {k: last.get(k, 0) for k in ("flips", "frames", "audio_ms", "pad_reads", "threads", "discovered")}
+    summary = {k: last.get(k, 0) for k in ("flips", "frames", "audio_ms", "pad_reads", "threads", "discovered",
+                                           "seeds")}
     summary["lit"] = int(any(s.get("lit") for s in status))
     stage = "prepares"
     if status and any(s.get("flips") or s.get("threads") or s.get("pad_reads") or s.get("audio_ms")
@@ -316,7 +317,30 @@ def toolkit_commit():
         return "unknown"
 
 
-def run_one(source, a):
+def recall_of(work, source):
+    """The title's prepare-time recall (tools/compat/recall.py) for its result
+    line, without the per-address rows; None when no run missed anything."""
+    from tools.compat import recall
+    try:
+        xbe = None
+        src = os.path.abspath(source)
+        if os.path.isdir(src):
+            xbe = os.path.join(src, "default.xbe")
+        elif src.lower().endswith(".xbe"):
+            xbe = src
+        elif os.path.isfile(os.path.join(work, "xbe", "default.xbe")):
+            xbe = os.path.join(work, "xbe", "default.xbe")
+        r = recall.report(work, xbe)
+    except Exception:               # never let the measure spoil the result
+        return None
+    if not r["misses"]:
+        return None
+    r.pop("rows", None)
+    r["summary"] = recall.summary(r)
+    return r
+
+
+def run_one(source, a, marks=None):
     name = os.path.basename(os.path.normpath(source))
     work = os.path.join(os.path.abspath(a.work_root), re.sub(r"[^A-Za-z0-9._-]", "_", name))
     os.makedirs(work, exist_ok=True)
@@ -339,6 +363,11 @@ def run_one(source, a):
         res["layers"] = ident.get("layers")
     except (OSError, ValueError):
         pass
+    if marks is not None:           # tools/compat/heal.py: where this run's discoveries begin
+        try:
+            marks["disc_offset"] = os.path.getsize(os.path.join(work, "discovered.jsonl"))
+        except OSError:
+            marks["disc_offset"] = 0
     runs = []
     for i in range(a.repeat):
         status, presses, exit_info, run_s, log_text = boot(exe, work, a.seconds, i)
@@ -354,6 +383,9 @@ def run_one(source, a):
                smc=max(r.get("smc", 0) for r in runs))
     if a.repeat > 1:
         res["failure_rate"] = round(sum(r["stage"] != best["stage"] for r in runs) / len(runs), 2)
+    rc = recall_of(work, source)
+    if rc:
+        res["recall"] = rc
     return res
 
 
@@ -363,14 +395,23 @@ def report(results):
     for r in results:
         last[r.get("title_id") or r.get("source")] = r
     on_device = any(r.get("device") for r in results)
-    rows = ["| Title | Stage | Best of runs | Blocker | XDK | Toolkit |" + (" Device |" if on_device else ""),
-            "|---|---|---|---|---|---|" + ("---|" if on_device else "")]
+    with_recall = any(r.get("recall") for r in results)
+    rows = ["| Title | Stage | Best of runs | Blocker | XDK | Toolkit |" + (" Recall |" if with_recall else "")
+            + (" Device |" if on_device else ""),
+            "|---|---|---|---|---|---|" + ("---|" if with_recall else "") + ("---|" if on_device else "")]
     for k, r in sorted(last.items(), key=lambda kv: -STAGES.index(kv[1].get("stage", "none"))):
         rows.append("| %s | %s | %s | %s | %s | %s |" % (
             r.get("source", k), r.get("stage"), r.get("best", r.get("stage")),
             (r.get("blocker") or "").replace("|", "/"), r.get("xdk") or "", r.get("toolkit", ""))
+            + (" %s |" % recall_label(r) if with_recall else "")
             + (" %s |" % device.device_label(r).replace("|", "/") if on_device else ""))
     return "\n".join(rows)
+
+
+def recall_label(r):
+    """The Recall column: the line's prepare-time recall summary (XBA-129), "" without one."""
+    rc = r.get("recall")
+    return (rc.get("summary") or "").replace("|", "/") if isinstance(rc, dict) else ""
 
 
 def _key(r):
@@ -408,6 +449,7 @@ def matrix(results):
     by = history(results)
     rows, counts = [], {s: 0 for s in STAGES}
     on_device = any(r.get("device") for r in results)    # lines from the app (XBA-130): a Device column
+    with_recall = any(r.get("recall") for r in results)   # prepare-time recall (XBA-129)
     for k, runs in sorted(by.items(), key=lambda kv: (-STAGES.index(kv[1][-1].get("stage", "none")),
                                                       str(kv[1][-1].get("source", kv[0])).lower())):
         last = runs[-1]
@@ -423,6 +465,7 @@ def matrix(results):
             (last.get("blocker") or "").replace("|", "/"), last.get("xdk") or "",
             ", ".join(l for l in (last.get("layers") or []) if l.startswith("engines/")) or "",
             "%s %s" % (last.get("toolkit", ""), (last.get("time") or "")[:10]))
+            + (" %s |" % recall_label(last) if with_recall else "")
             + (" %s |" % device.device_label(last).replace("|", "/") if on_device else ""))
     total = sum(counts.values()) or 1
     smc = sum(1 for runs in by.values() if runs[-1].get("smc"))
@@ -431,8 +474,8 @@ def matrix(results):
            + ("; code written or run at run time (XBA-118): %d" % smc if smc else ""),
            "",
            "| Title | Title ID | Stage | Since the run before | Blocker | XDK | Engine | Toolkit, date |"
-           + (" Device |" if on_device else ""),
-           "|---|---|---|---|---|---|---|---|" + ("---|" if on_device else "")] + rows
+           + (" Recall |" if with_recall else "") + (" Device |" if on_device else ""),
+           "|---|---|---|---|---|---|---|---|" + ("---|" if with_recall else "") + ("---|" if on_device else "")] + rows
     reg = regressions(results)
     out += ["", "**Regressions** (a Bug each): " + ("none" if not reg else "; ".join(
         "%s %s -> %s (%s -> %s)" % (r["source"], r["from"], r["to"], r["toolkit_from"], r["toolkit_to"])
@@ -470,6 +513,10 @@ def plane_sync(results, project="XBA", page="Compatibility", dry_run=False, run=
 
 
 def main(argv=None):
+    argv = sys.argv[1:] if argv is None else list(argv)
+    if argv[:1] == ["recall"]:          # its own parser (tools/compat/recall.py)
+        from tools.compat import recall
+        return recall.main(argv[1:])
     ap = argparse.ArgumentParser(prog="tools.compat", description=__doc__)
     sub = ap.add_subparsers(dest="cmd", required=True)
     r = sub.add_parser("run", help="prepare and boot titles, append results")
@@ -489,9 +536,28 @@ def main(argv=None):
     q.add_argument("--dry-run", action="store_true")
     g = sub.add_parser("grade", help="grade a run made elsewhere (the app's library check), append its line")
     device.add_arguments(g)
+    h = sub.add_parser("heal", help="rounds of prepare + boot until a round brings nothing (XBA-129)")
+    h.add_argument("sources", nargs="+")
+    h.add_argument("--work-root", default="compat-work")
+    h.add_argument("--seconds", type=float, default=180)
+    h.add_argument("--sustain", type=float, default=60)
+    h.add_argument("--max-idle", type=int, default=1, help="rounds without progress in a row that stop it")
+    h.add_argument("--max-rounds", type=int, default=12, help="a safety net, not the cap (default 12)")
+    h.add_argument("--out", default="compat-results.jsonl")
+    sub.add_parser("recall", help="prepare-time recall of a title's work folder (XBA-129): recall --help")
     a = ap.parse_args(argv)
     if a.cmd == "grade":
         return device.grade_cmd(a)
+    if a.cmd == "heal":
+        from tools.compat import heal
+        a.repeat, a.no_prepare = 1, False
+        for src in a.sources:
+            res = heal.heal(src, a, run_one, out=lambda m: print(m, flush=True))
+            with open(a.out, "a") as f:
+                f.write(json.dumps(res) + "\n")
+            print("%-40s %-10s %s (%d round(s): %s)" % (res["source"], res["stage"], res.get("blocker") or "",
+                                                       res["heal"]["rounds"], res["heal"]["stop"]), flush=True)
+        return 0
     if a.cmd == "report":
         res = read_jsonl(a.results)
         print(matrix(res) if a.matrix else report(res))

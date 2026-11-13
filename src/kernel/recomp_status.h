@@ -4,7 +4,7 @@
  * RECOMP_STATUS_MS (default 1000) milliseconds:
  *
  *   {"ms":3000,"flips":118,"frames":41,"hash":"0x1f2e3d4c","lit":1,
- *    "audio_ms":2100,"pad_reads":180,"threads":7,"discovered":2}
+ *    "audio_ms":2100,"pad_reads":180,"threads":7,"discovered":2,"seeds":1}
  *
  *   ms          since the status started (the first runtime init)
  *   flips       frames the title presented (the executor's flip)
@@ -17,6 +17,8 @@
  *   threads     guest threads the kernel started (the first, run inline as the
  *               title's main thread, counts)
  *   discovered  new discovery-file entries (recomp_discovery.h)
+ *   seeds       of them, code the analysis missed (icall, thread, thread_ctx):
+ *               what the next Prepare can seed (XBA-129)
  *
  * Unset: nothing is counted beyond a load and a branch per call.
  * docs/technical/discovery.md has the companion file; the runner reads both. */

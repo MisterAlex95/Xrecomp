@@ -87,12 +87,21 @@ class Procs:
         with self.lock:
             self.live.discard(p)
 
-    def run(self, args, cwd=None, env=None):
-        """(returncode, stdout+stderr as text)."""
+    def run(self, args, cwd=None, env=None, peak=None):
+        """(returncode, stdout+stderr as text). peak: a list that gets the
+        child's peak resident set in kB (wait4's ru_maxrss; 0 where the host
+        has no wait4), for the Prepare's measurements (XBA-128)."""
         p = self.start(args, cwd=cwd, env=env, stdout=subprocess.PIPE,
                        stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
         try:
-            out, _ = p.communicate()
+            if peak is not None and hasattr(os, "wait4"):
+                out = p.stdout.read()
+                p.stdout.close()
+                peak.append(_reap(p))
+            else:
+                out, _ = p.communicate()
+                if peak is not None:
+                    peak.append(0)
         finally:
             self.done(p)
         if self.cancelled.is_set():
@@ -130,6 +139,24 @@ class Procs:
                 p.kill()
             except OSError:
                 pass
+
+
+def _reap(p):
+    """Wait for Popen p with wait4: its exit status into p.returncode, and its
+    peak RSS (kB on Linux and Android) returned. Popen does not wait again
+    once returncode is set."""
+    while True:
+        try:
+            _, status, ru = os.wait4(p.pid, 0)
+            break
+        except InterruptedError:
+            continue
+        except ChildProcessError:       # reaped elsewhere: Popen knows the code
+            p.wait()
+            return 0
+    p.returncode = os.waitstatus_to_exitcode(status) if hasattr(os, "waitstatus_to_exitcode") else \
+        (-(status & 0x7F) if status & 0x7F else (status >> 8) & 0xFF)
+    return int(ru.ru_maxrss)
 
 
 # ── Jobs ────────────────────────────────────────────────────────
@@ -314,11 +341,16 @@ def _first_error(out):
     return lines[-1].strip() if lines else "no output"
 
 
-def compile_all(sources, flags, tc, obj_dir, jobs, log=None, on_progress=None):
+def compile_all(sources, flags, tc, obj_dir, jobs, log=None, on_progress=None, limit=None, stats=None):
     """Compile `sources` (largest first) into obj_dir/<key>.o.
 
     Returns (objects in the order of `sources`, number compiled now).
     on_progress(done, total, compiled_now, eta_or_None) after each file.
+    limit(): how many compiles may run at once right now (the device log,
+    tools/prepare/metrics.py: fewer when the device is hot, 0 holds); read
+    before each compile starts, never above `jobs`. stats: a dict that gets
+    "peak_kb" (each compile's peak RSS), "compiled" and "held_s" (wall time
+    limit() held every compile, 0 jobs).
     Raises StepError (COMPILE_FAILED / NO_SPACE) or Cancelled."""
     os.makedirs(obj_dir, exist_ok=True)
     cid = tc.compiler_id()
@@ -337,15 +369,51 @@ def compile_all(sources, flags, tc, obj_dir, jobs, log=None, on_progress=None):
     failed = []
     t0 = time.time()
     log_lock = threading.Lock()
+    gate = threading.Condition()
+    running = [0]
+    peaks = []
+    held = [0.0]
+    held_since = [None]             # the device log holds every compile (jobs 0) since then
+    if stats is not None:
+        stats.update(peak_kb=peaks, compiled=0, held_s=0.0)
     if on_progress:
         on_progress(state["done"], total, 0, None)
+
+    def enter():
+        """Wait for a free slot under limit() (re-read every second while held)."""
+        with gate:
+            while not (failed or tc.procs.cancelled.is_set()):
+                allowed = jobs if limit is None else max(0, min(jobs, limit()))
+                if allowed == 0 and held_since[0] is None:
+                    held_since[0] = time.time()
+                elif allowed > 0 and held_since[0] is not None:
+                    held[0] += time.time() - held_since[0]
+                    held_since[0] = None
+                if running[0] < allowed:
+                    running[0] += 1
+                    return True
+                gate.wait(1.0)
+            return False
+
+    def leave():
+        with gate:
+            running[0] -= 1
+            gate.notify_all()
 
     def one(item):
         src, size, obj = item
         if failed or tc.procs.cancelled.is_set():
             return
+        if not enter():
+            return
         tmp = "%s.tmp%d.%d" % (obj, os.getpid(), threading.get_ident())
-        rc, out = tc.procs.run(tc.cc_argv + flags + ["-c", src, "-o", tmp])
+        peak = []
+        try:
+            rc, out = tc.procs.run(tc.cc_argv + flags + ["-c", src, "-o", tmp], peak=peak)
+        finally:
+            leave()
+        with lock:
+            peaks.extend(peak)
         if rc != 0 or not os.path.isfile(tmp):
             try:
                 os.remove(tmp)
@@ -381,6 +449,10 @@ def compile_all(sources, flags, tc, obj_dir, jobs, log=None, on_progress=None):
             # A cancel has killed the running compiles already (Procs.cancel);
             # queued ones return at once (failed / cancelled checked first).
             ex.shutdown(wait=True, cancel_futures=True)
+    if held_since[0] is not None:
+        held[0] += time.time() - held_since[0]
+    if stats is not None:
+        stats.update(compiled=state["compiled"], held_s=held[0])
     if tc.procs.cancelled.is_set():
         raise Cancelled()
     if failed:

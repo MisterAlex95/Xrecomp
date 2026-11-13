@@ -49,6 +49,11 @@ this run or an earlier one) is not written again: the file only grows with what 
                                                              the first write into a lifted code page: va = the page,
                                                              at = the address written, by = a store or a system call,
                                                              ret = the word at the guest stack top (XBA-118)
+{"t":"exception","va":"0x00012350","code":"0xC0000094","why":"divide by zero"}
+                                                             a guest exception nothing handled (XBA-129): a lifted
+                                                             divide error that stops the title (kernel_hal.c) or a
+                                                             raise no handler took (xbox_seh.c), or a host fault on a guest
+                                                             address no guest handler took (XBA-132)
 ```
 
 `bytes` is the first 8 bytes at the target of an `exec_outside_image`, as hex. They are code the title made at run time
@@ -57,6 +62,11 @@ from a wild pointer into data; nothing longer is ever written. Rules and the wri
 `src/kernel/recomp_smc.h`.
 
 Addresses are guest VAs, 8 hex digits. At most 6,144 distinct entries per file.
+
+The first `icall`, `thread` or `thread_ctx` entry a process writes is also said on stderr, once: `[DISCOVERY] first
+code the analysis missed in this run: icall 0x0012ABCD (skipped; the next Prepare adds it)`. A skipped indirect call
+does not crash, the title goes on (maybe wrong): that line, the entry, and the status line's `seeds` (how many such
+entries this process wrote, `src/kernel/recomp_status.h`) make the miss visible without a crash (XBA-129).
 
 ## Who reads it
 
@@ -76,13 +86,17 @@ Addresses are guest VAs, 8 hex digits. At most 6,144 distinct entries per file.
   `thread_ctx` addresses go through the same gates, the ones that pass are kept in `<work>/discovered-seeds.json` and
   handed to the disassembler, the others in `<work>/discovered-rejected.json` so they are not tried again. A new seed
   changes the stamp: the next prepare analyses and lifts again (all of it for now; only what changed is XBA-65).
-- The Android app, after a run that crashed (XBA-74, [prepare.md « Prepare again »](../android/prepare.md)): new
-  `icall`, `thread` or `thread_ctx` entries since the last Prepare → « Prepare again »; none → the title needs a fix,
-  with the first `unimpl` entry as the blocker.
+- The Android app, after every run (XBA-74, XBA-129, [prepare.md « Self-healing »](../android/prepare.md)): new
+  `icall`, `thread` or `thread_ctx` entries since the last Prepare → a Prepare that takes them in (at once and a
+  relaunch after a crash, in the background after a run that ended well); a crash with `exception`, `stack_switch` or
+  `unimpl` entries, or with nothing new → the title needs a fix, named.
+- `tools.compat heal` (the same loop on a desktop) and `tools.compat recall` (the share of run-time targets the static
+  analysis found, the misses' categories): [compat-runner.md](compat-runner.md#self-healing-rounds-and-recall-xba-129).
 
-The whole loop runs in CI on a synthetic title of our own (`tools/compat/test_e2e.py::test_the_self_healing_loop`):
-its thread routine is invisible to the static analysis (its address is computed), the first run records it as a
-`thread` entry, the next prepare seeds it and rebuilds, and the second run starts the thread.
+The whole loop runs in CI on a synthetic title of our own (`tools/compat/test_e2e.py::test_the_self_healing_loop`,
+through `tools.compat heal`): its thread routines are invisible to the static analysis (their addresses are
+computed); each run records the next one as a `thread` entry, the next prepare seeds it and rebuilds, and the run
+after starts it; the third is not code, the gates refuse it, and the loop stops after that round without progress.
 
 Code: `src/kernel/recomp_discovery.c` (the writer, no dependency on the rest of the runtime), callers in
 `kernel_bridge.c` (threads) and `templates/new-game/src/recomp_manual.c` (indirect calls, untranslated instructions);

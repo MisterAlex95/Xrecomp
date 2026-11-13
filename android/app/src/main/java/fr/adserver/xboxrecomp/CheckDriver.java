@@ -25,7 +25,8 @@ import java.util.List;
  * <p>Pauses: the game left the screen during a boot (the player went away, the screen turned off; the run is thrown
  * away and done again on return: a game in the background is held by the runtime, its numbers would mean nothing),
  * the check screen is not shown when a Prepare or a boot has to start (Android lets an app start those only from the
- * screen), the device reports a severe thermal status (a running Prepare is cancelled and resumed once it cooled down),
+ * screen), the device reports a severe thermal status (a running Prepare goes on with fewer compile jobs, XBA-128;
+ * nothing new starts until it cooled down),
  * or the battery runs low while not charging.
  */
 final class CheckDriver {
@@ -42,10 +43,10 @@ final class CheckDriver {
     static final long END_GRACE_MS = 30_000;
     /** Peak memory sampled this often. */
     static final long SAMPLE_MS = 5_000;
-    /** Thermal statuses (PowerManager.THERMAL_STATUS_*): severe pauses, moderate or less resumes. */
-    static final int THERMAL_SEVERE = 3, THERMAL_MODERATE = 2;
-    /** Not charging and below this: pause; resume when charging or at RESUME_BATTERY. */
-    static final int LOW_BATTERY = 20, RESUME_BATTERY = 30;
+    /** Thermal statuses (PowerManager.THERMAL_STATUS_*): severe pauses, moderate or less resumes (DeviceGuard). */
+    static final int THERMAL_SEVERE = DeviceGuard.THERMAL_SEVERE, THERMAL_MODERATE = DeviceGuard.THERMAL_MODERATE;
+    /** Not charging and below this: pause; resume when charging or at RESUME_BATTERY (DeviceGuard). */
+    static final int LOW_BATTERY = DeviceGuard.LOW_BATTERY, RESUME_BATTERY = DeviceGuard.RESUME_BATTERY;
     /** Interrupted Prepares (killed, cancelled by the system) started again before it is reported. */
     static final int MAX_PREPARE_ATTEMPTS = 3;
     /** Boots interrupted by the player leaving before the title is graded as it is. */
@@ -158,7 +159,7 @@ final class CheckDriver {
     synchronized void resume() {
         if (!LibraryCheck.PAUSED.equals(s.state))
             return;
-        if (LibraryCheck.HOT.equals(s.reason) && p.thermalStatus() >= THERMAL_SEVERE)
+        if (LibraryCheck.HOT.equals(s.reason) && DeviceGuard.hot(p.thermalStatus()))
             return;
         Log.i(TAG, "check: resumed (" + s.reason + ")");
         s.state = LibraryCheck.RUNNING;
@@ -252,11 +253,11 @@ final class CheckDriver {
     private void autoResume() {
         switch (s.reason) {
         case LibraryCheck.HOT:
-            if (p.thermalStatus() <= THERMAL_MODERATE)
+            if (DeviceGuard.cooled(p.thermalStatus()))
                 resume();
             break;
         case LibraryCheck.BATTERY:
-            if (p.charging() || p.batteryPercent() >= RESUME_BATTERY)
+            if (DeviceGuard.batteryBack(p.batteryPercent(), p.charging()))
                 resume();
             break;
         case LibraryCheck.AWAY:
@@ -270,11 +271,11 @@ final class CheckDriver {
 
     /** True (and paused) when the device should not start anything now. */
     private boolean held() {
-        if (p.thermalStatus() >= THERMAL_SEVERE) {
+        if (DeviceGuard.hot(p.thermalStatus())) {
             pauseFor(LibraryCheck.HOT);
             return true;
         }
-        if (!p.charging() && p.batteryPercent() >= 0 && p.batteryPercent() < LOW_BATTERY) {
+        if (DeviceGuard.batteryLow(p.batteryPercent(), p.charging())) {
             pauseFor(LibraryCheck.BATTERY);
             return true;
         }
@@ -317,12 +318,10 @@ final class CheckDriver {
         PrepareProtocol.Status st = p.prepareStatus(t.tid);
         boolean live = st != null && (st.running() || st.queued()) && p.prepareAlive();
         if (live) {
-            if (p.thermalStatus() >= THERMAL_SEVERE) {
-                Log.i(TAG, "check: severe thermal status, " + t.tid + "'s Prepare cancelled until it cools down");
-                p.cancelPrepare(t.tid);
-                addPrepareTime(t);
-                t.prepareAttempts--;   // a pause, not a failure
-                t.phase = LibraryCheck.PENDING;
+            // XBA-128: hot, the Prepare drops its own compile jobs (PrepareMonitor, DeviceGuard.jobsFor) and goes on
+            // slowly; the check pauses, so nothing new starts after it until the device cooled down.
+            if (DeviceGuard.hot(p.thermalStatus()) && !LibraryCheck.PAUSED.equals(s.state)) {
+                Log.i(TAG, "check: severe thermal status, " + t.tid + "'s Prepare goes on with fewer jobs; paused");
                 pauseFor(LibraryCheck.HOT);
             }
             return;

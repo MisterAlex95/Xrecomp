@@ -15,6 +15,7 @@
 #include "kernel_missing.h"
 #include "xbox_memory_layout.h"   /* RECOMP_TLS, g_fs_base */
 #include "xbox_seh.h"            /* recomp_divide_error raises #DE (XBA-112) */
+#include "recomp_discovery.h"     /* an unhandled #DE is recorded (XBA-129) */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -2247,5 +2248,6 @@ void recomp_divide_error(uint32_t va, uint32_t divisor)
             va, divisor ? "quotient overflow" : "divide by zero", code,
             g_eax, g_edx, divisor, g_esp, why);
     fflush(stderr);
+    recomp_discovery_exception(va, code, divisor ? "quotient overflow" : "divide by zero");   /* XBA-129 */
     xbox_KeBugCheckEx(0x1E, code, va, 0, 0);
 }

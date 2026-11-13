@@ -489,6 +489,8 @@ static int seh_raise(uint32_t rec, uint32_t eip, uint32_t esp_after, int quiet)
         g_seh_ebp = saved.seh_ebp;
     } else {
         seh_regs_load(&saved);
+        if (!quiet)
+            recomp_discovery_exception(SEH_MEM32(rec + XBOX_EXCREC_ADDRESS), code, "no guest handler took it");
         if (!quiet && seh_log_budget()) {
             fprintf(stderr, "  [SEH] unhandled exception 0x%08X at 0x%08X "
                     "(record 0x%08X); execution continues after the raise\n",
@@ -616,10 +618,16 @@ int xbox_SehRaiseHostFault(uint32_t va, uint32_t access, uintptr_t host_pc)
                     "runs again with the registers it had\n", va);
             fflush(stderr);
         }
-    } else if (seh_log_budget()) {
-        fprintf(stderr, "  [SEH] host fault on guest 0x%08X: no guest handler "
-                "took it; it goes to the host's handler\n", va);
-        fflush(stderr);
+    } else {
+        /* The same discovery kind as an unhandled raise (XBA-129): the
+         * blocker is named the same way, here before the crash it becomes. */
+        recomp_discovery_exception(va, XBOX_STATUS_ACCESS_VIOLATION,
+                                   "host fault on a guest address no guest handler took");
+        if (seh_log_budget()) {
+            fprintf(stderr, "  [SEH] host fault on guest 0x%08X: no guest handler "
+                    "took it; it goes to the host's handler\n", va);
+            fflush(stderr);
+        }
     }
     g_cpu = saved;
     return handled;

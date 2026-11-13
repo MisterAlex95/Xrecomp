@@ -20,6 +20,7 @@ import sys
 import traceback
 
 from tools.prepare import compile as cc
+from tools.prepare import metrics
 from tools.prepare import pack
 from tools.prepare import toolkit
 from tools.prepare.progress import Reporter
@@ -56,6 +57,11 @@ class Run:
         self.data_dir = None
         self.image = None             # a disc image source (XBA-126): the other images come out of it
         self.images = []              # [(disc path, objects)], other_images()
+        self.steps = metrics.Steps()  # what this run cost (XBA-128): pack.json "prepare"
+        self.compile_stats = {}
+        self.jobs = 0
+        self.sources = []
+        self.tools_peak_kb = 0
 
     # ── helpers ──
 
@@ -102,6 +108,8 @@ class Run:
         if self.stamp.get("xbe") != h or self.stamp.get("toolkit_sha256") != self.toolkit_sha:
             self.stamp = {}
             self.save_stamp(xbe=h, toolkit=self.toolkit, toolkit_sha256=self.toolkit_sha)
+        # Steps a killed or repeated Prepare finds done already (pack.json "prepare" "skipped", XBA-128).
+        self.steps.skipped = [k for k in ("parse", "disasm", "func_id", "abi", "lift", "link") if self.stamp.get(k)]
         self.xjson = os.path.join(self.work, "xbe", "default_analysis.json")
         if not (self.stamp.get("parse") and os.path.isfile(self.xjson)):
             rc, _ = self.procs.run_logged([self.py, "-m", "tools.xbe_parser", mine, "--json", self.xjson],
@@ -213,13 +221,17 @@ class Run:
             any(fn.endswith(".c") for fn in os.listdir(os.path.join(self.proj, "src", "title")))
         flags = cc.compile_flags(a.opt, self.m.ROOT, self.proj, self.tc.sysroot, has_profile, a.include_dir)
         jobs = a.jobs or cc.default_jobs(cc.mem_available(), os.cpu_count())
+        self.jobs, self.sources = jobs, sources
+        self.tools_peak_kb = metrics.children_peak_kb()     # the pipeline tools so far (disasm, lift, ...)
+        device_log = getattr(a, "device_log", None)
+        limit = (lambda: metrics.jobs_now(device_log, jobs)) if device_log else None
         self.rep.progress(4, 0, "compiling %d files, %d jobs, -O%s" % (len(sources), jobs, a.opt))
 
         def prog(done, total, now, eta):
             self.rep.progress(4, done * 100 // max(1, total), "%d/%d files (%d compiled)" % (done, total, now),
                               eta)
         self.objects, n = cc.compile_all(sources, flags, self.tc, os.path.join(self.work, "obj"), jobs,
-                                         log=self.log, on_progress=prog)
+                                         log=self.log, on_progress=prog, limit=limit, stats=self.compile_stats)
         self.rep.progress(4, 100, "%d files, %d compiled" % (len(sources), n))
         self.compiled = n
 
@@ -308,6 +320,9 @@ class Run:
                                   toolkit_sha256=self.toolkit_sha)
             if images:
                 meta["images"] = images
+            # What this run cost (XBA-128): step times, compile peak RSS, sizes, the device's thermal samples.
+            meta["prepare"] = metrics.summary(self.steps, self.compile_stats, self.sources, self.objects, self.jobs,
+                                              a.opt, part, getattr(a, "device_log", None), self.tools_peak_kb)
             try:
                 pack.publish(packs, self.tid, meta)
             except OSError as e:
@@ -342,12 +357,13 @@ def run(a, host):
     signal.signal(signal.SIGINT, on_signal)
     signal.signal(signal.SIGTERM, on_signal)
     try:
-        r.identify()
-        r.analyse()
-        r.lift()
-        r.compile()
-        r.other_images()
-        final = r.make_pack()
+        st = r.steps
+        st.run("identify", r.identify)
+        st.run("analyse", r.analyse)
+        st.run("lift", r.lift)
+        st.run("compile", r.compile)
+        st.run("images", r.other_images)
+        final = st.run("pack", r.make_pack)
         rep.ok(final)
         return 0
     except cc.Cancelled as e:

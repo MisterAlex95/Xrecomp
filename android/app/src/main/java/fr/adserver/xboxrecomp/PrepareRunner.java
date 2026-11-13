@@ -93,6 +93,29 @@ final class PrepareRunner {
         return statusFile;
     }
 
+    /** A background Prepare (XBA-129): said in status.json, which the launcher reads (before begin()). */
+    void setBackground(boolean b) {
+        status.background = b;
+    }
+
+    /** The clang -O level (XBA-128), in status.json and for the command (before begin()). */
+    void setOpt(int opt) {
+        status.opt = opt;
+    }
+
+    int opt() {
+        return status.opt;
+    }
+
+    /** A Prepare started again after its process died (XBA-128): prepare.log is kept and appended to. */
+    void setResumes(int n) {
+        status.resumes = n;
+    }
+
+    boolean background() {
+        return status.background;
+    }
+
     File logFile() {
         return logFile;
     }
@@ -106,7 +129,10 @@ final class PrepareRunner {
         File dir = statusFile.getParentFile();
         if (dir != null && !(dir.mkdirs() || dir.isDirectory()))
             throw new IOException("cannot create " + dir);
-        log = new PrintStream(new FileOutputStream(logFile, false), true, "UTF-8");
+        killOrphans();
+        log = new PrintStream(new FileOutputStream(logFile, status.resumes > 0), true, "UTF-8");
+        if (status.resumes > 0)
+            logLine("=== resumed after the Prepare's process died (" + status.resumes + "): the stamps skip what was done");
         status.state = PrepareProtocol.RUNNING;
         status.startedAt = System.currentTimeMillis();
         status.step = 0;
@@ -132,6 +158,37 @@ final class PrepareRunner {
             log.println(s);
     }
 
+    /** The process group of the running tools.prepare, kept beside status.json while it runs (XBA-128). */
+    File pgidFile() {
+        return new File(statusFile.getParentFile(), "pgid");
+    }
+
+    /**
+     * A Prepare whose process died (killed by the system: no onDestroy, no cancel) leaves tools.prepare and its
+     * compilers in their own process group, which setsid took out of the app's: they would compile beside the new run.
+     * The group's id was written when it started; it is ended before anything else runs.
+     */
+    void killOrphans() {
+        File f = pgidFile();
+        if (!f.isFile())
+            return;
+        int id = 0;
+        try {
+            id = Integer.parseInt(PrepareProtocol.readText(f, 64).trim());
+        } catch (IOException | NumberFormatException ignored) {
+        }
+        //noinspection ResultOfMethodCallIgnored
+        f.delete();
+        if (id <= 1)
+            return;
+        Log.w(TAG, "prepare: process group " + id + " left by a Prepare whose process died: ended");
+        try {
+            android.system.Os.kill(-id, 9);
+        } catch (Throwable ignored) {   // gone already, or no libcore in a JVM test
+        }
+        runKill("-KILL", "--", "-" + id);
+    }
+
     /** Ends without running the command (the install failed or was cancelled). */
     PrepareProtocol.Status finish(String state, String code, String msg) {
         status.state = state;
@@ -139,6 +196,8 @@ final class PrepareRunner {
         status.msg = msg == null ? "" : msg;
         status.eta = -1;
         logLine("=== " + state + (status.code.isEmpty() ? "" : " " + status.code) + ": " + status.msg);
+        //noinspection ResultOfMethodCallIgnored
+        pgidFile().delete();
         appendToolLog();
         publish(true);
         if (log != null)
@@ -249,6 +308,11 @@ final class PrepareRunner {
                 if (pgid == 0 && line.startsWith("XBA_PGID ")) {
                     try {
                         pgid = Integer.parseInt(line.substring(9).trim());
+                        try (FileOutputStream o = new FileOutputStream(pgidFile())) {   // for killOrphans
+                            o.write(String.valueOf(pgid).getBytes(StandardCharsets.US_ASCII));
+                        } catch (IOException e) {
+                            Log.w(TAG, "prepare: cannot write " + pgidFile() + ": " + e);
+                        }
                     } catch (NumberFormatException ignored) {
                     }
                     if (cancelRequested)

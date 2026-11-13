@@ -237,6 +237,15 @@ final class PrepareProtocol {
         /** The jobs of the current attempt and the attempt number (1, then 2 after a kill). */
         int jobs, attempt = 1;
         String titleId = "";
+        /**
+         * A background Prepare (XBA-129: a self-healing round after a run that ended well): the title's valid pack
+         * still plays while it runs, and nothing starts by itself when it is done.
+         */
+        boolean background;
+        /** Times the Prepare was started again after its process died (START_REDELIVER_INTENT, XBA-128). */
+        int resumes;
+        /** The clang -O level of this Prepare (XBA-128: 1 for a quick first build, 2 otherwise). */
+        int opt;
 
         boolean running() {
             return RUNNING.equals(state);
@@ -263,6 +272,12 @@ final class PrepareProtocol {
                 o.put("jobs", jobs);
                 o.put("attempt", attempt);
                 o.put("title_id", titleId);
+                if (background)
+                    o.put("background", true);
+                if (resumes > 0)
+                    o.put("resumes", resumes);
+                if (opt > 0)
+                    o.put("opt", opt);
             } catch (JSONException e) {
                 throw new IllegalStateException(e);
             }
@@ -285,6 +300,9 @@ final class PrepareProtocol {
             s.jobs = o.optInt("jobs", 0);
             s.attempt = o.optInt("attempt", 1);
             s.titleId = o.optString("title_id", "");
+            s.background = o.optBoolean("background", false);
+            s.resumes = o.optInt("resumes", 0);
+            s.opt = o.optInt("opt", 0);
             return s;
         }
 
@@ -328,6 +346,10 @@ final class PrepareProtocol {
     /** One waiting Prepare: what ACTION_START carried. */
     static final class Job {
         String titleId = "", gameDir = "", title = "";
+        /** A background Prepare (Status.background, XBA-129). */
+        boolean background;
+        /** clang -O level (XBA-128); 0: the service's default. */
+        int opt;
 
         Job() {}
 
@@ -390,6 +412,10 @@ final class PrepareProtocol {
                     x.put("title_id", j.titleId);
                     x.put("game_dir", j.gameDir);
                     x.put("title", j.title);
+                    if (j.background)
+                        x.put("background", true);
+                    if (j.opt > 0)
+                        x.put("opt", j.opt);
                     a.put(x);
                 }
                 o.put("jobs", a);
@@ -404,8 +430,12 @@ final class PrepareProtocol {
             org.json.JSONArray a = o.optJSONArray("jobs");
             for (int i = 0; a != null && i < a.length(); i++) {
                 JSONObject x = a.optJSONObject(i);
-                if (x != null)
-                    q.add(new Job(x.optString("title_id", ""), x.optString("game_dir", ""), x.optString("title", "")));
+                if (x == null)
+                    continue;
+                Job j = new Job(x.optString("title_id", ""), x.optString("game_dir", ""), x.optString("title", ""));
+                j.background = x.optBoolean("background", false);
+                j.opt = x.optInt("opt", 0);
+                q.add(j);
             }
             return q;
         }

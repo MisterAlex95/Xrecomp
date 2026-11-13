@@ -353,21 +353,24 @@ public class CheckDriverTest {
         assertEquals(2, d.s.current().bootAttempts);
     }
 
+    /** XBA-128: hot, the Prepare is not cancelled (it drops its own jobs); the check pauses, then goes on. */
     @Test
-    public void severeThermalStatusCancelsThePrepareAndResumesWhenCool() throws Exception {
+    public void severeThermalStatusPausesWithoutCancellingThePrepare() throws Exception {
         CheckDriver d = driver(title(A, "Sample Racer", "/games/a"));
         d.tick();
         p.thermal = CheckDriver.THERMAL_SEVERE;
         d.tick();
-        assertTrue(p.log.contains("cancel " + A));
+        assertFalse(p.log.contains("cancel " + A));
         assertEquals(LibraryCheck.PAUSED, d.s.state);
         assertEquals(LibraryCheck.HOT, d.s.reason);
+        assertEquals(LibraryCheck.PREPARING, d.s.current().phase);
         run(d, 60_000);
         assertEquals(1, p.log.stream().filter(l -> l.startsWith("prepare")).count());
         p.thermal = CheckDriver.THERMAL_MODERATE;
         run(d, 1000);
-        assertEquals(2, p.log.stream().filter(l -> l.startsWith("prepare")).count());
-        assertEquals(1, d.s.current().prepareAttempts);   // a pause is not a failed attempt
+        assertEquals(LibraryCheck.RUNNING, d.s.state);
+        assertEquals(1, p.log.stream().filter(l -> l.startsWith("prepare")).count());
+        assertEquals(1, d.s.current().prepareAttempts);
     }
 
     @Test
