@@ -82,6 +82,8 @@ static int s_cull = 1;             /* RECOMP_GPU_CULL (default on) */
 static int s_cpu_writes = 1;       /* RECOMP_GPU_CPU_WRITES (default on): rt_cpu_check */
 static float s_point_max = 1.0f;   /* GL_ALIASED_POINT_SIZE_RANGE's top */
 static float s_line_max = 1.0f;    /* GL_ALIASED_LINE_WIDTH_RANGE's top (GLES only) */
+static int s_mips = 1;             /* RECOMP_GPU_MIPS (default on): every mip level */
+static float s_lodb[4];            /* each stage's LOD bias this batch (u_lodb) */
 static uint32_t s_frame;
 static GLuint s_vao, s_vbo, s_vs;
 
@@ -580,6 +582,7 @@ static int ensure_init(void)
         glEnable(GL_PROGRAM_POINT_SIZE);
 #endif
     }
+    s_mips = !(getenv("RECOMP_GPU_MIPS") && !env_on("RECOMP_GPU_MIPS"));
     s_verbose = env_on("RECOMP_GPU_VERBOSE");
     s_cpu_writes = !(getenv("RECOMP_GPU_CPU_WRITES") && !env_on("RECOMP_GPU_CPU_WRITES"));
     s_readback_layout_switch = env_on("RECOMP_GPU_RT_RELAYOUT_READBACK");
@@ -1916,6 +1919,7 @@ static GlRT *rt_for_texture(const Nv2aTexture *t, uint32_t cube, GLint *alpha)
 
 typedef struct {
     uint32_t offset, color, width, height, pitch, palette, cube;   /* key */
+    uint32_t levels;                                               /* key */
     uint32_t bytes;
     uint64_t hash;
     GLuint tex;
@@ -1932,6 +1936,12 @@ typedef struct {
     uint32_t changed;
     int changes;
     uint32_t serial;
+    /* Mip chain (XBA-120): levels uploaded; GL_TEXTURE_MIN_FILTER and the
+     * LOD clamps as last set (samp_set resets MIN with MAG: min_seen is the
+     * samp.filter it last saw). */
+    uint32_t nlev;
+    GLint min_cur, min_seen;
+    float lod_lo, lod_hi;
 } GlTex;
 
 #define NV_GL_MAX_TEX 512           /* power of two */
@@ -1965,8 +1975,9 @@ static uint64_t tex_hash(const Nv2aTexture *t, uint32_t bytes)
     return h;
 }
 
-/* Upload one 2D image (a texture, or one cube face at `target`). */
-static int tex_upload_image(GLenum target, const Nv2aTexture *t)
+/* Upload one 2D image (a texture, or one cube face at `target`) as mip
+ * level `level`. */
+static int tex_upload_image(GLenum target, GLint level, const Nv2aTexture *t)
 {
     uint32_t bb = d3d8_format_dxt_block_bytes(t->color), n, i;
     uint32_t *argb;
@@ -1977,7 +1988,7 @@ static int tex_upload_image(GLenum target, const Nv2aTexture *t)
                  : t->color == 0x0E ? GL_COMPRESSED_RGBA_S3TC_DXT3_EXT
                  : GL_COMPRESSED_RGBA_S3TC_DXT5_EXT;
         uint32_t size = ((t->width + 3) / 4) * ((t->height + 3) / 4) * bb;
-        glCompressedTexImage2D(target, 0, f, (GLsizei)t->width, (GLsizei)t->height,
+        glCompressedTexImage2D(target, level, f, (GLsizei)t->width, (GLsizei)t->height,
                                0, (GLsizei)size, guest(t->offset));
         s_st.upload_kb += size >> 10;
         return 1;
@@ -1993,17 +2004,41 @@ static int tex_upload_image(GLenum target, const Nv2aTexture *t)
     }
     for (i = 0; i < n; i++)
         argb_to_rgba(argb[i], buf + (size_t)i * 4);
-    glTexImage2D(target, 0, GL_RGBA8, (GLsizei)t->width, (GLsizei)t->height, 0,
+    glTexImage2D(target, level, GL_RGBA8, (GLsizei)t->width, (GLsizei)t->height, 0,
                  GL_RGBA, GL_UNSIGNED_BYTE, buf);
     s_st.upload_kb += n >> 8;
     free(buf);
     return 1;
 }
 
+/* Every level of one face (or of a 2D texture) at `target`, as many as
+ * RECOMP_GPU_MIPS allows. Returns the levels uploaded, 0 on failure. */
+static uint32_t tex_upload_levels(GLenum target, const Nv2aTexture *face)
+{
+    uint32_t n = s_mips && face->levels > 1 ? face->levels : 1, lv;
+    Nv2aTexture one;
+
+    for (lv = 0; lv < n; lv++) {
+        if (!nv2a_backend_texture_level(face, lv, &one)) {
+            if (!lv)
+                one = *face;            /* a back end's own struct: level 0 as is */
+            else
+                break;
+        }
+        one.cube = 0;
+        if (!tex_upload_image(target, (GLint)lv, &one))
+            return lv ? lv : 0;
+        if (one.width == 1 && one.height == 1)
+            return lv + 1;
+    }
+    return lv;
+}
+
 static int tex_upload(GlTex *e, const Nv2aTexture *t)
 {
     GLenum target = e->cube ? GL_TEXTURE_CUBE_MAP : GL_TEXTURE_2D;
     Nv2aTexture one = *t;
+    uint32_t nlev = 0;
     int ok = 1, f;
 
     if (!e->tex)
@@ -2013,13 +2048,20 @@ static int tex_upload(GlTex *e, const Nv2aTexture *t)
     if (e->cube) {
         uint32_t stride = e->bytes / 6;
         for (f = 0; f < 6 && ok; f++) {
+            uint32_t n;
             one.offset = t->offset + (uint32_t)f * stride;
-            ok = tex_upload_image(GL_TEXTURE_CUBE_MAP_POSITIVE_X + (GLenum)f, &one);
+            n = tex_upload_levels(GL_TEXTURE_CUBE_MAP_POSITIVE_X + (GLenum)f, &one);
+            ok = n != 0;
+            nlev = f ? (n < nlev ? n : nlev) : n;
         }
     } else {
-        ok = tex_upload_image(GL_TEXTURE_2D, &one);   /* a cube seen as 2D: face 0 */
+        nlev = tex_upload_levels(GL_TEXTURE_2D, &one);   /* a cube seen as 2D: face 0 */
+        ok = nlev != 0;
     }
-    glTexParameteri(target, GL_TEXTURE_MAX_LEVEL, 0);
+    e->nlev = nlev ? nlev : 1;
+    glTexParameteri(target, GL_TEXTURE_MAX_LEVEL, (GLint)e->nlev - 1);
+    e->min_cur = e->min_seen = -1;
+    e->lod_lo = e->lod_hi = -1.0f;
     e->samp.wrap_s = e->samp.wrap_t = e->samp.filter = e->samp.swz_a = -1;
     s_st.uploads++;
     return ok;
@@ -2072,7 +2114,7 @@ static GlTex *tex_get(const Nv2aTexture *t, uint32_t cube, int unit)
         }
         if (c->offset == t->offset && c->color == t->color && c->width == t->width
             && c->height == t->height && c->pitch == t->pitch
-            && c->palette == t->palette && c->cube == cube) {
+            && c->palette == t->palette && c->cube == cube && c->levels == t->levels) {
             e = c;
             break;
         }
@@ -2136,6 +2178,7 @@ static GlTex *tex_get(const Nv2aTexture *t, uint32_t cube, int unit)
     e->offset = t->offset; e->color = t->color; e->width = t->width;
     e->height = t->height; e->pitch = t->pitch; e->palette = t->palette;
     e->cube = cube;
+    e->levels = t->levels;
     e->bytes = bytes;
     readback_overlapping(t->offset, bytes);
     {
@@ -2206,15 +2249,60 @@ static GLint tex_filter(const Nv2aTexture *t, uint32_t shade)
     return lin ? GL_LINEAR : GL_NEAREST;
 }
 
+/* The minifying filter with a mip chain (XBA-120): SET_TEXTURE_FILTER's
+ * MIN (xemu: 3 BOX_NEARESTLOD, 4 TENT_NEARESTLOD, 5 BOX_TENT_LOD, 6
+ * TENT_TENT_LOD) picks the level filter; the texel filter stays the one
+ * tex_filter chose (the CPU path's rule). Without levels, or for the LOD0
+ * modes, the base filter. */
+static GLint tex_min_filter(const Nv2aTexture *t, uint32_t nlev, GLint base)
+{
+    uint32_t min = (t->filter >> 16) & 0xFF;
+    int lin = base == GL_LINEAR;
+
+    if (nlev < 2 || min < 3 || min > 6)
+        return base;
+    if (min == 3 || min == 4)
+        return lin ? GL_LINEAR_MIPMAP_NEAREST : GL_NEAREST_MIPMAP_NEAREST;
+    return lin ? GL_LINEAR_MIPMAP_LINEAR : GL_NEAREST_MIPMAP_LINEAR;
+}
+
+/* SET_TEXTURE_FILTER's MIPMAP_LOD_BIAS: signed 5.8 fixed point. */
+static float tex_lod_bias(const Nv2aTexture *t)
+{
+    int32_t b = (int32_t)(t->filter << 19) >> 19;
+    return (float)b / 256.0f;
+}
+
 static void tex_bind(GlTex *e, const Nv2aTexture *t, int unit, uint32_t shade)
 {
     GLenum target = e->cube ? GL_TEXTURE_CUBE_MAP : GL_TEXTURE_2D;
+    GLint f = tex_filter(t, shade), minf = tex_min_filter(t, e->nlev, f);
 
     sh_active((int)unit);
     sh_tex(target, e->tex);
-    samp_set(target, &e->samp, tex_filter(t, shade),
+    samp_set(target, &e->samp, f,
              wrap_mode(t->addr_u, (int)t->border_color),
              wrap_mode(t->addr_v, (int)t->border_color), t->border, GL_ALPHA);
+    if (e->min_seen != e->samp.filter) {    /* samp_set set MIN to f */
+        e->min_seen = e->samp.filter;
+        e->min_cur = e->samp.filter;
+    }
+    if (e->min_cur != minf) {
+        glTexParameteri(target, GL_TEXTURE_MIN_FILTER, minf);
+        e->min_cur = minf;
+    }
+    if (e->nlev > 1) {
+        /* SET_TEXTURE_CONTROL0's LOD clamps (4.8 fixed point, xemu). */
+        float lo = (float)((t->control0 >> 18) & 0xFFF) / 256.0f;
+        float hi = (float)((t->control0 >> 6) & 0xFFF) / 256.0f;
+        if (lo != e->lod_lo || hi != e->lod_hi) {
+            glTexParameterf(target, GL_TEXTURE_MIN_LOD, lo);
+            glTexParameterf(target, GL_TEXTURE_MAX_LOD, hi);
+            e->lod_lo = lo;
+            e->lod_hi = hi;
+        }
+        s_lodb[unit] = tex_lod_bias(t);
+    }
     s_bound[unit] = e;
 }
 
@@ -2228,6 +2316,7 @@ typedef struct {
     GLint u_vp, u_tscale, u_c0, u_c1, u_fc0, u_fc1, u_fogc, u_aref;
     GLint u_bm, u_bso;              /* -1 without a bump-env stage */
     GLint u_psize;                  /* the vertex shader's point size */
+    GLint u_lodb;                   /* each stage's LOD bias (vec4) */
     /* With a translated vertex program (vsh_hash != 0): its uniforms, the
      * location of each c[i] (-1 where the compiler dropped it), and the
      * constant serial this program's copy of c[] is synced to. */
@@ -2588,6 +2677,7 @@ static void prog_setup(GlProg *p, int program)
     p->u_bm = glGetUniformLocation(p->prog, "u_bm");
     p->u_bso = glGetUniformLocation(p->prog, "u_bso");
     p->u_psize = glGetUniformLocation(p->prog, "u_psize");
+    p->u_lodb = glGetUniformLocation(p->prog, "u_lodb");
     if (program) {
         p->u_xf = glGetUniformLocation(p->prog, "u_xf");
         p->u_fog = glGetUniformLocation(p->prog, "u_fog");
@@ -3143,6 +3233,7 @@ static void bind_stage_textures(const Nv2aPixelState *ps, uint32_t kind[4], floa
 {
     uint32_t st;
 
+    memset(s_lodb, 0, sizeof s_lodb);
     for (st = 0; st < 4; st++) {
         const Nv2aTexStage *ts = &ps->stage[st];
         uint32_t mode = ts->mode, cube = 0;
@@ -3232,6 +3323,8 @@ static void set_pixel_uniforms(const GlProg *p, const Nv2aPixelState *ps,
     float c0[32], c1[32], v[4];
 
     glUniform2fv(p->u_tscale, 4, tscale);
+    if (p->u_lodb >= 0)
+        glUniform4fv(p->u_lodb, 1, s_lodb);
     if (ps->shade == NV2A_SHADE_COMBINERS) {
         int i;
         for (i = 0; i < 8; i++) {

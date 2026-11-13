@@ -325,15 +325,15 @@ static void emit_fetch(Sb *b, const Nv2aGlShaderKey *k, uint32_t st)
             return;
         }
         sb(b, "  float q%u = v_t%u.w != 0.0 ? v_t%u.w : 1.0;\n", st, st, st);
-        sb(b, "  vec4 T%u = texture(u_t%u, v_t%u.xy / q%u * u_tscale[%u]);\n",
-           st, st, st, st, st);
+        sb(b, "  vec4 T%u = texture(u_t%u, v_t%u.xy / q%u * u_tscale[%u], u_lodb[%u]);\n",
+           st, st, st, st, st, st);
         return;
     case 3:                                       /* CUBEMAP */
         if (kind == NV2A_GL_TEX_CUBE)
-            sb(b, "  vec4 T%u = texture(u_t%u, v_t%u.xyz);\n", st, st, st);
+            sb(b, "  vec4 T%u = texture(u_t%u, v_t%u.xyz, u_lodb[%u]);\n", st, st, st, st);
         else if (kind == NV2A_GL_TEX_2D)          /* not a cube: plain 2D, no divide */
-            sb(b, "  vec4 T%u = texture(u_t%u, v_t%u.xy * u_tscale[%u]);\n",
-               st, st, st, st);
+            sb(b, "  vec4 T%u = texture(u_t%u, v_t%u.xy * u_tscale[%u], u_lodb[%u]);\n",
+               st, st, st, st, st);
         else
             sb(b, "  vec4 T%u = vec4(1.0);\n", st);
         return;
@@ -370,8 +370,8 @@ static void emit_fetch(Sb *b, const Nv2aGlShaderKey *k, uint32_t st)
             return;
         }
         sb(b, "  vec2 D%u = mat2(u_bm[%u].xy, u_bm[%u].zw) * B%u.xy;\n", st, st, st, st);
-        sb(b, "  vec4 T%u = texture(u_t%u, (v_t%u.xy + D%u) * u_tscale[%u]);\n",
-           st, st, st, st, st);
+        sb(b, "  vec4 T%u = texture(u_t%u, (v_t%u.xy + D%u) * u_tscale[%u], u_lodb[%u]);\n",
+           st, st, st, st, st, st);
         if (mode == 7)
             sb(b, "  T%u *= u_bso[%u].x * B%u.z + u_bso[%u].y;\n", st, st, st, st);
         return;
@@ -452,6 +452,7 @@ size_t nv2a_gl_fragment_body(const Nv2aGlShaderKey *k, char *buf, size_t cap)
            "uniform vec4 u_fc0;\nuniform vec4 u_fc1;\nuniform vec4 u_fogc;\n"
            "uniform float u_aref;\n"
            "uniform vec4 u_bm[4];\nuniform vec2 u_bso[4];\n"
+           "uniform vec4 u_lodb;\n"
            "layout(location = 0) out vec4 o_color;\n");
     /* Point sprites: every stage's coordinates are the position inside the
      * point, (0,0) at its top left -- gl_PointCoord's t runs from the top in
@@ -489,13 +490,13 @@ size_t nv2a_gl_fragment_body(const Nv2aGlShaderKey *k, char *buf, size_t cap)
     } else if (k->shade == NV2A_SHADE_MODULATE) {
         /* xf_rows without combiners: stage 0 texel * diffuse. */
         if (k->tex_kind[0] != NV2A_GL_TEX_NONE)
-            sb(&b, "  o = texture(u_t0, v_t0.xy * u_tscale[0]) * clamp(v_d0, 0.0, 1.0);\n");
+            sb(&b, "  o = texture(u_t0, v_t0.xy * u_tscale[0], u_lodb[0]) * clamp(v_d0, 0.0, 1.0);\n");
         else
             sb(&b, "  o = clamp(v_d0, 0.0, 1.0);\n");
     } else {
         /* raster_triangle: the texel as it is, else the flat colour. */
         if (k->tex_kind[0] != NV2A_GL_TEX_NONE)
-            sb(&b, "  o = texture(u_t0, v_t0.xy * u_tscale[0]);\n");
+            sb(&b, "  o = texture(u_t0, v_t0.xy * u_tscale[0], u_lodb[0]);\n");
         else
             sb(&b, "  o = clamp(v_d0, 0.0, 1.0);\n");
     }

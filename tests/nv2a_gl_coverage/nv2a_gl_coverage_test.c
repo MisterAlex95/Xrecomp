@@ -16,7 +16,13 @@
  *      point's top left quarter;
  *   5. vertex-program points and lines (the GLSL vertex program path);
  *   6. none of it is counted as unsupported; the CPU rasteriser draws no
- *      point and counts one. */
+ *      point and counts one.
+ *
+ * Mip chains:
+ *   7. a 16x16 texture of five one-colour levels over 4x4 pixels: level 2
+ *      with BOX_NEARESTLOD, level 3 with a LOD bias of +1, level 1 with the
+ *      LOD clamped to 1, half level 2 half level 3 trilinear at LOD 2.5,
+ *      level 0 with a LOD0 filter and with RECOMP_GPU_MIPS=0. */
 #include "../../src/gpu/nv2a_gl.c"
 #include "nv2a_coverage.h"
 
@@ -277,6 +283,72 @@ int main(void)
         CHECK(count(0x00FFFFu, 9, 49, 11, 51) == 4 && count(0x00FFFFu, 0, 0, W, H) == 4);
         CHECK(count(0xFF00FFu, 14, 30, 52, 31) == 38);
         m(0x1E94, 0);
+    }
+
+    /* 7. A mip chain: a 16x16 swizzled A8R8G8B8 texture with 5 levels, each
+     * level one colour, drawn over 4x4 pixels (LOD 2). */
+    {
+        static const uint32_t col[5] = { 0xFFFF0000u, 0xFF00FF00u, 0xFF0000FFu,
+                                         0xFFFFFF00u, 0xFFFFFFFFu };
+        uint32_t lv, off = 0, sz = 16, i, c[7];
+        for (lv = 0; lv < 5; lv++, sz >>= 1)
+            for (i = 0; i < sz * sz; i++, off += 4)
+                put32(TEX + off, col[lv]);
+        vtx(0, nx(8), ny(8), 0.5f, 0xFFFFFFFFu, 0, 0);
+        vtx(1, nx(12), ny(8), 0.5f, 0xFFFFFFFFu, 1, 0);
+        vtx(2, nx(12), ny(12), 0.5f, 0xFFFFFFFFu, 1, 1);
+        vtx(3, nx(8), ny(12), 0.5f, 0xFFFFFFFFu, 0, 1);
+        m(0x1B00, TEX);
+        m(0x1B04, (0x06u << 8) | (2u << 4) | (5u << 16) | (4u << 20) | (4u << 24));
+        m(0x1B08, 0x0303);
+        m(0x1B0C, (1u << 30) | ((4u << 8) << 6));          /* LOD 0 .. 4 */
+        m(0x1B14, (3u << 16) | (1u << 24));                 /* BOX_NEARESTLOD */
+        clear_black();
+        draw(8, 0, 4);                                      /* QUADS */
+        readback();
+        c[0] = px(10, 10);
+        m(0x1B14, (3u << 16) | (1u << 24) | 256u);          /* LOD bias +1 */
+        draw(8, 0, 4);
+        readback();
+        c[1] = px(10, 10);
+        m(0x1B14, (3u << 16) | (1u << 24));
+        m(0x1B0C, (1u << 30) | ((1u << 8) << 6));          /* LOD clamped to 0 .. 1 */
+        draw(8, 0, 4);
+        readback();
+        c[2] = px(10, 10);
+        m(0x1B0C, (1u << 30) | ((4u << 8) << 6));
+        m(0x1B14, (6u << 16) | (2u << 24));                 /* TENT_TENT_LOD: trilinear */
+        draw(8, 0, 4);
+        readback();
+        c[3] = px(10, 10);
+        m(0x1B14, (6u << 16) | (2u << 24) | 128u);          /* trilinear, LOD 2.5 */
+        draw(8, 0, 4);
+        readback();
+        c[6] = px(10, 10);
+        m(0x1B14, (1u << 16) | (1u << 24));                 /* BOX_LOD0 */
+        draw(8, 0, 4);
+        readback();
+        c[4] = px(10, 10);
+        /* RECOMP_GPU_MIPS=0: level 0 whatever the filter. */
+        s_mips = 0;
+        tex_drop_all();
+        m(0x1B14, (3u << 16) | (1u << 24));
+        draw(8, 0, 4);
+        readback();
+        c[5] = px(10, 10);
+        s_mips = 1;
+        tex_drop_all();
+        printf("7. mip chain: LOD 2 %06X, bias +1 %06X, clamp 1 %06X, trilinear %06X,"
+               " LOD0 filter %06X, mips off %06X; trilinear at LOD 2.5 %06X\n",
+               c[0], c[1], c[2], c[3], c[4], c[5], c[6]);
+        CHECK(c[0] == 0x0000FFu && c[1] == 0xFFFF00u && c[2] == 0x00FF00u);
+        CHECK(c[3] == 0x0000FFu);               /* exactly LOD 2: level 2 alone */
+        CHECK(c[4] == 0xFF0000u && c[5] == 0xFF0000u);
+        /* Half blue (level 2), half yellow (level 3). */
+        CHECK((c[6] >> 16) >= 0x78 && (c[6] >> 16) <= 0x88 && ((c[6] >> 8) & 0xFF) >= 0x78
+              && ((c[6] >> 8) & 0xFF) <= 0x88 && (c[6] & 0xFF) >= 0x78 && (c[6] & 0xFF) <= 0x88);
+        m(0x1B0C, 0);
+        m(0x1B00, 0);
     }
 
     /* 6. Nothing counted as unsupported; the CPU rasteriser draws none and

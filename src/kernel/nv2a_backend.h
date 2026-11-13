@@ -91,6 +91,11 @@ typedef struct {
      * nv2a_backend_texture_bytes() / 6 apart). Zero in a struct a back end
      * builds itself means: no palette, no border, not a cube. */
     uint32_t palette, border, border_color, cube;
+    /* SET_TEXTURE_CONTROL0 as sent: MIN_LOD_CLAMP bits 18-29 and
+     * MAX_LOD_CLAMP bits 6-17, 4.8 fixed point (xemu). The LOD bias is in
+     * `filter` bits 0-12, signed 5.8. 0 in a struct a back end builds
+     * itself: level 0 only. */
+    uint32_t control0;
 } Nv2aTexture;
 
 typedef struct {
@@ -433,6 +438,13 @@ void nv2a_pb_exec_set_screen_dump(int (*dump)(const char *path));
  * Handles every format the executor can sample (swizzled, linear, DXT).
  * Returns 0 if the format is not supported. */
 int nv2a_backend_decode_texture(const Nv2aTexture *tex, uint32_t *argb_out);
+
+/* Mip level `level` of a swizzled or DXT texture as a texture of its own:
+ * *out is *tex with the level's offset, width and height (halved per level,
+ * at least 1) and one level. NV2A levels follow one another, each in the
+ * base level's layout (its own Morton order or blocks). Returns 0 past the
+ * texture's levels or for a linear texture's levels past 0. */
+int nv2a_backend_texture_level(const Nv2aTexture *tex, uint32_t level, Nv2aTexture *out);
 
 /* Bytes of guest memory a texture occupies: every mip level it declares
  * (rounded to the NV2A's 128-byte face alignment) times six for a cube map,

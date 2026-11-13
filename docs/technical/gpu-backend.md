@@ -735,10 +735,26 @@ the old policy (every frame and every unit switch, no target rule). DXT
 goes up compressed when S3TC exists (`RECOMP_GPU_S3TC=0` turns it off);
 every other format is decoded once by the executor's own sampler through
 `nv2a_backend_decode_texture`, so the CPU and GPU paths cannot disagree on a
-format. Level 0 only, like the CPU rasteriser. Filtering follows the CPU
+format. Filtering follows the CPU
 rasteriser's choice: combiner batches honour the title's TENT filters,
 the two simpler colour rules take the nearest texel unless
 `RECOMP_TEX_BILINEAR`/`RECOMP_TEX_ANISO`.
+
+**Mip chains (XBA-120).** Every level a swizzled or DXT texture declares
+(`MIPMAP_LEVELS`) goes up, down to 1x1: NV2A levels follow one another,
+each in the base level's own layout (`nv2a_backend_texture_level` gives a
+level's offset and size; the cache key includes the level count), cube
+faces each with their chain. The minifying filter takes the title's level
+mode from `SET_TEXTURE_FILTER` MIN (xemu: 3 BOX_NEARESTLOD, 4
+TENT_NEARESTLOD, 5 BOX_TENT_LOD, 6 TENT_TENT_LOD -- trilinear), the texel
+filter staying the one the rule above chose; the LOD0 modes sample level 0.
+`SET_TEXTURE_CONTROL0`'s LOD clamps (MIN bits 18-29, MAX bits 6-17, 4.8
+fixed point as xemu reads them) go to `GL_TEXTURE_MIN_LOD`/`MAX_LOD`; the
+LOD bias (`SET_TEXTURE_FILTER` bits 0-12, signed 5.8) is a shader uniform
+(`u_lodb`, the `texture()` bias argument: GLES has no
+`GL_TEXTURE_LOD_BIAS`). Linear (LU_IMAGE) textures have no levels.
+`RECOMP_GPU_MIPS=0` keeps level 0 only. The CPU rasteriser still samples
+level 0 (minified textures shimmer there); that is not counted as a gap.
 
 **Pixels.** `nv2a_gl_shader.c` writes a fragment shader per pipeline key: the
 combiner words, stage count and flags, stage-program modes, which stages hold
@@ -1045,8 +1061,8 @@ The original list (the interpreter was 41 % of the in-world executor):
 7. Done (XBA-119): `SET_CLEAR_RECT` for swizzled surfaces (the executor
    hands a back end the clear rectangle as the clip, as the CPU path clears
    it).
-8. Mip chains (upload every level, GL mip filters), which the CPU path never
-   had either.
+8. Done on the GPU (XBA-120): mip chains ("Mip chains" above). The CPU
+   path still samples level 0.
 
 ### 7e: presenting from the GPU
 

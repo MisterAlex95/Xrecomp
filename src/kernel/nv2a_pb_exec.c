@@ -280,6 +280,7 @@ typedef struct {
     uint32_t palette;                   /* guest address of the CLUT, P8 */
     uint32_t levels;                    /* mip levels, from FORMAT       */
     uint32_t filter;                    /* SET_TEXTURE_FILTER            */
+    uint32_t control0;                  /* SET_TEXTURE_CONTROL0: LOD clamps */
     uint32_t border;                    /* SET_TEXTURE_BORDER_COLOR      */
     int      border_color;              /* FORMAT: BORDER reads `border` */
     int      cube;                      /* FORMAT: six faces, not one    */
@@ -1215,7 +1216,11 @@ static void texture_to_backend(const Texture *t, Nv2aTexture *o)
     o->color  = t->color;
     o->addr_u = t->addr_u;
     o->addr_v = t->addr_v;
-    o->levels = t->pitch ? 1 : t->levels;
+    /* By the format, not by a pitch: CONTROL1 is not sent again for a
+     * swizzled texture, so a stale pitch from an earlier linear one took
+     * every later texture's levels away. */
+    o->levels = tex_size_from_format(t->color) ? (t->levels ? t->levels : 1) : 1;
+    o->control0 = t->control0;
     o->filter = t->filter;
     o->palette = t->palette;
     o->border = t->border;
@@ -1262,6 +1267,7 @@ static void current_render_state(Nv2aRenderState *r)
 
 static int sample_texture(uint32_t u, uint32_t v, uint32_t *argb);
 static uint32_t tex_face_stride(const Texture *t);
+static uint32_t tex_texel_bytes(uint32_t fmt);
 
 uint32_t nv2a_backend_texture_bytes(const Nv2aTexture *tex)
 {
@@ -1276,6 +1282,27 @@ uint32_t nv2a_backend_texture_bytes(const Nv2aTexture *tex)
     if (!tex_size_from_format(t.color))
         return t.pitch * t.height;
     return tex_face_stride(&t) * (tex->cube ? 6u : 1u);
+}
+
+int nv2a_backend_texture_level(const Nv2aTexture *tex, uint32_t level, Nv2aTexture *out)
+{
+    uint32_t lv, w = tex->width, h = tex->height, off = 0;
+    uint32_t block = d3d8_format_dxt_block_bytes(tex->color);
+
+    if (level >= (tex->levels ? tex->levels : 1) || (level && !tex_size_from_format(tex->color)))
+        return 0;
+    for (lv = 0; lv < level; lv++) {
+        off += block ? ((w + 3) / 4) * ((h + 3) / 4) * block
+                     : w * h * tex_texel_bytes(tex->color);
+        w = w > 1 ? w >> 1 : 1;
+        h = h > 1 ? h >> 1 : 1;
+    }
+    *out = *tex;
+    out->offset = tex->offset + off;
+    out->width = w;
+    out->height = h;
+    out->levels = 1;
+    return 1;
 }
 
 int nv2a_backend_decode_texture(const Nv2aTexture *tex, uint32_t *argb_out)
@@ -5930,6 +5957,9 @@ static void tex_stage_method(uint32_t method, uint32_t param)
         break;
     case NV097_SET_TEXTURE_CONTROL1:
         t->pitch = param >> 16;          /* linear formats only */
+        break;
+    case 0x1B0C:                                  /* SET_TEXTURE_CONTROL0 */
+        t->control0 = param;
         break;
     case NV097_SET_TEXTURE_IMAGE_RECT:
         t->width  = param >> 16;

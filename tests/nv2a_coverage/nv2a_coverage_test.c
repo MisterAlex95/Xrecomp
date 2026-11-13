@@ -8,6 +8,7 @@
  *   1. the format table (nv2a_coverage.c) says "decoded" for exactly the
  *      formats nv2a_backend_decode_texture reads, every code 0x00-0x41;
  *   2. method names from xemu's list, arrays and light blocks included;
+ *      mip level offsets (each level after the last, in its own layout);
  *   3. a batch of points, a texture format nothing decodes, a volume
  *      texture, logic op, a dot-product stage mode and fixed-function texgen
  *      are each counted once per batch under their names, and reach the
@@ -158,6 +159,33 @@ static void check_method_names(void)
     printf("2. method names: ok\n");
 }
 
+/* Mip levels (XBA-120): one after another, each in the base layout. */
+static void check_levels(void)
+{
+    Nv2aTexture t, l;
+    memset(&t, 0, sizeof t);
+    t.offset = 0x10000;
+    t.width = t.height = 16;
+    t.color = 0x06;                          /* SZ_A8R8G8B8 */
+    t.levels = 5;
+    CHECK(nv2a_backend_texture_level(&t, 2, &l) && l.offset == 0x10000 + 1024 + 256
+          && l.width == 4 && l.height == 4 && l.levels == 1);
+    CHECK(nv2a_backend_texture_level(&t, 4, &l) && l.width == 1 && l.offset == 0x10000 + 1360);
+    CHECK(!nv2a_backend_texture_level(&t, 5, &l));
+    t.color = 0x0C;                          /* DXT1: 8 bytes a 4x4 block */
+    t.width = 16; t.height = 8;
+    CHECK(nv2a_backend_texture_level(&t, 1, &l) && l.offset == 0x10000 + 64
+          && l.width == 8 && l.height == 4);
+    CHECK(nv2a_backend_texture_level(&t, 3, &l) && l.offset == 0x10000 + 64 + 16 + 8
+          && l.width == 2 && l.height == 1);
+    t.color = 0x12;                          /* linear: level 0 only */
+    t.pitch = 64;
+    CHECK(nv2a_backend_texture_level(&t, 0, &l) && !nv2a_backend_texture_level(&t, 1, &l));
+    t.color = 0x28; t.width = t.height = 4; t.levels = 2;   /* SZ_G8B8: 2 bytes */
+    CHECK(nv2a_backend_texture_level(&t, 1, &l) && l.offset == 0x10000 + 32);
+    printf("2b. mip levels: ok\n");
+}
+
 /* A fixed-function quad over a 64x64 surface (composite = viewport), 4 vertices
  * at 0x2000 (float3 position) with float2 texcoords at 0x2100. */
 static void setup_ffp(void)
@@ -214,6 +242,7 @@ int main(void)
 
     check_format_table();
     check_method_names();
+    check_levels();
 
     /* 3. Gaps, on the CPU rasteriser. */
     setup_ffp();
