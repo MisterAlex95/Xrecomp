@@ -592,7 +592,12 @@ int main(void)
 
     /* A host directory standing in for the disc, holding one file. */
     GetTempPathA(sizeof dir, dir);
-    strcat(dir, inl ? "xr_io_apc_inline" : "xr_io_apc");
+    /* One per process: ctest runs this file's three entries side by side
+     * (-j), and the default and RECOMP_APC_WAKE=0 entries shared one folder,
+     * so one's DeleteFileA at its end failed the other's reads now and then
+     * (a failed read queues no APC: "the APC runs inline" FAIL). */
+    snprintf(dir + strlen(dir), sizeof dir - strlen(dir), "%s_%lu", inl ? "xr_io_apc_inline" : "xr_io_apc",
+             (unsigned long)GetCurrentProcessId());
     CreateDirectoryA(dir, NULL);
     /* A forward slash, which Win32 takes as readily as a backslash. fopen is
      * the C library, not the shim, so nothing normalises a separator for it:
