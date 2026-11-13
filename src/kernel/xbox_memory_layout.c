@@ -93,8 +93,9 @@ static size_t g_span_size = 0;
  * every fixed-address window is carved out of it (layout_map_view,
  * layout_commit_at). See the span reservation in xbox_MemoryLayoutInit. */
 static int g_span_whole_window = 0;
-/* POSIX, RECOMP_EXT_VMA: the part of the span handed to guest_vmem, which
- * reserves (and releases) it itself. Not ours any more: see span_holds. */
+/* A part of the span handed over and no longer ours (span_holds). Nothing
+ * sets it since guest_vmem adopts its range in place (guest_vmem_adopt);
+ * kept so the release paths stay correct if a hand-over comes back. */
 static uintptr_t g_span_gap_lo = 0, g_span_gap_hi = 0;
 
 /* POSIX: is [addr, addr + size) part of the span reservation we still hold?
@@ -3572,6 +3573,9 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
             extern void xbox_path_set_title_id(uint32_t);
             xbox_path_set_title_id(*(const DWORD *)(xbe + cert_off + 8));
         }
+        /* The allowed game regions (+0xA0): the console's region (XBA-121). */
+        if (cert_off + 0xA4 <= xbe_size)
+            xbox_ConsoleSetTitleRegions(*(const DWORD *)(xbe + cert_off + 0xA0));
         int sections_short = 0;
         size_t total_bytes = 0;
 
@@ -4297,18 +4301,18 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
                 VirtualFree((LPVOID)host, 0, MEM_RELEASE);
             }
 #else
-            /* From here on the range is guest_vmem's: it reserves what the
-             * host leaves free there and releases that itself, and the span
-             * release at shutdown skips the whole range (span_holds), so
-             * nothing is unmapped twice. */
-            if (span_holds((void *)host, (size_t)ext)) {
-                VirtualFree((LPVOID)host, (SIZE_T)ext, MEM_RELEASE);
-                g_span_gap_lo = host;
-                g_span_gap_hi = host + (uintptr_t)ext;
-            }
+            /* The span holds the range: guest_vmem tracks it in place, with
+             * no release and no new reservation in between. It used to be
+             * released here and reserved again by guest_vmem at the same
+             * fixed address, and another thread could map into that gap
+             * (memory_regressions_ext_vma failed now and then). The span
+             * release at shutdown unmaps it with the rest. */
+            if (span_holds((void *)host, (size_t)ext))
+                guest_vmem_adopt(g_memory_offset, g_memory_size, mirror_top, (size_t)ext);
 #endif
         }
-        guest_vmem_init(g_memory_offset, g_memory_size, mirror_top);
+        if (!guest_vmem_active())
+            guest_vmem_init(g_memory_offset, g_memory_size, mirror_top);
     }
 
     /*

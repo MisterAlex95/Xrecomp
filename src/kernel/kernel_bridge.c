@@ -319,9 +319,10 @@ static void kernel_data_init(void)
      * this to convert ticks to time gets a division by zero if it is left 0. */
     BRIDGE_MEM32(XBOX_KERNEL_DATA_BASE + KDATA_TIME_INCREMENT) = 0x2710;
 
-    /* HalBootSMCVideoMode (ordinal 356) - SMC video mode word from boot. 0 is
-     * "no video mode reported", which titles treat as auto-detect. */
-    BRIDGE_MEM32(XBOX_KERNEL_DATA_BASE + KDATA_BOOT_SMC_VIDEO) = 0;
+    /* HalBootSMCVideoMode (ordinal 356) - the AV pack the kernel read from the
+     * SMC at boot: the one HalReadSMBusValue(SMC_CMD_AV_PACK) answers
+     * (XBOX_SMC_AV_PACK, the HDTV pack; XBA-121). 0 was the SCART pack. */
+    BRIDGE_MEM32(XBOX_KERNEL_DATA_BASE + KDATA_BOOT_SMC_VIDEO) = xbox_HalBootSMCVideoMode;
 
     /* IdexChannelObject is a structure, not an opaque pointer. Guest file-close
      * code walks DeviceQueue.DeviceListHead at +0x28. Host-backed synchronous
@@ -3793,8 +3794,8 @@ static void kernel_vblank_raise(void)
     }
 }
 
-/* Vblank N is due at t0 + N * 1000 / 60 ms: an absolute schedule, so the
- * rate is 60 Hz however coarse the timer thread's sleep. It used to be
+/* Vblank N is due at t0 + N * 1000 / 60 ms (50 for PAL): an absolute
+ * schedule, so the rate holds however coarse the timer thread's sleep. It used to be
  * "now + 16" checked on a 10 ms tick, which fired every 20 ms -- 50 Hz -- and
  * a title's frame limiter counts these. Kept in nanoseconds: whole
  * milliseconds put each vblank up to a millisecond off its edge, and a title
@@ -3805,26 +3806,30 @@ static void kernel_vblank_raise(void)
  * edge, 0 when vblanks are off. */
 #define VBLANK_RESTART_NS 100000000ull
 
-static uint64_t vblank_due(uint64_t t0_ns, uint64_t n)
+static uint64_t vblank_due(uint64_t t0_ns, uint64_t n, uint32_t hz)
 {
-    return t0_ns + n * 1000000000ull / 60u;
+    return t0_ns + n * 1000000000ull / hz;
 }
 
+/* The rate is the display's: 50 Hz once a title sets a PAL-I mode, else 60
+ * (xbox_AvRefreshHz, XBA-121); a change restarts the schedule. */
 static int kernel_vblank_tick_ns(uint64_t now_ns, uint64_t *next_due_ns)
 {
     static uint64_t t0_ns, count;
-    static int started;
+    static uint32_t hz;
+    uint32_t want_hz;
     uint64_t due;
 
     *next_due_ns = 0;
     if (kernel_vblank_mode() != XBOX_VBLANK_PACED)
         return 0;
-    if (!started) {
-        started = 1;
+    want_hz = (uint32_t)xbox_AvRefreshHz();
+    if (hz != want_hz) {
+        hz = want_hz;
         t0_ns = now_ns;
         count = 0;
     }
-    due = vblank_due(t0_ns, count);
+    due = vblank_due(t0_ns, count, hz);
     if (now_ns < due) {
         *next_due_ns = due;
         return 0;
@@ -3834,7 +3839,7 @@ static int kernel_vblank_tick_ns(uint64_t now_ns, uint64_t *next_due_ns)
         count = 0;
     }
     count++;
-    *next_due_ns = vblank_due(t0_ns, count);
+    *next_due_ns = vblank_due(t0_ns, count, hz);
     kernel_vblank_count(kernel_clock_ms());
     kernel_vblank_raise();
     return 1;
@@ -5087,6 +5092,13 @@ static void bridge_complete_file_io(uint32_t event_token, uint32_t apc_routine,
  * STATUS_USER_APC without waiting, as the real kernel does. A non-alertable or
  * kernel-mode wait leaves them queued.
  *
+ * "All" means both of the thread's user APC sources (XBA-102 x XBA-113): the
+ * file-I/O completions of this ring, then the APCs KeInsertQueueApc queued on
+ * its KTHREAD (kernel_ksync.c), each in its own order. On the console both
+ * are one FIFO; the two lists here have no common clock, so the ring goes
+ * first. Before, a wait answered by one source left the other for a later
+ * wait. bridge_apc_safe_point answers through the same helper.
+ *
  * Checked before the object, even one already signalled. The console tests the
  * object first, but there the request is still in flight when its thread
  * starts waiting and the completion's APC ends the wait; here the request
@@ -5099,19 +5111,38 @@ static void bridge_complete_file_io(uint32_t event_token, uint32_t apc_routine,
  *
  * The queue is copied out first: a completion routine may issue the next read,
  * which queues again, and that one belongs to the next wait. */
-static int bridge_run_io_apcs(uint32_t alertable, uint32_t wait_mode)
+static uint32_t thobj_current(void);
+static void bridge_apc_deliver(uint32_t apc);
+
+static int bridge_run_user_apcs(void)
 {
     uint32_t q[IO_APC_QUEUE][3];
-    int n = g_io_apc_count, i;
+    int n = g_io_apc_count, i, ran = 0;
 
-    if (!alertable || wait_mode != 1 /* UserMode */ || n == 0)
+    if (n) {
+        memcpy(q, g_io_apc, sizeof(q[0]) * n);
+        g_io_apc_count = 0;
+        for (i = 0; i < n; i++)
+            deliver_one_apc(q[i][0], q[i][1], q[i][2]);
+        ran = 1;
+    }
+    if (ks_apc_pending()) {
+        uint32_t kt = thobj_current(), apc;
+        while ((apc = ks_apc_take(kt, 1)) != 0) {
+            bridge_apc_deliver(apc);
+            ran = 1;
+        }
+    }
+    if (ran)
+        g_eax = 0x000000C0u;             /* STATUS_USER_APC */
+    return ran;
+}
+
+static int bridge_run_io_apcs(uint32_t alertable, uint32_t wait_mode)
+{
+    if (!alertable || wait_mode != 1 /* UserMode */)
         return 0;
-    memcpy(q, g_io_apc, sizeof(q[0]) * n);
-    g_io_apc_count = 0;
-    for (i = 0; i < n; i++)
-        deliver_one_apc(q[i][0], q[i][1], q[i][2]);
-    g_eax = 0x000000C0u;                 /* STATUS_USER_APC */
-    return 1;
+    return bridge_run_user_apcs();
 }
 
 /* -- XeLoadSection / XeUnloadSection (ordinals 327/328, 1 arg = 4 bytes) --
@@ -6940,13 +6971,11 @@ static void bridge_MmDeleteKernelStack(void)
 
 /* ── Xc* remaining crypto (ordinals 341-345, 347-351)
  *
- * Split into two kinds, both of which clear the memory-model bar:
- *  - the public-key / DES / ModExp entries are documented stubs that ignore
- *    their arguments (no Xbox Live, no on-console key derivation), so the
- *    pointers pass through without being dereferenced;
- *  - XcBlockCrypt/XcKeyTable/XcCryptService/XcUpdateCrypto are the same shape.
- * XcVerifyPKCS1Signature is worth singling out: it returns TRUE so that
- * signature checks succeed instead of rebooting the dashboard. */
+ * RSA, XcModExp and DES are real (kernel_crypto.c, which documents the buffer
+ * layouts): every pointer is a guest buffer, translated as is.
+ * XcVerifyPKCS1Signature checks for real but accepts a failure unless
+ * RECOMP_PKCS1_VERIFY=strict: what titles verify is signed with Microsoft's
+ * key, which is not here. */
 static void bridge_XcPKGetKeyLen(void)
 {
     g_eax = (uint32_t)xbox_XcPKGetKeyLen(XBOX_TO_NATIVE(STACK_ARG(0)));
@@ -7005,14 +7034,28 @@ static void bridge_XcBlockCryptCBC(void)
 
 static void bridge_XcCryptService(void)
 {
-    xbox_XcCryptService(STACK_ARG(0), XBOX_TO_NATIVE(STACK_ARG(1)));
-    g_eax = 0;
+    g_eax = (uint32_t)xbox_XcCryptService(STACK_ARG(0), XBOX_TO_NATIVE(STACK_ARG(1)));
 }
 
+/* The original CRYPTO_VECTOR (16 entries, ordinals 335-350) the title gets
+ * back holds the guest addresses of those exports: the synthetic thunk VA of
+ * the slot the title imported each through, 0 for one it did not import. */
 static void bridge_XcUpdateCrypto(void)
 {
-    xbox_XcUpdateCrypto(XBOX_TO_NATIVE(STACK_ARG(0)),
-        XBOX_TO_NATIVE(STACK_ARG(1)));
+    uint32_t rom = STACK_ARG(1);
+    int i, slot;
+
+    xbox_XcUpdateCrypto(XBOX_TO_NATIVE(STACK_ARG(0)), XBOX_TO_NATIVE(rom));
+    if (rom && bridge_va_mapped(rom, 16 * 4))
+        for (i = 0; i < 16; i++) {
+            uint32_t va = 0;
+            for (slot = 0; slot < XBOX_KERNEL_THUNK_TABLE_SIZE; slot++)
+                if (g_slot_ordinals[slot] == (ULONG)(335 + i)) {
+                    va = KERNEL_VA_BASE + (uint32_t)slot * 4;
+                    break;
+                }
+            BRIDGE_MEM32(rom + 4 * (uint32_t)i) = va;
+        }
     g_eax = 0;
 }
 
@@ -9395,12 +9438,18 @@ static void bridge_apc_run_kernel(void)
  * on the console. Returns 1 when the call is answered that way. esp points
  * at the arguments.
  *
+ * The file-I/O completions queued on this thread run in the same wait, first
+ * (bridge_run_user_apcs).
+ *
  * Not covered: a user-mode APC queued while its thread is already blocked
- * in an alertable wait does not wake it; it runs at the next such wait. */
+ * in an alertable wait does not wake it; it runs at the next such wait. The
+ * host shim's alertable waits (win32_compat.c WaitForSingleObjectEx, SleepEx)
+ * only look for host APCs before they block, so waking one needs them to
+ * wait on the thread too, plus a KTHREAD -> host thread map and delivery
+ * after each of the six wait bridges' host wait. */
 static int bridge_apc_safe_point(ULONG ordinal)
 {
-    uint32_t kt, apc;
-    int alertable = 0, ran = 0;
+    int alertable = 0;
 
     bridge_apc_run_kernel();
     switch (ordinal) {
@@ -9414,14 +9463,7 @@ static int bridge_apc_safe_point(ULONG ordinal)
     }
     if (!alertable)
         return 0;
-    kt = thobj_current();
-    while ((apc = ks_apc_take(kt, 1)) != 0) {
-        bridge_apc_deliver(apc);
-        ran = 1;
-    }
-    if (ran)
-        g_eax = 0x000000C0u;                 /* STATUS_USER_APC */
-    return ran;
+    return bridge_run_user_apcs();
 }
 
 /* --- KeInsertQueueDpc (ordinal 119) ---

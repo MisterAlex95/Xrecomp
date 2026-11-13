@@ -15,7 +15,7 @@ How to read the tables:
 - Values are text. A flag is "set" when the variable exists, unless the entry says `1` or non-zero is required.
 
 On Android these come from `recomp.cfg` in the app's external files dir. The launcher's Settings screen writes a few of
-them there for the player (`RECOMP_LANGUAGE`, `RECOMP_PRESENT_VSYNC`, `RECOMP_TEX_BILINEAR`, `RECOMP_TEX_ANISO`, `RECOMP_APU_HRTF`,
+them there for the player (`RECOMP_LANGUAGE`, `RECOMP_WIDESCREEN`, `RECOMP_480P`, `RECOMP_PRESENT_VSYNC`, `RECOMP_TEX_BILINEAR`, `RECOMP_TEX_ANISO`, `RECOMP_APU_HRTF`,
 `RECOMP_AUDIO_BUF_SAMPLES`, `RECOMP_RASTER_THREADS`, `RECOMP_BIG_CORES`, `RECOMP_SHELL_SELFTEST`) and keeps every
 other line as written: see [Settings](../android/app-shell.md#settings).
 
@@ -89,6 +89,11 @@ Switches that change how the kernel layer behaves. Each fixes a class of titles;
 | Variable | Default | What it does | Where |
 |---|---|---|---|
 | `RECOMP_LANGUAGE=<code>` | English | The console language the title reads (`XC_LANGUAGE` and the `XC_MAX_OS` block): `en`, `ja`, `de`, `fr`, `es`, `it`, `ko`, `zh`, `pt` (a region suffix such as `fr-CA` is ignored) or the Xbox value `1`..`9`. The title uses it when its disc has that language. A player setting, not a fix: on Android the launcher sets it (Settings › Game › Language, per-title choice in the in-game menu). | `kernel_xbox.c` |
+| `RECOMP_PKCS1_VERIFY=strict` | accept | `XcVerifyPKCS1Signature` answers what the RSA check finds instead of TRUE. The check runs either way (PKCS#1 v1.5, SHA-1, BSAFE public key) and a failure is logged (`[CRYPTO] XcVerifyPKCS1Signature: signature does not verify`, first 8). Accepting is the default because what titles verify is signed with Microsoft's key, which the runtime does not hold (`XePublicKeyData` is zeros): XAPI's DVD security-sector check (KOTOR's certificate asks for it) and Xbox Live. `strict` is for a title that signs and verifies with a key of its own. Saves and content are HMAC, not RSA (XBA-116). | `kernel_crypto.c` |
+| `RECOMP_GAME_REGION=na\|jp\|eu` | the title's | The console's region (XBA-121). Unset: the first the XBE certificate allows (+0xA0) of North America, Japan, rest of world; North America when it names none (the fixed answer before). The video standard follows: NTSC-M 60 Hz, NTSC-J 60 Hz, PAL-I 50 Hz. Read by `XC_FACTORY_GAME_REGION`, `XC_FACTORY_AV_REGION`, `XC_DVD_REGION` (1, or 2 outside North America), `XC_VIDEO` and the AV capabilities word (AV query 6). `na` restores the old answer for a PAL disc; `eu` shows a multi-region disc as a PAL console does. Logged once at load: `Certificate game regions ...`. | `kernel_xbox.c` |
+| `RECOMP_PAL60=0` | on | On a PAL console, the dashboard's « PAL 60 » choice is on: `XC_VIDEO` has its 60Hz bit, so a title that supports PAL 60 sets a 60 Hz mode, as every title ran before XBA-121 reported a PAL console (a PAL Burnout 3 runs at 60 fps). A title without PAL 60 support still sets a PAL-I mode and the vblank follows it (50 Hz). `0`: the console's own default, PAL 50 Hz until the title sets a mode. No effect on NTSC consoles (60 Hz already). | `kernel_xbox.c` |
+| `RECOMP_WIDESCREEN=1` | off | The dashboard's widescreen choice: `XC_VIDEO` and the AV capabilities word get the widescreen bit, so a title that supports it draws anamorphic 16:9 frames. Showing them wide is `RECOMP_ASPECT` (16:9). A player setting: Settings › Graphics › Widescreen on Android. | `kernel_xbox.c`, `kernel_hal.c` |
+| `RECOMP_480P=1` | off | The dashboard's 480p choice (the AV pack is always the HDTV pack, which carries 480i without it): `XC_VIDEO` and the AV capabilities word get the 480p bit, so a title that offers progressive output picks it. A player setting: Settings › Graphics › 480p on Android. | `kernel_xbox.c`, `kernel_hal.c` |
 | `RECOMP_SAVE_DIR=<dir>` | off | Root for the title's `UDATA`, `TDATA`, `TitleCache` and utility drive (`Cache/<title id>`, Z:) folders; created if missing. Absolute. Saves left in the game folder are then not used. | `kernel_path.c` |
 | `RECOMP_GAME_DIR=<dir>` | `<external files dir>/game` | Android app shell: where the title's data (`default.xbe` and the disc's files) is read from. The launcher sets it from the folder the player chose (XBA-54; it then wins over `recomp.cfg`); otherwise set it in `recomp.cfg`. | `recomp_storage.c` |
 | `RECOMP_HEAP_RECLAIM` | off | Gives freed guest heap back: freed heap blocks are split instead of handed over whole, and `NtFreeVirtualMemory` returns heap memory. Contiguous memory is `RECOMP_CONTIG_RECLAIM`. | `xbox_memory_layout.c`, `kernel_bridge.c` |
@@ -143,7 +148,7 @@ The executor is itself opt-in: set `RECOMP_PB_EXEC=1` to execute the pushbuffer.
 | `RECOMP_PB_REPORT_MS=N` | 10000 | Milliseconds between `[GPU]` reports (minimum 100). | `xbox_memory_layout.c` |
 | `RECOMP_PB_EXEC_VERBOSE` | off | Per-batch trace. | `nv2a_pb_exec.c` |
 | `RECOMP_PB_UNHANDLED_ALL` | top 10 | Lists every method the executor does not model, not only the top ten. | `nv2a_pb_exec.c` |
-| `RECOMP_VBLANK[=paced]` | no vblanks | Raises vblanks: a ~50 Hz tick, or `paced` for the 60 Hz schedule. `0` or empty is off. | `kernel_bridge.c` |
+| `RECOMP_VBLANK[=paced]` | no vblanks | Raises vblanks: a ~50 Hz tick, or `paced` for the display's schedule: 60 Hz, or 50 Hz once the title sets a PAL-I mode (before any mode, 50 Hz on a PAL console with `RECOMP_PAL60=0`; XBA-121). `0` or empty is off. | `kernel_bridge.c`, `kernel_hal.c` |
 | `RECOMP_FLIP_PACING[=edge]` | off | Holds each flip to the vblank count. | `nv2a_pb_exec.c` |
 | `RECOMP_FFP_INLINE=<0\|1\|2>` | 1 | Inline (Begin/End) fixed-function batches: `1` transformed by the composite matrix, `0` the old screen-space guess, `2` transformed only when the guess would skip them. A/B switch for one release. | `nv2a_pb_exec.c` |
 | `RECOMP_FFP_FLIP_NORMALS` | off | Lights the side of a fixed-function mesh that faces the viewer. Not hardware behaviour. | `nv2a_pb_exec.c` |

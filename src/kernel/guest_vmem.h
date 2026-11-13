@@ -32,6 +32,9 @@
  * the top of user space (a 128 MB map), where there is nothing above them to
  * track. Returns 1 when the tracker is live. */
 int guest_vmem_init(ptrdiff_t offset, uint64_t mirror_lo, uint64_t mirror_top);
+/* POSIX: the same over a range the caller already holds reserved (`held`
+ * bytes at mirror_top), tracked in place and never released here. */
+int guest_vmem_adopt(ptrdiff_t offset, uint64_t mirror_lo, uint64_t mirror_top, size_t held);
 void guest_vmem_shutdown(void);
 
 /* True once guest_vmem_init has succeeded. */

@@ -35,6 +35,7 @@ static uint32_t s_mirror_lo;    /* first address that aliases low memory */
 static uint32_t s_lo;           /* first tracked address: the top of the mirrors */
 static uint32_t s_top;          /* end of what the host let us reserve */
 static ptrdiff_t s_offset;      /* host address minus guest address */
+static int s_adopted;           /* the range is the layout's span: not ours to release */
 static SRWLOCK s_lock = SRWLOCK_INIT;
 
 static uint32_t page_index(uint32_t va) { return (va - s_lo) / VMEM_PAGE; }
@@ -64,7 +65,26 @@ static size_t host_free_run(uintptr_t host, size_t limit)
  * to still be free; asked for lazily, deep into boot, the range was taken by
  * something else nearly every run. MEM_RESERVE only: commits happen where a
  * title commits, as on the console. */
+static int vmem_setup(ptrdiff_t offset, uint64_t mirror_lo, uint64_t mirror_top, size_t held);
+
 int guest_vmem_init(ptrdiff_t offset, uint64_t mirror_lo, uint64_t mirror_top)
+{
+    return vmem_setup(offset, mirror_lo, mirror_top, 0);
+}
+
+/* POSIX: the layout's span already holds [mirror_top, GUEST_VMEM_TOP) as a
+ * reservation (`held` bytes of it); track it in place. Releasing that range
+ * and reserving it again at the same fixed host address left a gap another
+ * thread could map into (a malloc arena, a thread stack), and the tracker then
+ * stayed off: memory_regressions_ext_vma failed now and then under qemu.
+ * Commits inside it are mprotects on the span; shutdown leaves it to the span
+ * release. */
+int guest_vmem_adopt(ptrdiff_t offset, uint64_t mirror_lo, uint64_t mirror_top, size_t held)
+{
+    return held ? vmem_setup(offset, mirror_lo, mirror_top, held) : 0;
+}
+
+static int vmem_setup(ptrdiff_t offset, uint64_t mirror_lo, uint64_t mirror_top, size_t held)
 {
     size_t bytes;
     void *host;
@@ -83,9 +103,15 @@ int guest_vmem_init(ptrdiff_t offset, uint64_t mirror_lo, uint64_t mirror_top)
     s_lo = (uint32_t)mirror_top;
     host = (void *)((uintptr_t)s_lo + (uintptr_t)offset);
 
-    bytes = host_free_run((uintptr_t)host, GUEST_VMEM_TOP - s_lo) & ~(size_t)0xFFFF;
-    if (bytes && !VirtualAlloc(host, bytes, MEM_RESERVE, PAGE_NOACCESS))
-        bytes = 0;
+    if (held) {
+        bytes = (held < GUEST_VMEM_TOP - s_lo ? held : GUEST_VMEM_TOP - s_lo) & ~(size_t)0xFFFF;
+        s_adopted = 1;
+    } else {
+        bytes = host_free_run((uintptr_t)host, GUEST_VMEM_TOP - s_lo) & ~(size_t)0xFFFF;
+        if (bytes && !VirtualAlloc(host, bytes, MEM_RESERVE, PAGE_NOACCESS))
+            bytes = 0;
+        s_adopted = 0;
+    }
     if (!bytes) {
         fprintf(stderr, "  Extended VMA: could not reserve host memory at %p (error %lu);"
                         " the tracker stays off\n", host, GetLastError());
@@ -94,11 +120,13 @@ int guest_vmem_init(ptrdiff_t offset, uint64_t mirror_lo, uint64_t mirror_top)
     s_top = s_lo + (uint32_t)bytes;
     s_pages = calloc(bytes / VMEM_PAGE, sizeof s_pages[0]);
     if (!s_pages) {
-        VirtualFree(host, 0, MEM_RELEASE);
+        if (!s_adopted)
+            VirtualFree(host, 0, MEM_RELEASE);
         fprintf(stderr, "  Extended VMA: out of memory for the page table\n");
         return 0;
     }
-    fprintf(stderr, "  Extended VMA: reserved %u MB at %p, guest 0x%08X..0x%08X%s\n",
+    fprintf(stderr, "  Extended VMA: %s %u MB at %p, guest 0x%08X..0x%08X%s\n",
+            s_adopted ? "tracking the layout's" : "reserved",
             (unsigned)(bytes / (1024 * 1024)), host, s_lo, s_top,
             s_top < GUEST_VMEM_TOP ? " (the host has something above that)" : "");
     return 1;
@@ -106,10 +134,11 @@ int guest_vmem_init(ptrdiff_t offset, uint64_t mirror_lo, uint64_t mirror_top)
 
 void guest_vmem_shutdown(void)
 {
-    if (s_pages)
+    if (s_pages && !s_adopted)
         VirtualFree((void *)((uintptr_t)s_lo + (uintptr_t)s_offset), 0, MEM_RELEASE);
     free(s_pages);
     s_pages = NULL;
+    s_adopted = 0;
 }
 
 /* Commits [start, end) of the host reservation. Zeroes the pages, as
