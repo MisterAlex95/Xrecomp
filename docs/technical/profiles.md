@@ -165,7 +165,11 @@ The addresses Fable's and Burnout 3's title layers used to give (`XBA_D3D_DEVICE
 `XBA_D3D_SW_METHODS`) are what the search finds; for an A/B they are run-time overrides now:
 `RECOMP_D3D_DEVICE_PTR=0x...`, `RECOMP_D3D_DEVICE=0x...`, `RECOMP_D3D_SW_METHODS=0x...`
 ([environment-variables.md](../runtime/environment-variables.md#d3d-service)). With an address given, RunPushBuffer's
-methods write as D3D's handler does, without the run-time guards.
+methods write as D3D's handler does, without the run-time guards. With the device found, those guards check each
+write against the node D3D built, not against where the title keeps its data: the return slot in the contiguous
+window, the fixup list anywhere in mapped guest memory (bounded: 64 KB an entry, 1 MB a list), each fixup inside the
+node's own pushbuffer. A refusal is printed and counted (`[GPU] software methods: ...; fixup lists refused N`):
+[pushbuffer-executor.md](pushbuffer-executor.md#d3d-software-methods).
 
 **Other XDK builds (XBA-105).** What cannot be read from the device's structure is looked up in one table in
 `recomp_d3d_service.c` (`k_layouts`), keyed by the title's D3D library and build from its XBE header: the pointer

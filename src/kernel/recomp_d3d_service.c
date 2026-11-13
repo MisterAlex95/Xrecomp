@@ -66,7 +66,9 @@
  * with a {"t":"d3d_layout",...} line in the discovery file, so a run on a new
  * build tells what to add to the table. Run-time guards stay on such
  * fallbacks: a found device's RunPushBuffer methods write only into the
- * contiguous window, and decrement a pending count only when it reads as one.
+ * pushbuffer the node names (its return slot in the contiguous window, its
+ * fixups inside [base, slot)), and decrement a pending count only when it
+ * reads as one.
  *
  * Switches: RECOMP_D3D_SERVICE=0 leaves the service out (no software methods,
  * no semaphore watch, no DMA-walk default: the runtime as a project that never
@@ -83,6 +85,9 @@
 #include <stdlib.h>
 #include <string.h>
 
+#if defined(_MSC_VER)
+#include <intrin.h>
+#endif
 #ifndef _WIN32
 #include <pthread.h>
 #include <unistd.h>
@@ -134,8 +139,10 @@ static const D3dLayout k_fallback =
 #define XBE_BASE  0x00010000u
 
 extern ptrdiff_t xbox_GetMemoryOffset(void);
+extern size_t xbox_GetMappedSize(void);
 extern void *xbox_GetMemoryBase(void);
 extern void nv2a_pb_set_software_method_hook(int (*hook)(uint32_t param));
+extern void nv2a_pb_set_software_method_refusals(uint32_t (*count)(void));
 extern void nv2a_pb_set_semaphore_target(uint32_t guest_va);
 extern int  xbox_KeSetGuestEvent(uint32_t guest_va);
 extern int  xbox_KeAdoptGuestEvent(uint32_t guest_va);
@@ -442,18 +449,34 @@ static uint32_t current_device(void)
  *   0xD  node = device + 0x264 + payload * 20 (D3D's table), one pending run fewer
  *   0xE  node = payload | 0x80000000, recording: the count is left alone
  *
- * A node is { return target | flags, next, slot, fixups, base }. As the
- * handler does, for each node of the chain: *slot = JUMP(target); with flag
- * bit 29, copy each fixup { size, offset, bytes } to base + offset until size
- * 0xFFFFFFFF; next = -1; with bit 31, clear bit 30. With a device found at
- * run time the layout is assumed, so every address written to (the slot, a
- * fixup) must be in the contiguous window, where D3D's pushbuffers live: a
- * wrong guess must not write into the title's data (refusals are printed).
- * With the addresses given (RECOMP_D3D_DEVICE[_PTR]) it writes as D3D's
- * handler does, unchecked.
+ * A node is { return target | flags, next, slot, fixups, base }: slot is
+ * the pushbuffer's last word (its return JUMP, base + size - 4 by
+ * construction in RunPushBuffer), base its first, fixups the caller's
+ * D3DFixup data. As the handler does, for each node of the chain:
+ * *slot = JUMP(target); with flag bit 29, copy each fixup { size, offset,
+ * bytes } to base + offset until size 0xFFFFFFFF; next = -1; with bit 31,
+ * clear bit 30.
+ *
+ * With a device found at run time the layout is assumed, so each write is
+ * checked against the structure the node gives, not against where D3D's
+ * callers keep their data:
+ *   - the slot must be in the contiguous window (D3D's pushbuffers live there);
+ *   - the fixup list may be anywhere in mapped guest memory (D3DFixup buffers
+ *     are on the title's heap: Fable's at 0x0129xxxx, which a contiguous-only
+ *     rule dropped, every deferred list, silently), each entry header and
+ *     payload inside it, an entry at most 64 KB, the list at most 1 MB;
+ *   - each destination must lie inside the node's own pushbuffer:
+ *     base <= to, to + size <= slot (the return JUMP is not a fixup's), no wrap.
+ * A refused list stops at the entry refused (the entries before it stay
+ * applied, the return JUMP is patched anyway); refusals are printed (the
+ * first 4) and counted for the [GPU] software methods report line, so a
+ * dropped list is never silent. With the addresses given
+ * (RECOMP_D3D_DEVICE[_PTR]) it writes as D3D's handler does, unchecked.
  *
  * Runs on the executor thread, while the main thread may be in RunPushBuffer
- * bumping the same pending count. */
+ * bumping the same pending count and linking a new node to the chain with a
+ * compare-exchange on the last node's next (0 -> node): next is taken with an
+ * atomic exchange, so a node linked meanwhile is not overwritten with -1. */
 /* A write the run-time guards refused (device found at run time only: with
  * the addresses given the handler writes as D3D's does). */
 static void skip_note(const char *what, uint32_t va)
@@ -462,6 +485,84 @@ static void skip_note(const char *what, uint32_t va)
     if (shown++ < 4)
         fprintf(stderr, "[D3D] RunPushBuffer method: %s 0x%08X outside the contiguous window, not written\n",
                 what, va);
+}
+
+/* Fixup lists refused (a found device only), for the report. */
+static volatile uint32_t s_fixups_refused;
+
+uint32_t recomp_d3d_fixups_refused(void)
+{
+    return s_fixups_refused;
+}
+
+#define FIXUP_ENTRY_MAX 0x10000u    /* bytes in one entry */
+#define FIXUP_LIST_MAX  0x100000u   /* bytes walked in one list */
+
+/* [va, va + n) inside mapped guest memory: the low RAM above the first 64 KB
+ * (xbox_GetMappedSize, 64 MB if not known yet) or the contiguous window. */
+static int guest_readable(uint32_t va, uint32_t n)
+{
+    size_t mapped = xbox_GetMappedSize();
+    uint64_t lo_end = mapped ? (uint64_t)mapped : 0x04000000u, end = (uint64_t)va + n;
+    if (lo_end > CONTIG_LO)
+        lo_end = CONTIG_LO;
+    return (va >= 0x10000u && end <= lo_end) || (va >= CONTIG_LO && end <= CONTIG_HI);
+}
+
+static void fixup_refused(uint32_t node, uint32_t fix, uint32_t base, uint32_t slot, uint32_t to,
+                          uint32_t size, const char *why)
+{
+    static int shown;
+    s_fixups_refused++;     /* executor thread only */
+    if (shown++ < 4)
+        fprintf(stderr, "[D3D] RunPushBuffer method: fixup list of node 0x%08X refused at 0x%08X (%s: size %u "
+                "to 0x%08X, pushbuffer 0x%08X-0x%08X), rest of the list not written\n",
+                node, fix, why, size, to, base, slot);
+}
+
+/* A node's fixup list for a device found at run time (see above). */
+static void apply_fixups_checked(uint8_t *mem, uint32_t node, uint32_t slot)
+{
+    uint32_t base = G32(node + 16), fix = G32(node + 12), walked = 0;
+
+    if (!in_contig(base) || base >= slot) {
+        fixup_refused(node, fix, base, slot, base, 0, "pushbuffer base not below its slot");
+        return;
+    }
+    for (;;) {
+        uint32_t size, to;
+        if (!guest_readable(fix, 4)) {
+            fixup_refused(node, fix, base, slot, 0, 0, "list not in guest memory");
+            return;
+        }
+        size = G32(fix);
+        if (size == 0xFFFFFFFFu)
+            return;
+        if (!guest_readable(fix, 8)) {
+            fixup_refused(node, fix, base, slot, 0, size, "entry not in guest memory");
+            return;
+        }
+        to = base + G32(fix + 4);
+        if (size > FIXUP_ENTRY_MAX) {
+            fixup_refused(node, fix, base, slot, to, size, "entry larger than 64 KB");
+            return;
+        }
+        if (walked + 8u + size > FIXUP_LIST_MAX) {
+            fixup_refused(node, fix, base, slot, to, size, "no end within 1 MB");
+            return;
+        }
+        if (!guest_readable(fix + 8u, size)) {
+            fixup_refused(node, fix, base, slot, to, size, "payload not in guest memory");
+            return;
+        }
+        if (to < base || (uint64_t)to + size > slot) {
+            fixup_refused(node, fix, base, slot, to, size, "destination outside the pushbuffer");
+            return;
+        }
+        memcpy(mem + to, mem + fix + 8, size);
+        fix += 8u + size;
+        walked += 8u + size;
+    }
 }
 
 /* RunPushBuffer's two device offsets for this build: the table's, else the
@@ -526,20 +627,24 @@ static void d3d_run_pushbuffer_method(uint32_t dev, uint32_t type, uint32_t payl
             break;
         }
         G32(slot) = (target & 0x0FFFFFFFu) + 1u;            /* JUMP target */
-        if (target & 0x20000000u) {
+        if ((target & 0x20000000u) && !D3D_GIVEN) {
+            apply_fixups_checked(mem, node, slot);
+        } else if (target & 0x20000000u) {                  /* given: as D3D's handler, unchecked */
             uint32_t base = G32(node + 16), fix = G32(node + 12), size;
-            while ((D3D_GIVEN || in_contig(fix)) && (size = G32(fix)) != 0xFFFFFFFFu) {
-                uint32_t to = base + G32(fix + 4);
-                if (!D3D_GIVEN && size && (size > 0x10000u || !in_contig(to) || !in_contig(to + size - 1u))) {
-                    skip_note("fixup", to);
-                    break;
-                }
+            while ((size = G32(fix)) != 0xFFFFFFFFu) {
+                uint32_t to = base + G32(fix + 4);         /* wraps in the guest's 32 bits */
                 memcpy(mem + to, mem + fix + 8, size);
                 fix += 8u + size;
             }
         }
+#if defined(__GNUC__) || defined(__clang__)
+        next = __atomic_exchange_n((uint32_t *)(mem + node + 4), 0xFFFFFFFFu, __ATOMIC_SEQ_CST);
+#elif defined(_MSC_VER)
+        next = (uint32_t)_InterlockedExchange((volatile long *)(mem + node + 4), -1L);
+#else
         next = G32(node + 4);
         G32(node + 4) = 0xFFFFFFFFu;
+#endif
         if (target & 0x80000000u)
             G32(node) = target & 0xBFFFFFFFu;
         if (next == 0 || next == 0xFFFFFFFFu)
@@ -658,8 +763,10 @@ int recomp_d3d_configure(void)
      * which only the DMA walk keeps honest; and the walk delivers the software
      * methods the hook below answers. RECOMP_PB_WALK=scan: the segment scan. */
     SETENV_DEFAULT("RECOMP_PB_WALK", "dma");
-    if (s_methods)
+    if (s_methods) {
         nv2a_pb_set_software_method_hook(d3d_software_method);
+        nv2a_pb_set_software_method_refusals(recomp_d3d_fixups_refused);
+    }
     return 1;
 }
 

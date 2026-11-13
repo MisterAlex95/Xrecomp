@@ -517,4 +517,9 @@ void nv2a_pb_set_semaphore_target(uint32_t guest_va);
  * "D3D Software Methods"). */
 void nv2a_pb_set_software_method_hook(int (*hook)(uint32_t param));
 
+/* The hook's refusals: count() returns how many deferred RunPushBuffer fixup
+ * lists the hook refused to write (a guard said no); the report line
+ * "[GPU] software methods:" prints it when non-zero. NULL removes it. */
+void nv2a_pb_set_software_method_refusals(uint32_t (*count)(void));
+
 #endif /* NV2A_BACKEND_H */
