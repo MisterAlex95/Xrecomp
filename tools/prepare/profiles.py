@@ -15,8 +15,11 @@ xdk -> engines -> title. A higher layer's value wins over a lower one's.
 A layer's JSON (every key optional):
 
     "name"            what it is
-    "applies"         xdk only: {"libraries": ["D3D8", ...], "builds": [min, max]}
-                      (no "builds": every build of those libraries)
+    "applies"         xdk only: {"libraries": ["D3D8", ...], "builds": [min, max],
+                      "imports": {"ordinals": [kernel ordinals], "min": n}}
+                      (no "builds": every build of those libraries; "imports":
+                      also picked when the library table names none of the
+                      libraries and the XBE imports `min` of those ordinals)
     "hooks"           a C prefix: the layer's .c files define <prefix>_configure(void)
                       and <prefix>_start(const char *game_dir, const char *save_dir)
     "env_default"     {RECOMP_*: value} set before the hooks when nothing (the
@@ -74,16 +77,85 @@ def load_layer(key, root=PROFILES):
 
 
 def _applies(layer, ident):
-    """An xdk layer's "applies" against tools.xbe_ident's answer."""
+    """An xdk layer's "applies" (its libraries) against tools.xbe_ident's answer."""
+    return bool(_libraries_matched(layer, ident))
+
+
+def _libraries_matched(layer, ident):
+    """["D3D8 5849", ...]: the library table entries an xdk layer's "applies" matches."""
     a = layer["json"].get("applies") or {}
     want = {n.upper() for n in a.get("libraries", [])}
     if not want:
-        return False
+        return []
     builds = a.get("builds")
-    for name, build in ((ident or {}).get("xdk", {}).get("libraries") or {}).items():
-        if name.upper() in want and (not builds or builds[0] <= build <= builds[1]):
-            return True
-    return False
+    return ["%s %d" % (name, build)
+            for name, build in sorted(((ident or {}).get("xdk", {}).get("libraries") or {}).items())
+            if name.upper() in want and (not builds or builds[0] <= build <= builds[1])]
+
+
+def _names_libraries(layer, ident):
+    """True when the library table holds one of the layer's libraries, at any build."""
+    want = {n.upper() for n in (layer["json"].get("applies") or {}).get("libraries", [])}
+    return any(n.upper() in want for n in ((ident or {}).get("xdk", {}).get("libraries") or {}))
+
+
+def _imports_matched(layer, ident):
+    """The kernel ordinals typical of the layer's library ("applies": {"imports":
+    {"ordinals": [...], "min": n}}) that the XBE imports, when it has at least
+    `min` of them; else []. ident["imports"]: the XBE's kernel import ordinals."""
+    imp = (layer["json"].get("applies") or {}).get("imports") or {}
+    want = imp.get("ordinals") or [] if isinstance(imp, dict) else None
+    if not isinstance(want, list) or not all(isinstance(o, int) and 1 <= o <= 400 for o in want) \
+            or not isinstance(imp.get("min", 1), int) or not 1 <= imp.get("min", 1) <= max(1, len(want)):
+        raise ProfileError("%s: applies.imports: {\"ordinals\": [kernel ordinals], \"min\": 1..len} expected"
+                           % layer["key"])
+    have = set((ident or {}).get("imports") or ())
+    hits = [o for o in want if o in have]
+    return hits if want and len(hits) >= imp.get("min", 1) else []
+
+
+def xdk_matches(ident, root=PROFILES):
+    """Every xdk layer against this XBE (XBA-106), by name:
+    [{"key", "by": "library" | "imports" | None, "libraries": ["D3D8 5849", ...],
+    "imports": [ordinals]}]. A layer is picked by its library table entries; a
+    layer whose libraries the table does not name at all (stripped, renamed)
+    is picked by its kernel imports when the XBE has enough of them. A layer
+    whose library is there at a build it does not take (applies.builds) is not."""
+    out = []
+    for k in ("xdk/" + n for n in _names(root, "xdk")):
+        layer = load_layer(k, root)
+        libs = _libraries_matched(layer, ident) if ident else []
+        imps = _imports_matched(layer, ident) if ident else []
+        by = "library" if libs else "imports" if imps and not _names_libraries(layer, ident) else None
+        out.append({"key": k, "by": by, "libraries": libs, "imports": imps})
+    return out
+
+
+def import_names(ordinals):
+    """'AvSetDisplayMode, MmClaimGpuInstanceMemory' for kernel ordinals."""
+    from tools.xbe_parser.xbe_parser import KERNEL_EXPORTS
+    return ", ".join(KERNEL_EXPORTS.get(o, "ordinal %d" % o) for o in ordinals)
+
+
+def xdk_report(ident, root=PROFILES):
+    """The lines tools.prepare prints about the XDK layers (XBA-106): which
+    matched and how, and a warning for each one picked by its kernel imports
+    alone (the library table does not name its library)."""
+    if not ident:
+        return ["XDK layers: the XBE could not be identified; the runtime's XDK defaults apply "
+                "(recomp_xdk_defaults)"]
+    m = xdk_matches(ident, root)
+    picked = ["%s (%s)" % (x["key"], ", ".join(x["libraries"]) if x["by"] == "library" else "kernel imports")
+              for x in m if x["by"]]
+    lines = ["XDK layers: " + (", ".join(picked) if picked else
+                               "none matched; the runtime's XDK defaults apply (recomp_xdk_defaults)")]
+    for x in m:
+        if x["by"] == "imports":
+            libs = ", ".join((load_layer(x["key"], root)["json"].get("applies") or {}).get("libraries", []))
+            lines.append("warning: %s: the library table names none of %s, but the XBE imports %s: picked by "
+                         "its kernel imports (a stripped or renamed library table?)"
+                         % (x["key"], libs, import_names(x["imports"])))
+    return lines
 
 
 def _names(root, kind):
@@ -99,7 +171,7 @@ def auto_layers(ident, root=PROFILES):
     tools.xbe_ident.identify's answer; [] without one."""
     if not ident:
         return []
-    keys = [k for k in ("xdk/" + n for n in _names(root, "xdk")) if _applies(load_layer(k, root), ident)]
+    keys = [x["key"] for x in xdk_matches(ident, root) if x["by"]]
     for e in ident.get("engines", []):
         k = "engines/%s" % e["layer"]
         if e.get("kind") == "engine" and k not in keys and load_layer(k, root):

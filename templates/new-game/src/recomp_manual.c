@@ -118,11 +118,21 @@ recomp_func_t recomp_lookup_manual(uint32_t xbox_va)
  * (the ICALL macro pops the dummy return address and continues).
  * Focus on the ones that cause crashes or incorrect behavior.
  */
+/* Code made at run time (XBA-118, src/kernel/recomp_smc.h): an indirect
+ * call or jump into mapped guest memory outside the image's code is named
+ * as such ({"t":"smc","kind":"exec_outside_image"}) rather than as a
+ * missing dispatch entry or a wild pointer. Still skipped. */
+extern int xbox_SmcExecOutside(uint32_t target, uint32_t ret);
+
 void recomp_icall_fail_log(uint32_t va)
 {
     /* The call pushed its real return address: [g_esp] is the caller's next
-     * instruction. */
-    recomp_discovery_icall(va, *(volatile uint32_t *)((uintptr_t)g_esp + g_xbox_mem_offset));
+     * instruction (a tail jump pushed none: then it is the current
+     * function's own return address). */
+    uint32_t ret = *(volatile uint32_t *)((uintptr_t)g_esp + g_xbox_mem_offset);
+    if (xbox_SmcExecOutside(va, ret))
+        return;
+    recomp_discovery_icall(va, ret);
     fprintf(stderr, "[ICALL] Failed to resolve VA 0x%08X (total calls: %llu)\n",
             va, (unsigned long long)g_icall_count);
 
@@ -150,6 +160,7 @@ void recomp_icall_not_code_log(uint32_t va)
     enum { SLOTS = 16 };
     static uint32_t seen[SLOTS];
     static uint64_t hits[SLOTS];
+    static unsigned char smc[SLOTS];
     static int count;
     int i;
 
@@ -157,12 +168,19 @@ void recomp_icall_not_code_log(uint32_t va)
         if (seen[i] == va)
             break;
     if (i == count) {
+        /* The first time: mapped guest memory (heap, stack, data) is code
+         * made at run time, named once by the runtime (the push of the
+         * return address is still on the stack); then quiet here. */
+        int made = xbox_SmcExecOutside(va, *(volatile uint32_t *)((uintptr_t)g_esp + g_xbox_mem_offset));
         if (count == SLOTS)
             return;
         seen[count] = va;
         hits[count] = 0;
+        smc[count] = (unsigned char)made;
         count++;
     }
+    if (smc[i])
+        return;
     hits[i]++;
     /* Report at 1, 10, 100, 1000 ... rather than once. A single line says a
      * wild pointer was skipped; the progression says it is being skipped in a

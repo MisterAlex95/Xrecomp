@@ -99,6 +99,9 @@ def identify(path, table=None):
         "title": c.title_name,
         "xdk": xdk,
         "engines": engines,
+        # The kernel ordinals it imports: an XDK layer whose library the table
+        # does not name is picked by them (XBA-106, tools.prepare.profiles).
+        "imports": sorted({imp.ordinal for imp in xbe.kernel_imports}),
     }
     # The profile layers this XBE selects, lowest first (tools.prepare.profiles:
     # the xdk layers whose libraries it links, the engine layers that exist).

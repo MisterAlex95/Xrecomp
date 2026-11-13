@@ -118,7 +118,29 @@ def classify(status, presses_ms, exit_info, run_s, sustain_s, log_text="", disco
     stubs = stub_calls(discovered)
     if stubs and blocker and not blocker.startswith(("crash", "launches")):
         blocker += "; calls stub " + ", ".join(stubs)
+    # Code the title wrote or made at run time (XBA-118): the lifted C cannot
+    # run it, whatever the stage, so it is named even on a sustained run.
+    smc = [d for d in discovered or () if d.get("t") == "smc"]
+    summary["smc"] = len(smc)
+    if smc and not launch:
+        named = "code written or run at run time x%d: %s (XBA-118)" % (len(smc), ", ".join(smc_sites(smc)))
+        blocker = blocker + "; " + named if blocker else named
     return stage, blocker, summary
+
+
+def smc_sites(smc, limit=3):
+    """["exec_outside_image 0x00400000 (heap, from 0x00011234)", "code_write 0x00012345 (.text)", ...]: the
+    discovery file's smc entries in the order they came, at most `limit` (then "+N more")."""
+    out = []
+    for d in smc:
+        if d.get("kind") == "code_write":
+            out.append("code_write %s (%s)" % (d.get("at") or d.get("va"), d.get("section", "?")))
+        else:
+            out.append("%s %s (%s, from %s)" % (d.get("kind", "smc"), d.get("va"), d.get("where", "?"),
+                                                d.get("ret", "?")))
+    if len(out) > limit:
+        out = out[:limit] + ["+%d more" % (len(out) - limit)]
+    return out
 
 
 def stub_calls(discovered, limit=4):
@@ -328,7 +350,8 @@ def run_one(source, a):
     # The title's stage: the lowest over the runs (a race that loses 1 run in 4 is not "sustained").
     worst = min(runs, key=lambda r: STAGES.index(r["stage"]))
     best = max(runs, key=lambda r: STAGES.index(r["stage"]))
-    res.update(stage=worst["stage"], blocker=worst["blocker"], best=best["stage"], runs=runs)
+    res.update(stage=worst["stage"], blocker=worst["blocker"], best=best["stage"], runs=runs,
+               smc=max(r.get("smc", 0) for r in runs))
     if a.repeat > 1:
         res["failure_rate"] = round(sum(r["stage"] != best["stage"] for r in runs) / len(runs), 2)
     return res
@@ -402,8 +425,10 @@ def matrix(results):
             "%s %s" % (last.get("toolkit", ""), (last.get("time") or "")[:10]))
             + (" %s |" % device.device_label(last).replace("|", "/") if on_device else ""))
     total = sum(counts.values()) or 1
+    smc = sum(1 for runs in by.values() if runs[-1].get("smc"))
     out = ["**%d titles.** " % sum(counts.values()) + "; ".join(
-               "%s: %d (%d %%)" % (s, counts[s], counts[s] * 100 // total) for s in reversed(STAGES) if counts[s]),
+               "%s: %d (%d %%)" % (s, counts[s], counts[s] * 100 // total) for s in reversed(STAGES) if counts[s])
+           + ("; code written or run at run time (XBA-118): %d" % smc if smc else ""),
            "",
            "| Title | Title ID | Stage | Since the run before | Blocker | XDK | Engine | Toolkit, date |"
            + (" Device |" if on_device else ""),

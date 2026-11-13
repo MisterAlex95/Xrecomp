@@ -261,3 +261,105 @@ def test_the_layer_c_compiles(tmp_path):
                 subprocess.check_call([cc, "-std=gnu11", "-fsyntax-only", "-Werror=implicit-function-declaration",
                                        "-I", str(tmp_path / "inc"), "-I", os.path.join(ROOT, "include")]
                                       + extra + [str(t / fn)])
+
+
+# ── XBA-106: an odd library table ───────────────────────────────
+
+XAPI_IMPORTS = (326, 327, 328, 67, 24)
+DSOUND_IMPORTS = (175, 173, 44, 98)
+D3D_IMPORTS = (3, 2, 1, 4, 168)
+ALL_XDK_IMPORTS = tuple(sorted(set(XAPI_IMPORTS + DSOUND_IMPORTS + D3D_IMPORTS + (49, 164, 187, 190))))
+XDK_ENV = {"RECOMP_PB_EXEC": "1", "RECOMP_VBLANK": "paced", "RECOMP_AC97_READY": "1",
+           "RECOMP_DISPATCH_GATE": "1", "RECOMP_USB": "1", "RECOMP_KEYBOARD": "1"}
+RW_ENV = dict(XDK_ENV, RECOMP_PB_WALK="dma", RECOMP_GPU_FPS_CAP="60")
+
+# The four reference titles as they merged before XBA-106 (origin/main 5688baa): libraries, engines, keys,
+# hooks, env_force, params, env_default per platform. What the XBE imports must not change any of it.
+REFERENCE = {
+    "4D5300D1": ((("XAPILIB", 5849), ("D3D8", 5849), ("DSOUND", 5849)), (),
+                 ["xdk/d3d8", "xdk/dsound", "xdk/xapi", "titles/4d5300d1"], ["xba_d3d8", "fable"], {},
+                 {"XBA_D3D_DEVICE_PTR": 0x00862288, "XBA_D3D_DEVICE": 0x0085FDE0, "XBA_D3D_SW_METHODS": 0x7000},
+                 dict(XDK_ENV, RECOMP_GPU_FPS_CAP="30"), XDK_ENV),
+    "4541005B": ((("XAPILIB", 5849), ("D3D8LTCG", 5849), ("DSOUND", 5849), ("XMV", 5849)), ("renderware",),
+                 ["xdk/d3d8", "xdk/d3d8ltcg", "xdk/dsound", "xdk/xapi", "engines/renderware", "titles/4541005b"],
+                 ["xba_d3d8", "bo3"], {"RECOMP_LSFG": "0"},
+                 {"XBA_D3D_DMA_WALK": 1, "XBA_D3D_DEVICE_PTR": 0x0035FE48, "XBA_D3D_SW_METHODS": 0x20},
+                 RW_ENV, RW_ENV),
+    "45410083": ((("XAPILIB", 5849), ("D3D8LTCG", 5849), ("DSOUND", 5849)), ("renderware",),
+                 ["xdk/d3d8", "xdk/d3d8ltcg", "xdk/dsound", "xdk/xapi", "engines/renderware"], ["xba_d3d8"],
+                 {"RECOMP_LSFG": "0"}, {"XBA_D3D_DMA_WALK": 1}, RW_ENV, RW_ENV),
+    "4C410003": ((("XAPILIB", 5455), ("D3D8", 5455), ("DSOUND", 5455)), (),
+                 ["xdk/d3d8", "xdk/dsound", "xdk/xapi"], ["xba_d3d8"], {}, {}, XDK_ENV, XDK_ENV),
+}
+
+
+def _synthetic(tmp_path, name, libs, imports, title_id=0x4D530001, engines=()):
+    """tools.xbe_ident's answer for a synthetic XBE of our own (library table, kernel thunk table)."""
+    from tools.xbe_ident import identify
+    from tools.xbe_ident.test_xbe_ident import make_xbe
+    r = identify(make_xbe(tmp_path / name, libs=tuple((n, b, 0) for n, b in libs), xapi_index=None,
+                          imports=imports, title_id=title_id))
+    r["engines"] = [{"layer": e, "kind": "engine"} for e in engines]   # the markers: test_xbe_ident
+    return r
+
+
+@pytest.mark.parametrize("tid", sorted(REFERENCE))
+def test_the_reference_titles_merge_as_before_whatever_they_import(tmp_path, tid):
+    libs, engines, keys, hooks, force, params, android, desktop = REFERENCE[tid]
+    for imports in ((), ALL_XDK_IMPORTS, D3D_IMPORTS):
+        p = profiles.resolve(tid, _synthetic(tmp_path, "%s-%d.xbe" % (tid, len(imports)), libs, imports,
+                                             int(tid, 16), engines))
+        assert p["keys"] == keys and p["hooks"] == hooks and p["env_force"] == force
+        assert p["params"] == params
+        assert p["env_default"] == {"android": android, "desktop": desktop}
+
+
+def test_a_stripped_library_table_picks_the_xdk_layers_by_their_imports(tmp_path):
+    r = _synthetic(tmp_path, "stripped.xbe", (), ALL_XDK_IMPORTS)
+    p = profiles.resolve("4D530001", r)
+    assert p["keys"] == ["xdk/d3d8", "xdk/dsound", "xdk/xapi"] and p["hooks"] == ["xba_d3d8"]
+    assert p["env_default"]["desktop"] == XDK_ENV and p["params"] == {}
+    lines = profiles.xdk_report(r)
+    assert lines[0] == "XDK layers: xdk/d3d8 (kernel imports), xdk/dsound (kernel imports), xdk/xapi (kernel imports)"
+    assert len(lines) == 4 and all(l.startswith("warning: xdk/") for l in lines[1:])
+    assert "names none of D3D8, D3D8LTCG, but the XBE imports AvSetDisplayMode, AvSendTVEncoderOption" in lines[1]
+
+
+def test_a_renamed_library_is_picked_by_its_imports_and_the_others_by_name(tmp_path):
+    r = _synthetic(tmp_path, "renamed.xbe", (("XAPILIB", 5849), ("D3D8_QFE", 5849), ("DSOUND", 5849)),
+                   D3D_IMPORTS + XAPI_IMPORTS)
+    assert profiles.auto_layers(r) == ["xdk/d3d8", "xdk/dsound", "xdk/xapi"]
+    m = {x["key"]: x["by"] for x in profiles.xdk_matches(r)}
+    assert m == {"xdk/d3d8": "imports", "xdk/d3d8ltcg": None, "xdk/dsound": "library", "xdk/xapi": "library"}
+    lines = profiles.xdk_report(r)
+    assert lines[0] == "XDK layers: xdk/d3d8 (kernel imports), xdk/dsound (DSOUND 5849), xdk/xapi (XAPILIB 5849)"
+    assert len(lines) == 2 and lines[1].startswith("warning: xdk/d3d8:")
+
+
+def test_a_library_at_a_build_the_layer_does_not_take_is_not_picked_by_imports(tmp_path):
+    """D3D8LTCG 5788: xdk/d3d8 by name, xdk/d3d8ltcg (5849 only, no imports) stays out; and a layer whose
+    library is named at a build outside its range stays out even when its imports are there."""
+    r = _synthetic(tmp_path, "ltcg.xbe", (("XAPILIB", 5788), ("D3D8LTCG", 5788)), ALL_XDK_IMPORTS)
+    assert profiles.auto_layers(r) == ["xdk/d3d8", "xdk/dsound", "xdk/xapi"]     # dsound: not named, imports there
+    root = tmp_path / "tree"
+    layer(root, "xdk/dsound", {"applies": {"libraries": ["DSOUND"], "builds": [5558, 5849],
+                                           "imports": {"ordinals": [175], "min": 1}}})
+    old = dict(ident({"DSOUND": 4627}), imports=[175])
+    assert profiles.auto_layers(old, str(root)) == []
+
+
+def test_no_xdk_layer_and_an_unidentified_xbe_say_so(tmp_path):
+    r = _synthetic(tmp_path, "homebrew.xbe", (), (49, 187, 190))
+    assert profiles.auto_layers(r) == [] and profiles.resolve("4D530001", r) is None
+    assert profiles.xdk_report(r) == ["XDK layers: none matched; the runtime's XDK defaults apply "
+                                      "(recomp_xdk_defaults)"]
+    assert "could not be identified" in profiles.xdk_report(None)[0]
+    # Too few of a library's ordinals: not picked (D3D wants 2).
+    assert profiles.auto_layers(_synthetic(tmp_path, "one.xbe", (), (3,))) == []
+
+
+def test_applies_imports_is_checked(tmp_path):
+    for bad in ({"ordinals": [3, "x"]}, {"ordinals": [3], "min": 2}, {"ordinals": [999]}, [3]):
+        layer(tmp_path, "xdk/d3d8", {"applies": {"libraries": ["D3D8"], "imports": bad}})
+        with pytest.raises(profiles.ProfileError, match="applies.imports"):
+            profiles.auto_layers(dict(ident({}), imports=[3]), str(tmp_path))

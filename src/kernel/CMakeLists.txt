@@ -32,6 +32,8 @@ set(KERNEL_SOURCES
     icall_feedback.c
     recomp_trace.c
     recomp_discovery.c
+    recomp_xdk_defaults.c
+    recomp_smc.c
     recomp_stack_switch.c
     recomp_status.c
     recomp_diff.c

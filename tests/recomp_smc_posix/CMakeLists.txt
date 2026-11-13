@@ -1,0 +1,15 @@
+cmake_minimum_required(VERSION 3.20)
+project(recomp_smc_posix_test C)
+# Code written or run at run time (XBA-118): the lifted code pages write-protected, the first store into one
+# recorded through the POSIX fault handler, read() into one opened first, calls outside the image named.
+if(WIN32)
+    message(FATAL_ERROR "POSIX: mprotect and the SIGSEGV handler")
+endif()
+set(CMAKE_C_STANDARD 11)
+add_subdirectory(../.. runtime)
+add_executable(recomp_smc_posix_test test_main.c)
+target_include_directories(recomp_smc_posix_test PRIVATE ../../src/kernel ../../src)
+target_link_libraries(recomp_smc_posix_test PRIVATE xboxrecomp)
+enable_testing()
+add_test(NAME recomp_smc_posix COMMAND recomp_smc_posix_test)
+set_tests_properties(recomp_smc_posix PROPERTIES SKIP_RETURN_CODE 77)

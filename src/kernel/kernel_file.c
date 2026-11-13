@@ -1283,6 +1283,8 @@ NTSTATUS __stdcall xbox_NtCreateFile(
     return STATUS_SUCCESS;
 }
 
+extern void xbox_SmcHostWrite(const void *p, size_t len) __attribute__((weak));
+
 NTSTATUS __stdcall xbox_NtReadFile(
     HANDLE FileHandle, HANDLE Event, PIO_APC_ROUTINE ApcRoutine, PVOID ApcContext,
     PXBOX_IO_STATUS_BLOCK IoStatusBlock, PVOID Buffer, ULONG Length,
@@ -1302,6 +1304,11 @@ NTSTATUS __stdcall xbox_NtReadFile(
     if (ByteOffset && ByteOffset->QuadPart >= 0)
         lseek(fd, (off_t)ByteOffset->QuadPart, SEEK_SET);
 
+    /* read() into a write-protected code page would fail with EFAULT, not
+     * fault: open it first, which names it (XBA-118, recomp_smc.h). Weak:
+     * a test that links this file alone has no recomp_smc.c. */
+    if (xbox_SmcHostWrite)
+        xbox_SmcHostWrite(Buffer, Length);
     ssize_t n = read(fd, Buffer, Length);
     if (n < 0) {
         XBOX_TRACE(XBOX_LOG_FILE, "NtReadFile(handle=%p) errno=%d", FileHandle, errno);
