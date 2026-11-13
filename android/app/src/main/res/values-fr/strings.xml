@@ -205,6 +205,19 @@
     <string name="SHORTCUT_REQUESTED">Raccourci demandé : confirmez-le dans la fenêtre de votre écran d\'accueil.</string>
     <string name="SHORTCUT_REFUSED">Votre écran d\'accueil n\'a pas accepté le raccourci.</string>
     <string name="SHORTCUT_GAME_GONE">Le jeu de ce raccourci n\'est plus dans la bibliothèque : choisissez-en un ici.</string>
+    <!-- L'app d'un jeu (Gérer › Créer une app). -->
+    <string name="TITLE_APP_ADD">Créer une app</string>
+    <string name="TITLE_APP_ADD_DETAIL">Fait de ce jeu une app à part sur cet appareil : son nom et son logo parmi vos apps, verrouillée sur ce disque, elle s\'ouvre directement dessus. C\'est une copie de XRecomp : elle occupe environ %1$s. Android vous demande de confirmer l\'installation. Pour votre usage personnel uniquement.</string>
+    <string name="TITLE_APP_ALLOW">Autorisez XRecomp à installer des apps dans l\'écran qui s\'est ouvert, puis revenez et appuyez de nouveau sur Créer une app.</string>
+    <string name="TITLE_APP_BUILDING">Création de l\'app</string>
+    <string name="TITLE_APP_SIGNING">Signature de l\'app</string>
+    <string name="TITLE_APP_HANDING">Transmission de l\'app à Android</string>
+    <string name="TITLE_APP_CONFIRM">%1$s est prête : confirmez l\'installation dans la fenêtre d\'Android.</string>
+    <string name="TITLE_APP_INSTALLED">%1$s est installée : retrouvez-la parmi vos apps. Ouvrez-la et choisissez ce jeu une fois ; elle s\'ouvre ensuite directement dessus.</string>
+    <string name="TITLE_APP_CANCELLED">L\'app n\'a pas été installée (annulé).</string>
+    <string name="TITLE_APP_CONFLICT">Une app %1$s signée par une autre clé est installée : désinstallez-la, puis créez l\'app de nouveau.</string>
+    <string name="TITLE_APP_FAILED">L\'app n\'a pas été installée : %1$s</string>
+    <string name="TITLE_APP_BUILD_FAILED">L\'app n\'a pas pu être créée : %1$s. Rien n\'a été installé.</string>
 
     <!-- La préparation sur l'appareil (docs/android/prepare.md) -->
     <string name="PREPARE">Préparer</string>

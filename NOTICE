@@ -224,6 +224,12 @@ The Android app (XRecomp) — what the APK ships
     stub libraries), Apache License 2.0 and BSD-style licences, each
     header carrying its own notice. https://developer.android.com/ndk
 
+  apksig 8.7.3, Apache License 2.0 (classes.dex: signs the game apps that
+    Manage > Create an app makes on the device)
+    https://android.googlesource.com/platform/tools/apksig
+    Copyright (c) 2016, The Android Open Source Project
+    Full text: LICENSES/Apache-2.0-apksig.txt
+
   The packs the app builds on the device (libtitle.so) are made from the
   player's own disc and never leave the device; no game code or data is in
   this repository, an APK or a CI artefact.

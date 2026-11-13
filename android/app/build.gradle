@@ -310,8 +310,14 @@ android {
     }
 }
 
-// Test-only dependencies: the app itself uses no AndroidX and no library (Robolectric brings test-only AndroidX).
+// The app uses no AndroidX and one library: apksig, which signs the game apps « Create an app » makes on the device
+// (TitleApk; docs/android/app-shell.md « A game's own app »). APK Signature Scheme v2 is a binary format with
+// exact digest rules that the platform's verifier must accept; AOSP's own signer (Apache-2.0, pure Java, no
+// dependencies, the code apksigner and AGP use) is safer than a home-made one. The version is AGP's, already in the
+// Gradle cache of the build images (NOTICE « The Android app », LICENSES/Apache-2.0-apksig.txt).
+// The rest is test-only (Robolectric brings test-only AndroidX).
 dependencies {
+    implementation 'com.android.tools.build:apksig:8.7.3'
     testImplementation 'junit:junit:4.13.2'
     testImplementation 'org.robolectric:robolectric:4.14.1'
 }

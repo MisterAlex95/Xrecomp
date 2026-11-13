@@ -80,7 +80,8 @@ import fr.adserver.xboxrecomp.Widgets.MenuRow;
  *   saved to recomp.cfg (RecompConfig), applied at the next start; About ends Advanced;
  * - CONTROLS: the remapping of the pad (PadMapping, RECOMP_PAD_MAP in recomp.cfg), one row per Xbox control;
  * - GAME_DATA (« Manage »): change game, a home-screen shortcut for the game (TitleShortcut, ACTION_PLAY_TITLE),
- *   delete the imported copy and the game's stored things; ABOUT (X: LICENCES,
+ *   the game's own app (Create an app: TitleApp, TitleApk), delete the imported copy and the game's stored things;
+ *   ABOUT (X: LICENCES,
  *   the licence texts the APK carries, assets/licences/);
  * - PREPARE: Home's layout with the on-device Prepare's progress (dimmed after two idle minutes, for OLED screens).
  *
@@ -470,6 +471,8 @@ public class LauncherActivity extends Activity {
     protected void onResume() {
         super.onResume();
         resumed = true;
+        TitleAppReceiver.listener = () -> runOnUiThread(this::showTitleAppOutcome);
+        showTitleAppOutcome();
         poller.removeCallbacks(pollTick);
         poller.postDelayed(pollTick, PREPARE_POLL_MS);
     }
@@ -477,6 +480,7 @@ public class LauncherActivity extends Activity {
     @Override
     protected void onPause() {
         resumed = false;
+        TitleAppReceiver.listener = null;
         poller.removeCallbacks(pollTick);
         super.onPause();
     }
@@ -2336,6 +2340,12 @@ public class LauncherActivity extends Activity {
         if (pinTid != null && TitleShortcut.supported(this))
             listRow(list, getString(R.string.SHORTCUT_ADD), getString(R.string.SHORTCUT_ADD_DETAIL),
                     () -> onAddShortcut(pinTid));
+        // A game's own app (TitleApp, TitleApk): the same title ID rule; not in a game's own app itself, nor from a
+        // split install (nothing to copy).
+        File template = pinTid != null && TitleApp.ownTitleId(this) == null ? TitleApp.template(this) : null;
+        if (template != null)
+            listRow(list, getString(R.string.TITLE_APP_ADD),
+                    getString(R.string.TITLE_APP_ADD_DETAIL, size(template.length())), () -> onCreateApp(pinTid));
 
         if (dir != null && ownedCopy(dir)) {
             MenuRow del = listRow(list, getString(R.string.DELETE_COPY), getString(R.string.DELETE_COPY_DETAIL, dir),
@@ -2378,6 +2388,109 @@ public class LauncherActivity extends Activity {
         boolean ok = TitleShortcut.request(this, tid, gameTitle(gameDir()), art);
         Log.i(TAG, "launcher: shortcut " + TitleShortcut.id(tid) + (ok ? " requested" : " refused"));
         setNote(getString(ok ? R.string.SHORTCUT_REQUESTED : R.string.SHORTCUT_REFUSED), ok ? NOTE_OK : NOTE_ERROR);
+    }
+
+    /**
+     * Manage › Create an app (docs/android/app-shell.md « A game's own app »): this APK copied as the game's own
+     * app (TitleApk), behind the progress screen, then handed to Android's installer, whose confirmation
+     * TitleAppReceiver shows. Without « Install unknown apps » for this app, its settings screen first.
+     */
+    private void onCreateApp(String tid) {
+        if (!TitleApp.canInstall(this)) {
+            Log.i(TAG, "launcher: game app: Install unknown apps is off, opening its settings");
+            setNote(getString(R.string.TITLE_APP_ALLOW), NOTE_WARN);
+            try {
+                startActivity(new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                                         Uri.parse("package:" + getPackageName())));
+            } catch (ActivityNotFoundException e) {
+                Log.w(TAG, "launcher: no Install unknown apps screen", e);
+            }
+            return;
+        }
+        File template = TitleApp.template(this);
+        if (template == null)
+            return;
+        long need = TitleApp.spaceNeeded(template), free = getFilesDir().getUsableSpace();
+        if (free < need) {
+            setNote(getString(R.string.NOT_ENOUGH_SPACE, size(need), size(free)), NOTE_ERROR);
+            return;
+        }
+        refreshIdentity();   // the title image of this game (or none: the monogram)
+        String dir = gameDir();
+        String title = gameTitle(dir);
+        String label = TitleApk.label(title == null || title.trim().isEmpty() ? tid : title);
+        Library.Record r = rec();
+        String knownSha = r != null && tid.equals(r.titleId) ? r.xbeSha256 : "";
+        Bitmap icon = art;
+        Log.i(TAG, "launcher: game app " + TitleApk.packageName(tid) + " « " + label + " »: building from "
+                   + template + " (" + template.length() + " bytes)");
+        runWorker(R.string.TITLE_APP_BUILDING, () -> {
+            try {
+                TitleApk.Spec spec = new TitleApk.Spec();
+                spec.titleId = tid;
+                spec.label = label;
+                spec.parent = getPackageName();
+                spec.xbeSha256 = knownSha;
+                if (spec.xbeSha256 == null || spec.xbeSha256.isEmpty()) {
+                    File xbe = dir == null ? null : GameStore.findXbe(new File(dir));
+                    spec.xbeSha256 = xbe == null ? "" : GameStore.sha256(xbe);
+                }
+                if (spec.xbeSha256.isEmpty())
+                    Log.w(TAG, "launcher: game app " + spec.packageName() + ": no default.xbe hash, not locked");
+                spec.iconPng = TitleApp.iconPng(icon, tid, label);
+                spec.iconEntry = TitleApp.iconEntry(this);
+                spec.iconRes = R.mipmap.xba_title_icon;
+                TitleApp.Key key = TitleApp.key();
+                File apk = TitleApp.build(this, spec, key, new TitleApp.Progress() {
+                    @Override
+                    public void update(long done, long total) {
+                        progress(done, total, label);
+                    }
+
+                    @Override
+                    public void signing() {
+                        progressIndeterminate(R.string.TITLE_APP_SIGNING);
+                    }
+                }, () -> cancelRequested);
+                Log.i(TAG, "launcher: game app " + spec.packageName() + ": " + apk.length() + " bytes, signed");
+                progressIndeterminate(R.string.TITLE_APP_HANDING);
+                TitleApp.install(this, apk, spec.packageName(), label, (done, total) -> progress(done, total, label),
+                                 () -> cancelRequested);
+                //noinspection ResultOfMethodCallIgnored
+                apk.delete();   // the session has its own copy
+                workerNoteKind = NOTE_INFO;
+                workerNote = getString(R.string.TITLE_APP_CONFIRM, label);
+            } catch (java.io.InterruptedIOException e) {
+                TitleApp.clean(this);
+                cancelled();
+            } catch (IOException | RuntimeException e) {
+                Log.w(TAG, "launcher: game app " + TitleApk.packageName(tid) + " failed", e);
+                TitleApp.clean(this);
+                fail(getString(R.string.TITLE_APP_BUILD_FAILED, String.valueOf(e.getMessage())));
+            }
+        });
+    }
+
+    /** The installer's last outcome for a game's own app (TitleAppReceiver), as a note; nothing when none is new. */
+    private void showTitleAppOutcome() {
+        String[] o = TitleApp.takeOutcome(this);
+        if (o == null)
+            return;
+        int status = Integer.parseInt(o[0]);
+        String msg = o[1], label = o[2].isEmpty() ? o[3] : o[2];
+        switch (status) {
+        case android.content.pm.PackageInstaller.STATUS_SUCCESS:
+            setNote(getString(R.string.TITLE_APP_INSTALLED, label), NOTE_OK);
+            break;
+        case android.content.pm.PackageInstaller.STATUS_FAILURE_ABORTED:
+            setNote(getString(R.string.TITLE_APP_CANCELLED), NOTE_INFO);
+            break;
+        case android.content.pm.PackageInstaller.STATUS_FAILURE_CONFLICT:
+            setNote(getString(R.string.TITLE_APP_CONFLICT, label), NOTE_ERROR);
+            break;
+        default:
+            setNote(getString(R.string.TITLE_APP_FAILED, msg.isEmpty() ? String.valueOf(status) : msg), NOTE_ERROR);
+        }
     }
 
     /** The game's technical facts, one per line: title ID, when it was prepared and its pack's size, its files. */
@@ -3269,6 +3382,10 @@ public class LauncherActivity extends Activity {
 
     Thread scannerForTest() {
         return scanner;
+    }
+
+    Thread workerForTest() {
+        return worker;
     }
 
     private volatile long scanPaintedAt;
