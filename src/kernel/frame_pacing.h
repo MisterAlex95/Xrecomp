@@ -391,4 +391,212 @@ static inline uint32_t frame_pacing_flip(FramePacer *p, uint64_t now_ns, uint64_
     return p->rate;
 }
 
+/* ── Phase alignment to the display (XBA-136) ───────────────────────────────
+ *
+ * The schedule above is absolute but its phase against the panel's refresh
+ * is wherever the first flip fell, and the host and display clocks drift
+ * apart: flips near a refresh edge land on either side of it and a steady
+ * 30 shows as alternating 16.7 / 50 ms frames (5-11 ms sd in the XBA-107
+ * simulation). The aligner moves each booked slot so that the frame's
+ * present -- slot + the walk's mean time from its slot to its flip + the
+ * presenter's mean time from the flip to its present call -- falls at a fixed
+ * phase of the display's grid (PACING_ALIGN_PHASE_PM: half a refresh by
+ * default, RECOMP_PACING_ALIGN=0.3 sets 0.3). The grid's reference is the
+ * display's latch edge where the source knows it (Android 13+: the frame
+ * deadline; the desktop: the vsync a blocking present returns at), so half a
+ * refresh is as far as can be from the edge on both sides, and the jitter of
+ * a frame's cost and of the host's wake-up keeps every frame on its refresh.
+ * (Android 11-12 give the vsync tick, whose distance to the latch edge is
+ * the device's: the phase is the knob there.)
+ *
+ *  - The schedule advances by the display's measured frame period (n
+ *    refreshes of the grid: 33.367 ms at 59.94 Hz), not the nominal one, so
+ *    the host and display clocks do not drift apart.
+ *  - The correction is slow: at most a 32nd of a refresh per frame (0.5 ms
+ *    at 60 Hz), so a frame is never visibly shorter or longer; the worst
+ *    phase (half a refresh off) is reached in 16 frames.
+ *  - It snaps at once (up to half a refresh) where the schedule restarts
+ *    anyway: the first frame or the first grid, a rate change, a frame late
+ *    by a whole period, a resume (the schedule restarts after the pause). A
+ *    later grid (a panel switching 120 -> 60 Hz) is sought slowly.
+ *  - Only a frame period that is a whole number of refreshes (within 2 %)
+ *    can be aligned: 30 and 60 on 60 or 120 Hz, 30 on 90 Hz. Others (60 on
+ *    90 Hz: 1.5 refreshes) are left as they are, since no phase makes them
+ *    even.
+ *  - No grid (no vsync source, a variable-refresh display, a present that
+ *    never blocks), or a grid older than PACING_ALIGN_STALE_NS (paused):
+ *    the slots are left as booked.
+ *  - Given up (until the grid changes) if the corrections keep pushing the
+ *    same way, PACING_ALIGN_RUN_FRAMES frames in a row averaging over a
+ *    256th of a refresh (65 us at 60 Hz), twice: a grid that follows the flips (a desktop
+ *    present that returns at the caller's phase) would otherwise drag the
+ *    rate along. */
+#define PACING_ALIGN_PHASE_PM   500u            /* the present's phase in a refresh */
+#define PACING_ALIGN_STEP_DIV   32u             /* largest slow step: refresh / 32 */
+#define PACING_ALIGN_TOL_PM     20u             /* frame period vs n refreshes: 2 % */
+#define PACING_ALIGN_STALE_NS   1000000000ull
+#define PACING_ALIGN_RUN_FRAMES 64u
+#define PACING_ALIGN_RUN_DIV    256             /* a run's mean step over refresh / 256 */
+#define PACING_ALIGN_W_MAX_NS   250000000ull
+
+enum {
+    PACING_ALIGN_OFF,           /* RECOMP_PACING_ALIGN=0 */
+    PACING_ALIGN_NO_CLOCK,      /* no locked, fresh display grid */
+    PACING_ALIGN_NOT_DIVISOR,   /* the frame period is not whole refreshes */
+    PACING_ALIGN_SEEKING,       /* phase error over a 16th of a refresh */
+    PACING_ALIGN_LOCKED,
+    PACING_ALIGN_GAVE_UP        /* the grid followed the corrections */
+};
+
+typedef struct {
+    int on;
+    uint32_t phase_pm;
+    uint64_t w_ns;              /* mean slot -> flip of the frames held at the cap */
+    int have_w;
+    int state;
+    uint32_t refreshes;         /* per frame, when aligned */
+    uint64_t refresh_ns;
+    int64_t err_ns;             /* the last predicted phase error */
+    uint32_t gen;               /* the display grid's generation last seen */
+    int have_gen;
+    int64_t run_sum;            /* signed steps over the current run */
+    uint32_t run_n, run_hot;
+    uint32_t snaps;
+    uint32_t changes;           /* bumped on a change of state the log shows */
+} PacingAlign;
+
+static inline void frame_pacing_align_init(PacingAlign *a, int on, uint32_t phase_pm)
+{
+    memset(a, 0, sizeof *a);
+    a->on = on;
+    a->phase_pm = phase_pm < 1000u ? phase_pm : PACING_ALIGN_PHASE_PM;
+    a->state = on ? PACING_ALIGN_NO_CLOCK : PACING_ALIGN_OFF;
+}
+
+static inline const char *frame_pacing_align_state(const PacingAlign *a)
+{
+    switch (a->state) {
+    case PACING_ALIGN_OFF:         return "off (RECOMP_PACING_ALIGN=0)";
+    case PACING_ALIGN_NO_CLOCK:    return "no display clock";
+    case PACING_ALIGN_NOT_DIVISOR: return "the frame period is not a whole number of refreshes";
+    case PACING_ALIGN_SEEKING:     return "seeking the display's phase";
+    case PACING_ALIGN_LOCKED:      return "in phase with the display";
+    default:                       return "given up: the display clock follows the flips";
+    }
+}
+
+static inline void frame_pacing_align_to(PacingAlign *a, int state)
+{
+    int was = a->state;
+    a->state = state;
+    if (was != state && !((was == PACING_ALIGN_SEEKING && state == PACING_ALIGN_LOCKED)
+                          || (was == PACING_ALIGN_LOCKED && state == PACING_ALIGN_SEEKING)))
+        a->changes++;
+}
+
+/* A frame held at the cap flipped w_ns after its slot. */
+static inline void frame_pacing_align_flip(PacingAlign *a, uint64_t w_ns)
+{
+    if (w_ns > PACING_ALIGN_W_MAX_NS)
+        return;
+    if (!a->have_w) {
+        a->w_ns = w_ns;
+        a->have_w = 1;
+    } else {
+        a->w_ns = (a->w_ns * 7u + w_ns) / 8u;
+    }
+}
+
+/* The slot the schedule booked (frame_ns after the previous one; restart:
+ * the schedule started over), the display grid (have_clock, a vsync time,
+ * the refresh period, its generation) and the presenter's mean flip ->
+ * present time. Returns the slot to sleep to. */
+static inline uint64_t frame_pacing_align_slot(PacingAlign *a, uint64_t slot, uint64_t frame_ns,
+                                               int restart, int have_clock, uint64_t vsync_ns,
+                                               uint64_t refresh_ns, uint32_t gen, uint64_t lat_ns,
+                                               uint64_t now_ns)
+{
+    uint64_t n, whole, diff, pred, target;
+    int64_t d, ph, err, max, step, R;
+
+    if (!a->on)
+        return slot;
+    if (!have_clock || !refresh_ns || refresh_ns > 100000000ull
+            || (now_ns > vsync_ns && now_ns - vsync_ns > PACING_ALIGN_STALE_NS)) {
+        frame_pacing_align_to(a, PACING_ALIGN_NO_CLOCK);
+        return slot;
+    }
+    if (!a->have_gen || gen != a->gen) {
+        /* A new grid. The first is snapped to like a restart; a later one
+         * (a panel switching rate, a grid lost and found again) is sought
+         * slowly, since the frames on screen run on the old phase. */
+        if (!a->have_gen)
+            restart = 1;
+        a->have_gen = 1;
+        a->gen = gen;
+        a->run_sum = 0;
+        a->run_n = a->run_hot = 0;
+        if (a->state == PACING_ALIGN_GAVE_UP)
+            frame_pacing_align_to(a, PACING_ALIGN_SEEKING);
+    }
+    if (a->state == PACING_ALIGN_GAVE_UP)
+        return slot;
+    n = (frame_ns + refresh_ns / 2u) / refresh_ns;
+    whole = n * refresh_ns;
+    diff = frame_ns > whole ? frame_ns - whole : whole - frame_ns;
+    if (!n || diff * 1000u > whole * PACING_ALIGN_TOL_PM) {
+        frame_pacing_align_to(a, PACING_ALIGN_NOT_DIVISOR);
+        return slot;
+    }
+    a->refreshes = (uint32_t)n;
+    a->refresh_ns = refresh_ns;
+    R = (int64_t)refresh_ns;
+    /* The display's own frame period (n measured refreshes) rather than the
+     * nominal one the schedule adds: the clocks' drift is not a correction. */
+    if (!restart)
+        slot = (uint64_t)((int64_t)slot + (int64_t)whole - (int64_t)frame_ns);
+    pred = slot + a->w_ns + lat_ns;
+    target = refresh_ns * a->phase_pm / 1000u;
+    d = (int64_t)(pred - vsync_ns);
+    ph = ((d % R) + R) % R;
+    err = ph - (int64_t)target;
+    if (err >= R / 2)
+        err -= R;
+    else if (err < -R / 2)
+        err += R;
+    a->err_ns = err;
+    max = restart ? R / 2 : R / (int64_t)PACING_ALIGN_STEP_DIV;
+    step = -err;
+    if (step > max)
+        step = max;
+    if (step < -max)
+        step = -max;
+    if (restart) {
+        if (step)
+            a->snaps++;
+        a->run_sum = 0;
+        a->run_n = 0;
+    } else {
+        /* A grid that follows the flips never lets the error settle: the
+         * steps keep one sign. Real drift is a few us per frame. */
+        a->run_sum += step;
+        if (++a->run_n >= PACING_ALIGN_RUN_FRAMES) {
+            int64_t s = a->run_sum < 0 ? -a->run_sum : a->run_sum;
+            if (s * PACING_ALIGN_RUN_DIV > R * (int64_t)PACING_ALIGN_RUN_FRAMES)
+                a->run_hot++;
+            else
+                a->run_hot = 0;
+            a->run_sum = 0;
+            a->run_n = 0;
+            if (a->run_hot >= 2) {
+                frame_pacing_align_to(a, PACING_ALIGN_GAVE_UP);
+                return slot;
+            }
+        }
+    }
+    frame_pacing_align_to(a, (err < 0 ? -err : err) * 16 <= R ? PACING_ALIGN_LOCKED
+                                                              : PACING_ALIGN_SEEKING);
+    return (uint64_t)((int64_t)slot + step);
+}
+
 #endif /* XBOXRECOMP_FRAME_PACING_H */

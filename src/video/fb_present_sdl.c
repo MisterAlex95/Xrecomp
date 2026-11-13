@@ -64,6 +64,10 @@
 #if !defined(_WIN32)
 
 #include "frame_times.h"   /* the frame-time log (XBA-29) */
+#include "display_clock.h" /* the display's refresh grid (XBA-136) */
+#ifdef __ANDROID__
+#include "display_vsync_android.h"
+#endif
 #include <SDL.h>
 #include <pthread.h>
 #include <sched.h>
@@ -119,6 +123,7 @@ struct fb_slot {
     uint32_t format;            /* SDL_PIXELFORMAT_* */
     uint64_t aspect;            /* aspect_pack(): class, ZOOM rows */
     uint64_t seq;               /* s_ready_seq it was published as */
+    uint64_t pub_ns;            /* when it was published (XBA-136: flip -> present) */
 };
 
 /* What the window takes from SDL, and gives back on every way out. */
@@ -469,18 +474,92 @@ static int fg_take_due(uint64_t now, uint64_t *next_due)
  * frame_pacing.h), which bounds a title that presents IMMEDIATE by it:
  * RECOMP_DISPLAY_HZ, unless already set. Before the guest starts: the
  * executor reads it once, at its first flip. */
-static void report_display_hz(SDL_Window *win)
+static int report_display_hz(SDL_Window *win)
 {
     SDL_DisplayMode mode;
     int idx = SDL_GetWindowDisplayIndex(win);
     const char *e = getenv("RECOMP_DISPLAY_HZ");
     char hz[16];
 
-    if ((e && *e) || idx < 0 || SDL_GetCurrentDisplayMode(idx, &mode) != 0
+    if (e && *e)
+        return atoi(e);
+    if (idx < 0 || SDL_GetCurrentDisplayMode(idx, &mode) != 0
             || mode.refresh_rate < 24 || mode.refresh_rate > 480)
-        return;
+        return 0;
     snprintf(hz, sizeof hz, "%d", mode.refresh_rate);
     setenv("RECOMP_DISPLAY_HZ", hz, 1);
+    return mode.refresh_rate;
+}
+
+/* XBA-136: the display's refresh grid for RECOMP_PACING=auto's flips in
+ * phase with the panel (frame_pacing_align_slot in the executor). Android:
+ * AChoreographer on its own thread (display_vsync_android.c). Elsewhere:
+ * the return of a vsynced SDL_RenderPresent that blocked (it waited for the
+ * refresh), on this thread; presents that do not block give no grid, and
+ * none is published. Only when the executor uses it (the switches of
+ * pacing_auto, and RECOMP_PACING_ALIGN not 0). Both renderers present
+ * here, so the GPU back end and the CPU rasteriser are aligned alike. */
+extern void nv2a_pb_exec_display_clock(uint64_t vsync_ns, uint64_t period_ns, uint32_t gen);
+extern void nv2a_pb_exec_present_latency(uint64_t lat_ns);
+static DisplayClock s_dclk;
+static int s_dclk_present;              /* the desktop source is on */
+static int s_dclk_wanted;
+static int64_t s_present_lat_ns;        /* flip -> present call, mean */
+
+static int display_align_wanted(void)
+{
+    const char *e = getenv("RECOMP_PACING"), *c = getenv("RECOMP_GPU_FPS_CAP");
+    const char *a = getenv("RECOMP_PACING_ALIGN");
+    return e && (!strcmp(e, "auto") || !strcmp(e, "ask")) && !(c && *c)
+        && !(a && *a == '0' && !strchr(a, '.'));
+}
+
+static void display_sync_start(int hz, int vsync)
+{
+    uint64_t nominal = hz > 0 ? 1000000000ull / (uint64_t)hz : 0;
+
+    s_dclk_wanted = display_align_wanted();
+    if (!s_dclk_wanted)
+        return;
+#ifdef __ANDROID__
+    (void)vsync;
+    if (display_vsync_android_start(nominal))
+        fprintf(stderr, "  [FBWIN] display clock: Choreographer (%s)\n",
+                display_vsync_android_source());
+    else
+        fprintf(stderr, "  [FBWIN] display clock: no Choreographer; flips not aligned\n");
+#else
+    if (!vsync) {
+        fprintf(stderr, "  [FBWIN] display clock: none (RECOMP_PRESENT_VSYNC=0)\n");
+        return;
+    }
+    display_clock_init(&s_dclk, nominal);
+    s_dclk_present = 1;
+    fprintf(stderr, "  [FBWIN] display clock: the returns of vsynced presents that block\n");
+#endif
+}
+
+/* Around each present of a new frame: its flip -> present time, and on the
+ * desktop the present's return when it blocked for at least 2 ms. */
+static void display_sync_present(uint64_t pub_ns, uint64_t t_call, uint64_t t_ret)
+{
+    if (!s_dclk_wanted)
+        return;
+    if (pub_ns && t_call > pub_ns && t_call - pub_ns < 250000000ull) {
+        int64_t l = (int64_t)(t_call - pub_ns);
+        s_present_lat_ns = s_present_lat_ns ? s_present_lat_ns + (l - s_present_lat_ns) / 16 : l;
+        nv2a_pb_exec_present_latency((uint64_t)s_present_lat_ns);
+    }
+    if (s_dclk_present && t_ret - t_call >= 2000000ull) {
+        uint64_t ref, per;
+        uint32_t gen = s_dclk.gen;
+        int was = s_dclk.locked;
+        display_clock_sample(&s_dclk, t_ret, 0);
+        if (display_clock_get(&s_dclk, &ref, &per))
+            nv2a_pb_exec_display_clock(ref, per, s_dclk.gen);
+        else if (was || gen != s_dclk.gen)
+            nv2a_pb_exec_display_clock(0, 0, s_dclk.gen);
+    }
 }
 
 void xbox_FramebufferWindowSet(uint32_t fb_va, uint32_t pitch)
@@ -546,6 +625,7 @@ static void publish(uint32_t w, uint32_t h, uint32_t pitch, uint32_t format)
         s_back = t;
         s_ready_seq++;
         s_slot[s_ready].seq = s_ready_seq;
+        s_slot[s_ready].pub_ns = now_ns();
     }
     pthread_mutex_unlock(&s_lock);
 
@@ -1201,7 +1281,7 @@ int xbox_HostWindowMain(int (*guest_main)(void))
      * game controllers; the input layer then only reads them. */
     xbox_InputSetMainPump(1);
     xbox_InputSdlInit();
-    report_display_hz(win);
+    display_sync_start(report_display_hz(win), vsync);
 #if defined(XBOXRECOMP_LSFG)
     fg_report_display_rate(win);
     fg_start(1);
@@ -1225,7 +1305,7 @@ int xbox_HostWindowMain(int (*guest_main)(void))
 
     while (!quit && !guest_done) {
         SDL_Event ev;
-        uint64_t seq, now;
+        uint64_t seq, now, frame_pub = 0;
         const uint8_t *px = NULL;
         uint32_t fw = 0, fh = 0, pitch = 0, format = 0;
         uint64_t aspect = 0;
@@ -1362,6 +1442,8 @@ int xbox_HostWindowMain(int (*guest_main)(void))
         if (px) {
             /* A frame generation entry, set above. */
         } else if (seq != shown_seq || (reupload && shown_seq)) {
+            if (seq != shown_seq)
+                frame_pub = s_slot[s_front].pub_ns;
             shown_seq = seq;
             px = s_slot[s_front].px;
             fw = s_slot[s_front].w;
@@ -1449,7 +1531,12 @@ int xbox_HostWindowMain(int (*guest_main)(void))
             } else if (tex)
                 SDL_RenderCopy(ren, tex, NULL, NULL);
             perf_overlay_draw(ren);
-            SDL_RenderPresent(ren);
+            {
+                uint64_t t_call = now_ns();
+                SDL_RenderPresent(ren);
+                display_sync_present(frame_pub, t_call, now_ns());
+                frame_pub = 0;
+            }
             /* XBA-29: how even the presents are (scenario 3: sd < 2 ms). */
             {
                 static FrameTimes ft;
@@ -1504,6 +1591,9 @@ int xbox_HostWindowMain(int (*guest_main)(void))
      * A flip held by the lifecycle is let go first: it then sees s_running
      * clear and returns. */
     SDL_DelEventWatch(lifecycle_watch, NULL);
+#ifdef __ANDROID__
+    display_vsync_android_stop();
+#endif
     __atomic_store_n(&s_running, 0, __ATOMIC_SEQ_CST);
     recomp_lifecycle_resume_for(RECOMP_HOLD_ALL);   /* background and menu */
     while (__atomic_load_n(&s_in_present, __ATOMIC_SEQ_CST))
