@@ -9929,18 +9929,72 @@ static void bridge_NtQueryTimer(void)
     g_eax = 0;
 }
 
-/* --- NtReadFileScatter (ordinal 220, 8 args = 32 bytes) --- */
+/* --- NtReadFileScatter (ordinal 220, 8 args = 32 bytes)
+ * NTSTATUS NtReadFileScatter(HANDLE FileHandle, HANDLE Event,
+ *                            PIO_APC_ROUTINE ApcRoutine, PVOID ApcContext,
+ *                            PIO_STATUS_BLOCK IoStatusBlock,
+ *                            PFILE_SEGMENT_ELEMENT SegmentArray,
+ *                            ULONG Length, PLARGE_INTEGER ByteOffset);
+ * XAPI's ReadFileScatter (XBA-114). SegmentArray is one 4-byte element per
+ * page of the transfer (FILE_SEGMENT_ELEMENT is a PVOID on the console):
+ * page i of the Length bytes lands at element i. The pieces are read in
+ * order from ByteOffset (the current position when NULL); a short piece
+ * ends the request. Completion is NtReadFile's: status block, event, APC or
+ * completion packet, none of the last two when it fails synchronously. */
+static void bridge_rw_segments(int write)
+{
+    HANDLE   handle  = bridge_resolve_handle(STACK_ARG(0));
+    uint32_t ios_va  = STACK_ARG(4), seg_va = STACK_ARG(5);
+    uint32_t length  = STACK_ARG(6), off_va = STACK_ARG(7);
+    const char *who  = write ? "NtWriteFileGather" : "NtReadFileScatter";
+    uint32_t done = 0, n = (length + 0xFFFu) / 0x1000u, i;
+    NTSTATUS st = STATUS_SUCCESS;
+    LARGE_INTEGER off = {0};
+    int have_off = 0;
+
+    if (n && !bridge_buf_ok(seg_va, n * 4, who)) {
+        bridge_write_iostatus(ios_va, (NTSTATUS)0xC0000005, 0);
+        g_eax = 0xC0000005u;                 /* STATUS_ACCESS_VIOLATION */
+        return;
+    }
+    if (off_va) {
+        off.LowPart  = BRIDGE_MEM32(off_va);
+        off.HighPart = (LONG)BRIDGE_MEM32(off_va + 4);
+        have_off = off.QuadPart >= 0;        /* -1/-2: current position / end, as NtReadFile */
+    }
+    for (i = 0; i < n; i++) {
+        uint32_t buf = BRIDGE_MEM32(seg_va + i * 4);
+        uint32_t want = length - done < 0x1000u ? length - done : 0x1000u;
+        XBOX_IO_STATUS_BLOCK ios;
+        LARGE_INTEGER at;
+
+        if (!bridge_buf_ok(buf, want, who)) {
+            st = (NTSTATUS)0xC0000005;
+            break;
+        }
+        memset(&ios, 0, sizeof ios);
+        at.QuadPart = off.QuadPart + done;
+        st = write
+           ? xbox_NtWriteFile(handle, NULL, NULL, NULL, &ios, XBOX_TO_NATIVE(buf), want,
+                              have_off ? &at : (off_va ? &off : NULL))
+           : xbox_NtReadFile(handle, NULL, NULL, NULL, &ios, XBOX_TO_NATIVE(buf), want,
+                             have_off ? &at : (off_va ? &off : NULL));
+        done += (uint32_t)ios.Information;
+        if (st != STATUS_SUCCESS || (uint32_t)ios.Information < want)
+            break;
+    }
+    /* End of file part-way is a short transfer, not a failure. */
+    if (!write && done && st == (NTSTATUS)0xC0000011)
+        st = STATUS_SUCCESS;
+    bridge_write_iostatus(ios_va, st, done);
+    g_eax = (uint32_t)st;
+    bridge_complete_file_io(STACK_ARG(0), STACK_ARG(1), STACK_ARG(2), STACK_ARG(3),
+                            ios_va, g_eax, done, 0);
+}
+
 static void bridge_NtReadFileScatter(void)
 {
-    (void)STACK_ARG(0);
-    (void)STACK_ARG(1);
-    (void)STACK_ARG(2);
-    (void)STACK_ARG(3);
-    (void)STACK_ARG(4);
-    (void)STACK_ARG(5);
-    (void)STACK_ARG(6);
-    (void)STACK_ARG(7);
-    g_eax = 0;
+    bridge_rw_segments(0);
 }
 
 /* --- NtRemoveIoCompletion (ordinal 223, 5 args = 20 bytes)
@@ -10033,18 +10087,13 @@ static void bridge_NtSignalAndWaitForSingleObjectEx(void)
     g_eax = 0;
 }
 
-/* --- NtWriteFileGather (ordinal 237, 8 args = 32 bytes) --- */
+/* --- NtWriteFileGather (ordinal 237, 8 args = 32 bytes)
+ * The gathering sibling of NtReadFileScatter, same arguments: page i of the
+ * Length bytes comes from element i (XAPI's WriteFileGather). nxdk declares
+ * it BOOLEAN; it returns an NTSTATUS like the read. */
 static void bridge_NtWriteFileGather(void)
 {
-    (void)STACK_ARG(0);
-    (void)STACK_ARG(1);
-    (void)STACK_ARG(2);
-    (void)STACK_ARG(3);
-    (void)STACK_ARG(4);
-    (void)STACK_ARG(5);
-    (void)STACK_ARG(6);
-    (void)STACK_ARG(7);
-    g_eax = 0;
+    bridge_rw_segments(1);
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════

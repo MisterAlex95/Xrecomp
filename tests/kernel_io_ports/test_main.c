@@ -16,6 +16,10 @@
  *      another thread blocks until a packet is posted; a file joined to the
  *      object (FileCompletionInformation) posts its reads that carry an
  *      ApcContext and no routine, with the file's key; NtClose ends it.
+ *   2. Scatter / gather: NtReadFileScatter puts page i of the transfer at
+ *      segment i, from ByteOffset; a transfer that runs into the end of the
+ *      file is short, not failed; NtWriteFileGather writes page i from
+ *      segment i (read back through the scatter); the event is set.
  */
 #include "kernel.h"
 #include "xbox_memory_layout.h"
@@ -67,16 +71,23 @@ enum {
     ANSI_VA    = 0x61100,
     OA_VA      = 0x61200,
     BUF_VA     = 0x70000,
+    SEG_VA     = 0x60500,         /* FILE_SEGMENT_ELEMENT arrays */
+    PAGES_VA   = 0x80000,         /* pages for the segments, out of order */
 };
+
+#define FILE_BYTES 12288u
+static uint8_t pattern(uint32_t i) { return i < 4 ? (uint8_t)"PORT"[i] : (uint8_t)(i * 7u + 3u); }
 
 enum {
     S_CLOSE, S_OPEN, S_READ, S_SETINFO, S_WAIT1,
     S_IOC_CREATE, S_IOC_SET, S_IOC_REMOVE, S_IOC_QUERY,
+    S_SCATTER, S_GATHER, S_EVENT,
     S_COUNT
 };
 static const uint32_t slot_ord[S_COUNT] = {
     187, 202, 219, 226, 233,
     191, 227, 223, 212,
+    220, 237, 189,
 };
 
 static RECOMP_TLS int t_index;
@@ -225,7 +236,7 @@ static void test_io_completion(uint32_t file)
         CALL(S_READ, file, 0, 0, 0, IOSB_VA, BUF_VA, 4, OFFSET_VA);
         CALL(S_IOC_QUERY, port, OUT_VA);
         check(M32(OUT_VA) == 0, "a read with no ApcContext posts nothing", NULL);
-        *(int64_t *)(mem + TIMEOUT2_VA) = 4096;
+        *(int64_t *)(mem + TIMEOUT2_VA) = 0x100000;   /* past the end */
         CALL(S_READ, file, 0, 0, 0x5151, IOSB_VA, BUF_VA, 4, TIMEOUT2_VA);
         CALL(S_IOC_QUERY, port, OUT_VA);
         check(g_eax == 0 && M32(OUT_VA) == 0,
@@ -235,6 +246,62 @@ static void test_io_completion(uint32_t file)
     CALL(S_CLOSE, port);
     CALL(S_IOC_SET, port, 1, 2, 3, 4);
     check(g_eax == 0xC0000008u, "after NtClose the handle is no object: STATUS_INVALID_HANDLE", NULL);
+}
+
+/* ═══════════════════ 2. Scatter / gather ═══════════════════ */
+
+static void test_scatter_gather(uint32_t file)
+{
+    static const uint32_t page_of[3] = { 2, 0, 5 };   /* segment i -> page */
+    uint32_t i, ev, bad = 0;
+
+    become_thread(0);
+    CALL(S_EVENT, HANDLE_VA, 0, 0 /* notification */, 0);
+    ev = M32(HANDLE_VA);
+    for (i = 0; i < 3; i++)
+        M32(SEG_VA + 4 * i) = PAGES_VA + page_of[i] * 0x1000;
+    memset(mem + PAGES_VA, 0, 6 * 0x1000);
+    M32(OFFSET_VA) = 0; M32(OFFSET_VA + 4) = 0;
+    CALL(S_SCATTER, file, ev, 0, 0, IOSB_VA, SEG_VA, 10000, OFFSET_VA);
+    for (i = 0; i < 10000; i++)
+        if (M8(PAGES_VA + page_of[i / 0x1000] * 0x1000 + i % 0x1000) != pattern(i))
+            bad++;
+    snprintf(d, sizeof d, "status 0x%08X info %u bad %u", g_eax, M32(IOSB_VA + 4), bad);
+    check(g_eax == 0 && M32(IOSB_VA) == 0 && M32(IOSB_VA + 4) == 10000 && !bad && esp_ok(8),
+          "NtReadFileScatter: page i at segment i, 10000 bytes (8 arguments)", d);
+    check(M8(PAGES_VA + 5 * 0x1000 + (10000 - 8192)) == 0,
+          "nothing past Length in the last segment", NULL);
+    CALL(S_WAIT1, ev, 0, TIMEOUT_VA);
+    check(g_eax == 0, "the event is set", NULL);
+
+    M32(TIMEOUT2_VA) = 8192; M32(TIMEOUT2_VA + 4) = 0;
+    CALL(S_SCATTER, file, 0, 0, 0, IOSB_VA, SEG_VA, 8192, TIMEOUT2_VA);
+    snprintf(d, sizeof d, "status 0x%08X info %u", g_eax, M32(IOSB_VA + 4));
+    check(g_eax == 0 && M32(IOSB_VA + 4) == FILE_BYTES - 8192,
+          "into the end of the file: short (4096), not failed", d);
+
+    for (i = 0; i < 0x1000; i++) {
+        M8(PAGES_VA + 3 * 0x1000 + i) = (uint8_t)(0xA0 ^ i);
+        M8(PAGES_VA + 1 * 0x1000 + i) = (uint8_t)(0x5C ^ i);
+    }
+    M32(SEG_VA + 0x20) = PAGES_VA + 3 * 0x1000;
+    M32(SEG_VA + 0x24) = PAGES_VA + 1 * 0x1000;
+    M32(TIMEOUT2_VA) = 4096;
+    CALL(S_GATHER, file, 0, 0, 0, IOSB_VA, SEG_VA + 0x20, 8192, TIMEOUT2_VA);
+    snprintf(d, sizeof d, "status 0x%08X info %u", g_eax, M32(IOSB_VA + 4));
+    check(g_eax == 0 && M32(IOSB_VA + 4) == 8192 && esp_ok(8),
+          "NtWriteFileGather writes two pages (8 arguments)", d);
+    memset(mem + PAGES_VA, 0, 6 * 0x1000);
+    CALL(S_SCATTER, file, 0, 0, 0, IOSB_VA, SEG_VA, FILE_BYTES, OFFSET_VA);
+    for (bad = 0, i = 0; i < FILE_BYTES; i++) {
+        uint8_t want = i < 4096 ? pattern(i) : i < 8192 ? (uint8_t)(0xA0 ^ (i - 4096))
+                                                       : (uint8_t)(0x5C ^ (i - 8192));
+        if (M8(PAGES_VA + page_of[i / 0x1000] * 0x1000 + i % 0x1000) != want)
+            bad++;
+    }
+    snprintf(d, sizeof d, "bad %u", bad);
+    check(g_eax == 0 && !bad, "read back: page i of the gather came from segment i", d);
+    CALL(S_CLOSE, ev);
 }
 
 int main(void)
@@ -263,7 +330,8 @@ int main(void)
         printf("cannot create %s\n", path);
         return 1;
     }
-    fwrite("PORT", 1, 4, f);
+    for (i = 0; i < (int)FILE_BYTES; i++)
+        fputc(pattern((uint32_t)i), f);
     fclose(f);
 
     for (i = 0; i < S_COUNT; i++)
@@ -279,6 +347,8 @@ int main(void)
     check(file != 0, "NtOpenFile opens the stand-in disc file", d);
 
     test_io_completion(file);
+    if (file)
+        test_scatter_gather(file);
 
     if (file)
         CALL(S_CLOSE, file);
