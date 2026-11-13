@@ -199,6 +199,13 @@
     <string name="SHORTCUT_LAUNCHER">Lanceur</string>
     <string name="SHORTCUT_LAUNCHER_LONG">Lanceur : réglages et données du jeu</string>
 
+    <!-- A pinned home-screen shortcut for one game (Manage › Add to home screen) -->
+    <string name="SHORTCUT_ADD">Ajouter à l\'écran d\'accueil</string>
+    <string name="SHORTCUT_ADD_DETAIL">Un raccourci sur votre écran d\'accueil avec le logo de ce jeu. Le toucher ouvre ce jeu : il démarre s\'il est prêt, sinon sa page indique ce qu\'il lui faut.</string>
+    <string name="SHORTCUT_REQUESTED">Raccourci demandé : confirmez-le dans la fenêtre de votre écran d\'accueil.</string>
+    <string name="SHORTCUT_REFUSED">Votre écran d\'accueil n\'a pas accepté le raccourci.</string>
+    <string name="SHORTCUT_GAME_GONE">Le jeu de ce raccourci n\'est plus dans la bibliothèque : choisissez-en un ici.</string>
+
     <!-- La préparation sur l'appareil (docs/android/prepare.md) -->
     <string name="PREPARE">Préparer</string>
     <string name="PREPARING">Préparation…</string>

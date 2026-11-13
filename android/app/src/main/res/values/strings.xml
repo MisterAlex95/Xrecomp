@@ -222,6 +222,13 @@
     <string name="SHORTCUT_LAUNCHER">Launcher</string>
     <string name="SHORTCUT_LAUNCHER_LONG">Launcher: settings and game data</string>
 
+    <!-- A pinned home-screen shortcut for one game (Manage › Add to home screen) -->
+    <string name="SHORTCUT_ADD">Add to home screen</string>
+    <string name="SHORTCUT_ADD_DETAIL">A shortcut on your home screen with this game\'s logo. Tapping it opens this game: it starts when it is ready, otherwise its page shows what it needs.</string>
+    <string name="SHORTCUT_REQUESTED">Shortcut requested: confirm it in your home screen\'s dialog.</string>
+    <string name="SHORTCUT_REFUSED">Your home screen did not accept the shortcut.</string>
+    <string name="SHORTCUT_GAME_GONE">The game of this shortcut is no longer in the library: choose one here.</string>
+
     <!-- The on-device Prepare (docs/android/prepare.md): Home's Prepare row, the Preparing screen, the notification -->
     <string name="PREPARE">Prepare</string>
     <string name="PREPARING">Preparing…</string>
