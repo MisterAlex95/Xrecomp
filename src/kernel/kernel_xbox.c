@@ -51,8 +51,12 @@ void xbox_kernel_set_version(USHORT major, USHORT minor, USHORT build, USHORT qf
     xbox_KrnlVersion.Qfe   = qfe;
 }
 
-/* Crypto keys - zeroed, not needed for PC operation.
- * These are unique per-console on real hardware. */
+/* Console keys: zeros, the same on every host, on purpose.
+ * On the console the HD key is per machine and the others are Microsoft's;
+ * none is in the repo. XAPI keys save signatures with them (XcHMAC), so a
+ * key generated per device would make a save copied from the player's Mac to
+ * their phone fail its signature; a constant keeps saves portable between
+ * hosts. A save from a real console does not verify either way. */
 UCHAR xbox_EEPROMKey[16]              = {0};
 UCHAR xbox_HDKey[16]                  = {0};
 UCHAR xbox_SignatureKey[16]           = {0};
@@ -130,14 +134,14 @@ NTSTATUS __stdcall xbox_XeUnloadSection(PXBE_SECTION_HEADER Section)
  * ExQueryNonVolatileSetting / ExSaveNonVolatileSetting read and write EEPROM
  * settings. On real hardware these are stored in the 256-byte EEPROM on the
  * SMBus. For recompilation, we return sensible defaults:
- *   - Region: North America
- *   - Video: NTSC, XC_VIDEO_FLAGS_60Hz only (no widescreen, no HDTV modes:
- *     a title that honours those flags would switch its own output; the
- *     presenter widens a title that declares wide frames instead, see
- *     src/video/aspect_policy.h)
+ *   - Region and video standard: from the title's certificate (below)
+ *   - Video: 60Hz on NTSC (on PAL with RECOMP_PAL60=1), widescreen and 480p
+ *     when the player turns them on (RECOMP_WIDESCREEN, RECOMP_480P). A
+ *     title that honours widescreen draws anamorphic 16:9 frames; showing
+ *     them wide is the presenter's aspect setting (src/video/aspect_policy.h)
  *   - Language: RECOMP_LANGUAGE, else English
  *   - Audio: Stereo, Dolby Digital
- *   - DVD Region: Region 1 (North America)
+ *   - DVD Region: 1 for North America, 2 for Japan and the rest of the world
  *   - Time zone: the host's
  * ============================================================================ */
 
@@ -242,6 +246,89 @@ static ULONG eeprom_language(void)
     return 1;
 }
 
+/* The console's region (XBA-121). A console plays the discs of its own
+ * region: the XBE certificate lists the regions a title allows (+0xA0), and
+ * a title may check XGetGameRegion against them or pick its video standard
+ * from XGetVideoStandard. So the console here is one the title allows:
+ * North America when it does (NTSC 60 Hz, the old fixed answer), then Japan,
+ * then the rest of the world (PAL 50 Hz). RECOMP_GAME_REGION=na|jp|eu
+ * chooses one (a multi-region disc as a PAL console sees it, or the old
+ * behaviour for a PAL disc). Read on every query, like the language. */
+static ULONG s_cert_regions;
+
+void xbox_ConsoleSetTitleRegions(ULONG CertGameRegions)
+{
+    s_cert_regions = CertGameRegions;
+    xbox_log(XBOX_LOG_INFO, XBOX_LOG_XBOX,
+        "Certificate game regions 0x%08lX: console region %lu, AV region 0x%08lX, video flags 0x%08lX",
+        (unsigned long)CertGameRegions, (unsigned long)xbox_ConsoleGameRegion(),
+        (unsigned long)xbox_ConsoleAvRegion(), (unsigned long)xbox_ConsoleVideoFlags());
+}
+
+static int env_on(const char *name)
+{
+    const char *e = getenv(name);
+    return e && (!strcmp(e, "1") || !strcmp(e, "on") || !strcmp(e, "true") || !strcmp(e, "yes"));
+}
+
+ULONG xbox_ConsoleGameRegion(void)
+{
+    const char *e = getenv("RECOMP_GAME_REGION");
+    if (e && *e) {
+        char c = (char)(e[0] | 0x20);
+        if (c == 'n' || c == 'u' || !strcmp(e, "1"))
+            return XC_GAME_REGION_NA;
+        if (c == 'j' || !strcmp(e, "2"))
+            return XC_GAME_REGION_JAPAN;
+        if (c == 'e' || c == 'p' || c == 'r' || !strcmp(e, "4"))
+            return XC_GAME_REGION_RESTOFWORLD;
+        {
+            static int warned;
+            if (!warned) {
+                warned = 1;
+                xbox_log(XBOX_LOG_WARN, XBOX_LOG_XBOX,
+                    "RECOMP_GAME_REGION=%s is not na, jp or eu; the title's region", e);
+            }
+        }
+    }
+    if (s_cert_regions & XC_GAME_REGION_NA)
+        return XC_GAME_REGION_NA;
+    if (s_cert_regions & XC_GAME_REGION_JAPAN)
+        return XC_GAME_REGION_JAPAN;
+    if (s_cert_regions & XC_GAME_REGION_RESTOFWORLD)
+        return XC_GAME_REGION_RESTOFWORLD;
+    return XC_GAME_REGION_NA;
+}
+
+ULONG xbox_ConsoleAvRegion(void)
+{
+    switch (xbox_ConsoleGameRegion()) {
+    case XC_GAME_REGION_JAPAN:       return XC_AV_REGION_NTSC_J;
+    case XC_GAME_REGION_RESTOFWORLD: return XC_AV_REGION_PAL_I;
+    default:                         return XC_AV_REGION_NTSC_M;
+    }
+}
+
+/* XC_VIDEO, the dashboard's video settings. On a PAL console 60Hz is the
+ * "PAL 60" choice, off by default: a title without PAL 60 support runs at
+ * 50 Hz whatever it says, and the vblank pacing follows the mode it sets. */
+ULONG xbox_ConsoleVideoFlags(void)
+{
+    ULONG v = 0;
+    if (xbox_ConsoleAvRegion() != XC_AV_REGION_PAL_I || env_on("RECOMP_PAL60"))
+        v |= XC_VIDEO_FLAGS_60Hz;
+    if (env_on("RECOMP_WIDESCREEN"))
+        v |= XC_VIDEO_FLAGS_WIDESCREEN;
+    if (env_on("RECOMP_480P"))
+        v |= XC_VIDEO_FLAGS_HDTV_480p;
+    return v;
+}
+
+static ULONG console_dvd_region(void)
+{
+    return xbox_ConsoleGameRegion() == XC_GAME_REGION_NA ? 1 : 2;
+}
+
 NTSTATUS __stdcall xbox_ExQueryNonVolatileSetting(
     ULONG ValueIndex, PULONG Type, PVOID Value, ULONG ValueLength, PULONG ResultLength)
 {
@@ -262,9 +349,10 @@ NTSTATUS __stdcall xbox_ExQueryNonVolatileSetting(
         break;
 
     case XC_VIDEO:
-        /* NTSC 4:3, 480i at 60 Hz. The old low-half-word value read as 0 (#301). */
+        /* The flags live in the high half-word: the old low-half-word value
+         * read as 0 (#301). */
         if (ValueLength >= sizeof(ULONG)) {
-            *(PULONG)Value = XC_VIDEO_FLAGS_60Hz;
+            *(PULONG)Value = xbox_ConsoleVideoFlags();
             if (Type) *Type = 4; /* REG_DWORD */
             if (ResultLength) *ResultLength = sizeof(ULONG);
         }
@@ -293,9 +381,20 @@ NTSTATUS __stdcall xbox_ExQueryNonVolatileSetting(
         break;
 
     case XC_DVD_REGION:
-        /* Region 1 (North America) */
         if (ValueLength >= sizeof(ULONG)) {
-            *(PULONG)Value = 1;
+            *(PULONG)Value = console_dvd_region();
+            if (Type) *Type = 4;
+            if (ResultLength) *ResultLength = sizeof(ULONG);
+        }
+        break;
+
+    case XC_FACTORY_GAME_REGION:
+    case XC_FACTORY_AV_REGION:
+        /* Unanswered before: the default case zeroed them, a console of no
+         * region and no video standard. */
+        if (ValueLength >= sizeof(ULONG)) {
+            *(PULONG)Value = ValueIndex == XC_FACTORY_GAME_REGION
+                           ? xbox_ConsoleGameRegion() : xbox_ConsoleAvRegion();
             if (Type) *Type = 4;
             if (ResultLength) *ResultLength = sizeof(ULONG);
         }
@@ -355,9 +454,9 @@ NTSTATUS __stdcall xbox_ExQueryNonVolatileSetting(
         memcpy(blk + 0x28, &s_tz.std_bias, 4);
         memcpy(blk + 0x2C, &s_tz.dlt_bias, 4);
         { ULONG v = eeprom_language(); memcpy(blk + 0x30, &v, 4); }       /* RECOMP_LANGUAGE */
-        { ULONG v = XC_VIDEO_FLAGS_60Hz; memcpy(blk + 0x34, &v, 4); }
+        { ULONG v = xbox_ConsoleVideoFlags(); memcpy(blk + 0x34, &v, 4); }
         /* 0x58 is MiscFlags (0); DvdRegion is the last field, at 0x5C. */
-        { ULONG v = 1; memcpy(blk + 0x5C, &v, 4); }                       /* DVD region 1 */
+        { ULONG v = console_dvd_region(); memcpy(blk + 0x5C, &v, 4); }
         if (Type) *Type = 3;
         if (ResultLength) *ResultLength = sizeof blk;
         if (ValueLength < sizeof blk)

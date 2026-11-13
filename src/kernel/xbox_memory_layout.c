@@ -3572,6 +3572,9 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
             extern void xbox_path_set_title_id(uint32_t);
             xbox_path_set_title_id(*(const DWORD *)(xbe + cert_off + 8));
         }
+        /* The allowed game regions (+0xA0): the console's region (XBA-121). */
+        if (cert_off + 0xA4 <= xbe_size)
+            xbox_ConsoleSetTitleRegions(*(const DWORD *)(xbe + cert_off + 0xA0));
         int sections_short = 0;
         size_t total_bytes = 0;
 

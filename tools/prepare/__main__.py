@@ -1,7 +1,8 @@
 """
 Prepare an Xbox title from your own copy of the game.
 
-    python -m tools.prepare SOURCE [--work DIR] [--no-build] [--no-data]
+    python -m tools.prepare SOURCE [--work DIR] [--no-build] [--no-data] [--progress]
+    python -m tools.prepare SOURCE [--work DIR] --check [--json]
 
 SOURCE is a disc image (.iso / .xiso), a folder holding default.xbe (the
 extracted disc), or a default.xbe. Steps, each skipped when its output is
@@ -20,19 +21,28 @@ The work folder (default: <title id>-work next to SOURCE) holds everything it
 writes; nothing is written into the toolkit. Nothing from the game is ever
 uploaded or shared: the output is for your own machines.
 
+--progress adds machine-readable progress lines (XBA_PROGRESS / XBA_RESULT,
+tools/prepare/progress.py) to the output; --check says whether the title is
+prepared and up to date without doing anything. Both are the contract with
+the macOS launcher: docs/macos/launcher.md « Prepare interface ».
+
 With --android it makes a title pack for the Android app instead (libtitle.so
 + pack.json, built with clang and ld.lld, no CMake), with machine-readable
 progress lines: docs/android/prepare.md.
 """
 
 import argparse
+import errno
 import hashlib
 import json
 import os
+import re
 import shutil
+import signal
 import subprocess
 import sys
 import time
+import traceback
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 TEMPLATE = os.path.join(ROOT, "templates", "new-game")
@@ -40,23 +50,117 @@ PROFILES = os.path.join(ROOT, "profiles")
 DISCOVERY_FILE = "discovered.jsonl"     # in the work folder: src/kernel/recomp_discovery.h
 STEPS = 5
 
+# --progress (docs/macos/launcher.md « Prepare interface »): the Reporter that
+# writes the protocol lines, the step running, and the error code a failure
+# in it maps to. None / unused without --progress: the output stays as it was.
+_REP = None
+_STEP = 0
+_CODE = "INTERNAL"
+STEP_CODES = {1: "NO_XBE", 2: "ANALYSE_FAILED", 3: "INTERNAL", 4: "LIFT_FAILED", 5: "COMPILE_FAILED"}
+
 
 def step(n, msg):
+    global _STEP, _CODE
+    _STEP, _CODE = n, STEP_CODES[n]
     print("[%d/%d] %s" % (n, STEPS, msg), flush=True)
+    progress(0, msg)
 
 
-def run(args, log, cwd=ROOT):
-    """Run a command, its output appended to `log`; raise with the tail on failure."""
+def progress(pct, msg):
+    """An XBA_PROGRESS line for the step running (with --progress only)."""
+    if _REP is not None:
+        _REP.progress(_STEP, pct, msg)
+
+
+def note(msg, pct=None):
+    """A detail line of the step running, also as its progress message."""
+    print("      " + msg, flush=True)
+    if pct is not None:
+        progress(pct, msg)
+
+
+class CommandFailed(SystemExit):
+    """run()'s failure: a SystemExit whose text is what it always printed."""
+
+    def __init__(self, rc, args, log, tail):
+        SystemExit.__init__(self, "command failed (%d): %s\n--- %s (end) ---\n%s"
+                            % (rc, " ".join(args), log, tail))
+        self.rc, self.cmd, self.log = rc, args, log
+
+    def short(self):
+        tool = self.cmd[2] if len(self.cmd) > 2 and self.cmd[1] == "-m" else os.path.basename(self.cmd[0])
+        if tool == "cmake" and "--build" in self.cmd:
+            tool = "cmake --build"
+        return "%s failed (exit %d), see %s" % (tool, self.rc, self.log)
+
+
+class Cancelled(BaseException):
+    """SIGTERM / SIGINT under --progress."""
+
+
+# Ninja's "[12/345] ..." and make's "[ 45%] ...": how far a build is.
+_NINJA = re.compile(r"^\[(\d+)/(\d+)\]")
+_MAKE = re.compile(r"^\[\s*(\d+)%\]")
+
+
+def build_fraction(line):
+    """(0.0-1.0, "12/345" or "45 %") from one line of a CMake build's output, or None."""
+    m = _NINJA.match(line)
+    if m:
+        return int(m.group(1)) / max(1, int(m.group(2))), "%s/%s" % m.groups()
+    m = _MAKE.match(line)
+    if m:
+        return min(100, int(m.group(1))) / 100.0, "%s %%" % m.group(1)
+    return None
+
+
+class BuildProgress:
+    """on_line for the build: step 5 from 5 to 90 %, never going back, one
+    line when the percentage moves or every 2 s (a big title has thousands of
+    files). CMake's own "[1/2] Re-checking globbed directories" is not the build."""
+
+    def __init__(self, lo=5, hi=90):
+        self.lo, self.hi, self.last, self.t = lo, hi, None, 0.0
+
+    def __call__(self, line):
+        got = build_fraction(line)
+        if got is None or "Re-checking globbed directories" in line:
+            return
+        pct = max(self.lo + int((self.hi - self.lo) * got[0]), self.last or 0)
+        now = time.time()
+        if pct != self.last or now - self.t >= 2.0:
+            self.last, self.t = pct, now
+            progress(pct, "compiling %s" % got[1])
+
+
+def run(args, log, cwd=ROOT, on_line=None):
+    """Run a command, its output appended to `log`; raise with the tail on failure.
+    With on_line, each output line is also handed to it as it comes."""
     t0 = time.time()
     with open(log, "a") as f:
         f.write("\n$ %s\n" % " ".join(args))
         f.flush()
-        rc = subprocess.call(args, cwd=cwd, stdout=f, stderr=subprocess.STDOUT)
+        if on_line is None:
+            p = subprocess.Popen(args, cwd=cwd, stdout=f, stderr=subprocess.STDOUT)
+        else:
+            p = subprocess.Popen(args, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                 universal_newlines=True, errors="replace", bufsize=1)
+        try:
+            if on_line is not None:
+                for line in p.stdout:
+                    f.write(line)
+                    on_line(line)
+                p.stdout.close()
+                f.flush()
+            rc = p.wait()
+        except BaseException:       # as subprocess.call: never leave the child running
+            p.kill()
+            p.wait()
+            raise
     if rc != 0:
         with open(log) as f:
             tail = f.read()[-3000:]
-        raise SystemExit("command failed (%d): %s\n--- %s (end) ---\n%s"
-                         % (rc, " ".join(args), log, tail))
+        raise CommandFailed(rc, args, log, tail)
     return time.time() - t0
 
 
@@ -131,6 +235,7 @@ def unpack_image(image, dest):
             pct = done * 100 // total
             if pct != last and pct % 5 == 0:
                 print("      extracting the disc: %d %%" % pct, flush=True)
+                progress(90 + pct * 8 // 100, "extracting the disc: %d %%" % pct)
                 last = pct
 
 
@@ -280,6 +385,12 @@ def main(argv=None):
     ap.add_argument("--no-data", action="store_true",
                     help="do not extract the disc image for the desktop build")
     ap.add_argument("--force", action="store_true", help="redo every step")
+    mi = ap.add_argument_group("for a launcher (docs/macos/launcher.md « Prepare interface »)")
+    mi.add_argument("--progress", action="store_true",
+                    help="also print XBA_PROGRESS / XBA_RESULT lines (tools/prepare/progress.py)")
+    mi.add_argument("--check", action="store_true",
+                    help="say whether the title is prepared and up to date (absent, stale, ready); writes nothing")
+    mi.add_argument("--json", action="store_true", help="with --check: one JSON object on stdout")
     an = ap.add_argument_group("Android title pack (docs/android/prepare.md)")
     an.add_argument("--android", action="store_true", help="make a title pack for the Android app")
     an.add_argument("--pack-dir", help="packs folder: the pack goes to PACK_DIR/<TITLEID>/")
@@ -306,6 +417,71 @@ def main(argv=None):
     if a.android:
         from tools.prepare import android
         return android.run(a, sys.modules[__name__])
+    if a.check:
+        return check(a)
+    if a.progress:
+        return run_with_progress(a)
+    desktop(a)
+    return 0
+
+
+def run_with_progress(a):
+    """desktop() with the protocol lines: progress on each step, then one
+    XBA_RESULT. A failure still prints what it printed without --progress (on
+    stderr), then the XBA_RESULT error line on stdout."""
+    global _REP, _STEP, _CODE
+    from tools.prepare.progress import DESKTOP_STEP_IDS, Reporter
+    _REP, _STEP, _CODE = Reporter(ids=DESKTOP_STEP_IDS), 0, "INTERNAL"
+    rep = _REP
+
+    def on_signal(signum, frame):
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        raise Cancelled("signal %d" % signum)
+    old = signal.signal(signal.SIGTERM, on_signal), signal.signal(signal.SIGINT, on_signal)
+    try:
+        kind, path = desktop(a)
+        if kind == "exe":
+            rep.ok_exe(path)
+        else:
+            # --no-build: no executable; the project folder instead.
+            rep.ok_project(path)
+        return 0
+    except (Cancelled, KeyboardInterrupt) as e:
+        rep.error("CANCELLED", "cancelled (%s)" % (e.args[0] if e.args else "signal"))
+        return 130
+    except CommandFailed as e:
+        print(e.code, file=sys.stderr, flush=True)
+        rep.error(_CODE, e.short())
+        return 1
+    except SystemExit as e:
+        if e.code is None or isinstance(e.code, int):
+            raise
+        print(e.code, file=sys.stderr, flush=True)
+        rep.error(_CODE, str(e.code).splitlines()[0])
+        return 1
+    except OSError as e:
+        traceback.print_exc()
+        rep.error("NO_SPACE" if e.errno == errno.ENOSPC else "INTERNAL", str(e))
+        return 1
+    except Exception as e:
+        traceback.print_exc()
+        from tools.xiso.xdvdfs import XisoError
+        if isinstance(e, XisoError):        # an unreadable image: the step's code (NO_XBE in step 1)
+            rep.error(_CODE, str(e))
+        else:                               # a bug
+            rep.error("INTERNAL", "%s: %s" % (type(e).__name__, e))
+        return 1
+    finally:
+        signal.signal(signal.SIGTERM, old[0])
+        signal.signal(signal.SIGINT, old[1])
+        _REP = None
+
+
+def desktop(a):
+    """The five desktop steps. ("exe", path) when built, ("project", folder)
+    with --no-build; SystemExit on a failure."""
+    global _CODE
     py = sys.executable
     src = os.path.abspath(a.source)
     tmp_work = a.work or os.path.join(os.path.dirname(src), "xboxrecomp-work")
@@ -313,6 +489,7 @@ def main(argv=None):
 
     step(1, "finding default.xbe")
     xbe, data_dir, image = find_xbe(src, tmp_work)
+    _CODE = "BAD_XBE"
     if a.game_dir:
         data_dir = os.path.abspath(a.game_dir)
     tmp_json = os.path.join(tmp_work, "xbe_info.json")
@@ -331,6 +508,7 @@ def main(argv=None):
             xbe = os.path.join(work, "xbe", "default.xbe")
     log = os.path.join(work, "prepare.log")
     print("      %s (title ID %s), work folder %s" % (info["title"], tid, work), flush=True)
+    progress(30, "%s (title ID %s)" % (info["title"], tid))
     ident = identify_xbe(xbe, work)
     if ident:
         print("      built with: %s" % ident["summary"], flush=True)
@@ -339,6 +517,7 @@ def main(argv=None):
         profile = load_profile(tid, ident)
         env = pack.env_force_of(profile)
     except ValueError as e:
+        _CODE = "BAD_PROFILE"
         raise SystemExit("profiles: %s" % e)
     if profile:
         print("      profile layers: %s" % " ".join(profile["keys"]), flush=True)
@@ -350,6 +529,8 @@ def main(argv=None):
             print("      the title forces %s=%s" % (k, v), flush=True)
     else:
         print("      no profile layer for this XBE: the generic template only", flush=True)
+    progress(100, "%s (title ID %s)%s" % ((profile or {}).get("name") or info["title"], tid,
+                                          ", title profile" if profile and profile["title"] else ""))
 
     stamp_path = os.path.join(work, "stamp.json")
     stamp = {} if a.force else read_stamp(stamp_path)
@@ -373,8 +554,9 @@ def main(argv=None):
 
     step(2, "analysing the executable (a few minutes the first time)")
     if same and stamp.get("analysis"):
-        print("      up to date", flush=True)
+        note("up to date", 100)
     else:
+        progress(2, "xbe_parser")
         run([py, "-m", "tools.xbe_parser", xbe, "--json", xjson], log)
         cmd = [py, "-m", "tools.disasm", xbe, "-o", os.path.join(an, "disasm"), "--force"]
         # Function starts the analysis cannot find and a run did ("seed_functions":
@@ -383,28 +565,33 @@ def main(argv=None):
             cmd += ["--seed-functions", fn]
         if disc_seeds:
             cmd += ["--seed-functions", disc_seeds]
+        progress(5, "disassembling")
         t = run(cmd, log)
-        print("      disassembled in %.0f s" % t, flush=True)
+        note("disassembled in %.0f s" % t, 60)
+        progress(60, "identifying library functions")
         run([py, "-m", "tools.func_id", xbe,
              "--functions", os.path.join(an, "disasm", "functions.json"),
              "--strings", os.path.join(an, "disasm", "strings.json"),
              "--xrefs", os.path.join(an, "disasm", "xrefs.json"),
              "-o", os.path.join(an, "func_id")], log)
+        progress(80, "ABI analysis")
         run([py, "-m", "tools.abi_analysis", xbe, "--disasm-dir", os.path.join(an, "disasm"),
              "--func-id-dir", os.path.join(an, "func_id"),
              "--output-dir", os.path.join(an, "abi")], log)
         stamp = dict(want, analysis=True)
         with open(stamp_path, "w") as f:
             json.dump(stamp, f)
+        progress(100, "analysis done")
 
     step(3, "assembling the title project")
     proj = os.path.join(work, "project")
     name = assemble_project(proj, profile, info)
+    progress(100, "project %s" % name)
 
     step(4, "lifting the code to C (a few minutes the first time)")
     gen = os.path.join(proj, "src", "recomp", "gen")
     if same and stamp.get("lift") and os.listdir(gen):
-        print("      up to date", flush=True)
+        note("up to date", 100)
     else:
         # Lift into a fresh folder, then keep the files that did not change
         # (XBA-65): a re-prepare after a few new seeds rebuilds a few files,
@@ -421,15 +608,16 @@ def main(argv=None):
             cmd += ["--exclude-manual", os.path.join(proj, "src", "title", fn)]
         t = run(cmd, log)
         kept, written, removed = sync_generated(fresh, gen)
-        print("      %d C files in %.0f s (%d changed, %d unchanged, %d removed)"
-              % (len(os.listdir(gen)), t, written, kept, removed), flush=True)
-        stamp["lift"] = True
+        note("%d C files in %.0f s (%d changed, %d unchanged, %d removed)"
+             % (len(os.listdir(gen)), t, written, kept, removed), 100)
+        # The executable no longer matches the lift until a build succeeds (--check).
+        stamp["lift"], stamp["built"] = True, False
         with open(stamp_path, "w") as f:
             json.dump(stamp, f)
 
     if a.no_build:
         print("done: %s (not built)" % proj)
-        return 0
+        return "project", proj
 
     step(5, "building for this computer")
     build = os.path.join(proj, "build")
@@ -442,8 +630,13 @@ def main(argv=None):
          "-DXBA_IMAGE_MAP=" + (a.image_map or os.path.join(work, IMAGE_MAP)).replace("\\", "/"),
          # Which image this is, when not default.xbe (RECOMP_IMAGE: XeImageFileName).
          "-DXBA_IMAGE_NAME=" + (a.image_name or "")] + gen_args, log)
-    t = run(["cmake", "--build", build, "--parallel"], log)
-    print("      built in %.0f s" % t, flush=True)
+    progress(5, "compiling")
+    t = run(["cmake", "--build", build, "--parallel"], log, on_line=BuildProgress() if _REP else None)
+    note("built in %.0f s" % t, 90)
+    if stamp.get("built") is False:
+        stamp["built"] = True
+        with open(stamp_path, "w") as f:
+            json.dump(stamp, f)
     exe = os.path.join(build, name)
     if image and not a.no_data:
         data_dir = os.path.join(work, "game")
@@ -455,12 +648,120 @@ def main(argv=None):
         if not os.path.exists(link):
             os.symlink(data_dir, link)
     if not a.image_map and data_dir:
+        progress(98, "the disc's other images")
         prepare_other_images(a, py, xbe, data_dir, work, exe, log)
     print("\nReady: %s\n  game data: %s" % (exe, data_dir or "(none: put the disc's files in %s)" % link))
-    return 0
+    progress(100, "ready")
+    return "exe", exe
 
 
 IMAGE_MAP = "images.map"
+
+
+def check_state(source, work=None):
+    """--check: {"state": "absent" | "stale" | "ready", "reasons": [...],
+    "exe", "title", "title_id", "env_force", "work"} for SOURCE, from what
+    a prepare would compare (the stamp: XBE, toolkit commit, profile layers,
+    seeds from earlier runs) and what it built. Reads only: nothing is
+    written, not even the work folder. identify.IdentifyError when SOURCE is
+    not usable; profiles.ProfileError / ValueError for a bad profile."""
+    import tempfile
+    from tools.prepare import identify, pack
+    from tools.compat.__main__ import project_exe
+    src = os.path.abspath(source)
+    kind, xbe, data = identify.read_source(src)
+    x = identify.parse_xbe(data)
+    tid = "%08X" % x.certificate.title_id
+    work = os.path.abspath(work or os.path.join(os.path.dirname(src), "%s-work" % tid))
+    tmp = None
+    if xbe is None:             # an image: the copy a prepare made, else a temporary one
+        mine = os.path.join(work, "xbe", "default.xbe")
+        if os.path.isfile(mine):
+            xbe = mine
+            with open(mine, "rb") as f:
+                data = f.read()
+        else:
+            tmp = tempfile.mkdtemp(prefix="xba-check-")
+            xbe = os.path.join(tmp, "default.xbe")
+            with open(xbe, "wb") as f:
+                f.write(data)
+    try:
+        from tools import xbe_ident
+        try:
+            ident = xbe_ident.identify(xbe)
+        except Exception:
+            ident = None
+        profile = load_profile(tid, ident)
+        env = pack.env_force_of(profile)
+    finally:
+        if tmp:
+            shutil.rmtree(tmp, ignore_errors=True)
+    out = {"state": "absent", "reasons": [], "exe": project_exe(work),
+           "title": (profile or {}).get("name") or x.certificate.title_name.strip() or tid,
+           "title_id": tid, "env_force": env, "work": work}
+    stamp = read_stamp(os.path.join(work, "stamp.json"))
+    reasons = []
+    if stamp:
+        if stamp.get("xbe") != hashlib.sha256(data).hexdigest():
+            reasons.append("xbe")
+        if stamp.get("toolkit") != toolkit_version():
+            reasons.append("toolkit")
+        if stamp.get("profile") != profile_digest(profile):
+            reasons.append("profile")
+        if discovered_changed(work, stamp):
+            reasons.append("discovered")
+        if not (stamp.get("analysis") and stamp.get("lift")) or stamp.get("built") is False:
+            reasons.append("not_built")
+    elif out["exe"]:
+        reasons.append("no_stamp")
+    if out["exe"]:
+        out["state"] = "stale" if reasons else "ready"
+        out["reasons"] = reasons
+    elif stamp:
+        out["reasons"] = ["not_built"]
+    return out
+
+
+def discovered_changed(work, stamp):
+    """True when the next prepare would analyse again for what runs found:
+    the seeds file differs from the stamp's, or discovered.jsonl holds
+    addresses neither seeded nor rejected yet (they may become seeds)."""
+    from tools.prepare import discovered
+    seeds_path = os.path.join(work, discovered.SEEDS)
+    if discovered.digest(seeds_path if os.path.isfile(seeds_path) else None) != stamp.get("discovered", ""):
+        return True
+    disc = os.path.join(work, discovered.DISCOVERY)
+    if not os.path.isfile(disc):
+        return False
+    from tools.seed_from_log.__main__ import scan_discovery
+    with open(disc, encoding="utf-8", errors="replace") as f:
+        candidates = scan_discovery(f.read())
+    seeds = discovered._read_json(seeds_path, [])
+    rejected = discovered._read_json(os.path.join(work, discovered.REJECTED), [])
+    known = {e["start"].lower() for e in seeds if isinstance(e, dict)} | {r.lower() for r in rejected}
+    return any(("0x%08x" % va) not in known for va in candidates)
+
+
+def check(a):
+    """--check [--json]: exit 0 with the state; 1 when the source or its
+    profile is not usable ({"state": "error", "code", "msg"} with --json)."""
+    from tools.prepare import identify
+    try:
+        out = check_state(a.source, a.work)
+    except identify.IdentifyError as e:
+        out = {"state": "error", "code": e.code, "msg": e.msg}
+    except ValueError as e:         # profiles.ProfileError, pack.env_force_of
+        out = {"state": "error", "code": "BAD_PROFILE", "msg": "profiles: %s" % e}
+    if a.json:
+        print(json.dumps(out))
+    elif out["state"] == "error":
+        print("%s: %s" % (out["code"], out["msg"]), file=sys.stderr)
+    else:
+        print("%s %s (%s): %s%s" % (out["title_id"], out["title"], out["work"], out["state"],
+                                    " (%s)" % ", ".join(out["reasons"]) if out["reasons"] else ""))
+        if out["exe"]:
+            print("  %s" % out["exe"])
+    return 1 if out["state"] == "error" else 0
 
 
 def prepare_other_images(a, py, xbe, data_dir, work, exe, log):

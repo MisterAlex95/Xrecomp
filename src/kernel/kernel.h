@@ -1129,15 +1129,15 @@ VOID    __stdcall xbox_XcHMAC(const UCHAR* Key, ULONG KeyLength, const UCHAR* Da
 ULONG   __stdcall xbox_XcPKGetKeyLen(PVOID PublicKey);
 ULONG   __stdcall xbox_XcPKDecPrivate(PVOID PrivateKey, PVOID Input, PVOID Output);
 ULONG   __stdcall xbox_XcPKEncPublic(PVOID PublicKey, PVOID Input, PVOID Output);
-BOOLEAN __stdcall xbox_XcVerifyPKCS1Signature(PVOID Hash, PVOID PublicKey, PVOID Signature);
+BOOLEAN __stdcall xbox_XcVerifyPKCS1Signature(PVOID Signature, PVOID PublicKey, PVOID Digest);
 ULONG   __stdcall xbox_XcModExp(PULONG Result, PULONG Base, PULONG Exponent, PULONG Modulus, ULONG ModulusLength);
 
 VOID    __stdcall xbox_XcDESKeyParity(PUCHAR Key, ULONG KeyLength);
 VOID    __stdcall xbox_XcKeyTable(ULONG CipherSelect, PVOID KeyTable, const UCHAR* Key);
 VOID    __stdcall xbox_XcBlockCrypt(ULONG CipherSelect, PVOID Output, PVOID Input, PVOID KeyTable, ULONG Operation);
 VOID    __stdcall xbox_XcBlockCryptCBC(ULONG CipherSelect, ULONG OutputLength, PVOID Output, PVOID Input, PVOID KeyTable, ULONG Operation, PVOID FeedbackVector);
-VOID    __stdcall xbox_XcCryptService(ULONG Operation, PVOID Param);
-VOID    __stdcall xbox_XcUpdateCrypto(PVOID Param1, PVOID Param2);
+ULONG   __stdcall xbox_XcCryptService(ULONG Operation, PVOID Param);
+VOID    __stdcall xbox_XcUpdateCrypto(PVOID NewVector, PVOID RomVector);
 
 /* ============================================================================
  * Miscellaneous stubs
@@ -1269,6 +1269,40 @@ NTSTATUS __stdcall xbox_ExSaveNonVolatileSetting(ULONG ValueIndex, ULONG Type, P
 #define XC_MISC                   0x11
 #define XC_DVD_REGION             0x12
 #define XC_MAX_OS                 0xFF
+/* The factory section (nxdk xboxkrnl.h): the console's video standard and
+ * refresh (AV region) and the game regions it plays (XGetGameRegion). */
+#define XC_FACTORY_AV_REGION      0x103
+#define XC_FACTORY_GAME_REGION    0x104
+
+/* Game regions: XC_FACTORY_GAME_REGION, and the XBE certificate's allowed
+ * regions (+0xA0) use the same bits. */
+#define XC_GAME_REGION_NA            0x00000001
+#define XC_GAME_REGION_JAPAN         0x00000002
+#define XC_GAME_REGION_RESTOFWORLD   0x00000004
+#define XC_GAME_REGION_MANUFACTURING 0x80000000
+
+/* XC_FACTORY_AV_REGION: the video standard (AV_STANDARD_* << 8) and refresh
+ * (AV_REFRESH_*), the same fields as the AV capabilities word. */
+#define XC_AV_REGION_NTSC_M       0x00400100
+#define XC_AV_REGION_NTSC_J       0x00400200
+#define XC_AV_REGION_PAL_I        0x00800300
+
+/* The console's region and video settings (kernel_xbox.c, XBA-121), one
+ * source for ExQueryNonVolatileSetting, the AV capabilities and the vblank:
+ *  - region: RECOMP_GAME_REGION, else the first the title's certificate
+ *    allows of NA, Japan, rest of world (NA when it names none);
+ *  - standard and refresh: NTSC-M 60 Hz, NTSC-J 60 Hz, PAL-I 50 Hz;
+ *  - XC_VIDEO: 60Hz (on NTSC, on PAL with RECOMP_PAL60=1), widescreen
+ *    (RECOMP_WIDESCREEN=1), 480p (RECOMP_480P=1). */
+void  xbox_ConsoleSetTitleRegions(ULONG CertGameRegions);
+ULONG xbox_ConsoleGameRegion(void);
+ULONG xbox_ConsoleAvRegion(void);
+ULONG xbox_ConsoleVideoFlags(void);
+/* The AV capabilities word (AV query 6): pack, standard, refresh, user flags. */
+ULONG xbox_AvCapabilities(void);
+/* The refresh the title's display runs at: 50 for a PAL-I 576-line mode set
+ * by AvSetDisplayMode, else 60; before any mode, the console's refresh. */
+ULONG xbox_AvRefreshHz(void);
 
 /* Older spellings kept so existing call sites still build. */
 #define XC_PARENTAL_CONTROL       XC_P_CONTROL_GAMES

@@ -142,6 +142,9 @@
     <string name="OPT_GPU_SCALE_DETAIL">Le rendu GPU peut dessiner l\'image 3D à 2 ou 3 fois la résolution de la console, ou à la taille qui remplit exactement l\'écran. Plus net, au prix de plus de travail pour le GPU, de chaleur et de batterie. Les effets comme le halo et les ombres gardent leur résolution d\'origine. Auto : ce que choisit le profil du jeu (1× pour l\'instant). Sans effet avec le rendu logiciel. (RECOMP_GPU_SCALE)</string>
     <string name="VAL_SCALE_1">1×</string>
     <string name="VAL_SCALE_FIT">Adapter à l\'écran</string>
+    <string name="OPT_WIDESCREEN">Écran large</string>
+    <string name="OPT_WIDESCREEN_DETAIL">Annonce au jeu un téléviseur 16:9, comme le réglage du tableau de bord de la Xbox. Un jeu qui le gère dessine alors une image plus large ; mettez Format d\'image sur 16:9 pour l\'afficher sur toute la largeur. Un jeu sans mode large l\'ignore. S\'applique au prochain lancement du jeu. (RECOMP_WIDESCREEN)</string>
+    <string name="OPT_480P_DETAIL">Annonce au jeu un téléviseur qui accepte le 480p progressif, comme le réglage du tableau de bord de la Xbox avec le câble HD. Un jeu qui le propose rend des images entières au lieu d\'images entrelacées ; les autres l\'ignorent. S\'applique au prochain lancement du jeu. (RECOMP_480P)</string>
     <string name="OPT_ASPECT">Format d\'image</string>
     <string name="OPT_ASPECT_DETAIL">Auto affiche le jeu en 16:9 quand il sait dessiner une image plus large, et garde les menus et les vidéos dans leur forme d\'origine. 4:3 affiche toujours l\'image d\'origine de la console, avec des bandes sur les côtés. 16:9 remplit toujours l\'écran ; un jeu sans mode large est étiré.</string>
     <string name="VAL_ASPECT_4_3">4:3</string>

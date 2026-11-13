@@ -3793,8 +3793,8 @@ static void kernel_vblank_raise(void)
     }
 }
 
-/* Vblank N is due at t0 + N * 1000 / 60 ms: an absolute schedule, so the
- * rate is 60 Hz however coarse the timer thread's sleep. It used to be
+/* Vblank N is due at t0 + N * 1000 / 60 ms (50 for PAL): an absolute
+ * schedule, so the rate holds however coarse the timer thread's sleep. It used to be
  * "now + 16" checked on a 10 ms tick, which fired every 20 ms -- 50 Hz -- and
  * a title's frame limiter counts these. Kept in nanoseconds: whole
  * milliseconds put each vblank up to a millisecond off its edge, and a title
@@ -3805,26 +3805,30 @@ static void kernel_vblank_raise(void)
  * edge, 0 when vblanks are off. */
 #define VBLANK_RESTART_NS 100000000ull
 
-static uint64_t vblank_due(uint64_t t0_ns, uint64_t n)
+static uint64_t vblank_due(uint64_t t0_ns, uint64_t n, uint32_t hz)
 {
-    return t0_ns + n * 1000000000ull / 60u;
+    return t0_ns + n * 1000000000ull / hz;
 }
 
+/* The rate is the display's: 50 Hz once a title sets a PAL-I mode, else 60
+ * (xbox_AvRefreshHz, XBA-121); a change restarts the schedule. */
 static int kernel_vblank_tick_ns(uint64_t now_ns, uint64_t *next_due_ns)
 {
     static uint64_t t0_ns, count;
-    static int started;
+    static uint32_t hz;
+    uint32_t want_hz;
     uint64_t due;
 
     *next_due_ns = 0;
     if (kernel_vblank_mode() != XBOX_VBLANK_PACED)
         return 0;
-    if (!started) {
-        started = 1;
+    want_hz = (uint32_t)xbox_AvRefreshHz();
+    if (hz != want_hz) {
+        hz = want_hz;
         t0_ns = now_ns;
         count = 0;
     }
-    due = vblank_due(t0_ns, count);
+    due = vblank_due(t0_ns, count, hz);
     if (now_ns < due) {
         *next_due_ns = due;
         return 0;
@@ -3834,7 +3838,7 @@ static int kernel_vblank_tick_ns(uint64_t now_ns, uint64_t *next_due_ns)
         count = 0;
     }
     count++;
-    *next_due_ns = vblank_due(t0_ns, count);
+    *next_due_ns = vblank_due(t0_ns, count, hz);
     kernel_vblank_count(kernel_clock_ms());
     kernel_vblank_raise();
     return 1;
@@ -6940,13 +6944,11 @@ static void bridge_MmDeleteKernelStack(void)
 
 /* ── Xc* remaining crypto (ordinals 341-345, 347-351)
  *
- * Split into two kinds, both of which clear the memory-model bar:
- *  - the public-key / DES / ModExp entries are documented stubs that ignore
- *    their arguments (no Xbox Live, no on-console key derivation), so the
- *    pointers pass through without being dereferenced;
- *  - XcBlockCrypt/XcKeyTable/XcCryptService/XcUpdateCrypto are the same shape.
- * XcVerifyPKCS1Signature is worth singling out: it returns TRUE so that
- * signature checks succeed instead of rebooting the dashboard. */
+ * RSA, XcModExp and DES are real (kernel_crypto.c, which documents the buffer
+ * layouts): every pointer is a guest buffer, translated as is.
+ * XcVerifyPKCS1Signature checks for real but accepts a failure unless
+ * RECOMP_PKCS1_VERIFY=strict: what titles verify is signed with Microsoft's
+ * key, which is not here. */
 static void bridge_XcPKGetKeyLen(void)
 {
     g_eax = (uint32_t)xbox_XcPKGetKeyLen(XBOX_TO_NATIVE(STACK_ARG(0)));
@@ -7005,14 +7007,28 @@ static void bridge_XcBlockCryptCBC(void)
 
 static void bridge_XcCryptService(void)
 {
-    xbox_XcCryptService(STACK_ARG(0), XBOX_TO_NATIVE(STACK_ARG(1)));
-    g_eax = 0;
+    g_eax = (uint32_t)xbox_XcCryptService(STACK_ARG(0), XBOX_TO_NATIVE(STACK_ARG(1)));
 }
 
+/* The original CRYPTO_VECTOR (16 entries, ordinals 335-350) the title gets
+ * back holds the guest addresses of those exports: the synthetic thunk VA of
+ * the slot the title imported each through, 0 for one it did not import. */
 static void bridge_XcUpdateCrypto(void)
 {
-    xbox_XcUpdateCrypto(XBOX_TO_NATIVE(STACK_ARG(0)),
-        XBOX_TO_NATIVE(STACK_ARG(1)));
+    uint32_t rom = STACK_ARG(1);
+    int i, slot;
+
+    xbox_XcUpdateCrypto(XBOX_TO_NATIVE(STACK_ARG(0)), XBOX_TO_NATIVE(rom));
+    if (rom && bridge_va_mapped(rom, 16 * 4))
+        for (i = 0; i < 16; i++) {
+            uint32_t va = 0;
+            for (slot = 0; slot < XBOX_KERNEL_THUNK_TABLE_SIZE; slot++)
+                if (g_slot_ordinals[slot] == (ULONG)(335 + i)) {
+                    va = KERNEL_VA_BASE + (uint32_t)slot * 4;
+                    break;
+                }
+            BRIDGE_MEM32(rom + 4 * (uint32_t)i) = va;
+        }
     g_eax = 0;
 }
 

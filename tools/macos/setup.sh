@@ -6,7 +6,9 @@
 # By default it sets up the Python side, which is quick:
 #
 #   1. SDL2 and libepoxy via Homebrew, which the OpenGL video backend links
-#   2. a virtualenv in .venv with the suite's Python dependencies
+#      (found with pkg-config, so sdl2-compat counts as SDL2)
+#   2. a virtualenv in .venv with the suite's Python dependencies, made with
+#      the newest Python 3.10 or later found (Homebrew's first)
 #   3. a `py` shell function, so Windows' `py -3` works here too
 #
 # That is enough for `py -3 -m pytest tools/`. The conformance suite also needs
@@ -41,11 +43,23 @@ step() { echo; echo "== $* =="; }
 # ---------------------------------------------------------------- prerequisites
 step "Checking prerequisites"
 
-if ! command -v python3 >/dev/null 2>&1; then
-    echo "python3 is required. Install Python 3.10+ and re-run." >&2
+# A Python 3.10 or later: macOS's /usr/bin/python3 is older, so Homebrew's
+# versioned ones come first, newest first, then whatever is on PATH.
+py_ok() { "$1" -c 'import sys; sys.exit(sys.version_info < (3, 10))' >/dev/null 2>&1; }
+PYTHON=""
+for v in 3.14 3.13 3.12 3.11 3.10; do
+    for p in "/opt/homebrew/bin/python$v" "/usr/local/bin/python$v" "$(command -v "python$v" 2>/dev/null || true)"; do
+        if [ -n "$p" ] && [ -x "$p" ] && py_ok "$p"; then PYTHON="$p"; break 2; fi
+    done
+done
+if [ -z "$PYTHON" ] && command -v python3 >/dev/null 2>&1 && py_ok python3; then
+    PYTHON="$(command -v python3)"
+fi
+if [ -z "$PYTHON" ]; then
+    echo "Python 3.10 or later is required (brew install python@3.12) and re-run." >&2
     exit 1
 fi
-echo "python3: $(python3 --version 2>&1)"
+echo "python: $PYTHON ($("$PYTHON" --version 2>&1))"
 
 
 # ----------------------------------------------------------------------- venv
@@ -55,18 +69,30 @@ step "Native libraries"
 # not needed for the test suite, so a missing Homebrew is a warning rather than
 # a failure -- someone setting up only to run the tests should not be stopped by
 # a dependency they will not reach.
-BREW_FORMULAE="sdl2 libepoxy"
+#
+# Each is checked with pkg-config, which is what CMake asks: Homebrew's SDL2
+# today is sdl2-compat (SDL2's API over SDL3), which installs sdl2.pc but
+# conflicts with the old sdl2 formula, so `brew list sdl2` would miss it and
+# try to install the conflicting one.
 if ! command -v brew >/dev/null 2>&1; then
-    echo "Homebrew not found; skipping $BREW_FORMULAE."
+    echo "Homebrew not found; skipping SDL2 and libepoxy."
     echo "The test suite does not need them, but the OpenGL video backend does."
     echo "Install Homebrew from https://brew.sh, or install them another way."
 else
+    BREW_PREFIX="$(brew --prefix)"
+    export PATH="$BREW_PREFIX/bin:$PATH"
+    if ! command -v pkg-config >/dev/null 2>&1; then
+        echo "Installing: pkgconf (pkg-config)"
+        brew install pkgconf
+    fi
     missing=""
-    for f in $BREW_FORMULAE; do
-        if brew list --formula "$f" >/dev/null 2>&1; then
-            echo "$f: already installed."
+    # "<pkg-config module> <formula to install when it is missing>"
+    for pair in "sdl2 sdl2-compat" "epoxy libepoxy"; do
+        set -- $pair
+        if pkg-config --exists "$1"; then
+            echo "$1: already installed ($(pkg-config --modversion "$1"))."
         else
-            missing="$missing $f"
+            missing="$missing $2"
         fi
     done
     if [ -n "$missing" ]; then
@@ -79,11 +105,17 @@ fi
 step "Python environment"
 
 VENV="$ROOT_DIR/.venv"
+if [ -x "$VENV/bin/python3" ] && ! py_ok "$VENV/bin/python3"; then
+    # Made by an earlier version of this script from the system's Python 3.9,
+    # or its Python is gone: a venv cannot change its Python, so make it again.
+    echo ".venv has $("$VENV/bin/python3" --version 2>&1 || echo "a missing Python"); making it again with $PYTHON ..."
+    rm -rf "$VENV"
+fi
 if [ ! -x "$VENV/bin/python3" ]; then
     echo "Creating virtualenv in .venv ..."
-    python3 -m venv "$VENV"
+    "$PYTHON" -m venv "$VENV"
 else
-    echo ".venv already exists."
+    echo ".venv already exists ($("$VENV/bin/python3" --version 2>&1))."
 fi
 
 # Test that every dependency imports, not that the directory exists and not

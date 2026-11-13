@@ -1591,7 +1591,41 @@ NTSTATUS __stdcall xbox_NtSetSystemTime(PLARGE_INTEGER SystemTime, PLARGE_INTEGE
  * ============================================================================ */
 
 static ULONG g_av_saved_data_address = 0;
-static ULONG g_av_display_mode = 0;
+static volatile ULONG g_av_display_mode = 0;
+
+/* The AV capabilities word (XBA-121), which D3D reads to pick its display
+ * mode row and XAPI to answer XGetVideoFlags / XGetVideoStandard:
+ *   pack (0x000000FF) | standard (0x0000FF00) | user flags (0xFFFF0000),
+ * the standard and refresh from the factory AV region, the user flags
+ * (widescreen 0x00010000, 480p 0x00080000, 60Hz 0x00400000) from XC_VIDEO,
+ * as the console's kernel builds it (Cxbx-Reloaded's AvQueryAvCapabilities
+ * is the public description). One source with ExQueryNonVolatileSetting:
+ * the word and the EEPROM cannot disagree.
+ *
+ * The pack is the HDTV (component) pack, whatever the settings: with no HDTV
+ * flag set it carries 480i, as a console with that pack and 480p unticked
+ * does, and it is the pack D3D's tables were already matched against
+ * (Half-Life 2's 640x480 60Hz row is 0x00480104). */
+ULONG xbox_AvCapabilities(void)
+{
+    return AV_PACK_HDTV
+         | (xbox_ConsoleAvRegion() & 0x00C0FF00u)
+         | (xbox_ConsoleVideoFlags() & 0xFFFF0000u);
+}
+
+/* AV mode words (the XDK's AV_MODE_*): bits 30-31 are the output, and
+ * 0x40000000 is the 625-line PAL-I output, 50 Hz (AV_MODE_640x480_TO_PAL_I_YC
+ * is 0x44030307; PAL 60 and NTSC modes have 0, HDTV and VGA 0x80000000). */
+#define AV_MODE_OUT_MASK     0xC0000000u
+#define AV_MODE_OUT_PAL_50   0x40000000u
+
+ULONG xbox_AvRefreshHz(void)
+{
+    ULONG mode = g_av_display_mode;
+    if (mode)
+        return (mode & AV_MODE_OUT_MASK) == AV_MODE_OUT_PAL_50 ? 50 : 60;
+    return (xbox_ConsoleVideoFlags() & XC_VIDEO_FLAGS_60Hz) ? 60 : 50;
+}
 
 ULONG __stdcall xbox_AvGetSavedDataAddress(void)
 {
@@ -1621,12 +1655,9 @@ VOID __stdcall xbox_AvSendTVEncoderOption(
          * row, so the mode scan ran off the end of the table and device
          * creation failed with E_FAIL.
          *
-         * HDTV pack keeps 480p/720p available to titles that offer them;
-         * NTSC-M and 60Hz are the North American retail default, and match
-         * the region reported by ExQueryNonVolatileSetting. */
-        *Result = AV_PACK_HDTV
-                | (AV_STANDARD_NTSC_M << AV_STANDARD_SHIFT)
-                | AV_REFRESH_60Hz;
+         * The standard, refresh and user flags are the EEPROM's
+         * (xbox_AvCapabilities). */
+        *Result = xbox_AvCapabilities();
         break;
 
     case AV_OPTION_QUERY_MODE:
@@ -1635,10 +1666,9 @@ VOID __stdcall xbox_AvSendTVEncoderOption(
         break;
 
     case AV_OPTION_QUERY_AV_CAPABILITIES:
-        /* Report support for 480i, 480p, 720p, and widescreen */
-        *Result = AV_FLAGS_HDTV_480i | AV_FLAGS_HDTV_480p
-                | AV_FLAGS_HDTV_720p | AV_FLAGS_WIDESCREEN
-                | AV_FLAGS_60Hz;
+        /* Used to claim 480p, 720p and widescreen in bits of its own while
+         * the EEPROM said none: the same word as above now. */
+        *Result = xbox_AvCapabilities();
         break;
 
     case AV_OPTION_QUERY_ENCODER_TYPE:
@@ -1647,10 +1677,7 @@ VOID __stdcall xbox_AvSendTVEncoderOption(
         break;
 
     case AV_OPTION_QUERY_MODE_CAPS:
-        /* Same as capabilities for our purposes */
-        *Result = AV_FLAGS_HDTV_480i | AV_FLAGS_HDTV_480p
-                | AV_FLAGS_HDTV_720p | AV_FLAGS_WIDESCREEN
-                | AV_FLAGS_60Hz;
+        *Result = xbox_AvCapabilities();
         break;
 
     case AV_OPTION_SET_MODE:
@@ -1729,8 +1756,11 @@ NTSTATUS __stdcall xbox_HalReadSMBusValue(
             *DataValue = 0x60;
             break;
         case SMC_CMD_AV_PACK:
-            /* HDTV/Component pack */
-            *DataValue = AV_PACK_HDTV;
+            /* The HDTV pack, in the SMC's own numbering (0 SCART, 1 HDTV,
+             * 2 VGA, 3 RFU, 4 S-Video, 6 standard, 7 none), which XGetAVPack
+             * returns as is (XC_AV_PACK_HDTV is 1). It used to answer
+             * AV_PACK_HDTV (4), the AV query's numbering: S-Video here. */
+            *DataValue = 0x01;
             break;
         case SMC_CMD_CPU_TEMP:
             *DataValue = 40; /* 40 degrees C */
