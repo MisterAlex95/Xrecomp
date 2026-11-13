@@ -9,6 +9,7 @@
  */
 #include "kernel.h"
 #include "kernel_ksync.h"
+#include "xbox_memory_layout.h"   /* RECOMP_TLS */
 
 #include <stdlib.h>
 #include <string.h>
@@ -233,13 +234,119 @@ uint32_t ks_slist_flush(uint32_t head)
  *   +0x10 EntryListHead   +0x18 CurrentCount   +0x1C MaximumCount
  *   +0x20 ThreadListHead
  *
- * Not modelled: the concurrency limit. The console counts a queue's active
- * threads and stops handing out entries at MaximumCount -- 1 on a one-CPU
- * Xbox -- but it also knows when such a thread blocks on something else and
- * lets the next one go. Without that second half, enforcing the first would
- * deadlock any title whose queue worker waits on an event, so every waiter
- * may take an entry. CurrentCount stays 0. A queue waited on with
- * KeWaitForSingleObject is not supported either. */
+ * The concurrency limit (XBA-133): a thread that took an entry is
+ * associated with the queue and counts in CurrentCount while it runs; a
+ * remover gets an entry only while CurrentCount < MaximumCount (1 on a
+ * one-CPU Xbox, the default). The console also lets the next thread go when
+ * an associated thread blocks on something else; here a thread counts as
+ * not running for the length of every kernel call it makes
+ * (ks_thread_kernel_enter / _leave, from kernel_thunk_dispatch), which
+ * covers every wait and errs only towards letting more threads run --
+ * during a call that does not block. A thread running guest code without
+ * any kernel call counts as running, as on the console. RECOMP_QUEUE_LIMIT=0
+ * hands an entry to every waiter, as before. A queue waited on with
+ * KeWaitForSingleObject is not supported. */
+
+/* ── Queue association of a thread, for the concurrency limit ──
+ *
+ * kind 1: a KQUEUE at guest `obj`, CurrentCount/MaximumCount in its body;
+ * kind 2: an I/O completion object, slot `obj` of s_ports. `gen` tells a
+ * queue initialised again (or a port closed) from the one the thread took
+ * its entry from: a stale association is dropped, never counted. */
+static RECOMP_TLS int      t_q_kind;
+static RECOMP_TLS uint32_t t_q_obj;
+static RECOMP_TLS unsigned t_q_gen;
+static RECOMP_TLS int      t_q_counted;   /* counts in CurrentCount now */
+static RECOMP_TLS int      t_q_depth;     /* kernel call nesting */
+
+static int q_limit_on(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("RECOMP_QUEUE_LIMIT");
+        on = !(e && *e == '0');
+    }
+    return on;
+}
+
+/* KQUEUE generations, by address: bumped by KeInitializeQueue and
+ * KeRundownQueue. Lock held. */
+#define KQ_GEN_MAX 128
+static struct { uint32_t va; unsigned gen; } s_kq_gen[KQ_GEN_MAX];
+static unsigned s_gen_seq;
+
+static unsigned kq_gen(uint32_t q, int bump)
+{
+    int i, free_i = -1;
+    for (i = 0; i < KQ_GEN_MAX; i++) {
+        if (s_kq_gen[i].va == q) {
+            if (bump) s_kq_gen[i].gen = ++s_gen_seq;
+            return s_kq_gen[i].gen;
+        }
+        if (!s_kq_gen[i].va && free_i < 0) free_i = i;
+    }
+    if (free_i < 0)
+        free_i = (int)(q / 8u % KQ_GEN_MAX);   /* full: evict, which only drops associations */
+    s_kq_gen[free_i].va = q;
+    s_kq_gen[free_i].gen = ++s_gen_seq;
+    return s_kq_gen[free_i].gen;
+}
+
+static volatile int32_t *q_current(void);   /* the associated object's count, or NULL */
+
+/* Lock held: the thread takes an entry from (kind, obj) and counts there. */
+static void q_associate(int kind, uint32_t obj, unsigned gen)
+{
+    volatile int32_t *cur;
+    if (t_q_counted && (cur = q_current()) != NULL)
+        (*cur)--;                    /* moving from another queue */
+    t_q_kind = kind; t_q_obj = obj; t_q_gen = gen;
+    if ((cur = q_current()) != NULL)
+        (*cur)++;
+    t_q_counted = 1;
+}
+
+void ks_thread_kernel_enter(void)
+{
+    volatile int32_t *cur;
+    if (t_q_depth++ != 0 || !t_q_kind || !t_q_counted)
+        return;
+    ks_lock();
+    if ((cur = q_current()) != NULL)
+        (*cur)--;
+    t_q_counted = 0;
+    ks_unlock();
+    ks_wake_all();                   /* the next remover may go */
+}
+
+void ks_thread_kernel_leave(void)
+{
+    volatile int32_t *cur;
+    if (--t_q_depth != 0 || !t_q_kind || t_q_counted)
+        return;
+    ks_lock();
+    if ((cur = q_current()) != NULL) {
+        (*cur)++;
+        t_q_counted = 1;
+    } else {
+        t_q_kind = 0;                /* its queue is gone */
+    }
+    ks_unlock();
+}
+
+void ks_thread_exit(void)
+{
+    volatile int32_t *cur;
+    if (!t_q_kind)
+        return;
+    ks_lock();
+    if (t_q_counted && (cur = q_current()) != NULL)
+        (*cur)--;
+    t_q_kind = 0;
+    t_q_counted = 0;
+    ks_unlock();
+    ks_wake_all();
+}
 
 #define Q_SIGNAL  0x04u
 #define Q_ENTRIES 0x10u
@@ -262,6 +369,7 @@ void ks_queue_init(uint32_t q, uint32_t count)
     M32(q + Q_CURRENT) = 0;
     M32(q + Q_MAX) = count ? count : 1;   /* 0 = number of processors */
     list_init(q + Q_THREADS);
+    kq_gen(q, 1);
     ks_unlock();
 }
 
@@ -293,9 +401,17 @@ uint32_t ks_queue_remove(uint32_t q, uint32_t timeout_va)
         return STATUS_TIMEOUT_;
     ks_lock();
     list_fix(q + Q_ENTRIES);
+    {
+        /* The caller stops counting where it did (it is waiting now). */
+        volatile int32_t *cur;
+        if (t_q_counted && (cur = q_current()) != NULL)
+            (*cur)--;
+        t_q_counted = 0;
+    }
     for (;;) {
         DWORD ms;
-        if (!list_empty(q + Q_ENTRIES)) {
+        if (!list_empty(q + Q_ENTRIES)
+                && (!q_limit_on() || (int32_t)M32(q + Q_CURRENT) < (int32_t)M32(q + Q_MAX))) {
             got = list_remove_head(q + Q_ENTRIES);
             M32(got) = 0;                 /* Entry->Flink = NULL, as NT does */
             M32(q + Q_SIGNAL) = M32(q + Q_SIGNAL) - 1;
@@ -306,6 +422,9 @@ uint32_t ks_queue_remove(uint32_t q, uint32_t timeout_va)
             break;
         ks_wait(ms);
     }
+    /* Associated with this queue from now on, entry or not, and counting
+     * at once: an entry taken holds its slot before the lock goes. */
+    q_associate(1, q, kq_gen(q, 0));
     ks_unlock();
     return got;
 }
@@ -328,7 +447,10 @@ uint32_t ks_queue_rundown(uint32_t q)
     }
     M32(q + Q_SIGNAL) = 0;
     list_init(q + Q_THREADS);
+    M32(q + Q_CURRENT) = 0;          /* its threads are no longer associated */
+    kq_gen(q, 1);
     ks_unlock();
+    ks_wake_all();
     return first;
 }
 
@@ -361,11 +483,22 @@ typedef struct {
     unsigned gen;            /* bumped on close: stale references see it */
     int32_t  depth;
     int32_t  max;            /* the creation Count (0 = processors = 1) */
+    int32_t  cur;            /* associated threads running (the KQUEUE's CurrentCount) */
     ks_pkt  *head, *tail;
 } ks_port;
 
 static ks_port s_ports[KS_PORT_MAX];
 static unsigned s_port_gen;
+
+static volatile int32_t *q_current(void)   /* lock held */
+{
+    if (t_q_kind == 1 && kq_gen(t_q_obj, 0) == t_q_gen)
+        return (volatile int32_t *)KS_PTR(t_q_obj + Q_CURRENT);
+    if (t_q_kind == 2 && t_q_obj < KS_PORT_MAX && s_ports[t_q_obj].ident
+            && s_ports[t_q_obj].gen == t_q_gen)
+        return &s_ports[t_q_obj].cur;
+    return NULL;
+}
 
 static struct {
     void    *file;           /* NULL: free */
@@ -458,6 +591,12 @@ uint32_t ks_port_remove(void *ident, uint32_t timeout_va, uint32_t out[4])
         return 0xC0000008u;                     /* STATUS_INVALID_HANDLE */
     }
     gen = s_ports[slot].gen;
+    {
+        volatile int32_t *cur;
+        if (t_q_counted && (cur = q_current()) != NULL)
+            (*cur)--;
+        t_q_counted = 0;
+    }
     for (;;) {
         ks_port *p = &s_ports[slot];
         DWORD ms;
@@ -467,7 +606,7 @@ uint32_t ks_port_remove(void *ident, uint32_t timeout_va, uint32_t out[4])
             rc = 0xC0000008u;
             break;
         }
-        if (p->head) {
+        if (p->head && (!q_limit_on() || p->cur < p->max)) {
             ks_pkt *k = p->head;
             p->head = k->next;
             if (!p->head) p->tail = NULL;
@@ -485,6 +624,8 @@ uint32_t ks_port_remove(void *ident, uint32_t timeout_va, uint32_t out[4])
         }
         ks_wait(ms);
     }
+    if (s_ports[slot].ident == ident && s_ports[slot].gen == gen)
+        q_associate(2, (uint32_t)slot, gen);   /* as KeRemoveQueue */
     ks_unlock();
     return rc;
 }

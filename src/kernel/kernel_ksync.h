@@ -37,6 +37,14 @@ int32_t  ks_queue_insert(uint32_t q, uint32_t entry, int at_head);
 uint32_t ks_queue_remove(uint32_t q, uint32_t timeout_va);
 uint32_t ks_queue_rundown(uint32_t q);
 
+/* The concurrency limit of KQUEUEs and I/O completion objects (XBA-133):
+ * a thread associated with one counts as running except inside a kernel
+ * call. kernel_thunk_dispatch calls enter/leave around every call (they
+ * nest); a guest thread that ends calls exit. */
+void     ks_thread_kernel_enter(void);
+void     ks_thread_kernel_leave(void);
+void     ks_thread_exit(void);
+
 /* I/O completion objects (NtCreateIoCompletion 191, NtSetIoCompletion 227,
  * NtRemoveIoCompletion 223, NtQueryIoCompletion 212; XBA-114), host-side.
  * `ident` is the host HANDLE behind the title's token, a manual-reset event

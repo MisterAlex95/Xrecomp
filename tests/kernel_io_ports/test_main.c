@@ -16,6 +16,9 @@
  *      another thread blocks until a packet is posted; a file joined to the
  *      object (FileCompletionInformation) posts its reads that carry an
  *      ApcContext and no routine, with the file's key; NtClose ends it.
+ *   1b. XBA-133, the concurrency limit (Count 1): while the thread that took
+ *      a packet runs guest code, a second remover gets nothing; once it
+ *      blocks in a kernel call the second one gets the next packet.
  *   2. Scatter / gather: NtReadFileScatter puts page i of the transfer at
  *      segment i, from ByteOffset; a transfer that runs into the end of the
  *      file is short, not failed; NtWriteFileGather writes page i from
@@ -86,14 +89,14 @@ enum {
     S_CLOSE, S_OPEN, S_READ, S_SETINFO, S_WAIT1,
     S_IOC_CREATE, S_IOC_SET, S_IOC_REMOVE, S_IOC_QUERY,
     S_SCATTER, S_GATHER, S_EVENT,
-    S_SIGWAIT, S_SEM, S_MUTANT,
+    S_SIGWAIT, S_SEM, S_MUTANT, S_DELAY,
     S_COUNT
 };
 static const uint32_t slot_ord[S_COUNT] = {
     187, 202, 219, 226, 233,
     191, 227, 223, 212,
     220, 237, 189,
-    230, 193, 192,
+    230, 193, 192, 99,
 };
 
 static RECOMP_TLS int t_index;
@@ -171,7 +174,10 @@ static void test_io_completion(uint32_t file)
 
     become_thread(0);
     M32(HANDLE_VA) = 0;
-    CALL(S_IOC_CREATE, HANDLE_VA, 0x1F0003u, 0, 0);
+    /* Count 2: this thread takes packets below and so counts as one of the
+     * object's running threads; the remover on another thread is the
+     * second (the concurrency limit, XBA-133). */
+    CALL(S_IOC_CREATE, HANDLE_VA, 0x1F0003u, 0, 2);
     port = M32(HANDLE_VA);
     snprintf(d, sizeof d, "status 0x%08X handle 0x%08X", g_eax, port);
     check(g_eax == 0 && port != 0 && esp_ok(4), "NtCreateIoCompletion writes a handle (4 arguments)", d);
@@ -252,6 +258,61 @@ static void test_io_completion(uint32_t file)
     CALL(S_CLOSE, port);
     CALL(S_IOC_SET, port, 1, 2, 3, 4);
     check(g_eax == 0xC0000008u, "after NtClose the handle is no object: STATUS_INVALID_HANDLE", NULL);
+}
+
+/* ═══════════════════ 1b. Concurrency limit ═══════════════════ */
+
+static volatile int w_took, w_go, w_blocked;
+static volatile uint32_t w_key;
+
+static DWORD WINAPI port_worker(LPVOID p)
+{
+    (void)p;
+    become_thread(5);
+    CALL(S_IOC_REMOVE, g_port, OUT_VA + 0x80, OUT_VA + 0x84, OUT_VA + 0x88, 0);
+    w_key = M32(OUT_VA + 0x80);
+    w_took = 1;
+    while (!w_go)                    /* "guest code": no kernel call */
+        Sleep(1);
+    w_blocked = 1;
+    *(int64_t *)(mem + OUT_VA + 0x90) = -3000000;   /* 300 ms */
+    CALL(S_DELAY, 0, 0, OUT_VA + 0x90);
+    return 0;
+}
+
+static void test_io_completion_limit(void)
+{
+    uint32_t port;
+    HANDLE th;
+    DWORD t;
+
+    become_thread(0);
+    CALL(S_IOC_CREATE, HANDLE_VA, 0x1F0003u, 0, 1);
+    port = M32(HANDLE_VA);
+    CALL(S_IOC_SET, port, 0xA1, 0, 0, 0);
+    CALL(S_IOC_SET, port, 0xB2, 0, 0, 0);
+    g_port = port;
+    w_took = w_go = w_blocked = 0;
+    th = CreateThread(NULL, 0, port_worker, NULL, 0, NULL);
+    for (t = 0; !w_took && t < 5000; t++)
+        Sleep(1);
+    check(w_took && w_key == 0xA1, "a worker takes the first packet", NULL);
+    *(int64_t *)(mem + TIMEOUT2_VA) = -1000000;   /* 100 ms */
+    CALL(S_IOC_REMOVE, port, OUT_VA, OUT_VA + 4, IOSB_VA, TIMEOUT2_VA);
+    snprintf(d, sizeof d, "status 0x%08X", g_eax);
+    check(g_eax == 0x102u, "while it runs, a second remover gets nothing (Count 1)", d);
+    w_go = 1;
+    for (t = 0; !w_blocked && t < 5000; t++)
+        Sleep(1);
+    t = GetTickCount();
+    CALL(S_IOC_REMOVE, port, OUT_VA, OUT_VA + 4, IOSB_VA, 0);
+    t = GetTickCount() - t;
+    snprintf(d, sizeof d, "status 0x%08X key 0x%X after %lu ms", g_eax, M32(OUT_VA), (unsigned long)t);
+    check(g_eax == 0 && M32(OUT_VA) == 0xB2 && t < 250,
+          "once it blocks in a kernel call, the next packet goes", d);
+    WaitForSingleObject(th, 5000);
+    CloseHandle(th);
+    CALL(S_CLOSE, port);
 }
 
 /* ═══════════════════ 2. Scatter / gather ═══════════════════ */
@@ -432,6 +493,7 @@ int main(void)
     check(file != 0, "NtOpenFile opens the stand-in disc file", d);
 
     test_io_completion(file);
+    test_io_completion_limit();
     if (file)
         test_scatter_gather(file);
     test_signal_and_wait(file);

@@ -851,6 +851,7 @@ static DWORD WINAPI bridge_thread_main(LPVOID param)
     /* The kernel's thread startup ends a returning routine with
      * PsTerminateSystemThread(STATUS_SUCCESS). */
     thalert_forget(g_thread_obj_va);
+    ks_thread_exit();
     thobj_exit(g_thread_obj_va, 0);
     g_thread_obj_va = 0;
     return 0;
@@ -2963,6 +2964,7 @@ static void bridge_PsTerminateSystemThread(void)
         xbox_FreeThreadStack(g_thread_stack_top);
         g_thread_stack_top = 0;
         thalert_forget(g_thread_obj_va);
+        ks_thread_exit();
         thobj_exit(g_thread_obj_va, exit_status);
         g_thread_obj_va = 0;
         ExitThread(exit_status);
@@ -12711,7 +12713,9 @@ static void kernel_thunk_dispatch(void)
     int held = xbox_GuestCpuRelease(XBOX_GUEST_CPU_KERNEL,
                                     slot >= 0 && slot < XBOX_KERNEL_THUNK_TABLE_SIZE
                                     ? g_slot_ordinals[slot] : 0);
+    ks_thread_kernel_enter();   /* a queue's thread is not running in here (XBA-133) */
     kernel_thunk_dispatch_body();
+    ks_thread_kernel_leave();
     if (held)
         xbox_GuestCpuAcquire();
 }
