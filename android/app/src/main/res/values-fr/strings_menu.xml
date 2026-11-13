@@ -17,6 +17,8 @@
     <string name="MENU_BOTTOM">Écran du bas</string>
     <string name="MENU_LANGUAGE">Langue</string>
     <string name="MENU_LANGUAGE_FOLLOW">Comme les Réglages</string>
+    <string name="MENU_WIDESCREEN">Écran large</string>
+    <string name="MENU_VIDEO_FOLLOW">Comme les Réglages</string>
     <string name="MENU_BACK">Retour</string>
     <string name="MENU_HINT_SELECT">Choisir</string>
     <string name="MENU_HINT_BACK">Retour</string>
