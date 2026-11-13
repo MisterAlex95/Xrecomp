@@ -22,14 +22,18 @@ foreach(t fake_shell fake_shell_static)
     add_library(${t} SHARED ${APP}/pack_loader.c ${SRC}/recomp_pack.c ${SRC}/recomp_cfg.c fake_toolkit.c)
     target_include_directories(${t} PRIVATE ${SRC} ${APP})
     target_link_libraries(${t} PRIVATE ${CMAKE_DL_LIBS})
-    target_link_options(${t} PRIVATE -Wl,--no-undefined)
+    if(NOT APPLE)   # GNU ld's spelling; Apple's ld refuses undefined symbols by default
+        target_link_options(${t} PRIVATE -Wl,--no-undefined)
+    endif()
 endforeach()
 target_sources(fake_shell_static PRIVATE title_static.c)
 
 foreach(t fake_title fake_title_min)
     add_library(${t} SHARED ${t}.c)
     target_link_libraries(${t} PRIVATE fake_shell)
-    target_link_options(${t} PRIVATE -Wl,-Bsymbolic -Wl,--no-undefined)
+    if(NOT APPLE)   # as above; Mach-O's two-level namespace already binds a library's own symbols first
+        target_link_options(${t} PRIVATE -Wl,-Bsymbolic -Wl,--no-undefined)
+    endif()
 endforeach()
 
 enable_testing()

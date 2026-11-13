@@ -1377,7 +1377,11 @@ NTSTATUS __stdcall xbox_NtCreateFile(
     return STATUS_SUCCESS;
 }
 
-extern void xbox_SmcHostWrite(const void *p, size_t len) __attribute__((weak));
+/* recomp_smc.c's (XBA-118), which opens a protected code page before the host writes into it. This weak
+ * definition stands in where that file is not linked (some test projects): nothing is protected there. A weak
+ * definition, not a weak reference: Mach-O refuses to link an undefined weak reference, which broke these test
+ * projects on macOS. A strong definition (recomp_smc.c, or a test's own) replaces it. */
+__attribute__((weak)) void xbox_SmcHostWrite(const void *p, size_t len) { (void)p; (void)len; }
 
 NTSTATUS __stdcall xbox_NtReadFile(
     HANDLE FileHandle, HANDLE Event, PIO_APC_ROUTINE ApcRoutine, PVOID ApcContext,
@@ -1401,7 +1405,7 @@ NTSTATUS __stdcall xbox_NtReadFile(
              * buffer: a write-protected lifted code page (XBA-118) is opened
              * first, as for read() below, else the copy faults inside the
              * runtime (and that fault is never the guest's, XBA-132). */
-            if (xbox_SmcHostWrite && Length)
+            if (Length)
                 xbox_SmcHostWrite(Buffer, Length);
             n = df && xbox_disc_node_is_dir(df->node) ? -1
                    : df ? xbox_disc_read(df->node, Buffer, Length, off)
@@ -1440,8 +1444,7 @@ NTSTATUS __stdcall xbox_NtReadFile(
     /* read() into a write-protected code page would fail with EFAULT, not
      * fault: open it first, which names it (XBA-118, recomp_smc.h). Weak:
      * a test that links this file alone has no recomp_smc.c. */
-    if (xbox_SmcHostWrite)
-        xbox_SmcHostWrite(Buffer, Length);
+    xbox_SmcHostWrite(Buffer, Length);
     ssize_t n = read(fd, Buffer, Length);
     if (n < 0) {
         XBOX_TRACE(XBOX_LOG_FILE, "NtReadFile(handle=%p) errno=%d", FileHandle, errno);
