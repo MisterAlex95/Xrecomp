@@ -12,6 +12,11 @@ adb logcat -s xboxrecomp SDL
 The CI builds it on every push to `main`. The latest one is always the prerelease **shell-latest** of the repo
 (XBA-20): https://git.cf.adserver.fr/Alex/xboxrecomp-android/releases/tag/shell-latest
 
+This plain shell has its own application id, `fr.adserver.xboxrecomp.dev`, and shows as « XRecomp shell »
+(XBA-134): it installs next to the XRecomp APK of `xrecomp-latest` (`fr.adserver.xboxrecomp.shell`, the app a
+player uses) and never replaces it. The check lists below name `fr.adserver.xboxrecomp.shell`, the XRecomp APK's;
+with the plain shell, use `fr.adserver.xboxrecomp.dev` in their `adb` paths and `run-as`.
+
 ## How it is put together
 
 | Piece | What |
@@ -257,8 +262,8 @@ General only.
    deletes (« Press A again » replaces the size); paths in the description. Manage (Home): the title ID, prepared
    date, pack size and folder in the first row's description.
 6. In-game menu: a flat sheet flush with the left edge (about 30 % of the screen), the title and « Paused · 0:42
-   played », six rows (Quit apart), B Resume; Settings holds Perf overlay, Volume, Bottom screen, Language and Share
-   log. Screenshot.
+   played », six rows (Quit apart), B Resume; Settings holds Perf overlay, Volume, Bottom screen, Language, Widescreen,
+   480p and Share log. Screenshot.
 7. Bottom screen (Thor): pure black, the art, the title, one pill (Play, Prepare, Import…) and the battery; on the
    library it follows the focused card, on Settings or Storage only the art shows. While preparing: the big
    percentage, the bar, « <step> · about … left », Hold to cancel. Nothing in the bottom centre.
@@ -1243,7 +1248,7 @@ less the display cutout, so 720p and 1080p look the same.
 | Item | Does |
 |---|---|
 | Resume | Closes the menu. |
-| Settings | **Perf overlay** On / Off: fps and frame time (`xbox_FramebufferWindowGetStats`, twice a second) in the top right corner, in the menu's layer, not in the game frame; stays with the menu closed. **Volume** 0–100 % in steps of 10, A mutes / unmutes: one gain on the mixed APU output (`apu_volume.c`, the square of the fraction, after the WAV capture), set through JNI. **Bottom screen** Panel / Black / Off (only with a second screen): `GameStore.setBottomScreen` and the companion is refreshed at once. These three apply **now** (the rows say so) and are remembered (`files/settings/perf_overlay`, `game_volume`, `bottom_screen`); the volume is applied again at the next start. **Language** (only when the game's XBE gives a title ID): As in Settings, then the nine languages; this game's own [language](#game-language), applied at the next start. Screen filter and scaling are not offered: the SDL window's are fixed at start (`fb_present_sdl.c`: nearest, logical size 640 x 480). |
+| Settings | **Perf overlay** On / Off: fps and frame time (`xbox_FramebufferWindowGetStats`, twice a second) in the top right corner, in the menu's layer, not in the game frame; stays with the menu closed. **Volume** 0–100 % in steps of 10, A mutes / unmutes: one gain on the mixed APU output (`apu_volume.c`, the square of the fraction, after the WAV capture), set through JNI. **Bottom screen** Panel / Black / Off (only with a second screen): `GameStore.setBottomScreen` and the companion is refreshed at once. These three apply **now** (the rows say so) and are remembered (`files/settings/perf_overlay`, `game_volume`, `bottom_screen`); the volume is applied again at the next start. **Language** (only when the game's XBE gives a title ID): As in Settings, then the nine languages; this game's own [language](#game-language), applied at the next start. **Widescreen** and **480p** (same condition, XBA-134): As in Settings / On / Off, this game's own console video setting (`GameVideo.java`, kept in `files/settings/widescreen_<TITLEID>` and `480p_<TITLEID>`), applied at the next start: `ShellActivity` sets `RECOMP_WIDESCREEN` / `RECOMP_480P` to `1` or `0` (the environment wins over the `recomp.cfg` line of Settings › Graphics) and unsets them when the game follows Settings; logcat « shell: title video RECOMP_WIDESCREEN=… RECOMP_480P=…, title … ». Screen filter and scaling are not offered: the SDL window's are fixed at start (`fb_present_sdl.c`: nearest, logical size 640 x 480). |
 | Controls | The usual mapping, compact (plus Back and Select + Start: the menu); with a remapping in `recomp.cfg`, first « Your mapping » and each changed control (your button, the Xbox control). |
 | Screenshot | Closes the menu first, then saves the game's last frame as `<external files>/screenshots/<date>.bmp` (`xbox_FramebufferDumpBmp`, the companion panel's), and says « Saved … » at the top of the screen (and on the panel). |
 | Settings › Share log | This process's logcat to `files/logs/game.log`, then the share sheet (the companion panel's `LogProvider` path). The menu stays open. |
@@ -1316,6 +1321,16 @@ With a title from a European (multi-language) disc, Fable's PAL disc for instanc
 5. **US disc** (if you have one): choose French: the game stays in English (its disc has nothing else), nothing
    breaks.
 6. Say which languages Fable's disc offers, for the profile notes.
+
+### Device check (this game's widescreen and 480p, XBA-134), for Alex
+
+1. Settings › Graphics › Widescreen On. Start a game: logcat `shell: title video RECOMP_WIDESCREEN=(Settings)
+   RECOMP_480P=(Settings), title …` and the runtime's `recomp.cfg: … RECOMP_WIDESCREEN=1`.
+2. In-game menu › Settings: the rows **Widescreen** and **480p** read « As in Settings ». Widescreen → On → Off;
+   quit and start again: logcat `RECOMP_WIDESCREEN=0`, `recomp.cfg: … RECOMP_WIDESCREEN (kept from the
+   environment)`, the game in 4:3 although Settings says On.
+3. Another game: its rows still read « As in Settings », and it starts wide.
+4. Back in the first game: Widescreen → « As in Settings »; next start: wide again.
 
 ## Full screen
 
@@ -1439,15 +1454,15 @@ reported every mapping as `PAGE_READWRITE`.
 
 ### Device check (XBA-51), for Alex
 
-1. Install the shell APK (**shell-latest**), push a `recomp.cfg` with `RECOMP_SHELL_SELFTEST=1`:
+1. Install the shell APK (**shell-latest**, « XRecomp shell »), push a `recomp.cfg` with `RECOMP_SHELL_SELFTEST=1`:
    `printf 'RECOMP_SHELL_SELFTEST=1\n' > recomp.cfg`,
-   `adb push recomp.cfg /sdcard/Android/data/fr.adserver.xboxrecomp.shell/files/recomp.cfg`.
+   `adb push recomp.cfg /sdcard/Android/data/fr.adserver.xboxrecomp.dev/files/recomp.cfg`.
 2. Start the app, then `adb logcat -d -s xboxrecomp`.
 3. Expected: every `selftest` line `PASS` and the summary `selftest: 16 passed, 0 failed`; no tombstone
    (`adb logcat -d -b crash` empty).
 4. Run it a second time after a reboot (the address space layout changes).
 5. Send the logcat lines (both runs); remove the option (`adb shell rm
-   /sdcard/Android/data/fr.adserver.xboxrecomp.shell/files/recomp.cfg`).
+   /sdcard/Android/data/fr.adserver.xboxrecomp.dev/files/recomp.cfg`).
 
 ## A title in the shell
 
