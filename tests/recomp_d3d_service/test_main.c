@@ -19,6 +19,9 @@ ptrdiff_t xbox_GetMemoryOffset(void) { return (ptrdiff_t)g_mem; }
 void *xbox_GetMemoryBase(void) { return g_mem; }
 static int (*g_hook)(uint32_t);
 void nv2a_pb_set_software_method_hook(int (*hook)(uint32_t)) { g_hook = hook; }
+static uint32_t (*g_refusals)(void);
+void nv2a_pb_set_software_method_refusals(uint32_t (*count)(void)) { g_refusals = count; }
+size_t xbox_GetMappedSize(void) { return 0x04000000u; }     /* 64 MB of RAM */
 void nv2a_pb_set_semaphore_target(uint32_t va) { (void)va; }
 static uint32_t g_event;
 int xbox_KeSetGuestEvent(uint32_t va) { g_event = va; return 1; }
@@ -88,6 +91,169 @@ static void plant_header(const char *lib, uint32_t build)
     memset(g_mem + 0x10900, 0, 16);
     memcpy(g_mem + 0x10900, lib, strlen(lib) < 8 ? strlen(lib) : 8);
     *(uint16_t *)(g_mem + 0x10900 + 12) = (uint16_t)build;
+}
+
+/* ── Deferred RunPushBuffer fixups (method 0xD) ──────────────────────────
+ * A node { target | flags, next, slot, fixups, base }; a recorded pushbuffer
+ * [base, slot] (slot: its return JUMP); a D3DFixup list { size, offset, bytes }
+ * ... 0xFFFFFFFF wherever the title keeps it (Fable: its heap, 0x0129xxxx). */
+#define PB_BASE 0x80040000u
+#define PB_SLOT (PB_BASE + 0xFCu)                 /* a 256-byte pushbuffer */
+
+static void node_at(uint32_t node, uint32_t target, uint32_t next, uint32_t slot, uint32_t fix, uint32_t base)
+{
+    M32(node) = target;
+    M32(node + 4) = next;
+    M32(node + 8) = slot;
+    M32(node + 12) = fix;
+    M32(node + 16) = base;
+}
+
+/* One entry at `at` (size bytes of `fill` to base + off); returns the next entry's address. */
+static uint32_t fixup(uint32_t at, uint32_t size, uint32_t off, uint8_t fill)
+{
+    M32(at) = size;
+    M32(at + 4) = off;
+    memset(g_mem + at + 8, fill, size);
+    return at + 8 + size;
+}
+
+static int all(uint32_t va, uint32_t n, uint8_t v)
+{
+    uint32_t i;
+    for (i = 0; i < n; i++)
+        if (g_mem[va + i] != v)
+            return 0;
+    return 1;
+}
+
+/* The pushbuffer and 256 bytes either side filled with 0x11. */
+static void pb_fresh(void)
+{
+    memset(g_mem + PB_BASE - 0x100, 0x11, 0x300);
+}
+
+static uint32_t refused(void)
+{
+    return g_refusals ? g_refusals() : 0;
+}
+
+/* Method 0xD, payload 3, on `dev` (RunPushBuffer offsets +0x50/+0x264).
+ * given: the addresses given, the handler writes unchecked. */
+static void test_fixups(uint32_t dev, int given)
+{
+    uint32_t node = dev + 0x264 + 3 * 20, at, r0;
+    const uint32_t m = 3u << 5 | 0xDu, list = 0x01290000u;
+
+    /* 1. A list on the heap, two entries inside [base, slot): both copied,
+     * the return JUMP patched, one pending run fewer, next = -1, nothing refused. */
+    pb_fresh();
+    at = fixup(list, 4, 0x10, 0xAA);
+    at = fixup(at, 8, 0x20, 0xBB);
+    M32(at) = 0xFFFFFFFFu;
+    node_at(node, 0x20000000u | 0x00041000u, 0, PB_SLOT, list, PB_BASE);
+    M32(dev + 0x50) = 3;
+    r0 = refused();
+    CHECK(g_hook(m) == 1);
+    CHECK(all(PB_BASE + 0x10, 4, 0xAA) && all(PB_BASE + 0x20, 8, 0xBB));
+    CHECK(all(PB_BASE, 0x10, 0x11) && all(PB_BASE + 0x14, 0x0C, 0x11) && all(PB_BASE + 0x28, 0xD4, 0x11));
+    CHECK(M32(PB_SLOT) == 0x00041001u);
+    CHECK(M32(dev + 0x50) == 2);
+    CHECK(M32(node + 4) == 0xFFFFFFFFu);
+    CHECK(refused() == r0);
+#ifndef TEST_GIVEN
+    CHECK(g_refusals == recomp_d3d_fixups_refused);
+#endif
+
+    if (given) {
+        /* 5. The addresses given: unchecked, as D3D's handler (a destination
+         * below the pushbuffer is written). */
+        pb_fresh();
+        at = fixup(list, 4, 0xFFFFFFF0u, 0xCC);     /* base - 16 */
+        M32(at) = 0xFFFFFFFFu;
+        node_at(node, 0x20000000u | 0x00041000u, 0, PB_SLOT, list, PB_BASE);
+        CHECK(g_hook(m) == 1 && all(PB_BASE - 16, 4, 0xCC) && M32(PB_SLOT) == 0x00041001u);
+        return;
+    }
+
+    /* 2. A destination at the slot (the return JUMP itself), below base, past
+     * the slot, wrapping: not written, counted; the entry before it applied,
+     * the one after it not, the return JUMP patched. */
+    {
+        static const uint32_t bad_off[] = { 0xFCu, 0xFFFFFFF0u, 0x200u, 0x80000010u, 0xF8u };
+        static const uint32_t bad_size[] = { 4, 4, 4, 4, 8 };
+        unsigned i;
+        for (i = 0; i < sizeof bad_off / sizeof bad_off[0]; i++) {
+            uint32_t to = PB_BASE + bad_off[i];
+            pb_fresh();
+            M32(0x00040010u) = 0x11111111u;          /* where the wrapped one would land */
+            at = fixup(list, 4, 0x30, 0xCC);
+            at = fixup(at, bad_size[i], bad_off[i], 0xEE);
+            at = fixup(at, 4, 0x40, 0xDD);
+            M32(at) = 0xFFFFFFFFu;
+            node_at(node, 0x20000000u | 0x00041000u, 0, PB_SLOT, list, PB_BASE);
+            M32(dev + 0x50) = 3;
+            r0 = refused();
+            CHECK(g_hook(m) == 1);
+            CHECK(all(PB_BASE + 0x30, 4, 0xCC));
+            CHECK(all(PB_BASE + 0x40, 4, 0x11));
+            CHECK(M32(PB_SLOT) == 0x00041001u);
+            CHECK(refused() == r0 + 1);
+            CHECK(M32(dev + 0x50) == 2 && M32(node + 4) == 0xFFFFFFFFu);
+            CHECK(M32(to) != 0xEEEEEEEEu);
+            CHECK(M32(0x00040010u) == 0x11111111u && all(PB_BASE - 0x100, 0x100, 0x11)
+                  && all(PB_SLOT + 4, 0x100, 0x11));
+        }
+    }
+
+    /* 3. An entry larger than 64 KB; a list with no end within 1 MB (zeroed
+     * memory: endless empty entries); a payload past the end of RAM; a list
+     * outside guest memory: refused, counted, nothing written. */
+    {
+        static const uint32_t lists[] = { 0x01290000u, 0x01400000u, 0x03FFFFF0u, 0x50000000u };
+        unsigned i;
+        fixup(0x01290000u, 0x10001u, 0, 0xEE);
+        M32(0x03FFFFF0u) = 16;
+        M32(0x03FFFFF4u) = 0;
+        for (i = 0; i < 4; i++) {
+            pb_fresh();
+            node_at(node, 0x20000000u | 0x00041000u, 0, PB_SLOT, lists[i], PB_BASE);
+            r0 = refused();
+            CHECK(g_hook(m) == 1);
+            CHECK(refused() == r0 + 1);
+            CHECK(all(PB_BASE - 0x100, 0x1FC, 0x11) && M32(PB_SLOT) == 0x00041001u && all(PB_SLOT + 4, 0x100, 0x11));
+        }
+        memset(g_mem + 0x01290000u, 0, 0x10010u);
+        /* A base outside the contiguous window, or not below the slot. */
+        pb_fresh();
+        at = fixup(list, 4, 0x10, 0xAA);
+        M32(at) = 0xFFFFFFFFu;
+        node_at(node, 0x20000000u | 0x00041000u, 0, PB_SLOT, list, 0x00040000u);
+        r0 = refused();
+        CHECK(g_hook(m) == 1 && refused() == r0 + 1 && M32(0x00040010u) != 0xAAAAAAAAu);
+        node_at(node, 0x20000000u | 0x00041000u, 0, PB_SLOT, list, PB_SLOT + 4);
+        CHECK(g_hook(m) == 1 && refused() == r0 + 2 && all(PB_SLOT + 4, 0x100, 0x11));
+    }
+
+    /* 4. A chain of two nodes (the second in the ring, method 0xC style):
+     * both serviced, both fixups applied, next = -1 in each. */
+    {
+        uint32_t node2 = 0x80060000u, base2 = 0x80050000u, list2 = 0x01291000u;
+        pb_fresh();
+        memset(g_mem + base2, 0x11, 0x100);
+        at = fixup(list, 4, 0x10, 0xAA);
+        M32(at) = 0xFFFFFFFFu;
+        at = fixup(list2, 4, 0x08, 0xBB);
+        M32(at) = 0xFFFFFFFFu;
+        node_at(node, 0x20000000u | 0x00041000u, node2, PB_SLOT, list, PB_BASE);
+        node_at(node2, 0x20000000u | 0x00042000u, 0, base2 + 0xFC, list2, base2);
+        r0 = refused();
+        CHECK(g_hook(m) == 1);
+        CHECK(all(PB_BASE + 0x10, 4, 0xAA) && M32(PB_SLOT) == 0x00041001u);
+        CHECK(all(base2 + 0x08, 4, 0xBB) && M32(base2 + 0xFC) == 0x00042001u);
+        CHECK(M32(node + 4) == 0xFFFFFFFFu && M32(node2 + 4) == 0xFFFFFFFFu);
+        CHECK(refused() == r0);
+    }
 }
 
 int main(void)
@@ -189,6 +355,7 @@ int main(void)
         CHECK(g_hook(1u << 5 | 0xDu) == 1 && M32(dev + 0x50) == 2);
         CHECK(strstr(g_fallbacks, "D3D8LTCG 5933 rpb_pending=0x50;") != NULL);
         CHECK(strstr(g_fallbacks, "D3D8LTCG 5933 rpb_nodes=0x264;") != NULL);
+        test_fixups(dev, 0);
         /* Each rule once. */
         CHECK(strstr(strstr(g_fallbacks, "fence_event") + 1, "fence_event") == NULL);
     }
@@ -338,6 +505,11 @@ int main(void)
         CHECK(g_fallbacks[0] == 0);
 #endif
     }
+#ifdef TEST_GIVEN
+    test_fixups(0x0085FDE0, 1);
+#else
+    test_fixups(0x0085FDE0, 0);
+#endif
     if (failures)
         return 1;
     puts("recomp_d3d_service: ok");

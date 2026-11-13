@@ -365,6 +365,31 @@ answers 5 with `xbox_KeSetGuestEvent()` on the fence event (*Burnout 3*), on
 the device it finds at run time. The report counts
 what was serviced and, by type, what was not (`[GPU] software methods: ...`).
 
+**RunPushBuffer nodes (0xC–0xE).** The payload names a node
+`{ return target | flags, next, slot, fixups, base }`: `slot` is the recorded
+pushbuffer's last word (its return `JUMP`, `base + size - 4`), `base` its first,
+`fixups` the caller's `D3DFixup` list (`{ size, offset, bytes }` entries to
+`base + offset`, ended by size `0xFFFFFFFF`, applied when flag bit 29 is set),
+`next` the following node of the chain. For a device found at run time the
+service checks each write against that structure, not against where D3D's
+callers keep their data: the slot must be in the contiguous window; the fixup
+list may be anywhere in mapped guest memory (they are on the title's heap:
+*Fable*'s at `0x0129xxxx`), each entry at most 64 KB, the list at most 1 MB;
+every destination must lie inside the node's own pushbuffer
+(`base <= to`, `to + size <= slot`, no wrap). A refused list stops at the entry
+refused (earlier entries stay applied, the return `JUMP` is patched anyway); the
+first four refusals are printed (`[D3D] RunPushBuffer method: fixup list of node
+... refused ...`) and all are counted in the report line
+(`[GPU] software methods: ...; fixup lists refused N`, shown when N > 0).
+`next` is taken with an atomic exchange: the title links a new node with a
+compare-exchange on it from its own thread. An earlier rule (XBA-80 to 98bb6bb)
+asked for the *list* to be in the contiguous window, which
+dropped every deferred list of *Fable* silently: sub-meshes drawn in two passes
+then showed the other pass's texture for a frame or two. With the device given
+(`RECOMP_D3D_DEVICE[_PTR]`) the writes are unchecked, as D3D's handler does.
+`tests/recomp_d3d_service` covers the accepted list, each refused destination,
+oversized and endless lists, a chain of two nodes and the given device.
+
 ### Why not the title's own handler
 
 Delivering the interrupt to the title's D3D (PGRAPH_INTR, NSOURCE, the trapped

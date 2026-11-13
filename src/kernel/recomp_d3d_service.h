@@ -44,6 +44,11 @@ uint32_t recomp_d3d_scan_slots(uint32_t lo, uint32_t hi, uint32_t *slot);
 uint32_t recomp_d3d_fence_event_offset(uint32_t d);
 int recomp_d3d_locate(void);
 
+/* Deferred RunPushBuffer fixup lists the run-time guards refused (a device
+ * found at run time only), counted since start; the executor prints it in the
+ * [GPU] software methods report line when non-zero. */
+uint32_t recomp_d3d_fixups_refused(void);
+
 #ifdef __cplusplus
 }
 #endif
