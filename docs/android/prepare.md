@@ -88,7 +88,7 @@ Readers ignore fields they do not know. `tools/prepare/pack.py` (`read`, `check`
 | `c_mb`, `obj_mb`, `pack_mb`, `cpus` | Sizes of the C, the objects, the libraries in the pack; the CPU count. |
 | `peak_rss_mb` | Each compile's own peak resident set (`wait4`'s `ru_maxrss`, one per clang): max, p90, median. Absent where the host has no `wait4`. |
 | `tools_peak_mb` | The largest pipeline tool (disasm, lift: `RUSAGE_CHILDREN` before the compile). |
-| `held_s` | Time compiles waited for the device log's `jobs` (a hot device). |
+| `held_s` | Wall time the device log held every compile (`jobs` 0: critical heat, or a background Prepare while the game ran). |
 | `thermal` | From the device log (below): samples, the hottest status, seconds at severe or above, the fewest jobs allowed, the battery's hottest temperature, up to 24 points of the curve `[seconds into the run, status]`. Absent without a device log (a host). |
 
 The launcher shows it in Manage (« Preparation took 6 min 12 s · 4 jobs · -O2 », « Memory per compile job », « Hottest

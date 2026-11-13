@@ -349,8 +349,8 @@ def compile_all(sources, flags, tc, obj_dir, jobs, log=None, on_progress=None, l
     limit(): how many compiles may run at once right now (the device log,
     tools/prepare/metrics.py: fewer when the device is hot, 0 holds); read
     before each compile starts, never above `jobs`. stats: a dict that gets
-    "peak_kb" (each compile's peak RSS), "compiled" and "held_s" (time
-    compiles waited for limit()).
+    "peak_kb" (each compile's peak RSS), "compiled" and "held_s" (wall time
+    limit() held every compile, 0 jobs).
     Raises StepError (COMPILE_FAILED / NO_SPACE) or Cancelled."""
     os.makedirs(obj_dir, exist_ok=True)
     cid = tc.compiler_id()
@@ -373,6 +373,7 @@ def compile_all(sources, flags, tc, obj_dir, jobs, log=None, on_progress=None, l
     running = [0]
     peaks = []
     held = [0.0]
+    held_since = [None]             # the device log holds every compile (jobs 0) since then
     if stats is not None:
         stats.update(peak_kb=peaks, compiled=0, held_s=0.0)
     if on_progress:
@@ -381,16 +382,16 @@ def compile_all(sources, flags, tc, obj_dir, jobs, log=None, on_progress=None, l
     def enter():
         """Wait for a free slot under limit() (re-read every second while held)."""
         with gate:
-            waited = None
             while not (failed or tc.procs.cancelled.is_set()):
                 allowed = jobs if limit is None else max(0, min(jobs, limit()))
+                if allowed == 0 and held_since[0] is None:
+                    held_since[0] = time.time()
+                elif allowed > 0 and held_since[0] is not None:
+                    held[0] += time.time() - held_since[0]
+                    held_since[0] = None
                 if running[0] < allowed:
                     running[0] += 1
-                    if waited is not None:
-                        held[0] += time.time() - waited
                     return True
-                if waited is None:
-                    waited = time.time()
                 gate.wait(1.0)
             return False
 
@@ -448,6 +449,8 @@ def compile_all(sources, flags, tc, obj_dir, jobs, log=None, on_progress=None, l
             # A cancel has killed the running compiles already (Procs.cancel);
             # queued ones return at once (failed / cancelled checked first).
             ex.shutdown(wait=True, cancel_futures=True)
+    if held_since[0] is not None:
+        held[0] += time.time() - held_since[0]
     if stats is not None:
         stats.update(compiled=state["compiled"], held_s=held[0])
     if tc.procs.cancelled.is_set():
