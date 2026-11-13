@@ -78,9 +78,12 @@ from those with their own image.
 **What it cannot see.** GP and EP memory is plain RAM in the aperture: `xbox_memory_layout.c` traps only
 0x00000-0x2FFFF, because Burnout 3's DirectSound copies DSP memory with `rep movsd` (a host `memcpy`) that
 cannot be resumed after a fault. So a title's **reads** of DSP memory (results read back, output levels) are
-invisible; only what it wrote is seen. For the same reason the trapped GPRST handler
-(`mcpx_apu_dsp_gprst_write`) is reached only by tests: real titles write GPRST into RAM, which the watch reads
-(`gp_rst`) but the doorbell ack does not gate on.
+invisible; only what it wrote is seen. For the same reason a title's GPRST store never reaches the trapped
+handler (`mcpx_apu_dsp_gprst_write`): it lands in RAM. Since XBA-138 the doorbell poll reads the word back from the
+aperture once per APU frame, before the doorbell, and hands a change to that handler, so H2 below holds on a real
+run (`RECOMP_APU_GPRST_POLL=0` turns this off). A hold and release between two polls is not seen; a first store
+of 0 into the zeroed aperture is no change, so the GP keeps counting as running until the title writes another
+value.
 
 `RECOMP_APU_DSP_DUMP=<dir>` writes each distinct GP/EP window (64 KB) for study. It is the title's data: never in
 the repository.
