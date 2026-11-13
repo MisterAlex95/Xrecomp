@@ -1,5 +1,7 @@
 /* src/xiso (XBA-40): probe and extract synthetic disc images, byte for byte, plus cancel and corrupt images, and
- * the single-file API of the game library (xiso_open_fd / xiso_lookup / xiso_pread / xiso_extract_file_fd).
+ * the single-file API of the game library (xiso_open_fd / xiso_lookup / xiso_pread / xiso_extract_file_fd), and
+ * (XBA-126) split and compressed sources: every format extracted and compared, random reads against the plain image
+ * from several threads, xiso_list, broken compressed images.
  *
  *   xiso_test IMAGE_OR_MANIFEST...
  *
@@ -14,6 +16,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <ftw.h>
+#include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -726,6 +729,203 @@ static void test_mutations(void)
     printf("mutations: ok (%d extracted, %d rejected)\n", ok, errs);
 }
 
+/* ── sources: split parts, compressed images (XBA-126) ── */
+
+static void source_tree_ok(const char *first_part, const char *manifest, int want_kind, int want_parts)
+{
+    xiso_source *src = NULL;
+    CHECK_RC(xiso_source_open_path(first_part, &src), 0);
+    if (!src)
+        return;
+    if (xiso_source_kind(src) != want_kind || xiso_source_parts(src) != want_parts) {
+        fprintf(stderr, "FAIL %s: kind %s parts %d, want %s parts %d\n", first_part,
+                xiso_source_kind_name(xiso_source_kind(src)), xiso_source_parts(src),
+                xiso_source_kind_name(want_kind), want_parts);
+        g_fail++;
+    }
+    char title[64];
+    uint64_t total = 0;
+    int xbe = 0;
+    CHECK_RC(xiso_probe_source(src, title, sizeof title, &total, &xbe), 0);
+    CHECK(strcmp(title, "SYNTH") == 0 && xbe == 1 && total == manifest_total(manifest));
+    char *out = tmp_path("src_out");
+    rm_rf(out);
+    CHECK_RC(xiso_extract_source(src, out, NULL, NULL), 0);
+    verify_tree(out, manifest, NULL);
+    rm_rf(out);
+    xiso_source_close(src);
+}
+
+typedef struct {
+    xiso_source *src;
+    const uint8_t *plain;
+    size_t len;
+    unsigned seed;
+    int bad;
+} reader_t;
+
+static void *reader(void *arg)
+{
+    reader_t *r = arg;
+    uint8_t *buf = malloc(70000);
+    for (int i = 0; i < 400 && buf; i++) {
+        r->seed = r->seed * 1103515245u + 12345u;
+        uint64_t off = (r->seed >> 4) % (r->len + 100);
+        r->seed = r->seed * 1103515245u + 12345u;
+        size_t n = (r->seed >> 8) % 70000;
+        long got = xiso_source_pread(r->src, buf, n, off);
+        size_t want = off >= r->len ? 0 : (r->len - off < n ? r->len - off : n);
+        if (got != (long)want || (want && memcmp(buf, r->plain + off, want) != 0))
+            r->bad++;
+    }
+    free(buf);
+    return NULL;
+}
+
+/* Random reads (crossing blocks, parts, the end) compared with the plain image, from four threads at once. */
+static void source_reads_ok(const char *path, const char *plain_path)
+{
+    size_t len;
+    uint8_t *plain = read_file(plain_path, &len);
+    xiso_source *src = NULL;
+    CHECK_RC(xiso_source_open_path(path, &src), 0);
+    if (!src || !plain) {
+        free(plain);
+        xiso_source_close(src);
+        return;
+    }
+    CHECK(xiso_source_size(src) == len);
+    pthread_t t[4];
+    reader_t r[4];
+    for (int i = 0; i < 4; i++) {
+        r[i] = (reader_t){ src, plain, len, 77u + (unsigned)i * 1000u, 0 };
+        pthread_create(&t[i], NULL, reader, &r[i]);
+    }
+    for (int i = 0; i < 4; i++) {
+        pthread_join(t[i], NULL);
+        if (r[i].bad) {
+            fprintf(stderr, "FAIL %s: %d reads differ from the plain image (thread %d)\n", path, r[i].bad, i);
+            g_fail++;
+        }
+    }
+    xiso_source_close(src);
+    free(plain);
+}
+
+static void test_sources(void)
+{
+    const char *sm = fixture("small.manifest"), *tm = fixture("tree.manifest");
+    source_tree_ok(fixture("small.iso"), sm, XISO_KIND_PLAIN, 1);
+    source_tree_ok(fixture("small_v1.cso"), sm, XISO_KIND_CSO, 1);
+    source_tree_ok(fixture("small_v2.cso"), sm, XISO_KIND_CSO, 1);
+    source_tree_ok(fixture("small_v2f.cso"), sm, XISO_KIND_CSO, 1);
+    source_tree_ok(fixture("small_v2m.cso"), sm, XISO_KIND_CSO, 1);
+    source_tree_ok(fixture("small_b16k.cso"), sm, XISO_KIND_CSO, 1);
+    source_tree_ok(fixture("small.zso"), sm, XISO_KIND_ZSO, 1);
+    source_tree_ok(fixture("small.cci"), sm, XISO_KIND_CCI, 1);
+    source_tree_ok(fixture("tree_v1.cso"), tm, XISO_KIND_CSO, 1);
+    source_tree_ok(fixture("tree_split.1.iso"), tm, XISO_KIND_PLAIN | XISO_KIND_SPLIT, 3);
+    source_tree_ok(fixture("tree_split.2.iso"), tm, XISO_KIND_PLAIN | XISO_KIND_SPLIT, 3);   /* any part */
+    source_tree_ok(fixture("small_x.iso.001"), sm, XISO_KIND_PLAIN | XISO_KIND_SPLIT, 6);
+    source_tree_ok(fixture("small_p.part3.iso"), sm, XISO_KIND_PLAIN | XISO_KIND_SPLIT, 4);
+    source_tree_ok(fixture("small_cs.1.cso"), sm, XISO_KIND_CSO | XISO_KIND_SPLIT, 2);
+
+    /* The fd forms read a compressed file too (the app's import and library scan). */
+    int fd = open_ro(fixture("small_v2.cso"));
+    char title[64];
+    CHECK_RC(xiso_probe_fd(fd, title, sizeof title, NULL, NULL), 0);
+    CHECK(strcmp(title, "SYNTH") == 0);
+    close(fd);
+
+    /* Split parts handed over as fds (the app's picker gives no paths). */
+    int fds[3] = { open_ro(fixture("tree_split.1.iso")), open_ro(fixture("tree_split.2.iso")),
+                   open_ro(fixture("tree_split.3.iso")) };
+    xiso_source *src = NULL;
+    CHECK_RC(xiso_source_open_fds(fds, 3, 1, &src), 0);
+    if (src) {
+        xiso_image *img = NULL;
+        CHECK_RC(xiso_open_source(src, &img), 0);
+        if (img) {
+            check_stream(img, "big.bin", "big.bin", 4 * 1024 * 1024 + 300 * 1024 + 7);   /* crosses both cuts */
+            xiso_close(img);
+        }
+        xiso_source_close(src);                          /* closes the three fds (own) */
+    }
+
+    source_reads_ok(fixture("tree_v1.cso"), fixture("tree.iso"));
+    source_reads_ok(fixture("tree_split.3.iso"), fixture("tree.iso"));
+    source_reads_ok(fixture("small_v2m.cso"), fixture("small.iso"));
+    source_reads_ok(fixture("small.cci"), fixture("small.iso"));
+    source_reads_ok(fixture("small_cs.2.cso"), fixture("small.iso"));
+
+    /* Split names. */
+    char (*parts)[1024] = malloc(sizeof(*parts) * XISO_SOURCE_MAX_PARTS);
+    CHECK(xiso_split_parts(fixture("small.iso"), parts, XISO_SOURCE_MAX_PARTS) == 1);
+    CHECK(xiso_split_parts(fixture("small_x.iso.004"), parts, XISO_SOURCE_MAX_PARTS) == 6);
+    CHECK(strstr(parts[0], "small_x.iso.001") && strstr(parts[5], "small_x.iso.006"));
+    CHECK(xiso_split_parts(tmp_path("nope.1.iso"), parts, XISO_SOURCE_MAX_PARTS) == 0);
+    {   /* a lone "x.1.iso" is no split; "x.2.iso" without "x.1.iso" neither */
+        char *one = tmp_path("lone.1.iso"), *two = tmp_path("gap.2.iso"), *three = tmp_path("gap.3.iso");
+        write_file(one, (const uint8_t *)"x", 1);
+        write_file(two, (const uint8_t *)"x", 1);
+        write_file(three, (const uint8_t *)"x", 1);
+        CHECK(xiso_split_parts(one, parts, XISO_SOURCE_MAX_PARTS) == 1);
+        CHECK(xiso_split_parts(two, parts, XISO_SOURCE_MAX_PARTS) == 1 && strcmp(parts[0], two) == 0);
+        unlink(one); unlink(two); unlink(three);
+    }
+    free(parts);
+
+    /* xiso_list: the root and a subdirectory, sorted, with sizes and kinds. */
+    CHECK_RC(xiso_source_open_path(fixture("small_v2.cso"), &src), 0);
+    if (src) {
+        xiso_image *img = NULL;
+        CHECK_RC(xiso_open_source(src, &img), 0);
+        if (img) {
+            xiso_dirent *d = NULL;
+            size_t n = 0;
+            CHECK_RC(xiso_list(img, NULL, &d, &n), 0);
+            CHECK(n == 8);                               /* small: default.xbe, 5 files, sub, void */
+            int saw_sub = 0;
+            for (size_t i = 0; i < n; i++) {
+                if (i)
+                    CHECK(strcmp(d[i - 1].name, d[i].name) < 0);
+                if (!strcmp(d[i].name, "sub"))
+                    saw_sub = d[i].is_dir;
+                if (!strcmp(d[i].name, "b.txt"))
+                    CHECK(d[i].size == 2049 && !d[i].is_dir);
+            }
+            CHECK(saw_sub);
+            free(d);
+            xiso_stat st;
+            CHECK_RC(xiso_lookup(img, "sub", &st), 0);
+            CHECK_RC(xiso_list(img, &st, &d, &n), 0);
+            CHECK(n == 2);
+            free(d);
+            CHECK_RC(xiso_lookup(img, "void", &st), 0);
+            CHECK_RC(xiso_list(img, &st, &d, &n), 0);
+            CHECK(n == 0);
+            free(d);
+            CHECK_RC(xiso_lookup(img, "a.txt", &st), 0);
+            CHECK_RC(xiso_list(img, &st, &d, &n), XISO_EINVAL);   /* a file */
+            CHECK(xiso_partition_offset(img) == 0);
+            xiso_close(img);
+        }
+        xiso_source_close(src);
+    }
+
+    /* Broken compressed images: the read that needs the bad block fails, nothing else does. */
+    CHECK_RC(xiso_source_open_path(fixture("short.cso"), &src), XISO_ECORRUPT);
+    CHECK(src == NULL);
+    CHECK_RC(xiso_source_open_path(fixture("bad_block.zso"), &src), 0);
+    if (src) {
+        uint8_t b[4096];
+        CHECK(xiso_source_pread(src, b, sizeof b, 0) == XISO_ECORRUPT);           /* block 0 is broken */
+        CHECK(xiso_source_pread(src, b, 2048, 16 * 2048) == 2048);               /* block 16 is fine */
+        xiso_source_close(src);
+    }
+    printf("sources: ok\n");
+}
+
 int main(int argc, char **argv)
 {
     g_argc = argc;
@@ -745,6 +945,7 @@ int main(int argc, char **argv)
     test_lookup_corrupt();
     test_extract_file();
     test_mutations();
+    test_sources();
     rm_rf(g_tmp);
     printf(g_fail ? "%d failure(s)\n" : "all passed\n", g_fail);
     return g_fail ? 1 : 0;
