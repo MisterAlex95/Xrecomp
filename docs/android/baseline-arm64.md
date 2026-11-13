@@ -25,6 +25,9 @@ address space and signal frames itself. A pass is good evidence. A failure is a 
 | Tests | 99 pass, 1 skip, 0 fail (80 projects, 2026-11-09) | 98 pass, 3 skip, **1 fail** (82 projects, after XBA-21) |
 | `pytest tools/` | 981 pass, 8 skip | n/a (host independent) |
 
+The Python side is host independent, with one exception: `tools/recomp/test_reserved_idents` compiles lifted
+identifiers against the target's C headers, so the arm64 job also runs it with `aarch64-linux-gnu-gcc` (XBA-138).
+
 ## The arm64 failures
 
 CI holds this list in [`tools/ci/arm64-expected.txt`](../../tools/ci/arm64-expected.txt) (XBA-53): the `linux-arm64`

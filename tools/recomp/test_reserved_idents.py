@@ -14,8 +14,18 @@ clash. Reported from a FIFA Street 2 port, where it cost a day.
 
 Both checks compile against the headers a generated TU actually includes, and
 the positive sweep is paired with a negative control that feeds the same
-harness the unmangled name and requires it to fail -- a sweep that passes
+harness the unmangled name and requires it to clash -- a sweep that passes
 against both spellings is testing nothing.
+
+"Clash" is not always a compile error. Clang rejects `void isnan(void);`
+(the macro turns it into a redeclaration of `__builtin_isnan`), but GCC 14
+accepts it without a warning, x86-64 and aarch64 alike, and quietly defines a
+function called `__builtin_isnan`: the guest function is renamed behind the
+lifter's back. So the control counts a name as clashing when it fails to
+compile *or* when the headers define it as a macro (XBA-138). The compiler is
+the first of cl/clang/gcc/cc on PATH, or `$CC` when set: the test only
+compiles, so a cross compiler works (the arm64 CI job runs it with
+aarch64-linux-gnu-gcc).
 """
 
 import os
@@ -55,13 +65,19 @@ SHARP_MSVC = ("onexit",)
 
 def _find_cc():
     from .c_fixture import compiler
-    return compiler()
+    return os.environ.get("CC") or compiler()
 
 
 def _targets_msvc_crt():
     """Does the compiler under test build against the Microsoft CRT?"""
     rc, _ = _compile("#ifndef _MSC_VER\n#error not the Microsoft CRT\n#endif\n")
     return rc == 0
+
+def _is_macro(name):
+    """Do the generated TU's headers define `name` as a macro?"""
+    rc, _ = _compile(f"#ifdef {name}\n#error {name} is a macro\n#endif\n")
+    return rc != 0
+
 
 def sharp_names():
     """The names the negative control demands for this toolchain."""
@@ -114,11 +130,17 @@ class ReservedIdentTest(unittest.TestCase):
                 self.assertIn(name, _FUNC_RESERVED_IDENT,
                               f"{name} is missing from the reserved set")
                 rc, _ = _compile(f"void {name}(void);\nvoid {name}(void) {{ }}")
-                self.assertNotEqual(
-                    rc, 0,
-                    f"`void {name}(void);` compiled clean, so it does not "
-                    f"need to be in the reserved set -- or the headers this "
-                    f"test includes no longer match a generated TU")
+                self.assertTrue(
+                    rc != 0 or _is_macro(name),
+                    f"`void {name}(void);` compiled clean and {name} is not "
+                    f"a macro, so it does not need to be in the reserved "
+                    f"set -- or the headers this test includes no longer "
+                    f"match a generated TU")
+
+    def test_macro_check_sees_plain_names(self):
+        """The macro half of the control must not call everything a macro."""
+        self.assertTrue(_is_macro("NAN"))
+        self.assertFalse(_is_macro("MyGameFunc"))
 
 
     def test_posix_isatty_is_mangled(self):

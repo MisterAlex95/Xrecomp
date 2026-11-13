@@ -14,8 +14,9 @@ RUN dpkg --add-architecture arm64 && apt-get update && apt-get install -y --no-i
 
 FROM deps AS test
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
-# The expected-failures checker (tools/ci/check_expected.py). Its own layer, so the deps layer above stays cached.
-RUN apt-get update && apt-get install -y --no-install-recommends python3 && rm -rf /var/lib/apt/lists/*
+# The expected-failures checker (tools/ci/check_expected.py) and capstone for the lifter test below. Its own layer, so
+# the deps layer above stays cached.
+RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-capstone && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY . .
 ARG JOBS=4
@@ -24,6 +25,9 @@ ARG JOBS=4
 ENV SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy JOBS=${JOBS} RECOMP_GUEST_WINDOW=1 \
     XBR_CMAKE_ARGS="-DCMAKE_TOOLCHAIN_FILE=/src/cmake/toolchains/linux-aarch64-cross.cmake" \
     XBR_JUNIT_DIR=/reports/junit
+# The generated C meets the aarch64 glibc headers here only: the lifter's reserved identifiers, compiled (not run) with
+# the cross GCC (XBA-138). A few seconds; a failure fails the build before the long one.
+RUN CC=aarch64-linux-gnu-gcc python3 -B -m unittest -v tools.recomp.test_reserved_idents
 # /work removed at the end of the RUN, as in linux.Dockerfile (multi-GB sparse images from kernel_fd_limit).
 # A build break fails at once. The tests run to the end whatever fails (under qemu a failure is a lead, not a
 # verdict), the report is printed, then tools/ci/check_expected.py fails the build on any failure that is not in
