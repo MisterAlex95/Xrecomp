@@ -530,8 +530,12 @@ static inline int d3d8_format_is_swizzled(uint32_t fmt)
         fmt == 0x54 || fmt == 0x55 || fmt == 0x56)  /* D24X8/D24FS8/D32 */
         return 0;
 
-    /* YUV is linear (packed in raster order), not swizzled */
-    if (fmt == 0x24 || fmt == 0x25)  /* YUY2/UYVY */
+    /* YUV is linear (packed in raster order), not swizzled: the NV2A's
+     * LC_IMAGE_CR8YB8CB8YA8 / LC_IMAGE_YB8CR8YA8CB8 (YUY2/UYVY), and
+     * LU_IMAGE_A8CR8CB8Y8 (0x26) and LC_IMAGE_A4V6YB6A4U6YA6 (0x34), which
+     * were classed swizzled until XBA-138 (LU_/LC_ = linear in the NV2A
+     * format table as xemu and nxdk name it; src/kernel/nv2a_coverage.c). */
+    if (fmt == 0x24 || fmt == 0x25 || fmt == 0x26 || fmt == 0x34)
         return 0;
 
     /* All other formats are swizzled */
