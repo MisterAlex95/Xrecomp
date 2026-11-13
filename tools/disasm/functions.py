@@ -189,6 +189,14 @@ class FunctionDetector:
         # is not also an alias.
         self._pass_static_discovery(sections)
 
+        # Static discovery, packed pointer tables (XBA-140, level 2): records
+        # whose function pointer is off a dword boundary, which the aligned
+        # table-word pass below never reads (the MSVC CRT's math dispatch).
+        if self._disc().run_packed_tables(sections):
+            self.functions.clear()
+            self._build_functions(sections)
+            self._close_tail_jump_targets(sections)
+
         # Then the same for addresses that only ever exist as table entries.
         # After the immediate pass, so its results narrow the gaps first. These
         # become aliases rather than function starts, so no rebuild: aliases are

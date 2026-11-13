@@ -33,6 +33,14 @@ own CFG there. This module adds the evidence they do not use, in two levels:
       that decode as a closed function body with a balanced stack, no
       instruction data decodes into, and at least three instructions or a
       prologue: code reached only through a computed address.
+    * packed pointer tables (XBA-140): a run of records of one size in a
+      data section whose same field names code, at any alignment (the
+      table-word pass in functions.py reads aligned words only); the MSVC
+      CRT's x87 math dispatch packs its handler pointers after names of
+      any length, and its handlers are frameless. Each word takes a run's
+      seed gates plus a closed compiled body, no prologue asked, where a
+      function starts (run_packed_tables). Level 2: a run of data words is
+      not the strong evidence of level 1.
 
 A decoy (data that looks like a pointer: floats, strings, colours, offsets
 into the middle of code) must never become a function: see
@@ -58,8 +66,10 @@ Switches (docs/runtime/environment-variables.md):
 tools.disasm --static-discovery / --discovery-cap override them.
 """
 
+import array
 import bisect
 import os
+import sys
 from typing import Dict, List, Optional, Set, Tuple
 
 ENV_LEVEL = "RECOMP_STATIC_DISCOVERY"
@@ -106,7 +116,18 @@ _SAVED_ALIASES = {"ebx": "ebx", "bx": "ebx", "bl": "ebx", "bh": "ebx",
 
 # The pass names, as functions.json's detection_method and summary.json's
 # "discovery" keys.
-METHODS = ("callback_arg", "ctor_vtable", "rtti_vtable", "seh_funclet", "gap_body")
+METHODS = ("callback_arg", "ctor_vtable", "rtti_vtable", "seh_funclet", "gap_body",
+           "packed_table")
+
+# Packed pointer tables (level 2, XBA-140): a run of at least this many
+# records, a record at most this many bytes. On the decoy corpora
+# (test_static_discovery.py, test_packed_tables.py) the target gate alone
+# refuses every decoy, even from one record up; three is the margin: a
+# string or a colour table holds a lone code-looking word or two by chance,
+# a dispatch table holds more records than that.
+PACKED_MIN_RECORDS = 3
+PACKED_MAX_STRIDE = 32
+_U32 = "I" if array.array("I").itemsize == 4 else "L"
 
 
 def level_from_env(env=None) -> int:
@@ -844,4 +865,170 @@ class StaticDiscovery:
                     addr = nxt
         if added:
             print(f"  static discovery: {self.stats['gap_body']} function(s) in gaps")
+        return added
+
+    # -- level 2: packed pointer tables (XBA-140) -------------------------
+
+    def _packed_chains(self, sections, code_ranges) -> List[List[Tuple[int, int]]]:
+        """Runs of words in the data sections, at any byte offset, that
+        name code: PACKED_MIN_RECORDS or more at one stride (4 to
+        PACKED_MAX_STRIDE bytes: a record's size), at least one of them
+        off a dword boundary (an aligned run is functions.py's table-word
+        pass's). Each run is [(word va, value)], maximal at its stride."""
+        from .loader import DATA_SECTION_NAMES
+        code_names = {s.name for s in sections}
+        chains = []
+        if not code_ranges:
+            return chains
+        for sec in self.image.sections:
+            if sec.name in code_names and sec.name not in DATA_SECTION_NAMES:
+                continue                # code: its words are operands
+            data = self.image.get_section_data(sec)
+            if not data:
+                continue
+            data = bytes(data[:min(len(data), sec.raw_size or len(data),
+                                   sec.virtual_size or len(data))])
+            hits = {}
+            lo_all, hi_all = code_ranges[0][0], code_ranges[-1][1]
+            for phase in range(4):
+                n = (len(data) - phase) // 4
+                if n <= 0:
+                    continue
+                words = array.array(_U32, data[phase:phase + 4 * n])
+                if sys.byteorder != "little":
+                    words.byteswap()
+                for k, v in enumerate(words):
+                    if lo_all <= v < hi_all and self._in_ranges(code_ranges, v):
+                        hits[phase + 4 * k] = v
+            if len(hits) < PACKED_MIN_RECORDS:
+                continue
+            for off in sorted(hits):
+                for stride in range(4, PACKED_MAX_STRIDE + 1):
+                    if off - stride in hits:
+                        continue        # not the head of the run at this stride
+                    run = []
+                    o = off
+                    while o in hits:
+                        run.append((sec.virtual_addr + o, hits[o]))
+                        o += stride
+                    if len(run) >= PACKED_MIN_RECORDS and any(va % 4 for va, _ in run):
+                        chains.append(run)
+        return chains
+
+    def _packed_target(self, addr: int, bodies, starts, code_ranges, tables, arms):
+        """How a packed table's word may enter: "known" (already an entry),
+        "start", "alias", or None (refused, counted). Read-only.
+
+        The gates of a run's observed seed (tools.seed_from_log: executable,
+        reads as a function body) and of gap code: a closed CFG that is a
+        compiled body (_plausible_body), with no prologue asked, since the
+        run-time library's hand-written routines have none. And where a
+        function starts: in a gap, an instruction boundary that is aligned or
+        follows padding or a path's end; inside a measured body, an
+        instruction after a path's end (a routine packed after its owner's
+        ret): a clean split makes it a start, otherwise an alias, which
+        keeps the owner whole."""
+        d = self.d
+        if addr in d.functions or addr in d._candidates or addr in d._alias_entries:
+            return "known"
+        if not self._in_ranges(code_ranges, addr):
+            return self._refuse_packed("not in a code section")
+        if self._in_ranges(tables, addr) or addr in arms:
+            return self._refuse_packed("jump table or switch arm")
+        if d._is_byte_table(addr) or self._is_padding_byte(addr):
+            return self._refuse_packed("padding or byte table")
+        prev = self._prev_insn(addr)
+        ends_path = prev is not None and (prev.is_ret or prev.is_jump
+                                          or prev.mnemonic in ("int3", "nop"))
+        i = bisect.bisect_right(starts, addr) - 1
+        if i >= 0 and bodies[i][0] < addr < bodies[i][1]:
+            owner_start, owner_end = bodies[i]
+            if addr not in self.engine.instructions:
+                return self._refuse_packed("inside an instruction")
+            if not ends_path:
+                return self._refuse_packed("inside a body, mid path")
+            upper, kind = owner_end, "alias"
+            if self._clean_split(addr, owner_start, owner_end):
+                kind = "start"
+        else:
+            if (self.engine.instruction_covering(addr) is not None
+                    and not self._is_padding_byte(addr - 1)):
+                return self._refuse_packed("inside an instruction")
+            before = self.image.read_bytes_at_va(addr - 3, 3) or b"\0\0\0"
+            if not (addr % 4 == 0 or ends_path or before[-1] in (0xCC, 0x90, 0x00, 0xC3)
+                    or (before[0] == 0xC2 and before[2] == 0)):
+                return self._refuse_packed("not where a function starts")
+            k = bisect.bisect_right(starts, addr)
+            sec = self.image.get_section_at_va(addr)
+            upper = sec.virtual_addr + sec.virtual_size if sec is not None else addr
+            if k < len(starts):
+                upper = min(upper, starts[k])
+            kind = "start"
+        if not self.engine.probes_as_function_body(addr):
+            return self._refuse_packed("does not read as a function body")
+        if not self.engine.probes_as_callback_body(addr, upper, addr,
+                                                   tail_targets=set(d.functions)):
+            return self._refuse_packed("no closed body")
+        decoded = self._cfg(addr, upper)
+        if not decoded or not self._plausible_body(decoded, addr, upper):
+            return self._refuse_packed("not a compiled body")
+        return kind
+
+    def _refuse_packed(self, why: str) -> None:
+        self._refuse("packed table: " + why)
+        return None
+
+    def run_packed_tables(self, sections) -> bool:
+        """Level 2: the function pointers of packed tables (XBA-140). A run
+        is taken when PACKED_MIN_RECORDS of its words pass _packed_target,
+        three quarters of them do, and they name two routines or more; its
+        refused words stay out. Returns: anything added (starts to build,
+        or aliases)."""
+        if self.level < FULL:
+            return False
+        if self.baseline is None:
+            self.baseline = len(self.d.functions)
+        code_ranges = sorted(self._code_ranges(sections))
+        bodies = sorted((f.start, f.end) for f in self.d.functions.values()
+                        if f.start not in self.d._alias_entries)
+        starts = [b[0] for b in bodies]
+        tables = self._jump_table_words()
+        arms = self.d._jump_table_arms()
+        verdicts: Dict[int, Optional[str]] = {}
+        take: Dict[int, str] = {}
+        for run in self._packed_chains(sections, code_ranges):
+            kinds = []
+            for _, target in run:
+                if target not in verdicts:
+                    verdicts[target] = self._packed_target(target, bodies, starts,
+                                                           code_ranges, tables, arms)
+                kinds.append(verdicts[target])
+            good = [(t, k) for (_, t), k in zip(run, kinds) if k is not None]
+            if (len(good) < PACKED_MIN_RECORDS or 4 * len(good) < 3 * len(run)
+                    or len({t for t, _ in good}) < 2):
+                self._refuse("packed table: run refused")
+                continue
+            for t, k in good:
+                if k != "known":
+                    take.setdefault(t, k)
+        added = False
+        for addr, kind in sorted(take.items()):
+            if kind == "alias":
+                if not self._budget():
+                    break
+                i = bisect.bisect_right(starts, addr) - 1
+                self.d._alias_entries[addr] = bodies[i][1]
+                self.stats["packed_table"] += 1
+                added = True
+                continue
+            if addr not in self.engine.instructions:
+                if not self.engine.decode_at(addr, replace_overlaps=True):
+                    self._refuse_packed("does not decode")
+                    continue
+            if not self._add(addr, "packed_table"):
+                break
+            added = True
+        if added:
+            print(f"  static discovery: {self.stats['packed_table']} function(s) "
+                  f"from packed tables")
         return added

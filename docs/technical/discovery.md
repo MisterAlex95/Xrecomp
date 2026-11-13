@@ -120,6 +120,7 @@ analysis looks, before any run, for what a run would reveal (`tools/disasm/disco
 | `seh_funclet` | an exception frame's handlers and filters (`tools/recomp/seh_frames.py`): a funclet or resume target in the gap after its function extends the function; a funclet elsewhere becomes a function | the same |
 | switch tables | a table in `.rdata`/`.data` bounded by the `cmp; ja` before its dispatch, a byte-indexed two-level table, `mov reg, [idx*4 + table]; jmp reg`: the arms stay in their function and are never entries (`engine.py`) | every entry in the dispatch's section |
 | `gap_body` (level 2) | bytes in a gap, after padding or a terminator, nothing references (code reached through a computed address) | a closed body in the gap, a balanced stack, callee-saved registers saved before they are written, whole-argument `ret N`, none of what data decodes into, three instructions or a prologue, aligned after padding or a prologue when packed unaligned |
+| `packed_table` (level 2, XBA-140) | a packed pointer table in a data section: a run of 3 or more records of one size (4 to 32 bytes) whose same field names code, at any alignment, at least one word off a dword boundary (the older table-word pass reads aligned words only). The MSVC CRT's x87 math dispatch is the case: its handler pointers are packed after variable-length names, its handlers frameless | per word, a run's observed seed's (seed_from_log: executable, reads as a function body) plus a closed CFG that is a compiled body (balanced stack, callee-saved registers saved, whole-argument `ret N`, none of what data decodes into), no prologue asked; where a function starts: in a gap an instruction boundary that is aligned or follows padding or a path's end, inside a body an instruction after a path's end (a clean split makes it a start, otherwise an alias that keeps the body whole). A run is taken when 3 of its words and three quarters of them pass and they name two routines or more |
 
 The weak passes that were there before (table words, padding boundaries, starts after a ret, a data section's
 switch-table words) take the same body gates under `RECOMP_STATIC_DISCOVERY_STRICT=1` (off by default, wave 5): a
@@ -150,6 +151,15 @@ code, floats, colours, strings, offsets near the image base); with static discov
 of them functions or aliases, in 34 of the 40 titles. On the corpus the function count goes down 6 to 14 % and the
 bytes lifted move between -19 % and +1 %: aliases of decoys and of switch arms go, the missing targets come. End to end, `tools/compat/test_e2e.py::test_static_discovery_needs_no_round` boots a title whose run
 reaches only such code: one round, nothing to seed, `tools.compat recall` says `no miss`.
+
+Packed tables (`tools/disasm/test_packed_tables.py`, `-s` for the report): a fixture with three packed tables (13-byte
+`{name, kind, f1, f2}` records, a name followed by four contiguous pointers, 6-byte `{id, f}` records) naming eleven
+frameless routines, x87 code among them, two of them inside another function's body: all eleven are functions at the
+first analysis in the five layouts (four before: the ones a word happened to name at an aligned address), no decoy
+(a string holding an address, an unaligned run of words into the middle of code, colours whose one-byte-in windows read
+as code addresses, an unaligned float array). Its own decoy corpus (the 40 decoy titles plus packed runs of 3 to 8 words
+at a random stride and phase into non-entry code bytes, strings, colours and floats at odd offsets): 0 seeded, the
+pass adds nothing, 633 runs refused; the corpus above stays at 0 of 7,160.
 
 Code: `src/kernel/recomp_discovery.c` (the writer, no dependency on the rest of the runtime), callers in
 `kernel_bridge.c` (threads) and `templates/new-game/src/recomp_manual.c` (indirect calls, untranslated instructions);

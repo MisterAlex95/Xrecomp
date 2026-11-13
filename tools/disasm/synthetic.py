@@ -394,3 +394,113 @@ def discovery_e2e_title():
 
 
 E2E_DECOYS = (("thread_fn", 2), ("gap_fn", 1), ("m1", 1), ("fatal", 2), ("entry", 1))
+
+
+# Frameless x87 routines (XBA-140): a run-time math library's handlers, the
+# shape of the MSVC CRT's hand-written math code. No prologue, no padding
+# between them, reached only through a dispatch table. (name, hex)
+X87_ROUTINES = (
+    ("X_sin", "d9fe c3"),                                   # fsin; ret
+    ("X_cos", "d9ff c3"),                                   # fcos; ret
+    ("X_tan", "d9f2 ddd8 c3"),                              # fptan; fstp st0; ret
+    ("X_sqrt", "d9fa c3"),                                  # fsqrt; ret
+    # fxam; fwait; fnstsw ax; sahf; jp nan; fsin; ret; nan: fstp st0; fldz; ret
+    ("X_cls", "d9e5 9b dfe0 9e 7a03 d9fe c3 ddd8 d9ee c3"),
+    ("X_arg", "dd442404 d9fe c3"),                          # fld qword [esp+4]; fsin; ret
+    ("X_zero", "ddd8 d9ee c3"),                             # fstp st0; fldz; ret
+    ("X_nan", "ddd8 d9e8 d9ee def9 c3"),                    # 1/0 -> inf; ret
+    ("X_pow", "d9c9 d9f1 d9e8 d9c1 d9f8 c3"),               # fxch; fyl2x; ...
+)
+
+
+RGBA_DECOYS = (0x03, 0x11, 0x27, 0x35, 0x49, 0x5b)
+
+
+def packed_table_title(al=16, fill=0xCC):
+    """A title with packed (unaligned) dispatch tables naming frameless x87
+    routines (XBA-140), and decoys that look like such tables. Labels X_ are
+    the routines, the targets; nothing calls them directly (X_in1 and
+    X_in2 lie inside the body of owner, whose branch runs past them).
+
+    The tables, in .rdata:
+      mtab   records of 13 bytes {char name[4]; u8 kind; void *f1, *f2},
+             packed: the pointer fields fall at every phase of a dword
+      ntab   a variable-length name followed by four contiguous handler
+             pointers, the run starting off a dword boundary
+      otab   records of 6 bytes {u16 id; void *f}
+    Decoys (never a function): a string holding one address, an unaligned
+    run of words into the middle of code, colours whose unaligned windows
+    read as code addresses, an unaligned float array.
+
+    Returns (title, decoy addresses) once laid out."""
+    t = Title()
+    x = t.section(".text")
+    r = t.section(".rdata", DATA)
+    a = lambda: x.align(al, fill)
+    x.label("entry").hex("558bec").call("user").call("owner").hex("ebfe")
+    a()
+    # The dispatcher: the record's address as an immediate, then an indirect
+    # call through the field (`call [edx+5]`): no scan sees the target.
+    x.label("user").hex("ba").abs("mtab").hex("8b442404 6bc00d 03d0 ff5205 c3")
+    # The routines, packed straight after user's ret.
+    for name, code in X87_ROUTINES:
+        x.label(name).hex(code)
+    a()
+    x.label("after").hex("558bec 8b4508 5d c3")
+    a()
+    # Two routines inside a body: owner's branch runs past them, so the body
+    # covers them and may not be cut there (they become aliases).
+    x.label("owner").hex("8b442404 85c0 74").rel8("O_tail").hex("c3")
+    x.label("X_in1").hex("d9e1 c3")                         # fabs; ret
+    x.label("X_in2").hex("d9e0 c3")                         # fchs; ret
+    x.label("O_tail").hex("33c0 c3")
+    a()
+    x.label("last").hex("c3")
+
+    r.raw(b"\x01")                       # the tables start off a dword boundary
+    r.label("mtab")
+    for name, f1, f2 in ((b"sin\0", "X_sin", "X_nan"), (b"cos\0", "X_cos", "X_nan"),
+                         (b"tan\0", "X_tan", "X_cls"), (b"sqr\0", "X_sqrt", "X_zero"),
+                         (b"arg\0", "X_arg", "X_cls")):
+        r.raw(name).raw(b"\x07").abs(f1).abs(f2)
+    r.u32(0)
+    r.raw(b"pow\0\x02").label("ntab").abs("X_pow").abs("X_zero").abs("X_nan").abs("X_cls")
+    r.u32(0).raw(b"\x00")
+    # otab: records of 6 bytes {u16 id; void *f}, from offset 2 of a dword.
+    while len(r.buf) % 4 != 0:
+        r.raw(b"\x00")
+    r.raw(b"\x00\x00").label("otab")
+    for n, f in enumerate(("X_in1", "X_in2", "X_sin")):
+        r.raw(bytes([n, 0])).abs(f)
+    r.u32(0)
+    # Decoys, every word of them off a dword boundary (an aligned one is the
+    # older table-word pass's to judge).
+    def phase(p):
+        while len(r.buf) % 4 != p:
+            r.raw(b"_")
+    r.raw(b"C:\\path\\")
+    phase(3)
+    r.label("D_strptr").abs("X_cls", 2).raw(b"file.txt\0")
+    phase(1)
+    r.label("D_run").abs("user", 3).abs("user", 6).abs("X_cls", 2).abs("after", 1)
+    r.raw(b"\x00\x00\x09")
+    # Colours 0x0110GG00: their windows one byte in read 0x000110GG, in .text.
+    phase(0)
+    r.label("D_rgba")
+    for gg in RGBA_DECOYS:
+        r.u32(0x01000000 | (((BASE + HDR) >> 8 & 0xFF) << 16) | (gg << 8))
+    r.raw(b"\x00\x00\x00")
+    phase(2)
+    r.label("D_floats")
+    for v in (0.0, 1.0, 0.5, -1.0, 3.14159, 1e-3):
+        r.f32(v)
+    t._layout()
+    decoys = {"D_strptr": t.va("X_cls") + 2, "D_run0": t.va("user") + 3,
+              "D_run1": t.va("user") + 6, "D_run2": t.va("X_cls") + 2,
+              "D_run3": t.va("after") + 1}
+    text = t.sections[0]
+    entries = {text.va + off for off in text.labels.values()}
+    for gg in RGBA_DECOYS:
+        if text.va + gg not in entries:     # (a window may name a real entry, by layout)
+            decoys["D_rgba%02x" % gg] = text.va + gg      # what the window reads
+    return t, decoys
