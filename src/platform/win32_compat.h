@@ -138,6 +138,12 @@ int         w32_raise_fd_limit(unsigned long long *before, unsigned long long *a
 HANDLE CreateEventA(LPSECURITY_ATTRIBUTES sa, BOOL manualReset, BOOL initialState, LPCSTR name);
 HANDLE CreateEventW(LPSECURITY_ATTRIBUTES sa, BOOL manualReset, BOOL initialState, LPCWSTR name);
 BOOL   SetEvent(HANDLE h);
+/* Tests: threads blocked in a single-object wait on event h now (0 for a
+ * handle that is not an event). Not a Win32 call. */
+unsigned w32_event_waiters(HANDLE h);
+/* Tests: n SetEvents with no thread running in between (one lock hold): what
+ * two sets in a row do while a release is still on its way. Not a Win32 call. */
+BOOL   w32_event_set_n(HANDLE h, int n);
 BOOL   ResetEvent(HANDLE h);
 BOOL   PulseEvent(HANDLE h);
 
