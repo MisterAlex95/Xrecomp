@@ -31,3 +31,8 @@ set_tests_properties(usb_ohci_posix_test PROPERTIES SKIP_RETURN_CODE 77)
 add_test(NAME usb_ohci_posix_catchup_off COMMAND usb_ohci_posix_test ${TEST_XBE})
 set_tests_properties(usb_ohci_posix_catchup_off PROPERTIES SKIP_RETURN_CODE 77
                      ENVIRONMENT RECOMP_OHCI_CATCHUP=0)
+# The old configuration: no TIB per thread, so the controller thread never
+# runs (XBA-133 made the default configuration the first entry's).
+add_test(NAME usb_ohci_posix_no_tib COMMAND usb_ohci_posix_test ${TEST_XBE})
+set_tests_properties(usb_ohci_posix_no_tib PROPERTIES SKIP_RETURN_CODE 77
+                     ENVIRONMENT RECOMP_TIB_PER_THREAD=0)

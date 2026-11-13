@@ -11,11 +11,12 @@
  * Then the guest's side of the lists (xbox_OhciCatchUp, K-8c): a driver
  * that has written ControlListFilled while the controller thread is overdue
  * has the control list walked and the USB line raised from its own thread.
- * The synthetic image has no TLS and the test sets RECOMP_TIB_PER_THREAD=0,
- * so the controller thread gets no TIB and stops at once; its tick never
- * runs and is therefore always overdue here. (Since XBA-113 a no-TLS image
- * gets a TIB per thread by default; the controller thread would then run
- * and race the catch-up this checks.)
+ * The controller thread runs, as in the default configuration, and is held
+ * still between two passes (xbox_OhciHoldControllerForTest, XBA-133): it is
+ * then overdue by definition and cannot race the catch-up this checks. It
+ * used to be kept from running with RECOMP_TIB_PER_THREAD=0, which tested a
+ * configuration titles no longer run in; a third CTest entry still runs
+ * that one.
  * Run a second time with RECOMP_OHCI_CATCHUP=0 (a second CTest entry), the
  * same calls must leave the list and the line alone.
  *
@@ -147,6 +148,15 @@ static void catch_up(volatile uint32_t *hc0)
     hc0[0x10 / 4] = 0x80000002u;                /* enable MIE | WDH       */
     hc0[0x04 / 4] = 0x00000090u;                /* operational, CLE       */
 
+    /* The controller thread stands still from here: overdue. With
+     * RECOMP_TIB_PER_THREAD=0 it never ran, which is overdue too. */
+    {
+        int held = xbox_OhciHoldControllerForTest(1);
+        const char *tib = getenv("RECOMP_TIB_PER_THREAD");
+        if (!(tib && *tib == '0'))
+            check(held, "the controller thread runs and is held between passes", NULL);
+    }
+
     /* Nothing filled yet: nothing to catch up on. */
     xbox_OhciCatchUp();
     head = mem[CU_ED / 4 + 2] & ~0xFu;
@@ -185,10 +195,6 @@ int main(int argc, char **argv)
     unsigned char *xbe;
     struct sigaction sa;
     char detail[96];
-
-    /* Before the layout reads it: keep the controller thread from running
-     * (see the comment at the top). */
-    setenv("RECOMP_TIB_PER_THREAD", "0", 1);
 
     setvbuf(stdout, NULL, _IONBF, 0);
     xbe = argc > 1 ? load_file(argv[1], &xbe_len) : NULL;
