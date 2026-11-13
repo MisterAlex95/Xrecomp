@@ -74,3 +74,47 @@ def digest(path):
     import hashlib
     with open(path, "rb") as f:
         return hashlib.sha256(f.read()).hexdigest()
+
+
+def mode_suffix(env=None):
+    """What the stamp keeps of the static discovery switches (XBA-137,
+    tools/disasm/discovery.py): "" for the default (level 2, no cap), so a
+    stamp made with the default stays valid; otherwise "|sd=<level>:<cap>",
+    so flipping RECOMP_STATIC_DISCOVERY(_CAP) analyses again."""
+    from tools.disasm.discovery import FULL, cap_from_env, level_from_env
+    level, cap = level_from_env(env), cap_from_env(env)
+    return "" if (level, cap) == (FULL, None) else "|sd=%d:%s" % (level, "" if cap is None else "%g" % cap)
+
+
+def analysis_counts(an):
+    """The analysis' function count and what static discovery added to it,
+    per pass, from <an>/disasm/summary.json (XBA-137): pack.json's
+    "analysis", for the owner's library report. None without a summary."""
+    s = _read_json(os.path.join(an, "disasm", "summary.json"), None)
+    if not isinstance(s, dict):
+        return None
+    out = {"functions": s.get("total_functions"), "by_method": s.get("functions_by_method", {})}
+    d = s.get("discovery")
+    if isinstance(d, dict):
+        out["static_discovery"] = {"level": d.get("level"), "cap": d.get("cap"), "capped": d.get("capped"),
+                                   "added": d.get("added", {})}
+    return out
+
+
+def counts_line(counts):
+    """« 1234 functions, static discovery +12 (callback_arg 3, gap_body 9) »."""
+    if not counts:
+        return ""
+    line = "%s functions" % counts.get("functions")
+    sd = counts.get("static_discovery")
+    if sd:
+        added = {k: v for k, v in (sd.get("added") or {}).items() if v}
+        if sd.get("level") == 0:
+            line += ", static discovery off"
+        else:
+            line += ", static discovery +%d" % sum(added.values())
+            if added:
+                line += " (%s)" % ", ".join("%s %d" % kv for kv in sorted(added.items()))
+            if sd.get("capped"):
+                line += ", capped at %g %%" % sd["cap"]
+    return line

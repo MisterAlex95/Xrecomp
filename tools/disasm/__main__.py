@@ -95,6 +95,24 @@ def main():
              "default.",
     )
 
+    parser.add_argument(
+        "--static-discovery",
+        type=int, choices=(0, 1, 2), default=None,
+        help="Static discovery (XBA-137, tools/disasm/discovery.py): 0 off, "
+             "1 strong evidence only (callback arguments of kernel calls, "
+             "constructor and RTTI vtables, exception handlers, noreturn "
+             "kernel calls, switch tables outside code), 2 also code in gaps "
+             "that nothing references. Default: $RECOMP_STATIC_DISCOVERY, "
+             "else 2.",
+    )
+    parser.add_argument(
+        "--discovery-cap",
+        type=float, default=None, metavar="PCT",
+        help="Static discovery adds at most PCT %% more functions than the "
+             "passes before it found (each costs Prepare time on a phone). "
+             "Default: $RECOMP_STATIC_DISCOVERY_CAP, else no cap.",
+    )
+
     args = parser.parse_args()
 
     try:
@@ -123,6 +141,8 @@ def main():
             seed_functions=seed_funcs,
             observed_seeds=observed,
             skip_library_immediates=args.skip_library_immediates,
+            static_discovery=args.static_discovery,
+            discovery_cap=args.discovery_cap,
         )
         success = disassembler.run()
         sys.exit(0 if success else 1)

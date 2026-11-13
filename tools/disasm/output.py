@@ -73,6 +73,8 @@ class OutputWriter:
             "functions_with_prologue": func_summary["with_prologue"],
             "functions_by_method": func_summary["by_detection_method"],
             "functions_by_section": func_summary["by_section"],
+            # What static discovery added, per pass (XBA-137, discovery.py).
+            "discovery": func_summary.get("discovery"),
             "total_xrefs": self.xrefs.count(),
             "xrefs_by_type": xref_counts,
             "total_labels": self.labels.count(),

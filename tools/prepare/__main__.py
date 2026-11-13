@@ -637,9 +637,10 @@ def desktop(a):
         print("      discovered.jsonl not used: %s" % e, flush=True)
     # The profile counts too: its seeds go to the disassembler, its
     # exclude_manual to the lift; and the seeds earlier runs found.
+    # The static discovery switches too (XBA-137): "" for the default.
     from tools.prepare import toolkit
     want = {"xbe": sha256(xbe), "toolkit_sha256": toolkit.digest(), "profile": profile_digest(profile),
-            "discovered": discovered.digest(disc_seeds)}
+            "discovered": discovered.digest(disc_seeds) + discovered.mode_suffix()}
     # A stamp from before XBA-97 has no "discovered": the same as none. The
     # toolkit by its content digest, an old stamp by its commit (XBA-134).
     same = toolkit_same(stamp) and all(stamp.get(k, "" if k == "discovered" else None) == v
@@ -661,7 +662,8 @@ def desktop(a):
             cmd += ["--seed-functions", disc_seeds]
         progress(5, "disassembling")
         t = run(cmd, log, tick=(5, 58, "disassembling", 90))
-        note("disassembled in %.0f s" % t, 60)
+        counts = discovered.counts_line(discovered.analysis_counts(an))
+        note("disassembled in %.0f s%s" % (t, ": " + counts if counts else ""), 60)
         progress(60, "identifying library functions")
         run([py, "-m", "tools.func_id", xbe,
              "--functions", os.path.join(an, "disasm", "functions.json"),
@@ -834,7 +836,8 @@ def discovered_changed(work, stamp):
     addresses neither seeded nor rejected yet (they may become seeds)."""
     from tools.prepare import discovered
     seeds_path = os.path.join(work, discovered.SEEDS)
-    if discovered.digest(seeds_path if os.path.isfile(seeds_path) else None) != stamp.get("discovered", ""):
+    if (discovered.digest(seeds_path if os.path.isfile(seeds_path) else None) + discovered.mode_suffix()
+            != stamp.get("discovered", "")):
         return True
     disc = os.path.join(work, discovered.DISCOVERY)
     if not os.path.isfile(disc):

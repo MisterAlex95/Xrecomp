@@ -115,13 +115,16 @@ def test_the_self_healing_loop(tmp_path):
     3 starts B, which meets C; C is not code, the gates refuse it, so round 4's
     prepare accepts nothing: the loop stops there, a round without progress,
     not at a fixed count. The result carries the recall measure (3 misses, all
-    thread starts)."""
+    thread starts). Static discovery off (RECOMP_STATIC_DISCOVERY=0): its gap
+    pass would find A and B at the first prepare (XBA-137,
+    test_static_discovery_needs_no_round)."""
     if not shutil.which("cmake"):
         pytest.skip("no cmake")
     src, out, cw = _heal_xbe(tmp_path), tmp_path / "results.jsonl", tmp_path / "cw"
     r = subprocess.run([sys.executable, "-m", "tools.compat", "heal", src, "--work-root", str(cw),
                         "--seconds", "6", "--sustain", "3", "--out", str(out)],
-                       cwd=ROOT, capture_output=True, text=True, timeout=3600)
+                       cwd=ROOT, capture_output=True, text=True, timeout=3600,
+                       env=dict(os.environ, RECOMP_STATIC_DISCOVERY="0"))
     assert r.returncode == 0, r.stdout[-2000:] + r.stderr[-2000:]
     res = json.loads(out.read_text().splitlines()[-1])
     h = res["heal"]
@@ -606,3 +609,44 @@ def test_a_title_with_a_network_stack_finds_no_cable(tmp_path):
 
     log, status, res = run("--no-prepare", RECOMP_NIC="0")
     assert "XBA117 NIC FAIL" in log and "XBA117 NIC OK" not in log, log[-3000:]
+
+
+@pytest.mark.skipif(os.environ.get("XBA_E2E") != "1", reason="XBA_E2E=1: builds and boots a title (minutes)")
+def test_static_discovery_needs_no_round(tmp_path):
+    """XBA-137: a title whose run reaches only code the analysis used to miss
+    (tools/disasm/synthetic.py discovery_e2e_title: a vtable method, a thread
+    routine packed after a noreturn kernel call, a gap function reached through
+    a computed address, and a table of decoys) is found at the first prepare:
+    the run records nothing to seed, the loop stops after its first round, the
+    recall has no miss, and no decoy became a function."""
+    if not shutil.which("cmake"):
+        pytest.skip("no cmake")
+    from tools.disasm.synthetic import E2E_DECOYS, E2E_IMPORTS, discovery_e2e_title
+    d = tmp_path / "disco"
+    d.mkdir()
+    t = discovery_e2e_title()
+    t.write(d / "default.xbe", "entry", imports=E2E_IMPORTS, title_id=0x58424137, title="Disco")
+    out, cw = tmp_path / "results.jsonl", tmp_path / "cw"
+    env = {k: v for k, v in os.environ.items() if not k.startswith("RECOMP_STATIC_DISCOVERY")}
+    r = subprocess.run([sys.executable, "-m", "tools.compat", "heal", str(d), "--work-root", str(cw),
+                        "--seconds", "6", "--sustain", "3", "--out", str(out)],
+                       cwd=ROOT, capture_output=True, text=True, timeout=3600, env=env)
+    assert r.returncode == 0, r.stdout[-2000:] + r.stderr[-2000:]
+    res = json.loads(out.read_text().splitlines()[-1])
+    h = res["heal"]
+    assert h["rounds"] == 1 and h["history"][0]["new_seeds"] == 0, h
+    assert "recall" not in res, res["recall"]                  # no miss: compat attaches none
+    # The thread the title starts runs (its routine was found: no "thread" entry).
+    assert res["runs"][0]["threads"] >= 1 and res["stage"] == "boots", res
+    disc = cw / "disco" / "discovered.jsonl"
+    lines = disc.read_text().splitlines() if disc.exists() else []
+    assert not [l for l in lines if '"t":"icall"' in l or '"t":"thread' in l], lines
+    work = cw / "disco"
+    rc = subprocess.run([sys.executable, "-m", "tools.compat", "recall", str(work), str(d / "default.xbe")],
+                        cwd=ROOT, capture_output=True, text=True, timeout=120)
+    assert rc.returncode == 0 and rc.stdout.strip() == "no miss", rc.stdout + rc.stderr
+    funcs = {int(f["start"], 16) for f in json.loads((work / "analysis" / "disasm" / "functions.json").read_text())}
+    assert {t.va(n) for n in ("thread_fn", "m1", "gap_fn")} <= funcs
+    assert not [n for n, add in E2E_DECOYS if t.va(n) + add in funcs]
+    summary = json.loads((work / "analysis" / "disasm" / "summary.json").read_text())
+    assert summary["discovery"]["added"]["gap_body"] >= 1, summary["discovery"]

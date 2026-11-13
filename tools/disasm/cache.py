@@ -86,7 +86,8 @@ class AnalysisCache:
 
     def is_valid(self, xbe_path: str, analysis_json_path: str,
                  text_only: bool = False, extra_sections=None,
-                 seed_functions=None, skip_library_immediates=False) -> bool:
+                 seed_functions=None, skip_library_immediates=False,
+                 discovery="") -> bool:
         """
         Check if cached results are still valid.
 
@@ -112,6 +113,9 @@ class AnalysisCache:
                                                    seed_functions,
                                                    skip_library_immediates):
             return False
+        # Static discovery's level and cap (XBA-137).
+        if cache.get("discovery", "") != discovery:
+            return False
 
         # Verify output files exist
         required_files = [
@@ -127,7 +131,7 @@ class AnalysisCache:
     def save(self, xbe_path: str, analysis_json_path: str,
              text_only: bool, elapsed_seconds: float,
              extra_sections=None, seed_functions=None,
-             skip_library_immediates=False) -> None:
+             skip_library_immediates=False, discovery="") -> None:
         """
         Save cache metadata after a successful analysis run.
         """
@@ -141,6 +145,7 @@ class AnalysisCache:
             "opts_key": self._opts_key(text_only, extra_sections,
                                        seed_functions,
                                        skip_library_immediates),
+            "discovery": discovery,
             "timestamp": time.time(),
             "elapsed_seconds": elapsed_seconds,
         }

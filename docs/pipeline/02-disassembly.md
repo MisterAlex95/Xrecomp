@@ -225,6 +225,14 @@ re-running disassembly. `tools.seed_from_log` and `tools.recomp.icall_feedback`
 turn a run's failed targets into seeds; the patterns below are what to look
 for *before* a run, and why a seed is sometimes the wrong fix.
 
+Since XBA-137 the first analysis looks for several of them itself (static
+discovery, [discovery.md](../technical/discovery.md#static-discovery-at-the-first-prepare-xba-137)):
+thread routines and other callbacks pushed for kernel calls, vtables a
+constructor installs or RTTI describes, exception handlers, a call to a
+noreturn kernel routine as the end of a body (the third pattern below, for the
+kernel's own; a CRT exit helper that is not an import still runs on), switch
+tables outside the code, and code in gaps that nothing references.
+
 Where the failed address lands tells the patterns apart. Ask Ghidra with
 `ClassifyTargets.java` ([Triage without the GUI](../../tools/ghidra_naming/README.md#triage-without-the-gui)):
 between two functions is the first pattern; inside a function, right after a

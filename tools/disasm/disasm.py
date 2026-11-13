@@ -40,7 +40,9 @@ class Disassembler:
                  extra_sections: Optional[list] = None,
                  seed_functions: Optional[list] = None,
                  observed_seeds: Optional[set] = None,
-                 skip_library_immediates: bool = False):
+                 skip_library_immediates: bool = False,
+                 static_discovery: Optional[int] = None,
+                 discovery_cap: Optional[float] = None):
         self.xbe_path = xbe_path
         self.analysis_json = analysis_json
         self.output_dir = output_dir or config.DEFAULT_OUTPUT_DIR
@@ -51,6 +53,12 @@ class Disassembler:
         self.extra_sections = extra_sections or []
         self.seed_functions = seed_functions or []
         self.skip_library_immediates = skip_library_immediates
+        # Static discovery (XBA-137, discovery.py): level and cap, from the
+        # caller or RECOMP_STATIC_DISCOVERY / RECOMP_STATIC_DISCOVERY_CAP.
+        from .discovery import cap_from_env, level_from_env
+        self.static_discovery = (level_from_env() if static_discovery is None
+                                 else static_discovery)
+        self.discovery_cap = cap_from_env() if discovery_cap is None else discovery_cap
         # Seeds a run actually reached (see _load_seed_functions). They are
         # not guesses, so the mid-instruction guard below does not apply.
         self.observed_seeds = observed_seeds or set()
@@ -90,7 +98,8 @@ class Disassembler:
                                              self.text_only,
                                              self.extra_sections,
                                              self.seed_functions,
-                                             self.skip_library_immediates):
+                                             self.skip_library_immediates,
+                                             self._discovery_key()):
                 last_time = cache.get_last_run_time()
                 print(f"Cache hit - results unchanged (last run: "
                       f"{last_time:.1f}s)")
@@ -158,9 +167,19 @@ class Disassembler:
 
         # Realign after embedded switch tables before anything reads the
         # instruction stream. See DisasmEngine.resync_jump_tables().
+        if self.static_discovery:
+            n_reg = self.engine.find_register_dispatch()
+            if n_reg:
+                print(f"  {n_reg} switch dispatch(es) through a register")
         n_tables = self.engine.resync_jump_tables()
         if self.verbose:
             print(f"  Resynced past {n_tables:,d} embedded jump table(s)")
+        if self.static_discovery:
+            n_ext = self.engine.measure_external_tables(
+                [(s.virtual_addr, s.virtual_addr + s.virtual_size) for s in sections])
+            if n_ext:
+                print(f"  {n_ext} switch table(s) outside the code they dispatch to")
+            self.engine.decode_table_arms()
 
         # Phase 4: Cross-references
         if self.verbose:
@@ -175,9 +194,12 @@ class Disassembler:
         # Phase 5: Function detection
         if self.verbose:
             print("\nPhase 5: Detecting functions...")
+        # The seed check below measures bodies as before static discovery.
         self.func_detector = FunctionDetector(
             self.engine, self.image, self.xrefs, self.labels,
             skip_library_immediates=self.skip_library_immediates)
+        if not self.seed_functions:
+            self.func_detector = self._detector()
 
         # Measure bodies before accepting a seed inside a sweep instruction.
         if self.seed_functions:
@@ -205,9 +227,7 @@ class Disassembler:
             # Rebuild from the corrected stream, without candidates or xrefs
             # left over from the discarded sweep instructions.
             self.xrefs = build_xrefs(self.engine, self.image)
-            self.func_detector = FunctionDetector(
-                self.engine, self.image, self.xrefs, self.labels,
-                skip_library_immediates=self.skip_library_immediates)
+            self.func_detector = self._detector()
             for addr in accepted:
                 self.func_detector._add_candidate(addr, 0.95, "seed_vtable_thunk")
             if realigned:
@@ -266,13 +286,43 @@ class Disassembler:
             if json_path:
                 cache.save(self.xbe_path, json_path, self.text_only, elapsed,
                            self.extra_sections, self.seed_functions,
-                           self.skip_library_immediates)
+                           self.skip_library_immediates, self._discovery_key())
 
             if self.verbose:
                 print(f"\n  Output written to {self.output_dir}/")
 
         print(f"Done in {elapsed:.2f}s")
         return True
+
+    def _discovery_key(self) -> str:
+        return f"{self.static_discovery}:{self.discovery_cap}"
+
+    def _detector(self) -> FunctionDetector:
+        """The function detector, with static discovery as configured."""
+        return FunctionDetector(
+            self.engine, self.image, self.xrefs, self.labels,
+            skip_library_immediates=self.skip_library_immediates,
+            static_discovery=self.static_discovery,
+            discovery_cap=self.discovery_cap,
+            rtti_methods=self._rtti_methods())
+
+    def _rtti_methods(self) -> list:
+        """Virtual methods MSVC RTTI names (tools.rtti), for discovery
+        level 1 and up; none when the title has no RTTI."""
+        if not self.static_discovery:
+            return []
+        cached = self.__dict__.get("_rtti_cache")
+        if cached is None:
+            try:
+                from tools.rtti.rtti import recover, seeds
+                cached = seeds(recover(self.xbe_path))
+            except Exception as e:      # an XBE rtti cannot read: no RTTI evidence
+                print(f"  RTTI not read: {e}")
+                cached = []
+            if cached:
+                print(f"  RTTI: {len(cached)} virtual method(s)")
+            self._rtti_cache = cached
+        return cached
 
     def _get_target_sections(self) -> List[SectionInfo]:
         """Determine which sections to disassemble."""

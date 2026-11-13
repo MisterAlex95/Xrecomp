@@ -67,9 +67,25 @@ class FunctionDetector:
     until the next function or a terminal instruction.
     """
 
+    # Defaults for a detector made without __init__ (some tests): static
+    # discovery off. See _disc.
+    discovery = None
+    _noreturn_slots: frozenset = frozenset()
+    _extra_targets: Dict[int, Set[int]] = {}
+
+    def _disc(self):
+        """The StaticDiscovery of this detector (discovery.py, XBA-137)."""
+        if self.discovery is None:
+            from .discovery import StaticDiscovery
+            self.discovery = StaticDiscovery(self, 0)
+            self._extra_targets = {}
+        return self.discovery
+
     def __init__(self, engine: DisasmEngine, image: BinaryImage,
                  xrefs: XRefTracker, labels: LabelManager,
-                 skip_library_immediates: bool = False):
+                 skip_library_immediates: bool = False,
+                 static_discovery: int = 0, discovery_cap: Optional[float] = None,
+                 rtti_methods=()):
         self.engine = engine
         # Off by default. See _pass_imm_ref_targets.
         self.skip_library_immediates = skip_library_immediates
@@ -88,6 +104,17 @@ class FunctionDetector:
         # the function they land in.
         self._alias_entries: Dict[int, int] = {}
         self._callback_code: Set[int] = set()
+
+        # Static discovery (XBA-137, discovery.py). Off unless asked: the
+        # Disassembler passes RECOMP_STATIC_DISCOVERY's level.
+        from .discovery import StaticDiscovery
+        self.discovery = StaticDiscovery(self, static_discovery, discovery_cap,
+                                         rtti_methods)
+        # Kernel calls that never return end a body (level 1 and up).
+        self._noreturn_slots: Set[int] = self.discovery.noreturn_slots
+        # Exception-frame resume targets past a function's measured end, by
+        # function start: the body runs on to cover them.
+        self._extra_targets: Dict[int, Set[int]] = {}
 
     def detect_all(self, sections: Optional[List[SectionInfo]] = None) -> int:
         """
@@ -156,6 +183,12 @@ class FunctionDetector:
             self.functions.clear()
             self._build_functions(sections)
 
+        # Static discovery, strong evidence (XBA-137, discovery.py): callback
+        # arguments of kernel calls, constructor and RTTI vtables, exception
+        # handlers. Before the table-word pass, so a method it makes a start
+        # is not also an alias.
+        self._pass_static_discovery(sections)
+
         # Then the same for addresses that only ever exist as table entries.
         # After the immediate pass, so its results narrow the gaps first. These
         # become aliases rather than function starts, so no rebuild: aliases are
@@ -175,10 +208,38 @@ class FunctionDetector:
 
         self._build_alias_entries()
 
+        # Static discovery, gap code (XBA-137): last, once every body and
+        # alias is known, so a gap is really unclaimed.
+        if self._disc().run_gaps(sections):
+            self.functions.clear()
+            self._build_functions(sections)
+            self._close_tail_jump_targets(sections)
+            self._build_alias_entries()
+
         # Populate call graph
         self._build_call_graph()
 
         return len(self.functions)
+
+    def _pass_static_discovery(self, sections: List[SectionInfo]) -> None:
+        """discovery.StaticDiscovery's level-1 passes, until they find
+        nothing new: a new start can itself push a callback or build a
+        vtable, and an exception frame's resume targets extend its body."""
+        for _ in range(4):
+            added, resume = self._disc().run_strong(sections)
+            extended = False
+            for start, targets in resume.items():
+                if not targets <= self._extra_targets.get(start, set()):
+                    self._extra_targets.setdefault(start, set()).update(targets)
+                    extended = True
+            if not (added or extended):
+                break
+            self.functions.clear()
+            self._build_functions(sections)
+            self._close_tail_jump_targets(sections)
+        n = sum(self._disc().stats.values())
+        if n:
+            print(f"  static discovery: {n} function(s) from strong evidence")
 
     def _close_tail_jump_targets(self, sections: List[SectionInfo]) -> None:
         """Follow tail jumps from every entry until no new entry is found."""
@@ -516,6 +577,12 @@ class FunctionDetector:
                     or self.engine.probes_as_constant_stub(nxt)
                     or (past_padding and self._closed_body_in_gap(nxt, starts))):
                 continue
+            # A lone `push esi` or a constant accessor after a ret byte in
+            # data: only a compiled body (XBA-137, discovery.py).
+            k = bisect.bisect_right(starts, nxt)
+            upper = starts[k] if k < len(starts) else section.virtual_addr + section.virtual_size
+            if not self._disc().weak_start_ok(nxt, upper):
+                continue
             self._add_candidate(nxt, config.CONFIDENCE_CC_BOUNDARY,
                                 "gap_prologue")
             added = True
@@ -592,8 +659,10 @@ class FunctionDetector:
         i = bisect.bisect_right(starts, addr)
         section = self.image.get_section_at_va(addr)
         upper = starts[i] if i < len(starts) else (section.virtual_addr + section.virtual_size)
-        return self.engine.probes_as_callback_body(
-            addr, upper, tail_targets=self._candidates, allow_indirect_tails=True)
+        return (self.engine.probes_as_callback_body(
+                    addr, upper, tail_targets=self._candidates, allow_indirect_tails=True)
+                # data after padding that closes by chance (XBA-137)
+                and self._disc().table_word_gap_ok(addr, upper))
 
     def _pass_seed_aliases(self) -> None:
         """
@@ -741,10 +810,14 @@ class FunctionDetector:
                         next_addr = va_start + i
                         if (next_addr in self.engine.instructions
                                 and (self.engine.probes_as_prologue(next_addr)
-                                     or self.engine.probes_as_callback_body(
+                                     or (self.engine.probes_as_callback_body(
                                          next_addr, va_start + len(data),
                                          tail_targets=self._candidates,
-                                         allow_indirect_tails=True))):
+                                         allow_indirect_tails=True)
+                                         # data after padding that closes by
+                                         # chance (XBA-137's decoy corpus)
+                                         and self._disc().table_word_gap_ok(
+                                             next_addr, va_start + len(data))))):
                             self._add_candidate(
                                 next_addr,
                                 config.CONFIDENCE_CC_BOUNDARY,
@@ -1276,7 +1349,11 @@ class FunctionDetector:
             for off in range(0, len(data) - 3, 4):
                 va = sec.virtual_addr + off
                 if is_code and (inside_a_function(va) or
-                                inside_a_function(va + 3) or in_jump_table(va)):
+                                inside_a_function(va + 3)):
+                    continue
+                # A switch table outside code (a data section's, measured by
+                # engine.measure_external_tables) holds case labels too.
+                if in_jump_table(va):
                     continue
                 value = int.from_bytes(data[off:off + 4], "little")
                 if in_code_section(value):
@@ -1322,6 +1399,9 @@ class FunctionDetector:
                 # The entry proof above permits shared bodies and constructor
                 # tail thunks. Keep the enclosing function's extent intact.
                 if target not in self.engine.instructions:
+                    continue
+                # Not a word naming the middle of a path (XBA-137's decoys).
+                if not self._disc().table_word_inside_ok(target):
                     continue
                 end = bounds[j][1]
             else:
@@ -1385,6 +1465,10 @@ class FunctionDetector:
                         drop_realigned()
                         continue
                 if end <= target:
+                    drop_realigned()
+                    continue
+                # Nor random bytes that happen to close (XBA-137's decoys).
+                if not self._disc().table_word_gap_ok(target, end):
                     drop_realigned()
                     continue
             if end <= target:
@@ -1771,6 +1855,12 @@ class FunctionDetector:
         if next_func and next_func < upper:
             upper = next_func
 
+        # An exception frame's resume targets are inside the function even
+        # though nothing in it branches there (discovery.py, XBA-137).
+        for target in self._extra_targets.get(start, ()):
+            if start < target < upper and target > max_target:
+                max_target = target
+
         while addr < upper:
             # An embedded switch table is data sitting on the fall-through
             # path. engine.resync_jump_tables() removed the instructions the
@@ -1834,7 +1924,13 @@ class FunctionDetector:
                     addr = skipped
                     continue
 
-            if insn.is_ret or (insn.is_jump and not insn.is_cond_jump):
+            # A call to a kernel routine that never returns ends the path
+            # like a ret: without this, the function packed straight after
+            # `call [PsTerminateSystemThread]` (the CRT's _threadstartex
+            # after _endthreadex) was swallowed by it (XBA-137).
+            noreturn = (bool(self._noreturn_slots) and insn.is_call
+                        and insn.memory_ref in self._noreturn_slots)
+            if insn.is_ret or noreturn or (insn.is_jump and not insn.is_cond_jump):
                 # Stop only once we have decoded *past* every internal branch
                 # target. A target is an address that must be inside the
                 # function, so landing exactly on it is not coverage -- the
@@ -1929,4 +2025,5 @@ class FunctionDetector:
             "with_prologue": with_prologue,
             "by_detection_method": by_method,
             "by_section": by_section,
+            "discovery": self._disc().summary(),
         }
