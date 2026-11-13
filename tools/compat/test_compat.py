@@ -99,6 +99,25 @@ def test_a_called_stub_is_named_as_a_blocker():
     assert classify(st, [], None, 60, 60, "", disc[1:2])[1] == "no flip; calls stub ordinal 136 (KeRemoveQueue)"
 
 
+def test_what_the_renderer_could_not_draw_is_named():
+    # XBA-120: the status file's "unsupported" (src/kernel/nv2a_coverage.h)
+    # names what the renderer met and could not draw, most used first.
+    st = [line(t, flips=t // 16, frames=1, lit=0, threads=3) for t in range(1000, 30001, 1000)]
+    st[-1]["unsupported"] = {"points": 12, "texture format 0x26 LU_IMAGE_A8CR8CB8Y8": 40,
+                             "volume texture": 3, "logic op": 1}
+    stage, blocker, summary = classify(st, [8000], None, 30, 60)
+    assert stage == "boots"
+    assert blocker == ("nothing lit on screen; renderer lacks texture format 0x26 LU_IMAGE_A8CR8CB8Y8"
+                       " (40 batches), points (12 batches), volume texture (3 batches), +1 more")
+    assert summary["unsupported"]["points"] == 12
+    # Kept in the summary of a sustained run (no blocker), not beside a crash.
+    good = playing(40)
+    good[-1]["unsupported"] = {"lines": 2}
+    stage, blocker, summary = classify(good, [8000], None, 40, 30)
+    assert stage == "sustained" and blocker is None and summary["unsupported"] == {"lines": 2}
+    assert "renderer" not in classify(good, [8000], ("signal", 11), 40, 60)[1]
+
+
 def test_a_launch_of_another_image_is_named():
     st = playing(20)
     log = "  [KERNEL] launch of 'd:\\game.xbe' is not this title (default.xbe): exiting"

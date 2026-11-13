@@ -18,7 +18,7 @@ stage names and the first line of an error: nothing from the game.
 
 | Source | What |
 |---|---|
-| `RECOMP_STATUS` file | flips, picture changes (a hash of a 32x24 grid at each flip), lit, non-silent audio, pad reads, guest threads (`src/kernel/recomp_status.h`) |
+| `RECOMP_STATUS` file | flips, picture changes (a hash of a 32x24 grid at each flip), lit, non-silent audio, pad reads, guest threads, what the renderer could not draw (`unsupported`, XBA-120) (`src/kernel/recomp_status.h`) |
 | `discovered.jsonl` | what the analysis missed ([discovery.md](discovery.md)) |
 | the run's stderr | a crash line, the first untranslated instruction reached |
 
@@ -51,8 +51,12 @@ discovery file's `stub` entries: « no flip; calls stub ordinal 136 (KeRemoveQue
 A guest divide error no handler took (the runtime's `[#DE]` report, then bugcheck 0x1E) is named after the exit:
 « exited with code 30 after 3 s; divide error at 0x00012340: divide by zero (no guest handler took it) »; an unhandled
 guest exception (`[SEH] unhandled exception`, after which the title goes on) after any blocker but a crash: « no flip;
-unhandled guest exception 0xC0000005 at 0x00045678 » (XBA-110, XBA-112). The device's library check grades through the
-same `classify()` (`tools/compat/device.py`), so its words are these.
+unhandled guest exception 0xC0000005 at 0x00045678 » (XBA-110, XBA-112). What the renderer met and could not draw
+(the status file's `unsupported`: texture formats, points and lines, volume textures, stage modes, state, by name and
+batches; [gpu-backend.md](gpu-backend.md#what-is-not-drawn-xba-120)) is kept in the run's summary (`unsupported`) and
+named after any blocker but a crash or a launch, the three most used first: « nothing lit on screen; renderer lacks
+texture format 0x26 LU_IMAGE_A8CR8CB8Y8 (40 batches), points (12 batches), +1 more ». The device's library check
+grades through the same `classify()` (`tools/compat/device.py`), so its words are these.
 
 ## The « Compatibility » page (XBA-73)
 

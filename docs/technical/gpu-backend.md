@@ -28,6 +28,8 @@ presenting from the GPU. The last section lists what 7c–7e have to do.
 | `tests/nv2a_gl_shader` | 400 random combiner programs through the generated shaders, each pixel compared with `nv2a_rc_eval`. |
 | `tests/nv2a_gl_scale` | The internal resolution policy (0x121 / 0x2121 back buffer, swizzled and depth-only targets), the scale sticking to a scaled target's memory (Burnout 3's HUD clip and menu scissor, promotion, other pitch / swizzled), scissor rounding at 2.25, visibility count scaling, `RECOMP_GPU_SCALE_TARGETS` parsing. |
 | `tests/nv2a_gl_vsh` | 600 random vertex programs plus ILU/a0 edge cases through the translator (transform feedback), compared with `nv2a_vsh_interp.c`; eight deliberate translator mutations must be caught. |
+| `src/kernel/nv2a_coverage.c` | What is not drawn, by name (XBA-120): the NV2A texture format table, xemu's method names, the registry the report and the status file read. |
+| `tests/nv2a_coverage` | The executor over a fake guest memory: the format table against the decoder, method names, each gap counted once per batch and reaching the status file. |
 | `tests/nv2a_gl_backend` | The back end itself (nv2a_gl.c included) on a real context and a fake guest memory: guest CPU writes into targets (clean, dirty, host present, scaled 16-bit, swizzled, none), the scratch depth growing, an anti-aliased surface presented. `-cpu-writes-off` runs the same cases with `RECOMP_GPU_CPU_WRITES=0` and expects them wrong. |
 
 The GL tests are built twice on Linux: for desktop GL 3.3 core and, with
@@ -898,6 +900,38 @@ while the title streams. Off by default.
 
 With `RECOMP_FB_DUMP_FLIPS=<flag file>` a frame dump and a table can be
 taken at the same flip: `touch sig flag; sleep 0.4; rm flag`.
+
+## What is not drawn (XBA-120)
+
+What a batch needs and the path drawing it (the GL back end or the CPU
+rasteriser) leaves out is counted under a fixed name, once per batch, by
+`note_batch_gaps` in `nv2a_pb_exec.c` (registry: `src/kernel/nv2a_coverage.c`).
+A back end says what it draws through its caps; what neither path models is
+counted for both. The names:
+
+| Name | Counted when |
+|---|---|
+| `texture format 0xNN <xemu name>` | a stage in use samples a format the decoder (`sample_tex`, shared by both paths) cannot read: the stage reads white. The table in `nv2a_coverage.c` lists every NV2A format with its texel size, swizzle and whether it is decoded; `tests/nv2a_coverage` checks it against the decoder code by code. |
+| `shadow map (CPU rasteriser)` | a depth format in a projective stage on the CPU path (the GPU compares with its zeta surface instead). |
+| `points`, `lines`, `line strip`, `line loop` | the primitive, on a path that does not draw it. |
+| `volume texture` | a stage in use has `DIMENSIONALITY` 3. |
+| `texture stage mode 0xNN <name>` | dot-product and dependent-read modes (8 and up) on both paths, bump-env (6, 7) on the CPU path: they read zero. |
+| `logic op`, `polygon mode point`, `polygon mode line`, `flat shading` | the state is set for the batch; nothing models it. |
+| `stencil test (CPU rasteriser)` | stencil on, CPU path. |
+| `fixed-function texgen`, `fixed-function texture matrix`, `fixed-function vertex blending (skinning)`, `fixed-function specular`, `two-sided lighting`, `spot lights` | a fixed-function batch with that state on (`ffp_vertex` / `lit_color` model the composite matrix and lights without specular or cones). |
+| `batch with no vertex program, matrix or screen-space positions` | the batch is skipped. |
+
+The report prints them every period, most used first (`[GPU] unsupported
+(batches): points x12, texture format 0x26 LU_IMAGE_A8CR8CB8Y8 x40, ...`), and
+the status file carries them as `"unsupported":{name: batches}`
+(`recomp_status.h`), which the compat runner and Check my library append to a
+run's blocker ([compat-runner.md](compat-runner.md)). Methods the executor
+does not model at all are named too: each line of the report's unhandled
+table carries xemu's name (`nv2a_regs.h`), "(read from the register file)"
+for those modelled through `s_reg` (lights, culling, stencil, polygon
+offset); the 16 most frequent unmodelled ones go to the status file as
+`"unmodelled":{name: count}` (not a blocker: D3D sends many it never
+relies on).
 
 ## Known differences from the CPU rasteriser (7b)
 

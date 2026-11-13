@@ -18,6 +18,17 @@
  *               title's main thread, counts)
  *   discovered  new discovery-file entries (recomp_discovery.h)
  *
+ * and, once there are any (XBA-120):
+ *
+ *   "unsupported":{"points":12,"texture format 0x26 LU_IMAGE_A8CR8CB8Y8":40}
+ *               what the renderer met and could not draw, by name, and the
+ *               batches that needed it (src/kernel/nv2a_coverage.h); at most
+ *               32 names, in the order first met
+ *   "unmodelled":{"SET_LOGIC_OP":3}
+ *               Kelvin methods the executor does not model, by xemu's name
+ *               (or "0x1234"), and how often they arrived; at most 16, the
+ *               executor's report sets them
+ *
  * Unset: nothing is counted beyond a load and a branch per call.
  * docs/technical/discovery.md has the companion file; the runner reads both. */
 #ifndef XBOXRECOMP_RECOMP_STATUS_H
@@ -41,6 +52,15 @@ void recomp_status_audio(const int16_t *stereo, int count);
 
 void recomp_status_pad_read(void);
 void recomp_status_thread_started(void);
+
+/* n more uses of something the renderer could not draw. `name` must live
+ * for ever (a literal or a table entry: the pointer is kept) and hold no
+ * quote or backslash. One writer (the executor thread). */
+void recomp_status_unsupported(const char *name, uint32_t n);
+
+/* An unmodelled method's count so far (replaces the previous one). `name`
+ * as above. */
+void recomp_status_unmodelled(const char *name, uint64_t count);
 
 /* Tests: write one line now (as the thread does), and forget everything. */
 void recomp_status_write_now(void);

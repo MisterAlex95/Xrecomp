@@ -53,6 +53,7 @@
 #include "nv2a_vsh_interp.h"
 #include "nv2a_combiner.h"
 #include "nv2a_backend.h"
+#include "nv2a_coverage.h"     /* what is not drawn, by name (XBA-120) */
 #if defined(_WIN32)
 #include <windows.h>
 #define NV_TLS __declspec(thread)
@@ -282,6 +283,8 @@ typedef struct {
     uint32_t border;                    /* SET_TEXTURE_BORDER_COLOR      */
     int      border_color;              /* FORMAT: BORDER reads `border` */
     int      cube;                      /* FORMAT: six faces, not one    */
+    uint32_t dims;                      /* FORMAT: DIMENSIONALITY (2, 3) */
+    uint32_t depth;                     /* FORMAT: BASE_SIZE_P, volumes  */
     int      valid;
 } Texture;
 
@@ -570,6 +573,25 @@ static void note_texture_use(void)
  * executor does not model, millions of times a second, so no search. The
  * report sorts s_unhandled and rebuilds the slots afterwards. */
 static uint16_t s_unhandled_slot[0x2000 / 4];
+
+/* Methods the switch in nv2a_pb_exec_method does not take but that are
+ * modelled all the same, read from the register mirror s_reg where they
+ * matter (lighting, culling, stencil, polygon offset, shadow compare): not
+ * "unmodelled" in the status file. Keep in step with the s_reg reads. */
+static int method_modelled(uint32_t m)
+{
+    m &= 0x1FFC;
+    return m == 0x0298 || m == 0x0308 || m == 0x0314 || m == 0x032C || m == 0x0338
+        || (m >= 0x0360 && m <= 0x0378) || m == 0x0384 || m == 0x0388
+        || m == 0x039C || m == 0x03A0 || m == 0x03B4 || m == 0x03BC
+        || (m >= 0x0480 && m < 0x04C0)                  /* MODEL_VIEW_MATRIX0 */
+        || (m >= 0x0A10 && m < 0x0A1C)                  /* SCENE_AMBIENT_COLOR */
+        || m == 0x1E6C                                  /* SHADOW_DEPTH_FUNC */
+        || (m >= 0x1000 && m < 0x1400                   /* lights: colours, range, */
+            && ((m & 0x7F) < 0x18 || (m & 0x7F) == 0x24 /* direction, position, */
+                || ((m & 0x7F) >= 0x34 && (m & 0x7F) < 0x40)   /* attenuation */
+                || (m & 0x7F) >= 0x5C));
+}
 
 static void note_unhandled(uint32_t method, uint32_t param)
 {
@@ -3180,17 +3202,14 @@ static uint32_t modulate(uint32_t t, const float c[4])
 }
 
 /* Bytes one texel of a (non-DXT) format takes, for cube-face strides. */
+/* From the format table (nv2a_coverage.c), which knows every NV2A format:
+ * the list here had only the formats the sampler read, so a 16-bit format
+ * it did not know (A8Y8, R6G5B5, G8B8, Y16 ...) counted 4 bytes a texel and
+ * put every mip level and cube face after the first in the wrong place. */
 static uint32_t tex_texel_bytes(uint32_t fmt)
 {
-    switch (fmt) {
-    case 0x00: case 0x01: case 0x0B: case 0x13: case 0x19: case 0x1F:
-        return 1;
-    case 0x02: case 0x03: case 0x04: case 0x05: case 0x10: case 0x11:
-    case 0x1C: case 0x1D:
-        return 2;
-    default:
-        return 4;
-    }
+    uint32_t b = nv2a_tex_format(fmt)->bytes;
+    return b ? b : 4;
 }
 
 /* Bytes between cube faces: one face with all its mip levels, rounded up to
@@ -5098,6 +5117,117 @@ static uint32_t prim_triangles(uint32_t prim, uint32_t n)
     }
 }
 
+/* ---- what this batch needs that its path does not draw (XBA-120) --------
+ *
+ * Once per batch, before it is drawn: every texture format the sampler
+ * cannot read, primitive, texture dimensionality, stage mode and piece of
+ * state the path taking the batch (a back end or the CPU rasteriser) leaves
+ * out, counted under its name (nv2a_coverage.h). A back end says what it
+ * draws through its caps; what neither path models is counted for both. */
+static int backend_caps(uint32_t cap)
+{
+    return backend_draws() && (s_backend->caps & cap) == cap;
+}
+
+static void note_batch_gaps(void)
+{
+    static int no_rc = -1;
+    int gpu = backend_caps(NV2A_BACKEND_CAP_PIXEL), combiners, st;
+    uint32_t used = 0;
+
+    if (no_rc < 0)
+        no_rc = getenv("RECOMP_NO_COMBINERS") != NULL;
+    combiners = s_gpu.rc_seen && !no_rc;
+
+    switch (s_gpu.prim) {
+    case NV_PRIM_POINTS:     nv2a_gap_note("points", 1); return;
+    case NV_PRIM_LINES:      nv2a_gap_note("lines", 1); return;
+    case NV_PRIM_LINE_LOOP:  nv2a_gap_note("line loop", 1); return;
+    case NV_PRIM_LINE_STRIP: nv2a_gap_note("line strip", 1); return;
+    default: break;
+    }
+    if ((s_gpu.xf_mode & 3) != 2 && !batch_is_ffp() && !batch_is_screen_space()) {
+        nv2a_gap_note("batch with no vertex program, matrix or screen-space positions", 1);
+        return;
+    }
+
+    for (st = 0; st < 4; st++) {
+        const Texture *t = &s_gpu.texs[st];
+        const Nv2aTexFormat *f;
+        uint32_t mode = combiners ? (s_gpu.rc.stage_program >> (st * 5)) & 0x1F
+                                  : (st == 0 && t->valid);
+        if (!mode)
+            continue;
+        /* Stage modes: bump-env (6, 7) on the GPU only, the dot-product
+         * and dependent-read modes (8 and up) nowhere; both read zero. */
+        if (mode >= 8 || (mode >= 6 && !(gpu && st > 0))) {
+            const char *m = nv2a_stage_mode_name(mode);
+            nv2a_gap_note(m ? m : "texture stage mode (not an NV2A mode)", 1);
+        }
+        if (!((mode >= 1 && mode <= 3) || mode == 6 || mode == 7) || !t->valid)
+            continue;
+        used |= 1u << st;
+        f = nv2a_tex_format(t->color);
+        if (!f->decoded) {
+            /* A depth format in a projective stage is a shadow map: the
+             * GPU compares with the zeta surface it holds, the CPU path
+             * reads white. */
+            int depth = t->color >= 0x2A && t->color <= 0x31;
+            if (depth && combiners && (mode == 1 || mode == 2))
+                nv2a_gap_note(gpu ? NULL : "shadow map (CPU rasteriser)", 1);
+            else
+                nv2a_gap_note(f->gap, 1);
+        }
+        if (t->dims == 3)
+            nv2a_gap_note("volume texture", 1);
+    }
+
+    if (s_reg[0x17BC / 4])                              /* SET_LOGIC_OP_ENABLE */
+        nv2a_gap_note("logic op", 1);
+    {
+        uint32_t pm[2] = { s_reg[0x038C / 4], s_reg[0x0390 / 4] }, k;  /* FRONT/BACK_POLYGON_MODE */
+        for (k = 0; k < 2; k++) {
+            if (pm[k] == 0x1B00)                        /* GL_POINT */
+                nv2a_gap_note("polygon mode point", 1);
+            else if (pm[k] == 0x1B01)                   /* GL_LINE */
+                nv2a_gap_note("polygon mode line", 1);
+        }
+    }
+    if (s_reg[0x037C / 4] == 0x1D00)                    /* SET_SHADE_MODE: GL_FLAT */
+        nv2a_gap_note("flat shading", 1);
+    if (!gpu && s_reg[0x032C / 4])                      /* SET_STENCIL_TEST_ENABLE */
+        nv2a_gap_note("stencil test (CPU rasteriser)", 1);
+    if (batch_is_ffp()) {
+        /* The fixed-function unit as ffp_vertex / lit_color model it:
+         * composite matrix, lights without specular or spot cones. */
+        uint32_t mask = s_reg[0x03BC / 4], k;
+        for (st = 0; st < 4; st++) {
+            if (!(used & (1u << st)))
+                continue;
+            for (k = 0; k < 4; k++)
+                if (s_reg[(0x03C0u + 16u * (uint32_t)st + 4u * k) / 4]) {  /* SET_TEXGEN_S..Q */
+                    nv2a_gap_note("fixed-function texgen", 1);
+                    break;
+                }
+            if (s_reg[(0x0420u + 4u * (uint32_t)st) / 4])  /* SET_TEXTURE_MATRIX_ENABLE */
+                nv2a_gap_note("fixed-function texture matrix", 1);
+        }
+        if (s_reg[0x0328 / 4])                          /* SET_SKIN_MODE */
+            nv2a_gap_note("fixed-function vertex blending (skinning)", 1);
+        if (s_reg[0x0314 / 4]) {                        /* SET_LIGHTING_ENABLE */
+            if (s_reg[0x03B8 / 4])                      /* SET_SPECULAR_ENABLE */
+                nv2a_gap_note("fixed-function specular", 1);
+            if (s_reg[0x17C4 / 4])                      /* SET_TWO_SIDE_LIGHT_EN */
+                nv2a_gap_note("two-sided lighting", 1);
+            for (k = 0; k < NV_LIGHTS; k++)
+                if (((mask >> (2 * k)) & 3) == 3) {
+                    nv2a_gap_note("spot lights", 1);
+                    break;
+                }
+        }
+    }
+}
+
 static void draw_primitive(void)
 {
     float v[4];
@@ -5105,6 +5235,7 @@ static void draw_primitive(void)
 
     if (!s_gpu.prim || !s_gpu.idx_count)
         return;
+    note_batch_gaps();
     s_gpu.draws++;
     if ((s_gpu.draws % 200) == 0)
         fprintf(stderr, "  [GPU] draw #%u\n", s_gpu.draws);
@@ -5515,6 +5646,8 @@ static void tex_stage_method(uint32_t method, uint32_t param)
         t->cube = (param >> 2) & 1;
         t->border_color = (param >> 3) & 1;    /* BORDER_SOURCE: colour */
         t->levels = (param >> 16) & 0xF;
+        t->dims = (param >> 4) & 0xF;
+        t->depth = 1u << ((param >> 28) & 0xF);
         /* A swizzled texture carries its own dimensions here, as log2 in
          * BASE_SIZE_U/V. It has to: IMAGE_RECT describes a linear image, and
          * a title that only uses swizzled textures never sends one. */
@@ -6841,6 +6974,21 @@ void nv2a_pb_exec_report(void)
                     : d3d8_format_is_swizzled(s_tex_use[i].color) ? " swz" : " lin",
                 s_tex_use[i].batches);
 
+    /* What batches needed and their path did not draw (XBA-120), by name;
+     * the same counts are in the status file's "unsupported". */
+    {
+        const char *names[12];
+        uint64_t counts[12];
+        int n = nv2a_gap_list(names, counts, 12), k;
+        if (n) {
+            fprintf(stderr, "[GPU] unsupported (batches):");
+            for (k = 0; k < n; k++)
+                fprintf(stderr, "%s %s x%llu", k ? "," : "", names[k],
+                        (unsigned long long)counts[k]);
+            fputc(10, stderr);
+        }
+    }
+
     if (getenv("RECOMP_TEX_STATE")) {
         uint32_t k;
         for (k = 0; k < sizeof s_tex_set / sizeof s_tex_set[0]; k++)
@@ -6876,14 +7024,36 @@ void nv2a_pb_exec_report(void)
              * glance, and that is what says which vertex encoding a title
              * is using. */
             union { uint32_t u; float f; } v;
+            const char *nm = nv2a_method_name(s_unhandled[i].method);
             v.u = s_unhandled[i].last_param;
-            fprintf(stderr, "  [GPU]   0x%04X x%-8u last=0x%08X (%.4f)\n",
-                    s_unhandled[i].method, s_unhandled[i].count,
-                    v.u, v.f);
+            fprintf(stderr, "  [GPU]   0x%04X %-30s x%-8u last=0x%08X (%.4f)%s\n",
+                    s_unhandled[i].method, nm ? nm : "?", s_unhandled[i].count,
+                    v.u, v.f, method_modelled(s_unhandled[i].method)
+                              ? " (read from the register file)" : "");
         }
     }
     }
     for (i = 0; i < s_unhandled_count; i++)       /* the sort moved them */
         s_unhandled_slot[(s_unhandled[i].method & 0x1FFC) / 4] = (uint16_t)(i + 1);
+    /* The status file's "unmodelled": the 16 most frequent methods of the
+     * 3D class that nothing models (the table is sorted from here up only
+     * as far as the report printed; good enough for the top). */
+    {
+        static char hex[0x2000 / 4][8];
+        int sent = 0;
+        for (i = 0; i < s_unhandled_count && sent < 16; i++) {
+            uint32_t m = s_unhandled[i].method & 0x1FFC;
+            const char *nm;
+            if (method_modelled(m))
+                continue;
+            nm = nv2a_method_name(m);
+            if (!nm) {
+                snprintf(hex[m / 4], sizeof hex[0], "0x%04X", (unsigned)m);
+                nm = hex[m / 4];
+            }
+            recomp_status_unmodelled(nm, s_unhandled[i].count);
+            sent++;
+        }
+    }
     fflush(stderr);
 }
