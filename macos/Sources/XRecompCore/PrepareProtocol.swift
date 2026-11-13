@@ -30,6 +30,7 @@ public enum PrepareProtocol {
         "LINK_FAILED": "Linking the game failed.",
         "NO_SPACE": "The disk is full.",
         "CANCELLED": "Cancelled.",
+        "BUSY": "Another prepare of this game is already running (from the terminal?).",
         "INTERNAL": "Prepare hit a bug.",
     ]
 

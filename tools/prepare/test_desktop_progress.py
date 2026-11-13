@@ -351,3 +351,24 @@ def test_check_env_force_and_title(tmp_path, monkeypatch):
     (t / "title.json").write_text(json.dumps({"env_force": {"lsfg": "0"}}))
     rc = prep.main([TEST_XBE, "--work", str(work), "--check", "--json"])
     assert rc == 1
+
+
+def test_a_second_prepare_of_the_same_work_folder_is_refused(tmp_path, capsys):
+    # A launcher and a terminal preparing one title at once rewrote the same
+    # gen.new under each other (KOTOR: LIFT_FAILED). The second one now stops.
+    import sys
+    if sys.platform == "win32":
+        import pytest
+        pytest.skip("fcntl lock")
+    from tools.prepare import __main__ as pm
+    held = pm._lock_work(str(tmp_path))
+    assert held
+    try:
+        rc = pm.main([str(tmp_path / "missing.iso"), "--work", str(tmp_path), "--progress"])
+    finally:
+        held.close()
+    out = capsys.readouterr().out
+    assert rc == 1 and "XBA_RESULT error code=BUSY" in out, out
+    again = pm._lock_work(str(tmp_path))
+    assert again
+    again.close()

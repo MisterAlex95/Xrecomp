@@ -419,10 +419,44 @@ def main(argv=None):
         return android.run(a, sys.modules[__name__])
     if a.check:
         return check(a)
-    if a.progress:
-        return run_with_progress(a)
-    desktop(a)
-    return 0
+    lock = _lock_work(a.work)
+    if lock is False:
+        msg = "another prepare is already working in %s" % a.work
+        print("error: " + msg, file=sys.stderr, flush=True)
+        if a.progress:
+            from tools.prepare.progress import Reporter
+            Reporter().error("BUSY", msg)
+        return 1
+    try:
+        if a.progress:
+            return run_with_progress(a)
+        desktop(a)
+        return 0
+    finally:
+        if lock:
+            lock.close()
+
+
+def _lock_work(work):
+    """Hold an exclusive lock on WORK for the whole prepare, so two prepares
+    of one title (a launcher and a terminal) cannot rewrite the same project
+    under each other. False when another process holds it; None when there is
+    nothing to lock (no --work, or no fcntl on this host); else the open file,
+    released when closed or when the process ends."""
+    if not work:
+        return None
+    try:
+        import fcntl
+    except ImportError:
+        return None
+    os.makedirs(work, exist_ok=True)
+    f = open(os.path.join(work, ".prepare.lock"), "w")
+    try:
+        fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        f.close()
+        return False
+    return f
 
 
 def run_with_progress(a):

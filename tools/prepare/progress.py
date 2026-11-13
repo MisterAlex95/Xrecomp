@@ -36,6 +36,7 @@ ERROR_CODES = (
     "PACK_FAILED",      # writing or publishing the pack failed
     "NO_SPACE",         # out of storage (ENOSPC)
     "CANCELLED",        # SIGTERM / SIGINT
+    "BUSY",             # another prepare holds this work folder
     "INTERNAL",         # a bug: anything else
 )
 

@@ -317,6 +317,7 @@ Error codes and exit status:
 | `COMPILE_FAILED` | step 5: CMake configure or build failed, or another image's prepare |
 | `NO_SPACE` | ENOSPC anywhere |
 | `CANCELLED` | SIGTERM or SIGINT: exit 130 |
+| `BUSY` | another prepare holds the work folder (`<work>/.prepare.lock`); nothing was changed |
 | `INTERNAL` | a bug (traceback on stderr), or step 3 failed |
 
 Exit 0 after `ok`, 1 after an error, 130 after `CANCELLED`. A failed command's `msg` is
