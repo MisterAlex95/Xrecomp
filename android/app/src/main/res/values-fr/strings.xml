@@ -283,16 +283,7 @@
     <!-- Commandes -->
     <string name="CONTROLS">Commandes</string>
     <string name="CONTROLS_FOOTER">Pareil pour toute manette vue par Android : le jeu la lit comme la première manette Xbox. Les boutons sont pris par position, tels qu\'Android les nomme.</string>
-    <string name="PAD_L1">L1 · Noir</string>
-    <string name="PAD_L2">L2 · LT</string>
-    <string name="PAD_R1">R1 · Blanc</string>
-    <string name="PAD_R2">R2 · RT</string>
-    <string name="PAD_SELECT">Select · Back</string>
-    <string name="PAD_START">Start · Start</string>
     <string name="PAD_DPAD">Croix</string>
-    <string name="PAD_LSTICK">Stick G · L3</string>
-    <string name="PAD_RSTICK">Stick D · R3</string>
-    <string name="PAD_FACE">A B X Y</string>
     <string name="PAD_SCREEN">Retour : menu</string>
     <string name="CTL_FACE">A B X Y</string>
     <string name="CTL_FACE_X">A B X Y</string>
