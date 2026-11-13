@@ -112,6 +112,9 @@ PACK_INPUTS = (
     # Wave 4: the D3D layout table and the layer pick by code probes (XBA-105), the XBE reader (XBA-124).
     "profiles/xdk/d3d8/d3d8.c", "profiles/xdk/d3d8ltcg/layer.json", "tools/xbe_ident/__init__.py",
     "tools/xbe_parser/xbe_parser.py", "src/kernel/xbox_xbe_sections.h",
+    # Wave 5: the analysis (XBA-137's static discovery) decides which functions are lifted.
+    "tools/disasm/discovery.py", "tools/disasm/functions.py", "tools/disasm/engine.py", "tools/disasm/disasm.py",
+    "tools/prepare/discovered.py",
 )
 
 
@@ -125,12 +128,16 @@ def test_the_tree_covers_what_a_pack_is_made_of():
 
 def test_a_lifter_change_changes_the_digest(tmp_path):
     tree = toolkit.load_tree()
-    for rel in ("tools/recomp/seh_frames.py", "templates/runtime/recomp_types.h", "src/kernel/xbox_seh.c"):
+    for rel in ("tools/recomp/seh_frames.py", "tools/disasm/discovery.py", "templates/runtime/recomp_types.h",
+                "src/kernel/xbox_seh.c"):
         dst = tmp_path / rel
         dst.parent.mkdir(parents=True, exist_ok=True)
         dst.write_text("one\n")
     before = toolkit.compute(str(tmp_path), tree)
     (tmp_path / "tools/recomp/seh_frames.py").write_text("two\n")
+    after = toolkit.compute(str(tmp_path), tree)
+    (tmp_path / "tools/disasm/discovery.py").write_text("two\n")      # an analysis change too (XBA-137)
+    assert toolkit.compute(str(tmp_path), tree) != after
     after = toolkit.compute(str(tmp_path), tree)
     (tmp_path / "src/kernel/xbox_seh.c").write_text("two\n")              # the shell's: no new Prepare
     assert before != after and toolkit.compute(str(tmp_path), tree) == after
