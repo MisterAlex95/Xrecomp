@@ -19,10 +19,11 @@ ptrdiff_t xbox_GetMemoryOffset(void) { return (ptrdiff_t)g_mem; }
 void *xbox_GetMemoryBase(void) { return g_mem; }
 static int (*g_hook)(uint32_t);
 void nv2a_pb_set_software_method_hook(int (*hook)(uint32_t)) { g_hook = hook; }
-static uint32_t (*g_refusals)(void);
-void nv2a_pb_set_software_method_refusals(uint32_t (*count)(void)) { g_refusals = count; }
+static int (*g_refusals)(char *, int);
+void nv2a_pb_set_software_method_refusals(int (*describe)(char *, int)) { g_refusals = describe; }
 size_t xbox_GetMappedSize(void) { return 0x04000000u; }     /* 64 MB of RAM */
-void nv2a_pb_set_semaphore_target(uint32_t va) { (void)va; }
+static uint32_t g_sem;
+void nv2a_pb_set_semaphore_target(uint32_t va) { g_sem = va; }
 static uint32_t g_event;
 int xbox_KeSetGuestEvent(uint32_t va) { g_event = va; return 1; }
 static uint32_t g_adopted;
@@ -135,7 +136,7 @@ static void pb_fresh(void)
 
 static uint32_t refused(void)
 {
-    return g_refusals ? g_refusals() : 0;
+    return recomp_d3d_fixups_refused();
 }
 
 /* Method 0xD, payload 3, on `dev` (RunPushBuffer offsets +0x50/+0x264).
@@ -161,9 +162,7 @@ static void test_fixups(uint32_t dev, int given)
     CHECK(M32(dev + 0x50) == 2);
     CHECK(M32(node + 4) == 0xFFFFFFFFu);
     CHECK(refused() == r0);
-#ifndef TEST_GIVEN
-    CHECK(g_refusals == recomp_d3d_fixups_refused);
-#endif
+    CHECK(g_refusals == recomp_d3d_describe_refusals);
 
     if (given) {
         /* 5. The addresses given: unchecked, as D3D's handler (a destination
@@ -256,6 +255,117 @@ static void test_fixups(uint32_t dev, int given)
     }
 }
 
+
+/* ── The other run-time guards of RunPushBuffer's methods (WP-C) ─────────
+ * A found device: the node in guest memory, the slot in the contiguous
+ * window, each refusal counted by kind and described for the report line.
+ * Both: the chain cut at 4096 nodes. Method 0xC: node = payload | 0x80000000. */
+#define M0xC(node) ((((node) & 0x07FFFFFFu) << 5) | 0xCu)
+
+static void test_guards(uint32_t dev, int given)
+{
+    uint32_t r, i;
+    const uint32_t n1 = 0x80070000u, n2 = 0x80070020u, w2 = 0x80071000u;
+    char buf[192];
+
+    M32(dev + 0x50) = 0x100;
+    /* 1. Slot: the window's last word accepted, the chain followed. */
+    node_at(n1, 0x00031000u, n2, 0x83FFFFFCu, 0, 0);
+    node_at(n2, 0x00032000u, 0, w2, 0, 0);
+    M32(w2) = 0;
+    r = recomp_d3d_refused(RECOMP_D3D_REFUSED_SLOT);
+    CHECK(g_hook(M0xC(n1)) == 1);
+    CHECK(M32(0x83FFFFFCu) == 0x00031001u && M32(w2) == 0x00032001u);
+    CHECK(M32(n2 + 4) == 0xFFFFFFFFu && recomp_d3d_refused(RECOMP_D3D_REFUSED_SLOT) == r);
+    CHECK(M32(dev + 0x50) == 0xFF);
+    /* A slot straddling the window's end: refused and counted, the chain not
+     * followed (n2 untouched); with the device given, written. */
+    node_at(n1, 0x00031000u, n2, 0x83FFFFFEu, 0, 0);
+    node_at(n2, 0x00032000u, 0, w2, 0, 0);
+    M32(w2) = 0;
+    M32(0x83FFFFF8u) = M32(0x83FFFFFCu) = 0;
+    CHECK(g_hook(M0xC(n1)) == 1);
+    if (given) {
+        CHECK(M32(w2) == 0x00032001u && recomp_d3d_refused(RECOMP_D3D_REFUSED_SLOT) == 0);
+    } else {
+        CHECK(M32(0x83FFFFFCu) == 0 && M32(w2) == 0 && M32(n2 + 4) == 0 && M32(n1 + 4) == n2);
+        CHECK(recomp_d3d_refused(RECOMP_D3D_REFUSED_SLOT) == r + 1);
+    }
+    CHECK(M32(dev + 0x50) == 0xFE);         /* the pending count is the method's, not the chain's */
+
+    if (!given) {
+        /* 2. Node: the first one past the contiguous window (payload 0x4000000:
+         * 0x84000000), refused and counted, nothing written. */
+        r = recomp_d3d_refused(RECOMP_D3D_REFUSED_NODE);
+        M32(0) = 0x5A5A5A5Au;
+        M32(0x84000000u) = 0x00033000u;
+        M32(0x84000008u) = 0x80072000u;
+        M32(0x80072000u) = 0;
+        CHECK(g_hook(0x04000000u << 5 | 0xCu) == 1);
+        CHECK(M32(0x80072000u) == 0 && M32(0x84000004u) == 0 && M32(0) == 0x5A5A5A5Au);
+        CHECK(recomp_d3d_refused(RECOMP_D3D_REFUSED_NODE) == r + 1);
+        M32(0x84000000u) = M32(0x84000008u) = 0;
+        /* A next naming no guest memory: the first node serviced, the second refused. */
+        node_at(n1, 0x00031000u, 0x50000000u, 0x80073000u, 0, 0);
+        CHECK(g_hook(M0xC(n1)) == 1 && M32(0x80073000u) == 0x00031001u && M32(n1 + 4) == 0xFFFFFFFFu);
+        CHECK(recomp_d3d_refused(RECOMP_D3D_REFUSED_NODE) == r + 2);
+        /* A next naming a node of D3D's table (low RAM, in the image): serviced. */
+        node_at(n1, 0x00031000u, dev + 0x264 + 5 * 20, 0x80073000u, 0, 0);
+        node_at(dev + 0x264 + 5 * 20, 0x00034000u, 0, 0x80074000u, 0, 0);
+        CHECK(g_hook(M0xC(n1)) == 1 && M32(0x80074000u) == 0x00034001u);
+        CHECK(recomp_d3d_refused(RECOMP_D3D_REFUSED_NODE) == r + 2);
+    }
+
+    /* 3. A chain of 4097 nodes: 4096 serviced, cut and counted, the last one
+     * left linked (with the device given too). */
+    {
+        const uint32_t nodes = 0x80200000u, slots = 0x80300000u;
+        r = recomp_d3d_refused(RECOMP_D3D_REFUSED_CHAIN);
+        for (i = 0; i < 4097; i++) {
+            node_at(nodes + i * 20, 0x00040000u + i * 4, i < 4096 ? nodes + (i + 1) * 20 : 0, slots + i * 4, 0, 0);
+            M32(slots + i * 4) = 0;
+        }
+        CHECK(g_hook(M0xC(nodes)) == 1);
+        CHECK(M32(slots) == 0x00040001u && M32(slots + 4095 * 4) == 0x00040000u + 4095 * 4 + 1);
+        CHECK(M32(slots + 4096 * 4) == 0 && M32(nodes + 4096 * 20 + 4) == 0);
+        CHECK(M32(nodes + 4095 * 20 + 4) == 0xFFFFFFFFu);
+        CHECK(recomp_d3d_refused(RECOMP_D3D_REFUSED_CHAIN) == r + 1);
+        /* The same chain once more: every next is -1 now, one node serviced. */
+        M32(slots + 4 * 1) = 0;
+        CHECK(g_hook(M0xC(nodes)) == 1 && M32(slots + 4) == 0);
+        CHECK(recomp_d3d_refused(RECOMP_D3D_REFUSED_CHAIN) == r + 1);
+    }
+
+    /* 4. The report line's suffix: every kind with a count, in order, by name. */
+    CHECK(g_refusals == recomp_d3d_describe_refusals);
+    CHECK(recomp_d3d_describe_refusals(buf, sizeof buf) == (int)strlen(buf));
+    {
+        char want[192] = "", e[64];
+        static const char *const names[] = { "fixup lists", "slots", "nodes", "pending counts", "chains" };
+        for (i = 0; i < RECOMP_D3D_REFUSAL_KINDS; i++)
+            if (recomp_d3d_refused((RecompD3dRefusal)i)) {
+                snprintf(e, sizeof e, "; %s refused %u", names[i], recomp_d3d_refused((RecompD3dRefusal)i));
+                strcat(want, e);
+            }
+        CHECK(!strcmp(buf, want));
+        CHECK(strstr(buf, "; chains refused 1") != NULL);
+        if (!given)
+            CHECK(strstr(buf, "; fixup lists refused ") == buf && strstr(buf, "; nodes refused 2") != NULL);
+    }
+    CHECK(recomp_d3d_describe_refusals(buf, 10) <= 9 && strlen(buf) <= 9);   /* truncated, still a string */
+    CHECK(recomp_d3d_describe_refusals(buf, 0) == 0);
+
+    /* 5. The semaphore watch on the device (found or given): a heap pointer
+     * not handed over, a contiguous one handed over once. */
+    g_sem = 0;
+    M32(dev + 0x30) = 0x01234560u;
+    CHECK(recomp_d3d_watch_once(0) == 0 && g_sem == 0);
+    M32(dev + 0x30) = 0x8006B000u;
+    CHECK(recomp_d3d_watch_once(0) == 0x8006B000u && g_sem == 0x8006B000u);
+    g_sem = 0;
+    CHECK(recomp_d3d_watch_once(0x8006B000u) == 0x8006B000u && g_sem == 0);
+}
+
 int main(void)
 {
     g_mem = mmap(NULL, 0x100000000ull, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
@@ -281,6 +391,11 @@ int main(void)
     setenv("RECOMP_D3D_DEVICE", "0x0085FDE0", 1);
     setenv("RECOMP_D3D_DEVICE_PTR", "0x00862288", 1);
     setenv("RECOMP_D3D_SW_METHODS", "0x7000", 1);
+#elif defined(TEST_DEVONLY)
+    /* The device given alone, no RECOMP_D3D_SW_METHODS (WP-C). */
+    setenv("RECOMP_D3D_DEVICE", "0x0085FDE0", 1);
+#elif defined(TEST_SWMASK)
+    setenv("RECOMP_D3D_SW_METHODS", "0x1000", 1); /* RunPushBuffer's 0xC only */
 #elif defined(TEST_SCAN)
     setenv("RECOMP_PB_WALK", "scan", 1);          /* the A/B value: the segment scan */
 #elif defined(TEST_OFF)
@@ -310,6 +425,51 @@ int main(void)
     CHECK(g_hook(6u) == 1 && g_cb_routine == 0x00123450u && g_cb_ctx == 0xC0FFEEu);
     g_cb_routine = 0;
     CHECK(g_hook(7u) == 1 && g_cb_routine == 0x00123450u);
+#ifdef TEST_DEVONLY
+    /* RECOMP_D3D_DEVICE alone: every method serviced, as for a found device
+     * (it used to leave 0xC-0xE off: Fable stopped flipping after its load,
+     * "not serviced D:4620"); unchecked, as with the addresses given; the
+     * semaphore watched on the given device, not searched for. */
+    {
+        uint32_t dev = 0x0085FDE0, node = dev + 0x264 + 2 * 20;
+        CHECK(g_hook(5u) == 1);
+        M32(dev + 0x50) = 3;
+        node_at(node, 0x00020000u, 0, 0x00400000u, 0, 0);   /* a slot the guards would refuse */
+        CHECK(g_hook(2u << 5 | 0xDu) == 1 && M32(0x00400000u) == 0x00020001u && M32(dev + 0x50) == 2);
+        node_at(0x80070000u, 0x00021000u, 0, 0x80071000u, 0, 0);
+        CHECK(g_hook(M0xC(0x80070000u)) == 1 && M32(0x80071000u) == 0x00021001u);
+        node_at(0x80070000u, 0x00022000u, 0, 0x80071000u, 0, 0);
+        CHECK(g_hook(M0xC(0x80070000u) | 0x2u) == 1 && M32(0x80071000u) == 0x00022001u);   /* 0xE */
+        CHECK(recomp_d3d_refused(RECOMP_D3D_REFUSED_SLOT) == 0);
+        M32(dev + 0x30) = 0x8006B000u;
+        CHECK(recomp_d3d_watch_once(0) == 0x8006B000u && g_sem == 0x8006B000u);
+        CHECK(g_disc_dev == 0);                   /* nothing searched for */
+    }
+    if (failures)
+        return 1;
+    puts("recomp_d3d_service: ok");
+    return 0;
+#endif
+#ifdef TEST_SWMASK
+    /* RECOMP_D3D_SW_METHODS=0x1000 on a found device: 0xC serviced, 0xD and 0xE
+     * not (counted unserviced by the executor; configure said so at start). */
+    {
+        uint32_t dev = 0x0085FDE0;
+        plant(dev, 0x80010000, 0x80090000, 0x80012340);
+        CHECK(recomp_d3d_locate() == 1);
+        M32(dev + 0x50) = 3;
+        node_at(0x80070000u, 0x00021000u, 0, 0x80071000u, 0, 0);
+        CHECK(g_hook(M0xC(0x80070000u)) == 1 && M32(0x80071000u) == 0x00021001u && M32(dev + 0x50) == 2);
+        M32(0x80071000u) = 0;
+        node_at(dev + 0x264, 0x00021000u, 0, 0x80071000u, 0, 0);
+        CHECK(g_hook(0xDu) == 0 && g_hook(M0xC(0x80070000u) | 0x2u) == 0 && M32(0x80071000u) == 0);
+        CHECK(M32(dev + 0x50) == 2 && g_hook(5u) == 1);
+    }
+    if (failures)
+        return 1;
+    puts("recomp_d3d_service: ok");
+    return 0;
+#endif
 #ifdef TEST_5455
     /* An XDK 5455 title (KOTOR's layout), no params: found through D - 8, the
      * fence event read from the device; the walk on, so it is adopted. */
@@ -349,13 +509,21 @@ int main(void)
         M32(node + 4) = 0;
         M32(node + 8) = 0x80030000u;
         CHECK(g_hook(1u << 5 | 0xDu) == 1 && M32(0x80030000u) == 0x00030001u && M32(dev + 0x50) == 0);
+        CHECK(recomp_d3d_refused(RECOMP_D3D_REFUSED_PENDING) == 1);
         M32(dev + 0x50) = 0x12345678u;
         CHECK(g_hook(1u << 5 | 0xDu) == 1 && M32(dev + 0x50) == 0x12345678u);
+        CHECK(recomp_d3d_refused(RECOMP_D3D_REFUSED_PENDING) == 2);
         M32(dev + 0x50) = 3;
         CHECK(g_hook(1u << 5 | 0xDu) == 1 && M32(dev + 0x50) == 2);
+        CHECK(recomp_d3d_refused(RECOMP_D3D_REFUSED_PENDING) == 2);
+        /* 0xE leaves the count alone: nothing to refuse. */
+        M32(dev + 0x50) = 0;
+        CHECK(g_hook(0x00030000u << 5 | 0xEu) == 1 && recomp_d3d_refused(RECOMP_D3D_REFUSED_PENDING) == 2);
         CHECK(strstr(g_fallbacks, "D3D8LTCG 5933 rpb_pending=0x50;") != NULL);
         CHECK(strstr(g_fallbacks, "D3D8LTCG 5933 rpb_nodes=0x264;") != NULL);
         test_fixups(dev, 0);
+        test_guards(dev, 0);
+        CHECK(recomp_d3d_refused(RECOMP_D3D_REFUSED_PENDING) >= 2);   /* test_fixups runs the count down to 0 */
         /* Each rule once. */
         CHECK(strstr(strstr(g_fallbacks, "fence_event") + 1, "fence_event") == NULL);
     }
@@ -501,14 +669,23 @@ int main(void)
         CHECK(strstr(g_fallbacks, "D3D8 5849 rpb_nodes=0x264;") != NULL);
 #else
         CHECK(M32(0x00400000u) == 0x12345678u);
+        CHECK(recomp_d3d_refused(RECOMP_D3D_REFUSED_SLOT) == 1);
         /* D3D8LTCG 5849's RunPushBuffer offsets are in the table: nothing fell back. */
         CHECK(g_fallbacks[0] == 0);
+        /* A confirmed layout: the pending count decremented as D3D's handler
+         * does, whatever it reads (nothing to refuse). */
+        M32(dev + 0x50) = 0;
+        M32(node + 8) = 0x80020000u;
+        CHECK(g_hook(2u << 5 | 0xDu) == 1 && M32(dev + 0x50) == 0xFFFFFFFFu);
+        CHECK(recomp_d3d_refused(RECOMP_D3D_REFUSED_PENDING) == 0);
 #endif
     }
 #ifdef TEST_GIVEN
     test_fixups(0x0085FDE0, 1);
+    test_guards(0x0085FDE0, 1);
 #else
     test_fixups(0x0085FDE0, 0);
+    test_guards(0x0085FDE0, 0);
 #endif
     if (failures)
         return 1;

@@ -372,15 +372,27 @@ pushbuffer's last word (its return `JUMP`, `base + size - 4`), `base` its first,
 `base + offset`, ended by size `0xFFFFFFFF`, applied when flag bit 29 is set),
 `next` the following node of the chain. For a device found at run time the
 service checks each write against that structure, not against where D3D's
-callers keep their data: the slot must be in the contiguous window; the fixup
-list may be anywhere in mapped guest memory (they are on the title's heap:
-*Fable*'s at `0x0129xxxx`), each entry at most 64 KB, the list at most 1 MB;
-every destination must lie inside the node's own pushbuffer
-(`base <= to`, `to + size <= slot`, no wrap). A refused list stops at the entry
-refused (earlier entries stay applied, the return `JUMP` is patched anyway); the
-first four refusals are printed (`[D3D] RunPushBuffer method: fixup list of node
-... refused ...`) and all are counted in the report line
-(`[GPU] software methods: ...; fixup lists refused N`, shown when N > 0).
+callers keep their data. Each guard, what it refuses, and why it holds:
+
+| Guard (report name) | Refused | Why it holds |
+|---|---|---|
+| node (`nodes`) | a node whose 20 bytes are not in mapped guest memory (low RAM per `xbox_GetMappedSize`, or the contiguous window); the chain stops there, nothing written | 0xD nodes are in D3D's table inside the device (the image), 0xC/0xE nodes in the ring (`payload \| 0x80000000`), and `next` names one or the other; anything else is a misread layout. It used to read any address. |
+| slot (`slots`) | a return slot whose 4 bytes are not in the contiguous window; the chain stops there | the GPU runs the pushbuffer, so it is contiguous memory (`CreatePushBuffer`, or a title's own contiguous buffer); a node whose slot is not was not built by `RunPushBuffer`, so its `next` is no better. It also refused before, silently after four lines; now the end of the window is checked too (a slot at `0x83FFFFFE` straddled it). |
+| fixup list (`fixup lists`) | the list may be anywhere in mapped guest memory (they are on the title's heap: *Fable*'s at `0x0129xxxx`), each entry at most 64 KB, the list at most 1 MB; every destination inside the node's own pushbuffer (`base <= to`, `to + size <= slot`, no wrap). A refused list stops at the entry refused (earlier entries stay applied, the return `JUMP` is patched anyway) | WP-A, below |
+| pending count (`pending counts`) | on a build whose RunPushBuffer offsets the layout table does not confirm, a count that does not read as one (0, or above 4096) is left alone | the offset is the fallback's guess there, and decrementing a dword that is not the count corrupts the device. On a confirmed layout (D3D8LTCG 5849) the count is decremented as D3D's handler does, whatever it reads. |
+| chain (`chains`) | a chain longer than 4096 nodes is cut (also with the device given) | each node's `next` is set to -1 as it is taken, so a cycle ends by itself; only a chain through garbage gets that far. |
+
+The first four refusals of each kind are printed (`[D3D] RunPushBuffer method
+...`), and every one is counted in the report line, one suffix per kind with a
+non-zero count: `[GPU] software methods: ...; fixup lists refused 3; slots
+refused 1` (`recomp_d3d_describe_refusals`, handed to the executor with
+`nv2a_pb_set_software_method_refusals`). A method the mask leaves out, or one
+that comes before the device is known, is not serviced and is counted under
+`not serviced (type:count)` in the same line. The semaphore watch prints a GPU
+semaphore pointer it does not hand over because it is not in the contiguous
+window (`[D3D] device ...: GPU semaphore pointer ... not handed over`, first
+four); it reads the device found or given directly (a static), and only with
+`RECOMP_D3D_DEVICE_PTR` alone what the slot holds.
 `next` is taken with an atomic exchange: the title links a new node with a
 compare-exchange on it from its own thread. An earlier rule (XBA-80 to 98bb6bb)
 asked for the *list* to be in the contiguous window, which
@@ -388,7 +400,14 @@ dropped every deferred list of *Fable* silently: sub-meshes drawn in two passes
 then showed the other pass's texture for a frame or two. With the device given
 (`RECOMP_D3D_DEVICE[_PTR]`) the writes are unchecked, as D3D's handler does.
 `tests/recomp_d3d_service` covers the accepted list, each refused destination,
-oversized and endless lists, a chain of two nodes and the given device.
+oversized and endless lists, a chain of two nodes and the given device; and
+for the other guards (WP-C) the slot at the window's last word and straddling
+its end, a node past the window and a `next` outside guest memory, a node of
+D3D's table named by `next`, a 4097-node chain, the pending count on an
+unconfirmed and a confirmed layout, the report suffix, the semaphore watch,
+`RECOMP_D3D_DEVICE` alone (variant `devonly`: every method serviced, not
+searched for) and `RECOMP_D3D_SW_METHODS=0x1000` (variant `swmask`: 0xD and 0xE
+left unserviced).
 
 ### Why not the title's own handler
 
