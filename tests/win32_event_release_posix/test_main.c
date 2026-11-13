@@ -28,13 +28,22 @@ static DWORD WINAPI waiter_main(LPVOID p)
     return 0;
 }
 
+/* Start a waiter and return once it is blocked in the wait itself (counted
+ * among the event's waiters), or already done. It used to sleep 20 ms for
+ * that, which under qemu-user was sometimes not enough: in 9 the second set
+ * then found nobody waiting, was rightly kept, and released the late waiter
+ * too (3 runs in 10 on the arm64 job). */
 static HANDLE start(Waiter *w, HANDLE ev, DWORD ms)
 {
     HANDLE t;
+    unsigned before = w32_event_waiters(ev);
+    int k;
     w->ev = ev; w->woke = 0; w->waiting = 0; w->ms = ms;
     t = CreateThread(NULL, 0, waiter_main, w, 0, NULL);
     while (!w->waiting) Sleep(1);
-    Sleep(20);                              /* into the wait itself */
+    for (k = 0; k < 10000 && w32_event_waiters(ev) <= before
+                && WaitForSingleObject(t, 0) == WAIT_TIMEOUT; k++)
+        Sleep(1);
     return t;
 }
 
@@ -315,10 +324,14 @@ int main(int argc, char **argv)
      * The kernel mirrors a guest KEVENT's SignalState (still 1 until the
      * released thread returns) into the host event before every wait: one
      * KeSetEvent must not become two releases. */
+    /* The two sets go in under one lock hold (w32_event_set_n): with two
+     * SetEvent calls, waiter a could run and take the first release in
+     * between, and the second then rightly released b too, as Win32 does
+     * (3 runs in 10 under qemu-user). The property is the shim's, so it is
+     * tested without the scheduler in it. */
     ta = start(&a, ev, 1000);
     tb = start(&b, ev, 300);
-    SetEvent(ev);
-    SetEvent(ev);
+    w32_event_set_n(ev, 2);
     WaitForSingleObject(ta, INFINITE); WaitForSingleObject(tb, INFINITE);
     CloseHandle(ta); CloseHandle(tb);
     CHECK((a.woke != 0) + (b.woke != 0) == 1, "auto reset: two sets in a row before the waiter ran released %d",

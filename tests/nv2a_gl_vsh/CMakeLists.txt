@@ -25,7 +25,16 @@ set_tests_properties(nv2a-gl-vsh PROPERTIES SKIP_RETURN_CODE 77)
 
 # Linux: Mesa's EGL finds no display in a container; EGL_PLATFORM=surfaceless
 # gives it one (llvmpipe), so the GPU half runs in CI instead of skipping.
-set_tests_properties(nv2a-gl-vsh PROPERTIES ENVIRONMENT "EGL_PLATFORM=surfaceless")
+# Cross-compiled (the arm64 job runs it under qemu-user): llvmpipe emulated is far too slow for the GPU half
+# (the 300 s timeout, where it takes under a minute natively), so it is skipped there and the text checks run.
+if(CMAKE_CROSSCOMPILING)
+    set(GL_TEST_ENV "NV2A_GL_TEST_NO_GPU=1")
+    set(GL_TEST_ENV_ES "NV2A_GL_TEST_NO_GPU=1")
+else()
+    set(GL_TEST_ENV "EGL_PLATFORM=surfaceless")
+    set(GL_TEST_ENV_ES "EGL_PLATFORM=surfaceless;MESA_GLES_VERSION_OVERRIDE=3.0")
+endif()
+set_tests_properties(nv2a-gl-vsh PROPERTIES ENVIRONMENT "${GL_TEST_ENV}")
 # The same checks through the GLES 3.0 path (the Android build's GLSL ES
 # header, precision, GLES enums) on an EGL ES context, where the host has
 # GLES through libepoxy (NV2A_GL_FORCE_ES, nv2a_gl_api.h); Mesa held to GLES
@@ -42,5 +51,5 @@ if(NOT APPLE AND NOT ANDROID)
     target_link_libraries(nv2a-gl-vsh-es-test PRIVATE ${EPOXY_LINK_LIBRARIES} m)
     add_test(NAME nv2a-gl-vsh-es COMMAND nv2a-gl-vsh-es-test)
     set_tests_properties(nv2a-gl-vsh-es PROPERTIES SKIP_RETURN_CODE 77
-                         ENVIRONMENT "EGL_PLATFORM=surfaceless;MESA_GLES_VERSION_OVERRIDE=3.0")
+                         ENVIRONMENT "${GL_TEST_ENV_ES}")
 endif()

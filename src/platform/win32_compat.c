@@ -1217,11 +1217,20 @@ HANDLE CreateEventW(LPSECURITY_ATTRIBUTES sa, BOOL manualReset, BOOL initialStat
     return CreateEventA(sa, manualReset, initialState, NULL);
 }
 
-BOOL SetEvent(HANDLE h)
+unsigned w32_event_waiters(HANDLE h)
 {
     w32_object *o = obj_from_handle(h);
-    if (!o || o->kind != K_EVENT) return FALSE;
-    pthread_mutex_lock(&o->lock);
+    unsigned n = 0;
+    if (o && o->kind == K_EVENT) {
+        pthread_mutex_lock(&o->lock);
+        n = o->ev_waiters;
+        pthread_mutex_unlock(&o->lock);
+    }
+    return n;
+}
+
+static void event_set_locked(w32_object *o)
+{
     if (o->manual_reset) {
         if (!o->signaled)
             o->ev_epoch++;          /* releases every thread blocked now */
@@ -1237,6 +1246,25 @@ BOOL SetEvent(HANDLE h)
      * it reads 1): a KeSetEvent that went to a blocked thread as a grant would
      * otherwise release a second thread when the next one prepares its wait. */
     obj_wake(o);
+}
+
+BOOL SetEvent(HANDLE h)
+{
+    w32_object *o = obj_from_handle(h);
+    if (!o || o->kind != K_EVENT) return FALSE;
+    pthread_mutex_lock(&o->lock);
+    event_set_locked(o);
+    pthread_mutex_unlock(&o->lock);
+    return TRUE;
+}
+
+BOOL w32_event_set_n(HANDLE h, int n)
+{
+    w32_object *o = obj_from_handle(h);
+    if (!o || o->kind != K_EVENT) return FALSE;
+    pthread_mutex_lock(&o->lock);
+    while (n-- > 0)
+        event_set_locked(o);
     pthread_mutex_unlock(&o->lock);
     return TRUE;
 }

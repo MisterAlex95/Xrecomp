@@ -99,7 +99,9 @@ int main(void)
     CHECK(nv2a_gl_fragment_body(&k2, body, 16) == 0); /* too small: refused */
     rs.alpha_test_enable = 0;
 
-    if (!nv2a_gl_context_create()) {
+    /* NV2A_GL_TEST_NO_GPU: CMake sets it for a cross build run under
+     * qemu-user, where llvmpipe is too slow for this half. */
+    if (getenv("NV2A_GL_TEST_NO_GPU") || !nv2a_gl_context_create()) {
         printf("no GL context: GPU comparison skipped\n");
         return s_fail ? 1 : 77;
     }
