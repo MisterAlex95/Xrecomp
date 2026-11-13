@@ -283,8 +283,10 @@ prepare a game again after an update », README); saves and settings are kept. O
 the release key (its password is `android`, its name says debug, CI's is in an image layer), or a second application
 id (two apps side by side, but saves split between them).
 
-The rolling `shell-latest` (the plain shell, debug-signed by CI's image) has the same application id: do not install
-it on a device that has the XRecomp APK; it is for the shell checks of [app-shell.md](app-shell.md).
+The rolling `shell-latest` (the plain shell, debug-signed by CI's image) has its own application id since XBA-134,
+`fr.adserver.xboxrecomp.dev` (label « XRecomp shell »): it installs next to the XRecomp APK, with its own data, and
+never replaces it. It is for the shell checks of [app-shell.md](app-shell.md). Before XBA-134 it shared
+`fr.adserver.xboxrecomp.shell`: an old shell install is the « debug-signed install » of the paragraph above.
 
 A local build that must update a release-signed install needs the key too:
 `XBA_KEYSTORE=… XBA_KEYSTORE_PASSWORD=… gradle assembleRelease -PxbaDebuggable=1 -PxbaToolchainDir=… -PxbaVersionCode=<above the installed one>`.

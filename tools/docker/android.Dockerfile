@@ -79,12 +79,15 @@ RUN mkdir -p /reports \
 
 # The app shell APK (XBA-18), debug-signed. Out of the image with:
 #   docker build -f tools/docker/android.Dockerfile --target apk-out --output type=local,dest=out .
+# Its own application id, fr.adserver.xboxrecomp.dev, and label « XRecomp shell » (XBA-134): it installs next to
+# the XRecomp APK (fr.adserver.xboxrecomp.shell, xrecomp-latest) instead of over it (or failing on its other key).
 FROM android AS apk
 ARG XBA_VERSION=dev
 COPY . /src
 WORKDIR /src/android
 RUN printf 'sdk.dir=%s\ncmake.dir=/usr\n' "$ANDROID_HOME" > local.properties \
-    && gradle --no-daemon --console=plain -PxbaVersion="$XBA_VERSION" assembleDebug \
+    && gradle --no-daemon --console=plain -PxbaVersion="$XBA_VERSION" \
+         -PxbaApplicationId=fr.adserver.xboxrecomp.dev -PxbaLabel="XRecomp shell" assembleDebug \
     && mkdir -p /out \
     && cp app/build/outputs/apk/debug/app-debug.apk /out/xboxrecomp-shell.apk \
     && unzip -l /out/xboxrecomp-shell.apk | grep -E 'lib/|classes|assets/' | tee /out/apk-contents.txt \

@@ -247,7 +247,7 @@ jobs:
           fi
           body=$(jq -n --arg sha "$GITHUB_SHA" --arg s "$sha8" \
             '{tag_name: "shell-latest", target_commitish: $sha, name: ("App shell, latest main (" + $s + ")"), prerelease: true,
-              body: ("The Android app shell built by CI from main at " + $s + ". No game inside. Debug-signed, arm64-v8a, Android 11+.\n\nInstall: adb install -r xboxrecomp-shell-" + $s + ".apk. Check list: docs/android/app-shell.md.")}')
+              body: ("The Android app shell built by CI from main at " + $s + ". No game inside. Debug-signed, arm64-v8a, Android 11+. Its own application id (fr.adserver.xboxrecomp.dev, « XRecomp shell »): it installs next to the XRecomp APK of xrecomp-latest, never over it.\n\nInstall: adb install -r xboxrecomp-shell-" + $s + ".apk. Check list: docs/android/app-shell.md.")}')
           id=$(curl -fsS -X POST -H "$auth" -H "Content-Type: application/json" -d "$body" "$api/releases" | jq -r .id)
           curl -fsS -X POST -H "$auth" -F "attachment=@out/xboxrecomp-shell.apk;type=application/vnd.android.package-archive" \
             "$api/releases/$id/assets?name=xboxrecomp-shell-$sha8.apk" | jq -r .browser_download_url
