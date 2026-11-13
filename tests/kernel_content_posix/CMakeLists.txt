@@ -11,7 +11,8 @@ add_subdirectory(../../src/xiso xiso)
 # kernel_file.c serves D: from a disc image too since XBA-126: kernel_disc.c
 # and the xiso sources come with it (as in tests/kernel_disc).
 add_executable(kernel_content_posix_test test_main.c
-    ../../src/kernel/kernel_file.c ../../src/kernel/kernel_path.c ../../src/kernel/kernel_disc.c)
+    ../../src/kernel/kernel_file.c ../../src/kernel/kernel_path.c ../../src/kernel/kernel_disc.c
+    ../../src/kernel/prep_progress.c)
 target_include_directories(kernel_content_posix_test PRIVATE ../../src/kernel)
 target_link_libraries(kernel_content_posix_test PRIVATE platform xiso)
 enable_testing()

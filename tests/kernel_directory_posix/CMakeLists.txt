@@ -9,7 +9,8 @@ set(CMAKE_C_STANDARD 11)
 add_subdirectory(../../src/platform platform)
 add_subdirectory(../../src/xiso xiso)   # kernel_disc.c (XBA-126): the file layer serves D: from an image
 add_executable(kernel_directory_posix_test test_main.c
-    ../../src/kernel/kernel_file.c ../../src/kernel/kernel_path.c ../../src/kernel/kernel_disc.c)
+    ../../src/kernel/kernel_file.c ../../src/kernel/kernel_path.c ../../src/kernel/kernel_disc.c
+    ../../src/kernel/prep_progress.c)
 target_include_directories(kernel_directory_posix_test PRIVATE ../../src/kernel)
 target_link_libraries(kernel_directory_posix_test PRIVATE platform xiso)
 option(XBOX_DIRECTORY_ASAN "Instrument the fixture and its platform library" OFF)

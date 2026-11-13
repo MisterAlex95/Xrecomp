@@ -355,3 +355,13 @@ the lock stalls D3D init (RECOMP_GUEST_CPU_TRACE).
   the bridge's buffer checks and the OHCI accept lazy reservations too.
 - A/B: `RECOMP_LAZY_RESERVE=0` clamps the reserve again (the 38 MB crash); `RECOMP_GUEST_WINDOW=0` is the old layout.
 - Not run on Fable yet (no title on the CI host): Mac check list on XBA-103.
+
+## 2026-11-13: cache progress is the runtime's (WP7)
+- `title.c`'s `[CACHE]` thread (the percentage from the .biz headers) is gone. The runtime's generic indicator
+  (`src/kernel/prep_progress.h`) counts what any title writes to Z: and shows `preparing data <n> MB` in the window
+  title and the overlay, with `[PREP]` log lines; no percentage, since the total is Fable's own format.
+  `RECOMP_PREP_INDICATOR=0` turns it off.
+- What stays in this layer as enhancements (not derivable, nothing breaks without them): the 16:9 camera and
+  cutscene bars (`overrides.c`, `fable_aspect_configure`) and the front-end `Sleep(50)` shortened to 16 ms
+  (`FABLE_FRONTEND_SLEEP_MS`; the game's own 20 fps loop, 49.5 fps menus without it on the Mac).
+

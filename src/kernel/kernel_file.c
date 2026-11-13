@@ -16,6 +16,7 @@
 
 #define _GNU_SOURCE   /* FNM_CASEFOLD */
 #include "kernel.h"
+#include "prep_progress.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -1496,6 +1497,8 @@ NTSTATUS __stdcall xbox_NtWriteFile(
         return STATUS_UNSUCCESSFUL;
     }
 
+    if (n > 0)                          /* the "preparing data" indicator (prep_progress.h) */
+        xbox_UtilityWriteNote(w32_handle_path(FileHandle), (size_t)n);
     IoStatusBlock->Status = STATUS_SUCCESS;
     IoStatusBlock->Information = (ULONG_PTR)n;
     if (Event) SetEvent(Event);
