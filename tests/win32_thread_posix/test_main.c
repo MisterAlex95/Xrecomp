@@ -10,6 +10,11 @@
  *   1. SuspendThread(own handle) does not return until ResumeThread
  *   2. the same through the current-thread pseudo-handle
  *   3. ResumeThread reports the count the park left (1)
+ *   4. XBA-133: an APC queued from another thread ends an alertable
+ *      WaitForSingleObjectEx and an alertable SleepEx of the main thread
+ *      (which CreateThread did not start: w32_thread_apc_handle gives it a
+ *      thread object) with WAIT_IO_COMPLETION, the APC run on the main
+ *      thread; GetCurrentThread still answers the pseudo-handle there.
  */
 #include "win32_compat.h"
 
@@ -65,11 +70,55 @@ static void run(int pseudo, const char *what)
     CloseHandle(h);
 }
 
+static HANDLE g_main_apc;
+static volatile DWORD g_apc_tid;
+
+static VOID CALLBACK note_apc(ULONG_PTR data)
+{
+    (void)data;
+    g_apc_tid = GetCurrentThreadId();
+}
+
+static DWORD WINAPI queues_apc(LPVOID unused)
+{
+    (void)unused;
+    sleep_ms(100);
+    QueueUserAPC(note_apc, g_main_apc, 0);
+    return 0;
+}
+
+static void apc_wake(int sleep)
+{
+    HANDLE ev = CreateEventA(NULL, TRUE, FALSE, NULL), th;
+    struct timespec t0, t1;
+    DWORD r;
+    long ms;
+
+    g_apc_tid = 0;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    th = CreateThread(NULL, 0, queues_apc, NULL, 0, NULL);
+    r = sleep ? SleepEx(3000, TRUE) : WaitForSingleObjectEx(ev, 3000, TRUE);
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    ms = (t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_nsec - t0.tv_nsec) / 1000000;
+    WaitForSingleObject(th, INFINITE);
+    CloseHandle(th);
+    CloseHandle(ev);
+    check(r == WAIT_IO_COMPLETION && g_apc_tid == GetCurrentThreadId() && ms < 2000,
+          sleep ? "an APC from another thread ends an alertable SleepEx"
+                : "an APC from another thread ends WaitForSingleObjectEx", NULL);
+}
+
 int main(void)
 {
     printf("win32 thread shim (POSIX)\n");
     run(0, "SuspendThread(own handle) parks the thread");
     run(1, "SuspendThread(pseudo-handle) parks the thread");
+    g_main_apc = w32_thread_apc_handle();
+    check(g_main_apc != NULL && GetCurrentThread() == (HANDLE)(LONG_PTR)-2,
+          "the main thread gets an APC handle; GetCurrentThread unchanged", NULL);
+    apc_wake(0);
+    apc_wake(1);
+    check(SleepEx(50, TRUE) == 0, "an alertable SleepEx with nothing queued runs out", NULL);
     printf("%s: %d failure(s)\n", failures ? "FAIL" : "PASS", failures);
     return failures ? 1 : 0;
 }

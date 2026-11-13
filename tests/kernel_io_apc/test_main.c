@@ -31,10 +31,16 @@
  *     APC, deferred or inline (XBA-133);
  *   - xbox_SetDeferredIoApc(0) still selects the inline delivery;
  *   - with KeInsertQueueApc's user APCs (XBA-113) as well: one alertable
- *     wait runs both sources, the file-I/O completions first; an APC queued
- *     from another thread while this one is blocked in an alertable wait
- *     does not wake it (a known gap, kernel_bridge.c bridge_apc_safe_point)
- *     and runs on this thread at its next alertable wait.
+ *     wait runs both sources, the file-I/O completions first;
+ *   - XBA-133: an APC queued from another thread while this one is blocked
+ *     in an alertable user-mode wait ends that wait, in each of the six wait
+ *     bridges: it runs on this thread and the wait returns STATUS_USER_APC
+ *     long before its timeout. A kernel-mode alertable wait is not ended by
+ *     it. KeAlertThread from another thread ends an alertable wait with
+ *     STATUS_ALERTED; an alert sent before the wait answers the next
+ *     alertable wait at once and KeTestAlertThread reads and clears it.
+ *     With RECOMP_APC_WAKE=0 (the third ctest entry) the APC does not wake
+ *     the wait and runs at the next one, as before.
  * Inline (RECOMP_INLINE_APC=1):
  *   - the routine runs during NtReadFile with its context, and esp comes back
  *     exactly past NtReadFile's arguments (deliver_one_apc used to add 12
@@ -88,7 +94,8 @@ enum {
 };
 
 enum { S_OPEN, S_READ, S_WAIT1EX, S_DELAY, S_WAITNEX, S_KEWAIT1, S_KEWAITN,
-       S_EVENT, S_GETCUR, S_APCINIT, S_APCINS, S_COUNT };
+       S_EVENT, S_GETCUR, S_APCINIT, S_APCINS, S_WAIT1, S_ALERT, S_TESTALERT,
+       S_COUNT };
 static const uint32_t ordinals[S_COUNT] = {
     202, /* NtOpenFile */
     219, /* NtReadFile */
@@ -101,6 +108,9 @@ static const uint32_t ordinals[S_COUNT] = {
     104, /* KeGetCurrentThread */
     105, /* KeInitializeApc */
     118, /* KeInsertQueueApc */
+    233, /* NtWaitForSingleObject */
+    93,  /* KeAlertThread */
+    155, /* KeTestAlertThread */
 };
 
 /* stdcall from the current guest esp: push the arguments and a return
@@ -389,6 +399,38 @@ static void queue_user_apc(uint32_t apc, uint32_t kt, uint32_t context)
 }
 
 static uint32_t s_target_kt;
+static volatile uint32_t s_alert_prev;
+
+/* One of the six wait bridges, alertable in `mode`, on `h` (never
+ * signalled), for at most 2 s. */
+static void blocked_wait(int kind, uint32_t h, uint32_t mode)
+{
+    uint32_t a[8];
+    *(int64_t *)(mem + TIMEOUT2_VA) = -20000000;    /* 2 s */
+    *(uint32_t *)(mem + OBJS_VA) = h;
+    switch (kind) {
+    case 0: a[0] = h; a[1] = mode; a[2] = 1; a[3] = TIMEOUT2_VA; call(S_WAIT1EX, a, 4); break;
+    case 1: a[0] = h; a[1] = 1; a[2] = TIMEOUT2_VA; call(S_WAIT1, a, 3); break;
+    case 2: a[0] = 1; a[1] = OBJS_VA; a[2] = 1; a[3] = mode; a[4] = 1; a[5] = TIMEOUT2_VA;
+            call(S_WAITNEX, a, 6); break;
+    case 3: a[0] = h; a[1] = 0; a[2] = mode; a[3] = 1; a[4] = TIMEOUT2_VA; call(S_KEWAIT1, a, 5); break;
+    case 4: a[0] = 1; a[1] = OBJS_VA; a[2] = 1; a[3] = 0; a[4] = mode; a[5] = 1;
+            a[6] = TIMEOUT2_VA; a[7] = 0; call(S_KEWAITN, a, 8); break;
+    default: a[0] = mode; a[1] = 1; a[2] = TIMEOUT2_VA; call(S_DELAY, a, 3); break;
+    }
+}
+
+static DWORD WINAPI alerter_thread(LPVOID param)
+{
+    uint32_t a[2] = { 0, 1 /* UserMode */ };
+    (void)param;
+    Sleep(100);
+    g_esp = STACK3_VA;
+    a[0] = s_target_kt;
+    call(S_ALERT, a, 2);
+    s_alert_prev = g_eax;
+    return 0;
+}
 
 static DWORD WINAPI apc_queuer_thread(LPVOID param)
 {
@@ -432,23 +474,84 @@ static void run_ksync_apcs(void)
     delay_alertable();
     check(apc_runs == 2 && g_eax != 0xC0u, "the next alertable wait finds nothing", NULL);
 
-    /* Queued from another thread while this one is blocked alertably. */
+    /* Queued from another thread while this one is blocked alertably
+     * (XBA-133): each wait bridge in turn. */
+    {
+        static const char *const names[6] = {
+            "NtWaitForSingleObjectEx", "NtWaitForSingleObject", "NtWaitForMultipleObjectsEx",
+            "KeWaitForSingleObject", "KeWaitForMultipleObjects", "KeDelayExecutionThread" };
+        int k, woke = getenv("RECOMP_APC_WAKE") == NULL;
+        s_target_kt = kt;
+        for (k = 0; k < 6; k++) {
+            DWORD t0;
+            apc_runs = 0;
+            apc_tid = 0;
+            t0 = GetTickCount();
+            th = CreateThread(NULL, 0, apc_queuer_thread, NULL, 0, NULL);
+            blocked_wait(k, ev2, 1 /* UserMode */);
+            t0 = GetTickCount() - t0;
+            WaitForSingleObject(th, INFINITE);
+            CloseHandle(th);
+            snprintf(detail, sizeof detail, "%s: status 0x%08X runs %d after %lu ms",
+                     names[k], g_eax, apc_runs, (unsigned long)t0);
+            if (woke)
+                check(g_eax == 0xC0u && apc_runs == 1 && apc_tid == me && t0 < 1500,
+                      "an APC queued meanwhile ends the wait: STATUS_USER_APC", detail);
+            else
+                check(g_eax != 0xC0u && apc_runs == 0,
+                      "RECOMP_APC_WAKE=0: an APC queued meanwhile does not end it", detail);
+            check_esp(STACK_VA, "esp is exact after it");
+            if (!woke) {
+                delay_alertable();
+                check(apc_runs == 1 && g_eax == 0xC0u && apc_tid == me,
+                      "RECOMP_APC_WAKE=0: it runs at the next alertable wait", NULL);
+            }
+        }
+    }
+    if (getenv("RECOMP_APC_WAKE"))
+        return;
+
+    /* A kernel-mode alertable wait is not ended by a user APC. */
     apc_runs = 0;
-    s_target_kt = kt;
-    *(int64_t *)(mem + TIMEOUT2_VA) = -4000000;     /* 400 ms */
     th = CreateThread(NULL, 0, apc_queuer_thread, NULL, 0, NULL);
-    args[0] = ev2; args[1] = 1 /* UserMode */; args[2] = 1; args[3] = TIMEOUT2_VA;
+    *(int64_t *)(mem + TIMEOUT2_VA) = -4000000;     /* 400 ms */
+    args[0] = ev2; args[1] = 0 /* KernelMode */; args[2] = 1; args[3] = TIMEOUT2_VA;
     call(S_WAIT1EX, args, 4);
     WaitForSingleObject(th, INFINITE);
     CloseHandle(th);
     snprintf(detail, sizeof detail, "status 0x%08X runs %d", g_eax, apc_runs);
-    check(apc_runs == 0 && g_eax == 0x102u,
-          "an APC queued meanwhile does not wake the wait (known gap): it times out", detail);
-    check_esp(STACK_VA, "esp is exact after the timed-out wait");
+    check(g_eax == 0x102u && apc_runs == 0,
+          "a kernel-mode alertable wait times out, the user APC still queued", detail);
     delay_alertable();
-    snprintf(detail, sizeof detail, "runs %d ctx 0x%X status 0x%08X", apc_runs, apc_seen[0], g_eax);
-    check(apc_runs == 1 && apc_seen[0] == 0x303u && g_eax == 0xC0u && apc_tid == me,
-          "it runs at the next alertable wait, on the target thread", detail);
+    check(apc_runs == 1 && g_eax == 0xC0u, "and it runs at the next user-mode one", NULL);
+
+    /* KeAlertThread from another thread. */
+    th = CreateThread(NULL, 0, alerter_thread, NULL, 0, NULL);
+    blocked_wait(0, ev2, 1);
+    WaitForSingleObject(th, INFINITE);
+    CloseHandle(th);
+    snprintf(detail, sizeof detail, "status 0x%08X prev %u", g_eax, s_alert_prev);
+    check(g_eax == 0x101u && s_alert_prev == 0,
+          "KeAlertThread from another thread ends the wait: STATUS_ALERTED", detail);
+    blocked_wait(0, ev2, 1);
+    check(g_eax == 0x102u, "the alert is used up: the next wait times out", NULL);
+
+    /* An alert sent first. */
+    args[0] = kt; args[1] = 1 /* UserMode */;
+    call(S_ALERT, args, 2);
+    check(g_eax == 0, "KeAlertThread on a running thread: was not alerted", NULL);
+    call(S_ALERT, args, 2);
+    check(g_eax == 1, "...and a second one says it already was", NULL);
+    args[0] = 1;
+    call(S_TESTALERT, args, 1);
+    check(g_eax == 1, "KeTestAlertThread reads the flag", NULL);
+    call(S_TESTALERT, args, 1);
+    check(g_eax == 0, "...and clears it", NULL);
+    args[0] = kt; args[1] = 1;
+    call(S_ALERT, args, 2);
+    blocked_wait(0, ev2, 1);
+    check(g_eax == 0x101u, "an alert sent before answers the next alertable wait at once", NULL);
+    check_esp(STACK_VA, "esp is exact after the alert calls");
 }
 
 static void run_inline(void)

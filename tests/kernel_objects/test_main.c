@@ -23,6 +23,11 @@
  *      CloseProcedure with the handle count, the last one takes the name out
  *      and the last reference calls DeleteProcedure. A permanent object
  *      keeps its name after its last handle until ObMakeTemporaryObject.
+ *   3. NtQueueApcThread (XBA-133) on the current thread: the routine runs at
+ *      the next alertable user-mode wait as ApcRoutine(Arg1, Arg2, Arg3),
+ *      which returns STATUS_USER_APC; a handle that is no thread is
+ *      STATUS_INVALID_HANDLE. (Waking another thread's wait is the same path
+ *      as KeInsertQueueApc's, checked in tests/kernel_io_apc.)
  */
 #include "kernel.h"
 #include "xbox_memory_layout.h"
@@ -38,6 +43,7 @@ extern ptrdiff_t g_xbox_mem_offset;
 
 #define CLOSE_VA  0x00007100u     /* "guest" addresses of the type procedures */
 #define DELETE_VA 0x00007200u
+#define APC_VA    0x00007300u
 
 static int failures;
 static char d[256];
@@ -59,15 +65,16 @@ enum {
     O_THUNK = 0x0000, O_STACK = 0x2000, O_HANDLE = 0x3000, O_OUT = 0x3100,
     O_ANSI = 0x3200, O_OA = 0x3300, O_NAME = 0x3400, O_ANSI2 = 0x3500,
     O_NAME2 = 0x3600, O_BUF = 0x4000, O_TYPE = 0x5000, O_TYPE2 = 0x5100,
+    O_TIB = 0x6000, O_KT = 0x6100, O_ZERO = 0x6400,
 };
 #define V(o) (B + (uint32_t)(o))
 
 enum {
     S_CLOSE, S_OPENDIR, S_QUERYDIR, S_SYMLINK, S_CREATE, S_INSERT, S_MKTEMP,
-    S_OPENNAME, S_OPENPTR, S_REFPTR, S_REFHANDLE, S_DEREF, S_COUNT
+    S_OPENNAME, S_OPENPTR, S_REFPTR, S_REFHANDLE, S_DEREF, S_QAPC, S_DELAY, S_COUNT
 };
 static const uint32_t ord[S_COUNT] = {
-    187, 201, 208, 67, 239, 241, 242, 243, 244, 248, 246, 250,
+    187, 201, 208, 67, 239, 241, 242, 243, 244, 248, 246, 250, 206, 99,
 };
 
 static uint32_t call(int slot, const uint32_t *args, int n)
@@ -106,10 +113,23 @@ static void delete_proc(void)
     g_esp += 8;
 }
 
+static int apc_runs;
+static uint32_t apc_args[3];
+
+static void apc_proc(void)       /* ApcRoutine(Arg1, Arg2, Arg3), stdcall */
+{
+    apc_args[0] = G32(g_esp + 4);
+    apc_args[1] = G32(g_esp + 8);
+    apc_args[2] = G32(g_esp + 12);
+    apc_runs++;
+    g_esp += 16;
+}
+
 recomp_func_t recomp_lookup(uint32_t va);
 recomp_func_t recomp_lookup(uint32_t va)
 {
-    return va == CLOSE_VA ? close_proc : va == DELETE_VA ? delete_proc : NULL;
+    return va == CLOSE_VA ? close_proc : va == DELETE_VA ? delete_proc
+         : va == APC_VA ? apc_proc : NULL;
 }
 recomp_func_t recomp_lookup_manual(uint32_t va);
 recomp_func_t recomp_lookup_manual(uint32_t va) { (void)va; return NULL; }
@@ -312,6 +332,35 @@ static void test_objects(void)
     check(deletes == 1, "the last reference deletes it", NULL);
 }
 
+/* ═══════════════════ 3. NtQueueApcThread ═══════════════════ */
+
+static void test_queue_apc(void)
+{
+    /* A TIB whose fs:[0x28] names this thread's KTHREAD, as the loader
+     * builds them. */
+    memset(XBOX_TO_NATIVE(V(O_TIB)), 0, 0x40);
+    memset(XBOX_TO_NATIVE(V(O_KT)), 0, 0x200);
+    G32(V(O_TIB)) = 0xFFFFFFFFu;
+    G32(V(O_TIB) + 0x28) = V(O_KT);
+    xbox_InitGuestKthread(V(O_KT), 0, V(O_STACK) + 0x1000, V(O_STACK));
+    g_fs_base = V(O_TIB);
+    G32(V(O_ZERO)) = 0; G32(V(O_ZERO) + 4) = 0;
+
+    apc_runs = 0;
+    CALL(S_QAPC, 0xFFFFFFFEu /* NtCurrentThread */, APC_VA, 0x11, 0x22, 0x33);
+    check(g_eax == 0 && apc_runs == 0 && esp_ok(5),
+          "NtQueueApcThread queues, nothing runs yet (5 arguments)", NULL);
+    CALL(S_DELAY, 1 /* UserMode */, 1, V(O_ZERO));
+    snprintf(d, sizeof d, "status 0x%08X runs %d args 0x%X 0x%X 0x%X", g_eax, apc_runs,
+             apc_args[0], apc_args[1], apc_args[2]);
+    check(g_eax == 0xC0u && apc_runs == 1 && apc_args[0] == 0x11 && apc_args[1] == 0x22
+          && apc_args[2] == 0x33, "the next alertable wait runs ApcRoutine(1, 2, 3)", d);
+    CALL(S_DELAY, 1, 1, V(O_ZERO));
+    check(g_eax != 0xC0u && apc_runs == 1, "once", NULL);
+    CALL(S_QAPC, 0x12345678u, APC_VA, 0, 0, 0);
+    check(g_eax == 0xC0000008u, "a handle that is no thread: STATUS_INVALID_HANDLE", NULL);
+}
+
 static unsigned char *load(const char *path, size_t *n)
 {
     FILE *f = fopen(path, "rb");
@@ -348,6 +397,7 @@ int main(int argc, char **argv)
 
     test_directories();
     test_objects();
+    test_queue_apc();
 
     printf("\n%d failure(s)\n", failures);
     return failures ? 1 : 0;

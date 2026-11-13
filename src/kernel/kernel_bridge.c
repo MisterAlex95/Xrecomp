@@ -520,6 +520,8 @@ static int defer_io_apc(void)
 }
 
 static int bridge_run_io_apcs(uint32_t alertable, uint32_t wait_mode);
+static void bridge_wait_done(uint32_t alertable, uint32_t wait_mode);
+static void thalert_forget(uint32_t kthread);
 
 struct bridge_thread_start {
     recomp_func_t fn;
@@ -848,6 +850,7 @@ static DWORD WINAPI bridge_thread_main(LPVOID param)
     g_thread_stack_top = 0;
     /* The kernel's thread startup ends a returning routine with
      * PsTerminateSystemThread(STATUS_SUCCESS). */
+    thalert_forget(g_thread_obj_va);
     thobj_exit(g_thread_obj_va, 0);
     g_thread_obj_va = 0;
     return 0;
@@ -2439,6 +2442,7 @@ static void bridge_KeWaitForSingleObject(void)
             g_eax = (uint32_t)xbox_KeWaitForSingleObject(
                 ge, wait_reason, wait_mode,
                 (BOOLEAN)alertable, XBOX_TO_NATIVE(timeout_ptr));
+            bridge_wait_done(alertable, wait_mode);
             if (g_eax == 0 && type == 1)               /* synchronization: consumed */
                 BRIDGE_MEM32(object + 4) = 0;
             xbox_wait_stats_wait(object, ret_va, g_eax, t0);
@@ -2457,6 +2461,7 @@ static void bridge_KeWaitForSingleObject(void)
     g_eax = (uint32_t)xbox_KeWaitForSingleObject(
         h, wait_reason, wait_mode,
         (BOOLEAN)alertable, XBOX_TO_NATIVE(timeout_ptr));
+    bridge_wait_done(alertable, wait_mode);
     xbox_wait_stats_wait(object, ret_va, g_eax, t0);
     if (g_eax != 0)
         bridge_wait_spin(object, g_eax, timeout_ptr, ret_va);
@@ -2483,6 +2488,7 @@ static void bridge_NtWaitForSingleObject(void)
     t0 = xbox_wait_stats_begin(bridge_timeout_is_poll(timeout_ptr));
     g_eax = (uint32_t)xbox_NtWaitForSingleObject(
         handle, (BOOLEAN)alertable, XBOX_TO_NATIVE(timeout_ptr));
+    bridge_wait_done(alertable, 1);
     xbox_wait_stats_wait(token, site, g_eax, t0);
 }
 
@@ -2554,6 +2560,7 @@ static void bridge_NtWaitForSingleObjectEx(void)
         g_eax = (uint32_t)xbox_NtWaitForSingleObjectEx(
             handle, (KPROCESSOR_MODE)wait_mode, (BOOLEAN)alertable,
             XBOX_TO_NATIVE(timeout_ptr));
+        bridge_wait_done(alertable, wait_mode);
         xbox_wait_stats_wait(token, site, g_eax, t0);
     }
 }
@@ -2632,6 +2639,7 @@ static void bridge_NtWaitForMultipleObjectsEx(void)
         g_eax = (uint32_t)xbox_NtWaitForMultipleObjectsEx(
             count, handles, wait_type, (BOOLEAN)alertable,
             XBOX_TO_NATIVE(timeout_ptr));
+        bridge_wait_done(alertable, wait_mode);
         xbox_wait_stats_wait_multi(BRIDGE_MEM32(handles_va), site, g_eax, t0, count, wait_type == 0);
     }
 }
@@ -2804,11 +2812,13 @@ static void bridge_KeDelayExecutionThread(void)
         shorter.QuadPart = -(LONGLONG)ovr * 10000;
         g_eax = (uint32_t)xbox_KeDelayExecutionThread(
             (KPROCESSOR_MODE)wait_mode, (BOOLEAN)alertable, &shorter);
+        bridge_wait_done(alertable, wait_mode);
         return;
     }
     g_eax = (uint32_t)xbox_KeDelayExecutionThread(
         (KPROCESSOR_MODE)wait_mode, (BOOLEAN)alertable,
         XBOX_TO_NATIVE(interval_ptr));
+    bridge_wait_done(alertable, wait_mode);
 }
 
 /* ── KeBugCheck (ordinal 95) / KeBugCheckEx (96) ─────────── */
@@ -2952,6 +2962,7 @@ static void bridge_PsTerminateSystemThread(void)
          * to do it. */
         xbox_FreeThreadStack(g_thread_stack_top);
         g_thread_stack_top = 0;
+        thalert_forget(g_thread_obj_va);
         thobj_exit(g_thread_obj_va, exit_status);
         g_thread_obj_va = 0;
         ExitThread(exit_status);
@@ -5167,11 +5178,248 @@ static int bridge_run_user_apcs(void)
     return ran;
 }
 
+/* ── Waking a thread blocked in an alertable wait (XBA-133) ──
+ *
+ * A user APC queued for another thread (KeInsertQueueApc, NtQueueApcThread)
+ * and an alert (KeAlertThread) end that thread's alertable wait on the
+ * console. Here the thread is blocked in a host wait, so each guest thread
+ * that makes an alertable wait has an entry: its KTHREAD, a handle to its
+ * host thread (w32_thread_apc_handle), what kind of alertable wait it is in
+ * now, and its Alerted flags (KTHREAD.Alerted[mode] on the console). The
+ * waker queues a no-op host APC to the thread, which ends its host wait
+ * (WAIT_IO_COMPLETION, STATUS_ALERTED); the thread then runs its user APCs
+ * and the wait returns STATUS_USER_APC, or STATUS_ALERTED for an alert.
+ *
+ * Each of the wait bridges calls bridge_run_io_apcs before its host wait
+ * (bridge_wait_begin) and bridge_wait_done after it. begin marks the wait,
+ * throws away a host APC left over from an earlier wake (one that came
+ * after its wait had ended for another reason), then answers the wait
+ * before blocking: STATUS_ALERTED when the thread is alerted for this mode,
+ * STATUS_USER_APC when a user-mode wait finds user APCs queued. A waker
+ * looks at the mark after queueing, and begin looks at the queues after
+ * marking, so an APC is either seen by begin or wakes the host wait.
+ *
+ * A user APC wakes only a user-mode alertable wait, a user-mode alert too;
+ * a kernel-mode alert wakes either, as on the console. RECOMP_APC_WAKE=0
+ * turns the waking off (the old behaviour: the APC runs at the thread's
+ * next alertable wait). */
+#define THALERT_MAX 512
+
+typedef struct {
+    uint32_t kthread;           /* 0: free */
+    HANDLE   host;              /* the host thread, NULL until it waited */
+    HANDLE   src;               /* the thread's own handle it was duplicated from */
+    int      waiting;           /* 0, or 1 + KPROCESSOR_MODE of the alertable wait */
+    uint8_t  alerted[2];        /* KernelMode, UserMode */
+} ThAlert;
+
+static ThAlert s_thalert[THALERT_MAX];
+static volatile LONG s_thalert_lock;
+
+static void thalert_lock(void)
+{
+    while (InterlockedCompareExchange(&s_thalert_lock, 1, 0) != 0)
+        SwitchToThread();
+}
+
+static void thalert_unlock(void) { InterlockedExchange(&s_thalert_lock, 0); }
+
+static int apc_wake_enabled(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("RECOMP_APC_WAKE");
+        on = !(e && *e == '0');
+    }
+    return on;
+}
+
+/* The entry of `kthread`, made when `create`. Lock held. */
+static ThAlert *thalert_find(uint32_t kthread, int create)
+{
+    ThAlert *free_e = NULL;
+    int i;
+    if (!kthread)
+        return NULL;
+    for (i = 0; i < THALERT_MAX; i++) {
+        if (s_thalert[i].kthread == kthread)
+            return &s_thalert[i];
+        if (!s_thalert[i].kthread && !free_e)
+            free_e = &s_thalert[i];
+    }
+    if (create && free_e) {
+        memset(free_e, 0, sizeof *free_e);
+        free_e->kthread = kthread;
+    }
+    return create ? free_e : NULL;
+}
+
+static VOID CALLBACK thalert_noop(ULONG_PTR unused) { (void)unused; }
+
+/* The calling thread's KTHREAD, as thobj_current, but never made here: a
+ * thread whose TIB names none has nothing a waker could name either. */
+static uint32_t thalert_self_kt(void)
+{
+    if (g_thread_obj_va)
+        return g_thread_obj_va;
+    return g_fs_base ? BRIDGE_MEM32(g_fs_base + 0x28) : 0;
+}
+
+static RECOMP_TLS HANDLE t_thalert_host;   /* this thread's, once taken */
+
+static HANDLE thalert_host_self(void)
+{
+    if (!t_thalert_host) {
+#ifdef _WIN32
+        DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(),
+                        &t_thalert_host, 0, FALSE, DUPLICATE_SAME_ACCESS);
+#else
+        t_thalert_host = w32_thread_apc_handle();
+#endif
+    }
+    return t_thalert_host;
+}
+
+/* The calling thread starts (kind 1 + mode) or ends (0) an alertable wait.
+ * Starting answers the thread's Alerted flag for that mode: 1 when it was
+ * set (and is now clear). */
+static int thalert_mark(int kind)
+{
+    uint32_t kt = thalert_self_kt();
+    HANDLE host = kind ? thalert_host_self() : NULL;
+    int alerted = 0;
+    ThAlert *e;
+
+    thalert_lock();
+    e = thalert_find(kt, kind != 0);
+    if (e) {
+        if (kind && host && e->src != host) {
+            HANDLE old = e->host;     /* first wait, or a KTHREAD reused by a new thread */
+            HANDLE dup = NULL;
+            DuplicateHandle(GetCurrentProcess(), host, GetCurrentProcess(), &dup,
+                            0, FALSE, DUPLICATE_SAME_ACCESS);
+            e->host = dup;
+            e->src = host;
+            if (old) CloseHandle(old);
+        }
+        e->waiting = kind;
+        if (kind && e->alerted[kind - 1]) {
+            e->alerted[kind - 1] = 0;
+            e->waiting = 0;
+            alerted = 1;
+        }
+    }
+    thalert_unlock();
+    return alerted;
+}
+
+/* Wake `kthread` for a user APC queued to it (from another thread). */
+static void thalert_wake_for_apc(uint32_t kthread)
+{
+    ThAlert *e;
+    if (!apc_wake_enabled() || !kthread || kthread == thalert_self_kt())
+        return;
+    thalert_lock();
+    e = thalert_find(kthread, 0);
+    if (e && e->waiting == 2 /* user-mode alertable */ && e->host)
+        QueueUserAPC(thalert_noop, e->host, 0);
+    thalert_unlock();
+}
+
+/* KeAlertThread: the previous Alerted[mode]; sets it and wakes an
+ * alertable wait it may end (a kernel-mode alert ends either kind). */
+static int thalert_alert(uint32_t kthread, int mode)
+{
+    ThAlert *e;
+    int prev = 0;
+    mode = mode ? 1 : 0;
+    thalert_lock();
+    e = thalert_find(kthread, 1);
+    if (e) {
+        prev = e->alerted[mode];
+        if (!prev) {
+            if (e->waiting && (mode == 0 || e->waiting == 2) && e->host
+                    && kthread != thalert_self_kt()) {
+                /* Ends the wait instead: the flag of the wait's own mode
+                 * stands for the wake, and bridge_wait_done clears it. */
+                e->alerted[e->waiting - 1] = 1;
+                QueueUserAPC(thalert_noop, e->host, 0);
+            } else {
+                e->alerted[mode] = 1;
+            }
+        }
+    }
+    thalert_unlock();
+    return prev;
+}
+
+/* KeTestAlertThread: Alerted[mode], cleared. */
+static int thalert_test(uint32_t kthread, int mode)
+{
+    ThAlert *e;
+    int was = 0;
+    thalert_lock();
+    e = thalert_find(kthread, 0);
+    if (e) {
+        was = e->alerted[mode ? 1 : 0];
+        e->alerted[mode ? 1 : 0] = 0;
+    }
+    thalert_unlock();
+    return was;
+}
+
+/* The thread is gone: its entry goes, with the host handle. */
+static void thalert_forget(uint32_t kthread)
+{
+    ThAlert *e;
+    HANDLE h = NULL;
+    thalert_lock();
+    e = thalert_find(kthread, 0);
+    if (e) {
+        h = e->host;
+        memset(e, 0, sizeof *e);
+    }
+    thalert_unlock();
+    if (h) CloseHandle(h);
+    if (t_thalert_host && kthread == g_thread_obj_va) {   /* the exiting thread's own */
+        CloseHandle(t_thalert_host);
+        t_thalert_host = NULL;
+    }
+}
+
+/* bridge_wait_begin: see above. Returns 1 when the wait is answered
+ * (g_eax set) and must not be made. */
 static int bridge_run_io_apcs(uint32_t alertable, uint32_t wait_mode)
 {
-    if (!alertable || wait_mode != 1 /* UserMode */)
+    wait_mode &= 0xFF;
+    if (!(alertable & 0xFF))
         return 0;
-    return bridge_run_user_apcs();
+    if (thalert_mark(1 + (wait_mode == 1))) {
+        g_eax = 0x00000101u;             /* STATUS_ALERTED */
+        return 1;
+    }
+    SleepEx(0, TRUE);                    /* a stale wake-up from an earlier wait */
+    if (wait_mode == 1 && bridge_run_user_apcs()) {
+        thalert_mark(0);
+        return 1;
+    }
+    return 0;
+}
+
+/* After the host wait of an alertable wait. Woken (STATUS_ALERTED from the
+ * host): a user-mode wait runs the APCs that woke it and returns
+ * STATUS_USER_APC; an alert's flag is cleared and STATUS_ALERTED stays. */
+static void bridge_wait_done(uint32_t alertable, uint32_t wait_mode)
+{
+    wait_mode &= 0xFF;
+    if (!(alertable & 0xFF))
+        return;
+    thalert_mark(0);
+    if (g_eax != 0x00000101u)
+        return;
+    if (wait_mode == 1 && bridge_run_user_apcs())
+        return;
+    thalert_test(thalert_self_kt(), wait_mode == 1);
 }
 
 /* -- XeLoadSection / XeUnloadSection (ordinals 327/328, 1 arg = 4 bytes) --
@@ -6588,8 +6836,11 @@ static void bridge_NtReleaseSemaphore(void)
  * Nt* thread calls do, degrading to a pass-through for synthetic handles. */
 static void bridge_KeAlertThread(void)
 {
-    g_eax = (uint32_t)xbox_KeAlertThread(
-        bridge_resolve_handle(STACK_ARG(0)), (KPROCESSOR_MODE)STACK_ARG(1));
+    /* BOOLEAN KeAlertThread(PKTHREAD Thread, KPROCESSOR_MODE AlertMode): the
+     * thread's previous Alerted[AlertMode]. Thread is the KTHREAD, not a
+     * handle; it used to go to xbox_KeAlertThread as one, which queued a
+     * host APC on whatever that resolved to (XBA-133). */
+    g_eax = (uint32_t)thalert_alert(STACK_ARG(0), (int)(STACK_ARG(1) & 0xFF));
 }
 
 /* ── KeWaitForMultipleObjects (ordinal 158, 8 args)
@@ -6640,6 +6891,7 @@ static void bridge_KeWaitForMultipleObjects(void)
             STACK_ARG(3), (KPROCESSOR_MODE)STACK_ARG(4),
             (BOOLEAN)alertable, XBOX_TO_NATIVE(timeout_va),
             XBOX_TO_NATIVE(STACK_ARG(7)));
+        bridge_wait_done(alertable, STACK_ARG(4));
         xbox_wait_stats_wait_multi(objects_va ? BRIDGE_MEM32(objects_va) : 0, site, g_eax, t0,
                                    count, wait_type == 0);
     }
@@ -9339,11 +9591,20 @@ static void bridge_KeSuspendThread(void)
         g_eax = 0;
 }
 
-/* --- KeAlertResumeThread (ordinal 92, 1 arg = 4 bytes) --- */
+/* --- KeAlertResumeThread (ordinal 92, 1 arg = 4 bytes)
+ * ULONG KeAlertResumeThread(PKTHREAD Thread): a kernel-mode alert (it ends
+ * an alertable wait of either mode, else sets Alerted[KernelMode]), then a
+ * resume; the previous suspend count back (XBA-133). The host thread is the
+ * one the KE shadow keeps for the thread object. */
 static void bridge_KeAlertResumeThread(void)
 {
-    (void)STACK_ARG(0);
-    g_eax = 0;
+    uint32_t kt = STACK_ARG(0);
+    HANDLE th = ke_shadow_lookup(kt);
+
+    thalert_alert(kt, 0);
+    g_eax = th ? (uint32_t)ResumeThread(th) : 0;
+    if (g_eax == (uint32_t)-1)
+        g_eax = 0;
 }
 
 /* --- KeBoostPriorityThread (ordinal 94, 2 args = 8 bytes) --- */
@@ -9436,9 +9697,12 @@ static void bridge_KeInsertQueueApc(void)
     /* A kernel-mode APC for the calling thread runs before the call returns,
      * as on the console when the insert drops back below APC_LEVEL. One for
      * another thread runs at that thread's next kernel call; a user-mode one
-     * at its next alertable user-mode wait (bridge_apc_safe_point). */
+     * at its next alertable user-mode wait (bridge_apc_safe_point), or ends
+     * the one it is blocked in now (thalert_wake_for_apc, XBA-133). */
     if (ok && BRIDGE_MEM8(apc + 2) == 0 && BRIDGE_MEM32(apc + 4) == thobj_current())
         bridge_apc_run_kernel();
+    else if (ok && BRIDGE_MEM8(apc + 2) == 1)
+        thalert_wake_for_apc(BRIDGE_MEM32(apc + 4));
     g_eax = (uint32_t)ok;
 }
 
@@ -9475,6 +9739,8 @@ static void bridge_call_guest(uint32_t va, const uint32_t *args, int n)
  * may change or clear what follows, then NormalRoutine(NormalContext,
  * SystemArgument1, SystemArgument2). The four values live just below esp
  * for the length of the delivery. */
+static int apc_pool_owned(uint32_t apc);
+
 static void bridge_apc_deliver(uint32_t apc)
 {
     uint32_t save_esp = g_esp, area;
@@ -9496,6 +9762,8 @@ static void bridge_apc_deliver(uint32_t apc)
         bridge_call_guest(BRIDGE_MEM32(area + 0), a, 3);
     }
     g_esp = save_esp;
+    if (apc_pool_owned(apc))              /* NtQueueApcThread's own KAPC */
+        xbox_HeapFree(apc);
 }
 
 static void bridge_apc_run_kernel(void)
@@ -9515,12 +9783,8 @@ static void bridge_apc_run_kernel(void)
  * The file-I/O completions queued on this thread run in the same wait, first
  * (bridge_run_user_apcs).
  *
- * Not covered: a user-mode APC queued while its thread is already blocked
- * in an alertable wait does not wake it; it runs at the next such wait. The
- * host shim's alertable waits (win32_compat.c WaitForSingleObjectEx, SleepEx)
- * only look for host APCs before they block, so waking one needs them to
- * wait on the thread too, plus a KTHREAD -> host thread map and delivery
- * after each of the six wait bridges' host wait. */
+ * A user-mode APC queued while its thread is already blocked in an
+ * alertable wait wakes it (XBA-133): see bridge_run_io_apcs. */
 static int bridge_apc_safe_point(ULONG ordinal)
 {
     int alertable = 0;
@@ -9655,11 +9919,14 @@ static void bridge_KeSetPriorityThread(void)
         xbox_KeSetBasePriorityThread(h, pri - 8);
 }
 
-/* --- KeTestAlertThread (ordinal 155, 1 arg = 4 bytes) --- */
+/* --- KeTestAlertThread (ordinal 155, 1 arg = 4 bytes)
+ * BOOLEAN KeTestAlertThread(KPROCESSOR_MODE AlertMode): the calling
+ * thread's Alerted[AlertMode], cleared (XBA-133). The console also marks a
+ * user APC pending here when one is queued; kernel_ksync.c's insert has
+ * marked it already. */
 static void bridge_KeTestAlertThread(void)
 {
-    (void)STACK_ARG(0);
-    g_eax = 0;
+    g_eax = (uint32_t)thalert_test(thalert_self_kt(), (int)(STACK_ARG(0) & 0xFF));
 }
 
 /* --- KiBugCheckData (ordinal 162, 0 args = 0 bytes) --- */
@@ -9988,14 +10255,73 @@ static void bridge_NtProtectVirtualMemory(void)
     }
 }
 
-/* --- NtQueueApcThread (ordinal 206, 5 args = 20 bytes) --- */
+/* --- NtQueueApcThread (ordinal 206, 5 args = 20 bytes)
+ * NTSTATUS NtQueueApcThread(HANDLE ThreadHandle, PPS_APC_ROUTINE ApcRoutine,
+ *                           PVOID ApcArgument1, PVOID ApcArgument2,
+ *                           PVOID ApcArgument3);
+ * XAPI's QueueUserAPC (XBA-133). As on the console: a KAPC from the pool,
+ * initialised for the thread with ApcRoutine as its user-mode NormalRoutine
+ * and ApcArgument1 as its context, and inserted with Arguments 2 and 3, so
+ * it runs as ApcRoutine(Argument1, Argument2, Argument3) at the thread's
+ * alertable user-mode wait -- the one it is blocked in now, if any. The
+ * console frees the KAPC from its KernelRoutine; here bridge_apc_deliver
+ * frees the ones this made (apc_pool_owned). */
+#define APC_POOL_MAX 256
+static uint32_t s_apc_pool[APC_POOL_MAX];
+static volatile LONG s_apc_pool_lock;
+
+static void apc_pool_note(uint32_t apc, int add)
+{
+    int i;
+    while (InterlockedCompareExchange(&s_apc_pool_lock, 1, 0) != 0)
+        SwitchToThread();
+    for (i = 0; i < APC_POOL_MAX; i++)
+        if (add ? !s_apc_pool[i] : s_apc_pool[i] == apc) {
+            s_apc_pool[i] = add ? apc : 0;
+            break;
+        }
+    InterlockedExchange(&s_apc_pool_lock, 0);
+}
+
+/* 1 when bridge_NtQueueApcThread made this KAPC (and it is now forgotten). */
+static int apc_pool_owned(uint32_t apc)
+{
+    int i, owned = 0;
+    while (InterlockedCompareExchange(&s_apc_pool_lock, 1, 0) != 0)
+        SwitchToThread();
+    for (i = 0; i < APC_POOL_MAX && !owned; i++)
+        if (s_apc_pool[i] == apc) {
+            s_apc_pool[i] = 0;
+            owned = 1;
+        }
+    InterlockedExchange(&s_apc_pool_lock, 0);
+    return owned;
+}
+
 static void bridge_NtQueueApcThread(void)
 {
-    (void)STACK_ARG(0);
-    (void)STACK_ARG(1);
-    (void)STACK_ARG(2);
-    (void)STACK_ARG(3);
-    (void)STACK_ARG(4);
+    uint32_t token = STACK_ARG(0), routine = STACK_ARG(1);
+    uint32_t kt = token == 0xFFFFFFFEu ? thobj_current() : thobj_from_token(token);
+    uint32_t apc;
+
+    if (!kt) {
+        g_eax = 0xC0000008u;                 /* STATUS_INVALID_HANDLE */
+        return;
+    }
+    apc = xbox_HeapAlloc(0x28, 16);
+    if (!apc) {
+        g_eax = 0xC000009Au;                 /* STATUS_INSUFFICIENT_RESOURCES */
+        return;
+    }
+    apc_pool_note(apc, 1);
+    ks_apc_init(apc, kt, 0, 0, routine, 1 /* UserMode */, STACK_ARG(2));
+    if (!ks_apc_insert(apc, STACK_ARG(3), STACK_ARG(4))) {
+        apc_pool_note(apc, 0);
+        xbox_HeapFree(apc);
+        g_eax = 0xC0000001u;                 /* STATUS_UNSUCCESSFUL */
+        return;
+    }
+    thalert_wake_for_apc(kt);
     g_eax = 0;
 }
 
@@ -10303,6 +10629,7 @@ static void bridge_NtSignalAndWaitForSingleObjectEx(void)
     g_eax = (uint32_t)xbox_NtWaitForSingleObjectEx(
         wait_h, (KPROCESSOR_MODE)wait_mode, (BOOLEAN)alertable,
         XBOX_TO_NATIVE(timeout_ptr));
+    bridge_wait_done(alertable, wait_mode);
     xbox_wait_stats_wait(token, site, g_eax, t0);
 }
 
