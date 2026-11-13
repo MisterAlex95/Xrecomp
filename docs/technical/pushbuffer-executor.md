@@ -294,7 +294,7 @@ wait that is method 5: a software-method hook that sets the fence event with
 `xbox_KeSetGuestEvent()` (see [D3D Software Methods](#d3d-software-methods)),
 D3D built the event itself, which is a guest event by default (with
 `RECOMP_TITLE_KEVENTS=0`, that one event adopted with `xbox_KeAdoptGuestEvent()`:
-the XDK D3D layer does so for a device it found at run time). XDK 5849's D3D8LTCG gets the walk from its own
+the XDK D3D layer does so for a device it found at run time). A D3D8LTCG title whose fence wait spins on the latch gets the walk from its own
 layer (`profiles/xdk/d3d8ltcg`): its fence wait also spins on the 0x0310 latch
 (PGRAPH 0x400B10), which only the walk keeps honest.
 

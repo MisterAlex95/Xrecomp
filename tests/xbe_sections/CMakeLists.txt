@@ -1,0 +1,22 @@
+cmake_minimum_required(VERSION 3.20)
+project(xbe_sections_test C)
+# XBE sections loaded on demand (XBA-124): src/kernel/xbox_xbe_sections.c
+# alone over a stand-in for guest memory (unit), and through the whole
+# runtime's xbox_MemoryLayoutInit on our own synthetic images (layout).
+set(CMAKE_C_STANDARD 11)
+find_package(Threads REQUIRED)
+add_executable(xbe_sections_unit test_main.c ../../src/kernel/xbox_xbe_sections.c)
+target_include_directories(xbe_sections_unit PRIVATE ../../src/kernel)
+target_link_libraries(xbe_sections_unit PRIVATE Threads::Threads)
+enable_testing()
+add_test(NAME xbe_sections_unit COMMAND xbe_sections_unit)
+set_tests_properties(xbe_sections_unit PROPERTIES SKIP_RETURN_CODE 77)
+if(NOT WIN32)
+    add_subdirectory(../.. runtime)
+    add_executable(xbe_sections_layout test_main.c)
+    target_compile_definitions(xbe_sections_layout PRIVATE TEST_LAYOUT=1)
+    target_include_directories(xbe_sections_layout PRIVATE ../../src/kernel)
+    target_link_libraries(xbe_sections_layout PRIVATE xboxrecomp)
+    add_test(NAME xbe_sections_layout COMMAND xbe_sections_layout)
+    set_tests_properties(xbe_sections_layout PROPERTIES SKIP_RETURN_CODE 77)
+endif()
