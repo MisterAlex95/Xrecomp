@@ -118,6 +118,15 @@ int main(void)
         CHECK(field(l, "flips") == 9 && l[strlen(l) - 2] == '}');
     }
 
+    CHECK(strstr(l, "apu_dsp") == NULL);    /* no APU yet: no field */
+
+    /* The APU's DSP report (XBA-122) rides on the line as an object. */
+    recomp_status_apu_dsp("{\"cmds\":7,\"stalls\":0}");
+    recomp_status_write_now();
+    l = last_line(path);
+    CHECK(strstr(l, ",\"apu_dsp\":{\"cmds\":7,\"stalls\":0}}") != NULL);
+    CHECK(field(l, "flips") == 9 && field(l, "cmds") == 7);
+
     recomp_status_reset();
     remove(path);
     if (failures)

@@ -87,6 +87,41 @@ static void named_write(FILE *f, const char *key, const StatusNamed *t, int n)
     fputc('}', f);
 }
 
+/* The APU's "apu_dsp" object (XBA-122), set by the audio thread every few
+ * dozen milliseconds. A try-lock on its side: the audio thread never waits
+ * on the status thread, it skips one update instead. */
+static char s_apu_dsp[1024];
+static volatile long s_apu_dsp_lock;
+
+static int apu_dsp_trylock(void)
+{
+#ifdef _WIN32
+    return InterlockedCompareExchange((volatile LONG *)&s_apu_dsp_lock, 1, 0) == 0;
+#else
+    return __sync_val_compare_and_swap(&s_apu_dsp_lock, 0, 1) == 0;
+#endif
+}
+
+static void apu_dsp_unlock(void)
+{
+#ifdef _WIN32
+    InterlockedExchange((volatile LONG *)&s_apu_dsp_lock, 0);
+#else
+    __sync_lock_release(&s_apu_dsp_lock);
+#endif
+}
+
+void recomp_status_apu_dsp(const char *json)
+{
+    size_t n;
+    if (!s_on || !json || !apu_dsp_trylock())
+        return;
+    n = strlen(json);
+    if (n < sizeof s_apu_dsp)
+        memcpy(s_apu_dsp, json, n + 1);
+    apu_dsp_unlock();
+}
+
 static uint64_t now_ms(void)
 {
 #ifdef _WIN32
@@ -100,8 +135,19 @@ static uint64_t now_ms(void)
 
 void recomp_status_write_now(void)
 {
+    char dsp[sizeof s_apu_dsp + 16];
+    int spins = 0;
+
     if (!s_on || !s_file)
         return;
+    dsp[0] = 0;
+    while (!apu_dsp_trylock() && ++spins < 100000)
+        ;
+    if (spins < 100000) {
+        if (s_apu_dsp[0])
+            snprintf(dsp, sizeof dsp, ",\"apu_dsp\":%s", s_apu_dsp);
+        apu_dsp_unlock();
+    }
     fprintf(s_file, "{\"ms\":%llu,\"flips\":%llu,\"frames\":%llu,\"hash\":\"0x%08X\",\"lit\":%u,"
                     "\"audio_ms\":%llu,\"pad_reads\":%llu,\"threads\":%llu,\"discovered\":%u,\"seeds\":%u",
             (unsigned long long)(now_ms() - s_t0_ms), (unsigned long long)s_flips,
@@ -112,6 +158,7 @@ void recomp_status_write_now(void)
     named_write(s_file, "unmodelled", s_unmod, s_nunmod);
     if (s_net)
         fprintf(s_file, ",\"net\":\"%s\"", s_net);   /* XBA-117 */
+    fputs(dsp, s_file);                              /* XBA-122 */
     fputs("}\n", s_file);
     fflush(s_file);
 }
@@ -253,6 +300,7 @@ void recomp_status_reset(void)
     s_hash = s_lit = 0;
     s_ngaps = s_nunmod = 0;
     s_net = NULL;
+    s_apu_dsp[0] = 0;
     s_period_ms = 1000;
     (void)open_file();          /* tests call write_now themselves: no thread */
 }

@@ -3,8 +3,11 @@
 Hardware emulation of the Xbox's MCPX APU (Audio Processing Unit), extracted from [xemu](https://github.com/xemu-project/xemu). The APU is a custom chip with three processors:
 
 - **VP (Voice Processor)** — 256 hardware voices, ADPCM/PCM decode, pitch shifting, envelopes, HRTF 3D audio
-- **GP (Global Processor)** — DSP for global effects (reverb, chorus). Currently **stubbed** — effects bypass.
-- **EP (Encode Processor)** — DSP for AC3/DTS encoding. Currently **stubbed** — passthrough.
+- **GP (Global Processor)** — DSP for global effects (reverb, chorus). Not emulated: the mixbins are folded to
+  stereo by role (`apu_mix.c`), with an optional native I3DL2 reverb (`RECOMP_APU_REVERB`), and what the title asks
+  of the GP is recorded (`apu_dsp_watch.c`). [docs/technical/apu-dsp.md](../../docs/technical/apu-dsp.md).
+- **EP (Encode Processor)** — DSP for AC3/DTS encoding. Not emulated: the output is PCM stereo whatever EP image the
+  title loads; its canary is kept so DirectSound sees it alive.
 
 Audio output uses Windows `waveOut` at 48kHz stereo 16-bit.
 
@@ -17,7 +20,9 @@ Audio output uses Windows `waveOut` at 48kHz stereo 16-bit.
 | `apu_regs.h` | 366 | MCPX APU register definitions and field masks |
 | `apu_core.c` | 762 | MMIO handlers, frame thread, waveOut output, test tone |
 | `apu_vp.c` | 1,247 | Voice Processor — decode, resample, mix, envelopes, HRTF |
-| `apu_dsp.c` | 90 | GP/EP stubs (mixbin 0/1 passthrough) |
+| `apu_dsp.c` | 420 | GP/EP stand-in: DSP doorbell ack, EP canary, calls the mixdown and the watch |
+| `apu_mix.c` | 380 | Mixbin downmix by role, native I3DL2 reverb (this project's code, MIT) |
+| `apu_dsp_watch.c` | 310 | What the title asks of the GP/EP: commands, images, mixbins, to the log and the status file (MIT) |
 | `apu_mmio_hook.c` | 253 | VEH x86-64 instruction decoder for 0xFE800000+ MMIO |
 | `apu_shim.h` | 431 | QEMU compatibility (threads, atomics, clocks → Win32) |
 | `apu_debug.h` | 104 | Debug logging macros |

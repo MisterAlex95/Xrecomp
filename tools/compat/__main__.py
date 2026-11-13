@@ -64,6 +64,9 @@ def classify(status, presses_ms, exit_info, run_s, sustain_s, log_text="", disco
     net = next((s["net"] for s in status if s.get("net")), None)
     if net:
         summary["net"] = net
+    dsp = next((s["apu_dsp"] for s in reversed(status) if isinstance(s.get("apu_dsp"), dict)), None)
+    if dsp is not None:
+        summary["apu_dsp"] = dsp
     stage = "prepares"
     if status and any(s.get("flips") or s.get("threads") or s.get("pad_reads") or s.get("audio_ms")
                       for s in status):
@@ -405,6 +408,28 @@ def run_one(source, a, marks=None):
     return res
 
 
+def dsp_label(result):
+    """What a title asked of the APU's DSPs (XBA-122, the status file's apu_dsp of its last run),
+    in a few words: whether it depends on the GP and how. Empty when the runtime reported nothing."""
+    d = next((r.get("apu_dsp") for r in reversed(result.get("runs") or []) if r.get("apu_dsp")), None)
+    if not d:
+        return ""
+    words = []
+    if d.get("gp_words"):
+        words.append("GP image %s (%d words%s)" % (str(d.get("gp_image", ""))[:8], d["gp_words"],
+                                                   ", %d images" % d["gp_images"] if d.get("gp_images", 0) > 1 else ""))
+    if d.get("cmds"):
+        words.append("%d cmds" % d["cmds"])
+    sends = [n for n in ("i3dl2", "fx") if d.get(n)]
+    if sends:
+        words.append("sends: " + "+".join("reverb" if n == "i3dl2" else "FX" for n in sends))
+    if d.get("ep_words"):
+        words.append("EP image")
+    if d.get("stalls"):
+        words.append("%d stall(s)" % d["stalls"])
+    return ", ".join(words) or "no DSP use"
+
+
 def report(results):
     """A Markdown table, one row per title (the last result for each)."""
     last = {}
@@ -412,15 +437,18 @@ def report(results):
         last[r.get("title_id") or r.get("source")] = r
     on_device = any(r.get("device") for r in results)
     with_recall = any(r.get("recall") for r in results)
+    with_dsp = any(dsp_label(r) for r in last.values())
     rows = ["| Title | Stage | Best of runs | Blocker | XDK | Toolkit |" + (" Recall |" if with_recall else "")
-            + (" Device |" if on_device else ""),
-            "|---|---|---|---|---|---|" + ("---|" if with_recall else "") + ("---|" if on_device else "")]
+            + (" Device |" if on_device else "") + (" DSP |" if with_dsp else ""),
+            "|---|---|---|---|---|---|" + ("---|" if with_recall else "") + ("---|" if on_device else "")
+            + ("---|" if with_dsp else "")]
     for k, r in sorted(last.items(), key=lambda kv: -STAGES.index(kv[1].get("stage", "none"))):
         rows.append("| %s | %s | %s | %s | %s | %s |" % (
             r.get("source", k) + (" (network stack)" if r.get("net") else ""), r.get("stage"), r.get("best", r.get("stage")),
             (r.get("blocker") or "").replace("|", "/"), r.get("xdk") or "", r.get("toolkit", ""))
             + (" %s |" % recall_label(r) if with_recall else "")
-            + (" %s |" % device.device_label(r).replace("|", "/") if on_device else ""))
+            + (" %s |" % device.device_label(r).replace("|", "/") if on_device else "")
+            + (" %s |" % dsp_label(r) if with_dsp else ""))
     return "\n".join(rows)
 
 

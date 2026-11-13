@@ -37,6 +37,11 @@
  *               kernel's PHY routes (XBA-117): "nic probed, link down", or
  *               "nic probed, link up (RECOMP_NIC=0)" with the model off
  *
+ * and once the APU frame thread ran (XBA-122):
+ *
+ *   apu_dsp     once the APU frame thread ran: what the title asked of the
+ *               GP/EP DSPs (src/apu/apu_dsp_watch.h has the fields)
+ *
  * Unset: nothing is counted beyond a load and a branch per call.
  * docs/technical/discovery.md has the companion file; the runner reads both. */
 #ifndef XBOXRECOMP_RECOMP_STATUS_H
@@ -59,6 +64,10 @@ void recomp_status_frame(const void *px, uint32_t w, uint32_t h, uint32_t pitch,
 void recomp_status_audio(const int16_t *stereo, int count);
 
 void recomp_status_pad_read(void);
+
+/* The APU's DSP report, a JSON object (src/apu/apu_dsp_watch.c), written as the line's "apu_dsp" field. The
+ * caller never blocks: an update that meets the writer is dropped. */
+void recomp_status_apu_dsp(const char *json);
 void recomp_status_thread_started(void);
 
 /* n more uses of something the renderer could not draw. `name` must live

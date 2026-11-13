@@ -140,6 +140,10 @@ missed anything, and `report` / `report --matrix` get a Recall column (« recall
 Tested on synthetic titles only (`tools/compat/test_heal.py`, and `test_e2e.py::test_the_self_healing_loop`: three
 threads found one round at a time, the third refused, four rounds); a real title's numbers are XBA-75.
 
+Each run keeps the status file's `apu_dsp` object (what the title asked of the APU's DSPs, XBA-122:
+[APU DSP](apu-dsp.md)); once one title has it, `report` gets a DSP column (« GP image 9cd378fc (1500 words), 13 cmds,
+sends: reverb+FX, 1 stall(s) »). Titles sharing a GP image hash share DirectSound's effects image.
+
 ## Limits
 
 - `responsive` is a heuristic: an animated screen changes on its own. The press times and the status clock start a

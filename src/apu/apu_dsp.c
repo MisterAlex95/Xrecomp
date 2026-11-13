@@ -5,13 +5,13 @@
  * processing (reverb, chorus, etc.) and final output encoding. The full
  * DSP is ~3000 lines of DSP56300 emulation code.
  *
- * For initial audio, we bypass the DSP entirely:
- * - VP mixbins are passed directly to the EP output
- * - GP effects processing is skipped
- * - The EP just copies mixbin 0/1 (front L/R) to the monitor buffer
- *
- * This gives us basic voice playback without effects. The DSP can be
- * connected later for reverb, EQ, and other processing.
+ * No DSP56300 runs here: the GP's effects image is not executed and the EP
+ * outputs PCM stereo. The VP's mixbins are mixed down by role
+ * (apu_mix.c), optionally through a native I3DL2 reverb fed from the
+ * I3DL2 send, and what the title asks of the DSPs is recorded
+ * (apu_dsp_watch.c). The handshakes DirectSound waits on are answered
+ * below. docs/technical/apu-dsp.md: why no DSP56300 (xemu's interpreter is
+ * GPL, this file and the rest of src/apu are LGPL), the handshake list.
  *
  * Copyright (c) 2012 espes
  * Copyright (c) 2019-2025 Matt Borgerson
@@ -23,6 +23,8 @@
  */
 
 #include "apu_state.h"
+#include "apu_dsp_watch.h"
+#include "apu_mix.h"
 #include "fpconv.h"
 
 #include <stdlib.h>
@@ -99,19 +101,83 @@ static void dsp_ack_init(void)
                 s_dsp_ack_count, s_dsp_ack[0]);
 }
 
-/* SUM EVERY MIXBIN THE GUEST ROUTED TO, NOT JUST THE FIRST TWO.
+/* The mixdown and the native reverb live in apu_mix.c (the bins by role,
+ * RECOMP_APU_MIXDOWN; RECOMP_APU_MIXDOWN_ALL=0 still means bins 0/1 only),
+ * the observation in apu_dsp_watch.c. Both are this project's own code.
  *
- * Default ON. RECOMP_APU_MIXDOWN_ALL=0 restores the previous two-bin read,
- * because this changes audible output for every title and an escape hatch
- * costs one branch. */
-static int mcpx_apu_mixdown_all(void)
+ * The reverb is allocated here, at init, never on the audio thread. With
+ * RECOMP_APU_REVERB_IMAGES=<hash>[,<hash>...] it runs only while the GP
+ * holds one of the listed effects images (the hashes the [APU-DSP] lines
+ * and the status file print); any other image is bypassed and counted. */
+#define REVERB_IMAGES_MAX 8
+static ApuReverb *s_reverb;
+static uint64_t s_reverb_images[REVERB_IMAGES_MAX];
+static int s_reverb_image_count;
+static void *s_aperture_override;          /* tests */
+extern void *xbox_GetMcpxAperture(void);
+
+void mcpx_apu_dsp_set_aperture(void *ap)
 {
-    static int on = -1;
-    if (on < 0) {
-        const char *e = getenv("RECOMP_APU_MIXDOWN_ALL");
-        on = (e && *e) ? (atoi(e) != 0) : 1;
+    s_aperture_override = ap;
+}
+
+static const uint8_t *dsp_aperture(void)
+{
+    return (const uint8_t *)(s_aperture_override ? s_aperture_override
+                                                 : xbox_GetMcpxAperture());
+}
+
+static void reverb_init(void)
+{
+    ApuI3dl2 p;
+    const char *name = NULL, *list;
+
+    apu_mix_reset_config();
+    s_reverb_image_count = 0;
+    if (!apu_mix_reverb_config(&p, &name))
+        return;
+    if (!s_reverb)
+        s_reverb = apu_reverb_create();
+    if (!s_reverb)
+        return;
+    apu_reverb_set(s_reverb, &p);
+    apu_reverb_clear(s_reverb);
+    list = getenv("RECOMP_APU_REVERB_IMAGES");
+    while (list && *list && s_reverb_image_count < REVERB_IMAGES_MAX) {
+        char *end;
+        unsigned long long h = strtoull(list, &end, 16);
+        if (end == list)
+            break;
+        if (h)
+            s_reverb_images[s_reverb_image_count++] = (uint64_t)h;
+        list = (*end == ',') ? end + 1 : end;
     }
-    return on;
+    fprintf(stderr, "[APU-MIX] native I3DL2 reverb on: preset %s, fed from the"
+                    " I3DL2 send (bin 10); %s\n", name,
+            s_reverb_image_count ? "only under the listed GP images"
+                                 : "under any GP image");
+}
+
+/* The reverb for this frame, or NULL: off, or the GP image is not listed. */
+static ApuReverb *reverb_for_frame(void)
+{
+    uint64_t h;
+    int i;
+
+    if (!s_reverb)
+        return NULL;
+    if (s_reverb_image_count) {
+        h = apu_dsp_watch_stats()->gp_image_hash;
+        for (i = 0; i < s_reverb_image_count; i++)
+            if (s_reverb_images[i] == h)
+                break;
+        if (i == s_reverb_image_count) {
+            apu_dsp_watch_reverb(0);
+            return NULL;
+        }
+    }
+    apu_dsp_watch_reverb(1);
+    return s_reverb;
 }
 
 /* GPRST (GP region + 0xFFFC): the GP runs only with both reset bits set, as
@@ -140,11 +206,20 @@ static uint32_t *dsp_ack_auto_slot(MCPXAPUState *d)
 {
     uint32_t sge = qatomic_read(&d->regs[NV_PAPU_GPSADDR]), page;
 
-    if (!sge || s_gp_in_reset)
+    if (!sge)
         return NULL;
     page = *(const uint32_t *)mcpx_apu_phys(sge);
     if (!page || (page & 0xFFF))
         return NULL;                       /* table not filled in yet */
+    if (s_gp_in_reset) {
+        /* Not answered, but counted: a title that rings while it holds the
+         * GP in reset waits on hardware too -- this says how long. The page
+         * is only read, and only the page the table names now. */
+        uint32_t *slot = (uint32_t *)(mcpx_apu_phys(page) + GP_DOORBELL_OFFSET);
+        apu_dsp_watch_pending(*slot ? APU_DSP_PEND_RESET : -1,
+                              page + GP_DOORBELL_OFFSET);
+        return NULL;
+    }
     if (page != s_dsp_ack_auto_page) {
         s_dsp_ack_auto_page = page;
         fprintf(stderr, "[APU] DSP doorbell: GP scratch SGE table 0x%08X maps"
@@ -180,7 +255,6 @@ static uint32_t *dsp_ack_auto_slot(MCPXAPUState *d)
  * memory beyond this word is still what it last wrote there. */
 #define EP_CANARY_OFFSET 0x5A018u
 #define EP_CANARY_VALUE  0x00CCCCCCu
-extern void *xbox_GetMcpxAperture(void);
 
 static int ep_canary_on(void)
 {
@@ -200,7 +274,7 @@ static void ep_canary_poll(void)
     char *ap;
     volatile uint32_t *w;
 
-    if (!ep_canary_on() || !(ap = (char *)xbox_GetMcpxAperture()))
+    if (!ep_canary_on() || !(ap = (char *)dsp_aperture()))
         return;
     w = (volatile uint32_t *)(ap + EP_CANARY_OFFSET);
     if (*w != EP_CANARY_VALUE)
@@ -227,12 +301,16 @@ void mcpx_apu_dsp_ack_poll(MCPXAPUState *d)
         return;
     if (s_dsp_ack_auto) {
         uint32_t *slot = dsp_ack_auto_slot(d);
-        if (slot && *slot) {
-            static int shown;
-            if (shown++ < 3)
-                fprintf(stderr, "[APU] DSP doorbell (auto): command 0x%08X"
-                                " acknowledged\n", *slot);
-            *slot = 0;
+        if (slot) {
+            apu_dsp_watch_pending(-1, 0);
+            if (*slot) {
+                static int shown;
+                if (shown++ < 3)
+                    fprintf(stderr, "[APU] DSP doorbell (auto): command 0x%08X"
+                                    " acknowledged\n", *slot);
+                apu_dsp_watch_cmd(s_dsp_ack_auto_page + GP_DOORBELL_OFFSET, *slot);
+                *slot = 0;
+            }
         }
     }
     for (i = 0; i < s_dsp_ack_count; i++) {
@@ -242,6 +320,7 @@ void mcpx_apu_dsp_ack_poll(MCPXAPUState *d)
             if (shown[i]++ < 3)
                 fprintf(stderr, "[APU] DSP doorbell 0x%08X: command 0x%08X"
                                 " acknowledged\n", s_dsp_ack[i], *slot);
+            apu_dsp_watch_cmd(s_dsp_ack[i], *slot);
             *slot = 0;
         }
     }
@@ -257,6 +336,8 @@ void mcpx_apu_dsp_init(MCPXAPUState *d)
     s_dsp_ack_auto = 0;
     s_dsp_ack_auto_page = 0;
     s_gp_in_reset = 0;
+    apu_dsp_watch_reset();
+    reverb_init();
 
     /* Allocate minimal DSP state for GP and EP.
      * We need these to exist so reset doesn't crash,
@@ -282,6 +363,8 @@ void mcpx_apu_dsp_finalize(MCPXAPUState *d)
     free(d->ep.dsp);
     d->gp.dsp = NULL;
     d->ep.dsp = NULL;
+    apu_reverb_destroy(s_reverb);
+    s_reverb = NULL;
 }
 
 void mcpx_apu_update_dsp_preference(MCPXAPUState *d)
@@ -294,63 +377,35 @@ void mcpx_apu_update_dsp_preference(MCPXAPUState *d)
 void mcpx_apu_dsp_frame(MCPXAPUState *d,
                          float mixbins[NUM_MIXBINS][NUM_SAMPLES_PER_FRAME])
 {
-    /* Bypass DSP: take mixbin 0 (front-left) and mixbin 1 (front-right)
-     * and write them directly to the monitor frame buffer as the final
-     * EP output.
+    /* No GP or EP runs: the bins are mixed down to stereo here (apu_mix.c)
+     * and written to the monitor frame buffer as the EP's output, a PCM
+     * stereo stream whatever EP image the title loaded.
      *
-     * The Xbox DirectSound typically routes:
-     *   Mixbin 0 = Front Left
-     *   Mixbin 1 = Front Right
-     *   Mixbin 2 = Center (often unused in stereo)
-     *   Mixbin 3 = LFE
-     *   Mixbin 4-5 = Rear L/R
+     * Bins 2..31 used to be dropped on the floor: only bins 0/1 were read.
+     * Measured on Jet Set Radio Future, one 200 s gameplay run:
      *
-     * For stereo output, bins 0 and 1 are what we want.
-     */
-
+     *     [APU-BIN] 2D heard=557466 lost=0
+     *               3D heard=0      lost=377768
+     *               lost by bin: 6,7,8,9,10
+     *
+     * The title's 3D positional voices -- its sound effects -- are routed
+     * to bins 6 to 10 by the guest's own V0BIN..V3BIN (the XTLK pairs and
+     * the I3DL2 send), music on 2D voices to bins 0 and 1, which is why the
+     * music was always audible and no effect ever was. The fix then summed
+     * every bin, even left / odd right (RECOMP_APU_MIXDOWN=sum), which put
+     * the centre in the left channel only, the LFE and the I3DL2 send on one
+     * side each. The routed mixdown (XBA-122, the default) folds each bin by
+     * its DirectSound role; apu_mix.c has the coefficients. */
+    float out[NUM_SAMPLES_PER_FRAME][2];
     int off = (d->ep_frame_div % 8) * NUM_SAMPLES_PER_FRAME;
 
+    apu_dsp_watch_frame((const float (*)[32])mixbins, dsp_aperture());
+
     if (d->monitor.point != MCPX_APU_DEBUG_MON_VP) {
+        apu_mix_frame(apu_mix_mode(), (const float (*)[APU_MIX_SAMPLES])mixbins,
+                      reverb_for_frame(), out);
         for (int i = 0; i < NUM_SAMPLES_PER_FRAME; i++) {
-            /* Bins 2..31 used to be computed and then dropped on the floor.
-             * On hardware the GP and EP mix the submixes down; here they are
-             * stubs, so thirty of thirty-two bins were discarded every frame
-             * with no counter anywhere to say so.
-             *
-             * Measured on Jet Set Radio Future, one 200 s gameplay run, with
-             * a positive control moving beside it:
-             *
-             *     [APU-BIN] 2D heard=557466 lost=0
-             *               3D heard=0      lost=377768
-             *               lost by bin: 6,7,8,9,10
-             *
-             * 557,466 music voice-frames heard and none lost; 377,768 effect
-             * voice-frames produced correctly and thrown away. The title's 3D
-             * positional voices -- its sound effects -- are routed to bins 6
-             * to 10 by the guest's own V0BIN..V3BIN, and music on 2D voices
-             * lands in bins 0 and 1, which is why the music was always
-             * audible and no effect ever was. Every instrument upstream of
-             * this line read healthy.
-             *
-             * Gating the HRTF submix override was tried first and did not fix
-             * it, so the defect is the width of this mixdown and nothing else.
-             *
-             * Even bins left, odd bins right, which preserves the stereo
-             * pairing the guest set up -- bins 6/7 and 8/9 arrive with matched
-             * counts. This is not what a real EP does; it is the cheapest
-             * mixdown that stops discarding audio. */
-            float left, right;
-            if (mcpx_apu_mixdown_all()) {
-                left = 0.0f;
-                right = 0.0f;
-                for (int b = 0; b < NUM_MIXBINS; ++b) {
-                    if (b & 1) right += mixbins[b][i];
-                    else       left  += mixbins[b][i];
-                }
-            } else {
-                left = mixbins[0][i];
-                right = mixbins[1][i];
-            }
+            float left = out[i][0], right = out[i][1];
             /* Clamp to [-1, 1] range */
             if (left > 1.0f) left = 1.0f;
             if (left < -1.0f) left = -1.0f;

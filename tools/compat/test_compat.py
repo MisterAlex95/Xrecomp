@@ -167,6 +167,25 @@ def test_a_network_stack_is_carried_to_the_summary_and_the_report():
     assert t.splitlines()[2].startswith("| a (network stack) | boots |")
 
 
+def test_dsp_use_reaches_the_report():
+    # XBA-122: the status file's apu_dsp object (the runtime's view of what the title asked of the GP/EP)
+    # rides on the run's summary, and the report says in a few words whether the title depends on the DSP.
+    dsp = {"cmds": 13, "stalls": 1, "gp_image": "9cd378fca346977d", "gp_words": 1500, "gp_images": 2,
+           "ep_words": 0, "i3dl2": 10, "fx": 0}
+    st = playing(30)
+    st[-1]["apu_dsp"] = dsp
+    summary = classify(st, [8000], None, 30, 60)[2]
+    assert summary["apu_dsp"] == dsp
+    assert "apu_dsp" not in classify(playing(30), [8000], None, 30, 60)[2]
+    rows = [{"source": "a", "stage": "renders", "toolkit": "x", "runs": [{"apu_dsp": dsp}]},
+            {"source": "b", "stage": "boots", "toolkit": "x", "runs": [{}]}]
+    t = report(rows).splitlines()
+    assert t[0].endswith(" DSP |")
+    assert t[2].endswith("| GP image 9cd378fc (1500 words, 2 images), 13 cmds, sends: reverb, 1 stall(s) |")
+    assert t[3].endswith("|  |")
+    assert " DSP |" not in report([rows[1]]).splitlines()[0]
+
+
 FAKE_TITLE = r'''#!/usr/bin/env python3
 # A stand-in for a title binary: writes the status file like the runtime and
 # changes its picture when the runner presses (RECOMP_PAD_LIVE). MODE: play, hang, crash.

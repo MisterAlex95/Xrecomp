@@ -87,6 +87,7 @@ One per stage, in the order you run them.
 - [xbox_d3d8](../src/d3d/README.md) — D3D8 interface, register combiners, vertex shaders, texture unswizzle
 - [xbox_dsound](../src/audio/README.md) — DirectSound buffers, 3D audio, mixbins
 - [xbox_apu](../src/apu/README.md) — MCPX APU voice processor, mixer, MMIO
+- [APU DSP](technical/apu-dsp.md) — the GP/EP: what titles ask of them, handshakes, mixdown, native reverb
 - [xbox_nv2a](../src/nv2a/README.md) — NV2A GPU registers, push buffer, PGRAPH→D3D11
 - [xbox_input](../src/input/README.md) — Gamepad state, vibration, button mapping
 
