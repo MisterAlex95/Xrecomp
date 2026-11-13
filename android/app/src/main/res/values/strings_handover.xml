@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The pack handover (XBA-176, PackHandover, docs/android/prepare.md « Handing a pack to a game's own app »): a game's
+     own app takes over XRecomp's prepared game instead of preparing it again. A file of its own so that it does not
+     collide with strings.xml edits. -->
+<resources>
+    <string name="HANDOVER_COPYING">Copying the prepared game from XRecomp… %1$d %%</string>
+    <string name="HANDOVER_COPYING_BUTTON">Copying…</string>
+    <string name="HANDOVER_COPYING_NOTE">XRecomp has prepared this game already: its copy is being taken over, in a few seconds. No need to prepare it again here.</string>
+    <string name="HANDOVER_BUSY">Wait a few seconds: the prepared game is being copied from XRecomp.</string>
+    <string name="HANDOVER_DONE">The prepared game was copied from XRecomp: press Play.</string>
+    <string name="HANDOVER_DONE_OLDER">The prepared game was copied from XRecomp. Another version of the app prepared it: it plays, and Prepare again gets this version\'s fixes.</string>
+    <string name="HANDOVER_NO_PARENT">XRecomp is not installed, so this app prepares the game itself.</string>
+    <string name="HANDOVER_NO_PACK">XRecomp has not prepared this game: prepare it here, or prepare it in XRecomp and open this app again.</string>
+    <string name="HANDOVER_REFUSED">XRecomp did not hand its prepared game over (%1$s): prepare it here.</string>
+    <string name="HANDOVER_UNFIT">XRecomp\'s prepared game was made for another version of this app: prepare it here, or create this app again from XRecomp.</string>
+    <string name="HANDOVER_OTHER_XBE">XRecomp prepared another version of this disc: prepare it here.</string>
+    <string name="HANDOVER_NO_SPACE">Not enough space to copy XRecomp\'s prepared game (%1$s needed): free some space and open this app again, or prepare it here.</string>
+    <string name="HANDOVER_FAILED">Copying XRecomp\'s prepared game failed (%1$s): open this app again to retry, or prepare it here.</string>
+</resources>

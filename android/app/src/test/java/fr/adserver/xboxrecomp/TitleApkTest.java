@@ -193,17 +193,27 @@ public class TitleApkTest {
                 last = id;
             }
         }
-        // The provider's authority follows the package; components keep their full class names.
+        // The providers' authorities follow the package (the copy's never clash with XRecomp's: logs, and the
+        // packs of the handover, XBA-176); components keep their full class names.
         List<String> names = new ArrayList<>();
-        String authority = null;
+        List<String> authorities = new ArrayList<>();
         for (int el : x.descendants(app)) {
             String tag = x.name(el);
             if (tag.equals("provider"))
-                authority = x.value(x.attr(el, TitleApk.ATTR_AUTHORITIES));
+                authorities.add(x.value(x.attr(el, TitleApk.ATTR_AUTHORITIES)));
             if (tag.equals("activity") || tag.equals("service") || tag.equals("receiver") || tag.equals("provider"))
                 names.add(x.value(x.attr(el, TitleApk.ATTR_NAME)));
         }
-        assertEquals("fr.adserver.xboxrecomp.t4d5300d1.logs", authority);
+        assertEquals(java.util.Arrays.asList("fr.adserver.xboxrecomp.t4d5300d1.logs",
+                                             "fr.adserver.xboxrecomp.t4d5300d1.packs"), authorities);
+        assertTrue(names.contains("fr.adserver.xboxrecomp.PackHandoverActivity"));
+        // The handover's <queries>: the copy still looks for its parent, by the parent's package.
+        List<String> queried = new ArrayList<>();
+        for (int el : x.descendants(root)) {
+            if (x.name(el).equals("package"))
+                queried.add(x.value(x.attr(el, TitleApk.ATTR_NAME)));
+        }
+        assertEquals(java.util.Collections.singletonList(old), queried);
         assertTrue(names.contains("fr.adserver.xboxrecomp.LauncherActivity"));
         assertTrue(names.contains("fr.adserver.xboxrecomp.ShellActivity"));
         assertTrue(names.contains("fr.adserver.xboxrecomp.TitleAppReceiver"));
@@ -213,6 +223,8 @@ public class TitleApkTest {
         // name in META_PARENT.
         for (int el : x.descendants(root)) {
             if (x.name(el).equals("meta-data") && TitleApk.META_PARENT.equals(x.value(x.attr(el, TitleApk.ATTR_NAME))))
+                continue;
+            if (x.name(el).equals("package"))   // <queries><package>: the parent, on purpose
                 continue;
             for (BinaryXml.Attr a : x.nodes.get(el).attrs) {
                 String v = x.value(a);

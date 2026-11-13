@@ -8,6 +8,7 @@ import android.content.ActivityNotFoundException;
 import android.content.ContentResolver;
 import android.content.Context;
 import android.content.Intent;
+import android.content.pm.PackageManager;
 import android.content.pm.ShortcutInfo;
 import android.content.pm.ShortcutManager;
 import android.database.Cursor;
@@ -162,6 +163,7 @@ public class LauncherActivity extends Activity {
     private static final int REQ_NOTIFICATIONS = 4;
     private static final int REQ_LSFG_DLL = 5;
     private static final int REQ_LIBRARY_TREE = 6;
+    static final int REQ_PACK_HANDOVER = 7;
     /** The library re-reads its entries' states (Prepare, queue, running game) every this many polls. */
     private static final int LIBRARY_POLL_EVERY = 4;
 
@@ -208,6 +210,27 @@ public class LauncherActivity extends Activity {
     private Widgets.PillButton homePrimary;
     /** Home's status line while a Prepare runs (the poll updates it). */
     private Widgets.Chip homeStatus;
+
+    // ---- The pack handover (a game's own app, XBA-176, PackHandover) ----
+    /** The parent was asked in this process already (once per cold start). */
+    static boolean handoverAsked;
+    /** The copy running, or null: its title ID and progress. */
+    private Handover handover;
+    private Thread handoverWorker;
+
+    private static final class Handover {
+        final String tid;
+        volatile long done, total;
+
+        Handover(String tid, long total) {
+            this.tid = tid;
+            this.total = total;
+        }
+
+        int pct() {
+            return total <= 0 ? 0 : (int)Math.min(100, done * 100 / total);
+        }
+    }
 
     // ---- The Preparing screen's idle dim ----
     private FrameLayout dimView;
@@ -462,6 +485,8 @@ public class LauncherActivity extends Activity {
             confirmSwitch();   // « X is running and will close », Play armed
         if (toPrepare)
             go(Screen.PREPARE);
+        // A game's own app without a current pack: XRecomp's, if it hands it over (XBA-176).
+        askParentForPack();
         // The library folder through the Storage Access Framework: scanned at a cold start (and on Y) only.
         if (savedInstanceState == null && lib && Library.folderTree(this) != null && Library.folderPath(this) == null)
             startScan();
@@ -1670,10 +1695,19 @@ public class LauncherActivity extends Activity {
         if (improve)
             heal = null;   // a run that ended well: Home as usual, plus the note and (setting off) a quiet button
 
+        // XBA-176: XRecomp's pack being copied into this game's own app (instead of « Needs preparing »).
+        boolean copying = st == State.READY && copying(tid);
+
         // The one line: the state when it is not « Ready », else when it was last played.
         String statusText = null;
         int statusColor = Theme.OK;
-        if (st == State.READY && preparing) {
+        if (copying) {
+            statusText = getString(R.string.HANDOVER_COPYING, handover.pct());
+            statusColor = Theme.ACCENT;
+            View line = heroLine(info, statusText, statusColor);
+            if (line instanceof Widgets.Chip)
+                homeStatus = (Widgets.Chip)line;
+        } else if (st == State.READY && preparing) {
             switch (prep) {
             case RUNNING:
                 statusText = ps == null ? getString(R.string.PREPARE_STARTING) : progressLine(ps);
@@ -1727,6 +1761,9 @@ public class LauncherActivity extends Activity {
         if (st == State.NONE || st == State.MISSING || st == State.NO_ACCESS) {
             play = pill(buttons, null, getString(st == State.NONE ? R.string.CHOOSE_GAME : R.string.CHOOSE_AGAIN),
                         true, () -> go(Screen.SOURCE));
+        } else if (copying) {
+            play = pill(buttons, null, getString(R.string.HANDOVER_COPYING_BUTTON), true, this::onPlay);
+            play.setDim(true);
         } else if (preparing && prep == Prep.QUEUED) {
             play = pill(buttons, null, queuedLabel(tid), true, this::onPlay);
             homePrep = prep;
@@ -1765,7 +1802,9 @@ public class LauncherActivity extends Activity {
                                                                                                 : R.string.HINT_BACK,
                 this::back);
 
-        if (preparing && prep == Prep.INTERRUPTED)
+        if (copying)
+            setNote(getString(R.string.HANDOVER_COPYING_NOTE), NOTE_INFO);
+        else if (preparing && prep == Prep.INTERRUPTED)
             setNote(getString(R.string.PREPARE_INTERRUPTED), NOTE_WARN);
         else if (otherXbe)
             setNote(getString(R.string.HOME_OTHER_XBE_NOTE), NOTE_WARN);
@@ -1781,7 +1820,11 @@ public class LauncherActivity extends Activity {
             setNote(getString(R.string.GAME_RUNNING_HOME), NOTE_INFO);
         else if (running && st == State.READY)
             setNote(getString(R.string.LIB_OTHER_RUNNING, runningTitle()), NOTE_INFO);
-        else if (olderToolkit)
+        else if (handoverNoteText != null && st != State.NONE) {
+            setNote(handoverNoteText, handoverNoteKind);
+            if (handoverNoteKind == NOTE_OK)
+                handoverNoteText = null;   // « copied »: said once
+        } else if (olderToolkit)
             setNote(getString(enhChanged ? R.string.HOME_ENHANCEMENTS_CHANGED_NOTE : R.string.HOME_OLDER_TOOLKIT_NOTE,
                               estimate()), NOTE_INFO);
         else if (st == State.READY && !preparing && (rec() != null ? rec().lastPlayed : GameStore.lastPlayed(this)) <= 0)
@@ -1849,6 +1892,10 @@ public class LauncherActivity extends Activity {
             return;
         }
         if (st == State.READY) {
+            if (copying(titleId())) {   // XBA-176: a few seconds more
+                setNote(getString(R.string.HANDOVER_BUSY), NOTE_INFO);
+                return;
+            }
             Prep p = prep();
             if (p == Prep.RUNNING || p == Prep.FAILED) {
                 go(Screen.PREPARE);
@@ -2642,6 +2689,195 @@ public class LauncherActivity extends Activity {
         return LibraryScreen.packMatches(getFilesDir(), tid, selectedXbeSha());
     }
 
+    // ---- The pack handover (a game's own app, XBA-176, PackHandover) --------------------------------------------
+
+    private static final String HANDOVER_PREFS = "handover", HANDOVER_DECLINED = "declined_parent_update";
+    /** A note about the handover for Home (shown when Home has nothing more urgent to say), or null. */
+    private String handoverNoteText;
+    private int handoverNoteKind;
+    /** The parent's lastUpdateTime when it was asked. */
+    private long handoverParentUpdated = -1;
+
+    /** This game's own app's title ID (8 upper-case hex digits); null in XRecomp itself. */
+    private String ownTid() {
+        return Pack.normTitleId(TitleApp.ownTitleId(this));
+    }
+
+    /** The parent's pack is being copied for tid. */
+    private boolean copying(String tid) {
+        return handover != null && tid != null && Pack.sameTitleId(tid, handover.tid);
+    }
+
+    /**
+     * In a game's own app with no pack, or one lifted by another toolkit than its own: asks the parent (XRecomp,
+     * meta-data PARENT) for its pack, once per process, through its PackHandoverActivity for a result. Not while the
+     * app's own Prepare runs. A stale pack of its own that the parent did not replace: asked again only after the
+     * parent was updated.
+     */
+    private void askParentForPack() {
+        String tid = ownTid(), parent = TitleApp.ownParent(this);
+        if (tid == null || parent == null || handoverAsked || handover != null)
+            return;
+        if (!PackHandover.wanted(getFilesDir(), tid, Toolchain.toolkitDigest(this)))
+            return;
+        PrepareProtocol.Status s = PrepareProtocol.readStatus(PrepareService.statusFile(this, tid));
+        if (statusAlive(s) || (s != null && s.queued() && prepareProcessAlive()))
+            return;
+        if (gameRunning())   // its pack is loaded: replaced at a later start
+            return;
+        boolean ownValid = Pack.check(getFilesDir(), tid) == Pack.Check.VALID;
+        long parentUpdated;
+        try {
+            parentUpdated = getPackageManager().getPackageInfo(parent, 0).lastUpdateTime;
+        } catch (PackageManager.NameNotFoundException e) {
+            handoverAsked = true;
+            Log.i(TAG, "launcher: pack handover: " + parent + " is not installed");
+            if (!ownValid)
+                handoverNote(getString(R.string.HANDOVER_NO_PARENT), NOTE_INFO);
+            return;
+        }
+        if (ownValid && parentUpdated == getSharedPreferences(HANDOVER_PREFS, MODE_PRIVATE).getLong(HANDOVER_DECLINED, -2))
+            return;
+        handoverAsked = true;
+        handoverParentUpdated = parentUpdated;
+        Intent i = new Intent(PackHandover.ACTION).setClassName(parent, PackHandover.ACTIVITY)
+                .putExtra(PackHandover.EXTRA_TITLE_ID, tid);
+        try {
+            startActivityForResult(i, REQ_PACK_HANDOVER);
+            overridePendingTransition(0, 0);
+            Log.i(TAG, "launcher: pack handover: asking " + parent + " for " + tid
+                       + (ownValid ? " (this app's pack is from another toolkit)" : " (no pack here)"));
+        } catch (ActivityNotFoundException | SecurityException e) {
+            Log.w(TAG, "launcher: pack handover: cannot ask " + parent + ": " + e);
+            if (!ownValid)
+                handoverNote(getString(R.string.HANDOVER_REFUSED, e.getClass().getSimpleName()), NOTE_WARN);
+        }
+    }
+
+    /** The parent's answer: an offer to copy, or a refusal (a note when this app has nothing to play). */
+    private void onHandoverAnswer(int resultCode, Intent data) {
+        String tid = ownTid(), parent = TitleApp.ownParent(this);
+        if (tid == null || parent == null || handover != null)
+            return;
+        PackHandover.Offer offer = resultCode == RESULT_OK ? PackHandover.offer(data, parent, tid) : null;
+        if (offer == null) {
+            String r = data == null ? null : data.getStringExtra(PackHandover.EXTRA_REFUSAL);
+            Log.w(TAG, "launcher: pack handover: " + parent + " refused: "
+                       + (r != null ? r : resultCode == RESULT_OK ? "malformed answer" : "result " + resultCode));
+            handoverDeclined();
+            if (Pack.check(getFilesDir(), tid) != Pack.Check.VALID)
+                handoverNote(PackHandover.Refusal.NO_PACK.name().equals(r) ? getString(R.string.HANDOVER_NO_PACK)
+                             : getString(R.string.HANDOVER_REFUSED, r != null ? r : "?"),
+                             PackHandover.Refusal.NO_PACK.name().equals(r) ? NOTE_INFO : NOTE_WARN);
+            return;
+        }
+        Log.i(TAG, "launcher: pack handover: " + parent + " offers " + offer.uris.keySet() + ", " + offer.total()
+                   + " bytes");
+        Handover h = new Handover(offer.titleId, offer.total());
+        handover = h;
+        handoverNoteText = null;
+        if (screen == Screen.HOME)
+            show(Screen.HOME, 0);
+        else   // the first start's game choice: the copy goes on behind it
+            setNote(getString(R.string.HANDOVER_COPYING_NOTE), NOTE_INFO);
+        ContentResolver cr = getContentResolver();
+        String locked = GameStore.expectedSha256(this), toolkit = Toolchain.toolkitDigest(this);
+        File files = getFilesDir();
+        handoverWorker = new Thread(() -> {
+            PackHandover.Result r = PackHandover.take(name -> {
+                java.io.InputStream in = cr.openInputStream(offer.uris.get(name));
+                if (in == null)
+                    throw new java.io.FileNotFoundException(name);
+                return in;
+            }, offer, files, locked, toolkit, (done, total) -> {
+                int before = h.pct();
+                h.done = done;
+                if (h.pct() != before)
+                    runOnUiThread(() -> handoverProgress(h));
+            }, this::isDestroyed);
+            runOnUiThread(() -> handoverDone(h, r));
+        }, "xba-pack-handover");
+        handoverWorker.start();
+    }
+
+    /** Tests: the copy's thread. */
+    Thread handoverWorkerForTest() {
+        return handoverWorker;
+    }
+
+    private void handoverProgress(Handover h) {
+        if (handover == h && screen == Screen.HOME && homeStatus != null)
+            homeStatus.set(getString(R.string.HANDOVER_COPYING, h.pct()), Theme.ACCENT);
+    }
+
+    private void handoverDone(Handover h, PackHandover.Result r) {
+        if (handover != h)
+            return;
+        handover = null;
+        handoverWorker = null;
+        Log.i(TAG, "launcher: pack handover " + h.tid + ": " + r.outcome + (r.detail.isEmpty() ? "" : " (" + r.detail + ")"));
+        boolean ownValid = Pack.check(getFilesDir(), h.tid) == Pack.Check.VALID;
+        String note = null;
+        int kind = NOTE_WARN;
+        switch (r.outcome) {
+        case COPIED:
+            // The parent's Enhancements choice comes with its pack (else Home would offer to prepare again).
+            String tl = r.meta == null ? "" : r.meta.optString("title_layer", "");
+            if ("on".equals(tl) || "off".equals(tl))
+                GameStore.setEnhancements(this, h.tid, "on".equals(tl));
+            note = getString(r.olderToolkit ? R.string.HANDOVER_DONE_OLDER : R.string.HANDOVER_DONE);
+            kind = NOTE_OK;
+            break;
+        case NOT_NEWER:
+        case CANCELLED:
+            handoverDeclined();
+            break;
+        case UNFIT:
+            note = getString(R.string.HANDOVER_UNFIT);
+            break;
+        case OTHER_XBE:
+            note = getString(R.string.HANDOVER_OTHER_XBE);
+            break;
+        case NO_SPACE:
+            long need = 0;
+            try {
+                need = Long.parseLong(r.detail);
+            } catch (NumberFormatException ignored) {
+            }
+            note = getString(R.string.HANDOVER_NO_SPACE, size(need));
+            break;
+        default:
+            note = getString(R.string.HANDOVER_FAILED, r.detail);
+            kind = NOTE_ERROR;
+            break;
+        }
+        if (r.outcome != PackHandover.Outcome.COPIED && ownValid) {
+            handoverDeclined();
+            note = null;   // its own pack still plays: nothing to say
+        }
+        if (note != null)
+            handoverNote(note, kind);
+        else if (screen == Screen.HOME)
+            refreshKeepingFocus();
+    }
+
+    /** The parent did not replace this app's stale pack: not asked again until it is updated. */
+    private void handoverDeclined() {
+        if (handoverParentUpdated >= 0)
+            getSharedPreferences(HANDOVER_PREFS, MODE_PRIVATE).edit()
+                    .putLong(HANDOVER_DECLINED, handoverParentUpdated).apply();
+    }
+
+    /** Shows a handover note: on Home (rebuilt) when Home shows, else at once. */
+    private void handoverNote(String text, int kind) {
+        handoverNoteText = text;
+        handoverNoteKind = kind;
+        if (screen == Screen.HOME)
+            show(Screen.HOME, 0);
+        else
+            setNote(text, kind);
+    }
+
     // ---- A pack that no longer matches (XBA-127, PackFreshness) ------------------------------------------------
 
     /**
@@ -2791,6 +3027,11 @@ public class LauncherActivity extends Activity {
         }
         if (tid == null || dir == null)
             return;
+        if (copying(tid)) {   // XBA-176: XRecomp's pack is on its way
+            setNote(getString(R.string.HANDOVER_BUSY), NOTE_INFO);
+            return;
+        }
+        handoverNoteText = null;
         long free = internalFree();
         if (free < PREPARE_MIN_FREE) {
             setNote(getString(R.string.PREPARE_NO_SPACE, size(PREPARE_MIN_FREE), size(free)), NOTE_ERROR);
@@ -5484,6 +5725,10 @@ public class LauncherActivity extends Activity {
             Log.i(TAG, "launcher: All files access "
                        + (Environment.isExternalStorageManager() ? "granted" : "refused"));
             openTreePicker();   // in place when granted, copied otherwise
+            return;
+        }
+        if (requestCode == REQ_PACK_HANDOVER) {
+            onHandoverAnswer(resultCode, data);
             return;
         }
         if (resultCode != RESULT_OK || data == null || (data.getData() == null && data.getClipData() == null))

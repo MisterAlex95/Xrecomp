@@ -23,6 +23,11 @@
     <!-- « Create an app » (Manage; docs/android/app-shell.md « A game's own app »): the generated APK goes to Android's
          installer, which asks the player to confirm. Allowed per app by the player (« Install unknown apps »). -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <!-- The pack handover (XBA-176, docs/android/prepare.md « Handing a pack to a game's own app »): a game's own app
+         looks for XRecomp. TitleApk leaves this <package> as it is, so in the copy it names the parent. -->
+    <queries>
+        <package android:name="${applicationId}" />
+    </queries>
 
     <!-- allowNativeHeapPointerTagging: lifted code may squeeze host pointers; tagged heap pointers would break it
          (see the Plane page « Reference · BananaNative »). -->
@@ -122,6 +127,29 @@
         <provider
             android:name=".LogProvider"
             android:authorities="${applicationId}.logs"
+            android:process=":launcher"
+            android:exported="false"
+            android:grantUriPermissions="true" />
+
+        <!-- The pack handover (XBA-176): a game's own app asks for its pack through this activity, for a result; it
+             checks the caller (package fr.adserver.xboxrecomp.t<tid>, signed by the game apps' key), grants read
+             access to the pack's files through PackProvider, and finishes without showing anything. -->
+        <activity
+            android:name=".PackHandoverActivity"
+            android:exported="true"
+            android:process=":launcher"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar"
+            android:excludeFromRecents="true"
+            android:noHistory="true">
+            <intent-filter>
+                <action android:name="fr.adserver.xboxrecomp.PACK_HANDOVER" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
+        <!-- Read-only, never exported: only URIs PackHandoverActivity granted are readable by another app. -->
+        <provider
+            android:name=".PackProvider"
+            android:authorities="${applicationId}.packs"
             android:process=":launcher"
             android:exported="false"
             android:grantUriPermissions="true" />

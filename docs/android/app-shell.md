@@ -274,12 +274,17 @@ launcher (at once, or at its next resume): « … is installed », « The app wa
 signed by another key is installed », « The app was not installed: <installer message> ».
 
 The game's app is XRecomp with one game: its own private storage, its own settings. At its first start it asks for
-the game like XRecomp's first start (folder or image), refuses another disc, then prepares the game. **Not done
-yet**: handing the parent's pack over so the app does not prepare again (the [import drop](prepare.md#where-packs-live)
-is not implemented). The planned way: the game's app asks XRecomp (`…PARENT`) through an explicit activity
-result for its pack; XRecomp checks the caller is `fr.adserver.xboxrecomp.t<tid>`, grants read access to `pack.json`
-and `libtitle.so` through its provider, and the app copies them into `packs/<TID>.partial/`, checks `lib_sha256`
-and `lib_size`, and publishes atomically.
+the game like XRecomp's first start (folder or image) and refuses another disc. **It does not prepare the game
+again** when XRecomp has (XBA-176, [prepare.md « Handing a pack to a game's own app »](prepare.md#handing-a-pack-to-a-games-own-app)):
+at its start, with no pack (or one from another toolkit than its own), it asks XRecomp (`…PARENT`) for its pack
+through a translucent activity of XRecomp started for a result. XRecomp answers only `fr.adserver.xboxrecomp.t<tid>`
+for that very title, signed by the game apps' key (its own AndroidKeyStore certificate, `GET_SIGNING_CERTIFICATES`),
+and grants read access to the pack's files one URI each through its non-exported `PackProvider`
+(`<package>.packs`, which `TitleApk` moves to the game's app's package like `.logs`). The game's app checks the pack
+fits (format, title, ABI, shell ABI, its disc), copies it into `packs/<TID>.partial/` while checking `lib_size` and
+`lib_sha256`, and publishes it atomically. Home says « Copying the prepared game from XRecomp… 42 % », then Play.
+XRecomp missing, without a pack, refusing, or a pack that does not fit: the normal Prepare, with a note saying why.
+The copy is the app's own: it keeps playing after XRecomp is uninstalled.
 
 logcat: `launcher: game app fr.adserver.xboxrecomp.t<tid> « <label> »: building from <apk> (<n> bytes)`, `…: <n>
 bytes, signed`, `… handed to the installer (session <id>)`, then `launcher: game app <pkg>: installer status <n>`.
@@ -308,8 +313,37 @@ use and is never distributed.
 4. Open Fable (the new app): XRecomp's welcome / game choice; choose Fable's folder or image: it is accepted. Choose
    another game's folder instead first: « WRONG_GAME » (the app is locked to Fable's disc). About shows the game
    check with Fable's hash and the app id `fr.adserver.xboxrecomp.t4d5300d1`.
-5. Prepare Fable in the new app (the pack is not handed over yet: this is the known follow-up), then Play: the game
-   starts. With « Open the game directly next time » on, tapping the icon goes straight into the game.
+5. Home of the new app: XRecomp's pack is copied in seconds (below), then Play: the game starts without a Prepare.
+   With « Open the game directly next time » on, tapping the icon goes straight into the game.
+
+### Device check (pack handover, XBA-176), for Alex
+
+`adb logcat -s xboxrecomp` throughout; XRecomp (xrecomp-latest) with Fable prepared and played once; the Fable app not
+installed yet (uninstall it if it is: `adb uninstall fr.adserver.xboxrecomp.t4d5300d1`).
+
+1. Fable › Manage › **Create an app**, install it (as above). Open the new Fable app and choose Fable's folder or
+   image. Home shows « Copying the prepared game from XRecomp… » with the percentage going up and a dimmed « Copying… »
+   button, not « Needs preparing ». XRecomp's own screen does not show (at most a blink). Note how long the copy takes
+   and the pack's size (Manage › Pack size).
+2. Then the note « The prepared game was copied from XRecomp: press Play » and **Play**: Fable starts, no Prepare.
+   logcat: `pack handover: asking fr.adserver.xboxrecomp.shell for 4D5300D1`, `pack 4D5300D1 handed over to
+   fr.adserver.xboxrecomp.t4d5300d1` (XRecomp's process), `pack 4D5300D1 published from the handover`,
+   `pack handover 4D5300D1: COPIED`.
+3. Back to the app's Home, leave it (swipe it away), open it again: no copy this time, Play at once; logcat has no new
+   `asking` line.
+4. Uninstall XRecomp (`adb uninstall fr.adserver.xboxrecomp.shell`; this loses its key: keep its saves first if
+   needed). Open the Fable app: Play, the game starts (the copy is its own).
+5. Reinstall XRecomp, prepare Fable there, then install a newer XRecomp build whose toolkit changed (its About shows a
+   newer build; or ask the agent for one), prepare Fable in it, and **Create an app** again (after an uninstall of
+   XRecomp the old Fable app must be uninstalled first: « signed by another key »). Open the Fable app: it copies
+   again (the stale pack is replaced), then Play; Home has no « Prepared by an older version of the app » line.
+6. A non-generated app cannot get the pack:
+   `adb shell am start -W -n fr.adserver.xboxrecomp.shell/fr.adserver.xboxrecomp.PackHandoverActivity --es
+   fr.adserver.xboxrecomp.extra.HANDOVER_TITLE_ID 4D5300D1` → nothing shows, logcat `pack handover refused to null
+   (4D5300D1): NO_CALLER`. And `adb shell content read --uri
+   content://fr.adserver.xboxrecomp.shell.packs/4D5300D1/pack.json` → refused (Permission Denial: not exported).
+7. In XRecomp, delete Fable's pack (Manage › the pack's row), then in the Fable app delete its pack too and open it
+   again: the note « XRecomp has not prepared this game: prepare it here… » and Prepare, as before XBA-176.
 6. In XRecomp, Manage › Create an app once more for Fable: Android's dialog says it is an **update**; after it, the
    new app keeps its data (still prepared, the folder still chosen).
 7. Uninstall the game's app (long-press › Uninstall): XRecomp is untouched (its library, Fable's pack, saves).
