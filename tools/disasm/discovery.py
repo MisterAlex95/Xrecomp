@@ -40,7 +40,11 @@ own CFG there. This module adds the evidence they do not use, in two levels:
       any length, and its handlers are frameless. Each word takes a run's
       seed gates plus a closed compiled body, no prologue asked, where a
       function starts (run_packed_tables). Level 2: a run of data words is
-      not the strong evidence of level 1.
+      not the strong evidence of level 1. A table one of whose runs is taken
+      is then completed (WP5): its other words that name code next to its
+      established entries, on an instruction boundary, become aliases even
+      where the routine is entered mid path (the CRT's helpers fall into
+      each other), so no seed has to anchor the table.
 
 A decoy (data that looks like a pointer: floats, strings, colours, offsets
 into the middle of code) must never become a function: see
@@ -127,6 +131,11 @@ METHODS = ("callback_arg", "ctor_vtable", "rtti_vtable", "seh_funclet", "gap_bod
 # a dispatch table holds more records than that.
 PACKED_MIN_RECORDS = 3
 PACKED_MAX_STRIDE = 32
+# Completing a table (run_packed_tables): a refused word is taken only when
+# it names code this close to an established entry of its table. The CRT's
+# math routines sit within a few KB of each other; a record header read as a
+# word (`01 id id` + a pointer's low byte) names code megabytes away.
+PACKED_NEAR = 0x10000
 _U32 = "I" if array.array("I").itemsize == 4 else "L"
 
 
@@ -152,6 +161,15 @@ def cap_from_env(env=None) -> Optional[float]:
         return float(v) if v else None
     except ValueError:
         return None
+
+
+def _self_test(insn) -> bool:
+    """`or r, r` / `and r, r`: a flag test that leaves r as it was. The CRT's
+    x87 helpers test a flag the dispatcher left in bl this way (`or bl, bl`),
+    which is a read of ebx, not a clobber."""
+    ops = insn.operands
+    return (insn.mnemonic in ("or", "and") and len(ops) == 2
+            and ops[0].type == "reg" and ops[1].type == "reg" and ops[0].reg == ops[1].reg)
 
 
 def stack_balanced(decoded, entry: int, lower: int, upper: int) -> bool:
@@ -284,6 +302,7 @@ class StaticDiscovery:
         self.refused: Dict[str, int] = {}
         self.baseline: Optional[int] = None
         self.capped = False
+        self.packed_completed = 0
         self.noreturn_slots: Set[int] = set()
         self.callback_slots: Dict[int, Tuple[int, ...]] = {}
         if level >= STRONG:
@@ -323,7 +342,9 @@ class StaticDiscovery:
 
     def summary(self) -> dict:
         return {"level": self.level, "strict": self.strict, "cap": self.cap, "capped": self.capped,
-                "added": dict(self.stats), "refused": dict(sorted(self.refused.items()))}
+                "added": dict(self.stats), "refused": dict(sorted(self.refused.items())),
+                # Of added["packed_table"]: the aliases a table's completion made.
+                "packed_completed": self.packed_completed}
 
     # -- shared tests -----------------------------------------------------
 
@@ -407,6 +428,8 @@ class StaticDiscovery:
                     return False
             if i.mnemonic == "push" and i.operands and i.operands[0].type == "reg":
                 saved.add(i.operands[0].reg)
+            elif _self_test(i):
+                pass                    # `or bl, bl`: sets flags, keeps the value
             elif i.mnemonic != "pop":
                 clobbered.update(_SAVED_ALIASES.get(r) for r in (i.regs_written or ())
                                  if r in _SAVED_ALIASES)
@@ -978,12 +1001,156 @@ class StaticDiscovery:
         self._refuse("packed table: " + why)
         return None
 
+    @staticmethod
+    def _clustered(targets) -> bool:
+        """Do these code addresses lie within PACKED_NEAR of each other? A
+        dispatch table's handlers do (the CRT's math helpers span a few KB);
+        words read across a table of short strings (`"+3\\0\\0"` read one
+        byte in) step through code 64 KB at a time."""
+        return bool(targets) and max(targets) - min(targets) <= PACKED_NEAR
+
+    @classmethod
+    def _trim(cls, run, kinds):
+        """The run without the refused words at either end that name code
+        far from the run's other routines, when those are clustered (a
+        refused word near them stays and counts against the run). A
+        run is maximal at its stride, so it picks up the words next to a
+        table that happen to read as code addresses: the record header in
+        front of the first pointer (a flag byte and a u16 id + the pointer's
+        low byte, megabytes away from the handlers). Otherwise the run as it
+        is."""
+        good = [t for (_, t), k in zip(run, kinds) if k is not None]
+        if not cls._clustered(good):
+            return run, kinds
+
+        def far(i):
+            return kinds[i] is None and all(abs(run[i][1] - g) > PACKED_NEAR for g in good)
+        lo, hi = 0, len(run)
+        while lo < hi and far(lo):
+            lo += 1
+        while hi > lo and far(hi - 1):
+            hi -= 1
+        return run[lo:hi], kinds[lo:hi]
+
+    def _packed_completion(self, addr: int, bodies, starts, code_ranges, tables, arms):
+        """The end of the alias entry an anchored table's word may make, or
+        None (refused, counted). For a word of a table whose other entries
+        are established (run_packed_tables): the hand-written CRT routines
+        fall into each other, so an entry may follow an instruction that does
+        not end a path (`fstp st0` / `ret`, or `mov [ebp-0x90], 8` /
+        `call ...`), branch back into a neighbour's code, or open with a byte
+        a compiler never starts with (`or cl, cl`). Asked: an instruction
+        boundary, never inside an instruction (WP2's rule); not a jump table,
+        a switch arm, padding or a measured byte table; a body that reads as
+        a function body and closes, where an exit to code the sweep already
+        decoded counts; a compiled body (_plausible_body). Always an alias:
+        it keeps the body it sits in (or the gap) whole."""
+        d = self.d
+        if not self._in_ranges(code_ranges, addr):
+            return self._refuse_completion("not in a code section")
+        if self._in_ranges(tables, addr) or addr in arms:
+            return self._refuse_completion("jump table or switch arm")
+        if addr in self.engine.byte_tables or self._is_padding_byte(addr):
+            return self._refuse_completion("padding or byte table")
+        i = bisect.bisect_right(starts, addr) - 1
+        if i >= 0 and bodies[i][0] < addr < bodies[i][1]:
+            if addr not in self.engine.instructions:
+                return self._refuse_completion("inside an instruction")
+            upper = bodies[i][1]
+        else:
+            if addr not in self.engine.instructions and (
+                    self.engine.instruction_covering(addr) is not None):
+                return self._refuse_completion("inside an instruction")
+            k = bisect.bisect_right(starts, addr)
+            sec = self.image.get_section_at_va(addr)
+            upper = sec.virtual_addr + sec.virtual_size if sec is not None else addr
+            if k < len(starts):
+                upper = min(upper, starts[k])
+        if not self.engine.probes_as_function_body(addr):
+            return self._refuse_completion("does not read as a function body")
+        escapes: Set[int] = set()
+        if not (self.engine.probes_as_callback_body(addr, upper, addr,
+                                                    tail_targets=set(d.functions),
+                                                    escapes=escapes)
+                and all(e in self.engine.instructions and self._in_ranges(code_ranges, e)
+                        for e in escapes)):
+            return self._refuse_completion("no closed body")
+        decoded = self._cfg(addr, upper)
+        if not decoded or not self._plausible_body(decoded, addr, upper):
+            return self._refuse_completion("not a compiled body")
+        return upper
+
+    def _refuse_completion(self, why: str) -> None:
+        self._refuse("packed table completion: " + why)
+        return None
+
+    def _complete_tables(self, runs, taken, verdicts, bodies, starts, code_ranges,
+                         tables, arms) -> Dict[int, int]:
+        """run_packed_tables's completion step: {target: alias end}."""
+        if not any(taken):
+            return {}
+        # One table: runs connected by a shared word (union-find on runs).
+        parent = list(range(len(runs)))
+
+        def find(x):
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+        by_word: Dict[int, int] = {}
+        for n, run in enumerate(runs):
+            for va, _ in run:
+                m = by_word.setdefault(va, n)
+                if m != n:
+                    parent[find(n)] = find(m)
+        anchored = {find(n) for n, ok in enumerate(taken) if ok}
+        established: Dict[int, Set[int]] = {}
+        for n, run in enumerate(runs):
+            root = find(n)
+            if root in anchored:
+                established.setdefault(root, set()).update(
+                    t for _, t in run if verdicts.get(t) is not None)
+        near_of = {root: sorted(ts) for root, ts in established.items()}
+        out: Dict[int, int] = {}
+        judged: Dict[int, Optional[int]] = {}
+        for n, run in enumerate(runs):
+            root = find(n)
+            if root not in anchored:
+                continue
+            named = {t for _, t in run}
+            est = {t for t in named if verdicts.get(t) is not None}
+            if not est or 2 * len(est) < len(named) or not self._clustered(est):
+                continue
+            near = near_of[root]
+            for t in sorted(named - est):
+                j = bisect.bisect_left(near, t)
+                if not any(0 <= k < len(near) and abs(near[k] - t) <= PACKED_NEAR
+                           for k in (j - 1, j)):
+                    continue            # a header byte's word, far from the table's code
+                if t not in judged:
+                    judged[t] = self._packed_completion(t, bodies, starts, code_ranges,
+                                                        tables, arms)
+                if judged[t] is not None:
+                    out[t] = judged[t]
+        return out
+
     def run_packed_tables(self, sections) -> bool:
         """Level 2: the function pointers of packed tables (XBA-140). A run
-        is taken when PACKED_MIN_RECORDS of its words pass _packed_target,
-        three quarters of them do, and they name two routines or more; its
-        refused words stay out. Returns: anything added (starts to build,
-        or aliases)."""
+        (trimmed of refused words at its ends, _trim) is taken when
+        PACKED_MIN_RECORDS of its words pass _packed_target, three quarters
+        of them do, and they name two routines or more.
+
+        Then the table is completed (WP5): runs that share a word with a
+        taken run make one table (a record's pointers are a run at stride 4,
+        each field a run at the record's stride). In a run of such a table
+        where at least half the routines named are established (passed
+        _packed_target, or were entries already), a refused word becomes an
+        alias entry when it passes _packed_completion and names code within
+        PACKED_NEAR bytes of an established entry of its table. That takes
+        the CRT math table's fall-into entries with no seed to anchor it
+        (the MSVC CRT's math table), and never a run no gate established: a run of
+        decoys has no established word. Returns: anything added (starts to
+        build, or aliases)."""
         if self.level < FULL:
             return False
         if self.baseline is None:
@@ -996,21 +1163,28 @@ class StaticDiscovery:
         arms = self.d._jump_table_arms()
         verdicts: Dict[int, Optional[str]] = {}
         take: Dict[int, str] = {}
-        for run in self._packed_chains(sections, code_ranges):
+        runs = self._packed_chains(sections, code_ranges)
+        taken: List[bool] = []
+        for run in runs:
             kinds = []
             for _, target in run:
                 if target not in verdicts:
                     verdicts[target] = self._packed_target(target, bodies, starts,
                                                            code_ranges, tables, arms)
                 kinds.append(verdicts[target])
-            good = [(t, k) for (_, t), k in zip(run, kinds) if k is not None]
-            if (len(good) < PACKED_MIN_RECORDS or 4 * len(good) < 3 * len(run)
+            trun, tkinds = self._trim(run, kinds)
+            good = [(t, k) for (_, t), k in zip(trun, tkinds) if k is not None]
+            if (len(good) < PACKED_MIN_RECORDS or 4 * len(good) < 3 * len(trun)
                     or len({t for t, _ in good}) < 2):
                 self._refuse("packed table: run refused")
+                taken.append(False)
                 continue
+            taken.append(True)
             for t, k in good:
                 if k != "known":
                     take.setdefault(t, k)
+        completed = self._complete_tables(runs, taken, verdicts, bodies, starts,
+                                          code_ranges, tables, arms)
         added = False
         for addr, kind in sorted(take.items()):
             if kind == "alias":
@@ -1028,7 +1202,22 @@ class StaticDiscovery:
             if not self._add(addr, "packed_table"):
                 break
             added = True
+        n_completed = 0
+        for addr, end in sorted(completed.items()):
+            if addr in take or addr in self.d._alias_entries:
+                continue
+            if not self._budget():
+                break
+            if addr not in self.engine.instructions:
+                if not self.engine.decode_at(addr, replace_overlaps=True):
+                    self._refuse_completion("does not decode")
+                    continue
+            self.d._alias_entries[addr] = end
+            self.stats["packed_table"] += 1
+            n_completed += 1
+            self.packed_completed += 1
+            added = True
         if added:
             print(f"  static discovery: {self.stats['packed_table']} function(s) "
-                  f"from packed tables")
+                  f"from packed tables ({n_completed} completing a table)")
         return added

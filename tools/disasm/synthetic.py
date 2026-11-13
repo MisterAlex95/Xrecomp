@@ -504,3 +504,82 @@ def packed_table_title(al=16, fill=0xCC):
         if text.va + gg not in entries:     # (a window may name a real entry, by layout)
             decoys["D_rgba%02x" % gg] = text.va + gg      # what the window reads
     return t, decoys
+
+
+# The CRT math table's routines (WP5), the shape of the MSVC CRT's math
+# dispatch table: hand-written x87 helpers packed back to back that fall
+# into each other, test a flag the dispatcher left in bl (`or bl, bl`), open
+# with `or cl, cl`, and branch back into a neighbour's code.
+CRT_ROUTINES = ("M_a", "M_b", "M_c", "M_d", "M_e", "M_fall", "M_ret", "M_or", "M_mid")
+# The fall-into ones: no gate of the packed-table pass takes them alone.
+CRT_FALL_INTO = ("M_fall", "M_ret", "M_or", "M_mid")
+
+# Decoy words of the second table: (routine, offset) of an instruction
+# boundary in the middle of a path, never an entry.
+CRT_DECOY_WORDS = ((("M_a", 7), ("M_b", 12), ("M_e", 2), ("M_c", 6)),
+                   (("M_b", 7), ("M_a", 12), ("M_e", 4), ("M_or", 2)),
+                   (("M_e", 9), ("M_b", 14), ("M_c", 6), ("M_or", 8)))
+
+
+def crt_math_table_title(al=16, fill=0xCC):
+    """A title with one packed table shaped like the MSVC CRT's math
+    dispatch table (records of 32 bytes: a length-prefixed name, a byte, a
+    u16 id, then four handler pointers at phase 2 of a dword), naming the
+    CRT_ROUTINES: no seed and no other reference anchors them. Decoys (never
+    an entry): a word of the table naming the middle of an instruction of
+    M_a, and a second table of the same shape whose words all name
+    instruction boundaries in the middle of paths (CRT_DECOY_WORDS).
+
+    Returns (title, decoy addresses) once laid out."""
+    t = Title()
+    x = t.section(".text")
+    r = t.section(".rdata", DATA)
+    x.label("entry").hex("558bec").call("disp").hex("ebfe")
+    x.align(al, fill)
+    # The dispatcher: the table's address as an immediate, an indirect call
+    # through a record's field.
+    x.label("disp").hex("ba").abs("mtab").hex("8b442404 c1e005 03d0 ff5212 c3")
+    # The routines, packed straight after disp's ret. M_helper is called
+    # directly (a function the older passes find); nothing else is.
+    x.label("M_helper").hex("d9ea dec9 33db f6d3 c3")      # fldl2e; fmulp; xor ebx,ebx; not bl; ret
+    x.label("M_z").hex("ddd8")                              # fstp st0
+    x.label("M_fall").hex("ddd8 d9e8 c3")                   # fstp st0; fld1; ret
+    x.label("M_y").hex("ddd8")                              # fstp st0
+    x.label("M_ret").hex("c3")                              # ret, entered on its own
+    x.label("M_a").hex("c68570ffffffff").call("M_helper").hex("0adb 74").rel8("M_t1").hex("d9e8 c3")
+    x.label("M_t1").hex("d9e0 c3")
+    x.label("M_b").hex("c68570fffffffe").call("M_helper").hex("0adb 75").rel8("M_t2").hex("d9e1 c3")
+    x.label("M_t2").hex("d9ee c3")
+    x.label("M_c").hex("dbbd62ffffff dbad62ffffff c3")    # fstp/fld xword [ebp-0x9e]; ret
+    x.label("M_d").hex("ddd8 d9ee c3")                      # fstp st0; fldz; ret
+    x.label("M_e").hex("d9c0 d9e1").call("M_helper").hex("0adb 74").rel8("M_e2").hex("dee9 c3")
+    x.label("M_e2").hex("ddd8 c3")
+    # or cl, cl; jne M_fall (back into the neighbours' code); fstp; fldz; ret
+    x.label("M_or").hex("0ac9 0f85").rel("M_fall").hex("ddd8 d9ee c3")
+    x.label("M_w").hex("c68570ffffff08")                    # mov byte [ebp-0x90], 8
+    x.label("M_mid").call("M_c").hex("eb").rel8("M_e2")     # call M_c; jmp M_e2
+    x.align(al, fill)
+    x.label("last").hex("c3")
+
+    def records(label, rows):
+        r.label(label)
+        for n, (name, fields) in enumerate(rows):
+            r.raw(bytes([len(name)]) + name + b"\0" * (12 - len(name)))
+            r.raw(b"\x01").raw(bytes([0x13 + n, 0]))
+            for f, add in fields:
+                r.abs(f, add)
+
+    r.raw(b"\x00\x00")                  # the pointers fall at phase 2 of a dword
+    records("mtab", ((b"sinh", (("M_a", 0), ("M_ret", 0), ("M_c", 0), ("M_or", 0))),
+                     (b"cosh", (("M_b", 0), ("M_fall", 0), ("M_c", 0), ("M_d", 0))),
+                     (b"tanh", (("M_e", 0), ("M_ret", 0), ("M_c", 0), ("M_mid", 0))),
+                     (b"acos", (("M_a", 2), ("M_ret", 0), ("M_c", 0), ("M_d", 0)))))
+    r.raw(b"\0" * 8 + b"-- end of the math table, nothing to read here --" + b"\0" * 7)
+    records("dtab", tuple((b"dec%d" % n, row) for n, row in enumerate(CRT_DECOY_WORDS)))
+    r.u32(0)
+    t._layout()
+    decoys = {"M_a+2": t.va("M_a") + 2}
+    for row in CRT_DECOY_WORDS:
+        for name, add in row:
+            decoys["%s+%d" % (name, add)] = t.va(name) + add
+    return t, decoys

@@ -19,8 +19,9 @@ sys.path.insert(0, ROOT)
 pytest.importorskip("capstone")
 
 from tools.disasm import discovery                                   # noqa: E402
-from tools.disasm.synthetic import (DATA, X87_ROUTINES, Title,       # noqa: E402
-                                    packed_table_title)
+from tools.disasm.synthetic import (CRT_FALL_INTO, CRT_ROUTINES,     # noqa: E402
+                                    DATA, X87_ROUTINES, Title,
+                                    crt_math_table_title, packed_table_title)
 from tools.disasm.test_static_discovery import LAYOUTS, _decoy_title, analyse   # noqa: E402
 
 ROUTINES = [n for n, _ in X87_ROUTINES] + ["X_in1", "X_in2"]
@@ -169,3 +170,116 @@ def test_growth_report(tmp_path, capsys):
         for al, fill, f0, f1, r0, r1, p in rows:
             print("    align %2d fill %02X: %2d -> %2d functions, routines %2d -> %2d, packed_table %d"
                   % (al, fill, f0, f1, r0, r1, p))
+
+
+# -- WP5: a CRT math table with no anchor (no seed, no other reference) -------
+
+def _instruction_starts(t):
+    """Every instruction boundary of the title's code, by a linear decode
+    from each label (the fixture has no data in .text)."""
+    import capstone
+    md = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_32)
+    x = t.sections[0]
+    t.va("entry")
+    out = set()
+    for off in x.labels.values():
+        for i in md.disasm(bytes(x.buf[off:]), x.va + off):
+            out.add(i.address)
+            if i.mnemonic in ("ret", "jmp"):
+                break
+    return out
+
+
+@pytest.mark.parametrize("al,fill", LAYOUTS)
+@pytest.mark.parametrize("strict", (False, True))
+def test_crt_math_table_without_seeds(tmp_path, al, fill, strict):
+    """Every routine the table names is an entry (a start or an alias) at the
+    first analysis, with no seed: the fall-into ones through the table's
+    completion. No decoy is, and nothing starts inside an instruction."""
+    t, decoys = crt_math_table_title(al, fill)
+    funcs, s = analyse(t, str(tmp_path), discovery.FULL, imports=(), strict=strict)
+    missing = [n for n in CRT_ROUTINES if t.va(n) not in funcs]
+    assert not missing, (missing, s["discovery"])
+    seeded = sorted(k for k, va in decoys.items() if va in funcs)
+    assert not seeded, seeded
+    starts = _instruction_starts(t)
+    text = t.sections[0]
+    inside = sorted("%08X" % a for a in funcs
+                    if text.va <= a < text.va + len(text.buf) and a not in starts)
+    assert not inside, inside
+    assert s["discovery"]["refused"].get("packed table completion: inside an instruction", 0) >= 1
+    # The completion made aliases (the code around them stays whole); a
+    # fall-into entry the older gate already takes (a dword-aligned word in a
+    # gap) is a start, as before.
+    assert s["discovery"]["packed_completed"] >= 2, s["discovery"]
+    for n in CRT_FALL_INTO:
+        assert funcs[t.va(n)]["detection_method"] in ("tail_jump_alias", "packed_table"), \
+            (n, funcs[t.va(n)])
+
+
+def test_crt_math_table_needs_the_pass(tmp_path):
+    """Level 1 (no packed-table pass) finds none of the fall-into routines:
+    nothing else references them, so the test above measures the pass."""
+    t, _ = crt_math_table_title()
+    funcs, s = analyse(t, str(tmp_path), discovery.STRONG, imports=())
+    assert not [n for n in CRT_FALL_INTO if t.va(n) in funcs]
+
+
+def test_spread_run_is_not_trimmed(tmp_path):
+    """A run whose passing words name code 64 KB apart (words read across a
+    table of short strings, `"+3\\0\\0"` one byte in) keeps its refused end
+    words: trimming is for a table whose handlers sit together, so this run
+    stays refused (4 of 6) and nothing it names is added."""
+    t = Title()
+    x = t.section(".text")
+    r = t.section(".rdata", DATA)
+    x.label("entry").hex("558bec ebfe")
+    for k in range(4):
+        x.pad(0x10000).align(16)
+        x.label("P%d" % k).hex("558bec 33c0 5d c3")
+        x.label("T%d" % k).hex("d9fe c3")              # fsin; ret, packed after P's ret
+    x.pad(0x10000).align(16)
+    x.label("tail").hex("558bec 33c0 5d c3")
+    x.label("last").hex("c3")
+    r.raw(b"\x00\x00\x00")                             # every word at phase 3
+    r.abs("entry", 1)                                  # refused (inside an instruction), far
+    for k in range(4):
+        r.abs("T%d" % k)
+    r.abs("tail", 2)                                   # refused, far
+    r.u32(0)
+    t._layout()
+    funcs, s = analyse(t, str(tmp_path), discovery.FULL, imports=(), strict=True)
+    found = {k: funcs[t.va("T%d" % k)]["detection_method"] for k in range(4) if t.va("T%d" % k) in funcs}
+    assert not found, (found, s["discovery"])
+    assert s["discovery"]["refused"].get("packed table: run refused", 0) >= 1
+
+
+def test_decoy_table_alone_is_not_completed(tmp_path):
+    """A table of the same shape whose words all name the middle of paths
+    has no established word: no run of it is taken, nothing is completed."""
+    from tools.disasm.synthetic import CRT_DECOY_WORDS
+    t = Title()
+    x = t.section(".text")
+    r = t.section(".rdata", DATA)
+    x.label("entry").hex("558bec ebfe").align(16)
+    x.label("M_helper").hex("d9ea dec9 33db f6d3 c3").align(16)
+    x.label("M_a").hex("c68570ffffffff").call("M_helper").hex("0adb 7402 d9e8 c3 d9e0 c3")
+    x.align(16)
+    x.label("M_b").hex("c68570fffffffe").call("M_helper").hex("0adb 7502 d9e1 c3 d9ee c3")
+    x.align(16)
+    x.label("M_c").hex("dbbd62ffffff dbad62ffffff c3").align(16)
+    x.label("M_e").hex("d9c0 d9e1").call("M_helper").hex("0adb 7403 dee9 c3 ddd8 c3")
+    x.align(16)
+    x.label("M_or").hex("0ac9 0f8500000000 ddd8 d9ee c3").align(16)
+    x.label("last").hex("c3")
+    r.raw(b"\x00\x00")
+    for n, row in enumerate(CRT_DECOY_WORDS):
+        r.raw(b"\x04dec%d" % n + b"\0" * 8).raw(b"\x01").raw(bytes([n, 0]))
+        for name, add in row:
+            r.abs(name, add)
+    r.u32(0)
+    t._layout()
+    words = {t.va(name) + add for row in CRT_DECOY_WORDS for name, add in row}
+    funcs, s = analyse(t, str(tmp_path), discovery.FULL, imports=(), strict=True)
+    assert not sorted("%08X" % a for a in funcs if a in words)
+    assert s["discovery"]["added"]["packed_table"] == 0
