@@ -651,12 +651,13 @@ class XBEParser:
         # For addresses within the header
         if base <= va < base + self._header_area():
             return va - base
-        # Search sections
-        for section in getattr(self, "_sections", []):
-            sec_va_start = section.virtual_addr
-            sec_va_end = sec_va_start + section.virtual_size
-            if sec_va_start <= va < sec_va_end:
-                return section.raw_addr + (va - sec_va_start)
+        # Search sections (overlapping ones: lookup_order, XBA-138)
+        hits = [s for s in getattr(self, "_sections", [])
+                if s.virtual_addr <= va < s.virtual_addr + s.virtual_size]
+        if hits:
+            section = lookup_order(hits, lambda s: s.flags & SECTION_EXECUTABLE,
+                                   lambda s: s.flags & SECTION_PRELOAD)[0]
+            return section.raw_addr + (va - section.virtual_addr)
         # Fallback: assume flat mapping
         return va - base
 
@@ -996,6 +997,28 @@ def section_overlaps(sections: List[XBESectionHeader]):
     return out
 
 
+def lookup_order(sections, executable, preload):
+    """The sections (given in table order) in the order an address lookup
+    tries them: the first one that covers an address is the one whose bytes
+    the static tools read there (XBA-138). Only overlapping sections care.
+
+    1. Code first: where one section holding code overlaps data, the code has
+       one meaning, the code section's bytes. The data section's bytes are
+       data the lifted code reads from guest memory at run time, whichever of
+       the two XeLoadSection put there last.
+    2. Then the section in memory at boot: the PRELOAD ones are loaded in
+       table order, so the last PRELOAD section that covers an address wins;
+       with no PRELOAD one, the last in the table (the order the runtime
+       copies them in, src/kernel/xbox_xbe_sections.c).
+
+    Two code sections at one address stay a blocker (image_report, "code"):
+    rule 2 picks the one lifted, the other's code is not in the C.
+    `executable` and `preload` are callables on a section."""
+    ranked = sorted(enumerate(sections),
+                    key=lambda p: (not executable(p[1]), not preload(p[1]), -p[0]))
+    return [s for _, s in ranked]
+
+
 def image_report(xbe: XBEFile) -> Dict:
     """The image facts the triage and prepare report (stable keys, JSON-ready):
     the key pair, header and image sizes, the sections with their preload
@@ -1015,9 +1038,13 @@ def image_report(xbe: XBEFile) -> Dict:
             "writable": bool(s.flags & SECTION_WRITABLE),
         })
     ov = []
+    order = lookup_order(xbe.sections, lambda s: s.flags & SECTION_EXECUTABLE, lambda s: s.flags & SECTION_PRELOAD)
     for i, j, lo, hi in section_overlaps(xbe.sections):
         a, b = xbe.sections[i], xbe.sections[j]
+        first = a if order.index(a) < order.index(b) else b
         ov.append({
+            "read": first.name or "#%d" % (i if first is a else j),   # whose bytes the static tools read
+
             "a": a.name or "#%d" % i,
             "b": b.name or "#%d" % j,
             "va": "0x%08X" % lo,
@@ -1141,6 +1168,9 @@ def print_xbe_info(xbe: XBEFile):
     for i, j, lo, hi in section_overlaps(xbe.sections):
         print(f"  overlap: {xbe.sections[i].name} and {xbe.sections[j].name} share "
               f"0x{lo:08X}-0x{hi:08X} (loaded one at a time)")
+    for o in image_report(xbe)["overlaps"]:
+        print(f"  overlap {o['a']}/{o['b']}: the static tools read {o['read']}'s bytes"
+              + ("; BLOCKER: both hold code" if o["code"] else ""))
 
     print(f"\n--- Libraries ({len(xbe.libraries)}) ---")
     for lib in xbe.libraries:

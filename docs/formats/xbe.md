@@ -159,13 +159,33 @@ again (nothing writes them, their pages are never released). At boot, of two ove
 memory (the layout copies in table order, so the later one used to win), and each overlap is printed
 (`[XBE] sections A and B share ...`). `RECOMP_XBE_SECTIONS=0` keeps the old bookkeeping (the count only).
 
-**Overlapping code is a blocker.** The lifter has one function per address and reads the bytes of the first section
-that covers it, so of two code sections at one address only one is in the C; when the title loads the other, its calls
-run the first one's code. `tools.triage` and `tools.prepare` (`BLOCKER: sections A and B both hold code ...`) name it.
-Supporting it means tagging lifted functions with their section and switching the dispatch entries on
-`XeLoadSection`, which no title in the library has needed so far (the triage's « Overlaps » column will say).
+**Which section the static tools read (XBA-138).** Every tool that maps an address to file bytes (the parser for
+header structures, `tools.disasm`, `tools.func_id`, `tools.abi_analysis`, the lifter's `tools/recomp/config.py`) picks,
+among the sections covering it, by one rule (`lookup_order` in `tools/xbe_parser/xbe_parser.py`):
+
+1. Code before data. Where a code section overlaps a data section, the address's code has one meaning, the code
+   section's bytes, even when the data section is the one in memory at boot: the lifted code runs once
+   `XeLoadSection` brought its section in, and the data section's bytes are data the lifted code reads from guest
+   memory at run time.
+2. Then the section in memory at boot: the last Preload one in table order, else the last one in the table (the order
+   the runtime above copies them in).
+
+Before, each tool took the first covering section of its own list (table order, or sorted by address), so preloaded
+data listed before an overlay's code made the lifter decode the data. Overlapping data and code over data are thereby
+supported; `image_report` (the parser's JSON, `tools.triage`) names under `read` the section whose bytes were used.
+`tools/xbe_parser/test_xbe_parser.py::test_every_static_reader_picks_the_same_overlapping_section` builds one
+synthetic XBE with the three cases and checks all five readers.
+
+**Overlapping code is a blocker**, and stays one: it is not well defined statically. Which code sits at the address
+depends on the last `XeLoadSection` at run time, and the lifted C has one function per address. Rule 2 picks the one
+lifted (the one in memory at boot, which is also what the runtime starts with); when the title loads the other, its
+calls run the first one's code. `tools.triage` and `tools.prepare` (`BLOCKER: sections A and B both hold code ...`)
+name it. Supporting it means lifting each overlay's functions under its own section, giving the dispatch one table per
+overlay and switching the entries on `XeLoadSection`/`XeUnloadSection`, which no title in the library has needed so
+far (the triage's « Overlaps » column will say).
 What breaks with everything at boot, in short: nothing for a title that loads before use and never relies on a reload;
-a reloaded data section's state (fixed here); overlapping data (fixed here); overlapping code (blocker).
+a reloaded data section's state (fixed here); overlapping data and code over data (fixed here, and read alike by the
+static tools); overlapping code (blocker).
 
 ## Title updates and downloadable content (XBA-124)
 

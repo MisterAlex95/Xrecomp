@@ -59,12 +59,20 @@ SECTIONS = [
 ]
 
 
+# Where sections overlap, the rank of each in the address lookup (XBA-138):
+# (va, size, raw) -> rank, from configure_from_xbe; lowest first.
+_LOOKUP_RANK = {}
+
+
 def va_to_file_offset(va):
-    """Convert a virtual address to a file offset in the XBE."""
-    for name, sec_va, sec_size, sec_raw in SECTIONS:
-        if sec_va <= va < sec_va + sec_size:
-            return va - sec_va + sec_raw
-    return None
+    """Convert a virtual address to a file offset in the XBE. Where sections
+    overlap, the bytes of the one tools/xbe_parser lookup_order puts first."""
+    hits = [(sec_va, sec_size, sec_raw) for _, sec_va, sec_size, sec_raw in SECTIONS
+            if sec_va <= va < sec_va + sec_size]
+    if not hits:
+        return None
+    sec_va, _, sec_raw = min(hits, key=lambda h: _LOOKUP_RANK.get(h, 0))
+    return va - sec_va + sec_raw
 
 
 # ============================================================
@@ -179,6 +187,10 @@ def configure_from_xbe(xbe_path: str) -> None:
         (s.name, s.virtual_addr, s.virtual_size, s.raw_addr)
         for s in has_size
     ]
+    from tools.xbe_parser.xbe_parser import SECTION_EXECUTABLE, SECTION_PRELOAD, lookup_order
+    ranked = lookup_order(has_size, lambda s: s.flags & SECTION_EXECUTABLE, lambda s: s.flags & SECTION_PRELOAD)
+    _LOOKUP_RANK.clear()
+    _LOOKUP_RANK.update(((s.virtual_addr, s.virtual_size, s.raw_addr), i) for i, s in enumerate(ranked))
     _install(sections, xbe_path)
 
 # ============================================================

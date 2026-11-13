@@ -106,6 +106,14 @@ class XbeFile:
             for s in candidates:
                 if s.name == name_hint:
                     return s
+        if len(candidates) > 1:
+            # Overlapping sections (XBA-138): code before data, then the one
+            # in memory at boot (the last PRELOAD one, else the last). The
+            # rule of tools/xbe_parser lookup_order, inlined: this module
+            # stays dependency-free.
+            ranked = sorted(enumerate(candidates),
+                            key=lambda p: (not p[1].flags & 0x4, not p[1].flags & 0x2, -p[0]))
+            return ranked[0][1]
         return candidates[0]
 
     def read_bytes_at_va(self, va, size, name_hint=None):

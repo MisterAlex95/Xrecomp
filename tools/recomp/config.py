@@ -17,6 +17,7 @@ from typing import List, Optional
 
 # Section flag bit from the XBE format (see tools/xbe_parser).
 SECTION_EXECUTABLE = 0x00000004
+SECTION_PRELOAD = 0x00000002
 
 # Sections that hold code despite not being marked executable in the XBE, or
 # that we always want treated as code. Matched by exact section name.
@@ -38,6 +39,8 @@ class Section:
     raw_addr: int
     raw_size: int
     is_code: bool
+    preload: bool = True
+    index: int = 0          # in the XBE's section table
 
 
 # Populated by configure_from_xbe(). Fallback: Xbox Dashboard build 3944.
@@ -128,8 +131,10 @@ def configure_from_xbe(xbe_path: str) -> None:
             raw_addr=s.raw_addr,
             raw_size=s.raw_size,
             is_code=_classify(s.name, s.flags),
+            preload=bool(s.flags & SECTION_PRELOAD),
+            index=i,
         )
-        for s in xbe.sections
+        for i, s in enumerate(xbe.sections)
     ]
     if not sections:
         raise ValueError(f"XBE has no sections: {xbe_path}")
@@ -180,15 +185,14 @@ def configured_from() -> Optional[str]:
 
 def va_to_file_offset(va):
     """Convert virtual address to XBE file offset."""
-    for s in _SECTIONS:
-        if s.va <= va < s.va + s.va_size:
-            offset = va - s.va + s.raw_addr
-            # Sections are zero-padded when virtual_size exceeds raw_size (BSS
-            # tails); those addresses exist at runtime but have no file bytes.
-            if va - s.va >= s.raw_size:
-                return None
-            return offset
-    return None
+    s = section_at(va)
+    if s is None:
+        return None
+    # Sections are zero-padded when virtual_size exceeds raw_size (BSS
+    # tails); those addresses exist at runtime but have no file bytes.
+    if va - s.va >= s.raw_size:
+        return None
+    return va - s.va + s.raw_addr
 
 
 # The longest x86 instruction. The loader's zero fill past a code section's
@@ -199,11 +203,16 @@ MAX_INSN_LEN = 15
 
 
 def section_at(va) -> Optional[Section]:
-    """The section whose virtual range holds VA, or None."""
-    for s in _SECTIONS:
-        if s.va <= va < s.va + s.va_size:
-            return s
-    return None
+    """The section whose virtual range holds VA, or None. Where sections
+    overlap, the one whose bytes the lifter reads (tools/xbe_parser
+    lookup_order, XBA-138): code before data, then the one in memory at
+    boot."""
+    hits = [s for s in _SECTIONS if s.va <= va < s.va + s.va_size]
+    if len(hits) > 1:
+        from tools.xbe_parser.xbe_parser import lookup_order
+        hits = lookup_order(sorted(hits, key=lambda s: s.index),
+                            lambda s: s.is_code, lambda s: s.preload)
+    return hits[0] if hits else None
 
 
 def readable_end(section: Section) -> int:
@@ -223,15 +232,11 @@ def readable_end(section: Section) -> int:
 
 def is_code_address(va):
     """Check if VA is in an executable section (.text or XDK library sections)."""
-    for s in _SECTIONS:
-        if s.va <= va < s.va + s.va_size:
-            return s.is_code
-    return False
+    s = section_at(va)
+    return s.is_code if s is not None else False
 
 
 def is_data_address(va):
     """Check if VA is in a data section."""
-    for s in _SECTIONS:
-        if s.va <= va < s.va + s.va_size:
-            return not s.is_code
-    return False
+    s = section_at(va)
+    return not s.is_code if s is not None else False

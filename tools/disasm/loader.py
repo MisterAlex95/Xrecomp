@@ -80,11 +80,17 @@ class BinaryImage:
         return self._section_by_name.get(name)
 
     def get_section_at_va(self, va: int) -> Optional[SectionInfo]:
-        """Find the section containing a virtual address."""
-        for sec in self.sections:
-            if sec.virtual_addr <= va < sec.virtual_addr + sec.virtual_size:
-                return sec
-        return None
+        """Find the section containing a virtual address. Where sections
+        overlap, the one whose bytes the static tools read there
+        (tools/xbe_parser lookup_order, XBA-138): code before data, then the
+        one in memory at boot."""
+        hits = [sec for sec in self.sections
+                if sec.virtual_addr <= va < sec.virtual_addr + sec.virtual_size]
+        if len(hits) > 1:
+            from tools.xbe_parser.xbe_parser import lookup_order
+            return lookup_order(hits, lambda s: s.executable and s.name not in DATA_SECTION_NAMES,
+                                lambda s: "PRE" in s.flags.split(", "))[0]
+        return hits[0] if hits else None
 
     def va_to_file_offset(self, va: int) -> Optional[int]:
         """Convert virtual address to file offset."""
@@ -95,14 +101,12 @@ class BinaryImage:
                 return off
             return None
 
-        # Search sections
-        for sec in self.sections:
-            if sec.virtual_addr <= va < sec.virtual_addr + sec.virtual_size:
-                offset_in_sec = va - sec.virtual_addr
-                if offset_in_sec < sec.raw_size:
-                    return sec.raw_addr + offset_in_sec
-                # In BSS (beyond raw data)
-                return None
+        sec = self.get_section_at_va(va)
+        if sec is not None:
+            offset_in_sec = va - sec.virtual_addr
+            if offset_in_sec < sec.raw_size:
+                return sec.raw_addr + offset_in_sec
+            # In BSS (beyond raw data)
         return None
 
     def read_bytes_at_va(self, va: int, size: int) -> Optional[bytes]:

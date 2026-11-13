@@ -96,7 +96,7 @@ def test_the_image_facts(tmp_path):
     assert not r.get("error"), r
     assert (r["key"], r["sections"], r["tls"]) == ("debug", 5, False)
     assert r["not_preloaded"] == ["OVA", "OVB"]
-    assert r["overlaps"] == [{"a": "OVA", "b": "OVB", "va": "0x00018040", "size": 0x80, "code": True}]
+    assert r["overlaps"] == [{"read": "OVB", "a": "OVA", "b": "OVB", "va": "0x00018040", "size": 0x80, "code": True}]
     assert r["blockers"] and "OVA and OVB" in r["blockers"][0]
     assert r["kernel_imports"] == 4 and r["stub_imports"] == ["ExReadWriteRefurbInfo", "MmDbgReleaseAddress"]
     assert r["libraries"] == {"D3D8": 5849, "XAPILIB": 5849}

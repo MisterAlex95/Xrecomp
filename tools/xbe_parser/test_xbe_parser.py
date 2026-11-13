@@ -118,7 +118,8 @@ def test_overlapping_sections_and_shared_pages():
     assert x.header.entry_point == code
     assert section_overlaps(x.sections) == [(1, 2, BASE + 0x3200, BASE + 0x3600)]
     r = image_report(x)
-    assert r["overlaps"] == [{"a": "OVL_A", "b": "OVL_B", "va": "0x00013200", "size": 0x400, "code": True}]
+    assert r["overlaps"] == [{"read": "OVL_B", "a": "OVL_A", "b": "OVL_B", "va": "0x00013200", "size": 0x400,
+                              "code": True}]
     assert r["not_preloaded"] == ["OVL_A", "OVL_B"]
     assert (r["section_count"], r["tls"], r["key"]) == (5, False, "retail")
     # D1 and D2 share the page at 0x15000: one reference count for both.
@@ -145,3 +146,65 @@ def test_the_cli_json_carries_preload_and_overlaps(tmp_path):
     j = json.loads(out.read_text())
     assert [s["preload"] for s in j["sections"]] == [True, False]
     assert j["overlaps"] == [] and j["warnings"] == [] and j["key"] == "retail"
+
+
+def test_every_static_reader_picks_the_same_overlapping_section(tmp_path):
+    """Overlapping sections (XBA-138): every tool that maps an address to file
+    bytes reads the same section there. Code before data (the code has one
+    meaning); then the one in memory at boot, the last PRELOAD one in table
+    order, else the last. Two code sections stay a blocker."""
+    import json
+    import subprocess
+    from tools.abi_analysis.xbe_min import XbeFile
+    from tools.disasm.loader import load_image
+    from tools.func_id import config as fcfg
+    from tools.recomp import config as rcfg
+
+    secs = [Sec(".text", b"\xc3" * 0x100),
+            # Each pair puts first in the table the one that must not be read:
+            # before XBA-138 every reader took the first covering section.
+            # Preloaded data over code loaded on demand: the code.
+            Sec("OVD", b"\xdd" * 0x100, flags=W | PRELOAD, va=BASE + 0x3000),
+            Sec("OVC", b"\xcc" * 0x100, flags=X, va=BASE + 0x3000),
+            # data / data: the preload one, although later in the table
+            Sec("DB", b"\xb2" * 0x100, flags=W, va=BASE + 0x5000),
+            Sec("DA", b"\xa1" * 0x100, flags=W | PRELOAD, va=BASE + 0x5000),
+            # code / code: the preload one is read, and it is a blocker
+            Sec("CB", b"\xcb" * 0x100, flags=X, va=BASE + 0x7000),
+            Sec("CA", b"\xca" * 0x100, flags=X | PRELOAD, va=BASE + 0x7000)]
+    xbe = tmp_path / "ov.xbe"
+    xbe.write_bytes(build_xbe(secs))
+    want = {BASE + 0x3080: 0xCC, BASE + 0x5080: 0xA1, BASE + 0x7080: 0xCA}
+
+    r = image_report(XBEParser(str(xbe)).parse())
+    assert [(o["a"], o["b"], o["read"], o["code"]) for o in r["overlaps"]] == [
+        ("OVD", "OVC", "OVC", False), ("DB", "DA", "DA", False), ("CB", "CA", "CA", True)]
+
+    data = xbe.read_bytes()
+    seen = {}
+    abi = XbeFile(str(xbe))
+    seen["abi_analysis"] = {va: abi.read_bytes_at_va(va, 1)[0] for va in want}
+
+    analysis = tmp_path / "ov_analysis.json"
+    subprocess.run([sys.executable, "-m", "tools.xbe_parser", str(xbe), "--json", str(analysis), "--quiet"],
+                   check=True, cwd=os.path.join(os.path.dirname(__file__), "..", ".."))
+    img = load_image(str(xbe), str(analysis))
+    seen["disasm"] = {va: img.read_bytes_at_va(va, 1)[0] for va in want}
+    assert img.get_section_at_va(BASE + 0x3080).name == "OVC"
+
+    saved_r, saved_f = dict(vars(rcfg)), dict(vars(fcfg))
+    saved_rank = dict(fcfg._LOOKUP_RANK)
+    try:
+        rcfg.configure_from_xbe(str(xbe))
+        seen["recomp"] = {va: data[rcfg.va_to_file_offset(va)] for va in want}
+        assert rcfg.is_code_address(BASE + 0x3080) and not rcfg.is_code_address(BASE + 0x5080)
+        fcfg.configure_from_xbe(str(xbe))
+        seen["func_id"] = {va: data[fcfg.va_to_file_offset(va)] for va in want}
+    finally:
+        vars(rcfg).update(saved_r)
+        vars(fcfg).update(saved_f)
+        fcfg._LOOKUP_RANK.clear()
+        fcfg._LOOKUP_RANK.update(saved_rank)
+
+    for tool, got in seen.items():
+        assert got == want, (tool, {hex(k): hex(v) for k, v in got.items()})
