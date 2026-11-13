@@ -156,6 +156,17 @@ def test_report_table():
     assert t[2].startswith("| b | sustained |") and "| a | renders | renders | x/y |" in t[3]
 
 
+def test_a_network_stack_is_carried_to_the_summary_and_the_report():
+    """XBA-117: the status file says "net" once the title touched the NIC;
+    the run's summary keeps it and the report marks the title."""
+    st = playing(10)
+    assert "net" not in classify(st, [], None, 10, 60)[2]
+    st[3]["net"] = "nic probed, link down"
+    assert classify(st, [], None, 10, 60)[2]["net"] == "nic probed, link down"
+    t = report([{"source": "a", "stage": "boots", "toolkit": "abc", "net": "nic probed, link down"}])
+    assert t.splitlines()[2].startswith("| a (network stack) | boots |")
+
+
 FAKE_TITLE = r'''#!/usr/bin/env python3
 # A stand-in for a title binary: writes the status file like the runtime and
 # changes its picture when the runner presses (RECOMP_PAD_LIVE). MODE: play, hang, crash.

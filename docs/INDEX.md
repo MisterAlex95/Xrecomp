@@ -42,6 +42,7 @@ One per stage, in the order you run them.
 
 - [Memory Layout Reproduction](technical/memory-layout.md) — CreateFileMapping, mirror views, and address space tricks
 - [Xbox Kernel Replacement](technical/kernel-replacement.md) — Mapping Xbox kernel ordinals to Win32, and the gotchas
+- [Network: a Console with No Cable](technical/network.md) — The Ethernet controller model, what a title with Live or system link sees, and the device check list
 
 ### Graphics
 

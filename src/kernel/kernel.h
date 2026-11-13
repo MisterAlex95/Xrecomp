@@ -1295,6 +1295,7 @@ NTSTATUS __stdcall xbox_ExSaveNonVolatileSetting(ULONG ValueIndex, ULONG Type, P
 #define XC_MAX_OS                 0xFF
 /* The factory section (nxdk xboxkrnl.h): the console's video standard and
  * refresh (AV region) and the game regions it plays (XGetGameRegion). */
+#define XC_FACTORY_ETHERNET_ADDR  0x101   /* 6 bytes: the NIC's MAC (XBA-117) */
 #define XC_FACTORY_AV_REGION      0x103
 #define XC_FACTORY_GAME_REGION    0x104
 

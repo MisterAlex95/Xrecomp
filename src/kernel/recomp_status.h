@@ -31,6 +31,12 @@
  *               (or "0x1234"), and how often they arrived; at most 16, the
  *               executor's report sets them
  *
+ * and once the title touched the Ethernet controller (XBA-117):
+ *
+ *   net         only once the title touched the Ethernet controller or the
+ *               kernel's PHY routes (XBA-117): "nic probed, link down", or
+ *               "nic probed, link up (RECOMP_NIC=0)" with the model off
+ *
  * Unset: nothing is counted beyond a load and a branch per call.
  * docs/technical/discovery.md has the companion file; the runner reads both. */
 #ifndef XBOXRECOMP_RECOMP_STATUS_H
@@ -63,6 +69,10 @@ void recomp_status_unsupported(const char *name, uint32_t n);
 /* An unmodelled method's count so far (replaces the previous one). `name`
  * as above. */
 void recomp_status_unmodelled(const char *name, uint64_t count);
+
+/* The title has a network stack (src/kernel/xbox_nic.c): what it found, a
+ * string literal. Safe from a signal handler (one pointer store). */
+void recomp_status_net(const char *what);
 
 /* Tests: write one line now (as the thread does), and forget everything. */
 void recomp_status_write_now(void);

@@ -10,6 +10,7 @@
  */
 
 #include "kernel.h"
+#include "xbox_nic.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -399,6 +400,30 @@ NTSTATUS __stdcall xbox_ExQueryNonVolatileSetting(
         }
         break;
 
+    case XC_FACTORY_ETHERNET_ADDR:
+        /* The MAC XNet programs into the NIC (XBA-117): locally
+         * administered, derived per install, never a real console's. */
+        if (Type) *Type = 3;                 /* REG_BINARY */
+        if (ResultLength) *ResultLength = 6;
+        if (ValueLength < 6)
+            return 0xC0000023L;              /* STATUS_BUFFER_TOO_SMALL */
+        xbox_NicMacAddress((uint8_t *)Value);
+        break;
+
+    case XC_ONLINE_IP_ADDRESS:
+    case XC_ONLINE_DNS_ADDRESS:
+    case XC_ONLINE_DEFAULT_GATEWAY:
+    case XC_ONLINE_SUBNET_MASK:
+        /* No static configuration: 0 is "use DHCP", a console never set up
+         * for a network. Answered by the default case before, with a
+         * warning per query. */
+        if (ValueLength >= sizeof(ULONG)) {
+            *(PULONG)Value = 0;
+            if (Type) *Type = 4;
+            if (ResultLength) *ResultLength = sizeof(ULONG);
+        }
+        break;
+
     case XC_FACTORY_GAME_REGION:
     case XC_FACTORY_AV_REGION:
         /* Unanswered before: the default case zeroed them, a console of no
@@ -508,20 +533,24 @@ NTSTATUS __stdcall xbox_ExSaveNonVolatileSetting(
 /* ============================================================================
  * Network / PHY
  *
- * PhyGetLinkState reports Ethernet link status. Xbox had a built-in 100Mbit
- * NIC. For PC, we report link-up since we'll handle networking differently.
+ * The kernel's side of the Ethernet PHY, answered from the NIC model's PHY
+ * (xbox_nic.c, XBA-117): a console with no cable. PhyGetLinkState returns
+ * XNET_ETHERNET_LINK_* flags, 0 for no link; XNetGetEthernetLinkStatus in the
+ * title passes that on, and the title's network menus say "no cable".
+ * RECOMP_NIC=0 brings back the previous answer, XNET_ETHERNET_LINK_ACTIVE.
  * ============================================================================ */
 
 ULONG __stdcall xbox_PhyGetLinkState(BOOLEAN Verify)
 {
-    (void)Verify;
-    /* Return link up, 100 Mbps, full duplex */
-    return 0x01; /* XNET_ETHERNET_LINK_ACTIVE */
+    (void)Verify;   /* re-read the PHY: it is read every time here */
+    return xbox_NicPhyLinkState();
 }
 
 NTSTATUS __stdcall xbox_PhyInitialize(BOOLEAN ForceReset, PVOID Param2)
 {
-    (void)ForceReset;
     (void)Param2;
+    /* Resets the PHY and restarts autonegotiation, which never completes;
+     * success either way, as with no cable the PHY itself is fine. */
+    xbox_NicPhyInitialize(ForceReset != 0);
     return STATUS_SUCCESS;
 }

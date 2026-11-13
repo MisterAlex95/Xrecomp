@@ -24,6 +24,7 @@ static unsigned s_period_ms = 1000;
  * read once a second; a torn read is one stale number. */
 static volatile uint64_t s_flips, s_frames, s_audio_samples, s_pad_reads, s_threads;
 static volatile uint32_t s_hash, s_lit;
+static const char *volatile s_net;      /* a literal, or NULL: no NIC touched */
 
 /* "unsupported" and "unmodelled" (XBA-120): names by pointer, appended by
  * one writer; the entry is filled before the count of entries grows, so the
@@ -109,6 +110,8 @@ void recomp_status_write_now(void)
             (unsigned long long)s_threads, recomp_discovery_written(), recomp_discovery_seeds());
     named_write(s_file, "unsupported", s_gaps, s_ngaps);
     named_write(s_file, "unmodelled", s_unmod, s_nunmod);
+    if (s_net)
+        fprintf(s_file, ",\"net\":\"%s\"", s_net);   /* XBA-117 */
     fputs("}\n", s_file);
     fflush(s_file);
 }
@@ -235,6 +238,11 @@ void recomp_status_thread_started(void)
         s_threads++;
 }
 
+void recomp_status_net(const char *what)
+{
+    s_net = what;               /* kept with the status off too: cheap, and */
+}                               /* a later start still reports it */
+
 void recomp_status_reset(void)
 {
     if (s_file)
@@ -244,6 +252,7 @@ void recomp_status_reset(void)
     s_flips = s_frames = s_audio_samples = s_pad_reads = s_threads = 0;
     s_hash = s_lit = 0;
     s_ngaps = s_nunmod = 0;
+    s_net = NULL;
     s_period_ms = 1000;
     (void)open_file();          /* tests call write_now themselves: no thread */
 }

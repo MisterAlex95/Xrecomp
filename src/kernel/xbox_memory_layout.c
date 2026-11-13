@@ -977,6 +977,7 @@ static void ac97_arm_write_trap(void)
 #include "apu/apu.h"
 #include "apu/apu_wav.h"
 #include "usb/ohci.h"
+#include "xbox_nic.h"
 
 #define MMIO_APU_BASE 0xFE800000u   /* what MemoryLayoutInit unmaps for the APU */
 #define MMIO_APU_END  0xFE880000u
@@ -1022,6 +1023,8 @@ int xbox_VehMmioFault(void *exception_pointers)
                    ep->ExceptionRecord->ExceptionInformation[0] ? 1 : 0);
     if (xbox_OhciOwnsAddress(va))
         return xbox_OhciHandleMmio(ep->ContextRecord, va);
+    if (xbox_NicOwnsAddress(va))
+        return xbox_NicHandleMmio(ep->ContextRecord, va);
     return 0;
 }
 #else
@@ -1059,6 +1062,8 @@ int xbox_PosixMmioFault(void *ucv, uintptr_t fault)
         return 1;
     if (xbox_OhciOwnsAddress(va))
         return xbox_OhciHandleMmio(ucv, va);
+    if (xbox_NicOwnsAddress(va))
+        return xbox_NicHandleMmio(ucv, va);
     if (__atomic_load_n(&g_mmio_test.size, __ATOMIC_ACQUIRE)
             && va - g_mmio_test.va < g_mmio_test.size)
 #if defined(__aarch64__)
@@ -4438,6 +4443,9 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
         win_settle_placeholders();
 #endif
     lazy_reset();
+    /* The Ethernet controller with no cable (XBA-117): its registers fault
+     * from here on and xbox_PosixMmioFault / xbox_VehMmioFault answer them. */
+    xbox_NicInit();
     xbox_WatchInit();
     fprintf(stderr, "xbox_MemoryLayoutInit: complete\n");
     return TRUE;
@@ -4559,6 +4567,7 @@ void xbox_MemoryLayoutShutdown(void)
     }
 #endif
     if (g_mcpx_memory) {
+        xbox_NicShutdown();
         ac97_disarm_write_trap();
         layout_release(g_mcpx_memory, 0);
         g_mcpx_memory = NULL;
