@@ -46,12 +46,14 @@ The blocker is the first of: a crash (signal and fault line), an early exit, no 
 for 30 s at the end), each with the first untranslated instruction or the last discovery when there is one. A
 guest stack switch the runtime could not carry (a `stack_switch` discovery entry, XBA-101,
 [stack-switching.md](stack-switching.md)) is named after any of them: « hang: ...; stack switch at 0x... to 0x...:
-<why> (XBA-101) ». Any blocker but a crash or a launch also names the stub kernel routes the run called, from the
+<why> ». Any blocker but a crash or a launch also names the stub kernel routes the run called, from the
 discovery file's `stub` entries: « no flip; calls stub ordinal 136 (KeRemoveQueue) » (XBA-115).
 A guest divide error no handler took (the runtime's `[#DE]` report, then bugcheck 0x1E) is named after the exit:
-« exited with code 30 after 3 s; divide error at 0x00012340: divide by zero (no guest handler took it) »; an unhandled
+« exited with code 30 after 3 s; guest exception 0xC0000094 at 0x00012340: divide by zero »; an unhandled
 guest exception (`[SEH] unhandled exception`, after which the title goes on) after any blocker but a crash: « no flip;
-unhandled guest exception 0xC0000005 at 0x00045678 » (XBA-110, XBA-112). What the renderer met and could not draw
+guest exception 0xC0000005 at 0x00045678: no guest handler took it » (XBA-110, XBA-112). The discovery file's `exception`
+entries (XBA-129: divide errors, unhandled raises, host faults no guest handler took, XBA-132) are named first, after
+any blocker. These words (`tools/compat/blockers.py`) are the ones `heal.py` and the app's « needs a fix » use. What the renderer met and could not draw
 (the status file's `unsupported`: texture formats, points and lines, volume textures, stage modes, state, by name and
 batches; [gpu-backend.md](gpu-backend.md#what-is-not-drawn-xba-120)) is kept in the run's summary (`unsupported`) and
 named after any blocker but a crash or a launch, the three most used first: « nothing lit on screen; renderer lacks
@@ -110,7 +112,7 @@ what `discovered.jsonl` held before it), crash or not. It stops on:
 | Stop | When |
 |---|---|
 | `nothing new found` | the run met no new code and ran its time |
-| `needs a fix: <blocker>` | the run met no new code and stopped, or stopped with what a prepare cannot fix: a guest exception nothing handled, a stack switch the runtime could not carry, an untranslated instruction (named in that order); calls to stub kernel routes are named after the blocker |
+| `needs a fix: <blocker>` | the run met no new code and stopped, or stopped with what a prepare cannot fix: a guest exception nothing handled, a stack switch the runtime could not carry, an untranslated instruction, code written or run at run time (XBA-118) (named in that order); calls to stub kernel routes are named after the blocker |
 | `no progress: the prepare accepted no new seed` | the round's prepare took none of the new addresses (seed_from_log's gates: not code) |
 | `no progress: the same blocker twice` | the run stopped on the blocker of the round before (seconds aside) |
 | `safety cap: 12 rounds` | `--max-rounds`, a safety net only |

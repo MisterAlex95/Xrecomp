@@ -196,6 +196,6 @@ def test_the_device_names_the_new_blockers_as_the_desktop_does(tmp_path):
         if discovered:
             assert "stack switch at 0x000100B1" in want and "calls stub ordinal 136 (KeRemoveQueue)" in want, want
         elif log is de:
-            assert "divide error at 0x00012340: divide by zero (no guest handler took it)" in want, want
+            assert "guest exception 0xC0000094 at 0x00012340: divide by zero" in want, want
         else:
-            assert want.endswith("unhandled guest exception 0xC0000005 at 0x00045678"), want
+            assert want.endswith("guest exception 0xC0000005 at 0x00045678: no guest handler took it"), want

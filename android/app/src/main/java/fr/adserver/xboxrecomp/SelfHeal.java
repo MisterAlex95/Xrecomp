@@ -78,6 +78,12 @@ final class SelfHeal {
         int stub;
         /** The first of them, « ordinal 136 (KeRemoveQueue) », or "". */
         String firstStub = "";
+        /** Each stub route once, in the order first called (tools/compat/blockers.py stub_names). */
+        final java.util.List<String> stubNames = new java.util.ArrayList<>();
+        /** Code written or run at run time (XBA-118): the lifted C cannot run it, a Prepare does not help. */
+        int smc;
+        /** Their sites, « code_write 0x00012345 (.text) », in order (blockers.py smc_site). */
+        final java.util.List<String> smcSites = new java.util.ArrayList<>();
     }
 
     /** How the game's process last ended (ApplicationExitInfo, or a test's). */
@@ -342,10 +348,23 @@ final class SelfHeal {
                     f.firstException = o.optString("code", "?") + " at " + o.optString("va", "?") + ": "
                             + o.optString("why", "?");
                 break;
-            case "stub":
+            case "stub": {
+                String name = "ordinal " + o.optInt("ord", -1)
+                              + (o.optString("name", "").isEmpty() ? "" : " (" + o.optString("name", "") + ")");
                 if (f.stub++ == 0)
-                    f.firstStub = "ordinal " + o.optInt("ord", -1)
-                            + (o.optString("name", "").isEmpty() ? "" : " (" + o.optString("name", "") + ")");
+                    f.firstStub = name;
+                if (!f.stubNames.contains(name))
+                    f.stubNames.add(name);
+                break;
+            }
+            case "smc":
+                f.smc++;
+                if ("code_write".equals(o.optString("kind", "")))
+                    f.smcSites.add("code_write " + (o.has("at") ? o.optString("at") : o.optString("va", "null"))
+                                   + " (" + o.optString("section", "?") + ")");
+                else
+                    f.smcSites.add(o.optString("kind", "smc") + " " + o.optString("va", "null") + " ("
+                                   + o.optString("where", "?") + ", from " + o.optString("ret", "?") + ")");
                 break;
             default:   // run, d3d, wait_spin, launch: the runtime acts on them, the analysis does not
                 break;
@@ -354,7 +373,11 @@ final class SelfHeal {
         return f;
     }
 
-    /** What a Prepare cannot fix and stops a title, in words (tools/compat/heal.py says the same), or null. */
+    /**
+     * What a Prepare cannot fix and stops a title, in words, or null. The same words as tools/compat/blockers.py, which
+     * the desktop's classify() (the matrix, the device's library check) and heal.py use: one blocker reads the same
+     * everywhere (SelfHealTest and test_blockers.py pin the strings).
+     */
     static String fatal(Finds f) {
         if (f.exception > 0)
             return "guest exception " + f.firstException + more(f.exception);
@@ -362,7 +385,33 @@ final class SelfHeal {
             return "stack switch " + f.firstStackSwitch + more(f.stackSwitch);
         if (f.unimpl > 0)
             return "untranslated instruction: " + f.firstUnimpl + more(f.unimpl);
+        if (f.smc > 0)
+            return smcWords(f);
         return null;
+    }
+
+    /** blockers.py smc_words: « code written or run at run time x2: site, site » (at most 3, then « +N more »). */
+    static String smcWords(Finds f) {
+        java.util.List<String> sites = new java.util.ArrayList<>(f.smcSites);
+        if (sites.size() > 3) {
+            int extra = sites.size() - 3;
+            sites = new java.util.ArrayList<>(sites.subList(0, 3));
+            sites.add("+" + extra + " more");
+        }
+        return "code written or run at run time x" + f.smc + ": " + String.join(", ", sites);
+    }
+
+    /** blockers.py stub_words: « calls stub ordinal 136 (KeRemoveQueue), ... » (at most 4, then « +N more »), or "". */
+    static String stubWords(Finds f) {
+        java.util.List<String> names = new java.util.ArrayList<>(f.stubNames);
+        if (names.isEmpty())
+            return "";
+        if (names.size() > 4) {
+            int extra = names.size() - 4;
+            names = new java.util.ArrayList<>(names.subList(0, 4));
+            names.add("+" + extra + " more");
+        }
+        return "calls stub " + String.join(", ", names);
     }
 
     private static String more(int n) {
@@ -382,7 +431,7 @@ final class SelfHeal {
         String crash = "crash" + (e.why.isEmpty() ? "" : " (" + e.why + ")");
         if (f.seeds > 0)
             return crash + ", still after " + rounds + " rounds";
-        return crash + ", nothing new found" + (f.stub > 0 ? "; calls stub " + f.firstStub + more(f.stub) : "");
+        return crash + ", nothing new found" + (f.stub > 0 ? "; " + stubWords(f) : "");
     }
 
     /**

@@ -9,7 +9,7 @@ import subprocess
 import sys
 import time
 
-from tools.compat import STAGES, device
+from tools.compat import STAGES, blockers, device
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
@@ -90,10 +90,9 @@ def classify(status, presses_ms, exit_info, run_s, sustain_s, log_text="", disco
             blocker = "hang: no flip for the last %d s" % stall
     # A guest stack switch the runtime could not carry (XBA-101) explains a
     # hang, a crash or an exit alike: the side that should have run never did.
-    switch = next((d for d in discovered if d.get("t") == "stack_switch"), None)
-    if blocker and switch and not launch:
-        blocker += "; stack switch at %s to %s: %s (XBA-101)" % (switch.get("va"), switch.get("to"),
-                                                                   switch.get("why"))
+    switches = blockers.of_kind(discovered, "stack_switch")
+    if blocker and switches and not launch:
+        blocker += "; " + blockers.stack_switch_words(switches)
     elif blocker and (blocker == "no flip" or blocker.startswith(("hang", "no status"))):
         u = UNIMPL_RE.search(log_text or "")
         if u:
@@ -103,14 +102,21 @@ def classify(status, presses_ms, exit_info, run_s, sustain_s, log_text="", disco
             if addressed:
                 d = addressed[-1]
                 blocker += "; last discovery: %s %s" % (d.get("t"), d.get("va"))
-    # The guest's exceptions (XBA-110 x XBA-112), with the same words on the
-    # device (tools/compat/device.py grades through this function).
+    # The guest's exceptions nothing handled (XBA-110, XBA-112, XBA-129,
+    # XBA-132): the discovery file's "exception" entries, or, for a run from
+    # before them, the runtime's [#DE] and [SEH] lines; the same words as
+    # heal.py and the app's SelfHeal (tools/compat/blockers.py).
+    excs = blockers.of_kind(discovered, "exception")
     de = DE_RE.search(log_text or "")
     seh = SEH_UNHANDLED_RE.search(log_text or "")
-    if blocker and de and not launch:
-        blocker += "; divide error at %s: %s (%s)" % (de.group(1), de.group(2), de.group(3))
+    if blocker and excs and not launch:
+        blocker += "; " + blockers.exception_words(excs)
+    elif blocker and de and not launch:
+        code = "0xC0000094" if de.group(2) == "divide by zero" else "0xC0000095"
+        blocker += "; " + blockers.exception_words([{"code": code, "va": de.group(1), "why": de.group(2)}])
     elif blocker and seh and not launch and not blocker.startswith("crash"):
-        blocker += "; unhandled guest exception %s at %s" % (seh.group(1), seh.group(2))
+        blocker += "; " + blockers.exception_words([{"code": seh.group(1), "va": seh.group(2),
+                                                      "why": "no guest handler took it"}])
     if blocker is None and stage != "sustained":
         blocker = {"boots": "nothing lit on screen", "renders": "no response to the pad",
                    "responsive": "not sustained"}.get(stage)
@@ -133,24 +139,15 @@ def classify(status, presses_ms, exit_info, run_s, sustain_s, log_text="", disco
     smc = [d for d in discovered or () if d.get("t") == "smc"]
     summary["smc"] = len(smc)
     if smc and not launch:
-        named = "code written or run at run time x%d: %s (XBA-118)" % (len(smc), ", ".join(smc_sites(smc)))
+        named = blockers.smc_words(smc)
         blocker = blocker + "; " + named if blocker else named
     return stage, blocker, summary
 
 
 def smc_sites(smc, limit=3):
-    """["exec_outside_image 0x00400000 (heap, from 0x00011234)", "code_write 0x00012345 (.text)", ...]: the
-    discovery file's smc entries in the order they came, at most `limit` (then "+N more")."""
-    out = []
-    for d in smc:
-        if d.get("kind") == "code_write":
-            out.append("code_write %s (%s)" % (d.get("at") or d.get("va"), d.get("section", "?")))
-        else:
-            out.append("%s %s (%s, from %s)" % (d.get("kind", "smc"), d.get("va"), d.get("where", "?"),
-                                                d.get("ret", "?")))
-    if len(out) > limit:
-        out = out[:limit] + ["+%d more" % (len(out) - limit)]
-    return out
+    """The smc entries' sites, as blockers.smc_words lists them."""
+    sites = [blockers.smc_site(e) for e in smc]
+    return sites[:limit] + ["+%d more" % (len(sites) - limit)] if len(sites) > limit else sites
 
 
 def renderer_gaps(last, limit=3):
@@ -167,18 +164,8 @@ def renderer_gaps(last, limit=3):
 
 
 def stub_calls(discovered, limit=4):
-    """["ordinal 136 (KeRemoveQueue)", ...] from the discovery file's stub
-    entries, in the order they were first called, at most `limit` (then "+N")."""
-    out = []
-    for d in discovered or ():
-        if d.get("t") != "stub" or "ord" not in d:
-            continue
-        s = "ordinal %s" % d["ord"] + (" (%s)" % d["name"] if d.get("name") else "")
-        if s not in out:
-            out.append(s)
-    if len(out) > limit:
-        out = out[:limit] + ["+%d more" % (len(out) - limit)]
-    return out
+    """["ordinal 136 (KeRemoveQueue)", ...] (blockers.stub_names)."""
+    return blockers.stub_names(blockers.of_kind(discovered, "stub"), limit)
 
 
 def _responds(status, presses_ms):

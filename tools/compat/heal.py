@@ -31,9 +31,11 @@ import json
 import os
 import re
 
+from tools.compat import blockers
+
 SEED_KINDS = ("icall", "thread", "thread_ctx")
 # A prepare cannot fix these: the lifter, the kernel or the runtime must.
-FATAL_KINDS = ("exception", "stack_switch", "unimpl")
+FATAL_KINDS = ("exception", "stack_switch", "unimpl", "smc")
 
 DISCOVERY = "discovered.jsonl"
 SEEDS = "discovered-seeds.json"
@@ -63,8 +65,8 @@ def entries_from(path, offset=0):
 
 
 def finds(entries):
-    """{"seeds": [va...], "exception": [entry...], "stack_switch": [...], "unimpl": [...], "stub": [...]}."""
-    f = {"seeds": [], "exception": [], "stack_switch": [], "unimpl": [], "stub": []}
+    """{"seeds": [va...], "exception": [entry...], "stack_switch": [...], "unimpl": [...], "smc": [...], "stub": [...]}."""
+    f = {"seeds": [], "exception": [], "stack_switch": [], "unimpl": [], "smc": [], "stub": []}
     for e in entries:
         t = e.get("t")
         if t in SEED_KINDS and e.get("va"):
@@ -76,27 +78,22 @@ def finds(entries):
 
 
 def named_blocker(f):
-    """What a prepare cannot fix, in words (the app says the same), or None."""
+    """What a prepare cannot fix, in words (classify() and the app say the same:
+    tools/compat/blockers.py), or None. Code written or run at run time
+    (XBA-118) is one: the lifted C cannot run it, another Prepare neither."""
     if f["exception"]:
-        e = f["exception"][0]
-        return "guest exception %s at %s: %s" % (e.get("code", "?"), e.get("va", "?"), e.get("why", "?"))
+        return blockers.exception_words(f["exception"])
     if f["stack_switch"]:
-        e = f["stack_switch"][0]
-        return "stack switch at %s to %s: %s" % (e.get("va", "?"), e.get("to", "?"), e.get("why", "?"))
+        return blockers.stack_switch_words(f["stack_switch"])
     if f["unimpl"]:
-        e = f["unimpl"][0]
-        return "untranslated instruction: %s at %s" % (e.get("insn", "?"), e.get("va", "?"))
+        return blockers.unimpl_words(f["unimpl"])
+    if f["smc"]:
+        return blockers.smc_words(f["smc"])
     return None
 
 
 def stub_words(f, limit=4):
-    out = []
-    for e in f["stub"]:
-        s = "ordinal %s" % e.get("ord") + (" (%s)" % e["name"] if e.get("name") else "")
-        if s not in out:
-            out.append(s)
-    return "calls stub " + ", ".join(out[:limit]) + (" +%d more" % (len(out) - limit) if len(out) > limit else "") \
-        if out else None
+    return blockers.stub_words(f["stub"], limit)
 
 
 def _same(a, b):

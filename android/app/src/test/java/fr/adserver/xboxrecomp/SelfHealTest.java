@@ -245,4 +245,35 @@ public class SelfHealTest {
         append(work, RUN + ICALL);
         assertEquals(1, SelfHeal.scan(SelfHeal.discoveryFile(work), SelfHeal.read(work).offset).seeds);
     }
+
+    /** Wave 3: the same words as tools/compat/blockers.py (tools/compat/test_blockers.py pins the same strings). */
+    private static final String BLOCKER_FIXTURE = RUN
+            + "{\"t\":\"smc\",\"va\":\"0x00400000\",\"kind\":\"exec_outside_image\",\"ret\":\"0x00011234\","
+            + "\"where\":\"heap\",\"bytes\":\"5589E583EC10C390\"}\n"
+            + "{\"t\":\"smc\",\"va\":\"0x00012000\",\"kind\":\"code_write\",\"at\":\"0x00012345\","
+            + "\"section\":\".text\",\"by\":\"a store\",\"ret\":\"0x00011000\"}\n"
+            + "{\"t\":\"stub\",\"ord\":136,\"name\":\"KeRemoveQueue\",\"ret\":\"0x00012345\"}\n"
+            + "{\"t\":\"stub\",\"ord\":206,\"name\":\"NtQueueApcThread\",\"ret\":\"0x00012399\"}\n"
+            + "{\"t\":\"exception\",\"va\":\"0x00040000\",\"code\":\"0xC0000005\","
+            + "\"why\":\"host fault on a guest address no guest handler took\"}\n"
+            + "{\"t\":\"exception\",\"va\":\"0x00011020\",\"code\":\"0xC0000094\",\"why\":\"divide by zero\"}\n";
+
+    @Test
+    public void theBlockerWordsAreTheDesktops() throws Exception {
+        File work = tmp.newFolder("w");
+        append(work, BLOCKER_FIXTURE);
+        SelfHeal.Finds f = SelfHeal.scan(SelfHeal.discoveryFile(work), 0);
+        assertEquals("guest exception 0xC0000005 at 0x00040000: host fault on a guest address no guest handler took (+1)",
+                     SelfHeal.fatal(f));
+        assertEquals("code written or run at run time x2: exec_outside_image 0x00400000 (heap, from 0x00011234), "
+                     + "code_write 0x00012345 (.text)", SelfHeal.smcWords(f));
+        assertEquals("calls stub ordinal 136 (KeRemoveQueue), ordinal 206 (NtQueueApcThread)", SelfHeal.stubWords(f));
+        // Code written at run time alone is « needs a fix » too: a Prepare cannot make the lifted C run it.
+        File w2 = tmp.newFolder("w2");
+        SelfHeal.launched(w2, 1000);
+        append(w2, RUN + ICALL + BLOCKER_FIXTURE.split("\n")[2] + "\n");
+        assertTrue(SelfHeal.onExit(w2, crash(2000)));
+        assertEquals(SelfHeal.Offer.NEEDS_FIX, SelfHeal.read(w2).offer);
+        assertEquals("code written or run at run time x1: code_write 0x00012345 (.text)", SelfHeal.read(w2).blocker);
+    }
 }
