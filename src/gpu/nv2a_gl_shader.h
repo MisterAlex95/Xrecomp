@@ -67,6 +67,11 @@ typedef struct {
      * by the caller after nv2a_gl_shader_key (the batch, not the pixel
      * state, knows it). */
     uint32_t point_sprite;
+    /* SET_TEXTURE_FILTER's signed channels per combiner stage (bits 0-3:
+     * A, R, G, B), read as two's complement over 127 after the fetch
+     * (nv_s8); not for a stage a bump-env stage reads (it signs dU/dV
+     * itself). */
+    uint32_t tex_signed[4];
 } Nv2aGlShaderKey;
 
 enum {

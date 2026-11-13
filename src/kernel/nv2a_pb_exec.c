@@ -1681,6 +1681,18 @@ static uint32_t linear_twin(uint32_t fmt)
     case 0x06: return 0x12;                /* A8R8G8B8  -> LIN_A8R8G8B8  */
     case 0x07: return 0x1E;                /* X8R8G8B8  -> LIN_X8R8G8B8  */
     case 0x19: return 0x1F;                /* A8        -> LIN_A8        */
+    /* XBA-120: the rest of xemu's SZ_ list. */
+    case 0x1A: return 0x20;                /* SZ_A8Y8       -> LU_IMAGE_A8Y8       */
+    case 0x27: return 0x37;                /* SZ_R6G5B5     -> LU_IMAGE_R6G5B5     */
+    case 0x28: return 0x17;                /* SZ_G8B8       -> LU_IMAGE_G8B8       */
+    case 0x29: return 0x16;                /* SZ_R8B8       -> LU_IMAGE_R8B8       */
+    case 0x32: return 0x35;                /* SZ_Y16        -> LU_IMAGE_Y16        */
+    case 0x33: return 0x36;                /* SZ_YB16YA16   -> LU_IMAGE_YB16YA16   */
+    case 0x38: return 0x3D;                /* SZ_R5G5B5A1   -> LU_IMAGE_R5G5B5A1   */
+    case 0x39: return 0x3E;                /* SZ_R4G4B4A4   -> LU_IMAGE_R4G4B4A4   */
+    case 0x3A: return 0x3F;                /* SZ_A8B8G8R8   -> LU_IMAGE_A8B8G8R8   */
+    case 0x3B: return 0x40;                /* SZ_B8G8R8A8   -> LU_IMAGE_B8G8R8A8   */
+    case 0x3C: return 0x41;                /* SZ_R8G8B8A8   -> LU_IMAGE_R8G8B8A8   */
     default:   return fmt;                 /* already linear, or unhandled */
     }
 }
@@ -1862,6 +1874,81 @@ static int decode_texel(const Texture *t, uint32_t fmt, const uint8_t *p, uint32
     case 0x1B: {                                    /* LIN_AL8 */
         uint32_t t = p[u];
         *argb = (t << 24) | (t << 16) | (t << 8) | t;
+        return 1;
+    }
+
+    /* XBA-120: the formats of xemu's list nothing read. Bump-map formats
+     * (D3D's V8U8 is G8B8, L6V5U5 R6G5B5, V16U16 YB16YA16) hand their
+     * bytes over as they are: the bump stages (and SET_TEXTURE_FILTER's
+     * signed channels, rc_signed) read them as two's complement. A channel
+     * a format lacks reads 1, as alpha does. Luminance repeats in R, G, B;
+     * 16-bit values keep their top byte. */
+    case 0x14: {                                    /* LU_IMAGE_SY8 (signed Y8) */
+        uint32_t t = p[u];
+        *argb = 0xFF000000u | (t << 16) | (t << 8) | t;
+        return 1;
+    }
+    case 0x15: {                                    /* LU_IMAGE_X7SY9: signed 9-bit Y */
+        uint32_t t = (((const uint16_t *)p)[u] >> 1) & 0xFFu;
+        *argb = 0xFF000000u | (t << 16) | (t << 8) | t;
+        return 1;
+    }
+    case 0x16: {                                    /* LU_IMAGE_R8B8 */
+        uint32_t t = ((const uint16_t *)p)[u];
+        *argb = 0xFF00FF00u | ((t >> 8) << 16) | (t & 0xFFu);
+        return 1;
+    }
+    case 0x17:                                      /* LU_IMAGE_G8B8 */
+    case 0x18: {                                    /* LU_IMAGE_SG8SB8 */
+        uint32_t t = ((const uint16_t *)p)[u];
+        *argb = 0xFFFF0000u | t;                    /* G high byte, B low */
+        return 1;
+    }
+    case 0x20: {                                    /* LU_IMAGE_A8Y8 */
+        uint32_t t = ((const uint16_t *)p)[u], y = t & 0xFFu;
+        *argb = ((t >> 8) << 24) | (y << 16) | (y << 8) | y;
+        return 1;
+    }
+    case 0x37: {                                    /* LU_IMAGE_R6G5B5 */
+        uint32_t t = ((const uint16_t *)p)[u];
+        *argb = 0xFF000000u
+              | (expand((t >> 10) & 0x3F, 6) << 16)
+              | (expand((t >>  5) & 0x1F, 5) <<  8)
+              |  expand( t        & 0x1F, 5);
+        return 1;
+    }
+    case 0x2E: {                                    /* LU_IMAGE_DEPTH_X8_Y24_FIXED */
+        /* Depth in the top 24 bits, as a Z24S8 surface stores it (xemu
+         * uploads it as GL_UNSIGNED_INT_24_8): its top byte, as grey. */
+        uint32_t t = ((const uint32_t *)p)[u] >> 24;
+        *argb = 0xFF000000u | (t << 16) | (t << 8) | t;
+        return 1;
+    }
+    case 0x30:                                      /* LU_IMAGE_DEPTH_Y16_FIXED */
+    case 0x35: {                                    /* LU_IMAGE_Y16 */
+        uint32_t t = ((const uint16_t *)p)[u] >> 8;
+        *argb = 0xFF000000u | (t << 16) | (t << 8) | t;
+        return 1;
+    }
+    case 0x36: {                                    /* LU_IMAGE_YB16YA16 */
+        uint32_t t = ((const uint32_t *)p)[u];
+        *argb = 0xFFFF0000u | ((t >> 24) << 8) | ((t >> 8) & 0xFFu);
+        return 1;
+    }
+    case 0x3D: {                                    /* LU_IMAGE_R5G5B5A1 */
+        uint32_t t = ((const uint16_t *)p)[u];
+        *argb = ((t & 1u) ? 0xFF000000u : 0u)
+              | (expand((t >> 11) & 0x1F, 5) << 16)
+              | (expand((t >>  6) & 0x1F, 5) <<  8)
+              |  expand((t >>  1) & 0x1F, 5);
+        return 1;
+    }
+    case 0x3E: {                                    /* LU_IMAGE_R4G4B4A4 */
+        uint32_t t = ((const uint16_t *)p)[u];
+        *argb = (expand( t        & 0x0F, 4) << 24)
+              | (expand((t >> 12) & 0x0F, 4) << 16)
+              | (expand((t >>  8) & 0x0F, 4) <<  8)
+              |  expand((t >>  4) & 0x0F, 4);
         return 1;
     }
 
@@ -3527,6 +3614,27 @@ static void rc_texel(const Texture *t, uint32_t face, float u, float v,
         out[0] = out[1] = out[2] = out[3] = 1.0f;
 }
 
+/* SET_TEXTURE_FILTER's signed channels (bits 28-31: A, R, G, B; XBA-120):
+ * the texel's byte read as two's complement over 127, the bump stages'
+ * reading (nv_s8 in nv2a_gl_shader.c), so a signed normal map reaches the
+ * combiners in [-1, 1]. */
+static float rc_s8(float x)
+{
+    float b = floorf(x * 255.0f + 0.5f);
+    return (b >= 128.0f ? b - 256.0f : b) / 127.0f;
+}
+
+static void rc_signed(const Texture *t, float out[4])
+{
+    uint32_t sg = t->filter >> 28;
+    if (!sg)
+        return;
+    if (sg & 1) out[3] = rc_s8(out[3]);
+    if (sg & 2) out[0] = rc_s8(out[0]);
+    if (sg & 4) out[1] = rc_s8(out[1]);
+    if (sg & 8) out[2] = rc_s8(out[2]);
+}
+
 /* What texture stage `st` contributes, by its SHADER_STAGE_PROGRAM mode
  * (xemu psh.c). Returns 0 when a clip-plane stage kills the pixel. */
 static int rc_stage_fetch(int st, const float c[4], const float *cx,
@@ -3541,15 +3649,24 @@ static int rc_stage_fetch(int st, const float c[4], const float *cx,
         out[0] = out[1] = out[2] = 0.0f; out[3] = 1.0f;
         return 1;
     case 1: case 2:                               /* PROJECT2D / 3D */
+        if (t->color >= 0x2A && t->color <= 0x31) {
+            /* A shadow map: this path has no depth compare, and reading the
+             * depth as a colour (decoded since XBA-120) would darken what
+             * white leaves lit, as before. */
+            out[0] = out[1] = out[2] = out[3] = 1.0f;
+            return 1;
+        }
         if (cx && cy) {                           /* neighbours: the gradient */
             float qx = cx[3] != 0.0f ? cx[3] : 1.0f, qy = cy[3] != 0.0f ? cy[3] : 1.0f;
             float u = c[0] / q, v = c[1] / q;
             float g[4] = { cx[0] / qx - u, cx[1] / qx - v,
                            cy[0] / qy - u, cy[1] / qy - v };
             rc_texel(t, 0, u, v, g, out);
+            rc_signed(t, out);
             return 1;
         }
         rc_texel(t, 0, c[0] / q, c[1] / q, NULL, out);
+        rc_signed(t, out);
         return 1;
     case 3: {                                     /* CUBEMAP */
         float x = c[0], y = c[1], z = c[2];
@@ -3557,6 +3674,7 @@ static int rc_stage_fetch(int st, const float c[4], const float *cx,
         uint32_t face;
         if (!t->cube) {
             rc_texel(t, 0, c[0], c[1], NULL, out);
+            rc_signed(t, out);
             return 1;
         }
         if (ax >= ay && ax >= az) {
@@ -3570,6 +3688,7 @@ static int rc_stage_fetch(int st, const float c[4], const float *cx,
             ma = 1.0f;
         rc_texel(t, face * tex_face_stride(t), (sc / ma + 1.0f) * 0.5f,
                  (tc / ma + 1.0f) * 0.5f, NULL, out);
+        rc_signed(t, out);
         return 1;
     }
     case 4:                                       /* PASSTHRU */
@@ -5507,15 +5626,14 @@ static void note_batch_gaps(void)
             continue;
         used |= 1u << st;
         f = nv2a_tex_format(t->color);
-        if (!f->decoded) {
+        if (t->color >= 0x2A && t->color <= 0x31 && combiners && (mode == 1 || mode == 2)) {
             /* A depth format in a projective stage is a shadow map: the
              * GPU compares with the zeta surface it holds, the CPU path
              * reads white. */
-            int depth = t->color >= 0x2A && t->color <= 0x31;
-            if (depth && combiners && (mode == 1 || mode == 2))
-                nv2a_gap_note(gpu ? NULL : "shadow map (CPU rasteriser)", 1);
-            else
-                nv2a_gap_note(f->gap, 1);
+            if (!gpu)
+                nv2a_gap_note("shadow map (CPU rasteriser)", 1);
+        } else if (!f->decoded) {
+            nv2a_gap_note(f->gap, 1);
         }
         if (t->dims == 3 && !backend_caps(NV2A_BACKEND_CAP_PIXEL | NV2A_BACKEND_CAP_VOLUME))
             nv2a_gap_note("volume texture", 1);

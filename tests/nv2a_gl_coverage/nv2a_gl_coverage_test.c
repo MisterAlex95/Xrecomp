@@ -28,7 +28,11 @@
  *   8. a cube map's six faces, one colour each, on a CUBEMAP stage;
  *   9. a 4x4x4 volume, one colour a slice: each slice by its r through the
  *      colour rule without combiners, then on a PROJECT3D stage with q = 2;
- *      the CPU rasteriser counts it as unsupported. */
+ *      the CPU rasteriser counts it as unsupported.
+ *
+ * Formats:
+ *  10. swizzled A8Y8 and R4G4B4A4 (added), and SET_TEXTURE_FILTER's signed
+ *      channels on an A8R8G8B8 texel, through the combiners. */
 #include "../../src/gpu/nv2a_gl.c"
 #include "nv2a_coverage.h"
 
@@ -453,6 +457,57 @@ int main(void)
         CHECK(nv2a_gap_count("volume texture") == 1);
         nv2a_gl_install_from_env();
         m(0x1784, 2 | (2 << 4) | (32 << 8));
+        m(0x1E70, 0);
+        m(0x1B00, 0);
+    }
+
+    /* 10. Formats XBA-120 added, on the GPU: swizzled A8Y8 and R4G4B4A4
+     * through the combiners (final: D = texel), then signed channels. */
+    {
+        uint32_t k, c[4];
+        uint16_t v16;
+        m(0x1E70, 1);                           /* stage 0 PROJECT2D */
+        m(0x1784, 2 | (2 << 4) | (32 << 8));
+        for (k = 0; k < 4; k++)
+            vtx(k, nx(k == 1 || k == 2 ? 12 : 8), ny(k >= 2 ? 12 : 8), 0.5f, 0xFFFFFFFFu,
+                k == 1 || k == 2 ? 1.0f : 0.0f, k >= 2 ? 1.0f : 0.0f);
+        m(0x1B00, TEX);
+        m(0x1B08, 0x0303);
+        m(0x1B0C, 1u << 30);
+        v16 = 0xFF60;                           /* A8Y8: A 0xFF, Y 0x60 */
+        for (k = 0; k < 4; k++)
+            memcpy(s_mem + TEX + 2 * k, &v16, 2);
+        m(0x1B04, (0x1Au << 8) | (2u << 4) | (1u << 16) | (1u << 20) | (1u << 24));
+        m(0x1B14, (1u << 16) | (1u << 24));
+        clear_black();
+        draw(8, 0, 4);
+        readback();
+        c[0] = px(10, 10);
+        v16 = 0x48CF;                           /* R4G4B4A4: 4, 8, C, F */
+        for (k = 0; k < 4; k++)
+            memcpy(s_mem + TEX + 2 * k, &v16, 2);
+        m(0x1B04, (0x39u << 8) | (2u << 4) | (1u << 16) | (1u << 20) | (1u << 24));
+        draw(8, 0, 4);
+        readback();
+        c[1] = px(10, 10);
+        /* A8R8G8B8 0xFFC04080 with R, G, B signed: R -64/127 and B -128/127
+         * clamp to 0 at the final combiner, G 64/127 reads 0x80. */
+        for (k = 0; k < 4; k++)
+            put32(TEX + 4 * k, 0xFFC04080u);
+        m(0x1B04, (0x06u << 8) | (2u << 4) | (1u << 16) | (1u << 20) | (1u << 24));
+        draw(8, 0, 4);
+        readback();
+        c[2] = px(10, 10);
+        m(0x1B14, (1u << 16) | (1u << 24) | (0xEu << 28));
+        draw(8, 0, 4);
+        readback();
+        c[3] = px(10, 10);
+        printf("10. A8Y8 %06X, R4G4B4A4 %06X, A8R8G8B8 %06X, the same with R, G, B signed %06X\n",
+               c[0], c[1], c[2], c[3]);
+        CHECK(c[0] == 0x606060u && c[1] == 0x4488CCu && c[2] == 0xC04080u);
+        CHECK((c[3] & 0xFF00FFu) == 0 && ((c[3] >> 8) & 0xFF) >= 0x80 && ((c[3] >> 8) & 0xFF) <= 0x81);
+        CHECK(nv2a_gap_count("texture format 0x1A SZ_A8Y8") == 0);
+        m(0x1B14, (1u << 16) | (1u << 24));
         m(0x1E70, 0);
         m(0x1B00, 0);
     }

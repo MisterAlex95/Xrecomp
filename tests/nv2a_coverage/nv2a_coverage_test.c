@@ -160,6 +160,57 @@ static void check_method_names(void)
     printf("2. method names: ok\n");
 }
 
+/* The formats XBA-120 added: one texel each, decoded exactly. */
+static void check_new_formats(void)
+{
+    static const struct { uint32_t fmt, bytes, raw, want; } c[] = {
+        { 0x14, 1, 0x9A, 0xFF9A9A9Au },          /* LU_IMAGE_SY8 */
+        { 0x15, 2, 0x0135, 0xFF9A9A9Au },        /* LU_IMAGE_X7SY9 */
+        { 0x16, 2, 0x12AB, 0xFF12FFABu },        /* LU_IMAGE_R8B8 */
+        { 0x29, 2, 0x12AB, 0xFF12FFABu },        /* SZ_R8B8 */
+        { 0x17, 2, 0x34CD, 0xFFFF34CDu },        /* LU_IMAGE_G8B8 */
+        { 0x28, 2, 0x34CD, 0xFFFF34CDu },        /* SZ_G8B8 (D3D V8U8) */
+        { 0x18, 2, 0x34CD, 0xFFFF34CDu },        /* LU_IMAGE_SG8SB8 */
+        { 0x1A, 2, 0x8040, 0x80404040u },        /* SZ_A8Y8 */
+        { 0x20, 2, 0x8040, 0x80404040u },        /* LU_IMAGE_A8Y8 */
+        { 0x27, 2, 0xFC1F, 0xFFFF00FFu },        /* SZ_R6G5B5 */
+        { 0x37, 2, 0x03E0, 0xFF00FF00u },        /* LU_IMAGE_R6G5B5 */
+        { 0x2E, 4, 0xAB123456u, 0xFFABABABu },   /* LU_IMAGE_DEPTH_X8_Y24_FIXED */
+        { 0x30, 2, 0xCD12, 0xFFCDCDCDu },        /* LU_IMAGE_DEPTH_Y16_FIXED */
+        { 0x32, 2, 0x7F00, 0xFF7F7F7Fu },        /* SZ_Y16 */
+        { 0x35, 2, 0x7F00, 0xFF7F7F7Fu },        /* LU_IMAGE_Y16 */
+        { 0x33, 4, 0x80004000u, 0xFFFF8040u },   /* SZ_YB16YA16 (D3D V16U16) */
+        { 0x38, 2, 0xF801, 0xFFFF0000u },        /* SZ_R5G5B5A1 */
+        { 0x3D, 2, 0x07C0, 0x0000FF00u },        /* LU_IMAGE_R5G5B5A1 */
+        { 0x39, 2, 0xF00F, 0xFFFF0000u },        /* SZ_R4G4B4A4 */
+        { 0x3E, 2, 0x0F80, 0x0000FF88u },        /* LU_IMAGE_R4G4B4A4 */
+        { 0x3A, 4, 0x11223344u, 0x11443322u },   /* SZ_A8B8G8R8 */
+        { 0x3B, 4, 0x11223344u, 0x44332211u },   /* SZ_B8G8R8A8 */
+        { 0x3C, 4, 0x11223344u, 0x44112233u },   /* SZ_R8G8B8A8 */
+    };
+    size_t i;
+    int bad = 0;
+
+    for (i = 0; i < sizeof c / sizeof c[0]; i++) {
+        Nv2aTexture t;
+        uint32_t out = 0;
+        memset(&t, 0, sizeof t);
+        t.offset = 0x30000;
+        t.width = t.height = 1;
+        t.pitch = 4;
+        t.color = c[i].fmt;
+        t.levels = 1;
+        memcpy(s_mem + 0x30000, &c[i].raw, 4);
+        if (!nv2a_backend_decode_texture(&t, &out) || out != c[i].want) {
+            printf("format 0x%02X: 0x%08X reads 0x%08X, want 0x%08X\n", c[i].fmt, c[i].raw,
+                   out, c[i].want);
+            bad++;
+        }
+    }
+    CHECK(bad == 0);
+    printf("2c. added formats: %d of %d wrong\n", bad, (int)(sizeof c / sizeof c[0]));
+}
+
 /* Mip levels (XBA-120): one after another, each in the base layout. */
 static void check_levels(void)
 {
@@ -275,6 +326,7 @@ int main(void)
     check_format_table();
     check_method_names();
     check_levels();
+    check_new_formats();
 
     /* 3. Gaps, on the CPU rasteriser. */
     setup_ffp();

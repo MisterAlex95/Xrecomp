@@ -756,6 +756,27 @@ LOD bias (`SET_TEXTURE_FILTER` bits 0-12, signed 5.8) is a shader uniform
 `RECOMP_GPU_MIPS=0` keeps level 0 only. The CPU rasteriser still samples
 level 0 (minified textures shimmer there); that is not counted as a gap.
 
+**Formats (XBA-120).** The decoder both paths share (`sample_tex` /
+`decode_texel`) now reads 51 of the 59 NV2A formats (the table in
+`nv2a_coverage.c`): added the swizzled twins SZ_A8Y8, SZ_R6G5B5, SZ_G8B8,
+SZ_R8B8, SZ_Y16, SZ_YB16YA16, SZ_R5G5B5A1, SZ_R4G4B4A4, SZ_A8B8G8R8,
+SZ_B8G8R8A8, SZ_R8G8B8A8 and the linear LU_IMAGE_SY8, X7SY9, R8B8, G8B8,
+SG8SB8, A8Y8, R6G5B5, Y16, YB16YA16, R5G5B5A1, R4G4B4A4, and the fixed depth
+formats LU_IMAGE_DEPTH_X8_Y24_FIXED (depth in the top 24 bits, as a Z24S8
+surface stores it) and _Y16_FIXED read as grey. Bump-map formats (D3D's
+V8U8 = G8B8, L6V5U5 = R6G5B5, V16U16 = YB16YA16) hand their bytes over as
+they are; a channel a format lacks reads 1, as alpha does (an assumption
+xemu's own table should confirm); 16-bit values keep their top byte. Still
+counted as unsupported: LU_IMAGE_A8CR8CB8Y8 and LC_IMAGE_A4V6YB6A4U6YA6
+(`d3d8_format_is_swizzled` calls them swizzled, which they are not), the
+swizzled depth formats (0x2A-0x2D, which the same helper calls linear) and
+the float depth formats. A depth format on a projective combiner stage is
+still a shadow map: compared on the GPU, white on the CPU path (which no
+longer reaches the decoder for it). `SET_TEXTURE_FILTER`'s signed channels
+(bits 28-31: A, R, G, B) are honoured on both paths: the texel's byte read
+as two's complement over 127 after the fetch (`rc_signed`, `nv_s8`), except
+on a stage a bump-env stage reads, which signs dU/dV itself.
+
 **Cube and volume textures (XBA-120).** Cube maps (FORMAT bit 2, a
 CUBEMAP stage) were already sampled as `samplerCube` from six faces, each
 face's levels padded to 128 bytes; they now carry their mip chains too.

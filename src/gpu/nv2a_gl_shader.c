@@ -60,6 +60,17 @@ void nv2a_gl_shader_key(const Nv2aPixelState *ps, const Nv2aRenderState *rs,
             }
         }
     }
+    if (ps->shade == NV2A_SHADE_COMBINERS)
+        for (s = 0; s < 4; s++) {
+            uint32_t mode = (key->stage_program >> (s * 5)) & 0x1F, b, src = 0;
+            for (b = 1; b < 4; b++)
+                if ((key->bump_src[b] & 0x10) && (key->bump_src[b] & 0xF) == s)
+                    src = 1;
+            if (mode >= 1 && mode <= 3 && tex_kind[s] != NV2A_GL_TEX_NONE
+                && tex_kind[s] != NV2A_GL_TEX_SHADOW16 && tex_kind[s] != NV2A_GL_TEX_SHADOW24
+                && !src && ps->stage[s].valid)
+                key->tex_signed[s] = ps->stage[s].tex.filter >> 28;
+        }
     /* alpha_test_pass(): ALWAYS and anything unknown pass, so they are "off".
      * The screen-space path never alpha-tests. */
     if (rs->alpha_test_enable && ps->shade != NV2A_SHADE_REPLACE
@@ -470,13 +481,20 @@ size_t nv2a_gl_fragment_body(const Nv2aGlShaderKey *k, char *buf, size_t cap)
             sb(&b, "#define v_t%u vec4(vec2(gl_PointCoord.x, 1.0 - gl_PointCoord.y)"
                    " / u_tscale[%u], 0.0, 1.0)\n", st, st);
     if (k->shade == NV2A_SHADE_COMBINERS
-        && (k->bump_src[1] | k->bump_src[2] | k->bump_src[3]))
+        && (k->bump_src[1] | k->bump_src[2] | k->bump_src[3]
+            | k->tex_signed[0] | k->tex_signed[1] | k->tex_signed[2] | k->tex_signed[3]))
         emit_bump_helpers(&b);
     sb(&b, "void main() {\n  vec4 o;\n");
 
     if (k->shade == NV2A_SHADE_COMBINERS) {
-        for (st = 0; st < 4; st++)
+        for (st = 0; st < 4; st++) {
+            static const char ch[4] = { 'a', 'r', 'g', 'b' };
+            uint32_t c;
             emit_fetch(&b, k, st);
+            for (c = 0; c < 4; c++)
+                if ((k->tex_signed[st] >> c) & 1)
+                    sb(&b, "  T%u.%c = nv_s8(T%u.%c);\n", st, ch[c], st, ch[c]);
+        }
         /* Only the registers a program can read before writing need a value:
          * zero, r0, r1 and the final-combiner specials. */
         sb(&b, "  vec4 R0 = vec4(0.0), R1 = vec4(0.0), R2 = vec4(0.0);\n"
