@@ -429,6 +429,8 @@ def main(argv=None):
     an.add_argument("--extra-src", action="append", default=[], metavar="FILE.c",
                     help="an extra C file compiled into the pack (src/extra/)")
     an.add_argument("--include-dir", action="append", default=[], metavar="DIR", help="an extra -I")
+    an.add_argument("--device-log", metavar="FILE",
+                    help="the app's device log (JSON lines: thermal status, compiles allowed now; XBA-128)")
     mi = ap.add_argument_group("the disc's other images (XBA-82; set by the top-level prepare)")
     mi.add_argument("--image-map", help=argparse.SUPPRESS)   # the map file every image's build bakes in
     mi.add_argument("--game-dir", help=argparse.SUPPRESS)    # D:\ for an image that is not the disc root's
