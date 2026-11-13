@@ -5,13 +5,11 @@
  * processing (reverb, chorus, etc.) and final output encoding. The full
  * DSP is ~3000 lines of DSP56300 emulation code.
  *
- * For initial audio, we bypass the DSP entirely:
- * - VP mixbins are passed directly to the EP output
- * - GP effects processing is skipped
- * - The EP just copies mixbin 0/1 (front L/R) to the monitor buffer
- *
- * This gives us basic voice playback without effects. The DSP can be
- * connected later for reverb, EQ, and other processing.
+ * No DSP56300 runs here: the GP's effects image is not executed and the EP
+ * outputs PCM stereo: the VP's mixbins are summed to stereo, and what the
+ * title asks of the DSPs is recorded (apu_dsp_watch.c). The handshakes DirectSound waits on are answered
+ * below. docs/technical/apu-dsp.md: why no DSP56300 (xemu's interpreter is
+ * GPL, this file and the rest of src/apu are LGPL), the handshake list.
  *
  * Copyright (c) 2012 espes
  * Copyright (c) 2019-2025 Matt Borgerson
@@ -23,6 +21,7 @@
  */
 
 #include "apu_state.h"
+#include "apu_dsp_watch.h"
 #include "fpconv.h"
 
 #include <stdlib.h>
@@ -114,6 +113,22 @@ static int mcpx_apu_mixdown_all(void)
     return on;
 }
 
+/* What the title asks of the DSPs is recorded in apu_dsp_watch.c (this
+ * project's own code), from the GP/EP memory in the aperture. */
+static void *s_aperture_override;          /* tests */
+extern void *xbox_GetMcpxAperture(void);
+
+void mcpx_apu_dsp_set_aperture(void *ap)
+{
+    s_aperture_override = ap;
+}
+
+static const uint8_t *dsp_aperture(void)
+{
+    return (const uint8_t *)(s_aperture_override ? s_aperture_override
+                                                 : xbox_GetMcpxAperture());
+}
+
 /* GPRST (GP region + 0xFFFC): the GP runs only with both reset bits set, as
  * in xemu's gp_write. Nothing else models the GP, so this is kept for the
  * =auto ack alone. Before the first write the GP counts as running: a title
@@ -140,11 +155,20 @@ static uint32_t *dsp_ack_auto_slot(MCPXAPUState *d)
 {
     uint32_t sge = qatomic_read(&d->regs[NV_PAPU_GPSADDR]), page;
 
-    if (!sge || s_gp_in_reset)
+    if (!sge)
         return NULL;
     page = *(const uint32_t *)mcpx_apu_phys(sge);
     if (!page || (page & 0xFFF))
         return NULL;                       /* table not filled in yet */
+    if (s_gp_in_reset) {
+        /* Not answered, but counted: a title that rings while it holds the
+         * GP in reset waits on hardware too -- this says how long. The page
+         * is only read, and only the page the table names now. */
+        uint32_t *slot = (uint32_t *)(mcpx_apu_phys(page) + GP_DOORBELL_OFFSET);
+        apu_dsp_watch_pending(*slot ? APU_DSP_PEND_RESET : -1,
+                              page + GP_DOORBELL_OFFSET);
+        return NULL;
+    }
     if (page != s_dsp_ack_auto_page) {
         s_dsp_ack_auto_page = page;
         fprintf(stderr, "[APU] DSP doorbell: GP scratch SGE table 0x%08X maps"
@@ -180,7 +204,6 @@ static uint32_t *dsp_ack_auto_slot(MCPXAPUState *d)
  * memory beyond this word is still what it last wrote there. */
 #define EP_CANARY_OFFSET 0x5A018u
 #define EP_CANARY_VALUE  0x00CCCCCCu
-extern void *xbox_GetMcpxAperture(void);
 
 static int ep_canary_on(void)
 {
@@ -200,7 +223,7 @@ static void ep_canary_poll(void)
     char *ap;
     volatile uint32_t *w;
 
-    if (!ep_canary_on() || !(ap = (char *)xbox_GetMcpxAperture()))
+    if (!ep_canary_on() || !(ap = (char *)dsp_aperture()))
         return;
     w = (volatile uint32_t *)(ap + EP_CANARY_OFFSET);
     if (*w != EP_CANARY_VALUE)
@@ -227,12 +250,16 @@ void mcpx_apu_dsp_ack_poll(MCPXAPUState *d)
         return;
     if (s_dsp_ack_auto) {
         uint32_t *slot = dsp_ack_auto_slot(d);
-        if (slot && *slot) {
-            static int shown;
-            if (shown++ < 3)
-                fprintf(stderr, "[APU] DSP doorbell (auto): command 0x%08X"
-                                " acknowledged\n", *slot);
-            *slot = 0;
+        if (slot) {
+            apu_dsp_watch_pending(-1, 0);
+            if (*slot) {
+                static int shown;
+                if (shown++ < 3)
+                    fprintf(stderr, "[APU] DSP doorbell (auto): command 0x%08X"
+                                    " acknowledged\n", *slot);
+                apu_dsp_watch_cmd(s_dsp_ack_auto_page + GP_DOORBELL_OFFSET, *slot);
+                *slot = 0;
+            }
         }
     }
     for (i = 0; i < s_dsp_ack_count; i++) {
@@ -242,6 +269,7 @@ void mcpx_apu_dsp_ack_poll(MCPXAPUState *d)
             if (shown[i]++ < 3)
                 fprintf(stderr, "[APU] DSP doorbell 0x%08X: command 0x%08X"
                                 " acknowledged\n", s_dsp_ack[i], *slot);
+            apu_dsp_watch_cmd(s_dsp_ack[i], *slot);
             *slot = 0;
         }
     }
@@ -257,6 +285,7 @@ void mcpx_apu_dsp_init(MCPXAPUState *d)
     s_dsp_ack_auto = 0;
     s_dsp_ack_auto_page = 0;
     s_gp_in_reset = 0;
+    apu_dsp_watch_reset();
 
     /* Allocate minimal DSP state for GP and EP.
      * We need these to exist so reset doesn't crash,
@@ -294,51 +323,28 @@ void mcpx_apu_update_dsp_preference(MCPXAPUState *d)
 void mcpx_apu_dsp_frame(MCPXAPUState *d,
                          float mixbins[NUM_MIXBINS][NUM_SAMPLES_PER_FRAME])
 {
-    /* Bypass DSP: take mixbin 0 (front-left) and mixbin 1 (front-right)
-     * and write them directly to the monitor frame buffer as the final
-     * EP output.
+    /* Bypass DSP: the bins are summed to stereo and written directly to the
+     * monitor frame buffer as the final EP output.
      *
-     * The Xbox DirectSound typically routes:
-     *   Mixbin 0 = Front Left
-     *   Mixbin 1 = Front Right
-     *   Mixbin 2 = Center (often unused in stereo)
-     *   Mixbin 3 = LFE
-     *   Mixbin 4-5 = Rear L/R
+     * Bins 2..31 used to be dropped on the floor: only bins 0/1 were read.
+     * Measured on Jet Set Radio Future, one 200 s gameplay run:
      *
-     * For stereo output, bins 0 and 1 are what we want.
-     */
-
+     *     [APU-BIN] 2D heard=557466 lost=0
+     *               3D heard=0      lost=377768
+     *               lost by bin: 6,7,8,9,10
+     *
+     * The title's 3D positional voices -- its sound effects -- are routed
+     * to bins 6 to 10 by the guest's own V0BIN..V3BIN, music on 2D voices
+     * to bins 0 and 1, which is why the music was always audible and no
+     * effect ever was. Even bins left, odd bins right, which preserves the
+     * stereo pairing the guest set up. This is not what a real EP does; it
+     * is the cheapest mixdown that stops discarding audio. */
     int off = (d->ep_frame_div % 8) * NUM_SAMPLES_PER_FRAME;
+
+    apu_dsp_watch_frame((const float (*)[32])mixbins, dsp_aperture());
 
     if (d->monitor.point != MCPX_APU_DEBUG_MON_VP) {
         for (int i = 0; i < NUM_SAMPLES_PER_FRAME; i++) {
-            /* Bins 2..31 used to be computed and then dropped on the floor.
-             * On hardware the GP and EP mix the submixes down; here they are
-             * stubs, so thirty of thirty-two bins were discarded every frame
-             * with no counter anywhere to say so.
-             *
-             * Measured on Jet Set Radio Future, one 200 s gameplay run, with
-             * a positive control moving beside it:
-             *
-             *     [APU-BIN] 2D heard=557466 lost=0
-             *               3D heard=0      lost=377768
-             *               lost by bin: 6,7,8,9,10
-             *
-             * 557,466 music voice-frames heard and none lost; 377,768 effect
-             * voice-frames produced correctly and thrown away. The title's 3D
-             * positional voices -- its sound effects -- are routed to bins 6
-             * to 10 by the guest's own V0BIN..V3BIN, and music on 2D voices
-             * lands in bins 0 and 1, which is why the music was always
-             * audible and no effect ever was. Every instrument upstream of
-             * this line read healthy.
-             *
-             * Gating the HRTF submix override was tried first and did not fix
-             * it, so the defect is the width of this mixdown and nothing else.
-             *
-             * Even bins left, odd bins right, which preserves the stereo
-             * pairing the guest set up -- bins 6/7 and 8/9 arrive with matched
-             * counts. This is not what a real EP does; it is the cheapest
-             * mixdown that stops discarding audio. */
             float left, right;
             if (mcpx_apu_mixdown_all()) {
                 left = 0.0f;

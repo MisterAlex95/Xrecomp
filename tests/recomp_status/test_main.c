@@ -21,7 +21,7 @@ static int failures;
 
 static char *last_line(const char *path)
 {
-    static char line[512], buf[512];
+    static char line[2048], buf[2048];
     FILE *f = fopen(path, "r");
     line[0] = 0;
     if (!f)
@@ -97,6 +97,14 @@ int main(void)
     CHECK(field(l, "audio_ms") == 10);
     CHECK(field(l, "pad_reads") == 2 && field(l, "threads") == 1 && field(l, "discovered") == 0);
     CHECK(strstr(l, "\"hash\":\"0x") != NULL && l[strlen(l) - 2] == '}');
+    CHECK(strstr(l, "apu_dsp") == NULL);    /* no APU yet: no field */
+
+    /* The APU's DSP report (XBA-122) rides on the line as an object. */
+    recomp_status_apu_dsp("{\"cmds\":7,\"stalls\":0}");
+    recomp_status_write_now();
+    l = last_line(path);
+    CHECK(strstr(l, ",\"apu_dsp\":{\"cmds\":7,\"stalls\":0}}") != NULL);
+    CHECK(field(l, "flips") == 9 && field(l, "cmds") == 7);
 
     recomp_status_reset();
     remove(path);

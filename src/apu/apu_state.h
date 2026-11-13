@@ -555,6 +555,9 @@ void mcpx_apu_dsp_frame(MCPXAPUState *d, float mixbins[NUM_MIXBINS][NUM_SAMPLES_
 void mcpx_apu_dsp_ack_poll(MCPXAPUState *d);
 void mcpx_apu_dsp_gprst_write(uint32_t val);
 int mcpx_apu_dsp_mem_read(uint64_t addr, uint64_t *val);
+/* Tests: the MCPX aperture the DSP stage reads (GP/EP memory, the EP
+ * canary) instead of the kernel's; NULL restores the kernel's. */
+void mcpx_apu_dsp_set_aperture(void *ap);
 
 /* Monitor (host output): call after each 32-sample frame; on the last frame
  * of an EP period it adds the software mixer and test tone to frame_buf and

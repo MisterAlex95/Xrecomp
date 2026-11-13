@@ -17,6 +17,8 @@
  *   threads     guest threads the kernel started (the first, run inline as the
  *               title's main thread, counts)
  *   discovered  new discovery-file entries (recomp_discovery.h)
+ *   apu_dsp     once the APU frame thread ran: what the title asked of the
+ *               GP/EP DSPs (src/apu/apu_dsp_watch.h has the fields)
  *
  * Unset: nothing is counted beyond a load and a branch per call.
  * docs/technical/discovery.md has the companion file; the runner reads both. */
@@ -40,6 +42,10 @@ void recomp_status_frame(const void *px, uint32_t w, uint32_t h, uint32_t pitch,
 void recomp_status_audio(const int16_t *stereo, int count);
 
 void recomp_status_pad_read(void);
+
+/* The APU's DSP report, a JSON object (src/apu/apu_dsp_watch.c), written as the line's "apu_dsp" field. The
+ * caller never blocks: an update that meets the writer is dropped. */
+void recomp_status_apu_dsp(const char *json);
 void recomp_status_thread_started(void);
 
 /* Tests: write one line now (as the thread does), and forget everything. */
