@@ -26,6 +26,9 @@
 #include "kernel.h"
 #include "xbox_nic.h"
 #include "recomp_status.h"
+#include "xbox_seh.h"
+
+extern int xbox_PosixInstallMmioFaultHandler(void);
 
 #include <signal.h>
 #include <stdint.h>
@@ -341,6 +344,25 @@ int main(int argc, char **argv)
     else
         run_off();
     check(!s_unhandled, "no access fell through to the crash path", NULL);
+
+    /* Through the runtime's own fault handler (wave 4): SMC, then MMIO (the
+     * NIC page among them), then XBA-132's guest exception. With a guest
+     * handler chain live on the thread a NIC register access is still MMIO,
+     * never raised to the guest as an access violation. */
+    if (model && xbox_PosixInstallMmioFaultHandler() == 0) {
+        XboxSehStats st;
+        uint32_t rec = XBOX_STACK_TOP - 0x100, v;
+        *(volatile uint32_t *)(s_base + rec) = 0xFFFFFFFFu;
+        *(volatile uint32_t *)(s_base + rec + 4) = 0x00011000u;
+        *(volatile uint32_t *)(s_base + g_fs_base) = rec;
+        xbox_SehStatsGet(&st, 1);
+        R(TxRxControl) = 0;
+        v = R(TransmitterStatus);
+        xbox_SehStatsGet(&st, 0);
+        *(volatile uint32_t *)(s_base + g_fs_base) = 0xFFFFFFFFu;
+        check(v == 0 && st.host_faults == 0 && st.raises == 0 && !s_unhandled,
+              "with a guest handler chain: the NIC page is MMIO, never a guest exception", NULL);
+    }
 
     /* Said once, in the status file, for the library report. */
     {

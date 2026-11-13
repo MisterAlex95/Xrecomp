@@ -302,3 +302,23 @@ def test_guest_exceptions_are_named():
     crash = classify(st, [], ("signal", 11), 40, 60, "SIGSEGV at 0x1234\n", disc)[1]
     assert crash.endswith("; guest exception 0xC0000005 at 0x00040000: host fault on a guest address no guest handler"
                           " took"), crash
+
+
+def test_every_column_of_the_report_at_once():
+    """Wave 4: the report's optional columns coexist -- Recall (XBA-129),
+    Device (XBA-130), DSP (XBA-122) -- with the network stack mark (XBA-117),
+    and the status line's fields all reach the summary together."""
+    st = playing(30)
+    st[-1].update({"seeds": 2, "net": "nic probed, link down", "unsupported": {"points": 4},
+                   "apu_dsp": {"cmds": 3, "gp_words": 10, "gp_image": "abcdef0123456789"}})
+    summary = classify(st, [8000], None, 30, 60)[2]
+    assert summary["seeds"] == 2 and summary["net"] == "nic probed, link down"
+    assert summary["unsupported"] == {"points": 4} and summary["apu_dsp"]["cmds"] == 3 and "smc" in summary
+    row = {"source": "a", "stage": "renders", "toolkit": "x", "net": "nic probed, link down",
+           "recall": {"summary": "12 of 13 known functions"}, "device": "AYN Thor", "android": 13,
+           "runs": [{"apu_dsp": {"cmds": 3, "gp_words": 10, "gp_image": "abcdef0123456789"}}]}
+    t = report([row]).splitlines()
+    assert t[0] == "| Title | Stage | Best of runs | Blocker | XDK | Toolkit | Recall | Device | DSP |"
+    assert t[1].count("|") == t[0].count("|")
+    assert t[2].startswith("| a (network stack) | renders |")
+    assert "| 12 of 13 known functions | AYN Thor, Android 13 | GP image abcdef01 (10 words), 3 cmds |" in t[2], t[2]
