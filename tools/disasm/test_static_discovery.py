@@ -229,6 +229,30 @@ def test_rtti_vtable_methods(tmp_path):
     assert int(on[t.va("die")]["end"], 16) == t.va("method")
 
 
+def test_seh_filter_away_from_its_function(tmp_path):
+    """An __except filter the scope table names, parked after another
+    function's call that never returns: a function of its own (seh_funclet);
+    the __except block in the gap after its function extends that one."""
+    t = Title()
+    x = t.section(".text")
+    r = t.section(".rdata", DATA)
+    x.label("entry").hex("558bec").call("guarded").hex("6a00").call("check").hex("83c404 ebfe").align(16)
+    x.label("guarded").hex("558bec 6aff").push("scopetbl").push("eh3")
+    x.hex("64a100000000 50 648925 00000000 83ec08 c745fc00000000 33c0 c745fcffffffff")
+    x.label("L_ret").hex("8b4df0 64890d00000000 8be5 5d c3")
+    x.label("resume").hex("8b65e8 eb").rel8("L_ret").align(16)
+    x.label("eh3").hex("b801000000 c3").align(16)
+    x.label("check").hex("8b442404 85c0 74").rel8("C_ret").call("die")
+    x.label("C_ret").hex("c3").align(16)
+    x.label("fatal").hex("6a00").call_kernel(0).align(16)
+    x.label("die").hex("6a02").call("fatal")
+    x.label("filter").hex("b801000000 c3").align(16)
+    r.label("scopetbl").u32(0xFFFFFFFF).abs("filter").abs("resume")
+    on, s = analyse(t, str(tmp_path), discovery.STRONG, imports=(49,))
+    assert on.get(t.va("filter"), {}).get("detection_method") == "seh_funclet", on.get(t.va("filter"))
+    assert int(on[t.va("guarded")]["end"], 16) > t.va("resume")
+
+
 def test_random_blobs_between_functions(tmp_path, capsys):
     """A larger title: 1,500 small functions (a third called, a third in a
     table, a third named nowhere), a 64-byte random blob after every 50th,

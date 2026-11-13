@@ -525,14 +525,17 @@ class StaticDiscovery:
         return out
 
     def seh_targets(self, sections) -> Tuple[Dict[int, str], Dict[int, Set[int]]]:
-        """Funclets outside their function ({addr: "seh_funclet"}) and resume
-        targets past a function's end ({function start: {targets}})."""
+        """Funclets outside their function and away from it ({addr:
+        "seh_funclet"}), and the handler targets in the gap right after a
+        function, which extend it ({function start: {targets}})."""
         from ..recomp.disasm import Disassembler
         from ..recomp.seh_frames import analyze_seh_frame
         code_ranges = sorted(self._code_ranges(sections))
         prologs = self._seh_prologs()
         decoder = None
         funclets, resume = {}, {}
+        starts = sorted(f.start for f in self.d.functions.values()
+                        if f.start not in self.d._alias_entries)
         read_u32 = self.image.read_u32_at_va
         is_code = lambda va: self._in_ranges(code_ranges, va)
         for f in list(self.d.functions.values()):
@@ -561,11 +564,20 @@ class StaticDiscovery:
             probe = analyze_seh_frame(decoded, f.start, 0xFFFFFFFF, read_u32, prologs, is_code)
             if probe is not None:
                 outside_resume = {t for t in probe.resume if t in frame.outside}
+            # MSVC parks filters, __finally blocks and __except blocks after
+            # the function's ret: those in the gap before the next function
+            # extend the function (a funclet made a start there would cut
+            # it short of the resume target behind). A funclet elsewhere is
+            # a function of its own; a resume target elsewhere stays lost.
+            k = bisect.bisect_right(starts, f.start)
+            nxt = starts[k] if k < len(starts) else f.end
             for t in frame.outside:
-                if t in outside_resume:
+                if f.start < t < nxt:
                     resume.setdefault(f.start, set()).add(t)
-                else:
+                elif t not in outside_resume:
                     funclets.setdefault(t, "seh_funclet")
+                else:
+                    self._refuse("seh: resume target in another function")
         return funclets, resume
 
     def _clean_split(self, addr: int, owner_start: int, owner_end: int) -> bool:
