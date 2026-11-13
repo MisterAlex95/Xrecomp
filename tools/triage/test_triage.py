@@ -26,7 +26,8 @@ def test_folder_with_a_launched_xbe(tmp_path):
              text=b"//RenderWare/rwsdk/\0d:\\\\game.xbe\0", others=("game.xbe", "extras/demo.xbe"))
     r = triage_disc(str(d))
     assert not r.get("error") and r["xdk"] == 5849 and r["engines"] == ["RenderWare"]
-    assert "engines/renderware" in r["layers"] and r["title_profile"] is False
+    # No engine layer is shipped since WP4: the engine is information only.
+    assert "engines/renderware" not in r["layers"] and r["title_profile"] is False
     by = {x["path"]: x["named_by_default"] for x in r["xbes"]}
     assert by == {"game.xbe": True, "extras/demo.xbe": False} and r["multi_xbe"] is True
 

@@ -271,6 +271,7 @@ static pthread_mutex_t s_fg_lock = PTHREAD_MUTEX_INITIALIZER;
 static int             s_fg_on;              /* the pacer runs */
 static int             s_fg_window;          /* ... and feeds the window */
 static volatile int    s_fg_stop_req;        /* xbox_FramegenRequestStop asked */
+static volatile int    s_fg_wait;            /* waits for the lock verdict (xbox_FramegenRelease) */
 static uint64_t        s_fg_full_drops;      /* pushed out of a full FIFO */
 static uint64_t        s_fg_late_skips;      /* due, but a newer one was too */
 static uint64_t        s_fg_presented;       /* FIFO frames the window showed */
@@ -282,7 +283,8 @@ static int fg_feeding(void)
      * presents in flight (s_in_present) before it stops the pacer, so no
      * submit can reach a pacer being torn down. seq_cst on both sides: a
      * present either sees the request or is counted in s_in_present. */
-    return s_fg_on && !__atomic_load_n(&s_fg_stop_req, __ATOMIC_SEQ_CST) && framegen_pacer_active();
+    return s_fg_on && !__atomic_load_n(&s_fg_stop_req, __ATOMIC_SEQ_CST)
+        && !__atomic_load_n(&s_fg_wait, __ATOMIC_ACQUIRE) && framegen_pacer_active();
 }
 
 /* The window's sink, on the pacer thread: copy into the FIFO and wake the
@@ -387,6 +389,18 @@ void xbox_FramegenRequestStop(const char *why)
         fprintf(stderr, "[LSFG] frame generation off: %s\n", why ? why : "asked");
 }
 
+/* WP4: the executor judged the title free to run below its ask, or locked to
+ * a rate frame generation's cap does not divide (frame_lock_gate): frames go
+ * to the pacer from the next present. Until then they go to the window as
+ * without frame generation, and the cap was not lowered. Any thread. */
+void xbox_FramegenRelease(const char *why)
+{
+    if (s_fg_on && __atomic_exchange_n(&s_fg_wait, 0, __ATOMIC_ACQ_REL)) {
+        framegen_pacer_reset();     /* the first frame primes the generator */
+        fprintf(stderr, "[LSFG] frame generation on: %s\n", why ? why : "asked");
+    }
+}
+
 /* Lifecycle pause / resume: nothing from before the pause is blended with,
  * or shown after, what comes after it. */
 static void fg_lifecycle(int paused, void *user)
@@ -424,7 +438,10 @@ static void fg_report_display_rate(SDL_Window *win)
 }
 
 /* Under RECOMP_LSFG=1: register the bridge (when built) and start the
- * pacer. window = 0: headless, the sink only counts. */
+ * pacer. window = 0: headless, the sink only counts. Under RECOMP_PACING=auto
+ * (the default) the pacer starts idle: the frames reach it only once the
+ * executor has judged the title (nv2a_pb_exec_framegen_waits, WP4). */
+extern int nv2a_pb_exec_framegen_waits(void);
 static void fg_start(int window)
 {
     static FramegenSink sink;
@@ -438,6 +455,11 @@ static void fg_start(int window)
     if (framegen_pacer_start(&sink) < 0)
         return;
     s_fg_window = window;
+    if (nv2a_pb_exec_framegen_waits()) {
+        __atomic_store_n(&s_fg_wait, 1, __ATOMIC_RELEASE);
+        fprintf(stderr, "[LSFG] frame generation waits for the title's lock verdict (25 to 50 s after its "
+                        "first frame): frames shown as they come until then\n");
+    }
     s_fg_on = 1;
     recomp_lifecycle_listen(fg_lifecycle, NULL);
     atexit(fg_atexit);
@@ -506,12 +528,11 @@ static int s_dclk_present;              /* the desktop source is on */
 static int s_dclk_wanted;
 static int64_t s_present_lat_ns;        /* flip -> present call, mean */
 
+extern int nv2a_pb_exec_pacing_auto_wanted(void);
 static int display_align_wanted(void)
 {
-    const char *e = getenv("RECOMP_PACING"), *c = getenv("RECOMP_GPU_FPS_CAP");
     const char *a = getenv("RECOMP_PACING_ALIGN");
-    return e && (!strcmp(e, "auto") || !strcmp(e, "ask")) && !(c && *c)
-        && !(a && *a == '0' && !strchr(a, '.'));
+    return nv2a_pb_exec_pacing_auto_wanted() && !(a && *a == '0' && !strchr(a, '.'));
 }
 
 static void display_sync_start(int hz, int vsync)
@@ -1337,6 +1358,8 @@ int xbox_HostWindowMain(int (*guest_main)(void))
             framegen_pacer_stop();
             fg_fifo_clear();
             s_fg_on = s_fg_window = 0;
+            __atomic_store_n(&s_fg_wait, 0, __ATOMIC_RELEASE);
+            perf_overlay_set_framegen(2, 0, 0, 0);     /* "LSFG OFF" from now on */
             fg_any = 0;
             fg_next_due = 0;
             dirty = 1;
@@ -1572,7 +1595,8 @@ int xbox_HostWindowMain(int (*guest_main)(void))
         if (s_fg_on) {
             uint32_t real, shown, gen;
             framegen_pacer_stats(&real, &shown, &gen);
-            perf_overlay_set_framegen(framegen_pacer_active() ? 1 : 2, real, shown, gen);
+            perf_overlay_set_framegen(__atomic_load_n(&s_fg_wait, __ATOMIC_ACQUIRE) ? 3
+                                      : framegen_pacer_active() ? 1 : 2, real, shown, gen);
             if (now - t_fg_log >= 5000) {
                 if (t_fg_log && !fg_off_seen)
                     fg_log_stats();

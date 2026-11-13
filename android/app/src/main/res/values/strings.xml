@@ -157,7 +157,7 @@
     <string name="VAL_GPU_CPU">Software</string>
     <string name="VAL_GPU_GL">GPU</string>
     <string name="OPT_GPU_FPS_CAP">Frame cap</string>
-    <string name="OPT_GPU_FPS_CAP_DETAIL">With the GPU renderer, menus and pause screens can run at 200 frames per second or more, which only drains the battery and heats the device. The cap holds them to 60 (or 30). Auto: what this game\'s profile chooses (60, or 30 where the profile asks for even pacing). Off removes it, for testing. No effect with the software renderer. (RECOMP_GPU_FPS_CAP)</string>
+    <string name="OPT_GPU_FPS_CAP_DETAIL">With the GPU renderer, menus and pause screens can run at 200 frames per second or more, which only drains the battery and heats the device. The cap holds them to 60 (or 30). Auto: the game\'s own rate (60, or 30 when it asks for 30), or a steady lower rate (30) when the device cannot keep it up; a game whose logic follows the frame rate is never slowed down. 30 or 60: a fixed cap, with the GPU renderer only. Off removes it, for testing. (RECOMP_GPU_FPS_CAP; Auto is RECOMP_PACING=auto)</string>
     <string name="VAL_FPS_30" translatable="false">30</string>
     <string name="VAL_FPS_60" translatable="false">60</string>
     <string name="OPT_GPU_SCALE">Resolution</string>
@@ -357,7 +357,7 @@
     <string name="LSFG_READY_PERF_ONLY">Shaders ready (LSFG 3.1 performance only)</string>
     <string name="LSFG_UNSUPPORTED">This Lossless.dll version is not supported</string>
     <string name="LSFG_TITLE_UNAVAILABLE">Frame generation unavailable for this title</string>
-    <string name="LSFG_TITLE_UNAVAILABLE_DETAIL">This game\'s profile turns frame generation off (pack.json env_force RECOMP_LSFG=0): the game does not run right at frame generation\'s 30 fps pacing (a game whose logic follows the frame rate runs in slow motion). The setting stays for your other games.</string>
+    <string name="LSFG_TITLE_UNAVAILABLE_DETAIL">This game\'s pack turns frame generation off (pack.json env_force RECOMP_LSFG=0). The setting stays for your other games. (Without such a setting, frame generation decides by itself: it waits 25 to 50 seconds after the game starts and stays off for a game locked to 60 frames per second, whose logic would run in slow motion at frame generation\'s 30.)</string>
     <string name="LSFG_NO_TRANSLATOR">Shaders found, but this app cannot translate them (translator missing)</string>
     <string name="LSFG_NOT_A_DLL">%1$s is not a DLL: choose Lossless.dll.</string>
     <!-- Settings › Launcher › Game theme (docs/android/app-shell.md « Game theme ») -->

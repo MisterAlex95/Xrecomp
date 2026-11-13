@@ -13,9 +13,6 @@
     "XBA_D3D_DEVICE": "0x0085FDE0",
     "XBA_D3D_SW_METHODS": "0x7000"
   },
-  "env_default_android": {
-    "RECOMP_GPU_FPS_CAP": "30"
-  },
   "exclude_manual": [
     "overrides.c"
   ],

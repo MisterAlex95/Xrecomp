@@ -475,9 +475,12 @@ frame time, not the cap, held the capped run at 40 fps.
 
 ### Pacing from the title: RECOMP_PACING=auto (XBA-107, XBA-135)
 
-Opt-in tonight, so that no title changes before the owner's check:
-`RECOMP_PACING=auto` picks the cap's rate at every flip instead of a fixed
-`RECOMP_GPU_FPS_CAP`. The rule is in `src/kernel/frame_pacing.h` (pure,
+The default since WP4, on every host and both renderers (`RECOMP_PACING`
+unset means auto; `RECOMP_PACING=off` restores the fixed cap, the A/B
+switch): `RECOMP_PACING=auto` picks the cap's rate at every flip instead of
+a fixed `RECOMP_GPU_FPS_CAP`. It replaced the profile values that did the
+same per title (the RenderWare layer's 60, Burnout 3's
+`RECOMP_FLIP_PACING=1` on the desktop rasteriser, Fable's Android 30). The rule is in `src/kernel/frame_pacing.h` (pure,
 header-only); the executor feeds it the swaps and the flips
 (`pacing_cap_at_flip` in nv2a_pb_exec.c) and books the slots as above.
 
@@ -506,24 +509,37 @@ header-only); the executor feeds it the swaps and the flips
   (the kernel's paced schedule runs on the host clock): logic that counts
   vblanks or reads a timer keeps its speed at 30. Logic that advances once
   per flip does not, so a title *locked to its ask* is never divided.
-  Judged once, 20 s after the first flip (logos, movies), over 5 s: locked
-  when at least 90 % of its swaps ask a fixed interval and it held that
-  rate on at least 90 % of its frames (Burnout 3: interval ONE at 60 in its
-  front end, so a heavy race scene later stays at 60 rather than running
-  in slow motion at 30). Until judged, a fixed-interval title runs at its
+  Judged from 20 s after the first flip (logos, movies), over 5 s windows:
+  locked as soon as a window has at least 90 % of its swaps asking a fixed
+  interval and the title held that rate on at least 90 % of its frames
+  (Burnout 3: interval ONE at 60 in its front end, so a heavy race scene
+  later stays at 60 rather than running in slow motion at 30); free only
+  after six windows in a row that do not hold (WP4: 30 s; one slow movie
+  window under host load had Burnout 3 judged free and divided on the
+  Mac). The verdict is then kept. Until judged, a fixed-interval title runs at its
   ask; an IMMEDIATE title is free from the start. `RECOMP_PACING_LOCK=1` /
   `=0` forces the verdict. The judgement is a heuristic: a title whose
-  logic follows real time but whose first judged seconds hold its ask
-  (light menus, a movie) is judged locked and keeps today's behaviour (no
-  division); a flip-locked title that does not hold its ask while judged
-  would be divided (it was already short of its speed).
-- **What wins.** A set `RECOMP_GPU_FPS_CAP` (a profile's `env_default`, the
-  launcher's Frame cap) turns auto off and keeps the fixed cap (`[GPU]
-  pacing auto off: RECOMP_GPU_FPS_CAP=... wins`). Frame generation's lower
-  cap (30) bounds auto's rate, and XBA-96's auto-off still applies.
-  Unlike the fixed cap, auto also paces the CPU rasteriser, so Burnout 3's
-  `RECOMP_FLIP_PACING=1` on the desktop rasteriser has a generic form.
+  logic follows real time but that holds its ask over one window (light
+  menus, a movie: Fable's front end at 60 with its title layer's shorter
+  sleep) is judged locked, so it is never divided and gets no frame
+  generation, even if a later scene cannot hold the ask (Thor check, WP4);
+  a flip-locked title that holds its ask in none of six windows (a host
+  far too slow, or loaded: the WP4 Mac runs under a load average above
+  100) is judged free and divided, which puts it in slow motion.
+- **What wins.** A set `RECOMP_GPU_FPS_CAP` (the launcher's Frame cap 30 /
+  60 / Off, or a profile's `env_default`) turns auto off and keeps the
+  fixed cap (`[GPU] pacing auto off: RECOMP_GPU_FPS_CAP=... wins`).
+  Unlike the fixed cap, auto also paces the CPU rasteriser (Burnout 3's
+  `RECOMP_FLIP_PACING=1` on the desktop rasteriser was removed for it).
   `RECOMP_PACING=ask` keeps the ask and never divides.
+- **Frame generation** (`RECOMP_LSFG=1`, WP4) waits for the verdict: the
+  cap is not lowered and frames are shown as without it until then; a
+  title judged locked to an ask above frame generation's cap (30 at 60 Hz,
+  2x) is held without it while it asks for that, any other gets it from
+  the verdict on, with that cap bounding auto's rate
+  ([framegen.md](framegen.md#titles-locked-to-the-flip-rate)). Log: `[GPU]
+  frame generation held off: the title holds the 60 fps it asks for
+  (locked to it), ...` or `[GPU] frame generation on: ...`.
 
 Logs: `[GPU] pacing: 30 fps (frames miss their slot: lower even rate; ask 60
 fps: 60 Hz vblank, interval 1)` on every change and verdict, and in each
@@ -540,12 +556,12 @@ nothing filters for it yet. PAL 50 Hz on a 60 Hz panel cannot be even at
 
 Synthetic titles (tests/frame_pacing, simulation with a vsynced window;
 tests/nv2a_ffp_backend `nv2a-pacing-*`, the executor itself), against
-tonight's profile values:
+the profile values auto replaced (removed in WP4):
 
-| Synthetic title | auto | profile value today |
+| Synthetic title | auto | profile value before WP4 |
 |---|---|---|
 | 10 ms, interval ONE | 60, judged locked | RenderWare `RECOMP_GPU_FPS_CAP=60` |
-| 20 ms, ONE | 60 until judged (25 s), then 30 | Fable `env_default_android` 30 |
+| 20 ms, ONE | 60 until judged free (50 s), then 30 | Fable `env_default_android` 30 |
 | 20 ms, IMMEDIATE | 30 within 1.5 s | Fable 30 |
 | 40 ms | 20, even | 30 cap: ~25, uneven |
 | 12-22 ms varying | 30, no change in 2 min | 30 |
@@ -1355,13 +1371,12 @@ Settings: the launcher's Graphics section offers **Renderer** (Auto /
 Software / GPU, `RECOMP_GPU`) and **Frame cap (GPU renderer)** (Auto / 30 /
 60 / Off, `RECOMP_GPU_FPS_CAP`), written to `recomp.cfg`
 ([app-shell.md](../android/app-shell.md#settings)). Auto writes nothing:
-the runtime's Android default applies. Fable's profile sets
-`RECOMP_GPU_FPS_CAP=30` on Android (`env_default_android` in
-`profiles/titles/4d5300d1/title.json`), since an Oakvale frame does not fit
-16.7 ms on the Thor and a 60 cap lets the rate wander. `RECOMP_PACING=auto`
-([above](#pacing-from-the-title-recomp_pacingauto-xba-107-xba-135)) is to
-derive that 30 at run time; the profile value stays until it is checked on
-the Thor (XBA-108).
+the runtime's default applies, `RECOMP_PACING=auto`
+([above](#pacing-from-the-title-recomp_pacingauto-xba-107-xba-135)). Fable's
+profile set `RECOMP_GPU_FPS_CAP=30` on Android until WP4, since an Oakvale
+frame does not fit 16.7 ms on the Thor and a 60 cap let the rate wander;
+auto's adaptive divisor derives that 30 at run time for a title judged free
+(Thor check: WP4's device list).
 
 **Default on Android (XBA-119).** With `RECOMP_GPU` unset the GL back end
 draws on Android (`gpu_selected`, `NV2A_GL_DEFAULT_ON`); the runtime then

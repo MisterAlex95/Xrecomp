@@ -19,6 +19,24 @@
  *               flips + the presenter's 1 ms land at half a refresh, and stay
  *     alignoff  the same with RECOMP_PACING_ALIGN=0: the flips keep the
  *               schedule's phase
+ *     default   RECOMP_PACING unset (WP4: auto is the default): 20 ms
+ *               IMMEDIATE frames paced at 30 fps, as under auto
+ *     off       RECOMP_PACING=off: the fixed cap, 20 ms IMMEDIATE frames not
+ *               divided (60 or no cap, by host: both leave them at 20 ms)
+ *
+ *   nv2a-pacing-fg-test <case>  (the same source built with XBOXRECOMP_LSFG,
+ *   RECOMP_LSFG=1: frame generation's gate, WP4)
+ *     fglocked  9 ms frames, ONE: never capped at 30, before the verdict
+ *               (20 s + 5 s) or after; the verdict holds frame generation
+ *               off; then the title asks TWO (30): frame generation on
+ *     fgfree    20 ms frames, ONE: at its ask (20 ms, not divided) until the
+ *               verdict says free (20 s + six windows of 5 s that do not
+ *               hold), then frame generation on and 30 fps
+ *     fgask30   10 ms frames, interval TWO: 30 fps throughout, locked to 30,
+ *               which frame generation's cap does not divide: on
+ *     fgoff     RECOMP_PACING=off: the fixed cap lowered to 30 from the first
+ *               frame, then the XBA-96 watch turns frame generation off
+ *     fgnolock  RECOMP_FRAME_LOCK=0: 30 from the first frame, never stopped
  *
  * One case per process: the executor's state is static. */
 #include <stddef.h>
@@ -106,6 +124,13 @@ static uint64_t frame(uint64_t work, uint32_t interval)
 
 static int near(uint64_t a, uint64_t b) { return a + 300000 >= b && b + 300000 >= a; }
 
+#ifdef XBOXRECOMP_LSFG
+/* The presenter's side of frame generation's gate. */
+static int s_fg_stops, s_fg_releases;
+void xbox_FramegenRequestStop(const char *why) { (void)why; s_fg_stops++; }
+void xbox_FramegenRelease(const char *why) { (void)why; s_fg_releases++; }
+#endif
+
 /* Frames of `work` for `secs`; returns the mean frame period (flip to flip)
  * over the last second and checks that every sleep in it was `want_sleep`
  * (UINT64_MAX: no check). */
@@ -144,8 +169,16 @@ int main(int argc, char **argv)
     const char *c = argc > 1 ? argv[1] : "fast";
     double period;
 
-    setenv_("RECOMP_PACING", "auto");
+    if (!strcmp(c, "off") || !strcmp(c, "fgoff"))
+        setenv_("RECOMP_PACING", "off");
+    else if (strcmp(c, "default") != 0 && strncmp(c, "fg", 2) != 0)
+        setenv_("RECOMP_PACING", "auto");
     setenv_("RECOMP_DISPLAY_HZ", "60");
+#ifdef XBOXRECOMP_LSFG
+    setenv_("RECOMP_LSFG", "1");
+    if (!strcmp(c, "fgnolock"))
+        setenv_("RECOMP_FRAME_LOCK", "0");
+#endif
     if (!strcmp(c, "capwins"))
         setenv_("RECOMP_GPU_FPS_CAP", "60");
     if (!strcmp(c, "pal"))
@@ -161,7 +194,7 @@ int main(int argc, char **argv)
     if (!strcmp(c, "fast")) {
         period = run(10 * MS, IV_ONE, 10, SEC / 60 - 10 * MS);
         CHECK(period > 16.4 && period < 16.9);
-    } else if (!strcmp(c, "slow") || !strcmp(c, "cpu")) {
+    } else if (!strcmp(c, "slow") || !strcmp(c, "cpu") || !strcmp(c, "default")) {
         (void)run(20 * MS, IV_IMMEDIATE, 1.6, UINT64_MAX);      /* down within ~1.5 s */
         period = run(20 * MS, IV_IMMEDIATE, 5, SEC / 30 - 20 * MS);
         CHECK(period > 33.0 && period < 33.7);
@@ -202,6 +235,52 @@ int main(int argc, char **argv)
             CHECK(worst < 300000);
         else
             CHECK(worst > 1 * MS);
+    } else if (!strcmp(c, "off")) {
+        period = run(20 * MS, IV_IMMEDIATE, 5, 0);
+        CHECK(period > 19.9 && period < 20.1);
+#ifdef XBOXRECOMP_LSFG
+    } else if (!strcmp(c, "fglocked")) {
+        int i;
+        for (i = 0; i < 24; i++) {                              /* before the verdict: never lowered */
+            period = run(9 * MS, IV_ONE, 1, UINT64_MAX);
+            CHECK(period > 16.4 && period < 16.9);
+        }
+        period = run(9 * MS, IV_ONE, 10, SEC / 60 - 9 * MS);    /* after it: still 60 */
+        CHECK(period > 16.4 && period < 16.9);
+        CHECK(s_fg_stops == 0 && s_fg_releases == 0);
+        period = run(9 * MS, 2u, 5, SEC / 30 - 9 * MS);         /* asks 30: the cap divides nothing */
+        CHECK(period > 33.0 && period < 33.7);
+        CHECK(s_fg_stops == 0 && s_fg_releases == 1);
+    } else if (!strcmp(c, "fgfree")) {
+        int i;
+        for (i = 0; i < 48; i++) {                              /* at its ask, no generation, no cap */
+            period = run(20 * MS, IV_ONE, 1, i ? 0 : UINT64_MAX); /* the first slot: a sleep */
+            CHECK(period > 19.9 && period < 20.1);
+        }
+        CHECK(s_fg_releases == 0);
+        period = run(20 * MS, IV_ONE, 10, SEC / 30 - 20 * MS);  /* judged free: 30, generation on */
+        CHECK(period > 33.0 && period < 33.7);
+        CHECK(s_fg_stops == 0 && s_fg_releases == 1);
+    } else if (!strcmp(c, "fgask30")) {
+        period = run(10 * MS, 2u, 20, SEC / 30 - 10 * MS);
+        CHECK(period > 33.0 && period < 33.7);
+        CHECK(s_fg_releases == 0);
+        period = run(10 * MS, 2u, 10, SEC / 30 - 10 * MS);
+        CHECK(period > 33.0 && period < 33.7);
+        CHECK(s_fg_stops == 0 && s_fg_releases == 1);
+    } else if (!strcmp(c, "fgoff") || !strcmp(c, "fgnolock")) {
+        period = run(10 * MS, IV_ONE, 5, SEC / 30 - 10 * MS);   /* lowered from the first frame */
+        CHECK(period > 33.0 && period < 33.7);
+        period = run(10 * MS, IV_ONE, 35, UINT64_MAX);
+        if (!strcmp(c, "fgoff")) {                              /* XBA-96: 600 + 180 flips at 30 */
+            CHECK(period > 16.4 && period < 16.9);
+            CHECK(s_fg_stops == 1);
+        } else {
+            CHECK(period > 33.0 && period < 33.7);
+            CHECK(s_fg_stops == 0);
+        }
+        CHECK(s_fg_releases == 0);
+#endif
     } else if (!strcmp(c, "pal")) {
         period = run(10 * MS, IV_ONE, 10, SEC / 50 - 10 * MS);
         CHECK(period > 19.7 && period < 20.3);

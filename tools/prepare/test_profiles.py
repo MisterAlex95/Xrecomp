@@ -192,30 +192,32 @@ def test_the_first_titles_resolve(tid, libs):
 
 def test_fable_and_burnout_keep_their_own_values():
     fable = profiles.resolve("4D5300D1", ident(FABLE_LIBS))
-    assert fable["env_default"]["android"]["RECOMP_GPU_FPS_CAP"] == "30"
-    assert "RECOMP_GPU_FPS_CAP" not in fable["env_default"]["desktop"]
+    # WP4: no frame cap from a profile any more (RECOMP_PACING=auto decides at run time).
+    for plat in ("android", "desktop"):
+        assert "RECOMP_GPU_FPS_CAP" not in fable["env_default"][plat]
     assert fable["params"] == {"XBA_D3D_DEVICE_PTR": 0x00862288, "XBA_D3D_DEVICE": 0x0085FDE0,
                                "XBA_D3D_SW_METHODS": 0x7000}
     assert fable["exclude_manual"] == ["titles_4d5300d1__overrides.c"]
     bo3 = profiles.resolve("4541005B", ident(BO3_LIBS, probes=LATCH))
-    # The engine layer (XBA-95) carries what Burnout 3 needs as a RenderWare title.
-    assert "engines/renderware" in bo3["keys"]
-    assert bo3["env_force"] == {"RECOMP_LSFG": "0"}
+    # WP4: the RenderWare engine layer is gone; the DMA walk comes from xdk/d3d8ltcg, the 60 fps pacing and
+    # frame generation off from the run-time lock verdict, and no title.c is left (no "bo3" hooks).
+    assert "engines/renderware" not in bo3["keys"] and bo3["hooks"] == ["xba_d3d8"]
+    assert bo3["env_force"] == {}
     assert bo3["params"] == {"XBA_D3D_DEVICE_PTR": 0x0035FE48, "XBA_D3D_SW_METHODS": 0x20,
                              "XBA_D3D_DMA_WALK": 1}   # from xdk/d3d8ltcg
     for plat in ("android", "desktop"):
-        assert bo3["env_default"][plat]["RECOMP_GPU_FPS_CAP"] == "60"
-        assert bo3["env_default"][plat]["RECOMP_PB_WALK"] == "dma"
+        assert "RECOMP_GPU_FPS_CAP" not in bo3["env_default"][plat]
         assert "RECOMP_TITLE_KEVENTS" not in bo3["env_default"][plat]   # on by default in the kernel
 
 
-def test_a_renderware_title_with_no_profile_gets_the_engine_layer():
-    """Black (45410083) has no title layer: the RenderWare markers pick the engine layer."""
+def test_a_renderware_title_with_no_profile_gets_no_engine_layer():
+    """Black (45410083) has no title layer, and the RenderWare markers pick no layer since WP4: the DMA walk comes
+    from xdk/d3d8ltcg, pacing and frame generation are decided at run time."""
     black = profiles.resolve("45410083", ident({"XAPILIB": 5849, "D3D8LTCG": 5849, "DSOUND": 5849}, ["renderware"], LATCH))
-    assert black["keys"] == ["xdk/d3d8", "xdk/d3d8ltcg", "xdk/dsound", "xdk/xapi", "engines/renderware"]
+    assert black["keys"] == ["xdk/d3d8", "xdk/d3d8ltcg", "xdk/dsound", "xdk/xapi"]
     assert not black["title"]
-    assert black["env_force"] == {"RECOMP_LSFG": "0"}
-    assert black["env_default"]["android"]["RECOMP_PB_WALK"] == "dma"
+    assert black["env_force"] == {}
+    assert black["params"] == {"XBA_D3D_DMA_WALK": 1}
 
 
 def test_a_d3d8ltcg_latch_wait_gets_the_dma_walk_without_a_title_profile():
@@ -286,23 +288,22 @@ D3D_IMPORTS = (3, 2, 1, 4, 168)
 ALL_XDK_IMPORTS = tuple(sorted(set(XAPI_IMPORTS + DSOUND_IMPORTS + D3D_IMPORTS + (49, 164, 187, 190))))
 XDK_ENV = {"RECOMP_PB_EXEC": "1", "RECOMP_VBLANK": "paced", "RECOMP_AC97_READY": "1",
            "RECOMP_DISPATCH_GATE": "1", "RECOMP_USB": "1", "RECOMP_KEYBOARD": "1"}
-RW_ENV = dict(XDK_ENV, RECOMP_PB_WALK="dma", RECOMP_GPU_FPS_CAP="60")
-
-# The four reference titles as they merged before XBA-106 (origin/main 5688baa): libraries, engines, keys,
-# hooks, env_force, params, env_default per platform. What the XBE imports must not change any of it.
+# The four reference titles as they merged before XBA-106 (origin/main 5688baa), less what WP4 moved to run time
+# (the RenderWare engine layer, Burnout 3's title.c, Fable's Android frame cap): libraries, engines, keys, hooks,
+# env_force, params, env_default per platform. What the XBE imports must not change any of it.
 REFERENCE = {
     "4D5300D1": ((("XAPILIB", 5849), ("D3D8", 5849), ("DSOUND", 5849)), (),
                  ["xdk/d3d8", "xdk/dsound", "xdk/xapi", "titles/4d5300d1"], ["xba_d3d8", "fable"], {},
                  {"XBA_D3D_DEVICE_PTR": 0x00862288, "XBA_D3D_DEVICE": 0x0085FDE0, "XBA_D3D_SW_METHODS": 0x7000},
-                 dict(XDK_ENV, RECOMP_GPU_FPS_CAP="30"), XDK_ENV),
+                 XDK_ENV, XDK_ENV),
     "4541005B": ((("XAPILIB", 5849), ("D3D8LTCG", 5849), ("DSOUND", 5849), ("XMV", 5849)), ("renderware",),
-                 ["xdk/d3d8", "xdk/d3d8ltcg", "xdk/dsound", "xdk/xapi", "engines/renderware", "titles/4541005b"],
-                 ["xba_d3d8", "bo3"], {"RECOMP_LSFG": "0"},
+                 ["xdk/d3d8", "xdk/d3d8ltcg", "xdk/dsound", "xdk/xapi", "titles/4541005b"],
+                 ["xba_d3d8"], {},
                  {"XBA_D3D_DMA_WALK": 1, "XBA_D3D_DEVICE_PTR": 0x0035FE48, "XBA_D3D_SW_METHODS": 0x20},
-                 RW_ENV, RW_ENV),
+                 XDK_ENV, XDK_ENV),
     "45410083": ((("XAPILIB", 5849), ("D3D8LTCG", 5849), ("DSOUND", 5849)), ("renderware",),
-                 ["xdk/d3d8", "xdk/d3d8ltcg", "xdk/dsound", "xdk/xapi", "engines/renderware"], ["xba_d3d8"],
-                 {"RECOMP_LSFG": "0"}, {"XBA_D3D_DMA_WALK": 1}, RW_ENV, RW_ENV),
+                 ["xdk/d3d8", "xdk/d3d8ltcg", "xdk/dsound", "xdk/xapi"], ["xba_d3d8"],
+                 {}, {"XBA_D3D_DMA_WALK": 1}, XDK_ENV, XDK_ENV),
     "4C410003": ((("XAPILIB", 5455), ("D3D8", 5455), ("DSOUND", 5455)), (),
                  ["xdk/d3d8", "xdk/dsound", "xdk/xapi"], ["xba_d3d8"], {}, {}, XDK_ENV, XDK_ENV),
 }

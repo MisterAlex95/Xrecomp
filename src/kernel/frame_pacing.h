@@ -40,14 +40,18 @@
  *     (the kernel's schedule, kernel_bridge.c): game logic that counts
  *     vblanks or reads a timer does not slow down at 30. Logic that
  *     advances once per flip does, so a title "locked to its ask" is never
- *     divided. A title is judged once, after PACING_LOCK_SKIP_NS of flips
- *     (logos, movies), over PACING_LOCK_WINDOW_NS: locked when at least
- *     90 % of its swaps ask for a fixed interval (not IMMEDIATE) and it
- *     sustained that rate on at least 90 % of its frames -- a title that
- *     asks the hardware for a fixed rate and holds it is treated as built
- *     around it (Burnout 3: interval ONE, 60). Until judged, a fixed-
- *     interval title runs at its ask. A title that asks IMMEDIATE, or did
- *     not hold its ask while judged, is free and gets the adaptive divisor.
+ *     divided. A title is judged after PACING_LOCK_SKIP_NS of flips (logos,
+ *     movies), over windows of PACING_LOCK_WINDOW_NS: locked as soon as a
+ *     window has at least 90 % of its swaps asking a fixed interval (not
+ *     IMMEDIATE) and the title sustained that rate on at least 90 % of its
+ *     frames -- a title that asks the hardware for a fixed rate and holds
+ *     it is treated as built around it (Burnout 3: interval ONE, 60). Free
+ *     only after PACING_LOCK_FREE_WINDOWS windows in a row that do not hold
+ *     (WP4): a few slow seconds (a movie under host load, a stall) must not
+ *     get a flip-locked title divided, which would put it in slow motion,
+ *     the worse of the two mistakes. The verdict is then kept. Until judged,
+ *     a fixed-interval title runs at its ask. A title that asks IMMEDIATE,
+ *     or was judged free, gets the adaptive divisor.
  *     RECOMP_PACING_LOCK=1 / =0 forces the verdict (A/B).
  *
  * Pure and header-only (counts and times come in as arguments), so
@@ -75,6 +79,7 @@
 #define PACING_PROBE_OK_NS     10000000000ull
 #define PACING_LOCK_SKIP_NS    20000000000ull
 #define PACING_LOCK_WINDOW_NS  5000000000ull
+#define PACING_LOCK_FREE_WINDOWS 6u            /* windows that do not hold before "free": 30 s */
 #define PACING_LOCK_MIN_FRAMES 60u
 #define PACING_VBL_WINDOW_NS   1000000000ull
 
@@ -113,6 +118,7 @@ typedef struct {
     /* The lock verdict. */
     uint64_t first_flip_ns, lock_t0;
     uint32_t lk_flips, lk_fixed, lk_info, lk_ok;
+    uint32_t lk_windows;        /* windows judged that did not hold */
     int locked;                 /* 0 undecided, 1 locked to its ask, -1 free */
 
     /* For the caller's log and report. */
@@ -277,8 +283,13 @@ static inline void frame_pacing_judge_lock(FramePacer *p, uint64_t now_ns, int m
     }
     if (now_ns - p->lock_t0 < PACING_LOCK_WINDOW_NS || p->lk_flips < PACING_LOCK_MIN_FRAMES)
         return;
-    p->locked = (p->lk_fixed * 10u >= p->lk_flips * 9u && p->lk_info
-                 && p->lk_ok * 10u >= p->lk_info * 9u) ? 1 : -1;
+    if (!(p->lk_fixed * 10u >= p->lk_flips * 9u && p->lk_info && p->lk_ok * 10u >= p->lk_info * 9u)
+            && ++p->lk_windows < PACING_LOCK_FREE_WINDOWS) {
+        p->lock_t0 = now_ns;                    /* not held: judge the next window */
+        p->lk_flips = p->lk_fixed = p->lk_info = p->lk_ok = 0;
+        return;
+    }
+    p->locked = p->lk_windows < PACING_LOCK_FREE_WINDOWS ? 1 : -1;
     p->why = p->locked > 0 ? "the title holds the fixed rate it asks for: locked to it, never divided"
                            : "the title is free to run below its ask: adaptive divisor";
     p->changes++;

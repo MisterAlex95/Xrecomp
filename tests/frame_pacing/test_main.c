@@ -7,7 +7,7 @@
  * steady rate, the [FBWIN] frame-time standard deviation of the presents
  * (under 2 ms), how often the rate changed, and how fast it reacted.
  *
- * The cases against tonight's profile values:
+ * The cases against the profile values auto replaced (removed in WP4):
  *   10 ms, interval ONE        60  (engines/renderware RECOMP_GPU_FPS_CAP=60)
  *   20 ms                      30  (Fable's env_default_android cap of 30)
  *   40 ms                      20  (the profile's 30 cap would wander at ~25)
@@ -212,6 +212,13 @@ static void clocked(double t, uint32_t i, uint64_t *cpu, uint64_t *gpu)
     *cpu = 0;
     *gpu = (uint64_t)((ms + jitter(1.0)) * MS);
 }
+static void cslowstart(double t, uint32_t i, uint64_t *cpu, uint64_t *gpu)
+{
+    double ms = t >= 20.0 && t < 32.0 ? 25.0 : t < 60.0 ? 9.0 : 18.0;
+    (void)i;
+    *cpu = 0;
+    *gpu = (uint64_t)((ms + jitter(1.0)) * MS);
+}
 static void c5(double t, uint32_t i, uint64_t *cpu, uint64_t *gpu)
 { (void)t; (void)i; *cpu = 0; *gpu = (uint64_t)((5.0 + jitter(0.5)) * MS); }
 static void c12(double t, uint32_t i, uint64_t *cpu, uint64_t *gpu)
@@ -314,14 +321,15 @@ int main(void)
         CHECK(r.rate == 60 && r.locked == 1 && r.changes_after == 0);
         CHECK(r.sd_ms >= 0 && r.sd_ms < 2.0 && fabs(r.mean_ms - 16.67) < 0.3);
     }
-    /* 20 ms, interval ONE: at its ask until judged (20 s skip + 5 s), then
-     * free and down to 30 within about a second. */
+    /* 20 ms, interval ONE: at its ask until judged (20 s skip + six 5 s
+     * windows that do not hold, WP4), then free and down to 30 within about
+     * a second. */
     {
-        Sim s = {"20 ms, ONE (Fable cap 30)", 60, 60, -1, 1, IV_ONE, c20, 60};
+        Sim s = {"20 ms, ONE (Fable cap 30)", 60, 60, -1, 1, IV_ONE, c20, 80};
         static const uint32_t m30[] = {30};
-        r = run(&s, 30, m30, 1);
+        r = run(&s, 55, m30, 1);
         CHECK(r.rate == 30 && r.locked == -1 && r.changes_after == 0);
-        CHECK(r.t_rate[0] > 25.0 && r.t_rate[0] < 27.5);
+        CHECK(r.t_rate[0] > 50.0 && r.t_rate[0] < 52.5);
         CHECK(r.sd_ms >= 0 && r.sd_ms < 2.0 && fabs(r.mean_ms - 33.33) < 0.5);
     }
     /* 20 ms, IMMEDIATE: free from the start, 30 within about a second. */
@@ -334,8 +342,8 @@ int main(void)
     }
     /* 40 ms: 20, evenly. */
     {
-        Sim s = {"40 ms, ONE", 60, 60, -1, 1, IV_ONE, c40, 60};
-        r = run(&s, 30, NULL, 0);
+        Sim s = {"40 ms, ONE", 60, 60, -1, 1, IV_ONE, c40, 80};
+        r = run(&s, 55, NULL, 0);
         CHECK(r.rate == 20 && r.changes_after == 0);
         CHECK(r.sd_ms >= 0 && r.sd_ms < 2.0 && fabs(r.mean_ms - 50.0) < 0.5);
     }
@@ -379,6 +387,16 @@ int main(void)
         r = run(&s, 1, NULL, 0);
         CHECK(r.locked == 1 && r.rate == 60 && r.changes_after == 0);
     }
+    /* WP4: a flip-locked title whose first judged seconds are slow (a movie
+     * under host load: 25 ms frames from 20 s to 32 s) is not judged free on
+     * them: it holds 60 again in the next window and is judged locked, and
+     * the heavy scene after is not divided. */
+    {
+        Sim s = {"flip-locked, slow first window: 9, 25, 9 then 18 ms, ONE", 60, 60, -1, 1, IV_ONE,
+                 cslowstart, 90};
+        r = run(&s, 1, NULL, 0);
+        CHECK(r.locked == 1 && r.rate == 60 && r.changes_after == 0);
+    }
     /* The same title with RECOMP_PACING_LOCK=0: divided to 30 at once. */
     {
         Sim s = {"same, RECOMP_PACING_LOCK=0", 60, 60, 0, 1, IV_ONE, clocked, 70};
@@ -410,16 +428,16 @@ int main(void)
         CHECK(r.rate == 50 && r.changes_after == 0);
     }
     {
-        Sim s = {"30 ms, ONE, PAL 50 Hz", 60, 50, -1, 1, IV_ONE, c30, 60};
-        r = run(&s, 30, NULL, 0);
+        Sim s = {"30 ms, ONE, PAL 50 Hz", 60, 50, -1, 1, IV_ONE, c30, 80};
+        r = run(&s, 55, NULL, 0);
         CHECK(r.rate == 25 && r.changes_after == 0);
     }
     /* A 120 Hz panel (AYN Thor): a fixed interval keeps the vblank's
      * divisors (20 ms ONE: 30, every 4th refresh); IMMEDIATE goes up to the
      * panel's 120 (5 ms) or 60 (12 ms). */
     {
-        Sim s = {"20 ms, ONE, 120 Hz panel", 120, 60, -1, 1, IV_ONE, c20, 60};
-        r = run(&s, 30, NULL, 0);
+        Sim s = {"20 ms, ONE, 120 Hz panel", 120, 60, -1, 1, IV_ONE, c20, 80};
+        r = run(&s, 55, NULL, 0);
         CHECK(r.rate == 30 && r.sd_ms >= 0 && r.sd_ms < 2.0);
     }
     {

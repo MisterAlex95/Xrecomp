@@ -15,10 +15,14 @@ add_executable(nv2a-present-sync-test nv2a_present_sync_test.c ${NV2A_BACKEND_TE
 add_executable(nv2a-zpass-test nv2a_zpass_test.c ${NV2A_BACKEND_TEST_SOURCES})
 add_executable(nv2a-flip-cap-test nv2a_flip_cap_test.c ${NV2A_BACKEND_TEST_SOURCES})
 add_executable(nv2a-pacing-test nv2a_pacing_test.c ${NV2A_BACKEND_TEST_SOURCES})
+# The same with frame generation's gate compiled in (XBOXRECOMP_LSFG: frame_lock.h, framegen_policy.h).
+add_executable(nv2a-pacing-fg-test nv2a_pacing_test.c ${NV2A_BACKEND_TEST_SOURCES})
+target_compile_definitions(nv2a-pacing-fg-test PRIVATE XBOXRECOMP_LSFG=1)
 add_executable(nv2a-ffp-inline-test nv2a_ffp_inline_test.c ${NV2A_BACKEND_TEST_SOURCES})
 add_executable(nv2a-ffp-batch-test nv2a_ffp_batch_test.c ${NV2A_BACKEND_TEST_SOURCES})
 add_executable(nv2a-clear-rect-test nv2a_clear_rect_test.c ${NV2A_BACKEND_TEST_SOURCES})
 foreach(target nv2a-ffp-backend-test nv2a-present-sync-test nv2a-zpass-test nv2a-flip-cap-test nv2a-pacing-test
+               nv2a-pacing-fg-test
                nv2a-ffp-inline-test nv2a-ffp-batch-test nv2a-clear-rect-test)
     target_include_directories(${target} PRIVATE ../../src/kernel ../../src)
     if(MSVC)
@@ -47,10 +51,18 @@ set_tests_properties(nv2a-zpass-always PROPERTIES ENVIRONMENT "RECOMP_GPU_ZPASS=
 add_test(NAME nv2a-flip-cap COMMAND nv2a-flip-cap-test)
 # RECOMP_PACING=auto (XBA-107, XBA-135): synthetic titles of 10, 20, 40 ms, a flip-locked one,
 # a fixed cap that wins, PAL 50 Hz vblanks, the CPU rasteriser, flips in phase with a display
-# grid (XBA-136) and RECOMP_PACING_ALIGN=0; one case per process.
-foreach(case fast slow slower locked capwins pal cpu align alignoff)
+# grid (XBA-136) and RECOMP_PACING_ALIGN=0, auto as the default (unset) and RECOMP_PACING=off
+# (WP4); one case per process.
+foreach(case fast slow slower locked capwins pal cpu align alignoff default off)
     add_test(NAME nv2a-pacing-${case} COMMAND nv2a-pacing-test ${case})
 endforeach()
+# Frame generation's gate (WP4): a locked title never capped, a free one capped once judged, a title
+# at 30 that the cap does not divide, the fixed cap's XBA-96 watch, RECOMP_FRAME_LOCK=0.
+if(NOT WIN32)
+    foreach(case fglocked fgfree fgask30 fgoff fgnolock)
+        add_test(NAME nv2a-pacing-${case} COMMAND nv2a-pacing-fg-test ${case})
+    endforeach()
+endif()
 # Inline (Begin/End) fixed-function batches: transformed (default), the old screen-space
 # guess (RECOMP_FFP_INLINE=0), and only what the guess would skip (=2).
 add_test(NAME nv2a-ffp-inline COMMAND nv2a-ffp-inline-test)

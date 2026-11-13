@@ -6303,12 +6303,19 @@ void nv2a_pb_exec_walk_begin(void)
  * or sleeping a period after a frame that was already slow.
  *
  * Independent of RECOMP_FLIP_PACING (the flip hold, guest vblank clock),
- * which still applies after. Default 60 on macOS and Android, off elsewhere
+ * which still applies after. Only under RECOMP_PACING=off (or with
+ * RECOMP_GPU_FPS_CAP set): RECOMP_PACING=auto, the default, picks the rate
+ * itself (pacing_auto below). Default 60 on macOS and Android, off elsewhere
  * (a back end a game project registers may present with vsync itself);
  * 0 = off. */
 static int s_cap_value = -1;             /* gpu_fps_cap's, once computed */
 static int s_cap_pre_fg;                 /* the cap before frame generation lowered it */
 static int pacing_auto(void);
+#ifdef XBOXRECOMP_LSFG
+static int s_fg_cap;                     /* frame generation's cap, kept until the gate opens */
+static int s_fg_gate_wait;               /* frame generation waits for the lock verdict */
+static int framegen_waits(void);
+#endif
 static int gpu_fps_cap(void)
 {
 #define cap s_cap_value
@@ -6330,7 +6337,13 @@ static int gpu_fps_cap(void)
 #ifdef XBOXRECOMP_LSFG
         /* RECOMP_LSFG=1: min(cap, display rate / multiplier), see
          * src/framegen/framegen_policy.h. */
-        if (framegen_policy_fps_cap(c) != c) {
+        if (framegen_policy_fps_cap(c) != c && framegen_waits()) {
+            /* WP4: not before the lock verdict (framegen_gate_at_flip). */
+            s_fg_cap = framegen_policy_fps_cap(c);
+            s_fg_gate_wait = 1;
+            fprintf(stderr, "  [GPU] frame generation waits for the lock verdict: frames at the title's own "
+                            "rate until then, then a %d fps cap unless the title is locked above it\n", s_fg_cap);
+        } else if (framegen_policy_fps_cap(c) != c) {
             fprintf(stderr, "  [GPU] back end frame cap %d fps for frame generation (was %d)\n",
                     framegen_policy_fps_cap(c), c);
             s_cap_pre_fg = c ? c : 60;
@@ -6349,8 +6362,20 @@ static int gpu_fps_cap(void)
 #ifdef XBOXRECOMP_LSFG
 #include "frame_lock.h"
 extern void xbox_FramegenRequestStop(const char *why);
+extern void xbox_FramegenRelease(const char *why);
 static FrameLock s_frame_lock;
 static uint64_t s_cap_held_total, s_cap_held_seen;
+
+/* RECOMP_FRAME_LOCK=0: no check, frame generation from the first frame. */
+static int frame_lock_enabled(void)
+{
+    static int enabled = -1;
+    if (enabled < 0) {
+        const char *e = getenv("RECOMP_FRAME_LOCK");
+        enabled = !(e && *e == '0');
+    }
+    return enabled;
+}
 #endif
 
 /* Both on the executor (ack) thread, except s_cap_until_ns, which any thread
@@ -6378,15 +6403,15 @@ uint64_t nv2a_pb_exec_flip_cap_until_ns(void)
     return s_cap_until_ns;
 }
 
-/* RECOMP_PACING=auto (XBA-107, XBA-135): with no RECOMP_GPU_FPS_CAP set (a
- * profile's value or the launcher's Frame cap wins as it is), the cap's
- * rate is chosen at every flip from the title's presentation interval and
- * the frame cost the host sustains (frame_pacing.h), on either renderer;
- * frame generation's lower cap still bounds it. =ask: the title's ask only.
- * Unset or anything else: the fixed cap as before. RECOMP_PACING_LOCK=1/0
- * forces the "locked to its ask" verdict; RECOMP_DISPLAY_HZ (set by the SDL
- * presenter) bounds an IMMEDIATE title. Vblanks keep the console's rate:
- * only the flips are paced. */
+/* RECOMP_PACING=auto (XBA-107, XBA-135; the default since WP4): with no
+ * RECOMP_GPU_FPS_CAP set (the launcher's Frame cap wins as it is), the
+ * cap's rate is chosen at every flip from the title's presentation interval
+ * and the frame cost the host sustains (frame_pacing.h), on either
+ * renderer; frame generation's lower cap still bounds it once its gate has
+ * opened. =ask: the title's ask only. =off (or 0): the fixed cap as before
+ * (gpu_fps_cap). RECOMP_PACING_LOCK=1/0 forces the "locked to its ask"
+ * verdict; RECOMP_DISPLAY_HZ (set by the SDL presenter) bounds an IMMEDIATE
+ * title. Vblanks keep the console's rate: only the flips are paced. */
 static FramePacer s_pacer;
 static uint64_t s_pace_slept_ns;        /* slept at the cap since the last flip */
 static uint32_t s_pace_rate, s_pace_logged;
@@ -6478,39 +6503,116 @@ static uint64_t pacing_align_slot(uint64_t slot, uint64_t period, uint64_t now)
     return r;
 }
 
+/* What the switches ask for: 0 the fixed cap (RECOMP_PACING=off or 0, or
+ * RECOMP_GPU_FPS_CAP set), 1 auto (unset, auto, anything else), 2 ask.
+ * Reads only the environment: the presenter asks it too, before the guest
+ * starts (nv2a_pb_exec_pacing_auto_wanted). */
+static int pacing_env_mode(void)
+{
+    const char *e = getenv("RECOMP_PACING"), *c = getenv("RECOMP_GPU_FPS_CAP");
+    if (c && *c)
+        return 0;
+    if (e && (!strcmp(e, "off") || !strcmp(e, "0")))
+        return 0;
+    return e && !strcmp(e, "ask") ? 2 : 1;
+}
+
+int nv2a_pb_exec_pacing_auto_wanted(void)
+{
+    return pacing_env_mode() != 0;
+}
+
 static int pacing_auto(void)
 {
     static int on = -1;
     if (on < 0) {
         const char *e = getenv("RECOMP_PACING"), *c = getenv("RECOMP_GPU_FPS_CAP");
         const char *l = getenv("RECOMP_PACING_LOCK"), *d = getenv("RECOMP_DISPLAY_HZ");
-        int want = e && (!strcmp(e, "auto") || !strcmp(e, "ask"));
-        on = want && !(c && *c);
+        int mode = pacing_env_mode();
+        on = mode != 0;
         if (on) {
             long hz = d && *d ? strtol(d, NULL, 10) : 0;
             frame_pacing_init(&s_pacer, hz >= 24 && hz <= 480 ? (uint32_t)hz : 0u,
-                              l && *l ? (*l != '0') : -1, strcmp(e, "ask") != 0);
+                              l && *l ? (*l != '0') : -1, mode == 1);
             pacing_align_init();
-            fprintf(stderr, "  [GPU] pacing %s: the title's presentation interval%s; display %u Hz\n",
-                    e, s_pacer.adaptive ? ", then the highest even rate the host sustains" : "",
+            fprintf(stderr, "  [GPU] pacing %s%s: the title's presentation interval%s; display %u Hz\n",
+                    mode == 2 ? "ask" : "auto", e && *e ? "" : " (default; RECOMP_PACING=off: the fixed cap)",
+                    s_pacer.adaptive ? ", then the highest even rate the host sustains" : "",
                     frame_pacing_display(&s_pacer));
-        } else if (want) {
-            fprintf(stderr, "  [GPU] pacing %s off: RECOMP_GPU_FPS_CAP=%s wins\n", e, c);
+        } else if (c && *c) {
+            fprintf(stderr, "  [GPU] pacing auto off: RECOMP_GPU_FPS_CAP=%s wins\n", c);
+        } else {
+            fprintf(stderr, "  [GPU] pacing off (RECOMP_PACING=%s): the fixed cap\n", e);
         }
     }
     return on;
 }
 
+#ifdef XBOXRECOMP_LSFG
+/* WP4: frame generation waits for the lock verdict when auto paces the
+ * flips and the check is on; the presenter asks it before the guest starts
+ * (it then keeps the frames off the pacer until xbox_FramegenRelease). */
+static int framegen_waits(void)
+{
+    return framegen_policy_enabled() && pacing_env_mode() != 0 && frame_lock_enabled();
+}
+
+int nv2a_pb_exec_framegen_waits(void)
+{
+    return framegen_waits();
+}
+
+/* At a flip, while frame generation waits: once the pacer has judged the
+ * title (frame_pacing_judge_lock, or RECOMP_PACING_LOCK), open the gate, or
+ * hold frame generation off while a locked title asks for more than its cap
+ * (frame_lock_gate; looked at again at every flip: a title whose ask drops
+ * to the cap, Fable in its world at interval TWO, gets it then). */
+static void framegen_gate_at_flip(void)
+{
+    static uint32_t held_ask;
+    int verdict = s_pacer.lock_force >= 0 ? (s_pacer.lock_force ? 1 : -1) : s_pacer.locked;
+    uint32_t ask = frame_pacing_ask(&s_pacer);
+    int g = frame_lock_gate(verdict, ask, (uint32_t)s_fg_cap);
+
+    if (g == FRAMEGEN_GATE_WAIT)
+        return;
+    if (g == FRAMEGEN_GATE_HOLD) {
+        if (held_ask != ask)
+            fprintf(stderr, "  [GPU] frame generation held off: the title holds the %u fps it asks for (locked to "
+                            "it), and game logic that follows the flip rate would run in slow motion at frame "
+                            "generation's %d fps cap; it starts if the title asks for %d or less "
+                            "(RECOMP_FRAME_LOCK=0 keeps it on)\n", ask, s_fg_cap, s_fg_cap);
+        held_ask = ask;
+        return;
+    }
+    s_fg_gate_wait = 0;
+    fprintf(stderr, "  [GPU] frame generation on: %s; back end frame cap %d fps from now\n",
+            verdict > 0 ? "the title is locked to a rate the cap does not divide"
+                        : "the title is free to run below its ask", s_fg_cap);
+    s_cap_value = s_fg_cap;
+    s_cap_next_ns = s_cap_due_ns = 0;
+    xbox_FramegenRelease(verdict > 0 ? "the title runs at frame generation's rate or below"
+                                     : "the title is free to run below its ask");
+}
+#endif
+
 /* At FLIP_STALL, under auto: the rate for the next frame, bounded by a
- * lower cap that frame generation set (hard > 0). A new rate restarts the
- * schedule. */
-static int pacing_cap_at_flip(int hard)
+ * lower cap that frame generation set (gpu_fps_cap() > 0 under auto only
+ * then). A new rate restarts the schedule. */
+static int pacing_cap_at_flip(void)
 {
     uint64_t now = xbox_HostNowNs();
     uint32_t r;
+    int hard = gpu_fps_cap();
 
     frame_pacing_vblank(&s_pacer, xbox_VblankCount(), now);
     r = frame_pacing_flip(&s_pacer, now, s_pace_slept_ns);
+#ifdef XBOXRECOMP_LSFG
+    if (s_fg_gate_wait) {
+        framegen_gate_at_flip();
+        hard = gpu_fps_cap();
+    }
+#endif
     s_pace_slept_ns = 0;
     if (s_align_slot && now > s_align_slot)     /* a frame held at the cap: slot -> flip */
         frame_pacing_align_flip(&s_align, now - s_align_slot);
@@ -6538,7 +6640,7 @@ static void flip_cap_book(void)
     int cap;
 
     if (pacing_auto())
-        cap = pacing_cap_at_flip(gpu_fps_cap());
+        cap = pacing_cap_at_flip();
     else
         cap = backend_draws() ? gpu_fps_cap() : 0;
     if (cap <= 0) {
@@ -6605,13 +6707,8 @@ static void flip_cap_wait(void)
  * with a line saying why. RECOMP_FRAME_LOCK=0 leaves it alone. */
 static void frame_lock_at_flip(void)
 {
-    static int enabled = -1;
     int held;
-    if (enabled < 0) {
-        const char *e = getenv("RECOMP_FRAME_LOCK");
-        enabled = !(e && *e == '0');
-    }
-    if (!enabled || !s_cap_pre_fg || s_frame_lock.verdict)
+    if (!frame_lock_enabled() || !s_cap_pre_fg || s_frame_lock.verdict)
         return;
     held = s_cap_held_total != s_cap_held_seen;
     s_cap_held_seen = s_cap_held_total;

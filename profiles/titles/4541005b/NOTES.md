@@ -10,9 +10,11 @@ stall.
 
 ## What the profile does
 
-Since XBA-66 most of it comes from the XDK layers (`profiles/xdk/xapi`, `dsound`, `d3d8`) and, since XBA-95, the
-engine layer `profiles/engines/renderware` (DMA walk, title-built KEVENTs, 60 fps cap, frame generation off); D3D's
-addresses stay in title.json `"params"`; `title.c` keeps the flip pacing only. Rules: `docs/technical/profiles.md`.
+Since XBA-66 most of it comes from the XDK layers (`profiles/xdk/xapi`, `dsound`, `d3d8`, `d3d8ltcg`); D3D's
+addresses stay in title.json `"params"`. The engine layer `profiles/engines/renderware` (XBA-95: DMA walk, 60 fps cap,
+frame generation off) and `title.c` (flip pacing on the desktop software rasteriser) went in WP4: the walk comes from
+`xdk/d3d8ltcg`, and `RECOMP_PACING=auto` (the default) judges the game locked to its 60 fps ask, so it is never
+divided and frame generation stays off for it. Rules: `docs/technical/profiles.md`.
 
 | Setting | Why |
 |---|---|
@@ -22,8 +24,8 @@ addresses stay in title.json `"params"`; `title.c` keeps the flip pacing only. R
 | `RECOMP_AC97_READY=1` | without: hang after the USB start, no flip |
 | `RECOMP_VBLANK=paced` | without: one flip (XMV clock, swap counters) |
 | `RECOMP_DISPATCH_GATE=1`, `RECOMP_USB=1`, `RECOMP_KEYBOARD=1` | same XDK USB stack as Fable; gate off prints `[IRQ] gate off: N DPCs at DISPATCH` (3–13 in 335 s) |
-| `RECOMP_GPU_FPS_CAP=60`; `RECOMP_FLIP_PACING=1` on the desktop software rasteriser | the game is locked to the flip rate |
-| title.json `"env_force": {"RECOMP_LSFG": "0"}` | frame generation 2x on a 60 Hz panel caps at 30 → slow motion; the shell applies it before the window opens |
+| none since WP4 (was `RECOMP_GPU_FPS_CAP=60`, `RECOMP_FLIP_PACING=1` on the desktop software rasteriser) | the game is locked to the flip rate: `RECOMP_PACING=auto`'s verdict `locked to its ask` keeps it at 60 on both renderers |
+| none since WP4 (was title.json `"env_force": {"RECOMP_LSFG": "0"}`) | frame generation 2x on a 60 Hz panel caps at 30 → slow motion; it now waits for the lock verdict and stays off (`[GPU] frame generation held off: ...`) |
 | seed `0x00363064` | the XID class driver's Init, see below |
 | `XBA_D3D_FENCE=mirror` (was `BO3_FENCE`) | A/B fallback: segment scan, `xbox_Nv2aMirrorFence(0x0035FE48, 0x2C, 0x30)`, no hook, no watch |
 

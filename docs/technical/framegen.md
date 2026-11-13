@@ -272,33 +272,55 @@ end need not link the framegen library; included only in an
   at flip N+1 and the pacer times frames by their own flip. Log:
   `[GPUGL] present read-back sync (frame generation)`.
 - `RECOMP_FLIP_PACING` (the guest vblank flip hold) is independent.
-- `RECOMP_PACING=auto` (XBA-107, [GPU Back End](gpu-backend.md#pacing-from-the-title-recomp_pacingauto-xba-107-xba-135)):
-  frame generation's cap bounds the rate auto picks; XBA-96's switch-off
-  below raises that bound back to 60.
+- `RECOMP_PACING=auto` (XBA-107, the default since WP4, [GPU Back End](gpu-backend.md#pacing-from-the-title-recomp_pacingauto-xba-107-xba-135)):
+  the cap is applied only once the gate below has opened; it then bounds the
+  rate auto picks.
 
-Both are read once at start-up; if the pacer falls back later, the cap and the
-sync read-back stay for the run (30 fps is the Android profile's cap anyway).
-
-**Titles locked to the flip rate.** A title whose game logic advances once per
-flip (Burnout 3) runs in slow motion under the 30 fps cap. Its profile forces
-frame generation off with `"env_force": {"RECOMP_LSFG": "0"}` in
-`profiles/titles/<title id>/title.json`: `xba_title_configure` is too late for it (the
-presenter and the pacer read `RECOMP_LSFG` before the guest starts), so the
-option travels in `pack.json` on Android (set by the pack loader after
-`recomp.cfg`) and in the generated `src/title/env_force.h` on the desktop (set
-by `main()`). Log: `[TITLE] 4541005B forces RECOMP_LSFG=0 (title profile)`.
-See [Environment variables](../runtime/environment-variables.md#forced-by-a-title).
+The present mode is read once at start-up (sync from the start, also while
+the gate waits); if the pacer falls back later, the cap and the sync
+read-back stay for the run.
 
 ### Titles locked to the flip rate
 
 The cap rule assumes a title that runs at 30. One whose game logic advances per flip at 60 runs in slow motion under
-it (Burnout 3; its engine layer still forces `RECOMP_LSFG=0`). The executor watches for that (XBA-96,
-`src/kernel/frame_lock.h`): over 180 flips under frame generation's cap, after the first 600 (logos and movies, presented every vblank whatever the game does), if at least 90 % of the title's
-swaps (software method 1) ask for every vblank (interval ONE or DEFAULT, not IMMEDIATE) and at least 90 % of its
-frames waited at the cap, frame generation stops (`xbox_FramegenRequestStop`, at the window loop's next turn) and the
-cap goes back to what it was before frame generation lowered it, with a line saying why. A cap that is not frame
-generation's (a profile's `RECOMP_GPU_FPS_CAP=30`, as Fable has on Android) is never touched. `RECOMP_FRAME_LOCK=0`
-turns the check off.
+it (Burnout 3: 98 to 137 km/h in 5 s at a 30 cap against 2.5 s at 60). Until WP4 its profile forced
+`RECOMP_LSFG=0`; now the runtime decides, in `src/kernel/frame_lock.h`:
+
+- **The gate** (WP4, under `RECOMP_PACING=auto`, the default). Frame generation waits for the pacer's lock verdict
+  (`frame_pacing.h`: from 20 s after the first flip, over 5 s windows, at the title's own rate: locked as soon as a
+  window has 90 % of its swaps asking a fixed interval and the title held that rate on 90 % of its frames; free after
+  six windows in a row that do not hold, so 25 s for a locked title, 50 s for a free one). Until then the cap is not lowered and the presenter
+  keeps the frames off the pacer (`fg_feeding`; the pacer thread is started and idle, the generator opens at the
+  first frame it gets): the title runs and is shown as without frame generation, and the overlay says
+  `LSFG WAITING`. Then `frame_lock_gate`:
+  - locked to an ask above frame generation's cap (interval ONE, 60 against 30): frame generation is held off, the
+    rate stays the title's, and the gate keeps looking at every flip: if the title's ask later drops to the cap (the
+    mode of its last 60 swaps at interval TWO), frame generation starts as below. Once started it stays, also if
+    the ask goes back up. Log: `[GPU] frame generation held off: the title holds the 60 fps it asks for (locked to
+    it), ...`. Measured on the Mac: Burnout 3 is judged locked at 25 s and held off for the whole race; Fable asks
+    ONE (60) in its front end and TWO (30) while loading and in Oakvale, so it gets frame generation either way
+    (judged free, or locked to 30 once in its world);
+  - free (it did not hold its ask, or asks IMMEDIATE), or locked to an ask the cap does not divide (interval TWO:
+    30): the cap is lowered and the presenter hands frames to the pacer from the next present
+    (`xbox_FramegenRelease`, a `framegen_pacer_reset` first). Log: `[GPU] frame generation on: ...; back end frame
+    cap 30 fps from now` and `[LSFG] frame generation on: ...`.
+
+  `RECOMP_PACING_LOCK=1` / `=0` decide at the first flip.
+- **The watch** (XBA-96, under `RECOMP_PACING=off`, the fixed cap). The cap is lowered from the first frame; over 180
+  flips under it, after the first 600 (logos and movies, presented every vblank whatever the game does), if at least
+  90 % of the title's swaps (software method 1) ask for every vblank (interval ONE or DEFAULT, not IMMEDIATE) and at
+  least 90 % of its frames waited at the cap, frame generation stops (`xbox_FramegenRequestStop`, at the window
+  loop's next turn) and the cap goes back to what it was before frame generation lowered it, with a line saying why.
+  A cap that is not frame generation's (`RECOMP_GPU_FPS_CAP=30` from the launcher) is never touched.
+
+`RECOMP_FRAME_LOCK=0` turns both off: frame generation and its cap from the first frame. A title profile can still
+force frame generation off (`"env_force": {"RECOMP_LSFG": "0"}`,
+[Environment variables](../runtime/environment-variables.md#forced-by-a-title)); none does since WP4. The Android
+launcher's « Frame generation unavailable for this title » row only follows such a forced value.
+
+Tests: `tests/frame_lock` (the watch and `frame_lock_gate`), `tests/nv2a_ffp_backend` `nv2a-pacing-fg*` (the
+executor built with `XBOXRECOMP_LSFG`: a locked title never capped before or after its verdict, a free one capped
+once judged, a title at 30, the fixed cap's watch, `RECOMP_FRAME_LOCK=0`).
 
 ### Tests
 

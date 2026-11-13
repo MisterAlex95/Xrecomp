@@ -43,23 +43,25 @@ A title profile (`profiles/titles/<title id>/title.json`, or any profile layer: 
 everything else (the shell environment, `recomp.cfg`, the launcher's Settings):
 
 ```json
-"env_force": {"RECOMP_LSFG": "0"}
+"env_force": {"RECOMP_GPU": "0"}
 ```
+
+No shipped profile forces anything since WP4 (Burnout 3's `RECOMP_LSFG=0` went: frame generation now waits for the
+run-time lock verdict and stays off by itself for a title locked to 60, [Frame Generation](../technical/framegen.md#titles-locked-to-the-flip-rate)).
 
 - **Allowed**: names `RECOMP_[A-Z0-9_]+` (63 characters at most), values strings of printable ASCII (255 at most; a
   JSON number is taken as its text), 16 entries at most. `tools.prepare` refuses anything else (`BAD_PROFILE` on
   Android, an error on the desktop); the runtime checks again and ignores a refused entry with a `[TITLE]` line on
   stderr. The value is set as is: for a switch read by presence, `"0"` still turns it on.
 - **Why not `setenv` in the profile**: `xba_title_configure` runs when the guest thread starts, after the window
-  and the frame generation pacer have read their options. Burnout 3 (its game logic follows the flip rate) under
-  `RECOMP_LSFG=1`'s 30 fps cap runs in slow motion; its profile forces `RECOMP_LSFG=0`.
+  and the frame generation pacer have read their options.
 - **Android**: `tools/prepare` copies it into `pack.json` ([prepare.md](../android/prepare.md#packjson));
   `pack_loader.c` sets it after `recomp.cfg` and before the dlopen (`recomp_pack_apply_env_force`,
   `recomp_cfg_force`). The launcher's frame generation row says « Frame generation unavailable for this title » when
   the selected game's pack forces `RECOMP_LSFG` off.
 - **Desktop**: `tools.prepare` writes it to the project's `src/title/env_force.h`; `main()` (templates/new-game)
   sets it first thing.
-- Log, one line per option: `[TITLE] 4541005B forces RECOMP_LSFG=0 (title profile)`.
+- Log, one line per option: `[TITLE] 4541005B forces RECOMP_GPU=0 (title profile)`.
 
 ## Bring-up and diagnostics
 
@@ -230,9 +232,9 @@ The executor is itself opt-in: set `RECOMP_PB_EXEC=1` to execute the pushbuffer.
 | `RECOMP_OVERLAY=1` | off | The SDL presenter draws its small debug overlay (FPS, frame time, draws, memory, CPU, battery, temperature, the title's status line) in the top left corner of the game. Off by default everywhere, Android included; the in-game menu's Settings page has its own performance display for normal use. | `src/video/perf_overlay.c` |
 | `RECOMP_PREP_INDICATOR=0` | on | Turns off the "preparing data" indicator: while a title writes a burst of at least 8 MB to its utility drive (Z:), as Fable does unpacking its data on the first run, the window title and the overlay's status line say `preparing data <n> MB`, and the log has `[PREP]` lines (start, every 64 MB, the total and duration once 5 s pass without a write). No total or percentage: the format is the title's own (WP7). | `src/kernel/prep_progress.c` |
 | `RECOMP_D3D_CALLBACKS=0` | on | Leaves D3D's InsertCallback software methods (6, 7) unserviced instead of calling the title's routine at DPC level (XBA-94). | `profiles/xdk/d3d8/d3d8.c` |
-| `RECOMP_FRAME_LOCK=0` | on | Under frame generation, keeps it on even for a title that asks for every vblank and waits at its 30 fps cap on nearly every frame (otherwise: frame generation off, cap back to 60; XBA-96, framegen.md). | `nv2a_pb_exec.c` |
-| `RECOMP_GPU_FPS_CAP=N` | 60 on macOS and Android, off elsewhere | With a back end drawing (`RECOMP_GPU=1`), at most N flips per second of host time: after `FLIP_STALL` the executor sleeps until the frame's slot before it walks on. `0` turns it off. Independent of `RECOMP_FLIP_PACING`. The `[GPU] frame cap` report line gives waits, time slept and how late the sleeps woke. | `nv2a_pb_exec.c` |
-| `RECOMP_PACING=auto`, `=ask` | off (the fixed cap) | XBA-107 / XBA-135. `auto`: the cap's rate is chosen at every flip, on either renderer: the title's ask (vblank rate / the presentation interval its swaps carry; IMMEDIATE: the display's rate), then the highest even rate (vblank rate / k, at least 15 fps) the measured frame cost sustains, with hysteresis. A title judged locked to its ask (fixed interval, held it while judged, 20 s after its first flip) is never divided: logic that advances per flip would run in slow motion. Vblanks keep the console's rate. `ask`: the ask only. Off when `RECOMP_GPU_FPS_CAP` is set (a profile, the launcher's Frame cap): that cap wins. [GPU Back End](../technical/gpu-backend.md#pacing-from-the-title-recomp_pacingauto-xba-107-xba-135). | `nv2a_pb_exec.c`, `frame_pacing.h` |
+| `RECOMP_FRAME_LOCK=0` | on | Under frame generation, no lock check: frame generation and its 30 fps cap from the first frame, never stopped. Otherwise (WP4) under `RECOMP_PACING=auto` frame generation waits for the pacer's lock verdict (25 s after the first flip for a title that holds its rate, 50 s for one judged free) without lowering the cap, and stays off for a title locked to an ask above its cap; under `RECOMP_PACING=off` the cap is lowered at once and a title that asks for every vblank and waits at the 30 fps cap on nearly every frame turns it off (XBA-96). [framegen.md](../technical/framegen.md#titles-locked-to-the-flip-rate). | `nv2a_pb_exec.c`, `frame_lock.h` |
+| `RECOMP_GPU_FPS_CAP=N` | unset: `RECOMP_PACING=auto` picks the rate; under `RECOMP_PACING=off` 60 on macOS and Android, off elsewhere | Set (the launcher's Frame cap 30 / 60 / Off): turns `RECOMP_PACING=auto` off. With a back end drawing (`RECOMP_GPU=1`), at most N flips per second of host time: after `FLIP_STALL` the executor sleeps until the frame's slot before it walks on. `0` turns it off. Independent of `RECOMP_FLIP_PACING`. The `[GPU] frame cap` report line gives waits, time slept and how late the sleeps woke. | `nv2a_pb_exec.c` |
+| `RECOMP_PACING=auto`, `=ask`, `=off` | auto (WP4; `off` or `0`: the fixed cap, the A/B switch) | XBA-107 / XBA-135. `auto`: the cap's rate is chosen at every flip, on either renderer: the title's ask (vblank rate / the presentation interval its swaps carry; IMMEDIATE: the display's rate), then the highest even rate (vblank rate / k, at least 15 fps) the measured frame cost sustains, with hysteresis. A title judged locked to its ask (fixed interval, held it over a 5 s window from 20 s after its first flip; free only after six windows in a row that do not hold) is never divided: logic that advances per flip would run in slow motion. Vblanks keep the console's rate. `ask`: the ask only. Off when `RECOMP_GPU_FPS_CAP` is set (the launcher's Frame cap): that cap wins. Frame generation waits for its verdict (`RECOMP_FRAME_LOCK`). [GPU Back End](../technical/gpu-backend.md#pacing-from-the-title-recomp_pacingauto-xba-107-xba-135). | `nv2a_pb_exec.c`, `frame_pacing.h` |
 | `RECOMP_PACING_LOCK=1`, `=0` | judged | Under `RECOMP_PACING=auto`: `1` treats the title as locked to its ask (never divided), `0` as free (divided from the first flip). A/B switch for the verdict (XBA-107). | `frame_pacing.h` |
 | `RECOMP_PACING_ALIGN=0`, `=0.N` | on under `RECOMP_PACING=auto`, phase 0.5 | XBA-136. Under `RECOMP_PACING=auto` / `=ask`, the paced flips are kept in phase with the display's refresh: each slot moves (at most a 32nd of a refresh per frame, at once where the schedule restarts) so the frame's present call falls half a refresh from the display's latch edge (Android 13+: the Choreographer frame deadline; Android 11-12: the vsync tick; desktop: the return of a vsynced present that blocked). `0`: off (the absolute schedule as XBA-107 left it). A fraction (`0.3`) sets the present's phase in a refresh. No effect without a display clock (headless, `RECOMP_PRESENT_VSYNC=0` on the desktop, a present that never blocks, a variable-refresh display) or when the frame period is not a whole number of refreshes (60 on 90 Hz). [GPU Back End](../technical/gpu-backend.md#flips-in-phase-with-the-display-xba-136). | `frame_pacing.h`, `display_clock.h`, `display_vsync_android.c`, `fb_present_sdl.c` |
 | `RECOMP_DISPLAY_HZ=N` | the SDL window's display | The display's refresh rate for `RECOMP_PACING=auto` (bounds a title that presents IMMEDIATE); the SDL presenter sets it before the guest starts unless it is already set; 60 when unknown (headless). | `fb_present_sdl.c`, `nv2a_pb_exec.c` |
@@ -307,7 +309,7 @@ Only in a build configured with `-DXBOXRECOMP_LSFG=ON` (POSIX hosts); see [Frame
 
 | Variable | Default | What it does | Where |
 |---|---|---|---|
-| `RECOMP_LSFG=1` | off | Frame generation on. A title profile can force it off (`env_force`, [Forced by a title](#forced-by-a-title)). While on, the effective `RECOMP_GPU_FPS_CAP` is min(cap, display rate / multiplier) (a cap of `0` becomes display rate / multiplier: 30 at 60 Hz, 2x) and `RECOMP_GPU_PRESENT=sync` is forced. Both stay for the run if the pacer later falls back to pass-through. | `src/framegen/framegen_policy.h`, `nv2a_pb_exec.c`, `src/gpu/nv2a_gl.c` |
+| `RECOMP_LSFG=1` | off | Frame generation on. Under `RECOMP_PACING=auto` (the default) it waits for the title's lock verdict (25 to 50 s; frames shown as without it, `LSFG WAITING` in the overlay) and stays off for a title locked to 60 (WP4, `RECOMP_FRAME_LOCK`). Once on, the effective `RECOMP_GPU_FPS_CAP` is min(cap, display rate / multiplier) (a cap of `0` becomes display rate / multiplier: 30 at 60 Hz, 2x). `RECOMP_GPU_PRESENT=sync` is forced from the start. Both stay for the run if the pacer later falls back to pass-through. A title profile can still force it off (`env_force`, [Forced by a title](#forced-by-a-title)). | `src/framegen/framegen_policy.h`, `nv2a_pb_exec.c`, `src/gpu/nv2a_gl.c` |
 | `RECOMP_LSFG_MULT=2..4` | 2 | Frames shown per real frame (2: one generated frame between two real ones). | `framegen_policy.h` |
 | `RECOMP_LSFG_DISPLAY_HZ=N` | 60 | Display refresh rate used by the cap rule. Unset, the windowed presenter sets it to the display's rate when that is below 60 Hz (a faster display keeps 60). | `framegen_policy.h`, `src/video/fb_present_sdl.c` |
 | `RECOMP_LSFG_BUDGET_MS=N` | cap period / multiplier (16.7 ms at 30 fps, 2x) | Generation cost above which a frame counts as over budget; 30 in a row (or 30 failed generations) turn frame generation off: `[LSFG] off: <reason>`. | `src/framegen/framegen_pacer.c` |

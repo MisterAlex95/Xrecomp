@@ -85,8 +85,8 @@ def test_engines_need_their_minimum(tmp_path):
     r = identify(make_xbe(tmp_path / "f.xbe", text=text))
     names = [e["name"] for e in r["engines"]]
     assert names == ["RenderWare", "Bink"]
-    # profiles/engines/renderware exists (XBA-95); middleware (Bink) is never a layer.
-    assert r["layers"] == ["xdk/d3d8", "xdk/xapi", "engines/renderware"]
+    # No engine layer is shipped since WP4 (profiles/engines/renderware went); middleware (Bink) is never a layer.
+    assert r["layers"] == ["xdk/d3d8", "xdk/xapi"]
     assert summary(r) == "XDK 5849, RenderWare; middleware Bink"
 
 

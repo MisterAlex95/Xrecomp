@@ -1,22 +1,35 @@
-/* Does the title want more frames than frame generation lets it have?
- * (XBA-96, T4)
+/* Frame generation and titles locked to the flip rate (XBA-96, T4; WP4).
  *
  * Frame generation (RECOMP_LSFG) shows two frames per real one and paces for
  * 60 Hz, so it caps the title at 30 fps: right for the titles that run at 30,
  * wrong for one whose game logic advances per flip at 60 (Burnout 3 ran in
- * slow motion, and its profile had to force RECOMP_LSFG=0). Seen from here,
- * such a title
- *   - asks for every vblank: its swaps (D3D software method 1) carry the
- *     presentation interval ONE (or DEFAULT), not TWO or more, and not
- *     IMMEDIATE;
- *   - and the cap holds it back: nearly every frame arrives before its 30 fps
- *     slot, so the executor sleeps at the cap.
- * A title that runs at 30 by itself (interval TWO, or frames slower than the
- * cap) is left alone, and so is a cap that is not frame generation's (a
- * title profile's RECOMP_GPU_FPS_CAP=30): the caller only asks while the cap
- * in force is the one frame generation lowered.
+ * slow motion, and its profile had to force RECOMP_LSFG=0).
  *
- * Pure and header-only, so a test drives it with numbers. */
+ * Two ways to find such a title, both pure and header-only (a test drives
+ * them with numbers):
+ *
+ *  1. The gate (frame_lock_gate, the default under RECOMP_PACING=auto):
+ *     frame generation waits for the pacer's lock verdict (frame_pacing.h,
+ *     judged at the title's own rate, 20 s after its first flip) and the
+ *     cap is not lowered before it. A title judged locked to an ask above
+ *     frame generation's cap (Burnout 3: interval ONE, holds 60) is held
+ *     without frame generation while it asks for that; a free title, or one
+ *     locked to an ask the cap does not divide (interval TWO: 30, which
+ *     Fable asks in its world after a front end at ONE), gets it from then
+ *     on.
+ *
+ *  2. The watch (FrameLock, under a fixed cap, RECOMP_PACING=off): the cap
+ *     is lowered from the first frame, and the title is watched under it.
+ *     Such a title
+ *       - asks for every vblank: its swaps (D3D software method 1) carry the
+ *         presentation interval ONE (or DEFAULT), not TWO or more, and not
+ *         IMMEDIATE;
+ *       - and the cap holds it back: nearly every frame arrives before its
+ *         30 fps slot, so the executor sleeps at the cap.
+ *     A title that runs at 30 by itself (interval TWO, or frames slower than
+ *     the cap) is left alone, and so is a cap that is not frame generation's
+ *     (RECOMP_GPU_FPS_CAP=30): the caller only asks while the cap in force
+ *     is the one frame generation lowered. */
 #ifndef XBOXRECOMP_FRAME_LOCK_H
 #define XBOXRECOMP_FRAME_LOCK_H
 
@@ -63,6 +76,22 @@ static inline int frame_lock_flip(FrameLock *f, int held)
                   && f->held * 10u >= f->flips * 9u)            /* 90 % of frames held by the cap */
                ? 1 : -1;
     return f->verdict;
+}
+
+/* The gate (1 above). verdict: the pacer's, 0 undecided, 1 locked to its
+ * ask, -1 free; ask_fps: the rate the title asks for; fg_cap: frame
+ * generation's cap (display rate / multiplier). */
+#define FRAMEGEN_GATE_WAIT   0          /* no verdict yet: frames at the title's rate, no generation */
+#define FRAMEGEN_GATE_START  1          /* frame generation on, the cap lowered to fg_cap */
+#define FRAMEGEN_GATE_HOLD   (-1)       /* locked above fg_cap: no frame generation while the ask stays there */
+
+static inline int frame_lock_gate(int verdict, uint32_t ask_fps, uint32_t fg_cap)
+{
+    if (!verdict)
+        return FRAMEGEN_GATE_WAIT;
+    if (verdict > 0 && fg_cap && ask_fps > fg_cap)
+        return FRAMEGEN_GATE_HOLD;
+    return FRAMEGEN_GATE_START;
 }
 
 #endif /* XBOXRECOMP_FRAME_LOCK_H */

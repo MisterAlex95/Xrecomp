@@ -1,5 +1,6 @@
 /* XBA-96: frame generation goes off only for a title that asks for every
- * vblank and is held back by the 30 fps cap on nearly every frame. */
+ * vblank and is held back by the 30 fps cap on nearly every frame.
+ * WP4: the gate, from the pacer's lock verdict. */
 #include "frame_lock.h"
 #include <stdio.h>
 
@@ -49,6 +50,16 @@ int main(void)
             CHECK(frame_lock_flip(&f, 1) == -1);
         }
     }
+    /* The gate: no verdict, wait; locked to 60 against a 30 cap, hold; locked to
+     * 30 (interval TWO) or to 25 (PAL, TWO), start; free, start; a 120 Hz display
+     * (cap 60) with a title locked to 60, start. */
+    CHECK(frame_lock_gate(0, 60, 30) == FRAMEGEN_GATE_WAIT);
+    CHECK(frame_lock_gate(1, 60, 30) == FRAMEGEN_GATE_HOLD);
+    CHECK(frame_lock_gate(1, 50, 30) == FRAMEGEN_GATE_HOLD);
+    CHECK(frame_lock_gate(1, 30, 30) == FRAMEGEN_GATE_START);
+    CHECK(frame_lock_gate(1, 25, 30) == FRAMEGEN_GATE_START);
+    CHECK(frame_lock_gate(-1, 60, 30) == FRAMEGEN_GATE_START);
+    CHECK(frame_lock_gate(1, 60, 60) == FRAMEGEN_GATE_START);
     if (failures)
         return 1;
     puts("frame_lock: ok");

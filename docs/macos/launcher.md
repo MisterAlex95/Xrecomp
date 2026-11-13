@@ -179,7 +179,7 @@ rewrite their key's first line in place, a default value removes the line, and l
 | General | Window | `RECOMP_FULLSCREEN` | Window, Fullscreen |
 | General | Window size | `RECOMP_WINDOW_SCALE` | 2x (default), 1x, 3x, 4x |
 | Graphics | Renderer | `RECOMP_GPU` | CPU (default), GPU (OpenGL 4.1, opt-in) |
-| Graphics | Frame cap | `RECOMP_GPU_FPS_CAP` | Auto (60), 30, 60, Off; GPU only |
+| Graphics | Frame cap | `RECOMP_GPU_FPS_CAP` | Auto (`RECOMP_PACING=auto`: the game's rate, or a steady lower one), 30, 60, Off; GPU only |
 | Graphics | Internal resolution | `RECOMP_GPU_SCALE` | 1x, 2x, 3x, Fit; GPU only |
 | Graphics | Aspect ratio | `RECOMP_ASPECT` | Auto, 4:3, 16:9 |
 | Graphics | VSync | `RECOMP_PRESENT_VSYNC` | On, Off |

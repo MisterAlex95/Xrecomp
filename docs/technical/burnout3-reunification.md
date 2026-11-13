@@ -27,7 +27,7 @@ What it took, beyond what Fable already needed:
 | front end stalls at `_FEMain.xmv`: the `0x400B10` latch never moved | `RECOMP_PB_WALK=dma` |
 | under the DMA walk, `BlockOnTime` sleeps for ever on the fence event | a software-method hook answers method 5 with `xbox_KeSetGuestEvent` (new in `kernel_bridge.c`), `RECOMP_TITLE_KEVENTS=1` |
 | no pad: the XID class driver's Init was never lifted | seed `0x00363064`; `tools/disasm` now realigns a table-named prologue the sweep stepped over |
-| game in slow motion with frame generation or a 30 fps cap | the game is locked to the flip rate: cap 60, frame generation off (`env_force` in `title.json`) |
+| game in slow motion with frame generation or a 30 fps cap | the game is locked to the flip rate: cap 60, frame generation off (`env_force` in `title.json` until WP4; now the run-time lock verdict of `RECOMP_PACING=auto`, [framegen.md](framegen.md#titles-locked-to-the-flip-rate)) |
 
 Details, addresses and runs: `profiles/titles/4541005b/NOTES.md`.
 

@@ -383,7 +383,7 @@ exist in the runtime and mean something to a player are offered:
 | General › Language | Same as Android (default), English, Français, Deutsch, Español, Italiano, Português, 日本語, 한국어, 中文 | `RECOMP_LANGUAGE=…`; « Same as Android » writes nothing ([Game language](#game-language)) |
 | Graphics › Vertical sync | On (default), Off | `RECOMP_PRESENT_VSYNC=0` when off |
 | Graphics › Renderer | Auto (default: GPU, unless the title's pack forces `RECOMP_GPU=0`), Software, GPU | `RECOMP_GPU=0` / `1`; Auto writes nothing and the runtime's Android default (GPU, CPU rasteriser when GLES 3.0 cannot start) applies; see [GPU back end](../technical/gpu-backend.md#android) |
-| Graphics › Frame cap (dimmed when the renderer is Software) | Auto (default: the title profile's choice, 60 unless the profile sets one; Fable: 30), 30, 60, Off | `RECOMP_GPU_FPS_CAP=30` / `60` / `0` |
+| Graphics › Frame cap (dimmed when the renderer is Software) | Auto (default: `RECOMP_PACING=auto`, the title's own rate or a steady lower one the device sustains, never dividing a title locked to its rate; WP4), 30, 60, Off | Auto writes nothing; `RECOMP_GPU_FPS_CAP=30` / `60` / `0` (a fixed cap, auto off) |
 | Graphics › Resolution (dimmed when the renderer is Software) | Auto (default: the title profile's choice, 1× for now), 1× (original), 2×, 3×, Fit the screen | `RECOMP_GPU_SCALE=1` / `2` / `3` / `auto` (Fit: the screen's height / 480, at most 3); see [GPU back end](../technical/gpu-backend.md#internal-resolution) |
 | Graphics › Aspect ratio | Auto (default), 4:3 (original), 16:9 | `RECOMP_ASPECT=4:3` / `16:9`. Auto: 16:9 for the frames a title draws wide (a title patch declares them; Fable on Android) with menus and videos kept in their shape, 4:3 otherwise; 16:9 stretches every frame of a title that draws no wide frames; see [GPU back end](../technical/gpu-backend.md#aspect-modes) |
 | Graphics › Widescreen | Off (default), On | `RECOMP_WIDESCREEN=1`: the console's widescreen setting (EEPROM `XC_VIDEO` and the AV capabilities, XBA-121); a title that supports it draws 16:9 frames, shown full width with Aspect ratio 16:9 |
@@ -416,7 +416,9 @@ rename; no file is created while every option is at its default. A value the scr
 shows as « Custom » and stays until that row is changed. « Reset all » (the end of Advanced, or Y on any tab)
 removes the lines of these options only. Frame generation forced off by the game's pack (`env_force` RECOMP_LSFG=0)
 stays changeable (it is global) but is dimmed, and its description says, in amber, that it is unavailable for this
-title.
+title. No shipped profile forces it since WP4: the runtime keeps frame generation off by itself for a game judged
+locked to 60 ([framegen.md](../technical/framegen.md#titles-locked-to-the-flip-rate)); the row does not know that
+verdict.
 
 Asked for in XBA-41 but left out, because no runtime option backs them on Android: the output scaling and its filter
 (the SDL presenter always letterboxes the 640 x 480 frame with nearest-neighbour sampling, `fb_present_sdl.c`;

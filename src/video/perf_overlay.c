@@ -198,6 +198,8 @@ int perf_overlay_tick(uint64_t now_ms, uint64_t flips, uint32_t draws, const cha
                  s_fg_gen_us / 1000, s_fg_gen_us % 1000 / 100);
     else if (s_fg_state == 2)
         snprintf(s_lines[n++], LINE_CHARS, "LSFG OFF");
+    else if (s_fg_state == 3)
+        snprintf(s_lines[n++], LINE_CHARS, "LSFG WAITING");
 
     rss = rss_mb();
     if (sys_mem_mb(&used, &total) == 0)
