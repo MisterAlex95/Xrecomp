@@ -1,0 +1,15 @@
+# Allow-list of tools/ci/title_guard.py (XBA-109). One entry per line, `# reason` after it:
+#   <glob>            a whole file (relative to the repo root, fnmatch: * crosses directories)
+#   <path> <token>    one token in one file: a title ID or address in upper-case hex without 0x, a name in lower case
+# Every entry is an exception to « no per-title code »: keep the reason honest, prefer fixing the code.
+
+# Upstream's reference layout: these files (owned by upstream, unchanged in this fork) carry one retail XBE's section
+# table as the fallback that configure_from_xbe() / the per-game CUSTOMIZE step replaces. Kept byte-identical so
+# tools/sync_upstream.sh merges cleanly; a new use of the value anywhere else still fails.
+templates/runtime/xbox_memory.h 0036B7C0      # XBOX_RDATA_VA /* CUSTOMIZE */ placeholder
+tools/disasm/config.py 0036B7C0               # KERNEL_THUNK_ADDR / DATA_SECTIONS reference fallback
+tools/func_id/config.py 0036B7C0              # RDATA_VA_START / SECTIONS reference fallback
+tools/recomp/analyze_unresolved.py 0036B7C0   # section table of upstream's analysis helper
+
+# Words that are also a game's name
+android/app/src/main/res/values-fr/strings.xml halo   # « les effets comme le halo » : the light effect (bloom)
