@@ -263,6 +263,12 @@
     <string name="PREPARE_SEE_WHY">Voir l\'erreur</string>
     <string name="KV_PREPARED">Préparé le</string>
     <string name="KV_PACK_SIZE">Taille du pack</string>
+    <string name="KV_PREPARE_TOOK">Durée de la préparation</string>
+    <string name="PREPARE_TOOK">%1$s · %2$d tâches · -O%3$s (%4$d fichiers, %5$d compilés)</string>
+    <string name="KV_PREPARE_MEMORY">Mémoire par tâche de compilation</string>
+    <string name="PREPARE_MEMORY">%1$d Mo au plus, %2$d Mo en général</string>
+    <string name="KV_PREPARE_HEAT">Le plus chaud pendant ce temps</string>
+    <string name="PREPARE_HOT_FOR">%1$s (%2$s au niveau sévère ou plus)</string>
     <string name="VAL_NEVER">Jamais</string>
     <string name="VAL_NONE">—</string>
     <string name="PLAYTIME_MIN">%1$d min</string>

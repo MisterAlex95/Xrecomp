@@ -266,8 +266,12 @@ class CheckPlatform implements CheckDriver.Platform {
             f.add("soc=" + Build.SOC_MODEL);
         f.add("app_build=" + c.getString(R.string.xba_version) + " (" + c.getString(R.string.xba_version_code) + ")");
         f.add("seconds=" + (int)Math.round(g.runS > 0 ? g.runS : 0));
-        if (g.peakKb > 0)
+        if (g.peakKb > 0)   // the game's process (VmHWM)
             f.add("peak_mem_mb=" + (g.peakKb + 512) / 1024);
+        // XBA-128: what the title's Prepare cost (pack.json "prepare"): its time when the check did not time it, the
+        // compile jobs' peak memory, the pack's size, the jobs, -O, the hottest thermal status, the steps' times.
+        if (g.title != null)
+            f.addAll(PrepareFacts.reportFields(filesDir(), g.title.tid, g.prepareMs >= 0));
         return f;
     }
 

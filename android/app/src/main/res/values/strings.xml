@@ -286,6 +286,12 @@
     <string name="PREPARE_SEE_WHY">See what failed</string>
     <string name="KV_PREPARED">Prepared</string>
     <string name="KV_PACK_SIZE">Pack size</string>
+    <string name="KV_PREPARE_TOOK">Preparation took</string>
+    <string name="PREPARE_TOOK">%1$s · %2$d jobs · -O%3$s (%4$d files, %5$d compiled)</string>
+    <string name="KV_PREPARE_MEMORY">Memory per compile job</string>
+    <string name="PREPARE_MEMORY">%1$d MB at most, %2$d MB typical</string>
+    <string name="KV_PREPARE_HEAT">Hottest during it</string>
+    <string name="PREPARE_HOT_FOR">%1$s (%2$s at severe or above)</string>
     <string name="VAL_NEVER">Never</string>
     <string name="VAL_NONE">—</string>
     <string name="PLAYTIME_MIN">%1$d min</string>

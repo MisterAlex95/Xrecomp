@@ -2292,6 +2292,7 @@ public class LauncherActivity extends Activity {
             String[] pack = packFacts(tid);
             l.add(kv(R.string.KV_PREPARED, pack[0]));
             l.add(kv(R.string.KV_PACK_SIZE, pack[1]));
+            l.addAll(PrepareFacts.lines(this, getFilesDir(), tid));   // XBA-128: what its Prepare cost
         }
         if (dir == null) {
             l.add(kv(R.string.KV_STATUS, getString(stateLabel(state()))));

@@ -209,6 +209,24 @@ public class LauncherSelfHealTest {
         assertTrue(a.noteForTest(), a.noteForTest().contains("(1)"));
     }
 
+    /** XBA-128: Manage's facts say what the pack's Prepare cost (pack.json « prepare »). */
+    @Test
+    public void manageSaysWhatThePrepareCost() throws Exception {
+        File json = new File(Pack.packDir(app.getFilesDir(), TID), Pack.JSON);
+        org.json.JSONObject o = new org.json.JSONObject(PrepareProtocol.readText(json, 1 << 16));
+        o.put("prepare", new org.json.JSONObject("{\"total_s\": 512, \"jobs\": 4, \"opt\": \"2\", \"files\": 163,"
+                + " \"compiled\": 163, \"peak_rss_mb\": {\"max\": 589, \"p90\": 302, \"median\": 163},"
+                + " \"thermal\": {\"max\": 3, \"severe_s\": 95}}"));
+        TestSupport.write(json, o.toString(1));
+        LauncherActivity a = launch(null);
+        a.goForTest(LauncherActivity.Screen.GAME_DATA);
+        shadowOf(Looper.getMainLooper()).idle();
+        assertTrue(TestSupport.screenshot(a.getWindow().getDecorView(), "prepare-16-manage-prepare-cost").length() > 0);
+        String d = a.descriptionForTest();
+        assertTrue(d, d.contains("8 min 32 s · 4 jobs · -O2 (163 files, 163 compiled)"));
+        assertTrue(d, d.contains("589 MB at most"));
+    }
+
     @Test
     public void aGuestExceptionNeedsAFixNamed() throws Exception {
         lastRun(ApplicationExitInfo.REASON_CRASH_NATIVE, ICALL + "{\"t\":\"exception\",\"va\":\"0x00011020\","

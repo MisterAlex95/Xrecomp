@@ -242,6 +242,10 @@ final class PrepareProtocol {
          * still plays while it runs, and nothing starts by itself when it is done.
          */
         boolean background;
+        /** Times the Prepare was started again after its process died (START_REDELIVER_INTENT, XBA-128). */
+        int resumes;
+        /** The clang -O level of this Prepare (XBA-128: 1 for a quick first build, 2 otherwise). */
+        int opt;
 
         boolean running() {
             return RUNNING.equals(state);
@@ -270,6 +274,10 @@ final class PrepareProtocol {
                 o.put("title_id", titleId);
                 if (background)
                     o.put("background", true);
+                if (resumes > 0)
+                    o.put("resumes", resumes);
+                if (opt > 0)
+                    o.put("opt", opt);
             } catch (JSONException e) {
                 throw new IllegalStateException(e);
             }
@@ -293,6 +301,8 @@ final class PrepareProtocol {
             s.attempt = o.optInt("attempt", 1);
             s.titleId = o.optString("title_id", "");
             s.background = o.optBoolean("background", false);
+            s.resumes = o.optInt("resumes", 0);
+            s.opt = o.optInt("opt", 0);
             return s;
         }
 
@@ -338,6 +348,8 @@ final class PrepareProtocol {
         String titleId = "", gameDir = "", title = "";
         /** A background Prepare (Status.background, XBA-129). */
         boolean background;
+        /** clang -O level (XBA-128); 0: the service's default. */
+        int opt;
 
         Job() {}
 
@@ -402,6 +414,8 @@ final class PrepareProtocol {
                     x.put("title", j.title);
                     if (j.background)
                         x.put("background", true);
+                    if (j.opt > 0)
+                        x.put("opt", j.opt);
                     a.put(x);
                 }
                 o.put("jobs", a);
@@ -420,6 +434,7 @@ final class PrepareProtocol {
                     continue;
                 Job j = new Job(x.optString("title_id", ""), x.optString("game_dir", ""), x.optString("title", ""));
                 j.background = x.optBoolean("background", false);
+                j.opt = x.optInt("opt", 0);
                 q.add(j);
             }
             return q;
