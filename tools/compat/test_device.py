@@ -170,3 +170,32 @@ def test_the_renderer_is_what_really_drew():
     assert renderer_of("  [GPUGL] CPU rasteriser selected (RECOMP_GPU=0)\n") == "CPU rasteriser (RECOMP_GPU=0)"
     assert renderer_of(gl) == "GPU selected (no frame drawn)"
     assert renderer_of("no GPU lines at all\n") is None
+
+
+def test_the_device_names_the_new_blockers_as_the_desktop_does(tmp_path):
+    """wave1/1b's blocker kinds through `grade`, word for word classify()'s:
+    a stub route, a stack switch the runtime could not carry, a refused
+    cross-stack SEH resume (recorded as a stack_switch), an unhandled guest
+    exception and a divide error no handler took."""
+    st = [line(t) for t in range(1000, 20001, 1000)]
+    disc = [{"t": "stub", "ord": 136, "name": "KeRemoveQueue", "ret": "0x00012345"},
+            {"t": "stack_switch", "va": "0x000100B1", "to": "0x00010078",
+             "why": "an exception handler resumes into a frame on another host stack (SEH, XBA-112)"}]
+    seh = "  [SEH] unhandled exception 0xC0000005 at 0x00045678 (record 0x0017FE00); execution continues after the raise\n"
+    de = ("[#DE] integer divide error at 0x00012340: divide by zero (status 0xC0000094); eax=00000007 edx=00000000 "
+          "divisor=00000000 esp=0017FF00 -- no guest handler took it, stopping\n[EXIT] KeBugCheckEx 0x0000001E\n")
+    for log, exit_arg, exit_info, discovered in ((seh, "none", None, disc), (de, "exit:30", ("exit", 30), ()),
+                                                  (seh, "none", None, ())):
+        sub = tmp_path / ("c%d" % len(list(tmp_path.iterdir())))
+        sub.mkdir()
+        work, sp, lg = _files(sub, st, log, IDENT, discovered)
+        r = _grade(sub, "--work", str(work), "--status", str(sp), "--log", str(lg), "--exit", exit_arg,
+                   "--run-s", "20")[-1]
+        want = classify(st, [], exit_info, 20, 60, log, list(discovered))[1]
+        assert r["blocker"] == want, (r["blocker"], want)
+        if discovered:
+            assert "stack switch at 0x000100B1" in want and "calls stub ordinal 136 (KeRemoveQueue)" in want, want
+        elif log is de:
+            assert "divide error at 0x00012340: divide by zero (no guest handler took it)" in want, want
+        else:
+            assert want.endswith("unhandled guest exception 0xC0000005 at 0x00045678"), want

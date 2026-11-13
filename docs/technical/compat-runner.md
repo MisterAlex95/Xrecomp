@@ -48,6 +48,11 @@ guest stack switch the runtime could not carry (a `stack_switch` discovery entry
 [stack-switching.md](stack-switching.md)) is named after any of them: « hang: ...; stack switch at 0x... to 0x...:
 <why> (XBA-101) ». Any blocker but a crash or a launch also names the stub kernel routes the run called, from the
 discovery file's `stub` entries: « no flip; calls stub ordinal 136 (KeRemoveQueue) » (XBA-115).
+A guest divide error no handler took (the runtime's `[#DE]` report, then bugcheck 0x1E) is named after the exit:
+« exited with code 30 after 3 s; divide error at 0x00012340: divide by zero (no guest handler took it) »; an unhandled
+guest exception (`[SEH] unhandled exception`, after which the title goes on) after any blocker but a crash: « no flip;
+unhandled guest exception 0xC0000005 at 0x00045678 » (XBA-110, XBA-112). The device's library check grades through the
+same `classify()` (`tools/compat/device.py`), so its words are these.
 
 ## The « Compatibility » page (XBA-73)
 

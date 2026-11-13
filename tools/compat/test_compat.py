@@ -206,3 +206,20 @@ def test_the_last_screenshot_is_kept(tmp_path):
         (shots / ("f%05d.bmp" % n)).write_bytes(b"BM%d" % n)
     assert keep_last_shot(str(shots), str(tmp_path / "shot-0.bmp")) == str(tmp_path / "shot-0.bmp")
     assert (tmp_path / "shot-0.bmp").read_bytes() == b"BM2" and not shots.exists()
+
+
+def test_guest_exceptions_are_named():
+    """XBA-110 x XBA-112: a divide error no handler took (the runtime's [#DE]
+    report, then bugcheck 0x1E) and an unhandled guest exception, in the
+    blocker; the latter is not taken for the crash detail."""
+    de = ("[#DE] integer divide error at 0x00012340: divide by zero (status 0xC0000094); eax=00000007 "
+          "edx=00000000 divisor=00000000 esp=0017FF00 -- no guest handler took it, stopping\n"
+          "[EXIT] KeBugCheckEx 0x0000001E\n")
+    st = [{"ms": 1000, "flips": 0, "draws": 0, "pad_reads": 0}]
+    blocker = classify(st, [], ("code", 30), 3, 60, de)[1]
+    assert blocker == ("exited with code 30 after 3 s; divide error at 0x00012340: divide by zero "
+                       "(no guest handler took it)"), blocker
+    seh = "  [SEH] unhandled exception 0xC0000005 at 0x00045678 (record 0x0017FE00); execution continues after the raise\n"
+    assert classify(st, [], None, 60, 60, seh)[1] == "no flip; unhandled guest exception 0xC0000005 at 0x00045678"
+    crash = classify(st, [], ("signal", 11), 40, 60, seh + "SIGSEGV at 0x1234\n")[1]
+    assert crash.startswith("crash (signal 11): SIGSEGV") and "unhandled guest" not in crash, crash

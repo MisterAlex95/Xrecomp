@@ -37,8 +37,16 @@ def read_jsonl(path):
 
 
 LAUNCH_RE = re.compile(r"\[KERNEL\] launch of '([^']*)' is not this title")
-CRASH_RE = re.compile(r"(SIGSEGV|SIGBUS|SIGILL|SIGABRT|unhandled exception|access violation|"
+# "[SEH] unhandled exception ..." (XBA-112) is a guest raise nothing handled,
+# after which the title goes on: not the crash, so not its detail.
+CRASH_RE = re.compile(r"(SIGSEGV|SIGBUS|SIGILL|SIGABRT|(?<!\[SEH\] )unhandled exception|access violation|"
                       r"\[FAULT\][^\n]*|fault at [^\n]*)", re.I)
+# A lifted div/idiv's #DE that no guest handler took: the runtime reports it
+# and bugchecks (0x1E), kernel_hal.c recomp_divide_error.
+DE_RE = re.compile(r"\[#DE\] integer divide error at (0x[0-9A-Fa-f]+): ([a-z ]+) \(status 0x[0-9A-Fa-f]+\)"
+                   r"[^\n]*-- ([^\n]*?), stopping")
+# A guest exception nothing handled (xbox_seh.c): the raise returns.
+SEH_UNHANDLED_RE = re.compile(r"\[SEH\] unhandled exception (0x[0-9A-Fa-f]{8}) at (0x[0-9A-Fa-f]{8})")
 UNIMPL_RE = re.compile(r"\[UNIMPL\] untranslated instruction REACHED: `([^`]*)` at (0x[0-9A-Fa-f]+)")
 
 
@@ -94,6 +102,14 @@ def classify(status, presses_ms, exit_info, run_s, sustain_s, log_text="", disco
             if addressed:
                 d = addressed[-1]
                 blocker += "; last discovery: %s %s" % (d.get("t"), d.get("va"))
+    # The guest's exceptions (XBA-110 x XBA-112), with the same words on the
+    # device (tools/compat/device.py grades through this function).
+    de = DE_RE.search(log_text or "")
+    seh = SEH_UNHANDLED_RE.search(log_text or "")
+    if blocker and de and not launch:
+        blocker += "; divide error at %s: %s (%s)" % (de.group(1), de.group(2), de.group(3))
+    elif blocker and seh and not launch and not blocker.startswith("crash"):
+        blocker += "; unhandled guest exception %s at %s" % (seh.group(1), seh.group(2))
     if blocker is None and stage != "sustained":
         blocker = {"boots": "nothing lit on screen", "renders": "no response to the pad",
                    "responsive": "not sustained"}.get(stage)
