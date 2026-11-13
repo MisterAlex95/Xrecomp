@@ -175,26 +175,6 @@ public class PrepareService extends Service {
         int opt = intent.getIntExtra(EXTRA_OPT, 0);
         if (opt <= 0)
             opt = !background && quickFirst(this) ? 1 : OPT;
-        int resumes = 0;
-        if ((flags & START_FLAG_REDELIVERY) != 0 && titleId != null) {
-            // XBA-128: the Prepare's process died (the system killed it) and Android started it again with its intent.
-            PrepareProtocol.Status prev = PrepareProtocol.readStatus(statusFile(this, titleId));
-            if (prev != null && !prev.running()) {
-                Log.i(TAG, "prepare: " + titleId + " redelivered but " + prev.state + ": nothing to resume");
-                if (!busy())
-                    stopSelf(startId);
-                return START_NOT_STICKY;
-            }
-            resumes = (prev == null ? 0 : prev.resumes) + 1;
-            if (resumes > MAX_RESUMES) {
-                Log.w(TAG, "prepare: " + titleId + "'s process died " + resumes + " times: given up");
-                markKilled(titleId, resumes);
-                if (!busy())
-                    stopSelf(startId);
-                return START_NOT_STICKY;
-            }
-            Log.i(TAG, "prepare: resuming " + titleId + " after its process died (" + resumes + ")");
-        }
         // startForegroundService() needs startForeground() even when nothing new starts.
         try {
             goForeground(notification(null));
@@ -202,6 +182,26 @@ public class PrepareService extends Service {
             Log.w(TAG, "prepare: cannot go to the foreground: " + e);
             stopSelf(startId);
             return START_NOT_STICKY;
+        }
+        int resumes = 0;
+        if ((flags & START_FLAG_REDELIVERY) != 0 && titleId != null) {
+            // XBA-128: the Prepare's process died (the system killed it) and Android started it again with its intent.
+            PrepareProtocol.Status prev = PrepareProtocol.readStatus(statusFile(this, titleId));
+            boolean waiting = prev != null && prev.queued();   // it was queued: a plain start
+            if (prev != null && !prev.running() && !waiting) {
+                Log.i(TAG, "prepare: " + titleId + " redelivered but " + prev.state + ": nothing to resume");
+                dropStart(startId);
+                return START_NOT_STICKY;
+            }
+            resumes = waiting ? 0 : (prev == null ? 0 : prev.resumes) + 1;
+            if (resumes > MAX_RESUMES) {
+                Log.w(TAG, "prepare: " + titleId + "'s process died " + resumes + " times: given up");
+                markKilled(titleId, resumes);
+                dropStart(startId);
+                return START_NOT_STICKY;
+            }
+            if (resumes > 0)
+                Log.i(TAG, "prepare: resuming " + titleId + " after its process died (" + resumes + ")");
         }
         boolean busy = busy();
         if (gameDir == null || titleId == null || titleId.isEmpty()) {
@@ -329,6 +329,14 @@ public class PrepareService extends Service {
         if (titleId != null)
             markCancelled(titleId, PrepareProtocol.RUNNING, PrepareProtocol.QUEUED);
         stopSelf();
+    }
+
+    /** A start that runs nothing: out of the foreground and stopped, unless a Prepare runs. */
+    private void dropStart(int startId) {
+        if (busy())
+            return;
+        stopForeground(STOP_FOREGROUND_REMOVE);
+        stopSelf(startId);
     }
 
     /** XBA-128: the quick first build (-O1, then a background -O2) is on (a file, for measuring it on a device). */
