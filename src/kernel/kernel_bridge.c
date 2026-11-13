@@ -1099,8 +1099,10 @@ static void bridge_NtClose(void)
     /* Close real handles but skip fake/synthetic ones */
     if (raw_handle && raw_handle != 0xDEAD0001u && raw_handle != 0xBEEF0010u) {
         HANDLE h = bridge_take_handle(raw_handle);
-        if (h && h != INVALID_HANDLE_VALUE)
+        if (h && h != INVALID_HANDLE_VALUE) {
+            ks_port_forget(h);   /* an I/O completion object, or a file joined to one */
             xbox_NtClose(h);   /* settles a pending overwrite; drops a dir context */
+        }   /* settles a pending overwrite; drops a dir context */
     }
     g_eax = 0; /* STATUS_SUCCESS */
 }
@@ -5059,11 +5061,6 @@ static void deliver_one_apc(uint32_t apc_routine, uint32_t apc_context,
     }
 }
 
-/* Per-thread pending-APC ring. An APC is delivered on the thread that issued
- * the request, which is also the thread that waits, so thread-local is right.
- * The status block is written and the event set before this, so a title that
- * polls either, or waits on the event without being alertable, sees the
- * request complete whether or not its APC has run -- as on the console. */
 /* A request that fails synchronously -- an error status (NT_ERROR) the call
  * returns itself, not STATUS_PENDING -- queues no APC: the I/O manager
  * completes it without a completion APC and the caller learns of it from
@@ -5076,16 +5073,30 @@ static int bridge_io_failed_sync(uint32_t status, int pending)
     return ((status >> 30) == 3u) && !pending;
 }
 
-static void bridge_complete_file_io(uint32_t event_token, uint32_t apc_routine,
-                                    uint32_t apc_context, uint32_t iostatus,
-                                    uint32_t status, int pending)
+/* Per-thread pending-APC ring. An APC is delivered on the thread that issued
+ * the request, which is also the thread that waits, so thread-local is right.
+ * The status block is written and the event set before this, so a title that
+ * polls either, or waits on the event without being alertable, sees the
+ * request complete whether or not its APC has run -- as on the console.
+ *
+ * A file joined to an I/O completion object (FileCompletionInformation)
+ * posts a request that names no APC routine but an ApcContext -- XAPI's
+ * overlapped ReadFile passes the OVERLAPPED there -- to that object, with
+ * the file's key and the request's status and byte count (XBA-114). */
+static void bridge_complete_file_io(uint32_t file_token, uint32_t event_token,
+                                    uint32_t apc_routine, uint32_t apc_context,
+                                    uint32_t iostatus, uint32_t status,
+                                    uint32_t info, int pending)
 {
-    if (bridge_io_failed_sync(status, pending))
-        apc_routine = 0;
     if (event_token) {
         HANDLE ev = bridge_resolve_handle(event_token);
         if (ev) SetEvent(ev);
     }
+    if (bridge_io_failed_sync(status, pending))
+        return;
+    if (!apc_routine && apc_context)
+        ks_port_post_for_file(bridge_resolve_handle(file_token), apc_context,
+                              status, info);
     if (apc_routine) {
         if (defer_io_apc() && g_io_apc_count < IO_APC_QUEUE) {
             uint32_t *q = g_io_apc[g_io_apc_count++];
@@ -5359,8 +5370,8 @@ static void bridge_NtReadFile(void)
         fflush(stderr);
     }
     bridge_write_iostatus(iostatus, ios.Status, (uint32_t)ios.Information);
-    bridge_complete_file_io(STACK_ARG(1), STACK_ARG(2), STACK_ARG(3),
-                            iostatus, g_eax,
+    bridge_complete_file_io(STACK_ARG(0), STACK_ARG(1), STACK_ARG(2), STACK_ARG(3),
+                            iostatus, g_eax, (uint32_t)ios.Information,
                             bridge_async_io_enabled() && bridge_handle_is_async(STACK_ARG(0)));
 
     /* An asynchronous request returns STATUS_PENDING, even when the data was
@@ -5408,8 +5419,8 @@ static void bridge_NtWriteFile(void)
     g_eax = (uint32_t)xbox_NtWriteFile(handle, NULL, NULL, NULL, &ios,
                 XBOX_TO_NATIVE(buffer_va), length, poff);
     bridge_write_iostatus(iostatus, ios.Status, (uint32_t)ios.Information);
-    bridge_complete_file_io(STACK_ARG(1), STACK_ARG(2), STACK_ARG(3),
-                            iostatus, g_eax, 0);
+    bridge_complete_file_io(STACK_ARG(0), STACK_ARG(1), STACK_ARG(2), STACK_ARG(3),
+                            iostatus, g_eax, (uint32_t)ios.Information, 0);
 }
 
 /* ── NtQueryInformationFile (ordinal 211, 5 args = 20 bytes) */
@@ -5448,6 +5459,22 @@ static void bridge_NtSetInformationFile(void)
     if (!bridge_buf_ok(info_va, length, "NtSetInformationFile")) {
         bridge_write_iostatus(ios_va, (NTSTATUS)0xC0000005, 0);
         g_eax = 0xC0000005u;                 /* STATUS_ACCESS_VIOLATION */
+        return;
+    }
+
+    /* FileCompletionInformation (30): { HANDLE Port; PVOID Key; }, the
+     * port a handle token. XAPI's CreateIoCompletionPort on a file joins it
+     * to the port: its requests with an ApcContext and no APC routine post
+     * their completion there (bridge_complete_file_io, XBA-114). */
+    if (infoclass == 30u) {
+        if (length < 8u) {
+            g_eax = 0xC0000004u;             /* STATUS_INFO_LENGTH_MISMATCH */
+        } else {
+            HANDLE port = bridge_resolve_handle(BRIDGE_MEM32(info_va));
+            g_eax = ks_port_associate(handle, port, BRIDGE_MEM32(info_va + 4))
+                  ? 0xC000000Du : 0;         /* STATUS_INVALID_PARAMETER */
+        }
+        bridge_write_iostatus(ios_va, (NTSTATUS)g_eax, 0);
         return;
     }
 
@@ -9724,13 +9751,31 @@ static void bridge_NtCancelTimer(void)
     g_eax = 0;  /* STATUS_SUCCESS */
 }
 
-/* --- NtCreateIoCompletion (ordinal 191, 4 args = 16 bytes) --- */
+/* --- NtCreateIoCompletion (ordinal 191, 4 args = 16 bytes)
+ * NTSTATUS NtCreateIoCompletion(PHANDLE IoCompletionHandle,
+ *                               ACCESS_MASK DesiredAccess,
+ *                               POBJECT_ATTRIBUTES ObjectAttributes,
+ *                               ULONG Count);
+ * XAPI's CreateIoCompletionPort. The object is kernel_ksync.c's (XBA-114);
+ * the handle is a manual-reset event it keeps signalled while packets are
+ * queued, so a wait on the handle answers as a wait on the console's
+ * KQUEUE does. It used to succeed without writing a handle. */
 static void bridge_NtCreateIoCompletion(void)
 {
-    (void)STACK_ARG(0);
-    (void)STACK_ARG(1);
-    (void)STACK_ARG(2);
-    (void)STACK_ARG(3);
+    uint32_t handle_va = STACK_ARG(0);
+    HANDLE h;
+
+    if (!handle_va || !bridge_buf_ok(handle_va, 4, "NtCreateIoCompletion")) {
+        g_eax = 0xC0000005u;                 /* STATUS_ACCESS_VIOLATION */
+        return;
+    }
+    h = CreateEventA(NULL, TRUE, FALSE, NULL);
+    if (!h || !ks_port_create(h, STACK_ARG(3))) {
+        if (h) CloseHandle(h);
+        g_eax = 0xC000009Au;                 /* STATUS_INSUFFICIENT_RESOURCES */
+        return;
+    }
+    bridge_write_handle(handle_va, h);
     g_eax = 0;
 }
 
@@ -9831,14 +9876,23 @@ static void bridge_NtQueryEvent(void)
     g_eax = 0;
 }
 
-/* --- NtQueryIoCompletion (ordinal 212, 5 args = 20 bytes) --- */
+/* --- NtQueryIoCompletion (ordinal 212, 2 args = 8 bytes)
+ * NTSTATUS NtQueryIoCompletion(HANDLE, PIO_COMPLETION_BASIC_INFORMATION);
+ * The basic information is one LONG, Depth: the packets queued. */
 static void bridge_NtQueryIoCompletion(void)
 {
-    (void)STACK_ARG(0);
-    (void)STACK_ARG(1);
-    (void)STACK_ARG(2);
-    (void)STACK_ARG(3);
-    (void)STACK_ARG(4);
+    int32_t depth = ks_port_depth(bridge_resolve_handle(STACK_ARG(0)));
+    uint32_t info_va = STACK_ARG(1);
+
+    if (depth < 0) {
+        g_eax = 0xC0000008u;                 /* STATUS_INVALID_HANDLE */
+        return;
+    }
+    if (!info_va || !bridge_buf_ok(info_va, 4, "NtQueryIoCompletion")) {
+        g_eax = 0xC0000005u;
+        return;
+    }
+    BRIDGE_MEM32(info_va) = (uint32_t)depth;
     g_eax = 0;
 }
 
@@ -9889,26 +9943,43 @@ static void bridge_NtReadFileScatter(void)
     g_eax = 0;
 }
 
-/* --- NtRemoveIoCompletion (ordinal 223, 5 args = 20 bytes) --- */
+/* --- NtRemoveIoCompletion (ordinal 223, 5 args = 20 bytes)
+ * NTSTATUS NtRemoveIoCompletion(HANDLE IoCompletionHandle, PVOID *KeyContext,
+ *                               PVOID *ApcContext,
+ *                               PIO_STATUS_BLOCK IoStatusBlock,
+ *                               PLARGE_INTEGER Timeout);
+ * XAPI's GetQueuedCompletionStatus: the oldest packet, or STATUS_TIMEOUT
+ * once Timeout (NULL = forever) runs out. Not alertable, as on the console.
+ * A blocking wait, filed with the others (kernel_wait_stats.h). */
 static void bridge_NtRemoveIoCompletion(void)
 {
-    (void)STACK_ARG(0);
-    (void)STACK_ARG(1);
-    (void)STACK_ARG(2);
-    (void)STACK_ARG(3);
-    (void)STACK_ARG(4);
-    g_eax = 0;
+    uint32_t token = STACK_ARG(0), key_va = STACK_ARG(1), ctx_va = STACK_ARG(2);
+    uint32_t ios_va = STACK_ARG(3), timeout_va = STACK_ARG(4);
+    uint32_t out[4] = { 0, 0, 0, 0 };
+    uint64_t t0 = xbox_wait_stats_begin(bridge_timeout_is_poll(timeout_va));
+
+    g_eax = ks_port_remove(bridge_resolve_handle(token), timeout_va, out);
+    xbox_wait_stats_wait(token, g_xbox_kernel_caller, g_eax, t0);
+    if (g_eax != 0)
+        return;
+    if (key_va && bridge_buf_ok(key_va, 4, "NtRemoveIoCompletion"))
+        BRIDGE_MEM32(key_va) = out[0];
+    if (ctx_va && bridge_buf_ok(ctx_va, 4, "NtRemoveIoCompletion"))
+        BRIDGE_MEM32(ctx_va) = out[1];
+    if (ios_va && bridge_buf_ok(ios_va, 8, "NtRemoveIoCompletion"))
+        bridge_write_iostatus(ios_va, (NTSTATUS)out[2], out[3]);
 }
 
-/* --- NtSetIoCompletion (ordinal 227, 5 args = 20 bytes) --- */
+/* --- NtSetIoCompletion (ordinal 227, 5 args = 20 bytes)
+ * NTSTATUS NtSetIoCompletion(HANDLE IoCompletionHandle, PVOID KeyContext,
+ *                            PVOID ApcContext, NTSTATUS IoStatus,
+ *                            ULONG_PTR IoStatusInformation);
+ * XAPI's PostQueuedCompletionStatus. */
 static void bridge_NtSetIoCompletion(void)
 {
-    (void)STACK_ARG(0);
-    (void)STACK_ARG(1);
-    (void)STACK_ARG(2);
-    (void)STACK_ARG(3);
-    (void)STACK_ARG(4);
-    g_eax = 0;
+    g_eax = ks_port_post(bridge_resolve_handle(STACK_ARG(0)), STACK_ARG(1),
+                         STACK_ARG(2), STACK_ARG(3), STACK_ARG(4))
+          ? 0xC0000008u : 0;                 /* STATUS_INVALID_HANDLE */
 }
 
 /* --- NtSetTimerEx (ordinal 229, 8 args = 32 bytes) --- */
@@ -11015,7 +11086,7 @@ static int stdcall_args_for_ordinal(ULONG ordinal)
     case 201: return 12;  /* NtOpenDirectoryObject (3) */
     case 208: return 28;  /* NtQueryDirectoryObject (7) */
     case 209: return 16;  /* NtQueryEvent (4) */
-    case 212: return 20;  /* NtQueryIoCompletion (5) */
+    case 212: return  8;  /* NtQueryIoCompletion (2): nxdk xboxkrnl.h */
     case 213: return 20;  /* NtQueryMutant (5) */
     case 214: return 20;  /* NtQuerySemaphore (5) */
     case 216: return 20;  /* NtQueryTimer (5) */

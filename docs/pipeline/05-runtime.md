@@ -215,7 +215,7 @@ stub is in `src/kernel/kernel_stub_table.c`: its first call (then the 10th, 100t
 | Kernel (IRQL fastcalls) | 2 | 2 | 0 | 0 | - |
 | Kernel internals | 2 | 1 | 0 | 1 | 163 KiUnlockDispatcherDatabase |
 | Memory manager | 25 | 21 | 0 | 4 | 174 MmIsAddressValid, 178 MmPersistContiguousMemory, 376 MmDbgQueryAvailablePages, 377 MmDbgReleaseAddress |
-| Native API (files, events, memory) | 55 | 41 | 0 | 14 | 191 NtCreateIoCompletion, 201 NtOpenDirectoryObject, 206 NtQueueApcThread, 208 NtQueryDirectoryObject, 209 NtQueryEvent, 212 NtQueryIoCompletion, 213 NtQueryMutant, 214 NtQuerySemaphore, 216 NtQueryTimer, 220 NtReadFileScatter, 223 NtRemoveIoCompletion, 227 NtSetIoCompletion, 230 NtSignalAndWaitForSingleObjectEx, 237 NtWriteFileGather |
+| Native API (files, events, memory) | 55 | 45 | 0 | 10 | 201 NtOpenDirectoryObject, 206 NtQueueApcThread, 208 NtQueryDirectoryObject, 209 NtQueryEvent, 213 NtQueryMutant, 214 NtQuerySemaphore, 216 NtQueryTimer, 220 NtReadFileScatter, 230 NtSignalAndWaitForSingleObjectEx, 237 NtWriteFileGather |
 | Object manager | 10 | 4 | 0 | 6 | 239 ObCreateObject, 241 ObInsertObject, 242 ObMakeTemporaryObject, 243 ObOpenObjectByName, 244 ObOpenObjectByPointer, 248 ObReferenceObjectByPointer |
 | Network PHY | 2 | 2 | 0 | 0 | - |
 | Process / thread | 5 | 4 | 0 | 1 | 257 PsSetCreateThreadNotifyRoutine |
@@ -223,7 +223,7 @@ stub is in `src/kernel/kernel_stub_table.c`: its first call (then the 10th, 100t
 | Crypto | 17 | 17 | 0 | 0 | - |
 | XBE sections | 2 | 2 | 0 | 0 | - |
 | Other (port I/O, ...) | 17 | 14 | 0 | 3 | 88 KdDebuggerEnabled, 89 KdDebuggerNotPresent, 332 WRITE_PORT_BUFFER_UCHAR |
-| **All** | **347** | **289** | **9** | **49** | |
+| **All** | **347** | **293** | **9** | **45** | |
 <!-- kernel-coverage:end -->
 
 ### Data Exports

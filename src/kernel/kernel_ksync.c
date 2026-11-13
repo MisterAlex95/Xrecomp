@@ -10,6 +10,7 @@
 #include "kernel.h"
 #include "kernel_ksync.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 extern ptrdiff_t g_xbox_mem_offset;
@@ -329,6 +330,248 @@ uint32_t ks_queue_rundown(uint32_t q)
     list_init(q + Q_THREADS);
     ks_unlock();
     return first;
+}
+
+/* ══════════════════════ I/O completion objects ══════════════════════
+ *
+ * NtCreateIoCompletion and friends (XBA-114). On the console an I/O
+ * completion object is a KQUEUE whose entries are completion packets the
+ * kernel allocates: (KeyContext, ApcContext, IoStatus, Information). The
+ * title never sees the queue or the packets, only a handle, so both live
+ * host-side here, under the same lock and condition variable as the rest.
+ *
+ * `ident` is the host HANDLE the bridge hands the title a token for: a
+ * manual-reset event that is signalled while packets are queued, the KQUEUE's
+ * SignalState, so a plain wait on the handle answers as on the console.
+ *
+ * A file joins a port with NtSetInformationFile(FileCompletionInformation):
+ * its requests that carry an ApcContext and no APC routine then post their
+ * completion there (ks_port_post_for_file), with the file's key. */
+
+#define KS_PORT_MAX  64
+#define KS_PASSOC_MAX 128
+
+typedef struct ks_pkt {
+    struct ks_pkt *next;
+    uint32_t key, ctx, status, info;
+} ks_pkt;
+
+typedef struct {
+    void    *ident;          /* NULL: free slot */
+    unsigned gen;            /* bumped on close: stale references see it */
+    int32_t  depth;
+    int32_t  max;            /* the creation Count (0 = processors = 1) */
+    ks_pkt  *head, *tail;
+} ks_port;
+
+static ks_port s_ports[KS_PORT_MAX];
+static unsigned s_port_gen;
+
+static struct {
+    void    *file;           /* NULL: free */
+    int      port;
+    unsigned gen;
+    uint32_t key;
+} s_passoc[KS_PASSOC_MAX];
+
+static int port_find(void *ident)   /* lock held; slot or -1 */
+{
+    int i;
+    if (!ident)
+        return -1;
+    for (i = 0; i < KS_PORT_MAX; i++)
+        if (s_ports[i].ident == ident)
+            return i;
+    return -1;
+}
+
+int ks_port_create(void *ident, uint32_t count)
+{
+    int i, ok = 0;
+    if (!ident)
+        return 0;
+    ks_lock();
+    for (i = 0; i < KS_PORT_MAX; i++)
+        if (!s_ports[i].ident) {
+            memset(&s_ports[i], 0, sizeof s_ports[i]);
+            s_ports[i].ident = ident;
+            s_ports[i].gen = ++s_port_gen;
+            s_ports[i].max = count ? (int32_t)count : 1;
+            ok = 1;
+            break;
+        }
+    ks_unlock();
+    return ok;
+}
+
+int ks_port_is(void *ident)
+{
+    int r;
+    ks_lock();
+    r = port_find(ident) >= 0;
+    ks_unlock();
+    return r;
+}
+
+/* Lock held. */
+static int port_post_locked(int slot, uint32_t key, uint32_t ctx,
+                            uint32_t status, uint32_t info)
+{
+    ks_port *p = &s_ports[slot];
+    ks_pkt *k = (ks_pkt *)malloc(sizeof *k);
+    if (!k)
+        return -1;
+    k->next = NULL;
+    k->key = key; k->ctx = ctx; k->status = status; k->info = info;
+    if (p->tail) p->tail->next = k; else p->head = k;
+    p->tail = k;
+    if (p->depth++ == 0)
+        SetEvent((HANDLE)p->ident);
+    return 0;
+}
+
+int ks_port_post(void *ident, uint32_t key, uint32_t ctx, uint32_t status,
+                 uint32_t info)
+{
+    int slot, r = -1;
+    ks_lock();
+    slot = port_find(ident);
+    if (slot >= 0)
+        r = port_post_locked(slot, key, ctx, status, info);
+    ks_unlock();
+    if (r == 0)
+        ks_wake_all();
+    return r;
+}
+
+uint32_t ks_port_remove(void *ident, uint32_t timeout_va, uint32_t out[4])
+{
+    uint64_t deadline = ks_deadline(timeout_va);
+    uint32_t rc;
+    unsigned gen;
+    int slot;
+
+    ks_lock();
+    slot = port_find(ident);
+    if (slot < 0) {
+        ks_unlock();
+        return 0xC0000008u;                     /* STATUS_INVALID_HANDLE */
+    }
+    gen = s_ports[slot].gen;
+    for (;;) {
+        ks_port *p = &s_ports[slot];
+        DWORD ms;
+        if (p->gen != gen || p->ident != ident) {
+            /* Closed under us. The console keeps the object alive for its
+             * waiters until they time out; here the packets went with it. */
+            rc = 0xC0000008u;
+            break;
+        }
+        if (p->head) {
+            ks_pkt *k = p->head;
+            p->head = k->next;
+            if (!p->head) p->tail = NULL;
+            if (--p->depth == 0)
+                ResetEvent((HANDLE)p->ident);
+            out[0] = k->key; out[1] = k->ctx; out[2] = k->status; out[3] = k->info;
+            free(k);
+            rc = 0;
+            break;
+        }
+        ms = ks_remaining(deadline);
+        if (ms == 0) {
+            rc = STATUS_TIMEOUT_;
+            break;
+        }
+        ks_wait(ms);
+    }
+    ks_unlock();
+    return rc;
+}
+
+int32_t ks_port_depth(void *ident)
+{
+    int slot;
+    int32_t d = -1;
+    ks_lock();
+    slot = port_find(ident);
+    if (slot >= 0)
+        d = s_ports[slot].depth;
+    ks_unlock();
+    return d;
+}
+
+int ks_port_associate(void *file, void *port, uint32_t key)
+{
+    int slot, i, free_i = -1, r = -1;
+    if (!file)
+        return -1;
+    ks_lock();
+    slot = port_find(port);
+    if (slot >= 0) {
+        for (i = 0; i < KS_PASSOC_MAX; i++) {
+            if (s_passoc[i].file == file) { free_i = i; break; }
+            if (!s_passoc[i].file && free_i < 0) free_i = i;
+        }
+        if (free_i >= 0) {
+            s_passoc[free_i].file = file;
+            s_passoc[free_i].port = slot;
+            s_passoc[free_i].gen = s_ports[slot].gen;
+            s_passoc[free_i].key = key;
+            r = 0;
+        }
+    }
+    ks_unlock();
+    return r;
+}
+
+int ks_port_post_for_file(void *file, uint32_t ctx, uint32_t status, uint32_t info)
+{
+    int i, r = 0;
+    if (!file)
+        return 0;
+    ks_lock();
+    for (i = 0; i < KS_PASSOC_MAX; i++)
+        if (s_passoc[i].file == file) {
+            int slot = s_passoc[i].port;
+            if (s_ports[slot].ident && s_ports[slot].gen == s_passoc[i].gen)
+                r = port_post_locked(slot, s_passoc[i].key, ctx, status, info) == 0;
+            break;
+        }
+    ks_unlock();
+    if (r)
+        ks_wake_all();
+    return r;
+}
+
+void ks_port_forget(void *handle)
+{
+    int i, slot;
+    if (!handle)
+        return;
+    ks_lock();
+    for (i = 0; i < KS_PASSOC_MAX; i++)
+        if (s_passoc[i].file == handle)
+            s_passoc[i].file = NULL;
+    slot = port_find(handle);
+    if (slot >= 0) {
+        ks_port *p = &s_ports[slot];
+        while (p->head) {
+            ks_pkt *k = p->head;
+            p->head = k->next;
+            free(k);
+        }
+        p->tail = NULL;
+        p->depth = 0;
+        p->ident = NULL;
+        p->gen = ++s_port_gen;
+        for (i = 0; i < KS_PASSOC_MAX; i++)
+            if (s_passoc[i].file && s_passoc[i].port == slot)
+                s_passoc[i].file = NULL;
+    }
+    ks_unlock();
+    if (slot >= 0)
+        ks_wake_all();
 }
 
 /* ═════════════════════════ KDEVICE_QUEUE ═════════════════════════
