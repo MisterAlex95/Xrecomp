@@ -8,8 +8,6 @@
 
 const KernelStubEntry g_kernel_stub_table[] = {
     {  25, "ExReadWriteRefurbInfo" },
-    {  43, "HalEnableSystemInterrupt" },
-    {  47, "HalRegisterShutdownNotification" },
     {  60, "IoBuildAsynchronousFsdRequest" },
     {  63, "IoCheckShareAccess" },
     {  75, "IoQueryFileInformation" },

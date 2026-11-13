@@ -48,6 +48,10 @@ NOOP_OK = {
     103: "KeGetCurrentIrql: IRQL is read from KPCR.Irql by guest code; PASSIVE is the answer outside a raise",
     121: "KeIsExecutingDpc: DPCs run on their own thread, never inside the caller",
     365: "HalEnableSecureTrayEject: no tray lock to arm",
+    43: "HalEnableSystemInterrupt: no interrupt controller mask is modelled; device models raise their "
+        "lines regardless (HalDisableSystemInterrupt is the same no-op)",
+    47: "HalRegisterShutdownNotification: a reboot here ends or replaces the process, and no device model "
+        "(the NIC included, XBA-117) has DMA in flight for a notification to stop",
 }
 
 CATEGORIES = [
