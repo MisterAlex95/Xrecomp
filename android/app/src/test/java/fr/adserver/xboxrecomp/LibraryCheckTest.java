@@ -170,8 +170,19 @@ public class LibraryCheckTest {
         assertEquals("aa", a.xbeSha256);
         assertTrue(a.bootable());
         assertEquals("Tiny Tanks", b.title);
+        // XBA-126 x XBA-130: an image the scan found, never imported, readable by its path, is prepared from and
+        // booted from the image itself (it used to be "not booted: the game's files are not in the app").
+        assertTrue(b.bootable());
+        assertEquals(iso.getAbsolutePath(), b.gameDir);
+        assertEquals(iso.getAbsolutePath(), b.source);
+        // Reached only through a document (content:): not bootable, prepared from the cached default.xbe as before.
+        it.loc = "content://com.android.externalstorage.documents/document/primary%3Axbox%2Ftanks.iso";
+        entries = LibraryScreen.entries(files, g, x, env);
+        b = LibraryCheck.plan(entries, files, "58420002").get(0);
         assertFalse(b.bootable());
         assertEquals(it.xbeFile(files).getParent(), b.source);
+        it.loc = LibraryIndex.fileLoc(iso);
+        entries = LibraryScreen.entries(files, g, x, env);
         assertEquals(1, LibraryCheck.plan(entries, files, "58420002").size());
         assertEquals(5 * 12 + (2 * (LibraryCheck.SECONDS + 15) + 59) / 60, LibraryCheck.estimateMinutes(5, 2, 12));
     }

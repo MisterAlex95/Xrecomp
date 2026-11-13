@@ -987,7 +987,9 @@ from another `default.xbe` (« disc changed ») or by an older toolkit than this
 changed »; Home keeps Play there, the check prepares, since it measures this APK's toolkit). The Prepare
 is PrepareService's, as from Home (its notification, its `status.json`); failed → the title's line is stage `none`,
 blocker `prepare failed: CODE: msg`; interrupted (killed, cancelled by the system) → started again, at most 3 times.
-A title whose files are not in the app (an image not imported) is prepared from the cached `default.xbe` and not
+A disc image the library scan found and never imported is prepared from and booted from the image itself when the
+app can read it by its path (XBA-126: D:\ served from the image, nothing extracted). A title whose files are not in
+the app otherwise (an image reached only through a document) is prepared from the cached `default.xbe` and not
 started: stage `prepares`, blocker `not booted: the game's files are not in the app`. Then the boot:
 
 1. `current.json` (title ID, `<files>/check/run/<TID>/`, until when); the launcher's launch steps (the launched game,
