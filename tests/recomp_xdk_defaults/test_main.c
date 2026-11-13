@@ -36,7 +36,7 @@ int main(void)
     const char *v;
     int n = 0;
 
-    /* The table: what profiles/xdk/{xapi,dsound,d3d8} set, the same values. */
+    /* The table: what profiles/xdk/{xapi,dsound,d3d8} set before they went, the same values. */
     while (recomp_xdk_default_name(n, NULL))
         n++;
     CHECK(n == 5);

@@ -11,11 +11,14 @@ static int set_default(const char *k, const char *v) { return getenv(k) ? 0 : _p
 static int set_default(const char *k, const char *v) { return getenv(k) ? 0 : setenv(k, v, 0) == 0; }
 #endif
 
-/* Each one the console's hardware, not a title's taste; the same values as
- * the XDK layers (profiles/xdk/<name>/layer.json, whose "_why" says why):
+/* Each one the console's hardware, not a title's taste; what the XDK layers
+ * set before they went (profiles/xdk/<name>/layer.json in the history):
  *   xapi    RECOMP_DISPATCH_GATE, RECOMP_VBLANK, RECOMP_USB, RECOMP_KEYBOARD
- *   dsound  RECOMP_AC97_READY
- *   d3d8    RECOMP_VBLANK (RECOMP_PB_EXEC: already a default elsewhere) */
+ *           (XPP locks by raising to DISPATCH_LEVEL, a lock on the one-CPU
+ *           console only: without the gate the pad dies within a minute)
+ *   dsound  RECOMP_AC97_READY (DirectSoundCreate waits for the codec)
+ *   d3d8    RECOMP_VBLANK (RECOMP_PB_EXEC: already a default elsewhere; the
+ *           D3D service, recomp_d3d_service.c, does the rest) */
 static const char *const k_defaults[][2] = {
     {"RECOMP_DISPATCH_GATE", "1"},
     {"RECOMP_VBLANK", "paced"},

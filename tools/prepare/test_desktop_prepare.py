@@ -58,12 +58,12 @@ def test_profile_digest_follows_the_files(tmp_path):
     assert b != a
     assert prep.profile_digest(None) not in (a, b)
     # A lower layer's file counts too.
-    x = tmp_path / "xdk" / "d3d8"
+    x = tmp_path / "engines" / "renderware"
     x.mkdir(parents=True)
-    (x / "layer.json").write_text(json.dumps({"applies": {"libraries": ["D3D8"]}}))
-    ident = {"xdk": {"libraries": {"D3D8": 5849}}, "engines": []}
+    (x / "layer.json").write_text(json.dumps({}))
+    ident = {"xdk": {"libraries": {"D3D8": 5849}}, "engines": [{"layer": "renderware", "kind": "engine"}]}
     c = prep.profile_digest(profiles.resolve("4541005B", ident, str(tmp_path)))
-    (x / "d3d8.c").write_text("/* */\n")
+    (x / "rw.c").write_text("/* */\n")
     assert prep.profile_digest(profiles.resolve("4541005B", ident, str(tmp_path))) not in (b, c)
 
 

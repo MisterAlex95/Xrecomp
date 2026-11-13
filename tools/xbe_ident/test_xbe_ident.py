@@ -52,7 +52,7 @@ def test_xdk_from_the_header_pointer(tmp_path):
     x = r["xdk"]
     assert (x["build"], x["source"], x["mixed"], x["qfe"]) == (5849, "header", True, 3)
     assert x["libraries"] == {"D3D8": 5933, "XAPILIB": 5849}
-    assert r["layers"] == ["xdk/d3d8", "xdk/xapi"]      # profiles/xdk/<name>/layer.json "applies"
+    assert r["layers"] == []        # no xdk layer is picked: the toolkit's defaults (XDK switches, D3D service)
 
 
 def test_xdk_by_name_then_most_common(tmp_path):
@@ -72,9 +72,9 @@ def test_a_header_pointer_outside_the_table_is_ignored(tmp_path):
 def test_no_library_table(tmp_path):
     r = identify(make_xbe(tmp_path / "e.xbe", libs=()))
     assert r["xdk"]["build"] == 0 and r["layers"] == [] and r["imports"] == []
-    # Stripped, but D3D's kernel calls are there (XBA-106): the D3D8 layer by its imports.
+    # Stripped, D3D's kernel calls there (XBA-106): reported; nothing to pick, the defaults cover it.
     r = identify(make_xbe(tmp_path / "e2.xbe", libs=(), imports=(3, 1, 168, 49)))
-    assert r["imports"] == [1, 3, 49, 168] and r["layers"] == ["xdk/d3d8"]
+    assert r["imports"] == [1, 3, 49, 168] and r["layers"] == []
     assert summary(r).startswith("XDK unknown, no known engine")
 
 
@@ -85,8 +85,9 @@ def test_engines_need_their_minimum(tmp_path):
     r = identify(make_xbe(tmp_path / "f.xbe", text=text))
     names = [e["name"] for e in r["engines"]]
     assert names == ["RenderWare", "Bink"]
-    # No engine layer is shipped since WP4 (profiles/engines/renderware went); middleware (Bink) is never a layer.
-    assert r["layers"] == ["xdk/d3d8", "xdk/xapi"]
+    # No engine layer is shipped since WP4 (profiles/engines/renderware went), and no XDK layer since WP3;
+    # middleware (Bink) is never a layer.
+    assert r["layers"] == []
     assert summary(r) == "XDK 5849, RenderWare; middleware Bink"
 
 
@@ -126,8 +127,8 @@ def test_cli_one_xbe(tmp_path, capsys):
     p = make_xbe(tmp_path / "h.xbe")
     out = tmp_path / "one.json"
     assert main([p, "--json", str(out)]) == 0
-    assert json.loads(out.read_text())["layers"] == ["xdk/d3d8", "xdk/xapi"]
-    assert "layers: xdk/d3d8 xdk/xapi" in capsys.readouterr().out
+    assert json.loads(out.read_text())["layers"] == []
+    assert "layers: (none)" in capsys.readouterr().out
 
 
 def test_prepare_writes_ident_json(tmp_path):
@@ -135,7 +136,7 @@ def test_prepare_writes_ident_json(tmp_path):
     p = make_xbe(tmp_path / "p.xbe", text=b"Miles Sound System\0")
     r = identify_xbe(p, str(tmp_path))
     assert r["summary"] == "XDK 5849, no known engine; middleware Miles Sound System"
-    assert json.loads((tmp_path / "ident.json").read_text())["layers"] == ["xdk/d3d8", "xdk/xapi"]
+    assert json.loads((tmp_path / "ident.json").read_text())["layers"] == []
     bad = tmp_path / "bad.xbe"
     bad.write_bytes(b"nope")
     assert identify_xbe(str(bad), str(tmp_path)) is None      # the prepare goes on without it
@@ -154,25 +155,19 @@ LATCH_LOOP = bytes.fromhex(
 
 
 def test_the_d3d_latch_wait_probe(tmp_path):
-    """XBA-105: the DMA walk is chosen by what the title's D3D does. The loop in code counts; the same
-    bytes in a data section, or the register read without the fence-bit test, do not."""
+    """XBA-105: what the title's D3D does, reported (the DMA walk it called for is the default now). The loop in
+    code counts; the same bytes in a data section, or the register read without the fence-bit test, do not."""
     from tools.xbe_parser.synth import PRELOAD, W, X, Sec, write_xbe
     p = write_xbe(tmp_path / "a.xbe", [Sec(".text", b"\x90" * 7 + LATCH_LOOP + b"\xc3")],
                   libs=(("XAPILIB", 5455, 0), ("D3D8LTCG", 5455, 0)))
     r = identify(p)
-    assert r["probes"] == {"d3d_latch_wait": 1}
-    assert "xdk/d3d8ltcg" in r["layers"]                     # any D3D8LTCG build with the loop
+    assert r["probes"] == {"d3d_latch_wait": 1} and r["layers"] == []
     absolute = bytes.fromhex("a1100b40fd" "a87c" "75f9")     # mov eax, [0xFD400B10]; test al, 0x7C; jne
     p = write_xbe(tmp_path / "b.xbe", [Sec(".text", absolute + b"\xc3")], libs=(("D3D8LTCG", 5849, 0),))
     assert identify(p)["probes"] == {"d3d_latch_wait": 1}
     p = write_xbe(tmp_path / "c.xbe", [Sec(".text", b"\xc3" * 16), Sec(".rdata", LATCH_LOOP, flags=PRELOAD)],
                   libs=(("D3D8LTCG", 5788, 0),))
-    r = identify(p)
-    assert r["probes"] == {"d3d_latch_wait": 0} and "xdk/d3d8ltcg" not in r["layers"]
-    # Build 5849 keeps the layer when the scan finds nothing (or_builds: Black, Burnout 3).
-    p = write_xbe(tmp_path / "c2.xbe", [Sec(".text", b"\xc3" * 16)], libs=(("D3D8LTCG", 5849, 0),))
-    r = identify(p)
-    assert r["probes"] == {"d3d_latch_wait": 0} and "xdk/d3d8ltcg" in r["layers"]
+    assert identify(p)["probes"] == {"d3d_latch_wait": 0}
     no_test = LATCH_LOOP.replace(bytes.fromhex("f6c17c"), bytes.fromhex("85c9" "90"))
     p = write_xbe(tmp_path / "d.xbe", [Sec(".text", no_test, flags=PRELOAD | X | W)], libs=(("D3D8", 5849, 0),))
     assert identify(p)["probes"] == {"d3d_latch_wait": 0}

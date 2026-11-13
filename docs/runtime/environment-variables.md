@@ -29,13 +29,29 @@ The switches every XDK title needs because the console works that way are set by
 layers' `xba_title_configure`), unless the environment, `recomp.cfg`, a forced option or a profile layer already set them:
 `RECOMP_DISPATCH_GATE=1`, `RECOMP_VBLANK=paced`, `RECOMP_USB=1`, `RECOMP_KEYBOARD=1`, `RECOMP_AC97_READY=1`
 (`RECOMP_PB_EXEC=1` already was a default of the title project and of the Android shell). The XDK layers
-(`profiles/xdk/*`) set the same values, so a title they match is unchanged; a title whose library table they do not
-match (stripped, renamed, unknown build) still boots with picture, sound and pad (XBA-106). When it sets any, one line:
+(`profiles/xdk/*`) that used to set them are gone: every title, whatever its library table says, boots with picture,
+sound and pad (XBA-106). When it sets any, one line:
 `[XDK] defaults: RECOMP_DISPATCH_GATE=1 ... (no profile layer set them; RECOMP_XDK_DEFAULTS=0 turns them off)`.
 
 | Variable | Default | What it does | Where |
 |---|---|---|---|
-| `RECOMP_XDK_DEFAULTS=0` | on | Sets none of the XDK defaults: the profile layers alone, as before XBA-106 (A/B). Each switch can also be turned off on its own with `=0`. | `recomp_xdk_defaults.c` |
+| `RECOMP_XDK_DEFAULTS=0` | on | Sets none of the XDK defaults (A/B). Each switch can also be turned off on its own with `=0`. | `recomp_xdk_defaults.c` |
+
+### D3D service
+
+D3D's GPU semaphore and software methods are answered by the D3D service (`src/kernel/recomp_d3d_service.c`, the
+former profile layer `profiles/xdk/d3d8/d3d8.c`), which `templates/new-game` main configures right after
+`recomp_xdk_defaults()` and starts right before the guest's entry point, for every title: D3D's device is found at
+run time (`[D3D] device found at ...`); a title without D3D finds none and the service stays idle. It also makes the
+DMA walk the default walk (`RECOMP_PB_WALK`, below). [profiles.md](../technical/profiles.md#the-d3d-service).
+
+| Variable | Default | What it does | Where |
+|---|---|---|---|
+| `RECOMP_D3D_SERVICE=0` | on | Leaves the service out: no software methods answered, no semaphore watch, no DMA-walk default (A/B; D3D titles freeze without it). | `recomp_d3d_service.c` |
+| `RECOMP_D3D_DEVICE_PTR=0x...`, `RECOMP_D3D_DEVICE=0x...` | found at run time | The device pointer slot (D3D's `g_pDevice`) or the device itself, instead of the search (A/B; they were a title layer's `XBA_D3D_DEVICE_PTR` / `XBA_D3D_DEVICE` params). With one given, only methods 5-9 are on unless `RECOMP_D3D_SW_METHODS` says more, and RunPushBuffer's methods write without the run-time guards. | `recomp_d3d_service.c` |
+| `RECOMP_D3D_SW_METHODS=0x...` | every one (found device) | The software methods answered, bit n = method n (`0x7000`: RunPushBuffer, 0xC-0xE); 5 (the fence event), 6-7 and 8-9 are on whatever it says. | `recomp_d3d_service.c` |
+| `RECOMP_D3D_CALLBACKS=0` | on | Leaves D3D's InsertCallback software methods (6, 7) unserviced instead of calling the title's routine at DPC level (XBA-94). | `recomp_d3d_service.c` |
+| `RECOMP_D3D_FENCE=mirror` | off | The A/B fallback Burnout 3 was brought up with: no software methods, no semaphore watch, the segment scan, D3D's fence mirrored as "GPU always caught up". Needs `RECOMP_D3D_DEVICE_PTR`. Its old name `XBA_D3D_FENCE` is still read. | `recomp_d3d_service.c` |
 
 ### Forced by a title
 
@@ -206,7 +222,7 @@ The executor is itself opt-in: set `RECOMP_PB_EXEC=1` to execute the pushbuffer.
 |---|---|---|---|
 | `RECOMP_PB_EXEC` | off (Android: on) | Executes the title's pushbuffer. On Android the app shell sets it unless `recomp.cfg` says `RECOMP_PB_EXEC=0` (docs/android/app-shell.md). | `nv2a_pb_scan.c`, `xbox_memory_layout.c` |
 | `RECOMP_PB_SCAN` | off | Read-only survey of the pushbuffer; ranks what is not implemented. | `nv2a_pb_scan.c`, `xbox_memory_layout.c` |
-| `RECOMP_PB_WALK=dma` | off (on for D3D8LTCG titles whose fence wait spins on the 0x0310 latch, any build: `profiles/xdk/d3d8ltcg`, `XBA_D3D_DMA_WALK`, picked by `tools.xbe_ident`'s `d3d_latch_wait` probe) | Walks the pushbuffer as the DMA engine does, which delivers D3D's software-method interrupt. `RECOMP_PB_WALK=scan` turns it off where a layer turned it on. | `nv2a_pb_scan.c` |
+| `RECOMP_PB_WALK=dma`, `=scan` | `dma` in a title project (the D3D service sets it unless something already did); the segment scan in a project that never configures the service | `dma`: walks the pushbuffer as the DMA engine does (JUMPs, ring wraps, its own GET published before every command), which keeps D3D8LTCG's fence wait on DMA_GET and the 0x0310 latch honest and delivers D3D's software-method interrupt. `scan`: the segment scan (A/B; KOTOR ran 5 of 5 runs either way, K-7). It was the `xdk/d3d8ltcg` layer's `XBA_D3D_DMA_WALK`. | `nv2a_pb_scan.c`, `recomp_d3d_service.c` |
 | `RECOMP_NV2A_TRACE` | off | Shows whether `DMA_PUT` moves at all. | `xbox_memory_layout.c` |
 | `RECOMP_POLL_WAIT=0` | on | The lifter marks loops that only poll one memory word (`test dword [mem], imm ; jne/je` to itself) with `RECOMP_POLL_WAIT`. For D3D KickOff's wait on the PFB flush bit (0x100410 bit 16) the thread then blocks until the ack thread clears the bit (`xbox_Nv2aKickWait`) instead of spinning a host core; other words still spin. `0` keeps the spin for the flush bit too. Takes effect on titles prepared with a toolkit that has the lifter change. | `xbox_memory_layout.c`, `tools/recomp/translator.py` |
 | `RECOMP_PB_REPORT_MS=N` | 10000 | Milliseconds between `[GPU]` reports (minimum 100). | `xbox_memory_layout.c` |
@@ -231,7 +247,6 @@ The executor is itself opt-in: set `RECOMP_PB_EXEC=1` to execute the pushbuffer.
 | `RECOMP_GPU=1`, `=0` | on on Android, off elsewhere | XBA-119 (default on Android). `1`: draw with the GL back end (desktop GL 3.3/4.1 core, GLES 3.0 on Android) instead of the CPU rasteriser; vertex programs run as GLSL vertex shaders (see `RECOMP_GPU_VSH`). `0`: the CPU rasteriser (the A/B switch on Android, launcher › Renderer › Software). Unset: the platform's default (on Android the runtime then sets `RECOMP_GPU=1` itself, so later readers see the choice). Falls back to the CPU rasteriser if no GL context can be made (logged `[GPUGL] no GL context: falling back to the CPU rasteriser`). See [GPU Back End](../technical/gpu-backend.md). | `src/gpu/nv2a_gl.c` |
 | `RECOMP_OVERLAY=1` | off | The SDL presenter draws its small debug overlay (FPS, frame time, draws, memory, CPU, battery, temperature, the title's status line) in the top left corner of the game. Off by default everywhere, Android included; the in-game menu's Settings page has its own performance display for normal use. | `src/video/perf_overlay.c` |
 | `RECOMP_PREP_INDICATOR=0` | on | Turns off the "preparing data" indicator: while a title writes a burst of at least 8 MB to its utility drive (Z:), as Fable does unpacking its data on the first run, the window title and the overlay's status line say `preparing data <n> MB`, and the log has `[PREP]` lines (start, every 64 MB, the total and duration once 5 s pass without a write). No total or percentage: the format is the title's own (WP7). | `src/kernel/prep_progress.c` |
-| `RECOMP_D3D_CALLBACKS=0` | on | Leaves D3D's InsertCallback software methods (6, 7) unserviced instead of calling the title's routine at DPC level (XBA-94). | `profiles/xdk/d3d8/d3d8.c` |
 | `RECOMP_FRAME_LOCK=0` | on | Under frame generation, no lock check: frame generation and its 30 fps cap from the first frame, never stopped. Otherwise (WP4) under `RECOMP_PACING=auto` frame generation waits for the pacer's lock verdict (25 s after the first flip for a title that holds its rate, 50 s for one judged free) without lowering the cap, and stays off for a title locked to an ask above its cap; under `RECOMP_PACING=off` the cap is lowered at once and a title that asks for every vblank and waits at the 30 fps cap on nearly every frame turns it off (XBA-96). [framegen.md](../technical/framegen.md#titles-locked-to-the-flip-rate). | `nv2a_pb_exec.c`, `frame_lock.h` |
 | `RECOMP_GPU_FPS_CAP=N` | unset: `RECOMP_PACING=auto` picks the rate; under `RECOMP_PACING=off` 60 on macOS and Android, off elsewhere | Set (the launcher's Frame cap 30 / 60 / Off): turns `RECOMP_PACING=auto` off. With a back end drawing (`RECOMP_GPU=1`), at most N flips per second of host time: after `FLIP_STALL` the executor sleeps until the frame's slot before it walks on. `0` turns it off. Independent of `RECOMP_FLIP_PACING`. The `[GPU] frame cap` report line gives waits, time slept and how late the sleeps woke. | `nv2a_pb_exec.c` |
 | `RECOMP_PACING=auto`, `=ask`, `=off` | auto (WP4; `off` or `0`: the fixed cap, the A/B switch) | XBA-107 / XBA-135. `auto`: the cap's rate is chosen at every flip, on either renderer: the title's ask (vblank rate / the presentation interval its swaps carry; IMMEDIATE: the display's rate), then the highest even rate (vblank rate / k, at least 15 fps) the measured frame cost sustains, with hysteresis. A title judged locked to its ask (fixed interval, held it over a 5 s window from 20 s after its first flip; free only after six windows in a row that do not hold) is never divided: logic that advances per flip would run in slow motion. Vblanks keep the console's rate. `ask`: the ask only. Off when `RECOMP_GPU_FPS_CAP` is set (the launcher's Frame cap): that cap wins. Frame generation waits for its verdict (`RECOMP_FRAME_LOCK`). [GPU Back End](../technical/gpu-backend.md#pacing-from-the-title-recomp_pacingauto-xba-107-xba-135). | `nv2a_pb_exec.c`, `frame_pacing.h` |

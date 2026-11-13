@@ -19,7 +19,7 @@ For each disc (an .iso/.xiso image, or a folder of extracted files):
     kernel_stub_table.c, tools/kernel_audit/stubs.py): what the title calls
     that does nothing yet;
   * tools.xbe_ident's code probes (d3d_latch_wait: D3D's fence wait spins
-    on the 0x0310 latch, which picks the DMA walk for D3D8LTCG);
+    on the 0x0310 latch, which needs the DMA walk, the toolkit's default);
   * every other .xbe on the disc, and which of them default.xbe names in its
     strings ("d:\\menu.xbe", ...): a disc that launches another image needs
     multi-XBE support (XBA-82) before anything after the launch runs;

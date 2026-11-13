@@ -2,17 +2,7 @@
   "title_id": "4D5300D1",
   "name": "Fable: The Lost Chapters",
   "project": "fable",
-  "layers": [
-    "xdk/xapi",
-    "xdk/dsound",
-    "xdk/d3d8"
-  ],
   "hooks": "fable",
-  "params": {
-    "XBA_D3D_DEVICE_PTR": "0x00862288",
-    "XBA_D3D_DEVICE": "0x0085FDE0",
-    "XBA_D3D_SW_METHODS": "0x7000"
-  },
   "exclude_manual": [
     "overrides.c"
   ],

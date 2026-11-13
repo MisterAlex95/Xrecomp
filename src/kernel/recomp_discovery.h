@@ -25,7 +25,7 @@
  *                                                          StartContext1 in the code range, not dispatchable
  *   {"t":"unimpl","va":"0x00012345","insn":"bsf eax, ecx"} untranslated instruction reached
  *   {"t":"d3d","va":"0x0085FDE0","slot":"0x00862288"}      D3D's device found at run time
- *                                                          (profiles/xdk/d3d8/d3d8.c)
+ *                                                          (recomp_d3d_service.c)
  *   {"t":"wait_spin","va":"0x0027B91C","ret":"0x00025701","header":"0x00040001","status":"0xC0000001"}
  *                                                          a thread waits on it thousands of times a second
  *   {"t":"launch","va":"0x5A1C33E0","path":"d:\\game.xbe"}  the title launched another image (XBA-82);
@@ -59,9 +59,9 @@
  *                                                          took (xbox_seh.c); a Prepare cannot fix
  *                                                          it (XBA-129)
  *   {"t":"d3d_layout","va":"0x1A2B3C4D","lib":"D3D8LTCG","build":5933,"rule":"fence_event","used":"0x00001DCC"}
- *                                                          the XDK D3D layer met a D3D build its table does
+ *                                                          the D3D service met a D3D build its table does
  *                                                          not know and fell back to another build's value
- *                                                          for that rule (XBA-105, profiles/xdk/d3d8/d3d8.c);
+ *                                                          for that rule (XBA-105, recomp_d3d_service.c);
  *                                                          va is a hash of lib, build and rule
  *   {"t":"cut_body","va":"0x001C1208"}                     a lifted body ran off its end: the analysis
  *                                                          cut it short (WP2, recomp_cut_body in

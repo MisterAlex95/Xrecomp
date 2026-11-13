@@ -44,7 +44,7 @@
 /* xboxrecomp runtime headers */
 #include <xbox/xboxrecomp.h>
 
-/* The profile layers: profiles/ in the toolkit (XDK libraries, engine, title),
+/* The profile layers: profiles/ in the toolkit (engine, title; optional),
  * copied into src/title/ by tools.prepare with a generated xba_layers.c that
  * defines these two hooks and calls each layer's, lowest first
  * (docs/technical/profiles.md; CMakeLists defines XBA_TITLE_PROFILE when that
@@ -52,6 +52,11 @@
  * and start right before the guest's entry point, with the kernel up; it gets
  * the game and save directories (save_dir NULL = the kernel's default). */
 extern int recomp_xdk_defaults(void);
+/* The XDK D3D service (src/kernel/recomp_d3d_service.h): D3D's device found at
+ * run time, its GPU semaphore and software methods, the DMA walk. For every
+ * title; one without D3D finds no device and it stays idle. */
+extern int recomp_d3d_configure(void);
+extern void recomp_d3d_start(const char *game_dir, const char *save_dir);
 #ifdef XBA_TITLE_PROFILE
 extern void xba_title_configure(void);
 extern void xba_title_start(const char *game_dir, const char *save_dir);
@@ -377,10 +382,12 @@ static int game_main(void *hInstance, void *hPrevInstance, char *lpCmdLine,
     xba_title_configure();
 #endif
     /* The XDK switches (DISPATCH gate, paced vblanks, the USB pad, AC'97
-     * ready) for a title whose library table the XDK layers did not match:
-     * after the layers, so theirs and the environment's win
+     * ready): after the layers, so a title layer's and the environment's win
      * (src/kernel/recomp_xdk_defaults.h; RECOMP_XDK_DEFAULTS=0: none). */
     recomp_xdk_defaults();
+    /* After the layers and the defaults, so a title's RECOMP_PB_WALK wins over
+     * the service's DMA-walk default (RECOMP_D3D_SERVICE=0: no service). */
+    recomp_d3d_configure();
 
     /* Step 2: Initialize Xbox memory layout */
     printf("Initializing Xbox memory layout...\n");
@@ -481,6 +488,7 @@ static int game_main(void *hInstance, void *hPrevInstance, char *lpCmdLine,
      * does nothing while appearing to be set. */
     xbox_WatchdogStart();
 
+    recomp_d3d_start(s_game_dir, s_save_dir);
 #ifdef XBA_TITLE_PROFILE
     xba_title_start(s_game_dir, s_save_dir);
 #endif

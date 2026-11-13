@@ -33,7 +33,7 @@ this run or an earlier one) is not written again: the file only grows with what 
 {"t":"thread","va":"0x00034560","ctx1":"0x00045670"}         thread start routine with no dispatch entry
 {"t":"thread_ctx","va":"0x00045670","routine":"0x00034560"}  StartContext1 inside the title's code with no dispatch entry
 {"t":"unimpl","va":"0x00056780","insn":"bsf eax, ecx"}       untranslated instruction reached (RECOMP_UNIMPL)
-{"t":"d3d","va":"0x0085FDE0","slot":"0x00862288"}            D3D's device found at run time (profiles/xdk/d3d8/d3d8.c)
+{"t":"d3d","va":"0x0085FDE0","slot":"0x00862288"}            D3D's device found at run time (src/kernel/recomp_d3d_service.c)
 {"t":"wait_spin","va":"0x0027B91C","ret":"0x00025701","header":"0x00040001","status":"0xC0000001"}
                                                              a thread waited on it 2,000 times in a second (kernel_bridge.c)
 {"t":"launch","va":"0x5A1C33E0","path":"d:\\game.xbe"}           the title launched another image (XBA-82); va: a hash of the path
@@ -129,7 +129,7 @@ entries this process wrote, `src/kernel/recomp_status.h`) make the miss visible 
 - `cut_body` entries are not seeds: they name an analysis error (a function start that cut the body before it).
   `tools.prepare` already prints the count of trapped bodies after the lift (« cut bodies ... »), so they are known
   before any run.
-- `d3d_layout` entries are not seeds: they say what to add to `k_layouts` in `profiles/xdk/d3d8/d3d8.c` for that
+- `d3d_layout` entries are not seeds: they say what to add to `k_layouts` in `src/kernel/recomp_d3d_service.c` for that
   build (XBA-105); `tools.compat` (and the device grader) add « D3D layout guessed for D3D8LTCG 5933:
   fence_event, ... » after a blocker other than a crash or a launch (`tools/compat/blockers.py`).
 - `tools.prepare` reads it before analysing (XBA-97, `tools/prepare/discovered.py`): the `icall`, `thread` and

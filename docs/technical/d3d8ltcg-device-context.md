@@ -206,7 +206,8 @@ so no wrapper is needed for either. The event itself needs the title project:
 with `RECOMP_PB_WALK=dma` the "far behind" path is taken, and something must set
 the event when the executor reaches the patched NOP — a software-method hook
 answering type 5 with `xbox_KeSetGuestEvent(device + 0x1DCC)`, as the XDK D3D
-profile layer (`profiles/xdk/d3d8/d3d8.c`) does for Burnout 3.
+service (`src/kernel/recomp_d3d_service.c`, formerly the profile layer
+`profiles/xdk/d3d8/d3d8.c`) does for every title.
 
 ## D3D8LTCG Stub Functions
 

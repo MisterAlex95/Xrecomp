@@ -107,10 +107,11 @@ PACK_INPUTS = (
     "profiles/titles/4d5300d1/overrides.c", "profiles/titles/4d5300d1/title.json",
     # Wave 3: images as sources (XBA-126), the XDK defaults (XBA-106), SMC (XBA-118), renderer coverage (XBA-120).
     "tools/xiso/source.py", "tools/xiso/xdvdfs.py", "tools/prepare/android.py", "tools/prepare/profiles.py",
-    "templates/new-game/src/main.c", "profiles/xdk/d3d8/layer.json", "src/kernel/recomp_smc.h",
+    "templates/new-game/src/main.c", "src/kernel/recomp_smc.h",
     "src/kernel/kernel_disc.h", "src/kernel/recomp_xdk_defaults.h", "src/kernel/nv2a_coverage.h",
-    # Wave 4: the D3D layout table and the layer pick by code probes (XBA-105), the XBE reader (XBA-124).
-    "profiles/xdk/d3d8/d3d8.c", "profiles/xdk/d3d8ltcg/layer.json", "tools/xbe_ident/__init__.py",
+    # Wave 4: the code probes (XBA-105), the XBE reader (XBA-124). The D3D service is the shell's now
+    # (src/kernel/recomp_d3d_service.c, libmain.so); its header names what main.c calls.
+    "src/kernel/recomp_d3d_service.h", "tools/xbe_ident/__init__.py",
     "tools/xbe_parser/xbe_parser.py", "src/kernel/xbox_xbe_sections.h",
     # Wave 5: the analysis (XBA-137's static discovery) decides which functions are lifted.
     "tools/disasm/discovery.py", "tools/disasm/functions.py", "tools/disasm/engine.py", "tools/disasm/disasm.py",

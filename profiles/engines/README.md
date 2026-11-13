@@ -6,6 +6,6 @@ layers do. Picked when tools.xbe_ident finds the engine in the XBE, or when a ti
 `"layers"`. Rules: `docs/technical/profiles.md`.
 
 None is shipped. The last one, `renderware` (DMA walk, 60 fps cap, frame generation off, for
-Burnout 3 and Black), was removed in WP4: the DMA walk comes from `xdk/d3d8ltcg`, and the pacing and
+Burnout 3 and Black), was removed in WP4: the DMA walk is the toolkit's default (the D3D service), and the pacing and
 frame generation decisions are made at run time (`RECOMP_PACING=auto`, the lock verdict,
 `docs/technical/framegen.md`). The mechanism stays for a developer's A/B layer.

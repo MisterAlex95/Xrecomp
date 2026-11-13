@@ -1,8 +1,9 @@
 """
 What an XBE was built with: its XDK version and its engines (XBA-67).
 
-One function, `identify(path)`, for tools.prepare (which picks the profile
-layers from it, XBA-66) and for the library triage (XBA-63). It reads the
+One function, `identify(path)`, for tools.prepare (which picks the engine
+layers from it, XBA-66, and reports the rest) and for the library triage
+(XBA-63). It reads the
 XBE only: no disassembly, so it runs in a second on the device too.
 
 XDK version
@@ -19,14 +20,15 @@ Engines and middleware
     are returned as the evidence.
 
 Code probes (XBA-105)
-    What the title's linked code does, where a profile layer's choice
-    depends on it rather than on a build number: byte shapes searched in the
-    executable sections, counted. `d3d_latch_wait`: D3D's fence wait that
+    What the title's linked code does, reported (ident.json, the triage):
+    byte shapes searched in the executable sections, counted. `d3d_latch_wait`: D3D's fence wait that
     spins on PGRAPH 0x400B10 (the 0x0310 latch) until its fence bits (mask
     0x7C) match the GPU semaphore -- `mov r32, [reg + 0x400B10]` (or the
     absolute 0xFD400B10) followed within 32 bytes by a `test`/`and` with
     0x7C. Under the segment scan nothing latches that register, so a title
-    whose D3D waits there needs the DMA walk (profiles/xdk/d3d8ltcg).
+    whose D3D waits there needs the DMA walk, which is the toolkit's default
+    (src/kernel/recomp_d3d_service.c); the probe used to pick the layer
+    profiles/xdk/d3d8ltcg that turned it on.
 
 Image facts (XBA-124)
     tools.xbe_parser.image_report: the key pair, the sections and their
@@ -163,15 +165,14 @@ def identify(path, table=None):
         "version": c.version,
         "xdk": xdk,
         "engines": engines,
-        # The kernel ordinals it imports: an XDK layer whose library the table
-        # does not name is picked by them (XBA-106, tools.prepare.profiles).
+        # The kernel ordinals it imports (reported; XBA-106 picked XDK layers by them).
         "imports": sorted({imp.ordinal for imp in xbe.kernel_imports}),
         "kernel_imports": sorted({i.ordinal for i in xbe.kernel_imports}),
         "probes": probes_in(xbe),
         "image": image_report(xbe),
     }
-    # The profile layers this XBE selects, lowest first (tools.prepare.profiles:
-    # the xdk layers whose libraries it links, the engine layers that exist).
+    # The profile layers this XBE selects (tools.prepare.profiles: the engine
+    # layers that exist; no XDK layer, the toolkit's defaults do their work).
     from tools.prepare import profiles
     ident["layers"] = profiles.auto_layers(ident)
     return ident

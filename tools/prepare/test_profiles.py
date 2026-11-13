@@ -3,6 +3,7 @@ generated C, and the profiles/ tree of the toolkit itself (no game data)."""
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -22,9 +23,6 @@ def ident(libs, engines=(), probes=None):
             "probes": dict(probes or {})}
 
 
-LATCH = {"d3d_latch_wait": 1}       # tools.xbe_ident: D3D's fence wait spins on the 0x0310 latch (XBA-105)
-
-
 def layer(root, key, obj, **files):
     d = root / key
     d.mkdir(parents=True, exist_ok=True)
@@ -36,38 +34,37 @@ def layer(root, key, obj, **files):
 
 @pytest.fixture
 def tree(tmp_path):
+    # xdk layers as a developer would make one for an A/B: none ships, and the XBE never picks one (an old
+    # "applies" is not read); a title's "layers" names it.
     layer(tmp_path, "xdk/d3d8", {"applies": {"libraries": ["D3D8", "D3D8LTCG"]}, "hooks": "d3d",
                                  "env_default": {"RECOMP_PB_EXEC": "1", "RECOMP_VBLANK": "paced"}})
-    layer(tmp_path, "xdk/dsound", {"applies": {"libraries": ["DSOUND"], "builds": [5558, 5849]},
-                                   "env_default": {"RECOMP_AC97_READY": "1"}})
+    layer(tmp_path, "xdk/dsound", {"env_default": {"RECOMP_AC97_READY": "1"}})
     layer(tmp_path, "engines/renderware", {"env_default": {"RECOMP_VBLANK": "plain"}})
     return tmp_path
 
 
-def test_layers_from_the_library_table(tree):
+def test_layers_from_the_engines_only(tree):
     root = str(tree)
     assert profiles.auto_layers(None, root) == []
-    assert profiles.auto_layers(ident({"D3D8LTCG": 5849, "DSOUND": 5849}), root) == ["xdk/d3d8", "xdk/dsound"]
-    # A build outside the layer's range, a library nobody has a layer for.
-    assert profiles.auto_layers(ident({"DSOUND": 4627, "XNET": 5849}), root) == []
-    # Engines: only those with a folder; lowercase library names match too.
-    assert profiles.auto_layers(ident({"d3d8": 1}, ["renderware", "unreal2"]), root) == \
-        ["xdk/d3d8", "engines/renderware"]
+    assert profiles.auto_layers(ident({"D3D8LTCG": 5849, "DSOUND": 5849}), root) == []
+    # Engines: only those with a folder.
+    assert profiles.auto_layers(ident({"d3d8": 1}, ["renderware", "unreal2"]), root) == ["engines/renderware"]
 
 
 def test_no_layer_is_no_profile(tree):
     assert profiles.resolve("4D530001", ident({"XNET": 5849}), str(tree)) is None
+    assert profiles.resolve("4D530001", ident({"D3D8": 5849}), str(tree)) is None
 
 
 def test_merge_lowest_first(tree):
-    layer(tree, "titles/4d530001", {"name": "T", "project": "t", "hooks": "t",
+    layer(tree, "titles/4d530001", {"name": "T", "project": "t", "hooks": "t", "layers": ["xdk/d3d8"],
                                     "env_default": {"RECOMP_PB_EXEC": "0"},
                                     "env_default_android": {"RECOMP_GPU_FPS_CAP": "30"},
                                     "params": {"XBA_D3D_DEVICE_PTR": "0x00862288", "XBA_N": 5}},
           title_c="void t_configure(void) {}\n")
     p = profiles.resolve("4D530001", ident({"D3D8": 5849}, ["renderware"]), str(tree))
     assert p["keys"] == ["xdk/d3d8", "engines/renderware", "titles/4d530001"]
-    assert p["title"] and p["name"] == "T" and p["project"] == "t" and p["missing"] == []
+    assert p["title"] and p["name"] == "T" and p["project"] == "t" and p["missing"] == ["xdk/d3d8"]
     assert p["hooks"] == ["d3d", "t"]
     # The engine's VBLANK over the XDK's, the title's PB_EXEC over the XDK's.
     assert p["env_default"]["desktop"] == {"RECOMP_PB_EXEC": "0", "RECOMP_VBLANK": "plain"}
@@ -77,8 +74,8 @@ def test_merge_lowest_first(tree):
 
 
 def test_a_platform_value_of_a_lower_layer_loses_to_a_plain_higher_one(tree):
-    layer(tree, "xdk/d3d8", {"applies": {"libraries": ["D3D8"]}, "env_default_android": {"RECOMP_GPU_FPS_CAP": "30"}})
-    layer(tree, "titles/4d530001", {"env_default": {"RECOMP_GPU_FPS_CAP": "60"}})
+    layer(tree, "xdk/d3d8", {"env_default_android": {"RECOMP_GPU_FPS_CAP": "30"}})
+    layer(tree, "titles/4d530001", {"layers": ["xdk/d3d8"], "env_default": {"RECOMP_GPU_FPS_CAP": "60"}})
     p = profiles.resolve("4D530001", ident({"D3D8": 1}), str(tree))
     assert p["env_default"] == {"android": {"RECOMP_GPU_FPS_CAP": "60"}, "desktop": {"RECOMP_GPU_FPS_CAP": "60"}}
 
@@ -87,7 +84,7 @@ def test_title_asks_for_layers(tree):
     """A title lists the layers it was proven with: picked even when the XBE does not select them."""
     layer(tree, "titles/4d530001", {"layers": ["xdk/dsound", "xdk/d3d8"]})
     p = profiles.resolve("4D530001", ident({"D3D8": 5849}), str(tree))
-    assert p["keys"] == ["xdk/d3d8", "xdk/dsound", "titles/4d530001"] and p["missing"] == ["xdk/dsound"]
+    assert p["keys"] == ["xdk/d3d8", "xdk/dsound", "titles/4d530001"] and p["missing"] == ["xdk/dsound", "xdk/d3d8"]
     p = profiles.resolve("4D530001", None, str(tree))
     assert p["keys"] == ["xdk/d3d8", "xdk/dsound", "titles/4d530001"]
     for bad in (["xdk/nope"], ["titles/4541005b"], ["../x"]):
@@ -122,11 +119,13 @@ def test_files_and_exclude_manual(tree):
     p = profiles.resolve("4D530001", None, str(tree))
     assert p["seed_functions"] == [str(tree / "titles" / "4d530001" / "seeds.json")]
     assert p["exclude_manual"] == ["titles_4d530001__overrides.c"]
-    layer(tree, "xdk/d3d8", {"applies": {"libraries": ["D3D8"]}, "exclude_manual": ["o.c"]}, o_c="/* */\n")
+    layer(tree, "xdk/d3d8", {"exclude_manual": ["o.c"]}, o_c="/* */\n")
+    layer(tree, "titles/4d530001", {"layers": ["xdk/d3d8"], "exclude_manual": ["overrides.c"]},
+          overrides_c="/* */\n")
     with pytest.raises(profiles.ProfileError):                 # tools.recomp takes one file
         profiles.resolve("4D530001", ident({"D3D8": 1}), str(tree))
-    layer(tree, "xdk/d3d8", {"applies": {"libraries": ["D3D8"]}, "hooks": "t"})
-    layer(tree, "titles/4d530001", {"hooks": "t"})
+    layer(tree, "xdk/d3d8", {"hooks": "t"})
+    layer(tree, "titles/4d530001", {"layers": ["xdk/d3d8"], "hooks": "t"})
     with pytest.raises(profiles.ProfileError):                 # two layers, one prefix
         profiles.resolve("4D530001", ident({"D3D8": 1}), str(tree))
 
@@ -137,15 +136,14 @@ def test_generated_c_runs_the_layers_in_order(tree, tmp_path):
     cc = shutil.which("cc")
     if not cc:
         pytest.skip("no cc")
-    layer(tree, "xdk/d3d8", {"applies": {"libraries": ["D3D8"]}, "hooks": "d3d",
-                             "env_default": {"RECOMP_PB_EXEC": "1", "RECOMP_Q": 'a"b?\\'}},
+    layer(tree, "xdk/d3d8", {"hooks": "d3d", "env_default": {"RECOMP_PB_EXEC": "1", "RECOMP_Q": 'a"b?\\'}},
           d3d_c='#include <stdio.h>\n#include <stdlib.h>\n#include "xba_params.h"\n'
                 'void d3d_configure(void) { printf("d3d %s %s %s\\n", getenv("RECOMP_PB_EXEC"), '
                 'getenv("RECOMP_Q"), getenv("RECOMP_USER")); }\n'
-                'void d3d_start(const char *g, const char *s) { printf("d3d start %s 0x%X\\n", g, XBA_D3D_DEVICE); }\n')
-    layer(tree, "titles/4d530001", {"hooks": "t", "env_default": {"RECOMP_USER": "profile"},
+                'void d3d_start(const char *g, const char *s) { printf("d3d start %s 0x%X\\n", g, XBA_N); }\n')
+    layer(tree, "titles/4d530001", {"hooks": "t", "layers": ["xdk/d3d8"], "env_default": {"RECOMP_USER": "profile"},
                                     "env_default_desktop": {"RECOMP_PB_EXEC": "2"},
-                                    "params": {"XBA_D3D_DEVICE": "0x0085FDE0"}},
+                                    "params": {"XBA_N": "0x0085FDE0"}},
           title_c='#include <stdio.h>\nvoid t_configure(void) { puts("t"); }\n'
                   'void t_start(const char *g, const char *s) { printf("t start %s\\n", s); }\n')
     p = profiles.resolve("4D530001", ident({"D3D8": 1}), str(tree))
@@ -166,28 +164,38 @@ def test_generated_c_runs_the_layers_in_order(tree, tmp_path):
 
 # ── The toolkit's own profiles/ tree ─────────────────────────────
 
-FABLE_LIBS = {"XAPILIB": 5849, "D3D8": 5849, "DSOUND": 5849}
+# Fable and Burnout 3 both link D3D8LTCG 5849 (their runs print "[D3D] D3D8LTCG build 5849").
+FABLE_LIBS = {"XAPILIB": 5849, "D3D8LTCG": 5849, "DSOUND": 5849}
 BO3_LIBS = {"XAPILIB": 5849, "D3D8LTCG": 5849, "DSOUND": 5849, "XMV": 5849}
+
+
+def _shipped(kind):
+    d = os.path.join(profiles.PROFILES, kind)
+    return sorted(n for n in os.listdir(d) if os.path.isdir(os.path.join(d, n))) if os.path.isdir(d) else []
+
+
+def test_no_xdk_layer_ships():
+    """What profiles/xdk/* did is the toolkit's default (the XDK switches, the D3D service, the DMA walk): no
+    layer folder, and no title layer asks for one."""
+    assert _shipped("xdk") == []
+    for n in _shipped("titles"):
+        asked = profiles.load_layer("titles/" + n)["json"].get("layers") or []
+        assert not [k for k in asked if k.startswith("xdk/")], n
 
 
 @pytest.mark.parametrize("tid,libs", [("4D5300D1", FABLE_LIBS), ("4541005B", BO3_LIBS)])
 def test_the_first_titles_resolve(tid, libs):
-    for ident_ in (ident(libs, probes=LATCH), None):          # also when the XBE cannot be identified
+    for ident_ in (ident(libs), None):          # also when the XBE cannot be identified
         p = profiles.resolve(tid, ident_)
-        xdk = [k for k in p["keys"] if k.startswith("xdk/")]
         assert p["keys"][-1] == "titles/" + tid.lower()
-        if ident_ and "D3D8LTCG" in libs:       # picked by the library table only, not asked by the title
-            assert xdk == ["xdk/d3d8", "xdk/d3d8ltcg", "xdk/dsound", "xdk/xapi"]
-        else:
-            assert xdk == ["xdk/d3d8", "xdk/dsound", "xdk/xapi"]
-        asked = [k for k in p["layers"][-1]["json"]["layers"]]
-        assert p["missing"] == ([k for k in asked if k.startswith("engines/")] if ident_ else asked)
-        # What both had in their own title.c before the layers: now from the XDK layers.
-        common = {"RECOMP_PB_EXEC": "1", "RECOMP_AC97_READY": "1", "RECOMP_VBLANK": "paced",
-                  "RECOMP_DISPATCH_GATE": "1", "RECOMP_USB": "1", "RECOMP_KEYBOARD": "1"}
+        assert not [k for k in p["keys"] if k.startswith("xdk/")]
+        asked = p["layers"][-1]["json"].get("layers") or []
+        assert p["missing"] == asked                  # ident() names no engine
+        # The D3D addresses are found at run time (src/kernel/recomp_d3d_service.c): no params.
+        assert p["params"] == {}
+        # What both had from the XDK layers: the toolkit's defaults now.
         for plat in ("android", "desktop"):
-            assert common.items() <= p["env_default"][plat].items()
-        assert "XBA_D3D_DEVICE_PTR" in p["params"] and p["params"]["XBA_D3D_SW_METHODS"]
+            assert XDK_ENV.items() <= effective(p, plat).items()
 
 
 def test_fable_and_burnout_keep_their_own_values():
@@ -195,66 +203,56 @@ def test_fable_and_burnout_keep_their_own_values():
     # WP4: no frame cap from a profile any more (RECOMP_PACING=auto decides at run time).
     for plat in ("android", "desktop"):
         assert "RECOMP_GPU_FPS_CAP" not in fable["env_default"][plat]
-    assert fable["params"] == {"XBA_D3D_DEVICE_PTR": 0x00862288, "XBA_D3D_DEVICE": 0x0085FDE0,
-                               "XBA_D3D_SW_METHODS": 0x7000}
     assert fable["exclude_manual"] == ["titles_4d5300d1__overrides.c"]
-    bo3 = profiles.resolve("4541005B", ident(BO3_LIBS, probes=LATCH))
-    # WP4: the RenderWare engine layer is gone; the DMA walk comes from xdk/d3d8ltcg, the 60 fps pacing and
-    # frame generation off from the run-time lock verdict, and no title.c is left (no "bo3" hooks).
-    assert "engines/renderware" not in bo3["keys"] and bo3["hooks"] == ["xba_d3d8"]
-    assert bo3["env_force"] == {}
-    assert bo3["params"] == {"XBA_D3D_DEVICE_PTR": 0x0035FE48, "XBA_D3D_SW_METHODS": 0x20,
-                             "XBA_D3D_DMA_WALK": 1}   # from xdk/d3d8ltcg
+    assert fable["hooks"] == ["fable"] and fable["keys"] == ["titles/4d5300d1"]
+    bo3 = profiles.resolve("4541005B", ident(BO3_LIBS, ["renderware"]))
+    # WP4: no engine layer, no title.c; WP3: no XDK layer, no D3D params. What is left is the name and the state.
+    assert bo3["keys"] == ["titles/4541005b"] and bo3["hooks"] == [] and bo3["params"] == {}
+    assert bo3["env_force"] == {} and bo3["project"] == "burnout3"
     for plat in ("android", "desktop"):
-        assert "RECOMP_GPU_FPS_CAP" not in bo3["env_default"][plat]
-        assert "RECOMP_TITLE_KEVENTS" not in bo3["env_default"][plat]   # on by default in the kernel
+        assert bo3["env_default"][plat] == {}
+        assert effective(bo3, plat)["RECOMP_PB_WALK"] == "dma"
 
 
-def test_a_renderware_title_with_no_profile_gets_no_engine_layer():
-    """Black (45410083) has no title layer, and the RenderWare markers pick no layer since WP4: the DMA walk comes
-    from xdk/d3d8ltcg, pacing and frame generation are decided at run time."""
-    black = profiles.resolve("45410083", ident({"XAPILIB": 5849, "D3D8LTCG": 5849, "DSOUND": 5849}, ["renderware"], LATCH))
-    assert black["keys"] == ["xdk/d3d8", "xdk/d3d8ltcg", "xdk/dsound", "xdk/xapi"]
-    assert not black["title"]
-    assert black["env_force"] == {}
-    assert black["params"] == {"XBA_D3D_DMA_WALK": 1}
+def test_a_renderware_title_with_no_profile_gets_no_layer():
+    """Black (45410083) has no title layer, and since WP4 the RenderWare markers pick no layer; since WP3 no XDK
+    layer either: the generic template only, the toolkit's defaults do the rest (the DMA walk included)."""
+    black = profiles.resolve("45410083", ident({"XAPILIB": 5849, "D3D8LTCG": 5849, "DSOUND": 5849}, ["renderware"]))
+    assert black is None
+    assert effective(black, "android") == XDK_ENV
 
 
-def test_a_d3d8ltcg_latch_wait_gets_the_dma_walk_without_a_title_profile():
-    """D3D8LTCG whose fence wait spins on the 0x0310 latch (Black, Burnout 3 at XDK 5849) needs the DMA walk, so the
-    D3D8LTCG layer turns it on (XBA_D3D_DMA_WALK), and the D3D8 layer then adopts the fence event once it finds the
-    device. Decided by tools.xbe_ident's probe, whatever the build (XBA-105), or by build 5849, the build it was
-    picked by before the probe and is known to need it (or_builds, wave 4: the probe was never run on Black or Burnout
-    3, and without the walk Black is a black screen); D3D8LTCG of another build without the loop and plain D3D8
-    (Fable) are left as they were."""
-    black = profiles.resolve("45410083", ident({"XAPILIB": 5849, "D3D8LTCG": 5849, "DSOUND": 5849}, probes=LATCH))
-    assert black["keys"] == ["xdk/d3d8", "xdk/d3d8ltcg", "xdk/dsound", "xdk/xapi"] and not black["title"]
-    assert black["params"] == {"XBA_D3D_DMA_WALK": 1}
-    assert "#define XBA_D3D_DMA_WALK 0x00000001u" in profiles.params_header(black)
-    for libs in ({"D3D8LTCG": 5788}, {"D3D8LTCG": 4627}):          # another build with the loop: the walk too
-        assert "xdk/d3d8ltcg" in profiles.resolve("4D530001", ident(libs, probes=LATCH))["keys"]
-    for probes in ({}, {"d3d_latch_wait": 0}):                     # 5849 whatever the scan found: never dropped
-        for tid, libs in (("45410083", {"XAPILIB": 5849, "D3D8LTCG": 5849, "DSOUND": 5849}),
-                          ("4541005B", {"XAPILIB": 5849, "D3D8LTCG": 5849, "DSOUND": 5849})):
-            p = profiles.resolve(tid, ident(libs, probes=probes))
-            assert "xdk/d3d8ltcg" in p["keys"] and p["params"].get("XBA_D3D_DMA_WALK") == 1, (tid, probes)
-    for libs, probes in (({"D3D8LTCG": 5788}, {}), ({"D3D8LTCG": 5788}, {"d3d_latch_wait": 0}),
-                         ({"D3D8": 5849}, LATCH)):
-        p = profiles.resolve("4D530001", ident(libs, probes=probes))
-        assert "xdk/d3d8ltcg" not in p["keys"] and "XBA_D3D_DMA_WALK" not in p["params"]
-    assert "XBA_D3D_DMA_WALK" not in profiles.resolve("4D5300D1", ident(FABLE_LIBS, probes=LATCH))["params"]
+def test_the_dma_walk_and_the_d3d_service_are_toolkit_defaults():
+    """The D3D service lives in src/ and makes the DMA walk the default walk; the title template calls it for every
+    title, after the layers and the XDK defaults (so a layer's or the environment's RECOMP_PB_WALK wins). A title
+    with no layer at all gets the walk (it used to need xdk/d3d8ltcg's XBA_D3D_DMA_WALK)."""
+    with open(os.path.join(ROOT, "src", "kernel", "recomp_d3d_service.c")) as f:
+        svc = f.read()
+    assert 'SETENV_DEFAULT("RECOMP_PB_WALK", "dma");' in svc
+    with open(os.path.join(ROOT, "src", "kernel", "CMakeLists.txt")) as f:
+        assert "recomp_d3d_service.c" in f.read()
+    with open(os.path.join(ROOT, "templates", "new-game", "src", "main.c")) as f:
+        main = f.read()
+    conf, defaults = main.index("    recomp_d3d_configure();"), main.index("    recomp_xdk_defaults();")
+    assert main.index("    xba_title_configure();") < defaults < conf < main.index("xbox_MemoryLayoutInit(xbe_data")
+    assert main.index("    recomp_d3d_start(s_game_dir, s_save_dir);") < main.index("    xbe_entry_point();")
+    for libs in ({"D3D8LTCG": 5849}, {"D3D8LTCG": 5788}, {"D3D8": 5455}, {}):
+        assert profiles.resolve("4D530001", ident(libs)) is None
+        assert effective(None, "android")["RECOMP_PB_WALK"] == "dma"
 
 
 def test_every_layer_in_the_tree_is_well_formed():
     """Every layer's JSON passes the checks, alone on top of a bare title."""
-    keys = ["%s/%s" % (k, n) for k in ("xdk", "engines") for n in profiles._names(profiles.PROFILES, k)]
-    assert "xdk/d3d8" in keys
-    for k in keys:
-        l = profiles.load_layer(k)
-        if k.startswith("xdk/"):
-            assert l["json"].get("applies", {}).get("libraries"), k
-    for n in profiles._names(profiles.PROFILES, "titles"):
+    for n in _shipped("engines"):
+        assert profiles.load_layer("engines/" + n)
+    for n in _shipped("titles"):
         assert profiles.resolve(n, None)["title"]
+
+
+def test_an_empty_profiles_tree_gives_no_profile(tmp_path):
+    """A title prepares with no profiles/ at all: no layer, the generic template only."""
+    for libs, engines in (({"D3D8LTCG": 5849}, ["renderware"]), (FABLE_LIBS, ())):
+        assert profiles.resolve("4541005B", ident(libs, engines), str(tmp_path)) is None
 
 
 def test_the_layer_c_compiles(tmp_path):
@@ -280,33 +278,49 @@ def test_the_layer_c_compiles(tmp_path):
                                       + extra + [str(t / fn)])
 
 
-# ── XBA-106: an odd library table ───────────────────────────────
+# ── Effective settings: what a run starts with ─────────────────
+
+def _xdk_defaults():
+    """recomp_xdk_defaults' table, read from its C source (src/kernel/recomp_xdk_defaults.c)."""
+    with open(os.path.join(ROOT, "src", "kernel", "recomp_xdk_defaults.c")) as f:
+        src = f.read()
+    table = src[src.index("k_defaults[][2] = {"):src.index("};", src.index("k_defaults[][2] = {"))]
+    return dict(re.findall(r'\{"(RECOMP_[A-Z0-9_]+)", "([^"]*)"\}', table))
+
+
+def effective(prof, plat):
+    """The switches a run of this profile starts with, as main() sets them: the layers' env_default for the
+    platform, then recomp_xdk_defaults, the pushbuffer executor (main(), the Android shell) and the D3D service's
+    DMA walk where nothing set them; env_force over everything."""
+    env = dict((prof or {}).get("env_default", {}).get(plat, {}))
+    for k, v in dict(_xdk_defaults(), RECOMP_PB_EXEC="1", RECOMP_PB_WALK="dma").items():
+        env.setdefault(k, v)
+    env.update((prof or {}).get("env_force", {}))
+    return env
+
+
+XDK_ENV = {"RECOMP_PB_EXEC": "1", "RECOMP_VBLANK": "paced", "RECOMP_AC97_READY": "1",
+           "RECOMP_DISPATCH_GATE": "1", "RECOMP_USB": "1", "RECOMP_KEYBOARD": "1", "RECOMP_PB_WALK": "dma"}
+
+# The four reference titles: libraries, engines, keys, hooks, and the effective settings per platform. The
+# settings are what they started with before the XDK layers went (main @ 261ad6c, with profiles/xdk/*: the
+# layers' switches, XBA_D3D_DMA_WALK from xdk/d3d8ltcg on D3D8LTCG 5849; WP4 had already moved the RenderWare
+# layer, Burnout 3's title.c and Fable's Android cap to run time), with one change by design: KOTOR (D3D8 5455)
+# moves from the segment scan to the DMA walk (K-7: 5 of 5 runs each way without a difference).
+REFERENCE = {
+    "4D5300D1": ((("XAPILIB", 5849), ("D3D8LTCG", 5849), ("DSOUND", 5849)), (),
+                 ["titles/4d5300d1"], ["fable"], XDK_ENV, XDK_ENV),
+    "4541005B": ((("XAPILIB", 5849), ("D3D8LTCG", 5849), ("DSOUND", 5849), ("XMV", 5849)), ("renderware",),
+                 ["titles/4541005b"], [], XDK_ENV, XDK_ENV),
+    "45410083": ((("XAPILIB", 5849), ("D3D8LTCG", 5849), ("DSOUND", 5849)), ("renderware",), None, None,
+                 XDK_ENV, XDK_ENV),
+    "4C410003": ((("XAPILIB", 5455), ("D3D8", 5455), ("DSOUND", 5455)), (), None, None, XDK_ENV, XDK_ENV),
+}
 
 XAPI_IMPORTS = (326, 327, 328, 67, 24)
 DSOUND_IMPORTS = (175, 173, 44, 98)
 D3D_IMPORTS = (3, 2, 1, 4, 168)
 ALL_XDK_IMPORTS = tuple(sorted(set(XAPI_IMPORTS + DSOUND_IMPORTS + D3D_IMPORTS + (49, 164, 187, 190))))
-XDK_ENV = {"RECOMP_PB_EXEC": "1", "RECOMP_VBLANK": "paced", "RECOMP_AC97_READY": "1",
-           "RECOMP_DISPATCH_GATE": "1", "RECOMP_USB": "1", "RECOMP_KEYBOARD": "1"}
-# The four reference titles as they merged before XBA-106 (origin/main 5688baa), less what WP4 moved to run time
-# (the RenderWare engine layer, Burnout 3's title.c, Fable's Android frame cap): libraries, engines, keys, hooks,
-# env_force, params, env_default per platform. What the XBE imports must not change any of it.
-REFERENCE = {
-    "4D5300D1": ((("XAPILIB", 5849), ("D3D8", 5849), ("DSOUND", 5849)), (),
-                 ["xdk/d3d8", "xdk/dsound", "xdk/xapi", "titles/4d5300d1"], ["xba_d3d8", "fable"], {},
-                 {"XBA_D3D_DEVICE_PTR": 0x00862288, "XBA_D3D_DEVICE": 0x0085FDE0, "XBA_D3D_SW_METHODS": 0x7000},
-                 XDK_ENV, XDK_ENV),
-    "4541005B": ((("XAPILIB", 5849), ("D3D8LTCG", 5849), ("DSOUND", 5849), ("XMV", 5849)), ("renderware",),
-                 ["xdk/d3d8", "xdk/d3d8ltcg", "xdk/dsound", "xdk/xapi", "titles/4541005b"],
-                 ["xba_d3d8"], {},
-                 {"XBA_D3D_DMA_WALK": 1, "XBA_D3D_DEVICE_PTR": 0x0035FE48, "XBA_D3D_SW_METHODS": 0x20},
-                 XDK_ENV, XDK_ENV),
-    "45410083": ((("XAPILIB", 5849), ("D3D8LTCG", 5849), ("DSOUND", 5849)), ("renderware",),
-                 ["xdk/d3d8", "xdk/d3d8ltcg", "xdk/dsound", "xdk/xapi"], ["xba_d3d8"],
-                 {}, {"XBA_D3D_DMA_WALK": 1}, XDK_ENV, XDK_ENV),
-    "4C410003": ((("XAPILIB", 5455), ("D3D8", 5455), ("DSOUND", 5455)), (),
-                 ["xdk/d3d8", "xdk/dsound", "xdk/xapi"], ["xba_d3d8"], {}, {}, XDK_ENV, XDK_ENV),
-}
 
 
 def _synthetic(tmp_path, name, libs, imports, title_id=0x4D530001, engines=()):
@@ -320,69 +334,40 @@ def _synthetic(tmp_path, name, libs, imports, title_id=0x4D530001, engines=()):
 
 
 @pytest.mark.parametrize("tid", sorted(REFERENCE))
-def test_the_reference_titles_merge_as_before_whatever_they_import(tmp_path, tid):
-    libs, engines, keys, hooks, force, params, android, desktop = REFERENCE[tid]
-    for imports in ((), ALL_XDK_IMPORTS, D3D_IMPORTS):
-        p = profiles.resolve(tid, _synthetic(tmp_path, "%s-%d.xbe" % (tid, len(imports)), libs, imports,
-                                             int(tid, 16), engines))
-        assert p["keys"] == keys and p["hooks"] == hooks and p["env_force"] == force
-        assert p["params"] == params
-        assert p["env_default"] == {"android": android, "desktop": desktop}
+def test_the_reference_titles_start_with_the_same_settings(tmp_path, tid):
+    """Whatever the XBE's library table or imports say (a stripped or renamed table included, XBA-106)."""
+    libs, engines, keys, hooks, android, desktop = REFERENCE[tid]
+    for table, imports in ((libs, ()), (libs, ALL_XDK_IMPORTS), ((), D3D_IMPORTS), ((("D3D8_QFE", 5849),), ())):
+        p = profiles.resolve(tid, _synthetic(tmp_path, "%s-%d-%d.xbe" % (tid, len(table), len(imports)), table,
+                                             imports, int(tid, 16), engines))
+        assert (p and p["keys"]) == keys and (p and p["hooks"]) == hooks
+        assert not (p and p["params"])
+        assert effective(p, "android") == android and effective(p, "desktop") == desktop
 
 
-def test_a_stripped_library_table_picks_the_xdk_layers_by_their_imports(tmp_path):
-    r = _synthetic(tmp_path, "stripped.xbe", (), ALL_XDK_IMPORTS)
-    p = profiles.resolve("4D530001", r)
-    assert p["keys"] == ["xdk/d3d8", "xdk/dsound", "xdk/xapi"] and p["hooks"] == ["xba_d3d8"]
-    assert p["env_default"]["desktop"] == XDK_ENV and p["params"] == {}
-    lines = profiles.xdk_report(r)
-    assert lines[0] == "XDK layers: xdk/d3d8 (kernel imports), xdk/dsound (kernel imports), xdk/xapi (kernel imports)"
-    assert len(lines) == 4 and all(l.startswith("warning: xdk/") for l in lines[1:])
-    assert "names none of D3D8, D3D8LTCG, but the XBE imports AvSetDisplayMode, AvSendTVEncoderOption" in lines[1]
+@pytest.mark.parametrize("tid", sorted(REFERENCE))
+def test_without_the_title_layer_only_the_title_specific_values_go(tmp_path, tid):
+    """XBA_NO_TITLE_LAYER=1: no layer at all; the toolkit's defaults give the same settings."""
+    libs, engines, _, _, _, _ = REFERENCE[tid]
+    r = _synthetic(tmp_path, "%s.xbe" % tid, libs, (), int(tid, 16), engines)
+    p = profiles.resolve(tid, r, title_layer=False)
+    assert p is None
+    assert effective(p, "desktop") == XDK_ENV and effective(p, "android") == XDK_ENV
 
 
-def test_a_renamed_library_is_picked_by_its_imports_and_the_others_by_name(tmp_path):
-    r = _synthetic(tmp_path, "renamed.xbe", (("XAPILIB", 5849), ("D3D8_QFE", 5849), ("DSOUND", 5849)),
-                   D3D_IMPORTS + XAPI_IMPORTS)
-    assert profiles.auto_layers(r) == ["xdk/d3d8", "xdk/dsound", "xdk/xapi"]
-    m = {x["key"]: x["by"] for x in profiles.xdk_matches(r)}
-    assert m == {"xdk/d3d8": "imports", "xdk/d3d8ltcg": None, "xdk/dsound": "library", "xdk/xapi": "library"}
-    lines = profiles.xdk_report(r)
-    assert lines[0] == "XDK layers: xdk/d3d8 (kernel imports), xdk/dsound (DSOUND 5849), xdk/xapi (XAPILIB 5849)"
-    assert len(lines) == 2 and lines[1].startswith("warning: xdk/d3d8:")
-
-
-def test_a_library_at_a_build_the_layer_does_not_take_is_not_picked_by_imports(tmp_path):
-    """D3D8LTCG 5788: xdk/d3d8 by name, xdk/d3d8ltcg (5849 only, no imports) stays out; and a layer whose
-    library is named at a build outside its range stays out even when its imports are there."""
-    r = _synthetic(tmp_path, "ltcg.xbe", (("XAPILIB", 5788), ("D3D8LTCG", 5788)), ALL_XDK_IMPORTS)
-    assert profiles.auto_layers(r) == ["xdk/d3d8", "xdk/dsound", "xdk/xapi"]     # dsound: not named, imports there
-    root = tmp_path / "tree"
-    layer(root, "xdk/dsound", {"applies": {"libraries": ["DSOUND"], "builds": [5558, 5849],
-                                           "imports": {"ordinals": [175], "min": 1}}})
-    old = dict(ident({"DSOUND": 4627}), imports=[175])
-    assert profiles.auto_layers(old, str(root)) == []
-
-
-def test_no_xdk_layer_and_an_unidentified_xbe_say_so(tmp_path):
+def test_the_xdk_report_says_what_applies(tmp_path):
     r = _synthetic(tmp_path, "homebrew.xbe", (), (49, 187, 190))
     assert profiles.auto_layers(r) == [] and profiles.resolve("4D530001", r) is None
-    assert profiles.xdk_report(r) == ["XDK layers: none matched; the runtime's XDK defaults apply "
-                                      "(recomp_xdk_defaults)"]
+    assert profiles.xdk_report(r) == ["XDK: no library table; the toolkit's defaults apply "
+                                      "(XDK switches, D3D service, DMA walk)"]
+    r = _synthetic(tmp_path, "t.xbe", (("XAPILIB", 5849), ("D3D8LTCG", 5849)), ())
+    assert profiles.xdk_report(r) == ["XDK: D3D8LTCG 5849, XAPILIB 5849; the toolkit's defaults apply "
+                                      "(XDK switches, D3D service, DMA walk)"]
     assert "could not be identified" in profiles.xdk_report(None)[0]
-    # Too few of a library's ordinals: not picked (D3D wants 2).
-    assert profiles.auto_layers(_synthetic(tmp_path, "one.xbe", (), (3,))) == []
-
-
-def test_applies_imports_is_checked(tmp_path):
-    for bad in ({"ordinals": [3, "x"]}, {"ordinals": [3], "min": 2}, {"ordinals": [999]}, [3]):
-        layer(tmp_path, "xdk/d3d8", {"applies": {"libraries": ["D3D8"], "imports": bad}})
-        with pytest.raises(profiles.ProfileError, match="applies.imports"):
-            profiles.auto_layers(dict(ident({}), imports=[3]), str(tmp_path))
 
 
 def test_without_the_title_layer_a_title_is_any_title(tree):
     layer(tree, "titles/4d530001", {"name": "T", "layers": ["xdk/dsound"], "env_default": {"RECOMP_X": "1"}})
-    p = profiles.resolve("4D530001", ident({"D3D8": 5849}), str(tree), title_layer=False)
-    assert p["keys"] == ["xdk/d3d8"] and not p["title"] and "RECOMP_X" not in p["env_default"]["desktop"]
+    p = profiles.resolve("4D530001", ident({"D3D8": 5849}, ["renderware"]), str(tree), title_layer=False)
+    assert p["keys"] == ["engines/renderware"] and not p["title"] and "RECOMP_X" not in p["env_default"]["desktop"]
     assert profiles.resolve("4D530001", ident({"XNET": 5849}), str(tree), title_layer=False) is None

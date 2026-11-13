@@ -162,9 +162,9 @@ python -m tools.xbe_ident discs/*/default.xbe --json t.json  # library triage: o
 - **Engines and middleware**: marker strings from `tools/xbe_ident/engines.json` (RenderWare, Unreal Engine 2,
   Gamebryo, id Tech 3/4, Source, LithTech; Havok, Bink, Miles). An entry needs `min` of its markers. Add engines
   there; check new markers against the corpus first.
-- **Layers**: the profile layers the XBE selects, lowest first (`tools/prepare/profiles.py`): each
-  `profiles/xdk/<name>/` whose `applies` names a library it links, then `profiles/engines/<name>/` for each engine
-  found (not middleware) that has a folder. `tools.prepare` writes the result to `<work>/ident.json`; the rules are
+- **Layers**: the profile layers the XBE selects (`tools/prepare/profiles.py`): `profiles/engines/<name>/` for each
+  engine found (not middleware) that has a folder. No XDK layer: what they did (the XDK switches, the D3D service,
+  the DMA walk) is the toolkit's default for every title. `tools.prepare` writes the result to `<work>/ident.json`; the rules are
   in `docs/technical/profiles.md`.
 
 ---

@@ -49,12 +49,16 @@ def test_prepare_lifts_a_synthetic_title(tmp_path):
     work = tmp_path / "work"
     r = _prepare(_xbe(tmp_path), work, "--no-build")
     assert r.returncode == 0, r.stdout[-2000:] + r.stderr[-2000:]
-    assert "profile layers: xdk/d3d8 xdk/dsound xdk/xapi" in r.stdout
+    # No profile layer: the toolkit's defaults (the XDK switches, the D3D service, the DMA walk) do it all.
+    assert "no profile layer for this XBE: the generic template only" in r.stdout
+    assert "the toolkit's defaults apply (XDK switches, D3D service, DMA walk)" in r.stdout
     gen = work / "project" / "src" / "recomp" / "gen"
     text = "".join(p.read_text(errors="replace") for p in gen.glob("*.c"))
     assert "xbe_entry_point" in text
-    title = sorted(os.listdir(work / "project" / "src" / "title"))
-    assert "xba_layers.c" in title and "xdk_d3d8__d3d8.c" in title
+    title = work / "project" / "src" / "title"
+    assert not title.is_dir() or not [f for f in os.listdir(title) if f.endswith(".c")]
+    main_c = (work / "project" / "src" / "main.c").read_text()
+    assert "    recomp_d3d_configure();" in main_c and "    recomp_d3d_start(s_game_dir, s_save_dir);" in main_c
 
 
 @pytest.mark.skipif(os.environ.get("XBA_E2E") != "1", reason="XBA_E2E=1: builds and boots a title (minutes)")
@@ -355,8 +359,8 @@ def _coroutine_xbe(tmp_path):
 @pytest.mark.skipif(os.environ.get("XBA_E2E") != "1", reason="XBA_E2E=1: builds and boots a title (minutes)")
 def test_a_stripped_library_table_still_gets_the_xdk_switches(tmp_path):
     """XBA-106 in the real runtime: no library table at all, but D3D's kernel imports (AvSetDisplayMode,
-    AvSendTVEncoderOption, MmClaimGpuInstanceMemory). prepare picks xdk/d3d8 by its imports and says so; the
-    title project sets the switches no layer set (the DISPATCH gate, the pad, AC'97) itself."""
+    AvSendTVEncoderOption, MmClaimGpuInstanceMemory). No layer is needed: the title project sets the XDK switches
+    itself (the DISPATCH gate, the pad, AC'97), and the D3D service runs for every title."""
     if not shutil.which("cmake"):
         pytest.skip("no cmake")
     d = tmp_path / "bare"
@@ -369,9 +373,11 @@ def test_a_stripped_library_table_still_gets_the_xdk_switches(tmp_path):
     assert r.returncode == 0, r.stdout[-2000:] + r.stderr[-2000:]
     work = tmp_path / "cw" / "bare"
     prep = (work / "compat-prepare.log").read_text()
-    assert "XDK layers: xdk/d3d8 (kernel imports)" in prep and "warning: xdk/d3d8: the library table" in prep, prep
+    assert "XDK: no library table; the toolkit's defaults apply" in prep, prep
     log = (work / "run-0.log").read_text()
-    assert "[XDK] defaults: RECOMP_DISPATCH_GATE=1 RECOMP_KEYBOARD=1 RECOMP_AC97_READY=1" in log, log[-3000:]
+    xdk = [line for line in log.splitlines() if line.startswith("[XDK] defaults:")]
+    assert xdk and all(k in xdk[0] for k in ("RECOMP_DISPATCH_GATE=1", "RECOMP_KEYBOARD=1", "RECOMP_AC97_READY=1")), \
+        log[-3000:]
     assert "emulated APU up" in log, log[-3000:]          # RECOMP_AC97_READY took effect
 
 

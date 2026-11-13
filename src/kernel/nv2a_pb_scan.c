@@ -455,8 +455,10 @@ void nv2a_pb_scan(uint32_t put_phys)
  * on an event that the GPU's interrupt for that method signals. A runtime that
  * does not deliver that interrupt leaves the title asleep for good -- a title
  * that ran under the segment scan froze on the first screen whose pushbuffer
- * made the walk long enough. So the walk is opt-in, for projects that deliver
- * the GPU's software-method interrupt. */
+ * made the walk long enough. So the walk is opt-in here, for projects that
+ * deliver the GPU's software-method interrupt: the XDK D3D service does
+ * (recomp_d3d_service.c), and makes the walk the default where it is
+ * configured -- every title built from templates/new-game. */
 int nv2a_pb_dma_walk(void)
 {
     static int on = -1;

@@ -10,11 +10,12 @@ stall.
 
 ## What the profile does
 
-Since XBA-66 most of it comes from the XDK layers (`profiles/xdk/xapi`, `dsound`, `d3d8`, `d3d8ltcg`); D3D's
-addresses stay in title.json `"params"`. The engine layer `profiles/engines/renderware` (XBA-95: DMA walk, 60 fps cap,
-frame generation off) and `title.c` (flip pacing on the desktop software rasteriser) went in WP4: the walk comes from
-`xdk/d3d8ltcg`, and `RECOMP_PACING=auto` (the default) judges the game locked to its 60 fps ask, so it is never
-divided and frame generation stays off for it. Rules: `docs/technical/profiles.md`.
+Since WP3 all of it is the toolkit's default: the XDK switches (`recomp_xdk_defaults`), and the D3D service
+(`src/kernel/recomp_d3d_service.c`, formerly the XDK layers `profiles/xdk/d3d8` and `d3d8ltcg`), which finds the
+device at run time (`0x0035D9A0`, slot `0x0035FE48`: the addresses title.json `"params"` used to give) and makes the
+DMA walk the default. The engine layer `profiles/engines/renderware` (XBA-95: DMA walk, 60 fps cap, frame generation
+off) and `title.c` (flip pacing on the desktop software rasteriser) went in WP4: `RECOMP_PACING=auto` (the default)
+judges the game locked to its 60 fps ask, so it is never divided and frame generation stays off for it. Rules: `docs/technical/profiles.md`.
 
 | Setting | Why |
 |---|---|

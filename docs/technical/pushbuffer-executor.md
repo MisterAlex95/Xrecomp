@@ -294,9 +294,12 @@ wait that is method 5: a software-method hook that sets the fence event with
 `xbox_KeSetGuestEvent()` (see [D3D Software Methods](#d3d-software-methods)),
 D3D built the event itself, which is a guest event by default (with
 `RECOMP_TITLE_KEVENTS=0`, that one event adopted with `xbox_KeAdoptGuestEvent()`:
-the XDK D3D layer does so for a device it found at run time). A D3D8LTCG title whose fence wait spins on the latch gets the walk from its own
-layer (`profiles/xdk/d3d8ltcg`): its fence wait also spins on the 0x0310 latch
-(PGRAPH 0x400B10), which only the walk keeps honest.
+the D3D service does so for a device it found at run time). The walk is the
+default in a title project: the D3D service (`src/kernel/recomp_d3d_service.c`)
+sets `RECOMP_PB_WALK=dma` unless something already did, since D3D8LTCG's fence
+wait spins on the 0x0310 latch (PGRAPH 0x400B10), which only the walk keeps
+honest (it was the `profiles/xdk/d3d8ltcg` layer's choice). `RECOMP_PB_WALK=scan`
+keeps the segment scan.
 
 ## The Segment Scan Follows Jumps
 
@@ -343,8 +346,8 @@ say which method, the rest is its payload. Seen in *Fable* (dispatcher
 |---|---|
 | 1 | swap bookkeeping: the flip hold uses its interval (`nv2a_flip_hold.c`) |
 | 5 | `KeSetEvent` on a fence event: the one D3D's `BlockOnTime` sleeps on, with no timeout, after patching this method in at the fence it waits for when the GPU is more than 0x2000 bytes behind. Often a KEVENT D3D built itself (no `KeInitializeEvent`), a guest event by default (`RECOMP_TITLE_KEVENTS=0` turns that off); a hook sets it with `xbox_KeSetGuestEvent()` (`kernel.h`) |
-| 6, 7 | `D3DDevice_InsertCallback`: calls `[0x401A88]` with `[0x40186C]` (methods `0x1D8C`/`0x1D90` pushed just before: PGRAPH's ZSTENCILCLEARVALUE and COLORCLEARVALUE). `xdk/d3d8` queues `routine(context)` on the DPC path (`xbox_DpcQueueGuestCall`, refused when the routine is not code); `RECOMP_D3D_CALLBACKS=0` leaves them unserviced |
-| 8, 9 | PGRAPH RDI writes, a register poke: GPU-internal state the executor does not read (it keeps its own), so `xdk/d3d8` acknowledges them; the first payloads are printed (`[D3D] software method 8 ...`). Seen: *Fable* ~30 a frame in-world, *Burnout 3* ~80 a second in a race, *Black* 1 x 8 and 12 x 9 at start |
+| 6, 7 | `D3DDevice_InsertCallback`: calls `[0x401A88]` with `[0x40186C]` (methods `0x1D8C`/`0x1D90` pushed just before: PGRAPH's ZSTENCILCLEARVALUE and COLORCLEARVALUE). the D3D service queues `routine(context)` on the DPC path (`xbox_DpcQueueGuestCall`, refused when the routine is not code); `RECOMP_D3D_CALLBACKS=0` leaves them unserviced |
+| 8, 9 | PGRAPH RDI writes, a register poke: GPU-internal state the executor does not read (it keeps its own), so the D3D service acknowledges them; the first payloads are printed (`[D3D] software method 8 ...`). Seen: *Fable* ~30 a frame in-world, *Burnout 3* ~80 a second in a race, *Black* 1 x 8 and 12 x 9 at start |
 | 0xC, 0xD, 0xE | deferred `RunPushBuffer`: patch the return `JUMP` (and fixups) of a recorded pushbuffer that is run again before the GPU passed its previous run |
 
 The 0xC–0xE ones matter for the walk: until the handler has run, the recorded
@@ -355,10 +358,11 @@ The executor calls a hook the game project registers,
 `nv2a_pb_set_software_method_hook()` (`nv2a_backend.h`), for every software
 method except the swap, on the executor thread, before it reads the next
 pushbuffer word — the GPU waits for the handler on the console too. The
-XDK D3D profile layer (`profiles/xdk/d3d8/d3d8.c`) services 0xC–0xE exactly
-as D3D's RunPushBuffer helper does (*Fable*'s `sub_00855860`) and answers 5
-with `xbox_KeSetGuestEvent()` on the fence event (*Burnout 3*), for the
-methods and the device addresses each title profile gives it. The report counts
+title template registers the XDK D3D service's (`src/kernel/recomp_d3d_service.c`,
+formerly the profile layer `profiles/xdk/d3d8/d3d8.c`): it services 0xC–0xE
+exactly as D3D's RunPushBuffer helper does (*Fable*'s `sub_00855860`) and
+answers 5 with `xbox_KeSetGuestEvent()` on the fence event (*Burnout 3*), on
+the device it finds at run time. The report counts
 what was serviced and, by type, what was not (`[GPU] software methods: ...`).
 
 ### Why not the title's own handler
@@ -379,7 +383,7 @@ type without a per-title hook. It does not work against this runtime yet:
   it synchronously on the executor thread races that delivery (both mask and
   unmask `PMC_INTR_EN_0`), and the executor thread has no guest stack or TIB.
 
-What `xdk/d3d8` services without any title address (XBA-80, XBA-94): 5 and
+What the D3D service services without any title address (XBA-80, XBA-94): 5 and
 0xC–0xE on the device it finds, 8 and 9 acknowledged, 6 and 7 queued as a
 guest call at DPC level (a KDPC from a small pool, typed so `kernel_run_dpc`
 calls the routine with its one argument, cdecl, registers put back after).

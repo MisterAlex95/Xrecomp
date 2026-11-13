@@ -1,21 +1,14 @@
 /*
- * XDK Direct3D 8 layer (profiles/xdk/d3d8): what the console's GPU and D3D's
- * interrupt handler do for D3D, which the recompiled title cannot do itself.
+ * The XDK D3D service (recomp_d3d_service.h): what the console's GPU and
+ * D3D's interrupt handler do for D3D, which the recompiled title cannot do
+ * itself. A toolkit default (it was the profile layer profiles/xdk/d3d8/d3d8.c,
+ * compiled into each title that layer matched): templates/new-game main()
+ * calls recomp_d3d_configure / recomp_d3d_start for every title, and a title
+ * without D3D finds no device and stays idle.
  *
  * D3D is linked into each title, so its device sits at a different address in
- * every XBE. Two ways to know it:
- *
- *   params (title.json "params", xba_params.h), which win when given:
- *     XBA_D3D_DEVICE_PTR   the slot holding the device pointer (D3D's g_pDevice)
- *     XBA_D3D_DEVICE       the device itself (a static in D3D's section)
- *     XBA_D3D_SW_METHODS   the software methods to service, bit n = method n:
- *                          0x7000 RunPushBuffer (0xC-0xE); the fence event (5)
- *                          is serviced whatever it says (see D3D_METHODS_FENCE)
- *     XBA_D3D_DMA_WALK     1: walk the pushbuffer as the DMA engine does
- *
- *   or found at run time (XBA-80), when the title gives neither address: once
- *   D3D has made its device, the title's image is scanned for the one dword D
- *   where
+ * every XBE. It is found at run time (XBA-80): once D3D has made its device,
+ * the title's image is scanned for the one dword D where
  *     [D + 0x24A8] == D                      the pointer slot right after the device
  *     [D + 0x24] < [D + 0x28], both in the contiguous window, 4 KB to 64 MB apart
  *                                            the pushbuffer ring
@@ -25,28 +18,44 @@
  *   the image naming a D inside the image is tried with the ring and put tests,
  *   [D + 0x30] (the GPU semaphore pointer) in the contiguous window, and D3D's
  *   two adjacent KEVENTs inside D (below). A unique D only, both ways; it is
- *   printed and written to the discovery file ({"t":"d3d","va":D,"slot":P})
- *   for the next prepare. Found this way, all the serviceable methods are on
- *   unless XBA_D3D_SW_METHODS says otherwise.
- *   Method 5 sets the fence event, which D3D builds itself right after its
- *   vblank event: two KEVENT headers 16 bytes apart, the only such pair in the
- *   device (5849: +0x1DBC/+0x1DCC; 5455: +0x199C/+0x19AC). Its offset is read
- *   from the device found (xba_d3d8_fence_event_offset); with no pair the
- *   table's offset for the build (k_layouts), else 5849's, said. Title-built KEVENTs are guest events by default
- *   (kernel_bridge.c, RECOMP_TITLE_KEVENTS), so BlockOnTime's wait blocks until
- *   the method comes instead of failing at once and spinning. With
- *   RECOMP_TITLE_KEVENTS=0, the one fence event is still adopted under the DMA
- *   walk, which delivers method 5 (xbox_KeAdoptGuestEvent).
- *   The D3D8LTCG layer (profiles/xdk/d3d8ltcg) turns the DMA walk on for a
- *   D3D8LTCG whose fence wait spins on the 0x0310 latch, which needs it
- *   (XBA_D3D_DMA_WALK): tools.xbe_ident's d3d_latch_wait probe finds that loop
- *   in the title's code, whatever the build (XBA-105).
+ *   printed and written to the discovery file ({"t":"d3d","va":D,"slot":P}).
+ *   Found this way, all the serviceable methods are on unless
+ *   RECOMP_D3D_SW_METHODS says otherwise.
  *
- * The other offsets inside the device were read on XDK 5849 (Burnout 3,
- * D3D8LTCG) and on Fable's D3D, and are the same on XDK 5455 (KOTOR): ring
- * +0x24/+0x28, fence count +0x2C, semaphore pointer +0x30. The pointer slot is
- * device + 0x24A8 on 5849, Fable and the original Burnout 3 build
- * (docs/technical/d3d8ltcg-device-context.md).
+ * Run-time overrides, for an A/B (they were a title profile's compile-time
+ * XBA_D3D_* params; numbers in C notation, 0x... for hex):
+ *     RECOMP_D3D_DEVICE_PTR   the slot holding the device pointer (D3D's g_pDevice)
+ *     RECOMP_D3D_DEVICE       the device itself (a static in D3D's section)
+ *     RECOMP_D3D_SW_METHODS   the software methods to service, bit n = method n:
+ *                             0x7000 RunPushBuffer (0xC-0xE); the fence event (5)
+ *                             is serviced whatever it says (see D3D_METHODS_FENCE)
+ *   With an address given, the device is not searched for and RunPushBuffer's
+ *   methods write as D3D's handler does, without the run-time guards.
+ *
+ * Method 5 sets the fence event, which D3D builds itself right after its
+ * vblank event: two KEVENT headers 16 bytes apart, the only such pair in the
+ * device (5849: +0x1DBC/+0x1DCC; 5455: +0x199C/+0x19AC). Its offset is read
+ * from the device found (recomp_d3d_fence_event_offset); with no pair the
+ * table's offset for the build (k_layouts), else 5849's, said. Title-built
+ * KEVENTs are guest events by default (kernel_bridge.c, RECOMP_TITLE_KEVENTS),
+ * so BlockOnTime's wait blocks until the method comes instead of failing at
+ * once and spinning. With RECOMP_TITLE_KEVENTS=0, the one fence event is still
+ * adopted under the DMA walk, which delivers method 5 (xbox_KeAdoptGuestEvent).
+ *
+ * The DMA walk (RECOMP_PB_WALK=dma) is the default once this service is
+ * configured: D3D8LTCG's fence wait reads DMA_GET and the 0x0310 latch
+ * (PGRAPH 0x400B10), which only the walk keeps honest (Black froze at the
+ * menu under the segment scan, Burnout 3 needs it too), and the walk delivers
+ * software method 5, which this service answers. RECOMP_PB_WALK=scan keeps the
+ * segment scan (the A/B value; KOTOR, D3D8 5455, ran 5 of 5 runs either way,
+ * K-7). A project that does not call recomp_d3d_configure keeps the segment
+ * scan (nv2a_pb_scan.c): nothing would answer the software methods the walk
+ * makes D3D ask for.
+ *
+ * The other offsets inside the device were read on XDK 5849 (Burnout 3 and
+ * Fable, both D3D8LTCG 5849) and are the same on XDK 5455 (KOTOR): ring
+ * +0x24/+0x28, fence count +0x2C, semaphore pointer +0x30. The pointer slot
+ * is device + 0x24A8 on 5849 (docs/technical/d3d8ltcg-device-context.md).
  *
  * Every offset is either read from the device's structure (the device
  * itself, its slot, its fence event) or looked up in k_layouts below, keyed by
@@ -59,17 +68,20 @@
  * fallbacks: a found device's RunPushBuffer methods write only into the
  * contiguous window, and decrement a pending count only when it reads as one.
  *
- * Switch: XBA_D3D_FENCE=mirror is the A/B fallback Burnout 3 was brought up
- * with (needs XBA_D3D_DEVICE_PTR): no software methods, no semaphore watch, no
- * DMA walk, and D3D's fence mirrored as "GPU always caught up".
+ * Switches: RECOMP_D3D_SERVICE=0 leaves the service out (no software methods,
+ * no semaphore watch, no DMA-walk default: the runtime as a project that never
+ * calls it). RECOMP_D3D_FENCE=mirror (the old name XBA_D3D_FENCE is still
+ * read) is the A/B fallback Burnout 3 was brought up with; it needs
+ * RECOMP_D3D_DEVICE_PTR: no software methods, no semaphore watch, the segment
+ * scan, and D3D's fence mirrored as "GPU always caught up".
  */
+#include "recomp_d3d_service.h"
+
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
-#include "xba_params.h"
 
 #ifndef _WIN32
 #include <pthread.h>
@@ -84,9 +96,9 @@
  * What cannot be read from the device's structure. 0 in a field: not known
  * for that build (the fallback's value is used, and said). slot: the device
  * pointer slot relative to the device, 0 when it is found by any pointer
- * (xba_d3d8_scan_slots). Ring, put, fence count and semaphore are the same in
+ * (recomp_d3d_scan_slots). Ring, put, fence count and semaphore are the same in
  * every layout seen; they are what finds the device, so a build where they
- * moved would not be found at all (the title's params then say where). */
+ * moved would not be found at all (RECOMP_D3D_DEVICE_PTR then says where). */
 typedef struct {
     const char *lib;            /* the XBE library name */
     unsigned build;
@@ -97,19 +109,19 @@ typedef struct {
     uint32_t fence_event;               /* the KEVENT BlockOnTime sleeps on (the pair read from the device wins) */
     uint32_t rpb_pending;               /* RunPushBuffer calls waiting for the GPU */
     uint32_t rpb_nodes;                 /* RunPushBuffer's node table, 20 bytes a node */
-    const char *seen;
+    const char *seen;           /* how a message names it */
 } D3dLayout;
 
+/* Seen on: D3D8LTCG 5849 Burnout 3, Black, Fable; D3D8 5455 KOTOR. */
 static const D3dLayout k_layouts[] = {
-    { "D3D8LTCG", 5849, 0x24A8, 0x24, 0x28, 0x2C, 0x30, 0x1DCC, 0,    0,     "Burnout 3, Black" },
-    { "D3D8",     5455, -8,     0x24, 0x28, 0x2C, 0x30, 0x19AC, 0,    0,     "KOTOR" },
+    { "D3D8LTCG", 5849, 0x24A8, 0x24, 0x28, 0x2C, 0x30, 0x1DCC, 0x50, 0x264, "D3D8LTCG 5849's" },
+    { "D3D8",     5455, -8,     0x24, 0x28, 0x2C, 0x30, 0x19AC, 0,    0,     "D3D8 5455's" },
 };
-/* What a rule falls back to: 5849's slot and fence event, the RunPushBuffer
- * offsets of Fable's D3D (the only one they were read on; its library and
- * build were not recorded: a run of Fable prints them, see the check list in
- * XBA-105). */
+/* What a rule falls back to: D3D8LTCG 5849's (Fable's D3D is D3D8LTCG 5849:
+ * its runs print "[D3D] D3D8LTCG build 5849", and the RunPushBuffer offsets
+ * were read on it). */
 static const D3dLayout k_fallback =
-    { "D3D8LTCG", 5849, 0x24A8, 0x24, 0x28, 0x2C, 0x30, 0x1DCC, 0x50, 0x264, "D3D8LTCG 5849's / Fable's" };
+    { "D3D8LTCG", 5849, 0x24A8, 0x24, 0x28, 0x2C, 0x30, 0x1DCC, 0x50, 0x264, "D3D8LTCG 5849's" };
 
 #define D3D_FENCE_COUNT  (layout()->fence_count)
 #define D3D_RING_START   (layout()->ring_start)
@@ -136,18 +148,17 @@ extern int  xbox_DpcQueueGuestCall(uint32_t routine, uint32_t context);
 
 #define G32(a) (*(volatile uint32_t *)((uint8_t *)xbox_GetMemoryOffset() + (uint32_t)(a)))
 
-#if defined(XBA_D3D_DEVICE_PTR) || defined(XBA_D3D_DEVICE)
-#define D3D_GIVEN 1                 /* the title profile says where it is */
-#else
-#define D3D_GIVEN 0
-#endif
+/* RECOMP_D3D_DEVICE / RECOMP_D3D_DEVICE_PTR (read by recomp_d3d_configure):
+ * where the device is, when the environment says so. */
+static uint32_t s_given_device, s_given_ptr;
+#define D3D_GIVEN (s_given_device != 0 || s_given_ptr != 0)
 
 /* 8 and 9 (XBA-94): D3D's handler pokes PGRAPH through its RDI (RAM data
  * interface) window, 0x400750 / 0x400754 -- internal GPU state no part of this
  * runtime reads, since the executor keeps its own. On the console the GPU
  * stops until the handler has run and then goes on; here going on is all
- * there is to do, so they are acknowledged (counted as serviced) whatever the
- * profile says. The first few payloads are printed, to document them per XDK
+ * there is to do, so they are acknowledged (counted as serviced) whatever
+ * RECOMP_D3D_SW_METHODS says. The first few payloads are printed, to document them per XDK
  * build (docs/technical/pushbuffer-executor.md). */
 #define D3D_METHODS_ACK 0x0300u
 
@@ -160,25 +171,21 @@ extern int  xbox_DpcQueueGuestCall(uint32_t routine, uint32_t context);
 #define D3D_METHODS_CALLBACK 0x00C0u
 
 /* 5: the fence event, whenever the device is known, whatever
- * XBA_D3D_SW_METHODS says. Title-built KEVENTs are guest events by default
+ * RECOMP_D3D_SW_METHODS says. Title-built KEVENTs are guest events by default
  * (kernel_bridge.c), so D3D's fence wait really blocks on that event, and this
- * method is the only thing that sets it: Fable (params 0x7000) froze in
+ * method is the only thing that sets it: Fable (methods 0x7000) froze in
  * Oakvale with its main thread blocked in sub_00855260's KeWaitForSingleObject
  * right after one unserviced method 5. Its offset is read from the device. */
 #define D3D_METHODS_FENCE 0x0020u
 
-#ifdef XBA_D3D_SW_METHODS
-#define D3D_METHODS_DEFAULT ((XBA_D3D_SW_METHODS) | D3D_METHODS_FENCE | D3D_METHODS_ACK | D3D_METHODS_CALLBACK)
-#elif D3D_GIVEN
-#define D3D_METHODS_DEFAULT (D3D_METHODS_FENCE | D3D_METHODS_ACK | D3D_METHODS_CALLBACK)
-#else
-#define D3D_METHODS_DEFAULT (0x7020u | D3D_METHODS_ACK | D3D_METHODS_CALLBACK) /* found at run time: everything */
-#endif
+/* Found at run time: every method serviced (recomp_d3d_configure). */
+#define D3D_METHODS_ALL (0x7020u | D3D_METHODS_ACK | D3D_METHODS_CALLBACK)
 
 static int d3d_mirror;
+static int d3d_off;                 /* RECOMP_D3D_SERVICE=0 */
 static volatile uint32_t s_device;  /* the device, once known (0: not yet) */
 static volatile uint32_t s_slot;    /* its pointer slot */
-static uint32_t s_methods = D3D_METHODS_DEFAULT;
+static uint32_t s_methods = D3D_METHODS_ALL;
 static volatile uint32_t s_fence_event;  /* offset in the device; read at run time */
 static volatile int s_fence_known;  /* s_fence_event read from the device (locate, or the first method 5) */
 
@@ -186,7 +193,7 @@ static int in_contig(uint32_t va) { return va >= CONTIG_LO && va < CONTIG_HI; }
 
 /* The title's D3D library and build, from the XBE header the kernel maps at
  * 0x10000 (its library table), and the layout for them. Read on first use:
- * xba_d3d8_configure runs before guest memory is mapped. */
+ * recomp_d3d_configure runs before guest memory is mapped. */
 static char s_lib[9];
 static unsigned s_build;
 static const D3dLayout *s_layout;   /* the table's entry, or NULL: unknown build */
@@ -264,7 +271,7 @@ static uint32_t slot_offset(void)
 /* ── Finding the device (XBA-80) ─────────────────────────────────────────── */
 
 /* 1 when D looks like D3D's device (see the comment at the top). */
-int xba_d3d8_is_device(uint32_t d)
+int recomp_d3d_is_device(uint32_t d)
 {
     uint32_t s, e, p;
     if (G32(d + slot_offset()) != d)
@@ -278,12 +285,12 @@ int xba_d3d8_is_device(uint32_t d)
 
 /* The device in [lo, hi): its address when exactly one dword passes, else 0
  * (none yet, or two: then nothing is trusted). */
-uint32_t xba_d3d8_scan(uint32_t lo, uint32_t hi)
+uint32_t recomp_d3d_scan(uint32_t lo, uint32_t hi)
 {
     uint32_t found = 0, d, so = slot_offset();
     lo = (lo + 3u) & ~3u;
     for (d = lo; d < hi && hi - d >= so + 4u; d += 4u) {
-        if (G32(d + so) != d || !xba_d3d8_is_device(d))
+        if (G32(d + so) != d || !recomp_d3d_is_device(d))
             continue;
         if (found)
             return 0;
@@ -316,7 +323,7 @@ static int is_kevent(uint32_t va)
 /* The device's two events sit side by side (vblank, then fence), 16 bytes
  * each: the offset of the second when exactly one such pair lies in
  * [0x400, 0x4000), else 0. */
-uint32_t xba_d3d8_fence_event_offset(uint32_t d)
+uint32_t recomp_d3d_fence_event_offset(uint32_t d)
 {
     uint32_t off, found = 0;
     if (d > 0xFFFFFFFFu - D3D_EVENTS_HI - 32u)
@@ -343,7 +350,7 @@ static int is_device_core(uint32_t d)
 /* The device in [lo, hi) through any dword P of it that names D, D inside
  * [lo, hi) with the whole event window before hi (XDK 5455: P = D - 8). The
  * device when exactly one D passes, its first P in *slot; else 0. */
-uint32_t xba_d3d8_scan_slots(uint32_t lo, uint32_t hi, uint32_t *slot)
+uint32_t recomp_d3d_scan_slots(uint32_t lo, uint32_t hi, uint32_t *slot)
 {
     uint32_t found = 0, first = 0, p, d;
     lo = (lo + 3u) & ~3u;
@@ -354,7 +361,7 @@ uint32_t xba_d3d8_scan_slots(uint32_t lo, uint32_t hi, uint32_t *slot)
         /* hi - d, not d + window: d may be anywhere up to 0xFFFFFFFF */
         if (d < lo || d >= hi || (d & 3u) || hi - d < D3D_EVENTS_HI + 32u || d == found)
             continue;
-        if (!is_device_core(d) || !xba_d3d8_fence_event_offset(d))
+        if (!is_device_core(d) || !recomp_d3d_fence_event_offset(d))
             continue;
         if (found)
             return 0;
@@ -371,7 +378,7 @@ uint32_t xba_d3d8_scan_slots(uint32_t lo, uint32_t hi, uint32_t *slot)
  * came from the device. */
 static uint32_t fence_event_of(uint32_t d, int *read)
 {
-    uint32_t ev = xba_d3d8_fence_event_offset(d);
+    uint32_t ev = recomp_d3d_fence_event_offset(d);
     *read = ev != 0;
     if (ev)
         return ev;
@@ -381,17 +388,17 @@ static uint32_t fence_event_of(uint32_t d, int *read)
 }
 
 /* Try once; on success remember it, say so and record it. */
-int xba_d3d8_locate(void)
+int recomp_d3d_locate(void)
 {
     uint32_t end = image_end(), d, slot = 0, ev;
     int read;
     if (s_device || !end)
         return s_device != 0;
-    if ((d = xba_d3d8_scan(XBE_BASE, end)) != 0) {
+    if ((d = recomp_d3d_scan(XBE_BASE, end)) != 0) {
         slot = d + slot_offset();
         /* Found by a slot offset the table did not give for this build. */
         (void)fell_back("slot", "device pointer slot", slot_offset());
-    } else if (!(d = xba_d3d8_scan_slots(XBE_BASE, end, &slot))) {
+    } else if (!(d = recomp_d3d_scan_slots(XBE_BASE, end, &slot))) {
         return 0;
     }
     /* The ring, put and semaphore offsets are what found it; on a build the
@@ -414,13 +421,11 @@ int xba_d3d8_locate(void)
 
 static uint32_t current_device(void)
 {
-#if defined(XBA_D3D_DEVICE)
-    return XBA_D3D_DEVICE;
-#elif defined(XBA_D3D_DEVICE_PTR)
-    return G32(XBA_D3D_DEVICE_PTR);
-#else
+    if (s_given_device)
+        return s_given_device;
+    if (s_given_ptr)
+        return G32(s_given_ptr);
     return s_device;
-#endif
 }
 
 /* ── RunPushBuffer's deferred return JUMP (software methods 0xC, 0xD, 0xE) ──
@@ -444,12 +449,13 @@ static uint32_t current_device(void)
  * run time the layout is assumed, so every address written to (the slot, a
  * fixup) must be in the contiguous window, where D3D's pushbuffers live: a
  * wrong guess must not write into the title's data (refusals are printed).
- * With the profile's addresses it writes as D3D's handler does, unchecked.
+ * With the addresses given (RECOMP_D3D_DEVICE[_PTR]) it writes as D3D's
+ * handler does, unchecked.
  *
  * Runs on the executor thread, while the main thread may be in RunPushBuffer
  * bumping the same pending count. */
 /* A write the run-time guards refused (device found at run time only: with
- * the profile's addresses the handler writes as D3D's does). */
+ * the addresses given the handler writes as D3D's does). */
 static void skip_note(const char *what, uint32_t va)
 {
     static int shown;
@@ -581,10 +587,10 @@ static int d3d_software_method(uint32_t param)
      * KEVENTs, kernel_bridge.c), or adopted alone under the DMA walk when the
      * device was found at run time (locate); the kernel checks the header
      * reads as an event before it touches it. Its offset is read from the
-     * device (locate, or here at the first method 5 with the profile's
-     * addresses), 5849's when the device holds no event pair. */
+     * device (locate, or here at the first method 5 with the addresses
+     * given), 5849's when the device holds no event pair. */
     if (type == 5u) {
-        if (!s_fence_known) {           /* the profile's device: read the offset once */
+        if (!s_fence_known) {           /* a given device: read the offset once */
             int read;
             s_fence_event = fence_event_of(dev, &read);
             s_fence_known = 1;
@@ -601,40 +607,64 @@ static int d3d_software_method(uint32_t param)
     return 0;
 }
 
-void xba_d3d8_configure(void)
+/* A number from the environment (C notation), 0 when unset or not one. */
+static uint32_t env_number(const char *name)
 {
-    const char *fence = getenv("XBA_D3D_FENCE");
-
-    d3d_mirror = fence && !strcmp(fence, "mirror");
-    {
-        const char *cb = getenv("RECOMP_D3D_CALLBACKS");
-        if (cb && *cb == '0')
-            s_methods &= ~D3D_METHODS_CALLBACK;
+    const char *v = getenv(name);
+    char *end;
+    unsigned long n;
+    if (!v || !*v)
+        return 0;
+    n = strtoul(v, &end, 0);
+    if (*end) {
+        fprintf(stderr, "[D3D] %s=%s is not a number: ignored\n", name, v);
+        return 0;
     }
-#ifdef XBA_D3D_DEVICE_PTR
-    s_slot = XBA_D3D_DEVICE_PTR;
-#endif
+    return (uint32_t)n;
+}
+
+int recomp_d3d_configure(void)
+{
+    const char *fence = getenv("RECOMP_D3D_FENCE");
+    const char *off = getenv("RECOMP_D3D_SERVICE");
+    const char *cb = getenv("RECOMP_D3D_CALLBACKS");
+
+    d3d_off = off && *off == '0';
+    if (d3d_off)
+        return 0;
+    if (!fence || !*fence)
+        fence = getenv("XBA_D3D_FENCE");        /* its name as a profile switch */
+    d3d_mirror = fence && !strcmp(fence, "mirror");
+    s_given_device = env_number("RECOMP_D3D_DEVICE");
+    s_given_ptr = env_number("RECOMP_D3D_DEVICE_PTR");
+    if (getenv("RECOMP_D3D_SW_METHODS") && *getenv("RECOMP_D3D_SW_METHODS"))
+        s_methods = env_number("RECOMP_D3D_SW_METHODS") | D3D_METHODS_FENCE | D3D_METHODS_ACK | D3D_METHODS_CALLBACK;
+    else if (D3D_GIVEN)
+        s_methods = D3D_METHODS_FENCE | D3D_METHODS_ACK | D3D_METHODS_CALLBACK;
+    else
+        s_methods = D3D_METHODS_ALL;
+    if (cb && *cb == '0')
+        s_methods &= ~D3D_METHODS_CALLBACK;
+    s_slot = s_given_ptr;
     if (d3d_mirror) {
-#ifdef XBA_D3D_DEVICE_PTR
-        xbox_Nv2aMirrorFence(XBA_D3D_DEVICE_PTR, D3D_FENCE_COUNT, D3D_SEMAPHORE);
-#else
-        fprintf(stderr, "[D3D] XBA_D3D_FENCE=mirror needs XBA_D3D_DEVICE_PTR: ignored\n");
-#endif
-        if (D3D_GIVEN)
-            return;
+        if (s_given_ptr) {
+            xbox_Nv2aMirrorFence(s_given_ptr, D3D_FENCE_COUNT, D3D_SEMAPHORE);
+            return 1;                   /* the segment scan, no hook, no watch */
+        }
+        fprintf(stderr, "[D3D] RECOMP_D3D_FENCE=mirror needs RECOMP_D3D_DEVICE_PTR: ignored\n");
         d3d_mirror = 0;
     }
-#if defined(XBA_D3D_DMA_WALK) && XBA_D3D_DMA_WALK
     /* D3D's fence wait reads DMA_GET and the 0x0310 latch (PGRAPH 0x400B10),
-     * which only the DMA walk keeps honest. */
+     * which only the DMA walk keeps honest; and the walk delivers the software
+     * methods the hook below answers. RECOMP_PB_WALK=scan: the segment scan. */
     SETENV_DEFAULT("RECOMP_PB_WALK", "dma");
-#endif
     if (s_methods)
         nv2a_pb_set_software_method_hook(d3d_software_method);
+    return 1;
 }
 
 #ifndef _WIN32
-/* Find the device if the profile did not say where it is, then hand the
+/* Find the device if the environment did not say where it is, then hand the
  * executor D3D's GPU semaphore (device + 0x30) once D3D has allocated it, and
  * again if a device reset moves it. The slot does not always hold the device
  * (Fable), so only a semaphore in contiguous memory is accepted: handing over a
@@ -648,7 +678,7 @@ static void *d3d_watch(void *unused)
         uint32_t dev, sem;
         if (!s_slot) {
             if (!(++tries % 250u))              /* every 250 ms until found */
-                (void)xba_d3d8_locate();
+                (void)recomp_d3d_locate();
             usleep(1000);
             continue;
         }
@@ -664,13 +694,13 @@ static void *d3d_watch(void *unused)
     return NULL;
 }
 
-void xba_d3d8_start(const char *game_dir, const char *save_dir)
+void recomp_d3d_start(const char *game_dir, const char *save_dir)
 {
     pthread_t t;
     (void)game_dir; (void)save_dir;
-    if (!d3d_mirror && pthread_create(&t, NULL, d3d_watch, NULL) == 0)
+    if (!d3d_off && !d3d_mirror && pthread_create(&t, NULL, d3d_watch, NULL) == 0)
         pthread_detach(t);
 }
 #else
-void xba_d3d8_start(const char *game_dir, const char *save_dir) { (void)game_dir; (void)save_dir; }
+void recomp_d3d_start(const char *game_dir, const char *save_dir) { (void)game_dir; (void)save_dir; }
 #endif
