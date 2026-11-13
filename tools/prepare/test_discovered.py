@@ -50,3 +50,22 @@ def test_new_addresses_are_gated_once(tmp_path):
         f.write('{"t":"icall","va":"0x00099999","ret":"0x00011111"}\n')
     discovered.refresh(str(tmp_path), "x.xbe", str(tmp_path / "functions.json"), gate=fake_gate(calls))
     assert calls == [[0x99999]]
+
+
+def test_static_discovery_in_the_stamp_and_the_counts(tmp_path):
+    """XBA-137: the switches change the stamp only off their default, and the
+    disassembler's summary gives pack.json's "analysis"."""
+    assert discovered.mode_suffix({}) == ""
+    assert discovered.mode_suffix({"RECOMP_STATIC_DISCOVERY": "2"}) == ""
+    assert discovered.mode_suffix({"RECOMP_STATIC_DISCOVERY": "0"}) == "|sd=0:"
+    assert discovered.mode_suffix({"RECOMP_STATIC_DISCOVERY_CAP": "5"}) == "|sd=2:5"
+    assert discovered.analysis_counts(str(tmp_path)) is None
+    (tmp_path / "disasm").mkdir()
+    (tmp_path / "disasm" / "summary.json").write_text(json.dumps({
+        "total_functions": 120, "functions_by_method": {"call_target": 100, "gap_body": 3},
+        "discovery": {"level": 2, "cap": None, "capped": False,
+                      "added": {"callback_arg": 1, "ctor_vtable": 0, "gap_body": 3}, "refused": {"x": 9}}}))
+    c = discovered.analysis_counts(str(tmp_path))
+    assert c["functions"] == 120 and c["static_discovery"]["added"]["gap_body"] == 3
+    assert "refused" not in c["static_discovery"]
+    assert discovered.counts_line(c) == "120 functions, static discovery +4 (callback_arg 1, gap_body 3)"

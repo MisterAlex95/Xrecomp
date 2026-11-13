@@ -156,7 +156,8 @@ class Run:
             disasm += ["--seed-functions", disc]
         # Also when the seeds file went away (removed to drop a bad seed): the
         # analysis made with it must not be kept.
-        key = discovered.digest(disc)
+        # The static discovery switches too (XBA-137): "" for the default.
+        key = discovered.digest(disc) + discovered.mode_suffix()
         if self.stamp.get("discovered", "") != key:
             for name in ("disasm", "func_id", "abi", "lift"):
                 self.stamp.pop(name, None)
@@ -179,6 +180,10 @@ class Run:
                 self.stamp.pop(later, None)
             self.py_step(args, 2, lo, hi, "analysing: %s" % name, expect, "ANALYSE_FAILED")
             self.save_stamp(**{name: True})
+            if name == "disasm":        # how many functions, static discovery's share (XBA-137)
+                counts = discovered.counts_line(discovered.analysis_counts(an))
+                if counts:
+                    self.rep.progress(2, hi, counts)
         self.an = an
         self.rep.progress(2, 100, "analysis done")
 
@@ -320,6 +325,12 @@ class Run:
                                   toolkit_sha256=self.toolkit_sha)
             if images:
                 meta["images"] = images
+            # The analysis' function count and static discovery's share per
+            # pass (XBA-137), for the owner's library report.
+            from tools.prepare import discovered
+            counts = discovered.analysis_counts(self.an) if getattr(self, "an", None) else None
+            if counts:
+                meta["analysis"] = counts
             # What this run cost (XBA-128): step times, compile peak RSS, sizes, the device's thermal samples.
             meta["prepare"] = metrics.summary(self.steps, self.compile_stats, self.sources, self.objects, self.jobs,
                                               a.opt, part, getattr(a, "device_log", None), self.tools_peak_kb)
