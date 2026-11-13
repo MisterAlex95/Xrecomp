@@ -2397,6 +2397,11 @@ static volatile LONG g_next_unique_thread;
 
 uint32_t xbox_GuestKprocess(void) { return g_kprocess_va; }
 
+uint32_t xbox_NewGuestThreadId(void)
+{
+    return (uint32_t)InterlockedIncrement(&g_next_unique_thread) * 4;
+}
+
 /* Layout from nxdk's xboxkrnl.h (KTHREAD 0x110 bytes, ETHREAD after it):
  *   +0x00 Header (Type 6 = ThreadObject, Size, SignalState +4, WaitListHead +8)
  *   +0x10 MutantListHead  +0x1C StackBase  +0x20 StackLimit  +0x28 TlsData
@@ -2427,7 +2432,10 @@ void xbox_InitGuestKthread(uint32_t kt, uint32_t tls_data,
     KT8(0x4B) = 1;                               /* ApcQueueable */
     KT8(0x70) = 8;                               /* BasePriority */
     KT32(0x120) = 0x103;                         /* STILL_ACTIVE */
-    KT32(0x12C) = (uint32_t)InterlockedIncrement(&g_next_unique_thread) * 4;
+    /* An id the creator already gave out (PsCreateSystemThreadEx's ThreadId,
+     * written before the thread runs) stays: the two must be one number. */
+    if (!KT32(0x12C))
+        KT32(0x12C) = xbox_NewGuestThreadId();
     KT32(0x134) = kt + 0x134; KT32(0x138) = kt + 0x134; /* IrpList */
     #undef KT8
     #undef KT32

@@ -524,6 +524,7 @@ static int bridge_run_io_apcs(uint32_t alertable, uint32_t wait_mode);
 struct bridge_thread_start {
     recomp_func_t fn;
     uint32_t ctx1, ctx2, stack_top, obj_va, tls_size;
+    uint32_t unique_id;   /* ETHREAD.UniqueThread the creator gave out */
 };
 
 /* Lay out a thread's TLS the way the Xbox kernel does.
@@ -826,6 +827,10 @@ static DWORD WINAPI bridge_thread_main(LPVOID param)
             BRIDGE_MEM32(tib + 0x28) = s->obj_va;
             if (s->tls_size && bridge_layout_tls(s->obj_va, top, s->tls_size))
                 g_esp = ((top - s->tls_size) & ~0xFu) - 16;
+        } else if (tib && s->unique_id && BRIDGE_MEM32(tib + 0x28)) {
+            /* No pool object: the TIB's own KTHREAD is this thread's, and
+             * it answers with the id the creator already returned. */
+            BRIDGE_MEM32(BRIDGE_MEM32(tib + 0x28) + 0x12C) = s->unique_id;
         }
     }
     free(s);
@@ -856,7 +861,7 @@ static DWORD WINAPI bridge_thread_main(LPVOID param)
 static HANDLE bridge_spawn_thread(recomp_func_t fn, uint32_t ctx1,
                                   uint32_t ctx2, uint32_t stack_top,
                                   uint32_t obj_va, uint32_t tls_size,
-                                  int suspended)
+                                  int suspended, uint32_t unique_id)
 {
     struct bridge_thread_start *s = malloc(sizeof(*s));
     HANDLE th;
@@ -865,6 +870,7 @@ static HANDLE bridge_spawn_thread(recomp_func_t fn, uint32_t ctx1,
     s->fn = fn; s->ctx1 = ctx1; s->ctx2 = ctx2; s->stack_top = stack_top;
     s->obj_va = obj_va;
     s->tls_size = tls_size;
+    s->unique_id = unique_id;
 
     /* CreateSuspended: the thread waits for NtResumeThread before its first
      * instruction. A title creates a worker suspended to finish its context
@@ -887,14 +893,25 @@ static HANDLE bridge_spawn_thread(recomp_func_t fn, uint32_t ctx1,
 static HANDLE bridge_spawn_guest_thread(recomp_func_t fn, uint32_t ctx1,
                                         uint32_t ctx2, uint32_t stack_top,
                                         uint32_t handle_va, uint32_t tls_size,
-                                        int suspended)
+                                        int suspended, uint32_t thread_id_va)
 {
     recomp_status_thread_started();
     uint32_t obj = thobj_alloc();
+    uint32_t id = xbox_NewGuestThreadId();
     HANDLE th, shadow = NULL;
 
+    /* ThreadId is the new thread's ETHREAD.UniqueThread, known to the creator
+     * before the thread runs: a title keeps CreateThread's lpThreadId and
+     * compares it with GetCurrentThreadId() (fs:[0x28]+0x12C) on the thread
+     * itself, e.g. to tell whether it owns a heap. With the object pool full
+     * the thread's TIB KTHREAD takes the id instead (bridge_thread_main). */
+    if (obj)
+        BRIDGE_MEM32(obj + 0x12C) = id;
+    if (thread_id_va)
+        BRIDGE_MEM32(thread_id_va) = id;
     thobj_ref(obj);
-    th = bridge_spawn_thread(fn, ctx1, ctx2, stack_top, obj, tls_size, suspended);
+    th = bridge_spawn_thread(fn, ctx1, ctx2, stack_top, obj, tls_size,
+                             suspended, id);
     if (!th) {
         thobj_unref(obj);   /* the thread's own: it never ran */
     } else {
@@ -929,6 +946,7 @@ static void bridge_PsCreateSystemThreadEx(void)
 {
     uint32_t xbox_handle_ptr = STACK_ARG(0);
     uint32_t tls_size        = STACK_ARG(3);
+    uint32_t xbox_thread_id_ptr = STACK_ARG(4);
     uint32_t start_context1  = STACK_ARG(5);
     uint32_t start_context2  = STACK_ARG(6);
     uint32_t start_routine   = STACK_ARG(9);
@@ -947,6 +965,13 @@ static void bridge_PsCreateSystemThreadEx(void)
     /* Write a fake handle to the output pointer */
     if (xbox_handle_ptr) {
         BRIDGE_MEM32(xbox_handle_ptr) = 0xBEEF0001;  /* fake handle */
+    }
+    /* ThreadId: a routine run on this thread (the first call, or
+     * RECOMP_WORKERS=inline) has this thread's id; a spawned worker's
+     * replaces it before the worker runs (bridge_spawn_guest_thread). */
+    if (xbox_thread_id_ptr) {
+        uint32_t kt = thobj_current();
+        BRIDGE_MEM32(xbox_thread_id_ptr) = kt ? BRIDGE_MEM32(kt + 0x12C) : 0;
     }
 
     /* Call the start routine synchronously through the recomp dispatch.
@@ -1035,7 +1060,8 @@ static void bridge_PsCreateSystemThreadEx(void)
                 if (!stack_top
                     || !bridge_spawn_guest_thread(fn, start_context1, start_context2,
                                                   stack_top, xbox_handle_ptr,
-                                                  tls_size, create_suspended)) {
+                                                  tls_size, create_suspended,
+                                                  xbox_thread_id_ptr)) {
                     /* An error, as on the console when no kernel stack can
                      * be had (XBA-104). Running the worker inline instead
                      * deadlocked a worker that waits for its creator's
@@ -10042,6 +10068,7 @@ static void bridge_ObReferenceObjectByPointer(void)
 static void bridge_PsCreateSystemThread(void)
 {
     uint32_t xbox_handle_ptr = STACK_ARG(0);
+    uint32_t xbox_thread_id_ptr = STACK_ARG(3);
     uint32_t start_context1  = STACK_ARG(4);
     uint32_t start_context2  = STACK_ARG(5);
     uint32_t start_routine   = STACK_ARG(6);
@@ -10054,6 +10081,10 @@ static void bridge_PsCreateSystemThread(void)
     /* Fake handle until the worker path can write a real one. */
     if (xbox_handle_ptr)
         BRIDGE_MEM32(xbox_handle_ptr) = 0xBEEF0002;
+    if (xbox_thread_id_ptr) {   /* see PsCreateSystemThreadEx */
+        uint32_t kt = thobj_current();
+        BRIDGE_MEM32(xbox_thread_id_ptr) = kt ? BRIDGE_MEM32(kt + 0x12C) : 0;
+    }
 
     if (start_routine) {
         recomp_func_t fn = recomp_lookup(start_routine);
@@ -10086,7 +10117,8 @@ static void bridge_PsCreateSystemThread(void)
                 if (!stack_top
                     || !bridge_spawn_guest_thread(fn, start_context1,
                                                   start_context2, stack_top,
-                                                  xbox_handle_ptr, 0, 0)) {
+                                                  xbox_handle_ptr, 0, 0,
+                                                  xbox_thread_id_ptr)) {
                     /* see PsCreateSystemThreadEx */
                     fprintf(stderr, "  [KERNEL] PsCreateSystemThread: no %s"
                             " for worker 0x%08X: STATUS_INSUFFICIENT_RESOURCES\n",

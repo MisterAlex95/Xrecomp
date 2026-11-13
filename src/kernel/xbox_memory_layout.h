@@ -741,6 +741,13 @@ uint32_t xbox_AllocThreadTib(void);
 void xbox_InitGuestKthread(uint32_t kt, uint32_t tls_data,
                            uint32_t stack_base, uint32_t stack_limit);
 
+/* A fresh ETHREAD.UniqueThread. PsCreateSystemThread(Ex) takes one for the
+ * thread it creates, stores it in the new KTHREAD and returns it through
+ * ThreadId, so the creator's copy (CreateThread's lpThreadId) equals what the
+ * thread reads from fs:[0x28]+0x12C (GetCurrentThreadId).
+ * xbox_InitGuestKthread keeps a UniqueThread that is already set. */
+uint32_t xbox_NewGuestThreadId(void);
+
 /* The guest KPROCESS every KTHREAD's ApcState.Process names; 0 before the
  * loader built it. */
 uint32_t xbox_GuestKprocess(void);

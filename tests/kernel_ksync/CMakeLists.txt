@@ -7,3 +7,15 @@ target_include_directories(kernel_ksync_test PRIVATE ../../src/kernel)
 target_link_libraries(kernel_ksync_test PRIVATE xboxrecomp)
 enable_testing()
 add_test(NAME kernel_ksync_test COMMAND kernel_ksync_test)
+# PsCreateSystemThread(Ex) ThreadId == the new thread's UniqueThread, against
+# a real guest window (xbox_MemoryLayoutInit on the synthetic XBE), as in
+# tests/kernel_thread_stacks. POSIX host (mkdtemp, usleep).
+if(NOT WIN32)
+    add_executable(kernel_ksync_thread_id test_thread_id.c)
+    target_include_directories(kernel_ksync_thread_id PRIVATE ../../src/kernel)
+    target_link_libraries(kernel_ksync_thread_id PRIVATE xboxrecomp)
+    add_test(NAME kernel_ksync_thread_id
+             COMMAND kernel_ksync_thread_id
+                     ${CMAKE_CURRENT_SOURCE_DIR}/../../tools/conformance/test.xbe)
+    set_tests_properties(kernel_ksync_thread_id PROPERTIES TIMEOUT 120)
+endif()
