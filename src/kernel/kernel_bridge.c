@@ -575,6 +575,10 @@ static uint32_t bridge_layout_tls(uint32_t kthread, uint32_t top,
 }
 
 static void bridge_write_handle(uint32_t handle_va, HANDLE h);
+static void bridge_call_guest(uint32_t va, const uint32_t *args, int n);
+static void thread_notify_run(uint32_t thread, int create);   /* XBA-114 */
+static int  thread_notify_on(void);
+static void bridge_run_shutdown_notifications(void);
 
 /* ── Guest thread objects ─────────────────────────────────
  *
@@ -857,6 +861,7 @@ static DWORD WINAPI bridge_thread_main(LPVOID param)
 
     fprintf(stderr, "  [KERNEL] worker thread returned (eax=0x%08X)\n", g_eax);
     fflush(stderr);
+    thread_notify_run(g_thread_obj_va, 0);   /* on its own stack, still ours */
     /* The routine returned instead of calling PsTerminateSystemThread; the
      * stack is still ours to give back. */
     xbox_FreeThreadStack(g_thread_stack_top);
@@ -910,8 +915,12 @@ static HANDLE bridge_spawn_guest_thread(recomp_func_t fn, uint32_t ctx1,
     uint32_t obj = thobj_alloc();
     HANDLE th, shadow = NULL;
 
+    int notify = obj && thread_notify_on();
+
     thobj_ref(obj);
-    th = bridge_spawn_thread(fn, ctx1, ctx2, stack_top, obj, tls_size, suspended);
+    /* With thread notify routines, the thread waits for them: the console
+     * calls them before the new thread runs (PsSetCreateThreadNotifyRoutine). */
+    th = bridge_spawn_thread(fn, ctx1, ctx2, stack_top, obj, tls_size, suspended || notify);
     if (!th) {
         thobj_unref(obj);   /* the thread's own: it never ran */
     } else {
@@ -921,6 +930,11 @@ static HANDLE bridge_spawn_guest_thread(recomp_func_t fn, uint32_t ctx1,
         if (handle_va) {
             bridge_write_handle(handle_va, th);
             thobj_attach_token(BRIDGE_MEM32(handle_va), obj);
+        }
+        if (notify) {
+            thread_notify_run(obj, 1);
+            if (!suspended)
+                ResumeThread(th);
         }
     }
     thobj_unref(obj);
@@ -1971,6 +1985,7 @@ static void bridge_HalReturnToFirmware(void)
     fprintf(stderr, "  [KERNEL] HalReturnToFirmware: routine=%u - title is leaving\n",
             routine);
     fflush(stderr);
+    bridge_run_shutdown_notifications();   /* HalRegisterShutdownNotification (XBA-114) */
 
     /* Write the indirect-branch targets before the process goes away. This
      * path ends in ExitProcess, which does not run atexit handlers, so the
@@ -2974,6 +2989,7 @@ static void bridge_PsTerminateSystemThread(void)
         /* The normal exit for a worker, and therefore the one that has to
          * return the stack -- ExitThread never comes back to bridge_thread_main
          * to do it. */
+        thread_notify_run(g_thread_obj_va, 0);
         xbox_FreeThreadStack(g_thread_stack_top);
         g_thread_stack_top = 0;
         thalert_forget(g_thread_obj_va);
@@ -4142,9 +4158,62 @@ static void bridge_MmClaimGpuInstanceMemory(void)
 /* VOID HalRegisterShutdownNotification(PHAL_SHUTDOWN_REGISTRATION, BOOLEAN)
  * Records a callback for console shutdown. Nothing here ever shuts down that
  * way, so registration is accepted and dropped. */
+/* --- HalRegisterShutdownNotification (ordinal 47, 2 args = 8 bytes)
+ * VOID HalRegisterShutdownNotification(
+ *          PHAL_SHUTDOWN_REGISTRATION ShutdownRegistration, BOOLEAN Register);
+ * HAL_SHUTDOWN_REGISTRATION { NotificationRoutine; LONG Priority;
+ * LIST_ENTRY ListEntry; }. Registers (or takes back) a routine the HAL
+ * calls as NotificationRoutine(ShutdownRegistration) when the title leaves
+ * through HalReturnToFirmware, highest Priority first (XBA-114). */
+#define SHUTDOWN_NOTIFY_MAX 16
+static uint32_t s_shutdown_reg[SHUTDOWN_NOTIFY_MAX];
+static volatile LONG s_shutdown_lock;
+
 static void bridge_HalRegisterShutdownNotification(void)
 {
+    uint32_t reg = STACK_ARG(0);
+    int add = (STACK_ARG(1) & 0xFF) != 0, i, j;
+
     g_eax = 0;
+    if (!reg || !bridge_va_mapped(reg, 16))
+        return;
+    while (InterlockedCompareExchange(&s_shutdown_lock, 1, 0) != 0)
+        SwitchToThread();
+    for (i = 0; i < SHUTDOWN_NOTIFY_MAX && s_shutdown_reg[i] != reg; i++)
+        ;
+    if (i < SHUTDOWN_NOTIFY_MAX) {           /* there: take it out */
+        for (j = i; j + 1 < SHUTDOWN_NOTIFY_MAX; j++)
+            s_shutdown_reg[j] = s_shutdown_reg[j + 1];
+        s_shutdown_reg[SHUTDOWN_NOTIFY_MAX - 1] = 0;
+    }
+    if (add && s_shutdown_reg[SHUTDOWN_NOTIFY_MAX - 1] == 0) {
+        int32_t pri = (int32_t)BRIDGE_MEM32(reg + 4);
+        for (i = 0; s_shutdown_reg[i] && (int32_t)BRIDGE_MEM32(s_shutdown_reg[i] + 4) >= pri; i++)
+            ;
+        for (j = SHUTDOWN_NOTIFY_MAX - 1; j > i; j--)
+            s_shutdown_reg[j] = s_shutdown_reg[j - 1];
+        s_shutdown_reg[i] = reg;
+    }
+    InterlockedExchange(&s_shutdown_lock, 0);
+}
+
+/* HalReturnToFirmware: each registered routine, once, in priority order. */
+static void bridge_run_shutdown_notifications(void)
+{
+    uint32_t regs[SHUTDOWN_NOTIFY_MAX];
+    int i, n = 0;
+
+    while (InterlockedCompareExchange(&s_shutdown_lock, 1, 0) != 0)
+        SwitchToThread();
+    for (i = 0; i < SHUTDOWN_NOTIFY_MAX && s_shutdown_reg[i]; i++)
+        regs[n++] = s_shutdown_reg[i];
+    memset(s_shutdown_reg, 0, sizeof s_shutdown_reg);
+    InterlockedExchange(&s_shutdown_lock, 0);
+    for (i = 0; i < n; i++) {
+        uint32_t a[1] = { regs[i] }, routine = BRIDGE_MEM32(regs[i]);
+        if (routine)
+            bridge_call_guest(routine, a, 1);
+    }
 }
 
 /* ── Kernel timers (ordinals 113, 149, 150, 97) ───────────
@@ -11466,12 +11535,59 @@ static void bridge_PsQueryStatistics(void)
     g_eax = 0;
 }
 
-/* --- PsSetCreateThreadNotifyRoutine (ordinal 257, 2 args = 8 bytes) --- */
+/* --- PsSetCreateThreadNotifyRoutine (ordinal 257, 1 arg = 4 bytes)
+ * NTSTATUS PsSetCreateThreadNotifyRoutine(PCREATE_THREAD_NOTIFY_ROUTINE);
+ * One argument (nxdk xboxkrnl.h); the table said two. Up to eight routines
+ * (STATUS_INSUFFICIENT_RESOURCES past them), each called as
+ * NotifyRoutine(PETHREAD Thread, HANDLE ThreadId, BOOLEAN Create): with
+ * Create TRUE on the creating thread when PsCreateSystemThreadEx makes a
+ * thread, before it runs; with FALSE on the thread itself as it ends
+ * (XBA-114). The thread is its guest object, which is also its ThreadId
+ * here. RECOMP_THREAD_NOTIFY=0 registers them without ever calling one, for
+ * A/B. */
+#define THREAD_NOTIFY_MAX 8
+static uint32_t s_thread_notify[THREAD_NOTIFY_MAX];
+static volatile LONG s_thread_notify_count;
+
+static int thread_notify_on(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("RECOMP_THREAD_NOTIFY");
+        on = !(e && *e == '0');
+    }
+    return on && s_thread_notify_count > 0;
+}
+
+static void thread_notify_run(uint32_t thread, int create)
+{
+    uint32_t routines[THREAD_NOTIFY_MAX];
+    int i, n = 0;
+
+    if (!thread || !thread_notify_on())
+        return;
+    for (i = 0; i < THREAD_NOTIFY_MAX; i++)
+        if (s_thread_notify[i])
+            routines[n++] = s_thread_notify[i];
+    for (i = 0; i < n; i++) {
+        uint32_t a[3] = { thread, thread, create ? 1u : 0u };
+        bridge_call_guest(routines[i], a, 3);
+    }
+}
+
 static void bridge_PsSetCreateThreadNotifyRoutine(void)
 {
-    (void)STACK_ARG(0);
-    (void)STACK_ARG(1);
-    g_eax = 0;
+    uint32_t routine = STACK_ARG(0);
+    int i;
+
+    for (i = 0; i < THREAD_NOTIFY_MAX; i++)
+        if (InterlockedCompareExchange((volatile LONG *)&s_thread_notify[i],
+                                       (LONG)routine, 0) == 0) {
+            InterlockedIncrement(&s_thread_notify_count);
+            g_eax = 0;
+            return;
+        }
+    g_eax = 0xC000009Au;                     /* STATUS_INSUFFICIENT_RESOURCES */
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -12362,7 +12478,7 @@ static int stdcall_args_for_ordinal(ULONG ordinal)
     /* Ps */
     case 254: return 28;  /* PsCreateSystemThread (7) */
     case 256: return  4;  /* PsQueryStatistics (1) */
-    case 257: return  8;  /* PsSetCreateThreadNotifyRoutine (2) */
+    case 257: return  4;  /* PsSetCreateThreadNotifyRoutine (1): nxdk xboxkrnl.h */
 
     /* Rtl */
     case 281: return 12;  /* RtlExtendedIntegerMultiply (3) */

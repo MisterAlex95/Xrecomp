@@ -208,7 +208,7 @@ stub is in `src/kernel/kernel_stub_table.c`: its first call (then the 10th, 100t
 | Debugger | 6 | 3 | 3 | 0 | - |
 | Executive (pool, locks, interlocked) | 16 | 16 | 0 | 0 | - |
 | File-system cache | 3 | 2 | 1 | 0 | - |
-| HAL (SMBus, interrupts, firmware) | 15 | 12 | 2 | 1 | 47 HalRegisterShutdownNotification |
+| HAL (SMBus, interrupts, firmware) | 15 | 13 | 2 | 0 | - |
 | Interlocked / SList | 8 | 8 | 0 | 0 | - |
 | I/O manager | 27 | 21 | 5 | 1 | 60 IoBuildAsynchronousFsdRequest |
 | Kernel (threads, waits, timers, DPCs, APCs) | 65 | 61 | 4 | 0 | - |
@@ -218,12 +218,12 @@ stub is in `src/kernel/kernel_stub_table.c`: its first call (then the 10th, 100t
 | Native API (files, events, memory) | 55 | 55 | 0 | 0 | - |
 | Object manager | 10 | 10 | 0 | 0 | - |
 | Network PHY | 2 | 2 | 0 | 0 | - |
-| Process / thread | 5 | 4 | 0 | 1 | 257 PsSetCreateThreadNotifyRoutine |
+| Process / thread | 5 | 5 | 0 | 0 | - |
 | Run-time library | 66 | 66 | 0 | 0 | - |
 | Crypto | 17 | 17 | 0 | 0 | - |
 | XBE sections | 2 | 2 | 0 | 0 | - |
 | Other (port I/O, ...) | 15 | 14 | 1 | 0 | - |
-| **All** | **345** | **324** | **18** | **3** | |
+| **All** | **345** | **326** | **18** | **1** | |
 <!-- kernel-coverage:end -->
 
 ### Data Exports

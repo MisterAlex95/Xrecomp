@@ -7,9 +7,7 @@
 #include "kernel_stubs.h"
 
 const KernelStubEntry g_kernel_stub_table[] = {
-    {  47, "HalRegisterShutdownNotification" },
     {  60, "IoBuildAsynchronousFsdRequest" },
-    { 257, "PsSetCreateThreadNotifyRoutine" },
 };
 
 const unsigned g_kernel_stub_count = sizeof g_kernel_stub_table / sizeof g_kernel_stub_table[0];

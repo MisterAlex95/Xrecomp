@@ -35,6 +35,12 @@
  *      register read back, ExReadWriteRefurbInfo, MmDbgQueryAvailablePages,
  *      IoSetShareAccess / IoCheckShareAccess / IoRemoveShareAccess, and
  *      KdDebuggerEnabled / KdDebuggerNotPresent as data exports.
+ *   5. PsSetCreateThreadNotifyRoutine: a routine registered is called with
+ *      Create TRUE on the creating thread before PsCreateSystemThreadEx's
+ *      worker runs, and with FALSE on the worker as it ends; the ninth
+ *      registration is refused. HalRegisterShutdownNotification (POSIX, in a
+ *      forked child, since HalReturnToFirmware ends the process): the
+ *      routines run in priority order, an unregistered one does not.
  */
 #include "kernel.h"
 #include "xbox_memory_layout.h"
@@ -42,6 +48,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifndef _WIN32
+#include <sys/wait.h>
+#include <unistd.h>
+#endif
 
 typedef void (*recomp_func_t)(void);
 extern recomp_func_t recomp_lookup_kernel(uint32_t xbox_va);
@@ -51,6 +61,10 @@ extern ptrdiff_t g_xbox_mem_offset;
 #define CLOSE_VA  0x00007100u     /* "guest" addresses of the type procedures */
 #define DELETE_VA 0x00007200u
 #define APC_VA    0x00007300u
+#define NOTIFY_VA 0x00007400u
+#define WORKER_VA 0x00007500u
+#define SHUT_A_VA 0x00007600u
+#define SHUT_B_VA 0x00007700u
 
 static int failures;
 static char d[256];
@@ -82,11 +96,13 @@ enum {
     S_OPENNAME, S_OPENPTR, S_REFPTR, S_REFHANDLE, S_DEREF, S_QAPC, S_DELAY,
     S_WALK, S_BACKTRACE, S_MAPMASK, S_NOBOOST, S_ISVALID, S_SYNCH, S_KIUNLOCK,
     S_SMCSCRATCH, S_SMBREAD, S_REFURB, S_DBGPAGES, S_SETSHARE, S_CHECKSHARE,
-    S_REMOVESHARE, S_KDENABLED, S_KDNOTPRESENT, S_COUNT
+    S_REMOVESHARE, S_KDENABLED, S_KDNOTPRESENT, S_NOTIFY, S_PSCREATE, S_WAIT1,
+    S_SHUTREG, S_FIRMWARE, S_COUNT
 };
 static const uint32_t ord[S_COUNT] = {
     187, 201, 208, 67, 239, 241, 242, 243, 244, 248, 246, 250, 206, 99,
     319, 266, 297, 144, 174, 130, 163, 366, 45, 25, 376, 80, 63, 78, 88, 89,
+    257, 255, 233, 47, 49,
 };
 
 static uint32_t call(int slot, const uint32_t *args, int n)
@@ -137,11 +153,49 @@ static void apc_proc(void)       /* ApcRoutine(Arg1, Arg2, Arg3), stdcall */
     g_esp += 16;
 }
 
+/* Thread notify routine (Thread, ThreadId, Create) and the worker. */
+static volatile int notes, worker_ran, notes_before_run;
+static volatile uint32_t note_thread[4], note_create[4];
+static volatile unsigned long note_tid[4], worker_tid;
+
+static void notify_proc(void)
+{
+    int i = notes < 4 ? notes : 3;
+    note_thread[i] = G32(g_esp + 4);
+    note_create[i] = G32(g_esp + 12) & 0xFF;
+    note_tid[i] = (unsigned long)GetCurrentThreadId();
+    notes++;
+    g_esp += 16;
+}
+
+static void worker_proc(void)       /* VOID (PVOID ctx1, PVOID ctx2) */
+{
+    notes_before_run = notes;
+    worker_tid = (unsigned long)GetCurrentThreadId();
+    worker_ran = 1;
+    g_esp += 12;
+}
+
+static int shut_fd = -1;
+static void shut_proc(char c)
+{
+#ifndef _WIN32
+    if (shut_fd >= 0) { ssize_t w = write(shut_fd, &c, 1); (void)w; }
+#else
+    (void)c;
+#endif
+    g_esp += 8;
+}
+static void shut_a(void) { shut_proc('A'); }
+static void shut_b(void) { shut_proc('B'); }
+
 recomp_func_t recomp_lookup(uint32_t va);
 recomp_func_t recomp_lookup(uint32_t va)
 {
     return va == CLOSE_VA ? close_proc : va == DELETE_VA ? delete_proc
-         : va == APC_VA ? apc_proc : NULL;
+         : va == APC_VA ? apc_proc : va == NOTIFY_VA ? notify_proc
+         : va == WORKER_VA ? worker_proc : va == SHUT_A_VA ? shut_a
+         : va == SHUT_B_VA ? shut_b : NULL;
 }
 recomp_func_t recomp_lookup_manual(uint32_t va);
 recomp_func_t recomp_lookup_manual(uint32_t va) { (void)va; return NULL; }
@@ -464,6 +518,77 @@ static void test_misc(void)
     }
 }
 
+/* ═══════════════════ 5. Notify routines ═══════════════════ */
+
+static void test_notify(void)
+{
+    uint32_t h, i, r = 0;
+    unsigned long me = (unsigned long)GetCurrentThreadId();
+
+    CALL(S_NOTIFY, NOTIFY_VA);
+    check(g_eax == 0 && esp_ok(1), "PsSetCreateThreadNotifyRoutine registers (1 argument)", NULL);
+    for (i = 0; i < 8; i++) {
+        CALL(S_NOTIFY, CLOSE_VA + 0x1000 + i);   /* no routine there: called, logged, skipped */
+        r = g_eax;
+    }
+    check(r == 0xC000009Au, "the ninth routine is refused: STATUS_INSUFFICIENT_RESOURCES", NULL);
+
+    xbox_SetThreadMode(XBOX_THREAD_MODE_SPAWN);
+    notes = worker_ran = 0;
+    G32(V(O_HANDLE)) = 0;
+    /* ThreadHandle, ExtraSize, KStack, Tls, ThreadId, ctx1, ctx2, Suspended, Debug, Routine */
+    CALL(S_PSCREATE, V(O_HANDLE), 0, 0, 0, 0, 1, 2, 0, 0, WORKER_VA);
+    h = G32(V(O_HANDLE));
+    CALL(S_WAIT1, h, 0, 0);
+    snprintf(d, sizeof d, "status 0x%08X notes %d ran %d before %d create %u/%u tid %lu/%lu",
+             g_eax, notes, worker_ran, notes_before_run, note_create[0], note_create[1],
+             note_tid[0], note_tid[1]);
+    check(worker_ran && notes == 2 && notes_before_run == 1 && note_create[0] == 1
+          && note_tid[0] == me && note_thread[0] != 0,
+          "Create TRUE on the creating thread, before the worker runs", d);
+    check(note_create[1] == 0 && note_tid[1] == worker_tid && note_thread[1] == note_thread[0],
+          "Create FALSE on the worker as it ends, same thread", d);
+    CALL(S_CLOSE, h);
+
+#ifndef _WIN32
+    {   /* Shutdown notifications, in a child: HalReturnToFirmware ends it. */
+        int pfd[2], status = -1;
+        char got[8] = "";
+        ssize_t n = 0, k;
+        pid_t pid;
+
+        fflush(NULL);
+        if (pipe(pfd) != 0)
+            return;
+        pid = fork();
+        if (pid == 0) {
+            uint32_t ra = V(O_BUF) + 0x200, rb = V(O_BUF) + 0x220, rc = V(O_BUF) + 0x240;
+            close(pfd[0]);
+            shut_fd = pfd[1];
+            G32(ra) = SHUT_A_VA; G32(ra + 4) = 1;
+            G32(rb) = SHUT_B_VA; G32(rb + 4) = 5;
+            G32(rc) = SHUT_A_VA; G32(rc + 4) = 9;
+            CALL(S_SHUTREG, ra, 1);
+            CALL(S_SHUTREG, rb, 1);
+            CALL(S_SHUTREG, rc, 1);
+            CALL(S_SHUTREG, rc, 0);            /* taken back */
+            CALL(S_FIRMWARE, 1);
+            _exit(30);
+        }
+        close(pfd[1]);
+        if (pid > 0) {
+            while (n < (ssize_t)sizeof got - 1 && (k = read(pfd[0], got + n, sizeof got - 1 - n)) > 0)
+                n += k;
+            waitpid(pid, &status, 0);
+        }
+        close(pfd[0]);
+        got[n > 0 ? n : 0] = 0;
+        snprintf(d, sizeof d, "got '%s'", got);
+        check(!strcmp(got, "BA"), "HalReturnToFirmware runs the shutdown routines, highest priority first", d);
+    }
+#endif
+}
+
 static unsigned char *load(const char *path, size_t *n)
 {
     FILE *f = fopen(path, "rb");
@@ -502,6 +627,7 @@ int main(int argc, char **argv)
     test_objects();
     test_queue_apc();
     test_misc();
+    test_notify();
 
     printf("\n%d failure(s)\n", failures);
     return failures ? 1 : 0;
