@@ -262,6 +262,19 @@ finished sub-step is never redone; the compile keeps every finished object (cach
 files in flight are lost; **the lift is one step**: a kill during it redoes the whole lift (it writes all the C at
 once; on the real title of « Measurements » the lift is under a minute of a 10–30 min Prepare).
 
+The lift stays one step on purpose (XBA-138). `tools.recomp` translates every function in memory first and writes
+the C only at the end (`translator.py`: `recomp_funcs.h`, then the chunks, through `write_if_changed`), so a kill
+almost always lands before the first file and a per-file resume would save only the write phase, seconds of the
+lift's ~50 s (48.2 s of 372 s in the `pack.json` example above: 13 % of the Prepare, at most one lift lost per kill).
+Resuming the translation itself would mean checkpointing the translator's whole-program state (labels, indirect-call
+tables, the header that lists every function), for less than a minute. And nothing is lost downstream: a redone lift
+writes the same bytes, and the object cache is keyed by content, so the compile that follows finds every object it
+had. What the lift does guarantee: its stamp is dropped before it empties `gen/` and written only after
+`tools.recomp` succeeds, so a half-written `gen/` is never taken as a finished lift, even when a later run comes back
+to the stamp's earlier key (the « Enhancements » switch turned off, then on again;
+`test_android_killed_lift_never_passes_as_up_to_date`). The desktop Prepare lifts into `gen.new` and syncs, same
+guarantee.
+
 The app's side:
 
 - The service returns `START_REDELIVER_INTENT`: when the system kills `:prepare` (low memory, the phantom process

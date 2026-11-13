@@ -614,3 +614,69 @@ def test_android_other_images_from_an_image(tmp_path, monkeypatch, fmt):
     copied = sorted(os.path.relpath(os.path.join(d, f), os.path.join(a.work, "disc-xbe"))
                     for d, _, fs in os.walk(os.path.join(a.work, "disc-xbe")) for f in fs)
     assert copied == ["game.xbe", os.path.join("sub", "menu.xbe")]
+
+
+def test_android_killed_lift_never_passes_as_up_to_date(tmp_path, monkeypatch):
+    """A lift killed half way, then the earlier profile key back, lifts again (XBA-138).
+
+    The lift wipes gen/ and writes it in one process; its stamp is the profile
+    digest. If the old stamp outlived the wipe, a run killed in the lift with
+    key B, followed by a run with key A again (the « Enhancements » switch
+    turned off, then on), would take the half-written gen/ as A's lift.
+    """
+    from tools.prepare import android
+
+    class Killed(Exception):
+        pass
+
+    keys = {"profile": "A"}
+
+    class Host:
+        ROOT = str(tmp_path)
+
+        def assemble_project(self, proj, profile, info):
+            os.makedirs(os.path.join(proj, "src", "recomp", "gen"), exist_ok=True)
+
+        def profile_digest(self, profile):
+            return keys["profile"]
+
+        def lift_cut_bodies(self, log, at):
+            return ""
+
+    a = _Args(tmp_path, "libmain.so")
+    a.extra_src = []
+    os.makedirs(a.work)
+    gen = os.path.join(a.work, "project", "src", "recomp", "gen")
+    lifts = []
+
+    def run(kill):
+        r = android.Run(a, Host())
+        if os.path.exists(r.stamp_path):
+            with open(r.stamp_path) as f:
+                r.stamp = json.load(f)
+        r.an, r.xbe, r.tid, r.profile, r.info = str(tmp_path), str(tmp_path / "x.xbe"), "T", None, {}
+
+        def py_step(args, *rest):
+            lifts.append(keys["profile"])
+            for i in range(3):
+                with open(os.path.join(gen, "chunk_%d.c" % i), "w") as f:
+                    f.write("/* %s */" % keys["profile"])
+                if kill:
+                    raise Killed()
+        monkeypatch.setattr(r, "py_step", py_step)
+        r.lift()
+
+    (tmp_path / "x.xbe").write_bytes(b"XBEH")
+    run(kill=False)                             # A, complete
+    assert lifts == ["A"] and len(os.listdir(gen)) == 3
+    keys["profile"] = "B"
+    with pytest.raises(Killed):
+        run(kill=True)                          # B, killed after one file
+    assert os.listdir(gen) == ["chunk_0.c"]
+    with open(os.path.join(a.work, "stamp.json")) as f:
+        assert "lift" not in json.load(f)
+    keys["profile"] = "A"
+    run(kill=False)                             # A again: lifted, not « up to date »
+    assert lifts == ["A", "B", "A"] and len(os.listdir(gen)) == 3
+    run(kill=False)                             # and now it is
+    assert lifts == ["A", "B", "A"]

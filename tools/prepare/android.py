@@ -207,6 +207,13 @@ class Run:
         if self.stamp.get("lift") == key and os.listdir(gen):
             self.rep.progress(3, 100, "lift up to date (%d C files)" % len(os.listdir(gen)))
         else:
+            # Drop the old stamp before the old C (XBA-138): a run killed in
+            # the lift leaves gen/ half written, and a stamp still naming an
+            # earlier key would pass it as up to date once the key comes
+            # back (the « Enhancements » switch turned off, then on again).
+            if "lift" in self.stamp:
+                self.stamp.pop("lift")
+                self.save_stamp()
             for fn in os.listdir(gen):
                 os.remove(os.path.join(gen, fn))
             an = self.an
