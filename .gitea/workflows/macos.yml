@@ -1,0 +1,52 @@
+# macOS build check, on Alex's M1 Mac (act_runner `mac-m1`, label macos-arm64, host mode: the steps run in the
+# Mac's shell; see the mac-runner repository). The Linux and Android jobs never compile with Apple's SDK, and on
+# 2026-11-13 a GL constant missing from <OpenGL/gl3.h> stopped the owner's title build after a night of merges.
+#
+#   gate     the toolkit libraries build with AppleClang (cmake + ninja, Release, as a title project builds them)
+#   report   every C test project under tests/ configures and builds (XBR_BUILD_ONLY: nothing is run, the jobs
+#            share the owner's desktop session and must never open a window); a failure there is a warning until
+#            a macOS baseline exists (tools/ci/macos-unbuilt.txt, to come)
+#
+# Push to main and manual runs only: never a pull request (someone else's code must not run on the Mac). The
+# runner takes one job at a time; a newer push cancels the build of an older one. Compiles are capped at 4 jobs so
+# the Mac stays usable. Needs Homebrew's cmake, ninja, pkg-config, sdl2 and libepoxy (tools/macos/setup.sh).
+name: macOS build
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ['docs/**', '**.md', 'android/**', '.claude/**', 'profiles/**']
+  workflow_dispatch:
+
+concurrency:
+  group: macos-build
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-arm64
+    timeout-minutes: 45
+    steps:
+      - name: Fetch (without node)
+        run: |
+          rm -rf co build
+          git clone -q --depth 1 "https://x:${{ github.token }}@git.cf.adserver.fr/${{ github.repository }}.git" co
+          git -C co fetch -q --depth 1 origin "${{ github.sha }}"
+          git -C co checkout -q "${{ github.sha }}"
+      - name: Toolkit libraries (the gate)
+        run: |
+          export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+          cmake -S co -B build/root -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build/root -j4
+      - name: C test projects build (report only)
+        run: |
+          export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+          if JOBS=4 XBR_BUILD_ONLY=1 co/tools/run_c_tests.sh build/c-tests build/c-tests.md; then
+            echo "every C test project builds"
+          else
+            grep -E '\| FAIL \||FAIL' build/c-tests.md || true
+            echo "::warning::some C test projects do not build on macOS (report above); not gating yet"
+          fi
+      - name: Clean
+        if: always()
+        run: rm -rf co build

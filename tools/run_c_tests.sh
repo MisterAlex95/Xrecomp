@@ -12,6 +12,9 @@
 # counts as skipped. The report is a Markdown table: project, configure,
 # build, tests passed / skipped / failed. Exit status: 0 when nothing failed.
 #
+# XBR_BUILD_ONLY=1 configures and builds each project and runs no test (the macOS build check: its jobs run in a
+# desktop session and must not open a window). The report then shows "-" for the test columns.
+#
 # XBR_JUNIT_DIR=dir also writes ctest's JUnit file per project, dir/<project>.xml (ctest 3.21+), which
 # tools/ci/check_expected.py reads (the arm64 job, XBA-53).
 #
@@ -59,6 +62,8 @@ for dir in "$ROOT"/tests/*/; do
         conf=FAIL; build=-; fail=1
     elif ! cmake --build "$bdir" -j"$JOBS" >>"$log" 2>&1; then
         build=FAIL; fail=1
+    elif [ -n "${XBR_BUILD_ONLY:-}" ]; then
+        pass=-; skip=-; failed=-
     else
         junit=()
         [ -z "$JUNIT_DIR" ] || junit=(--output-junit "$JUNIT_DIR/$name.xml")
