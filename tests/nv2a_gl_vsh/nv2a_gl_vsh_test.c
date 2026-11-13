@@ -27,6 +27,7 @@
 #include "nv2a_gl_vsh.h"
 
 #include <stddef.h>
+#include <stdlib.h>
 
 static int s_fail;
 #define CHECK(c) do { if (!(c)) { printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #c); s_fail++; } } while (0)
@@ -528,7 +529,9 @@ int main(void)
         CHECK(st[120] > st[59]);
     }
 
-    if (!nv2a_gl_context_create()) {
+    /* NV2A_GL_TEST_NO_GPU: CMake sets it for a cross build run under
+     * qemu-user, where llvmpipe is too slow for this half. */
+    if (getenv("NV2A_GL_TEST_NO_GPU") || !nv2a_gl_context_create()) {
         printf("no GL context: GPU comparison skipped\n");
         return s_fail ? 1 : 77;
     }
