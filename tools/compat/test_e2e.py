@@ -17,6 +17,7 @@ its code is one function, `jmp $`.
 import json
 import os
 import shutil
+import struct
 import subprocess
 import sys
 
@@ -371,3 +372,110 @@ def test_a_check_run_as_the_device_makes_it(tmp_path):
     m = subprocess.run([sys.executable, "-m", "tools.compat", "report", str(out), "--matrix"], cwd=ROOT,
                        capture_output=True, text=True, timeout=60)
     assert "Test host" in m.stdout, m.stdout
+
+
+def _asm(items):
+    """Bytes from a list of byte strings, ("label", name) and (opcode bytes,
+    label) for a rel32 branch to a label (jmp E9, jcc 0F 8x, call E8)."""
+    out, labels, fix = bytearray(), {}, []
+    for it in items:
+        if isinstance(it, (bytes, bytearray)):
+            out += it
+        elif it[0] == "label":
+            labels[it[1]] = len(out)
+        else:
+            out += it[0] + b"\0\0\0\0"
+            fix.append((len(out) - 4, it[1]))
+    for at, name in fix:
+        out[at:at + 4] = struct.pack("<i", labels[name] - (at + 4))
+    return bytes(out)
+
+
+NIC_OK, NIC_FAIL = 0x00011300, 0x00011320
+
+
+def _nic_xbe(tmp_path):
+    """XBA-117: a title of ours that does what a forcedeth-style driver does
+    at start-up, through the NIC's registers at 0xFEF00000: reset and wait
+    for UnknownSetupReg5 bit 31, read the PHY's BMSR through the MII
+    registers (wait for INUSE to clear) and require the link down, start the
+    transmitter and queue one frame on a ring in contiguous memory, wait for
+    the controller to hand the descriptor back and require "carrier lost",
+    then ask the kernel's PhyGetLinkState and require 0. Every wait is a
+    bounded loop. DbgPrint says which way it went, then the title spins."""
+    imm = lambda v: struct.pack("<I", v)                         # noqa: E731
+    poll = lambda test, ok, fail: [b"\xb9" + imm(100000), ("label", ok + "_top"), test,  # noqa: E731
+                                   (b"\x0f\x84" if ok.startswith("z") else b"\x0f\x85", ok),
+                                   b"\x49", (b"\x0f\x85", ok + "_top"), (b"\xe9", fail)]
+    code = _asm([
+        b"\x55\x8b\xec\x56\x57",                                 # push ebp; mov ebp, esp; push esi; push edi
+        b"\xbe" + imm(0xFEF00000),                               # mov esi, NIC
+        b"\xc7\x86\x44\x01\x00\x00" + imm(0x12),                 # TxRxControl = BIT1 | RESET
+        *poll(b"\xf7\x86\x30\x01\x00\x00" + imm(0x80000000), "nz_reset", "fail"),  # test [Reg5], bit31
+        ("label", "nz_reset"),
+        b"\xc7\x86\x44\x01\x00\x00" + imm(0),                    # TxRxControl = 0
+        b"\xc7\x86\x90\x01\x00\x00" + imm(0x21),                 # MIIControl = read PHY 1 reg 1
+        *poll(b"\xf7\x86\x90\x01\x00\x00" + imm(0x8000), "z_mii", "fail"),         # test INUSE
+        ("label", "z_mii"),
+        b"\x8b\x86\x94\x01\x00\x00",                             # mov eax, [MIIData]
+        b"\xa9" + imm(0x24), (b"\x0f\x85", "fail"),              # link or autoneg complete: fail
+        b"\xbf" + imm(0x80300000),                               # mov edi, ring (phys 0x300000)
+        b"\xc7\x07" + imm(0x00301000),                           # desc.buffer
+        b"\xc7\x47\x04" + imm(0x8001003B),                       # desc: VALID | LAST, 60 bytes
+        b"\xc7\x86\x00\x01\x00\x00" + imm(0x00300000),           # TxRingPhysAddr
+        b"\xc7\x86\x08\x01\x00\x00" + imm(0x000F0003),           # RingSizes: 16 rx, 4 tx
+        b"\xc7\x86\x84\x00\x00\x00" + imm(1),                    # TransmitterControl = START
+        b"\xc7\x86\x44\x01\x00\x00" + imm(1),                    # TxRxControl = KICK
+        *poll(b"\xf7\x47\x04" + imm(0x80000000), "z_tx", "fail"),                 # test VALID
+        ("label", "z_tx"),
+        b"\xf7\x47\x04" + imm(0x08000000), (b"\x0f\x84", "fail"),   # carrier lost, or fail
+        b"\x6a\x01\xff\x15\x00\x08\x01\x00",                     # push 1; call [PhyGetLinkState]
+        b"\x85\xc0", (b"\x0f\x85", "fail"),                      # link flags must be 0
+        b"\x68" + imm(NIC_OK), b"\xff\x15\x04\x08\x01\x00", b"\x83\xc4\x04",       # DbgPrint(ok)
+        ("label", "spin"), (b"\xe9", "spin"),
+        ("label", "fail"),
+        b"\x68" + imm(NIC_FAIL), b"\xff\x15\x04\x08\x01\x00", b"\x83\xc4\x04",     # DbgPrint(fail)
+        ("label", "spin2"), (b"\xe9", "spin2"),
+    ])
+    text = bytearray(code + b"\x00" * (0x340 - len(code)))
+    text[NIC_OK - 0x11000:NIC_OK - 0x11000 + 14] = b"XBA117 NIC OK\0"
+    text[NIC_FAIL - 0x11000:NIC_FAIL - 0x11000 + 16] = b"XBA117 NIC FAIL\0"
+    d = tmp_path / "nic"
+    d.mkdir()
+    p = make_xbe(d / "default.xbe", libs=(("XAPILIB", 5849, 0),), text=bytes(text), title_id=0x58424106,
+                 title="Nic")
+    b = bytearray(open(p, "rb").read())
+    struct.pack_into("<III", b, 0x800, 0x80000000 | 252, 0x80000000 | 8, 0)    # PhyGetLinkState, DbgPrint
+    open(p, "wb").write(b)
+    return d
+
+
+@pytest.mark.skipif(os.environ.get("XBA_E2E") != "1", reason="XBA_E2E=1: builds and boots a title (minutes)")
+def test_a_title_with_a_network_stack_finds_no_cable(tmp_path):
+    """XBA-117 in the real runtime: the lifted driver sequence of _nic_xbe
+    completes with the link down, quickly; the log and the status file say
+    the title has a network stack, and so does the compat result. With
+    RECOMP_NIC=0 (the behaviour before) the registers are plain memory: the
+    reset bit never comes up and the same title takes its failure path."""
+    if not shutil.which("cmake"):
+        pytest.skip("no cmake")
+    d, out, cw = _nic_xbe(tmp_path), tmp_path / "results.jsonl", tmp_path / "cw"
+
+    def run(*extra, **env):
+        r = subprocess.run([sys.executable, "-m", "tools.compat", "run", str(d), "--work-root", str(cw),
+                            "--seconds", "6", "--sustain", "3", "--out", str(out)] + list(extra),
+                           cwd=ROOT, capture_output=True, text=True, timeout=1800, env=dict(os.environ, **env))
+        assert r.returncode == 0, r.stdout[-2000:] + r.stderr[-2000:]
+        status = [json.loads(l) for l in (cw / "nic" / "status-0.jsonl").read_text().splitlines()]
+        return (cw / "nic" / "run-0.log").read_text(errors="replace"), status, \
+            json.loads(out.read_text().splitlines()[-1])
+
+    log, status, res = run()
+    assert "XBA117 NIC OK" in log and "XBA117 NIC FAIL" not in log, log[-3000:]
+    assert "[NET] nic probed (registers), link down" in log, log[-3000:]
+    net = [s for s in status if s.get("net")]
+    assert net and net[0]["net"] == "nic probed, link down" and net[0]["ms"] < 5000, status
+    assert res.get("net") == "nic probed, link down", res
+
+    log, status, res = run("--no-prepare", RECOMP_NIC="0")
+    assert "XBA117 NIC FAIL" in log and "XBA117 NIC OK" not in log, log[-3000:]

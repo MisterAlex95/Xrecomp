@@ -212,6 +212,8 @@ def record(a):
     res.update(stage=stage, blocker=blocker, best=stage,
                runs=[dict({"stage": stage, "blocker": blocker, "run_s": round(a.run_s)}, **summary,
                           screenshot=None)])
+    if summary.get("net"):
+        res["net"] = summary["net"]
     return res
 
 

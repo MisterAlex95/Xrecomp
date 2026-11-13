@@ -59,6 +59,10 @@ def classify(status, presses_ms, exit_info, run_s, sustain_s, log_text="", disco
     last = status[-1] if status else {}
     summary = {k: last.get(k, 0) for k in ("flips", "frames", "audio_ms", "pad_reads", "threads", "discovered")}
     summary["lit"] = int(any(s.get("lit") for s in status))
+    # The title touched the Ethernet controller (XBA-117): it has a network stack.
+    net = next((s["net"] for s in status if s.get("net")), None)
+    if net:
+        summary["net"] = net
     stage = "prepares"
     if status and any(s.get("flips") or s.get("threads") or s.get("pad_reads") or s.get("audio_ms")
                       for s in status):
@@ -329,6 +333,9 @@ def run_one(source, a):
     worst = min(runs, key=lambda r: STAGES.index(r["stage"]))
     best = max(runs, key=lambda r: STAGES.index(r["stage"]))
     res.update(stage=worst["stage"], blocker=worst["blocker"], best=best["stage"], runs=runs)
+    net = next((r["net"] for r in runs if r.get("net")), None)
+    if net:
+        res["net"] = net
     if a.repeat > 1:
         res["failure_rate"] = round(sum(r["stage"] != best["stage"] for r in runs) / len(runs), 2)
     return res
@@ -344,7 +351,7 @@ def report(results):
             "|---|---|---|---|---|---|" + ("---|" if on_device else "")]
     for k, r in sorted(last.items(), key=lambda kv: -STAGES.index(kv[1].get("stage", "none"))):
         rows.append("| %s | %s | %s | %s | %s | %s |" % (
-            r.get("source", k), r.get("stage"), r.get("best", r.get("stage")),
+            r.get("source", k) + (" (network stack)" if r.get("net") else ""), r.get("stage"), r.get("best", r.get("stage")),
             (r.get("blocker") or "").replace("|", "/"), r.get("xdk") or "", r.get("toolkit", ""))
             + (" %s |" % device.device_label(r).replace("|", "/") if on_device else ""))
     return "\n".join(rows)
