@@ -14,6 +14,11 @@
  *               IMMEDIATE frames are not divided, as before auto
  *     pal       10 ms frames, ONE, 50 Hz vblanks: 50 fps
  *     cpu       no back end (the CPU rasteriser): 20 ms IMMEDIATE: 30 fps
+ *     align     20 ms IMMEDIATE (30 fps) with a display grid published at a
+ *               phase far from the flips' (XBA-136): within a second the
+ *               flips + the presenter's 1 ms land at half a refresh, and stay
+ *     alignoff  the same with RECOMP_PACING_ALIGN=0: the flips keep the
+ *               schedule's phase
  *
  * One case per process: the executor's state is static. */
 #include <stddef.h>
@@ -62,6 +67,13 @@ volatile uint32_t *xbox_Nv2aRegPtr(uint32_t offset) { (void)offset; return NULL;
 
 extern void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param);
 extern int nv2a_pb_exec_flip_poll(void);
+extern void nv2a_pb_exec_display_clock(uint64_t vsync_ns, uint64_t period_ns, uint32_t gen);
+extern void nv2a_pb_exec_present_latency(uint64_t lat_ns);
+
+/* XBA-136: a fake display grid (period 0: none), republished at every
+ * frame as the presenter's vsync source does. */
+static uint64_t s_disp_period, s_disp_phase;
+static uint64_t s_last_flip;
 
 static void fake_draw(const Nv2aSurface *s, const Nv2aBatch *b) { (void)s; (void)b; }
 static void fake_flip(void) {}
@@ -79,6 +91,12 @@ static uint64_t frame(uint64_t work, uint32_t interval)
     uint64_t before;
 
     s_now += work;
+    if (s_disp_period) {
+        uint64_t k = (s_now - T0 - s_disp_phase) / s_disp_period;
+        nv2a_pb_exec_display_clock(T0 + s_disp_phase + k * s_disp_period, s_disp_period, 1);
+        nv2a_pb_exec_present_latency(1000000ull);
+    }
+    s_last_flip = s_now;
     nv2a_pb_exec_method(0, 0x0100, (0x00123400u | interval) << 5 | 1u);   /* swap */
     nv2a_pb_exec_method(0, 0x0130, 0);                                      /* FLIP_STALL */
     before = s_slept;
@@ -158,6 +176,32 @@ int main(int argc, char **argv)
     } else if (!strcmp(c, "capwins")) {
         period = run(20 * MS, IV_IMMEDIATE, 10, 0);
         CHECK(period > 19.9 && period < 20.1);
+    } else if (!strcmp(c, "align") || !strcmp(c, "alignoff")) {
+        /* 60 Hz grid; the schedule starts at the first flip (20 ms in), the
+         * grid's edge 7.3 ms later: the presents would sit at 0.37 of a
+         * refresh from it, never at the target 0.5. */
+        uint64_t R = SEC / 60, worst = 0, ph;
+        int i;
+        if (!strcmp(c, "alignoff"))
+            setenv_("RECOMP_PACING_ALIGN", "0");
+        s_disp_period = R;
+        s_disp_phase = 20 * MS + 7300000ull;
+        (void)run(20 * MS, IV_IMMEDIATE, 3, UINT64_MAX);
+        for (i = 0; i < 60; i++) {
+            int64_t e;
+            (void)frame(20 * MS, IV_IMMEDIATE);
+            ph = (s_last_flip + 1 * MS - T0 - s_disp_phase) % R;
+            e = (int64_t)ph - (int64_t)(R / 2);
+            if ((uint64_t)(e < 0 ? -e : e) > worst)
+                worst = (uint64_t)(e < 0 ? -e : e);
+        }
+        period = run(20 * MS, IV_IMMEDIATE, 2, UINT64_MAX);
+        printf("NV2A pacing %s: presents' worst distance to half a refresh %.2f ms\n", c, worst / 1e6);
+        CHECK(period > 33.0 && period < 33.7);
+        if (!strcmp(c, "align"))
+            CHECK(worst < 300000);
+        else
+            CHECK(worst > 1 * MS);
     } else if (!strcmp(c, "pal")) {
         period = run(10 * MS, IV_ONE, 10, SEC / 50 - 10 * MS);
         CHECK(period > 19.7 && period < 20.3);

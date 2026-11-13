@@ -325,16 +325,7 @@
     <!-- Controls -->
     <string name="CONTROLS">Controls</string>
     <string name="CONTROLS_FOOTER">The same for any gamepad Android sees: the game reads it as the first Xbox controller. Buttons are taken by position, as Android names them.</string>
-    <string name="PAD_L1">L1 · Black</string>
-    <string name="PAD_L2">L2 · LT</string>
-    <string name="PAD_R1">R1 · White</string>
-    <string name="PAD_R2">R2 · RT</string>
-    <string name="PAD_SELECT">Select · Back</string>
-    <string name="PAD_START">Start · Start</string>
     <string name="PAD_DPAD">D-pad</string>
-    <string name="PAD_LSTICK">L stick · L3</string>
-    <string name="PAD_RSTICK">R stick · R3</string>
-    <string name="PAD_FACE">A B X Y</string>
     <string name="PAD_SCREEN">Back: menu</string>
     <string name="CTL_FACE">A B X Y</string>
     <string name="CTL_FACE_X">A B X Y</string>

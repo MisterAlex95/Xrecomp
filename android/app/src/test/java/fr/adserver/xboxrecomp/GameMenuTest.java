@@ -589,6 +589,39 @@ public class GameMenuTest {
     }
 
     @Test
+    public void noVideoRowsWithoutAGame() {
+        menu.open("Back");
+        menu.row(GameMenu.Item.SETTINGS).performClick();
+        assertNull(menu.row(GameMenu.Item.WIDESCREEN));
+        assertNull(menu.row(GameMenu.Item.P480));
+    }
+
+    /** XBA-134: Widescreen and 480p per title, as in Settings -> On -> Off -> as in Settings. */
+    @Test
+    public void videoRowsArePerTitle() throws Exception {
+        java.io.File dir = new java.io.File(activity.getFilesDir(), "video-game");
+        TestSupport.write(new java.io.File(dir, "default.xbe"), TestSupport.xbe(0x4D5300D1, "Game"));
+        GameStore.remember(activity, dir.getPath(), "Game");
+        menu.release();
+        build();
+        menu.open("Back");
+        menu.row(GameMenu.Item.SETTINGS).performClick();
+        GameVideo.Setting w = GameVideo.Setting.WIDESCREEN, p = GameVideo.Setting.P480;
+        assertNotNull(menu.row(GameMenu.Item.WIDESCREEN));
+        assertNotNull(menu.row(GameMenu.Item.P480));
+        assertNull(GameVideo.titleChoice(activity, "4D5300D1", w));
+        menu.row(GameMenu.Item.WIDESCREEN).performClick();
+        assertEquals(Boolean.TRUE, GameVideo.titleChoice(activity, "4D5300D1", w));
+        menu.row(GameMenu.Item.WIDESCREEN).performClick();
+        assertEquals(Boolean.FALSE, GameVideo.titleChoice(activity, "4D5300D1", w));
+        assertNull(GameVideo.titleChoice(activity, "4D5300D1", p));      // the other one untouched
+        menu.row(GameMenu.Item.WIDESCREEN).performClick();
+        assertNull(GameVideo.titleChoice(activity, "4D5300D1", w));
+        menu.row(GameMenu.Item.P480).performClick();
+        assertEquals(Boolean.TRUE, GameVideo.titleChoice(activity, "4D5300D1", p));
+    }
+
+    @Test
     public void controlsPage() {
         menu.open("Back");
         menu.row(GameMenu.Item.CONTROLS).performClick();

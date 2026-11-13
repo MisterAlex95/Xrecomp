@@ -46,8 +46,9 @@ set_tests_properties(nv2a-zpass-always PROPERTIES ENVIRONMENT "RECOMP_GPU_ZPASS=
 # RECOMP_GPU_FPS_CAP on a fake clock: fast frames held, slow frames not.
 add_test(NAME nv2a-flip-cap COMMAND nv2a-flip-cap-test)
 # RECOMP_PACING=auto (XBA-107, XBA-135): synthetic titles of 10, 20, 40 ms, a flip-locked one,
-# a fixed cap that wins, PAL 50 Hz vblanks, the CPU rasteriser; one case per process.
-foreach(case fast slow slower locked capwins pal cpu)
+# a fixed cap that wins, PAL 50 Hz vblanks, the CPU rasteriser, flips in phase with a display
+# grid (XBA-136) and RECOMP_PACING_ALIGN=0; one case per process.
+foreach(case fast slow slower locked capwins pal cpu align alignoff)
     add_test(NAME nv2a-pacing-${case} COMMAND nv2a-pacing-test ${case})
 endforeach()
 # Inline (Begin/End) fixed-function batches: transformed (default), the old screen-space

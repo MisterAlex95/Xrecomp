@@ -30,6 +30,11 @@ else()
     # pvideo_posix.c: the PVIDEO overlay's scan-out into this window.
     target_sources(xbox_video PRIVATE fb_present_sdl.c perf_overlay.c pvideo_posix.c)
     target_link_libraries(xbox_video PUBLIC SDL2::SDL2)
+    if(ANDROID)
+        # XBA-136: the display's refresh grid from AChoreographer (libandroid).
+        target_sources(xbox_video PRIVATE display_vsync_android.c)
+        target_link_libraries(xbox_video PUBLIC android ${CMAKE_DL_LIBS})
+    endif()
     # RECOMP_GPU=1: the presenter registers the GL back end (src/gpu).
     if(TARGET xbox_gpu)
         target_link_libraries(xbox_video PUBLIC xbox_gpu)

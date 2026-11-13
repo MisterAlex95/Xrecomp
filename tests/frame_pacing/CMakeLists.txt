@@ -10,3 +10,12 @@ if(NOT MSVC)
 endif()
 enable_testing()
 add_test(NAME frame_pacing COMMAND frame_pacing_test)
+# Flips in phase with the display (XBA-136): the schedule's aligner (frame_pacing.h) and the
+# display grid (src/video/display_clock.h) against a fake display, every starting phase at 30 and
+# 60 fps on 60 and 120 Hz, then 90 Hz, VRR, lost vsyncs, pause/resume, a panel switch.
+add_executable(frame_pacing_align_test align_test.c)
+target_include_directories(frame_pacing_align_test PRIVATE ../../src/kernel ../../src/video)
+if(NOT MSVC)
+    target_link_libraries(frame_pacing_align_test PRIVATE m)
+endif()
+add_test(NAME frame_pacing_align COMMAND frame_pacing_align_test)

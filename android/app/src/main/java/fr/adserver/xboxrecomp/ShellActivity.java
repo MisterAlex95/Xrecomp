@@ -77,6 +77,7 @@ public class ShellActivity extends SDLActivity {
                 Log.w(LauncherActivity.TAG, "shell: cannot set RECOMP_GAME_DIR", e);
             }
         }
+        applyTitleVideo();
         applyLanguage();
         boolean checked = LibraryCheck.applyRunEnv(this);   // a library check's run: status file and pad script (XBA-130)
         applyBuiltinPad();
@@ -152,6 +153,28 @@ public class ShellActivity extends SDLActivity {
         }
         Log.i(LauncherActivity.TAG, "shell: game language " + (lang != null ? lang : cfg != null ? cfg + " (recomp.cfg)"
                                                               : "en (default)") + ", title " + tid);
+    }
+
+    /**
+     * RECOMP_WIDESCREEN and RECOMP_480P for the runtime (XBA-134, {@link GameVideo}): « 1 » / « 0 » when the title has
+     * its own choice, else unset (recomp.cfg, then off, decide), also clearing what a previous game left.
+     */
+    private void applyTitleVideo() {
+        String tid = GameLanguage.currentTitleId(this);
+        StringBuilder line = new StringBuilder("shell: title video");
+        for (GameVideo.Setting s : GameVideo.Setting.values()) {
+            String v = GameVideo.resolve(GameVideo.titleChoice(this, tid, s));
+            try {
+                if (v != null)
+                    Os.setenv(s.env, v, true);
+                else
+                    Os.unsetenv(s.env);
+            } catch (ErrnoException e) {
+                Log.w(LauncherActivity.TAG, "shell: cannot set " + s.env, e);
+            }
+            line.append(' ').append(s.env).append('=').append(v != null ? v : "(Settings)");
+        }
+        Log.i(LauncherActivity.TAG, line.append(", title ").append(tid).toString());
     }
 
     @Override

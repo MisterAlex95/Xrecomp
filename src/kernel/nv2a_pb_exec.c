@@ -6391,6 +6391,93 @@ static FramePacer s_pacer;
 static uint64_t s_pace_slept_ns;        /* slept at the cap since the last flip */
 static uint32_t s_pace_rate, s_pace_logged;
 
+/* XBA-136: the slots in phase with the display (frame_pacing_align_slot).
+ * The presenter publishes the display's grid and its flip -> present time
+ * (nv2a_pb_exec_display_clock, nv2a_pb_exec_present_latency) from its own
+ * threads; the executor reads them at each booking. RECOMP_PACING_ALIGN=0
+ * turns it off, a fraction (0.3) sets the present's phase in a refresh. */
+static PacingAlign s_align;
+static uint64_t s_align_slot;           /* the slot the last wait slept to, 0: not held */
+static int s_align_restart;             /* the schedule restarted: snap */
+static uint32_t s_align_logged;
+static volatile uint64_t s_disp_seq, s_disp_ref, s_disp_period, s_disp_gen, s_disp_lat;
+
+/* The display's refresh grid: a vsync (or latch-edge) time and the refresh
+ * period on xbox_HostNowNs's clock; period 0: no grid. gen changes when the
+ * grid's phase does. One writer at a time (the presenter's vsync source). */
+void nv2a_pb_exec_display_clock(uint64_t vsync_ns, uint64_t period_ns, uint32_t gen)
+{
+    uint64_t q = __atomic_load_n(&s_disp_seq, __ATOMIC_RELAXED);
+    __atomic_store_n(&s_disp_seq, q + 1, __ATOMIC_RELAXED);
+    __atomic_thread_fence(__ATOMIC_RELEASE);
+    __atomic_store_n(&s_disp_ref, vsync_ns, __ATOMIC_RELAXED);
+    __atomic_store_n(&s_disp_period, period_ns, __ATOMIC_RELAXED);
+    __atomic_store_n(&s_disp_gen, (uint64_t)gen, __ATOMIC_RELAXED);
+    __atomic_store_n(&s_disp_seq, q + 2, __ATOMIC_RELEASE);
+}
+
+/* The presenter's mean time from a flip's publish to its present call. */
+void nv2a_pb_exec_present_latency(uint64_t lat_ns)
+{
+    __atomic_store_n(&s_disp_lat, lat_ns, __ATOMIC_RELAXED);
+}
+
+static int display_clock_read(uint64_t *ref, uint64_t *period, uint32_t *gen)
+{
+    int tries;
+    for (tries = 0; tries < 4; tries++) {
+        uint64_t q = __atomic_load_n(&s_disp_seq, __ATOMIC_ACQUIRE), q2;
+        if (q & 1u)
+            continue;
+        *ref = __atomic_load_n(&s_disp_ref, __ATOMIC_RELAXED);
+        *period = __atomic_load_n(&s_disp_period, __ATOMIC_RELAXED);
+        *gen = (uint32_t)__atomic_load_n(&s_disp_gen, __ATOMIC_RELAXED);
+        __atomic_thread_fence(__ATOMIC_ACQUIRE);
+        q2 = __atomic_load_n(&s_disp_seq, __ATOMIC_RELAXED);
+        if (q == q2)
+            return q != 0 && *period != 0;
+    }
+    return 0;
+}
+
+static void pacing_align_init(void)
+{
+    const char *e = getenv("RECOMP_PACING_ALIGN");
+    uint32_t pm = PACING_ALIGN_PHASE_PM;
+    int on = !(e && *e == '0' && !strchr(e, '.'));
+
+    if (e && strchr(e, '.')) {
+        double f = strtod(e, NULL);
+        if (f > 0.0 && f < 1.0)
+            pm = (uint32_t)(f * 1000.0 + 0.5);
+    }
+    frame_pacing_align_init(&s_align, on, pm);
+    s_align_logged = s_align.changes;
+}
+
+/* At a booking under auto: the slot moved into the display's phase. */
+static uint64_t pacing_align_slot(uint64_t slot, uint64_t period, uint64_t now)
+{
+    uint64_t ref = 0, rper = 0, r;
+    uint32_t gen = 0;
+    int have = s_align.on && display_clock_read(&ref, &rper, &gen);
+
+    r = frame_pacing_align_slot(&s_align, slot, period, s_align_restart, have, ref, rper, gen,
+                                __atomic_load_n(&s_disp_lat, __ATOMIC_RELAXED), now);
+    s_align_restart = 0;
+    if (s_align.changes != s_align_logged) {
+        s_align_logged = s_align.changes;
+        if (s_align.state == PACING_ALIGN_SEEKING || s_align.state == PACING_ALIGN_LOCKED)
+            fprintf(stderr, "  [GPU] pacing: flips in phase with the display (%.2f Hz, %u refreshes "
+                    "per frame, present at %u%% of a refresh)\n", 1e9 / (double)s_align.refresh_ns,
+                    s_align.refreshes, s_align.phase_pm / 10u);
+        else
+            fprintf(stderr, "  [GPU] pacing: flips not aligned to the display: %s\n",
+                    frame_pacing_align_state(&s_align));
+    }
+    return r;
+}
+
 static int pacing_auto(void)
 {
     static int on = -1;
@@ -6403,6 +6490,7 @@ static int pacing_auto(void)
             long hz = d && *d ? strtol(d, NULL, 10) : 0;
             frame_pacing_init(&s_pacer, hz >= 24 && hz <= 480 ? (uint32_t)hz : 0u,
                               l && *l ? (*l != '0') : -1, strcmp(e, "ask") != 0);
+            pacing_align_init();
             fprintf(stderr, "  [GPU] pacing %s: the title's presentation interval%s; display %u Hz\n",
                     e, s_pacer.adaptive ? ", then the highest even rate the host sustains" : "",
                     frame_pacing_display(&s_pacer));
@@ -6424,6 +6512,9 @@ static int pacing_cap_at_flip(int hard)
     frame_pacing_vblank(&s_pacer, xbox_VblankCount(), now);
     r = frame_pacing_flip(&s_pacer, now, s_pace_slept_ns);
     s_pace_slept_ns = 0;
+    if (s_align_slot && now > s_align_slot)     /* a frame held at the cap: slot -> flip */
+        frame_pacing_align_flip(&s_align, now - s_align_slot);
+    s_align_slot = 0;
     if (s_pacer.changes != s_pace_logged) {
         s_pace_logged = s_pacer.changes;
         fprintf(stderr, "  [GPU] pacing: %u fps (%s; ask %u fps: %u Hz vblank, interval %s%u)\n",
@@ -6458,6 +6549,7 @@ static void flip_cap_book(void)
     now = xbox_HostNowNs();
     if (!s_cap_next_ns) {
         s_cap_next_ns = now + period;   /* the first frame starts the schedule */
+        s_align_restart = 1;
     } else if (now >= s_cap_next_ns + period) {
         /* Already late: this frame took longer than a period. Its slot is
          * now -- no wait -- and the schedule restarts from here. Sleeping a
@@ -6466,10 +6558,13 @@ static void flip_cap_book(void)
         s_cap_late++;
         s_cap_next_ns = now;
         s_cap_due_ns = 0;
+        s_align_restart = 1;
         return;
     } else {
         s_cap_next_ns += period;
     }
+    if (pacing_auto())                  /* XBA-136: in phase with the display */
+        s_cap_next_ns = pacing_align_slot(s_cap_next_ns, period, now);
     s_cap_due_ns = s_cap_next_ns;
 }
 
@@ -6493,6 +6588,7 @@ static void flip_cap_wait(void)
     s_cap_held_total++;
 #endif
     s_pace_slept_ns += xbox_HostNowNs() - now;
+    s_align_slot = due;
     now = xbox_HostNowNs();
     if (now > due) {
         s_cap_over_ns += now - due;
@@ -6589,7 +6685,7 @@ int nv2a_pb_exec_flip_poll(void)
 /* The cap's line in the periodic [GPU] report, then reset. */
 static void flip_cap_report(void)
 {
-    if (pacing_auto() && s_pace_rate)
+    if (pacing_auto() && s_pace_rate) {
         fprintf(stderr, "[GPU] pacing %u fps: ask %u fps (vblank %u Hz, interval %s%u), %s, "
                 "frame cost p90 %.1f ms, %u%% of frames missed their slot\n",
                 s_pace_rate, frame_pacing_ask(&s_pacer), s_pacer.vblank_hz,
@@ -6598,7 +6694,15 @@ static void flip_cap_report(void)
                 s_pacer.lock_force > 0 || s_pacer.locked > 0 ? "locked to its ask"
                 : frame_pacing_free(&s_pacer) ? "adaptive" : "at its ask until judged",
                 s_pacer.last_p90_us / 1e3, s_pacer.last_miss_pct);
-    else if (!backend_draws() || gpu_fps_cap() <= 0)
+        if (s_align.state == PACING_ALIGN_SEEKING || s_align.state == PACING_ALIGN_LOCKED)
+            fprintf(stderr, "[GPU] pacing display phase: %s, %u refreshes of %.3f ms per frame, "
+                    "error %.2f ms, slot->flip %.1f ms, flip->present %.1f ms, %u snaps\n",
+                    frame_pacing_align_state(&s_align), s_align.refreshes,
+                    s_align.refresh_ns / 1e6, s_align.err_ns / 1e6, s_align.w_ns / 1e6,
+                    __atomic_load_n(&s_disp_lat, __ATOMIC_RELAXED) / 1e6, s_align.snaps);
+        else
+            fprintf(stderr, "[GPU] pacing display phase: %s\n", frame_pacing_align_state(&s_align));
+    } else if (!backend_draws() || gpu_fps_cap() <= 0)
         return;
     fprintf(stderr, "[GPU] frame cap %d: waits %u slept %.1f ms, woke %.2f ms"
             " late avg (%.2f max), frames over a period (not held) %u\n",

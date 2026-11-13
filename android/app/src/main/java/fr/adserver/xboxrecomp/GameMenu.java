@@ -46,8 +46,8 @@ import java.util.function.LongSupplier;
  *       in the game every key it saw go down and centres every stick it saw move, and the companion's buttons;
  *       closing releases the companion's again. A key whose down came while open acts on its release, so nothing of
  *       it reaches the game.</li>
- *   <li>Items: Resume, Settings (performance overlay, game volume, bottom screen: all live; this game's language:
- *       next start; Share log), Controls, Screenshot, Back to launcher (the game stays alive and held in the
+ *   <li>Items: Resume, Settings (performance overlay, game volume, bottom screen: all live; this game's language,
+ *       widescreen and 480p: next start; Share log), Controls, Screenshot, Back to launcher (the game stays alive and held in the
  *       background), Quit game (a second press within {@link #QUIT_ARM_MS} confirms). The header shows the game's
  *       title and « Paused · 0:42 played ».</li>
  * </ul>
@@ -109,7 +109,8 @@ final class GameMenu {
 
     enum Page { MAIN, SETTINGS, CONTROLS }
 
-    enum Item { RESUME, SETTINGS, CONTROLS, SCREENSHOT, SHARE_LOG, LAUNCHER, QUIT, PERF, VOLUME, BOTTOM, LANGUAGE, BACK }
+    enum Item { RESUME, SETTINGS, CONTROLS, SCREENSHOT, SHARE_LOG, LAUNCHER, QUIT, PERF, VOLUME, BOTTOM, LANGUAGE,
+                WIDESCREEN, P480, BACK }
 
     private final Activity activity;
     private final Host host;
@@ -806,6 +807,14 @@ final class GameMenu {
                     labels[i + 1] = GameLanguage.NAMES[GameLanguage.MENU_ORDER[i]];
                 r.setChoices(labels);
                 r.cycler = this::stepLanguage;
+                // XBA-134: this game's widescreen and 480p, as in Settings or its own.
+                String[] video = { s(R.string.MENU_VIDEO_FOLLOW), s(R.string.MENU_ON), s(R.string.MENU_OFF) };
+                r = row(Item.WIDESCREEN, s(R.string.MENU_WIDESCREEN));
+                r.setChoices(video);
+                r.cycler = dir -> stepVideo(GameVideo.Setting.WIDESCREEN, dir);
+                r = row(Item.P480, s(R.string.MENU_480P));
+                r.setChoices(video);
+                r.cycler = dir -> stepVideo(GameVideo.Setting.P480, dir);
             }
             row(Item.SHARE_LOG, s(R.string.MENU_SHARE_LOG));
             row(Item.BACK, s(R.string.MENU_BACK));
@@ -914,6 +923,12 @@ final class GameMenu {
             break;
         case LANGUAGE:
             stepLanguage(1);
+            break;
+        case WIDESCREEN:
+            stepVideo(GameVideo.Setting.WIDESCREEN, 1);
+            break;
+        case P480:
+            stepVideo(GameVideo.Setting.P480, 1);
             break;
         case BACK:
             back();
@@ -1038,6 +1053,21 @@ final class GameMenu {
         updateValues();
     }
 
+    /** This game's widescreen or 480p (XBA-134): remembered per title ID, applied by ShellActivity at next start. */
+    private void stepVideo(GameVideo.Setting which, int dir) {
+        Boolean on = GameVideo.next(GameVideo.titleChoice(activity, titleId(), which), dir);
+        GameVideo.setTitleChoice(activity, titleId(), which, on);
+        Log.i(LauncherActivity.TAG, "shell: menu: " + which.env + " "
+                                    + (on == null ? "as in Settings" : on ? "on" : "off")
+                                    + " for " + titleId() + " (next start)");
+        updateValues();
+    }
+
+    private String videoLabel(GameVideo.Setting which) {
+        Boolean on = GameVideo.titleChoice(activity, titleId(), which);
+        return s(on == null ? R.string.MENU_VIDEO_FOLLOW : on ? R.string.MENU_ON : R.string.MENU_OFF);
+    }
+
     private void updateValues() {
         Widgets.MenuRow r = rows.get(Item.PERF);
         if (r != null)
@@ -1058,6 +1088,12 @@ final class GameMenu {
             r.setValue(pos == 0 ? s(R.string.MENU_LANGUAGE_FOLLOW)
                                 : GameLanguage.NAMES[GameLanguage.MENU_ORDER[pos - 1]]);
         }
+        r = rows.get(Item.WIDESCREEN);
+        if (r != null)
+            r.setValue(videoLabel(GameVideo.Setting.WIDESCREEN));
+        r = rows.get(Item.P480);
+        if (r != null)
+            r.setValue(videoLabel(GameVideo.Setting.P480));
     }
 
     private String volumeLabel(int v) {
