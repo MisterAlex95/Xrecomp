@@ -213,6 +213,29 @@ def toolkit_version():
     return "unknown"
 
 
+def toolkit_same(stamp):
+    """True when the lift in this stamp is the current toolkit's (XBA-134):
+    the toolkit content digest (tools/prepare/toolkit.py, the one the
+    Android packs carry), not the commit, so a commit that changes no file
+    of the toolkit tree (docs, Java, tests, the runtime's .c files) keeps the
+    lift. A stamp from before the digest has only the commit: the same
+    commit is the same toolkit."""
+    from tools.prepare import toolkit
+    if "toolkit_sha256" in stamp:
+        return stamp["toolkit_sha256"] == toolkit.digest()
+    return stamp.get("toolkit") == toolkit_version()
+
+
+def runtime_same(stamp):
+    """True when the executable was built against the current runtime
+    (toolkit.runtime_digest: src/, include/, cmake/): a change there needs a
+    rebuild, minutes, not a new lift. A stamp from before it: by commit."""
+    from tools.prepare import toolkit
+    if "runtime_sha256" in stamp:
+        return stamp["runtime_sha256"] == toolkit.runtime_digest()
+    return stamp.get("toolkit") == toolkit_version()
+
+
 def find_xbe(source, work):
     """(path to default.xbe, game data folder or None, image or None)."""
     src = os.path.abspath(source)
@@ -604,10 +627,14 @@ def desktop(a):
         print("      discovered.jsonl not used: %s" % e, flush=True)
     # The profile counts too: its seeds go to the disassembler, its
     # exclude_manual to the lift; and the seeds earlier runs found.
-    want = {"xbe": sha256(xbe), "toolkit": toolkit_version(), "profile": profile_digest(profile),
+    from tools.prepare import toolkit
+    want = {"xbe": sha256(xbe), "toolkit_sha256": toolkit.digest(), "profile": profile_digest(profile),
             "discovered": discovered.digest(disc_seeds)}
-    # A stamp from before XBA-97 has no "discovered": the same as none.
-    same = all(stamp.get(k, "" if k == "discovered" else None) == v for k, v in want.items())
+    # A stamp from before XBA-97 has no "discovered": the same as none. The
+    # toolkit by its content digest, an old stamp by its commit (XBA-134).
+    same = toolkit_same(stamp) and all(stamp.get(k, "" if k == "discovered" else None) == v
+                                       for k, v in want.items() if k != "toolkit_sha256")
+    want["toolkit"] = toolkit_version()     # recorded, not compared
 
     step(2, "analysing the executable (a few minutes the first time)")
     if same and stamp.get("analysis"):
@@ -693,8 +720,9 @@ def desktop(a):
     progress(5, "compiling")
     t = run(["cmake", "--build", build, "--parallel"], log, on_line=BuildProgress() if _REP else None)
     note("built in %.0f s" % t, 90)
-    if stamp.get("built") is False:
+    if stamp.get("built") is False or stamp.get("runtime_sha256") != toolkit.runtime_digest():
         stamp["built"] = True
+        stamp["runtime_sha256"] = toolkit.runtime_digest()     # what --check compares (XBA-134)
         with open(stamp_path, "w") as f:
             json.dump(stamp, f)
     exe = os.path.join(build, name)
@@ -764,8 +792,10 @@ def check_state(source, work=None):
     if stamp:
         if stamp.get("xbe") != hashlib.sha256(data).hexdigest():
             reasons.append("xbe")
-        if stamp.get("toolkit") != toolkit_version():
+        if not toolkit_same(stamp):
             reasons.append("toolkit")
+        elif stamp.get("built") is not False and not runtime_same(stamp):
+            reasons.append("runtime")       # a rebuild only: the lift stands
         if stamp.get("profile") != profile_digest(profile):
             reasons.append("profile")
         if discovered_changed(work, stamp):

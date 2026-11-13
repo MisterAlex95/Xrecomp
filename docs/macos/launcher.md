@@ -103,7 +103,9 @@ checks reuse the Java tests' cases, so change both sides together.
 ## Toolkit, Python and PATH
 
 - **The toolkit is the checkout, side by side, not bundled**: prepare needs the whole tree (tools, templates,
-  profiles, `src/`) and stamps titles with `git rev-parse HEAD`. It is found, in order, from the Setup choice,
+  profiles, `src/`) and stamps titles with its content digests (XBA-134: `toolkit_sha256`, the digest the Android packs
+  carry, for the lift; `runtime_sha256` over `src/`, `include/`, `cmake/` for the build; the commit is recorded, not
+  compared). It is found, in order, from the Setup choice,
   `$XBA_TOOLKIT`, the `XBAToolkitPath` that `build-app.sh` wrote into `Info.plist`, then the folders above the
   executable. A folder counts when it holds `tools/prepare/__main__.py` and `templates/new-game/`.
 - **Python**: the Setup choice, else `<toolkit>/.venv/bin/python3` (`tools/macos/setup.sh` makes one with Python 3.10
@@ -269,7 +271,7 @@ line, exit 0:
 | Field | Type | Meaning |
 |---|---|---|
 | `state` | string | `absent` (no executable), `stale` (an executable, but the next prepare would redo something), `ready`. |
-| `reasons` | [string] | Empty for `ready`. For `stale`, any of: `toolkit` (another toolkit commit), `profile` (the profile layers' files changed), `discovered` (runs found new addresses in `discovered.jsonl`: show "Improvements found while playing: prepare again"), `xbe` (another `default.xbe`), `not_built` (the lift is newer than the executable: a build failed or was cancelled), `no_stamp` (an executable without `stamp.json`). For `absent`: `["not_built"]` when a prepare started but has not built yet, else `[]`. |
+| `reasons` | [string] | Empty for `ready`. For `stale`, any of: `toolkit` (the toolkit tree's files changed: `tools/prepare/toolkit.py`'s content digest, so a commit that touches only docs, tests, Java or the runtime's `.c` files is not one; a stamp from before XBA-134 compares the commit), `runtime` (only the runtime the executable links changed: the next prepare keeps the lift and rebuilds, minutes), `profile` (the profile layers' files changed), `discovered` (runs found new addresses in `discovered.jsonl`: show "Improvements found while playing: prepare again"), `xbe` (another `default.xbe`), `not_built` (the lift is newer than the executable: a build failed or was cancelled), `no_stamp` (an executable without `stamp.json`). For `absent`: `["not_built"]` when a prepare started but has not built yet, else `[]`. |
 | `exe` | string or null | The executable (`project(...)` of `DIR/project/CMakeLists.txt` in `DIR/project/build`), also when `stale`: the old binary can still be played. |
 | `title` | string | The title profile's `name`, else the certificate's title name. |
 | `title_id` | string | 8 upper-case hex digits. |
