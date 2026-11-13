@@ -304,20 +304,23 @@ final class LibraryCheck {
     /**
      * ShellActivity.onCreate, before SDL starts: a checked run gets {@link #runEnv} (it wins over recomp.cfg, which
      * the runtime reads later and which never replaces a variable already set). A normal start changes nothing.
+     * Returns whether this start is a checked run (the on-screen pad stays off then, wave 4).
      */
-    static void applyRunEnv(Context c) {
+    static boolean applyRunEnv(Context c) {
         try {
             File ext = GameStore.externalFilesDir(c);
             String usb = ext == null ? null : RecompConfig.load(ext).get("RECOMP_USB");
             Map<String, String> env = currentEnv(c.getFilesDir(), GameLanguage.currentTitleId(c),
                                                  System.currentTimeMillis(), usb);
             if (env == null)
-                return;
+                return false;
             for (Map.Entry<String, String> e : env.entrySet())
                 Os.setenv(e.getKey(), e.getValue(), true);
             Log.i(TAG, "shell: library check run: " + env);
+            return true;
         } catch (ErrnoException | RuntimeException e) {
             Log.w(TAG, "shell: cannot set the library check's environment", e);
+            return false;
         }
     }
 

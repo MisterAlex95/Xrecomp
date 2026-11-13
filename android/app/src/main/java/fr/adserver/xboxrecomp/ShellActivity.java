@@ -78,7 +78,7 @@ public class ShellActivity extends SDLActivity {
             }
         }
         applyLanguage();
-        LibraryCheck.applyRunEnv(this);   // a library check's run: status file and pad script (XBA-130)
+        boolean checked = LibraryCheck.applyRunEnv(this);   // a library check's run: status file and pad script (XBA-130)
         applyBuiltinPad();
         super.onCreate(savedInstanceState);
         if (mBrokenLibraries)
@@ -87,6 +87,7 @@ public class ShellActivity extends SDLActivity {
         applyGameTheme();
         menu = new GameMenu(this, new MenuHost());
         touch = new TouchControls(this, mixer, () -> PadDevices.any(this));
+        touch.checkRun(checked);   // never the on-screen pad during a library check
         touch.attach();   // under the menu
         menu.attach();
         companion = new CompanionScreen(this, "shell", ctx -> {

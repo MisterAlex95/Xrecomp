@@ -162,6 +162,20 @@ public class TouchControlsTest {
         assertEquals(0, overlay.rt);
     }
 
+    /** Wave 4: a library check's run (XBA-130) never shows the on-screen pad, even in Auto with no controller. */
+    @Test
+    public void neverDuringALibraryCheck() {
+        touch.checkRun(true);
+        touch.start();
+        assertFalse(touch.shown());
+        assertFalse("no pad 0 of the overlay beside the check's scripted pad 1", overlay.on);
+        touch.onTouch();
+        touch.onInputDeviceRemoved(1);
+        assertFalse(touch.shown());
+        touch.checkRun(false);
+        assertTrue("an ordinary start: Auto shows it again", touch.shown());
+    }
+
     @Test
     public void hiddenWithAControllerAndWhenOneIsUsed() {
         controller = true;

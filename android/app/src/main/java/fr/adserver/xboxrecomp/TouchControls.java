@@ -29,7 +29,7 @@ final class TouchControls implements InputManager.InputDeviceListener {
     private final Devices devices;
     final TouchPadView view;
     private TouchSettings settings = new TouchSettings();
-    private boolean used, panel, shown;
+    private boolean used, panel, shown, checked;
 
     TouchControls(Activity a, OverlayMixer mixer, Devices devices) {
         this.activity = a;
@@ -68,6 +68,18 @@ final class TouchControls implements InputManager.InputDeviceListener {
         if (panel != on) {
             panel = on;
             update(on ? "panel shown" : "panel gone");
+        }
+    }
+
+    /**
+     * A library check's run (XBA-130): never shown, whatever the setting. The check drives pad 1 from its own script
+     * (RECOMP_PAD_LIVE) and measures the game as played with a controller; an on-screen pad would add a pad 0 of its
+     * own and cover the screen the check grades.
+     */
+    void checkRun(boolean on) {
+        if (checked != on) {
+            checked = on;
+            update(on ? "library check" : "not a library check");
         }
     }
 
@@ -123,7 +135,7 @@ final class TouchControls implements InputManager.InputDeviceListener {
     }
 
     void update(String why) {
-        show(TouchSettings.visible(settings.mode, devices.any(), used, panel), why);
+        show(!checked && TouchSettings.visible(settings.mode, devices.any(), used, panel), why);
     }
 
     private void show(boolean on, String why) {
