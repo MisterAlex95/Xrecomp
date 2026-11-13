@@ -25,18 +25,28 @@ from tools.disasm.synthetic import (DATA, Title, code_labels,        # noqa: E40
 LAYOUTS = ((16, 0xCC), (1, 0xCC), (4, 0x90), (8, 0xCC), (16, 0x00))
 
 
-def analyse(t, tmp_path, level, cap=None, imports=CORPUS_IMPORTS, name="default.xbe"):
-    """tools.xbe_parser + tools.disasm on title `t`: (functions by start, summary)."""
+def analyse(t, tmp_path, level, cap=None, imports=CORPUS_IMPORTS, name="default.xbe", strict=False):
+    """tools.xbe_parser + tools.disasm on title `t`: (functions by start, summary).
+    strict: RECOMP_STATIC_DISCOVERY_STRICT, the tightening of the older passes
+    (off by default, wave 5); the decoy tests run with it on."""
     from tools.xbe_parser.xbe_parser import XBEParser, export_json
     from tools.disasm.disasm import Disassembler
     os.makedirs(tmp_path, exist_ok=True)
     xbe = t.write(os.path.join(tmp_path, name), "entry", imports=imports)
     xjson = xbe[:-4] + "_analysis.json"
     export_json(XBEParser(xbe).parse(), xjson)
-    out = os.path.join(tmp_path, "out-%d" % level)
-    with contextlib.redirect_stdout(io.StringIO()):
-        assert Disassembler(xbe, analysis_json=xjson, output_dir=out, force=True,
-                            static_discovery=level, discovery_cap=cap).run()
+    out = os.path.join(tmp_path, "out-%d%s" % (level, "s" if strict else ""))
+    saved = os.environ.get(discovery.ENV_STRICT)
+    os.environ[discovery.ENV_STRICT] = "1" if strict else "0"
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            assert Disassembler(xbe, analysis_json=xjson, output_dir=out, force=True,
+                                static_discovery=level, discovery_cap=cap).run()
+    finally:
+        if saved is None:
+            os.environ.pop(discovery.ENV_STRICT, None)
+        else:
+            os.environ[discovery.ENV_STRICT] = saved
     funcs = json.load(open(os.path.join(out, "functions.json")))
     summary = json.load(open(os.path.join(out, "summary.json")))
     return {int(f["start"], 16): f for f in funcs}, summary
@@ -49,7 +59,7 @@ def targets(t):
 @pytest.mark.parametrize("al,fill", LAYOUTS)
 def test_every_target_is_found_and_no_decoy(tmp_path, al, fill):
     t, decoys = discovery_corpus(al, fill)
-    funcs, summary = analyse(t, str(tmp_path), discovery.FULL)
+    funcs, summary = analyse(t, str(tmp_path), discovery.FULL, strict=True)
     missing = sorted(n for va, n in targets(t).items() if va not in funcs)
     assert not missing, missing
     seeded = sorted(k for k, va in decoys.items() if va in funcs)
@@ -67,7 +77,7 @@ def test_the_shapes_the_passes_before_missed(tmp_path, al, fill):
     """Off, the run would have to reveal these; on, they are found."""
     t, _ = discovery_corpus(al, fill)
     off, _ = analyse(t, str(tmp_path), discovery.OFF)
-    on, summary = analyse(t, str(tmp_path), discovery.FULL)
+    on, summary = analyse(t, str(tmp_path), discovery.FULL, strict=True)
     va = t.va
     # The thread routine packed after a noreturn kernel call, the gap
     # function nothing references and the code after `jmp $`.
@@ -150,7 +160,7 @@ def test_decoy_corpus_false_positive_rate(tmp_path, capsys):
     titles = seeded = decoys = before = before_titles = 0
     for seed in range(40):
         t, words = _decoy_title(seed)
-        funcs, _ = analyse(t, str(tmp_path / str(seed)), discovery.FULL, imports=())
+        funcs, _ = analyse(t, str(tmp_path / str(seed)), discovery.FULL, imports=(), strict=True)
         bad = sorted(a for a in funcs if a in words)
         titles += 1
         decoys += len(words)
@@ -198,7 +208,12 @@ def test_the_e2e_title_needs_no_run(tmp_path):
     for name in ("thread_fn", "m1", "gap_fn", "fatal", "make_obj"):
         assert t.va(name) in on, name
     assert t.va("thread_fn") not in off and t.va("gap_fn") not in off
-    assert not [n for n, add in E2E_DECOYS if t.va(n) + add in on]
+    # Keeping its decoys out is the tightening of the older passes: strict
+    # (wave 5). By default they are what the passes before XBA-137 made of them.
+    strict, _ = analyse(t, str(tmp_path), discovery.FULL, imports=E2E_IMPORTS, strict=True)
+    for name in ("thread_fn", "m1", "gap_fn", "fatal", "make_obj"):
+        assert t.va(name) in strict, name
+    assert not [n for n, add in E2E_DECOYS if t.va(n) + add in strict]
 
 
 def test_rtti_vtable_methods(tmp_path):
@@ -223,7 +238,8 @@ def test_rtti_vtable_methods(tmp_path):
     r.label("bcd").abs("td").u32(0).u32(0).u32(0xFFFFFFFF).u32(0).u32(0)
     r.abs("col")
     r.label("vtbl").abs("m0").abs("method").u32(0)
-    on, s = analyse(t, str(tmp_path), discovery.STRONG, imports=(49,))
+    # strict: by default the older table-word pass names it an alias first.
+    on, s = analyse(t, str(tmp_path), discovery.STRONG, imports=(49,), strict=True)
     assert t.va("method") in on and on[t.va("method")]["detection_method"] == "rtti_vtable", \
         on.get(t.va("method"))
     assert int(on[t.va("die")]["end"], 16) == t.va("method")
@@ -248,7 +264,7 @@ def test_seh_filter_away_from_its_function(tmp_path):
     x.label("die").hex("6a02").call("fatal")
     x.label("filter").hex("b801000000 c3").align(16)
     r.label("scopetbl").u32(0xFFFFFFFF).abs("filter").abs("resume")
-    on, s = analyse(t, str(tmp_path), discovery.STRONG, imports=(49,))
+    on, s = analyse(t, str(tmp_path), discovery.STRONG, imports=(49,), strict=True)
     assert on.get(t.va("filter"), {}).get("detection_method") == "seh_funclet", on.get(t.va("filter"))
     assert int(on[t.va("guarded")]["end"], 16) > t.va("resume")
 
@@ -280,7 +296,7 @@ def test_random_blobs_between_functions(tmp_path, capsys):
         r.u32(rnd.randrange(1 << 32))
     t._layout()
     labels = {t.va(name) for name in t.labels()}
-    on, _ = analyse(t, str(tmp_path), discovery.FULL, imports=())
+    on, _ = analyse(t, str(tmp_path), discovery.FULL, imports=(), strict=True)
     off, _ = analyse(t, str(tmp_path), discovery.OFF, imports=())
     false_on = sorted(a for a in on if a not in labels)
     false_off = sorted(a for a in off if a not in labels)
@@ -291,3 +307,41 @@ def test_random_blobs_between_functions(tmp_path, capsys):
     with capsys.disabled():
         print("\n  random blobs: %d functions, found %d -> %d, false starts %d -> %d (off -> on)"
               % (len(labels), found_off, found_on, len(false_off), len(false_on)))
+
+
+def test_strict_off_finds_every_function_the_passes_before_found(tmp_path):
+    """Wave 5: by default (RECOMP_STATIC_DISCOVERY_STRICT off) static
+    discovery loses nothing the analysis before XBA-137 (level 0) found, on
+    the whole synthetic corpus (the layouts, decoy titles, the e2e title):
+    each of its function starts is still a start, or lies inside a body the
+    default level measured (still lifted). On the corpus the only such ones
+    are the case arms of the register-dispatched switch, which the additive
+    register-dispatch pass now keeps in their function. The tightening of
+    the older passes, which drops starts, is the strict switch's alone."""
+    from tools.disasm.synthetic import E2E_IMPORTS, discovery_e2e_title
+    cases = [(discovery_corpus(al, fill)[0], CORPUS_IMPORTS, "%d%x" % (al, fill)) for al, fill in LAYOUTS]
+    cases += [(_decoy_title(seed)[0], (), "d%d" % seed) for seed in range(0, 40, 4)]
+    cases.append((discovery_e2e_title(), E2E_IMPORTS, "e2e"))
+    dropped_by_strict = 0
+    for t, imports, name in cases:
+        off, _ = analyse(t, str(tmp_path / name), discovery.OFF, imports=imports)
+        on, s = analyse(t, str(tmp_path / name), discovery.FULL, imports=imports)
+        bodies = sorted((int(f["start"], 16), int(f["end"], 16)) for f in on.values())
+        inside = lambda a: any(lo < a < hi for lo, hi in bodies)          # noqa: E731
+        lost = sorted("%08X %s" % (a, off[a]["detection_method"]) for a in off if a not in on and not inside(a))
+        assert not lost, (name, lost)
+        labels = code_labels(t)
+        absorbed = [labels.get(a, "%08X" % a) for a in off if a not in on]
+        assert all(n.startswith("R_c") for n in absorbed), (name, absorbed)
+        assert s["discovery"]["strict"] is False
+        strict, _ = analyse(t, str(tmp_path / name), discovery.FULL, imports=imports, strict=True)
+        dropped_by_strict += sum(1 for a in off if a not in strict)
+    assert dropped_by_strict > 0        # what the switch is for: strict does tighten
+
+
+def test_the_strict_switch_is_read_and_stamped(monkeypatch):
+    from tools.prepare.discovered import mode_suffix
+    assert not discovery.strict_from_env({})
+    assert discovery.strict_from_env({discovery.ENV_STRICT: "1"})
+    assert mode_suffix({}) == ""
+    assert mode_suffix({discovery.ENV_STRICT: "1"}) == "|sd=2::strict"

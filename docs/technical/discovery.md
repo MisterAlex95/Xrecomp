@@ -121,12 +121,19 @@ analysis looks, before any run, for what a run would reveal (`tools/disasm/disco
 | switch tables | a table in `.rdata`/`.data` bounded by the `cmp; ja` before its dispatch, a byte-indexed two-level table, `mov reg, [idx*4 + table]; jmp reg`: the arms stay in their function and are never entries (`engine.py`) | every entry in the dispatch's section |
 | `gap_body` (level 2) | bytes in a gap, after padding or a terminator, nothing references (code reached through a computed address) | a closed body in the gap, a balanced stack, callee-saved registers saved before they are written, whole-argument `ret N`, none of what data decodes into, three instructions or a prologue, aligned after padding or a prologue when packed unaligned |
 
-The weak passes that were there before (table words, padding boundaries) take the same body gates at level 1 and up:
-a table word that names the middle of a path inside a function (the `mov ebp, esp` after `push ebp`, the `ret` after a
-`pop`) is no longer an alias, nor bytes in a gap that close by chance.
+The weak passes that were there before (table words, padding boundaries, starts after a ret, a data section's
+switch-table words) take the same body gates under `RECOMP_STATIC_DISCOVERY_STRICT=1` (off by default, wave 5): a
+table word that names the middle of a path inside a function (the `mov ebp, esp` after `push ebp`, the `ret` after a
+`pop`) is no longer an alias, nor bytes in a gap that close by chance. That keeps the decoys out (the decoy tests run
+with it), but on synthetic titles it drops 6-14 % of the starts those passes found, and on a real title one may be
+genuine: it waits for the owner's comparison of the function counts on the reference titles. By default static
+discovery only adds: `test_strict_off_finds_every_function_the_passes_before_found` pins that every start the
+analysis before XBA-137 found is still a start or inside a measured body (the register-dispatched switch's arms,
+which the new pass keeps in their function).
 
-**Switches**: `RECOMP_STATIC_DISCOVERY` (`2` default, `1` strong evidence only, `0` as before) and
-`RECOMP_STATIC_DISCOVERY_CAP` (at most this many percent more functions), or `tools.disasm --static-discovery /
+**Switches**: `RECOMP_STATIC_DISCOVERY` (`2` default, `1` strong evidence only, `0` as before),
+`RECOMP_STATIC_DISCOVERY_CAP` (at most this many percent more functions) and `RECOMP_STATIC_DISCOVERY_STRICT`
+(above), or `tools.disasm --static-discovery /
 --discovery-cap` ([environment-variables.md](../runtime/environment-variables.md)). Off their default they change
 the prepare's stamp.
 

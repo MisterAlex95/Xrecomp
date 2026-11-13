@@ -1352,8 +1352,10 @@ class FunctionDetector:
                                 inside_a_function(va + 3)):
                     continue
                 # A switch table outside code (a data section's, measured by
-                # engine.measure_external_tables) holds case labels too.
-                if in_jump_table(va):
+                # engine.measure_external_tables) holds case labels too: not
+                # function pointers, under RECOMP_STATIC_DISCOVERY_STRICT (a
+                # tightening of this older pass, off by default, wave 5).
+                if in_jump_table(va) and (is_code or self._disc().strict):
                     continue
                 value = int.from_bytes(data[off:off + 4], "little")
                 if in_code_section(value):

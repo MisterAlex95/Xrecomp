@@ -79,11 +79,14 @@ def digest(path):
 def mode_suffix(env=None):
     """What the stamp keeps of the static discovery switches (XBA-137,
     tools/disasm/discovery.py): "" for the default (level 2, no cap), so a
-    stamp made with the default stays valid; otherwise "|sd=<level>:<cap>",
-    so flipping RECOMP_STATIC_DISCOVERY(_CAP) analyses again."""
-    from tools.disasm.discovery import FULL, cap_from_env, level_from_env
-    level, cap = level_from_env(env), cap_from_env(env)
-    return "" if (level, cap) == (FULL, None) else "|sd=%d:%s" % (level, "" if cap is None else "%g" % cap)
+    stamp made with the default stays valid; otherwise "|sd=<level>:<cap>"
+    (and ":strict" with RECOMP_STATIC_DISCOVERY_STRICT), so flipping
+    RECOMP_STATIC_DISCOVERY(_CAP, _STRICT) analyses again."""
+    from tools.disasm.discovery import FULL, cap_from_env, level_from_env, strict_from_env
+    level, cap, strict = level_from_env(env), cap_from_env(env), strict_from_env(env)
+    if (level, cap, strict) == (FULL, None, False):
+        return ""
+    return "|sd=%d:%s%s" % (level, "" if cap is None else "%g" % cap, ":strict" if strict else "")
 
 
 def analysis_counts(an):

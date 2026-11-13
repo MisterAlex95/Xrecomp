@@ -295,7 +295,8 @@ class Disassembler:
         return True
 
     def _discovery_key(self) -> str:
-        return f"{self.static_discovery}:{self.discovery_cap}"
+        from .discovery import strict_from_env
+        return f"{self.static_discovery}:{self.discovery_cap}" + (":strict" if strict_from_env() else "")
 
     def _detector(self) -> FunctionDetector:
         """The function detector, with static discovery as configured."""

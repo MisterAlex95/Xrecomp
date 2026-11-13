@@ -43,6 +43,18 @@ Switches (docs/runtime/environment-variables.md):
   RECOMP_STATIC_DISCOVERY      0 off, 1 strong evidence only, 2 (default) all
   RECOMP_STATIC_DISCOVERY_CAP  at most this many percent more functions than
                                the passes before found (default: no cap)
+  RECOMP_STATIC_DISCOVERY_STRICT  1: also tighten the OLDER passes (wave 5):
+                               a start after a ret must be a compiled body,
+                               a table word must not name the middle of a
+                               path nor random bytes that close, and a data
+                               section's switch table holds no function
+                               pointers. Off by default: on synthetic titles
+                               it drops 6-14 % of the functions the older
+                               passes found, and on a real title one of them
+                               may be genuine; on once the owner has compared
+                               the counts on the reference titles. The new
+                               passes above (strong evidence, gaps) only add,
+                               and stay on.
 tools.disasm --static-discovery / --discovery-cap override them.
 """
 
@@ -52,6 +64,7 @@ from typing import Dict, List, Optional, Set, Tuple
 
 ENV_LEVEL = "RECOMP_STATIC_DISCOVERY"
 ENV_CAP = "RECOMP_STATIC_DISCOVERY_CAP"
+ENV_STRICT = "RECOMP_STATIC_DISCOVERY_STRICT"
 OFF, STRONG, FULL = 0, 1, 2
 
 # Kernel calls that never return: a body ends at them.
@@ -104,6 +117,12 @@ def level_from_env(env=None) -> int:
         return max(OFF, min(FULL, int(v)))
     except ValueError:
         return OFF if v.lower() in ("off", "no", "false") else FULL
+
+
+def strict_from_env(env=None) -> bool:
+    """RECOMP_STATIC_DISCOVERY_STRICT: 1/on/yes/true tightens the older passes."""
+    v = (env if env is not None else os.environ).get(ENV_STRICT, "").strip().lower()
+    return v in ("1", "on", "yes", "true")
 
 
 def cap_from_env(env=None) -> Optional[float]:
@@ -229,11 +248,15 @@ class StaticDiscovery:
     """The passes above, run by FunctionDetector.detect_all (functions.py)."""
 
     def __init__(self, detector, level: int = FULL, cap: Optional[float] = None,
-                 rtti_methods=()):
+                 rtti_methods=(), strict: Optional[bool] = None):
         self.d = detector
         self.engine = detector.engine
         self.image = detector.image
         self.level = level
+        # The tightening of the older passes (table words, after-ret starts,
+        # data-section switch tables): RECOMP_STATIC_DISCOVERY_STRICT, off
+        # by default (see the module docstring).
+        self.strict = strict_from_env() if strict is None else bool(strict)
         self.cap = cap
         self.rtti_methods = set(rtti_methods or ())
         self.stats: Dict[str, int] = {m: 0 for m in METHODS}
@@ -278,7 +301,7 @@ class StaticDiscovery:
         self.refused[why] = self.refused.get(why, 0) + 1
 
     def summary(self) -> dict:
-        return {"level": self.level, "cap": self.cap, "capped": self.capped,
+        return {"level": self.level, "strict": self.strict, "cap": self.cap, "capped": self.capped,
                 "added": dict(self.stats), "refused": dict(sorted(self.refused.items()))}
 
     # -- shared tests -----------------------------------------------------
@@ -316,7 +339,7 @@ class StaticDiscovery:
         written for. A word that names the `mov ebp, esp` after a `push ebp`,
         or the ret after a `pop`, is a decoy: on the decoy corpus every
         suffix-entry alias was one. Level 1 and up."""
-        if self.level < STRONG:
+        if self.level < STRONG or not self.strict:
             return True
         prev = self._prev_insn(target)
         if prev is not None and (prev.is_ret or prev.is_jump
@@ -329,7 +352,7 @@ class StaticDiscovery:
         """A data word naming bytes in a gap, without a prologue: the body
         must not hold what data decodes into, and its stack must balance.
         Level 1 and up."""
-        if self.level < STRONG or self.engine.probes_as_prologue(target):
+        if self.level < STRONG or not self.strict or self.engine.probes_as_prologue(target):
             return True
         # Where a compiler starts a function: aligned, after padding, or
         # straight after a path's end. A word into the middle of a blob
@@ -387,7 +410,7 @@ class StaticDiscovery:
         """functions.py's _pass_gap_prologues: a start right after a ret
         that opens with a lone register push or is a constant accessor must
         also be a compiled body (_plausible_body). Level 1 and up."""
-        if self.level < STRONG or self._frame_prologue(addr):
+        if self.level < STRONG or not self.strict or self._frame_prologue(addr):
             return True
         decoded = self._cfg(addr, upper)
         if decoded and self._plausible_body(decoded, addr, upper):
