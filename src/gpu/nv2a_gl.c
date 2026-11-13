@@ -80,7 +80,7 @@ static int s_recheck_frame;        /* RECOMP_GPU_TEX_RECHECK=frame */
 static int s_recheck_switch;       /* RECOMP_GPU_TEX_RECHECK=switch: the old policy */
 static int s_cull = 1;             /* RECOMP_GPU_CULL (default on) */
 static int s_cpu_writes = 1;       /* RECOMP_GPU_CPU_WRITES (default on): rt_cpu_check */
-static float s_point_max = 1.0f;   /* GL_ALIASED_POINT_SIZE_RANGE's top */
+static float s_point_max = 1.0f;   /* the point size range's top */
 static float s_line_max = 1.0f;    /* GL_ALIASED_LINE_WIDTH_RANGE's top (GLES only) */
 static int s_mips = 1;             /* RECOMP_GPU_MIPS (default on): every mip level */
 static float s_lodb[4];            /* each stage's LOD bias this batch (u_lodb) */
@@ -572,7 +572,14 @@ static int ensure_init(void)
          * widths over 1, and macOS reports [1, 1] anyway. */
         GLfloat r[2] = { 1.0f, 1.0f };
         s_line_width = 1.0f;            /* a new context's */
+        /* GLES names the range ALIASED_POINT_SIZE_RANGE; core desktop GL
+         * dropped that name with the compatibility profile (Apple's gl3.h
+         * does not declare it) and keeps POINT_SIZE_RANGE. */
+#if NV2A_GL_ES
         glGetFloatv(GL_ALIASED_POINT_SIZE_RANGE, r);
+#else
+        glGetFloatv(GL_POINT_SIZE_RANGE, r);
+#endif
         s_point_max = r[1] >= 1.0f ? r[1] : 1.0f;
 #if NV2A_GL_ES
         r[0] = r[1] = 1.0f;
