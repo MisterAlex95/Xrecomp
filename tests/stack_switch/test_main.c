@@ -10,12 +10,16 @@
  *
  * (Fable's scheduler without the cli/sti and fs:[0]), copied from the
  * translator's output; the other guest functions are written the same way.
+ * Where the sti was, the bytes just popped are written over, as an interrupt
+ * handler let in there does: the runtime must not tell contexts apart by them.
  *
  *   1. two coroutines: the first switch starts the other side at the address
  *      its ret pops, every later one resumes it, and each side comes back out
  *      of the call it left with its esp and registers
  *   2. copy-stack fibers (Fable's shape): two fibers parked at the same esp and
- *      the same return address, told apart by their stack bytes
+ *      the same return address, told apart by their stack bytes; then two
+ *      that only differ past their first 64 bytes (the same job under the same
+ *      frames with the same registers, Fable's loader fibers)
  *   3. a coroutine whose body returns into an exit routine continues there
  *   4. a switch to a place no context is parked at and no function starts is
  *      the old behaviour, recorded in the discovery file
@@ -25,6 +29,8 @@
  *   own back when it resumes, and for a new stack in a heap block, its top
  *   (scenario 1's B; scenario 5's B is not in one: unknown)
  *   off: RECOMP_STACK_SWITCH=0 (argv[1] = "off") is the old behaviour
+ *   RECOMP_STACK_SWITCH_WHOLE=0: twins by their first 64 bytes only, which
+ *   mixes up the fibers alike over them (checked as such)
  */
 #define RECOMP_GENERATED_CODE
 #include "recomp_types.h"
@@ -54,6 +60,8 @@ static int failures;
 #define VA_A_RET     0x00011140u    /* after A's call to the switch */
 #define VA_FIBER     0x00011200u    /* a copy-stack fiber's entry */
 #define VA_FIBER_RET 0x00011220u    /* after a fiber's call to the switch */
+#define VA_DEEP      0x00011280u    /* a fiber that is itself only far up its stack */
+#define VA_DEEP_RET  0x000112A0u
 #define VA_BODY      0x00011300u    /* scenario 3: a body that returns */
 #define VA_EXIT      0x00011340u    /* ...into this exit routine */
 #define VA_EXIT_RET  0x00011360u
@@ -94,6 +102,9 @@ static void sub_00011000(void)      /* the switch, as lifted */
     POP32(esp, esi);
     POP32(esp, ebp);
     POP32(esp, ebx);
+    /* Fable's has an sti here: a posted interrupt runs on this stack and
+     * writes over what was just popped. */
+    memset(guest + (_ss_load - GUEST_BASE), 0xEE, esp - _ss_load);
     g_ebp = ebp; g_seh_ebp = ebp; if (_ss_save) recomp_stack_switch_ret(_ss_save, _ss_load, _ss_entry, 0u, _ss_site); esp += 4; return; /* ret */
 }
 
@@ -161,9 +172,10 @@ static void two_coroutines(uint32_t slot, uint32_t a_top, uint32_t b_top, int ro
 
 #define SHARED_TOP  0x00170000u     /* one stack area for every fiber */
 #define FIBER_BYTES 0x200u          /* at most this much of it per fiber */
-static uint32_t fiber_save[2] = { 0x00160000u, 0x00161000u };   /* each fiber's saved bytes */
-static uint32_t fiber_len[2];
-static unsigned fiber_count[2], fiber_bad;
+static uint32_t fiber_save[4] = { 0x00160000u, 0x00161000u,     /* each fiber's saved bytes */
+                                  0x00162000u, 0x00163000u };
+static uint32_t fiber_len[4];
+static unsigned fiber_count[4], fiber_bad;
 
 static void sub_00011200(void)      /* a fiber: ebx names it */
 {
@@ -174,6 +186,24 @@ static void sub_00011200(void)      /* a fiber: ebx names it */
         if (MEM32(esp) != (0xF1BE0000u | id) || ebx != id)
             fiber_bad++;
         PUSH32(esp, VA_FIBER_RET);
+        sub_00011000();
+    }
+}
+
+/* A fiber whose own word is 96 bytes above where it parks, under frames and
+ * registers every such fiber has alike. */
+static void sub_00011280(void)
+{
+    uint32_t id = ebx;              /* C local, on the fiber's host stack */
+    PUSH32(esp, 0xDEE90000u | id);
+    for (int i = 0; i < 19; i++)
+        PUSH32(esp, 0x5A5A5A5Au);   /* frames in between: the same for all */
+    for (;;) {
+        fiber_count[id]++;
+        if (MEM32(esp + 19 * 4) != (0xDEE90000u | id))
+            fiber_bad++;
+        ebx = 0;                    /* nothing of its own in the registers */
+        PUSH32(esp, VA_DEEP_RET);
         sub_00011000();
     }
 }
@@ -193,14 +223,14 @@ static void resume_fiber(int id)
     memcpy(guest + (fiber_save[id] - GUEST_BASE), guest + (sp - GUEST_BASE), fiber_len[id]);
 }
 
-static void new_fiber(int id)
+static void new_fiber(int id, uint32_t entry)
 {
     uint32_t b = fiber_save[id];
     MEM32(b + 0x00) = 0;            /* edi */
     MEM32(b + 0x04) = 0;            /* esi */
     MEM32(b + 0x08) = 0;            /* ebp */
     MEM32(b + 0x0C) = (uint32_t)id; /* ebx */
-    MEM32(b + 0x10) = VA_FIBER;     /* ret */
+    MEM32(b + 0x10) = entry;        /* ret */
     MEM32(b + 0x14) = 0;
     fiber_len[id] = 0x18;
 }
@@ -229,6 +259,7 @@ recomp_func_t recomp_lookup(uint32_t va)
     case VA_SW:     return sub_00011000;
     case VA_CO_B:   return sub_00011100;
     case VA_FIBER:  return sub_00011200;
+    case VA_DEEP:   return sub_00011280;
     case VA_BODY:   return sub_00011300;
     case VA_EXIT:   return sub_00011340;
     default:        return NULL;
@@ -310,8 +341,8 @@ int main(int argc, char **argv)
         unsigned want[2] = { 0, 0 };
         int before = failures;
         t_slot = 0x00100004u;
-        new_fiber(0);
-        new_fiber(1);
+        new_fiber(0, VA_FIBER);
+        new_fiber(1, VA_FIBER);
         for (unsigned k = 0; k < sizeof order / sizeof order[0]; k++) {
             resume_fiber(order[k]);
             want[order[k]]++;
@@ -321,6 +352,30 @@ int main(int argc, char **argv)
         CHECK(recomp_stack_switch_started() == 3);
         printf("  2. copy-stack fibers, %u + %u resumes: %s\n", want[0], want[1],
                failures > before ? "FAIL" : "ok");
+
+        /* The same with two fibers alike over their first 64 bytes: only the
+         * whole stack says which one the resumer copied back. With
+         * RECOMP_STACK_SWITCH_WHOLE=0 (the A/B) the first 64 bytes cannot. */
+        const char *whole = getenv("RECOMP_STACK_SWITCH_WHOLE");
+        int first64 = whole && *whole == '0';
+        before = failures;
+        want[0] = want[1] = 0;
+        new_fiber(2, VA_DEEP);
+        new_fiber(3, VA_DEEP);
+        for (unsigned k = 0; k < sizeof order / sizeof order[0]; k++) {
+            resume_fiber(2 + order[k]);
+            want[order[k]]++;
+        }
+        if (first64) {
+            CHECK(fiber_bad != 0);  /* the A/B tells them apart by 64 bytes: it cannot */
+        } else {
+            CHECK(fiber_count[2] == want[0] && fiber_count[3] == want[1]);
+            CHECK(fiber_bad == 0);
+        }
+        CHECK(recomp_stack_switch_started() == 5);
+        printf("  2. copy-stack fibers alike over 64 bytes%s, %u + %u resumes: %s\n",
+               first64 ? " (first 64 bytes only: mixed up, as expected)" : "", want[0],
+               want[1], failures > before ? "FAIL" : "ok");
     }
 
     /* 3 */
@@ -369,7 +424,7 @@ int main(int argc, char **argv)
         pthread_t th;
         CHECK(pthread_create(&th, NULL, thread_main, NULL) == 0);
         pthread_join(th, NULL);
-        CHECK(recomp_stack_switch_started() == 5);
+        CHECK(recomp_stack_switch_started() == 7);
         printf("  5. another host thread: %s\n", failures > before ? "FAIL" : "ok");
     }
 
