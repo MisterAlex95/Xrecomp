@@ -235,12 +235,13 @@ def c_name(layer_key, fn):
     return "%s__%s" % (layer_key.replace("/", "_"), fn)
 
 
-def resolve(tid, ident, root=PROFILES):
+def resolve(tid, ident, root=PROFILES, title_layer=True):
     """The merged profile for title ID `tid` (8 hex digits), or None when no
     layer applies (the generic template only). ProfileError for a layer that
-    is not well formed."""
+    is not well formed. title_layer=False leaves profiles/titles/<tid> out,
+    the layers it names included: what any unknown title gets (XBA-108)."""
     title_key = "titles/%s" % tid.lower()
-    title = load_layer(title_key, root)
+    title = load_layer(title_key, root) if title_layer else None
     auto = auto_layers(ident, root)
     keys = list(auto)
     missing = []

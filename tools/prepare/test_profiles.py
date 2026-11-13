@@ -378,3 +378,10 @@ def test_applies_imports_is_checked(tmp_path):
         layer(tmp_path, "xdk/d3d8", {"applies": {"libraries": ["D3D8"], "imports": bad}})
         with pytest.raises(profiles.ProfileError, match="applies.imports"):
             profiles.auto_layers(dict(ident({}), imports=[3]), str(tmp_path))
+
+
+def test_without_the_title_layer_a_title_is_any_title(tree):
+    layer(tree, "titles/4d530001", {"name": "T", "layers": ["xdk/dsound"], "env_default": {"RECOMP_X": "1"}})
+    p = profiles.resolve("4D530001", ident({"D3D8": 5849}), str(tree), title_layer=False)
+    assert p["keys"] == ["xdk/d3d8"] and not p["title"] and "RECOMP_X" not in p["env_default"]["desktop"]
+    assert profiles.resolve("4D530001", ident({"XNET": 5849}), str(tree), title_layer=False) is None

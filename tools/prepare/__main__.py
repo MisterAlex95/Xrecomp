@@ -298,7 +298,17 @@ def load_profile(tid, ident):
     """The merged profile layers for this title (tools.prepare.profiles), or
     None. Raises profiles.ProfileError."""
     from tools.prepare import profiles
-    return profiles.resolve(tid, ident, PROFILES)
+    if no_title_layer():
+        print("  profile: the title layer is left out (--no-title-layer / XBA_NO_TITLE_LAYER)",
+              file=sys.stderr, flush=True)
+    return profiles.resolve(tid, ident, PROFILES, title_layer=not no_title_layer())
+
+
+def no_title_layer():
+    """--no-title-layer, or XBA_NO_TITLE_LAYER=1 in the environment (what a
+    launcher's child inherits): prepare as for a title nobody has a profile
+    for. The option sets the variable, so the disc's other images follow."""
+    return os.environ.get("XBA_NO_TITLE_LAYER", "") not in ("", "0")
 
 
 def sync_generated(new_dir, dest_dir):
@@ -437,6 +447,9 @@ def main(argv=None):
                     help="extract the disc image into <work>/game for the desktop build, as before XBA-126 "
                          "(default: the build reads the image in place)")
     ap.add_argument("--force", action="store_true", help="redo every step")
+    ap.add_argument("--no-title-layer", action="store_true",
+                    help="leave profiles/titles/<title id> out: prepare as for an unknown title "
+                         "(also XBA_NO_TITLE_LAYER=1 in the environment)")
     mi = ap.add_argument_group("for a launcher (docs/macos/launcher.md « Prepare interface »)")
     mi.add_argument("--progress", action="store_true",
                     help="also print XBA_PROGRESS / XBA_RESULT lines (tools/prepare/progress.py)")
@@ -468,6 +481,8 @@ def main(argv=None):
     mi.add_argument("--game-dir", help=argparse.SUPPRESS)    # D:\ for an image that is not the disc root's
     mi.add_argument("--image-name", help=argparse.SUPPRESS)  # that image's disc path (XeImageFileName)
     a = ap.parse_args(argv)
+    if a.no_title_layer:
+        os.environ["XBA_NO_TITLE_LAYER"] = "1"
     if a.android:
         from tools.prepare import android
         return android.run(a, sys.modules[__name__])
