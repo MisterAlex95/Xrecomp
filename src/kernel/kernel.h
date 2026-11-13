@@ -478,10 +478,12 @@ typedef VOID (*PIO_APC_ROUTINE)(
  * The address is parsed from the XBE header at runtime. Game code calls kernel
  * functions via: call [thunk_addr]. We fill this table with our xbox_* implementations.
  *
- * Legacy define for backward compatibility (Burnout 3 address).
- * New code should use xbox_kernel_set_thunk_address() instead.
+ * The initial value is 0, « not set »: xbox_MemoryLayoutInit() sets the
+ * title's own address (xbox_kernel_set_thunk_address()) and
+ * xbox_kernel_bridge_init() refuses to patch without one. (It used to be one
+ * title's address, which patched whatever lived there for every other title.)
  */
-#define XBOX_KERNEL_THUNK_TABLE_BASE  0x0036B7C0  /* default; overridden at runtime */
+#define XBOX_KERNEL_THUNK_TABLE_BASE  0x00000000  /* not set; set at runtime */
 /* The real kernel's export directory has 378 slots, of which 371 are exported
  * (ordinals 367-373 are null). Verified identical in xboxkrnl.exe from builds
  * 3944, 4039 and 5455, so this is stable across the console's life. The old
@@ -498,7 +500,7 @@ typedef VOID (*PIO_APC_ROUTINE)(
  * Set the kernel thunk table address for the current game.
  * Call this BEFORE xbox_kernel_bridge_init(). The address is parsed
  * from the XBE header's KernelImageThunkAddress field.
- * If not called, the default (a legacy title's 0x0036B7C0) is used.
+ * If not called, xbox_kernel_bridge_init() finds no table and patches nothing.
  */
 void xbox_kernel_set_thunk_address(uint32_t xbox_va, uint32_t count);
 
@@ -572,6 +574,8 @@ void xbox_path_init(const char* game_dir, const char* save_dir);
  * <user root>/Cache/<title id in lower case>, the user root being
  * RECOMP_SAVE_DIR when set and the save dir otherwise. */
 void xbox_path_set_title_id(uint32_t title_id);
+/* That ID, 0 before xbox_MemoryLayoutInit has read the certificate. */
+uint32_t xbox_path_title_id(void);
 /* That folder on the host (UTF-8), for host code that watches what the title
  * writes to Z: (Fable's data-preparation progress). */
 const char *xbox_path_utility_dir_utf8(void);

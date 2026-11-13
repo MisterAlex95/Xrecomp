@@ -294,7 +294,7 @@ static void kernel_data_init(void)
                 if (n > 0x0BFF)
                     n = 0x0BFF;
                 BRIDGE_MEM32(page + 0) = 3;          /* LaunchDataType */
-                BRIDGE_MEM32(page + 4) = 0x45410091; /* title id */
+                BRIDGE_MEM32(page + 4) = xbox_path_title_id(); /* this title's */
                 for (i = 0; i < n; i++)
                     BRIDGE_MEM8(page + 0x400 + (uint32_t)i) =
                         (uint8_t)cmdline[i];
@@ -13435,6 +13435,11 @@ void xbox_kernel_bridge_init(void)
      * other thread. */
     xbox_DpcMarkGuestThread();
     guest_cpu_join();
+    if (!g_thunk_table_base) {
+        fprintf(stderr, "  Kernel thunk bridge: no thunk table address (the XBE "
+                        "header's was not read): nothing patched\n");
+        return;
+    }
     fprintf(stderr, "  Kernel thunk bridge: resolving %d entries at 0x%08X\n",
             g_thunk_table_count, g_thunk_table_base);
 
