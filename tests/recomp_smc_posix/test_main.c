@@ -14,11 +14,15 @@
  * read() into a code page is opened first; an indirect call into the heap,
  * the stack or the image's data is an exec_outside_image record with the
  * first bytes at the target, a null or wild pointer is not; RECOMP_SMC=0
- * protects nothing.
+ * protects nothing. The code-page stores are made with a guest handler chain
+ * live on the thread: XBA-132 raises other host faults on guest addresses to
+ * the guest's handlers, and a store into a protected code page must never be
+ * one of them (the SMC path is first in the fault handler).
  */
 #include "xbox_memory_layout.h"
 #include "recomp_discovery.h"
 #include "recomp_smc.h"
+#include "xbox_seh.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -137,6 +141,17 @@ int main(void)
     mem[0x16010] = 1; mem[0x17010] = 2; mem[0x18010] = 3; mem[0x1B900] = 4;
     CHECK(xbox_SmcCount() == 0);
 
+    /* A guest handler chain on this thread (one record on the guest stack), so
+     * XBA-132 would raise any other fault on a guest address to the guest. */
+    {
+        XboxSehStats st;
+        uint32_t rec = XBOX_STACK_TOP - 0x100;
+        *(volatile uint32_t *)(mem + rec) = 0xFFFFFFFFu;
+        *(volatile uint32_t *)(mem + rec + 4) = 0x00011000u;
+        *(volatile uint32_t *)(mem + g_fs_base) = rec;
+        xbox_SehStatsGet(&st, 1);
+    }
+
     if (hp == 4096) {
         /* The first store into a code page: recorded, page opened, store done. */
         mem[0x12345] = 0xC3;
@@ -157,6 +172,13 @@ int main(void)
             CHECK(xbox_SmcCount() == 4 && xbox_SmcProtectedPages() == 2);
             close(fd[0]); close(fd[1]);
         }
+    }
+
+    {
+        XboxSehStats st;
+        xbox_SehStatsGet(&st, 0);
+        CHECK(st.host_faults == 0 && st.raises == 0);   /* SMC first: none became a guest exception */
+        *(volatile uint32_t *)(mem + g_fs_base) = 0xFFFFFFFFu;
     }
 
     /* Running code that is not in the image. */
