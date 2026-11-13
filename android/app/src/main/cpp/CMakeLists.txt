@@ -32,6 +32,14 @@ if(TARGET xbox_framegen)
 endif()
 target_link_libraries(main PRIVATE -Wl,--whole-archive ${XBA_TOOLKIT_LIBS} -Wl,--no-whole-archive
                                    SDL2::SDL2 GLESv3 log android m)
+# The other consoles' runtimes (XBA-147, consoles/README.md): pack_loader.c hands a pack whose console is gba, ps1 or
+# n64 to <console>_runtime_start. Stubs for now; the root build leaves the consoles OFF on Android, so add them here.
+foreach(_console gba ps1 n64)
+    if(NOT TARGET ${_console}_runtime)
+        add_subdirectory("${XBOXRECOMP_ROOT}/consoles/${_console}/runtime" ${_console}_runtime)
+    endif()
+    target_link_libraries(main PRIVATE ${_console}_runtime)
+endforeach()
 
 # Release flags for the runtime (the software GPU, the kernel, audio): what a frame on the device spends its time in.
 # Every toolkit library pins -O2 in its own CMakeLists, after the NDK's per-configuration flags, so the NDK's -O3 for

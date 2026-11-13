@@ -22,6 +22,10 @@ import java.util.regex.Pattern;
  * "toolkit_sha256", "lib":"libtitle.so", "lib_sha256", "lib_size", "entry":"recomp_title_main", "cc", "built_at"}, and
  * "env_force":{"RECOMP_LSFG":"0", ...} when the title profile forces options (the native loader sets them over
  * recomp.cfg; the launcher only shows them).
+ *
+ * Other consoles (XBA-147, {@link Console}): "console" ("xbox" when absent, so every pack made before stays valid, same
+ * format 1) and, for gba / ps1 / n64, "title_key" in place of title_id. Such a pack is packs/&lt;console&gt;-&lt;key&gt;
+ * ({@link #check(File, Console, String)}, {@link #route}).
  */
 final class Pack {
     private Pack() {}
@@ -31,7 +35,8 @@ final class Pack {
     static final int FORMAT = 1;
     static final String PACKS_DIR = "packs", JSON = "pack.json";
 
-    enum Check { VALID, NO_TITLE_ID, NO_PACK, BAD_JSON, BAD_FORMAT, WRONG_TITLE, WRONG_SHELL_ABI, NO_LIB, LIB_SIZE }
+    enum Check { VALID, NO_TITLE_ID, NO_PACK, BAD_JSON, BAD_FORMAT, WRONG_CONSOLE, WRONG_TITLE, WRONG_SHELL_ABI, NO_LIB,
+                 LIB_SIZE }
 
     static File packsDir(File filesDir) {
         return new File(filesDir, PACKS_DIR);
@@ -41,11 +46,31 @@ final class Pack {
         return new File(packsDir(filesDir), titleId);
     }
 
-    /** Whether <files>/packs/<titleId> holds a usable pack for that title. */
+    /** Whether <files>/packs/<titleId> holds a usable pack for that Xbox title (console xbox, or none). */
     static Check check(File filesDir, String titleId) {
         if (titleId == null || titleId.isEmpty())
             return Check.NO_TITLE_ID;
-        File dir = packDir(filesDir, titleId);
+        return checkDir(packDir(filesDir, titleId), Console.XBOX, titleId);
+    }
+
+    /**
+     * Whether the pack of a game of console c holds a usable pack: an Xbox title's as {@link #check(File, String)}
+     * (key = its title ID), another console's in packs/&lt;console&gt;-&lt;key&gt; with that console and title_key.
+     */
+    static Check check(File filesDir, Console c, String key) {
+        if (c == Console.XBOX)
+            return check(filesDir, key);
+        File dir = packDir(filesDir, c, key);
+        return dir == null ? Check.NO_TITLE_ID : checkDir(dir, c, key);
+    }
+
+    /** packs/&lt;name&gt; of a game of console c ({@link Console#packDirName}), or null when key cannot name one. */
+    static File packDir(File filesDir, Console c, String key) {
+        String name = Console.packDirName(c, key);
+        return name == null ? null : new File(packsDir(filesDir), name);
+    }
+
+    private static Check checkDir(File dir, Console c, String key) {
         File json = new File(dir, JSON);
         if (!json.isFile())
             return Check.NO_PACK;
@@ -57,7 +82,9 @@ final class Pack {
         }
         if (o.optInt("format", -1) != FORMAT)
             return Check.BAD_FORMAT;
-        if (!sameTitleId(o.optString("title_id", ""), titleId))
+        if (Console.fromPack(o.optString("console", "")) != c)
+            return Check.WRONG_CONSOLE;
+        if (c == Console.XBOX ? !sameTitleId(o.optString("title_id", ""), key) : !o.optString("title_key", "").equals(key))
             return Check.WRONG_TITLE;
         if (o.optInt("shell_abi", -1) != SHELL_ABI)
             return Check.WRONG_SHELL_ABI;
@@ -71,6 +98,39 @@ final class Pack {
         if (want <= 0 || so.length() != want)
             return Check.LIB_SIZE;
         return Check.VALID;
+    }
+
+    /** Where starting a game goes (XBA-147): its console (the runtime the native loader hands it to), key and pack. */
+    static final class Route {
+        final Console console;
+        /** The Xbox title ID or the other console's title key; null when the app cannot read it here (an Xbox image). */
+        final String key;
+        final Check check;
+
+        Route(Console console, String key, Check check) {
+            this.console = console;
+            this.key = key;
+            this.check = check;
+        }
+    }
+
+    /**
+     * The route of a game: an Xbox game folder (its default.xbe's title ID), an Xbox disc image (key null: the
+     * launcher reads its XBE through XisoNative), or a game of another console ({@link Console#identify}: by content,
+     * an .iso included). Null when game is none of those. The game goes to ShellActivity as RECOMP_GAME_DIR either
+     * way; the native side tells them apart the same way and picks the runtime (pack_loader.c).
+     */
+    static Route route(File filesDir, File game) {
+        if (game == null)
+            return null;
+        if (game.isDirectory()) {
+            String tid = xbeTitleId(new File(game, "default.xbe"));
+            return tid == null ? null : new Route(Console.XBOX, tid, check(filesDir, tid));
+        }
+        Console.Identity id = Console.identify(game);
+        if (id != null)
+            return new Route(id.console, id.key, check(filesDir, id.console, id.key));
+        return Console.detect(game) == Console.XBOX ? new Route(Console.XBOX, null, Check.NO_TITLE_ID) : null;
     }
 
     /**

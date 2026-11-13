@@ -59,6 +59,13 @@ public class ShellActivity extends SDLActivity {
          * SDLThread, and recomp_app_start reads it in recomp_storage_resolve. The process environment is libc's, so
          * native getenv sees it. Set here, it wins over a RECOMP_GAME_DIR line in recomp.cfg. */
         String dir = GameStore.chosenDir(this);
+        /* A game of another console (XBA-147) is a file, handed over as it is: the native side reads its console and
+         * title key and gives its pack to that console's runtime (pack_loader.c). Said here for the device check. */
+        if (dir != null && new File(dir).isFile()) {
+            Pack.Route r = Pack.route(getFilesDir(), new File(dir));
+            if (r != null && r.console != Console.XBOX)
+                Log.i(LauncherActivity.TAG, "shell: " + r.console.id + " game " + r.key + ", pack " + r.check);
+        }
         /* A disc image read in place (XBA-126): the folder is its companion (XBEs and disc.json); the runtime gets
          * the image itself, its path or fds opened here from the persisted documents. Opened again at every
          * process start, so a quick reboot or a hand-over to another image (both a new process) finds it too.
