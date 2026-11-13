@@ -91,6 +91,49 @@ The run's environment is `device.check_env`: `boot()`'s minus `RECOMP_HEADLESS` 
 dumped on the device). `report`, `report --matrix` and `plane` read a device file as a desktop one; when a line has
 `device`, the tables get a Device column (« AYN Thor, Android 13 »).
 
+## Self-healing rounds and recall (XBA-129)
+
+```bash
+python -m tools.compat heal /dumps/title.iso --work-root /scratch/compat --seconds 180 [--max-idle 1]
+python -m tools.compat recall /scratch/compat/title /dumps/title/default.xbe [--icall-dump icall.txt] [--json]
+```
+
+`heal` is the app's self-healing loop on a desktop (`tools/compat/heal.py`; the app's side:
+[prepare.md « Self-healing »](../android/prepare.md#self-healing-xba-74-xba-129)). A round is one `run` (prepare +
+boot); another round follows when the boot met code the analysis missed (`icall`, `thread`, `thread_ctx` entries past
+what `discovered.jsonl` held before it), crash or not. It stops on:
+
+| Stop | When |
+|---|---|
+| `nothing new found` | the run met no new code and ran its time |
+| `needs a fix: <blocker>` | the run met no new code and stopped, or stopped with what a prepare cannot fix: a guest exception nothing handled, a stack switch the runtime could not carry, an untranslated instruction (named in that order); calls to stub kernel routes are named after the blocker |
+| `no progress: the prepare accepted no new seed` | the round's prepare took none of the new addresses (seed_from_log's gates: not code) |
+| `no progress: the same blocker twice` | the run stopped on the blocker of the round before (seconds aside) |
+| `safety cap: 12 rounds` | `--max-rounds`, a safety net only |
+
+The cap is on rounds without progress (`--max-idle`, default 1: the first such round stops), not on rounds. The
+results line is the last round's, with `heal: {rounds, stop, history: [{round, stage, blocker, new_seeds, accepted,
+run_seeds, then}]}`; `run_seeds` is the runtime's own count (the status line's `seeds`).
+
+**Recall** (`tools/compat/recall.py`): from a title's whole `discovered.jsonl` history, the targets reached at run time
+that the static analysis missed, what the prepares made of them (`seeded`, `rejected` by the gates, `pending`), and
+where each one is referenced from in the image, as input for the disassembler:
+
+| Category | The missed address |
+|---|---|
+| thread start | a `thread` / `thread_ctx` entry |
+| vtable | is a word next to another word that points into code (a vtable, a table of function pointers) |
+| table word | is a word in the image, alone among non-code words (a dispatch or class-driver table entry) |
+| computed jump | appears nowhere in the image: computed at run time |
+
+`inside_known` counts misses inside a function the analysis knows (the sweep decoded through them). The share found
+statically needs the targets reached that the analysis did find, which the discovery file does not hold: given an
+icall-feedback dump (a runtime built with `RECOMP_ICALL_FEEDBACK`, `tools/recomp/icall_feedback.py`) it is
+`found_statically / targets`, else « recall unknown ». `run` adds a `recall` object to a title's line when a run
+missed anything, and `report` / `report --matrix` get a Recall column (« recall unknown (3 misses: 3 thread start) »).
+Tested on synthetic titles only (`tools/compat/test_heal.py`, and `test_e2e.py::test_the_self_healing_loop`: three
+threads found one round at a time, the third refused, four rounds); a real title's numbers are XBA-75.
+
 ## Limits
 
 - `responsive` is a heuristic: an animated screen changes on its own. The press times and the status clock start a

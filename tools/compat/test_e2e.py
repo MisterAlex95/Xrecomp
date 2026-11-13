@@ -74,19 +74,32 @@ def test_build_and_boot_through_the_compat_runner(tmp_path):
 
 
 def _heal_xbe(tmp_path):
-    """A title whose thread routine the static analysis cannot see: the entry
-    computes its address (mov eax, 0x11000; add eax, 0x40) and hands it to
-    PsCreateSystemThreadEx through the kernel thunk table (ordinal 255); the
-    routine waits on a zero dword for ever. Then loops."""
+    """A title whose code the static analysis finds one thread at a time
+    (XBA-64, XBA-129). Each start routine's address is computed (mov eax,
+    0x11000; add eax, N) and handed to PsCreateSystemThreadEx through the kernel
+    thunk table (ordinal 255), so only a run sees it:
+
+      entry    0x11000  starts A, then loops
+      A        0x11040  starts B, then waits on a zero dword for ever
+      B        0x11080  starts C, then waits
+      C        0x11108  not code: zeros up to the end of the section, which
+                        seed_from_log's gates refuse
+    """
     import struct
-    entry = bytes.fromhex("558bec" "b800100100" "83c040" "50" + "6a00" * 9 + "ff1500080100" "ebfe")
-    entry += b"\x90" * (0x40 - len(entry))
-    routine = bytes.fromhex("833d0011010000" "74f7" "c3")   # L: cmp dword [0x11100], 0 / je L / ret
-    text = entry + routine
-    text += b"\x00" * (0x110 - len(text))
+
+    def starter(off, wait):
+        code = bytes.fromhex("b800100100" "05") + struct.pack("<I", off) + bytes.fromhex(
+            "50" + "6a00" * 9 + "ff1500080100")
+        return code + (bytes.fromhex("833d0011010000" "74f7" "c3") if wait else bytes.fromhex("ebfe"))
+    entry = bytes.fromhex("558bec") + starter(0x40, False)
+    text = bytearray(0x110)
+    text[0:len(entry)] = entry
+    a, b = starter(0x80, True), starter(0x108, True)
+    text[0x40:0x40 + len(a)] = a
+    text[0x80:0x80 + len(b)] = b
     d = tmp_path / "heal"
     d.mkdir()
-    p = make_xbe(d / "default.xbe", libs=(("XAPILIB", 5849, 0),), text=text, title_id=0x58424102, title="Heal")
+    p = make_xbe(d / "default.xbe", libs=(("XAPILIB", 5849, 0),), text=bytes(text), title_id=0x58424102, title="Heal")
     b = bytearray(open(p, "rb").read())
     struct.pack_into("<II", b, 0x800, 0x80000000 | 255, 0)   # thunk table: PsCreateSystemThreadEx, end
     open(p, "wb").write(b)
@@ -95,29 +108,38 @@ def _heal_xbe(tmp_path):
 
 @pytest.mark.skipif(os.environ.get("XBA_E2E") != "1", reason="XBA_E2E=1: builds and boots a title (minutes)")
 def test_the_self_healing_loop(tmp_path):
-    """XBA-64 + XBA-97 + XBA-65 end to end: the first run meets a thread
-    routine with no dispatch entry and records it; the next prepare seeds it
-    from discovered.jsonl and rebuilds; the second run starts the thread."""
+    """XBA-64 + XBA-97 + XBA-65 + XBA-129 end to end, through `tools.compat
+    heal`: round 1 meets thread A with no dispatch entry and records it; the
+    next prepare seeds it and rebuilds, round 2 starts A, which meets B; round
+    3 starts B, which meets C; C is not code, the gates refuse it, so round 4's
+    prepare accepts nothing: the loop stops there, a round without progress,
+    not at a fixed count. The result carries the recall measure (3 misses, all
+    thread starts)."""
     if not shutil.which("cmake"):
         pytest.skip("no cmake")
-    disc, out, cw = _heal_xbe(tmp_path), tmp_path / "results.jsonl", tmp_path / "cw"
-
-    def run():
-        r = subprocess.run([sys.executable, "-m", "tools.compat", "run", disc, "--work-root", str(cw),
-                            "--seconds", "6", "--sustain", "3", "--out", str(out)],
-                           cwd=ROOT, capture_output=True, text=True, timeout=1800)
-        assert r.returncode == 0, r.stdout[-2000:] + r.stderr[-2000:]
-        return json.loads(out.read_text().splitlines()[-1])
-
-    first = run()
+    src, out, cw = _heal_xbe(tmp_path), tmp_path / "results.jsonl", tmp_path / "cw"
+    r = subprocess.run([sys.executable, "-m", "tools.compat", "heal", src, "--work-root", str(cw),
+                        "--seconds", "6", "--sustain", "3", "--out", str(out)],
+                       cwd=ROOT, capture_output=True, text=True, timeout=3600)
+    assert r.returncode == 0, r.stdout[-2000:] + r.stderr[-2000:]
+    res = json.loads(out.read_text().splitlines()[-1])
+    h = res["heal"]
     work = cw / "heal"
-    disc_lines = [json.loads(l) for l in (work / "discovered.jsonl").read_text().splitlines()]
-    assert {"t": "thread", "va": "0x00011040", "ctx1": "0x00000000"} in disc_lines, disc_lines
-    assert first["runs"][0]["threads"] == 0
-    second = run()
+    lines = [json.loads(l) for l in (work / "discovered.jsonl").read_text().splitlines()]
+    for va in ("0x00011040", "0x00011080", "0x00011108"):
+        assert {"t": "thread", "va": va, "ctx1": "0x00000000"} in lines, lines
+    assert [x["new_seeds"] for x in h["history"]] == [1, 1, 1, 0], h
+    assert [x["accepted"] for x in h["history"]] == [None, 1, 1, 0], h
+    assert h["rounds"] == 4 and h["stop"] == "no progress: the prepare accepted no new seed", h
     seeds = json.loads((work / "discovered-seeds.json").read_text())
-    assert [s["start"] for s in seeds] == ["0x00011040"]
-    assert second["runs"][0]["threads"] >= 1 and second["stage"] == "boots", second
+    assert [s["start"] for s in seeds] == ["0x00011040", "0x00011080"]
+    assert json.loads((work / "discovered-rejected.json").read_text()) == ["0x00011108"]
+    assert res["runs"][0]["threads"] >= 2 and res["stage"] == "boots", res
+    rc = res["recall"]
+    assert rc["misses"] == 3 and rc["seeded"] == 2 and rc["rejected"] == 1, rc
+    assert rc["categories"]["thread start"] == 3, rc
+    # The runtime's own count of what it met that the analysis missed (the status line's "seeds").
+    assert [x["run_seeds"] for x in h["history"]] == [1, 1, 1, 0], h
 
 
 @pytest.mark.skipif(os.environ.get("XBA_E2E") != "1", reason="XBA_E2E=1: builds and boots a title (minutes)")
