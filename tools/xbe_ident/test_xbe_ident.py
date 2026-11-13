@@ -132,3 +132,48 @@ def test_prepare_writes_ident_json(tmp_path):
     bad = tmp_path / "bad.xbe"
     bad.write_bytes(b"nope")
     assert identify_xbe(str(bad), str(tmp_path)) is None      # the prepare goes on without it
+
+
+# D3D's far-behind probe as docs/technical/d3d8ltcg-device-context.md shows it (our own bytes of that shape).
+LATCH_LOOP = bytes.fromhex(
+    "8b9634090000"      # mov edx, [esi+0x934]      register base
+    "8b7e30"            # mov edi, [esi+0x30]       GPU semaphore
+    "8b82100b4000"      # loop: mov eax, [edx+0x400B10]
+    "8b0f"              # mov ecx, [edi]
+    "c1e102"            # shl ecx, 2
+    "33c8"              # xor ecx, eax
+    "f6c17c"            # test cl, 0x7C
+    "75ef")             # jne loop
+
+
+def test_the_d3d_latch_wait_probe(tmp_path):
+    """XBA-105: the DMA walk is chosen by what the title's D3D does. The loop in code counts; the same
+    bytes in a data section, or the register read without the fence-bit test, do not."""
+    from tools.xbe_parser.synth import PRELOAD, W, X, Sec, write_xbe
+    p = write_xbe(tmp_path / "a.xbe", [Sec(".text", b"\x90" * 7 + LATCH_LOOP + b"\xc3")],
+                  libs=(("XAPILIB", 5455, 0), ("D3D8LTCG", 5455, 0)))
+    r = identify(p)
+    assert r["probes"] == {"d3d_latch_wait": 1}
+    assert "xdk/d3d8ltcg" in r["layers"]                     # any D3D8LTCG build with the loop
+    absolute = bytes.fromhex("a1100b40fd" "a87c" "75f9")     # mov eax, [0xFD400B10]; test al, 0x7C; jne
+    p = write_xbe(tmp_path / "b.xbe", [Sec(".text", absolute + b"\xc3")], libs=(("D3D8LTCG", 5849, 0),))
+    assert identify(p)["probes"] == {"d3d_latch_wait": 1}
+    p = write_xbe(tmp_path / "c.xbe", [Sec(".text", b"\xc3" * 16), Sec(".rdata", LATCH_LOOP, flags=PRELOAD)],
+                  libs=(("D3D8LTCG", 5849, 0),))
+    r = identify(p)
+    assert r["probes"] == {"d3d_latch_wait": 0} and "xdk/d3d8ltcg" not in r["layers"]
+    no_test = LATCH_LOOP.replace(bytes.fromhex("f6c17c"), bytes.fromhex("85c9" "90"))
+    p = write_xbe(tmp_path / "d.xbe", [Sec(".text", no_test, flags=PRELOAD | X | W)], libs=(("D3D8", 5849, 0),))
+    assert identify(p)["probes"] == {"d3d_latch_wait": 0}
+
+
+def test_overlapping_code_sections_are_a_blocker(tmp_path):
+    from tools.xbe_parser.synth import BASE as B, X, Sec, write_xbe
+    from tools.xbe_ident import blockers
+    p = write_xbe(tmp_path / "o.xbe", [Sec(".text", b"\xc3" * 16), Sec("OVA", b"\x90" * 64, flags=X, va=B + 0x3000),
+                                       Sec("OVB", b"\x90" * 64, flags=X, va=B + 0x3000)])
+    r = identify(p)
+    assert r["image"]["overlaps"][0]["code"] is True and r["image"]["not_preloaded"] == ["OVA", "OVB"]
+    assert blockers(r) == ["sections OVA and OVB both hold code at 0x00013000 (+0x40): only one of them is lifted "
+                           "(overlapping code sections, XBA-124)"]
+    assert blockers(identify(write_xbe(tmp_path / "n.xbe"))) == []

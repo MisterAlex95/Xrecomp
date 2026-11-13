@@ -493,6 +493,10 @@ class XBEHeader:
     entry_point: int = 0
     is_debug: bool = False
     kernel_thunk_addr: int = 0
+    # Which XOR key pair decoded them: "retail", "debug", or "unknown" when
+    # neither puts the entry point and the thunk table inside the image (the
+    # retail decoding is then kept, as before, and a warning says so).
+    entry_key: str = "retail"
 
 
 @dataclass
@@ -564,6 +568,10 @@ class XBEFile:
     debug_pathname: str
     debug_filename: str
     raw_data: bytes
+    # What the parser had to work around (odd but loadable headers): a field
+    # pointing outside the file, a certificate shorter than the fields read,
+    # a library table cut short. Empty for a well-formed image.
+    warnings: List[str] = field(default_factory=list)
 
 
 # ============================================================
@@ -571,10 +579,32 @@ class XBEFile:
 # ============================================================
 
 class XBEParser:
+    """Parses an XBE. Robust to odd but loadable images (XBA-124): a header
+    bigger than one page, a certificate shorter than the fields read or
+    missing, no library table, a debug-keyed entry point. Those parse, with a
+    line in XBEFile.warnings. What cannot be an XBE raises ValueError: a bad
+    magic, a header cut before its last field (0x178), a section table
+    outside the file (the loader would map nothing)."""
+
+    HEADER_FIELDS_END = 0x178       # the last header field (LogoBitmapSize) ends here
+    CERT_FIELDS_END = 0x1D0         # the oldest certificate size; newer ones add fields after it
+
     def __init__(self, filepath: str):
         self.filepath = filepath
         with open(filepath, 'rb') as f:
             self.data = f.read()
+        self.warnings: List[str] = []
+
+    @classmethod
+    def from_bytes(cls, data: bytes, filepath: str = "default.xbe") -> "XBEParser":
+        p = cls.__new__(cls)
+        p.filepath, p.data, p.warnings = filepath, bytes(data), []
+        return p
+
+    def _warn(self, msg: str):
+        if not hasattr(self, "warnings"):
+            self.warnings = []
+        self.warnings.append(msg)
 
     def _read_u32(self, offset: int) -> int:
         return struct.unpack_from('<I', self.data, offset)[0]
@@ -583,32 +613,46 @@ class XBEParser:
         return struct.unpack_from('<H', self.data, offset)[0]
 
     def _read_bytes(self, offset: int, size: int) -> bytes:
+        if offset < 0:
+            return b""
         return self.data[offset:offset + size]
 
     def _read_string(self, offset: int, max_len: int = 256) -> str:
         """Read null-terminated ASCII string."""
+        if not 0 <= offset < len(self.data):
+            return ""
         end = self.data.find(b'\x00', offset, offset + max_len)
         if end == -1:
-            end = offset + max_len
+            end = min(offset + max_len, len(self.data))
         return self.data[offset:end].decode('ascii', errors='replace')
 
     def _read_wstring(self, offset: int, max_chars: int = 128) -> str:
         """Read null-terminated UTF-16LE string."""
         chars = []
         for i in range(max_chars):
-            c = struct.unpack_from('<H', self.data, offset + i * 2)[0]
+            o = offset + i * 2
+            if not 0 <= o <= len(self.data) - 2:
+                break
+            c = struct.unpack_from('<H', self.data, o)[0]
             if c == 0:
                 break
             chars.append(chr(c))
         return ''.join(chars)
 
+    def _header_area(self) -> int:
+        """Bytes of the image header mapped at the base: SizeOfHeaders when
+        it is sane (an image with many sections or libraries has more than a
+        page of header), else one page."""
+        hs = getattr(self, "_headers_size", 0)
+        return hs if 0x1000 <= hs <= len(self.data) else 0x1000
+
     def _va_to_file(self, va: int, base: int) -> int:
         """Convert virtual address to file offset using section headers."""
         # For addresses within the header
-        if va < base + 0x1000:
+        if base <= va < base + self._header_area():
             return va - base
         # Search sections
-        for section in self._sections:
+        for section in getattr(self, "_sections", []):
             sec_va_start = section.virtual_addr
             sec_va_end = sec_va_start + section.virtual_size
             if sec_va_start <= va < sec_va_end:
@@ -617,16 +661,28 @@ class XBEParser:
         return va - base
 
     def parse(self) -> XBEFile:
+        if not hasattr(self, "warnings"):
+            self.warnings = []
         # Validate magic
         magic = self._read_bytes(0, 4)
         if magic != XBE_MAGIC:
             raise ValueError(f"Invalid XBE magic: {magic!r} (expected {XBE_MAGIC!r})")
+        if len(self.data) < self.HEADER_FIELDS_END:
+            raise ValueError(f"XBE header truncated: {len(self.data)} bytes, its fields end at "
+                             f"0x{self.HEADER_FIELDS_END:X}")
 
         # Parse header
+        self._headers_size = 0
+        self._sections = []
         header = self._parse_header()
+        self._headers_size = header.headers_size
+        if not self.HEADER_FIELDS_END <= header.headers_size <= len(self.data):
+            self._warn(f"SizeOfHeaders 0x{header.headers_size:X} is outside the file "
+                       f"({len(self.data)} bytes): one page assumed")
 
-        # Parse sections first (needed for VA→file translation)
+        # Parse sections first (needed for VA→file translation and the keys)
         self._sections = self._parse_sections(header)
+        self._decode_keys(header)
 
         # Parse certificate
         cert = self._parse_certificate(header)
@@ -644,17 +700,11 @@ class XBEParser:
         debug_pathname = ""
         debug_filename = ""
         if header.debug_pathname_addr:
-            try:
-                off = self._va_to_file(header.debug_pathname_addr, header.base_address)
-                debug_pathname = self._read_string(off)
-            except Exception:
-                pass
+            off = self._va_to_file(header.debug_pathname_addr, header.base_address)
+            debug_pathname = self._read_string(off)
         if header.debug_filename_addr:
-            try:
-                off = self._va_to_file(header.debug_filename_addr, header.base_address)
-                debug_filename = self._read_string(off)
-            except Exception:
-                pass
+            off = self._va_to_file(header.debug_filename_addr, header.base_address)
+            debug_filename = self._read_string(off)
 
         return XBEFile(
             header=header,
@@ -666,6 +716,7 @@ class XBEParser:
             debug_pathname=debug_pathname,
             debug_filename=debug_filename,
             raw_data=self.data,
+            warnings=list(self.warnings),
         )
 
     def _parse_header(self) -> XBEHeader:
@@ -702,40 +753,52 @@ class XBEParser:
             logo_bitmap_addr=self._read_u32(0x0170),
             logo_bitmap_size=self._read_u32(0x0174),
         )
-
-        # Decode entry point
-        entry_retail = (h.entry_point_raw ^ ENTRY_RETAIL_XOR) & 0xFFFFFFFF
-        entry_debug = (h.entry_point_raw ^ ENTRY_DEBUG_XOR) & 0xFFFFFFFF
-
-        # Determine if retail or debug based on which entry falls in valid range
-        if h.base_address <= entry_retail < h.base_address + h.image_size:
-            h.entry_point = entry_retail
-            h.is_debug = False
-        elif h.base_address <= entry_debug < h.base_address + h.image_size:
-            h.entry_point = entry_debug
-            h.is_debug = True
-        else:
-            # Default to retail
-            h.entry_point = entry_retail
-            h.is_debug = False
-
-        # Decode kernel thunk address
-        thunk_retail = (h.kernel_thunk_addr_raw ^ THUNK_RETAIL_XOR) & 0xFFFFFFFF
-        thunk_debug = (h.kernel_thunk_addr_raw ^ THUNK_DEBUG_XOR) & 0xFFFFFFFF
-
-        if h.is_debug:
-            h.kernel_thunk_addr = thunk_debug
-        else:
-            h.kernel_thunk_addr = thunk_retail
-
+        # Retail decoding until the sections are known (_decode_keys).
+        h.entry_point = (h.entry_point_raw ^ ENTRY_RETAIL_XOR) & 0xFFFFFFFF
+        h.kernel_thunk_addr = (h.kernel_thunk_addr_raw ^ THUNK_RETAIL_XOR) & 0xFFFFFFFF
         return h
+
+    def _decode_keys(self, h: XBEHeader):
+        """Pick the XOR key pair (retail or debug) that decodes the entry point
+        and the kernel thunk address consistently: the entry point in an
+        executable section, both inside the image. Retail wins a tie; when
+        neither fits at all, retail is kept and a warning says so. One pair
+        for both: a console signs an image with one key set."""
+        lo, hi = h.base_address, h.base_address + h.image_size
+
+        def in_exec(va):
+            return any(s.flags & SECTION_EXECUTABLE and s.virtual_addr <= va < s.virtual_addr + s.virtual_size
+                       for s in self._sections)
+
+        best = None
+        for name, ek, tk in (("retail", ENTRY_RETAIL_XOR, THUNK_RETAIL_XOR),
+                             ("debug", ENTRY_DEBUG_XOR, THUNK_DEBUG_XOR)):
+            e = (h.entry_point_raw ^ ek) & 0xFFFFFFFF
+            t = (h.kernel_thunk_addr_raw ^ tk) & 0xFFFFFFFF
+            score = (2 if in_exec(e) else 0) + (lo <= e < hi) + (lo <= t < hi)
+            if best is None or score > best[0]:
+                best = (score, name, e, t)
+        score, name, e, t = best
+        if score == 0:
+            name = "unknown"
+            e = (h.entry_point_raw ^ ENTRY_RETAIL_XOR) & 0xFFFFFFFF
+            t = (h.kernel_thunk_addr_raw ^ THUNK_RETAIL_XOR) & 0xFFFFFFFF
+            self._warn("neither the retail nor the debug key puts the entry point or the kernel thunk "
+                       "table inside the image: retail decoding kept")
+        h.entry_point, h.kernel_thunk_addr = e, t
+        h.is_debug = name == "debug"
+        h.entry_key = name
 
     def _parse_sections(self, header: XBEHeader) -> List[XBESectionHeader]:
         sections = []
         base = header.base_address
         sec_hdr_offset = header.section_headers_addr - base
+        n = header.num_sections
+        if n and (sec_hdr_offset < 0 or sec_hdr_offset + n * 56 > len(self.data)):
+            raise ValueError(f"XBE section table ({n} headers at VA 0x{header.section_headers_addr:08X}) "
+                             f"is outside the {len(self.data)}-byte file")
 
-        for i in range(header.num_sections):
+        for i in range(n):
             off = sec_hdr_offset + i * 56  # Each section header is 56 bytes
             sec = XBESectionHeader(
                 flags=self._read_u32(off + 0),
@@ -754,6 +817,9 @@ class XBEParser:
                 name_off = sec.section_name_addr - base
                 if 0 <= name_off < len(self.data):
                     sec.name = self._read_string(name_off, 32)
+            if sec.raw_size and sec.raw_addr + sec.raw_size > len(self.data):
+                self._warn(f"section {i} ({sec.name or '?'}) raw data 0x{sec.raw_addr:X}+0x{sec.raw_size:X} "
+                           f"runs past the end of the file")
             sections.append(sec)
 
         return sections
@@ -761,31 +827,45 @@ class XBEParser:
     def _parse_certificate(self, header: XBEHeader) -> XBECertificate:
         base = header.base_address
         off = header.certificate_addr - base
+        if not header.certificate_addr or off < 0 or off + 12 > len(self.data):
+            self._warn(f"no certificate in the file (address 0x{header.certificate_addr:08X}): "
+                       f"title ID 0, no name")
+            return XBECertificate(size=0, timestamp=0, title_id=0, title_name="", alt_title_ids=[0] * 16,
+                                  allowed_media=0, game_region=0, game_ratings=0, disc_number=0, version=0,
+                                  lan_key=b"", signature_key=b"", alt_signature_keys=[])
+        size = self._read_u32(off)
+        # Fields past the end of the file read as zero. The certificate's own
+        # size is not trusted to cut them: synthetic and early images leave
+        # it 0, and the console reads the fixed fields whatever it says.
+        limit = len(self.data)
+        if off + self.CERT_FIELDS_END > limit:
+            self._warn(f"certificate at 0x{header.certificate_addr:08X} is cut by the end of the file")
 
-        title_name_raw = self._read_bytes(off + 12, 80)
-        title_name = title_name_raw.decode('utf-16-le', errors='replace').rstrip('\x00')
+        def u32(o):
+            return self._read_u32(off + o) if off + o + 4 <= limit else 0
 
-        alt_title_ids = []
-        for i in range(16):
-            alt_title_ids.append(self._read_u32(off + 92 + i * 4))
+        def raw(o, n):
+            return self.data[off + o:min(off + o + n, limit)] if off + o < limit else b""
 
-        alt_sig_keys = []
-        for i in range(16):
-            alt_sig_keys.append(self._read_bytes(off + 0x01AC + i * 16, 16))
+        title_name = raw(12, 80).decode('utf-16-le', errors='replace').split('\x00', 1)[0]
+        alt_title_ids = [u32(92 + i * 4) for i in range(16)]
+        # The 16 alternate signature keys end the oldest certificate (0xD0 to
+        # 0x1D0; this read 0x1AC before XBA-124, past it).
+        alt_sig_keys = [k for k in (raw(0xD0 + i * 16, 16) for i in range(16)) if len(k) == 16]
 
         return XBECertificate(
-            size=self._read_u32(off + 0),
-            timestamp=self._read_u32(off + 4),
-            title_id=self._read_u32(off + 8),
+            size=size,
+            timestamp=u32(4),
+            title_id=u32(8),
             title_name=title_name,
             alt_title_ids=alt_title_ids,
-            allowed_media=self._read_u32(off + 156),
-            game_region=self._read_u32(off + 160),
-            game_ratings=self._read_u32(off + 164),
-            disc_number=self._read_u32(off + 168),
-            version=self._read_u32(off + 172),
-            lan_key=self._read_bytes(off + 176, 16),
-            signature_key=self._read_bytes(off + 192, 16),
+            allowed_media=u32(156),
+            game_region=u32(160),
+            game_ratings=u32(164),
+            disc_number=u32(168),
+            version=u32(172),
+            lan_key=raw(176, 16),
+            signature_key=raw(192, 16),
             alt_signature_keys=alt_sig_keys,
         )
 
@@ -794,11 +874,14 @@ class XBEParser:
             return []
 
         libraries = []
-        base = header.base_address
-        off = header.library_versions_addr - base
+        off = self._va_to_file(header.library_versions_addr, header.base_address)
 
         for i in range(header.num_library_versions):
             lib_off = off + i * 16  # Each library version entry is 16 bytes
+            if lib_off < 0 or lib_off + 16 > len(self.data):
+                self._warn(f"library table: {header.num_library_versions} entries announced, "
+                           f"{i} inside the file")
+                break
             name_bytes = self._read_bytes(lib_off, 8)
             name = name_bytes.decode('ascii', errors='replace').rstrip('\x00')
             major = self._read_u16(lib_off + 8)
@@ -830,9 +913,13 @@ class XBEParser:
         if thunk_file_off is None:
             # Try header area
             thunk_file_off = header.kernel_thunk_addr - base
+        if not 0 <= thunk_file_off < len(self.data):
+            self._warn(f"kernel thunk table 0x{header.kernel_thunk_addr:08X} is outside the file: no imports")
+            return []
 
         off = thunk_file_off
-        while off + 4 <= len(self.data):
+        # The kernel exports under 400 ordinals: a longer table is not one.
+        while off + 4 <= len(self.data) and len(imports) < 1024:
             val = self._read_u32(off)
             if val == 0:
                 break
@@ -855,6 +942,9 @@ class XBEParser:
 
         base = header.base_address
         off = self._va_to_file(header.tls_addr, base)
+        if off < 0 or off + 24 > len(self.data):
+            self._warn(f"TLS directory 0x{header.tls_addr:08X} is outside the file")
+            return None
 
         return XBETLSDirectory(
             raw_data_start=self._read_u32(off + 0),
@@ -879,6 +969,73 @@ class XBEParser:
             f.write(raw)
 
         return filepath
+
+
+# ============================================================
+# Image analysis (XBA-124): what the loader and the lifter need to know
+# ============================================================
+
+def section_overlaps(sections: List[XBESectionHeader]):
+    """Pairs of sections whose virtual ranges share bytes: [(i, j, lo, hi)].
+    Sections that only share a page (one ends inside a page where the next
+    begins: the head/tail shared pages) do not overlap. Overlapping sections
+    are alternatives -- one at a time, through XeLoadSection -- and, when both
+    hold code, the lifter cannot tell whose code an address means."""
+    out = []
+    for i, a in enumerate(sections):
+        if not a.virtual_size:
+            continue
+        for j in range(i + 1, len(sections)):
+            b = sections[j]
+            if not b.virtual_size:
+                continue
+            lo = max(a.virtual_addr, b.virtual_addr)
+            hi = min(a.virtual_addr + a.virtual_size, b.virtual_addr + b.virtual_size)
+            if lo < hi:
+                out.append((i, j, lo, hi))
+    return out
+
+
+def image_report(xbe: XBEFile) -> Dict:
+    """The image facts the triage and prepare report (stable keys, JSON-ready):
+    the key pair, header and image sizes, the sections with their preload
+    flags, the overlapping ones, TLS, and the parser's warnings."""
+    h = xbe.header
+    secs = []
+    for i, s in enumerate(xbe.sections):
+        secs.append({
+            "index": i,
+            "name": s.name,
+            "va": "0x%08X" % s.virtual_addr,
+            "vsize": s.virtual_size,
+            "raw_size": s.raw_size,
+            "flags": format_flags(s.flags),
+            "preload": bool(s.flags & SECTION_PRELOAD),
+            "executable": bool(s.flags & SECTION_EXECUTABLE),
+            "writable": bool(s.flags & SECTION_WRITABLE),
+        })
+    ov = []
+    for i, j, lo, hi in section_overlaps(xbe.sections):
+        a, b = xbe.sections[i], xbe.sections[j]
+        ov.append({
+            "a": a.name or "#%d" % i,
+            "b": b.name or "#%d" % j,
+            "va": "0x%08X" % lo,
+            "size": hi - lo,
+            "code": bool(a.flags & SECTION_EXECUTABLE and b.flags & SECTION_EXECUTABLE),
+        })
+    return {
+        "key": h.entry_key,
+        "headers_size": h.headers_size,
+        "image_size": h.image_size,
+        "section_count": len(xbe.sections),
+        "section_bytes": sum(s.virtual_size for s in xbe.sections),
+        "sections": secs,
+        "not_preloaded": [s["name"] or "#%d" % s["index"] for s in secs if not s["preload"]],
+        "overlaps": ov,
+        "tls": xbe.tls is not None,
+        "warnings": list(xbe.warnings),
+    }
 
 
 # ============================================================
@@ -950,7 +1107,8 @@ def print_xbe_info(xbe: XBEFile):
 
     print(f"\n  File: {c.title_name}")
     print(f"  Title ID: 0x{c.title_id:08X}")
-    print(f"  Type: {'Debug' if h.is_debug else 'Retail'}")
+    print(f"  Type: {'Debug' if h.is_debug else 'Retail'}"
+          f"{' (neither key fits: retail decoding kept)' if h.entry_key == 'unknown' else ''}")
     print(f"  Build Date: {format_timestamp(h.timestamp)}")
     print(f"  Certificate Date: {format_timestamp(c.timestamp)}")
     print(f"  Region: {format_region(c.game_region)}")
@@ -979,6 +1137,10 @@ def print_xbe_info(xbe: XBEFile):
     for i, sec in enumerate(xbe.sections):
         print(f"  {i:2d}  {sec.name:<12} 0x{sec.virtual_addr:08X} 0x{sec.virtual_size:08X} "
               f"0x{sec.raw_addr:08X} 0x{sec.raw_size:08X}  {format_flags(sec.flags)}")
+
+    for i, j, lo, hi in section_overlaps(xbe.sections):
+        print(f"  overlap: {xbe.sections[i].name} and {xbe.sections[j].name} share "
+              f"0x{lo:08X}-0x{hi:08X} (loaded one at a time)")
 
     print(f"\n--- Libraries ({len(xbe.libraries)}) ---")
     for lib in xbe.libraries:
@@ -1037,6 +1199,11 @@ def print_xbe_info(xbe: XBEFile):
     print(f"  Signature Key: {c.signature_key.hex()}")
     print(f"  Game Ratings: 0x{c.game_ratings:08X}")
 
+    if xbe.warnings:
+        print(f"\n--- Warnings ({len(xbe.warnings)}) ---")
+        for w in xbe.warnings:
+            print(f"  {w}")
+
     print("\n" + "=" * 70)
 
 
@@ -1052,6 +1219,7 @@ def export_json(xbe: XBEFile, output_path: str):
         "title": xbe.certificate.title_name,
         "title_id": f"0x{xbe.certificate.title_id:08X}",
         "type": "debug" if xbe.header.is_debug else "retail",
+        "key": xbe.header.entry_key,
         "build_date": format_timestamp(xbe.header.timestamp),
         "xdk_version": xbe.libraries[0].build if xbe.libraries else 0,
         "build_path": xbe.debug_pathname,
@@ -1069,9 +1237,12 @@ def export_json(xbe: XBEFile, output_path: str):
                 "flags": format_flags(sec.flags),
                 "writable": bool(sec.flags & SECTION_WRITABLE),
                 "executable": bool(sec.flags & SECTION_EXECUTABLE),
+                "preload": bool(sec.flags & SECTION_PRELOAD),
             }
             for sec in xbe.sections
         ],
+        "overlaps": image_report(xbe)["overlaps"],
+        "warnings": list(xbe.warnings),
         "libraries": [
             {
                 "name": lib.name,

@@ -344,6 +344,9 @@ def identify_xbe(xbe, work):
         print("      could not identify the XDK and engine: %s" % e, flush=True)
         return None
     ident["summary"] = xbe_ident.summary(ident)
+    # Said, not fatal: the rest of the title may still run (XBA-124).
+    for b in xbe_ident.blockers(ident):
+        print("      BLOCKER: %s" % b, flush=True)
     with open(os.path.join(work, "ident.json"), "w", encoding="utf-8") as f:
         json.dump(ident, f, indent=1)
     return ident

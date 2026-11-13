@@ -15,8 +15,10 @@ xdk -> engines -> title. A higher layer's value wins over a lower one's.
 A layer's JSON (every key optional):
 
     "name"            what it is
-    "applies"         xdk only: {"libraries": ["D3D8", ...], "builds": [min, max]}
-                      (no "builds": every build of those libraries)
+    "applies"         xdk only: {"libraries": ["D3D8", ...], "builds": [min, max],
+                      "probes": ["d3d_latch_wait", ...]} (no "builds": every build of
+                      those libraries; "probes": tools.xbe_ident's code probes that
+                      must all have matched, XBA-105)
     "hooks"           a C prefix: the layer's .c files define <prefix>_configure(void)
                       and <prefix>_start(const char *game_dir, const char *save_dir)
     "env_default"     {RECOMP_*: value} set before the hooks when nothing (the
@@ -80,6 +82,9 @@ def _applies(layer, ident):
     if not want:
         return False
     builds = a.get("builds")
+    found = (ident or {}).get("probes") or {}
+    if any(not found.get(p) for p in a.get("probes", [])):
+        return False
     for name, build in ((ident or {}).get("xdk", {}).get("libraries") or {}).items():
         if name.upper() in want and (not builds or builds[0] <= build <= builds[1]):
             return True
