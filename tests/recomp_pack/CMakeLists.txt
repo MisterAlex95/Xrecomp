@@ -24,6 +24,8 @@ foreach(t fake_shell fake_shell_static)
     target_link_libraries(${t} PRIVATE ${CMAKE_DL_LIBS})
     if(NOT APPLE)   # GNU ld's spelling; Apple's ld refuses undefined symbols by default
         target_link_options(${t} PRIVATE -Wl,--no-undefined)
+    else()          # ...the weak reference pack_loader.c tests for NULL included: allow that one by name
+        target_link_options(${t} PRIVATE -Wl,-U,_xbox_disc_slurp)
     endif()
 endforeach()
 target_sources(fake_shell_static PRIVATE title_static.c)
