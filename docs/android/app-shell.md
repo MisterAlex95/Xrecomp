@@ -153,7 +153,7 @@ One activity, a small state machine of screens (`LauncherActivity.Screen`) with 
 | Home | No top bar: the game's title image (or a monogram) in the [game theme](#game-theme)'s colours, its title (the XBE certificate's name, else the folder's name), **one line** — when it was played (« Yesterday · 12 h 40 min played », « Not played yet »), or its state when it is not ready (« Needs preparing · once, about 20–30 min », « Prepare failed · CODE », the Prepare's progress, « Queued (n) », « Game data missing » with the folder, …) — and **one row of buttons**: a solid **Play** (or **Prepare**, **Preparing…**, **See what failed**, **Choose a game**) and three quiet pills, **Settings**, **Controls**, **Manage**. Before the first play the note says where the in-game menu is. | A finished import (Play focused), every start when « Start in the game » is off, the « Launcher » shortcut, B from the screens above. |
 | Settings | Four tabs (General, Graphics, Audio, Advanced; L1 / R1) of [options](#settings) as « label  value » rows, left / right (or A) to change, the focused option's description on the right. About ends Advanced. | Home, Options. |
 | Controls | The player's **remapping** ([Controls and remapping](#controls-and-remapping)): one row per Xbox control (A B X Y, Black, White, the triggers; Back, Start, the stick presses; the D-pad; the two sticks), its value the player's button, changed like a setting; « Reset controls » (also Y). The description column says what the focused row does and draws the handheld with, next to each control, what the game gets from it. | Home. |
-| Manage | **Change game** (another folder or image, or the same one again to re-import; **Library** when the [game library](#game-library) is on); **Delete the imported copy** (only when the game is the app's own copy, `files/games/<TID>/` or the older `files/game/`; its size as the value; press A twice within 5 s; saves are kept); the game's pack, Prepare files, caches and saves with their sizes, each deleted on its own ([Storage](#storage)). The technical facts (title ID, prepared date, pack size, folder, source, size, free space) are the first row's description. | Home. |
+| Manage | **Change game** (another folder or image, or the same one again to re-import; **Library** when the [game library](#game-library) is on); **Delete the imported copy** (only when the game is the app's own copy, `files/games/<TID>/` or the older `files/game/`; its size as the value; press A twice within 5 s; saves are kept); **Add to home screen** (a [shortcut for this game](#a-game-on-the-home-screen), only when the home screen takes pin requests); the game's pack, Prepare files, caches and saves with their sizes, each deleted on its own ([Storage](#storage)). The technical facts (title ID, prepared date, pack size, folder, source, size, free space) are the first row's description. | Home. |
 | About | Version (`-PxbaVersion`), build (`-PxbaVersionCode`), app id, the game check (the first digits of `-PxbaXbeSha256`, or none), a one-line licence summary, and that no game data is included. **X**: Licences. | The end of Settings › Advanced, Options on the library. |
 | Licences | XBA-100. Every licence text the APK carries, monospaced, one after the other: `LICENSE`, `NOTICE`, then `LICENSES/*.txt` (copied into the assets `licences/` at build time by `xbaLicencesAsset`). D-pad up / down scroll, L1 / R1 page, a finger scrolls too. | X on About. |
 
@@ -177,9 +177,53 @@ settings saved, errors).
 | The native side found no `default.xbe` (`NO_GAME_DATA`) | `shell_main.c` calls `ShellActivity.openGamePicker(dir)`; the launcher opens on Choose your game with `NO_GAME_DATA` and that folder in the note; B goes to Home. |
 | Long-press on the app icon, « Change game » | Choose your game, even with a game set up; B goes to Home. If the game is running, the note says it will close when another game is chosen; saves are in internal storage and stay. |
 | Long-press on the app icon, « Launcher » | Home, even with « Start in the game » on or the game running. |
+| A game's home-screen shortcut, the game ready | That game becomes the selected one and starts (the rules of « Start in the game »: its files, no Prepare needed or running, a pack from this `default.xbe`, not a wrong game, no crash round to offer), whatever « Start in the game » says. Already running: back to it. Another game running: its Home, the note says that game will close, one press of Play goes on. |
+| A game's home-screen shortcut, the game not ready | That game's Home with its state (Needs preparing, Not imported, Game data missing, …), B to the library; its Prepare screen when one runs or failed. Nothing starts by itself (no Prepare, no import). |
+| A game's home-screen shortcut, the game no longer in the library | The library (or Home / Welcome without one), the note « The game of this shortcut is no longer in the library ». |
 
 The two shortcuts are dynamic (the package name differs per title, which a static `shortcuts.xml` cannot follow),
 published each time the launcher runs, so they appear after the first start.
+
+### A game on the home screen
+
+Manage › **Add to home screen** asks the home screen to pin a shortcut for the game shown (`ShortcutManager.
+requestPinShortcut`; `TitleShortcut`); the home screen shows its own dialog, the note says « Shortcut requested ».
+The row is hidden when `isRequestPinShortcutSupported()` is false, or when the game has no title ID.
+
+| What | Value |
+|---|---|
+| Id | `game_<TID>` (one per game; asking again updates it) |
+| Label | The game's title: up to 12 characters under the icon (cut at a word, « Burnout 3… »), 25 in the long label |
+| Icon | Adaptive, 432 x 432 (108 dp at xxxhdpi): the [title image](#game-theme) (`files/art/<TID>.png`) centred at two thirds, so the mask barely cuts it, on the average colour of its outer pixels (the dark launcher green when they are transparent); without an image the monogram (initials on the title ID's hue, as on the library's cards) |
+| Intent | Explicit to `LauncherActivity`, action `fr.adserver.xboxrecomp.PLAY_TITLE`, extra `fr.adserver.xboxrecomp.TITLE_ID` = the title ID, a fresh task (as the app icon's shortcuts) |
+| Update | When the launcher loads that game's title image (Home, after a scan or a theme bake), a pinned `game_<TID>` gets the current icon and title (`updateShortcuts`); nothing when it is not pinned |
+
+Pinned, not dynamic: the long-press menu keeps « Change game » and « Launcher ». What a tap does is in
+[When it shows](#when-it-shows). logcat: `launcher: shortcut game_<TID> requested`, then at a tap `launcher: shown (game
+shortcut <TID>)` or `launcher: shortcut <TID>: ready, starting it`. Tests: `LauncherShortcutTest` (the row and the
+request, the three cases of a tap, the icon → `build/screenshots/shortcut-icon-*.png`, the labels).
+
+### Device check (home-screen shortcut), for Alex
+
+`adb logcat -s xboxrecomp` throughout; a library with Fable (prepared) and Burnout 3 (not imported), and a stock or
+Pixel-like home screen (AYN Thor's launcher, then another one if installed).
+
+1. Fable › Home › Manage: the row **Add to home screen** is there, its description on the right. Press A: the home
+   screen's dialog shows Fable's logo and « Fable »; the launcher's note says « Shortcut requested… ». Accept.
+2. The home screen: the icon is Fable's title image, whole (not cut by the mask), on a matching background; the
+   label is « Fable ». Send a screenshot.
+3. Close the app (recents › swipe away). Tap the shortcut: Fable starts straight away, no launcher screen (logcat
+   `launcher: shortcut 4D5300D1: ready, starting it`).
+4. Home button while Fable runs, tap the shortcut again: back into the running game, no restart.
+5. Burnout 3 › Manage › Add to home screen, accept; tap its shortcut: Burnout 3's Home with **Not imported** (or its
+   state), nothing starts by itself; B goes to the library.
+6. With Fable running in the background, tap Burnout 3's shortcut after it was imported and prepared: its Home, the
+   note says Fable is running and will close; Play once more starts Burnout 3.
+7. A game without a title image (or a test XBE): its shortcut shows the monogram (two letters on a colour), legible.
+8. Delete a game from the library (Storage › its imported copy, and its file from the library folder, then Y), tap
+   its shortcut: the library opens with « The game of this shortcut is no longer in the library », no crash.
+9. Long-press the app icon: still only « Change game » and « Launcher ».
+10. In French: the row « Ajouter à l'écran d'accueil », the notes in French.
 
 A new game, once checked, becomes a record of the [game library](#game-library) and the selected game; the launcher
 goes to Home with Play focused and « TITLE is ready » in the note, instead of starting the game by itself. It

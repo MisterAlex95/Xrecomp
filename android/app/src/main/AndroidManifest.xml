@@ -58,6 +58,11 @@
                 <action android:name="fr.adserver.xboxrecomp.SHOW_LAUNCHER" />
                 <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
+            <!-- A game's pinned home-screen shortcut (TitleShortcut): its intent is explicit, the filter documents it. -->
+            <intent-filter>
+                <action android:name="fr.adserver.xboxrecomp.PLAY_TITLE" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
         </activity>
 
         <activity
