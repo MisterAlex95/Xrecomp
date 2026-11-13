@@ -506,7 +506,7 @@ void xbox_kernel_set_thunk_address(uint32_t xbox_va, uint32_t count);
 
 /**
  * Get the kernel thunk table address and entry count currently in effect.
- * Set during memory layout init from the XBE header. *xbox_va/*count are
+ * Set during memory layout init from the XBE header. Both outputs are
  * zeroed if never configured.
  */
 void xbox_kernel_get_thunk_address(uint32_t *xbox_va, uint32_t *count);
