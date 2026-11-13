@@ -129,6 +129,11 @@ BOOL  DuplicateHandle(HANDLE srcProc, HANDLE src, HANDLE dstProc,
 HANDLE      w32_open_handle(int fd, const char *host_path);
 int         w32_handle_fd(HANDLE h);
 const char *w32_handle_path(HANDLE h);
+/* A file handle backed by the file layer's own object instead of (or as well
+ * as) a host fd: ext_free(ext) runs when the last reference goes. The disc
+ * image backing (kernel_disc.c, XBA-126) opens D:'s files this way, fd -1. */
+HANDLE      w32_open_handle_ext(int fd, const char *host_path, void *ext, void (*ext_free)(void *));
+void       *w32_handle_ext(HANDLE h);
 /* After a rename: later path-based operations on h follow the file. */
 void        w32_handle_set_path(HANDLE h, const char *host_path);
 /* Raise the soft RLIMIT_NOFILE as far as the host allows; see the .c. */

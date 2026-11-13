@@ -514,6 +514,17 @@ static int game_main(void *hInstance, void *hPrevInstance, char *lpCmdLine,
 static BOOL load_xbe(const char *path, void **out_data, size_t *out_size)
 {
     FILE *f = fopen(path, "rb");
+#ifndef _WIN32
+    /* The game directory may be a disc image read in place (XBA-126):
+     * "game" a link to Game.iso / .cso / a split part, or the shell's
+     * "fd:N". The XBE then comes out of the image, which stays mounted
+     * for D:\ (src/kernel/kernel_disc.h). */
+    if (!f) {
+        extern int xbox_disc_slurp(const char *host_path, void **data, size_t *size);
+        if (xbox_disc_slurp(path, out_data, out_size) == 0)
+            return TRUE;
+    }
+#endif
     if (!f) {
         fprintf(stderr, "Cannot open XBE: %s\n", path);
         return FALSE;

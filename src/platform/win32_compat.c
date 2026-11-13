@@ -373,6 +373,10 @@ typedef struct w32_object {
     int             fd;
     SIZE_T          map_size;
     char           *file_path;
+    /* A file handle with no host fd (a file of a disc image, XBA-126):
+     * the file layer's own state, freed with the handle. */
+    void           *file_ext;
+    void          (*file_ext_free)(void *);
 } w32_object;
 
 /* pseudo handles for "current thread"/"current process" */
@@ -604,6 +608,8 @@ static void obj_release(w32_object *o)
     if (o->kind == K_FILE) {
         if (o->fd >= 0) close(o->fd);
         free(o->file_path);
+        if (o->file_ext && o->file_ext_free)
+            o->file_ext_free(o->file_ext);
     } else if (o->kind == K_FILEMAP) {
         if (o->fd >= 0) close(o->fd);
     } else if (o->kind == K_WAITABLE_TIMER) {
@@ -625,6 +631,23 @@ HANDLE w32_open_handle(int fd, const char *host_path)
     o->fd        = fd;
     o->file_path = host_path ? strdup(host_path) : NULL;
     return obj_handle(o);
+}
+
+HANDLE w32_open_handle_ext(int fd, const char *host_path, void *ext, void (*ext_free)(void *))
+{
+    HANDLE h = w32_open_handle(fd, host_path);
+    w32_object *o = obj_from_handle(h);
+    if (o) {
+        o->file_ext = ext;
+        o->file_ext_free = ext_free;
+    }
+    return h;
+}
+
+void *w32_handle_ext(HANDLE h)
+{
+    w32_object *o = obj_from_handle(h);
+    return (o && o->kind == K_FILE) ? o->file_ext : NULL;
 }
 
 int w32_handle_fd(HANDLE h)

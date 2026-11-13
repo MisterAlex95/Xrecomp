@@ -764,6 +764,7 @@ translate:
 #include <fcntl.h>
 #include <dirent.h>
 #include <strings.h>
+#include "kernel_disc.h"
 
 static char s_game_dir[MAX_PATH];
 static char s_save_dir[MAX_PATH];
@@ -876,6 +877,13 @@ void xbox_path_init(const char* game_dir, const char* save_dir)
 
     strip_trailing_slash(s_game_dir);
     strip_trailing_slash(s_save_dir);
+
+    /* A disc image as the game directory (XBA-126): D:\ is served from it
+     * in place (kernel_disc.c), the paths under s_game_dir stay the names the
+     * file layer recognises. A failed mount is reported there; the paths
+     * then simply do not open. */
+    if (xbox_disc_spec_is_image(s_game_dir))
+        xbox_disc_mount(s_game_dir);
 
     /* The save-side directories and the partition device images, as the
      * Win32 backend makes them. Without Partition0.img a title's
@@ -1058,7 +1066,9 @@ translate:
             while (n > 1 && host_path_buf[n - 1] == '/')
                 host_path_buf[--n] = '\0';
         }
-        fold_case(host_path_buf, strlen(base_dir));
+        /* Not inside a disc image: its lookups ignore case already. */
+        if (!xbox_disc_rel(host_path_buf))
+            fold_case(host_path_buf, strlen(base_dir));
 
         XBOX_TRACE(XBOX_LOG_PATH, "%s -> %s", xbox_path, host_path_buf);
         /* As the Win32 backend does: the bridge reads back the host path

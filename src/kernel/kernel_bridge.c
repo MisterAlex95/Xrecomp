@@ -37,6 +37,7 @@
 #include "recomp_icall_feedback.h"
 #include "recomp_discovery.h"
 #include "recomp_status.h"
+#include "kernel_disc.h"
 #include <stdio.h>
 /* stdlib.h is load-bearing, not tidiness. Without it C89 implicit declaration
  * makes malloc return `int`, so bridge_spawn_thread truncated its heap pointer
@@ -5824,6 +5825,16 @@ static void bridge_NtDeviceIoControlFile(void)
             uint32_t opcode   = BRIDGE_MEM8(in_va + 28);
             uint32_t i;
 
+#if !defined(_WIN32)
+            /* With a disc image mounted (kernel_disc.c, XBA-126), sector
+             * reads and READ CAPACITY come from its game partition. */
+            if (data_va && data_len
+                    && xbox_disc_scsi((const uint8_t *)XBOX_TO_NATIVE(in_va + 28),
+                                      (uint8_t *)XBOX_TO_NATIVE(data_va), data_len)) {
+                fprintf(stderr, "  [FILE] DVD SCSI command 0x%02X, %u bytes "
+                                "-> from the disc image\n", opcode, data_len);
+            } else
+#endif
             if (opcode == 0xAD && bridge_dvd_security_sector(data_va, data_len)) {
                 fprintf(stderr, "  [FILE] DVD SCSI command 0xAD, %u bytes "
                                 "-> security sector for this title's "

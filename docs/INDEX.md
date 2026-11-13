@@ -50,6 +50,7 @@ One per stage, in the order you run them.
 - [D3D8LTCG Device Context](technical/d3d8ltcg-device-context.md) — Device field map, PB ring management, stub calling conventions
 - [The Compat Runner](technical/compat-runner.md) — Prepare, boot headless with a pad script, and record the stage each title reaches
 - [Discs with Several XBEs](technical/multi-xbe.md) — A launcher image handing over to another XBE: one executable per image, the kernel execs the next
+- [Playing from the Disc Image](technical/disc-images.md) — D:\ served straight from an ISO, a split image or a CSO/ZSO/CCI: no extraction; prepare from the image; read speeds; device checks
 - [The Discovery File](technical/discovery.md) — What a run meets that the static analysis missed, recorded for the next prepare
 - [Saves](technical/saves.md) — The XDK save APIs on one host layout for every title: UDATA/TDATA per title in the save dir, no memory units, kept across prepares
 - [Profiles in Layers](technical/profiles.md) — A title's switches and fixes in `profiles/`: XDK library, engine and title layers, picked from the XBE by `tools.prepare`

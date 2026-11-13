@@ -288,6 +288,11 @@ final class GameStore {
 
     /** RECOMP_GAME_DIR from recomp.cfg (the native side reads the file too), or null. */
     static String cfgGameDir(Context c) {
+        return cfgValue(c, "RECOMP_GAME_DIR");
+    }
+
+    /** A variable's value in recomp.cfg (the first NAME= line), or null when absent or empty. */
+    static String cfgValue(Context c, String name) {
         File ext = externalFilesDir(c);
         if (ext == null)
             return null;
@@ -298,8 +303,8 @@ final class GameStore {
             String line;
             while ((line = r.readLine()) != null) {
                 line = line.trim();
-                if (line.startsWith("RECOMP_GAME_DIR=")) {
-                    String v = line.substring("RECOMP_GAME_DIR=".length()).trim();
+                if (line.startsWith(name + "=")) {
+                    String v = line.substring(name.length() + 1).trim();
                     return v.isEmpty() ? null : v;
                 }
             }

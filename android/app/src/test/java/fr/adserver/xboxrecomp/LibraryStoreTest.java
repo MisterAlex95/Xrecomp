@@ -134,6 +134,7 @@ public class LibraryStoreTest {
         x.items.add(item("file:/x/Fable (v2).iso", "4D5300D1", "Fable", 9));
         x.items.add(item("file:/x/burnout", "4541000D", "Burnout 3", 1));
         x.items.get(2).kind = LibraryIndex.KIND_FOLDER;
+        x.items.get(1).parts.addAll(Arrays.asList("file:/x/Fable (v2).iso", "file:/x/Fable (v2).2.iso"));   // XBA-126
         LibraryIndex.Item bad = new LibraryIndex.Item();
         bad.loc = "file:/x/linux.iso";
         bad.name = "linux.iso";
@@ -151,6 +152,9 @@ public class LibraryStoreTest {
         assertEquals(4, b.region);
         assertEquals(new File(files, "library/xbe/4541000D-cd/default.xbe"), b.xbeFile(files));
         assertTrue(b.sameFingerprint("file:/x/burnout", 7, 1));
+        assertEquals(Arrays.asList("file:/x/Fable (v2).iso", "file:/x/Fable (v2).2.iso"),
+                     back.find("file:/x/Fable (v2).iso").parts);
+        assertTrue(back.find("file:/x/Fable.iso").parts.isEmpty());
         assertFalse(b.sameFingerprint("file:/x/burnout", 7, 2));
 
         Map<String, List<LibraryIndex.Item>> games = back.games();

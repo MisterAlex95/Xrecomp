@@ -46,6 +46,26 @@ __attribute__((weak)) int fe_menu_get_pb_state(void)
     return s_pb_state ? s_pb_state() : 0;
 }
 
+/* XBA-126: the game may be a disc image read in place ("fd:N/default.xbe",
+ * "<image>/default.xbe"): the kernel's reader (kernel_disc.c, linked into
+ * libmain.so) takes the XBE out of it. Weak, so tests/recomp_pack's fake
+ * shell links without the kernel. */
+extern int xbox_disc_slurp(const char *host_path, void **data, size_t *size) __attribute__((weak));
+
+static int xbe_title_id(const char *xbe_path, char tid[9])
+{
+    void *data = NULL;
+    size_t len = 0;
+    int rc;
+    if (recomp_pack_xbe_title_id(xbe_path, tid) == 0)
+        return 0;
+    if (!xbox_disc_slurp || !xbe_path || xbox_disc_slurp(xbe_path, &data, &len) != 0)
+        return -1;
+    rc = recomp_pack_xbe_title_id_mem(data, len, tid);
+    free(data);
+    return rc;
+}
+
 int xba_pack_load(const char *files_dir, const char *xbe_path, xba_title_main_fn *main_out,
                   char *reason, size_t reason_n)
 {
@@ -56,7 +76,7 @@ int xba_pack_load(const char *files_dir, const char *xbe_path, xba_title_main_fn
 
     *main_out = NULL;
     why[0] = 0;
-    if (recomp_pack_xbe_title_id(xbe_path, tid) != 0) {
+    if (xbe_title_id(xbe_path, tid) != 0) {
         snprintf(why, sizeof why, "cannot read the title ID of %s", xbe_path ? xbe_path : "(none)");
         printf("PACK_INVALID %s\n", why);
         rc = RECOMP_PACK_INVALID;

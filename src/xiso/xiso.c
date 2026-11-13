@@ -54,10 +54,11 @@ typedef struct {
 } entry_t;
 
 typedef struct {
-    int fd;
-    uint64_t img_size;                      /* UINT64_MAX when the fd cannot tell */
+    xiso_source *src;                       /* not owned */
+    uint64_t img_size;                      /* UINT64_MAX when the source cannot tell */
     uint64_t base;
     uint32_t root_sector, root_size;
+    uint64_t vol_time;                      /* the descriptor's FILETIME */
 
     /* directory tables already walked in this pass (open addressing, key sector + 1) */
     uint32_t *seen;
@@ -105,12 +106,9 @@ static int read_full(vol_t *v, void *dst, size_t len, uint64_t off)
 {
     uint8_t *p = dst;
     while (len > 0) {
-        ssize_t n = pread(v->fd, p, len, (off_t)off);
-        if (n < 0) {
-            if (errno == EINTR)
-                continue;
-            return XISO_EIO;
-        }
+        long n = xiso_source_pread(v->src, p, len, off);
+        if (n < 0)
+            return (int)n;
         if (n == 0)
             return XISO_ECORRUPT;
         p += n;
@@ -155,19 +153,11 @@ static int in_image(const vol_t *v, uint32_t sector, uint32_t size)
 
 /* ── Volume ──────────────────────────────────────────────────────────────── */
 
-static int vol_open(vol_t *v, int fd)
+static int vol_open(vol_t *v, xiso_source *src)
 {
-    struct stat st;
     memset(v, 0, sizeof *v);
-    v->fd = fd;
-    v->img_size = UINT64_MAX;
-    if (fstat(fd, &st) == 0 && S_ISREG(st.st_mode) && st.st_size >= 0) {
-        v->img_size = (uint64_t)st.st_size;
-    } else {
-        off_t end = lseek(fd, 0, SEEK_END);   /* a pipe or socket says ESPIPE: size unknown */
-        if (end > 0)
-            v->img_size = (uint64_t)end;
-    }
+    v->src = src;
+    v->img_size = xiso_source_size(src);      /* UINT64_MAX: a pipe or socket, size unknown */
     for (size_t i = 0; i < sizeof BASES / sizeof BASES[0]; i++) {
         uint8_t desc[SECTOR_SIZE];
         uint64_t off = BASES[i] + (uint64_t)DESC_SECTOR * SECTOR_SIZE;
@@ -183,6 +173,7 @@ static int vol_open(vol_t *v, int fd)
         v->base = BASES[i];
         v->root_sector = rd32(desc + 0x14);
         v->root_size = rd32(desc + 0x18);
+        v->vol_time = (uint64_t)rd32(desc + 0x1C) | (uint64_t)rd32(desc + 0x20) << 32;
         return 0;
     }
     return XISO_ENOTXISO;
@@ -515,7 +506,34 @@ static void read_title(vol_t *v, char *out, size_t cap)
     out[o] = 0;
 }
 
+/* A source over one fd (not owned) for the fd forms. */
+static int fd_source(int fd, xiso_source **out)
+{
+    if (fd < 0)
+        return XISO_EINVAL;
+    return xiso_source_open_fds(&fd, 1, 0, out);
+}
+
 int xiso_probe_fd(int fd, char *title_out, size_t title_cap, uint64_t *total_bytes, int *has_default_xbe)
+{
+    xiso_source *src;
+    int rc = fd < 0 ? XISO_EINVAL : fd_source(fd, &src);
+    if (rc) {
+        if (title_out && title_cap)
+            title_out[0] = 0;
+        if (total_bytes)
+            *total_bytes = 0;
+        if (has_default_xbe)
+            *has_default_xbe = 0;
+        return rc;
+    }
+    rc = xiso_probe_source(src, title_out, title_cap, total_bytes, has_default_xbe);
+    xiso_source_close(src);
+    return rc;
+}
+
+int xiso_probe_source(xiso_source *src, char *title_out, size_t title_cap, uint64_t *total_bytes,
+                      int *has_default_xbe)
 {
     if (title_out && title_cap)
         title_out[0] = 0;
@@ -523,12 +541,12 @@ int xiso_probe_fd(int fd, char *title_out, size_t title_cap, uint64_t *total_byt
         *total_bytes = 0;
     if (has_default_xbe)
         *has_default_xbe = 0;
-    if (fd < 0)
+    if (!src)
         return XISO_EINVAL;
     vol_t *v = malloc(sizeof *v);
     if (!v)
         return XISO_ENOMEM;
-    int rc = vol_open(v, fd);
+    int rc = vol_open(v, src);
     if (!rc)
         rc = scan(v);
     if (!rc) {
@@ -582,7 +600,20 @@ static int make_parents(char *path)
 
 int xiso_extract_fd(int fd, const char *out_dir, xiso_progress_fn progress, void *user)
 {
+    xiso_source *src;
     if (fd < 0 || !out_dir || !out_dir[0])
+        return XISO_EINVAL;
+    int rc = fd_source(fd, &src);
+    if (rc)
+        return rc;
+    rc = xiso_extract_source(src, out_dir, progress, user);
+    xiso_source_close(src);
+    return rc;
+}
+
+int xiso_extract_source(xiso_source *src, const char *out_dir, xiso_progress_fn progress, void *user)
+{
+    if (!src || !out_dir || !out_dir[0])
         return XISO_EINVAL;
     size_t len = strlen(out_dir);
     while (len > 1 && out_dir[len - 1] == '/')
@@ -602,7 +633,7 @@ int xiso_extract_fd(int fd, const char *out_dir, xiso_progress_fn progress, void
     snprintf(partial, len + 9, "%s.partial", dst);
     snprintf(old, len + 5, "%s.old", dst);
 
-    rc = vol_open(v, fd);
+    rc = vol_open(v, src);
     if (!rc)
         rc = scan(v);                         /* validate everything before writing anything */
     if (!rc && !(v->buf = malloc(BUF_SIZE)))
@@ -672,25 +703,45 @@ out:
 
 struct xiso_image {
     vol_t v;
+    xiso_source *own_src;                   /* the fd form's source, closed with the image */
 };
 
-int xiso_open_fd(int fd, xiso_image **out)
+int xiso_open_source(xiso_source *src, xiso_image **out)
 {
     if (!out)
         return XISO_EINVAL;
     *out = NULL;
-    if (fd < 0)
+    if (!src)
         return XISO_EINVAL;
     xiso_image *img = malloc(sizeof *img);
     if (!img)
         return XISO_ENOMEM;
-    int rc = vol_open(&img->v, fd);
+    int rc = vol_open(&img->v, src);
     if (rc) {
         vol_close(&img->v);
         free(img);
         return rc;
     }
+    img->own_src = NULL;
     *out = img;
+    return 0;
+}
+
+int xiso_open_fd(int fd, xiso_image **out)
+{
+    xiso_source *src;
+    if (!out)
+        return XISO_EINVAL;
+    *out = NULL;
+    int rc = fd_source(fd, &src);
+    if (rc)
+        return rc;
+    rc = xiso_open_source(src, out);
+    if (rc) {
+        xiso_source_close(src);
+        return rc;
+    }
+    (*out)->own_src = src;
     return 0;
 }
 
@@ -699,7 +750,54 @@ void xiso_close(xiso_image *img)
     if (!img)
         return;
     vol_close(&img->v);
+    xiso_source_close(img->own_src);
     free(img);
+}
+
+uint64_t xiso_partition_offset(const xiso_image *img) { return img ? img->v.base : 0; }
+uint64_t xiso_volume_time(const xiso_image *img) { return img ? img->v.vol_time : 0; }
+
+int xiso_list(xiso_image *img, const xiso_stat *dir, xiso_dirent **out, size_t *count)
+{
+    if (!img || !out || !count)
+        return XISO_EINVAL;
+    *out = NULL;
+    *count = 0;
+    vol_t *v = &img->v;
+    uint32_t sector = v->root_sector, size = v->root_size;
+    if (dir) {
+        if (!dir->is_dir || dir->offset < v->base || (dir->offset - v->base) % SECTOR_SIZE)
+            return XISO_EINVAL;
+        sector = (uint32_t)((dir->offset - v->base) / SECTOR_SIZE);
+        size = dir->size;
+    }
+    seen_reset(v);
+    entry_t *ents;
+    size_t n;
+    int rc = read_dir(v, sector, size, &ents, &n);
+    if (rc)
+        return rc;
+    xiso_dirent *d = n ? malloc(n * sizeof *d) : NULL;
+    if (n && !d) {
+        free(ents);
+        return XISO_ENOMEM;
+    }
+    for (size_t i = 0; i < n; i++) {
+        int is_dir = (ents[i].attr & ATTR_DIRECTORY) != 0;
+        if (ents[i].size > 0 && !in_image(v, ents[i].sector, ents[i].size)) {
+            free(ents);
+            free(d);
+            return XISO_ECORRUPT;
+        }
+        memcpy(d[i].name, ents[i].name, sizeof d[i].name);
+        d[i].offset = v->base + (uint64_t)ents[i].sector * SECTOR_SIZE;
+        d[i].size = ents[i].size;
+        d[i].is_dir = is_dir;
+    }
+    free(ents);
+    *out = d;
+    *count = n;
+    return 0;
 }
 
 /* ASCII case folding only: XDVDFS names are 8-bit and the kernel compares them that way. */
@@ -791,10 +889,23 @@ int xiso_pread(xiso_image *img, const xiso_stat *st, void *buf, size_t len, uint
 
 int xiso_extract_file_fd(int fd, const char *path, const char *out_file, uint64_t max_bytes)
 {
+    xiso_source *src;
     if (fd < 0 || !path || !out_file || !out_file[0])
         return XISO_EINVAL;
+    int rc = fd_source(fd, &src);
+    if (rc)
+        return rc;
+    rc = xiso_extract_file_source(src, path, out_file, max_bytes);
+    xiso_source_close(src);
+    return rc;
+}
+
+int xiso_extract_file_source(xiso_source *src, const char *path, const char *out_file, uint64_t max_bytes)
+{
+    if (!src || !path || !out_file || !out_file[0])
+        return XISO_EINVAL;
     xiso_image *img;
-    int rc = xiso_open_fd(fd, &img);
+    int rc = xiso_open_source(src, &img);
     if (rc)
         return rc;
     xiso_stat st;

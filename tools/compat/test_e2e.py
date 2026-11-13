@@ -190,16 +190,11 @@ def test_a_wait_spin_is_caught_and_promoted(tmp_path):
     assert any(l.get("t") == "wait_spin" and l.get("va") == "0x%08X" % evt for l in lines), lines
 
 
-@pytest.mark.skipif(os.environ.get("XBA_E2E") != "1", reason="XBA_E2E=1: builds and boots a title (minutes)")
-def test_a_launch_of_another_image_hands_over(tmp_path):
-    """XBA-82 (desktop): default.xbe launches d:\\game.xbe as the XDK's
-    XLaunchNewImage does (a contiguous page holding the path at +8, stored in
-    LaunchDataPage, then HalReturnToFirmware(2)). tools.prepare prepares both
-    images (game.xbe is named in default.xbe's strings) and writes images.map;
-    the kernel execs game.xbe's executable in the same process."""
+def _launcher_disc(tmp_path):
+    """A two-image synthetic disc: default.xbe launches d:\\game.xbe as the
+    XDK's XLaunchNewImage does (a contiguous page holding the path at +8,
+    stored in LaunchDataPage, then HalReturnToFirmware(2)); game.xbe spins."""
     import struct
-    if not shutil.which("cmake"):
-        pytest.skip("no cmake")
     code = bytes.fromhex(
         "558bec"
         "6800100000" "ff1500080100"          # push 0x1000; call [MmAllocateContiguousMemory]
@@ -219,6 +214,17 @@ def test_a_launch_of_another_image_hands_over(tmp_path):
     struct.pack_into("<IIII", b, 0x800, 0x80000000 | 165, 0x80000000 | 164, 0x80000000 | 49, 0)
     open(p, "wb").write(b)
     make_xbe(d / "game.xbe", libs=(("XAPILIB", 5849, 0),), text=SPIN, title_id=0x58424105, title="Game2")
+    return d
+
+
+@pytest.mark.skipif(os.environ.get("XBA_E2E") != "1", reason="XBA_E2E=1: builds and boots a title (minutes)")
+def test_a_launch_of_another_image_hands_over(tmp_path):
+    """XBA-82 (desktop): tools.prepare prepares both images of _launcher_disc
+    (game.xbe is named in default.xbe's strings) and writes images.map; the
+    kernel execs game.xbe's executable in the same process."""
+    if not shutil.which("cmake"):
+        pytest.skip("no cmake")
+    d = _launcher_disc(tmp_path)
     out = tmp_path / "results.jsonl"
     r = subprocess.run([sys.executable, "-m", "tools.compat", "run", str(d), "--work-root", str(tmp_path / "cw"),
                         "--seconds", "8", "--sustain", "3", "--out", str(out)],
@@ -230,6 +236,45 @@ def test_a_launch_of_another_image_hands_over(tmp_path):
     log = (work / "run-0.log").read_text(errors="replace")
     assert "launch of 'D:\\game.xbe': handing over to" in log, log[-3000:]
     assert "Game2" in log.split("handing over to", 1)[1], log[-3000:]     # game.xbe's runtime started
+    res = json.loads(out.read_text().splitlines()[-1])
+    assert "launches another XBE" not in (res.get("blocker") or ""), res
+
+
+@pytest.mark.skipif(os.environ.get("XBA_E2E") != "1", reason="XBA_E2E=1: builds and boots a title (minutes)")
+def test_a_multi_image_disc_boots_from_its_image(tmp_path):
+    """XBA-126: the same two-image disc as a split, compressed image (Disc.1.cso,
+    Disc.2.cso): tools.prepare reads default.xbe and game.xbe out of it (nothing
+    else is extracted), each build's game links to the image, the runtime
+    mounts it (kernel_disc.c) for D:\\ and the XBE load, and the hand-over to
+    game.xbe runs from the image too."""
+    if not shutil.which("cmake"):
+        pytest.skip("no cmake")
+    sys.path.insert(0, os.path.join(ROOT, "tools", "xiso"))
+    import mkcso
+    import mkxiso
+    d = _launcher_disc(tmp_path)
+    iso = tmp_path / "plain.iso"
+    mkxiso.build(str(d), str(iso))
+    cso = mkcso.compress(iso.read_bytes(), "cso2")
+    parts = mkcso.write_split(cso, str(tmp_path / "Disc.cso"), len(cso) // 2 + 1, "dot")
+    assert len(parts) == 2
+    shutil.rmtree(d)                                 # only the image is left
+    iso.unlink()
+    out = tmp_path / "results.jsonl"
+    r = subprocess.run([sys.executable, "-m", "tools.compat", "run", parts[0], "--work-root", str(tmp_path / "cw"),
+                        "--seconds", "8", "--sustain", "3", "--out", str(out)],
+                       cwd=ROOT, capture_output=True, text=True, timeout=1800)
+    assert r.returncode == 0, r.stdout[-2000:] + r.stderr[-2000:]
+    work = tmp_path / "cw" / "Disc.1.cso"
+    assert not (work / "game").exists()                              # nothing extracted
+    assert [f for f in os.listdir(work / "disc-xbe") if f.endswith(".xbe")] == ["game.xbe"]   # only that copied out
+    assert os.path.realpath(work / "project" / "build" / "game") == os.path.realpath(parts[0])
+    imap = (work / "images.map").read_text().splitlines()
+    assert imap[0].startswith("default.xbe\t") and imap[1].startswith("game.xbe\t"), imap
+    log = (work / "run-0.log").read_text(errors="replace")
+    assert "[DISC] mounted" in log and "cso split, 2 part(s)" in log, log[-3000:]
+    assert "launch of 'D:\\game.xbe': handing over to" in log, log[-3000:]
+    assert "Game2" in log.split("handing over to", 1)[1], log[-3000:]
     res = json.loads(out.read_text().splitlines()[-1])
     assert "launches another XBE" not in (res.get("blocker") or ""), res
 

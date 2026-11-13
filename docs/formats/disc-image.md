@@ -53,6 +53,24 @@ The Android app extracts a picked image in-app with `src/xiso` (`xiso.h`, XBA-40
 directory's binary tree the way the kernel looks names up, and checks every offset against the image size. On a
 desktop, `xiso_extract image.iso outdir` uses the same code (see `tools/xiso/README.md`).
 
+### Split and compressed images (XBA-126)
+
+Every reader here (`src/xiso`, `tools/xiso`, the runtime, the app) also takes:
+
+| Form | Names | Notes |
+|---|---|---|
+| FAT32 split | `Game.1.iso` / `Game.2.iso`, `Game.part1.iso`, `Game.iso.1` / `Game.iso.001` (same for the other extensions) | The parts concatenated in order. Any part names the set; numbering starts at 1 (or 0). A lone `Game.2.iso` without `Game.1.iso` is one image. Two different discs named `Game.1.iso` and `Game.2.iso` are taken for one split image: rename them. |
+| CSO | `.cso`, `.ciso` (magic `CISO`) | v0/v1 (PSP tools): raw deflate, bit 31 = stored. v2: maxcso's layout (deflate, bit 31 = LZ4) and the Xbox tools' (MakeMHz `ciso`: LZ4 flagged, stored unflagged, an LZ4 frame block header kept or not). Recognised by magic, not by name. |
+| ZSO | `.zso` (magic `ZISO`) | LZ4, bit 31 = stored. |
+| CCI | `.cci` (magic `CCIM`) | LZ4 with a leading padding-count byte, bit 31 = LZ4 (the Repackinator layout, tried without the byte too). |
+| Split compressed | `Game.1.cso` / `Game.2.cso` | The compressed stream is what is split, as the Xbox tools write it. |
+
+Not read: **CHD, 7z, zip** (archives and MAME's hunk format; extract them first). The decoders are in
+`src/xiso/xiso_source.c` (inflate and LZ4, no zlib); `tools/xiso/source.py` is the Python twin. Format details at the
+top of `xiso_source.c`. The CSO v2 Xbox layout and CCI follow the public tools' writers and are covered by images we
+build (`tools/xiso/mkcso.py`); a real file from each tool is on the device check list
+([disc-images.md](../technical/disc-images.md)).
+
 ### xdvdfs (external)
 
 A Rust-based tool for reading and extracting Xbox disc images.

@@ -25,6 +25,7 @@ sys.path.insert(0, os.path.join(ROOT, "tools", "xiso"))
 sys.path.insert(0, os.path.join(ROOT, "tools", "conformance"))
 import mkxiso  # noqa: E402
 import mkxbe   # noqa: E402
+import mkcso   # noqa: E402
 
 BIG = 4 * 1024 * 1024 + 300 * 1024 + 7      # > the 2 MB copy buffer, crosses the 4 MB progress step
 
@@ -105,6 +106,35 @@ def main():
     mkxiso.build(s, img("truncated_dir.iso"), truncate=33 * 2048 + 100)    # inside the root table
     with open(img("default.xbe.ref"), "wb") as f:                          # the test compares default.xbe to it
         f.write(mkxbe.build())
+
+    # XBA-126: split and compressed images of the same trees (tools/xiso/mkcso.py).
+    with open(img("small.iso"), "rb") as f:
+        small_img = f.read()
+    with open(img("tree.iso"), "rb") as f:
+        tree_img = f.read()
+    for fmt, name in (("cso1", "small_v1.cso"), ("cso2", "small_v2.cso"), ("cso2-framed", "small_v2f.cso"),
+                      ("cso2-maxcso", "small_v2m.cso"), ("zso", "small.zso"), ("cci", "small.cci")):
+        with open(img(name), "wb") as f:
+            f.write(mkcso.compress(small_img, fmt))
+    with open(img("small_b16k.cso"), "wb") as f:                           # a bigger block, deflate
+        f.write(mkcso.compress(small_img, "cso1", block=16384, align=0))
+    tree_cso = mkcso.compress(tree_img, "cso1")                              # stored blocks, many batches
+    with open(img("tree_v1.cso"), "wb") as f:
+        f.write(tree_cso)
+    mkcso.write_split(tree_img, img("tree_split.iso"), 2 * 1024 * 1024 + 4096, "dot")   # .1/.2/.3/.4.iso
+    mkcso.write_split(small_img, img("small_x.iso"), 20000, "ext3")         # .iso.001 ...
+    mkcso.write_split(small_img, img("small_p.iso"), 30000, "part")         # .part1.iso ...
+    mkcso.write_split(mkcso.compress(small_img, "cso2"), img("small_cs.cso"), 7000, "dot")   # a split .cso
+    bad = bytearray(mkcso.compress(small_img, "zso"))                      # a block that does not decode
+    import struct as _st
+    first = (_st.unpack_from("<I", bad, 24)[0] & 0x7FFFFFFF) << bad[21]
+    for i in range(first, first + 64):
+        bad[i] = 0xFF                                                       # literal lengths that never end
+    with open(img("bad_block.zso"), "wb") as f:
+        f.write(bad)
+    short = mkcso.compress(small_img, "cso2")                              # the index points past the end
+    with open(img("short.cso"), "wb") as f:
+        f.write(short[:len(short) - 3000])
     shutil.rmtree(t)                                                       # the test regenerates the contents
     shutil.rmtree(s)
 

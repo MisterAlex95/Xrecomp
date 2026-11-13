@@ -56,6 +56,17 @@ public class ShellActivity extends SDLActivity {
          * SDLThread, and recomp_app_start reads it in recomp_storage_resolve. The process environment is libc's, so
          * native getenv sees it. Set here, it wins over a RECOMP_GAME_DIR line in recomp.cfg. */
         String dir = GameStore.chosenDir(this);
+        /* A disc image read in place (XBA-126): the folder is its companion (XBEs and disc.json); the runtime gets
+         * the image itself, its path or fds opened here from the persisted documents. Opened again at every
+         * process start, so a quick reboot or a hand-over to another image (both a new process) finds it too.
+         * Unreachable (SD card out, permission gone): "fd:-1", which the runtime reports as no game data. */
+        DiscImages.Disc disc = dir == null ? null : DiscImages.read(new java.io.File(dir));
+        if (disc != null) {
+            String spec = DiscImages.runtimeSpec(disc, DiscImages.contentOpener(this));
+            Log.i(LauncherActivity.TAG, "shell: disc image " + DiscImages.label(disc) + " (" + disc.kind + ") -> "
+                                        + (spec != null ? spec : "unreachable"));
+            dir = spec != null ? spec : "fd:-1";
+        }
         if (dir != null) {
             try {
                 Os.setenv("RECOMP_GAME_DIR", dir, true);

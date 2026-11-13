@@ -46,6 +46,8 @@ final class Library {
     static final String GAMES_SUBDIR = "games";
 
     static final String KIND_IMPORTED = "imported", KIND_IN_PLACE = "in_place", KIND_CFG = "cfg";
+    /** A disc image read in place (XBA-126): data_dir is its companion folder (DiscImages). */
+    static final String KIND_IMAGE = "image";
 
     /** Preferences (GameStore.PREFS): the launched game's title ID (next to game_dir and title), the library folder. */
     static final String PREF_TITLE_ID = "title_id", PREF_TREE = "library_tree", PREF_PATH = "library_path",
@@ -93,7 +95,12 @@ final class Library {
 
         /** data_dir is set and holds a default.xbe. */
         boolean hasData() {
-            return !dataDir.isEmpty() && GameStore.findXbe(new File(dataDir)) != null;
+            if (dataDir.isEmpty() || GameStore.findXbe(new File(dataDir)) == null)
+                return false;
+            // A disc image read in place by path: the image must still be there (SD card in). By document: known
+            // only when the game opens it (the shell then reports no game data).
+            DiscImages.Disc d = KIND_IMAGE.equals(dataKind) ? DiscImages.read(new File(dataDir)) : null;
+            return d == null || !d.viaPath() || new File(d.path).isFile();
         }
 
         JSONObject toJson() throws JSONException {

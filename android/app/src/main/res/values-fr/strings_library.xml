@@ -62,6 +62,9 @@
     <string name="LIB_ST_CACHES">Caches du jeu</string>
     <string name="LIB_ST_SAVES">Sauvegardes</string>
     <string name="LIB_ST_DATA_DETAIL">La copie faite par l\'application lors de l\'importation du jeu. La supprimer libère la place ; le jeu reste dans la bibliothèque et peut être importé à nouveau. Votre image disque ou votre dossier ne sont jamais touchés.</string>
+    <string name="LIB_ST_IMAGE">Image disque, lue sur place</string>
+    <string name="LIB_ST_IMAGE_DETAIL">Le jeu est lu directement dans votre image disque, là où elle est : rien n\'a été copié ni extrait. L\'application ne garde que les fichiers XBE de l\'image (pour le titre, l\'illustration et la préparation). Supprimer oublie l\'image ; l\'image elle-même n\'est jamais touchée.</string>
+    <string name="LIB_ST_IMAGE_VALUE">%1$s dans l\'appli · image %2$s</string>
     <string name="LIB_ST_PACK_DETAIL">Ce que la préparation a construit pour ce jeu. Une fois supprimé, le jeu doit être préparé à nouveau (20 à 60 minutes).</string>
     <string name="LIB_ST_WORK_DETAIL">Les fichiers de travail de la préparation (code généré, objets). Utiles seulement pour reprendre ou refaire une préparation plus vite.</string>
     <string name="LIB_ST_CACHES_DETAIL">Les caches propres au jeu (Z:, les partitions de cache, E:\\CACHE), mis de côté pendant qu\'un autre jeu tourne. Le jeu les reconstruit au démarrage suivant, ce qui peut prendre quelques minutes.</string>

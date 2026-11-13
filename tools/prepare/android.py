@@ -54,6 +54,7 @@ class Run:
         self.layers = []
         self.toolkit_sha = ""         # tools/prepare/toolkit.py: what a stale pack is judged by
         self.data_dir = None
+        self.image = None             # a disc image source (XBA-126): the other images come out of it
         self.images = []              # [(disc path, objects)], other_images()
 
     # ── helpers ──
@@ -80,7 +81,7 @@ class Run:
     def identify(self):
         self.rep.progress(1, 0, "finding default.xbe")
         try:
-            xbe, self.data_dir, _ = self.m.find_xbe(self.a.source, self.work)
+            xbe, self.data_dir, self.image = self.m.find_xbe(self.a.source, self.work)
         except SystemExit as e:
             raise cc.StepError("NO_XBE", str(e))
         # Our own copy, next to its analysis JSON (the tools look for
@@ -227,15 +228,16 @@ class Run:
         test), each analysed, lifted and compiled in <work>/images/<path>/ with
         this run's toolchain; make_pack links one library each. An image that
         fails is left out (default.xbe still runs; its launch then exits as
-        before). Only from a folder: a disc image source has no other files here."""
-        if not self.data_dir or getattr(self.a, "no_images", False):
+        before). From a folder, or from a disc image (XBA-126: the named XBEs
+        are copied out of it, nothing else); a lone default.xbe has no others."""
+        disc = self.data_dir or self.image
+        if not disc or getattr(self.a, "no_images", False):
             return
         import re
-        from tools.triage import _named_xbes, _xbes_in_folder
+        from tools.triage import _named_xbes, disc_xbes
         with open(self.xbe, "rb") as f:
             named = _named_xbes(f.read())
-        others = [(rel, p) for rel, p in _xbes_in_folder(self.data_dir)
-                  if rel.lower() != "default.xbe" and os.path.basename(rel).lower() in named]
+        others = [(rel, p) for rel, p in disc_xbes(disc, self.work, named) if rel.lower() != "default.xbe"]
         for rel, p in others[:IMAGES_MAX]:
             sub_a = copy.copy(self.a)
             sub_a.source = p

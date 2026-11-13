@@ -8,7 +8,9 @@ recompiled title is one executable per image, so the hand-over is a process exec
 
 ## Desktop (Linux, macOS, Windows)
 
-- `tools.prepare` reads the disc's other `.xbe` files that `default.xbe` names in its strings (`tools.triage`'s test),
+- `tools.prepare` reads the disc's other `.xbe` files that `default.xbe` names in its strings (`tools.triage`'s test;
+  from a folder, or straight from a disc image, plain, split or compressed: only those XBEs are copied out, into
+  `<work>/disc-xbe/`, XBA-126),
   prepares each into `<work>/images/<path>/`, and writes `<work>/images.map`, one line per image:
   `<disc path>\t<executable>` (`default.xbe` first). Every image's build bakes the map's path in (`XBA_IMAGE_MAP`,
   read as `RECOMP_IMAGE_MAP`).
@@ -17,7 +19,9 @@ recompiled title is one executable per image, so the hand-over is a process exec
   that image's executable in the same process (Windows: `CreateProcess`, then this process ends, as the quick reboot
   does; not built or run by our CI). Not found, or the exec failed: the title exits as before, the launch
   is recorded in the discovery file (`{"t":"launch"}`) and the compat runner names it.
-- Tested end to end in CI on a two-image synthetic disc (`tools/compat/test_e2e.py::test_a_launch_of_another_image_hands_over`).
+- Tested end to end in CI on a two-image synthetic disc (`tools/compat/test_e2e.py::test_a_launch_of_another_image_hands_over`),
+  and on the same disc as a split CSO image booted in place (`test_a_multi_image_disc_boots_from_its_image`,
+  [disc-images.md](disc-images.md)).
 
 ## The running image's name
 
@@ -39,6 +43,10 @@ is then a hand-over, and a launch of the running image a quick reboot. A launch 
   the shell installs (`xbox_SetImageHandler`): it writes `image.next` and restarts the game process the way a quick
   reboot does (the launcher ends it and starts the game activity again). A quick reboot of a secondary image writes
   `image.next` too, so the same image starts again.
+- The on-device Prepare finds the other images in a game folder, in a disc image source (plain, split or compressed,
+  the named XBEs copied out) and in the companion folder of an image read in place, which holds every XBE of the
+  image (XBA-126, [disc-images.md](disc-images.md)). Only a lone cached `default.xbe` (a library game prepared before
+  it is imported) has no others.
 
 ## Not yet
 
