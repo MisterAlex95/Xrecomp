@@ -11,12 +11,15 @@ final class PreviewStore: LauncherActions {
     private var timer: Timer?
 
     static let screens = ["library", "home", "preparing", "failed", "running", "settings", "controls", "manage", "log",
-                          "setup", "about"]
+                          "setup", "about", "single", "single-missing"]
 
     init(screen: String) {
-        model = LauncherModel(demo: true)
+        // « single »: a game app (single-game mode) on Sample Racer; « single-missing »: one whose title is gone.
+        let single: String? = screen == "single" ? "58410002" : screen == "single-missing" ? "584100FF" : nil
+        model = LauncherModel(demo: true, singleTitle: single)
         model.actions = self
         model.games = PreviewStore.mockGames()
+        model.scannedOnce = true
         model.setup = SetupInfo(
             toolkit: "/Users/you/xboxrecomp-android", toolkitSource: "infoPlist",
             toolkitCommit: "504a47a1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7",
@@ -61,6 +64,10 @@ final class PreviewStore: LauncherActions {
         case "log": model.route = .log(first)
         case "setup": model.route = .setup
         case "about": model.route = .about
+        case "single", "single-missing":
+            let m = model
+            m.games = m.games.filter { m.accepts($0) }
+            m.route = m.homeRoute
         default: model.route = .library
         }
         timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
@@ -193,6 +200,10 @@ final class PreviewStore: LauncherActions {
     func delete(_ item: Storage.Item, of id: String) { model.notice = "Demo mode: nothing deleted." }
     func importSaves(_ id: String) -> Int { 0 }
     func setEnhancements(_ id: String, on: Bool) { model.update(id) { $0.record.enhancements = on ? nil : false } }
+    func createTitleApp(_ id: String, at url: URL) {
+        model.notice = "Demo mode: \(url.lastPathComponent) would be made in \(url.deletingLastPathComponent().path)."
+    }
+    func openMainApp() { model.notice = "Demo mode: XRecomp would open." }
     func reveal(_ url: URL) {}
     func titlePaths(_ id: String) -> TitlePaths? { AppPaths(root: URL(fileURLWithPath: "/tmp/xrecomp-demo")).title(id) }
     func setToolkit(_ path: String) { model.setup.toolkit = path }

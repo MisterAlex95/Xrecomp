@@ -2,11 +2,29 @@ import SwiftUI
 import UniformTypeIdentifiers
 import XRecompCore
 
-/// The window: a sidebar (library, games, setup) and the detail pane the route picks.
+/// The window: a sidebar (library, games, setup) and the detail pane the route picks; in a game app
+/// (single-game mode) that game's screens alone (SingleTitleRoot).
 struct RootView: View {
     @EnvironmentObject var model: LauncherModel
 
     var body: some View {
+        Group {
+            if model.singleTitle != nil {
+                SingleTitleRoot()
+            } else {
+                splitView
+            }
+        }
+        .preferredColorScheme(.dark)
+        .tint(Theme.accent)
+        .alert("XRecomp", isPresented: Binding(get: { model.notice != nil }, set: { if !$0 { model.notice = nil } })) {
+            Button("OK") { model.notice = nil }
+        } message: {
+            Text(model.notice ?? "")
+        }
+    }
+
+    private var splitView: some View {
         NavigationSplitView {
             Sidebar()
                 .navigationSplitViewColumnWidth(min: 200, ideal: 230, max: 300)
@@ -18,8 +36,6 @@ struct RootView: View {
             }
             .frame(minWidth: 640, minHeight: 520)
         }
-        .preferredColorScheme(.dark)
-        .tint(Theme.accent)
         .onDrop(of: [.fileURL], isTargeted: nil) { providers in
             for p in providers {
                 _ = p.loadObject(ofClass: URL.self) { url, _ in
@@ -27,11 +43,6 @@ struct RootView: View {
                 }
             }
             return true
-        }
-        .alert("XRecomp", isPresented: Binding(get: { model.notice != nil }, set: { if !$0 { model.notice = nil } })) {
-            Button("OK") { model.notice = nil }
-        } message: {
-            Text(model.notice ?? "")
         }
     }
 
@@ -52,6 +63,95 @@ struct RootView: View {
         case .defaults: SettingsView(gameId: nil)
         case .about: AboutView()
         }
+    }
+}
+
+/// A game app's window (single-game mode, docs/macos/launcher.md « Game apps »): the game's Home, Settings,
+/// Controls, Manage and Log, without the sidebar or the Library. Setup, Default settings and About open from Home's
+/// « … » menu, each with a way back to Home. When the library does not have the title (any more): MissingTitleView.
+struct SingleTitleRoot: View {
+    @EnvironmentObject var model: LauncherModel
+
+    var body: some View {
+        ZStack {
+            BackdropView(glow: model.singleGame?.accentColor ?? Theme.accent)
+            detail
+                .transition(.opacity)
+        }
+        .frame(minWidth: 640, minHeight: 520)
+        .navigationTitle(model.singleGame?.name ?? "XRecomp")
+    }
+
+    @ViewBuilder private var detail: some View {
+        switch model.route {
+        case .settings(let id): SettingsView(gameId: id).id(id)
+        case .controls(let id): ControlsView(gameId: id)
+        case .manage(let id): ManageView(gameId: id).id(id)
+        case .log(let id): LogView(gameId: id)
+        case .setup: withBack { SetupView() }
+        case .defaults: withBack { SettingsView(gameId: nil) }
+        case .about: withBack { AboutView() }
+        case .library, .home:
+            if let g = model.singleGame { HomeView(game: g) } else { MissingTitleView() }
+        }
+    }
+
+    private func withBack<V: View>(@ViewBuilder _ content: () -> V) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Button { model.route = model.homeRoute } label: {
+                Label(model.singleGame?.name ?? "Back", systemImage: "chevron.left")
+            }
+            .buttonStyle(PillButtonStyle(compact: true))
+            .keyboardShortcut("[", modifiers: .command)
+            .padding([.horizontal, .top], Theme.s4)
+            content()
+        }
+    }
+}
+
+/// A game app whose title the library does not have: removed, its disc image moved, or on a disk that is not
+/// connected. The app holds nothing of the game, so it can only point back to the main XRecomp.
+struct MissingTitleView: View {
+    @EnvironmentObject var model: LauncherModel
+
+    var body: some View {
+        VStack {
+            Spacer()
+            Panel(padding: Theme.s4) {
+                VStack(alignment: .leading, spacing: Theme.s2) {
+                    if !model.scannedOnce || model.scanning {
+                        HStack(spacing: Theme.s2) {
+                            ProgressView().controlSize(.small)
+                            Text("Looking for the game in your library…").foregroundStyle(Theme.textDim)
+                        }
+                    } else {
+                        Image(systemName: "questionmark.folder").font(.system(size: 34)).foregroundStyle(Theme.warn)
+                        Text("This game is not in your library").font(.title3.weight(.semibold))
+                            .foregroundStyle(Theme.text)
+                        Text("XRecomp found no game with title ID \(model.singleTitle ?? "?") in "
+                             + folders + ". Its disc image or folder was moved or removed, or it is on a disk that "
+                             + "is not connected. Add it again in XRecomp, then open this app again.")
+                            .foregroundStyle(Theme.textDim)
+                            .fixedSize(horizontal: false, vertical: true)
+                        HStack(spacing: Theme.s1) {
+                            Button("Open XRecomp") { model.actions?.openMainApp() }
+                                .buttonStyle(PrimaryButtonStyle())
+                            Button("Scan again") { model.actions?.rescan() }.buttonStyle(PillButtonStyle())
+                            Button("Setup") { model.route = .setup }.buttonStyle(PillButtonStyle())
+                        }
+                    }
+                }
+            }
+            .frame(maxWidth: 560)
+            Spacer()
+        }
+        .padding(Theme.s4)
+        .frame(maxWidth: .infinity)
+    }
+
+    private var folders: String {
+        let f = model.setup.libraryFolders
+        return f.isEmpty ? Settings.defaultLibrary : f.joined(separator: ", ")
     }
 }
 

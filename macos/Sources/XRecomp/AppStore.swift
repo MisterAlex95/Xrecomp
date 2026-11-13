@@ -1,4 +1,5 @@
 import AppKit
+import CoreServices
 import XRecompCore
 
 /// The real launcher: drives XRecompCore for the views. Settings and per-title files live under AppPaths
@@ -8,7 +9,10 @@ import XRecompCore
 final class AppStore: LauncherActions {
     /// The one store of the process (the delegate stops its children at quit).
     static weak var current: AppStore?
-    let model = LauncherModel()
+    /// A game app (Info.plist `XBASingleTitle`, or `$XRECOMP_SINGLE_TITLE`) runs on its one title; the data is the
+    /// same Application Support tree as the main app's (nothing here depends on the bundle ID).
+    let model = LauncherModel(singleTitle: TitleApp.singleTitle(info: Bundle.main.infoDictionary,
+                                                                environment: ProcessInfo.processInfo.environment))
     private let basePaths = AppPaths.standard()
     private var settings: Settings
     private var paths: AppPaths
@@ -61,7 +65,7 @@ final class AppStore: LauncherActions {
                 model.setup.python = py?.path
                 model.setup.dependencies = deps
                 model.setup.checking = false
-                if tk == nil && model.route == .library { model.route = .setup }
+                if tk == nil && model.route == model.homeRoute { model.route = .setup }
                 then?()
             }
         }
@@ -161,6 +165,7 @@ final class AppStore: LauncherActions {
             DispatchQueue.main.async { [self] in
                 merge(items)
                 model.scanning = false
+                model.scannedOnce = true
                 refreshStates()
             }
         }
@@ -188,7 +193,7 @@ final class AppStore: LauncherActions {
     /// New scan results in, keeping what the running prepare and game know.
     private func merge(_ items: [GameItem]) {
         var out: [GameItem] = []
-        for var n in items {
+        for var n in items where model.accepts(n) {
             if let old = model.game(n.id) {
                 n.prepare = old.prepare
                 n.runningSince = old.runningSince
@@ -513,6 +518,78 @@ final class AppStore: LauncherActions {
         do { return try SaveImport.run(titleId: t.titleId, to: t.save) } catch {
             model.notice = "Import failed: \(error.localizedDescription)"
             return 0
+        }
+    }
+
+    // ---- game apps -----------------------------------------------------------------------------------------------
+
+    /// `<Game title>.app` at dest: a copy of this XRecomp.app with the game's name, bundle ID and icon and
+    /// `XBASingleTitle`, signed ad hoc. The icon is drawn from the cached title image (else the monogram).
+    func createTitleApp(_ id: String, at dest: URL) {
+        guard let g = model.game(id), let tid = g.titleId else { return }
+        guard model.singleTitle == nil else { return }
+        let source = Bundle.main.bundleURL
+        guard source.pathExtension == "app" else {
+            return model.notice = "Only XRecomp.app can make a game app: build it with macos/scripts/build-app.sh "
+                + "and open it from Finder (not swift run)."
+        }
+        guard model.creatingApp == nil else { return }
+        let t = paths.title(tid), xbe = g.entry.xbe.map { URL(fileURLWithPath: $0) }
+        let name = g.name, accent = g.accent, toolkitPath = toolkit?.root.path
+        model.creatingApp = id
+        work.async {
+            var problem: String?
+            do {
+                let art = TitleArt.load(cache: t.art, xbe: xbe)
+                guard let icon = TitleApp.iconImage(art: art, title: name, titleId: tid, accent: accent),
+                      let icns = TitleApp.icns(master: icon) else { throw TitleApp.BuildError.icon }
+                try TitleApp.build(source: source, dest: dest, title: name, titleId: tid, icns: icns,
+                                   toolkitPath: toolkitPath)
+                let r = TitleApp.sign(dest)
+                if !r.ok {
+                    problem = "codesign failed (exit \(r.status)): "
+                        + r.output.trimmingCharacters(in: .whitespacesAndNewlines)
+                }
+            } catch let e as TitleApp.BuildError {
+                problem = e.description
+            } catch {
+                problem = error.localizedDescription
+            }
+            DispatchQueue.main.async { [self] in
+                model.creatingApp = nil
+                if let problem {
+                    model.notice = "Cannot create \(dest.lastPathComponent): \(problem)"
+                    return
+                }
+                // Launch Services learns the new bundle (name, icon) now rather than at its next scan.
+                _ = LSRegisterURL(dest as CFURL, true)
+                NSWorkspace.shared.activateFileViewerSelecting([dest])
+                model.notice = "\(dest.lastPathComponent) is ready in \(dest.deletingLastPathComponent().path). "
+                    + "It opens straight on \(name) and shares this library, its settings and saves."
+            }
+        }
+    }
+
+    /// A game app's « Open XRecomp »: the app it was made from, else the one Launch Services knows by bundle ID,
+    /// else the toolkit's macos/build/XRecomp.app.
+    func openMainApp() {
+        let info = Bundle.main.infoDictionary ?? [:]
+        var candidates: [URL] = []
+        if let p = info[TitleApp.mainAppPathKey] as? String, !p.isEmpty { candidates.append(URL(fileURLWithPath: p)) }
+        let bid = (info[TitleApp.mainBundleIdKey] as? String) ?? TitleApp.mainBundleId
+        if let u = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bid) { candidates.append(u) }
+        if let tk = toolkit { candidates.append(tk.root.appendingPathComponent("macos/build/XRecomp.app")) }
+        let me = Bundle.main.bundleURL.standardizedFileURL.path
+        guard let app = candidates.first(where: {
+            $0.standardizedFileURL.path != me
+                && FileManager.default.fileExists(atPath: $0.appendingPathComponent("Contents/Info.plist").path)
+        }) else {
+            return model.notice = "XRecomp.app was not found. Build it with macos/scripts/build-app.sh."
+        }
+        NSWorkspace.shared.openApplication(at: app, configuration: NSWorkspace.OpenConfiguration()) { _, error in
+            guard let error else { return }
+            let text = "Cannot open XRecomp: \(error.localizedDescription)"
+            DispatchQueue.main.async { AppStore.current?.model.notice = text }
         }
     }
 

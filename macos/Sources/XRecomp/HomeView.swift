@@ -13,10 +13,14 @@ struct HomeView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: Theme.s3) {
                     HStack {
-                        Button { model.route = .library } label: { Image(systemName: "chevron.left") }
-                            .buttonStyle(PillButtonStyle(compact: true))
-                            .keyboardShortcut("[", modifiers: .command)
-                            .help("Library")
+                        if model.singleTitle == nil {
+                            Button { model.route = .library } label: { Image(systemName: "chevron.left") }
+                                .buttonStyle(PillButtonStyle(compact: true))
+                                .keyboardShortcut("[", modifiers: .command)
+                                .help("Library")
+                        } else {
+                            singleTitleMenu
+                        }
                         Spacer()
                     }
                     header
@@ -59,6 +63,24 @@ struct HomeView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
+    }
+
+    /// A game app has no Library: what the sidebar gives the main app is in this menu.
+    private var singleTitleMenu: some View {
+        Menu {
+            Button("Setup") { model.route = .setup }
+            Button("Default settings") { model.route = .defaults }
+            Button("About XRecomp") { model.route = .about }
+            Divider()
+            Button("Open XRecomp (all games)") { model.actions?.openMainApp() }
+        } label: {
+            Image(systemName: "ellipsis.circle")
+        }
+        .menuStyle(.button)
+        .buttonStyle(.borderless)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help("Setup, default settings, the whole library")
     }
 
     private var header: some View {
