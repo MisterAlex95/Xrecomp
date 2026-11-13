@@ -11,8 +11,8 @@
  * - Device enumeration
  */
 
-#ifndef BURNOUT3_XINPUT_XBOX_H
-#define BURNOUT3_XINPUT_XBOX_H
+#ifndef XBOXRECOMP_XINPUT_XBOX_H
+#define XBOXRECOMP_XINPUT_XBOX_H
 
 #include <stdint.h>
 #include "platform/xbox_winnt.h"
@@ -134,4 +134,4 @@ int xbox_InputAnyOpen(void);
 }
 #endif
 
-#endif /* BURNOUT3_XINPUT_XBOX_H */
+#endif /* XBOXRECOMP_XINPUT_XBOX_H */
