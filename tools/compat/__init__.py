@@ -2,7 +2,7 @@
 The compat runner (XBA-62): prepare a title, boot it headless with a pad
 script, and say how far it got.
 
-    python -m tools.compat run SOURCE [SOURCE...] [--seconds 180] [--repeat N]
+    python -m tools.compat run SOURCE [SOURCE...] [--seconds 180] [--repeat N] [--no-title-layer]
     python -m tools.compat report results.jsonl
     python -m tools.compat grade --source NAME --status FILE ...   # a run made elsewhere (the app, device.py)
 

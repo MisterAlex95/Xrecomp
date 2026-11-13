@@ -52,6 +52,20 @@ public class SelfHealTest {
     }
 
     @Test
+    public void taintedEntriesAreNoSeeds() throws Exception {
+        // What the Prepare's gate holds back (tools/seed_from_log, profile-free WP1) is no progress for it.
+        File work = tmp.newFolder("w");
+        append(work, RUN + "{\"t\":\"icall\",\"va\":\"0x0012ABCD\",\"ret\":\"0x00123456\",\"tainted\":true}\n"
+                     + "{\"t\":\"icall\",\"va\":\"0x0012ABD0\",\"ret\":\"0x00123456\",\"tainted\":false}\n");
+        assertEquals(1, SelfHeal.scan(SelfHeal.discoveryFile(work), 0).seeds);
+        SelfHeal.prepareStarted(work);
+        append(work, RUN + "{\"t\":\"icall\",\"va\":\"0x0012ABE0\",\"ret\":\"0x00123456\",\"tainted\":true}\n");
+        SelfHeal.launched(work, 1000);
+        assertTrue(SelfHeal.onExit(work, crash(2000)));
+        assertEquals(SelfHeal.Offer.NEEDS_FIX, SelfHeal.read(work).offer);
+    }
+
+    @Test
     public void onlyWhatFollowsThePrepareIsNew() throws Exception {
         File work = tmp.newFolder("w");
         append(work, RUN + ICALL);

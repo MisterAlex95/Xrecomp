@@ -388,6 +388,36 @@ public class LauncherScreensTest {
         assertEquals(0xFFA7C2FF, stageAccent(b));
     }
 
+    /**
+     * Profile-free WP6: Settings › General › Enhancements, only for a game whose pack says the toolkit has optional
+     * enhancements for it (pack.json title_layer); a press turns them off for that title (the file the Prepare reads).
+     */
+    @Test
+    public void enhancementsRowForAGameWithEnhancements() throws Exception {
+        withToolchain();
+        File pack = TestSupport.writePack(app.getFilesDir(), TID, 64);
+        LauncherActivity a = launch();
+        a.goForTest(LauncherActivity.Screen.SETTINGS);
+        idle(300);
+        assertNull("no title_layer in pack.json: no row", row(a, app.getString(R.string.ENHANCEMENTS)));
+
+        File json = new File(pack, "pack.json");
+        org.json.JSONObject o = new org.json.JSONObject(PrepareProtocol.readText(json, 1 << 16));
+        TestSupport.write(json, o.put("title_layer", "on").toString(1));
+        a = launch();
+        a.goForTest(LauncherActivity.Screen.SETTINGS);
+        idle(300);
+        Widgets.MenuRow r = row(a, app.getString(R.string.ENHANCEMENTS));
+        assertNotNull(r);
+        assertEquals(app.getString(R.string.VAL_ON), r.value);
+        r.requestFocusFromTouch();
+        key(a, KeyEvent.KEYCODE_DPAD_RIGHT);
+        idle(300);
+        assertFalse(GameStore.enhancements(app, TID));
+        assertEquals(app.getString(R.string.VAL_OFF), row(a, app.getString(R.string.ENHANCEMENTS)).value);
+        assertEquals(app.getString(R.string.ENHANCEMENTS_OFF), a.noteForTest());
+    }
+
     /** No game set up: the stock colours, and no Game theme row. */
     @Test
     public void noGameNoTheme() throws Exception {

@@ -68,13 +68,16 @@ def env_force_of(profile):
 
 
 def make_meta(lib_path, title_id, title, xbe_sha256, toolkit, cc, shell_abi=SHELL_ABI, now=None,
-              env_force=None, layers=None, toolkit_sha256=None):
+              env_force=None, layers=None, toolkit_sha256=None, title_layer=None):
     """pack.json's content. env_force (env_force_of) goes in only when it is
     not empty: a pack without it forces nothing. layers: the profile layers
     the pack was built with (tools.prepare.profiles), lowest first; the
     loader does not read them, they say what went in. toolkit_sha256: the
     toolkit digest (tools/prepare/toolkit.py), which the app compares with its
-    own to offer a Prepare again after an update (XBA-127)."""
+    own to offer a Prepare again after an update (XBA-127). title_layer:
+    "on" / "off" when the toolkit has optional enhancements for the title
+    (profiles/titles/<id>) and they went in / were left out, which the app's
+    « Enhancements » switch is compared with (WP6); absent when it has none."""
     now = now or datetime.datetime.now(datetime.timezone.utc)
     meta = {
         "format": FORMAT,
@@ -97,6 +100,8 @@ def make_meta(lib_path, title_id, title, xbe_sha256, toolkit, cc, shell_abi=SHEL
         meta["layers"] = list(layers)
     if toolkit_sha256:
         meta["toolkit_sha256"] = toolkit_sha256
+    if title_layer:
+        meta["title_layer"] = title_layer
     return meta
 
 

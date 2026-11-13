@@ -91,6 +91,16 @@ final class Pack {
         return hashField(filesDir, titleId, "toolkit_sha256");
     }
 
+    /**
+     * Whether the pack of titleId was built with the toolkit's optional enhancements for the title (pack.json's
+     * title_layer, profile-free WP6): "on", "off" (left out: the Enhancements switch was off), or null when the toolkit
+     * has none for it (or no readable pack.json says).
+     */
+    static String titleLayer(File filesDir, String titleId) {
+        String v = hashField(filesDir, titleId, "title_layer");
+        return "on".equals(v) || "off".equals(v) ? v : null;
+    }
+
     private static String hashField(File filesDir, String titleId, String field) {
         String id = normTitleId(titleId);
         if (id == null)

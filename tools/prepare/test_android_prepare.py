@@ -379,7 +379,7 @@ class _Tc:
         return "clang 19"
 
 
-def _make_pack(tmp_path, monkeypatch, env_force, layers=(), images=(), toolkit_sha="cd" * 32):
+def _make_pack(tmp_path, monkeypatch, env_force, layers=(), images=(), toolkit_sha="cd" * 32, title_layer=None):
     from tools.prepare import android
     links = []
 
@@ -404,6 +404,7 @@ def _make_pack(tmp_path, monkeypatch, env_force, layers=(), images=(), toolkit_s
     r.info = {"title": "Synthetic"}
     r.env_force = env_force
     r.layers = list(layers)
+    r.title_layer = title_layer
     r.images = [(rel, ["/o/%s.o" % rel], str(tmp_path / "work" / "images" / rel)) for rel in images]
     final = r.make_pack()
     return pack.read(final), links
@@ -429,6 +430,20 @@ def test_android_pack_json_layers(tmp_path, monkeypatch):
     assert links == []
     meta, links = _make_pack(tmp_path, monkeypatch, {}, layers[1:])
     assert meta["layers"] == layers[1:] and len(links) == 1
+
+
+def test_android_pack_json_title_layer(tmp_path, monkeypatch):
+    """WP6: pack.json says whether the title's optional enhancements went in ("on") or were left out ("off"), for
+    the app's « Enhancements » switch; nothing for a title the toolkit has none for. A flip of the switch alone
+    writes the pack again."""
+    meta, links = _make_pack(tmp_path, monkeypatch, {})
+    assert "title_layer" not in meta and len(links) == 1
+    meta, links = _make_pack(tmp_path, monkeypatch, {}, ["titles/58424104"], title_layer="on")
+    assert meta["title_layer"] == "on" and len(links) == 1
+    meta, links = _make_pack(tmp_path, monkeypatch, {}, [], title_layer="off")
+    assert meta["title_layer"] == "off" and "layers" not in meta and len(links) == 1
+    meta, links = _make_pack(tmp_path, monkeypatch, {}, [], title_layer="off")
+    assert links == []
 
 
 def test_android_pack_json_toolkit_sha256(tmp_path, monkeypatch):

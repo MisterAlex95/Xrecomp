@@ -13,8 +13,9 @@ another way, and the status below supersedes the plan.
 
 Burnout 3 (PAL Fr/De/It disc, title ID 4541005B, XDK 5849) runs on the shared
 toolkit and runtime with no fork: `tools.prepare` on the disc image, the generic
-`templates/new-game` project, and a small title profile, `profiles/titles/4541005b/`
-(a `title.c` of about 150 lines, one seeded function). On the Mac with the GL back
+`templates/new-game` project, and (then) a small title profile, `profiles/titles/4541005b/`
+(a `title.c` of about 150 lines, one seeded function). Since profile-free WP6 it has no
+profile at all: everything it held is a toolkit default or found by the analysis. On the Mac with the GL back
 end it goes from boot to a finished race at 60 fps: movies with sound, the title
 screen, profile and save, menus, vehicle select, a 2-lap race, results and
 auto-save; two 15-minute soaks did not stall. Android has not been tried yet.
@@ -29,7 +30,7 @@ What it took, beyond what Fable already needed:
 | no pad: the XID class driver's Init was never lifted | seed `0x00363064`; `tools/disasm` now realigns a table-named prologue the sweep stepped over |
 | game in slow motion with frame generation or a 30 fps cap | the game is locked to the flip rate: cap 60, frame generation off (`env_force` in `title.json` until WP4; now the run-time lock verdict of `RECOMP_PACING=auto`, [framegen.md](framegen.md#titles-locked-to-the-flip-rate)) |
 
-Details, addresses and runs: `profiles/titles/4541005b/NOTES.md`.
+Details, addresses and runs: [burnout3-notes.md](burnout3-notes.md).
 
 What did **not** turn out to be needed: the per-title ordinal remap (Phase 2
 below), Burnout 3's own runtime libraries, its hand-written overrides, its xemu

@@ -1,0 +1,5 @@
+# Allow-list of tools/ci/layer_guard.py (profile-free WP6). One entry per line, `# reason` after it:
+#   <layer> <rule>      the layer as profiles/<layer> (titles/<title id>), the rule as a finding prints it
+#                       (layers, seed_functions, params:XBA_D3D_X, env_force:RECOMP_X, layer.json, key:<name>)
+# Every entry is a title layer carrying what a general mechanism should do: keep the reason honest, prefer fixing the
+# mechanism. A retail title ID here is a code token for tools/ci/title_guard.py: allow it there too.

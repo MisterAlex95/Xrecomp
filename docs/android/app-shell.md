@@ -380,6 +380,7 @@ exist in the runtime and mean something to a player are offered:
 | General › Vibration | On (default), Off | none: `ui_haptics` |
 | General › Bottom screen (only with a second display) | Panel (default), Black, Off | none: [Dual screen](#dual-screen-ayn-thor), `GameStore.bottomScreen` |
 | General › Game theme (only with a game that has a title ID) | Art and colours (default), Colours only, Off | none: [Game theme](#game-theme), `files/settings/theme_<TID>` |
+| General › Enhancements (only for a game whose pack has `title_layer`: the toolkit has optional enhancements for it) | On (default), Off | none: `files/settings/enhancements_<TID>`; off, the game's next Prepare runs with `XBA_NO_TITLE_LAYER=1`, and Home offers Prepare again while the pack differs ([profiles.md](../technical/profiles.md#optional-by-construction), [prepare.md](prepare.md#packjson) `title_layer`) |
 | General › Language | Same as Android (default), English, Français, Deutsch, Español, Italiano, Português, 日本語, 한국어, 中文 | `RECOMP_LANGUAGE=…`; « Same as Android » writes nothing ([Game language](#game-language)) |
 | Graphics › Vertical sync | On (default), Off | `RECOMP_PRESENT_VSYNC=0` when off |
 | Graphics › Renderer | Auto (default: GPU, unless the title's pack forces `RECOMP_GPU=0`), Software, GPU | `RECOMP_GPU=0` / `1`; Auto writes nothing and the runtime's Android default (GPU, CPU rasteriser when GLES 3.0 cannot start) applies; see [GPU back end](../technical/gpu-backend.md#android) |

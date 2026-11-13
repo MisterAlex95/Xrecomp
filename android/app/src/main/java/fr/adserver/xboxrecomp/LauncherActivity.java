@@ -1613,6 +1613,10 @@ public class LauncherActivity extends Activity {
             xbeShaLater(dir, tid);
         boolean otherXbe = st == State.READY && preparing && prep == Prep.NEEDED && otherXbe(tid);
         boolean olderToolkit = st == State.READY && prep == Prep.PLAYABLE && heal == null && olderToolkit(tid);
+        // WP6: the Enhancements switch differs from the pack's: offered like a newer toolkit (Play stays first).
+        boolean enhChanged = st == State.READY && prep == Prep.PLAYABLE && heal == null && !olderToolkit
+                             && enhancementsChanged(tid);
+        olderToolkit |= enhChanged;
         // XBA-129: a self-healing round in the background (Play stays), or one to start / offer after a good run.
         PrepareProtocol.Status healing = prep == Prep.PLAYABLE && !running ? backgroundPrepare(tid) : null;
         boolean improve = heal != null && heal.offer == SelfHeal.Offer.IMPROVE;
@@ -1656,7 +1660,7 @@ public class LauncherActivity extends Activity {
             statusColor = Theme.ACCENT;
             heroLine(info, statusText, statusColor);
         } else if (olderToolkit) {
-            statusText = getString(R.string.HOME_OLDER_TOOLKIT);
+            statusText = getString(enhChanged ? R.string.HOME_ENHANCEMENTS_CHANGED : R.string.HOME_OLDER_TOOLKIT);
             statusColor = Theme.WARN;
             heroLine(info, statusText, statusColor);
         } else if (st == State.READY) {
@@ -1731,7 +1735,8 @@ public class LauncherActivity extends Activity {
         else if (running && st == State.READY)
             setNote(getString(R.string.LIB_OTHER_RUNNING, runningTitle()), NOTE_INFO);
         else if (olderToolkit)
-            setNote(getString(R.string.HOME_OLDER_TOOLKIT_NOTE, estimate()), NOTE_INFO);
+            setNote(getString(enhChanged ? R.string.HOME_ENHANCEMENTS_CHANGED_NOTE : R.string.HOME_OLDER_TOOLKIT_NOTE,
+                              estimate()), NOTE_INFO);
         else if (st == State.READY && !preparing && (rec() != null ? rec().lastPlayed : GameStore.lastPlayed(this)) <= 0)
             setNote(getString(R.string.HOME_LEAD_READY), NOTE_INFO);   // before the first play: where the menu is
         // XBA-129: the setting on, the launcher starts the round itself (a note says so, the Prepare can be stopped).
@@ -1891,8 +1896,12 @@ public class LauncherActivity extends Activity {
             if (DualScreen.available(this, CompanionScreen.ownDisplayId(this)))
                 bottomScreenRow(list);
             String dir = gameDir();
-            if (dir != null && state() != State.NONE && GameStore.findXbe(new File(dir)) != null && titleId() != null)
+            if (dir != null && state() != State.NONE && GameStore.findXbe(new File(dir)) != null && titleId() != null) {
                 gameThemeRow(list, titleId(), gameTitle(dir));
+                // WP6: only for a game the toolkit has enhancements for, as its pack says (after a first Prepare).
+                if (Toolchain.available(this) && Pack.titleLayer(getFilesDir(), titleId()) != null)
+                    enhancementsRow(list, titleId(), gameTitle(dir));
+            }
         }
         RecompConfig.Section section = tabSection(settingsTab);
         for (RecompConfig.Option o : shown) {
@@ -2027,6 +2036,28 @@ public class LauncherActivity extends Activity {
             Log.i(TAG, "launcher: game theme " + tid + " " + modes[i].key);
             show(Screen.SETTINGS, 0);   // syncTheme: the new colours, the focus stays on this row
             setNote(getString(R.string.GAME_THEME_SAVED, names[i]), NOTE_OK);
+        };
+        r.setOnClickListener(v -> r.cycler.step(1));
+    }
+
+    /**
+     * Settings › General › Enhancements, per title (profile-free WP6): the toolkit's optional extras for the game
+     * (profiles/titles/<id>), on by default. Off, the next Prepare passes XBA_NO_TITLE_LAYER=1; Home then offers
+     * Prepare again (enhancementsChanged).
+     */
+    private void enhancementsRow(LinearLayout list, String tid, String title) {
+        MenuRow r = settingRow(list, getString(R.string.ENHANCEMENTS), getString(R.string.ENHANCEMENTS_DETAIL, title));
+        r.setChoices(new String[] { getString(R.string.VAL_ON), getString(R.string.VAL_OFF) });
+        Runnable refresh = () -> r.setValue(getString(GameStore.enhancements(this, tid) ? R.string.VAL_ON
+                                                                                         : R.string.VAL_OFF));
+        refresh.run();
+        r.cycler = d -> {
+            boolean on = !GameStore.enhancements(this, tid);
+            GameStore.setEnhancements(this, tid, on);
+            refresh.run();
+            feedback.play(UiFeedback.Cue.MOVE, r);
+            setNote(getString(on ? R.string.ENHANCEMENTS_ON : R.string.ENHANCEMENTS_OFF), NOTE_OK);
+            Log.i(TAG, "launcher: enhancements " + tid + " " + (on ? "on" : "off"));
         };
         r.setOnClickListener(v -> r.cycler.step(1));
     }
@@ -2492,6 +2523,16 @@ public class LauncherActivity extends Activity {
                     refreshKeepingFocus();
             });
         }, "xba-xbe-sha").start();
+    }
+
+    /**
+     * The valid pack of tid was built with the title's optional enhancements and the switch is now off, or the other
+     * way round (pack.json title_layer, profile-free WP6). A pack that says nothing (no enhancements for the title, or
+     * made before the field) never differs.
+     */
+    private boolean enhancementsChanged(String tid) {
+        String tl = tid == null ? null : Pack.titleLayer(getFilesDir(), tid);
+        return tl != null && Toolchain.available(this) && "on".equals(tl) != GameStore.enhancements(this, tid);
     }
 
     /** « Prepare again » for a pack lifted by an older toolkit: a plain Prepare (the game does not start after it). */

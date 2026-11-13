@@ -2,26 +2,66 @@
 
 > Part of the [Documentation Index](../INDEX.md)
 
-A title's switches and fixes beyond the generic template and the toolkit's defaults live in `profiles/`, in layers.
-`tools.prepare` picks the layers from the XBE, merges them and puts them into the title project (`src/title/`), on the desktop and on the
-device alike (the tree ships in the app's `toolkit.zip`). Code: `tools/prepare/profiles.py`; spec: Plane XBA « Spec ·
-Universal titles », section 3.
+**A title needs no profile.** It is prepared and run by the toolkit alone: its defaults (the XDK switches, the D3D
+service with the DMA walk, run-time pacing and the frame-lock verdict), what the analysis reads from the XBE (static
+discovery, packed tables) and what the runs find (the gated discovery loop). A title with no layer is the normal case,
+and every reference title runs that way (profile-free WP1-WP6, report `profile-free-report.md`).
+
+What `profiles/` can still add is **optional**: a title layer holds enhancements of one game that cannot be derived (a
+16:9 mod of its camera, a faster front end), never something the title needs to boot, draw, play sound, take input
+or keep its speed. `tools.prepare` picks the layers, merges them and puts them into the title project (`src/title/`),
+on the desktop and on the device alike (the tree ships in the app's `toolkit.zip`). Code:
+`tools/prepare/profiles.py`; spec: Plane XBA « Spec · Universal titles », section 3.
+
+## Optional by construction
+
+- **Prepare says what it adds.** A title the toolkit has enhancements for prints
+  `title enhancements: titles/<id> (16:9 scenes, front end at the display rate)` (title.json `"enhancements"`).
+- **The A/B switch.** `python -m tools.prepare SOURCE --no-title-layer`, or `XBA_NO_TITLE_LAYER=1` in the environment,
+  prepares the title as an unknown one: no title layer, nor the layers it names (prepare prints
+  `title enhancements left out ...`). The prepare stamps hash the layers, so switching re-lifts. The executable is
+  `title_<id>` either way (no shipped title layer sets `"project"`).
+- **Launchers.** The macOS launcher (Manage › More › Enhancements) and the Android app (Settings › General ›
+  Enhancements, per game) offer the switch for a title the toolkit has enhancements for. Off, their prepares run with
+  `--no-title-layer` / `XBA_NO_TITLE_LAYER=1`. `prepare --check --json` and `pack.json` say `"title_layer": "on"` or
+  `"off"` for such a title (nothing for another), so a build made the other way is offered for Prepare again (the Mac
+  through `--check`'s `profile` reason, the app by comparing pack.json with the switch).
+- **The compatibility matrix both ways.** `python -m tools.compat run <sources> --no-title-layer` prepares in a work
+  folder of its own (`<name>-no-title-layer`) with the variable set and marks its result lines `"title_layer": false`;
+  `tools.compat report` then shows a « No title layer » column next to the normal stage, a lower stage there in bold.
+  The stage must not drop: a title layer may never be needed to run.
+- **The CI guard.** `tools/ci/layer_guard.py` (run by `tools/ci/test_layer_guard.py` in `pytest tools/`) fails the
+  build when a shipped layer carries what a general mechanism covers (below). A justified exception goes into
+  `tools/ci/layer_guard_allow.txt` with its reason.
 
 ## The layers, lowest first
 
 | Layer | Folder | Picked when |
 |---|---|---|
 | Toolkit | none: `src/` (runtime) and `tools/` (lifter); in the title project `recomp_xdk_defaults()` and the D3D service (`recomp_d3d_configure` / `recomp_d3d_start`) | always |
-| XDK library | `profiles/xdk/<name>/layer.json`: none ships (see below) | a title's `"layers"` names it (a developer's A/B) |
-| Engine | `profiles/engines/<name>/layer.json` | `tools.xbe_ident` finds the engine whose `layer` (in `tools/xbe_ident/engines.json`) is `<name>` |
-| Title | `profiles/titles/<title id>/title.json` | the title ID matches |
+| XDK library | `profiles/xdk/<name>/layer.json`: none ships | a title's `"layers"` names it (a developer's A/B, never shipped) |
+| Engine | `profiles/engines/<name>/layer.json`: none ships | `tools.xbe_ident` finds the engine whose `layer` (in `tools/xbe_ident/engines.json`) is `<name>` |
+| Title | `profiles/titles/<title id>/title.json`: optional enhancements | the title ID matches, unless `--no-title-layer` / `XBA_NO_TITLE_LAYER=1` |
 
-A title's `"layers"` lists the engine (or developer XDK) layers it was proven with: they are picked even when the XBE
-does not select them, and prepare prints `asked for by the title profile, not selected by the XBE`.
-`python -m tools.xbe_ident default.xbe` prints the layers an XBE selects.
+A title's `"layers"` lists engine (or developer XDK) layers to pick even when the XBE does not select them, and prepare
+prints `asked for by the title profile, not selected by the XBE`; a shipped title may not use it.
+`python -m tools.xbe_ident default.xbe` prints the libraries and engines an XBE was built with.
 
-**A fix goes to the lowest layer where it is true.** What every XDK title needs because the console works that way
-goes to the toolkit; what one engine needs to an engine layer; what one title's own code needs stays with the title.
+**A fix goes to the toolkit.** What every XDK title needs because the console works that way is a default; what an
+engine needs is found from the XBE or decided at run time; what cannot be computed from the XBE or a run is not a fix
+but an enhancement, and only that stays with a title.
+
+## What a shipped layer may hold (tools/ci/layer_guard.py)
+
+| Fails | Why | Instead |
+|---|---|---|
+| a `profiles/xdk/*/layer.json` or `profiles/engines/*/layer.json` | what they did is the toolkit's default | `src/`, or a developer's local A/B layer |
+| a title.json without `"enhancements"` | a layer with nothing to add is deleted (Burnout 3's went in WP6: a name and a state) | the XBE certificate's name, the prepare's state |
+| `"layers"` | the XDK layers are defaults, engines are found from the XBE | nothing |
+| `"seed_functions"` | static discovery and the gated discovery loop find code (WP1, WP5) | nothing, or an analysis fix |
+| `"params"` `XBA_D3D_*` | the D3D service finds the device at run time | `RECOMP_D3D_*` at run time for an A/B |
+| `env_default*` / `env_force` of `RECOMP_PB_WALK`, `RECOMP_PB_EXEC`, `RECOMP_GPU_FPS_CAP`, `RECOMP_PACING`, `RECOMP_FLIP_PACING`, `RECOMP_FRAME_LOCK`, `RECOMP_LSFG`, the D3D service's and the five XDK switches | a general mechanism sets or decides them | its default, or the player's `recomp.cfg` |
+| a key the guard does not know | a typo, or a new key to review | add it to `KNOWN_KEYS` with the rule it needs |
 
 ## The XDK is the toolkit's default
 
@@ -73,7 +113,8 @@ Every key is optional. The same keys work in every layer; a higher layer's value
 | `params` | `{"XBA_*": number}`: `#define`s in `xba_params.h`, for the layers' C (the D3D addresses are no longer params: the service finds them, `RECOMP_D3D_DEVICE_PTR` and friends override them at run time) |
 | `seed_functions` | files in the layer for the disassembler (`tools.seed_from_log`'s format) |
 | `exclude_manual` | one `.c` file in the layer whose functions replace the generated ones (one in the whole stack) |
-| `layers`, `project`, `status` | titles: the layers above, the CMake project name, a one-line state |
+| `enhancements` | titles: what the layer adds, a few words each (prepare prints them); a shipped title layer must have one |
+| `layers`, `project`, `status` | titles: the layers above (not in a shipped title), the CMake project name (default `title_<id>`), a one-line state |
 | `_why` | free text: why each value is there |
 
 ## In the title project
@@ -87,21 +128,21 @@ three generated files (a title with no layer gets no `src/title/`):
 - `xba_params.h`: the merged `params`.
 - `env_force.h` when the stack forces options (Android: `pack.json` `env_force` instead).
 
-`pack.json` records the layers (`"layers"`), and the prepare stamps hash every layer's files: changing a layer
-re-lifts the titles that use it.
+`pack.json` records the layers (`"layers"`) and, for a title the toolkit has enhancements for, `"title_layer"`
+(`"on"` / `"off"`); the prepare stamps hash every layer's files: changing a layer, or the switch, re-lifts the title.
 
 ## The layers today
 
-| Layer | Holds | Seen on |
-|---|---|---|
-| `titles/4d5300d1` | Fable: map size, deferred I/O APCs, front-end sleep, 16:9, fibers (`overrides.c`) | |
-| `titles/4541005b` | Burnout 3: name and state only (`NOTES.md` keeps the history) | |
+| Layer | Holds |
+|---|---|
+| `titles/4d5300d1` | Fable, optional: 16:9 scenes (`overrides.c` entry hooks on the camera and the cutscene bars, `title.c` `fable_aspect_configure`) and the front end at the display rate (`title.c`: its `Sleep(50)` shortened to 16 ms) |
 
-No XDK layer is shipped since WP3 (above), and no engine layer since WP4: `engines/renderware` (DMA walk, 60 fps
-cap, frame generation off) went, the DMA walk is the toolkit's default and the pacing and frame generation choices
-are made at run time (`RECOMP_PACING=auto` and its lock verdict,
-[framegen.md](framegen.md#titles-locked-to-the-flip-rate)). Burnout 3's `title.c` (flip pacing on the software
-rasteriser) and Fable's Android `RECOMP_GPU_FPS_CAP=30` went with it.
+Nothing else ships. Gone with the profile-free work: the XDK layers (WP3: the toolkit's defaults and the D3D
+service), `engines/renderware` (WP4: the DMA walk is the default, pacing and frame generation are decided at run time,
+[framegen.md](framegen.md#titles-locked-to-the-flip-rate)), both `seed_functions.json` (WP5: packed-table discovery),
+Fable's `[CACHE]` thread (WP7: the runtime's « preparing data » indicator), Fable's D3D KickOff wait override
+`sub_008556D0` (WP6: the lifter's poll-wait mark does it for every XDK D3D) and Burnout 3's title layer (WP6: a name
+and a state only; its history is [burnout3-notes.md](burnout3-notes.md)).
 
 ## The D3D service
 
@@ -145,11 +186,13 @@ offsets beyond 5849; and that the walk suits every D3D8 title (KOTOR is the one 
 
 ## Adding a title
 
-1. `python -m tools.prepare` with no title layer: the toolkit's defaults (XDK switches, D3D service, DMA walk) and
-   the engine layer, if any, apply on their own.
-2. A fix that one title needs: `profiles/titles/<title id>/` (`title.json`, `title.c` with `hooks`, `NOTES.md`).
-3. Once a second title needs the same fix, move it down to the engine layer or the toolkit, and find the
-   title-specific part (addresses) at run time.
+Nothing to add: `python -m tools.prepare SOURCE` with no layer. The toolkit's defaults, the analysis and the
+discovery loop (Prepare again after a run that found code) are the path. When a title does not run, the fix goes to
+the toolkit (the runtime, the lifter, the analysis), found by its general rule, never to a title layer.
+
+A title layer is only for an optional enhancement of one game: `profiles/titles/<title id>/` with `title.json`
+(`"enhancements"`, `"hooks"`, `"status"`), its `.c` files and a `NOTES.md`. Check that the title still runs with it
+left out (`tools.compat run ... --no-title-layer`) and that `python3 tools/ci/layer_guard.py` passes.
 
 ## No per-title code outside profiles/titles (XBA-109)
 

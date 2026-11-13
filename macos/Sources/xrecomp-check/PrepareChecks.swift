@@ -172,6 +172,27 @@ func registerPrepareChecks() {
                                         work: URL(fileURLWithPath: "/w"))
         req.force = true
         expectEq(req.arguments, ["-u", "-m", "tools.prepare", "/g/My Game.iso", "--work", "/w", "--progress", "--force"])
+        req.force = false
+        req.noTitleLayer = true
+        expectEq(req.arguments, ["-u", "-m", "tools.prepare", "/g/My Game.iso", "--work", "/w", "--progress",
+                                 "--no-title-layer"])
+    }
+
+    check("enhancements: the per-title switch reaches the prepare's environment (profile-free WP6)") {
+        let inherited = ["PATH": "/bin", "XBA_NO_TITLE_LAYER": "1"]
+        expectNil(ChildEnvironment.prepare(inherited, enhancements: true)["XBA_NO_TITLE_LAYER"])
+        expectEq(ChildEnvironment.prepare(inherited, enhancements: false)["XBA_NO_TITLE_LAYER"], "1")
+        expectEq(ChildEnvironment.prepare(["PATH": "/bin"], enhancements: false)["PATH"], "/bin")
+        var r = TitleRecord()
+        expect(r.enhancementsOn, "on by default")
+        r.enhancements = false
+        let d = tempDir("record")
+        let f = d.appendingPathComponent("state.json")
+        try? r.save(to: f)
+        expect(read(f).contains("\"enhancements\" : false"), read(f))
+        expect(!TitleRecord.load(from: f).enhancementsOn)
+        write(f, #"{"runs": 2}"#)
+        expect(TitleRecord.load(from: f).enhancementsOn, "a record from before the switch")
     }
 
     check("runner: error result") {
@@ -257,6 +278,10 @@ func registerPrepareChecks() {
         expectEq(TitleState.describe(["toolkit"]), "Prepare again (toolkit updated)")
         expectEq(TitleState.describe(["runtime"]), "Prepare again to rebuild (runtime updated, a few minutes)")
         expectEq(TitleState.describe([]), "Prepare again")
+        expectNil(stale?.titleLayer)
+        expectEq(TitleState.decode(#"{"state": "stale", "reasons": ["profile"], "title_layer": "off"}"#)?.titleLayer,
+                 "off")
+        expectEq(TitleState.describe(["profile"]), "Prepare again (enhancements or title profile changed)")
     }
 
     check("title state: project exe from CMakeLists") {

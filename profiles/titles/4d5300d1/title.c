@@ -1,9 +1,14 @@
 /*
- * Fable: The Lost Chapters (Xbox, 2005), title ID 4D5300D1 -- the title profile.
+ * Fable: The Lost Chapters (Xbox, 2005), title ID 4D5300D1 -- the title layer.
  *
- * The title layer: tools.prepare puts it on top of the XDK layers and calls
- * the two hooks below (title.json "hooks") after theirs. Everything here was
- * found bringing the title up on macOS arm64 (see NOTES.md in this folder).
+ * Optional enhancements only (profile-free WP6): the title runs without this
+ * layer, on the toolkit's defaults (docs/technical/profiles.md). tools.prepare
+ * calls the two hooks below (title.json "hooks") from xba_title_configure /
+ * xba_title_start; --no-title-layer / XBA_NO_TITLE_LAYER=1 (the launcher's
+ * « Enhancements » off) leaves them out. What they add:
+ *   - 16:9 scenes (fable_aspect_configure, overrides.c);
+ *   - the front end at the display rate instead of the game's own 20 fps.
+ * History: NOTES.md in this folder.
  */
 #include <stdint.h>
 #include <stdio.h>
@@ -45,31 +50,14 @@ static void fable_aspect_configure(void)
 
 void fable_configure(void)
 {
-    /* Fable reserves 608 MB of address space for its own allocator and
-     * sub-allocates across all of it. That used to need xbox_SetMapSize(1 GB)
-     * here, and RECOMP_GUEST_WINDOW=1 in title.json because the desktop layout
-     * then lost the contiguous window. Neither is set any more (XBA-103): the
-     * whole 4 GB window is the default layout on every 64-bit host, and the
-     * reserve is granted whole as a lazy reservation at the top of user space
-     * (RECOMP_LAZY_RESERVE). Its 12+ worker threads alive during the
-     * front-end load need no setting either: the stack pool grows with the
-     * guest heap (XBA-104). title.json on Android caps the GPU renderer at
-     * 30 fps, evenly paced: in
-     * Oakvale a frame takes the executor 17-22 ms on an M1 and more on the
-     * AYN Thor, so a 60 cap only lets the rate wander between 20 and 40
-     * (docs/technical/gpu-backend.md, Android; the launcher's Frame cap wins).
-     *
-     * The XDK layers (title.json "layers") set the pushbuffer executor, the
-     * AC'97 codec, the paced vblanks (the XMV decoder's clock is
-     * D3DDevice_GetDisplayFieldStatus, sub_0084F650, which reads the vblank
-     * count at device+0x1DE8), the one-CPU DISPATCH gate for XPP
-     * (0x0086E480-0x00876C3C), the pad, and service D3D's GPU semaphore and
-     * deferred RunPushBuffer (0x00855900; dispatcher sub_00859C40, helper
-     * sub_00855860) with the addresses in title.json "params". */
-    /* File-I/O completion APCs run at the next alertable wait, as the hardware
-     * does: the runtime's default since XBA-102 (inline, the loader's
-     * completion ran before the read call had returned and its bookkeeping
-     * was set up). RECOMP_INLINE_APC=1 restores the inline delivery. */
+    /* Nothing here is needed to run: below are the two enhancements. What
+     * this hook used to set is the
+     * toolkit's default now: the 608 MB reserve and the 4 GB window
+     * (XBA-103), the stack pool (XBA-104), deferred file-I/O APCs (XBA-102),
+     * the XDK switches, the D3D service and the DMA walk (recomp_xdk_defaults,
+     * src/kernel/recomp_d3d_service.c: the device, its semaphore and
+     * RunPushBuffer's methods found at run time), and the frame rate
+     * (RECOMP_PACING=auto, WP4). */
     /* The front end (title screen, menus, loading screens) runs
      * do { draw; Sleep(50); } while (!done) in sub_0020BBB5, the two
      * `push 0x32; call Sleep` at 0x0020BD93 and 0x0020C3C5: 20 fps at most

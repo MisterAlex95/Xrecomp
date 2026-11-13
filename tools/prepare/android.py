@@ -53,6 +53,7 @@ class Run:
         self.stamp = {}
         self.env_force = {}
         self.layers = []
+        self.title_layer = None
         self.toolkit_sha = ""         # tools/prepare/toolkit.py: what a stale pack is judged by
         self.data_dir = None
         self.image = None             # a disc image source (XBA-126): the other images come out of it
@@ -130,6 +131,10 @@ class Run:
         from tools.prepare import profiles
         for line in profiles.xdk_report(self.ident, self.m.PROFILES):     # XBA-106
             self.rep.progress(1, 99, line)
+        self.title_layer = self.m.title_layer_state(self.tid)              # WP6: the app's Enhancements switch
+        en = profiles.title_line(self.tid, self.m.PROFILES, left_out=self.title_layer == "off")
+        if en:
+            self.rep.progress(1, 99, en)
         self.rep.progress(1, 100, "%s (title ID %s)%s%s" % (self.info.get("title", "?"), self.tid,
                                                            ", title profile" if self.profile and self.profile["title"]
                                                            else "",
@@ -308,6 +313,7 @@ class Run:
         meta = pack.read(final)
         if (self.stamp.get("link") == key and meta and meta["xbe_sha256"] == self.xbe_sha
                 and meta.get("env_force", {}) == self.env_force and meta.get("layers", []) == self.layers
+                and meta.get("title_layer") == self.title_layer
                 and meta.get("images", {}) == images
                 and meta.get("toolkit_sha256", "") == self.toolkit_sha
                 and pack.check(final, a.shell_abi) is None):
@@ -326,7 +332,7 @@ class Run:
             meta = pack.make_meta(lib, self.tid, self.info.get("title", ""), self.xbe_sha, self.toolkit,
                                   "%s -O%s" % (self.tc.short_version(), a.opt), shell_abi=a.shell_abi,
                                   env_force=self.env_force, layers=self.layers,
-                                  toolkit_sha256=self.toolkit_sha)
+                                  toolkit_sha256=self.toolkit_sha, title_layer=self.title_layer)
             if images:
                 meta["images"] = images
             # The analysis' function count and static discovery's share per

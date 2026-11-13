@@ -3,7 +3,10 @@ import Foundation
 /// What `python -m tools.prepare SOURCE --work DIR --check --json` says about a title, without doing any work:
 ///
 ///     {"state": "absent"|"stale"|"ready", "reasons": [...], "exe": "...", "title": "...", "title_id": "...",
-///      "env_force": {"RECOMP_X": "0"}, "work": "..."}
+///      "env_force": {"RECOMP_X": "0"}, "work": "...", "title_layer": "on"|"off"}
+///
+/// "title_layer" is there only when the toolkit has optional enhancements for the title (profiles/titles/<id>):
+/// "on" when they go in, "off" with XBA_NO_TITLE_LAYER=1 (Manage › Enhancements, profile-free WP6).
 ///
 /// On failure it exits 1 with {"state": "error", "code": "...", "msg": "..."}. Stale reasons: toolkit, profile,
 /// discovered, xbe, not_built, no_stamp; exe stays filled when stale (the old binary is playable).
@@ -24,12 +27,15 @@ public struct TitleState: Codable, Equatable, Sendable {
     public var envForce: [String: String]
     /// The work folder looked at.
     public var work: String?
+    /// "on" / "off": the toolkit has optional enhancements for this title and they go in / are left out; nil: none.
+    public var titleLayer: String?
     /// With state error.
     public var code: String?
     public var msg: String?
 
     enum CodingKeys: String, CodingKey {
         case state, reasons, exe, title, titleId = "title_id", envForce = "env_force", work, code, msg
+        case titleLayer = "title_layer"
     }
 
     public init(state: State, reasons: [String] = [], exe: String? = nil, title: String? = nil,
@@ -53,6 +59,7 @@ public struct TitleState: Codable, Equatable, Sendable {
         titleId = try? c.decodeIfPresent(String.self, forKey: .titleId)
         envForce = (try? c.decodeIfPresent([String: String].self, forKey: .envForce)) ?? [:]
         work = try? c.decodeIfPresent(String.self, forKey: .work)
+        titleLayer = try? c.decodeIfPresent(String.self, forKey: .titleLayer)
         code = try? c.decodeIfPresent(String.self, forKey: .code)
         msg = try? c.decodeIfPresent(String.self, forKey: .msg)
     }
@@ -85,7 +92,7 @@ public struct TitleState: Codable, Equatable, Sendable {
         if r.contains(where: { $0.contains("toolkit") || $0.contains("commit") }) {
             return "Prepare again (toolkit updated)"
         }
-        if r.contains(where: { $0.contains("profile") }) { return "Prepare again (title profile changed)" }
+        if r.contains(where: { $0.contains("profile") }) { return "Prepare again (enhancements or title profile changed)" }
         if r.contains(where: { $0.contains("xbe") }) { return "Prepare again (the game's files changed)" }
         if r.contains("not_built") { return "The last build did not finish: prepare again" }
         if r.contains("runtime") { return "Prepare again to rebuild (runtime updated, a few minutes)" }

@@ -2,10 +2,17 @@
 
 Private, never commit to xboxrecomp-android: contains game data and generated code.
 
-(That line is about the private bring-up folder this file describes; this NOTES.md itself is ours. Since XBA-66
-the profile sits on the XDK layers `profiles/xdk/xapi`, `dsound`, `d3d8` (title.json `"layers"`): the executor,
-AC'97, paced vblanks, DISPATCH gate, pad, and D3D's semaphore and RunPushBuffer methods with the addresses in
-title.json `"params"`. Rules: `docs/technical/profiles.md`.)
+(That line is about the private bring-up folder this file describes; this NOTES.md itself is ours.)
+
+**Today (profile-free WP6, 2026-11-13).** The title runs without this layer: the XDK switches, the D3D service with
+the DMA walk (`src/kernel/recomp_d3d_service.c`: device, GPU semaphore and RunPushBuffer methods found at run time;
+the former `profiles/xdk/*` layers and title.json `"params"` `XBA_D3D_*`), run-time pacing (`RECOMP_PACING=auto`,
+which replaced the Android `RECOMP_GPU_FPS_CAP=30`), the poll-wait on D3D's flush kick (the former `sub_008556D0`
+override) and static discovery of the packed CRT math table (the former `seed_functions.json`) are the toolkit's.
+What is left are two optional enhancements: 16:9 scenes (`overrides.c` entry hooks, `title.c`
+`fable_aspect_configure`) and the front end at the display rate (`title.c`, `xbox_SetDelayOverride`). The
+launcher's / app's « Enhancements » switch (`XBA_NO_TITLE_LAYER=1` when off) leaves them out. Everything below is
+the bring-up history: the layers, params and seeds it names are gone. Rules: `docs/technical/profiles.md`.
 
 | Dir | What |
 |---|---|

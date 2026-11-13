@@ -77,6 +77,7 @@ One per stage, in the order you run them.
 - [Gap Analysis vs xemu](technical/gap-analysis.md) — What's implemented, what's missing, prioritized roadmap
 - [Candidate Games](technical/candidate-games.md) — Choosing a target, tiered by difficulty
 - [Burnout 3 Reunification](technical/burnout3-reunification.md) — Bringing the origin title back onto the extracted toolkit
+- [Burnout 3 notes](technical/burnout3-notes.md) — Its former title profile's history: settings, addresses, runs
 - [xemu GDB Debugging](technical/xemu-debugging.md) — xemu's GDB stub as a reference debugger for runtime state
 
 ## Android Port

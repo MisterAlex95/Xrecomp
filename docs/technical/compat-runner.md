@@ -10,6 +10,19 @@ python -m tools.compat run /dumps/*.iso --work-root /scratch/compat --seconds 18
 python -m tools.compat report compat-results.jsonl     # Markdown table, one row per title
 ```
 
+**Without the title layer** (profile-free WP6): `run --no-title-layer` (and `heal --no-title-layer`) prepares with
+`XBA_NO_TITLE_LAYER=1`, in a work folder of its own (`<name>-no-title-layer`, so the two builds never share a stamp, an
+executable or a discovery history), and marks its result lines `"title_layer": false`. `report` then adds a « No title
+layer » column next to each title's normal stage (in bold when lower: a title layer must never be needed to run); the
+matrix lists such runs as rows of their own (`<title> (no title layer)`), not counted as more titles and never taken
+for a regression of the normal run. The A/B of the whole matrix:
+
+```bash
+python -m tools.compat run /dumps/*.iso --seconds 180
+python -m tools.compat run /dumps/*.iso --seconds 180 --no-title-layer
+python -m tools.compat report compat-results.jsonl
+```
+
 One title at a time, at `nice 10`, each boot stopped by PID after `--seconds`. Run it on a machine of your own
 (Linux arm64 first, then x86-64 and macOS); never on the LXC that hosts Gitea and Plane. The results hold numbers,
 stage names and the first line of an error: nothing from the game.

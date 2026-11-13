@@ -10,10 +10,9 @@ already there for this XBE, this toolkit and this title profile:
 
   1. find default.xbe (out of the image if needed) and read its title ID
   2. the analysis pipeline: xbe_parser, disasm, func_id, abi_analysis
-  3. the title project: templates/new-game + the profile layers this XBE
-     picks from profiles/ (XDK libraries, engine, title: their switches and
-     fixes, docs/technical/profiles.md; their seed_functions files already
-     went to the disassembler in step 2)
+  3. the title project: templates/new-game on the toolkit's defaults, plus
+     the optional layers of profiles/ (a title's enhancements; left out with
+     --no-title-layer; docs/technical/profiles.md)
   4. the C lift (tools.recomp) into the project
   5. build it for this host (CMake), with the game data next to it
 
@@ -319,16 +318,26 @@ def load_profile(tid, ident):
     """The merged profile layers for this title (tools.prepare.profiles), or
     None. Raises profiles.ProfileError."""
     from tools.prepare import profiles
-    if no_title_layer():
-        print("  profile: the title layer is left out (--no-title-layer / XBA_NO_TITLE_LAYER)",
-              file=sys.stderr, flush=True)
     return profiles.resolve(tid, ident, PROFILES, title_layer=not no_title_layer())
+
+
+def title_layer_state(tid):
+    """"on" when the toolkit has optional enhancements for tid
+    (profiles/titles/<tid>) and they go in, "off" when they are left out
+    (--no-title-layer / XBA_NO_TITLE_LAYER=1), None when it has none: what
+    pack.json and --check say, for a launcher's « Enhancements » switch."""
+    from tools.prepare import profiles
+    if not profiles.find_title_layer(tid, PROFILES):
+        return None
+    return "off" if no_title_layer() else "on"
 
 
 def no_title_layer():
     """--no-title-layer, or XBA_NO_TITLE_LAYER=1 in the environment (what a
-    launcher's child inherits): prepare as for a title nobody has a profile
-    for. The option sets the variable, so the disc's other images follow."""
+    launcher's child inherits, its per-title « Enhancements » switch off):
+    prepare as for a title nobody has a profile for, its optional
+    enhancements left out. The option sets the variable, so the disc's other
+    images follow."""
     return os.environ.get("XBA_NO_TITLE_LAYER", "") not in ("", "0")
 
 
@@ -469,8 +478,8 @@ def main(argv=None):
                          "(default: the build reads the image in place)")
     ap.add_argument("--force", action="store_true", help="redo every step")
     ap.add_argument("--no-title-layer", action="store_true",
-                    help="leave profiles/titles/<title id> out: prepare as for an unknown title "
-                         "(also XBA_NO_TITLE_LAYER=1 in the environment)")
+                    help="leave profiles/titles/<title id> out (its optional enhancements): prepare as for "
+                         "an unknown title (also XBA_NO_TITLE_LAYER=1 in the environment)")
     mi = ap.add_argument_group("for a launcher (docs/macos/launcher.md « Prepare interface »)")
     mi.add_argument("--progress", action="store_true",
                     help="also print XBA_PROGRESS / XBA_RESULT lines (tools/prepare/progress.py)")
@@ -645,16 +654,20 @@ def desktop(a):
         raise SystemExit("profiles: %s" % e)
     for line in profiles.xdk_report(ident, PROFILES):
         print("      " + line, flush=True)
+    en = profiles.title_line(tid, PROFILES, left_out=no_title_layer())
+    if en:
+        print("      " + en, flush=True)
     if profile:
         print("      profile layers: %s" % " ".join(profile["keys"]), flush=True)
         for k in profile["missing"]:
             print("      %s: asked for by the title profile, not selected by the XBE" % k, flush=True)
-        if profile["title"]:
-            print("      title profile: %s" % profile.get("status", ""), flush=True)
+        if profile["title"] and profile.get("status"):
+            print("      title profile: %s" % profile["status"], flush=True)
         for k, v in env.items():
             print("      the title forces %s=%s" % (k, v), flush=True)
     else:
-        print("      no profile layer for this XBE: the generic template only", flush=True)
+        print("      no profile layer for this XBE: the generic template only, on the toolkit's defaults "
+              "(the normal case)", flush=True)
     progress(100, "%s (title ID %s)%s" % ((profile or {}).get("name") or info["title"], tid,
                                           ", title profile" if profile and profile["title"] else ""))
 
@@ -806,7 +819,8 @@ IMAGE_MAP = "images.map"
 
 def check_state(source, work=None):
     """--check: {"state": "absent" | "stale" | "ready", "reasons": [...],
-    "exe", "title", "title_id", "env_force", "work"} for SOURCE, from what
+    "exe", "title", "title_id", "env_force", "work", and "title_layer": "on" |
+    "off" when the toolkit has optional enhancements for the title} for SOURCE, from what
     a prepare would compare (the stamp: XBE, toolkit commit, profile layers,
     seeds from earlier runs) and what it built. Reads only: nothing is
     written, not even the work folder. identify.IdentifyError when SOURCE is
@@ -845,6 +859,9 @@ def check_state(source, work=None):
     out = {"state": "absent", "reasons": [], "exe": project_exe(work),
            "title": (profile or {}).get("name") or x.certificate.title_name.strip() or tid,
            "title_id": tid, "env_force": env, "work": work}
+    tl = title_layer_state(tid)
+    if tl:                      # the toolkit has optional enhancements for it (WP6)
+        out["title_layer"] = tl
     stamp = read_stamp(os.path.join(work, "stamp.json"))
     reasons = []
     if stamp:

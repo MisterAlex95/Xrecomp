@@ -192,6 +192,7 @@ final class PreviewStore: LauncherActions {
     }
     func delete(_ item: Storage.Item, of id: String) { model.notice = "Demo mode: nothing deleted." }
     func importSaves(_ id: String) -> Int { 0 }
+    func setEnhancements(_ id: String, on: Bool) { model.update(id) { $0.record.enhancements = on ? nil : false } }
     func reveal(_ url: URL) {}
     func titlePaths(_ id: String) -> TitlePaths? { AppPaths(root: URL(fileURLWithPath: "/tmp/xrecomp-demo")).title(id) }
     func setToolkit(_ path: String) { model.setup.toolkit = path }

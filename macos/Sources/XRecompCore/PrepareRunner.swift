@@ -24,6 +24,8 @@ public final class PrepareRunner: @unchecked Sendable {
         public var work: URL
         public var force = false
         public var noBuild = false
+        /// --no-title-layer: the title's optional enhancements left out (profile-free WP6).
+        public var noTitleLayer = false
         /// Extra arguments after the fixed ones (the checks use it).
         public var extra: [String] = []
         public var environment: [String: String] = ChildEnvironment.base()
@@ -39,6 +41,7 @@ public final class PrepareRunner: @unchecked Sendable {
             var a = ["-u", "-m", "tools.prepare", source.path, "--work", work.path, "--progress"]
             if force { a.append("--force") }
             if noBuild { a.append("--no-build") }
+            if noTitleLayer { a.append("--no-title-layer") }
             return a + extra
         }
     }

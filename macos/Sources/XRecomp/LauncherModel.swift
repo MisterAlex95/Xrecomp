@@ -31,6 +31,8 @@ struct GameItem: Identifiable, Equatable {
     var status: TitleStatus = .checking
     var exe: String?
     var envForce: [String: String] = [:]
+    /// prepare --check's "title_layer": "on" / "off" when the toolkit has optional enhancements for this title.
+    var titleLayer: String?
     var prepare: PrepareState?
     /// Since when the game runs (nil: not running).
     var runningSince: Date?
@@ -51,7 +53,7 @@ struct GameItem: Identifiable, Equatable {
     static func == (a: GameItem, b: GameItem) -> Bool {
         a.id == b.id && a.entry == b.entry && a.name == b.name && a.status == b.status && a.exe == b.exe
             && a.prepare == b.prepare && a.runningSince == b.runningSince && a.lastExit == b.lastExit
-            && a.record == b.record && a.accent == b.accent && (a.art === b.art)
+            && a.record == b.record && a.accent == b.accent && (a.art === b.art) && a.titleLayer == b.titleLayer
     }
 
     /// The one status line of Home and the card.
@@ -129,6 +131,8 @@ protocol LauncherActions: AnyObject {
     func storage(_ id: String) -> [(Storage.Item, Int64)]
     func delete(_ item: Storage.Item, of id: String)
     func importSaves(_ id: String) -> Int
+    /// The title's optional enhancements on or off for its next prepare (profile-free WP6).
+    func setEnhancements(_ id: String, on: Bool)
     func reveal(_ url: URL)
     func titlePaths(_ id: String) -> TitlePaths?
     func setToolkit(_ path: String)

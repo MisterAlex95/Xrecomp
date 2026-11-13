@@ -33,6 +33,10 @@ struct ManageView: View {
                 SectionTitle(text: "More")
                 Panel {
                     VStack(alignment: .leading, spacing: Theme.s2) {
+                        if game?.titleLayer != nil {
+                            enhancementsRow
+                            Divider().overlay(Theme.lineSoft)
+                        }
                         HStack {
                             VStack(alignment: .leading, spacing: 2) {
                                 Text("Prepare from scratch").foregroundStyle(Theme.text)
@@ -84,6 +88,24 @@ struct ManageView: View {
             }
         } message: {
             Text("Every step runs again; the first prepare of a game takes many minutes.")
+        }
+    }
+
+    /// Profile-free WP6: the toolkit's optional enhancements for this title (a 16:9 mod, a front-end rate...), which it
+    /// does not need to run. Off: its prepares run with --no-title-layer; the build made the other way turns stale.
+    private var enhancementsRow: some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Enhancements").foregroundStyle(Theme.text)
+                Text("Extras the toolkit has for this game, such as a widescreen picture. The game runs without "
+                     + "them. Applies at the next prepare.")
+                    .font(.caption).foregroundStyle(Theme.textFaint)
+            }
+            Spacer()
+            Toggle("", isOn: Binding(get: { game?.record.enhancementsOn ?? true },
+                                     set: { model.actions?.setEnhancements(gameId, on: $0) }))
+                .toggleStyle(.switch).labelsHidden()
+                .disabled(game?.runningSince != nil || isPreparing)
         }
     }
 

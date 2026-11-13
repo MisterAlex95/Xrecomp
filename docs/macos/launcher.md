@@ -37,7 +37,7 @@ games, Setup, Default settings, About) and the detail pane.
 | Prepare failed | The error code in words, prepare's message, the last 40 lines of `prepare.log`, Reveal log in Finder, Copy log. |
 | Settings | Per title, four tabs (General, Graphics, Audio, Advanced) over the [option table](#per-title-settings), saved to the title's `recomp.cfg` at once; Advanced has a free editor for your own lines. **Default settings** (sidebar) is the same for every title. |
 | Controls | The pad mapping the game gets (L1 = Black, R1 = White, View = Back) and the connected controller's name (GameController). |
-| Manage | Per title: the size of the work folder, the extracted disc, saves, the Z: cache, logs and the title image, each deletable after a confirmation and revealable in Finder; "Re-prepare…" (`--force`); "Import saves from command-line runs". |
+| Manage | Per title: the size of the work folder, the extracted disc, saves, the Z: cache, logs and the title image, each deletable after a confirmation and revealable in Finder; "Re-prepare…" (`--force`); "Import saves from command-line runs"; for a title the toolkit has optional enhancements for (`--check`'s `title_layer`), an **Enhancements** switch (on by default; off, the title's prepares and checks run with `--no-title-layer` / `XBA_NO_TITLE_LAYER=1`, kept in `state.json` `"enhancements": false`, and a build made the other way shows « Prepare again (enhancements or title profile changed) »). |
 | Log | The live output of the running game (or prepare), copyable; run logs are kept in `logs/`. |
 | Setup | The toolkit found (and from where), every dependency with the command that installs it, the Python environment (with **Create it**), the library folders, the work folder location. Shown first when the toolkit is not found. |
 | About | Version, the toolkit's commit, "No game data included", the licence texts read from the toolkit (`LICENSE`, `NOTICE`, `LICENSES/*.txt`). |
@@ -277,6 +277,7 @@ line, exit 0:
 | `title_id` | string | 8 upper-case hex digits. |
 | `env_force` | {string: string} | The options the profile layers force (compiled into the binary, they win over the environment): show those settings as "set by the title". |
 | `work` | string | The work folder looked at. |
+| `title_layer` | string | Only for a title the toolkit has optional enhancements for (`profiles/titles/<id>`): `on` when they go in, `off` when `--no-title-layer` / `XBA_NO_TITLE_LAYER=1` leaves them out (docs/technical/profiles.md « Optional by construction »). The launcher offers the Enhancements switch for such a title. |
 
 Failure: exit 1 and `{"state": "error", "code": "...", "msg": "..."}`: the identify codes above, or `BAD_PROFILE`
 (a profile layer is not well formed). `--check` without `--json` prints one human line instead.

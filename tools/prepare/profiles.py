@@ -3,15 +3,23 @@ Profiles in layers (XBA-66): what tools.prepare adds to the generic template
 for one XBE, from profiles/ in the toolkit. docs/technical/profiles.md has the
 rules; this module only reads the tree and merges it.
 
-    profiles/xdk/<name>/layer.json       an XDK library layer: none ships (what
-                                         they did is the toolkit's default: the
-                                         XDK switches, the D3D service, the DMA
-                                         walk); one a developer makes for an A/B
-                                         is picked only when a title's "layers"
-                                         names it
+A title with no layer at all is the normal case (profile-free WP6): the
+toolkit's defaults (the XDK switches, the D3D service, the DMA walk, run-time
+pacing) and what the analysis and the runs find make it run. A layer is
+optional:
+
+    profiles/xdk/<name>/layer.json       an XDK library layer: none ships; one a
+                                         developer makes for an A/B is picked
+                                         only when a title's "layers" names it
     profiles/engines/<name>/layer.json   an engine, picked by tools.xbe_ident's
-                                         engines.json (its "layer")
-    profiles/titles/<title id>/title.json  one title
+                                         engines.json (its "layer"): none ships
+    profiles/titles/<title id>/title.json  one title's optional enhancements
+                                         (a 16:9 mod, a front-end rate...):
+                                         never needed to run, left out by
+                                         --no-title-layer / XBA_NO_TITLE_LAYER=1
+
+tools/ci/layer_guard.py keeps shipped layers to that: no xdk or engine layer,
+and no title layer carrying what a general mechanism covers.
 
 Lowest first: toolkit (the runtime and the lifter themselves, no folder) ->
 xdk -> engines -> title. A higher layer's value wins over a lower one's.
@@ -25,12 +33,13 @@ A layer's JSON (every key optional):
                       environment, recomp.cfg) has set them; "env_default_android"
                       and "env_default_desktop" for one platform only
     "env_force"       {RECOMP_*: value} forced over everything (pack.env_force_of)
-    "params"          {XBA_*: number} #defines in xba_params.h for the lower layers'
-                      C (a title gives the addresses an XDK layer's code needs)
+    "params"          {XBA_*: number} #defines in xba_params.h for the layers' C
     "seed_functions"  files in the layer (tools.seed_from_log's format) for the disassembler
     "exclude_manual"  a .c file in the layer whose functions replace the generated ones
-    "layers"          titles: the layers the title was proven with; picked even
-                      when the XBE does not select them (and prepare says so)
+    "layers"          titles: other layers to pick even when the XBE does not
+                      select them (a developer's A/B; a shipped title may not)
+    "enhancements"    titles: what the layer adds, a few words each, which
+                      prepare prints ("16:9 scenes", ...)
     "project", "status"  titles: the CMake project name, a one-line state
 """
 
@@ -147,9 +156,10 @@ def c_name(layer_key, fn):
 
 def resolve(tid, ident, root=PROFILES, title_layer=True):
     """The merged profile for title ID `tid` (8 hex digits), or None when no
-    layer applies (the generic template only). ProfileError for a layer that
-    is not well formed. title_layer=False leaves profiles/titles/<tid> out,
-    the layers it names included: what any unknown title gets (XBA-108)."""
+    layer applies (the generic template only: the normal case). ProfileError
+    for a layer that is not well formed. title_layer=False leaves
+    profiles/titles/<tid> out, the layers it names included: what any unknown
+    title gets (XBA-108), the A/B of its enhancements (WP6)."""
     title_key = "titles/%s" % tid.lower()
     title = load_layer(title_key, root) if title_layer else None
     auto = auto_layers(ident, root)
@@ -214,7 +224,39 @@ def resolve(tid, ident, root=PROFILES, title_layer=True):
         for k in ("name", "project", "status"):
             if title["json"].get(k):
                 prof[k] = title["json"][k]
+        prof["enhancements"] = enhancements_of(title)
     return prof
+
+
+def enhancements_of(title):
+    """A title layer's "enhancements": a list of short printable strings."""
+    en = title["json"].get("enhancements") or []
+    if not isinstance(en, list) or not all(isinstance(e, str) and e and len(e) <= 80
+                                           and all(0x20 <= ord(c) <= 0x7e for c in e) for e in en):
+        raise ProfileError("%s: enhancements: a list of short ASCII strings expected" % title["key"])
+    return list(en)
+
+
+def find_title_layer(tid, root=PROFILES):
+    """profiles/titles/<tid> as load_layer gives it, or None: whether the
+    toolkit has optional enhancements for this title at all (what a launcher's
+    « Enhancements » switch is offered for)."""
+    return load_layer("titles/%s" % tid.lower(), root)
+
+
+def title_line(tid, root=PROFILES, left_out=False):
+    """The line prepare prints about a title's enhancements, or None when the
+    toolkit has none for it:
+        title enhancements: titles/58424104 (16:9 scenes, front-end rate)
+        title enhancements left out (--no-title-layer / ...): titles/58424104 (...)"""
+    t = find_title_layer(tid, root)
+    if not t:
+        return None
+    en = enhancements_of(t)
+    what = "%s%s" % (t["key"], " (%s)" % ", ".join(en) if en else "")
+    if left_out:
+        return "title enhancements left out (--no-title-layer / XBA_NO_TITLE_LAYER): " + what
+    return "title enhancements: " + what
 
 
 def digest_into(h, prof):

@@ -24,6 +24,14 @@ public enum ChildEnvironment {
         return e
     }
 
+    /// A prepare's (or --check's) environment: XBA_NO_TITLE_LAYER=1 when the title's optional enhancements are off,
+    /// and never an inherited one otherwise (profile-free WP6).
+    public static func prepare(_ env: [String: String] = base(), enhancements: Bool) -> [String: String] {
+        var e = env
+        e["XBA_NO_TITLE_LAYER"] = enhancements ? nil : "1"
+        return e
+    }
+
     /// A game's environment: the fixed PATH, then the global defaults, then the title's recomp.cfg lines (the first
     /// line for a key wins, as the runtime reads the file), then RECOMP_SAVE_DIR. A recomp.cfg value replaces an
     /// inherited variable of the same name; PATH and RECOMP_SAVE_DIR cannot be set from the file.

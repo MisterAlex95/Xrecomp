@@ -1,16 +1,13 @@
-/* Hand-written replacements for generated functions (Fable: The Lost Chapters).
+/* Hand-written replacements for generated functions (Fable: The Lost Chapters):
+ * the optional 16:9 enhancement's entry hooks. The title runs without them
+ * (--no-title-layer / XBA_NO_TITLE_LAYER=1, the launcher's « Enhancements » off).
  *
  * tools.recomp --exclude-manual (tools.prepare passes this file) skips generating the
  * bodies defined here, so every caller, direct or indirect, reaches these. */
 #define RECOMP_GENERATED_CODE   /* register names (eax, esp...) as in generated code */
 #include "recomp/gen/recomp_types.h"
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
-#ifndef _WIN32
-#include <sched.h>
-#include <time.h>
-#endif
 
 /* Fibers: sub_0004B440, Fable's context switch (cli; push ebx, ebp, esi,
  * edi, fs:[0]; xchg esp, [0x00990A8C]; pop them; sti; ret), was replaced here
@@ -20,49 +17,11 @@
  * (all of them park at the same esp, returning to the same yield), the one to
  * resume is told apart by those bytes. docs/technical/stack-switching.md. */
 
-/* ── D3D's flush kick: sub_008556D0, the wait the main thread spins in ──────
- *
- * XDK D3D's KickOff, before it writes DMA_PUT, sets bit 16 of PFB register
- * 0x100410 (nv = [device+0x1C28]) and spins until the GPU clears it. Here the
- * NV2A ack thread clears it, at the top of each pass and between commands of
- * the segment it executes -- so while the executor rasterises a big batch the
- * title waits for it, and Fable's main thread spent 92-100 % of a core in this
- * loop on the title screen and in-world (sampled under sub_00855520, its
- * caller, into which the shared build had inlined it), a core the
- * rasteriser's workers need, above all on a handheld's five fast cores.
- *
- * The same register traffic and the same flags out, but the wait is
- * xbox_Nv2aKickWait: the guest sleeps on a condition the ack thread signals
- * when it clears the bit, and the ack thread, idle, sleeps on one the kick
- * signals (xbox_memory_layout.c). It used to yield 64 times and then sleep
- * 50 us a turn: in Oakvale 3-4 sleeps a kick, each waking late, 850-890 ms
- * a second spent in the loop, and the ack thread polled for the next kick
- * meanwhile. FABLE_D3D_SPIN=1 restores the bare spin. */
-extern void xbox_Nv2aKickWait(volatile uint32_t *reg, uint32_t mask);
-
-void sub_008556D0(void)
-{
-    static int spin = -1;
-
-    if (spin < 0) {
-        const char *e = getenv("FABLE_D3D_SPIN");
-        spin = e && e[0] == '1';
-    }
-    eax = MEM32(0x00862288u);
-    eax = MEM32(eax + 0x1C28);
-    ecx = MEM32(eax + 0x100410) | 0x10000u;
-    if (spin) {
-        MEM32(eax + 0x100410) = ecx;
-        while (MEM32(eax + 0x100410) & 0x10000u)
-            ;
-    } else {
-        xbox_Nv2aKickWait(&MEM32(eax + 0x100410), 0x10000u);
-    }
-    /* test [nv+0x100410], 0x10000 came out zero: ZF and PF set, CF, SF,
-     * OF clear. */
-    g_eflags = (g_eflags & ~0x8C5u) | 0x4u | 0x40u;
-    esp += 4;                                     /* ret */
-}
+/* D3D's flush kick, sub_008556D0 (the wait the main thread spun in), was
+ * replaced here until profile-free WP6: the lifter marks such poll loops, and
+ * xbox_GuestPollWait (xbox_Nv2aKickWait for this flush bit) sleeps in them for
+ * every XDK D3D (RECOMP_POLL_WAIT, docs/runtime/environment-variables.md), so
+ * the generated body is used again. */
 
 /* ── 16:9: the camera's display-aspect override and the cutscene bars ──────
  *

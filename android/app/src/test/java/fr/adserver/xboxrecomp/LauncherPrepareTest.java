@@ -500,6 +500,35 @@ public class LauncherPrepareTest {
         assertEquals(ShellActivity.class.getName(), next.getComponent().getClassName());
     }
 
+    /**
+     * Profile-free WP6: the Enhancements switch differs from what the pack was built with (pack.json title_layer):
+     * Home offers Prepare again next to Play, as for a newer toolkit; switched back, it says nothing.
+     */
+    @Test
+    public void enhancementsChangedOffersPrepareAgain() throws Exception {
+        withToolkitDigest(hex("11"));
+        TestSupport.writePack(app.getFilesDir(), TID, 64);
+        packField("toolkit_sha256", hex("11"));
+        packField("title_layer", "on");
+        assertEquals("on", Pack.titleLayer(app.getFilesDir(), TID));
+        assertTrue(GameStore.setEnhancements(app, TID, false));
+        status(PrepareProtocol.DONE, "pack", 5, 100, -1, "", "");
+        LauncherActivity a = launch(null);
+        assertEquals(app.getString(R.string.PLAY), a.homePrimaryForTest().title);
+        assertTrue(a.noteForTest(), a.noteForTest().startsWith("The Enhancements setting"));
+        assertNotNull(pillNamed(a.getWindow().getDecorView(), app.getString(R.string.PREPARE_AGAIN)));
+
+        assertTrue(GameStore.setEnhancements(app, TID, true));
+        a = launch(null);
+        assertNull(pillNamed(a.getWindow().getDecorView(), app.getString(R.string.PREPARE_AGAIN)));
+        // A pack that says nothing (no enhancements for the title) never differs.
+        packField("title_layer", "");
+        assertNull(Pack.titleLayer(app.getFilesDir(), TID));
+        assertTrue(GameStore.setEnhancements(app, TID, false));
+        a = launch(null);
+        assertNull(pillNamed(a.getWindow().getDecorView(), app.getString(R.string.PREPARE_AGAIN)));
+    }
+
     @Test
     public void currentToolkitSaysNothing() throws Exception {
         withToolkitDigest(hex("11"));

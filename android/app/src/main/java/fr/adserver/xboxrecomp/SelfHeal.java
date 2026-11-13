@@ -332,7 +332,10 @@ final class SelfHeal {
             case "icall":
             case "thread":
             case "thread_ctx":
-                f.seeds++;
+                // Written after the run went wrong ("tainted": a v2 runtime marks them, profile-free WP1): the
+                // Prepare's gate holds them back (tools/seed_from_log), so they are no progress it can make.
+                if (!o.optBoolean("tainted", false))
+                    f.seeds++;
                 break;
             case "unimpl":
                 if (f.unimpl++ == 0)

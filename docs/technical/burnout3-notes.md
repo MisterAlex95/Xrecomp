@@ -1,4 +1,10 @@
-# Burnout 3: Takedown (4541005B) — title profile notes
+# Burnout 3: Takedown (4541005B) — notes
+
+> Part of the [Documentation Index](../INDEX.md)
+
+This was `profiles/titles/4541005b/NOTES.md`. Since profile-free WP6 the title has no profile: its `title.json`
+held only a name, a project name and a state, which the XBE certificate and the prepare give, and
+`tools/ci/layer_guard.py` refuses a title layer with no enhancement. It prepares as `title_4541005b`.
 
 PAL Fr/De/It disc, XDK 5849, D3D8LTCG / DSOUND / XMV / XPP linked in. Entry point `0x001D2B27`, kernel thunk
 table `0x0036BAC0` (147 imports, all resolved by the bridge; `gen_ordinal_remap` gives identity: no ordinal remap

@@ -16,7 +16,7 @@ Xbox games using Criterion's RenderWare engine (and potentially other Xbox D3D8 
 
 Every address in this document is from the Burnout 3 build the original fork
 was mapped on. The PAL disc (French/German/Italian, title ID 4541005B, the one
-`profiles/titles/4541005b/` profiles) has the D3D section 0x300 higher; the offsets
+[burnout3-notes.md](burnout3-notes.md) describes) has the D3D section 0x300 higher; the offsets
 inside the device are the same:
 
 | What | This document | PAL 4541005B |

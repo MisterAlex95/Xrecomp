@@ -129,6 +129,23 @@ final class GameStore {
         return writeSmall(c, GAME_VOLUME_FILE, Integer.toString(Math.max(0, Math.min(100, percent))));
     }
 
+    /*
+     * Per title: the toolkit's optional enhancements (profiles/titles/<id>: a 16:9 mod, a front-end rate...; profile-free
+     * WP6), on by default. A file, as the Prepare runs in its own process (":prepare"), which passes
+     * XBA_NO_TITLE_LAYER=1 to tools.prepare when they are off. The title runs without them.
+     */
+    static final String ENHANCEMENTS_FILE = "enhancements_";
+
+    static boolean enhancements(Context c, String titleId) {
+        String id = Pack.normTitleId(titleId);
+        return id == null || !"off".equals(readSmall(c, ENHANCEMENTS_FILE + id));
+    }
+
+    static boolean setEnhancements(Context c, String titleId, boolean on) {
+        String id = Pack.normTitleId(titleId);
+        return id != null && writeSmall(c, ENHANCEMENTS_FILE + id, on ? "on" : "off");
+    }
+
     /** A one-line setting in files/settings (GameLanguage's per-title choice); null when missing or blank. */
     static String readSettingFile(Context c, String name) {
         return readSmall(c, name);

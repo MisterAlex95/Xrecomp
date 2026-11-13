@@ -531,6 +531,8 @@ public class PrepareService extends Service {
                 e.put("PYTHONUNBUFFERED", "1");
                 e.put("PYTHONPATH", in.toolkit.getAbsolutePath());   // tools.prepare from the toolkit root
                 e.put("XBA_PYTHON", new File(nat, Toolchain.PYTHON).getAbsolutePath());
+                if (!GameStore.enhancements(c, titleId))   // Settings › Enhancements off (profile-free WP6)
+                    e.put("XBA_NO_TITLE_LAYER", "1");
                 return e;
             }
 

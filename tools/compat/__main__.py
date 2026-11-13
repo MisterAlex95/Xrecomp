@@ -241,11 +241,24 @@ def _lower_priority():
         pass
 
 
-def prepare(source, work, log):
+NO_TITLE_LAYER = "no-title-layer"
+
+
+def variant_of(r):
+    """A result line's variant: "no-title-layer" for a run prepared without the title's optional enhancements
+    (--no-title-layer, profile-free WP6), "" for the normal one."""
+    return NO_TITLE_LAYER if r.get("title_layer") is False else ""
+
+
+def prepare(source, work, log, no_title_layer=False):
     t0 = time.time()
+    env = dict(os.environ)
+    env.pop("XBA_NO_TITLE_LAYER", None)
+    if no_title_layer:
+        env["XBA_NO_TITLE_LAYER"] = "1"
     with open(log, "w") as f:
         rc = subprocess.call([sys.executable, "-m", "tools.prepare", source, "--work", work],
-                             cwd=ROOT, stdout=f, stderr=subprocess.STDOUT, preexec_fn=_lower_priority)
+                             cwd=ROOT, stdout=f, stderr=subprocess.STDOUT, preexec_fn=_lower_priority, env=env)
     tail = ""
     if rc:
         with open(log, errors="replace") as f:
@@ -379,11 +392,16 @@ def recall_of(work, source):
 
 def run_one(source, a, marks=None):
     name = os.path.basename(os.path.normpath(source))
-    work = os.path.join(os.path.abspath(a.work_root), re.sub(r"[^A-Za-z0-9._-]", "_", name))
+    ntl = bool(getattr(a, "no_title_layer", False))
+    # Its own work folder: the two builds never share a stamp, an executable or a discovery history.
+    work = os.path.join(os.path.abspath(a.work_root), re.sub(r"[^A-Za-z0-9._-]", "_", name)
+                        + ("-" + NO_TITLE_LAYER if ntl else ""))
     os.makedirs(work, exist_ok=True)
     res = {"source": name, "toolkit": toolkit_commit(), "time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+    if ntl:
+        res["title_layer"] = False
     if not a.no_prepare:
-        rc, secs, tail = prepare(source, work, os.path.join(work, "compat-prepare.log"))
+        rc, secs, tail = prepare(source, work, os.path.join(work, "compat-prepare.log"), ntl)
         res["prepare_s"] = round(secs)
         if rc:
             res.update(stage="none", blocker="prepare failed: " + tail)
@@ -452,25 +470,43 @@ def dsp_label(result):
 
 
 def report(results):
-    """A Markdown table, one row per title (the last result for each)."""
-    last = {}
+    """A Markdown table, one row per title (the last result for each). Runs prepared without the title layer
+    (--no-title-layer) are not rows of their own: when there are any, a « No title layer » column gives each
+    title's stage that way next to the normal one (profile-free WP6: it must not be lower)."""
+    last, ntl = {}, {}
     for r in results:
-        last[r.get("title_id") or r.get("source")] = r
+        (ntl if variant_of(r) else last)[r.get("title_id") or r.get("source")] = r
+    for k, r in ntl.items():          # a title run only that way still gets its row
+        last.setdefault(k, {"source": r.get("source", k), "stage": "none", "blocker": "not run with its title layer"})
     on_device = any(r.get("device") for r in results)
     with_recall = any(r.get("recall") for r in results)
     with_dsp = any(dsp_label(r) for r in last.values())
-    rows = ["| Title | Stage | Best of runs | Blocker | XDK | Toolkit |" + (" Recall |" if with_recall else "")
-            + (" Device |" if on_device else "") + (" DSP |" if with_dsp else ""),
-            "|---|---|---|---|---|---|" + ("---|" if with_recall else "") + ("---|" if on_device else "")
-            + ("---|" if with_dsp else "")]
+    rows = ["| Title | Stage | Best of runs | Blocker | XDK | Toolkit |" + (" No title layer |" if ntl else "")
+            + (" Recall |" if with_recall else "") + (" Device |" if on_device else "") + (" DSP |" if with_dsp else ""),
+            "|---|---|---|---|---|---|" + ("---|" if ntl else "") + ("---|" if with_recall else "")
+            + ("---|" if on_device else "") + ("---|" if with_dsp else "")]
     for k, r in sorted(last.items(), key=lambda kv: -STAGES.index(kv[1].get("stage", "none"))):
         rows.append("| %s | %s | %s | %s | %s | %s |" % (
             r.get("source", k) + (" (network stack)" if r.get("net") else ""), r.get("stage"), r.get("best", r.get("stage")),
             (r.get("blocker") or "").replace("|", "/"), r.get("xdk") or "", r.get("toolkit", ""))
+            + (" %s |" % ntl_label(r, ntl.get(k)) if ntl else "")
             + (" %s |" % recall_label(r) if with_recall else "")
             + (" %s |" % device.device_label(r).replace("|", "/") if on_device else "")
             + (" %s |" % dsp_label(r) if with_dsp else ""))
     return "\n".join(rows)
+
+
+def ntl_label(r, other):
+    """The « No title layer » column: the stage the title reached prepared without its title layer, marked when it
+    is lower than with it (a title layer must never be needed to run), "" when it was not run that way."""
+    if not other:
+        return ""
+    st = other.get("stage", "none")
+    lower = STAGES.index(st) < STAGES.index(r.get("stage", "none"))
+    words = ("**%s, lower**" % st if lower else st)
+    if other.get("blocker"):
+        words += ": " + other["blocker"]
+    return words.replace("|", "/")
 
 
 def recall_label(r):
@@ -480,7 +516,9 @@ def recall_label(r):
 
 
 def _key(r):
-    return r.get("title_id") or r.get("source")
+    """A title, and the variant apart (a run without the title layer is no regression of the normal one)."""
+    k = r.get("title_id") or r.get("source")
+    return (k, variant_of(r)) if variant_of(r) else k
 
 
 def history(results):
@@ -501,7 +539,9 @@ def regressions(results):
         prev, last = runs[-2], runs[-1]
         a, b = STAGES.index(prev.get("stage", "none")), STAGES.index(last.get("stage", "none"))
         if b < a:
-            out.append({"title": k, "source": last.get("source", k), "from": prev.get("stage"),
+            title = k[0] if isinstance(k, tuple) else k
+            out.append({"title": title, "source": str(last.get("source", title))
+                        + (" (no title layer)" if variant_of(last) else ""), "from": prev.get("stage"),
                         "to": last.get("stage"), "blocker": last.get("blocker"),
                         "toolkit_from": prev.get("toolkit"), "toolkit_to": last.get("toolkit")})
     return out
@@ -519,21 +559,23 @@ def matrix(results):
                                                       str(kv[1][-1].get("source", kv[0])).lower())):
         last = runs[-1]
         stage = last.get("stage", "none")
-        counts[stage] += 1
+        if not variant_of(last):        # a run without the title layer is the same title again
+            counts[stage] += 1
         change = ""
         if len(runs) > 1:
             d = STAGES.index(stage) - STAGES.index(runs[-2].get("stage", "none"))
             change = "up from %s" % runs[-2].get("stage") if d > 0 else \
                      "**down from %s**" % runs[-2].get("stage") if d < 0 else "same"
         rows.append("| %s | %s | %s | %s | %s | %s | %s | %s |" % (
-            str(last.get("source", k)).replace("|", "/"), last.get("title_id") or "", stage, change,
+            (str(last.get("source", k)) + (" (no title layer)" if variant_of(last) else "")).replace("|", "/"),
+            last.get("title_id") or "", stage, change,
             (last.get("blocker") or "").replace("|", "/"), last.get("xdk") or "",
             ", ".join(l for l in (last.get("layers") or []) if l.startswith("engines/")) or "",
             "%s %s" % (last.get("toolkit", ""), (last.get("time") or "")[:10]))
             + (" %s |" % recall_label(last) if with_recall else "")
             + (" %s |" % device.device_label(last).replace("|", "/") if on_device else ""))
     total = sum(counts.values()) or 1
-    smc = sum(1 for runs in by.values() if runs[-1].get("smc"))
+    smc = sum(1 for runs in by.values() if runs[-1].get("smc") and not variant_of(runs[-1]))
     out = ["**%d titles.** " % sum(counts.values()) + "; ".join(
                "%s: %d (%d %%)" % (s, counts[s], counts[s] * 100 // total) for s in reversed(STAGES) if counts[s])
            + ("; code written or run at run time (XBA-118): %d" % smc if smc else ""),
@@ -591,6 +633,9 @@ def main(argv=None):
     r.add_argument("--sustain", type=float, default=60, help="the sustained window, seconds (default 60)")
     r.add_argument("--repeat", type=int, default=1, help="boots per title: the stage is the worst run")
     r.add_argument("--no-prepare", action="store_true", help="reuse the work folder's build")
+    r.add_argument("--no-title-layer", action="store_true",
+                   help="prepare without the titles' optional enhancements (XBA_NO_TITLE_LAYER=1), in a work folder "
+                        "of its own; the report shows both columns")
     r.add_argument("--out", default="compat-results.jsonl", help="results, appended (default compat-results.jsonl)")
     p = sub.add_parser("report", help="Markdown table from a results file")
     p.add_argument("results")
@@ -609,6 +654,7 @@ def main(argv=None):
     h.add_argument("--max-idle", type=int, default=1, help="rounds without progress in a row that stop it")
     h.add_argument("--max-rounds", type=int, default=12, help="a safety net, not the cap (default 12)")
     h.add_argument("--out", default="compat-results.jsonl")
+    h.add_argument("--no-title-layer", action="store_true", help="as for run")
     sub.add_parser("recall", help="prepare-time recall of a title's work folder (XBA-129): recall --help")
     a = ap.parse_args(argv)
     if a.cmd == "grade":

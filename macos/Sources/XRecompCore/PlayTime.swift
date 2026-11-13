@@ -8,6 +8,12 @@ public struct TitleRecord: Codable, Equatable, Sendable {
     public var playSeconds: Double = 0
     public var runs: Int = 0
     public var lastPrepare: PrepareRecord?
+    /// The title's optional enhancements (profiles/titles/<id>, profile-free WP6): nil or true = on, false = its
+    /// prepares run with --no-title-layer (Manage › Enhancements).
+    public var enhancements: Bool?
+
+    /// The enhancements go in (the default).
+    public var enhancementsOn: Bool { enhancements ?? true }
 
     public struct PrepareRecord: Codable, Equatable, Sendable {
         public var ok: Bool
@@ -25,7 +31,7 @@ public struct TitleRecord: Codable, Equatable, Sendable {
 
     enum CodingKeys: String, CodingKey {
         case sourcePath = "source_path", lastPlayed = "last_played", playSeconds = "play_seconds", runs
-        case lastPrepare = "last_prepare"
+        case lastPrepare = "last_prepare", enhancements
     }
 
     public init(sourcePath: String? = nil) {

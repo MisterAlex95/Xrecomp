@@ -6,4 +6,11 @@
     <string name="HOME_OTHER_XBE_NOTE">This game\'s files are not the version it was prepared from (another revision or region of the disc). Prepare again to play it; your saves are kept.</string>
     <string name="HOME_OLDER_TOOLKIT">Prepared by an older version of the app</string>
     <string name="HOME_OLDER_TOOLKIT_NOTE">This update translates games better. Prepare again (%1$s) to get its fixes; until then the game plays as before. Your saves are kept.</string>
+    <!-- Settings › General › Enhancements, per game (profile-free WP6: profiles/titles/<id>, optional) -->
+    <string name="ENHANCEMENTS">Enhancements</string>
+    <string name="ENHANCEMENTS_DETAIL">Extras the app has for %1$s, such as a widescreen picture or a smoother front end. The game runs without them, as on the console. Applies at the next preparation.</string>
+    <string name="ENHANCEMENTS_ON">Enhancements on: the next preparation puts them in.</string>
+    <string name="ENHANCEMENTS_OFF">Enhancements off: the next preparation leaves them out.</string>
+    <string name="HOME_ENHANCEMENTS_CHANGED">Enhancements changed · prepare again</string>
+    <string name="HOME_ENHANCEMENTS_CHANGED_NOTE">The Enhancements setting is not what the game was prepared with. Prepare again (%1$s) to apply it; until then the game plays as prepared. Your saves are kept.</string>
 </resources>

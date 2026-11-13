@@ -198,6 +198,12 @@ public class ToolchainTest {
         assertEquals(n, env.get("LD_LIBRARY_PATH"));
         assertEquals("1", env.get("PYTHONUNBUFFERED"));
         assertEquals(new File(files, "work/4D530004/prepare.log"), runner.toolLog);
+        // Profile-free WP6: Settings › Enhancements off for this title leaves its title layer out.
+        assertFalse(env.containsKey("XBA_NO_TITLE_LAYER"));
+        assertTrue(GameStore.setEnhancements(ctx, "4d530004", false));
+        assertEquals("1", f.environment().get("XBA_NO_TITLE_LAYER"));
+        assertTrue(GameStore.setEnhancements(ctx, "4D530004", true));
+        assertFalse(f.environment().containsKey("XBA_NO_TITLE_LAYER"));
     }
 
     @Test

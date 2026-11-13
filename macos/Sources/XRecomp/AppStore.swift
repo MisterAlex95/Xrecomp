@@ -198,6 +198,7 @@ final class AppStore: LauncherActions {
                     n.status = old.status
                     n.exe = old.exe
                     n.envForce = old.envForce
+                    n.titleLayer = old.titleLayer
                 }
             }
             out.append(n)
@@ -234,8 +235,12 @@ final class AppStore: LauncherActions {
         guard let g = model.game(id), let tid = g.titleId, let tk = toolkit, let py = python else { return }
         if case .unreadable = g.status { return }
         let source = URL(fileURLWithPath: g.entry.path), workDir = paths.title(tid).work
+        // The stamp is compared with the prepare this title would get: its enhancements off, a build made with them
+        // is stale (reason "profile"), and the other way round.
+        let env = ChildEnvironment.prepare(enhancements: TitleRecord.load(from: paths.title(tid).state).enhancementsOn)
         work.async {
-            let st = TitleState.check(python: py.path, toolkit: tk.root, source: source, work: workDir)
+            let st = TitleState.check(python: py.path, toolkit: tk.root, source: source, work: workDir,
+                                      environment: env)
             DispatchQueue.main.async { [self] in
                 model.update(id) { item in
                     guard let st else {
@@ -244,6 +249,7 @@ final class AppStore: LauncherActions {
                     }
                     if let t = st.title, !t.isEmpty { item.name = t }
                     item.envForce = st.envForce
+                    item.titleLayer = st.titleLayer
                     item.exe = st.playable ? st.exe : nil
                     switch st.state {
                     case .ready: item.status = .ready
@@ -294,6 +300,8 @@ final class AppStore: LauncherActions {
                                         work: t.work)
         req.force = force
         var record = TitleRecord.load(from: t.state)
+        req.noTitleLayer = !record.enhancementsOn
+        req.environment = ChildEnvironment.prepare(req.environment, enhancements: record.enhancementsOn)
         record.sourcePath = g.entry.path
         try? record.save(to: t.state)
         let runner = PrepareRunner(req) { [weak self] e in
@@ -485,6 +493,19 @@ final class AppStore: LauncherActions {
             model.notice = "Cannot delete: \(error.localizedDescription)"
         }
         if item == .work || item == .extractedDisc { refreshState(id) }
+    }
+
+    func setEnhancements(_ id: String, on: Bool) {
+        guard let t = titlePaths(id) else { return }
+        var r = TitleRecord.load(from: t.state)
+        r.enhancements = on ? nil : false
+        do {
+            try r.save(to: t.state)
+        } catch {
+            return model.notice = "Cannot save the setting: \(error.localizedDescription)"
+        }
+        model.update(id) { $0.record = r }
+        refreshState(id)     // a build made the other way is stale now: Home offers Prepare again
     }
 
     func importSaves(_ id: String) -> Int {

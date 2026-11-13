@@ -338,3 +338,45 @@ def test_a_run_has_its_own_data_home(tmp_path, monkeypatch):
     assert env["XDG_DATA_HOME"] == str(tmp_path / "data-0") and os.path.isdir(env["XDG_DATA_HOME"])
     assert not (old / "launch.bin").exists()
     assert boot_env(str(tmp_path), 1, "s", "l", str(tmp_path))["XDG_DATA_HOME"] == str(tmp_path / "data-1")
+
+
+def test_runs_without_the_title_layer_are_a_column_and_no_regression():
+    """Profile-free WP6: `run --no-title-layer` lines (title_layer false) are the « No title layer » column of the
+    report, a lower stage there is marked, and in the matrix they are rows of their own, neither counted as more
+    titles nor taken for a regression of the normal run."""
+    from tools.compat.__main__ import matrix, regressions
+    res = [{"source": "a", "title_id": "58424104", "stage": "sustained", "toolkit": "x"},
+           {"source": "a", "title_id": "58424104", "stage": "renders", "blocker": "hang: no flip for the last 40 s",
+            "toolkit": "x", "title_layer": False},
+           {"source": "b", "title_id": "58424105", "stage": "renders", "toolkit": "x"},
+           {"source": "b", "title_id": "58424105", "stage": "renders", "toolkit": "x", "title_layer": False}]
+    t = report(res).splitlines()
+    assert t[0] == "| Title | Stage | Best of runs | Blocker | XDK | Toolkit | No title layer |"
+    assert t[1].count("|") == t[0].count("|") and len(t) == 4
+    assert t[2] == "| a | sustained | sustained |  |  | x | **renders, lower**: hang: no flip for the last 40 s |"
+    assert t[3] == "| b | renders | renders |  |  | x | renders |"
+    assert regressions(res) == []
+    md = matrix(res)
+    assert md.startswith("**2 titles.** sustained: 1 (50 %); renders: 1 (50 %)")
+    assert "| a (no title layer) | 58424104 | renders |  |" in md
+    assert "No title layer" not in report(res[:1]) and len(report(res[1:2]).splitlines()) == 3
+
+
+def test_the_no_title_layer_prepare_has_its_own_folder_and_variable(tmp_path, monkeypatch):
+    from tools.compat import __main__ as cm
+    calls = []
+
+    def fake_call(cmd, cwd=None, stdout=None, stderr=None, preexec_fn=None, env=None):
+        calls.append((cmd, env.get("XBA_NO_TITLE_LAYER")))
+        return 1
+    monkeypatch.setattr(cm.subprocess, "call", fake_call)
+    monkeypatch.setenv("XBA_NO_TITLE_LAYER", "1")          # a caller's variable does not leak into a normal run
+
+    class A:
+        work_root, no_prepare, no_title_layer = str(tmp_path), False, False
+    assert "title_layer" not in cm.run_one("/x/game", A)
+    A.no_title_layer = True
+    res = cm.run_one("/x/game", A)
+    assert res["title_layer"] is False and res["stage"] == "none"
+    assert [c[1] for c in calls] == [None, "1"]
+    assert calls[0][0][-1] == str(tmp_path / "game") and calls[1][0][-1] == str(tmp_path / "game-no-title-layer")
