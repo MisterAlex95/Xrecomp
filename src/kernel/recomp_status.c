@@ -24,6 +24,7 @@ static unsigned s_period_ms = 1000;
  * read once a second; a torn read is one stale number. */
 static volatile uint64_t s_flips, s_frames, s_audio_samples, s_pad_reads, s_threads;
 static volatile uint32_t s_hash, s_lit;
+static const char *volatile s_net;      /* a literal, or NULL: no NIC touched */
 
 static uint64_t now_ms(void)
 {
@@ -41,11 +42,12 @@ void recomp_status_write_now(void)
     if (!s_on || !s_file)
         return;
     fprintf(s_file, "{\"ms\":%llu,\"flips\":%llu,\"frames\":%llu,\"hash\":\"0x%08X\",\"lit\":%u,"
-                    "\"audio_ms\":%llu,\"pad_reads\":%llu,\"threads\":%llu,\"discovered\":%u}\n",
+                    "\"audio_ms\":%llu,\"pad_reads\":%llu,\"threads\":%llu,\"discovered\":%u%s%s%s}\n",
             (unsigned long long)(now_ms() - s_t0_ms), (unsigned long long)s_flips,
             (unsigned long long)s_frames, s_hash, s_lit ? 1u : 0u,
             (unsigned long long)(s_audio_samples / 48u), (unsigned long long)s_pad_reads,
-            (unsigned long long)s_threads, recomp_discovery_written());
+            (unsigned long long)s_threads, recomp_discovery_written(),
+            s_net ? ",\"net\":\"" : "", s_net ? s_net : "", s_net ? "\"" : "");
     fflush(s_file);
 }
 
@@ -171,6 +173,11 @@ void recomp_status_thread_started(void)
         s_threads++;
 }
 
+void recomp_status_net(const char *what)
+{
+    s_net = what;               /* kept with the status off too: cheap, and */
+}                               /* a later start still reports it */
+
 void recomp_status_reset(void)
 {
     if (s_file)
@@ -179,6 +186,7 @@ void recomp_status_reset(void)
     s_on = 0;
     s_flips = s_frames = s_audio_samples = s_pad_reads = s_threads = 0;
     s_hash = s_lit = 0;
+    s_net = NULL;
     s_period_ms = 1000;
     (void)open_file();          /* tests call write_now themselves: no thread */
 }

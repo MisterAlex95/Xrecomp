@@ -27,6 +27,7 @@ set(KERNEL_SOURCES
     kernel_bridge.c
     kernel_wait_stats.c
     xbox_memory_layout.c
+    xbox_nic.c
     xbox_seh.c
     guest_vmem.c
     icall_feedback.c

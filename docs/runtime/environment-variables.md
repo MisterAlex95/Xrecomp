@@ -290,3 +290,12 @@ See [xbox_input](../../src/input/README.md).
 | `RECOMP_OHCI_CATCHUP` | on (needs the gate and safe points) | When the controller thread is more than 16 ms overdue and the driver has written ControlListFilled or BulkListFilled, a guest thread walks the lists at its release point and runs the USB interrupt there (log: `[OHCI0] controller thread N ms overdue; lists serviced on the guest thread`). Keeps a starved host thread from letting per-frame control transfers (rumble) pile up past XAPI's descriptor budget (KOTOR, K-8c). `0` restores the controller thread alone; an A/B switch kept for one release. | `ohci.c`, `kernel_hal.c` |
 | `RECOMP_USB_TRACE`, `RECOMP_USB_STATS` | off | Controller trace; completions every 5 s. | `ohci.c` |
 | `RECOMP_PAD_LIVE=<file>`, `RECOMP_PAD_SCRIPT`, `RECOMP_PAD_PRESS` | off | Test input: a file read live, a script, or a periodic press. | `usb_gamepad.c` |
+
+## Network
+
+See [Network: a console with no cable](../technical/network.md).
+
+| Variable | Default | What it does | Where |
+|---|---|---|---|
+| `RECOMP_NIC` | on | The MCPX Ethernet controller model (XBA-117): registers at 0xFEF00000 trapped and answered as a controller with no cable (PHY link down, autonegotiation never completes, transmit refused with carrier lost, no interrupt), `PhyGetLinkState` returns 0. `0` is the behaviour before: the registers are plain memory and `PhyGetLinkState` says link up. | `xbox_nic.c` |
+| `RECOMP_NIC_TRACE=1` | off | Prints the first 400 NIC register accesses (offset, size, value): what a title's network stack does at boot. | `xbox_nic.c` |

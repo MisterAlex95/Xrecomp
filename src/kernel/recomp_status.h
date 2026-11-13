@@ -17,6 +17,9 @@
  *   threads     guest threads the kernel started (the first, run inline as the
  *               title's main thread, counts)
  *   discovered  new discovery-file entries (recomp_discovery.h)
+ *   net         only once the title touched the Ethernet controller or the
+ *               kernel's PHY routes (XBA-117): "nic probed, link down", or
+ *               "nic probed, link up (RECOMP_NIC=0)" with the model off
  *
  * Unset: nothing is counted beyond a load and a branch per call.
  * docs/technical/discovery.md has the companion file; the runner reads both. */
@@ -41,6 +44,10 @@ void recomp_status_audio(const int16_t *stereo, int count);
 
 void recomp_status_pad_read(void);
 void recomp_status_thread_started(void);
+
+/* The title has a network stack (src/kernel/xbox_nic.c): what it found, a
+ * string literal. Safe from a signal handler (one pointer store). */
+void recomp_status_net(const char *what);
 
 /* Tests: write one line now (as the thread does), and forget everything. */
 void recomp_status_write_now(void);

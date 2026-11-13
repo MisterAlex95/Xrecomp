@@ -307,7 +307,7 @@ ptrdiff_t xbox_GetMemoryOffset(void);
 size_t xbox_GetMappedSize(void);
 void xbox_ProtectMirrorsForDebug(void);
 
-/* Trapped hardware registers (APU, AC'97 bus master, USB OHCI). A title's
+/* Trapped hardware registers (APU, AC'97 bus master, USB OHCI, NIC). A title's
  * fault handler calls one of these first and resumes the thread when it
  * returns 1; only 0 is a crash. void * keeps windows.h and ucontext.h out of
  * here.
