@@ -1229,6 +1229,10 @@ NTSTATUS __stdcall xbox_ExSaveNonVolatileSetting(ULONG ValueIndex, ULONG Type, P
 #define SMC_CMD_FIRMWARE_VER    0x01    /* SMC firmware version */
 #define SMC_CMD_TRAY_STATE      0x03    /* DVD tray state */
 #define SMC_CMD_AV_PACK         0x04    /* AV pack type */
+/* The AV pack the SMC reports (its own numbering: 0 SCART, 1 HDTV, 2 VGA,
+ * 3 RFU, 4 S-Video, 6 standard, 7 none): the HDTV pack (XBA-121). The same
+ * value is HalBootSMCVideoMode, the word the kernel read from the SMC at boot. */
+#define XBOX_SMC_AV_PACK        0x01u
 #define SMC_CMD_CPU_TEMP        0x09    /* CPU temperature */
 #define SMC_CMD_MB_TEMP         0x0A    /* Motherboard temperature */
 #define SMC_CMD_FAN_SPEED       0x10    /* Fan speed */

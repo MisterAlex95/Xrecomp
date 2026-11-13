@@ -1760,7 +1760,7 @@ NTSTATUS __stdcall xbox_HalReadSMBusValue(
              * 2 VGA, 3 RFU, 4 S-Video, 6 standard, 7 none), which XGetAVPack
              * returns as is (XC_AV_PACK_HDTV is 1). It used to answer
              * AV_PACK_HDTV (4), the AV query's numbering: S-Video here. */
-            *DataValue = 0x01;
+            *DataValue = XBOX_SMC_AV_PACK;
             break;
         case SMC_CMD_CPU_TEMP:
             *DataValue = 40; /* 40 degrees C */
@@ -1858,10 +1858,12 @@ XBOX_ANSI_STRING xbox_HalDiskSerialNumber = {
 };
 
 /*
- * Video mode the SMC reported at boot. 0 lets title code fall back to querying
- * the AV pack, which we answer properly in AvGetSavedDataAddress/SMBus.
+ * What the kernel read from the SMC's AV pack register at boot: the same pack
+ * HalReadSMBusValue(SMC_CMD_AV_PACK) answers, so a title that reads either
+ * sees one console (XBA-121). It was 0, the SCART pack in the SMC's numbering,
+ * while the SMBus said HDTV.
  */
-ULONG xbox_HalBootSMCVideoMode = 0;
+ULONG xbox_HalBootSMCVideoMode = XBOX_SMC_AV_PACK;
 
 /*
  * IDE channel object. Real kernels export a device object for the ATA channel;

@@ -9,7 +9,8 @@
  *    with RECOMP_PAL60=0 (the console's own default);
  *  - RECOMP_WIDESCREEN / RECOMP_480P set their XC_VIDEO bits, and the same
  *    bits appear in the AV capabilities word;
- *  - a PAL-I display mode makes the vblank 50 Hz, a PAL 60 or NTSC mode 60.
+ *  - a PAL-I display mode makes the vblank 50 Hz, a PAL 60 or NTSC mode 60;
+ *  - HalBootSMCVideoMode is the pack the SMBus reports (HDTV).
  */
 #include "kernel.h"
 #include <stdio.h>
@@ -83,6 +84,15 @@ int main(void)
 
     /* No certificate yet (and the old fixed answer): North America. */
     expect("no certificate", XC_GAME_REGION_NA, XC_AV_REGION_NTSC_M, F60, 60);
+    {
+        ULONG smc = 0xFF;
+        xbox_HalReadSMBusValue(SMC_SLAVE_ADDRESS, SMC_CMD_AV_PACK, FALSE, &smc);
+        if (xbox_HalBootSMCVideoMode != smc || smc != XBOX_SMC_AV_PACK) {
+            fprintf(stderr, "FAIL: HalBootSMCVideoMode %lu, SMBus AV pack %lu: one console, the HDTV pack (1)\n",
+                    (unsigned long)xbox_HalBootSMCVideoMode, (unsigned long)smc);
+            failures++;
+        }
+    }
     if (avcaps() != 0x00400104u) {
         fprintf(stderr, "FAIL: NA caps 0x%08lX, the old word was 0x00400104\n", (unsigned long)avcaps());
         failures++;
