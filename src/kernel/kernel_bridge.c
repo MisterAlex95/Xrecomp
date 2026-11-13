@@ -10076,15 +10076,52 @@ static void bridge_NtSetTimerEx(void)
     g_eax = SetWaitableTimer(h, &due, period, NULL, NULL, FALSE) ? 0 : 0xC000000Du;
 }
 
-/* --- NtSignalAndWaitForSingleObjectEx (ordinal 230, 5 args = 20 bytes) --- */
+/* --- NtSignalAndWaitForSingleObjectEx (ordinal 230, 5 args = 20 bytes)
+ * NTSTATUS NtSignalAndWaitForSingleObjectEx(HANDLE SignalHandle,
+ *                                           HANDLE WaitHandle,
+ *                                           KPROCESSOR_MODE WaitMode,
+ *                                           BOOLEAN Alertable,
+ *                                           PLARGE_INTEGER Timeout);
+ * XAPI's SignalObjectAndWait (XBA-114): set the event, release the
+ * semaphore by one or the mutant, then wait on WaitHandle as
+ * NtWaitForSingleObjectEx does. A signal that fails ends the call with its
+ * status and no wait, as on the console: STATUS_MUTANT_NOT_OWNED for a
+ * mutant the caller does not own, STATUS_OBJECT_TYPE_MISMATCH for an
+ * object that cannot be signalled. The console does both under one
+ * dispatcher lock; here another thread may run between the two, which only
+ * a title that polls the signalled object could see. It used to return
+ * STATUS_SUCCESS without either. */
 static void bridge_NtSignalAndWaitForSingleObjectEx(void)
 {
-    (void)STACK_ARG(0);
-    (void)STACK_ARG(1);
-    (void)STACK_ARG(2);
-    (void)STACK_ARG(3);
-    (void)STACK_ARG(4);
-    g_eax = 0;
+    HANDLE   sig         = bridge_resolve_handle(STACK_ARG(0));
+    uint32_t token       = STACK_ARG(1);
+    HANDLE   wait_h      = bridge_resolve_handle(token);
+    uint32_t wait_mode   = STACK_ARG(2) & 0xFF;
+    uint32_t alertable   = STACK_ARG(3) & 0xFF;
+    uint32_t timeout_ptr = STACK_ARG(4);
+    uint32_t site        = g_xbox_kernel_caller;
+    uint64_t t0;
+
+    if (!sig || !wait_h) {
+        g_eax = 0xC0000008u;                 /* STATUS_INVALID_HANDLE */
+        return;
+    }
+    xbox_wait_stats_set(STACK_ARG(0));
+    if (!SetEvent(sig) && !ReleaseSemaphore(sig, 1, NULL)) {
+        if (!ReleaseMutex(sig)) {
+            g_eax = GetLastError() == ERROR_NOT_OWNER
+                  ? 0xC0000046u               /* STATUS_MUTANT_NOT_OWNED */
+                  : 0xC0000024u;              /* STATUS_OBJECT_TYPE_MISMATCH */
+            return;
+        }
+    }
+    if (bridge_run_io_apcs(alertable, wait_mode))
+        return;
+    t0 = xbox_wait_stats_begin(bridge_timeout_is_poll(timeout_ptr));
+    g_eax = (uint32_t)xbox_NtWaitForSingleObjectEx(
+        wait_h, (KPROCESSOR_MODE)wait_mode, (BOOLEAN)alertable,
+        XBOX_TO_NATIVE(timeout_ptr));
+    xbox_wait_stats_wait(token, site, g_eax, t0);
 }
 
 /* --- NtWriteFileGather (ordinal 237, 8 args = 32 bytes)

@@ -35,7 +35,6 @@ const KernelStubEntry g_kernel_stub_table[] = {
     { 213, "NtQueryMutant" },
     { 214, "NtQuerySemaphore" },
     { 216, "NtQueryTimer" },
-    { 230, "NtSignalAndWaitForSingleObjectEx" },
     { 239, "ObCreateObject" },
     { 241, "ObInsertObject" },
     { 242, "ObMakeTemporaryObject" },

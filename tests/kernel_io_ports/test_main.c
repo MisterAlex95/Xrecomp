@@ -20,6 +20,10 @@
  *      segment i, from ByteOffset; a transfer that runs into the end of the
  *      file is short, not failed; NtWriteFileGather writes page i from
  *      segment i (read back through the scatter); the event is set.
+ *   3. NtSignalAndWaitForSingleObjectEx: sets an event, releases a semaphore
+ *      or a mutant, then waits; a mutant the caller does not own and an
+ *      object that cannot be signalled fail without waiting; the wait times
+ *      out; a ping-pong with another thread.
  */
 #include "kernel.h"
 #include "xbox_memory_layout.h"
@@ -82,12 +86,14 @@ enum {
     S_CLOSE, S_OPEN, S_READ, S_SETINFO, S_WAIT1,
     S_IOC_CREATE, S_IOC_SET, S_IOC_REMOVE, S_IOC_QUERY,
     S_SCATTER, S_GATHER, S_EVENT,
+    S_SIGWAIT, S_SEM, S_MUTANT,
     S_COUNT
 };
 static const uint32_t slot_ord[S_COUNT] = {
     187, 202, 219, 226, 233,
     191, 227, 223, 212,
     220, 237, 189,
+    230, 193, 192,
 };
 
 static RECOMP_TLS int t_index;
@@ -304,6 +310,85 @@ static void test_scatter_gather(uint32_t file)
     CALL(S_CLOSE, ev);
 }
 
+/* ═══════════════════ 3. Signal and wait ═══════════════════ */
+
+static uint32_t make_event(uint32_t type, uint32_t state)
+{
+    CALL(S_EVENT, HANDLE_VA, 0, type, state);
+    return M32(HANDLE_VA);
+}
+
+static uint32_t g_go, g_done;
+static volatile int partner_ok;
+
+static DWORD WINAPI partner(LPVOID p)
+{
+    (void)p;
+    become_thread(4);
+    CALL(S_WAIT1, g_go, 0, 0);               /* forever */
+    partner_ok = g_eax == 0;
+    {
+        /* The answer, by a signal-and-wait of its own on a spare event. */
+        uint32_t spare = make_event(1, 0);
+        CALL(S_SIGWAIT, g_done, spare, 1, 0, TIMEOUT_VA);
+        CALL(S_CLOSE, spare);
+    }
+    return 0;
+}
+
+static void test_signal_and_wait(uint32_t file)
+{
+    uint32_t e1, e2, e3, sem, mut, r;
+    HANDLE th;
+
+    become_thread(0);
+    e1 = make_event(1 /* synchronization */, 0);
+    e2 = make_event(0 /* notification */, 1);
+    e3 = make_event(0, 0);
+    CALL(S_SEM, HANDLE_VA, 0, 0, 2);
+    sem = M32(HANDLE_VA);
+    CALL(S_MUTANT, HANDLE_VA, 0, 0 /* not owned */);
+    mut = M32(HANDLE_VA);
+
+    CALL(S_SIGWAIT, e1, e2, 1, 0, TIMEOUT_VA);
+    check(g_eax == 0 && esp_ok(5), "event set, signalled object waited: STATUS_SUCCESS (5 arguments)", NULL);
+    CALL(S_WAIT1, e1, 0, TIMEOUT_VA);
+    check(g_eax == 0, "the signalled event is set", NULL);
+
+    CALL(S_SIGWAIT, sem, sem, 1, 0, TIMEOUT_VA);
+    check(g_eax == 0, "a semaphore released by one, then taken by the wait", NULL);
+    CALL(S_WAIT1, sem, 0, TIMEOUT_VA);
+    check(g_eax == 0x102u, "its count is back to 0", NULL);
+
+    CALL(S_SIGWAIT, mut, e3, 1, 0, 0 /* forever: must not wait */);
+    snprintf(d, sizeof d, "status 0x%08X", g_eax);
+    check(g_eax == 0xC0000046u, "a mutant not owned: STATUS_MUTANT_NOT_OWNED, no wait", d);
+    if (file) {
+        CALL(S_SIGWAIT, file, e3, 1, 0, 0);
+        snprintf(d, sizeof d, "status 0x%08X", g_eax);
+        check(g_eax == 0xC0000024u, "a file: STATUS_OBJECT_TYPE_MISMATCH, no wait", d);
+    }
+    *(int64_t *)(mem + TIMEOUT2_VA) = -200000;   /* 20 ms */
+    CALL(S_SIGWAIT, e1, e3, 1, 0, TIMEOUT2_VA);
+    check(g_eax == 0x102u, "a wait on an unsignalled object times out", NULL);
+
+    g_go = make_event(1, 0);
+    g_done = make_event(1, 0);
+    partner_ok = 0;
+    th = CreateThread(NULL, 0, partner, NULL, 0, NULL);
+    *(int64_t *)(mem + TIMEOUT2_VA) = -50000000; /* 5 s */
+    CALL(S_SIGWAIT, g_go, g_done, 1, 0, TIMEOUT2_VA);
+    r = g_eax;
+    WaitForSingleObject(th, 5000);
+    CloseHandle(th);
+    snprintf(d, sizeof d, "status 0x%08X partner %d", r, partner_ok);
+    check(r == 0 && partner_ok, "ping-pong with another thread: woken by its answer", d);
+
+    CALL(S_CLOSE, e1); CALL(S_CLOSE, e2); CALL(S_CLOSE, e3);
+    CALL(S_CLOSE, sem); CALL(S_CLOSE, mut);
+    CALL(S_CLOSE, g_go); CALL(S_CLOSE, g_done);
+}
+
 int main(void)
 {
     char dir[MAX_PATH], path[MAX_PATH];
@@ -349,6 +434,7 @@ int main(void)
     test_io_completion(file);
     if (file)
         test_scatter_gather(file);
+    test_signal_and_wait(file);
 
     if (file)
         CALL(S_CLOSE, file);
