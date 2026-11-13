@@ -4117,9 +4117,10 @@ class BatchTranslator:
                 stats["total_lines"] += code.count("\n")
                 seh_entries = getattr(self.translator, "seh_funclet_entries", None)
                 if seh_entries:
-                    funclet_entries.extend(seh_entries(
-                        addr, name, code,
-                        getattr(self.translator, "_seh_frame", None)))
+                    funclet_entries.extend(
+                        (addr, name, entry) for entry in seh_entries(
+                            addr, name, code,
+                            getattr(self.translator, "_seh_frame", None)))
             else:
                 # Stub for failed translations
                 stub = f"/* FAILED: {name} at 0x{addr:08X} */\n"
@@ -4131,12 +4132,25 @@ class BatchTranslator:
         # dispatch table and their own function calls them directly, so they
         # are entries like any function -- unless something already is.
         taken = {a for a, _, _ in translations} | set(manual_decls)
+        # The first entry of a function carries its `<name>__seh` copy, which
+        # every other entry calls: when that entry is dropped (the funclet is
+        # already a detected function), the copy goes with its parent instead,
+        # or the other entries do not link (Burnout 3's dashupdate.xbe).
         taken_names = {n for _, n, _ in translations}
-        for entry in funclet_entries:
+        parent_index = {a: k for k, (a, _, _) in enumerate(translations)}
+        for parent_va, parent_name, entry in funclet_entries:
             if entry[0] not in taken and entry[1] not in taken_names:
                 translations.append(entry)
                 taken.add(entry[0])
                 taken_names.add(entry[1])
+                continue
+            marker = (f"void {parent_name}__seh(uint32_t _seh_target);\n"
+                      f"void {entry[1]}(void) {{")
+            cut = entry[2].rfind(marker)
+            if cut > 0 and parent_va in parent_index:
+                k = parent_index[parent_va]
+                a, n, c = translations[k]
+                translations[k] = (a, n, c + "\n" + entry[2][:cut])
         stats["seh_funclets"] = len(funclet_entries)
 
         # A wrapped function's body is sub_X_gen; the hand-written sub_X is
