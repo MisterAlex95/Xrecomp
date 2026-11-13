@@ -91,6 +91,10 @@ The run's environment is `device.check_env`: `boot()`'s minus `RECOMP_HEADLESS` 
 dumped on the device). `report`, `report --matrix` and `plane` read a device file as a desktop one; when a line has
 `device`, the tables get a Device column (« AYN Thor, Android 13 »).
 
+Each run keeps the status file's `apu_dsp` object (what the title asked of the APU's DSPs, XBA-122:
+[APU DSP](apu-dsp.md)); once one title has it, `report` gets a DSP column (« GP image 9cd378fc (1500 words), 13 cmds,
+sends: reverb+FX, 1 stall(s) »). Titles sharing a GP image hash share DirectSound's effects image.
+
 ## Limits
 
 - `responsive` is a heuristic: an animated screen changes on its own. The press times and the status clock start a
