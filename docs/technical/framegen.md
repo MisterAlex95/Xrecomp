@@ -272,6 +272,9 @@ end need not link the framegen library; included only in an
   at flip N+1 and the pacer times frames by their own flip. Log:
   `[GPUGL] present read-back sync (frame generation)`.
 - `RECOMP_FLIP_PACING` (the guest vblank flip hold) is independent.
+- `RECOMP_PACING=auto` (XBA-107, [GPU Back End](gpu-backend.md#pacing-from-the-title-recomp_pacingauto-xba-107-xba-135)):
+  frame generation's cap bounds the rate auto picks; XBA-96's switch-off
+  below raises that bound back to 60.
 
 Both are read once at start-up; if the pacer falls back later, the cap and the
 sync read-back stay for the run (30 fps is the Android profile's cap anyway).

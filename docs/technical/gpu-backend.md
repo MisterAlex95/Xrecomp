@@ -470,6 +470,95 @@ both outside the flip point: blocking the ack thread on `PUT` changes and a
 yield in that wait are separate work (WP5). Under load, the title's own
 frame time, not the cap, held the capped run at 40 fps.
 
+### Pacing from the title: RECOMP_PACING=auto (XBA-107, XBA-135)
+
+Opt-in tonight, so that no title changes before the owner's check:
+`RECOMP_PACING=auto` picks the cap's rate at every flip instead of a fixed
+`RECOMP_GPU_FPS_CAP`. The rule is in `src/kernel/frame_pacing.h` (pure,
+header-only); the executor feeds it the swaps and the flips
+(`pacing_cap_at_flip` in nv2a_pb_exec.c) and books the slots as above.
+
+- **The title's ask.** Each XDK Swap carries its presentation interval in
+  the software-method 1 NOP (bits 0-2, DEFAULT read as ONE; bit 3
+  IMMEDIATE). The ask is the vblank rate divided by the interval the title
+  used most over its last 60 swaps: 60 for ONE, 30 for TWO; 50 / 25 at a
+  PAL-I mode's 50 Hz (the vblank rate is measured from the guest vblank
+  count, so it follows XBA-121's video standard). An IMMEDIATE title was
+  never held by the console: the display's rate bounds it
+  (`RECOMP_DISPLAY_HZ`, set by the SDL presenter).
+- **The adaptive divisor**, for a title free to run below its ask: the
+  highest rate of the form base / k (base: the vblank rate, or the
+  display's for IMMEDIATE; integral; at least 15 fps) that the measured
+  frame cost sustains. The frame cost is flip to flip minus what the
+  executor slept at the cap. Every 0.5 s: more than 20 % of frames late for
+  their slot two windows in a row (about a second) steps down to the
+  highest rate whose period holds the 90th percentile cost with 10 % to
+  spare; at most 2 % late and the 90th percentile within 80 % of a higher
+  rate's period for two windows steps up. A cost measured while the
+  executor sleeps hides the title's CPU work done during the sleep, so a
+  step up is a probe: one that falls back within 10 s doubles the wait
+  before the next (4 s up to 64 s). The schedule is absolute, so the flips
+  are evenly spaced: a steady 30, not a rate wandering between 20 and 40.
+- **Guest time.** Vblanks keep the console's rate whatever the flip rate
+  (the kernel's paced schedule runs on the host clock): logic that counts
+  vblanks or reads a timer keeps its speed at 30. Logic that advances once
+  per flip does not, so a title *locked to its ask* is never divided.
+  Judged once, 20 s after the first flip (logos, movies), over 5 s: locked
+  when at least 90 % of its swaps ask a fixed interval and it held that
+  rate on at least 90 % of its frames (Burnout 3: interval ONE at 60 in its
+  front end, so a heavy race scene later stays at 60 rather than running
+  in slow motion at 30). Until judged, a fixed-interval title runs at its
+  ask; an IMMEDIATE title is free from the start. `RECOMP_PACING_LOCK=1` /
+  `=0` forces the verdict. The judgement is a heuristic: a title whose
+  logic follows real time but whose first judged seconds hold its ask
+  (light menus, a movie) is judged locked and keeps today's behaviour (no
+  division); a flip-locked title that does not hold its ask while judged
+  would be divided (it was already short of its speed).
+- **What wins.** A set `RECOMP_GPU_FPS_CAP` (a profile's `env_default`, the
+  launcher's Frame cap) turns auto off and keeps the fixed cap (`[GPU]
+  pacing auto off: RECOMP_GPU_FPS_CAP=... wins`). Frame generation's lower
+  cap (30) bounds auto's rate, and XBA-96's auto-off still applies.
+  Unlike the fixed cap, auto also paces the CPU rasteriser, so Burnout 3's
+  `RECOMP_FLIP_PACING=1` on the desktop rasteriser has a generic form.
+  `RECOMP_PACING=ask` keeps the ask and never divides.
+
+Logs: `[GPU] pacing: 30 fps (frames miss their slot: lower even rate; ask 60
+fps: 60 Hz vblank, interval 1)` on every change and verdict, and in each
+`[GPU]` report `[GPU] pacing 30 fps: ask 60 fps (...), adaptive, frame cost p90
+21.3 ms, 41% of frames missed their slot` before the usual `[GPU] frame cap`
+line.
+
+Rates on the displays the targets have: a 60 Hz panel and a fixed interval:
+60, 30, 20, 15. A 120 Hz panel (AYN Thor): the same rates for a fixed
+interval (2, 4, 6, 8 refreshes each, all even), and for IMMEDIATE 120, 60,
+40, 30, 24, 20, 15. A 90 Hz panel would not show 60 evenly (1.5 refreshes);
+nothing filters for it yet. PAL 50 Hz on a 60 Hz panel cannot be even at
+50 or 25 (the console's PAL 60, XBA-121's default, avoids it).
+
+Synthetic titles (tests/frame_pacing, simulation with a vsynced window;
+tests/nv2a_ffp_backend `nv2a-pacing-*`, the executor itself), against
+tonight's profile values:
+
+| Synthetic title | auto | profile value today |
+|---|---|---|
+| 10 ms, interval ONE | 60, judged locked | RenderWare `RECOMP_GPU_FPS_CAP=60` |
+| 20 ms, ONE | 60 until judged (25 s), then 30 | Fable `env_default_android` 30 |
+| 20 ms, IMMEDIATE | 30 within 1.5 s | Fable 30 |
+| 40 ms | 20, even | 30 cap: ~25, uneven |
+| 12-22 ms varying | 30, no change in 2 min | 30 |
+| 9 ms, then 18 ms (flip-locked) | 60 kept, not divided | RenderWare 60 |
+
+In every steady case the flips' standard deviation is under 2 ms (wake-up
+jitter of up to 1 ms included). What the window shows also depends on where
+the host schedule falls against the panel's refresh, which nothing aligns
+yet: flips close to a refresh edge land on either side of it, and the
+presents' standard deviation then reaches 5-11 ms at a steady 30 in the
+simulation. The test checks the presents with the edge half a refresh from
+the flips (sd 0.00 in every steady case); aligning the schedule or the
+present time to the display (Choreographer or `EGL_ANDROID_presentation_time`
+on Android, the vsync timestamps on desktop) is the follow-up that makes the
+`[FBWIN] frame times` line meet 2 ms whatever the phase.
+
 ### Context loss and GL_OUT_OF_MEMORY
 
 At every flip `gl_check_frame` drains `glGetError` and asks
@@ -1043,7 +1132,10 @@ Software / GPU, `RECOMP_GPU`) and **Frame cap (GPU renderer)** (Auto / 30 /
 the runtime's Android default applies. Fable's profile sets
 `RECOMP_GPU_FPS_CAP=30` on Android (`env_default_android` in
 `profiles/titles/4d5300d1/title.json`), since an Oakvale frame does not fit
-16.7 ms on the Thor and a 60 cap lets the rate wander.
+16.7 ms on the Thor and a 60 cap lets the rate wander. `RECOMP_PACING=auto`
+([above](#pacing-from-the-title-recomp_pacingauto-xba-107-xba-135)) is to
+derive that 30 at run time; the profile value stays until it is checked on
+the Thor (XBA-108).
 
 **Default on Android (XBA-119).** With `RECOMP_GPU` unset the GL back end
 draws on Android (`gpu_selected`, `NV2A_GL_DEFAULT_ON`); the runtime then
