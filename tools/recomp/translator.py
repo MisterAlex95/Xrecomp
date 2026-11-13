@@ -3150,7 +3150,10 @@ class FunctionTranslator:
         # function whose only ebp is an enter (Fable's sub_002EE2CE, bytes
         # the sweep decoded as `mov edi, edi; enter 0x2EE2, 0; ret`) emitted
         # C that named an undeclared ebp and did not compile.
-        if any(insn.mnemonic in ("leave", "enter") for insn in instructions):
+        # Far transfers (ljmp/lcall) publish ebp to the SEH helper the same
+        # way (g_seh_ebp = ebp); KOTOR's 0x0001A7?? block was only an ljmp.
+        if any(insn.mnemonic in ("leave", "enter", "ljmp", "lcall")
+               for insn in instructions):
             used_regs.add("ebp")
 
         # PUSHAD/POPAD implicitly read or restore every register.

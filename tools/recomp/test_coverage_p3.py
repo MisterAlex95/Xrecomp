@@ -112,3 +112,18 @@ def test_a_function_whose_only_ebp_is_enter_declares_it():
     code = FunctionTranslator(image, db).translate_function(base, db[base])
     assert "/* enter */" in code, code
     assert "uint32_t ebp" in code, code
+
+def test_a_function_whose_only_ebp_is_a_far_jump_declares_it():
+    # KOTOR: a block that is only `ljmp 0x8:0x0001A7DC`. The far-jump lift
+    # publishes g_seh_ebp = ebp, which named an undeclared ebp.
+    from tools.recomp import config
+    from tools.recomp.translator import FunctionTranslator
+    base = 0x10000
+    image = bytes.fromhex("eadca70100" "0800")
+    config._install([config.Section(".text", base, len(image), 0, len(image), True)],
+                    entry_point=base, kernel_thunk_addr=base, origin="ljmp-test")
+    db = {base: {"start": hex(base), "end": base + len(image),
+                 "_addr": base, "size": len(image)}}
+    code = FunctionTranslator(image, db).translate_function(base, db[base])
+    assert "ljmp 0x8:0x0001A7DC" in code, code
+    assert "uint32_t ebp" in code, code
