@@ -466,6 +466,88 @@ only) and a layout of its own drawn over the game.
 7. With an external pad paired (Bluetooth): the same mapping applies to it.
 8. French: the screen in French (« Commandes », « Noir », « Blanc »).
 
+### Players: four pads from the connected controllers (XBA-123)
+
+The emulated USB pads (`RECOMP_USB`) follow the controllers: one per port that has one, plugged into the root hub as
+it arrives and pulled out a second after it leaves, each on its own port, so the title's XAPI sees the insertion or
+removal on that controller port (`src/usb/usb_hotplug.h`, `ohci.c`; `RECOMP_USB_PADS=n` keeps the old fixed count).
+Which controller is which port is `src/input/input_ports.h`: at the game's start the controllers present are packed
+from port 1 (pinned ones, then the handheld's built-in pad, then the rest), and a controller keeps its port across a
+disconnect. Rumble goes to the controller of the port the game vibrates. A title that asks for a memory unit finds
+none, as before (no hub, no memory unit model; saves stay in UDATA).
+
+- `ShellActivity` sets `RECOMP_PAD_BUILTIN` (the gamepad Android reports as not external, `PadDevices`) before the
+  runtime starts: the Thor's own pad is port 1 unless pinned otherwise.
+- Controls › **Players**: Port 1 to 4, each First come (default) or a controller connected now (`PadPorts`, written
+  as `RECOMP_PAD_PORTS=1=045e:0b13:Xbox Wireless Controller` in recomp.cfg; read at the next start). A controller
+  pinned to one port leaves the other. The description says what each port would get with the controllers
+  connected now (the same rule as the runtime; `PadPortsTest` and `tests/input_pad_ports` share the cases). A pinned
+  controller that is not connected shows « (not connected) » and leaves no hole at the start.
+- The mapping (`RECOMP_PAD_MAP`) stays **global**: one mapping for every port. A mapping belongs to a kind of
+  controller rather than to a player, and a per-port one would follow the port when players swap pads; per-controller
+  profiles can come later. (It now applies at all: before XBA-123 nothing called `xbox_InputInit`, so the variable
+  was never read in a real run.)
+- logcat: `[INPUT] port N: <name> (vvvv:pppp) connected` / `disconnected (the port waits for it)`,
+  `[OHCI0] pad N plugged in / pulled out on root port P (controller port N)`, `shell: controllers [...]`.
+
+### On-screen pad (XBA-42)
+
+For a phone with one screen and no controller: both sticks (analog), the D-pad (eight ways), A B X Y, Black and
+White, the triggers (full when touched: Android gives no usable pressure), Back and Start, LS / RS (stick presses),
+translucent over the game. `TouchPad` (the layout and what the fingers press, pure Java), `TouchPadView` (draws it,
+takes every pointer), `TouchControls` (shows or hides it), `OverlayMixer` (merges it with the companion panel's
+buttons into the one overlay pad, `CompanionNative.nativeOverlayPad`, port 0).
+
+- **Drawn by the app**, a View over SDL's surface under the in-game menu, not in the native present pass: the
+  window is composited over the SurfaceView anyway (the menu's layer is there), and a View that redraws only when a
+  finger changes something costs the game's frame nothing with either renderer, where the present pass would draw it
+  every frame in two back ends. Touch goes from the UI thread to `input_overlay.h` directly (no SDL event queue), read
+  by the next pad report.
+- **Fingers**: each pointer on its own; a finger that lands on a stick or the D-pad keeps it until it lifts (off the
+  circle = full tilt); a finger on a button can slide to the next one; everything is released on cancel, when hidden,
+  on detach and in `onStop`. Sticks: 6 % dead zone, rescaled so the edge is full tilt. Nothing within 3 % of the left
+  edge (the in-game menu's swipe). A light haptic tick when a button goes down.
+- **When**: Controls › On-screen pad › Show: *Without a controller* (default: shown while Android lists no game
+  controller, hidden as soon as a controller sends a key or a motion, back when the controllers are gone or the
+  screen is touched with none connected), *Always*, *Never*. **Never while the companion panel is up** on a second
+  screen (the Thor). Opacity 30 / 50 (default) / 70 / 100 %, size Small / Normal / Large. One line in
+  `files/settings/touch_controls` (`AUTO 50 100`), read at each game start. Layout editing: later (the positions are
+  in `TouchPad.layout`).
+- logcat: `shell: touch controls shown|hidden (<why>, <mode>)`.
+- Tests: `TouchPadTest` (two sticks and buttons at once, the D-pad's eight ways, sliding, a stick kept off the
+  circle, triggers, cancel, the layout on screen and clear of the edge at every size, visibility, the mixer),
+  `TouchControlsTest` (real multi-pointer MotionEvents, Auto / Always / Never, a controller used, the panel; screenshots
+  `touch-1-default`, `touch-2-four-fingers`, `touch-3-large-opaque`, `touch-4-small-faint`), `LauncherPlayersTest`
+  (`controls-4-players`, `controls-5-touch`).
+
+### Device check (players and on-screen pad, XBA-123 / XBA-42), for Alex
+
+A title with `RECOMP_USB` (its pack sets it) and two pads: the Thor's and a Bluetooth one.
+
+1. Start the game with the Bluetooth pad off. logcat: `[INPUT] port 1: <Thor pad> (vvvv:pppp) connected`,
+   `[OHCI0] pad 1 plugged in on root port 3 (controller port 1)`. Send `shell: controllers [...]`.
+2. Turn the Bluetooth pad on in game: `port 2: … connected`, then `pad 2 plugged in on root port 4`. In a title with
+   local multiplayer, player 2 can join with it (« Press Start » on the second slot).
+3. Turn it off: after a second `pad 2 pulled out`; the title notices (a « reconnect controller 2 » message, or player 2
+   drops). Turn it on again: same port (`port 2`), player 2 again.
+4. Rumble: a title that vibrates player 2's pad vibrates the Bluetooth pad, not the Thor.
+5. Controls › Players: Port 1 = the Bluetooth pad. Start the game: the Bluetooth pad is player 1, the Thor player 2.
+   First come again afterwards.
+6. A title that offers a memory unit: it finds none and saves to the console as before.
+
+On-screen pad. What the Thor can check (its pad is always connected, so: Bottom screen **Off**, and Controls ›
+On-screen pad › Show **Always**):
+
+7. The pad over the game on the top screen; screenshot. Both thumbs on both sticks move the game's two sticks at once
+   (camera and movement); A while steering; LT / RT; Back and Start; LS / RS; the D-pad's diagonals.
+8. No added lag felt compared with the physical pad (press A on screen and on the pad, same response).
+9. Swipe from the very left edge: the in-game menu opens, and the stick does not stay held after it closes.
+10. Opacity 100 % and Large, then 30 % and Small: the pad follows at the next start.
+11. Bottom screen back to Panel: the on-screen pad is gone from the top screen, whatever Show says.
+
+On a phone without a controller (not possible on the Thor): with Show at its default, the pad shows by itself at game
+start; pair a Bluetooth pad and press a button: it hides; unpair: it comes back.
+
 ### Frame generation
 
 Lossless Scaling frame generation (LSFG 3.1, [Frame Generation](../technical/framegen.md)) in an APK built with:

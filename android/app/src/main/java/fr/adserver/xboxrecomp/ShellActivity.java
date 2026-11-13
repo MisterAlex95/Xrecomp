@@ -36,6 +36,9 @@ public class ShellActivity extends SDLActivity {
     private CompanionScreen companion;
     private CompanionPanel panel;
     private GameMenu menu;
+    /** The overlay pad both the companion panel and the on-screen pad drive (XBA-42). */
+    private final OverlayMixer mixer = new OverlayMixer(new NativeOverlay());
+    private TouchControls touch;
     /** « shell: fps N » every 10 s while started, panel or not (Device check: fps with the panel on and off). */
     private final android.os.Handler fpsLog = new android.os.Handler(android.os.Looper.getMainLooper());
     private final Runnable fpsTick = new Runnable() {
@@ -65,12 +68,15 @@ public class ShellActivity extends SDLActivity {
         }
         applyLanguage();
         LibraryCheck.applyRunEnv(this);   // a library check's run: status file and pad script (XBA-130)
+        applyBuiltinPad();
         super.onCreate(savedInstanceState);
         if (mBrokenLibraries)
             return;   // SDLActivity shows its error dialog and finishes
         SystemBars.hide(this);   // full screen: no status bar, no gesture pill (XBA-99)
         applyGameTheme();
         menu = new GameMenu(this, new MenuHost());
+        touch = new TouchControls(this, mixer, () -> PadDevices.any(this));
+        touch.attach();   // under the menu
         menu.attach();
         companion = new CompanionScreen(this, "shell", ctx -> {
             panel = new CompanionPanel(ctx, new NativeSink(), ShellActivity::stats);
@@ -94,6 +100,24 @@ public class ShellActivity extends SDLActivity {
         Theme.apply(g != null ? g.colors : Theme.Colors.STOCK);
         Log.i(LauncherActivity.TAG, g != null ? "shell: " + g.logLine().substring("launcher: ".length())
                                               : "shell: theme " + tid + ": stock");
+    }
+
+    /**
+     * RECOMP_PAD_BUILTIN (XBA-123, src/input/input_ports.h): the handheld's own pad (the gamepad that is not external,
+     * PadDevices) is port 1 unless the Controls screen pins another there. Unset on a phone.
+     */
+    private void applyBuiltinPad() {
+        String key = PadPorts.builtinKey(PadDevices.connected(this));
+        try {
+            if (key != null)
+                Os.setenv(PadPorts.BUILTIN_ENV, key, true);
+            else
+                Os.unsetenv(PadPorts.BUILTIN_ENV);
+        } catch (ErrnoException e) {
+            Log.w(LauncherActivity.TAG, "shell: cannot set " + PadPorts.BUILTIN_ENV, e);
+        }
+        Log.i(LauncherActivity.TAG, "shell: controllers " + PadDevices.connected(this)
+                                    + (key != null ? ", built-in " + key : ""));
     }
 
     /**
@@ -123,6 +147,8 @@ public class ShellActivity extends SDLActivity {
         super.onStart();
         if (companion != null)
             companion.start();
+        if (touch != null)
+            touch.start();
         fpsLog.removeCallbacks(fpsTick);
         fpsLog.postDelayed(fpsTick, 10_000);
         if (menu != null)
@@ -145,6 +171,8 @@ public class ShellActivity extends SDLActivity {
         fpsLog.removeCallbacks(fpsTick);
         if (companion != null)
             companion.stop();   // the panel's onDetachedFromWindow releases its buttons
+        if (touch != null)
+            touch.stop();       // hidden, fingers released
         overlayOff();           // and again here, whatever happened to the panel
         panel = null;
         super.onStop();
@@ -163,6 +191,8 @@ public class ShellActivity extends SDLActivity {
 
     @Override
     public boolean dispatchKeyEvent(KeyEvent e) {
+        if (touch != null)
+            touch.onKey(e);   // a controller used hides the Auto on-screen pad
         if (menu != null && menu.dispatchKey(e))
             return true;
         return super.dispatchKeyEvent(e);
@@ -170,6 +200,8 @@ public class ShellActivity extends SDLActivity {
 
     @Override
     public boolean dispatchGenericMotionEvent(MotionEvent e) {
+        if (touch != null)
+            touch.onMotion(e);
         if (menu != null && menu.dispatchMotion(e))
             return true;
         return super.dispatchGenericMotionEvent(e);
@@ -177,6 +209,8 @@ public class ShellActivity extends SDLActivity {
 
     @Override
     public boolean dispatchTouchEvent(MotionEvent e) {
+        if (touch != null && e.getActionMasked() == MotionEvent.ACTION_DOWN)
+            touch.onTouch();
         if (menu != null && menu.dispatchTouch(e))
             return true;
         return super.dispatchTouchEvent(e);
@@ -215,13 +249,12 @@ public class ShellActivity extends SDLActivity {
 
         @Override
         public void releaseOverlay() {
+            if (touch != null)
+                touch.view.releaseAll();   // the on-screen pad: nothing held, still shown
             if (panel == null)
-                return;   // no panel: the overlay is off already (onStop, CompanionPanel.onDetachedFromWindow)
+                return;   // no panel: its part of the overlay is off already (onStop, onDetachedFromWindow)
             panel.releaseAll();
-            try {
-                CompanionNative.nativeOverlay(0, 0);   // still on (a stand-in pad), nothing held
-            } catch (UnsatisfiedLinkError ignored) {
-            }
+            mixer.panel(0, 0);   // still on (a stand-in pad), nothing held
         }
 
         @Override
@@ -321,25 +354,42 @@ public class ShellActivity extends SDLActivity {
         }
     }
 
-    private static void overlayOff() {
-        try {
-            CompanionNative.nativeOverlayOff();
-        } catch (UnsatisfiedLinkError ignored) {
+    private void overlayOff() {
+        mixer.off();
+    }
+
+    /** The overlay pad (input_overlay.h) through CompanionNative. */
+    private static final class NativeOverlay implements OverlayMixer.Sink {
+        @Override
+        public void pad(int buttons, int analogMask, int lt, int rt, int lx, int ly, int rx, int ry) {
+            try {
+                CompanionNative.nativeOverlayPad(buttons, analogMask, lt, rt, lx, ly, rx, ry);
+            } catch (UnsatisfiedLinkError ignored) {
+            }
+        }
+
+        @Override
+        public void off() {
+            try {
+                CompanionNative.nativeOverlayOff();
+            } catch (UnsatisfiedLinkError ignored) {
+            }
         }
     }
 
     private final class NativeSink implements CompanionPanel.Sink {
         @Override
         public void overlay(int buttons, int analogMask) {
-            try {
-                CompanionNative.nativeOverlay(buttons, analogMask);
-            } catch (UnsatisfiedLinkError ignored) {
-            }
+            mixer.panel(buttons, analogMask);
+            if (touch != null)
+                touch.panelShowing(true);   // never the on-screen pad while the panel is up
         }
 
         @Override
         public void release() {
-            overlayOff();
+            mixer.panelOff();
+            if (touch != null)
+                touch.panelShowing(false);
         }
 
         @Override
