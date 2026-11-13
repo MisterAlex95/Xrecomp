@@ -28,6 +28,7 @@ set(KERNEL_SOURCES
     kernel_wait_stats.c
     xbox_memory_layout.c
     xbox_seh.c
+    xbox_seh_fault.c
     guest_vmem.c
     icall_feedback.c
     recomp_trace.c

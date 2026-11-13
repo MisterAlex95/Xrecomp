@@ -14,6 +14,7 @@
 #include "platform/host_cpus.h"
 #include "kernel.h"
 #include "xbox_memory_layout.h"   /* XBOX_WORKER_STACK_* + worker-stack decls */
+#include "xbox_seh.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -437,6 +438,14 @@ void *xbox_thread_debug_handle(void) { return (void *)g_game_thread; }
  * a spawned worker, so the allocator itself must be thread-safe. */
 static volatile LONG g_worker_stack_used[XBOX_WORKER_STACK_COUNT];
 
+/* Every caller runs guest code on the slice it takes, on the thread that
+ * takes it, until it frees it: an interrupt routine (on the gate holder,
+ * whose own stack is elsewhere), the timer thread's DPCs, the USB and APU
+ * service threads. So taking one also tells the exception dispatcher that
+ * this thread's guest stack is now that slice, exactly, and freeing it gives
+ * the previous bounds back (XBA-132). Before, those threads had no bounds
+ * (the dispatcher's 1 MB window above esp) and the holder kept its own,
+ * which put an interrupt routine's own frames "on another guest stack". */
 int xbox_worker_stack_alloc(void)
 {
     int i;
@@ -445,16 +454,21 @@ int xbox_worker_stack_alloc(void)
          * (xbox_memory_layout.h): hand out only the ones that fit in it. */
         if ((uint32_t)(i + 1) * XBOX_WORKER_STACK_SIZE > XBOX_STACK_SIZE)
             break;
-        if (InterlockedCompareExchange(&g_worker_stack_used[i], 1, 0) == 0)
+        if (InterlockedCompareExchange(&g_worker_stack_used[i], 1, 0) == 0) {
+            uint32_t lo = XBOX_WORKER_STACK_BASE + XBOX_WORKER_STACK_SIZE * (uint32_t)i;
+            xbox_SehPushGuestStack(lo, lo + XBOX_WORKER_STACK_SIZE);
             return i;
+        }
     }
     return -1;  /* all slices in use */
 }
 
 void xbox_worker_stack_free(int slot)
 {
-    if (slot >= 0 && slot < XBOX_WORKER_STACK_COUNT)
+    if (slot >= 0 && slot < XBOX_WORKER_STACK_COUNT) {
+        xbox_SehPopGuestStack();
         InterlockedExchange(&g_worker_stack_used[slot], 0);
+    }
 }
 
 /* ============================================================================

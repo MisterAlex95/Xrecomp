@@ -21,8 +21,12 @@ void ehstub_inner(void);
 void my_cxx_handler(void);
 void f_div(void);
 void sub_0001039F(void);
+void f_probe(void);
+void sub_00010426(void);
+void my_lj_unwind(void);
 void sub_0001F000(void);  /* RAISE, the harness */
 void sub_0001F010(void);  /* UNWIND, the harness */
+void sub_0001F020(void);  /* COMMIT, the harness */
 
 /**
  * g_raises
@@ -1102,6 +1106,306 @@ loc_0001039F: ;
 void f_div__seh(uint32_t _seh_target);
 void sub_0001039F(void) { f_div__seh(0x0001039Fu); } /* eh3 funclet of 0x0001033C */
 
+/**
+ * f_probe
+ * Original: 0x000103B2 - 0x0001047B (201 bytes, 57 insns)
+ * CC: cdecl, 0 params, returns int_or_void
+ * Frame: fpo_leaf
+ */
+void f_probe(void)
+{
+    uint32_t ebp = 0;
+    ebp = g_ebp;  /* prologue saves caller's frame */
+    int _flags = 0; /* fallback flag var */
+    uint32_t _fa = 0, _fb = 0;
+    int32_t _fas = 0, _fbs = 0;
+    (void)_fa; (void)_fb; (void)_fas; (void)_fbs;
+
+loc_000103B2: ;
+    PUSH32(esp, ebp);
+    ebp = esp;
+    g_ebp = ebp; /* publish frame for frameless callees */
+    g_seh_ebp = ebp;
+    PUSH32(esp, 0xFFFFFFFFu);
+    PUSH32(esp, 0x20090);
+    PUSH32(esp, 0x1013B);
+    eax = MEM32(XBOX_FS_BASE);
+    PUSH32(esp, eax);
+    MEM32(XBOX_FS_BASE) = esp;
+    { static const uint32_t _seh_resume[] = { 0x00010406u }; static const recomp_seh_desc _seh_desc = { 0x000103B2u, 1u, _seh_resume }; /* eh3 frame, table 0x00020090 */
+    switch (RECOMP_SETJMP(*recomp_seh_anchor(MEM32(XBOX_FS_BASE), ebp, &_seh_desc))) {
+    case 0: break;
+    case 1: ebp = g_seh_ebp; goto loc_00010406;
+    default: break; } }
+    _fb = (uint32_t)(8) & 0xFFFFFFFFu; _fbs = (int32_t)(int32_t)(_fb); /* sub source, before the write */
+    esp = esp - 8;
+    _fa = (uint32_t)(esp) & 0xFFFFFFFFu; _fas = (int32_t)(int32_t)(_fa); /* sub result */
+    PUSH32(esp, ebx);
+    PUSH32(esp, esi);
+    PUSH32(esp, edi);
+    MEM32(ebp + -24) = esp;
+    MEM32(ebp + -4) = 0;
+    esi = 0x5EED0001;
+    PUSH32(esp, esi);
+    _fa = (uint32_t)(MEM32(0x30020)) & 0xFFFFFFFFu; _fb = (uint32_t)(0) & 0xFFFFFFFFu;
+    _fas = (int32_t)(int32_t)(_fa); _fbs = (int32_t)(int32_t)(_fb); /* cmp MEM32(0x30020), 0 (32-bit) */
+    if (CMP_NE(_fa, _fb)) goto loc_000103F5; /* jne: not equal / not zero */
+
+loc_000103EE: ;
+    eax = MEM32(0x40000);
+    goto loc_00010400;
+
+loc_000103F5: ;
+    MEM32(0x40004) = esi;
+    eax = MEM32(0x40004);
+
+loc_00010400: ;
+    POP32(esp, esi);
+    _fb = (uint32_t)(1) & 0xFFFFFFFFu; _fbs = (int32_t)(int32_t)(_fb); /* add source, before the write */
+    eax = eax + 1;
+    _fa = (uint32_t)(eax) & 0xFFFFFFFFu; _fas = (int32_t)(int32_t)(_fa); /* add result */
+    goto loc_0001040E;
+
+loc_00010406: ;
+    esp = MEM32(ebp + -24);
+    eax = 0x777;
+
+loc_0001040E: ;
+    MEM32(ebp + -4) = 0xFFFFFFFFu;
+    ecx = MEM32(ebp + -16);
+    MEM32(XBOX_FS_BASE) = ecx;
+    POP32(esp, edi);
+    POP32(esp, esi);
+    POP32(esp, ebx);
+    esp = ebp;
+    POP32(esp, ebp);
+    g_ebp = ebp; g_seh_ebp = ebp; esp += 4; return; /* ret */
+
+loc_00010426: ;
+    ecx = MEM32(ebp + -20);
+    edx = MEM32(ecx);
+    eax = MEM32(edx);
+    MEM32(0x30008) = eax;
+    eax = MEM32(edx + 0x14);
+    MEM32(0x30024) = eax;
+    eax = MEM32(edx + 0x18);
+    MEM32(0x30028) = eax;
+    edx = MEM32(ecx + 4);
+    eax = MEM32(edx + 0x20C);
+    MEM32(0x3002C) = eax;
+    eax = MEM32(edx + 0x230);
+    MEM32(0x30030) = eax;
+    eax = MEM32(edx + 0x220);
+    MEM32(0x30034) = eax;
+    eax = MEM32(0x30004);
+    _fa = (uint32_t)(eax) & 0xFFFFFFFFu; _fb = (uint32_t)(0xFFFFFFFFu) & 0xFFFFFFFFu;
+    _fas = (int32_t)(int32_t)(_fa); _fbs = (int32_t)(int32_t)(_fb); /* cmp eax, 0xFFFFFFFFu (32-bit) */
+    if (CMP_NE(_fa, _fb)) goto loc_0001047A; /* jne: not equal / not zero */
+
+loc_00010470: ;
+    g_ebp = ebp; /* frame stays current across calls */
+    g_seh_ebp = ebp;
+    PUSH32(esp, 0x00010475u); RECOMP_ABI_CALL(0x0001F020u, sub_0001F020); /* call 0x0001F020 */
+
+loc_00010475: ;
+    eax = 0xFFFFFFFFu;
+
+loc_0001047A: ;
+    g_ebp = ebp; g_seh_ebp = ebp; esp += 4; return; /* ret */
+
+}
+
+/* 0x000103B2 entered at its exception funclets */
+void f_probe__seh(uint32_t _seh_target);
+/**
+ * f_probe
+ * Original: 0x000103B2 - 0x0001047B (201 bytes, 57 insns)
+ * CC: cdecl, 0 params, returns int_or_void
+ * Frame: fpo_leaf
+ */
+void f_probe__seh(uint32_t _seh_target)
+{
+    uint32_t ebp = 0;
+    ebp = g_ebp;  /* prologue saves caller's frame */
+    int _flags = 0; /* fallback flag var */
+    uint32_t _fa = 0, _fb = 0;
+    int32_t _fas = 0, _fbs = 0;
+    (void)_fa; (void)_fb; (void)_fas; (void)_fbs;
+
+    /* entered at an exception funclet of 0x000103B2 */
+    ebp = g_seh_ebp; /* the funclet runs on its parent's frame */
+    switch (_seh_target) {
+    case 0x00010426u: goto loc_00010426;
+    default: g_esp += 4; return; /* not a funclet: pop and return */
+    }
+
+loc_000103B2: ;
+    PUSH32(esp, ebp);
+    ebp = esp;
+    g_ebp = ebp; /* publish frame for frameless callees */
+    g_seh_ebp = ebp;
+    PUSH32(esp, 0xFFFFFFFFu);
+    PUSH32(esp, 0x20090);
+    PUSH32(esp, 0x1013B);
+    eax = MEM32(XBOX_FS_BASE);
+    PUSH32(esp, eax);
+    MEM32(XBOX_FS_BASE) = esp;
+    { static const uint32_t _seh_resume[] = { 0x00010406u }; static const recomp_seh_desc _seh_desc = { 0x000103B2u, 1u, _seh_resume }; /* eh3 frame, table 0x00020090 */
+    switch (RECOMP_SETJMP(*recomp_seh_anchor(MEM32(XBOX_FS_BASE), ebp, &_seh_desc))) {
+    case 0: break;
+    case 1: ebp = g_seh_ebp; goto loc_00010406;
+    default: break; } }
+    _fb = (uint32_t)(8) & 0xFFFFFFFFu; _fbs = (int32_t)(int32_t)(_fb); /* sub source, before the write */
+    esp = esp - 8;
+    _fa = (uint32_t)(esp) & 0xFFFFFFFFu; _fas = (int32_t)(int32_t)(_fa); /* sub result */
+    PUSH32(esp, ebx);
+    PUSH32(esp, esi);
+    PUSH32(esp, edi);
+    MEM32(ebp + -24) = esp;
+    MEM32(ebp + -4) = 0;
+    esi = 0x5EED0001;
+    PUSH32(esp, esi);
+    _fa = (uint32_t)(MEM32(0x30020)) & 0xFFFFFFFFu; _fb = (uint32_t)(0) & 0xFFFFFFFFu;
+    _fas = (int32_t)(int32_t)(_fa); _fbs = (int32_t)(int32_t)(_fb); /* cmp MEM32(0x30020), 0 (32-bit) */
+    if (CMP_NE(_fa, _fb)) goto loc_000103F5; /* jne: not equal / not zero */
+
+loc_000103EE: ;
+    eax = MEM32(0x40000);
+    goto loc_00010400;
+
+loc_000103F5: ;
+    MEM32(0x40004) = esi;
+    eax = MEM32(0x40004);
+
+loc_00010400: ;
+    POP32(esp, esi);
+    _fb = (uint32_t)(1) & 0xFFFFFFFFu; _fbs = (int32_t)(int32_t)(_fb); /* add source, before the write */
+    eax = eax + 1;
+    _fa = (uint32_t)(eax) & 0xFFFFFFFFu; _fas = (int32_t)(int32_t)(_fa); /* add result */
+    goto loc_0001040E;
+
+loc_00010406: ;
+    esp = MEM32(ebp + -24);
+    eax = 0x777;
+
+loc_0001040E: ;
+    MEM32(ebp + -4) = 0xFFFFFFFFu;
+    ecx = MEM32(ebp + -16);
+    MEM32(XBOX_FS_BASE) = ecx;
+    POP32(esp, edi);
+    POP32(esp, esi);
+    POP32(esp, ebx);
+    esp = ebp;
+    POP32(esp, ebp);
+    g_ebp = ebp; g_seh_ebp = ebp; esp += 4; return; /* ret */
+
+loc_00010426: ;
+    ecx = MEM32(ebp + -20);
+    edx = MEM32(ecx);
+    eax = MEM32(edx);
+    MEM32(0x30008) = eax;
+    eax = MEM32(edx + 0x14);
+    MEM32(0x30024) = eax;
+    eax = MEM32(edx + 0x18);
+    MEM32(0x30028) = eax;
+    edx = MEM32(ecx + 4);
+    eax = MEM32(edx + 0x20C);
+    MEM32(0x3002C) = eax;
+    eax = MEM32(edx + 0x230);
+    MEM32(0x30030) = eax;
+    eax = MEM32(edx + 0x220);
+    MEM32(0x30034) = eax;
+    eax = MEM32(0x30004);
+    _fa = (uint32_t)(eax) & 0xFFFFFFFFu; _fb = (uint32_t)(0xFFFFFFFFu) & 0xFFFFFFFFu;
+    _fas = (int32_t)(int32_t)(_fa); _fbs = (int32_t)(int32_t)(_fb); /* cmp eax, 0xFFFFFFFFu (32-bit) */
+    if (CMP_NE(_fa, _fb)) goto loc_0001047A; /* jne: not equal / not zero */
+
+loc_00010470: ;
+    g_ebp = ebp; /* frame stays current across calls */
+    g_seh_ebp = ebp;
+    PUSH32(esp, 0x00010475u); RECOMP_ABI_CALL(0x0001F020u, sub_0001F020); /* call 0x0001F020 */
+
+loc_00010475: ;
+    eax = 0xFFFFFFFFu;
+
+loc_0001047A: ;
+    g_ebp = ebp; g_seh_ebp = ebp; esp += 4; return; /* ret */
+
+}
+
+void f_probe__seh(uint32_t _seh_target);
+void sub_00010426(void) { f_probe__seh(0x00010426u); } /* eh3 funclet of 0x000103B2 */
+
+/**
+ * my_lj_unwind
+ * Original: 0x0001047B - 0x000104C6 (75 bytes, 31 insns)
+ * CC: cdecl, 0 params, returns int_or_void
+ * Frame: fpo_leaf
+ */
+void my_lj_unwind(void)
+{
+    uint32_t ebp = 0;
+    ebp = g_ebp;  /* frameless: caller's frame */
+    int _flags = 0; /* fallback flag var */
+    uint32_t _fa = 0, _fb = 0;
+    int32_t _fas = 0, _fbs = 0;
+    (void)_fa; (void)_fb; (void)_fas; (void)_fbs;
+    ebp = g_seh_ebp; /* fpo_leaf: inherit caller's frame */
+
+loc_0001047B: ;
+    PUSH32(esp, ebp);
+    PUSH32(esp, ebx);
+    PUSH32(esp, esi);
+    PUSH32(esp, edi);
+    ecx = MEM32(esp + 0x14);
+    ebp = MEM32(ecx);
+    ebx = MEM32(ecx + 0x18);
+    edx = MEM32(ecx + 0x1C);
+    edi = MEM32(ebx + 8);
+
+loc_0001048E: ;
+    esi = MEM32(ebx + 0xC);
+    _fa = (uint32_t)(esi) & 0xFFFFFFFFu; _fb = (uint32_t)(0xFFFFFFFFu) & 0xFFFFFFFFu;
+    _fas = (int32_t)(int32_t)(_fa); _fbs = (int32_t)(int32_t)(_fb); /* cmp esi, 0xFFFFFFFFu (32-bit) */
+    if (CMP_EQ(_fa, _fb)) goto loc_000104B5; /* je: equal / zero */
+
+loc_00010496: ;
+    _fa = (uint32_t)(esi) & 0xFFFFFFFFu; _fb = (uint32_t)(edx) & 0xFFFFFFFFu;
+    _fas = (int32_t)(int32_t)(_fa); _fbs = (int32_t)(int32_t)(_fb); /* cmp esi, edx (32-bit) */
+    if (CMP_EQ(_fa, _fb)) goto loc_000104B5; /* je: equal / zero */
+
+loc_0001049A: ;
+    ecx = esi + esi * 2;
+    eax = MEM32(edi + ecx * 4);
+    MEM32(ebx + 0xC) = eax;
+    eax = MEM32(edi + ecx * 4 + 4);
+    _fa = (uint32_t)(eax) & 0xFFFFFFFFu; _fb = (uint32_t)(0) & 0xFFFFFFFFu;
+    _fas = (int32_t)(int32_t)(_fa); _fbs = (int32_t)(int32_t)(_fb); /* cmp eax, 0 (32-bit) */
+    if (CMP_NE(_fa, _fb)) goto loc_0001048E; /* jne: not equal / not zero */
+
+loc_000104AB: ;
+    eax = MEM32(edi + ecx * 4 + 8);
+    { uint32_t _icall_esp = g_esp;
+    PUSH32(esp, edx);
+    g_ebp = ebp; g_seh_ebp = ebp; { uint32_t _icall_target = eax; PUSH32(esp, 0x000104B2u); RECOMP_ICALL_SAFE_AT(_icall_target, _icall_esp, 0x000104B0u); } /* indirect call */
+    }
+
+loc_000104B2: ;
+    POP32(esp, edx);
+    goto loc_0001048E;
+
+loc_000104B5: ;
+    _fb = (uint32_t)(0x100) & 0xFFFFFFFFu; _fbs = (int32_t)(int32_t)(_fb); /* add source, before the write */
+    MEM32(0x30000) = MEM32(0x30000) + 0x100;
+    _fa = (uint32_t)(MEM32(0x30000)) & 0xFFFFFFFFu; _fas = (int32_t)(int32_t)(_fa); /* add result */
+    POP32(esp, edi);
+    POP32(esp, esi);
+    POP32(esp, ebx);
+    POP32(esp, ebp);
+    g_ebp = ebp; g_seh_ebp = ebp; esp += 8; return; /* ret 4 */
+
+}
+
 
 static const struct { uint32_t va; recomp_func_t fn; } seh_fixture_table[] = {
     { 0x00010000u, g_raises },
@@ -1120,6 +1424,9 @@ static const struct { uint32_t va; recomp_func_t fn; } seh_fixture_table[] = {
     { 0x000102ACu, my_cxx_handler },
     { 0x0001033Cu, f_div },
     { 0x0001039Fu, sub_0001039F },
+    { 0x000103B2u, f_probe },
+    { 0x00010426u, sub_00010426 },
+    { 0x0001047Bu, my_lj_unwind },
 };
 
 recomp_func_t recomp_lookup(uint32_t va)
@@ -1136,7 +1443,7 @@ recomp_func_t seh_fixture_lookup_harness(uint32_t va);
 recomp_func_t recomp_lookup_manual(uint32_t va) { return seh_fixture_lookup_harness(va); }
 
 const uint32_t seh_fixture_text_va = 0x00010000u;
-const uint32_t seh_fixture_text_size = 946u;
+const uint32_t seh_fixture_text_size = 1222u;
 const unsigned char seh_fixture_text[] = {
     0x55, 0x89, 0xE5, 0x83, 0xEC, 0x50, 0xC7, 0x04, 0x24, 0x01, 0x00, 0x00, 0xE0, 0xC7, 0x44, 0x24,
     0x04, 0x00, 0x00, 0x00, 0x00, 0xC7, 0x44, 0x24, 0x08, 0x00, 0x00, 0x00, 0x00, 0xC7, 0x44, 0x24,
@@ -1197,10 +1504,27 @@ const unsigned char seh_fixture_text[] = {
     0x65, 0xE8, 0xB8, 0x55, 0x05, 0x00, 0x00, 0xC7, 0x45, 0xFC, 0xFF, 0xFF, 0xFF, 0xFF, 0x8B, 0x4D,
     0xF0, 0x64, 0x89, 0x0D, 0x00, 0x00, 0x00, 0x00, 0x5F, 0x5E, 0x5B, 0x89, 0xEC, 0x5D, 0xC3, 0x8B,
     0x4D, 0xEC, 0x8B, 0x09, 0x8B, 0x09, 0x89, 0x0D, 0x08, 0x00, 0x03, 0x00, 0xA1, 0x04, 0x00, 0x03,
-    0x00, 0xC3,
+    0x00, 0xC3, 0x55, 0x89, 0xE5, 0x6A, 0xFF, 0x68, 0x90, 0x00, 0x02, 0x00, 0x68, 0x3B, 0x01, 0x01,
+    0x00, 0x64, 0xA1, 0x00, 0x00, 0x00, 0x00, 0x50, 0x64, 0x89, 0x25, 0x00, 0x00, 0x00, 0x00, 0x83,
+    0xEC, 0x08, 0x53, 0x56, 0x57, 0x89, 0x65, 0xE8, 0xC7, 0x45, 0xFC, 0x00, 0x00, 0x00, 0x00, 0xBE,
+    0x01, 0x00, 0xED, 0x5E, 0x56, 0x83, 0x3D, 0x20, 0x00, 0x03, 0x00, 0x00, 0x75, 0x07, 0xA1, 0x00,
+    0x00, 0x04, 0x00, 0xEB, 0x0B, 0x89, 0x35, 0x04, 0x00, 0x04, 0x00, 0xA1, 0x04, 0x00, 0x04, 0x00,
+    0x5E, 0x83, 0xC0, 0x01, 0xEB, 0x08, 0x8B, 0x65, 0xE8, 0xB8, 0x77, 0x07, 0x00, 0x00, 0xC7, 0x45,
+    0xFC, 0xFF, 0xFF, 0xFF, 0xFF, 0x8B, 0x4D, 0xF0, 0x64, 0x89, 0x0D, 0x00, 0x00, 0x00, 0x00, 0x5F,
+    0x5E, 0x5B, 0x89, 0xEC, 0x5D, 0xC3, 0x8B, 0x4D, 0xEC, 0x8B, 0x11, 0x8B, 0x02, 0xA3, 0x08, 0x00,
+    0x03, 0x00, 0x8B, 0x42, 0x14, 0xA3, 0x24, 0x00, 0x03, 0x00, 0x8B, 0x42, 0x18, 0xA3, 0x28, 0x00,
+    0x03, 0x00, 0x8B, 0x51, 0x04, 0x8B, 0x82, 0x0C, 0x02, 0x00, 0x00, 0xA3, 0x2C, 0x00, 0x03, 0x00,
+    0x8B, 0x82, 0x30, 0x02, 0x00, 0x00, 0xA3, 0x30, 0x00, 0x03, 0x00, 0x8B, 0x82, 0x20, 0x02, 0x00,
+    0x00, 0xA3, 0x34, 0x00, 0x03, 0x00, 0xA1, 0x04, 0x00, 0x03, 0x00, 0x83, 0xF8, 0xFF, 0x75, 0x0A,
+    0xE8, 0xAB, 0xEB, 0x00, 0x00, 0xB8, 0xFF, 0xFF, 0xFF, 0xFF, 0xC3, 0x55, 0x53, 0x56, 0x57, 0x8B,
+    0x4C, 0x24, 0x14, 0x8B, 0x29, 0x8B, 0x59, 0x18, 0x8B, 0x51, 0x1C, 0x8B, 0x7B, 0x08, 0x8B, 0x73,
+    0x0C, 0x83, 0xFE, 0xFF, 0x74, 0x1F, 0x39, 0xD6, 0x74, 0x1B, 0x8D, 0x0C, 0x76, 0x8B, 0x04, 0x8F,
+    0x89, 0x43, 0x0C, 0x8B, 0x44, 0x8F, 0x04, 0x85, 0xC0, 0x75, 0xE3, 0x8B, 0x44, 0x8F, 0x08, 0x52,
+    0xFF, 0xD0, 0x5A, 0xEB, 0xD9, 0x81, 0x05, 0x00, 0x00, 0x03, 0x00, 0x00, 0x01, 0x00, 0x00, 0x5F,
+    0x5E, 0x5B, 0x5D, 0xC2, 0x04, 0x00,
 };
 const uint32_t seh_fixture_rdata_va = 0x00020000u;
-const uint32_t seh_fixture_rdata_size = 144u;
+const uint32_t seh_fixture_rdata_size = 156u;
 const unsigned char seh_fixture_rdata[] = {
     0xFF, 0xFF, 0xFF, 0xFF, 0xD1, 0x00, 0x01, 0x00, 0xB1, 0x00, 0x01, 0x00, 0xFF, 0xFF, 0xFF, 0xFF,
     0x00, 0x00, 0x00, 0x00, 0x33, 0x01, 0x01, 0x00, 0x20, 0x05, 0x93, 0x19, 0x01, 0x00, 0x00, 0x00,
@@ -1211,6 +1535,7 @@ const unsigned char seh_fixture_rdata[] = {
     0x20, 0x05, 0x93, 0x19, 0x01, 0x00, 0x00, 0x00, 0x7C, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF,
     0x96, 0x02, 0x01, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0x9F, 0x03, 0x01, 0x00, 0x7F, 0x03, 0x01, 0x00,
+    0xFF, 0xFF, 0xFF, 0xFF, 0x26, 0x04, 0x01, 0x00, 0x06, 0x04, 0x01, 0x00,
 };
 const uint32_t seh_fixture_ehstub_cxx = 0x0001029Eu;
 const uint32_t seh_fixture_ehstub_inner = 0x000102A5u;
@@ -1219,7 +1544,9 @@ const uint32_t seh_fixture_f_cxx_inner = 0x0001024Fu;
 const uint32_t seh_fixture_f_div = 0x0001033Cu;
 const uint32_t seh_fixture_f_inner = 0x000100E4u;
 const uint32_t seh_fixture_f_outer = 0x00010078u;
+const uint32_t seh_fixture_f_probe = 0x000103B2u;
 const uint32_t seh_fixture_g_raises = 0x00010000u;
 const uint32_t seh_fixture_g_throw = 0x0001003Cu;
 const uint32_t seh_fixture_my_cxx_handler = 0x000102ACu;
 const uint32_t seh_fixture_my_handler3 = 0x0001013Bu;
+const uint32_t seh_fixture_my_lj_unwind = 0x0001047Bu;

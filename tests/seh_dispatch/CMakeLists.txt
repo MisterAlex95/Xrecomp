@@ -14,9 +14,13 @@ if(WIN32)
 endif()
 enable_testing()
 add_test(NAME seh_dispatch_test COMMAND seh_dispatch_test)
+# XBA-132's A/B switch: host faults go down the chain at once.
+add_test(NAME seh_dispatch_faults_off COMMAND seh_dispatch_test faults-off)
+set_tests_properties(seh_dispatch_faults_off PROPERTIES
+    ENVIRONMENT "RECOMP_SEH_FAULTS=0" SKIP_RETURN_CODE 77)
 
 # What an anchor costs per call (not a test): ./seh_anchor_bench [iterations]
 add_executable(seh_anchor_bench anchor_bench.c ../../src/kernel/xbox_seh.c
-    ../../src/kernel/recomp_discovery.c)
+    ../../src/kernel/xbox_seh_fault.c ../../src/kernel/recomp_discovery.c)
 target_include_directories(seh_anchor_bench PRIVATE ../../src/kernel ../../src)
 target_link_libraries(seh_anchor_bench PRIVATE platform)
