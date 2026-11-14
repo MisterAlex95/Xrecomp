@@ -8,16 +8,12 @@ project(gba_runtime C)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
-
-# gba_core: the emulated machine alone (CPU, bus, IO, BIOS, PPU (gba_ppu.c, XBA-154)), plain C11 + libm, no host dependency, so the tests
-# and gba_run build anywhere (no SDL).
+# gba_core: the emulated machine alone (CPU, bus, IO, BIOS, and the PPU gba_ppu.c of XBA-154), plain C11 + libm, no
+# host dependency, so the tests and gba_run build anywhere (no SDL).
 if(NOT TARGET gba_core)
     add_library(gba_core STATIC gba_core.c gba_cpu.c gba_bus.c gba_io.c gba_bios.c gba_ppu.c)
     target_include_directories(gba_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-    find_library(GBA_LIBM m)
-    if(GBA_LIBM)
-        target_link_libraries(gba_core PUBLIC ${GBA_LIBM})
-    endif()
+    target_link_libraries(gba_core PUBLIC m) # sin / pow for the HLE BIOS
     target_compile_options(gba_core PRIVATE -Wall -Wextra)
     if(NOT CMAKE_BUILD_TYPE OR CMAKE_BUILD_TYPE STREQUAL "Debug")
         target_compile_options(gba_core PRIVATE -O2) # the interpreter is far too slow unoptimised

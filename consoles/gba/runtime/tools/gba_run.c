@@ -12,6 +12,7 @@
  * --reg-result R  after the frames, exit 0 if register rR is 0, 1 if not, 2 if the CPU is not in an idle
  *               loop (jsmolka/gba-tests leave the number of the first failed test in r12 and spin: --reg-result 12)
  * Prints the frame rate reached on stderr. Exit 3 on a usage or file error. */
+#define _POSIX_C_SOURCE 199309L /* clock_gettime */
 #include "gba_core.h"
 
 #include <stdbool.h>
