@@ -1,6 +1,8 @@
 /* test_vk_driver.c -- the custom Vulkan driver selection of the N64 RDP (n64_vk_driver.h): the RECOMP_VK_* variables,
- * the trial marker and last_start. Off Android libxba_vkdriver.so does not exist, so every open that gets that far
- * fails as a driver that cannot be opened on a device does: the system-driver path. No Vulkan needed. */
+ * the trial marker, last_start and <id>.status. Off Android libxba_vkdriver.so does not exist, so every open that gets
+ * that far fails as a driver that cannot be opened on a device does: the system-driver path (open_failed). With
+ * --wrapper, a fake libxba_vkdriver.so (fake_vkdriver.c, found through LD_LIBRARY_PATH / DYLD_LIBRARY_PATH) opens it:
+ * the outcomes the RDP reports afterwards (ok, unsupported, not_loaded). No Vulkan needed. */
 #include "n64_vk_driver.h"
 
 #include <stdio.h>
@@ -50,10 +52,62 @@ static void clear(void)
     remove(p);
     snprintf(p, sizeof p, "%s/last_start", root);
     remove(p);
+    snprintf(p, sizeof p, "%s/abc123.status", root);
+    remove(p);
+    snprintf(p, sizeof p, "%s/myid.status", root);
+    remove(p);
 }
 
-int main(void)
+/* The fake wrapper opens the driver: the marker is written, n64_vk_driver_done gives the outcome. */
+static int wrapper_tests(void)
 {
+    char line[256], lib[700];
+    snprintf(lib, sizeof lib, "%s/vulkan.test.so", drv);
+    FILE *f = fopen(lib, "w");
+    fputs("x", f);
+    fclose(f);
+    setenv("RECOMP_VK_DRIVER_DIR", drv, 1);
+    setenv("RECOMP_VK_DRIVER_LIB", "vulkan.test.so", 1);
+    setenv("RECOMP_VK_DRIVER_ID", "myid", 1);
+    static const char *outcomes[] = { "ok", "unsupported", "not_loaded" };
+    for (int i = 0; i < 3; i++) {
+        void *gipa = n64_vk_driver_open();
+        CHECK(gipa != NULL);
+        if (!gipa)
+            break;
+        CHECK(read_line("trying", line, sizeof line) && !strcmp(line, "myid"));
+        n64_vk_driver_done(outcomes[i]);
+        char want[64];
+        snprintf(want, sizeof want, "myid %s", outcomes[i]);
+        CHECK(read_line("last_start", line, sizeof line) && !strcmp(line, want));
+        CHECK(read_line("myid.status", line, sizeof line) && !strcmp(line, outcomes[i]));
+        CHECK(!read_line("trying", line, sizeof line));
+        n64_vk_driver_done("ok"); /* once only */
+        CHECK(read_line("myid.status", line, sizeof line) && !strcmp(line, outcomes[i]));
+    }
+    /* another driver's start afterwards: its own status file, myid's stays (the app reads both) */
+    setenv("RECOMP_VK_DRIVER_ID", "abc123", 1);
+    CHECK(n64_vk_driver_open() != NULL);
+    n64_vk_driver_done("unsupported");
+    CHECK(read_line("last_start", line, sizeof line) && !strcmp(line, "abc123 unsupported"));
+    CHECK(read_line("abc123.status", line, sizeof line) && !strcmp(line, "unsupported"));
+    CHECK(read_line("myid.status", line, sizeof line) && !strcmp(line, "not_loaded"));
+    /* an id that cannot name a file: last_start only */
+    setenv("RECOMP_VK_DRIVER_ID", "../x", 1);
+    CHECK(n64_vk_driver_open() != NULL);
+    n64_vk_driver_done("ok");
+    CHECK(read_line("last_start", line, sizeof line) && !strcmp(line, "../x ok"));
+    char p[700];
+    snprintf(p, sizeof p, "%s/../x.status", root);
+    CHECK(access(p, F_OK) != 0);
+    clear();
+    remove(lib);
+    return 0;
+}
+
+int main(int argc, char **argv)
+{
+    const int wrapper = argc > 1 && !strcmp(argv[1], "--wrapper");
     char line[256];
     const char *tmp = getenv("TMPDIR");
     snprintf(root, sizeof root, "%s/n64vkdXXXXXX", tmp && *tmp ? tmp : "/tmp");
@@ -73,6 +127,19 @@ int main(void)
     unsetenv("RECOMP_VK_DRIVER_ID");
     unsetenv("RECOMP_VK_HOOK_DIR");
 
+    if (wrapper) {
+        wrapper_tests();
+        rmdir(drv);
+        rmdir(root);
+        rmdir(base);
+        if (fails) {
+            fprintf(stderr, "n64_vk_driver --wrapper: %d failure(s)\n", fails);
+            return 1;
+        }
+        printf("n64_vk_driver --wrapper: ok\n");
+        return 0;
+    }
+
     /* nothing selected: no open, no file */
     CHECK(!n64_vk_driver_selected());
     CHECK(n64_vk_driver_open() == NULL);
@@ -88,21 +155,22 @@ int main(void)
     CHECK(!read_line("last_start", line, sizeof line));
     unsetenv("RECOMP_VK_DRIVER");
 
-    /* the library is missing: failed, id from the directory's name */
+    /* the library is missing: open_failed, id from the directory's name; its own status file too */
     CHECK(n64_vk_driver_open() == NULL);
     CHECK(!strcmp(n64_vk_driver_id(), "abc123"));
-    CHECK(read_line("last_start", line, sizeof line) && !strcmp(line, "abc123 failed"));
+    CHECK(read_line("last_start", line, sizeof line) && !strcmp(line, "abc123 open_failed"));
+    CHECK(read_line("abc123.status", line, sizeof line) && !strcmp(line, "open_failed"));
     CHECK(!read_line("trying", line, sizeof line));
     clear();
 
     /* a library file name with a '/' is refused */
     setenv("RECOMP_VK_DRIVER_LIB", "../x.so", 1);
     CHECK(n64_vk_driver_open() == NULL);
-    CHECK(read_line("last_start", line, sizeof line) && !strcmp(line, "abc123 failed"));
+    CHECK(read_line("last_start", line, sizeof line) && !strcmp(line, "abc123 open_failed"));
     setenv("RECOMP_VK_DRIVER_LIB", "vulkan.test.so", 1);
     clear();
 
-    /* the library is there, libxba_vkdriver.so is not (desktop): failed, the marker written then removed */
+    /* the library is there, libxba_vkdriver.so is not (desktop): open_failed, the marker written then removed */
     char lib[700];
     snprintf(lib, sizeof lib, "%s/vulkan.test.so", drv);
     FILE *f = fopen(lib, "w");
@@ -114,14 +182,14 @@ int main(void)
     setenv("RECOMP_VK_DRIVER_DIR", slash, 1); /* with the trailing '/' */
     CHECK(n64_vk_driver_open() == NULL);
     CHECK(!strcmp(n64_vk_driver_id(), "myid"));
-    CHECK(read_line("last_start", line, sizeof line) && !strcmp(line, "myid failed"));
+    CHECK(read_line("last_start", line, sizeof line) && !strcmp(line, "myid open_failed"));
     CHECK(!read_line("trying", line, sizeof line));
     clear();
 
     /* a marker for another driver: ignored and removed */
     write_line("trying", "other\n");
     CHECK(n64_vk_driver_open() == NULL);
-    CHECK(read_line("last_start", line, sizeof line) && !strcmp(line, "myid failed"));
+    CHECK(read_line("last_start", line, sizeof line) && !strcmp(line, "myid open_failed"));
     CHECK(!read_line("trying", line, sizeof line));
     clear();
 
@@ -129,6 +197,7 @@ int main(void)
     write_line("trying", "myid\n");
     CHECK(n64_vk_driver_open() == NULL);
     CHECK(read_line("last_start", line, sizeof line) && !strcmp(line, "myid crashed"));
+    CHECK(read_line("myid.status", line, sizeof line) && !strcmp(line, "crashed"));
     CHECK(read_line("trying", line, sizeof line) && !strcmp(line, "myid"));
     n64_vk_driver_done("ok"); /* nothing was opened: no effect */
     CHECK(read_line("trying", line, sizeof line) && !strcmp(line, "myid"));

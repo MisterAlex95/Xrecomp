@@ -113,6 +113,18 @@ target_link_libraries(n64_vk_driver_test PRIVATE ${CMAKE_DL_LIBS})
 target_compile_options(n64_vk_driver_test PRIVATE -Wall -Wextra)
 add_test(NAME n64_vk_driver COMMAND n64_vk_driver_test)
 set_tests_properties(n64_vk_driver PROPERTIES TIMEOUT 30)
+# A fake libxba_vkdriver.so that opens any driver (fake_vkdriver.c): the outcomes after an open (ok, unsupported,
+# not_loaded) in last_start and <id>.status. Not on Windows (no dlopen).
+if(NOT WIN32)
+    add_library(n64_fake_vkdriver MODULE fake_vkdriver.c)
+    set_target_properties(n64_fake_vkdriver PROPERTIES PREFIX "" OUTPUT_NAME libxba_vkdriver SUFFIX ".so"
+                          LIBRARY_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/fake_vkdriver)
+    target_link_libraries(n64_fake_vkdriver PRIVATE ${CMAKE_DL_LIBS})
+    add_dependencies(n64_vk_driver_test n64_fake_vkdriver)
+    add_test(NAME n64_vk_driver_wrapper COMMAND n64_vk_driver_test --wrapper)
+    set_tests_properties(n64_vk_driver_wrapper PROPERTIES TIMEOUT 30
+        ENVIRONMENT "LD_LIBRARY_PATH=${CMAKE_CURRENT_BINARY_DIR}/fake_vkdriver;DYLD_LIBRARY_PATH=${CMAKE_CURRENT_BINARY_DIR}/fake_vkdriver")
+endif()
 
 foreach(t cpu io)
     add_executable(n64_${t}_test test_${t}.c)

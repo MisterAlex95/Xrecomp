@@ -19,10 +19,17 @@
  * <driver dir>/../trying (<files>/vk_drivers/trying). n64_vk_driver_done removes it. If it is there at the next start
  * with the same id, the driver is skipped (logged) and the marker stays until the app clears it (the player picks a
  * driver again). The outcome of each start is written to <files>/vk_drivers/last_start as one line "<id> <status>",
- * status one of: ok (the RDP runs on the custom driver), failed (it could not be opened, or paraLLEl-RDP could not run
- * on it: the system driver was used), not_loaded (adrenotools fell back to the device's own driver), crashed (the
- * marker of a previous start was found: skipped). Both files are written only when the driver directory's parent is
- * named vk_drivers (never a file outside that layout). */
+ * and to <files>/vk_drivers/<id>.status as "<status>" (this driver's own last start; only for an id of
+ * [A-Za-z0-9_-]), status one of:
+ *   ok           the RDP runs on the custom driver
+ *   open_failed  it could not be opened (bad variables, no library file, libxba_vkdriver.so or adrenotools refused
+ *                it, no vkGetInstanceProcAddr, or the loader answered nothing): the system driver was used
+ *   unsupported  it was opened, but paraLLEl-RDP cannot run on it (no Vulkan device, the device lacks what
+ *                paraLLEl-RDP needs, or every shader try failed): the system driver was used
+ *   not_loaded   adrenotools fell back to the device's own driver
+ *   crashed      the marker of a previous start was found: skipped
+ * (A runtime before open_failed / unsupported wrote "failed" for both; the app still reads it.) The files are written
+ * only when the driver directory's parent is named vk_drivers (never a file outside that layout). */
 #ifndef N64_VK_DRIVER_H
 #define N64_VK_DRIVER_H
 
@@ -42,7 +49,7 @@ void *n64_vk_driver_open(void);
 const char *n64_vk_driver_id(void);
 
 /* The outcome of the start that n64_vk_driver_open began: removes the marker, writes last_start
- * ("ok", "failed" or "not_loaded"). The adrenotools handle is never closed. */
+ * ("ok", "open_failed", "unsupported" or "not_loaded") and <id>.status. The adrenotools handle is never closed. */
 void n64_vk_driver_done(const char *status);
 
 #ifdef __cplusplus

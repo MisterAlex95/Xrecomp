@@ -438,14 +438,14 @@ void *vk_create(n64_rcp_bus bus)
         /* vkCreateInstance resolved: a loader that answers nothing would be called through a null pointer */
         if (Vulkan::Context::init_loader(reinterpret_cast<PFN_vkGetInstanceProcAddr>(gipa)) && vkCreateInstance) {
             const bool ok = try_driver(d.get(), &custom);
-            if (custom)
-                n64_vk_driver_done(ok ? "ok" : "failed");
+            if (custom) /* opened and made a loader: what fails now is paraLLEl-RDP on this driver */
+                n64_vk_driver_done(ok ? "ok" : "unsupported");
             if (ok) {
                 vk_reset(d.get());
                 return d.release();
             }
         } else {
-            n64_vk_driver_done("failed");
+            n64_vk_driver_done("open_failed");
         }
         if (!custom) {
             fprintf(stderr, "n64: Vulkan RDP: the device's own driver was already tried\n");

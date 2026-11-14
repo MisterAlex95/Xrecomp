@@ -40,7 +40,7 @@ static void write_file(const char *name, const char *text)
 {
     if (!vkd.has_state)
         return;
-    char path[VKD_PATH_MAX + 32];
+    char path[VKD_PATH_MAX + 192];
     snprintf(path, sizeof path, "%s/%s", vkd.state, name);
     FILE *f = fopen(path, "w");
     if (!f) {
@@ -82,11 +82,31 @@ static int own_dir(char *out, size_t n)
     return 1;
 }
 
+/* 1 when the id can name a file next to the drivers: [A-Za-z0-9_-]+ (the app's ids are 16 hex digits). */
+static int id_is_file_name(const char *id)
+{
+    if (!*id)
+        return 0;
+    for (const char *p = id; *p; p++)
+        if (!((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') || (*p >= '0' && *p <= '9') || *p == '_' ||
+              *p == '-'))
+            return 0;
+    return 1;
+}
+
+/* last_start ("<id> <status>", the last start with any custom driver) and <id>.status ("<status>", this driver's last
+ * start: the app reads it first, so a game with its own driver does not hide another driver's outcome). */
 static void last_start(const char *status)
 {
     char line[200];
     snprintf(line, sizeof line, "%s %s\n", vkd.id, status);
     write_file("last_start", line);
+    if (id_is_file_name(vkd.id)) {
+        char name[160];
+        snprintf(name, sizeof name, "%s.status", vkd.id);
+        snprintf(line, sizeof line, "%s\n", status);
+        write_file(name, line);
+    }
 }
 
 void *n64_vk_driver_open(void)
@@ -122,7 +142,7 @@ void *n64_vk_driver_open(void)
         fprintf(stderr, "n64: Vulkan RDP: custom driver %s: RECOMP_VK_DRIVER_DIR must be absolute and "
                         "RECOMP_VK_DRIVER_LIB a file name (%s, %s); system driver\n",
                 vkd.id, vkd.dir, lib ? lib : "unset");
-        last_start("failed");
+        last_start("open_failed");
         return NULL;
     }
     if (marker_is_ours()) {
@@ -135,7 +155,7 @@ void *n64_vk_driver_open(void)
     snprintf(path, sizeof path, "%s%s", vkd.dir, lib);
     if (access(path, R_OK) != 0) {
         fprintf(stderr, "n64: Vulkan RDP: custom driver %s: no file %s; system driver\n", vkd.id, path);
-        last_start("failed");
+        last_start("open_failed");
         return NULL;
     }
     char hooks[VKD_PATH_MAX];
@@ -154,7 +174,7 @@ void *n64_vk_driver_open(void)
         const char *e = dlerror();
         fprintf(stderr, "n64: Vulkan RDP: custom driver %s: cannot load libxba_vkdriver.so (%s); system driver\n",
                 vkd.id, e ? e : "?");
-        n64_vk_driver_done("failed");
+        n64_vk_driver_done("open_failed");
         return NULL;
     }
     typedef void *(*open_fn)(const char *, const char *, const char *);
@@ -165,13 +185,13 @@ void *n64_vk_driver_open(void)
     if (!handle) {
         fprintf(stderr, "n64: Vulkan RDP: custom driver %s (%s%s, hooks in %s): %s; system driver\n", vkd.id, vkd.dir,
                 lib, hooks[0] ? hooks : "?", xerror && xerror()[0] ? xerror() : "cannot be opened");
-        n64_vk_driver_done("failed");
+        n64_vk_driver_done("open_failed");
         return NULL;
     }
     void *gipa = dlsym(handle, "vkGetInstanceProcAddr");
     if (!gipa) {
         fprintf(stderr, "n64: Vulkan RDP: custom driver %s: no vkGetInstanceProcAddr; system driver\n", vkd.id);
-        n64_vk_driver_done("failed");
+        n64_vk_driver_done("open_failed");
         return NULL;
     }
     fprintf(stderr, "n64: Vulkan RDP: custom driver %s opened (%s%s)\n", vkd.id, vkd.dir, lib);
