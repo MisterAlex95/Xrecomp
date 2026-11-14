@@ -1,5 +1,10 @@
 cmake_minimum_required(VERSION 3.20)
 project(console_ps1_tests C)
+
+# macOS: _POSIX_C_SOURCE hides the BSD / C99 extras (snprintf, mkdtemp...) unless _DARWIN_C_SOURCE is set.
+if(APPLE)
+    add_compile_definitions(_DARWIN_C_SOURCE)
+endif()
 # The PlayStation runtime's C tests (XBA-146): a self-contained project like those under tests/, run by
 # tools/run_c_tests.sh (as console_ps1) and by the root build's ctest when XBR_CONSOLE_PS1 is ON. POSIX hosts.
 #

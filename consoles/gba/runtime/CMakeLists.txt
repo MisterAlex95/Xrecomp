@@ -8,6 +8,11 @@ project(gba_runtime C)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
+# macOS: _POSIX_C_SOURCE hides the BSD / C99 extras (snprintf, mkdtemp...) unless _DARWIN_C_SOURCE is set.
+if(APPLE)
+    add_compile_definitions(_DARWIN_C_SOURCE)
+endif()
+
 # gba_core: the emulated machine alone (CPU, bus, IO, BIOS, and the PPU gba_ppu.c of XBA-154), plain C11 + libm, no
 # host dependency, so the tests and gba_run build anywhere (no SDL).
 if(NOT TARGET gba_core)

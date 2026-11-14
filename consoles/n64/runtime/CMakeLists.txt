@@ -8,6 +8,11 @@ project(n64_runtime C)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
+# macOS: _POSIX_C_SOURCE hides the BSD / C99 extras (snprintf, mkdtemp...) unless _DARWIN_C_SOURCE is set.
+if(APPLE)
+    add_compile_definitions(_DARWIN_C_SOURCE)
+endif()
+
 # The RCP devices, each the real module (n64_rsp.c / n64_rdp.c) when present or its placeholder n64_<dev>_stub.c, in a
 # target of its own so the modules merge without duplicate symbols.
 # n64_rdp_sw: the software RDP (N-5, XBA-173, n64_devices.h + n64_rdp.h): plain C11 (+ pthreads for the optional

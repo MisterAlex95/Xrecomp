@@ -8,6 +8,11 @@ project(ps1_runtime C)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
+# macOS: _POSIX_C_SOURCE hides the BSD / C99 extras (snprintf, mkdtemp...) unless _DARWIN_C_SOURCE is set.
+if(APPLE)
+    add_compile_definitions(_DARWIN_C_SOURCE)
+endif()
+
 # ps1_gpu: the GPU (P-7, XBA-165, ps1_devices.h): plain C11, no host dependency, so tests build anywhere. ps1_gpu.c
 # replaces the core's ps1_gpu_stub.c when it is present.
 if(NOT TARGET ps1_gpu)
