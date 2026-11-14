@@ -1,0 +1,96 @@
+/* gba_play: plays a GBA ROM on a desktop (Linux, macOS) through the runtime the Android app uses (gba_runtime_run:
+ * host_window, host_pad, host_audio, saves, pacing). XBA-157; a title runs here before it is debugged on Android.
+ *
+ *   gba_play ROM [--frames N] [--save-dir DIR] [--bios PATH] [--scale aspect|integer] [--filter nearest|linear]
+ *                [--headless] [--unpaced] [--keys MASK] [--screenshot OUT.ppm] [--capture N OUT.ppm] [--key KEY]
+ *
+ * --frames N        stop after N frames (default: until the window is closed)
+ * --save-dir DIR    saves in DIR/gba-<KEY>/game.sav (default $XDG_DATA_HOME/xrecomp/save, else
+ *                   ~/.local/share/xrecomp/save); "" turns saves off
+ * --bios PATH       a 16 KB BIOS image (default $RECOMP_GBA_BIOS, else the built-in one)
+ * --scale, --filter how the picture fills the window (default aspect, nearest; $RECOMP_GBA_SCALE / _FILTER)
+ * --headless        no window (also with SDL_VIDEODRIVER=dummy or no DISPLAY): frames, pads, audio, saves only
+ * --unpaced         no pacing: as fast as the host goes
+ * --keys MASK       GBA keys held the whole run (KEYINPUT order, 1 = pressed)
+ * --screenshot OUT  the last frame (240 x 160) as a PPM
+ * --capture N OUT   the window's whole drawable at frame N, read back before the swap (the real present path)
+ * --key KEY         the title key (default: computed from the ROM, as the app does)
+ * Keyboard: arrows, X = A, Z = B, A = L, S = R, Enter = Start, Backspace = Select; any game controller (Xbox layout).
+ * Exit 0, 1 when the ROM cannot run, 2 on a usage error. */
+#include "gba_runtime.h"
+#include "host_window.h"
+
+#include <SDL.h>
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+static int usage(void)
+{
+    fprintf(stderr, "usage: gba_play ROM [--frames N] [--save-dir DIR] [--bios PATH] [--scale aspect|integer]\n"
+                    "                [--filter nearest|linear] [--headless] [--unpaced] [--keys MASK]\n"
+                    "                [--screenshot OUT.ppm] [--capture N OUT.ppm] [--key KEY]\n");
+    return 2;
+}
+
+int main(int argc, char **argv)
+{
+    gba_runtime_opts o;
+    static char save_dir[1024];
+    int save_set = 0;
+
+    gba_runtime_opts_init(&o);
+    for (int i = 1; i < argc; i++) {
+        const char *a = argv[i];
+        int more = i + 1 < argc;
+        if (!strcmp(a, "--frames") && more)
+            o.frames = strtoull(argv[++i], NULL, 10);
+        else if (!strcmp(a, "--save-dir") && more) {
+            snprintf(save_dir, sizeof save_dir, "%s", argv[++i]);
+            save_set = 1;
+        } else if (!strcmp(a, "--bios") && more)
+            o.bios = argv[++i];
+        else if (!strcmp(a, "--scale") && more) {
+            const char *v = argv[++i];
+            o.scale = !strcmp(v, "integer") ? HOST_SCALE_INTEGER : HOST_SCALE_ASPECT;
+        } else if (!strcmp(a, "--filter") && more) {
+            const char *v = argv[++i];
+            o.filter = !strcmp(v, "linear") ? HOST_FILTER_LINEAR : HOST_FILTER_NEAREST;
+        } else if (!strcmp(a, "--headless"))
+            o.headless = 1;
+        else if (!strcmp(a, "--unpaced"))
+            o.unpaced = 1;
+        else if (!strcmp(a, "--keys") && more)
+            o.keys = (uint16_t)strtoul(argv[++i], NULL, 0);
+        else if (!strcmp(a, "--screenshot") && more)
+            o.screenshot = argv[++i];
+        else if (!strcmp(a, "--capture") && i + 2 < argc) {
+            o.capture_frame = strtoull(argv[++i], NULL, 10);
+            o.capture_path = argv[++i];
+        } else if (!strcmp(a, "--key") && more)
+            o.title_key = argv[++i];
+        else if (a[0] == '-' || o.rom)
+            return usage();
+        else
+            o.rom = a;
+    }
+    if (!o.rom)
+        return usage();
+    if (!save_set) {
+        const char *xdg = getenv("XDG_DATA_HOME"), *home = getenv("HOME");
+        if (xdg && *xdg)
+            snprintf(save_dir, sizeof save_dir, "%s/xrecomp/save", xdg);
+        else if (home && *home)
+            snprintf(save_dir, sizeof save_dir, "%s/.local/share/xrecomp/save", home);
+    }
+    o.save_dir = save_dir[0] ? save_dir : NULL;
+
+    if (SDL_Init(SDL_INIT_EVENTS) != 0) {
+        fprintf(stderr, "gba_play: SDL: %s\n", SDL_GetError());
+        return 1;
+    }
+    int rc = gba_runtime_run(&o);
+    SDL_Quit();
+    return rc == 0 ? 0 : 1;
+}

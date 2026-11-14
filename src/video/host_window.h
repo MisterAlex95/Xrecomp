@@ -66,6 +66,23 @@ int host_window_present_rgba(const void *px, int w, int h, int pitch);
  * Returns 1, or 0 on a GL error. */
 int host_window_present_texture(unsigned tex, int w, int h, int top_down);
 
+/* How host_window_present_rgba / _texture fit the picture in the window.
+ * HOST_SCALE_ASPECT (the default): the largest rectangle of its aspect;
+ * HOST_SCALE_INTEGER: the largest whole multiple of its size that fits (a
+ * pixel-art console: every source pixel the same size), aspect when not even
+ * 1x fits. filter: how the window's own texture (present_rgba) is sampled,
+ * HOST_FILTER_LINEAR (the default) or HOST_FILTER_NEAREST (sharp pixels).
+ * May be called before open; kept across open / close. */
+enum { HOST_SCALE_ASPECT = 0, HOST_SCALE_INTEGER = 1 };
+enum { HOST_FILTER_LINEAR = 0, HOST_FILTER_NEAREST = 1 };
+void host_window_set_scaling(int scale, int filter);
+
+/* Writes the next presented picture, the whole drawable as drawn (letterbox
+ * included), to ppm_path as a binary PPM, read back before the swap: a
+ * screenshot through the real present path (headless checks under Xvfb).
+ * One capture per call; NULL or "" cancels. */
+void host_window_capture(const char *ppm_path);
+
 /* A GL entry point of the window's context (SDL_GL_GetProcAddress), for a
  * console's renderer. NULL before open. */
 void *host_window_gl_proc(const char *name);

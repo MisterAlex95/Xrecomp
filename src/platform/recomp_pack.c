@@ -13,6 +13,7 @@
 #include <string.h>
 #include <strings.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 #define PACK_JSON_MAX (1 << 20)
 
@@ -377,8 +378,24 @@ int recomp_pack_rom_identify(const char *path, int *console, char *key, size_t k
             *console = c;
         return 0;
     }
-    if (!(f = fopen(path, "rb")))
+    if (!strncmp(path, "fd:", 3)) {
+        /* A document the shell opened (XBA-157): a dup of it, read from 0; the shell's descriptor stays open. */
+        char *end;
+        long v = strtol(path + 3, &end, 10);
+        int fd = end != path + 3 && !*end && v >= 0 ? dup((int)v) : -1;
+        if (fd < 0)
+            return -1;
+        if (!(f = fdopen(fd, "rb"))) {
+            close(fd);
+            return -1;
+        }
+        if (fseek(f, 0, SEEK_SET) != 0) {
+            fclose(f);
+            return -1;
+        }
+    } else if (!(f = fopen(path, "rb"))) {
         return -1;
+    }
     hn = fread(h, 1, sizeof h, f);
     if (n64_key(h, hn, key, key_n) == 0)
         c = RECOMP_CONSOLE_N64;

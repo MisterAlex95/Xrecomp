@@ -78,10 +78,16 @@ int xba_pack_set_next_image(const char *target);
  * console's runtime (<console>_runtime_start, consoles/<console>/runtime),
  * whose return value goes to *runtime_rc. Logs one line on stdout:
  *   PACK_LOADED <console> <key> <lib path> (<size> bytes, "<title>")
+ *   PACK_NONE <console> <key> (...)
  *   PACK_MISSING <console> <key> (...)
  *   PACK_INVALID <reason>
+ * A console whose runtime plays without a pack (GBA: an interpreter,
+ * XBA-157) runs the game when there is none (PACK_NONE, pack_lib NULL) and
+ * that is RECOMP_PACK_OK; for the others no pack is PACK_MISSING.
  * Returns RECOMP_PACK_OK, RECOMP_PACK_MISSING or RECOMP_PACK_INVALID (not a
  * game of another console included), with why in reason.
+ * The path may be "fd:N" (a document the app opened, recomp_pack_rom_identify
+ * reads it from offset 0).
  * xba_pack_rom_console: the console of such a file (RECOMP_CONSOLE_GBA...),
  * or RECOMP_CONSOLE_UNKNOWN (an Xbox game, a folder, anything else). */
 int xba_pack_rom_console(const char *path);

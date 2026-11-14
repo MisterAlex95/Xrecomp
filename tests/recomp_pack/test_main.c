@@ -5,6 +5,7 @@
 #include "recomp_pack.h"
 
 #include <dlfcn.h>
+#include <fcntl.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -369,6 +370,22 @@ static void test_consoles(void)
         char want[32];
         snprintf(want, sizeof want, "AXVE-%08X", (unsigned)crc32_ref(rom, sizeof rom));
         CHECK(recomp_pack_rom_identify(path, &c, key, sizeof key) == 0 && c == RECOMP_CONSOLE_GBA && !strcmp(key, want));
+        /* "fd:N", a document the app opened (XBA-157): the same key, read from 0, the descriptor left open. */
+        int fd = open(path, O_RDONLY);
+        char spec[32];
+        CHECK(fd >= 0);
+        if (fd >= 0) {
+            CHECK(lseek(fd, 100, SEEK_SET) == 100);
+            snprintf(spec, sizeof spec, "fd:%d", fd);
+            c = -1;
+            key[0] = 0;
+            CHECK(recomp_pack_rom_identify(spec, &c, key, sizeof key) == 0 && c == RECOMP_CONSOLE_GBA
+                  && !strcmp(key, want));
+            CHECK(fcntl(fd, F_GETFD) != -1);
+            close(fd);
+        }
+        CHECK(recomp_pack_rom_identify("fd:-1", &c, key, sizeof key) == -1);
+        CHECK(recomp_pack_rom_identify("fd:x", &c, key, sizeof key) == -1);
     }
     make_gba(rom, sizeof rom, "a\0 1");
     write_file(path, rom, sizeof rom);
@@ -618,8 +635,9 @@ static void test_routing(const char *shell_path, const char *title_path, const c
     }
 
     /* XBA-147: a game of another console goes to that console's runtime. A
-     * fake gba pack (any library bytes: the stub runtime does not load it
-     * yet) routes to gba_runtime_start, which logs "gba runtime ready". */
+     * fake gba pack (any library bytes: the runtime does not load it yet)
+     * routes to gba_runtime_start (a stand-in here, fake_gba_runtime.c),
+     * which logs "gba runtime ready"; without a pack the GBA runs anyway. */
     {
         typedef int (*load_rom_fn)(const char *, const char *, int *, char *, size_t);
         load_rom_fn load_rom = (load_rom_fn)dlsym(shell, "xba_pack_load_rom");
@@ -638,8 +656,27 @@ static void test_routing(const char *shell_path, const char *title_path, const c
         CHECK(recomp_pack_rom_identify(gba, &c, key, sizeof key) == 0 && c == RECOMP_CONSOLE_GBA);
         CHECK(rom_console(gba) == RECOMP_CONSOLE_GBA && rom_console(xbe) == RECOMP_CONSOLE_UNKNOWN);
 
-        CHECK(load_rom(files, gba, &runtime_rc, reason, sizeof reason) == RECOMP_PACK_MISSING);
-        CHECK(strstr(reason, "gba-XRCT-") == reason);
+        /* No pack: the GBA runtime is an interpreter (XBA-157), it runs the game anyway (PACK_NONE). */
+        snprintf(out, sizeof out, "%s/gba/stdout-none.txt", root);
+        fflush(stdout);
+        {
+            int saved0 = dup(1);
+            FILE *cap0 = fopen(out, "w");
+            dup2(fileno(cap0), 1);
+            rc = load_rom(files, gba, &runtime_rc, reason, sizeof reason);
+            fflush(stdout);
+            dup2(saved0, 1);
+            close(saved0);
+            fclose(cap0);
+            cap0 = fopen(out, "r");
+            size_t n0 = fread(log, 1, sizeof log - 1, cap0);
+            log[n0] = 0;
+            fclose(cap0);
+            fputs(log, stdout);
+        }
+        CHECK(rc == RECOMP_PACK_OK && runtime_rc == 0 && reason[0] == 0);
+        CHECK(strstr(log, "PACK_NONE gba XRCT-") != NULL);
+        CHECK(strstr(log, "gba runtime ready") != NULL && strstr(log, "pack none") != NULL);
 
         snprintf(dir, sizeof dir, "%s/packs/gba-%s", files, key);
         mkdirs(dir);

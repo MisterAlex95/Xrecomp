@@ -11,6 +11,7 @@ commercial ROM or a BIOS dump. Only our own code lives here; third-party test RO
 | [`timer_irq`](timer_irq/README.md) | VBlank / HBlank / timer IRQs, cascade timer, `VBlankIntrWait` | `timer_irq.gba` |
 | [`gfx`](gfx/README.md) | mode 0 tiles + sprites, then mode 3 bitmap; two capture points | `gfx.gba` |
 | [`iwram_copy`](iwram_copy/README.md) | code run from IWRAM/EWRAM: crt0-copied, copied at run time, patched in place | `iwram_copy.gba` |
+| [`pad`](pad/README.md) | interactive: the ten keys, a marker on the D-pad, a counter saved in SRAM (desktop / device check) | `pad.gba` |
 
 ## Build
 

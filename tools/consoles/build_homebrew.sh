@@ -8,7 +8,7 @@
 # xba-<console>-homebrew; Docker's layer cache makes a rebuild instant), then builds
 # consoles/<console>/tests/homebrew/ in a throwaway container of it, without network, and writes
 # into OUTDIR/<console>/:
-#   gba: <prog>.gba + <prog>.elf                           (hello cpu timer_irq gfx iwram_copy)
+#   gba: <prog>.gba + <prog>.elf                           (hello cpu timer_irq gfx iwram_copy pad)
 #   ps1: <prog>.exe + <prog>.elf + <prog>.bin/.cue disc    (hello cpu timer_irq gfx overlay)
 #   n64: <prog>.z64 + <prog>.elf                           (hello cpu timer_irq gfx)
 # plus SHA256SUMS. Outputs are never committed (build/ is ignored).
