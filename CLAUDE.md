@@ -1,7 +1,9 @@
-# Xbox Recomp Android
+# XRecomp
 
+Console games statically recompiled to native code: original Xbox today, GBA / PS1 / N64 under way (`consoles/`).
 Fork of [xboxrecomp](https://github.com/sp00nznet/xboxrecomp) (remote `upstream`, our work on `main`) that adds
-**Android arm64** as a host: NDK build, OpenGL ES 3.0, SDLActivity app shell, one APK per title.
+**Android arm64** as a host (NDK build, OpenGL ES 3.0, the XRecomp app with on-device Prepare), a macOS launcher
+(`macos/`) and a console-agnostic host layer (`src/host`). Hosts: Android, macOS, Linux (x86-64 / arm64), Windows.
 
 **Vision, roadmap, decisions, spec: Plane project XBA** (`plane page show -p XBA "Vision"`, « Roadmap »,
 « Spec · Android port », « Decisions taken »). Work queue: `plane next -p XBA`. Organisation (agents, states):
