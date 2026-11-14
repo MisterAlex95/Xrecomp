@@ -24,7 +24,8 @@
  * Drivers that cannot compile a shader (Adreno 740 on the AYN Thor: one compute pipeline failed at every dispatch,
  * black screen at 15 fps): at create, a few commands are drawn into a corner of RDRAM (saved and restored) and must
  * compile and come out right (check()). If not, paraLLEl-RDP is tried again without subgroup operations, then with its
- * ubershader, then create returns NULL and the software RDP takes over. A failed pipeline is never compiled again
+ * ubershader (not on Qualcomm's driver: ubershader_draws_wrong), then create returns NULL and the software RDP takes
+ * over. A failed pipeline is never compiled again
  * (our Granite patch); one that still fails during the game is logged once and reported through vk_failed, and
  * n64_rdp_select.c switches to the software RDP. RECOMP_N64_RDP_CHECK=0 skips the check. */
 #include "n64_rdp_backend.h"
@@ -314,6 +315,17 @@ void fetch64(const VkRdp *d, uint32_t a, uint32_t *hi, uint32_t *lo)
     *lo = n64_be32(b + 4);
 }
 
+/* The Qualcomm proprietary driver (Adreno 740 on the AYN Thor) compiles the ubershader and draws check() right, but
+ * games come out black (Ocarina of Time: nothing but a few pixels, no Vulkan error): the software RDP instead.
+ * RECOMP_N64_RDP_UBERSHADER=1 tries it anyway. */
+bool ubershader_draws_wrong(Vulkan::Device *dev)
+{
+    if (const char *e = getenv("RECOMP_N64_RDP_UBERSHADER"))
+        if (atoi(e) != 0)
+            return false;
+    return dev->get_device_features().driver_id == VK_DRIVER_ID_QUALCOMM_PROPRIETARY_KHR;
+}
+
 /* ---- n64_rdp_ops ---------------------------------------------------------------------------------------------------- */
 void vk_reset(void *p);
 
@@ -354,6 +366,11 @@ void *vk_create(n64_rcp_bus bus)
     for (size_t i = 0; i < sizeof tries / sizeof tries[0]; i++) {
         if (i == 1 && !subgroups)
             continue; /* the same shaders as the default ones */
+        if ((tries[i].flags & RDP::COMMAND_PROCESSOR_FLAG_UBERSHADER_BIT) && ubershader_draws_wrong(d->dev.get())) {
+            fprintf(stderr, "n64: Vulkan RDP: the ubershader passes the check on %s but draws a black screen in "
+                            "games (Ocarina of Time), not used (RECOMP_N64_RDP_UBERSHADER=1 to try it)\n", gpu);
+            break;
+        }
         d->cp.reset(new RDP::CommandProcessor(*d->dev, bus.rdram, 0, bus.rdram_size, bus.rdram_size / 2,
                                               tries[i].flags));
         if (!d->cp->device_is_supported()) {

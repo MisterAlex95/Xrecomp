@@ -437,7 +437,9 @@ bit for bit against angrylion.
 - **Shaders the driver cannot compile.** At start, `n64_rdp_vk.cpp` draws a few commands into a corner of RDRAM
   (saved and restored): fills of the colour and Z images and a textured rectangle with a Z test. Every pipeline must
   compile, and the pixels must come out right. If not, it tries again without subgroup operations (when the default
-  shaders used them), then with paraLLEl-RDP's ubershader. When all three fail, the software RDP takes over. The
+  shaders used them), then with paraLLEl-RDP's ubershader. The ubershader is skipped on Qualcomm's proprietary
+  driver (Adreno 740 on the AYN Thor): it passes the check there but Ocarina of Time comes out black, without a
+  Vulkan error; `RECOMP_N64_RDP_UBERSHADER=1` tries it anyway. When all three fail, the software RDP takes over. The
   start line names what was kept (`n64: Vulkan RDP on <GPU> (paraLLEl-RDP, default shaders)`). Our Granite patch
   never compiles a failed pipeline twice, and logs the program and its spec constants once
   ([third_party/parallel-rdp](../third_party/parallel-rdp/README.md)). If a pipeline still fails during the game
