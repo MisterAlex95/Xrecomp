@@ -73,6 +73,30 @@ uint64_t gba_frames(gba_machine *m);
 /* Save memory hook (G-7 will add flash / EEPROM): the 64 KB SRAM area at 0x0E000000. */
 uint8_t *gba_sram(gba_machine *m, size_t *size);
 
+/* Audio (G-6, XBA-155): stereo int16, interleaved L/R, at GBA_AUDIO_RATE, produced while gba_run_frame runs and
+ * buffered inside the machine (at least 8 frames' worth; the oldest samples are dropped on overflow). Copies at most
+ * max_frames sample frames into out and returns how many. Until the APU lands it returns 0 (silence). */
+#define GBA_AUDIO_RATE 48000
+size_t gba_audio_pull(gba_machine *m, int16_t *out, size_t max_frames);
+
+/* Saves (G-7, XBA-156). The kind is detected from the ROM (library ID strings) or from the game's first accesses.
+ * gba_save_data: the current save image (NULL when none) and its size, to write to storage as is.
+ * gba_save_take_dirty: 1 when the game wrote its save since the last call (then the host writes it out, e.g. a
+ * second after the last write and at exit), and clears the flag. gba_save_load: puts a stored image back (before the
+ * first frame); returns 0, or -1 when the size does not fit the kind. */
+typedef enum gba_save_kind {
+    GBA_SAVE_NONE,
+    GBA_SAVE_SRAM,     /* 32 KB SRAM / FRAM */
+    GBA_SAVE_FLASH64,  /* 64 KB flash */
+    GBA_SAVE_FLASH128, /* 128 KB flash (two banks) */
+    GBA_SAVE_EEPROM512,
+    GBA_SAVE_EEPROM8K,
+} gba_save_kind;
+gba_save_kind gba_save_type(gba_machine *m);
+const uint8_t *gba_save_data(gba_machine *m, size_t *size);
+int gba_save_take_dirty(gba_machine *m);
+int gba_save_load(gba_machine *m, const uint8_t *data, size_t size);
+
 void gba_destroy(gba_machine *m);
 
 #ifdef __cplusplus

@@ -11,7 +11,7 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 # gba_core: the emulated machine alone (CPU, bus, IO, BIOS, and the PPU gba_ppu.c of XBA-154), plain C11 + libm, no
 # host dependency, so the tests and gba_run build anywhere (no SDL).
 if(NOT TARGET gba_core)
-    add_library(gba_core STATIC gba_core.c gba_cpu.c gba_bus.c gba_io.c gba_bios.c gba_ppu.c)
+    add_library(gba_core STATIC gba_core.c gba_cpu.c gba_bus.c gba_io.c gba_bios.c gba_ppu.c gba_audio.c gba_save.c)
     target_include_directories(gba_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
     target_link_libraries(gba_core PUBLIC m) # sin / pow for the HLE BIOS
     target_compile_options(gba_core PRIVATE -Wall -Wextra)
