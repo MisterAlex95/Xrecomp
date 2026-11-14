@@ -70,7 +70,7 @@ prepare puts `.old` back if a kill fell between the two renames. So a reader see
 
 | `title_layer` | string | Optional (profile-free WP6): only for a title the toolkit has optional enhancements for (`profiles/titles/<id>`). `on`: they went in; `off`: they were left out (the app's Settings › General › Enhancements was off for the title, so its Prepare had `XBA_NO_TITLE_LAYER=1`). When it differs from the switch, Home says « Enhancements changed · prepare again » and offers Prepare again next to Play, as for an older toolkit. The row is shown only for a pack that has the field. |
 
-| `images` | object | Optional (XBA-82): the disc's other images that `default.xbe` names, prepared from the game folder (one sub-run each in `<work>/images/<path>/`, shown inside step 4 as « game.xbe: ... », at most 8), disc path to library: `{"game.xbe": "libimage-1.so"}`. An image whose analysis or compile fails is left out (« left out » line): default.xbe still runs. Shells from before ignore it. See [multi-xbe.md](../technical/multi-xbe.md#android). |
+| `images` | object | Optional (XBA-82): the disc's other images that `default.xbe` names (at most 8), disc path to library: `{"game.xbe": "libimage-1.so", "intro.xbe": ""}`. `""`: named, not prepared yet; it is prepared on its first launch ([Images](#images-xba-82)). An image built is one sub-run in `<work>/images/<path>/`, shown inside step 4 as « game.xbe: ... »; one whose analysis or compile fails is left out (« left out » line): default.xbe still runs. Shells from before ignore it. See [multi-xbe.md](../technical/multi-xbe.md#android). |
 
 | `prepare` | object | Optional (XBA-128): what the Prepare that wrote this pack cost, measured as it ran (`tools/prepare/metrics.py`). See below. Informative: no check reads it. |
 
@@ -118,6 +118,7 @@ python -m tools.prepare SOURCE --android --work DIR --pack-dir DIR --cc PATH [--
        --sysroot DIR --shell-lib PATH [--jobs N] [--opt 2] [--shell-abi N]
        [--ld PATH [--ld-prefix-arg ARG]] [--builtins PATH] [--python PATH]
        [--extra-src FILE.c]... [--include-dir DIR]... [--device-log FILE] [--force]
+       [--image PATH]... [--all-images]
 ```
 
 | Flag | Device value |
@@ -137,6 +138,8 @@ python -m tools.prepare SOURCE --android --work DIR --pack-dir DIR --cc PATH [--
 | `--extra-src`, `--include-dir` | Development: an extra C file in the pack, an extra `-I`. |
 | `--device-log FILE` | `<work>/device.jsonl`, the app's device log ([below](#the-device-log-xba-128)): compiles allowed now, thermal samples. Absent: `--jobs` all the way. |
 | `--force` | Redo every step (the object cache still applies). |
+| `--image PATH` | Also build this other image of the disc now (its disc path, `game.xbe`). The app does not pass it: it writes `<work>/images.want` ([Images](#images-xba-82)). |
+| `--all-images` | Build every other image `default.xbe` names now (up front, as before XBA-82's lazy prepare). Not used by the app. |
 
 The steps, each one subprocess (`python -m tools.<tool>`) or a pool of compiler processes, never the
 `multiprocessing` module (no `sem_open` on Android):
@@ -237,6 +240,34 @@ ld.lld -EL --fix-cortex-a53-843419 -z now -z relro -z max-page-size=16384 -z noe
 
 `max-page-size=16384`: 16 KB-page devices (Android 15+). `--no-undefined` turns a symbol the shell does not export
 into a link error on the device rather than a dlopen failure at start.
+
+## Images (XBA-82)
+
+A disc whose `default.xbe` launches another XBE of the disc ([multi-xbe.md](../technical/multi-xbe.md)) needs one
+library per image. The on-device Prepare builds them **lazily**: the first Prepare stays as fast as for a one-image
+disc.
+
+- **First Prepare**: `default.xbe` only. Step 4 (`other_images`) lists the images `default.xbe` names and finds on the
+  disc, and writes each one into `pack.json` `images` with library `""` (« N more image(s) prepared on their first
+  launch »).
+- **What a Prepare builds** (`Run.wanted_images`): the images asked with `--image`, the lines of `<work>/images.want`
+  (disc paths, any case, `\` or `/`), and the images the current pack already has a library for (a Prepare again, for
+  a new toolkit or a self-healing round, keeps them). `--all-images` builds all of them.
+- **First launch of an image not prepared**: the kernel finds it in `images.map` and writes the launch data; the
+  shell's image handler (`shell_main.c`) sees `RECOMP_PACK_IMAGE_LAZY` (`xba_pack_image_state`), writes
+  `<work>/image.pending` and calls `ShellActivity.prepareImage`, which opens the launcher (`EXTRA_PREPARE_IMAGE`);
+  logcat `PACK_IMAGE_LAZY <path>`. The process then ends with the launch data left in the save dir.
+- **Home** says « Goes on in <image> · not prepared yet » with **Prepare <image>** first and Play second. Prepare
+  adds the image to `images.want` and starts the title's Prepare (the same queue as any Prepare, `PendingImage`).
+  When it is done and the image is in the pack, the game starts again in it: `image.pending` becomes `image.next`
+  (pack_loader.c loads that image's library) and the launch data reaches it, as after a quick reboot. Play instead
+  (or any other start of the title) drops `image.pending` and the launch data: `default.xbe` starts from the
+  beginning. An image the Prepare left out is dropped the same way, with a note.
+- **A game's own app** has no Home to offer it on: it starts the image's Prepare at once and goes into the image.
+
+Why not up front: a launcher disc's other images are often as large as `default.xbe` (a second game, a menu), so
+building them all would double the first Prepare for an image the player may never reach. Up front stays available
+from the command line (`--all-images`), not as an app setting.
 
 ## The device log (XBA-128)
 

@@ -223,6 +223,23 @@ void xbox_SetImageHandler(xbox_image_handler fn);
 
 static void image_via_launcher(const char *target)
 {
+    /* Named by default.xbe but not prepared yet (lazy, docs/android/prepare.md
+     * « Images »): <work>/image.pending, then ShellActivity.prepareImage opens
+     * the launcher, which offers « Prepare <image> » and starts that image
+     * once it is in the pack. The launch data stays in the save dir for that
+     * start (this does not return, so the kernel does not delete it). */
+    if (xba_pack_image_state(target) == RECOMP_PACK_IMAGE_LAZY) {
+        if (xba_pack_set_pending_image(target) != 0) {
+            fprintf(stderr, "xboxrecomp: launch of %s: cannot write image.pending\n", target);
+            return;
+        }
+        if (call_activity("prepareImage", target) != 0) {
+            fprintf(stderr, "xboxrecomp: launch of %s: ShellActivity.prepareImage failed\n", target);
+            return;
+        }
+        printf("PACK_IMAGE_LAZY %s: not prepared yet, the launcher offers to prepare it\n", target);
+        recomp_quit(0);
+    }
     if (xba_pack_set_next_image(target) != 0) {
         fprintf(stderr, "xboxrecomp: launch of %s: cannot write image.next\n", target);
         return;

@@ -217,6 +217,8 @@ def check(pack_dir, shell_abi=SHELL_ABI, verify_hash=True):
     if verify_hash and sha256_file(lib) != meta["lib_sha256"]:
         return "%s sha256 mismatch" % meta["lib"]
     for path, name in (meta.get("images") or {}).items():   # XBA-82: the disc's other images
+        if name == "":                                      # named, prepared on its first launch
+            continue
         if "/" in name or name in (".", "..") or not os.path.isfile(os.path.join(pack_dir, name)):
             return "image %s: %s missing" % (path, name)
     return None

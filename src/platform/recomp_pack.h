@@ -68,7 +68,8 @@ typedef struct recomp_pack_meta {
     struct { char key[64]; char value[256]; } env_force[RECOMP_PACK_ENV_FORCE_MAX];
     /* "images": {"game.xbe": "libimage-game.xbe.so", ...}: the disc's other
      * images the title launches (XBA-82), each one's library in the pack
-     * folder. default.xbe is "lib". Older shells skip the key. */
+     * folder, "" for one not prepared yet (prepared on its first launch).
+     * default.xbe is "lib". Older shells skip the key. */
     int images_n, images_dropped;
     struct { char path[256]; char lib[256]; } images[RECOMP_PACK_IMAGES_MAX];
     /* XBA-147: "console" ("xbox" when absent) and, for another console,
@@ -191,7 +192,10 @@ int recomp_pack_validate_key(const recomp_pack_meta *m, int console, const char 
  * empty) is lib_path itself, another one an "images" entry, checked to be a
  * plain file name present in pack_dir. Fills out (pack_dir/lib) and, when
  * key is not NULL, the entry's path as pack.json spells it. Returns 0, or -1
- * with a reason (not in the pack, missing file). */
+ * with a reason (not in the pack, missing file), or RECOMP_PACK_IMAGE_LAZY
+ * when the entry's library is "" (named by default.xbe, not prepared yet:
+ * the on-device Prepare builds it on its first launch; key is filled). */
+#define RECOMP_PACK_IMAGE_LAZY 1
 int recomp_pack_image_lib(const recomp_pack_meta *m, const char *pack_dir, const char *lib_path,
                           const char *path, char *out, size_t out_n, char *key, size_t key_n,
                           char *reason, size_t reason_n);

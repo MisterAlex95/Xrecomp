@@ -69,6 +69,15 @@ int xba_pack_load(const char *files_dir, const char *xbe_path, xba_title_main_fn
  * kernel's image handler, before the restart); 0 when written. */
 const char *xba_pack_image_xbe(void);
 int xba_pack_set_next_image(const char *target);
+/* Images are prepared lazily on the device (docs/android/prepare.md
+ * « Images »): pack.json names one with library "" until its first launch.
+ * xba_pack_image_state: 0 when target's library is in the loaded pack,
+ * RECOMP_PACK_IMAGE_LAZY when it is named but not prepared yet, -1 otherwise
+ * (no pack, not named, library missing). xba_pack_set_pending_image writes
+ * <work>/image.pending (the launcher offers « Prepare <image> », then moves
+ * it to image.next); 0 when written. */
+int xba_pack_image_state(const char *target);
+int xba_pack_set_pending_image(const char *target);
 
 /* Other consoles (XBA-147): the game is a file of another console (a .gba,
  * a PS1 .bin / .cue / .iso, an N64 .z64 / .v64 / .n64), read by

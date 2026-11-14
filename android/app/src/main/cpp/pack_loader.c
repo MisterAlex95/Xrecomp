@@ -23,6 +23,9 @@ static lookup_fn s_lookup, s_lookup_manual;
  * the XBE of the image this start runs when it is not default.xbe. */
 static char s_next_path[RECOMP_PACK_PATH_MAX + 64];
 static char s_image_xbe[RECOMP_PACK_PATH_MAX + 300];
+/* The loaded pack's images, for the image handler (xba_pack_image_state). */
+static recomp_pack_meta s_meta;
+static char s_pack_dir[RECOMP_PACK_PATH_MAX], s_pack_lib[RECOMP_PACK_PATH_MAX];
 static pb_state_fn s_pb_state;
 static int *s_fe_cursor;
 
@@ -128,6 +131,9 @@ int xba_pack_load(const char *files_dir, const char *xbe_path, xba_title_main_fn
         snprintf(pack_dir, sizeof pack_dir, "%s", lib);
         if ((slash = strrchr(pack_dir, '/')) != NULL)
             *slash = 0;
+        s_meta = m;
+        snprintf(s_pack_dir, sizeof s_pack_dir, "%s", pack_dir);
+        snprintf(s_pack_lib, sizeof s_pack_lib, "%s", lib);
         if (want[0]) {
             if (recomp_pack_image_lib(&m, pack_dir, lib, want, img_lib, sizeof img_lib, key, sizeof key, ir,
                                       sizeof ir) == 0) {
@@ -192,6 +198,33 @@ int xba_pack_set_next_image(const char *target)
     if (!s_next_path[0] || !target || !*target)
         return -1;
     if (!(f = fopen(s_next_path, "w")))
+        return -1;
+    fprintf(f, "%s\n", target);
+    return fclose(f) == 0 ? 0 : -1;
+}
+
+int xba_pack_image_state(const char *target)
+{
+    char out[RECOMP_PACK_PATH_MAX + 300], why[256];
+
+    if (!s_pack_dir[0] || !target || !*target)
+        return -1;
+    return recomp_pack_image_lib(&s_meta, s_pack_dir, s_pack_lib, target, out, sizeof out, NULL, 0, why,
+                                 sizeof why);
+}
+
+int xba_pack_set_pending_image(const char *target)
+{
+    char path[sizeof s_next_path + 16], *slash;
+    FILE *f;
+
+    if (!s_next_path[0] || !target || !*target)
+        return -1;
+    snprintf(path, sizeof path, "%s", s_next_path);
+    if (!(slash = strrchr(path, '/')))
+        return -1;
+    snprintf(slash + 1, sizeof path - (size_t)(slash + 1 - path), "image.pending");
+    if (!(f = fopen(path, "w")))
         return -1;
     fprintf(f, "%s\n", target);
     return fclose(f) == 0 ? 0 : -1;
