@@ -189,6 +189,24 @@ struct n64_rdp *n64_get_rdp(n64_machine *m);
 /* Statistics: instructions executed (n64_run_frame / n64_run_cycles). */
 uint64_t n64_instructions(n64_machine *m);
 
+/* Guest health, for the runtime's diagnostics (no effect on the machine).
+ * n64_guest_fault_info: the first exception of a kind a healthy game does not take (TLB refill / invalid / modified,
+ * address error, bus error, reserved instruction, coprocessor unusable other than COP1), with the registers at that
+ * moment, and how many such exceptions there have been since n64_create (count 0: none).
+ * n64_guest_activity: counters of the guest's outside progress since n64_create (VI_ORIGIN writes with a new value,
+ * SI and PI DMAs, audio buffers queued); a running game moves them every frame or so. */
+typedef struct n64_guest_fault {
+    uint64_t count;
+    uint32_t code, cause, status; /* ExcCode, Cause and Status as the exception left them */
+    uint64_t pc, epc, badvaddr;   /* pc: the vector; epc: the faulting instruction */
+    uint64_t frame;               /* n64_frames at that moment */
+} n64_guest_fault;
+typedef struct n64_activity {
+    uint64_t vi_origin_changes, si_dmas, pi_dmas, ai_buffers;
+} n64_activity;
+const n64_guest_fault *n64_guest_fault_info(n64_machine *m);
+void n64_guest_activity(n64_machine *m, n64_activity *out);
+
 #ifdef __cplusplus
 }
 #endif

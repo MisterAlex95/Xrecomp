@@ -73,6 +73,12 @@ uint8_t *n64_rsp_mem(n64_rsp *s);
 uint32_t n64_rsp_read_reg(n64_rsp *s, uint32_t reg);
 void n64_rsp_write_reg(n64_rsp *s, uint32_t reg, uint32_t v);
 int n64_rsp_halted(n64_rsp *s);
+/* Scalar register r (1..31; reads 0 and writes are ignored for anything else). The setter is for the HLE boot (the
+ * register a CIC-6105 IPL3 leaves, n64_pif.c) and tests. */
+uint32_t n64_rsp_get_gpr(n64_rsp *s, int r);
+void n64_rsp_set_gpr(n64_rsp *s, int r, uint32_t v);
+/* 1 while SP_SEMAPHORE is set, without the side effect of a read (which sets it). */
+int n64_rsp_semaphore_held(n64_rsp *s);
 /* Runs up to cycles RSP cycles (stops early on BREAK / halt). Returns the cycles used. */
 uint32_t n64_rsp_run(n64_rsp *s, uint32_t cycles);
 

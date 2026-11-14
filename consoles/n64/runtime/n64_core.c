@@ -203,7 +203,7 @@ static void slice(n64_machine *m, uint64_t end)
     for (int i = 0; i < EV_COUNT; i++)
         if (m->ev[i] < stop)
             stop = m->ev[i];
-    bool rsp_on = !n64_rsp_halted(m->rsp);
+    bool rsp_on = !n64_rsp_halted(m->rsp) && !(m->boot_x105 && n64_pif_x105_hold(m));
     if (rsp_on && stop > m->now + RSP_SLICE)
         stop = m->now + RSP_SLICE;
     m->stop_at = stop;
@@ -221,6 +221,8 @@ static void slice(n64_machine *m, uint64_t end)
     } else {
         m->rsp_tick = m->now; /* halted, or started during this slice: it runs from now */
     }
+    if (N64_UNLIKELY(m->boot_x105))
+        n64_pif_x105_step(m);
     dispatch(m);
 }
 
@@ -306,6 +308,16 @@ uint64_t n64_frames(n64_machine *m) { return m->frames; }
 uint8_t *n64_rdram(n64_machine *m) { return m->rdram; }
 uint32_t n64_rdram_size(n64_machine *m) { return m->rdram_size; }
 uint64_t n64_instructions(n64_machine *m) { return m->instructions; }
+
+const n64_guest_fault *n64_guest_fault_info(n64_machine *m) { return &m->fault; }
+
+void n64_guest_activity(n64_machine *m, n64_activity *out)
+{
+    out->vi_origin_changes = m->vi_origin_changes;
+    out->si_dmas = m->si_dmas;
+    out->pi_dmas = m->pi_dmas;
+    out->ai_buffers = m->ai_buffers;
+}
 
 void n64_set_tty(n64_machine *m, void (*fn)(void *ctx, char c), void *ctx)
 {

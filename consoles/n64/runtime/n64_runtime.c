@@ -43,6 +43,7 @@
 #define SAVE_LATEST_NS 5000000000ull              /* and at most five after the first */
 #define AUDIO_TARGET_FRAMES (N64_AUDIO_RATE / 20) /* 50 ms queued */
 #define FPS_LOG_NS 10000000000ull                 /* a frame-rate line every 10 s (the device check) */
+#define STUCK_NS 5000000000ull                    /* the guest stuck detector's limit (n64_runtime_stuck_check) */
 #define STICK_RANGE 80
 #define N_SAVES 9 /* n64_save_kind: NONE .. PAK3 */
 
@@ -201,6 +202,97 @@ int n64_runtime_frameskip_parse(const char *v)
     if (v && v[0] >= '0' && v[0] <= '9' && !v[1])
         return v[0] - '0';
     return N64_RT_FRAMESKIP_AUTO;
+}
+
+static const char *exc_name(uint32_t code)
+{
+    switch (code) {
+    case 1: return "TLB modified";
+    case 2: return "TLB miss (load / fetch)";
+    case 3: return "TLB miss (store)";
+    case 4: return "address error (load / fetch)";
+    case 5: return "address error (store)";
+    case 6: return "bus error (fetch)";
+    case 7: return "bus error (data)";
+    case 10: return "reserved instruction";
+    case 11: return "coprocessor unusable";
+    default: return "exception";
+    }
+}
+
+/* Diagnostics of the frame loop, logged once (the Android shell sends stdout to logcat): the first guest fault
+ * exception of the session, and the « guest stuck » detector (n64_runtime_stuck_check). No effect on the game. */
+static void guest_health(n64_machine *m, n64_runtime_stuck *st, uint64_t *fault_logged, uint64_t frame_ns)
+{
+    const n64_guest_fault *f = n64_guest_fault_info(m);
+    if (f->count && !*fault_logged) {
+        *fault_logged = 1;
+        printf("n64: guest fault at frame %llu: %s (Cause %08x), EPC %08llx, BadVAddr %08llx, Status %08x\n",
+               (unsigned long long)f->frame, exc_name(f->code), f->cause, (unsigned long long)(f->epc & 0xFFFFFFFFu),
+               (unsigned long long)(f->badvaddr & 0xFFFFFFFFu), f->status);
+        fflush(stdout);
+    }
+    n64_activity a;
+    n64_guest_activity(m, &a);
+    uint64_t limit = frame_ns ? STUCK_NS / frame_ns : 300;
+    int why = n64_runtime_stuck_check(st, a.vi_origin_changes, a.si_dmas + a.pi_dmas + a.ai_buffers, f->count, limit);
+    if (why == N64_RT_STUCK_NONE)
+        return;
+    struct n64_rdp *rdp = n64_get_rdp(m);
+    printf("n64: guest stuck at frame %llu (%s for %.0f s): pc %08llx Status %08llx Cause %08llx EPC %08llx "
+           "BadVAddr %08llx, %llu fault exceptions, DPC start %06x end %06x current %06x status %04x\n",
+           (unsigned long long)n64_frames(m),
+           why == N64_RT_STUCK_IDLE ? "no picture, DMA or audio" : "no new picture since a fault exception",
+           (double)STUCK_NS / 1e9, (unsigned long long)(n64_pc(m) & 0xFFFFFFFFu),
+           (unsigned long long)(n64_cop0(m, 12) & 0xFFFFFFFFu), (unsigned long long)(n64_cop0(m, 13) & 0xFFFFFFFFu),
+           (unsigned long long)(n64_cop0(m, 14) & 0xFFFFFFFFu), (unsigned long long)(n64_cop0(m, 8) & 0xFFFFFFFFu),
+           (unsigned long long)f->count, rdp ? n64_rdp_read_reg(rdp, 0) : 0, rdp ? n64_rdp_read_reg(rdp, 1) : 0,
+           rdp ? n64_rdp_read_reg(rdp, 2) : 0, rdp ? n64_rdp_read_reg(rdp, 3) : 0);
+    fflush(stdout);
+}
+
+void n64_runtime_stuck_init(n64_runtime_stuck *s)
+{
+    memset(s, 0, sizeof *s);
+    s->fault_age = UINT64_MAX;
+}
+
+int n64_runtime_stuck_check(n64_runtime_stuck *s, uint64_t vi_origin_changes, uint64_t other_activity,
+                            uint64_t faults, uint64_t limit)
+{
+    int vi_moved = vi_origin_changes != s->vi, other_moved = other_activity != s->other;
+    if (faults != s->faults)
+        s->fault_age = 0;
+    else if (s->fault_age < UINT64_MAX)
+        s->fault_age++;
+    if (vi_moved) {
+        s->vi_still = 0;
+        /* A crash screen is often one last picture drawn after the fault: a fault shortly before still counts. */
+        s->fault_since_vi = limit && s->fault_age < limit;
+        s->reported = N64_RT_STUCK_NONE; /* a new picture: whatever was reported is over */
+    } else {
+        s->vi_still++;
+        if (s->fault_age == 0)
+            s->fault_since_vi = 1;
+    }
+    if (vi_moved || other_moved) {
+        s->all_still = 0;
+        if (s->reported == N64_RT_STUCK_IDLE)
+            s->reported = N64_RT_STUCK_NONE;
+    } else {
+        s->all_still++;
+    }
+    s->vi = vi_origin_changes;
+    s->other = other_activity;
+    s->faults = faults;
+    if (!limit)
+        return N64_RT_STUCK_NONE;
+    if (s->all_still >= limit && s->reported == N64_RT_STUCK_NONE)
+        return s->reported = N64_RT_STUCK_IDLE;
+    if (s->fault_since_vi && s->vi_still >= limit && s->reported != N64_RT_STUCK_FAULT &&
+        s->all_still < limit)
+        return s->reported = N64_RT_STUCK_FAULT;
+    return N64_RT_STUCK_NONE;
 }
 
 int n64_runtime_frameskip(int mode, int64_t behind_ns, uint64_t frame_ns, int audio_low, int *run)
@@ -813,6 +905,9 @@ int n64_runtime_run(const n64_runtime_opts *o)
     int64_t behind = 0; /* how late this frame starts (pacing below) */
     int skip_run = 0;
     uint64_t skipped = 0, skipped_log = 0;
+    n64_runtime_stuck stuck;
+    n64_runtime_stuck_init(&stuck);
+    uint64_t fault_logged = 0;
 
     for (;;) {
         int running = 1;
@@ -869,6 +964,7 @@ int n64_runtime_run(const n64_runtime_opts *o)
         uint64_t c0 = n64_cycles(m);
         n64_run_frame(m);
         uint64_t frame_ns = n64_runtime_frame_ns(n64_cycles(m) - c0);
+        guest_health(m, &stuck, &fault_logged, frame_ns);
         int kind = n64_save_kind_detected(m);
         int cart_dirty = kind != N64_SAVE_NONE && n64_save_take_dirty(m, (n64_save_kind)kind);
         if (kind != last_kind && kind != N64_SAVE_NONE && !cart_dirty && !s_saved[kind])
@@ -934,9 +1030,11 @@ int n64_runtime_run(const n64_runtime_opts *o)
             dirty_at = dirty_first = 0;
         }
         if (t - fps_t >= FPS_LOG_NS) {
-            printf("n64: %.1f fps over the last %.0f s (VI %.1f Hz), %llu frames skipped, %llu late resets so far\n",
+            printf("n64: %.1f fps over the last %.0f s (VI %.1f Hz), %llu frames skipped, %llu late resets so far, "
+                   "pc %08llx\n",
                    (double)fps_frames * 1e9 / (double)(t - fps_t), (double)(t - fps_t) / 1e9, 1e9 / (double)frame_ns,
-                   (unsigned long long)(skipped - skipped_log), (unsigned long long)late_resets);
+                   (unsigned long long)(skipped - skipped_log), (unsigned long long)late_resets,
+                   (unsigned long long)(n64_pc(m) & 0xFFFFFFFFu));
             skipped_log = skipped;
             fflush(stdout);
             fps_t = t;
