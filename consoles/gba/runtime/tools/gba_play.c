@@ -22,6 +22,8 @@
  * --missed FILE     with --pack: at exit, add the cartridge addresses the interpreter had to run to FILE (the
  *                   discovery loop: gba_tools.recomp --discovered FILE)
  * Keyboard: arrows, X = A, Z = B, A = L, S = R, Enter = Start, Backspace = Select; any game controller (Xbox layout).
+ * Save states (XBA-182): F1-F4 save slots 1-4, Shift+F1-F4 load them (<save dir>/gba-<KEY>/state<N>.st); Tab held
+ * fast-forwards (RECOMP_FF_SPEED: 2..16 times, default 4, or "max"); on a pad, Back + right trigger held does the same.
  * Exit 0, 1 when the ROM cannot run, 2 on a usage error. */
 #include "gba_runtime.h"
 #include "host_window.h"

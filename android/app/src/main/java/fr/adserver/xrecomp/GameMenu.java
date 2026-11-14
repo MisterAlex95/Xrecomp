@@ -46,7 +46,8 @@ import java.util.function.LongSupplier;
  *       in the game every key it saw go down and centres every stick it saw move, and the companion's buttons;
  *       closing releases the companion's again. A key whose down came while open acts on its release, so nothing of
  *       it reaches the game.</li>
- *   <li>Items: Resume, Settings (performance overlay, game volume, bottom screen: all live; this game's language,
+ *   <li>Items: Resume, for a GBA or PS1 game Save state, Load state (four slots each) and Fast-forward (XBA-182),
+ *       Settings (performance overlay, game volume, bottom screen: all live; this game's language,
  *       widescreen and 480p: next start; Share log), Controls, Screenshot, Back to launcher (the game stays alive and held in the
  *       background; « Back to the home screen » in a game's own app, which has no launcher to show), Quit game (a second press within {@link #QUIT_ARM_MS} confirms). The header shows the game's
  *       title and « Paused · 0:42 played ».</li>
@@ -120,7 +121,46 @@ final class GameMenu {
         default boolean changeDisc(Ps1Discs.Disc d) {
             return false;
         }
+
+        /** XBA-182: a GBA or PS1 game with save states runs (MenuNative.nativeStatesAvailable): the state rows show. */
+        default boolean statesSupported() {
+            return false;
+        }
+
+        /** XBA-182: when slot 1..4 was saved, Unix ms, or 0 when it has nothing loadable. */
+        default long stateTime(int slot) {
+            return 0;
+        }
+
+        /** XBA-182: the slot's thumbnail, { w, h, ARGB pixels... }, or null. */
+        default int[] stateThumb(int slot) {
+            return null;
+        }
+
+        /** XBA-182: saves the slot; 0 or a negative code (MenuNative.nativeStateSave). */
+        default int saveState(int slot) {
+            return STATE_NO_GAME;
+        }
+
+        /** XBA-182: loads the slot; 0 or a negative code. */
+        default int loadState(int slot) {
+            return STATE_NO_GAME;
+        }
+
+        /** XBA-182: whether fast-forward is on. */
+        default boolean fastForward() {
+            return false;
+        }
+
+        default void setFastForward(boolean on) {}
     }
+
+    /** XBA-182: the save state slots, and the native side's codes (menu_jni.c). */
+    static final int SLOTS = 4;
+    static final int STATE_OK = 0, STATE_NO_GAME = -1, STATE_EMPTY = -2, STATE_OTHER_GAME = -3, STATE_OTHER_VERSION = -4,
+                     STATE_IO = -5, STATE_BAD_SLOT = -6, STATE_DAMAGED = -7;
+    /** The largest thumbnail the native side hands over (anything bigger is not one). */
+    static final int THUMB_MAX_W = 160, THUMB_MAX_H = 120;
 
     static final long ANIM_MS = 200, QUIT_ARM_MS = 4000, FLASH_MS = 3000, PERF_TICK_MS = 500, SESSION_TICK_MS = 1000;
     /** A Back within this long after a swipe opened the menu is the system's back gesture ending: ignored. */
@@ -133,10 +173,10 @@ final class GameMenu {
     static final int ROW_H = Theme.ROW_H;
     static final int VOLUME_STEP = 10;
 
-    enum Page { MAIN, SETTINGS, CONTROLS, DISCS }
+    enum Page { MAIN, SETTINGS, CONTROLS, DISCS, SAVE_SLOTS, LOAD_SLOTS }
 
     enum Item { RESUME, SETTINGS, CONTROLS, SCREENSHOT, SHARE_LOG, LAUNCHER, QUIT, PERF, VOLUME, BOTTOM, LANGUAGE,
-                WIDESCREEN, P480, TOUCH, BACK, DISC, SCALE, FILTER, VK_DRIVER }
+                WIDESCREEN, P480, TOUCH, BACK, DISC, SCALE, FILTER, VK_DRIVER, STATE_SAVE, STATE_LOAD, FAST_FORWARD }
 
     private final Activity activity;
     private final Host host;
@@ -771,7 +811,9 @@ final class GameMenu {
             return;
         feedback.play(UiFeedback.Cue.BACK, drawer);
         if (page != Page.MAIN) {
-            Item from = page == Page.SETTINGS ? Item.SETTINGS : page == Page.DISCS ? Item.DISC : Item.CONTROLS;
+            Item from = page == Page.SETTINGS ? Item.SETTINGS : page == Page.DISCS ? Item.DISC
+                        : page == Page.SAVE_SLOTS ? Item.STATE_SAVE : page == Page.LOAD_SLOTS ? Item.STATE_LOAD
+                        : Item.CONTROLS;
             showPage(Page.MAIN, from);
             return;
         }
@@ -810,6 +852,14 @@ final class GameMenu {
         case MAIN:
             pageV.setVisibility(View.GONE);
             row(Item.RESUME, s(R.string.MENU_RESUME));
+            if (statesSupported()) {   // XBA-182: a GBA or PS1 game
+                row(Item.STATE_SAVE, s(R.string.MENU_STATE_SAVE));
+                row(Item.STATE_LOAD, s(R.string.MENU_STATE_LOAD));
+                Widgets.MenuRow ff = row(Item.FAST_FORWARD, s(R.string.MENU_FAST_FORWARD));
+                ff.setChoices(new String[] { s(R.string.MENU_ON), s(R.string.MENU_OFF) });
+                ff.cycler = dir -> toggleFastForward();
+                updateValues();
+            }
             row(Item.SETTINGS, s(R.string.MENU_SETTINGS));
             row(Item.CONTROLS, s(R.string.MENU_CONTROLS));
             row(Item.SCREENSHOT, s(R.string.MENU_SCREENSHOT));
@@ -893,6 +943,8 @@ final class GameMenu {
             if (cm != null) {   // a GBA, PS1 or N64 game: its buttons and where they come from (XBA-158 / 168 / 174)
                 kvRow(s(R.string.CTL_MENU), s(R.string.CTL_MENU_X));
                 kvRow(s(R.string.CTL_COMBO), s(R.string.CTL_COMBO_X));
+                if (cm.console == Console.GBA || cm.console == Console.PS1)   // XBA-182: the fixed pad chord
+                    kvRow(s(R.string.CTL_FF), s(R.string.CTL_FF_X));
                 if (!cm.isDefault())
                     kvRow(s(R.string.MENU_CTL_REMAPPED),
                           activity.getString(R.string.MENU_CTL_REMAPPED_X, cm.changedCount()));
@@ -922,6 +974,14 @@ final class GameMenu {
             pageV.setVisibility(View.VISIBLE);
             for (Ps1Discs.Disc d : discs())
                 discRow(d);
+            row(Item.BACK, s(R.string.MENU_BACK));
+            break;
+        case SAVE_SLOTS:
+        case LOAD_SLOTS:
+            pageV.setText(s(p == Page.SAVE_SLOTS ? R.string.MENU_STATE_SAVE : R.string.MENU_STATE_LOAD));
+            pageV.setVisibility(View.VISIBLE);
+            for (int slot = 1; slot <= SLOTS; slot++)
+                slotRow(slot, p == Page.SAVE_SLOTS);
             row(Item.BACK, s(R.string.MENU_BACK));
             break;
         }
@@ -992,6 +1052,115 @@ final class GameMenu {
         discList = now;
         close();
         flash(activity.getString(R.string.MENU_DISC_DONE, d.number), true);
+    }
+
+    // ---- Save states and fast-forward (XBA-182) ----------------------------------------------------------------
+
+    private boolean statesSupported() {
+        try {
+            return host.statesSupported();
+        } catch (RuntimeException e) {
+            Log.w(LauncherActivity.TAG, "shell: menu: save states unknown", e);
+            return false;
+        }
+    }
+
+    /**
+     * A slot of the Save state or Load state page: « Slot N », the time it was saved or « Empty » under it, its
+     * thumbnail at the right. Read each time the page shows, so a fresh save is there the next time.
+     */
+    private void slotRow(int slot, boolean save) {
+        long when = host.stateTime(slot);
+        Widgets.MenuRow r = new Widgets.MenuRow(activity);
+        r.set(activity.getString(R.string.MENU_STATE_SLOT, slot), null);
+        r.setSubtitle(when > 0 ? slotTime(activity, when, System.currentTimeMillis()) : s(R.string.MENU_STATE_EMPTY));
+        if (when > 0)
+            r.setThumb(thumbBitmap(host.stateThumb(slot)));
+        else if (!save)
+            r.setDim(true);   // nothing to load
+        r.onPress = () -> feedback.play(UiFeedback.Cue.SELECT, r);
+        r.setOnClickListener(v -> {
+            if (save)
+                saveSlot(slot);
+            else
+                loadSlot(slot, when > 0, r);
+        });
+        list.addView(r, new LinearLayout.LayoutParams(-1, ROW_H));
+    }
+
+    private void saveSlot(int slot) {
+        int code = host.saveState(slot);
+        Log.i(LauncherActivity.TAG, "shell: menu: save state slot " + slot + ": " + code);
+        close();
+        if (code == STATE_OK)
+            flash(activity.getString(R.string.MENU_STATE_SAVED, slot), true);
+        else
+            flash(stateError(code, slot, true), false);
+    }
+
+    private void loadSlot(int slot, boolean filled, Widgets.MenuRow r) {
+        if (!filled) {
+            feedback.play(UiFeedback.Cue.ERROR, r);
+            flash(activity.getString(R.string.MENU_STATE_EMPTY_SLOT, slot), false);
+            return;
+        }
+        int code = host.loadState(slot);
+        Log.i(LauncherActivity.TAG, "shell: menu: load state slot " + slot + ": " + code);
+        close();
+        if (code == STATE_OK)
+            flash(activity.getString(R.string.MENU_STATE_LOADED, slot), true);
+        else
+            flash(stateError(code, slot, false), false);
+    }
+
+    /** The message for a native code that is not STATE_OK. */
+    private String stateError(int code, int slot, boolean save) {
+        switch (code) {
+        case STATE_EMPTY:
+            return activity.getString(R.string.MENU_STATE_EMPTY_SLOT, slot);
+        case STATE_OTHER_GAME:
+            return activity.getString(R.string.MENU_STATE_ERR_OTHER_GAME, slot);
+        case STATE_OTHER_VERSION:
+            return activity.getString(R.string.MENU_STATE_ERR_VERSION, slot);
+        case STATE_IO:
+            return activity.getString(save ? R.string.MENU_STATE_ERR_WRITE : R.string.MENU_STATE_ERR_READ, slot);
+        case STATE_DAMAGED:
+            return activity.getString(R.string.MENU_STATE_ERR_DAMAGED, slot);
+        case STATE_NO_GAME:
+            return s(R.string.MENU_STATE_ERR_NO_GAME);
+        default:
+            return activity.getString(save ? R.string.MENU_STATE_SAVE_FAILED : R.string.MENU_STATE_LOAD_FAILED, slot);
+        }
+    }
+
+    /** A slot's save time: the time alone today (« 14:32 »), else the date and the time, in the device's format. */
+    static String slotTime(android.content.Context c, long when, long now) {
+        java.util.Calendar a = java.util.Calendar.getInstance(), b = java.util.Calendar.getInstance();
+        a.setTimeInMillis(when);
+        b.setTimeInMillis(now);
+        java.util.Date d = new java.util.Date(when);
+        String time = android.text.format.DateFormat.getTimeFormat(c).format(d);
+        if (a.get(java.util.Calendar.YEAR) == b.get(java.util.Calendar.YEAR)
+            && a.get(java.util.Calendar.DAY_OF_YEAR) == b.get(java.util.Calendar.DAY_OF_YEAR))
+            return time;
+        return android.text.format.DateFormat.getMediumDateFormat(c).format(d) + " " + time;
+    }
+
+    /** The native thumbnail { w, h, ARGB pixels... } as a bitmap; null when there is none or it does not add up. */
+    static android.graphics.Bitmap thumbBitmap(int[] t) {
+        if (t == null || t.length < 2)
+            return null;
+        int w = t[0], h = t[1];
+        if (w <= 0 || h <= 0 || w > THUMB_MAX_W || h > THUMB_MAX_H || t.length < 2 + w * h)
+            return null;
+        return android.graphics.Bitmap.createBitmap(t, 2, w, w, h, android.graphics.Bitmap.Config.ARGB_8888);
+    }
+
+    private void toggleFastForward() {
+        boolean on = !host.fastForward();
+        host.setFastForward(on);
+        Log.i(LauncherActivity.TAG, "shell: menu: fast-forward " + (on ? "on" : "off"));
+        updateValues();
     }
 
     /** A line of the Controls table: the device's control, what the game gets. */
@@ -1071,6 +1240,15 @@ final class GameMenu {
             break;
         case TOUCH:
             toggleTouch();
+            break;
+        case STATE_SAVE:
+            showPage(Page.SAVE_SLOTS, null);
+            break;
+        case STATE_LOAD:
+            showPage(Page.LOAD_SLOTS, null);
+            break;
+        case FAST_FORWARD:
+            toggleFastForward();
             break;
         case BACK:
             back();
@@ -1295,6 +1473,9 @@ final class GameMenu {
         r = rows.get(Item.VK_DRIVER);
         if (r != null)
             r.setValue(vkDriverLabel());
+        r = rows.get(Item.FAST_FORWARD);
+        if (r != null)
+            r.setValue(s(host.fastForward() ? R.string.MENU_ON : R.string.MENU_OFF));
         r = rows.get(Item.TOUCH);
         Boolean touch = host.touchShown();
         if (r != null && touch != null)

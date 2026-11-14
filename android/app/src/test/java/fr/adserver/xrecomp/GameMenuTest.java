@@ -94,6 +94,20 @@ public class GameMenuTest {
         boolean discOk;
         @Override public List<Ps1Discs.Disc> discs() { return discList; }
         @Override public boolean changeDisc(Ps1Discs.Disc d) { chosen.add(d); return discOk; }
+        /** XBA-182: save states (index 1..4), the codes the next save / load return, fast-forward. */
+        boolean states;
+        final long[] times = new long[GameMenu.SLOTS + 1];
+        final int[][] thumbs = new int[GameMenu.SLOTS + 1][];
+        final List<Integer> saved = new ArrayList<>(), loaded = new ArrayList<>();
+        int saveCode, loadCode;
+        boolean ff;
+        @Override public boolean statesSupported() { return states; }
+        @Override public long stateTime(int slot) { return times[slot]; }
+        @Override public int[] stateThumb(int slot) { return thumbs[slot]; }
+        @Override public int saveState(int slot) { saved.add(slot); return saveCode; }
+        @Override public int loadState(int slot) { loaded.add(slot); return loadCode; }
+        @Override public boolean fastForward() { return ff; }
+        @Override public void setFastForward(boolean on) { ff = on; }
     }
 
     /** A stand-in for the game's frame (ours: gradients and shapes), so the dimming shows in the screenshots. */
@@ -853,6 +867,232 @@ public class GameMenuTest {
         assertSame(menu.row(GameMenu.Item.BACK), menu.focusedRow());
         idle(100);
         TestSupport.screenshot(menu.root, "menu-controls-gba");
+    }
+
+    /** XBA-182: a GBA game's Controls page has the fast-forward chord; an N64 game's and the Xbox list do not. */
+    @Test
+    public void consoleControlsListFastForward() throws Exception {
+        host.console = ConsolePadMap.parse(Console.GBA, "");
+        menu.open("Back");
+        menu.row(GameMenu.Item.CONTROLS).performClick();
+        java.util.List<String> texts = new java.util.ArrayList<>();
+        collect(menu.drawer, texts);
+        assertTrue(texts.toString(), texts.contains(activity.getString(R.string.CTL_FF)));
+        assertTrue(texts.toString(), texts.contains(activity.getString(R.string.CTL_FF_X)));
+        press(KeyEvent.KEYCODE_BUTTON_B);
+        host.console = null;
+        menu.row(GameMenu.Item.CONTROLS).performClick();
+        texts.clear();
+        collect(menu.drawer, texts);
+        assertFalse(texts.toString(), texts.contains(activity.getString(R.string.CTL_FF)));
+    }
+
+    // ---- Save states and fast-forward (XBA-182) --------------------------------------------------------------------
+
+    private static int[] thumb(int w, int h, int argb) {
+        int[] t = new int[2 + w * h];
+        t[0] = w;
+        t[1] = h;
+        java.util.Arrays.fill(t, 2, t.length, argb);
+        return t;
+    }
+
+    /** A console game with states: slot 2 saved now with a thumbnail, slot 4 two days ago, 1 and 3 empty. */
+    private void statesGame() {
+        host.states = true;
+        long now = System.currentTimeMillis();
+        host.times[2] = now;
+        host.thumbs[2] = thumb(160, 120, 0xFF3366CC);
+        host.times[4] = now - 2 * 24 * 3600_000L;
+    }
+
+    @Test
+    public void stateRowsOnlyWithStates() {
+        menu.open("Back");
+        assertNull(menu.row(GameMenu.Item.STATE_SAVE));
+        assertNull(menu.row(GameMenu.Item.STATE_LOAD));
+        assertNull(menu.row(GameMenu.Item.FAST_FORWARD));
+        assertSame(menu.row(GameMenu.Item.SETTINGS), menu.rowsForTest().get(1));
+        menu.close();
+        host.states = true;
+        menu.open("Back");
+        List<Widgets.MenuRow> rows = menu.rowsForTest();
+        assertSame(menu.row(GameMenu.Item.RESUME), rows.get(0));
+        assertSame(menu.row(GameMenu.Item.STATE_SAVE), rows.get(1));
+        assertSame(menu.row(GameMenu.Item.STATE_LOAD), rows.get(2));
+        assertSame(menu.row(GameMenu.Item.FAST_FORWARD), rows.get(3));
+        assertSame(menu.row(GameMenu.Item.SETTINGS), rows.get(4));
+        assertEquals(activity.getString(R.string.MENU_STATE_SAVE), rows.get(1).title);
+        assertEquals(activity.getString(R.string.MENU_STATE_LOAD), rows.get(2).title);
+        assertEquals(activity.getString(R.string.MENU_FAST_FORWARD), rows.get(3).title);
+    }
+
+    @Test
+    public void fastForwardToggles() {
+        host.states = true;
+        menu.open("Back");
+        Widgets.MenuRow r = menu.row(GameMenu.Item.FAST_FORWARD);
+        assertEquals(activity.getString(R.string.MENU_OFF), r.value);
+        r.performClick();
+        assertTrue(host.ff);
+        assertEquals(activity.getString(R.string.MENU_ON), r.value);
+        assertTrue("the menu stays", menu.isOpen());
+        assertEquals(GameMenu.Page.MAIN, menu.page());
+        r.requestFocusFromTouch();
+        press(KeyEvent.KEYCODE_DPAD_LEFT);
+        assertFalse(host.ff);
+        assertEquals(activity.getString(R.string.MENU_OFF), r.value);
+        // Opened again: the value is the host's.
+        host.ff = true;
+        menu.close();
+        menu.open("Back");
+        assertEquals(activity.getString(R.string.MENU_ON), menu.row(GameMenu.Item.FAST_FORWARD).value);
+    }
+
+    @Test
+    public void saveSlotsPage() throws Exception {
+        statesGame();
+        menu.open("Back");
+        menu.row(GameMenu.Item.STATE_SAVE).performClick();
+        assertEquals(GameMenu.Page.SAVE_SLOTS, menu.page());
+        List<Widgets.MenuRow> rows = menu.rowsForTest();
+        assertEquals(5, rows.size());   // four slots, Back
+        for (int i = 0; i < 4; i++)
+            assertEquals(activity.getString(R.string.MENU_STATE_SLOT, i + 1), rows.get(i).title);
+        assertSame(menu.row(GameMenu.Item.BACK), rows.get(4));
+        assertEquals(activity.getString(R.string.MENU_STATE_EMPTY), rows.get(0).subtitle);
+        assertNull(rows.get(0).thumb);
+        assertFalse("an empty slot can be saved to", rows.get(0).dim);
+        String today = android.text.format.DateFormat.getTimeFormat(activity).format(new java.util.Date(host.times[2]));
+        assertEquals(today, rows.get(1).subtitle);
+        assertNotNull(rows.get(1).thumb);
+        assertEquals(160, rows.get(1).thumb.getWidth());
+        assertEquals(120, rows.get(1).thumb.getHeight());
+        assertEquals(0xFF3366CC, rows.get(1).thumb.getPixel(10, 10));
+        assertNull("no thumbnail from the host", rows.get(3).thumb);
+        assertTrue(rows.get(3).subtitle, rows.get(3).subtitle.length() > today.length());   // a date, then the time
+        assertTrue(rows.get(3).subtitle.endsWith(
+                android.text.format.DateFormat.getTimeFormat(activity).format(new java.util.Date(host.times[4]))));
+        assertSame("the focus on slot 1", rows.get(0), menu.focusedRow());
+        idle(100);
+        TestSupport.screenshot(menu.root, "menu-save-slots");
+        // Slot 3: saved, the menu closes, a message.
+        rows.get(2).performClick();
+        assertEquals(List.of(3), host.saved);
+        assertFalse(menu.isOpen());
+        assertEquals(activity.getString(R.string.MENU_STATE_SAVED, 3), menu.flashText());
+        // Slot info read again the next time: slot 3 now has a time.
+        host.times[3] = System.currentTimeMillis();
+        menu.open("Back");
+        menu.row(GameMenu.Item.STATE_SAVE).performClick();
+        assertFalse(activity.getString(R.string.MENU_STATE_EMPTY).equals(menu.rowsForTest().get(2).subtitle));
+    }
+
+    @Test
+    public void saveErrors() {
+        statesGame();
+        int[][] cases = { { GameMenu.STATE_IO, R.string.MENU_STATE_ERR_WRITE },
+                          { GameMenu.STATE_OTHER_GAME, R.string.MENU_STATE_ERR_OTHER_GAME },
+                          { GameMenu.STATE_BAD_SLOT, R.string.MENU_STATE_SAVE_FAILED } };
+        for (int[] c : cases) {
+            host.saveCode = c[0];
+            menu.open("Back");
+            menu.row(GameMenu.Item.STATE_SAVE).performClick();
+            menu.rowsForTest().get(0).performClick();
+            assertFalse(menu.isOpen());
+            assertEquals(activity.getString(c[1], 1), menu.flashText());
+        }
+        host.saveCode = GameMenu.STATE_NO_GAME;
+        menu.open("Back");
+        menu.row(GameMenu.Item.STATE_SAVE).performClick();
+        menu.rowsForTest().get(0).performClick();
+        assertEquals(activity.getString(R.string.MENU_STATE_ERR_NO_GAME), menu.flashText());
+    }
+
+    @Test
+    public void loadSlotsPage() {
+        statesGame();
+        menu.open("Back");
+        menu.row(GameMenu.Item.STATE_LOAD).performClick();
+        assertEquals(GameMenu.Page.LOAD_SLOTS, menu.page());
+        List<Widgets.MenuRow> rows = menu.rowsForTest();
+        assertEquals(5, rows.size());
+        assertTrue("empty: dim", rows.get(0).dim);
+        assertFalse(rows.get(1).dim);
+        assertNotNull(rows.get(1).thumb);
+        // An empty slot: a message, the menu stays, nothing loaded.
+        rows.get(0).performClick();
+        assertTrue(menu.isOpen());
+        assertEquals(GameMenu.Page.LOAD_SLOTS, menu.page());
+        assertTrue(host.loaded.isEmpty());
+        assertEquals(activity.getString(R.string.MENU_STATE_EMPTY_SLOT, 1), menu.flashText());
+        // A filled one: loaded, closed.
+        rows.get(1).performClick();
+        assertEquals(List.of(2), host.loaded);
+        assertFalse(menu.isOpen());
+        assertEquals(activity.getString(R.string.MENU_STATE_LOADED, 2), menu.flashText());
+    }
+
+    @Test
+    public void loadErrors() {
+        statesGame();
+        int[][] cases = { { GameMenu.STATE_OTHER_GAME, R.string.MENU_STATE_ERR_OTHER_GAME },
+                          { GameMenu.STATE_OTHER_VERSION, R.string.MENU_STATE_ERR_VERSION },
+                          { GameMenu.STATE_DAMAGED, R.string.MENU_STATE_ERR_DAMAGED },
+                          { GameMenu.STATE_IO, R.string.MENU_STATE_ERR_READ },
+                          { GameMenu.STATE_EMPTY, R.string.MENU_STATE_EMPTY_SLOT },
+                          { -99, R.string.MENU_STATE_LOAD_FAILED } };
+        for (int[] c : cases) {
+            host.loadCode = c[0];
+            menu.open("Back");
+            menu.row(GameMenu.Item.STATE_LOAD).performClick();
+            menu.rowsForTest().get(3).performClick();   // slot 4: filled
+            assertFalse(menu.isOpen());
+            assertEquals(activity.getString(c[1], 4), menu.flashText());
+        }
+        assertEquals(List.of(4, 4, 4, 4, 4, 4), host.loaded);
+    }
+
+    @Test
+    public void backFromSlotPagesFocusesTheOpener() {
+        host.states = true;
+        menu.open("Back");
+        menu.row(GameMenu.Item.STATE_SAVE).performClick();
+        press(KeyEvent.KEYCODE_BUTTON_B);
+        assertEquals(GameMenu.Page.MAIN, menu.page());
+        assertSame(menu.row(GameMenu.Item.STATE_SAVE), menu.focusedRow());
+        menu.row(GameMenu.Item.STATE_LOAD).performClick();
+        assertEquals(GameMenu.Page.LOAD_SLOTS, menu.page());
+        menu.row(GameMenu.Item.BACK).performClick();
+        assertEquals(GameMenu.Page.MAIN, menu.page());
+        assertSame(menu.row(GameMenu.Item.STATE_LOAD), menu.focusedRow());
+        assertTrue(menu.isOpen());
+    }
+
+    @Test
+    public void thumbBitmapChecksItsInput() {
+        assertNull(GameMenu.thumbBitmap(null));
+        assertNull(GameMenu.thumbBitmap(new int[] { 4 }));
+        assertNull(GameMenu.thumbBitmap(new int[] { 2, 2, 0, 0, 0 }));          // too short
+        assertNull(GameMenu.thumbBitmap(new int[] { 0, 2 }));
+        assertNull(GameMenu.thumbBitmap(thumb(161, 1, 0)));                      // too wide
+        android.graphics.Bitmap b = GameMenu.thumbBitmap(new int[] { 2, 1, 0xFFFF0000, 0xFF00FF00 });
+        assertEquals(2, b.getWidth());
+        assertEquals(1, b.getHeight());
+        assertEquals(0xFFFF0000, b.getPixel(0, 0));
+        assertEquals(0xFF00FF00, b.getPixel(1, 0));
+    }
+
+    @Test
+    public void slotTimeTodayOrWithDate() {
+        java.util.Calendar cal = java.util.Calendar.getInstance();
+        cal.set(2026, java.util.Calendar.NOVEMBER, 14, 14, 32, 0);
+        long when = cal.getTimeInMillis();
+        java.text.DateFormat tf = android.text.format.DateFormat.getTimeFormat(activity);
+        assertEquals(tf.format(new java.util.Date(when)), GameMenu.slotTime(activity, when, when + 3600_000L));
+        String other = GameMenu.slotTime(activity, when, when + 2 * 24 * 3600_000L);
+        assertEquals(android.text.format.DateFormat.getMediumDateFormat(activity).format(new java.util.Date(when))
+                     + " " + tf.format(new java.util.Date(when)), other);
     }
 
     private static void collect(View v, java.util.List<String> out) {

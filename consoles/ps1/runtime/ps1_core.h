@@ -146,6 +146,33 @@ int ps1_bios_hle(ps1_machine *m);
 void ps1_set_lid(ps1_machine *m, int open);
 int ps1_change_disc(ps1_machine *m, const char *disc_path, char *err, size_t errlen);
 
+/* Save states (XBA-182): the whole machine as a versioned blob: a header (magic, console, PS1_STATE_VERSION, hashes of
+ * the game (the EXE given, else the disc in the drive: its size and volume descriptor) and of the BIOS (0: HLE)), then
+ * sections: the CPU / COP0 / GTE / scratchpad / interrupt controller / DMA / timers / video scheduler / SIO with the
+ * pads and both memory cards (the machine), main RAM, the GPU (VRAM and state), the CD-ROM controller (its
+ * registers, commands in flight, the drive's position and sector buffers, XA / CD-DA), the SPU (state and RAM), the
+ * MDEC, the HLE BIOS, the recompiled code's boot flag. Take and load them between frames. A state is the machine
+ * only: it loads the same whether the program runs interpreted or with a title pack attached (lifted code is
+ * re-checked against RAM after a load). The disc in the drive stays the one there (a state saved with another disc
+ * of the game in the drive is refused: change the disc first).
+ * ps1_state_size: the bytes ps1_state_save needs now. ps1_state_save: returns the size written, 0 when cap is too
+ * small or no state can be taken (PS1_STATE_EBUSY from ps1_state_check_save: an HLE BIOS call into guest code in
+ * progress, never the case between frames). ps1_state_check / ps1_state_load: PS1_STATE_OK, or why the state is
+ * refused (the machine is left as it was). Loading leaves the cards' dirty flags clear: a card the state brought back
+ * reaches storage only once the game writes it again. */
+#define PS1_STATE_VERSION 1
+enum {
+    PS1_STATE_OK = 0,
+    PS1_STATE_EGAME = -3,
+    PS1_STATE_EVERSION = -4,
+    PS1_STATE_EBUSY = -6,
+    PS1_STATE_ECORRUPT = -7,
+};
+size_t ps1_state_size(ps1_machine *m);
+size_t ps1_state_save(ps1_machine *m, uint8_t *out, size_t cap);
+int ps1_state_check(ps1_machine *m, const uint8_t *data, size_t size);
+int ps1_state_load(ps1_machine *m, const uint8_t *data, size_t size);
+
 /* The devices, for tests and the runtime (NULL when absent). */
 struct ps1_gpu *ps1_get_gpu(ps1_machine *m);
 

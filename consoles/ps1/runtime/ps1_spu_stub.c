@@ -104,3 +104,23 @@ size_t ps1_spu_audio_pull(ps1_spu *s, int16_t *stereo, size_t frames)
     s->queued -= n;
     return n;
 }
+
+/* Save states (XBA-182): a placeholder has no state worth keeping. */
+size_t ps1_spu_state_size(ps1_spu *x)
+{
+    (void)x;
+    return 0;
+}
+
+void ps1_spu_state_save(ps1_spu *x, uint8_t *out)
+{
+    (void)x;
+    (void)out;
+}
+
+int ps1_spu_state_load(ps1_spu *x, const uint8_t *in, size_t n)
+{
+    (void)x;
+    (void)in;
+    return n == 0 ? 0 : -1;
+}

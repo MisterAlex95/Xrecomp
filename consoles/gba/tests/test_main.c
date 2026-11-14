@@ -1,12 +1,13 @@
 /* The Game Boy Advance runtime (XBA-146, XBA-157): its pure helpers (title key, pad mapping, colour conversion, save
  * path) and headless runs of a tiny ROM made here (no window: SDL's dummy drivers), checking the save it writes, that
- * the save is read back, and the "fd:N" form the app shell uses for documents. */
+ * the save is read back, the "fd:N" form the app shell uses for documents, and save states through recomp_states.h. */
 #include "gba_core.h"
 #include "gba_runtime.h"
 #include "host_pad.h"
 #include "host_window.h"
 #include "host_time.h"
 #include "recomp_lifecycle.h"
+#include "recomp_states.h"
 
 #include <pthread.h>
 
@@ -256,6 +257,66 @@ static void test_runs(void)
     void *ret = NULL;
     CHECK(pthread_join(th, &ret) == 0 && ret && *(int *)ret == 0);
     write_rom(rom_path, 0x33);
+
+    /* 2c: save states (XBA-182) through the shared interface, as the in-game menu calls it from the UI thread while
+     * the game runs on its own: slot 1 saved with its thumbnail, loaded back; fast-forward toggled on and off; the
+     * slot copied into another game's folder is refused by that game. */
+    recomp_states_detach();
+    CHECK(recomp_states_save(1) == RECOMP_STATE_ENOGAME);
+    gba_runtime_opts_init(&o);
+    o.rom = rom_path;
+    o.save_dir = dir;
+    o.title_key = key;
+    o.headless = 1;
+    CHECK(pthread_create(&th, NULL, run_thread, &o) == 0);
+    for (int i = 0; i < 100 && !recomp_states_available(); i++)
+        usleep(10 * 1000);
+    CHECK(recomp_states_available() && !strcmp(recomp_states_console(), "gba"));
+    usleep(200 * 1000);
+    recomp_state_meta meta;
+    static uint16_t thumb[RECOMP_STATE_THUMB_W * RECOMP_STATE_THUMB_H];
+    CHECK(recomp_states_info(1, &meta, NULL) == RECOMP_STATE_EEMPTY);
+    CHECK(recomp_states_load(1) == RECOMP_STATE_EEMPTY);
+    CHECK(recomp_states_save(1) == RECOMP_STATE_OK);
+    CHECK(recomp_states_info(1, &meta, thumb) == RECOMP_STATE_OK);
+    CHECK(!strcmp(meta.console, "gba") && !strcmp(meta.key, key) && meta.frames > 0);
+    CHECK(meta.thumb_w == 160 && meta.thumb_h == 106);
+    char slot[600], other[600];
+    snprintf(slot, sizeof slot, "%s/gba-%s/state1.st", dir, key);
+    CHECK(file_size(slot) > 100000);
+    recomp_ff_set(1);
+    usleep(100 * 1000);
+    recomp_ff_set(0);
+    CHECK(recomp_states_load(1) == RECOMP_STATE_OK);
+    recomp_lifecycle_pause_for(RECOMP_HOLD_MENU);   /* from the menu: the game held */
+    CHECK(recomp_states_save(2) == RECOMP_STATE_OK && recomp_states_load(2) == RECOMP_STATE_OK);
+    recomp_lifecycle_resume_for(RECOMP_HOLD_MENU);
+    usleep(50 * 1000);
+    CHECK(SDL_PushEvent(&quit) == 1);
+    CHECK(pthread_join(th, &ret) == 0 && ret && *(int *)ret == 0);
+    CHECK(!recomp_states_available());
+    /* Another game (another ROM, another key): the slot file copied into its folder is refused by the core. */
+    char rom2[300];
+    snprintf(rom2, sizeof rom2, "%s/other.gba", dir);
+    write_rom(rom2, 0x44);
+    snprintf(other, sizeof other, "%s/gba-OTHER-GAME", dir);
+    mkdir(other, 0755);
+    snprintf(other, sizeof other, "%s/gba-OTHER-GAME/state3.st", dir);
+    char cp[1400];
+    snprintf(cp, sizeof cp, "cp '%s' '%s'", slot, other);
+    CHECK(system(cp) == 0);
+    gba_runtime_opts_init(&o);
+    o.rom = rom2;
+    o.save_dir = dir;
+    o.title_key = "OTHER-GAME";
+    o.headless = 1;
+    CHECK(pthread_create(&th, NULL, run_thread, &o) == 0);
+    for (int i = 0; i < 100 && !recomp_states_available(); i++)
+        usleep(10 * 1000);
+    CHECK(recomp_states_info(3, &meta, NULL) == RECOMP_STATE_OK);
+    CHECK(recomp_states_load(3) == RECOMP_STATE_EGAME);
+    CHECK(SDL_PushEvent(&quit) == 1);
+    CHECK(pthread_join(th, &ret) == 0 && ret && *(int *)ret == 0);
 
     /* 3: no ROM, a missing file, a bad fd: an error, nothing written. */
     gba_runtime_opts_init(&o);

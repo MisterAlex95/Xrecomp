@@ -20,6 +20,7 @@
  * block: a game that polls the busy bit sees it clear at once). */
 #include "ps1_devices.h"
 
+#include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -368,4 +369,49 @@ size_t ps1_mdec_dma_read(ps1_mdec *d, uint32_t *words, size_t n)
     for (size_t i = got; i < n; i++)
         words[i] = 0;
     return got;
+}
+
+/* ---- Save states (XBA-182) ------------------------------------------------------------------------------------ */
+
+/* The decoder (tables, command, block in progress), then the output words not read yet. */
+size_t ps1_mdec_state_size(ps1_mdec *d)
+{
+    return sizeof(ps1_mdec) + (d->out_len - d->out_pos) * sizeof(uint32_t);
+}
+
+void ps1_mdec_state_save(ps1_mdec *d, uint8_t *out)
+{
+    ps1_mdec c = *d;
+    c.out = NULL;
+    c.out_len -= c.out_pos;
+    c.out_pos = 0;
+    c.out_cap = 0;
+    memcpy(out, &c, sizeof c);
+    if (c.out_len)
+        memcpy(out + sizeof c, d->out + d->out_pos, c.out_len * sizeof(uint32_t));
+}
+
+int ps1_mdec_state_load(ps1_mdec *d, const uint8_t *in, size_t n)
+{
+    ps1_mdec c;
+    if (n < sizeof c)
+        return -1;
+    memcpy(&c, in, sizeof c);
+    if (c.out_pos != 0 || n != sizeof c + c.out_len * sizeof(uint32_t))
+        return -1;
+    uint32_t *buf = d->out;
+    size_t cap = d->out_cap;
+    if (c.out_len > cap) {
+        uint32_t *nb = realloc(buf, c.out_len * sizeof *nb);
+        if (!nb)
+            return -1;
+        buf = nb;
+        cap = c.out_len;
+    }
+    *d = c;
+    d->out = buf;
+    d->out_cap = cap;
+    if (c.out_len)
+        memcpy(d->out, in + sizeof c, c.out_len * sizeof(uint32_t));
+    return 0;
 }

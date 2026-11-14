@@ -2493,6 +2493,8 @@ less the display cutout, so 720p and 1080p look the same.
 | Item | Does |
 |---|---|
 | Resume | Closes the menu. |
+| Save state, Load state | Only for a GBA or PS1 game whose runtime can save states (XBA-182: `Host.statesSupported`, `MenuNative.nativeStatesAvailable`); an Xbox or N64 game does not show them. Each opens a page of four slots, « Slot 1 » to « Slot 4 », then Back. Under each slot: « Empty », or when it was saved (the time alone for today, « 14:32 »; the date and the time for another day, in the device's format), and its thumbnail at the right of the row. The slots are read each time the page shows, so a fresh save is there the next time. **Save state**: choosing a slot saves to it (over what it held), closes the menu and says « Saved to slot N » at the top of the screen. **Load state**: an empty slot is dimmed; choosing it says « Slot N is empty » and the menu stays; a saved one loads, closes the menu and says « Slot N loaded ». A failure closes the menu with a warning that names it: the slot holds another game's state, it was saved by another version of the app, it is damaged, it cannot be written or read. B (or Back) returns to the main page on the row that opened the page. |
+| Fast-forward | Same condition: On / Off, a setting row (A or left / right toggles it, the menu stays open). On, the game runs faster until it is turned off. The pad chord **Back + RT, held** does the same while held (Controls lists it for a GBA or PS1 game). |
 | Settings | **Perf overlay** On / Off: fps and frame time (`xbox_FramebufferWindowGetStats`, twice a second) in the top right corner, in the menu's layer, not in the game frame; stays with the menu closed. **Volume** 0–100 % in steps of 10, A mutes / unmutes: one gain on the mixed APU output (`apu_volume.c`, the square of the fraction, after the WAV capture), set through JNI. **Bottom screen** Panel / Black / Off (only with a second screen): `GameStore.setBottomScreen` and the companion is refreshed at once. **On-screen pad** Shown / Hidden (only when the game has one, XBA-158): for this session, whatever Controls › On-screen pad › Show says (never with the companion panel up). These apply **now** (the rows say so) and are remembered (`files/settings/perf_overlay`, `game_volume`, `bottom_screen`); the volume is applied again at the next start. **Language** (only for an Xbox game whose XBE gives a title ID): As in Settings, then the nine languages; this game's own [language](#game-language), applied at the next start. **Widescreen** and **480p** (same condition, XBA-134): As in Settings / On / Off, this game's own console video setting (`GameVideo.java`, kept in `files/settings/widescreen_<TITLEID>` and `480p_<TITLEID>`), applied at the next start: `ShellActivity` sets `RECOMP_WIDESCREEN` / `RECOMP_480P` to `1` or `0` (the environment wins over the `recomp.cfg` line of Settings › Graphics) and unsets them when the game follows Settings; logcat « shell: title video RECOMP_WIDESCREEN=… RECOMP_480P=…, title … ». A GBA, PS1 or N64 game (XBA-181) has none of these three: **Scale (next start)** and **Filter (next start)** instead, As in Settings then each value, this game's own ([Settings per console](#settings-per-console)); Perf overlay, Volume and Screenshot are the same rows (the native side backs them for the consoles through the same JNI calls). An Xbox game's screen filter and scaling are not offered: the SDL window's are fixed at start (`fb_present_sdl.c`: nearest, logical size 640 x 480). |
 | Controls | The usual mapping, compact (plus Back and Select + Start: the menu); with a remapping in `recomp.cfg`, first « Your mapping » and each changed control (your button, the Xbox control). A GBA / PS1 / N64 game: each of its buttons and the controls it comes from ([Controls for the other consoles](#controls-for-the-other-consoles)). |
 | Screenshot | Closes the menu first, then saves the game's last frame as `<external files>/screenshots/<date>.bmp` (`xbox_FramebufferDumpBmp`, the companion panel's), and says « Saved … » at the top of the screen (and on the panel). |
@@ -2501,17 +2503,30 @@ less the display cutout, so 720p and 1080p look the same.
 | Back to launcher | **The game stays alive** (the runtime maps its guest memory once per process: starting it again means a new process), held: the drawer goes at once, the launcher comes up (`ACTION_SHOW_LAUNCHER`), and the menu's hold is let go only in `onStop`, after SDL's pause has put the background hold in place, so no frame runs in between. The launcher's Play brings this task back and the game goes on (`launcher: game running, bringing it back`). In a game's own app the row is **Back to the home screen**: the task goes behind Android's home screen (`moveTaskToBack`), held the same way; its icon brings it back. |
 | Quit game | The first press turns the row into « Press again to quit » (with « Progress since the last save is lost » under it, the only row that says more) for 4 s (moving away cancels it); the second press quits: `nativeQuit` lets the guest go, `sync()`s the saves, then `recomp_quit(0)` ([Quit](#quit)). |
 
+**Save states and fast-forward, native side (XBA-182).** `menu_jni.c` calls the shared interface
+`src/platform/recomp_states.h`: `nativeStatesAvailable` (a GBA or PS1 runtime is attached with a save folder),
+`nativeStateSave / Load(slot)` (the runtime saves / loads between frames under its frame lock; the menu holds the game
+then, so it never waits for a frame), `nativeStateTime / Thumb(slot)` (the slot file's header and thumbnail: 0 / null
+for an empty, damaged or other-version slot), `nativeFastForward(on)` / `nativeFastForwardOn` (the toggle; the Back +
+RT chord is read by the runtime itself). Slots are `<internal files>/save/<console>-<KEY>/state1.st` .. `state4.st`,
+beside the game's saves; a slot from another game is refused by the core when loaded (« holds another game's
+state »), as is one written by another build of the app (« saved by another version »). Formats, tests and the
+desktop keys: [consoles/README.md « Save states and fast-forward »](../../consoles/README.md). Logcat: « gba: state slot
+N saved (… bytes, frame …) », « ps1: state slot N loaded », « gba: fast-forward on at frame … ».
+
 The header shows the game's title (the launcher's choice) and « Paused · h:mm played », the time since the game
-started (this process). Hints: A Select, B Resume on the main page, B Back on Settings and Controls.
+started (this process). Hints: A Select, B Resume on the main page, B Back on the other pages.
 
 **Tests and screenshots.** `GameMenuTest` (Robolectric, a fake `GameMenu.Host` standing in for libmain and SDL): Back,
 a gamepad's Back, Guide, Select + Start timing (0.4 s no, 0.55 s yes, released early no), the edge swipe and what is
 not one, the panel's Menu; nothing reaching the game while open; the releases on open (keys, a centred joystick
 event, the overlay) and on close; B acting on release; stick and hat navigation with repeat; Back to launcher holding
 until `onStop`; Quit's confirmation and its timeout; the quick settings by pad (live, remembered, applied at start);
-the slide; the drawer's width. Rendered over a made-up game frame to `build/screenshots/menu-*.png`: closed, main,
-quit armed, quick settings, controls, closed with the overlay and a message; en and fr at 1080p and 720p
-(`--target app-unit-tests-out`). C: `tests/recomp_lifecycle` (the reasons) and `tests/apu_volume`.
+the slide; the drawer's width; the save state rows (only with states), the slot pages (« Empty » or the time, the
+thumbnail, the dimmed empty slot on Load), saving and loading with each error message, Fast-forward's toggle, Back to
+the opener, the Fast-forward line in a GBA game's Controls. Rendered over a made-up game frame to `build/screenshots/menu-*.png`: closed, main,
+quit armed, quick settings, controls, closed with the overlay and a message; en and fr at 1080p and 720p; and the
+save slots in English at 1080p (`menu-save-slots.png`) (`--target app-unit-tests-out`). C: `tests/recomp_lifecycle` (the reasons) and `tests/apu_volume`.
 
 ### Device check (in-game menu), for Alex
 

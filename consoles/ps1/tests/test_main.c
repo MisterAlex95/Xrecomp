@@ -2,7 +2,8 @@
  * EXE magic, fallback key, frame length) and headless runs (SDL's dummy drivers) of our homebrew through OpenBIOS:
  * an EXE fast-booted, the same through "fd:N" (the app shell's documents), a disc booted by the BIOS from its .cue,
  * memory cards read back and left alone while unchanged, the app shell's entry, the errors, and a game's save
- * (the mcard homebrew: BIOS memory card functions) written to disk after the debounce, then reloaded.
+ * (the mcard homebrew: BIOS memory card functions) written to disk after the debounce, then reloaded; save states
+ * (XBA-182) saved and loaded through recomp_states.h while the game runs on its own thread, another game's refused.
  *
  *   ps1_runtime_test [BIOS HOMEBREW_DIR]     (the runs skip, the helpers still run, when either is absent) */
 #include "host_pad.h"
@@ -12,6 +13,9 @@
 #include "ps1_devices.h"
 #include "ps1_runtime.h"
 #include "recomp_lifecycle.h"
+#include "recomp_states.h"
+
+#include <pthread.h>
 
 #include <SDL.h>
 
@@ -270,6 +274,90 @@ static void test_save(const char *dir, const char *hb)
     CHECK(system(cmd) == 0);
 }
 
+static void *run_thread(void *arg)
+{
+    static int rc;
+    rc = ps1_runtime_run((const ps1_runtime_opts *)arg);
+    return &rc;
+}
+
+static void wait_attached(void)
+{
+    for (int i = 0; i < 300 && !recomp_states_available(); i++)
+        usleep(10 * 1000);
+}
+
+/* Save states (XBA-182): gfx.exe plays paced on its own thread; slot 1 saved (with a 4:3 thumbnail of its 320 x 240
+ * picture) and loaded as the in-game menu does, slot 2 while the game is held; fast-forward toggled; the slot copied
+ * into another game's folder (cpu.exe) refused there. */
+static void test_states(const char *dir, const char *hb)
+{
+    char exe[600], exe2[600], slot[800], other[800], cmd[1700];
+    snprintf(exe, sizeof exe, "%s/gfx.exe", hb);
+    snprintf(exe2, sizeof exe2, "%s/cpu.exe", hb);
+    recomp_states_detach();
+    CHECK(recomp_states_save(1) == RECOMP_STATE_ENOGAME);
+    ps1_runtime_opts o;
+    ps1_runtime_opts_init(&o);
+    o.game = exe;
+    o.save_dir = dir;
+    o.title_key = "STAT-00001";
+    o.headless = 1;
+    pthread_t th;
+    void *ret = NULL;
+    SDL_Event quit;
+    memset(&quit, 0, sizeof quit);
+    quit.type = SDL_QUIT;
+    CHECK(pthread_create(&th, NULL, run_thread, &o) == 0);
+    wait_attached();
+    CHECK(recomp_states_available() && !strcmp(recomp_states_console(), "ps1"));
+    usleep(400 * 1000);
+    recomp_state_meta meta;
+    static uint16_t thumb[RECOMP_STATE_THUMB_W * RECOMP_STATE_THUMB_H];
+    CHECK(recomp_states_info(1, &meta, NULL) == RECOMP_STATE_EEMPTY);
+    CHECK(recomp_states_save(1) == RECOMP_STATE_OK);
+    CHECK(recomp_states_info(1, &meta, thumb) == RECOMP_STATE_OK);
+    CHECK(!strcmp(meta.console, "ps1") && !strcmp(meta.key, "STAT-00001") && meta.frames > 0);
+    CHECK(meta.thumb_w == 160 && meta.thumb_h == 120);
+    int lit = 0;
+    for (int i = 0; i < meta.thumb_w * meta.thumb_h; i++)
+        lit += thumb[i] != 0;
+    CHECK(lit > 100); /* gfx.exe's picture, not black */
+    snprintf(slot, sizeof slot, "%s/ps1-STAT-00001/state1.st", dir);
+    struct stat sb;
+    CHECK(stat(slot, &sb) == 0 && sb.st_size > 3000000);
+    recomp_ff_set(1);
+    usleep(100 * 1000);
+    recomp_ff_set(0);
+    CHECK(recomp_states_load(1) == RECOMP_STATE_OK);
+    recomp_lifecycle_pause_for(RECOMP_HOLD_MENU);
+    CHECK(recomp_states_save(2) == RECOMP_STATE_OK && recomp_states_load(2) == RECOMP_STATE_OK);
+    recomp_lifecycle_resume_for(RECOMP_HOLD_MENU);
+    usleep(50 * 1000);
+    CHECK(SDL_PushEvent(&quit) == 1);
+    CHECK(pthread_join(th, &ret) == 0 && ret && *(int *)ret == 0);
+    CHECK(!recomp_states_available());
+
+    if (access(exe2, R_OK) != 0)
+        return;
+    snprintf(other, sizeof other, "%s/ps1-OTHR-00002", dir);
+    mkdir(other, 0755);
+    snprintf(other, sizeof other, "%s/ps1-OTHR-00002/state3.st", dir);
+    snprintf(cmd, sizeof cmd, "cp '%s' '%s'", slot, other);
+    CHECK(system(cmd) == 0);
+    ps1_runtime_opts_init(&o);
+    o.game = exe2;
+    o.save_dir = dir;
+    o.title_key = "OTHR-00002";
+    o.headless = 1;
+    CHECK(pthread_create(&th, NULL, run_thread, &o) == 0);
+    wait_attached();
+    CHECK(recomp_states_info(3, &meta, NULL) == RECOMP_STATE_OK);
+    CHECK(recomp_states_load(3) == RECOMP_STATE_EGAME);
+    CHECK(SDL_PushEvent(&quit) == 1);
+    CHECK(pthread_join(th, &ret) == 0 && ret && *(int *)ret == 0);
+}
+
 static void test_runs(const char *bios, const char *hb)
 {
     char dir[] = "/tmp/ps1_runtime_test.XXXXXX", exe[600], cue[600], shot[300], card[400], spec[32];
@@ -361,6 +449,7 @@ static void test_runs(const char *bios, const char *hb)
 
     /* 6: a game's save written by the debounce, then reloaded. */
     test_save(dir, hb);
+    test_states(dir, hb);
 
     /* 7: multi-disc (XBA-166): a .m3u plays its first disc (fast boot: the BIOS boots it without its shell); a swap
      * opens the lid, a second later closes it on the other disc; an image that does not open is refused. */

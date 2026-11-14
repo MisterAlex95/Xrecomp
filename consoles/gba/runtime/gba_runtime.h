@@ -24,7 +24,8 @@ typedef struct gba_runtime_opts {
     /* The game's key (GAME-CRC32, recomp_pack_rom_identify); NULL or "": computed from the ROM (gba_runtime_key). */
     const char *title_key;
     /* Saves: <save_dir>/gba-<KEY>/game.sav, read before the first frame, written a second after the game last wrote
-     * its save, when the app pauses (background, in-game menu) and at exit. NULL: no saves. */
+     * its save, when the app pauses (background, in-game menu) and at exit. Save states (XBA-182, recomp_states.h):
+     * <save_dir>/gba-<KEY>/state1.st .. state4.st. NULL: no saves, no states. */
     const char *save_dir;
     /* A 16 KB BIOS image (never shipped); NULL: $RECOMP_GBA_BIOS, else the core's built-in BIOS. */
     const char *bios;

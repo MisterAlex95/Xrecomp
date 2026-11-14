@@ -138,6 +138,24 @@ void ps1_mdec_write(ps1_mdec *d, uint32_t reg, uint32_t v);
 void ps1_mdec_dma_write(ps1_mdec *d, const uint32_t *words, size_t n); /* DMA0 in */
 size_t ps1_mdec_dma_read(ps1_mdec *d, uint32_t *words, size_t n);      /* DMA1 out */
 
+/* ---- Save states (XBA-182) -------------------------------------------------------------------------------------- */
+/* Each device's state as opaque bytes of this build (its own struct without host pointers: the IRQ sink, the disc,
+ * buffers; the SPU adds its RAM, the MDEC its output not read yet). size: the bytes save writes (the MDEC's depends
+ * on its output queue). load: 0, or -1 when n is not what this build writes (the device is left as it was). The
+ * placeholders keep nothing (size 0). The core's ps1_state_save / ps1_state_load (ps1_core.h) put them together. */
+size_t ps1_gpu_state_size(ps1_gpu *g);
+void ps1_gpu_state_save(ps1_gpu *g, uint8_t *out);
+int ps1_gpu_state_load(ps1_gpu *g, const uint8_t *in, size_t n);
+size_t ps1_cdrom_state_size(ps1_cdrom *c);
+void ps1_cdrom_state_save(ps1_cdrom *c, uint8_t *out);
+int ps1_cdrom_state_load(ps1_cdrom *c, const uint8_t *in, size_t n);
+size_t ps1_spu_state_size(ps1_spu *s);
+void ps1_spu_state_save(ps1_spu *s, uint8_t *out);
+int ps1_spu_state_load(ps1_spu *s, const uint8_t *in, size_t n);
+size_t ps1_mdec_state_size(ps1_mdec *d);
+void ps1_mdec_state_save(ps1_mdec *d, uint8_t *out);
+int ps1_mdec_state_load(ps1_mdec *d, const uint8_t *in, size_t n);
+
 #ifdef __cplusplus
 }
 #endif

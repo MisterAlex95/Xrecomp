@@ -25,6 +25,7 @@ endif()
 #                      the kernel layout, a synthetic disc booted through SYSTEM.CNF, the memory card file system
 #   ps1_hle_*          the programs above under the HLE BIOS (no image): PASS, the same result block as under
 #                      OpenBIOS (ps1_hle_same_*), disc boots, mcard, ps1-tests, recompiled in lockstep (ps1_hle_rc_*)
+#   ps1_state_*        save states: the round trip, interpreter and packs (ps1_rc_state_*), refusals (XBA-182)
 #   ps1_rc_*           the same programs recompiled (ps1_tools.recomp + cc, discovery loop), in lockstep with the
 #                      interpreter; ps1_rc_fuzz: random MIPS programs under timer IRQs (needs python3, cc)
 # The EXE / BIOS tests skip (exit 77) when their inputs are absent, so a CI job without Docker or network stays green.
@@ -309,4 +310,39 @@ if(TARGET ps1_run)
              ${PS1_TESTS_DIR}/timers/timers.exe ${PS1_RC_WORK}/hle_jcz_timers 12000 --tty --until-tty "Done." --quiet)
     list(APPEND rc ps1_hle_rc_jcz_timers)
     set_tests_properties(${rc} PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900)
+
+    # Save states (XBA-182, state_exe.sh): the round trip (a state saved after frame 150, the next 150 frames hashed,
+    # then the same from the state loaded in a new machine) on every homebrew under OpenBIOS and the HLE BIOS, a disc
+    # read in progress (overlay.cue fast-booted: the CD-ROM controller, its sector buffers and the drive's position
+    # are in the state), with each program's pack (ps1_rc_state_*: states cross between lifted and interpreted
+    # runs), and refusals: another game's state, a state taken under another BIOS.
+    set(PS1_STATE sh ${CMAKE_CURRENT_SOURCE_DIR}/state_exe.sh $<TARGET_FILE:ps1_run>)
+    set(PS1_STATE_WORK ${CMAKE_CURRENT_BINARY_DIR}/state)
+    set(st)
+    foreach(prog ${hb})
+        add_test(NAME ps1_state_hb_${prog} COMMAND ${PS1_STATE} ${PS1_BIOS} ${PS1_HOMEBREW_DIR}/${prog}.exe
+                 ${PS1_STATE_WORK}/hb_${prog} interp)
+        add_test(NAME ps1_state_hle_hb_${prog} COMMAND ${PS1_STATE} hle ${PS1_HOMEBREW_DIR}/${prog}.exe
+                 ${PS1_STATE_WORK}/hle_hb_${prog} interp)
+        add_test(NAME ps1_rc_state_hb_${prog} COMMAND ${PS1_STATE} ${PS1_BIOS} ${PS1_HOMEBREW_DIR}/${prog}.exe
+                 ${PS1_STATE_WORK}/rc_hb_${prog} pack)
+        list(APPEND st ps1_state_hb_${prog} ps1_state_hle_hb_${prog} ps1_rc_state_hb_${prog})
+    endforeach()
+    if(PS1_HAVE_CD)
+        add_test(NAME ps1_state_hb_disc_overlay COMMAND ${PS1_STATE} ${PS1_BIOS} ${PS1_HOMEBREW_DIR}/overlay.cue
+                 ${PS1_STATE_WORK}/hb_disc_overlay interp --fast-boot)
+        add_test(NAME ps1_rc_state_hb_disc_overlay COMMAND ${PS1_STATE} ${PS1_BIOS} ${PS1_HOMEBREW_DIR}/overlay.cue
+                 ${PS1_STATE_WORK}/rc_hb_disc_overlay pack --fast-boot)
+        add_test(NAME ps1_state_hle_hb_disc_overlay COMMAND ${PS1_STATE} hle ${PS1_HOMEBREW_DIR}/overlay.cue
+                 ${PS1_STATE_WORK}/hle_hb_disc_overlay interp)
+        set_tests_properties(ps1_state_hb_disc_overlay ps1_rc_state_hb_disc_overlay ps1_state_hle_hb_disc_overlay
+                             PROPERTIES ENVIRONMENT "STATE_N=100;STATE_M=200")
+        list(APPEND st ps1_state_hb_disc_overlay ps1_rc_state_hb_disc_overlay ps1_state_hle_hb_disc_overlay)
+    endif()
+    add_test(NAME ps1_state_wrong_game COMMAND ${PS1_STATE} ${PS1_BIOS} ${PS1_HOMEBREW_DIR}/timer_irq.exe
+             ${PS1_STATE_WORK}/wrong_game other:${PS1_HOMEBREW_DIR}/cpu.exe)
+    add_test(NAME ps1_state_wrong_bios COMMAND ${PS1_STATE} ${PS1_BIOS} ${PS1_HOMEBREW_DIR}/timer_irq.exe
+             ${PS1_STATE_WORK}/wrong_bios bios:hle)
+    list(APPEND st ps1_state_wrong_game ps1_state_wrong_bios)
+    set_tests_properties(${st} PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900)
 endif()

@@ -22,6 +22,7 @@
  * combination, picked once per primitive; no per-pixel indirect calls. */
 #include "ps1_devices.h"
 
+#include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -1110,3 +1111,28 @@ ps1_gpu *ps1_gpu_create(ps1_irq_sink irq)
 }
 
 void ps1_gpu_destroy(ps1_gpu *g) { free(g); }
+
+/* ---- Save states (XBA-182) ------------------------------------------------------------------------------------ */
+
+size_t ps1_gpu_state_size(ps1_gpu *g)
+{
+    (void)g;
+    return sizeof(ps1_gpu);
+}
+
+void ps1_gpu_state_save(ps1_gpu *g, uint8_t *out)
+{
+    size_t n = sizeof g->irq;
+    memcpy(out, g, sizeof *g);
+    memset(out + offsetof(ps1_gpu, irq), 0, n); /* the host's sink, not state */
+}
+
+int ps1_gpu_state_load(ps1_gpu *g, const uint8_t *in, size_t n)
+{
+    if (n != sizeof *g)
+        return -1;
+    ps1_irq_sink irq = g->irq;
+    memcpy(g, in, sizeof *g);
+    g->irq = irq;
+    return 0;
+}

@@ -43,4 +43,23 @@
     <string name="MENU_DISC_PLAYING">In the drive</string>
     <string name="MENU_DISC_DONE">Disc %1$d: the lid opens, the disc goes in</string>
     <string name="MENU_DISC_FAILED">The disc cannot be opened</string>
+    <!-- XBA-182: a GBA or PS1 game's save states (four slots) and fast-forward. -->
+    <string name="MENU_STATE_SAVE">Save state</string>
+    <string name="MENU_STATE_LOAD">Load state</string>
+    <string name="MENU_FAST_FORWARD">Fast-forward</string>
+    <string name="MENU_STATE_SLOT">Slot %1$d</string>
+    <string name="MENU_STATE_EMPTY">Empty</string>
+    <string name="MENU_STATE_SAVED">Saved to slot %1$d</string>
+    <string name="MENU_STATE_LOADED">Slot %1$d loaded</string>
+    <string name="MENU_STATE_EMPTY_SLOT">Slot %1$d is empty</string>
+    <string name="MENU_STATE_ERR_OTHER_GAME">Slot %1$d holds another game\'s state</string>
+    <string name="MENU_STATE_ERR_VERSION">Slot %1$d was saved by another version of the app</string>
+    <string name="MENU_STATE_ERR_WRITE">Slot %1$d cannot be written</string>
+    <string name="MENU_STATE_ERR_READ">Slot %1$d cannot be read</string>
+    <string name="MENU_STATE_ERR_DAMAGED">Slot %1$d is damaged</string>
+    <string name="MENU_STATE_ERR_NO_GAME">Save states are not available for this game</string>
+    <string name="MENU_STATE_SAVE_FAILED">Slot %1$d: the state was not saved</string>
+    <string name="MENU_STATE_LOAD_FAILED">Slot %1$d: the state was not loaded</string>
+    <string name="CTL_FF">Back + RT</string>
+    <string name="CTL_FF_X">Fast-forward (hold)</string>
 </resources>

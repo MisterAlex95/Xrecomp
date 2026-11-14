@@ -73,6 +73,16 @@ static void flush_cache(struct gba_rc_state *s)
     s->interp_key = KEY_NONE;
 }
 
+void gba_recomp_state_loaded(gba_machine *m)
+{
+    struct gba_rc_state *s = m->rc;
+    if (!s)
+        return;
+    s->expect = KEY_NONE;
+    s->interp_key = KEY_NONE;
+    s->interp_left = 0;
+}
+
 static void drop_table(struct gba_rc_state *s)
 {
     free(s->isl[0]);

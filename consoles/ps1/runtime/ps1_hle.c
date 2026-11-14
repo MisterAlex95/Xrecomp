@@ -2895,3 +2895,37 @@ void ps1_hle_destroy(ps1_machine *m)
     free(m->hle);
     m->hle = NULL;
 }
+
+/* ---- Save states (XBA-182) ------------------------------------------------------------------------------------ */
+
+/* The HLE BIOS's own state (its kernel objects, files, heaps, libc state); 0 bytes with a BIOS image. */
+size_t ps1_hle_state_size(ps1_machine *m)
+{
+    return m->hle ? sizeof(struct ps1_hle) : 0;
+}
+
+int ps1_hle_state_busy(ps1_machine *m)
+{
+    return m->hle && m->hle->depth != 0;
+}
+
+void ps1_hle_state_save(ps1_machine *m, uint8_t *out)
+{
+    if (!m->hle)
+        return;
+    struct ps1_hle c = *m->hle;
+    c.trace = false;
+    memcpy(out, &c, sizeof c);
+}
+
+int ps1_hle_state_load(ps1_machine *m, const uint8_t *in, size_t n)
+{
+    if (n != ps1_hle_state_size(m))
+        return -1;
+    if (!m->hle)
+        return 0;
+    bool trace = m->hle->trace;
+    memcpy(m->hle, in, sizeof *m->hle);
+    m->hle->trace = trace;
+    return 0;
+}

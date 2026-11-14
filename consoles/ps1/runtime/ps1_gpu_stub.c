@@ -119,3 +119,23 @@ const uint16_t *ps1_gpu_vram(ps1_gpu *g)
 {
     return g->vram;
 }
+
+/* Save states (XBA-182): a placeholder has no state worth keeping. */
+size_t ps1_gpu_state_size(ps1_gpu *x)
+{
+    (void)x;
+    return 0;
+}
+
+void ps1_gpu_state_save(ps1_gpu *x, uint8_t *out)
+{
+    (void)x;
+    (void)out;
+}
+
+int ps1_gpu_state_load(ps1_gpu *x, const uint8_t *in, size_t n)
+{
+    (void)x;
+    (void)in;
+    return n == 0 ? 0 : -1;
+}

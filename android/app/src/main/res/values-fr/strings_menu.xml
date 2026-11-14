@@ -37,4 +37,22 @@
     <string name="MENU_DISC_PLAYING">Dans le lecteur</string>
     <string name="MENU_DISC_DONE">Disque %1$d : le capot s\'ouvre, le disque entre</string>
     <string name="MENU_DISC_FAILED">Le disque ne peut pas être ouvert</string>
+    <string name="MENU_STATE_SAVE">Sauvegarder l\'état</string>
+    <string name="MENU_STATE_LOAD">Charger un état</string>
+    <string name="MENU_FAST_FORWARD">Avance rapide</string>
+    <string name="MENU_STATE_SLOT">Emplacement %1$d</string>
+    <string name="MENU_STATE_EMPTY">Vide</string>
+    <string name="MENU_STATE_SAVED">État sauvegardé dans l\'emplacement %1$d</string>
+    <string name="MENU_STATE_LOADED">Emplacement %1$d chargé</string>
+    <string name="MENU_STATE_EMPTY_SLOT">L\'emplacement %1$d est vide</string>
+    <string name="MENU_STATE_ERR_OTHER_GAME">L\'emplacement %1$d contient l\'état d\'un autre jeu</string>
+    <string name="MENU_STATE_ERR_VERSION">L\'emplacement %1$d vient d\'une autre version de l\'appli</string>
+    <string name="MENU_STATE_ERR_WRITE">L\'emplacement %1$d ne peut pas être écrit</string>
+    <string name="MENU_STATE_ERR_READ">L\'emplacement %1$d ne peut pas être lu</string>
+    <string name="MENU_STATE_ERR_DAMAGED">L\'emplacement %1$d est endommagé</string>
+    <string name="MENU_STATE_ERR_NO_GAME">Pas de sauvegarde d\'état pour ce jeu</string>
+    <string name="MENU_STATE_SAVE_FAILED">Emplacement %1$d : l\'état n\'a pas été sauvegardé</string>
+    <string name="MENU_STATE_LOAD_FAILED">Emplacement %1$d : l\'état n\'a pas été chargé</string>
+    <string name="CTL_FF">Retour + RT</string>
+    <string name="CTL_FF_X">Avance rapide (maintenus)</string>
 </resources>

@@ -120,6 +120,28 @@ if(TARGET gba_run)
                     --frames 300 --reg-result 12)
         set_tests_properties(gba_rc_jsmolka_${t} PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 600)
     endforeach()
+    # Save states (XBA-182): the round trip on every homebrew (a state saved after frame 120, the next 180 frames
+    # hashed, then the same from the state loaded in a new machine), interpreter alone (gba_state_hb_*) and with the
+    # ROM's pack (gba_rc_state_hb_*: states cross between lifted and interpreted runs), and another game's state
+    # refused (gba_state_wrong_game). state_rom.sh.
+    set(GBA_STATE_ROM ${CMAKE_CURRENT_SOURCE_DIR}/state_rom.sh)
+    foreach(prog hello cpu timer_irq iwram_copy gfx pad sound)
+        add_test(NAME gba_state_hb_${prog}
+            COMMAND sh ${GBA_STATE_ROM} $<TARGET_FILE:gba_run> ${GBA_HOMEBREW_DIR}/${prog}.gba
+                    ${CMAKE_CURRENT_BINARY_DIR}/state/hb_${prog} interp)
+        add_test(NAME gba_rc_state_hb_${prog}
+            COMMAND sh ${GBA_STATE_ROM} $<TARGET_FILE:gba_run> ${GBA_HOMEBREW_DIR}/${prog}.gba
+                    ${CMAKE_CURRENT_BINARY_DIR}/state/rc_hb_${prog} pack)
+        set_tests_properties(gba_state_hb_${prog} PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
+        set_tests_properties(gba_rc_state_hb_${prog} PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900)
+    endforeach()
+    add_test(NAME gba_state_hb_lle_sound
+        COMMAND sh ${GBA_STATE_ROM} $<TARGET_FILE:gba_run> ${GBA_HOMEBREW_DIR}/sound.gba
+                ${CMAKE_CURRENT_BINARY_DIR}/state/hb_lle_sound interp --bios ${GBA_BIOS})
+    add_test(NAME gba_state_wrong_game
+        COMMAND sh ${GBA_STATE_ROM} $<TARGET_FILE:gba_run> ${GBA_HOMEBREW_DIR}/gfx.gba
+                ${CMAKE_CURRENT_BINARY_DIR}/state/wrong_game other:${GBA_HOMEBREW_DIR}/sound.gba)
+    set_tests_properties(gba_state_hb_lle_sound gba_state_wrong_game PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
     find_package(Python3 COMPONENTS Interpreter QUIET)
     if(Python3_Interpreter_FOUND)
         add_test(NAME gba_rc_fuzz
