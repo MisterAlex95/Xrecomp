@@ -1309,6 +1309,78 @@ static void t_wrote(void)
 }
 
 /* The homebrew gfx.z64 frame as libdragon's rdpq emits it (fill and copy mode fix-ups included), with its checks. */
+/* ---- Internal resolution (XBA-185, n64_rdp.h) ----------------------------------------------------------------------- */
+static void t_upscale(void)
+{
+    cur = "upscale options";
+    static const struct { const char *in; int out; } parse[] = {
+        { "1", 1 }, { "2", 2 }, { "4", 4 }, { "8", 8 }, { "3", 2 }, { "6", 4 }, { "16", 8 }, { "0", 0 }, { "-2", 0 },
+        { "", 0 }, { "x2", 0 }, { "2x", 0 },
+    };
+    for (size_t i = 0; i < sizeof parse / sizeof parse[0]; i++) {
+        char what[64];
+        snprintf(what, sizeof what, "parse \"%s\"", parse[i].in);
+        expect(what, (uint32_t)n64_rdp_upscale_parse(parse[i].in), (uint32_t)parse[i].out);
+    }
+    expect("parse NULL", (uint32_t)n64_rdp_upscale_parse(NULL), 0);
+    char *saved_n64 = getenv("RECOMP_N64_UPSCALE") ? strdup(getenv("RECOMP_N64_UPSCALE")) : NULL;
+    char *saved = getenv("RECOMP_UPSCALE") ? strdup(getenv("RECOMP_UPSCALE")) : NULL;
+    unsetenv("RECOMP_N64_UPSCALE");
+    unsetenv("RECOMP_UPSCALE");
+    expect("env: default 1x", (uint32_t)n64_rdp_upscale_env(), 1);
+    setenv("RECOMP_UPSCALE", "4", 1);
+    expect("env: shared RECOMP_UPSCALE", (uint32_t)n64_rdp_upscale_env(), 4);
+    setenv("RECOMP_N64_UPSCALE", "2", 1);
+    expect("env: RECOMP_N64_UPSCALE overrides", (uint32_t)n64_rdp_upscale_env(), 2);
+    setenv("RECOMP_N64_UPSCALE", "bad", 1);
+    expect("env: an invalid N64 value falls back to the shared one", (uint32_t)n64_rdp_upscale_env(), 4);
+    unsetenv("RECOMP_N64_UPSCALE");
+    unsetenv("RECOMP_UPSCALE");
+    if (saved_n64)
+        setenv("RECOMP_N64_UPSCALE", saved_n64, 1);
+    if (saved)
+        setenv("RECOMP_UPSCALE", saved, 1);
+    free(saved_n64);
+    free(saved);
+
+    /* The RDP under test asked for 2x: the software RDP stays 1x without a scanout; the Vulkan one draws at 2x and its
+     * VI scans a 320 x 240 frame buffer out at 1280 x 480 (640 VI pixels x 2, 240 lines x 2). */
+    n64_rdp_set_upscale(2);
+    fresh("upscale 2x");
+    n64_rdp_set_upscale(0);
+    const uint32_t vi[14] = { 0x3302 /* 16-bit, AA mode 3, pixel advance */, FB_ADDR, 320, 0x200, 0, 0x03E52239,
+                              0x20D, 0xC15, 0x0C150C15, 108u << 16 | 748u, 37u << 16 | 511u, 0x000E0204, 0x200, 0x400 };
+    static uint32_t px[1280 * 480];
+    int w = 0, h = 0;
+    if (!vk) {
+        expect("software RDP: 1x", (uint32_t)n64_rdp_upscale(G.dp), 1);
+        expect("software RDP: no scanout", (uint32_t)n64_rdp_scanout_scale(G.dp), 0);
+        check(n64_rdp_scanout(G.dp, vi, 0, px, 1280, 480, &w, &h) != 0, "software RDP: scanout refused");
+        return;
+    }
+    expect("Vulkan RDP: 2x", (uint32_t)n64_rdp_upscale(G.dp), 2);
+    expect("Vulkan RDP: scanout 2x", (uint32_t)n64_rdp_scanout_scale(G.dp), 2);
+    frame16(320, 240);
+    L(&LS, c_modes(OM_FILL));
+    L(&LS, c_fill_color(0x00010001)); /* black, coverage */
+    L(&LS, c_fill_rect(0, 0, 319 * 4, 239 * 4));
+    L(&LS, c_sync_pipe());
+    L(&LS, c_fill_color(0xF801F801)); /* red */
+    L(&LS, c_fill_rect(40 * 4, 30 * 4, 119 * 4, 69 * 4));
+    L(&LS, c_sync_full());
+    go();
+    expect_px16(320, 50, 40, 0xF801); /* RDRAM still holds the native picture */
+    check(n64_rdp_scanout(G.dp, vi, 0, px, 640, 480, &w, &h) != 0, "scanout larger than the buffer refused");
+    check(n64_rdp_scanout(G.dp, vi, 0, px, 1280, 480, &w, &h) == 0, "scanout");
+    expect("scanout width", (uint32_t)w, 1280);
+    expect("scanout height", (uint32_t)h, 480);
+    if (w == 1280 && h == 480) {
+        /* fb (x, y) -> VI pixel 2x (X scale 0.5) -> 4x out; fb row y -> active line y, field row y + 1 -> 2 (y + 1) */
+        expect("red inside", px[(2 * (40 + 1) + 1) * 1280 + 4 * 50 + 2] & 0xF0F0F0, 0xF00000);
+        expect("black outside", px[(2 * (100 + 1) + 1) * 1280 + 4 * 200 + 2], 0);
+    }
+}
+
 static void t_gfx(void)
 {
     fresh("gfx.z64 replica");
@@ -1548,6 +1620,7 @@ int main(int argc, char **argv)
     t_matrix();
     t_wrote();
     t_gfx();
+    t_upscale();
     if (G.dp)
         rig_close(&G);
     if (failures) {

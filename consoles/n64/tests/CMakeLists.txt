@@ -155,6 +155,12 @@ if(TARGET n64_run)
                  ${N64_HOMEBREW_DIR}/${prog}.z64 --result --frames 900 --quiet)
         set_tests_properties(n64_hb_${prog} PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 180)
     endforeach()
+    # Internal resolution (XBA-185): gfx.z64 on the Vulkan RDP at 2x, a 1280 x 480 scanout matching the 1x picture.
+    if(N64_HAVE_RCP AND TARGET n64_rdp_vk)
+        add_test(NAME n64_hb_gfx_upscale COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/run_upscale.sh $<TARGET_FILE:n64_run>
+                 ${N64_HOMEBREW_DIR}/gfx.z64 ${CMAKE_CURRENT_BINARY_DIR}/upscale)
+        set_tests_properties(n64_hb_gfx_upscale PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 400)
+    endif()
     add_test(NAME n64_systemtest COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/run_systemtest.sh $<TARGET_FILE:n64_run>
              ${N64_SYSTEMTEST} ${CMAKE_CURRENT_SOURCE_DIR}/systemtest_known.txt ${N64_HAVE_RCP})
     set_tests_properties(n64_systemtest PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)

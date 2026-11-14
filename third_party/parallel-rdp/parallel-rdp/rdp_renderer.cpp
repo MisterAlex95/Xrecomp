@@ -88,9 +88,13 @@ bool Renderer::has_pipeline_failure() const
 		caps.ubershader ? nullptr : shader_bank->depth_blend,
 		caps.ubershader ? nullptr : shader_bank->rasterizer,
 		shader_bank->extract_vram, shader_bank->masked_rdram_resolve,
-		shader_bank->clear_write_mask, shader_bank->update_upscaled_domain_post,
-		shader_bank->update_upscaled_domain_pre, shader_bank->update_upscaled_domain_resolve,
-		shader_bank->clear_super_sampled_write_mask,
+		shader_bank->clear_write_mask,
+		// The upscaling programs only count when upscaling: a device whose upscaled pipelines failed can still run at
+		// 1x (the N64 runtime tries again without upscaling, XBA-185).
+		caps.upscaling > 1 ? shader_bank->update_upscaled_domain_post : nullptr,
+		caps.upscaling > 1 ? shader_bank->update_upscaled_domain_pre : nullptr,
+		caps.upscaling > 1 ? shader_bank->update_upscaled_domain_resolve : nullptr,
+		caps.super_sample_readback ? shader_bank->clear_super_sampled_write_mask : nullptr,
 	};
 	for (auto *program : programs)
 		if (program && program->has_mandatory_failure())

@@ -2,7 +2,8 @@
  * software RDP (n64_rdp.c, its functions renamed n64_rdp_sw_*) or the Vulkan one (n64_rdp_vk.cpp, paraLLEl-RDP). The
  * back end is chosen at n64_rdp_create; every other call goes through its table. A back end that stops being able to
  * draw (ops->failed: the Vulkan RDP with a shader its driver cannot compile) is replaced by the software RDP once
- * the RDP is idle, after n64_rdp_run or n64_rdp_flush. */
+ * the RDP is idle, after n64_rdp_run or n64_rdp_flush. The internal resolution (XBA-185, n64_rdp.h) is resolved here
+ * ($RECOMP_N64_UPSCALE, $RECOMP_UPSCALE) and asked of the back end; only the Vulkan one honours it. */
 #include "n64_rdp.h"
 #include "n64_rdp_backend.h"
 
@@ -33,7 +34,8 @@ static int sw_set_threads(void *d, int n) { return n64_rdp_sw_set_threads(d, n);
 static void sw_flush(void *d) { n64_rdp_sw_flush(d); }
 
 const n64_rdp_ops n64_rdp_sw_ops = { "software", sw_create, sw_destroy, sw_reset, sw_attach_dmem,
-                                     sw_read_reg, sw_write_reg, sw_run, sw_set_threads, sw_flush, NULL };
+                                     sw_read_reg, sw_write_reg, sw_run, sw_set_threads, sw_flush, NULL,
+                                     NULL, NULL, NULL };
 
 struct n64_rdp {
     const n64_rdp_ops *ops;
@@ -66,6 +68,58 @@ n64_rdp_backend n64_rdp_backend_parse(const char *s)
 
 const char *n64_rdp_backend_name(const n64_rdp *d) { return d ? d->ops->name : "none"; }
 
+/* ---- Internal resolution (XBA-185) ---------------------------------------------------------------------------------- */
+static int s_upscale; /* n64_rdp_set_upscale; 0: the environment */
+
+int n64_rdp_upscale_parse(const char *s)
+{
+    if (!s || !*s)
+        return 0;
+    char *end;
+    long v = strtol(s, &end, 10);
+    if (end == s || *end || v < 1)
+        return 0;
+    return v >= 8 ? 8 : v >= 4 ? 4 : v >= 2 ? 2 : 1;
+}
+
+int n64_rdp_upscale_env(void)
+{
+    int f = n64_rdp_upscale_parse(getenv("RECOMP_N64_UPSCALE"));
+    if (!f)
+        f = n64_rdp_upscale_parse(getenv("RECOMP_UPSCALE"));
+    return f ? f : 1;
+}
+
+void n64_rdp_set_upscale(int factor)
+{
+    s_upscale = factor <= 0 ? 0 : factor >= 8 ? 8 : factor >= 4 ? 4 : factor >= 2 ? 2 : 1;
+}
+
+int n64_rdp_upscale_wanted(void) { return s_upscale ? s_upscale : n64_rdp_upscale_env(); }
+
+int n64_rdp_upscale(const n64_rdp *d) { return d && d->ops->upscale ? d->ops->upscale(d->impl) : 1; }
+
+int n64_rdp_scanout_scale(const n64_rdp *d)
+{
+    return d && d->ops->scanout_scale && d->ops->scanout ? d->ops->scanout_scale(d->impl) : 0;
+}
+
+int n64_rdp_scanout(n64_rdp *d, const uint32_t *vi, uint32_t field, uint32_t *xrgb, int max_w, int max_h, int *w,
+                    int *h)
+{
+    if (!n64_rdp_scanout_scale(d))
+        return -1;
+    return d->ops->scanout(d->impl, vi, field, xrgb, max_w, max_h, w, h);
+}
+
+/* The software RDP draws at 1x: said once when more was asked (also when the Vulkan RDP could not start or failed). */
+static void upscale_needs_vulkan(void)
+{
+    int f = n64_rdp_upscale_wanted();
+    if (f > 1)
+        fprintf(stderr, "n64: upscale %dx needs the Vulkan RDP, the software RDP draws at 1x\n", f);
+}
+
 n64_rdp *n64_rdp_create(n64_rcp_bus bus)
 {
     n64_rdp *d = calloc(1, sizeof *d);
@@ -92,6 +146,8 @@ n64_rdp *n64_rdp_create(n64_rcp_bus bus)
     if (!d->impl) {
         d->ops = &n64_rdp_sw_ops;
         d->impl = d->ops->create(bus);
+        if (d->impl)
+            upscale_needs_vulkan();
     }
     if (!d->impl) {
         free(d);
@@ -137,6 +193,8 @@ static void replace_failed(n64_rdp *d)
         return;
     }
     fprintf(stderr, "n64: the %s RDP failed, software RDP from now on\n", d->ops->name);
+    if (n64_rdp_upscale(d) > 1)
+        upscale_needs_vulkan();
     d->ops->destroy(d->impl);
     d->ops = &n64_rdp_sw_ops;
     d->impl = sw;
