@@ -121,6 +121,10 @@ struct DeviceFeatures
 	VkPhysicalDeviceSubgroupSizeControlFeatures subgroup_size_control_features = {};
 
 	VkDriverId driver_id = {};
+	// xboxrecomp-android patch (third_party/parallel-rdp/README.md): the driver's name and version string
+	// (VkPhysicalDeviceDriverProperties), for the N64 RDP's start line; empty without VK_KHR_driver_properties.
+	char driver_name[VK_MAX_DRIVER_NAME_SIZE] = {};
+	char driver_info[VK_MAX_DRIVER_INFO_SIZE] = {};
 
 	// References Vulkan::Context.
 	const VkPhysicalDeviceFeatures2 *pdf2 = nullptr;

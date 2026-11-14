@@ -440,13 +440,26 @@ bit for bit against angrylion.
   shaders used them), then with paraLLEl-RDP's ubershader. The ubershader is skipped on Qualcomm's proprietary
   driver (Adreno 740 on the AYN Thor): it passes the check there but Ocarina of Time comes out black, without a
   Vulkan error; `RECOMP_N64_RDP_UBERSHADER=1` tries it anyway. When all three fail, the software RDP takes over. The
-  start line names what was kept (`n64: Vulkan RDP on <GPU> (paraLLEl-RDP, default shaders)`). Our Granite patch
+  start line names what was kept and the driver (`n64: Vulkan RDP on <GPU> (paraLLEl-RDP, default shaders; driver
+  <driverName> <driverInfo>, system)`). Our Granite patch
   never compiles a failed pipeline twice, and logs the program and its spec constants once
   ([third_party/parallel-rdp](../third_party/parallel-rdp/README.md)). If a pipeline still fails during the game
   (another frame buffer format, for example), the failure is logged and `n64_rdp_select.c` switches to the software
   RDP when the RDP is idle. The RDP state is lost then, and so is the frame being drawn. `RECOMP_N64_RDP_CHECK=0`
   skips the check. `PARALLEL_RDP_TEST_FAIL_PROGRAM=depth_blend` (or `rasterizer`, `tile_binning_combined`, ...)
   fakes a failing driver, to test the fallbacks on lavapipe.
+- **Custom Vulkan driver (Android).** The player can supply a driver, Mesa Turnip for the Adreno, which compiles
+  paraLLEl-RDP's shaders where Qualcomm's driver does not. `n64_vk_driver.c` reads the selection the app put in the
+  environment (`RECOMP_VK_DRIVER_DIR`, `RECOMP_VK_DRIVER_LIB`, `RECOMP_VK_DRIVER_ID`, `RECOMP_VK_HOOK_DIR`;
+  `RECOMP_VK_DRIVER=system` forces the system driver: [environment variables](../docs/runtime/environment-variables.md#custom-vulkan-driver-n64-rdp)),
+  dlopens `libxba_vkdriver.so` (libadrenotools, [third_party/adrenotools](../third_party/adrenotools/README.md)) and
+  hands its `vkGetInstanceProcAddr` to Granite's `init_loader`. The same shader tries run on that driver. If it cannot
+  be opened, makes no device, or fails every try, the system's libvulkan is loaded again and the tries run there:
+  custom driver, then system driver, then the software RDP, each step logged. When adrenotools could not load the
+  custom library it silently loads Qualcomm's driver; the `driverID` tells, and the log says `custom driver <id> was
+  not loaded`. A driver that crashes the process instead: `vk_drivers/trying` holds its id while it is opened and
+  checked, and the next start skips it. The start line ends `custom <id>` or `system`. Off Android the open always
+  fails (no `libxba_vkdriver.so`), the same path as a driver that cannot be opened.
 
 Tests (`consoles/n64/tests`, built with `-DXBR_N64_RDP_VULKAN=ON`; without a GPU, Mesa's lavapipe with
 `VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json`):
@@ -461,6 +474,9 @@ Tests (`consoles/n64/tests`, built with `-DXBR_N64_RDP_VULKAN=ON`; without a GPU
   edge pixels angrylion leaves out. The busy scene differs in 25 % of its pixels, 72 % of those off by one step of a
   5-bit channel (the software RDP's interpolation and filter rounding). The 64 random mode-matrix lists (every mode,
   many invalid on purpose) differ in 0.1 to 11 % of their colour units (one is identical).
+- `n64_rdp_vulkan_bad_driver`: `n64_rdp_vulkan` with a custom driver that cannot be opened; the log says why and the
+  system driver passes the same tests. `n64_vk_driver` (every build, no Vulkan): the `RECOMP_VK_*` variables, the
+  trial marker and `last_start`.
 - `n64_hb_gfx` passes with `RECOMP_N64_RDP=vulkan` too.
 - lavapipe's speed means nothing for a phone.
 

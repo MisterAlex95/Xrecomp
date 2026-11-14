@@ -27,9 +27,16 @@
  * ubershader (not on Qualcomm's driver: ubershader_draws_wrong), then create returns NULL and the software RDP takes
  * over. A failed pipeline is never compiled again
  * (our Granite patch); one that still fails during the game is logged once and reported through vk_failed, and
- * n64_rdp_select.c switches to the software RDP. RECOMP_N64_RDP_CHECK=0 skips the check. */
+ * n64_rdp_select.c switches to the software RDP. RECOMP_N64_RDP_CHECK=0 skips the check.
+ *
+ * Custom driver (Mesa Turnip on the Thor's Adreno, n64_vk_driver.h): when the app selected one (RECOMP_VK_DRIVER_DIR),
+ * its vkGetInstanceProcAddr (libadrenotools, libxba_vkdriver.so) is the first loader, and the same tries run on it.
+ * If it cannot be opened, makes no device, or fails every try, the system's libvulkan is loaded again and the tries
+ * run there: custom driver -> system driver -> software RDP. The start line names the driver (driverName, driverInfo,
+ * custom <id> or system). */
 #include "n64_rdp_backend.h"
 #include "n64_rdp.h"
+#include "n64_vk_driver.h"
 
 #include "context.hpp"
 #include "device.hpp"
@@ -329,31 +336,44 @@ bool ubershader_draws_wrong(Vulkan::Device *dev)
 /* ---- n64_rdp_ops ---------------------------------------------------------------------------------------------------- */
 void vk_reset(void *p);
 
-void *vk_create(n64_rcp_bus bus)
+/* "driver <name> <info>, custom <id>" or "..., system", for the start line. */
+void driver_label(Vulkan::Device *dev, bool custom, char *out, size_t n)
 {
-    /* paraLLEl-RDP's incoherent path pages RDRAM by a power of two. */
-    if (!bus.rdram || bus.rdram_size < (1u << 20) || (bus.rdram_size & (bus.rdram_size - 1)))
-        return nullptr;
-    on_thread();
-    if (!Vulkan::Context::init_loader(nullptr)) {
-        fprintf(stderr, "n64: Vulkan RDP: no Vulkan loader\n");
-        return nullptr;
-    }
-    std::unique_ptr<VkRdp> d(new (std::nothrow) VkRdp);
-    if (!d)
-        return nullptr;
-    d->bus = bus;
+    const Vulkan::DeviceFeatures &f = dev->get_device_features();
+    const char *name = f.driver_name[0] ? f.driver_name : "unknown";
+    if (custom)
+        snprintf(out, n, "driver %s %s, custom %s", name, f.driver_info, n64_vk_driver_id());
+    else
+        snprintf(out, n, "driver %s %s, system", name, f.driver_info);
+}
+
+/* Instance, device and the shader tries on the Vulkan loader init_loader was given last. 1: d->cp is kept for the game;
+ * 0: this driver cannot run paraLLEl-RDP (d->ctx / dev / cp reset); custom is 1 for a player's driver (the start line,
+ * and the check that adrenotools did not fall back to the device's own driver, which then counts as the system one). */
+bool try_driver(VkRdp *d, bool *custom)
+{
+    const n64_rcp_bus &bus = d->bus;
     d->ctx.reset(new Vulkan::Context);
     Vulkan::Context::SystemHandles handles = {};
     d->ctx->set_system_handles(handles);
     d->ctx->set_num_thread_indices(1);
     if (!d->ctx->init_instance_and_device(nullptr, 0, nullptr, 0, 0)) {
-        fprintf(stderr, "n64: Vulkan RDP: no Vulkan device\n");
-        return nullptr;
+        fprintf(stderr, "n64: Vulkan RDP: no Vulkan device%s\n", *custom ? " on the custom driver" : "");
+        d->ctx.reset();
+        return false;
     }
     d->dev.reset(new Vulkan::Device);
     d->dev->set_context(*d->ctx);
     const char *gpu = d->dev->get_gpu_properties().deviceName;
+    char drv[2 * VK_MAX_DRIVER_NAME_SIZE + 64];
+    if (*custom && d->dev->get_device_features().driver_id == VK_DRIVER_ID_QUALCOMM_PROPRIETARY_KHR) {
+        /* adrenotools' hook loads the device's own driver when the custom one fails to load (logcat tag hook_impl) */
+        fprintf(stderr, "n64: Vulkan RDP: custom driver %s was not loaded, %s runs on Qualcomm's driver (see logcat "
+                        "tag hook_impl)\n", n64_vk_driver_id(), gpu);
+        n64_vk_driver_done("not_loaded");
+        *custom = false;
+    }
+    driver_label(d->dev.get(), *custom, drv, sizeof drv);
 
     /* The default shaders, then without subgroup operations, then the ubershader: the first set that compiles and
      * draws the check right. The device keeps its programs and their failed pipelines from one try to the next. */
@@ -374,29 +394,79 @@ void *vk_create(n64_rcp_bus bus)
         d->cp.reset(new RDP::CommandProcessor(*d->dev, bus.rdram, 0, bus.rdram_size, bus.rdram_size / 2,
                                               tries[i].flags));
         if (!d->cp->device_is_supported()) {
-            fprintf(stderr, "n64: Vulkan RDP: the device (%s) lacks what paraLLEl-RDP needs\n", gpu);
-            d->cp.reset();
-            return nullptr;
+            fprintf(stderr, "n64: Vulkan RDP: the device (%s, %s) lacks what paraLLEl-RDP needs\n", gpu, drv);
+            break;
         }
         subgroups = d->cp->uses_subgroups();
-        if (check(d.get())) {
+        if (check(d)) {
             d->cp_flags = tries[i].flags;
             /* A fresh command processor for the game: none of the check's RDP state. */
             d->cp->idle();
             d->cp.reset(new RDP::CommandProcessor(*d->dev, bus.rdram, 0, bus.rdram_size, bus.rdram_size / 2,
                                                   d->cp_flags));
-            printf("n64: Vulkan RDP on %s (paraLLEl-RDP, %s)\n", gpu, tries[i].name);
+            printf("n64: Vulkan RDP on %s (paraLLEl-RDP, %s; %s)\n", gpu, tries[i].name, drv);
             fflush(stdout);
-            vk_reset(d.get());
-            return d.release();
+            return true;
         }
         fprintf(stderr, "n64: Vulkan RDP: %s fail on %s%s\n", tries[i].name, gpu,
                 i + 1 < sizeof tries / sizeof tries[0] ? ", trying again" : "");
         d->cp->idle();
     }
-    fprintf(stderr, "n64: Vulkan RDP: the driver of %s cannot run paraLLEl-RDP's shaders\n", gpu);
-    d->cp.reset();
-    return nullptr;
+    if (d->cp && d->cp->device_is_supported())
+        fprintf(stderr, "n64: Vulkan RDP: the driver of %s (%s) cannot run paraLLEl-RDP's shaders\n", gpu, drv);
+    d->cp.reset(); /* the command processor, then the device, then the instance */
+    d->dev.reset();
+    d->ctx.reset();
+    return false;
+}
+
+/* The loaders, in order: the player's driver (n64_vk_driver.h) when one is selected and opens, then the system's.
+ * Custom driver -> system driver -> NULL, and n64_rdp_select.c starts the software RDP; each step is logged. */
+void *vk_create(n64_rcp_bus bus)
+{
+    /* paraLLEl-RDP's incoherent path pages RDRAM by a power of two. */
+    if (!bus.rdram || bus.rdram_size < (1u << 20) || (bus.rdram_size & (bus.rdram_size - 1)))
+        return nullptr;
+    on_thread();
+    std::unique_ptr<VkRdp> d(new (std::nothrow) VkRdp);
+    if (!d)
+        return nullptr;
+    d->bus = bus;
+
+    if (void *gipa = n64_vk_driver_open()) {
+        bool custom = true;
+        /* vkCreateInstance resolved: a loader that answers nothing would be called through a null pointer */
+        if (Vulkan::Context::init_loader(reinterpret_cast<PFN_vkGetInstanceProcAddr>(gipa)) && vkCreateInstance) {
+            const bool ok = try_driver(d.get(), &custom);
+            if (custom)
+                n64_vk_driver_done(ok ? "ok" : "failed");
+            if (ok) {
+                vk_reset(d.get());
+                return d.release();
+            }
+        } else {
+            n64_vk_driver_done("failed");
+        }
+        if (!custom) {
+            fprintf(stderr, "n64: Vulkan RDP: the device's own driver was already tried\n");
+            return nullptr; /* adrenotools fell back to it: the same driver again would fail the same way */
+        }
+        fprintf(stderr, "n64: Vulkan RDP: custom driver %s cannot run paraLLEl-RDP, trying the system driver\n",
+                n64_vk_driver_id());
+        /* the system's libvulkan again, volk re-initialised (the adrenotools handle stays loaded) */
+        if (!Vulkan::Context::init_loader(nullptr, true)) {
+            fprintf(stderr, "n64: Vulkan RDP: no Vulkan loader\n");
+            return nullptr;
+        }
+    } else if (!Vulkan::Context::init_loader(nullptr)) {
+        fprintf(stderr, "n64: Vulkan RDP: no Vulkan loader\n");
+        return nullptr;
+    }
+    bool custom = false;
+    if (!try_driver(d.get(), &custom))
+        return nullptr;
+    vk_reset(d.get());
+    return d.release();
 }
 
 void vk_destroy(void *p)

@@ -65,6 +65,12 @@ Pipelines a driver cannot compile (the Adreno 740 of the AYN Thor failed one com
 - `parallel-rdp/rdp_device.*`: `COMMAND_PROCESSOR_FLAG_NO_SUBGROUPS_BIT` and `COMMAND_PROCESSOR_FLAG_UBERSHADER_BIT`
   feed those options, and `CommandProcessor` forwards the three queries.
 
+The driver's name and version (`driverName`, `driverInfo` of `VkPhysicalDeviceDriverProperties`, for the start line,
+which must say whether a custom driver such as Turnip is in use):
+
+- `vulkan/context.hpp`, `vulkan/context.cpp`: `DeviceFeatures` keeps `driver_name` and `driver_info` next to
+  `driver_id`.
+
 The N64 runtime uses them (`consoles/n64/runtime/n64_rdp_vk.cpp`): a check at start, then default shaders, no
 subgroups, ubershader, else the software RDP (`consoles/README.md`).
 

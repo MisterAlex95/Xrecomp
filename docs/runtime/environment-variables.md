@@ -343,6 +343,31 @@ Only in a build configured with `-DXBOXRECOMP_LSFG=ON` (POSIX hosts); see [Frame
 | `RECOMP_LSFG_FP16=auto\|0\|1` | auto | Embedded FP16 SPIR-V when the DLL has it and the device has `shaderFloat16` (translated DXBC is always full precision). | `lsfg_generator.c` |
 | `RECOMP_LSFG_GPU=<index>` | best device | Vulkan physical device index for the bridge. | `src/framegen/lsfg_bridge.cpp` |
 
+## Custom Vulkan driver (N64 RDP)
+
+A Vulkan driver the player supplied (Mesa Turnip on an Adreno) for the N64 Vulkan RDP, opened through libadrenotools
+(`libxba_vkdriver.so`, Android arm64 only; [third_party/adrenotools](../../third_party/adrenotools/README.md)). The app
+sets these before the game starts, from its driver choice (`files/settings/vk_driver`, the drivers installed under
+`files/vk_drivers/<id>/` with their `meta.json`); they can also be written to `recomp.cfg` by hand for a test. Chain:
+custom driver, then the system driver, then the software RDP, each step logged; the start line names the driver
+(`n64: Vulkan RDP on <GPU> (paraLLEl-RDP, <shaders>; driver <driverName> <driverInfo>, custom <id>|system)`).
+See [consoles/README.md](../../consoles/README.md) (N64 RDP) and `consoles/n64/runtime/n64_vk_driver.h`.
+
+| Variable | Default | What it does | Where |
+|---|---|---|---|
+| `RECOMP_VK_DRIVER_DIR=<dir>` | unset (system driver) | Absolute, app-private directory of the driver, `<files>/vk_drivers/<id>/` (a missing trailing `/` is added). Set: the driver is the RDP's first Vulkan loader. | `consoles/n64/runtime/n64_vk_driver.c` |
+| `RECOMP_VK_DRIVER_LIB=<file>` | unset | The driver's library in that directory (`meta.json` `libraryName`, e.g. `vulkan.purple.so`); a name, no `/`. | `n64_vk_driver.c` |
+| `RECOMP_VK_DRIVER_ID=<id>` | the directory's last component | The driver's id, for the log, the trial marker and `last_start`. | `n64_vk_driver.c` |
+| `RECOMP_VK_HOOK_DIR=<dir>` | the directory `libmain.so` was loaded from | The app's native library directory (`ApplicationInfo.nativeLibraryDir`), where adrenotools' hook libraries are. | `n64_vk_driver.c` |
+| `RECOMP_VK_DRIVER=system` | unset | Forces the system driver whatever the others say. | `n64_vk_driver.c` |
+
+Files next to the drivers (written only when the driver directory's parent is named `vk_drivers`):
+`vk_drivers/trying` holds the id while the driver is being opened and checked; found at the next start with the same
+id (the driver crashed the process), the driver is skipped until the app removes the file (the player picks a driver
+again). `vk_drivers/last_start` is one line `<id> <status>`, status `ok`, `failed` (could not be opened, or
+paraLLEl-RDP could not run on it), `not_loaded` (adrenotools fell back to the device's own driver: logcat tag
+`hook_impl`) or `crashed` (skipped because of the marker).
+
 ## Audio
 
 See the [APU](../../src/apu/README.md) and [DirectSound](../../src/audio/README.md) module references.
