@@ -157,5 +157,13 @@
             android:process=":launcher"
             android:exported="false"
             android:grantUriPermissions="true" />
+        <!-- The Vulkan driver chosen here, for a game's own app (VkDriverShare, docs/android/app-shell.md « Vulkan
+             drivers »): exported, but every call checks the caller as the pack handover does (package
+             fr.adserver.xrecomp.t<tid>, signed by the game apps' key); anything else is refused. -->
+        <provider
+            android:name=".VkDriverProvider"
+            android:authorities="${applicationId}.vkdrivers"
+            android:process=":launcher"
+            android:exported="true" />
     </application>
 </manifest>

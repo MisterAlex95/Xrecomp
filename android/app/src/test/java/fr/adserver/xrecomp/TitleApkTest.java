@@ -205,7 +205,9 @@ public class TitleApkTest {
                 names.add(x.value(x.attr(el, TitleApk.ATTR_NAME)));
         }
         assertEquals(java.util.Arrays.asList("fr.adserver.xrecomp.t4d5300d1.logs",
-                                             "fr.adserver.xrecomp.t4d5300d1.packs"), authorities);
+                                             "fr.adserver.xrecomp.t4d5300d1.packs",
+                                             "fr.adserver.xrecomp.t4d5300d1.vkdrivers"), authorities);
+        assertTrue(names.contains("fr.adserver.xrecomp.VkDriverProvider"));
         assertTrue(names.contains("fr.adserver.xrecomp.PackHandoverActivity"));
         // The handover's <queries>: the copy still looks for its parent, by the parent's package.
         List<String> queried = new ArrayList<>();
