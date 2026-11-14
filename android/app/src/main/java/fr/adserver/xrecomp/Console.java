@@ -5,7 +5,11 @@ import java.io.File;
 import java.io.FileReader;
 import java.io.IOException;
 import java.io.RandomAccessFile;
+import java.nio.ByteBuffer;
+import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Locale;
 import java.util.zip.CRC32;
 
@@ -37,6 +41,33 @@ enum Console {
             if (c.id.equals(v))
                 return c;
         return null;
+    }
+
+    /** The console's short name on a library card's badge (a product name: not translated). */
+    String badge() {
+        switch (this) {
+        case GBA:
+            return "GBA";
+        case PS1:
+            return "PS1";
+        case N64:
+            return "N64";
+        default:
+            return "Xbox";
+        }
+    }
+
+    /**
+     * The console of a library key (games.json's and the index's game key, docs « Game library »): « gba-… »,
+     * « ps1-… », « n64-… » (packDirName) for the other consoles; anything else is an Xbox title ID or « local-… ».
+     */
+    static Console ofKey(String key) {
+        if (key != null) {
+            for (Console c : values())
+                if (c != XBOX && key.startsWith(c.id + "-"))
+                    return c;
+        }
+        return XBOX;
     }
 
     // ---- Import filter ------------------------------------------------------------------------------------------
@@ -100,7 +131,17 @@ enum Console {
      * an ISO 9660 volume whose system ID is "PLAYSTATION" (2048- or 2352-byte sectors), else null.
      */
     static Console sniffIso(File f) {
-        try (RandomAccessFile r = new RandomAccessFile(f, "r")) {
+        try (RandomAccessFile raf = new RandomAccessFile(f, "r")) {
+            return sniffIso(source(raf.getChannel()));
+        } catch (IOException e) {
+            return null;
+        }
+    }
+
+    /** {@link #sniffIso(File)} over any seekable content (a document of the library folder, a test's bytes). */
+    static Console sniffIso(Source src) {
+        try {
+            Rd r = new Rd(src);
             byte[] m = new byte[XISO_MAGIC.length];
             for (long base : XISO_OFFSETS) {
                 long at = base + 0x10000L;
@@ -158,7 +199,20 @@ enum Console {
             Identity id = identify(bin);
             return id != null && id.console == PS1 ? id : null;
         }
-        try (RandomAccessFile r = new RandomAccessFile(f, "r")) {
+        try (RandomAccessFile raf = new RandomAccessFile(f, "r")) {
+            return identify(source(raf.getChannel()));
+        } catch (IOException e) {
+            return null;
+        }
+    }
+
+    /**
+     * {@link #identify(File)} over any seekable content: the library scan reads a document of a folder seen through
+     * the Storage Access Framework this way. A .cue is not followed here (the caller resolves its FILE: cueFiles).
+     */
+    static Identity identify(Source src) {
+        try {
+            Rd r = new Rd(src);
             byte[] h = new byte[0xC0];
             int hn = r.read(h);
             String k;
@@ -188,7 +242,7 @@ enum Console {
         return (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') ? (char)b : '_';
     }
 
-    private static String gbaKey(RandomAccessFile r, byte[] h, int hn) throws IOException {
+    private static String gbaKey(Rd r, byte[] h, int hn) throws IOException {
         if (hn < 0xC0 || (h[0xB2] & 0xff) != 0x96)
             return null;
         int sum = 0;
@@ -227,39 +281,141 @@ enum Console {
 
     /** A .cue's first FILE, next to the .cue; null when it names none. */
     static File cueBin(File cue) {
+        StringBuilder text = new StringBuilder();
         try (BufferedReader r = new BufferedReader(new FileReader(cue))) {
             String line;
-            while ((line = r.readLine()) != null) {
-                String t = line.trim();
-                if (t.length() < 5 || !t.substring(0, 4).equalsIgnoreCase("FILE") || !Character.isWhitespace(t.charAt(4)))
-                    continue;
-                t = t.substring(5).trim();
-                String name;
-                if (t.startsWith("\"")) {
-                    int end = t.indexOf('"', 1);
-                    name = end > 1 ? t.substring(1, end) : null;
-                } else {
-                    String[] parts = t.split("\\s+");
-                    name = parts.length > 0 && !parts[0].isEmpty() ? parts[0] : null;
-                }
-                if (name == null)
-                    return null;
-                File f = new File(name);
-                return f.isAbsolute() ? f : new File(cue.getParentFile(), name);
-            }
+            while ((line = r.readLine()) != null && text.length() < MAX_CUE)
+                text.append(line).append('\n');
         } catch (IOException e) {
             return null;
         }
-        return null;
+        List<String> names = cueFiles(text.toString());
+        if (names.isEmpty())
+            return null;
+        File f = new File(names.get(0));
+        return f.isAbsolute() ? f : new File(cue.getParentFile(), names.get(0));
+    }
+
+    /** The most of a .cue read (real ones: a few hundred bytes). */
+    static final int MAX_CUE = 64 << 10;
+
+    /**
+     * Every FILE a .cue names, in order (a multi-track disc names one per track), as written (relative to the .cue);
+     * reading stops at the first malformed FILE line.
+     */
+    static List<String> cueFiles(String cue) {
+        List<String> out = new ArrayList<>();
+        for (String line : cue.split("\\r?\\n|\\r")) {
+            String t = line.trim();
+            if (t.length() < 5 || !t.substring(0, 4).equalsIgnoreCase("FILE") || !Character.isWhitespace(t.charAt(4)))
+                continue;
+            t = t.substring(5).trim();
+            String name;
+            if (t.startsWith("\"")) {
+                int end = t.indexOf('"', 1);
+                name = end > 1 ? t.substring(1, end) : null;
+            } else {
+                String[] parts = t.split("\\s+");
+                name = parts.length > 0 && !parts[0].isEmpty() ? parts[0] : null;
+            }
+            if (name == null)
+                break;
+            out.add(name);
+        }
+        return out;
+    }
+
+    // ---- Reading ------------------------------------------------------------------------------------------------
+
+    /** Seekable content read at a position: a file, a document's descriptor, a test's bytes. */
+    interface Source {
+        long length() throws IOException;
+
+        /** Up to len bytes at pos into b[off..]; -1 at the end. */
+        int read(long pos, byte[] b, int off, int len) throws IOException;
+    }
+
+    /** A FileChannel as a Source (a RandomAccessFile's, or a FileInputStream's over a document's descriptor). */
+    static Source source(FileChannel ch) {
+        return new Source() {
+            @Override
+            public long length() throws IOException {
+                return ch.size();
+            }
+
+            @Override
+            public int read(long pos, byte[] b, int off, int len) throws IOException {
+                return ch.read(ByteBuffer.wrap(b, off, len), pos);
+            }
+        };
+    }
+
+    /** Bytes in memory as a Source. */
+    static Source source(byte[] data) {
+        return new Source() {
+            @Override
+            public long length() {
+                return data.length;
+            }
+
+            @Override
+            public int read(long pos, byte[] b, int off, int len) {
+                if (pos >= data.length)
+                    return -1;
+                int n = (int)Math.min(len, data.length - pos);
+                System.arraycopy(data, (int)pos, b, off, n);
+                return n;
+            }
+        };
+    }
+
+    /** RandomAccessFile's seek / read / readFully over a Source. */
+    private static final class Rd {
+        final Source s;
+        long pos;
+
+        Rd(Source s) {
+            this.s = s;
+        }
+
+        long length() throws IOException {
+            return s.length();
+        }
+
+        void seek(long p) {
+            pos = p;
+        }
+
+        int read(byte[] b) throws IOException {
+            int n = s.read(pos, b, 0, b.length);
+            if (n > 0)
+                pos += n;
+            return n;
+        }
+
+        void readFully(byte[] b) throws IOException {
+            readFully(b, 0, b.length);
+        }
+
+        void readFully(byte[] b, int off, int len) throws IOException {
+            while (len > 0) {
+                int n = s.read(pos, b, off, len);
+                if (n <= 0)
+                    throw new java.io.EOFException();
+                pos += n;
+                off += n;
+                len -= n;
+            }
+        }
     }
 
     /** An ISO 9660 data track: 2048-byte sectors, or raw 2352-byte ones (mode 1 data at 16, mode 2 form 1 at 24). */
     private static final class Iso {
-        final RandomAccessFile r;
+        final Rd r;
         final int size, off;
         final byte[] pvd = new byte[2048];
 
-        private Iso(RandomAccessFile r, int size, int off) {
+        private Iso(Rd r, int size, int off) {
             this.r = r;
             this.size = size;
             this.off = off;
@@ -278,7 +434,7 @@ enum Console {
             return pvd[0] == 1 && pvd[1] == 'C' && pvd[2] == 'D' && pvd[3] == '0' && pvd[4] == '0' && pvd[5] == '1';
         }
 
-        static Iso open(RandomAccessFile r) throws IOException {
+        static Iso open(Rd r) throws IOException {
             Iso a = new Iso(r, 2048, 0);
             if (a.read(16, a.pvd) && a.isPvd())
                 return a;

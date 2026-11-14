@@ -59,20 +59,28 @@ public class LibraryScannerTest {
         return s.getBytes(StandardCharsets.US_ASCII);
     }
 
-    /** An in-memory folder. Locations « fake:/path ». */
+    /** An in-memory folder. Locations « fake:/path » (another prefix: another folder, « gba:/path »). */
     static class FakeTree implements LibraryScanner.Tree {
         final Map<String, List<LibraryScanner.Node>> dirs = new HashMap<>();
         final Map<String, byte[]> data = new HashMap<>();
         final List<byte[]> opened = new ArrayList<>();
+        final String prefix;
         int lists;
+        /** The tree that opened a file last: the one whose fds the next peek reads (the scan is sequential). */
+        static FakeTree last;
 
         FakeTree() {
-            dirs.put("fake:", new ArrayList<>());
+            this("fake:");
+        }
+
+        FakeTree(String prefix) {
+            this.prefix = prefix;
+            dirs.put(prefix, new ArrayList<>());
         }
 
         private String dirOf(String path) {
             int s = path.lastIndexOf('/');
-            String parent = s < 0 ? "fake:" : "fake:/" + path.substring(0, s);
+            String parent = s < 0 ? prefix : prefix + "/" + path.substring(0, s);
             if (!dirs.containsKey(parent))
                 dir(path.substring(0, s));
             return parent;
@@ -80,7 +88,7 @@ public class LibraryScannerTest {
 
         FakeTree dir(String path) {
             String parent = dirOf(path);
-            String loc = "fake:/" + path;
+            String loc = prefix + "/" + path;
             dirs.put(loc, new ArrayList<>());
             dirs.get(parent).add(new LibraryScanner.Node(loc, path.substring(path.lastIndexOf('/') + 1), true, 0, 0));
             return this;
@@ -89,7 +97,7 @@ public class LibraryScannerTest {
         FakeTree file(String path, byte[] content, long mtime) {
             remove(path);
             String parent = dirOf(path);
-            String loc = "fake:/" + path;
+            String loc = prefix + "/" + path;
             data.put(loc, content);
             dirs.get(parent).add(new LibraryScanner.Node(loc, path.substring(path.lastIndexOf('/') + 1), false,
                                                          content.length, mtime));
@@ -97,7 +105,7 @@ public class LibraryScannerTest {
         }
 
         void remove(String path) {
-            String loc = "fake:/" + path;
+            String loc = prefix + "/" + path;
             for (List<LibraryScanner.Node> l : dirs.values())
                 l.removeIf(n -> n.loc.equals(loc));
             data.remove(loc);
@@ -105,7 +113,7 @@ public class LibraryScannerTest {
 
         @Override
         public LibraryScanner.Node root() {
-            return new LibraryScanner.Node("fake:", "xbox", true, 0, 0);
+            return new LibraryScanner.Node(prefix, "xbox", true, 0, 0);
         }
 
         @Override
@@ -124,6 +132,7 @@ public class LibraryScannerTest {
                 throw new IOException("cannot open " + file.loc);
             int fd = opened.size();
             opened.add(b);
+            last = this;
             return new LibraryScanner.Opened() {
                 @Override
                 public int fd() {
@@ -133,6 +142,11 @@ public class LibraryScannerTest {
                 @Override
                 public InputStream stream() {
                     return new ByteArrayInputStream(b);
+                }
+
+                @Override
+                public Console.Source source() {
+                    return Console.source(b);
                 }
 
                 @Override
@@ -379,7 +393,7 @@ public class LibraryScannerTest {
     public void entryCap() {
         FakeTree t = new FakeTree();
         for (int i = 0; i < LibraryScanner.MAX_ENTRIES + 50; i++)
-            t.file(String.format("f%05d.bin", i), text("x"), 1);
+            t.file(String.format("f%05d.dat", i), text("x"), 1);
         t.file("zz.iso", iso(1, "after the cap"), 1);
         LibraryScanner.Result r = scan(t, null);
         assertTrue(r.index.truncated);
@@ -513,5 +527,193 @@ public class LibraryScannerTest {
         assertFalse(LibraryScanner.isImage("iso"));
         assertEquals("Fable", LibraryScanner.stripExtension("Fable.iso"));
         assertEquals(".iso", LibraryScanner.stripExtension(".iso"));
+    }
+
+    // ---- Several folders, every console (XBA-178) ---------------------------------------------------------------
+
+    private static LibraryScanner.Root root(String folder, LibraryScanner.Tree t) {
+        return new LibraryScanner.Root(folder, t);
+    }
+
+    /** Peeks an image of whichever tree opened it (each FakeTree numbers its own fds). */
+    private static final LibraryScanner.ImagePeek ANY_PEEK =
+            (fds, path, out, max) -> new FakePeek(FakeTree.last).extractFile(fds, path, out, max);
+
+    private LibraryScanner.Result scan(List<LibraryScanner.Root> roots, LibraryIndex prev) {
+        return LibraryScanner.scan(roots, prev, ANY_PEEK, cache, null, null, null);
+    }
+
+    private FakeTree ps1;
+
+    private List<LibraryScanner.Root> fourFolders() {
+        FakeTree xbox = new FakeTree("xbox:")
+                .file("Fable.iso", iso(0x4D5300D1, "Fable"), 10)
+                .file("Halo/default.xbe", TestSupport.xbe(0x4D530004, "Halo"), 30);
+        FakeTree gba = new FakeTree("gba:")
+                .file("Sample Quest.gba", ConsoleTest.gba("AXVE"), 40)
+                .file("broken.gba", text("not a rom at all"), 41);
+        String cue = "FILE \"Disc (Track 1).bin\" BINARY\n  TRACK 01 MODE2/2352\n"
+                     + "FILE \"Disc (Track 2).bin\" BINARY\n  TRACK 02 AUDIO\n";
+        ps1 = new FakeTree("ps1:")
+                .file("Disc.cue", text(cue), 50)
+                .file("Disc (Track 1).bin", ConsoleTest.ps1(true, "BOOT = cdrom:\\SLUS_005.94;1\r\n", "PLAYSTATION"),
+                      51)
+                .file("Disc (Track 2).bin", new byte[4096], 52)
+                .file("Lone.bin", ConsoleTest.ps1(true, "BOOT=cdrom:\\SCES_123.45;1", "PLAYSTATION"), 53)
+                .file("bios.bin", new byte[2048], 54)
+                .file("Plain.iso", ConsoleTest.ps1(false, "BOOT = cdrom:\\SLPS_000.01;1", "PLAYSTATION"), 55);
+        FakeTree n64 = new FakeTree("n64:")
+                .file("Mario.z64", ConsoleTest.n64(0), 60)
+                .file("roms/Mario swapped.v64", ConsoleTest.n64(1), 61);
+        return Arrays.asList(root("t:xbox", xbox), root("t:gba", gba), root("t:ps1", ps1), root("t:n64", n64));
+    }
+
+    /** One index over four folders: each game keyed by console + title key, stamped with its folder. */
+    @Test
+    public void severalFoldersEveryConsole() throws Exception {
+        LibraryScanner.Result r = scan(fourFolders(), null);
+        assertFalse(r.cancelled);
+        assertEquals("xbox:", r.index.root);
+
+        LibraryIndex.Item fable = r.index.find("xbox:/Fable.iso");
+        assertTrue(fable.ok());
+        assertEquals(Console.XBOX, fable.console);
+        assertEquals("4D5300D1", fable.tid);
+        assertEquals("t:xbox", fable.folder);
+        assertTrue(r.index.find("xbox:/Halo").ok());
+
+        LibraryIndex.Item quest = r.index.find("gba:/Sample Quest.gba");
+        assertTrue(quest.ok());
+        assertEquals(LibraryIndex.KIND_ROM, quest.kind);
+        assertEquals(Console.GBA, quest.console);
+        assertTrue(quest.key, quest.key.startsWith("AXVE-"));
+        assertEquals("gba-" + quest.key, quest.tid);
+        assertEquals("Sample Quest", quest.title);
+        assertEquals("t:gba", quest.folder);
+        assertEquals("", quest.xbe);
+        assertEquals(LibraryIndex.NOT_ROM, r.index.find("gba:/broken.gba").status);
+
+        LibraryIndex.Item disc = r.index.find("ps1:/Disc.cue");
+        assertTrue(disc.ok());
+        assertEquals("ps1-SLUS-00594", disc.tid);
+        assertEquals("Disc", disc.title);
+        assertEquals(Arrays.asList("ps1:/Disc (Track 1).bin", "ps1:/Disc (Track 2).bin"), disc.parts);
+        assertEquals("the newest of the .cue and its tracks", 52, disc.mtime);
+        assertNull("a track is not listed again", r.index.find("ps1:/Disc (Track 1).bin"));
+        assertNull(r.index.find("ps1:/Disc (Track 2).bin"));
+        assertEquals("ps1-SCES-12345", r.index.find("ps1:/Lone.bin").tid);
+        assertEquals(LibraryIndex.IGNORED, r.index.find("ps1:/bios.bin").status);
+        LibraryIndex.Item plain = r.index.find("ps1:/Plain.iso");
+        assertTrue("a PlayStation .iso: not an Xbox image, read for its serial", plain.ok());
+        assertEquals(Console.PS1, plain.console);
+        assertEquals(LibraryIndex.KIND_ROM, plain.kind);
+        assertEquals("ps1-SLPS-00001", plain.tid);
+
+        assertEquals("n64-NSME-635A2BFF", r.index.find("n64:/Mario.z64").tid);
+        assertEquals("the same game in another byte order: a variant", "n64-NSME-635A2BFF",
+                     r.index.find("n64:/roms/Mario swapped.v64").tid);
+
+        java.util.Map<String, List<LibraryIndex.Item>> games = r.index.games();
+        assertEquals(7, games.size());   // Fable, Halo, Sample Quest, Disc, Lone, Plain, Mario (two variants)
+        assertEquals(2, games.get("n64-NSME-635A2BFF").size());
+        assertEquals(java.util.EnumSet.allOf(Console.class), r.index.consoles());
+        List<String> others = new ArrayList<>();
+        for (LibraryIndex.Item i : r.index.others())
+            others.add(i.name);
+        assertEquals("bios.bin is ignored, not an « other file »", Arrays.asList("broken.gba"), others);
+
+        // An unchanged rescan opens nothing (the .cue's tracks included; LibraryStoreTest: the index's JSON).
+        LibraryIndex back = r.index;
+        LibraryScanner.Result again = scan(fourFolders(), back);
+        assertEquals(0, again.peeks);
+        assertEquals(back.items.size(), again.reused);
+        assertEquals(games.keySet(), again.index.games().keySet());
+
+        // A changed track: the .cue is read again (and its first track opened).
+        List<LibraryScanner.Root> roots3 = fourFolders();
+        ps1.file("Disc (Track 2).bin", new byte[8192], 99);
+        LibraryScanner.Result third = scan(roots3, again.index);
+        assertEquals(1, third.peeks);
+        assertEquals(99, third.index.find("ps1:/Disc.cue").mtime);
+        assertTrue(third.index.find("ps1:/Disc.cue").ok());
+    }
+
+    /** A .cue whose track is missing or not a PlayStation disc: an « other file ». */
+    @Test
+    public void cueWithoutItsDisc() {
+        FakeTree t = new FakeTree("ps1:")
+                .file("Gone.cue", text("FILE \"Gone.bin\" BINARY\n"), 1)
+                .file("Music.cue", text("FILE Music.bin BINARY\n"), 2)
+                .file("Music.bin", new byte[4096], 3);
+        LibraryScanner.Result r = scan(Arrays.asList(root("t:ps1", t)), null);
+        assertEquals(LibraryIndex.NOT_ROM, r.index.find("ps1:/Gone.cue").status);
+        assertEquals(LibraryIndex.NOT_ROM, r.index.find("ps1:/Music.cue").status);
+        assertNull("the .cue's track is not listed on its own", r.index.find("ps1:/Music.bin"));
+        assertEquals(0, r.games());
+    }
+
+    /** The walk's limits are per folder: a full folder does not hide the games of the next one. */
+    @Test
+    public void entryCapPerFolder() {
+        FakeTree big = new FakeTree("big:");
+        for (int i = 0; i < LibraryScanner.MAX_ENTRIES + 50; i++)
+            big.file(String.format("f%05d.dat", i), text("x"), 1);
+        FakeTree small = new FakeTree("gba:").file("Game.gba", ConsoleTest.gba("BXYE"), 2);
+        LibraryScanner.Result r = scan(Arrays.asList(root("t:big", big), root("t:gba", small)), null);
+        assertTrue(r.index.truncated);
+        assertEquals(1, r.games());
+        assertTrue(r.index.find("gba:/Game.gba").ok());
+    }
+
+    /** A folder that cannot be read: the others are still scanned; root "" (the caller keeps the art). */
+    @Test
+    public void oneUnreadableFolder() {
+        LibraryScanner.Tree noRoot = new LibraryScanner.Tree() {
+            @Override
+            public LibraryScanner.Node root() throws IOException {
+                throw new IOException("permission gone");
+            }
+
+            @Override
+            public List<LibraryScanner.Node> list(LibraryScanner.Node dir) {
+                return null;
+            }
+
+            @Override
+            public LibraryScanner.Opened open(LibraryScanner.Node file) {
+                return null;
+            }
+        };
+        FakeTree n = new FakeTree("n64:").file("Mario.n64", ConsoleTest.n64(2), 1);
+        LibraryScanner.Result r = scan(Arrays.asList(root("t:a", noRoot), root("t:n64", n)), null);
+        assertEquals("", r.index.root);
+        assertEquals(1, r.games());
+        assertEquals("n64-NSME-635A2BFF", r.index.find("n64:/Mario.n64").tid);
+    }
+
+    /** A folder inside another one, both in the library: each file is listed once, with the first folder. */
+    @Test
+    public void overlappingFolders() {
+        FakeTree outer = new FakeTree("fake:").file("gba/Game.gba", ConsoleTest.gba("CXYE"), 1);
+        FakeTree inner = new FakeTree("fake:/gba").file("Other.gba", ConsoleTest.gba("DXYE"), 1);
+        byte[] game = outer.data.get("fake:/gba/Game.gba");
+        inner.data.put("fake:/gba/Game.gba", game);
+        inner.dirs.get("fake:/gba").add(new LibraryScanner.Node("fake:/gba/Game.gba", "Game.gba", false, game.length,
+                                                                1));
+        LibraryScanner.Result r = scan(Arrays.asList(root("t:outer", outer), root("t:inner", inner)), null);
+        assertEquals(2, r.index.items.size());
+        assertEquals("t:outer", r.index.find("fake:/gba/Game.gba").folder);
+        assertEquals("t:inner", r.index.find("fake:/gba/Other.gba").folder);
+    }
+
+    /** An item of an older index is reused by the first folder's scan and gets its folder. */
+    @Test
+    public void olderItemsAreStampedByTheScan() {
+        FakeTree t = new FakeTree().file("Fable.iso", iso(0x4D5300D1, "Fable"), 10);
+        LibraryScanner.Result r = scan(t, null);
+        assertEquals("", r.index.find("fake:/Fable.iso").folder);   // the one-folder scan, as before
+        LibraryScanner.Result again = scan(Arrays.asList(root("t:xbox", t)), r.index);
+        assertEquals(1, again.reused);
+        assertEquals("t:xbox", again.index.find("fake:/Fable.iso").folder);
     }
 }

@@ -316,7 +316,7 @@ public class LauncherLibraryTest {
         assertEquals(app.getString(R.string.LIB_FOLDER_TILE), ((Widgets.PillButton)a.focusForTest()).title);
     }
 
-    /** Y: the Options sheet (Rescan, Storage, Library folder, Settings, About); B closes it, the focus comes back. */
+    /** Y: the Options sheet (Rescan, Storage, Library folders, Settings, About); B closes it, the focus comes back. */
     @Test
     public void optionsSheet() throws Exception {
         for (int i = 0; i < 3; i++)
@@ -336,7 +336,7 @@ public class LauncherLibraryTest {
         for (Widgets.MenuRow r : sheet.rowsForTest())
             rows.add(r.title);
         assertEquals(java.util.Arrays.asList(app.getString(R.string.LIB_RESCAN), app.getString(R.string.LIB_STORAGE),
-                                             app.getString(R.string.LIB_FOLDER_TILE), app.getString(R.string.SETTINGS),
+                                             app.getString(R.string.LIB_FOLDERS), app.getString(R.string.SETTINGS),
                                              app.getString(R.string.ABOUT)), rows);
         assertEquals(root.getName(), sheet.rowsForTest().get(2).value);
         assertTrue(a.focusForTest() == sheet.rowsForTest().get(0));
@@ -559,5 +559,96 @@ public class LauncherLibraryTest {
                 allViews(((ViewGroup)v).getChildAt(i), out);
         }
         return out;
+    }
+
+    // ---- Several library folders (XBA-178) ---------------------------------------------------------------------
+
+    /**
+     * Two folders, an Xbox one and a GBA one (read as files): every game in one grid with its console badge, the GBA
+     * game « Not playable yet » (A says why, no Home); Options › Library folders lists both, « Add a folder » last,
+     * and one is taken out of the library (its games leave the grid, nothing in it is deleted).
+     */
+    @Test
+    public void severalFoldersEveryConsole() throws Exception {
+        folderGame(0);
+        folderGame(1);
+        File gba = tmp.newFolder("gba");
+        File rom = new File(gba, "Pocket Quest.gba");
+        TestSupport.write(rom, ConsoleTest.gba("AXVE"));
+        useFolder();
+        Library.addFolder(app, "content://com.android.externalstorage.documents/tree/primary%3Agba",
+                          gba.getAbsolutePath());
+        LauncherActivity a = launch();
+        assertEquals(LauncherActivity.Screen.LIBRARY, a.screenForTest());
+        assertEquals(3, a.libraryCardsForTest().size());
+        GameCard quest = card(a, "Pocket Quest");
+        assertNotNull(quest);
+        assertEquals("GBA", quest.badgeForTest());
+        assertEquals("Xbox", card(a, NAMES[0]).badgeForTest());
+        assertEquals(app.getString(R.string.LIB_CHIP_NOT_PLAYABLE_YET), quest.chipForTest());
+        assertTrue(quest.chipShownForTest());
+        TestSupport.screenshot(a.getWindow().getDecorView(), "library-consoles");
+
+        // A on the GBA card: a note, still the library, the selected game unchanged.
+        a.forceFocusForTest();
+        idle(300);
+        quest.requestFocusFromTouch();
+        idle(300);
+        key(a, KeyEvent.KEYCODE_BUTTON_A);
+        assertEquals(LauncherActivity.Screen.LIBRARY, a.screenForTest());
+        assertEquals(app.getString(R.string.LIB_NOT_PLAYABLE_NOTE, "GBA"), a.noteForTest());
+        Library.Games g = Library.read(Library.gamesFile(app.getFilesDir()));
+        assertTrue("no record for a game that cannot be selected",
+                   g.get(LibraryIndex.read(Library.indexFile(app.getFilesDir()))
+                                .find(LibraryIndex.fileLoc(rom)).tid) == null);
+        key(a, KeyEvent.KEYCODE_BUTTON_START);
+        assertEquals(LauncherActivity.Screen.LIBRARY, a.screenForTest());
+
+        // Options › Library folders: both folders, then « Add a folder ».
+        key(a, KeyEvent.KEYCODE_BUTTON_Y);
+        Widgets.Sheet sheet = a.sheetForTest();
+        assertEquals(app.getString(R.string.LIB_FOLDERS_N, 2), sheet.rowsForTest().get(2).value);
+        sheet.rowsForTest().get(2).requestFocusFromTouch();
+        key(a, KeyEvent.KEYCODE_BUTTON_A);
+        sheet = a.sheetForTest();
+        assertNotNull(sheet);
+        List<String> rows = new ArrayList<>();
+        for (Widgets.MenuRow r : sheet.rowsForTest())
+            rows.add(r.title);
+        assertEquals(java.util.Arrays.asList("xbox", "gba", app.getString(R.string.LIB_FOLDER_ADD)), rows);
+        assertEquals(gba.getParentFile().getName(), sheet.rowsForTest().get(1).value);   // (a device: « Internal storage »)
+        TestSupport.screenshot(a.getWindow().getDecorView(), "library-folders");
+
+        // A on « gba »: Keep (first) or Remove; Keep goes back to the list.
+        sheet.rowsForTest().get(1).requestFocusFromTouch();
+        key(a, KeyEvent.KEYCODE_BUTTON_A);
+        sheet = a.sheetForTest();
+        assertEquals(app.getString(R.string.LIB_FOLDER_KEEP), sheet.rowsForTest().get(0).title);
+        assertTrue(a.focusForTest() == sheet.rowsForTest().get(0));
+        sheet.rowsForTest().get(1).requestFocusFromTouch();
+        key(a, KeyEvent.KEYCODE_BUTTON_A);
+        assertNull(a.sheetForTest());
+        assertEquals(1, Library.folders(app).size());
+        assertEquals(2, a.libraryCardsForTest().size());
+        assertNull(card(a, "Pocket Quest"));
+        assertEquals("", card(a, NAMES[0]).badgeForTest());   // an Xbox-only library looks as before
+        assertTrue("nothing in the folder is deleted", rom.isFile());
+        assertEquals(app.getString(R.string.LIB_FOLDER_REMOVED, "gba"), a.noteForTest());
+        assertNull(LibraryIndex.read(Library.indexFile(app.getFilesDir())).find(LibraryIndex.fileLoc(rom)));
+    }
+
+    /** The one library folder of an older launcher: migrated as the first entry, its games listed as before. */
+    @Test
+    public void olderSingleFolderMigrates() throws Exception {
+        folderGame(0);
+        GameStore.prefs(app).edit()
+                .putString(Library.PREF_TREE, "content://com.android.externalstorage.documents/tree/primary%3Axbox")
+                .putString(Library.PREF_PATH, root.getAbsolutePath()).commit();
+        LauncherActivity a = launch();
+        assertEquals(LauncherActivity.Screen.LIBRARY, a.screenForTest());
+        assertEquals(1, a.libraryCardsForTest().size());
+        assertEquals(1, Library.folders(app).size());
+        assertEquals(root.getAbsolutePath(), Library.folders(app).get(0).path);
+        assertNull(GameStore.prefs(app).getString(Library.PREF_TREE, null));
     }
 }

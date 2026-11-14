@@ -12,23 +12,36 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * What the library folder holds, as last scanned (LibraryScanner): <files>/library/index.json. Rebuildable: a missing
+ * What the library folders hold, as last scanned (LibraryScanner): <files>/library/index.json. Rebuildable: a missing
  * or corrupt file is an empty index and the next scan opens every image again. Plain Java and org.json.
  *
  * <pre>
  * {"v":1, "root":"file:/storage/emulated/0/xbox", "scanned_at":0, "truncated":false, "items":[
  *  {"loc":"file:/…/Halo.iso", "kind":"iso|folder", "name":"Halo.iso", "size":0, "mtime":0, "status":"ok",
  *   "tid":"4D530004", "title":"Halo", "region":4, "disc":0, "version":0, "xbe_sha256":"…",
- *   "xbe":"xbe/4D530004-0123abcd/default.xbe"}]}
+ *   "xbe":"xbe/4D530004-0123abcd/default.xbe", "folder":"content://…/tree/primary%3Axbox"},
+ *  {"loc":"file:/…/gba/Game.gba", "kind":"rom", "name":"Game.gba", "size":0, "mtime":0, "status":"ok",
+ *   "console":"gba", "key":"AXVE-1A2B3C4D", "tid":"gba-AXVE-1A2B3C4D", "title":"Game", "folder":"…"}]}
  * </pre>
  * size and mtime are the scanned file's: the image itself, or a game folder's default.xbe (its fingerprint; a folder's
- * total size is not computed at scan). xbe is relative to <files>/library.
+ * total size is not computed at scan); a .cue's: the .cue and its tracks summed (parts: the tracks), the newest time.
+ * xbe is relative to <files>/library. folder: the tree URI of the library folder the item is in (Library.Folder; absent
+ * in an index from before several folders: the first folder). console: absent for an Xbox game; a game of another
+ * console (XBA-178) has its generic title key (Console.identify) and, as tid, its library key « <console>-<key> »
+ * (Console.packDirName), so games() and games.json key every console the same way.
  */
 final class LibraryIndex {
     static final String KIND_ISO = "iso", KIND_FOLDER = "folder";
-    /** Item statuses: only « ok » items are games; the rest is the « Other files » line. */
+    /** A game file of another console (Console: .gba, .bin / .cue / .iso of a PS1 disc, .z64 / .n64 / .v64). */
+    static final String KIND_ROM = "rom";
+    /**
+     * Item statuses: only « ok » items are games; the rest is the « Other files » line. NOT_ROM: a file named like a
+     * game of another console whose content gives no title key (not a game, or a CHD, not read yet). IGNORED: a lone
+     * .bin that is no PlayStation disc (firmware, a dump: a name too common to call it a game); kept for the stat-only
+     * rescan, shown nowhere.
+     */
     static final String OK = "ok", NOT_XISO = "not_xiso", NO_XBE = "no_xbe", BAD_XBE = "bad_xbe",
-            UNREADABLE = "unreadable";
+            UNREADABLE = "unreadable", NOT_ROM = "not_rom", IGNORED = "ignored";
 
     String root = "";
     long scannedAt;
@@ -43,11 +56,21 @@ final class LibraryIndex {
         String tid = "", title = "";
         int region, disc, version;
         String xbeSha256 = "", xbe = "";
-        /** A split image (XBA-126): every part's loc in order (loc is the first); empty for one file. */
+        /** A split image (XBA-126): every part's loc in order (loc is the first); a .cue: its tracks; else empty. */
         final java.util.List<String> parts = new java.util.ArrayList<>();
+        /** The console (XBOX for every item of an index from before XBA-178) and, for another one, its title key. */
+        Console console = Console.XBOX;
+        String key = "";
+        /** The library folder it was found in: its tree URI (Library.Folder.tree); "" in an older index. */
+        String folder = "";
 
         boolean ok() {
             return OK.equals(status);
+        }
+
+        /** A game of another console than the Xbox: listed, not playable yet (no Prepare, no launch). */
+        boolean otherConsole() {
+            return console != Console.XBOX;
         }
 
         /** The cached default.xbe, or null. */
@@ -70,6 +93,12 @@ final class LibraryIndex {
             o.put("status", status);
             if (!parts.isEmpty())
                 o.put("parts", new org.json.JSONArray(parts));
+            if (!folder.isEmpty())
+                o.put("folder", folder);
+            if (otherConsole()) {
+                o.put("console", console.id);
+                o.put("key", key);
+            }
             if (ok()) {
                 o.put("tid", tid);
                 o.put("title", title);
@@ -100,8 +129,14 @@ final class LibraryIndex {
             org.json.JSONArray parts = o.optJSONArray("parts");
             for (int k = 0; parts != null && k < parts.length(); k++)
                 i.parts.add(parts.optString(k));
+            i.folder = o.optString("folder", "");
+            Console c = Console.fromPack(o.optString("console", ""));
+            i.console = c == null ? Console.XBOX : c;
+            i.key = o.optString("key", "");
+            if (c == null)
+                i.status = UNREADABLE;   // a console this build does not know
             if (i.ok() && i.tid.isEmpty())
-                i.status = BAD_XBE;
+                i.status = i.otherConsole() ? NOT_ROM : BAD_XBE;
             return i;
         }
     }
@@ -136,11 +171,29 @@ final class LibraryIndex {
         return m;
     }
 
+    /** The consoles of the games listed (ok items). */
+    java.util.Set<Console> consoles() {
+        java.util.Set<Console> s = java.util.EnumSet.noneOf(Console.class);
+        for (Item i : items) {
+            if (i.ok())
+                s.add(i.console);
+        }
+        return s;
+    }
+
+    /**
+     * Drops the items of a library folder taken out of the library (folder: its tree URI); first: it was the first
+     * folder, which also owns the items of an index from before several folders (no folder field).
+     */
+    void dropFolder(String folder, boolean first) {
+        items.removeIf(i -> i.folder.equals(folder) || (first && i.folder.isEmpty()));
+    }
+
     /** The items that are not games (not an Xbox image, no default.xbe, a bad XBE, unreadable). */
     List<Item> others() {
         List<Item> l = new ArrayList<>();
         for (Item i : items) {
-            if (!i.ok())
+            if (!i.ok() && !IGNORED.equals(i.status))
                 l.add(i);
         }
         return l;

@@ -23,16 +23,20 @@ import java.util.List;
 import java.util.Locale;
 
 /**
- * Scans the game library folder (docs: « Game library »): disc images (*.iso, *.xiso) and extracted game folders (a
- * directory holding default.xbe), into a LibraryIndex. Each game's default.xbe is copied once into the XBE cache
- * (<files>/library/xbe/<TID>-<sha8>/default.xbe; identical XBEs share one copy): out of an image through ImagePeek
- * (XisoNative.extractFile, a few MB read, nothing else extracted), out of a folder by a plain copy. Everything that
- * reads an XBE by path (title, art, theme, hash, the Prepare's source before import) then works on that copy.
+ * Scans the game library folders (docs: « Game library »; several since XBA-178, one per console say) into one
+ * LibraryIndex: Xbox disc images (*.iso, *.xiso...) and extracted game folders (a directory holding default.xbe), and
+ * the games of the other consoles (Console: .gba; PS1 .cue with its tracks, a lone .bin, an .iso whose content is a
+ * PlayStation disc; N64 .z64 / .n64 / .v64), each keyed by its console and title key (Console.identify). Each Xbox
+ * game's default.xbe is copied once into the XBE cache (<files>/library/xbe/<TID>-<sha8>/default.xbe; identical XBEs
+ * share one copy): out of an image through ImagePeek (XisoNative.extractFile, a few MB read, nothing else extracted),
+ * out of a folder by a plain copy. Everything that reads an XBE by path (title, art, theme, hash, the Prepare's source
+ * before import) then works on that copy.
  *
- * Walk: at most MAX_DEPTH levels below the folder and MAX_ENTRIES entries; names starting with « . » and the Android
- * directory are skipped; a game folder is not descended. A rescan reuses every item whose location, size and
- * modification time are unchanged without opening it (a stat-only rescan). Failures stay in the index with their
- * status (LibraryIndex.NOT_XISO, NO_XBE, BAD_XBE, UNREADABLE): the « Other files » line.
+ * Walk, per folder: at most MAX_DEPTH levels below it and MAX_ENTRIES entries; names starting with « . » and the
+ * Android directory are skipped; a game folder is not descended. A rescan reuses every item whose location, size and
+ * modification time are unchanged without opening it (a stat-only rescan; a .cue's fingerprint covers its tracks).
+ * Failures stay in the index with their status (LibraryIndex.NOT_XISO, NO_XBE, BAD_XBE, UNREADABLE, NOT_ROM): the
+ * « Other files » line.
  *
  * The walk is plain Java over Tree and ImagePeek, so the JVM tests drive it with fakes. Production trees: PathTree
  * (java.io.File, with All files access) and DocTree (the Storage Access Framework). Runs on a background thread.
@@ -65,6 +69,22 @@ final class LibraryScanner {
         int fd();
 
         InputStream stream() throws IOException;
+
+        /** The content read at any position (Console.identify of a game of another console). */
+        default Console.Source source() throws IOException {
+            throw new IOException("not seekable");
+        }
+    }
+
+    /** One library folder to scan: its tree URI (Library.Folder.tree, stamped on its items) and how to read it. */
+    static final class Root {
+        final String folder;
+        final Tree tree;
+
+        Root(String folder, Tree tree) {
+            this.folder = folder == null ? "" : folder;
+            this.tree = tree;
+        }
     }
 
     interface Tree {
@@ -112,40 +132,73 @@ final class LibraryScanner {
         return scan(t, previous, peek, xbeCacheDir, null, null, c);
     }
 
-    /**
-     * Scans t. previous (may be null) gives the fingerprints to reuse. art and listener may be null. On cancel the
-     * result holds what was found so far, marked cancelled: the caller keeps its previous index.
-     */
+    /** One folder (its items get no folder field: the first folder's, LibraryIndex.Item.folder). */
     static Result scan(Tree t, LibraryIndex previous, ImagePeek peek, File xbeCacheDir, Art art, Listener listener,
                        Cancel c) {
-        long t0 = System.nanoTime();
-        Walk w = new Walk(t, previous == null ? new LibraryIndex() : previous, peek, xbeCacheDir, art, listener, c);
-        w.r.index = new LibraryIndex();
-        try {
-            Node root = t.root();
-            w.r.index.root = root.loc;
-            w.dir(root, 0);
-        } catch (IOException e) {
-            warn("launcher: library: cannot read the folder: " + e.getMessage());
-        }
-        w.r.index.scannedAt = System.currentTimeMillis();
-        w.r.ms = (System.nanoTime() - t0) / 1_000_000;
-        return w.r;
+        return scan(java.util.Collections.singletonList(new Root("", t)), previous, peek, xbeCacheDir, art, listener,
+                    c);
     }
 
+    /**
+     * Scans every folder in turn into one index (the walk's limits apply to each folder). previous (may be null)
+     * gives the fingerprints to reuse. art and listener may be null. index.root is the first folder's location, ""
+     * when some folder could not be read (it may only be unmounted: the caller then keeps the art of the games it no
+     * longer sees); index.truncated: some folder reached its entry cap. A file found again through another
+     * (overlapping) folder is listed once. On cancel the result holds what was found so far, marked cancelled: the
+     * caller keeps its previous index.
+     */
+    static Result scan(List<Root> roots, LibraryIndex previous, ImagePeek peek, File xbeCacheDir, Art art,
+                       Listener listener, Cancel c) {
+        long t0 = System.nanoTime();
+        Result r = new Result();
+        r.index = new LibraryIndex();
+        LibraryIndex prev = previous == null ? new LibraryIndex() : previous;
+        java.util.Set<String> seen = new java.util.HashSet<>();
+        boolean unreadable = false;
+        for (int k = 0; k < roots.size() && !r.cancelled; k++) {
+            Root root = roots.get(k);
+            Walk w = new Walk(r, root, prev, seen, peek, xbeCacheDir, art, listener, c);
+            try {
+                Node n = root.tree.root();
+                if (k == 0)
+                    r.index.root = n.loc;
+                w.dir(n, 0);
+            } catch (IOException e) {
+                warn("launcher: library: cannot read the folder " + root.folder + ": " + e.getMessage());
+                unreadable = true;
+            }
+            r.index.truncated |= w.truncated;
+        }
+        if (unreadable)
+            r.index.root = "";
+        r.index.scannedAt = System.currentTimeMillis();
+        r.ms = (System.nanoTime() - t0) / 1_000_000;
+        return r;
+    }
+
+    /** The walk of one folder; the result, the previous index and the locations seen are shared by all folders. */
     private static final class Walk {
         final Tree t;
+        final String folder;
         final LibraryIndex prev;
+        final java.util.Set<String> seen;
         final ImagePeek peek;
         final File cache;
         final Art art;
         final Listener listener;
         final Cancel cancel;
-        final Result r = new Result();
+        final Result r;
+        /** This folder's entries and whether it reached MAX_ENTRIES. */
+        int entries;
+        boolean truncated;
 
-        Walk(Tree t, LibraryIndex prev, ImagePeek peek, File cache, Art art, Listener listener, Cancel cancel) {
-            this.t = t;
+        Walk(Result r, Root root, LibraryIndex prev, java.util.Set<String> seen, ImagePeek peek, File cache, Art art,
+             Listener listener, Cancel cancel) {
+            this.r = r;
+            this.t = root.tree;
+            this.folder = root.folder;
             this.prev = prev;
+            this.seen = seen;
             this.peek = peek;
             this.cache = cache;
             this.art = art;
@@ -156,7 +209,7 @@ final class LibraryScanner {
         boolean stop() {
             if (!r.cancelled && cancel != null && cancel.cancelled())
                 r.cancelled = true;
-            return r.cancelled || r.index.truncated;
+            return r.cancelled || truncated;
         }
 
         void dir(Node d, int depth) {
@@ -176,14 +229,28 @@ final class LibraryScanner {
             }
             if (xbe != null) {   // a game folder: not descended
                 r.entries++;
+                entries++;
                 add(folder(d, xbe));
                 return;
+            }
+            // A PS1 disc as a .cue and its tracks: the .cue stands for the disc, its tracks are not listed again.
+            java.util.Map<Node, LibraryIndex.Item> cues = new java.util.HashMap<>();
+            java.util.Set<String> tracks = new java.util.HashSet<>();
+            for (Node k : kids) {
+                if (stop())
+                    return;
+                if (!k.dir && !k.name.startsWith(".") && isCue(k.name)) {
+                    LibraryIndex.Item i = cue(k, kids);
+                    cues.put(k, i);
+                    tracks.addAll(i.parts);
+                }
             }
             for (Node k : kids) {
                 if (stop())
                     return;
-                if (++r.entries > MAX_ENTRIES) {
-                    r.index.truncated = true;
+                r.entries++;
+                if (++entries > MAX_ENTRIES) {
+                    truncated = true;
                     return;
                 }
                 if (k.name.startsWith(".") || k.name.equalsIgnoreCase("Android"))
@@ -196,13 +263,20 @@ final class LibraryScanner {
                     if (parts == null)
                         continue;                       // a later part of a split image: its first stands for it
                     add(image(parts));
+                } else if (cues.containsKey(k)) {
+                    add(cues.get(k));
+                } else if (isRom(k.name) && !tracks.contains(k.loc)) {
+                    add(rom(k));
                 }
             }
         }
 
         void add(LibraryIndex.Item i) {
+            if (!seen.add(i.loc))
+                return;   // the same file through another library folder (one inside another)
+            i.folder = folder;
             r.index.items.add(i);
-            if (i.ok() && art != null) {
+            if (i.ok() && !i.otherConsole() && art != null) {
                 try {
                     art.onGame(xbeOf(i), i.tid, i.title);
                 } catch (RuntimeException e) {
@@ -223,7 +297,7 @@ final class LibraryScanner {
             LibraryIndex.Item p = prev.find(loc);
             if (p == null || !p.sameFingerprint(loc, size, mtime))
                 return null;
-            if (p.ok()) {
+            if (p.ok() && !p.otherConsole()) {
                 File x = xbeOf(p);
                 if (x == null || !x.isFile())
                     return null;
@@ -285,6 +359,9 @@ final class LibraryScanner {
             case XisoNative.ENOTXISO:
             case XisoNative.ECORRUPT:
                 i.status = LibraryIndex.NOT_XISO;
+                // A plain .iso is an Xbox or a PlayStation disc: only the content tells (Console.sniffIso).
+                if (rc == XisoNative.ENOTXISO && parts.size() == 1 && Console.isPlainIso(n.name))
+                    identify(i, n, Console.PS1);
                 break;
             default:
                 i.status = LibraryIndex.UNREADABLE;
@@ -293,6 +370,90 @@ final class LibraryScanner {
             //noinspection ResultOfMethodCallIgnored
             tmp.delete();
             return i;
+        }
+
+        /** A game file of another console (Console.byName): its title key from its content. */
+        LibraryIndex.Item rom(Node n) {
+            LibraryIndex.Item old = reuse(n.loc, n.size, n.mtime);
+            if (old != null)
+                return old;
+            LibraryIndex.Item i = item(n.loc, LibraryIndex.KIND_ROM, n.name, n.size, n.mtime);
+            i.status = n.name.toLowerCase(Locale.ROOT).endsWith(".bin") ? LibraryIndex.IGNORED : LibraryIndex.NOT_ROM;
+            r.peeks++;
+            identify(i, n, Console.byName(n.name));
+            return i;
+        }
+
+        /**
+         * A .cue: the disc of its tracks (FILE lines, next to it), identified from its first track. Its fingerprint is
+         * the .cue's and its tracks' (sizes summed, the newest time), so a rescan reuses it without reading the .cue.
+         */
+        LibraryIndex.Item cue(Node c, List<Node> kids) {
+            LibraryIndex.Item p = prev.find(c.loc);
+            if (p != null && !p.parts.isEmpty()) {
+                List<Node> was = new ArrayList<>();
+                for (String loc : p.parts)
+                    for (Node k : kids)
+                        if (k.loc.equals(loc))
+                            was.add(k);
+                if (was.size() == p.parts.size()) {
+                    LibraryIndex.Item old = reuse(c.loc, c.size + sizes(was), Math.max(c.mtime, newest(was)));
+                    if (old != null)
+                        return old;
+                }
+            }
+            List<Node> tracks = new ArrayList<>();
+            String text = null;
+            try (Opened o = t.open(c); InputStream in = o.stream()) {
+                byte[] buf = new byte[Console.MAX_CUE];
+                int n = 0, k;
+                while (n < buf.length && (k = in.read(buf, n, buf.length - n)) > 0)
+                    n += k;
+                text = new String(buf, 0, n, java.nio.charset.StandardCharsets.ISO_8859_1);
+            } catch (IOException | RuntimeException e) {
+                warn("launcher: library: cannot read " + c.loc + ": " + e);
+            }
+            for (String name : text == null ? java.util.Collections.<String>emptyList() : Console.cueFiles(text)) {
+                String base = name.substring(Math.max(name.lastIndexOf('/'), name.lastIndexOf('\\')) + 1);
+                Node hit = null;
+                for (Node k : kids)
+                    if (!k.dir && (k.name.equals(base) || (hit == null && k.name.equalsIgnoreCase(base))))
+                        hit = k;
+                if (hit != null && !tracks.contains(hit))
+                    tracks.add(hit);
+            }
+            LibraryIndex.Item i = item(c.loc, LibraryIndex.KIND_ROM, c.name, c.size + sizes(tracks),
+                                       Math.max(c.mtime, newest(tracks)));
+            for (Node k : tracks)
+                i.parts.add(k.loc);
+            i.status = text == null ? LibraryIndex.UNREADABLE : LibraryIndex.NOT_ROM;
+            if (!tracks.isEmpty() && !isCue(tracks.get(0).name)) {
+                r.peeks++;
+                identify(i, tracks.get(0), Console.PS1);   // a .cue stands for a CD: a PlayStation disc only
+            }
+            return i;
+        }
+
+        /**
+         * Reads n's content for its console and title key (Console.identify); i becomes a game of that console when
+         * it has one and it is the console only (the one n's name says).
+         */
+        void identify(LibraryIndex.Item i, Node n, Console only) {
+            Console.Identity id = null;
+            try (Opened o = t.open(n)) {
+                id = Console.identify(o.source());
+            } catch (IOException | RuntimeException e) {
+                warn("launcher: library: cannot read " + n.loc + ": " + e);
+            }
+            String key = id == null || id.console != only ? null : Console.packDirName(id.console, id.key);
+            if (key == null)
+                return;
+            i.kind = LibraryIndex.KIND_ROM;
+            i.status = LibraryIndex.OK;
+            i.console = id.console;
+            i.key = id.key;
+            i.tid = key;
+            i.title = stripExtension(i.name);
         }
 
         LibraryIndex.Item folder(Node d, Node xbe) {
@@ -394,6 +555,30 @@ final class LibraryScanner {
     /** A disc image or one part of a split image (DiscImages.isImageName: .iso .xiso .cso .ciso .zso .cci). */
     static boolean isImage(String name) {
         return DiscImages.isImageName(name);
+    }
+
+    /** A game file of another console than the Xbox, by name (Console.byName: .gba, .bin, .cue, .chd, .z64...). */
+    static boolean isRom(String name) {
+        Console c = Console.byName(name);
+        return c != null && c != Console.XBOX;
+    }
+
+    static boolean isCue(String name) {
+        return name.toLowerCase(Locale.ROOT).endsWith(".cue");
+    }
+
+    private static long sizes(List<Node> l) {
+        long s = 0;
+        for (Node n : l)
+            s += n.size;
+        return s;
+    }
+
+    private static long newest(List<Node> l) {
+        long m = 0;
+        for (Node n : l)
+            m = Math.max(m, n.mtime);
+        return m;
     }
 
     /**
@@ -573,6 +758,13 @@ final class LibraryScanner {
             }
 
             @Override
+            public Console.Source source() {
+                // Positional reads: the descriptor's offset is left alone (a FileInputStream over a descriptor it
+                // did not open does not close it; p.close() does).
+                return Console.source(new FileInputStream(p.getFileDescriptor()).getChannel());
+            }
+
+            @Override
             public void close() throws IOException {
                 p.close();
             }
@@ -581,17 +773,33 @@ final class LibraryScanner {
 
     // ---- The app's scan -----------------------------------------------------------------------------------------
 
-    /** The library folder's tree for this app: files with All files access and a path, else SAF; null when none. */
+    /** The first library folder's tree for this app (folderRoots); null when none. */
     static Tree folderTree(Context c) {
         return folderTree(c, Environment.isExternalStorageManager());
     }
 
     static Tree folderTree(Context c, boolean allFilesAccess) {
-        String path = Library.folderPath(c);
-        if (path != null && allFilesAccess)
-            return new PathTree(new File(path));
-        String tree = Library.folderTree(c);
-        return tree == null ? null : new DocTree(c.getContentResolver(), Uri.parse(tree));
+        List<Root> l = folderRoots(c, allFilesAccess);
+        return l.isEmpty() ? null : l.get(0).tree;
+    }
+
+    /** A folder's tree: files with All files access and a path, else the Storage Access Framework. */
+    static Tree tree(Context c, Library.Folder f, boolean allFilesAccess) {
+        if (f.path != null && allFilesAccess)
+            return new PathTree(new File(f.path));
+        return new DocTree(c.getContentResolver(), Uri.parse(f.tree));
+    }
+
+    /** Every library folder of this app, in order, with its tree (empty: no folder). */
+    static List<Root> folderRoots(Context c, boolean allFilesAccess) {
+        List<Root> l = new ArrayList<>();
+        for (Library.Folder f : Library.folders(c))
+            l.add(new Root(f.tree, tree(c, f, allFilesAccess)));
+        return l;
+    }
+
+    static List<Root> folderRoots(Context c) {
+        return folderRoots(c, Environment.isExternalStorageManager());
     }
 
     /** The production ImagePeek: libxba_import.so. */
@@ -620,21 +828,29 @@ final class LibraryScanner {
     }
 
     /**
-     * Scans the app's library folder (on the calling thread: a worker) and, unless cancelled, writes index.json and
+     * Scans the app's library folders (on the calling thread: a worker) and, unless cancelled, writes index.json and
      * the scan time. Returns null when no folder is set.
      */
     static Result scanLibrary(Context c, Listener listener, Cancel cancel) {
-        return scanLibrary(c, folderTree(c), listener, cancel);
+        return scanLibrary(c, folderRoots(c), listener, cancel);
     }
 
+    /** One tree, as the first library folder's. */
     static Result scanLibrary(Context c, Tree t, Listener listener, Cancel cancel) {
         if (t == null)
+            return null;
+        String first = Library.folderTree(c);
+        return scanLibrary(c, java.util.Collections.singletonList(new Root(first, t)), listener, cancel);
+    }
+
+    static Result scanLibrary(Context c, List<Root> roots, Listener listener, Cancel cancel) {
+        if (roots == null || roots.isEmpty())
             return null;
         File files = c.getFilesDir();
         File indexFile = Library.indexFile(files);
         LibraryIndex prev = LibraryIndex.read(indexFile);
         long start = SystemClock.elapsedRealtime();
-        Result r = scan(t, prev, NATIVE_PEEK, Library.xbeCacheDir(files), titleArtAndTheme(c), listener, cancel);
+        Result r = scan(roots, prev, NATIVE_PEEK, Library.xbeCacheDir(files), titleArtAndTheme(c), listener, cancel);
         if (!r.cancelled) {
             try {
                 LibraryIndex.write(indexFile, r.index);
@@ -643,8 +859,8 @@ final class LibraryScanner {
                 warn("launcher: library: cannot write " + indexFile + ": " + e);
             }
         }
-        Log.i(TAG, "launcher: library: scan " + r.index.items.size() + " items, " + r.games() + " games, "
-                   + (SystemClock.elapsedRealtime() - start) + " ms (" + r.peeks + " opened, " + r.reused
+        Log.i(TAG, "launcher: library: scan of " + roots.size() + " folders: " + r.index.items.size() + " items, "
+                   + r.games() + " games, " + (SystemClock.elapsedRealtime() - start) + " ms (" + r.peeks + " opened, " + r.reused
                    + " unchanged" + (r.index.truncated ? ", entry cap reached" : "")
                    + (r.cancelled ? ", cancelled" : "") + ")");
         return r;
