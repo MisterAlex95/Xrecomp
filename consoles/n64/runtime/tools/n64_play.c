@@ -2,7 +2,7 @@
  * (n64_runtime_run: host_window, host_pad, host_audio, saves, pacing). XBA-174; a title runs here before it is
  * debugged on Android.
  *
- *   n64_play ROM [--frames N] [--save-dir DIR] [--scale aspect|integer] [--filter nearest|linear]
+ *   n64_play ROM [--frames N] [--save-dir DIR] [--scale aspect|integer|stretch] [--filter nearest|linear]
  *                [--pak controller|rumble|none] [--players 1..4] [--rdp-threads N] [--pal | --ntsc] [--tty]
  *                [--headless] [--unpaced] [--buttons MASK] [--screenshot OUT.ppm] [--capture N OUT.ppm] [--key KEY]
  *                [--pack LIB.so] [--missed FILE] [--frameskip auto|0..9]
@@ -10,8 +10,10 @@
  * ROM               a .z64 / .v64 / .n64 file (any byte order); no BIOS needed (the PIF is HLE)
  * --frames N        stop after N frames (VI interrupts; default: until the window is closed)
  * --save-dir DIR    saves in DIR/n64-<KEY>/ (game.eep / game.sra / game.fla, pak1.mpk..; default
- *                   $XDG_DATA_HOME/xrecomp/save, else ~/.local/share/xrecomp/save); "" turns them off
- * --scale, --filter how the 4:3 picture fills the window (default aspect, linear; $RECOMP_N64_SCALE / _FILTER)
+ *                   $RECOMP_SAVE_DIR, else $XDG_DATA_HOME/xrecomp/save, else ~/.local/share/xrecomp/save); ""
+ *                   turns them off
+ * --scale, --filter how the 4:3 picture fills the window (default aspect, linear; $RECOMP_N64_SCALE / _FILTER, else
+ *                   $RECOMP_SCALE / $RECOMP_FILTER); --scale stretch fills the whole window
  * --pak             the accessory in the controllers (default controller pak; $RECOMP_N64_PAK)
  * --players N       host pad N -> controller N (default: every pad drives controller 1)
  * --rdp-threads N   RDP scanline-band threads (default $RECOMP_N64_RDP_THREADS, else $XBR_N64_RDP_THREADS, else 1)
@@ -45,7 +47,7 @@
 
 static int usage(void)
 {
-    fprintf(stderr, "usage: n64_play ROM [--frames N] [--save-dir DIR] [--scale aspect|integer]\n"
+    fprintf(stderr, "usage: n64_play ROM [--frames N] [--save-dir DIR] [--scale aspect|integer|stretch]\n"
                     "                [--filter nearest|linear] [--pak controller|rumble|none] [--players 1..4]\n"
                     "                [--rdp-threads N] [--pal | --ntsc] [--tty] [--headless] [--unpaced]\n"
                     "                [--buttons MASK] [--screenshot OUT.ppm] [--capture N OUT.ppm] [--key KEY]\n"
@@ -68,10 +70,15 @@ int main(int argc, char **argv)
         else if (!strcmp(a, "--save-dir") && more) {
             snprintf(save_dir, sizeof save_dir, "%s", argv[++i]);
             save_set = 1;
-        } else if (!strcmp(a, "--scale") && more)
-            o.scale = !strcmp(argv[++i], "integer") ? HOST_SCALE_INTEGER : HOST_SCALE_ASPECT;
-        else if (!strcmp(a, "--filter") && more)
-            o.filter = !strcmp(argv[++i], "nearest") ? HOST_FILTER_NEAREST : HOST_FILTER_LINEAR;
+        } else if (!strcmp(a, "--scale") && more) {
+            o.scale = host_window_scale_parse(argv[++i]);
+            if (o.scale < 0)
+                return usage();
+        } else if (!strcmp(a, "--filter") && more) {
+            o.filter = host_window_filter_parse(argv[++i]);
+            if (o.filter < 0)
+                return usage();
+        }
         else if (!strcmp(a, "--pak") && more) {
             o.pak = n64_runtime_pak_parse(argv[++i]);
             if (o.pak == N64_RT_PAK_DEFAULT)
@@ -118,8 +125,11 @@ int main(int argc, char **argv)
             o.title_key = key;
     }
     if (!save_set) {
-        const char *xdg = getenv("XDG_DATA_HOME"), *home = getenv("HOME");
-        if (xdg && *xdg)
+        /* $RECOMP_SAVE_DIR (the macOS launcher's per-title folder, XBA-181), else the XDG data folder. */
+        const char *env = getenv("RECOMP_SAVE_DIR"), *xdg = getenv("XDG_DATA_HOME"), *home = getenv("HOME");
+        if (env && *env)
+            snprintf(save_dir, sizeof save_dir, "%s", env);
+        else if (xdg && *xdg)
             snprintf(save_dir, sizeof save_dir, "%s/xrecomp/save", xdg);
         else if (home && *home)
             snprintf(save_dir, sizeof save_dir, "%s/.local/share/xrecomp/save", home);

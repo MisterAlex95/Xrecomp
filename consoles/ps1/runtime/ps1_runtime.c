@@ -696,6 +696,17 @@ static const char *pad_name(int analog)
     return analog ? "analog (DualShock)" : "digital";
 }
 
+void ps1_runtime_display(const ps1_runtime_opts *o, int *scale, int *filter)
+{
+    /* RECOMP_PS1_SCALE / _FILTER, else the shared RECOMP_SCALE / RECOMP_FILTER (XBA-181); smooth by default. */
+    int s = o && o->scale >= 0 ? o->scale : host_window_env_scale("RECOMP_PS1_SCALE", HOST_SCALE_ASPECT);
+    int f = o && o->filter >= 0 ? o->filter : host_window_env_filter("RECOMP_PS1_FILTER", HOST_FILTER_LINEAR);
+    if (scale)
+        *scale = s;
+    if (filter)
+        *filter = f;
+}
+
 int ps1_runtime_run(const ps1_runtime_opts *o)
 {
     if (!o || !o->game || !*o->game) {
@@ -804,17 +815,14 @@ int ps1_runtime_run(const ps1_runtime_opts *o)
     int window = !o->headless && !host_window_headless();
     if (SDL_WasInit(SDL_INIT_EVENTS) == 0)
         SDL_InitSubSystem(SDL_INIT_EVENTS);
-    int scale = o->scale >= 0 ? o->scale
-                              : env_choice("RECOMP_PS1_SCALE", "integer", 0) ? HOST_SCALE_INTEGER : HOST_SCALE_ASPECT;
-    int filter = o->filter >= 0 ? o->filter
-                                : env_choice("RECOMP_PS1_FILTER", "nearest", 0) ? HOST_FILTER_NEAREST
-                                                                                 : HOST_FILTER_LINEAR;
+    int scale, filter;
+    ps1_runtime_display(o, &scale, &filter);
     host_window_set_scaling(scale, filter);
     host_window_set_aspect(4, 3);
     if (window) {
         char title[300];
         snprintf(title, sizeof title, "XRecomp PS1 - %s", base_name(game));
-        if (!host_window_open(title, 320 * 3, 240 * 3, 1)) {
+        if (!host_window_open(title, 320 * 3, 240 * 3, host_window_env_vsync())) {
             fprintf(stderr, "ps1: no window, running headless\n");
             window = 0;
         }
@@ -824,7 +832,8 @@ int ps1_runtime_run(const ps1_runtime_opts *o)
     console_pad_load(&s_pad_map, CONSOLE_PAD_PS1, getenv(console_pad_env(CONSOLE_PAD_PS1)));
     int audio = host_audio_open(PS1_AUDIO_RATE, 2);
     printf("ps1: window %s (4:3, %s, %s), audio %s, pads %u, port 1 %s%s\n", window ? "on" : "off",
-           scale == HOST_SCALE_INTEGER ? "integer" : "aspect", filter == HOST_FILTER_NEAREST ? "nearest" : "linear",
+           scale == HOST_SCALE_INTEGER ? "integer" : scale == HOST_SCALE_STRETCH ? "stretch" : "aspect",
+           filter == HOST_FILTER_NEAREST ? "nearest" : "linear",
            audio ? "on" : "off", host_pad_mask(), pad_name(analog), players >= 2 ? ", two players" : "");
     fflush(stdout);
 
@@ -841,6 +850,7 @@ int ps1_runtime_run(const ps1_runtime_opts *o)
     ps1_pad_kind kind = analog ? PS1_PAD_ANALOG : PS1_PAD_DUALSHOCK;
     int analog2 = analog;
     uint8_t rumble[2][2] = {{0, 0}, {0, 0}};   /* per port: small, large, as last sent to the host pads */
+    int rumble_on = host_pad_rumble_env();     /* RECOMP_RUMBLE=0 turns the DualShock motors off (XBA-181) */
 
     for (;;) {
         int running = 1;
@@ -927,7 +937,8 @@ int ps1_runtime_run(const ps1_runtime_opts *o)
             printf("ps1: the game set port 1 %s at frame %llu\n", pad_name(analog), (unsigned long long)frames);
             fflush(stdout);
         }
-        rumble_drive(players, motors, rumble);
+        if (rumble_on)
+            rumble_drive(players, motors, rumble); /* RECOMP_RUMBLE=0: never */
 
         if (gpu) {
             ps1_gpu_timing tm;

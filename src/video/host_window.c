@@ -1,13 +1,16 @@
 /* host_window.c -- see host_window.h (XBA-145). */
 #include "host_window.h"
 #include "host_pad.h"
+#include "host_time.h"
 #include "recomp_lifecycle.h"
 
 #include <SDL.h>
 
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 /* The few GL entry points the present needs, from SDL: no GL header or GL
  * library at build time, the same code on GLES 3.0 and desktop 3.2 core. */
@@ -93,6 +96,18 @@ static void *s_hook_user;
 static int s_scale = HOST_SCALE_ASPECT, s_filter = HOST_FILTER_LINEAR, s_tex_filter = -1;
 static int s_aspect_num, s_aspect_den; /* host_window_set_aspect; 0: the picture's own */
 static char s_capture[1024];
+
+/* host_window_stats: written by the presenting thread, read from any. */
+static int s_open;
+static uint64_t s_frames_pub, s_last_present_ns, s_fps_t0, s_fps_n;
+static uint32_t s_fps_centi;
+
+/* host_window_screenshot_bmp: a copy of the last present_rgba picture (RGBA,
+ * tightly packed, row 0 at the top) and the shape it was shown at. */
+static pthread_mutex_t s_last_mu = PTHREAD_MUTEX_INITIALIZER;
+static uint8_t *s_last;
+static size_t s_last_cap;
+static int s_last_w, s_last_h, s_last_anum, s_last_aden;
 
 static int env_set(const char *name)
 {
@@ -296,6 +311,11 @@ int host_window_open(const char *title, int width, int height, int vsync)
     host_pad_init();
     s_quit = 0;
     s_frames = 0;
+    s_fps_t0 = s_fps_n = 0;
+    __atomic_store_n(&s_frames_pub, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&s_fps_centi, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&s_last_present_ns, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&s_open, 1, __ATOMIC_RELEASE);
     fprintf(stderr, "  [HOST] window: %dx%d, GL%s %d.%d, vsync %s\n", width, height, s_gles ? " ES" : " core",
             s_major, s_minor, s_vsync ? "on" : "off");
     return 1;
@@ -352,6 +372,50 @@ static void capture(int dw, int dh)
     s_capture[0] = 0;
 }
 
+/* host_window_stats: one more present; the rate is taken over a second. */
+static void count_frame(void)
+{
+    uint64_t now = xbox_HostNowNs();
+
+    __atomic_store_n(&s_frames_pub, s_frames, __ATOMIC_RELAXED);
+    __atomic_store_n(&s_last_present_ns, now, __ATOMIC_RELAXED);
+    if (!s_fps_t0 || now - s_fps_t0 > 4000000000ull) {   /* first frame, or back from a long hold */
+        s_fps_t0 = now;
+        s_fps_n = 0;
+        return;
+    }
+    s_fps_n++;
+    if (now - s_fps_t0 >= 1000000000ull) {
+        __atomic_store_n(&s_fps_centi, (uint32_t)(s_fps_n * 100000000000ull / (now - s_fps_t0)), __ATOMIC_RELAXED);
+        s_fps_t0 = now;
+        s_fps_n = 0;
+    }
+}
+
+/* host_window_screenshot_bmp: keeps the picture just shown. */
+static void keep_last(const uint8_t *px, int w, int h, int pitch)
+{
+    size_t need = (size_t)w * h * 4;
+
+    pthread_mutex_lock(&s_last_mu);
+    if (need > s_last_cap) {
+        uint8_t *n = realloc(s_last, need);
+        if (!n) {
+            pthread_mutex_unlock(&s_last_mu);
+            return;
+        }
+        s_last = n;
+        s_last_cap = need;
+    }
+    for (int y = 0; y < h; y++)
+        memcpy(s_last + (size_t)y * w * 4, px + (size_t)y * pitch, (size_t)w * 4);
+    s_last_w = w;
+    s_last_h = h;
+    s_last_anum = s_aspect_num;
+    s_last_aden = s_aspect_den;
+    pthread_mutex_unlock(&s_last_mu);
+}
+
 static int draw(unsigned tex, int w, int h, int top_down)
 {
     int dw = 0, dh = 0, vw, vh;
@@ -373,7 +437,10 @@ static int draw(unsigned tex, int w, int h, int top_down)
         if (k >= 1 && (int64_t)h * k * aw / ah > dw)
             k = 0; /* that height is too wide for the window */
     }
-    if (s_scale == HOST_SCALE_INTEGER && k >= 1) {
+    if (s_scale == HOST_SCALE_STRETCH) {
+        vw = dw;
+        vh = dh;
+    } else if (s_scale == HOST_SCALE_INTEGER && k >= 1) {
         vh = h * k;
         vw = s_aspect_num > 0 && s_aspect_den > 0 ? (int)((int64_t)vh * aw / ah) : w * k;
     } else if ((int64_t)dw * ah > (int64_t)dh * aw) {
@@ -404,6 +471,7 @@ static int draw(unsigned tex, int w, int h, int top_down)
         capture(dw, dh);
     SDL_GL_SwapWindow(s_win);
     s_frames++;
+    count_frame();
     if (err) {
         fprintf(stderr, "  [HOST] window: GL error 0x%04x at present\n", err);
         return 0;
@@ -444,12 +512,14 @@ int host_window_present_rgba(const void *px, int w, int h, int pitch)
         s_gl.TexSubImage2D(XGL_TEXTURE_2D, 0, 0, 0, w, h, XGL_RGBA, XGL_UNSIGNED_BYTE, px);
     }
     s_gl.PixelStorei(XGL_UNPACK_ROW_LENGTH, 0);
-    return draw(s_tex, w, h, 1);
+    int ok = draw(s_tex, w, h, 1);
+    keep_last(px, w, h, pitch);
+    return ok;
 }
 
 void host_window_set_scaling(int scale, int filter)
 {
-    s_scale = scale == HOST_SCALE_INTEGER ? HOST_SCALE_INTEGER : HOST_SCALE_ASPECT;
+    s_scale = scale == HOST_SCALE_INTEGER || scale == HOST_SCALE_STRETCH ? scale : HOST_SCALE_ASPECT;
     s_filter = filter == HOST_FILTER_NEAREST ? HOST_FILTER_NEAREST : HOST_FILTER_LINEAR;
 }
 
@@ -457,6 +527,143 @@ void host_window_set_aspect(int num, int den)
 {
     s_aspect_num = num > 0 && den > 0 ? num : 0;
     s_aspect_den = num > 0 && den > 0 ? den : 0;
+}
+
+int host_window_scale_parse(const char *v)
+{
+    if (!v)
+        return -1;
+    if (!strcasecmp(v, "aspect"))
+        return HOST_SCALE_ASPECT;
+    if (!strcasecmp(v, "integer"))
+        return HOST_SCALE_INTEGER;
+    if (!strcasecmp(v, "stretch"))
+        return HOST_SCALE_STRETCH;
+    return -1;
+}
+
+int host_window_filter_parse(const char *v)
+{
+    if (!v)
+        return -1;
+    if (!strcasecmp(v, "nearest"))
+        return HOST_FILTER_NEAREST;
+    if (!strcasecmp(v, "linear"))
+        return HOST_FILTER_LINEAR;
+    return -1;
+}
+
+int host_window_env_scale(const char *console_var, int def)
+{
+    int v = console_var ? host_window_scale_parse(getenv(console_var)) : -1;
+
+    if (v < 0)
+        v = host_window_scale_parse(getenv("RECOMP_SCALE"));
+    return v < 0 ? def : v;
+}
+
+int host_window_env_filter(const char *console_var, int def)
+{
+    int v = console_var ? host_window_filter_parse(getenv(console_var)) : -1;
+
+    if (v < 0)
+        v = host_window_filter_parse(getenv("RECOMP_FILTER"));
+    return v < 0 ? def : v;
+}
+
+int host_window_env_vsync(void)
+{
+    const char *v = getenv("RECOMP_PRESENT_VSYNC");
+
+    return !(v && v[0] == '0');
+}
+
+int host_window_stats(uint32_t *fps_centi, uint64_t *frames)
+{
+    uint32_t fps = 0;
+    uint64_t n = 0;
+    int open = __atomic_load_n(&s_open, __ATOMIC_ACQUIRE);
+
+    if (open) {
+        uint64_t last = __atomic_load_n(&s_last_present_ns, __ATOMIC_RELAXED);
+        n = __atomic_load_n(&s_frames_pub, __ATOMIC_RELAXED);
+        if (last && xbox_HostNowNs() - last < 2000000000ull)
+            fps = __atomic_load_n(&s_fps_centi, __ATOMIC_RELAXED);
+    }
+    if (fps_centi)
+        *fps_centi = fps;
+    if (frames)
+        *frames = n;
+    return open;
+}
+
+int host_window_screenshot_bmp(const char *path)
+{
+    uint8_t *px = NULL, hdr[54], *line;
+    int w, h, anum, aden;
+
+    if (!path || !path[0])
+        return -1;
+    pthread_mutex_lock(&s_last_mu);
+    w = s_last_w;
+    h = s_last_h;
+    anum = s_last_anum;
+    aden = s_last_aden;
+    if (s_last && w > 0 && h > 0 && (px = malloc((size_t)w * h * 4)))
+        memcpy(px, s_last, (size_t)w * h * 4);
+    pthread_mutex_unlock(&s_last_mu);
+    if (!px)
+        return -1;
+
+    /* The shape it was shown at: the height kept and the width following, or the width kept when that would
+     * make it narrower than it is. */
+    int ow = w, oh = h;
+    if (anum > 0 && aden > 0) {
+        ow = (int)(((int64_t)h * anum + aden / 2) / aden);
+        if (ow < w) {
+            ow = w;
+            oh = (int)(((int64_t)w * aden + anum / 2) / anum);
+        }
+    }
+    uint32_t row = ((uint32_t)ow * 3u + 3u) & ~3u, img = row * (uint32_t)oh, total = 54u + img;
+    uint32_t uw = (uint32_t)ow, uh = (uint32_t)oh;
+    FILE *f = fopen(path, "wb");
+    line = calloc(1, row);
+    if (!f || !line) {
+        if (f)
+            fclose(f);
+        free(line);
+        free(px);
+        return -1;
+    }
+    memset(hdr, 0, sizeof hdr);
+    hdr[0] = 'B';
+    hdr[1] = 'M';
+    memcpy(hdr + 2, &total, 4);
+    hdr[10] = 54;
+    hdr[14] = 40;
+    memcpy(hdr + 18, &uw, 4);
+    memcpy(hdr + 22, &uh, 4);
+    hdr[26] = 1;
+    hdr[28] = 24;
+    memcpy(hdr + 34, &img, 4);
+    int ok = fwrite(hdr, 1, sizeof hdr, f) == sizeof hdr;
+    for (int y = oh - 1; ok && y >= 0; y--) {   /* bottom-up */
+        const uint8_t *src = px + (size_t)((int64_t)y * h / oh) * w * 4;
+        for (int x = 0; x < ow; x++) {
+            const uint8_t *p = src + (size_t)((int64_t)x * w / ow) * 4;
+            line[x * 3 + 0] = p[2];
+            line[x * 3 + 1] = p[1];
+            line[x * 3 + 2] = p[0];
+        }
+        ok = fwrite(line, 1, row, f) == row;
+    }
+    free(line);
+    free(px);
+    if (fclose(f) != 0 || !ok)
+        return -1;
+    fprintf(stderr, "  [HOST] window: screenshot %dx%d (from %dx%d) to %s\n", ow, oh, w, h, path);
+    return 0;
 }
 
 void host_window_capture(const char *ppm_path)
@@ -492,6 +699,13 @@ void host_window_close(void)
 {
     if (!s_win)
         return;
+    __atomic_store_n(&s_open, 0, __ATOMIC_RELEASE);
+    pthread_mutex_lock(&s_last_mu);
+    free(s_last);
+    s_last = NULL;
+    s_last_cap = 0;
+    s_last_w = s_last_h = 0;
+    pthread_mutex_unlock(&s_last_mu);
     SDL_DelEventWatch(lifecycle_watch, NULL);
     host_pad_shutdown();
     if (s_ctx) {

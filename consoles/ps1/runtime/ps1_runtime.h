@@ -52,9 +52,9 @@ typedef struct ps1_runtime_opts {
     const char *capture_path;
     /* Buttons held on pad 1 for the whole run, on top of the pads (PS1_PAD_*, 1 = pressed; tests). */
     uint16_t buttons;
-    /* Window scaling: -1 = $RECOMP_PS1_SCALE ("integer" or "aspect", default aspect); else HOST_SCALE_*. Filter: -1
-     * = $RECOMP_PS1_FILTER ("linear" or "nearest", default linear: the PS1's widths 256..640 are stretched to 4:3);
-     * else HOST_FILTER_*. */
+    /* Window scaling: -1 = $RECOMP_PS1_SCALE, else $RECOMP_SCALE ("aspect", "integer" or "stretch", default aspect;
+     * host_window_env_scale); else HOST_SCALE_*. Filter: -1 = $RECOMP_PS1_FILTER, else $RECOMP_FILTER ("linear" or
+     * "nearest", default linear: the PS1's widths 256..640 are stretched to 4:3); else HOST_FILTER_*. */
     int scale, filter;
     /* The pad plugged in port 1: -1 = $RECOMP_PS1_PAD ("analog" or "digital", default digital), 0 digital
      * (SCPH-1080; the left stick drives the D-pad too), 1 DualShock in analog mode (sticks -> analog). Back + L3 +
@@ -82,6 +82,10 @@ typedef struct ps1_runtime_opts {
 } ps1_runtime_opts;
 
 void ps1_runtime_opts_init(ps1_runtime_opts *o);
+
+/* How the run shows its picture: o->scale / o->filter when set (>= 0), else $RECOMP_PS1_SCALE / _FILTER, else the
+ * shared $RECOMP_SCALE / $RECOMP_FILTER (host_window_env_scale / _filter), else aspect and linear. o may be NULL. */
+void ps1_runtime_display(const ps1_runtime_opts *o, int *scale, int *filter);
 
 /* Plays o->game until the player quits (window closed, SDL_QUIT) or o->frames ran. Returns 0, or -1 when the game
  * or the BIOS cannot be read or the machine cannot start (why on stderr). Logs one "ps1: ..." line per step on

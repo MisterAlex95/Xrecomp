@@ -6,6 +6,7 @@
 #include <unistd.h>
 
 #include "apu_volume.h"
+#include "host_audio.h"
 #include "ps1_runtime.h"
 #include "platform/recomp_lifecycle.h"
 #include "platform/recomp_quit.h"
@@ -33,7 +34,8 @@ JNIEXPORT void JNICALL JNI_FN(nativeSetVolume)(JNIEnv *env, jclass cls, jint per
 {
     (void)env;
     (void)cls;
-    xbox_ApuSetOutputVolume((int)percent);
+    xbox_ApuSetOutputVolume((int)percent);   /* an Xbox game: the APU's output */
+    host_audio_set_volume((int)percent);     /* a GBA / PS1 / N64 game: host_audio (XBA-181) */
 }
 
 /* Quit from the menu: the guest is let go (a flip parked by the menu must not hold anything), the saves the title

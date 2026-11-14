@@ -41,8 +41,9 @@ typedef struct gba_runtime_opts {
     const char *capture_path;
     /* Keys held for the whole run, on top of the pads (KEYINPUT order, 1 = pressed; tests). */
     uint16_t keys;
-    /* Window scaling: -1 = $RECOMP_GBA_SCALE ("integer" or "aspect", default aspect); else HOST_SCALE_*. Filter: -1
-     * = $RECOMP_GBA_FILTER ("linear" or "nearest", default nearest); else HOST_FILTER_*. */
+    /* Window scaling: -1 = $RECOMP_GBA_SCALE, else $RECOMP_SCALE ("aspect", "integer" or "stretch", default aspect;
+     * host_window_env_scale); else HOST_SCALE_*. Filter: -1 = $RECOMP_GBA_FILTER, else $RECOMP_FILTER ("linear" or
+     * "nearest", default nearest); else HOST_FILTER_*. */
     int scale, filter;
     /* A GBA title pack's library (XBA-157 / XBA-158, gba_pack.h): taken when its pack.json (beside it) says it is
      * this ROM's, this shell's and this host's and its table loads, else the game runs interpreted (a log line says
@@ -54,6 +55,10 @@ typedef struct gba_runtime_opts {
 } gba_runtime_opts;
 
 void gba_runtime_opts_init(gba_runtime_opts *o);
+
+/* How the run shows its picture: o->scale / o->filter when set (>= 0), else $RECOMP_GBA_SCALE / _FILTER, else the
+ * shared $RECOMP_SCALE / $RECOMP_FILTER (host_window_env_scale / _filter), else aspect and nearest. o may be NULL. */
+void gba_runtime_display(const gba_runtime_opts *o, int *scale, int *filter);
 
 /* Plays o->rom until the player quits (window closed, SDL_QUIT) or o->frames ran. Returns 0, or -1 when the ROM
  * cannot be read or the machine cannot start (why on stderr). Logs one "gba: ..." line per step on stdout. */

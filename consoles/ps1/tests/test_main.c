@@ -6,6 +6,7 @@
  *
  *   ps1_runtime_test [BIOS HOMEBREW_DIR]     (the runs skip, the helpers still run, when either is absent) */
 #include "host_pad.h"
+#include "host_window.h"
 #include "host_time.h"
 #include "ps1_core.h"
 #include "ps1_devices.h"
@@ -39,6 +40,41 @@ static uint32_t crc32_ref(const uint8_t *p, size_t n)
             crc = crc & 1 ? 0xedb88320u ^ (crc >> 1) : crc >> 1;
     }
     return ~crc;
+}
+
+/* The display options (XBA-181): the runtime's own keys win over the shared ones, which win over its defaults;
+ * every key accepts both filters and the three scales. */
+static void test_display(void)
+{
+    ps1_runtime_opts o;
+    int scale = -1, filter = -1;
+
+    ps1_runtime_opts_init(&o);
+    unsetenv("RECOMP_PS1_SCALE");
+    unsetenv("RECOMP_PS1_FILTER");
+    unsetenv("RECOMP_SCALE");
+    unsetenv("RECOMP_FILTER");
+    ps1_runtime_display(&o, &scale, &filter);
+    CHECK(scale == HOST_SCALE_ASPECT && filter == HOST_FILTER_LINEAR);
+    setenv("RECOMP_SCALE", "stretch", 1);
+    setenv("RECOMP_FILTER", "nearest", 1);
+    ps1_runtime_display(&o, &scale, &filter);
+    CHECK(scale == HOST_SCALE_STRETCH && filter == HOST_FILTER_NEAREST);
+    setenv("RECOMP_PS1_SCALE", "integer", 1);
+    setenv("RECOMP_PS1_FILTER", "linear", 1);
+    ps1_runtime_display(&o, &scale, &filter);
+    CHECK(scale == HOST_SCALE_INTEGER && filter == HOST_FILTER_LINEAR);
+    setenv("RECOMP_PS1_FILTER", "nearest", 1);
+    ps1_runtime_display(NULL, NULL, &filter);
+    CHECK(filter == HOST_FILTER_NEAREST);
+    o.scale = HOST_SCALE_ASPECT;   /* the caller's choice (a player's --scale) wins over every key */
+    o.filter = HOST_FILTER_LINEAR;
+    ps1_runtime_display(&o, &scale, &filter);
+    CHECK(scale == HOST_SCALE_ASPECT && filter == HOST_FILTER_LINEAR);
+    unsetenv("RECOMP_PS1_SCALE");
+    unsetenv("RECOMP_PS1_FILTER");
+    unsetenv("RECOMP_SCALE");
+    unsetenv("RECOMP_FILTER");
 }
 
 static void test_helpers(void)
@@ -384,6 +420,7 @@ int main(int argc, char **argv)
         return 1;
     }
     test_helpers();
+    test_display();
     test_m3u();
     if (argc >= 3)
         test_runs(argv[1], argv[2]);

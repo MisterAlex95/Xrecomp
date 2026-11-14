@@ -100,6 +100,86 @@ static int run_core(void)
         rmdir(base);
     }
 
+    /* The shared options (XBA-181): a console's own key wins, then the shared one, then the default. */
+    CHECK(host_window_scale_parse("aspect") == HOST_SCALE_ASPECT);
+    CHECK(host_window_scale_parse("Integer") == HOST_SCALE_INTEGER);
+    CHECK(host_window_scale_parse("stretch") == HOST_SCALE_STRETCH);
+    CHECK(host_window_scale_parse("") == -1 && host_window_scale_parse(NULL) == -1);
+    CHECK(host_window_scale_parse("fill") == -1);
+    CHECK(host_window_filter_parse("nearest") == HOST_FILTER_NEAREST);
+    CHECK(host_window_filter_parse("LINEAR") == HOST_FILTER_LINEAR);
+    CHECK(host_window_filter_parse("bilinear") == -1);
+    unsetenv("RECOMP_SCALE");
+    unsetenv("RECOMP_FILTER");
+    unsetenv("RECOMP_TEST_SCALE");
+    unsetenv("RECOMP_TEST_FILTER");
+    CHECK(host_window_env_scale("RECOMP_TEST_SCALE", HOST_SCALE_INTEGER) == HOST_SCALE_INTEGER);
+    CHECK(host_window_env_filter("RECOMP_TEST_FILTER", HOST_FILTER_NEAREST) == HOST_FILTER_NEAREST);
+    CHECK(host_window_env_filter("RECOMP_TEST_FILTER", HOST_FILTER_LINEAR) == HOST_FILTER_LINEAR);
+    setenv("RECOMP_SCALE", "stretch", 1);
+    setenv("RECOMP_FILTER", "linear", 1);
+    CHECK(host_window_env_scale("RECOMP_TEST_SCALE", HOST_SCALE_ASPECT) == HOST_SCALE_STRETCH);
+    CHECK(host_window_env_scale(NULL, HOST_SCALE_ASPECT) == HOST_SCALE_STRETCH);
+    CHECK(host_window_env_filter("RECOMP_TEST_FILTER", HOST_FILTER_NEAREST) == HOST_FILTER_LINEAR);
+    setenv("RECOMP_TEST_SCALE", "integer", 1);
+    setenv("RECOMP_TEST_FILTER", "nearest", 1);
+    CHECK(host_window_env_scale("RECOMP_TEST_SCALE", HOST_SCALE_ASPECT) == HOST_SCALE_INTEGER);
+    CHECK(host_window_env_filter("RECOMP_TEST_FILTER", HOST_FILTER_LINEAR) == HOST_FILTER_NEAREST);
+    setenv("RECOMP_TEST_SCALE", "junk", 1);   /* not a value: the shared key then */
+    CHECK(host_window_env_scale("RECOMP_TEST_SCALE", HOST_SCALE_ASPECT) == HOST_SCALE_STRETCH);
+    unsetenv("RECOMP_SCALE");
+    unsetenv("RECOMP_FILTER");
+    unsetenv("RECOMP_TEST_SCALE");
+    unsetenv("RECOMP_TEST_FILTER");
+    unsetenv("RECOMP_PRESENT_VSYNC");
+    CHECK(host_window_env_vsync() == 1);
+    setenv("RECOMP_PRESENT_VSYNC", "0", 1);
+    CHECK(host_window_env_vsync() == 0);
+    setenv("RECOMP_PRESENT_VSYNC", "1", 1);
+    CHECK(host_window_env_vsync() == 1);
+    unsetenv("RECOMP_PRESENT_VSYNC");
+    unsetenv("RECOMP_RUMBLE");
+    CHECK(host_pad_rumble_env() == 1);
+    setenv("RECOMP_RUMBLE", "0", 1);
+    CHECK(host_pad_rumble_env() == 0);
+    setenv("RECOMP_RUMBLE", "1", 1);
+    CHECK(host_pad_rumble_env() == 1);
+    unsetenv("RECOMP_RUMBLE");
+    unsetenv("RECOMP_AUDIO_BUF_SAMPLES");
+    CHECK(host_audio_env_buffer_samples() == HOST_AUDIO_BUF_SAMPLES_DEFAULT);
+    setenv("RECOMP_AUDIO_BUF_SAMPLES", "256", 1);
+    CHECK(host_audio_env_buffer_samples() == 256);
+    setenv("RECOMP_AUDIO_BUF_SAMPLES", "16", 1);
+    CHECK(host_audio_env_buffer_samples() == 128);
+    setenv("RECOMP_AUDIO_BUF_SAMPLES", "99999", 1);
+    CHECK(host_audio_env_buffer_samples() == 4096);
+    unsetenv("RECOMP_AUDIO_BUF_SAMPLES");
+
+    /* Volume: 100 leaves the samples alone, 0 is silence, 50 is a quarter (the square of the fraction). */
+    {
+        int16_t in[4] = { 32767, -32768, 1000, -1000 }, out[4];
+        CHECK(host_audio_volume() == 100);
+        host_audio_scale(out, in, 4, 100);
+        CHECK(!memcmp(out, in, sizeof in));
+        host_audio_scale(out, in, 4, 0);
+        CHECK(out[0] == 0 && out[1] == 0 && out[2] == 0 && out[3] == 0);
+        host_audio_scale(out, in, 4, 50);
+        CHECK(out[0] == 8191 && out[1] == -8192 && out[2] == 250 && out[3] == -250);
+        host_audio_set_volume(150);
+        CHECK(host_audio_volume() == 100);
+        host_audio_set_volume(-5);
+        CHECK(host_audio_volume() == 0);
+        host_audio_set_volume(100);
+    }
+
+    /* No window: no stats, no screenshot. */
+    {
+        uint32_t fps = 7;
+        uint64_t n = 7;
+        CHECK(host_window_stats(&fps, &n) == 0 && fps == 0 && n == 0);
+        CHECK(host_window_screenshot_bmp("/nonexistent/x.bmp") == -1);
+    }
+
     /* Fast cores and frame generation link (no pacer thread started). */
     (void)recomp_host_cpus_restore;
     CHECK(!framegen_pacer_active());
@@ -191,7 +271,35 @@ static int run_window(void)
            info.drawable_h, info.vsync, seen_mask, seen_buttons);
     CHECK(info.frames == frames);
     CHECK(host_window_gl_proc("glGetString") != NULL);
+
+    /* Stats and the screenshot of the last picture (XBA-181), from this thread as from any. */
+    uint32_t fps = 0;
+    uint64_t presented = 0;
+    CHECK(host_window_stats(&fps, &presented) == 1);
+    CHECK(presented == frames);
+    printf("host_layer window: stats %u.%02u fps\n", fps / 100, fps % 100);
+    {
+        char bmp[512];
+        const char *tmp = getenv("TMPDIR");
+        snprintf(bmp, sizeof bmp, "%s/xbr_host_shot_%d.bmp", tmp && tmp[0] ? tmp : "/tmp", (int)getpid());
+        host_window_set_aspect(4, 3);   /* 320x240 is 4:3 already: same size */
+        CHECK(host_window_present_rgba(px, W, H, W * 4));
+        CHECK(host_window_screenshot_bmp(bmp) == 0);
+        FILE *f = fopen(bmp, "rb");
+        unsigned char hdr[54] = { 0 };
+        CHECK(f && fread(hdr, 1, sizeof hdr, f) == sizeof hdr);
+        if (f)
+            fclose(f);
+        int32_t bw, bh;
+        memcpy(&bw, hdr + 18, 4);
+        memcpy(&bh, hdr + 22, 4);
+        CHECK(hdr[0] == 'B' && hdr[1] == 'M' && bw == W && bh == H && hdr[28] == 24);
+        unlink(bmp);
+        host_window_set_aspect(0, 0);
+    }
     host_window_close();
+    CHECK(host_window_stats(&fps, &presented) == 0);
+    CHECK(host_window_screenshot_bmp("/tmp/never.bmp") == -1);   /* the picture went with the window */
     SDL_Quit();
     return s_fail;
 }

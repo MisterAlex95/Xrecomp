@@ -317,7 +317,7 @@ The executor is itself opt-in: set `RECOMP_PB_EXEC=1` to execute the pushbuffer.
 | `RECOMP_CLOSE_KEEPS_RUNNING=1` | off | Closing the window only closes it instead of exiting the process. | `fb_present.c` |
 | `RECOMP_D3D_PRESENT` | off | Presents through a D3D11 swap chain. | `gpu_present.c` |
 | `RECOMP_PS_TEXT_CACHE=0` | on | D3D11 path (Windows): compile every generated combiner pixel shader again instead of reusing the one compiled from identical HLSL text. | `src/d3d/d3d8_combiners.c` |
-| `RECOMP_PRESENT_VSYNC` | on | `0` turns vsync off. | `gpu_present.c`, `fb_present_sdl.c` |
+| `RECOMP_PRESENT_VSYNC` | on | `0` turns vsync off. The GBA, PS1 and N64 runtimes read it too (`host_window_env_vsync`, XBA-181). | `gpu_present.c`, `fb_present_sdl.c`, `src/video/host_window.c` |
 | `RECOMP_PRESENT_FILTER` | default | Sampler filter for the D3D11 present. | `gpu_present.c` |
 | `RECOMP_PVIDEO=0` | on | POSIX hosts: turns off the PVIDEO overlay's scan-out (films a title plays through `D3DDevice_UpdateOverlay`, composed over the last frame at 640x480 and published as a host frame each vblank a bank is pending; logged `[PVIDEO] overlay on: ...`). The STOP handshake in the NV2A ack pass stays. | `src/video/pvideo_posix.c` |
 | `RECOMP_FMV_HOST` | off | Plays a movie through the host player when the title asks to. A substitute for the title's own output. | `kernel_bridge.c` |
@@ -391,7 +391,7 @@ See the [APU](../../src/apu/README.md) and [DirectSound](../../src/audio/README.
 | `RECOMP_APU_GPRST_POLL` | on | Reads the GP reset word (GPRST, VA `0xFE83FFFC`, plain memory) back from the aperture every APU frame and pauses the doorbell ack while it holds the GP in reset (XBA-138). `0`: the title's GPRST stores are not seen, the ack answers regardless (before XBA-138). | `apu_dsp.c` |
 | `RECOMP_APU_PRIORITY` | on | `0` leaves the APU frame thread at the default priority (otherwise nice -16 on Linux/Android, QoS user-interactive on macOS). | `apu_core.c` |
 | `RECOMP_APU_EP_CANARY` | on | Keeps the XDK EP program's canary (`0x00CCCCCC` at EP P:6, VA `0xFE85A018`) while the APU frame thread runs; DirectSound resets the whole APU (10 ms stall) on every `DoWork` that reads anything else. `0` leaves the word alone. | `apu_dsp.c` |
-| `RECOMP_AUDIO_BUF_COUNT`, `RECOMP_AUDIO_BUF_SAMPLES` | built-in | Device buffer count and size. | `apu_sdl2.c`, `apu_xaudio2.c` |
+| `RECOMP_AUDIO_BUF_COUNT`, `RECOMP_AUDIO_BUF_SAMPLES` | built-in | Device buffer count and size. `RECOMP_AUDIO_BUF_SAMPLES` (128..4096) is also the GBA, PS1 and N64 runtimes' device buffer in sample frames (`host_audio`, default 1024, XBA-181). | `apu_sdl2.c`, `apu_xaudio2.c`, `src/audio/host_audio.c` |
 
 ## Input
 
@@ -405,7 +405,7 @@ See [xbox_input](../../src/input/README.md).
 | `RECOMP_MKB` | off | Keyboard-and-mouse layer; tuned by `RECOMP_MKB_SENS`, `_DZ`, `_ACC`, `_FULL`, `_INVERT_Y`, `_SWAP_STICKS` or an `RECOMP_MKB_INI` file. | `mkb_input.c` |
 | `RECOMP_KEY_TRACE` | off | Prints the first 40 key-downs. | `keyboard_sdl.c`, `fb_present.c` |
 | `RECOMP_INPUT_DIAG` | off | Reports whether the input chain is wired. | `usb_gamepad.c` |
-| `RECOMP_RUMBLE` | on | `0` turns rumble off. | `ohci.c` |
+| `RECOMP_RUMBLE` | on | `0` turns rumble off: the Xbox pads, the N64 Rumble Pak and the PS1 DualShock motors (`host_pad_rumble_env`, XBA-181). | `ohci.c`, `src/input/host_pad.c` |
 | `RECOMP_USB` | on in a title project (XDK default) | Enables the USB controller model; `0` (or empty) is off. The title project calls `xbox_OhciInit()` after the memory layout (the template does). | `ohci.c` |
 | `RECOMP_USB_PADS=1..4` | unset: the pads follow the controllers | Unset (XBA-123): one emulated pad per port that has a controller (`xbox_InputPortMask`: a host pad assigned to that port, or on port 1 the keyboard or the touch overlay), plugged in one at a time as controllers come and pulled out 1 s after one goes, each on its own root port, so a title's XAPI sees the insertion or removal on that controller port (`usb_hotplug.h`). With no controller at all since the start, pad 1 stays plugged (as before); the bring-up inputs (`RECOMP_PAD_PRESS`, `_SCRIPT`, `_LIVE`) keep pad 1 plugged too. Set: that many pads, always plugged, never removed: the behaviour before XBA-123 (`1` = the old default; the A/B switch). Log: `[OHCI0] pad N plugged in / pulled out on root port P (controller port N)`. | `ohci.c`, `usb_hotplug.c` |
 | `RECOMP_USB_PORT=0..3` | 2 with four ports | Root port pad 1 appears on; pad n is on the n-th port after it. | `ohci.c` |
@@ -415,6 +415,41 @@ See [xbox_input](../../src/input/README.md).
 | `RECOMP_OHCI_CATCHUP` | on (needs the gate and safe points) | When the controller thread is more than 16 ms overdue and the driver has written ControlListFilled or BulkListFilled, a guest thread walks the lists at its release point and runs the USB interrupt there (log: `[OHCI0] controller thread N ms overdue; lists serviced on the guest thread`). Keeps a starved host thread from letting per-frame control transfers (rumble) pile up past XAPI's descriptor budget (KOTOR, K-8c). `0` restores the controller thread alone; an A/B switch kept for one release. | `ohci.c`, `kernel_hal.c` |
 | `RECOMP_USB_TRACE`, `RECOMP_USB_STATS` | off | Controller trace; completions every 5 s. | `ohci.c` |
 | `RECOMP_PAD_LIVE=<file>`, `RECOMP_PAD_SCRIPT`, `RECOMP_PAD_PRESS` | off | Test input: a file read live, a script, or a periodic press. | `usb_gamepad.c` |
+
+## Consoles (GBA, PS1, N64)
+
+The GBA, PS1 and N64 runtimes (`consoles/*/runtime`, [consoles/README.md](../../consoles/README.md)) and their
+desktop players (`gba_play`, `ps1_play`, `n64_play`). A player's command-line flag wins over the variable. Shared
+keys first (XBA-181: one key for every console, the Android Settings write them; a console's own key wins over the
+shared one), then each console's own. `RECOMP_PRESENT_VSYNC`, `RECOMP_AUDIO_BUF_SAMPLES` and `RECOMP_RUMBLE` above
+apply to them too; the pad mappings are under [Input](#input).
+
+| Variable | Default | What it does | Where |
+|---|---|---|---|
+| `RECOMP_SCALE=aspect\|integer\|stretch` | aspect | How every console's picture fills the window: `aspect` the largest rectangle of its shape, `integer` the largest whole multiple of its size (of its height for the 4:3 PS1 / N64), `stretch` the whole window. `RECOMP_GBA_SCALE`, `RECOMP_PS1_SCALE`, `RECOMP_N64_SCALE` win for their console. | `src/video/host_window.c` (`host_window_env_scale`) |
+| `RECOMP_FILTER=nearest\|linear` | the console's: GBA nearest, PS1 / N64 linear | How the picture is sampled: `nearest` sharp pixels, `linear` smooth. `RECOMP_GBA_FILTER`, `RECOMP_PS1_FILTER`, `RECOMP_N64_FILTER` win for their console; every key takes both values. | `host_window.c` (`host_window_env_filter`) |
+| `RECOMP_GBA_SCALE`, `RECOMP_PS1_SCALE`, `RECOMP_N64_SCALE` | `RECOMP_SCALE` | One console's scale (`aspect`, `integer`, `stretch`); `--scale` on its player. | `consoles/*/runtime/*_runtime.c` (`*_runtime_display`) |
+| `RECOMP_GBA_FILTER`, `RECOMP_PS1_FILTER`, `RECOMP_N64_FILTER` | `RECOMP_FILTER` | One console's filter (`nearest`, `linear`); `--filter` on its player. | `*_runtime.c` (`*_runtime_display`) |
+| `RECOMP_SAVE_DIR=<dir>` | `$XDG_DATA_HOME/xrecomp/save`, else `~/.local/share/xrecomp/save` | The players' save folder when `--save-dir` is not given (the macOS launcher sets it per title): `<dir>/gba-<KEY>/`, `ps1-<KEY>/`, `n64-<KEY>/`. The Android app passes its own folder (`*_runtime_set_save_dir`). The Xbox runtime reads it too ([Files](#files-discs-and-the-xbe)). | `consoles/*/runtime/tools/*_play.c` |
+| `RECOMP_HOST_GL=core` | GLES 3.0 first | Skips the OpenGL ES 3.0 context and takes the 3.2 core one (the macOS path, checked on Linux). | `host_window.c` |
+| `RECOMP_GBA_BIOS=<path>` | the built-in BIOS | A 16 KB GBA BIOS image (never shipped); `--bios` on `gba_play`. | `gba_runtime.c` |
+| `RECOMP_GBA_FRAMES=N` | unbounded | The Android entry (`gba_runtime_start`): stop after N frames (checks). | `gba_runtime.c` |
+| `RECOMP_PS1_BIOS=<path>\|hle` | the app's asset, else `build/ps1-bios/openbios.bin`, else the HLE BIOS | A 512 KB PlayStation BIOS image; `hle` the built-in HLE BIOS (no image, XBA-163). | `ps1_runtime.c`, `tools/ps1_run.c` |
+| `RECOMP_PS1_FASTBOOT=0` | on | A disc boots through the BIOS shell instead of jumping to its EXE (`--no-fast-boot`). | `ps1_runtime.c` |
+| `RECOMP_PS1_PAD=analog\|digital` | digital | The pad in port 1: a DualShock in analog or digital mode (`--pad`); Back + L3 + R3 switches while playing. | `ps1_runtime.c` |
+| `RECOMP_PS1_PLAYERS=1\|2` | 1 | `2`: host pad 1 drives port 1, host pad 2 port 2; otherwise every pad drives port 1 (`--players`). | `ps1_runtime.c` |
+| `RECOMP_PS1_FRAMES=N` | unbounded | The Android entry (`ps1_runtime_start`): stop after N frames (checks). | `ps1_runtime.c` |
+| `RECOMP_N64_PAK=controller\|rumble\|none` | controller | The accessory in the controllers: a controller pak (saved as `pakN.mpk`), a rumble pak (drives the host pad's rumble unless `RECOMP_RUMBLE=0`) or none (`--pak`). | `n64_runtime.c` |
+| `RECOMP_N64_PLAYERS=1..4` | 1 | With 2 or more, host pad N drives controller N; otherwise every pad drives controller 1 (`--players`). | `n64_runtime.c` |
+| `RECOMP_N64_STICK_RANGE=N` | 80 | The stick's value at full travel on one axis (the diagonals follow the octagonal gate). | `n64_runtime.c` |
+| `RECOMP_N64_DEADZONE=0..90` | 8 | The stick's radial dead zone, in percent. | `n64_runtime.c` |
+| `RECOMP_N64_FRAMESKIP=auto\|0\|N` | auto | `auto` skips the picture of frames the host is late for, `0` never, `N` shows one frame in N + 1 (`--frameskip`). A skipped frame still runs and makes its sound. | `n64_runtime.c` |
+| `RECOMP_N64_RDP=vulkan\|software\|auto` | auto: Vulkan on Android (when built in), software elsewhere | The RDP back end (`vk` / `gpu`, `sw` / `cpu` too). The Vulkan one falls back to the software one when it fails its check. | `n64_rdp_select.c` |
+| `RECOMP_N64_RDP_THREADS=N` | 2 on Android, else `XBR_N64_RDP_THREADS`, else 1 | The software RDP's scanline-band threads (`--rdp-threads`). | `n64_runtime.c`, `n64_rdp.c` |
+| `RECOMP_N64_RDP_CHECK=0` | on | Skips the Vulkan RDP's start-up draw check (only a pipeline failure then falls back). | `n64_rdp_vk.cpp` |
+| `RECOMP_N64_RDP_UBERSHADER=1` | off on Qualcomm's driver | Uses the Vulkan RDP's ubershader on Qualcomm's proprietary driver anyway (games come out black there, so it goes software). | `n64_rdp_vk.cpp` |
+| `RECOMP_N64_TTY=1` | off | Prints the IS-Viewer text a game writes (`--tty`). | `n64_runtime.c` |
+| `RECOMP_N64_FRAMES=N` | unbounded | The Android entry (`n64_runtime_start`): stop after N frames (checks). | `n64_runtime.c` |
 
 ## Network
 
