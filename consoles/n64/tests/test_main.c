@@ -126,6 +126,29 @@ static void test_helpers(void)
     CHECK(n64_runtime_pak_parse("none") == N64_RT_PAK_NONE);
     CHECK(n64_runtime_pak_parse("transfer") == N64_RT_PAK_DEFAULT);
     CHECK(n64_runtime_pak_parse(NULL) == N64_RT_PAK_DEFAULT);
+
+    /* Frame skip: parse, auto (late by more than half a frame or audio low, 3 in a row at most), fixed, off. */
+    CHECK(n64_runtime_frameskip_parse("auto") == N64_RT_FRAMESKIP_AUTO);
+    CHECK(n64_runtime_frameskip_parse(NULL) == N64_RT_FRAMESKIP_AUTO);
+    CHECK(n64_runtime_frameskip_parse("0") == 0 && n64_runtime_frameskip_parse("2") == 2);
+    {
+        const uint64_t f = 16666666;
+        int run = 0, n = 0;
+        CHECK(n64_runtime_frameskip(N64_RT_FRAMESKIP_AUTO, 0, f, 0, &run) == 0);
+        CHECK(n64_runtime_frameskip(N64_RT_FRAMESKIP_AUTO, (int64_t)f / 4, f, 0, &run) == 0);
+        for (int i = 0; i < 8; i++)
+            n += n64_runtime_frameskip(N64_RT_FRAMESKIP_AUTO, (int64_t)f, f, 0, &run);
+        CHECK(n == 6); /* skip 3, show 1, skip 3, show 1 */
+        run = 0;
+        CHECK(n64_runtime_frameskip(N64_RT_FRAMESKIP_AUTO, -5000000, f, 1, &run) == 1); /* audio about to run dry */
+        CHECK(n64_runtime_frameskip(N64_RT_FRAMESKIP_AUTO, 0, f, 0, &run) == 0 && run == 0);
+        n = 0;
+        for (int i = 0; i < 9; i++)
+            n += n64_runtime_frameskip(2, 0, f, 0, &run);
+        CHECK(n == 6); /* fixed 2: two of every three */
+        run = 0;
+        CHECK(n64_runtime_frameskip(0, (int64_t)f * 10, f, 1, &run) == 0);
+    }
 }
 
 static long file_size(const char *path)

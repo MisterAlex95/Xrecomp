@@ -184,6 +184,26 @@ int n64_runtime_pak_parse(const char *v)
     return N64_RT_PAK_DEFAULT;
 }
 
+int n64_runtime_frameskip_parse(const char *v)
+{
+    if (v && v[0] >= '0' && v[0] <= '9' && !v[1])
+        return v[0] - '0';
+    return N64_RT_FRAMESKIP_AUTO;
+}
+
+int n64_runtime_frameskip(int mode, int64_t behind_ns, uint64_t frame_ns, int audio_low, int *run)
+{
+    int skip;
+    if (mode == 0)
+        skip = 0;
+    else if (mode > 0)
+        skip = *run < mode;
+    else
+        skip = *run < 3 && (behind_ns > (int64_t)(frame_ns / 2) || audio_low);
+    *run = skip ? *run + 1 : 0;
+    return skip;
+}
+
 /* ---- Files ---------------------------------------------------------------------------------------------------- */
 
 static int spec_fd(const char *spec, int *own)
@@ -586,6 +606,7 @@ void n64_runtime_opts_init(n64_runtime_opts *o)
     o->rdp_threads = -1;
     o->force_pal = -1;
     o->tty = -1;
+    o->frameskip = N64_RT_FRAMESKIP_ENV;
 }
 
 static const char *base_name(const char *p)
@@ -683,6 +704,16 @@ int n64_runtime_run(const n64_runtime_opts *o)
         n64_set_accessory(m, port, acc);
         n64_set_controller(m, port, port < players, 0, 0, 0);
     }
+    int fskip = o->frameskip != N64_RT_FRAMESKIP_ENV ? o->frameskip
+                                                      : n64_runtime_frameskip_parse(getenv("RECOMP_N64_FRAMESKIP"));
+    if (fskip > N64_RT_FRAMESKIP_MAX)
+        fskip = N64_RT_FRAMESKIP_MAX;
+    if (fskip < N64_RT_FRAMESKIP_AUTO)
+        fskip = N64_RT_FRAMESKIP_AUTO;
+    if (fskip == N64_RT_FRAMESKIP_AUTO)
+        printf("n64: frame skip auto (when late or the audio runs low, at most 3 in a row)\n");
+    else
+        printf("n64: frame skip %d\n", fskip);
     int tty = o->tty >= 0 ? o->tty : env_choice("RECOMP_N64_TTY", "1", 0);
     if (tty)
         n64_set_tty(m, on_tty, NULL);
@@ -733,6 +764,9 @@ int n64_runtime_run(const n64_runtime_opts *o)
     uint64_t fps_t = t0, fps_frames = 0, last_frame_ns = 0;
     int was_paused = 0, heard = 0, rc = 0;
     int rumble_sent[4] = {0, 0, 0, 0};
+    int64_t behind = 0; /* how late this frame starts (pacing below) */
+    int skip_run = 0;
+    uint64_t skipped = 0, skipped_log = 0;
 
     for (;;) {
         int running = 1;
@@ -796,7 +830,14 @@ int n64_runtime_run(const n64_runtime_opts *o)
         int dirty = cart_dirty;
         for (int p = 0; p < 4; p++)
             dirty |= n64_save_take_dirty(m, (n64_save_kind)(N64_SAVE_PAK0 + p));
-        int on = n64_display(m, xrgb, N64_SCREEN_MAX_W, N64_SCREEN_MAX_H, &dw, &dh) == 0;
+        /* Frame skip: the picture of a frame the host is late for is not made nor shown (the frame itself ran). */
+        int audio_low = audio && heard && !o->unpaced && host_audio_queued() < AUDIO_TARGET_FRAMES / 4;
+        int skip = n64_runtime_frameskip(o->unpaced && fskip < 0 ? 0 : fskip, o->unpaced ? 0 : behind,
+                                         frame_ns, audio_low, &skip_run);
+        if ((o->frames && frames + 1 >= o->frames) || (o->capture_path && o->capture_frame == frames + 1))
+            skip = 0; /* the last frame of a bounded run is the screenshot; a capture is a capture */
+        int on = skip ? display_on > 0 : n64_display(m, xrgb, N64_SCREEN_MAX_W, N64_SCREEN_MAX_H, &dw, &dh) == 0;
+        skipped += (uint64_t)skip;
         rumble_drive(m, players, rumble_sent);
         pthread_mutex_unlock(&s_mu);
         frames++;
@@ -810,7 +851,9 @@ int n64_runtime_run(const n64_runtime_opts *o)
             printf("n64: VI rate %.2f Hz at frame %llu\n", 1e9 / (double)frame_ns, (unsigned long long)frames);
             last_frame_ns = frame_ns;
         }
-        if (!on || dw <= 0 || dh <= 0 || dw > N64_SCREEN_MAX_W || dh > N64_SCREEN_MAX_H) {
+        if (skip) {
+            /* keep the last picture and its size */
+        } else if (!on || dw <= 0 || dh <= 0 || dw > N64_SCREEN_MAX_W || dh > N64_SCREEN_MAX_H) {
             dw = last_w ? last_w : 320;
             dh = last_h ? last_h : 240;
             memset(xrgb, 0, (size_t)dw * (size_t)dh * sizeof xrgb[0]);
@@ -844,15 +887,16 @@ int n64_runtime_run(const n64_runtime_opts *o)
             dirty_at = dirty_first = 0;
         }
         if (t - fps_t >= FPS_LOG_NS) {
-            printf("n64: %.1f fps over the last %.0f s (VI %.1f Hz), %llu late resets so far\n",
+            printf("n64: %.1f fps over the last %.0f s (VI %.1f Hz), %llu frames skipped, %llu late resets so far\n",
                    (double)fps_frames * 1e9 / (double)(t - fps_t), (double)(t - fps_t) / 1e9, 1e9 / (double)frame_ns,
-                   (unsigned long long)late_resets);
+                   (unsigned long long)(skipped - skipped_log), (unsigned long long)late_resets);
+            skipped_log = skipped;
             fflush(stdout);
             fps_t = t;
             fps_frames = 0;
         }
 
-        if (window) {
+        if (window && !skip) {
             if (o->capture_path && o->capture_frame == frames)
                 host_window_capture(o->capture_path);
             n64_runtime_xrgb_to_rgba(xrgb, rgba, (size_t)dw * (size_t)dh);
@@ -872,6 +916,7 @@ int n64_runtime_run(const n64_runtime_opts *o)
                     next -= frame_ns / 50;
             }
             t = now_ns();
+            behind = (int64_t)(t - next);
             if (t > next + 3 * frame_ns) {
                 next = t; /* a stall (a slow host, the debugger): no burst to catch up */
                 late_resets++;
@@ -882,8 +927,8 @@ int n64_runtime_run(const n64_runtime_opts *o)
     }
 
     double secs = (double)(now_ns() - t0) / 1e9;
-    printf("n64: %llu frames in %.1f s (%.2f fps), %llu late resets\n", (unsigned long long)frames, secs,
-           secs > 0 ? (double)frames / secs : 0.0, (unsigned long long)late_resets);
+    printf("n64: %llu frames in %.1f s (%.2f fps), %llu skipped, %llu late resets\n", (unsigned long long)frames, secs,
+           secs > 0 ? (double)frames / secs : 0.0, (unsigned long long)skipped, (unsigned long long)late_resets);
     saves_flush("exit");
     if (o->screenshot) {
         if (write_ppm(o->screenshot, xrgb, dw, dh) == 0)

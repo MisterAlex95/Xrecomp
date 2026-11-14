@@ -5,7 +5,7 @@
  *   n64_play ROM [--frames N] [--save-dir DIR] [--scale aspect|integer] [--filter nearest|linear]
  *                [--pak controller|rumble|none] [--players 1..4] [--rdp-threads N] [--pal | --ntsc] [--tty]
  *                [--headless] [--unpaced] [--buttons MASK] [--screenshot OUT.ppm] [--capture N OUT.ppm] [--key KEY]
- *                [--pack LIB.so] [--missed FILE]
+ *                [--pack LIB.so] [--missed FILE] [--frameskip auto|0..9]
  *
  * ROM               a .z64 / .v64 / .n64 file (any byte order); no BIOS needed (the PIF is HLE)
  * --frames N        stop after N frames (VI interrupts; default: until the window is closed)
@@ -17,6 +17,8 @@
  * --rdp-threads N   RDP scanline-band threads (default $RECOMP_N64_RDP_THREADS, else $XBR_N64_RDP_THREADS, else 1)
  * --pal / --ntsc    force the TV type (default: the ROM's region)
  * --tty             print the game's IS-Viewer debug text ("n64: tty: ..." lines)
+ * --frameskip M     auto (default, $RECOMP_N64_FRAMESKIP): skip the picture of frames the host is late for; 0 never;
+ *                   N: show one frame in N + 1 (the frames still run whole, audio included)
  * --headless        no window (also with SDL_VIDEODRIVER=dummy or no DISPLAY): frames, pads, audio, saves only
  * --unpaced         no pacing: as fast as the host goes
  * --buttons MASK    N64 buttons held the whole run on controller 1 (N64_BTN_* bits, 1 = pressed)
@@ -47,7 +49,7 @@ static int usage(void)
                     "                [--filter nearest|linear] [--pak controller|rumble|none] [--players 1..4]\n"
                     "                [--rdp-threads N] [--pal | --ntsc] [--tty] [--headless] [--unpaced]\n"
                     "                [--buttons MASK] [--screenshot OUT.ppm] [--capture N OUT.ppm] [--key KEY]\n"
-                    "                [--pack LIB.so] [--missed FILE]\n");
+                    "                [--pack LIB.so] [--missed FILE] [--frameskip auto|0..9]\n");
     return 2;
 }
 
@@ -84,6 +86,8 @@ int main(int argc, char **argv)
             o.force_pal = 0;
         else if (!strcmp(a, "--tty"))
             o.tty = 1;
+        else if (!strcmp(a, "--frameskip") && more)
+            o.frameskip = n64_runtime_frameskip_parse(argv[++i]);
         else if (!strcmp(a, "--headless"))
             o.headless = 1;
         else if (!strcmp(a, "--unpaced"))

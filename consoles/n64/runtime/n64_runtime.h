@@ -72,6 +72,11 @@ typedef struct n64_runtime_opts {
      * (n64_recomp_write_missed: address, hash, bytes) is appended to this file without repeats, which the next
      * Prepare hands to the lifter (the discovery loop). NULL: not written. */
     const char *discovered_path;
+    /* Frame skipping when the host cannot keep up (the software RDP on a phone): N64_RT_FRAMESKIP_ENV (-2) =
+     * $RECOMP_N64_FRAMESKIP ("auto", default; "0" never; "N" shows one frame in N + 1), N64_RT_FRAMESKIP_AUTO (-1),
+     * 0, or N. A skipped frame still runs whole (CPU, RSP, RDP drawing into RDRAM: the game may read it back) and
+     * makes its audio; only the VI picture (n64_display) and the present are skipped. */
+    int frameskip;
 } n64_runtime_opts;
 
 void n64_runtime_opts_init(n64_runtime_opts *o);
@@ -127,6 +132,16 @@ uint64_t n64_runtime_frame_ns(uint64_t cycles);
 /* The accessory a value names ("controller" / "pak" / "mempak", "rumble", "none"), or N64_RT_PAK_DEFAULT when it is
  * none of them (NULL too). */
 int n64_runtime_pak_parse(const char *v);
+
+enum { N64_RT_FRAMESKIP_ENV = -2, N64_RT_FRAMESKIP_AUTO = -1, N64_RT_FRAMESKIP_MAX = 9 };
+/* "auto" (or NULL / "") -> N64_RT_FRAMESKIP_AUTO, "0".."9" -> that, anything else -> N64_RT_FRAMESKIP_AUTO. */
+int n64_runtime_frameskip_parse(const char *v);
+/* Whether to skip the next frame's picture. mode: N64_RT_FRAMESKIP_AUTO or 0..N64_RT_FRAMESKIP_MAX; behind_ns: how
+ * late the frame starts against its deadline (0 or less: on time); audio_low: the host's audio queue is below a
+ * quarter of its target (it is about to run dry); *run: frames skipped in a row (updated). Auto skips when the frame
+ * is more than half a frame late or the audio is about to run dry, at most 3 in a row (15 fps shown at worst at
+ * 60 Hz); a fixed N skips N, shows one. */
+int n64_runtime_frameskip(int mode, int64_t behind_ns, uint64_t frame_ns, int audio_low, int *run);
 
 #ifdef __cplusplus
 }
