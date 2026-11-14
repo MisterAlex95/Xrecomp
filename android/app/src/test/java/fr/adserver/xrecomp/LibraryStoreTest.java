@@ -313,4 +313,96 @@ public class LibraryStoreTest {
     public void importDir() {
         assertEquals(new File(ext, "games/4D5300D1"), Library.importDir(ext, "4D5300D1"));
     }
+
+    // ---- Several folders, every console (XBA-178) ---------------------------------------------------------------
+
+    /** An index from before several folders (no folder, no console): its items stay valid as Xbox games. */
+    @Test
+    public void olderIndexStaysValid() throws Exception {
+        String old = "{\"v\":1,\"root\":\"file:/sdcard/xbox\",\"scanned_at\":5,\"truncated\":false,\"items\":["
+                     + "{\"loc\":\"file:/sdcard/xbox/Fable.iso\",\"kind\":\"iso\",\"name\":\"Fable.iso\",\"size\":3,"
+                     + "\"mtime\":4,\"status\":\"ok\",\"tid\":\"4D5300D1\",\"title\":\"Fable\",\"region\":1,"
+                     + "\"disc\":0,\"version\":0,\"xbe_sha256\":\"00\",\"xbe\":\"xbe/4D5300D1-00000000/default.xbe\"}]}";
+        LibraryIndex x = LibraryIndex.fromJson(new org.json.JSONObject(old));
+        LibraryIndex.Item i = x.find("file:/sdcard/xbox/Fable.iso");
+        assertTrue(i.ok());
+        assertEquals(Console.XBOX, i.console);
+        assertEquals("", i.folder);
+        assertEquals(Arrays.asList("4D5300D1"), new java.util.ArrayList<>(x.games().keySet()));
+        org.json.JSONObject o = i.toJson();
+        assertFalse("an Xbox item is written as before", o.has("console") || o.has("key") || o.has("folder"));
+        // Dropping the first folder takes the items of the older index with it; another folder's stay.
+        LibraryIndex.Item rom = new LibraryIndex.Item();
+        rom.loc = "doc:primary:gba/G.gba";
+        rom.folder = "t:gba";
+        x.items.add(rom);
+        x.dropFolder("t:xbox", true);
+        assertEquals(1, x.items.size());
+        assertEquals("t:gba", x.items.get(0).folder);
+        // An unknown console (a newer build's index): not a game here.
+        org.json.JSONObject future = new org.json.JSONObject().put("loc", "file:/x.sfc").put("status", "ok")
+                .put("console", "snes").put("tid", "snes-X");
+        assertFalse(LibraryIndex.Item.fromJson(future).ok());
+    }
+
+    /** A game of another console, its folder, an ignored file: written and read back. */
+    @Test
+    public void indexRoundTripOtherConsoles() throws Exception {
+        LibraryIndex x = new LibraryIndex();
+        LibraryIndex.Item disc = new LibraryIndex.Item();
+        disc.loc = "doc:primary:ps1/Disc.cue";
+        disc.kind = LibraryIndex.KIND_ROM;
+        disc.name = "Disc.cue";
+        disc.console = Console.PS1;
+        disc.key = "SLUS-00594";
+        disc.tid = "ps1-SLUS-00594";
+        disc.title = "Disc";
+        disc.folder = "content://tree/ps1";
+        disc.parts.add("doc:primary:ps1/Disc (Track 1).bin");
+        x.items.add(disc);
+        LibraryIndex.Item bios = new LibraryIndex.Item();
+        bios.loc = "doc:primary:ps1/bios.bin";
+        bios.kind = LibraryIndex.KIND_ROM;
+        bios.status = LibraryIndex.IGNORED;
+        bios.folder = "content://tree/ps1";
+        x.items.add(bios);
+        File f = Library.indexFile(files);
+        LibraryIndex.write(f, x);
+        LibraryIndex back = LibraryIndex.read(f);
+        LibraryIndex.Item d = back.find("doc:primary:ps1/Disc.cue");
+        assertTrue(d.ok());
+        assertEquals(Console.PS1, d.console);
+        assertEquals("SLUS-00594", d.key);
+        assertEquals("ps1-SLUS-00594", d.tid);
+        assertEquals("content://tree/ps1", d.folder);
+        assertEquals(Arrays.asList("doc:primary:ps1/Disc (Track 1).bin"), d.parts);
+        assertEquals(Arrays.asList("ps1-SLUS-00594"), new java.util.ArrayList<>(back.games().keySet()));
+        assertEquals(LibraryIndex.IGNORED, back.find("doc:primary:ps1/bios.bin").status);
+        assertTrue("an ignored file is no « other file »", back.others().isEmpty());
+    }
+
+    /** A games.json from before several consoles: its records keep their title ID keys. */
+    @Test
+    public void olderGamesJsonStaysValid() throws Exception {
+        String old = "{\"v\":1,\"selected\":\"4D5300D1\",\"games\":{\"4D5300D1\":{\"title\":\"Fable\",\"source\":"
+                     + "\"file:/sdcard/xbox/Fable.iso\",\"data_dir\":\"\",\"data_kind\":\"\",\"xbe_sha256\":\"ab\","
+                     + "\"added_at\":1,\"last_played\":2,\"play_ms\":3}}}";
+        File f = Library.gamesFile(files);
+        TestSupport.write(f, old.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        Library.Games g = Library.read(f);
+        Library.Record r = g.get("4D5300D1");
+        assertNotNull(r);
+        assertEquals(3, r.playMs);
+        assertEquals("4D5300D1", g.selected().titleId);
+        assertEquals(Console.XBOX, Console.ofKey(r.titleId));
+        // A game of another console keyed the same way, next to it.
+        Library.Record gba = new Library.Record();
+        gba.titleId = "gba-AXVE-1A2B3C4D";
+        g.put(gba);
+        Library.write(f, g);
+        Library.Games back = Library.read(f);
+        assertEquals(2, back.games.size());
+        assertEquals(Console.GBA, Console.ofKey(back.get("gba-AXVE-1A2B3C4D").titleId));
+        assertEquals("4D5300D1", back.selected);
+    }
 }

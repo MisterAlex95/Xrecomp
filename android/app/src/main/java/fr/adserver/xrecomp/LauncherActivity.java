@@ -73,8 +73,8 @@ import fr.adserver.xrecomp.Widgets.MenuRow;
  *
  * - WELCOME (first run, no game set up) -> SOURCE (game folder, disc image or library folder) -> FOLDER_ACCESS (All
  *   files access explained, or copy) -> IMPORT (progress ring; B cancels) -> HOME;
- * - LIBRARY: the game library's grid, a context line, the Options sheet on Y (Rescan, Storage, Library folder,
- *   Settings, About); STORAGE: what the app stores, per game;
+ * - LIBRARY: the game library's grid (every console's games, from several library folders), a context line, the
+ *   Options sheet on Y (Rescan, Storage, Library folders, Settings, About); STORAGE: what the app stores, per game;
  * - HOME: the game's art and title, one line (when it was played, or its state), one row of buttons: a solid Play
  *   (or Prepare, Choose…) and three quiet pills, Settings, Controls, Manage;
  * - SETTINGS: four tabs (General, Graphics, Audio, Advanced): the launcher's preferences and a few RECOMP_* options
@@ -497,8 +497,8 @@ public class LauncherActivity extends Activity {
             go(Screen.PREPARE);
         // A game's own app without a current pack: XRecomp's, if it hands it over (XBA-176).
         askParentForPack();
-        // The library folder through the Storage Access Framework: scanned at a cold start (and on Y) only.
-        if (savedInstanceState == null && lib && Library.folderTree(this) != null && Library.folderPath(this) == null)
+        // Library folders all through the Storage Access Framework: scanned at a cold start (and on Y) only.
+        if (savedInstanceState == null && lib && !Library.folders(this).isEmpty() && !Library.anyFolderPath(this))
             startScan();
     }
 
@@ -967,8 +967,8 @@ public class LauncherActivity extends Activity {
         restoreFocus(false);
         if (companion != null && s != Screen.HOME && s != Screen.LIBRARY && s != Screen.PREPARE)
             companion.artOnly();   // the bottom screen: the game's art alone
-        // The library folder read as files: a (stat-only) rescan each time the library opens.
-        if (s == Screen.LIBRARY && was != Screen.LIBRARY && Library.folderPath(this) != null)
+        // A library folder read as files: a (stat-only) rescan each time the library opens.
+        if (s == Screen.LIBRARY && was != Screen.LIBRARY && Library.anyFolderPath(this))
             startScan();
         building = false;
         if (dir != 0)
@@ -1221,9 +1221,13 @@ public class LauncherActivity extends Activity {
 
     /** Opens a sheet over the screen: the screen's focus is kept for later and blocked while it is open. */
     private Widgets.Sheet openSheet(int title) {
+        return openSheet(getString(title));
+    }
+
+    private Widgets.Sheet openSheet(String title) {
         closeSheet(false);
         sheetReturn = focused();
-        sheet = new Widgets.Sheet(this, getString(title), () -> {
+        sheet = new Widgets.Sheet(this, title, () -> {
             feedback.play(UiFeedback.Cue.BACK, host);
             closeSheet(true);
         });
@@ -1500,10 +1504,10 @@ public class LauncherActivity extends Activity {
                                 getString(all ? R.string.BADGE_IN_PLACE : R.string.BADGE_FOLDER_ASK),
                                 this::onChooseFolder);
         choice(list, R.string.CARD_ISO, getString(R.string.CARD_ISO_SUB), null, this::openIsoPicker);
-        String libPath = Library.folderPath(this);
+        List<Library.Folder> libFolders = Library.folders(this);
         choice(list, R.string.LIB_CARD, getString(R.string.LIB_CARD_SUB),
-               Library.folderTree(this) == null ? null : libPath != null ? new File(libPath).getName()
-                                                                         : getString(R.string.LIB_BADGE_SET),
+               libFolders.isEmpty() ? null : libFolders.size() > 1 ? foldersValue(libFolders)
+               : libFolders.get(0).path != null ? libFolders.get(0).name() : getString(R.string.LIB_BADGE_SET),
                this::onChooseLibraryFolder);
         // The intro under the focused choice's own text: what any choice keeps.
         for (int i = 0; i < list.getChildCount(); i++) {
@@ -3785,7 +3789,7 @@ public class LauncherActivity extends Activity {
 
     /** The game library is on: a library folder is set, or the launcher knows two games or more. */
     private boolean libraryOn() {
-        return Library.folderTree(this) != null || games.games.size() >= 2;
+        return !Library.folders(this).isEmpty() || games.games.size() >= 2;
     }
 
     private void setIndex(LibraryIndex x) {
@@ -3801,24 +3805,12 @@ public class LauncherActivity extends Activity {
         }
     }
 
-    /** The library folder can be read: All files access for a path, the persisted permission for a tree. */
-    private boolean folderAccessible() {
-        String tree = Library.folderTree(this);
-        if (tree == null)
-            return true;
-        if (Library.folderPath(this) != null)
-            return Environment.isExternalStorageManager();
-        for (android.content.UriPermission p : getContentResolver().getPersistedUriPermissions()) {
-            if (p.isReadPermission() && p.getUri().toString().equals(tree))
-                return true;
-        }
-        return false;
-    }
-
     private LibraryScreen.Env libEnv() {
         LibraryScreen.Env e = new LibraryScreen.Env();
         e.toolchain = Toolchain.available(this);
-        e.accessible = folderAccessible();
+        // Each library folder can be read: All files access for a path, the persisted permission for a tree.
+        e.accessible = true;
+        e.noAccess = Library.unreadableFolders(this, Environment.isExternalStorageManager());
         e.prepareProcess = prepareProcessAlive();
         e.runningTid = gameRunning() ? launchedTid() : null;
         e.importingTid = worker != null && worker.isAlive() ? importTid : null;
@@ -3863,6 +3855,8 @@ public class LauncherActivity extends Activity {
 
     /** e becomes the selected game (a record is made for a game seen in the folder only). */
     private void selectEntry(LibraryScreen.Entry e) {
+        if (e.otherConsole())
+            return;   // never the selected game: Home, Play and Prepare are the Xbox's
         boolean isNew = games.get(e.tid) == null;
         Library.Record r = LibraryScreen.recordFor(e, System.currentTimeMillis());
         if (isNew)
@@ -3906,15 +3900,31 @@ public class LauncherActivity extends Activity {
         return heal == null || heal.offer == SelfHeal.Offer.IMPROVE;
     }
 
-    /** A on a card: the game's Home, in its colours. */
+    /** A on a card: the game's Home, in its colours (a game of another console: why it does not play yet). */
     private void openGame(LibraryScreen.Entry e) {
+        if (notPlayableYet(e))
+            return;
         selectEntry(e);
         Log.i(TAG, "launcher: library: open " + e.tid + " (" + e.title() + ", " + e.chip + ")");
         go(Screen.HOME);
     }
 
+    /**
+     * A game of another console than the Xbox (XBA-178): listed, not playable until its console's runtime is in;
+     * A or Start on its card says so. True when e is one.
+     */
+    private boolean notPlayableYet(LibraryScreen.Entry e) {
+        if (!e.otherConsole())
+            return false;
+        Log.i(TAG, "launcher: library: " + e.tid + " (" + e.title() + ") is not playable yet");
+        setNote(getString(R.string.LIB_NOT_PLAYABLE_NOTE, e.console().badge()), NOTE_INFO);
+        return true;
+    }
+
     /** Start on a card (or the bottom screen's big button): the game's primary action, without opening Home. */
     private void libraryPrimary(LibraryScreen.Entry e) {
+        if (notPlayableYet(e))
+            return;
         selectEntry(e);
         onPlay();
     }
@@ -3999,7 +4009,8 @@ public class LauncherActivity extends Activity {
      */
     private void importEntry(LibraryScreen.Entry e) {
         LibraryIndex.Item it = e.active;
-        String tree = Library.folderTree(this);
+        Library.Folder folder = Library.folderOf(Library.folders(this), it);
+        String tree = folder == null ? null : folder.tree;
         if (it == null) {
             setNote(getString(R.string.LIB_SOURCE_GONE_NOTE, e.title()), NOTE_WARN);
             return;
@@ -4036,7 +4047,10 @@ public class LauncherActivity extends Activity {
         runWorker(R.string.CHECKING, () -> importImage(uris, names, f, f == null));
     }
 
-    /** The library folder was picked: remembered (path with All files access, else the tree), then scanned. */
+    /**
+     * A library folder was picked: added to the library folders (path with All files access, else the tree; the same
+     * folder again updates its entry), then every folder is scanned.
+     */
     private void onLibraryTreePicked(Uri tree) {
         try {
             getContentResolver().takePersistableUriPermission(tree, Intent.FLAG_GRANT_READ_URI_PERMISSION);
@@ -4045,12 +4059,10 @@ public class LauncherActivity extends Activity {
         String path = Environment.isExternalStorageManager() ? GameStore.treeUriToPath(tree) : null;
         if (path != null && !new File(path).isDirectory())
             path = null;
-        String before = Library.folderTree(this);
-        Library.setFolder(this, tree.toString(), path);
-        Log.i(TAG, "launcher: library: folder " + tree + (path != null ? " = " + path : " (Storage Access Framework)"));
+        Library.addFolder(this, tree.toString(), path);
+        Log.i(TAG, "launcher: library: folder " + tree + (path != null ? " = " + path : " (Storage Access Framework)")
+                   + ", " + Library.folders(this).size() + " folders");
         pickLibrary = false;
-        if (!tree.toString().equals(before))
-            setIndex(new LibraryIndex());   // another folder: its own items (the scan still reuses what it can)
         focusTid = null;
         history.clear();
         show(Screen.LIBRARY);   // a path is scanned as the library opens
@@ -4058,9 +4070,37 @@ public class LauncherActivity extends Activity {
             startScan();
     }
 
-    /** Y: scan the library folder again (or choose one). */
+    /**
+     * Takes a folder out of the library: its games leave the grid (their records, packs and saves stay, as for a
+     * game gone from a folder), its read permission is released. Nothing in the folder is touched.
+     */
+    private void removeLibraryFolder(Library.Folder f) {
+        List<Library.Folder> before = Library.folders(this);
+        boolean first = !before.isEmpty() && before.get(0).tree.equals(f.tree);
+        if (scanning())
+            scanCancel = true;   // its result would list the folder again
+        Library.removeFolder(this, f.tree);
+        index.dropFolder(f.tree, first);
+        try {
+            LibraryIndex.write(Library.indexFile(getFilesDir()), index);
+        } catch (IOException e) {
+            Log.w(TAG, "launcher: library: cannot write index.json", e);
+        }
+        setIndex(index);
+        try {
+            getContentResolver().releasePersistableUriPermission(Uri.parse(f.tree),
+                                                                 Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        } catch (RuntimeException ignored) {   // (not held: a path, or already gone)
+        }
+        Log.i(TAG, "launcher: library: folder " + f.tree + " removed, " + Library.folders(this).size() + " left");
+        focusTid = null;
+        refreshKeepingFocus();
+        setNote(getString(R.string.LIB_FOLDER_REMOVED, f.name()), NOTE_INFO);
+    }
+
+    /** Y: scan the library folders again (or choose one). */
     private void rescanLibrary() {
-        if (Library.folderTree(this) == null) {
+        if (Library.folders(this).isEmpty()) {
             onChooseLibraryFolder();
             return;
         }
@@ -4072,8 +4112,8 @@ public class LauncherActivity extends Activity {
     private void startScan() {
         if (scanner != null && scanner.isAlive())
             return;
-        LibraryScanner.Tree t = LibraryScanner.folderTree(this);
-        if (t == null)
+        List<LibraryScanner.Root> roots = LibraryScanner.folderRoots(this);
+        if (roots.isEmpty())
             return;
         scanCancel = false;
         scanFound = 0;
@@ -4082,7 +4122,7 @@ public class LauncherActivity extends Activity {
         scanner = new Thread(() -> {
             LibraryScanner.Result r = null;
             try {
-                r = LibraryScanner.scanLibrary(app, t, item -> {
+                r = LibraryScanner.scanLibrary(app, roots, item -> {
                     scanFound++;
                     postScanProgress();
                 }, () -> scanCancel);
@@ -4151,7 +4191,7 @@ public class LauncherActivity extends Activity {
         List<String> parts = new ArrayList<>();
         if (scanning())
             parts.add(getString(R.string.LIB_SCANNING, scanFound));
-        else if (Library.folderTree(this) == null)
+        else if (Library.folders(this).isEmpty())
             parts.add(getString(R.string.LIB_NO_FOLDER));
         else if (libEntries.isEmpty())
             parts.add(getString(R.string.LIB_EMPTY));
@@ -4177,6 +4217,11 @@ public class LauncherActivity extends Activity {
     private void buildLibrary() {
         screenTitle.setText(R.string.LIB_TITLE);
         libEntries = LibraryScreen.entries(getFilesDir(), games, index, libEnv());
+        // Games of several consoles: each card says its console (an Xbox-only library looks as before).
+        java.util.Set<Console> consoles = java.util.EnumSet.noneOf(Console.class);
+        for (LibraryScreen.Entry e : libEntries)
+            consoles.add(e.console());
+        boolean badges = consoles.size() > 1;
         Library.Record sel = games.selected();
         String want = focusTid != null ? focusTid : sel != null ? sel.titleId : null;
         GameCard focusCard = null;
@@ -4185,6 +4230,8 @@ public class LauncherActivity extends Activity {
             c.setGame(LibraryScreen.art(getFilesDir(), libArt, e), e.tid, e.title(), LibraryScreen.chipText(this, e),
                       LibraryScreen.chipColor(e.chip));
             c.setChipShown(e.chip != GameState.Chip.READY);
+            if (badges)
+                c.setBadge(e.console().badge());
             c.setDim(e.chip == GameState.Chip.SOURCE_GONE || e.chip == GameState.Chip.DATA_MISSING
                      || e.chip == GameState.Chip.NO_FILE_ACCESS);
             c.setOnClickListener(v -> {
@@ -4218,8 +4265,8 @@ public class LauncherActivity extends Activity {
             if (backdrop != null)
                 backdrop.setGlows(Theme.GLOW, Theme.GLOW2);
             if (companion != null)
-                companion.library("", getString(Library.folderTree(this) == null ? R.string.LIB_FOLDER_NONE
-                                                                                 : R.string.LIB_FOLDER_TILE),
+                companion.library("", getString(Library.folders(this).isEmpty() ? R.string.LIB_FOLDER_NONE
+                                                                                : R.string.LIB_FOLDER_TILE),
                                   Theme.TEXT_DIM, null, null);
         } else {
             body.addView(LibraryScreen.grid(this, libCards, libCaption), new FrameLayout.LayoutParams(MATCH, MATCH));
@@ -4248,7 +4295,7 @@ public class LauncherActivity extends Activity {
             setNote(getString(R.string.LIB_RUNNING_NOTE, runningTitle()), NOTE_INFO);
     }
 
-    /** Y on the library: the Options sheet (Rescan, Storage, Library folder, Settings, About). */
+    /** Y on the library: the Options sheet (Rescan, Storage, Library folders, Settings, About). */
     private void openOptions() {
         if (screen != Screen.LIBRARY)
             return;
@@ -4256,14 +4303,60 @@ public class LauncherActivity extends Activity {
         sheetRow(getString(R.string.LIB_RESCAN), this::rescanLibrary);
         sheetRow(getString(R.string.LIB_STORAGE), () -> go(Screen.STORAGE))
                 .setValue(getString(R.string.LIB_ST_FREE, size(freeSpace())));
-        String path = Library.folderPath(this), tree = Library.folderTree(this);
-        sheetRow(getString(R.string.LIB_FOLDER_TILE), this::onChooseLibraryFolder)
-                .setValue(tree == null ? getString(R.string.LIB_FOLDER_NONE)
-                          : path != null ? new File(path).getName() : getString(R.string.LIB_FOLDER_SAF));
+        List<Library.Folder> folders = Library.folders(this);
+        sheetRow(getString(R.string.LIB_FOLDERS), this::openFoldersSheet)
+                .setValue(folders.isEmpty() ? getString(R.string.LIB_FOLDER_NONE) : foldersValue(folders));
         if (Toolchain.available(this))   // XBA-130: prepares and boots every game, a report
             sheetRow(getString(R.string.CHECK_LIBRARY), () -> startActivity(CheckActivity.intent(this)));
         sheetRow(getString(R.string.SETTINGS), () -> go(Screen.SETTINGS));
         sheetRow(getString(R.string.ABOUT), () -> go(Screen.ABOUT));
+        sheetReady();
+    }
+
+    /** « xbox », « Chosen folder » or « 4 folders »: the library folders in one value. */
+    private String foldersValue(List<Library.Folder> folders) {
+        if (folders.size() == 1)
+            return folders.get(0).path != null ? folders.get(0).name() : getString(R.string.LIB_FOLDER_SAF);
+        return getString(R.string.LIB_FOLDERS_N, folders.size());
+    }
+
+    /**
+     * Options › Library folders: one row per folder (its name; its path, or « Chosen folder » through the Storage
+     * Access Framework), A on one asks to take it out of the library; « Add a folder » last.
+     */
+    private void openFoldersSheet() {
+        if (screen != Screen.LIBRARY)
+            return;
+        openSheet(R.string.LIB_FOLDERS);
+        for (Library.Folder f : Library.folders(this))
+            sheetRow(f.name(), () -> confirmRemoveFolder(f)).setValue(folderWhere(f));
+        sheetRow(getString(R.string.LIB_FOLDER_ADD), this::onChooseLibraryFolder);
+        sheetReady();
+    }
+
+    /**
+     * Where a library folder is, short enough for the sheet: « Internal storage », « SD card » (read as files), the
+     * folder above it otherwise, « Chosen folder » through the Storage Access Framework.
+     */
+    private String folderWhere(Library.Folder f) {
+        if (f.path == null)
+            return getString(R.string.LIB_FOLDER_SAF);
+        if (f.path.startsWith("/storage/emulated/"))
+            return getString(R.string.LIB_FOLDER_INTERNAL);
+        if (f.path.startsWith("/storage/"))
+            return getString(R.string.LIB_FOLDER_SD);
+        File parent = new File(f.path).getParentFile();
+        return parent == null ? f.path : parent.getName();
+    }
+
+    /** A on a library folder: « Keep » (focused first, as B) or « Remove from the library ». */
+    private void confirmRemoveFolder(Library.Folder f) {
+        if (screen != Screen.LIBRARY)
+            return;
+        openSheet(f.name());
+        sheetRow(getString(R.string.LIB_FOLDER_KEEP), this::openFoldersSheet);
+        sheetRow(getString(R.string.LIB_FOLDER_REMOVE), () -> removeLibraryFolder(f))
+                .setValue(getString(R.string.LIB_FOLDER_REMOVE_SUB));
         sheetReady();
     }
 

@@ -204,4 +204,89 @@ public class LibraryScreenTest {
         assertEquals("1.02", LibraryScreen.versionText(0x102));
         assertEquals("0.00", LibraryScreen.versionText(0));
     }
+
+    /** XBA-178: a game of another console is listed « Not playable yet », keyed by console + title key. */
+    @Test
+    public void otherConsolesAreNotPlayableYet() throws Exception {
+        LibraryIndex x = new LibraryIndex();
+        x.items.add(iso(FABLE, "Fable", "Fable.iso", 1));
+        LibraryIndex.Item rom = new LibraryIndex.Item();
+        rom.loc = "file:/sdcard/gba/Sample.gba";
+        rom.kind = LibraryIndex.KIND_ROM;
+        rom.name = "Sample.gba";
+        rom.console = Console.GBA;
+        rom.key = "AXVE-1A2B3C4D";
+        rom.tid = "gba-AXVE-1A2B3C4D";
+        rom.title = "Sample";
+        rom.folder = "content://tree/gba";
+        x.items.add(rom);
+        LibraryScreen.Env env = env();
+        env.toolchain = true;
+        List<LibraryScreen.Entry> l = LibraryScreen.entries(files, new Library.Games(), x, env);
+        assertEquals(2, l.size());
+        assertEquals(FABLE, l.get(0).tid);
+        assertEquals(GameState.Chip.NOT_IMPORTED, l.get(0).chip);   // the Xbox game: unchanged
+        LibraryScreen.Entry e = l.get(1);
+        assertEquals("gba-AXVE-1A2B3C4D", e.tid);
+        assertEquals(Console.GBA, e.console());
+        assertTrue(e.otherConsole());
+        assertFalse("no Prepare, no theme, no XBE art", e.realTid());
+        assertFalse(e.facts.toolchain);
+        assertEquals(GameState.Chip.NOT_PLAYABLE_YET, e.chip);
+        assertEquals(R.string.LIB_CHIP_NOT_PLAYABLE_YET, LibraryScreen.chipLabel(e.chip));
+        assertFalse(GameState.playable(e.chip));
+        assertNull(LibraryScreen.art(files, new java.util.HashMap<>(), e));
+
+        // A record left from it (games.json keyed the same way), its file gone: it leaves the grid.
+        Library.Games g = new Library.Games();
+        Library.Record r = new Library.Record();
+        r.titleId = "gba-AXVE-1A2B3C4D";
+        r.title = "Sample";
+        g.put(r);
+        x.items.remove(rom);
+        assertEquals(1, LibraryScreen.entries(files, g, x, env).size());
+        assertEquals(GameState.Chip.GONE, LibraryScreen.entry(files, r.titleId, g, x, env).chip);
+    }
+
+    /** A library folder the app cannot read: only its games show « No file access ». */
+    @Test
+    public void noAccessPerFolder() {
+        LibraryIndex x = new LibraryIndex();
+        LibraryIndex.Item fable = iso(FABLE, "Fable", "Fable.iso", 1), halo = iso(HALO, "Halo", "Halo.iso", 1),
+                burnout = iso(BURNOUT, "Burnout 3", "Burnout 3.iso", 1);
+        fable.folder = "content://tree/a";
+        halo.folder = "content://tree/b";
+        burnout.folder = "";   // an older index: the first folder's
+        x.items.add(fable);
+        x.items.add(halo);
+        x.items.add(burnout);
+        LibraryScreen.Env env = env();
+        env.noAccess = new java.util.HashSet<>(java.util.Arrays.asList("content://tree/b"));
+        List<LibraryScreen.Entry> l = LibraryScreen.entries(files, new Library.Games(), x, env);
+        assertEquals(GameState.Chip.NOT_IMPORTED, l.get(0).chip);   // Burnout 3
+        assertEquals(GameState.Chip.NOT_IMPORTED, l.get(1).chip);   // Fable
+        assertEquals(GameState.Chip.NO_FILE_ACCESS, l.get(2).chip);   // Halo
+        env.noAccess = new java.util.HashSet<>(java.util.Arrays.asList("", "content://tree/a"));
+        l = LibraryScreen.entries(files, new Library.Games(), x, env);
+        assertEquals(GameState.Chip.NO_FILE_ACCESS, l.get(0).chip);
+        assertEquals(GameState.Chip.NO_FILE_ACCESS, l.get(1).chip);
+        assertEquals(GameState.Chip.NOT_IMPORTED, l.get(2).chip);
+    }
+
+    /** Library.folderOf: an item's folder, the first folder for an older item, null for a folder taken out. */
+    @Test
+    public void folderOfAnItem() {
+        List<Library.Folder> folders = java.util.Arrays.asList(new Library.Folder("content://a", "/a"),
+                                                               new Library.Folder("content://b", null));
+        LibraryIndex.Item i = new LibraryIndex.Item();
+        assertEquals("content://a", Library.folderOf(folders, i).tree);
+        i.folder = "content://b";
+        assertEquals("content://b", Library.folderOf(folders, i).tree);
+        i.folder = "content://gone";
+        assertNull(Library.folderOf(folders, i));
+        assertNull(Library.folderOf(java.util.Collections.emptyList(), i));
+        assertEquals(Console.GBA, Console.ofKey("gba-AXVE-1A2B3C4D"));
+        assertEquals(Console.XBOX, Console.ofKey(FABLE));
+        assertEquals(Console.XBOX, Console.ofKey("local-0a1b2c3d"));
+    }
 }

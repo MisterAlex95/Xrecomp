@@ -49,9 +49,12 @@ final class Library {
     /** A disc image read in place (XBA-126): data_dir is its companion folder (DiscImages). */
     static final String KIND_IMAGE = "image";
 
-    /** Preferences (GameStore.PREFS): the launched game's title ID (next to game_dir and title), the library folder. */
+    /**
+     * Preferences (GameStore.PREFS): the launched game's title ID (next to game_dir and title), the library folders
+     * (library_folders, XBA-178; library_tree / library_path: the one folder before, migrated as the first entry).
+     */
     static final String PREF_TITLE_ID = "title_id", PREF_TREE = "library_tree", PREF_PATH = "library_path",
-            PREF_SCANNED_AT = "library_scanned_at";
+            PREF_FOLDERS = "library_folders", PREF_SCANNED_AT = "library_scanned_at";
 
     static File dir(File filesDir) {
         return new File(filesDir, DIR);
@@ -82,7 +85,10 @@ final class Library {
     // ---- Records --------------------------------------------------------------------------------------------------
 
     static final class Record {
-        /** The key: 8 upper-case hex digits, or « local-xxxxxxxx » for an XBE without a title ID. */
+        /**
+         * The key: 8 upper-case hex digits, or « local-xxxxxxxx » for an XBE without a title ID; a game of another
+         * console: « <console>-<title key> » (Console.packDirName, XBA-178).
+         */
         String titleId = "";
         String title = "";
         /** The scan location of the active source (LibraryIndex.Item.loc: « file:/… », « doc:… »), "" for none. */
@@ -374,33 +380,194 @@ final class Library {
         }
     }
 
-    // ---- Library folder (preferences) -------------------------------------------------------------------------------
+    // ---- Library folders (preferences) ------------------------------------------------------------------------------
 
-    /** The picked library folder's tree URI, or null. */
+    /**
+     * One library folder (XBA-178: one per console, say): its tree URI (the picker's, whose read permission persists;
+     * also the folder's identity, LibraryIndex.Item.folder) and, when it can be read as files with All files access,
+     * its path (null: through the Storage Access Framework).
+     */
+    static final class Folder {
+        final String tree, path;
+
+        Folder(String tree, String path) {
+            this.tree = tree == null ? "" : tree;
+            this.path = path == null || path.isEmpty() ? null : path;
+        }
+
+        /** The folder's name for the Options sheet: the path's last part, else the tree's (« primary:gba » → gba). */
+        String name() {
+            if (path != null)
+                return new File(path).getName();
+            String t = tree;
+            try {
+                t = java.net.URLDecoder.decode(tree, "UTF-8");
+            } catch (java.io.UnsupportedEncodingException | IllegalArgumentException ignored) {
+            }
+            int cut = Math.max(t.lastIndexOf('/'), t.lastIndexOf(':'));
+            return cut >= 0 && cut + 1 < t.length() ? t.substring(cut + 1) : t;
+        }
+    }
+
+    /** library_folders: a JSON array of {"tree", "path"} (path absent: SAF); unreadable or absent: null. */
+    static List<Folder> parseFolders(String json) {
+        if (json == null)
+            return null;
+        try {
+            org.json.JSONArray a = new org.json.JSONArray(json);
+            List<Folder> l = new ArrayList<>();
+            for (int i = 0; i < a.length(); i++) {
+                JSONObject o = a.optJSONObject(i);
+                if (o != null && !o.optString("tree", "").isEmpty())
+                    l.add(new Folder(o.optString("tree", ""), o.optString("path", "")));
+            }
+            return l;
+        } catch (JSONException e) {
+            return null;
+        }
+    }
+
+    static String foldersJson(List<Folder> l) {
+        org.json.JSONArray a = new org.json.JSONArray();
+        try {
+            for (Folder f : l) {
+                JSONObject o = new JSONObject();
+                o.put("tree", f.tree);
+                if (f.path != null)
+                    o.put("path", f.path);
+                a.put(o);
+            }
+        } catch (JSONException e) {
+            throw new IllegalStateException(e);
+        }
+        return a.toString();
+    }
+
+    /**
+     * The library folders from the preferences' values: library_folders when set; else the one folder of a launcher
+     * from before several folders (library_tree, library_path) as the only entry; else none.
+     */
+    static List<Folder> folders(String foldersJson, String oldTree, String oldPath) {
+        List<Folder> l = parseFolders(foldersJson);
+        if (l != null)
+            return l;
+        l = new ArrayList<>();
+        if (oldTree != null && !oldTree.isEmpty())
+            l.add(new Folder(oldTree, oldPath));
+        return l;
+    }
+
+    /** The library folders, in the order they were added; the old single folder migrates (written once) as the first. */
+    static List<Folder> folders(Context c) {
+        SharedPreferences p = GameStore.prefs(c);
+        String json = p.getString(PREF_FOLDERS, null);
+        List<Folder> l = folders(json, p.getString(PREF_TREE, null), p.getString(PREF_PATH, null));
+        if (json == null && !l.isEmpty()) {
+            p.edit().putString(PREF_FOLDERS, foldersJson(l)).remove(PREF_TREE).remove(PREF_PATH).commit();
+            Log.i(TAG, "launcher: library: folder " + l.get(0).tree + " migrated to library_folders");
+        }
+        return l;
+    }
+
+    static boolean setFolders(Context c, List<Folder> l) {
+        return GameStore.prefs(c).edit().putString(PREF_FOLDERS, foldersJson(l)).remove(PREF_TREE).remove(PREF_PATH)
+                .remove(PREF_SCANNED_AT).commit();
+    }
+
+    /** l with f added at the end; the same tree again replaces its entry in place (its path may have changed). */
+    static List<Folder> withFolder(List<Folder> l, Folder f) {
+        List<Folder> out = new ArrayList<>(l);
+        for (int i = 0; i < out.size(); i++) {
+            if (out.get(i).tree.equals(f.tree)) {
+                out.set(i, f);
+                return out;
+            }
+        }
+        out.add(f);
+        return out;
+    }
+
+    /** Adds a folder (or updates the one with this tree). Clears the scan time. */
+    static boolean addFolder(Context c, String treeUri, String path) {
+        return setFolders(c, withFolder(folders(c), new Folder(treeUri, path)));
+    }
+
+    /** Takes the folder with this tree out of the library (nothing on disk is touched). */
+    static boolean removeFolder(Context c, String treeUri) {
+        List<Folder> l = new ArrayList<>(folders(c));
+        l.removeIf(f -> f.tree.equals(treeUri));
+        return setFolders(c, l);
+    }
+
+    /**
+     * The folder an index item was found in: its folder field's, else (an index from before several folders) the
+     * first folder; null when that folder is no longer in the library.
+     */
+    static Folder folderOf(List<Folder> folders, LibraryIndex.Item i) {
+        if (i == null || folders.isEmpty())
+            return null;
+        if (i.folder.isEmpty())
+            return folders.get(0);
+        for (Folder f : folders)
+            if (f.tree.equals(i.folder))
+                return f;
+        return null;
+    }
+
+    /**
+     * The library folders the app cannot read now (LibraryScreen.Env.noAccess): a path without All files access, a
+     * tree whose read permission is gone. Their tree URIs, and "" when the first is one of them (it owns the items of
+     * an index from before several folders).
+     */
+    static java.util.Set<String> unreadableFolders(Context c, boolean allFilesAccess) {
+        java.util.Set<String> granted = new java.util.HashSet<>();
+        for (android.content.UriPermission p : c.getContentResolver().getPersistedUriPermissions()) {
+            if (p.isReadPermission())
+                granted.add(p.getUri().toString());
+        }
+        java.util.Set<String> out = new java.util.HashSet<>();
+        List<Folder> l = folders(c);
+        for (int i = 0; i < l.size(); i++) {
+            Folder f = l.get(i);
+            if (f.path != null ? allFilesAccess : granted.contains(f.tree))
+                continue;
+            out.add(f.tree);
+            if (i == 0)
+                out.add("");
+        }
+        return out;
+    }
+
+    /** The first library folder's tree URI, or null (no folder): « a library folder is set ». */
     static String folderTree(Context c) {
-        String s = GameStore.prefs(c).getString(PREF_TREE, null);
-        return s == null || s.isEmpty() ? null : s;
+        List<Folder> l = folders(c);
+        return l.isEmpty() ? null : l.get(0).tree;
     }
 
-    /** The library folder as a path (All files access), or null (no folder, or the SAF fallback). */
+    /** The first library folder as a path (All files access), or null (no folder, or the SAF fallback). */
     static String folderPath(Context c) {
-        String s = GameStore.prefs(c).getString(PREF_PATH, null);
-        return s == null || s.isEmpty() ? null : s;
+        List<Folder> l = folders(c);
+        return l.isEmpty() ? null : l.get(0).path;
     }
 
-    /** Remembers the folder: its tree URI and, when readable as files, its path (null: SAF). Clears the scan time. */
+    /** Some library folder is read as files (a path): the library rescans each time it opens. */
+    static boolean anyFolderPath(Context c) {
+        for (Folder f : folders(c))
+            if (f.path != null)
+                return true;
+        return false;
+    }
+
+    /** Makes this the only library folder (its tree URI and, when readable as files, its path). Clears the scan time. */
     static boolean setFolder(Context c, String treeUri, String path) {
-        SharedPreferences.Editor e = GameStore.prefs(c).edit().putString(PREF_TREE, treeUri == null ? "" : treeUri)
-                .remove(PREF_SCANNED_AT);
-        if (path == null || path.isEmpty())
-            e.remove(PREF_PATH);
-        else
-            e.putString(PREF_PATH, path);
-        return e.commit();
+        List<Folder> l = new ArrayList<>();
+        if (treeUri != null && !treeUri.isEmpty())
+            l.add(new Folder(treeUri, path));
+        return setFolders(c, l);
     }
 
     static boolean clearFolder(Context c) {
-        return GameStore.prefs(c).edit().remove(PREF_TREE).remove(PREF_PATH).remove(PREF_SCANNED_AT).commit();
+        return setFolders(c, new ArrayList<>());
     }
 
     static long scannedAt(Context c) {

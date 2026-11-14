@@ -10,13 +10,16 @@ package fr.adserver.xrecomp;
  * game its own way); without them, Not imported / Needs copying / No file access (a source is there), else
  * Source gone (an in-place folder that vanished), Data missing (a recomp.cfg folder that vanished), or GONE: neither
  * files nor source, the game leaves the grid (its pack and saves stay visible in Storage).
+ *
+ * A game of another console than the Xbox (XBA-178): Not playable yet while it is in a library folder (no Prepare, no
+ * launch until its console's runtime exists), else GONE.
  */
 final class GameState {
     private GameState() {}
 
     enum Chip {
         RUNNING, PREPARING, QUEUED, IMPORTING, PREPARE_FAILED, PACK_INVALID, READY, NEEDS_PREPARING, NOT_IMPORTED,
-        NEEDS_COPYING, NO_FILE_ACCESS, SOURCE_GONE, DATA_MISSING, GONE
+        NEEDS_COPYING, NO_FILE_ACCESS, SOURCE_GONE, DATA_MISSING, GONE, NOT_PLAYABLE_YET
     }
 
     /** The active source in the library folder. */
@@ -33,6 +36,8 @@ final class GameState {
 
     static final class Facts {
         String titleId = "";
+        /** The game's console (Console.ofKey of its key). */
+        Console console = Console.XBOX;
         /** The record's data_kind (Library.KIND_*), "" without a record. */
         String dataKind = "";
         /** The record's data_dir holds a default.xbe. */
@@ -58,6 +63,8 @@ final class GameState {
     }
 
     static Chip chip(Facts f) {
+        if (f.console != Console.XBOX)
+            return f.source == Source.MISSING ? Chip.GONE : Chip.NOT_PLAYABLE_YET;
         if (f.titleId.equals(f.runningTid))
             return Chip.RUNNING;
         boolean packValid = f.pack == Pack.Check.VALID && f.packMatches;

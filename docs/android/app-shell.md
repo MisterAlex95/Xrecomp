@@ -145,7 +145,7 @@ One activity, a small state machine of screens (`LauncherActivity.Screen`) with 
 
 | Screen | What it shows | Reached from |
 |---|---|---|
-| Library | The [game library](#game-library): a full-width grid of the games (five columns), the focused game's state and play time as one context line at the bottom left; Rescan, Storage, Library folder, Settings and About in the **Options** sheet (Y). | Every start when the library is on, B from a game's Home. |
+| Library | The [game library](#game-library): a full-width grid of the games (five columns), the focused game's state and play time as one context line at the bottom left; Rescan, Storage, Library folders, Settings and About in the **Options** sheet (Y). | Every start when the library is on, B from a game's Home. |
 | Storage | What the app stores per game, each deleted on its own ([Storage](#storage)). | Options (Y) on the library. |
 | Welcome | What the app is (a recompiled game, the game not included: bring your own copy), three plain steps, a « Get started » button. | First start, when no game is set up at all. |
 | Choose your game (source) | A list: **Game folder** (read in place with All files access, otherwise copied; the value says which), **Disc image (ISO)** (extracted once; the free space in the top bar), **Game library folder**; the focused choice explained on the right. | Welcome, Manage › Change game, Play with no usable game, the « Change game » shortcut, `NO_GAME_DATA`. |
@@ -455,7 +455,7 @@ way; Home's copy line is what the long-press « Launcher » shows.
 | B (`BUTTON_B`), Back, Escape | Back one screen; on Home or Welcome, leave the app (on a library game's Home: the library); during an import or a Prepare, Cancel (a Prepare: twice); with the Options sheet open, close it. |
 | Left / right on a setting | Previous / next value. |
 | L1 / R1 | Settings: previous / next tab (wrapping). |
-| Y | Library: the **Options** sheet (Rescan, Storage, Library folder, Settings, About; B or Y closes it, the focus comes back). Settings: the defaults. Preparing: hide it (the Prepare carries on). A failed Prepare: Share log. |
+| Y | Library: the **Options** sheet (Rescan, Storage, Library folders, Settings, About; B or Y closes it, the focus comes back). Settings: the defaults. Preparing: hide it (the Prepare carries on). A failed Prepare: Share log. |
 | Start | Home: Play (not shown as a hint). Library: the focused game's primary action. |
 | Touch | Tap an item to select it, the arrows of a setting to step it, a button hint to do what it says. After a touch, the first D-pad or A press brings the focus back. |
 
@@ -517,7 +517,7 @@ General only.
    never runs under its value. Screenshot of each tab, in English and French.
 4. Library: five columns, « Ready » not written under a ready game, the others with a dot and their state
    (« Not imported » grey); the focused game's line at the bottom left. Y opens Options from the right: Rescan,
-   Storage (free space), Library folder (its name), Settings, About; D-pad stays in it; B closes it and the focus is
+   Storage (free space), Library folders (its name), Settings, About; D-pad stays in it; B closes it and the focus is
    back on the card. X does nothing any more. Screenshot with and without the sheet.
 5. Storage (from Options): « … free » in the top bar, the games' names as small labels, sizes as values, A twice
    deletes (« Press A again » replaces the size); paths in the description. Manage (Home): the title ID, prepared
@@ -1009,9 +1009,11 @@ Use the Thor's gamepad for everything unless a step says touch.
 
 ## Game library
 
-One APK, several games. A **library folder** (for example `/sdcard/xbox`) holds disc images (`*.iso`, `*.xiso`,
-`*.cso`, `*.zso`, `*.cci`, split sets such as `Game.1.iso` + `Game.2.iso`) and extracted game folders (a folder with
-a `default.xbe`); the launcher lists them, and the player imports the ones he plays. An image is read in place
+One APK, several games. **Library folders** (several since XBA-178, say one per console: `/sdcard/xbox`,
+`/sdcard/gba`, `/sdcard/ps1`, `/sdcard/n64`) hold disc images (`*.iso`, `*.xiso`, `*.cso`, `*.zso`, `*.cci`, split
+sets such as `Game.1.iso` + `Game.2.iso`) and extracted game folders (a folder with a `default.xbe`), and the games
+of the other consoles (see [Other consoles](#other-consoles-xba-178)); the launcher lists them all in one grid, and
+the player imports the Xbox ones he plays. An image is read in place
 ([Disc images read in place](#disc-images-read-in-place-xba-126): only its XBEs are copied, into
 `files/discs/<TID>/`), or extracted into `<external files>/games/<TID>/` with `RECOMP_DISC_IMAGE=0`; a game folder
 read as files is played in place (no copy). Prepare packs, Prepare status, the title image, the game theme,
@@ -1020,27 +1022,64 @@ launched game changes.
 
 ### Turning it on
 
-Choose your game › **Game library folder** (third card). With All files access the folder is read as files (the
-tree URI resolved to a path, `java.io.File`, images opened with `ParcelFileDescriptor`); without it,
-FOLDER_ACCESS offers **Allow all files access** or **Use the file picker** (Storage Access Framework: images are
-imported from their document, folders must be copied, chip « Needs copying »). The read permission on the tree is
-kept (`takePersistableUriPermission`). Preferences (`game`): `library_tree`, `library_path` (absent in SAF mode),
-`library_scanned_at`.
+Choose your game › **Game library folder** (third card), or later Library › Options › **Library folders** ›
+**Add a folder**. With All files access a folder is read as files (the tree URI resolved to a path, `java.io.File`,
+images opened with `ParcelFileDescriptor`); without it, FOLDER_ACCESS offers **Allow all files access** or **Use the
+file picker** (Storage Access Framework: images are imported from their document, folders must be copied, chip
+« Needs copying »). Each folder's read permission on its tree is kept (`takePersistableUriPermission`; released when
+the folder is taken out of the library). Each folder is read its own way: some by path, others through SAF.
+
+Preferences (`game`): `library_folders`, a JSON array in the order the folders were added, `[{"tree":
+"content://…/tree/primary%3Axbox", "path": "/storage/emulated/0/xbox"}, {"tree": "…%3Agba"}]` (`path` absent: SAF),
+and `library_scanned_at`. The tree URI is the folder's identity. **Migration:** the one folder of an older version
+(`library_tree`, `library_path`) becomes the first entry the first time the folders are read (`Library.folders`),
+written once; the old keys are removed. Picking a folder that is already in the list updates its entry in place (say,
+All files access granted since).
 
 The library is **on** when a library folder is set, or the launcher knows two games or more. Otherwise everything is
 as before (Welcome, Home of the one game, Change game): the one-game launcher and its tests are unchanged.
 
 ### Scan
 
-`LibraryScanner` on a worker: at most four levels, 5,000 entries; names starting with « . » and `Android/` skipped; a
-folder holding `default.xbe` is a game folder (not descended). A split set is one item (its first part; the parts'
+`LibraryScanner` on a worker walks every library folder in turn into one index; per folder: at most four levels,
+5,000 entries (a full folder does not hide the next one's games); names starting with « . » and `Android/` skipped; a
+folder holding `default.xbe` is a game folder (not descended). Each item records its folder's tree URI (`folder`; an
+item of an older index has none and belongs to the first folder); a file seen through two overlapping folders is
+listed once. A folder that cannot be read leaves the others' items in, and keeps the art and themes of the games it
+no longer lists (it may only be unmounted). A split set is one item (its first part; the parts'
 locations in the index's `parts`, their sizes summed); a later part alone is not listed. Each new or changed image
 gives its `default.xbe` only (`XisoNative.extractFileParts` over its parts, at most 32 MB) into `files/library/xbe/<TID>-<sha8>/` (art, theme, hash, and the Prepare's
 source before an import); an unchanged one (location, size, modification time) is not opened again. The title image
 and the game theme are cached there and then (`files/art/<TID>.png`, `<TID>.theme`). Files that are not games (not
-an Xbox image, no or a bad `default.xbe`, unreadable) make the dimmed « Other files (n) » line under the grid. The
-index is `files/library/index.json` (rebuildable). Rescans: each time the library opens (path mode), Y, a new folder;
-in SAF mode only at a cold start and on Y. logcat: `launcher: library: scan N items, M games, T ms (…)`.
+an Xbox image, no or a bad `default.xbe`, a game file of another console without a title key, unreadable) make the
+dimmed « Other files (n) » line under the grid. The index is `files/library/index.json` (rebuildable). Rescans: each
+time the library opens (when some folder is read by path), Y, a new folder; with every folder through SAF only at a
+cold start and on Y. logcat: `launcher: library: scan of F folders: N items, M games, T ms (…)`.
+
+### Other consoles (XBA-178)
+
+The scan also lists the games of the consoles XRecomp is growing into (`Console`, XBA-147), identified from their
+content the way the native side names their packs (`Console.identify`, mirroring `recomp_pack_rom_identify`):
+
+| Console | Files | Title key |
+|---|---|---|
+| Game Boy Advance | `*.gba` | game code + CRC32 of the file, `AXVE-1A2B3C4D` |
+| PlayStation | a `.cue` and its tracks (the `.cue` stands for the disc; the tracks it names are not listed again), a lone `.bin`, an `.iso` that is no Xbox image (`ENOTXISO`) but an ISO 9660 « PLAYSTATION » volume | the serial of `SYSTEM.CNF`'s BOOT line, `SLUS-00594` |
+| Nintendo 64 | `*.z64`, `*.v64`, `*.n64` (any byte order) | game code + header CRC1, `NSME-635A2BFF` |
+
+Such a game is keyed `<console>-<title key>` (`gba-AXVE-1A2B3C4D`, the pack folder's name, `Console.packDirName`) in
+the index's `tid` and in `games.json`; Xbox games keep their title ID, so every older `games.json` / `index.json`
+record stays valid. Index items of another console carry `"kind": "rom"`, `"console"`, `"key"` (absent for Xbox:
+an Xbox item is written as before). A `.cue`'s fingerprint is its own and its tracks' (sizes summed, the newest
+time), so the stat-only rescan covers a changed track. A file named like a game whose content gives no title key is
+an « other file »; a `.chd` too for now (compressed, read once a CHD reader is in). A lone `.bin` that is no
+PlayStation disc (firmware, a dump) is ignored: kept in the index for the stat-only rescan, shown nowhere.
+
+These games show in the grid with the chip **Not playable yet** (a neutral grey dot) until their console's runtime
+exists: no Prepare, no Import, no Home; A or Start on the card says so in the note line (« GBA games are listed but
+not playable yet… ») and selects nothing. When the library holds games of more than one console, every card has a
+small badge in its art's top left corner (**Xbox**, **GBA**, **PS1**, **N64**); an Xbox-only library looks as
+before. There is no console filter.
 
 ### The library screen
 
@@ -1049,8 +1088,11 @@ one-line title, and its state as a dot and a label only when it is not **Ready**
 grey dot) — sorted by title. The focused game's state and play time are one context line at the bottom left
 (« Ready · Yesterday · 12 h 40 min played »). D-pad between cards (a ring around the art glides to them), **A** the
 game's Home, **Start** its primary action without opening Home, **Y** the **Options** sheet — **Rescan**, **Storage**
-(the free space), **Library folder** (its name; A chooses another), **Settings**, **About** — and **B** leaves the
-app. An empty library shows why (no folder yet, nothing found, the scan's progress) and a **Library folder** button.
+(the free space), **Library folders** (the folder's name, or « 4 folders »), **Settings**, **About** — and **B**
+leaves the app. **Library folders** opens a second sheet: one row per folder (its name; « Internal storage », « SD
+card » or « Chosen folder » for SAF), then **Add a folder** (the tree picker, as above). A on a folder: **Keep it**
+(focused first) or **Remove from the library** — its games leave the grid and the index at once (their records,
+packs and saves stay, as for a game gone from a folder), its permission is released, nothing in it is deleted. An empty library shows why (no folder yet, nothing found, the scan's progress) and a **Library folder** button.
 The scan's progress, a scan cut at 5,000 entries and the « Other files (n) » line go under the grid. The library is
 always in the stock colours; only the backdrop's glow follows the focused card (from its cached `<TID>.theme`).
 Opening a game's Home applies its theme; back to the library resets it. The bottom screen shows the focused game:
@@ -1059,7 +1101,8 @@ its art, title and primary action.
 States (`GameState`, first that applies): **Running**, **Preparing**, **Queued (n)**, **Importing**, then with the
 game's files present **Prepare failed**, **Pack invalid** (the pack was built from another `default.xbe` —
 `Pack.xbeSha256` against the record's — or the shell refused it), **Ready**, **Needs preparing**; without them
-**Not imported**, **Needs copying**, **No file access**, else **Source gone** (an in-place folder that vanished) or
+**Not imported**, **Needs copying**, **No file access** (per folder: a path without All files access, a tree whose
+permission is gone), else **Source gone** (an in-place folder that vanished) or
 **Game data missing**. A game with neither files nor source leaves the grid (its pack and saves stay in Storage).
 Variants: images with the same title ID are one game; the active one is the record's source, else the most recently
 modified.
@@ -1108,7 +1151,7 @@ left the library folder.
 | What | Where |
 |---|---|
 | Records (launcher only; temporary file, then rename) | `files/library/games.json`: `selected`, per title ID `title`, `source`, `data_dir`, `data_kind` (`imported`, `in_place`, `cfg`, `image`), `xbe_sha256`, `added_at`, `last_played`, `play_ms` |
-| Scan index (rebuildable) | `files/library/index.json` |
+| Scan index (rebuildable) | `files/library/index.json` (per item its `folder`; `console`, `key` for another console) |
 | Cached `default.xbe` | `files/library/xbe/<TID>-<sha8>/default.xbe` |
 | Imported games | `<external files>/games/<TID>/` (staged in `games/.import`, swapped once checked) |
 | Disc images read in place | `files/discs/<TID>/`: the image's XBEs and `disc.json` (staged in `discs/.import`) |
@@ -1129,9 +1172,13 @@ of one game), one game folder, one nested image, a non-Xbox `notes.iso`, and a h
 the scan skips. `adb push OUT_DIR /sdcard/xbox-test`, then choose it as the library folder. The games import in a
 second; they do not run (the XBE is not a game).
 
-Tests: `LibraryScreenTest`, `StorageTest` (plain JUnit), `LauncherLibraryTest` (routing, grid with 0 / 1 / 7 / 20
-games in en / fr at 720p / 1080p → `build/screenshots/library-*.png`, navigation, theme, launched game written at
-Play only, caches switched, not imported, Prepare now, queue, Storage), `LauncherPanelsTest` (`companion-library-*`).
+Tests: `LibraryScreenTest`, `LibraryScannerTest`, `StorageTest` (plain JUnit; the scanner over in-memory folders:
+several folders and every console, per-folder caps, an unreadable or overlapping folder), `LibraryStoreTest` and
+`LibraryContextTest` (older `index.json` / `games.json` still valid, the folder list and its migration, a scan of two
+folders by path), `LauncherLibraryTest` (routing, grid with 0 / 1 / 7 / 20 games in en / fr at 720p / 1080p →
+`build/screenshots/library-*.png`, navigation, theme, launched game written at Play only, caches switched, not
+imported, Prepare now, queue, Storage, two folders with a GBA game and Options › Library folders →
+`library-consoles.png`, `library-folders.png`), `LauncherPanelsTest` (`companion-library-*`).
 
 ### Device check (game library), for Alex
 
@@ -1169,6 +1216,29 @@ Play only, caches switched, not imported, Prepare now, queue, Storage), `Launche
 15. In French: the library, the chips (« Non importé », « En attente (1) »), Storage.
 16. Turn All files access off (system settings), choose the folder again with **Use the file picker**: the games
     are listed; folders read « À copier » / « Needs copying », images import.
+
+### Device check (library folders, XBA-178), for Alex
+
+`adb logcat -s xboxrecomp` throughout. Folders `/sdcard/xbox` (your Xbox images), `/sdcard/gba`, `/sdcard/ps1`,
+`/sdcard/n64` with a few games each (your own dumps or the homebrew corpus of C0-5).
+
+1. Install over the current APK (library folder `/sdcard/xbox` already set): the library opens as before, same
+   games, no badge on the cards; logcat `launcher: library: folder … migrated to library_folders` once.
+2. Y › **Library folders**: one row « xbox » (« Internal storage »), then **Add a folder**. Add `/sdcard/gba`, then
+   `/sdcard/ps1` and `/sdcard/n64` the same way: after each, the library rescans (logcat `launcher: library: scan of
+   N folders: …`) and the new games appear, sorted by title among the Xbox ones.
+3. Every card now has a badge (Xbox, GBA, PS1, N64); GBA / PS1 / N64 games read **Not playable yet** (grey dot); a
+   PS1 disc as `.cue` + `.bin` tracks is one card; the same N64 game in `.z64` and `.v64` is one card.
+4. A on a GBA card: the note « GBA games are listed but not playable yet… », no Home; Start the same. The Xbox games
+   open, prepare and play as before.
+5. Y twice (rescan): quick, `… 0 opened, N unchanged`.
+6. Y › Library folders: four rows. A on « gba » › **Keep it** (focused first): nothing changes. A on « gba » ›
+   **Remove from the library**: the GBA cards leave at once, the note « gba is no longer in the library… »; the files
+   in `/sdcard/gba` are still there. Close and reopen the app: still three folders, no GBA card.
+7. Without All files access (system settings off), add a folder with **Use the file picker**: its games are listed;
+   the folders read by path show **No file access** on their Xbox games until access is back.
+8. In French: « Dossiers de la bibliothèque », « Ajouter un dossier », « Pas encore jouable ».
+9. Bottom screen (Thor): on a GBA card its title and « Not playable yet », no action button.
 
 ## Prepare on the device (the app side)
 

@@ -19,7 +19,8 @@ import java.util.Map;
 
 /**
  * The library screen's model and grid (docs/android/app-shell.md « Game library »): the launcher's records
- * (Library.Games) joined with the scan index (LibraryIndex) into one Entry per title ID, each with its GameState chip,
+ * (Library.Games) joined with the scan index (LibraryIndex) into one Entry per game key (an Xbox title ID, or
+ * « <console>-<title key> » for a game of another console, XBA-178), each with its GameState chip,
  * and the scrolling full-width 5-column grid of GameCards. LauncherActivity builds the rest of the screen (the context
  * line, the Options sheet, hints) with its own helpers; this class keeps the library's logic out of it.
  */
@@ -33,11 +34,21 @@ final class LibraryScreen {
     /** What the facts of every entry share: the toolchain, the folder's access, the running game, the queue. */
     static final class Env {
         boolean toolchain, accessible, prepareProcess;
+        /**
+         * The library folders the app cannot read now (their tree URIs; "" too when it is the first folder, which
+         * owns the items of an older index): their games show « No file access ».
+         */
+        java.util.Set<String> noAccess = Collections.emptySet();
         String runningTid, importingTid;
         PrepareProtocol.Queue queue = new PrepareProtocol.Queue();
         long now = System.currentTimeMillis();
         /** Title IDs whose pack the shell refused this session. */
         java.util.Set<String> packDropped = Collections.emptySet();
+
+        /** The folder of item i can be read (accessible, and not one of noAccess). */
+        boolean accessible(LibraryIndex.Item i) {
+            return accessible && (i == null || !noAccess.contains(i.folder));
+        }
     }
 
     /** One game of the library: its record (may be null), its variants in the folder (may be empty), its state. */
@@ -77,9 +88,22 @@ final class LibraryScreen {
             return active == null ? null : active.xbeFile(filesDir);
         }
 
-        /** Title IDs are 8 hex digits; a « local-… » key has none (no Prepare, no theme). */
+        /** The game's console, from its key. */
+        Console console() {
+            return Console.ofKey(tid);
+        }
+
+        /** A game of another console than the Xbox: listed, « Not playable yet » (no Prepare, no launch, no Home). */
+        boolean otherConsole() {
+            return console() != Console.XBOX;
+        }
+
+        /**
+         * Title IDs are 8 hex digits; a « local-… » key has none, nor a game of another console (no Prepare, no
+         * theme, no XBE art).
+         */
         boolean realTid() {
-            return !Library.isLocalKey(tid);
+            return !Library.isLocalKey(tid) && !otherConsole();
         }
     }
 
@@ -150,13 +174,15 @@ final class LibraryScreen {
         en.active = LibraryIndex.active(en.variants, en.record == null ? null : en.record.source);
         GameState.Facts f = new GameState.Facts();
         f.titleId = en.tid;
+        f.console = en.console();
         f.dataKind = en.record == null ? "" : en.record.dataKind;
         boolean recordData = en.record != null && en.record.hasData();
         f.hasData = recordData;
-        f.source = LibraryScanner.source(en.active, env.accessible);
+        boolean accessible = env.accessible(en.active);
+        f.source = LibraryScanner.source(en.active, accessible);
         // A game folder of the library read as files is played in place: its files are here, record or not.
         File inPlace = inPlaceDir(en.active);
-        if (!f.hasData && inPlace != null && env.accessible && (en.record == null || en.record.dataDir.isEmpty())
+        if (!f.hasData && inPlace != null && accessible && (en.record == null || en.record.dataDir.isEmpty())
             && GameStore.findXbe(inPlace) != null) {
             f.hasData = true;
             f.dataKind = Library.KIND_IN_PLACE;
@@ -239,6 +265,8 @@ final class LibraryScreen {
             return R.string.STATE_NO_ACCESS;
         case SOURCE_GONE:
             return R.string.LIB_CHIP_SOURCE_GONE;
+        case NOT_PLAYABLE_YET:
+            return R.string.LIB_CHIP_NOT_PLAYABLE_YET;
         default:
             return R.string.STATE_MISSING;
         }
@@ -254,6 +282,7 @@ final class LibraryScreen {
         case IMPORTING:
             return Theme.ACCENT;
         case NOT_IMPORTED:
+        case NOT_PLAYABLE_YET:
             return Theme.TEXT_DIM;   // neutral: nothing is wrong (ACCENT is the « ready » green in stock)
         case PREPARE_FAILED:
         case PACK_INVALID:

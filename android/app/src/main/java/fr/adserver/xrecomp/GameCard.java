@@ -16,7 +16,8 @@ import android.view.View;
 /**
  * One game of the library grid (docs/android/app-shell.md « Game library »): its title image (TitleArt's cached PNG)
  * or a monogram on the title ID's hue, its title on one line, and under it its state (GameState) as a dot and a label
- * — only when it is not « Ready ». Focusable: it grows a little when focused, and the launcher's Glide draws a ring
+ * — only when it is not « Ready »; when the library holds games of several consoles, the console's short name as a
+ * badge in the art's top left corner (XBA-178). Focusable: it grows a little when focused, and the launcher's Glide draws a ring
  * around its art. Colours are read from Theme when drawn (the library is always in the stock colours).
  */
 final class GameCard extends View {
@@ -26,7 +27,7 @@ final class GameCard extends View {
     private Bitmap art;
     private String initials = "";
     private int monoColor = Theme.ACCENT_DEEP;
-    private String title = "", chip = "";
+    private String title = "", chip = "", badge = "";
     private int chipColor = Theme.TEXT_DIM;
     private boolean chipShown = true, dim;
     private float focusT;
@@ -35,7 +36,7 @@ final class GameCard extends View {
     private final Paint fillP = new Paint(Paint.ANTI_ALIAS_FLAG), lineP = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint bmpP = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
     private final TextPaint titleP = new TextPaint(Paint.ANTI_ALIAS_FLAG), chipP = new TextPaint(Paint.ANTI_ALIAS_FLAG),
-            monoP = new TextPaint(Paint.ANTI_ALIAS_FLAG);
+            monoP = new TextPaint(Paint.ANTI_ALIAS_FLAG), badgeP = new TextPaint(Paint.ANTI_ALIAS_FLAG);
     private final RectF artR = new RectF();
     private final Path clip = new Path();
 
@@ -50,6 +51,18 @@ final class GameCard extends View {
         chipP.setTextSize(Theme.T_SMALL);
         chipP.setTypeface(Theme.REGULAR);
         monoP.setTypeface(Theme.MEDIUM);
+        badgeP.setTextSize(Theme.T_SMALL);
+        badgeP.setTypeface(Theme.MEDIUM);
+    }
+
+    /** The console badge (« GBA »), "" or null for none. */
+    void setBadge(String b) {
+        badge = b == null ? "" : b;
+        invalidate();
+    }
+
+    String badgeForTest() {
+        return badge;
     }
 
     /** A game: its art (null: the monogram of title on the colour of key), its title and its state. */
@@ -165,6 +178,18 @@ final class GameCard extends View {
             fillP.setShader(null);
             fillP.setColor(dim ? 0x88000000 : Theme.alpha(Theme.ACCENT, 0.12f));
             c.drawRect(artR, fillP);
+        }
+        if (!badge.isEmpty()) {
+            // A dark pill with the console's name, in the art's top left corner (readable over any art).
+            Paint.FontMetrics bm = badgeP.getFontMetrics();
+            float bw = badgeP.measureText(badge) + 2 * Theme.S2, bh = bm.descent - bm.ascent + Theme.S1;
+            RectF b = new RectF(artR.left + Theme.S2, artR.top + Theme.S2, artR.left + Theme.S2 + bw,
+                                artR.top + Theme.S2 + bh);
+            fillP.setShader(null);
+            fillP.setColor(0xB0000000);
+            c.drawRoundRect(b, bh / 2, bh / 2, fillP);
+            badgeP.setColor(Theme.alpha(Theme.TEXT_BRIGHT, dim ? 0.6f : 0.94f));
+            c.drawText(badge, b.left + Theme.S2, b.centerY() - (bm.ascent + bm.descent) / 2, badgeP);
         }
         c.restore();
         lineP.setColor(Theme.alpha(Theme.TEXT, 0.10f));

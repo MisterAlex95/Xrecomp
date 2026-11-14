@@ -76,7 +76,98 @@ public class LibraryContextTest {
         Library.clearFolder(app);
         assertNull(Library.folderTree(app));
         assertNull(LibraryScanner.folderTree(app, true));
-        assertNull(LibraryScanner.scanLibrary(app, null, null, null));
+        assertNull(LibraryScanner.scanLibrary(app, (LibraryScanner.Tree)null, null, null));
+    }
+
+    /** XBA-178: the one folder of an older launcher (library_tree / library_path) becomes the first entry, once. */
+    @Test
+    public void singleFolderMigratesAsTheFirstEntry() {
+        GameStore.prefs(app).edit().putString(Library.PREF_TREE, "content://tree/primary%3Axbox")
+                .putString(Library.PREF_PATH, "/storage/emulated/0/xbox").commit();
+        java.util.List<Library.Folder> l = Library.folders(app);
+        assertEquals(1, l.size());
+        assertEquals("content://tree/primary%3Axbox", l.get(0).tree);
+        assertEquals("/storage/emulated/0/xbox", l.get(0).path);
+        assertEquals("xbox", l.get(0).name());
+        // Written once as library_folders; the old keys go.
+        assertNull(GameStore.prefs(app).getString(Library.PREF_TREE, null));
+        assertNull(GameStore.prefs(app).getString(Library.PREF_PATH, null));
+        assertEquals(Library.foldersJson(l), GameStore.prefs(app).getString(Library.PREF_FOLDERS, null));
+
+        // Then folders are added after it, and the first keeps its place.
+        assertTrue(Library.addFolder(app, "content://tree/primary%3Agba", null));
+        assertTrue(Library.addFolder(app, "content://tree/primary%3Aps1", "/storage/emulated/0/ps1"));
+        l = Library.folders(app);
+        assertEquals(3, l.size());
+        assertEquals("content://tree/primary%3Axbox", l.get(0).tree);
+        assertNull("through the Storage Access Framework", l.get(1).path);
+        assertEquals("gba", l.get(1).name());
+        assertEquals("content://tree/primary%3Axbox", Library.folderTree(app));
+        assertTrue(Library.anyFolderPath(app));
+
+        // The same folder again updates its entry in place (All files access granted since).
+        Library.addFolder(app, "content://tree/primary%3Agba", "/storage/emulated/0/gba");
+        l = Library.folders(app);
+        assertEquals(3, l.size());
+        assertEquals("/storage/emulated/0/gba", l.get(1).path);
+
+        assertTrue(Library.removeFolder(app, "content://tree/primary%3Axbox"));
+        l = Library.folders(app);
+        assertEquals(2, l.size());
+        assertEquals("content://tree/primary%3Agba", Library.folderTree(app));
+        assertEquals(2, LibraryScanner.folderRoots(app, true).size());
+        assertTrue(LibraryScanner.folderRoots(app, true).get(0).tree instanceof LibraryScanner.PathTree);
+        assertTrue(LibraryScanner.folderRoots(app, false).get(0).tree instanceof LibraryScanner.DocTree);
+        assertEquals("content://tree/primary%3Agba", LibraryScanner.folderRoots(app, true).get(0).folder);
+    }
+
+    /** No folder, a SAF folder only, an unreadable library_folders value. */
+    @Test
+    public void folderListEdges() {
+        assertTrue(Library.folders(app).isEmpty());
+        assertNull(GameStore.prefs(app).getString(Library.PREF_FOLDERS, null));   // nothing written for nothing
+        assertEquals(1, Library.folders(null, "content://tree/x", null).size());
+        assertNull(Library.folders(null, "content://tree/x", null).get(0).path);
+        assertTrue("library_folders wins over the old keys",
+                   Library.folders("[]", "content://tree/x", "/x").isEmpty());
+        assertEquals("unreadable: the old keys", 1, Library.folders("{bad", "content://tree/x", "/x").size());
+        assertEquals("entries without a tree are dropped", 1,
+                     Library.parseFolders("[{\"tree\":\"content://a\"},{\"path\":\"/b\"},3]").size());
+    }
+
+    /** Folders the app cannot read: a path without All files access, a tree without its persisted permission. */
+    @Test
+    public void unreadableFolders() {
+        Library.addFolder(app, "content://tree/a", "/storage/emulated/0/a");
+        Library.addFolder(app, "content://tree/b", null);
+        assertEquals(new java.util.HashSet<>(java.util.Arrays.asList("content://tree/b")),
+                     Library.unreadableFolders(app, true));
+        assertEquals(new java.util.HashSet<>(java.util.Arrays.asList("", "content://tree/a", "content://tree/b")),
+                     Library.unreadableFolders(app, false));
+    }
+
+    /** Several folders read as files: one index, each item stamped with its folder, a game per console. */
+    @Test
+    public void scanLibraryOverSeveralFolders() throws Exception {
+        File xbox = new File(app.getExternalFilesDir(null), "xbox"), gba = new File(app.getExternalFilesDir(null), "gba");
+        TestSupport.write(new File(xbox, "Halo/default.xbe"), TestSupport.xbe(0x4D530004, "Halo"));
+        TestSupport.write(new File(gba, "Sample.gba"), ConsoleTest.gba("AXVE"));
+        Library.addFolder(app, "content://tree/xbox", xbox.getAbsolutePath());
+        Library.addFolder(app, "content://tree/gba", gba.getAbsolutePath());
+        LibraryScanner.Result r = LibraryScanner.scanLibrary(app, LibraryScanner.folderRoots(app, true), null, null);
+        assertEquals(2, r.games());
+        LibraryIndex saved = LibraryIndex.read(Library.indexFile(app.getFilesDir()));
+        LibraryIndex.Item halo = saved.find(LibraryIndex.fileLoc(new File(xbox, "Halo")));
+        LibraryIndex.Item rom = saved.find(LibraryIndex.fileLoc(new File(gba, "Sample.gba")));
+        assertEquals("content://tree/xbox", halo.folder);
+        assertEquals(Console.XBOX, halo.console);
+        assertEquals("content://tree/gba", rom.folder);
+        assertEquals(Console.GBA, rom.console);
+        assertTrue(rom.tid.startsWith("gba-AXVE-"));
+        assertEquals("Sample", rom.title);
+        assertEquals(LibraryIndex.fileLoc(xbox), saved.root);
+        assertEquals("a rescan opens nothing", 2,
+                     LibraryScanner.scanLibrary(app, LibraryScanner.folderRoots(app, true), null, null).reused);
     }
 
     @Test

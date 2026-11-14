@@ -403,7 +403,8 @@ public class CheckActivity extends Activity {
         File f = getFilesDir();
         LibraryScreen.Env env = new LibraryScreen.Env();
         env.toolchain = Toolchain.available(this);
-        env.accessible = Library.folderPath(this) == null || Environment.isExternalStorageManager();
+        env.accessible = true;
+        env.noAccess = Library.unreadableFolders(this, Environment.isExternalStorageManager());
         env.queue = PrepareProtocol.readQueue(PrepareProtocol.queueFile(f));
         List<LibraryScreen.Entry> entries = LibraryScreen.entries(f, Library.read(Library.gamesFile(f)),
                                                                   LibraryIndex.read(Library.indexFile(f)), env);
