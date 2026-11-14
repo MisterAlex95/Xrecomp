@@ -12,6 +12,8 @@ project(console_gba_tests C)
 #   gba_hb_<prog>      our homebrew under gba_run --result, built-in BIOS (HLE)
 #   gba_hb_lle_<prog>  the same through the Cult-of-GBA BIOS (LLE)
 #   gba_jsmolka_<t>    jsmolka/gba-tests arm / thumb / memory / bios, and save/sram, flash64, flash128, none
+#   gba_rc_*           the same ROMs recompiled (gba_tools.recomp + cc, discovery loop), in lockstep with the
+#                      interpreter; gba_rc_fuzz: random ARM / Thumb programs, same comparison (needs python3, cc)
 # The ROM and BIOS tests skip (exit 77) when their inputs are absent, so a CI job without Docker or network stays
 # green. They come from (repo root):
 #   tools/consoles/build_homebrew.sh gba build/homebrew     -> GBA_HOMEBREW_DIR (default build/homebrew/gba)
@@ -92,4 +94,32 @@ if(TARGET gba_run)
             COMMAND sh ${GBA_RUN_ROM} $<TARGET_FILE:gba_run> ${GBA_TESTS_DIR}/${t}.gba --frames 300 --reg-result 12)
         set_tests_properties(gba_jsmolka_${t} PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 150)
     endforeach()
+
+    # Static recompilation (XBA-150 / 151 / 152): each ROM above lifted to C (gba_tools.recomp), built with the host
+    # cc, the discovery loop run to convergence, then played in lockstep with the interpreter (recomp_rom.sh).
+    # gba_rc_fuzz: random ARM / Thumb programs with timer IRQs, lifted and compared the same way (recomp_fuzz.py).
+    set(GBA_RC_ROM ${CMAKE_CURRENT_SOURCE_DIR}/recomp_rom.sh)
+    set(GBA_RC_WORK ${CMAKE_CURRENT_BINARY_DIR}/recomp)
+    foreach(prog hello cpu timer_irq iwram_copy gfx pad sound)
+        add_test(NAME gba_rc_hb_${prog}
+            COMMAND sh ${GBA_RC_ROM} $<TARGET_FILE:gba_run> ${GBA_HOMEBREW_DIR}/${prog}.gba ${GBA_RC_WORK}/hb_${prog}
+                    --result --frames 900)
+        add_test(NAME gba_rc_hb_lle_${prog}
+            COMMAND sh ${GBA_RC_ROM} $<TARGET_FILE:gba_run> ${GBA_HOMEBREW_DIR}/${prog}.gba
+                    ${GBA_RC_WORK}/hb_lle_${prog} --result --frames 900 --bios ${GBA_BIOS})
+        set_tests_properties(gba_rc_hb_${prog} gba_rc_hb_lle_${prog} PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 600)
+    endforeach()
+    foreach(t arm thumb memory bios sram flash64 flash128 none)
+        add_test(NAME gba_rc_jsmolka_${t}
+            COMMAND sh ${GBA_RC_ROM} $<TARGET_FILE:gba_run> ${GBA_TESTS_DIR}/${t}.gba ${GBA_RC_WORK}/jsmolka_${t}
+                    --frames 300 --reg-result 12)
+        set_tests_properties(gba_rc_jsmolka_${t} PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 600)
+    endforeach()
+    find_package(Python3 COMPONENTS Interpreter QUIET)
+    if(Python3_Interpreter_FOUND)
+        add_test(NAME gba_rc_fuzz
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/recomp_fuzz.py --gba-run $<TARGET_FILE:gba_run>
+                    --work ${GBA_RC_WORK}/fuzz --seeds 0-5 --frames 20)
+        set_tests_properties(gba_rc_fuzz PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900)
+    endif()
 endif()
