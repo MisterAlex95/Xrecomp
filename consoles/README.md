@@ -235,8 +235,10 @@ GPU's mode says), absolute deadlines nudged ±2 % by the audio queue. Memory car
 and `card2.mcr`, 128 KB raw images as other emulators write them (.mcr / .mcd), read before the first frame, written
 a second after the game's last write to the card (five at most after its first), at pause and at exit, only when
 changed. BIOS: `--bios`, `RECOMP_PS1_BIOS`, the app's asset `ps1-bios/openbios.bin`, else `build/ps1-bios/openbios.bin`
-from the working directory or an ancestor of the program. A pack's library is ignored until the PS1 recompiler lands
-(logged). The Android app calls it through `ps1_runtime_start` ([app-shell.md](../docs/android/app-shell.md)
+from the working directory or an ancestor of the program. A title pack (`--pack LIB`, XBA-168: `python3 -m
+tools.prepare game.cue` builds one, [prepare.md « PS1 packs »](../docs/android/prepare.md#ps1-packs-xba-168)) runs the
+lifted code when its `pack.json` and table say it is this disc's (the SHA-256 of its boot EXE) and the game plays
+interpreted otherwise; `--missed FILE` keeps what it did not cover for the next Prepare (`consoles/ps1/runtime/ps1_pack.h`). The Android app calls it through `ps1_runtime_start` ([app-shell.md](../docs/android/app-shell.md)
 « PlayStation games »); the APK carries OpenBIOS (the `ps1-bios` stage of `tools/docker/android.Dockerfile`, sha256
 checked; `LICENSES/MIT-OpenBIOS.txt`). On a desktop:
 

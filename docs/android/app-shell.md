@@ -1214,13 +1214,23 @@ Until the GBA lifter lands (`gba_tools.recomp`), step 3 ends with `LIFT_FAILED`:
 ### PlayStation games (XBA-168)
 
 The PS1 runtime (`consoles/ps1/runtime`, an interpreter: `ps1_core.h` on the host layer, consoles/README.md
-« Playing a PS1 game ») plays a disc as it is, the GBA's way: no Import, no pack. Its Prepare comes with the PS1
-recompiler; until then a PS1 card is **Ready** (no chip) while its disc is in a library folder, **Running** while it
-runs, **No file access** when its folder cannot be read, and never shows a Prepare state.
+« Playing a PS1 game ») plays a disc as it is, the GBA's way: no Import, no pack needed. With the on-device
+toolchain a Prepare translates it for the device (a title pack: [prepare.md « PS1 packs »](prepare.md#ps1-packs-xba-168))
+so that it runs natively; Play never waits for it. A PS1 card is **Ready** (no chip) while its disc is in a library
+folder, **Preparing** / **Queued** while its Prepare runs or waits, **Running** while it runs, **No file access** when
+its folder cannot be read.
 
-- **Home.** With the toolchain, A on the card opens the game's Home like a GBA game's (`Screen.ROM_HOME`): the title,
-  « Plays in the interpreter », **Play** alone (no Prepare yet) and a note on the BIOS and the memory cards. Without
-  the toolchain, A launches at once; Start on the card always does.
+- **Home (XBA-168, with the toolchain).** A on the card opens the game's Home, the GBA's (`Screen.ROM_HOME`): the
+  title, one line, **Play** first and the Prepare action beside it: « Not prepared · plays in the interpreter »
+  (Prepare), « Prepared · runs natively », « Prepared · N new addresses found · prepare again » (the runtime's
+  discovered records beyond the pack's `discovered`: overlays the pack did not have), the Prepare's progress,
+  « Queued », « Prepare failed · CODE ». Prepare starts `PrepareService` with the disc (the `.cue` or image path, or
+  its document URI) and the library key `ps1-<SERIAL>`; status, log, queue, notification and Preparing screen are the
+  Xbox ones. A document disc is not copied: the service copies the sectors that lead to the boot EXE into
+  `<files>/work/ps1-<KEY>/disc.iso` (`Ps1Disc`, a sparse image of a few hundred KB; a `.cue`'s data track found among
+  the track documents the library index lists, `PrepareService.cueParts`). A `.chd` has Play alone and a note: it
+  cannot be prepared (`LauncherActivity.romPrepares`; convert it to `.cue` / `.bin`). Without the toolchain, A
+  launches at once; Start on the card always does.
 - **Launch** (`LauncherActivity.launchRom`, as for the GBA): the disc becomes the launched game (`rom`, the library key
   `ps1-<SERIAL>` as `title_id`); the same disc running is brought back, another game ending first.
 - **The disc reaches the runtime** as `RECOMP_GAME_DIR`. A folder read as files: the `.cue`'s path (the runtime opens
@@ -1233,7 +1243,10 @@ runs, **No file access** when its folder cannot be read, and never shows a Prepa
   `shell: cue sheet content://… (N track file(s)) -> /data/user/0/…/cache/ps1/disc.cue`; a track missing or
   unreadable: `fd:-1` and back to the launcher. `shell_main.c` routes it like a GBA ROM (`xba_pack_rom_console`,
   `RECOMP_DISC_IMAGE=0`), `pack_loader.c` logs `PACK_NONE ps1 <SERIAL> (not prepared, the interpreter runs it)`
-  (`PACK_IGNORED` for a pack that would pass: no PS1 recompiled code yet) and calls `ps1_runtime_start`. `.chd` is not
+  and calls `ps1_runtime_start`; with a pack: `PACK_LOADED ps1 <SERIAL> (<N> functions)`, or `PACK_STALE ps1 <SERIAL>
+  (<why>), running interpreted` when it is not this disc's (the SHA-256 of its boot EXE), this shell's or does not
+  load (the game always starts). At exit (and Quit) the code the interpreter had to run goes to
+  `<files>/work/ps1-<KEY>/discovered.txt` for the next Prepare (address, hash and bytes: overlays get lifted). `.chd` is not
   identified yet (no title key: an « other file »).
 - **BIOS.** OpenBIOS (MIT, PCSX-Redux's nugget tree), inside the APK as `assets/ps1-bios/openbios.bin`: the `ps1-bios`
   stage of `tools/docker/android.Dockerfile` builds it from its pinned source, sha256 checked, and gradle takes it with
@@ -1265,6 +1278,39 @@ runs, **No file access** when its folder cannot be read, and never shows a Prepa
 
 On a desktop the same runtime plays a disc with `ps1_play` (consoles/README.md), where a game is checked first.
 
+### Device check (PS1 Prepare, XBA-168), for Alex
+
+An APK with the toolchain, our homebrew discs in `/sdcard/ps1` as above plus the overlay disc (`adb push
+out/hb/ps1/overlay.cue out/hb/ps1/overlay.bin /sdcard/ps1/`), `adb logcat -s xboxrecomp SDL` throughout.
+
+1. A on the **overlay** card. Expected: its Home, « Not prepared · plays in the interpreter », **Play** focused,
+   **Prepare** beside it, a note on what each does. Screenshot.
+2. Right, A on **Prepare**: the Preparing screen (« Install tools » the first time, then Identify, Analyse, Translate,
+   Compile, Pack) and the notification. Note the total time (the homebrew: about a minute after the tools are
+   installed). Expected: back on the Home, « overlay is prepared », « Prepared · runs natively ». `adb shell run-as
+   fr.adserver.xrecomp.shell ls -l files/packs/ps1-PSX-4009E1ED` shows `libtitle.so` and `pack.json`.
+3. Play: logcat `PACK_LOADED ps1 PSX-4009E1ED (69 functions)` (about that many); after the BIOS screen the program
+   runs as before (its result screen says PASS, as in the interpreter). Quit from the in-game menu after 30 s. logcat
+   `ps1: code at N address(es) the pack did not cover, M new record(s), in /data/user/0/…/files/work/ps1-PSX-4009E1ED/discovered.txt`
+   (the two overlays it loads from the disc; about 14 addresses, 21 records).
+4. A on the card: « Prepared · N new addresses found · prepare again », **Prepare again** beside Play. Screenshot.
+   Prepare again, then Play: `PACK_LOADED ps1 PSX-4009E1ED (86 functions)` (more than in step 3), PASS, and at Quit no
+   « did not cover » line (or no new record). The Home says « Prepared » again.
+5. gfx and hello: Prepare each, Play: the same pictures as interpreted (step 2 / 5 of « PS1 games »), `PACK_LOADED`;
+   note the frame rate at Quit next to the interpreted one.
+6. A stale pack: `adb shell run-as fr.adserver.xrecomp.shell sh -c 'echo x >> files/packs/ps1-PSX-4009E1ED/libtitle.so'`,
+   Play. Expected: the game still starts, logcat `PACK_STALE ps1 PSX-4009E1ED (…), running interpreted`; the Home
+   says « Not prepared »; Prepare repairs it.
+7. A library folder added with the file picker (no All files access), holding overlay.cue + overlay.bin: Prepare
+   works the same; `prepare.log` (Share log on the Preparing screen, or `run-as … cat files/work/ps1-PSX-4009E1ED/prepare.log`)
+   has `disc: content://…overlay.bin -> …/work/ps1-PSX-4009E1ED/disc.iso (boot \OVERLAY.EXE;1, 16384 bytes, … sectors
+   copied)`, and `run-as … du -k files/work/ps1-PSX-4009E1ED/disc.iso` is small (tens of KB).
+8. One of your own disc dumps (`.cue` + `.bin` tracks): Prepare (note the time and the pack size in `pack.json`),
+   Play (`PACK_LOADED`, picture, sound, speed vs. interpreted), quit after a few minutes of play, Prepare again when
+   the Home offers it, play again. Send the logcat and `prepare.log` if a step fails. A `.chd` of it: its Home has
+   Play alone and the note about `.chd`.
+9. Switch the Thor to French: the Home lines and notes in French.
+
 ### Device check (PS1 games, XBA-168), for Alex
 
 On the AYN Thor, `adb logcat -s xboxrecomp SDL` throughout. Our homebrew: `tools/consoles/build_homebrew.sh ps1
@@ -1275,7 +1321,7 @@ out/hb/ps1/gfx.cue out/hb/ps1/gfx.bin out/hb/ps1/hello.cue out/hb/ps1/hello.bin 
 1. Install the APK (CI's xrecomp-latest: it carries OpenBIOS). If `/sdcard/ps1` is not a library folder yet: Y ›
    Library folders › Add a folder › `ps1`. Expected: the cards « gfx » and « hello » with the **PS1** badge (when
    other consoles' games are listed too), **no** chip. About › Licences lists `MIT-OpenBIOS.txt`.
-2. A on **gfx** (with the toolchain: its Home, « Plays in the interpreter », Play alone, a note; screenshot; A on
+2. A on **gfx** (with the toolchain: its Home, « Not prepared · plays in the interpreter », Play and Prepare; screenshot; A on
    Play). Expected: about 6 s of the BIOS's black 640 x 480 screen (OpenBIOS boots the disc), then a dark grey 4:3
    picture: a red rectangle, a green triangle, a colour gradient square, a magenta / white checkerboard and a small
    textured square, black bars left and right. Screenshot. logcat: `launcher: library: play ps1-PSX-… from
