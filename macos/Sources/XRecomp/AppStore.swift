@@ -528,6 +528,10 @@ final class AppStore: LauncherActions {
     func createTitleApp(_ id: String, at dest: URL) {
         guard let g = model.game(id), let tid = g.titleId else { return }
         guard model.singleTitle == nil else { return }
+        // Only for a prepared game (as on Android): the app opens straight on it, so it must be playable at once.
+        guard g.playable else {
+            return model.notice = "Prepare \(g.name) first, then create its app."
+        }
         let source = Bundle.main.bundleURL
         guard source.pathExtension == "app" else {
             return model.notice = "Only XRecomp.app can make a game app: build it with macos/scripts/build-app.sh "

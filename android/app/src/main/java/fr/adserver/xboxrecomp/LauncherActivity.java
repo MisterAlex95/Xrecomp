@@ -2005,8 +2005,9 @@ public class LauncherActivity extends Activity {
         List<RecompConfig.Option> shown = RecompConfig.shownOptions(lsfgBuilt());
         lsfgOff = lsfgForcedOff();
         if (settingsTab == TAB_GENERAL) {
-            launcherToggle(list, R.string.OPEN_DIRECTLY, R.string.OPEN_DIRECTLY_DETAIL, GameStore::autoStart,
-                           GameStore::setAutoStart, R.string.OPEN_DIRECTLY_ON, R.string.OPEN_DIRECTLY_OFF);
+            if (TitleApp.ownTitleId(this) == null)   // a game's own app always goes straight into its game
+                launcherToggle(list, R.string.OPEN_DIRECTLY, R.string.OPEN_DIRECTLY_DETAIL, GameStore::autoStart,
+                               GameStore::setAutoStart, R.string.OPEN_DIRECTLY_ON, R.string.OPEN_DIRECTLY_OFF);
             launcherToggle(list, R.string.UI_SOUND, R.string.UI_SOUND_DETAIL, GameStore::uiSound,
                            GameStore::setUiSound, R.string.UI_SOUND_ON, R.string.UI_SOUND_OFF);
             launcherToggle(list, R.string.UI_HAPTICS, R.string.UI_HAPTICS_DETAIL, GameStore::uiHaptics,
