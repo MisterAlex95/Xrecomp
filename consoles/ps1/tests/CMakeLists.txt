@@ -3,7 +3,8 @@ project(console_ps1_tests C)
 # The PlayStation runtime's C tests (XBA-146): a self-contained project like those under tests/, run by
 # tools/run_c_tests.sh (as console_ps1) and by the root build's ctest when XBR_CONSOLE_PS1 is ON. POSIX hosts.
 #
-#   ps1_runtime        the runtime links and answers (needs xbr_host / SDL2; not built with PS1_CORE_ONLY=ON)
+#   ps1_runtime        the runtime: helpers, headless runs of gfx.exe / gfx.cue (needs xbr_host / SDL2; not built
+#                      with PS1_CORE_ONLY=ON)
 #   ps1_gpu            GPU feature tests (test_gpu.c); ps1_gpu_bench runs by hand
 #   ps1_cpu            core unit tests (test_cpu.c): delay slots, load delays, exceptions, COP0, IRQs, DMA, timers,
 #                      pads / memory cards
@@ -27,12 +28,6 @@ if(NOT TARGET ps1_gpu)
 endif()
 
 enable_testing()
-if(TARGET ps1_runtime)
-    add_executable(ps1_runtime_test test_main.c)
-    target_link_libraries(ps1_runtime_test PRIVATE ps1_runtime)
-    add_test(NAME ps1_runtime COMMAND ps1_runtime_test)
-    set_tests_properties(ps1_runtime PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60)
-endif()
 
 # The GPU (P-7, XBA-165): feature tests on synthetic GP0 / GP1 streams; ps1_gpu_bench, its micro benchmark, runs by
 # hand (ps1_gpu_bench [seconds]).
@@ -73,6 +68,14 @@ set(PS1_HOMEBREW_DIR ${PS1_REPO_ROOT}/build/homebrew/ps1 CACHE PATH "Built PS1 h
 set(PS1_BIOS ${PS1_REPO_ROOT}/build/ps1-bios/openbios.bin CACHE FILEPATH "OpenBIOS (build_ps1_bios.sh)")
 set(PS1_TESTS_DIR ${PS1_REPO_ROOT}/build/ps1-tests CACHE PATH "JaCzekanski/ps1-tests (fetch_ps1_tests.sh)")
 set(PS1_RT ${CMAKE_CURRENT_SOURCE_DIR}/../runtime)
+# The runtime (XBA-168): helpers always, headless runs of gfx.exe / gfx.cue when the BIOS and the homebrew are built.
+if(TARGET ps1_runtime)
+    add_executable(ps1_runtime_test test_main.c)
+    target_link_libraries(ps1_runtime_test PRIVATE ps1_runtime)
+    target_compile_options(ps1_runtime_test PRIVATE -Wall -Wextra)
+    add_test(NAME ps1_runtime COMMAND ps1_runtime_test ${PS1_BIOS} ${PS1_HOMEBREW_DIR})
+    set_tests_properties(ps1_runtime PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120)
+endif()
 set(PS1_HAVE_GPU OFF)
 set(PS1_HAVE_CD OFF)
 if(EXISTS ${PS1_RT}/ps1_gpu.c)

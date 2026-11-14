@@ -91,6 +91,7 @@ static uint64_t s_frames;
 static host_window_event_fn s_hook;
 static void *s_hook_user;
 static int s_scale = HOST_SCALE_ASPECT, s_filter = HOST_FILTER_LINEAR, s_tex_filter = -1;
+static int s_aspect_num, s_aspect_den; /* host_window_set_aspect; 0: the picture's own */
 static char s_capture[1024];
 
 static int env_set(const char *name)
@@ -363,15 +364,24 @@ static int draw(unsigned tex, int w, int h, int top_down)
     /* Letterbox: the largest rectangle of the picture's aspect, or of a
      * whole multiple of its size (HOST_SCALE_INTEGER, when 1x fits). */
     int k = dw / w < dh / h ? dw / w : dh / h;
+    /* The shape shown: the picture's own, or host_window_set_aspect's. */
+    int64_t aw = w, ah = h;
+    if (s_aspect_num > 0 && s_aspect_den > 0) {
+        aw = s_aspect_num;
+        ah = s_aspect_den;
+        k = dh / h;
+        if (k >= 1 && (int64_t)h * k * aw / ah > dw)
+            k = 0; /* that height is too wide for the window */
+    }
     if (s_scale == HOST_SCALE_INTEGER && k >= 1) {
-        vw = w * k;
         vh = h * k;
-    } else if ((int64_t)dw * h > (int64_t)dh * w) {
+        vw = s_aspect_num > 0 && s_aspect_den > 0 ? (int)((int64_t)vh * aw / ah) : w * k;
+    } else if ((int64_t)dw * ah > (int64_t)dh * aw) {
         vh = dh;
-        vw = (int)((int64_t)dh * w / h);
+        vw = (int)((int64_t)dh * aw / ah);
     } else {
         vw = dw;
-        vh = (int)((int64_t)dw * h / w);
+        vh = (int)((int64_t)dw * ah / aw);
     }
     s_gl.BindFramebuffer(XGL_FRAMEBUFFER, 0);
     s_gl.Disable(XGL_SCISSOR_TEST);
@@ -441,6 +451,12 @@ void host_window_set_scaling(int scale, int filter)
 {
     s_scale = scale == HOST_SCALE_INTEGER ? HOST_SCALE_INTEGER : HOST_SCALE_ASPECT;
     s_filter = filter == HOST_FILTER_NEAREST ? HOST_FILTER_NEAREST : HOST_FILTER_LINEAR;
+}
+
+void host_window_set_aspect(int num, int den)
+{
+    s_aspect_num = num > 0 && den > 0 ? num : 0;
+    s_aspect_den = num > 0 && den > 0 ? den : 0;
 }
 
 void host_window_capture(const char *ppm_path)

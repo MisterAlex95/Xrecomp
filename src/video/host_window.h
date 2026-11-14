@@ -77,6 +77,13 @@ enum { HOST_SCALE_ASPECT = 0, HOST_SCALE_INTEGER = 1 };
 enum { HOST_FILTER_LINEAR = 0, HOST_FILTER_NEAREST = 1 };
 void host_window_set_scaling(int scale, int filter);
 
+/* The shape the picture is shown at, num:den (4:3 for a PlayStation, whose
+ * frame buffer is 256..640 pixels wide whatever the screen), instead of its
+ * own w:h. HOST_SCALE_INTEGER then takes whole multiples of its height, the
+ * width following the shape. 0 / 0: the picture's own (the default). Kept
+ * across open / close. */
+void host_window_set_aspect(int num, int den);
+
 /* Writes the next presented picture, the whole drawable as drawn (letterbox
  * included), to ppm_path as a binary PPM, read back before the swap: a
  * screenshot through the real present path (headless checks under Xvfb).

@@ -41,7 +41,7 @@ interface target when there is no Vulkan bridge). The `*.cmake` files have inclu
 ### src/video
 | File | Class | Note |
 |---|---|---|
-| `host_window.[ch]` | G (new) | SDL window, GL ES 3.0 / 3.2 core context, RGBA or GL-texture present, letterboxed (aspect or integer scaling, linear or nearest: `host_window_set_scaling`), a capture of the drawable as presented (`host_window_capture`), events → lifecycle and pads |
+| `host_window.[ch]` | G (new) | SDL window, GL ES 3.0 / 3.2 core context, RGBA or GL-texture present, letterboxed (aspect or integer scaling, linear or nearest: `host_window_set_scaling`; a fixed display shape such as the PS1's 4:3: `host_window_set_aspect`), a capture of the drawable as presented (`host_window_capture`), events → lifecycle and pads |
 | `perf_overlay.[ch]` | G | SDL_Renderer overlay; moved from `xbox_video` to `xbr_host` |
 | `display_vsync_android.[ch]` | M → split | AChoreographer grid; now hands samples to a sink passed to `display_vsync_android_start`, and the Xbox presenter passes `nv2a_pb_exec_display_clock`. Moved to `xbr_host` |
 | `display_clock.h`, `frame_times.h` | G | header-only |

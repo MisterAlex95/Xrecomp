@@ -84,11 +84,25 @@ option(PS1_CORE_ONLY "Build only ps1_core, the PS1 devices and ps1_run, not ps1_
 if(NOT PS1_CORE_ONLY AND NOT TARGET xbr_host)
     add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../../src/host ${CMAKE_CURRENT_BINARY_DIR}/xbr_host)
 endif()
+# ps1_runtime: the core + the host layer (ps1_runtime_run plays a disc or an EXE: window, pads, audio, memory cards,
+# pacing; XBA-168).
 if(NOT PS1_CORE_ONLY AND NOT TARGET ps1_runtime)
     add_library(ps1_runtime STATIC ps1_runtime.c)
     target_include_directories(ps1_runtime PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
     target_link_libraries(ps1_runtime PUBLIC ps1_core xbr_host)
     target_compile_options(ps1_runtime PRIVATE -Wall -Wextra)
+    set_target_properties(ps1_runtime PROPERTIES POSITION_INDEPENDENT_CODE ON)
+endif()
+
+# ps1_play: plays a disc or an EXE on a desktop through ps1_runtime (XBA-168). The title key comes from the disc as
+# the app reads it (recomp_pack_rom_identify): src/platform/recomp_pack.c is compiled in (libc + recomp_cfg, which
+# xbr_host brings), so a project that adds this directory alone needs nothing more.
+if(NOT ANDROID AND TARGET ps1_runtime AND NOT TARGET ps1_play)
+    get_filename_component(PS1_PLATFORM_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../../src/platform ABSOLUTE)
+    add_executable(ps1_play tools/ps1_play.c ${PS1_PLATFORM_DIR}/recomp_pack.c)
+    target_include_directories(ps1_play PRIVATE ${PS1_PLATFORM_DIR})
+    target_link_libraries(ps1_play PRIVATE ps1_runtime ${CMAKE_DL_LIBS})
+    target_compile_options(ps1_play PRIVATE -Wall -Wextra)
 endif()
 
 # ps1_run: the headless runner (desktop hosts only).
