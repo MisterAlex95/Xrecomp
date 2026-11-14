@@ -32,7 +32,8 @@ progress lines: docs/android/prepare.md.
 A Game Boy Advance ROM (.gba) makes a GBA title pack, with --android for the
 app or for gba_play on this host (tools/prepare/gba.py); a PlayStation disc
 (.cue / .bin / .iso) or PS-X EXE a PS1 title pack, for the app or for
-ps1_play (tools/prepare/ps1.py).
+ps1_play (tools/prepare/ps1.py); a Nintendo 64 ROM (.z64 / .v64 / .n64) an
+N64 title pack, for the app or for n64_play / n64_run (tools/prepare/n64.py).
 """
 
 import argparse
@@ -556,14 +557,17 @@ def main(argv=None):
     mi.add_argument("--image-map", help=argparse.SUPPRESS)   # the map file every image's build bakes in
     mi.add_argument("--game-dir", help=argparse.SUPPRESS)    # D:\ for an image that is not the disc root's
     mi.add_argument("--image-name", help=argparse.SUPPRESS)  # that image's disc path (XeImageFileName)
-    gb = ap.add_argument_group("Game Boy Advance and PS1 title packs (docs/android/prepare.md « GBA packs », "
-                               "« PS1 packs »)")
+    gb = ap.add_argument_group("Game Boy Advance, PS1 and N64 title packs (docs/android/prepare.md « GBA packs », "
+                               "« PS1 packs », « N64 packs »)")
     gb.add_argument("--discovered", metavar="FILE",
-                    help="a GBA ROM or a PS1 disc: more code the runtime had to interpret, merged with "
+                    help="a GBA ROM, a PS1 disc or an N64 ROM: more code the runtime had to interpret, merged with "
                          "<work>/discovered.txt")
     a = ap.parse_args(argv)
     if a.no_title_layer:
         os.environ["XBA_NO_TITLE_LAYER"] = "1"
+    from tools.prepare import n64
+    if n64.is_n64(a.source):            # an N64 ROM (its first word, any byte order): the PS1's steps (XBA-174)
+        return n64.run(a, sys.modules[__name__], a.android)
     from tools.prepare import gba
     if gba.is_gba(a.source):            # a GBA ROM: its own steps, --android or a desktop pack (XBA-157 / 158)
         return gba.run(a, sys.modules[__name__], a.android)

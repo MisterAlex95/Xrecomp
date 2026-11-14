@@ -122,6 +122,10 @@ PACK_INPUTS = (
     # PS1 packs (XBA-168): the Prepare's PS1 path, the lifter (its disc reader too), the headers its C includes.
     "tools/prepare/ps1.py", "consoles/ps1/tools/ps1_tools/recomp.py", "consoles/ps1/tools/ps1_tools/exe.py",
     "consoles/ps1/runtime/ps1_recomp.h", "consoles/ps1/runtime/ps1_recomp_rt.h", "consoles/ps1/runtime/ps1_core.h",
+    # N64 packs (XBA-174): the Prepare's N64 path, the lifter, the headers its C includes.
+    "tools/prepare/n64.py", "consoles/n64/tools/n64_tools/recomp.py", "consoles/n64/tools/n64_tools/lift.py",
+    "consoles/n64/runtime/n64_recomp.h", "consoles/n64/runtime/n64_recomp_rt.h", "consoles/n64/runtime/n64_core.h",
+    "consoles/n64/runtime/n64_devices.h",
 )
 
 
@@ -133,6 +137,8 @@ def test_the_tree_covers_what_a_pack_is_made_of():
     assert "tools/recomp/test_seh_frames.py" not in sel and "src/kernel/xbox_seh.c" not in sel
     assert "consoles/gba/runtime/gba_cpu.c" not in sel                  # the core is the shell's (libmain.so)
     assert "consoles/ps1/runtime/ps1_cpu.c" not in sel
+    assert "consoles/n64/runtime/n64_cpu.c" not in sel
+    assert "consoles/n64/tools/n64_tools/test_recomp.py" not in sel
     assert not [p for p in sel if "/test_" in p]
 
 

@@ -281,6 +281,9 @@ def ps1_opt(opt):
     return gba.gba_opt(opt)
 
 
+lifted_opt, JOB_RSS, RESERVED = ps1_opt, PS1_JOB_RSS, PS1_RESERVED   # what Run reads (Run.cm)
+
+
 def lifted_cflags(opt):
     """The optimisation flags of lifted PS1 code (also tools/consoles/ps1_recomp_build.py's and the compile-time
     benchmark's): no SLP vectorizer, as for GBA code (nothing to vectorize; a costly pass on big functions)."""
@@ -305,6 +308,9 @@ def compile_flags(opt, root, gen, sysroot=None, include_dirs=()):
 # ── The run: the GBA's (gba.Run), with a disc in place of a ROM ──
 
 class Run(gba.Run):
+    # The console module the steps after identify take their lifter, flags, checks and pack.json from: this one, or
+    # tools/prepare/n64.py's (an N64 Run is this one with a cartridge in place of a disc).
+    cm = sys.modules[__name__]
 
     # ── 1 identify ──
 
@@ -373,7 +379,8 @@ class Run(gba.Run):
 
     def lift(self):
         gen = os.path.join(self.work, "gen")
-        module = os.environ.get(RECOMP_MODULE_ENV, DEFAULT_MODULE)
+        cm = self.cm
+        module = os.environ.get(cm.RECOMP_MODULE_ENV, cm.DEFAULT_MODULE)
         key = "%s|%s" % (self.disc_key, module)
         if self.stamp.get("lift") == key and os.path.isdir(gen) and any(f.endswith(".c") for f in os.listdir(gen)):
             self.rep.progress(3, 100, "lift up to date (%d C files)" % len([f for f in os.listdir(gen)
@@ -390,7 +397,7 @@ class Run(gba.Run):
         if self.seeds:
             args += ["--discovered", self.seeds]
         env = dict(os.environ)
-        paths = [p for p in (os.environ.get(TOOLS_DIR_ENV), tools_dir(self.m.ROOT), self.m.ROOT) if p]
+        paths = [p for p in (os.environ.get(cm.TOOLS_DIR_ENV), cm.tools_dir(self.m.ROOT), self.m.ROOT) if p]
         if env.get("PYTHONPATH"):
             paths.append(env["PYTHONPATH"])
         env["PYTHONPATH"] = os.pathsep.join(paths)
@@ -420,17 +427,18 @@ class Run(gba.Run):
 
     def compile(self):
         a = self.a
-        self.opt = opt = ps1_opt(a.opt)
+        cm = self.cm
+        self.opt = opt = cm.lifted_opt(a.opt)
         if self.android:
             self.tc = cc.Toolchain(a.cc, os.path.abspath(a.sysroot), cc_prefix=a.cc_prefix_arg, ld=a.ld,
                                    ld_prefix=a.ld_prefix_arg, builtins=a.builtins, procs=self.procs)
-            flags = compile_flags(opt, self.m.ROOT, self.gen, self.tc.sysroot, a.include_dir)
+            flags = cm.compile_flags(opt, self.m.ROOT, self.gen, self.tc.sysroot, a.include_dir)
         else:
             self.tc = gba.HostToolchain(a.cc or os.environ.get("CC") or "cc", self.procs)
-            flags = compile_flags(opt, self.m.ROOT, self.gen, None, a.include_dir)
+            flags = cm.compile_flags(opt, self.m.ROOT, self.gen, None, a.include_dir)
         sources = [os.path.join(self.gen, fn) for fn in sorted(os.listdir(self.gen)) if fn.endswith(".c")]
         sources += [os.path.abspath(s) for s in a.extra_src]
-        jobs = a.jobs or cc.default_jobs(cc.mem_available(), os.cpu_count(), PS1_JOB_RSS, PS1_RESERVED)
+        jobs = a.jobs or cc.default_jobs(cc.mem_available(), os.cpu_count(), cm.JOB_RSS, cm.RESERVED)
         self.jobs, self.sources = jobs, sources
         self.tools_peak_kb = metrics.children_peak_kb()
         device_log = getattr(a, "device_log", None)
@@ -446,7 +454,7 @@ class Run(gba.Run):
     # ── 5 pack ──
 
     def make_pack(self):
-        a = self.a
+        a, cm = self.a, self.cm
         abi = pack.ABI if self.android else gba.host_abi()
         os.makedirs(self.packs, exist_ok=True)
         self.rep.progress(5, 0, "linking libtitle.so")
@@ -460,7 +468,7 @@ class Run(gba.Run):
         key = h.hexdigest()
         pack.recover(self.packs, self.name)
         final = pack.final_dir(self.packs, self.name)
-        if self.stamp.get("link") == key and check(final, self.key, self.rom_sha, abi, a.shell_abi) is None:
+        if self.stamp.get("link") == key and cm.check(final, self.key, self.rom_sha, abi, a.shell_abi) is None:
             self.rep.progress(5, 100, "pack up to date")
         else:
             try:
@@ -470,7 +478,7 @@ class Run(gba.Run):
             lib = os.path.join(part, pack.LIB)
             self.link(lib)
             self.rep.progress(5, 70, "writing pack.json")
-            meta = make_meta(lib, self.key, self.title, self.rom_sha, self.boot, abi, a.shell_abi, self.toolkit,
+            meta = cm.make_meta(lib, self.key, self.title, self.rom_sha, self.boot, abi, a.shell_abi, self.toolkit,
                              self.toolkit_sha, "%s -O%s" % (self.tc.short_version(), self.opt), self.discovered)
             meta["prepare"] = metrics.summary(self.steps, self.compile_stats, self.sources, self.objects, self.jobs,
                                               self.opt, part, getattr(a, "device_log", None), self.tools_peak_kb)
