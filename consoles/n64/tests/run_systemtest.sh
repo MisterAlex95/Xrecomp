@@ -1,5 +1,6 @@
 #!/bin/sh
-# ctest helper (XBA-171): run_systemtest.sh N64_RUN ROM KNOWN HAVE_RCP. Runs lemmy-64/n64-systemtest under n64_run,
+# ctest helper (XBA-171): run_systemtest.sh N64_RUN ROM KNOWN HAVE_RCP [n64_run args...]. Runs lemmy-64/n64-systemtest
+# under n64_run (the extra arguments, e.g. --pack LIB: the recompiled run, recomp_systemtest.sh),
 # collects its failing tests from the IS-Viewer text ("Test 'NAME' ... failed") and passes when every failing test is
 # a known gap: a line of KNOWN (a test name prefix; # comments), or, while the RSP / RDP are the stubs (HAVE_RCP not
 # ON), a test of theirs (names starting "RSP ", "SP ", "RDP "). Prints the suite's summary and the counts. Exits 77
@@ -8,11 +9,12 @@ run=$1
 rom=$2
 known=$3
 rcp=$4
+shift 4
 if [ ! -f "$rom" ]; then
     echo "skipped: $rom not built (tools/consoles/build_n64_systemtest.sh)"
     exit 77
 fi
-out=$(timeout 240 "$run" "$rom" --tty --frames 1200 --quiet 2>&1)
+out=$(timeout 240 "$run" "$rom" --tty --frames 1200 --quiet "$@" 2>&1)
 summary=$(printf '%s\n' "$out" | grep -E "^Finished in|Failed [0-9]+ of" | head -n 3)
 if [ -z "$summary" ]; then
     printf '%s\n' "$out" | tail -n 30

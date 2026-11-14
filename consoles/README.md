@@ -357,6 +357,64 @@ vector funct, load, store, DMA, status and scalar op whose checksums must equal 
 homebrew ROM `homebrew/rsp`), `test_rsp_rdp.c` (microcode driving the real RDP over XBUS and from RDRAM);
 `n64_rsp_bench` (by hand): ~90-110 M RSP instructions/s on a vector-dense loop on the x86 dev host.
 
+**N64 static recompilation (N-1 XBA-169, N-2 XBA-170, N-3 XBA-171).** The PS1's model on the VR4300: an N64 game's
+code is lifted to C, compiled for the host into a title pack (`libtitle.so`), and runs natively on the same core; IPL3,
+the RSP, the RDP, VI / AI / PI / SI, the PIF and interrupts are the interpreter's code either way. Universal: the ROM
+alone, no symbol or ELF file (N64Recomp needs a decompilation's ELF), no per-title configuration; what the static
+pass misses runs in the interpreter, which records it, bytes included, for the next build (the discovery loop).
+Contract (`n64_recomp.h`, frozen between `n64_tools`, Prepare, the loader and the core; change together and bump
+`N64_RECOMP_ABI`):
+
+- `python3 -m n64_tools.recomp ROM OUTDIR [--discovered FILE]` (`consoles/n64/tools`, pure Python, our own MIPS III
+  decoder) writes `OUTDIR/n64_rc_NNN.c` + `n64_rc_table.c`; each compiles with `-I consoles/n64/runtime` alone. The
+  code comes from the boot (the classic boot megabyte at the header's address, or libdragon's ELF in the ROM read
+  from its program headers as its IPL3 does), PI DMA copies with constant arguments, and the recorded code; functions
+  from a recursive walk (calls, tail calls, jump tables, code pointers, the exception vectors) and a linear sweep of
+  the text. Design notes and measurements: [n64/tools/README.md](n64/tools/README.md).
+- The library exports `n64_recomp_title_table`: entries (32-bit virtual address, length, **content hash**, function),
+  the ROM's SHA-256 and boot PC. N64 code runs from RDRAM (IPL3's copy, PI DMA, overlays, TLB-mapped segments), so an
+  entry runs only while memory holds its words: the core keeps a write counter per 4 KB RDRAM page (CPU and lifted
+  stores, PI / SI / SP DMA), re-hashes an entry only when a page it covers changed, and picks, among entries sharing
+  an address, the one that matches. TLB-mapped entries stay within one 4 KB page: the PC is translated with the
+  current TLB / ASID / mode, the bytes are checked at the physical page, the answer is cached until a TLB write or an
+  EntryHi write. The lifted code's ABI is `n64_recomp_rt.h`: the first members of `n64_machine` (`n64_rc_head`: time,
+  stop, instruction count, RDRAM and its page counters, MI mode, then `n64_rc_cpu`: GPRs, HI / LO, PC / next PC /
+  delay slot, COP0, FPRs, FCSR; static asserts in `n64_recomp.c`) and the core functions `n64_rc_read` / `_write` /
+  `_read_partial` / `_write_masked` / `_cop1` / `_ctc1`, which the loading executable exports
+  (`n64_core_exported()`: n64_run; the app's libmain.so must link `n64_core` whole-archive the same way).
+- `n64_attach_recomp` / `n64_recomp_missed` / `n64_recomp_write_missed` (`n64_recomp.c`, called from `n64_cpu_run`):
+  RDRAM code in kernel mode, once the CPU reached the boot PC, runs lifted code when an entry matches, the interpreter
+  otherwise; the discovered file gets `ADDR HASH HEXBYTES` per miss (a 2 KB window, never past a mapped page). An
+  address seen with 8 contents is code generated at run time: left to the interpreter.
+
+Lifted code is tick-exact with the interpreter: the same fetch cost by segment, the same multiply / divide / FPU /
+uncached / bus costs at the same points, the instruction count (COP0 Random derives from it), the scheduler and
+interrupt test before every instruction, the stop and the interrupt line reloaded after every call into the core, so
+COUNT = COMPARE and RCP interrupts land in front of the same instruction; delay slots inline, branch-likely skipping
+its slot; COP0 (but CACHE), SYSCALL / BREAK, LL / SC, a branch in a delay slot and any instruction whose exception
+condition holds (overflow, trap, faulting access, COP1 unusable) handed to the interpreter with the state in front of
+it (exact EPC / BD / BadVAddr); COP1 arithmetic and CTC1 through `n64_fpu.c`, which raises FPE / unimplemented
+itself; calls and indirect jumps through the dispatcher (bounded C stack). `n64_run ROM --pack LIB --lockstep` checks
+it: an interpreter-only twin alongside, the whole state (GPRs, FPRs, COP0 with COUNT, the TLB, time, instruction
+count, scheduler, MI, RDRAM, RSP memory) and the picture compared after every frame. On a desktop:
+
+```sh
+tools/consoles/n64_recomp_build.py game.z64 build/rc/game --loop 4 --n64-run build/n64/n64_runtime/n64_run --frames 1800
+build/n64/n64_runtime/n64_run game.z64 --pack build/rc/game/libtitle.so --lockstep --stats --frames 600
+build/n64/n64_runtime/n64_run game.z64 --pack build/rc/game/libtitle.so --missed build/rc/game/discovered.txt
+```
+
+Tests (`consoles/n64/tests`, ctest `n64_rc_*`): every homebrew through the discovery loop then in lockstep, with
+the discovery measured against its ELF (`recomp_rom.sh`: at least 99 % of the function symbols found, never an
+input); n64-systemtest under `--pack` (the interpreter's pass / known-gap set) and in lockstep
+(`recomp_systemtest.sh`); `n64_rc_fuzz`: random MIPS III code (64-bit ops, branch-likely, unaligned accesses, COP1
+in both FR modes, overflows / traps / FPE exceptions) under a COUNT = COMPARE interrupt every 40-600 COUNT ticks
+(`recomp_fuzz.py`); pytest `consoles/n64/tools/n64_tools/test_recomp.py`. Measured on the x86 dev host (loaded,
+12 cores): the homebrew converge in 1-2 rounds, 98.7-99.9 % native instructions once IPL3 is past; recompiled vs
+interpreted 4200-4400 vs 180 frames/s on timer_irq / gfx (their idle loop after the verdict), 1000-1080 vs 190 on rsp
+(RSP-bound); lifted C costs 1.3-2.8 s of compiler per 1000 instructions at -O1 (homebrew: 28 k instructions, ~8 s
+with 8 jobs; n64-systemtest: 407 k instructions, ~150-190 s with 6 jobs).
+
 **Legal**: no ROM, disc image, BIOS or game data in this repository, its CI or its artifacts. Tests use homebrew we
 build ourselves (devkitARM / libtonc, PSn00bSDK, libdragon) and dumps Alex made from his own media, kept outside every
 repository.

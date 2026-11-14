@@ -14,6 +14,8 @@ project(console_n64_tests C)
 #                     FlashRAM, AI, VI
 #   n64_hb_<prog>     our homebrew ROMs under n64_run --result (HLE PIF, libdragon IPL3 run as on the hardware);
 #                     rsp needs the real RSP (n64_rsp.c), gfx the real RSP and RDP (n64_rsp.c, n64_rdp.c)
+#   n64_rc_*          the same ROMs recompiled (n64_tools.recomp + cc, discovery loop) in lockstep with the
+#                     interpreter; n64_rc_systemtest the suite under --pack; n64_rc_fuzz random MIPS III code
 #   n64_systemtest    lemmy-64/n64-systemtest (MIT) built from source: every CPU / COP0 / TLB / COP1 / memory test
 #                     must pass but the known gaps listed in systemtest_known.txt (RSP / RDP tests only count with
 #                     the real modules)
@@ -110,4 +112,28 @@ if(TARGET n64_run)
     add_test(NAME n64_systemtest COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/run_systemtest.sh $<TARGET_FILE:n64_run>
              ${N64_SYSTEMTEST} ${CMAKE_CURRENT_SOURCE_DIR}/systemtest_known.txt ${N64_HAVE_RCP})
     set_tests_properties(n64_systemtest PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
+
+    # Static recompilation (N-1 XBA-169, N-2 XBA-170, N-3 XBA-171): each homebrew ROM lifted to C from the ROM alone
+    # (n64_tools.recomp; its ELF only measures the discovery: >= 99 % of the function symbols found), built with the
+    # discovery loop and run in lockstep with the interpreter (recomp_rom.sh: the whole state compared after every
+    # frame); n64-systemtest under --pack (the interpreter's pass / known-gap set) and in lockstep
+    # (recomp_systemtest.sh); n64_rc_fuzz: random MIPS III code under COUNT = COMPARE interrupts (recomp_fuzz.py).
+    find_package(Python3 COMPONENTS Interpreter)
+    if(Python3_FOUND)
+        set(N64_RC_WORK ${CMAKE_CURRENT_BINARY_DIR}/recomp)
+        foreach(prog ${hb})
+            add_test(NAME n64_rc_hb_${prog} COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/recomp_rom.sh $<TARGET_FILE:n64_run>
+                     ${N64_HOMEBREW_DIR}/${prog}.z64 ${N64_RC_WORK}/hb_${prog} 900 --result)
+            set_tests_properties(n64_rc_hb_${prog} PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 1800
+                                 ENVIRONMENT "PYTHON=${Python3_EXECUTABLE}")
+        endforeach()
+        add_test(NAME n64_rc_systemtest COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/recomp_systemtest.sh
+                 $<TARGET_FILE:n64_run> ${N64_SYSTEMTEST} ${CMAKE_CURRENT_SOURCE_DIR}/systemtest_known.txt
+                 ${N64_HAVE_RCP} ${N64_RC_WORK}/systemtest)
+        set_tests_properties(n64_rc_systemtest PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 3600
+                             ENVIRONMENT "PYTHON=${Python3_EXECUTABLE}")
+        add_test(NAME n64_rc_fuzz COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/recomp_fuzz.py
+                 --n64-run $<TARGET_FILE:n64_run> --work ${N64_RC_WORK}/fuzz --seeds 0-7 --frames 15 --insns 1500)
+        set_tests_properties(n64_rc_fuzz PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 1800)
+    endif()
 endif()
