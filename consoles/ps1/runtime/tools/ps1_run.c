@@ -18,10 +18,22 @@
  * --until-tty T stop once the console text contains T (exit 0), exit 2 if it never does
  * --pad MASK    buttons held on pad 1 for the whole run (PS1_PAD_* bits, 1 = pressed)
  * --hash        print a hash of the RAM and VRAM (FNV-1a 64) and the cycle count
+ * --pack LIB    attach a recompiled title pack (ps1_recomp.h: a shared library exporting ps1_recomp_title_table)
+ * --lockstep    with --pack: an interpreter-only twin runs alongside, the whole state (CPU, cycles, scheduler, RAM,
+ *               scratchpad, GTE, VRAM) compared after every frame; prints "LOCKSTEP OK" or the first difference
+ *               (exit 4)
+ * --lockstep-cycles N  (debugging) compare every N cycles instead of every frame (1: about every instruction),
+ *               and print both PCs at the first difference
+ * --missed FILE append the code the interpreter had to run (address, hash, bytes: the discovered file of
+ *               ps1_recomp.h) to FILE at exit
+ * --stats       print the recompiler's counters (native share needs a pack built with -DPS1_RC_COUNT)
  * Prints the frame rate reached on stderr (unless --quiet). Exit 3 on a usage or file error. */
 #define _POSIX_C_SOURCE 199309L /* clock_gettime */
 #include "ps1_core.h"
 #include "ps1_devices.h"
+#include "ps1_recomp.h"
+
+#include <dlfcn.h>
 
 #include <stdbool.h>
 #include <stdio.h>
@@ -134,14 +146,17 @@ static double now_s(void)
 static int usage(void)
 {
     fprintf(stderr, "usage: ps1_run [--bios PATH] [--exe X.exe | --disc X.cue] [--frames N] [--result] [--ppm OUT]\n"
-                    "               [--wav OUT] [--tty] [--until-tty TEXT] [--pad MASK] [--hash] [--quiet]\n");
+                    "               [--wav OUT] [--tty] [--until-tty TEXT] [--pad MASK] [--hash] [--quiet]\n"
+                    "               [--pack LIB.so [--lockstep]] [--missed FILE] [--stats]\n");
     return 3;
 }
 
 int main(int argc, char **argv)
 {
     const char *bios_path = getenv("RECOMP_PS1_BIOS"), *exe_path = NULL, *disc_path = NULL;
-    const char *ppm = NULL, *wav = NULL, *until = NULL;
+    const char *ppm = NULL, *wav = NULL, *until = NULL, *pack = NULL, *missed = NULL;
+    bool lockstep = false, stats = false;
+    long lock_cycles = 0;
     long frames = 600;
     bool result = false, quiet = false, hash = false;
     tty_state tty = {0};
@@ -174,6 +189,16 @@ int main(int argc, char **argv)
             pad = (uint16_t)strtoul(argv[++i], NULL, 0);
         else if (!strcmp(a, "--hash"))
             hash = true;
+        else if (!strcmp(a, "--pack") && more)
+            pack = argv[++i];
+        else if (!strcmp(a, "--lockstep"))
+            lockstep = true;
+        else if (!strcmp(a, "--lockstep-cycles") && more)
+            lockstep = true, lock_cycles = strtol(argv[++i], NULL, 0);
+        else if (!strcmp(a, "--missed") && more)
+            missed = argv[++i];
+        else if (!strcmp(a, "--stats"))
+            stats = true;
         else if (!strcmp(a, "--quiet"))
             quiet = true;
         else if (a[0] != '-') {
@@ -201,12 +226,31 @@ int main(int argc, char **argv)
     }
     char err[256] = "";
     ps1_machine *m = ps1_create(bios, bios_size, disc_path, exe, exe_size, err, sizeof err);
+    ps1_machine *twin = NULL;
+    if (m && pack && lockstep)
+        twin = ps1_create(bios, bios_size, disc_path, exe, exe_size, err, sizeof err);
     free(bios);
     free(exe);
-    if (!m) {
+    if (!m || (pack && lockstep && !twin)) {
         fprintf(stderr, "ps1_run: %s\n", err);
         return 3;
     }
+    void *lib = NULL;
+    if (pack) {
+        lib = dlopen(pack, RTLD_NOW | RTLD_LOCAL);
+        ps1_recomp_title_table_fn get = lib ? (ps1_recomp_title_table_fn)dlsym(lib, PS1_RECOMP_ENTRY_SYMBOL) : NULL;
+        if (!get || ps1_attach_recomp(m, get()) != 0) {
+            fprintf(stderr, "ps1_run: cannot load the pack %s: %s\n", pack, lib ? "bad table" : dlerror());
+            return 3;
+        }
+        if (!quiet)
+            fprintf(stderr, "ps1_run: pack %s, %u functions\n", pack, get()->count);
+    } else if (missed) {
+        fprintf(stderr, "ps1_run: --missed needs --pack (lift the EXE first: ps1_tools.recomp)\n");
+        return 3;
+    }
+    if (twin)
+        ps1_set_pad(twin, 0, PS1_PAD_DIGITAL, pad, 0x80, 0x80, 0x80, 0x80);
     ps1_set_tty(m, on_tty, &tty);
     ps1_set_pad(m, 0, PS1_PAD_DIGITAL, pad, 0x80, 0x80, 0x80, 0x80);
 
@@ -233,8 +277,39 @@ int main(int argc, char **argv)
     int rc = result || until ? 2 : 0;
     double t0 = now_s();
     long f;
+    long diverged = -1;
+    char why[256] = "";
     for (f = 0; f < frames; f++) {
+        if (twin && lock_cycles > 0) {
+            uint64_t end = ps1_cycles(m) + 33868800 / 60;
+            while (ps1_cycles(m) < end) {
+                uint32_t pa = ps1_pc(twin), pb = ps1_pc(m);
+                ps1_run_cycles(m, (uint64_t)lock_cycles);
+                while (ps1_cycles(twin) < ps1_cycles(m))
+                    ps1_run_cycles(twin, ps1_cycles(m) - ps1_cycles(twin));
+                if (ps1_recomp_compare(twin, m, why, sizeof why) != 0) {
+                    printf("LOCKSTEP DIFF at cycle %llu: %s; before: interpreter pc 0x%08X, recompiled pc 0x%08X; "
+                           "after: 0x%08X, 0x%08X\n", (unsigned long long)ps1_cycles(m), why, pa, pb, ps1_pc(twin),
+                           ps1_pc(m));
+                    break;
+                }
+            }
+            if (why[0]) {
+                diverged = f;
+                f++;
+                break;
+            }
+            continue;
+        }
         ps1_run_frame(m);
+        if (twin) {
+            ps1_run_frame(twin);
+            if (ps1_recomp_compare(twin, m, why, sizeof why) != 0) {
+                diverged = f;
+                f++;
+                break;
+            }
+        }
         if (wf) {
             int16_t buf[2048 * 2];
             size_t n;
@@ -259,6 +334,32 @@ int main(int argc, char **argv)
         }
     }
     double dt = now_s() - t0;
+    if (twin) {
+        if (diverged >= 0) {
+            printf("LOCKSTEP DIFF at frame %ld: %s (interpreter vs recompiled)\n", diverged, why);
+            rc = 4;
+        } else {
+            printf("LOCKSTEP OK: %ld frames identical to the interpreter\n", f);
+        }
+    }
+    if (stats && pack) {
+        ps1_recomp_stats st;
+        ps1_recomp_get_stats(m, &st);
+        double total = (double)st.native + (double)st.interp_ram;
+        printf("recomp: %.2f%% native (%llu native, %llu interpreted RAM instructions, %llu handed over), %llu calls, "
+               "%llu slow lookups, %llu rehashes, %llu stale, %llu interrupts\n",
+               total > 0 ? 100.0 * (double)st.native / total : 0.0, (unsigned long long)st.native,
+               (unsigned long long)st.interp_ram, (unsigned long long)st.fallbacks, (unsigned long long)st.calls,
+               (unsigned long long)st.slow_lookups, (unsigned long long)st.rehashes, (unsigned long long)st.stale,
+               (unsigned long long)st.interrupts);
+    }
+    if (missed) {
+        int n = ps1_recomp_write_missed(m, missed);
+        if (n < 0)
+            fprintf(stderr, "ps1_run: cannot write %s\n", missed);
+        else if (stats || !quiet)
+            printf("missed: %d new record(s) -> %s\n", n, missed);
+    }
 
     if (result) {
         uint32_t magic = ps1_peek32(m, RESULT_ADDR), st = ps1_peek32(m, RESULT_ADDR + 4);
@@ -299,5 +400,9 @@ int main(int argc, char **argv)
         fprintf(stderr, "ps1_run: %ld frames in %.2f s (%.1f fps, %.1f MHz emulated)\n", f, dt, dt > 0 ? f / dt : 0.0,
                 dt > 0 ? (double)ps1_cycles(m) / dt / 1e6 : 0.0);
     ps1_destroy(m);
+    if (twin)
+        ps1_destroy(twin);
+    if (lib)
+        dlclose(lib);
     return rc;
 }

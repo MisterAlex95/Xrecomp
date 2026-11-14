@@ -261,7 +261,7 @@ static void take_interrupt(ps1_machine *m)
 #define IMM_S ((uint32_t)(int32_t)(int16_t)ins)
 #define IMM_U (ins & 0xFFFFu)
 
-static void step(ps1_machine *m)
+static inline void step(ps1_machine *m)
 {
     uint32_t pc = m->pc, ins;
     m->cur_pc = pc;
@@ -661,8 +661,21 @@ static void step(ps1_machine *m)
     m->r[0] = 0;
 }
 
+void ps1_cpu_step(ps1_machine *m) { step(m); }
+void ps1_cpu_take_interrupt(ps1_machine *m) { take_interrupt(m); }
+
+void ps1_cpu_hook_check(ps1_machine *m)
+{
+    if (m->pc == m->hook_at)
+        hook(m);
+}
+
 void ps1_cpu_run(ps1_machine *m)
 {
+    if (m->rc) {
+        ps1_recomp_run(m); /* a recompiled title pack is attached (ps1_recomp.c): same loop, lifted code too */
+        return;
+    }
     while (m->cycles < m->next_event) {
         if (m->irq_pending) {
             take_interrupt(m);

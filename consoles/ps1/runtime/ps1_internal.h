@@ -12,6 +12,13 @@
 
 #define PS1_SCRATCH_SIZE 0x400u
 
+/* RAM write tracking for the static recompiler (ps1_recomp.c): one counter per 1 KB page of the 2 MB, bumped by
+ * every write into it (CPU stores, lifted stores, DMA, EXE load), so lifted code is re-checked against its hash only
+ * when a page it covers changed. */
+#define PS1_RAM_PAGE_SHIFT 10
+#define PS1_RAM_PAGES (PS1_RAM_SIZE >> PS1_RAM_PAGE_SHIFT)
+#define PS1_RAM_TOUCH(m, phys) ((m)->ram_gen[((phys) & (PS1_RAM_SIZE - 1)) >> PS1_RAM_PAGE_SHIFT]++)
+
 /* COP0 registers. */
 enum {
     C0_BPC = 3,
@@ -156,10 +163,17 @@ struct ps1_machine {
     uint32_t cop0[32];
     uint64_t cycles;
     uint64_t next_event;
+    /* Static recompilation (ps1_recomp.h): the fields above and these five are ps1_rc_head (ps1_recomp_rt.h), the
+     * lifted code's view of the machine; ps1_recomp.c checks every offset. */
+    uint8_t *ram;           /* PS1_RAM_SIZE */
+    uint8_t *rc_scratch;    /* = scratch */
+    uint32_t *ram_gen;      /* PS1_RAM_PAGES write counters: bumped by every store / DMA into the page */
+    uint64_t rc_native;     /* instructions run by lifted code (packs built with -DPS1_RC_COUNT) */
+    uint8_t rc_exit;        /* PS1_RC_EXIT_*: why lifted code returned */
+    struct ps1_rc_state *rc; /* attached table, dispatch cache, missed record (NULL: none) */
 
     ps1_gte gte;
 
-    uint8_t *ram;           /* PS1_RAM_SIZE */
     uint8_t *bios;          /* PS1_BIOS_SIZE */
     uint8_t scratch[PS1_SCRATCH_SIZE];
 
@@ -248,5 +262,17 @@ void ps1_card_format(uint8_t *data);
 
 /* ps1_core.c: the shell entry hook (fast boot). */
 void ps1_boot_exe(ps1_machine *m);
+
+/* ps1_bus.c: the exception a load (store = 0) or store (store = 1) at addr would raise, 0 if none (no side effect). */
+int ps1_bus_fault(ps1_machine *m, uint32_t addr, int store);
+
+/* ps1_cpu.c: one interpreter step (the instruction at pc; no IRQ / hook check), the interpreter-only run loop. */
+void ps1_cpu_step(ps1_machine *m);
+void ps1_cpu_hook_check(ps1_machine *m);   /* the run loop's BIOS / fast-boot hook test before an instruction */
+void ps1_cpu_take_interrupt(ps1_machine *m);
+
+/* ps1_recomp.c */
+void ps1_recomp_run(ps1_machine *m);        /* the run loop with a table attached (ps1_cpu_run calls it) */
+void ps1_recomp_free(ps1_machine *m);
 
 #endif

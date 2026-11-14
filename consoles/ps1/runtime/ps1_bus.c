@@ -121,6 +121,8 @@ static int write_any(ps1_machine *m, uint32_t addr, uint32_t v, int width)
     default:
         return EXC_DBE;
     }
+    if (r == REG_RAM)
+        PS1_RAM_TOUCH(m, p);
     if (width == 4) {
         wr32le(dst, v);
     } else if (width == 2) {
@@ -130,6 +132,17 @@ static int write_any(ps1_machine *m, uint32_t addr, uint32_t v, int width)
         dst[0] = (uint8_t)v;
     }
     return 0;
+}
+
+int ps1_bus_fault(ps1_machine *m, uint32_t addr, int store)
+{
+    uint32_t p = 0;
+    if (store && (m->cop0[C0_SR] & SR_ISC))
+        return 0;
+    int r = decode(m, addr, &p);
+    if (r == -1)
+        return store ? EXC_ADES : EXC_ADEL;
+    return r == REG_NONE ? EXC_DBE : 0;
 }
 
 int ps1_read32(ps1_machine *m, uint32_t addr, uint32_t *v) { return read_any(m, addr, v, 4); }
@@ -174,6 +187,9 @@ uint32_t ps1_peek32(ps1_machine *m, uint32_t addr)
 void ps1_poke32(ps1_machine *m, uint32_t addr, uint32_t v)
 {
     uint8_t *p = (uint8_t *)peek_ptr(m, addr & ~3u);
-    if (p && p != m->bios + ((addr & ~3u) & 0x7FFFFu))
+    if (p && p != m->bios + ((addr & ~3u) & 0x7FFFFu)) {
         wr32le(p, v);
+        if (p >= m->ram && p < m->ram + PS1_RAM_SIZE)
+            PS1_RAM_TOUCH(m, (uint32_t)(p - m->ram));
+    }
 }

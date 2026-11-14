@@ -320,6 +320,7 @@ static void dma_from_device(ps1_machine *m, int ch, uint32_t addr, uint32_t n, i
         }
         for (uint32_t i = 0; i < k; i++) {
             wr32le(m->ram + (addr & 0x1FFFFCu), buf[i]);
+            PS1_RAM_TOUCH(m, addr);
             addr += (uint32_t)step;
         }
         n -= k;
@@ -362,6 +363,7 @@ static void dma_run(ps1_machine *m, int ch)
         for (uint32_t i = 0; i < n; i++) {
             uint32_t v = i == n - 1 ? 0x00FFFFFFu : ((addr - 4) & 0x1FFFFCu);
             wr32le(m->ram + (addr & 0x1FFFFCu), v);
+            PS1_RAM_TOUCH(m, addr);
             addr -= 4;
         }
         words = n;

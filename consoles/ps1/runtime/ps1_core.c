@@ -48,6 +48,8 @@ void ps1_boot_exe(ps1_machine *m)
         m->ram[(t_addr + i) & (PS1_RAM_SIZE - 1)] = e[0x800 + i];
     for (uint32_t i = 0; i < b_size && i < PS1_RAM_SIZE; i++)
         m->ram[(b_addr + i) & (PS1_RAM_SIZE - 1)] = 0;
+    for (uint32_t i = 0; i < PS1_RAM_PAGES; i++)
+        m->ram_gen[i]++; /* new code and data everywhere, as far as lifted code is concerned */
     m->r[28] = gp0;
     if (s_addr) {
         m->r[29] = s_addr + s_size;
@@ -80,11 +82,13 @@ ps1_machine *ps1_create(const uint8_t *bios, size_t bios_size, const char *disc_
     }
     m->ram = calloc(1, PS1_RAM_SIZE);
     m->bios = malloc(PS1_BIOS_SIZE);
+    m->ram_gen = calloc(PS1_RAM_PAGES, sizeof *m->ram_gen);
+    m->rc_scratch = m->scratch;
     if (exe) {
         m->exe = malloc(exe_size);
         m->exe_size = exe_size;
     }
-    if (!m->ram || !m->bios || (exe && !m->exe)) {
+    if (!m->ram || !m->ram_gen || !m->bios || (exe && !m->exe)) {
         set_err(err, errlen, "out of memory");
         ps1_destroy(m);
         return NULL;
@@ -146,7 +150,9 @@ void ps1_destroy(ps1_machine *m)
         ps1_mdec_destroy(m->mdec);
     if (m->disc)
         ps1_disc_close(m->disc);
+    ps1_recomp_free(m);
     free(m->ram);
+    free(m->ram_gen);
     free(m->bios);
     free(m->exe);
     free(m);

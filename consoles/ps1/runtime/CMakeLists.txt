@@ -64,7 +64,7 @@ endif()
 # ps1_core: the emulated machine (CPU, GTE, bus, DMA, timers, SIO0, scheduler) over the device libraries above. Plain
 # C11 + libm, no host dependency, so the tests and ps1_run build anywhere (no SDL).
 if(NOT TARGET ps1_core)
-    add_library(ps1_core STATIC ps1_core.c ps1_cpu.c ps1_gte.c ps1_bus.c ps1_io.c ps1_sio.c)
+    add_library(ps1_core STATIC ps1_core.c ps1_cpu.c ps1_gte.c ps1_bus.c ps1_io.c ps1_sio.c ps1_recomp.c)
     target_include_directories(ps1_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
     target_link_libraries(ps1_core PUBLIC ps1_gpu ps1_cd ps1_spu ps1_mdec)
     find_library(PS1_LIBM m)
@@ -105,9 +105,22 @@ if(NOT ANDROID AND TARGET ps1_runtime AND NOT TARGET ps1_play)
     target_compile_options(ps1_play PRIVATE -Wall -Wextra)
 endif()
 
-# ps1_run: the headless runner (desktop hosts only).
+# ps1_core_exported(target): the executable exports the core's symbols, which a recompiled title pack (ps1_recomp.h,
+# ps1_recomp_rt.h: ps1_rc_*) binds to when it is dlopen'ed. The whole archive is linked so every symbol is there.
+function(ps1_core_exported tgt)
+    set_target_properties(${tgt} PROPERTIES ENABLE_EXPORTS ON)
+    if(APPLE)
+        target_link_options(${tgt} PRIVATE "LINKER:-force_load,$<TARGET_FILE:ps1_core>")
+    else()
+        target_link_libraries(${tgt} PRIVATE -Wl,--whole-archive ps1_core -Wl,--no-whole-archive)
+    endif()
+    target_link_libraries(${tgt} PRIVATE ${CMAKE_DL_LIBS})
+endfunction()
+
+# ps1_run: the headless runner (desktop hosts only); --pack loads a recompiled title (static recompilation, XBA-160..162).
 if(NOT ANDROID AND NOT TARGET ps1_run)
     add_executable(ps1_run tools/ps1_run.c)
+    ps1_core_exported(ps1_run) # first, so the whole archive comes before the plain one
     target_link_libraries(ps1_run PRIVATE ps1_core)
     target_compile_options(ps1_run PRIVATE -Wall -Wextra)
 endif()
