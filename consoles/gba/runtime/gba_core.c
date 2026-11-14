@@ -23,7 +23,7 @@ gba_machine *gba_create(const uint8_t *rom, size_t rom_size, const uint8_t *bios
     }
     memcpy(m->rom, rom, rom_size);
     m->rom_size = (uint32_t)rom_size;
-    memset(m->sram, 0xFF, sizeof m->sram); /* erased battery RAM reads 0xFF */
+    gba_save_init(m); /* save kind from the ROM, erased chip (0xFF) */
 
     if (bios) {
         memcpy(m->bios, bios, bios_size);
@@ -67,10 +67,3 @@ uint32_t gba_reg(gba_machine *m, int r)
 uint32_t gba_cpsr(gba_machine *m) { return gba_get_cpsr(m); }
 uint64_t gba_cycles(gba_machine *m) { return m->now; }
 uint64_t gba_frames(gba_machine *m) { return m->frames; }
-
-uint8_t *gba_sram(gba_machine *m, size_t *size)
-{
-    if (size)
-        *size = GBA_SRAM_SIZE;
-    return m->sram;
-}

@@ -303,7 +303,7 @@ static inline bool cond_ok(const gba_machine *m, uint32_t cond)
 /* Misaligned word load: the word at the aligned address, rotated right by 8 x the low two bits. */
 static inline uint32_t load32_rot(gba_machine *m, uint32_t addr, bool seq)
 {
-    return ror32(gba_read32(m, addr & ~3u, seq), (addr & 3) * 8);
+    return ror32(gba_read32(m, addr, seq), (addr & 3) * 8);
 }
 
 /* ---- ARM ------------------------------------------------------------------------------------------------ */
@@ -450,7 +450,7 @@ static void arm_swap(gba_machine *m, uint32_t op)
         gba_write8(m, addr, (uint8_t)src, false);
     } else {
         tmp = load32_rot(m, addr, false);
-        gba_write32(m, addr & ~3u, src, false);
+        gba_write32(m, addr, src, false);
     }
     m->now += 1;
     if (rd == 15)
@@ -472,7 +472,7 @@ static void arm_halfword(gba_machine *m, uint32_t op)
         uint32_t v;
         switch (sh) {
         case 1: /* LDRH: a misaligned halfword comes back rotated */
-            v = ror32(gba_read16(m, addr & ~1u, false), (addr & 1) * 8);
+            v = ror32(gba_read16(m, addr, false), (addr & 1) * 8);
             break;
         case 2: /* LDRSB */
             v = (uint32_t)(int32_t)(int8_t)gba_read8(m, addr, false);
@@ -493,7 +493,7 @@ static void arm_halfword(gba_machine *m, uint32_t op)
             R[rd] = v;
     } else {
         if (sh == 1)
-            gba_write16(m, addr & ~1u, (uint16_t)(R[rd] + (rd == 15 ? 4 : 0)), false);
+            gba_write16(m, addr, (uint16_t)(R[rd] + (rd == 15 ? 4 : 0)), false);
         /* sh 2 / 3 stores are LDRD / STRD on ARMv5: no-ops on the ARM7TDMI */
         if (!p || w)
             R[rn] = moved;
@@ -529,7 +529,7 @@ static void arm_single_transfer(gba_machine *m, uint32_t op)
         if (b)
             gba_write8(m, addr, (uint8_t)v, false);
         else
-            gba_write32(m, addr & ~3u, v, false);
+            gba_write32(m, addr, v, false);
         if (!p || w)
             R[rn] = moved;
     }
@@ -861,12 +861,12 @@ static void thumb_execute(gba_machine *m, uint32_t op, uint32_t pc)
     case 0x0A: case 0x0B: {
         uint32_t rd = op & 7, addr = R[(op >> 3) & 7] + R[(op >> 6) & 7];
         switch ((op >> 9) & 7) {
-        case 0: gba_write32(m, addr & ~3u, R[rd], false); break;                          /* STR */
-        case 1: gba_write16(m, addr & ~1u, (uint16_t)R[rd], false); break;               /* STRH */
+        case 0: gba_write32(m, addr, R[rd], false); break;                          /* STR */
+        case 1: gba_write16(m, addr, (uint16_t)R[rd], false); break;               /* STRH */
         case 2: gba_write8(m, addr, (uint8_t)R[rd], false); break;                       /* STRB */
         case 3: R[rd] = (uint32_t)(int32_t)(int8_t)gba_read8(m, addr, false); m->now += 1; break; /* LDRSB */
         case 4: R[rd] = load32_rot(m, addr, false); m->now += 1; break;                  /* LDR */
-        case 5: R[rd] = ror32(gba_read16(m, addr & ~1u, false), (addr & 1) * 8); m->now += 1; break; /* LDRH */
+        case 5: R[rd] = ror32(gba_read16(m, addr, false), (addr & 1) * 8); m->now += 1; break; /* LDRH */
         case 6: R[rd] = gba_read8(m, addr, false); m->now += 1; break;                   /* LDRB */
         default:                                                                        /* LDRSH */
             if (addr & 1)
@@ -888,17 +888,17 @@ static void thumb_execute(gba_machine *m, uint32_t op, uint32_t pc)
         } else if (byte) {
             gba_write8(m, addr, (uint8_t)R[rd], false);
         } else {
-            gba_write32(m, addr & ~3u, R[rd], false);
+            gba_write32(m, addr, R[rd], false);
         }
         break;
     }
     case 0x10: case 0x11: { /* LDRH / STRH #imm5 * 2 */
         uint32_t rd = op & 7, addr = R[(op >> 3) & 7] + ((op >> 6) & 31) * 2;
         if (op & 0x800) {
-            R[rd] = ror32(gba_read16(m, addr & ~1u, false), (addr & 1) * 8);
+            R[rd] = ror32(gba_read16(m, addr, false), (addr & 1) * 8);
             m->now += 1;
         } else {
-            gba_write16(m, addr & ~1u, (uint16_t)R[rd], false);
+            gba_write16(m, addr, (uint16_t)R[rd], false);
         }
         break;
     }
@@ -908,7 +908,7 @@ static void thumb_execute(gba_machine *m, uint32_t op, uint32_t pc)
             R[rd] = load32_rot(m, addr, false);
             m->now += 1;
         } else {
-            gba_write32(m, addr & ~3u, R[rd], false);
+            gba_write32(m, addr, R[rd], false);
         }
         break;
     }

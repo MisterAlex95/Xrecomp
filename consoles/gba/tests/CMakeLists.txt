@@ -6,9 +6,11 @@ project(console_gba_tests C)
 #   gba_runtime        the runtime links and answers (needs xbr_host / SDL2; not built with GBA_CORE_ONLY=ON)
 #   gba_cpu            unit tests of the core (test_cpu.c)
 #   gba_ppu            PPU feature tests (test_ppu.c); gba_ppu_bench, its micro benchmark, runs by hand
+#   gba_apu            APU unit tests (test_apu.c, XBA-155)
+#   gba_save           save memory unit tests (test_save.c, XBA-156)
 #   gba_hb_<prog>      our homebrew under gba_run --result, built-in BIOS (HLE)
 #   gba_hb_lle_<prog>  the same through the Cult-of-GBA BIOS (LLE)
-#   gba_jsmolka_<t>    jsmolka/gba-tests arm / thumb / memory / bios
+#   gba_jsmolka_<t>    jsmolka/gba-tests arm / thumb / memory / bios, and save/sram, flash64, flash128, none
 # The ROM and BIOS tests skip (exit 77) when their inputs are absent, so a CI job without Docker or network stays
 # green. They come from (repo root):
 #   tools/consoles/build_homebrew.sh gba build/homebrew     -> GBA_HOMEBREW_DIR (default build/homebrew/gba)
@@ -43,6 +45,13 @@ target_link_libraries(gba_ppu_test PRIVATE gba_core)
 target_compile_options(gba_ppu_test PRIVATE -Wall -Wextra)
 add_test(NAME gba_ppu COMMAND gba_ppu_test)
 set_tests_properties(gba_ppu PROPERTIES TIMEOUT 60)
+foreach(t apu save)
+    add_executable(gba_${t}_test test_${t}.c)
+    target_link_libraries(gba_${t}_test PRIVATE gba_core)
+    target_compile_options(gba_${t}_test PRIVATE -Wall -Wextra)
+    add_test(NAME gba_${t} COMMAND gba_${t}_test)
+    set_tests_properties(gba_${t} PROPERTIES TIMEOUT 60)
+endforeach()
 add_executable(gba_ppu_bench bench_ppu.c)
 target_link_libraries(gba_ppu_bench PRIVATE gba_core)
 target_compile_options(gba_ppu_bench PRIVATE -Wall -Wextra)
@@ -54,7 +63,7 @@ set(GBA_BIOS ${GBA_REPO_ROOT}/build/gba-bios/cult-of-gba-bios.bin CACHE FILEPATH
 set(GBA_RUN_ROM ${CMAKE_CURRENT_SOURCE_DIR}/run_rom.sh)
 
 if(TARGET gba_run)
-    foreach(prog hello cpu timer_irq iwram_copy gfx pad)
+    foreach(prog hello cpu timer_irq iwram_copy gfx pad sound)
         add_test(NAME gba_hb_${prog}
             COMMAND sh ${GBA_RUN_ROM} $<TARGET_FILE:gba_run> ${GBA_HOMEBREW_DIR}/${prog}.gba --result --frames 900)
         add_test(NAME gba_hb_lle_${prog}
@@ -64,9 +73,9 @@ if(TARGET gba_run)
     endforeach()
     # bios.gba checks the opcodes the Nintendo BIOS leaves in its read latch: it passes with our built-in BIOS
     # (laid out to match) and not with Cult-of-GBA's, so it only runs HLE.
-    foreach(t arm thumb memory bios)
+    foreach(t arm thumb memory bios sram flash64 flash128 none)
         add_test(NAME gba_jsmolka_${t}
-            COMMAND sh ${GBA_RUN_ROM} $<TARGET_FILE:gba_run> ${GBA_TESTS_DIR}/${t}.gba --frames 60 --reg-result 12)
+            COMMAND sh ${GBA_RUN_ROM} $<TARGET_FILE:gba_run> ${GBA_TESTS_DIR}/${t}.gba --frames 300 --reg-result 12)
         set_tests_properties(gba_jsmolka_${t} PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 150)
     endforeach()
 endif()

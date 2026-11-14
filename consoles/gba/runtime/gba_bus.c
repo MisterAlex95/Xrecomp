@@ -1,7 +1,8 @@
 /* GBA memory map (XBA-153): BIOS, EWRAM, IWRAM, IO, palette, VRAM, OAM, cartridge ROM and SRAM, with their
  * mirrors, bus widths and wait states (GBATEK « GBA Memory Map », « GBA System Control »).
  *
- * Accesses take an aligned address (the CPU aligns and rotates). Each one adds its cycles to m->now from the
+ * Accesses may get an unaligned address: the bus aligns it, except for the save chip (8-bit bus, gba_save.c); the
+ * CPU rotates misaligned loads. The EEPROM answers in the 0x0D000000 area (gba_save.c). Each access adds its cycles to m->now from the
  * wait-state tables, which follow WAITCNT. Not modelled: the PPU's VRAM / palette / OAM contention, the exact
  * cartridge prefetch buffer (approximated: with prefetch on, sequential ROM opcode fetches cost 1 cycle per
  * halfword). */
@@ -105,8 +106,8 @@ static uint32_t read32_raw(gba_machine *m, uint32_t addr)
     case 0x8: case 0x9: case 0xA: case 0xB: case 0xC: case 0xD:
         return rom_read32(m, addr);
     case 0xE:
-    case 0xF:
-        return m->sram[addr & (GBA_SRAM_SIZE - 1)] * 0x01010101u;
+    case 0xF: /* save chip, 8-bit bus: the addressed byte, repeated */
+        return gba_save_read8(m, addr) * 0x01010101u;
     default:
         return m->open_bus;
     }
@@ -135,11 +136,15 @@ static uint16_t read16_raw(gba_machine *m, uint32_t addr)
         return rd16(&m->vram[vram_offset(addr)]);
     case 0x7:
         return rd16(&m->oam[addr & (GBA_OAM_SIZE - 1)]);
-    case 0x8: case 0x9: case 0xA: case 0xB: case 0xC: case 0xD:
+    case 0xD:
+        if (gba_eeprom_area(m, addr))
+            return gba_eeprom_read(m);
+        return rom_read16(m, addr);
+    case 0x8: case 0x9: case 0xA: case 0xB: case 0xC:
         return rom_read16(m, addr);
     case 0xE:
     case 0xF:
-        return (uint16_t)(m->sram[addr & (GBA_SRAM_SIZE - 1)] * 0x0101u);
+        return (uint16_t)(gba_save_read8(m, addr) * 0x0101u);
     default:
         return (uint16_t)(m->open_bus >> ((addr & 2) * 8));
     }
@@ -154,21 +159,32 @@ static uint8_t read8_raw(gba_machine *m, uint32_t addr)
         return m->iwram[addr & (GBA_IWRAM_SIZE - 1)];
     case 0xE:
     case 0xF:
-        return m->sram[addr & (GBA_SRAM_SIZE - 1)];
+        return gba_save_read8(m, addr);
     default:
         return (uint8_t)(read16_raw(m, addr & ~1u) >> ((addr & 1) * 8));
     }
 }
 
+/* The CPU passes single-transfer addresses unaligned: the save chip's 8-bit bus sees every address line, the
+ * other regions ignore the low bits. */
+static inline bool save_region(uint32_t addr)
+{
+    return (addr >> 25) == 7; /* 0x0E000000-0x0FFFFFFF */
+}
+
 uint32_t gba_read32(gba_machine *m, uint32_t addr, bool seq)
 {
     m->now += m->wait32[(addr >> 24) & 15][seq];
+    if (!save_region(addr))
+        addr &= ~3u;
     return read32_raw(m, addr);
 }
 
 uint16_t gba_read16(gba_machine *m, uint32_t addr, bool seq)
 {
     m->now += m->wait16[(addr >> 24) & 15][seq];
+    if (!save_region(addr))
+        addr &= ~1u;
     return read16_raw(m, addr);
 }
 
@@ -236,6 +252,11 @@ static bool bitmap_mode(const gba_machine *m)
 void gba_write32(gba_machine *m, uint32_t addr, uint32_t v, bool seq)
 {
     m->now += m->wait32[(addr >> 24) & 15][seq];
+    if (save_region(addr)) { /* 8-bit bus: the byte of the value the address selects */
+        gba_save_write8(m, addr, (uint8_t)(v >> ((addr & 3) * 8)));
+        return;
+    }
+    addr &= ~3u;
     switch (addr >> 24) {
     case 0x2:
         wr32(&m->ewram[addr & (GBA_EWRAM_SIZE - 1)], v);
@@ -258,10 +279,6 @@ void gba_write32(gba_machine *m, uint32_t addr, uint32_t v, bool seq)
     case 0x7:
         wr32(&m->oam[addr & (GBA_OAM_SIZE - 1)], v);
         break;
-    case 0xE:
-    case 0xF:
-        m->sram[addr & (GBA_SRAM_SIZE - 1)] = (uint8_t)(v >> ((addr & 3) * 8));
-        break;
     default:
         break; /* BIOS, ROM, unmapped: ignored */
     }
@@ -270,6 +287,11 @@ void gba_write32(gba_machine *m, uint32_t addr, uint32_t v, bool seq)
 void gba_write16(gba_machine *m, uint32_t addr, uint16_t v, bool seq)
 {
     m->now += m->wait16[(addr >> 24) & 15][seq];
+    if (save_region(addr)) {
+        gba_save_write8(m, addr, (uint8_t)(v >> ((addr & 1) * 8)));
+        return;
+    }
+    addr &= ~1u;
     switch (addr >> 24) {
     case 0x2:
         wr16(&m->ewram[addr & (GBA_EWRAM_SIZE - 1)], v);
@@ -290,9 +312,9 @@ void gba_write16(gba_machine *m, uint32_t addr, uint16_t v, bool seq)
     case 0x7:
         wr16(&m->oam[addr & (GBA_OAM_SIZE - 1)], v);
         break;
-    case 0xE:
-    case 0xF:
-        m->sram[addr & (GBA_SRAM_SIZE - 1)] = (uint8_t)(v >> ((addr & 1) * 8));
+    case 0xD:
+        if (gba_eeprom_area(m, addr))
+            gba_eeprom_write(m, v);
         break;
     default:
         break;
@@ -324,7 +346,7 @@ void gba_write8(gba_machine *m, uint32_t addr, uint8_t v, bool seq)
     }
     case 0xE:
     case 0xF:
-        m->sram[addr & (GBA_SRAM_SIZE - 1)] = v;
+        gba_save_write8(m, addr, v);
         break;
     default:
         break; /* OAM ignores 8-bit writes; BIOS, ROM, unmapped too */
@@ -354,7 +376,9 @@ static const uint8_t *peek_ptr(gba_machine *m, uint32_t addr)
         return (addr & 0x1FFFFFF) < m->rom_size ? &m->rom[addr & 0x1FFFFFF] : NULL;
     case 0xE:
     case 0xF:
-        return &m->sram[addr & (GBA_SRAM_SIZE - 1)];
+        if (m->save.kind == GBA_SAVE_FLASH64 || m->save.kind == GBA_SAVE_FLASH128)
+            return &m->save.data[m->save.flash_bank + (addr & 0xFFFF)];
+        return &m->save.data[addr & 0x7FFF];
     default:
         return NULL;
     }

@@ -3,8 +3,9 @@
  *
  * m->io keeps the 0x400-byte register image as the CPU wrote it (the PPU reads it directly); registers with
  * hardware state (timer counters, IF, KEYINPUT, DISPSTAT flags, VCOUNT) are kept in sync or computed on read.
- * Sound: no audio output yet. The sound registers are stored, and the FIFO DMAs (DMA1/2 special timing) are
- * driven by timer overflows so games that stream audio keep running. */
+ * Sound: registers 0x60-0xA7 belong to the APU (gba_audio.c); timer 0 / 1 overflows pop the Direct Sound FIFOs
+ * and DMA1 / DMA2 in special timing refill them. DMA3 transfers to the EEPROM tell the save code the address
+ * width (gba_save.c). */
 #include "gba_internal.h"
 
 static const int timer_shift[4] = {0, 6, 8, 10};
@@ -88,6 +89,8 @@ static void dma_run(gba_machine *m, int i)
 
     if (src >= 0x08000000 && src < 0x0E000000)
         src_inc = step; /* the cartridge bus only counts up */
+    if (i == 3 && gba_eeprom_area(m, dst))
+        gba_eeprom_dma_hint(m, count);
 
     bool seq = false;
     for (uint32_t n = 0; n < count; n++) {
@@ -151,12 +154,11 @@ static void dma_trigger(gba_machine *m, int timing)
     }
 }
 
-/* Sound FIFO `f` (0 = A, 1 = B) consumed a sample: refill it through the DMA channel pointed at it. */
-static void fifo_tick(gba_machine *m, int f)
+/* Sound FIFO `f` (0 = A, 1 = B) plays its next sample; at 16 bytes or less, the DMA channel pointed at it refills
+ * it (4 words). */
+static void fifo_tick(gba_machine *m, int f, uint64_t when)
 {
-    if (m->fifo_count[f] > 0)
-        m->fifo_count[f]--;
-    if (m->fifo_count[f] > 16)
+    if (gba_apu_fifo_tick(m, f, when) > 16)
         return;
     uint32_t fifo_addr = 0x040000A0u + 4u * (uint32_t)f;
     for (int i = 1; i <= 2; i++) {
@@ -205,10 +207,10 @@ static void timer_overflow(gba_machine *m, int i, uint64_t when)
         gba_raise_irq(m, (uint16_t)(IRQ_TIMER0 << i));
     if (i < 2) {
         uint16_t sh = rd16(&m->io[0x82]); /* SOUNDCNT_H: FIFO A / B timer select */
-        if ((sh & 0x300) && ((sh >> 10) & 1) == i)
-            fifo_tick(m, 0);
-        if ((sh & 0x3000) && ((sh >> 14) & 1) == i)
-            fifo_tick(m, 1);
+        if (((sh >> 10) & 1) == i)
+            fifo_tick(m, 0, when);
+        if (((sh >> 14) & 1) == i)
+            fifo_tick(m, 1, when);
     }
     if (i < 3) {
         gba_timer *n = &m->timer[i + 1];
@@ -342,6 +344,7 @@ void gba_run_frame(gba_machine *m, uint16_t *framebuffer)
         gba_cpu_run(m);
         run_events(m);
     }
+    gba_apu_sync(m, m->now); /* the frame's audio is in the output ring */
     m->fb = NULL;
 }
 
@@ -360,6 +363,8 @@ uint16_t gba_io_read16(gba_machine *m, uint32_t addr)
     default:
         break;
     }
+    if (a >= 0x60 && a < 0xA0)
+        return (uint16_t)(gba_apu_read8(m, a) | gba_apu_read8(m, a + 1) << 8);
     if ((a >= 0x10 && a < 0x48) || a == 0x4C || (a >= 0x54 && a < 0x60) || (a >= 0xA0 && a < 0xBA) ||
         (a >= 0xBC && a < 0xC6) || (a >= 0xC8 && a < 0xD2) || (a >= 0xD4 && a < 0xDE) || (a >= 0xE0 && a < 0x100) ||
         (a >= 0x110 && a < 0x120) || (a >= 0x20C && a < 0x300) || a >= 0x304)
@@ -370,6 +375,11 @@ uint16_t gba_io_read16(gba_machine *m, uint32_t addr)
 void gba_io_write16(gba_machine *m, uint32_t addr, uint16_t v)
 {
     uint32_t a = addr & 0x3FE;
+    if (a >= 0x60 && a < 0xA8) { /* sound: byte by byte, low byte first (a FIFO gets them in that order) */
+        gba_apu_write8(m, a, (uint8_t)v);
+        gba_apu_write8(m, a + 1, (uint8_t)(v >> 8));
+        return;
+    }
     switch (a) {
     case 0x004: /* DISPSTAT: flags are read-only */
         wr16(&m->io[4], (uint16_t)((rd16(&m->io[4]) & 7) | (v & 0xFF38)));
@@ -383,13 +393,6 @@ void gba_io_write16(gba_machine *m, uint32_t addr, uint16_t v)
         wr16(&m->io[a], v);
         latch_affine(m); /* writing a reference point reloads the internal one */
         return;
-    case 0x0A0: case 0x0A2: case 0x0A4: case 0x0A6: {
-        int f = a >= 0xA4;
-        if (m->fifo_count[f] < 32)
-            m->fifo_count[f] += 2;
-        wr16(&m->io[a], v);
-        return;
-    }
     case 0x0BA: case 0x0C6: case 0x0D2: case 0x0DE:
         wr16(&m->io[a], v);
         dma_write_ctl(m, (int)(a - 0xBA) / 12, v);
@@ -436,6 +439,10 @@ void gba_io_write16(gba_machine *m, uint32_t addr, uint16_t v)
 void gba_io_write8(gba_machine *m, uint32_t addr, uint8_t v)
 {
     uint32_t a = addr & 0x3FF;
+    if (a >= 0x60 && a < 0xA8) {
+        gba_apu_write8(m, a, v);
+        return;
+    }
     switch (a) {
     case 0x202:
     case 0x203:
@@ -450,14 +457,6 @@ void gba_io_write8(gba_machine *m, uint32_t addr, uint8_t v)
         else if (!(m->ie & m->if_ & 0x3FFF))
             m->cpu.halted = true;
         return;
-    case 0x0A0: case 0x0A1: case 0x0A2: case 0x0A3:
-    case 0x0A4: case 0x0A5: case 0x0A6: case 0x0A7: {
-        int f = a >= 0xA4;
-        if (m->fifo_count[f] < 32)
-            m->fifo_count[f]++;
-        m->io[a] = v;
-        return;
-    }
     default: {
         uint16_t cur = rd16(&m->io[a & ~1u]);
         if (a & 1)
@@ -482,7 +481,7 @@ void gba_io_reset(gba_machine *m)
     m->ie = m->if_ = m->ime = 0;
     m->irq_line = false;
     m->keycnt = 0;
-    m->fifo_count[0] = m->fifo_count[1] = 0;
+    gba_apu_reset(m);
     gba_set_keys(m, 0);
     wr16(&m->io[0x20], 0x100); /* BG2PA, BG2PD, BG3PA, BG3PD: identity */
     wr16(&m->io[0x26], 0x100);

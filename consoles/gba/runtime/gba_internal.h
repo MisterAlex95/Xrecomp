@@ -17,7 +17,8 @@
 #define GBA_VRAM_SIZE 0x18000u
 #define GBA_OAM_SIZE 0x400u
 #define GBA_ROM_MAX 0x2000000u
-#define GBA_SRAM_SIZE 0x10000u
+#define GBA_SAVE_MAX 0x20000u      /* largest save chip: 128 KB flash */
+#define GBA_AUDIO_RING 8192u       /* output ring, stereo frames (> 8 video frames at 48 kHz); power of two */
 
 /* CPU modes (CPSR bits 0-4). */
 enum {
@@ -72,6 +73,85 @@ typedef struct gba_timer {
     int shift;              /* prescaler: 0, 6, 8, 10 */
 } gba_timer;
 
+/* ---- APU (gba_audio.c) ---- */
+
+/* Square channels 1 and 2 (channel 2 has no sweep). */
+typedef struct gba_psg_square {
+    bool on;
+    int vol, env_period, env_timer;
+    bool env_up;
+    int length;             /* counts down to 0 at 256 Hz while len_en */
+    bool len_en;
+    int duty, pos;          /* duty pattern 0-3, step 0-7 */
+    uint16_t freq;          /* 11-bit rate */
+    int32_t timer, period;  /* CPU cycles to the next duty step / between steps */
+    int sw_period, sw_shift, sw_timer;
+    bool sw_down, sw_en;
+    uint16_t shadow;
+} gba_psg_square;
+
+typedef struct gba_psg_wave {
+    bool on;
+    int length;
+    bool len_en;
+    int pos;                /* sample 0-31 (one bank) or 0-63 (two banks) */
+    uint16_t freq;
+    int32_t timer, period;
+    int vol_mul;            /* volume in quarters: 0, 1, 2, 3 (forced 75 %) or 4 */
+} gba_psg_wave;
+
+typedef struct gba_psg_noise {
+    bool on;
+    int vol, env_period, env_timer;
+    bool env_up;
+    int length;
+    bool len_en;
+    uint16_t lfsr;
+    bool out;               /* last bit shifted out: high or low */
+    int32_t timer, period;  /* period 0: the clock is stopped (shift 14 / 15) */
+} gba_psg_noise;
+
+#define GBA_APU_WINDOW 128   /* cycles per mixing window: 131072 Hz */
+
+typedef struct gba_apu {
+    uint64_t time;          /* cycle the APU has run up to */
+    int win_pos;            /* cycles into the current mixing window (0..GBA_APU_WINDOW-1) */
+    int32_t acc[6];         /* the window's integrals: square 1, square 2, wave, noise, FIFO A, FIFO B */
+    int fs_windows;         /* windows until the next frame sequencer step (512 Hz) */
+    int fs_step;            /* 0-7 */
+    gba_psg_square sq[2];
+    gba_psg_wave wave;
+    gba_psg_noise noise;
+    uint8_t wave_ram[2][16];
+    int8_t fifo[2][32];
+    int fifo_r[2], fifo_n[2];
+    int8_t ds_sample[2];    /* sample each Direct Sound channel is playing */
+    /* Low-pass (Q8), resampler (window rate -> GBA_AUDIO_RATE, area average) and the output ring. */
+    int32_t lpf_l, lpf_r;
+    uint32_t out_rem;
+    int64_t out_l, out_r;
+    uint32_t ring_r, ring_n;
+    int16_t ring[GBA_AUDIO_RING * 2];
+} gba_apu;
+
+/* ---- save memory (gba_save.c) ---- */
+typedef struct gba_save {
+    gba_save_kind kind;
+    bool dirty;
+    /* flash */
+    int flash_seq;          /* 0: idle, 1: got AA at 5555, 2: then 55 at 2AAA */
+    bool flash_id, flash_erase, flash_program, flash_bank_sel;
+    uint32_t flash_bank;    /* 0 or 0x10000 */
+    /* EEPROM */
+    int eeprom_abits;       /* address width: 6 (512 B) or 14 (8 KB) */
+    int eeprom_nbits;       /* bits of the current request received */
+    int eeprom_cmd;         /* 2: write, 3: read */
+    uint32_t eeprom_addr;
+    uint64_t eeprom_data;
+    int eeprom_read_left;   /* bits left in a read reply: 68 (4 dummy + 64 data) .. 0 */
+    uint8_t data[GBA_SAVE_MAX];
+} gba_save;
+
 typedef struct gba_dma {
     uint32_t sad, dad;      /* register values */
     uint16_t cnt_l, cnt_h;
@@ -102,7 +182,6 @@ struct gba_machine {
     gba_timer timer[4];
     gba_dma dma[4];
     uint32_t dma_latch;     /* last value a DMA moved (open bus of DMA reads) */
-    int fifo_count[2];      /* bytes queued in sound FIFO A / B (no sound yet: only drives the FIFO DMAs) */
 
     /* Affine reference points, 20.8 fixed point sign-extended from 28 bits. */
     int32_t bg2x, bg2y, bg3x, bg3y;
@@ -125,7 +204,9 @@ struct gba_machine {
     uint8_t pal[GBA_PAL_SIZE];
     uint8_t vram[GBA_VRAM_SIZE];
     uint8_t oam[GBA_OAM_SIZE];
-    uint8_t sram[GBA_SRAM_SIZE];
+
+    gba_apu apu;
+    gba_save save;
 
     int16_t sine[256];      /* BIOS sine table (HLE BgAffineSet / ObjAffineSet), 1.14 fixed point */
 };
@@ -149,8 +230,9 @@ static inline void wr32(uint8_t *p, uint32_t v)
     p[3] = (uint8_t)(v >> 24);
 }
 
-/* gba_bus.c: CPU-visible accesses (add their cycles to m->now; addresses are aligned by the caller's width,
- * rotation of misaligned loads is the CPU's job). seq: sequential access. */
+/* gba_bus.c: CPU-visible accesses (add their cycles to m->now; the bus aligns addresses to the access width except
+ * in the save area, whose 8-bit bus sees them whole; rotation of misaligned loads is the CPU's job). seq: sequential
+ * access. */
 uint8_t gba_read8(gba_machine *m, uint32_t addr, bool seq);
 uint16_t gba_read16(gba_machine *m, uint32_t addr, bool seq);
 uint32_t gba_read32(gba_machine *m, uint32_t addr, bool seq);
@@ -169,6 +251,28 @@ void gba_raise_irq(gba_machine *m, uint16_t bits);
 void gba_update_irq(gba_machine *m);
 void gba_schedule(gba_machine *m);
 void gba_io_reset(gba_machine *m);
+
+/* gba_audio.c: sound registers 0x60-0xA7 (byte granularity), FIFO timer ticks, catching up. */
+void gba_apu_reset(gba_machine *m);
+void gba_apu_sync(gba_machine *m, uint64_t until);
+uint8_t gba_apu_read8(gba_machine *m, uint32_t addr);
+void gba_apu_write8(gba_machine *m, uint32_t addr, uint8_t v);
+/* Timer overflow on FIFO f's timer at cycle `when`: plays the next sample; returns the bytes left queued. */
+int gba_apu_fifo_tick(gba_machine *m, int f, uint64_t when);
+
+/* gba_save.c: kind detection, the 0x0E000000 area (8-bit bus) and the EEPROM. */
+void gba_save_init(gba_machine *m);
+uint8_t gba_save_read8(gba_machine *m, uint32_t addr);
+void gba_save_write8(gba_machine *m, uint32_t addr, uint8_t v);
+uint16_t gba_eeprom_read(gba_machine *m);
+void gba_eeprom_write(gba_machine *m, uint16_t v);
+/* DMA3 is about to move `count` halfwords to the EEPROM: 9 / 73 mean a 6-bit address, 17 / 81 a 14-bit one. */
+void gba_eeprom_dma_hint(gba_machine *m, uint32_t count);
+static inline bool gba_eeprom_area(const gba_machine *m, uint32_t addr)
+{
+    return (m->save.kind == GBA_SAVE_EEPROM512 || m->save.kind == GBA_SAVE_EEPROM8K) && (addr >> 24) == 0xD &&
+           (m->rom_size <= 0x1000000u || (addr & 0xFFFFFF) >= 0xFFFF00u);
+}
 
 /* gba_cpu.c */
 void gba_cpu_reset(gba_machine *m, uint32_t pc, uint32_t cpsr);

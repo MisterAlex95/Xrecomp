@@ -70,12 +70,12 @@ uint64_t gba_cycles(gba_machine *m);
 /* Frames run (VBlanks reached) since creation. */
 uint64_t gba_frames(gba_machine *m);
 
-/* Save memory hook (G-7 will add flash / EEPROM): the 64 KB SRAM area at 0x0E000000. */
+/* The save chip's raw storage, writable (tests, debugging): as gba_save_data, but 32 KB when the kind is NONE. */
 uint8_t *gba_sram(gba_machine *m, size_t *size);
 
 /* Audio (G-6, XBA-155): stereo int16, interleaved L/R, at GBA_AUDIO_RATE, produced while gba_run_frame runs and
  * buffered inside the machine (at least 8 frames' worth; the oldest samples are dropped on overflow). Copies at most
- * max_frames sample frames into out and returns how many. Until the APU lands it returns 0 (silence). */
+ * max_frames sample frames into out and returns how many. Call it from the thread that runs gba_run_frame (no lock). */
 #define GBA_AUDIO_RATE 48000
 size_t gba_audio_pull(gba_machine *m, int16_t *out, size_t max_frames);
 

@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Fetches the jsmolka/gba-tests ROMs (MIT, https://github.com/jsmolka/gba-tests) used as external CPU / memory /
-# BIOS conformance suites by consoles/gba/tests (XBA-152). Never committed: they land in build/.
+# BIOS / save conformance suites by consoles/gba/tests (XBA-152, XBA-156). Never committed: they land in build/.
 #
-#   tools/consoles/fetch_gba_tests.sh [OUTDIR]        (default build/gba-tests -> OUTDIR/{arm,thumb,memory,bios}.gba)
+#   tools/consoles/fetch_gba_tests.sh [OUTDIR]        (default build/gba-tests)
+#       -> OUTDIR/{arm,thumb,memory,bios}.gba and, from save/, OUTDIR/{sram,flash64,flash128,none}.gba
 #
 # The suites are written for FASMARM, which no image of ours carries, so this takes the ROMs the repository
 # ships at a pinned commit (the tarball is checked against its sha256) instead of assembling them. Each ROM
@@ -23,6 +24,9 @@ mkdir "$work/src"
 tar xzf "$work/src.tgz" -C "$work/src" --strip-components=1
 for t in arm thumb memory bios; do
     cp "$work/src/$t/$t.gba" "$out/$t.gba"
+done
+for t in sram flash64 flash128 none; do
+    cp "$work/src/save/$t.gba" "$out/$t.gba"
 done
 cp "$work/src/LICENSE" "$out/LICENSE"
 echo "jsmolka/gba-tests $COMMIT -> $out"

@@ -140,8 +140,11 @@ static void register_ram_reset(gba_machine *m, uint32_t flags)
         memset(&m->io[0x120], 0, 0x40);
         wr16(&m->io[0x134], 0x8000);
     }
-    if (flags & 0x40)
-        memset(&m->io[0x60], 0, 0x50);
+    if (flags & 0x40) { /* sound registers: master off (clears the PSG), SOUNDCNT_H and both FIFOs */
+        gba_apu_write8(m, 0x04000084, 0);
+        gba_apu_write8(m, 0x04000082, 0);
+        gba_apu_write8(m, 0x04000083, 0x88);
+    }
     if (flags & 0x80) {
         memset(&m->io[2], 0, 0x5E);
         wr16(&m->io[0x20], 0x100);
@@ -453,10 +456,15 @@ void gba_bios_hle_swi(gba_machine *m, uint32_t num)
         R[0] = (uint32_t)f;
         break;
     }
+    case 0x19: { /* SoundBias: level 0 or 200h (at once, where the BIOS ramps it) */
+        uint16_t sb = gba_io_read16(m, 0x04000088);
+        gba_io_write16(m, 0x04000088, (uint16_t)((sb & ~0x3FEu) | (R[0] ? 0x200 : 0)));
+        break;
+    }
     case 0x27: /* CustomHalt */
         gba_io_write8(m, 0x04000301, (uint8_t)R[2]);
         break;
     default:
-        break; /* SoundBias, the sound driver, multiboot, ...: no-ops for now */
+        break; /* the sound driver, multiboot, ...: no-ops for now */
     }
 }
