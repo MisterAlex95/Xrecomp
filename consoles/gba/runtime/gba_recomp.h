@@ -8,8 +8,8 @@
  * timers, DMA, interrupts and saves are the same code either way.
  *
  * Contract (frozen between gba_tools, Prepare, the loader and the core; change together and bump GBA_RECOMP_ABI):
- * - `python3 -m gba_tools.recomp ROM OUTDIR [--discovered FILE]` writes OUTDIR/*.c (and nothing else needed to
- *   build): compile every .c with -I consoles/gba/runtime into one shared library.
+ * - `python3 -m gba_tools.recomp ROM OUTDIR [--discovered FILE]` writes C sources into OUTDIR (nothing else needed to
+ *   build): compile each of them with -I consoles/gba/runtime into one shared library.
  * - That library exports `gba_recomp_title_table` (pack.json "entry"), returning the table below.
  * - The library is linked against the core's symbols (the shell / gba_play provide them at load time). */
 #ifndef GBA_RECOMP_H
