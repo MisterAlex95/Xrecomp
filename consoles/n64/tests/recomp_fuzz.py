@@ -32,7 +32,9 @@ BUILD = os.path.join(REPO, "tools", "consoles", "n64_recomp_build.py")
 
 BASE = 0x80000400
 DATA = 0x80100000  # r28 points here (4 KB of scratch data), r29 at its uncached alias
-REGS = list(range(1, 26))  # random destinations / sources (k0 / k1: the handler's; r28 / r29: data bases; r30: loops)
+REGS = list(range(1, 24)) + [25]  # random destinations / sources (k0 / k1: the handler's; r24 / r28 / r29: data
+# bases; r30: loops)
+UB = 24  # the uncached data base, loaded from memory: an address the lifter cannot know (hand-off path)
 K0, K1, GP, SP, FP, RA = 26, 27, 28, 29, 30, 31
 
 
@@ -122,18 +124,18 @@ class Gen:
             return r_type(r.choice([0x11, 0x13]), self.src(), 0, 0)  # MTHI MTLO
         if k < 0.78:
             op, size = r.choice(LOADS)
-            return i_type(op, r.choice([GP, SP]), self.reg(), r.randrange(0, 0xF80, size))
+            return i_type(op, r.choice([GP, SP, UB]), self.reg(), r.randrange(0, 0xF80, size))
         if k < 0.86:
             op, size = r.choice(STORES)
-            return i_type(op, r.choice([GP, SP]), self.src(), r.randrange(0, 0xF80, size))
+            return i_type(op, r.choice([GP, SP, UB]), self.src(), r.randrange(0, 0xF80, size))
         if k < 0.92:
-            return i_type(r.choice(PARTIAL), r.choice([GP, SP]), self.reg(), r.randrange(0, 0xF80))
+            return i_type(r.choice(PARTIAL), r.choice([GP, SP, UB]), self.reg(), r.randrange(0, 0xF80))
         if k < 0.95:  # COP1 moves and loads / stores
             c = r.randrange(8)
             if c < 4:
                 return (0x11 << 26) | ([0, 1, 4, 5][c] << 21) | (self.reg() << 16) | (self.freg(c in (1, 3)) << 11)
             op = [0x31, 0x35, 0x39, 0x3D][c - 4]
-            return i_type(op, r.choice([GP, SP]), self.freg(op in (0x35, 0x3D)), r.randrange(0, 0xF80, 8))
+            return i_type(op, r.choice([GP, SP, UB]), self.freg(op in (0x35, 0x3D)), r.randrange(0, 0xF80, 8))
         if k < 0.97:
             return cop0(0, self.reg(), r.choice([9, 1]))  # MFC0 COUNT / RANDOM (interpreted)
         if k < 0.98:
@@ -198,6 +200,8 @@ class Gen:
         self.emit(i_type(0x09, 9, 9, 4))
         self.li(GP, DATA)
         self.li(SP, DATA | 0x20000000)
+        self.emit(i_type(0x2B, GP, SP, 0xFF8))  # sw sp, 0xFF8(gp) ; lw r24, 0xFF8(gp)
+        self.emit(i_type(0x23, GP, UB, 0xFF8))
         for reg in REGS + [FP, RA]:
             self.li(reg, r.getrandbits(32))
             if r.random() < 0.4:

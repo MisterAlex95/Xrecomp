@@ -387,11 +387,16 @@ Contract (`n64_recomp.h`, frozen between `n64_tools`, Prepare, the loader and th
   otherwise; the discovered file gets `ADDR HASH HEXBYTES` per miss (a 2 KB window, never past a mapped page). An
   address seen with 8 contents is code generated at run time: left to the interpreter.
 
-Lifted code is tick-exact with the interpreter: the same fetch cost by segment, the same multiply / divide / FPU /
-uncached / bus costs at the same points, the instruction count (COP0 Random derives from it), the scheduler and
-interrupt test before every instruction, the stop and the interrupt line reloaded after every call into the core, so
-COUNT = COMPARE and RCP interrupts land in front of the same instruction; delay slots inline, branch-likely skipping
-its slot; COP0 (but CACHE), SYSCALL / BREAK, LL / SC, a branch in a delay slot and any instruction whose exception
+Lifted code is tick-exact with the interpreter, in the GBA / PS1 recompilers' shape (compile time on the phone):
+functions cut into blocks (entry, jump targets, return points, every 12 instructions), only block starts resumable
+(inside one, the interpreter runs to its end: `rc_hint`), one scheduler / interrupt check per block (the interpreter
+finishes the block when an event lands inside), checked again after every call into the core; the same fetch cost by
+segment, the same multiply / divide / FPU / uncached / bus costs at the same points, the instruction count (COP0
+Random derives from it), so COUNT = COMPARE and RCP interrupts land in front of the same instruction; cached RDRAM
+accesses (and KSEG1 stores) inline, known constant addresses off it (the drivers' RCP registers) through the core,
+pointer accesses off it handed to the interpreter with the rest of their block; only the guest registers a function
+uses in locals; files cut by a hash of function identity (stable names: a discovery round recompiles about one file
+per new function); delay slots inline, branch-likely skipping its slot; COP0 (but CACHE), SYSCALL / BREAK, LL / SC, a branch in a delay slot and any instruction whose exception
 condition holds (overflow, trap, faulting access, COP1 unusable) handed to the interpreter with the state in front of
 it (exact EPC / BD / BadVAddr); COP1 arithmetic and CTC1 through `n64_fpu.c`, which raises FPE / unimplemented
 itself; calls and indirect jumps through the dispatcher (bounded C stack). `n64_run ROM --pack LIB --lockstep` checks
@@ -410,12 +415,13 @@ input); n64-systemtest under `--pack` (the interpreter's pass / known-gap set) a
 (`recomp_systemtest.sh`); `n64_rc_fuzz`: random MIPS III code (64-bit ops, branch-likely, unaligned accesses, COP1
 in both FR modes, overflows / traps / FPE exceptions) under a COUNT = COMPARE interrupt every 40-600 COUNT ticks
 (`recomp_fuzz.py`); pytest `consoles/n64/tools/n64_tools/test_recomp.py`. Measured on the x86 dev host (loaded,
-12 cores): the homebrew converge in 1-2 rounds, 98.7-99.9 % native instructions once IPL3 is past; n64-systemtest
-in 3 rounds at 99.56 % native, its 3721 tests giving the interpreter's result. Recompiled vs interpreted: 770-800 vs
-104-119 frames/s on n64-systemtest (CPU-bound, pack built with the native counter), 4200-4400 vs 180 on timer_irq /
-gfx (their idle loop after the verdict), 1000-1080 vs 190 on rsp (RSP-bound); the interpreter alone is within noise
-of what it was before the page write tracking. Lifted C costs 1.3-2.8 s of compiler per 1000 instructions at -O1 (homebrew: 28 k instructions, ~8 s
-with 8 jobs; n64-systemtest: 407 k instructions, ~150-190 s with 6 jobs).
+12 cores): the homebrew converge in 1-2 rounds, 98.4-99.5 % native instructions once IPL3 is past; n64-systemtest
+in 3 rounds at 97.2 % native (rounds 2 and 3 recompiled 5 and 2 of its 237 files), its 3721 tests giving the
+interpreter's result. Recompiled vs interpreted: 1075 vs 146 frames/s on n64-systemtest (CPU-bound), 3700-4600 vs
+180 on timer_irq / gfx (their idle loop after the verdict), 1190-1215 vs 190 on rsp (RSP-bound); the interpreter
+alone is within noise of what it was before the page write tracking. Lifted C costs 0.8-0.9 s of compiler per 1000
+instructions with gcc -O1 -fno-tree-slp-vectorize on that host (homebrew: 28-38 k instructions in ~4-5 s with 6 jobs;
+n64-systemtest: 407 k instructions in ~77 s with 6 jobs, 1.1 s / 1k).
 
 **Legal**: no ROM, disc image, BIOS or game data in this repository, its CI or its artifacts. Tests use homebrew we
 build ourselves (devkitARM / libtonc, PSn00bSDK, libdragon) and dumps Alex made from his own media, kept outside every

@@ -34,6 +34,7 @@ HEAD_AT(rc_lo);
 HEAD_AT(rc_len);
 HEAD_AT(rc_hit);
 HEAD_AT(rc_exit);
+HEAD_AT(rc_hint);
 HEAD_AT(rc_native);
 HEAD_AT(cpu);
 CPU_AT(gpr);
@@ -99,6 +100,7 @@ struct n64_rc_state {
     uint32_t nrefs;
     bool booted;                /* the CPU reached the table's boot_pc (IPL3 is done) */
     uint64_t interp_pc;         /* lifted code handed this instruction to the interpreter */
+    uint32_t interp_left;       /* and this many in sequence from there (rc_hint: the rest of a lifted block) */
     uint64_t expect;            /* the instruction after the last interpreted RDRAM step */
     n64_recomp_stats stats;
     rc_missed *missed;
@@ -590,13 +592,19 @@ void n64_recomp_run(n64_machine *m)
             continue;
         }
         if (pc == s->interp_pc || c->next_ds) {
-            /* the instruction lifted code left to the interpreter (after the loop's checks), or a delay slot */
-            if (pc == s->interp_pc)
+            /* the instruction lifted code left to the interpreter (after the loop's checks), or a delay slot; then
+             * the rest of its block while execution stays in sequence (inside a block nothing is a resume point) */
+            bool handed = pc == s->interp_pc;
+            if (handed)
                 s->stats.fallbacks++;
             s->interp_pc = 1;
             s->stats.interp_ram++;
             n64_cpu_step(m);
             s->expect = 1;
+            if (handed && s->interp_left > 1 && c->pc == pc + 4) {
+                s->interp_pc = pc + 4;
+                s->interp_left--;
+            }
             continue;
         }
         uint32_t base = 0;
@@ -607,6 +615,7 @@ void n64_recomp_run(n64_machine *m)
             m->rc_len = en->len;
             m->rc_hit = 0;
             m->rc_exit = N64_RC_EXIT_NORMAL;
+            m->rc_hint = 0;
             en->fn(m);
             m->rc_len = 0;
             c->gpr[0] = 0;
@@ -614,8 +623,10 @@ void n64_recomp_run(n64_machine *m)
             m->rc_exit = N64_RC_EXIT_NORMAL;
             if (why != N64_RC_EXIT_NOT_COVERED) {
                 s->stats.calls++;
-                if (why == N64_RC_EXIT_INTERP)
+                if (why == N64_RC_EXIT_INTERP) {
                     s->interp_pc = c->pc;
+                    s->interp_left = m->rc_hint ? m->rc_hint : 1;
+                }
                 s->expect = 1;
                 continue;
             }

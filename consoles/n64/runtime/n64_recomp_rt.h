@@ -8,12 +8,15 @@
  * which the host executable (n64_run, the Android shell's libmain.so) exports for the pack to bind to: n64_rc_read,
  * n64_rc_write, n64_rc_read_partial, n64_rc_write_masked, n64_rc_cop1, n64_rc_ctc1 (n64_cpu.c).
  *
- * Lifted code is cycle-exact with the interpreter (n64_cpu.c): every instruction costs the same fetch ticks (by the
+ * Lifted code is tick-exact with the interpreter (n64_cpu.c): every instruction costs the same fetch ticks (by the
  * function's segment: cached KSEG0 / TLB-mapped, uncached KSEG1), the same multiply / divide / uncached-access /
- * bus ticks, at the same point; before each instruction it checks `now < stop_at` and the interrupt line, as the run
- * loop does, and counts the instruction (COP0 Random derives from the count). After a call into the core (an access
- * off cached RDRAM: it may raise an interrupt, start a DMA, move the scheduler's stop) it reloads the stop and the
- * interrupt line. So COUNT = COMPARE interrupts, VI / PI / SI / AI / SP / DP interrupts land in front of the same
+ * bus ticks, at the same point, and is counted (COP0 Random derives from the count). The function is cut into blocks
+ * (n64_tools lift.py « blocks and event checks »): at a block's start one check sees whether `now < stop_at` (and no
+ * interrupt pending) would fail in front of any of its instructions, as the run loop checks before each; if so it
+ * leaves (due now) or lets the interpreter run the rest of the block (rc_hint), which stops exactly where it would
+ * have. After a call into the core (an access off cached RDRAM, COP1 arithmetic: it may charge ticks, raise an
+ * interrupt, start a DMA, move the stop) it reloads the clock, the stop and the interrupt line and checks the rest of
+ * the block again. So COUNT = COMPARE interrupts, VI / PI / SI / AI / SP / DP interrupts land in front of the same
  * instruction as in the interpreter, and a recompiled run is the interpreter's run, frame for frame.
  *
  * What lifted code leaves to the interpreter (it returns with rc_exit = N64_RC_EXIT_INTERP and the state in front of
@@ -25,12 +28,15 @@
  * rounding modes, flags, causes, FR views), which raises its exceptions itself (FPE, unimplemented operation): the
  * lifted code then returns with the exception's state as the core set it. CACHE and SYNC do nothing (no cache model:
  * the interpreter's semantics). Calls, returns, indirect jumps and jumps out of the function return to the
- * dispatcher (a bounded C stack); it picks the next function.
+ * dispatcher (a bounded C stack); it picks the next function. A load or store at an address the lifter could not
+ * tell (a pointer) that turns out to be off cached RDRAM (uncached loads, IO, TLB-mapped, a fault, a store into the
+ * code running) is handed to the interpreter with the rest of its block (RC_HAND, rc_hint).
  *
  * Entry: the dispatcher calls a table function with pc at any instruction of its range, never in a delay slot, only
- * in kernel mode, with now < stop_at and no interrupt pending, rc_lo / rc_len the physical range of the entry's code
- * and rc_hit 0. The function resumes at that instruction; if pc is not one of its own it returns at once with
- * rc_exit = N64_RC_EXIT_NOT_COVERED. */
+ * in kernel mode, with now < stop_at and no interrupt pending, rc_lo / rc_len the physical range of the entry's code,
+ * rc_hit and rc_hint 0. The function resumes at that instruction when it starts a block; inside a block it returns at
+ * once with N64_RC_EXIT_INTERP and rc_hint the instructions to the block's end (the interpreter runs them, as long as
+ * execution stays in sequence); if pc is not one of its own it returns at once with N64_RC_EXIT_NOT_COVERED. */
 #ifndef N64_RECOMP_RT_H
 #define N64_RECOMP_RT_H
 
@@ -74,6 +80,7 @@ typedef struct n64_rc_head {
     uint32_t rc_lo, rc_len; /* the running function's physical code range */
     uint8_t rc_hit;        /* the core wrote into that range: stop after the instruction */
     uint8_t rc_exit;       /* N64_RC_EXIT_*: why lifted code returned */
+    uint8_t rc_hint;       /* with N64_RC_EXIT_INTERP: how many instructions the interpreter runs (the rest of a block) */
     uint64_t rc_native;    /* instructions run natively (counted when the pack is built with -DN64_RC_COUNT) */
     n64_rc_cpu cpu;
 } n64_rc_head;
@@ -109,8 +116,10 @@ int n64_rc_ctc1(n64_machine *m, uint32_t v, uint64_t pc, int ds);
  *   RC_FN f(n64_machine *m_) {
  *       RC_ENTER(N64_RC_CPI_CACHED);
  *       uint64_t r4 = h->cpu.gpr[4], ...;             (the registers the function uses)
- *       switch ((uint32_t)h->cpu.pc) { case 0x80001000u: goto L_80001000; ... default: RC_NOT_COVERED(); }
- *   L_80001000: RC_I(0x80001000u); ... one instruction ...
+ *       switch ((uint32_t)h->cpu.pc) { case 0x80001000u: goto L_80001000; ...        (the blocks' starts)
+ *       default: { static const uint8_t mid_[] = {...}; RC_MID_TABLE(0x80001000u, mid_); RC_NOT_COVERED(); } }
+ *   L_80001000: RC_SEG(0x80001000u, ticks, n);                                         (the block's event check)
+ *       RC_I(); ... one instruction ...  RC_I(); ... the next ...
  *       ...
  *       RC_EXIT(end);
  *       RC_EPILOGUE_BEGIN();
@@ -119,8 +128,8 @@ int n64_rc_ctc1(n64_machine *m, uint32_t v, uint64_t pc, int ds);
  *   }
  *
  * Guest registers live in locals, and so do the clock (`now`), the scheduler's stop (`stop`: 0 when the interrupt
- * line is up or the function must stop after the current instruction) and the instruction count (`ic`), synced
- * around every call into the core. */
+ * line is up or the core wrote into this code) and the instruction count (`ic`), synced around every call into the
+ * core. */
 #define RC_SX(A) ((uint64_t)(int64_t)(int32_t)(uint32_t)(A))
 
 #define RC_ENTER(CPI)                                                                                                \
@@ -136,6 +145,7 @@ int n64_rc_ctc1(n64_machine *m, uint32_t v, uint64_t pc, int ds);
     uint64_t hi = h->cpu.hi, lo = h->cpu.lo, dz = 0;                                                                 \
     uint64_t epc = 0, enp = 0, jt = 0;                                                                               \
     int tk = 0;                                                                                                      \
+    unsigned ehint = 0;                                                                                              \
     bool edl = false;                                                                                                \
     (void)ram; (void)gen; (void)rsz; (void)plo; (void)plen; (void)sr; (void)mrep; (void)dz
 
@@ -149,14 +159,6 @@ int n64_rc_ctc1(n64_machine *m, uint32_t v, uint64_t pc, int ds);
 #define RC_UNCOUNT() ((void)0)
 #endif
 
-/* Leaves for the dispatcher: next instruction PC, then NPC (64-bit, sign-extended); DL = PC is a delay slot. */
-#define RC_GO(PC, NPC, DL)                                                                                           \
-    do {                                                                                                             \
-        epc = (PC);                                                                                                  \
-        enp = (NPC);                                                                                                 \
-        edl = (DL);                                                                                                  \
-        goto x_exit;                                                                                                 \
-    } while (0)
 /* Continue at the static address A (32-bit), or at the register value V (64-bit). */
 #define RC_EXIT(A)                                                                                                   \
     do {                                                                                                             \
@@ -169,24 +171,46 @@ int n64_rc_ctc1(n64_machine *m, uint32_t v, uint64_t pc, int ds);
         goto x_plain;                                                                                                \
     } while (0)
 
-/* Start of the instruction at A: stop in front of it when the scheduler is due or an interrupt is pending (the
- * interpreter's loop tests), then its fetch and its count. RC_I_SLOT: the same for a delay slot (NPC: where its
- * branch goes on). */
-#define RC_I(A)                                                                                                      \
+/* Start of an instruction: its fetch and its count (the event checks are per segment: RC_SEG). */
+#define RC_I()                                                                                                       \
     do {                                                                                                             \
-        if (__builtin_expect(now >= stop, 0))                                                                        \
-            RC_EXIT(A);                                                                                              \
         now += RC_CPI;                                                                                               \
         ic++;                                                                                                        \
         RC_COUNT();                                                                                                  \
     } while (0)
-#define RC_I_SLOT(A, NPC)                                                                                            \
+
+/* The event check of a segment starting at A (n64_tools lift.py « blocks and event checks »): TICKS the static ticks
+ * at most before its last instruction, N the instructions from A to the end of its block. Due now (or an interrupt
+ * pending: stop is 0 then): leave for the dispatcher, the run loop's own check in front of A; due inside the segment:
+ * the interpreter runs from A (N instructions: rc_hint), so it stops exactly where it would have. */
+#define RC_SEG(A, TICKS, N)                                                                                          \
     do {                                                                                                             \
-        if (__builtin_expect(now >= stop, 0))                                                                        \
-            RC_GO(RC_SX(A), (NPC), true);                                                                            \
-        now += RC_CPI;                                                                                               \
-        ic++;                                                                                                        \
-        RC_COUNT();                                                                                                  \
+        if (__builtin_expect(now + (TICKS) >= stop, 0)) {                                                            \
+            epc = RC_SX(A);                                                                                          \
+            ehint = (N);                                                                                             \
+            goto x_seg;                                                                                              \
+        }                                                                                                            \
+    } while (0)
+
+/* Entered at pc, not a resume point (an interrupt returned inside a block): TAB[(pc - LO) / 4] is the number of
+ * instructions to the end of pc's block (0: not one of this function's): the interpreter runs them, nothing done. */
+#define RC_MID_TABLE(LO, TAB)                                                                                        \
+    do {                                                                                                             \
+        uint32_t o__ = (uint32_t)h->cpu.pc - (LO), i__ = o__ >> 2;                                                   \
+        if (!(o__ & 3u) && i__ < sizeof(TAB) && (TAB)[i__]) {                                                        \
+            h->rc_hint = (TAB)[i__];                                                                                 \
+            h->rc_exit = N64_RC_EXIT_INTERP;                                                                         \
+            return;                                                                                                  \
+        }                                                                                                            \
+    } while (0)
+
+/* The interpreter runs the instruction at A and the N - 1 after it, the rest of its block (rc_hint): an access the
+ * compact forms (RC_*_RAM) do not do, nothing of it done. */
+#define RC_HAND(A, N)                                                                                                \
+    do {                                                                                                             \
+        epc = RC_SX(A);                                                                                              \
+        ehint = (N);                                                                                                 \
+        goto x_hand;                                                                                                 \
     } while (0)
 
 /* The interpreter runs the instruction at A instead (its fetch and count are undone: the interpreter does them). */
@@ -254,9 +278,12 @@ static inline void rc_wbe8(uint8_t *p, uint64_t v)
 
 #define RC_KSEG0 0xFFFFFFFF80000000ull
 
-/* Aligned loads (LB LBU LH LHU LW LWU LD, the COP1 loads): cached RDRAM (KSEG0) inline, the rest through the core.
- * SZ the size, OUT the destination, CONV the extension (RC_S8, RC_U8, ...), FAULT the statement run when the access
- * would raise. */
+/* ---- memory (n64_tools lift.py « memory accesses ») ----
+ * Cached RDRAM (KSEG0, aligned, MI repeat mode off, not into this function's own code) inline with static ticks;
+ * anything else through the core (n64_rc_read / write / ...: translation, costs, devices, write tracking), then CONT,
+ * the lifter's re-check of the rest of the segment with the clock and stop the core left (an RC_SEG for the next
+ * instruction: the core may have charged bus ticks, raised an interrupt (stop 0) or written into this code). FAULT
+ * runs when the access would raise: nothing done, the interpreter raises it. */
 #define RC_S8(v) ((uint64_t)(int64_t)(int8_t)(v))
 #define RC_U8(v) ((uint64_t)(uint8_t)(v))
 #define RC_S16(v) ((uint64_t)(int64_t)(int16_t)(v))
@@ -264,84 +291,134 @@ static inline void rc_wbe8(uint8_t *p, uint64_t v)
 #define RC_S32(v) ((uint64_t)(int64_t)(int32_t)(v))
 #define RC_U32(v) ((uint64_t)(uint32_t)(v))
 #define RC_U64(v) ((uint64_t)(v))
-#define RC_LOAD(OUT, A, SZ, CONV, FAULT)                                                                             \
+/* The RDRAM offset a store reaches through KSEG0 or KSEG1 (the interpreter charges nothing more for an uncached store,
+ * unlike an uncached load: libdragon draws into uncached framebuffers), or a value >= rsz for any other address. */
+#define RC_STORE_OFF(A)                                                                                              \
+    ((((A) - RC_KSEG0) & ~0x20000000ull) < rsz ? (((A) - RC_KSEG0) & 0x1FFFFFFFull) : ~0ull)
+/* Does a store of SZ bytes at RDRAM offset O touch this function's own code? */
+#define RC_OWN(O, SZ) ((uint32_t)((O) - plo + (SZ) - 1) < plen + (SZ) - 1)
+
+/* Aligned loads (LB LBU LH LHU LW LWU LD, the COP1 loads): SZ the size, OUT the destination, CONV the extension. */
+#define RC_LOAD(OUT, A, SZ, CONV, FAULT, CONT)                                                                       \
     do {                                                                                                             \
-        uint64_t qa_ = (A), qo_ = qa_ - RC_KSEG0;                                                                       \
-        if (__builtin_expect(qo_ < rsz && !(qa_ & (SZ - 1)), 1)) {                                                     \
-            (OUT) = CONV(rc_be##SZ(ram + qo_));                                                                       \
+        uint64_t qa_ = (A), qo_ = qa_ - RC_KSEG0;                                                                    \
+        if (__builtin_expect(qo_ < rsz && !(qa_ & (SZ - 1)), 1)) {                                                   \
+            (OUT) = CONV(rc_be##SZ(ram + qo_));                                                                      \
         } else {                                                                                                     \
-            uint64_t qv_ = 0;                                                                                         \
+            uint64_t qv_ = 0;                                                                                        \
             RC_SYNC_OUT();                                                                                           \
-            int qe_ = n64_rc_read(RC_M, qa_, SZ, &qv_);                                                                 \
+            int qe_ = n64_rc_read(RC_M, qa_, SZ, &qv_);                                                              \
             RC_SYNC_IN();                                                                                            \
-            if (qe_) {                                                                                                \
+            if (qe_) {                                                                                               \
                 FAULT;                                                                                               \
             }                                                                                                        \
-            (OUT) = CONV(qv_);                                                                                        \
+            (OUT) = CONV(qv_);                                                                                       \
+            CONT;                                                                                                    \
         }                                                                                                            \
     } while (0)
 
-/* A store of SZ bytes at offset O of RDRAM: page counter, and a stop when it hit this function's own code. */
-#define RC_WROTE(O, SZ)                                                                                              \
-    do {                                                                                                             \
-        gen[(O) >> 12]++;                                                                                            \
-        if (__builtin_expect((uint32_t)((O) - plo + (SZ) - 1) < plen + (SZ) - 1, 0))                                 \
-            stop = 0;                                                                                                \
-    } while (0)
-
 /* Aligned stores (SB SH SW SD, the COP1 stores). */
-#define RC_STORE(A, SZ, V, FAULT)                                                                                    \
+#define RC_STORE(A, SZ, V, FAULT, CONT)                                                                              \
     do {                                                                                                             \
-        uint64_t qa_ = (A), qo_ = qa_ - RC_KSEG0;                                                                       \
-        if (__builtin_expect(qo_ < rsz && !(qa_ & (SZ - 1)) && !mrep, 1)) {                                            \
-            rc_wbe##SZ(ram + qo_, (V));                                                                               \
-            RC_WROTE((uint32_t)qo_, SZ);                                                                              \
+        uint64_t qa_ = (A), qo_ = RC_STORE_OFF(qa_);                                                                 \
+        if (__builtin_expect(qo_ < rsz && !(qa_ & (SZ - 1)) && !mrep && !RC_OWN((uint32_t)qo_, SZ), 1)) {            \
+            rc_wbe##SZ(ram + qo_, (V));                                                                              \
+            gen[qo_ >> 12]++;                                                                                        \
         } else {                                                                                                     \
             RC_SYNC_OUT();                                                                                           \
-            int qe_ = n64_rc_write(RC_M, qa_, SZ, (V));                                                                \
+            int qe_ = n64_rc_write(RC_M, qa_, SZ, (V));                                                              \
             RC_SYNC_IN();                                                                                            \
-            if (qe_) {                                                                                                \
+            if (qe_) {                                                                                               \
                 FAULT;                                                                                               \
             }                                                                                                        \
+            CONT;                                                                                                    \
         }                                                                                                            \
     } while (0)
 
 /* The aligned word (SZ 4) / doubleword (8) an LWL / LWR / LDL / LDR at A reads. */
-#define RC_LOADP(OUT, A, SZ, FAULT)                                                                                  \
+#define RC_LOADP(OUT, A, SZ, FAULT, CONT)                                                                            \
     do {                                                                                                             \
-        uint64_t qa_ = (A), qo_ = (qa_ & ~(uint64_t)(SZ - 1)) - RC_KSEG0;                                               \
-        if (__builtin_expect(qo_ < rsz, 1)) {                                                                         \
-            (OUT) = rc_be##SZ(ram + qo_);                                                                             \
+        uint64_t qa_ = (A), qo_ = (qa_ & ~(uint64_t)(SZ - 1)) - RC_KSEG0;                                            \
+        if (__builtin_expect(qo_ < rsz, 1)) {                                                                        \
+            (OUT) = rc_be##SZ(ram + qo_);                                                                            \
         } else {                                                                                                     \
-            uint64_t qv_ = 0;                                                                                         \
+            uint64_t qv_ = 0;                                                                                        \
             RC_SYNC_OUT();                                                                                           \
-            int qe_ = n64_rc_read_partial(RC_M, qa_, SZ, &qv_);                                                         \
+            int qe_ = n64_rc_read_partial(RC_M, qa_, SZ, &qv_);                                                      \
             RC_SYNC_IN();                                                                                            \
-            if (qe_) {                                                                                                \
+            if (qe_) {                                                                                               \
                 FAULT;                                                                                               \
             }                                                                                                        \
-            (OUT) = qv_;                                                                                              \
+            (OUT) = qv_;                                                                                             \
+            CONT;                                                                                                    \
         }                                                                                                            \
     } while (0)
 
 /* SWL / SWR / SDL / SDR: the bytes of MASK (left-aligned in 64 bits with DATA; SZ 4 uses the upper word). */
-#define RC_STOREP(A, DATA, MASK, SZ, FAULT)                                                                          \
+#define RC_STOREP(A, DATA, MASK, SZ, FAULT, CONT)                                                                    \
     do {                                                                                                             \
-        uint64_t qa_ = (A), qo_ = (qa_ & ~(uint64_t)(SZ - 1)) - RC_KSEG0, qd_ = (DATA), qk_ = (MASK);                     \
-        if (__builtin_expect(qo_ < rsz, 1)) {                                                                         \
-            for (int qi_ = 0; qi_ < (SZ); qi_++) {                                                                      \
-                unsigned qs_ = 56 - 8 * (unsigned)qi_;                                                                 \
-                if ((qk_ >> qs_) & 0xFF)                                                                               \
-                    ram[qo_ + (uint64_t)qi_] = (uint8_t)(qd_ >> qs_);                                                    \
+        uint64_t qa_ = (A), qo_ = RC_STORE_OFF(qa_ & ~(uint64_t)(SZ - 1)), qd_ = (DATA), qk_ = (MASK);               \
+        if (__builtin_expect(qo_ < rsz && !RC_OWN((uint32_t)qo_, SZ), 1)) {                                          \
+            for (int qi_ = 0; qi_ < (SZ); qi_++) {                                                                   \
+                unsigned qs_ = 56 - 8 * (unsigned)qi_;                                                               \
+                if ((qk_ >> qs_) & 0xFF)                                                                             \
+                    ram[qo_ + (uint64_t)qi_] = (uint8_t)(qd_ >> qs_);                                                \
             }                                                                                                        \
-            RC_WROTE((uint32_t)qo_, SZ);                                                                              \
+            gen[qo_ >> 12]++;                                                                                        \
         } else {                                                                                                     \
             RC_SYNC_OUT();                                                                                           \
-            int qe_ = n64_rc_write_masked(RC_M, qa_, qd_, qk_, SZ);                                                      \
+            int qe_ = n64_rc_write_masked(RC_M, qa_, qd_, qk_, SZ);                                                  \
             RC_SYNC_IN();                                                                                            \
-            if (qe_) {                                                                                                \
+            if (qe_) {                                                                                               \
                 FAULT;                                                                                               \
             }                                                                                                        \
+            CONT;                                                                                                    \
+        }                                                                                                            \
+    } while (0)
+
+/* The compact forms for an access whose address the lifter does not know: cached RDRAM inline as above, anything else
+ * (uncached, IO, TLB-mapped, a fault, MI repeat mode, a store into this function's own code) runs HAND, which gives
+ * the instruction to the interpreter with the rest of its block (no call into the core: small code). */
+#define RC_LOAD_RAM(OUT, A, SZ, CONV, HAND)                                                                          \
+    do {                                                                                                             \
+        uint64_t qa_ = (A), qo_ = qa_ - RC_KSEG0;                                                                    \
+        if (__builtin_expect(qo_ < rsz && !(qa_ & (SZ - 1)), 1)) {                                                   \
+            (OUT) = CONV(rc_be##SZ(ram + qo_));                                                                      \
+        } else {                                                                                                     \
+            HAND;                                                                                                    \
+        }                                                                                                            \
+    } while (0)
+#define RC_STORE_RAM(A, SZ, V, HAND)                                                                                 \
+    do {                                                                                                             \
+        uint64_t qa_ = (A), qo_ = RC_STORE_OFF(qa_);                                                                 \
+        if (__builtin_expect(qo_ < rsz && !(qa_ & (SZ - 1)) && !mrep && !RC_OWN((uint32_t)qo_, SZ), 1)) {            \
+            rc_wbe##SZ(ram + qo_, (V));                                                                              \
+            gen[qo_ >> 12]++;                                                                                        \
+        } else {                                                                                                     \
+            HAND;                                                                                                    \
+        }                                                                                                            \
+    } while (0)
+#define RC_LOADP_RAM(OUT, A, SZ, HAND)                                                                               \
+    do {                                                                                                             \
+        uint64_t qo_ = ((A) & ~(uint64_t)(SZ - 1)) - RC_KSEG0;                                                       \
+        if (__builtin_expect(qo_ < rsz, 1)) {                                                                        \
+            (OUT) = rc_be##SZ(ram + qo_);                                                                            \
+        } else {                                                                                                     \
+            HAND;                                                                                                    \
+        }                                                                                                            \
+    } while (0)
+#define RC_STOREP_RAM(A, DATA, MASK, SZ, HAND)                                                                       \
+    do {                                                                                                             \
+        uint64_t qo_ = RC_STORE_OFF((A) & ~(uint64_t)(SZ - 1)), qd_ = (DATA), qk_ = (MASK);                          \
+        if (__builtin_expect(qo_ < rsz && !RC_OWN((uint32_t)qo_, SZ), 1)) {                                          \
+            for (int qi_ = 0; qi_ < (SZ); qi_++) {                                                                   \
+                unsigned qs_ = 56 - 8 * (unsigned)qi_;                                                               \
+                if ((qk_ >> qs_) & 0xFF)                                                                             \
+                    ram[qo_ + (uint64_t)qi_] = (uint8_t)(qd_ >> qs_);                                                \
+            }                                                                                                        \
+            gen[qo_ >> 12]++;                                                                                        \
+        } else {                                                                                                     \
+            HAND;                                                                                                    \
         }                                                                                                            \
     } while (0)
 
@@ -536,22 +613,33 @@ static inline uint64_t rc_cfc1(const n64_rc_head *h, int r)
 }
 /* COP1 operations through n64_fpu.c (PC the instruction, DS 1 in a delay slot); they charge their latency (DIV,
  * SQRT, MUL) to the clock. */
-#define RC_COP1(INS, PC, DS)                                                                                         \
+#define RC_COP1(INS, PC, DS, CONT)                                                                                   \
     do {                                                                                                             \
         RC_SYNC_OUT();                                                                                               \
         if (n64_rc_cop1(RC_M, (INS), RC_SX(PC), (DS)))                                                               \
             RC_RAISED();                                                                                             \
         now = h->now;                                                                                                \
+        CONT;                                                                                                        \
     } while (0)
-#define RC_CTC1(V, PC, DS)                                                                                           \
+#define RC_CTC1(V, PC, DS, CONT)                                                                                     \
     do {                                                                                                             \
         RC_SYNC_OUT();                                                                                               \
         if (n64_rc_ctc1(RC_M, (uint32_t)(V), RC_SX(PC), (DS)))                                                       \
             RC_RAISED();                                                                                             \
+        CONT;                                                                                                        \
     } while (0)
 
 /* The common exits, then (generated) the stores of the registers the function writes, then RC_EPILOGUE_END. */
 #define RC_EPILOGUE_BEGIN()                                                                                          \
+    x_seg: __attribute__((unused));                                                                                  \
+    if (now < stop) {                                                                                                \
+        h->rc_exit = N64_RC_EXIT_INTERP;                                                                             \
+        h->rc_hint = (uint8_t)ehint;                                                                                 \
+    }                                                                                                                \
+    goto x_plain;                                                                                                    \
+    x_hand: __attribute__((unused));                                                                                 \
+    h->rc_hint = (uint8_t)ehint;                                                                                     \
+    goto x_interp;                                                                                                   \
     x_interp_slot: __attribute__((unused));                                                                          \
     now -= RC_CPI;                                                                                                   \
     ic--;                                                                                                            \
@@ -578,7 +666,8 @@ static inline uint64_t rc_cfc1(const n64_rc_head *h, int r)
     h->now = now;                                                                                                    \
     h->instructions = ic;                                                                                            \
     (void)tk;                                                                                                        \
-    (void)jt
+    (void)jt;                                                                                                        \
+    (void)ehint
 
 /* Marks the functions of a pack (hidden: only the table function is exported). */
 #define RC_FN __attribute__((visibility("hidden"))) void

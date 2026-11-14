@@ -181,6 +181,7 @@ struct n64_machine {
     uint32_t rc_lo, rc_len;      /* the physical code range of the lifted function running (rc_len 0: none) */
     uint8_t rc_hit;              /* a write landed in that range: the lifted function stops after the instruction */
     uint8_t rc_exit;             /* N64_RC_EXIT_*: why the lifted function returned */
+    uint8_t rc_hint;             /* with N64_RC_EXIT_INTERP: how many instructions the interpreter runs */
     uint64_t rc_native;          /* instructions lifted code ran (packs built with -DN64_RC_COUNT) */
     n64_cpu cpu;
     /* ---- end of n64_rc_head ---- */

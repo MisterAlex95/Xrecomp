@@ -191,6 +191,7 @@ ALL_KINDS = [
     i_type(0x09, 4, 4, -1), i_type(0x19, 4, 4, 8), i_type(0x0F, 0, 8, 0x8010), i_type(0x0B, 4, 9, 7),
     r_type(0x20, 4, 5, 6), i_type(0x18, 4, 7, 3), r_type(0x34, 4, 5), i_type(0x01, 4, 0x0C, 9),
     r_type(0x1C, 4, 5), r_type(0x1B, 4, 5), r_type(0x10, 0, 0, 10), r_type(0x13, 4),
+    i_type(0x0F, 0, 9, 0xA440), i_type(0x23, 9, 11, 0x10),
     i_type(0x23, 8, 11, 0), i_type(0x37, 8, 12, 8), i_type(0x1A, 8, 12, 3), i_type(0x26, 8, 11, 5),
     i_type(0x2B, 8, 11, 0), i_type(0x2D, 8, 12, 9), i_type(0x2A, 8, 11, 2), i_type(0x28, 8, 4, 1),
     0x44822000, 0x44A32000, 0x44022000, 0x44CA7800, 0x444A7800, i_type(0x35, 8, 2, 16), i_type(0x39, 8, 3, 4),
@@ -205,28 +206,30 @@ ALL_KINDS = [
 ]
 
 
-def lifted_c(comments=True, sparse=False):
+def lifted_c(comments=True, resume_all=False):
     img = Image(0x80000400, be(ALL_KINDS), "elf")
     f = Function(img, 0x80000400, img.end)
-    return FnLifter(f, "n64_rc_test", resume_all=not sparse).function(comments)
+    return FnLifter(f, "n64_rc_test", resume_all=resume_all).function(comments)
 
 
 def test_lift_shapes():
     c = lifted_c()
     assert "RC_ENTER(N64_RC_CPI_CACHED)" in c
-    assert "RC_LOADP(w_, ea_, 8" in c and "rc_ldl(" in c
-    assert "RC_STOREP(ea_, RC_SDR_D(" in c
+    assert "RC_LOADP_RAM(w_, ea_, 8" in c and "rc_ldl(" in c  # r8 = LUI 0x8010: cached RDRAM, inline
+    assert "RC_STOREP_RAM(ea_, RC_SDR_D(" in c
+    assert "RC_LOAD(r11, r9 + 0x0000000000000010ULL, 4, RC_S32" in c  # r9 = LUI 0xA440 (VI): through the core
     assert "RC_COP1(0x46221080u" in c
-    assert "RC_INTERP(0x8000048Cu)" in c  # MFC0 goes to the interpreter
+    assert "RC_SEG(0x80000400u" in c and "RC_MID_TABLE(0x80000400u, mid_)" in c  # blocks
+    assert "RC_INTERP(0x80000494u)" in c  # MFC0 goes to the interpreter
     assert "if (!tk) { goto L_" in c  # branch-likely skips its slot
     assert "RC_EXIT64(jt);" in c
 
 
 @pytest.mark.skipif(not shutil.which(os.environ.get("CC", "cc")), reason="no C compiler")
-@pytest.mark.parametrize("sparse", [False, True])
-def test_lift_compiles(tmp_path, sparse):
+@pytest.mark.parametrize("resume_all", [False, True])
+def test_lift_compiles(tmp_path, resume_all):
     src = tmp_path / "t.c"
-    src.write_text('#include "n64_recomp_rt.h"\n' + lifted_c(sparse=sparse))
+    src.write_text('#include "n64_recomp_rt.h"\n' + lifted_c(resume_all=resume_all))
     cc = os.environ.get("CC", "cc")
     r = subprocess.run([cc, "-std=c11", "-O1", "-Wall", "-Werror", "-Wno-unused-label", "-Wno-unused-variable",
                         "-Wno-unused-but-set-variable", "-I", RUNTIME, "-c", str(src), "-o", str(tmp_path / "t.o")],
@@ -250,4 +253,11 @@ def test_cli(tmp_path, capsys):
     assert summary["ram_functions"] >= 1 and summary["functions"] > 5
     tab = (out / "n64_rc_table.c").read_text()
     assert "n64_recomp_title_table" in tab and "0x80000180u" in tab and "0x80000400u" in tab
-    assert sorted(p.name for p in out.iterdir())[0] == "n64_rc_000.c"
+    names = sorted(p.name for p in out.iterdir())
+    # files named after their first function (here the recorded code at 0x80000180, with its hash)
+    assert any(n.startswith("n64_rc_80000180_") for n in names)
+    # stable: a second run with the same input writes the same files
+    first = {n: (out / n).read_text() for n in names}
+    assert recomp_main([str(path), str(out), "--discovered", str(disc)]) == 0
+    capsys.readouterr()
+    assert {p.name: p.read_text() for p in out.iterdir()} == first

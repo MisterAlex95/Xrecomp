@@ -21,7 +21,7 @@ PYTHONPATH=consoles/n64/tools python3 -m n64_tools.coverage hello.z64 hello.elf 
 | `discover.py` | function discovery over images (static segments, recorded RDRAM code) |
 | `dma.py` | code segments copied by PI DMA with constant arguments |
 | `lift.py` | one C function per discovered function (`n64_recomp_rt.h` macros) |
-| `recomp.py` | the CLI: `n64_rc_NNN.c` (3000 instructions per file) + `n64_rc_table.c` |
+| `recomp.py` | the CLI: `n64_rc_AAAAAAAA[_HHHHHHHH].c` (stable files, below) + `n64_rc_table.c` |
 | `coverage.py` | test tool: the share of an ELF's function symbols the discovery found (never an input) |
 
 ## Finding the code the game runs
@@ -94,19 +94,39 @@ and we keep no Nintendo code or byte patterns derived from it.
 ## Lifting
 
 `lift.py` follows the interpreter (`n64_cpu.c`, `n64_fpu.c`) instruction for instruction; the ABI and its rules are
-in `n64_recomp_rt.h`. In short: 64-bit GPRs in C locals (only those the function uses are loaded, only those it
-writes stored back), 32-bit results sign-extended, delay slots inline, branch-likely skipping its slot, the fetch
-cost / instruction count / scheduler and interrupt test before every instruction (COUNT = COMPARE interrupts land at
-the same instruction as in the interpreter), cached RDRAM accesses inline and everything else through the core's
-translation and devices, COP1 moves inline and arithmetic through `n64_fpu.c` (identical results, flags, causes,
-exceptions), COP0 / exceptions / LL-SC / a branch in a delay slot handed to the interpreter with the state in front of
-the instruction (exact EPC / BD / BadVAddr), calls and indirect jumps through the dispatcher (bounded C stack).
-`--sparse-labels` keeps resume points only where control comes back (smaller switch).
+in `n64_recomp_rt.h`, the design notes at the end of `lift.py`. The shape is the GBA / PS1 recompilers' (designed for
+compile time on the phone):
+
+- **Blocks.** A function is cut into blocks: its start, jump targets, the fall-through and return point after a
+  transfer, the instruction after one always handed to the interpreter, then every 12 instructions. Only block starts
+  are resume points (a `case` of the entry switch); entered inside a block (an interrupt's ERET returns anywhere),
+  the function lets the interpreter run to the block's end (`rc_hint`, from a small table).
+- **One event check per block.** The interpreter checks the scheduler's stop and the interrupt line before every
+  instruction; lifted code checks once at the block's start whether any of its instructions would be stopped (static
+  ticks: fetch, multiply / divide latencies); if so it leaves (due now) or the interpreter runs the block, stopping
+  exactly where it would have. After a call into the core the rest of the block is checked again.
+- **Memory.** Cached RDRAM inline (KSEG0; stores through KSEG1 too: the interpreter charges nothing more for an
+  uncached store, and libdragon draws into uncached framebuffers). An access at a known constant address off cached
+  RDRAM (a LUI-built base, also a 64 KB base plus an ANDI-masked index: the drivers' RCP registers, uncached RDRAM)
+  goes through the core and stays native. An access through a pointer that turns out to be off cached RDRAM is handed
+  to the interpreter with the rest of its block (one exit, no call into the core: small code).
+- 64-bit GPRs in C locals (only those the function uses, written back only when it writes them), 32-bit results
+  sign-extended, delay slots inline, branch-likely skipping its slot, COP1 moves inline and arithmetic through
+  `n64_fpu.c` (identical results, flags, causes, exceptions), COP0 / exceptions / LL-SC / a branch in a delay slot
+  handed to the interpreter with the state in front of the instruction (exact EPC / BD / BadVAddr), calls and
+  indirect jumps through the dispatcher (bounded C stack).
+- **Stable files.** Functions in address order, a file cut after a function whose identity (start, hash) hashes to
+  0 mod 8 once it holds 1000 instructions (at 4000 at most); files are named after their first function. A
+  discovery round changes only the files that gained functions, and the object cache (`n64_recomp_build.py`, Prepare)
+  recompiles only those. Flags: `-O1 -fno-tree-slp-vectorize` (tools/prepare/gba.py `lifted_cflags`).
+
+`--resume-all` makes every instruction a block of its own (debugging).
 
 ## Limits
 
 - The RDP's rendering into RDRAM is not write-tracked (`n64_rdp.c` writes framebuffers directly): code drawn over
   by the RDP would not be noticed. Games never do this.
 - Lifted code runs in kernel mode only (every N64 game runs in kernel mode); user / supervisor code is interpreted.
-- Compile time: about 1.3-2.8 s of compiler per 1000 instructions at -O1 on a desktop x86 core (homebrew ~28 k
-  instructions: ~8 s with 8 jobs; n64-systemtest 407 k instructions: ~150-190 s with 6 jobs).
+- Compile time: about 0.8-0.9 s of compiler per 1000 instructions at -O1 on a desktop x86 core with gcc (the
+  per-instruction design of the first version cost 1.6-2.8 s): homebrew ~28 k instructions in ~4 s with 6 jobs,
+  n64-systemtest 407 k instructions in ~77 s with 6 jobs (1.1 s / 1k on the loaded host).
