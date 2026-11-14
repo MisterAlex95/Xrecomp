@@ -7,7 +7,7 @@
 # The Python side does not depend on the host CPU: it is covered by linux.Dockerfile.
 FROM debian:trixie-slim AS deps
 RUN dpkg --add-architecture arm64 && apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates cmake ninja-build pkg-config crossbuild-essential-arm64 qemu-user file \
+        ca-certificates cmake ninja-build pkg-config crossbuild-essential-arm64 qemu-user file ccache \
         libsdl2-dev:arm64 libgl1-mesa-dev:arm64 libepoxy-dev:arm64 libssl-dev:arm64 \
         libavcodec-dev:arm64 libavformat-dev:arm64 libavutil-dev:arm64 libswscale-dev:arm64 \
     && rm -rf /var/lib/apt/lists/*
@@ -32,7 +32,12 @@ RUN CC=aarch64-linux-gnu-gcc python3 -B -m unittest -v tools.recomp.test_reserve
 # A build break fails at once. The tests run to the end whatever fails (under qemu a failure is a lead, not a
 # verdict), the report is printed, then tools/ci/check_expected.py fails the build on any failure that is not in
 # tools/ci/arm64-expected.txt, and on any line there that no longer fails (XBA-53).
-RUN mkdir -p /work && trap 'rm -rf /work; find /tmp -mindepth 1 -delete' EXIT \
+# ccache (tools/run_c_tests.sh): the projects that rebuild the runtime share its objects within a run, and the cache
+# mount keeps them between runs on the same host (BuildKit, capped at CCACHE_MAXSIZE; a fresh GitHub runner starts
+# empty). The env makes every CMake configure here use it, the root build and pytest's builds included.
+ENV CCACHE_DIR=/ccache CCACHE_MAXSIZE=2G CCACHE_BASEDIR=/ CCACHE_NOHASHDIR=1 \
+    CMAKE_C_COMPILER_LAUNCHER=ccache CMAKE_CXX_COMPILER_LAUNCHER=ccache
+RUN --mount=type=cache,id=xba-ccache-arm64,target=/ccache mkdir -p /work && trap 'rm -rf /work; find /tmp -mindepth 1 -delete' EXIT \
     && export TMPDIR=/work TMP=/work TEMP=/work \
     && mkdir -p /reports/junit \
     && cmake -S . -B /work/build/root -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo $XBR_CMAKE_ARGS \

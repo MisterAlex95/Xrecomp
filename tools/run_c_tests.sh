@@ -33,6 +33,13 @@ read -r -a EXTRA <<< "${XBR_CMAKE_ARGS:-}"
 command -v ninja >/dev/null 2>&1 && GEN=(-G Ninja)
 JUNIT_DIR=${XBR_JUNIT_DIR:-}
 export SDL_AUDIODRIVER=${SDL_AUDIODRIVER:-dummy}
+# ccache when it is there (XBR_NO_CCACHE=1: never): most projects build the whole runtime again
+# (add_subdirectory(../.. runtime)) with the same flags, so after the first one its objects are cache hits. Their
+# build folders sit at the same depth, so with base_dir / and no cwd in the hash the paths match.
+if [ -z "${XBR_NO_CCACHE:-}" ] && [ -z "${CMAKE_C_COMPILER_LAUNCHER:-}" ] && command -v ccache >/dev/null 2>&1; then
+    export CMAKE_C_COMPILER_LAUNCHER=ccache CMAKE_CXX_COMPILER_LAUNCHER=ccache
+    export CCACHE_BASEDIR=${CCACHE_BASEDIR:-/} CCACHE_NOHASHDIR=${CCACHE_NOHASHDIR:-1}
+fi
 [ -z "$JUNIT_DIR" ] || { mkdir -p "$JUNIT_DIR" && JUNIT_DIR=$(cd "$JUNIT_DIR" && pwd); }   # ctest: relative to the build dir
 
 # Projects that only build for Windows (a FATAL_ERROR under if(NOT WIN32), or an unconditional <windows.h>).
