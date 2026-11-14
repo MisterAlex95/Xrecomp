@@ -143,10 +143,91 @@ static void test_boot(void)
     CHECK_EQ(m->pi_dom[0][2], 0x07, "PI domain 1 page size");
     CHECK_EQ(m->pi_dom[0][3], 0x03, "PI domain 1 release");
     CHECK_EQ(r32(m, 0x04300004), 0x02020102u, "MI_VERSION");
+    /* IPL2's first words left in IMEM (n64_pif.c; the CIC-6105 IPL3 decrypts its RSP code with them), PAL variant. */
+    CHECK_EQ(n64_peek32(m, 0xA4001000u), 0x3C0DBFC0u, "IMEM 0x000: IPL2");
+    CHECK_EQ(n64_peek32(m, 0xA4001004u), 0xBDA807FCu, "IMEM 0x004: IPL2 (PAL)");
+    CHECK_EQ(n64_peek32(m, 0xA400101Cu), 0x3C0BB000u, "IMEM 0x01C: IPL2");
+    CHECK_EQ(m->boot_x105, N64_X105_OFF, "no 6105 boot handshake for another CIC");
+    for (int r = 1; r < 32; r++)
+        CHECK_EQ(n64_rsp_get_gpr(m->rsp, r), 0, "RSP register after the boot (not a 6105)");
     n64_destroy(m);
     n64_options o = {.force_pal = 0};
     m = mk(&o);
     CHECK_EQ(n64_reg(m, 20), 1, "s4: NTSC forced");
+    CHECK_EQ(n64_peek32(m, 0xA4001004u), 0x8DA807FCu, "IMEM 0x004: IPL2 (NTSC)");
+    n64_destroy(m);
+}
+
+/* The CIC-6105 IPL3's RSP semaphore wait (n64_pif.c): a program shaped like the IPL3's (take SP_SEMAPHORE, spin on it
+ * with $5 counting down, give up when $5 goes negative), started the way IPL3 starts it. With the handshake armed the
+ * RSP is held while the CPU keeps the semaphore, so it does not give up however long the CPU takes, and once the
+ * program has ended $5 is the console's value; without it, the same program gives up. */
+static void test_x105_boot(void)
+{
+    static const uint32_t prog[] = {
+        0x3C050001u, /* 000 lui   $5, 0x0001      (a short count: 65536 iterations) */
+        0x40083800u, /* 004 mfc0  $8, SP_SEMAPHORE  (takes it) */
+        0x04A00005u, /* 008 bltz  $5, 0x020 */
+        0x40033800u, /* 00C mfc0  $3, SP_SEMAPHORE */
+        0x1460FFFDu, /* 010 bne   $3, $0, 0x008 */
+        0x20A5FFFFu, /* 014 addi  $5, $5, -1 */
+        0x34061234u, /* 018 ori   $6, $0, 0x1234  (released) */
+        0x0000000Du, /* 01C break */
+        0x3406DEADu, /* 020 ori   $6, $0, 0xDEAD  (gave up) */
+        0x0000000Du, /* 024 break */
+    };
+    for (int armed = 1; armed >= 0; armed--) {
+        n64_machine *m = mk(NULL);
+        for (unsigned i = 0; i < sizeof prog / sizeof prog[0]; i++)
+            n64_poke32(m, 0xA4001000u + 4 * i, prog[i]);
+        m->boot_x105 = armed ? N64_X105_ARMED : N64_X105_OFF; /* what n64_pif_boot sets for a 6105 cartridge */
+        w32(m, 0x04080000, 0);       /* SP_PC */
+        w32(m, 0x04040010, 0x1 | 0x4); /* SP_STATUS: clear halt and broke */
+        n64_run_cycles(m, 3000000);  /* far longer than 65536 iterations */
+        if (armed) {
+            CHECK(!n64_rsp_halted(m->rsp), "6105 boot: the RSP waits for the semaphore");
+            CHECK(n64_rsp_get_gpr(m->rsp, 5) > 0x8000u, "6105 boot: the RSP is held, not spinning ($5 = 0x%X)",
+                  n64_rsp_get_gpr(m->rsp, 5));
+        } else {
+            CHECK(n64_rsp_halted(m->rsp), "no handshake: the RSP gives up");
+            CHECK_EQ(n64_rsp_get_gpr(m->rsp, 6), 0xDEAD, "no handshake: the give-up path");
+        }
+        w32(m, 0x0404001C, 0); /* the CPU releases SP_SEMAPHORE */
+        n64_run_cycles(m, 100000);
+        CHECK(n64_rsp_halted(m->rsp), "the program ended");
+        if (armed) {
+            CHECK_EQ(n64_rsp_get_gpr(m->rsp, 6), 0x1234, "6105 boot: the released path");
+            CHECK_EQ(n64_rsp_get_gpr(m->rsp, 5), 0x4E000, "6105 boot: $5 the console leaves");
+            CHECK_EQ(m->boot_x105, N64_X105_OFF, "6105 boot: the handshake is over");
+            /* Over: a later wait on the semaphore runs as it is (no hold). */
+            n64_rsp_set_gpr(m->rsp, 5, 7);
+            CHECK_EQ(n64_rsp_get_gpr(m->rsp, 5), 7, "RSP register setter");
+        }
+        n64_destroy(m);
+    }
+}
+
+/* Guest health counters (n64_guest_activity, n64_guest_fault_info): what the runtime's stuck detector reads. */
+static void test_guest_health(void)
+{
+    n64_machine *m = mk(NULL);
+    n64_activity a0, a1;
+    n64_guest_activity(m, &a0);
+    w32(m, 0x04400004, 0x100000); /* VI_ORIGIN, new value */
+    w32(m, 0x04400004, 0x100000); /* the same again: not a change */
+    w32(m, 0x04500000, 0x2000);   /* AI_DRAM_ADDR */
+    w32(m, 0x04500004, 0x100);    /* AI_LEN: a buffer */
+    n64_guest_activity(m, &a1);
+    CHECK_EQ(a1.vi_origin_changes - a0.vi_origin_changes, 1, "VI origin changes");
+    CHECK_EQ(a1.ai_buffers - a0.ai_buffers, 1, "audio buffers");
+    CHECK_EQ(n64_guest_fault_info(m)->count, 0, "no fault yet");
+    n64_poke32(m, 0x80000800u, 0x8C080001u); /* lw t0, 1(zero): address error */
+    n64_run_cycles(m, 100);
+    const n64_guest_fault *f = n64_guest_fault_info(m);
+    CHECK(f->count >= 1, "a fault recorded");
+    CHECK_EQ(f->code, 4, "AdEL");
+    CHECK_EQ(f->epc, 0xFFFFFFFF80000800ull, "its EPC");
+    CHECK_EQ(f->badvaddr, 1, "its BadVAddr");
     n64_destroy(m);
 }
 
@@ -841,6 +922,8 @@ int main(void)
 {
     test_rom();
     test_boot();
+    test_x105_boot();
+    test_guest_health();
     test_joybus();
     test_pi_saves();
     test_ai();

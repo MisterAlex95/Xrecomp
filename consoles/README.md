@@ -326,7 +326,12 @@ Boot: the PIF is HLE, never a PIF ROM: the CIC is recognised from the ROM's IPL3
 6103, 6105, 6106, 7102; libdragon's open IPL3 by its banner; else a 6102), the header and IPL3 go to DMEM, PI domain 1
 timing comes from the header, s3..s7 / sp / ra are what IPL3 expects (seed, TV type from the region, cold reset), the
 RDRAM is reported configured (RI_SELECT, osMemSize at 0x80000318) so IPL3 takes its warm path, and the CPU starts at
-0xA4000040 in the ROM's own IPL3. Joybus: controllers (info, buttons + stick), the controller pak (32 KB, data CRC;
+0xA4000040 in the ROM's own IPL3. IMEM holds IPL2's first eight words, as the PIF leaves them (the 6105 / 7105 IPL3
+decrypts its RSP program with them). That program spins on SP_SEMAPHORE while the CPU computes the boot checksum,
+counting down in RSP $5, and games check what it leaves (Ocarina of Time's rspboot: $4, $6, $11 and $5 within 0.2 % of
+the console's count; when the check fails, the game corrupts RDRAM at random and crashes). Our cost model cannot meet
+that count, so for this IPL3 only the RSP is not run while it waits for the semaphore, and $5 gets the console's value
+once its program ends (`n64_pif.c` header: sources and values). Joybus: controllers (info, buttons + stick), the controller pak (32 KB, data CRC;
 a fresh one is formatted like a new .mpk: ID block and copies, index table, empty notes) and the rumble pak, EEPROM
 4K / 16K, the RTC (status, control and time blocks on the host's local clock plus the offset the game sets). The CIC
 challenge (PIF command bit 1, used by 6105 games) is acknowledged without a response: nothing of ours needs it. Saves: SRAM 32 KB, FlashRAM 128 KB (MX29L1100 ID, erase / program / read
@@ -411,7 +416,12 @@ The title key comes from the ROM as the app reads it (`recomp_pack_rom_identify`
 when it cannot, `n64_runtime_fallback_key`). Every option is listed at the top of `runtime/tools/n64_play.c`. Test:
 `n64_runtime` (`consoles/n64/tests/test_main.c`: the helpers, then gfx.z64's picture, through `fd:N` with two RDP
 threads and a rumble pak, byte-swapped as `.v64`, an EEPROM and a controller pak read back and left alone, the app
-shell's entry, the errors). gfx.z64 runs at about 60 fps paced on the x86 dev host with one RDP thread.
+shell's entry, the errors). Diagnostics in the log (stdout, logcat on Android; no effect on the game): the first
+guest fault exception of a session (`n64: guest fault at frame N: TLB miss (store) (Cause …), EPC …, BadVAddr …`:
+TLB, address and bus errors, reserved instruction, coprocessor unusable other than COP1), and `n64: guest stuck at
+frame N (…)` with pc, Status, Cause, EPC, BadVAddr and the DPC registers, once per episode, when for 5 s nothing moves
+(no new VI origin, SI / PI DMA or audio buffer: an exception storm, a deadlock) or the picture stays after a fault
+(a game's own crash screen); the 10 s frame-rate line also gives the pc. gfx.z64 runs at about 60 fps paced on the x86 dev host with one RDP thread.
 
 **N64 RSP (N-5, XBA-173).** `consoles/n64/runtime/n64_rsp.c`, the RSP half of `n64_devices.h` (CMake target
 `n64_rsp`, plain C11, no host dependency): LLE, so every microcode runs as on the hardware (no per-game HLE). Scalar

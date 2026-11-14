@@ -151,6 +151,25 @@ int n64_runtime_frameskip_parse(const char *v);
  * 60 Hz); a fixed N skips N, shows one. */
 int n64_runtime_frameskip(int mode, int64_t behind_ns, uint64_t frame_ns, int audio_low, int *run);
 
+/* The « guest stuck » detector of the frame loop (diagnostics only: it logs, it changes nothing). Fed once per frame
+ * with the guest's progress counters (n64_guest_activity) and its fault count (n64_guest_fault_info). Returns
+ * N64_RT_STUCK_NONE, or once per episode the reason the guest looks dead: no VI origin change, SI / PI DMA or audio
+ * buffer for `limit` frames (an exception storm, a deadlock), or no VI origin change for `limit` frames after a fault
+ * exception (a game's own crash screen holds the picture, often one drawn after the fault, while its other threads
+ * still poll the controller and play sound). An episode ends when the counters move again (any of them for the first, the VI origin for the second). */
+enum { N64_RT_STUCK_NONE = 0, N64_RT_STUCK_IDLE, N64_RT_STUCK_FAULT };
+typedef struct n64_runtime_stuck {
+    uint64_t vi, other, faults; /* the counters seen last */
+    uint64_t vi_still;          /* frames without a VI origin change */
+    uint64_t all_still;         /* frames without any change */
+    uint64_t fault_age;         /* frames since the fault count last moved (UINT64_MAX: never) */
+    int fault_since_vi;         /* a fault exception since (or shortly before) the last VI origin change */
+    int reported;               /* N64_RT_STUCK_* reported for this episode */
+} n64_runtime_stuck;
+void n64_runtime_stuck_init(n64_runtime_stuck *s);
+int n64_runtime_stuck_check(n64_runtime_stuck *s, uint64_t vi_origin_changes, uint64_t other_activity,
+                            uint64_t faults, uint64_t limit);
+
 #ifdef __cplusplus
 }
 #endif

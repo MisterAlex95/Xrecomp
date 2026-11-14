@@ -55,7 +55,11 @@ void n64_vi_write(n64_machine *m, uint32_t reg, uint32_t v)
 {
     switch (reg) {
     case 0: m->vi[0] = v & 0x1FBFF; break;
-    case 1: m->vi[1] = v & 0x00FFFFFF; break;
+    case 1:
+        if ((v & 0x00FFFFFF) != m->vi[1])
+            m->vi_origin_changes++;
+        m->vi[1] = v & 0x00FFFFFF;
+        break;
     case 2: m->vi[2] = v & 0xFFF; break;
     case 3: m->vi[3] = v & 0x3FF; break;
     case 4: n64_mi_clear(m, N64_MI_VI); break;
@@ -304,6 +308,8 @@ void n64_ai_write(n64_machine *m, uint32_t reg, uint32_t v)
     case 0: m->ai_dram = v & 0x00FFFFF8u; break;
     case 1:
         m->ai_len = v & 0x3FFF8u;
+        if (m->ai_len)
+            m->ai_buffers++;
         if (m->ai_len && m->ai_count < 2) {
             m->ai_fifo[m->ai_count].addr = m->ai_dram;
             m->ai_fifo[m->ai_count].len = m->ai_len;

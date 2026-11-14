@@ -142,6 +142,18 @@ static void exception_vec(n64_machine *m, int code, int ce, uint32_t offset)
     c->cop0[C0_STATUS] = sr | SR_EXL;
     uint64_t base = (sr & SR_BEV) ? 0xFFFFFFFFBFC00200ull : 0xFFFFFFFF80000000ull;
     c->pc = base + offset;
+    if (N64_UNLIKELY((code >= EXC_MOD && code <= EXC_DBE) || code == EXC_RI || (code == EXC_CPU && ce != 1))) {
+        /* A fault a healthy game does not take (n64_guest_fault_info): recorded for the runtime's log. */
+        if (m->fault.count++ == 0) {
+            m->fault.code = (uint32_t)code;
+            m->fault.cause = cause;
+            m->fault.status = sr | SR_EXL;
+            m->fault.pc = c->pc;
+            m->fault.epc = c->cop0[C0_EPC];
+            m->fault.badvaddr = c->cop0[C0_BADVADDR];
+            m->fault.frame = m->frames;
+        }
+    }
     c->npc = c->pc + 4;
     c->next_ds = false;
     n64_cpu_status_changed(m);

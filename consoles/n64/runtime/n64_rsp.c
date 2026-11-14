@@ -204,6 +204,22 @@ int n64_rsp_halted(n64_rsp *s)
     return (s->status & ST_HALT) != 0;
 }
 
+uint32_t n64_rsp_get_gpr(n64_rsp *s, int r)
+{
+    return (r > 0 && r < 32) ? s->r[r] : 0;
+}
+
+void n64_rsp_set_gpr(n64_rsp *s, int r, uint32_t v)
+{
+    if (r > 0 && r < 32)
+        s->r[r] = v;
+}
+
+int n64_rsp_semaphore_held(n64_rsp *s)
+{
+    return s->semaphore != 0;
+}
+
 /* ---- SP registers ------------------------------------------------------------------------------------------------- */
 
 static void raise_sp(n64_rsp *s)
