@@ -1,12 +1,13 @@
-"""Placeholder for the PlayStation pipeline (PS-X EXE + ISO 9660, MIPS I disassembly, then function discovery and the lifter)."""
+"""The PlayStation pipeline's stages: exe.py (PS-X EXE + ISO 9660), isa.py (MIPS I), discover.py, lift.py; recomp.py
+runs them (XBA-160, XBA-161)."""
 
 from . import CONSOLE
 
-VERSION = "0.0.0"
+VERSION = "1.0.0"
 
 
 def describe() -> dict:
-    """What this console's pipeline is: its name and the stages it will have."""
+    """What this console's pipeline is: its name and its stages."""
     return {
         "console": CONSOLE,
         "version": VERSION,
