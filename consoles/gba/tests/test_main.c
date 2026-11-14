@@ -4,6 +4,7 @@
 #include "gba_core.h"
 #include "gba_runtime.h"
 #include "host_pad.h"
+#include "host_window.h"
 #include "host_time.h"
 #include "recomp_lifecycle.h"
 
@@ -63,6 +64,41 @@ static uint32_t crc32_ref(const uint8_t *p, size_t n)
             crc = crc & 1 ? 0xedb88320u ^ (crc >> 1) : crc >> 1;
     }
     return ~crc;
+}
+
+/* The display options (XBA-181): the runtime's own keys win over the shared ones, which win over its defaults;
+ * every key accepts both filters and the three scales. */
+static void test_display(void)
+{
+    gba_runtime_opts o;
+    int scale = -1, filter = -1;
+
+    gba_runtime_opts_init(&o);
+    unsetenv("RECOMP_GBA_SCALE");
+    unsetenv("RECOMP_GBA_FILTER");
+    unsetenv("RECOMP_SCALE");
+    unsetenv("RECOMP_FILTER");
+    gba_runtime_display(&o, &scale, &filter);
+    CHECK(scale == HOST_SCALE_ASPECT && filter == HOST_FILTER_NEAREST);
+    setenv("RECOMP_SCALE", "stretch", 1);
+    setenv("RECOMP_FILTER", "linear", 1);
+    gba_runtime_display(&o, &scale, &filter);
+    CHECK(scale == HOST_SCALE_STRETCH && filter == HOST_FILTER_LINEAR);
+    setenv("RECOMP_GBA_SCALE", "integer", 1);
+    setenv("RECOMP_GBA_FILTER", "nearest", 1);
+    gba_runtime_display(&o, &scale, &filter);
+    CHECK(scale == HOST_SCALE_INTEGER && filter == HOST_FILTER_NEAREST);
+    setenv("RECOMP_GBA_FILTER", "linear", 1);
+    gba_runtime_display(NULL, NULL, &filter);
+    CHECK(filter == HOST_FILTER_LINEAR);
+    o.scale = HOST_SCALE_ASPECT;   /* the caller's choice (a player's --scale) wins over every key */
+    o.filter = HOST_FILTER_NEAREST;
+    gba_runtime_display(&o, &scale, &filter);
+    CHECK(scale == HOST_SCALE_ASPECT && filter == HOST_FILTER_NEAREST);
+    unsetenv("RECOMP_GBA_SCALE");
+    unsetenv("RECOMP_GBA_FILTER");
+    unsetenv("RECOMP_SCALE");
+    unsetenv("RECOMP_FILTER");
 }
 
 static void test_helpers(void)
@@ -254,6 +290,7 @@ int main(void)
     CHECK(v && strncmp(v, "gba_runtime ", 12) == 0);
     CHECK(xbox_HostNowNs() != 0);   /* the host layer is linked in */
     test_helpers();
+    test_display();
     test_runs();
     if (failures) {
         fprintf(stderr, "%d failure(s)\n", failures);

@@ -70,12 +70,46 @@ int host_window_present_texture(unsigned tex, int w, int h, int top_down);
  * HOST_SCALE_ASPECT (the default): the largest rectangle of its aspect;
  * HOST_SCALE_INTEGER: the largest whole multiple of its size that fits (a
  * pixel-art console: every source pixel the same size), aspect when not even
- * 1x fits. filter: how the window's own texture (present_rgba) is sampled,
- * HOST_FILTER_LINEAR (the default) or HOST_FILTER_NEAREST (sharp pixels).
- * May be called before open; kept across open / close. */
-enum { HOST_SCALE_ASPECT = 0, HOST_SCALE_INTEGER = 1 };
+ * 1x fits; HOST_SCALE_STRETCH: the whole window, aspect not kept. filter:
+ * how the window's own texture (present_rgba) is sampled, HOST_FILTER_LINEAR
+ * (the default) or HOST_FILTER_NEAREST (sharp pixels). May be called before
+ * open; kept across open / close. */
+enum { HOST_SCALE_ASPECT = 0, HOST_SCALE_INTEGER = 1, HOST_SCALE_STRETCH = 2 };
 enum { HOST_FILTER_LINEAR = 0, HOST_FILTER_NEAREST = 1 };
 void host_window_set_scaling(int scale, int filter);
+
+/* The shared display options (XBA-181, docs/runtime/environment-variables.md),
+ * read the same way by every console runtime and player:
+ *   host_window_scale_parse   "aspect" / "integer" / "stretch" -> HOST_SCALE_*
+ *   host_window_filter_parse  "nearest" / "linear" -> HOST_FILTER_*
+ * (case ignored; -1 for NULL, "" or anything else).
+ *   host_window_env_scale     $console_var (e.g. "RECOMP_GBA_SCALE") when it
+ *                             parses, else $RECOMP_SCALE, else def
+ *   host_window_env_filter    $console_var, else $RECOMP_FILTER, else def
+ *   host_window_env_vsync     0 when $RECOMP_PRESENT_VSYNC starts with '0',
+ *                             else 1 (the vsync argument of host_window_open)
+ * console_var may be NULL. */
+int host_window_scale_parse(const char *v);
+int host_window_filter_parse(const char *v);
+int host_window_env_scale(const char *console_var, int def);
+int host_window_env_filter(const char *console_var, int def);
+int host_window_env_vsync(void);
+
+/* The rate the window presents at, from any thread (the Android companion
+ * panel and FPS overlay when no Xbox presenter runs): *fps_centi frames per
+ * second x 100 over the last second (0 when nothing was presented for two
+ * seconds, e.g. while the game is held), *frames the presents since open.
+ * Either pointer may be NULL. Returns 1 while the window is open, else 0
+ * (both outputs 0). */
+int host_window_stats(uint32_t *fps_centi, uint64_t *frames);
+
+/* Writes the last picture host_window_present_rgba showed, as a 24-bit BMP,
+ * from any thread (also while the game is held: a copy of it is kept). It is
+ * the picture at its own size, reshaped to host_window_set_aspect's shape
+ * when one is set (nearest, never smaller: 256x240 at 4:3 -> 320x240), no
+ * letterbox. Returns 0, or -1 when no picture was presented since open or the
+ * file cannot be written. */
+int host_window_screenshot_bmp(const char *path);
 
 /* The shape the picture is shown at, num:den (4:3 for a PlayStation, whose
  * frame buffer is 256..640 pixels wide whatever the screen), instead of its

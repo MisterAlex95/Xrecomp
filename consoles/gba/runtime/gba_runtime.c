@@ -350,14 +350,6 @@ static void sleep_until(uint64_t t)
     }
 }
 
-static int env_choice(const char *name, const char *one, int def)
-{
-    const char *v = getenv(name);
-    if (!v || !*v)
-        return def;
-    return strcasecmp(v, one) == 0;
-}
-
 /* Desktop keys: arrows, X / Z = A / B, A / S = L / R, Enter = Start, Backspace or right Shift = Select. */
 static uint16_t keyboard_keys(void)
 {
@@ -404,6 +396,17 @@ static const char *base_name(const char *p)
 {
     const char *s = strrchr(p, '/');
     return s ? s + 1 : p;
+}
+
+void gba_runtime_display(const gba_runtime_opts *o, int *scale, int *filter)
+{
+    /* RECOMP_GBA_SCALE / _FILTER, else the shared RECOMP_SCALE / RECOMP_FILTER (XBA-181); sharp pixels by default. */
+    int s = o && o->scale >= 0 ? o->scale : host_window_env_scale("RECOMP_GBA_SCALE", HOST_SCALE_ASPECT);
+    int f = o && o->filter >= 0 ? o->filter : host_window_env_filter("RECOMP_GBA_FILTER", HOST_FILTER_NEAREST);
+    if (scale)
+        *scale = s;
+    if (filter)
+        *filter = f;
 }
 
 int gba_runtime_run(const gba_runtime_opts *o)
@@ -465,16 +468,13 @@ int gba_runtime_run(const gba_runtime_opts *o)
     int window = !o->headless && !host_window_headless();
     if (SDL_WasInit(SDL_INIT_EVENTS) == 0)
         SDL_InitSubSystem(SDL_INIT_EVENTS);
-    int scale = o->scale >= 0 ? o->scale
-                              : env_choice("RECOMP_GBA_SCALE", "integer", 0) ? HOST_SCALE_INTEGER : HOST_SCALE_ASPECT;
-    int filter = o->filter >= 0 ? o->filter
-                                : env_choice("RECOMP_GBA_FILTER", "linear", 0) ? HOST_FILTER_LINEAR
-                                                                                 : HOST_FILTER_NEAREST;
+    int scale, filter;
+    gba_runtime_display(o, &scale, &filter);
     host_window_set_scaling(scale, filter);
     if (window) {
         char title[300];
         snprintf(title, sizeof title, "XRecomp GBA - %s", base_name(o->rom));
-        if (!host_window_open(title, GBA_SCREEN_W * 4, GBA_SCREEN_H * 4, 1)) {
+        if (!host_window_open(title, GBA_SCREEN_W * 4, GBA_SCREEN_H * 4, host_window_env_vsync())) {
             fprintf(stderr, "gba: no window, running headless\n");
             window = 0;
         }
@@ -484,7 +484,8 @@ int gba_runtime_run(const gba_runtime_opts *o)
     console_pad_load(&s_pad_map, CONSOLE_PAD_GBA, getenv(console_pad_env(CONSOLE_PAD_GBA)));
     int audio = host_audio_open(GBA_AUDIO_RATE, 2);
     printf("gba: window %s (%s, %s), audio %s, pads %u\n", window ? "on" : "off",
-           scale == HOST_SCALE_INTEGER ? "integer" : "aspect", filter == HOST_FILTER_NEAREST ? "nearest" : "linear",
+           scale == HOST_SCALE_INTEGER ? "integer" : scale == HOST_SCALE_STRETCH ? "stretch" : "aspect",
+           filter == HOST_FILTER_NEAREST ? "nearest" : "linear",
            audio ? "on" : "off", host_pad_mask());
     fflush(stdout);
 

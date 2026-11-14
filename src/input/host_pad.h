@@ -77,6 +77,11 @@ int host_pad_read(int port, HostPadState *out);
 /* Rumble, 0..65535 per motor, for ms. Returns 1 when the pad has it. */
 int host_pad_rumble(int port, uint16_t low, uint16_t high, uint32_t ms);
 
+/* 0 when $RECOMP_RUMBLE starts with '0' (the player turned rumble off: a
+ * console runtime then never drives host_pad_rumble, as the Xbox's OHCI
+ * ignores the pads' rumble reports), else 1. Read at each call. */
+int host_pad_rumble_env(void);
+
 /* The touch overlay pad (the Android app's on-screen pad and companion panel, the console-agnostic twin of
  * input_overlay.h): a pad state set from the UI thread, NULL when off. It is not one of the ports above (host_pad_read
  * and host_pad_mask do not see it); console_pad_read (console_pad.h) merges it into port 0 through the console's

@@ -14,9 +14,10 @@
 extern "C" {
 #endif
 
-/* Opens the default output at rate Hz with channels (1 or 2). Returns 1, or
- * 0 when there is no device (SDL_AUDIODRIVER=dummy opens a silent one). A
- * second open returns 1 and keeps the first format. */
+/* Opens the default output at rate Hz with channels (1 or 2), with a device
+ * buffer of host_audio_env_buffer_samples() frames. Returns 1, or 0 when
+ * there is no device (SDL_AUDIODRIVER=dummy opens a silent one). A second
+ * open returns 1 and keeps the first format. */
 int host_audio_open(int rate, int channels);
 
 /* Queues nframes frames (nframes * channels samples). Returns 1, or 0 when
@@ -32,6 +33,24 @@ int host_audio_rate(void);
 int host_audio_channels(void);
 
 void host_audio_close(void);
+
+/* The device buffer in sample frames: $RECOMP_AUDIO_BUF_SAMPLES clamped to
+ * 128..4096 (the Xbox output's bounds), HOST_AUDIO_BUF_SAMPLES_DEFAULT when
+ * unset or empty (XBA-181). */
+#define HOST_AUDIO_BUF_SAMPLES_DEFAULT 1024
+int host_audio_env_buffer_samples(void);
+
+/* The output volume, 0..100 (clamped; 100, the default, leaves the samples
+ * untouched, 0 is silence), applied by host_audio_queue to what it queues.
+ * The gain is the square of the fraction, as the Xbox output's
+ * (xbox_ApuSetOutputVolume): 50 is about -12 dB. Any thread, before or
+ * after open; kept across open / close (the Android in-game menu's volume). */
+void host_audio_set_volume(int percent);
+int host_audio_volume(void);
+
+/* Scales count interleaved samples from src into dst by `percent` (the
+ * gain host_audio_queue applies); dst may be src. */
+void host_audio_scale(int16_t *dst, const int16_t *src, uint32_t count, int percent);
 
 #ifdef __cplusplus
 }

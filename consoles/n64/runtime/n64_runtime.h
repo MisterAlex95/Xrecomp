@@ -46,9 +46,9 @@ typedef struct n64_runtime_opts {
     const char *capture_path;
     /* Buttons held on controller 1 for the whole run, on top of the pads (N64_BTN_*, 1 = pressed; tests). */
     uint16_t buttons;
-    /* Window scaling: -1 = $RECOMP_N64_SCALE ("integer" or "aspect", default aspect); else HOST_SCALE_*. Filter: -1 =
-     * $RECOMP_N64_FILTER ("linear" or "nearest", default linear: the VI's 256..640-wide pictures are stretched to
-     * 4:3); else HOST_FILTER_*. */
+    /* Window scaling: -1 = $RECOMP_N64_SCALE, else $RECOMP_SCALE ("aspect", "integer" or "stretch", default aspect;
+     * host_window_env_scale); else HOST_SCALE_*. Filter: -1 = $RECOMP_N64_FILTER, else $RECOMP_FILTER ("linear" or
+     * "nearest", default linear: the VI's 256..640-wide pictures are stretched to 4:3); else HOST_FILTER_*. */
     int scale, filter;
     /* The accessory in the controllers: N64_RT_PAK_DEFAULT = $RECOMP_N64_PAK ("controller", "rumble" or "none";
      * default controller: the controller pak, saved as pakN.mpk); a rumble pak drives the host pad's rumble. */
@@ -80,6 +80,10 @@ typedef struct n64_runtime_opts {
 } n64_runtime_opts;
 
 void n64_runtime_opts_init(n64_runtime_opts *o);
+
+/* How the run shows its picture: o->scale / o->filter when set (>= 0), else $RECOMP_N64_SCALE / _FILTER, else the
+ * shared $RECOMP_SCALE / $RECOMP_FILTER (host_window_env_scale / _filter), else aspect and linear. o may be NULL. */
+void n64_runtime_display(const n64_runtime_opts *o, int *scale, int *filter);
 
 /* Plays o->rom until the player quits (window closed, SDL_QUIT) or o->frames ran. Returns 0, or -1 when the ROM cannot
  * be read or the machine cannot start (why on stderr). Logs one "n64: ..." line per step on stdout. */

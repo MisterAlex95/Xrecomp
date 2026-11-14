@@ -194,6 +194,12 @@ int host_pad_rumble(int port, uint16_t low, uint16_t high, uint32_t ms)
     return ok;
 }
 
+int host_pad_rumble_env(void)
+{
+    const char *e = getenv("RECOMP_RUMBLE");
+    return !(e && e[0] == '0');
+}
+
 static pthread_mutex_t s_overlay_mu = PTHREAD_MUTEX_INITIALIZER;
 static HostPadState s_overlay;
 static int s_overlay_on;

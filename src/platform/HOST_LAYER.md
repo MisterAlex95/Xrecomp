@@ -41,7 +41,7 @@ interface target when there is no Vulkan bridge). The `*.cmake` files have inclu
 ### src/video
 | File | Class | Note |
 |---|---|---|
-| `host_window.[ch]` | G (new) | SDL window, GL ES 3.0 / 3.2 core context, RGBA or GL-texture present, letterboxed (aspect or integer scaling, linear or nearest: `host_window_set_scaling`; a fixed display shape such as the PS1's 4:3: `host_window_set_aspect`), a capture of the drawable as presented (`host_window_capture`), events → lifecycle and pads |
+| `host_window.[ch]` | G (new) | SDL window, GL ES 3.0 / 3.2 core context, RGBA or GL-texture present, letterboxed (aspect, integer or stretch scaling, linear or nearest: `host_window_set_scaling`; a fixed display shape such as the PS1's 4:3: `host_window_set_aspect`), a capture of the drawable as presented (`host_window_capture`), events → lifecycle and pads; from any thread, the present rate (`host_window_stats`) and the last picture as a BMP (`host_window_screenshot_bmp`); the shared display keys `RECOMP_SCALE` (aspect, integer or stretch) / `RECOMP_FILTER` / `RECOMP_PRESENT_VSYNC` (`host_window_env_*`, XBA-181) |
 | `perf_overlay.[ch]` | G | SDL_Renderer overlay; moved from `xbox_video` to `xbr_host` |
 | `display_vsync_android.[ch]` | M → split | AChoreographer grid; now hands samples to a sink passed to `display_vsync_android_start`, and the Xbox presenter passes `nv2a_pb_exec_display_clock`. Moved to `xbr_host` |
 | `display_clock.h`, `frame_times.h` | G | header-only |
@@ -54,7 +54,7 @@ interface target when there is no Vulkan bridge). The `*.cmake` files have inclu
 ### src/input
 | File | Class | Note |
 |---|---|---|
-| `host_pad.[ch]` | G (new) | SDL controllers on 4 ports (`input_ports` rules), console-neutral state |
+| `host_pad.[ch]` | G (new) | SDL controllers on 4 ports (`input_ports` rules), console-neutral state, rumble (`RECOMP_RUMBLE=0`: `host_pad_rumble_env`) |
 | `input_ports.[ch]` | G | pure logic; split out of `xbox_input_map` into `input_ports` |
 | `xinput_device.c`, `xinput_xbox.h`, `mkb_input.[ch]` | X | XInput-shaped Xbox pads, Win32 raw input |
 | `keyboard.[ch]`, `keyboard_sdl.[ch]`, `input_map.[ch]`, `input_overlay.[ch]` | M, kept X | generic rules over the Xbox pad struct (`XINPUT_GAMEPAD`); the type would have to change, so they stay with the Xbox side |
@@ -62,7 +62,7 @@ interface target when there is no Vulkan bridge). The `*.cmake` files have inclu
 ### src/audio
 | File | Class | Note |
 |---|---|---|
-| `host_audio.[ch]` | G (new) | one SDL device, queued S16 frames, paused with the app |
+| `host_audio.[ch]` | G (new) | one SDL device, queued S16 frames, paused with the app; its buffer from `RECOMP_AUDIO_BUF_SAMPLES`, the output volume (`host_audio_set_volume`, the Android menu) |
 | `dsound_device.c`, `dsound_xbox.h` | X | DirectSound over the MCPX APU |
 | `wma_decoder.[ch]` | X | Media Foundation WMA |
 

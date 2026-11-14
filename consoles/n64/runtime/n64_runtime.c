@@ -648,6 +648,17 @@ static const char *save_kind_name(int kind)
     }
 }
 
+void n64_runtime_display(const n64_runtime_opts *o, int *scale, int *filter)
+{
+    /* RECOMP_N64_SCALE / _FILTER, else the shared RECOMP_SCALE / RECOMP_FILTER (XBA-181); smooth by default. */
+    int s = o && o->scale >= 0 ? o->scale : host_window_env_scale("RECOMP_N64_SCALE", HOST_SCALE_ASPECT);
+    int f = o && o->filter >= 0 ? o->filter : host_window_env_filter("RECOMP_N64_FILTER", HOST_FILTER_LINEAR);
+    if (scale)
+        *scale = s;
+    if (filter)
+        *filter = f;
+}
+
 int n64_runtime_run(const n64_runtime_opts *o)
 {
     if (!o || !o->rom || !*o->rom) {
@@ -750,17 +761,14 @@ int n64_runtime_run(const n64_runtime_opts *o)
     int window = !o->headless && !host_window_headless();
     if (SDL_WasInit(SDL_INIT_EVENTS) == 0)
         SDL_InitSubSystem(SDL_INIT_EVENTS);
-    int scale = o->scale >= 0 ? o->scale
-                              : env_choice("RECOMP_N64_SCALE", "integer", 0) ? HOST_SCALE_INTEGER : HOST_SCALE_ASPECT;
-    int filter = o->filter >= 0 ? o->filter
-                                : env_choice("RECOMP_N64_FILTER", "nearest", 0) ? HOST_FILTER_NEAREST
-                                                                                 : HOST_FILTER_LINEAR;
+    int scale, filter;
+    n64_runtime_display(o, &scale, &filter);
     host_window_set_scaling(scale, filter);
     host_window_set_aspect(4, 3);
     if (window) {
         char title[300];
         snprintf(title, sizeof title, "XRecomp N64 - %s", info->title[0] ? info->title : base_name(o->rom));
-        if (!host_window_open(title, 320 * 3, 240 * 3, 1)) {
+        if (!host_window_open(title, 320 * 3, 240 * 3, host_window_env_vsync())) {
             fprintf(stderr, "n64: no window, running headless\n");
             window = 0;
         }
@@ -770,7 +778,8 @@ int n64_runtime_run(const n64_runtime_opts *o)
     console_pad_load(&s_pad_map, CONSOLE_PAD_N64, getenv(console_pad_env(CONSOLE_PAD_N64)));
     int audio = host_audio_open(N64_AUDIO_RATE, 2);
     printf("n64: window %s (4:3, %s, %s), audio %s, pads %u, %s%s, RDP %s, threads %d\n", window ? "on" : "off",
-           scale == HOST_SCALE_INTEGER ? "integer" : "aspect", filter == HOST_FILTER_NEAREST ? "nearest" : "linear",
+           scale == HOST_SCALE_INTEGER ? "integer" : scale == HOST_SCALE_STRETCH ? "stretch" : "aspect",
+           filter == HOST_FILTER_NEAREST ? "nearest" : "linear",
            audio ? "on" : "off", host_pad_mask(), pak_name(pak), players >= 2 ? ", several players" : "",
            n64_rdp_backend_name(rdp), rdp_threads);
     fflush(stdout);
@@ -783,6 +792,7 @@ int n64_runtime_run(const n64_runtime_opts *o)
     uint64_t fps_t = t0, fps_frames = 0, last_frame_ns = 0;
     int was_paused = 0, heard = 0, rc = 0;
     int rumble_sent[4] = {0, 0, 0, 0};
+    int rumble_on = host_pad_rumble_env(); /* RECOMP_RUMBLE=0 turns the Rumble Pak off (XBA-181) */
     int64_t behind = 0; /* how late this frame starts (pacing below) */
     int skip_run = 0;
     uint64_t skipped = 0, skipped_log = 0;
@@ -857,7 +867,8 @@ int n64_runtime_run(const n64_runtime_opts *o)
             skip = 0; /* the last frame of a bounded run is the screenshot; a capture is a capture */
         int on = skip ? display_on > 0 : n64_display(m, xrgb, N64_SCREEN_MAX_W, N64_SCREEN_MAX_H, &dw, &dh) == 0;
         skipped += (uint64_t)skip;
-        rumble_drive(m, players, rumble_sent);
+        if (rumble_on)
+            rumble_drive(m, players, rumble_sent); /* RECOMP_RUMBLE=0: never */
         pthread_mutex_unlock(&s_mu);
         frames++;
         fps_frames++;

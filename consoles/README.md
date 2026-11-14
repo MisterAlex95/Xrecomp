@@ -56,7 +56,8 @@ a ROM headless. Tests: `consoles/gba/tests/CMakeLists.txt` (unit tests, our home
 CPU / memory / BIOS / save suites fetched by `tools/consoles/fetch_gba_tests.sh`).
 
 **Playing a GBA game (XBA-157).** `gba_runtime_run` (`gba_runtime.h`) plays a ROM on the host layer: `host_window`
-(RGB555 → RGBA texture, letterboxed, aspect or integer scaling, nearest or linear), every `host_pad` controller in
+(RGB555 → RGBA texture, letterboxed, aspect, integer or stretch scaling, nearest by default or linear: the display
+options shared by every console, [environment-variables.md](../docs/runtime/environment-variables.md#consoles-gba-ps1-n64)), every `host_pad` controller in
 the Xbox layout (A → A, B → B, Y → A, X → B, shoulders and triggers → L / R, Start, Back → Select, D-pad and left
 stick → D-pad), `host_audio` fed from `gba_audio_pull`, pacing at 59.73 Hz with absolute deadlines nudged by the
 audio queue, saves in `<save dir>/gba-<KEY>/game.sav` (read at start, written a second after the game's last write,
@@ -270,7 +271,7 @@ discs reach their result in 85-145 frames instead of 390-420. A `.m3u` playlist 
 disc », F6 on the desktop for the playlist's next disc, `ps1_play --swap FRAME:DISC`) opens the lid, and a second later
 closes it on the new disc (XBA-166). The picture is the GPU's display area (256 / 320 / 368 / 512 / 640 x 240 / 480, 15- or 24-bit) shown at
 4:3 whatever its width (`host_window_set_aspect`), letterboxed, linear by default (`RECOMP_PS1_FILTER=nearest`,
-`RECOMP_PS1_SCALE=integer`: whole multiples of the height). Pads, Xbox layout: A → Cross, B → Circle, X → Square,
+`RECOMP_PS1_SCALE=integer`: whole multiples of the height; or the shared `RECOMP_FILTER` / `RECOMP_SCALE`). Pads, Xbox layout: A → Cross, B → Circle, X → Square,
 Y → Triangle, LB / RB → L1 / R1, LT / RT → L2 / R2, Start, Back → Select, stick clicks → L3 / R3, D-pad; port 1 is a
 DualShock plugged in in digital mode (the left stick drives the D-pad too) or, with `RECOMP_PS1_PAD=analog`, in
 analog mode (both sticks); the game may switch it itself (config mode) and lock it, Back + L3 + R3 while playing is its
@@ -374,7 +375,8 @@ packs »](../docs/android/prepare.md#n64-packs-xba-174); it runs the lifted code
 this cartridge's, the SHA-256 of the ROM in big-endian order, and the game plays interpreted otherwise; `--missed FILE`
 keeps what it did not cover for the next Prepare, `consoles/n64/runtime/n64_pack.h`). The picture is the VI's
 canvas (320 or 640 x 240, 480 interlaced, PAL 288 / 576 lines; `n64_vi.c` above) shown at 4:3 whatever its size,
-letterboxed, linear by default (`RECOMP_N64_FILTER=nearest`, `RECOMP_N64_SCALE=integer`). Controller, Xbox layout: left
+letterboxed, linear by default (`RECOMP_N64_FILTER=nearest`, `RECOMP_N64_SCALE=integer`; or the shared `RECOMP_FILTER` /
+`RECOMP_SCALE`). Controller, Xbox layout: left
 stick → stick (radial dead zone 8 %, `RECOMP_N64_DEADZONE` in percent; ±80 on an axis at full travel,
 `RECOMP_N64_STICK_RANGE`; the diagonals go to about ±68, the real stick's octagonal gate), A → A, B and X → B, right
 stick → C buttons (past half its travel), Y → C-up, LB → L, RB → R, LT or RT → Z, Start, D-pad; keyboard on a desktop

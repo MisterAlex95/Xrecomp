@@ -1,13 +1,15 @@
 /* The companion panel's JNI (fr.adserver.xrecomp.CompanionNative, docs/android/app-shell.md « Dual screen »):
  * the touch overlay pad (src/input/input_overlay.h for an Xbox game, and the same pad as host_pad's overlay for the
  * GBA, PS1 and N64 runtimes, which read it through console_pad_read), the window's frame stats, a screenshot of the
- * last frame, and quit. Called on the UI thread (the overlay, quit) or a worker thread (the screenshot). */
+ * last frame (both from the Xbox presenter, or from host_window while a GBA / PS1 / N64 game has it open, XBA-181),
+ * and quit. Called on the UI thread (the overlay, quit) or a worker thread (the screenshot). */
 #include <jni.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 
 #include "host_pad.h"
+#include "host_window.h"
 #include "input_overlay.h"
 #include "platform/recomp_quit.h"
 #include "video/video_player.h"
@@ -132,7 +134,9 @@ JNIEXPORT jintArray JNICALL JNI_FN(nativeStats)(JNIEnv *env, jclass cls)
     jintArray out;
 
     (void)cls;
-    xbox_FramebufferWindowGetStats(&fps_centi, &draws);
+    /* A console game presents through host_window (no draw count there); an Xbox game through fb_present_sdl. */
+    if (!host_window_stats(&fps_centi, NULL))
+        xbox_FramebufferWindowGetStats(&fps_centi, &draws);
     v[0] = (jint)fps_centi;
     v[1] = (jint)draws;
     out = (*env)->NewIntArray(env, 2);
@@ -152,7 +156,7 @@ JNIEXPORT jboolean JNICALL JNI_FN(nativeScreenshot)(JNIEnv *env, jclass cls, jst
     p = (*env)->GetStringUTFChars(env, path, NULL);
     if (!p)
         return JNI_FALSE;
-    rc = xbox_FramebufferDumpBmp(p);
+    rc = host_window_stats(NULL, NULL) ? host_window_screenshot_bmp(p) : xbox_FramebufferDumpBmp(p);
     (*env)->ReleaseStringUTFChars(env, path, p);
     return rc == 0 ? JNI_TRUE : JNI_FALSE;
 }
