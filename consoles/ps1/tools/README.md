@@ -1,6 +1,6 @@
 # ps1_tools: the PS1 static recompiler (XBA-160, XBA-161, XBA-162)
 
-`python3 -m ps1_tools.recomp INPUT OUTDIR [--discovered FILE] [--report FILE] [--no-comments] [--sparse-labels]`: a
+`python3 -m ps1_tools.recomp INPUT OUTDIR [--discovered FILE] [--report FILE] [--no-comments] [--resume-all]`: a
 PlayStation program to C that runs on the core in `consoles/ps1/runtime` (contract: `ps1_recomp.h`, lifted-code
 ABI: `ps1_recomp_rt.h`, overview: [consoles/README.md](../../README.md)). INPUT is a PS-X EXE or a disc image
 (`.cue` / `.bin` / `.iso`). Pure Python 3, standard library only (the MIPS decoder is ours), so it runs in the
@@ -11,8 +11,8 @@ app's embedded CPython.
 | `exe.py` | PS-X EXE header; ISO 9660 on cooked (2048) and raw (2352, mode 1 / mode 2 form 1) images, `.cue` sheets; `SYSTEM.CNF` `BOOT=` (else `PSX.EXE`) |
 | `isa.py` | MIPS I decoder: class, registers read, plain and delayed destinations, targets; `conflicts()` (load delay rule) |
 | `discover.py` | images (the EXE, recorded RAM code), function discovery, jump tables, BIOS call stubs, record merging |
-| `lift.py` | one C function per discovered function |
-| `recomp.py` | the CLI: OUTDIR/ps1_rc_NNN.c (about 3000 instructions each) + ps1_rc_table.c |
+| `lift.py` | one C function per discovered function: blocks, event checks, memory accesses |
+| `recomp.py` | the CLI: OUTDIR/ps1_rc_AAAAAAAA.c (1000-4000 instructions each, « C files ») + ps1_rc_table.c |
 
 ## Code lives in RAM
 
@@ -51,11 +51,31 @@ by byte patterns) are not done: everything found is lifted; the stubs are the on
 ## Lifting
 
 Each instruction gets the interpreter's semantics (`ps1_cpu.c`), cycle for cycle: the fetch cost of the function's
-segment (KSEG1: 5, else 1) and the scheduler test before every instruction; LW-class loads (LW / LWL / LWR / LWC2)
-with the load cost of their target, LB / LH / stores without, as the interpreter; RAM and scratchpad inline (with
-the interpreter's address decode quirks), everything else through the core (`ps1_rc_lw`, `ps1_rc_read`,
-`ps1_rc_write`, `ps1_rc_swlr`), the IRQ line checked after such an access. GTE commands, MFC2 / CFC2 / MTC2 / CTC2 /
-LWC2 / SWC2 call `ps1_rc_gte_*` (SR.CU2 checked).
+segment (KSEG1: 5, else 1); LW-class loads (LW / LWL / LWR / LWC2) with the load cost of their target, LB / LH /
+stores without, as the interpreter; main RAM and the scratchpad inline (with the interpreter's address decode
+quirks). GTE commands, MFC2 / CFC2 / MTC2 / CTC2 / LWC2 / SWC2 call `ps1_rc_gte_*` (SR.CU2 checked). The scheduler
+is tested where the interpreter's loop would stop, with one check per segment (below).
+
+- **Memory accesses.** An access whose address is a known IO register (the base built by LUI, then ADDIU / ORI, in
+  the function, plus the offset, outside RAM and the scratchpad: `lift.io_accesses`, a heuristic for speed only) goes
+  through the core (`ps1_rc_lw`, `ps1_rc_read`, `ps1_rc_write`; SWL / SWR always: `ps1_rc_swlr`), the IRQ line
+  checked after it. Any other access is a RAM access: main RAM and the scratchpad inline, anything else (IO after
+  all, an address or bus error, a store into the running function's own code) handed to the interpreter with the
+  rest of its block (`RC_HAND`, nothing of the instruction done): one exit per access and no call into the core, so
+  its cycles are static.
+- **Blocks and event checks.** A function is cut into blocks: its entry, branch and jump targets, the instruction
+  after a transfer's delay slot (return points), after an instruction always handed to the interpreter, and every 12
+  instructions. Only block starts are resume points (a case of the entry switch). A segment runs from a block's start,
+  or from after a dynamic instruction (an access through the core, a GTE command), to the next dynamic one or the
+  block's end; its check, `RC_SEG`, compares `now` plus the static cycles of its instructions before the last (fetch,
+  and 3 per RAM load: an upper bound) with the next event: due now, the function stops there (the interpreter's own
+  stop); due inside the segment, the interpreter runs the rest of the block (`PS1_RC_EXIT_INTERP` with `rc_hint` =
+  how many instructions), so events land on the same instruction as in the interpreter. Entered inside a block (an
+  interrupt returns there), the function answers the same from a table (`mid_`). An IO access that left an interrupt
+  pending sets the local next event to 0: the check after it stops. This replaced a label, a scheduler test and an
+  exit per instruction, which made the C 3-5 times slower to compile (docs/android/prepare.md « PS1 packs »).
+- **Registers.** Guest registers live in locals: the ones the function writes are loaded at entry and written back
+  at every exit, the ones it only reads are `const` (the core never changes them), the others are not there.
 
 - **Load delay slots.** A load's value lands after the next instruction. When that instruction neither reads the
   register nor loads into it (`isa.conflicts`; LWL / LWR forward the value in flight, as the interpreter), the
@@ -63,17 +83,24 @@ LWC2 / SWC2 call `ps1_rc_gte_*` (SR.CU2 checked).
   too). Otherwise the function stops with the load in flight (`ld_reg` / `ld_val`) and the interpreter runs that
   instruction. A load in a delay slot is checked against the branch target's first instruction (same function) or
   left to the dispatcher, which applies the same rule to the instruction it finds in RAM.
-- **Branch delay slots** run inline after the branch; the condition and the link are computed first. A stop in front
-  of a slot (scheduler) leaves the interpreter's delay state (`next_delay`, `next_pc`, `next_taken`). A branch in a
-  delay slot is handed to the interpreter.
+- **Branch delay slots** run inline after the branch; the condition and the link are computed first. A slot handed
+  to the interpreter (a fault) leaves the interpreter's delay state (`next_delay`, `next_pc`, `next_taken`). A branch
+  in a delay slot is handed to the interpreter.
 - **Exceptions**: overflow (ADD / ADDI / SUB), address errors (alignment), bus errors (checked before the access,
-  `ps1_bus_fault`), SYSCALL, BREAK, reserved encodings, coprocessor unusable, and all of COP0 (MFC0, MTC0, RFE) are
-  handed to the interpreter with nothing of the instruction done (`PS1_RC_EXIT_INTERP`): it raises them exactly.
-- **Self-modifying code**: a store into the running function's own code stops it after the store; the dispatcher's
-  content check then sees the change.
+  `ps1_bus_fault`, or the access handed over), SYSCALL, BREAK, reserved encodings, coprocessor unusable, and all of
+  COP0 (MFC0, MTC0, RFE) are handed to the interpreter with nothing of the instruction done (`PS1_RC_EXIT_INTERP`):
+  it raises them exactly.
+- **Self-modifying code**: a store into the running function's own code is handed to the interpreter (a RAM
+  access), or stops the function after it (through the core); the dispatcher's content check then sees the change.
 - **Control flow**: branches inside the function are `goto`s; calls, returns, JR / JALR and jumps out of the function
-  return to the dispatcher (bounded C stack). Every instruction is a resume point (`--sparse-labels`: only branch
-  targets, return addresses and the instructions after accesses / hand-overs, ~10 % faster to compile).
+  return to the dispatcher (bounded C stack). `--resume-all` (debugging) makes every instruction a block of its own.
+
+## C files
+
+Functions in address order, a file ending after a function whose identity (start, hash) hashes to 0 mod 8 once it
+holds 1000 instructions, or at 4000 (`recomp.chunks_of`), named after its first function (`ps1_rc_80012340.c`;
+code recorded in RAM: `ps1_rc_80100000_1a2b3c4d.c`). Functions the discovery loop adds change the file they land in
+and seldom the next one: Prepare's object cache (and `ps1_recomp_build.py`'s) recompiles only those.
 
 ## Checking it
 
@@ -83,11 +110,16 @@ LWC2 / SWC2 call `ps1_rc_gte_*` (SR.CU2 checked).
   instruction) and prints both PCs at the first difference; `PS1_RC_ENTRIES=LO-HI` attaches only those table entries
   (bisecting a divergence).
 - `tools/consoles/ps1_recomp_build.py INPUT WORKDIR --loop N --ps1-run PATH --run-args "--bios X ..."`: lift, build
-  with the host cc (-O1), run, lift what was recorded, until a round records nothing new; `report.json` has the
-  rounds, functions, native share and compile time per 1000 instructions.
+  with the host cc (Prepare's flags, -O1; an object cache keyed by content), run, lift what was recorded, until a
+  round records nothing new; `report.json` has the rounds, functions, files compiled, native share and compile time
+  per 1000 instructions.
+- `consoles/ps1/tests/bench`: a synthetic game-sized program (`build_exe.sh`: `gen_exe.py`'s C, ~1100 functions of
+  game-like code, ~220k instructions, built by PSn00bSDK) and `compile_time.py` (CPU time of every compile with
+  Prepare's flags, host or NDK clang); never a game.
 - ctest `ps1_rc_*` (`consoles/ps1/tests`): our homebrew (EXE fast boot, and the overlay test from its disc) and
   JaCzekanski's ps1-tests, each through the discovery loop and then in lockstep; `ps1_rc_fuzz` (`recomp_fuzz.py`):
   random MIPS code (every ALU form, HI / LO, loads and stores of every width, load-use hazards, loads in delay
   slots, linking branches, JAL / JALR, GTE) under a timer IRQ every 37-2000 cycles.
 - pytest `test_recomp.py`: decoder, ISO 9660 on cooked and raw images, discovery on hand-encoded code (calls,
-  pointers, a jump table, a BIOS stub), overlays at one address, generated code, the CLI and C syntax.
+  pointers, a jump table, a BIOS stub), overlays at one address, generated code, the CLI and C syntax, blocks /
+  segment checks / IO accesses / register locals, resume points, files that stay the same when functions are found.

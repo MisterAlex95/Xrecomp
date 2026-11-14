@@ -292,7 +292,7 @@ def test_cli_and_c_compiles(tmp_path, capsys):
     summary = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
     assert summary["functions"] >= 4 and summary["bios_stubs"] == 1
     files = sorted(os.listdir(out))
-    assert "ps1_rc_table.c" in files and "ps1_rc_000.c" in files
+    assert "ps1_rc_table.c" in files and "ps1_rc_%08X.c" % BASE in files
     cc = shutil.which(os.environ.get("CC", "cc"))
     if not cc:
         pytest.skip("no C compiler")
@@ -314,3 +314,55 @@ def test_long_bodies_are_cut_off_delay_slots():
     assert funcs[0].end == BASE + (n - 1) * 4  # cut before the branch, not between it and its slot
     assert funcs[-1].end == BASE + len(w) * 4
     assert all(a.end == b.start for a, b in zip(funcs, funcs[1:]))
+
+
+# ---- blocks, event checks, registers ----
+def test_blocks_segments_and_registers():
+    from ps1_tools.discover import Function
+    from ps1_tools.lift import FnLifter
+    w = ([LUI(8, 0x1F80)] + [ADDIU(4, 4, 1)] * 4 + [LW(2, 0x1814, 8)] + [ADDIU(3, 3, 1)] * 6 + [LW(9, 0, isa.SP)]
+         + [ADDIU(3, 3, 1)] * 13 + [JR_RA, NOP])
+    img = Image(BASE, words(w), "exe")
+    c = FnLifter(Function(img, BASE, BASE + 4 * len(w)), "ps1_rc_t").function(comments=False)
+    # blocks of 12 instructions: three resume points; the rest answer from the mid_ table
+    assert [x for x in c.split("\n") if x.strip().startswith("case ")] == [
+        "    case 0x80010000u: goto L_80010000;", "    case 0x80010030u: goto L_80010030;",
+        "    case 0x80010060u: goto L_80010060;"]
+    assert "mid_[27] = {0, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0, 11," in c
+    # the GPU status register (a LUI base) goes through the core; the stack is a RAM access, handed over otherwise
+    assert "RC_LW(r8 + 0x00001814u, 3u, ldv, RC_INTERP(0x80010014u););" in c
+    assert "RC_LW_RAM(r29, 3u, ldv, RC_HAND(0x80010030u, 12););" in c
+    # one check per segment: up to the IO access (5 cycles before it), after it, then each block (the slot included;
+    # the RAM load counts its 3 cycles)
+    assert "RC_SEG(0x80010000u, 5, 12);" in c and "RC_SEG(0x80010018u, 5, 6);" in c
+    assert "RC_SEG(0x80010030u, 14, 12);" in c and "RC_SEG(0x80010060u, 3, 4);" in c
+    assert c.count("RC_SEG(") == 4 and c.count("RC_I();") == len(w)
+    # registers: written ones in locals written back, read-only ones const
+    assert "    uint32_t r2 = h->r[2], r3 = h->r[3], r4 = h->r[4], r8 = h->r[8], r9 = h->r[9];\n" in c
+    assert "    const uint32_t r29 = h->r[29], r31 = h->r[31];\n" in c
+    assert "h->r[2] = r2; h->r[3] = r3; h->r[4] = r4; h->r[8] = r8; h->r[9] = r9;" in c and "h->r[29] =" not in c
+
+
+def test_return_points_and_targets_are_resume_points():
+    from ps1_tools.lift import FnLifter
+    img = Image(BASE, program(), "exe")
+    main_f = [f for f in Discovery(img, {BASE}).run() if f.start == BASE][0]
+    c = FnLifter(main_f, "ps1_rc_main").function(comments=False)
+    for a in (0, 16, 24, 18 * 4, 22 * 4, 25 * 4):  # entry, after each JAL's slot, jump table targets
+        assert "case 0x%08Xu:" % (BASE + a) in c
+
+
+def test_files_stay_the_same_when_functions_are_found(tmp_path):
+    n, size = 300, 20
+    w = []
+    for k in range(n):
+        w += [ADDIU(2, 2, k + 1)] * (size - 2) + [JR_RA, NOP]
+    exe = Exe(make_exe(words(w)))
+    seeds = [(BASE + 4 * size * k, None) for k in range(n)]
+    out1, out2 = tmp_path / "a", tmp_path / "b"
+    recompile(exe, str(out1), [s for k, s in enumerate(seeds) if k != n // 2], comments=False)
+    recompile(exe, str(out2), seeds, comments=False)
+    f1 = {f: (out1 / f).read_text() for f in os.listdir(out1) if f != "ps1_rc_table.c"}
+    f2 = {f: (out2 / f).read_text() for f in os.listdir(out2) if f != "ps1_rc_table.c"}
+    assert len(f2) >= 4
+    assert len([f for f in f2 if f1.get(f) != f2[f]]) == 1  # the new function's file, nothing else

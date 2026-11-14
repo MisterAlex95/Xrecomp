@@ -6,23 +6,25 @@
 
 INPUT: a PS-X EXE or a disc image (.cue / .bin / .iso).
 1. `python3 -m ps1_tools.recomp INPUT WORKDIR/src [--discovered WORKDIR/discovered.txt]` (consoles/ps1/tools)
-2. every WORKDIR/src/*.c compiled with the host compiler (-O1 by default, -fPIC -I consoles/ps1/runtime), linked into
-   WORKDIR/libtitle.so (on macOS with -undefined dynamic_lookup: the core's symbols come from the executable)
+2. every WORKDIR/src/*.c compiled with the host compiler (Prepare's flags: tools/prepare/ps1.py lifted_cflags, -O1
+   by default; -fPIC -I consoles/ps1/runtime), linked into WORKDIR/libtitle.so (on macOS with -undefined
+   dynamic_lookup: the core's symbols come from the executable). Objects are kept in WORKDIR/obj, named by a hash of
+   the file and the command, as Prepare's object cache: a round compiles only the files the lifter changed.
 3. with --loop N: up to N rounds of  ps1_run INPUT --pack libtitle.so --missed WORKDIR/discovered.txt  then a rebuild
    with the code the interpreter had to run (bytes included: overlays), until a round records nothing new.
 
 --discovered FILE seeds WORKDIR/discovered.txt (appended). --count builds with -DPS1_RC_COUNT (native instruction
 counter: ps1_run --stats prints the native share). Writes WORKDIR/report.json (rounds, functions, instructions,
-records, native %, compile time per 1000 instructions). Exit 0 when the pack is built (and, with --loop, the loop
-converged), 1 otherwise.
+records, files compiled, native %, compile time per 1000 instructions when every file was compiled). Exit 0 when the
+pack is built (and, with --loop, the loop converged), 1 otherwise.
 """
 
 import argparse
+import hashlib
 import json
 import os
 import re
 import shlex
-import shutil
 import subprocess
 import sys
 import time
@@ -31,6 +33,8 @@ from concurrent.futures import ThreadPoolExecutor
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 TOOLS = os.path.join(REPO, "consoles", "ps1", "tools")
 RUNTIME = os.path.join(REPO, "consoles", "ps1", "runtime")
+sys.path.insert(0, REPO)
+from tools.prepare import ps1  # noqa: E402  (Prepare's flags for lifted PS1 code)
 
 
 def log(msg):
@@ -64,21 +68,28 @@ def lift(inp, src, discovered):
     return summary
 
 
-def build(src, lib, cc, opt, jobs, cflags):
+def build(src, lib, cc, opt, jobs, cflags, objdir):
+    """Compiles the files of src whose object is not in objdir yet (objects named by a hash of the file and the
+    command: Prepare's object cache, so a discovery round recompiles only the files it changed), links lib. Returns
+    (seconds, compiler seconds, files compiled, files)."""
     cfiles = sorted(f for f in os.listdir(src) if f.endswith(".c"))
-    objdir = os.path.join(src, "obj")
-    shutil.rmtree(objdir, ignore_errors=True)
-    os.makedirs(objdir)
+    os.makedirs(objdir, exist_ok=True)
     cpu = {}
 
     def compile_one(f):
-        obj = os.path.join(objdir, f[:-2] + ".o")
-        cmd = cc + [opt, "-fPIC", "-w", "-I", RUNTIME] + cflags + ["-c", os.path.join(src, f), "-o", obj]
+        path = os.path.join(src, f)
+        cmd = cc + opt + ["-fPIC", "-w", "-I", RUNTIME] + cflags + ["-c", path, "-o"]
+        with open(path, "rb") as fh:
+            key = hashlib.sha256(fh.read() + "\0".join(cmd).encode()).hexdigest()[:20]
+        obj = os.path.join(objdir, "%s-%s.o" % (f[:-2], key))
+        if os.path.exists(obj):
+            return obj
         t0 = time.time()
-        r = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        r = subprocess.run(cmd + [obj + ".tmp"], capture_output=True, text=True, check=False)
         cpu[f] = time.time() - t0
         if r.returncode != 0:
             raise RuntimeError("%s failed:\n%s" % (" ".join(cmd), r.stderr[-4000:]))
+        os.replace(obj + ".tmp", obj)
         return obj
 
     t0 = time.time()
@@ -90,7 +101,9 @@ def build(src, lib, cc, opt, jobs, cflags):
     r = subprocess.run(link, capture_output=True, text=True, check=False)
     if r.returncode != 0:
         raise RuntimeError("link failed:\n" + r.stderr)
-    return time.time() - t0, sum(cpu.values())
+    for old in set(os.listdir(objdir)) - {os.path.basename(o) for o in objs}:
+        os.remove(os.path.join(objdir, old))
+    return time.time() - t0, sum(cpu.values()), len(cpu), len(cfiles)
 
 
 def run_once(ps1_run, inp, lib, missed, frames, run_args):
@@ -127,6 +140,8 @@ def main(argv=None):
             out.write(f.read())
     cc = shlex.split(args.cc)
     cflags = ["-DPS1_RC_COUNT"] if args.count else []
+    opt = ps1.lifted_cflags(args.opt[2:] if args.opt.startswith("-O") else args.opt)
+    objdir = os.path.join(work, "obj")
     report = {"input": inp, "opt": args.opt, "rounds": []}
     try:
         rounds = max(1, args.loop)
@@ -136,16 +151,20 @@ def main(argv=None):
         for i in range(1, rounds + 1):
             before = records(disc)
             summary = lift(inp, src, disc)
-            secs, cpu = build(src, lib, cc, args.opt, args.jobs, cflags)
+            secs, cpu, compiled, nfiles = build(src, lib, cc, opt, args.jobs, cflags, objdir)
             insns = max(1, summary["instructions"])
             rnd = {"round": i, "functions": summary["functions"], "instructions": summary["instructions"],
                    "ram_functions": summary["ram_functions"], "records_in": len(before),
                    "lift_seconds": summary["lift_seconds"], "build_seconds": round(secs, 2),
-                   "compile_cpu_seconds_per_1k_insns": round(cpu * 1000.0 / insns, 3)}
+                   "files": nfiles, "files_compiled": compiled}
+            if compiled == nfiles:
+                rnd["compile_cpu_seconds_per_1k_insns"] = round(cpu * 1000.0 / insns, 3)
             log("round %d: %d functions (%d from recorded RAM code), %d instructions, %d records in, lifted in %.1f s, "
-                "built in %.1f s (%.2f s of compiler per 1000 instructions, %s)"
+                "built in %.1f s (%d of %d files compiled%s, %s)"
                 % (i, summary["functions"], summary["ram_functions"], summary["instructions"], len(before),
-                   summary["lift_seconds"], secs, rnd["compile_cpu_seconds_per_1k_insns"], args.opt))
+                   summary["lift_seconds"], secs, compiled, nfiles,
+                   ", %.2f s of compiler per 1000 instructions" % rnd["compile_cpu_seconds_per_1k_insns"]
+                   if compiled == nfiles else "", " ".join(opt)))
             if args.loop:
                 rc, native, _ = run_once(args.ps1_run, inp, lib, disc, args.frames, shlex.split(args.run_args))
                 after = records(disc)
@@ -161,7 +180,7 @@ def main(argv=None):
         if args.loop and not converged:
             # the last round's records are not lifted yet: one more build so the pack holds them
             lift(inp, src, disc)
-            build(src, lib, cc, args.opt, args.jobs, cflags)
+            build(src, lib, cc, opt, args.jobs, cflags, objdir)
             log("not converged after %d rounds (pack rebuilt with every record)" % rounds)
         report["converged"] = converged
         report["rounds_run"] = len(report["rounds"])

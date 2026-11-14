@@ -9,11 +9,13 @@
  * ps1_rc_lw, ps1_rc_read, ps1_rc_write, ps1_rc_swlr, ps1_rc_gte_cmd, ps1_rc_gte_read, ps1_rc_gte_write.
  *
  * Lifted code is cycle-exact with the interpreter (ps1_cpu.c): every instruction costs the same fetch cycles, LW-class
- * loads the same load cycles, at the same point; before each instruction it checks `cycles < next_event`, as the run
- * loop does; after an access that left main RAM (IO: it may raise an interrupt) it checks the IRQ line. When it must
- * stop (scheduler event, pending IRQ, a call, a return, an indirect jump, a jump out of the function: the dispatcher
- * picks the next function), it writes the registers back with pc / next_pc / the delay-slot flags exactly as the
- * interpreter would hold them between two instructions, and returns.
+ * loads the same load cycles, at the same point; it stops where the run loop would (`cycles < next_event` before each
+ * instruction): exactly at the start of a block, and once per segment inside it (ps1_tools lift.py « blocks and event
+ * checks »: when the next event falls inside a segment, the interpreter runs the rest of the block). An access that
+ * left main RAM (IO: it may raise an interrupt) and left the IRQ line up, or a store into the function's own code,
+ * stops it after that instruction. When it must stop (scheduler event, pending IRQ, a call, a return, an indirect
+ * jump, a jump out of the function: the dispatcher picks the next function), it writes the registers back with pc /
+ * next_pc / the delay-slot flags exactly as the interpreter would hold them between two instructions, and returns.
  *
  * Load delay slots: a load's value lands after the next instruction. The lifter commits it at once when the next
  * instruction neither reads the register nor loads into it (then nothing can tell the difference: an exception or an
@@ -24,8 +26,13 @@
  * PS1_RC_EXIT_INTERP and the state in front of that instruction, nothing of it done.
  *
  * Entry: the dispatcher calls a table function with pc at any instruction of its range, never in a delay slot, never
- * with a load in flight, in kernel mode with the cache not isolated (it interprets otherwise). The function resumes at
- * that instruction; if pc is not one of its own it returns at once with rc_exit = PS1_RC_EXIT_NOT_COVERED. */
+ * with a load in flight, in kernel mode with the cache not isolated (it interprets otherwise). The function resumes
+ * there when it is the start of one of its blocks (the resume points: its entry, jump targets, return points, every
+ * few instructions). At another of its instructions it returns at once with PS1_RC_EXIT_INTERP and rc_hint = the
+ * number of instructions to its block's end, nothing changed: the interpreter runs them (as when an event stopped
+ * lifted code there, or an interrupt handler returns there). If pc is not one of its own it returns at once with
+ * rc_exit = PS1_RC_EXIT_NOT_COVERED. (Packs from before rc_hint resumed at every instruction; both kinds run on every
+ * core of PS1_RECOMP_ABI 1: an older core ignores rc_hint and calls the function back for each instruction.) */
 #ifndef PS1_RECOMP_RT_H
 #define PS1_RECOMP_RT_H
 
@@ -65,6 +72,7 @@ typedef struct ps1_rc_head {
     uint32_t *ram_gen;      /* write counter per 1 KB RAM page: lifted stores bump it like the core's */
     uint64_t rc_native;     /* instructions run natively (counted when the pack is built with -DPS1_RC_COUNT) */
     uint8_t rc_exit;        /* PS1_RC_EXIT_*: why lifted code returned */
+    uint8_t rc_hint;        /* with PS1_RC_EXIT_INTERP: see below (0 before each call; older cores ignore it) */
 } ps1_rc_head;
 
 enum {
@@ -72,6 +80,10 @@ enum {
     PS1_RC_EXIT_INTERP = 1,      /* the interpreter runs the instruction at pc, then dispatch goes on */
     PS1_RC_EXIT_NOT_COVERED = 2, /* this function does not hold pc: nothing ran */
 };
+
+/* rc_hint with PS1_RC_EXIT_INTERP: how many instructions, in sequence from pc, the interpreter may run before calling
+ * lifted code again (the rest of a lifted block: no resume point inside); 0 = 1. The core stops counting as soon as
+ * execution leaves the sequence (a taken branch, an interrupt). */
 
 /* The core's side (ps1_recomp.c). Each returns 0, or the exception the access raises (EXC_* code) with nothing done
  * and no cycle spent: the lifted code then hands the instruction to the interpreter, which raises it. */
@@ -87,32 +99,45 @@ void ps1_rc_gte_write(ps1_machine *m, int r, uint32_t v);                /* MTC2
  *
  *   RC_FN f(ps1_machine *m_) {
  *       RC_ENTER(cpi, plo, plen);
- *       switch (h->pc) { case 0x80010000u: goto L_80010000; ... default: RC_NOT_COVERED(); }
- *   L_80010000: RC_I(0x80010000u); ... one instruction ...
+ *       uint32_t r2 = h->r[2], r29 = h->r[29];           (the registers it writes)
+ *       const uint32_t r4 = h->r[4];                      (the ones it only reads)
+ *       switch (h->pc) {
+ *       case 0x80010000u: goto L_80010000;               (the resume points)
+ *       default: { static const uint8_t mid_[] = {...}; RC_MID_TABLE(0x80010000u, mid_); RC_NOT_COVERED(); }
+ *       }
+ *   L_80010000:
+ *       RC_SEG(0x80010000u, 2, 5);                       (a segment: its static cycles, instructions to the block end)
+ *       RC_I(); ... one instruction ...
+ *       RC_I(); ... a memory access ...
+ *       RC_SEG(0x8001000Cu, 0, 3);                       (the next segment)
  *       ...
  *       RC_EXIT(end);
  *       RC_EPILOGUE();
+ *       h->r[2] = r2; h->r[29] = r29;
  *   }
  *
  * cpi: cycles per instruction fetch (the interpreter's, by segment); plo / plen: the function's code in RAM (offset
- * in the 2 MB, bytes), for the self-modification check after stores. Guest registers live in locals; `now` and `ne`
- * (next event) too, synced around every call into the core; `chk` asks to stop after the current instruction
- * (a store hit this function's own code, or an IO access left an interrupt pending). */
+ * in the 2 MB, bytes), for the self-modification check after stores. Guest registers live in locals, declared by the
+ * lifted function after RC_ENTER: the ones it writes as `uint32_t r5 = h->r[5];`, written back after RC_EPILOGUE
+ * (`h->r[5] = r5;`), the ones it only reads as `const uint32_t`, not written back (the core's functions never change
+ * the CPU's registers); the same for hi / lo. `now` and `ne` (next event) live in locals too, synced around every call
+ * into the core. A store that hit this function's own code, or an IO
+ * access that left an interrupt pending, sets `ne` to 0: the check of the next segment (one follows every access)
+ * leaves for the dispatcher. */
 #define RC_ENTER(CPI, PLO, PLEN)                                                                                     \
     ps1_rc_head *const h = (ps1_rc_head *)(void *)m_;                                                                \
     enum { RC_CPI = (CPI) };                                                                                         \
     const uint32_t rc_plo = (PLO), rc_plen = (PLEN);                                                                 \
-    uint32_t r1 = h->r[1], r2 = h->r[2], r3 = h->r[3], r4 = h->r[4], r5 = h->r[5], r6 = h->r[6], r7 = h->r[7];      \
-    uint32_t r8 = h->r[8], r9 = h->r[9], r10 = h->r[10], r11 = h->r[11], r12 = h->r[12], r13 = h->r[13];           \
-    uint32_t r14 = h->r[14], r15 = h->r[15], r16 = h->r[16], r17 = h->r[17], r18 = h->r[18], r19 = h->r[19];       \
-    uint32_t r20 = h->r[20], r21 = h->r[21], r22 = h->r[22], r23 = h->r[23], r24 = h->r[24], r25 = h->r[25];       \
-    uint32_t r26 = h->r[26], r27 = h->r[27], r28 = h->r[28], r29 = h->r[29], r30 = h->r[30], r31 = h->r[31];       \
-    uint32_t hi = h->hi, lo = h->lo;                                                                                 \
+    uint8_t *const rc_ram = h->ram, *const rc_scratch = h->scratch;                                                  \
+    uint32_t *const rc_gen = h->ram_gen;                                                                             \
     uint64_t now = h->cycles, ne = h->next_event;                                                                    \
-    uint32_t epc = 0, enp = 0, tk = 0, jt = 0, ldv = 0, chk = 0;                                                     \
+    uint32_t epc = 0, enp = 0, tk = 0, jt = 0, ldv = 0, ehint = 0;                                                   \
     bool edl = false, etk = false;                                                                                   \
     (void)rc_plo;                                                                                                    \
-    (void)rc_plen
+    (void)rc_plen;                                                                                                   \
+    (void)rc_ram;                                                                                                    \
+    (void)rc_scratch;                                                                                                \
+    (void)rc_gen
 
 #define RC_M ((ps1_machine *)(void *)h)
 
@@ -147,21 +172,35 @@ void ps1_rc_gte_write(ps1_machine *m, int r, uint32_t v);                /* MTC2
         RC_EXIT(A);                                                                                                  \
     } while (0)
 
-/* Start of the instruction at A: stop in front of it when the scheduler is due (the interpreter's loop test), then
- * its fetch. RC_I_SLOT: the same for a delay slot (NPC: where its branch goes, TK: taken). */
-#define RC_I(A)                                                                                                      \
+/* Start of an instruction: its fetch. */
+#define RC_I()                                                                                                       \
     do {                                                                                                             \
-        if (__builtin_expect(now >= ne, 0))                                                                          \
-            RC_EXIT(A);                                                                                              \
         now += RC_CPI;                                                                                               \
         RC_COUNT();                                                                                                  \
     } while (0)
-#define RC_I_SLOT(A, NPC, TK)                                                                                        \
+
+/* The event check of a segment starting at A (ps1_tools lift.py « blocks and event checks »): CYC static cycles before
+ * its last instruction, N instructions from A to the end of its block. Due now: leave for the dispatcher (the run
+ * loop's own check, in front of A); due inside the segment: the interpreter runs from A (N instructions: rc_hint). */
+#define RC_SEG(A, CYC, N)                                                                                            \
     do {                                                                                                             \
-        if (__builtin_expect(now >= ne, 0))                                                                          \
-            RC_GO((A), (NPC), true, (TK));                                                                           \
-        now += RC_CPI;                                                                                               \
-        RC_COUNT();                                                                                                  \
+        if (__builtin_expect(now + (CYC) >= ne, 0)) {                                                                \
+            epc = (A);                                                                                               \
+            ehint = (N);                                                                                             \
+            goto x_seg;                                                                                              \
+        }                                                                                                            \
+    } while (0)
+
+/* Entered at pc, not a resume point: TAB[(pc - LO) / 4] is the number of instructions to the end of pc's block (0:
+ * not one of this function's instructions): the interpreter runs them, nothing done here. */
+#define RC_MID_TABLE(LO, TAB)                                                                                        \
+    do {                                                                                                             \
+        uint32_t o__ = h->pc - (LO), i__ = o__ >> 2;                                                                 \
+        if (!(o__ & 3u) && i__ < sizeof(TAB) && (TAB)[i__]) {                                                        \
+            h->rc_hint = (TAB)[i__];                                                                                 \
+            h->rc_exit = PS1_RC_EXIT_INTERP;                                                                         \
+            return;                                                                                                  \
+        }                                                                                                            \
     } while (0)
 
 /* The interpreter runs the instruction at A instead (its fetch is undone: the interpreter counts it). */
@@ -169,6 +208,13 @@ void ps1_rc_gte_write(ps1_machine *m, int r, uint32_t v);                /* MTC2
     do {                                                                                                             \
         epc = (A);                                                                                                   \
         goto x_interp;                                                                                               \
+    } while (0)
+/* ... and the N - 1 instructions after it, the rest of its block (rc_hint). */
+#define RC_HAND(A, N)                                                                                                \
+    do {                                                                                                             \
+        epc = (A);                                                                                                   \
+        ehint = (N);                                                                                                 \
+        goto x_hand;                                                                                                 \
     } while (0)
 #define RC_INTERP_SLOT(A, NPC, TK)                                                                                   \
     do {                                                                                                             \
@@ -199,23 +245,34 @@ static inline bool rc_is_hook(uint32_t t)
 
 /* Calls into the core: the clock goes out and comes back with the next event; an IO access may raise an IRQ. */
 #define RC_SYNC_OUT() (h->cycles = now)
-#define RC_SYNC_IN() (now = h->cycles, ne = h->next_event, chk |= h->irq_pending)
+#define RC_SYNC_IN() (now = h->cycles, ne = h->irq_pending ? 0 : h->next_event)
+
+/* Memory accesses. A: the address; AL: its alignment mask (3 for a word, 1 for a halfword, 0 for a byte: a misaligned
+ * address is an address error); FAULT: the statement that hands the instruction to the interpreter, which raises the
+ * exception (written once: one exit per access). Main RAM inline (the fast test, alignment included), the scratchpad
+ * inline, the rest through the core. RC_RAM_FAST's SEGS: the segments (A >> 29, a bit each) whose low 8 MB reach main
+ * RAM for that access. rc_ram / rc_scratch / rc_gen: the head's pointers, in locals (RC_ENTER). */
+#define RC_RAM_FAST(A, AL, SEGS) (((A) & (0x1F800000u | (AL))) == 0 && ((SEGS) >> ((A) >> 29) & 1u))
 
 /* LW-class loads (the interpreter's load32): main RAM (any segment but KSEG2 / 1-3 holes, as the interpreter) costs 3
- * cycles, the scratchpad nothing, the rest through ps1_rc_lw. A is 4-aligned. FAULT runs when the access raises. */
-#define RC_LW(A, OUT, FAULT)                                                                                         \
+ * cycles, the scratchpad nothing, the rest through ps1_rc_lw. */
+#define RC_LW(A, AL, OUT, FAULT)                                                                                     \
     do {                                                                                                             \
-        uint32_t a_ = (A), s_ = a_ >> 29, p_ = a_ & 0x1FFFFFFFu;                                                     \
-        if (__builtin_expect(p_ < 0x00800000u && (s_ == 0 || (s_ >= 4 && s_ != 7)), 1)) {                            \
-            memcpy(&(OUT), h->ram + (p_ & 0x1FFFFCu), 4);                                                            \
+        uint32_t a_ = (A);                                                                                           \
+        if (__builtin_expect(RC_RAM_FAST(a_, AL, 0x71u), 1)) {                                                       \
+            memcpy(&(OUT), rc_ram + (a_ & 0x1FFFFCu), 4);                                                            \
             now += 3;                                                                                                \
-        } else if (s_ != 7 && (p_ & 0xFFFFFC00u) == 0x1F800000u) {                                                   \
-            memcpy(&(OUT), h->scratch + (p_ & 0x3FCu), 4);                                                           \
         } else {                                                                                                     \
             uint32_t v_ = 0;                                                                                         \
-            RC_SYNC_OUT();                                                                                           \
-            int e_ = ps1_rc_lw(RC_M, a_, &v_);                                                                       \
-            RC_SYNC_IN();                                                                                            \
+            int e_ = (a_ & (AL)) != 0;                                                                               \
+            if (e_) {                                                                                                \
+            } else if ((a_ >> 29) != 7 && (a_ & 0x1FFFFC00u) == 0x1F800000u) {                                       \
+                memcpy(&v_, rc_scratch + (a_ & 0x3FCu), 4);                                                          \
+            } else {                                                                                                 \
+                RC_SYNC_OUT();                                                                                       \
+                e_ = ps1_rc_lw(RC_M, a_, &v_);                                                                       \
+                RC_SYNC_IN();                                                                                        \
+            }                                                                                                        \
             if (e_) {                                                                                                \
                 FAULT;                                                                                               \
             }                                                                                                        \
@@ -225,19 +282,24 @@ static inline bool rc_is_hook(uint32_t t)
 
 /* LB / LH / LBU / LHU: the bus's decode (RAM in KUSEG / KSEG0 / KSEG1, scratchpad in KUSEG / KSEG0), no cycles.
  * T is the C type the value is read as (int8_t, uint16_t, ...); OUT gets it sign- or zero-extended. */
-#define RC_LD(T, A, OUT, FAULT)                                                                                      \
+#define RC_LD(T, A, AL, OUT, FAULT)                                                                                  \
     do {                                                                                                             \
-        uint32_t a_ = (A), s_ = a_ >> 29, p_ = a_ & 0x1FFFFFFFu;                                                     \
+        uint32_t a_ = (A);                                                                                           \
         T t_;                                                                                                        \
-        if (__builtin_expect(p_ < 0x00800000u && (s_ == 0 || s_ == 4 || s_ == 5), 1)) {                              \
-            memcpy(&t_, h->ram + (p_ & 0x1FFFFFu), sizeof t_);                                                       \
-        } else if ((s_ == 0 || s_ == 4) && (p_ & 0xFFFFFC00u) == 0x1F800000u) {                                      \
-            memcpy(&t_, h->scratch + (p_ & 0x3FFu), sizeof t_);                                                      \
+        if (__builtin_expect(RC_RAM_FAST(a_, AL, 0x31u), 1)) {                                                       \
+            memcpy(&t_, rc_ram + (a_ & 0x1FFFFFu), sizeof t_);                                                       \
         } else {                                                                                                     \
             uint32_t v_ = 0;                                                                                         \
-            RC_SYNC_OUT();                                                                                           \
-            int e_ = ps1_rc_read(RC_M, a_, (int)sizeof t_, &v_);                                                     \
-            RC_SYNC_IN();                                                                                            \
+            int e_ = (a_ & (AL)) != 0;                                                                               \
+            if (e_) {                                                                                                \
+            } else if ((0x11u >> (a_ >> 29) & 1u) && (a_ & 0x1FFFFC00u) == 0x1F800000u) {                            \
+                memcpy(&t_, rc_scratch + (a_ & 0x3FFu), sizeof t_);                                                  \
+                v_ = (uint32_t)t_;                                                                                   \
+            } else {                                                                                                 \
+                RC_SYNC_OUT();                                                                                       \
+                e_ = ps1_rc_read(RC_M, a_, (int)sizeof t_, &v_);                                                     \
+                RC_SYNC_IN();                                                                                        \
+            }                                                                                                        \
             if (e_) {                                                                                                \
                 FAULT;                                                                                               \
             }                                                                                                        \
@@ -248,29 +310,77 @@ static inline bool rc_is_hook(uint32_t t)
 
 /* SB / SH / SW: RAM stores bump the page's write counter and stop after the instruction when they hit this
  * function's own code; the scratchpad inline; the rest through ps1_rc_write. */
-#define RC_ST(T, A, V, FAULT)                                                                                        \
+#define RC_ST(T, A, AL, V, FAULT)                                                                                    \
     do {                                                                                                             \
-        uint32_t a_ = (A), s_ = a_ >> 29, p_ = a_ & 0x1FFFFFFFu;                                                     \
+        uint32_t a_ = (A);                                                                                           \
         T t_ = (T)(V);                                                                                               \
-        if (__builtin_expect(p_ < 0x00800000u && (s_ == 0 || s_ == 4 || s_ == 5), 1)) {                              \
-            uint32_t o_ = p_ & 0x1FFFFFu;                                                                            \
-            memcpy(h->ram + o_, &t_, sizeof t_);                                                                     \
-            h->ram_gen[o_ >> 10]++;                                                                                  \
+        if (__builtin_expect(RC_RAM_FAST(a_, AL, 0x31u), 1)) {                                                       \
+            uint32_t o_ = a_ & 0x1FFFFFu;                                                                            \
+            memcpy(rc_ram + o_, &t_, sizeof t_);                                                                     \
+            rc_gen[o_ >> 10]++;                                                                                      \
             if (__builtin_expect(o_ - rc_plo < rc_plen, 0))                                                          \
-                chk = 1;                                                                                             \
-        } else if ((s_ == 0 || s_ == 4) && (p_ & 0xFFFFFC00u) == 0x1F800000u) {                                      \
-            memcpy(h->scratch + (p_ & 0x3FFu), &t_, sizeof t_);                                                      \
+                ne = 0;                                                                                              \
         } else {                                                                                                     \
-            RC_SYNC_OUT();                                                                                           \
-            int e_ = ps1_rc_write(RC_M, a_, (int)sizeof t_, (uint32_t)t_);                                           \
-            RC_SYNC_IN();                                                                                            \
+            int e_ = (a_ & (AL)) != 0;                                                                               \
+            if (e_) {                                                                                                \
+            } else if ((0x11u >> (a_ >> 29) & 1u) && (a_ & 0x1FFFFC00u) == 0x1F800000u) {                            \
+                memcpy(rc_scratch + (a_ & 0x3FFu), &t_, sizeof t_);                                                  \
+            } else {                                                                                                 \
+                RC_SYNC_OUT();                                                                                       \
+                e_ = ps1_rc_write(RC_M, a_, (int)sizeof t_, (uint32_t)t_);                                           \
+                RC_SYNC_IN();                                                                                        \
+            }                                                                                                        \
             if (e_) {                                                                                                \
                 FAULT;                                                                                               \
             }                                                                                                        \
         }                                                                                                            \
     } while (0)
 
-/* SWL / SWR: always through the core (rare); may modify code, so stop after them when they touched RAM. */
+/* RAM accesses (ps1_tools lift.py « memory accesses »: the address is not a known IO register): main RAM and the
+ * scratchpad inline, as above; anything else (IO after all, an address or bus error, a store into this function's
+ * own code) runs HAND, which gives the instruction to the interpreter, nothing of it done. No call into the core:
+ * the clock and the next event only move by the static cycles. */
+#define RC_SCRATCH_OK(A, SEGS) (((SEGS) >> ((A) >> 29) & 1u) && ((A) & 0x1FFFFC00u) == 0x1F800000u)
+#define RC_LW_RAM(A, AL, OUT, HAND)                                                                                  \
+    do {                                                                                                             \
+        uint32_t a_ = (A);                                                                                           \
+        if (__builtin_expect(RC_RAM_FAST(a_, AL, 0x71u), 1)) {                                                       \
+            memcpy(&(OUT), rc_ram + (a_ & 0x1FFFFCu), 4);                                                            \
+            now += 3;                                                                                                \
+        } else if (!(a_ & (AL)) && RC_SCRATCH_OK(a_, 0x7Fu)) {                                                       \
+            memcpy(&(OUT), rc_scratch + (a_ & 0x3FCu), 4);                                                           \
+        } else {                                                                                                     \
+            HAND;                                                                                                    \
+        }                                                                                                            \
+    } while (0)
+#define RC_LD_RAM(T, A, AL, OUT, HAND)                                                                               \
+    do {                                                                                                             \
+        uint32_t a_ = (A);                                                                                           \
+        T t_;                                                                                                        \
+        if (__builtin_expect(RC_RAM_FAST(a_, AL, 0x31u), 1)) {                                                       \
+            memcpy(&t_, rc_ram + (a_ & 0x1FFFFFu), sizeof t_);                                                       \
+        } else if (!(a_ & (AL)) && RC_SCRATCH_OK(a_, 0x11u)) {                                                       \
+            memcpy(&t_, rc_scratch + (a_ & 0x3FFu), sizeof t_);                                                      \
+        } else {                                                                                                     \
+            HAND;                                                                                                    \
+        }                                                                                                            \
+        (OUT) = (uint32_t)(int32_t)t_;                                                                               \
+    } while (0)
+#define RC_ST_RAM(T, A, AL, V, HAND)                                                                                 \
+    do {                                                                                                             \
+        uint32_t a_ = (A), o_ = a_ & 0x1FFFFFu;                                                                      \
+        T t_ = (T)(V);                                                                                               \
+        if (__builtin_expect(RC_RAM_FAST(a_, AL, 0x31u) && o_ - rc_plo >= rc_plen, 1)) {                             \
+            memcpy(rc_ram + o_, &t_, sizeof t_);                                                                     \
+            rc_gen[o_ >> 10]++;                                                                                      \
+        } else if (!(a_ & (AL)) && RC_SCRATCH_OK(a_, 0x11u)) {                                                       \
+            memcpy(rc_scratch + (a_ & 0x3FFu), &t_, sizeof t_);                                                      \
+        } else {                                                                                                     \
+            HAND;                                                                                                    \
+        }                                                                                                            \
+    } while (0)
+
+/* SWL / SWR: always through the core (rare); may modify code, so stop after them. */
 #define RC_SWLR(A, V, RIGHT, FAULT)                                                                                  \
     do {                                                                                                             \
         RC_SYNC_OUT();                                                                                               \
@@ -279,7 +389,7 @@ static inline bool rc_is_hook(uint32_t t)
         if (e_) {                                                                                                    \
             FAULT;                                                                                                   \
         }                                                                                                            \
-        chk = 1;                                                                                                     \
+        ne = 0;                                                                                                      \
     } while (0)
 
 /* LWL / LWR merge: CUR the register as the instruction sees it (the load in flight forwarded), W the aligned word. */
@@ -324,12 +434,20 @@ static inline void rc_divu(uint32_t n, uint32_t d, uint32_t *hi, uint32_t *lo)
 #define RC_CU2() ((h->cop0[12] & 0x40000000u) != 0)
 
 #define RC_EPILOGUE()                                                                                                \
+    x_seg: __attribute__((unused));                                                                                  \
+    if (now < ne) {                                                                                                  \
+        h->rc_exit = PS1_RC_EXIT_INTERP;                                                                             \
+        h->rc_hint = (uint8_t)ehint;                                                                                 \
+    }                                                                                                                \
+    goto x_plain;                                                                                                    \
     x_interp_slot: __attribute__((unused));                                                                          \
     now -= RC_CPI;                                                                                                   \
     RC_UNCOUNT();                                                                                                    \
     h->rc_exit = PS1_RC_EXIT_INTERP;                                                                                 \
     edl = true;                                                                                                      \
     goto x_exit;                                                                                                     \
+    x_hand: __attribute__((unused));                                                                                 \
+    h->rc_hint = (uint8_t)ehint;                                                                                     \
     x_interp: __attribute__((unused));                                                                               \
     now -= RC_CPI;                                                                                                   \
     RC_UNCOUNT();                                                                                                    \
@@ -343,15 +461,8 @@ static inline void rc_divu(uint32_t n, uint32_t d, uint32_t *hi, uint32_t *lo)
     h->next_pc = enp;                                                                                                \
     h->next_delay = edl;                                                                                             \
     h->next_taken = etk;                                                                                             \
-    h->r[1] = r1; h->r[2] = r2; h->r[3] = r3; h->r[4] = r4; h->r[5] = r5; h->r[6] = r6; h->r[7] = r7;              \
-    h->r[8] = r8; h->r[9] = r9; h->r[10] = r10; h->r[11] = r11; h->r[12] = r12; h->r[13] = r13; h->r[14] = r14;    \
-    h->r[15] = r15; h->r[16] = r16; h->r[17] = r17; h->r[18] = r18; h->r[19] = r19; h->r[20] = r20;                \
-    h->r[21] = r21; h->r[22] = r22; h->r[23] = r23; h->r[24] = r24; h->r[25] = r25; h->r[26] = r26;                \
-    h->r[27] = r27; h->r[28] = r28; h->r[29] = r29; h->r[30] = r30; h->r[31] = r31;                                \
-    h->hi = hi;                                                                                                      \
-    h->lo = lo;                                                                                                      \
     h->cycles = now;                                                                                                 \
-    (void)tk; (void)jt; (void)ldv; (void)chk
+    (void)tk; (void)jt; (void)ldv; (void)ehint
 
 /* Marks the functions of a pack (hidden: only the table function is exported). */
 #define RC_FN __attribute__((visibility("hidden"))) void

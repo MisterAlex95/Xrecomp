@@ -124,6 +124,17 @@ def test_serial_matches_the_loader():
     assert ps1.exe_key(exe) == "EXE-%08X" % (zlib.crc32(exe) & 0xFFFFFFFF)
 
 
+def test_compile_flags_and_jobs():
+    """Lifted PS1 code compiles at -O1 for --opt 2 / 3 without the SLP vectorizer (XBA-161), and the job pool counts
+    256 MB per compile with a 1 GB reserve."""
+    from tools.prepare import compile as cc
+    assert [ps1.ps1_opt(o) for o in ("0", "1", "2", "3", "s")] == ["0", "1", "1", "1", "s"]
+    flags = ps1.compile_flags(ps1.ps1_opt("2"), ROOT, "/gen")
+    assert "-O1" in flags and "-fno-tree-slp-vectorize" in flags and "-O2" not in flags
+    assert cc.default_jobs(3 << 30, 8, ps1.PS1_JOB_RSS, ps1.PS1_RESERVED) == 5
+    assert cc.default_jobs(int(1.6 * (1 << 30)), 8, ps1.PS1_JOB_RSS, ps1.PS1_RESERVED) == 2
+
+
 def test_read_source(tmp_path):
     exe = make_exe()
     for raw in (False, True):

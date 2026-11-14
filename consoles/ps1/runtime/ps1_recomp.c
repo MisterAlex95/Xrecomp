@@ -43,6 +43,7 @@ _Static_assert(offsetof(ps1_machine, rc_scratch) == offsetof(ps1_rc_head, scratc
 HEAD_AT(ram_gen);
 HEAD_AT(rc_native);
 HEAD_AT(rc_exit);
+HEAD_AT(rc_hint);
 _Static_assert(PS1_RAM_PAGE_SHIFT == 10, "lifted stores bump ram_gen[offset >> 10]");
 
 #define CACHE_BITS 14
@@ -83,6 +84,7 @@ struct ps1_rc_state {
     uint32_t nrefs;
     bool booted;                /* the CPU reached the table's boot_pc (the BIOS is done) */
     uint32_t interp_pc;         /* lifted code handed this instruction to the interpreter */
+    uint32_t interp_left;       /* and this many in sequence from there (rc_hint: the rest of a lifted block) */
     uint32_t expect;            /* the instruction after the last interpreted RAM step */
     ps1_recomp_stats stats;
     rc_missed *missed;
@@ -556,13 +558,19 @@ void ps1_recomp_run(ps1_machine *m)
         }
         if (pc == s->interp_pc || m->next_delay || (m->cop0[C0_SR] & (SR_KUC | SR_ISC))) {
             /* the instruction lifted code left to the interpreter (after the loop's checks), a delay slot, user mode
-             * or an isolated cache */
-            if (pc == s->interp_pc)
+             * or an isolated cache. Then the rest of its block, while execution stays in sequence: inside a block
+             * nothing is a resume point. */
+            bool handed = pc == s->interp_pc;
+            if (handed)
                 s->stats.fallbacks++;
             s->interp_pc = KEY_NONE;
             s->stats.interp_ram++;
             ps1_cpu_step(m);
             s->expect = KEY_NONE;
+            if (handed && s->interp_left > 1 && m->pc == pc + 4) {
+                s->interp_pc = pc + 4;
+                s->interp_left--;
+            }
             continue;
         }
         if (m->ld_reg) {
@@ -581,14 +589,17 @@ void ps1_recomp_run(ps1_machine *m)
         int32_t e = lookup(m, s, pc);
         if (e >= 0) {
             m->rc_exit = PS1_RC_EXIT_NORMAL;
+            m->rc_hint = 0;
             s->table->entries[e].fn(m);
             m->r[0] = 0;
             uint8_t why = m->rc_exit;
             m->rc_exit = PS1_RC_EXIT_NORMAL;
             if (why != PS1_RC_EXIT_NOT_COVERED) {
                 s->stats.calls++;
-                if (why == PS1_RC_EXIT_INTERP)
+                if (why == PS1_RC_EXIT_INTERP) {
                     s->interp_pc = m->pc;
+                    s->interp_left = m->rc_hint ? m->rc_hint : 1;
+                }
                 s->expect = KEY_NONE;
                 continue;
             }

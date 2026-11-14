@@ -692,14 +692,47 @@ else `PSX.EXE`; for an EXE, the file), not of the image:
 | 5 | `pack` | `libtitle.so`, `pack.json`, atomic publish as `packs/ps1-<KEY>` | `link` |
 
 The lift reads the copied EXE, not the image: the image is opened once, in step 1. Compile flags: the GBA's with
-`-I<toolkit>/consoles/ps1/runtime` (`--target=aarch64-linux-android30 --sysroot=<sysroot> [-resource-dir=…] -O<opt>
--g0 -fPIC -std=gnu11 -w -DNDEBUG -I<work>/gen`). The link is the Xbox pack's (`ld.lld … -shared -soname libtitle.so
+`-I<toolkit>/consoles/ps1/runtime` (`--target=aarch64-linux-android30 --sysroot=<sysroot> [-resource-dir=…] -O1
+-fno-tree-slp-vectorize -g0 -fPIC -std=gnu11 -w -DNDEBUG -I<work>/gen`, `ps1.compile_flags`); `--opt 2` and `3`
+compile at -O1 for a PS1 title too (`ps1_opt`; `pack.json` `cc` says `-O1`). Jobs, when `--jobs` is 0: `default_jobs`
+with 256 MB per job and a 1 GB reserve (one compile peaks at ~160 MB), at most 5 and the CPU count, and the device
+log's limit. The link is the Xbox pack's (`ld.lld … -shared -soname libtitle.so
 -Bsymbolic --no-undefined … -l:libmain.so`): every core function the lifted code calls (`ps1_rc_*`, ps1_recomp_rt.h)
 must be exported by `libmain.so`, which links the whole PS1 core (`--whole-archive ps1_core`,
 android/app/src/main/cpp/CMakeLists.txt). The toolkit tree ships `consoles/ps1/tools/**/*.py` (on `PYTHONPATH` for
 step 3; step 1 imports its disc reader) and `consoles/ps1/runtime/*.h`; both count in the toolkit digest.
 `XBA_PS1_RECOMP` (a module name) and `XBA_PS1_TOOLS_DIR` replace the lifter for the tests
 (`tools/prepare/tests/fake_ps1_recomp.py`).
+
+**Compile time (XBA-161).** What was done for GBA code (« Compile time (XBA-151) » above), for MIPS: the lifter
+writes blocks with one scheduler check per segment instead of a label, a check and an exit per instruction; an access
+whose address is not a known IO register is a RAM access, main RAM and the scratchpad inline and anything else
+handed to the interpreter with the rest of its block (one exit per access, no call into the core); a function keeps
+in locals only the guest registers it uses, and writes back only the ones it writes (consoles/ps1/tools/README.md
+« Lifting »). Files are cut by a hash of function identities and named after their first function, so a discovery
+round recompiles ~1 file per function found, and Prepare drops the SLP vectorizer and -O2. Measured on the synthetic
+program of `consoles/ps1/tests/bench` (`build_exe.sh`: 1102 functions of game-like C built by PSn00bSDK, 222,094
+instructions; `compile_time.py`), CPU time of all compiles (sum of user + system time), 6 jobs, on the Zen 5 host of
+« Measurements », 2026-11-14 (the host was shared and loaded: before and after were compiled interleaved in one pool):
+
+| | before (one label and check per instruction) | after (-O1) |
+|---|---|---|
+| NDK r28c clang 19, aarch64-linux-android30, -O1 | 880 s (3.96 s per 1k instructions; 3.54 on a quieter host) | 142 s (0.64 s per 1k; 0.61 alone) |
+| NDK clang, -O2 (Prepare's level before) | 1219 s (5.49 s per 1k) | (-O1) |
+| Debian clang 19, x86-64, -O1 | 659 s (2.97 s per 1k) | 150 s (0.67 s per 1k) |
+| Wall time, 6 jobs (NDK) | 138 s, largest file 30 s | 23 s, largest file 4.2 s |
+| Peak memory of one compile (NDK) | 363 MB | 160 MB |
+| Files compiled after a discovery round (8 functions found) | all 70 | 3 of 88 |
+
+On a phone, with the « Measurements » model (×0.71 of the host's NDK CPU time; the loaded host's figures, so on the
+safe side): 200k instructions **~1.5 min** (was ~9.4 min at -O1, ~13 min at Prepare's -O2), 400k ~3 min (was ~19 /
+~26 min), plus the lift (~3 s per 220k on the host) and the link. A game's main EXE and overlays are 200k-400k instructions. Run time is not worse: frames per
+second with the pack, before / after (`ps1_run --frames`, best of 5 interleaved runs, host cc -O1): the synthetic
+program 334 / 360 (its timer IRQ every 2000 cycles lands inside blocks: the interpreter finishes them), ps1-tests
+cpu/cop 2,818 / 3,599, cpu/code-in-io 2,702 / 3,636, gte/test-all 885 / 1,020, dma/otc-test 2,669 / 3,283, timers
+2,655 / 3,371, our homebrew within ±4 % (they idle after their checks). The share of instructions run natively in
+the lockstep tests drops from 99.9 % to 99.1-99.9 % (IO through a pointer, events inside blocks), for less time per
+frame. -O2 runs the synthetic program no faster (346 / 351 fps at -O2 / -O1).
 
 **A disc behind the Storage Access Framework.** tools.prepare opens files by path; a library folder added with the
 file picker gives documents. `PrepareService.ps1Source` then copies, from the disc's data track (a single-file `.bin`

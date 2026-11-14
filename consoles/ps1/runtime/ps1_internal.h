@@ -184,6 +184,7 @@ struct ps1_machine {
     uint32_t *ram_gen;      /* PS1_RAM_PAGES write counters: bumped by every store / DMA into the page */
     uint64_t rc_native;     /* instructions run by lifted code (packs built with -DPS1_RC_COUNT) */
     uint8_t rc_exit;        /* PS1_RC_EXIT_*: why lifted code returned */
+    uint8_t rc_hint;        /* with PS1_RC_EXIT_INTERP: how many instructions the interpreter runs (rt.h) */
     struct ps1_rc_state *rc; /* attached table, dispatch cache, missed record (NULL: none) */
 
     ps1_gte gte;
