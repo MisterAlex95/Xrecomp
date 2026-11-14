@@ -459,7 +459,9 @@ bit for bit against angrylion.
   custom library it silently loads Qualcomm's driver; the `driverID` tells, and the log says `custom driver <id> was
   not loaded`. A driver that crashes the process instead: `vk_drivers/trying` holds its id while it is opened and
   checked, and the next start skips it. The start line ends `custom <id>` or `system`. Off Android the open always
-  fails (no `libxba_vkdriver.so`), the same path as a driver that cannot be opened.
+  fails (no `libxba_vkdriver.so`), the same path as a driver that cannot be opened. In the app the player picks
+  the driver in Settings › Graphics › Vulkan driver (downloaded from GitHub releases or imported as a zip; none
+  ships with the app): [app-shell.md « Vulkan drivers »](../docs/android/app-shell.md#vulkan-drivers).
 
 Tests (`consoles/n64/tests`, built with `-DXBR_N64_RDP_VULKAN=ON`; without a GPU, Mesa's lavapipe with
 `VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json`):
