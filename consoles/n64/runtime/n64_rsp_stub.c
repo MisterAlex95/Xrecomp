@@ -62,8 +62,11 @@ static void dma(n64_rsp *s, uint32_t v, int to_rdram)
             uint8_t *p = s->mem + bank + ((mem + i) & 0xFFF);
             uint32_t a = dram + i;
             if (to_rdram) {
-                if (a < s->bus.rdram_size)
+                if (a < s->bus.rdram_size) {
                     s->bus.rdram[a] = *p;
+                    if (s->bus.wrote)
+                        s->bus.wrote(s->bus.ctx, a, 1);
+                }
             } else {
                 *p = a < s->bus.rdram_size ? s->bus.rdram[a] : 0;
             }

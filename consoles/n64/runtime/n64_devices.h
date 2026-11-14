@@ -53,6 +53,9 @@ typedef struct n64_rcp_bus {
     void (*raise)(void *ctx, int mi_irq); /* sets an MI_INTR bit */
     void (*clear)(void *ctx, int mi_irq); /* clears it (SP status writes clear the SP interrupt) */
     void *ctx;
+    /* Optional (NULL: none): a device wrote RDRAM [addr, addr + len) (SP DMA to RDRAM). The core tracks writes into
+     * RDRAM for its static recompilation (n64_recomp.h: code is checked by content). */
+    void (*wrote)(void *ctx, uint32_t addr, uint32_t len);
 } n64_rcp_bus;
 
 typedef struct n64_rsp n64_rsp;

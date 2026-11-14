@@ -19,18 +19,7 @@
 
 static inline uint64_t sx32(uint64_t v) { return (uint64_t)(int64_t)(int32_t)(uint32_t)v; }
 
-/* Tick costs. */
-enum {
-    COST_CACHED = 3,       /* 1.5 cycles: an instruction fetched from cached memory */
-    COST_UNCACHED_RAM = 20, /* uncached RDRAM fetch */
-    COST_RSPMEM = 12,      /* IPL3 runs from DMEM */
-    COST_ROM = 60,
-    COST_DATA_UNCACHED = 8, /* uncached RDRAM data access */
-    COST_MULT = 8,         /* extra over the base for MULT / MULTU (5 cycles) */
-    COST_DMULT = 14,
-    COST_DIV = 70,
-    COST_DDIV = 134,
-};
+/* Tick costs: COST_* in n64_internal.h (lifted code charges the same). */
 
 enum { ACC_LOAD = 0, ACC_STORE = 1, ACC_FETCH = 2 };
 
@@ -305,13 +294,15 @@ adel:
     return false;
 }
 
-static inline bool vtop(n64_machine *m, uint64_t va, int acc, uint32_t *pa)
+/* raise: false for lifted code's accesses (n64_rc_*), which must leave everything untouched when the access faults:
+ * the interpreter then runs the instruction again and raises. */
+static inline bool vtop(n64_machine *m, uint64_t va, int acc, uint32_t *pa, bool raise)
 {
     if (N64_LIKELY(va - 0xFFFFFFFF80000000ull < 0x40000000ull) && m->cpu.ksu == 0) {
         *pa = (uint32_t)va & 0x1FFFFFFFu;
         return true;
     }
-    return vtop_slow(m, va, acc, pa, true);
+    return vtop_slow(m, va, acc, pa, raise);
 }
 
 int n64_cpu_probe(n64_machine *m, uint64_t va, uint32_t *pa)
@@ -335,14 +326,15 @@ static inline void wbe64(uint8_t *p, uint64_t v)
 static inline bool kseg1(uint64_t va) { return va - 0xFFFFFFFFA0000000ull < 0x20000000ull; }
 
 /* Reads size (1, 2, 4, 8) bytes at va (aligned). False when an exception was raised. */
-static bool rd(n64_machine *m, uint64_t va, int size, uint64_t *out)
+static inline bool rd_x(n64_machine *m, uint64_t va, int size, uint64_t *out, bool raise)
 {
     if (N64_UNLIKELY(va & (uint64_t)(size - 1))) {
-        address_error(m, va, ACC_LOAD);
+        if (raise)
+            address_error(m, va, ACC_LOAD);
         return false;
     }
     uint32_t pa;
-    if (!vtop(m, va, ACC_LOAD, &pa))
+    if (!vtop(m, va, ACC_LOAD, &pa, raise))
         return false;
     if (N64_LIKELY(pa < m->rdram_size)) {
         const uint8_t *p = m->rdram + pa;
@@ -376,6 +368,8 @@ static bool rd(n64_machine *m, uint64_t va, int size, uint64_t *out)
     return true;
 }
 
+static bool rd(n64_machine *m, uint64_t va, int size, uint64_t *out) { return rd_x(m, va, size, out, true); }
+
 /* MI repeat mode (MI_MODE bit 7, set with the length): the next RDRAM write repeats the bus word (32 bits, 64 for SD) over the
  * length (less the start's misalignment to 8), wrapping in the 2 KB page, then the mode ends. */
 static void mi_repeat_write(n64_machine *m, uint32_t pa, int size, uint64_t v)
@@ -389,17 +383,19 @@ static void mi_repeat_write(n64_machine *m, uint32_t pa, int size, uint64_t v)
         if (a < m->rdram_size)
             m->rdram[a] = size == 8 ? (uint8_t)(v >> (8 * (7 - (a & 7)))) : (uint8_t)(w >> (8 * (3 - (a & 3))));
     }
+    n64_rdram_wrote(m, pa & ~0x7FFu, 0x800);
     m->mi_mode &= ~0x80u;
 }
 
-static bool wr(n64_machine *m, uint64_t va, int size, uint64_t v)
+static inline bool wr_x(n64_machine *m, uint64_t va, int size, uint64_t v, bool raise)
 {
     if (N64_UNLIKELY(va & (uint64_t)(size - 1))) {
-        address_error(m, va, ACC_STORE);
+        if (raise)
+            address_error(m, va, ACC_STORE);
         return false;
     }
     uint32_t pa;
-    if (!vtop(m, va, ACC_STORE, &pa))
+    if (!vtop(m, va, ACC_STORE, &pa, raise))
         return false;
     if (N64_LIKELY(pa < m->rdram_size)) {
         if (N64_UNLIKELY(m->mi_mode & 0x80)) {
@@ -413,6 +409,7 @@ static bool wr(n64_machine *m, uint64_t va, int size, uint64_t v)
         case 4: n64_wbe32(p, (uint32_t)v); break;
         default: wbe64(p, v); break;
         }
+        n64_rdram_wrote_aligned(m, pa, (uint32_t)size);
         return true;
     }
     /* Outside RDRAM the bus is 32 bits wide: SB / SH write the whole word with the register shifted into their byte
@@ -426,11 +423,13 @@ static bool wr(n64_machine *m, uint64_t va, int size, uint64_t v)
     return true;
 }
 
+static bool wr(n64_machine *m, uint64_t va, int size, uint64_t v) { return wr_x(m, va, size, v, true); }
+
 /* The aligned word / doubleword a partial load (LWL / LWR / LDL / LDR) reads, translated from the unaligned address. */
-static bool rd_partial(n64_machine *m, uint64_t va, int size, uint64_t *out)
+static inline bool rd_partial_x(n64_machine *m, uint64_t va, int size, uint64_t *out, bool raise)
 {
     uint32_t pa;
-    if (!vtop(m, va, ACC_LOAD, &pa))
+    if (!vtop(m, va, ACC_LOAD, &pa, raise))
         return false;
     pa &= ~(uint32_t)(size - 1);
     if (pa < m->rdram_size) {
@@ -442,13 +441,18 @@ static bool rd_partial(n64_machine *m, uint64_t va, int size, uint64_t *out)
     return true;
 }
 
+static bool rd_partial(n64_machine *m, uint64_t va, int size, uint64_t *out)
+{
+    return rd_partial_x(m, va, size, out, true);
+}
+
 /* A partial store (SWL / SWR / SDL / SDR): translated as a store, then only the bytes in mask are written (data and
  * mask left-aligned in 64 bits; size 4 uses the upper word). */
-static void store_masked(n64_machine *m, uint64_t va, uint64_t data, uint64_t mask, int size)
+static inline bool store_masked_x(n64_machine *m, uint64_t va, uint64_t data, uint64_t mask, int size, bool raise)
 {
     uint32_t pa;
-    if (!vtop(m, va, ACC_STORE, &pa)) /* the unaligned address: BadVAddr reports it */
-        return;
+    if (!vtop(m, va, ACC_STORE, &pa, raise)) /* the unaligned address: BadVAddr reports it */
+        return false;
     pa &= ~(uint32_t)(size - 1);
     if (pa < m->rdram_size) {
         uint8_t *p = m->rdram + pa;
@@ -457,12 +461,19 @@ static void store_masked(n64_machine *m, uint64_t va, uint64_t data, uint64_t ma
             if ((mask >> sh) & 0xFF)
                 p[i] = (uint8_t)(data >> sh);
         }
-        return;
+        n64_rdram_wrote_aligned(m, pa, (uint32_t)size);
+        return true;
     }
     m->now += n64_bus_cost(pa);
     n64_bus_write32(m, pa, (uint32_t)(data >> 32), (uint32_t)(mask >> 32));
     if (size == 8)
         n64_bus_write32(m, pa + 4, (uint32_t)data, (uint32_t)mask);
+    return true;
+}
+
+static void store_masked(n64_machine *m, uint64_t va, uint64_t data, uint64_t mask, int size)
+{
+    store_masked_x(m, va, data, mask, size, true);
 }
 
 /* Instruction fetch, slow path (anything but cached RDRAM). */
@@ -555,6 +566,7 @@ static void cop0_write(n64_machine *m, int r, uint64_t v)
         break;
     case C0_ENTRYHI:
         c->cop0[r] = v & 0xC00000FFFFFFE0FFull;
+        c->tlb_gen++; /* the ASID may have changed */
         break;
     case C0_COMPARE:
         c->cop0[r] = (uint32_t)v;
@@ -613,6 +625,7 @@ static void tlb_write(n64_machine *m, int i)
     tlb_derive(e); /* global: G of both halves */
     e->lo[0] &= 0x03FFFFFEu; /* the entry keeps PFN, C, D, V; G apart */
     e->lo[1] &= 0x03FFFFFEu;
+    c->tlb_gen++;
 }
 
 static void cop0_op(n64_machine *m, uint32_t ins)
@@ -1177,34 +1190,104 @@ static void exec(n64_machine *m, uint32_t ins)
     }
 }
 
-void n64_cpu_run(n64_machine *m)
+_Static_assert(COST_INTERRUPT == 2 * N64_TICKS_PER_CYCLE, "an interrupt costs two cycles");
+
+static inline void take_interrupt(n64_machine *m)
 {
     n64_cpu *c = &m->cpu;
-    while (m->now < m->stop_at) {
-        if (N64_UNLIKELY(c->irq)) {
-            c->cur = c->pc;
-            c->ds = c->next_ds;
-            exception_vec(m, EXC_INT, 0, 0x180);
-            m->now += 2 * N64_TICKS_PER_CYCLE;
-            continue;
-        }
-        uint64_t pc = c->pc;
-        c->cur = pc;
-        c->ds = c->next_ds;
-        c->next_ds = false;
-        uint32_t ins;
-        uint64_t off = pc - 0xFFFFFFFF80000000ull;
-        if (N64_LIKELY(off < (uint64_t)m->rdram_size && c->ksu == 0 && !(pc & 3))) {
-            ins = n64_be32(m->rdram + off);
-            m->now += COST_CACHED;
-        } else if (!fetch_slow(m, pc, &ins)) {
-            m->now += COST_CACHED;
-            continue;
-        }
-        c->pc = c->npc;
-        c->npc += 4;
-        exec(m, ins);
-        c->gpr[0] = 0;
-        m->instructions++;
+    c->cur = c->pc;
+    c->ds = c->next_ds;
+    exception_vec(m, EXC_INT, 0, 0x180);
+    m->now += COST_INTERRUPT;
+}
+
+static inline void step(n64_machine *m)
+{
+    n64_cpu *c = &m->cpu;
+    uint64_t pc = c->pc;
+    c->cur = pc;
+    c->ds = c->next_ds;
+    c->next_ds = false;
+    uint32_t ins;
+    uint64_t off = pc - 0xFFFFFFFF80000000ull;
+    if (N64_LIKELY(off < (uint64_t)m->rdram_size && c->ksu == 0 && !(pc & 3))) {
+        ins = n64_be32(m->rdram + off);
+        m->now += COST_CACHED;
+    } else if (!fetch_slow(m, pc, &ins)) {
+        m->now += COST_CACHED;
+        return;
     }
+    c->pc = c->npc;
+    c->npc += 4;
+    exec(m, ins);
+    c->gpr[0] = 0;
+    m->instructions++;
+}
+
+void n64_cpu_step(n64_machine *m) { step(m); }
+void n64_cpu_take_interrupt(n64_machine *m) { take_interrupt(m); }
+
+void n64_cpu_run(n64_machine *m)
+{
+    if (N64_UNLIKELY(m->rc != NULL) && n64_recomp_active(m)) {
+        n64_recomp_run(m); /* the same loop, with lifted code where a table covers the PC */
+        return;
+    }
+    while (m->now < m->stop_at) {
+        if (N64_UNLIKELY(m->cpu.irq)) {
+            take_interrupt(m);
+            continue;
+        }
+        step(m);
+    }
+}
+
+/* ---- The core functions lifted code calls (n64_recomp_rt.h) -------------------------------------------------------
+ * Each does what the interpreter does for the access (translation, costs, bus side effects, RDRAM write tracking) and
+ * returns 0, or 1 with nothing done when the access would raise an exception: the lifted code then hands the
+ * instruction to the interpreter, which raises it with the exact EPC / BD / BadVAddr. */
+
+int n64_rc_read(n64_machine *m, uint64_t va, int size, uint64_t *out)
+{
+    return rd_x(m, va, size, out, false) ? 0 : 1;
+}
+
+int n64_rc_write(n64_machine *m, uint64_t va, int size, uint64_t v)
+{
+    return wr_x(m, va, size, v, false) ? 0 : 1;
+}
+
+int n64_rc_read_partial(n64_machine *m, uint64_t va, int size, uint64_t *out)
+{
+    return rd_partial_x(m, va, size, out, false) ? 0 : 1;
+}
+
+int n64_rc_write_masked(n64_machine *m, uint64_t va, uint64_t data, uint64_t mask, int size)
+{
+    return store_masked_x(m, va, data, mask, size, false) ? 0 : 1;
+}
+
+/* COP1 operations (anything but the moves, branches, loads and stores, which lifted code runs inline) and CTC1 run in
+ * n64_fpu.c, which raises its exceptions itself: the instruction is at pc (ds: in a branch delay slot). Returns 1 when
+ * an exception was taken (pc / npc / COP0 then hold the exception's entry; nothing more of the instruction runs). */
+#define RC_NO_PC 1u /* never a PC (odd): exception_vec overwrites it */
+int n64_rc_cop1(n64_machine *m, uint32_t ins, uint64_t pc, int ds)
+{
+    n64_cpu *c = &m->cpu;
+    c->cur = pc;
+    c->ds = ds != 0;
+    c->pc = RC_NO_PC;
+    n64_fpu_cop1(m, ins);
+    c->gpr[0] = 0;
+    return c->pc != RC_NO_PC;
+}
+
+int n64_rc_ctc1(n64_machine *m, uint32_t v, uint64_t pc, int ds)
+{
+    n64_cpu *c = &m->cpu;
+    c->cur = pc;
+    c->ds = ds != 0;
+    c->pc = RC_NO_PC;
+    n64_fpu_write_fcsr(m, v);
+    return c->pc != RC_NO_PC;
 }

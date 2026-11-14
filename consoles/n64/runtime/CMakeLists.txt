@@ -56,7 +56,7 @@ endif()
 # n64_core: the emulated machine (CPU, COP0 / TLB, COP1, bus, MI / PI / SI / PIF / VI / AI, saves) over n64_rsp and
 # n64_rdp. Plain C11 + libm, no host dependency, so the tests and n64_run build anywhere (no SDL).
 if(NOT TARGET n64_core)
-    add_library(n64_core STATIC n64_core.c n64_cpu.c n64_fpu.c n64_bus.c n64_io.c n64_pif.c n64_rom.c)
+    add_library(n64_core STATIC n64_core.c n64_cpu.c n64_fpu.c n64_bus.c n64_io.c n64_pif.c n64_rom.c n64_recomp.c)
     target_include_directories(n64_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
     target_link_libraries(n64_core PUBLIC n64_rsp n64_rdp)
     find_library(N64_LIBM m)
@@ -100,9 +100,22 @@ if(NOT ANDROID AND TARGET n64_runtime AND NOT TARGET n64_play)
     target_compile_options(n64_play PRIVATE -Wall -Wextra)
 endif()
 
-# n64_run: the headless runner (desktop hosts only).
+# n64_core_exported(target): the executable exports the core's symbols, which a recompiled title pack (n64_recomp.h,
+# n64_recomp_rt.h: n64_rc_*) binds to when it is dlopen'ed. The whole archive is linked so every symbol is there.
+function(n64_core_exported tgt)
+    set_target_properties(${tgt} PROPERTIES ENABLE_EXPORTS ON)
+    if(APPLE)
+        target_link_options(${tgt} PRIVATE "LINKER:-force_load,$<TARGET_FILE:n64_core>")
+    else()
+        target_link_libraries(${tgt} PRIVATE -Wl,--whole-archive n64_core -Wl,--no-whole-archive)
+    endif()
+    target_link_libraries(${tgt} PRIVATE ${CMAKE_DL_LIBS})
+endfunction()
+
+# n64_run: the headless runner (desktop hosts only); --pack loads a recompiled title (static recompilation, XBA-169..171).
 if(NOT ANDROID AND NOT TARGET n64_run)
     add_executable(n64_run tools/n64_run.c)
+    n64_core_exported(n64_run) # first, so the whole archive comes before the plain one
     target_link_libraries(n64_run PRIVATE n64_core)
     target_compile_options(n64_run PRIVATE -Wall -Wextra)
 endif()

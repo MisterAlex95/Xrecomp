@@ -80,7 +80,7 @@ static uint8_t *M; /* DMEM then IMEM */
 
 static void new_rsp(void)
 {
-    n64_rcp_bus bus = {rdram, RDRAM_SIZE, bus_raise, bus_clear, NULL};
+    n64_rcp_bus bus = {rdram, RDRAM_SIZE, bus_raise, bus_clear, NULL, NULL};
     if (S)
         n64_rsp_destroy(S);
     S = n64_rsp_create(bus);

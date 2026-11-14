@@ -110,6 +110,8 @@ typedef struct n64_tlb_entry {
     bool global;
 } n64_tlb_entry;
 
+/* The first members, through fcsr, are lifted code's view of the CPU (n64_rc_cpu in n64_recomp_rt.h; n64_recomp.c
+ * checks every offset): keep them first and in this order. */
 typedef struct n64_cpu {
     uint64_t gpr[32];
     uint64_t hi, lo;
@@ -119,21 +121,23 @@ typedef struct n64_cpu {
     bool ds;          /* the instruction at pc is in a delay slot */
     bool next_ds;
     bool llbit;
-    uint64_t cop0[32];
-    uint64_t cop0_latch;  /* last value written to a COP0 register (unused registers read it) */
-    n64_tlb_entry tlb[32];
-    uint64_t fpr[32];
-    uint32_t fcsr;
-    uint32_t cop2_latch_lo;
-    uint64_t cop2_latch;
-    /* COUNT runs at half the CPU clock: COUNT = count_base + (now - count_tick) / 4. */
-    uint32_t count_base;
-    uint64_t count_tick;
+    bool irq;         /* an interrupt is to be taken before the next instruction */
     /* Derived from STATUS (n64_cpu_status_changed). */
     int ksu;          /* 0 kernel, 1 supervisor, 2 user (EXL / ERL force kernel) */
     bool addr64;      /* 64-bit addressing in the current mode (KX / SX / UX) */
     bool ops64;       /* 64-bit operations allowed (kernel, or SX / UX) */
-    bool irq;         /* an interrupt is to be taken before the next instruction */
+    uint64_t cop0[32];
+    uint64_t fpr[32];
+    uint32_t fcsr;
+    /* ---- end of n64_rc_cpu ---- */
+    uint32_t cop2_latch_lo;
+    uint64_t cop0_latch;  /* last value written to a COP0 register (unused registers read it) */
+    n64_tlb_entry tlb[32];
+    uint32_t tlb_gen;     /* bumped by TLBWI / TLBWR and EntryHi writes: cached translations of code are stale */
+    uint64_t cop2_latch;
+    /* COUNT runs at half the CPU clock: COUNT = count_base + (now - count_tick) / 4. */
+    uint32_t count_base;
+    uint64_t count_tick;
 } n64_cpu;
 
 /* ---- Events ---------------------------------------------------------------------------------------------------- */
@@ -160,17 +164,31 @@ typedef enum { FLASH_IDLE = 0, FLASH_READ, FLASH_STATUS, FLASH_ERASE, FLASH_WRIT
 /* ---- Audio ----------------------------------------------------------------------------------------------------- */
 #define N64_AUDIO_RING 16384u /* sample frames, power of two */
 
+/* RDRAM write tracking (static recompilation, n64_recomp.h): one counter per 4 KB page, bumped by every write into
+ * RDRAM (CPU stores, lifted stores, PI / SI / SP DMA; not the RDP's rendering). */
+#define N64_PAGE_SHIFT 12
+
 struct n64_machine {
-    n64_cpu cpu;
+    /* ---- n64_rc_head: lifted code's view of the machine (n64_recomp_rt.h; n64_recomp.c checks every offset). Keep
+     * these first and in this order. ---- */
     uint64_t now;                /* ticks */
     uint64_t stop_at;            /* the CPU loop runs while now < stop_at */
-    uint64_t ev[EV_COUNT];
     uint64_t instructions;
+    uint8_t *rdram;
+    uint32_t *rdram_gen;         /* write counter per 4 KB page of RDRAM */
+    uint32_t rdram_size;
+    uint32_t mi_mode;
+    uint32_t rc_lo, rc_len;      /* the physical code range of the lifted function running (rc_len 0: none) */
+    uint8_t rc_hit;              /* a write landed in that range: the lifted function stops after the instruction */
+    uint8_t rc_exit;             /* N64_RC_EXIT_*: why the lifted function returned */
+    uint64_t rc_native;          /* instructions lifted code ran (packs built with -DN64_RC_COUNT) */
+    n64_cpu cpu;
+    /* ---- end of n64_rc_head ---- */
+    struct n64_rc_state *rc;     /* n64_recomp.c: the attached table and the record of missed code (NULL: none) */
+    uint64_t ev[EV_COUNT];
     uint64_t frames;
     bool frame_done;
 
-    uint8_t *rdram;
-    uint32_t rdram_size;
     uint8_t *rom;
     uint32_t rom_size;
     n64_rom_info info;
@@ -182,8 +200,8 @@ struct n64_machine {
     uint8_t *spmem;              /* n64_rsp_mem: DMEM + IMEM */
     uint64_t rsp_tick;           /* the RSP has run up to here */
 
-    /* MI */
-    uint32_t mi_mode, mi_intr, mi_mask;
+    /* MI (mi_mode is in the head above) */
+    uint32_t mi_intr, mi_mask;
     /* RI and the RDRAM registers (stubs IPL3 is happy with) */
     uint32_t ri[8];
     uint32_t rdram_regs[16];
@@ -234,6 +252,42 @@ struct n64_machine {
     void *tty_ctx;
 };
 
+/* Instruction / access costs in ticks (n64_cpu.c; lifted code charges the same: n64_recomp_rt.h). */
+enum {
+    COST_CACHED = 3,        /* 1.5 cycles: an instruction fetched from cached memory */
+    COST_UNCACHED_RAM = 20, /* uncached RDRAM fetch */
+    COST_RSPMEM = 12,       /* IPL3 runs from DMEM */
+    COST_ROM = 60,
+    COST_DATA_UNCACHED = 8, /* uncached RDRAM data access */
+    COST_MULT = 8,          /* extra over the base for MULT / MULTU (5 cycles) */
+    COST_DMULT = 14,
+    COST_DIV = 70,
+    COST_DDIV = 134,
+    COST_INTERRUPT = 4,     /* taking an interrupt */
+};
+
+/* A write landed in RDRAM [pa, pa + len): bumps the page counters (and flags the running lifted function's range). */
+static inline void n64_rdram_wrote(n64_machine *m, uint32_t pa, uint32_t len)
+{
+    if (N64_UNLIKELY(!len || pa >= m->rdram_size))
+        return;
+    uint32_t last = pa + len - 1;
+    if (last >= m->rdram_size)
+        last = m->rdram_size - 1;
+    for (uint32_t p = pa >> N64_PAGE_SHIFT; p <= last >> N64_PAGE_SHIFT; p++)
+        m->rdram_gen[p]++;
+    if (N64_UNLIKELY(m->rc_len) && pa < m->rc_lo + m->rc_len && last >= m->rc_lo)
+        m->rc_hit = 1;
+}
+
+/* The same for an aligned CPU store (1..8 bytes inside RDRAM: one page). */
+static inline void n64_rdram_wrote_aligned(n64_machine *m, uint32_t pa, uint32_t size)
+{
+    m->rdram_gen[pa >> N64_PAGE_SHIFT]++;
+    if (N64_UNLIKELY(m->rc_len) && pa + size > m->rc_lo && pa < m->rc_lo + m->rc_len)
+        m->rc_hit = 1;
+}
+
 /* ---- CPU (n64_cpu.c) ------------------------------------------------------------------------------------------- */
 void n64_cpu_reset(n64_machine *m);
 /* Runs instructions while now < stop_at. */
@@ -248,6 +302,18 @@ void n64_cpu_schedule_compare(n64_machine *m);
 void n64_cpu_exception(n64_machine *m, int code, int ce);
 /* Address translation without side effects (debug): 0 and the physical address, or -1. */
 int n64_cpu_probe(n64_machine *m, uint64_t va, uint32_t *pa);
+/* One instruction at pc (the interpreter's loop body without its checks), and taking the pending interrupt: the
+ * static recompilation's dispatcher (n64_recomp.c) runs the interpreter through these. */
+void n64_cpu_step(n64_machine *m);
+void n64_cpu_take_interrupt(n64_machine *m);
+
+/* ---- Static recompilation (n64_recomp.c) ------------------------------------------------------------------------ */
+/* n64_cpu_run's loop while a table is attached (m->rc). */
+void n64_recomp_run(n64_machine *m);
+bool n64_recomp_active(const n64_machine *m);
+void n64_recomp_free(n64_machine *m);
+/* RDRAM was reset (memset): every cached content check is stale. */
+void n64_recomp_reset(n64_machine *m);
 
 /* ---- COP1 (n64_fpu.c) ------------------------------------------------------------------------------------------ */
 /* Executes a COP1 instruction (opcode 0x11), CU1 already checked. */

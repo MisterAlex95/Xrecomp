@@ -2,6 +2,7 @@
  *
  *   n64_run ROM [--frames N] [--result] [--ppm OUT.ppm] [--wav OUT.wav] [--tty] [--pad MASK] [--pal | --ntsc]
  *           [--save PATH] [--hash] [--info] [--regs] [--quiet]
+ *           [--pack LIB.so [--lockstep] [--missed FILE] [--stats]]
  *
  * ROM           a .z64 / .v64 / .n64 file (any byte order)
  * --frames N    frames (VI interrupts) to run (default 600); with --result, the most frames to wait
@@ -18,10 +19,22 @@
  * --hash        print a hash of the RDRAM (FNV-1a 64), the instruction and cycle counts
  * --info        print the ROM header and the detected CIC
  * --regs        print the CPU state at the end (PC, COP0 Status / Cause / EPC / BadVAddr, GPRs)
+ * --pack LIB    a recompiled title pack (n64_recomp.h: libtitle.so built by n64_tools.recomp /
+ *               tools/consoles/n64_recomp_build.py): its lifted code runs natively, the interpreter runs the rest
+ * --lockstep    with --pack: an interpreter-only twin runs alongside; after every frame the whole state (CPU, COP0, TLB,
+ *               FPU, time, scheduler, MI, RDRAM, RSP memory) and the picture are compared. Prints "LOCKSTEP OK" or
+ *               the first difference ("LOCKSTEP FAIL"), exit 1 then
+ * --lockstep-cycles N  compare every N CPU cycles instead of every frame (then --frames counts these steps), and
+ *               --lockstep-from C runs C cycles before the first comparison (to close in on a divergence)
+ * --missed FILE with --pack: append the code the interpreter had to run to FILE (the discovery loop's input)
+ * --stats       with --pack: calls, fallbacks, lookups, re-hashes, and the native share of the instructions (packs
+ *               built with -DN64_RC_COUNT)
  * Prints the frame rate reached on stderr (unless --quiet). Exit 3 on a usage or file error. */
 #define _POSIX_C_SOURCE 199309L /* clock_gettime */
 #include "n64_core.h"
+#include "n64_recomp.h"
 
+#include <dlfcn.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -105,7 +118,8 @@ static double now_s(void)
 static int usage(void)
 {
     fprintf(stderr, "usage: n64_run ROM [--frames N] [--result] [--ppm OUT] [--wav OUT] [--tty] [--pad MASK]\n"
-                    "               [--pal | --ntsc] [--save PATH] [--hash] [--info] [--regs] [--quiet]\n");
+                    "               [--pal | --ntsc] [--save PATH] [--hash] [--info] [--regs] [--quiet]\n"
+                    "               [--pack LIB.so [--lockstep] [--missed FILE] [--stats]]\n");
     return 3;
 }
 
@@ -120,11 +134,27 @@ static n64_save_kind kind_of_size(size_t n)
     }
 }
 
+static uint64_t display_hash(n64_machine *m)
+{
+    static uint32_t px[N64_SCREEN_MAX_W * N64_SCREEN_MAX_H];
+    int w = 0, h = 0;
+    if (n64_display(m, px, N64_SCREEN_MAX_W, N64_SCREEN_MAX_H, &w, &h) != 0)
+        return 0;
+    uint64_t hv = 0xCBF29CE484222325ull;
+    for (int i = 0; i < w * h; i++) {
+        hv ^= px[i];
+        hv *= 0x100000001B3ull;
+    }
+    return hv ^ ((uint64_t)w << 32 | (uint32_t)h);
+}
+
 int main(int argc, char **argv)
 {
-    const char *rom_path = NULL, *ppm = NULL, *wav = NULL, *save = NULL;
+    const char *rom_path = NULL, *ppm = NULL, *wav = NULL, *save = NULL, *pack = NULL, *missed = NULL;
     long frames = 600;
     bool result = false, quiet = false, hash = false, tty = false, info = false, regs = false;
+    bool lockstep = false, stats = false;
+    long long lock_cycles = 0, lock_from = 0;
     uint16_t pad = 0;
     n64_options opts = {.force_pal = -1};
 
@@ -157,6 +187,18 @@ int main(int argc, char **argv)
             regs = true;
         else if (!strcmp(a, "--quiet"))
             quiet = true;
+        else if (!strcmp(a, "--pack") && more)
+            pack = argv[++i];
+        else if (!strcmp(a, "--missed") && more)
+            missed = argv[++i];
+        else if (!strcmp(a, "--lockstep"))
+            lockstep = true;
+        else if (!strcmp(a, "--lockstep-cycles") && more)
+            lock_cycles = strtoll(argv[++i], NULL, 0);
+        else if (!strcmp(a, "--lockstep-from") && more)
+            lock_from = strtoll(argv[++i], NULL, 0);
+        else if (!strcmp(a, "--stats"))
+            stats = true;
         else if (a[0] != '-' && !rom_path)
             rom_path = a;
         else
@@ -177,16 +219,36 @@ int main(int argc, char **argv)
         opts.save_kind = kind_of_size(save_size);
     char err[256] = "";
     n64_machine *m = n64_create(rom, rom_size, &opts, err, sizeof err);
+    n64_machine *twin = NULL;
+    if (m && pack && lockstep)
+        twin = n64_create(rom, rom_size, &opts, err, sizeof err);
     free(rom);
-    if (!m) {
+    if (!m || (pack && lockstep && !twin)) {
         fprintf(stderr, "n64_run: %s\n", err);
         free(save_data);
+        n64_destroy(m);
         return 3;
     }
     if (save_data) {
         if (n64_save_load(m, opts.save_kind, save_data, save_size) != 0)
             fprintf(stderr, "n64_run: %s: not a save image (%zu bytes)\n", save, save_size);
+        if (twin)
+            n64_save_load(twin, opts.save_kind, save_data, save_size);
         free(save_data);
+    }
+    void *lib = NULL;
+    if (pack) {
+        lib = dlopen(pack, RTLD_NOW | RTLD_LOCAL);
+        n64_recomp_title_table_fn get = lib ? (n64_recomp_title_table_fn)dlsym(lib, N64_RECOMP_ENTRY_SYMBOL) : NULL;
+        const n64_recomp_table *t = get ? get() : NULL;
+        if (!t || n64_attach_recomp(m, t) != 0) {
+            fprintf(stderr, "n64_run: %s: %s\n", pack, !lib ? dlerror() : !t ? "no n64_recomp_title_table" : "ABI");
+            n64_destroy(m);
+            n64_destroy(twin);
+            return 3;
+        }
+        if (!quiet)
+            fprintf(stderr, "n64_run: pack %s: %u functions, boot 0x%08X\n", pack, t->count, t->boot_pc);
     }
     if (info) {
         const n64_rom_info *ri = n64_info(m);
@@ -197,6 +259,9 @@ int main(int argc, char **argv)
     if (tty)
         n64_set_tty(m, on_tty, NULL);
     n64_set_controller(m, 0, 1, pad, 0, 0);
+    if (twin)
+        n64_set_controller(twin, 0, 1, pad, 0, 0);
+    bool lock_bad = false;
 
     FILE *wf = NULL;
     uint32_t wav_frames = 0;
@@ -221,8 +286,37 @@ int main(int argc, char **argv)
     int rc = result ? 2 : 0;
     double t0 = now_s();
     long f;
+    if (twin && lock_from > 0) {
+        n64_run_cycles(m, (uint64_t)lock_from);
+        n64_run_cycles(twin, (uint64_t)lock_from);
+    }
     for (f = 0; f < frames; f++) {
-        n64_run_frame(m);
+        if (twin && lock_cycles > 0)
+            n64_run_cycles(m, (uint64_t)lock_cycles);
+        else
+            n64_run_frame(m);
+        if (twin) {
+            if (lock_cycles > 0)
+                n64_run_cycles(twin, (uint64_t)lock_cycles);
+            else
+                n64_run_frame(twin);
+            char why[160] = "";
+            int d = n64_recomp_compare(m, twin, why, sizeof why);
+            if (!d && display_hash(m) != display_hash(twin)) {
+                d = 1;
+                snprintf(why, sizeof why, "the picture");
+            }
+            if (d) {
+                printf("LOCKSTEP FAIL at frame %ld: %s (recompiled vs interpreter; pc 0x%016llX vs 0x%016llX, "
+                       "instructions %llu vs %llu, cycles %llu vs %llu)\n",
+                       f + 1, why, (unsigned long long)n64_pc(m), (unsigned long long)n64_pc(twin),
+                       (unsigned long long)n64_instructions(m), (unsigned long long)n64_instructions(twin),
+                       (unsigned long long)n64_cycles(m), (unsigned long long)n64_cycles(twin));
+                lock_bad = true;
+                f++;
+                break;
+            }
+        }
         if (wf) {
             int16_t buf[2048 * 2];
             size_t n;
@@ -242,6 +336,28 @@ int main(int argc, char **argv)
         }
     }
     double dt = now_s() - t0;
+    if (twin && !lock_bad)
+        printf("LOCKSTEP OK (%ld frames, the whole state identical after each)\n", f);
+    if (pack && missed) {
+        int n = n64_recomp_write_missed(m, missed);
+        if (n < 0)
+            fprintf(stderr, "n64_run: cannot write %s\n", missed);
+        else if (!quiet)
+            fprintf(stderr, "n64_run: %d new missed records -> %s\n", n, missed);
+    }
+    if (pack && stats) {
+        n64_recomp_stats st;
+        n64_recomp_get_stats(m, &st);
+        uint64_t total = n64_instructions(m);
+        printf("recomp: %llu calls, %llu interpreted RDRAM instructions (%llu fallbacks), %llu slow lookups, "
+               "%llu re-hashes (%llu stale), %llu interrupts\n",
+               (unsigned long long)st.calls, (unsigned long long)st.interp_ram, (unsigned long long)st.fallbacks,
+               (unsigned long long)st.slow_lookups, (unsigned long long)st.rehashes, (unsigned long long)st.stale,
+               (unsigned long long)st.interrupts);
+        if (st.native)
+            printf("recomp: %.2f%% native (%llu of %llu instructions)\n", total ? 100.0 * st.native / total : 0.0,
+                   (unsigned long long)st.native, (unsigned long long)total);
+    }
 
     if (result) {
         uint32_t magic = n64_peek32(m, RESULT_ADDR), st = n64_peek32(m, RESULT_ADDR + 4);
@@ -306,5 +422,8 @@ int main(int argc, char **argv)
                 dt > 0 ? f / dt : 0.0, dt > 0 ? (double)n64_instructions(m) / dt / 1e6 : 0.0,
                 dt > 0 ? (double)n64_cycles(m) / dt / 1e6 : 0.0);
     n64_destroy(m);
-    return rc;
+    n64_destroy(twin);
+    /* lib stays loaded until exit (no dlclose: nothing may call into it after the machines are gone anyway) */
+    (void)lib;
+    return lock_bad ? 1 : rc;
 }

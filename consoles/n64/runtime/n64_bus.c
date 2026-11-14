@@ -181,6 +181,7 @@ static void pi_dma_to_rdram(n64_machine *m, uint32_t *dram_p, uint32_t *cart_p, 
             if (cur < 0)
                 cur = 0;
         }
+        n64_rdram_wrote(m, dram, (uint32_t)cur);
         for (int32_t i = 0; i < cur; i++, dram++)
             if (dram < m->rdram_size)
                 m->rdram[dram] = buf[i];
@@ -311,8 +312,10 @@ static void si_write(n64_machine *m, uint32_t reg, uint32_t v)
         m->si_dram = v & 0x00FFFFFCu;
         break;
     case 1: /* PIF_AD_RD64B: PIF RAM -> RDRAM */
-        if (m->si_dram + 64 <= m->rdram_size)
+        if (m->si_dram + 64 <= m->rdram_size) {
             memcpy(m->rdram + m->si_dram, m->pif_ram, 64);
+            n64_rdram_wrote(m, m->si_dram, 64);
+        }
         m->si_status |= 1u;
         n64_schedule(m, EV_SI, m->now + SI_DMA_TICKS);
         break;
@@ -380,6 +383,7 @@ void n64_bus_write32(n64_machine *m, uint32_t pa, uint32_t v, uint32_t mask)
         if (pa + 4 <= m->rdram_size) {
             uint8_t *p = m->rdram + pa;
             n64_wbe32(p, (n64_be32(p) & ~mask) | (v & mask));
+            n64_rdram_wrote(m, pa, 4);
         }
         return;
     }

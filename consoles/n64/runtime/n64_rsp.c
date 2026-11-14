@@ -231,8 +231,11 @@ static void sp_dma(n64_rsp *s, int to_rdram, uint32_t lenreg)
             uint8_t *sp = s->mem + (bank | off);
             int in = rd && da + 8 <= size;
             if (to_rdram) {
-                if (in)
+                if (in) {
                     memcpy(rd + da, sp, 8);
+                    if (s->bus.wrote)
+                        s->bus.wrote(s->bus.ctx, da, 8);
+                }
             } else {
                 if (in)
                     memcpy(sp, rd + da, 8);

@@ -11,6 +11,7 @@
 
 static void rcp_raise(void *ctx, int irq) { n64_mi_raise(ctx, irq); }
 static void rcp_clear(void *ctx, int irq) { n64_mi_clear(ctx, irq); }
+static void rcp_wrote(void *ctx, uint32_t addr, uint32_t len) { n64_rdram_wrote(ctx, addr, len); }
 
 static void seterr(char *err, size_t n, const char *msg)
 {
@@ -49,6 +50,12 @@ static void machine_reset(n64_machine *m)
     n64_ai_reset(m);
     n64_pif_boot(m);
     n64_cpu_set_count(m, 0);
+    for (uint32_t p = 0; p < (m->rdram_size >> N64_PAGE_SHIFT); p++)
+        m->rdram_gen[p]++; /* RDRAM was cleared and rewritten */
+    m->rc_lo = m->rc_len = 0;
+    m->rc_hit = 0;
+    if (m->rc)
+        n64_recomp_reset(m);
 }
 
 n64_machine *n64_create(const uint8_t *rom, size_t size, const n64_options *opts, char *err, size_t errlen)
@@ -74,7 +81,8 @@ n64_machine *n64_create(const uint8_t *rom, size_t size, const n64_options *opts
     m->rom = calloc(1, rsize);
     m->rdram_size = m->opts.rdram_size == 0x400000u ? 0x400000u : N64_RDRAM_SIZE;
     m->rdram = calloc(1, m->rdram_size);
-    if (!m->rom || !m->rdram) {
+    m->rdram_gen = calloc(m->rdram_size >> N64_PAGE_SHIFT, sizeof *m->rdram_gen);
+    if (!m->rom || !m->rdram || !m->rdram_gen) {
         seterr(err, errlen, "out of memory");
         n64_destroy(m);
         return NULL;
@@ -90,7 +98,7 @@ n64_machine *n64_create(const uint8_t *rom, size_t size, const n64_options *opts
     m->info.order = order;
     m->pal = m->opts.force_pal >= 0 ? m->opts.force_pal != 0 : m->info.pal != 0;
 
-    n64_rcp_bus bus = {m->rdram, m->rdram_size, rcp_raise, rcp_clear, m};
+    n64_rcp_bus bus = {m->rdram, m->rdram_size, rcp_raise, rcp_clear, m, rcp_wrote};
     m->rsp = n64_rsp_create(bus);
     m->rdp = n64_rdp_create(bus);
     if (!m->rsp || !m->rdp) {
@@ -120,8 +128,10 @@ void n64_destroy(n64_machine *m)
         n64_rsp_destroy(m->rsp);
     if (m->rdp)
         n64_rdp_destroy(m->rdp);
+    n64_recomp_free(m);
     free(m->rom);
     free(m->rdram);
+    free(m->rdram_gen);
     free(m->flash);
     free(m->isv);
     free(m);
@@ -270,8 +280,11 @@ uint8_t n64_peek8(n64_machine *m, uint32_t addr)
 void n64_poke32(n64_machine *m, uint32_t addr, uint32_t v)
 {
     uint8_t *p = (uint8_t *)peek_ptr(m, addr & ~3u, 4);
-    if (p && (p < m->rom || p >= m->rom + m->rom_size) && (p < m->pif_ram || p >= m->pif_ram + 64))
+    if (p && (p < m->rom || p >= m->rom + m->rom_size) && (p < m->pif_ram || p >= m->pif_ram + 64)) {
         n64_wbe32(p, v);
+        if (p >= m->rdram && p < m->rdram + m->rdram_size)
+            n64_rdram_wrote(m, (uint32_t)(p - m->rdram), 4);
+    }
 }
 
 uint64_t n64_reg(n64_machine *m, int r) { return r >= 0 && r < 32 ? m->cpu.gpr[r] : 0; }
