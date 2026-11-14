@@ -38,7 +38,8 @@ content decides (Xbox volume magic `MICROSOFT*XBOX*MEDIA` first, then an ISO 966
 `PLAYSTATION`). CHD is accepted by name but not read yet (no title key).
 
 CMake options `XBR_CONSOLE_GBA`, `XBR_CONSOLE_PS1` and `XBR_CONSOLE_N64` are ON by default on Linux and macOS and OFF
-on Android and Windows. A console is turned on for Android once it is ready: the GBA is (XBA-157).
+on Android and Windows. A console is turned on for Android once it is ready: the GBA (XBA-157) and the PS1 (XBA-168)
+are.
 
 **GBA core (XBA-152, XBA-153).** Interpreter first (decision of 2026-11-14, XBA-142); the static lifter (below) is an
 acceleration layer. `consoles/gba/runtime/gba_core.h`: an ARM7TDMI interpreter (ARM + Thumb), the memory map, LCD
@@ -169,6 +170,40 @@ modulation, ENDX, reverb (psx-spx formula with its FIR), capture buffers, the SP
 input. `ps1_mdec.c`: RLE, IDCT with the scale table, 4 / 8 / 15 / 24-bit output, DMA0 / DMA1. Tests:
 `consoles/ps1/tests/test_{disc,cdrom,spu,mdec}.c` on images and register streams they generate (a compressed CHD
 from `chdman` too when it is installed). The limits are listed at the top of each source.
+
+**Playing a PS1 game (XBA-168).** `ps1_runtime_run` (`consoles/ps1/runtime/ps1_runtime.h`) plays a disc or an EXE
+on the host layer, the GBA's way: a disc (`.cue` with its tracks, `.bin`, `.iso`, `.chd`, or `fd:N` for a
+single-file image) boots through OpenBIOS from `SYSTEM.CNF`, an EXE (recognised by its `PS-X EXE` magic) is
+fast-booted. The picture is the GPU's display area (256 / 320 / 368 / 512 / 640 x 240 / 480, 15- or 24-bit) shown at
+4:3 whatever its width (`host_window_set_aspect`), letterboxed, linear by default (`RECOMP_PS1_FILTER=nearest`,
+`RECOMP_PS1_SCALE=integer`: whole multiples of the height). Pads, Xbox layout: A → Cross, B → Circle, X → Square,
+Y → Triangle, LB / RB → L1 / R1, LT / RT → L2 / R2, Start, Back → Select, stick clicks → L3 / R3, D-pad; port 1 is a
+digital pad (the left stick drives the D-pad too) or, with `RECOMP_PS1_PAD=analog` or Back + L3 + R3 while playing, a
+DualShock in analog mode (both sticks); every host pad drives port 1, or with `RECOMP_PS1_PLAYERS=2` host pads 1 and
+2 drive ports 1 and 2. Sound: `ps1_audio_pull` (44.1 kHz) into `host_audio`, which SDL converts to the device's rate.
+Pacing: the frame's length is the CPU cycles the core ran to the next VBlank (NTSC 59.94 / 59.29, PAL 50 Hz, as the
+GPU's mode says), absolute deadlines nudged ±2 % by the audio queue. Memory cards: `<save dir>/ps1-<KEY>/card1.mcr`
+and `card2.mcr`, 128 KB raw images as other emulators write them (.mcr / .mcd), read before the first frame, written
+a second after the game's last write to the card (five at most after its first), at pause and at exit, only when
+changed. BIOS: `--bios`, `RECOMP_PS1_BIOS`, the app's asset `ps1-bios/openbios.bin`, else `build/ps1-bios/openbios.bin`
+from the working directory or an ancestor of the program. A pack's library is ignored until the PS1 recompiler lands
+(logged). The Android app calls it through `ps1_runtime_start` ([app-shell.md](../docs/android/app-shell.md)
+« PlayStation games »); the APK carries OpenBIOS (the `ps1-bios` stage of `tools/docker/android.Dockerfile`, sha256
+checked; `LICENSES/MIT-OpenBIOS.txt`). On a desktop:
+
+```sh
+cmake -S consoles/ps1/tests -B build/ps1 && cmake --build build/ps1          # or the root build (XBR_CONSOLE_PS1 ON)
+build/ps1/ps1_runtime/ps1_play game.cue      # keyboard: arrows, X = Cross, C = Circle, Z = Square, S = Triangle,
+                                             # Q / E = L1 / R1, 1 / 3 = L2 / R2, Enter = Start, Backspace = Select
+build/ps1/ps1_runtime/ps1_play build/homebrew/ps1/gfx.exe --scale integer --save-dir /tmp/saves
+SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy build/ps1/ps1_runtime/ps1_play gfx.cue --frames 600 --screenshot last.ppm
+xvfb-run -a build/ps1/ps1_runtime/ps1_play gfx.exe --frames 240 --capture 200 present.ppm   # the real present path
+```
+
+The title key comes from the disc as the app reads it (`recomp_pack_rom_identify`: `SLUS-00594`, or `PSX-<CRC32>`);
+an EXE gets `EXE-<CRC32>`. Every option is listed at the top of `runtime/tools/ps1_play.c`. Test: `ps1_runtime`
+(`consoles/ps1/tests/test_main.c`: the helpers, then gfx.exe fast-booted, through `fd:N`, a memory card read back and
+left alone, gfx.cue booted by the BIOS to its 320 x 240 picture, the errors).
 
 **Legal**: no ROM, disc image, BIOS or game data in this repository, its CI or its artifacts. Tests use homebrew we
 build ourselves (devkitARM / libtonc, PSn00bSDK, libdragon) and dumps Alex made from his own media, kept outside every

@@ -1075,10 +1075,10 @@ time), so the stat-only rescan covers a changed track. A file named like a game 
 an « other file »; a `.chd` too for now (compressed, read once a CHD reader is in). A lone `.bin` that is no
 PlayStation disc (firmware, a dump) is ignored: kept in the index for the stat-only rescan, shown nowhere.
 
-GBA games play: see [Game Boy Advance games](#game-boy-advance-games-xba-157). PS1 and N64 games show in the grid
-with the chip **Not playable yet** (a neutral grey dot) until their console's runtime exists: no Prepare, no Import,
-no Home; A or Start on the card says so in the note line (« PS1 games are listed but not playable yet… ») and selects
-nothing. When the library holds games of more than one console, every card has a small badge in its art's top left
+GBA games play: see [Game Boy Advance games](#game-boy-advance-games-xba-157); PS1 games too:
+[PlayStation games](#playstation-games-xba-168). N64 games show in the grid with the chip **Not playable yet** (a
+neutral grey dot) until their console's runtime exists: no Prepare, no Import, no Home; A or Start on the card says so
+in the note line (« N64 games are listed but not playable yet… ») and selects nothing. When the library holds games of more than one console, every card has a small badge in its art's top left
 corner (**Xbox**, **GBA**, **PS1**, **N64**); an Xbox-only library looks as before. There is no console filter.
 
 ### Game Boy Advance games (XBA-157)
@@ -1151,7 +1151,7 @@ out/hb/gba/hello.gba /sdcard/gba/` (or over USB file transfer into `Internal sto
 
 1. Install the APK. If `/sdcard/gba` is not a library folder yet: Y › Library folders › Add a folder › `gba`.
    Expected: the GBA cards (« pad », « gfx », « hello »: the file names) with the **GBA** badge when Xbox games are
-   listed too, and **no** chip (Ready). PS1 / N64 cards still read « Not playable yet ».
+   listed too, and **no** chip (Ready). N64 cards still read « Not playable yet » (PS1 cards play since XBA-168).
 2. A on the **pad** card. Expected: the game starts at once, fullscreen, landscape, no Home screen; « XBA PAD + SAVE »
    at the top, the frame counter `F…` moving. logcat: `launcher: library: play gba-XBAT-… from /storage/…/pad.gba`,
    `PACK_NONE gba XBAT-…`, `gba: window on (aspect, nearest), audio on, pads 1` (or more with an external pad).
@@ -1210,6 +1210,99 @@ Until the GBA lifter lands (`gba_tools.recomp`), step 3 ends with `LIFT_FAILED`:
 8. A library folder added with the file picker (no All files access): Prepare works the same (logcat
    `rom: content://… copied to …/work/gba-XBAT-…/rom.gba`).
 9. Switch the Thor to French: the game's Home lines and notes in French.
+
+### PlayStation games (XBA-168)
+
+The PS1 runtime (`consoles/ps1/runtime`, an interpreter: `ps1_core.h` on the host layer, consoles/README.md
+« Playing a PS1 game ») plays a disc as it is, the GBA's way: no Import, no pack. Its Prepare comes with the PS1
+recompiler; until then a PS1 card is **Ready** (no chip) while its disc is in a library folder, **Running** while it
+runs, **No file access** when its folder cannot be read, and never shows a Prepare state.
+
+- **Home.** With the toolchain, A on the card opens the game's Home like a GBA game's (`Screen.ROM_HOME`): the title,
+  « Plays in the interpreter », **Play** alone (no Prepare yet) and a note on the BIOS and the memory cards. Without
+  the toolchain, A launches at once; Start on the card always does.
+- **Launch** (`LauncherActivity.launchRom`, as for the GBA): the disc becomes the launched game (`rom`, the library key
+  `ps1-<SERIAL>` as `title_id`); the same disc running is brought back, another game ending first.
+- **The disc reaches the runtime** as `RECOMP_GAME_DIR`. A folder read as files: the `.cue`'s path (the runtime opens
+  its tracks beside it), or the `.bin` / `.iso`'s. A folder seen through the Storage Access Framework: a single-file
+  image (`.bin`, `.iso`) goes over as `fd:N` like a GBA ROM; a `.cue` cannot (its tracks have no paths), so the
+  launcher hands the game activity the track documents the scan found (`GameStore` `rom_parts`,
+  `LauncherActivity.romParts`), and `ShellActivity` opens the `.cue` and each track (detached descriptors, kept for
+  the process's life) and writes `<cache>/ps1/disc.cue` whose FILE lines name each track as `/proc/self/fd/N`
+  (`Ps1Cue`): no copy of the disc, and the runtime and the title key reader open those paths like files. logcat
+  `shell: cue sheet content://… (N track file(s)) -> /data/user/0/…/cache/ps1/disc.cue`; a track missing or
+  unreadable: `fd:-1` and back to the launcher. `shell_main.c` routes it like a GBA ROM (`xba_pack_rom_console`,
+  `RECOMP_DISC_IMAGE=0`), `pack_loader.c` logs `PACK_NONE ps1 <SERIAL> (not prepared, the interpreter runs it)`
+  (`PACK_IGNORED` for a pack that would pass: no PS1 recompiled code yet) and calls `ps1_runtime_start`. `.chd` is not
+  identified yet (no title key: an « other file »).
+- **BIOS.** OpenBIOS (MIT, PCSX-Redux's nugget tree), inside the APK as `assets/ps1-bios/openbios.bin`: the `ps1-bios`
+  stage of `tools/docker/android.Dockerfile` builds it from its pinned source, sha256 checked, and gradle takes it with
+  `-PxbaPs1Bios=FILE` (the same check); its licence is `LICENSES/MIT-OpenBIOS.txt` (About › Licences, NOTICE « The
+  Android app »). The runtime reads the asset through SDL. Never a Sony BIOS. `RECOMP_PS1_BIOS=/path` (recomp.cfg)
+  uses another 512 KB image. An APK built without it sends a PS1 game back to the launcher: « The game ended: the game
+  cannot start: its disc or the PlayStation BIOS cannot be read ».
+- **Picture.** The GPU's display area (256..640 x 240 / 480, 15- or 24-bit) through `host_window` at 4:3, letterboxed
+  (1440 x 1080 on the Thor's 1080p screen), smoothed (linear); `RECOMP_PS1_FILTER=nearest` keeps sharp pixels,
+  `RECOMP_PS1_SCALE=integer` whole multiples of the height (4x a 240-line picture: 1280 x 960).
+- **Controls.** Every connected pad drives port 1, Xbox layout: A → Cross, B → Circle, X → Square, Y → Triangle,
+  LB / RB → L1 / R1, LT / RT → L2 / R2, Start → Start, Back / Select → Select, stick clicks → L3 / R3, D-pad →
+  D-pad. A digital pad by default (the left stick drives the D-pad too); Back + L3 + R3 together switch to a DualShock
+  in analog mode (both sticks, logcat `ps1: port 1 is now analog (DualShock)`) and back; `RECOMP_PS1_PAD=analog`
+  starts in analog mode; `RECOMP_PS1_PLAYERS=2`: the first two pads drive ports 1 and 2. Back on the device opens the
+  in-game menu.
+- **Sound.** 44.1 kHz stereo from the SPU (`ps1_audio_pull`, CD audio and XA mixed in) through `host_audio`.
+- **Pacing.** The PS1's own field rate (NTSC about 60 Hz, PAL 50 Hz, from the cycles each frame ran), absolute
+  deadlines nudged ±2 % by the audio queue; vsync on; a stall of more than three frames resets the clock.
+- **Memory cards.** `<internal files>/save/ps1-<KEY>/card1.mcr` (and `card2.mcr` once a game writes slot 2): 128 KB
+  raw images, the `.mcr` other emulators read and write, so a card can be copied in or out with `adb`. Read before the
+  first frame (none: a blank formatted card); written a second after the game's last write to it (at most five
+  seconds after its first), at once when the app pauses (Home, the in-game menu) and at exit (the menu's Quit too),
+  through `.tmp` + rename, only when it changed.
+- **Lifecycle.** As for the GBA: Home pauses (no frame runs, audio paused) and resumes; the in-game menu holds it;
+  Quit ends the process. A disc that cannot be read sends the player back to the launcher with the reason above.
+- **Options** (recomp.cfg): `RECOMP_PS1_BIOS`, `RECOMP_PS1_SCALE`, `RECOMP_PS1_FILTER`, `RECOMP_PS1_PAD`,
+  `RECOMP_PS1_PLAYERS` as above; `RECOMP_PS1_FRAMES=N` stops after N frames (checks).
+
+On a desktop the same runtime plays a disc with `ps1_play` (consoles/README.md), where a game is checked first.
+
+### Device check (PS1 games, XBA-168), for Alex
+
+On the AYN Thor, `adb logcat -s xboxrecomp SDL` throughout. Our homebrew: `tools/consoles/build_homebrew.sh ps1
+out/hb` (Docker; `out/hb/ps1/gfx.cue` + `gfx.bin`, `hello.cue` + `hello.bin`, `timer_irq.*`…; the `.exe` files are
+for the desktop). Copy the discs to the device's PS1 folder: `adb shell mkdir -p /sdcard/ps1 && adb push
+out/hb/ps1/gfx.cue out/hb/ps1/gfx.bin out/hb/ps1/hello.cue out/hb/ps1/hello.bin /sdcard/ps1/`.
+
+1. Install the APK (CI's xrecomp-latest: it carries OpenBIOS). If `/sdcard/ps1` is not a library folder yet: Y ›
+   Library folders › Add a folder › `ps1`. Expected: the cards « gfx » and « hello » with the **PS1** badge (when
+   other consoles' games are listed too), **no** chip. About › Licences lists `MIT-OpenBIOS.txt`.
+2. A on **gfx** (with the toolchain: its Home, « Plays in the interpreter », Play alone, a note; screenshot; A on
+   Play). Expected: about 6 s of the BIOS's black 640 x 480 screen (OpenBIOS boots the disc), then a dark grey 4:3
+   picture: a red rectangle, a green triangle, a colour gradient square, a magenta / white checkerboard and a small
+   textured square, black bars left and right. Screenshot. logcat: `launcher: library: play ps1-PSX-… from
+   /storage/…/gfx.cue`, `PACK_NONE ps1 PSX-…`, `ps1: … game gfx.cue (disc, BIOS boot), key PSX-…, BIOS asset
+   ps1-bios/openbios.bin`, `ps1: window on (4:3, aspect, linear), audio on, pads 1, port 1 digital`, `ps1: display
+   320 x 240 at frame …`.
+3. Speed: Back › Quit game after about 30 s. logcat `ps1: N frames in S s (59.9x fps), 0 late resets` (around 60 fps
+   with a few late resets at most). Note the rate if lower.
+4. `RECOMP_PS1_SCALE=integer` in recomp.cfg, A on gfx again: a smaller picture (1280 x 960) with black borders all
+   round. `RECOMP_PS1_FILTER=nearest`: sharp pixels. Remove both.
+5. A on **hello**: after the BIOS screen, « XBA HELLO PS1 » and « HOMEBREW CORPUS XBA-149 » in white on dark blue.
+   Screenshot. Home, wait 5 s, reopen XRecomp from recents:
+   the game is where it was. logcat `ps1: paused at frame …`, `ps1: resumed`.
+6. Back: the in-game menu, the game holds; Quit game. logcat `clean exit`. While a PS1 game runs, start an Xbox or a
+   GBA game from the launcher: the PS1 one ends, the other starts.
+7. A library folder added with the file picker (no All files access), holding gfx.cue + gfx.bin: A on gfx plays the
+   same. logcat `shell: cue sheet content://… (1 track file(s)) -> /data/user/0/…/cache/ps1/disc.cue`. A lone
+   `gfx.bin` there (rename the .cue away, Y to rescan) plays too (`shell: ROM document … -> fd:N`).
+8. One of your own disc dumps (`.cue` + `.bin` tracks, or a single `.bin` / `.iso`; kept outside every repository):
+   copy it to `/sdcard/ps1`, Y, A on its card (named after the file; its key is the serial, `ps1-SLUS-…`). Note: does
+   the BIOS boot it, is the picture right (and the 4:3 shape), sound, controls (Cross / Circle / Square / Triangle,
+   shoulders, triggers, Start / Select, D-pad and left stick), speed (logcat at quit). Try Back + L3 + R3 in a game
+   that uses the sticks (logcat `port 1 is now analog`). Save to the memory card in the game, quit, start again: the
+   save is there (`ps1: memory card 1 loaded from …/save/ps1-SLUS-…/card1.mcr`). `adb shell run-as
+   fr.adserver.xrecomp.shell ls -l files/save/ps1-*` shows `card1.mcr`, 131072 bytes. The core is new: send the
+   logcat and a screenshot for any game that does not boot, shows wrong graphics or runs slowly.
+9. Switch the Thor to French: the PS1 Home's line and note in French.
 
 ### The library screen
 
