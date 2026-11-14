@@ -61,6 +61,18 @@ if(XBR_PS1_CHD AND PS1_disc_SRC STREQUAL "ps1_disc.c")
     target_compile_definitions(ps1_cd PRIVATE XBR_PS1_CHD=1)
 endif()
 
+# ps1_identify: ps1_disc as recomp_pack_rom_identify's disc hook (ps1_identify.h), so a .chd gets its title key where
+# both are linked (libmain, the launcher's libxba_import, ps1_play). Only recomp_pack.h is needed here; the consumer
+# links recomp_pack.c (recomp_pack_set_disc_hook), which stays libc-only.
+if(NOT TARGET ps1_identify)
+    get_filename_component(PS1_PLATFORM_INC ${CMAKE_CURRENT_SOURCE_DIR}/../../../src/platform ABSOLUTE)
+    add_library(ps1_identify STATIC ps1_identify.c)
+    target_include_directories(ps1_identify PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} PRIVATE ${PS1_PLATFORM_INC})
+    target_link_libraries(ps1_identify PUBLIC ps1_cd)
+    target_compile_options(ps1_identify PRIVATE -Wall -Wextra)
+    set_target_properties(ps1_identify PROPERTIES POSITION_INDEPENDENT_CODE ON)
+endif()
+
 # ps1_core: the emulated machine (CPU, GTE, bus, DMA, timers, SIO0, scheduler) over the device libraries above. Plain
 # C11 + libm, no host dependency, so the tests and ps1_run build anywhere (no SDL).
 if(NOT TARGET ps1_core)
@@ -101,7 +113,7 @@ if(NOT ANDROID AND TARGET ps1_runtime AND NOT TARGET ps1_play)
     get_filename_component(PS1_PLATFORM_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../../src/platform ABSOLUTE)
     add_executable(ps1_play tools/ps1_play.c ${PS1_PLATFORM_DIR}/recomp_pack.c)
     target_include_directories(ps1_play PRIVATE ${PS1_PLATFORM_DIR})
-    target_link_libraries(ps1_play PRIVATE ps1_runtime ${CMAKE_DL_LIBS})
+    target_link_libraries(ps1_play PRIVATE ps1_runtime ps1_identify ${CMAKE_DL_LIBS})
     target_compile_options(ps1_play PRIVATE -Wall -Wextra)
 endif()
 

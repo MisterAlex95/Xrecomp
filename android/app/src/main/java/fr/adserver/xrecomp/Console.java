@@ -208,8 +208,8 @@ enum Console {
      * ID PLAYSTATION; without a serial-shaped boot file « PSX-&lt;CRC32 of the volume descriptor&gt; »; a .cue: its
      * first FILE).</li>
      * </ul>
-     * A game code byte outside [A-Z0-9] becomes '_'. Null for anything else: an Xbox game, and CHD for now (compressed:
-     * read once a CHD reader is in).
+     * A game code byte outside [A-Z0-9] becomes '_'. A CHD (« MComprHD » at 0: a PlayStation disc, compressed) is read
+     * by the native disc reader ({@link #chdReader}, XBA-159). Null for anything else: an Xbox game.
      */
     static Identity identify(File f) {
         if (f == null || !f.isFile())
@@ -222,10 +222,42 @@ enum Console {
             return id != null && id.console == PS1 ? id : null;
         }
         try (RandomAccessFile raf = new RandomAccessFile(f, "r")) {
-            return identify(source(raf.getChannel()));
+            return identify(source(raf.getChannel(), f.getPath()));
         } catch (IOException e) {
             return null;
         }
+    }
+
+    /** The PS1 title key of a disc only native code reads (a CHD), from a path or « fd:N »; null when none. */
+    interface DiscKeyReader {
+        String ps1Key(String nativePath);
+    }
+
+    /**
+     * The CHD reader (XBA-159): libxba_import.so's recomp_pack_rom_identify with the PS1 disc reader (Ps1Native), the
+     * one the game process uses: CHD hunks are zlib, LZMA, zstd or FLAC, and only zlib is in the JDK. Tests substitute
+     * their own.
+     */
+    static volatile DiscKeyReader chdReader = Ps1Native::titleKey;
+
+    private static final byte[] CHD_MAGIC = "MComprHD".getBytes(StandardCharsets.US_ASCII);
+
+    /** h starts with a CHD's magic (MAME compressed hunks of data, any version). */
+    static boolean isChd(byte[] h, int hn) {
+        if (hn < CHD_MAGIC.length)
+            return false;
+        for (int i = 0; i < CHD_MAGIC.length; i++)
+            if (h[i] != CHD_MAGIC[i])
+                return false;
+        return true;
+    }
+
+    /** A CHD's identity through {@link #chdReader}: a PS1 disc with a key that names a folder, else null. */
+    private static Identity chdIdentity(Source src) {
+        String path = src.nativePath();
+        DiscKeyReader r = chdReader;
+        String k = path == null || r == null ? null : r.ps1Key(path);
+        return k != null && packDirName(PS1, k) != null ? new Identity(PS1, k) : null;
     }
 
     /**
@@ -238,6 +270,8 @@ enum Console {
             byte[] h = new byte[0xC0];
             int hn = r.read(h);
             String k;
+            if (isChd(h, hn))
+                return chdIdentity(src);
             if ((k = n64Key(h, hn)) != null)
                 return new Identity(N64, k);
             if ((k = gbaKey(r, h, hn)) != null)
@@ -355,11 +389,29 @@ enum Console {
 
         /** Up to len bytes at pos into b[off..]; -1 at the end. */
         int read(long pos, byte[] b, int off, int len) throws IOException;
+
+        /**
+         * The same content for native code ({@link #chdReader}): a file path, or « fd:N » for a descriptor its owner
+         * keeps open; null when there is none (bytes in memory).
+         */
+        default String nativePath() {
+            return null;
+        }
     }
 
     /** A FileChannel as a Source (a RandomAccessFile's, or a FileInputStream's over a document's descriptor). */
     static Source source(FileChannel ch) {
+        return source(ch, null);
+    }
+
+    /** {@link #source(FileChannel)} that native code can also open at nativePath (a path or « fd:N »). */
+    static Source source(FileChannel ch, String nativePath) {
         return new Source() {
+            @Override
+            public String nativePath() {
+                return nativePath;
+            }
+
             @Override
             public long length() throws IOException {
                 return ch.size();

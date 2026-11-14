@@ -5,9 +5,17 @@
  * 8 x JOY_BAUD cycles; the device's reply lands in the RX buffer and, when it pulls /ACK (more bytes expected) and
  * JOY_CTRL bit 12 is set, IRQ 7 is raised (JOY_STAT bit 9, acknowledged by JOY_CTRL bit 4).
  *
- * Devices: the digital pad (0x01 0x42: id 0x41 0x5A, two button bytes, active low), the DualShock in analog mode
- * (id 0x73, then right X / Y, left X / Y) and the 128 KB memory card (0x81, then 'R' read / 'W' write / 'S' id, the
- * standard frame protocol: 1024 frames of 128 bytes, checksum = XOR of the address bytes and data). */
+ * Devices: the digital pad (0x01 0x42: id 0x41 0x5A, two button bytes, active low), the DualShock and the 128 KB
+ * memory card (0x81, then 'R' read / 'W' write / 'S' id, the standard frame protocol: 1024 frames of 128 bytes,
+ * checksum = XOR of the address bytes and data).
+ *
+ * The DualShock (psx-spx « Controllers - Configuration Commands »): in digital mode it answers 0x42 like the digital
+ * pad (L3 / R3 not reported), in analog mode id 0x73 and six bytes (buttons, right X / Y, left X / Y). 0x43 (a read
+ * too) with 01h as its first parameter enters config mode: id 0xF3, every command 9 bytes, 0x43 00h leaves it.
+ * Config commands: 0x44 mode (00h digital, 01h analog) + key (03h locks the ANALOG button, 02h unlocks), 0x45 status
+ * (01h DualShock, 02h, LED, 02h, 01h, 00h), 0x46 / 0x47 / 0x4C constant tables by index, 0x4D the rumble mapping (the
+ * old one is answered; per poll byte 00h = small motor, 01h = large, FFh = none); other 0x40..0x4F answer zeros. A
+ * 0x42 poll's parameter bytes then drive the motors: small on when bit 0 is set, large 00h..FFh. */
 #include "ps1_internal.h"
 
 #include <string.h>
@@ -44,6 +52,131 @@ void ps1_sio_reset(ps1_machine *m)
     s->baud = 0x88;
 }
 
+void ps1_pad_plug(ps1_pad *p, ps1_pad_kind kind)
+{
+    p->kind = kind;
+    p->analog = kind == PS1_PAD_ANALOG;
+    p->config = false;
+    p->locked = false;
+    memset(p->rumble_map, 0xFF, sizeof p->rumble_map);
+    p->motor_small = p->motor_large = 0;
+}
+
+static bool dualshock(const ps1_pad *p)
+{
+    return p->kind == PS1_PAD_ANALOG || p->kind == PS1_PAD_DUALSHOCK;
+}
+
+int ps1_pad_analog(ps1_machine *m, int port)
+{
+    if (port < 0 || port > 1 || !dualshock(&m->pads[port]))
+        return -1;
+    return m->pads[port].analog;
+}
+
+int ps1_pad_analog_button(ps1_machine *m, int port)
+{
+    if (port < 0 || port > 1 || !dualshock(&m->pads[port]))
+        return -1;
+    ps1_pad *p = &m->pads[port];
+    if (!p->locked)
+        p->analog = !p->analog;
+    return p->analog;
+}
+
+void ps1_pad_rumble(ps1_machine *m, int port, uint8_t *small, uint8_t *large)
+{
+    const ps1_pad *p = port >= 0 && port <= 1 ? &m->pads[port] : NULL;
+    bool on = p && dualshock(p);
+    if (small)
+        *small = on ? p->motor_small : 0;
+    if (large)
+        *large = on ? p->motor_large : 0;
+}
+
+/* The pad's reply to byte tx at step (1: the command, 2: 5Ah, 3.. the parameters), and its last step. */
+static uint8_t pad_exchange(ps1_sio *s, ps1_pad *p, int step, uint8_t tx, int *last)
+{
+    bool ds = dualshock(p);
+    if (step == 1) {
+        bool ok = tx == 0x42 || (ds && (tx == 0x43 || (p->config && (tx & 0xF0) == 0x40)));
+        if (!ok)
+            return *last = 0, 0xFF;
+        s->pad_cmd = tx;
+        s->pad_arg = 0;
+        s->pad_long = p->config || p->analog;
+        s->pad_poll = tx == 0x42 || !p->config;
+        *last = s->pad_long ? 8 : 4;
+        return p->config ? 0xF3 : p->analog ? 0x73 : 0x41;
+    }
+    *last = s->pad_long ? 8 : 4;
+    if (step == 2)
+        return 0x5A;
+    int i = step - 3; /* parameter / data byte 0..5 */
+    if (i == 0)
+        s->pad_arg = tx;
+    uint8_t cmd = s->pad_cmd;
+    if (s->pad_poll) {
+        /* a poll: buttons (active low), then the sticks */
+        uint16_t b = (uint16_t)~p->buttons;
+        if (!p->analog)
+            b |= PS1_PAD_L3 | PS1_PAD_R3;
+        if (cmd == 0x43 && i == 0 && tx == 0x01)
+            p->config = true; /* from the next command on */
+        if (cmd == 0x42 && ds && i < 6) {
+            if (p->rumble_map[i] == 0x00)
+                p->motor_small = tx & 1 ? 255 : 0;
+            else if (p->rumble_map[i] == 0x01)
+                p->motor_large = tx;
+        }
+        bool sticks = p->analog;
+        switch (i) {
+        case 0: return (uint8_t)b;
+        case 1: return (uint8_t)(b >> 8);
+        case 2: return sticks ? p->rx : 0x80;
+        case 3: return sticks ? p->ry : 0x80;
+        case 4: return sticks ? p->lx : 0x80;
+        default: return sticks ? p->ly : 0x80;
+        }
+    }
+    /* config mode */
+    switch (cmd) {
+    case 0x43:
+        if (i == 0 && tx == 0x00)
+            p->config = false;
+        return 0x00;
+    case 0x44:
+        if (i == 0 && tx <= 1)
+            p->analog = tx == 1;
+        else if (i == 1 && (tx == 0x02 || tx == 0x03))
+            p->locked = tx == 0x03;
+        return 0x00;
+    case 0x45: {
+        const uint8_t r[6] = { 0x01, 0x02, (uint8_t)p->analog, 0x02, 0x01, 0x00 };
+        return r[i];
+    }
+    case 0x46: {
+        static const uint8_t r[2][6] = { { 0x00, 0x00, 0x01, 0x02, 0x00, 0x0A }, { 0x00, 0x00, 0x01, 0x01, 0x01, 0x14 } };
+        return s->pad_arg <= 1 ? r[s->pad_arg][i] : 0x00;
+    }
+    case 0x47: {
+        static const uint8_t r[6] = { 0x00, 0x00, 0x02, 0x00, 0x01, 0x00 };
+        return s->pad_arg == 0 ? r[i] : 0x00;
+    }
+    case 0x4C:
+        return i == 3 && s->pad_arg <= 1 ? (s->pad_arg ? 0x07 : 0x04) : 0x00;
+    case 0x4D: {
+        uint8_t old = p->rumble_map[i];
+        p->rumble_map[i] = tx;
+        if (i == 5)
+            p->motor_small = p->motor_large = 0;
+        return old;
+    }
+    default:
+        return 0x00;
+    }
+}
+
 static void deselect(ps1_sio *s)
 {
     s->device = 0;
@@ -77,27 +210,11 @@ static uint8_t exchange(ps1_machine *m, uint8_t tx, bool *ack)
 
     int step = s->step++;
     if (s->device == 1) { /* pad */
-        const ps1_pad *p = &m->pads[port];
-        bool analog = p->kind == PS1_PAD_ANALOG;
-        uint16_t b = (uint16_t)~p->buttons;
-        int last = analog ? 8 : 4;
-        uint8_t r;
-        switch (step) {
-        case 1:
-            if (tx != 0x42) {
-                s->device = -1;
-                return 0xFF;
-            }
-            r = analog ? 0x73 : 0x41;
-            break;
-        case 2: r = 0x5A; break;
-        case 3: r = (uint8_t)b; break;
-        case 4: r = (uint8_t)(b >> 8); break;
-        case 5: r = p->rx; break;
-        case 6: r = p->ry; break;
-        case 7: r = p->lx; break;
-        case 8: r = p->ly; break;
-        default: s->device = -1; return 0xFF;
+        int last = 0;
+        uint8_t r = step <= 8 ? pad_exchange(s, &m->pads[port], step, tx, &last) : 0xFF;
+        if (step > last) {
+            s->device = -1;
+            return 0xFF;
         }
         *ack = step < last;
         return r;

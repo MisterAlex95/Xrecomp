@@ -219,10 +219,25 @@ static int n64_key(const unsigned char *h, size_t hn, char *key, size_t key_n)
 
 /* An ISO 9660 track: 2048-byte sectors, or raw 2352-byte ones (mode 1 data
  * at 16, mode 2 form 1 at 24). */
-typedef struct { FILE *f; long size; long off; } iso_track;
+typedef struct {
+    FILE *f;
+    long size;
+    long off;
+    const recomp_pack_disc_hook *hook;  /* a CHD: user data through the hook (f unused) */
+    void *disc;
+} iso_track;
+
+static const recomp_pack_disc_hook *s_disc_hook;
+
+void recomp_pack_set_disc_hook(const recomp_pack_disc_hook *hook)
+{
+    s_disc_hook = hook;
+}
 
 static int iso_read(const iso_track *t, uint32_t lba, unsigned char out[2048])
 {
+    if (t->hook)
+        return t->hook->read(t->disc, lba, out);
     long pos = (long)lba * t->size + t->off;
     return fseek(t->f, pos, SEEK_SET) == 0 && fread(out, 1, 2048, t->f) == 2048 ? 0 : -1;
 }
@@ -231,9 +246,9 @@ static int iso_open(FILE *f, iso_track *t, unsigned char pvd[2048])
 {
     static const unsigned char sync[12] = { 0, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0 };
     unsigned char raw[16];
+    memset(t, 0, sizeof *t);
     t->f = f;
     t->size = 2048;
-    t->off = 0;
     if (iso_read(t, 16, pvd) == 0 && pvd[0] == 1 && !memcmp(pvd + 1, "CD001", 5))
         return 0;
     if (fseek(f, 16L * 2352, SEEK_SET) != 0 || fread(raw, 1, 16, f) != 16 || memcmp(raw, sync, 12))
@@ -309,17 +324,44 @@ static int ps1_serial(const char *cnf, char *key, size_t key_n)
     return -1;
 }
 
+/* The key of a PlayStation volume whose PVD t has read. */
+static int ps1_volume_key(const iso_track *t, const unsigned char pvd[2048], char *key, size_t key_n)
+{
+    char cnf[2049];
+    if (pvd[0] != 1 || memcmp(pvd + 1, "CD001", 5) || memcmp(pvd + 8, "PLAYSTATION", 11))
+        return -1;
+    if (iso_system_cnf(t, pvd, cnf, sizeof cnf) == 0 && ps1_serial(cnf, key, key_n) == 0)
+        return 0;
+    snprintf(key, key_n, "PSX-%08X", (unsigned)crc32_update(0, pvd, 2048));
+    return 0;
+}
+
 static int ps1_key(FILE *f, char *key, size_t key_n)
 {
     iso_track t;
     unsigned char pvd[2048];
-    char cnf[2049];
-    if (iso_open(f, &t, pvd) || memcmp(pvd + 8, "PLAYSTATION", 11))
+    if (iso_open(f, &t, pvd))
         return -1;
-    if (iso_system_cnf(&t, pvd, cnf, sizeof cnf) == 0 && ps1_serial(cnf, key, key_n) == 0)
-        return 0;
-    snprintf(key, key_n, "PSX-%08X", (unsigned)crc32_update(0, pvd, sizeof pvd));
-    return 0;
+    return ps1_volume_key(&t, pvd, key, key_n);
+}
+
+/* A CHD through the disc hook: -1 without one, or when it is no PlayStation disc. */
+static int ps1_chd_key(const char *path, char *key, size_t key_n)
+{
+    const recomp_pack_disc_hook *hook = s_disc_hook;
+    iso_track t;
+    unsigned char pvd[2048];
+    int rc = -1;
+    if (!hook || !hook->open || !hook->read || !hook->close)
+        return -1;
+    memset(&t, 0, sizeof t);
+    t.hook = hook;
+    if (!(t.disc = hook->open(path)))
+        return -1;
+    if (iso_read(&t, 16, pvd) == 0)
+        rc = ps1_volume_key(&t, pvd, key, key_n);
+    hook->close(t.disc);
+    return rc;
 }
 
 /* A .cue's first FILE, resolved next to it, into out. */
@@ -397,6 +439,15 @@ int recomp_pack_rom_identify(const char *path, int *console, char *key, size_t k
         return -1;
     }
     hn = fread(h, 1, sizeof h, f);
+    if (hn >= 8 && !memcmp(h, "MComprHD", 8)) {
+        /* A CHD: compressed, read by the disc hook (which opens its own handle on path). */
+        fclose(f);
+        if (ps1_chd_key(path, key, key_n))
+            return -1;
+        if (console)
+            *console = RECOMP_CONSOLE_PS1;
+        return 0;
+    }
     if (n64_key(h, hn, key, key_n) == 0)
         c = RECOMP_CONSOLE_N64;
     else if (gba_key(f, h, hn, key, key_n) == 0)

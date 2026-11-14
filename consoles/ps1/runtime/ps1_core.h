@@ -49,11 +49,16 @@ enum {
     PS1_PAD_SQUARE = 1 << 15,
 };
 
-/* What is plugged into a controller port. */
+/* What is plugged into a controller port. Both DualShock kinds are the same pad (SCPH-1200), plugged in with its
+ * ANALOG LED on or off: the game may switch it (config mode, command 0x44) and set up its rumble motors (0x4D), and
+ * the player may press its ANALOG button (ps1_pad_analog_button) unless the game locked it. In digital mode it
+ * answers like the digital pad (id 0x5A41, L3 / R3 not reported); in analog mode id 0x5A73, buttons, then right X / Y
+ * and left X / Y. */
 typedef enum ps1_pad_kind {
-    PS1_PAD_NONE = 0,    /* empty port */
-    PS1_PAD_DIGITAL = 1, /* SCPH-1080, id 0x5A41 */
-    PS1_PAD_ANALOG = 2,  /* DualShock in analog mode (id 0x5A73: buttons + right X/Y + left X/Y) */
+    PS1_PAD_NONE = 0,      /* empty port */
+    PS1_PAD_DIGITAL = 1,   /* SCPH-1080, id 0x5A41, no config mode */
+    PS1_PAD_ANALOG = 2,    /* DualShock, plugged in in analog mode */
+    PS1_PAD_DUALSHOCK = 3, /* DualShock, plugged in in digital mode */
 } ps1_pad_kind;
 
 /* Creates a machine and starts it at the BIOS reset vector.
@@ -67,9 +72,20 @@ ps1_machine *ps1_create(const uint8_t *bios, size_t bios_size, const char *disc_
 void ps1_destroy(ps1_machine *m);
 
 /* Controller port 0 or 1: kind, buttons held (PS1_PAD_*, 1 = pressed) and, for the analog pad, the sticks
- * (0..255, 128 = centre). */
+ * (0..255, 128 = centre). Called every frame; another kind than the port's is a new pad plugged in (a DualShock's
+ * mode, lock and rumble set-up start over), the same kind keeps them. */
 void ps1_set_pad(ps1_machine *m, int port, ps1_pad_kind kind, uint16_t buttons, uint8_t lx, uint8_t ly, uint8_t rx,
                  uint8_t ry);
+
+/* A DualShock on port 0 or 1 (XBA-167): ps1_pad_analog 1 when it reports analog (id 0x73), 0 digital, -1 no DualShock
+ * there. ps1_pad_analog_button presses its ANALOG button: the mode flips unless the game locked it (0x44); returns
+ * the mode then (-1 no DualShock). */
+int ps1_pad_analog(ps1_machine *m, int port);
+int ps1_pad_analog_button(ps1_machine *m, int port);
+
+/* The DualShock's rumble motors on port 0 or 1 as the game drives them (the poll's bytes it mapped with 0x4D): small
+ * (right, on / off: 0 or 255) and large (left, 0..255). Both 0 without a DualShock or a mapping. */
+void ps1_pad_rumble(ps1_machine *m, int port, uint8_t *small, uint8_t *large);
 
 /* Runs until the start of the next VBlank (the VBlank interrupt is raised as it returns). */
 void ps1_run_frame(ps1_machine *m);

@@ -146,7 +146,23 @@ public class LibraryScannerTest {
 
                 @Override
                 public Console.Source source() {
-                    return Console.source(b);
+                    Console.Source in = Console.source(b);
+                    return new Console.Source() {   // « fd:N » for the CHD reader, as LibraryScanner.parcel
+                        @Override
+                        public long length() throws IOException {
+                            return in.length();
+                        }
+
+                        @Override
+                        public int read(long pos, byte[] out, int off, int len) throws IOException {
+                            return in.read(pos, out, off, len);
+                        }
+
+                        @Override
+                        public String nativePath() {
+                            return "fd:" + fd;
+                        }
+                    };
                 }
 
                 @Override
@@ -650,6 +666,44 @@ public class LibraryScannerTest {
         assertEquals(LibraryIndex.NOT_ROM, r.index.find("ps1:/Music.cue").status);
         assertNull("the .cue's track is not listed on its own", r.index.find("ps1:/Music.bin"));
         assertEquals(0, r.games());
+    }
+
+    /**
+     * A .chd (XBA-159): read by the native CHD reader through the document's descriptor (« fd:N »); a PlayStation disc
+     * becomes a game keyed by its serial, and without the reader (or for another CD) it stays an « other file ».
+     */
+    @Test
+    public void chdDiscThroughTheNativeReader() {
+        Console.DiscKeyReader was = Console.chdReader;
+        try {
+            FakeTree t = new FakeTree("ps1:")
+                    .file("Game.chd", ConsoleTest.chd(ConsoleTest.ps1(true, "BOOT = cdrom:\\SLUS_005.94;1\r\n",
+                                                                      "PLAYSTATION")), 1)
+                    .file("Other.chd", ConsoleTest.chd(ConsoleTest.ps1(true, null, "WIN32")), 2);
+            List<String> asked = new ArrayList<>();
+            Console.chdReader = path -> {
+                asked.add(path);
+                assertTrue(path, path.startsWith("fd:"));
+                return ConsoleTest.chdKey(t.opened.get(Integer.parseInt(path.substring(3))));
+            };
+            LibraryScanner.Result r = scan(Arrays.asList(root("t:ps1", t)), null);
+            LibraryIndex.Item game = r.index.find("ps1:/Game.chd");
+            assertTrue(game.ok());
+            assertEquals(LibraryIndex.KIND_ROM, game.kind);
+            assertEquals(Console.PS1, game.console);
+            assertEquals("SLUS-00594", game.key);
+            assertEquals("ps1-SLUS-00594", game.tid);
+            assertEquals("Game", game.title);
+            assertEquals(LibraryIndex.NOT_ROM, r.index.find("ps1:/Other.chd").status);
+            assertEquals(2, asked.size());
+
+            Console.chdReader = path -> null;   // no libxba_import.so: an « other file », as before
+            r = scan(Arrays.asList(root("t:ps1", t)), null);
+            assertEquals(LibraryIndex.NOT_ROM, r.index.find("ps1:/Game.chd").status);
+            assertEquals(0, r.games());
+        } finally {
+            Console.chdReader = was;
+        }
     }
 
     /** The walk's limits are per folder: a full folder does not hide the games of the next one. */

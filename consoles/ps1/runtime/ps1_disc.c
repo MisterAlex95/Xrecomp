@@ -599,9 +599,20 @@ ps1_disc *ps1_disc_open(const char *path, char *err, size_t errlen)
 #endif
     } else {
         int fd = open(path, O_RDONLY);
+        uint8_t magic[8] = {0};
         if (fd < 0) {
             set_err(err, errlen, "cannot open %s: %s", path, strerror(errno));
             rc = -1;
+        } else if (read_full(fd, magic, 8, 0) == 0 && memcmp(magic, "MComprHD", 8) == 0) {
+            /* a CHD under another name: by content, as for fd: */
+            close(fd);
+#ifdef XBR_PS1_CHD
+            d->kind = SRC_CHD;
+            rc = open_chd(d, path, -1, err, errlen);
+#else
+            set_err(err, errlen, "CHD support is not built in (XBR_PS1_CHD)");
+            rc = -1;
+#endif
         } else {
             rc = open_single(d, fd, has_ext(path, ".iso"), err, errlen);
         }

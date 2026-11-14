@@ -7,6 +7,7 @@ import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
 import org.json.JSONObject;
+import org.junit.After;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
@@ -29,6 +30,13 @@ import java.util.zip.CRC32;
 public class ConsoleTest {
     @Rule
     public TemporaryFolder tmp = new TemporaryFolder();
+
+    private final Console.DiscKeyReader nativeChd = Console.chdReader;
+
+    @After
+    public void restoreChdReader() {
+        Console.chdReader = nativeChd;
+    }
 
     // ---- Synthetic games ------------------------------------------------------------------------------------------
 
@@ -101,6 +109,66 @@ public class ConsoleTest {
             }
         }
         return out.toByteArray();
+    }
+
+    private static void be32(byte[] b, int o, long v) {
+        b[o] = (byte)(v >> 24); b[o + 1] = (byte)(v >> 16); b[o + 2] = (byte)(v >> 8); b[o + 3] = (byte)v;
+    }
+
+    private static long rbe32(byte[] b, int o) {
+        return (b[o] & 0xffL) << 24 | (b[o + 1] & 0xffL) << 16 | (b[o + 2] & 0xffL) << 8 | (b[o + 3] & 0xffL);
+    }
+
+    /** CHD frames: 2352 bytes of sector + 96 of subcode; 8 per hunk (chdman's CD hunk). */
+    static final int CHD_FRAME = 2448, CHD_HUNK = 8 * CHD_FRAME;
+
+    /**
+     * An uncompressed CHD v5 of a raw (2352-byte sector) data track, as consoles/ps1/tests/test_disc.c writes one:
+     * 124-byte header, a map of 4-byte hunk numbers (hunk h at h * hunk bytes), one CHT2 track metadata entry, hunks
+     * of 8 frames from hunk 1.
+     */
+    static byte[] chd(byte[] rawTrack) {
+        int frames = rawTrack.length / 2352, hunks = (frames + 7) / 8;
+        byte[] f = new byte[(hunks + 1) * CHD_HUNK];
+        System.arraycopy("MComprHD".getBytes(StandardCharsets.US_ASCII), 0, f, 0, 8);
+        be32(f, 8, 124);
+        be32(f, 12, 5);
+        be32(f, 36, (long)hunks * CHD_HUNK);   // logical bytes (low word)
+        be32(f, 44, 124);                       // map offset (low word)
+        int meta = 124 + hunks * 4;
+        be32(f, 52, meta);                      // metadata offset (low word)
+        be32(f, 56, CHD_HUNK);
+        be32(f, 60, CHD_FRAME);
+        for (int h = 0; h < hunks; h++)
+            be32(f, 124 + h * 4, h + 1);
+        String m = "TRACK:1 TYPE:MODE2_RAW SUBTYPE:NONE FRAMES:" + frames
+                   + " PREGAP:0 PGTYPE:MODE2_RAW PGSUB:NONE POSTGAP:0";
+        System.arraycopy("CHT2".getBytes(StandardCharsets.US_ASCII), 0, f, meta, 4);
+        be32(f, meta + 4, m.length() + 1);
+        System.arraycopy(m.getBytes(StandardCharsets.US_ASCII), 0, f, meta + 16, m.length());
+        for (int i = 0; i < frames; i++)
+            System.arraycopy(rawTrack, i * 2352, f, CHD_HUNK + i * CHD_FRAME, 2352);
+        return f;
+    }
+
+    /**
+     * What the native reader (Ps1Native: recomp_pack_rom_identify + ps1_disc + libchdr) answers, for the uncompressed
+     * CHDs above: the frames' sectors read as a .bin. The real reader is tested natively (consoles/ps1/tests
+     * test_identify.c: uncompressed and cdzl CHDs); here only the app's side is: which files go to it, with what path.
+     */
+    static String chdKey(byte[] chd) {
+        if (chd == null || chd.length < 124 || !new String(chd, 0, 8, StandardCharsets.US_ASCII).equals("MComprHD")
+            || rbe32(chd, 12) != 5 || rbe32(chd, 16) != 0)
+            return null;
+        int hunkBytes = (int)rbe32(chd, 56), hunks = (int)(rbe32(chd, 36) / hunkBytes), map = (int)rbe32(chd, 44);
+        ByteArrayOutputStream raw = new ByteArrayOutputStream();
+        for (int h = 0; h < hunks; h++) {
+            long at = rbe32(chd, map + h * 4) * hunkBytes;
+            for (int i = 0; i < hunkBytes / CHD_FRAME && at + (i + 1) * (long)CHD_FRAME <= chd.length; i++)
+                raw.write(chd, (int)(at + i * CHD_FRAME), 2352);
+        }
+        Console.Identity id = Console.identify(Console.source(raw.toByteArray()));
+        return id != null && id.console == Console.PS1 ? id.key : null;
     }
 
     /** An Xbox XISO: "MICROSOFT*XBOX*MEDIA" at sector 32. */
@@ -216,10 +284,53 @@ public class ConsoleTest {
         assertNull(Console.ps1Serial("VMODE = NTSC"));
     }
 
+    /**
+     * A .chd (XBA-159) goes to the native CHD reader with its path, by content (the « MComprHD » magic, whatever its
+     * name), and its key is the one the same disc has as a .bin.
+     */
+    @Test
+    public void chdKeyComesFromTheNativeReader() throws Exception {
+        byte[] bin = ps1(true, "BOOT = cdrom:\\SLUS_005.94;1\r\nTCB = 4\r\n", "PLAYSTATION");
+        File disc = file("Game.chd", chd(bin));
+        File renamed = file("Game.img", chd(bin));
+        java.util.List<String> asked = new java.util.ArrayList<>();
+        Console.chdReader = path -> {
+            asked.add(path);
+            try {
+                return chdKey(java.nio.file.Files.readAllBytes(new File(path).toPath()));
+            } catch (java.io.IOException e) {
+                return null;
+            }
+        };
+        Console.Identity id = Console.identify(disc);
+        assertNotNull(id);
+        assertEquals(Console.PS1, id.console);
+        assertEquals("SLUS-00594", id.key);
+        assertEquals(Console.identify(file("Game.bin", bin)).key, id.key);
+        assertEquals("ps1-SLUS-00594", id.packName());
+        assertEquals(java.util.Collections.singletonList(disc.getPath()), asked);
+        assertEquals("SLUS-00594", Console.identify(renamed).key);
+
+        // Another CD's CHD (no PLAYSTATION volume): no key.
+        assertNull(Console.identify(file("Other.chd", chd(ps1(true, "BOOT = cdrom:\\SLUS_005.94;1\r\n", "WIN32")))));
+        // Bytes with no path for native code (a test's Source): not read.
+        asked.clear();
+        assertNull(Console.identify(Console.source(chd(bin))));
+        assertTrue(asked.isEmpty());
+        // A key that cannot name a pack folder is refused.
+        Console.chdReader = path -> "../x";
+        assertNull(Console.identify(disc));
+        // Without the native library (a JVM, an APK built without it): an « other file », as before.
+        Console.chdReader = path -> null;
+        assertNull(Console.identify(disc));
+        assertNull(Ps1Native.titleKey(disc.getPath()));   // no libxba_import.so on the JVM
+    }
+
     @Test
     public void xboxGamesAndOthersHaveNoKey() throws Exception {
         assertNull(Console.identify(file("Halo.iso", xiso())));
         assertNull(Console.identify(file("default.xbe", TestSupport.xbe(0x4D530004, "Halo"))));
+        Console.chdReader = path -> chdKey("MComprHD".getBytes(StandardCharsets.US_ASCII));
         assertNull(Console.identify(file("Game.chd", "MComprHD".getBytes(StandardCharsets.US_ASCII))));
         assertNull(Console.identify(file("Loop.cue", "FILE \"Loop.cue\" BINARY\n".getBytes(StandardCharsets.US_ASCII))));
         assertNull(Console.identify(new File(tmp.getRoot(), "missing.gba")));

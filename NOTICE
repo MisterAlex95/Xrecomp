@@ -139,8 +139,9 @@ Frame generation (LSFG) — built from pinned checkouts, not vendored
 libchdr — vendored for PlayStation .chd disc images
 ---------------------------------------------------
 
-  third_party/libchdr: https://github.com/rtissera/libchdr, tag v0.3.0
-  (commit 93d8c239ff0d4e8d7722985992649fce12d2463b), unmodified reader sources
+  third_party/libchdr: https://github.com/rtissera/libchdr, master
+  commit 47d794151b2b64f6aba60304e6480f4f5a2bc24b (2026-10-11, after tag v0.3.0),
+  unmodified reader sources
   and the dependencies it ships; built as the static library ps1_chdr when
   XBR_PS1_CHD is ON (consoles/ps1/runtime, ps1_disc.c). Each part keeps its
   own licence text next to it:
@@ -149,10 +150,10 @@ libchdr — vendored for PlayStation .chd disc images
                      (third_party/libchdr/LICENSE.txt)
     dr_flac          public domain (Unlicense) or MIT No Attribution, David Reid
                      (licence at the end of include/dr_libs/dr_flac.h)
-    LZMA SDK 25.01   public domain, Igor Pavlov (deps/lzma-25.01/LICENSE)
-    miniz 3.1.1      MIT, Copyright 2013-2014 RAD Game Tools and Valve
+    LZMA SDK 26.02   public domain, Igor Pavlov (deps/lzma-26.02/LICENSE)
+    miniz 3.1.2      MIT, Copyright 2013-2014 RAD Game Tools and Valve
                      Software, 2010-2014 Rich Geldreich and Tenacious Software
-                     LLC (deps/miniz-3.1.1/LICENSE)
+                     LLC (deps/miniz-3.1.2/LICENSE)
     zstd 1.5.7       BSD 3-Clause (dual BSD / GPLv2, used under BSD),
                      Copyright Meta Platforms, Inc. and affiliates
                      (deps/zstd-1.5.7/LICENSE)

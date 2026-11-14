@@ -113,6 +113,12 @@ typedef struct ps1_pad {
     ps1_pad_kind kind;
     uint16_t buttons;   /* 1 = pressed */
     uint8_t lx, ly, rx, ry;
+    /* DualShock (ps1_sio.c). */
+    bool analog;        /* reports id 0x73 (LED on) */
+    bool config;        /* in config mode (id 0xF3), entered with 0x43 */
+    bool locked;        /* the game locked the mode (0x44 key 03h): the ANALOG button does nothing */
+    uint8_t rumble_map[6]; /* 0x4D: which motor each poll byte drives (00h small, 01h large, FFh none) */
+    uint8_t motor_small, motor_large;
 } ps1_pad;
 
 typedef struct ps1_card {
@@ -142,7 +148,15 @@ typedef struct ps1_sio {
     uint8_t next_reply; /* the device's reply to the byte in flight */
     bool next_ack;
     uint8_t wr_status;  /* memory card write: end status (47h good, 4Eh bad checksum) */
+    uint8_t pad_cmd;    /* pad command byte (42h read, 43h..4Dh config) */
+    uint8_t pad_arg;    /* its first parameter byte (the mode of 44h, the index of 46h / 47h / 4Ch) */
+    bool pad_long;      /* the command answers 6 data bytes (analog mode or config mode), else 2 */
+    bool pad_poll;      /* it answers the pad's state (42h, 43h outside config mode) */
 } ps1_sio;
+
+/* A DualShock plugged in (another kind than before on the port, ps1_set_pad): mode from the kind, unlocked, no rumble
+ * mapping (ps1_sio.c). */
+void ps1_pad_plug(ps1_pad *p, ps1_pad_kind kind);
 
 /* ---- The machine ---- */
 struct ps1_machine {

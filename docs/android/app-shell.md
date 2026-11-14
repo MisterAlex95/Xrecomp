@@ -1064,7 +1064,7 @@ content the way the native side names their packs (`Console.identify`, mirroring
 | Console | Files | Title key |
 |---|---|---|
 | Game Boy Advance | `*.gba` | game code + CRC32 of the file, `AXVE-1A2B3C4D` |
-| PlayStation | a `.cue` and its tracks (the `.cue` stands for the disc; the tracks it names are not listed again), a lone `.bin`, an `.iso` that is no Xbox image (`ENOTXISO`) but an ISO 9660 « PLAYSTATION » volume | the serial of `SYSTEM.CNF`'s BOOT line, `SLUS-00594` |
+| PlayStation | a `.cue` and its tracks (the `.cue` stands for the disc; the tracks it names are not listed again), a lone `.bin`, a `.chd`, an `.iso` that is no Xbox image (`ENOTXISO`) but an ISO 9660 « PLAYSTATION » volume | the serial of `SYSTEM.CNF`'s BOOT line, `SLUS-00594` |
 | Nintendo 64 | `*.z64`, `*.v64`, `*.n64` (any byte order) | game code + header CRC1, `NSME-635A2BFF` |
 
 Such a game is keyed `<console>-<title key>` (`gba-AXVE-1A2B3C4D`, the pack folder's name, `Console.packDirName`) in
@@ -1072,7 +1072,11 @@ the index's `tid` and in `games.json`; Xbox games keep their title ID, so every 
 record stays valid. Index items of another console carry `"kind": "rom"`, `"console"`, `"key"` (absent for Xbox:
 an Xbox item is written as before). A `.cue`'s fingerprint is its own and its tracks' (sizes summed, the newest
 time), so the stat-only rescan covers a changed track. A file named like a game whose content gives no title key is
-an « other file »; a `.chd` too for now (compressed, read once a CHD reader is in). A lone `.bin` that is no
+an « other file ». A `.chd` (« MComprHD »: compressed hunks, zlib / LZMA / zstd / FLAC) is read by native code:
+`Console.chdReader` calls `Ps1Native.titleKey` in `libxba_import.so` (the launcher's process already loads it for
+`XisoNative`; no SDL), which runs `recomp_pack_rom_identify` with the PS1 disc reader (`ps1_disc.c` + libchdr) as its
+disc hook, on the file's path or the document's `fd:N`, so the key is the one the game process computes (XBA-159).
+Without the library (a JVM test, an APK built without it) a `.chd` stays an « other file ». A lone `.bin` that is no
 PlayStation disc (firmware, a dump) is ignored: kept in the index for the stat-only rescan, shown nowhere.
 
 GBA games play: see [Game Boy Advance games](#game-boy-advance-games-xba-157); PS1 games too:
@@ -1233,8 +1237,9 @@ runs, **No file access** when its folder cannot be read, and never shows a Prepa
   `shell: cue sheet content://… (N track file(s)) -> /data/user/0/…/cache/ps1/disc.cue`; a track missing or
   unreadable: `fd:-1` and back to the launcher. `shell_main.c` routes it like a GBA ROM (`xba_pack_rom_console`,
   `RECOMP_DISC_IMAGE=0`), `pack_loader.c` logs `PACK_NONE ps1 <SERIAL> (not prepared, the interpreter runs it)`
-  (`PACK_IGNORED` for a pack that would pass: no PS1 recompiled code yet) and calls `ps1_runtime_start`. `.chd` is not
-  identified yet (no title key: an « other file »).
+  (`PACK_IGNORED` for a pack that would pass: no PS1 recompiled code yet) and calls `ps1_runtime_start`. A `.chd` goes
+  over as `fd:N` too; `shell_main.c` installs the PS1 disc reader as `recomp_pack_rom_identify`'s disc hook
+  (`ps1_identify_install`) before routing, so it is keyed by its serial like a `.bin`.
 - **BIOS.** OpenBIOS (MIT, PCSX-Redux's nugget tree), inside the APK as `assets/ps1-bios/openbios.bin`: the `ps1-bios`
   stage of `tools/docker/android.Dockerfile` builds it from its pinned source, sha256 checked, and gradle takes it with
   `-PxbaPs1Bios=FILE` (the same check); its licence is `LICENSES/MIT-OpenBIOS.txt` (About › Licences, NOTICE « The
@@ -1246,9 +1251,12 @@ runs, **No file access** when its folder cannot be read, and never shows a Prepa
   `RECOMP_PS1_SCALE=integer` whole multiples of the height (4x a 240-line picture: 1280 x 960).
 - **Controls.** Every connected pad drives port 1, Xbox layout: A → Cross, B → Circle, X → Square, Y → Triangle,
   LB / RB → L1 / R1, LT / RT → L2 / R2, Start → Start, Back / Select → Select, stick clicks → L3 / R3, D-pad →
-  D-pad. A digital pad by default (the left stick drives the D-pad too); Back + L3 + R3 together switch to a DualShock
-  in analog mode (both sticks, logcat `ps1: port 1 is now analog (DualShock)`) and back; `RECOMP_PS1_PAD=analog`
-  starts in analog mode; `RECOMP_PS1_PLAYERS=2`: the first two pads drive ports 1 and 2. Back on the device opens the
+  D-pad. A DualShock (XBA-167), plugged in in digital mode by default (the left stick drives the D-pad too);
+  `RECOMP_PS1_PAD=analog` plugs it in in analog mode (both sticks). A game may switch it itself through the pad's
+  config mode (logcat `ps1: the game set port 1 analog (DualShock) at frame N`) and lock it; Back + L3 + R3 together
+  are its ANALOG button (logcat `ps1: port 1 is now analog (DualShock)`, or `stays … (locked by the game)`). Its
+  rumble motors, when the game maps them, drive the pad's rumble (`host_pad_rumble`: large motor → low frequency,
+  small → high); `RECOMP_PS1_PLAYERS=2`: the first two pads drive ports 1 and 2. Back on the device opens the
   in-game menu.
 - **Sound.** 44.1 kHz stereo from the SPU (`ps1_audio_pull`, CD audio and XA mixed in) through `host_audio`.
 - **Pacing.** The PS1's own field rate (NTSC about 60 Hz, PAL 50 Hz, from the cycles each frame ran), absolute
@@ -1298,11 +1306,20 @@ out/hb/ps1/gfx.cue out/hb/ps1/gfx.bin out/hb/ps1/hello.cue out/hb/ps1/hello.bin 
    copy it to `/sdcard/ps1`, Y, A on its card (named after the file; its key is the serial, `ps1-SLUS-…`). Note: does
    the BIOS boot it, is the picture right (and the 4:3 shape), sound, controls (Cross / Circle / Square / Triangle,
    shoulders, triggers, Start / Select, D-pad and left stick), speed (logcat at quit). Try Back + L3 + R3 in a game
-   that uses the sticks (logcat `port 1 is now analog`). Save to the memory card in the game, quit, start again: the
+   that uses the sticks (logcat `port 1 is now analog`); a game that switches to analog itself shows `the game set
+   port 1 analog`, and one with vibration makes the pad rumble. Save to the memory card in the game, quit, start again: the
    save is there (`ps1: memory card 1 loaded from …/save/ps1-SLUS-…/card1.mcr`). `adb shell run-as
    fr.adserver.xrecomp.shell ls -l files/save/ps1-*` shows `card1.mcr`, 131072 bytes. The core is new: send the
    logcat and a screenshot for any game that does not boot, shows wrong graphics or runs slowly.
 9. Switch the Thor to French: the PS1 Home's line and note in French.
+10. A `.chd` of one of your own discs (`chdman createcd -i Game.cue -o Game.chd` on a computer; kept outside every
+    repository) in the library folder, Y: its card is a PS1 game keyed by its serial (`ps1-SLUS-…`, the same key as
+    its `.cue`), not an « other file »; once with All files access, once through a folder added with the file picker.
+    A on it plays it (logcat `PACK_NONE ps1 SLUS-…`).
+11. A game that switches the DualShock to analog itself (one that needs the sticks, started with the default
+    digital pad): logcat `ps1: the game set port 1 analog (DualShock)`; if it locks the mode, Back + L3 + R3 logs
+    `stays … (locked by the game)`. A game with vibration (in its options): the controller rumbles when the game
+    says so, and stops.
 
 ### The library screen
 

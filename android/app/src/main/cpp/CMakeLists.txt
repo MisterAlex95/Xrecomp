@@ -47,6 +47,8 @@ target_link_libraries(main PRIVATE -Wl,--whole-archive gba_core -Wl,--no-whole-a
 # The PS1 core goes in whole too (ps1_core.h, ps1_devices.h), exported for the PS1 title packs to come (XBA-168: the
 # recompiler's lifted code will call into it as the GBA's does).
 target_link_libraries(main PRIVATE -Wl,--whole-archive ps1_core -Wl,--no-whole-archive)
+# A .chd PlayStation disc's title key (XBA-159): the PS1 disc reader as recomp_pack_rom_identify's disc hook.
+target_link_libraries(main PRIVATE ps1_identify)
 set(XBA_CONSOLE_FAST_LIBS gba_core gba_runtime gba_pack   # the interpreters: release flags below too
                           ps1_core ps1_gpu ps1_cd ps1_spu ps1_mdec ps1_runtime)
 
@@ -91,8 +93,11 @@ endif()
 # libc only, and always built. With -PxbaLsfg=1 and a DXVK checkout (XBOXRECOMP_LSFG_DXVK_SRC) the DXBC translator
 # is linked in too (C++17, libc++ static), so the phone translates the shaders itself.
 include("${XBOXRECOMP_ROOT}/src/framegen/lsfg_shaders.cmake")
-add_library(xba_import SHARED xiso_jni.c lsfg_jni.c)
-target_link_libraries(xba_import PRIVATE xiso lsfg_shaders log)
+# ps1_jni.c (Ps1Native.java, XBA-159): the title key of a .chd PlayStation disc for the library scan
+# (Console.identify): recomp_pack_rom_identify with the PS1 disc reader (ps1_disc.c + the vendored libchdr) as its
+# disc hook. libc only, no SDL: the launcher process stays free of the runtime.
+add_library(xba_import SHARED xiso_jni.c lsfg_jni.c ps1_jni.c)
+target_link_libraries(xba_import PRIVATE xiso lsfg_shaders recomp_pack ps1_identify log)
 if(TARGET lsfg_dxbc)
     target_link_libraries(xba_import PRIVATE lsfg_dxbc)
     target_compile_definitions(xba_import PRIVATE XBA_LSFG_TRANSLATOR=1)

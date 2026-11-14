@@ -29,6 +29,7 @@
 #define XBOXRECOMP_RECOMP_PACK_H
 
 #include <stddef.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -112,11 +113,28 @@ const char *recomp_pack_console_name(int console);
  *        a .cue: its first FILE)
  * A game code byte outside [A-Z0-9] becomes '_', so a key names a folder.
  * An Xbox image is none of these (the Xbox path reads it); that is how an
- * .iso is told apart: XISO magic vs ISO 9660 "PLAYSTATION". CHD is not read
- * yet. key: 24 bytes or more. path may also be "fd:N", a descriptor the app
- * shell opened from a document (XBA-157): read from offset 0 through a dup,
- * left open. Returns 0, or -1 when the file is none of those. */
+ * .iso is told apart: XISO magic vs ISO 9660 "PLAYSTATION". A CHD (MAME
+ * compressed hunks, "MComprHD" at 0: a PlayStation disc) is read through the
+ * disc hook below when one is installed, else it is not identified. key: 24
+ * bytes or more. path may also be "fd:N", a descriptor the app shell opened
+ * from a document (XBA-157): read from offset 0 through a dup, left open.
+ * Returns 0, or -1 when the file is none of those. */
 int recomp_pack_rom_identify(const char *path, int *console, char *key, size_t key_n);
+
+/* A reader of the disc images recomp_pack_rom_identify cannot read itself
+ * (CHD: compressed, XBA-159), so recomp_pack.c stays libc-only: whoever links
+ * a disc reader installs it (the PS1 runtime's ps1_identify_install, built
+ * with XBR_PS1_CHD). open: a path or "fd:N" (left open), returns a handle or
+ * NULL; read: the 2048 user data bytes of data sector lba (LBA 0 = MSF
+ * 00:02:00, the PVD at 16), 0 or -1; close: frees the handle. */
+typedef struct recomp_pack_disc_hook {
+    void *(*open)(const char *path);
+    int (*read)(void *disc, uint32_t lba, unsigned char out[2048]);
+    void (*close)(void *disc);
+} recomp_pack_disc_hook;
+
+/* Installs the hook (NULL removes it); the struct must outlive its use. */
+void recomp_pack_set_disc_hook(const recomp_pack_disc_hook *hook);
 
 /* The pack folder's name: "<console>-<key>" for another console, the
  * normalised title ID for xbox. Returns 0, or -1 when key is empty, longer
