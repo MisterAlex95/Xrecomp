@@ -30,7 +30,7 @@
  * --stats       with --pack: calls, fallbacks, lookups, re-hashes, and the native share of the instructions (packs
  *               built with -DN64_RC_COUNT)
  * Prints the frame rate reached on stderr (unless --quiet). Exit 3 on a usage or file error. */
-#define _POSIX_C_SOURCE 199309L /* clock_gettime */
+#define _POSIX_C_SOURCE 200809L /* clock_gettime */
 #include "n64_core.h"
 #include "n64_recomp.h"
 

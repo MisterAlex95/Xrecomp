@@ -1,6 +1,6 @@
 /* GBA PPU micro benchmark (XBA-154): lines per second on the busy mode 0 scene (4 text BGs, 128 sprites, alpha).
  *   gba_ppu_bench [seconds]   (default 2) */
-#define _POSIX_C_SOURCE 199309L
+#define _POSIX_C_SOURCE 200809L
 #include "ppu_scene.h"
 
 #include <stdio.h>

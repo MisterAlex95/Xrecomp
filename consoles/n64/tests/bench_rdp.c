@@ -2,7 +2,7 @@
  * bilinear + Z, 2-cycle fog + blend + Z), and frames/s of the busy scene of the tests (1500 mixed primitives, about
  * 0.9 Mpixels: far more than a typical libultra frame) with 1, 2 and 4 threads.
  *   n64_rdp_bench [seconds per case [case name substring]]   (default 1, every case) */
-#define _POSIX_C_SOURCE 199309L
+#define _POSIX_C_SOURCE 200809L
 #include "rdp_cmd.h"
 
 #include <stdio.h>

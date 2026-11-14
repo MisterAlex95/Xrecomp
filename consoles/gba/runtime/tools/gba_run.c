@@ -23,7 +23,7 @@
  *               (CPU, cycles, memories, frame) after every frame; exit 4 at the first difference
  * --hash        print a hash of the last frame and of the RAM (FNV-1a 64) and the cycle count
  * Prints the frame rate reached on stderr. Exit 3 on a usage or file error. */
-#define _POSIX_C_SOURCE 199309L /* clock_gettime */
+#define _POSIX_C_SOURCE 200809L /* clock_gettime */
 #include "gba_core.h"
 #include "gba_pack.h"
 #include "gba_recomp.h"

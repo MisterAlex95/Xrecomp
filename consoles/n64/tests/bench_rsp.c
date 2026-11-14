@@ -4,7 +4,7 @@
  *   n64_rsp_bench [seconds]      (default 2)
  *   n64_rsp_bench -n COUNT       exactly COUNT RSP instructions, for instruction counts under valgrind / qemu
  * Both print a hash of DMEM after the run (the loop's stores), equal on every host for the same COUNT. */
-#define _POSIX_C_SOURCE 199309L
+#define _POSIX_C_SOURCE 200809L
 #include "n64_devices.h"
 
 #include <stdio.h>

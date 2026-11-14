@@ -32,7 +32,7 @@
  * --fast-boot   a disc without --exe: the BIOS's shell (its logo) is skipped, the BIOS boots the disc at once
  * --swap F:DISC at frame F the lid opens; 60 frames later DISC is in the drive and the lid closes (DISC "-": none)
  * Prints the frame rate reached on stderr (unless --quiet). Exit 3 on a usage or file error. */
-#define _POSIX_C_SOURCE 199309L /* clock_gettime */
+#define _POSIX_C_SOURCE 200809L /* clock_gettime */
 #include "ps1_core.h"
 #include "ps1_devices.h"
 #include "ps1_recomp.h"

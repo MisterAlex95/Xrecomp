@@ -2,7 +2,7 @@
  * opaque and semi-transparent), and frames/s of a busy 320x240 scene: 2000 mixed primitives of 4..31 pixels, about
  * 0.5 Mpixels, around what the PS1 GPU's own fill rate allows in a 60 Hz frame.
  *   ps1_gpu_bench [seconds per case]   (default 1) */
-#define _POSIX_C_SOURCE 199309L
+#define _POSIX_C_SOURCE 200809L
 #include "gpu_scene.h"
 
 #include <stdio.h>
