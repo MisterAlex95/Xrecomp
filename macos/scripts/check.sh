@@ -1,5 +1,5 @@
 #!/bin/bash
-# The launcher's local checks (there is no macOS CI runner): build, the check executable, and a smoke run of the
+# The launcher's checks, local and in .github/workflows/desktop.yml: build, the check executable, and a smoke run of the
 # app against a temporary library made from the synthetic tools/conformance/test.xbe (ours, no game content).
 #   bash macos/scripts/check.sh
 set -euo pipefail

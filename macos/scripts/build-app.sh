@@ -3,6 +3,10 @@
 # (XBAToolkitPath), the icon from docs/images/xrecomp-icon.svg, and an ad-hoc signature (built and run on the same
 # Mac: no Developer ID, no notarization). Command Line Tools are enough.
 #   bash macos/scripts/build-app.sh
+# Environment, for the published build (.github/workflows/desktop.yml):
+#   XBA_APP_VERSION=0.2.0   CFBundleShortVersionString (default 0.1.0)
+#   XBA_APP_PORTABLE=1      no XBAToolkitPath: the app finds the toolkit in the folders above it (the downloaded
+#                           folder it sits in), not at the path of the machine that built it
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 REPO="$(cd "$HERE/.." && pwd)"
@@ -18,11 +22,14 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN/XRecomp" "$APP/Contents/MacOS/XRecomp"
 
-VERSION="0.1.0"
+VERSION="${XBA_APP_VERSION:-0.1.0}"
 BUILD="$(git -C "$REPO" rev-list --count HEAD 2>/dev/null || echo 1)"
 esc() { printf '%s' "$1" | sed -e 's/[&|\\]/\\&/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'; }
 sed -e "s|@VERSION@|$VERSION|" -e "s|@BUILD@|$BUILD|" -e "s|@TOOLKIT@|$(esc "$REPO")|" \
     "$HERE/Info.plist.in" > "$APP/Contents/Info.plist"
+if [ "${XBA_APP_PORTABLE:-0}" = 1 ]; then
+    plutil -remove XBAToolkitPath "$APP/Contents/Info.plist"
+fi
 plutil -lint "$APP/Contents/Info.plist" >/dev/null
 
 echo "== icon"

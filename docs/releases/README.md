@@ -16,7 +16,17 @@ Downloads: the [GitHub releases](https://github.com/MisterAlex95/Xrecomp/release
 - `xrecomp-v<version>.apk`: the XRecomp Android app with the on-device Prepare. arm64-v8a, Android 11+.
   Release-signed (the same key as `xrecomp-latest`, so either updates the other in place) and **not debuggable**.
 - `xrecomp-v<version>.apk.sha256`.
-- No game, no game data, no generated C: you prepare your own games on your device.
+- `xrecomp-v<version>-macos-arm64.zip`: the Mac app (Apple silicon, macOS 14+) inside the toolkit folder it drives.
+  Ad-hoc signed, not notarized: run `xattr -dr com.apple.quarantine <the XRecomp folder>` once before opening it,
+  otherwise macOS blocks it or runs it from a translocated copy that cannot see its toolkit (Setup then asks for it).
+- `xrecomp-v<version>-linux.tar.gz`: the toolkit for Linux (README « Linux »).
+- A `.sha256` next to each.
+- No game, no game data, no generated C: you prepare your own games on your device or computer.
+
+`xrecomp-latest` carries the same files, named `xrecomp-<commit>…`. The desktop files are built on GitHub's runners
+by `.github/workflows/desktop.yml` (each one is this repository's tree at the commit, `tools/ci/package_toolkit.sh`,
+plus `XRecomp.app` for the Mac) and attached once Gitea has published the release of that commit. No Windows build
+yet: that route is upstream's and untested here.
 
 Every XRecomp APK we publish (releases and `xrecomp-latest`) is signed with the same certificate, SHA-256:
 
@@ -27,7 +37,7 @@ BC:F2:04:46:E6:FE:38:6F:3C:FA:A1:B8:75:B2:5E:99:7A:77:0A:E6:1A:B2:48:68:DD:4C:9C
 Check a download with `apksigner verify --print-certs xrecomp-v<version>.apk` (Android SDK build-tools): its
 `Signer #1 certificate SHA-256 digest` must be the same, lower case without colons. Any other signer is not ours.
 
-The Mac app and the command-line toolkit are built from the source at the tag (README « Get it »).
+The Mac app and the toolkit can also be built from the source at the tag (README « Get it »).
 
 ## Making a release (maintainers)
 
@@ -39,7 +49,11 @@ The Mac app and the command-line toolkit are built from the source at the tag (R
    `<version>+<commit>`) and publishes the release on Gitea and on GitHub with the notes. It stops without
    publishing when the notes file, the release key or `GH_RELEASE_TOKEN` is missing
    ([toolchain.md « Signing »](../android/toolchain.md#signing) lists the secrets).
-5. Check the GitHub release page: the APK, its checksum, the notes ending with `signed with: release key`.
+5. GitHub's `Desktop` workflow (`.github/workflows/desktop.yml`) runs on the tag when the mirror pushes it, waits
+   for that release, then attaches the macOS zip and the Linux archive and appends a « Desktop » section to the
+   notes. A re-run of Gitea's release job recreates the release without them: re-run the Desktop run of the tag.
+6. Check the GitHub release page: the APK, the two desktop files, their checksums, the notes ending with
+   `signed with: release key`.
 
 Versions follow [semantic versioning](https://semver.org) loosely while we are below 1.0: the minor number goes up
 with a release that adds something, the patch number with a release that only fixes.

@@ -66,6 +66,10 @@ Some docs to go further:
 
 ### macOS
 
+Download `xrecomp-v<version>-macos-arm64.zip` from the latest [release](https://github.com/MisterAlex95/Xrecomp/releases/latest),
+unzip it, run `xattr -dr com.apple.quarantine XRecomp` in Terminal (the app is not notarized) and open
+`XRecomp/XRecomp.app`; keep it in that folder. Or build it from a checkout:
+
 ```bash
 bash macos/scripts/build-app.sh            # → macos/build/XRecomp.app (Command Line Tools are enough)
 open macos/build/XRecomp.app
@@ -78,6 +82,9 @@ Without the app, `scripts/xboxrecomp.command [GAME]` installs what it needs (Hom
 `~/.xboxrecomp`) and prepares the game. You can also double-click it.
 
 ### Linux (and macOS from a terminal)
+
+From a checkout, or from `xrecomp-v<version>-linux.tar.gz` of the latest
+[release](https://github.com/MisterAlex95/Xrecomp/releases/latest) (the same tree):
 
 ```bash
 bash tools/linux/install_deps.sh           # apt / pacman / dnf; on macOS: bash tools/macos/setup.sh
