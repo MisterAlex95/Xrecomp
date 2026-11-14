@@ -247,4 +247,58 @@ public class TouchControlsTest {
         assertFalse(touch.shown());
         assertFalse(overlay.on);
     }
+
+    /**
+     * XBA-158 / XBA-168 / XBA-174: the GBA, PS1 (digital and analog) and N64 layouts, each with real fingers on two of
+     * its buttons, reaching the same overlay as the Xbox's (the runtimes read it through host_pad's overlay).
+     */
+    @Test
+    public void consoleLayouts() throws Exception {
+        touch.layout(TouchPad.Layout.GBA);
+        touch.start();
+        layout();
+        assertTrue(touch.shown());
+        PanelTesting fingers = new PanelTesting(touch.view);
+        fingers.press(0, at(TouchPad.A));
+        fingers.press(1, at(TouchPad.SHOULDER_L));
+        assertEquals((1 << TouchPad.AN_A) | (1 << TouchPad.AN_BLACK), overlay.analog);
+        shot("5-gba");
+        fingers.cancel();
+
+        touch.layout(TouchPad.Layout.PS1);
+        layout();
+        assertEquals("a new layout: nothing held", 0, overlay.analog);
+        fingers = new PanelTesting(touch.view);
+        fingers.press(0, at(TouchPad.A));   // Cross
+        fingers.press(1, at(TouchPad.SHOULDER_R2));
+        assertEquals(1 << TouchPad.AN_A, overlay.analog);
+        assertEquals(255, overlay.rt);
+        shot("6-ps1");
+        fingers.cancel();
+
+        touch.layout(TouchPad.Layout.PS1_ANALOG);
+        layout();
+        shot("7-ps1-analog");
+
+        touch.layout(TouchPad.Layout.N64);
+        layout();
+        fingers = new PanelTesting(touch.view);
+        fingers.press(0, at(TouchPad.C_RIGHT));
+        fingers.press(1, at(TouchPad.Z));
+        assertEquals(32767, overlay.rx);
+        assertEquals(255, overlay.lt);
+        shot("8-n64");
+        fingers.cancel();
+        assertEquals(0, overlay.rx);
+
+        // The in-game menu's toggle: hidden for the session whatever the mode, then shown again.
+        touch.force(false);
+        assertFalse(touch.shown());
+        assertFalse(overlay.on);
+        controller = true;
+        touch.force(true);
+        assertTrue("shown even with a controller", touch.shown());
+        touch.panelShowing(true);
+        assertFalse("never with the companion panel", touch.shown());
+    }
 }

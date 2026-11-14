@@ -30,6 +30,8 @@ final class TouchControls implements InputManager.InputDeviceListener {
     final TouchPadView view;
     private TouchSettings settings = new TouchSettings();
     private boolean used, panel, shown, checked;
+    /** The in-game menu's toggle for this session: shown or hidden whatever the mode, null: the mode decides. */
+    private Boolean forced;
 
     TouchControls(Activity a, OverlayMixer mixer, Devices devices) {
         this.activity = a;
@@ -37,6 +39,11 @@ final class TouchControls implements InputManager.InputDeviceListener {
         this.devices = devices;
         view = new TouchPadView(a, mixer::touch);
         view.setVisibility(View.GONE);
+    }
+
+    /** The console's layout (XBA-158 / XBA-168 / XBA-174): its own buttons, set before start. */
+    void layout(TouchPad.Layout l) {
+        view.setLayout(l);
     }
 
     /** Adds the view (before the in-game menu's, so the menu draws above it). */
@@ -134,8 +141,16 @@ final class TouchControls implements InputManager.InputDeviceListener {
         update("device changed");
     }
 
+    /** The in-game menu's toggle: shown or hidden for the rest of the session (never with the panel up). */
+    void force(boolean on) {
+        forced = on;
+        update(on ? "menu: shown" : "menu: hidden");
+    }
+
     void update(String why) {
-        show(!checked && TouchSettings.visible(settings.mode, devices.any(), used, panel), why);
+        boolean want = forced != null ? forced && !panel
+                                      : TouchSettings.visible(settings.mode, devices.any(), used, panel);
+        show(!checked && want, why);
     }
 
     private void show(boolean on, String why) {

@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="CC_CONSOLE_GBA">Game Boy Advance</string>
+    <string name="CC_CONSOLE_PS1">PlayStation</string>
+    <string name="CC_CONSOLE_N64">Nintendo 64</string>
+
+    <string name="CC_A">A</string>
+    <string name="CC_B">B</string>
+    <string name="CC_L">L</string>
+    <string name="CC_R">R</string>
+    <string name="CC_Z">Z</string>
+    <string name="CC_START">Start</string>
+    <string name="CC_SELECT">Select</string>
+    <string name="CC_CROSS">Croix</string>
+    <string name="CC_CIRCLE">Rond</string>
+    <string name="CC_SQUARE">Carré</string>
+    <string name="CC_TRIANGLE">Triangle</string>
+    <string name="CC_L1">L1</string>
+    <string name="CC_R1">R1</string>
+    <string name="CC_L2">L2</string>
+    <string name="CC_R2">R2</string>
+    <string name="CC_L3">L3 (appui stick gauche)</string>
+    <string name="CC_R3">R3 (appui stick droit)</string>
+    <string name="CC_C_UP">C haut</string>
+    <string name="CC_C_DOWN">C bas</string>
+    <string name="CC_C_LEFT">C gauche</string>
+    <string name="CC_C_RIGHT">C droite</string>
+    <string name="CC_GROUP_C">Boutons C</string>
+    <string name="CC_STICK">Stick analogique</string>
+    <string name="CC_GROUP_STICK">Stick analogique</string>
+
+    <string name="CC_SCOPE">Commandes pour</string>
+    <string name="CC_SCOPE_CONSOLE">Tous les jeux %1$s</string>
+    <string name="CC_SCOPE_GAME">Ce jeu seulement</string>
+    <string name="CC_SCOPE_DETAIL">Tous les jeux %1$s partagent les mêmes commandes. Ce jeu seulement : une copie pour ce jeu, modifiable sans toucher aux autres ; revenir à tous les jeux la supprime.</string>
+    <string name="CC_LEAD">Ce que le jeu %1$s reçoit de votre manette. Gauche et droite changent le bouton, Y remet les boutons habituels. Le lanceur et le menu du jeu gardent les boutons habituels ; la manette à l\'écran n\'est jamais remappée.</string>
+    <string name="CC_RANGE">Amplitude du stick</string>
+    <string name="CC_RANGE_DETAIL">Jusqu\'où va le stick du jeu quand votre stick est au bout de sa course ; un vrai stick N64 atteint environ 80. Habituel : 80.</string>
+    <string name="CC_DEADZONE">Zone morte</string>
+    <string name="CC_DEADZONE_DETAIL" formatted="false">De combien votre stick bouge avant que le jeu le voie. À augmenter si un personnage marche tout seul. Habituel : 8 %.</string>
+    <string name="CC_RUNTIME_DEFAULT">Habituel</string>
+    <string name="CC_RESET_DETAIL">Chaque bouton %1$s à sa place habituelle (pour %2$s).</string>
+    <string name="CC_TOUCH_DETAIL">Les boutons de la %1$s sur l\'écran du jeu, jamais remappés. Sans manette : affichée tant qu\'aucune manette n\'est connectée, masquée dès qu\'on en utilise une. Le menu du jeu l\'affiche ou la masque pour la session. Jamais sur l\'écran du haut d\'une console portable quand l\'écran du bas affiche le panneau.</string>
+    <string name="CC_GAME_MAP_ON">Ce jeu a ses propres commandes.</string>
+
+    <string name="MENU_TOUCH">Manette à l\'écran</string>
+    <string name="MENU_TOUCH_SHOWN">Affichée</string>
+    <string name="MENU_TOUCH_HIDDEN">Masquée</string>
+</resources>

@@ -1,5 +1,6 @@
 /* host_pad.c -- see host_pad.h (XBA-145). */
 #include "host_pad.h"
+#include "console_pad.h"
 #include "input_ports.h"
 
 #include <SDL.h>
@@ -191,6 +192,43 @@ int host_pad_rumble(int port, uint16_t low, uint16_t high, uint32_t ms)
         ok = SDL_GameControllerRumble(s_pad[port], low, high, ms) == 0;
     pthread_mutex_unlock(&s_mu);
     return ok;
+}
+
+static pthread_mutex_t s_overlay_mu = PTHREAD_MUTEX_INITIALIZER;
+static HostPadState s_overlay;
+static int s_overlay_on;
+
+void host_pad_overlay_set(const HostPadState *st)
+{
+    pthread_mutex_lock(&s_overlay_mu);
+    if (st) {
+        s_overlay = *st;
+        s_overlay.connected = 1;
+    } else {
+        memset(&s_overlay, 0, sizeof s_overlay);
+    }
+    s_overlay_on = st != NULL;
+    pthread_mutex_unlock(&s_overlay_mu);
+}
+
+int host_pad_overlay_get(HostPadState *out)
+{
+    int on;
+    if (!out)
+        return 0;
+    pthread_mutex_lock(&s_overlay_mu);
+    on = s_overlay_on;
+    *out = s_overlay;
+    pthread_mutex_unlock(&s_overlay_mu);
+    return on;
+}
+
+int console_pad_read(const ConsolePadMap *m, int port, ConsolePadOut *out)
+{
+    HostPadState pad, overlay;
+    int have_pad = host_pad_read(port, &pad);
+    int have_overlay = port == 0 && host_pad_overlay_get(&overlay);
+    return console_pad_merge(m, have_pad ? &pad : NULL, have_overlay ? &overlay : NULL, out);
 }
 
 void host_pad_shutdown(void)

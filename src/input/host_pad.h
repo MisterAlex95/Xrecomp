@@ -77,6 +77,14 @@ int host_pad_read(int port, HostPadState *out);
 /* Rumble, 0..65535 per motor, for ms. Returns 1 when the pad has it. */
 int host_pad_rumble(int port, uint16_t low, uint16_t high, uint32_t ms);
 
+/* The touch overlay pad (the Android app's on-screen pad and companion panel, the console-agnostic twin of
+ * input_overlay.h): a pad state set from the UI thread, NULL when off. It is not one of the ports above (host_pad_read
+ * and host_pad_mask do not see it); console_pad_read (console_pad.h) merges it into port 0 through the console's
+ * default mapping, so the on-screen buttons are the console's own whatever the player remapped. */
+void host_pad_overlay_set(const HostPadState *st);
+/* 1 and *out when the overlay is on, else 0 (*out zeroed). */
+int host_pad_overlay_get(HostPadState *out);
+
 void host_pad_shutdown(void);
 
 #ifdef __cplusplus

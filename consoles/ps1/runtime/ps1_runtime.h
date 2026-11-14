@@ -104,6 +104,11 @@ int ps1_runtime_start(const char *rom, const char *pack_lib, const char *title_k
  * clicks) -> L3 / R3, D-pad -> D-pad; digital (analog = 0): the left stick past a third of its travel -> D-pad too.
  * Opposite directions at once cancel. */
 uint16_t ps1_runtime_pad_buttons(uint32_t buttons, int lx, int ly, int lt, int rt, int analog);
+/* The PS1 buttons for a pad read through console_pad (console_pad.h: bit PS1_T_* of o->buttons; digital: the mapped
+ * left stick past stick_threshold is the D-pad too), opposite directions cancelled. The game reads its pads through
+ * the player's mapping (RECOMP_PS1_PAD_MAP); ps1_runtime_pad_buttons is that mapping's defaults, the layout above. */
+struct ConsolePadOut;
+uint16_t ps1_runtime_pad_of(const struct ConsolePadOut *o, int stick_threshold, int analog);
 
 /* An SDL stick axis (-32768..32767) as the DualShock's byte (0..255, 0x80 = centre; +y down on both). */
 uint8_t ps1_runtime_axis(int v);

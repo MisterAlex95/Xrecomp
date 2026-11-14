@@ -14,6 +14,7 @@
 #include "ps1_runtime.h"
 
 #include "host_audio.h"
+#include "console_pad.h"
 #include "host_pad.h"
 #include "host_window.h"
 #include "ps1_core.h"
@@ -65,31 +66,28 @@ static uint32_t crc32_of(const uint8_t *p, size_t n)
     return ~crc;
 }
 
-uint16_t ps1_runtime_pad_buttons(uint32_t b, int lx, int ly, int lt, int rt, int analog)
+/* The player's mapping (console_pad.h, RECOMP_PS1_PAD_MAP), loaded when a game starts; the defaults until then. */
+static ConsolePadMap s_pad_map;
+
+uint16_t ps1_runtime_pad_of(const ConsolePadOut *o, int stick_threshold, int analog)
 {
-    const int dead = 32768 / 3, trig = 16384;
+    static const uint16_t bits[PS1_T_COUNT] = {
+        [PS1_T_CROSS] = PS1_PAD_CROSS, [PS1_T_CIRCLE] = PS1_PAD_CIRCLE, [PS1_T_SQUARE] = PS1_PAD_SQUARE,
+        [PS1_T_TRIANGLE] = PS1_PAD_TRIANGLE, [PS1_T_L1] = PS1_PAD_L1, [PS1_T_R1] = PS1_PAD_R1,
+        [PS1_T_L2] = PS1_PAD_L2, [PS1_T_R2] = PS1_PAD_R2, [PS1_T_L3] = PS1_PAD_L3, [PS1_T_R3] = PS1_PAD_R3,
+        [PS1_T_START] = PS1_PAD_START, [PS1_T_SELECT] = PS1_PAD_SELECT, [PS1_T_UP] = PS1_PAD_UP,
+        [PS1_T_DOWN] = PS1_PAD_DOWN, [PS1_T_LEFT] = PS1_PAD_LEFT, [PS1_T_RIGHT] = PS1_PAD_RIGHT,
+    };
     uint16_t k = 0;
-    if (b & HOST_PAD_A) k |= PS1_PAD_CROSS;
-    if (b & HOST_PAD_B) k |= PS1_PAD_CIRCLE;
-    if (b & HOST_PAD_X) k |= PS1_PAD_SQUARE;
-    if (b & HOST_PAD_Y) k |= PS1_PAD_TRIANGLE;
-    if (b & HOST_PAD_LSHOULDER) k |= PS1_PAD_L1;
-    if (b & HOST_PAD_RSHOULDER) k |= PS1_PAD_R1;
-    if (lt > trig) k |= PS1_PAD_L2;
-    if (rt > trig) k |= PS1_PAD_R2;
-    if (b & HOST_PAD_START) k |= PS1_PAD_START;
-    if (b & HOST_PAD_BACK) k |= PS1_PAD_SELECT;
-    if (b & HOST_PAD_LSTICK) k |= PS1_PAD_L3;
-    if (b & HOST_PAD_RSTICK) k |= PS1_PAD_R3;
-    if (b & HOST_PAD_DPAD_UP) k |= PS1_PAD_UP;
-    if (b & HOST_PAD_DPAD_DOWN) k |= PS1_PAD_DOWN;
-    if (b & HOST_PAD_DPAD_LEFT) k |= PS1_PAD_LEFT;
-    if (b & HOST_PAD_DPAD_RIGHT) k |= PS1_PAD_RIGHT;
-    if (!analog) {
-        if (ly < -dead) k |= PS1_PAD_UP;
-        if (ly > dead) k |= PS1_PAD_DOWN;
-        if (lx < -dead) k |= PS1_PAD_LEFT;
-        if (lx > dead) k |= PS1_PAD_RIGHT;
+    for (int i = 0; i < PS1_T_COUNT; i++)
+        if (o->buttons & (1u << i))
+            k |= bits[i];
+    if (!analog) {   /* digital: the DualShock's left stick (as mapped) is a D-pad too */
+        int lx = o->stick_x[0], ly = o->stick_y[0];
+        if (ly < -stick_threshold) k |= PS1_PAD_UP;
+        if (ly > stick_threshold) k |= PS1_PAD_DOWN;
+        if (lx < -stick_threshold) k |= PS1_PAD_LEFT;
+        if (lx > stick_threshold) k |= PS1_PAD_RIGHT;
     }
     /* Opposite directions at once (a worn stick, two pads): a real D-pad cannot, some games misbehave. */
     if ((k & (PS1_PAD_UP | PS1_PAD_DOWN)) == (PS1_PAD_UP | PS1_PAD_DOWN))
@@ -97,6 +95,20 @@ uint16_t ps1_runtime_pad_buttons(uint32_t b, int lx, int ly, int lt, int rt, int
     if ((k & (PS1_PAD_LEFT | PS1_PAD_RIGHT)) == (PS1_PAD_LEFT | PS1_PAD_RIGHT))
         k &= (uint16_t)~(PS1_PAD_LEFT | PS1_PAD_RIGHT);
     return k;
+}
+
+uint16_t ps1_runtime_pad_buttons(uint32_t b, int lx, int ly, int lt, int rt, int analog)
+{
+    ConsolePadMap m;
+    ConsolePadOut o;
+    HostPadState st = {.connected = 1, .buttons = b};
+    st.axis[HOST_PAD_AXIS_LX] = (int16_t)lx;
+    st.axis[HOST_PAD_AXIS_LY] = (int16_t)ly;
+    st.axis[HOST_PAD_AXIS_LT] = (int16_t)lt;
+    st.axis[HOST_PAD_AXIS_RT] = (int16_t)rt;
+    console_pad_defaults(&m, CONSOLE_PAD_PS1);
+    console_pad_apply(&m, &st, &o);
+    return ps1_runtime_pad_of(&o, m.stick_threshold, analog);
 }
 
 uint8_t ps1_runtime_axis(int v)
@@ -505,25 +517,27 @@ static int deflection(uint8_t v)
     return v > 0x80 ? v - 0x80 : 0x80 - v;
 }
 
-/* The host pads for PS1 port `port`: with one player every pad drives port 0 (buttons merged, the most deflected
- * stick wins); with two, host pad N drives port N. */
+/* The host pads for PS1 port `port`, through the player's mapping (the on-screen pad joins host pad 1,
+ * console_pad_read): with one player every pad drives port 0 (buttons merged, the most deflected stick wins); with
+ * two, host pad N drives port N. */
 static void pads_read(int port, int players, int analog, pad_in *out)
 {
     memset(out, 0, sizeof *out);
     out->lx = out->ly = out->rx = out->ry = 0x80;
+    if (!s_pad_map.console)
+        console_pad_defaults(&s_pad_map, CONSOLE_PAD_PS1);
     for (int p = 0; p < HOST_PAD_PORTS; p++) {
         if (players >= 2 ? p != port : port != 0)
             continue;
-        HostPadState st;
-        if (!host_pad_read(p, &st))
+        ConsolePadOut o;
+        if (!console_pad_read(&s_pad_map, p, &o))
             continue;
         const uint32_t chord = HOST_PAD_BACK | HOST_PAD_LSTICK | HOST_PAD_RSTICK;
-        if ((st.buttons & chord) == chord)
+        if ((o.host_buttons & chord) == chord)
             out->toggle = 1;
-        out->buttons |= ps1_runtime_pad_buttons(st.buttons, st.axis[HOST_PAD_AXIS_LX], st.axis[HOST_PAD_AXIS_LY],
-                                                st.axis[HOST_PAD_AXIS_LT], st.axis[HOST_PAD_AXIS_RT], analog);
-        uint8_t lx = ps1_runtime_axis(st.axis[HOST_PAD_AXIS_LX]), ly = ps1_runtime_axis(st.axis[HOST_PAD_AXIS_LY]);
-        uint8_t rx = ps1_runtime_axis(st.axis[HOST_PAD_AXIS_RX]), ry = ps1_runtime_axis(st.axis[HOST_PAD_AXIS_RY]);
+        out->buttons |= ps1_runtime_pad_of(&o, s_pad_map.stick_threshold, analog);
+        uint8_t lx = ps1_runtime_axis(o.stick_x[0]), ly = ps1_runtime_axis(o.stick_y[0]);
+        uint8_t rx = ps1_runtime_axis(o.stick_x[1]), ry = ps1_runtime_axis(o.stick_y[1]);
         if (deflection(lx) + deflection(ly) > deflection(out->lx) + deflection(out->ly)) {
             out->lx = lx;
             out->ly = ly;
@@ -679,6 +693,7 @@ int ps1_runtime_run(const ps1_runtime_opts *o)
     }
     if (!window)
         host_pad_init();
+    console_pad_load(&s_pad_map, CONSOLE_PAD_PS1, getenv(console_pad_env(CONSOLE_PAD_PS1)));
     int audio = host_audio_open(PS1_AUDIO_RATE, 2);
     printf("ps1: window %s (4:3, %s, %s), audio %s, pads %u, port 1 %s%s\n", window ? "on" : "off",
            scale == HOST_SCALE_INTEGER ? "integer" : "aspect", filter == HOST_FILTER_NEAREST ? "nearest" : "linear",

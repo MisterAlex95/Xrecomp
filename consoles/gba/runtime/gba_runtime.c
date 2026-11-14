@@ -13,6 +13,7 @@
 #include "gba_core.h"
 #include "gba_pack.h"
 #include "host_audio.h"
+#include "console_pad.h"
 #include "host_pad.h"
 #include "host_window.h"
 #include "recomp_exit_hook.h"
@@ -81,36 +82,40 @@ int gba_runtime_key(const uint8_t *rom, size_t size, char *out, size_t out_n)
     return 0;
 }
 
-uint16_t gba_runtime_pad_keys(uint32_t b, int lx, int ly, int lt, int rt)
+/* The player's mapping (console_pad.h, RECOMP_GBA_PAD_MAP), loaded when a game starts; the defaults until then. */
+static ConsolePadMap s_pad_map;
+
+uint16_t gba_runtime_keys_of(uint32_t t)
 {
-    const int dead = 32768 / 3, trig = 16384;
+    static const uint16_t keys[GBA_T_COUNT] = {
+        [GBA_T_A] = GBA_KEY_A, [GBA_T_B] = GBA_KEY_B, [GBA_T_L] = GBA_KEY_L, [GBA_T_R] = GBA_KEY_R,
+        [GBA_T_START] = GBA_KEY_START, [GBA_T_SELECT] = GBA_KEY_SELECT, [GBA_T_UP] = GBA_KEY_UP,
+        [GBA_T_DOWN] = GBA_KEY_DOWN, [GBA_T_LEFT] = GBA_KEY_LEFT, [GBA_T_RIGHT] = GBA_KEY_RIGHT,
+    };
     uint16_t k = 0;
-    if (b & (HOST_PAD_A | HOST_PAD_Y))
-        k |= GBA_KEY_A;
-    if (b & (HOST_PAD_B | HOST_PAD_X))
-        k |= GBA_KEY_B;
-    if ((b & HOST_PAD_LSHOULDER) || lt > trig)
-        k |= GBA_KEY_L;
-    if ((b & HOST_PAD_RSHOULDER) || rt > trig)
-        k |= GBA_KEY_R;
-    if (b & HOST_PAD_START)
-        k |= GBA_KEY_START;
-    if (b & HOST_PAD_BACK)
-        k |= GBA_KEY_SELECT;
-    if ((b & HOST_PAD_DPAD_UP) || ly < -dead)
-        k |= GBA_KEY_UP;
-    if ((b & HOST_PAD_DPAD_DOWN) || ly > dead)
-        k |= GBA_KEY_DOWN;
-    if ((b & HOST_PAD_DPAD_LEFT) || lx < -dead)
-        k |= GBA_KEY_LEFT;
-    if ((b & HOST_PAD_DPAD_RIGHT) || lx > dead)
-        k |= GBA_KEY_RIGHT;
+    for (int i = 0; i < GBA_T_COUNT; i++)
+        if (t & (1u << i))
+            k |= keys[i];
     /* Opposite directions at once (a worn stick, two pads): the GBA's own pad cannot, some games misbehave. */
     if ((k & (GBA_KEY_UP | GBA_KEY_DOWN)) == (GBA_KEY_UP | GBA_KEY_DOWN))
         k &= (uint16_t)~(GBA_KEY_UP | GBA_KEY_DOWN);
     if ((k & (GBA_KEY_LEFT | GBA_KEY_RIGHT)) == (GBA_KEY_LEFT | GBA_KEY_RIGHT))
         k &= (uint16_t)~(GBA_KEY_LEFT | GBA_KEY_RIGHT);
     return k;
+}
+
+uint16_t gba_runtime_pad_keys(uint32_t b, int lx, int ly, int lt, int rt)
+{
+    ConsolePadMap m;
+    ConsolePadOut o;
+    HostPadState st = {.connected = 1, .buttons = b};
+    st.axis[HOST_PAD_AXIS_LX] = (int16_t)lx;
+    st.axis[HOST_PAD_AXIS_LY] = (int16_t)ly;
+    st.axis[HOST_PAD_AXIS_LT] = (int16_t)lt;
+    st.axis[HOST_PAD_AXIS_RT] = (int16_t)rt;
+    console_pad_defaults(&m, CONSOLE_PAD_GBA);
+    console_pad_apply(&m, &st, &o);
+    return gba_runtime_keys_of(o.buttons);
 }
 
 void gba_runtime_rgb555_to_rgba(const uint16_t *src, uint8_t *dst, size_t n)
@@ -373,15 +378,17 @@ static uint16_t keyboard_keys(void)
     return k;
 }
 
-/* Every connected pad drives the one GBA (a handheld's own controls and an external pad both work). */
+/* Every connected pad drives the one GBA (a handheld's own controls and an external pad both work), through the
+ * player's mapping; the on-screen pad joins pad 1 (console_pad_read). */
 static uint16_t pads_keys(void)
 {
     uint16_t k = 0;
+    if (!s_pad_map.console)
+        console_pad_defaults(&s_pad_map, CONSOLE_PAD_GBA);
     for (int p = 0; p < HOST_PAD_PORTS; p++) {
-        HostPadState st;
-        if (host_pad_read(p, &st))
-            k |= gba_runtime_pad_keys(st.buttons, st.axis[HOST_PAD_AXIS_LX], st.axis[HOST_PAD_AXIS_LY],
-                                      st.axis[HOST_PAD_AXIS_LT], st.axis[HOST_PAD_AXIS_RT]);
+        ConsolePadOut o;
+        if (console_pad_read(&s_pad_map, p, &o))
+            k |= gba_runtime_keys_of(o.buttons);
     }
     return k;
 }
@@ -474,6 +481,7 @@ int gba_runtime_run(const gba_runtime_opts *o)
     }
     if (!window)
         host_pad_init();
+    console_pad_load(&s_pad_map, CONSOLE_PAD_GBA, getenv(console_pad_env(CONSOLE_PAD_GBA)));
     int audio = host_audio_open(GBA_AUDIO_RATE, 2);
     printf("gba: window %s (%s, %s), audio %s, pads %u\n", window ? "on" : "off",
            scale == HOST_SCALE_INTEGER ? "integer" : "aspect", filter == HOST_FILTER_NEAREST ? "nearest" : "linear",

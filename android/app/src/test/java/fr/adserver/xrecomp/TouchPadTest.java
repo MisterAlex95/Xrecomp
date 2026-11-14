@@ -195,4 +195,131 @@ public class TouchPadTest {
         assertTrue(off[0]);
         assertFalse(m.on());
     }
+
+    // ---- The other consoles' layouts (XBA-158 / XBA-168 / XBA-174) ------------------------------------------------
+
+    private static TouchPad.State press(TouchPad p, int id) {
+        TouchPad.Control k = p.control(id);
+        p.down(0, k.cx, k.cy);
+        TouchPad.State s = p.state();
+        p.up(0);
+        return s;
+    }
+
+    @Test
+    public void layoutForEachConsole() {
+        assertEquals(TouchPad.Layout.XBOX, TouchPad.layoutFor(Console.XBOX, true));
+        assertEquals(TouchPad.Layout.XBOX, TouchPad.layoutFor(null, false));
+        assertEquals(TouchPad.Layout.GBA, TouchPad.layoutFor(Console.GBA, true));
+        assertEquals(TouchPad.Layout.PS1, TouchPad.layoutFor(Console.PS1, false));
+        assertEquals(TouchPad.Layout.PS1_ANALOG, TouchPad.layoutFor(Console.PS1, true));
+        assertEquals(TouchPad.Layout.N64, TouchPad.layoutFor(Console.N64, false));
+    }
+
+    /** Each console button lands on the Xbox control the console's default mapping reads as it (console_pad.c). */
+    @Test
+    public void consoleButtonsOnTheirXboxControls() {
+        TouchPad g = new TouchPad(TouchPad.Layout.GBA);
+        g.layout(W, H, 1f);
+        assertEquals(7, g.controls.size());   // D-pad, A, B, L, R, Select, Start
+        assertEquals(1 << TouchPad.AN_A, press(g, TouchPad.A).analogMask);
+        assertEquals(1 << TouchPad.AN_B, press(g, TouchPad.B).analogMask);
+        assertEquals(1 << TouchPad.AN_BLACK, press(g, TouchPad.SHOULDER_L).analogMask);   // the left shoulder: L
+        assertEquals(1 << TouchPad.AN_WHITE, press(g, TouchPad.SHOULDER_R).analogMask);
+        assertEquals(TouchPad.XB_BACK, press(g, TouchPad.SELECT).buttons);
+        assertEquals(TouchPad.XB_START, press(g, TouchPad.START).buttons);
+        TouchPad.Control d = g.control(TouchPad.DPAD);
+        g.down(1, d.cx, d.cy - d.r * 0.8f);
+        assertEquals(TouchPad.XB_UP, g.state().buttons);
+        g.cancel();
+        assertFalse(g.has(TouchPad.LSTICK));
+
+        TouchPad p = new TouchPad(TouchPad.Layout.PS1);
+        p.layout(W, H, 1f);
+        assertFalse("digital: no sticks", p.has(TouchPad.LSTICK) || p.has(TouchPad.RSTICK));
+        assertEquals(1 << TouchPad.AN_A, press(p, TouchPad.A).analogMask);   // Cross
+        assertEquals(1 << TouchPad.AN_Y, press(p, TouchPad.Y).analogMask);   // Triangle
+        assertEquals(TouchPad.GLYPH_SQUARE, p.control(TouchPad.X).glyph);
+        assertEquals(1 << TouchPad.AN_BLACK, press(p, TouchPad.SHOULDER_L).analogMask);   // L1
+        assertEquals(255, press(p, TouchPad.SHOULDER_L2).lt);
+        assertEquals(255, press(p, TouchPad.SHOULDER_R2).rt);
+        TouchPad pa = new TouchPad(TouchPad.Layout.PS1_ANALOG);
+        pa.layout(W, H, 1f);
+        assertTrue(pa.has(TouchPad.LSTICK) && pa.has(TouchPad.RSTICK) && pa.has(TouchPad.L3));
+        TouchPad.Control ls = pa.control(TouchPad.LSTICK);
+        pa.down(0, ls.cx, ls.cy);
+        pa.move(0, ls.cx - ls.r, ls.cy);
+        assertEquals(-32767, pa.state().lx);
+        pa.cancel();
+        assertEquals(TouchPad.XB_LTHUMB, press(pa, TouchPad.L3).buttons);
+
+        TouchPad n = new TouchPad(TouchPad.Layout.N64);
+        n.layout(W, H, 1f);
+        assertFalse("no D-pad", n.has(TouchPad.DPAD));
+        assertEquals(255, press(n, TouchPad.Z).lt);
+        assertEquals(1 << TouchPad.AN_B, press(n, TouchPad.B).analogMask);
+        TouchPad.State s = press(n, TouchPad.C_LEFT);
+        assertEquals(-32767, s.rx);   // the right stick pushed left: C-left
+        assertEquals(0, s.ry);
+        assertTrue(s.held(n.control(TouchPad.C_LEFT)));
+        assertFalse(s.held(n.control(TouchPad.C_RIGHT)));
+        assertEquals(32767, press(n, TouchPad.C_UP).ry);   // Y up
+        assertEquals(-32767, press(n, TouchPad.C_DOWN).ry);
+        // Two C buttons at once (a thumb across C-up and C-right).
+        TouchPad.Control up = n.control(TouchPad.C_UP), right = n.control(TouchPad.C_RIGHT);
+        n.down(0, up.cx, up.cy);
+        n.down(1, right.cx, right.cy);
+        s = n.state();
+        assertEquals(32767, s.rx);
+        assertEquals(32767, s.ry);
+        n.cancel();
+        // The stick with A held.
+        TouchPad.Control st = n.control(TouchPad.LSTICK), a = n.control(TouchPad.A);
+        n.down(0, st.cx, st.cy);
+        n.move(0, st.cx, st.cy - st.r);
+        n.down(1, a.cx, a.cy);
+        s = n.state();
+        assertEquals(32767, s.ly);
+        assertEquals(1 << TouchPad.AN_A, s.analogMask);
+    }
+
+    /** Every console layout on screen, off the menu's edge, nothing overlapping (circles and pills), at every size. */
+    @Test
+    public void consoleLayoutsStayOnScreen() {
+        for (TouchPad.Layout l : new TouchPad.Layout[] { TouchPad.Layout.GBA, TouchPad.Layout.PS1,
+                                                         TouchPad.Layout.PS1_ANALOG, TouchPad.Layout.N64 }) {
+            TouchPad p = new TouchPad(l);
+            for (float scale : new float[] { 0.8f, 1f, 1.25f }) {
+                for (float[] wh : new float[][] { { 2400, 1080 }, { 1920, 1080 }, { 1600, 900 }, { 1280, 960 } }) {
+                    p.layout(wh[0], wh[1], scale);
+                    String at = " at " + scale + " on " + wh[0] + "x" + wh[1];
+                    for (TouchPad.Control k : p.controls) {
+                        float hw = k.pill() ? k.hw : k.r, hh = k.pill() ? k.hh : k.r;
+                        String what = l + " control " + k.id + at;
+                        assertTrue(what, k.cx - hw >= wh[0] * TouchPad.EDGE_FRAC);
+                        assertTrue(what, k.cx + hw <= wh[0] && k.cy - hh >= 0 && k.cy + hh <= wh[1]);
+                    }
+                    for (TouchPad.Control a : p.controls)
+                        for (TouchPad.Control b : p.controls)
+                            if (a != b)
+                                assertFalse(l + " " + a.id + "/" + b.id + at, overlap(a, b));
+                }
+            }
+        }
+    }
+
+    /** Two controls as drawn: circle / circle by distance, a pill as its rectangle. */
+    private static boolean overlap(TouchPad.Control a, TouchPad.Control b) {
+        if (!a.pill() && !b.pill()) {
+            float dx = a.cx - b.cx, dy = a.cy - b.cy;
+            return Math.sqrt(dx * dx + dy * dy) < a.r + b.r;
+        }
+        if (a.pill() && b.pill())
+            return Math.abs(a.cx - b.cx) < a.hw + b.hw && Math.abs(a.cy - b.cy) < a.hh + b.hh;
+        TouchPad.Control pill = a.pill() ? a : b, c = a.pill() ? b : a;
+        float nx = Math.max(pill.cx - pill.hw, Math.min(c.cx, pill.cx + pill.hw));
+        float ny = Math.max(pill.cy - pill.hh, Math.min(c.cy, pill.cy + pill.hh));
+        float dx = c.cx - nx, dy = c.cy - ny;
+        return dx * dx + dy * dy < c.r * c.r;
+    }
 }
