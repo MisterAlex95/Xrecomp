@@ -311,23 +311,31 @@ static uint8_t *bios_try(const char *path, size_t *n)
     return b;
 }
 
-/* The BIOS image (ps1_runtime_opts.bios); where it came from in `from`. */
-static uint8_t *bios_load(const char *explicit_path, char *from, size_t from_n)
+/* The BIOS image (ps1_runtime_opts.bios); where it came from in `from`. NULL: the HLE BIOS ("hle" asked for, or no
+ * image found: from says which), or *bad when the path the caller gave is not a 512 KB image. */
+static uint8_t *bios_load(const char *explicit_path, char *from, size_t from_n, int *bad)
 {
     size_t n = 0;
     uint8_t *b;
     const char *env = getenv("RECOMP_PS1_BIOS");
     const char *first[] = {explicit_path, env && *env ? env : NULL, s_start_bios[0] ? s_start_bios : NULL};
+    *bad = 0;
     for (int i = 0; i < 3; i++) {
-        if (!first[i])
+        if (!first[i] || !*first[i])
             continue;
+        if (!strcmp(first[i], "hle")) {
+            snprintf(from, from_n, "HLE (asked for)");
+            return NULL;
+        }
         if ((b = bios_try(first[i], &n))) {
             snprintf(from, from_n, "%s", first[i]);
             return b;
         }
         fprintf(stderr, "ps1: BIOS %s is not a 512 KB image\n", first[i]);
-        if (i == 0)
-            return NULL; /* asked for that one */
+        if (i == 0) {
+            *bad = 1; /* asked for that one */
+            return NULL;
+        }
     }
     /* The app's asset (SDL reads the APK's assets for a relative path on Android; on a desktop, relative to the
      * working directory). */
@@ -368,6 +376,7 @@ static uint8_t *bios_load(const char *explicit_path, char *from, size_t from_n)
             }
         }
     }
+    snprintf(from, from_n, "HLE (no image found)");
     return NULL;
 }
 
@@ -728,10 +737,10 @@ int ps1_runtime_run(const ps1_runtime_opts *o)
         return -1;
     }
     char bios_from[1200] = "";
-    uint8_t *bios = bios_load(o->bios, bios_from, sizeof bios_from);
-    if (!bios) {
-        fprintf(stderr, "ps1: no BIOS image (OpenBIOS: tools/consoles/build_ps1_bios.sh, then --bios or "
-                        "RECOMP_PS1_BIOS)\n");
+    int bios_bad = 0;
+    uint8_t *bios = bios_load(o->bios, bios_from, sizeof bios_from, &bios_bad);
+    if (!bios && bios_bad) {
+        fprintf(stderr, "ps1: the BIOS %s cannot be used (a 512 KB image, or \"hle\")\n", o->bios);
         free(exe);
         return -1;
     }
@@ -753,7 +762,7 @@ int ps1_runtime_run(const ps1_runtime_opts *o)
         }
     }
     char err[256] = "";
-    ps1_machine *m = ps1_create(bios, PS1_BIOS_SIZE, disc, exe, exe_n, err, sizeof err);
+    ps1_machine *m = ps1_create(bios, bios ? PS1_BIOS_SIZE : 0, disc, exe, exe_n, err, sizeof err);
     free(bios);
     free(exe);
     if (!m) {
