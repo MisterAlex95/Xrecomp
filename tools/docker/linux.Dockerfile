@@ -35,17 +35,23 @@ ENV SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy JOBS=${JOBS} \
 # 1. the toolkit itself, and the two tests the root build lists
 # 2. every self-contained C test project under tests/ (report in /reports/c-tests.md)
 # 3. the Python side (lifter unit tests, and the console pipelines' under consoles/, XBA-146)
+# PART splits that for parallel CI jobs (.github/workflows/linux.yml): all (default, everything, as Gitea runs it),
+# python (1 and 3), or c-K/N (the K-th of N slices of 2, tools/run_c_tests.sh XBR_SHARD).
 # ccache (tools/run_c_tests.sh): the projects that rebuild the runtime share its objects within a run, and the cache
 # mount keeps them between runs on the same host (BuildKit, capped at CCACHE_MAXSIZE; a fresh GitHub runner starts
 # empty). The env makes every CMake configure here use it, the root build and pytest's builds included.
 ENV CCACHE_DIR=/ccache CCACHE_MAXSIZE=2G CCACHE_BASEDIR=/ CCACHE_NOHASHDIR=1 \
     CMAKE_C_COMPILER_LAUNCHER=ccache CMAKE_CXX_COMPILER_LAUNCHER=ccache
+ARG PART=all
 RUN --mount=type=cache,id=xba-ccache-linux,target=/ccache mkdir -p /work && trap 'rm -rf /work; find /tmp -mindepth 1 -delete' EXIT \
+    && case "$PART" in all|python|c-[1-9]*/[1-9]*) ;; *) echo "PART: all, python or c-K/N, not $PART"; exit 2 ;; esac \
     && export TMPDIR=/work TMP=/work TEMP=/work \
     && mkdir -p /reports \
-    && cmake -S . -B /work/build/root -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DXBOXRECOMP_BUILD_TESTS=ON \
-    && cmake --build /work/build/root -j"$JOBS" \
-    && ctest --test-dir /work/build/root --output-on-failure --timeout 300 \
-    && tools/run_c_tests.sh /work/build/c-tests /reports/c-tests.md \
-    && python3 -m pytest -q -p no:cacheprovider tools/ consoles/ | tee /reports/pytest.txt \
+    && case "$PART" in all|python) \
+         cmake -S . -B /work/build/root -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DXBOXRECOMP_BUILD_TESTS=ON \
+         && cmake --build /work/build/root -j"$JOBS" \
+         && ctest --test-dir /work/build/root --output-on-failure --timeout 300 ;; esac \
+    && case "$PART" in all) tools/run_c_tests.sh /work/build/c-tests /reports/c-tests.md ;; \
+         c-*) XBR_SHARD=${PART#c-} tools/run_c_tests.sh /work/build/c-tests /reports/c-tests.md ;; esac \
+    && case "$PART" in all|python) python3 -m pytest -q -p no:cacheprovider tools/ consoles/ | tee /reports/pytest.txt ;; esac \
     && ccache -s | tee /reports/ccache.txt
