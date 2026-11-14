@@ -2660,8 +2660,9 @@ static void dispatch(n64_rdp *d, const uint64_t *w, int len)
     const int draw = (id >= 0x08 && id <= 0x0F) || id == 0x24 || id == 0x25 || id == 0x36;
     if (draw)
         d->pipebusy = (d->pipebusy + cost) & 0xFFFFFF;
-    if (id != 0x29) /* any command starts the pipe and its clock, until SYNC_FULL (n64-systemtest "Flags during a run") */
+    if (id != 0x29) /* commands after a SYNC_FULL in the same buffer start the pipe again */
         d->status |= ST_PIPE_BUSY | ST_GCLK;
+
     if (id == 0x30 || id == 0x33 || id == 0x34) {
         uint32_t sh = (uint32_t)(w0 >> 12) & 0xFFF, sl = (uint32_t)(w0 >> 44) & 0xFFF;
         d->tmemc = (d->tmemc + ((sh - sl) >> 2) + 4) & 0xFFFFFF;
@@ -2847,6 +2848,7 @@ void n64_rdp_write_reg(n64_rdp *d, uint32_t reg, uint32_t v)
         break;
     case 1:
         d->end = v & 0xFFFFF8;
+        d->status |= ST_PIPE_BUSY | ST_GCLK; /* the pipe and its clock run from here until SYNC_FULL */
         if (d->start_pending) {
             d->current = d->start;
             d->start_pending = 0;

@@ -117,13 +117,16 @@ static void t_regs(void)
     expect("CLOCK cleared", n64_rdp_read_reg(G.dp, 4), 0);
     expect("BUFBUSY cleared", n64_rdp_read_reg(G.dp, 5), 0);
     expect("PIPEBUSY cleared", n64_rdp_read_reg(G.dp, 6), 0);
-    /* the pipe and its clock run from the first command (drawing or not) until SYNC_FULL (n64-systemtest) */
+    /* the pipe and its clock run from an END write (even an empty buffer) until SYNC_FULL (n64-systemtest "RDP STATUS:
+     * Flags during a run" compares the whole register) */
+    go();
+    expect("busy after an empty buffer", n64_rdp_read_reg(G.dp, 3), 0x080 | 0x020 | 0x008);
     L(&LS, c_color_image(F_RGBA, SZ16, 64, FB_ADDR));
     go();
-    expect("busy after a non-drawing command", n64_rdp_read_reg(G.dp, 3) & 0x1E8, 0x080 | 0x020 | 0x008);
+    expect("busy after a non-drawing command", n64_rdp_read_reg(G.dp, 3), 0x080 | 0x020 | 0x008);
     L(&LS, c_sync_full());
     go();
-    expect("idle after SYNC_FULL", n64_rdp_read_reg(G.dp, 3) & 0x1E8, 0x080);
+    expect("idle after SYNC_FULL", n64_rdp_read_reg(G.dp, 3), 0x080);
     n64_rdp_write_reg(G.dp, 3, 0x20);
     check(n64_rdp_read_reg(G.dp, 3) & 0x4, "flush set");
     n64_rdp_write_reg(G.dp, 3, 0x10);
