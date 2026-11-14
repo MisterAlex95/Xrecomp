@@ -28,9 +28,9 @@ a one-step **Prepare** and a console-agnostic host layer that the other consoles
 | Console | CPU | State |
 |---|---|---|
 | **Original Xbox** | x86 (Pentium III) | ✅ Experimental: several games boot, a few are playable |
-| **Game Boy Advance** | ARM7TDMI | 🧪 Recompiled with interpreter fallback, Prepare on the device, save states; homebrew and test suites pass, not yet tried on commercial games |
-| **PlayStation** | MIPS R3000A | 🧪 Recompiled with interpreter fallback (overlays included), Prepare on the device, no BIOS image needed (HLE BIOS, OpenBIOS as an option), save states; homebrew and test suites pass |
-| **Nintendo 64** | MIPS R4300i | 🧪 Recompiled with interpreter fallback (no symbols needed), Prepare on the device; LLE RSP, RDP on Vulkan (paraLLEl-RDP) with a software fallback, emulated PIF; homebrew and n64-systemtest pass; Ocarina of Time (PAL) plays at full speed on an AYN Thor with a Turnip Vulkan driver |
+| **Game Boy Advance** | ARM7TDMI | 🧪 Recompiled with interpreter fallback, Prepare on the device, save states; homebrew and test suites pass; Pokémon Pinball: Ruby & Sapphire playable on an AYN Thor |
+| **PlayStation** | MIPS R3000A | 🧪 Recompiled with interpreter fallback (overlays included), Prepare on the device, no BIOS image needed (HLE BIOS, OpenBIOS as an option), save states; homebrew and test suites pass; Crash Bandicoot playable on an AYN Thor |
+| **Nintendo 64** | MIPS R4300i | 🧪 Recompiled with interpreter fallback (no symbols needed), Prepare on the device; LLE RSP, RDP on Vulkan (paraLLEl-RDP) with a software fallback, emulated PIF; homebrew and n64-systemtest pass; The Legend of Zelda: Ocarina of Time (PAL) playable at full speed on an AYN Thor with a Turnip Vulkan driver |
 
 On Android, the N64 renderer needs a Vulkan driver that can compile its shaders: on Adreno, pick a Mesa Turnip driver
 in Settings › Graphics › Vulkan driver (the app lists and downloads them; [app-shell.md](docs/android/app-shell.md#vulkan-drivers)).
