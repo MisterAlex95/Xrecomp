@@ -54,6 +54,7 @@
  * of the head after a Pause (it stays on the last sector), audio sub-channels (P, R..W) and CD+G. */
 #include "ps1_devices.h"
 
+#include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -1258,4 +1259,34 @@ size_t ps1_cdrom_audio_pull(ps1_cdrom *c, int16_t *stereo, size_t frames)
     if (!c->ring_count)
         c->xa_play_frames = 0;
     return n;
+}
+
+/* ---- Save states (XBA-182) ------------------------------------------------------------------------------------ */
+
+/* The controller whole (registers, FIFOs, the command and responses in flight, the drive's position, sector buffers,
+ * XA / CD-DA state and its audio ring); the disc stays the one in the drive now. */
+size_t ps1_cdrom_state_size(ps1_cdrom *c)
+{
+    (void)c;
+    return sizeof(ps1_cdrom);
+}
+
+void ps1_cdrom_state_save(ps1_cdrom *c, uint8_t *out)
+{
+    size_t ni = sizeof c->irq, nd = sizeof c->disc;
+    memcpy(out, c, sizeof *c);
+    memset(out + offsetof(ps1_cdrom, irq), 0, ni);
+    memset(out + offsetof(ps1_cdrom, disc), 0, nd);
+}
+
+int ps1_cdrom_state_load(ps1_cdrom *c, const uint8_t *in, size_t n)
+{
+    if (n != sizeof *c)
+        return -1;
+    ps1_irq_sink irq = c->irq;
+    ps1_disc *disc = c->disc;
+    memcpy(c, in, sizeof *c);
+    c->irq = irq;
+    c->disc = disc;
+    return 0;
 }

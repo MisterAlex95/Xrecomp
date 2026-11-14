@@ -125,6 +125,26 @@ static void flush_cache(struct ps1_rc_state *s)
     s->expect = KEY_NONE;
 }
 
+/* Save states (XBA-182): whether the program booted (lifted code may run), -1 without recompiled code. */
+int ps1_recomp_booted(ps1_machine *m)
+{
+    return m->rc && m->rc->table ? m->rc->booted : -1;
+}
+
+/* A state was loaded: every RAM page counts as written (ps1_state.c bumps them), the dispatch cache and the
+ * hand-offs in flight are forgotten, the boot flag is the state's (-1: unknown, then the EXE having started). */
+void ps1_recomp_state_loaded(ps1_machine *m, int booted)
+{
+    struct ps1_rc_state *s = m->rc;
+    if (!s)
+        return;
+    flush_cache(s);
+    s->interp_left = 0;
+    for (uint32_t i = 0; i < s->n; i++)
+        s->vstate[i] = V_UNKNOWN;
+    s->booted = booted >= 0 ? booted != 0 : m->exe_started;
+}
+
 static void drop_table(struct ps1_rc_state *s)
 {
     free(s->pfirst);

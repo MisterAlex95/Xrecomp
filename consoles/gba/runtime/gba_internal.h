@@ -214,6 +214,8 @@ struct gba_machine {
     gba_save save;
 
     int16_t sine[256];      /* BIOS sine table (HLE BgAffineSet / ObjAffineSet), 1.14 fixed point */
+
+    uint64_t rom_hash;      /* FNV-1a 64 of the ROM | 1, 0 until a save state needs it (gba_state.c) */
 };
 
 /* gba_machine starts with gba_rc_head's members. */
@@ -316,6 +318,9 @@ void gba_cpu_jump(gba_machine *m, uint32_t addr, bool thumb);
 /* gba_recomp.c: the run loop with a table attached (dispatch to lifted code, interpreter otherwise). */
 void gba_recomp_run(gba_machine *m);
 void gba_recomp_free(gba_machine *m);
+/* A save state was loaded (gba_state.c): the hand-offs between lifted code and the interpreter in flight are
+ * forgotten (the dispatch cache stays: it is a function of the ROM). */
+void gba_recomp_state_loaded(gba_machine *m);
 
 /* gba_bios.c */
 void gba_bios_install_builtin(gba_machine *m);

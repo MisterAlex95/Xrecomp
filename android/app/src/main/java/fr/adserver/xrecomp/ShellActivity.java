@@ -635,6 +635,78 @@ public class ShellActivity extends SDLActivity {
             }
         }
 
+        /** XBA-182: a GBA or PS1 game runs, and its runtime can save states. */
+        @Override
+        public boolean statesSupported() {
+            String tid = GameStore.launchedRom(ShellActivity.this) != null
+                         ? GameStore.launchedTitleId(ShellActivity.this) : null;
+            Console c = tid == null ? null : Console.ofKey(tid);
+            if (c != Console.GBA && c != Console.PS1)
+                return false;
+            try {
+                return MenuNative.nativeStatesAvailable();
+            } catch (UnsatisfiedLinkError e) {
+                Log.w(LauncherActivity.TAG, "shell: menu: no native save states", e);
+                return false;
+            }
+        }
+
+        @Override
+        public long stateTime(int slot) {
+            try {
+                return MenuNative.nativeStateTime(slot);
+            } catch (UnsatisfiedLinkError e) {
+                return 0;
+            }
+        }
+
+        @Override
+        public int[] stateThumb(int slot) {
+            try {
+                return MenuNative.nativeStateThumb(slot);
+            } catch (UnsatisfiedLinkError e) {
+                return null;
+            }
+        }
+
+        @Override
+        public int saveState(int slot) {
+            try {
+                return MenuNative.nativeStateSave(slot);
+            } catch (UnsatisfiedLinkError e) {
+                Log.w(LauncherActivity.TAG, "shell: menu: no native state save", e);
+                return GameMenu.STATE_NO_GAME;
+            }
+        }
+
+        @Override
+        public int loadState(int slot) {
+            try {
+                return MenuNative.nativeStateLoad(slot);
+            } catch (UnsatisfiedLinkError e) {
+                Log.w(LauncherActivity.TAG, "shell: menu: no native state load", e);
+                return GameMenu.STATE_NO_GAME;
+            }
+        }
+
+        @Override
+        public boolean fastForward() {
+            try {
+                return MenuNative.nativeFastForwardOn();
+            } catch (UnsatisfiedLinkError e) {
+                return false;
+            }
+        }
+
+        @Override
+        public void setFastForward(boolean on) {
+            try {
+                MenuNative.nativeFastForward(on);
+            } catch (UnsatisfiedLinkError e) {
+                Log.w(LauncherActivity.TAG, "shell: menu: no native fast-forward", e);
+            }
+        }
+
         @Override
         public void quit() {
             overlayOff();

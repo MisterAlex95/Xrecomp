@@ -186,3 +186,23 @@ size_t ps1_cdrom_audio_pull(ps1_cdrom *c, int16_t *stereo, size_t frames)
     (void)frames;
     return 0;
 }
+
+/* Save states (XBA-182): a placeholder has no state worth keeping. */
+size_t ps1_cdrom_state_size(ps1_cdrom *x)
+{
+    (void)x;
+    return 0;
+}
+
+void ps1_cdrom_state_save(ps1_cdrom *x, uint8_t *out)
+{
+    (void)x;
+    (void)out;
+}
+
+int ps1_cdrom_state_load(ps1_cdrom *x, const uint8_t *in, size_t n)
+{
+    (void)x;
+    (void)in;
+    return n == 0 ? 0 : -1;
+}

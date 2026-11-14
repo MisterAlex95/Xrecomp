@@ -1,8 +1,11 @@
 /* The in-game menu's JNI (fr.adserver.xrecomp.MenuNative, docs/android/app-shell.md « In-game menu »): hold the
  * game while the drawer is open (the lifecycle's MENU reason: the flip parks and the audio device pauses, as in the
- * background), the output volume, quit, and a PlayStation game's disc change (XBA-166). Called on the UI thread. */
+ * background), the output volume, quit, a PlayStation game's disc change (XBA-166), and a GBA / PS1 game's save
+ * states and fast-forward (XBA-182, recomp_states.h). Called on the UI thread. */
 #include <jni.h>
+#include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 #include <unistd.h>
 
 #include "apu_volume.h"
@@ -10,6 +13,7 @@
 #include "ps1_runtime.h"
 #include "platform/recomp_lifecycle.h"
 #include "platform/recomp_quit.h"
+#include "platform/recomp_states.h"
 
 #define JNI_FN(name) Java_fr_adserver_xrecomp_MenuNative_##name
 
@@ -66,4 +70,87 @@ JNIEXPORT jboolean JNICALL JNI_FN(nativePs1ChangeDisc)(JNIEnv *env, jclass cls, 
     printf("xboxrecomp: change disc to %s from the in-game menu: %s\n", path, rc == 0 ? "queued" : "no PS1 game");
     (*env)->ReleaseStringUTFChars(env, jpath, path);
     return rc == 0 ? JNI_TRUE : JNI_FALSE;
+}
+
+/* ---- Save states and fast-forward (XBA-182) ------------------------------------------------------------------- */
+/* The running console game's slots through recomp_states.h: its runtime saves / loads between frames under its frame
+ * lock (the game is held by the menu then, so it never waits for one), the slot files beside its saves. */
+
+JNIEXPORT jboolean JNICALL JNI_FN(nativeStatesAvailable)(JNIEnv *env, jclass cls)
+{
+    (void)env;
+    (void)cls;
+    return recomp_states_available() ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jint JNICALL JNI_FN(nativeStateSave)(JNIEnv *env, jclass cls, jint slot)
+{
+    (void)env;
+    (void)cls;
+    int rc = recomp_states_save((int)slot);
+    printf("xboxrecomp: save state slot %d from the in-game menu: %s\n", (int)slot, recomp_states_error(rc));
+    return rc;
+}
+
+JNIEXPORT jint JNICALL JNI_FN(nativeStateLoad)(JNIEnv *env, jclass cls, jint slot)
+{
+    (void)env;
+    (void)cls;
+    int rc = recomp_states_load((int)slot);
+    printf("xboxrecomp: load state slot %d from the in-game menu: %s\n", (int)slot, recomp_states_error(rc));
+    return rc;
+}
+
+/* When the slot was saved (Unix ms), 0 when it holds nothing this console's game can load: no file, damaged,
+ * another format version, another console. (Another game's state is refused by the core on load.) */
+JNIEXPORT jlong JNICALL JNI_FN(nativeStateTime)(JNIEnv *env, jclass cls, jint slot)
+{
+    (void)env;
+    (void)cls;
+    recomp_state_meta m;
+    if (recomp_states_info((int)slot, &m, NULL) != RECOMP_STATE_OK)
+        return 0;
+    if (strcmp(m.console, recomp_states_console()) != 0)
+        return 0;
+    return m.saved_ms > 0 ? (jlong)m.saved_ms : 1;
+}
+
+/* { w, h, ARGB... } from the slot's RGB565 thumbnail, or null. */
+JNIEXPORT jintArray JNICALL JNI_FN(nativeStateThumb)(JNIEnv *env, jclass cls, jint slot)
+{
+    (void)cls;
+    static uint16_t thumb[RECOMP_STATE_THUMB_W * RECOMP_STATE_THUMB_H];
+    static jint argb[2 + RECOMP_STATE_THUMB_W * RECOMP_STATE_THUMB_H];
+    recomp_state_meta m;
+    if (recomp_states_info((int)slot, &m, thumb) != RECOMP_STATE_OK || m.thumb_w <= 0 || m.thumb_h <= 0)
+        return NULL;
+    int n = m.thumb_w * m.thumb_h;
+    argb[0] = m.thumb_w;
+    argb[1] = m.thumb_h;
+    for (int i = 0; i < n; i++) {
+        unsigned c = thumb[i], r = c >> 11, g = (c >> 5) & 63, b = c & 31;
+        r = r << 3 | r >> 2;
+        g = g << 2 | g >> 4;
+        b = b << 3 | b >> 2;
+        argb[2 + i] = (jint)(0xFF000000u | r << 16 | g << 8 | b);
+    }
+    jintArray out = (*env)->NewIntArray(env, 2 + n);
+    if (out)
+        (*env)->SetIntArrayRegion(env, out, 0, 2 + n, argb);
+    return out;
+}
+
+JNIEXPORT void JNICALL JNI_FN(nativeFastForward)(JNIEnv *env, jclass cls, jboolean on)
+{
+    (void)env;
+    (void)cls;
+    recomp_ff_set(on ? 1 : 0);
+    printf("xboxrecomp: fast-forward %s from the in-game menu\n", on ? "on" : "off");
+}
+
+JNIEXPORT jboolean JNICALL JNI_FN(nativeFastForwardOn)(JNIEnv *env, jclass cls)
+{
+    (void)env;
+    (void)cls;
+    return recomp_ff_toggled() ? JNI_TRUE : JNI_FALSE;
 }

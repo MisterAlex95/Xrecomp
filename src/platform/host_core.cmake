@@ -6,8 +6,9 @@
 #   recomp_cfg        RECOMP_* options from recomp.cfg on hosts without a shell (recomp_cfg.h)
 #   host_cpus         run on the fast cores of a big.LITTLE host (host_cpus.h)
 #   recomp_storage    a title's data and save directories on a host without a shell (recomp_storage.h), POSIX
-#   xbr_host_core     the log pump (android_log.c), the app lifecycle (recomp_lifecycle.c) and the quit path
-#                     (recomp_quit.c), POSIX; links the first four (xbr_host adds recomp_storage)
+#   xbr_host_core     the log pump (android_log.c), the app lifecycle (recomp_lifecycle.c), the quit path
+#                     (recomp_quit.c) and the consoles' save states / fast-forward (recomp_states.c, XBA-182),
+#                     POSIX; links the first four (xbr_host adds recomp_storage)
 if(NOT TARGET host_time)
     get_filename_component(_xbr_core_src "${CMAKE_CURRENT_LIST_DIR}/.." ABSOLUTE)
 
@@ -32,7 +33,8 @@ if(NOT TARGET host_time)
         add_library(xbr_host_core STATIC
             ${CMAKE_CURRENT_LIST_DIR}/android_log.c
             ${CMAKE_CURRENT_LIST_DIR}/recomp_lifecycle.c
-            ${CMAKE_CURRENT_LIST_DIR}/recomp_quit.c)
+            ${CMAKE_CURRENT_LIST_DIR}/recomp_quit.c
+            ${CMAKE_CURRENT_LIST_DIR}/recomp_states.c)
         target_include_directories(xbr_host_core PUBLIC ${_xbr_core_src} ${CMAKE_CURRENT_LIST_DIR})
         find_package(Threads REQUIRED)
         target_link_libraries(xbr_host_core PUBLIC Threads::Threads recomp_exit_hook host_time recomp_cfg host_cpus)

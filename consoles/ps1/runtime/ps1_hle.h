@@ -18,6 +18,7 @@
 #ifndef PS1_HLE_H
 #define PS1_HLE_H
 
+#include <stddef.h>
 #include <stdint.h>
 
 typedef struct ps1_machine ps1_machine;
@@ -47,5 +48,13 @@ void ps1_hle_trap(ps1_machine *m, uint32_t code);
 int ps1_hle_implemented(int table, int fn, const char **name);
 /* Distinct unimplemented calls the program made so far (each reported once on stderr). */
 int ps1_hle_unimplemented_count(ps1_machine *m);
+
+/* Save states (XBA-182, ps1_state.c): the HLE BIOS's state as bytes (0 without the HLE BIOS). busy: a guest call
+ * from C is in progress (C frames on the host stack): no state can be taken then. load: 0, or -1 on a size
+ * mismatch. */
+size_t ps1_hle_state_size(ps1_machine *m);
+int ps1_hle_state_busy(ps1_machine *m);
+void ps1_hle_state_save(ps1_machine *m, uint8_t *out);
+int ps1_hle_state_load(ps1_machine *m, const uint8_t *in, size_t n);
 
 #endif

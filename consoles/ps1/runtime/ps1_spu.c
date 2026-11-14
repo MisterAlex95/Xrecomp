@@ -32,6 +32,7 @@
  * hardware's per-voice stagger within a sample, the transfer types other than normal, the external audio input. */
 #include "ps1_devices.h"
 
+#include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -825,4 +826,35 @@ size_t ps1_spu_audio_pull(ps1_spu *s, int16_t *stereo, size_t frames)
     }
     s->ring_count -= (uint32_t)n;
     return n;
+}
+
+/* ---- Save states (XBA-182) ------------------------------------------------------------------------------------ */
+
+/* The registers, voices, reverb and output ring (the struct), then the 512 KB of sound RAM. */
+size_t ps1_spu_state_size(ps1_spu *s)
+{
+    (void)s;
+    return sizeof(ps1_spu) + RAM_SIZE;
+}
+
+void ps1_spu_state_save(ps1_spu *s, uint8_t *out)
+{
+    size_t ni = sizeof s->irq, nr = sizeof s->ram;
+    memcpy(out, s, sizeof *s);
+    memset(out + offsetof(ps1_spu, irq), 0, ni);
+    memset(out + offsetof(ps1_spu, ram), 0, nr);
+    memcpy(out + sizeof *s, s->ram, RAM_SIZE);
+}
+
+int ps1_spu_state_load(ps1_spu *s, const uint8_t *in, size_t n)
+{
+    if (n != sizeof *s + RAM_SIZE)
+        return -1;
+    ps1_irq_sink irq = s->irq;
+    uint8_t *ram = s->ram;
+    memcpy(s, in, sizeof *s);
+    s->irq = irq;
+    s->ram = ram;
+    memcpy(s->ram, in + sizeof *s, RAM_SIZE);
+    return 0;
 }

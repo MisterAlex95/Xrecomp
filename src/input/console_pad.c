@@ -367,6 +367,15 @@ int console_pad_load(ConsolePadMap *m, int console, const char *text)
     return rejected;
 }
 
+uint32_t console_pad_targets_using(const ConsolePadMap *m, uint32_t sources)
+{
+    uint32_t t = 0;
+    for (int i = 0; m && i < m->n_targets && i < CONSOLE_PAD_MAX_TARGETS; i++)
+        if (m->source[i] & sources)
+            t |= 1u << i;
+    return t;
+}
+
 uint32_t console_pad_sources(const HostPadState *st, int stick_threshold, int trigger_threshold)
 {
     static const struct { uint32_t host; int source; } k_buttons[] = {

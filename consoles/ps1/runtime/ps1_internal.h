@@ -294,5 +294,8 @@ void ps1_cpu_take_interrupt(ps1_machine *m);
 /* ps1_recomp.c */
 void ps1_recomp_run(ps1_machine *m);        /* the run loop with a table attached (ps1_cpu_run calls it) */
 void ps1_recomp_free(ps1_machine *m);
+/* Save states (XBA-182, ps1_state.c): the boot flag of the attached code (-1: none), and the reset after a load. */
+int ps1_recomp_booted(ps1_machine *m);
+void ps1_recomp_state_loaded(ps1_machine *m, int booted);
 
 #endif

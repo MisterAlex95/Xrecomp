@@ -97,6 +97,28 @@ const uint8_t *gba_save_data(gba_machine *m, size_t *size);
 int gba_save_take_dirty(gba_machine *m);
 int gba_save_load(gba_machine *m, const uint8_t *data, size_t size);
 
+/* Save states (XBA-182): the whole machine (CPU, memories, IO, PPU, APU, timers, DMA, the save chip and its
+ * contents) as a versioned blob: a header (magic, console, GBA_STATE_VERSION, the ROM's and the BIOS's hashes) and
+ * its sections (gba_state.c). Take and load them between frames (not from inside gba_run_frame). A state is the
+ * machine only: it loads the same whether the game runs interpreted or with a recompiled pack attached, before or
+ * after (the lifted code's hand-offs in flight are reset).
+ * gba_state_size: the bytes gba_state_save needs. gba_state_save: writes the state into out, returns its size (0 when
+ * cap is too small). gba_state_check / gba_state_load: GBA_STATE_OK, or why the state is refused (the machine is
+ * left as it was): another game or BIOS, another format version or machine layout (another build), not a state.
+ * Loading leaves the save chip's dirty flag clear: the state's save memory reaches storage only once the game
+ * writes its save again. */
+#define GBA_STATE_VERSION 1
+enum {
+    GBA_STATE_OK = 0,
+    GBA_STATE_EGAME = -3,
+    GBA_STATE_EVERSION = -4,
+    GBA_STATE_ECORRUPT = -7,
+};
+size_t gba_state_size(gba_machine *m);
+size_t gba_state_save(gba_machine *m, uint8_t *out, size_t cap);
+int gba_state_check(gba_machine *m, const uint8_t *data, size_t size);
+int gba_state_load(gba_machine *m, const uint8_t *data, size_t size);
+
 void gba_destroy(gba_machine *m);
 
 #ifdef __cplusplus

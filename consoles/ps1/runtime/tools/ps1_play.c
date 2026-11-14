@@ -38,6 +38,8 @@
  * DISC may be a .m3u playlist (multi-disc games): its first disc plays, F6 changes to the next one.
  * Keyboard: arrows, X = Cross, C = Circle, Z = Square, S = Triangle, Q / E = L1 / R1, 1 / 3 = L2 / R2,
  * Enter = Start, Backspace = Select; any game controller (Xbox layout).
+ * Save states (XBA-182): F1-F4 save slots 1-4, Shift+F1-F4 load them (<save dir>/ps1-<KEY>/state<N>.st); Tab held
+ * fast-forwards (RECOMP_FF_SPEED: 2..16 times, default 4, or "max"); on a pad, Back + right trigger held does the same.
  * Exit 0, 1 when the game cannot run, 2 on a usage error. */
 #include "host_window.h"
 #include "ps1_runtime.h"

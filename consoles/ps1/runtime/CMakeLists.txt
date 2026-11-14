@@ -82,7 +82,7 @@ endif()
 # C11 + libm, no host dependency, so the tests and ps1_run build anywhere (no SDL).
 if(NOT TARGET ps1_core)
     add_library(ps1_core STATIC ps1_core.c ps1_cpu.c ps1_gte.c ps1_bus.c ps1_io.c ps1_sio.c ps1_recomp.c
-        ps1_hle.c)
+        ps1_hle.c ps1_state.c)
     target_include_directories(ps1_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
     target_link_libraries(ps1_core PUBLIC ps1_gpu ps1_cd ps1_spu ps1_mdec)
     find_library(PS1_LIBM m)

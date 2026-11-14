@@ -545,6 +545,11 @@ final class Widgets {
         String badge, value;
         int badgeColor = Theme.TEXT_DIM;
         Cycler cycler;
+        /**
+         * XBA-182: a picture at the right side (a save state's), as tall as the focus plate, its aspect kept; with one
+         * the value and the badge are not drawn.
+         */
+        android.graphics.Bitmap thumb;
 
         private float tickT, valueReserve;
         private ValueAnimator tickAnim;
@@ -553,11 +558,12 @@ final class Widgets {
         private final TextPaint subP = textPaint(Theme.T_SMALL, Theme.REGULAR, Theme.TEXT_DIM);
         private final TextPaint valueP = textPaint(Theme.T_BODY, Theme.REGULAR, Theme.TEXT_DIM);
         private final TextPaint badgeP = textPaint(Theme.T_SMALL, Theme.MEDIUM, Theme.TEXT_DIM);
-        private final RectF r = new RectF();
-        private final Path tri = new Path();
+        private final RectF r = new RectF(), thumbR = new RectF();
+        private final Path tri = new Path(), thumbClip = new Path();
+        private final Paint thumbP = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
         private float leftArrowX = -1;
         private boolean downOnLeftArrow;
-        private static final float ARROW = 10, ARROW_GAP = 18;
+        private static final float ARROW = 10, ARROW_GAP = 18, THUMB_PAD = 4, THUMB_RADIUS = 8;
 
         MenuRow(Context c) {
             super(c);
@@ -634,6 +640,11 @@ final class Widgets {
             invalidate();
         }
 
+        void setThumb(android.graphics.Bitmap b) {
+            thumb = b;
+            invalidate();
+        }
+
         @Override
         public boolean onKeyDown(int keyCode, KeyEvent e) {
             if (cycler != null && (keyCode == KeyEvent.KEYCODE_DPAD_LEFT || keyCode == KeyEvent.KEYCODE_DPAD_RIGHT)) {
@@ -670,7 +681,19 @@ final class Widgets {
             }
             float x = Theme.ROW_INSET, right = w - Theme.ROW_INSET, textRight = right;
             leftArrowX = -1;
-            if (value != null && (badge == null || badge.isEmpty())) {
+            if (thumb != null && thumb.getWidth() > 0 && thumb.getHeight() > 0) {
+                float th = Math.max(1, h - 2 * plateInsetY() - 2 * THUMB_PAD);
+                float tw = th * thumb.getWidth() / thumb.getHeight();
+                thumbR.set(right - tw, (h - th) / 2, right, (h + th) / 2);
+                thumbClip.reset();
+                thumbClip.addRoundRect(thumbR, THUMB_RADIUS, THUMB_RADIUS, Path.Direction.CW);
+                c.save();
+                c.clipPath(thumbClip);
+                thumbP.setAlpha(dim ? 110 : 255);
+                c.drawBitmap(thumb, null, thumbR, thumbP);
+                c.restore();
+                textRight = right - tw - Theme.S4;
+            } else if (value != null && (badge == null || badge.isEmpty())) {
                 float vw = valueP.measureText(value), col = Math.max(vw, valueReserve);
                 float arrows = cycler != null ? ARROW + ARROW_GAP : 0;
                 // The value sits at the right edge, and moves left to make room for its arrows when focused.

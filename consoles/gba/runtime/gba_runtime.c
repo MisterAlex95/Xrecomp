@@ -6,7 +6,12 @@
  * (so the audio device's clock wins in the long run and the queue neither starves nor grows); vsync is on, so a swap
  * may wait for the display too, and a frame late by more than three periods resets the clock instead of running
  * fast to catch up. While the app is paused (background, the in-game menu: recomp_lifecycle) no frame runs, the save
- * is written and the window keeps pumping. */
+ * is written and the window keeps pumping.
+ *
+ * Save states and fast-forward (XBA-182, recomp_states.h): the run attaches itself while it plays, so the in-game
+ * menu and the desktop keys (F1-F4 save a slot, Shift+F1-F4 load it, Tab held fast-forwards) save and load between
+ * frames under s_mu. Fast-forward runs `speed` GBA frames per shown frame with their audio averaged down (or, at
+ * "max", as many as fit in a display frame, silent). */
 #define _GNU_SOURCE /* pread, nanosleep */
 #include "gba_runtime.h"
 
@@ -18,6 +23,7 @@
 #include "host_window.h"
 #include "recomp_exit_hook.h"
 #include "recomp_lifecycle.h"
+#include "recomp_states.h"
 
 #include <SDL.h>
 
@@ -330,6 +336,93 @@ static void save_load(gba_machine *m)
     }
 }
 
+/* ---- Save states (XBA-182) ------------------------------------------------------------------------------------ */
+
+static char s_state_dir[1100];                  /* <save dir>/gba-<KEY> */
+static char s_key[64];
+static uint16_t s_fb[GBA_SCREEN_W * GBA_SCREEN_H]; /* the last frame (written under s_mu) */
+static int s_state_loaded;                      /* a state was loaded: the loop resets its clock (under s_mu) */
+
+/* recomp_states_save's callback, any thread: the state and a thumbnail of the last frame, taken under s_mu (between
+ * frames), then written to <dir>/state<slot>.st. */
+static int state_save_op(int slot, void *user)
+{
+    (void)user;
+    char path[1200];
+    if (recomp_states_slot_path(s_state_dir, slot, path, sizeof path) != 0)
+        return RECOMP_STATE_ESLOT;
+    static uint8_t rgba[GBA_SCREEN_W * GBA_SCREEN_H * 4];
+    static uint16_t thumb[RECOMP_STATE_THUMB_W * RECOMP_STATE_THUMB_H];
+    recomp_state_meta meta;
+    memset(&meta, 0, sizeof meta);
+    snprintf(meta.console, sizeof meta.console, "gba");
+    snprintf(meta.key, sizeof meta.key, "%.47s", s_key);
+    pthread_mutex_lock(&s_mu);
+    if (!s_m) {
+        pthread_mutex_unlock(&s_mu);
+        return RECOMP_STATE_ENOGAME;
+    }
+    size_t cap = gba_state_size(s_m), n = 0;
+    uint8_t *blob = malloc(cap);
+    if (blob)
+        n = gba_state_save(s_m, blob, cap);
+    meta.frames = gba_frames(s_m);
+    gba_runtime_rgb555_to_rgba(s_fb, rgba, GBA_SCREEN_W * GBA_SCREEN_H);
+    pthread_mutex_unlock(&s_mu);
+    recomp_states_thumb(rgba, GBA_SCREEN_W, GBA_SCREEN_H, GBA_SCREEN_W * 4, 3, 2, thumb, &meta.thumb_w, &meta.thumb_h);
+    int rc = n ? recomp_states_write(path, &meta, thumb, blob, n) : RECOMP_STATE_EIO;
+    free(blob);
+    printf("gba: state slot %d %s (%zu bytes, frame %llu) %s\n", slot, rc == 0 ? "saved" : "not saved", n,
+           (unsigned long long)meta.frames, rc == 0 ? path : recomp_states_error(rc));
+    fflush(stdout);
+    return rc;
+}
+
+static int state_load_op(int slot, void *user)
+{
+    (void)user;
+    char path[1200];
+    if (recomp_states_slot_path(s_state_dir, slot, path, sizeof path) != 0)
+        return RECOMP_STATE_ESLOT;
+    recomp_state_meta meta;
+    uint8_t *blob = NULL;
+    size_t n = 0;
+    int rc = recomp_states_read(path, &meta, NULL, &blob, &n);
+    if (rc == RECOMP_STATE_OK && strcmp(meta.console, "gba") != 0)
+        rc = RECOMP_STATE_EGAME;
+    if (rc == RECOMP_STATE_OK) {
+        pthread_mutex_lock(&s_mu);
+        if (!s_m) {
+            rc = RECOMP_STATE_ENOGAME;
+        } else {
+            rc = gba_state_load(s_m, blob, n); /* GBA_STATE_* share RECOMP_STATE_*'s values */
+            if (rc == GBA_STATE_OK) {
+                int16_t sink[1024 * 2];
+                while (gba_audio_pull(s_m, sink, 1024) > 0) /* what the state had queued was heard already */
+                    ;
+                /* The state's save memory is what the game sees; the file on disk changes only once it writes. */
+                size_t sn = 0;
+                const uint8_t *cur = gba_save_data(s_m, &sn);
+                uint8_t *copy = cur && sn ? realloc(s_saved, sn) : NULL;
+                if (copy) {
+                    memcpy(copy, cur, sn);
+                    s_saved = copy;
+                    s_saved_n = sn;
+                }
+                s_state_loaded = 1;
+            }
+        }
+        pthread_mutex_unlock(&s_mu);
+    }
+    free(blob);
+    if (rc == 0)
+        printf("gba: state slot %d loaded (%s)\n", slot, path);
+    else
+        printf("gba: state slot %d not loaded: %s\n", slot, recomp_states_error(rc));
+    fflush(stdout);
+    return rc;
+}
+
 /* ---- The run -------------------------------------------------------------------------------------------------- */
 
 static uint64_t now_ns(void)
@@ -370,19 +463,52 @@ static uint16_t keyboard_keys(void)
     return k;
 }
 
+/* The fast-forward chord (XBA-182): Back + right trigger past half, held on a physical pad. */
+static int ff_chord(int port)
+{
+    HostPadState st;
+    return host_pad_read(port, &st) && (st.buttons & HOST_PAD_BACK) && st.axis[HOST_PAD_AXIS_RT] > 16384;
+}
+
 /* Every connected pad drives the one GBA (a handheld's own controls and an external pad both work), through the
- * player's mapping; the on-screen pad joins pad 1 (console_pad_read). */
-static uint16_t pads_keys(void)
+ * player's mapping; the on-screen pad joins pad 1 (console_pad_read). *chord: a pad holds the fast-forward chord (its
+ * Back and right trigger then reach the game as nothing). */
+static uint16_t pads_keys(int *chord)
 {
     uint16_t k = 0;
     if (!s_pad_map.console)
         console_pad_defaults(&s_pad_map, CONSOLE_PAD_GBA);
+    *chord = 0;
     for (int p = 0; p < HOST_PAD_PORTS; p++) {
         ConsolePadOut o;
-        if (console_pad_read(&s_pad_map, p, &o))
+        if (console_pad_read(&s_pad_map, p, &o)) {
+            if (ff_chord(p)) {
+                *chord = 1;
+                o.buttons &= ~console_pad_targets_using(&s_pad_map, CPS_BIT(CPS_BACK) | CPS_BIT(CPS_RIGHT_TRIGGER));
+            }
             k |= gba_runtime_keys_of(o.buttons);
+        }
     }
     return k;
+}
+
+/* Desktop keys of the save states (XBA-182): F1-F4 save slots 1-4, Shift+F1-F4 load them, on the key's press. */
+static void state_keys(int held[4])
+{
+    const Uint8 *ks = SDL_GetKeyboardState(NULL);
+    if (!ks)
+        return;
+    int shift = ks[SDL_SCANCODE_LSHIFT] || ks[SDL_SCANCODE_RSHIFT];
+    for (int i = 0; i < 4; i++) {
+        int down = ks[SDL_SCANCODE_F1 + i];
+        if (down && !held[i]) {
+            if (shift)
+                recomp_states_load(i + 1);
+            else
+                recomp_states_save(i + 1);
+        }
+        held[i] = down;
+    }
 }
 
 void gba_runtime_opts_init(gba_runtime_opts *o)
@@ -463,6 +589,15 @@ int gba_runtime_run(const gba_runtime_opts *o)
     static int listening;
     if (!listening && recomp_lifecycle_listen(on_lifecycle, NULL) == 0)
         listening = 1;
+    /* Save states: <save dir>/gba-<KEY>/state<N>.st, beside the save (none without a save dir). */
+    snprintf(s_key, sizeof s_key, "%s", key);
+    if (!o->save_dir || !*o->save_dir ||
+        snprintf(s_state_dir, sizeof s_state_dir, "%s/gba-%s", o->save_dir, key) >= (int)sizeof s_state_dir)
+        s_state_dir[0] = 0;
+    recomp_state_ops ops = {"gba", state_save_op, state_load_op, NULL};
+    recomp_states_attach(&ops, s_state_dir);
+    printf("gba: save states %s%s, fast-forward x%d%s\n", s_state_dir[0] ? "in " : "off (no save dir)", s_state_dir,
+           recomp_ff_speed(), recomp_ff_speed() ? "" : " (max)");
 
     /* The window, or none (headless checks: SDL dummy drivers). */
     int window = !o->headless && !host_window_headless();
@@ -489,11 +624,12 @@ int gba_runtime_run(const gba_runtime_opts *o)
            audio ? "on" : "off", host_pad_mask());
     fflush(stdout);
 
-    static uint16_t fb[GBA_SCREEN_W * GBA_SCREEN_H];
+    uint16_t *fb = s_fb;
     static uint8_t rgba[GBA_SCREEN_W * GBA_SCREEN_H * 4];
     static int16_t pcm[GBA_AUDIO_RATE / 10 * 2];
     uint64_t frames = 0, next = now_ns(), dirty_at = 0, t0 = next, late_resets = 0;
-    int was_paused = 0, heard = 0, rc = 0;
+    int was_paused = 0, heard = 0, rc = 0, fkeys[4] = {0}, was_ff = 0;
+    recomp_ff_carry carry = {{0, 0}, 0};
 
     for (;;) {
         int running = 1;
@@ -527,20 +663,49 @@ int gba_runtime_run(const gba_runtime_opts *o)
             next = now_ns();   /* the time away is not caught up */
         }
 
-        uint16_t keys = (uint16_t)(o->keys | pads_keys() | (window ? keyboard_keys() : 0));
-        pthread_mutex_lock(&s_mu);
-        gba_set_keys(m, keys);
-        gba_run_frame(m, fb);
-        int dirty = gba_save_take_dirty(m);
-        pthread_mutex_unlock(&s_mu);
-        frames++;
+        int chord = 0;
+        uint16_t keys = (uint16_t)(o->keys | pads_keys(&chord) | (window ? keyboard_keys() : 0));
+        if (window)
+            state_keys(fkeys);
+        const Uint8 *ks = window ? SDL_GetKeyboardState(NULL) : NULL;
+        recomp_ff_hold(chord || (ks && ks[SDL_SCANCODE_TAB]));
+        int ff = recomp_ff_active(), speed = recomp_ff_speed();
+        if (ff != was_ff) {
+            printf("gba: fast-forward %s at frame %llu\n", ff ? (speed ? "on" : "on (max)") : "off",
+                   (unsigned long long)frames);
+            fflush(stdout);
+            carry = (recomp_ff_carry){{0, 0}, 0};
+            was_ff = ff;
+            next = now_ns();
+        }
+        /* Fast-forward: `speed` GBA frames per shown frame (max: as many as fit in one display frame). */
+        int steps = ff ? (speed ? speed : 64) : 1, dirty = 0;
+        uint64_t burst_end = now_ns() + GBA_FRAME_NS * 9 / 10;
+        for (int step = 0; step < steps; step++) {
+            pthread_mutex_lock(&s_mu);
+            gba_set_keys(m, keys);
+            gba_run_frame(m, fb);
+            dirty |= gba_save_take_dirty(m);
+            if (s_state_loaded) {
+                s_state_loaded = 0;
+                next = now_ns(); /* a loaded state: the clock starts again from it */
+            }
+            pthread_mutex_unlock(&s_mu);
+            frames++;
 
-        /* Sound: everything the frame made (about 803 sample frames). */
-        size_t got;
-        while ((got = gba_audio_pull(m, pcm, sizeof pcm / sizeof pcm[0] / 2)) > 0) {
-            heard = 1;
-            if (audio)
-                host_audio_queue(pcm, (uint32_t)got);
+            /* Sound: everything the frame made (about 803 sample frames); averaged down while fast-forwarding. */
+            size_t got;
+            while ((got = gba_audio_pull(m, pcm, sizeof pcm / sizeof pcm[0] / 2)) > 0) {
+                heard = 1;
+                if (ff)
+                    got = speed ? recomp_ff_audio(pcm, got, speed, &carry) : 0;
+                if (audio && got)
+                    host_audio_queue(pcm, (uint32_t)got);
+            }
+            if (o->frames && frames >= o->frames)
+                break;
+            if (ff && !speed && now_ns() >= burst_end)
+                break;
         }
 
         uint64_t t = now_ns();
@@ -560,7 +725,7 @@ int gba_runtime_run(const gba_runtime_opts *o)
         if (o->frames && frames >= o->frames)
             break;
 
-        if (!o->unpaced) {
+        if (!o->unpaced && !(ff && !speed)) {
             next += GBA_FRAME_NS;
             /* Audio-driven: a queue above its target slows the clock a little, below it speeds it up (±2%). */
             if (audio && heard) {
@@ -592,6 +757,8 @@ int gba_runtime_run(const gba_runtime_opts *o)
     }
     fflush(stdout);
     recomp_exit_hook_set(NULL);
+    recomp_states_detach(); /* before s_mu: a save / load in progress finishes first */
+    recomp_ff_hold(0);
     if (audio)
         host_audio_close();
     if (window)

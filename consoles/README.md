@@ -574,6 +574,59 @@ alone is within noise of what it was before the page write tracking. Lifted C co
 instructions with gcc -O1 -fno-tree-slp-vectorize on that host (homebrew: 28-38 k instructions in ~4-5 s with 6 jobs;
 n64-systemtest: 407 k instructions in ~77 s with 6 jobs, 1.1 s / 1k).
 
+**Save states and fast-forward (XBA-182).** GBA and PS1 (the N64 plugs in the same way, below; the Xbox has none: its
+state is the whole guest memory and GPU). Three layers:
+
+- The cores: `gba_state_save` / `gba_state_load` (`gba_core.h`, `gba_state.c`) and `ps1_state_save` / `ps1_state_load`
+  (`ps1_core.h`, `ps1_state.c`) put the whole machine in a blob: a header (magic `XRSTATE`, the console, its format
+  version `GBA_STATE_VERSION` / `PS1_STATE_VERSION`, an FNV-1a 64 hash of the game: the ROM; the EXE given, else the
+  disc in the drive (its size and volume descriptor); and of the BIOS: 0 for the built-in / HLE one) and sections
+  (id, size, bytes). GBA: the `gba_machine` whole (CPU and banks, cycle clock and scheduler, IO, timers, DMA, PPU
+  registers, VRAM / OAM / palette, EWRAM / IWRAM, the APU and its FIFOs, the save chip and its contents). PS1: the
+  machine (CPU, COP0, delay slots, GTE, scratchpad, interrupt controller, DMA, timers, the video scheduler, SIO with
+  the pads and both memory cards), main RAM, the GPU (VRAM and its state), the CD-ROM controller (registers, FIFOs,
+  commands and responses in flight, the drive's position, sector buffers, XA / CD-DA), the SPU (state and its 512 KB),
+  the MDEC (its output not read yet), the HLE BIOS's state, the recompiled code's boot flag. Each device has its
+  `ps1_<dev>_state_size / _save / _load` (`ps1_devices.h`; the placeholders keep nothing). A state from another game,
+  another BIOS, another format version or another build (a section whose size is not this build's) is refused and
+  the machine is left as it was. Host pointers are never in a state, and neither is anything a pack adds: a state is
+  the machine only, so it loads the same whether the game runs interpreted or recompiled, either way round. On load
+  the GBA's lifted-code hand-offs in flight are reset (its dispatch is a function of the ROM, which never changes);
+  the PS1 bumps every RAM page's write counter and flushes its dispatch cache, so each lifted function is hashed
+  against RAM again before it runs. Take and load states between frames. Loading clears the save chip's / cards'
+  dirty flags: what the state brought back reaches `game.sav` / `card1.mcr` only once the game writes its save again.
+- The shared interface, `src/platform/recomp_states.h` (in `xbr_host_core`): a runtime attaches itself while it
+  plays (console, state folder, a save and a load callback that run under its frame lock), the in-game menu and the
+  desktop keys call `recomp_states_save / _load / _info (slot)`. Slots: `<save dir>/<console>-<KEY>/state1.st` ..
+  `state4.st`, beside the saves: a header (magic `XRSLOT`, version, console, key, the time saved, the frames run), a
+  thumbnail of the last frame (RGB565, at most 160 x 120, at the console's display aspect), then the core's blob;
+  written through `.tmp` + rename. About 0.6 MB for the GBA, 4.1 MB for the PS1. No save dir, no states.
+- Fast-forward (`recomp_ff_*`): a toggle (the menu's « Fast-forward ») and a hold (Tab on a desktop; on a pad, Back +
+  right trigger held, whose two controls then reach the game as nothing); the speed is `RECOMP_FF_SPEED` (2..16
+  times the console's rate, default 4) or `max` (as many frames as fit in one display frame, silent). The runtime
+  runs `speed` frames per shown frame and averages their audio down by the same factor (higher pitched, never a gap:
+  the audio queue keeps its length, so pacing stays audio-driven).
+
+Desktop: `gba_play` / `ps1_play` F1-F4 save slots 1-4, Shift+F1-F4 load them, Tab held fast-forwards. Headless,
+`gba_run` / `ps1_run --state-save N:FILE` writes a state after frame N, `--state-load FILE` starts from one (exit 5
+when the core refuses it), `--run-hash` prints one hash of every frame's picture and audio after the save point.
+Tests: `tests/recomp_states` (slot files, refusals, thumbnails, the attach / save / load path, fast-forward speed and
+audio); the round trip on every homebrew (`gba_state_hb_*`, `ps1_state_hb_*`, `ps1_state_hle_hb_*`: save after 120 /
+150 frames, hash the next 180 / 150, then the same from the state in a new machine; a run from power-on must differ;
+`consoles/{gba,ps1}/tests/state_*.sh`), the same with each program's pack (`gba_rc_state_hb_*`, `ps1_rc_state_hb_*`:
+the state of a recompiled run loads in the interpreter and the other way round, same hash, and a recompiled run from
+a state stays in lockstep), a disc read in progress (`ps1_state_hb_disc_overlay`), refusals (`gba_state_wrong_game`,
+`ps1_state_wrong_game`, `ps1_state_wrong_bios`); the runtimes' tests save and load through `recomp_states.h` while
+the game runs on its own thread (`gba_runtime`, `ps1_runtime`). The Android in-game menu: [app-shell.md « In-game
+menu »](../docs/android/app-shell.md#in-game-menu).
+
+**The N64 next.** The same three steps: `n64_state_save / _load` in the core (the VR4300 and COP0 / COP1 / TLB, RDRAM,
+the RSP's DMEM / IMEM and registers, the RDP's state, VI / AI / PI / SI / MI, the PIF and the cartridge save; the
+lifted code's RAM checks invalidated on load as the PS1 does), then `n64_runtime.c` attaches with
+`recomp_states_attach(&(recomp_state_ops){"n64", save, load, NULL}, "<save dir>/n64-<KEY>")` and runs its frames
+through the fast-forward loop like the other two; the menu shows the rows for `n64` once `ShellActivity`'s
+`statesSupported` lists it.
+
 **Legal**: no ROM, disc image, BIOS or game data in this repository, its CI or its artifacts. Tests use homebrew we
 build ourselves (devkitARM / libtonc, PSn00bSDK, libdragon) and dumps Alex made from his own media, kept outside every
 repository.

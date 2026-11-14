@@ -108,6 +108,10 @@ int console_pad_load(ConsolePadMap *m, int console, const char *text);
 const char *console_pad_target_name(int console, int target);
 const char *console_pad_source_name(int source);
 
+/* The targets any of `sources` (CPS_BIT set) drives in *m: what a runtime hides from the game while a hotkey chord of
+ * those sources is held (XBA-182: Back + right trigger, hold to fast-forward). */
+uint32_t console_pad_targets_using(const ConsolePadMap *m, uint32_t sources);
+
 /* The host sources a pad state presses (buttons, triggers and stick directions past the thresholds). */
 uint32_t console_pad_sources(const HostPadState *st, int stick_threshold, int trigger_threshold);
 

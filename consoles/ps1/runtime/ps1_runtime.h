@@ -32,7 +32,8 @@ typedef struct ps1_runtime_opts {
     /* Memory cards: <save_dir>/ps1-<KEY>/card1.mcr and card2.mcr (128 KB raw images, the .mcr other emulators use),
      * read before the first frame (a missing one is a freshly formatted card), written a second after the game's
      * last write to the card (at most five seconds after its first), when the app pauses and at exit; only a card
-     * that changed is written. NULL: no saves. */
+     * that changed is written. Save states (XBA-182, recomp_states.h): <save_dir>/ps1-<KEY>/state1.st .. state4.st.
+     * NULL: no saves, no states. */
     const char *save_dir;
     /* The 512 KB BIOS image: NULL = $RECOMP_PS1_BIOS, then ps1_runtime_set_bios's path, then the app's asset
      * ps1-bios/openbios.bin (Android), then build/ps1-bios/openbios.bin next to the working directory or an

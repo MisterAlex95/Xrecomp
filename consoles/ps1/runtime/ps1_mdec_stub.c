@@ -43,3 +43,23 @@ size_t ps1_mdec_dma_read(ps1_mdec *d, uint32_t *words, size_t n)
         words[i] = 0;
     return n;
 }
+
+/* Save states (XBA-182): a placeholder has no state worth keeping. */
+size_t ps1_mdec_state_size(ps1_mdec *x)
+{
+    (void)x;
+    return 0;
+}
+
+void ps1_mdec_state_save(ps1_mdec *x, uint8_t *out)
+{
+    (void)x;
+    (void)out;
+}
+
+int ps1_mdec_state_load(ps1_mdec *x, const uint8_t *in, size_t n)
+{
+    (void)x;
+    (void)in;
+    return n == 0 ? 0 : -1;
+}

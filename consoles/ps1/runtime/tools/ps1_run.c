@@ -32,6 +32,12 @@
  *               are an unformatted card), written back at exit when the game wrote the card
  * --fast-boot   a disc without --exe: the BIOS's shell (its logo) is skipped, the BIOS boots the disc at once
  * --swap F:DISC at frame F the lid opens; 60 frames later DISC is in the drive and the lid closes (DISC "-": none)
+ * --state-save N:FILE  after frame N, write a save state (ps1_state_save, XBA-182) to FILE
+ * --state-load FILE    load a save state before the first frame (exit 5 when the core refuses it: another game or
+ *               BIOS, another version, not a state)
+ * --run-hash    print one hash (FNV-1a 64) of every frame's displayed picture and audio and the final cycle count,
+ *               over the frames after --state-save's frame (all the frames without it): a run from a state loaded
+ *               with --state-load gives the same hash over the same number of frames (the save state round trip)
  * Prints the frame rate reached on stderr (unless --quiet). Exit 3 on a usage or file error. */
 #define _POSIX_C_SOURCE 200809L /* clock_gettime */
 #include "ps1_core.h"
@@ -153,7 +159,7 @@ static int usage(void)
     fprintf(stderr, "usage: ps1_run [--bios PATH] [--exe X.exe | --disc X.cue] [--frames N] [--result] [--ppm OUT]\n"
                     "               [--wav OUT] [--tty] [--until-tty TEXT] [--pad MASK] [--hash] [--quiet]\n"
                     "               [--pack LIB.so [--lockstep]] [--missed FILE] [--stats] [--card FILE] [--fast-boot]\n"
-                    "               [--swap FRAME:DISC]\n");
+                    "               [--swap FRAME:DISC] [--state-save N:FILE] [--state-load FILE] [--run-hash]\n");
     return 3;
 }
 
@@ -166,7 +172,9 @@ int main(int argc, char **argv)
     const char *swap_disc = NULL;
     long lock_cycles = 0;
     long frames = 600;
-    bool result = false, quiet = false, hash = false;
+    bool result = false, quiet = false, hash = false, run_hash = false;
+    const char *state_save = NULL, *state_load = NULL;
+    long state_at = 0;
     tty_state tty = {0};
     uint16_t pad = 0;
 
@@ -219,6 +227,14 @@ int main(int argc, char **argv)
         }
         else if (!strcmp(a, "--stats"))
             stats = true;
+        else if (!strcmp(a, "--run-hash"))
+            run_hash = true;
+        else if (!strcmp(a, "--state-load") && more)
+            state_load = argv[++i];
+        else if (!strcmp(a, "--state-save") && more && strchr(argv[i + 1], ':')) {
+            state_at = strtol(argv[++i], NULL, 10);
+            state_save = strchr(argv[i], ':') + 1;
+        }
         else if (!strcmp(a, "--quiet"))
             quiet = true;
         else if (a[0] != '-') {
@@ -295,6 +311,26 @@ int main(int argc, char **argv)
     ps1_set_tty(m, on_tty, &tty);
     ps1_set_pad(m, 0, PS1_PAD_DIGITAL, pad, 0x80, 0x80, 0x80, 0x80);
 
+    if (state_load) {
+        size_t n = 0;
+        uint8_t *st = load_file(state_load, &n);
+        int src = st ? ps1_state_load(m, st, n) : PS1_STATE_ECORRUPT;
+        if (src == PS1_STATE_OK && twin)
+            src = ps1_state_load(twin, st, n);
+        free(st);
+        if (src != PS1_STATE_OK) {
+            printf("STATE REFUSED %s: %s\n", state_load,
+                   src == PS1_STATE_EGAME ? "another game or BIOS" : src == PS1_STATE_EVERSION ? "another version"
+                                                                                           : "not a state");
+            return 5;
+        }
+        if (!quiet)
+            fprintf(stderr, "ps1_run: state %s loaded (%zu bytes, frame %llu)\n", state_load, n,
+                    (unsigned long long)ps1_frames(m));
+    }
+    uint64_t rh = 0xCBF29CE484222325ull;
+    long rh_frames = 0;
+
     FILE *wf = NULL;
     uint32_t wav_frames = 0;
     if (wav) {
@@ -364,10 +400,40 @@ int main(int argc, char **argv)
                 break;
             }
         }
+        int counted = run_hash && (!state_save || f + 1 > state_at);
+        if (counted) {
+            static uint32_t px[640 * 512];
+            int w = 0, h = 0;
+            if (ps1_display(m, px, 640, 512, &w, &h) == 0)
+                rh = fnv64((const uint8_t *)px, (size_t)w * (size_t)h * 4, rh);
+            rh = fnv64((const uint8_t *)&w, sizeof w, rh);
+            rh_frames++;
+        }
+        if (run_hash && !wf) {
+            int16_t buf[2048 * 2];
+            size_t n;
+            while ((n = ps1_audio_pull(m, buf, 2048)) > 0)
+                if (counted)
+                    rh = fnv64((const uint8_t *)buf, n * 4, rh);
+        }
+        if (state_save && f + 1 == state_at) {
+            size_t cap = ps1_state_size(m), n = 0;
+            uint8_t *st = malloc(cap);
+            FILE *sf = st ? fopen(state_save, "wb") : NULL;
+            if (!st || !(n = ps1_state_save(m, st, cap)) || !sf || fwrite(st, 1, n, sf) != n || fclose(sf) != 0) {
+                fprintf(stderr, "ps1_run: cannot write the state %s\n", state_save);
+                return 3;
+            }
+            free(st);
+            if (!quiet)
+                fprintf(stderr, "ps1_run: state written to %s after frame %ld (%zu bytes)\n", state_save, f + 1, n);
+        }
         if (wf) {
             int16_t buf[2048 * 2];
             size_t n;
             while ((n = ps1_audio_pull(m, buf, 2048)) > 0) {
+                if (counted)
+                    rh = fnv64((const uint8_t *)buf, n * 4, rh);
                 for (size_t i = 0; i < n * 2; i++)
                     put16(wf, (uint16_t)buf[i]);
                 wav_frames += (uint32_t)n;
@@ -395,6 +461,11 @@ int main(int argc, char **argv)
         } else {
             printf("LOCKSTEP OK: %ld frames identical to the interpreter\n", f);
         }
+    }
+    if (run_hash) {
+        uint64_t cyc = ps1_cycles(m);
+        rh = fnv64((const uint8_t *)&cyc, sizeof cyc, rh);
+        printf("run-hash %016llx frames %ld\n", (unsigned long long)rh, rh_frames);
     }
     if (stats && pack) {
         ps1_recomp_stats st;

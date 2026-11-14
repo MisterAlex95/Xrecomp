@@ -28,4 +28,29 @@ final class MenuNative {
      * False when no PS1 game runs.
      */
     static native boolean nativePs1ChangeDisc(String path);
+
+    /** XBA-182: true while a GBA or PS1 game that supports save states runs (with a save folder). */
+    static native boolean nativeStatesAvailable();
+
+    /**
+     * XBA-182: saves slot 1..4 between frames. 0 ok, or a negative code: -1 no console game, -2 empty slot, -3 another
+     * game's state, -4 saved by another version, -5 the file cannot be written or read, -6 bad slot, -7 not a state
+     * file or damaged.
+     */
+    static native int nativeStateSave(int slot);
+
+    /** XBA-182: loads slot 1..4 between frames. 0 ok, or a negative code (nativeStateSave). */
+    static native int nativeStateLoad(int slot);
+
+    /** XBA-182: when slot 1..4 was saved, Unix ms; 0 when empty, unreadable, another game's or another version's. */
+    static native long nativeStateTime(int slot);
+
+    /** XBA-182: the slot's thumbnail, { w, h, ARGB pixels... } (w * h after the two), at most 160 x 120; or null. */
+    static native int[] nativeStateThumb(int slot);
+
+    /** XBA-182: fast-forward on or off (the menu's toggle). */
+    static native void nativeFastForward(boolean on);
+
+    /** XBA-182: true while fast-forward is on. */
+    static native boolean nativeFastForwardOn();
 }
