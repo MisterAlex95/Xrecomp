@@ -32,7 +32,7 @@ its own private storage: it takes XRecomp's pack over instead of preparing again
 
 `TITLEID` is the XBE's title ID in 8 upper-case hex digits (`4D5300D1`). A Game Boy Advance game's pack is
 `packs/gba-<KEY>/` ([GBA packs](#gba-packs-xba-157-xba-158)), a PlayStation disc's `packs/ps1-<KEY>/`
-([PS1 packs](#ps1-packs-xba-168)).
+([PS1 packs](#ps1-packs-xba-168)), a Nintendo 64 cartridge's `packs/n64-<KEY>/` ([N64 packs](#n64-packs-xba-174)).
 
 **Atomic publish.** A pack is built in `packs/<TITLEID>.partial/`; `pack.json` is written last (temp file, fsync,
 rename), then the directory is renamed to `packs/<TITLEID>`. An existing pack is first renamed to
@@ -188,6 +188,7 @@ XBA_RESULT ok pack=/data/user/0/<app>/files/packs/12345678
 | `NO_XBE` | no `default.xbe` in the source |
 | `NO_ROM`, `BAD_ROM` | a GBA ROM that cannot be read, or is empty or over 32 MB ([GBA packs](#gba-packs-xba-157-xba-158)) |
 | `NO_DISC`, `BAD_DISC` | a PS1 disc that cannot be read, or whose boot EXE is missing or not one, or a `.chd` ([PS1 packs](#ps1-packs-xba-168)) |
+| `NO_ROM`, `BAD_ROM` (N64) | an N64 ROM that cannot be read, or is under 4 KB or over 64 MB ([N64 packs](#n64-packs-xba-174)) |
 | `BAD_XBE` | `xbe_parser` cannot read it |
 | `ANALYSE_FAILED`, `LIFT_FAILED` | a pipeline tool failed; details in `prepare.log` |
 | `COMPILE_FAILED` | a C file did not compile; `msg` = file and first error |
@@ -824,6 +825,144 @@ Tests: `python3 -m pytest tools/prepare/test_ps1_prepare.py` (a fake lifter on i
 `ps1_tools` on the homebrew disc when it is built; the NDK case where `ANDROID_NDK_HOME` is set),
 `consoles/ps1/tests` `ps1_pack`, `tests/recomp_pack`, the app's `Ps1DiscTest`, `PrepareServiceTest.ps1Source`,
 `LauncherLibraryTest.ps1HomePrepares`.
+
+## N64 packs (XBA-174)
+
+An N64 cartridge plays in the interpreter with no pack (consoles/README.md « Playing an N64 game »); a pack makes its
+CPU code run natively (the RSP, the RDP and the rest of the RCP are the same code either way). It is the PS1's path
+for a ROM: the same command, steps, compile driver and publish, `tools/prepare/n64.py` (its `Run` is `ps1.Run` with a
+cartridge in place of a disc: `ps1.Run` reads the lifter, flags, checks and pack.json from a console module,
+`Run.cm`), taken whenever SOURCE's first word is an N64 ROM's in one of its three byte orders (`.z64`, `.v64`, `.n64`;
+the extension does not matter; checked before the GBA and PS1 paths). Contract of the lifted code:
+`consoles/n64/runtime/n64_recomp.h`; the lifter: `consoles/n64/tools` (`n64_tools`).
+
+```
+<files dir>/packs/n64-<KEY>/libtitle.so
+<files dir>/packs/n64-<KEY>/pack.json
+<files dir>/work/n64-<KEY>/      --work: gen/, obj/, stamp.json, prepare.log, discovered.txt (rom.z64)
+```
+
+`KEY` is the title key (`recomp_pack_rom_identify`, `Console.identify`, `n64.title_key`, `n64_tools` `Rom.title_key`):
+the header's game code (0x3B, `[A-Z0-9]` else `_`) and CRC1 (0x10), `NSME-635A2BFF`, the same from every byte order.
+Our libdragon homebrew all have `N___-00000000` (no game code, no CRC): they share a key and a pack folder, and the
+source identity tells them apart (the last one prepared is the one that loads; the others run interpreted, `PACK_STALE
+… built from another ROM`). The app's Prepare goes by the library key `n64-<KEY>`.
+
+**The source identity** (pack.json `source_sha256`) is the SHA-256 of the **whole ROM in the console's big-endian
+order** (z64; a v64 has its byte pairs swapped back, an n64 its words reversed, a trailing part that is not a whole
+pair or word as it is: `n64_rom_normalize`'s rule):
+
+- a `.z64`, a `.v64` and a `.n64` dump of one cartridge are one game with one pack; a hack, a translation or another
+  revision is another ROM;
+- it is what `n64_tools` records in the table (`n64_recomp_table.source_sha256`, `Rom.sha256`), so the runtime checks
+  one value against pack.json and against the library;
+- the Prepare reads the ROM once in 1 MB pieces, normalising and hashing as it goes (no copy of up to 64 MB in the
+  work folder: the lifter reads the file in any byte order itself);
+- at each start the runtime has the whole ROM in memory already (`n64_create` needs it), and hashes it only when a
+  pack is there (`n64_pack_rom_sha256`, streaming through a 64 KB buffer, the ROM untouched). Measured: 64 MB in
+  0.30 s in plain C on the Zen 5 host of « Measurements »; on arm64 the ARMv8 SHA-2 instructions are used when the
+  CPU has them (`getauxval(AT_HWCAP) & HWCAP_SHA2`, every Snapdragon; `N64_PACK_SHA_C=1` forces plain C), which hash
+  well over 1 GB/s on a Cortex-X3 class core, so tens of milliseconds for the largest cartridge (the runtime logs it:
+  `n64: ROM identity <16 hex>... (<ms> ms)`; under qemu both paths give the same hashes, the speed is not
+  representative). A cache keyed by path, size and time was not needed, and would not cover `fd:N` documents.
+  Known-answer tests run on both paths (`consoles/n64/tests` `n64_pack`, under qemu-aarch64 too).
+
+**The steps** (same progress lines and ids, `n` = 5):
+
+| # | id | Does | Stamp |
+|---|---|---|---|
+| 1 | `identify` | reads the ROM (under 4 KB, over 64 MB, not an N64 byte order: `BAD_ROM`; unreadable: `NO_ROM`): title key, header title, byte order, the source identity | `source` + `toolkit_sha256` (another ROM or toolkit starts over; the same ROM in another byte order does not) |
+| 2 | `analyse` | the code earlier runs had to interpret: `<work>/discovered.txt` (plus `--discovered FILE`), one record kept per address + hash, sorted, into `<work>/discovered-seeds.txt` (the PS1's reader: the format is the same) | (their digest, in the lift's key) |
+| 3 | `lift` | `python -m n64_tools.recomp ROM <work>/gen.new [--discovered seeds]`, then `gen.new` → `gen` (the stamp is dropped first) | `lift` |
+| 4 | `compile` | each `gen/*.c` with the flags below, the object cache of « Compile and link » | the object cache |
+| 5 | `pack` | `libtitle.so`, `pack.json`, atomic publish as `packs/n64-<KEY>` | `link` |
+
+Compile flags: the PS1's with `-I<toolkit>/consoles/n64/runtime` (`-O1 -fno-tree-slp-vectorize -g0 -fPIC -std=gnu11
+-w -DNDEBUG -I<work>/gen`, `n64.compile_flags`; `--opt 2` and `3` compile at -O1, `n64.lifted_opt`). Jobs, when
+`--jobs` is 0: 256 MB per job and a 1 GB reserve (files of 1000..4000 instructions, like the PS1's). `n64_tools` cuts
+files by a hash of function identity and names them after their first function, so a discovery round recompiles
+the table and the files that gained functions (checked on gfx.z64: the 2 records of a run lifted, 2 of 27 files compiled again, 1205 functions instead of 1203).
+The link is the Xbox pack's (`--no-undefined … -l:libmain.so`): every core function the lifted code calls
+(`n64_rc_*`, n64_recomp_rt.h) must be exported by `libmain.so`, which links the whole N64 core (`--whole-archive
+n64_core n64_rsp n64_rdp`, android/app/src/main/cpp/CMakeLists.txt). The toolkit tree ships
+`consoles/n64/tools/**/*.py` (on `PYTHONPATH` for step 3) and `consoles/n64/runtime/*.h`; both count in the toolkit
+digest. `XBA_N64_RECOMP` (a module name) and `XBA_N64_TOOLS_DIR` replace the lifter for the tests
+(`tools/prepare/tests/fake_n64_recomp.py`).
+
+**pack.json** of an N64 pack (format 1; unknown fields ignored):
+
+```json
+{"format": 1, "console": "n64", "title_key": "NSME-635A2BFF", "title": "SUPER MARIO 64", "source_sha256": "...",
+ "rom_order": "z64", "abi": "arm64-v8a", "shell_abi": 1, "toolkit": "<commit>", "toolkit_sha256": "...",
+ "lib": "libtitle.so", "lib_sha256": "...", "lib_size": 3064944, "entry": "n64_recomp_title_table",
+ "cc": "clang 19.1.7 -O1", "built_at": "2026-11-14T07:07:54Z", "discovered": 2, "prepare": {...}}
+```
+
+| Field | Meaning |
+|---|---|
+| `console`, `title_key` | `n64` and the title key, in place of `title_id`. |
+| `title` | The header's name (0x20, 20 characters), else the file name without its extension, for display. |
+| `source_sha256` | The ROM it was built from, in big-endian order (above). The runtime compares it with the ROM it plays and with the table's own `source_sha256`. |
+| `rom_order` | The byte order of the file prepared (information; the identity is the same for all three). |
+| `entry` | `n64_recomp_title_table`: `const n64_recomp_table *n64_recomp_title_table(void)`. |
+| `discovered` | How many discovered records the lift was given. The app compares it with the file's line count to offer Prepare again. |
+
+The other fields are the Xbox pack's. `tools/prepare/n64.py` (`read`, `check`) is the reference.
+
+**The loader.** `pack_loader.c` (`xba_pack_load_rom`) never refuses to start an N64 game: no `pack.json` →
+`PACK_NONE n64 <KEY> (not prepared, the interpreter runs it)`; `recomp_pack_find_key` refuses it → `PACK_STALE n64
+<KEY> (<reason>), running interpreted`; else `n64_runtime_start(rom, <pack>/libtitle.so, key)`, and the runtime
+(`consoles/n64/runtime/n64_pack.c`, the PS1's `ps1_pack.c` for a cartridge) checks again with what only it knows:
+`source_sha256` = the ROM's, `lib_sha256` (hashed at each start), `entry`; then `dlopen(RTLD_NOW | RTLD_LOCAL)`, the
+table, its `abi` (`n64_attach_recomp`) and its `source_sha256`. `PACK_LOADED n64 <KEY> (<N> functions)`, or
+`PACK_STALE n64 <KEY> (<why>), running interpreted`. On a desktop `n64_runtime_opts.pack_lib` (`n64_play --pack`)
+does the same (a library with no `pack.json` beside it: the table's checks only); `n64_play` exports the core
+(`n64_core_exported`), as `n64_run` does.
+
+**The discovery loop.** At exit (also the in-game menu's Quit, through the exit hook) the runtime appends the code the
+interpreter had to start running while the pack was attached, after the boot PC, that no entry matched
+(`n64_recomp_write_missed`) to `<files>/work/n64-<KEY>/discovered.txt`: `ADDR HASH HEXBYTES` per line (the virtual
+address, the content hash, up to 2 KB of the code as it was in RDRAM, never past a mapped page), a record the file
+already holds never written twice, the folder made first. Log: `n64: code at <N> address(es) the pack did not cover,
+<A> new record(s), in <path>`. The next Prepare finds the file in its work folder and the lift takes it, bytes
+included: code loaded by DMA from computed addresses, decompressed or TLB-mapped code gets lifted. Home compares the
+file's line count with the pack's `discovered` (app-shell.md « Nintendo 64 games »).
+
+**RDP writes.** The core's write tracking (per-4 KB-page counters of RDRAM, n64_recomp.h) covers CPU stores, lifted
+stores, PI, SI and SP DMA, and since XBA-174 the RDP's rendering: `n64_rdp.c` reports the rows of the colour and Z
+images each command list drew through the bus's `wrote` callback (after the pixels are written, on the CPU's thread;
+with scanline-band threads when the batch is flushed), so code drawn over by the RDP is checked again like code
+overwritten by DMA. Output and speed unchanged (`n64_rdp` golden hashes, `n64_rdp_bench`).
+
+**On a desktop** (Linux x86-64 or arm64, macOS): `python3 -m tools.prepare game.z64` builds a pack for `n64_play` /
+`n64_run` with the host's `cc`, the core left undefined (resolved against the program at load), `"abi"` the host's;
+work and packs default to `$XDG_DATA_HOME/xrecomp/work/n64-<KEY>` and `…/packs/n64-<KEY>`. Checked on 2026-11-14
+with our homebrew (`tools/consoles/build_homebrew.sh n64`):
+
+```sh
+python3 -m tools.prepare build/homebrew/n64/gfx.z64 --work /tmp/w --pack-dir /tmp/p    # 27 files, 8 s, 5 jobs
+build/n64t/n64_runtime/n64_play build/homebrew/n64/gfx.z64 --headless --frames 300 --pack \
+    /tmp/p/n64-N___-00000000/libtitle.so --missed /tmp/w/discovered.txt
+    # n64: ROM identity e080322a138d2a58... (1 ms); PACK_LOADED n64 N___-00000000 (1203 functions);
+    # n64: code at 2 address(es) the pack did not cover, 2 new record(s) (libdragon's trampolines at 0x807FFEA0)
+build/n64t/n64_runtime/n64_run build/homebrew/n64/gfx.z64 --pack /tmp/p/n64-N___-00000000/libtitle.so \
+    --lockstep --stats --frames 300                      # LOCKSTEP OK
+python3 -m tools.prepare build/homebrew/n64/gfx.z64 --work /tmp/w --pack-dir /tmp/p    # discovered 2: 2 of 27 files compiled
+build/n64t/n64_runtime/n64_run … --lockstep --missed /tmp/w/m2.txt   # LOCKSTEP OK, 0 new missed records
+```
+
+The device's build, checked the same day against the real `libmain.so` of the debug APK (`assembleDebug`, NDK r28c):
+`--android` with the NDK's clang (19.0.1) and with the shipped toolchain itself (`libxbacc.so` under qemu-aarch64,
+clang 19.1.7, the extracted `sysroot.zip`, `--cc-prefix-arg clang`: 27 files in 88 s under qemu, 6 jobs): `XBA_RESULT
+ok` both times; `libtitle.so` AArch64 DYN (3.2 MB), NEEDED libmain / libm / libdl / liblog / libc,
+`n64_recomp_title_table` exported, its six undefined core symbols (`n64_rc_read`, `n64_rc_write`,
+`n64_rc_read_partial`, `n64_rc_write_masked`, `n64_rc_cop1`, `n64_rc_ctc1`) all exported by `libmain.so` (138 `n64_`
+symbols, the whole core); `"cc": "clang 19.1.7 -O1"`.
+
+Tests: `python3 -m pytest tools/prepare/test_n64_prepare.py` (a fake lifter on ROMs the test makes in the three byte
+orders; the real `n64_tools` on gfx.z64 when the homebrew is built, run by `n64_run --pack --lockstep` when it is built
+too; the NDK case where `ANDROID_NDK_HOME` is set), `consoles/n64/tests` `n64_pack` and `n64_rdp` (the `wrote`
+ranges), `tests/recomp_pack`, the app's `PrepareServiceTest.n64Source`, `LauncherLibraryTest.n64HomePrepares`.
 
 ## The loader
 

@@ -1372,15 +1372,23 @@ out/hb/ps1/gfx.cue out/hb/ps1/gfx.bin out/hb/ps1/hello.cue out/hb/ps1/hello.bin 
 
 The N64 runtime (`consoles/n64/runtime`, an interpreter: `n64_core.h` with the LLE RSP and the software RDP on the
 host layer, consoles/README.md « Playing an N64 game ») plays a cartridge dump as it is, the PS1's way: no Import, no
-pack, no BIOS (the PIF is high-level emulated). There is no N64 recompiler yet, so no Prepare: a pack in
-`packs/n64-<KEY>/` is ignored. An N64 card is **Ready** (no chip) while its file is in a library folder, **Running**
-while it runs, **No file access** when its folder cannot be read.
+pack needed, no BIOS (the PIF is high-level emulated). With the on-device toolchain a Prepare translates it for the
+device (a title pack: [prepare.md « N64 packs »](prepare.md#n64-packs-xba-174)) so that it runs natively; Play never
+waits for it. An N64 card is **Ready** (no chip) while its file is in a library folder, **Preparing** / **Queued**
+while its Prepare runs or waits, **Running** while it runs, **No file access** when its folder cannot be read.
 
-- **Home.** A on the card opens the game's Home (`Screen.ROM_HOME`), with or without the toolchain: the title, « Plays
-  in the interpreter », **Play** first and the pak button beside it: **Controller pak** (the default) or **Rumble pak**,
-  what the controller holds for this game; A on it switches to the other one (`N64Pak`, a file per game,
-  `files/settings/n64_pak_<KEY>`) and the note under it says what each does. No Prepare until the N64 recompiler
-  lands. Start on the card (and the bottom screen's Play) launches at once.
+- **Home.** A on the card opens the game's Home (`Screen.ROM_HOME`), with or without the toolchain: the title, one
+  line, **Play** first, then (with the toolchain, XBA-174) the Prepare action, then the pak button: **Controller pak**
+  (the default) or **Rumble pak**, what the controller holds for this game; A on it switches to the other one
+  (`N64Pak`, a file per game, `files/settings/n64_pak_<KEY>`). The line and the Prepare action are the PS1's: « Not
+  prepared · plays in the interpreter » (**Prepare**), « Prepared · runs natively », « Prepared · N new addresses found
+  · prepare again » (**Prepare again**: the runtime's discovered records beyond the pack's `discovered`), the
+  Prepare's progress, « Queued », « Prepare failed · CODE » (**See what failed**). Prepare starts `PrepareService` with
+  the cartridge (its path, read in place in any byte order; a document of a folder seen through the Storage Access
+  Framework is copied to `<files>/work/n64-<KEY>/rom.z64` first, 64 MB at most, `PrepareService.romSource`) and the
+  library key `n64-<CODE>-<CRC1>`; status, log (Share log), queue, notification and Preparing screen are the Xbox
+  ones. Without the toolchain: « Plays in the interpreter », Play and the pak, a note on what each does. Start on the
+  card (and the bottom screen's Play) launches at once.
 - **Launch** (`LauncherActivity.launchRom`, as for the GBA and the PS1): the cartridge becomes the launched game
   (`rom`, the library key `n64-<CODE>-<CRC1>` as `title_id`); the same game running is brought back, another game
   ending first.
@@ -1388,9 +1396,12 @@ while it runs, **No file access** when its folder cannot be read.
   through the Storage Access Framework (the GBA's way). `ShellActivity` sets `RECOMP_N64_PAK` to the game's pak choice
   (logcat `shell: n64 pak rumble, game n64-…`), or unsets it when it has none (a `RECOMP_N64_PAK` line of recomp.cfg,
   then the controller pak, decide). `shell_main.c` routes it like a GBA ROM; `pack_loader.c` logs `PACK_NONE n64 <KEY>
-  (not prepared, the interpreter runs it)` (or `(a pack is there, ignored until the N64 recompiler lands; …)`) and calls
-  `n64_runtime_start`. A file that cannot be read sends the player back to the launcher with « The game ended: the
-  game file cannot be read ».
+  (not prepared, the interpreter runs it)` and calls `n64_runtime_start`; with a pack: `PACK_LOADED n64 <KEY> (<N>
+  functions)` (after `n64: ROM identity <16 hex>... (<ms> ms)`, the time the ROM's SHA-256 took), or `PACK_STALE n64
+  <KEY> (<why>), running interpreted` when it is not this cartridge's (the SHA-256 of the ROM in big-endian order),
+  this shell's or does not load (the game always starts). At exit (and Quit) the code the interpreter had to run goes
+  to `<files>/work/n64-<KEY>/discovered.txt` for the next Prepare (address, hash and bytes). A file that cannot be
+  read sends the player back to the launcher with « The game ended: the game file cannot be read ».
 - **Picture.** The VI's visible area at framebuffer resolution (320 x 240 for most games, 640 x 480 interlaced for a
   few, PAL 288 / 576 lines) through `host_window` at 4:3, letterboxed (1440 x 1080 on the Thor's 1080p screen),
   smoothed (linear); `RECOMP_N64_FILTER=nearest` keeps sharp pixels, `RECOMP_N64_SCALE=integer` whole multiples.
@@ -1421,6 +1432,49 @@ while it runs, **No file access** when its folder cannot be read.
 
 On a desktop the same runtime plays a cartridge with `n64_play` (consoles/README.md), where a game is checked first.
 
+### Device check (N64 Prepare, XBA-174), for Alex
+
+On the AYN Thor, an APK with the toolchain, our homebrew in `/sdcard/n64` as in « N64 games » below (gfx.z64,
+hello.z64, cpu.z64), `adb logcat -s xboxrecomp SDL` throughout. Our homebrew all share the key `N___-00000000` (no
+game code, no CRC in their headers): one pack folder for the three, the last one prepared is the one that loads.
+
+1. A on **gfx**. Expected: its Home, « Not prepared · plays in the interpreter », **Play** focused, then **Prepare**,
+   then **Controller pak**; the note says what Play, Prepare and the pak button do. Screenshot.
+2. Right, A on **Prepare**: the Preparing screen (« Install tools » the first time, then Identify, Analyse, Translate,
+   Compile, Pack) and the notification. Note the total time and the Compile step's time (27 files; a desktop core
+   compiles them in about 33 s of CPU, so expect one to three minutes). Expected: back on the Home, « gfx is
+   prepared », « Prepared · runs natively », **Play** then **Controller pak** (no Prepare button). `adb shell run-as
+   fr.adserver.xrecomp.shell ls -l files/packs/n64-N___-00000000` shows `libtitle.so` (about 3 MB) and `pack.json`.
+3. Play: logcat `n64: ROM identity e080322a138d2a58... (N ms)` (note N: the SHA-256 of the ROM with the ARMv8
+   instructions; well under 10 ms for this 224 KB ROM), then `PACK_LOADED n64 N___-00000000 (1203 functions)` (about
+   that many). The picture is the one of « N64 games » step 2. Leave it 30 s, note the three `fps over the last 10 s`
+   lines, then Back › Quit game. logcat `n64: code at 2 address(es) the pack did not cover, 2 new record(s), in
+   /data/user/0/…/files/work/n64-N___-00000000/discovered.txt` (libdragon's trampolines at the top of RDRAM) and the
+   quit line `n64: N frames in S s (… fps)`. Compare the frame rate with « N64 games » step 3 (interpreted).
+4. A on the card: « Prepared · 2 new addresses found · prepare again », **Prepare again** beside Play. Screenshot.
+   Prepare again (note the time: only the files that changed compile, 2 of 27), then Play: `PACK_LOADED n64
+   N___-00000000 (1205 functions)`, and at Quit no « did not cover » line (or 0 new records). The Home says
+   « Prepared » again.
+5. A stale pack: A on **hello**, Play. Expected: logcat `PACK_STALE n64 N___-00000000 (built from another ROM),
+   running interpreted` (gfx's pack is in the shared folder), hello runs as in the interpreter. Its Home says
+   « Prepared » all the same (the launcher checks the key and the files, the runtime the ROM's hash; real games do not
+   share keys). Prepare hello from its Home (Prepare again is not offered: remove the pack with `run-as … rm -r
+   files/packs/n64-N___-00000000` first): hello's own pack replaces gfx's, and gfx goes stale in turn.
+6. A damaged pack: `adb shell run-as fr.adserver.xrecomp.shell sh -c 'echo x >> files/packs/n64-N___-00000000/libtitle.so'`,
+   Play. Expected: the game still starts, `PACK_STALE … (libtitle.so is … bytes, pack.json says …)` or `(… sha256
+   mismatch)`; the Home says « Not prepared »; Prepare repairs it.
+7. A library folder added with the file picker (no All files access) holding gfx.z64: Prepare works the same;
+   `prepare.log` (Share log on the Preparing screen, or `run-as … cat files/work/n64-N___-00000000/prepare.log`) has
+   `rom: content://… copied to …/work/n64-N___-00000000/rom.z64 (229376 bytes)`. The byte-swapped `gfx.v64` (« N64
+   games » step 6) gets the same key and is « Prepared » by gfx.z64's pack (same identity).
+8. With the pack, the rumble pak still works (« N64 games » step 7): the pak button is last, Play logs `rumble pak`.
+9. One of your own cartridge dumps (kept outside every repository): Prepare (note the total time, the file count of
+   the Compile step and `lib_size` in `pack.json`), Play (`n64: ROM identity … (N ms)`: note N for this ROM's size,
+   `PACK_LOADED`, picture, sound, the frame rate next to the interpreted one), play a few minutes (menus, a level, a
+   save), Quit, Prepare again when the Home offers it, play again: fewer or no new records each round. Send the logcat
+   and `prepare.log` if a step fails, and the frame rates.
+10. Switch the Thor to French: the Home lines, the Prepare buttons and the notes in French.
+
 ### Device check (N64 games, XBA-174), for Alex
 
 On the AYN Thor, `adb logcat -s xboxrecomp SDL` throughout. Our homebrew: `tools/consoles/build_homebrew.sh n64
@@ -1430,8 +1484,10 @@ out/hb` (Docker; `out/hb/n64/gfx.z64`, `hello.z64`, `cpu.z64`, `timer_irq.z64`).
 1. Install the APK. If `/sdcard/n64` is not a library folder yet: Y › Library folders › Add a folder › `n64`.
    Expected: the cards « gfx », « hello », « cpu » with the **N64** badge (when other consoles' games are listed too),
    **no** chip (no more « Not playable yet »).
-2. A on **gfx**. Expected: its Home, « Plays in the interpreter », **Play** focused, **Controller pak** beside it, no
-   Prepare, a note on what Play and the pak button do. Screenshot. A on Play: the game starts at once, fullscreen,
+2. A on **gfx**. Expected: its Home, **Play** focused (without the toolchain: « Plays in the interpreter »,
+   **Controller pak** beside it, a note on what Play and the pak button do; with it: « Not prepared · plays in the
+   interpreter », **Prepare** then **Controller pak**: « N64 Prepare » below). Screenshot. A on Play: the game
+   starts at once, fullscreen,
    landscape: on black, a red rectangle top left, a blue one under it, a small and a large magenta / white
    checkerboard, a colour-gradient triangle at the bottom; black bars left and right (4:3). Screenshot. logcat:
    `launcher: library: play n64-N___-00000000 from /storage/…/gfx.z64`, `PACK_NONE n64 N___-00000000 (not prepared,

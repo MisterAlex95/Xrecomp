@@ -309,7 +309,11 @@ build/n64/n64_runtime/n64_run build/n64-systemtest/n64-systemtest.z64 --tty --fr
 
 **Playing an N64 game (XBA-174).** `n64_runtime_run` (`consoles/n64/runtime/n64_runtime.h`) plays a cartridge on the
 host layer, the PS1's way: a ROM file in any byte order (`.z64`, `.v64`, `.n64`, or `fd:N`), no BIOS (the PIF is HLE),
-no pack (a pack's library is ignored, logged, until the N64 recompiler lands). The picture is the VI's visible area at
+a title pack optional (`--pack LIB`, XBA-174: `python3 -m tools.prepare game.z64` builds one, [prepare.md « N64
+packs »](../docs/android/prepare.md#n64-packs-xba-174); it runs the lifted code when its `pack.json` and table say it is
+this cartridge's, the SHA-256 of the ROM in big-endian order, and the game plays interpreted otherwise; `--missed FILE`
+keeps what it did not cover for the next Prepare, `consoles/n64/runtime/n64_pack.h`). The picture is the VI's
+visible area at
 framebuffer resolution (320 x 240, 640 x 480 interlaced, PAL 288 / 576 lines...) shown at 4:3 whatever its size,
 letterboxed, linear by default (`RECOMP_N64_FILTER=nearest`, `RECOMP_N64_SCALE=integer`). Controller, Xbox layout: left
 stick → stick (radial dead zone 8 %, `RECOMP_N64_DEADZONE` in percent; ±80 on an axis at full travel,
