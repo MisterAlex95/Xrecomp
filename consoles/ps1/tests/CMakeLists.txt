@@ -13,6 +13,8 @@ project(console_ps1_tests C)
 #                      GPU (ps1_gpu.c), overlay the disc and CD-ROM modules (ps1_disc.c, ps1_cdrom.c)
 #   ps1_hb_disc_<prog> the same booted from their discs by the BIOS (SYSTEM.CNF), with the disc and CD-ROM modules
 #   ps1_jcz_<test>     JaCzekanski/ps1-tests (cpu, gte, dma, timers, pad; spu with ps1_spu.c), console text checked
+#   ps1_rc_*           the same programs recompiled (ps1_tools.recomp + cc, discovery loop), in lockstep with the
+#                      interpreter; ps1_rc_fuzz: random MIPS programs under timer IRQs (needs python3, cc)
 # The EXE / BIOS tests skip (exit 77) when their inputs are absent, so a CI job without Docker or network stays green.
 # They come from (repo root):
 #   tools/consoles/build_homebrew.sh ps1 build/homebrew   -> PS1_HOMEBREW_DIR (default build/homebrew/ps1)
@@ -127,4 +129,41 @@ if(TARGET ps1_run)
         list(APPEND jcz ps1_jcz_spu_memory_transfer)
     endif()
     set_tests_properties(${jcz} PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
+
+    # Static recompilation (P-2 XBA-160, P-3 XBA-161, P-4 XBA-162): each program above lifted to C (ps1_tools.recomp),
+    # built with the host cc at -O1, the discovery loop run to convergence (overlay: the overlays read from the disc
+    # are recorded, bytes included, and lifted on the next round; both share 0x80100000), then run in lockstep with
+    # the interpreter (recomp_exe.sh: the whole state compared after every frame). ps1_rc_fuzz: random MIPS code under
+    # a fast timer IRQ, lifted and compared the same way (recomp_fuzz.py).
+    set(PS1_RC_EXE sh ${CMAKE_CURRENT_SOURCE_DIR}/recomp_exe.sh $<TARGET_FILE:ps1_run> ${PS1_BIOS})
+    set(PS1_RC_WORK ${CMAKE_CURRENT_BINARY_DIR}/recomp)
+    set(rc)
+    foreach(prog ${hb})
+        add_test(NAME ps1_rc_hb_${prog} COMMAND ${PS1_RC_EXE} ${PS1_HOMEBREW_DIR}/${prog}.exe ${PS1_RC_WORK}/hb_${prog}
+                 900 --result --quiet)
+        list(APPEND rc ps1_rc_hb_${prog})
+    endforeach()
+    if(PS1_HAVE_CD)
+        add_test(NAME ps1_rc_hb_overlay COMMAND ${PS1_RC_EXE} ${PS1_HOMEBREW_DIR}/overlay.exe ${PS1_RC_WORK}/hb_overlay
+                 1800 --disc ${PS1_HOMEBREW_DIR}/overlay.cue --result --quiet)
+        add_test(NAME ps1_rc_hb_disc_overlay COMMAND ${PS1_RC_EXE} ${PS1_HOMEBREW_DIR}/overlay.cue
+                 ${PS1_RC_WORK}/hb_disc_overlay 3000 --result --quiet)
+        list(APPEND rc ps1_rc_hb_overlay ps1_rc_hb_disc_overlay)
+    endif()
+    foreach(t cpu/cop/cop cpu/code-in-io/code-in-io gte/test-all/test-all dma/otc-test/otc-test dma/dpcr/dpcr
+              timers/timers)
+        get_filename_component(n ${t} NAME)
+        string(REPLACE "-" "_" n ${n})
+        add_test(NAME ps1_rc_jcz_${n} COMMAND ${PS1_RC_EXE} ${PS1_TESTS_DIR}/${t}.exe ${PS1_RC_WORK}/jcz_${n} 12000
+                 --tty --until-tty "Done." --quiet)
+        list(APPEND rc ps1_rc_jcz_${n})
+    endforeach()
+    find_package(Python3 COMPONENTS Interpreter QUIET)
+    if(Python3_Interpreter_FOUND)
+        add_test(NAME ps1_rc_fuzz
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/recomp_fuzz.py --ps1-run $<TARGET_FILE:ps1_run>
+                    --bios ${PS1_BIOS} --work ${PS1_RC_WORK}/fuzz --seeds 0-5 --frames 40)
+        list(APPEND rc ps1_rc_fuzz)
+    endif()
+    set_tests_properties(${rc} PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900)
 endif()

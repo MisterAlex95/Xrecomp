@@ -146,6 +146,53 @@ cmake -S consoles/ps1/tests -B build/ps1 -DPS1_CORE_ONLY=ON && cmake --build bui
 build/ps1/ps1_runtime/ps1_run --exe build/homebrew/ps1/gfx.exe --result --ppm gfx.ppm
 ```
 
+**PS1 static recompilation (P-2 XBA-160, P-3 XBA-161, P-4 XBA-162).** The GBA's model on RAM-loaded code: a PS1
+program's MIPS code is lifted to C, compiled for the host into a title pack (`libtitle.so`), and runs natively on the
+same core; the BIOS, the devices, DMA, timers and interrupts are the interpreter's code either way. Universal, no
+per-title configuration; what the static pass misses runs in the interpreter, which records it, bytes included, for
+the next build (the discovery loop). Contract (`ps1_recomp.h`, frozen between `ps1_tools`, Prepare, the loader and
+the core; change together and bump `PS1_RECOMP_ABI`):
+
+- `python3 -m ps1_tools.recomp INPUT OUTDIR [--discovered FILE]` (`consoles/ps1/tools`, pure Python, our own MIPS
+  decoder) writes `OUTDIR/ps1_rc_NNN.c` + `ps1_rc_table.c`; each compiles with `-I consoles/ps1/runtime` alone. INPUT
+  is a disc image (`.cue` / `.bin` / `.iso`: the EXE `SYSTEM.CNF` boots, read from ISO 9660) or a PS-X EXE.
+- The library exports `ps1_recomp_title_table`: entries (address, length, **content hash**, function), the EXE's
+  SHA-256 and entry point. PS1 code runs from RAM (the EXE, then overlays read over each other), so an entry runs only
+  while RAM holds its words: the core keeps a write counter per 1 KB RAM page (CPU and lifted stores, DMA, the EXE
+  load), re-hashes an entry only when a page it covers changed, and picks, among entries sharing an address
+  (overlays), the one that matches. The lifted code's ABI is `ps1_recomp_rt.h`: the first members of `ps1_machine`
+  (`ps1_rc_head`: registers and delay-slot state, COP0, clock and next event, RAM / scratchpad / page counters;
+  static asserts in `ps1_recomp.c`) and the core functions `ps1_rc_lw` / `_read` / `_write` / `_swlr` / `_gte_cmd` /
+  `_gte_read` / `_gte_write`, which the loading executable exports (`ps1_core_exported()`: ps1_run).
+- `ps1_attach_recomp` / `ps1_recomp_missed` / `ps1_recomp_write_missed` (`ps1_recomp.c`, called from the
+  `ps1_cpu.c` run loop): main RAM above the BIOS's 64 KB, once the CPU reached the EXE's entry, runs lifted code
+  when an entry matches, the interpreter otherwise; the discovered file gets `ADDR HASH HEXBYTES` per miss (a 2 KB
+  window of the code as it was), so overlays are lifted on the next round from their own bytes. An address seen
+  with 8 contents is code generated at run time: left to the interpreter.
+
+Lifted code is cycle-exact with the interpreter (same fetch and load costs at the same points, the scheduler test
+before every instruction, the IRQ line after IO accesses; load delay slots committed early only when the next
+instruction cannot tell, else left in flight to the interpreter; branch delay slots inline; exceptions, COP0 and a
+branch in a delay slot handed to the interpreter; calls, returns and indirect jumps through the dispatcher, so the C
+stack stays bounded). `ps1_run INPUT --pack LIB --lockstep` checks it: an interpreter-only twin alongside, the whole
+state (CPU, cycles, scheduler, IRQ / DMA / timer registers, GTE, RAM, scratchpad, VRAM) compared after every frame
+(`--lockstep-cycles N`: every N cycles). On a desktop:
+
+```sh
+tools/consoles/ps1_recomp_build.py game.cue build/rc/game --loop 4 --ps1-run build/ps1/ps1_runtime/ps1_run \
+    --frames 3000 --run-args "--bios build/ps1-bios/openbios.bin"
+build/ps1/ps1_runtime/ps1_run game.cue --pack build/rc/game/libtitle.so --lockstep --stats --frames 600
+```
+
+Tests (`consoles/ps1/tests`, ctest `ps1_rc_*`): every homebrew (the overlay one from its EXE and from its disc:
+both overlays are recorded in round 1, lifted in round 2, and B replacing A at 0x80100000 never runs A's native
+code) and ps1-tests (cpu/cop, cpu/code-in-io, gte/test-all, dma/otc-test, dma/dpcr, timers) through the discovery
+loop then in lockstep; `ps1_rc_fuzz`: random MIPS code under a timer IRQ every 37-2000 cycles; pytest
+`consoles/ps1/tools/ps1_tools/test_recomp.py`. All converge in 2-3 rounds at 99.9 % native instructions, except
+gte/test-all (81.7 %: it writes each GTE command into a stub before running it). Lifted C costs about 1.3-2 s of
+compiler per 1000 instructions at -O1 on a desktop x86 core (`--sparse-labels`: ~10 % less). Design notes:
+[ps1/tools/README.md](ps1/tools/README.md).
+
 **PS1 GPU (P-7, XBA-165).** `consoles/ps1/runtime/ps1_gpu.c`, the GPU half of `ps1_devices.h` (CMake target
 `ps1_gpu`, plain C11, no host dependency): GP0 / GP1, GPUSTAT / GPUREAD, CPU / VRAM / DMA transfers and a software
 rasterizer with the hardware's rules (top-left fill, 1023 x 511 culling, quads as (v0 v1 v2) + (v1 v2 v3), 4 / 8 / 15
