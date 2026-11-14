@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:1
 # PS1 test oracle (XBA-149): PCSX-Redux, built from a pinned commit, with OpenBIOS (its open-source BIOS
 # replacement, built from source in the same tree: no Sony BIOS dump anywhere). tools/consoles/run_homebrew.sh
 # runs our homebrew corpus in it headless (-no-ui, a Lua script polls the result block at each VSync) and reads

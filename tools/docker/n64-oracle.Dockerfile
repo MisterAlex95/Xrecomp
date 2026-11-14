@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:1
 # N64 test oracle (XBA-149): ares, built from a pinned commit with only its N64 core. ares has no headless mode, so
 # tools/consoles/run_homebrew.sh runs it under Xvfb with its null video/audio drivers and reads our result block
 # through ares's GDB server (tools/consoles/oracle/gdb_poll.py). The RDP runs on paraLLEl-RDP over Mesa's lavapipe
