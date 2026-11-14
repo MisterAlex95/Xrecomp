@@ -32,6 +32,14 @@ GEN=()
 read -r -a EXTRA <<< "${XBR_CMAKE_ARGS:-}"
 command -v ninja >/dev/null 2>&1 && GEN=(-G Ninja)
 JUNIT_DIR=${XBR_JUNIT_DIR:-}
+# XBR_SHARD=K/N: only every N-th project from the K-th (1-based), for parallel CI jobs; the N slices together are the
+# whole run. Counted over every project folder, in the loop's order, so a slice does not depend on the host.
+SHARD_K=1 SHARD_N=1
+if [ -n "${XBR_SHARD:-}" ]; then
+    SHARD_K=${XBR_SHARD%/*} SHARD_N=${XBR_SHARD#*/}
+    case "$SHARD_K$SHARD_N" in *[!0-9]*|'') echo "XBR_SHARD: K/N, not $XBR_SHARD" >&2; exit 2 ;; esac
+    [ "$SHARD_K" -ge 1 ] && [ "$SHARD_K" -le "$SHARD_N" ] || { echo "XBR_SHARD: 1 <= K <= N, not $XBR_SHARD" >&2; exit 2; }
+fi
 export SDL_AUDIODRIVER=${SDL_AUDIODRIVER:-dummy}
 # ccache when it is there (XBR_NO_CCACHE=1: never): most projects build the whole runtime again
 # (add_subdirectory(../.. runtime)) with the same flags, so after the first one its objects are cache hits. Their
@@ -63,10 +71,13 @@ fail=0
     echo "|---|---|---|---|---|---|"
 } > "$REPORT"
 
+index=-1
 for dir in "$ROOT"/tests/*/ ${CONSOLE_TESTS[@]+"${CONSOLE_TESTS[@]}"}; do
     name=$(basename "$dir")
     case "$dir" in "$ROOT"/consoles/*) name=console_$(basename "$(dirname "$dir")") ;; esac
     [ -f "$dir/CMakeLists.txt" ] || continue
+    index=$((index + 1))
+    [ $(( index % SHARD_N )) -eq $(( SHARD_K - 1 )) ] || continue
     bdir="$OUT/$name"
     log="$OUT/$name.log"
     conf=ok; build=ok; pass=0; skip=0; failed=0

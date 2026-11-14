@@ -1,6 +1,8 @@
 # The public GitHub mirror's check: the Linux build and every test (tools/docker/linux.Dockerfile, the same as the
 # linux job of .gitea/workflows/ci.yml). Gitea ignores .github/workflows while .gitea/workflows exists, so this runs
 # only on GitHub: on what the mirror pushes, and on pull requests, which never touch the maintainers' machine here.
+# Three parallel jobs (the Dockerfile's PART): the root build + ctest + pytest, and the C test projects in two slices.
+# Together they are what PART=all runs on Gitea.
 name: Linux
 
 on:
@@ -18,12 +20,21 @@ concurrency:
 
 jobs:
   test:
+    name: test (${{ matrix.part }})
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        part: [python, c-1/2, c-2/2]
     steps:
       - uses: actions/checkout@v4
       - name: Build and test (Docker)
-        run: docker build -f tools/docker/linux.Dockerfile --target test --progress=plain -t xrecomp-linux .
-      - name: C test report
+        run: |
+          docker build -f tools/docker/linux.Dockerfile --target test --build-arg PART="${{ matrix.part }}" \
+            --progress=plain -t xrecomp-linux .
+      - name: Test report
         if: always()
-        run: docker run --rm xrecomp-linux cat /reports/c-tests.md >> "$GITHUB_STEP_SUMMARY" || true
+        run: |
+          docker run --rm xrecomp-linux sh -c 'cat /reports/c-tests.md 2>/dev/null; tail -n 3 /reports/pytest.txt 2>/dev/null; grep -E "Hits|Misses" /reports/ccache.txt 2>/dev/null | head -2' \
+            >> "$GITHUB_STEP_SUMMARY" || true
