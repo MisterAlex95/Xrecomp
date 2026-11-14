@@ -244,6 +244,9 @@ struct ps1_machine {
 
     void (*tty)(void *ctx, char c);
     void *tty_ctx;
+
+    /* The HLE BIOS (ps1_hle.c, XBA-163): NULL when a BIOS image runs (LLE). */
+    struct ps1_hle *hle;
 };
 
 /* ps1_cpu.c */

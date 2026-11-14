@@ -81,5 +81,5 @@ wrong expectation (`gfx` sampled the gouraud quad on its diagonal, fixed), the r
 | `mipsel-none-elf` GCC (bundled with the SDK) | 12.3.0 | GPLv3 (tools only; libgcc has the runtime exception) |
 
 No Sony BIOS is used or needed: our core (`ps1_run`, `ps1_hb_*` tests) runs them through OpenBIOS built from source
-(`tools/consoles/build_ps1_bios.sh`, the oracle's image byte for byte); an HLE of the BIOS calls libpsn00b makes (A/B/C
-tables: interrupts, events, `FlushCache`, CD) is a later step.
+(`tools/consoles/build_ps1_bios.sh`, the oracle's image byte for byte), and through the HLE BIOS with no image at all
+(`ps1_run --bios hle`, [../../HLE_BIOS.md](../../HLE_BIOS.md)), with the same results.

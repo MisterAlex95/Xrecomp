@@ -36,7 +36,8 @@ typedef struct ps1_runtime_opts {
     const char *save_dir;
     /* The 512 KB BIOS image: NULL = $RECOMP_PS1_BIOS, then ps1_runtime_set_bios's path, then the app's asset
      * ps1-bios/openbios.bin (Android), then build/ps1-bios/openbios.bin next to the working directory or an
-     * ancestor of the executable (desktop). OpenBIOS (MIT) only; never a Sony BIOS in the repository. */
+     * ancestor of the executable (desktop); none of them: the HLE BIOS (ps1_hle.c, XBA-163). "hle" (here or in any
+     * of those settings) asks for the HLE BIOS. OpenBIOS (MIT) only; never a Sony BIOS in the repository. */
     const char *bios;
     /* Stop after this many frames (0: until the player quits). */
     uint64_t frames;
