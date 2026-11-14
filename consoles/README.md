@@ -14,7 +14,7 @@ game for these consoles runs yet. Goal, order, rules (legal, Linux arm64 first),
 Each one has:
 
 - `runtime/`: C, CMake target `<name>_runtime`. It links only the host layer `xbr_host` (`src/host`,
-  `src/platform/HOST_LAYER.md`) and never the Xbox libraries. N64 is empty for now (one version function);
+  `src/platform/HOST_LAYER.md`) and never the Xbox libraries. N64 has its RSP and RDP devices, no core yet;
   GBA and PS1 have their cores, see below.
 - `tools/`: the Python pipeline (parse → disasm → function discovery → lift → C), package `<name>_tools`. Its
   tests live in the package and run with the tools suite: `python3 -m pytest tools/ consoles/`.
@@ -261,6 +261,19 @@ The title key comes from the disc as the app reads it (`recomp_pack_rom_identify
 an EXE gets `EXE-<CRC32>`. Every option is listed at the top of `runtime/tools/ps1_play.c`. Test: `ps1_runtime`
 (`consoles/ps1/tests/test_main.c`: the helpers, then gfx.exe fast-booted, through `fd:N`, a memory card read back and
 left alone, gfx.cue booted by the BIOS to its 320 x 240 picture, the errors).
+
+**N64 RSP (N-5, XBA-173).** `consoles/n64/runtime/n64_rsp.c`, the RSP half of `n64_devices.h` (CMake target
+`n64_rsp`, plain C11, no host dependency): LLE, so every microcode runs as on the hardware (no per-game HLE). Scalar
+unit (MIPS subset, delay slots, wrapping DMEM accesses, BREAK / intr-break), COP0 = SP registers (instant DMA with
+length / count / skip, status set / clear pairs, semaphore) and the DPC registers of the attached RDP (an END write
+runs the RDP at once, so XBUS lists in DMEM are consumed before the microcode reuses them), vector unit (every load /
+store with its wraparound rules, the 16 element selectors, every computational op, the reciprocal / inverse square
+root ROMs generated from their formulas). Accumulator as bits 47..16 (int32) + 15..0 (uint16): 8-lane 32-bit loops
+the compiler vectorises (SSE2 / NEON), identical results everywhere. One cycle per instruction. Tests
+(`consoles/n64/tests`): `test_rsp.c` (hand-checked vectors, and 93 differential groups of random microcode over every
+vector funct, load, store, DMA, status and scalar op whose checksums must equal those the ares oracle computed from the
+homebrew ROM `homebrew/rsp`), `test_rsp_rdp.c` (microcode driving the real RDP over XBUS and from RDRAM);
+`n64_rsp_bench` (by hand): ~90-110 M RSP instructions/s on a vector-dense loop on the x86 dev host.
 
 **Legal**: no ROM, disc image, BIOS or game data in this repository, its CI or its artifacts. Tests use homebrew we
 build ourselves (devkitARM / libtonc, PSn00bSDK, libdragon) and dumps Alex made from his own media, kept outside every

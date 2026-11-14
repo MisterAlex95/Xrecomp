@@ -9,6 +9,7 @@ commercial ROM. Only our own code lives here; third-party test ROMs wait for the
 | [`cpu`](cpu/README.md) | 56 VR4300 sequences: 64-bit integer ops, branch-likely, unaligned BE loads/stores, FPU | `cpu.z64` |
 | [`timer_irq`](timer_irq/README.md) | VI interrupt, COUNT/COMPARE timer interrupt (libdragon timers), COUNT rate | `timer_irq.z64` |
 | [`gfx`](gfx/README.md) | RDP via rdpq: fill rectangles, copy-mode and scaled texture blits, gouraud triangle | `gfx.z64` |
+| [`rsp`](rsp/README.md) | RSP differential groups (every vector op / load / store, DMA, scalar): checksums for `test_rsp.c` | `rsp.z64` |
 
 ## Build
 

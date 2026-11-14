@@ -10,7 +10,7 @@
 # into OUTDIR/<console>/:
 #   gba: <prog>.gba + <prog>.elf                           (hello cpu timer_irq gfx iwram_copy pad sound)
 #   ps1: <prog>.exe + <prog>.elf + <prog>.bin/.cue disc    (hello cpu timer_irq gfx overlay)
-#   n64: <prog>.z64 + <prog>.elf                           (hello cpu timer_irq gfx)
+#   n64: <prog>.z64 + <prog>.elf                           (hello cpu timer_irq gfx rsp)
 # plus SHA256SUMS. Outputs are never committed (build/ is ignored).
 #
 # Sources go in and outputs come out with `docker cp`, not bind mounts, so the script also works
