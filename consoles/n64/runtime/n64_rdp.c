@@ -18,10 +18,16 @@
  *   - attributes (shade RGBA, S / T / W, Z) are planes: value at a pixel = edge value of its scan line (stepped by
  *     DaDe) + DaDx * (pixel x - major edge x), sampled at the pixel's top-left corner, stepped by DaDx along the span;
  *   - one span routine per (texture, shade, Z, 2-cycle, 32-bit) combination, picked once per primitive; inside, the
- *     rest of the state (blender, dither, filters...) are plain branches on per-primitive constants. The combiner of
- *     each cycle is resolved when the mode changes into: constant (computed once), pass-through of one input, a
- *     product of two inputs, or the generic (A - B) * C + D on input pointers. A blender that cannot change the pixel
- *     is skipped. Fill and copy modes have their own loops.
+ *     rest of the state (blender, dither, filters...) are plain branches on per-primitive constants. 16-bit spans
+ *     without key, noise or LOD (nearly all of them) go to span_fast, which keeps everything in locals (and has an
+ *     F_SIMPLE instance for pixels without memory read, blending or coverage tricks); span_std does the rest. The
+ *     combiner of each cycle is resolved when the mode changes into: constant (computed once), pass-through of one
+ *     input, a product of two inputs, or the generic (A - B) * C + D; a combiner whose inputs are all 0..255 skips the
+ *     9-bit clamps. A blender that cannot change the pixel is skipped. Fill and copy modes have their own loops;
+ *   - textures: each tile's coordinate rules are derived into constants and a sampler routine per (texel kind, filter)
+ *     when tiles or modes change; without LOD a run of up to SPAN_CHUNK pixels is sampled in one call. Texels and
+ *     blender colours are packed 16-bit lanes in a uint64_t (the bilinear filter and the blend are a few multiplies);
+ *     RGBA16 and TLUT texels come from dec16, TMEM decoded ahead, kept up to date after loads.
  * Pixel pipeline (1 / 2 cycle): texture (perspective divide, shift, SL / TL offset, clamp / mirror / mask, point or
  * 3-point bilinear with mid-texel, YUV convert, TLUT, LOD tile selection with detail / sharpen), combiner (2 cycles,
  * every input incl. noise, LOD fraction, K4 / K5, key centre / scale), chroma key (approximated: see key_alpha), alpha
@@ -212,10 +218,6 @@ struct n64_rdp {
 static inline int imin(int a, int b) { return a < b ? a : b; }
 static inline int imax(int a, int b) { return a > b ? a : b; }
 static inline int32_t sext(uint32_t v, int bits) { return (int32_t)(v << (32 - bits)) >> (32 - bits); }
-static inline int32_t clamp32(int64_t v)
-{
-    return v > INT32_MAX ? INT32_MAX : v < INT32_MIN ? INT32_MIN : (int32_t)v;
-}
 /* The combiner / shade clamp on 9 bits: 0x100..0x17F saturate to 255, 0x180..0x1FF (negative) to 0. */
 static inline int clamp9(int v)
 {
@@ -278,104 +280,6 @@ static const uint8_t bayer_matrix[16] = { 0, 4, 1, 5, 4, 0, 5, 1, 3, 7, 2, 6, 7,
 static inline int row_mine(const rdp_render *r, int y) { return r->nbands == 1 || ((y >> 2) % r->nbands) == r->band; }
 
 /* ---- Textures ------------------------------------------------------------------------------------------------------ */
-static inline void tlut_entry(const rdp_render *r, int idx, int32_t *o)
-{
-    const uint8_t *e = r->s.tmem + 0x800 + ((idx << 3) & 0x7FF);
-    uint16_t v = (uint16_t)(e[0] << 8 | e[1]);
-    if (r->s.om.tlut_ia) {
-        o[0] = o[1] = o[2] = v >> 8;
-        o[3] = v & 0xFF;
-    } else {
-        o[0] = expand5(v >> 11);
-        o[1] = expand5((v >> 6) & 31);
-        o[2] = expand5((v >> 1) & 31);
-        o[3] = (v & 1) ? 255 : 0;
-    }
-}
-
-/* One texel of tile t at integer coordinates (already wrapped) into o[4] (8-bit channels). YUV texels come out as
- * (U, V, Y, Y) for the convert step. */
-ALWAYS_INLINE void fetch_texel(const rdp_render *r, const rdp_tile *t, int s, int tt, int32_t *o)
-{
-    const uint8_t *tm = r->s.tmem;
-    const uint32_t base = (uint32_t)(t->tmem + tt * t->line);
-    const uint32_t x = (tt & 1) ? 4 : 0;
-    const int tlut = r->s.om.tlut;
-    const uint32_t am = tlut ? 0x7FF : 0xFFF;
-    switch (t->size) {
-    case 0: {
-        int n = (tm[((base + (uint32_t)(s >> 1)) ^ x) & am] >> ((s & 1) ? 0 : 4)) & 15;
-        if (tlut) {
-            tlut_entry(r, t->pal << 4 | n, o);
-            return;
-        }
-        if (t->fmt == FMT_IA) {
-            int i = n >> 1;
-            o[0] = o[1] = o[2] = i << 5 | i << 2 | i >> 1;
-            o[3] = (n & 1) ? 255 : 0;
-        } else if (t->fmt == FMT_CI) {
-            o[0] = o[1] = o[2] = o[3] = t->pal << 4 | n;
-        } else {
-            o[0] = o[1] = o[2] = o[3] = n * 17;
-        }
-        return;
-    }
-    case 1: {
-        int n = tm[((base + (uint32_t)s) ^ x) & am];
-        if (tlut) {
-            tlut_entry(r, n, o);
-            return;
-        }
-        if (t->fmt == FMT_IA) {
-            o[0] = o[1] = o[2] = (n >> 4) * 17;
-            o[3] = (n & 15) * 17;
-        } else {
-            o[0] = o[1] = o[2] = o[3] = n;
-        }
-        return;
-    }
-    case 2: {
-        if (t->fmt == FMT_YUV) {
-            uint32_t ay = ((base + (uint32_t)s) ^ x) & 0x7FF, auv = ((base + (uint32_t)(s & ~1)) ^ x) & 0x7FF;
-            o[0] = tm[auv];
-            o[1] = tm[(auv + 1) & 0x7FF];
-            o[2] = o[3] = tm[0x800 + ay];
-            return;
-        }
-        uint32_t a = ((base + (uint32_t)s * 2) ^ x) & am & ~1u;
-        uint16_t v = (uint16_t)(tm[a] << 8 | tm[a + 1]);
-        if (tlut) {
-            tlut_entry(r, v >> 8, o);
-            return;
-        }
-        if (t->fmt == FMT_IA) {
-            o[0] = o[1] = o[2] = v >> 8;
-            o[3] = v & 0xFF;
-        } else if (t->fmt == FMT_I || t->fmt == FMT_CI) {
-            o[0] = o[1] = o[2] = o[3] = v >> 8;
-        } else {
-            o[0] = expand5(v >> 11);
-            o[1] = expand5((v >> 6) & 31);
-            o[2] = expand5((v >> 1) & 31);
-            o[3] = (v & 1) ? 255 : 0;
-        }
-        return;
-    }
-    default: { /* 32-bit: R G in the low half, B A in the high half */
-        uint32_t a = ((base + (uint32_t)s * 2) ^ x) & 0x7FE;
-        if (tlut) {
-            tlut_entry(r, tm[a], o);
-            return;
-        }
-        o[0] = tm[a];
-        o[1] = tm[a + 1];
-        o[2] = tm[a + 0x800];
-        o[3] = tm[a + 0x801];
-        return;
-    }
-    }
-}
-
 /* Raw texel for copy mode, as a 16-bit pixel (and the 32-bit / 8-bit forms for those colour images). */
 static uint32_t copy_texel(const rdp_render *r, const rdp_tile *t, int s, int tt, int out_size)
 {
@@ -431,50 +335,6 @@ static uint32_t copy_texel(const rdp_render *r, const rdp_tile *t, int s, int tt
     }
 }
 
-/* One texture coordinate (s10.5) of tile t through shift, offset, clamp, mirror and mask: integer coordinates of the
- * texel and its +1 neighbour, and the 5-bit fraction. */
-ALWAYS_INLINE void tc_axis(int32_t c, int shift, int lo, int hi, int clamp_en, int mask, int mirror, int *i0, int *i1,
-                           int *frac)
-{
-    if (shift)
-        c = shift < 11 ? c >> shift : (int32_t)((uint32_t)c << (16 - shift));
-    c -= lo << 3;
-    int i = c >> 5, f = c & 31, j = i + 1;
-    if (clamp_en || !mask) {
-        int mx = imax((hi >> 2) - (lo >> 2), 0);
-        if (c < 0) {
-            i = j = 0;
-            f = 0;
-        } else if (i >= mx) {
-            i = j = mx;
-            f = 0;
-        } else if (j > mx) {
-            j = mx;
-        }
-    }
-    if (mask) {
-        int m = (1 << mask) - 1;
-        if (mirror) {
-            if ((i >> mask) & 1)
-                i = ~i;
-            if ((j >> mask) & 1)
-                j = ~j;
-        }
-        i &= m;
-        j &= m;
-    }
-    *i0 = i;
-    *i1 = j;
-    *frac = f;
-}
-
-static inline void tile_coords(const rdp_tile *t, int32_t s, int32_t tt, int *s0, int *s1, int *fs, int *t0, int *t1,
-                               int *ft)
-{
-    tc_axis(s, t->shift_s, t->sl, t->sh, t->cs, imin(t->mask_s, 10), t->ms, s0, s1, fs);
-    tc_axis(tt, t->shift_t, t->tl, t->th, t->ct, imin(t->mask_t, 10), t->mt, t0, t1, ft);
-}
-
 /* YUV -> RGB with K0..K3 on (U, V, Y) = channels (0, 1, 2); the K4 / K5 part is the combiner's (TEX - K4) * K5 + TEX.
  * Approximation: U and V centred on 128, products rounded, 9-bit results. */
 static void yuv_convert(const rdp_render *r, const int32_t *in, int32_t *o)
@@ -489,8 +349,7 @@ static void yuv_convert(const rdp_render *r, const int32_t *in, int32_t *o)
 
 /* Texture sampling, specialised: each tile gets its sampling parameters (shift, offset, clamp, mirror, mask resolved
  * into a few constants) and one sampler routine per cycle, picked from (texel kind, filter) when the tile or the modes
- * change (tiles_prep), so the per-pixel work has no format or mode switch. Same results as the generic rules above
- * (fetch_texel / tile_coords, kept for copy mode). */
+ * change (tiles_prep), so the per-pixel work has no format or mode switch. */
 enum { K4_TLUT_RGBA, K4_TLUT_IA, K4_IA, K4_CI, K4_I, K8_TLUT_RGBA, K8_TLUT_IA, K8_IA, K8_I, K16_YUV, K16_TLUT_RGBA,
        K16_TLUT_IA, K16_IA, K16_I, K16_RGBA, K32_TLUT_RGBA, K32_TLUT_IA, K32_RGBA, K_N };
 enum { FL_CONV, FL_POINT, FL_BIL, FL_BILMID, FL_N };
@@ -545,7 +404,9 @@ ALWAYS_INLINE uint64_t tlut_k(const uint8_t *tm, const uint64_t *dec, int idx, i
     return LANES((uint64_t)(v >> 8)) ^ ((v >> 8) ^ (v & 0xFF)); /* I I I A */
 }
 
-/* fetch_texel for one kind K (a constant in each instance), packed. */
+/* One texel of a tile at integer coordinates (already wrapped), packed, for one kind K (a constant in each instance).
+ * YUV texels come out as (U, V, Y, Y) for the convert step; 32-bit texels have R G in the low half of TMEM and B A in
+ * the high half. */
 ALWAYS_INLINE uint64_t fetch_k(const uint8_t *tm, const uint64_t *dec, const rdp_tdesc *d, const int K, int s, int tt)
 {
     const uint32_t base = d->tmem + (uint32_t)tt * d->line;
@@ -601,7 +462,8 @@ ALWAYS_INLINE uint64_t fetch_k(const uint8_t *tm, const uint64_t *dec, const rdp
     }
 }
 
-/* tc_axis on the derived parameters of axis ax. */
+/* One texture coordinate (s10.5) through the tile's shift, offset, clamp, mirror and mask (derived parameters of axis
+ * ax): integer coordinates of the texel and its +1 neighbour, and the 5-bit fraction. */
 ALWAYS_INLINE void td_axis_t(const rdp_tdesc *d, int ax, int32_t c, int *i0, int *i1, int *frac, const int PLAIN)
 {
     if (!PLAIN)
@@ -1962,7 +1824,7 @@ static void fill_rect(rdp_render *r, int xh, int yh, int xl, int yl)
 }
 
 /* Copy mode: texels straight to the pixels. The texel coordinate along the row comes from the tile's derived
- * parameters (td_axis, the same rules as tile_coords); the other one is computed once per row. */
+ * parameters (td_axis); the other one is computed once per row. */
 static void copy_rect(rdp_render *r, int xh, int yh, int xl, int yl, int tn, int32_t S, int32_t T, int32_t dsdx,
                       int32_t dtdy, int flip)
 {

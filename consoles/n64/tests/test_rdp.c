@@ -1,7 +1,8 @@
 /* N64 RDP tests (XBA-173): synthetic command lists, one per feature, with the expected pixels worked out by hand from
  * the hardware rules n64_rdp.c documents (n64brew wiki RDP pages, libdragon rdpq docs); DPC register behaviour; a
- * replica of the homebrew gfx.z64 frame; golden hashes of busy scenes (regression guards: update them only for a
- * deliberate change) and the same scene drawn with 1 and 3 threads, which must match bit for bit. */
+ * replica of the homebrew gfx.z64 frame; golden hashes of busy scenes and of a matrix of random command lists over
+ * every mode (regression guards: update them only for a deliberate change) and the same scenes drawn with 1 and 3
+ * threads, which must match bit for bit. */
 #include "rdp_cmd.h"
 
 #include <stdio.h>
@@ -11,6 +12,9 @@
 #endif
 #ifndef GOLDEN_GFX
 #define GOLDEN_GFX 0x370204FDu
+#endif
+#ifndef GOLDEN_MATRIX
+#define GOLDEN_MATRIX 0x1DF30C72u
 #endif
 
 static int failures;
@@ -882,6 +886,299 @@ static void t_scenes(void)
         printf("busy scene hash 0x%08X\n", h1);
 }
 
+/* ---- Mode matrix --------------------------------------------------------------------------------------------------- */
+/* Random command lists over every mode, texel format, filter, blender, coverage and Z setting (integers only, so the
+ * lists are the same on every host): a regression guard for the specialised paths (span_fast, the samplers, the packed
+ * blender, decoded TMEM, copy mode), whose golden hash comes from the generic implementation they replaced. */
+static uint32_t mx_s;
+static uint32_t mx_rnd(void)
+{
+    mx_s ^= mx_s << 13;
+    mx_s ^= mx_s >> 17;
+    mx_s ^= mx_s << 5;
+    return mx_s;
+}
+static int mx(int n) { return (int)(mx_rnd() % (uint32_t)n); }
+static int32_t mx_range(int32_t lo, int32_t hi) { return lo + (int32_t)(mx_rnd() % (uint32_t)(hi - lo)); }
+static int mx_max(int a, int b) { return a > b ? a : b; }
+
+static const u64 mx_modes[] = {
+    OM_STD,
+    OM_STD | OM_BILERP,
+    OM_STD | OM_BILERP | OM_Z_COMPARE | OM_Z_UPDATE | OM_PERSP,
+    OM_1CYC | OM_TF0_RGB | OM_TF1_RGB | OM_RGB_DITHER(0) | OM_ALPHA_DITHER(3) | OM_BILERP | OM_Z_COMPARE | OM_Z_UPDATE,
+    OM_2CYC | OM_TF0_RGB | OM_TF1_RGB | OM_RGB_DITHER(0) | OM_ALPHA_DITHER(3) | OM_BILERP | OM_IMAGE_READ |
+        OM_FORCE_BLEND | OM_Z_COMPARE | OM_Z_UPDATE | OM_BLEND0(0, 2, 3, 0) | OM_BLEND1(0, 0, 1, 0),
+    OM_2CYC | OM_TF0_RGB | OM_TF1_RGB | OM_RGB_DITHER(1) | OM_ALPHA_DITHER(3) | OM_IMAGE_READ | OM_FORCE_BLEND |
+        OM_Z_COMPARE | OM_BLEND0(0, 2, 3, 0) | OM_BLEND1(0, 0, 1, 0),
+    OM_STD | OM_BILERP | OM_IMAGE_READ | OM_FORCE_BLEND | OM_BLEND0(0, 0, 1, 0) | OM_BLEND1(0, 0, 1, 0),
+    OM_STD | OM_BILERP | OM_IMAGE_READ | OM_BLEND0(0, 0, 1, 0) | OM_BLEND1(0, 0, 1, 0) | OM_CVG_X_ALPHA | OM_AA |
+        OM_Z_COMPARE | OM_Z_UPDATE | OM_PERSP,
+    OM_STD | OM_BILERP | OM_ALPHA_COMPARE | OM_Z_COMPARE | OM_Z_UPDATE | OM_PERSP | OM_TLUT,
+    OM_STD | OM_BILERP | OM_MID | OM_TLUT | OM_TLUT_IA,
+    OM_2CYC | OM_TF0_RGB | OM_TF1_RGB | OM_BILERP | OM_LOD | OM_PERSP | OM_Z_COMPARE | OM_Z_UPDATE,
+    OM_STD | OM_RGB_DITHER(2) | OM_ALPHA_DITHER(2) | OM_ALPHA_COMPARE | OM_DITHER_ALPHA,
+};
+static const int mx_cc[][8] = {
+    { CC_TEX0, CC_ZERO_A, CC_SHADE, CC_ZERO_ADD, AC_ZERO, AC_ZERO, AC_ZERO, AC_SHADE },
+    { CC_TEX0, CC_ZERO_A, CC_SHADE, CC_ZERO_ADD, AC_TEX0, AC_ZERO, AC_SHADE, AC_ZERO },
+    { CC_TEX0, CC_ZERO_A, CC_PRIM, CC_ZERO_ADD, AC_ZERO, AC_ZERO, AC_ZERO, AC_PRIM },
+    { CC_ZERO_A, CC_ZERO_A, CC_ZERO_MUL, CC_TEX0, AC_ZERO, AC_ZERO, AC_ZERO, AC_TEX0 },
+    { CC_ZERO_A, CC_ZERO_A, CC_ZERO_MUL, CC_SHADE, AC_ZERO, AC_ZERO, AC_ZERO, AC_SHADE },
+    { CC_PRIM, CC_ENV, CC_TEX0, CC_ENV, AC_PRIM, AC_ZERO, AC_TEX0, AC_ZERO },
+    { CC_TEX1, CC_TEX0, CC_LODFRAC, CC_TEX0, AC_TEX1, AC_TEX0, AC_LODFRAC, AC_TEX0 },
+    { CC_TEX0, CC_K4, CC_K5, CC_TEX0, AC_ZERO, AC_ZERO, AC_ZERO, AC_ONE },
+};
+
+/* A triangle from random fixed-point coefficients (as the RSP would send them). */
+static void mx_triangle(rdp_list *l, int fbw, int fbh)
+{
+    const int shade = mx(4) != 0, tex = mx(4) != 0, zb = mx(2);
+    const int yh = mx(fbh * 4 + 40), ym = yh + mx(200), yl = ym + mx(200);
+    /* one random draw per declarator: the order of calls inside an expression is unspecified */
+    const int32_t xhi = mx_range(-20, fbw + 20), xhf = mx(65536), xmo = mx_range(-8, 8);
+    const int32_t xli = mx_range(-20, fbw + 20), xlf = mx(65536);
+    const int32_t xh = xhi * 65536 + xhf, xm = xh + xmo * 65536, xl = xli * 65536 + xlf;
+    const int32_t dxh = mx_range(-3 * 65536, 3 * 65536), dxm = mx_range(-3 * 65536, 3 * 65536);
+    const int32_t dxl = mx_range(-3 * 65536, 3 * 65536);
+    const int lft = mx(2), level = mx(8), tile = mx(8) < 6 ? mx(2) : mx(8);
+    L(l, OP(0x08 | shade << 2 | tex << 1 | zb) | (u64)lft << 55 | (u64)level << 51 | (u64)tile << 48 |
+             (u64)(yl & 0x3FFF) << 32 | (u64)(ym & 0x3FFF) << 16 | (u64)(yh & 0x3FFF));
+    L(l, (u64)(uint32_t)xl << 32 | (uint32_t)dxl);
+    L(l, (u64)(uint32_t)xh << 32 | (uint32_t)dxh);
+    L(l, (u64)(uint32_t)xm << 32 | (uint32_t)dxm);
+    int32_t a[8], dx[8], de[8], dy[8];
+    for (int k = 0; k < 4; k++) { /* shade: 0..255 with some overshoot */
+        const int32_t ai = mx_range(-16, 272), af = mx(65536);
+        a[k] = ai * 65536 + af;
+        dx[k] = mx_range(-8 * 65536, 8 * 65536);
+        de[k] = mx_range(-8 * 65536, 8 * 65536);
+        dy[k] = mx_range(-8 * 65536, 8 * 65536);
+    }
+    const int big = mx(3) == 0;
+    for (int k = 4; k < 6; k++) { /* S, T (s10.5 in the top half) */
+        a[k] = mx_range(-2048, big ? 16384 : 4096) * 65536;
+        dx[k] = mx_range(-64, 64) * 65536 / (big ? 1 : 4);
+        de[k] = mx_range(-64, 64) * 65536 / (big ? 1 : 4);
+        dy[k] = mx_range(-64, 64) * 65536 / (big ? 1 : 4);
+    }
+    a[6] = mx(10) == 0 ? mx_range(-4096, 4096) * 65536 : mx_range(1024, 32767) * 65536; /* W */
+    dx[6] = mx_range(-256, 256) * 65536;
+    de[6] = mx_range(-256, 256) * 65536;
+    dy[6] = mx_range(-256, 256) * 65536;
+    const int32_t zi = mx_range(0, 0x7FFF), zf = mx(65536);
+    a[7] = zi * 65536 + zf; /* Z */
+    dx[7] = mx_range(-512, 512) * 65536;
+    de[7] = mx_range(-512, 512) * 65536;
+    dy[7] = mx_range(-512, 512) * 65536;
+    if (shade) {
+        L(l, pack4(a[0], a[1], a[2], a[3], 1));
+        L(l, pack4(dx[0], dx[1], dx[2], dx[3], 1));
+        L(l, pack4(a[0], a[1], a[2], a[3], 0));
+        L(l, pack4(dx[0], dx[1], dx[2], dx[3], 0));
+        L(l, pack4(de[0], de[1], de[2], de[3], 1));
+        L(l, pack4(dy[0], dy[1], dy[2], dy[3], 1));
+        L(l, pack4(de[0], de[1], de[2], de[3], 0));
+        L(l, pack4(dy[0], dy[1], dy[2], dy[3], 0));
+    }
+    if (tex) {
+        L(l, pack4(a[4], a[5], a[6], 0, 1));
+        L(l, pack4(dx[4], dx[5], dx[6], 0, 1));
+        L(l, pack4(a[4], a[5], a[6], 0, 0));
+        L(l, pack4(dx[4], dx[5], dx[6], 0, 0));
+        L(l, pack4(de[4], de[5], de[6], 0, 1));
+        L(l, pack4(dy[4], dy[5], dy[6], 0, 1));
+        L(l, pack4(de[4], de[5], de[6], 0, 0));
+        L(l, pack4(dy[4], dy[5], dy[6], 0, 0));
+    }
+    if (zb) {
+        L(l, (u64)(uint32_t)a[7] << 32 | (uint32_t)dx[7]);
+        L(l, (u64)(uint32_t)de[7] << 32 | (uint32_t)dy[7]);
+    }
+}
+
+static void mx_list(rdp_list *l)
+{
+    const int fbw = 32 + mx(130), fbh = 16 + mx(100);
+    int fbsize = mx(8) == 0 ? SZ32 : mx(10) == 0 ? SZ8 : SZ16;
+    l->n = 0;
+    L(l, c_color_image(F_RGBA, fbsize, fbw, FB_ADDR));
+    L(l, c_z_image(ZB_ADDR));
+    if (mx(6) == 0) {
+        const int x0 = mx(40), y0 = mx(40), x1 = mx_max(fbw * 4 - mx(40), 0), y1 = mx_max(fbh * 4 - mx(40), 0);
+        L(l, c_scissor_field(x0, y0, x1, y1, mx(2)));
+    } else if (mx(3) == 0) {
+        const int x0 = mx(80), y0 = mx(80), x1 = mx_max(fbw * 4 - mx(80), 0), y1 = mx_max(fbh * 4 - mx(80), 0);
+        L(l, c_scissor(x0, y0, x1, y1));
+    } else {
+        L(l, c_scissor(0, 0, fbw * 4, fbh * 4));
+    }
+    const int nc = 20 + mx(120);
+    for (int i = 0; i < nc; i++) {
+        const int k = mx(24);
+        if (k == 0) { /* texture load through tile 7 */
+            const int fmt = mx(5), sz = mx(4), w = 8 << mx(4);
+            const uint32_t addr = TEX_ADDR + (uint32_t)mx(4096);
+            L(l, c_tex_image(fmt, sz, w, addr));
+            const int line = 1 + mx(16), tm = mx(512);
+            L(l, c_set_tile(fmt, sz, line, tm, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0));
+            const int op = mx(4);
+            if (op == 0) {
+                const int sh = mx(2048), dxt = mx(4096);
+                L(l, c_load_block(7, 0, 0, sh, dxt));
+            } else if (op == 1) {
+                const int sl = mx(64) * 4, sh = mx(256) * 4;
+                L(l, c_load_tlut(7, sl, 0, sh, 0));
+            } else {
+                const int sl = mx(16) * 4, tl = mx(16) * 4, sh = (16 + mx(48)) * 4, th = (16 + mx(48)) * 4;
+                L(l, c_load_tile(7, sl, tl, sh, th));
+            }
+        } else if (k <= 2) {
+            int f[14];
+            const int t = mx(8) < 6 ? mx(2) : mx(8);
+            if (mx(2)) {
+                const int lim[14] = { 5, 4, 16, 512, 1, 16, 2, 2, 11, 16, 2, 2, 11, 16 };
+                for (int j = 0; j < 14; j++)
+                    f[j] = j == 4 ? t : mx(lim[j]) + (j == 2);
+            } else {
+                f[0] = mx(5), f[1] = mx(4), f[2] = 1 + mx(16), f[3] = mx(512), f[4] = t, f[5] = mx(16);
+                f[6] = mx(4) == 0, f[7] = mx(4) == 0, f[8] = mx(6), f[9] = mx(4) ? 0 : mx(16);
+                f[10] = mx(4) == 0, f[11] = mx(4) == 0, f[12] = mx(6), f[13] = mx(4) ? 0 : mx(16);
+            }
+            L(l, c_set_tile(f[0], f[1], f[2], f[3], f[4], f[5], f[6], f[7], f[8], f[9], f[10], f[11], f[12], f[13]));
+        } else if (k == 3) {
+            const int t = mx(8) < 6 ? mx(2) : mx(8);
+            int c[4];
+            const int wide = mx(2);
+            for (int j = 0; j < 4; j++)
+                c[j] = wide ? mx(4096) : j < 2 ? mx(64) : mx(256) + 16;
+            L(l, c_tile_size(t, c[0], c[1], c[2], c[3]));
+        } else if (k <= 5) {
+            u64 m;
+            if (mx(4) == 0) {
+                const u64 hi = mx_rnd();
+                m = (hi << 32 | mx_rnd()) & 0x00FFFFFFFFFFFFFFull;
+            } else {
+                m = mx_modes[mx((int)(sizeof mx_modes / sizeof mx_modes[0]))];
+                if (mx(2))
+                    m ^= 1ull << mx(56);
+                if (mx(3) == 0)
+                    m ^= 1ull << mx(56);
+            }
+            if (mx(12) == 0)
+                m = (m & ~(3ull << 52)) | OM_COPY;
+            else if (mx(16) == 0)
+                m = (m & ~(3ull << 52)) | OM_FILL;
+            else if (((m >> 52) & 3) >= 2)
+                m &= ~(2ull << 52);
+            L(l, c_modes(m));
+        } else if (k == 6) {
+            if (mx(3) == 0) {
+                const u64 hi = mx_rnd();
+                L(l, OP(0x3C) | ((hi << 32 | mx_rnd()) & 0x00FFFFFFFFFFFFFFull));
+            } else {
+                const int *a = mx_cc[mx(8)], *b = mx_cc[mx(8)];
+                if (mx(2))
+                    L(l, c_combine1(a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7]));
+                else
+                    L(l, c_combine(a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7], b[0], b[1], b[2], b[3], b[4], b[5],
+                                   b[6], b[7]));
+            }
+        } else if (k == 7) {
+            const int w = mx(6);
+            const uint32_t c = mx_rnd();
+            if (w == 0) {
+                const int ml = mx(32), lf = mx(256);
+                L(l, c_prim(ml, lf, c));
+            } else if (w == 1) {
+                L(l, c_env(c));
+            } else if (w == 2) {
+                L(l, c_blend(c));
+            } else if (w == 3) {
+                L(l, c_fog(c));
+            } else if (w == 4) {
+                L(l, c_fill_color(c));
+            } else {
+                const int z = mx(0x8000), dz = mx(0x10000);
+                L(l, c_prim_depth(z, dz));
+            }
+        } else if (k == 8) {
+            int v[6];
+            const int kind = mx(2) ? 0 : mx(2) ? 1 : 2;
+            if (kind == 0) {
+                for (int j = 0; j < 6; j++)
+                    v[j] = mx(512);
+                L(l, c_convert(v[0], v[1], v[2], v[3], v[4], v[5]));
+            } else if (kind == 1) {
+                v[0] = mx(4096), v[1] = mx(256), v[2] = mx(256);
+                L(l, c_key_r(v[0], v[1], v[2]));
+            } else {
+                v[0] = mx(4096), v[1] = mx(4096), v[2] = mx(256), v[3] = mx(256), v[4] = mx(256), v[5] = mx(256);
+                L(l, c_key_gb(v[0], v[1], v[2], v[3], v[4], v[5]));
+            }
+        } else if (k <= 10) {
+            const int xh = mx_max((mx(fbw + 20) - 10) * 4 + mx(4), 0);
+            const int yh = mx_max((mx(fbh + 20) - 10) * 4 + mx(4), 0);
+            const int w = mx(60), h = mx(40);
+            int dsdx = mx(4) == 0 ? (int16_t)mx_rnd() : (mx(2) ? 1 << 10 : 1 << (6 + mx(6)));
+            const int dtdy = mx(4) == 0 ? (int16_t)mx_rnd() : (mx(2) ? 1 << 10 : 1 << (6 + mx(6)));
+            if (mx(3) == 0)
+                dsdx = -dsdx;
+            const int flip = mx(4) == 0, tile = mx(8) < 6 ? mx(2) : mx(8);
+            const int xl = xh + w * 4 + mx(4), yl = yh + h * 4 + mx(4);
+            const int s0 = (int16_t)(mx(4) ? mx(64 * 32) : (int)mx_rnd());
+            const int t0 = (int16_t)(mx(4) ? mx(64 * 32) : (int)mx_rnd());
+            c_texrect(l, flip, tile, xh, yh, xl, yl, s0, t0, dsdx, dtdy);
+        } else if (k == 11) {
+            const int x = mx(fbw), y = mx(fbh);
+            const int x0 = x * 4 + mx(4), y0 = y * 4 + mx(4), x1 = (x + mx(50)) * 4 + mx(4), y1 = (y + mx(30)) * 4 + mx(4);
+            L(l, c_fill_rect(x0, y0, x1, y1));
+        } else {
+            mx_triangle(l, fbw, fbh);
+        }
+        if (mx(30) == 0) {
+            fbsize = mx(8) == 0 ? SZ32 : mx(10) == 0 ? SZ8 : SZ16;
+            L(l, c_color_image(F_RGBA, fbsize, fbw, FB_ADDR));
+        }
+    }
+    L(l, c_sync_full());
+}
+
+static uint32_t mx_run(int threads, int seed)
+{
+    fresh("mode matrix");
+    if (threads > 1)
+        n64_rdp_set_threads(G.dp, threads);
+    mx_s = 0x9E3779B9u * (uint32_t)(seed + 1);
+    for (uint32_t a = 0; a < 0x30000; a++) {
+        G.ram[FB_ADDR + a] = (uint8_t)mx_rnd();
+        G.ram[ZB_ADDR + a] = mx(2) ? (uint8_t)mx_rnd() : 0xFF;
+    }
+    for (uint32_t a = 0; a < 0x6000; a++)
+        G.ram[TEX_ADDR + a] = (uint8_t)mx_rnd();
+    mx_list(&scene);
+    rig_run(&G, &scene);
+    return fnv1a(G.ram + FB_ADDR, 0x40000) ^ fnv1a(G.ram + ZB_ADDR, 0x40000) * 3;
+}
+
+static void t_matrix(void)
+{
+    uint32_t h = 0;
+    int same = 1;
+    for (int i = 0; i < 64; i++) {
+        const uint32_t h1 = mx_run(1, i);
+        if (i % 4 == 0)
+            same &= mx_run(3, i) == h1;
+        h = (h ^ h1) * 0x01000193u;
+    }
+    cur = "mode matrix";
+    check(same, "1 thread vs 3 threads");
+    if (GOLDEN_MATRIX)
+        expect("hash", h, GOLDEN_MATRIX);
+    else
+        printf("mode matrix hash 0x%08X\n", h);
+}
+
 /* The homebrew gfx.z64 frame as libdragon's rdpq emits it (fill and copy mode fix-ups included), with its checks. */
 static void t_gfx(void)
 {
@@ -945,6 +1242,7 @@ int main(void)
     t_persp();
     t_lod();
     t_scenes();
+    t_matrix();
     t_gfx();
     if (G.dp)
         rig_close(&G);
