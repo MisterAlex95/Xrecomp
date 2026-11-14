@@ -434,6 +434,17 @@ bit for bit against angrylion.
   then the DP interrupt is raised. `n64_rdp_flush` (called before the VI reads the frame buffer) waits for commands
   queued since then. The colour / Z rows drawn are reported through `bus.wrote` after the wait, as `n64_rdp.c` does.
   `n64_rdp_set_threads` is a no-op there (1).
+- **Shaders the driver cannot compile.** At start, `n64_rdp_vk.cpp` draws a few commands into a corner of RDRAM
+  (saved and restored): fills of the colour and Z images and a textured rectangle with a Z test. Every pipeline must
+  compile, and the pixels must come out right. If not, it tries again without subgroup operations (when the default
+  shaders used them), then with paraLLEl-RDP's ubershader. When all three fail, the software RDP takes over. The
+  start line names what was kept (`n64: Vulkan RDP on <GPU> (paraLLEl-RDP, default shaders)`). Our Granite patch
+  never compiles a failed pipeline twice, and logs the program and its spec constants once
+  ([third_party/parallel-rdp](../third_party/parallel-rdp/README.md)). If a pipeline still fails during the game
+  (another frame buffer format, for example), the failure is logged and `n64_rdp_select.c` switches to the software
+  RDP when the RDP is idle. The RDP state is lost then, and so is the frame being drawn. `RECOMP_N64_RDP_CHECK=0`
+  skips the check. `PARALLEL_RDP_TEST_FAIL_PROGRAM=depth_blend` (or `rasterizer`, `tile_binning_combined`, ...)
+  fakes a failing driver, to test the fallbacks on lavapipe.
 
 Tests (`consoles/n64/tests`, built with `-DXBR_N64_RDP_VULKAN=ON`; without a GPU, Mesa's lavapipe with
 `VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json`):

@@ -667,6 +667,23 @@ Pipeline Program::add_pipeline(Hash hash, const Pipeline &pipeline)
 	return pipelines.emplace_yield(hash, pipeline)->get();
 }
 
+// xboxrecomp-android patch (third_party/parallel-rdp/README.md): see shader.hpp.
+bool Program::pipeline_failed(Hash hash) const
+{
+	std::lock_guard<std::mutex> holder{failed_lock};
+	return failed_pipelines.count(hash) != 0;
+}
+
+void Program::mark_pipeline_failed(Hash hash, bool mandatory)
+{
+	{
+		std::lock_guard<std::mutex> holder{failed_lock};
+		failed_pipelines.insert(hash);
+	}
+	if (mandatory)
+		mandatory_failure.store(true, std::memory_order_release);
+}
+
 void Program::destroy_pipeline(const Pipeline &pipeline)
 {
 	device->get_device_table().vkDestroyPipeline(device->get_device(), pipeline.pipeline, nullptr);

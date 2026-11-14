@@ -51,6 +51,61 @@ Renderer::~Renderer()
 void Renderer::set_shader_bank(const ShaderBank *bank)
 {
 	shader_bank = bank;
+
+	// xboxrecomp-android patch (third_party/parallel-rdp/README.md): names for the log of a failed pipeline.
+	if (!bank)
+		return;
+#define PRDP_NAME_PROGRAM(field) if (bank->field) bank->field->set_debug_name(#field)
+	PRDP_NAME_PROGRAM(tmem_update);
+	PRDP_NAME_PROGRAM(span_setup);
+	PRDP_NAME_PROGRAM(clear_indirect_buffer);
+	PRDP_NAME_PROGRAM(tile_binning_combined);
+	PRDP_NAME_PROGRAM(ubershader);
+	PRDP_NAME_PROGRAM(depth_blend);
+	PRDP_NAME_PROGRAM(rasterizer);
+	PRDP_NAME_PROGRAM(extract_vram);
+	PRDP_NAME_PROGRAM(masked_rdram_resolve);
+	PRDP_NAME_PROGRAM(clear_write_mask);
+	PRDP_NAME_PROGRAM(update_upscaled_domain_post);
+	PRDP_NAME_PROGRAM(update_upscaled_domain_pre);
+	PRDP_NAME_PROGRAM(update_upscaled_domain_resolve);
+	PRDP_NAME_PROGRAM(clear_super_sampled_write_mask);
+#undef PRDP_NAME_PROGRAM
+}
+
+// xboxrecomp-android patch (third_party/parallel-rdp/README.md): a mandatory pipeline (compiled synchronously, the
+// dispatch dropped when it fails) of one of the bank's programs failed. The specialised rasterizer variants compile
+// in the background and fall back to the generic rasterizer: they don't count. Only the programs these caps use: the
+// ubershader, or the rasterizer and depth_blend (the device shares programs between renderers, failures included).
+bool Renderer::has_pipeline_failure() const
+{
+	if (!shader_bank)
+		return false;
+	const Vulkan::Program *programs[] = {
+		shader_bank->tmem_update, shader_bank->span_setup, shader_bank->clear_indirect_buffer,
+		shader_bank->tile_binning_combined,
+		caps.ubershader ? shader_bank->ubershader : nullptr,
+		caps.ubershader ? nullptr : shader_bank->depth_blend,
+		caps.ubershader ? nullptr : shader_bank->rasterizer,
+		shader_bank->extract_vram, shader_bank->masked_rdram_resolve,
+		shader_bank->clear_write_mask, shader_bank->update_upscaled_domain_post,
+		shader_bank->update_upscaled_domain_pre, shader_bank->update_upscaled_domain_resolve,
+		shader_bank->clear_super_sampled_write_mask,
+	};
+	for (auto *program : programs)
+		if (program && program->has_mandatory_failure())
+			return true;
+	return false;
+}
+
+bool Renderer::uses_subgroups() const
+{
+	return caps.subgroup_tile_binning || caps.subgroup_depth_blend;
+}
+
+bool Renderer::uses_ubershader() const
+{
+	return caps.ubershader;
 }
 
 bool Renderer::init_renderer(const RendererOptions &options)
@@ -114,7 +169,7 @@ bool Renderer::init_renderer(const RendererOptions &options)
 	init_buffers(options);
 	if (options.upscaling_factor > 1 && !init_internal_upscaling_factor(options))
 		return false;
-	return init_caps();
+	return init_caps(options);
 }
 
 void Renderer::set_device(Vulkan::Device *device_)
@@ -127,9 +182,13 @@ void Renderer::set_validation_interface(ValidationInterface *iface)
 	validation_iface = iface;
 }
 
-bool Renderer::init_caps()
+bool Renderer::init_caps(const RendererOptions &options)
 {
 	auto &features = device->get_device_features();
+
+	// xboxrecomp-android patch (third_party/parallel-rdp/README.md): the fallbacks asked for by the caller.
+	if (options.force_ubershader)
+		caps.ubershader = true;
 
 	if (const char *timestamp = getenv("PARALLEL_RDP_BENCH"))
 	{
@@ -155,6 +214,8 @@ bool Renderer::init_caps()
 		allow_subgroup = strtol(subgroup, nullptr, 0) > 0;
 		LOGI("Allow subgroups = %d\n", int(allow_subgroup));
 	}
+	if (options.disable_subgroups) // xboxrecomp-android patch (third_party/parallel-rdp/README.md)
+		allow_subgroup = false;
 
 	bool allow_small_types = true;
 	bool forces_small_types = false;
@@ -244,6 +305,14 @@ bool Renderer::init_caps()
 			allow_subgroup &&
 			(features.vk11_props.subgroupSupportedOperations & required) == required &&
 			(features.vk11_props.subgroupSupportedOperations & VK_SHADER_STAGE_COMPUTE_BIT) != 0;
+
+	// xboxrecomp-android patch (third_party/parallel-rdp/README.md): what the shaders were chosen with, for the
+	// reports of a device's failures.
+	LOGI("paraLLEl-RDP caps: driver %u, subgroup size %u, ubershader %d, small types %d, subgroup tile binning %d, "
+	     "subgroup depth blend %d\n",
+	     features.supports_driver_properties ? unsigned(features.driver_id) : 0u, subgroup_size,
+	     int(caps.ubershader), int(caps.supports_small_integer_arithmetic), int(caps.subgroup_tile_binning),
+	     int(caps.subgroup_depth_blend));
 
 	return true;
 }

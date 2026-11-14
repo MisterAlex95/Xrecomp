@@ -27,6 +27,9 @@ typedef struct n64_rdp_ops {
     void (*run)(void *d);
     int (*set_threads)(void *d, int n);
     void (*flush)(void *d);
+    /* Non-zero once this back end can no longer draw (the Vulkan RDP: a shader the driver failed to compile during
+     * the game); n64_rdp_select.c then goes on with the software RDP. NULL: never. */
+    int (*failed)(void *d);
 } n64_rdp_ops;
 
 extern const n64_rdp_ops n64_rdp_sw_ops; /* n64_rdp_select.c, over n64_rdp_sw_* */

@@ -1,6 +1,8 @@
 /* n64_rdp_select.c -- the RDP of n64_devices.h / n64_rdp.h as a choice of back ends (XBA-173, n64_rdp_backend.h): the
  * software RDP (n64_rdp.c, its functions renamed n64_rdp_sw_*) or the Vulkan one (n64_rdp_vk.cpp, paraLLEl-RDP). The
- * back end is chosen once, at n64_rdp_create; every other call goes through its table. */
+ * back end is chosen at n64_rdp_create; every other call goes through its table. A back end that stops being able to
+ * draw (ops->failed: the Vulkan RDP with a shader its driver cannot compile) is replaced by the software RDP once
+ * the RDP is idle, after n64_rdp_run or n64_rdp_flush. */
 #include "n64_rdp.h"
 #include "n64_rdp_backend.h"
 
@@ -31,11 +33,14 @@ static int sw_set_threads(void *d, int n) { return n64_rdp_sw_set_threads(d, n);
 static void sw_flush(void *d) { n64_rdp_sw_flush(d); }
 
 const n64_rdp_ops n64_rdp_sw_ops = { "software", sw_create, sw_destroy, sw_reset, sw_attach_dmem,
-                                     sw_read_reg, sw_write_reg, sw_run, sw_set_threads, sw_flush };
+                                     sw_read_reg, sw_write_reg, sw_run, sw_set_threads, sw_flush, NULL };
 
 struct n64_rdp {
     const n64_rdp_ops *ops;
     void *impl;
+    n64_rcp_bus bus;     /* for a replacement back end */
+    const uint8_t *dmem;
+    int threads;         /* the last n64_rdp_set_threads, 0: never called */
 };
 
 #ifndef N64_RDP_DEFAULT_BACKEND
@@ -66,6 +71,7 @@ n64_rdp *n64_rdp_create(n64_rcp_bus bus)
     n64_rdp *d = calloc(1, sizeof *d);
     if (!d)
         return NULL;
+    d->bus = bus;
     n64_rdp_backend b = s_backend != N64_RDP_AUTO ? s_backend : n64_rdp_backend_parse(getenv("RECOMP_N64_RDP"));
     const int asked = b == N64_RDP_VULKAN;
     (void)asked; /* only reported in builds without the Vulkan RDP */
@@ -76,7 +82,8 @@ n64_rdp *n64_rdp_create(n64_rcp_bus bus)
         d->ops = &n64_rdp_vk_ops;
         d->impl = d->ops->create(bus);
         if (!d->impl)
-            fprintf(stderr, "n64: no Vulkan device for the RDP, software RDP instead\n");
+            fprintf(stderr, "n64: the Vulkan RDP cannot run here (no device, or its shaders fail), "
+                            "software RDP instead\n");
 #else
         if (asked)
             fprintf(stderr, "n64: this build has no Vulkan RDP (XBR_N64_RDP_VULKAN), software RDP instead\n");
@@ -102,12 +109,60 @@ void n64_rdp_destroy(n64_rdp *d)
 }
 
 void n64_rdp_reset(n64_rdp *d) { d->ops->reset(d->impl); }
-void n64_rdp_attach_dmem(n64_rdp *d, const uint8_t *dmem) { d->ops->attach_dmem(d->impl, dmem); }
+void n64_rdp_attach_dmem(n64_rdp *d, const uint8_t *dmem)
+{
+    d->dmem = dmem;
+    d->ops->attach_dmem(d->impl, dmem);
+}
 uint32_t n64_rdp_read_reg(n64_rdp *d, uint32_t reg) { return d->ops->read_reg(d->impl, reg); }
 void n64_rdp_write_reg(n64_rdp *d, uint32_t reg, uint32_t v) { d->ops->write_reg(d->impl, reg, v); }
-void n64_rdp_run(n64_rdp *d) { d->ops->run(d->impl); }
-int n64_rdp_set_threads(n64_rdp *d, int n) { return d->ops->set_threads(d->impl, n); }
-void n64_rdp_flush(n64_rdp *d) { d->ops->flush(d->impl); }
+int n64_rdp_set_threads(n64_rdp *d, int n)
+{
+    d->threads = n;
+    return d->ops->set_threads(d->impl, n);
+}
+
+/* The software RDP in place of a failed back end, with the DPC registers the game sees (the RDP is idle: CURRENT is
+ * END) and its status bits. The RDP state the old back end held (modes, tiles, TMEM) is lost: games set it again in
+ * their next display list. */
+static void replace_failed(n64_rdp *d)
+{
+    const uint32_t end = d->ops->read_reg(d->impl, 1);
+    const uint32_t status = d->ops->read_reg(d->impl, 3);
+    if (d->ops->read_reg(d->impl, 2) != end)
+        return; /* commands still to run: at a later flush */
+    void *sw = n64_rdp_sw_ops.create(d->bus);
+    if (!sw) {
+        fprintf(stderr, "n64: the software RDP cannot start, the %s RDP stays\n", d->ops->name);
+        return;
+    }
+    fprintf(stderr, "n64: the %s RDP failed, software RDP from now on\n", d->ops->name);
+    d->ops->destroy(d->impl);
+    d->ops = &n64_rdp_sw_ops;
+    d->impl = sw;
+    if (d->dmem)
+        d->ops->attach_dmem(d->impl, d->dmem);
+    if (d->threads > 0)
+        d->ops->set_threads(d->impl, d->threads);
+    d->ops->write_reg(d->impl, 3, (status & 1 ? 0x002 : 0) | (status & 2 ? 0x008 : 0) | (status & 4 ? 0x020 : 0));
+    d->ops->write_reg(d->impl, 0, end); /* START then END: CURRENT = END, nothing to run */
+    d->ops->write_reg(d->impl, 1, end);
+}
+
+/* After the commands ran, the RDP is idle (CURRENT is END): the moment to replace a failed back end. */
+void n64_rdp_run(n64_rdp *d)
+{
+    d->ops->run(d->impl);
+    if (d->ops->failed && d->ops->failed(d->impl))
+        replace_failed(d);
+}
+
+void n64_rdp_flush(n64_rdp *d)
+{
+    d->ops->flush(d->impl);
+    if (d->ops->failed && d->ops->failed(d->impl))
+        replace_failed(d);
+}
 
 /* The 16-bit pixels' hidden coverage bits (n64_rdp.h, for the VI's anti-aliasing filter; NULL: none, the VI then uses
  * the pixel's low bit). The software RDP keeps them in a side array; the Vulkan RDP keeps them on the GPU: NULL. */

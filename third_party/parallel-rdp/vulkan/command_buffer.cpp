@@ -29,6 +29,9 @@
 #include "indirect_layout.hpp"
 #include "timer.hpp"
 #include <string.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <atomic>
 
 using namespace Util;
 
@@ -1083,6 +1086,11 @@ Pipeline CommandBuffer::build_compute_pipeline(Device *device, const DeferredPip
 		return {};
 	}
 
+	// xboxrecomp-android patch (third_party/parallel-rdp/README.md): the driver already failed on this one, don't
+	// spend another compile (~6 ms on Adreno) on it.
+	if (compile.program->pipeline_failed(compile.hash))
+		return {};
+
 	auto &shader = *compile.program->get_shader(ShaderStage::Compute);
 	VkComputePipelineCreateInfo info = { VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO };
 	info.layout = compile.layout->get_layout();
@@ -1142,14 +1150,40 @@ Pipeline CommandBuffer::build_compute_pipeline(Device *device, const DeferredPip
 		info.flags |= VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT;
 
 	auto start_ts = Util::get_current_time_nsecs();
-	VkResult vr = table.vkCreateComputePipelines(device->get_device(), compile.cache, 1, &info, nullptr, &compute_pipeline);
+	VkResult vr;
+	// xboxrecomp-android patch (third_party/parallel-rdp/README.md): PARALLEL_RDP_TEST_FAIL_PROGRAM=name[,name...]
+	// makes the named programs fail as a driver that cannot compile them would, to test the fallbacks.
+	if (const char *fail = getenv("PARALLEL_RDP_TEST_FAIL_PROGRAM");
+	    fail && strstr(fail, compile.program->get_debug_name()))
+		vr = mode == CompileMode::FailOnCompileRequired ? VK_PIPELINE_COMPILE_REQUIRED : VK_ERROR_UNKNOWN;
+	else
+		vr = table.vkCreateComputePipelines(device->get_device(), compile.cache, 1, &info, nullptr, &compute_pipeline);
 	auto end_ts = Util::get_current_time_nsecs();
 	log_compile_time("compute", compile.hash, end_ts - start_ts, vr, mode);
 
 	if (vr != VK_SUCCESS || compute_pipeline == VK_NULL_HANDLE)
 	{
 		if (vr < 0)
+		{
 			LOGE("Failed to create compute pipeline!\n");
+			// xboxrecomp-android patch (third_party/parallel-rdp/README.md): say which one, once, and remember it.
+			char specs[VULKAN_NUM_TOTAL_SPEC_CONSTANTS * 24] = {};
+			size_t len = 0;
+			for (uint32_t i = 0; i < spec_info.mapEntryCount && len + 24 < sizeof(specs); i++)
+				len += snprintf(specs + len, sizeof(specs) - len, " %u=0x%x",
+				                spec_entries[i].constantID, spec_constants[i]);
+			LOGE("Compute pipeline %016llx of program \"%s\" (shader %016llx) failed (VkResult %d, mode %s); "
+			     "spec constants:%s; subgroup size control: %s (log2 %u..%u, full %u). Not compiled again.\n",
+			     static_cast<unsigned long long>(compile.hash), compile.program->get_debug_name(),
+			     static_cast<unsigned long long>(shader.get_hash()), int(vr),
+			     mode == CompileMode::Sync ? "sync" : (mode == CompileMode::AsyncThread ? "async-thread" : "other"),
+			     len ? specs : " none",
+			     compile.static_state.state.subgroup_control_size ? "on" : "off",
+			     unsigned(compile.static_state.state.subgroup_minimum_size_log2),
+			     unsigned(compile.static_state.state.subgroup_maximum_size_log2),
+			     unsigned(compile.static_state.state.subgroup_full_group));
+			compile.program->mark_pipeline_failed(compile.hash, mode == CompileMode::Sync);
+		}
 		return {};
 	}
 
@@ -2853,6 +2887,17 @@ void CommandBuffer::draw_indexed_indirect(const Vulkan::Buffer &buffer,
 		LOGE("Failed to flush render state, draw call will be dropped.\n");
 }
 
+// xboxrecomp-android patch (third_party/parallel-rdp/README.md): a pipeline that failed fails every dispatch; the
+// first ones are enough in the log.
+static bool log_dropped_dispatch()
+{
+	static std::atomic<uint32_t> count;
+	uint32_t n = count.fetch_add(1, std::memory_order_relaxed);
+	if (n == 16)
+		LOGE("Further dropped dispatches are not logged.\n");
+	return n < 16;
+}
+
 void CommandBuffer::dispatch_indirect(const Buffer &buffer, VkDeviceSize offset)
 {
 	VK_ASSERT(is_compute);
@@ -2860,7 +2905,7 @@ void CommandBuffer::dispatch_indirect(const Buffer &buffer, VkDeviceSize offset)
 	{
 		table.vkCmdDispatchIndirect(cmd, buffer.get_buffer(), offset);
 	}
-	else
+	else if (log_dropped_dispatch())
 		LOGE("Failed to flush render state, dispatch will be dropped.\n");
 }
 
@@ -2942,7 +2987,7 @@ void CommandBuffer::dispatch(uint32_t groups_x, uint32_t groups_y, uint32_t grou
 	VK_ASSERT(is_compute);
 	if (flush_compute_state(true) != VK_NULL_HANDLE)
 		table.vkCmdDispatch(cmd, groups_x, groups_y, groups_z);
-	else
+	else if (log_dropped_dispatch())
 		LOGE("Failed to flush render state, dispatch will be dropped.\n");
 }
 
