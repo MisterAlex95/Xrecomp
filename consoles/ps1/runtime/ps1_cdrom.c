@@ -28,8 +28,8 @@
  *
  * Audio. CD-DA (Play, or ReadN with Setmode bit 0 on an audio track) and XA-ADPCM real-time sectors (Setmode bit 6;
  * Setfilter's file / channel when Setmode bit 3) go through the volume matrix into a ring of 44100 Hz stereo frames
- * the SPU pulls. XA is resampled from 37800 / 18900 Hz with linear interpolation (the hardware's 7-tap zigzag filter
- * is not modelled). CD-DA always plays at 1x (a 2x Play plays at normal pitch). Report mode sends INT1 every 10
+ * the SPU pulls. XA is resampled from 37800 Hz with psx-spx's 25-point zigzag interpolation (18900 Hz: each sample fed
+ * twice). CD-DA always plays at 1x (a 2x Play plays at normal pitch). Report mode sends INT1 every 10
  * sectors (absolute time on even tens, relative time with bit 7 of the seconds on odd tens; peak level 0). */
 #include "ps1_devices.h"
 
@@ -143,8 +143,9 @@ struct ps1_cdrom {
     uint8_t vol_next[4];
     uint8_t xa_mute;     /* 3.3 bit 0 */
     xa_chan xa[2];
-    int16_t xa_last[2];   /* last decoded frame (resampler) */
-    uint32_t xa_phase;    /* resampler phase, 16.16 of an input sample */
+    int16_t xa_ring[2][32]; /* the last 37800 Hz samples (zigzag interpolation) */
+    uint32_t xa_p;
+    int xa_sixstep;
     int16_t ring[AUDIO_RING * 2];
     uint32_t ring_head, ring_count;
     uint32_t xa_play_frames; /* frames of XA still in the ring (ADPBUSY) */
@@ -306,15 +307,44 @@ static int xa_decode(ps1_cdrom *c, const uint8_t *sector, int16_t *out)
     return n;
 }
 
+/* psx-spx « 25-point Zigzag Interpolation »: seven tables of 29 taps turn every six 37800 Hz samples into seven
+ * 44100 Hz ones (hardware data transcribed from psx-spx; it notes small rounding differences with the real chip). */
+static const int16_t zigzag[7][29] = {
+    {0, 0, 0, 0, 0, -2, 10, -34, 65, -84, 52, 9, -266, 1024, -2680, 9036, 26516, -6016, 3021, -1571, 848, -365, 107, 10, -16, 17, -8, 3, -1},
+    {0, 0, 0, -2, 0, 3, -19, 60, -75, 162, -227, 306, -67, -615, 3229, 29883, -4532, 2488, -1471, 882, -424, 166, -27, 5, 6, -8, 3, -1, 0},
+    {0, 0, -1, 3, -2, -5, 31, -74, 179, -402, 689, -926, 1272, -1446, 31033, -1446, 1272, -926, 689, -402, 179, -74, 31, -5, -2, 3, -1, 0, 0},
+    {0, -1, 3, -8, 6, 5, -27, 166, -424, 882, -1471, 2488, -4532, 29883, 3229, -615, -67, 306, -227, 162, -75, 60, -19, 3, 0, -2, 0, 0, 0},
+    {-1, 3, -8, 17, -16, 10, 107, -365, 848, -1571, 3021, -6016, 26516, 9036, -2680, 1024, -266, 9, 52, -84, 65, -34, 10, -1, 0, 1, 0, 0, 0},
+    {2, -8, 16, -35, 43, 26, -235, 635, -1352, 2810, -5882, 21472, 15367, -4681, 2062, -839, 347, -68, -23, 70, -35, 17, -5, 0, 0, 0, 0, 0, 0},
+    {-5, 17, -35, 70, -23, -68, 347, -839, 2062, -4681, 15367, 21472, -5882, 2810, -1352, 635, -235, 26, 43, -35, 16, -8, 2, 0, 0, 0, 0, 0, 0},
+};
+
+static void xa_out37800(ps1_cdrom *c, int16_t l, int16_t r)
+{
+    c->xa_ring[0][c->xa_p & 31] = l;
+    c->xa_ring[1][c->xa_p & 31] = r;
+    c->xa_p++;
+    if (--c->xa_sixstep > 0)
+        return;
+    c->xa_sixstep = 6;
+    for (int t = 0; t < 7; t++) {
+        int32_t sum[2] = {0, 0};
+        for (int ch = 0; ch < 2; ch++)
+            for (int i = 1; i <= 29; i++)
+                sum[ch] += (c->xa_ring[ch][(c->xa_p - (uint32_t)i) & 31] * zigzag[t][i - 1]) / 0x8000;
+        ring_put(c, clamp16(sum[0]), clamp16(sum[1]));
+        c->xa_play_frames++;
+    }
+}
+
 static void xa_play(ps1_cdrom *c, const uint8_t *sector)
 {
     int16_t pcm[18 * 8 * 28];
     int n = xa_decode(c, sector, pcm);
     uint8_t coding = sector[19];
     int stereo = (coding & 3) == 1;
-    uint32_t rate = ((coding >> 2) & 3) == 1 ? 18900u : 37800u;
+    int half = ((coding >> 2) & 3) == 1; /* 18900 Hz: each sample twice through the 37800 Hz path */
     int frames = stereo ? n / 2 : n;
-    uint32_t step = (uint32_t)(((uint64_t)rate << 16) / 44100u);
     if (c->xa_mute) {
         /* muted by 3.3 bit 0: decoded (filters keep their history), silent */
         memset(pcm, 0, sizeof pcm);
@@ -322,17 +352,9 @@ static void xa_play(ps1_cdrom *c, const uint8_t *sector)
     for (int i = 0; i < frames; i++) {
         int16_t l = stereo ? pcm[2 * i] : pcm[i];
         int16_t r = stereo ? pcm[2 * i + 1] : pcm[i];
-        while (c->xa_phase < 0x10000u) {
-            uint32_t f = c->xa_phase;
-            int32_t ol = c->xa_last[0] + (int32_t)(((int64_t)(l - c->xa_last[0]) * f) >> 16);
-            int32_t or_ = c->xa_last[1] + (int32_t)(((int64_t)(r - c->xa_last[1]) * f) >> 16);
-            ring_put(c, ol, or_);
-            c->xa_play_frames++;
-            c->xa_phase += step;
-        }
-        c->xa_phase -= 0x10000u;
-        c->xa_last[0] = l;
-        c->xa_last[1] = r;
+        xa_out37800(c, l, r);
+        if (half)
+            xa_out37800(c, l, r);
     }
 }
 
@@ -877,6 +899,7 @@ static void reset(ps1_cdrom *c)
     c->vol[0] = c->vol[2] = 0x80;
     memcpy(c->vol_next, c->vol, 4);
     c->license = detect_license(d);
+    c->xa_sixstep = 6;
 }
 
 ps1_cdrom *ps1_cdrom_create(ps1_irq_sink irq, ps1_disc *disc)

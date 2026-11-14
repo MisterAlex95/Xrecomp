@@ -347,34 +347,6 @@ static void test_read(ps1_disc *d)
             break;
     }
 
-    /* Setloc, SeekL, then ReadN (no Setloc pending): reading starts at the seek target, not at the last sector
-     * read (OpenBIOS reads files this way) */
-    uint8_t loc3[3] = {0x00, 0x02, 0x20}; /* LBA 20 is XA; read 30 */
-    loc3[2] = 0x30;
-    m = 0x80;
-    expect(0x0E, &m, 1, 3, r);
-    expect(0x02, loc3, 3, 3, r);
-    command(0x15, NULL, 0);
-    CHECK(wait_int(PS1_CPU_HZ, NULL, 256) == 3, "SeekL INT3");
-    ack();
-    i = wait_int(PS1_CPU_HZ, NULL, 256);
-    response(r);
-    CHECK(i == 2 && r[0] == 0x02, "SeekL INT2 %d stat %02X", i, r[0]);
-    ack();
-    expect(0x06, NULL, 0, 3, r);
-    i = wait_int(PS1_CPU_HZ, NULL, 128);
-    response(r);
-    read_dma_sector(got, 0x800);
-    make_data_sector(s, 30, 0x08);
-    CHECK(i == 1 && memcmp(got, s + 24, 0x800) == 0, "ReadN after SeekL reads the seek target");
-    ack();
-    expect(0x09, NULL, 0, 3, r);
-    while ((i = wait_int(PS1_CPU_HZ * 2, NULL, 256)) != 0) {
-        ack();
-        if (i == 2)
-            break;
-    }
-
     /* 800h by register: padding repeats byte 800h-8 */
     m = 0x80;
     expect(0x0E, &m, 1, 3, r);
@@ -391,6 +363,96 @@ static void test_read(ps1_disc *d)
     CHECK(!(reg_r(0, 0) & 0x40), "DRQSTS after the last byte");
     CHECK(ps1_cdrom_read(cd, 2) == s[24 + 0x800 - 8], "800h padding byte");
     ack();
+}
+
+/* ---- OpenBIOS's file reads (the trace of its SYSTEM.CNF boot) ---------------------------------------------- */
+
+/* Like OpenBIOS's IRQ handler: acknowledge first, then read the response. Returns the interrupt type. */
+static int bios_wait(uint8_t *r, int *n)
+{
+    int i = wait_int(PS1_CPU_HZ * 2, NULL, 256);
+    ack();
+    *n = response(r);
+    return i;
+}
+
+static void bios_cmd(uint8_t c, const uint8_t *p, int np, int second)
+{
+    uint8_t r[16];
+    int n;
+    command(c, p, np);
+    int i = bios_wait(r, &n);
+    CHECK(i == 3 && n >= 1, "command %02X: INT%d (%d bytes)", c, i, n);
+    if (second) {
+        i = bios_wait(r, &n);
+        CHECK(i == 2, "command %02X: second INT%d", c, i);
+    }
+}
+
+/* Setmode 80h, ReadN, one sector by DMA as OpenBIOS's initiateDMA does (BFRD 0, then 80h), then Pause. */
+static void bios_read(uint32_t want_lba)
+{
+    uint8_t r[16], s[2352];
+    uint32_t w[512];
+    int n;
+    uint8_t m = 0x80;
+    bios_cmd(0x0E, &m, 1, 0);
+    bios_cmd(0x06, NULL, 0, 0);
+    int i = bios_wait(r, &n);
+    CHECK(i == 1, "INT%d instead of INT1", i);
+    reg_w(0, 3, 0x00);
+    reg_w(0, 3, 0x80);
+    ps1_cdrom_dma_read(cd, w, 512);
+    make_data_sector(s, want_lba, 0x08);
+    int ok = memcmp(w, s + 24, 0x800) == 0;
+    CHECK(ok, "read of LBA %u delivered another sector", want_lba);
+    if (!ok) {
+        for (uint32_t l = 0; l < DATA_SECTORS; l++) {
+            make_data_sector(s, l, 0x08);
+            if (memcmp(w, s + 24, 0x800) == 0)
+                printf("  (it is LBA %u)\n", l);
+        }
+    }
+    command(0x09, NULL, 0);
+    while ((i = bios_wait(r, &n)) == 1) {
+    }
+    CHECK(i == 3, "Pause INT%d", i);
+    i = bios_wait(r, &n);
+    CHECK(i == 2, "Pause second INT%d", i);
+}
+
+static void bios_setloc(uint32_t lba)
+{
+    uint32_t a = lba + 150;
+    uint8_t p[3] = {to_bcd(a / 4500), to_bcd((a / 75) % 60), to_bcd(a % 75)};
+    bios_cmd(0x02, p, 3, 0);
+}
+
+/* The command sequence OpenBIOS sends to boot a disc (traced on our homebrew cpu.cue): a Read after SeekL / SeekP
+ * must start at the seek target, not where the last Read stopped. */
+static void test_openbios_sequence(ps1_disc *d)
+{
+    fresh(d);
+    bios_cmd(0x0A, NULL, 0, 1); /* Init */
+    bios_setloc(16);            /* Setloc 00:02:16, Setmode 80h, ReadN: the PVD */
+    bios_read(16);
+    bios_setloc(26);            /* Setloc, Setmode, ReadN: "the root directory" (LBA 22 on cpu.cue; 20..23 are XA here) */
+    bios_read(26);
+    bios_cmd(0x0A, NULL, 0, 1); /* Init, Setloc 00:02:16, SeekL, Setmode, ReadN: the PVD again, */
+    bios_setloc(16);            /* not the root directory */
+    bios_cmd(0x15, NULL, 0, 1);
+    bios_read(16);
+    bios_cmd(0x01, NULL, 0, 0); /* Getstat, Setloc 00:02:00, SeekL, Setmode, ReadN */
+    bios_setloc(0);
+    bios_cmd(0x15, NULL, 0, 1);
+    bios_read(0);
+    bios_cmd(0x01, NULL, 0, 0); /* Getstat, Setloc, SeekL, Setmode, ReadN: "SYSTEM.CNF" */
+    bios_setloc(27);
+    bios_cmd(0x15, NULL, 0, 1);
+    bios_read(27);
+    bios_setloc(25);            /* SeekP then a Read: the same rule */
+    bios_cmd(0x16, NULL, 0, 1);
+    bios_read(25);
 }
 
 static void test_xa(ps1_disc *d)
@@ -420,8 +482,10 @@ static void test_xa(ps1_disc *d)
     CHECK(n >= 18800 && n <= 18830, "XA frames %zu", n);
     int good = 0;
     for (size_t k = 100; k < n; k++)
-        good += pcm[2 * k] == 0x3000 && pcm[2 * k + 1] == 0x3000;
-    CHECK(good == (int)n - 100, "XA samples: %d of %zu are 3000h", good, n - 100);
+        good += pcm[2 * k] == pcm[2 * k + 1] && pcm[2 * k] >= 0x2A00 && pcm[2 * k] <= 0x2C00;
+    /* the zigzag tables' gain is about 0.906 (psx-spx): 3000h comes out near 2B80h */
+    CHECK(good == (int)n - 100, "XA samples: %d of %zu near 2B80h (sample 200: %04X)", good, n - 100,
+          (uint16_t)pcm[400]);
     CHECK(!(reg_r(0, 0) & 0x04), "ADPBUSY once the stream is drained");
     while ((i = wait_int(PS1_CPU_HZ * 2, NULL, 256)) != 0) {
         ack();
@@ -634,6 +698,7 @@ int main(void)
     test_info(d);
     test_getid(d);
     test_read(d);
+    test_openbios_sequence(d);
     test_xa(d);
     test_play(d);
     test_init_stop(d);

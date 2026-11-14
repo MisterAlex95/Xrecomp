@@ -162,7 +162,7 @@ libchdr (`third_party/libchdr`, v0.3.0, option `XBR_PS1_CHD`, ON by default), an
 `ps1_cdrom.c` is the controller of psx-spx: banked registers, parameter / response / data FIFOs, INT1..INT5 queued
 until acknowledged, first / second response times from psx-spx's measurements, seeks approximated by distance, every
 command up to ReadTOC (Test 20h answers vC2), ReadN / ReadS with 800h / 924h sectors and DMA3, XA-ADPCM (filter,
-37800 / 18900 Hz, linear resampling) and CD-DA with the volume matrix into a 44.1 kHz stream. GetID answers a data
+37800 / 18900 Hz, psx-spx zigzag interpolation to 44.1 kHz) and CD-DA with the volume matrix into a 44.1 kHz stream. GetID answers a data
 disc as licensed (`SCEx` from the licence text at LBA 4, `SCEA` without one, as a modchip would), so a BIOS boots our
 homebrew. `ps1_spu.c`: 24 ADPCM voices with Gaussian interpolation, exact ADSR and sweep envelopes, noise, pitch
 modulation, ENDX, reverb (psx-spx formula with its FIR), capture buffers, the SPU IRQ, FIFO and DMA4 transfers, CD
