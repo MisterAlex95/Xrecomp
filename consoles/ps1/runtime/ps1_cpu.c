@@ -256,6 +256,7 @@ static void take_interrupt(ps1_machine *m)
     m->pend_reg = m->ld_reg;
     m->pend_val = m->ld_val;
     m->ld_reg = 0;
+    m->cycles += 2;
     ps1_cpu_exception(m, EXC_INT, 0);
 }
 
