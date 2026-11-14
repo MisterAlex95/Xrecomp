@@ -769,9 +769,10 @@ int n64_runtime_run(const n64_runtime_opts *o)
         host_pad_init();
     console_pad_load(&s_pad_map, CONSOLE_PAD_N64, getenv(console_pad_env(CONSOLE_PAD_N64)));
     int audio = host_audio_open(N64_AUDIO_RATE, 2);
-    printf("n64: window %s (4:3, %s, %s), audio %s, pads %u, %s%s, RDP threads %d\n", window ? "on" : "off",
+    printf("n64: window %s (4:3, %s, %s), audio %s, pads %u, %s%s, RDP %s, threads %d\n", window ? "on" : "off",
            scale == HOST_SCALE_INTEGER ? "integer" : "aspect", filter == HOST_FILTER_NEAREST ? "nearest" : "linear",
-           audio ? "on" : "off", host_pad_mask(), pak_name(pak), players >= 2 ? ", several players" : "", rdp_threads);
+           audio ? "on" : "off", host_pad_mask(), pak_name(pak), players >= 2 ? ", several players" : "",
+           n64_rdp_backend_name(rdp), rdp_threads);
     fflush(stdout);
 
     static uint32_t xrgb[N64_SCREEN_MAX_W * N64_SCREEN_MAX_H];

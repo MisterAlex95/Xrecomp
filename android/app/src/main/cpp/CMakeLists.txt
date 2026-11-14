@@ -15,6 +15,10 @@ get_filename_component(XBOXRECOMP_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../../../
 if(XBOXRECOMP_LSFG)
     enable_language(CXX)
 endif()
+# The N64 Vulkan RDP (XBR_N64_RDP_VULKAN, ON on Android: paraLLEl-RDP, C++17, libc++ static) goes into libmain.so:
+# libmain links C++, so CXX is enabled here, at the top (consoles/n64/runtime/CMakeLists.txt). Its libvulkan is
+# dlopened too (its own volk, renamed prdp_*: no clash with the LSFG bridge's).
+enable_language(CXX)
 add_subdirectory("${XBOXRECOMP_ROOT}" xboxrecomp)
 
 add_library(main SHARED shell_main.c pack_loader.c companion_jni.c menu_jni.c)
@@ -54,7 +58,7 @@ target_link_libraries(main PRIVATE -Wl,--whole-archive n64_core n64_rsp n64_rdp 
 target_link_libraries(main PRIVATE ps1_identify)
 set(XBA_CONSOLE_FAST_LIBS gba_core gba_runtime gba_pack   # the interpreters: release flags below too
                           ps1_core ps1_gpu ps1_cd ps1_spu ps1_mdec ps1_runtime
-                          n64_core n64_rsp n64_rdp n64_runtime)
+                          n64_core n64_rsp n64_rdp n64_rdp_sw n64_runtime)
 
 # Release flags for the runtime (the software GPU, the kernel, audio): what a frame on the device spends its time in.
 # Every toolkit library pins -O2 in its own CMakeLists, after the NDK's per-configuration flags, so the NDK's -O3 for

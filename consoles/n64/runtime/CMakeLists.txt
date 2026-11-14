@@ -10,27 +10,61 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 
 # The RCP devices, each the real module (n64_rsp.c / n64_rdp.c) when present or its placeholder n64_<dev>_stub.c, in a
 # target of its own so the modules merge without duplicate symbols.
-# n64_rdp: the RDP (N-5, XBA-173, n64_devices.h + n64_rdp.h): plain C11 (+ pthreads for the optional scanline bands),
-# no host dependency, so tests build anywhere. n64_rdp.c replaces the core's n64_rdp_stub.c when it is present.
-if(NOT TARGET n64_rdp AND (EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/n64_rdp.c OR EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/n64_rdp_stub.c))
+# n64_rdp_sw: the software RDP (N-5, XBA-173, n64_devices.h + n64_rdp.h): plain C11 (+ pthreads for the optional
+# scanline bands), no host dependency, so tests build anywhere. n64_rdp.c replaces the core's n64_rdp_stub.c when it is
+# present. Its public functions are renamed n64_rdp_sw_* (n64_rdp_sw_names.h, forced in): n64_rdp below dispatches.
+if(NOT TARGET n64_rdp_sw AND (EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/n64_rdp.c OR EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/n64_rdp_stub.c))
     if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/n64_rdp.c)
         set(N64_RDP_SRC n64_rdp.c)
     else()
         set(N64_RDP_SRC n64_rdp_stub.c)
     endif()
-    add_library(n64_rdp STATIC ${N64_RDP_SRC})
-    target_include_directories(n64_rdp PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-    target_compile_options(n64_rdp PRIVATE -Wall -Wextra)
+    add_library(n64_rdp_sw STATIC ${N64_RDP_SRC})
+    target_include_directories(n64_rdp_sw PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+    target_compile_options(n64_rdp_sw PRIVATE -Wall -Wextra)
     if(NOT CMAKE_BUILD_TYPE OR CMAKE_BUILD_TYPE STREQUAL "Debug")
-        target_compile_options(n64_rdp PRIVATE -O2) # the software rasterizer is far too slow unoptimised
+        target_compile_options(n64_rdp_sw PRIVATE -O2) # the software rasterizer is far too slow unoptimised
     endif()
     # Auto-vectorised 4-channel code reads back scalar stores as vectors (store-forwarding stalls): 1.6x slower.
-    target_compile_options(n64_rdp PRIVATE $<$<C_COMPILER_ID:GNU>:-fno-tree-vectorize>
+    target_compile_options(n64_rdp_sw PRIVATE $<$<C_COMPILER_ID:GNU>:-fno-tree-vectorize>
                            $<$<C_COMPILER_ID:Clang,AppleClang>:-fno-slp-vectorize>)
-    set_target_properties(n64_rdp PROPERTIES POSITION_INDEPENDENT_CODE ON)
+    set_target_properties(n64_rdp_sw PROPERTIES POSITION_INDEPENDENT_CODE ON)
     find_package(Threads)
     if(Threads_FOUND)
-        target_link_libraries(n64_rdp PUBLIC Threads::Threads)
+        target_link_libraries(n64_rdp_sw PUBLIC Threads::Threads)
+    endif()
+    target_compile_options(n64_rdp_sw PRIVATE "SHELL:-include ${CMAKE_CURRENT_SOURCE_DIR}/n64_rdp_sw_names.h")
+endif()
+
+# n64_rdp: the RDP the core links (n64_devices.h + n64_rdp.h), n64_rdp_select.c choosing a back end at n64_rdp_create
+# (n64_rdp_backend.h): the software RDP, or with XBR_N64_RDP_VULKAN the Vulkan one, n64_rdp_vk.cpp over paraLLEl-RDP
+# (third_party/parallel-rdp, MIT; C++17; Vulkan loaded at run time, never linked). ON by default on Android (the AYN
+# Thor's Adreno), OFF elsewhere: a desktop build then needs no C++ (-DXBR_N64_RDP_VULKAN=ON to test it, with Mesa's
+# lavapipe on a machine without a GPU). A project that links n64_rdp with it ON enables CXX in its own top directory
+# (consoles/n64/tests and the Android app do).
+get_filename_component(N64_PRDP_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../../third_party/parallel-rdp ABSOLUTE)
+if(ANDROID AND EXISTS ${N64_PRDP_DIR}/CMakeLists.txt)
+    set(_n64_vk_default ON)
+else()
+    set(_n64_vk_default OFF)
+endif()
+option(XBR_N64_RDP_VULKAN "N64: link the Vulkan RDP (paraLLEl-RDP) next to the software RDP" ${_n64_vk_default})
+if(NOT TARGET n64_rdp AND TARGET n64_rdp_sw)
+    add_library(n64_rdp STATIC n64_rdp_select.c)
+    target_include_directories(n64_rdp PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+    target_compile_options(n64_rdp PRIVATE -Wall -Wextra)
+    target_link_libraries(n64_rdp PUBLIC n64_rdp_sw)
+    set_target_properties(n64_rdp PROPERTIES POSITION_INDEPENDENT_CODE ON)
+    if(XBR_N64_RDP_VULKAN)
+        enable_language(CXX)
+        add_subdirectory(${N64_PRDP_DIR} ${CMAKE_CURRENT_BINARY_DIR}/parallel-rdp)
+        add_library(n64_rdp_vk STATIC n64_rdp_vk.cpp)
+        target_include_directories(n64_rdp_vk PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+        target_compile_definitions(n64_rdp_vk PUBLIC N64_RDP_HAVE_VULKAN)
+        target_compile_options(n64_rdp_vk PRIVATE -Wall -Wextra)
+        target_link_libraries(n64_rdp_vk PRIVATE parallel_rdp)
+        set_target_properties(n64_rdp_vk PROPERTIES POSITION_INDEPENDENT_CODE ON)
+        target_link_libraries(n64_rdp PUBLIC n64_rdp_vk)
     endif()
 endif()
 

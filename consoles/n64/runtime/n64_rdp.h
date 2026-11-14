@@ -32,6 +32,17 @@ void n64_rdp_flush(n64_rdp *d);
  * index = byte address >> 1. The VI's anti-aliasing filter reads them (n64_vi.c). NULL when the renderer has none. */
 const uint8_t *n64_rdp_hidden_bits(n64_rdp *d);
 
+/* Back ends (XBA-173, n64_rdp_backend.h): the software RDP (n64_rdp.c) and, in builds with XBR_N64_RDP_VULKAN, the
+ * Vulkan one (paraLLEl-RDP on a compute device, n64_rdp_vk.cpp). n64_rdp_create takes the back end set here, else
+ * $RECOMP_N64_RDP ("vulkan", "software" or "auto"), else auto: Vulkan on Android when the build has it and a device
+ * with the features it needs is there, software elsewhere. A Vulkan RDP that cannot start falls back to software. On
+ * the Vulkan RDP n64_rdp_set_threads is a no-op (returns 1) and n64_rdp_flush waits for the GPU (the VI reads RDRAM
+ * next). */
+typedef enum { N64_RDP_AUTO = 0, N64_RDP_SOFTWARE = 1, N64_RDP_VULKAN = 2 } n64_rdp_backend;
+void n64_rdp_set_backend(n64_rdp_backend b); /* for the next n64_rdp_create calls; N64_RDP_AUTO: back to the default */
+n64_rdp_backend n64_rdp_backend_parse(const char *s); /* "vulkan" / "software" / anything else: auto */
+const char *n64_rdp_backend_name(const n64_rdp *d); /* "software" or "vulkan" */
+
 #ifdef __cplusplus
 }
 #endif
