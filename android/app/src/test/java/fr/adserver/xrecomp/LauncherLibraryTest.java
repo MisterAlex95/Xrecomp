@@ -821,7 +821,7 @@ public class LauncherLibraryTest {
 
     /**
      * XBA-174: an N64 card is Ready (the N64 badge, no chip); A opens its Home, even without the toolchain: Play first
-     * and the pak in the controller beside it, no Prepare (no N64 recompiler yet). The pak button switches this game
+     * and the pak in the controller beside it, no Prepare without the toolchain (n64HomePrepares: with it). The pak button switches this game
      * to the rumble pak and back (N64Pak, a file per game; the note says which); Play starts the game activity with
      * the cartridge and the library key n64-<code>-<crc1>. Start on the card launches at once.
      */
@@ -897,7 +897,114 @@ public class LauncherLibraryTest {
         assertEquals(LauncherActivity.Screen.LIBRARY, b.screenForTest());
     }
 
-    /** A .chd plays but has no Prepare (XBA-168: the PS1 recompiler reads .cue / .bin / .iso); a GBA ROM has one. */
+    /**
+     * XBA-174: with the toolchain, an N64 Home has Prepare like a PS1 disc's: Play first, Prepare beside it, the pak
+     * last; « Not prepared » (with the pak hint). Prepare starts PrepareService with the cartridge and the library key
+     * n64-<code>-<crc1> and shows the Preparing screen; a valid pack says « Prepared »; code the runs found since
+     * offers Prepare again; Play launches the cartridge in every state.
+     */
+    @Test
+    public void n64HomePrepares() throws Exception {
+        Toolchain.assetsOverride = TestSupport.toolAssets(tmp.newFolder("assets"), "1");
+        Toolchain.nativeDirOverride = TestSupport.fakeNativeDir(tmp.getRoot()).getAbsolutePath();
+        folderGame(0);
+        File dir = tmp.newFolder("n64");
+        File rom = new File(dir, "Star Race.v64");
+        TestSupport.write(rom, ConsoleTest.n64(1));
+        useFolder();
+        Library.addFolder(app, "content://com.android.externalstorage.documents/tree/primary%3An64",
+                          dir.getAbsolutePath());
+        String key = "n64-NSME-635A2BFF";
+        LauncherActivity a = launch();
+        a.forceFocusForTest();
+        idle(300);
+        card(a, "Star Race").requestFocusFromTouch();
+        idle(300);
+        key(a, KeyEvent.KEYCODE_BUTTON_A);
+        assertEquals(LauncherActivity.Screen.ROM_HOME, a.screenForTest());
+        assertNull("not launched", shadowOf(a).getNextStartedActivity());
+        assertEquals(key, a.romEntryForTest().tid);
+        assertEquals(app.getString(R.string.PLAY), a.homePrimaryForTest().title);
+        assertEquals(app.getString(R.string.ROM_N64_NOT_PREPARED_NOTE), a.noteForTest());
+        TestSupport.screenshot(a.getWindow().getDecorView(), "n64-3-home-not-prepared");
+
+        // Play, Prepare, the pak: the pak is last.
+        a.forceFocusForTest();
+        idle(300);
+        key(a, KeyEvent.KEYCODE_DPAD_RIGHT);
+        key(a, KeyEvent.KEYCODE_DPAD_RIGHT);
+        View pak = a.focusForTest();
+        assertTrue(pak instanceof Widgets.PillButton);
+        assertEquals(app.getString(R.string.N64_PAK_CONTROLLER), ((Widgets.PillButton)pak).title);
+
+        // Prepare (right of Play): the service with the cartridge and the library key, then the Preparing screen.
+        key(a, KeyEvent.KEYCODE_DPAD_LEFT);
+        View prep = a.focusForTest();
+        assertTrue(prep instanceof Widgets.PillButton);
+        assertEquals(app.getString(R.string.PREPARE), ((Widgets.PillButton)prep).title);
+        key(a, KeyEvent.KEYCODE_BUTTON_A);
+        Intent started = shadowOf(app).getNextStartedService();
+        assertNotNull("PrepareService started", started);
+        assertEquals(PrepareService.ACTION_START, started.getAction());
+        assertEquals(key, started.getStringExtra(PrepareService.EXTRA_TITLE_ID));
+        assertEquals(rom.getAbsolutePath(), started.getStringExtra(PrepareService.EXTRA_GAME_DIR));
+        assertEquals(LauncherActivity.Screen.PREPARE, a.screenForTest());
+        assertEquals(PrepareProtocol.RUNNING, PrepareProtocol.readStatus(PrepareService.statusFile(app, key)).state);
+
+        // Done: a valid pack (console n64). Its Home says Prepared, Play first, no second Prepare.
+        File pdir = Pack.packDir(app.getFilesDir(), key);
+        TestSupport.write(new File(pdir, "libtitle.so"), new byte[16]);
+        org.json.JSONObject o = new org.json.JSONObject().put("format", 1).put("console", "n64")
+                .put("title_key", "NSME-635A2BFF").put("abi", "arm64-v8a").put("shell_abi", Pack.SHELL_ABI)
+                .put("lib", "libtitle.so").put("lib_size", 16).put("source_sha256", "ab").put("discovered", 1);
+        TestSupport.write(new File(pdir, "pack.json"), o.toString());
+        PrepareProtocol.Status st = PrepareProtocol.readStatus(PrepareService.statusFile(app, key));
+        st.state = PrepareProtocol.DONE;
+        PrepareProtocol.writeStatus(PrepareService.statusFile(app, key), st);
+        TestSupport.write(Pack.discoveredFile(app.getFilesDir(), key),
+                          "807FFEA0 9B0F0C6562018CB6 3C018080\n");   // what the pack was built with
+        LauncherActivity b = launch();
+        b.forceFocusForTest();
+        idle(300);
+        card(b, "Star Race").requestFocusFromTouch();
+        idle(300);
+        key(b, KeyEvent.KEYCODE_BUTTON_A);
+        assertEquals(LauncherActivity.Screen.ROM_HOME, b.screenForTest());
+        assertEquals(app.getString(R.string.ROM_PREPARED_NOTE), b.noteForTest());
+        b.forceFocusForTest();
+        idle(300);
+        key(b, KeyEvent.KEYCODE_DPAD_RIGHT);
+        View next = b.focusForTest();
+        assertTrue("the pak right after Play", next instanceof Widgets.PillButton
+                   && app.getString(R.string.N64_PAK_CONTROLLER).equals(((Widgets.PillButton)next).title));
+        TestSupport.screenshot(b.getWindow().getDecorView(), "n64-4-home-prepared");
+
+        // The runs found code since (two more records): Prepare again.
+        TestSupport.write(Pack.discoveredFile(app.getFilesDir(), key),
+                          "807FFEA0 9B0F0C6562018CB6 3C018080\n807FFEA8 4913B54793434260 3C018080\n"
+                          + "80300000 0000000000000001 03E00008\n");
+        LauncherActivity c = launch();
+        c.forceFocusForTest();
+        idle(300);
+        card(c, "Star Race").requestFocusFromTouch();
+        idle(300);
+        key(c, KeyEvent.KEYCODE_BUTTON_A);
+        assertEquals(app.getString(R.string.ROM_NEW_CODE_NOTE, 2), c.noteForTest());
+        TestSupport.screenshot(c.getWindow().getDecorView(), "n64-5-home-new-code");
+
+        // Play (focused first): the cartridge to the game activity.
+        key(c, KeyEvent.KEYCODE_BUTTON_A);
+        Intent game = shadowOf(c).getNextStartedActivity();
+        assertNotNull(game);
+        assertEquals(ShellActivity.class.getName(), game.getComponent().getClassName());
+        assertEquals(rom.getAbsolutePath(), GameStore.launchedRom(app));
+        assertEquals(key, GameStore.launchedTitleId(app));
+    }
+
+    /**
+     * A .chd plays but has no Prepare (XBA-168: the PS1 recompiler reads .cue / .bin / .iso); a GBA ROM and an N64
+     * cartridge have one.
+     */
     @Test
     public void romPrepares() {
         LibraryScreen.Entry e = new LibraryScreen.Entry("ps1-SLUS-00594");
@@ -909,7 +1016,7 @@ public class LauncherLibraryTest {
         e.active = null;
         assertTrue(LauncherActivity.romPrepares(e));
         assertTrue(LauncherActivity.romPrepares(new LibraryScreen.Entry("gba-AXVE-00000001")));
-        assertFalse(LauncherActivity.romPrepares(new LibraryScreen.Entry("n64-NSME-00000001")));
+        assertTrue(LauncherActivity.romPrepares(new LibraryScreen.Entry("n64-NSME-00000001")));
     }
 
     /** The track documents of a .cue seen through SAF (XBA-168): their URIs under the tree; nothing otherwise. */

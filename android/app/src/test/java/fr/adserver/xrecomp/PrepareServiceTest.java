@@ -369,6 +369,37 @@ public class PrepareServiceTest {
     }
 
     /**
+     * XBA-174: the ROM an N64 Prepare reads. A path goes as it is (tools.prepare reads any byte order in place); a
+     * document is copied into the work folder as rom.z64 (its first word says the order), 64 MB at most.
+     */
+    @Test
+    public void n64Source() throws Exception {
+        File work = tmp.newFolder("work64");
+        assertEquals("/sdcard/n64/Game.v64", PrepareService.romSource(app, "/sdcard/n64/Game.v64", work, null,
+                                                                      PrepareService.N64_ROM_COPY,
+                                                                      PrepareService.N64_ROM_MAX));
+        assertEquals(64L << 20, PrepareService.N64_ROM_MAX);
+        android.net.Uri u = android.net.Uri.parse(
+            "content://com.android.externalstorage.documents/tree/primary%3An64/document/primary%3An64%2FGame.v64");
+        byte[] rom = ConsoleTest.n64(1);
+        org.robolectric.Shadows.shadowOf(app.getContentResolver())
+            .registerInputStream(u, new java.io.ByteArrayInputStream(rom));
+        String out = PrepareService.romSource(app, u.toString(), work, null, PrepareService.N64_ROM_COPY,
+                                              PrepareService.N64_ROM_MAX);
+        assertEquals(new File(work, "rom.z64").getAbsolutePath(), out);
+        org.junit.Assert.assertArrayEquals(rom, java.nio.file.Files.readAllBytes(new File(out).toPath()));
+        android.net.Uri big = android.net.Uri.parse(u + "2");
+        org.robolectric.Shadows.shadowOf(app.getContentResolver())
+            .registerInputStream(big, new java.io.ByteArrayInputStream(new byte[64]));
+        try {
+            PrepareService.romSource(app, big.toString(), work, null, PrepareService.N64_ROM_COPY, 32);
+            org.junit.Assert.fail("over the limit");
+        } catch (java.io.IOException e) {
+            assertTrue(e.getMessage(), e.getMessage().contains("N64"));
+        }
+    }
+
+    /**
      * XBA-168: the disc a PS1 Prepare reads. A path goes as it is (tools.prepare opens a .cue and its tracks itself);
      * a .cue document's track documents come from the library index (its item's parts, under the same tree).
      */

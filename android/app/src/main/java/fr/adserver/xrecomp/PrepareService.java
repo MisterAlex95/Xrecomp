@@ -492,9 +492,13 @@ public class PrepareService extends Service {
         }
         // A GBA game (XBA-158): its ROM, a path, or a library folder's document that tools.prepare cannot open: then
         // copied into the work folder first (32 MB at most), where tools.prepare keeps its own copy anyway. A PS1 disc
-        // (XBA-168): a path as it is; a document: the sectors that lead to its boot EXE, copied (Ps1Disc).
+        // (XBA-168): a path as it is; a document: the sectors that lead to its boot EXE, copied (Ps1Disc). An N64
+        // cartridge (XBA-174): a path as it is (tools.prepare reads it in place, any byte order); a document copied
+        // into the work folder (64 MB at most).
+        final Console console = Console.ofKey(titleId);
         final String source = !rom ? gameDir
-                              : Console.ofKey(titleId) == Console.PS1 ? ps1Source(c, gameDir, titleId, work, runner)
+                              : console == Console.PS1 ? ps1Source(c, gameDir, titleId, work, runner)
+                              : console == Console.N64 ? romSource(c, gameDir, work, runner, N64_ROM_COPY, N64_ROM_MAX)
                               : romSource(c, gameDir, work, runner);
         return new PrepareRunner.CommandFactory() {
             @Override
@@ -560,9 +564,19 @@ public class PrepareService extends Service {
      * the Storage Access Framework) copied to &lt;work&gt;/rom.gba.
      */
     static String romSource(Context c, String spec, File work, PrepareRunner runner) throws IOException {
+        return romSource(c, spec, work, runner, "rom.gba", ROM_MAX);
+    }
+
+    /** The largest ROM copied for an N64 Prepare (n64_core.h N64_ROM_MAX), and the copy's name in the work folder. */
+    static final long N64_ROM_MAX = 64L << 20;
+    static final String N64_ROM_COPY = "rom.z64";   // tools.prepare reads its first word: any byte order
+
+    /** romSource with the copy's name and largest size (an N64 cartridge: rom.z64, 64 MB). */
+    static String romSource(Context c, String spec, File work, PrepareRunner runner, String name, long max)
+            throws IOException {
         if (!spec.startsWith("content:"))
             return spec;
-        File out = new File(work, "rom.gba"), tmp = new File(work, "rom.gba.tmp");
+        File out = new File(work, name), tmp = new File(work, name + ".tmp");
         long n = 0;
         try (java.io.InputStream in = c.getContentResolver().openInputStream(android.net.Uri.parse(spec));
              java.io.FileOutputStream o = new java.io.FileOutputStream(tmp)) {
@@ -572,8 +586,9 @@ public class PrepareService extends Service {
             int r;
             while ((r = in.read(buf)) > 0) {
                 n += r;
-                if (n > ROM_MAX)
-                    throw new IOException(spec + " is over 32 MB: not a GBA ROM");
+                if (n > max)
+                    throw new IOException(spec + " is over " + (max >> 20) + " MB: not a "
+                                          + (max == ROM_MAX ? "GBA" : "N64") + " ROM");
                 o.write(buf, 0, r);
             }
             o.getFD().sync();

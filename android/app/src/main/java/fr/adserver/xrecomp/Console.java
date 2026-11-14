@@ -74,11 +74,10 @@ enum Console {
 
     /**
      * A game of this console that starts from its file can also be prepared (translated for the device into a pack):
-     * the GBA (XBA-158) and the PS1 (XBA-168; not a .chd image: LauncherActivity.romPrepares). Not the N64 until its
-     * recompiler lands (XBA-174): its Home has Play only.
+     * the GBA (XBA-158), the PS1 (XBA-168; not a .chd image: LauncherActivity.romPrepares) and the N64 (XBA-174).
      */
     boolean prepares() {
-        return this == GBA || this == PS1;
+        return this == GBA || this == PS1 || this == N64;
     }
 
     /**

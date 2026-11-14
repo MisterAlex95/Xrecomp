@@ -3861,16 +3861,17 @@ public class LauncherActivity extends Activity {
     }
 
     /**
-     * A GBA game's or a PS1 disc's Home: its title, one line (« Prepared · runs natively », « Not prepared · plays
-     * in the interpreter », the Prepare's progress or failure, new code found since the pack), Play first (always:
-     * the interpreter needs no pack) and the Prepare action beside it (not for a .chd: romPrepares).
+     * A GBA game's, a PS1 disc's or an N64 cartridge's Home: its title, one line (« Prepared · runs natively », « Not
+     * prepared · plays in the interpreter », the Prepare's progress or failure, new code found since the pack), Play
+     * first (always: the interpreter needs no pack) and the Prepare action beside it (not for a .chd: romPrepares; not
+     * without the toolchain, which only an N64 Home is opened without: Play and its pak then), the N64's pak last.
      */
     private void buildRomHome() {
         LibraryScreen.Entry e = romEntry();
         Prep p = romPrep(e);
         romPrepShown = p;
         PrepareProtocol.Status ps = e.facts.prepare;
-        boolean prepares = romPrepares(e);
+        boolean prepares = romPrepares(e) && p != Prep.OFF;   // OFF: no toolchain
         int found = p == Prep.PLAYABLE ? Pack.newlyDiscovered(getFilesDir(), e.tid) : 0;
         LinearLayout info = hero(e.title(), false, null);
         String line;
@@ -3943,7 +3944,7 @@ public class LauncherActivity extends Activity {
 
         if (e.chip == GameState.Chip.RUNNING)
             setNote(getString(R.string.GAME_RUNNING_HOME), NOTE_INFO);
-        else if (n64)
+        else if (n64 && !prepares)
             setNote(getString(n64Rumble(e.tid) ? R.string.ROM_N64_NOTE_RUMBLE : R.string.ROM_N64_NOTE), NOTE_INFO);
         else if (!prepares)
             setNote(getString(R.string.ROM_PS1_CHD_NOTE), NOTE_INFO);
@@ -3953,7 +3954,7 @@ public class LauncherActivity extends Activity {
             setNote(found > 0 ? getString(R.string.ROM_NEW_CODE_NOTE, found) : getString(R.string.ROM_PREPARED_NOTE),
                     NOTE_INFO);
         else if (p == Prep.NEEDED || p == Prep.CANCELLED || p == Prep.INTERRUPTED)
-            setNote(getString(R.string.ROM_NOT_PREPARED_NOTE), NOTE_INFO);
+            setNote(getString(n64 ? R.string.ROM_N64_NOT_PREPARED_NOTE : R.string.ROM_NOT_PREPARED_NOTE), NOTE_INFO);
     }
 
     /** An N64 game plays with the rumble pak (N64Pak): its own choice, else recomp.cfg's RECOMP_N64_PAK line. */
@@ -3963,8 +3964,8 @@ public class LauncherActivity extends Activity {
     }
 
     /**
-     * Whether a game that starts from its file has a Prepare: its console's (Console.prepares: the GBA, the PS1), and
-     * not a .chd image (XBA-168: the PS1 recompiler reads .cue / .bin / .iso; a .chd plays, interpreted).
+     * Whether a game that starts from its file has a Prepare: its console's (Console.prepares: the GBA, the PS1, the
+     * N64), and not a .chd image (XBA-168: the PS1 recompiler reads .cue / .bin / .iso; a .chd plays, interpreted).
      */
     static boolean romPrepares(LibraryScreen.Entry e) {
         if (!e.console().prepares())
@@ -3974,9 +3975,9 @@ public class LauncherActivity extends Activity {
     }
 
     /**
-     * Prepare (or Prepare again) for a GBA game or a PS1 disc: PrepareService with the ROM or the disc (a path, or the
-     * document URI: the service copies a ROM into the game's work folder, the sectors of a disc that lead to its boot
-     * EXE) and its library key as title ID; the Preparing screen follows. The space check is the Xbox one's: a pack
+     * Prepare (or Prepare again) for a GBA game, a PS1 disc or an N64 cartridge: PrepareService with the ROM or the
+     * disc (a path, or the document URI: the service copies a ROM into the game's work folder, the sectors of a disc
+     * that lead to its boot EXE) and its library key as title ID; the Preparing screen follows. The space check is the Xbox one's: a pack
      * is small, but the compiler and its temporary files are not.
      */
     private void startRomPrepare(LibraryScreen.Entry e) {

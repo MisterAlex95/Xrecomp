@@ -101,5 +101,6 @@
     <string name="N64_PAK_CONTROLLER">Controller Pak</string>
     <string name="N64_PAK_RUMBLE">Rumble Pak</string>
     <string name="ROM_N64_NOTE">Jouer lance le jeu depuis son fichier de cartouche, sans BIOS. Les sauvegardes et le Controller Pak sont conservés pour chaque jeu. Le second bouton met un Rumble Pak dans la manette à la place (sans les sauvegardes du Controller Pak).</string>
+    <string name="ROM_N64_NOT_PREPARED_NOTE">Jouer lance le jeu tout de suite depuis son fichier de cartouche, dans l\'interpréteur. Préparer le traduit pour cet appareil (quelques minutes) pour qu\'il tourne en natif ; vous pouvez jouer pendant ce temps. Le dernier bouton choisit le Controller Pak (sauvegardes) ou un Rumble Pak.</string>
     <string name="ROM_N64_NOTE_RUMBLE">Jouer lance le jeu depuis son fichier de cartouche, sans BIOS. Un Rumble Pak est dans la manette : elle vibre quand le jeu le demande. Le second bouton remet le Controller Pak (ses sauvegardes).</string>
 </resources>

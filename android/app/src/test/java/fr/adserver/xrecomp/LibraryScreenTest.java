@@ -221,7 +221,7 @@ public class LibraryScreenTest {
     /**
      * XBA-178 / XBA-157: a game of another console is keyed by console + title key; a GBA game is Ready (its runtime
      * plays the ROM as it is: no import; its Prepare, XBA-158, only speeds it up), Running while it runs; a PS1 disc
-     * the same with its Prepare (XBA-168); an N64 cartridge Ready too, without a Prepare (XBA-174).
+     * the same with its Prepare (XBA-168); an N64 cartridge Ready too, with its Prepare (XBA-174).
      */
     @Test
     public void otherConsoles() throws Exception {
@@ -266,11 +266,12 @@ public class LibraryScreenTest {
         assertEquals(GameState.Chip.RUNNING, LibraryScreen.entry(files, p.tid, new Library.Games(), x, env).chip);
         env.runningTid = null;
 
-        // XBA-174: an N64 cartridge launches as it is, Ready; no Prepare (no N64 recompiler yet), so no pack state.
+        // XBA-174: an N64 cartridge launches as it is, Ready, and has its Prepare (with the toolchain) too.
         LibraryScreen.Entry n = LibraryScreen.entry(files, "n64-NSME-635A2BFF", new Library.Games(), x, env);
         assertEquals(Console.N64, n.console());
         assertTrue(n.directLaunch());
-        assertFalse("no Prepare", n.facts.toolchain);
+        assertTrue("its Prepare (XBA-174)", n.facts.toolchain);
+        assertEquals(Pack.Check.NO_PACK, n.facts.pack);
         assertEquals(GameState.Chip.READY, n.chip);
         assertTrue(GameState.playable(n.chip));
         env.runningTid = "n64-NSME-635A2BFF";
