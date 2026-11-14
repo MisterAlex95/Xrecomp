@@ -101,6 +101,10 @@ int n64_runtime_start(const char *rom, const char *pack_lib, const char *title_k
  * RB -> R, LT or RT past a quarter -> Z, Start -> Start, D-pad -> D-pad, the right stick past half its travel ->
  * the C buttons (up / down / left / right). Opposite directions at once cancel. */
 uint16_t n64_runtime_pad_buttons(uint32_t buttons, int rx, int ry, int lt, int rt);
+/* The N64 buttons for console_pad targets (bit N64_T_* of console_pad.h), opposite directions cancelled. The game
+ * reads its pads through the player's mapping (RECOMP_N64_PAD_MAP, console_pad.h); n64_runtime_pad_buttons is that
+ * mapping's defaults, the layout above. */
+uint16_t n64_runtime_buttons_of(uint32_t targets);
 
 /* An SDL left stick (-32768..32767 each, +y down) as the N64 stick (+y up), range = the value at full travel on an
  * axis (the real stick's gate is about +-80; 0: 80), dead = the radial dead zone in SDL units (-1: 8 % of the travel).

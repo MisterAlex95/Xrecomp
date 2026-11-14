@@ -11,6 +11,7 @@ project(xbr_host C)
 #                   host_cpus, recomp_cfg, recomp_exit_hook
 #   recomp_storage  data and save directories (recomp_storage_resolve_entry)
 #   input_ports     which controller is which port (src/input/mapping/input_ports.cmake)
+#   console_pad     a host pad to a console's pad, the player's mapping (src/input/mapping/console_pad.cmake)
 #   host_framegen   frame generation pacer + fake generator (src/framegen/host_framegen.cmake)
 #   xbr_host        the SDL parts: host_window (video), host_pad (input), host_audio (audio), perf_overlay,
 #                   the Android display clock (display_vsync_android.c)
@@ -28,6 +29,7 @@ get_filename_component(XBR_HOST_SRC "${CMAKE_CURRENT_SOURCE_DIR}/.." ABSOLUTE)
 
 include(${XBR_HOST_SRC}/platform/host_core.cmake)
 include(${XBR_HOST_SRC}/input/mapping/input_ports.cmake)
+include(${XBR_HOST_SRC}/input/mapping/console_pad.cmake)
 include(${XBR_HOST_SRC}/framegen/host_framegen.cmake)
 
 if(NOT TARGET SDL2::SDL2)
@@ -51,7 +53,7 @@ if(NOT TARGET xbr_host)
         ${XBR_HOST_SRC}/video
         ${XBR_HOST_SRC}/input
         ${XBR_HOST_SRC}/audio)
-    target_link_libraries(xbr_host PUBLIC xbr_host_core recomp_storage input_ports host_framegen SDL2::SDL2)
+    target_link_libraries(xbr_host PUBLIC xbr_host_core recomp_storage input_ports console_pad host_framegen SDL2::SDL2)
     set_target_properties(xbr_host PROPERTIES POSITION_INDEPENDENT_CODE ON)
     target_compile_options(xbr_host PRIVATE -Wall -Wextra -O2)
 endif()

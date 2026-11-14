@@ -14,6 +14,7 @@
 #include "n64_runtime.h"
 
 #include "host_audio.h"
+#include "console_pad.h"
 #include "host_pad.h"
 #include "host_window.h"
 #include "n64_core.h"
@@ -51,25 +52,21 @@ const char *n64_runtime_version(void)
 
 /* ---- Pure helpers --------------------------------------------------------------------------------------------- */
 
-uint16_t n64_runtime_pad_buttons(uint32_t b, int rx, int ry, int lt, int rt)
+/* The player's mapping (console_pad.h, RECOMP_N64_PAD_MAP), loaded when a game starts; the defaults until then. */
+static ConsolePadMap s_pad_map;
+
+uint16_t n64_runtime_buttons_of(uint32_t t)
 {
-    const int c_dead = 16384, trig = 8192;
+    static const uint16_t bits[N64_T_COUNT] = {
+        [N64_T_A] = N64_BTN_A, [N64_T_B] = N64_BTN_B, [N64_T_Z] = N64_BTN_Z, [N64_T_L] = N64_BTN_L,
+        [N64_T_R] = N64_BTN_R, [N64_T_START] = N64_BTN_START, [N64_T_UP] = N64_BTN_DUP, [N64_T_DOWN] = N64_BTN_DDOWN,
+        [N64_T_LEFT] = N64_BTN_DLEFT, [N64_T_RIGHT] = N64_BTN_DRIGHT, [N64_T_C_UP] = N64_BTN_CUP,
+        [N64_T_C_DOWN] = N64_BTN_CDOWN, [N64_T_C_LEFT] = N64_BTN_CLEFT, [N64_T_C_RIGHT] = N64_BTN_CRIGHT,
+    };
     uint16_t k = 0;
-    if (b & HOST_PAD_A) k |= N64_BTN_A;
-    if (b & (HOST_PAD_B | HOST_PAD_X)) k |= N64_BTN_B;
-    if (b & HOST_PAD_Y) k |= N64_BTN_CUP;
-    if (b & HOST_PAD_LSHOULDER) k |= N64_BTN_L;
-    if (b & HOST_PAD_RSHOULDER) k |= N64_BTN_R;
-    if (lt > trig || rt > trig) k |= N64_BTN_Z;
-    if (b & HOST_PAD_START) k |= N64_BTN_START;
-    if (b & HOST_PAD_DPAD_UP) k |= N64_BTN_DUP;
-    if (b & HOST_PAD_DPAD_DOWN) k |= N64_BTN_DDOWN;
-    if (b & HOST_PAD_DPAD_LEFT) k |= N64_BTN_DLEFT;
-    if (b & HOST_PAD_DPAD_RIGHT) k |= N64_BTN_DRIGHT;
-    if (ry < -c_dead) k |= N64_BTN_CUP;
-    if (ry > c_dead) k |= N64_BTN_CDOWN;
-    if (rx < -c_dead) k |= N64_BTN_CLEFT;
-    if (rx > c_dead) k |= N64_BTN_CRIGHT;
+    for (int i = 0; i < N64_T_COUNT; i++)
+        if (t & (1u << i))
+            k |= bits[i];
     /* Opposite directions at once (two pads, a worn stick): a real controller cannot, some games misbehave. */
     const uint16_t pairs[4][2] = {{N64_BTN_DUP, N64_BTN_DDOWN}, {N64_BTN_DLEFT, N64_BTN_DRIGHT},
                                   {N64_BTN_CUP, N64_BTN_CDOWN}, {N64_BTN_CLEFT, N64_BTN_CRIGHT}};
@@ -77,6 +74,20 @@ uint16_t n64_runtime_pad_buttons(uint32_t b, int rx, int ry, int lt, int rt)
         if ((k & pairs[i][0]) && (k & pairs[i][1]))
             k &= (uint16_t)~(pairs[i][0] | pairs[i][1]);
     return k;
+}
+
+uint16_t n64_runtime_pad_buttons(uint32_t b, int rx, int ry, int lt, int rt)
+{
+    ConsolePadMap m;
+    ConsolePadOut o;
+    HostPadState st = {.connected = 1, .buttons = b};
+    st.axis[HOST_PAD_AXIS_RX] = (int16_t)rx;
+    st.axis[HOST_PAD_AXIS_RY] = (int16_t)ry;
+    st.axis[HOST_PAD_AXIS_LT] = (int16_t)lt;
+    st.axis[HOST_PAD_AXIS_RT] = (int16_t)rt;
+    console_pad_defaults(&m, CONSOLE_PAD_N64);
+    console_pad_apply(&m, &st, &o);
+    return n64_runtime_buttons_of(o.buttons);
 }
 
 void n64_runtime_stick(int lx, int ly, int range, int dead, int8_t *x, int8_t *y)
@@ -522,22 +533,28 @@ typedef struct pad_in {
     int8_t x, y;
 } pad_in;
 
-/* The host pads for N64 controller `port`: with one player every pad drives controller 1 (buttons merged, the most
- * deflected stick wins); with more, host pad N drives controller N. */
+/* The host pads for N64 controller `port`, through the player's mapping (the on-screen pad joins host pad 1,
+ * console_pad_read; the mapping's range / deadzone, when set, over the runtime's): with one player every pad drives
+ * controller 1 (buttons merged, the most deflected stick wins); with more, host pad N drives controller N. */
 static void pads_read(int port, int players, int range, int dead, pad_in *out)
 {
     memset(out, 0, sizeof *out);
+    if (!s_pad_map.console)
+        console_pad_defaults(&s_pad_map, CONSOLE_PAD_N64);
+    if (s_pad_map.range > 0)
+        range = s_pad_map.range;
+    if (s_pad_map.deadzone >= 0)
+        dead = 32767 * s_pad_map.deadzone / 100;
     for (int p = 0; p < HOST_PAD_PORTS; p++) {
         if (players >= 2 ? p != port : port != 0)
             continue;
-        HostPadState st;
-        if (!host_pad_read(p, &st))
+        ConsolePadOut o;
+        if (!console_pad_read(&s_pad_map, p, &o))
             continue;
         out->any = 1;
-        out->buttons |= n64_runtime_pad_buttons(st.buttons, st.axis[HOST_PAD_AXIS_RX], st.axis[HOST_PAD_AXIS_RY],
-                                                st.axis[HOST_PAD_AXIS_LT], st.axis[HOST_PAD_AXIS_RT]);
+        out->buttons |= n64_runtime_buttons_of(o.buttons);
         int8_t x, y;
-        n64_runtime_stick(st.axis[HOST_PAD_AXIS_LX], st.axis[HOST_PAD_AXIS_LY], range, dead, &x, &y);
+        n64_runtime_stick(o.stick_x[0], o.stick_y[0], range, dead, &x, &y);
         if (abs(x) + abs(y) > abs(out->x) + abs(out->y)) {
             out->x = x;
             out->y = y;
@@ -719,6 +736,7 @@ int n64_runtime_run(const n64_runtime_opts *o)
     }
     if (!window)
         host_pad_init();
+    console_pad_load(&s_pad_map, CONSOLE_PAD_N64, getenv(console_pad_env(CONSOLE_PAD_N64)));
     int audio = host_audio_open(N64_AUDIO_RATE, 2);
     printf("n64: window %s (4:3, %s, %s), audio %s, pads %u, %s%s, RDP threads %d\n", window ? "on" : "off",
            scale == HOST_SCALE_INTEGER ? "integer" : "aspect", filter == HOST_FILTER_NEAREST ? "nearest" : "linear",

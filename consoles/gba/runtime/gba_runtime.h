@@ -85,6 +85,10 @@ int gba_runtime_key(const uint8_t *rom, size_t size, char *out, size_t out_n);
  * rest there), shoulders -> L / R, triggers past half -> L / R, Start -> Start, Back -> Select, D-pad and left stick
  * (past a third of its travel) -> D-pad. */
 uint16_t gba_runtime_pad_keys(uint32_t buttons, int lx, int ly, int lt, int rt);
+/* The GBA keys for console_pad targets (bit GBA_T_* of console_pad.h), opposite directions cancelled. The game reads
+ * its pads through the player's mapping (RECOMP_GBA_PAD_MAP, console_pad.h); gba_runtime_pad_keys is that mapping's
+ * defaults, the fixed layout above. */
+uint16_t gba_runtime_keys_of(uint32_t targets);
 
 /* RGB555 (bit 0-4 red, 5-9 green, 10-14 blue) to RGBA8 bytes (alpha 255), n pixels; 5 bits widened as v << 3 | v >> 2. */
 void gba_runtime_rgb555_to_rgba(const uint16_t *src, uint8_t *dst, size_t n);
