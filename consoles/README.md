@@ -1,7 +1,8 @@
 # Other consoles
 
-XRecomp also runs **Game Boy Advance**, **PlayStation** and **Nintendo 64** games, statically recompiled the same way
-as Xbox discs. Goal, order, rules (legal, Linux arm64 first), layout, pipeline and milestones are in the Plane spec:
+XRecomp is adding **Game Boy Advance**, **PlayStation** and **Nintendo 64**, statically recompiled the same way as
+Xbox discs. This is early work: the layout, build options and test corpus are in place, the runtimes are empty, and no
+game for these consoles runs yet. Goal, order, rules (legal, Linux arm64 first), layout, pipeline and milestones are in the Plane spec:
 `plane page show -p XBA "Spec · Other consoles"` (epics C0, G, P, N).
 
 | Directory | Console | CPU |

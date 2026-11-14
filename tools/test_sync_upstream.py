@@ -185,6 +185,19 @@ def test_a_real_conflict_still_stops_the_sync(repos):
     assert git(fork, "status", "--porcelain").stdout == ""
 
 
+def test_a_readme_conflict_keeps_ours_and_says_what_to_refresh(repos):
+    up, fork = repos
+    commit(up, {"README.md": "# xboxrecomp\n\nv1\n"}, "upstream: README.md")
+    sync(fork)
+    commit(fork, {"README.md": "# XRecomp\n\nrewritten\n"}, "fork: README rewritten")
+    commit(up, {"README.md": "# xboxrecomp\n\nv2\n"}, "upstream: next release")
+    r = sync(fork)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "kept ours: README.md" in r.stdout and "docs/upstream/README.md" in r.stdout
+    assert (fork / "README.md").read_text() == "# XRecomp\n\nrewritten\n"
+    assert git(fork, "status", "--porcelain").stdout == ""
+
+
 def test_the_resolver_says_when_no_merge_is_in_progress(repos):
     _, fork = repos
     r = subprocess.run([sys.executable, os.path.join(TOOLS, "sync_upstream_resolve.py"), "--repo", str(fork)],

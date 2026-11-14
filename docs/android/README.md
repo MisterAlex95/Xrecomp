@@ -32,7 +32,9 @@ Conflicts that come only from text we renamed in upstream's files resolve by the
 (`tools/sync_upstream_resolve.py`, XBA-138): the neutral include guards of eight headers (`XBOXRECOMP_<FILE>_H`, one
 of them only in its closing `#endif` comment) and the kernel thunk table's default and comment in
 `src/kernel/kernel.h` (XBA-109). The merge of such a file is redone with upstream's side and the merge base translated
-to our names, so only upstream's real change is merged; a new renamed region goes in the script's `REGIONS`. On any
+to our names, so only upstream's real change is merged; a new renamed region goes in the script's `REGIONS`. `README.md` is
+ours (rewritten 2026-11-14): a conflict there keeps our version and prints a reminder to refresh
+[docs/upstream/README.md](../upstream/README.md) and [CHANGELOG.md](../../CHANGELOG.md) from upstream's README. On any
 other conflict the script aborts the merge and lists the files; resolve by hand (`git merge upstream/main` in the main
 worktree) and commit. Tested on fixture repositories (`tools/test_sync_upstream.py`), never against GitHub.
 
