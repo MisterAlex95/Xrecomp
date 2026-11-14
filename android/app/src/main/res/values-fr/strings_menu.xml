@@ -56,4 +56,14 @@
     <string name="MENU_STATE_LOAD_FAILED">Emplacement %1$d : l\'état n\'a pas été chargé</string>
     <string name="CTL_FF">Retour + RT</string>
     <string name="CTL_FF_X">Avance rapide (maintenus)</string>
+    <!-- Sauvegarde / chargement rapides, l'emplacement automatique et la reprise. -->
+    <string name="CTL_QUICK_SAVE">Retour + RB</string>
+    <string name="CTL_QUICK_SAVE_X">Sauvegarde rapide (dernier emplacement)</string>
+    <string name="CTL_QUICK_LOAD">Retour + LB</string>
+    <string name="CTL_QUICK_LOAD_X">Chargement rapide (dernier emplacement)</string>
+    <string name="MENU_STATE_AUTO">Là où vous vous étiez arrêté</string>
+    <string name="MENU_STATE_RESUMED">Reprise là où vous vous étiez arrêté</string>
+    <string name="MENU_STATE_RESUME_FAILED">Reprise impossible : le jeu repart du début</string>
+    <string name="MENU_RESUME_AUTO">Reprendre là où je m\'étais arrêté</string>
+    <string name="MENU_QUIT_CONFIRM_KEPT">Votre progression est gardée pour la prochaine fois</string>
 </resources>

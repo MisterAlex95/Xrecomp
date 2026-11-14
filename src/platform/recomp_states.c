@@ -35,9 +35,10 @@ const char *recomp_states_error(int code)
 
 int recomp_states_slot_path(const char *dir, int slot, char *out, size_t out_n)
 {
-    if (!dir || !*dir || !out || slot < 1 || slot > RECOMP_STATE_SLOTS)
+    if (!dir || !*dir || !out || slot < RECOMP_STATE_AUTO || slot > RECOMP_STATE_SLOTS)
         return -1;
-    int n = snprintf(out, out_n, "%s/state%d.st", dir, slot);
+    int n = slot == RECOMP_STATE_AUTO ? snprintf(out, out_n, "%s/auto.st", dir)
+                                      : snprintf(out, out_n, "%s/state%d.st", dir, slot);
     return n < 0 || (size_t)n >= out_n ? -1 : 0;
 }
 
@@ -242,6 +243,7 @@ static recomp_state_ops s_ops;
 static char s_console[8];
 static char s_dir[1024];
 static int s_attached;
+static int s_quick;   /* the quick slot, 0: not chosen yet this run */
 
 void recomp_states_attach(const recomp_state_ops *ops, const char *dir)
 {
@@ -256,6 +258,7 @@ void recomp_states_attach(const recomp_state_ops *ops, const char *dir)
         s_attached = 0;
         s_dir[0] = 0;
     }
+    s_quick = 0;
     pthread_mutex_unlock(&s_mu);
 }
 
@@ -287,7 +290,7 @@ static atomic_uint s_loads; /* states loaded (recomp_states_loads) */
  * detaches before it takes its own frame lock to end. */
 static int run_op(int slot, int load)
 {
-    if (slot < 1 || slot > RECOMP_STATE_SLOTS)
+    if (slot < RECOMP_STATE_AUTO || slot > RECOMP_STATE_SLOTS)
         return RECOMP_STATE_ESLOT;
     pthread_mutex_lock(&s_mu);
     int rc = RECOMP_STATE_ENOGAME;
@@ -295,6 +298,8 @@ static int run_op(int slot, int load)
         rc = load ? s_ops.load(slot, s_ops.user) : s_ops.save(slot, s_ops.user);
     if (load && rc == RECOMP_STATE_OK)
         atomic_fetch_add(&s_loads, 1);
+    if (rc == RECOMP_STATE_OK && slot != RECOMP_STATE_AUTO)
+        s_quick = slot;
     pthread_mutex_unlock(&s_mu);
     return rc;
 }
@@ -311,8 +316,108 @@ int recomp_states_info(int slot, recomp_state_meta *meta, uint16_t *thumb)
     int ok = s_attached && recomp_states_slot_path(s_dir, slot, path, sizeof path) == 0;
     pthread_mutex_unlock(&s_mu);
     if (!ok)
-        return slot < 1 || slot > RECOMP_STATE_SLOTS ? RECOMP_STATE_ESLOT : RECOMP_STATE_ENOGAME;
+        return slot < RECOMP_STATE_AUTO || slot > RECOMP_STATE_SLOTS ? RECOMP_STATE_ESLOT : RECOMP_STATE_ENOGAME;
     return recomp_states_read(path, meta, thumb, NULL, NULL);
+}
+
+/* ---- Quick save / load, resume, events ------------------------------------------------------------------------ */
+
+static recomp_state_event s_event;   /* under s_ev_mu */
+static pthread_mutex_t s_ev_mu = PTHREAD_MUTEX_INITIALIZER;
+
+static void note(int kind, int slot, int rc)
+{
+    pthread_mutex_lock(&s_ev_mu);
+    s_event.seq++;
+    s_event.kind = kind;
+    s_event.slot = slot;
+    s_event.rc = rc;
+    pthread_mutex_unlock(&s_ev_mu);
+}
+
+void recomp_states_last_event(recomp_state_event *ev)
+{
+    if (!ev)
+        return;
+    pthread_mutex_lock(&s_ev_mu);
+    *ev = s_event;
+    pthread_mutex_unlock(&s_ev_mu);
+}
+
+int recomp_states_quick_slot(void)
+{
+    pthread_mutex_lock(&s_mu);
+    int q = s_quick;
+    char dir[sizeof s_dir];
+    snprintf(dir, sizeof dir, "%s", s_attached ? s_dir : "");
+    pthread_mutex_unlock(&s_mu);
+    if (q)
+        return q;
+    /* Not chosen yet this run: the most recently saved numbered slot, else slot 1. */
+    int best = 1;
+    int64_t best_ms = 0;
+    for (int slot = 1; dir[0] && slot <= RECOMP_STATE_SLOTS; slot++) {
+        char path[1100];
+        recomp_state_meta m;
+        if (recomp_states_slot_path(dir, slot, path, sizeof path) == 0 &&
+            recomp_states_read(path, &m, NULL, NULL, NULL) == RECOMP_STATE_OK && m.saved_ms > best_ms) {
+            best_ms = m.saved_ms;
+            best = slot;
+        }
+    }
+    return best;
+}
+
+int recomp_states_quick_save(void)
+{
+    int slot = recomp_states_quick_slot();
+    int rc = recomp_states_save(slot);
+    note(RECOMP_STATE_EV_SAVED, slot, rc);
+    return rc;
+}
+
+int recomp_states_quick_load(void)
+{
+    int slot = recomp_states_quick_slot();
+    int rc = recomp_states_load(slot);
+    note(RECOMP_STATE_EV_LOADED, slot, rc);
+    return rc;
+}
+
+int recomp_states_chord(int back, int lshoulder, int rshoulder, int *held, int *swallow)
+{
+    int l = back && lshoulder, r = back && rshoulder, action = RECOMP_CHORD_NONE;
+    if (r && !(*held & 2))
+        action = RECOMP_CHORD_SAVE;
+    else if (l && !(*held & 1))
+        action = RECOMP_CHORD_LOAD;
+    *held = (l ? 1 : 0) | (r ? 2 : 0);
+    if (swallow)
+        *swallow = l || r;
+    return action;
+}
+
+int recomp_states_chord_run(int action)
+{
+    if (action == RECOMP_CHORD_SAVE)
+        return recomp_states_quick_save();
+    if (action == RECOMP_CHORD_LOAD)
+        return recomp_states_quick_load();
+    return RECOMP_STATE_OK;
+}
+
+int recomp_states_resume_enabled(void)
+{
+    const char *v = getenv("RECOMP_STATE_RESUME");
+    return v && (!strcmp(v, "1") || !strcmp(v, "on") || !strcmp(v, "yes"));
+}
+
+int recomp_states_resume(void)
+{
+    int rc = recomp_states_load(RECOMP_STATE_AUTO);
+    if (rc != RECOMP_STATE_EEMPTY)
+        note(RECOMP_STATE_EV_RESUMED, RECOMP_STATE_AUTO, rc);
+    return rc;
 }
 
 /* ---- Fast-forward --------------------------------------------------------------------------------------------- */

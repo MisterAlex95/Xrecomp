@@ -443,4 +443,8 @@
     <string name="VKD_ERR_BAD_URL">Cette adresse de téléchargement n\'est pas autorisée. Rien n\'a été téléchargé.</string>
     <string name="VKD_ERR_HTTP">Le téléchargement a échoué (%1$s). Réessayez plus tard.</string>
     <string name="VKD_ERR_NETWORK">Pas de connexion, ou le téléchargement a été coupé. Réessayez plus tard.</string>
+    <string name="COVER_DOWNLOAD">Télécharger les jaquettes</string>
+    <string name="COVER_DOWNLOAD_DETAIL">Activé : les jaquettes de vos jeux GBA, PlayStation et N64 viennent de libretro-thumbnails (le nom du fichier du jeu est cherché sur GitHub). Désactivé : rien n\'est téléchargé ; une image du jeu est gardée une fois que vous y avez joué.</string>
+    <string name="COVER_DOWNLOAD_ON">Les jaquettes seront cherchées au prochain scan de la bibliothèque.</string>
+    <string name="COVER_DOWNLOAD_OFF">Aucune jaquette n\'est téléchargée.</string>
 </resources>

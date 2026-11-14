@@ -468,16 +468,27 @@ static int ff_chord(int port)
 
 /* Every connected pad drives the one GBA (a handheld's own controls and an external pad both work), through the
  * player's mapping; the on-screen pad joins pad 1 (console_pad_read). *chord: a pad holds the fast-forward chord (its
- * Back and right trigger then reach the game as nothing). */
-static uint16_t pads_keys(int *chord)
+ * Back and right trigger then reach the game as nothing). *quick: a pad pressed a quick save / load chord this frame
+ * (Back + right / left shoulder, recomp_states_chord; Back and the shoulders then reach the game as nothing). */
+static int s_quick_held[HOST_PAD_PORTS];
+static uint16_t pads_keys(int *chord, int *quick)
 {
     uint16_t k = 0;
     if (!s_pad_map.console)
         console_pad_defaults(&s_pad_map, CONSOLE_PAD_GBA);
     *chord = 0;
+    *quick = RECOMP_CHORD_NONE;
     for (int p = 0; p < HOST_PAD_PORTS; p++) {
         ConsolePadOut o;
         if (console_pad_read(&s_pad_map, p, &o)) {
+            int swallow = 0, act = recomp_states_chord(!!(o.host_buttons & HOST_PAD_BACK),
+                                                       !!(o.host_buttons & HOST_PAD_LSHOULDER),
+                                                       !!(o.host_buttons & HOST_PAD_RSHOULDER), &s_quick_held[p], &swallow);
+            if (act && !*quick)
+                *quick = act;
+            if (swallow)
+                o.buttons &= ~console_pad_targets_using(&s_pad_map, CPS_BIT(CPS_BACK) | CPS_BIT(CPS_LEFT_SHOULDER) |
+                                                                    CPS_BIT(CPS_RIGHT_SHOULDER));
             if (ff_chord(p)) {
                 *chord = 1;
                 o.buttons &= ~console_pad_targets_using(&s_pad_map, CPS_BIT(CPS_BACK) | CPS_BIT(CPS_RIGHT_TRIGGER));
@@ -594,6 +605,13 @@ int gba_runtime_run(const gba_runtime_opts *o)
     recomp_states_attach(&ops, s_state_dir);
     printf("gba: save states %s%s, fast-forward x%d%s\n", s_state_dir[0] ? "in " : "off (no save dir)", s_state_dir,
            recomp_ff_speed(), recomp_ff_speed() ? "" : " (max)");
+    memset(s_quick_held, 0, sizeof s_quick_held);
+    int resume = recomp_states_resume_enabled() && s_state_dir[0];
+    if (resume) {
+        int r = recomp_states_resume();
+        printf("gba: resume from the automatic slot: %s\n", r == RECOMP_STATE_EEMPTY ? "nothing saved yet"
+                                                                                     : recomp_states_error(r));
+    }
 
     /* The window, or none (headless checks: SDL dummy drivers). */
     int window = !o->headless && !host_window_headless();
@@ -639,6 +657,8 @@ int gba_runtime_run(const gba_runtime_opts *o)
         }
         if (!running) {
             printf("gba: quit asked after %llu frames\n", (unsigned long long)frames);
+            if (resume && frames > 0) /* the player closed the window: the next start resumes here */
+                printf("gba: automatic slot %s\n", recomp_states_error(recomp_states_save(RECOMP_STATE_AUTO)));
             break;
         }
         if (recomp_lifecycle_paused()) {
@@ -659,8 +679,9 @@ int gba_runtime_run(const gba_runtime_opts *o)
             next = now_ns();   /* the time away is not caught up */
         }
 
-        int chord = 0;
-        uint16_t keys = (uint16_t)(o->keys | pads_keys(&chord) | (window ? keyboard_keys() : 0));
+        int chord = 0, quick = 0;
+        uint16_t keys = (uint16_t)(o->keys | pads_keys(&chord, &quick) | (window ? keyboard_keys() : 0));
+        recomp_states_chord_run(quick);
         if (window)
             state_keys(fkeys);
         const Uint8 *ks = window ? SDL_GetKeyboardState(NULL) : NULL;

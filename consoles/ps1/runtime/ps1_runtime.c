@@ -732,6 +732,7 @@ typedef struct pad_in {
     uint8_t lx, ly, rx, ry;
     int toggle; /* Back + L3 + R3 held */
     int ff;     /* Back + right trigger held: fast-forward (XBA-182) */
+    int quick;  /* Back + right / left shoulder pressed this frame: quick save / load (RECOMP_CHORD_*) */
 } pad_in;
 
 static int deflection(uint8_t v)
@@ -742,6 +743,7 @@ static int deflection(uint8_t v)
 /* The host pads for PS1 port `port`, through the player's mapping (the on-screen pad joins host pad 1,
  * console_pad_read): with one player every pad drives port 0 (buttons merged, the most deflected stick wins); with
  * two, host pad N drives port N. */
+static int s_quick_held[HOST_PAD_PORTS]; /* recomp_states_chord's state per host pad */
 static void pads_read(int port, int players, int analog, pad_in *out)
 {
     memset(out, 0, sizeof *out);
@@ -754,6 +756,14 @@ static void pads_read(int port, int players, int analog, pad_in *out)
         ConsolePadOut o;
         if (!console_pad_read(&s_pad_map, p, &o))
             continue;
+        int swallow = 0, act = recomp_states_chord(!!(o.host_buttons & HOST_PAD_BACK),
+                                                   !!(o.host_buttons & HOST_PAD_LSHOULDER),
+                                                   !!(o.host_buttons & HOST_PAD_RSHOULDER), &s_quick_held[p], &swallow);
+        if (act && !out->quick)
+            out->quick = act;
+        if (swallow) /* the chord's Back and shoulders reach the game as nothing */
+            o.buttons &= ~console_pad_targets_using(&s_pad_map, CPS_BIT(CPS_BACK) | CPS_BIT(CPS_LEFT_SHOULDER) |
+                                                                CPS_BIT(CPS_RIGHT_SHOULDER));
         const uint32_t chord = HOST_PAD_BACK | HOST_PAD_LSTICK | HOST_PAD_RSTICK;
         if ((o.host_buttons & chord) == chord)
             out->toggle = 1;
@@ -978,6 +988,13 @@ int ps1_runtime_run(const ps1_runtime_opts *o)
     recomp_states_attach(&ops, s_state_dir);
     printf("ps1: save states %s%s, fast-forward x%d%s\n", s_state_dir[0] ? "in " : "off (no save dir)", s_state_dir,
            recomp_ff_speed(), recomp_ff_speed() ? "" : " (max)");
+    memset(s_quick_held, 0, sizeof s_quick_held);
+    int resume = recomp_states_resume_enabled() && s_state_dir[0];
+    if (resume) {
+        int r = recomp_states_resume();
+        printf("ps1: resume from the automatic slot: %s\n", r == RECOMP_STATE_EEMPTY ? "nothing saved yet"
+                                                                                     : recomp_states_error(r));
+    }
 
     int window = !o->headless && !host_window_headless();
     if (SDL_WasInit(SDL_INIT_EVENTS) == 0)
@@ -1030,6 +1047,8 @@ int ps1_runtime_run(const ps1_runtime_opts *o)
         }
         if (!running) {
             printf("ps1: quit asked after %llu frames\n", (unsigned long long)frames);
+            if (resume && frames > 0) /* the player closed the window: the next start resumes here */
+                printf("ps1: automatic slot %s\n", recomp_states_error(recomp_states_save(RECOMP_STATE_AUTO)));
             break;
         }
         if (recomp_lifecycle_paused()) {
@@ -1053,6 +1072,7 @@ int ps1_runtime_run(const ps1_runtime_opts *o)
         pad_in p1, p2;
         pads_read(0, players, analog, &p1);
         pads_read(1, players, analog2, &p2);
+        recomp_states_chord_run(p1.quick ? p1.quick : p2.quick);
         if (p1.toggle && !toggle_held) {
             pthread_mutex_lock(&s_mu);
             int was = analog;

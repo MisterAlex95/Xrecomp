@@ -1123,6 +1123,8 @@ public class LauncherActivity extends Activity {
                 File f = TitleArt.cacheFile(getFilesDir(), tid);
                 art = f.isFile() ? BitmapFactory.decodeFile(f.getPath()) : null;
             }
+            if (art == null && tid != null && Console.ofKey(tid) != Console.XBOX)
+                art = CoverArt.load(getFilesDir(), tid);   // a GBA / PS1 / N64 game: its cover or a captured frame
             Log.i(TAG, "launcher: title image " + (art != null ? art.getWidth() + "x" + art.getHeight() : "none")
                        + " for " + key);
             // A pinned shortcut of this game follows its image and title (the image may have come after the pin).
@@ -2076,6 +2078,8 @@ public class LauncherActivity extends Activity {
             if (TitleApp.ownTitleId(this) == null)   // a game's own app always goes straight into its game
                 launcherToggle(list, R.string.OPEN_DIRECTLY, R.string.OPEN_DIRECTLY_DETAIL, GameStore::autoStart,
                                GameStore::setAutoStart, R.string.OPEN_DIRECTLY_ON, R.string.OPEN_DIRECTLY_OFF);
+            launcherToggle(list, R.string.COVER_DOWNLOAD, R.string.COVER_DOWNLOAD_DETAIL, CoverArt::downloadOn,
+                           CoverArt::setDownloadOn, R.string.COVER_DOWNLOAD_ON, R.string.COVER_DOWNLOAD_OFF);
             launcherToggle(list, R.string.UI_SOUND, R.string.UI_SOUND_DETAIL, GameStore::uiSound,
                            GameStore::setUiSound, R.string.UI_SOUND_ON, R.string.UI_SOUND_OFF);
             launcherToggle(list, R.string.UI_HAPTICS, R.string.UI_HAPTICS_DETAIL, GameStore::uiHaptics,
@@ -4868,6 +4872,46 @@ public class LauncherActivity extends Activity {
         return scanner != null && scanner.isAlive();
     }
 
+    private Thread coverThread;
+
+    /**
+     * Cover art for the GBA, PS1 and N64 games that have none (CoverArt: libretro-thumbnails, when « Download cover
+     * art » is on), one game after the other on a worker; each one found shows at once.
+     */
+    private void fetchCovers(LibraryIndex idx) {
+        if (!CoverArt.downloadOn(this) || !VkDriverIndex.networkAllowed(this)
+            || (coverThread != null && coverThread.isAlive()))
+            return;
+        File files = getFilesDir();
+        long now = System.currentTimeMillis();
+        List<String[]> todo = new ArrayList<>();
+        for (java.util.Map.Entry<String, List<LibraryIndex.Item>> g : idx.games().entrySet()) {
+            LibraryIndex.Item i = g.getValue().get(0);
+            if (i.otherConsole() && CoverArt.wanted(files, g.getKey(), now))
+                todo.add(new String[] { g.getKey(), i.name });
+        }
+        if (todo.isEmpty())
+            return;
+        Log.i(TAG, "launcher: cover art: looking for " + todo.size() + " game(s)");
+        coverThread = new Thread(() -> {
+            VkDriverIndex.Http http = new VkDriverIndex.UrlHttp();
+            for (String[] t : todo) {
+                if (!CoverArt.fetch(http, files, t[0], t[1]))
+                    continue;
+                runOnUiThread(() -> {
+                    libArt.remove(t[0]);
+                    if (t[0].equals(artTid))
+                        artTid = null;   // Home's image is read again
+                    if (isFinishing() || isDestroyed())
+                        return;
+                    if (screen == Screen.LIBRARY || screen == Screen.HOME)
+                        refreshKeepingFocus();
+                });
+            }
+        }, "cover-art");
+        coverThread.start();
+    }
+
     private void onScanDone(LibraryScanner.Result r, LibraryIndex before) {
         if (isFinishing() || isDestroyed())
             return;
@@ -4885,6 +4929,7 @@ public class LauncherActivity extends Activity {
                 }
             }
             libArt.values().removeIf(java.util.Objects::isNull);   // art the scan made shows now
+            fetchCovers(r.index);
             if (libEntries.isEmpty())
                 focusTid = null;   // the first games found: the focus goes to the selected one, not the folder tile
         }

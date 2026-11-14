@@ -469,4 +469,8 @@
     <string name="VKD_ERR_BAD_URL">This download address is not allowed. Nothing was downloaded.</string>
     <string name="VKD_ERR_HTTP">The download failed (%1$s). Try again later.</string>
     <string name="VKD_ERR_NETWORK">No connection, or the download was cut. Try again later.</string>
+    <string name="COVER_DOWNLOAD">Download cover art</string>
+    <string name="COVER_DOWNLOAD_DETAIL">On: the box art of your GBA, PlayStation and N64 games comes from libretro-thumbnails (the game\'s file name is looked up on GitHub). Off: nothing is downloaded; a picture of the game is kept once you have played it.</string>
+    <string name="COVER_DOWNLOAD_ON">Covers are looked for at the next library scan.</string>
+    <string name="COVER_DOWNLOAD_OFF">No cover is downloaded.</string>
 </resources>

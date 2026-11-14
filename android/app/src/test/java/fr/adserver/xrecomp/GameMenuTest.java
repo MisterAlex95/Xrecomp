@@ -108,6 +108,9 @@ public class GameMenuTest {
         @Override public int loadState(int slot) { loaded.add(slot); return loadCode; }
         @Override public boolean fastForward() { return ff; }
         @Override public void setFastForward(boolean on) { ff = on; }
+        /** The native side's last quick save / load / resume event, null = none. */
+        int[] event;
+        @Override public int[] stateEvent() { return event; }
     }
 
     /** A stand-in for the game's frame (ours: gradients and shapes), so the dimming shows in the screenshots. */
@@ -1061,6 +1064,91 @@ public class GameMenuTest {
             assertEquals(activity.getString(c[1], 4), menu.flashText());
         }
         assertEquals(List.of(4, 4, 4, 4, 4, 4), host.loaded);
+    }
+
+    // ---- Quick save / load and resuming --------------------------------------------------------------------------
+
+    @Test
+    public void leavingSavesTheAutomaticSlot() {
+        statesGame();
+        menu.onStop();                                      // Back to launcher, Home, the screen off
+        assertEquals(List.of(GameMenu.AUTO_SLOT), host.saved);
+        menu.onStart();
+        menu.open("Back");
+        menu.row(GameMenu.Item.QUIT).performClick();
+        assertEquals(activity.getString(R.string.MENU_QUIT_CONFIRM_KEPT), menu.row(GameMenu.Item.QUIT).subtitle);
+        menu.row(GameMenu.Item.QUIT).performClick();
+        assertEquals(1, host.quits);
+        assertEquals(List.of(GameMenu.AUTO_SLOT, GameMenu.AUTO_SLOT), host.saved);
+    }
+
+    @Test
+    public void autoResumeOffSavesNothing() {
+        statesGame();
+        menu.open("Back");
+        menu.row(GameMenu.Item.SETTINGS).performClick();
+        GameMenu.Item it = GameMenu.Item.AUTO_RESUME;
+        assertNotNull(menu.row(it));
+        assertEquals(activity.getString(R.string.MENU_ON), menu.row(it).value);
+        menu.row(it).performClick();
+        assertFalse(GameStore.autoResume(activity));
+        assertEquals(activity.getString(R.string.MENU_OFF), menu.row(it).value);
+        menu.close();
+        menu.onStop();
+        assertTrue(host.saved.isEmpty());
+        GameStore.setAutoResume(activity, true);
+    }
+
+    @Test
+    public void autoResumeRowOnlyWithStates() {
+        menu.open("Back");
+        menu.row(GameMenu.Item.SETTINGS).performClick();
+        assertNull(menu.row(GameMenu.Item.AUTO_RESUME));
+        menu.close();
+        menu.onStop();
+        assertTrue(host.saved.isEmpty());                   // an Xbox game: no automatic slot
+    }
+
+    @Test
+    public void loadPageShowsWhereYouLeftOff() {
+        statesGame();
+        host.times[GameMenu.AUTO_SLOT] = System.currentTimeMillis();
+        menu.open("Back");
+        menu.row(GameMenu.Item.STATE_LOAD).performClick();
+        List<Widgets.MenuRow> rows = menu.rowsForTest();
+        assertEquals(6, rows.size());
+        assertEquals(activity.getString(R.string.MENU_STATE_AUTO), rows.get(0).title);
+        rows.get(0).performClick();
+        assertEquals(List.of(GameMenu.AUTO_SLOT), host.loaded);
+        assertEquals(activity.getString(R.string.MENU_STATE_RESUMED), menu.flashText());
+        // The save page never offers it.
+        menu.open("Back");
+        menu.row(GameMenu.Item.STATE_SAVE).performClick();
+        assertEquals(5, menu.rowsForTest().size());
+    }
+
+    @Test
+    public void quickEventsFlashOncePerEvent() {
+        statesGame();
+        host.event = new int[] { 1, GameMenu.EV_RESUMED, 0, GameMenu.STATE_OK };
+        idle(GameMenu.STATE_TICK_MS + 10);
+        assertEquals(activity.getString(R.string.MENU_STATE_RESUMED), menu.flashText());
+        idle(GameMenu.FLASH_MS + 10);
+        assertNull("the same event shows once", menu.flashText());
+        host.event = new int[] { 2, GameMenu.EV_SAVED, 3, GameMenu.STATE_OK };
+        idle(GameMenu.STATE_TICK_MS + 10);
+        assertEquals(activity.getString(R.string.MENU_STATE_SAVED, 3), menu.flashText());
+        host.event = new int[] { 3, GameMenu.EV_LOADED, 1, GameMenu.STATE_EMPTY };
+        idle(GameMenu.STATE_TICK_MS + 10);
+        assertEquals(activity.getString(R.string.MENU_STATE_EMPTY_SLOT, 1), menu.flashText());
+        host.event = new int[] { 4, GameMenu.EV_RESUMED, 0, GameMenu.STATE_OTHER_VERSION };
+        idle(GameMenu.STATE_TICK_MS + 10);
+        assertEquals(activity.getString(R.string.MENU_STATE_RESUME_FAILED), menu.flashText());
+        // Stopped: no polling.
+        menu.onStop();
+        host.event = new int[] { 5, GameMenu.EV_SAVED, 2, GameMenu.STATE_OK };
+        idle(GameMenu.FLASH_MS + GameMenu.STATE_TICK_MS);
+        assertNull(menu.flashText());
     }
 
     @Test
