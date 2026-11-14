@@ -154,6 +154,7 @@ One activity, a small state machine of screens (`LauncherActivity.Screen`) with 
 | Home | No top bar: the game's title image (or a monogram) in the [game theme](#game-theme)'s colours, its title (the XBE certificate's name, else the folder's name), **one line** — when it was played (« Yesterday · 12 h 40 min played », « Not played yet »), or its state when it is not ready (« Needs preparing · once, about 20–30 min », « Prepare failed · CODE », the Prepare's progress, « Queued (n) », « Game data missing » with the folder, …) — and **one row of buttons**: a solid **Play** (or **Prepare**, **Preparing…**, **See what failed**, **Choose a game**) and three quiet pills, **Settings**, **Controls**, **Manage**. Before the first play the note says where the in-game menu is. | A finished import (Play focused), every start when « Start in the game » is off, the « Launcher » shortcut, B from the screens above. |
 | Settings | Four tabs (General, Graphics, Audio, Advanced; L1 / R1) of [options](#settings) as « label  value » rows, left / right (or A) to change, the focused option's description on the right. About ends Advanced. | Home, Options. |
 | Controls | The player's **remapping** ([Controls and remapping](#controls-and-remapping)): one row per Xbox control (A B X Y, Black, White, the triggers; Back, Start, the stick presses; the D-pad; the two sticks), its value the player's button, changed like a setting; « Reset controls » (also Y). The description column says what the focused row does and draws the handheld with, next to each control, what the game gets from it. | Home. |
+| Controls (GBA, PS1, N64) | The console's buttons remapped, for all its games or this game only ([Controls for the other consoles](#controls-for-the-other-consoles)): Mapping for, one row per console button, the sticks, the N64 stick's range and dead zone, the on-screen pad, « Reset controls » (also Y). | A GBA / PS1 / N64 game's Home (its « Controls » pill). |
 | Manage | **Change game** (another folder or image, or the same one again to re-import; **Library** when the [game library](#game-library) is on); **Delete the imported copy** (only when the game is the app's own copy, `files/games/<TID>/` or the older `files/game/`; its size as the value; press A twice within 5 s; saves are kept); **Add to home screen** (a [shortcut for this game](#a-game-on-the-home-screen), only when the home screen takes pin requests); **Create an app** (the game's [own app](#a-games-own-app), made and installed on the device; its size as the description; **only for a prepared game** (a valid pack built from this disc): before that the row says « Prepare this game first » and pressing it only repeats that in the note, so the app it makes always takes the pack over and starts straight into the game; not in a game's own app); the game's pack, Prepare files, caches and saves with their sizes, each deleted on its own ([Storage](#storage)). The technical facts (title ID, prepared date, pack size, folder, source, size, free space) are the first row's description. | Home. |
 | About | Version (`-PxbaVersion`), build (`-PxbaVersionCode`), app id, the game check (the first digits of `-PxbaXbeSha256`, or none), a one-line licence summary, and that no game data is included. **X**: Licences. | The end of Settings › Advanced, Options on the library. |
 | Licences | XBA-100. Every licence text the APK carries, monospaced, one after the other: `LICENSE`, `NOTICE`, then `LICENSES/*.txt` (copied into the assets `licences/` at build time by `xbaLicencesAsset`). D-pad up / down scroll, L1 / R1 page, a finger scrolls too. | X on About. |
@@ -817,6 +818,80 @@ On-screen pad › Show **Always**):
 On a phone without a controller (not possible on the Thor): with Show at its default, the pad shows by itself at game
 start; pair a Bluetooth pad and press a button: it hides; unpair: it comes back.
 
+### Controls for the other consoles
+
+XBA-158 / XBA-168 / XBA-174. A GBA, PS1 or N64 game gets what an Xbox game has: its buttons remapped, per console
+and per game, and the on-screen pad with the console's own buttons.
+
+**Mapping layer** (`src/input/console_pad.h`, part of the host layer, pure C, `tests/console_pad`). Each console has
+targets (GBA: A B L R Start Select, the D-pad; PS1: Cross Circle Square Triangle L1 R1 L2 R2 L3 R3 Start Select, the
+D-pad, two sticks; N64: A B Z L R Start, the D-pad, C up / down / left / right, the stick). Each target takes a set of
+the pad's sources (the names of `RECOMP_PAD_MAP`: `south`, `east`, `left_trigger`, `right_stick_up` …; a trigger or a
+stick direction counts past the console's threshold), each stick a host stick. The defaults are the fixed mappings
+the runtimes had (the GBA's A = A + Y, the N64's C-up = Y + right stick up …), so no line changes nothing. Text:
+`target=source[+source]` or `=none`, `left_stick=` / `right_stick=` (PS1) and `stick=` (N64) `left|right|none`,
+`range=1..127` and `deadzone=0..90` (N64, percent; absent: `RECOMP_N64_STICK_RANGE` / `RECOMP_N64_DEADZONE`), only what
+differs, e.g. `RECOMP_GBA_PAD_MAP=a=east,b=south`. The runtime reads `RECOMP_GBA_PAD_MAP` / `RECOMP_PS1_PAD_MAP` /
+`RECOMP_N64_PAD_MAP` at start (logcat `[INPUT] gba pad map: a=east,b=south`, or `(default)`) and maps each pad through it
+(`gba_runtime_keys_of`, `ps1_runtime_pad_of`, `n64_runtime_buttons_of`; the old `*_pad_buttons` functions are the
+defaults). PS1 digital mode: the mapped left stick is the D-pad too, as before.
+
+**Home › Controls** (`ROM_CONTROLS`, the « Controls » pill last on a GBA / PS1 / N64 Home; `ConsolePadMap`,
+`ConsoleControls`). Pad only, like the Xbox Controls: *Mapping for* · All <console> games / This game only, one row
+per console button (its value the player's controls, « A + Y » for a default with two; left / right or A step it
+through every source one at a time, then Not used), the sticks (PS1, N64), the N64's Stick range and Dead zone
+(« Usual », then values), the On-screen pad rows (shared with the Xbox's), « Reset controls » (also Y: the usual
+mapping for the scope shown). Written at once: all games → recomp.cfg's line; this game only →
+`files/settings/pad_map_<KEY>` (« map: » + the text), which `ShellActivity` sets in the environment as
+`RECOMP_<CONSOLE>_PAD_MAP` (it wins over recomp.cfg; no file: unset, recomp.cfg decides; logcat `shell: gba controls of
+the game: …` / `of the console (recomp.cfg)`). Switching to *This game only* copies the console's mapping; back to all
+games drops the copy. The in-game menu's Controls page lists the console's buttons and where each comes from.
+
+**On-screen pad.** `TouchPad.Layout` per console (`layoutFor`, set by `ShellActivity`): GBA D-pad, A, B, L, R, Select,
+Start; PS1 D-pad, Cross / Circle / Square / Triangle (drawn shapes), L1 / R1 / L2 / R2, Select, Start, and with
+`RECOMP_PS1_PAD=analog` both sticks and L3 / R3; N64 stick, A, B, Z, L, R, Start, the four C buttons. Each button
+presses the Xbox control the console's default mapping reads as it (L = Black, Z = left trigger, a C button = the
+right stick pushed fully). The overlay goes through `CompanionNative.nativeOverlayPad` as before; `companion_jni.c`
+now also hands it to `host_pad_overlay_set` (a host pad, SDL layout), and `console_pad_read` merges it into pad 1
+**through the console's defaults**, never the player's remapping: the on-screen Cross is always Cross. Shown
+automatically without a controller (Controls › On-screen pad › Show), never with the companion panel up; the in-game
+menu's Settings › **On-screen pad** (Shown / Hidden) overrides that for the session (logcat `shell: touch controls
+shown|hidden (menu: …)`). The companion panel's Back / Start / Black / White reach the console games the same way.
+
+Tests: `tests/console_pad` (defaults = the old mappings, text, thresholds, the overlay merge), the console runtime tests
+(the old `*_pad_buttons` cases unchanged), `ConsolePadMapTest`, `LauncherConsoleControlsTest` (screenshots
+`console-controls-*`), `TouchPadTest` (layouts on screen at every size, nothing overlapping, what each button presses),
+`TouchControlsTest` (`touch-5-gba` … `touch-8-n64`), `GameMenuTest` (`touchToggle`, `consoleControlsPage`).
+
+### Device check (controls for the other consoles, XBA-158 / XBA-168 / XBA-174), for Alex
+
+On the AYN Thor, a GBA game, a PS1 disc and an N64 cartridge of yours in the library.
+
+1. GBA game › Home: the pills end with **Controls**; open it. Screenshot. Rows A … D-pad right, A = « A + Y »,
+   Mapping for = « All Game Boy Advance games ».
+2. On A press right once: A = B, « 1 changed », « Saved ». `adb shell cat /sdcard/Android/data/<app id>/files/recomp.cfg`
+   has `RECOMP_GBA_PAD_MAP=a=east`.
+3. Play: the right face button is the GBA's A, the bottom one does nothing for A (logcat
+   `[INPUT] gba pad map: a=east`). The launcher and the in-game menu still select with the bottom button.
+4. In-game menu › Controls: « Your mapping », then each GBA button with your control (A · B).
+5. Back in Controls: Mapping for → « This game only » (note « This game has its own mapping »); L → L2 alone. Play this
+   game: L2 is L, L1 no longer (logcat `shell: gba controls of the game: a=east,l=left_trigger`). Another GBA game:
+   L1 still L, A still on B (the console's mapping).
+6. Y in this game's Controls: its mapping back to the usual one (A = A + Y) while the other GBA games keep A = B.
+   Mapping for → « All … games »: the copy goes. Y again: recomp.cfg's line goes.
+7. PS1 disc › Controls: Cross … R3, Left / Right stick; Cross → B: in the game Cross is the right button. Reset.
+8. N64 cartridge › Controls: C buttons, Analog stick, Stick range, Dead zone. Dead zone 20 %: the stick needs a larger
+   push before Mario moves; Stick range 64: he no longer runs at full tilt. Reset.
+9. On-screen pad, the Thor's built-in controls standing in for « no controller »: Bottom screen **Off**, Controls ›
+   On-screen pad › Show **Always** (the Thor's pad always counts as connected). Each game shows its console's layout
+   (screenshots): GBA D-pad / A / B / L / R / Select / Start; PS1 the four shapes, L1 L2 R2 R1; N64 stick, C buttons,
+   Z bottom left. Every button works, two at once (stick + A, C-up + C-right), Start pauses.
+10. With A remapped to B (step 2), the on-screen A is still the GBA's A.
+11. In-game menu › Settings › On-screen pad: Hidden → the pad goes for the session; Shown → back. Bottom screen back to
+    Panel: no on-screen pad on the top screen; the panel's Start pauses the GBA game.
+12. On a phone without a controller: Show at its default, the console's pad appears at game start, hides when a
+    Bluetooth pad is used.
+
 ### Frame generation
 
 Lossless Scaling frame generation (LSFG 3.1, [Frame Generation](../technical/framegen.md)) in an APK built with:
@@ -1127,7 +1202,8 @@ for the folder again).
 - **Controls.** Every connected pad drives the GBA (the Thor's own controls and an external pad alike), Xbox layout:
   A → A, B → B (and Y → A, X → B, a second pair under the thumb), LB / RB → L / R (the triggers too), Start → Start,
   Back / Select → Select, D-pad and left stick → D-pad. Back on the device opens the in-game menu, as for an Xbox
-  game. The on-screen touch pad does not drive the GBA yet.
+  game. These are the defaults: Home › Controls remaps them, and the on-screen pad has a GBA layout ([Controls for
+  the other consoles](#controls-for-the-other-consoles)).
 - **Sound.** 48 kHz stereo through `host_audio`, pulled from `gba_audio_pull` each frame (silence until the APU
   lands behind the same call).
 - **Pacing.** The GBA's own 59.73 Hz with absolute deadlines (no drift), nudged ±2 % by the audio queue once there is
@@ -1271,7 +1347,8 @@ its folder cannot be read.
   are its ANALOG button (logcat `ps1: port 1 is now analog (DualShock)`, or `stays … (locked by the game)`). Its
   rumble motors, when the game maps them, drive the pad's rumble (`host_pad_rumble`: large motor → low frequency,
   small → high); `RECOMP_PS1_PLAYERS=2`: the first two pads drive ports 1 and 2. Back on the device opens the
-  in-game menu.
+  in-game menu. These are the defaults: Home › Controls remaps them, and the on-screen pad has a PS1 layout
+  ([Controls for the other consoles](#controls-for-the-other-consoles)).
 - **Sound.** 44.1 kHz stereo from the SPU (`ps1_audio_pull`, CD audio and XA mixed in) through `host_audio`.
 - **Pacing.** The PS1's own field rate (NTSC about 60 Hz, PAL 50 Hz, from the cycles each frame ran), absolute
   deadlines nudged ±2 % by the audio queue; vsync on; a stall of more than three frames resets the clock.
@@ -1409,7 +1486,9 @@ while its Prepare runs or waits, **Running** while it runs, **No file access** w
   zone, ±80 at full travel, the diagonals about ±68 like the real stick's octagonal gate), A → A, B and X → B, right
   stick → the C buttons (C-up / down / left / right, past half its travel), Y → C-up, LB → L, RB → R, LT or RT → Z,
   Start → Start, D-pad → D-pad. With the rumble pak, the game's motor drives the pad's rumble (`host_pad_rumble`).
-  `RECOMP_N64_PLAYERS=2..4`: host pad N drives controller N. Back on the device opens the in-game menu.
+  `RECOMP_N64_PLAYERS=2..4`: host pad N drives controller N. Back on the device opens the in-game menu. These are
+  the defaults: Home › Controls remaps them (and the stick's range and dead zone), and the on-screen pad has an N64
+  layout ([Controls for the other consoles](#controls-for-the-other-consoles)).
 - **Sound.** 48 kHz stereo from the AI (`n64_audio_pull`) through `host_audio`.
 - **Pacing.** The VI's own rate (NTSC about 60 Hz, PAL 50 Hz, from the cycles each frame ran), absolute deadlines
   nudged ±2 % by the audio queue; vsync on; a stall of more than three frames resets the clock. The software RDP is
@@ -2145,8 +2224,8 @@ less the display cutout, so 720p and 1080p look the same.
 | Item | Does |
 |---|---|
 | Resume | Closes the menu. |
-| Settings | **Perf overlay** On / Off: fps and frame time (`xbox_FramebufferWindowGetStats`, twice a second) in the top right corner, in the menu's layer, not in the game frame; stays with the menu closed. **Volume** 0–100 % in steps of 10, A mutes / unmutes: one gain on the mixed APU output (`apu_volume.c`, the square of the fraction, after the WAV capture), set through JNI. **Bottom screen** Panel / Black / Off (only with a second screen): `GameStore.setBottomScreen` and the companion is refreshed at once. These three apply **now** (the rows say so) and are remembered (`files/settings/perf_overlay`, `game_volume`, `bottom_screen`); the volume is applied again at the next start. **Language** (only when the game's XBE gives a title ID): As in Settings, then the nine languages; this game's own [language](#game-language), applied at the next start. **Widescreen** and **480p** (same condition, XBA-134): As in Settings / On / Off, this game's own console video setting (`GameVideo.java`, kept in `files/settings/widescreen_<TITLEID>` and `480p_<TITLEID>`), applied at the next start: `ShellActivity` sets `RECOMP_WIDESCREEN` / `RECOMP_480P` to `1` or `0` (the environment wins over the `recomp.cfg` line of Settings › Graphics) and unsets them when the game follows Settings; logcat « shell: title video RECOMP_WIDESCREEN=… RECOMP_480P=…, title … ». Screen filter and scaling are not offered: the SDL window's are fixed at start (`fb_present_sdl.c`: nearest, logical size 640 x 480). |
-| Controls | The usual mapping, compact (plus Back and Select + Start: the menu); with a remapping in `recomp.cfg`, first « Your mapping » and each changed control (your button, the Xbox control). |
+| Settings | **Perf overlay** On / Off: fps and frame time (`xbox_FramebufferWindowGetStats`, twice a second) in the top right corner, in the menu's layer, not in the game frame; stays with the menu closed. **Volume** 0–100 % in steps of 10, A mutes / unmutes: one gain on the mixed APU output (`apu_volume.c`, the square of the fraction, after the WAV capture), set through JNI. **Bottom screen** Panel / Black / Off (only with a second screen): `GameStore.setBottomScreen` and the companion is refreshed at once. **On-screen pad** Shown / Hidden (only when the game has one, XBA-158): for this session, whatever Controls › On-screen pad › Show says (never with the companion panel up). These apply **now** (the rows say so) and are remembered (`files/settings/perf_overlay`, `game_volume`, `bottom_screen`); the volume is applied again at the next start. **Language** (only when the game's XBE gives a title ID): As in Settings, then the nine languages; this game's own [language](#game-language), applied at the next start. **Widescreen** and **480p** (same condition, XBA-134): As in Settings / On / Off, this game's own console video setting (`GameVideo.java`, kept in `files/settings/widescreen_<TITLEID>` and `480p_<TITLEID>`), applied at the next start: `ShellActivity` sets `RECOMP_WIDESCREEN` / `RECOMP_480P` to `1` or `0` (the environment wins over the `recomp.cfg` line of Settings › Graphics) and unsets them when the game follows Settings; logcat « shell: title video RECOMP_WIDESCREEN=… RECOMP_480P=…, title … ». Screen filter and scaling are not offered: the SDL window's are fixed at start (`fb_present_sdl.c`: nearest, logical size 640 x 480). |
+| Controls | The usual mapping, compact (plus Back and Select + Start: the menu); with a remapping in `recomp.cfg`, first « Your mapping » and each changed control (your button, the Xbox control). A GBA / PS1 / N64 game: each of its buttons and the controls it comes from ([Controls for the other consoles](#controls-for-the-other-consoles)). |
 | Screenshot | Closes the menu first, then saves the game's last frame as `<external files>/screenshots/<date>.bmp` (`xbox_FramebufferDumpBmp`, the companion panel's), and says « Saved … » at the top of the screen (and on the panel). |
 | Settings › Share log | This process's logcat to `files/logs/game.log`, then the share sheet (the companion panel's `LogProvider` path). The menu stays open. |
 | Back to launcher | **The game stays alive** (the runtime maps its guest memory once per process: starting it again means a new process), held: the drawer goes at once, the launcher comes up (`ACTION_SHOW_LAUNCHER`), and the menu's hold is let go only in `onStop`, after SDL's pause has put the background hold in place, so no frame runs in between. The launcher's Play brings this task back and the game goes on (`launcher: game running, bringing it back`). In a game's own app the row is **Back to the home screen**: the task goes behind Android's home screen (`moveTaskToBack`), held the same way; its icon brings it back. |
