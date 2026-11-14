@@ -1122,8 +1122,8 @@ ALWAYS_INLINE int z_test(int mode, uint32_t sz, uint32_t oz, int dzc_new, int dz
 #define F_2C 8u
 #define F_32 16u
 #define SPAN_CHUNK 64
-#define F_SIMPLE 32u /* 16-bit pixels, no memory read, blender passes, no key / alpha compare / coverage x alpha /
-                      * alpha from coverage / colour on coverage / noise: those branches compile away */
+#define F_FAST 32u   /* span_fast: 16-bit pixels, no key / noise / LOD */
+#define F_SIMPLE 64u /* and no memory read, blending, alpha compare or coverage tricks: those branches compile away */
 
 static inline int row_cvg(const rdp_row *row, int x)
 {
@@ -1141,14 +1141,12 @@ static inline int row_cvg(const rdp_row *row, int x)
 ALWAYS_INLINE void span_std(rdp_render *r, const rdp_prim *p, const rdp_row *row, const unsigned F)
 {
     const rdp_state *s = &r->s;
-    rdp_modes M = s->om; /* locals: the RDRAM stores below cannot alias them */
-    if (F & F_SIMPLE)
-        M.image_read = M.key = M.cvg_x_alpha = M.alpha_cvg_sel = M.alpha_compare = M.color_on_cvg = 0;
+    const rdp_modes M = s->om; /* locals: the RDRAM stores below cannot alias them */
     rdp_cin *in = &r->in;
     uint8_t *restrict ram = r->ram;
     uint8_t *restrict hid = r->hidden;
     const uint32_t size = r->ram_size, ci_addr = s->ci_addr, zi_addr = s->zi_addr;
-    const int use_noise = (F & F_SIMPLE) ? 0 : r->use_noise, blend_pass = (F & F_SIMPLE) ? 1 : r->blend_pass;
+    const int use_noise = r->use_noise, blend_pass = r->blend_pass;
     const int thr_blend = s->blend[3];
     const uint32_t seed = r->prim_count;
     const int dzc = p->dzc;
@@ -1170,7 +1168,7 @@ ALWAYS_INLINE void span_std(rdp_render *r, const rdp_prim *p, const rdp_row *row
         ccomb[c] = sext9(r->ccconst[1][c]);
     }
     const int y = row->y;
-    const int ci8 = !(F & (F_32 | F_SIMPLE)) && s->ci_size == 1;
+    const int ci8 = !(F & F_32) && s->ci_size == 1;
     const uint8_t *dith = M.rgb_dither == 0 ? magic_matrix : M.rgb_dither == 1 ? bayer_matrix : NULL;
     const int dither_on = !(F & F_32) && M.rgb_dither != 3;
     const uint32_t row_off = (uint32_t)y * (uint32_t)s->ci_width;
@@ -1385,10 +1383,10 @@ ALWAYS_INLINE void span_std(rdp_render *r, const rdp_prim *p, const rdp_row *row
 }
 
 
-/* The span routine of F_SIMPLE primitives (16-bit pixels, no memory read, the blender passes, no key / alpha compare /
- * coverage x alpha / alpha from coverage / colour on coverage / noise / LOD): the same steps as span_std with
- * everything in locals. The combiner reads a local copy of its inputs (q, indexed like rdp_cin), which the RDRAM
- * stores cannot alias. Spans that would reach past RDRAM or wrap the 24-bit address go to span_std. */
+/* The span routine of F_FAST primitives (16-bit pixels, no key, noise or LOD: nearly everything games draw): the
+ * same steps as span_std with everything in locals. The combiner reads a local copy of its inputs (q, indexed like
+ * rdp_cin) and the blender local copies of its own, which the RDRAM stores cannot alias. Spans that would reach past
+ * RDRAM or wrap the 24-bit address go to span_std. */
 #define Q_OF(r, ptr) ((uint8_t)((ptr) - (const int32_t *)&(r)->in))
 #define Q_COMB 0
 #define Q_TEX0 4
@@ -1426,9 +1424,35 @@ ALWAYS_INLINE void combine_q(const int32_t *q, const uint8_t ix[4][4], const uin
     }
 }
 
-static const span_fn span_table[48];
+static const span_fn span_table[64];
 
-ALWAYS_INLINE void span_simple(rdp_render *r, const rdp_prim *p, const rdp_row *row, const unsigned F)
+/* 65536 / d rounded up: (n * recip4[d]) >> 16 == n / d for n <= 4080 and d <= 16 (checked exhaustively). */
+static const uint32_t recip4[17] = { 0,    65536, 32768, 21846, 16384, 13108, 10923, 9363, 8192,
+                                     7282, 6554,  5958,  5462,  5042,  4682,  4370,  4096 };
+
+/* blend_cycle on packed colours (pk4 lanes, the A lane ignored): P / M the colour inputs, a8 the 8-bit A input, bsel
+ * the B input mode. Each lane's P * a + M * (b + 1) is at most 255 * 63, so the three lanes are done at once; the
+ * divided blend's denominator is a multiple of 4 up to 60, divided through recip4. */
+ALWAYS_INLINE uint64_t blend_pk(uint64_t P, uint64_t M, int a8, int bsel, int memcvg, int divide)
+{
+    const int a = a8 >> 3;
+    const int b = bsel == 0 ? (~a & 31) : bsel == 1 ? memcvg << 2 : bsel == 2 ? 31 : 0;
+    const uint64_t sum = P * (uint64_t)a + M * (uint64_t)(b + 1);
+    if (divide) {
+        const uint32_t rc = recip4[((a & ~3) + (b & ~3) + 4) >> 2];
+        uint64_t o = 0;
+        for (int sh = 16; sh < 64; sh += 16) {
+            const uint32_t v = (((uint32_t)(sum >> sh) & 0xFFFF) >> 2) * rc >> 16;
+            o |= (uint64_t)(v > 255 ? 255 : v) << sh;
+        }
+        return o;
+    }
+    uint64_t v = (sum >> 5) & LANES(0x7FFull);                                      /* at most 510 per lane */
+    const uint64_t over = ((v + LANES(0x7F00ull)) & LANES(0x8000ull)) >> 15;          /* 1 where >= 256 */
+    return (v | over * 0xFF) & LANES(0xFFull);
+}
+
+ALWAYS_INLINE void span_fast(rdp_render *r, const rdp_prim *p, const rdp_row *row, const unsigned F)
 {
     const rdp_state *s = &r->s;
     const int y = row->y, x0 = row->x0, x1 = row->x1;
@@ -1436,7 +1460,7 @@ ALWAYS_INLINE void span_simple(rdp_render *r, const rdp_prim *p, const rdp_row *
     const uint32_t pa0 = s->ci_addr + ((row_off + (uint32_t)x0) << 1), pa1 = s->ci_addr + ((row_off + (uint32_t)x1) << 1);
     const uint32_t za0 = s->zi_addr + ((row_off + (uint32_t)x0) << 1), za1 = s->zi_addr + ((row_off + (uint32_t)x1) << 1);
     if (pa1 + 1 >= r->ram_size || pa0 > pa1 || ((F & F_Z) && (za1 + 1 >= r->ram_size || za0 > za1))) {
-        span_table[F & ~F_SIMPLE](r, p, row);
+        span_table[F & ~(F_FAST | F_SIMPLE)](r, p, row);
         return;
     }
     const rdp_modes *om = &s->om;
@@ -1444,14 +1468,18 @@ ALWAYS_INLINE void span_simple(rdp_render *r, const rdp_prim *p, const rdp_row *
     uint8_t *restrict hid = r->hidden;
     uint32_t pa = pa0, za = za0;
     const int z_prim = om->z_prim, z_compare = om->z_compare, z_update = om->z_update, z_mode = om->z_mode;
+    const int SIMPLE = (F & F_SIMPLE) != 0;
+    const int image_read = !SIMPLE && om->image_read, cvg_x_alpha = !SIMPLE && om->cvg_x_alpha;
+    const int alpha_cvg_sel = !SIMPLE && om->alpha_cvg_sel, alpha_compare = !SIMPLE && om->alpha_compare;
+    const int thr_blend = s->blend[3], cvg_dest = om->cvg_dest;
+    const int color_on_cvg = !SIMPLE && om->color_on_cvg, force_blend = om->force_blend;
     const int dzc = p->dzc;
     const uint32_t primz18 = p->primz18;
     const uint16_t zlow = (uint16_t)(dzc >> 2);
     const uint8_t zhid = (uint8_t)(dzc & 3);
-    const int ncvg_dest1 = om->cvg_dest == 1; /* memory coverage 7, overflow always: 7, or (cvg + 7) & 7 */
     const uint8_t *dith = om->rgb_dither == 0   ? magic_matrix + (y & 3) * 4
                           : om->rgb_dither == 1 ? bayer_matrix + (y & 3) * 4
-                                                : NULL;
+                                                : NULL; /* 2 (noise) is not F_FAST */
     int32_t q[Q_N];
     memcpy(q, &r->in, sizeof q);
     q[Q_COMB] = q[Q_COMB + 1] = q[Q_COMB + 2] = q[Q_COMB + 3] = 0;
@@ -1470,6 +1498,23 @@ ALWAYS_INLINE void span_simple(rdp_render *r, const rdp_prim *p, const rdp_row *
     int32_t ccol[4];
     for (int c = 0; c < 4; c++)
         ccol[c] = clamp9(ccc[1][c]);
+    /* Blender inputs: P / M of each cycle among (pixel, memory, blend colour, fog colour); the pixel input of cycle 1
+     * in 2-cycle mode is cycle 0's output. A among (pixel alpha, fog alpha, shade alpha, 0). */
+    const int blend_pass = SIMPLE || r->blend_pass;
+    uint64_t bcomb = 0, bc0 = 0, memc = 0;
+    const uint64_t blc = pk4((uint32_t)s->blend[0], (uint32_t)s->blend[1], (uint32_t)s->blend[2], 0);
+    const uint64_t fogc = pk4((uint32_t)s->fog[0], (uint32_t)s->fog[1], (uint32_t)s->fog[2], 0);
+    const uint64_t *bP[2], *bM[2];
+    int bA[2], bB[2];
+    for (int cy = 0; cy < 2; cy++) {
+        const uint64_t *pix = ((F & F_2C) && cy == 1) ? &bc0 : &bcomb;
+        const uint64_t *srcs[4] = { pix, &memc, &blc, &fogc };
+        bP[cy] = srcs[om->m1a[cy]];
+        bM[cy] = srcs[om->m2a[cy]];
+        bA[cy] = om->m1b[cy];
+        bB[cy] = om->m2b[cy];
+    }
+    const int fog_a = s->fog[3];
     const int persp = om->persp && !p->rect;
     const int tn0 = p->tile & 7, tn1 = (p->tile + 1) & 7;
     const samp_fn samp0 = r->samp[tn0][0], samp1 = r->samp[tn1][1];
@@ -1509,13 +1554,19 @@ ALWAYS_INLINE void span_simple(rdp_render *r, const rdp_prim *p, const rdp_row *
             const int cvg = (x >= fx0 && x < fx1) ? 8 : row_cvg(row, x);
             if (!cvg)
                 continue;
+            int memcvg = 7;
+            if (image_read) {
+                const uint16_t v = n64_be16(ram + pa);
+                memc = rgba5551_pk(v);
+                memcvg = (v & 1) << 2 | hid[pa >> 1];
+            }
             uint32_t z18 = 0;
             if (F & F_Z) {
                 z18 = z_prim ? primz18 : cz < 0 ? 0 : (uint32_t)cz >> 13;
                 if (z_compare) {
                     const uint16_t zm = n64_be16(ram + za);
                     const int dzm = (zm & 3) << 2 | hid[za >> 1];
-                    if (!z_test(z_mode, z18, z_decompress(zm >> 2), dzc, dzm, 1))
+                    if (!z_test(z_mode, z18, z_decompress(zm >> 2), dzc, dzm, cvg + memcvg >= 8))
                         continue;
                 }
             }
@@ -1538,8 +1589,11 @@ ALWAYS_INLINE void span_simple(rdp_render *r, const rdp_prim *p, const rdp_row *
             if (F & F_2C) {
                 int32_t c0[4];
                 combine_q(q, ix[0], ccm[0], ccc[0], c0);
-                for (int c = 0; c < 4; c++)
-                    q[Q_COMB + c] = safe0 ? c0[c] : sext9(c0[c]);
+                if (safe0)
+                    memcpy(q + Q_COMB, c0, sizeof c0);
+                else
+                    for (int c = 0; c < 4; c++)
+                        q[Q_COMB + c] = sext9(c0[c]);
                 combine_q(q, ix[1], ccm[1], ccc[1], col);
                 if (!safe1)
                     for (int c = 0; c < 4; c++)
@@ -1554,16 +1608,54 @@ ALWAYS_INLINE void span_simple(rdp_render *r, const rdp_prim *p, const rdp_row *
                         col[c] = clamp9(col[c]);
                     }
             }
-            const int ncvg = ncvg_dest1 ? cvg - 1 : 7;
+            int pcvg = cvg;
+            if (cvg_x_alpha)
+                pcvg = (cvg * (col[3] + 1)) >> 8;
+            const int alpha = alpha_cvg_sel ? imin(pcvg << 5, 255) : col[3];
+            if (alpha_compare && alpha < thr_blend)
+                continue;
+            const int overflow = pcvg + memcvg >= 8;
             int cr = col[0], cg = col[1], cb = col[2];
-            if (dith) {
-                const int dv = dith[x & 3];
-                cr = ((cr & 7) > dv) ? imin(cr + 8, 255) : cr;
-                cg = ((cg & 7) > dv) ? imin(cg + 8, 255) : cg;
-                cb = ((cb & 7) > dv) ? imin(cb + 8, 255) : cb;
+            if (!blend_pass) {
+                bcomb = pk4((uint32_t)col[0], (uint32_t)col[1], (uint32_t)col[2], 0);
+                const int shade_a = q[Q_SHADE + 3];
+                int fc = 0;
+                if (F & F_2C) {
+                    const int a8 = bA[0] == 0 ? alpha : bA[0] == 1 ? fog_a : bA[0] == 2 ? shade_a : 0;
+                    bc0 = blend_pk(*bP[0], *bM[0], a8, bB[0], memcvg, 0);
+                    fc = 1;
+                }
+                uint64_t o;
+                if (force_blend || overflow) {
+                    const int a8 = bA[fc] == 0 ? alpha : bA[fc] == 1 ? fog_a : bA[fc] == 2 ? shade_a : 0;
+                    o = blend_pk(*bP[fc], *bM[fc], a8, bB[fc], memcvg, !force_blend);
+                } else {
+                    o = *bP[fc];
+                }
+                cr = (int)(o >> 48) & 0xFF;
+                cg = (int)(o >> 32) & 0xFF;
+                cb = (int)(o >> 16) & 0xFF;
             }
-            n64_wbe16(ram + pa, (uint16_t)((cr >> 3) << 11 | (cg >> 3) << 6 | (cb >> 3) << 1 | ncvg >> 2));
-            hid[pa >> 1] = (uint8_t)(ncvg & 3);
+            int ncvg;
+            switch (cvg_dest) {
+            case 0: ncvg = overflow ? 7 : pcvg + memcvg; break;
+            case 1: ncvg = (pcvg + memcvg) & 7; break;
+            case 2: ncvg = 7; break;
+            default: ncvg = memcvg; break;
+            }
+            if (color_on_cvg && !overflow) { /* coverage only */
+                ram[pa + 1] = (uint8_t)((ram[pa + 1] & 0xFE) | ncvg >> 2);
+                hid[pa >> 1] = (uint8_t)(ncvg & 3);
+            } else {
+                if (dith) {
+                    const int dv = dith[x & 3];
+                    cr = ((cr & 7) > dv) ? imin(cr + 8, 255) : cr;
+                    cg = ((cg & 7) > dv) ? imin(cg + 8, 255) : cg;
+                    cb = ((cb & 7) > dv) ? imin(cb + 8, 255) : cb;
+                }
+                n64_wbe16(ram + pa, (uint16_t)((cr >> 3) << 11 | (cg >> 3) << 6 | (cb >> 3) << 1 | ncvg >> 2));
+                hid[pa >> 1] = (uint8_t)(ncvg & 3);
+            }
             if ((F & F_Z) && z_update) {
                 n64_wbe16(ram + za, (uint16_t)(z_compress(z18) << 2 | zlow));
                 hid[za >> 1] = zhid;
@@ -1572,27 +1664,88 @@ ALWAYS_INLINE void span_simple(rdp_render *r, const rdp_prim *p, const rdp_row *
     }
 }
 
-#define SPAN_INST(f)                                                                                                     \
-    static void span_##f(rdp_render *r, const rdp_prim *p, const rdp_row *row)                                           \
+#define SPAN_INST(i, f)                                                                                                  \
+    static void span_##i(rdp_render *r, const rdp_prim *p, const rdp_row *row)                                           \
     {                                                                                                                    \
-        if ((f) & F_SIMPLE)                                                                                              \
-            span_simple(r, p, row, (f) & ~F_32);                                                                         \
+        if ((f) & F_FAST)                                                                                                \
+            span_fast(r, p, row, f);                                                                                     \
         else                                                                                                             \
             span_std(r, p, row, f);                                                                                      \
     }
-SPAN_INST(0) SPAN_INST(1) SPAN_INST(2) SPAN_INST(3) SPAN_INST(4) SPAN_INST(5) SPAN_INST(6) SPAN_INST(7)
-SPAN_INST(8) SPAN_INST(9) SPAN_INST(10) SPAN_INST(11) SPAN_INST(12) SPAN_INST(13) SPAN_INST(14) SPAN_INST(15)
-SPAN_INST(16) SPAN_INST(17) SPAN_INST(18) SPAN_INST(19) SPAN_INST(20) SPAN_INST(21) SPAN_INST(22) SPAN_INST(23)
-SPAN_INST(24) SPAN_INST(25) SPAN_INST(26) SPAN_INST(27) SPAN_INST(28) SPAN_INST(29) SPAN_INST(30) SPAN_INST(31)
-SPAN_INST(32) SPAN_INST(33) SPAN_INST(34) SPAN_INST(35) SPAN_INST(36) SPAN_INST(37) SPAN_INST(38) SPAN_INST(39)
-SPAN_INST(40) SPAN_INST(41) SPAN_INST(42) SPAN_INST(43) SPAN_INST(44) SPAN_INST(45) SPAN_INST(46) SPAN_INST(47)
-static const span_fn span_table[48] = {
+/* span_table[f] for f < 32 (span_std), [32 + (f & 15)] F_FAST, [48 + (f & 15)] F_FAST | F_SIMPLE. */
+SPAN_INST(0, 0u)
+SPAN_INST(1, 1u)
+SPAN_INST(2, 2u)
+SPAN_INST(3, 3u)
+SPAN_INST(4, 4u)
+SPAN_INST(5, 5u)
+SPAN_INST(6, 6u)
+SPAN_INST(7, 7u)
+SPAN_INST(8, 8u)
+SPAN_INST(9, 9u)
+SPAN_INST(10, 10u)
+SPAN_INST(11, 11u)
+SPAN_INST(12, 12u)
+SPAN_INST(13, 13u)
+SPAN_INST(14, 14u)
+SPAN_INST(15, 15u)
+SPAN_INST(16, 16u)
+SPAN_INST(17, 17u)
+SPAN_INST(18, 18u)
+SPAN_INST(19, 19u)
+SPAN_INST(20, 20u)
+SPAN_INST(21, 21u)
+SPAN_INST(22, 22u)
+SPAN_INST(23, 23u)
+SPAN_INST(24, 24u)
+SPAN_INST(25, 25u)
+SPAN_INST(26, 26u)
+SPAN_INST(27, 27u)
+SPAN_INST(28, 28u)
+SPAN_INST(29, 29u)
+SPAN_INST(30, 30u)
+SPAN_INST(31, 31u)
+SPAN_INST(32, 32u)
+SPAN_INST(33, 33u)
+SPAN_INST(34, 34u)
+SPAN_INST(35, 35u)
+SPAN_INST(36, 36u)
+SPAN_INST(37, 37u)
+SPAN_INST(38, 38u)
+SPAN_INST(39, 39u)
+SPAN_INST(40, 40u)
+SPAN_INST(41, 41u)
+SPAN_INST(42, 42u)
+SPAN_INST(43, 43u)
+SPAN_INST(44, 44u)
+SPAN_INST(45, 45u)
+SPAN_INST(46, 46u)
+SPAN_INST(47, 47u)
+SPAN_INST(48, 96u)
+SPAN_INST(49, 97u)
+SPAN_INST(50, 98u)
+SPAN_INST(51, 99u)
+SPAN_INST(52, 100u)
+SPAN_INST(53, 101u)
+SPAN_INST(54, 102u)
+SPAN_INST(55, 103u)
+SPAN_INST(56, 104u)
+SPAN_INST(57, 105u)
+SPAN_INST(58, 106u)
+SPAN_INST(59, 107u)
+SPAN_INST(60, 108u)
+SPAN_INST(61, 109u)
+SPAN_INST(62, 110u)
+SPAN_INST(63, 111u)
+static const span_fn span_table[64] = {
     span_0, span_1, span_2, span_3, span_4, span_5, span_6, span_7,
     span_8, span_9, span_10, span_11, span_12, span_13, span_14, span_15,
     span_16, span_17, span_18, span_19, span_20, span_21, span_22, span_23,
     span_24, span_25, span_26, span_27, span_28, span_29, span_30, span_31,
     span_32, span_33, span_34, span_35, span_36, span_37, span_38, span_39,
     span_40, span_41, span_42, span_43, span_44, span_45, span_46, span_47,
+    span_48, span_49, span_50, span_51, span_52, span_53, span_54, span_55,
+    span_56, span_57, span_58, span_59, span_60, span_61, span_62, span_63,
 };
 
 /* Fill mode: the fill colour over the span (no coverage, no pipeline). */
@@ -1631,9 +1784,11 @@ static void span_select(rdp_render *r)
         f |= F_2C;
     if (r->s.ci_size == 3)
         f |= F_32;
-    else if (r->s.ci_size == 2 && !om->image_read && r->blend_pass && !om->key && !om->cvg_x_alpha &&
-             !om->alpha_cvg_sel && !om->alpha_compare && !om->color_on_cvg && !r->use_noise && !r->use_lod)
-        f |= F_SIMPLE;
+    else if (r->s.ci_size == 2 && !om->key && !r->use_noise && !r->use_lod)
+        f |= (!om->image_read && r->blend_pass && !om->cvg_x_alpha && !om->alpha_cvg_sel && !om->alpha_compare &&
+              !om->color_on_cvg)
+                 ? 48u
+                 : 32u;
     r->span = span_table[f];
 }
 
@@ -1659,8 +1814,18 @@ static void raster(rdp_render *r, const rdp_prim *p)
     const int k0 = p->yh & ~3, y0 = k0 >> 2;
     const int32_t ih = p->dxh >> 2, im = p->dxm >> 2, il = p->dxl >> 2;
     const int64_t clx0 = (int64_t)s->sc_x0 << 14, clx1 = (int64_t)s->sc_x1 << 14;
-    for (int y = ytop >> 2; y <= (ybot - 1) >> 2; y++) {
-        if (!row_mine(r, y) || (s->sc_field && (y & 1) != s->sc_odd))
+    /* only the attributes the span reads */
+    const unsigned amask = (r->use_shade ? 0x0Fu : 0u) | (r->use_tex ? 0x70u : 0u) | (r->use_z ? 0x80u : 0u);
+    /* the rows of this renderer's band: blocks of 4 rows, one block in nb */
+    const int nb = r->nbands, ylast = (ybot - 1) >> 2;
+    int y = ytop >> 2;
+    if (nb > 1) {
+        const int blk = y >> 2, m = blk % nb;
+        if (m != r->band)
+            y = (blk + (r->band - m + nb) % nb) * 4;
+    }
+    for (; y <= ylast; y = (nb > 1 && ((y + 1) & 3) == 0) ? y + 1 + 4 * (nb - 1) : y + 1) {
+        if (s->sc_field && (y & 1) != s->sc_odd)
             continue;
         rdp_row row;
         row.y = y;
@@ -1706,7 +1871,8 @@ static void raster(rdp_render *r, const rdp_prim *p)
         const int64_t xm = (int64_t)p->xh + (int64_t)ih * (y * 4 - k0);
         const int64_t dx = ((int64_t)row.x0 << 16) - xm;
         for (int i = 0; i < A_N; i++)
-            row.a[i] = (int32_t)((uint32_t)p->a0[i] + (uint32_t)p->dade[i] * (uint32_t)(y - y0) +
+            row.a[i] = !(amask >> i & 1) ? 0 :
+                       (int32_t)((uint32_t)p->a0[i] + (uint32_t)p->dade[i] * (uint32_t)(y - y0) +
                                  (uint32_t)(((int64_t)p->dadx[i] * dx) >> 16));
         r->span(r, p, &row);
     }
@@ -2596,8 +2762,9 @@ n64_rdp *n64_rdp_create(n64_rcp_bus bus)
 #endif
     n64_rdp_reset(d);
     const char *env = getenv("XBR_N64_RDP_THREADS");
-    if (env && atoi(env) > 1)
-        n64_rdp_set_threads(d, atoi(env));
+    const int nt = env ? atoi(env) : N64_RDP_DEFAULT_THREADS;
+    if (nt > 1)
+        n64_rdp_set_threads(d, nt);
     return d;
 }
 
