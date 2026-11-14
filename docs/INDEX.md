@@ -14,6 +14,9 @@ stuck in.
 - [macOS Launcher](macos/launcher.md) — The XRecomp Mac app: library, prepare, play, settings; its prepare interface and Mac checklist
 - [Environment Variables](runtime/environment-variables.md) — Every `RECOMP_*` switch: default, effect, and the source file that reads it
 - [Contributing](../CONTRIBUTING.md) — Setup, where to focus, code style, how to submit
+- [Upstream README](upstream/README.md) — xboxrecomp's own README: background, library table, FAQ, community ports, test notes
+- [Changelog](../CHANGELOG.md) — Upstream xboxrecomp releases, v0.1.0 to today
+- [Other consoles](../consoles/README.md) — GBA, PS1, N64: layout and rules of the early work
 
 ## Pipeline Guides
 

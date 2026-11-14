@@ -2,7 +2,11 @@
 
 > Part of the [Documentation Index](INDEX.md)
 
-This guide walks you through recompiling your first Xbox game, from extracting the XBE to getting the game running on Windows.
+This guide walks you through recompiling your first Xbox game by hand, from extracting the XBE to getting the game running on Windows. The same steps work on Linux and macOS with `python3` in place of `py -3`.
+
+> To just play a game, you do not need any of this. `python3 -m tools.prepare GAME` (or the Android and Mac apps)
+> runs every step below in one go: see the [README](../README.md#get-it). Read on when you bring up a new title
+> and need to see each stage.
 
 ## What You Need
 

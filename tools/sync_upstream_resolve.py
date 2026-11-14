@@ -19,6 +19,9 @@ region in REGIONS. Only what we renamed is translated;
 the rest of upstream's change merges as it would have. A file that still
 conflicts after that is a real conflict and is left as git left it.
 
+Files in OURS were rewritten for this fork (the README, 2026-11-14): a
+conflict there keeps our version, and prints where upstream's text goes.
+
 Exit status: 0 when no conflict is left (resolved files are staged), 1 when
 some remain (listed on stderr), 2 when there is no merge in progress.
 """
@@ -37,6 +40,13 @@ REGIONS = {
          r"^#define XBOX_KERNEL_THUNK_TABLE_BASE\b"),
         (r"^ \* If not called, ", r"^ \* If not called, "),
     ],
+}
+
+# Files this fork rewrote: a conflict keeps ours. The value says what to do
+# with upstream's change by hand.
+OURS = {
+    "README.md": "upstream's README changed: refresh docs/upstream/README.md and CHANGELOG.md from "
+                 "`git show upstream/main:README.md`",
 }
 
 _GUARD = re.compile(r"^#ifndef\s+(\w+)\s*\n#define\s+\1\b", re.M)
@@ -118,6 +128,11 @@ def resolve(repo):
             stages[int(stage)] = sha
         if set(stages) != {1, 2, 3}:            # added or deleted on one side: not a rename
             left.append(path)
+            continue
+        if path in OURS:
+            git(repo, "checkout", "--ours", "--", path)
+            git(repo, "add", "--", path)
+            print("  kept ours: %s (%s)" % (path, OURS[path]))
             continue
         base, ours, theirs = (git(repo, "cat-file", "blob", stages[i]) for i in (1, 2, 3))
         tb, tt = translate(base, ours, path), translate(theirs, ours, path)
