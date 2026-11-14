@@ -88,9 +88,12 @@ public class LogProvider extends ContentProvider {
         if (f == null)
             return null;
         try {
-            File lsfg = new File(c.getFilesDir(), "lsfg").getCanonicalFile();
-            if (f.getCanonicalPath().startsWith(lsfg.getPath() + File.separator))
-                return null;
+            String path = f.getCanonicalPath();
+            for (String own : new String[] {"lsfg", VkDrivers.DIR}) {   // shader cache, custom Vulkan drivers
+                File d = new File(c.getFilesDir(), own).getCanonicalFile();
+                if (path.startsWith(d.getPath() + File.separator))
+                    return null;
+            }
         } catch (IOException e) {
             return null;
         }
