@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/stat.h>
 
 #define PACK_JSON_MAX (1 << 20)
@@ -111,7 +112,289 @@ int recomp_pack_norm_title_id(const char *s, char out[9])
     return 0;
 }
 
-/* ---- pack.json ------------------------------------------------------------ */
+/* ---- Other consoles (XBA-147) ---------------------------------------------- */
+
+static const char *const CONSOLE_NAMES[] = { "xbox", "gba", "ps1", "n64" };
+
+int recomp_pack_console_id(const char *name)
+{
+    if (!name || !name[0])
+        return RECOMP_CONSOLE_XBOX;
+    for (int i = 0; i < (int)(sizeof CONSOLE_NAMES / sizeof CONSOLE_NAMES[0]); i++)
+        if (!strcmp(name, CONSOLE_NAMES[i]))
+            return i;
+    return RECOMP_CONSOLE_UNKNOWN;
+}
+
+const char *recomp_pack_console_name(int console)
+{
+    if (console < 0 || console >= (int)(sizeof CONSOLE_NAMES / sizeof CONSOLE_NAMES[0]))
+        return "?";
+    return CONSOLE_NAMES[console];
+}
+
+int recomp_pack_dir_name(int console, const char *key, char *out, size_t out_n)
+{
+    size_t n;
+    if (console == RECOMP_CONSOLE_XBOX) {
+        char id[9];
+        if (recomp_pack_norm_title_id(key, id) || out_n < 9)
+            return -1;
+        memcpy(out, id, 9);
+        return 0;
+    }
+    if (console < 0 || !key || !(n = strlen(key)) || n > 40)
+        return -1;
+    for (const char *p = key; *p; p++)
+        if (!((*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z') || (*p >= '0' && *p <= '9') || *p == '_'
+              || *p == '-'))
+            return -1;
+    return (size_t)snprintf(out, out_n, "%s-%s", recomp_pack_console_name(console), key) < out_n ? 0 : -1;
+}
+
+static uint32_t crc32_update(uint32_t crc, const unsigned char *p, size_t n)
+{
+    static uint32_t table[256];
+    if (!table[1])
+        for (uint32_t i = 0; i < 256; i++) {
+            uint32_t c = i;
+            for (int k = 0; k < 8; k++)
+                c = c & 1 ? 0xedb88320u ^ (c >> 1) : c >> 1;
+            table[i] = c;
+        }
+    crc = ~crc;
+    while (n--)
+        crc = table[(crc ^ *p++) & 0xff] ^ (crc >> 8);
+    return ~crc;
+}
+
+/* A game code byte for a key: [A-Z0-9] as is, anything else '_'. */
+static char code_char(unsigned char c)
+{
+    return (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ? (char)c : '_';
+}
+
+/* Game Boy Advance: 0x96 at 0xB2 and the header complement check at 0xBD. */
+static int gba_key(FILE *f, const unsigned char *h, size_t hn, char *key, size_t key_n)
+{
+    unsigned char sum = 0, buf[65536];
+    uint32_t crc = 0;
+    size_t n;
+    if (hn < 0xC0 || h[0xB2] != 0x96)
+        return -1;
+    for (int i = 0xA0; i <= 0xBC; i++)
+        sum = (unsigned char)(sum - h[i]);
+    if ((unsigned char)(sum - 0x19) != h[0xBD])
+        return -1;
+    if (fseek(f, 0, SEEK_SET) != 0)
+        return -1;
+    while ((n = fread(buf, 1, sizeof buf, f)) > 0)
+        crc = crc32_update(crc, buf, n);
+    snprintf(key, key_n, "%c%c%c%c-%08X", code_char(h[0xAC]), code_char(h[0xAD]), code_char(h[0xAE]),
+             code_char(h[0xAF]), (unsigned)crc);
+    return 0;
+}
+
+/* Nintendo 64: the first word says the byte order; CRC1 at 0x10, the game
+ * code (category, ID, region) at 0x3B. */
+static int n64_key(const unsigned char *h, size_t hn, char *key, size_t key_n)
+{
+    unsigned char b[0x40];
+    int order;   /* byte index of the big-endian byte 0 in each word: z64 0, v64 swaps pairs, n64 reverses */
+    if (hn < 0x40)
+        return -1;
+    if (h[0] == 0x80 && h[1] == 0x37 && h[2] == 0x12 && h[3] == 0x40) order = 0;
+    else if (h[0] == 0x37 && h[1] == 0x80 && h[2] == 0x40 && h[3] == 0x12) order = 1;
+    else if (h[0] == 0x40 && h[1] == 0x12 && h[2] == 0x37 && h[3] == 0x80) order = 2;
+    else return -1;
+    for (int i = 0; i < 0x40; i++) {
+        int w = i & ~3, k = i & 3;
+        b[i] = h[w + (order == 0 ? k : order == 1 ? (k ^ 1) : 3 - k)];
+    }
+    snprintf(key, key_n, "%c%c%c%c-%02X%02X%02X%02X", code_char(b[0x3B]), code_char(b[0x3C]), code_char(b[0x3D]),
+             code_char(b[0x3E]), b[0x10], b[0x11], b[0x12], b[0x13]);
+    return 0;
+}
+
+/* An ISO 9660 track: 2048-byte sectors, or raw 2352-byte ones (mode 1 data
+ * at 16, mode 2 form 1 at 24). */
+typedef struct { FILE *f; long size; long off; } iso_track;
+
+static int iso_read(const iso_track *t, uint32_t lba, unsigned char out[2048])
+{
+    long pos = (long)lba * t->size + t->off;
+    return fseek(t->f, pos, SEEK_SET) == 0 && fread(out, 1, 2048, t->f) == 2048 ? 0 : -1;
+}
+
+static int iso_open(FILE *f, iso_track *t, unsigned char pvd[2048])
+{
+    static const unsigned char sync[12] = { 0, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0 };
+    unsigned char raw[16];
+    t->f = f;
+    t->size = 2048;
+    t->off = 0;
+    if (iso_read(t, 16, pvd) == 0 && pvd[0] == 1 && !memcmp(pvd + 1, "CD001", 5))
+        return 0;
+    if (fseek(f, 16L * 2352, SEEK_SET) != 0 || fread(raw, 1, 16, f) != 16 || memcmp(raw, sync, 12))
+        return -1;
+    t->size = 2352;
+    t->off = raw[15] == 2 ? 24 : 16;
+    if (iso_read(t, 16, pvd) == 0 && pvd[0] == 1 && !memcmp(pvd + 1, "CD001", 5))
+        return 0;
+    return -1;
+}
+
+/* SYSTEM.CNF in the root directory, up to n - 1 bytes, NUL-terminated. */
+static int iso_system_cnf(const iso_track *t, const unsigned char pvd[2048], char *out, size_t n)
+{
+    unsigned char sec[2048];
+    uint32_t lba = le32(pvd + 156 + 2), len = le32(pvd + 156 + 10);
+    for (uint32_t done = 0; done < len && done < 64 * 2048; done += 2048, lba++) {
+        if (iso_read(t, lba, sec))
+            return -1;
+        for (unsigned o = 0; o + 33 < 2048 && sec[o];) {
+            unsigned rl = sec[o], nl = sec[o + 32];
+            if (rl < 34 || o + rl > 2048)
+                break;
+            if (nl >= 10 && o + 33 + nl <= 2048 && !strncasecmp((const char *)sec + o + 33, "SYSTEM.CNF", 10)
+                && (nl == 10 || sec[o + 33 + 10] == ';')) {
+                uint32_t flba = le32(sec + o + 2), flen = le32(sec + o + 10);
+                if (iso_read(t, flba, sec))
+                    return -1;
+                if (flen > 2048) flen = 2048;
+                if (flen > n - 1) flen = (uint32_t)(n - 1);
+                memcpy(out, sec, flen);
+                out[flen] = 0;
+                return 0;
+            }
+            o += rl;
+        }
+    }
+    return -1;
+}
+
+/* "BOOT = cdrom:\SLUS_005.94;1" -> "SLUS-00594"; -1 when the boot file is not
+ * serial-shaped (four letters, '_' or '-', three digits, '.', two digits). */
+static int ps1_serial(const char *cnf, char *key, size_t key_n)
+{
+    const char *p = cnf;
+    while ((p = strstr(p, "BOOT")) != NULL) {
+        const char *q = p + 4;
+        p = q;
+        while (*q == ' ' || *q == '\t') q++;
+        if (*q != '=')
+            continue;
+        q++;
+        const char *end = q;
+        while (*end && *end != '\r' && *end != '\n' && *end != ';') end++;
+        const char *name = q;
+        for (const char *s = q; s < end; s++)
+            if (*s == '\\' || *s == ':' || *s == '/') name = s + 1;
+        while (end > name && (end[-1] == ' ' || end[-1] == '\t')) end--;
+        char s[16];
+        if (end - name != 11)
+            return -1;
+        for (int i = 0; i < 11; i++)
+            s[i] = name[i] >= 'a' && name[i] <= 'z' ? (char)(name[i] - 32) : name[i];
+        for (int i = 0; i < 4; i++)
+            if (s[i] < 'A' || s[i] > 'Z') return -1;
+        if ((s[4] != '_' && s[4] != '-') || s[8] != '.')
+            return -1;
+        for (int i = 5; i < 11; i++)
+            if (i != 8 && (s[i] < '0' || s[i] > '9')) return -1;
+        snprintf(key, key_n, "%.4s-%.3s%.2s", s, s + 5, s + 9);
+        return 0;
+    }
+    return -1;
+}
+
+static int ps1_key(FILE *f, char *key, size_t key_n)
+{
+    iso_track t;
+    unsigned char pvd[2048];
+    char cnf[2049];
+    if (iso_open(f, &t, pvd) || memcmp(pvd + 8, "PLAYSTATION", 11))
+        return -1;
+    if (iso_system_cnf(&t, pvd, cnf, sizeof cnf) == 0 && ps1_serial(cnf, key, key_n) == 0)
+        return 0;
+    snprintf(key, key_n, "PSX-%08X", (unsigned)crc32_update(0, pvd, sizeof pvd));
+    return 0;
+}
+
+/* A .cue's first FILE, resolved next to it, into out. */
+static int cue_bin(const char *cue, char *out, size_t n)
+{
+    char line[1200];
+    FILE *f = fopen(cue, "r");
+    int rc = -1;
+    if (!f)
+        return -1;
+    while (rc && fgets(line, sizeof line, f)) {
+        char *p = line, *name, *end;
+        while (*p == ' ' || *p == '\t') p++;
+        if (strncasecmp(p, "FILE", 4) || (p[4] != ' ' && p[4] != '\t'))
+            continue;
+        p += 5;
+        while (*p == ' ' || *p == '\t') p++;
+        if (*p == '"') {
+            name = ++p;
+            end = strchr(p, '"');
+        } else {
+            name = p;
+            end = p + strcspn(p, " \t\r\n");
+        }
+        if (!end || end == name)
+            break;
+        *end = 0;
+        const char *slash = strrchr(cue, '/');
+        if (name[0] == '/' || !slash)
+            rc = (size_t)snprintf(out, n, "%s", name) < n ? 0 : -1;
+        else
+            rc = (size_t)snprintf(out, n, "%.*s/%s", (int)(slash - cue), cue, name) < n ? 0 : -1;
+        break;
+    }
+    fclose(f);
+    return rc;
+}
+
+int recomp_pack_rom_identify(const char *path, int *console, char *key, size_t key_n)
+{
+    unsigned char h[0xC0];
+    size_t hn;
+    size_t len = path ? strlen(path) : 0;
+    FILE *f;
+    int c = RECOMP_CONSOLE_UNKNOWN;
+
+    if (!path || !key || key_n < 24)
+        return -1;
+    if (len > 4 && !strcasecmp(path + len - 4, ".cue")) {
+        char bin[RECOMP_PACK_PATH_MAX];
+        if (cue_bin(path, bin, sizeof bin) || !strcasecmp(bin + (strlen(bin) > 4 ? strlen(bin) - 4 : 0), ".cue"))
+            return -1;
+        if (recomp_pack_rom_identify(bin, &c, key, key_n) || c != RECOMP_CONSOLE_PS1)
+            return -1;
+        if (console)
+            *console = c;
+        return 0;
+    }
+    if (!(f = fopen(path, "rb")))
+        return -1;
+    hn = fread(h, 1, sizeof h, f);
+    if (n64_key(h, hn, key, key_n) == 0)
+        c = RECOMP_CONSOLE_N64;
+    else if (gba_key(f, h, hn, key, key_n) == 0)
+        c = RECOMP_CONSOLE_GBA;
+    else if (ps1_key(f, key, key_n) == 0)
+        c = RECOMP_CONSOLE_PS1;
+    fclose(f);
+    if (c == RECOMP_CONSOLE_UNKNOWN)
+        return -1;
+    if (console)
+        *console = c;
+    return 0;
+}
+
+/* ---- pack.json------------------------------------------------------------ */
 
 /* A tiny JSON reader: enough for a flat object of strings and integers, and
  * skips anything else (nested objects, arrays, floats, true/false/null). */
@@ -358,6 +641,8 @@ static const field FIELDS[] = {
     INT_FIELD("lib_size", RECOMP_PACK_HAVE_LIB_SIZE, lib_size),
     STR_FIELD("lib_sha256", 0, lib_sha256),
     STR_FIELD("entry", 0, entry),
+    STR_FIELD("console", RECOMP_PACK_HAVE_CONSOLE, console),
+    STR_FIELD("title_key", RECOMP_PACK_HAVE_TITLE_KEY, title_key),
 };
 
 int recomp_pack_parse(const char *json, size_t len, recomp_pack_meta *m, char *err, size_t errn)
@@ -424,6 +709,8 @@ done:
     if (r.p != r.end) { say(err, errn, "text after the object"); return -1; }
     if (!m->entry[0])
         snprintf(m->entry, sizeof m->entry, "recomp_title_main");
+    if (!m->console[0])            /* a pack from before the field: an Xbox one */
+        snprintf(m->console, sizeof m->console, "xbox");
     return 0;
 bad:
     say(err, errn, "bad JSON at byte %ld: %s", (long)(r.p - json), r.err ? r.err : "?");
@@ -432,9 +719,11 @@ bad:
 
 int recomp_pack_apply_env_force(const recomp_pack_meta *m)
 {
-    char tid[9];
+    char tid[sizeof m->title_key];
     int n = 0;
-    if (recomp_pack_norm_title_id(m->title_id, tid))
+    if (recomp_pack_console_id(m->console) != RECOMP_CONSOLE_XBOX)   /* XBA-147: the generic key */
+        snprintf(tid, sizeof tid, "%s", m->title_key[0] ? m->title_key : "?");
+    else if (recomp_pack_norm_title_id(m->title_id, tid))
         snprintf(tid, sizeof tid, "?");
     for (int i = 0; i < m->env_force_n; i++)
         if (recomp_cfg_force(tid, m->env_force[i].key, m->env_force[i].value) == 0)
@@ -445,24 +734,12 @@ int recomp_pack_apply_env_force(const recomp_pack_meta *m)
     return n;
 }
 
-int recomp_pack_validate(const recomp_pack_meta *m, const char *tid, long long shell_abi,
-                         const char *pack_dir, char *lib_path, size_t lib_path_n,
-                         char *reason, size_t reason_n)
+/* The checks after the title's own: abi, shell_abi, lib and its size. */
+static int validate_lib(const recomp_pack_meta *m, long long shell_abi, const char *pack_dir,
+                        char *lib_path, size_t lib_path_n, char *reason, size_t reason_n)
 {
-    static const char *const names[] = { "format", "title_id", "abi", "shell_abi", "lib", "lib_size" };
-    char a[9], b[9];
     struct stat st;
 
-    for (unsigned i = 0; i < 6; i++)
-        if (!(m->have & (1u << i))) { say(reason, reason_n, "pack.json has no %s", names[i]); return -1; }
-    if (m->format != RECOMP_PACK_FORMAT) {
-        say(reason, reason_n, "format %lld, this shell reads %d", m->format, RECOMP_PACK_FORMAT);
-        return -1;
-    }
-    if (recomp_pack_norm_title_id(m->title_id, a) || recomp_pack_norm_title_id(tid, b) || strcmp(a, b)) {
-        say(reason, reason_n, "title_id %s, the game is %s", m->title_id, tid ? tid : "?");
-        return -1;
-    }
     if (strcmp(m->abi, recomp_pack_host_abi())) {
         say(reason, reason_n, "abi %s, this shell is %s", m->abi, recomp_pack_host_abi());
         return -1;
@@ -489,6 +766,68 @@ int recomp_pack_validate(const recomp_pack_meta *m, const char *tid, long long s
         return -1;
     }
     return 0;
+}
+
+/* Required fields: the HAVE bits of title (title_id or title_key) and the
+ * five every pack has. */
+static int validate_fields(const recomp_pack_meta *m, unsigned title_bit, const char *title_name,
+                           char *reason, size_t reason_n)
+{
+    static const struct { unsigned bit; const char *name; } req[] = {
+        { RECOMP_PACK_HAVE_FORMAT, "format" }, { 0, NULL }, { RECOMP_PACK_HAVE_ABI, "abi" },
+        { RECOMP_PACK_HAVE_SHELL_ABI, "shell_abi" }, { RECOMP_PACK_HAVE_LIB, "lib" },
+        { RECOMP_PACK_HAVE_LIB_SIZE, "lib_size" },
+    };
+    for (unsigned i = 0; i < sizeof req / sizeof req[0]; i++) {
+        unsigned bit = req[i].bit ? req[i].bit : title_bit;
+        if (!(m->have & bit)) {
+            say(reason, reason_n, "pack.json has no %s", req[i].name ? req[i].name : title_name);
+            return -1;
+        }
+    }
+    if (m->format != RECOMP_PACK_FORMAT) {
+        say(reason, reason_n, "format %lld, this shell reads %d", m->format, RECOMP_PACK_FORMAT);
+        return -1;
+    }
+    return 0;
+}
+
+int recomp_pack_validate(const recomp_pack_meta *m, const char *tid, long long shell_abi,
+                         const char *pack_dir, char *lib_path, size_t lib_path_n,
+                         char *reason, size_t reason_n)
+{
+    char a[9], b[9];
+
+    if (validate_fields(m, RECOMP_PACK_HAVE_TITLE_ID, "title_id", reason, reason_n))
+        return -1;
+    if (recomp_pack_console_id(m->console) != RECOMP_CONSOLE_XBOX) {
+        say(reason, reason_n, "console %s, the game is an xbox title", m->console);
+        return -1;
+    }
+    if (recomp_pack_norm_title_id(m->title_id, a) || recomp_pack_norm_title_id(tid, b) || strcmp(a, b)) {
+        say(reason, reason_n, "title_id %s, the game is %s", m->title_id, tid ? tid : "?");
+        return -1;
+    }
+    return validate_lib(m, shell_abi, pack_dir, lib_path, lib_path_n, reason, reason_n);
+}
+
+int recomp_pack_validate_key(const recomp_pack_meta *m, int console, const char *key, long long shell_abi,
+                             const char *pack_dir, char *lib_path, size_t lib_path_n,
+                             char *reason, size_t reason_n)
+{
+    if (console == RECOMP_CONSOLE_XBOX)
+        return recomp_pack_validate(m, key, shell_abi, pack_dir, lib_path, lib_path_n, reason, reason_n);
+    if (validate_fields(m, RECOMP_PACK_HAVE_TITLE_KEY, "title_key", reason, reason_n))
+        return -1;
+    if (recomp_pack_console_id(m->console) != console) {
+        say(reason, reason_n, "console %s, the game is a %s title", m->console, recomp_pack_console_name(console));
+        return -1;
+    }
+    if (!key || strcmp(m->title_key, key)) {
+        say(reason, reason_n, "title_key %s, the game is %s", m->title_key, key ? key : "?");
+        return -1;
+    }
+    return validate_lib(m, shell_abi, pack_dir, lib_path, lib_path_n, reason, reason_n);
 }
 
 /* An image path for comparison: lowercase, '/', no leading separator. */
@@ -543,13 +882,14 @@ int recomp_pack_image_lib(const recomp_pack_meta *m, const char *pack_dir, const
     return -1;
 }
 
+static int read_pack_json(const char *dir, recomp_pack_meta *m, char *reason, size_t reason_n);
+
 int recomp_pack_find(const char *files_dir, const char *tid, long long shell_abi,
                      recomp_pack_meta *m, char *lib_path, size_t lib_path_n,
                      char *reason, size_t reason_n)
 {
-    char dir[RECOMP_PACK_PATH_MAX], json[RECOMP_PACK_PATH_MAX + 16], err[160];
+    char dir[RECOMP_PACK_PATH_MAX];
     char id[9];
-    FILE *f;
 
     memset(m, 0, sizeof *m);
     if (!files_dir || !files_dir[0] || recomp_pack_norm_title_id(tid, id)) {
@@ -560,6 +900,45 @@ int recomp_pack_find(const char *files_dir, const char *tid, long long shell_abi
         say(reason, reason_n, "path too long");
         return RECOMP_PACK_INVALID;
     }
+    int rc = read_pack_json(dir, m, reason, reason_n);
+    if (rc != RECOMP_PACK_OK)
+        return rc;
+    if (recomp_pack_validate(m, id, shell_abi, dir, lib_path, lib_path_n, reason, reason_n))
+        return RECOMP_PACK_INVALID;
+    return RECOMP_PACK_OK;
+}
+
+int recomp_pack_find_key(const char *files_dir, int console, const char *key, long long shell_abi,
+                         recomp_pack_meta *m, char *lib_path, size_t lib_path_n,
+                         char *reason, size_t reason_n)
+{
+    char dir[RECOMP_PACK_PATH_MAX], name[64];
+
+    if (console == RECOMP_CONSOLE_XBOX)
+        return recomp_pack_find(files_dir, key, shell_abi, m, lib_path, lib_path_n, reason, reason_n);
+    memset(m, 0, sizeof *m);
+    if (!files_dir || !files_dir[0] || recomp_pack_dir_name(console, key, name, sizeof name)) {
+        say(reason, reason_n, "no files dir or title key");
+        return RECOMP_PACK_INVALID;
+    }
+    if ((size_t)snprintf(dir, sizeof dir, "%s/packs/%s", files_dir, name) >= sizeof dir) {
+        say(reason, reason_n, "path too long");
+        return RECOMP_PACK_INVALID;
+    }
+    int rc = read_pack_json(dir, m, reason, reason_n);
+    if (rc != RECOMP_PACK_OK)
+        return rc;
+    if (recomp_pack_validate_key(m, console, key, shell_abi, dir, lib_path, lib_path_n, reason, reason_n))
+        return RECOMP_PACK_INVALID;
+    return RECOMP_PACK_OK;
+}
+
+/* <dir>/pack.json, read and parsed into m. */
+static int read_pack_json(const char *dir, recomp_pack_meta *m, char *reason, size_t reason_n)
+{
+    char json[RECOMP_PACK_PATH_MAX + 16], err[160];
+    FILE *f;
+
     snprintf(json, sizeof json, "%s/pack.json", dir);
     f = fopen(json, "rb");
     if (!f) {
@@ -583,8 +962,6 @@ int recomp_pack_find(const char *files_dir, const char *tid, long long shell_abi
         say(reason, reason_n, "pack.json: %s", err);
         return RECOMP_PACK_INVALID;
     }
-    if (recomp_pack_validate(m, id, shell_abi, dir, lib_path, lib_path_n, reason, reason_n))
-        return RECOMP_PACK_INVALID;
     return RECOMP_PACK_OK;
 }
 

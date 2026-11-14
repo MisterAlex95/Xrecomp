@@ -257,6 +257,214 @@ static void test_validate_and_find(void)
     b.have &= ~RECOMP_PACK_HAVE_LIB_SIZE;
     CHECK(recomp_pack_validate(&b, "4D530004", 1, dir, lib, sizeof lib, reason, sizeof reason) == -1);
     CHECK(strstr(reason, "lib_size") != NULL);
+
+    /* XBA-147: a pack.json from before the console field is an Xbox pack and
+     * loads as before; "console": "xbox" said aloud too; any other console is
+     * not this Xbox title's pack. */
+    CHECK(recomp_pack_find(files, "4D530004", 1, &m, lib, sizeof lib, reason, sizeof reason) == RECOMP_PACK_OK);
+    CHECK(!strcmp(m.console, "xbox") && !(m.have & RECOMP_PACK_HAVE_CONSOLE) && !m.title_key[0]);
+    CHECK(recomp_pack_find_key(files, RECOMP_CONSOLE_XBOX, "4d530004", 1, &m, lib, sizeof lib, reason,
+                               sizeof reason) == RECOMP_PACK_OK);
+    b = m;
+    snprintf(b.console, sizeof b.console, "xbox");
+    b.have |= RECOMP_PACK_HAVE_CONSOLE;
+    CHECK(recomp_pack_validate(&b, "4D530004", 1, dir, lib, sizeof lib, reason, sizeof reason) == 0);
+    snprintf(b.console, sizeof b.console, "gba");
+    CHECK(recomp_pack_validate(&b, "4D530004", 1, dir, lib, sizeof lib, reason, sizeof reason) == -1);
+    CHECK(strstr(reason, "console gba") != NULL);
+}
+
+/* ---- Other consoles (XBA-147) -------------------------------------------- */
+
+static uint32_t crc32_ref(const unsigned char *p, size_t n)   /* bit by bit, not the library's table */
+{
+    uint32_t c = 0xffffffffu;
+    for (size_t i = 0; i < n; i++) {
+        c ^= p[i];
+        for (int k = 0; k < 8; k++)
+            c = (c >> 1) ^ (0xedb88320u & (0u - (c & 1)));
+    }
+    return ~c;
+}
+
+/* A homebrew-shaped GBA ROM: game code, 0x96 at 0xB2, the complement check. */
+static void make_gba(unsigned char *b, size_t n, const char code[4])
+{
+    unsigned char sum = 0;
+    memset(b, 0, n);
+    for (size_t i = 0xC0; i < n; i++)
+        b[i] = (unsigned char)(i * 7);
+    memcpy(b + 0xA0, "XRECOMPTEST ", 12);
+    memcpy(b + 0xAC, code, 4);
+    memcpy(b + 0xB0, "01", 2);
+    b[0xB2] = 0x96;
+    for (int i = 0xA0; i <= 0xBC; i++)
+        sum = (unsigned char)(sum - b[i]);
+    b[0xBD] = (unsigned char)(sum - 0x19);
+}
+
+/* A PS1 data track: ISO 9660, system ID PLAYSTATION, SYSTEM.CNF holding cnf
+ * (none when NULL); 2048-byte sectors, or raw 2352-byte mode 2 ones. */
+static void make_ps1(const char *path, int raw, const char *cnf)
+{
+    enum { SECTORS = 24 };
+    static unsigned char s[SECTORS][2048];
+    unsigned char *pvd = s[16], *root = s[20], *r;
+    memset(s, 0, sizeof s);
+    pvd[0] = 1; memcpy(pvd + 1, "CD001", 5); pvd[6] = 1;
+    memset(pvd + 8, ' ', 32); memcpy(pvd + 8, "PLAYSTATION", 11);
+    memset(pvd + 40, ' ', 32); memcpy(pvd + 40, "XRECOMP_TEST", 12);
+    r = pvd + 156;                         /* the root directory's record */
+    r[0] = 34; put32(r, 2, 20); put32(r, 10, 2048); r[25] = 2; r[32] = 1;
+    s[17][0] = 0xff; memcpy(s[17] + 1, "CD001", 5);
+    r = root;                              /* ".", "..", SYSTEM.CNF;1 */
+    r[0] = 34; put32(r, 2, 20); put32(r, 10, 2048); r[25] = 2; r[32] = 1; r[33] = 0; r += 34;
+    r[0] = 34; put32(r, 2, 20); put32(r, 10, 2048); r[25] = 2; r[32] = 1; r[33] = 1; r += 34;
+    r[0] = 33 + 12 + 1; put32(r, 2, 21); put32(r, 10, cnf ? (uint32_t)strlen(cnf) : 0); r[32] = 12;
+    memcpy(r + 33, cnf ? "SYSTEM.CNF;1" : "OTHER.TXT;1 ", 12);
+    if (cnf)
+        memcpy(s[21], cnf, strlen(cnf));
+    FILE *f = fopen(path, "wb");
+    if (!f) { perror(path); exit(1); }
+    for (int i = 0; i < SECTORS; i++) {
+        if (raw) {
+            unsigned char head[24] = { 0, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0 };
+            unsigned char tail[2352 - 24 - 2048] = { 0 };
+            head[15] = 2;
+            fwrite(head, 1, sizeof head, f);
+            fwrite(s[i], 1, 2048, f);
+            fwrite(tail, 1, sizeof tail, f);
+        } else {
+            fwrite(s[i], 1, 2048, f);
+        }
+    }
+    fclose(f);
+}
+
+static void test_consoles(void)
+{
+    char path[1024], path2[1024], key[64], name[64];
+    unsigned char rom[0x400], n64[0x1000], v[0x1000];
+    int c;
+
+    CHECK(recomp_pack_console_id(NULL) == RECOMP_CONSOLE_XBOX && recomp_pack_console_id("") == RECOMP_CONSOLE_XBOX);
+    CHECK(recomp_pack_console_id("gba") == RECOMP_CONSOLE_GBA && recomp_pack_console_id("ps1") == RECOMP_CONSOLE_PS1);
+    CHECK(recomp_pack_console_id("n64") == RECOMP_CONSOLE_N64 && recomp_pack_console_id("xbox") == RECOMP_CONSOLE_XBOX);
+    CHECK(recomp_pack_console_id("GBA") == RECOMP_CONSOLE_UNKNOWN && recomp_pack_console_id("snes") == RECOMP_CONSOLE_UNKNOWN);
+    CHECK(!strcmp(recomp_pack_console_name(RECOMP_CONSOLE_PS1), "ps1") && !strcmp(recomp_pack_console_name(9), "?"));
+
+    CHECK(recomp_pack_dir_name(RECOMP_CONSOLE_GBA, "AXVE-1A2B3C4D", name, sizeof name) == 0
+          && !strcmp(name, "gba-AXVE-1A2B3C4D"));
+    CHECK(recomp_pack_dir_name(RECOMP_CONSOLE_XBOX, "0x4d530004", name, sizeof name) == 0 && !strcmp(name, "4D530004"));
+    CHECK(recomp_pack_dir_name(RECOMP_CONSOLE_PS1, "../x", name, sizeof name) == -1);
+    CHECK(recomp_pack_dir_name(RECOMP_CONSOLE_PS1, "", name, sizeof name) == -1);
+    CHECK(recomp_pack_dir_name(RECOMP_CONSOLE_UNKNOWN, "A", name, sizeof name) == -1);
+
+    /* GBA: game code + CRC32 of the whole file; a code byte that is no
+     * [A-Z0-9] becomes '_'; a broken header is no GBA ROM. */
+    make_gba(rom, sizeof rom, "AXVE");
+    snprintf(path, sizeof path, "%s/test.gba", root);
+    write_file(path, rom, sizeof rom);
+    {
+        char want[32];
+        snprintf(want, sizeof want, "AXVE-%08X", (unsigned)crc32_ref(rom, sizeof rom));
+        CHECK(recomp_pack_rom_identify(path, &c, key, sizeof key) == 0 && c == RECOMP_CONSOLE_GBA && !strcmp(key, want));
+    }
+    make_gba(rom, sizeof rom, "a\0 1");
+    write_file(path, rom, sizeof rom);
+    CHECK(recomp_pack_rom_identify(path, &c, key, sizeof key) == 0 && !strncmp(key, "___1-", 5));
+    rom[0xBD] ^= 1;
+    write_file(path, rom, sizeof rom);
+    CHECK(recomp_pack_rom_identify(path, &c, key, sizeof key) == -1);
+
+    /* N64: the same key from each byte order. */
+    memset(n64, 0, sizeof n64);
+    n64[0] = 0x80; n64[1] = 0x37; n64[2] = 0x12; n64[3] = 0x40;
+    n64[0x10] = 0x63; n64[0x11] = 0x5A; n64[0x12] = 0x2B; n64[0x13] = 0xFF;
+    memcpy(n64 + 0x3B, "NSME", 4);
+    for (int order = 0; order < 3; order++) {
+        for (size_t i = 0; i < sizeof n64; i++)
+            v[i] = order == 0 ? n64[i] : order == 1 ? n64[i ^ 1] : n64[(i & ~(size_t)3) + 3 - (i & 3)];
+        snprintf(path, sizeof path, "%s/test.%s", root, order == 0 ? "z64" : order == 1 ? "v64" : "n64");
+        write_file(path, v, sizeof v);
+        CHECK(recomp_pack_rom_identify(path, &c, key, sizeof key) == 0 && c == RECOMP_CONSOLE_N64
+              && !strcmp(key, "NSME-635A2BFF"));
+    }
+
+    /* PS1: the serial from SYSTEM.CNF, 2048- and 2352-byte sectors, through a
+     * .cue; without a serial-shaped boot file, the volume descriptor's CRC. */
+    snprintf(path, sizeof path, "%s/test.iso", root);
+    make_ps1(path, 0, "BOOT = cdrom:\\SLUS_005.94;1\r\nTCB = 4\r\n");
+    CHECK(recomp_pack_rom_identify(path, &c, key, sizeof key) == 0 && c == RECOMP_CONSOLE_PS1 && !strcmp(key, "SLUS-00594"));
+    snprintf(path, sizeof path, "%s/Test Game (Track 1).bin", root);
+    make_ps1(path, 1, "BOOT=cdrom:\\scus_944.26;1\n");
+    CHECK(recomp_pack_rom_identify(path, &c, key, sizeof key) == 0 && c == RECOMP_CONSOLE_PS1 && !strcmp(key, "SCUS-94426"));
+    snprintf(path2, sizeof path2, "%s/test.cue", root);
+    {
+        const char *cue = "FILE \"Test Game (Track 1).bin\" BINARY\n  TRACK 01 MODE2/2352\n    INDEX 01 00:00:00\n";
+        write_file(path2, cue, strlen(cue));
+    }
+    CHECK(recomp_pack_rom_identify(path2, &c, key, sizeof key) == 0 && c == RECOMP_CONSOLE_PS1 && !strcmp(key, "SCUS-94426"));
+    make_ps1(path, 1, "BOOT = cdrom:\\PSX.EXE;1\n");
+    CHECK(recomp_pack_rom_identify(path, &c, key, sizeof key) == 0 && !strncmp(key, "PSX-", 4) && strlen(key) == 12);
+    make_ps1(path, 0, NULL);
+    CHECK(recomp_pack_rom_identify(path, &c, key, sizeof key) == 0 && !strncmp(key, "PSX-", 4));
+
+    /* An Xbox image (XISO magic at 0x10000, no PLAYSTATION volume), an XBE,
+     * a missing file: none is another console's game. */
+    {
+        static unsigned char x[0x10800];
+        memset(x, 0, sizeof x);
+        memcpy(x + 0x10000, "MICROSOFT*XBOX*MEDIA", 20);
+        snprintf(path, sizeof path, "%s/xbox.iso", root);
+        write_file(path, x, sizeof x);
+        CHECK(recomp_pack_rom_identify(path, &c, key, sizeof key) == -1);
+        make_xbe(x, 0x4D530004);
+        snprintf(path, sizeof path, "%s/default.xbe", root);
+        write_file(path, x, 0x400);
+        CHECK(recomp_pack_rom_identify(path, &c, key, sizeof key) == -1);
+        CHECK(recomp_pack_rom_identify("/nonexistent/x.gba", &c, key, sizeof key) == -1);
+    }
+
+    /* A gba pack: found under packs/gba-<key>, checked on console and title_key. */
+    {
+        char files[1024], dir[1100], lib[1300], reason[256], so[1300], text[1024], jpath[1200];
+        recomp_pack_meta m;
+        unsigned char bytes[64] = { 1 };
+        snprintf(files, sizeof files, "%s/consoles/files", root);
+        snprintf(dir, sizeof dir, "%s/packs/gba-AXVE-00000001", files);
+        CHECK(recomp_pack_find_key(files, RECOMP_CONSOLE_GBA, "AXVE-00000001", 1, &m, lib, sizeof lib, reason,
+                                   sizeof reason) == RECOMP_PACK_MISSING);
+        mkdirs(dir);
+        snprintf(so, sizeof so, "%s/libtitle.so", dir);
+        write_file(so, bytes, sizeof bytes);
+        snprintf(text, sizeof text, "{\"format\":1,\"console\":\"gba\",\"title_key\":\"AXVE-00000001\",\"abi\":\"%s\","
+                 "\"shell_abi\":1,\"lib\":\"libtitle.so\",\"lib_size\":64}", recomp_pack_host_abi());
+        snprintf(jpath, sizeof jpath, "%s/pack.json", dir);
+        write_file(jpath, text, strlen(text));
+        CHECK(recomp_pack_find_key(files, RECOMP_CONSOLE_GBA, "AXVE-00000001", 1, &m, lib, sizeof lib, reason,
+                                   sizeof reason) == RECOMP_PACK_OK);
+        CHECK(!strcmp(lib, so) && !strcmp(m.console, "gba") && !strcmp(m.title_key, "AXVE-00000001"));
+        recomp_pack_meta b = m;
+        CHECK(recomp_pack_validate_key(&b, RECOMP_CONSOLE_GBA, "AXVE-00000002", 1, dir, lib, sizeof lib, reason,
+                                       sizeof reason) == -1 && strstr(reason, "title_key"));
+        CHECK(recomp_pack_validate_key(&b, RECOMP_CONSOLE_N64, "AXVE-00000001", 1, dir, lib, sizeof lib, reason,
+                                       sizeof reason) == -1 && strstr(reason, "console gba"));
+        CHECK(recomp_pack_validate(&b, "4D530004", 1, dir, lib, sizeof lib, reason, sizeof reason) == -1);
+        b.have &= ~RECOMP_PACK_HAVE_TITLE_KEY;
+        CHECK(recomp_pack_validate_key(&b, RECOMP_CONSOLE_GBA, "AXVE-00000001", 1, dir, lib, sizeof lib, reason,
+                                       sizeof reason) == -1 && strstr(reason, "no title_key"));
+        b = m;
+        snprintf(b.console, sizeof b.console, "xbox");      /* no console field: an Xbox pack, not this one */
+        CHECK(recomp_pack_validate_key(&b, RECOMP_CONSOLE_GBA, "AXVE-00000001", 1, dir, lib, sizeof lib, reason,
+                                       sizeof reason) == -1);
+        b = m;
+        b.shell_abi = 9;
+        CHECK(recomp_pack_validate_key(&b, RECOMP_CONSOLE_GBA, "AXVE-00000001", 1, dir, lib, sizeof lib, reason,
+                                       sizeof reason) == -1 && strstr(reason, "shell_abi 9"));
+        CHECK(recomp_pack_find_key(files, RECOMP_CONSOLE_GBA, "../x", 1, &m, lib, sizeof lib, reason,
+                                   sizeof reason) == RECOMP_PACK_INVALID);
+    }
 }
 
 /* ---- Routing ------------------------------------------------------------- */
@@ -409,6 +617,73 @@ static void test_routing(const char *shell_path, const char *title_path, const c
         unsetenv("RECOMP_IMAGE_MAP");
     }
 
+    /* XBA-147: a game of another console goes to that console's runtime. A
+     * fake gba pack (any library bytes: the stub runtime does not load it
+     * yet) routes to gba_runtime_start, which logs "gba runtime ready". */
+    {
+        typedef int (*load_rom_fn)(const char *, const char *, int *, char *, size_t);
+        load_rom_fn load_rom = (load_rom_fn)dlsym(shell, "xba_pack_load_rom");
+        int (*rom_console)(const char *) = (int (*)(const char *))dlsym(shell, "xba_pack_rom_console");
+        char gba[1100], key[64], dir[1200], so[1300], text[1024], out[1300], log[4096];
+        unsigned char rom[0x400], bytes[64] = { 0 };
+        int c = -1, runtime_rc = -1, rc;
+
+        CHECK(load_rom && rom_console);
+        if (!load_rom || !rom_console)
+            return;
+        setup_game("gba", 0x4D530006, NULL, 1, files, xbe);
+        snprintf(gba, sizeof gba, "%s/gba/Game.gba", root);
+        make_gba(rom, sizeof rom, "XRCT");
+        write_file(gba, rom, sizeof rom);
+        CHECK(recomp_pack_rom_identify(gba, &c, key, sizeof key) == 0 && c == RECOMP_CONSOLE_GBA);
+        CHECK(rom_console(gba) == RECOMP_CONSOLE_GBA && rom_console(xbe) == RECOMP_CONSOLE_UNKNOWN);
+
+        CHECK(load_rom(files, gba, &runtime_rc, reason, sizeof reason) == RECOMP_PACK_MISSING);
+        CHECK(strstr(reason, "gba-XRCT-") == reason);
+
+        snprintf(dir, sizeof dir, "%s/packs/gba-%s", files, key);
+        mkdirs(dir);
+        snprintf(so, sizeof so, "%s/libtitle.so", dir);
+        write_file(so, bytes, sizeof bytes);
+        snprintf(text, sizeof text, "{\"format\":1,\"console\":\"gba\",\"title_key\":\"%s\",\"title\":\"Fake GBA\","
+                 "\"abi\":\"%s\",\"shell_abi\":1,\"lib\":\"libtitle.so\",\"lib_size\":64}", key, recomp_pack_host_abi());
+        snprintf(out, sizeof out, "%s/pack.json", dir);
+        write_file(out, text, strlen(text));
+
+        /* stdout to a file around the call: the runtime's line is the check. */
+        snprintf(out, sizeof out, "%s/gba/stdout.txt", root);
+        fflush(stdout);
+        int saved = dup(1);
+        FILE *cap = fopen(out, "w");
+        dup2(fileno(cap), 1);
+        rc = load_rom(files, gba, &runtime_rc, reason, sizeof reason);
+        fflush(stdout);
+        dup2(saved, 1);
+        close(saved);
+        fclose(cap);
+        cap = fopen(out, "r");
+        size_t n = fread(log, 1, sizeof log - 1, cap);
+        log[n] = 0;
+        fclose(cap);
+        fputs(log, stdout);
+        CHECK(rc == RECOMP_PACK_OK && runtime_rc == 0);
+        CHECK(strstr(log, "PACK_LOADED gba ") != NULL);
+        CHECK(strstr(log, "gba runtime ready") != NULL);
+        CHECK(strstr(log, key) != NULL);
+
+        /* The pack says another console: refused, no runtime runs. */
+        snprintf(text, sizeof text, "{\"format\":1,\"console\":\"n64\",\"title_key\":\"%s\",\"abi\":\"%s\","
+                 "\"shell_abi\":1,\"lib\":\"libtitle.so\",\"lib_size\":64}", key, recomp_pack_host_abi());
+        snprintf(out, sizeof out, "%s/pack.json", dir);
+        write_file(out, text, strlen(text));
+        runtime_rc = 5;
+        CHECK(load_rom(files, gba, &runtime_rc, reason, sizeof reason) == RECOMP_PACK_INVALID);
+        CHECK(strstr(reason, "console n64") != NULL && runtime_rc == -1);
+
+        /* An Xbox game is not one: the Xbox loader's. */
+        CHECK(load_rom(files, xbe, &runtime_rc, reason, sizeof reason) == RECOMP_PACK_INVALID);
+    }
+
     /* A title linked into the shell: its strong symbols, not the forwarders. */
     void *st = dlopen(static_path, RTLD_NOW | RTLD_LOCAL);
     if (!st) { fprintf(stderr, "FAIL dlopen static shell: %s\n", dlerror()); failures++; return; }
@@ -434,6 +709,7 @@ int main(int argc, char **argv)
     test_env_force();
     test_images();
     test_validate_and_find();
+    test_consoles();
     if (argc >= 5)
         test_routing(argv[1], argv[2], argv[3], argv[4]);
     else

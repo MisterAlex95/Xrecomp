@@ -290,6 +290,23 @@ int main(int argc, char *argv[])
     if (have_game > 0 && !s_title_main)
         pack_rc = xba_pack_load(SDL_AndroidGetInternalStoragePath(), store.xbe, &s_title_main,
                                 pack_reason, sizeof pack_reason);
+    /* Another console's game (XBA-147): RECOMP_GAME_DIR names its file (a
+     * .gba, a PS1 disc, an N64 cartridge), which is no Xbox disc, so
+     * have_game is 0; its pack goes to that console's runtime (pack_loader.h).
+     * The runtimes are stubs for now: they log "<console> runtime ready" and
+     * return, and the shell stays on its idle screen. */
+    int console = !s_title_main && have_game <= 0 && store.game_dir[0] ? xba_pack_rom_console(store.game_dir)
+                                                                        : RECOMP_CONSOLE_UNKNOWN;
+    int console_game = console != RECOMP_CONSOLE_UNKNOWN;
+    if (console_game) {
+        int console_rc = -1;
+        pack_rc = xba_pack_load_rom(SDL_AndroidGetInternalStoragePath(), store.game_dir, &console_rc,
+                                    pack_reason, sizeof pack_reason);
+        if (pack_rc == RECOMP_PACK_OK)
+            printf("xboxrecomp: %s runtime returned %d\n", recomp_pack_console_name(console), console_rc);
+        else
+            printf("xboxrecomp: no usable pack for %s (%s)\n", store.game_dir, pack_reason);
+    }
     int run_title = have_game > 0 && s_title_main != NULL;
     if (run_title && xba_pack_image_xbe())   /* another image of the disc (XBA-82) */
         SDL_strlcpy(store.xbe, xba_pack_image_xbe(), sizeof store.xbe);
@@ -333,7 +350,10 @@ int main(int argc, char *argv[])
     /* No title data: say where it goes instead of starting a title that
      * cannot open its files. It shows the message and stays on its black
      * screen (the app is restarted once the data is pushed). */
-    if (have_game <= 0) {
+    if (console_game) {
+        /* Another console's game: its runtime ran (or its pack is missing),
+         * the lines above say which; no Xbox data to ask for. */
+    } else if (have_game <= 0) {
         char msg[3 * RECOMP_STORAGE_PATH_MAX];
         const char *dir = have_game == 0 ? store.game_dir : "(no storage)";
         printf("NO_GAME_DATA: default.xbe not found in %s\n", dir);

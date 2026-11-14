@@ -2,6 +2,9 @@
  * (pack_loader.h). No SDL, no JNI: tests/recomp_pack builds it into a fake
  * shell library on Linux and checks the routing. */
 #include "pack_loader.h"
+#include "gba_runtime.h"
+#include "n64_runtime.h"
+#include "ps1_runtime.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -192,4 +195,71 @@ int xba_pack_set_next_image(const char *target)
         return -1;
     fprintf(f, "%s\n", target);
     return fclose(f) == 0 ? 0 : -1;
+}
+
+/* ---- Other consoles (XBA-147) ---------------------------------------------- */
+
+int xba_pack_rom_console(const char *path)
+{
+    char key[64];
+    int console = RECOMP_CONSOLE_UNKNOWN;
+    if (!path || !path[0] || recomp_pack_rom_identify(path, &console, key, sizeof key) != 0)
+        return RECOMP_CONSOLE_UNKNOWN;
+    return console;
+}
+
+typedef int (*console_start_fn)(const char *rom, const char *pack_lib, const char *title_key);
+
+int xba_pack_load_rom(const char *files_dir, const char *rom_path, int *runtime_rc,
+                      char *reason, size_t reason_n)
+{
+    char key[64], lib[RECOMP_PACK_PATH_MAX], why[512];
+    recomp_pack_meta m;
+    console_start_fn start = NULL;
+    int console = RECOMP_CONSOLE_UNKNOWN, rc;
+
+    if (runtime_rc)
+        *runtime_rc = -1;
+    why[0] = 0;
+    if (!rom_path || recomp_pack_rom_identify(rom_path, &console, key, sizeof key) != 0) {
+        snprintf(why, sizeof why, "%s is not a game of another console", rom_path ? rom_path : "(none)");
+        printf("PACK_INVALID %s\n", why);
+        rc = RECOMP_PACK_INVALID;
+        goto out;
+    }
+    /* The runtime by the console: the game says which, pack.json must agree
+     * (recomp_pack_validate_key). */
+    switch (console) {
+    case RECOMP_CONSOLE_GBA: start = gba_runtime_start; break;
+    case RECOMP_CONSOLE_PS1: start = ps1_runtime_start; break;
+    case RECOMP_CONSOLE_N64: start = n64_runtime_start; break;
+    default: break;
+    }
+    rc = recomp_pack_find_key(files_dir, console, key, xba_shell_abi, &m, lib, sizeof lib, why, sizeof why);
+    if (rc == RECOMP_PACK_MISSING) {
+        snprintf(why, sizeof why, "%s-%s", recomp_pack_console_name(console), key);
+        printf("PACK_MISSING %s %s (no %s/packs/%s/pack.json)\n", recomp_pack_console_name(console), key,
+               files_dir ? files_dir : "", why);
+        goto out;
+    }
+    if (rc != RECOMP_PACK_OK || !start) {
+        if (rc == RECOMP_PACK_OK)
+            snprintf(why, sizeof why, "no %s runtime in this shell", recomp_pack_console_name(console));
+        printf("PACK_INVALID %s\n", why);
+        rc = RECOMP_PACK_INVALID;
+        goto out;
+    }
+    recomp_pack_apply_env_force(&m);
+    printf("PACK_LOADED %s %s %s (%lld bytes, \"%s\")\n", recomp_pack_console_name(console), key, lib, m.lib_size,
+           m.title);
+    fflush(stdout);
+    rc = start(rom_path, lib, key);
+    if (runtime_rc)
+        *runtime_rc = rc;
+    rc = RECOMP_PACK_OK;
+out:
+    fflush(stdout);
+    if (reason && reason_n)
+        snprintf(reason, reason_n, "%s", why);
+    return rc;
 }

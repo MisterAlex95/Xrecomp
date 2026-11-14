@@ -70,6 +70,24 @@ int xba_pack_load(const char *files_dir, const char *xbe_path, xba_title_main_fn
 const char *xba_pack_image_xbe(void);
 int xba_pack_set_next_image(const char *target);
 
+/* Other consoles (XBA-147): the game is a file of another console (a .gba,
+ * a PS1 .bin / .cue / .iso, an N64 .z64 / .v64 / .n64), read by
+ * recomp_pack_rom_identify. Its pack is <files_dir>/packs/<console>-<key>/,
+ * whose pack.json says console and title_key; the loader checks it
+ * (recomp_pack_find_key), sets its env_force options, and hands it to that
+ * console's runtime (<console>_runtime_start, consoles/<console>/runtime),
+ * whose return value goes to *runtime_rc. Logs one line on stdout:
+ *   PACK_LOADED <console> <key> <lib path> (<size> bytes, "<title>")
+ *   PACK_MISSING <console> <key> (...)
+ *   PACK_INVALID <reason>
+ * Returns RECOMP_PACK_OK, RECOMP_PACK_MISSING or RECOMP_PACK_INVALID (not a
+ * game of another console included), with why in reason.
+ * xba_pack_rom_console: the console of such a file (RECOMP_CONSOLE_GBA...),
+ * or RECOMP_CONSOLE_UNKNOWN (an Xbox game, a folder, anything else). */
+int xba_pack_rom_console(const char *path);
+int xba_pack_load_rom(const char *files_dir, const char *rom_path, int *runtime_rc,
+                      char *reason, size_t reason_n);
+
 #ifdef __cplusplus
 }
 #endif

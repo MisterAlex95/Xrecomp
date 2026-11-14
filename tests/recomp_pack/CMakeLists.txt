@@ -18,9 +18,16 @@ add_executable(recomp_pack_test test_main.c ${SRC}/recomp_pack.c ${SRC}/recomp_c
 target_include_directories(recomp_pack_test PRIVATE ${SRC})
 target_link_libraries(recomp_pack_test PRIVATE ${CMAKE_DL_LIBS})
 
+# The other consoles' runtimes pack_loader.c routes to (XBA-147): their sources only (stubs with no dependency yet),
+# as libmain.so links them.
+set(CONSOLES ${CMAKE_CURRENT_SOURCE_DIR}/../../consoles)
+set(CONSOLE_SRC ${CONSOLES}/gba/runtime/gba_runtime.c ${CONSOLES}/ps1/runtime/ps1_runtime.c
+                ${CONSOLES}/n64/runtime/n64_runtime.c)
+set(CONSOLE_INC ${CONSOLES}/gba/runtime ${CONSOLES}/ps1/runtime ${CONSOLES}/n64/runtime)
+
 foreach(t fake_shell fake_shell_static)
-    add_library(${t} SHARED ${APP}/pack_loader.c ${SRC}/recomp_pack.c ${SRC}/recomp_cfg.c fake_toolkit.c)
-    target_include_directories(${t} PRIVATE ${SRC} ${APP})
+    add_library(${t} SHARED ${APP}/pack_loader.c ${SRC}/recomp_pack.c ${SRC}/recomp_cfg.c fake_toolkit.c ${CONSOLE_SRC})
+    target_include_directories(${t} PRIVATE ${SRC} ${APP} ${CONSOLE_INC})
     target_link_libraries(${t} PRIVATE ${CMAKE_DL_LIBS})
     if(NOT APPLE)   # GNU ld's spelling; Apple's ld refuses undefined symbols by default
         target_link_options(${t} PRIVATE -Wl,--no-undefined)

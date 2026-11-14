@@ -12,6 +12,13 @@
  *   - dlopen + dlsym of the symbols a pack exports, each one checked to come
  *     from the pack itself, not from a library it depends on.
  *
+ * Other consoles (XBA-147, consoles/README.md): pack.json may carry
+ * "console" ("xbox" when absent, so every pack made before stays valid, same
+ * format 1) and, for gba / ps1 / n64, "title_key" instead of title_id: the
+ * generic title key recomp_pack_rom_identify reads from the game itself. Such
+ * a pack lives in <files dir>/packs/<console>-<title_key>/; the loader hands
+ * it to that console's runtime instead of dlopening it as an Xbox title.
+ *
  * lib_sha256 is not checked here: the pack sits in the app's private storage,
  * written by prepare (which hashed it) with an atomic publish, and hashing a
  * 100+ MB library at every start costs about a second on a phone. lib_size
@@ -63,6 +70,10 @@ typedef struct recomp_pack_meta {
      * folder. default.xbe is "lib". Older shells skip the key. */
     int images_n, images_dropped;
     struct { char path[256]; char lib[256]; } images[RECOMP_PACK_IMAGES_MAX];
+    /* XBA-147: "console" ("xbox" when absent) and, for another console,
+     * "title_key" (recomp_pack_rom_identify). */
+    char console[16];
+    char title_key[48];
 } recomp_pack_meta;
 
 #define RECOMP_PACK_HAVE_FORMAT    0x01u
@@ -71,7 +82,45 @@ typedef struct recomp_pack_meta {
 #define RECOMP_PACK_HAVE_SHELL_ABI 0x08u
 #define RECOMP_PACK_HAVE_LIB       0x10u
 #define RECOMP_PACK_HAVE_LIB_SIZE  0x20u
-#define RECOMP_PACK_REQUIRED       0x3fu
+#define RECOMP_PACK_REQUIRED       0x3fu    /* an Xbox pack's */
+#define RECOMP_PACK_HAVE_CONSOLE   0x40u
+#define RECOMP_PACK_HAVE_TITLE_KEY 0x80u
+
+/* The consoles a pack may be for (pack.json "console"). */
+enum {
+    RECOMP_CONSOLE_UNKNOWN = -1,
+    RECOMP_CONSOLE_XBOX = 0,
+    RECOMP_CONSOLE_GBA = 1,
+    RECOMP_CONSOLE_PS1 = 2,
+    RECOMP_CONSOLE_N64 = 3
+};
+
+/* "xbox", "gba", "ps1", "n64" <-> RECOMP_CONSOLE_*. NULL or "" is xbox (a
+ * pack from before the field); anything else RECOMP_CONSOLE_UNKNOWN / "?". */
+int recomp_pack_console_id(const char *name);
+const char *recomp_pack_console_name(int console);
+
+/* The console and generic title key of a game of another console than the
+ * Xbox, from the file's content (its extension is not trusted):
+ *   gba  "<game code>-<CRC32 of the file>"          AXVE-1A2B3C4D
+ *        (header: 0x96 at 0xB2 and a valid complement check at 0xBD)
+ *   n64  "<game code>-<header CRC1>"                NSME-635A2BFF
+ *        (.z64 80371240, .v64 37804012, .n64 40123780: any byte order)
+ *   ps1  "<serial>" from SYSTEM.CNF's BOOT line     SLUS-00594
+ *        (ISO 9660 in 2048- or 2352-byte sectors, system ID "PLAYSTATION";
+ *        no serial-shaped boot file: "PSX-<CRC32 of the volume descriptor>";
+ *        a .cue: its first FILE)
+ * A game code byte outside [A-Z0-9] becomes '_', so a key names a folder.
+ * An Xbox image is none of these (the Xbox path reads it); that is how an
+ * .iso is told apart: XISO magic vs ISO 9660 "PLAYSTATION". CHD is not read
+ * yet. key: 24 bytes or more. Returns 0, or -1 when the file is none of
+ * those. */
+int recomp_pack_rom_identify(const char *path, int *console, char *key, size_t key_n);
+
+/* The pack folder's name: "<console>-<key>" for another console, the
+ * normalised title ID for xbox. Returns 0, or -1 when key is empty, longer
+ * than 40 or has characters outside [A-Za-z0-9_-]. */
+int recomp_pack_dir_name(int console, const char *key, char *out, size_t out_n);
 
 /* The `abi` a pack for this host carries: "arm64-v8a" on arm64, "x86_64",
  * "x86", "armeabi-v7a", else "unknown". */
@@ -102,13 +151,21 @@ int recomp_pack_parse(const char *json, size_t len, recomp_pack_meta *m, char *e
 int recomp_pack_apply_env_force(const recomp_pack_meta *m);
 
 /* The checks on a parsed pack.json for title tid, this shell's ABI and the
- * pack directory: every required field, format 1, title_id = tid, abi = the
+ * pack directory: every required field, format 1, console xbox (or none),
+ * title_id = tid, abi = the
  * host's, shell_abi, lib a plain file name, the file there and lib_size
  * bytes long. Fills lib_path (pack_dir/lib). Returns 0, or -1 with a short
  * reason ("shell_abi 0, this shell is 1"). */
 int recomp_pack_validate(const recomp_pack_meta *m, const char *tid, long long shell_abi,
                          const char *pack_dir, char *lib_path, size_t lib_path_n,
                          char *reason, size_t reason_n);
+
+/* The same for a pack of another console: format, console, title_key = key
+ * (in place of title_id), abi, shell_abi, lib, lib_size. RECOMP_CONSOLE_XBOX
+ * is recomp_pack_validate with key as the title ID. */
+int recomp_pack_validate_key(const recomp_pack_meta *m, int console, const char *key, long long shell_abi,
+                             const char *pack_dir, char *lib_path, size_t lib_path_n,
+                             char *reason, size_t reason_n);
 
 /* The library of image `path` (a disc path, any case, '\\' or '/', as
  * xbox_launch_rel_path gives it) in a validated pack: "default.xbe" (or
@@ -126,6 +183,12 @@ int recomp_pack_image_lib(const recomp_pack_meta *m, const char *pack_dir, const
 int recomp_pack_find(const char *files_dir, const char *tid, long long shell_abi,
                      recomp_pack_meta *m, char *lib_path, size_t lib_path_n,
                      char *reason, size_t reason_n);
+
+/* recomp_pack_find for a game of another console: <files_dir>/packs/
+ * <console>-<key>/pack.json, checked with recomp_pack_validate_key. */
+int recomp_pack_find_key(const char *files_dir, int console, const char *key, long long shell_abi,
+                         recomp_pack_meta *m, char *lib_path, size_t lib_path_n,
+                         char *reason, size_t reason_n);
 
 /* What a pack exports. Optional ones are NULL when the pack does not define
  * them (a dlsym that resolves to a library the pack depends on -- libmain.so
