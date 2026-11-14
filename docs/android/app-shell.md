@@ -1309,9 +1309,10 @@ its folder cannot be read.
   its document URI) and the library key `ps1-<SERIAL>`; status, log, queue, notification and Preparing screen are the
   Xbox ones. A document disc is not copied: the service copies the sectors that lead to the boot EXE into
   `<files>/work/ps1-<KEY>/disc.iso` (`Ps1Disc`, a sparse image of a few hundred KB; a `.cue`'s data track found among
-  the track documents the library index lists, `PrepareService.cueParts`). A `.chd` has Play alone and a note: it
-  cannot be prepared (`LauncherActivity.romPrepares`; convert it to `.cue` / `.bin`). Without the toolchain, A
-  launches at once; Start on the card always does.
+  the track documents the library index lists, `PrepareService.cueParts`). A `.chd` (a path or a document) is read
+  by the native disc reader (`Ps1Native.openDisc`: `ps1_disc.c` + libchdr in `libxba_import.so`, every codec) and its
+  boot EXE's sectors go to the same `disc.iso` (XBA-168; [prepare.md « PS1 packs »](prepare.md#ps1-packs-xba-168)).
+  Without the toolchain, A launches at once; Start on the card always does.
 - **Launch** (`LauncherActivity.launchRom`, as for the GBA): the disc becomes the launched game (`rom`, the library key
   `ps1-<SERIAL>` as `title_id`); the same disc running is brought back, another game ending first.
 - **The disc reaches the runtime** as `RECOMP_GAME_DIR`. A folder read as files: the `.cue`'s path (the runtime opens
@@ -1329,7 +1330,7 @@ its folder cannot be read.
   load (the game always starts). At exit (and Quit) the code the interpreter had to run goes to
   `<files>/work/ps1-<KEY>/discovered.txt` for the next Prepare (address, hash and bytes: overlays get lifted). A `.chd` goes over as `fd:N`
   too; `shell_main.c` installs the PS1 disc reader as `recomp_pack_rom_identify`'s disc hook (`ps1_identify_install`)
-  before routing, so it is keyed by its serial like a `.bin` (it plays; it cannot be prepared yet).
+  before routing, so it is keyed by its serial like a `.bin` (a pack prepared from it or from its `.cue` is taken).
 - **BIOS.** OpenBIOS (MIT, PCSX-Redux's nugget tree), inside the APK as `assets/ps1-bios/openbios.bin`: the `ps1-bios`
   stage of `tools/docker/android.Dockerfile` builds it from its pinned source, sha256 checked, and gradle takes it with
   `-PxbaPs1Bios=FILE` (the same check); its licence is `LICENSES/MIT-OpenBIOS.txt` (About › Licences, NOTICE « The
@@ -1393,8 +1394,9 @@ out/hb/ps1/overlay.cue out/hb/ps1/overlay.bin /sdcard/ps1/`), `adb logcat -s xbo
    copied)`, and `run-as … du -k files/work/ps1-PSX-4009E1ED/disc.iso` is small (tens of KB).
 8. One of your own disc dumps (`.cue` + `.bin` tracks): Prepare (note the time and the pack size in `pack.json`),
    Play (`PACK_LOADED`, picture, sound, speed vs. interpreted), quit after a few minutes of play, Prepare again when
-   the Home offers it, play again. Send the logcat and `prepare.log` if a step fails. A `.chd` of it: its Home has
-   Play alone and the note about `.chd`.
+   the Home offers it, play again. Send the logcat and `prepare.log` if a step fails. A `.chd` of it (`chdman
+   createcd`): its Home offers Prepare too; `prepare.log` has `disc: … (chd) -> …/disc.iso (boot …)`, the pack's
+   `source_sha256` is the `.cue`'s, and Play logs `PACK_LOADED`.
 9. Switch the Thor to French: the Home lines and notes in French.
 
 ### Device check (PS1 games, XBA-168), for Alex

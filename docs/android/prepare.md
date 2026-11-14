@@ -187,7 +187,7 @@ XBA_RESULT ok pack=/data/user/0/<app>/files/packs/12345678
 | `BAD_ARGS` | a required flag is missing (`--work`, `--pack-dir`, `--cc`, `--sysroot`, `--shell-lib`) |
 | `NO_XBE` | no `default.xbe` in the source |
 | `NO_ROM`, `BAD_ROM` | a GBA ROM that cannot be read, or is empty or over 32 MB ([GBA packs](#gba-packs-xba-157-xba-158)) |
-| `NO_DISC`, `BAD_DISC` | a PS1 disc that cannot be read, or whose boot EXE is missing or not one, or a `.chd` ([PS1 packs](#ps1-packs-xba-168)) |
+| `NO_DISC`, `BAD_DISC` | a PS1 disc that cannot be read, or whose boot EXE is missing or not one, or a `.chd` hunk the reader cannot decode ([PS1 packs](#ps1-packs-xba-168)) |
 | `NO_ROM`, `BAD_ROM` (N64) | an N64 ROM that cannot be read, or is under 4 KB or over 64 MB ([N64 packs](#n64-packs-xba-174)) |
 | `BAD_XBE` | `xbe_parser` cannot read it |
 | `ANALYSE_FAILED`, `LIFT_FAILED` | a pipeline tool failed; details in `prepare.log` |
@@ -686,7 +686,7 @@ else `PSX.EXE`; for an EXE, the file), not of the image:
 
 | # | id | Does | Stamp |
 |---|---|---|---|
-| 1 | `identify` | reads the disc with the lifter's own reader (`ps1_tools.exe`: ISO 9660 on cooked or raw sectors, a `.cue`'s first data track): title key, the boot EXE (over 2 MB + 2 KB, missing, not a PS-X EXE: `BAD_DISC`; unreadable: `NO_DISC`; a `.chd`: `BAD_DISC`, see below), its SHA-256; copies it to `<work>/boot.exe` | `source` + `toolkit_sha256` (another EXE or toolkit starts over) |
+| 1 | `identify` | reads the disc with the lifter's own reader (`ps1_tools.exe`: ISO 9660 on cooked or raw sectors, a `.cue`'s first data track, a `.chd`: see below): title key, the boot EXE (over 2 MB + 2 KB, missing, not a PS-X EXE, a CHD hunk it cannot decode: `BAD_DISC`; unreadable: `NO_DISC`), its SHA-256; copies it to `<work>/boot.exe` | `source` + `toolkit_sha256` (another EXE or toolkit starts over) |
 | 2 | `analyse` | the code earlier runs had to interpret: `<work>/discovered.txt` (plus `--discovered FILE`), one record kept per address + hash, sorted, into `<work>/discovered-seeds.txt` | (their digest, in the lift's key) |
 | 3 | `lift` | `python -m ps1_tools.recomp <work>/boot.exe <work>/gen.new [--discovered seeds]`, then `gen.new` → `gen` (the stamp is dropped first) | `lift` |
 | 4 | `compile` | each `gen/*.c` with the flags below, the object cache of « Compile and link » | the object cache |
@@ -744,11 +744,27 @@ sparse file, a few hundred KB on disk whatever the disc's size), and passes that
 `ps1_tools.exe`'s, so the key and the EXE found there are the disc's. A path (All files access) goes as it is: a
 `.cue` finds its tracks beside it.
 
-**A `.chd`** cannot be prepared: `ps1_tools` is pure Python (the app's embedded CPython) and reads `.cue` / `.bin` /
-`.iso`; there is no CHD decoder for it. The step fails with `BAD_DISC` (« a .chd image: … chdman extractcd makes a .cue
-/ .bin of it »), and the app does not offer Prepare for one (its Home says why). The game still plays from the
-`.chd`, interpreted; a pack made from the same disc's `.cue` / `.bin` would be taken (same boot EXE) if the key
-matched, but `.chd` has no title key in the app yet.
+**A `.chd`** (XBA-168) is prepared like the `.cue` of the same disc, with the same key and source identity (the boot
+EXE's SHA-256), so either pack plays either image. Two readers, one per side:
+
+- `ps1_tools` has its own CHD v5 reader (`consoles/ps1/tools/ps1_tools/chd.py`, pure Python): the Huffman-coded map,
+  then only the hunks that hold the volume descriptor, the directories, SYSTEM.CNF and the boot EXE (a few dozen of a
+  disc's tens of thousands). Codecs: `cdzl` (deflate) and `cdlz` (LZMA) through CPython's `zlib` and `lzma`, which the
+  app's embedded CPython 3.13 ships (`lib-dynload/zlib…so` against the system's libz, `_lzma…so` with liblzma built
+  in: checked in `python-stdlib.zip`); `cdzs` (zstd) through `compression.zstd`, CPython 3.14 and later only (not the
+  app's); `cdfl` (FLAC) is never decoded: chdman uses it for audio hunks, which hold no code. A data hunk the reader
+  cannot decode (FLAC, zstd on Python 3.13, a diff CHD's parent) fails with `BAD_DISC` saying which. chdman's default
+  codecs for a CD are `cdlz`, `cdzl`, `cdfl`: every chdman CD image of a PlayStation disc reads.
+- the app does not depend on that: `PrepareService.ps1Source` opens a `.chd` (a path or a document, as `fd:N`) with
+  the native disc reader the game uses (`Ps1Native.openDisc`: `ps1_disc.c` and libchdr in `libxba_import.so`, every
+  codec) and `Ps1Disc.extract` copies the boot EXE's sectors into the sparse `<work>/disc.iso` as for a `.bin`
+  document, so tools.prepare reads a plain ISO. Without the native library a path goes to tools.prepare as it is.
+
+The Home of a `.chd` offers Prepare like any disc. Tests: `consoles/ps1/tools/ps1_tools/test_chd.py` (CHDs written
+in chdman's shapes, every codec, raw and repeated hunks, run-length maps, errors; chdman's own images when chdman is
+installed), `tools/prepare/test_ps1_prepare.py` (`.chd` keys and EXEs, the Prepare end to end from a `.chd` of the
+overlay homebrew), ctest `ps1_hb_chd_overlay_cdlz` / `_cdzl` (a CHD `ps1_tools.chd` wrote, booted through libchdr: the
+two readers agree).
 
 **pack.json** of a PS1 pack (format 1; unknown fields ignored):
 

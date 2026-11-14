@@ -3,12 +3,13 @@
 `python3 -m ps1_tools.recomp INPUT OUTDIR [--discovered FILE] [--report FILE] [--no-comments] [--resume-all]`: a
 PlayStation program to C that runs on the core in `consoles/ps1/runtime` (contract: `ps1_recomp.h`, lifted-code
 ABI: `ps1_recomp_rt.h`, overview: [consoles/README.md](../../README.md)). INPUT is a PS-X EXE or a disc image
-(`.cue` / `.bin` / `.iso`). Pure Python 3, standard library only (the MIPS decoder is ours), so it runs in the
+(`.cue` / `.bin` / `.iso` / `.chd`). Pure Python 3, standard library only (the MIPS decoder is ours), so it runs in the
 app's embedded CPython.
 
 | module | role |
 |---|---|
 | `exe.py` | PS-X EXE header; ISO 9660 on cooked (2048) and raw (2352, mode 1 / mode 2 form 1) images, `.cue` sheets; `SYSTEM.CNF` `BOOT=` (else `PSX.EXE`) |
+| `chd.py` | MAME CHD v5 CD images: Huffman-coded map, `cdzl` / `cdlz` hunks (zlib, lzma), `cdzs` on Python 3.14+ (compression.zstd), FLAC hunks (audio) refused; only the hunks read are decompressed. `python3 -m ps1_tools.chd info X.chd`; `write` makes test images in chdman's shape (XBA-168) |
 | `isa.py` | MIPS I decoder: class, registers read, plain and delayed destinations, targets; `conflicts()` (load delay rule) |
 | `discover.py` | images (the EXE, recorded RAM code), function discovery, jump tables, BIOS call stubs, record merging |
 | `lift.py` | one C function per discovered function: blocks, event checks, memory accesses |

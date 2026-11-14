@@ -221,21 +221,34 @@ ON by default), and `fd:N` for single-file images. `ps1_identify.c` (target `ps1
 serial) where both are linked: libmain, the launcher's `libxba_import.so` (`Ps1Native`, the library scan) and
 `ps1_play`; `recomp_pack.c` stays libc-only and leaves a `.chd` unidentified without the hook.
 `ps1_cdrom.c` is the controller of psx-spx: banked registers, parameter / response / data FIFOs, INT1..INT5 queued
-until acknowledged, first / second response times from psx-spx's measurements, seeks approximated by distance, every
-command up to ReadTOC (Test 20h answers vC2), ReadN / ReadS with 800h / 924h sectors and DMA3, XA-ADPCM (filter,
-37800 / 18900 Hz, psx-spx zigzag interpolation to 44.1 kHz) and CD-DA with the volume matrix into a 44.1 kHz stream. GetID answers a data
+until acknowledged, first / second response times from psx-spx's measurements and the ps1-tests cdrom/timing hardware
+log (seeks: a settling time plus distance, fitted to it), every command up to ReadTOC and GetQ (Test 20h answers vC2),
+ReadN / ReadS with 800h / 924h sectors and DMA3, XA-ADPCM (filter, 37800 / 18900 Hz, psx-spx zigzag interpolation to
+44.1 kHz) and CD-DA with the volume matrix into a 44.1 kHz stream (at 2x when Setmode says so: double pitch), report
+mode with peak levels, sub-channel Q for GetlocP and the reports (pregaps: index 00 of the next track; the lead-out
+AAh), the lid (`ps1_cdrom_set_lid`: INT5 01h 08h, stat bit 4 latched until a Getstat; `ps1_cdrom_set_disc` swaps
+discs, XBA-166). GetID answers a data
 disc as licensed (`SCEx` from the licence text at LBA 4, `SCEA` without one, as a modchip would), so a BIOS boots our
 homebrew. `ps1_spu.c`: 24 ADPCM voices with Gaussian interpolation, exact ADSR and sweep envelopes, noise, pitch
 modulation, ENDX, reverb (psx-spx formula with its FIR, the hardware's IIR form with the vIIR = -8000h quirk), capture
 buffers, the SPU IRQ, FIFO and DMA4 transfers, CD input; KON / KOFF latched to the next sample, a voice starts four
 samples after its key on, and the main volume scales the whole mix (voices, CD, reverb). `ps1_mdec.c`: RLE, IDCT with the scale table, 4 / 8 / 15 / 24-bit output, DMA0 / DMA1. Tests:
 `consoles/ps1/tests/test_{disc,cdrom,spu,mdec}.c` on images and register streams they generate (a compressed CHD
-from `chdman` too when it is installed). The limits are listed at the top of each source.
+from `chdman` too when it is installed); JaCzekanski's cdrom/getloc (passes), cdrom/timing (within the hardware log's
+ranges) and cdrom/disc-swap on a 74:10 sparse synthetic disc (`run_jcz_cd.sh`); `ps1_hb_chd_overlay_*` boots CHDs
+written by `ps1_tools.chd` through libchdr. The limits are listed at the top of each source (the CD-ROM's: its
+sector buffers, the head after a Pause, audio sub-channels other than Q).
 
 **Playing a PS1 game (XBA-168).** `ps1_runtime_run` (`consoles/ps1/runtime/ps1_runtime.h`) plays a disc or an EXE
 on the host layer, the GBA's way: a disc (`.cue` with its tracks, `.bin`, `.iso`, `.chd`, or `fd:N` for a
 single-file image) boots through OpenBIOS from `SYSTEM.CNF`, an EXE (recognised by its `PS-X EXE` magic) is
-fast-booted. The picture is the GPU's display area (256 / 320 / 368 / 512 / 640 x 240 / 480, 15- or 24-bit) shown at
+fast-booted. A disc boots fast too (`ps1_set_fast_boot`, on by default, `RECOMP_PS1_FASTBOOT=0` / `--no-fast-boot`
+turn it off): OpenBIOS's shell (its own logo animation, about five seconds; there is no Sony logo) returns at once and
+the BIOS boots the disc itself, SYSTEM.CNF's settings included, so nothing is skipped but the animation: our homebrew
+discs reach their result in 85-145 frames instead of 390-420. A `.m3u` playlist (multi-disc games, one image per line,
+`ps1_runtime_m3u`) plays its first disc; `ps1_runtime_change_disc(path)` (any thread: the app's in-game menu « Change
+disc », F6 on the desktop for the playlist's next disc, `ps1_play --swap FRAME:DISC`) opens the lid, and a second later
+closes it on the new disc (XBA-166). The picture is the GPU's display area (256 / 320 / 368 / 512 / 640 x 240 / 480, 15- or 24-bit) shown at
 4:3 whatever its width (`host_window_set_aspect`), letterboxed, linear by default (`RECOMP_PS1_FILTER=nearest`,
 `RECOMP_PS1_SCALE=integer`: whole multiples of the height). Pads, Xbox layout: A → Cross, B → Circle, X → Square,
 Y → Triangle, LB / RB → L1 / R1, LT / RT → L2 / R2, Start, Back → Select, stick clicks → L3 / R3, D-pad; port 1 is a
@@ -267,8 +280,9 @@ xvfb-run -a build/ps1/ps1_runtime/ps1_play gfx.exe --frames 240 --capture 200 pr
 
 The title key comes from the disc as the app reads it (`recomp_pack_rom_identify`: `SLUS-00594`, or `PSX-<CRC32>`);
 an EXE gets `EXE-<CRC32>`. Every option is listed at the top of `runtime/tools/ps1_play.c`. Test: `ps1_runtime`
-(`consoles/ps1/tests/test_main.c`: the helpers, then gfx.exe fast-booted, through `fd:N`, a memory card read back and
-left alone, gfx.cue booted by the BIOS to its 320 x 240 picture, the errors).
+(`consoles/ps1/tests/test_main.c`: the helpers and `.m3u` parsing, then gfx.exe fast-booted, through `fd:N`, a memory
+card read back and left alone, gfx.cue booted by the BIOS to its 320 x 240 picture, the errors, a save written and
+reloaded, a playlist's disc swap, fast boot on and off); `ps1_hb_fastboot_*` boot every homebrew disc fast.
 
 **N64 core (N-1 XBA-169, N-3 XBA-171, N-4 XBA-172).** Interpreter first, the PS1's shape. `consoles/n64/runtime/n64_core.h`:
 a VR4300 interpreter (`n64_cpu.c`: every MIPS III integer instruction, 64-bit ops, LL / SC / LLD / SCD, LWL..SDR,
