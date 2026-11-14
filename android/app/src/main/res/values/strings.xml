@@ -231,6 +231,8 @@
     <!-- A game's own app (Manage › Create an app; TitleApp, docs/android/app-shell.md « A game's own app »). -->
     <string name="TITLE_APP_ADD">Create an app</string>
     <string name="TITLE_APP_ADD_DETAIL">Makes this game an app of its own on this device: its name and logo in your apps, locked to this disc, opening straight into it. It is a copy of XRecomp, so it takes about %1$s. Android asks you to confirm the install. For your own use only.</string>
+    <string name="TITLE_APP_ADD_UNPREPARED">Prepare this game first (Home › Prepare): its own app is made from the prepared game, so that it starts straight into it.</string>
+    <string name="TITLE_APP_PREPARE_FIRST">Prepare %1$s first, then Create an app.</string>
     <string name="TITLE_APP_ALLOW">Allow XRecomp to install apps on the screen that opened, then come back and press Create an app again.</string>
     <string name="TITLE_APP_BUILDING">Creating the app</string>
     <string name="TITLE_APP_SIGNING">Signing the app</string>

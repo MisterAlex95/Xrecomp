@@ -2415,11 +2415,17 @@ public class LauncherActivity extends Activity {
             listRow(list, getString(R.string.SHORTCUT_ADD), getString(R.string.SHORTCUT_ADD_DETAIL),
                     () -> onAddShortcut(pinTid));
         // A game's own app (TitleApp, TitleApk): the same title ID rule; not in a game's own app itself, nor from a
-        // split install (nothing to copy).
+        // split install (nothing to copy). Only for a prepared game: the app takes this pack over at its first start
+        // (PackHandover) and goes straight into the game; before that the row says to prepare first.
         File template = pinTid != null && TitleApp.ownTitleId(this) == null ? TitleApp.template(this) : null;
-        if (template != null)
-            listRow(list, getString(R.string.TITLE_APP_ADD),
-                    getString(R.string.TITLE_APP_ADD_DETAIL, size(template.length())), () -> onCreateApp(pinTid));
+        if (template != null) {
+            if (prepared(pinTid))
+                listRow(list, getString(R.string.TITLE_APP_ADD),
+                        getString(R.string.TITLE_APP_ADD_DETAIL, size(template.length())), () -> onCreateApp(pinTid));
+            else
+                listRow(list, getString(R.string.TITLE_APP_ADD), getString(R.string.TITLE_APP_ADD_UNPREPARED),
+                        this::notePrepareFirst);
+        }
 
         if (dir != null && ownedCopy(dir)) {
             MenuRow del = listRow(list, getString(R.string.DELETE_COPY), getString(R.string.DELETE_COPY_DETAIL, dir),
@@ -2464,12 +2470,26 @@ public class LauncherActivity extends Activity {
         setNote(getString(ok ? R.string.SHORTCUT_REQUESTED : R.string.SHORTCUT_REFUSED), ok ? NOTE_OK : NOTE_ERROR);
     }
 
+    /** tid has a valid pack built from the selected game's default.xbe: what « Create an app » needs. */
+    private boolean prepared(String tid) {
+        return Pack.check(getFilesDir(), tid) == Pack.Check.VALID && packMatchesSelected(tid);
+    }
+
+    private void notePrepareFirst() {
+        Log.i(TAG, "launcher: game app: not prepared, nothing built");
+        setNote(getString(R.string.TITLE_APP_PREPARE_FIRST, gameTitle(gameDir())), NOTE_WARN);
+    }
+
     /**
      * Manage › Create an app (docs/android/app-shell.md « A game's own app »): this APK copied as the game's own
      * app (TitleApk), behind the progress screen, then handed to Android's installer, whose confirmation
      * TitleAppReceiver shows. Without « Install unknown apps » for this app, its settings screen first.
      */
     private void onCreateApp(String tid) {
+        if (!prepared(tid)) {   // the pack went away since Manage was built
+            notePrepareFirst();
+            return;
+        }
         if (!TitleApp.canInstall(this)) {
             Log.i(TAG, "launcher: game app: Install unknown apps is off, opening its settings");
             setNote(getString(R.string.TITLE_APP_ALLOW), NOTE_WARN);
