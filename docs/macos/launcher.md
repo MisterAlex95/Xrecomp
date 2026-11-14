@@ -82,6 +82,13 @@ bash macos/scripts/build-app.sh      # macos/build/XRecomp.app, ad-hoc signed
   [`docs/images/xrecomp-icon.svg`](../images/xrecomp-icon.svg) (`scripts/mkicon.swift` + `iconutil`) and signs ad hoc
   (`codesign -s -`). Built and run on the same Mac it needs no Developer ID or notarization. The app is not
   sandboxed: it spawns compilers and reads your folders.
+- **Published build**: GitHub's `.github/workflows/desktop.yml` runs `check.sh`, then `build-app.sh` with
+  `XBA_APP_PORTABLE=1` (no `XBAToolkitPath`: the path of the runner means nothing on your Mac) and
+  `XBA_APP_VERSION=<release>`, puts the app inside the toolkit folder (`tools/ci/package_toolkit.sh`, with
+  `tools/VERSION` for the commit) and checks that it finds that folder by itself (`toolkit_source` `bundle`) before
+  zipping it ([releases](../releases/README.md)). Downloaded, it carries the quarantine flag: without
+  `xattr -dr com.apple.quarantine`, Gatekeeper blocks it and App Translocation would run it from a read-only copy
+  elsewhere, where the folders above it hold no toolkit (Setup then asks for one).
 
 ## Layout of the code
 

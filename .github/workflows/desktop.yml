@@ -1,0 +1,189 @@
+# Desktop downloads on the public GitHub mirror (docs/releases/README.md « What a release contains »): the Mac app
+# and the Linux toolkit, built on GitHub's own runners (free for a public repository; nothing runs on the
+# maintainers' machines) and attached to the GitHub release that Gitea's CI publishes with the APK.
+#
+#   tag xrecomp-v<version>   <tag>-macos-arm64.zip and <tag>-linux.tar.gz on that release
+#   push to main             xrecomp-<sha8>-macos-arm64.zip and xrecomp-<sha8>-linux.tar.gz on xrecomp-latest
+#   manual run               the same for the ref it runs on (a tag or main); any other branch builds without
+#                            publishing (the files stay on the run's page)
+#
+# Gitea ignores .github/workflows while .gitea/workflows exists. No game, no game data, no generated C: each download
+# is this repository's tree at the commit (tools/ci/package_toolkit.sh), plus XRecomp.app for the Mac.
+#
+# Order with Gitea: tools/ci/github_release.sh deletes and recreates a release (the APK side), which would drop files
+# attached before it. So the publish job waits for the release of this very commit (target_commitish), then attaches.
+# A re-run of Gitea's release job drops these files: re-run this workflow's run for the tag afterwards.
+name: Desktop
+
+on:
+  push:
+    branches: [main]
+    tags: ['xrecomp-v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  meta:
+    runs-on: ubuntu-24.04
+    outputs:
+      label: ${{ steps.m.outputs.label }}
+      release: ${{ steps.m.outputs.release }}
+      version: ${{ steps.m.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: m
+        run: |
+          sha8=$(printf '%s' "$GITHUB_SHA" | cut -c1-8)
+          last=$(git describe --tags --match 'xrecomp-v*' --abbrev=0 2>/dev/null || echo xrecomp-v0.1.0)
+          case "$GITHUB_REF" in
+            refs/tags/xrecomp-v*) tag=${GITHUB_REF#refs/tags/}
+                                  label=$tag release=$tag version=${tag#xrecomp-v} ;;
+            refs/heads/main)      label=xrecomp-$sha8 release=xrecomp-latest version=${last#xrecomp-v} ;;
+            *)                    label=xrecomp-$sha8 release="" version=${last#xrecomp-v} ;;
+          esac
+          { echo "label=$label"; echo "release=$release"; echo "version=$version"; } >> "$GITHUB_OUTPUT"
+          echo "label $label, release ${release:-none (not published)}, app version $version"
+
+  macos:
+    needs: meta
+    runs-on: macos-15
+    timeout-minutes: 45
+    env:
+      LABEL: ${{ needs.meta.outputs.label }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Launcher checks (build, xrecomp-check, smoke)
+        run: bash macos/scripts/check.sh
+      - name: XRecomp.app inside the toolkit folder
+        env:
+          XBA_APP_VERSION: ${{ needs.meta.outputs.version }}
+          XBA_APP_PORTABLE: '1'
+        run: |
+          sh tools/ci/package_toolkit.sh out/XRecomp
+          bash macos/scripts/build-app.sh
+          ditto macos/build/XRecomp.app out/XRecomp/XRecomp.app
+          codesign --verify --strict out/XRecomp/XRecomp.app
+          ! /usr/libexec/PlistBuddy -c 'Print :XBAToolkitPath' out/XRecomp/XRecomp.app/Contents/Info.plist 2>/dev/null
+      - name: The packaged app finds its toolkit by itself
+        run: |
+          t=$(mktemp -d)
+          mkdir -p "$t/library/Synthetic Game" "$t/home"
+          cp tools/conformance/test.xbe "$t/library/Synthetic Game/default.xbe"
+          XRECOMP_HOME="$t/home" out/XRecomp/XRecomp.app/Contents/MacOS/XRecomp --smoke --library "$t/library" \
+            | tee "$t/smoke.json"
+          grep -Eq '"toolkit_source" *: *"bundle"' "$t/smoke.json"
+          grep -Eq '"toolkit" *: *"[^"]*/out/XRecomp"' "$t/smoke.json"
+      - name: Zip
+        run: |
+          ditto -c -k --keepParent out/XRecomp "out/$LABEL-macos-arm64.zip"
+          (cd out && shasum -a 256 "$LABEL-macos-arm64.zip" > "$LABEL-macos-arm64.zip.sha256" && cat ./*.sha256)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: out/${{ env.LABEL }}-macos-arm64.zip*
+          retention-days: 14
+
+  linux:
+    needs: meta
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      LABEL: ${{ needs.meta.outputs.label }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Package
+        run: |
+          sh tools/ci/package_toolkit.sh out/XRecomp
+          tar -C out -czf "out/$LABEL-linux.tar.gz" XRecomp
+          (cd out && sha256sum "$LABEL-linux.tar.gz" > "$LABEL-linux.tar.gz.sha256" && cat ./*.sha256)
+      # From the archive, as a user would: README « Linux » (the venv because Ubuntu's pip refuses system installs).
+      # The synthetic test.xbe lifts but does not link (no xbe_entry_point), hence --no-build, then the runtime build.
+      - name: Smoke test of the archive
+        run: |
+          t=$(mktemp -d)
+          tar -C "$t" -xzf "out/$LABEL-linux.tar.gz"
+          cd "$t/XRecomp"
+          bash tools/linux/install_deps.sh
+          sudo apt-get install -y python3-venv
+          python3 -m venv "$t/venv" && "$t/venv/bin/pip" install -q capstone pefile numpy
+          mkdir -p "$t/game" && cp tools/conformance/test.xbe "$t/game/default.xbe"
+          "$t/venv/bin/python" -m tools.prepare "$t/game/default.xbe" --work "$t/work" --no-build
+          ls "$t/work/project/src/recomp/gen/recomp_dispatch.c"
+          cmake -S . -B "$t/build" -DCMAKE_BUILD_TYPE=Release
+          cmake --build "$t/build" -j"$(nproc)"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: out/${{ env.LABEL }}-linux.tar.gz*
+          retention-days: 14
+
+  publish:
+    needs: [meta, macos, linux]
+    if: needs.meta.outputs.release != ''
+    runs-on: ubuntu-24.04
+    timeout-minutes: 340
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RELEASE: ${{ needs.meta.outputs.release }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: out
+          merge-multiple: true
+      # Gitea publishes the release once its own CI is through (minutes for a tag, up to hours for main behind the
+      # shared host's heavy-job lock). For main, no release of this commit in time (a newer push, a red Gitea run)
+      # is not an error: the files stay on this run's page.
+      - name: Wait for the release of this commit
+        id: wait
+        run: |
+          for _ in $(seq 1 106); do
+            target=$(gh release view "$RELEASE" --json targetCommitish -q .targetCommitish 2>/dev/null || true)
+            case "$RELEASE:$target" in
+              xrecomp-latest:"$GITHUB_SHA") echo "ok=1" >> "$GITHUB_OUTPUT"; exit 0 ;;
+              xrecomp-latest:*) ;;
+              *:?*) echo "ok=1" >> "$GITHUB_OUTPUT"; exit 0 ;;
+            esac
+            echo "release $RELEASE: ${target:-not there yet}, waiting for $GITHUB_SHA"
+            sleep 180
+          done
+          if [ "$RELEASE" = xrecomp-latest ]; then
+            echo "::warning::no xrecomp-latest release for $GITHUB_SHA: files left on this run only"
+            exit 0
+          fi
+          echo "no release $RELEASE on GitHub: did Gitea's release job run?"; exit 1
+      - name: Attach the desktop downloads
+        if: steps.wait.outputs.ok == '1'
+        run: |
+          ls -la out
+          gh release upload "$RELEASE" out/* --clobber
+          gh release view "$RELEASE" --json body -q .body > body.md
+          if ! grep -q '^### Desktop' body.md; then
+            cat >> body.md <<'EOF'
+
+          ### Desktop
+
+          - `*-macos-arm64.zip`: the XRecomp app for Macs with Apple silicon (macOS 14+) in the toolkit folder it drives.
+            Keep `XRecomp.app` inside that folder. It is not notarized: before the first launch, run
+            `xattr -dr com.apple.quarantine <the XRecomp folder>` in Terminal (otherwise macOS blocks the app, or
+            runs it from a copy that cannot see its toolkit). Setup lists the Homebrew packages and Python it needs.
+          - `*-linux.tar.gz`: the toolkit for Linux (x86-64 and arm64): `bash tools/linux/install_deps.sh`, then
+            `python3 -m tools.prepare /path/to/game.iso` (README, « Linux »).
+
+          No game inside: you prepare your own games on your computer.
+          EOF
+            gh release edit "$RELEASE" --notes-file body.md
+          fi
+          gh release view "$RELEASE" --json assets -q '.assets[].name'
