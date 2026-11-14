@@ -29,8 +29,15 @@
  *     RECOMP_D3D_SW_METHODS   the software methods to service, bit n = method n:
  *                             0x7000 RunPushBuffer (0xC-0xE); the fence event (5)
  *                             is serviced whatever it says (see D3D_METHODS_FENCE)
- *   With an address given, the device is not searched for and RunPushBuffer's
- *   methods write as D3D's handler does, without the run-time guards.
+ *   With an address given, the device is not searched for (the semaphore
+ *   watch reads the given device, else what the given slot holds), every
+ *   serviceable method is on unless RECOMP_D3D_SW_METHODS says otherwise, as
+ *   for a found device (a given address alone used to leave RunPushBuffer's
+ *   methods off: Fable then stopped flipping after its load, "not serviced
+ *   D:4620"), and RunPushBuffer's methods write as D3D's handler does, without
+ *   the run-time guards. Configure says so at start-up ("[D3D] device given
+ *   ..."), and says when RECOMP_D3D_SW_METHODS leaves a RunPushBuffer method
+ *   out.
  *
  * Method 5 sets the fence event, which D3D builds itself right after its
  * vblank event: two KEVENT headers 16 bytes apart, the only such pair in the
@@ -68,7 +75,9 @@
  * fallbacks: a found device's RunPushBuffer methods write only into the
  * pushbuffer the node names (its return slot in the contiguous window, its
  * fixups inside [base, slot)), and decrement a pending count only when it
- * reads as one.
+ * reads as one. Every refusal is printed (the first 4 of each kind) and
+ * counted in the executor's "[GPU] software methods:" report line
+ * (recomp_d3d_describe_refusals).
  *
  * Switches: RECOMP_D3D_SERVICE=0 leaves the service out (no software methods,
  * no semaphore watch, no DMA-walk default: the runtime as a project that never
@@ -142,7 +151,7 @@ extern ptrdiff_t xbox_GetMemoryOffset(void);
 extern size_t xbox_GetMappedSize(void);
 extern void *xbox_GetMemoryBase(void);
 extern void nv2a_pb_set_software_method_hook(int (*hook)(uint32_t param));
-extern void nv2a_pb_set_software_method_refusals(uint32_t (*count)(void));
+extern void nv2a_pb_set_software_method_refusals(int (*describe)(char *buf, int size));
 extern void nv2a_pb_set_semaphore_target(uint32_t guest_va);
 extern int  xbox_KeSetGuestEvent(uint32_t guest_va);
 extern int  xbox_KeAdoptGuestEvent(uint32_t guest_va);
@@ -460,7 +469,14 @@ static uint32_t current_device(void)
  * With a device found at run time the layout is assumed, so each write is
  * checked against the structure the node gives, not against where D3D's
  * callers keep their data:
- *   - the slot must be in the contiguous window (D3D's pushbuffers live there);
+ *   - the node (20 bytes) must be in mapped guest memory: 0xD nodes are in
+ *     the device's table (the image), 0xC/0xE nodes in the ring (the
+ *     contiguous window), and a next pointer names one or the other; a node
+ *     elsewhere means a misread layout, so the chain stops there, unwritten;
+ *   - the slot (4 bytes) must be in the contiguous window: the GPU runs the
+ *     pushbuffer, so it is contiguous memory (D3D's CreatePushBuffer, or a
+ *     title's own contiguous allocation). A node whose slot is not was not
+ *     built by RunPushBuffer, so its next is no better: the chain stops there;
  *   - the fixup list may be anywhere in mapped guest memory (D3DFixup buffers
  *     are on the title's heap: Fable's at 0x0129xxxx, which a contiguous-only
  *     rule dropped, every deferred list, silently), each entry header and
@@ -468,31 +484,61 @@ static uint32_t current_device(void)
  *   - each destination must lie inside the node's own pushbuffer:
  *     base <= to, to + size <= slot (the return JUMP is not a fixup's), no wrap.
  * A refused list stops at the entry refused (the entries before it stay
- * applied, the return JUMP is patched anyway); refusals are printed (the
- * first 4) and counted for the [GPU] software methods report line, so a
- * dropped list is never silent. With the addresses given
- * (RECOMP_D3D_DEVICE[_PTR]) it writes as D3D's handler does, unchecked.
+ * applied, the return JUMP is patched anyway). On a layout the table did not
+ * confirm for this build, the pending count is decremented only when it
+ * reads as a count (1-4096), else left alone. A chain is followed for at most
+ * 4096 nodes, for a given device too (each node's next is set to -1 as it is
+ * taken, so a cycle ends by itself: only a chain through garbage gets there).
+ * Every refusal is printed (the first 4 of each kind) and counted for the
+ * [GPU] software methods report line, so dropped work is never silent. With
+ * the addresses given (RECOMP_D3D_DEVICE[_PTR]) it writes as D3D's handler
+ * does, unchecked.
  *
  * Runs on the executor thread, while the main thread may be in RunPushBuffer
  * bumping the same pending count and linking a new node to the chain with a
  * compare-exchange on the last node's next (0 -> node): next is taken with an
  * atomic exchange, so a node linked meanwhile is not overwritten with -1. */
-/* A write the run-time guards refused (device found at run time only: with
- * the addresses given the handler writes as D3D's does). */
-static void skip_note(const char *what, uint32_t va)
+/* What the run-time guards refused, by kind, since start (only the executor
+ * thread writes them), for the report line: "; <name> refused N" for each
+ * kind with N > 0. */
+static volatile uint32_t s_refused[RECOMP_D3D_REFUSAL_KINDS];
+static const char *const k_refusal_names[RECOMP_D3D_REFUSAL_KINDS] = {
+    "fixup lists", "slots", "nodes", "pending counts", "chains",
+};
+
+/* Counts one refusal of `kind`; 1 for the first 4 of a kind (printed). */
+static int refuse(RecompD3dRefusal kind)
 {
-    static int shown;
-    if (shown++ < 4)
-        fprintf(stderr, "[D3D] RunPushBuffer method: %s 0x%08X outside the contiguous window, not written\n",
-                what, va);
+    return s_refused[kind]++ < 4u;
 }
 
-/* Fixup lists refused (a found device only), for the report. */
-static volatile uint32_t s_fixups_refused;
+uint32_t recomp_d3d_refused(RecompD3dRefusal kind)
+{
+    return (unsigned)kind < RECOMP_D3D_REFUSAL_KINDS ? s_refused[kind] : 0;
+}
 
 uint32_t recomp_d3d_fixups_refused(void)
 {
-    return s_fixups_refused;
+    return s_refused[RECOMP_D3D_REFUSED_FIXUPS];
+}
+
+int recomp_d3d_describe_refusals(char *buf, int size)
+{
+    int o = 0, k;
+    if (size <= 0)
+        return 0;
+    buf[0] = 0;
+    for (k = 0; k < RECOMP_D3D_REFUSAL_KINDS; k++) {
+        uint32_t n = s_refused[k];
+        int w;
+        if (!n)
+            continue;
+        w = snprintf(buf + o, (size_t)(size - o), "; %s refused %u", k_refusal_names[k], n);
+        if (w < 0 || w >= size - o)
+            return (int)strlen(buf);    /* truncated */
+        o += w;
+    }
+    return o;
 }
 
 #define FIXUP_ENTRY_MAX 0x10000u    /* bytes in one entry */
@@ -512,9 +558,7 @@ static int guest_readable(uint32_t va, uint32_t n)
 static void fixup_refused(uint32_t node, uint32_t fix, uint32_t base, uint32_t slot, uint32_t to,
                           uint32_t size, const char *why)
 {
-    static int shown;
-    s_fixups_refused++;     /* executor thread only */
-    if (shown++ < 4)
+    if (refuse(RECOMP_D3D_REFUSED_FIXUPS))
         fprintf(stderr, "[D3D] RunPushBuffer method: fixup list of node 0x%08X refused at 0x%08X (%s: size %u "
                 "to 0x%08X, pushbuffer 0x%08X-0x%08X), rest of the list not written\n",
                 node, fix, why, size, to, base, slot);
@@ -605,10 +649,9 @@ static void d3d_run_pushbuffer_method(uint32_t dev, uint32_t type, uint32_t payl
     if (type != 0xEu) {
         uint32_t n = G32(pending);
         if (!rpb_confirmed() && (n == 0 || n > 0x1000u)) {
-            static int shown;
-            if (shown++ < 4)
-                fprintf(stderr, "[D3D] RunPushBuffer method: pending count +0x%X reads %u, not a count: "
-                        "left alone\n", pending - dev, n);
+            if (refuse(RECOMP_D3D_REFUSED_PENDING))
+                fprintf(stderr, "[D3D] RunPushBuffer method %X: pending count +0x%X reads %u, not a count "
+                        "(layout not confirmed for this build): left alone\n", type, pending - dev, n);
         } else {
 #if defined(__GNUC__) || defined(__clang__)
             __atomic_fetch_sub((uint32_t *)(mem + pending), 1u, __ATOMIC_SEQ_CST);
@@ -617,13 +660,27 @@ static void d3d_run_pushbuffer_method(uint32_t dev, uint32_t type, uint32_t payl
 #endif
         }
     }
-    for (guard = 0; guard < 4096; guard++) {
+    for (guard = 0;; guard++) {
         uint32_t target, next, slot;
 
+        if (guard == 4096) {
+            if (refuse(RECOMP_D3D_REFUSED_CHAIN))
+                fprintf(stderr, "[D3D] RunPushBuffer method %X: chain longer than 4096 nodes, cut before node "
+                        "0x%08X (rest not serviced)\n", type, node);
+            break;
+        }
+        if (!D3D_GIVEN && !guest_readable(node, 20)) {
+            if (refuse(RECOMP_D3D_REFUSED_NODE))
+                fprintf(stderr, "[D3D] RunPushBuffer method %X (payload 0x%07X): node 0x%08X not in guest "
+                        "memory: chain not serviced from there\n", type, payload, node);
+            break;
+        }
         target = G32(node);
         slot = G32(node + 8);
-        if (!D3D_GIVEN && !in_contig(slot)) {
-            skip_note("slot", slot);
+        if (!D3D_GIVEN && (!in_contig(slot) || slot > CONTIG_HI - 4u)) {
+            if (refuse(RECOMP_D3D_REFUSED_SLOT))
+                fprintf(stderr, "[D3D] RunPushBuffer method %X: node 0x%08X slot 0x%08X outside the contiguous "
+                        "window: return JUMP not written, chain not serviced from there\n", type, node, slot);
             break;
         }
         G32(slot) = (target & 0x0FFFFFFFu) + 1u;            /* JUMP target */
@@ -742,15 +799,24 @@ int recomp_d3d_configure(void)
     d3d_mirror = fence && !strcmp(fence, "mirror");
     s_given_device = env_number("RECOMP_D3D_DEVICE");
     s_given_ptr = env_number("RECOMP_D3D_DEVICE_PTR");
+    /* Every serviceable method unless RECOMP_D3D_SW_METHODS says otherwise,
+     * device found or given: a given address is an A/B of the search, not of
+     * the method set (a given address alone used to leave 0xC-0xE off, and
+     * Fable stopped flipping after its load with "not serviced D:4620"). */
     if (getenv("RECOMP_D3D_SW_METHODS") && *getenv("RECOMP_D3D_SW_METHODS"))
         s_methods = env_number("RECOMP_D3D_SW_METHODS") | D3D_METHODS_FENCE | D3D_METHODS_ACK | D3D_METHODS_CALLBACK;
-    else if (D3D_GIVEN)
-        s_methods = D3D_METHODS_FENCE | D3D_METHODS_ACK | D3D_METHODS_CALLBACK;
     else
         s_methods = D3D_METHODS_ALL;
     if (cb && *cb == '0')
         s_methods &= ~D3D_METHODS_CALLBACK;
     s_slot = s_given_ptr;
+    if (D3D_GIVEN && !d3d_mirror)
+        fprintf(stderr, "[D3D] device given (RECOMP_D3D_DEVICE=0x%08X, RECOMP_D3D_DEVICE_PTR=0x%08X): not searched "
+                "for; RunPushBuffer methods write unchecked\n", s_given_device, s_given_ptr);
+    if (!d3d_mirror && (s_methods & 0x7000u) != 0x7000u)
+        fprintf(stderr, "[D3D] RECOMP_D3D_SW_METHODS=%s leaves RunPushBuffer methods 0x%X unserviced: a title that "
+                "defers RunPushBuffer stops (counted under not serviced)\n",
+                getenv("RECOMP_D3D_SW_METHODS"), 0x7000u & ~s_methods);
     if (d3d_mirror) {
         if (s_given_ptr) {
             xbox_Nv2aMirrorFence(s_given_ptr, D3D_FENCE_COUNT, D3D_SEMAPHORE);
@@ -765,37 +831,59 @@ int recomp_d3d_configure(void)
     SETENV_DEFAULT("RECOMP_PB_WALK", "dma");
     if (s_methods) {
         nv2a_pb_set_software_method_hook(d3d_software_method);
-        nv2a_pb_set_software_method_refusals(recomp_d3d_fixups_refused);
+        nv2a_pb_set_software_method_refusals(recomp_d3d_describe_refusals);
     }
     return 1;
 }
 
+/* One pass of the semaphore watch: hand the executor D3D's GPU semaphore
+ * (device + 0x30) once D3D has allocated it, and again if a device reset
+ * moves it. The device is the one given or found (a static in D3D's section),
+ * else what the given pointer slot holds. The slot does not always hold the
+ * device (Fable), so only a semaphore in contiguous memory is accepted:
+ * handing over a heap address made the executor write into game data. A
+ * refused value is printed (the first 4). Returns the semaphore now handed
+ * over (`last` when nothing changed). */
+uint32_t recomp_d3d_watch_once(uint32_t last)
+{
+    static uint32_t refused_last;
+    static int shown;
+    uint32_t dev = current_device(), sem;
+    if (!dev)
+        return last;
+    sem = G32(dev + D3D_SEMAPHORE);
+    if (!sem || sem == last)
+        return last;
+    if (!in_contig(sem)) {
+        if (sem != refused_last && shown < 4) {
+            shown++;
+            fprintf(stderr, "[D3D] device 0x%08X: GPU semaphore pointer 0x%08X outside the contiguous window, "
+                    "not handed over\n", dev, sem);
+        }
+        refused_last = sem;
+        return last;
+    }
+    nv2a_pb_set_semaphore_target(sem);
+    fprintf(stderr, "[D3D] device 0x%08X, GPU semaphore at 0x%08X\n", dev, sem);
+    return sem;
+}
+
 #ifndef _WIN32
-/* Find the device if the environment did not say where it is, then hand the
- * executor D3D's GPU semaphore (device + 0x30) once D3D has allocated it, and
- * again if a device reset moves it. The slot does not always hold the device
- * (Fable), so only a semaphore in contiguous memory is accepted: handing over a
- * heap address made the executor write into game data. */
+/* Find the device if the environment did not say where it is, then watch its
+ * semaphore (recomp_d3d_watch_once) every millisecond. */
 static void *d3d_watch(void *unused)
 {
     uint32_t last = 0;
     unsigned tries = 0;
     (void)unused;
     for (;;) {
-        uint32_t dev, sem;
-        if (!s_slot) {
+        if (!D3D_GIVEN && !s_device) {
             if (!(++tries % 250u))              /* every 250 ms until found */
                 (void)recomp_d3d_locate();
             usleep(1000);
             continue;
         }
-        dev = G32(s_slot);
-        sem = dev ? G32(dev + D3D_SEMAPHORE) : 0;
-        if (sem && sem != last && in_contig(sem)) {
-            nv2a_pb_set_semaphore_target(sem);
-            fprintf(stderr, "[D3D] device 0x%08X, GPU semaphore at 0x%08X\n", dev, sem);
-            last = sem;
-        }
+        last = recomp_d3d_watch_once(last);
         usleep(1000);
     }
     return NULL;

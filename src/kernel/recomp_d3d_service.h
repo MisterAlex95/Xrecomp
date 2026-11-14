@@ -30,7 +30,9 @@ extern "C" {
 
 /* Reads the switches, installs the software-method hook and sets the DMA walk
  * as the default walk. Returns 0 when RECOMP_D3D_SERVICE=0 left it out, else 1.
- * Prints nothing unless a switch is malformed. */
+ * Prints nothing unless a switch is malformed, an address is given
+ * (RECOMP_D3D_DEVICE[_PTR]), or RECOMP_D3D_SW_METHODS leaves a RunPushBuffer
+ * method out. */
 int recomp_d3d_configure(void);
 
 /* Starts the watch thread (device search, GPU semaphore hand-over). No-op on
@@ -44,10 +46,30 @@ uint32_t recomp_d3d_scan_slots(uint32_t lo, uint32_t hi, uint32_t *slot);
 uint32_t recomp_d3d_fence_event_offset(uint32_t d);
 int recomp_d3d_locate(void);
 
-/* Deferred RunPushBuffer fixup lists the run-time guards refused (a device
- * found at run time only), counted since start; the executor prints it in the
- * [GPU] software methods report line when non-zero. */
-uint32_t recomp_d3d_fixups_refused(void);
+/* What the run-time guards of RunPushBuffer's methods refused (a device found
+ * at run time; the chain cap also with the addresses given), by kind, counted
+ * since start; recomp_d3d_service.c says what each guard checks. */
+typedef enum {
+    RECOMP_D3D_REFUSED_FIXUPS,   /* a fixup list stopped at an entry */
+    RECOMP_D3D_REFUSED_SLOT,     /* a node's return slot outside the contiguous window */
+    RECOMP_D3D_REFUSED_NODE,     /* a node outside mapped guest memory */
+    RECOMP_D3D_REFUSED_PENDING,  /* a pending count that did not read as one (unconfirmed layout), left alone */
+    RECOMP_D3D_REFUSED_CHAIN,    /* a chain cut at 4096 nodes */
+    RECOMP_D3D_REFUSAL_KINDS
+} RecompD3dRefusal;
+uint32_t recomp_d3d_refused(RecompD3dRefusal kind);
+uint32_t recomp_d3d_fixups_refused(void);   /* recomp_d3d_refused(RECOMP_D3D_REFUSED_FIXUPS) */
+
+/* The refusals as the [GPU] software methods report line prints them:
+ * "; fixup lists refused 3; slots refused 1" (kinds with a non-zero count
+ * only; "" when none). Returns the length written into buf (size bytes). */
+int recomp_d3d_describe_refusals(char *buf, int size);
+
+/* One pass of the GPU semaphore watch (the watch thread runs it every ms once
+ * the device is known): hands the executor [device + 0x30] when it changed
+ * and lies in the contiguous window. Returns the semaphore handed over, else
+ * last. For tests. */
+uint32_t recomp_d3d_watch_once(uint32_t last);
 
 #ifdef __cplusplus
 }

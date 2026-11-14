@@ -20,39 +20,11 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 # declares its own project().
 get_filename_component(XBOXRECOMP_SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/.." ABSOLUTE)
 
-# recomp_exit_hook: work that must run when a window ends the process with
-# ExitProcess, which skips atexit (recomp_exit_hook.h). A real library on
-# every host, carried by platform, so the D3D windows can call it without
-# linking the kernel.
-add_library(recomp_exit_hook STATIC recomp_exit_hook.c)
-target_include_directories(recomp_exit_hook PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+# The console-agnostic core (recomp_exit_hook, host_time, recomp_cfg, host_cpus, recomp_storage, xbr_host_core):
+# host_core.cmake, shared with src/host (xbr_host, XBA-145). See HOST_LAYER.md.
+include(${CMAKE_CURRENT_SOURCE_DIR}/host_core.cmake)
 
-# host_time: the host's monotonic clock and the timer thread's sleep
-# (host_time.h). A real library on every host, carried by platform to every
-# library of the runtime.
-add_library(host_time STATIC host_time.c)
-target_include_directories(host_time PUBLIC
-    ${XBOXRECOMP_SRC_DIR}
-    ${CMAKE_CURRENT_SOURCE_DIR}
-)
-
-# recomp_cfg: RECOMP_* options from a recomp.cfg file (recomp_cfg.h), for
-# hosts without a shell environment (Android). A real library on every host.
-add_library(recomp_cfg STATIC recomp_cfg.c)
-target_include_directories(recomp_cfg PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-
-# host_cpus: run on the fast cores of a big.LITTLE host (host_cpus.h). A real
-# library on every host (a no-op outside Linux).
-add_library(host_cpus STATIC host_cpus.c)
-target_include_directories(host_cpus PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-
-# recomp_storage: the title's data and save directories on a host without a
-# shell (recomp_storage.h, XBA-23). POSIX hosts (dirent); only the Android
-# app shell links it.
 if(NOT WIN32)
-    add_library(recomp_storage STATIC recomp_storage.c)
-    target_include_directories(recomp_storage PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-
     # recomp_app: a title's start-up on a host without a shell, in one call
     # (recomp_app.h, XBA-52): logcat, recomp.cfg, host defaults, storage,
     # fast cores, fault handler. Calls the kernel (xbox_path_init, the fault
@@ -76,18 +48,16 @@ if(WIN32)
     target_include_directories(platform INTERFACE ${XBOXRECOMP_SRC_DIR})
     target_link_libraries(platform INTERFACE recomp_exit_hook)
 else()
-    add_library(platform STATIC win32_compat.c android_log.c recomp_lifecycle.c recomp_quit.c)
+    # win32_compat.c here; the log pump, the lifecycle and the quit path are the host layer's (xbr_host_core).
+    add_library(platform STATIC win32_compat.c)
     target_include_directories(platform PUBLIC
         ${XBOXRECOMP_SRC_DIR}
         ${CMAKE_CURRENT_SOURCE_DIR}
     )
     find_package(Threads REQUIRED)
-    target_link_libraries(platform PUBLIC Threads::Threads recomp_exit_hook host_time recomp_cfg host_cpus)
+    target_link_libraries(platform PUBLIC Threads::Threads xbr_host_core recomp_exit_hook host_time recomp_cfg host_cpus)
     if(NOT APPLE)
         target_link_libraries(platform PUBLIC m)   # feclearexcept etc.; libSystem has them on macOS
-    endif()
-    if(ANDROID)
-        target_link_libraries(platform PUBLIC log)   # android_log.c: stdout / stderr -> logcat
     endif()
     target_compile_options(platform PRIVATE -Wall -Wextra -Wno-unused-parameter -O2)
 endif()

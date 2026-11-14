@@ -1,0 +1,57 @@
+cmake_minimum_required(VERSION 3.20)
+project(host_layer_test C)
+# The host layer alone (XBA-145, src/platform/HOST_LAYER.md): a program that links only xbr_host (src/host) opens a
+# window, presents a GL texture and reads the pads. The project adds src/host and nothing else, so its build
+# compiles no Xbox source; the configure step also walks xbr_host's link closure and fails on an Xbox target or
+# source (below).
+#   host_layer_core    no display: time, lifecycle, config, storage, pads and audio out on SDL's dummy drivers
+#   host_layer_window  the window, GL present and pads; skipped (77) headless or under XBR_BUILD_ONLY
+if(WIN32)
+    message(FATAL_ERROR "The host layer is POSIX-only")
+endif()
+set(CMAKE_C_STANDARD 11)
+
+add_subdirectory(../../src/host host)
+
+# Every target xbr_host reaches, and its sources: none may be Xbox-specific.
+function(_xbr_host_closure target)
+    if(NOT TARGET ${target} OR target IN_LIST _xbr_seen)
+        return()
+    endif()
+    list(APPEND _xbr_seen ${target})
+    set(_xbr_seen ${_xbr_seen} PARENT_SCOPE)
+    get_target_property(_aliased ${target} ALIASED_TARGET)
+    get_target_property(_imported ${target} IMPORTED)
+    if(_imported OR _aliased)
+        return()   # SDL2::SDL2, Threads::Threads
+    endif()
+    if(target MATCHES "^(platform|xbox_|recomp_app$|recomp_pack$)")
+        message(FATAL_ERROR "xbr_host links the Xbox target ${target}")
+    endif()
+    get_target_property(_srcs ${target} SOURCES)
+    foreach(_s IN LISTS _srcs)
+        if(_s MATCHES "(win32_compat|xbox_|kernel|nv2a|mmio_decode|xbe|apu|dsound|xinput_device|fb_present)")
+            message(FATAL_ERROR "xbr_host builds the Xbox source ${_s} (target ${target})")
+        endif()
+    endforeach()
+    get_target_property(_libs ${target} LINK_LIBRARIES)
+    get_target_property(_ilibs ${target} INTERFACE_LINK_LIBRARIES)
+    foreach(_l IN LISTS _libs _ilibs)
+        if(_l AND TARGET ${_l})
+            _xbr_host_closure(${_l})
+            set(_xbr_seen ${_xbr_seen} PARENT_SCOPE)
+        endif()
+    endforeach()
+endfunction()
+set(_xbr_seen "")
+_xbr_host_closure(xbr_host)
+message(STATUS "xbr_host closure: ${_xbr_seen}")
+
+add_executable(host_layer_test test_main.c)
+target_link_libraries(host_layer_test PRIVATE xbr_host)
+
+enable_testing()
+add_test(NAME host_layer_core COMMAND host_layer_test core)
+set_tests_properties(host_layer_core PROPERTIES ENVIRONMENT "SDL_AUDIODRIVER=dummy" TIMEOUT 60)
+add_test(NAME host_layer_window COMMAND host_layer_test window)
+set_tests_properties(host_layer_window PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60)

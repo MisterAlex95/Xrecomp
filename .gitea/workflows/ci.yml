@@ -1,5 +1,6 @@
-# Linux baseline of the fork (XBA-13): the toolkit builds, every C test project under tests/ passes or skips
-# (exit 77), and the Python suite (pytest tools/) passes -- all inside tools/docker/linux.Dockerfile.
+# Linux baseline of the fork (XBA-13): the toolkit builds, every C test project under tests/ and consoles/*/tests/ passes
+# or skips (exit 77), and the Python suite (pytest tools/ consoles/) passes -- all inside tools/docker/linux.Dockerfile.
+# The console runtimes (XBA-146) ride in the same linux and linux-arm64 jobs: no job of their own on the shared host.
 # Runs on the Coolify host's Docker (job container with the Docker CLI only), like Table Factory's CI; the host's
 # layer cache keeps the apt / pip layers between runs. The last step prints the C test report.
 #

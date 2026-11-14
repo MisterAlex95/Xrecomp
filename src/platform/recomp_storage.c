@@ -57,7 +57,7 @@ static void mkdir_p(const char *path)
         fprintf(stderr, "storage: cannot create %s: %s\n", tmp, strerror(errno));
 }
 
-static int find_xbe(const char *dir, char *out)
+static int find_entry(const char *dir, const char *name, char *out)
 {
     DIR *d = opendir(dir);
     struct dirent *e;
@@ -67,7 +67,7 @@ static int find_xbe(const char *dir, char *out)
     if (!d)
         return 0;
     while ((e = readdir(d)) != NULL) {
-        if (strcasecmp(e->d_name, "default.xbe") == 0) {
+        if (strcasecmp(e->d_name, name) == 0) {
             struct stat st;
             if (fmt(out, dir, e->d_name) == 0 && stat(out, &st) == 0 &&
                 S_ISREG(st.st_mode)) {
@@ -83,6 +83,12 @@ static int find_xbe(const char *dir, char *out)
 
 int recomp_storage_resolve(const char *external, const char *internal,
                            recomp_storage *out)
+{
+    return recomp_storage_resolve_entry(external, internal, "default.xbe", out);
+}
+
+int recomp_storage_resolve_entry(const char *external, const char *internal,
+                                 const char *entry, recomp_storage *out)
 {
     const char *ov = getenv("RECOMP_GAME_DIR");
 
@@ -104,8 +110,16 @@ int recomp_storage_resolve(const char *external, const char *internal,
     mkdir_p(out->save_dir);
     int image = image_spec(out->game_dir);
     int found;
+    if (!entry || !entry[0]) {
+        /* No entry file to look for (XBA-145): the directories only. */
+        if (!image)
+            mkdir_p(out->game_dir);
+        printf("storage: game=%s save=%s\n", out->game_dir, out->save_dir);
+        fflush(stdout);
+        return 0;
+    }
     if (image) {
-        found = image > 0 && fmt(out->xbe, out->game_dir, "default.xbe") == 0;
+        found = image > 0 && fmt(out->xbe, out->game_dir, entry) == 0;
         if (!found)
             out->xbe[0] = '\0';
         printf("storage: game=%s (disc image%s) save=%s\n", out->game_dir,
@@ -114,9 +128,9 @@ int recomp_storage_resolve(const char *external, const char *internal,
         return found;
     }
     mkdir_p(out->game_dir);
-    found = find_xbe(out->game_dir, out->xbe);
-    printf("storage: game=%s save=%s (default.xbe %s)\n",
-           out->game_dir, out->save_dir, found ? "found" : "missing");
+    found = find_entry(out->game_dir, entry, out->xbe);
+    printf("storage: game=%s save=%s (%s %s)\n",
+           out->game_dir, out->save_dir, entry, found ? "found" : "missing");
     fflush(stdout);
     return found;
 }

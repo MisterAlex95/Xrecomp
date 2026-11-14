@@ -25,7 +25,8 @@ target_compile_definitions(main PRIVATE XBA_VERSION="${XBA_VERSION}")
 # a title linked in wins, otherwise they reach a dlopened title pack, pack_loader.h).
 set(XBA_TOOLKIT_LIBS xbox_kernel xbox_d3d8 xbox_dsound xbox_input xbox_input_map xbox_usb xbox_apu xbox_nv2a
                      xbox_video platform host_time recomp_exit_hook recomp_cfg host_cpus
-                     recomp_storage recomp_app recomp_selftest recomp_pack)
+                     recomp_storage recomp_app recomp_selftest recomp_pack
+                     xbr_host xbr_host_core input_ports)   # the host layer (XBA-145)
 if(TARGET xbox_framegen)
     list(APPEND XBA_TOOLKIT_LIBS xbox_framegen)
 endif()

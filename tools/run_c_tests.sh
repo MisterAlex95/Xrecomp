@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Builds every self-contained C test project under tests/ and runs its ctest.
-# The root build only lists a couple of them; this covers the whole directory.
+# The root build only lists a couple of them; this covers the whole directory,
+# then consoles/<name>/tests (XBA-146) as console_<name>.
 #
 #   tools/run_c_tests.sh [build-dir] [report.md]
 #
@@ -40,6 +41,14 @@ WINDOWS_ONLY=" apu_vp fb_present idex_channel input_xinput_imports kernel_dispat
                kernel_physical_address kernel_regressions mmio_decode nv2a_pvideo xaudio2 "
 case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) WINDOWS_ONLY="" ;; esac
 
+# The console runtimes' test projects (consoles/<name>/tests, XBA-146), reported as console_<name>: POSIX hosts only,
+# like the host layer they link (xbr_host).
+CONSOLE_TESTS=()
+case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*) ;;
+    *) for dir in "$ROOT"/consoles/*/tests/; do [ -f "$dir/CMakeLists.txt" ] && CONSOLE_TESTS+=("$dir"); done ;;
+esac
+
 mkdir -p "$OUT"
 fail=0
 {
@@ -47,8 +56,9 @@ fail=0
     echo "|---|---|---|---|---|---|"
 } > "$REPORT"
 
-for dir in "$ROOT"/tests/*/; do
+for dir in "$ROOT"/tests/*/ ${CONSOLE_TESTS[@]+"${CONSOLE_TESTS[@]}"}; do
     name=$(basename "$dir")
+    case "$dir" in "$ROOT"/consoles/*) name=console_$(basename "$(dirname "$dir")") ;; esac
     [ -f "$dir/CMakeLists.txt" ] || continue
     bdir="$OUT/$name"
     log="$OUT/$name.log"

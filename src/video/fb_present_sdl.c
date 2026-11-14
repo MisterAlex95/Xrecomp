@@ -544,7 +544,7 @@ static void display_sync_start(int hz, int vsync)
         return;
 #ifdef __ANDROID__
     (void)vsync;
-    if (display_vsync_android_start(nominal))
+    if (display_vsync_android_start(nominal, nv2a_pb_exec_display_clock))
         fprintf(stderr, "  [FBWIN] display clock: Choreographer (%s)\n",
                 display_vsync_android_source());
     else

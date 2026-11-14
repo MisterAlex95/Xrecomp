@@ -455,8 +455,8 @@ void nv2a_pb_set_semaphore_target(uint32_t guest_va)
 static int (*volatile s_swm_hook)(uint32_t param);
 static uint32_t s_swm_serviced, s_swm_ignored[32];
 void nv2a_pb_set_software_method_hook(int (*hook)(uint32_t param)) { s_swm_hook = hook; }
-static uint32_t (*volatile s_swm_refusals)(void);
-void nv2a_pb_set_software_method_refusals(uint32_t (*count)(void)) { s_swm_refusals = count; }
+static int (*volatile s_swm_refusals)(char *buf, int size);
+void nv2a_pb_set_software_method_refusals(int (*describe)(char *buf, int size)) { s_swm_refusals = describe; }
 
 /* Unhandled methods, ranked. The interesting output is not that something was
  * skipped but which things dominate, because that is the order to implement
@@ -7702,16 +7702,14 @@ static void fb_dump_report(void)
 void nv2a_pb_exec_report(void)
 {
     {
-        char buf[256], ref[48] = "";
+        char buf[256], ref[192] = "";
         int t, o = 0;
-        uint32_t (*refusals)(void) = s_swm_refusals;
-        uint32_t refused = refusals ? refusals() : 0;
+        int (*refusals)(char *, int) = s_swm_refusals;
+        int refused = refusals ? refusals(ref, (int)sizeof ref) : 0;
         for (t = 0; t < 32; t++)
             if (s_swm_ignored[t] && o < (int)sizeof buf - 24)
                 o += snprintf(buf + o, sizeof buf - o, " %X:%u", t, s_swm_ignored[t]);
-        if (refused)
-            snprintf(ref, sizeof ref, "; fixup lists refused %u", refused);
-        if (s_swm_serviced || o || refused)
+        if (s_swm_serviced || o || refused > 0)
             fprintf(stderr, "[GPU] software methods: %u serviced by the title;"
                             " not serviced (type:count)%s%s\n",
                     s_swm_serviced, o ? buf : " none", ref);
