@@ -23,6 +23,10 @@
     <!-- « Create an app » (Manage; docs/android/app-shell.md « A game's own app »): the generated APK goes to Android's
          installer, which asks the player to confirm. Allowed per app by the player (« Install unknown apps »). -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <!-- Vulkan drivers (docs/android/app-shell.md « Vulkan drivers », VkDriverIndex): the list of Turnip drivers from
+         the GitHub Releases API and the download the player picks, only from the Drivers screen. No driver ships in
+         the app. XRecomp only: TitleApk drops this permission from a game's own app (PARENT_ONLY_PERMISSIONS). -->
+    <uses-permission android:name="android.permission.INTERNET" />
     <!-- The pack handover (XBA-176, docs/android/prepare.md « Handing a pack to a game's own app »): a game's own app
          looks for XRecomp. TitleApk leaves this <package> as it is, so in the copy it names the parent. -->
     <queries>

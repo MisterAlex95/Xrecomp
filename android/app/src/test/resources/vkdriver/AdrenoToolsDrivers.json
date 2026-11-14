@@ -1,0 +1,338 @@
+[
+ {
+  "tag_name": "v840",
+  "name": "Qualcomm Driver v840",
+  "draft": false,
+  "prerelease": false,
+  "published_at": "2026-01-14T13:54:43Z",
+  "assets": [
+   {
+    "name": "Qualcomm_840_adpkg.zip",
+    "size": 17385120,
+    "digest": "sha256:b3552a18196a74d6c24b23779ec9c773251bbcc09795f391eff7949802bffa29",
+    "browser_download_url": "https://github.com/K11MCH1/AdrenoToolsDrivers/releases/download/v840/Qualcomm_840_adpkg.zip"
+   }
+  ]
+ },
+ {
+  "tag_name": "v837",
+  "name": "Qualcomm Driver v837",
+  "draft": false,
+  "prerelease": false,
+  "published_at": "2026-01-14T13:17:24Z",
+  "assets": [
+   {
+    "name": "Qualcomm_837_adpkg.zip",
+    "size": 12715427,
+    "digest": "sha256:ad12f6788cb5d521ed2da86da531d02bbfe654b2c4a9ae70e1853ce15acff416",
+    "browser_download_url": "https://github.com/K11MCH1/AdrenoToolsDrivers/releases/download/v837/Qualcomm_837_adpkg.zip"
+   }
+  ]
+ },
+ {
+  "tag_name": "v26.0.0-rc08",
+  "name": "v26.0.0 - Revision 8 + super beta 8xx support",
+  "draft": false,
+  "prerelease": false,
+  "published_at": "2026-01-08T01:03:08Z",
+  "assets": [
+   {
+    "name": "turnip_a8xx.zip",
+    "size": 2477437,
+    "digest": "sha256:27e400a39cae06ac22695d74b837449868f712c679662c5793776bd575eca3bd",
+    "browser_download_url": "https://github.com/K11MCH1/AdrenoToolsDrivers/releases/download/v26.0.0-rc08/turnip_a8xx.zip"
+   },
+   {
+    "name": "Turnip_v26.0.0_R8.zip",
+    "size": 3478359,
+    "digest": "sha256:e634db0f929e2205e95511c769071817d0390180ec72c8e690bc76375e813715",
+    "browser_download_url": "https://github.com/K11MCH1/AdrenoToolsDrivers/releases/download/v26.0.0-rc08/Turnip_v26.0.0_R8.zip"
+   },
+   {
+    "name": "Turnip_v26.0.0_R8_Gmem.zip",
+    "size": 3478156,
+    "digest": "sha256:b60bffe2844a271cd293011de307fe06d28549bd5b93d03749b7c9f39af4114b",
+    "browser_download_url": "https://github.com/K11MCH1/AdrenoToolsDrivers/releases/download/v26.0.0-rc08/Turnip_v26.0.0_R8_Gmem.zip"
+   },
+   {
+    "name": "Turnip_v26.0.0_R8_Sysmem.zip",
+    "size": 3478168,
+    "digest": "sha256:a440085d55c3108325133bb07538696791d78a184d1c3f1adac0fa85167ea3d6",
+    "browser_download_url": "https://github.com/K11MCH1/AdrenoToolsDrivers/releases/download/v26.0.0-rc08/Turnip_v26.0.0_R8_Sysmem.zip"
+   }
+  ]
+ },
+ {
+  "tag_name": "v26.0.0-rc07",
+  "name": "v26.0.0 - Revision 7",
+  "draft": false,
+  "prerelease": false,
+  "published_at": "2025-12-26T01:13:15Z",
+  "assets": [
+   {
+    "name": "Turnip_v26.0.0_R7.zip",
+    "size": 3481059,
+    "digest": "sha256:e6e10ef71c31b6117ba5163f48a873b7d32e66a687e8c2d06c407cc740d97387",
+    "browser_download_url": "https://github.com/K11MCH1/AdrenoToolsDrivers/releases/download/v26.0.0-rc07/Turnip_v26.0.0_R7.zip"
+   },
+   {
+    "name": "Turnip_v26.0.0_R7_Gmem.zip",
+    "size": 3481189,
+    "digest": "sha256:52e4f37bf38e0ef027df15922773798119abcba693df045abf49bdb3b66342f0",
+    "browser_download_url": "https://github.com/K11MCH1/AdrenoToolsDrivers/releases/download/v26.0.0-rc07/Turnip_v26.0.0_R7_Gmem.zip"
+   },
+   {
+    "name": "Turnip_v26.0.0_R7_Sysmem.zip",
+    "size": 3481064,
+    "digest": "sha256:8c9fe5e357ddfe4970840cf91e2244b81e4dfbedf627d4f855db9f522ef7dd65",
+    "browser_download_url": "https://github.com/K11MCH1/AdrenoToolsDrivers/releases/download/v26.0.0-rc07/Turnip_v26.0.0_R7_Sysmem.zip"
+   }
+  ]
+ },
+ {
+  "tag_name": "v26.0.0-rc06",
+  "name": "v26.0.0 - Revision 6",
+  "draft": false,
+  "prerelease": false,
+  "published_at": "2025-12-10T10:44:34Z",
+  "assets": [
+   {
+    "name": "Turnip_v26.0.0_R6.zip",
+    "size": 3553145,
+    "digest": "sha256:c13ad4ad992a0663d6ae4b4f1d6c74af0379b1c820f6e473ec6ec47bf53d0681",
+    "browser_download_url": "https://github.com/K11MCH1/AdrenoToolsDrivers/releases/download/v26.0.0-rc06/Turnip_v26.0.0_R6.zip"
+   },
+   {
+    "name": "Turnip_v26.0.0_R6_Gmem.zip",
+    "size": 3552367,
+    "digest": "sha256:c20a1f793545b3ca64abfa47b8a9280c15c27cb5d459f7cb15b64f756980dcf6",
+    "browser_download_url": "https://github.com/K11MCH1/AdrenoToolsDrivers/releases/download/v26.0.0-rc06/Turnip_v26.0.0_R6_Gmem.zip"
+   },
+   {
+    "name": "Turnip_v26.0.0_R6_Sysmem.zip",
+    "size": 3552386,
+    "digest": "sha256:198590e9308da34981b59855268f2713f3aba83c43d97e08c7b7d46f2940855f",
+    "browser_download_url": "https://github.com/K11MCH1/AdrenoToolsDrivers/releases/download/v26.0.0-rc06/Turnip_v26.0.0_R6_Sysmem.zip"
+   }
+  ]
+ },
+ {
+  "tag_name": "v26.0.0-rc05",
+  "name": "v26.0.0 - Revision 5",
+  "draft": false,
+  "prerelease": false,
+  "published_at": "2025-11-29T14:01:16Z",
+  "assets": [
+   {
+    "name": "Turnip_v26.0.0_R5.zip",
+    "size": 3436013,
+    "digest": "sha256:808ea83b458a70ef7f46bba25fd39423a1a09554e9d0d6e93aacc8645efa11d8",
+    "browser_download_url": "https://github.com/K11MCH1/AdrenoToolsDrivers/releases/download/v26.0.0-rc05/Turnip_v26.0.0_R5.zip"
+   },
+   {
+    "name": "Turnip_v26.0.0_R5_Gmem.zip",
+    "size": 3435962,
+    "digest": "sha256:038c12f993ee9ce2dcd0fb49ac6301a93aa96f744ede6d0c92194af2c8ac9d07",
+    "browser_download_url": "https://github.com/K11MCH1/AdrenoToolsDrivers/releases/download/v26.0.0-rc05/Turnip_v26.0.0_R5_Gmem.zip"
+   },
+   {
+    "name": "Turnip_v26.0.0_R5_Sysmem.zip",
+    "size": 3435965,
+    "digest": "sha256:abf7d3b95bf3178e2dba7bbc974ca279af2455b0d05c8f37788e17b1f4763655",
+    "browser_download_url": "https://github.com/K11MCH1/AdrenoToolsDrivers/releases/download/v26.0.0-rc05/Turnip_v26.0.0_R5_Sysmem.zip"
+   }
+  ]
+ },
+ {
+  "tag_name": "v26.0.0-rc04",
+  "name": "v26.0.0 - Revision 4",
+  "draft": false,
+  "prerelease": false,
+  "published_at": "2025-11-22T04:43:31Z",
+  "assets": [
+   {
+    "name": "Turnip_v26.0.0_R4.zip",
+    "size": 3442521,
+    "digest": "sha256:69a61f08102b415eec4d8f02e3b258830bf8dcb4a28445d5330c037d151b6725",
+    "browser_download_url": "https://github.com/K11MCH1/AdrenoToolsDrivers/releases/download/v26.0.0-rc04/Turnip_v26.0.0_R4.zip"
+   },
+   {
+    "name": "Turnip_v26.0.0_R4_Gmem.zip",
+    "size": 3442556,
+    "digest": "sha256:1d16adbb509723502dbb6dec8745c0faebc588eb2ba36f5621ef0a244b4b431e",
+    "browser_download_url": "https://github.com/K11MCH1/AdrenoToolsDrivers/releases/download/v26.0.0-rc04/Turnip_v26.0.0_R4_Gmem.zip"
+   },
+   {
+    "name": "Turnip_v26.0.0_R4_Sysmem.zip",
+    "size": 3442552,
+    "digest": "sha256:77f6421fbad767f805fb450dcfe387b6d46e1f4daa5e5793b164d91ba6dd8e2e",
+    "browser_download_url": "https://github.com/K11MCH1/AdrenoToolsDrivers/releases/download/v26.0.0-rc04/Turnip_v26.0.0_R4_Sysmem.zip"
+   }
+  ]
+ },
+ {
+  "tag_name": "v26.0.0-rc.03",
+  "name": "v26.0.0 - Revision 3 + v25.3.0 with NEW Autotuner",
+  "draft": false,
+  "prerelease": false,
+  "published_at": "2025-11-12T15:12:33Z",
+  "assets": [
+   {
+    "name": "Turnip_v25.3.0_PREFER_SYSMEM.zip",
+    "size": 3376718,
+    "digest": "sha256:0a743d5620655cdfe7f96bae8212109746efbff672bd2adac2fd883372800231",
+    "browser_download_url": "https://github.com/K11MCH1/AdrenoToolsDrivers/releases/download/v26.0.0-rc.03/Turnip_v25.3.0_PREFER_SYSMEM.zip"
+   },
+   {
+    "name": "Turnip_v25.3.0_PROFILED.zip",
+    "size": 3376715,
+    "digest": "sha256:f23046e306d433f959823c2547218e33476444f511ec96c1f5aeb5ca04314edc",
+    "browser_download_url": "https://github.com/K11MCH1/AdrenoToolsDrivers/releases/download/v26.0.0-rc.03/Turnip_v25.3.0_PROFILED.zip"
+   },
+   {
+    "name": "Turnip_v26.0.0_R3.zip",
+    "size": 3385449,
+    "digest": "sha256:39c81e8217644d1adb33e732eb3b1d3cbb69ab1878185cdb2d70facfacc14a8e",
+    "browser_download_url": "https://github.com/K11MCH1/AdrenoToolsDrivers/releases/download/v26.0.0-rc.03/Turnip_v26.0.0_R3.zip"
+   },
+   {
+    "name": "Turnip_v26.0.0_R3_CB_Perf_Fix.zip",
+    "size": 3389038,
+    "digest": "sha256:276a69eed665c9150163cc0e84aa141fb4fb93397d62f5c72ac48a2026a2b8f3",
+    "browser_download_url": "https://github.com/K11MCH1/AdrenoToolsDrivers/releases/download/v26.0.0-rc.03/Turnip_v26.0.0_R3_CB_Perf_Fix.zip"
+   },
+   {
+    "name": "Turnip_v26.0.0_R3_CB_Perf_Fix_Gmem.zip",
+    "size": 3389206,
+    "digest": "sha256:95b5f2e504c701f2cfc43f1c9399d96908f39edd674476a6409d0134cb1647b7",
+    "browser_download_url": "https://github.com/K11MCH1/AdrenoToolsDrivers/releases/download/v26.0.0-rc.03/Turnip_v26.0.0_R3_CB_Perf_Fix_Gmem.zip"
+   },
+   {
+    "name": "Turnip_v26.0.0_R3_CB_Perf_Fix_Sysmem.zip",
+    "size": 3389207,
+    "digest": "sha256:e1ff33563d6d57a64b1a89589eff1ce20bdb597c9cc92ebb1cbe86553a823e61",
+    "browser_download_url": "https://github.com/K11MCH1/AdrenoToolsDrivers/releases/download/v26.0.0-rc.03/Turnip_v26.0.0_R3_CB_Perf_Fix_Sysmem.zip"
+   }
+  ]
+ },
+ {
+  "tag_name": "v26.0.0-rc.02",
+  "name": "v26.0.0 - Revision 2",
+  "draft": false,
+  "prerelease": false,
+  "published_at": "2025-10-29T02:43:25Z",
+  "assets": [
+   {
+    "name": "Turnip_v26.0.0_R2.zip",
+    "size": 3378211,
+    "digest": "sha256:25f72273a0679ef0f679d947e56465109405c7055b91f28b77fdd7f0f5c2dd3d",
+    "browser_download_url": "https://github.com/K11MCH1/AdrenoToolsDrivers/releases/download/v26.0.0-rc.02/Turnip_v26.0.0_R2.zip"
+   },
+   {
+    "name": "Turnip_v26.0.0_R2_Gmem.zip",
+    "size": 3378277,
+    "digest": "sha256:4fc19fc42f5417ed2a8db3fe4c8ecde0d58dbc8ab3a73cc561f643057cd7e5ad",
+    "browser_download_url": "https://github.com/K11MCH1/AdrenoToolsDrivers/releases/download/v26.0.0-rc.02/Turnip_v26.0.0_R2_Gmem.zip"
+   },
+   {
+    "name": "Turnip_v26.0.0_R2_Sysmem.zip",
+    "size": 3378282,
+    "digest": "sha256:b1a85004e0f5d8eb1af8113d8eab8621a7ee50ac9455824525185ee93ebe9365",
+    "browser_download_url": "https://github.com/K11MCH1/AdrenoToolsDrivers/releases/download/v26.0.0-rc.02/Turnip_v26.0.0_R2_Sysmem.zip"
+   }
+  ]
+ },
+ {
+  "tag_name": "v849",
+  "name": "Qualcomm Driver v849",
+  "draft": false,
+  "prerelease": false,
+  "published_at": "2025-10-26T02:08:01Z",
+  "assets": [
+   {
+    "name": "Qualcomm_849_adpkg.zip",
+    "size": 23687773,
+    "digest": "sha256:3e193ed6b271a519429ef34af2209f1009c9e5892b3c8be19cea03d91f829c9c",
+    "browser_download_url": "https://github.com/K11MCH1/AdrenoToolsDrivers/releases/download/v849/Qualcomm_849_adpkg.zip"
+   }
+  ]
+ },
+ {
+  "tag_name": "v26.0.0-rc.01",
+  "name": "v26.0.0 - Revision 1",
+  "draft": false,
+  "prerelease": false,
+  "published_at": "2025-10-20T17:01:20Z",
+  "assets": [
+   {
+    "name": "Turnip_v26.0.0_R1.zip",
+    "size": 3435114,
+    "digest": "sha256:0d39ad9138f394f45fc76b7650cea048445a12955bba694cb17b9df38e1f41ab",
+    "browser_download_url": "https://github.com/K11MCH1/AdrenoToolsDrivers/releases/download/v26.0.0-rc.01/Turnip_v26.0.0_R1.zip"
+   },
+   {
+    "name": "Turnip_v26.0.0_R1_Autotuner.zip",
+    "size": 3443975,
+    "digest": "sha256:da686c765faea153974144e58ed975252d3dd8f53c6b69dbbfea717b55bb0345",
+    "browser_download_url": "https://github.com/K11MCH1/AdrenoToolsDrivers/releases/download/v26.0.0-rc.01/Turnip_v26.0.0_R1_Autotuner.zip"
+   },
+   {
+    "name": "Turnip_v26.0.0_R1_Gmem.zip",
+    "size": 3444130,
+    "digest": "sha256:78a6aae720079c7e51bab9187684d629c81160d298f0849cf66d864947be59e7",
+    "browser_download_url": "https://github.com/K11MCH1/AdrenoToolsDrivers/releases/download/v26.0.0-rc.01/Turnip_v26.0.0_R1_Gmem.zip"
+   }
+  ]
+ },
+ {
+  "tag_name": "v25.3.0-rc.11",
+  "name": " v25.3.0 - Revision 11",
+  "draft": false,
+  "prerelease": false,
+  "published_at": "2025-10-09T00:10:43Z",
+  "assets": [
+   {
+    "name": "Turnip_v25.3.0_R11.zip",
+    "size": 3365701,
+    "digest": "sha256:0452bdd5e966ca94b58ba7c489db3648df6715d862e38cfa939ec62625293b40",
+    "browser_download_url": "https://github.com/K11MCH1/AdrenoToolsDrivers/releases/download/v25.3.0-rc.11/Turnip_v25.3.0_R11.zip"
+   }
+  ]
+ },
+ {
+  "tag_name": "v842.6",
+  "name": "Qualcomm Driver v842.6",
+  "draft": false,
+  "prerelease": false,
+  "published_at": "2025-09-30T10:56:28Z",
+  "assets": [
+   {
+    "name": "8Elite2-842.6.zip",
+    "size": 12201469,
+    "digest": "sha256:1c18001cc568724ea7d7424f3ade0cd659ba695bb51170cf87f578677af78a56",
+    "browser_download_url": "https://github.com/K11MCH1/AdrenoToolsDrivers/releases/download/v842.6/8Elite2-842.6.zip"
+   }
+  ]
+ },
+ {
+  "tag_name": "v819.2",
+  "name": "Qualcomm v819.2",
+  "draft": false,
+  "prerelease": false,
+  "published_at": "2025-08-13T03:02:55Z",
+  "assets": [
+   {
+    "name": "8Elite2-842.6.zip",
+    "size": 12201469,
+    "digest": "sha256:1c18001cc568724ea7d7424f3ade0cd659ba695bb51170cf87f578677af78a56",
+    "browser_download_url": "https://github.com/K11MCH1/AdrenoToolsDrivers/releases/download/v819.2/8Elite2-842.6.zip"
+   },
+   {
+    "name": "Qualcomm_819.2_adpkg.zip",
+    "size": 13076862,
+    "digest": "sha256:50d2b9e051cc8f261cb436962cd5cfae179cd5f832676957dd69d360cf053410",
+    "browser_download_url": "https://github.com/K11MCH1/AdrenoToolsDrivers/releases/download/v819.2/Qualcomm_819.2_adpkg.zip"
+   }
+  ]
+ }
+]
