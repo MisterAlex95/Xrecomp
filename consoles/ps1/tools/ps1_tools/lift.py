@@ -363,6 +363,10 @@ class FnLifter:
             i = img.ins(a)
             if i.is_transfer() or i.cls == "interp":
                 lead.add(emitted[k + 1])
+            # the not-taken path of a transfer with its slot inline goes to a + 8, even when the slot is also
+            # emitted on its own (a jump target): a + 8 needs its label then too
+            if i.is_transfer() and self.inside(a + 4) and not img.ins(a + 4).is_transfer() and a + 8 in em:
+                lead.add(a + 8)
         run = 0
         for a in emitted:
             if a in lead or self.resume_all or run >= MAX_BLOCK:
