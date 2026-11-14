@@ -149,37 +149,48 @@ static void lzma_fast_free(ISzAllocPtr p, void *address)
 
 static uint32_t lzma_compute_aligned_dictionary_size(uint32_t hunkbytes)
 {
-	const unsigned int level = 9;
+	/* MAME's chd_lzma_compressor::configure_properties() (src/lib/util/chdcodec.cpp) uses
+	 * level = 6 and reduceSize = hunkbytes, then calls LzmaEncProps_Normalize(). The decoder
+	 * has no way to read back what the encoder actually used (see MAME's own FIXME comment on
+	 * chd_lzma_decompressor's constructor), so it must independently re-derive the exact same
+	 * dictionary size from hunkbytes alone. Mirror LzmaEncProps_Normalize() and
+	 * LzmaEnc_WriteProperties() from the LZMA SDK verbatim - do not "simplify" this, any
+	 * deviation that yields a *smaller* dictionary than the real encoder used will silently
+	 * corrupt decoded CHDs (dictionary too small to hold the encoder's back-references).
+	 */
+	const unsigned int level = 6;
 	const uint32_t reduceSize = hunkbytes;
 
 	uint32_t dictSize, alignedDictSize;
 
-	/* LzmaEncProps_Normalize */
+	/* LzmaEncProps_Normalize: level-based default dictionary size */
 	dictSize = level <= 4 ?
 		(uint32_t)1 << (level * 2 + 16) :
 		level <= sizeof(size_t) / 2 + 4 ?
 			(uint32_t)1 << (level + 20) :
 			(uint32_t)1 << (sizeof(size_t) / 2 + 24);
 
+	/* LzmaEncProps_Normalize: clamp dictSize down toward reduceSize (hunkbytes), never below
+	 * kReduceMin. This must be MIN(dictSize, ...), not MAX - a MAX here is a no-op that leaves
+	 * dictSize at its full level-based default (67108864 bytes at level 6) regardless of
+	 * hunkbytes, which is the bug this function used to have. Spelled out with the MIN/MAX
+	 * macros rather than manual if-statements on purpose: that's what let the original bug
+	 * hide in the first place. */
 	if (dictSize > reduceSize)
 	{
 		const uint32_t kReduceMin = (uint32_t)1 << 12;
-		const uint32_t max = MIN(kReduceMin, reduceSize);
-
-		dictSize = MAX(max, dictSize);
+		dictSize = MIN(dictSize, MAX(reduceSize, kReduceMin));
 	}
 
-	/* LzmaEnc_SetProps */
-	dictSize = MIN((uint32_t)15 << 28, dictSize); /* kLzmaMaxHistorySize */
-
-	/* LzmaEnc_WriteProperties */
-	/* we write aligned dictionary value to properties for lzma decoder */
+	/* LzmaEnc_WriteProperties: dictionary size actually written to (here, re-derived for) the
+	 * stream properties - rounds up to the nearest representable LZMA dictionary size. */
 	if (dictSize >= ((uint32_t)1 << 21))
 	{
 		const uint32_t kDictMask = ((uint32_t)1 << 20) - 1;
 
 		alignedDictSize = (dictSize + kDictMask) & ~kDictMask;
-		alignedDictSize = MIN(dictSize, alignedDictSize);
+		if (alignedDictSize < dictSize)
+			alignedDictSize = dictSize;
 	}
 	else
 	{
@@ -220,7 +231,11 @@ chd_error lzma_codec_init(void* codec, uint32_t hunkbytes)
 	LzmaDec_Construct(&lzma_codec->decoder);
 
 	/* do memory allocations */
-	if (LzmaDec_Allocate(&lzma_codec->decoder, decoder_props, LZMA_PROPS_SIZE, &alloc->base) != SZ_OK)
+	/* Probs only, no dictionary: the dictionary is pointed at the caller's
+	 * output buffer per call instead, which is what the SDK's own one-call
+	 * LzmaDecode() does. Saves a hunk-sized allocation and the memcpy that
+	 * LzmaDec_DecodeToBuf would make out of a private dictionary. */
+	if (LzmaDec_AllocateProbs(&lzma_codec->decoder, decoder_props, LZMA_PROPS_SIZE, &alloc->base) != SZ_OK)
 		return CHDERR_DECOMPRESSION_ERROR;
 
 	/* Okay */
@@ -237,7 +252,7 @@ void lzma_codec_free(void* codec)
 	lzma_codec_data* lzma_codec = (lzma_codec_data*) codec;
 
 	/* free memory */
-	LzmaDec_Free(&lzma_codec->decoder, &lzma_codec->allocator.base);
+	LzmaDec_FreeProbs(&lzma_codec->decoder, &lzma_codec->allocator.base);
 	lzma_allocator_free(&lzma_codec->allocator);
 }
 
@@ -254,12 +269,20 @@ chd_error lzma_codec_decompress(void* codec, const uint8_t *src, uint32_t comple
 	SizeT consumedlen, decodedlen;
 	/* initialize */
 	lzma_codec_data* lzma_codec = (lzma_codec_data*) codec;
+
+	/* Decode straight into the caller's buffer by using it as the dictionary.
+	 * Each hunk is an independent stream, so back-references can never reach
+	 * before its start and destlen is a sufficient window. */
+	lzma_codec->decoder.dic = dest;
+	lzma_codec->decoder.dicBufSize = destlen;
 	LzmaDec_Init(&lzma_codec->decoder);
 
 	/* decode */
 	consumedlen = complen;
-	decodedlen = destlen;
-	res = LzmaDec_DecodeToBuf(&lzma_codec->decoder, dest, &decodedlen, src, &consumedlen, LZMA_FINISH_END, &status);
+	res = LzmaDec_DecodeToDic(&lzma_codec->decoder, destlen, src, &consumedlen, LZMA_FINISH_END, &status);
+	decodedlen = lzma_codec->decoder.dicPos;
+	lzma_codec->decoder.dic = NULL;   /* never let LzmaDec_Free touch it */
+	lzma_codec->decoder.dicBufSize = 0;
 	if ((res != SZ_OK && res != LZMA_STATUS_MAYBE_FINISHED_WITHOUT_MARK) || consumedlen != complen || decodedlen != destlen)
 		return CHDERR_DECOMPRESSION_ERROR;
 	return CHDERR_NONE;
