@@ -8,8 +8,8 @@
 # OUT_DIR gets: CMakeLists.txt and src/ (the template), src/recomp/gen/ (the pipeline's C, plus xbe_entry.c, which
 # calls the five functions and prints their results), and game/default.xbe (the synthetic XBE, to push to the
 # device). Then:
-#   Android:  cd android && gradle assembleDebug -PxbaTitleDir=OUT_DIR -PxbaApplicationId=fr.adserver.xboxrecomp.stub
-#             adb push OUT_DIR/game/default.xbe /sdcard/Android/data/fr.adserver.xboxrecomp.stub/files/game/
+#   Android:  cd android && gradle assembleDebug -PxbaTitleDir=OUT_DIR -PxbaApplicationId=fr.adserver.xrecomp.stub
+#             adb push OUT_DIR/game/default.xbe /sdcard/Android/data/fr.adserver.xrecomp.stub/files/game/
 #   Desktop:  cmake -S OUT_DIR -B OUT_DIR/build -DXBOXRECOMP_DIR=$PWD && cmake --build OUT_DIR/build
 #             (cd OUT_DIR && RECOMP_HEADLESS=1 build/your_game_recomp)
 #

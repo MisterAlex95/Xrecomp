@@ -10,12 +10,13 @@ adb logcat -s xboxrecomp SDL
 ```
 
 The CI builds it on every push to `main`. The latest one is always the prerelease **shell-latest** of the repo
-(XBA-20): https://git.cf.adserver.fr/Alex/xboxrecomp-android/releases/tag/shell-latest
+(XBA-20), on the maintainers' Gitea only: players install the XRecomp APK from the
+[releases](https://github.com/MisterAlex95/Xrecomp/releases) instead.
 
-This plain shell has its own application id, `fr.adserver.xboxrecomp.dev`, and shows as « XRecomp shell »
-(XBA-134): it installs next to the XRecomp APK of `xrecomp-latest` (`fr.adserver.xboxrecomp.shell`, the app a
-player uses) and never replaces it. The check lists below name `fr.adserver.xboxrecomp.shell`, the XRecomp APK's;
-with the plain shell, use `fr.adserver.xboxrecomp.dev` in their `adb` paths and `run-as`.
+This plain shell has its own application id, `fr.adserver.xrecomp.dev`, and shows as « XRecomp shell »
+(XBA-134): it installs next to the XRecomp APK of `xrecomp-latest` (`fr.adserver.xrecomp.shell`, the app a
+player uses) and never replaces it. The check lists below name `fr.adserver.xrecomp.shell`, the XRecomp APK's;
+with the plain shell, use `fr.adserver.xrecomp.dev` in their `adb` paths and `run-as`.
 
 ## How it is put together
 
@@ -55,7 +56,7 @@ before anything starts, and puts each line in the environment (`src/platform/rec
 
 ```bash
 printf 'RECOMP_WAIT_LOG=1\n# comments and blank lines are fine\n' > recomp.cfg
-adb push recomp.cfg /sdcard/Android/data/fr.adserver.xboxrecomp.shell/files/recomp.cfg
+adb push recomp.cfg /sdcard/Android/data/fr.adserver.xrecomp.shell/files/recomp.cfg
 ```
 
 logcat then shows one line: `recomp.cfg: 1 option(s) from …: RECOMP_WAIT_LOG=1`. Without the file it shows
@@ -90,12 +91,12 @@ Device check (XBA-23):
 1. Start the shell once with nothing pushed. Expected: the launcher's welcome screen, and logcat
    `launcher: shown (no game set up)`; nothing from the runtime, which has not started.
 2. Push any file named `default.xbe` (one of our nxdk samples will do):
-   `adb push default.xbe /sdcard/Android/data/fr.adserver.xboxrecomp.shell/files/game/`, then start the app again.
+   `adb push default.xbe /sdcard/Android/data/fr.adserver.xrecomp.shell/files/game/`, then start the app again.
    Expected: the launcher's home, chip « Ready »; Play: logcat `storage: … (default.xbe found)` and
    `game data: …/game/default.xbe`.
-3. `adb shell run-as fr.adserver.xboxrecomp.shell ls -ls files/save` (debug APK). Expected: `TitleData`,
+3. `adb shell run-as fr.adserver.xrecomp.shell ls -ls files/save` (debug APK). Expected: `TitleData`,
    `UserData`, `Cache`, `SystemData` and `Partition0.img` … `Partition5.img`, the last ones taking about 0 blocks.
-4. Kill the app (`adb shell am force-stop fr.adserver.xboxrecomp.shell`), restart it, run step 3 again: the same
+4. Kill the app (`adb shell am force-stop fr.adserver.xrecomp.shell`), restart it, run step 3 again: the same
    files, still there.
 5. Send the logcat lines and the `ls` output.
 
@@ -196,7 +197,7 @@ The row is hidden when `isRequestPinShortcutSupported()` is false, or when the g
 | Id | `game_<TID>` (one per game; asking again updates it) |
 | Label | The game's title: up to 12 characters under the icon (cut at a word, « Burnout 3… »), 25 in the long label |
 | Icon | Adaptive, 432 x 432 (108 dp at xxxhdpi): the [title image](#game-theme) (`files/art/<TID>.png`) centred at two thirds, so the mask barely cuts it, on the average colour of its outer pixels (the dark launcher green when they are transparent); without an image the monogram (initials on the title ID's hue, as on the library's cards) |
-| Intent | Explicit to `LauncherActivity`, action `fr.adserver.xboxrecomp.PLAY_TITLE`, extra `fr.adserver.xboxrecomp.TITLE_ID` = the title ID, a fresh task (as the app icon's shortcuts) |
+| Intent | Explicit to `LauncherActivity`, action `fr.adserver.xrecomp.PLAY_TITLE`, extra `fr.adserver.xrecomp.TITLE_ID` = the title ID, a fresh task (as the app icon's shortcuts) |
 | Update | When the launcher loads that game's title image (Home, after a scan or a theme bake), a pinned `game_<TID>` gets the current icon and title (`updateShortcuts`); nothing when it is not pinned |
 
 Pinned, not dynamic: the long-press menu keeps « Change game » and « Launcher ». What a tap does is in
@@ -242,10 +243,10 @@ whole of XRecomp, toolchain included).
 
 | What | Value |
 |---|---|
-| Package | `fr.adserver.xboxrecomp.t<titleid>` (lower case, `4d5300d1`), as `tools/android/title_apk.sh` names it |
+| Package | `fr.adserver.xrecomp.t<titleid>` (lower case, `4d5300d1`), as `tools/android/title_apk.sh` names it |
 | Label | The game's title (XBE certificate, else folder), whole up to 50 characters: a literal in the manifest |
 | Icon | `mipmap/xba_title_icon`, an adaptive icon whose background layer is `drawable-nodpi/xba_title_icon_art.png`: the generator puts there `TitleShortcut.icon` (432 x 432, the title image on its border's colour, else the monogram), the same picture as the shortcut's |
-| Lock | Manifest meta-data `fr.adserver.xboxrecomp.XBE_SHA256` = the library record's `xbe_sha256` (else the hash of `default.xbe`): `GameStore.expectedSha256` reads it before the `xba_xbe_sha256` resource, so another disc gets [WRONG_GAME](#wrong_game). Also `…TITLE_ID` (the title ID) and `…PARENT` (XRecomp's package) |
+| Lock | Manifest meta-data `fr.adserver.xrecomp.XBE_SHA256` = the library record's `xbe_sha256` (else the hash of `default.xbe`): `GameStore.expectedSha256` reads it before the `xba_xbe_sha256` resource, so another disc gets [WRONG_GAME](#wrong_game). Also `…TITLE_ID` (the title ID) and `…PARENT` (XRecomp's package) |
 | Version | XRecomp's own `versionCode` / `versionName` (a copy) |
 | Signature | APK Signature Scheme v2 only (minSdk 30: no v1; v3's key rotation is not needed), by apksig (`com.android.tools.build:apksig`, AOSP, Apache-2.0) |
 | Key | EC P-256 in the AndroidKeyStore, alias `xba_title_apps`, made at the first « Create an app », never exported; the same for every game's app, so **creating it again updates the installed one**. It lives as long as XRecomp's install: after an uninstall of XRecomp (an update keeps it), an app made before must be uninstalled before it can be made again (« signed by another key ») |
@@ -257,7 +258,7 @@ installed APK (`ApplicationInfo.sourceDir`), copied entry by entry into `files/t
    `android:roundIcon` to the slot (`R.mipmap.xba_title_icon`, the same id since the template is this APK); every
    provider authority (`<package>.logs`) and package-derived name (permissions, task affinity, process) moved to the
    new package; component class names written in full against the old package (AGP's merged manifest has them in
-   full already), so they stay `fr.adserver.xboxrecomp.*`; the three meta-data added (replaced when present).
+   full already), so they stay `fr.adserver.xrecomp.*`; the three meta-data added (replaced when present).
    Attributes stay sorted by resource id; a manifest read and written back unchanged gives the same bytes.
 2. The slot's PNG replaced (its path is what `Resources.getValue` says, `res/drawable-nodpi-v4/…`, so a release build
    with shortened resource paths works too); `resources.arsc` is not touched.
@@ -279,7 +280,7 @@ into the game** ([Straight into the game](#straight-into-the-game)): at its firs
 does (or asks for it once) and refuses another disc. **It does not prepare the game
 again** when XRecomp has (XBA-176, [prepare.md « Handing a pack to a game's own app »](prepare.md#handing-a-pack-to-a-games-own-app)):
 at its start, with no pack (or one from another toolkit than its own), it asks XRecomp (`…PARENT`) for its pack
-through a translucent activity of XRecomp started for a result. XRecomp answers only `fr.adserver.xboxrecomp.t<tid>`
+through a translucent activity of XRecomp started for a result. XRecomp answers only `fr.adserver.xrecomp.t<tid>`
 for that very title, signed by the game apps' key (its own AndroidKeyStore certificate, `GET_SIGNING_CERTIFICATES`),
 and grants read access to the pack's files one URI each through its non-exported `PackProvider`
 (`<package>.packs`, which `TitleApk` moves to the game's app's package like `.logs`). The game's app checks the pack
@@ -289,7 +290,7 @@ XRecomp… 42 % »), then the game starts. XRecomp missing, without a pack, refu
 Prepare, started by itself on that screen, saying why.
 The copy is the app's own: it keeps playing after XRecomp is uninstalled.
 
-logcat: `launcher: game app fr.adserver.xboxrecomp.t<tid> « <label> »: building from <apk> (<n> bytes)`, `…: <n>
+logcat: `launcher: game app fr.adserver.xrecomp.t<tid> « <label> »: building from <apk> (<n> bytes)`, `…: <n>
 bytes, signed`, `… handed to the installer (session <id>)`, then `launcher: game app <pkg>: installer status <n>`.
 Tests: `TitleApkTest` (the binary manifest round trip and patch, the zip copy and its alignment, the v2 signature
 checked by apksig's `ApkVerifier`, a regeneration keeping the certificate; the template is the build's resource APK,
@@ -355,7 +356,7 @@ screenshots `build/screenshots/game-app-*.png`, `handover-*.png`.
 
 `adb logcat -s xboxrecomp` throughout. XRecomp (a build with this change) with Fable in the library **read in place
 from a folder**, prepared and played once. Uninstall any earlier Fable app first
-(`adb uninstall fr.adserver.xboxrecomp.t4d5300d1`), then Fable › Manage › **Create an app** and install it.
+(`adb uninstall fr.adserver.xrecomp.t4d5300d1`), then Fable › Manage › **Create an app** and install it.
 
 1. Tap the new Fable icon (fresh install). Expected: one screen with Fable's logo and title, « Getting the game
    ready… », then « Copying the prepared game from XRecomp… n % » (a few seconds), possibly one screen « Allow file
@@ -376,7 +377,7 @@ from a folder**, prepared and played once. Uninstall any earlier Fable app first
    with `RECOMP_DISC_IMAGE=0`). Uninstall/Create/install the Fable app, tap: « Where is the game? » with « XRecomp
    keeps its own copy of this game, which this app cannot read… » and **Choose a game**. Choose Fable's folder or
    image once: the game starts by itself. Quit, tap again: the game at once.
-8. **Wrong disc**: uninstall the Fable app's data (`adb shell pm clear fr.adserver.xboxrecomp.t4d5300d1`), tap the
+8. **Wrong disc**: uninstall the Fable app's data (`adb shell pm clear fr.adserver.xrecomp.t4d5300d1`), tap the
    icon, refuse All files access if asked, then on « Where is the game? » choose **another game's** folder: the usual
    choice screen says `WRONG_GAME`. (With XRecomp pointing at another region's Fable: the Fable app shows « Wrong game »
    and **Choose a game**.) No crash, no blank screen.
@@ -405,12 +406,12 @@ from a folder**, prepared and played once. Uninstall any earlier Fable app first
    image as its icon, whole (not cut by the mask), next to XRecomp's own icon, which has not changed. Screenshot.
 4. Open Fable (the new app): it goes into the game ([Straight into the game](#straight-into-the-game) and its
    device check). Long-press › Launcher › Settings › About shows the game check with Fable's hash and the app id
-   `fr.adserver.xboxrecomp.t4d5300d1`.
+   `fr.adserver.xrecomp.t4d5300d1`.
 
 ### Device check (pack handover, XBA-176), for Alex
 
 `adb logcat -s xboxrecomp` throughout; XRecomp (xrecomp-latest) with Fable prepared and played once; the Fable app not
-installed yet (uninstall it if it is: `adb uninstall fr.adserver.xboxrecomp.t4d5300d1`). Since « Straight into the game »
+installed yet (uninstall it if it is: `adb uninstall fr.adserver.xrecomp.t4d5300d1`). Since « Straight into the game »
 the icon shows the copy on the game's one screen and starts the game itself (no Home, no Play): steps 1–3 now read that
 way; Home's copy line is what the long-press « Launcher » shows.
 
@@ -419,22 +420,22 @@ way; Home's copy line is what the long-press « Launcher » shows.
    button, not « Needs preparing ». XRecomp's own screen does not show (at most a blink). Note how long the copy takes
    and the pack's size (Manage › Pack size).
 2. Then the note « The prepared game was copied from XRecomp: press Play » and **Play**: Fable starts, no Prepare.
-   logcat: `pack handover: asking fr.adserver.xboxrecomp.shell for 4D5300D1`, `pack 4D5300D1 handed over to
-   fr.adserver.xboxrecomp.t4d5300d1` (XRecomp's process), `pack 4D5300D1 published from the handover`,
+   logcat: `pack handover: asking fr.adserver.xrecomp.shell for 4D5300D1`, `pack 4D5300D1 handed over to
+   fr.adserver.xrecomp.t4d5300d1` (XRecomp's process), `pack 4D5300D1 published from the handover`,
    `pack handover 4D5300D1: COPIED`.
 3. Back to the app's Home, leave it (swipe it away), open it again: no copy this time, Play at once; logcat has no new
    `asking` line.
-4. Uninstall XRecomp (`adb uninstall fr.adserver.xboxrecomp.shell`; this loses its key: keep its saves first if
+4. Uninstall XRecomp (`adb uninstall fr.adserver.xrecomp.shell`; this loses its key: keep its saves first if
    needed). Open the Fable app: Play, the game starts (the copy is its own).
 5. Reinstall XRecomp, prepare Fable there, then install a newer XRecomp build whose toolkit changed (its About shows a
    newer build; or ask the agent for one), prepare Fable in it, and **Create an app** again (after an uninstall of
    XRecomp the old Fable app must be uninstalled first: « signed by another key »). Open the Fable app: it copies
    again (the stale pack is replaced), then Play; Home has no « Prepared by an older version of the app » line.
 6. A non-generated app cannot get the pack:
-   `adb shell am start -W -n fr.adserver.xboxrecomp.shell/fr.adserver.xboxrecomp.PackHandoverActivity --es
-   fr.adserver.xboxrecomp.extra.HANDOVER_TITLE_ID 4D5300D1` → nothing shows, logcat `pack handover refused to null
+   `adb shell am start -W -n fr.adserver.xrecomp.shell/fr.adserver.xrecomp.PackHandoverActivity --es
+   fr.adserver.xrecomp.extra.HANDOVER_TITLE_ID 4D5300D1` → nothing shows, logcat `pack handover refused to null
    (4D5300D1): NO_CALLER`. And `adb shell content read --uri
-   content://fr.adserver.xboxrecomp.shell.packs/4D5300D1/pack.json` → refused (Permission Denial: not exported).
+   content://fr.adserver.xrecomp.shell.packs/4D5300D1/pack.json` → refused (Permission Denial: not exported).
 7. In XRecomp, delete Fable's pack (Manage › the pack's row), then in the Fable app delete its pack too and open it
    again: the note « XRecomp has not prepared this game: prepare it here… » and Prepare, as before XBA-176.
 6. In XRecomp, Manage › Create an app once more for Fable: Android's dialog says it is an **update**; after it, the
@@ -442,7 +443,7 @@ way; Home's copy line is what the long-press « Launcher » shows.
 7. Uninstall the game's app (long-press › Uninstall): XRecomp is untouched (its library, Fable's pack, saves).
 8. A game without a title image: Create an app gives an app with the monogram as its icon, legible.
 9. In French: the row « Créer une app », the progress labels and the notes in French.
-10. `adb shell pm dump fr.adserver.xboxrecomp.t4d5300d1 | grep -E "versionCode|signatures"`: the same versionCode as
+10. `adb shell pm dump fr.adserver.xrecomp.t4d5300d1 | grep -E "versionCode|signatures"`: the same versionCode as
     XRecomp's; send the line.
 
 ### Controls
@@ -969,10 +970,10 @@ Use the Thor's gamepad for everything unless a step says touch.
    back`). Back, Quit game twice to quit it, start the app again: Home with Play focused (« Open directly » is off).
 7. Settings: L1 / R1 to the Graphics tab, D-pad through the rows, left / right change Vertical sync and Texture
    filtering, the description on the right follows the focus. Then
-   `adb shell cat /sdcard/Android/data/fr.adserver.xboxrecomp.shell/files/recomp.cfg`: the comment line and
+   `adb shell cat /sdcard/Android/data/fr.adserver.xrecomp.shell/files/recomp.cfg`: the comment line and
    `RECOMP_PRESENT_VSYNC=0` / `RECOMP_TEX_BILINEAR=1` (or what you chose). Play: logcat `recomp.cfg: N option(s)
    from …` lists them and `[FBWIN] … vsync off`. Back in Settings, Y: the lines are gone.
-8. Hand-written lines survive: `adb shell "echo RECOMP_WAIT_LOG=1 >> /sdcard/Android/data/fr.adserver.xboxrecomp.shell/files/recomp.cfg"`,
+8. Hand-written lines survive: `adb shell "echo RECOMP_WAIT_LOG=1 >> /sdcard/Android/data/fr.adserver.xrecomp.shell/files/recomp.cfg"`,
    change a setting, `cat` again: `RECOMP_WAIT_LOG=1` is still there.
 9. Settings › General › « Start in the game » on; quit and start the app: the game starts directly.
    Long-press the icon › « Launcher »: Home. Turn it off again in Settings.
@@ -991,10 +992,10 @@ Use the Thor's gamepad for everything unless a step says touch.
     before this change).
 14. Pick a file that is not an ISO (e.g. a photo): `NOT_AN_ISO` in the note.
 15. Manage › Delete the imported copy: the first A shows « Press A again », the second deletes; then Welcome (or
-    Home without a game) and « The imported copy was deleted ». Saves: `adb shell run-as fr.adserver.xboxrecomp.shell ls files/save`
+    Home without a game) and « The imported copy was deleted ». Saves: `adb shell run-as fr.adserver.xrecomp.shell ls files/save`
     still lists them.
 16. `NO_GAME_DATA` (after step 15, so that no game is remembered): `adb shell mkdir /sdcard/Download/empty`, then
-    `adb shell "echo RECOMP_GAME_DIR=/sdcard/Download/empty >> /sdcard/Android/data/fr.adserver.xboxrecomp.shell/files/recomp.cfg"`.
+    `adb shell "echo RECOMP_GAME_DIR=/sdcard/Download/empty >> /sdcard/Android/data/fr.adserver.xrecomp.shell/files/recomp.cfg"`.
     Start the app: Home; Manage says « Set in recomp.cfg ». Play: the native side finds no `default.xbe` and hands over;
     the launcher opens on Choose your game with `NO_GAME_DATA` and the folder in the note. Remove the line afterwards.
 17. WRONG_GAME needs an APK built with `-PxbaXbeSha256=` of another XBE (ask for one, or build one): picking the stub
@@ -1402,7 +1403,7 @@ Needs the toolchain APK, the library on (`/sdcard/xbox`), the Thor plugged in. `
    comes back and boots that game again.
 4. **Share report**: the share sheet with `compat-results.jsonl`; send it to yourself. Open it: one line per run, no
    game data (title ID, name, XDK, engines, stage, blocker, numbers, device fields).
-5. During a Prepare: `adb shell am kill fr.adserver.xboxrecomp.shell` is not enough (foreground); kill the launcher's
+5. During a Prepare: `adb shell am kill fr.adserver.xrecomp.shell` is not enough (foreground); kill the launcher's
    process: `adb shell run-as <app id> kill -9 $(adb shell pidof <app id>:launcher)`. Open the app: the check screen,
    carrying on.
 6. During a boot, reboot the Thor (`adb reboot`). Open the app: the check carries on with the next title; the
@@ -1837,13 +1838,13 @@ reported every mapping as `PAGE_READWRITE`.
 
 1. Install the shell APK (**shell-latest**, « XRecomp shell »), push a `recomp.cfg` with `RECOMP_SHELL_SELFTEST=1`:
    `printf 'RECOMP_SHELL_SELFTEST=1\n' > recomp.cfg`,
-   `adb push recomp.cfg /sdcard/Android/data/fr.adserver.xboxrecomp.dev/files/recomp.cfg`.
+   `adb push recomp.cfg /sdcard/Android/data/fr.adserver.xrecomp.dev/files/recomp.cfg`.
 2. Start the app, then `adb logcat -d -s xboxrecomp`.
 3. Expected: every `selftest` line `PASS` and the summary `selftest: 16 passed, 0 failed`; no tombstone
    (`adb logcat -d -b crash` empty).
 4. Run it a second time after a reboot (the address space layout changes).
 5. Send the logcat lines (both runs); remove the option (`adb shell rm
-   /sdcard/Android/data/fr.adserver.xboxrecomp.dev/files/recomp.cfg`).
+   /sdcard/Android/data/fr.adserver.xrecomp.dev/files/recomp.cfg`).
 
 ## A title in the shell
 
@@ -1873,7 +1874,7 @@ makes the object library `xba_title` instead of an executable (the toolkit is th
 ```bash
 # the title project: templates/new-game + its generated C in src/recomp/gen (docs/GETTING_STARTED.md)
 cd android && gradle assembleDebug -PxbaTitleDir=/path/to/my_xbox_game \
-    -PxbaApplicationId=fr.adserver.xboxrecomp.mygame -PxbaLabel="My game"
+    -PxbaApplicationId=fr.adserver.xrecomp.mygame -PxbaLabel="My game"
 # or the NDK alone: cmake -S android/app/src/main/cpp -DXBA_TITLE_DIR=/path/to/my_xbox_game (+ the NDK toolchain)
 ```
 
@@ -1893,7 +1894,7 @@ tools/android/title_apk.sh /path/to/game --dry-run  # print the Gradle command
 |---|---|
 | Identify | `tools.prepare.identify`: title ID, name (certificate), `default.xbe` extracted from an image. |
 | Icon | `python -m tools.title_art default.xbe --android-res DIR`: the `$$XTIMAGE` texture (else `$$XSIMAGE`) decoded like `TitleArt.java`, as the foreground layer of an adaptive icon (432 px, the image centred at 72/108 of it, the part every launcher mask shows); the background is the average colour of the image's border. No title image: XRecomp's glyph on the title's colour (`TitleArt.monogramColor`). |
-| Build | Gradle with `-PxbaApplicationId=fr.adserver.xboxrecomp.t<titleid>`, `-PxbaLabel=<name>`, `-PxbaXbeSha256=…`, `-PxbaIconRes=DIR` (+ `-PxbaTitleDir` with `--title-dir`, + everything after `--`). `-PxbaIconRes` goes into the build types' resource source sets, so its `mipmap/ic_launcher` overrides main's. |
+| Build | Gradle with `-PxbaApplicationId=fr.adserver.xrecomp.t<titleid>`, `-PxbaLabel=<name>`, `-PxbaXbeSha256=…`, `-PxbaIconRes=DIR` (+ `-PxbaTitleDir` with `--title-dir`, + everything after `--`). `-PxbaIconRes` goes into the build types' resource source sets, so its `mipmap/ic_launcher` overrides main's. |
 
 Without `--title-dir` the APK runs the title from the pack its own Prepare builds (add `-PxbaToolchainDir=…` after
 `--`). The extracted `default.xbe` and the icon go to `~/.cache/xrecomp/title-apk/<TITLEID>` (`--work`; the script
@@ -1974,19 +1975,19 @@ only (the `dladdr` guard), and a shell with a title linked in (strong symbols wi
 Needs the shell APK from this branch. Steps 1–5 need no toolchain in the APK (a pack made on a host, pushed); with the
 toolchain, step 6.
 
-1. Shell APK, no pack, your game chosen: logcat `PACK_MISSING <TID> (no /data/user/0/fr.adserver.xboxrecomp/files/
+1. Shell APK, no pack, your game chosen: logcat `PACK_MISSING <TID> (no /data/user/0/fr.adserver.xrecomp/files/
    packs/<TID>/pack.json)`, then the NO_TITLE message as before. `adb logcat -s xboxrecomp`.
 2. A pack for the stub XBE made on a host (prepare.md « Checking on a host », with `--shell-lib` = the `libmain.so`
    out of **this** APK: `unzip -p xboxrecomp-shell.apk lib/arm64-v8a/libmain.so > libmain.so`). Push the stub's
-   `default.xbe` as the game (`/sdcard/Android/data/fr.adserver.xboxrecomp/files/game/`), then the pack:
+   `default.xbe` as the game (`/sdcard/Android/data/fr.adserver.xrecomp/files/game/`), then the pack:
    `adb push packs/12345678 /data/local/tmp/` and
-   `adb shell run-as fr.adserver.xboxrecomp sh -c 'mkdir -p files/packs && cp -r /data/local/tmp/12345678 files/packs/'`.
+   `adb shell run-as fr.adserver.xrecomp sh -c 'mkdir -p files/packs && cp -r /data/local/tmp/12345678 files/packs/'`.
 3. Start the app, Play. Expected: `PACK_LOADED 12345678 …/files/packs/12345678/libtitle.so (… bytes, "…",
    shell_abi 1; exports: recomp_lookup …)`, `xboxrecomp ready (… title)`, the five `stub title: …` lines and
    `stub title: all 5 lifted functions OK`, then `[FBWIN] guest returned (0)`. Back, Quit game twice quits;
    `adb logcat -b crash` empty.
 4. Unloadable pack, same size (the launcher's check passes it):
-   `adb shell run-as fr.adserver.xboxrecomp dd if=/dev/zero of=files/packs/12345678/libtitle.so bs=64 count=1 conv=notrunc`
+   `adb shell run-as fr.adserver.xrecomp dd if=/dev/zero of=files/packs/12345678/libtitle.so bs=64 count=1 conv=notrunc`
    (zeroes the ELF header). Play: `PACK_DLOPEN …` (bionic's « not a valid ELF » or similar), the launcher comes back
    with the red note « The prepared game could not be loaded (…). Prepare it again. » and Home shows **Prepare**
    (with the toolchain) or **Play**; `files/packs/12345678` is gone (`run-as … ls files/packs`). Screenshot.
@@ -2043,7 +2044,7 @@ Pause → Quit → Confirm, which goes back to its main menu) is restarted, not 
 ([docs/runtime/README.md](../runtime/README.md), « Quick reboot »). The kernel writes the launch data to
 `<internal files dir>/save/launch_data.bin` and calls the restart handler, which `shell_main.c` sets before the title
 starts (`restart_via_launcher`): it calls `ShellActivity.restartGame` through JNI from the guest thread, which sends
-`LauncherActivity` the explicit intent `fr.adserver.xboxrecomp.RESTART_GAME`. The launcher, in its own `:launcher`
+`LauncherActivity` the explicit intent `fr.adserver.xrecomp.RESTART_GAME`. The launcher, in its own `:launcher`
 process, does what it already does after a new game choice: `endRunningGame()` (`Process.killProcess` on the main
 process, waiting at most 2 s), then starts `ShellActivity` with `NEW_TASK | CLEAR_TASK` in a new main process, and
 finishes without showing anything; the play session stays open. A new process is needed because the runtime maps its
@@ -2099,7 +2100,7 @@ sink.
 
 1. From **shell-latest**, install the stub APK and push its XBE, then start « XRecomp stub »:
    `adb install -r xboxrecomp-stub-<commit>.apk`,
-   `adb push stub-default.xbe /sdcard/Android/data/fr.adserver.xboxrecomp.stub/files/game/default.xbe`,
+   `adb push stub-default.xbe /sdcard/Android/data/fr.adserver.xrecomp.stub/files/game/default.xbe`,
    `adb logcat -c && adb logcat -s xboxrecomp SDL DEBUG AndroidRuntime`. Expected in logcat: `defaults: RECOMP_FB_WINDOW=1
    RECOMP_PB_EXEC=1`, `xboxrecomp ready (… title)`, `starting the title`, the boot lines (`xbox_MemoryLayoutInit:
    complete`, `Starting game...`), five `stub title: …` lines and `stub title: all 5 lifted functions OK`, then

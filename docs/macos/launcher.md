@@ -78,7 +78,7 @@ bash macos/scripts/build-app.sh      # macos/build/XRecomp.app, ad-hoc signed
 - **`XRECOMP_SINGLE_TITLE=TID`** runs any launcher (`swift run`, the bare binary) in the single-game mode of a
   [game app](#game-apps).
 - **Packaging**: `build-app.sh` runs `swift build -c release`, writes `Contents/Info.plist` from `macos/Info.plist.in`
-  (bundle id `fr.adserver.xboxrecomp.mac`, macOS 14, `XBAToolkitPath` = this checkout), renders `AppIcon.icns` from
+  (bundle id `fr.adserver.xrecomp.mac`, macOS 14, `XBAToolkitPath` = this checkout), renders `AppIcon.icns` from
   [`docs/images/xrecomp-icon.svg`](../images/xrecomp-icon.svg) (`scripts/mkicon.swift` + `iconutil`) and signs ad hoc
   (`codesign -s -`). Built and run on the same Mac it needs no Developer ID or notarization. The app is not
   sandboxed: it spawns compilers and reads your folders.
@@ -215,7 +215,7 @@ Only for a prepared game (playable, as on Android): before that the row says « 
 
 - **What it is**: a copy of the running `XRecomp.app` (`Bundle.main.bundleURL`; from `swift run` there is no bundle
   and the app says so) with a rewritten `Info.plist`: `CFBundleName` and `CFBundleDisplayName` = the game title,
-  `CFBundleIdentifier` = `fr.adserver.xboxrecomp.mac.title.<title ID in lower case>`, `CFBundleIconFile` =
+  `CFBundleIdentifier` = `fr.adserver.xrecomp.mac.title.<title ID in lower case>`, `CFBundleIconFile` =
   `TitleIcon` (`CFBundleIconName` removed), and three keys of ours: `XBASingleTitle` = the title ID,
   `XBAMainAppPath` and `XBAMainBundleIdentifier` = the XRecomp.app it was made from. `XBAToolkitPath` is kept, or set
   to the toolkit the main app uses right now, so the copy still finds the checkout from outside it. The edit breaks

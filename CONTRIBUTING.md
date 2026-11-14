@@ -8,15 +8,18 @@ runtime and the pipeline. For this fork:
 - **Never** attach or commit game code, XBEs, disc images, game data, save files from retail games, or C generated
   from a game, in issues, pull requests or logs. Test with homebrew XBEs (nxdk) or the synthetic
   `tools/conformance/test.xbe`. Logs are fine once you have checked they quote no game data.
-- Issues and pull requests go to this repository, not upstream: upstream changes reach us through
-  `tools/sync_upstream.sh` ([docs/android/README.md](docs/android/README.md)).
+- Issues and pull requests go to [this repository on GitHub](https://github.com/MisterAlex95/Xrecomp), not upstream: upstream changes reach
+  us through `tools/sync_upstream.sh` ([docs/android/README.md](docs/android/README.md)). Development happens on the
+  maintainers' Gitea, which mirrors every push to GitHub (and overwrites GitHub's branches): nobody merges on GitHub.
+  A maintainer merges your pull request's commits on Gitea; once mirrored, GitHub shows the pull request as merged.
 - Upstream tests stay green on Linux: `docker build -f tools/docker/linux.Dockerfile --target test .`. Android
   changes also pass the app's unit tests (`--target app-unit-tests-out` of `tools/docker/android.Dockerfile`).
 - A bug on a device: say which device, Android version and APK (About shows the version), and attach
   `adb logcat -s xboxrecomp SDL AndroidRuntime DEBUG`. For a failed Prepare, its `prepare.log`
   ([docs/android/prepare.md](docs/android/prepare.md)).
-- CI runs on the maintainers' own machine and does not run pull requests from forks: a maintainer pushes your branch
-  to this repository to test it.
+- On GitHub, a pull request runs the Linux build and tests (`.github/workflows/linux.yml`). The full CI (arm64,
+  Android, macOS) runs on the maintainers' own machine and never runs someone else's code unreviewed: a maintainer
+  runs it once your branch is on Gitea.
 - Work language: English (code, comments, commits). Contributions are MIT ([LICENSE](LICENSE)).
 
 Security problems: [SECURITY.md](SECURITY.md), not a public issue.

@@ -347,7 +347,7 @@ func registerLibraryChecks() {
         // The Java source itself, when the checkout has it.
         let repo = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
             .deletingLastPathComponent().deletingLastPathComponent()
-        let src = read(repo.appendingPathComponent("android/app/src/main/java/fr/adserver/xboxrecomp/GamePalette.java"))
+        let src = read(repo.appendingPathComponent("android/app/src/main/java/fr/adserver/xrecomp/GamePalette.java"))
         if let r = src.range(of: #"STOCK = \{[^}]*\}"#, options: .regularExpression) {
             let vals = src[r].matches(of: #/0x([0-9A-Fa-f]{8})/#).map { UInt32($0.1, radix: 16)! }
             expectEq(vals, java, "GamePalette.java STOCK")

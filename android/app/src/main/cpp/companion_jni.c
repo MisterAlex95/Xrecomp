@@ -1,4 +1,4 @@
-/* The companion panel's JNI (fr.adserver.xboxrecomp.CompanionNative, docs/android/app-shell.md « Dual screen »):
+/* The companion panel's JNI (fr.adserver.xrecomp.CompanionNative, docs/android/app-shell.md « Dual screen »):
  * the touch overlay pad (src/input/input_overlay.h), the window's frame stats, a screenshot of the last frame, and
  * quit. Called on the UI thread (the overlay, quit) or a worker thread (the screenshot). */
 #include <jni.h>
@@ -10,7 +10,7 @@
 #include "platform/recomp_quit.h"
 #include "video/video_player.h"
 
-#define JNI_FN(name) Java_fr_adserver_xboxrecomp_CompanionNative_##name
+#define JNI_FN(name) Java_fr_adserver_xrecomp_CompanionNative_##name
 
 JNIEXPORT void JNICALL JNI_FN(nativeOverlay)(JNIEnv *env, jclass cls, jint buttons, jint analog_mask)
 {

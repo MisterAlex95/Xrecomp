@@ -5,7 +5,7 @@
  * translating the DXBC blobs when the APK was built with the translator (-PxbaLsfg=1 and a DXVK checkout). The DLL
  * itself is never stored; only counts go to the log, never shader contents.
  *
- * Java side: fr.adserver.xboxrecomp.LsfgNative. Result arrays (long[]):
+ * Java side: fr.adserver.xrecomp.LsfgNative. Result arrays (long[]):
  *   { status (0 or an LSFG_CACHE_* code), rcdata resources,
  *     dxbc[3.1], dxbc[3.1p], translated[3.1], translated[3.1p], fp16[3.1], fp16[3.1p], fp32[3.1], fp32[3.1p],
  *     needed[3.1], needed[3.1p], ready[3.1], ready[3.1p] }   ready: 1 when every shader of the variant is usable */
@@ -54,7 +54,7 @@ static void set_string(JNIEnv *env, jobjectArray arr, const char *s)
 
 /* LsfgNative.importDll(int fd, String baseDir, String[] dirOut, String[] errOut) -> long[] (above) */
 JNIEXPORT jlongArray JNICALL
-Java_fr_adserver_xboxrecomp_LsfgNative_importDll(JNIEnv *env, jclass cls, jint fd, jstring base_dir,
+Java_fr_adserver_xrecomp_LsfgNative_importDll(JNIEnv *env, jclass cls, jint fd, jstring base_dir,
                                                  jobjectArray dir_out, jobjectArray err_out)
 {
     (void)cls;
@@ -85,7 +85,7 @@ Java_fr_adserver_xboxrecomp_LsfgNative_importDll(JNIEnv *env, jclass cls, jint f
 
 /* LsfgNative.readManifest(String dir) -> long[] (above): the state of an existing cache directory. */
 JNIEXPORT jlongArray JNICALL
-Java_fr_adserver_xboxrecomp_LsfgNative_readManifest(JNIEnv *env, jclass cls, jstring dir)
+Java_fr_adserver_xrecomp_LsfgNative_readManifest(JNIEnv *env, jclass cls, jstring dir)
 {
     (void)cls;
     if (!dir)
@@ -101,7 +101,7 @@ Java_fr_adserver_xboxrecomp_LsfgNative_readManifest(JNIEnv *env, jclass cls, jst
 
 /* LsfgNative.currentDir(String baseDir) -> String or null: <baseDir>/<key> of the last import. */
 JNIEXPORT jstring JNICALL
-Java_fr_adserver_xboxrecomp_LsfgNative_currentDir(JNIEnv *env, jclass cls, jstring base_dir)
+Java_fr_adserver_xrecomp_LsfgNative_currentDir(JNIEnv *env, jclass cls, jstring base_dir)
 {
     (void)cls;
     if (!base_dir)
@@ -116,7 +116,7 @@ Java_fr_adserver_xboxrecomp_LsfgNative_currentDir(JNIEnv *env, jclass cls, jstri
 }
 
 JNIEXPORT jboolean JNICALL
-Java_fr_adserver_xboxrecomp_LsfgNative_hasTranslator(JNIEnv *env, jclass cls)
+Java_fr_adserver_xrecomp_LsfgNative_hasTranslator(JNIEnv *env, jclass cls)
 {
     (void)env; (void)cls;
 #ifdef XBA_LSFG_TRANSLATOR
@@ -127,7 +127,7 @@ Java_fr_adserver_xboxrecomp_LsfgNative_hasTranslator(JNIEnv *env, jclass cls)
 }
 
 JNIEXPORT jstring JNICALL
-Java_fr_adserver_xboxrecomp_LsfgNative_strerror(JNIEnv *env, jclass cls, jint err)
+Java_fr_adserver_xrecomp_LsfgNative_strerror(JNIEnv *env, jclass cls, jint err)
 {
     (void)cls;
     return (*env)->NewStringUTF(env, lsfg_cache_strerror(err));

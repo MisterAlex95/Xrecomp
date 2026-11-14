@@ -4,7 +4,7 @@
  * before SDL, and libmain.so needs libSDL2.so loaded first and pulls the whole runtime (--whole-archive toolkit, the
  * title). This one depends on libc, liblog and the static xiso target only.
  *
- * Java side: fr.adserver.xboxrecomp.XisoNative. The fd belongs to a ParcelFileDescriptor that Java keeps open (and
+ * Java side: fr.adserver.xrecomp.XisoNative. The fd belongs to a ParcelFileDescriptor that Java keeps open (and
  * closes) around each call; nothing here closes it. */
 #include <jni.h>
 #include <stdint.h>
@@ -45,9 +45,9 @@ static int64_t now_ns(void)
     return (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
 }
 
-/* fr.adserver.xboxrecomp.XisoNative.probe(int fd, String[] titleOut) -> long[] { status, totalBytes, hasDefaultXbe } */
+/* fr.adserver.xrecomp.XisoNative.probe(int fd, String[] titleOut) -> long[] { status, totalBytes, hasDefaultXbe } */
 JNIEXPORT jlongArray JNICALL
-Java_fr_adserver_xboxrecomp_XisoNative_probe(JNIEnv *env, jclass cls, jint fd, jobjectArray title_out)
+Java_fr_adserver_xrecomp_XisoNative_probe(JNIEnv *env, jclass cls, jint fd, jobjectArray title_out)
 {
     char title[256] = "";
     uint64_t total = 0;
@@ -100,9 +100,9 @@ static int progress_cb(uint64_t done, uint64_t total, const char *path, void *us
     return cancel ? 1 : 0;
 }
 
-/* fr.adserver.xboxrecomp.XisoNative.extract(int fd, String outDir, Progress listener) -> int (0 or XISO_E*) */
+/* fr.adserver.xrecomp.XisoNative.extract(int fd, String outDir, Progress listener) -> int (0 or XISO_E*) */
 JNIEXPORT jint JNICALL
-Java_fr_adserver_xboxrecomp_XisoNative_extract(JNIEnv *env, jclass cls, jint fd, jstring out_dir, jobject listener)
+Java_fr_adserver_xrecomp_XisoNative_extract(JNIEnv *env, jclass cls, jint fd, jstring out_dir, jobject listener)
 {
     (void)cls;
     if (!out_dir || !listener)
@@ -129,11 +129,11 @@ Java_fr_adserver_xboxrecomp_XisoNative_extract(JNIEnv *env, jclass cls, jint fd,
     return rc;
 }
 
-/* fr.adserver.xboxrecomp.XisoNative.extractFile(int fd, String pathInImage, String outFile, long maxBytes) -> int
+/* fr.adserver.xrecomp.XisoNative.extractFile(int fd, String pathInImage, String outFile, long maxBytes) -> int
  * (0 or XISO_E*): one file of the image (the game library takes default.xbe out of an ISO without extracting it).
  * outFile is created with O_EXCL and removed on failure; larger than maxBytes is XISO_EINVAL. */
 JNIEXPORT jint JNICALL
-Java_fr_adserver_xboxrecomp_XisoNative_extractFile(JNIEnv *env, jclass cls, jint fd, jstring path_in_image,
+Java_fr_adserver_xrecomp_XisoNative_extractFile(JNIEnv *env, jclass cls, jint fd, jstring path_in_image,
                                                    jstring out_file, jlong max_bytes)
 {
     (void)cls;
@@ -156,7 +156,7 @@ Java_fr_adserver_xboxrecomp_XisoNative_extractFile(JNIEnv *env, jclass cls, jint
 }
 
 JNIEXPORT jstring JNICALL
-Java_fr_adserver_xboxrecomp_XisoNative_strerror(JNIEnv *env, jclass cls, jint err)
+Java_fr_adserver_xrecomp_XisoNative_strerror(JNIEnv *env, jclass cls, jint err)
 {
     (void)cls;
     const char *s = xiso_strerror(err);
@@ -164,14 +164,14 @@ Java_fr_adserver_xboxrecomp_XisoNative_strerror(JNIEnv *env, jclass cls, jint er
 }
 
 JNIEXPORT jint JNICALL
-Java_fr_adserver_xboxrecomp_XisoNative_canceledCode(JNIEnv *env, jclass cls)
+Java_fr_adserver_xrecomp_XisoNative_canceledCode(JNIEnv *env, jclass cls)
 {
     (void)env; (void)cls;
     return XISO_ECANCELED;
 }
 
 JNIEXPORT jint JNICALL
-Java_fr_adserver_xboxrecomp_XisoNative_noSpaceCode(JNIEnv *env, jclass cls)
+Java_fr_adserver_xrecomp_XisoNative_noSpaceCode(JNIEnv *env, jclass cls)
 {
     (void)env; (void)cls;
     return XISO_ENOSPC;
@@ -196,7 +196,7 @@ static int open_parts(JNIEnv *env, jintArray fds, xiso_source **src)
 
 /* XisoNative.probeParts(int[] fds, String[] titleOut) -> long[] { status, totalBytes, hasDefaultXbe, kind, stored } */
 JNIEXPORT jlongArray JNICALL
-Java_fr_adserver_xboxrecomp_XisoNative_probeParts(JNIEnv *env, jclass cls, jintArray fds, jobjectArray title_out)
+Java_fr_adserver_xrecomp_XisoNative_probeParts(JNIEnv *env, jclass cls, jintArray fds, jobjectArray title_out)
 {
     char title[256] = "";
     uint64_t total = 0, stored = 0;
@@ -229,7 +229,7 @@ Java_fr_adserver_xboxrecomp_XisoNative_probeParts(JNIEnv *env, jclass cls, jintA
 
 /* XisoNative.extractParts(int[] fds, String outDir, Progress listener) -> int: xiso_extract over the parts. */
 JNIEXPORT jint JNICALL
-Java_fr_adserver_xboxrecomp_XisoNative_extractParts(JNIEnv *env, jclass cls, jintArray fds, jstring out_dir,
+Java_fr_adserver_xrecomp_XisoNative_extractParts(JNIEnv *env, jclass cls, jintArray fds, jstring out_dir,
                                                     jobject listener)
 {
     (void)cls;
@@ -265,7 +265,7 @@ Java_fr_adserver_xboxrecomp_XisoNative_extractParts(JNIEnv *env, jclass cls, jin
 
 /* XisoNative.extractFileParts(int[] fds, String pathInImage, String outFile, long maxBytes) -> int */
 JNIEXPORT jint JNICALL
-Java_fr_adserver_xboxrecomp_XisoNative_extractFileParts(JNIEnv *env, jclass cls, jintArray fds, jstring path_in_image,
+Java_fr_adserver_xrecomp_XisoNative_extractFileParts(JNIEnv *env, jclass cls, jintArray fds, jstring path_in_image,
                                                         jstring out_file, jlong max_bytes)
 {
     (void)cls;
@@ -336,7 +336,7 @@ static int xbes_walk(xiso_image *img, const xiso_stat *dir, const char *out_dir,
 }
 
 JNIEXPORT jint JNICALL
-Java_fr_adserver_xboxrecomp_XisoNative_extractXbes(JNIEnv *env, jclass cls, jintArray fds, jstring out_dir,
+Java_fr_adserver_xrecomp_XisoNative_extractXbes(JNIEnv *env, jclass cls, jintArray fds, jstring out_dir,
                                                    jlong max_bytes)
 {
     (void)cls;

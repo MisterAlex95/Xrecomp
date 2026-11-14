@@ -292,7 +292,7 @@ The app's side:
 
 ## The quick first build (XBA-128): a switch, off
 
-With `<files>/prepare/quick-first` present (`adb shell run-as fr.adserver.xboxrecomp.shell touch
+With `<files>/prepare/quick-first` present (`adb shell run-as fr.adserver.xrecomp.shell touch
 files/prepare/quick-first`), a Prepare that is not a background one builds at `-O1`; when its pack is published, an
 `-O2` rebuild of the same title is queued **in the background** (Play is not blocked; it holds while the game runs).
 Off by default: on the x86 host, `-O1` saves 4–6 % of the compile and costs a second full compile afterwards (see
@@ -378,9 +378,9 @@ playable game skips the launcher, and so the question, until the launcher shows.
 
 **The exchange.**
 
-1. The game's app starts `<PARENT>/fr.adserver.xboxrecomp.PackHandoverActivity` (meta-data `PARENT`, XRecomp's
-   package; component class names stay `fr.adserver.xboxrecomp.*` in a game's app) with `startActivityForResult`,
-   extra `fr.adserver.xboxrecomp.extra.HANDOVER_TITLE_ID` = its title ID. Its manifest's `<queries>` names XRecomp's
+1. The game's app starts `<PARENT>/fr.adserver.xrecomp.PackHandoverActivity` (meta-data `PARENT`, XRecomp's
+   package; component class names stay `fr.adserver.xrecomp.*` in a game's app) with `startActivityForResult`,
+   extra `fr.adserver.xrecomp.extra.HANDOVER_TITLE_ID` = its title ID. Its manifest's `<queries>` names XRecomp's
    package (`TitleApk` leaves `<package>` as it is, so in the copy it names the parent).
 2. XRecomp's activity (translucent, no view, `noHistory`, `excludeFromRecents`, in `:launcher`) checks the caller and
    finishes at once with its answer: the player sees nothing of XRecomp.
@@ -402,7 +402,7 @@ playable game skips the launcher, and so the question, until the launcher shows.
 | XRecomp is not itself a game's app | its own meta-data has no `TITLE_ID` | `NOT_A_PARENT` |
 | The caller is known | `getCallingPackage()`: set only for `startActivityForResult`; `adb shell am start` or a plain `startActivity` gives none | `NO_CALLER` |
 | The title ID is one | 1–8 hex digits | `BAD_TITLE` |
-| The caller is that title's game app | package = `fr.adserver.xboxrecomp.t<titleid>` (lower case) for the title ID it asks for | `WRONG_PACKAGE` |
+| The caller is that title's game app | package = `fr.adserver.xrecomp.t<titleid>` (lower case) for the title ID it asks for | `WRONG_PACKAGE` |
 | XRecomp ever made a game app | the AndroidKeyStore holds `xba_title_apps` (`TitleApp.existingCert`, which never makes it) | `NO_KEY` |
 | The caller is signed by that key | `GET_SIGNING_CERTIFICATES`: one signer, its certificate byte-for-byte that key's certificate | `WRONG_CERT` |
 | There is a whole pack | `Pack.check` = `VALID`, every file `pack.json` names present | `NO_PACK` |
@@ -412,7 +412,7 @@ files are read through `PackProvider` (`${applicationId}.packs`), **not exported
 the activity granted, one per file, are readable, read-only, by that caller, while its activity lives. The provider
 serves only `<TITLEID>/<name>` where the title ID is 8 upper-case hex digits and the name is `pack.json` or a file it
 names (`lib`, `images`), inside that pack directory. Its authority is package-derived, so `TitleApk` moves it to
-`fr.adserver.xboxrecomp.t<tid>.packs` in a game's app: no clash with XRecomp's (and a game's app serves nothing, as
+`fr.adserver.xrecomp.t<tid>.packs` in a game's app: no clash with XRecomp's (and a game's app serves nothing, as
 it refuses with `NOT_A_PARENT`). The game's app trusts the package its meta-data names as its parent: it was made by
 it and installs only next to it.
 

@@ -179,7 +179,7 @@ at 3 jobs), capstone seconds. Disk: about 9 GB of LLVM build tree during the bui
 ## The XRecomp APK in CI
 
 XBA-125. The APK a player installs is built by CI on every push to `main` and published as the rolling prerelease
-[`xrecomp-latest`](https://git.cf.adserver.fr/Alex/xboxrecomp-android/releases/tag/xrecomp-latest), asset
+[`xrecomp-latest`](https://github.com/MisterAlex95/Xrecomp/releases/tag/xrecomp-latest) (on Gitea, and on GitHub once `GH_RELEASE_TOKEN` is set), asset
 `xrecomp-<commit>.apk`. It is the `xrecomp-apk` stage of `android.Dockerfile`:
 
 - the **release** build type (the runtime libraries at `-O3`, `cpp/CMakeLists.txt`), still **debuggable**
@@ -217,7 +217,7 @@ To force a rebuild (a broken archive): delete the `toolchain-<key>` release in G
 
 An Android update keeps the app's data (packs in `files/packs`, saves in `files/save`, settings, the library,
 `shared_prefs`) only if the new APK has the **same application id, the same signing certificate, and a version code
-not lower** than the installed one. The first two never change for the XRecomp APK (`fr.adserver.xboxrecomp.shell`
+not lower** than the installed one. The first two never change for the XRecomp APK (`fr.adserver.xrecomp.shell`
 and the release key); the version code grows with each commit.
 
 How the build gets the key (`android/app/build.gradle`):
@@ -242,6 +242,10 @@ notes say **Debug-signed**.
 | `XBA_RELEASE_KEYSTORE_B64` | the keystore file, base64 on one line |
 | `XBA_RELEASE_KEYSTORE_PASSWORD` | its password |
 | `XBA_RELEASE_KEY_ALIAS` | optional, when the alias is not `xrecomp` |
+| `GH_RELEASE_TOKEN` | a GitHub fine-grained token, repository `Xrecomp` only, permission Contents: read and write: CI publishes the releases on GitHub with it ([releases](../releases/README.md)) |
+
+The Gitea variable `GH_RELEASE_REPO` (Settings › Actions › Variables) overrides the GitHub repository, default
+`MisterAlex95/Xrecomp`.
 
 **Creating the key (once, by the maintainer).** No agent and no CI job can do it: the key must exist only with you.
 
@@ -264,12 +268,12 @@ notes say **Debug-signed**.
 whenever its Android image is rebuilt, a Mac's is in `~/.android/debug.keystore`. Android refuses to install the
 release-signed APK over it (`INSTALL_FAILED_UPDATE_INCOMPATIBLE`, « App not installed » on the device): the app must
 be uninstalled first, and **uninstalling deletes its data**: packs, saves, settings, library, title art, and the
-imported game copy in `Android/data/fr.adserver.xboxrecomp.shell/`. It is a one-time cost; every later
+imported game copy in `Android/data/fr.adserver.xrecomp.shell/`. It is a one-time cost; every later
 `xrecomp-latest` updates in place. The least painful way: both the old build and the XRecomp APK are debuggable, so
 the data goes out and back with `run-as`:
 
 ```bash
-PKG=fr.adserver.xboxrecomp.shell
+PKG=fr.adserver.xrecomp.shell
 adb exec-out run-as $PKG tar -cf - files shared_prefs > xrecomp-data.tar   # 1. export (the old build)
 tar -tf xrecomp-data.tar | grep -E '^files/(save|packs|settings)/' | head   #    check it holds what you expect
 adb uninstall $PKG                                                          # 2. data gone from the device
@@ -284,9 +288,9 @@ the release key (its password is `android`, its name says debug, CI's is in an i
 id (two apps side by side, but saves split between them).
 
 The rolling `shell-latest` (the plain shell, debug-signed by CI's image) has its own application id since XBA-134,
-`fr.adserver.xboxrecomp.dev` (label « XRecomp shell »): it installs next to the XRecomp APK, with its own data, and
+`fr.adserver.xrecomp.dev` (label « XRecomp shell »): it installs next to the XRecomp APK, with its own data, and
 never replaces it. It is for the shell checks of [app-shell.md](app-shell.md). Before XBA-134 it shared
-`fr.adserver.xboxrecomp.shell`: an old shell install is the « debug-signed install » of the paragraph above.
+`fr.adserver.xrecomp.shell`: an old shell install is the « debug-signed install » of the paragraph above.
 
 A local build that must update a release-signed install needs the key too:
 `XBA_KEYSTORE=… XBA_KEYSTORE_PASSWORD=… gradle assembleRelease -PxbaDebuggable=1 -PxbaToolchainDir=… -PxbaVersionCode=<above the installed one>`.

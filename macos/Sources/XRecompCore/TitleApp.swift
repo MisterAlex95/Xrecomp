@@ -20,8 +20,8 @@ public enum TitleApp {
     public static let mainBundleIdKey = "XBAMainBundleIdentifier"
     public static let toolkitKey = "XBAToolkitPath"
     /// The main app's bundle ID (macos/Info.plist.in).
-    public static let mainBundleId = "fr.adserver.xboxrecomp.mac"
-    public static let bundleIdPrefix = "fr.adserver.xboxrecomp.mac.title."
+    public static let mainBundleId = "fr.adserver.xrecomp.mac"
+    public static let bundleIdPrefix = "fr.adserver.xrecomp.mac.title."
     /// The icon in Contents/Resources (`TitleIcon.icns`), named by CFBundleIconFile.
     public static let iconBaseName = "TitleIcon"
     /// `XRECOMP_SINGLE_TITLE=TID` gives single-game mode to any launcher run (`swift run XRecomp`, tests).
@@ -38,7 +38,7 @@ public enum TitleApp {
         return t.utf8.allSatisfy { hex.contains($0) } ? t : nil
     }
 
-    /// `fr.adserver.xboxrecomp.mac.title.<titleid lower case>`; anything but [a-z0-9-] is dropped.
+    /// `fr.adserver.xrecomp.mac.title.<titleid lower case>`; anything but [a-z0-9-] is dropped.
     public static func bundleIdentifier(titleId: String) -> String {
         let allowed = Set("abcdefghijklmnopqrstuvwxyz0123456789-".unicodeScalars)
         var safe = ""

@@ -7,7 +7,7 @@
 	<key>CFBundleDisplayName</key>
 	<string>XRecomp</string>
 	<key>CFBundleIdentifier</key>
-	<string>fr.adserver.xboxrecomp.mac</string>
+	<string>fr.adserver.xrecomp.mac</string>
 	<key>CFBundleExecutable</key>
 	<string>XRecomp</string>
 	<key>CFBundlePackageType</key>

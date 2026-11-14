@@ -65,7 +65,7 @@ rm -rf "$WORK/icon-res"
 (cd "$ROOT" && "$PY" -m tools.title_art "$WORK/default.xbe" --android-res "$WORK/icon-res" --json) > "$TMP/art.json"
 ICON=$(field "$TMP/art.json" icon)
 # A package segment starts with a letter: t + the title ID in lower case.
-APP_ID=fr.adserver.xboxrecomp.t$(echo "$TID" | tr 'A-F' 'a-f')
+APP_ID=fr.adserver.xrecomp.t$(echo "$TID" | tr 'A-F' 'a-f')
 
 echo "title $TID « $NAME »: package $APP_ID, icon from the $( [ "$ICON" = image ] && echo "title image" || echo "title colour (no title image)")"
 CMD=("$GRADLE" "$TASK" "-PxbaApplicationId=$APP_ID" "-PxbaLabel=$NAME" "-PxbaXbeSha256=$SHA"

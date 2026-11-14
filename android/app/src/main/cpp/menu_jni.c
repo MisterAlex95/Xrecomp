@@ -1,4 +1,4 @@
-/* The in-game menu's JNI (fr.adserver.xboxrecomp.MenuNative, docs/android/app-shell.md « In-game menu »): hold the
+/* The in-game menu's JNI (fr.adserver.xrecomp.MenuNative, docs/android/app-shell.md « In-game menu »): hold the
  * game while the drawer is open (the lifecycle's MENU reason: the flip parks and the audio device pauses, as in the
  * background), the output volume, and quit. Called on the UI thread. */
 #include <jni.h>
@@ -9,7 +9,7 @@
 #include "platform/recomp_lifecycle.h"
 #include "platform/recomp_quit.h"
 
-#define JNI_FN(name) Java_fr_adserver_xboxrecomp_MenuNative_##name
+#define JNI_FN(name) Java_fr_adserver_xrecomp_MenuNative_##name
 
 JNIEXPORT void JNICALL JNI_FN(nativeHold)(JNIEnv *env, jclass cls, jboolean on)
 {

@@ -1,0 +1,115 @@
+# A public release (docs/releases/README.md): pushing a tag xrecomp-v<version> on a commit of main builds the XRecomp
+# APK release-signed and not debuggable, and publishes it as a release (not a prerelease) both here and on the public
+# GitHub mirror, with docs/releases/<tag>.md as its notes.
+#
+# It reuses the on-device toolchain that CI cached for that commit (release toolchain-<key>): tag a commit whose main
+# build went green. It fails rather than publish half a release: no notes file, no release key, no GitHub token.
+# Runs on the maintainers' shared host under the heavy-job lock, like android-apk in ci.yml.
+name: Release
+
+on:
+  push:
+    tags: ['xrecomp-v*']
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    container:
+      image: docker:29.8.1-cli
+    steps:
+      - name: Checkout
+        env:
+          TOKEN: ${{ github.token }}
+        run: |
+          apk add --no-cache git curl jq xz >/dev/null
+          git init -q .
+          git fetch -q --depth 1 "$(printf '%s' "$GITHUB_SERVER_URL" | sed "s#://#://ci:$TOKEN@#")/$GITHUB_REPOSITORY.git" "$GITHUB_SHA"
+          git checkout -q FETCH_HEAD
+          git log -1 --format='%h %s'
+
+      - name: Check the inputs
+        env:
+          KS_B64: ${{ secrets.XBA_RELEASE_KEYSTORE_B64 }}
+          GH_TOKEN: ${{ secrets.GH_RELEASE_TOKEN }}
+        run: |
+          tag=${GITHUB_REF#refs/tags/}
+          [ -s "docs/releases/$tag.md" ] || { echo "docs/releases/$tag.md is missing: write the notes, then tag"; exit 1; }
+          [ -n "$KS_B64" ] || { echo "the release key (secret XBA_RELEASE_KEYSTORE_B64) is not set"; exit 1; }
+          [ -n "$GH_TOKEN" ] || { echo "the secret GH_RELEASE_TOKEN is not set"; exit 1; }
+
+      - name: Wait for the heavy-job lock
+        run: sh tools/ci/heavy_lock.sh acquire
+
+      - name: Fetch the toolchain (toolchain-<key>)
+        env:
+          TOKEN: ${{ github.token }}
+        run: |
+          key=$(sh tools/ci/toolchain_key.sh)
+          a="xba-toolchain-$key.tar.xz"
+          rel=$(curl -fsS -H "Authorization: token $TOKEN" \
+                  "$GITHUB_SERVER_URL/api/v1/repos/$GITHUB_REPOSITORY/releases/tags/toolchain-$key") \
+            || { echo "no release toolchain-$key: tag a commit whose main build is green"; exit 1; }
+          mkdir -p out/toolchain
+          for f in "$a" "$a.sha256"; do
+            url=$(printf '%s' "$rel" | jq -r --arg f "$f" '.assets[] | select(.name == $f) | .browser_download_url')
+            [ -n "$url" ] || { echo "toolchain-$key has no $f"; exit 1; }
+            curl -fsSL -u "ci:$TOKEN" -o "out/$f" "$url"
+          done
+          (cd out && sha256sum -c "$a.sha256")
+          xz -dc "out/$a" | tar -C out/toolchain -xf -
+          rm "out/$a"
+
+      - name: XRecomp APK (release-signed, not debuggable)
+        env:
+          KS_B64: ${{ secrets.XBA_RELEASE_KEYSTORE_B64 }}
+          XBA_KEYSTORE_PASSWORD: ${{ secrets.XBA_RELEASE_KEYSTORE_PASSWORD }}
+          XBA_KEY_ALIAS: ${{ secrets.XBA_RELEASE_KEY_ALIAS }}
+        run: |
+          tag=${GITHUB_REF#refs/tags/}
+          sha8=$(printf '%s' "$GITHUB_SHA" | cut -c1-8)
+          code=$(( $(git log -1 --format=%ct) / 60 ))
+          (umask 077 && mkdir -p sec && printf '%s' "$KS_B64" | base64 -d > sec/release.p12)
+          set -- --secret id=xba_keystore,src=sec/release.p12 --secret id=xba_keystore_password,env=XBA_KEYSTORE_PASSWORD
+          [ -z "$XBA_KEY_ALIAS" ] || set -- "$@" --secret id=xba_key_alias,env=XBA_KEY_ALIAS
+          docker build -f tools/docker/android.Dockerfile --target xrecomp-apk-out --progress=plain \
+            --build-context xba-toolchain=out/toolchain "$@" --build-arg JOBS=4 --build-arg XBA_SIGNING=release \
+            --build-arg XBA_DEBUGGABLE=0 --build-arg XBA_VERSION="${tag#xrecomp-v}+$sha8" \
+            --build-arg XBA_VERSION_CODE="$code" --output type=local,dest=out/apk .
+          rm -rf sec
+          cat out/apk/xrecomp-badging.txt out/apk/xrecomp-signing.txt
+          cp out/apk/xrecomp.apk "out/$tag.apk"
+          (cd out && sha256sum "$tag.apk" > "$tag.apk.sha256")
+          { cat "docs/releases/$tag.md"
+            printf '\n---\n\nBuilt by CI from %s. arm64-v8a, Android 11+. No game inside.\n\n```\n' "$sha8"
+            cat out/apk/xrecomp-signing.txt
+            printf '```\n'; } > out/notes.md
+
+      - name: Publish here
+        env:
+          TOKEN: ${{ github.token }}
+        run: |
+          tag=${GITHUB_REF#refs/tags/}
+          api="$GITHUB_SERVER_URL/api/v1/repos/$GITHUB_REPOSITORY"
+          auth="Authorization: token $TOKEN"
+          body=$(jq -n --arg tag "$tag" --rawfile notes out/notes.md \
+            '{tag_name: $tag, name: ("XRecomp " + ($tag | ltrimstr("xrecomp-"))), prerelease: false, body: $notes}')
+          id=$(curl -fsS -X POST -H "$auth" -H "Content-Type: application/json" -d "$body" "$api/releases" | jq -r .id)
+          for f in "$tag.apk" "$tag.apk.sha256"; do
+            curl -fsS -X POST -H "$auth" -F "attachment=@out/$f" "$api/releases/$id/assets?name=$f" \
+              | jq -r .browser_download_url
+          done
+
+      - name: Publish on GitHub
+        env:
+          GH_TOKEN: ${{ secrets.GH_RELEASE_TOKEN }}
+          GH_REPO: ${{ vars.GH_RELEASE_REPO }}
+        run: |
+          tag=${GITHUB_REF#refs/tags/}
+          sh tools/ci/github_release.sh "$tag" "$GITHUB_SHA" "XRecomp ${tag#xrecomp-}" false out/notes.md \
+            "out/$tag.apk" "out/$tag.apk.sha256"
+
+      - name: Clean up
+        if: always()
+        run: |
+          rm -rf out sec
+          sh tools/ci/heavy_lock.sh release || true

@@ -79,15 +79,15 @@ RUN mkdir -p /reports \
 
 # The app shell APK (XBA-18), debug-signed. Out of the image with:
 #   docker build -f tools/docker/android.Dockerfile --target apk-out --output type=local,dest=out .
-# Its own application id, fr.adserver.xboxrecomp.dev, and label « XRecomp shell » (XBA-134): it installs next to
-# the XRecomp APK (fr.adserver.xboxrecomp.shell, xrecomp-latest) instead of over it (or failing on its other key).
+# Its own application id, fr.adserver.xrecomp.dev, and label « XRecomp shell » (XBA-134): it installs next to
+# the XRecomp APK (fr.adserver.xrecomp.shell, xrecomp-latest) instead of over it (or failing on its other key).
 FROM android AS apk
 ARG XBA_VERSION=dev
 COPY . /src
 WORKDIR /src/android
 RUN printf 'sdk.dir=%s\ncmake.dir=/usr\n' "$ANDROID_HOME" > local.properties \
     && gradle --no-daemon --console=plain -PxbaVersion="$XBA_VERSION" \
-         -PxbaApplicationId=fr.adserver.xboxrecomp.dev -PxbaLabel="XRecomp shell" assembleDebug \
+         -PxbaApplicationId=fr.adserver.xrecomp.dev -PxbaLabel="XRecomp shell" assembleDebug \
     && mkdir -p /out \
     && cp app/build/outputs/apk/debug/app-debug.apk /out/xboxrecomp-shell.apk \
     && unzip -l /out/xboxrecomp-shell.apk | grep -E 'lib/|classes|assets/' | tee /out/apk-contents.txt \
@@ -155,7 +155,7 @@ WORKDIR /src/android
 RUN /src/tools/android/stub_title.sh /work/stub \
     && printf 'sdk.dir=%s\ncmake.dir=/usr\n' "$ANDROID_HOME" > local.properties \
     && gradle --no-daemon --console=plain -PxbaVersion="$XBA_VERSION" -PxbaTitleDir=/work/stub \
-         -PxbaApplicationId=fr.adserver.xboxrecomp.stub -PxbaLabel="XRecomp stub" assembleDebug \
+         -PxbaApplicationId=fr.adserver.xrecomp.stub -PxbaLabel="XRecomp stub" assembleDebug \
     && mkdir -p /out \
     && cp app/build/outputs/apk/debug/app-debug.apk /out/xboxrecomp-stub.apk \
     && cp /work/stub/game/default.xbe /out/stub-default.xbe \
@@ -259,8 +259,8 @@ FROM scratch AS prepare-apk-out
 COPY --from=prepare-apk /out/ /
 
 # The XRecomp APK (XBA-125, docs/android/toolchain.md « The XRecomp APK in CI »): the release build of the app with
-# the on-device toolchain (Prepare), optimised native code, debuggable (run-as), the version code from the commit
-# time. CI publishes it as xrecomp-latest. The toolchain comes from the stage xba-toolchain below, which CI replaces
+# the on-device toolchain (Prepare), optimised native code, debuggable (run-as) unless XBA_DEBUGGABLE=0, the version
+# code from the commit time. CI publishes it as xrecomp-latest (debuggable) and release.yml as a release (not). The toolchain comes from the stage xba-toolchain below, which CI replaces
 # with its cached toolchain-out (--build-context xba-toolchain=DIR); without that the toolchain is built here.
 # Signing: the BuildKit secrets xba_keystore (the keystore file), xba_keystore_password and xba_key_alias (optional,
 # default xrecomp). Without them the APK is signed with this image's debug key and the build says so; with
@@ -276,6 +276,8 @@ ARG XBA_VERSION=dev
 ARG XBA_VERSION_CODE=1
 # auto: the release key when its secrets are there, else the debug key; release: the release key or an error; debug.
 ARG XBA_SIGNING=auto
+# 1: debuggable (run-as, for the device check lists; xrecomp-latest). 0: a public release (release.yml).
+ARG XBA_DEBUGGABLE=1
 ARG JOBS=4
 COPY --from=xba-toolchain / /opt/xba-toolchain/
 COPY . /src
@@ -292,7 +294,7 @@ RUN --mount=type=secret,id=xba_keystore --mount=type=secret,id=xba_keystore_pass
     require=0; [ "$XBA_SIGNING" != release ] || require=1; \
     printf 'sdk.dir=%s\ncmake.dir=/usr\n' "$ANDROID_HOME" > local.properties; \
     gradle --no-daemon --console=plain -PxbaVersion="$XBA_VERSION" -PxbaVersionCode="$XBA_VERSION_CODE" \
-        -PxbaToolchainDir=/opt/xba-toolchain -PxbaDebuggable=1 -PxbaJobs="$JOBS" -PxbaRequireReleaseKey=$require \
+        -PxbaToolchainDir=/opt/xba-toolchain -PxbaDebuggable="$XBA_DEBUGGABLE" -PxbaJobs="$JOBS" -PxbaRequireReleaseKey=$require \
         assembleRelease; \
     mkdir -p /out; \
     cp app/build/outputs/apk/release/app-release.apk /out/xrecomp.apk; \
@@ -313,7 +315,8 @@ RUN set -e; bt=$(ls -d "$ANDROID_HOME"/build-tools/* | tail -1); apk=/out/xrecom
         || { echo "xrecomp.apk: an XBE or disc image other than the self-test"; exit 1; }; \
     "$bt/aapt2" dump badging "$apk" | grep -E "^package:|application-debuggable" | tee /out/xrecomp-badging.txt; \
     grep -q "versionCode='$XBA_VERSION_CODE'" /out/xrecomp-badging.txt; \
-    grep -q application-debuggable /out/xrecomp-badging.txt; \
+    if [ "$XBA_DEBUGGABLE" = 1 ]; then grep -q application-debuggable /out/xrecomp-badging.txt; \
+    else ! grep -q application-debuggable /out/xrecomp-badging.txt; fi; \
     "$bt/apksigner" verify --print-certs "$apk" | grep -E 'Signer #1 certificate (DN|SHA-256)' > /tmp/certs; \
     if grep -q 'CN=Android Debug' /tmp/certs; then kind=DEBUG; else kind=release; fi; \
     { echo "signed with: $kind key"; cat /tmp/certs; } | tee /out/xrecomp-signing.txt; \

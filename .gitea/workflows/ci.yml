@@ -248,7 +248,7 @@ jobs:
           fi
           body=$(jq -n --arg sha "$GITHUB_SHA" --arg s "$sha8" \
             '{tag_name: "shell-latest", target_commitish: $sha, name: ("App shell, latest main (" + $s + ")"), prerelease: true,
-              body: ("The Android app shell built by CI from main at " + $s + ". No game inside. Debug-signed, arm64-v8a, Android 11+. Its own application id (fr.adserver.xboxrecomp.dev, « XRecomp shell »): it installs next to the XRecomp APK of xrecomp-latest, never over it.\n\nInstall: adb install -r xboxrecomp-shell-" + $s + ".apk. Check list: docs/android/app-shell.md.")}')
+              body: ("The Android app shell built by CI from main at " + $s + ". No game inside. Debug-signed, arm64-v8a, Android 11+. Its own application id (fr.adserver.xrecomp.dev, « XRecomp shell »): it installs next to the XRecomp APK of xrecomp-latest, never over it.\n\nInstall: adb install -r xboxrecomp-shell-" + $s + ".apk. Check list: docs/android/app-shell.md.")}')
           id=$(curl -fsS -X POST -H "$auth" -H "Content-Type: application/json" -d "$body" "$api/releases" | jq -r .id)
           curl -fsS -X POST -H "$auth" -F "attachment=@out/xboxrecomp-shell.apk;type=application/vnd.android.package-archive" \
             "$api/releases/$id/assets?name=xboxrecomp-shell-$sha8.apk" | jq -r .browser_download_url
@@ -484,6 +484,19 @@ jobs:
           id=$(curl -fsS -X POST -H "$auth" -H "Content-Type: application/json" -d "$body" "$api/releases" | jq -r .id)
           curl -fsS -X POST -H "$auth" -F "attachment=@out/apk/xrecomp.apk;type=application/vnd.android.package-archive" \
             "$api/releases/$id/assets?name=xrecomp-$sha8.apk" | jq -r .browser_download_url
+          printf '%s' "$body" | jq -r .body > out/release-body.md
+
+      # The same rolling prerelease on the public GitHub mirror (docs/releases/README.md): the push mirror copies
+      # commits and tags, not releases. Skipped while the secret GH_RELEASE_TOKEN is not set.
+      - name: Publish the XRecomp APK on GitHub (xrecomp-latest)
+        env:
+          GH_TOKEN: ${{ secrets.GH_RELEASE_TOKEN }}
+          GH_REPO: ${{ vars.GH_RELEASE_REPO }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then echo "GH_RELEASE_TOKEN not set: no GitHub release"; exit 0; fi
+          sha8=$(printf '%s' "$GITHUB_SHA" | cut -c1-8)
+          sh tools/ci/github_release.sh xrecomp-latest "$GITHUB_SHA" "XRecomp, latest main ($sha8)" true \
+            out/release-body.md "out/apk/xrecomp.apk=xrecomp-$sha8.apk"
 
       - name: Clean up
         if: always()

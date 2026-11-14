@@ -15,7 +15,8 @@ stuck in.
 - [Environment Variables](runtime/environment-variables.md) — Every `RECOMP_*` switch: default, effect, and the source file that reads it
 - [Contributing](../CONTRIBUTING.md) — Setup, where to focus, code style, how to submit
 - [Upstream README](upstream/README.md) — xboxrecomp's own README: background, library table, FAQ, community ports, test notes
-- [Changelog](../CHANGELOG.md) — Upstream xboxrecomp releases, v0.1.0 to today
+- [Releases](releases/README.md) — XRecomp releases: notes per version, how a release is made
+- [Changelog](../CHANGELOG.md) — Upstream xboxrecomp releases, v0.1.0 to today (not XRecomp's)
 - [Other consoles](../consoles/README.md) — GBA, PS1, N64: layout and rules of the early work
 
 ## Pipeline Guides
@@ -91,7 +92,6 @@ One per stage, in the order you run them.
 - [Android App Shell](android/app-shell.md) — Launcher, library, Controls, settings, in-game menu, dual screen, library check; each feature's device check
 - [Prepare on the Device](android/prepare.md) — The title pack, `pack.json`, the device log, resume after a kill, stale packs, self-healing, measurements
 - [The Toolkit's Tests on a Device](android/device-tests.md) — The device test bundle and how to read its result
-- [Checks for Alex — 2026-11-13](android/checks-2026-11-13.md) — Every device and Mac check of the night of 2026-11-12/13 in one order: Mac first, then the AYN Thor
 
 ## Xbox Formats
 

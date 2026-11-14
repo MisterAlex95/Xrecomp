@@ -30,7 +30,7 @@ jobs:
       - name: Fetch (without node)
         run: |
           rm -rf co build
-          git clone -q --depth 1 "https://x:${{ github.token }}@git.cf.adserver.fr/${{ github.repository }}.git" co
+          git clone -q --depth 1 "$(printf '%s' "${{ github.server_url }}" | sed "s#://#://x:${{ github.token }}@#")/${{ github.repository }}.git" co
           git -C co fetch -q --depth 1 origin "${{ github.sha }}"
           git -C co checkout -q "${{ github.sha }}"
       - name: Toolkit libraries (the gate)

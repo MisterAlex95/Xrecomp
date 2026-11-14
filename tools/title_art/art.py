@@ -1,7 +1,7 @@
 """
 The title image of an XBE: its « $$XTIMAGE » section, an XPR0 texture, decoded
 to RGBA. The Python twin of the launchers' decoders
-(android/app/src/main/java/fr/adserver/xboxrecomp/TitleArt.java,
+(android/app/src/main/java/fr/adserver/xrecomp/TitleArt.java,
 macos/Sources/XRecompCore/TitleArt.swift): same formats, same limits, same
 fallbacks. The format notes are in TitleArt.java and docs/formats/xbe.md.
 

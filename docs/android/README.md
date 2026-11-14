@@ -8,7 +8,7 @@ commits and docs); public bug reports go to this repository's issues.
 
 | Remote | URL |
 |---|---|
-| `origin` | `https://git.cf.adserver.fr/Alex/xboxrecomp-android.git` (this fork; maintainers push over SSH) |
+| `origin` | the maintainers' Gitea (this fork, where CI runs; maintainers push over SSH). It mirrors every push to the public [GitHub repository](https://github.com/MisterAlex95/Xrecomp). |
 | `upstream` | `https://github.com/sp00nznet/xboxrecomp` |
 
 | Branch | Role |
@@ -18,7 +18,8 @@ commits and docs); public bug reports go to this repository's issues.
 Upstream is followed through the `upstream` remote (`upstream/main`), merged into `main` by the script below.
 Until 2026-11-09 our work lived on `android` with `main` as a mirror; that branch is gone.
 
-We take from upstream but send nothing back: no PRs or issues on GitHub, every change stays here (Alex, 2026-11-09).
+We take from upstream but send nothing back: no PRs or issues on upstream's repository, every change stays in this fork
+(Alex, 2026-11-09).
 Keep generic fixes in their own commits anyway: they merge more easily with upstream changes.
 
 ## Following upstream

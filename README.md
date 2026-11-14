@@ -2,6 +2,8 @@
 
 <h1 align="center">XRecomp</h1>
 
+<p align="center"><a href="https://github.com/MisterAlex95/Xrecomp/actions/workflows/linux.yml"><img src="https://github.com/MisterAlex95/Xrecomp/actions/workflows/linux.yml/badge.svg" alt="Linux tests"></a> <a href="https://github.com/MisterAlex95/Xrecomp/releases/latest"><img src="https://img.shields.io/github/v/release/MisterAlex95/Xrecomp?label=release" alt="Latest release"></a></p>
+
 <p align="center"><b>Console games, statically recompiled to native code.</b><br>
 Original Xbox today; Game Boy Advance, PlayStation and Nintendo 64 on the way.<br>
 Play on Android, macOS, Linux or Windows. Prepare on the device itself or on a desktop.</p>
@@ -49,9 +51,10 @@ fork. A game runs on Linux arm64 before we debug it on Android.
 
 ### Android
 
-1. Install `xrecomp-<commit>.apk` from the release
-   [xrecomp-latest](https://git.cf.adserver.fr/Alex/xboxrecomp-android/releases/tag/xrecomp-latest). CI builds it from
-   `main`, and each build updates the previous one in place.
+1. Install `xrecomp-v<version>.apk` from the latest [release](https://github.com/MisterAlex95/Xrecomp/releases/latest). For the newest
+   code, the prerelease [xrecomp-latest](https://github.com/MisterAlex95/Xrecomp/releases/tag/xrecomp-latest) is rebuilt from every push to
+   `main`; both are signed with the same key, so either updates the other in place
+   ([releases](docs/releases/README.md)).
 2. In the app, add an extracted game folder or an ISO, then press **Prepare**. When it finishes, press **Play**.
 
 Some docs to go further:
@@ -158,14 +161,18 @@ by sp00nz and its contributors ([CONTRIBUTORS.md](CONTRIBUTORS.md)). This fork f
 (`tools/sync_upstream.sh`) and adds the Android host, the launchers, Prepare and the per-title work. Report problems
 with this fork here, not upstream.
 
+The `XBA-nn` references in commits, comments and docs are tickets of the maintainers' private tracker; the reason
+behind each change is in the commit message and the linked doc.
+
 - Upstream's README, with its background, library table, FAQ and the list of community ports:
   [docs/upstream/README.md](docs/upstream/README.md).
 - Upstream's release history: [CHANGELOG.md](CHANGELOG.md).
 
 ## Contributing, legal, licence
 
-- **Contributing:** [CONTRIBUTING.md](CONTRIBUTING.md) (read « This fork » first). Security issues:
-  [SECURITY.md](SECURITY.md).
+- **Contributing:** [CONTRIBUTING.md](CONTRIBUTING.md) (read « This fork » first). Bugs and ideas:
+  [issues](https://github.com/MisterAlex95/Xrecomp/issues). Security issues: [SECURITY.md](SECURITY.md). Releases:
+  [docs/releases](docs/releases/README.md).
 - **Legal:** XRecomp is not affiliated with or endorsed by Microsoft or any game publisher. « Xbox » is a trademark
   of Microsoft. Use it only with games you own. Issues or pull requests that contain game code, XBEs, disc images,
   game data or C generated from a game are deleted.

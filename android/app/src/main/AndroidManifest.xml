@@ -59,16 +59,16 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
             <intent-filter>
-                <action android:name="fr.adserver.xboxrecomp.CHOOSE_GAME" />
+                <action android:name="fr.adserver.xrecomp.CHOOSE_GAME" />
                 <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
             <intent-filter>
-                <action android:name="fr.adserver.xboxrecomp.SHOW_LAUNCHER" />
+                <action android:name="fr.adserver.xrecomp.SHOW_LAUNCHER" />
                 <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
             <!-- A game's pinned home-screen shortcut (TitleShortcut): its intent is explicit, the filter documents it. -->
             <intent-filter>
-                <action android:name="fr.adserver.xboxrecomp.PLAY_TITLE" />
+                <action android:name="fr.adserver.xrecomp.PLAY_TITLE" />
                 <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
         </activity>
@@ -132,7 +132,7 @@
             android:grantUriPermissions="true" />
 
         <!-- The pack handover (XBA-176): a game's own app asks for its pack through this activity, for a result; it
-             checks the caller (package fr.adserver.xboxrecomp.t<tid>, signed by the game apps' key), grants read
+             checks the caller (package fr.adserver.xrecomp.t<tid>, signed by the game apps' key), grants read
              access to the pack's files through PackProvider, and finishes without showing anything. -->
         <activity
             android:name=".PackHandoverActivity"
@@ -142,7 +142,7 @@
             android:excludeFromRecents="true"
             android:noHistory="true">
             <intent-filter>
-                <action android:name="fr.adserver.xboxrecomp.PACK_HANDOVER" />
+                <action android:name="fr.adserver.xrecomp.PACK_HANDOVER" />
                 <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
         </activity>

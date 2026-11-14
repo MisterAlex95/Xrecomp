@@ -191,12 +191,12 @@ androidComponents {
 }
 
 android {
-    namespace 'fr.adserver.xboxrecomp'
+    namespace 'fr.adserver.xrecomp'
     compileSdk 35
     ndkVersion '28.2.13676358'
 
     defaultConfig {
-        applicationId findProperty('xbaApplicationId') ?: 'fr.adserver.xboxrecomp.shell'
+        applicationId findProperty('xbaApplicationId') ?: 'fr.adserver.xrecomp.shell'
         minSdk 30                       // decision XBA-10
         targetSdk 35
         versionCode((findProperty('xbaVersionCode') ?: '1') as int)

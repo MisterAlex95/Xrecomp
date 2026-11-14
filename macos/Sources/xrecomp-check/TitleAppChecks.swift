@@ -21,7 +21,7 @@ func fakeApp(_ url: URL, info: [String: Any]) {
 }
 
 let mainInfo: [String: Any] = [
-    "CFBundleName": "XRecomp", "CFBundleDisplayName": "XRecomp", "CFBundleIdentifier": "fr.adserver.xboxrecomp.mac",
+    "CFBundleName": "XRecomp", "CFBundleDisplayName": "XRecomp", "CFBundleIdentifier": "fr.adserver.xrecomp.mac",
     "CFBundleExecutable": "XRecomp", "CFBundleIconFile": "AppIcon", "CFBundleIconName": "AppIcon",
     "CFBundleShortVersionString": "0.1.0", "LSMinimumSystemVersion": "14.0", "XBAToolkitPath": "/Users/you/tk",
 ]
@@ -33,9 +33,9 @@ func registerTitleAppChecks() {
         expectNil(TitleApp.normalizedTitleId("4D53000G"))
         expectNil(TitleApp.normalizedTitleId("4D5300041"))
         expectNil(TitleApp.normalizedTitleId(nil))
-        expectEq(TitleApp.bundleIdentifier(titleId: "4D530004"), "fr.adserver.xboxrecomp.mac.title.4d530004")
-        expectEq(TitleApp.bundleIdentifier(titleId: "4D/53 0004"), "fr.adserver.xboxrecomp.mac.title.4d530004")
-        expectEq(TitleApp.bundleIdentifier(titleId: "é"), "fr.adserver.xboxrecomp.mac.title.unknown")
+        expectEq(TitleApp.bundleIdentifier(titleId: "4D530004"), "fr.adserver.xrecomp.mac.title.4d530004")
+        expectEq(TitleApp.bundleIdentifier(titleId: "4D/53 0004"), "fr.adserver.xrecomp.mac.title.4d530004")
+        expectEq(TitleApp.bundleIdentifier(titleId: "é"), "fr.adserver.xrecomp.mac.title.unknown")
         expectEq(TitleApp.appName(title: "Burnout 3: Takedown"), "Burnout 3 - Takedown")
         expectEq(TitleApp.appName(title: "AC/DC:Live"), "AC-DC-Live")
         expectEq(TitleApp.appName(title: "  .hidden\tgame\n"), "hiddengame")
@@ -55,23 +55,23 @@ func registerTitleAppChecks() {
                                    mainAppPath: "/Applications/XRecomp.app", toolkitPath: nil)
         expectEq(p["CFBundleName"] as? String, "Sample - Game")
         expectEq(p["CFBundleDisplayName"] as? String, "Sample - Game")
-        expectEq(p["CFBundleIdentifier"] as? String, "fr.adserver.xboxrecomp.mac.title.4d530004")
+        expectEq(p["CFBundleIdentifier"] as? String, "fr.adserver.xrecomp.mac.title.4d530004")
         expectEq(p["CFBundleIconFile"] as? String, "TitleIcon")
         expect(p["CFBundleIconName"] == nil, "the asset-catalog icon name is dropped")
         expectEq(p[TitleApp.singleTitleKey] as? String, "4D530004")
-        expectEq(p[TitleApp.mainBundleIdKey] as? String, "fr.adserver.xboxrecomp.mac")
+        expectEq(p[TitleApp.mainBundleIdKey] as? String, "fr.adserver.xrecomp.mac")
         expectEq(p[TitleApp.mainAppPathKey] as? String, "/Applications/XRecomp.app")
         expectEq(p["XBAToolkitPath"] as? String, "/Users/you/tk", "kept")
         expectEq(p["CFBundleExecutable"] as? String, "XRecomp")
         expectEq(p["CFBundleShortVersionString"] as? String, "0.1.0")
         expectEq(p["LSMinimumSystemVersion"] as? String, "14.0")
-        expectEq(mainInfo["CFBundleIdentifier"] as? String, "fr.adserver.xboxrecomp.mac", "the input is untouched")
+        expectEq(mainInfo["CFBundleIdentifier"] as? String, "fr.adserver.xrecomp.mac", "the input is untouched")
         let q = TitleApp.infoPlist(mainInfo, title: "G", titleId: "4D530004", mainAppPath: nil, toolkitPath: "/src/tk")
         expectEq(q["XBAToolkitPath"] as? String, "/src/tk", "the toolkit in use wins")
         expect(q[TitleApp.mainAppPathKey] == nil)
         // From a game app's own plist: the main app's bundle ID is carried, not the game app's.
         let r = TitleApp.infoPlist(p, title: "Other", titleId: "41420001", mainAppPath: nil, toolkitPath: nil)
-        expectEq(r[TitleApp.mainBundleIdKey] as? String, "fr.adserver.xboxrecomp.mac")
+        expectEq(r[TitleApp.mainBundleIdKey] as? String, "fr.adserver.xrecomp.mac")
         expectEq(r[TitleApp.singleTitleKey] as? String, "41420001")
         expectNotNil(try? PropertyListSerialization.data(fromPropertyList: p, format: .xml, options: 0), "serialisable")
     }
@@ -183,7 +183,7 @@ func registerTitleAppChecks() {
                            toolkitPath: "/src/tk")
         let info = TitleApp.readInfo(dest) ?? [:]
         expectEq(info["CFBundleName"] as? String, "Sample - Game")
-        expectEq(info["CFBundleIdentifier"] as? String, "fr.adserver.xboxrecomp.mac.title.4d530004")
+        expectEq(info["CFBundleIdentifier"] as? String, "fr.adserver.xrecomp.mac.title.4d530004")
         expectEq(info[TitleApp.singleTitleKey] as? String, "4D530004")
         expectEq(info[TitleApp.mainAppPathKey] as? String, src.standardizedFileURL.path)
         expectEq(info["XBAToolkitPath"] as? String, "/src/tk")
