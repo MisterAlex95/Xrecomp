@@ -1,0 +1,64 @@
+# paraLLEl-RDP (vendored)
+
+The Nintendo 64 RDP on Vulkan compute, by Themaister: an LLE renderer that aims to match the angrylion reference
+renderer bit for bit. Upstream's own README is `README.upstream.md`. The N64 runtime uses it as its GPU RDP
+(`consoles/n64/runtime/n64_rdp_vk.cpp`, Plane XBA-173). It is selected at run time with `RECOMP_N64_RDP`
+(`consoles/README.md`), and the software RDP `n64_rdp.c` is always the fallback.
+
+## Source
+
+- <https://github.com/Themaister/parallel-rdp-standalone> at `388d70f5835b352d841d9d9e5a08c5de01470f41`
+  (2024-11-09). This is upstream's tree for embedding in emulators: paraLLEl-RDP plus the parts of Granite it needs,
+  volk, the Vulkan headers and the SPIR-V shaders precompiled into `parallel-rdp/shaders/slangmosh.hpp`. It was
+  generated from Themaister/parallel-rdp `1cecd042b2619bc505c12bfdc713808386f2b54d` (`COMMIT`).
+- Downloaded as a tarball from codeload.github.com.
+
+## Licences (no GPL code)
+
+| Directory | Licence | Text |
+|---|---|---|
+| `parallel-rdp/` | MIT, Copyright (c) 2020 Themaister | `LICENSE` |
+| `vulkan/`, `util/` (Granite) | MIT, Copyright (c) 2017-2023 Hans-Kristian Arntzen | each file's header, `vulkan/LICENSE.Granite` |
+| `volk/` | MIT, Copyright (c) 2018-2023 Arseny Kapoulkine | end of `volk/volk.h` |
+| `vulkan-headers/` (1.3.278) | Apache-2.0, The Khronos Group | `vulkan-headers/LICENSE.md`, `vulkan-headers/LICENSE.Apache-2.0.txt` |
+
+paraLLEl-RDP studies angrylion (GPL) but contains none of its code (upstream README, « Disclaimer »). Its conformance
+suite and the angrylion submodule are not part of the standalone tree and are not vendored.
+
+## Trimmed
+
+The following were removed from the standalone tree:
+
+- `vulkan/wsi.*`, `vulkan/device_fossilize.*` and `vulkan/renderdoc_capture.cpp`: not compiled (upstream's
+  `config.mk` leaves them out too).
+- The platform headers we don't use from `vulkan-headers/include/vulkan/`. What remains: `vk_platform.h`,
+  `vulkan.h`, `vulkan_core.h`, `vulkan_android.h` and `vk_video/`.
+- `config.mk`, replaced by `CMakeLists.txt` (one static library, `parallel_rdp`).
+
+## Patches (ours, marked `xboxrecomp-android patch`)
+
+Our RDRAM is the core's byte array in the N64's byte order (`n64_devices.h`). paraLLEl-RDP expects 32-bit host
+words. With `PARALLEL_RDP_HOST_RDRAM_BSWAP32` (set by `CMakeLists.txt`):
+
+- `parallel-rdp/rdp_common.hpp`: `host_rdram_copy_to_gpu`, a copy that byte-swaps each 32-bit word.
+- `parallel-rdp/rdp_renderer.cpp`: the three host-to-GPU page copies of the incoherent path (`memcpy` into the
+  mapped GPU RDRAM or the staging buffer) use it.
+- `parallel-rdp/rdp_device.cpp`: `masked_memcpy` swaps the GPU's words and write masks on the way back. Imported
+  host memory (`VK_EXT_external_memory_host`) is never used: the shaders would read our bytes in the wrong order.
+
+The shaders are unchanged, so the precompiled SPIR-V is upstream's.
+
+## Symbols
+
+`CMakeLists.txt` generates `prdp_volk_rename.h` from `volk/volk.h` and forces it into every file of the library and
+of its users. It renames volk's globals (`vkCreateInstance` & co., `volkInitialize`, ...) to `prdp_*`. Another volk
+can then live in the same `libmain.so`, such as the LSFG bridge's (`src/framegen/lsfg_vulkan.cmake`). Vulkan is
+dlopened at run time (`libvulkan.so.1`, or `libvulkan.so` on Android), never linked.
+
+## Updating
+
+1. Take a newer `parallel-rdp-standalone` commit.
+2. Copy the same directories and trim as above.
+3. Re-apply the patches (grep `xboxrecomp-android patch`).
+4. Run `n64_rdp_test` with `RECOMP_N64_RDP=vulkan`, and `n64_rdp_test --compare`
+   (`consoles/n64/tests/CMakeLists.txt`).

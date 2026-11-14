@@ -159,6 +159,30 @@ libchdr — vendored for PlayStation .chd disc images
                      (deps/zstd-1.5.7/LICENSE)
 
 
+paraLLEl-RDP — vendored for the Nintendo 64 Vulkan RDP
+------------------------------------------------------
+
+  third_party/parallel-rdp: https://github.com/Themaister/parallel-rdp-standalone
+  commit 388d70f5835b352d841d9d9e5a08c5de01470f41 (2024-11-09; paraLLEl-RDP
+  1cecd042), trimmed, with a byte-order patch marked in the sources
+  (third_party/parallel-rdp/README.md); built as the static library
+  parallel_rdp when XBR_N64_RDP_VULKAN is ON (on by default for Android:
+  libmain.so carries it). Each part keeps its own licence text:
+
+    paraLLEl-RDP     MIT, Copyright (c) 2020 Themaister (LICENSE)
+    Granite          MIT, Copyright (c) 2017-2023 Hans-Kristian Arntzen
+                     (vulkan/, util/: each file's header)
+    volk             MIT, Copyright (c) 2018-2023 Arseny Kapoulkine
+                     (end of volk/volk.h)
+    Vulkan-Headers   Apache License 2.0, The Khronos Group Inc. (1.3.278,
+                     vulkan-headers/LICENSE.md)
+
+  Full texts for the APK: LICENSES/MIT-paraLLEl-RDP.txt and
+  LICENSES/Apache-2.0-Vulkan-Headers.txt. paraLLEl-RDP was written by
+  studying angrylion-rdp-plus (GPL) and contains none of its code (its
+  README); no GPL code is linked.
+
+
 PlayStation devices — references (no code taken)
 ------------------------------------------------
 
