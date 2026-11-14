@@ -1,12 +1,15 @@
 /* RSP micro benchmark (N-5, XBA-173): RSP instructions per second on a vector-heavy microcode loop shaped like a
  * vertex transform / audio mix inner loop (double-precision multiply-accumulate chains, clamps, clips, a select,
  * reciprocals, quad loads and stores, two scalar ops and a jump), against the RSP's 62.5 MHz.
- *   n64_rsp_bench [seconds]      (default 2) */
+ *   n64_rsp_bench [seconds]      (default 2)
+ *   n64_rsp_bench -n COUNT       exactly COUNT RSP instructions, for instruction counts under valgrind / qemu
+ * Both print a hash of DMEM after the run (the loop's stores), equal on every host for the same COUNT. */
 #define _POSIX_C_SOURCE 199309L
 #include "n64_devices.h"
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <time.h>
 
 #include "homebrew/common/rsp_asm.h"
@@ -26,7 +29,12 @@ static double now(void)
 
 int main(int argc, char **argv)
 {
-    double seconds = argc > 1 ? atof(argv[1]) : 2.0;
+    double seconds = 2.0;
+    uint64_t count = 0; /* 0: run for `seconds` */
+    if (argc > 2 && strcmp(argv[1], "-n") == 0)
+        count = strtoull(argv[2], NULL, 0);
+    else if (argc > 1)
+        seconds = atof(argv[1]);
     static uint8_t rdram[1 << 20];
     n64_rcp_bus bus = {rdram, sizeof rdram, NULL, NULL, NULL, NULL};
     n64_rsp *s = n64_rsp_create(bus);
@@ -74,13 +82,25 @@ int main(int argc, char **argv)
 
     uint64_t total = 0;
     double t0 = now(), t;
-    do {
-        total += n64_rsp_run(s, 1000000);
+    if (count) {
+        while (total < count) {
+            uint64_t left = count - total;
+            total += n64_rsp_run(s, left > 1000000 ? 1000000 : (uint32_t)left);
+        }
         t = now();
-    } while (t - t0 < seconds);
+    } else {
+        do {
+            total += n64_rsp_run(s, 1000000);
+            t = now();
+        } while (t - t0 < seconds);
+    }
     double ips = (double)total / (t - t0);
     printf("n64 rsp bench: %.1f M RSP instructions/s (%.2fx the RSP's 62.5 MHz), %llu instructions in %.2f s\n",
            ips / 1e6, ips / 62.5e6, (unsigned long long)total, t - t0);
+    uint32_t h = 2166136261u; /* FNV-1a over DMEM */
+    for (unsigned i = 0; i < 0x1000; i++)
+        h = (h ^ m[i]) * 16777619u;
+    printf("dmem hash %08x\n", h);
     n64_rsp_destroy(s);
     return 0;
 }

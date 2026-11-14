@@ -14,8 +14,9 @@
  * 15..0 (uint16), so every lane operation is 32-bit,
  * VCO (carry / not-equal), VCC (compare / clip), VCE, and the divide unit (DIVIN / DIVOUT / DIVDP) with the
  * reciprocal and inverse square root ROMs computed at create time from their defining formulas. Computational ops are
- * branchless 8-lane loops over 16 / 32-bit values the compiler vectorises (SSE2, NEON; the same C on every host,
- * so results are identical).
+ * branchless 8-lane loops over 16 / 32-bit values the compiler vectorises; on arm64 the hot ones (multiply-accumulate
+ * family, add / sub, compares, clips, merge, logic, divide moves), the element selectors and the aligned quad / double
+ * loads and stores are NEON intrinsics instead (vu_op_neon), bit-identical to the loops.
  *
  * Timing: one RSP cycle per instruction (no dual issue, no pipeline stalls); SP DMA completes instantly (DMA_BUSY and
  * DMA_FULL always read 0). */
@@ -23,6 +24,15 @@
 
 #include <stdlib.h>
 #include <string.h>
+
+/* arm64: the vector unit's hot ops and the quad loads / stores as NEON intrinsics (XBA-173), the portable C
+ * everywhere else and for the remaining ops. -DN64_RSP_NO_NEON forces the portable code (to compare). */
+#if defined(__aarch64__) && defined(__ARM_NEON) && !defined(N64_RSP_NO_NEON)
+#define RSP_NEON 1
+#include <arm_neon.h>
+#else
+#define RSP_NEON 0
+#endif
 
 #if defined(__GNUC__) || defined(__clang__)
 #define RSP_NOINLINE __attribute__((noinline))
@@ -136,12 +146,6 @@ static inline void vsetb(int16_t *v, unsigned b, uint8_t x)
 
 #define DM(a) (s->mem[(a) & 0xFFF])
 
-static const uint8_t sel_tab[16][8] = {
-    {0, 1, 2, 3, 4, 5, 6, 7}, {0, 1, 2, 3, 4, 5, 6, 7}, {0, 0, 2, 2, 4, 4, 6, 6}, {1, 1, 3, 3, 5, 5, 7, 7},
-    {0, 0, 0, 0, 4, 4, 4, 4}, {1, 1, 1, 1, 5, 5, 5, 5}, {2, 2, 2, 2, 6, 6, 6, 6}, {3, 3, 3, 3, 7, 7, 7, 7},
-    {0, 0, 0, 0, 0, 0, 0, 0}, {1, 1, 1, 1, 1, 1, 1, 1}, {2, 2, 2, 2, 2, 2, 2, 2}, {3, 3, 3, 3, 3, 3, 3, 3},
-    {4, 4, 4, 4, 4, 4, 4, 4}, {5, 5, 5, 5, 5, 5, 5, 5}, {6, 6, 6, 6, 6, 6, 6, 6}, {7, 7, 7, 7, 7, 7, 7, 7},
-};
 
 /* ---- Lifecycle ---------------------------------------------------------------------------------------------------- */
 
@@ -376,10 +380,326 @@ static void vu_divide(n64_rsp *s, int rsq, int32_t input, int16_t *out_lane)
         accl[i] = (uint16_t)lo_;                                                                                       \
     } while (0)
 
+#if RSP_NEON
+/* ---- Vector unit on NEON (arm64) ---------------------------------------------------------------------------------- */
+
+/* The same results as the portable loops of vu_op, bit for bit (test_rsp.c's ares-checked groups run on both), as
+ * explicit intrinsics so they do not depend on what the compiler manages to vectorise: one 8 x 16-bit register per
+ * operand, the accumulator's bits 47..16 as two 4 x 32-bit halves. Flags are 0 / 1 per lane in memory, masks here. */
+
+/* Byte shuffles for the 16 element selectors (0, 1: the vector; 2, 3: one element of each pair; 4..7: of each half;
+ * 8..15: one element everywhere), element j being bytes 2j, 2j + 1: one table lookup for any selector, no branch. */
+#define SB(x) 2 * (x), 2 * (x) + 1
+#define SB4(a, b, c, d) SB(a), SB(b), SB(c), SB(d)
+static const uint8_t sel_bytes[16][16] = {
+    {SB4(0, 1, 2, 3), SB4(4, 5, 6, 7)}, {SB4(0, 1, 2, 3), SB4(4, 5, 6, 7)}, {SB4(0, 0, 2, 2), SB4(4, 4, 6, 6)},
+    {SB4(1, 1, 3, 3), SB4(5, 5, 7, 7)}, {SB4(0, 0, 0, 0), SB4(4, 4, 4, 4)}, {SB4(1, 1, 1, 1), SB4(5, 5, 5, 5)},
+    {SB4(2, 2, 2, 2), SB4(6, 6, 6, 6)}, {SB4(3, 3, 3, 3), SB4(7, 7, 7, 7)}, {SB4(0, 0, 0, 0), SB4(0, 0, 0, 0)},
+    {SB4(1, 1, 1, 1), SB4(1, 1, 1, 1)}, {SB4(2, 2, 2, 2), SB4(2, 2, 2, 2)}, {SB4(3, 3, 3, 3), SB4(3, 3, 3, 3)},
+    {SB4(4, 4, 4, 4), SB4(4, 4, 4, 4)}, {SB4(5, 5, 5, 5), SB4(5, 5, 5, 5)}, {SB4(6, 6, 6, 6), SB4(6, 6, 6, 6)},
+    {SB4(7, 7, 7, 7), SB4(7, 7, 7, 7)},
+};
+#undef SB4
+#undef SB
+
+static inline int16x8_t nv_sel(const int16_t *tv, unsigned e)
+{
+    return vreinterpretq_s16_u8(vqtbl1q_u8(vreinterpretq_u8_s16(vld1q_s16(tv)), vld1q_u8(sel_bytes[e])));
+}
+
+static inline uint16x8_t nv_mask(const uint16_t *f) /* 0 / 1 flags -> 0 / all-ones */
+{
+    return vreinterpretq_u16_s16(vnegq_s16(vreinterpretq_s16_u16(vld1q_u16(f))));
+}
+
+static inline void nv_flag(uint16_t *f, uint16x8_t m) /* mask -> 0 / 1 flags */
+{
+    vst1q_u16(f, vshrq_n_u16(m, 15));
+}
+
+static inline int16x8_t nv_sclamp(int32x4_t h0, int32x4_t h1)
+{
+    return vcombine_s16(vqmovn_s32(h0), vqmovn_s32(h1));
+}
+
+/* clamp_u: 0 below 0, 0xFFFF above 0x7FFF. */
+static inline int16x8_t nv_clamp_u(int32x4_t h0, int32x4_t h1)
+{
+    int16x8_t x = vreinterpretq_s16_u16(vcombine_u16(vqmovun_s32(h0), vqmovun_s32(h1)));
+    return vorrq_s16(x, vshrq_n_s16(x, 15));
+}
+
+/* clamp_lo: acc[15:0], 0 when acc[47:16] < -32768, 0xFFFF when it is > 32767. */
+static inline int16x8_t nv_clamp_lo(int32x4_t h0, int32x4_t h1, uint16x8_t lo)
+{
+    uint16x8_t lt = vuzp1q_u16(vreinterpretq_u16_u32(vcltq_s32(h0, vdupq_n_s32(-32768))),
+                               vreinterpretq_u16_u32(vcltq_s32(h1, vdupq_n_s32(-32768))));
+    uint16x8_t gt = vuzp1q_u16(vreinterpretq_u16_u32(vcgtq_s32(h0, vdupq_n_s32(32767))),
+                               vreinterpretq_u16_u32(vcgtq_s32(h1, vdupq_n_s32(32767))));
+    return vreinterpretq_s16_u16(vbicq_u16(vorrq_u16(lo, gt), lt));
+}
+
+/* sa * ub (signed x unsigned 16-bit) as 32-bit products, lanes 0..3 and 4..7. */
+static inline int32x4_t nv_mulsu_lo(int16x8_t sa, int16x8_t ub)
+{
+    return vmulq_s32(vmovl_s16(vget_low_s16(sa)),
+                     vreinterpretq_s32_u32(vmovl_u16(vget_low_u16(vreinterpretq_u16_s16(ub)))));
+}
+
+static inline int32x4_t nv_mulsu_hi(int16x8_t sa, int16x8_t ub)
+{
+    return vmulq_s32(vmovl_high_s16(sa), vreinterpretq_s32_u32(vmovl_high_u16(vreinterpretq_u16_s16(ub))));
+}
+
+/* acc += addend, given as its low 16 bits l16 and its bits 47..16 (h0, h1): ACC_ADD on 8 lanes. */
+#define NV_ACC_ADD(l16, h0, h1)                                                                                        \
+    do {                                                                                                               \
+        uint32x4_t s0_ = vaddl_u16(vget_low_u16(accl), vget_low_u16(l16));                                             \
+        uint32x4_t s1_ = vaddl_high_u16(accl, l16);                                                                    \
+        acch0 = vaddq_s32(acch0, vaddq_s32(vreinterpretq_s32_u32(vshrq_n_u32(s0_, 16)), (h0)));                        \
+        acch1 = vaddq_s32(acch1, vaddq_s32(vreinterpretq_s32_u32(vshrq_n_u32(s1_, 16)), (h1)));                        \
+        accl = vaddq_u16(accl, l16);                                                                                   \
+    } while (0)
+
+#define NV_ACC_LOAD()                                                                                                  \
+    do {                                                                                                               \
+        acch0 = vld1q_s32(s->acch);                                                                                    \
+        acch1 = vld1q_s32(s->acch + 4);                                                                                \
+        accl = vld1q_u16(s->accl);                                                                                     \
+    } while (0)
+
+/* The hot computational ops; returns 0 for the others, which the portable code runs. */
+static inline int vu_op_neon(n64_rsp *s, uint32_t op, unsigned e, unsigned vt, unsigned vs, unsigned vd)
+{
+    int16x8_t a = vld1q_s16(s->vr[vs]), t = nv_sel(s->vr[vt], e), r;
+    int32x4_t acch0, acch1;
+    uint16x8_t accl, z = vdupq_n_u16(0);
+    switch (op & 63) {
+    case 0x00: /* VMULF */
+    case 0x01: /* VMULU */
+    {
+        int32x4_t p0 = vmull_s16(vget_low_s16(a), vget_low_s16(t)), p1 = vmull_high_s16(a, t);
+        acch0 = vrshrq_n_s32(p0, 15); /* (p + 0x4000) >> 15 */
+        acch1 = vrshrq_n_s32(p1, 15);
+        accl = vaddq_u16(vshlq_n_u16(vreinterpretq_u16_s16(vmulq_s16(a, t)), 1), vdupq_n_u16(0x8000));
+        r = (op & 1) ? nv_clamp_u(acch0, acch1) : vqrdmulhq_s16(a, t); /* sat((2ab + 0x8000) >> 16) = sclamp(hm) */
+        break;
+    }
+    case 0x04: /* VMUDL */
+    {
+        uint16x8_t ua = vreinterpretq_u16_s16(a), ut = vreinterpretq_u16_s16(t);
+        uint32x4_t p0 = vmull_u16(vget_low_u16(ua), vget_low_u16(ut)), p1 = vmull_high_u16(ua, ut);
+        accl = vuzp2q_u16(vreinterpretq_u16_u32(p0), vreinterpretq_u16_u32(p1)); /* the high halves */
+        acch0 = acch1 = vdupq_n_s32(0);
+        r = vreinterpretq_s16_u16(accl);
+        break;
+    }
+    case 0x05: /* VMUDM: a * ub */
+    case 0x06: /* VMUDN: ua * b */
+    {
+        int16x8_t sx = (op & 1) ? a : t, ux = (op & 1) ? t : a;
+        int32x4_t p0 = nv_mulsu_lo(sx, ux), p1 = nv_mulsu_hi(sx, ux);
+        acch0 = vshrq_n_s32(p0, 16);
+        acch1 = vshrq_n_s32(p1, 16);
+        accl = vreinterpretq_u16_s16(vmulq_s16(a, t));
+        r = (op & 1) ? vuzp2q_s16(vreinterpretq_s16_s32(p0), vreinterpretq_s16_s32(p1)) : vreinterpretq_s16_u16(accl);
+        break;
+    }
+    case 0x07: /* VMUDH */
+        acch0 = vmull_s16(vget_low_s16(a), vget_low_s16(t));
+        acch1 = vmull_high_s16(a, t);
+        accl = z;
+        r = nv_sclamp(acch0, acch1);
+        break;
+    case 0x08: /* VMACF */
+    case 0x09: /* VMACU */
+    {
+        int32x4_t p0 = vmull_s16(vget_low_s16(a), vget_low_s16(t)), p1 = vmull_high_s16(a, t);
+        uint16x8_t l = vshlq_n_u16(vreinterpretq_u16_s16(vmulq_s16(a, t)), 1);
+        NV_ACC_LOAD();
+        NV_ACC_ADD(l, vshrq_n_s32(p0, 15), vshrq_n_s32(p1, 15));
+        r = (op & 1) ? nv_clamp_u(acch0, acch1) : nv_sclamp(acch0, acch1);
+        break;
+    }
+    case 0x0C: /* VMADL */
+    {
+        uint16x8_t ua = vreinterpretq_u16_s16(a), ut = vreinterpretq_u16_s16(t);
+        uint32x4_t p0 = vmull_u16(vget_low_u16(ua), vget_low_u16(ut)), p1 = vmull_high_u16(ua, ut);
+        uint16x8_t l = vuzp2q_u16(vreinterpretq_u16_u32(p0), vreinterpretq_u16_u32(p1));
+        NV_ACC_LOAD();
+        NV_ACC_ADD(l, vdupq_n_s32(0), vdupq_n_s32(0));
+        r = nv_clamp_lo(acch0, acch1, accl);
+        break;
+    }
+    case 0x0D: /* VMADM: a * ub */
+    case 0x0E: /* VMADN: ua * b */
+    {
+        int16x8_t sx = (op & 1) ? a : t, ux = (op & 1) ? t : a;
+        int32x4_t p0 = nv_mulsu_lo(sx, ux), p1 = nv_mulsu_hi(sx, ux);
+        uint16x8_t l = vreinterpretq_u16_s16(vmulq_s16(a, t));
+        NV_ACC_LOAD();
+        NV_ACC_ADD(l, vshrq_n_s32(p0, 16), vshrq_n_s32(p1, 16));
+        r = (op & 1) ? nv_sclamp(acch0, acch1) : nv_clamp_lo(acch0, acch1, accl);
+        break;
+    }
+    case 0x0F: /* VMADH: ACCL unchanged */
+        acch0 = vaddq_s32(vld1q_s32(s->acch), vmull_s16(vget_low_s16(a), vget_low_s16(t)));
+        acch1 = vaddq_s32(vld1q_s32(s->acch + 4), vmull_high_s16(a, t));
+        vst1q_s32(s->acch, acch0);
+        vst1q_s32(s->acch + 4, acch1);
+        vst1q_s16(s->vr[vd], nv_sclamp(acch0, acch1));
+        return 1;
+    case 0x10: /* VADD */
+    case 0x11: /* VSUB */
+    {
+        int16x8_t c = vreinterpretq_s16_u16(vld1q_u16(s->vcol));
+        int32x4_t v0, v1;
+        if (op & 1) {
+            v0 = vsubw_s16(vsubl_s16(vget_low_s16(a), vget_low_s16(t)), vget_low_s16(c));
+            v1 = vsubw_high_s16(vsubl_high_s16(a, t), c);
+        } else {
+            v0 = vaddw_s16(vaddl_s16(vget_low_s16(a), vget_low_s16(t)), vget_low_s16(c));
+            v1 = vaddw_high_s16(vaddl_high_s16(a, t), c);
+        }
+        vst1q_u16(s->accl, vuzp1q_u16(vreinterpretq_u16_s32(v0), vreinterpretq_u16_s32(v1)));
+        vst1q_u16(s->vcol, z);
+        vst1q_u16(s->vcoh, z);
+        vst1q_s16(s->vr[vd], nv_sclamp(v0, v1));
+        return 1;
+    }
+    case 0x14: /* VADDC */
+    {
+        uint16x8_t ua = vreinterpretq_u16_s16(a), sum = vaddq_u16(ua, vreinterpretq_u16_s16(t));
+        vst1q_u16(s->accl, sum);
+        nv_flag(s->vcol, vcltq_u16(sum, ua));
+        vst1q_u16(s->vcoh, z);
+        vst1q_s16(s->vr[vd], vreinterpretq_s16_u16(sum));
+        return 1;
+    }
+    case 0x15: /* VSUBC */
+    {
+        uint16x8_t ua = vreinterpretq_u16_s16(a), ut = vreinterpretq_u16_s16(t), d = vsubq_u16(ua, ut);
+        vst1q_u16(s->accl, d);
+        nv_flag(s->vcol, vcltq_u16(ua, ut));
+        nv_flag(s->vcoh, vmvnq_u16(vceqq_u16(ua, ut)));
+        vst1q_s16(s->vr[vd], vreinterpretq_s16_u16(d));
+        return 1;
+    }
+    case 0x20: /* VLT */
+    case 0x21: /* VEQ */
+    case 0x22: /* VNE */
+    case 0x23: /* VGE */
+    {
+        uint16x8_t eq = vceqq_s16(a, t), coh = nv_mask(s->vcoh), col = nv_mask(s->vcol), c;
+        switch (op & 3) {
+        case 0: c = vorrq_u16(vcltq_s16(a, t), vandq_u16(eq, vandq_u16(coh, col))); break;
+        case 1: c = vbicq_u16(eq, coh); break;
+        case 2: c = vorrq_u16(vmvnq_u16(eq), coh); break;
+        default: c = vorrq_u16(vcgtq_s16(a, t), vbicq_u16(eq, vandq_u16(coh, col))); break;
+        }
+        r = vbslq_s16(c, a, t);
+        vst1q_u16(s->accl, vreinterpretq_u16_s16(r));
+        nv_flag(s->vccl, c);
+        vst1q_u16(s->vcch, z);
+        vst1q_u16(s->vcol, z);
+        vst1q_u16(s->vcoh, z);
+        vst1q_s16(s->vr[vd], r);
+        return 1;
+    }
+    case 0x24: /* VCL */
+    {
+        uint16x8_t ua = vreinterpretq_u16_s16(a), ut = vreinterpretq_u16_s16(t), sum = vaddq_u16(ua, ut);
+        uint16x8_t zero = vceqzq_u16(sum), nocy = vcgeq_u16(sum, ua);
+        uint16x8_t carry = nv_mask(s->vcol), ne = nv_mask(s->vcoh), ce = nv_mask(s->vce);
+        uint16x8_t lo_new = vbslq_u16(ce, vorrq_u16(zero, nocy), vandq_u16(zero, nocy));
+        uint16x8_t hi_new = vcgeq_u16(ua, ut);
+        uint16x8_t ccl = vbslq_u16(vbicq_u16(carry, ne), lo_new, nv_mask(s->vccl));
+        uint16x8_t cch = vbslq_u16(vorrq_u16(carry, ne), nv_mask(s->vcch), hi_new);
+        uint16x8_t sel = vbslq_u16(carry, ccl, cch);
+        uint16x8_t other = vbslq_u16(carry, vreinterpretq_u16_s16(vnegq_s16(t)), ut);
+        uint16x8_t lo = vbslq_u16(sel, other, ua);
+        nv_flag(s->vccl, ccl);
+        nv_flag(s->vcch, cch);
+        vst1q_u16(s->accl, lo);
+        vst1q_u16(s->vcol, z);
+        vst1q_u16(s->vcoh, z);
+        vst1q_u16(s->vce, z);
+        vst1q_s16(s->vr[vd], vreinterpretq_s16_u16(lo));
+        return 1;
+    }
+    case 0x25: /* VCH: a + b (signs differ) or a - b (same signs) never overflows 16 bits */
+    {
+        uint16x8_t dm = vreinterpretq_u16_s16(vshrq_n_s16(veorq_s16(a, t), 15));
+        uint16x8_t tnm = vreinterpretq_u16_s16(vshrq_n_s16(t, 15));
+        int16x8_t v = vbslq_s16(dm, vaddq_s16(a, t), vsubq_s16(a, t));
+        uint16x8_t lem = vclezq_s16(v), gem = vcgezq_s16(v);
+        int16x8_t lo = vbslq_s16(vbslq_u16(dm, lem, gem), vbslq_s16(dm, vnegq_s16(t), t), a);
+        uint16x8_t ne = vbicq_u16(vmvnq_u16(vceqzq_s16(v)), vceqq_s16(a, vmvnq_s16(t)));
+        nv_flag(s->vccl, vbslq_u16(dm, lem, tnm));
+        nv_flag(s->vcch, vbslq_u16(dm, tnm, gem));
+        nv_flag(s->vcol, dm);
+        nv_flag(s->vcoh, ne);
+        nv_flag(s->vce, vandq_u16(dm, vceqq_s16(v, vdupq_n_s16(-1))));
+        vst1q_u16(s->accl, vreinterpretq_u16_s16(lo));
+        vst1q_s16(s->vr[vd], lo);
+        return 1;
+    }
+    case 0x27: /* VMRG */
+        r = vbslq_s16(nv_mask(s->vccl), a, t);
+        vst1q_u16(s->vcol, z);
+        vst1q_u16(s->vcoh, z);
+        goto logic;
+    case 0x28: r = vandq_s16(a, t); goto logic;            /* VAND */
+    case 0x29: r = vmvnq_s16(vandq_s16(a, t)); goto logic; /* VNAND */
+    case 0x2A: r = vorrq_s16(a, t); goto logic;            /* VOR */
+    case 0x2B: r = vmvnq_s16(vorrq_s16(a, t)); goto logic; /* VNOR */
+    case 0x2C: r = veorq_s16(a, t); goto logic;            /* VXOR */
+    case 0x2D: r = vmvnq_s16(veorq_s16(a, t)); goto logic; /* VNXOR */
+    logic:
+        vst1q_u16(s->accl, vreinterpretq_u16_s16(r));
+        vst1q_s16(s->vr[vd], r);
+        return 1;
+    case 0x30: /* VRCP */
+    case 0x31: /* VRCPL */
+    case 0x34: /* VRSQ */
+    case 0x35: /* VRSQL */
+    {
+        const int16_t *tv = s->vr[vt];
+        int32_t input = (op & 1) && s->divdp ? (int32_t)((uint32_t)(uint16_t)s->divin << 16 | (uint16_t)tv[e & 7])
+                                             : (int32_t)tv[e & 7];
+        vst1q_u16(s->accl, vreinterpretq_u16_s16(t));
+        vu_divide(s, (op & 4) != 0, input, &s->vr[vd][vs & 7]);
+        return 1;
+    }
+    case 0x32: /* VRCPH */
+    case 0x36: /* VRSQH */
+        vst1q_u16(s->accl, vreinterpretq_u16_s16(t));
+        s->divdp = 1;
+        s->divin = s->vr[vt][e & 7];
+        s->vr[vd][vs & 7] = s->divout;
+        return 1;
+    case 0x37: /* VNOP */
+    case 0x3F: /* VNULL */
+        return 1;
+    default:
+        return 0;
+    }
+    vst1q_s32(s->acch, acch0);
+    vst1q_s32(s->acch + 4, acch1);
+    vst1q_u16(s->accl, accl);
+    vst1q_s16(s->vr[vd], r);
+    return 1;
+}
+#endif /* RSP_NEON */
+
 /* Kept out of the run loop: the scalar path stays small and the vector loops get registers of their own. */
 static RSP_NOINLINE void vu_op(n64_rsp *s, uint32_t op)
 {
     unsigned e = (op >> 21) & 15, vt = (op >> 16) & 31, vs = (op >> 11) & 31, vd = (op >> 6) & 31;
+#if RSP_NEON
+    if (vu_op_neon(s, op, e, vt, vs, vd))
+        return;
+#endif
     const int16_t *tv = s->vr[vt];
     int16_t a[8], t[8], r[8];
     int32_t *acch = s->acch;
@@ -392,10 +712,15 @@ static RSP_NOINLINE void vu_op(n64_rsp *s, uint32_t op)
         int16_t x = tv[e & 7];
         for (int i = 0; i < 8; i++)
             t[i] = x;
-    } else {
-        const uint8_t *sl = sel_tab[e];
-        for (int i = 0; i < 8; i++)
-            t[i] = tv[sl[i]];
+    } else if (e >= 4) { /* 4..7: element e - 4 of each half */
+        int16_t x0 = tv[e - 4], x1 = tv[e];
+        for (int i = 0; i < 4; i++) {
+            t[i] = x0;
+            t[i + 4] = x1;
+        }
+    } else { /* 2, 3: element e - 2 of each pair */
+        for (int i = 0; i < 8; i += 2)
+            t[i] = t[i + 1] = tv[i + (e & 1)];
     }
 
     switch (op & 63) {
@@ -750,6 +1075,47 @@ static inline void vr_pack(const uint8_t *b, int16_t *v)
         v[i] = (int16_t)(uint16_t)(b[2 * i] << 8 | b[2 * i + 1]);
 }
 
+/* Four or eight lanes from / to big-endian halfwords (fixed counts, so the portable loops vectorise too). */
+static inline void ld_be16x8(int16_t *v, const uint8_t *p)
+{
+#if RSP_NEON
+    vst1q_s16(v, vreinterpretq_s16_u8(vrev16q_u8(vld1q_u8(p))));
+#else
+    for (int k = 0; k < 8; k++)
+        v[k] = (int16_t)n64_be16(p + 2 * k);
+#endif
+}
+
+static inline void ld_be16x4(int16_t *v, const uint8_t *p)
+{
+#if RSP_NEON
+    vst1_s16(v, vreinterpret_s16_u8(vrev16_u8(vld1_u8(p))));
+#else
+    for (int k = 0; k < 4; k++)
+        v[k] = (int16_t)n64_be16(p + 2 * k);
+#endif
+}
+
+static inline void st_be16x8(uint8_t *p, const int16_t *v)
+{
+#if RSP_NEON
+    vst1q_u8(p, vrev16q_u8(vreinterpretq_u8_s16(vld1q_s16(v))));
+#else
+    for (int k = 0; k < 8; k++)
+        n64_wbe16(p + 2 * k, (uint16_t)v[k]);
+#endif
+}
+
+static inline void st_be16x4(uint8_t *p, const int16_t *v)
+{
+#if RSP_NEON
+    vst1_u8(p, vrev16_u8(vreinterpret_u8_s16(vld1_s16(v))));
+#else
+    for (int k = 0; k < 4; k++)
+        n64_wbe16(p + 2 * k, (uint16_t)v[k]);
+#endif
+}
+
 /* n bytes of DMEM from addr (wrapping at 4 KB) into dst. */
 static inline void dm_read(const n64_rsp *s, uint32_t addr, uint8_t *dst, unsigned n)
 {
@@ -779,6 +1145,14 @@ static inline void ld_bytes(n64_rsp *s, int16_t *v, unsigned e, uint32_t addr, u
     addr &= 0xFFF;
     if (!((e | n) & 1) && addr + n <= 0x1000) {
         const uint8_t *p = s->mem + addr;
+        if (n == 16) { /* LQV / LRV of a whole aligned register: e = 0 */
+            ld_be16x8(v, p);
+            return;
+        }
+        if (n == 8) { /* LDV */
+            ld_be16x4(v + e / 2, p);
+            return;
+        }
         for (unsigned k = 0; k < n / 2; k++)
             v[e / 2 + k] = (int16_t)n64_be16(p + 2 * k);
         return;
@@ -793,6 +1167,14 @@ static inline void st_bytes(n64_rsp *s, const int16_t *v, unsigned e, uint32_t a
     addr &= 0xFFF;
     if (!((e | n) & 1) && addr + n <= 0x1000) {
         uint8_t *p = s->mem + addr;
+        if (n == 16 && e == 0) { /* SQV of an aligned register */
+            st_be16x8(p, v);
+            return;
+        }
+        if (n == 8 && e <= 8) { /* SDV */
+            st_be16x4(p, v + e / 2);
+            return;
+        }
         for (unsigned k = 0; k < n / 2; k++)
             n64_wbe16(p + 2 * k, (uint16_t)v[(e / 2 + k) & 7]);
         return;
@@ -1080,6 +1462,19 @@ uint32_t n64_rsp_run(n64_rsp *s, uint32_t cycles)
     while (n < cycles) {
         uint32_t ia = pc;
         uint32_t op = n64_be32(imem + ia);
+        if ((op >> 25) == 0x25) { /* COP2 computational, most of a microcode: before the scalar decode below */
+            pc = npc;
+            npc = (npc + 4) & 0xFFC;
+            n++;
+            vu_op(s, op);
+            if (sstep) {
+                if (s->status & ST_SSTEP)
+                    s->status |= ST_HALT;
+                if (s->status & ST_HALT)
+                    break;
+            }
+            continue;
+        }
         int stop = 0;
         uint32_t rs = (op >> 21) & 31, rt = (op >> 16) & 31, rd = (op >> 11) & 31;
         uint32_t imm = (uint32_t)(int32_t)(int16_t)op;
@@ -1160,12 +1555,7 @@ uint32_t n64_rsp_run(n64_rsp *s, uint32_t cycles)
                 stop = 1; /* SP_STATUS may have halted the RSP or turned single-step on */
             }
             break;
-        case 0x12: /* COP2 */
-            if (op & (1u << 25))
-                vu_op(s, op);
-            else
-                cop2_move(s, op);
-            break;
+        case 0x12: cop2_move(s, op); break; /* COP2 moves (the computational ops are above) */
         case 0x20: r[rt] = (uint32_t)(int32_t)(int8_t)DM(r[rs] + imm); break;             /* LB */
         case 0x21: r[rt] = (uint32_t)(int32_t)(int16_t)ld16(s, r[rs] + imm); break;       /* LH */
         case 0x23:                                                                         /* LW */

@@ -378,11 +378,23 @@ length / count / skip, status set / clear pairs, semaphore) and the DPC register
 runs the RDP at once, so XBUS lists in DMEM are consumed before the microcode reuses them), vector unit (every load /
 store with its wraparound rules, the 16 element selectors, every computational op, the reciprocal / inverse square
 root ROMs generated from their formulas). Accumulator as bits 47..16 (int32) + 15..0 (uint16): 8-lane 32-bit loops
-the compiler vectorises (SSE2 / NEON), identical results everywhere. One cycle per instruction. Tests
+the compiler vectorises, identical results everywhere. One cycle per instruction. Tests
 (`consoles/n64/tests`): `test_rsp.c` (hand-checked vectors, and 93 differential groups of random microcode over every
 vector funct, load, store, DMA, status and scalar op whose checksums must equal those the ares oracle computed from the
 homebrew ROM `homebrew/rsp`), `test_rsp_rdp.c` (microcode driving the real RDP over XBUS and from RDRAM);
-`n64_rsp_bench` (by hand): ~90-110 M RSP instructions/s on a vector-dense loop on the x86 dev host.
+`n64_rsp_bench` (by hand; `-n COUNT` runs a fixed instruction count and prints a DMEM hash): ~115 M RSP
+instructions/s on a vector-dense loop on the x86 dev host (was ~97).
+
+*NEON (arm64, XBA-173).* On arm64 the hot vector ops are NEON intrinsics (`vu_op_neon`: the multiply-accumulate family
+VMULF..VMADH, VADD / VSUB / VADDC / VSUBC, VLT / VEQ / VNE / VGE, VCL / VCH, VMRG, the logic ops, the divide moves),
+every element selector is one table lookup (`tbl`), and the aligned LQV / SQV / LDV / SDV are a load + `rev16`; the
+remaining ops run the portable loops (`-DN64_RSP_NO_NEON` forces them everywhere). Portable gains for every host:
+vector computational ops dispatched before the scalar decode, selectors 2..7 without the table gather, fixed-count
+lane loads / stores. Bit-identical: the 93 ares groups and the RSP + RDP tests pass on x86 and on arm64 (qemu-user),
+and a random-microcode differential (vector ops, loads, stores, flags) hashes the same on x86, arm64 NEON and arm64
+portable. Measured with callgrind (aarch64, gcc 14 -O3, under qemu-user in the `xba-arm64-deps` image) on
+`n64_rsp_bench -n`: 105.7 -> 68.4 arm64 instructions per RSP instruction (-35 %; 92.8 with the portable gains alone);
+x86-64 (SSE2): 153.5 -> 136.5.
 
 **N64 static recompilation (N-1 XBA-169, N-2 XBA-170, N-3 XBA-171).** The PS1's model on the VR4300: an N64 game's
 code is lifted to C, compiled for the host into a title pack (`libtitle.so`), and runs natively on the same core; IPL3,
