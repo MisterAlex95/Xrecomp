@@ -396,6 +396,41 @@ portable. Measured with callgrind (aarch64, gcc 14 -O3, under qemu-user in the `
 `n64_rsp_bench -n`: 105.7 -> 68.4 arm64 instructions per RSP instruction (-35 %; 92.8 with the portable gains alone);
 x86-64 (SSE2): 153.5 -> 136.5.
 
+**N64 RDP: software and Vulkan (N-5, XBA-173).** `n64_rdp` (the RDP half of `n64_devices.h` + `n64_rdp.h`) is
+`n64_rdp_select.c`, which picks a back end at `n64_rdp_create` (`n64_rdp_backend.h`). The software RDP is `n64_rdp.c`
+(target `n64_rdp_sw`, its public names renamed `n64_rdp_sw_*` by the forced `n64_rdp_sw_names.h`). The Vulkan RDP is
+`n64_rdp_vk.cpp` (target `n64_rdp_vk`), the same DPC front end over paraLLEl-RDP (Themaister, MIT, vendored in
+[third_party/parallel-rdp](../third_party/parallel-rdp/README.md)): an LLE RDP on Vulkan compute, conformance-tested
+bit for bit against angrylion.
+- **Building it.** CMake option `XBR_N64_RDP_VULKAN`: ON for Android, OFF elsewhere (`-DXBR_N64_RDP_VULKAN=ON`; it
+  needs C++17). Vulkan is dlopened by a private volk (symbols renamed `prdp_*`), so a device without Vulkan still runs.
+- **Choosing it.** `n64_rdp_set_backend`, else `RECOMP_N64_RDP` = `vulkan` | `software` | `auto` (the default). `auto`
+  means Vulkan on Android when a device with Vulkan 1.1 and 8/16-bit storage is there, software elsewhere. Anything
+  that stops the Vulkan RDP from starting falls back to software (logged). The start line names the back end
+  (`n64: ... RDP vulkan, threads 1`), and the Vulkan one also logs `n64: Vulkan RDP on <GPU> (paraLLEl-RDP)`.
+- **Coherence.** paraLLEl-RDP gets the core's RDRAM without imported host memory (its "incoherent" path). It uploads
+  the pages a render pass reads and writes back, byte-masked, the bytes the GPU wrote, swapping each word between the
+  N64 byte order and the GPU's host words (our patch). On SYNC_FULL the CPU waits for the GPU and the write-back,
+  then the DP interrupt is raised. `n64_rdp_flush` (called before the VI reads the frame buffer) waits for commands
+  queued since then. The colour / Z rows drawn are reported through `bus.wrote` after the wait, as `n64_rdp.c` does.
+  `n64_rdp_set_threads` is a no-op there (1).
+
+Tests (`consoles/n64/tests`, built with `-DXBR_N64_RDP_VULKAN=ON`; without a GPU, Mesa's lavapipe with
+`VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json`):
+- `n64_rdp_vulkan` runs `test_rdp.c` on the Vulkan RDP with its own golden hashes (busy scene, gfx frame, mode
+  matrix). Seven feature cases are reported, not failed (`vk_known` in `test_rdp.c`), where the two RDPs differ on
+  purpose: fill rectangles against the scissor edge, flipped and TLUT / 8-bit copy mode, a 4-bit texture-image load
+  (crashes a real RDP; paraLLEl-RDP drops it), the YUV convert, the non-forced blender on fully covered pixels. Six of
+  the seven are places where paraLLEl-RDP is the angrylion-accurate one. The seventh is the chroma key, which
+  paraLLEl-RDP does not implement and `n64_rdp.c` approximates.
+- `n64_rdp_compare` (`n64_rdp_test --compare`) draws the same lists on both and reports the differences per 16-bit
+  unit. The gfx.z64 frame differs in 322 of 76,800 pixels, all on the triangle's edges: the software RDP draws
+  edge pixels angrylion leaves out. The busy scene differs in 25 % of its pixels, 72 % of those off by one step of a
+  5-bit channel (the software RDP's interpolation and filter rounding). The 64 random mode-matrix lists (every mode,
+  many invalid on purpose) differ in 0.1 to 11 % of their colour units (one is identical).
+- `n64_hb_gfx` passes with `RECOMP_N64_RDP=vulkan` too.
+- lavapipe's speed means nothing for a phone.
+
 **N64 static recompilation (N-1 XBA-169, N-2 XBA-170, N-3 XBA-171).** The PS1's model on the VR4300: an N64 game's
 code is lifted to C, compiled for the host into a title pack (`libtitle.so`), and runs natively on the same core; IPL3,
 the RSP, the RDP, VI / AI / PI / SI, the PIF and interrupts are the interpreter's code either way. Universal: the ROM

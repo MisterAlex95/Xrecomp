@@ -3,7 +3,12 @@
  * replica of the homebrew gfx.z64 frame; golden hashes of busy scenes and of a matrix of random command lists over
  * every mode (regression guards: update them only for a deliberate change) and the same scenes drawn with 1 and 3
  * threads, which must match bit for bit; every byte the RDP writes into RDRAM reported through the bus's wrote
- * callback (the core's write tracking for recompiled code, n64_recomp.h). */
+ * callback (the core's write tracking for recompiled code, n64_recomp.h).
+ *
+ * Back ends (XBA-173): the tests run on the RDP n64_rdp_create picks ($RECOMP_N64_RDP, n64_rdp.h). On the Vulkan RDP
+ * (paraLLEl-RDP, which follows angrylion) the golden hashes are its own (*_VK) and the hand-worked expectations of the
+ * cases in vk_known below are reported, not failed: there the two RDPs differ on purpose, each case says why.
+ * n64_rdp_test --compare draws the same lists on both and reports the differences (compare_backends). */
 #include "rdp_cmd.h"
 
 #include <pthread.h>
@@ -18,11 +23,53 @@
 #ifndef GOLDEN_MATRIX
 #define GOLDEN_MATRIX 0x1DF30C72u
 #endif
+/* The same on the Vulkan RDP (recorded with Mesa lavapipe; paraLLEl-RDP's output does not depend on the GPU). */
+#ifndef GOLDEN_BUSY_VK
+#define GOLDEN_BUSY_VK 0x3AD78541u
+#endif
+#ifndef GOLDEN_GFX_VK
+#define GOLDEN_GFX_VK 0xCC7BCB7Du
+#endif
+#ifndef GOLDEN_MATRIX_VK
+#define GOLDEN_MATRIX_VK 0xAE3AC95Cu
+#endif
 
-static int failures;
+static int failures, known_diffs;
 static const char *cur;
 static rdp_rig G;
 static rdp_list LS;
+static int vk; /* the RDP under test is the Vulkan one */
+#define GOLD(name) (vk ? name##_VK : name)
+
+/* Cases whose hand-worked expectations the Vulkan RDP does not meet, and why (consoles/README.md, « Vulkan RDP »). */
+static const struct {
+    const char *test, *why;
+} vk_known[] = {
+    { "scissor and interlace field", "fill rectangle against scissor XL / YL: paraLLEl-RDP (angrylion) includes the edge "
+                                     "column, n64_rdp.c excludes it" },
+    { "copy mode 1:1, alpha compare, flip", "flipped copy-mode rectangle: texel order differs (paraLLEl-RDP follows "
+                                            "angrylion; n64_rdp.c's flip is its own reading of the docs)" },
+    { "copy mode CI8 through the TLUT, 8-bit colour image", "copy mode with a TLUT / into an 8-bit image: angrylion "
+                                                            "copies 64 bits (4 texels) per step, n64_rdp.c one texel" },
+    { "CI4 (palette 2) and CI8 through the TLUT, RGBA16 and IA16 entries",
+      "the test loads a 4-bit texture image, which crashes a real RDP: paraLLEl-RDP drops the load" },
+    { "YUV through the convert step", "YUV texels: angrylion's convert (U / V centred, 16-bit loads only) differs from "
+                                      "n64_rdp.c's" },
+    { "alpha compare (blend alpha threshold) and chroma key", "chroma key: not implemented by paraLLEl-RDP (its README); "
+                                                              "n64_rdp.c approximates it" },
+    { "blender: alpha blend over memory (force blend and divided)", "blender without FORCE_BLEND on a fully covered "
+                                                                    "pixel: angrylion writes the pixel colour, "
+                                                                    "n64_rdp.c blends" },
+};
+static const char *known_why(void)
+{
+    if (!vk || !cur)
+        return NULL;
+    for (size_t i = 0; i < sizeof vk_known / sizeof vk_known[0]; i++)
+        if (!strcmp(cur, vk_known[i].test))
+            return vk_known[i].why;
+    return NULL;
+}
 
 static void fresh(const char *name)
 {
@@ -30,6 +77,7 @@ static void fresh(const char *name)
     if (G.dp)
         rig_close(&G);
     rig_open(&G);
+    vk = !strcmp(n64_rdp_backend_name(G.dp), "vulkan");
     LS.n = 0;
 }
 static void go(void)
@@ -37,18 +85,28 @@ static void go(void)
     rig_run(&G, &LS);
     LS.n = 0;
 }
+static void failed(void)
+{
+    const char *why = known_why();
+    if (why) {
+        fprintf(stderr, "  (known Vulkan RDP difference: %s)\n", why);
+        known_diffs++;
+    } else
+        failures++;
+}
 static void check(int cond, const char *what)
 {
     if (!cond) {
-        fprintf(stderr, "FAIL %s: %s\n", cur, what);
-        failures++;
+        fprintf(stderr, "%s %s: %s\n", known_why() ? "DIFF" : "FAIL", cur, what);
+        failed();
     }
 }
 static void expect(const char *what, uint32_t got, uint32_t want)
 {
     if (got != want) {
-        fprintf(stderr, "FAIL %s: %s = 0x%08X (%u), want 0x%08X (%u)\n", cur, what, got, got, want, want);
-        failures++;
+        fprintf(stderr, "%s %s: %s = 0x%08X (%u), want 0x%08X (%u)\n", known_why() ? "DIFF" : "FAIL", cur, what, got,
+                got, want, want);
+        failed();
     }
 }
 static void expect_px16(int w, int x, int y, unsigned want)
@@ -158,6 +216,7 @@ static void t_xbus(void)
     n64_rdp_write_reg(G.dp, 0, 0x100);
     n64_rdp_write_reg(G.dp, 1, 0x100 + (uint32_t)LS.n * 8);
     n64_rdp_run(G.dp);
+    n64_rdp_flush(G.dp); /* the Vulkan RDP draws on its GPU: wait before reading */
     LS.n = 0;
     expect_px16(64, 1, 1, 0x1234);
     expect_px16(64, 2, 2, 0x1234);
@@ -176,10 +235,12 @@ static void t_xbus(void)
     n64_rdp_write_reg(G.dp, 0, CMD_BASE);
     n64_rdp_write_reg(G.dp, 1, CMD_BASE + 3 * 8);
     n64_rdp_run(G.dp);
+    n64_rdp_flush(G.dp);
     expect_px16(64, 10, 10, 0);
     check(n64_rdp_read_reg(G.dp, 3) & 0x40, "cmd busy with a partial command");
     n64_rdp_write_reg(G.dp, 1, CMD_BASE + 4 * 8); /* no START: continues */
     n64_rdp_run(G.dp);
+    n64_rdp_flush(G.dp);
     LS.n = 0;
     expect_px16(64, 10, 10, 0xFFFF);
     expect_px16(64, 11, 11, 0xFFFF);
@@ -867,7 +928,7 @@ static uint32_t busy_hash(int threads)
 {
     fresh(threads > 1 ? "busy scene, threads" : "busy scene");
     if (threads > 1)
-        check(n64_rdp_set_threads(G.dp, threads) == threads, "threads started");
+        check(n64_rdp_set_threads(G.dp, threads) == (vk ? 1 : threads), "threads started"); /* none on the GPU */
     scene_textures(G.ram);
     scene.n = 0;
     scene_busy(&scene, 1500, 12345);
@@ -882,8 +943,8 @@ static void t_scenes(void)
     uint32_t h3 = busy_hash(3);
     expect("1 thread vs 3 threads", h3, h1);
     cur = "busy scene golden";
-    if (GOLDEN_BUSY)
-        expect("hash", h1, GOLDEN_BUSY);
+    if (GOLD(GOLDEN_BUSY))
+        expect("hash", h1, GOLD(GOLDEN_BUSY));
     else
         printf("busy scene hash 0x%08X\n", h1);
 }
@@ -1175,8 +1236,8 @@ static void t_matrix(void)
     }
     cur = "mode matrix";
     check(same, "1 thread vs 3 threads");
-    if (GOLDEN_MATRIX)
-        expect("hash", h, GOLDEN_MATRIX);
+    if (GOLD(GOLDEN_MATRIX))
+        expect("hash", h, GOLD(GOLDEN_MATRIX));
     else
         printf("mode matrix hash 0x%08X\n", h);
 }
@@ -1285,15 +1346,189 @@ static void t_gfx(void)
     check((g >> 11) > 2 && ((g >> 6) & 31) > 2 && ((g >> 1) & 31) > 2, "gouraud: all channels present");
     expect("interrupt", (uint32_t)G.irqs, 1);
     uint32_t h = fnv1a(G.ram + FB_ADDR, 320 * 240 * 2);
-    if (GOLDEN_GFX)
-        expect("frame hash", h, GOLDEN_GFX);
+    if (GOLD(GOLDEN_GFX))
+        expect("frame hash", h, GOLD(GOLDEN_GFX));
     else
         printf("gfx frame hash 0x%08X\n", h);
 }
 
-int main(void)
+/* ---- Software vs Vulkan (n64_rdp_test --compare, XBA-173) ------------------------------------------------------- */
+/* The same command lists through both back ends (the software RDP and, in a build with XBR_N64_RDP_VULKAN, the Vulkan
+ * one over paraLLEl-RDP), each with its own RDRAM, starting from the same bytes: the colour and Z images are compared
+ * 16 bits at a time. A report, not a pass / fail: the two differ where n64_rdp.c approximates (its header and code
+ * list where), and paraLLEl-RDP follows angrylion. Exit 77 when no Vulkan RDP can start (no device, or a build without
+ * it). Differences are classed per 16-bit unit: coverage bit only (bit 0 of an RGBA5551 pixel), colour off by at most
+ * 1 or by more (5-bit channels), Z: dz only (the low 2 bits) or Z itself. */
+static rdp_rig CA, CB;
+typedef struct {
+    uint32_t units, cvg_only, off1, off_more, z_units, z_dz_only, z_more;
+    int maxd;
+} cmp_stat;
+static cmp_stat cmp_total;
+static int cmp_irq_mismatch;
+
+static void cmp_diff(const uint8_t *a, const uint8_t *b, uint32_t n, int z, cmp_stat *s)
 {
+    for (uint32_t i = 0; i + 1 < n; i += 2) {
+        uint16_t x = n64_be16(a + i), y = n64_be16(b + i);
+        if (x == y)
+            continue;
+        if (z) {
+            s->z_units++;
+            if ((x >> 2) == (y >> 2))
+                s->z_dz_only++;
+            else
+                s->z_more++;
+            continue;
+        }
+        s->units++;
+        if ((x >> 1) == (y >> 1)) {
+            s->cvg_only++;
+            continue;
+        }
+        int d = 0;
+        for (int sh = 1; sh <= 11; sh += 5) {
+            int dc = abs((int)((x >> sh) & 31) - (int)((y >> sh) & 31));
+            d = dc > d ? dc : d;
+        }
+        if (d <= 1)
+            s->off1++;
+        else
+            s->off_more++;
+        if (d > s->maxd)
+            s->maxd = d;
+    }
+}
+
+/* Runs `scene` on both from CA.ram's current contents and compares [FB_ADDR, + fb_n) and [ZB_ADDR, + z_n). */
+static cmp_stat cmp_case(const char *name, uint32_t fb_n, uint32_t z_n, int verbose)
+{
+    memcpy(CB.ram, CA.ram, RAM_SIZE);
+    CA.irqs = CB.irqs = 0;
+    rig_run(&CA, &scene);
+    rig_run(&CB, &scene);
+    cmp_stat s = { 0 };
+    cmp_diff(CA.ram + FB_ADDR, CB.ram + FB_ADDR, fb_n, 0, &s);
+    cmp_diff(CA.ram + ZB_ADDR, CB.ram + ZB_ADDR, z_n, 1, &s);
+    if (CA.irqs != CB.irqs)
+        printf("  %s: SYNC_FULL interrupts %d (software) vs %d (vulkan)\n", name, CA.irqs, CB.irqs), cmp_irq_mismatch++;
+    if (verbose || s.units || s.z_units)
+        printf("  %-22s colour: %6u of %6u differ (coverage bit only %u, off by 1 %u, more %u, max %d); "
+               "Z: %u differ (dz only %u, Z %u)%s\n",
+               name, s.units, fb_n / 2, s.cvg_only, s.off1, s.off_more, s.maxd, s.z_units, s.z_dz_only, s.z_more,
+               memcmp(CA.ram, CB.ram, RAM_SIZE) ? "" : " [RDRAM identical]");
+    if (verbose && s.units) { /* 320-wide RGBA16 frames: where (bounding box, a few pixels) */
+        int x0 = 320, y0 = 240, x1 = -1, y1 = -1, shown = 0;
+        for (int y = 0; y < 240; y++)
+            for (int x = 0; x < 320; x++) {
+                uint16_t p = fb16(&CA, 320, x, y), q = fb16(&CB, 320, x, y);
+                if (p == q)
+                    continue;
+                x0 = x < x0 ? x : x0, x1 = x > x1 ? x : x1, y0 = y < y0 ? y : y0, y1 = y > y1 ? y : y1;
+                if (shown++ < 6 || getenv("N64_RDP_COMPARE_ALL"))
+                    printf("    (%d,%d) software %04X vulkan %04X\n", x, y, p, q);
+            }
+        printf("    differences within (%d,%d)-(%d,%d)\n", x0, y0, x1, y1);
+    }
+    cmp_total.units += s.units;
+    cmp_total.cvg_only += s.cvg_only;
+    cmp_total.off1 += s.off1;
+    cmp_total.off_more += s.off_more;
+    cmp_total.z_units += s.z_units;
+    cmp_total.z_dz_only += s.z_dz_only;
+    cmp_total.z_more += s.z_more;
+    if (s.maxd > cmp_total.maxd)
+        cmp_total.maxd = s.maxd;
+    return s;
+}
+
+static int compare_backends(void)
+{
+    n64_rdp_set_backend(N64_RDP_SOFTWARE);
+    rig_open(&CA);
+    n64_rdp_set_backend(N64_RDP_VULKAN);
+    rig_open(&CB);
+    n64_rdp_set_backend(N64_RDP_AUTO);
+    if (!CA.dp || !CB.dp || strcmp(n64_rdp_backend_name(CB.dp), "vulkan") != 0) {
+        printf("n64_rdp --compare: no Vulkan RDP here, skipped\n");
+        return 77;
+    }
+    printf("software vs vulkan RDP, 16-bit units of the colour / Z images:\n");
+
+    /* the gfx.z64 frame (t_gfx's list) */
+    memset(CA.ram, 0, RAM_SIZE);
+    for (int y = 0; y < 16; y++)
+        for (int x = 0; x < 16; x++)
+            n64_wbe16(CA.ram + TEX_ADDR + (y * 16 + x) * 2,
+                      ((x >> 2) ^ (y >> 2)) & 1 ? rgba16(255, 255, 255, 1) : rgba16(255, 0, 128, 1));
+    LS.n = 0;
+    frame16(320, 240);
+    L(&LS, c_modes(OM_FILL));
+    L(&LS, c_fill_color(0x00010001));
+    L(&LS, c_fill_rect(0, 0, 319 * 4, 239 * 4));
+    L(&LS, c_fill_color(0xF801F801));
+    L(&LS, c_fill_rect(16 * 4, 16 * 4, 79 * 4, 63 * 4));
+    L(&LS, c_fill_color(0x003F003F));
+    L(&LS, c_fill_rect(40 * 4, 80 * 4, 139 * 4, 119 * 4));
+    load_rgba16(16, 16, TEX_ADDR, 0, 0, 0);
+    L(&LS, c_modes(OM_COPY));
+    c_texrect(&LS, 0, 0, 120 * 4, 16 * 4, 135 * 4, 31 * 4, 0, 0, 4 << 10, 1 << 10);
+    L(&LS, c_modes(OM_STD));
+    L(&LS, CC_PASS(CC_TEX0, AC_TEX0));
+    c_texrect(&LS, 0, 0, 200 * 4, 16 * 4, 264 * 4, 80 * 4, 0, 0, 1 << 8, 1 << 8);
+    L(&LS, c_modes(OM_STD));
+    L(&LS, CC_PASS(CC_SHADE, AC_SHADE));
+    vtx a = VC(160, 130, 255, 0, 0, 255), b = VC(300, 220, 0, 255, 0, 255), c = VC(40, 220, 0, 0, 255, 255);
+    c_triangle(&LS, 1, 0, 0, 0, 0, &a, &b, &c);
+    L(&LS, c_sync_full());
+    memcpy(scene.w, LS.w, (size_t)LS.n * sizeof LS.w[0]);
+    scene.n = LS.n;
+    LS.n = 0;
+    cmp_case("gfx.z64 frame", 320 * 240 * 2, 0, 1);
+
+    /* the busy scene */
+    memset(CA.ram, 0, RAM_SIZE);
+    scene_textures(CA.ram);
+    scene.n = 0;
+    scene_busy(&scene, 1500, 12345);
+    cmp_case("busy scene", 320 * 240 * 2, 320 * 240 * 2, 1);
+
+    /* the mode matrix's 64 random lists */
+    int same = 0;
+    for (int i = 0; i < 64; i++) {
+        memset(CA.ram, 0, RAM_SIZE);
+        mx_s = 0x9E3779B9u * (uint32_t)(i + 1);
+        for (uint32_t a2 = 0; a2 < 0x30000; a2++) {
+            CA.ram[FB_ADDR + a2] = (uint8_t)mx_rnd();
+            CA.ram[ZB_ADDR + a2] = mx(2) ? (uint8_t)mx_rnd() : 0xFF;
+        }
+        for (uint32_t a2 = 0; a2 < 0x6000; a2++)
+            CA.ram[TEX_ADDR + a2] = (uint8_t)mx_rnd();
+        mx_list(&scene);
+        char name[32];
+        snprintf(name, sizeof name, "matrix list %d", i);
+        cmp_stat s = cmp_case(name, 0x40000, 0x40000, 0);
+        same += !s.units && !s.z_units;
+    }
+    printf("matrix: %d of 64 lists identical\n", same);
+    printf("total: colour %u differ (coverage bit only %u, off by 1 %u, more %u, max %d); Z %u (dz only %u, Z %u)\n",
+           cmp_total.units, cmp_total.cvg_only, cmp_total.off1, cmp_total.off_more, cmp_total.maxd, cmp_total.z_units,
+           cmp_total.z_dz_only, cmp_total.z_more);
+    rig_close(&CA);
+    rig_close(&CB);
+    /* A report: only a difference in the interrupts raised fails (cmp_irq_mismatch). */
+    return cmp_irq_mismatch ? 1 : 0;
+}
+
+int main(int argc, char **argv)
+{
+    if (argc > 1 && !strcmp(argv[1], "--compare"))
+        return compare_backends();
     t_regs();
+    if (n64_rdp_backend_parse(getenv("RECOMP_N64_RDP")) == N64_RDP_VULKAN && !vk) {
+        printf("n64_rdp: RECOMP_N64_RDP=vulkan but no Vulkan RDP here, skipped\n");
+        return 77;
+    }
     t_xbus();
     t_fill();
     t_copy();
@@ -1319,6 +1554,9 @@ int main(void)
         fprintf(stderr, "%d failure(s)\n", failures);
         return 1;
     }
-    printf("n64_rdp: all tests passed\n");
+    printf("n64_rdp: all tests passed (%s RDP", vk ? "vulkan" : "software");
+    if (known_diffs)
+        printf(", %d known differences reported", known_diffs);
+    printf(")\n");
     return 0;
 }

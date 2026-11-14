@@ -335,6 +335,7 @@ static inline void rig_run(rdp_rig *g, const rdp_list *l)
     n64_rdp_write_reg(g->dp, 0, CMD_BASE);
     n64_rdp_write_reg(g->dp, 1, CMD_BASE + (uint32_t)l->n * 8);
     n64_rdp_run(g->dp);
+    n64_rdp_flush(g->dp); /* lists without SYNC_FULL: drawn before the test reads RDRAM (the Vulkan RDP's GPU) */
 }
 
 static inline uint16_t fb16(const rdp_rig *g, int width, int x, int y) { return n64_be16(g->ram + FB_ADDR + (y * width + x) * 2); }

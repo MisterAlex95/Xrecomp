@@ -1491,9 +1491,12 @@ while its Prepare runs or waits, **Running** while it runs, **No file access** w
   layout ([Controls for the other consoles](#controls-for-the-other-consoles)).
 - **Sound.** 48 kHz stereo from the AI (`n64_audio_pull`) through `host_audio`.
 - **Pacing.** The VI's own rate (NTSC about 60 Hz, PAL 50 Hz, from the cycles each frame ran), absolute deadlines
-  nudged ±2 % by the audio queue; vsync on; a stall of more than three frames resets the clock. The software RDP is
-  what a frame spends its time in on a phone: it draws with 2 scanline-band threads on Android
-  (`RECOMP_N64_RDP_THREADS=N`, 1..8, changes it), and logcat says the rate reached every 10 s (`n64: 58.3 fps over
+  nudged ±2 % by the audio queue; vsync on; a stall of more than three frames resets the clock. The RDP is what a
+  frame spends most of its time in on a phone. By default it is the Vulkan RDP (paraLLEl-RDP on the GPU, XBA-173,
+  consoles/README.md « N64 RDP »): logcat `n64: Vulkan RDP on Adreno (TM) 740 (paraLLEl-RDP)`. If the device has no
+  usable Vulkan, it falls back to the software RDP (logged). `RECOMP_N64_RDP=software` (or `vulkan`) in recomp.cfg
+  forces one. The software RDP draws with 2 scanline-band threads (`RECOMP_N64_RDP_THREADS=N`, 1..8, changes it).
+  logcat says the rate reached every 10 s (`n64: 58.3 fps over
   the last 10 s (VI 60.0 Hz), 0 late resets so far`) and at quit (`n64: N frames in S s (… fps), N late resets`).
 - **Saves.** `<internal files>/save/n64-<KEY>/`: `game.eep` (EEPROM 4K, 512 bytes, or 16K, 2 KB), `game.sra` (SRAM,
   32 KB), `game.fla` (FlashRAM, 128 KB), the one the cartridge uses (the ROM header's save type, else the game's first
@@ -1571,12 +1574,13 @@ out/hb` (Docker; `out/hb/n64/gfx.z64`, `hello.z64`, `cpu.z64`, `timer_irq.z64`).
    checkerboard, a colour-gradient triangle at the bottom; black bars left and right (4:3). Screenshot. logcat:
    `launcher: library: play n64-N___-00000000 from /storage/…/gfx.z64`, `PACK_NONE n64 N___-00000000 (not prepared,
    …)`, `n64: n64_runtime 0.1.0, ROM gfx.z64 (z64, "XBA gfx", …), key N___-00000000, CIC libdragon, NTSC (60 Hz)`,
-   `n64: window on (4:3, aspect, linear), audio on, pads 1, controller pak, RDP threads 2`, `n64: display 320 x 237
+   `n64: window on (4:3, aspect, linear), audio on, pads 1, controller pak, RDP vulkan, threads 1`, `n64: display 320 x 237
    at frame 3`.
 3. **Frame rate** (the risk on a phone: the software RDP). Leave gfx running 30 s: logcat every 10 s
    `n64: … fps over the last 10 s (VI 59.8 Hz), N late resets so far`. Note the three values, then Back › Quit game:
    `n64: N frames in S s (… fps), N late resets`. Then with `RECOMP_N64_RDP_THREADS=1` and `=4` in recomp.cfg (one
-   line each time, removed after), start gfx again and note the rate each time (the line `RDP threads N` confirms it).
+   line each time, removed after, with `RECOMP_N64_RDP=software`), start gfx again and note the rate each time (the
+   line `RDP software, threads N` confirms it).
 4. A on **hello**: « XBA HELLO N64 » and « homebrew corpus XBA-149 » in white on dark blue. Screenshot. Home, wait 5 s, reopen XRecomp from
    recents: the game is where it was. logcat `n64: paused at frame …`, `n64: resumed`. Back: the in-game menu, the
    game holds; Quit game. logcat `clean exit`.
@@ -1603,6 +1607,17 @@ out/hb` (Docker; `out/hb/n64/gfx.z64`, `hello.z64`, `cpu.z64`, `timer_irq.z64`).
 10. A game with rumble support, set to Rumble pak on its Home: the controller vibrates when the game says so (a hit,
     an explosion) and stops; Home while it vibrates stops it.
 11. Switch the Thor to French: the N64 Home's buttons (« Controller Pak » / « Rumble Pak ») and note in French.
+12. **Vulkan RDP vs software RDP** (XBA-173). gfx, default settings: logcat `n64: Vulkan RDP on Adreno (TM) 740
+    (paraLLEl-RDP)` and `RDP vulkan, threads 1` (no `software RDP instead` line). The picture is step 2's, and the
+    triangle's edges may be a pixel thinner (the Vulkan RDP follows angrylion). Leave it 30 s and note the three
+    `… fps over the last 10 s` lines and the late resets. Then add `RECOMP_N64_RDP=software` to recomp.cfg, start
+    gfx again (`RDP software, threads 2`) and note the same, then remove the line.
+13. The same with your commercial dump (step 8): fps with the Vulkan RDP and with `RECOMP_N64_RDP=software`, 30 s
+    each, in a busy scene (3D, several characters). Note any picture difference between the two: missing or extra
+    geometry, wrong colours or textures, flicker, black frames, a frame that lags behind. Screenshots of both when
+    they differ. Send the logcat if the game stops or the Vulkan RDP logs `[ERROR]` lines (tag `Granite`).
+14. With frame generation on (an Xbox game with LSFG enabled, then an N64 game, then the Xbox game again): both
+    still work. Each uses its own Vulkan device.
 
 ### The library screen
 

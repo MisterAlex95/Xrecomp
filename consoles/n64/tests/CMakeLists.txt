@@ -29,6 +29,9 @@ if(WIN32)
     message(FATAL_ERROR "The console runtimes are POSIX-only (xbr_host)")
 endif()
 set(CMAKE_C_STANDARD 11)
+if(XBR_N64_RDP_VULKAN)
+    enable_language(CXX) # the Vulkan RDP (paraLLEl-RDP) is C++: the executables here link it
+endif()
 
 if(NOT TARGET n64_core)
     add_subdirectory(../runtime n64_runtime)
@@ -54,6 +57,17 @@ if(TARGET n64_rdp AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/../runtime/n64_rdp.c)
     target_compile_options(n64_rdp_test PRIVATE -Wall -Wextra)
     add_test(NAME n64_rdp COMMAND n64_rdp_test)
     set_tests_properties(n64_rdp PROPERTIES TIMEOUT 120)
+    # The Vulkan RDP (XBR_N64_RDP_VULKAN, XBA-173): the same tests on it, and both RDPs on the same lists
+    # (n64_rdp_test --compare, a report); skipped (77) without a Vulkan device. Without a GPU, Mesa's lavapipe
+    # (mesa-vulkan-drivers; VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json) runs them, slowly: a device and its
+    # pipelines are made per test case.
+    if(TARGET n64_rdp_vk)
+        add_test(NAME n64_rdp_vulkan COMMAND n64_rdp_test)
+        set_tests_properties(n64_rdp_vulkan PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 1800
+                             ENVIRONMENT "RECOMP_N64_RDP=vulkan")
+        add_test(NAME n64_rdp_compare COMMAND n64_rdp_test --compare)
+        set_tests_properties(n64_rdp_compare PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 1800)
+    endif()
     add_executable(n64_rdp_bench bench_rdp.c)
     target_link_libraries(n64_rdp_bench PRIVATE n64_rdp m)
     target_compile_options(n64_rdp_bench PRIVATE -Wall -Wextra -O2)
