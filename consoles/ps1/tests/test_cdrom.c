@@ -123,6 +123,29 @@ static ps1_disc *make_disc(void)
     return d;
 }
 
+/* A disc with a pregap: data track 1 LBA 0..44 (45 sectors), audio track 2 with INDEX 00 at 45 and INDEX 01 at 50,
+ * 150 sectors in all. */
+static ps1_disc *make_pregap_disc(void)
+{
+    static uint8_t img[150 * 2352];
+    for (uint32_t l = 0; l < 45; l++)
+        make_data_sector(img + l * 2352, l, 0x08);
+    for (uint32_t l = 45; l < 150; l++)
+        make_audio_sector(img + l * 2352, 2000 + l);
+    write_file("pregap.bin", img, sizeof img);
+    const char *cue = "FILE \"pregap.bin\" BINARY\n  TRACK 01 MODE2/2352\n    INDEX 01 00:00:00\n"
+                      "  TRACK 02 AUDIO\n    INDEX 00 00:00:45\n    INDEX 01 00:00:50\n";
+    write_file("pregap.cue", cue, strlen(cue));
+    char p[700], err[256] = "";
+    path_in(p, sizeof p, "pregap.cue");
+    ps1_disc *dd = ps1_disc_open(p, err, sizeof err);
+    if (!dd) {
+        printf("cannot open the pregap disc: %s\n", err);
+        exit(1);
+    }
+    return dd;
+}
+
 static void fresh(ps1_disc *d)
 {
     if (cd)
@@ -319,7 +342,7 @@ static void test_read(ps1_disc *d)
     i = wait_int(PS1_CPU_HZ * 2, &took, 256);
     n = response(r);
     CHECK(i == 2 && r[0] == 0x02, "Pause INT2 %d stat %02X", i, r[0]);
-    CHECK(took + 0xC4E1 >= 0x10BD93 - 0x2000 && took <= 0x10BD93 + 0x2000, "Pause second response after %llu",
+    CHECK(took + 0xC4E1 >= 1036808 - 0x2000 && took <= 1036808 + 0x2000, "Pause second response after %llu",
           (unsigned long long)took);
     ack();
     tick(PS1_CPU_HZ / 10);
@@ -642,13 +665,233 @@ static void test_init_stop(ps1_disc *d)
     ack();
     n = expect(0x01, NULL, 0, 3, r);
     CHECK(r[0] == 0x00, "stat after Stop %02X", r[0]);
-    /* the lid: a disc swap sets the shell-open bit until Getstat reads it */
+    /* the lid: a disc swap opens it (INT5 01h 08h) and sets the shell-open bit until Getstat reads it */
     ps1_cdrom_set_disc(cd, d);
+    i = wait_int(PS1_CPU_HZ, NULL, 256);
+    n = response(r);
+    CHECK(i == 5 && n == 2 && r[0] == 0x01 && r[1] == 0x08, "swap: INT%d %02X %02X", i, r[0], r[1]);
+    ack();
     n = expect(0x01, NULL, 0, 3, r);
-    CHECK(r[0] & 0x10, "shell open after a swap: %02X", r[0]);
+    CHECK((r[0] & 0x10) && (r[0] & 0x02), "shell open, motor on after a swap: %02X", r[0]);
     n = expect(0x01, NULL, 0, 3, r);
     CHECK(!(r[0] & 0x10), "shell bit cleared by Getstat: %02X", r[0]);
 }
+
+/* Drains interrupts (acknowledging) until none comes for a while. */
+static void drain(void)
+{
+    uint8_t r[16];
+    while (wait_int(PS1_CPU_HZ * 2, NULL, 1024)) {
+        response(r);
+        ack();
+    }
+}
+
+/* The lid (XBA-166): open while reading stops the drive with INT5 08h, commands needing the disc fail with 80h,
+ * GetID answers no disc, Getstat keeps bit 4 while it is open; closed again, bit 4 clears on the next Getstat and the
+ * disc reads. */
+static void test_lid(ps1_disc *d)
+{
+    fresh(d);
+    uint8_t r[16];
+    uint8_t loc[3] = {0x00, 0x02, 0x10};
+    expect(0x02, loc, 3, 3, r);
+    expect(0x06, NULL, 0, 3, r);
+    int i = wait_int(PS1_CPU_HZ, NULL, 256);
+    CHECK(i == 1, "reading: INT%d", i);
+    ack();
+    ps1_cdrom_set_lid(cd, 1);
+    i = wait_int(PS1_CPU_HZ, NULL, 256);
+    int n = response(r);
+    CHECK(i == 5 && n == 2 && r[0] == 0x01 && r[1] == 0x08, "lid open: INT%d %02X %02X", i, r[0], r[1]);
+    ack();
+    tick(451584 * 3);
+    CHECK(iflag() == 0, "no INT1 with the lid open");
+    n = expect(0x01, NULL, 0, 3, r);
+    CHECK(r[0] == 0x10, "Getstat with the lid open %02X", r[0]);
+    n = expect(0x01, NULL, 0, 3, r);
+    CHECK(r[0] == 0x10, "Getstat with the lid still open %02X", r[0]);
+    n = expect(0x06, NULL, 0, 5, r);
+    CHECK(n == 2 && r[0] == 0x11 && r[1] == 0x80, "ReadN with the lid open %02X %02X", r[0], r[1]);
+    command(0x1A, NULL, 0);
+    wait_int(PS1_CPU_HZ, NULL, 256);
+    response(r);
+    ack();
+    i = wait_int(PS1_CPU_HZ, NULL, 256);
+    n = response(r);
+    CHECK(i == 5 && r[0] == 0x08 && r[1] == 0x40, "GetID with the lid open: INT%d %02X %02X", i, r[0], r[1]);
+    ack();
+    ps1_cdrom_set_lid(cd, 0);
+    n = expect(0x01, NULL, 0, 3, r);
+    CHECK(r[0] == 0x12, "Getstat once closed %02X", r[0]);
+    n = expect(0x01, NULL, 0, 3, r);
+    CHECK(r[0] == 0x02, "Getstat after that %02X", r[0]);
+    n = expect(0x10, NULL, 0, 5, r);
+    CHECK(r[1] == 0x80, "GetlocL before a read after closing: %02X", r[1]);
+    expect(0x02, loc, 3, 3, r);
+    expect(0x06, NULL, 0, 3, r);
+    i = wait_int(PS1_CPU_HZ, NULL, 256);
+    CHECK(i == 1, "reading after the lid closed: INT%d", i);
+    ack();
+    /* a swap with the lid open changes the disc and nothing else */
+    ps1_cdrom_set_lid(cd, 1);
+    drain();
+    ps1_cdrom_set_disc(cd, NULL);
+    tick(100000);
+    CHECK(iflag() == 0, "no interrupt for a swap with the lid open");
+    ps1_cdrom_set_lid(cd, 0);
+    n = expect(0x01, NULL, 0, 3, r);
+    CHECK(r[0] == 0x10, "no disc: Getstat %02X (motor off)", r[0]);
+    ps1_cdrom_set_disc(cd, d);
+    drain();
+}
+
+static void setloc_lba(uint32_t lba)
+{
+    uint8_t r[16];
+    uint32_t a = lba + 150;
+    uint8_t loc[3] = {to_bcd(a / 4500), to_bcd((a / 75) % 60), to_bcd(a % 75)};
+    expect(0x02, loc, 3, 3, r);
+}
+
+/* Sub-channel Q (XBA-166): GetlocP in a pregap (index 0, counting down, the next track's number), while playing (the
+ * sector playing); GetQ's TOC entries. */
+static void test_subq(ps1_disc *d)
+{
+    fresh(d);
+    uint8_t r[16];
+    /* track 2 of the pregap disc starts at LBA 50 (INDEX 01), its INDEX 00 at 45 */
+    setloc_lba(47);
+    command(0x15, NULL, 0);
+    wait_int(PS1_CPU_HZ, NULL, 256);
+    ack();
+    int i = wait_int(PS1_CPU_HZ, NULL, 256);
+    ack();
+    CHECK(i == 2, "SeekL INT%d", i);
+    int n = expect(0x11, NULL, 0, 3, r);
+    CHECK(n == 8 && r[0] == 0x02 && r[1] == 0x00 && r[2] == 0 && r[3] == 0 && r[4] == 0x03 && r[5] == 0x00 &&
+              r[6] == 0x02 && r[7] == 0x47,
+          "GetlocP in the pregap: %02X %02X %02X:%02X:%02X %02X:%02X:%02X", r[0], r[1], r[2], r[3], r[4], r[5], r[6],
+          r[7]);
+    /* Play from there (1x): GetlocP follows the sector playing */
+    expect(0x03, NULL, 0, 3, r);
+    uint64_t t0 = now;
+    while (now - t0 < 451584u * 14)
+        if (wait_int(451584u * 14 - (now - t0), NULL, 1024))
+            ack();
+    n = expect(0x11, NULL, 0, 3, r);
+    int ff = (r[7] >> 4) * 10 + (r[7] & 15);
+    CHECK(n == 8 && r[0] == 0x02 && r[1] == 0x01 && r[5] == 0 && r[6] == 0x02 && ff >= 50 && ff <= 60,
+          "GetlocP while playing: track %02X index %02X abs %02X:%02X ff %d", r[0], r[1], r[5], r[6], ff);
+    expect(0x09, NULL, 0, 3, r);
+    drain();
+    /* the lead-out: past the last sector */
+    setloc_lba(ps1_disc_size(d) + 1);
+    n = expect(0x11, NULL, 0, 3, r);
+    CHECK(n == 8, "GetlocP %d", n);
+    /* GetQ: TOC entries */
+    uint8_t q[2] = {0x01, 0x02};
+    expect(0x1D, q, 2, 3, r);
+    i = wait_int(PS1_CPU_HZ, NULL, 256);
+    n = response(r);
+    CHECK(i == 2 && n == 10 && r[0] == 0x01 && r[2] == 0x02 && r[7] == 0x00 && r[8] == 0x02 && r[9] == 0x50,
+          "GetQ track 2: INT%d %d bytes %02X %02X %02X:%02X:%02X", i, n, r[0], r[2], r[7], r[8], r[9]);
+    ack();
+    q[1] = 0xA1;
+    expect(0x1D, q, 2, 3, r);
+    i = wait_int(PS1_CPU_HZ, NULL, 256);
+    n = response(r);
+    CHECK(i == 2 && r[2] == 0xA1 && r[7] == 0x02 && r[8] == 0x20, "GetQ A1: %02X last %02X type %02X", r[2], r[7],
+          r[8]);
+    ack();
+    q[1] = 0xA0;
+    expect(0x1D, q, 2, 3, r);
+    i = wait_int(PS1_CPU_HZ, NULL, 256);
+    n = response(r);
+    CHECK(i == 2 && r[0] == 0x41 && r[7] == 0x01, "GetQ A0: %02X first %02X", r[0], r[7]);
+    ack();
+    q[1] = 0xA2;
+    expect(0x1D, q, 2, 3, r);
+    i = wait_int(PS1_CPU_HZ, NULL, 256);
+    n = response(r);
+    CHECK(i == 2 && r[7] == 0x00 && r[8] == 0x04 && r[9] == 0x00, "GetQ A2: lead-out %02X:%02X:%02X", r[7], r[8],
+          r[9]);
+    ack();
+    q[1] = 0x09;
+    expect(0x1D, q, 2, 3, r);
+    i = wait_int(PS1_CPU_HZ, NULL, 256);
+    n = response(r);
+    CHECK(i == 5 && r[1] == 0x80, "GetQ of a track that is not there: INT%d %02X", i, r[1]);
+    ack();
+}
+
+/* CD-DA at 2x (XBA-166): sectors twice as fast, half the frames (double pitch); report peaks. */
+static void test_cdda_speed(ps1_disc *d)
+{
+    fresh(d);
+    uint8_t r[16];
+    static int16_t pcm[2 * 60000];
+    uint8_t m = 0x80 | 0x04; /* 2x, report */
+    expect(0x0E, &m, 1, 3, r);
+    uint8_t t = 0x02;
+    expect(0x03, &t, 1, 3, r);
+    uint64_t t0 = now;
+    int reports = 0, peaks = 0, right = 0;
+    size_t n = 0;
+    while (now - t0 < PS1_CPU_HZ / 2) {
+        n += ps1_cdrom_audio_pull(cd, pcm + 2 * n, 60000 - n);
+        int i = wait_int(PS1_CPU_HZ / 2 - (now - t0), NULL, 1024);
+        if (!i)
+            break;
+        response(r);
+        if (i == 1) {
+            reports++;
+            uint16_t pk = (uint16_t)(r[6] | r[7] << 8);
+            peaks += (pk & 0x7FFF) > 0;
+            right += (pk & 0x8000) != 0;
+            CHECK(((pk & 0x8000) != 0) == ((r[4] & 0x80) != 0), "peak channel bit %04X with seconds %02X", pk, r[4]);
+        }
+        ack();
+    }
+    n += ps1_cdrom_audio_pull(cd, pcm + 2 * n, 60000 - n);
+    /* about 75 sectors in 0.5 s (150 a second, less the seek), 294 frames each: half of 1x's frames per second */
+    CHECK(n >= 294 * 60 && n <= 294 * 76, "2x CD-DA frames %zu", n);
+    CHECK(reports >= 8 && peaks == reports && right > 0 && right < reports, "%d reports, %d with a peak, %d right",
+          reports, peaks, right);
+    uint8_t s0[2352];
+    make_audio_sector(s0, 1000);
+    int16_t l0 = (int16_t)(s0[0] | s0[1] << 8), l1 = (int16_t)(s0[4] | s0[5] << 8);
+    CHECK(pcm[0] == (int16_t)((l0 + l1) >> 1), "2x: frames averaged in pairs (%d, want %d)", pcm[0], (l0 + l1) >> 1);
+}
+
+/* Seek timing (XBA-166): a 100-sector seek then the first sector, at 1x and 2x, against the ps1-tests cdrom/timing
+ * hardware log (ReadN to the first INT1: about 0.67 - 0.98 M cycles at 1x, 0.55 - 1.02 M at 2x). */
+static void test_seek_timing(ps1_disc *d)
+{
+    for (int fast = 0; fast < 2; fast++) {
+        fresh(d);
+        uint8_t r[16];
+        uint8_t m = fast ? 0x80 : 0x00;
+        expect(0x0E, &m, 1, 3, r);
+        setloc_lba(116);
+        command(0x15, NULL, 0);
+        while (wait_int(PS1_CPU_HZ, NULL, 256) != 2) {
+            response(r);
+            ack();
+        }
+        ack();
+        setloc_lba(16);
+        expect(0x06, NULL, 0, 3, r);
+        uint64_t took;
+        int i = wait_int(PS1_CPU_HZ, &took, 256);
+        CHECK(i == 1 && took >= (fast ? 550000u : 650000u) && took <= 1000000u, "%dx seek + first sector: %llu",
+              fast + 1, (unsigned long long)took);
+        ack();
+        expect(0x09, NULL, 0, 3, r);
+        drain();
+    }
+}
+
 
 /* CD audio into the SPU: CD input enabled, CD volume, capture buffer of the left channel. */
 static void test_spu_mix(ps1_disc *d)
@@ -702,7 +945,15 @@ int main(void)
     test_xa(d);
     test_play(d);
     test_init_stop(d);
+    test_lid(d);
     test_spu_mix(d);
+    test_cdda_speed(d);
+    ps1_disc *pg = make_pregap_disc();
+    test_subq(pg);
+    test_seek_timing(pg);
+    ps1_cdrom_destroy(cd);
+    cd = NULL;
+    ps1_disc_close(pg);
     if (cd)
         ps1_cdrom_destroy(cd);
     ps1_disc_close(d);

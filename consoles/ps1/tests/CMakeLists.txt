@@ -142,6 +142,10 @@ if(TARGET ps1_run)
                      --quiet)
             # OpenBIOS boots the disc through SYSTEM.CNF (Setloc, SeekL, ReadN per file)
             set_tests_properties(ps1_hb_disc_${prog} PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
+            # the fast boot of a disc (XBA-168): the BIOS's shell skipped, the BIOS boots the disc itself
+            add_test(NAME ps1_hb_fastboot_${prog} COMMAND ${PS1_RUN_EXE} ${PS1_HOMEBREW_DIR}/${prog}.cue --fast-boot
+                     --result --frames 900 --quiet)
+            set_tests_properties(ps1_hb_fastboot_${prog} PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
         endforeach()
         # The overlay disc as CHDs ps1_tools.chd writes (cdlz, cdzl; XBA-168): booted through libchdr by the BIOS
         if(XBR_PS1_CHD)
@@ -172,6 +176,16 @@ if(TARGET ps1_run)
                  ${PS1_TESTS_DIR}/spu/memory-transfer/memory-transfer.exe "pass - testDMAReadTiming"
                  "pass - testDMAReadToRamSyncMode0")
         list(APPEND jcz ps1_jcz_spu_memory_transfer)
+    endif()
+    if(PS1_HAVE_CD)
+        # cdrom/getloc, timing and disc-swap with a 74:10 synthetic disc (a sparse image the script makes, XBA-166)
+        foreach(t getloc timing disc-swap)
+            string(REPLACE "-" "_" n ${t})
+            add_test(NAME ps1_jcz_cdrom_${n} COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/run_jcz_cd.sh
+                     $<TARGET_FILE:ps1_run> ${PS1_BIOS} ${PS1_TESTS_DIR}/cdrom/${t}/${t}.exe
+                     ${CMAKE_CURRENT_BINARY_DIR}/jcz_cdrom_${n} ${t})
+            list(APPEND jcz ps1_jcz_cdrom_${n})
+        endforeach()
     endif()
     set_tests_properties(${jcz} PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
 

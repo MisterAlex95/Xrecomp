@@ -92,6 +92,8 @@ int ps1_disc_read_sector(ps1_disc *d, uint32_t lba, uint8_t out[2352]);
 int ps1_disc_track_count(ps1_disc *d);
 /* Track t (1-based): start LBA, 1 = audio. Returns 0 or -1. */
 int ps1_disc_track(ps1_disc *d, int t, uint32_t *start_lba, int *audio);
+/* Track t's first LBA (its INDEX 00 / PREGAP; the same as its start without one). Returns 0 or -1. */
+int ps1_disc_track_begin(ps1_disc *d, int t, uint32_t *begin_lba);
 uint32_t ps1_disc_size(ps1_disc *d); /* sectors */
 
 /* ---- CD-ROM controller ---------------------------------------------------------------------------------------------- */
@@ -99,7 +101,12 @@ typedef struct ps1_cdrom ps1_cdrom;
 
 ps1_cdrom *ps1_cdrom_create(ps1_irq_sink irq, ps1_disc *disc /* NULL = no disc, lid closed */);
 void ps1_cdrom_destroy(ps1_cdrom *c);
-void ps1_cdrom_set_disc(ps1_cdrom *c, ps1_disc *disc); /* swap (multi-disc games) */
+/* Swap the disc (multi-disc games; NULL: none). With the lid closed it is a whole swap at once: the lid opens (INT5,
+ * the drive stops) and closes again on the new disc. With the lid open (ps1_cdrom_set_lid) only the disc changes. */
+void ps1_cdrom_set_disc(ps1_cdrom *c, ps1_disc *disc);
+/* The lid (XBA-166): 1 opens it (the drive stops, stat bit 4, INT5 01h 08h), 0 closes it (the motor spins up,
+ * bit 4 stays set until a Getstat). Commands that need the disc fail while it is open. */
+void ps1_cdrom_set_lid(ps1_cdrom *c, int open);
 uint8_t ps1_cdrom_read(ps1_cdrom *c, uint32_t reg);           /* 0x1F801800 + reg, reg 0..3 */
 void ps1_cdrom_write(ps1_cdrom *c, uint32_t reg, uint8_t v);
 void ps1_cdrom_tick(ps1_cdrom *c, uint32_t cpu_cycles);

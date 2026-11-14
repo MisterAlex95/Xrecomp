@@ -29,6 +29,8 @@
  * --stats       print the recompiler's counters (native share needs a pack built with -DPS1_RC_COUNT)
  * --card FILE   memory card 1 (a 128 KB raw image, .mcr): loaded when the file is there (any 128 KB content: zeros
  *               are an unformatted card), written back at exit when the game wrote the card
+ * --fast-boot   a disc without --exe: the BIOS's shell (its logo) is skipped, the BIOS boots the disc at once
+ * --swap F:DISC at frame F the lid opens; 60 frames later DISC is in the drive and the lid closes (DISC "-": none)
  * Prints the frame rate reached on stderr (unless --quiet). Exit 3 on a usage or file error. */
 #define _POSIX_C_SOURCE 199309L /* clock_gettime */
 #include "ps1_core.h"
@@ -149,7 +151,8 @@ static int usage(void)
 {
     fprintf(stderr, "usage: ps1_run [--bios PATH] [--exe X.exe | --disc X.cue] [--frames N] [--result] [--ppm OUT]\n"
                     "               [--wav OUT] [--tty] [--until-tty TEXT] [--pad MASK] [--hash] [--quiet]\n"
-                    "               [--pack LIB.so [--lockstep]] [--missed FILE] [--stats] [--card FILE]\n");
+                    "               [--pack LIB.so [--lockstep]] [--missed FILE] [--stats] [--card FILE] [--fast-boot]\n"
+                    "               [--swap FRAME:DISC]\n");
     return 3;
 }
 
@@ -157,7 +160,9 @@ int main(int argc, char **argv)
 {
     const char *bios_path = getenv("RECOMP_PS1_BIOS"), *exe_path = NULL, *disc_path = NULL;
     const char *ppm = NULL, *wav = NULL, *until = NULL, *pack = NULL, *missed = NULL, *card = NULL;
-    bool lockstep = false, stats = false;
+    bool lockstep = false, stats = false, fast_boot = false;
+    long swap_frame = -1;
+    const char *swap_disc = NULL;
     long lock_cycles = 0;
     long frames = 600;
     bool result = false, quiet = false, hash = false;
@@ -201,6 +206,15 @@ int main(int argc, char **argv)
             missed = argv[++i];
         else if (!strcmp(a, "--card") && more)
             card = argv[++i];
+        else if (!strcmp(a, "--fast-boot"))
+            fast_boot = true;
+        else if (!strcmp(a, "--swap") && more) {
+            char *colon = NULL;
+            swap_frame = strtol(argv[++i], &colon, 10);
+            if (!colon || *colon != ':' || !colon[1] || swap_frame < 0)
+                return usage();
+            swap_disc = colon + 1;
+        }
         else if (!strcmp(a, "--stats"))
             stats = true;
         else if (!strcmp(a, "--quiet"))
@@ -239,6 +253,9 @@ int main(int argc, char **argv)
         fprintf(stderr, "ps1_run: %s\n", err);
         return 3;
     }
+    ps1_set_fast_boot(m, fast_boot);
+    if (twin)
+        ps1_set_fast_boot(twin, fast_boot);
     void *lib = NULL;
     if (pack) {
         lib = dlopen(pack, RTLD_NOW | RTLD_LOCAL);
@@ -316,6 +333,19 @@ int main(int argc, char **argv)
                 break;
             }
             continue;
+        }
+        if (swap_disc && (f == swap_frame || f == swap_frame + 60)) {
+            ps1_machine *both[2] = {m, twin};
+            for (int k = 0; k < 2 && both[k]; k++) {
+                if (f == swap_frame) {
+                    ps1_set_lid(both[k], 1);
+                    continue;
+                }
+                char serr[256] = "";
+                if (ps1_change_disc(both[k], strcmp(swap_disc, "-") ? swap_disc : NULL, serr, sizeof serr) != 0)
+                    fprintf(stderr, "ps1_run: --swap: %s\n", serr);
+                ps1_set_lid(both[k], 0);
+            }
         }
         ps1_run_frame(m);
         if (twin) {

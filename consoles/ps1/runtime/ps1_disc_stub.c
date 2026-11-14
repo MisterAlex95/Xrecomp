@@ -43,3 +43,11 @@ uint32_t ps1_disc_size(ps1_disc *d)
     (void)d;
     return 0;
 }
+
+int ps1_disc_track_begin(ps1_disc *d, int t, uint32_t *begin_lba)
+{
+    (void)d;
+    (void)t;
+    (void)begin_lba;
+    return -1;
+}

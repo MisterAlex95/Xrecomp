@@ -5,7 +5,7 @@
  *   ps1_play DISC|EXE [--exe X.exe] [--frames N] [--save-dir DIR] [--bios PATH] [--scale aspect|integer]
  *                     [--filter nearest|linear] [--pad digital|analog] [--players 1|2] [--headless] [--unpaced]
  *                     [--buttons MASK] [--screenshot OUT.ppm] [--capture N OUT.ppm] [--key KEY]
- *                     [--pack LIB.so] [--missed FILE]
+ *                     [--pack LIB.so] [--missed FILE] [--no-fast-boot] [--swap FRAME:DISC]
  *
  * DISC              a .cue (with its tracks), .bin, .iso or .chd: the BIOS boots it (SYSTEM.CNF); EXE: a PS-X EXE,
  *                   fast-booted where the BIOS would enter its shell
@@ -30,6 +30,10 @@
  *                   beside it, ps1_pack_check first (ps1_pack.h); a pack that is not this game's runs interpreted
  * --missed FILE     with --pack: at exit, add the code the interpreter had to run (address, hash, bytes) to FILE (the
  *                   discovery loop: the Prepare's <work>/discovered.txt, or ps1_tools.recomp --discovered FILE)
+ * --no-fast-boot    a disc boots through the BIOS's shell (OpenBIOS's logo, about five seconds; default: skipped;
+ *                   $RECOMP_PS1_FASTBOOT=0 the same)
+ * --swap FRAME:DISC at frame FRAME, change the disc to DISC (the lid opens, a second later it closes on DISC)
+ * DISC may be a .m3u playlist (multi-disc games): its first disc plays, F6 changes to the next one.
  * Keyboard: arrows, X = Cross, C = Circle, Z = Square, S = Triangle, Q / E = L1 / R1, 1 / 3 = L2 / R2,
  * Enter = Start, Backspace = Select; any game controller (Xbox layout).
  * Exit 0, 1 when the game cannot run, 2 on a usage error. */
@@ -43,6 +47,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 static int usage(void)
 {
@@ -50,7 +55,7 @@ static int usage(void)
                     "                [--scale aspect|integer] [--filter nearest|linear] [--pad digital|analog]\n"
                     "                [--players 1|2] [--headless] [--unpaced] [--buttons MASK]\n"
                     "                [--screenshot OUT.ppm] [--capture N OUT.ppm] [--key KEY]\n"
-                    "                [--pack LIB.so] [--missed FILE]\n");
+                    "                [--pack LIB.so] [--missed FILE] [--no-fast-boot] [--swap FRAME:DISC]\n");
     return 2;
 }
 
@@ -98,7 +103,15 @@ int main(int argc, char **argv)
             o.pack_lib = argv[++i];
         else if (!strcmp(a, "--missed") && more)
             o.discovered_path = argv[++i];
-        else if (a[0] == '-' || o.game)
+        else if (!strcmp(a, "--no-fast-boot"))
+            o.fast_boot = 0;
+        else if (!strcmp(a, "--swap") && more) {
+            char *colon = NULL;
+            o.swap_frame = strtoull(argv[++i], &colon, 10);
+            if (!colon || *colon != ':' || !colon[1] || !o.swap_frame)
+                return usage();
+            o.swap_disc = colon + 1;
+        } else if (a[0] == '-' || o.game)
             return usage();
         else
             o.game = a;
@@ -108,7 +121,12 @@ int main(int argc, char **argv)
     if (!o.title_key) {
         int console = 0;
         ps1_identify_install(); /* a .chd too */
-        if (recomp_pack_rom_identify(o.game, &console, key, sizeof key) == 0 && console == RECOMP_CONSOLE_PS1)
+        static char first[1][PS1_RUNTIME_PATH_MAX];
+        const char *id = o.game;
+        size_t gl = strlen(o.game);
+        if (gl > 4 && !strcasecmp(o.game + gl - 4, ".m3u") && ps1_runtime_m3u(o.game, first, 1) == 1)
+            id = first[0]; /* a playlist: its first disc's key */
+        if (recomp_pack_rom_identify(id, &console, key, sizeof key) == 0 && console == RECOMP_CONSOLE_PS1)
             o.title_key = key;
     }
     if (!save_set) {

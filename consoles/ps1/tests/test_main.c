@@ -104,6 +104,36 @@ static void test_helpers(void)
     CHECK(ps1_runtime_frame_ns(PS1_CPU_HZ) == 1000000000ull / 45);
 }
 
+/* ps1_runtime_m3u (XBA-166): BOM, CR LF, comments, blank lines, relative and absolute entries, the max. */
+static void test_m3u(void)
+{
+    char dir[] = "/tmp/ps1_m3u_test.XXXXXX", path[300];
+    if (!mkdtemp(dir)) {
+        CHECK(0);
+        return;
+    }
+    snprintf(path, sizeof path, "%s/Game (Multi).m3u", dir);
+    FILE *f = fopen(path, "wb");
+    if (!f) {
+        CHECK(0);
+        return;
+    }
+    fputs("\xEF\xBB\xBFGame (Disc 1).cue\r\n\r\n# comment\r\n  Game (Disc 2).chd  \r\n/abs/Disc 3.bin", f);
+    fclose(f);
+    static char out[4][PS1_RUNTIME_PATH_MAX];
+    char want[400];
+    CHECK(ps1_runtime_m3u(path, out, 4) == 3);
+    snprintf(want, sizeof want, "%s/Game (Disc 1).cue", dir);
+    CHECK(!strcmp(out[0], want));
+    snprintf(want, sizeof want, "%s/Game (Disc 2).chd", dir);
+    CHECK(!strcmp(out[1], want));
+    CHECK(!strcmp(out[2], "/abs/Disc 3.bin"));
+    CHECK(ps1_runtime_m3u(path, out, 2) == 2);
+    CHECK(ps1_runtime_m3u("/nonexistent.m3u", out, 4) == 0);
+    unlink(path);
+    rmdir(dir);
+}
+
 static long file_size(const char *p)
 {
     struct stat st;
@@ -295,6 +325,45 @@ static void test_runs(const char *bios, const char *hb)
 
     /* 6: a game's save written by the debounce, then reloaded. */
     test_save(dir, hb);
+
+    /* 7: multi-disc (XBA-166): a .m3u plays its first disc (fast boot: the BIOS boots it without its shell); a swap
+     * opens the lid, a second later closes it on the other disc; an image that does not open is refused. */
+    char hcue[600];
+    snprintf(hcue, sizeof hcue, "%s/hello.cue", hb);
+    if (access(cue, R_OK) == 0 && access(hcue, R_OK) == 0) {
+        char m3u[400], log[420];
+        snprintf(m3u, sizeof m3u, "%s/Game.m3u", dir);
+        FILE *mf = fopen(m3u, "w");
+        if (mf) {
+            fprintf(mf, "# two discs\r\n%s\r\n%s\r\n", cue, hcue);
+            fclose(mf);
+        }
+        ps1_runtime_opts_init(&o);
+        o.game = m3u;
+        o.frames = 240;
+        o.unpaced = 1;
+        o.swap_frame = 100;
+        o.swap_disc = hcue;
+        snprintf(log, sizeof log, "%s/swap.log", dir);
+        CHECK(run_logged(&o, log) == 0);
+        CHECK(file_has(log, "playlist Game.m3u: 2 discs"));
+        CHECK(file_has(log, "disc, BIOS boot without its shell"));
+        CHECK(file_has(log, "lid opened at frame 100 (changing the disc to hello.cue)"));
+        CHECK(file_has(log, "lid closed at frame 160, disc hello.cue in"));
+        o.swap_disc = "/nonexistent/disc2.cue";
+        o.frames = 120;
+        CHECK(run_logged(&o, log) == 0);
+        CHECK(!file_has(log, "lid opened"));
+        /* no fast boot: the BIOS's shell runs */
+        ps1_runtime_opts_init(&o);
+        o.game = cue;
+        o.frames = 2;
+        o.unpaced = 1;
+        o.fast_boot = 0;
+        CHECK(run_logged(&o, log) == 0);
+        CHECK(file_has(log, "(disc, BIOS boot)"));
+        CHECK(ps1_runtime_change_disc(hcue) == -1); /* no game running */
+    }
     SDL_Quit();
 
     snprintf(cmd, sizeof cmd, "rm -rf '%s'", dir);
@@ -315,6 +384,7 @@ int main(int argc, char **argv)
         return 1;
     }
     test_helpers();
+    test_m3u();
     if (argc >= 3)
         test_runs(argv[1], argv[2]);
     else

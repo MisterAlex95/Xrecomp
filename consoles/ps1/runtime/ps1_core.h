@@ -126,8 +126,21 @@ uint8_t *ps1_ram(ps1_machine *m); /* the 2 MB of main RAM, writable */
 /* Console text (BIOS putchar / puts, A(3Ch) A(3Eh) B(3Dh) B(3Fh)): each character goes to fn. NULL: dropped. */
 void ps1_set_tty(ps1_machine *m, void (*fn)(void *ctx, char c), void *ctx);
 
+/* Fast boot of a disc (XBA-168), set before the first frame: the BIOS's shell (OpenBIOS's logo animation, about five
+ * seconds) returns at once instead of running, and the BIOS boots the disc as it would after it (SYSTEM.CNF's TCB /
+ * EVENT / STACK, the boot EXE read through the CD-ROM). No effect with an EXE to fast-boot. */
+void ps1_set_fast_boot(ps1_machine *m, int on);
+
 /* 1 once the fast boot has put the EXE in place (or immediately when there is none). */
 int ps1_exe_started(ps1_machine *m);
+
+/* Multi-disc games (XBA-166). ps1_set_lid opens (1) or closes (0) the CD drive's lid: opening stops the drive and
+ * tells the game (INT5), as the console's lid switch. ps1_change_disc puts another disc image in the drive (a path as
+ * ps1_create takes; NULL or "": none), closing the previous one: with the lid open only the disc changes (close it
+ * afterwards), with the lid closed it is a whole swap at once (open, change, close). Returns 0, or -1 with a message
+ * when the image cannot be opened (the drive keeps its disc). */
+void ps1_set_lid(ps1_machine *m, int open);
+int ps1_change_disc(ps1_machine *m, const char *disc_path, char *err, size_t errlen);
 
 /* The devices, for tests and the runtime (NULL when absent). */
 struct ps1_gpu *ps1_get_gpu(ps1_machine *m);

@@ -151,6 +151,14 @@ static void hook(ps1_machine *m)
             tty_puts(m, m->r[4]);
     } else if (pc == 0x00030000u && m->exe && !m->exe_started) {
         ps1_boot_exe(m);
+    } else if (pc == 0x00030000u && !m->exe && m->skip_shell && !m->shell_skipped) {
+        /* fast boot of a disc (XBA-168): the shell returns at once, as when it finds a disc, and the BIOS goes on
+         * with its own boot (SYSTEM.CNF's settings, the boot EXE read from the disc) */
+        m->shell_skipped = true;
+        m->r[2] = 0;
+        m->pc = m->r[31];
+        m->next_pc = m->r[31] + 4;
+        m->next_delay = false;
     }
 }
 

@@ -51,6 +51,12 @@ void ps1_cdrom_set_disc(ps1_cdrom *c, ps1_disc *disc)
     (void)disc;
 }
 
+void ps1_cdrom_set_lid(ps1_cdrom *c, int open)
+{
+    (void)c;
+    (void)open;
+}
+
 static void deliver(ps1_cdrom *c, const cd_resp *r)
 {
     c->iflag = r->irq;

@@ -239,6 +239,8 @@ struct ps1_machine {
     uint8_t *exe;
     size_t exe_size;
     bool exe_started;
+    bool skip_shell;   /* ps1_set_fast_boot: the BIOS shell (its logo) returns at once, the BIOS boots the disc */
+    bool shell_skipped;
 
     void (*tty)(void *ctx, char c);
     void *tty_ctx;

@@ -454,6 +454,105 @@ static void cards_load(ps1_machine *m)
     }
 }
 
+/* ---- Multi-disc games (XBA-166) ------------------------------------------------------------------------------- */
+
+#define SWAP_LID_FRAMES 60 /* the lid stays open about a second: games poll Getstat, they see it */
+
+static const char *base_name(const char *p);
+
+int ps1_runtime_m3u(const char *path, char out[][PS1_RUNTIME_PATH_MAX], int max)
+{
+    FILE *f = path ? fopen(path, "rb") : NULL;
+    if (!f)
+        return 0;
+    char dir[PS1_RUNTIME_PATH_MAX] = "";
+    const char *slash = strrchr(path, '/');
+    if (slash)
+        snprintf(dir, sizeof dir, "%.*s", (int)(slash - path + 1), path);
+    char line[PS1_RUNTIME_PATH_MAX];
+    int n = 0, first = 1;
+    while (n < max && fgets(line, sizeof line, f)) {
+        char *s = line;
+        if (first && (unsigned char)s[0] == 0xEF && (unsigned char)s[1] == 0xBB && (unsigned char)s[2] == 0xBF)
+            s += 3;
+        first = 0;
+        size_t len = strlen(s);
+        while (len && (s[len - 1] == '\n' || s[len - 1] == '\r' || s[len - 1] == ' ' || s[len - 1] == '\t'))
+            s[--len] = 0;
+        while (*s == ' ' || *s == '\t')
+            s++;
+        if (!*s || *s == '#')
+            continue;
+        int w = s[0] == '/' ? snprintf(out[n], PS1_RUNTIME_PATH_MAX, "%s", s)
+                            : snprintf(out[n], PS1_RUNTIME_PATH_MAX, "%s%s", dir, s);
+        if (w > 0 && w < PS1_RUNTIME_PATH_MAX)
+            n++;
+    }
+    fclose(f);
+    return n;
+}
+
+static int is_m3u(const char *p)
+{
+    size_t n = p ? strlen(p) : 0;
+    return n > 4 && strcasecmp(p + n - 4, ".m3u") == 0;
+}
+
+/* A swap asked from another thread (s_mu): the run's loop takes it between frames. */
+static char s_swap_path[PS1_RUNTIME_PATH_MAX];
+static int s_swap_asked;
+
+int ps1_runtime_change_disc(const char *path)
+{
+    if (!path || !*path)
+        return -1;
+    pthread_mutex_lock(&s_mu);
+    int running = s_m != NULL;
+    if (running) {
+        snprintf(s_swap_path, sizeof s_swap_path, "%s", path);
+        s_swap_asked = 1;
+    }
+    pthread_mutex_unlock(&s_mu);
+    return running ? 0 : -1;
+}
+
+/* The swap in progress: the lid is open for `frames` more frames, then `path` goes in. */
+typedef struct disc_swap {
+    char path[PS1_RUNTIME_PATH_MAX];
+    int frames; /* 0: none in progress */
+} disc_swap;
+
+/* Called with s_mu held, between frames: starts an asked swap (the image is checked first: one that does not open
+ * leaves the disc and the lid alone), finishes one whose lid time is over. */
+static void disc_swap_step(ps1_machine *m, disc_swap *sw, uint64_t frame)
+{
+    if (s_swap_asked && !sw->frames) {
+        s_swap_asked = 0;
+        char err[256] = "";
+        ps1_disc *probe = ps1_disc_open(s_swap_path, err, sizeof err);
+        if (!probe) {
+            fprintf(stderr, "ps1: cannot change the disc to %s: %s\n", s_swap_path, err);
+            return;
+        }
+        ps1_disc_close(probe);
+        snprintf(sw->path, sizeof sw->path, "%s", s_swap_path);
+        sw->frames = SWAP_LID_FRAMES;
+        ps1_set_lid(m, 1);
+        printf("ps1: lid opened at frame %llu (changing the disc to %s)\n", (unsigned long long)frame,
+               base_name(sw->path));
+        fflush(stdout);
+        return;
+    }
+    if (sw->frames && --sw->frames == 0) {
+        char err[256] = "";
+        if (ps1_change_disc(m, sw->path, err, sizeof err) != 0)
+            fprintf(stderr, "ps1: the disc %s cannot be read now (%s): the previous one stays\n", sw->path, err);
+        ps1_set_lid(m, 0);
+        printf("ps1: lid closed at frame %llu, disc %s in\n", (unsigned long long)frame, base_name(sw->path));
+        fflush(stdout);
+    }
+}
+
 /* ---- The run -------------------------------------------------------------------------------------------------- */
 
 static uint64_t now_ns(void)
@@ -556,6 +655,7 @@ void ps1_runtime_opts_init(ps1_runtime_opts *o)
     o->filter = -1;
     o->analog = -1;
     o->players = -1;
+    o->fast_boot = -1;
 }
 
 static const char *base_name(const char *p)
@@ -593,20 +693,34 @@ int ps1_runtime_run(const ps1_runtime_opts *o)
         fprintf(stderr, "ps1: no game\n");
         return -1;
     }
+    /* A .m3u playlist (XBA-166): its first disc plays, the others are a disc swap away. */
+    static char discs[PS1_RUNTIME_DISCS_MAX][PS1_RUNTIME_PATH_MAX];
+    int ndiscs = 0, disc_at = 0;
+    const char *game = o->game;
+    if (is_m3u(game)) {
+        ndiscs = ps1_runtime_m3u(game, discs, PS1_RUNTIME_DISCS_MAX);
+        if (!ndiscs) {
+            fprintf(stderr, "ps1: the playlist %s names no disc (or cannot be read)\n", game);
+            return -1;
+        }
+        printf("ps1: playlist %s: %d disc%s, disc 1 is %s\n", base_name(game), ndiscs, ndiscs > 1 ? "s" : "",
+               discs[0]);
+        game = discs[0];
+    }
     /* An EXE (fast boot), or a disc the BIOS boots. */
     uint8_t head[8] = {0};
-    ssize_t hn = read_head(o->game, head, sizeof head);
+    ssize_t hn = read_head(game, head, sizeof head);
     if (hn <= 0) {
-        fprintf(stderr, "ps1: cannot read the game %s (missing, empty or no permission)\n", o->game);
+        fprintf(stderr, "ps1: cannot read the game %s (missing, empty or no permission)\n", game);
         return -1;
     }
     uint8_t *exe = NULL;
     size_t exe_n = 0;
     const char *disc = NULL, *exe_path = NULL;
     if (ps1_runtime_is_exe(head, (size_t)hn)) {
-        exe_path = o->game;
+        exe_path = game;
     } else {
-        disc = o->game;
+        disc = game;
         exe_path = o->exe && *o->exe ? o->exe : NULL;
     }
     if (exe_path && !(exe = read_all(exe_path, PS1_EXE_MAX, &exe_n))) {
@@ -625,12 +739,12 @@ int ps1_runtime_run(const ps1_runtime_opts *o)
     if (o->title_key && *o->title_key)
         snprintf(key, sizeof key, "%s", o->title_key);
     else
-        ps1_runtime_fallback_key(exe_path == o->game ? exe : NULL, exe_path == o->game ? exe_n : 0, disc, key,
+        ps1_runtime_fallback_key(exe_path == game ? exe : NULL, exe_path == game ? exe_n : 0, disc, key,
                                  sizeof key);
     /* A pack's source identity (ps1_pack.h): the SHA-256 of the boot EXE, the file itself for an EXE game. */
     char src_sha[65] = "", src_why[300] = "";
     if (o->pack_lib && *o->pack_lib) {
-        if (exe_path == o->game) {
+        if (exe_path == game) {
             uint8_t sum[32];
             ps1_pack_sha256(exe, exe_n, sum);
             ps1_pack_hex(sum, src_sha);
@@ -646,9 +760,14 @@ int ps1_runtime_run(const ps1_runtime_opts *o)
         fprintf(stderr, "ps1: the machine cannot start: %s\n", err[0] ? err : "?");
         return -1;
     }
-    printf("ps1: %s, game %s (%s), key %s, BIOS %s\n", ps1_runtime_version(), base_name(o->game),
-           exe_path == o->game ? "EXE, fast boot" : exe_path ? "disc + EXE fast boot" : "disc, BIOS boot", key,
-           bios_from);
+    int fast_boot = o->fast_boot >= 0 ? o->fast_boot != 0 : !env_choice("RECOMP_PS1_FASTBOOT", "0", 0);
+    ps1_set_fast_boot(m, fast_boot);
+    printf("ps1: %s, game %s (%s), key %s, BIOS %s\n", ps1_runtime_version(), base_name(game),
+           exe_path == game ? "EXE, fast boot"
+           : exe_path       ? "disc + EXE fast boot"
+           : fast_boot      ? "disc, BIOS boot without its shell"
+                            : "disc, BIOS boot",
+           key, bios_from);
     ps1_pack pack;
     ps1_pack_load(m, o->pack_lib, key, src_sha, &pack); /* the interpreter whatever happens (logged) */
 
@@ -685,7 +804,7 @@ int ps1_runtime_run(const ps1_runtime_opts *o)
     host_window_set_aspect(4, 3);
     if (window) {
         char title[300];
-        snprintf(title, sizeof title, "XRecomp PS1 - %s", base_name(o->game));
+        snprintf(title, sizeof title, "XRecomp PS1 - %s", base_name(game));
         if (!host_window_open(title, 320 * 3, 240 * 3, 1)) {
             fprintf(stderr, "ps1: no window, running headless\n");
             window = 0;
@@ -705,7 +824,8 @@ int ps1_runtime_run(const ps1_runtime_opts *o)
     static int16_t pcm[PS1_AUDIO_RATE / 10 * 2];
     int dw = 320, dh = 240, last_w = 0, last_h = 0, last_pal = -1, last_int = -1, display_on = -1;
     uint64_t frames = 0, next = now_ns(), t0 = next, late_resets = 0, dirty_at = 0, dirty_first = 0;
-    int was_paused = 0, heard = 0, rc = 0, toggle_held = 0;
+    int was_paused = 0, heard = 0, rc = 0, toggle_held = 0, f6_held = 0;
+    disc_swap swap = {"", 0};
     ps1_gpu *gpu = ps1_get_gpu(m);
     /* DualShocks (XBA-167): plugged in in the mode chosen (RECOMP_PS1_PAD); the game may switch them (config mode)
      * and the toggle chord is their ANALOG button. The left stick is a D-pad while a port reports digital. */
@@ -765,7 +885,19 @@ int ps1_runtime_run(const ps1_runtime_opts *o)
         p1.buttons |= o->buttons;
         if (window)
             p1.buttons |= keyboard_buttons();
+        if (o->swap_frame && frames + 1 == o->swap_frame && o->swap_disc)
+            ps1_runtime_change_disc(o->swap_disc);
+        if (window && ndiscs > 1) { /* F6: the playlist's next disc */
+            const Uint8 *ks = SDL_GetKeyboardState(NULL);
+            int f6 = ks && ks[SDL_SCANCODE_F6];
+            if (f6 && !f6_held) {
+                disc_at = (disc_at + 1) % ndiscs;
+                ps1_runtime_change_disc(discs[disc_at]);
+            }
+            f6_held = f6;
+        }
         pthread_mutex_lock(&s_mu);
+        disc_swap_step(m, &swap, frames + 1); /* the frame about to run */
         ps1_set_pad(m, 0, kind, p1.buttons, p1.lx, p1.ly, p1.rx, p1.ry);
         if (players >= 2)
             ps1_set_pad(m, 1, kind, p2.buttons, p2.lx, p2.ly, p2.rx, p2.ry);
@@ -880,6 +1012,7 @@ int ps1_runtime_run(const ps1_runtime_opts *o)
     host_window_set_aspect(0, 0);
     pthread_mutex_lock(&s_mu);
     s_m = NULL;
+    s_swap_asked = 0;
     s_card_path[0][0] = s_card_path[1][0] = 0;
     if (s_discovered[0])
         ps1_pack_save_missed(m, s_discovered);

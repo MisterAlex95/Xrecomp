@@ -70,6 +70,14 @@ typedef struct ps1_runtime_opts {
      * (ps1_recomp_write_missed: address, hash, bytes) is appended to this file without repeats, which the next
      * Prepare hands to the lifter (the discovery loop). NULL: not written. */
     const char *discovered_path;
+    /* Fast boot of a disc (XBA-168): -1 = $RECOMP_PS1_FASTBOOT ("0" turns it off; on by default), 0 off, 1 on. On,
+     * the BIOS's shell (OpenBIOS's own logo animation, about five seconds; there is no Sony logo) is skipped and the
+     * BIOS boots the disc at once, SYSTEM.CNF and all (ps1_set_fast_boot). An EXE is always fast-booted. */
+    int fast_boot;
+    /* Tests and the desktop (ps1_play --swap): at frame swap_frame (> 0) the disc is changed to swap_disc as
+     * ps1_runtime_change_disc does. */
+    uint64_t swap_frame;
+    const char *swap_disc;
 } ps1_runtime_opts;
 
 void ps1_runtime_opts_init(ps1_runtime_opts *o);
@@ -95,6 +103,23 @@ void ps1_runtime_set_bios(const char *path);
  * ps1_runtime_set_save_dir's dir, discovered code in ps1_runtime_set_work_dir's; $RECOMP_PS1_FRAMES bounds the
  * run) and returns its result once the player quit. */
 int ps1_runtime_start(const char *rom, const char *pack_lib, const char *title_key);
+
+/* ---- Multi-disc games (XBA-166) ---- */
+
+#define PS1_RUNTIME_DISCS_MAX 8
+#define PS1_RUNTIME_PATH_MAX 1024
+
+/* Changes the disc of the game being played, from any thread (the app's in-game menu « Change disc »; on the
+ * desktop F6 steps through a .m3u playlist): the lid opens (the game sees it: INT5, stat bit 4), a second later the
+ * new disc is in and the lid closes. path is what ps1_disc_open takes (a .cue, .bin, .iso, .chd or "fd:N", which the
+ * runtime leaves open); an image that does not open is logged and the disc stays. Returns 0 when queued, -1 when no
+ * game is running or path is empty. */
+int ps1_runtime_change_disc(const char *path);
+
+/* The discs of a .m3u playlist (one image per line, relative to the playlist's folder unless absolute; blank lines
+ * and '#' comments skipped; a UTF-8 BOM and CR line ends taken): at most max paths into out. Returns how many (0:
+ * unreadable or empty). A game given as a .m3u plays its first disc. */
+int ps1_runtime_m3u(const char *path, char out[][PS1_RUNTIME_PATH_MAX], int max);
 
 /* ---- Pure helpers (tested in consoles/ps1/tests) ---- */
 

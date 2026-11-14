@@ -259,3 +259,32 @@ void ps1_set_tty(ps1_machine *m, void (*fn)(void *ctx, char c), void *ctx)
     m->tty = fn;
     m->tty_ctx = ctx;
 }
+
+void ps1_set_fast_boot(ps1_machine *m, int on) { m->skip_shell = on != 0; }
+
+/* ---- Disc swap (XBA-166) ---- */
+
+void ps1_set_lid(ps1_machine *m, int open)
+{
+    ps1_devices_sync(m);
+    ps1_cdrom_set_lid(m->cdrom, open);
+}
+
+int ps1_change_disc(ps1_machine *m, const char *disc_path, char *err, size_t errlen)
+{
+    ps1_disc *d = NULL;
+    if (disc_path && *disc_path) {
+        char derr[256] = "";
+        d = ps1_disc_open(disc_path, derr, sizeof derr);
+        if (!d) {
+            set_err(err, errlen, derr[0] ? derr : "cannot open the disc image");
+            return -1;
+        }
+    }
+    ps1_devices_sync(m);
+    ps1_cdrom_set_disc(m->cdrom, d);
+    if (m->disc)
+        ps1_disc_close(m->disc);
+    m->disc = d;
+    return 0;
+}

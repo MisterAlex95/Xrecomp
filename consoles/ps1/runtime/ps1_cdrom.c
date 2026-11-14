@@ -16,10 +16,13 @@
  * (IF & 7 == 0), and it replaces the response FIFO. The IRQ line (I_STAT bit 2) is raised on a delivery whose type
  * is enabled in IE, or when IE is written enabling a pending one.
  *
- * Times (CPU cycles at 33.8688 MHz). Sector: 451584 (1x, 75 sectors/s) or 225792 (2x). First responses, GetID,
- * Pause and Stop second responses: the averages psx-spx « Response Timings » measured (see the defines); MotorOn
- * 0.1 s when spinning up; ReadTOC / SetSession 0.5 s; seeks 20000 cycles + 1/4 sector time per 75 sectors of distance,
- * capped at 0.5 s (real seek times are unknown and depend on the head's position; this is an approximation).
+ * Times (CPU cycles at 33.8688 MHz). Sector: 451584 (1x, 75 sectors/s) or 225792 (2x). First responses, GetID and
+ * Stop second responses: the averages psx-spx « Response Timings » measured (see the defines); Init's and Pause's
+ * second responses from the hardware log of ps1-tests cdrom/timing (Pause about 1.01 M cycles at 1x, 1.04 M at 2x,
+ * not psx-spx's figures); MotorOn 0.1 s when spinning up; ReadTOC / SetSession 0.5 s. Seeks: a settling time (160000
+ * cycles at 1x, 470000 at 2x) + 20000 + 1/4 sector time per 75 sectors of distance, capped at 0.5 s: fitted to the
+ * same log's ReadN-to-first-sector times after a 100-sector seek (about 0.78 M cycles at 1x, 0.87 M at 2x); real seek
+ * times depend on where the head is, so this stays an approximation.
  *
  * GetID: a data disc always answers as a licensed one (INT2: 02 00 20 00 'S' 'C' 'E' x), x from the licence text
  * at LBA 4 ("...Inc" I, "...Amer" A, "...Euro" E), 'A' when there is none (our homebrew): what a console with a
@@ -29,8 +32,26 @@
  * Audio. CD-DA (Play, or ReadN with Setmode bit 0 on an audio track) and XA-ADPCM real-time sectors (Setmode bit 6;
  * Setfilter's file / channel when Setmode bit 3) go through the volume matrix into a ring of 44100 Hz stereo frames
  * the SPU pulls. XA is resampled from 37800 Hz with psx-spx's 25-point zigzag interpolation (18900 Hz: each sample fed
- * twice). CD-DA always plays at 1x (a 2x Play plays at normal pitch). Report mode sends INT1 every 10
- * sectors (absolute time on even tens, relative time with bit 7 of the seconds on odd tens; peak level 0). */
+ * twice), always at normal speed. CD-DA follows the drive: at 2x (Setmode bit 7) sectors come twice as fast and play
+ * at double pitch (each pair of frames averaged into one), as on the hardware. Report mode sends INT1 every 10
+ * sectors (absolute time on even tens, relative time with bit 7 of the seconds on odd tens) with the peak level of
+ * the samples played since the last report (bits 0..14 the highest magnitude, bit 15 the channel: left on absolute
+ * reports, right on relative ones).
+ *
+ * Position (sub-channel Q). GetlocP and the reports describe the sector last under the head: its track (the track
+ * whose INDEX 00 it follows, so a pregap belongs to the track it precedes; AAh past the end, the lead-out), index (00
+ * in a pregap, where the relative time counts down to INDEX 01), relative and absolute times. GetQ (1Dh adr point)
+ * answers the lead-in's TOC entries: a track's start, A0h / A1h the first / last track, A2h the lead-out.
+ *
+ * Lid (ps1_cdrom_set_lid, ps1_cdrom_set_disc: multi-disc games). Opening it stops the drive and the motor, sets stat
+ * bit 4 and sends INT5 (01h, 08h: the ps1-tests cdrom/disc-swap hardware log); commands that need a disc then fail
+ * (INT5 stat | 01h, 80h). Closing it spins the motor up on the new disc; bit 4 stays set until a Getstat reads it, and
+ * GetlocL fails until a sector is read. After a seek past the end (INT5 04h), GetlocL / GetlocP fail too (the
+ * cdrom/getloc log) until the next seek or Init.
+ *
+ * Not modelled: the drive's sector buffers (the hardware keeps more than the two sectors here: a sector the CPU did
+ * not take before the next one arrives is lost, as on a real overrun, but no older sector can be re-read), the seek
+ * of the head after a Pause (it stays on the last sector), audio sub-channels (P, R..W) and CD+G. */
 #include "ps1_devices.h"
 
 #include <stdlib.h>
@@ -43,9 +64,11 @@
 #define INIT_DELAY 0x13CCEu         /* Init's first response */
 #define INIT_SECOND 476300u         /* Init's second response (ps1-tests cdrom/timing hardware log, average) */
 #define GETID_DELAY 0x4A00u         /* GetID's second response */
-#define PAUSE_DELAY_1X 0x10BD93u    /* Pause while reading / playing: psx-spx gives 21181Ch at 1x, but the hardware
-                                     * log of ps1-tests cdrom/timing measures about 1.0M cycles at both speeds */
-#define PAUSE_DELAY_2X 0x10BD93u
+/* Pause while reading / playing: psx-spx gives 21181Ch / 10BD93h, the hardware log of ps1-tests cdrom/timing averages
+ * 1011910 / 1036808 cycles (its 16-bit timer counts 8-cycle ticks and one overflow: below 1 M cycles readings are
+ * exact, 10BD93h would read as 572 K, which no run shows). */
+#define PAUSE_DELAY_1X 1011910u
+#define PAUSE_DELAY_2X 1036808u
 #define PAUSE_DELAY_IDLE 0x1DF2u
 #define STOP_DELAY_1X 0xD38ACAu     /* Stop while spinning */
 #define STOP_DELAY_2X 0x18A6076u
@@ -53,6 +76,8 @@
 #define TOC_DELAY (PS1_CPU_HZ / 2)  /* ReadTOC / SetSession: "about 1 second" in psx-spx, shortened */
 #define SPINUP_DELAY (PS1_CPU_HZ / 10)
 #define SEEK_MAX (PS1_CPU_HZ / 2)
+#define SEEK_SETTLE_1X 160000u  /* the head settling on the track (fitted to the cdrom/timing hardware log) */
+#define SEEK_SETTLE_2X 470000u
 
 #define AUDIO_RING 32768u /* frames, power of two: 0.74 s */
 #define QUEUE 8
@@ -130,6 +155,14 @@ struct ps1_cdrom {
     uint8_t have_read;
     uint32_t resume_lba; /* where a Read without a new Setloc starts: the last sector received, or the last seek */
     uint8_t license; /* 'A' / 'E' / 'I' */
+    uint8_t getq_point; /* GetQ's point, answered by its second response */
+    uint8_t seek_failed; /* the last seek went past the disc: GetlocL / GetlocP fail until the next seek or Init */
+    uint8_t lid_open; /* the lid is open now (stat bit 4 is the latch: it stays set until a Getstat after closing) */
+    uint32_t q_lba;   /* the sector last under the head: GetlocP, reports */
+    uint16_t peak[2]; /* CD-DA peak magnitude per channel since the last report */
+    uint8_t peak_odd; /* the next report's channel: 0 left, 1 right */
+    int32_t cdda_half[2]; /* 2x CD-DA: the first frame of a pair waiting for its second */
+    uint8_t cdda_have_half;
 
     /* sector buffers: pending (read, INT1 not yet delivered) and current (delivered, loaded by the request bit) */
     uint8_t pending_sector[2352];
@@ -162,7 +195,8 @@ static uint32_t sector_cycles(const ps1_cdrom *c) { return (c->mode & MODE_SPEED
 static uint32_t seek_cycles(const ps1_cdrom *c, uint32_t to)
 {
     uint32_t d = to > c->lba ? to - c->lba : c->lba - to;
-    uint64_t t = 20000u + (uint64_t)d * (SECTOR_1X / 4) / 75u;
+    uint64_t t = ((c->mode & MODE_SPEED) ? SEEK_SETTLE_2X : SEEK_SETTLE_1X) + 20000u +
+                 (uint64_t)d * (SECTOR_1X / 4) / 75u;
     return t > SEEK_MAX ? SEEK_MAX : (uint32_t)t;
 }
 
@@ -382,6 +416,7 @@ static void start_seek(ps1_cdrom *c, int then)
     c->lba = to;
     c->resume_lba = to;
     c->setloc_pending = 0;
+    c->seek_failed = 0;
     c->stat = (uint8_t)((c->stat & ~(ST_READ | ST_PLAY)) | ST_SEEK | ST_MOTOR);
 }
 
@@ -391,37 +426,90 @@ static void stop_drive(ps1_cdrom *c)
     c->stat &= (uint8_t)~(ST_READ | ST_PLAY | ST_SEEK);
 }
 
-static void report(ps1_cdrom *c, int track, uint32_t start)
+/* Sub-channel Q of sector lba: track (BCD, AAh in the lead-out), index, relative and absolute times. */
+typedef struct qpos {
+    uint8_t track, index;
+    uint32_t rel, abs;
+} qpos;
+
+static qpos q_position(ps1_cdrom *c, uint32_t lba)
 {
-    uint32_t lba = c->lba;
+    qpos q = {1, 1, lba, lba + 150};
+    int n = ps1_disc_track_count(c->disc);
+    uint32_t size = ps1_disc_size(c->disc);
+    if (n <= 0)
+        return q;
+    if (lba >= size) {
+        q.track = 0xAA;
+        q.rel = lba - size;
+        return q;
+    }
+    int t = 1;
+    for (int i = 1; i <= n; i++) {
+        uint32_t b;
+        if (ps1_disc_track_begin(c->disc, i, &b) == 0 && b <= lba)
+            t = i;
+    }
+    uint32_t start = 0;
+    ps1_disc_track(c->disc, t, &start, NULL);
+    q.track = bcd((unsigned)t);
+    q.index = lba >= start ? 1 : 0;
+    q.rel = lba >= start ? lba - start : start - lba;
+    return q;
+}
+
+static void report(ps1_cdrom *c)
+{
+    uint32_t lba = c->q_lba;
     uint32_t a = lba + 150;
     int sect = (int)(a % 75);
     if (sect % 10)
         return;
+    qpos q = q_position(c, lba);
     uint8_t r[8];
     r[0] = c->stat;
-    r[1] = bcd((unsigned)track);
-    r[2] = lba >= start ? 1 : 0;
-    if ((sect / 10) % 2 == 0) {
-        r[3] = bcd(a / 4500);
-        r[4] = bcd((a / 75) % 60);
-        r[5] = bcd(a % 75);
-    } else {
-        uint32_t rel = lba >= start ? lba - start : start - lba;
-        r[3] = bcd(rel / 4500);
-        r[4] = (uint8_t)(bcd((rel / 75) % 60) | 0x80);
-        r[5] = bcd(rel % 75);
-    }
-    r[6] = r[7] = 0; /* peak level */
+    r[1] = q.track;
+    r[2] = q.index;
+    int rel = (sect / 10) % 2 != 0;
+    uint32_t t = rel ? q.rel : a;
+    r[3] = bcd(t / 4500);
+    r[4] = (uint8_t)(bcd((t / 75) % 60) | (rel ? 0x80 : 0));
+    r[5] = bcd(t % 75);
+    /* peak: left on absolute reports, right (bit 15) on relative ones; both start over */
+    uint16_t pk = (uint16_t)((c->peak[rel] > 0x7FFF ? 0x7FFF : c->peak[rel]) | (rel ? 0x8000 : 0));
+    r[6] = (uint8_t)pk;
+    r[7] = (uint8_t)(pk >> 8);
+    c->peak[0] = c->peak[1] = 0;
     push(c, 1, r, 8, 0);
 }
 
+static void cdda_frame(ps1_cdrom *c, int32_t l, int32_t r)
+{
+    uint16_t ml = (uint16_t)(l < 0 ? -l : l), mr = (uint16_t)(r < 0 ? -r : r);
+    if (ml > c->peak[0])
+        c->peak[0] = ml;
+    if (mr > c->peak[1])
+        c->peak[1] = mr;
+    ring_put(c, l, r);
+}
+
+/* One CD-DA sector into the ring: 588 frames, or at 2x 294 (each pair averaged: double speed, double pitch). */
 static void cdda_sector(ps1_cdrom *c, const uint8_t *s)
 {
+    int fast = (c->mode & MODE_SPEED) != 0;
     for (int i = 0; i < 588; i++) {
-        int16_t l = (int16_t)(s[4 * i] | (s[4 * i + 1] << 8));
-        int16_t r = (int16_t)(s[4 * i + 2] | (s[4 * i + 3] << 8));
-        ring_put(c, l, r);
+        int32_t l = (int16_t)(s[4 * i] | (s[4 * i + 1] << 8));
+        int32_t r = (int16_t)(s[4 * i + 2] | (s[4 * i + 3] << 8));
+        if (!fast) {
+            cdda_frame(c, l, r);
+        } else if (!c->cdda_have_half) {
+            c->cdda_half[0] = l;
+            c->cdda_half[1] = r;
+            c->cdda_have_half = 1;
+        } else {
+            cdda_frame(c, (c->cdda_half[0] + l) >> 1, (c->cdda_half[1] + r) >> 1);
+            c->cdda_have_half = 0;
+        }
     }
 }
 
@@ -446,21 +534,23 @@ static void drive_step(ps1_cdrom *c)
             push1(c, 4, c->stat);
             return;
         }
+        c->q_lba = c->lba;
         if (audio)
             cdda_sector(c, s);
         if (c->mode & MODE_REPORT)
-            report(c, track, tstart);
+            report(c);
         c->lba++;
-        c->drive_timer += SECTOR_1X;
+        c->drive_timer += sector_cycles(c);
         return;
     }
     /* reading */
     c->drive_timer += sector_cycles(c);
+    c->q_lba = c->lba;
     if (audio) {
         if (c->mode & MODE_CDDA) {
             cdda_sector(c, s);
             if (c->mode & MODE_REPORT)
-                report(c, track, tstart);
+                report(c);
             c->lba++;
             return;
         }
@@ -513,9 +603,10 @@ static void drive_tick(ps1_cdrom *c, uint32_t cycles)
             } else if (then == DRIVE_PLAY) {
                 c->drive = DRIVE_PLAY;
                 c->stat |= ST_PLAY;
-                c->drive_timer += SECTOR_1X;
+                c->drive_timer += sector_cycles(c);
             } else {
                 c->drive = DRIVE_IDLE;
+                c->q_lba = c->lba;
                 /* SeekL / SeekP complete: GetlocL sees the header of the target sector (a data track) */
                 uint8_t sec[2352];
                 int audio = 1;
@@ -537,7 +628,7 @@ static void drive_tick(ps1_cdrom *c, uint32_t cycles)
 
 /* ---- commands ----------------------------------------------------------------------------------------------- */
 
-static int disc_present(const ps1_cdrom *c) { return c->disc != NULL && !(c->stat & ST_SHELL); }
+static int disc_present(const ps1_cdrom *c) { return c->disc != NULL && !c->lid_open; }
 
 static void schedule_second(ps1_cdrom *c, uint8_t cmd, uint32_t delay)
 {
@@ -552,7 +643,7 @@ static int param_count(uint8_t cmd, int *min, int *max)
     switch (cmd) {
     case 0x02: *min = *max = 3; return 1;
     case 0x03: *min = 0, *max = 1; return 1;
-    case 0x0D: *min = *max = 2; return 1;
+    case 0x0D: case 0x1D: *min = *max = 2; return 1;
     case 0x0E: case 0x12: case 0x14: case 0x19: *min = *max = 1; return 1;
     case 0x01: case 0x04: case 0x05: case 0x06: case 0x07: case 0x08: case 0x09: case 0x0A: case 0x0B: case 0x0C:
     case 0x0F: case 0x10: case 0x11: case 0x13: case 0x15: case 0x16: case 0x1A: case 0x1B: case 0x1E:
@@ -587,7 +678,7 @@ static void execute(ps1_cdrom *c)
     switch (cmd) {
     case 0x01: /* Getstat */
         push1(c, 3, c->stat);
-        if (c->disc)
+        if (!c->lid_open)
             c->stat &= (uint8_t)~ST_SHELL; /* the lid is closed again: the latch clears once read */
         break;
     case 0x02: /* Setloc */
@@ -620,7 +711,7 @@ static void execute(ps1_cdrom *c)
         } else {
             c->drive = DRIVE_PLAY;
             c->stat = (uint8_t)((c->stat & ~(ST_READ | ST_SEEK)) | ST_PLAY | ST_MOTOR);
-            c->drive_timer = SECTOR_1X;
+            c->drive_timer = sector_cycles(c);
         }
         break;
     case 0x04: /* Forward */
@@ -680,6 +771,7 @@ static void execute(ps1_cdrom *c)
     case 0x0A: /* Init */
         drop_int1(c);
         stop_drive(c);
+        c->seek_failed = 0;
         c->mode = MODE_SIZE;
         c->setloc_pending = 0;
         if (c->disc)
@@ -714,6 +806,11 @@ static void execute(ps1_cdrom *c)
     {
         int audio = 0;
         find_track(c, c->lba, NULL, &audio);
+        if (c->seek_failed) {
+            uint8_t r[2] = {(uint8_t)(c->stat | ST_ERROR | ST_SEEKERR), 0x80};
+            push(c, 5, r, 2, 0);
+            break;
+        }
         if (c->drive == DRIVE_SEEK || c->drive == DRIVE_PLAY || audio || !c->have_read) {
             error(c, 0x80);
             break;
@@ -721,13 +818,16 @@ static void execute(ps1_cdrom *c)
         push(c, 3, c->last_header, 8, 0);
         break;
     }
-    case 0x11: /* GetlocP */
+    case 0x11: /* GetlocP: sub-channel Q of the sector last under the head (the one playing, the seek's target) */
     {
-        uint32_t lba = c->drive == DRIVE_IDLE && c->lba ? c->lba - 1 : c->lba, start;
-        int t = find_track(c, lba, &start, NULL);
-        uint32_t rel = lba >= start ? lba - start : start - lba, a = lba + 150;
-        uint8_t r[8] = {bcd((unsigned)t), (uint8_t)(lba >= start ? 1 : 0), bcd(rel / 4500), bcd((rel / 75) % 60),
-                        bcd(rel % 75), bcd(a / 4500), bcd((a / 75) % 60), bcd(a % 75)};
+        if (c->seek_failed) { /* the hardware log of ps1-tests cdrom/getloc: fails after a seek past the end */
+            uint8_t e[2] = {(uint8_t)(c->stat | ST_ERROR | ST_SEEKERR), 0x80};
+            push(c, 5, e, 2, 0);
+            break;
+        }
+        qpos q = q_position(c, c->q_lba);
+        uint8_t r[8] = {q.track, q.index, bcd(q.rel / 4500), bcd((q.rel / 75) % 60), bcd(q.rel % 75),
+                        bcd(q.abs / 4500), bcd((q.abs / 75) % 60), bcd(q.abs % 75)};
         push(c, 3, r, 8, 0);
         break;
     }
@@ -814,6 +914,15 @@ static void execute(ps1_cdrom *c)
         push1(c, 3, c->stat);
         schedule_second(c, cmd, GETID_DELAY);
         break;
+    case 0x1D: /* GetQ adr point: a TOC entry of the lead-in, INT2 with 10 bytes */
+        if (!bcd_ok(p[1]) && p[1] < 0xA0) {
+            error(c, 0x10);
+            break;
+        }
+        c->getq_point = p[1];
+        push1(c, 3, c->stat);
+        schedule_second(c, cmd, GETID_DELAY);
+        break;
     case 0x1E: /* ReadTOC */
         drop_int1(c);
         stop_drive(c);
@@ -847,6 +956,37 @@ static void second(ps1_cdrom *c)
             }
         }
         break;
+    case 0x1D: /* GetQ: control / adr, track 00, point, the lead-in's running time, 00, the point's time */
+    {
+        uint8_t pt = c->getq_point;
+        int n = ps1_disc_track_count(c->disc);
+        uint32_t lba = 0;
+        int audio = 0, ok = 1, first_audio = 0;
+        uint8_t pm = 0, ps = 0, pf = 0;
+        ps1_disc_track(c->disc, 1, NULL, &first_audio);
+        if (pt == 0xA0 || pt == 0xA1) {
+            pm = bcd((unsigned)(pt == 0xA0 ? 1 : n));
+            ps = first_audio ? 0x00 : 0x20; /* disc type: CD-DA, else CD-ROM XA */
+            ps1_disc_track(c->disc, pt == 0xA0 ? 1 : n, NULL, &audio);
+        } else if (pt == 0xA2) {
+            lba = ps1_disc_size(c->disc) + 150;
+            pm = bcd(lba / 4500), ps = bcd((lba / 75) % 60), pf = bcd(lba % 75);
+            ps1_disc_track(c->disc, n, NULL, &audio);
+        } else if (pt >= 1 && from_bcd(pt) <= n && ps1_disc_track(c->disc, from_bcd(pt), &lba, &audio) == 0) {
+            lba += 150;
+            pm = bcd(lba / 4500), ps = bcd((lba / 75) % 60), pf = bcd(lba % 75);
+        } else {
+            ok = 0;
+        }
+        if (!disc_present(c) || !ok) {
+            uint8_t r[2] = {(uint8_t)(c->stat | ST_ERROR), 0x80};
+            push(c, 5, r, 2, 0);
+            break;
+        }
+        uint8_t r[10] = {(uint8_t)((audio ? 0x00 : 0x40) | 0x01), 0x00, pt, 0x00, 0x00, 0x00, 0x00, pm, ps, pf};
+        push(c, 2, r, 10, 0);
+        break;
+    }
     case 0x12:
         if (kind == 2) {
             uint8_t r[2] = {(uint8_t)(c->stat | ST_ERROR), 0x40};
@@ -859,6 +999,7 @@ static void second(ps1_cdrom *c)
     case 0x16:
         if (kind == 3) {
             c->stat &= (uint8_t)~ST_MOTOR; /* the hardware answers stat 04h: motor stopped */
+            c->seek_failed = 1;
             uint8_t r[2] = {(uint8_t)(c->stat | ST_SEEKERR), 0x04};
             push(c, 5, r, 2, 0);
         }
@@ -902,6 +1043,38 @@ static void reset(ps1_cdrom *c)
     c->xa_sixstep = 6;
 }
 
+/* The lid opens: the drive and the motor stop, reads are dropped, INT5 tells the CPU: 01h 08h, as the hardware log of
+ * ps1-tests cdrom/disc-swap shows (the motor stopped, bit 4 not set yet in that response; Getstat has it after). */
+static void lid_open(ps1_cdrom *c)
+{
+    if (c->lid_open)
+        return;
+    c->lid_open = 1;
+    drop_int1(c);
+    stop_drive(c);
+    c->second_pending = 0;
+    c->second_cmd = 0;
+    c->setloc_pending = 0;
+    c->have_read = 0;
+    c->stat = (uint8_t)(c->stat & ~(ST_MOTOR | ST_READ | ST_SEEK | ST_PLAY | ST_SHELL));
+    error(c, 0x08);
+    c->stat |= ST_SHELL;
+}
+
+/* The lid closes: the motor spins up on the disc there (if any); stat bit 4 stays until a Getstat. */
+static void lid_close(ps1_cdrom *c)
+{
+    if (!c->lid_open)
+        return;
+    c->lid_open = 0;
+    c->seek_failed = 0;
+    c->license = detect_license(c->disc);
+    c->lba = c->resume_lba = c->q_lba = 0;
+    c->have_read = 0;
+    if (c->disc)
+        c->stat |= ST_MOTOR;
+}
+
 ps1_cdrom *ps1_cdrom_create(ps1_irq_sink irq, ps1_disc *disc)
 {
     ps1_cdrom *c = calloc(1, sizeof *c);
@@ -917,15 +1090,21 @@ void ps1_cdrom_destroy(ps1_cdrom *c) { free(c); }
 
 void ps1_cdrom_set_disc(ps1_cdrom *c, ps1_disc *disc)
 {
-    drop_int1(c);
-    stop_drive(c);
+    if (c->lid_open) {
+        c->disc = disc;
+        return;
+    }
+    lid_open(c);
     c->disc = disc;
-    c->stat = (uint8_t)((c->stat & ~ST_MOTOR) | ST_SHELL); /* the lid was opened */
-    if (disc)
-        c->stat |= ST_MOTOR;
-    c->license = detect_license(disc);
-    c->setloc_pending = 0;
-    c->lba = c->resume_lba = 0;
+    lid_close(c);
+}
+
+void ps1_cdrom_set_lid(ps1_cdrom *c, int open)
+{
+    if (open)
+        lid_open(c);
+    else
+        lid_close(c);
 }
 
 uint8_t ps1_cdrom_read(ps1_cdrom *c, uint32_t reg)

@@ -53,6 +53,10 @@ const char *ps1_pack_host_abi(void);
  * names case-insensitive, ";1" ignored). Fills hex with its SHA-256 and boot (may be NULL) with the path it read.
  * Returns 0, or -1 with why. */
 int ps1_pack_disc_boot_sha256(const char *disc, char hex[65], char *boot, size_t boot_n, char *why, size_t why_n);
+/* The same boot EXE's bytes (malloc'd, the caller frees; at most 2 MB + 2 KB): the runtime's fast boot of a disc
+ * (XBA-168). Returns 0, or -1 with why. */
+int ps1_pack_disc_boot_exe(const char *disc, uint8_t **exe, size_t *exe_n, char *boot, size_t boot_n, char *why,
+                           size_t why_n);
 
 /* The checks on <pack_dir>/pack.json for this game (key, the boot EXE's hex SHA-256), this shell (shell_abi; 0 skips
  * it) and this host. Fills lib_path. Returns PS1_PACK_LOADED (all good), PS1_PACK_NONE (no pack.json) or

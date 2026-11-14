@@ -577,13 +577,29 @@ static int cnf_boot(const char *cnf, char *out, size_t n)
 
 int ps1_pack_disc_boot_sha256(const char *disc, char hex[65], char *boot, size_t boot_n, char *why, size_t why_n)
 {
+    uint8_t *exe = NULL;
+    size_t len = 0;
+    hex[0] = 0;
+    if (ps1_pack_disc_boot_exe(disc, &exe, &len, boot, boot_n, why, why_n) != 0)
+        return -1;
+    uint8_t sum[32];
+    ps1_pack_sha256(exe, len, sum);
+    ps1_pack_hex(sum, hex);
+    free(exe);
+    return 0;
+}
+
+int ps1_pack_disc_boot_exe(const char *disc, uint8_t **exe_out, size_t *exe_n, char *boot, size_t boot_n, char *why,
+                           size_t why_n)
+{
     char err[256] = "", path[512] = "PSX.EXE";
     iso_rd r;
     uint32_t ext, len;
     uint8_t pvd[2048];
     const uint8_t *u;
     int rc = -1;
-    hex[0] = 0;
+    *exe_out = NULL;
+    *exe_n = 0;
     r.d = disc && *disc ? ps1_disc_open(disc, err, sizeof err) : NULL;
     if (!r.d) {
         snprintf(why, why_n, "the disc cannot be opened: %s", err[0] ? err : "no disc");
@@ -618,10 +634,8 @@ int ps1_pack_disc_boot_sha256(const char *disc, char hex[65], char *boot, size_t
         snprintf(why, why_n, "the boot EXE %s cannot be read (%u bytes)", path, len);
         goto out;
     }
-    uint8_t sum[32];
-    ps1_pack_sha256(exe, len, sum);
-    ps1_pack_hex(sum, hex);
-    free(exe);
+    *exe_out = exe;
+    *exe_n = len;
     if (boot && boot_n)
         snprintf(boot, boot_n, "%s", path);
     rc = 0;

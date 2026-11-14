@@ -704,3 +704,12 @@ int ps1_disc_track(ps1_disc *d, int t, uint32_t *start_lba, int *audio)
 }
 
 uint32_t ps1_disc_size(ps1_disc *d) { return d ? d->size : 0; }
+
+int ps1_disc_track_begin(ps1_disc *d, int t, uint32_t *begin_lba)
+{
+    if (!d || t < 1 || t > d->ntracks)
+        return -1;
+    if (begin_lba)
+        *begin_lba = d->tracks[t - 1].begin;
+    return 0;
+}
