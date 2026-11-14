@@ -95,6 +95,15 @@ final class GameLanguage {
                                           code == null ? "" : code);
     }
 
+    /**
+     * The title ID of the game the shell runs (XBA-181): a launched GBA, PS1 or N64 game's library key (gba-&lt;KEY&gt;
+     * ...; GameStore.launchedTitleId), else the chosen Xbox game's ({@link #currentTitleId}). The chosen Xbox folder
+     * stays remembered while a game of another console runs: its title ID is not that game's.
+     */
+    static String runningTitleId(Context c) {
+        return GameStore.launchedRom(c) != null ? GameStore.launchedTitleId(c) : currentTitleId(c);
+    }
+
     /** The chosen game's title ID (8 hex digits), or null when there is no game or its XBE cannot be read. */
     static String currentTitleId(Context c) {
         String dir = GameStore.chosenDir(c);

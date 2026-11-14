@@ -53,6 +53,11 @@ final class RecompConfig {
         final Choice[] choices;
         /** Offered only by an APK built with frame generation (-PxbaLsfg=1 with the bridge: R.bool.xba_lsfg). */
         boolean needsLsfg;
+        /**
+         * Read by every console's runtime (XBA-181: the GBA, PS1 and N64 ones too), not only the Xbox's: Settings shows
+         * it under « All consoles », the others under « Xbox only ».
+         */
+        boolean shared;
 
         Option(Section section, int title, int detail, String[] keys, Choice... choices) {
             this.section = section;
@@ -64,6 +69,11 @@ final class RecompConfig {
 
         Option lsfgOnly() {
             needsLsfg = true;
+            return this;
+        }
+
+        Option shared() {
+            shared = true;
             return this;
         }
 
@@ -79,6 +89,8 @@ final class RecompConfig {
     /** The console's widescreen and 480p settings (XBA-121). */
     static final String ENV_WIDESCREEN = "RECOMP_WIDESCREEN";
     static final String ENV_480P = "RECOMP_480P";
+    /** « 0 » stops every pad motor (XBA-181: the Xbox's emulated USB pad, the PS1 DualShock, the N64 Rumble Pak). */
+    static final String ENV_RUMBLE = "RECOMP_RUMBLE";
 
     private static String[] keys(String... k) {
         return k;
@@ -97,9 +109,21 @@ final class RecompConfig {
                    new Choice(R.string.LANG_ES, "es"), new Choice(R.string.LANG_IT, "it"),
                    new Choice(R.string.LANG_PT, "pt"), new Choice(R.string.LANG_JA, "ja"),
                    new Choice(R.string.LANG_KO, "ko"), new Choice(R.string.LANG_ZH, "zh")),
+        // XBA-181: the pad's motors, for every console (the Xbox's USB pad, the PS1 DualShock, the N64 Rumble Pak).
+        new Option(Section.GAME, R.string.OPT_RUMBLE, R.string.OPT_RUMBLE_DETAIL, keys(ENV_RUMBLE),
+                   new Choice(R.string.VAL_ON, (String)null), new Choice(R.string.VAL_OFF, "0")).shared(),
         new Option(Section.GRAPHICS, R.string.OPT_VSYNC, R.string.OPT_VSYNC_DETAIL,
                    keys("RECOMP_PRESENT_VSYNC"),
-                   new Choice(R.string.VAL_ON, (String)null), new Choice(R.string.VAL_OFF, "0")),
+                   new Choice(R.string.VAL_ON, (String)null), new Choice(R.string.VAL_OFF, "0")).shared(),
+        // XBA-181: the GBA, PS1 and N64 picture (ConsoleVideo; a game can have its own, scale_<KEY> / filter_<KEY>).
+        new Option(Section.GRAPHICS, R.string.OPT_CSCALE, R.string.OPT_CSCALE_DETAIL, keys(ConsoleVideo.ENV_SCALE),
+                   new Choice(R.string.VAL_CSCALE_ASPECT, (String)null),
+                   new Choice(R.string.VAL_CSCALE_INTEGER, ConsoleVideo.SCALE_INTEGER),
+                   new Choice(R.string.VAL_CSCALE_STRETCH, ConsoleVideo.SCALE_STRETCH)).shared(),
+        new Option(Section.GRAPHICS, R.string.OPT_CFILTER, R.string.OPT_CFILTER_DETAIL, keys(ConsoleVideo.ENV_FILTER),
+                   new Choice(R.string.VAL_CFILTER_CONSOLE, (String)null),
+                   new Choice(R.string.VAL_CFILTER_NEAREST, ConsoleVideo.FILTER_NEAREST),
+                   new Choice(R.string.VAL_CFILTER_LINEAR, ConsoleVideo.FILTER_LINEAR)).shared(),
         new Option(Section.GRAPHICS, R.string.OPT_GPU, R.string.OPT_GPU_DETAIL,
                    keys("RECOMP_GPU"),
                    new Choice(R.string.VAL_AUTO, (String)null), new Choice(R.string.VAL_GPU_CPU, "0"),
@@ -138,7 +162,7 @@ final class RecompConfig {
         new Option(Section.AUDIO, R.string.OPT_AUDIO_BUF, R.string.OPT_AUDIO_BUF_DETAIL,
                    keys("RECOMP_AUDIO_BUF_SAMPLES"),
                    new Choice(R.string.VAL_BUF_SHORT, "256"), new Choice(R.string.VAL_BUF_NORMAL, (String)null),
-                   new Choice(R.string.VAL_BUF_LONG, "1024"), new Choice(R.string.VAL_BUF_LONGEST, "2048")),
+                   new Choice(R.string.VAL_BUF_LONG, "1024"), new Choice(R.string.VAL_BUF_LONGEST, "2048")).shared(),
         new Option(Section.ADVANCED, R.string.OPT_RASTER, R.string.OPT_RASTER_DETAIL,
                    keys("RECOMP_RASTER_THREADS"),
                    new Choice(R.string.VAL_AUTO, (String)null), new Choice(R.string.VAL_1, "1"),
@@ -161,6 +185,41 @@ final class RecompConfig {
                 out.add(o);
         }
         return out;
+    }
+
+    /**
+     * The options of one Settings tab, in the order shown (XBA-181): in Graphics and Audio, where both kinds are, the
+     * ones every console reads first, then the Xbox's own (each group under its label); elsewhere as listed.
+     */
+    static List<Option> tabOptions(List<Option> shown, Section section) {
+        List<Option> all = new ArrayList<>(), out = new ArrayList<>();
+        for (Option o : shown) {
+            if (o.section == section)
+                all.add(o);
+        }
+        if (!grouped(all, section))
+            return all;
+        for (Option o : all)
+            if (o.shared)
+                out.add(o);
+        for (Option o : all)
+            if (!o.shared)
+                out.add(o);
+        return out;
+    }
+
+    /** The tab shows « All consoles » and « Xbox only » labels: Graphics or Audio with options of both kinds. */
+    static boolean grouped(List<Option> tab, Section section) {
+        if (section != Section.GRAPHICS && section != Section.AUDIO)
+            return false;
+        boolean any = false, xbox = false;
+        for (Option o : tab) {
+            if (o.section != section)
+                continue;
+            any |= o.shared;
+            xbox |= !o.shared;
+        }
+        return any && xbox;
     }
 
     private final File file;

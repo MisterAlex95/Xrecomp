@@ -79,7 +79,7 @@
     <string name="LIB_ST_PACK_DETAIL">Ce que la préparation a construit pour ce jeu. Une fois supprimé, le jeu doit être préparé à nouveau (20 à 60 minutes).</string>
     <string name="LIB_ST_WORK_DETAIL">Les fichiers de travail de la préparation (code généré, objets). Utiles seulement pour reprendre ou refaire une préparation plus vite.</string>
     <string name="LIB_ST_CACHES_DETAIL">Les caches propres au jeu (Z:, les partitions de cache, E:\\CACHE), mis de côté pendant qu\'un autre jeu tourne. Le jeu les reconstruit au démarrage suivant, ce qui peut prendre quelques minutes.</string>
-    <string name="LIB_ST_SAVES_DETAIL">Vos parties sauvegardées pour ce titre (UDATA, TDATA). Des sauvegardes supprimées ne se récupèrent pas.</string>
+    <string name="LIB_ST_SAVES_DETAIL">Vos parties sauvegardées pour ce titre. Des sauvegardes supprimées ne se récupèrent pas.</string>
     <string name="LIB_ST_DELETE_CONFIRM">Appuyez à nouveau sur A dans les 5 secondes pour le supprimer.</string>
     <string name="LIB_ST_SAVES_CONFIRM">Vos sauvegardes seront définitivement perdues. Appuyez à nouveau sur A dans les 5 secondes pour les supprimer.</string>
     <string name="LIB_ST_EMPTY">Rien n\'est encore stocké.</string>

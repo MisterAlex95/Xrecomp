@@ -79,6 +79,26 @@ public class StorageTest {
         assertEquals(20, Storage.measure(l.get(4)));
     }
 
+    /** XBA-181: a PS1 game's saves are save/ps1-&lt;KEY&gt;/ (its memory cards), listed and deleted on their own. */
+    @Test
+    public void consoleGameSaves() throws Exception {
+        String ps1 = "ps1-SLUS-01234", n64 = "n64-NSME-635A2BFF";
+        TestSupport.write(new File(d.saveDir(), ps1 + "/card1.mcr"), new byte[128]);
+        TestSupport.write(new File(d.saveDir(), "UDATA/4d5300d1/save.bin"), new byte[20]);
+        TestSupport.write(new File(d.workDir(ps1), "gen/a.c"), new byte[30]);
+        List<Storage.Item> l = Storage.items(d, ps1, null);
+        assertEquals(List.of(Storage.Kind.WORK, Storage.Kind.SAVES), kinds(l));
+        Storage.Item saves = l.get(1);
+        assertEquals(List.of(new File(d.saveDir(), ps1)), saves.files);
+        assertEquals(128, Storage.measure(saves));
+        assertTrue(Storage.titles(d, new Library.Games()).contains(ps1));
+        assertFalse(Storage.titles(d, new Library.Games()).contains(n64));
+        Storage.delete(d, saves, null);
+        assertFalse(new File(d.saveDir(), ps1).exists());
+        assertTrue("the Xbox game's saves stay", new File(d.saveDir(), "UDATA/4d5300d1/save.bin").isFile());
+        assertTrue(Storage.items(d, n64, null).isEmpty());
+    }
+
     @Test
     public void aFolderReadInPlaceIsNeverListedNorDeleted() throws Exception {
         File dir = new File(library, "Fable");

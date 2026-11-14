@@ -24,6 +24,9 @@
     <string name="MENU_WIDESCREEN">Widescreen</string>
     <string name="MENU_480P" translatable="false">480p</string>
     <string name="MENU_VIDEO_FOLLOW">As in Settings</string>
+    <!-- XBA-181: a GBA, PS1 or N64 game's own scale and filter, from its next start. -->
+    <string name="MENU_SCALE">Scale (next start)</string>
+    <string name="MENU_FILTER">Filter (next start)</string>
     <string name="MENU_BACK">Back</string>
     <string name="MENU_HINT_SELECT">Select</string>
     <string name="MENU_HINT_BACK">Back</string>

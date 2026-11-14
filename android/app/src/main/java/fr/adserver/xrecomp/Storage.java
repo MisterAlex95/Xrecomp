@@ -94,6 +94,11 @@ final class Storage {
     /** The save folders of a title: UDATA/<tid> and TDATA/<tid> (the kernel names them in lower case). */
     static List<File> saves(Dirs d, String tid) {
         List<File> l = new ArrayList<>();
+        if (Console.ofKey(tid) != Console.XBOX) {
+            // A GBA, PS1 or N64 game (XBA-181): save/<console>-<KEY>/ (game.sav, card1.mcr, game.eep, pak1.mpk...).
+            l.add(new File(d.saveDir(), tid));
+            return l;
+        }
         for (String area : new String[] { "UDATA", "TDATA" }) {
             File a = new File(d.saveDir(), area);
             String[] names = a.list();
@@ -174,6 +179,13 @@ final class Storage {
                     if (t != null)
                         s.add(t);
                 }
+            }
+        }
+        String[] consoleSaves = d.saveDir().list();   // save/gba-<KEY>/, ps1-<KEY>/, n64-<KEY>/
+        if (consoleSaves != null) {
+            for (String n : consoleSaves) {
+                if (Console.ofKey(n) != Console.XBOX && new File(d.saveDir(), n).isDirectory())
+                    s.add(n);
             }
         }
         String owner = SaveCaches.owner(d.ownerFile());

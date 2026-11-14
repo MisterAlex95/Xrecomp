@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- XBA-181: options shared by every console (Settings' « All consoles » rows) and a GBA, PS1 or N64 game's own
+     Options (its Home's « Options »). -->
+<resources>
+    <string name="SET_GROUP_ALL">Toutes les consoles</string>
+    <string name="SET_GROUP_XBOX">Xbox seulement</string>
+
+    <string name="OPT_CSCALE">Mise à l\'échelle</string>
+    <string name="OPT_CSCALE_DETAIL">Comment un jeu Game Boy Advance, PlayStation ou Nintendo 64 remplit l\'écran. Garder les proportions : le plus grand possible dans sa forme, avec des bords. Pixels entiers : un multiple entier de son image, tous les pixels de la même taille ; plus net, avec des bords plus larges. Étirer : tout l\'écran, déformé. Un jeu peut avoir la sienne (ses Options). S\'applique au prochain lancement d\'un jeu. (RECOMP_SCALE)</string>
+    <string name="VAL_CSCALE_ASPECT">Garder les proportions</string>
+    <string name="VAL_CSCALE_INTEGER">Pixels entiers</string>
+    <string name="VAL_CSCALE_STRETCH">Étirer</string>
+    <string name="OPT_CFILTER">Filtre de l\'image</string>
+    <string name="OPT_CFILTER_DETAIL">Comment l\'image d\'un jeu Game Boy Advance, PlayStation ou Nintendo 64 est agrandie. Net : des pixels carrés, comme sur l\'écran de la console. Lissé : des contours adoucis. Selon la console : net pour la Game Boy Advance, lissé pour la PlayStation et la Nintendo 64. Un jeu peut avoir le sien (ses Options). S\'applique au prochain lancement d\'un jeu. (RECOMP_FILTER)</string>
+    <string name="VAL_CFILTER_CONSOLE">Selon la console</string>
+    <string name="VAL_CFILTER_NEAREST">Net</string>
+    <string name="VAL_CFILTER_LINEAR">Lissé</string>
+    <string name="OPT_RUMBLE">Vibration de la manette</string>
+    <string name="OPT_RUMBLE_DETAIL">Activée : la manette vibre quand le jeu le demande (la DualShock de la PlayStation, le Rumble Pak de la Nintendo 64, la manette Xbox). Désactivée : jamais. Pour toutes les consoles. S\'applique au prochain lancement d\'un jeu. (RECOMP_RUMBLE)</string>
+
+    <string name="ROM_OPTIONS">Options</string>
+    <string name="ROM_OPT_PICTURE">L\'image de ce jeu</string>
+    <string name="ROM_OPT_DATA">Données du jeu</string>
+    <string name="ROM_OPT_FOLLOW">Comme les Réglages (%1$s)</string>
+    <string name="ROM_OPT_SCALE_DETAIL">Comment ce jeu remplit l\'écran : comme dans Réglages › Graphismes › Mise à l\'échelle, ou la sienne. Garder les proportions : le plus grand possible dans sa forme. Pixels entiers : tous les pixels de la même taille, des bords plus larges. Étirer : tout l\'écran, déformé. S\'applique au prochain lancement du jeu. (RECOMP_SCALE)</string>
+    <string name="ROM_OPT_FILTER_DETAIL">Comment l\'image de ce jeu est agrandie : comme dans Réglages › Graphismes › Filtre de l\'image, ou le sien. Net : des pixels carrés. Lissé : des contours adoucis. S\'applique au prochain lancement du jeu. (RECOMP_FILTER)</string>
+    <string name="ROM_OPT_SAVED">Enregistré pour ce jeu</string>
+    <string name="ROM_OPT_SAVED_RUNNING">Enregistré pour ce jeu ; s\'applique au prochain lancement du jeu</string>
+</resources>

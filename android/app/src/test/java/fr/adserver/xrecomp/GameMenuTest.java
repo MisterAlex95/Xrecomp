@@ -712,6 +712,59 @@ public class GameMenuTest {
         assertEquals(Boolean.TRUE, GameVideo.titleChoice(activity, "4D5300D1", p));
     }
 
+    /**
+     * XBA-181: a GBA game launched after an Xbox game. The menu keys its per-game rows on the GBA game's library key,
+     * not on the Xbox game still remembered as chosen: no Language, Widescreen or 480p (the Xbox's), Scale and Filter
+     * instead, saved for the GBA game (scale_&lt;KEY&gt;, filter_&lt;KEY&gt;); Volume, Perf overlay and Screenshot stay.
+     */
+    @Test
+    public void consoleGameRowsAfterAnXboxGame() throws Exception {
+        java.io.File dir = new java.io.File(activity.getFilesDir(), "xbox-then-gba");
+        TestSupport.write(new java.io.File(dir, "default.xbe"), TestSupport.xbe(0x4D5300D1, "Game"));
+        GameStore.remember(activity, dir.getPath(), "Game");
+        String key = "gba-AXVE-1A2B3C4D";
+        GameStore.rememberRomLaunch(activity, "/sdcard/roms/quest.gba", "Pocket Quest", key);
+        menu.release();
+        build();
+        menu.open("Back");
+        assertNotNull(menu.row(GameMenu.Item.SCREENSHOT));
+        menu.row(GameMenu.Item.SETTINGS).performClick();
+        assertNull(menu.row(GameMenu.Item.LANGUAGE));
+        assertNull(menu.row(GameMenu.Item.WIDESCREEN));
+        assertNull(menu.row(GameMenu.Item.P480));
+        assertNotNull(menu.row(GameMenu.Item.VOLUME));
+        assertNotNull(menu.row(GameMenu.Item.PERF));
+        Widgets.MenuRow scale = menu.row(GameMenu.Item.SCALE), filter = menu.row(GameMenu.Item.FILTER);
+        assertNotNull(scale);
+        assertNotNull(filter);
+        assertEquals(activity.getString(R.string.MENU_VIDEO_FOLLOW), scale.value);
+        scale.performClick();
+        assertEquals("aspect", ConsoleVideo.gameChoice(activity, key, ConsoleVideo.Setting.SCALE));
+        scale.performClick();
+        assertEquals("integer", ConsoleVideo.gameChoice(activity, key, ConsoleVideo.Setting.SCALE));
+        assertEquals(activity.getString(R.string.VAL_CSCALE_INTEGER), scale.value);
+        filter.performClick();
+        assertEquals("nearest", ConsoleVideo.gameChoice(activity, key, ConsoleVideo.Setting.FILTER));
+        assertNull("nothing under the Xbox game's ID", ConsoleVideo.gameChoice(activity, "4D5300D1",
+                                                                            ConsoleVideo.Setting.SCALE));
+        assertNull(GameLanguage.titleChoice(activity, "4D5300D1"));
+    }
+
+    /** XBA-181: an Xbox game has no console Scale / Filter rows. */
+    @Test
+    public void noConsoleRowsForAnXboxGame() throws Exception {
+        java.io.File dir = new java.io.File(activity.getFilesDir(), "xbox-only");
+        TestSupport.write(new java.io.File(dir, "default.xbe"), TestSupport.xbe(0x4D5300D1, "Game"));
+        GameStore.remember(activity, dir.getPath(), "Game");
+        menu.release();
+        build();
+        menu.open("Back");
+        menu.row(GameMenu.Item.SETTINGS).performClick();
+        assertNotNull(menu.row(GameMenu.Item.LANGUAGE));
+        assertNull(menu.row(GameMenu.Item.SCALE));
+        assertNull(menu.row(GameMenu.Item.FILTER));
+    }
+
     @Test
     public void controlsPage() {
         menu.open("Back");
