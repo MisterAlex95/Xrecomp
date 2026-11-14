@@ -12,7 +12,8 @@ package fr.adserver.xrecomp;
  * files nor source, the game leaves the grid (its pack and saves stay visible in Storage).
  *
  * A game of another console than the Xbox (XBA-178): Not playable yet while it is in a library folder (no Prepare, no
- * launch until its console's runtime exists), else GONE.
+ * launch until its console's runtime exists), else GONE. A console that plays its files as they are (the GBA,
+ * XBA-157): Running, No file access, else Ready while it is in a library folder, else GONE.
  */
 final class GameState {
     private GameState() {}
@@ -63,8 +64,15 @@ final class GameState {
     }
 
     static Chip chip(Facts f) {
-        if (f.console != Console.XBOX)
-            return f.source == Source.MISSING ? Chip.GONE : Chip.NOT_PLAYABLE_YET;
+        if (f.console != Console.XBOX) {
+            if (f.source == Source.MISSING)
+                return Chip.GONE;
+            if (!f.console.directLaunch())
+                return Chip.NOT_PLAYABLE_YET;
+            if (f.titleId.equals(f.runningTid))
+                return Chip.RUNNING;
+            return f.source == Source.NO_ACCESS ? Chip.NO_FILE_ACCESS : Chip.READY;
+        }
         if (f.titleId.equals(f.runningTid))
             return Chip.RUNNING;
         boolean packValid = f.pack == Pack.Check.VALID && f.packMatches;

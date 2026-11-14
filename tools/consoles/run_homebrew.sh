@@ -66,7 +66,7 @@ n64_cmd='Xvfb :99 -screen 0 640x480x24 -nolisten tcp >/run/xvfb.txt 2>&1 &
   python3 /run/decode_block.py --endian big --name "$NAME" --test-id "$TESTID" </run/out.txt \
     || { echo "  --- poller / ares output"; cat /run/out.txt /run/ares.txt | grep -v "^XBA-BLOCK" | tail -n 15; exit 1; }'
 
-declare -A testid=([hello]=HELO [cpu]="CPU " [timer_irq]=TIRQ [gfx]="GFX " [overlay]="OVL " [iwram_copy]=IWRM)
+declare -A testid=([hello]=HELO [cpu]="CPU " [timer_irq]=TIRQ [gfx]="GFX " [overlay]="OVL " [iwram_copy]=IWRM [pad]="PAD ")
 results=()
 failed=0
 

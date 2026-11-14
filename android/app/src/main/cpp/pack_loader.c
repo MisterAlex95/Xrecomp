@@ -236,6 +236,17 @@ int xba_pack_load_rom(const char *files_dir, const char *rom_path, int *runtime_
     default: break;
     }
     rc = recomp_pack_find_key(files_dir, console, key, xba_shell_abi, &m, lib, sizeof lib, why, sizeof why);
+    if (rc == RECOMP_PACK_MISSING && console == RECOMP_CONSOLE_GBA && start) {
+        /* The GBA runtime is an interpreter (XBA-157): no pack needed. */
+        printf("PACK_NONE %s %s (no pack needed, the interpreter runs it)\n", recomp_pack_console_name(console), key);
+        fflush(stdout);
+        why[0] = 0;
+        rc = start(rom_path, NULL, key);
+        if (runtime_rc)
+            *runtime_rc = rc;
+        rc = RECOMP_PACK_OK;
+        goto out;
+    }
     if (rc == RECOMP_PACK_MISSING) {
         snprintf(why, sizeof why, "%s-%s", recomp_pack_console_name(console), key);
         printf("PACK_MISSING %s %s (no %s/packs/%s/pack.json)\n", recomp_pack_console_name(console), key,

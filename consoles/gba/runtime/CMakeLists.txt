@@ -21,7 +21,8 @@ if(NOT TARGET gba_core)
     set_target_properties(gba_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 endif()
 
-# gba_runtime: the core + the host layer. GBA_CORE_ONLY=ON skips it (a host without SDL2 can still build and test the
+# gba_runtime: the core + the host layer (gba_runtime_run plays a game: window, pads, audio, saves, pacing; XBA-157).
+# GBA_CORE_ONLY=ON skips it (a host without SDL2 can still build and test the
 # core).
 option(GBA_CORE_ONLY "Build only gba_core and gba_run, not gba_runtime (no xbr_host / SDL2)" OFF)
 if(NOT GBA_CORE_ONLY)
@@ -34,6 +35,13 @@ if(NOT GBA_CORE_ONLY)
         target_link_libraries(gba_runtime PUBLIC gba_core xbr_host)
         target_compile_options(gba_runtime PRIVATE -Wall -Wextra)
     endif()
+endif()
+
+# gba_play: plays a ROM on a desktop through gba_runtime (window, pads, audio, saves; XBA-157).
+if(NOT ANDROID AND TARGET gba_runtime AND NOT TARGET gba_play)
+    add_executable(gba_play tools/gba_play.c)
+    target_link_libraries(gba_play PRIVATE gba_runtime)
+    target_compile_options(gba_play PRIVATE -Wall -Wextra)
 endif()
 
 # gba_run: the headless runner (desktop hosts only).

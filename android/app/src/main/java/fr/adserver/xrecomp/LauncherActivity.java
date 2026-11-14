@@ -3900,8 +3900,15 @@ public class LauncherActivity extends Activity {
         return heal == null || heal.offer == SelfHeal.Offer.IMPROVE;
     }
 
-    /** A on a card: the game's Home, in its colours (a game of another console: why it does not play yet). */
+    /**
+     * A on a card: the game's Home, in its colours (a GBA game: launched at once, XBA-157; a game of another console:
+     * why it does not play yet).
+     */
     private void openGame(LibraryScreen.Entry e) {
+        if (e.directLaunch()) {
+            launchRom(e);
+            return;
+        }
         if (notPlayableYet(e))
             return;
         selectEntry(e);
@@ -3914,7 +3921,7 @@ public class LauncherActivity extends Activity {
      * A or Start on its card says so. True when e is one.
      */
     private boolean notPlayableYet(LibraryScreen.Entry e) {
-        if (!e.otherConsole())
+        if (!e.otherConsole() || e.directLaunch())
             return false;
         Log.i(TAG, "launcher: library: " + e.tid + " (" + e.title() + ") is not playable yet");
         setNote(getString(R.string.LIB_NOT_PLAYABLE_NOTE, e.console().badge()), NOTE_INFO);
@@ -3923,10 +3930,59 @@ public class LauncherActivity extends Activity {
 
     /** Start on a card (or the bottom screen's big button): the game's primary action, without opening Home. */
     private void libraryPrimary(LibraryScreen.Entry e) {
+        if (e.directLaunch()) {
+            launchRom(e);
+            return;
+        }
         if (notPlayableYet(e))
             return;
         selectEntry(e);
         onPlay();
+    }
+
+    /**
+     * A GBA game (XBA-157): straight into the game activity with its ROM, no Home, Prepare, import or pack. The ROM is
+     * handed over as it is (GameStore.rememberRomLaunch: a path, or the document's URI that ShellActivity opens); the
+     * same ROM running is brought back, another game running is ended first (one game process at a time).
+     */
+    private void launchRom(LibraryScreen.Entry e) {
+        if (e.chip == GameState.Chip.NO_FILE_ACCESS) {
+            onChooseLibraryFolder();
+            return;
+        }
+        Library.Folder folder = e.active == null ? null : Library.folderOf(Library.folders(this), e.active);
+        String rom = romSpec(e.active, folder == null ? null : folder.tree);
+        if (rom == null) {
+            setNote(getString(R.string.LIB_SOURCE_GONE_NOTE, e.title()), NOTE_WARN);
+            return;
+        }
+        if (rom.equals(GameStore.launchedRom(this)) && gameRunning()) {
+            Log.i(TAG, "launcher: library: " + e.tid + " runs, bringing it back");
+            resumeShell();
+            return;
+        }
+        if (mainProcessPid() != 0)
+            endRunningGame();
+        GameStore.rememberRomLaunch(this, rom, e.title(), e.tid);
+        Log.i(TAG, "launcher: library: play " + e.tid + " (" + e.title() + ") from " + rom);
+        startActivity(new Intent(this, ShellActivity.class)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK));
+        finish();
+    }
+
+    /**
+     * What the game process opens for a ROM of the library: its path (« file: » item), or the document's URI under its
+     * library folder's tree (« doc: » item, Storage Access Framework); null when neither can be made.
+     */
+    static String romSpec(LibraryIndex.Item it, String tree) {
+        if (it == null || it.loc.isEmpty())
+            return null;
+        File f = LibraryIndex.locFile(it.loc);
+        if (f != null)
+            return f.getAbsolutePath();
+        if (it.loc.startsWith("doc:") && tree != null && !tree.isEmpty())
+            return DocumentsContract.buildDocumentUriUsingTree(Uri.parse(tree), it.loc.substring(4)).toString();
+        return null;
     }
 
     /** The primary action of a library game whose files are not here (State.LIBRARY). */
@@ -5083,6 +5139,8 @@ public class LauncherActivity extends Activity {
 
     /** The selected game is the one the process runs or last ran. */
     private boolean selectedIsLaunched() {
+        if (GameStore.launchedRom(this) != null)
+            return false;   // a GBA ROM runs (or ran) last: never the selected Xbox game
         String d = gameDir();
         return d != null && d.equals(launchedDir());
     }
@@ -5512,9 +5570,11 @@ public class LauncherActivity extends Activity {
      */
     private void launchShell(boolean restart) {
         boolean other = !selectedIsLaunched() && gameDir() != null;
+        boolean fromRom = GameStore.launchedRom(this) != null;   // the process runs a GBA ROM: never this game
         int pid = mainProcessPid();
-        if (pid != 0 && !restart && (other || !shellAlive())) {
-            Log.i(TAG, "launcher: main process " + pid + (other ? " runs another game" : " has no game window")
+        if (pid != 0 && !restart && (other || fromRom || !shellAlive())) {
+            Log.i(TAG, "launcher: main process " + pid + (other || fromRom ? " runs another game"
+                                                                           : " has no game window")
                        + ", restarting it");
             restart = true;
         }
@@ -5522,7 +5582,7 @@ public class LauncherActivity extends Activity {
             endRunningGame();
         String tid = titleId();
         Library.Record r = rec();
-        if (other || (r != null && tid != null && !tid.equals(GameStore.launchedTitleId(this)))) {
+        if (other || fromRom || (r != null && tid != null && !tid.equals(GameStore.launchedTitleId(this)))) {
             String dir = gameDir();
             boolean cfg = r != null && Library.KIND_CFG.equals(r.dataKind);
             GameStore.rememberLaunch(this, cfg ? null : dir, gameTitle(dir), tid);
@@ -5589,6 +5649,8 @@ public class LauncherActivity extends Activity {
 
     /** The running (or last launched) game's title, for the switch warning. */
     private String runningTitle() {
+        if (GameStore.launchedRom(this) != null && !GameStore.launchedRomTitle(this).isEmpty())
+            return GameStore.launchedRomTitle(this);
         String t = GameStore.chosenTitle(this);
         String tid = launchedTid();
         Library.Record r = tid == null ? null : games.get(tid);

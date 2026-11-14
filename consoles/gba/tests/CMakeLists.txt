@@ -54,7 +54,7 @@ set(GBA_BIOS ${GBA_REPO_ROOT}/build/gba-bios/cult-of-gba-bios.bin CACHE FILEPATH
 set(GBA_RUN_ROM ${CMAKE_CURRENT_SOURCE_DIR}/run_rom.sh)
 
 if(TARGET gba_run)
-    foreach(prog hello cpu timer_irq iwram_copy gfx)
+    foreach(prog hello cpu timer_irq iwram_copy gfx pad)
         add_test(NAME gba_hb_${prog}
             COMMAND sh ${GBA_RUN_ROM} $<TARGET_FILE:gba_run> ${GBA_HOMEBREW_DIR}/${prog}.gba --result --frames 900)
         add_test(NAME gba_hb_lle_${prog}

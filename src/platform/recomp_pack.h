@@ -113,8 +113,9 @@ const char *recomp_pack_console_name(int console);
  * A game code byte outside [A-Z0-9] becomes '_', so a key names a folder.
  * An Xbox image is none of these (the Xbox path reads it); that is how an
  * .iso is told apart: XISO magic vs ISO 9660 "PLAYSTATION". CHD is not read
- * yet. key: 24 bytes or more. Returns 0, or -1 when the file is none of
- * those. */
+ * yet. key: 24 bytes or more. path may also be "fd:N", a descriptor the app
+ * shell opened from a document (XBA-157): read from offset 0 through a dup,
+ * left open. Returns 0, or -1 when the file is none of those. */
 int recomp_pack_rom_identify(const char *path, int *console, char *key, size_t key_n);
 
 /* The pack folder's name: "<console>-<key>" for another console, the

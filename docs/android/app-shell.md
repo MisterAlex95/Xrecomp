@@ -1075,11 +1075,93 @@ time), so the stat-only rescan covers a changed track. A file named like a game 
 an « other file »; a `.chd` too for now (compressed, read once a CHD reader is in). A lone `.bin` that is no
 PlayStation disc (firmware, a dump) is ignored: kept in the index for the stat-only rescan, shown nowhere.
 
-These games show in the grid with the chip **Not playable yet** (a neutral grey dot) until their console's runtime
-exists: no Prepare, no Import, no Home; A or Start on the card says so in the note line (« GBA games are listed but
-not playable yet… ») and selects nothing. When the library holds games of more than one console, every card has a
-small badge in its art's top left corner (**Xbox**, **GBA**, **PS1**, **N64**); an Xbox-only library looks as
-before. There is no console filter.
+GBA games play: see [Game Boy Advance games](#game-boy-advance-games-xba-157). PS1 and N64 games show in the grid
+with the chip **Not playable yet** (a neutral grey dot) until their console's runtime exists: no Prepare, no Import,
+no Home; A or Start on the card says so in the note line (« PS1 games are listed but not playable yet… ») and selects
+nothing. When the library holds games of more than one console, every card has a small badge in its art's top left
+corner (**Xbox**, **GBA**, **PS1**, **N64**); an Xbox-only library looks as before. There is no console filter.
+
+### Game Boy Advance games (XBA-157)
+
+The GBA runtime (`consoles/gba/runtime`, an interpreter: `gba_core.h` on the host layer) plays a ROM as it is: no
+Prepare, no Import, no pack, no Home. A GBA card is **Ready** (no chip) while its file is in a library folder,
+**Running** while it runs, **No file access** when its folder cannot be read (A then asks for the folder again).
+
+- **Launch.** A or Start on the card (or the bottom screen's Play) starts the game activity at once
+  (`LauncherActivity.launchRom`): the ROM becomes the launched game (`GameStore.rememberRomLaunch`: preference `rom`,
+  the library key `gba-<KEY>` as `title_id`; the Xbox game's `game_dir` stays, so the launcher's one-game rules are
+  unchanged and any Xbox Play clears `rom`). The same ROM running is brought back; another game running is ended
+  first (one game process at a time). The launcher finishes, as for Play.
+- **The ROM reaches the runtime** as `RECOMP_GAME_DIR`: its path for a folder read as files, or, for a folder seen
+  through the Storage Access Framework, its document URI (`<tree>/document/<id>`), which `ShellActivity` opens and
+  hands over as `fd:N` (detached; the runtime reads it from offset 0; unreachable: `fd:-1`). `shell_main.c` sees a
+  game of another console (`xba_pack_rom_console`, which reads `fd:N` too), turns off the Xbox disc mount for that
+  process (`RECOMP_DISC_IMAGE=0`: the mount would close the descriptor) and calls `xba_pack_load_rom`; without a pack
+  that is `PACK_NONE gba <KEY> (no pack needed, the interpreter runs it)` and `gba_runtime_start(rom, NULL, key)`.
+  A pack's library would be ignored for now.
+- **Picture.** 240 x 160 RGB555 converted to RGBA and presented through `host_window` (GL ES 3.0), letterboxed at
+  the largest size of the GBA's aspect, sharp pixels (nearest). `RECOMP_GBA_SCALE=integer` (recomp.cfg) keeps every
+  pixel the same size (6x on the Thor's 1080p screen: 1440 x 960), `RECOMP_GBA_FILTER=linear` smooths.
+- **Controls.** Every connected pad drives the GBA (the Thor's own controls and an external pad alike), Xbox layout:
+  A → A, B → B (and Y → A, X → B, a second pair under the thumb), LB / RB → L / R (the triggers too), Start → Start,
+  Back / Select → Select, D-pad and left stick → D-pad. Back on the device opens the in-game menu, as for an Xbox
+  game. The on-screen touch pad does not drive the GBA yet.
+- **Sound.** 48 kHz stereo through `host_audio`, pulled from `gba_audio_pull` each frame (silence until the APU
+  lands behind the same call).
+- **Pacing.** The GBA's own 59.73 Hz with absolute deadlines (no drift), nudged ±2 % by the audio queue once there is
+  sound; vsync on; a stall of more than three frames resets the clock instead of running fast to catch up.
+- **Saves.** `<internal files>/save/gba-<KEY>/game.sav` (the title key: game code + CRC32 of the ROM, so two dumps
+  of one game keep separate saves). Read before the first frame; written a second after the game last wrote it
+  (`gba_save_take_dirty`), at once when the app pauses (Home, the in-game menu: from the thread that pauses, since
+  Android parks the game thread in the background), and at exit (also from the menu's Quit, through the exit hook).
+  Written through `game.sav.tmp` + rename, and only when it changed since it was read or last written.
+- **Lifecycle.** Home pauses the game (no frame runs, audio paused) and resumes it where it was; the in-game menu
+  holds it the same way; its Quit ends the process (« clean exit »). A ROM that cannot be read (moved, permission
+  gone) sends the player back to the launcher with « The game ended: the game file cannot be read ».
+- **Options** (recomp.cfg): `RECOMP_GBA_BIOS=/path/to/bios.bin` uses a 16 KB BIOS image of your own instead of the
+  built-in one (never shipped with the app); `RECOMP_GBA_SCALE`, `RECOMP_GBA_FILTER` as above; `RECOMP_GBA_FRAMES=N`
+  stops after N frames (checks).
+
+On a desktop the same runtime plays a ROM with `gba_play` (consoles/README.md), which is where a game is checked
+before the device.
+
+### Device check (GBA games, XBA-157), for Alex
+
+On the AYN Thor, `adb logcat -s xboxrecomp SDL` throughout. The homebrew ROMs come from
+`tools/consoles/build_homebrew.sh gba out/hb` (Docker; `out/hb/gba/pad.gba`, `gfx.gba`, `hello.gba`...). Copy them to
+the device's own GBA folder: `adb shell mkdir -p /sdcard/gba && adb push out/hb/gba/pad.gba out/hb/gba/gfx.gba
+out/hb/gba/hello.gba /sdcard/gba/` (or over USB file transfer into `Internal storage/gba`).
+
+1. Install the APK. If `/sdcard/gba` is not a library folder yet: Y › Library folders › Add a folder › `gba`.
+   Expected: the GBA cards (« pad », « gfx », « hello »: the file names) with the **GBA** badge when Xbox games are
+   listed too, and **no** chip (Ready). PS1 / N64 cards still read « Not playable yet ».
+2. A on the **pad** card. Expected: the game starts at once, fullscreen, landscape, no Home screen; « XBA PAD + SAVE »
+   at the top, the frame counter `F…` moving. logcat: `launcher: library: play gba-XBAT-… from /storage/…/pad.gba`,
+   `PACK_NONE gba XBAT-…`, `gba: window on (aspect, nearest), audio on, pads 1` (or more with an external pad).
+   Screenshot.
+3. Press each control and check its line shows `> NAME` while held: A → A, B → B, Y → A, X → B, LB → L, RB → R,
+   LT → L, RT → R, Start → START, Select → SELECT, D-pad → UP / DOWN / LEFT / RIGHT; the left stick moves the `*`
+   like the D-pad. Note any control that does nothing or the wrong thing.
+4. Speed: the counter climbs about 60 per second (time 10 s with a stopwatch: about 597). logcat at quit gives the
+   exact rate (`gba: N frames in S s (59.7x fps)`).
+5. Press A five times: the count reads 5. Home, wait 5 s, reopen XRecomp from recents: the game is where it was, the
+   counter did not move while away. logcat: `gba: paused at frame …`, `gba: save written (32768 bytes, pause) …`,
+   `gba: resumed`.
+6. Back: the in-game menu opens (the game holds); Quit game, confirm. logcat: `clean exit`. A on the pad card again:
+   the count reads 5 (`gba: save loaded (32768 bytes) from /data/user/0/…/files/save/gba-XBAT-…/game.sav`).
+7. While the pad game runs, open the launcher (Home, then the XRecomp icon if it shows the launcher) and start an Xbox
+   game: the GBA game ends, the Xbox game starts as before. Then A on the pad card: the Xbox game ends, the GBA one
+   starts.
+8. A on the **gfx** card: a colour gradient with a white and a black rectangle and a magenta diagonal after a moment
+   (a tiles-and-sprites scene first). Screenshot. Try `RECOMP_GBA_SCALE=integer` in recomp.cfg: smaller, black
+   borders all round, crisp pixels.
+9. A library folder added with the file picker (no All files access): the pad game starts the same (logcat
+   `shell: ROM document content://… -> fd:N`).
+10. One of your own cartridge dumps (`.gba`, kept outside every repository): copy it to `/sdcard/gba`, Y (rescan), A
+    on its card. Note: does it boot, is the picture right, do the controls work, does it hold 60 fps (logcat at
+    quit), and, after saving in the game, quitting and starting again, is the save there (`save loaded`). Sound
+    stays silent until the APU work lands; some games may still crash or show wrong graphics (the core is new):
+    send the logcat and a screenshot.
 
 ### The library screen
 
@@ -1227,9 +1309,10 @@ imported, Prepare now, queue, Storage, two folders with a GBA game and Options �
 2. Y › **Library folders**: one row « xbox » (« Internal storage »), then **Add a folder**. Add `/sdcard/gba`, then
    `/sdcard/ps1` and `/sdcard/n64` the same way: after each, the library rescans (logcat `launcher: library: scan of
    N folders: …`) and the new games appear, sorted by title among the Xbox ones.
-3. Every card now has a badge (Xbox, GBA, PS1, N64); GBA / PS1 / N64 games read **Not playable yet** (grey dot); a
-   PS1 disc as `.cue` + `.bin` tracks is one card; the same N64 game in `.z64` and `.v64` is one card.
-4. A on a GBA card: the note « GBA games are listed but not playable yet… », no Home; Start the same. The Xbox games
+3. Every card now has a badge (Xbox, GBA, PS1, N64); PS1 / N64 games read **Not playable yet** (grey dot; GBA games
+   play since XBA-157, see its own check); a PS1 disc as `.cue` + `.bin` tracks is one card; the same N64 game in
+   `.z64` and `.v64` is one card.
+4. A on a PS1 card: the note « PS1 games are listed but not playable yet… », no Home; Start the same. The Xbox games
    open, prepare and play as before.
 5. Y twice (rescan): quick, `… 0 opened, N unchanged`.
 6. Y › Library folders: four rows. A on « gba » › **Keep it** (focused first): nothing changes. A on « gba » ›
@@ -1238,7 +1321,7 @@ imported, Prepare now, queue, Storage, two folders with a GBA game and Options �
 7. Without All files access (system settings off), add a folder with **Use the file picker**: its games are listed;
    the folders read by path show **No file access** on their Xbox games until access is back.
 8. In French: « Dossiers de la bibliothèque », « Ajouter un dossier », « Pas encore jouable ».
-9. Bottom screen (Thor): on a GBA card its title and « Not playable yet », no action button.
+9. Bottom screen (Thor): on a PS1 card its title and « Not playable yet », no action button; on a GBA card, Play.
 
 ## Prepare on the device (the app side)
 

@@ -28,13 +28,14 @@ app): GBA game code + CRC32 of the ROM (`AXVE-1A2B3C4D`), PS1 serial from `SYSTE
 `PSX-<CRC32 of the volume descriptor>` without a serial-shaped boot file), N64 game code + header CRC1
 (`NSME-635A2BFF`, any byte order). Such a pack lives in `packs/<console>-<key>/`. The app shell's loader
 (`android/app/src/main/cpp/pack_loader.c`, `xba_pack_load_rom`) checks it and calls `<console>_runtime_start`, a
-stub that logs `<console> runtime ready` for now (libmain.so links the three runtimes). Import filter (`Console.java`):
+stub that logs `<console> runtime ready` for now (libmain.so links the three runtimes); the GBA's plays the game, and
+needs no pack (`PACK_NONE`, XBA-157). Import filter (`Console.java`):
 `.gba`; `.bin`, `.cue`, `.chd`; `.z64`, `.n64`, `.v64`; and `.iso`, which both an Xbox and a PS1 disc use, so its
 content decides (Xbox volume magic `MICROSOFT*XBOX*MEDIA` first, then an ISO 9660 volume with system ID
 `PLAYSTATION`). CHD is accepted by name but not read yet (no title key).
 
 CMake options `XBR_CONSOLE_GBA`, `XBR_CONSOLE_PS1` and `XBR_CONSOLE_N64` are ON by default on Linux and macOS and OFF
-on Android and Windows. A console is turned on for Android once it is ready.
+on Android and Windows. A console is turned on for Android once it is ready: the GBA is (XBA-157).
 
 **GBA core (XBA-152, XBA-153).** Interpreter first (decision of 2026-11-14, XBA-142); the static lifter comes later as an
 acceleration layer. `consoles/gba/runtime/gba_core.h`: an ARM7TDMI interpreter (ARM + Thumb), the memory map, LCD
@@ -44,6 +45,28 @@ SWIs in C). Direct boot by default. The PPU (`gba_ppu.h`) is a pure line rendere
 visible line. CMake target `gba_core` is the machine alone (C11 + libm, no SDL), `gba_runtime` adds the host layer;
 `gba_run ROM [--result] [--bios PATH] [--ppm OUT]` runs a ROM headless. Tests: `consoles/gba/tests/CMakeLists.txt`
 (unit tests, our homebrew HLE and LLE, jsmolka/gba-tests fetched by `tools/consoles/fetch_gba_tests.sh`).
+
+**Playing a GBA game (XBA-157).** `gba_runtime_run` (`gba_runtime.h`) plays a ROM on the host layer: `host_window`
+(RGB555 → RGBA texture, letterboxed, aspect or integer scaling, nearest or linear), every `host_pad` controller in
+the Xbox layout (A → A, B → B, Y → A, X → B, shoulders and triggers → L / R, Start, Back → Select, D-pad and left
+stick → D-pad), `host_audio` fed from `gba_audio_pull`, pacing at 59.73 Hz with absolute deadlines nudged by the
+audio queue, saves in `<save dir>/gba-<KEY>/game.sav` (read at start, written a second after the game's last write,
+at pause and at exit), pause and resume with `recomp_lifecycle`. The ROM is a path or `fd:N`. The Android app calls
+it through `gba_runtime_start` with no pack (the GBA is ON for Android: [app-shell.md](../docs/android/app-shell.md)
+« Game Boy Advance games »). On a desktop:
+
+```sh
+cmake -S consoles/gba/tests -B build/gba && cmake --build build/gba     # or the root build (XBR_CONSOLE_GBA ON)
+build/gba/gba_runtime/gba_play game.gba          # keyboard: arrows, X = A, Z = B, A = L, S = R, Enter, Backspace
+build/gba/gba_runtime/gba_play game.gba --scale integer --save-dir /tmp/saves
+SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy build/gba/gba_runtime/gba_play game.gba --frames 600 --screenshot last.ppm
+xvfb-run -a build/gba/gba_runtime/gba_play gfx.gba --frames 240 --capture 200 present.ppm   # the real present path
+```
+
+Saves default to `$XDG_DATA_HOME/xrecomp/save` (else `~/.local/share/xrecomp/save`); `--bios PATH` or
+`RECOMP_GBA_BIOS` uses a BIOS image of your own; every option is listed at the top of `runtime/tools/gba_play.c`. The
+homebrew `pad.gba` (`consoles/gba/tests/homebrew/pad`) shows the keys held and keeps a counter in SRAM: the controls
+and saves check on a real host.
 
 **Legal**: no ROM, disc image, BIOS or game data in this repository, its CI or its artifacts. Tests use homebrew we
 build ourselves (devkitARM / libtonc, PSn00bSDK, libdragon) and dumps Alex made from his own media, kept outside every

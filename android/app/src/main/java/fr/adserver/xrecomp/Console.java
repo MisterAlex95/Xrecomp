@@ -58,6 +58,20 @@ enum Console {
     }
 
     /**
+     * Its games play in this build (XBA-157): the Xbox (through Prepare and a pack) and the Game Boy Advance (its
+     * runtime is an interpreter: no Prepare, no pack, the ROM goes to the game activity as it is). PS1 and N64 are
+     * listed, « Not playable yet ».
+     */
+    boolean playable() {
+        return this == XBOX || this == GBA;
+    }
+
+    /** A game of this console starts from its file as it is, no Prepare or import (the GBA). */
+    boolean directLaunch() {
+        return this == GBA;
+    }
+
+    /**
      * The console of a library key (games.json's and the index's game key, docs « Game library »): « gba-… »,
      * « ps1-… », « n64-… » (packDirName) for the other consoles; anything else is an Xbox title ID or « local-… ».
      */

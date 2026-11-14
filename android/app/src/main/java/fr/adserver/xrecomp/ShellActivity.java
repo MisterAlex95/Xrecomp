@@ -58,9 +58,19 @@ public class ShellActivity extends SDLActivity {
         /* The chosen game folder, as RECOMP_GAME_DIR, before SDLActivity starts anything: SDL_main runs later on
          * SDLThread, and recomp_app_start reads it in recomp_storage_resolve. The process environment is libc's, so
          * native getenv sees it. Set here, it wins over a RECOMP_GAME_DIR line in recomp.cfg. */
-        String dir = GameStore.chosenDir(this);
+        String rom = GameStore.launchedRom(this);
+        String dir = rom != null ? rom : GameStore.chosenDir(this);
+        /* A GBA ROM launched from the library (XBA-157) may be a document of a library folder seen through the Storage
+         * Access Framework: opened here, its descriptor handed over as "fd:N" (detached: the game process keeps it for
+         * its life; the runtime reads it from offset 0). Unreachable: "fd:-1", which the runtime reports. */
+        if (rom != null && rom.startsWith("content:")) {
+            String spec = romDescriptor(rom, DiscImages.contentOpener(this));
+            Log.i(LauncherActivity.TAG, "shell: ROM document " + rom + " -> " + (spec != null ? spec : "unreachable"));
+            dir = spec != null ? spec : "fd:-1";
+        }
         /* A game of another console (XBA-147) is a file, handed over as it is: the native side reads its console and
-         * title key and gives its pack to that console's runtime (pack_loader.c). Said here for the device check. */
+         * title key and gives it to that console's runtime (pack_loader.c; the GBA needs no pack). Said here for the
+         * device check. */
         if (dir != null && new File(dir).isFile()) {
             Pack.Route r = Pack.route(getFilesDir(), new File(dir));
             if (r != null && r.console != Console.XBOX)
@@ -70,7 +80,7 @@ public class ShellActivity extends SDLActivity {
          * the image itself, its path or fds opened here from the persisted documents. Opened again at every
          * process start, so a quick reboot or a hand-over to another image (both a new process) finds it too.
          * Unreachable (SD card out, permission gone): "fd:-1", which the runtime reports as no game data. */
-        DiscImages.Disc disc = dir == null ? null : DiscImages.read(new java.io.File(dir));
+        DiscImages.Disc disc = dir == null || rom != null ? null : DiscImages.read(new java.io.File(dir));
         if (disc != null) {
             String spec = DiscImages.runtimeSpec(disc, DiscImages.contentOpener(this));
             Log.i(LauncherActivity.TAG, "shell: disc image " + DiscImages.label(disc) + " (" + disc.kind + ") -> "
@@ -102,6 +112,17 @@ public class ShellActivity extends SDLActivity {
             panel = new CompanionPanel(ctx, new NativeSink(), ShellActivity::stats);
             return panel;
         }, new KeyForwarder());
+    }
+
+    /** "fd:N" for a ROM document (its descriptor detached, the caller's to keep), or null when it cannot be opened. */
+    static String romDescriptor(String uri, DiscImages.Opener opener) {
+        try {
+            int fd = opener.open(uri);
+            return fd >= 0 ? "fd:" + fd : null;
+        } catch (java.io.IOException | RuntimeException e) {
+            Log.w(LauncherActivity.TAG, "shell: cannot open " + uri, e);
+            return null;
+        }
     }
 
     /**

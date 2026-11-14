@@ -205,37 +205,58 @@ public class LibraryScreenTest {
         assertEquals("0.00", LibraryScreen.versionText(0));
     }
 
-    /** XBA-178: a game of another console is listed « Not playable yet », keyed by console + title key. */
+    private static LibraryIndex.Item romItem(Console c, String key, String loc, String title) {
+        LibraryIndex.Item rom = new LibraryIndex.Item();
+        rom.loc = loc;
+        rom.kind = LibraryIndex.KIND_ROM;
+        rom.name = new File(loc).getName();
+        rom.console = c;
+        rom.key = key;
+        rom.tid = c.id + "-" + key;
+        rom.title = title;
+        rom.folder = "content://tree/" + c.id;
+        return rom;
+    }
+
+    /**
+     * XBA-178 / XBA-157: a game of another console is keyed by console + title key; a GBA game is Ready (its runtime
+     * plays the ROM as it is: no Prepare, no import), Running while it runs; PS1 and N64 are « Not playable yet ».
+     */
     @Test
-    public void otherConsolesAreNotPlayableYet() throws Exception {
+    public void otherConsoles() throws Exception {
         LibraryIndex x = new LibraryIndex();
         x.items.add(iso(FABLE, "Fable", "Fable.iso", 1));
-        LibraryIndex.Item rom = new LibraryIndex.Item();
-        rom.loc = "file:/sdcard/gba/Sample.gba";
-        rom.kind = LibraryIndex.KIND_ROM;
-        rom.name = "Sample.gba";
-        rom.console = Console.GBA;
-        rom.key = "AXVE-1A2B3C4D";
-        rom.tid = "gba-AXVE-1A2B3C4D";
-        rom.title = "Sample";
-        rom.folder = "content://tree/gba";
+        LibraryIndex.Item rom = romItem(Console.GBA, "AXVE-1A2B3C4D", "file:/sdcard/gba/Sample.gba", "Sample");
         x.items.add(rom);
+        x.items.add(romItem(Console.N64, "NSME-635A2BFF", "file:/sdcard/n64/Race.z64", "Race"));
         LibraryScreen.Env env = env();
         env.toolchain = true;
         List<LibraryScreen.Entry> l = LibraryScreen.entries(files, new Library.Games(), x, env);
-        assertEquals(2, l.size());
+        assertEquals(3, l.size());
         assertEquals(FABLE, l.get(0).tid);
         assertEquals(GameState.Chip.NOT_IMPORTED, l.get(0).chip);   // the Xbox game: unchanged
-        LibraryScreen.Entry e = l.get(1);
-        assertEquals("gba-AXVE-1A2B3C4D", e.tid);
+        LibraryScreen.Entry e = LibraryScreen.entry(files, "gba-AXVE-1A2B3C4D", new Library.Games(), x, env);
         assertEquals(Console.GBA, e.console());
         assertTrue(e.otherConsole());
+        assertTrue(e.directLaunch());
         assertFalse("no Prepare, no theme, no XBE art", e.realTid());
         assertFalse(e.facts.toolchain);
-        assertEquals(GameState.Chip.NOT_PLAYABLE_YET, e.chip);
-        assertEquals(R.string.LIB_CHIP_NOT_PLAYABLE_YET, LibraryScreen.chipLabel(e.chip));
-        assertFalse(GameState.playable(e.chip));
+        assertEquals(GameState.Chip.READY, e.chip);
+        assertTrue(GameState.playable(e.chip));
         assertNull(LibraryScreen.art(files, new java.util.HashMap<>(), e));
+        env.runningTid = "gba-AXVE-1A2B3C4D";
+        assertEquals(GameState.Chip.RUNNING, LibraryScreen.entry(files, e.tid, new Library.Games(), x, env).chip);
+        env.runningTid = null;
+        env.noAccess = java.util.Collections.singleton("content://tree/gba");
+        assertEquals(GameState.Chip.NO_FILE_ACCESS, LibraryScreen.entry(files, e.tid, new Library.Games(), x, env).chip);
+        env.noAccess = java.util.Collections.emptySet();
+
+        LibraryScreen.Entry n = LibraryScreen.entry(files, "n64-NSME-635A2BFF", new Library.Games(), x, env);
+        assertEquals(Console.N64, n.console());
+        assertFalse(n.directLaunch());
+        assertEquals(GameState.Chip.NOT_PLAYABLE_YET, n.chip);
+        assertEquals(R.string.LIB_CHIP_NOT_PLAYABLE_YET, LibraryScreen.chipLabel(n.chip));
+        assertFalse(GameState.playable(n.chip));
 
         // A record left from it (games.json keyed the same way), its file gone: it leaves the grid.
         Library.Games g = new Library.Games();
@@ -244,7 +265,7 @@ public class LibraryScreenTest {
         r.title = "Sample";
         g.put(r);
         x.items.remove(rom);
-        assertEquals(1, LibraryScreen.entries(files, g, x, env).size());
+        assertEquals(2, LibraryScreen.entries(files, g, x, env).size());   // Fable and the N64 game
         assertEquals(GameState.Chip.GONE, LibraryScreen.entry(files, r.titleId, g, x, env).chip);
     }
 

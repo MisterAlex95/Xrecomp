@@ -34,6 +34,11 @@
  *   (PACK_INVALID, PACK_DLOPEN) hands back to the launcher
  *   (ShellActivity.openLauncherBadPack), which drops the pack and offers
  *   Prepare again; no pack (PACK_MISSING) goes on as below;
+ * - a Game Boy Advance ROM (RECOMP_GAME_DIR names the file, or "fd:N" for
+ *   a document; XBA-157): the GBA runtime plays it, no pack needed
+ *   (gba_runtime_start: window, pads, audio, saves under <internal>/save/
+ *   gba-<KEY>/), then the process ends (recomp_quit); a ROM that cannot be
+ *   read goes back to the launcher (exit_via_launcher);
  * - otherwise the shell's own black, fullscreen, landscape window. With
  *   default.xbe found but no title linked and no pack, a message box says
  *   so (NO_TITLE) instead of a bare black screen. When
@@ -62,6 +67,7 @@
 #include "video/video_player.h"     /* xbox_HostWindowMain */
 
 #include "pack_loader.h"
+#include "gba_runtime.h"
 
 #ifndef XBA_VERSION
 #define XBA_VERSION "dev"
@@ -260,6 +266,11 @@ static int SDLCALL lifecycle_watch(void *user, SDL_Event *ev)
 int main(int argc, char *argv[])
 {
     (void)argc; (void)argv;
+    /* A game of another console (a GBA ROM, XBA-157) named by RECOMP_GAME_DIR, a path or "fd:N" from
+     * ShellActivity: no Xbox disc image to mount from it (the mount would close that descriptor on its way out). */
+    const char *gd = getenv("RECOMP_GAME_DIR");
+    if (gd && *gd && xba_pack_rom_console(gd) != RECOMP_CONSOLE_UNKNOWN)
+        setenv("RECOMP_DISC_IMAGE", "0", 1);
     /* Start-up steps, shared with every title (recomp_app.h). */
     recomp_storage store;
     int have_game = recomp_app_start(SDL_AndroidGetExternalStoragePath(),
@@ -292,20 +303,30 @@ int main(int argc, char *argv[])
                                 pack_reason, sizeof pack_reason);
     /* Another console's game (XBA-147): RECOMP_GAME_DIR names its file (a
      * .gba, a PS1 disc, an N64 cartridge), which is no Xbox disc, so
-     * have_game is 0; its pack goes to that console's runtime (pack_loader.h).
-     * The runtimes are stubs for now: they log "<console> runtime ready" and
-     * return, and the shell stays on its idle screen. */
+     * have_game is 0; it goes to that console's runtime (pack_loader.h).
+     * The GBA runtime plays it (XBA-157: no pack needed, saves under
+     * <internal>/save/gba-<KEY>/) and returns once the player quit: the
+     * process ends then, or goes back to the launcher saying why when the
+     * game could not start. PS1 and N64 are stubs: they log "<console>
+     * runtime ready" and return, and the shell stays on its idle screen. */
     int console = !s_title_main && have_game <= 0 && store.game_dir[0] ? xba_pack_rom_console(store.game_dir)
                                                                         : RECOMP_CONSOLE_UNKNOWN;
     int console_game = console != RECOMP_CONSOLE_UNKNOWN;
     if (console_game) {
         int console_rc = -1;
+        if (console == RECOMP_CONSOLE_GBA)
+            gba_runtime_set_save_dir(store.save_dir);
         pack_rc = xba_pack_load_rom(SDL_AndroidGetInternalStoragePath(), store.game_dir, &console_rc,
                                     pack_reason, sizeof pack_reason);
         if (pack_rc == RECOMP_PACK_OK)
             printf("xboxrecomp: %s runtime returned %d\n", recomp_pack_console_name(console), console_rc);
         else
             printf("xboxrecomp: no usable pack for %s (%s)\n", store.game_dir, pack_reason);
+        if (console == RECOMP_CONSOLE_GBA && pack_rc == RECOMP_PACK_OK) {
+            if (console_rc != 0)
+                exit_via_launcher("the game file cannot be read");
+            recomp_quit(console_rc != 0 ? 1 : 0);
+        }
     }
     int run_title = have_game > 0 && s_title_main != NULL;
     if (run_title && xba_pack_image_xbe())   /* another image of the disc (XBA-82) */

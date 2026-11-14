@@ -19,7 +19,9 @@
 #define XGL_UNSIGNED_BYTE       0x1401
 #define XGL_RGBA                0x1908
 #define XGL_RGBA8               0x8058
+#define XGL_NEAREST             0x2600
 #define XGL_LINEAR              0x2601
+#define XGL_PACK_ALIGNMENT      0x0D05
 #define XGL_TEXTURE_MAG_FILTER  0x2800
 #define XGL_TEXTURE_MIN_FILTER  0x2801
 #define XGL_TEXTURE_WRAP_S      0x2802
@@ -74,6 +76,7 @@ typedef struct {
     void (APIENTRY *ActiveTexture)(unsigned);
     void (APIENTRY *DrawArrays)(unsigned, int, int);
     unsigned (APIENTRY *GetError)(void);
+    void (APIENTRY *ReadPixels)(int, int, int, int, unsigned, unsigned, void *);
 } HostGl;
 
 static SDL_Window *s_win;
@@ -87,6 +90,8 @@ static int s_quit;
 static uint64_t s_frames;
 static host_window_event_fn s_hook;
 static void *s_hook_user;
+static int s_scale = HOST_SCALE_ASPECT, s_filter = HOST_FILTER_LINEAR, s_tex_filter = -1;
+static char s_capture[1024];
 
 static int env_set(const char *name)
 {
@@ -114,7 +119,8 @@ static int load_gl(void)
     struct { void **slot; const char *name; } fns[] = {
 #define F(n) { (void **)&s_gl.n, "gl" #n }
         F(GenTextures), F(DeleteTextures), F(BindTexture), F(TexParameteri), F(TexImage2D), F(TexSubImage2D),
-        F(PixelStorei), F(Viewport), F(ClearColor), F(Clear), F(Disable), F(CreateShader), F(ShaderSource),
+        F(PixelStorei), F(ReadPixels), F(Viewport), F(ClearColor), F(Clear), F(Disable), F(CreateShader),
+        F(ShaderSource),
         F(CompileShader), F(GetShaderiv), F(GetShaderInfoLog), F(DeleteShader), F(CreateProgram),
         F(AttachShader), F(LinkProgram), F(GetProgramiv), F(GetProgramInfoLog), F(DeleteProgram),
         F(UseProgram), F(GetUniformLocation), F(Uniform1i), F(Uniform1f), F(GenVertexArrays),
@@ -323,6 +329,28 @@ int host_window_pump(void)
     return !s_quit;
 }
 
+/* host_window_capture: the drawable as drawn, before the swap, as a binary
+ * PPM (row 0 at the top). Once per request. */
+static void capture(int dw, int dh)
+{
+    unsigned char *px = malloc((size_t)dw * dh * 4);
+    FILE *f = px ? fopen(s_capture, "wb") : NULL;
+
+    if (f) {
+        s_gl.PixelStorei(XGL_PACK_ALIGNMENT, 4);
+        s_gl.ReadPixels(0, 0, dw, dh, XGL_RGBA, XGL_UNSIGNED_BYTE, px);
+        fprintf(f, "P6\n%d %d\n255\n", dw, dh);
+        for (int y = dh - 1; y >= 0; y--)
+            for (int x = 0; x < dw; x++)
+                fwrite(px + ((size_t)y * dw + x) * 4, 1, 3, f);
+        fprintf(stderr, "  [HOST] window: %dx%d drawable captured to %s\n", dw, dh, s_capture);
+    }
+    if (!f || fclose(f) != 0)
+        fprintf(stderr, "  [HOST] window: cannot write the capture %s\n", s_capture);
+    free(px);
+    s_capture[0] = 0;
+}
+
 static int draw(unsigned tex, int w, int h, int top_down)
 {
     int dw = 0, dh = 0, vw, vh;
@@ -332,8 +360,13 @@ static int draw(unsigned tex, int w, int h, int top_down)
     SDL_GL_GetDrawableSize(s_win, &dw, &dh);
     if (dw <= 0 || dh <= 0)
         return 0;
-    /* Letterbox: the largest rectangle of the picture's aspect. */
-    if ((int64_t)dw * h > (int64_t)dh * w) {
+    /* Letterbox: the largest rectangle of the picture's aspect, or of a
+     * whole multiple of its size (HOST_SCALE_INTEGER, when 1x fits). */
+    int k = dw / w < dh / h ? dw / w : dh / h;
+    if (s_scale == HOST_SCALE_INTEGER && k >= 1) {
+        vw = w * k;
+        vh = h * k;
+    } else if ((int64_t)dw * h > (int64_t)dh * w) {
         vh = dh;
         vw = (int)((int64_t)dh * w / h);
     } else {
@@ -357,6 +390,8 @@ static int draw(unsigned tex, int w, int h, int top_down)
     s_gl.DrawArrays(XGL_TRIANGLES, 0, 3);
     s_gl.BindVertexArray(0);
     unsigned err = s_gl.GetError();
+    if (s_capture[0])
+        capture(dw, dh);
     SDL_GL_SwapWindow(s_win);
     s_frames++;
     if (err) {
@@ -378,13 +413,18 @@ int host_window_present_rgba(const void *px, int w, int h, int pitch)
     if (!s_tex) {
         s_gl.GenTextures(1, &s_tex);
         s_tex_w = s_tex_h = 0;
+        s_tex_filter = -1;
     }
     s_gl.BindTexture(XGL_TEXTURE_2D, s_tex);
     s_gl.PixelStorei(XGL_UNPACK_ALIGNMENT, 4);
     s_gl.PixelStorei(XGL_UNPACK_ROW_LENGTH, pitch / 4);
+    if (s_tex_filter != s_filter) {
+        int f = s_filter == HOST_FILTER_NEAREST ? XGL_NEAREST : XGL_LINEAR;
+        s_gl.TexParameteri(XGL_TEXTURE_2D, XGL_TEXTURE_MIN_FILTER, f);
+        s_gl.TexParameteri(XGL_TEXTURE_2D, XGL_TEXTURE_MAG_FILTER, f);
+        s_tex_filter = s_filter;
+    }
     if (w != s_tex_w || h != s_tex_h) {
-        s_gl.TexParameteri(XGL_TEXTURE_2D, XGL_TEXTURE_MIN_FILTER, XGL_LINEAR);
-        s_gl.TexParameteri(XGL_TEXTURE_2D, XGL_TEXTURE_MAG_FILTER, XGL_LINEAR);
         s_gl.TexParameteri(XGL_TEXTURE_2D, XGL_TEXTURE_WRAP_S, XGL_CLAMP_TO_EDGE);
         s_gl.TexParameteri(XGL_TEXTURE_2D, XGL_TEXTURE_WRAP_T, XGL_CLAMP_TO_EDGE);
         s_gl.TexImage2D(XGL_TEXTURE_2D, 0, (int)XGL_RGBA8, w, h, 0, XGL_RGBA, XGL_UNSIGNED_BYTE, px);
@@ -395,6 +435,17 @@ int host_window_present_rgba(const void *px, int w, int h, int pitch)
     }
     s_gl.PixelStorei(XGL_UNPACK_ROW_LENGTH, 0);
     return draw(s_tex, w, h, 1);
+}
+
+void host_window_set_scaling(int scale, int filter)
+{
+    s_scale = scale == HOST_SCALE_INTEGER ? HOST_SCALE_INTEGER : HOST_SCALE_ASPECT;
+    s_filter = filter == HOST_FILTER_NEAREST ? HOST_FILTER_NEAREST : HOST_FILTER_LINEAR;
+}
+
+void host_window_capture(const char *ppm_path)
+{
+    snprintf(s_capture, sizeof s_capture, "%s", ppm_path ? ppm_path : "");
 }
 
 void *host_window_gl_proc(const char *name)
@@ -441,6 +492,7 @@ void host_window_close(void)
     s_ctx = NULL;
     s_tex = s_vao = s_prog = 0;
     s_tex_w = s_tex_h = 0;
+    s_tex_filter = -1;
     memset(&s_gl, 0, sizeof s_gl);
     SDL_QuitSubSystem(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER);
 }
