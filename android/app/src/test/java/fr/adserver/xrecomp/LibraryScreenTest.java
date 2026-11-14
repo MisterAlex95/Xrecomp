@@ -221,7 +221,7 @@ public class LibraryScreenTest {
     /**
      * XBA-178 / XBA-157: a game of another console is keyed by console + title key; a GBA game is Ready (its runtime
      * plays the ROM as it is: no import; its Prepare, XBA-158, only speeds it up), Running while it runs; a PS1 disc
-     * the same without a Prepare (XBA-168); N64 is « Not playable yet ».
+     * the same with its Prepare (XBA-168); an N64 cartridge Ready too, without a Prepare (XBA-174).
      */
     @Test
     public void otherConsoles() throws Exception {
@@ -266,12 +266,18 @@ public class LibraryScreenTest {
         assertEquals(GameState.Chip.RUNNING, LibraryScreen.entry(files, p.tid, new Library.Games(), x, env).chip);
         env.runningTid = null;
 
+        // XBA-174: an N64 cartridge launches as it is, Ready; no Prepare (no N64 recompiler yet), so no pack state.
         LibraryScreen.Entry n = LibraryScreen.entry(files, "n64-NSME-635A2BFF", new Library.Games(), x, env);
         assertEquals(Console.N64, n.console());
-        assertFalse(n.directLaunch());
-        assertEquals(GameState.Chip.NOT_PLAYABLE_YET, n.chip);
-        assertEquals(R.string.LIB_CHIP_NOT_PLAYABLE_YET, LibraryScreen.chipLabel(n.chip));
-        assertFalse(GameState.playable(n.chip));
+        assertTrue(n.directLaunch());
+        assertFalse("no Prepare", n.facts.toolchain);
+        assertEquals(GameState.Chip.READY, n.chip);
+        assertTrue(GameState.playable(n.chip));
+        env.runningTid = "n64-NSME-635A2BFF";
+        assertEquals(GameState.Chip.RUNNING, LibraryScreen.entry(files, n.tid, new Library.Games(), x, env).chip);
+        env.runningTid = null;
+        assertEquals(R.string.LIB_CHIP_NOT_PLAYABLE_YET, LibraryScreen.chipLabel(GameState.Chip.NOT_PLAYABLE_YET));
+        assertFalse(GameState.playable(GameState.Chip.NOT_PLAYABLE_YET));
 
         // A record left from it (games.json keyed the same way), its file gone: it leaves the grid.
         Library.Games g = new Library.Games();

@@ -103,4 +103,10 @@
 <!-- A PS1 game's Home (XBA-168): Play only (the interpreter); its Prepare comes with the PS1 recompiler. -->
     <string name="ROM_PS1_LINE">Plays in the interpreter</string>
     <string name="ROM_PS1_CHD_NOTE">Play starts the game from its disc, through the PlayStation BIOS the app carries (OpenBIOS). A .chd image cannot be prepared: convert it to .cue / .bin (chdman extractcd) to run it natively.</string>
+<!-- An N64 game's Home (XBA-174): Play only (the interpreter; Prepare comes with the N64 recompiler) and the accessory
+     in its controller, a choice per game. -->
+    <string name="N64_PAK_CONTROLLER">Controller pak</string>
+    <string name="N64_PAK_RUMBLE">Rumble pak</string>
+    <string name="ROM_N64_NOTE">Play starts the game from its cartridge file, no BIOS needed. Saves and the controller pak are kept for each game. The second button puts a rumble pak in the controller instead (no controller pak saves then).</string>
+    <string name="ROM_N64_NOTE_RUMBLE">Play starts the game from its cartridge file, no BIOS needed. A rumble pak is in the controller: your pad vibrates when the game says so. The second button puts the controller pak back (its saves).</string>
 </resources>

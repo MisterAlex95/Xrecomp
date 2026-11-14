@@ -3921,6 +3921,16 @@ public class LauncherActivity extends Activity {
             pill(buttons, null, getString(R.string.PREPARE), false, () -> startRomPrepare(e));
             break;
         }
+        boolean n64 = e.console() == Console.N64;
+        if (n64) {   // XBA-174: the accessory in the controller, this game's choice (N64Pak)
+            boolean rumble = n64Rumble(e.tid);
+            pill(buttons, null, getString(rumble ? R.string.N64_PAK_RUMBLE : R.string.N64_PAK_CONTROLLER), false,
+                 () -> {
+                     N64Pak.setChoice(this, e.tid, N64Pak.toggled(rumble));
+                     Log.i(TAG, "launcher: " + e.tid + " plays with the " + (rumble ? "controller" : "rumble") + " pak");
+                     show(Screen.ROM_HOME, 0);
+                 });
+        }
         homePrimary = play;
         defaultFocus = play;
         startAction = () -> launchRom(e);
@@ -3933,6 +3943,8 @@ public class LauncherActivity extends Activity {
 
         if (e.chip == GameState.Chip.RUNNING)
             setNote(getString(R.string.GAME_RUNNING_HOME), NOTE_INFO);
+        else if (n64)
+            setNote(getString(n64Rumble(e.tid) ? R.string.ROM_N64_NOTE_RUMBLE : R.string.ROM_N64_NOTE), NOTE_INFO);
         else if (!prepares)
             setNote(getString(R.string.ROM_PS1_CHD_NOTE), NOTE_INFO);
         else if (p == Prep.FAILED)
@@ -3942,6 +3954,12 @@ public class LauncherActivity extends Activity {
                     NOTE_INFO);
         else if (p == Prep.NEEDED || p == Prep.CANCELLED || p == Prep.INTERRUPTED)
             setNote(getString(R.string.ROM_NOT_PREPARED_NOTE), NOTE_INFO);
+    }
+
+    /** An N64 game plays with the rumble pak (N64Pak): its own choice, else recomp.cfg's RECOMP_N64_PAK line. */
+    private boolean n64Rumble(String tid) {
+        File ext = GameStore.externalFilesDir(this);
+        return N64Pak.rumble(N64Pak.choice(this, tid), ext == null ? null : RecompConfig.load(ext).get(N64Pak.ENV));
     }
 
     /**
@@ -4133,7 +4151,8 @@ public class LauncherActivity extends Activity {
      */
     private void openGame(LibraryScreen.Entry e) {
         if (e.directLaunch()) {
-            if (Toolchain.available(this) && e.chip != GameState.Chip.NO_FILE_ACCESS) {   // its Home: Play, Prepare
+            // Its Home: Play and Prepare with the toolchain; an N64 game's always (Play and its pak, XBA-174).
+            if ((Toolchain.available(this) || e.console() == Console.N64) && e.chip != GameState.Chip.NO_FILE_ACCESS) {
                 Log.i(TAG, "launcher: library: open " + e.tid + " (" + e.title() + ", " + e.chip + ")");
                 romEntry = e;
                 go(Screen.ROM_HOME);
@@ -4174,8 +4193,8 @@ public class LauncherActivity extends Activity {
     }
 
     /**
-     * A GBA game (XBA-157) or a PS1 disc (XBA-168): straight into the game activity with its file, no Home, Prepare,
-     * import or pack. The ROM is
+     * A GBA game (XBA-157), a PS1 disc (XBA-168) or an N64 cartridge (XBA-174): straight into the game activity with its
+     * file, no Home, Prepare, import or pack. The ROM is
      * handed over as it is (GameStore.rememberRomLaunch: a path, or the document's URI that ShellActivity opens); the
      * same ROM running is brought back, another game running is ended first (one game process at a time).
      */
