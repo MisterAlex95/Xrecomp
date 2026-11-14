@@ -247,6 +247,11 @@ struct n64_machine {
     uint32_t audio_rd, audio_wr; /* sample frames, free-running */
     /* Cartridge save */
     n64_save_kind save_kind;     /* NONE until known */
+    bool save_fixed;             /* the kind came from n64_options or the ROM header (not detected) */
+    /* Joybus RTC */
+    uint8_t rtc_control[2];      /* block 0 */
+    int64_t rtc_offset;          /* seconds added to the host clock (the game set the time) */
+    int64_t rtc_fixed;           /* nonzero: the host clock reads this (tests) */
     uint8_t eeprom[N64_EEPROM_MAX];
     uint8_t sram[N64_SRAM_SIZE];
     uint8_t *flash;              /* N64_FLASH_SIZE */
@@ -367,5 +372,6 @@ void n64_cart2_write32(n64_machine *m, uint32_t pa, uint32_t v);
 void n64_cart2_dma_read(n64_machine *m, uint32_t cart, uint8_t *dst, uint32_t len);  /* cart -> RDRAM */
 void n64_cart2_dma_write(n64_machine *m, uint32_t cart, const uint8_t *src, uint32_t len); /* RDRAM -> cart */
 void n64_save_set_kind(n64_machine *m, n64_save_kind kind);
+void n64_pak_format(uint8_t *pak); /* a freshly formatted 32 KB controller pak */
 
 #endif

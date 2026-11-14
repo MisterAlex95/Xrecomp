@@ -114,6 +114,9 @@ n64_machine *n64_create(const uint8_t *rom, size_t size, const n64_options *opts
         n64_save_set_kind(m, m->opts.save_kind);
     else if (m->info.save_hint != N64_SAVE_NONE)
         n64_save_set_kind(m, m->info.save_hint);
+    m->save_fixed = m->save_kind != N64_SAVE_NONE;
+    for (int p = 0; p < 4; p++)
+        n64_pak_format(m->pak[p]);
     m->pad[0].connected = true;
     m->pad[0].acc = N64_ACC_CONTROLLER_PAK;
     machine_reset(m);

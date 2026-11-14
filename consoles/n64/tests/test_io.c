@@ -275,7 +275,7 @@ static void test_joybus(void)
     memcpy(b, e1, sizeof e1);
     b[63] = 1;
     pif_run(m, b);
-    CHECK(b[7] == 0x00 && b[8] == 0x80, "EEPROM 4K info (%02X %02X)", b[7], b[8]);
+    CHECK(b[7] == 0x00 && b[8] == 0xC0, "EEPROM info, kind not fixed: a 16K part (%02X %02X)", b[7], b[8]);
     memset(b, 0, 64);
     uint8_t e2[] = {0, 0, 0, 0, 0x0A, 0x01, 0x05, 0x03, 1, 2, 3, 4, 5, 6, 7, 8, 0xFF, 0xFE};
     memcpy(b, e2, sizeof e2);
@@ -291,6 +291,88 @@ static void test_joybus(void)
     const uint8_t *ee = n64_save_data(m, N64_SAVE_EEPROM4K, &sz);
     CHECK(ee && sz == 512 && ee[24] == 1, "EEPROM image");
     CHECK_EQ(n64_save_take_dirty(m, N64_SAVE_EEPROM4K), 1, "EEPROM dirty");
+    /* Still answered as 16K (a 16K game's later blocks pass libultra's range check); block 70 makes it 16K, the
+     * 4K image's bytes kept. */
+    memset(b, 0, 64);
+    uint8_t e4[] = {0, 0, 0, 0, 0x0A, 0x01, 0x05, 70, 9, 9, 9, 9, 9, 9, 9, 9, 0xFF, 0xFE};
+    memcpy(b, e4, sizeof e4);
+    b[63] = 1;
+    pif_run(m, b);
+    CHECK_EQ(n64_save_kind_detected(m), N64_SAVE_EEPROM16K, "EEPROM 16K once block 70 is written");
+    ee = n64_save_data(m, N64_SAVE_EEPROM16K, &sz);
+    CHECK(ee && sz == 2048 && ee[24] == 1 && ee[560] == 9, "EEPROM 16K image");
+
+    /* RTC on channel 4: status, the time block, a time set by the game read back (the clock fixed for the test:
+     * 2001-02-03 04:05:06, a Saturday). */
+    m->rtc_fixed = 981173106;
+    memset(b, 0, 64);
+    uint8_t r1[] = {0, 0, 0, 0, 0x01, 0x03, 0x06, 0xFF, 0xFF, 0xFF, 0xFE};
+    memcpy(b, r1, sizeof r1);
+    b[63] = 1;
+    pif_run(m, b);
+    CHECK(!(b[5] & 0x80) && b[7] == 0x00 && b[8] == 0x10, "RTC status (%02X %02X)", b[7], b[8]);
+    memset(b, 0, 64);
+    uint8_t r2[] = {0, 0, 0, 0, 0x02, 0x09, 0x07, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFE};
+    memcpy(b, r2, sizeof r2);
+    b[63] = 1;
+    pif_run(m, b);
+    CHECK(b[8] == 0x06 && b[9] == 0x05 && b[10] == 0x84 && b[11] == 0x03 && b[12] == 0x06 && b[13] == 0x02 &&
+              b[14] == 0x01 && b[15] == 0x01,
+          "RTC time %02X:%02X:%02X %02X/%02X/%02X wd %02X c %02X", b[10], b[9], b[8], b[11], b[13], b[14], b[12],
+          b[15]);
+    memset(b, 0, 64);
+    uint8_t r3[] = {0, 0, 0, 0, 0x0A, 0x01, 0x08, 0x02, 0x30, 0x59, 0x80 | 0x23, 0x31, 0x00, 0x12, 0x99, 0x00, 0xFE};
+    memcpy(b, r3, sizeof r3); /* 1999-12-31 23:59:30 */
+    b[63] = 1;
+    pif_run(m, b);
+    m->rtc_fixed += 45; /* 45 s later: 2000-01-01 00:00:15 */
+    memset(b, 0, 64);
+    memcpy(b, r2, sizeof r2);
+    b[63] = 1;
+    pif_run(m, b);
+    CHECK(b[8] == 0x15 && b[9] == 0x00 && (b[10] & 0x3F) == 0x00 && b[11] == 0x01 && b[13] == 0x01 && b[14] == 0x00 &&
+              b[15] == 0x01,
+          "RTC set by the game, 45 s on: %02X:%02X:%02X %02X/%02X/%02X c %02X", b[10], b[9], b[8], b[11], b[13], b[14],
+          b[15]);
+    n64_destroy(m);
+
+    /* A 4K EEPROM fixed by the options answers as 4K. */
+    n64_options o4 = {.force_pal = -1, .save_kind = N64_SAVE_EEPROM4K};
+    m = mk(&o4);
+    memset(b, 0, 64);
+    memcpy(b, e1, sizeof e1);
+    b[63] = 1;
+    pif_run(m, b);
+    CHECK(b[7] == 0x00 && b[8] == 0x80, "fixed EEPROM 4K info (%02X %02X)", b[7], b[8]);
+
+    /* A fresh controller pak is formatted: the ID block and its copies with a valid checksum, the index table's free
+     * entries and checksum, an empty note table. */
+    const uint8_t *pk = n64_save_data(m, N64_SAVE_PAK0, &sz);
+    CHECK(pk && sz == 32768, "pak image");
+    if (pk) {
+        static const int at[4] = {0x20, 0x60, 0x80, 0xC0};
+        for (int i = 0; i < 4; i++) {
+            uint32_t sum = 0;
+            for (int k = 0; k < 28; k += 2)
+                sum += (uint32_t)(pk[at[i] + k] << 8 | pk[at[i] + k + 1]);
+            uint32_t got = (uint32_t)(pk[at[i] + 28] << 8 | pk[at[i] + 29]);
+            uint32_t inv = (uint32_t)(pk[at[i] + 30] << 8 | pk[at[i] + 31]);
+            CHECK(got == (sum & 0xFFFF) && inv == ((0xFFF2u - got) & 0xFFFF), "pak ID block %d checksum", i);
+        }
+        CHECK(pk[0x20 + 28] == 0x66 && pk[0x20 + 29] == 0x25 && pk[0x20 + 30] == 0x99 && pk[0x20 + 31] == 0xCD,
+              "pak ID checksum bytes as a fresh .mpk");
+        uint32_t c = 0;
+        for (int e = 5; e < 128; e++)
+            c += pk[0x100 + 2 * e + 1];
+        CHECK(pk[0x101] == (c & 0xFF) && pk[0x101] == 0x71 && pk[0x10B] == 0x03 && pk[0x1FF] == 0x03 &&
+                  !memcmp(pk + 0x100, pk + 0x200, 256),
+              "pak index table and its copy");
+        int empty = 1;
+        for (int i = 0x300; i < 0x500; i++)
+            empty &= pk[i] == 0;
+        CHECK(empty, "pak note table empty");
+        CHECK_EQ(n64_save_take_dirty(m, N64_SAVE_PAK0), 0, "a fresh pak is not dirty");
+    }
     n64_destroy(m);
 }
 

@@ -8,8 +8,20 @@
  *
  * Joybus (PIF RAM command block, channel by channel): on the four controller channels 0x00 / 0xFF info, 0x01 buttons
  * and stick, 0x02 / 0x03 pak read / write (32 bytes, address CRC ignored, data CRC returned); the controller pak is
- * 32 KB of memory, the rumble pak answers 0x80 at 0x8000 once probed and turns its motor with writes at 0xC000. On
- * channel 4, the cartridge: EEPROM 4K / 16K info, 0x04 read and 0x05 write of 8-byte blocks. No RTC (no reply).
+ * 32 KB of memory (a fresh one formatted: n64_pak_format), the rumble pak answers 0x80 at 0x8000 once probed and
+ * turns its motor with writes at 0xC000. On channel 4, the cartridge: EEPROM info, 0x04 read and 0x05 write of
+ * 8-byte blocks; the joybus RTC (0x06 status, 0x07 / 0x08 block read / write: block 0 control, block 2 the time in
+ * BCD), always answered, on the host's clock plus the offset the game sets by writing the time.
+ *
+ * EEPROM 4K or 16K: libultra checks every block address against the type the status command reports (osEepromRead /
+ * Write: a 4K part refuses blocks above 63 before anything reaches the joybus), so a 16K game told "4K" never shows
+ * itself. Unless the kind is fixed (n64_options or the ROM header's save byte), the status command answers like a
+ * 16K part, which a 4K game accepts too (its blocks are all below 64; games test the type for non-zero); the save
+ * is kept as 4K (512 B, the files other emulators use) until a block above 63 is used, then 16K. A loaded 512-byte
+ * image does not fix it either (a 16K game saved by an older build that answered 4K).
+ *
+ * CIC challenge (PIF command bit 1, the NUS-CIC-6105 games' periodic check): acknowledged without the response; no
+ * homebrew or test of ours needs it.
  *
  * Saves: SRAM (32 KB, domain 2 at 0x08000000, CPU words and PI DMA), FlashRAM (128 KB, Macronix MX29L1100 ID
  * 0x1111800100C2001E: status / ID, read array, chip and sector erase, 128-byte page program through the PI), EEPROM
@@ -21,6 +33,7 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 /* ---- Boot ------------------------------------------------------------------------------------------------------ */
 
@@ -256,6 +269,135 @@ static uint8_t pak_crc(const uint8_t *data)
     return crc;
 }
 
+/* A freshly formatted controller pak (what libultra's osPfsInit expects and other emulators' new .mpk hold): page 0
+ * the ID block (at 0x20, with its copies at 0x60, 0x80 and 0xC0; 16-bit sum and 0xFFF2 - sum in its last 4 bytes),
+ * pages 1 and 2 the index table (entries 5..127 free: 0x0003, checksum in byte 1), pages 3 and 4 the empty note
+ * table, the rest zero. */
+void n64_pak_format(uint8_t *pak)
+{
+    static const uint8_t id[28] = {0xFF, 0xFF, 0xFF, 0xFF, 0x05, 0x1A, 0x5F, 0x13, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                                   0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x01, 0xFF};
+    memset(pak, 0, N64_PAK_SIZE);
+    uint8_t blk[32];
+    memcpy(blk, id, 28);
+    uint32_t sum = 0;
+    for (int i = 0; i < 28; i += 2)
+        sum += (uint32_t)(blk[i] << 8 | blk[i + 1]);
+    sum &= 0xFFFF;
+    blk[28] = (uint8_t)(sum >> 8);
+    blk[29] = (uint8_t)sum;
+    uint32_t inv = (0xFFF2u - sum) & 0xFFFF;
+    blk[30] = (uint8_t)(inv >> 8);
+    blk[31] = (uint8_t)inv;
+    static const int at[4] = {0x20, 0x60, 0x80, 0xC0};
+    for (int i = 0; i < 4; i++)
+        memcpy(pak + at[i], blk, 32);
+    for (int page = 1; page <= 2; page++) {
+        uint8_t *t = pak + page * 0x100;
+        uint32_t c = 0;
+        for (int e = 5; e < 128; e++) {
+            t[2 * e + 1] = 0x03;
+            c += 0x03;
+        }
+        t[1] = (uint8_t)c;
+    }
+}
+
+/* ---- RTC ------------------------------------------------------------------------------------------------------- */
+
+static uint8_t bcd(int v) { return (uint8_t)((v / 10) << 4 | (v % 10)); }
+static int unbcd(uint8_t v) { return (v >> 4) * 10 + (v & 15); }
+
+/* Days from 1970-01-01 to y-m-d (proleptic Gregorian). */
+static int64_t days_from_civil(int64_t y, int mo, int d)
+{
+    y -= mo <= 2;
+    int64_t era = (y >= 0 ? y : y - 399) / 400;
+    int64_t yoe = y - era * 400;
+    int64_t doy = (153 * (mo + (mo > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+    int64_t doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return era * 146097 + doe - 719468;
+}
+
+/* The host's local wall clock as seconds of a civil calendar (no time zone: what the RTC counts). */
+static int64_t rtc_host_local(n64_machine *m)
+{
+    time_t t = m->rtc_fixed ? (time_t)m->rtc_fixed : time(NULL);
+    struct tm tm;
+    if (m->rtc_fixed || !localtime_r(&t, &tm))
+        gmtime_r(&t, &tm); /* tests: the fixed clock is taken as is */
+    return days_from_civil(1900 + (int64_t)tm.tm_year, tm.tm_mon + 1, tm.tm_mday) * 86400 + tm.tm_hour * 3600 +
+           tm.tm_min * 60 + (tm.tm_sec > 59 ? 59 : tm.tm_sec);
+}
+
+/* The RTC's time block (block 2): seconds, minutes, hours (bit 7: 24-hour), day, weekday, month, year, century
+ * (1: 20xx). */
+static void rtc_read_time(n64_machine *m, uint8_t *b)
+{
+    time_t t = (time_t)(rtc_host_local(m) + m->rtc_offset);
+    struct tm tm;
+    gmtime_r(&t, &tm);
+    b[0] = bcd(tm.tm_sec > 59 ? 59 : tm.tm_sec);
+    b[1] = bcd(tm.tm_min);
+    b[2] = (uint8_t)(0x80 | bcd(tm.tm_hour));
+    b[3] = bcd(tm.tm_mday);
+    b[4] = bcd(tm.tm_wday);
+    b[5] = bcd(tm.tm_mon + 1);
+    b[6] = bcd(tm.tm_year % 100);
+    b[7] = (uint8_t)(tm.tm_year >= 100 ? 1 : 0);
+}
+
+static void rtc_write_time(n64_machine *m, const uint8_t *b)
+{
+    int hour = unbcd(b[2] & 0x3F);
+    int64_t year = 1900 + unbcd(b[6]) + (b[7] ? 100 : 0);
+    int mon = unbcd(b[5] & 0x1F), day = unbcd(b[3] & 0x3F);
+    if (mon < 1 || mon > 12 || day < 1 || day > 31)
+        return;
+    int64_t set = days_from_civil(year, mon, day) * 86400 + hour * 3600 + unbcd(b[1] & 0x7F) * 60 + unbcd(b[0] & 0x7F);
+    m->rtc_offset = set - rtc_host_local(m);
+}
+
+/* Joybus RTC commands on the cartridge channel. Returns 1 if handled. */
+static int rtc_cmd(n64_machine *m, const uint8_t *tx, int txn, uint8_t *rx, int rxn)
+{
+    switch (tx[0]) {
+    case 0x06: /* status: RTC present, running */
+        if (rxn >= 3) {
+            rx[0] = 0x00;
+            rx[1] = 0x10;
+            rx[2] = 0x00;
+        }
+        return 1;
+    case 0x07: /* read block */
+        if (txn < 2 || rxn < 9)
+            return 1;
+        memset(rx, 0, 9);
+        if (tx[1] == 0) {
+            rx[0] = m->rtc_control[0];
+            rx[1] = m->rtc_control[1];
+        } else if (tx[1] == 2) {
+            rtc_read_time(m, rx);
+        }
+        rx[8] = 0x00; /* status */
+        return 1;
+    case 0x08: /* write block */
+        if (txn < 10)
+            return 1;
+        if (tx[1] == 0) {
+            m->rtc_control[0] = tx[2];
+            m->rtc_control[1] = tx[3];
+        } else if (tx[1] == 2 && !(m->rtc_control[0] & 0x04)) { /* block 2 not write-protected */
+            rtc_write_time(m, tx + 2);
+        }
+        if (rxn >= 1)
+            rx[0] = 0x00;
+        return 1;
+    default:
+        return 0;
+    }
+}
+
 /* A controller command: tx bytes in, rx bytes out. Returns 0 or -1 (no device). */
 static int controller_cmd(n64_machine *m, int port, const uint8_t *tx, int txn, uint8_t *rx, int rxn)
 {
@@ -323,9 +465,12 @@ static int controller_cmd(n64_machine *m, int port, const uint8_t *tx, int txn, 
 
 static int eeprom_cmd(n64_machine *m, const uint8_t *tx, int txn, uint8_t *rx, int rxn)
 {
+    if (txn >= 1 && rtc_cmd(m, tx, txn, rx, rxn))
+        return 0;
     if (!eeprom_present(m) || txn < 1)
         return -1;
-    bool big = m->save_kind == N64_SAVE_EEPROM16K;
+    /* 16K unless the kind is a fixed 4K (see the top of the file). */
+    bool big = !(m->save_fixed && m->save_kind == N64_SAVE_EEPROM4K);
     switch (tx[0]) {
     case 0x00:
     case 0xFF:
