@@ -85,4 +85,13 @@
     <string name="LIB_ST_EMPTY">Rien n\'est encore stocké.</string>
     <string name="LIB_ST_FOOTER">Seul ce que l\'application a créé est supprimé ici : jamais vos images disque ni les dossiers de votre dossier de bibliothèque.</string>
     <string name="LIB_ST_SAVES_FOOTER">Les sauvegardes ne se suppriment qu\'ici, un jeu à la fois : rien d\'autre ne les efface.</string>
+<!-- A GBA game's Home (XBA-158). -->
+    <string name="ROM_PREPARED">Préparé · tourne en natif</string>
+    <string name="ROM_NOT_PREPARED">Non préparé · joue dans l\'interpréteur</string>
+    <string name="ROM_NEW_CODE">Préparé · %1$d nouvelles adresses trouvées · à préparer à nouveau</string>
+    <string name="ROM_NOT_PREPARED_NOTE">Jouer lance le jeu tout de suite, dans l\'interpréteur. Préparer le traduit pour cet appareil (quelques minutes) pour qu\'il tourne en natif ; vous pouvez jouer pendant ce temps.</string>
+    <string name="ROM_PREPARED_NOTE">Le jeu tourne depuis sa préparation. Le code qu\'elle ne couvre pas passe encore par l\'interpréteur et est noté pour la prochaine préparation.</string>
+    <string name="ROM_NEW_CODE_NOTE">Vos dernières parties ont exécuté du code que la préparation avait manqué (%1$d adresses). Préparez à nouveau pour le traduire aussi ; Jouer fonctionne en attendant.</string>
+    <string name="ROM_FAILED_NOTE">La préparation a échoué (%1$s) ; le jeu se joue toujours dans l\'interpréteur. Voir l\'erreur pour le journal.</string>
+    <string name="ROM_PREPARED_DONE">%1$s est préparé : il tourne maintenant en natif.</string>
 </resources>

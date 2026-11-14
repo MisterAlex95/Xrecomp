@@ -213,4 +213,38 @@ public class PackTest {
         assertTrue(Pack.envForce(files(), TID).isEmpty());
         assertTrue(Pack.envForce(files(), "zz").isEmpty());
     }
+
+    /**
+     * XBA-158: a GBA game's Prepare goes by its library key (« gba-&lt;KEY&gt; »), and check() takes it: the pack in
+     * packs/gba-&lt;KEY&gt; with console gba and that title_key. newlyDiscovered counts the runtime's addresses beyond
+     * the ones the pack was made with.
+     */
+    @Test
+    public void gbaPackByLibraryKey() throws Exception {
+        File files = files();
+        String key = "gba-AXVE-1A2B3C4D";
+        assertEquals(Pack.Check.NO_PACK, Pack.check(files, key));
+        File dir = new File(new File(files, "packs"), key);
+        TestSupport.write(new File(dir, "libtitle.so"), new byte[10]);
+        JSONObject o = new JSONObject().put("format", 1).put("console", "gba").put("title_key", "AXVE-1A2B3C4D")
+                .put("abi", "arm64-v8a").put("shell_abi", Pack.SHELL_ABI).put("lib", "libtitle.so").put("lib_size", 10)
+                .put("rom_sha256", "00").put("entry", "gba_recomp_title_table").put("discovered", 1);
+        TestSupport.write(new File(dir, "pack.json"), o.toString());
+        assertEquals(Pack.Check.VALID, Pack.check(files, key));
+        assertEquals(Pack.Check.VALID, Pack.check(files, Console.GBA, "AXVE-1A2B3C4D"));
+        assertEquals(Pack.Check.NO_PACK, Pack.check(files, "gba-AXVE-00000000"));
+        TestSupport.write(new File(dir, "pack.json"), o.put("shell_abi", Pack.SHELL_ABI + 1).toString());
+        assertEquals(Pack.Check.WRONG_SHELL_ABI, Pack.check(files, key));
+        TestSupport.write(new File(dir, "pack.json"), o.put("shell_abi", Pack.SHELL_ABI).toString());
+
+        assertEquals(0, Pack.newlyDiscovered(files, key));                       // no file yet
+        File disc = Pack.discoveredFile(files, key);
+        assertEquals(new File(new File(new File(files, "work"), key), "discovered.txt"), disc);
+        TestSupport.write(disc, "0x08000000\n# by hand\n\n0x08000101\n0x080001F0\n");
+        assertEquals(3, Pack.countAddresses(disc));
+        assertEquals(2, Pack.newlyDiscovered(files, key));                       // the pack had 1
+        TestSupport.write(new File(dir, "pack.json"), o.put("discovered", 3).toString());
+        assertEquals(0, Pack.newlyDiscovered(files, key));
+        assertEquals(0, Pack.newlyDiscovered(files, "gba-AXVE-00000000"));       // no pack
+    }
 }

@@ -195,11 +195,15 @@ final class LibraryScreen {
             f.hasData = true;
             f.dataKind = Library.KIND_IN_PLACE;
         }
-        f.toolchain = env.toolchain && en.realTid();
-        if (en.realTid()) {
+        // A GBA game (XBA-158) has a Prepare and a pack too, keyed by its library key (packs/gba-<KEY>).
+        boolean prepares = en.realTid() || en.directLaunch();
+        f.toolchain = env.toolchain && prepares;
+        if (prepares) {
             f.pack = Pack.check(filesDir, en.tid);
-            String sha = recordData ? en.record.xbeSha256 : en.active != null ? en.active.xbeSha256 : "";
-            f.packMatches = packMatches(filesDir, en.tid, sha);
+            if (en.realTid()) {
+                String sha = recordData ? en.record.xbeSha256 : en.active != null ? en.active.xbeSha256 : "";
+                f.packMatches = packMatches(filesDir, en.tid, sha);
+            }
             f.prepare = PrepareProtocol.readStatus(new File(new File(new File(filesDir, "prepare"), en.tid),
                                                             "status.json"));
             f.prepareFresh = f.prepare != null && env.now - f.prepare.updatedAt < PREPARE_FRESH_MS;

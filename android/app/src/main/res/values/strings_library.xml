@@ -91,4 +91,13 @@
     <string name="LIB_ST_EMPTY">Nothing stored yet.</string>
     <string name="LIB_ST_FOOTER">Only what the app made is deleted here: never your disc images nor the folders of your library folder.</string>
     <string name="LIB_ST_SAVES_FOOTER">Saves are only deleted from here, one game at a time: nothing else deletes them.</string>
+<!-- A GBA game's Home (XBA-158): Play always (the interpreter), Prepare makes it run natively. -->
+    <string name="ROM_PREPARED">Prepared · runs natively</string>
+    <string name="ROM_NOT_PREPARED">Not prepared · plays in the interpreter</string>
+    <string name="ROM_NEW_CODE">Prepared · %1$d new addresses found · prepare again</string>
+    <string name="ROM_NOT_PREPARED_NOTE">Play starts the game at once, in the interpreter. Prepare translates it for this device (a few minutes) so that it runs natively; you can play meanwhile.</string>
+    <string name="ROM_PREPARED_NOTE">The game runs from its preparation. Code it does not cover still runs in the interpreter and is noted for the next Prepare.</string>
+    <string name="ROM_NEW_CODE_NOTE">Your last games ran code the preparation had missed (%1$d addresses). Prepare again to translate it too; Play works meanwhile.</string>
+    <string name="ROM_FAILED_NOTE">The preparation failed (%1$s); the game still plays in the interpreter. See what failed for the log.</string>
+    <string name="ROM_PREPARED_DONE">%1$s is prepared: it now runs natively.</string>
 </resources>

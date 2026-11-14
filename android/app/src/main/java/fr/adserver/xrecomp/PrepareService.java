@@ -482,11 +482,17 @@ public class PrepareService extends Service {
         work.mkdirs();
         //noinspection ResultOfMethodCallIgnored
         packs.mkdirs();
-        try {   // what the runs find from now on is new to this Prepare's analysis (XBA-74)
-            SelfHeal.prepareStarted(work);
-        } catch (IOException e) {
-            runner.logLine("selfheal.json not updated: " + e.getMessage());
+        boolean rom = Console.ofKey(titleId) != Console.XBOX;
+        if (!rom) {
+            try {   // what the runs find from now on is new to this Prepare's analysis (XBA-74)
+                SelfHeal.prepareStarted(work);
+            } catch (IOException e) {
+                runner.logLine("selfheal.json not updated: " + e.getMessage());
+            }
         }
+        // A GBA game (XBA-158): its ROM, a path, or a library folder's document that tools.prepare cannot open: then
+        // copied into the work folder first (32 MB at most), where tools.prepare keeps its own copy anyway.
+        final String source = rom ? romSource(c, gameDir, work, runner) : gameDir;
         return new PrepareRunner.CommandFactory() {
             @Override
             public List<String> command(int jobs) {
@@ -494,7 +500,7 @@ public class PrepareService extends Service {
                 a.add(new File(nat, Toolchain.PYTHON).getAbsolutePath());
                 a.add("-m");
                 a.add("tools.prepare");
-                a.add(gameDir);
+                a.add(source);
                 a.add("--android");
                 a.add("--work");
                 a.add(work.getAbsolutePath());
@@ -531,7 +537,7 @@ public class PrepareService extends Service {
                 e.put("PYTHONUNBUFFERED", "1");
                 e.put("PYTHONPATH", in.toolkit.getAbsolutePath());   // tools.prepare from the toolkit root
                 e.put("XBA_PYTHON", new File(nat, Toolchain.PYTHON).getAbsolutePath());
-                if (!GameStore.enhancements(c, titleId))   // Settings › Enhancements off (profile-free WP6)
+                if (!rom && !GameStore.enhancements(c, titleId))   // Settings › Enhancements off (profile-free WP6)
                     e.put("XBA_NO_TITLE_LAYER", "1");
                 return e;
             }
@@ -541,6 +547,41 @@ public class PrepareService extends Service {
                 return in.toolkit;
             }
         };
+    }
+
+    /** The largest ROM copied for a GBA Prepare (gba_runtime.c GBA_ROM_MAX). */
+    static final long ROM_MAX = 32L << 20;
+
+    /**
+     * The file tools.prepare reads for a GBA game: its path as it is, or a content URI (a library folder seen through
+     * the Storage Access Framework) copied to &lt;work&gt;/rom.gba.
+     */
+    static String romSource(Context c, String spec, File work, PrepareRunner runner) throws IOException {
+        if (!spec.startsWith("content:"))
+            return spec;
+        File out = new File(work, "rom.gba"), tmp = new File(work, "rom.gba.tmp");
+        long n = 0;
+        try (java.io.InputStream in = c.getContentResolver().openInputStream(android.net.Uri.parse(spec));
+             java.io.FileOutputStream o = new java.io.FileOutputStream(tmp)) {
+            if (in == null)
+                throw new IOException("cannot open " + spec);
+            byte[] buf = new byte[1 << 16];
+            int r;
+            while ((r = in.read(buf)) > 0) {
+                n += r;
+                if (n > ROM_MAX)
+                    throw new IOException(spec + " is over 32 MB: not a GBA ROM");
+                o.write(buf, 0, r);
+            }
+            o.getFD().sync();
+        } catch (SecurityException e) {
+            throw new IOException("no access to " + spec + ": " + e.getMessage());
+        }
+        if (!tmp.renameTo(out))
+            throw new IOException("cannot write " + out);
+        if (runner != null)
+            runner.logLine("rom: " + spec + " copied to " + out + " (" + n + " bytes)");
+        return out.getAbsolutePath();
     }
 
     private void onJobEnd(PrepareProtocol.Status s) {

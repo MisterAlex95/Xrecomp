@@ -30,7 +30,8 @@ place (planned; not implemented yet, see « The loader »). A game's own app (ap
 its own private storage: it takes XRecomp's pack over instead of preparing again
 ([Handing a pack to a game's own app](#handing-a-pack-to-a-games-own-app)).
 
-`TITLEID` is the XBE's title ID in 8 upper-case hex digits (`4D5300D1`).
+`TITLEID` is the XBE's title ID in 8 upper-case hex digits (`4D5300D1`). A Game Boy Advance game's pack is
+`packs/gba-<KEY>/` ([GBA packs](#gba-packs-xba-157-xba-158)).
 
 **Atomic publish.** A pack is built in `packs/<TITLEID>.partial/`; `pack.json` is written last (temp file, fsync,
 rename), then the directory is renamed to `packs/<TITLEID>`. An existing pack is first renamed to
@@ -184,6 +185,7 @@ XBA_RESULT ok pack=/data/user/0/<app>/files/packs/12345678
 |---|---|
 | `BAD_ARGS` | a required flag is missing (`--work`, `--pack-dir`, `--cc`, `--sysroot`, `--shell-lib`) |
 | `NO_XBE` | no `default.xbe` in the source |
+| `NO_ROM`, `BAD_ROM` | a GBA ROM that cannot be read, or is empty or over 32 MB ([GBA packs](#gba-packs-xba-157-xba-158)) |
 | `BAD_XBE` | `xbe_parser` cannot read it |
 | `ANALYSE_FAILED`, `LIFT_FAILED` | a pipeline tool failed; details in `prepare.log` |
 | `COMPILE_FAILED` | a C file did not compile; `msg` = file and first error |
@@ -535,6 +537,91 @@ of CPU at -O2 is ~6 min, plus 20–30 % for sustained clocks under thermal limit
 the NDK's clang. The embedded clang is a plain build of LLVM 19 (the NDK's is PGO + BOLT + LTO, ~20–30 % faster):
 count **8–10 min**. With 2 jobs (the 1.5 GB formula on a 12 GB device) it would be 15–20 min. The largest file alone
 takes ~1 min on a middle core; it starts first. To be measured on the device (« Device » check list).
+
+## GBA packs (XBA-157, XBA-158)
+
+A Game Boy Advance game plays in the interpreter with no pack (consoles/README.md); a pack makes it run natively. The
+same command, the same compile driver and the same publish build it from the player's ROM: `tools/prepare/gba.py`,
+taken whenever SOURCE is a `.gba` (or any file with a GBA cartridge header). Contract of the lifted code:
+`consoles/gba/runtime/gba_recomp.h`.
+
+```
+<files dir>/packs/gba-<KEY>/libtitle.so
+<files dir>/packs/gba-<KEY>/pack.json
+<files dir>/work/gba-<KEY>/                  --work: rom.gba, gen/, obj/, stamp.json, prepare.log, discovered.txt
+```
+
+`KEY` is the title key (`recomp_pack_rom_identify`, `gba_runtime_key`, `Console.identify`): game code + CRC32 of the
+whole ROM (`AXVE-1A2B3C4D`), so two dumps of one game have two packs. The app's Prepare goes by the library key
+`gba-<KEY>`: `status.json` in `<files>/prepare/gba-<KEY>/`, the queue, `Pack.check`.
+
+**The steps** (same progress lines and ids, `n` = 5):
+
+| # | id | Does | Stamp |
+|---|---|---|---|
+| 1 | `identify` | reads the ROM (32 MB at most: `BAD_ROM`; unreadable: `NO_ROM`), title key, SHA-256, header title; copies it to `<work>/rom.gba` | `rom` + `toolkit_sha256` (another ROM or toolkit starts over) |
+| 2 | `analyse` | the addresses earlier runs had to interpret: `<work>/discovered.txt` (plus `--discovered FILE`), merged into `<work>/discovered-seeds.txt` | (their digest, in the lift's key) |
+| 3 | `lift` | `python -m gba_tools.recomp <work>/rom.gba <work>/gen.new [--discovered seeds]`, then `gen.new` → `gen` (the stamp is dropped first: a half-written lift never passes) | `lift` |
+| 4 | `compile` | each `gen/*.c` with the flags below, the object cache of « Compile and link » | the object cache |
+| 5 | `pack` | `libtitle.so`, `pack.json`, atomic publish as `packs/gba-<KEY>` (`.partial`, `.old`, same rules) | `link` |
+
+Compile flags: `--target=aarch64-linux-android30 --sysroot=<sysroot> [-resource-dir=…] -O<opt> -g0 -fPIC -std=gnu11 -w
+-DNDEBUG -I<work>/gen -I<toolkit>/consoles/gba/runtime`. The link is the Xbox pack's (`ld.lld … -shared -soname
+libtitle.so -Bsymbolic --no-undefined … -l:libmain.so`): every core function the lifted code calls must be exported by
+`libmain.so`, which links the whole GBA core (`--whole-archive gba_core`, android/app/src/main/cpp/CMakeLists.txt).
+
+The toolkit tree ships what the lift and the compile need: `consoles/gba/tools/**/*.py` (the lifter, `gba_tools`; on
+`PYTHONPATH` for step 3) and `consoles/gba/runtime/*.h` (`gba_recomp.h`, `gba_core.h`, the lifted code's own header);
+both count in the toolkit digest. `XBA_GBA_RECOMP` (a module name) and `XBA_GBA_TOOLS_DIR` replace the lifter, for the
+tests (`tools/prepare/tests/fake_gba_recomp.py`, a table with the right ABI and `rom_sha256`).
+
+**pack.json** of a GBA pack (format 1; the same reader rules: unknown fields ignored):
+
+```json
+{"format": 1, "console": "gba", "title_key": "AXVE-1A2B3C4D", "title": "POCKET QUEST", "rom_sha256": "...",
+ "abi": "arm64-v8a", "shell_abi": 1, "toolkit": "<commit>", "toolkit_sha256": "...", "lib": "libtitle.so",
+ "lib_sha256": "...", "lib_size": 123456, "entry": "gba_recomp_title_table", "cc": "clang 19.0.1 -O2",
+ "built_at": "2026-11-14T21:10:35Z", "discovered": 12, "prepare": {...}}
+```
+
+| Field | Meaning |
+|---|---|
+| `console`, `title_key` | `gba` and the title key, in place of `title_id` (XBA-147). |
+| `title` | The header's 12-character title (else the file name), for display. |
+| `rom_sha256` | The ROM it was built from. The runtime compares it with the ROM it plays, and with the table's own `rom_sha256`. |
+| `entry` | `gba_recomp_title_table`: `const gba_recomp_table *gba_recomp_title_table(void)`. |
+| `discovered` | How many discovered addresses the lift was given. The app compares it with the file's count to offer Prepare again (below). |
+
+The other fields are the Xbox pack's. `tools/prepare/gba.py` (`read`, `check`) is the reference.
+
+**The loader.** `pack_loader.c` (`xba_pack_load_rom`) never refuses to start a GBA game:
+
+1. `packs/gba-<KEY>/pack.json` missing → `PACK_NONE gba <KEY> (not prepared, the interpreter runs it)`.
+2. `recomp_pack_find_key` refuses it (format, console, title_key, abi, shell_abi = `xba_shell_abi`, lib, lib_size) →
+   `PACK_STALE gba <KEY> (<reason>), running interpreted`.
+3. Else `gba_runtime_start(rom, <pack>/libtitle.so, key)`; the runtime (`consoles/gba/runtime/gba_pack.c`) checks
+   again with what only it knows: `rom_sha256` = SHA-256 of the ROM it read, `lib_sha256` (hashed at each start: a GBA
+   pack is a few MB), `entry`; then `dlopen(RTLD_NOW | RTLD_LOCAL)`, the table, its `abi` (`gba_attach_recomp`) and its
+   `rom_sha256`. `PACK_LOADED gba <KEY> (<N> functions)`, or `PACK_STALE gba <KEY> (<why>), running interpreted`.
+
+On a desktop, `gba_runtime_opts.pack_lib` does the same (a library with no `pack.json` beside it: the table's checks
+only); `gba_play` exports the core (`gba_core_exported`, `ENABLE_EXPORTS` + the whole archive).
+
+**The discovery loop.** At exit (also the in-game menu's Quit, through the exit hook) the runtime merges
+`gba_recomp_missed` (the ROM addresses the interpreter had to start running that the table did not cover, bit 0 =
+Thumb) into `<files>/work/gba-<KEY>/discovered.txt`: one `0x%08X` per line, sorted, no repeats, at most 65536 lines,
+written through a temporary file; nothing new, nothing written. Log: `gba: <N> address(es) the pack did not cover, <A>
+new, in <path>`. The next Prepare runs with `--work <files>/work/gba-<KEY>`, finds the file, and the lift takes them
+(`--discovered`). Home compares the file's count with the pack's `discovered`: more → « Prepared · N new addresses
+found · prepare again », Play stays first (app-shell.md « Game Boy Advance games »).
+
+**On a desktop** (Linux x86-64 or arm64, macOS): `python3 -m tools.prepare game.gba` builds a pack for `gba_play` with
+the host's `cc` (or `--cc`, `$CC`): the same steps, `-shared -fPIC -Wl,-Bsymbolic`, the core left undefined (resolved
+against `gba_play` at load), `"abi"` the host's (`x86_64`, `arm64-v8a`). Work and packs default to
+`$XDG_DATA_HOME/xrecomp/work/gba-<KEY>` and `…/packs/gba-<KEY>` (beside `gba_play`'s saves); `--work`, `--pack-dir`,
+`--jobs`, `--opt`, `--force`, `--discovered` as above. With `--android` and the NDK it is the device's build (« Checking
+on a host »). Tests: `python3 -m pytest tools/prepare/test_gba_prepare.py` (the NDK case runs where
+`ANDROID_NDK_HOME` is set), `consoles/gba/tests` `gba_pack`, `tests/recomp_pack`.
 
 ## The loader
 

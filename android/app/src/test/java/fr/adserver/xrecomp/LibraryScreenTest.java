@@ -220,7 +220,8 @@ public class LibraryScreenTest {
 
     /**
      * XBA-178 / XBA-157: a game of another console is keyed by console + title key; a GBA game is Ready (its runtime
-     * plays the ROM as it is: no Prepare, no import), Running while it runs; PS1 and N64 are « Not playable yet ».
+     * plays the ROM as it is: no import; its Prepare, XBA-158, only speeds it up), Running while it runs; PS1 and N64
+     * are « Not playable yet ».
      */
     @Test
     public void otherConsoles() throws Exception {
@@ -239,8 +240,9 @@ public class LibraryScreenTest {
         assertEquals(Console.GBA, e.console());
         assertTrue(e.otherConsole());
         assertTrue(e.directLaunch());
-        assertFalse("no Prepare, no theme, no XBE art", e.realTid());
-        assertFalse(e.facts.toolchain);
+        assertFalse("no theme, no XBE art", e.realTid());
+        assertTrue("its Prepare (XBA-158)", e.facts.toolchain);
+        assertEquals(Pack.Check.NO_PACK, e.facts.pack);
         assertEquals(GameState.Chip.READY, e.chip);
         assertTrue(GameState.playable(e.chip));
         assertNull(LibraryScreen.art(files, new java.util.HashMap<>(), e));

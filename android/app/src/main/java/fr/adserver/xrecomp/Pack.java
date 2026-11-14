@@ -46,11 +46,57 @@ final class Pack {
         return new File(packsDir(filesDir), titleId);
     }
 
-    /** Whether <files>/packs/<titleId> holds a usable pack for that Xbox title (console xbox, or none). */
+    /**
+     * Whether <files>/packs/<titleId> holds a usable pack for that Xbox title (console xbox, or none). A library key of
+     * another console (« gba-&lt;KEY&gt; », XBA-158: the GBA's Prepare goes by it) is that console's pack.
+     */
     static Check check(File filesDir, String titleId) {
         if (titleId == null || titleId.isEmpty())
             return Check.NO_TITLE_ID;
+        Console c = Console.ofKey(titleId);
+        if (c != Console.XBOX)
+            return check(filesDir, c, titleId.substring(c.id.length() + 1));
         return checkDir(packDir(filesDir, titleId), Console.XBOX, titleId);
+    }
+
+    /** The GBA runtime's discovered addresses of a game (XBA-158): &lt;files&gt;/work/&lt;library key&gt;/discovered.txt. */
+    static File discoveredFile(File filesDir, String libraryKey) {
+        return new File(new File(new File(filesDir, "work"), libraryKey), "discovered.txt");
+    }
+
+    /**
+     * How many addresses the runs found since the pack was made (XBA-158, the discovery loop): the discovered file's
+     * addresses beyond pack.json's « discovered » (what its Prepare handed to the lifter). 0 when there is no pack, no
+     * file, or nothing new. The runtime only ever adds to the file (sorted, no repeats).
+     */
+    static int newlyDiscovered(File filesDir, String libraryKey) {
+        File json = new File(packDir(filesDir, libraryKey), JSON);
+        int used;
+        try {
+            used = new JSONObject(PrepareProtocol.readText(json, 1 << 20)).optInt("discovered", 0);
+        } catch (IOException | JSONException e) {
+            return 0;
+        }
+        return Math.max(0, countAddresses(discoveredFile(filesDir, libraryKey)) - used);
+    }
+
+    /** The addresses in a discovered file (one hex number per line; blank lines and # comments skipped). */
+    static int countAddresses(File f) {
+        String text;
+        try {
+            text = PrepareProtocol.readText(f, 16 << 20);
+        } catch (IOException e) {
+            return 0;
+        }
+        int n = 0;
+        for (String line : text.split("\n")) {
+            int hash = line.indexOf('#');
+            if (hash >= 0)
+                line = line.substring(0, hash);
+            if (!line.trim().isEmpty())
+                n++;
+        }
+        return n;
     }
 
     /**

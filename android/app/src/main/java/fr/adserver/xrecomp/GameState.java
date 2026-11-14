@@ -13,7 +13,8 @@ package fr.adserver.xrecomp;
  *
  * A game of another console than the Xbox (XBA-178): Not playable yet while it is in a library folder (no Prepare, no
  * launch until its console's runtime exists), else GONE. A console that plays its files as they are (the GBA,
- * XBA-157): Running, No file access, else Ready while it is in a library folder, else GONE.
+ * XBA-157): Running, No file access, Preparing / Queued while its Prepare runs or waits (XBA-158: a pack speeds it up,
+ * it is never needed), else Ready while it is in a library folder, else GONE.
  */
 final class GameState {
     private GameState() {}
@@ -71,7 +72,13 @@ final class GameState {
                 return Chip.NOT_PLAYABLE_YET;
             if (f.titleId.equals(f.runningTid))
                 return Chip.RUNNING;
-            return f.source == Source.NO_ACCESS ? Chip.NO_FILE_ACCESS : Chip.READY;
+            if (f.source == Source.NO_ACCESS)
+                return Chip.NO_FILE_ACCESS;
+            // XBA-158: its Prepare shows on the card while it runs or waits; prepared or not, it plays (READY).
+            LauncherActivity.Prep p = prep(f.toolchain, f.pack == Pack.Check.VALID, f.prepare, f.prepareFresh,
+                                           f.prepareProcess);
+            return p == LauncherActivity.Prep.RUNNING ? Chip.PREPARING
+                   : p == LauncherActivity.Prep.QUEUED ? Chip.QUEUED : Chip.READY;
         }
         if (f.titleId.equals(f.runningTid))
             return Chip.RUNNING;

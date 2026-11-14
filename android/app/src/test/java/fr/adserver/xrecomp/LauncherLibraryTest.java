@@ -730,4 +730,86 @@ public class LauncherLibraryTest {
         assertEquals(root.getAbsolutePath(), Library.folders(app).get(0).path);
         assertNull(GameStore.prefs(app).getString(Library.PREF_TREE, null));
     }
+
+    /**
+     * XBA-158: with the on-device toolchain, A on a GBA card opens its Home: Play first (the interpreter, no pack
+     * needed), « Not prepared » and Prepare beside it. Prepare starts PrepareService with the ROM and the library key
+     * and shows the Preparing screen; a valid pack says « Prepared »; addresses the runs found since offer Prepare
+     * again; Play launches the ROM in every state.
+     */
+    @Test
+    public void gbaHomePrepares() throws Exception {
+        Toolchain.assetsOverride = TestSupport.toolAssets(tmp.newFolder("assets"), "1");
+        Toolchain.nativeDirOverride = TestSupport.fakeNativeDir(tmp.getRoot()).getAbsolutePath();
+        folderGame(0);
+        File gba = tmp.newFolder("gba");
+        File rom = new File(gba, "Pocket Quest.gba");
+        TestSupport.write(rom, ConsoleTest.gba("AXVE"));
+        useFolder();
+        Library.addFolder(app, "content://com.android.externalstorage.documents/tree/primary%3Agba",
+                          gba.getAbsolutePath());
+        LauncherActivity a = launch();
+        String key = LibraryIndex.read(Library.indexFile(app.getFilesDir())).find(LibraryIndex.fileLoc(rom)).tid;
+        a.forceFocusForTest();
+        idle(300);
+        card(a, "Pocket Quest").requestFocusFromTouch();
+        idle(300);
+        key(a, KeyEvent.KEYCODE_BUTTON_A);
+        assertEquals(LauncherActivity.Screen.ROM_HOME, a.screenForTest());
+        assertNull("not launched", shadowOf(a).getNextStartedActivity());
+        assertEquals(key, a.romEntryForTest().tid);
+        assertEquals(app.getString(R.string.ROM_NOT_PREPARED_NOTE), a.noteForTest());
+        TestSupport.screenshot(a.getWindow().getDecorView(), "gba-1-home-not-prepared");
+
+        // Prepare (right of Play): the service with the ROM and the library key, then the Preparing screen.
+        key(a, KeyEvent.KEYCODE_DPAD_RIGHT);
+        key(a, KeyEvent.KEYCODE_BUTTON_A);
+        Intent started = shadowOf(app).getNextStartedService();
+        assertNotNull("PrepareService started", started);
+        assertEquals(PrepareService.ACTION_START, started.getAction());
+        assertEquals(key, started.getStringExtra(PrepareService.EXTRA_TITLE_ID));
+        assertEquals(rom.getAbsolutePath(), started.getStringExtra(PrepareService.EXTRA_GAME_DIR));
+        assertEquals(LauncherActivity.Screen.PREPARE, a.screenForTest());
+        assertEquals(PrepareProtocol.RUNNING, PrepareProtocol.readStatus(PrepareService.statusFile(app, key)).state);
+        TestSupport.screenshot(a.getWindow().getDecorView(), "gba-2-preparing");
+
+        // Done: a valid pack. Its Home says Prepared, Play first.
+        File dir = Pack.packDir(app.getFilesDir(), key);
+        TestSupport.write(new File(dir, "libtitle.so"), new byte[16]);
+        org.json.JSONObject o = new org.json.JSONObject().put("format", 1).put("console", "gba")
+                .put("title_key", key.substring(4)).put("abi", "arm64-v8a").put("shell_abi", Pack.SHELL_ABI)
+                .put("lib", "libtitle.so").put("lib_size", 16).put("discovered", 0);
+        TestSupport.write(new File(dir, "pack.json"), o.toString());
+        PrepareProtocol.Status s = PrepareProtocol.readStatus(PrepareService.statusFile(app, key));
+        s.state = PrepareProtocol.DONE;
+        PrepareProtocol.writeStatus(PrepareService.statusFile(app, key), s);
+        LauncherActivity b = launch();
+        b.forceFocusForTest();
+        idle(300);
+        card(b, "Pocket Quest").requestFocusFromTouch();
+        idle(300);
+        key(b, KeyEvent.KEYCODE_BUTTON_A);
+        assertEquals(LauncherActivity.Screen.ROM_HOME, b.screenForTest());
+        assertEquals(app.getString(R.string.ROM_PREPARED_NOTE), b.noteForTest());
+        TestSupport.screenshot(b.getWindow().getDecorView(), "gba-3-home-prepared");
+
+        // The runs found addresses since: Prepare again offered, Play still first.
+        TestSupport.write(Pack.discoveredFile(app.getFilesDir(), key), "0x08000101\n0x080001F0\n");
+        LauncherActivity c = launch();
+        c.forceFocusForTest();
+        idle(300);
+        card(c, "Pocket Quest").requestFocusFromTouch();
+        idle(300);
+        key(c, KeyEvent.KEYCODE_BUTTON_A);
+        assertEquals(app.getString(R.string.ROM_NEW_CODE_NOTE, 2), c.noteForTest());
+        TestSupport.screenshot(c.getWindow().getDecorView(), "gba-4-home-new-code");
+
+        // Play (focused first): the ROM to the game activity.
+        key(c, KeyEvent.KEYCODE_BUTTON_A);
+        Intent game = shadowOf(c).getNextStartedActivity();
+        assertNotNull(game);
+        assertEquals(ShellActivity.class.getName(), game.getComponent().getClassName());
+        assertEquals(rom.getAbsolutePath(), GameStore.launchedRom(app));
+        assertEquals(key, GameStore.launchedTitleId(app));
+    }
 }

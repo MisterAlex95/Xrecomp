@@ -141,7 +141,9 @@ public class LauncherActivity extends Activity {
         WELCOME, SOURCE, FOLDER_ACCESS, IMPORT, HOME, SETTINGS, CONTROLS, GAME_DATA, ABOUT, LICENCES, PREPARE, LIBRARY,
         STORAGE,
         /** A game's own app on its way into the game: its art, its title, one line, at most one action (gameApp). */
-        DIRECT
+        DIRECT,
+        /** A GBA game's Home (XBA-158): Play (the interpreter, or its pack) and its Prepare; romEntry. */
+        ROM_HOME
     }
 
     /** The Preparing screen dims after this long without input (OLED burn-in); any key or touch wakes it. */
@@ -282,6 +284,13 @@ public class LauncherActivity extends Activity {
     private final android.os.Handler poller = new android.os.Handler(android.os.Looper.getMainLooper());
     private boolean resumed;
     private Prep homePrep;
+    /**
+     * The GBA game whose Home (Screen.ROM_HOME) or Preparing screen shows (XBA-158), else null: never the selected
+     * game (that is the Xbox's), cleared when Home, the library or the welcome screen shows.
+     */
+    private LibraryScreen.Entry romEntry;
+    /** The Prepare state ROM_HOME was built with (its poll rebuilds it when that changes). */
+    private Prep romPrepShown;
     /** Home's primary is « Prepare again » (XBA-74). */
     private boolean homeAgain;
     /** A crash round that ended while the launcher was not watching was looked at (XBA-129), once per launcher. */
@@ -738,6 +747,8 @@ public class LauncherActivity extends Activity {
 
     /** The hero backdrop shows on Home and Preparing only; every other screen has the plain gradient and one glow. */
     private Bitmap heroFor(Screen s) {
+        if (romEntry != null && (s == Screen.PREPARE || s == Screen.ROM_HOME))
+            return null;   // a GBA game: no title image
         return s == Screen.HOME || s == Screen.PREPARE || s == Screen.DIRECT ? hero : null;
     }
 
@@ -877,6 +888,9 @@ public class LauncherActivity extends Activity {
                 focusMemory.put(screen, i);
         }
         closeSheet(false);
+        if (s == Screen.HOME || s == Screen.LIBRARY || s == Screen.WELCOME)
+            romEntry = null;
+        romPrepShown = null;
         syncTheme(s);
         if (s != Screen.LIBRARY && backdrop != null)
             backdrop.setGlows(Theme.GLOW, Theme.GLOW2);   // the library's per-card glow stays there
@@ -899,7 +913,7 @@ public class LauncherActivity extends Activity {
         xAction = yAction = startAction = l1Action = r1Action = null;
         topRight.setText("");
         topTabs.removeAllViews();
-        setTopBar(s != Screen.HOME && s != Screen.PREPARE && s != Screen.DIRECT);
+        setTopBar(s != Screen.HOME && s != Screen.PREPARE && s != Screen.DIRECT && s != Screen.ROM_HOME);
         contextText = "";
         deleteArmedAt = 0;
         storageArmedKey = null;
@@ -963,6 +977,9 @@ public class LauncherActivity extends Activity {
         case DIRECT:
             buildDirect();
             break;
+        case ROM_HOME:
+            buildRomHome();
+            break;
         }
         restoreFocus(false);
         if (companion != null && s != Screen.HOME && s != Screen.LIBRARY && s != Screen.PREPARE)
@@ -997,7 +1014,8 @@ public class LauncherActivity extends Activity {
      */
     private boolean syncTheme(Screen s) {
         // The library and Storage: always the stock colours (only the backdrop's glow follows the focused card).
-        boolean stock = s == Screen.LIBRARY || s == Screen.STORAGE;
+        boolean stock = s == Screen.LIBRARY || s == Screen.STORAGE || s == Screen.ROM_HOME
+                        || s == Screen.PREPARE && romEntry != null;
         String dir = stock ? null : gameDir();
         File gd = dir == null ? null : new File(dir);
         String tid = null;
@@ -1917,6 +1935,10 @@ public class LauncherActivity extends Activity {
     }
 
     private void onPlay() {
+        if (screen == Screen.ROM_HOME && romEntry != null) {   // the bottom screen's Play on a GBA game's Home
+            launchRom(romEntry);
+            return;
+        }
         State st = state();
         if (st == State.LIBRARY) {
             libraryAction(currentEntry());
@@ -2685,7 +2707,7 @@ public class LauncherActivity extends Activity {
     }
 
     private PrepareProtocol.Status readPrepStatus() {
-        String tid = titleId();
+        String tid = prepTid();
         return tid == null ? null : PrepareProtocol.readStatus(PrepareService.statusFile(this, tid));
     }
 
@@ -3481,6 +3503,10 @@ public class LauncherActivity extends Activity {
 
     /** Checks the space, then starts PrepareService and shows the Preparing screen. */
     private void startPrepare() {
+        if (romEntry != null) {   // a GBA game's Retry / Resume (XBA-158)
+            startRomPrepare(romEntry);
+            return;
+        }
         startPrepare(false);
     }
 
@@ -3569,11 +3595,10 @@ public class LauncherActivity extends Activity {
      * under it, and Retry (or Resume) and Share log as buttons.
      */
     private void buildPrepare() {
-        String dir = gameDir();
-        String title = gameTitle(dir);
-        LinearLayout info = hero(title, false);
+        String title = prepTitle();
+        LinearLayout info = romEntry != null ? hero(title, false, null) : hero(title, false);
         if (companion != null)
-            companion.preparing(titleId(), title);
+            companion.preparing(prepTid(), title);
         prepStatus = (Widgets.Chip)heroLine(info, getString(R.string.PREPARE_STARTING), Theme.OK);
 
         LinearLayout progress = column();
@@ -3636,7 +3661,7 @@ public class LauncherActivity extends Activity {
     private void leavePrepare() {
         getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         if (history.isEmpty())
-            show(Screen.HOME);
+            show(romEntry != null ? Screen.ROM_HOME : Screen.HOME);
         else
             show(history.pop());
     }
@@ -3690,7 +3715,7 @@ public class LauncherActivity extends Activity {
         }
         cancelArmedAt = 0;
         cancelSent = true;
-        String tid = titleId();
+        String tid = prepTid();
         setNote(getString(R.string.CANCELING), NOTE_INFO);
         Log.i(TAG, "launcher: prepare cancel");
         try {
@@ -3702,14 +3727,14 @@ public class LauncherActivity extends Activity {
 
     /** « Share log »: prepare.log through LogProvider, to whatever app the player picks. */
     private void shareLog() {
-        String tid = titleId();
+        String tid = prepTid();
         if (tid == null || !PrepareService.logFile(this, tid).isFile()) {
             setNote(getString(R.string.SHARE_LOG_NONE), NOTE_INFO);
             return;
         }
         Uri uri = LogProvider.uriFor(this, tid);
         Intent send = new Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_STREAM, uri)
-                .putExtra(Intent.EXTRA_SUBJECT, getString(R.string.SHARE_LOG_SUBJECT, gameTitle(gameDir()), tid))
+                .putExtra(Intent.EXTRA_SUBJECT, getString(R.string.SHARE_LOG_SUBJECT, prepTitle(), tid))
                 .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
         send.setClipData(android.content.ClipData.newRawUri("prepare.log", uri));
         try {
@@ -3741,6 +3766,17 @@ public class LauncherActivity extends Activity {
             }
             paintPrepare(s);
             checkDim(isRunning);
+        } else if (screen == Screen.ROM_HOME && romEntry != null && romPrepShown != null) {
+            Prep now = romPrep(romEntry());
+            if (now != romPrepShown) {
+                refreshKeepingFocus();
+                return;
+            }
+            if (now == Prep.RUNNING) {
+                PrepareProtocol.Status s = readPrepStatus();
+                if (s != null && homeStatus != null)
+                    homeStatus.set(progressLine(s), Theme.OK);
+            }
         } else if (screen == Screen.HOME && homeChip != null) {
             LibraryScreen.Entry e = ++libPolls % LIBRARY_POLL_EVERY == 0 ? currentEntry() : null;
             if (e != null && e.chip != homeChip)
@@ -3769,6 +3805,22 @@ public class LauncherActivity extends Activity {
     /** The Prepare finished: Home with Play focused, the « done » sound and haptic, « TITLE is ready ». */
     private void onPrepareDone() {
         getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        if (romEntry != null) {   // a GBA game (XBA-158): its Home, Play first
+            boolean ok = Pack.check(getFilesDir(), romEntry.tid) == Pack.Check.VALID;
+            Log.i(TAG, "launcher: prepare done for " + romEntry.tid + ", pack " + (ok ? "valid" : "not valid"));
+            LibraryScreen.Entry e = romEntry;
+            history.clear();
+            history.push(Screen.LIBRARY);
+            focusMemory.remove(Screen.ROM_HOME);
+            romEntry = e;
+            show(Screen.ROM_HOME);
+            if (ok) {
+                restoreFocus(true);
+                feedback.play(UiFeedback.Cue.DONE, host);
+                setNote(getString(R.string.ROM_PREPARED_DONE, e.title()), NOTE_OK);
+            }
+            return;
+        }
         String tid = titleId();
         boolean ok = tid != null && Pack.check(getFilesDir(), tid) == Pack.Check.VALID;
         Log.i(TAG, "launcher: prepare done, pack " + (ok ? "valid" : "not valid"));
@@ -3783,6 +3835,166 @@ public class LauncherActivity extends Activity {
             setNote(getString(state() == State.LIBRARY ? R.string.LIB_PREPARED_IMPORT : R.string.READY_TO_PLAY,
                               gameTitle(gameDir())), NOTE_OK);
         }
+    }
+
+    // ---- A GBA game's Home and Prepare (XBA-158; docs/android/app-shell.md « Game Boy Advance games ») ------
+
+    /** The title ID the Prepare screens follow: the GBA game's library key (gba-<KEY>), else the Xbox game's. */
+    private String prepTid() {
+        return romEntry != null ? romEntry.tid : titleId();
+    }
+
+    private String prepTitle() {
+        return romEntry != null ? romEntry.title() : gameTitle(gameDir());
+    }
+
+    /** romEntry read again (its pack, its Prepare status, the running game). */
+    private LibraryScreen.Entry romEntry() {
+        romEntry = LibraryScreen.entry(getFilesDir(), romEntry.tid, games, index, libEnv());
+        return romEntry;
+    }
+
+    /** The Prepare state of a GBA game: Prep.PLAYABLE once its pack is valid, NEEDED before; Play works in both. */
+    private static Prep romPrep(LibraryScreen.Entry e) {
+        GameState.Facts f = e.facts;
+        return GameState.prep(f.toolchain, f.pack == Pack.Check.VALID, f.prepare, f.prepareFresh, f.prepareProcess);
+    }
+
+    /**
+     * A GBA game's Home: its title, one line (« Prepared · runs natively », « Not prepared · plays in the
+     * interpreter », the Prepare's progress or failure, new code found since the pack), Play first (always: the
+     * interpreter needs no pack) and the Prepare action beside it.
+     */
+    private void buildRomHome() {
+        LibraryScreen.Entry e = romEntry();
+        Prep p = romPrep(e);
+        romPrepShown = p;
+        PrepareProtocol.Status ps = e.facts.prepare;
+        int found = p == Prep.PLAYABLE ? Pack.newlyDiscovered(getFilesDir(), e.tid) : 0;
+        LinearLayout info = hero(e.title(), false, null);
+        String line;
+        int color;
+        switch (p) {
+        case RUNNING:
+            line = ps == null ? getString(R.string.PREPARE_STARTING) : progressLine(ps);
+            color = Theme.OK;
+            break;
+        case QUEUED:
+            line = queuedLabel(e.tid);
+            color = Theme.ACCENT;
+            break;
+        case FAILED:
+            line = getString(R.string.CHIP_PREPARE_FAILED) + (ps == null || ps.code.isEmpty() ? "" : " · " + ps.code);
+            color = Theme.ERROR;
+            break;
+        case PLAYABLE:
+            line = found > 0 ? getString(R.string.ROM_NEW_CODE, found) : getString(R.string.ROM_PREPARED);
+            color = found > 0 ? Theme.WARN : Theme.OK;
+            break;
+        default:
+            line = getString(R.string.ROM_NOT_PREPARED);
+            color = Theme.TEXT_DIM;
+            break;
+        }
+        View status = heroLine(info, line, color);
+        if (p == Prep.RUNNING && status instanceof Widgets.Chip)
+            homeStatus = (Widgets.Chip)status;
+
+        LinearLayout buttons = heroButtons(info);
+        Widgets.PillButton play = pill(buttons, Icon.PLAY, getString(R.string.PLAY), true, () -> launchRom(e));
+        switch (p) {
+        case RUNNING:
+            pill(buttons, null, getString(R.string.PREPARING), false, () -> go(Screen.PREPARE));
+            break;
+        case QUEUED:
+            pill(buttons, null, queuedLabel(e.tid), false, () -> dequeuePrepare(e.tid));
+            break;
+        case FAILED:
+            pill(buttons, null, getString(R.string.PREPARE_SEE_WHY), false, () -> go(Screen.PREPARE));
+            break;
+        case PLAYABLE:
+            if (found > 0)
+                pill(buttons, null, getString(R.string.PREPARE_AGAIN), false, () -> startRomPrepare(e));
+            break;
+        default:
+            pill(buttons, null, getString(R.string.PREPARE), false, () -> startRomPrepare(e));
+            break;
+        }
+        homePrimary = play;
+        defaultFocus = play;
+        startAction = () -> launchRom(e);
+        addHint("A", R.string.HINT_SELECT, this::clickFocused);
+        addHint("B", R.string.LIB_TITLE, this::back);
+        if (companion != null) {
+            companion.art(null);
+            companion.home(e.title(), line, color, true, play.title);
+        }
+
+        if (e.chip == GameState.Chip.RUNNING)
+            setNote(getString(R.string.GAME_RUNNING_HOME), NOTE_INFO);
+        else if (p == Prep.FAILED)
+            setNote(getString(R.string.ROM_FAILED_NOTE, ps == null ? "" : ps.code), NOTE_WARN);
+        else if (p == Prep.PLAYABLE)
+            setNote(found > 0 ? getString(R.string.ROM_NEW_CODE_NOTE, found) : getString(R.string.ROM_PREPARED_NOTE),
+                    NOTE_INFO);
+        else if (p == Prep.NEEDED || p == Prep.CANCELLED || p == Prep.INTERRUPTED)
+            setNote(getString(R.string.ROM_NOT_PREPARED_NOTE), NOTE_INFO);
+    }
+
+    /**
+     * Prepare (or Prepare again) for a GBA game: PrepareService with the ROM (a path, or the document URI the service
+     * copies into the game's work folder) and its library key as title ID; the Preparing screen follows. The space
+     * check is the Xbox one's: a GBA pack is small, but the compiler and its temporary files are not.
+     */
+    private void startRomPrepare(LibraryScreen.Entry e) {
+        Library.Folder folder = e.active == null ? null : Library.folderOf(Library.folders(this), e.active);
+        String rom = romSpec(e.active, folder == null ? null : folder.tree);
+        if (rom == null) {
+            setNote(getString(R.string.LIB_SOURCE_GONE_NOTE, e.title()), NOTE_WARN);
+            return;
+        }
+        long free = internalFree();
+        if (free < PREPARE_MIN_FREE) {
+            setNote(getString(R.string.PREPARE_NO_SPACE, size(PREPARE_MIN_FREE), size(free)), NOTE_ERROR);
+            return;
+        }
+        if (Build.VERSION.SDK_INT >= 33
+            && checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS)
+               != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            try {
+                requestPermissions(new String[] { android.Manifest.permission.POST_NOTIFICATIONS }, REQ_NOTIFICATIONS);
+            } catch (RuntimeException ignored) {
+            }
+        }
+        PrepareProtocol.Status s = new PrepareProtocol.Status();
+        s.titleId = e.tid;
+        s.startedAt = s.updatedAt = System.currentTimeMillis();
+        s.msg = getString(R.string.PREPARE_STARTING);
+        s.log = PrepareService.logFile(this, e.tid).getAbsolutePath();
+        File sf = PrepareService.statusFile(this, e.tid);
+        try {
+            PrepareProtocol.writeStatus(sf, s);
+            startForegroundService(PrepareService.startIntent(this, rom, e.tid, e.title()));
+        } catch (IOException | RuntimeException ex) {
+            Log.w(TAG, "launcher: cannot start the Prepare", ex);
+            s.state = PrepareProtocol.FAILED;
+            s.code = "START_FAILED";
+            s.msg = String.valueOf(ex.getMessage());
+            try {
+                PrepareProtocol.writeStatus(sf, s);
+            } catch (IOException ignored) {
+            }
+            setNote(getString(R.string.PREPARE_START_FAILED, String.valueOf(ex.getMessage())), NOTE_ERROR);
+            return;
+        }
+        Log.i(TAG, "launcher: prepare started for " + e.tid + " (" + rom + ")");
+        cancelSent = false;
+        romEntry = e;
+        go(Screen.PREPARE);
+    }
+
+    LibraryScreen.Entry romEntryForTest() {
+        return romEntry;
     }
 
     // ---- LIBRARY (docs/android/app-shell.md « Game library ») ------------------------------------------------
@@ -3906,6 +4118,12 @@ public class LauncherActivity extends Activity {
      */
     private void openGame(LibraryScreen.Entry e) {
         if (e.directLaunch()) {
+            if (Toolchain.available(this) && e.chip != GameState.Chip.NO_FILE_ACCESS) {   // its Home: Play, Prepare
+                Log.i(TAG, "launcher: library: open " + e.tid + " (" + e.title() + ", " + e.chip + ")");
+                romEntry = e;
+                go(Screen.ROM_HOME);
+                return;
+            }
             launchRom(e);
             return;
         }

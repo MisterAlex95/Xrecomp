@@ -29,7 +29,10 @@ app): GBA game code + CRC32 of the ROM (`AXVE-1A2B3C4D`), PS1 serial from `SYSTE
 (`NSME-635A2BFF`, any byte order). Such a pack lives in `packs/<console>-<key>/`. The app shell's loader
 (`android/app/src/main/cpp/pack_loader.c`, `xba_pack_load_rom`) checks it and calls `<console>_runtime_start`, a
 stub that logs `<console> runtime ready` for now (libmain.so links the three runtimes); the GBA's plays the game, and
-needs no pack (`PACK_NONE`, XBA-157). Import filter (`Console.java`):
+needs no pack (`PACK_NONE`, XBA-157); a GBA pack that Prepare built (`python3 -m tools.prepare game.gba`, XBA-158:
+docs/android/prepare.md « GBA packs ») makes it run natively, checked and loaded by `runtime/gba_pack.c`
+(`PACK_LOADED` / `PACK_STALE`, the game always starts), and the addresses the interpreter had to run are written at
+exit for the next Prepare (`gba_runtime_opts.discovered_path`). Import filter (`Console.java`):
 `.gba`; `.bin`, `.cue`, `.chd`; `.z64`, `.n64`, `.v64`; and `.iso`, which both an Xbox and a PS1 disc use, so its
 content decides (Xbox volume magic `MICROSOFT*XBOX*MEDIA` first, then an ISO 9660 volume with system ID
 `PLAYSTATION`). CHD is accepted by name but not read yet (no title key).

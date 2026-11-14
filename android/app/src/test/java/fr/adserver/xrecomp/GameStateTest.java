@@ -57,6 +57,22 @@ public class GameStateTest {
         assertEquals(GameState.Chip.READY, GameState.chip(f));
         f.toolchain = false;
         assertEquals(GameState.Chip.READY, GameState.chip(f));
+        // XBA-158: its Prepare shows on the card while it runs or waits; failed or done, it still plays.
+        f.toolchain = true;
+        PrepareProtocol.Status s = new PrepareProtocol.Status();
+        s.state = PrepareProtocol.RUNNING;
+        f.prepare = s;
+        f.prepareFresh = true;
+        assertEquals(GameState.Chip.PREPARING, GameState.chip(f));
+        s.state = PrepareProtocol.QUEUED;
+        f.prepareProcess = true;
+        assertEquals(GameState.Chip.QUEUED, GameState.chip(f));
+        s.state = PrepareProtocol.FAILED;
+        assertEquals(GameState.Chip.READY, GameState.chip(f));
+        f.pack = Pack.Check.VALID;
+        assertEquals(GameState.Chip.READY, GameState.chip(f));
+        f.prepare = null;
+        f.prepareProcess = false;
         f.runningTid = "gba-AXVE-1A2B3C4D";
         assertEquals(GameState.Chip.RUNNING, GameState.chip(f));
         f.runningTid = TID;

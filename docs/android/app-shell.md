@@ -1084,11 +1084,26 @@ corner (**Xbox**, **GBA**, **PS1**, **N64**); an Xbox-only library looks as befo
 ### Game Boy Advance games (XBA-157)
 
 The GBA runtime (`consoles/gba/runtime`, an interpreter: `gba_core.h` on the host layer) plays a ROM as it is: no
-Prepare, no Import, no pack, no Home. A GBA card is **Ready** (no chip) while its file is in a library folder,
-**Running** while it runs, **No file access** when its folder cannot be read (A then asks for the folder again).
+Import, and no pack needed. With the on-device toolchain, a Prepare can translate the game for the device (a title
+pack, XBA-158: [prepare.md « GBA packs »](prepare.md#gba-packs-xba-157-xba-158)) so that it runs natively; Play never
+waits for it. A GBA card is **Ready** (no chip) while its file is in a library folder, **Preparing** / **Queued** while
+its Prepare runs or waits, **Running** while it runs, **No file access** when its folder cannot be read (A then asks
+for the folder again).
 
-- **Launch.** A or Start on the card (or the bottom screen's Play) starts the game activity at once
-  (`LauncherActivity.launchRom`): the ROM becomes the launched game (`GameStore.rememberRomLaunch`: preference `rom`,
+- **Home (XBA-158, with the toolchain).** A on the card opens the game's own Home (`Screen.ROM_HOME`, the launcher's
+  `romEntry`; never the selected game, which stays the Xbox's): the title, one line, **Play** first and the Prepare
+  action beside it. The line: « Not prepared · plays in the interpreter » (Prepare), « Prepared · runs natively »,
+  « Prepared · N new addresses found · prepare again » (Prepare again, when the runs found code since the pack:
+  `Pack.newlyDiscovered`), the Prepare's progress (« Compile · 42 % · … »; Preparing… opens the Preparing screen),
+  « Queued » (A takes it out of the queue) or « Prepare failed · CODE » (See what failed: the Preparing screen with
+  Retry and Share log). A note under it says what Play and Prepare do. B goes back to the library. Prepare is the Xbox
+  flow: the space check, the notification permission, `PrepareService` with the ROM (a path, or the document's URI,
+  which the service copies to `<files>/work/gba-<KEY>/rom.gba`) and the library key `gba-<KEY>` as title ID, so
+  `status.json`, `prepare.log`, the queue, the notification and the Preparing screen are the Xbox ones (stock colours,
+  the title's monogram). When it ends, the game's Home again, « … is prepared: it now runs natively ». Without the
+  toolchain there is no Home: A launches, as Start does.
+- **Launch.** Start on the card, A without the toolchain, Play on its Home (or the bottom screen's Play) start the game
+  activity at once (`LauncherActivity.launchRom`): the ROM becomes the launched game (`GameStore.rememberRomLaunch`: preference `rom`,
   the library key `gba-<KEY>` as `title_id`; the Xbox game's `game_dir` stays, so the launcher's one-game rules are
   unchanged and any Xbox Play clears `rom`). The same ROM running is brought back; another game running is ended
   first (one game process at a time). The launcher finishes, as for Play.
@@ -1097,8 +1112,10 @@ Prepare, no Import, no pack, no Home. A GBA card is **Ready** (no chip) while it
   hands over as `fd:N` (detached; the runtime reads it from offset 0; unreachable: `fd:-1`). `shell_main.c` sees a
   game of another console (`xba_pack_rom_console`, which reads `fd:N` too), turns off the Xbox disc mount for that
   process (`RECOMP_DISC_IMAGE=0`: the mount would close the descriptor) and calls `xba_pack_load_rom`; without a pack
-  that is `PACK_NONE gba <KEY> (no pack needed, the interpreter runs it)` and `gba_runtime_start(rom, NULL, key)`.
-  A pack's library would be ignored for now.
+  that is `PACK_NONE gba <KEY> (not prepared, the interpreter runs it)` and `gba_runtime_start(rom, NULL, key)`.
+  With a pack: `PACK_LOADED gba <KEY> (<N> functions)`, or `PACK_STALE gba <KEY> (<why>), running interpreted` when
+  it is not this ROM's, this shell's or does not load (the game always starts). At exit the addresses the interpreter
+  had to run go to `<files>/work/gba-<KEY>/discovered.txt` for the next Prepare (the discovery loop).
 - **Picture.** 240 x 160 RGB555 converted to RGBA and presented through `host_window` (GL ES 3.0), letterboxed at
   the largest size of the GBA's aspect, sharp pixels (nearest). `RECOMP_GBA_SCALE=integer` (recomp.cfg) keeps every
   pixel the same size (6x on the Thor's 1080p screen: 1440 x 960), `RECOMP_GBA_FILTER=linear` smooths.
@@ -1162,6 +1179,37 @@ out/hb/gba/hello.gba /sdcard/gba/` (or over USB file transfer into `Internal sto
     quit), and, after saving in the game, quitting and starting again, is the save there (`save loaded`). Sound
     stays silent until the APU work lands; some games may still crash or show wrong graphics (the core is new):
     send the logcat and a screenshot.
+
+With an APK that carries the toolchain, A on a GBA card opens its Home (step 2 is then A on the card, A on Play;
+Start on the card still starts it at once).
+
+### Device check (GBA Prepare, XBA-158), for Alex
+
+An APK with the toolchain, the GBA homebrew in `/sdcard/gba` as above, `adb logcat -s xboxrecomp SDL` throughout.
+Until the GBA lifter lands (`gba_tools.recomp`), step 3 ends with `LIFT_FAILED`: note it and stop after step 4.
+
+1. A on the **pad** card. Expected: its Home, « Not prepared · plays in the interpreter », **Play** focused,
+   **Prepare** beside it, a note on what each does. Screenshot. B: back to the library.
+2. A on Play: the game starts at once (logcat `PACK_NONE gba XBAT-… (not prepared, …)`). Quit from the in-game menu.
+   logcat: `gba: N address(es) the pack did not cover, N new, in /data/user/0/…/files/work/gba-XBAT-…/discovered.txt`
+   (N may be 0 until the core records them).
+3. A on the card, right, A on **Prepare**: the Preparing screen (« Install tools » the first time, then Identify,
+   Analyse, Translate, Compile, Pack), the notification. Note the total time (a homebrew: well under a minute after
+   the tools are installed). Expected: back on the game's Home, « Pocket… is prepared », « Prepared · runs natively ».
+   Screenshot. `adb shell run-as fr.adserver.xrecomp.shell ls -l files/packs/gba-XBAT-*` shows `libtitle.so` and
+   `pack.json`.
+4. Play: logcat `PACK_LOADED gba XBAT-… (<N> functions)`; the game plays as in the interpreter (same picture, same
+   controls, the counter and the save still work). Quit.
+5. Play while a Prepare of the same game runs (start Prepare, press Y, then Play): the game starts at once in the
+   interpreter (or with the previous pack); the Prepare goes on. The card shows « Preparing » in the library meanwhile.
+6. After a run that found new code (step 2's line with « new »), the game's Home says « Prepared · N new addresses
+   found · prepare again » with **Prepare again** beside Play; it runs and the line goes back to « Prepared ».
+7. A stale pack: `adb shell run-as fr.adserver.xrecomp.shell sh -c 'echo x >> files/packs/gba-XBAT-*/libtitle.so'`,
+   Play. Expected: the game still starts, logcat `PACK_STALE gba XBAT-… (<reason: lib_size>),
+   running interpreted`; Home says « Not prepared »; Prepare repairs it.
+8. A library folder added with the file picker (no All files access): Prepare works the same (logcat
+   `rom: content://… copied to …/work/gba-XBAT-…/rom.gba`).
+9. Switch the Thor to French: the game's Home lines and notes in French.
 
 ### The library screen
 
