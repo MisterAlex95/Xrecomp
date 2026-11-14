@@ -3868,8 +3868,8 @@ public class LauncherActivity extends Activity {
     /**
      * A GBA game's, a PS1 disc's or an N64 cartridge's Home: its title, one line (« Prepared · runs natively », « Not
      * prepared · plays in the interpreter », the Prepare's progress or failure, new code found since the pack), Play
-     * first (always: the interpreter needs no pack) and the Prepare action beside it (not for a .chd: romPrepares; not
-     * without the toolchain, which only an N64 Home is opened without: Play and its pak then), the N64's pak last.
+     * first (always: the interpreter needs no pack) and the Prepare action beside it (not without the
+     * toolchain, which only an N64 Home is opened without: Play and its pak then), the N64's pak last.
      */
     private void buildRomHome() {
         LibraryScreen.Entry e = romEntry();
@@ -3954,7 +3954,7 @@ public class LauncherActivity extends Activity {
         else if (n64 && !prepares)
             setNote(getString(n64Rumble(e.tid) ? R.string.ROM_N64_NOTE_RUMBLE : R.string.ROM_N64_NOTE), NOTE_INFO);
         else if (!prepares)
-            setNote(getString(R.string.ROM_PS1_CHD_NOTE), NOTE_INFO);
+            setNote(getString(R.string.ROM_PS1_NOTE), NOTE_INFO);
         else if (p == Prep.FAILED)
             setNote(getString(R.string.ROM_FAILED_NOTE, ps == null ? "" : ps.code), NOTE_WARN);
         else if (p == Prep.PLAYABLE)
@@ -3972,13 +3972,10 @@ public class LauncherActivity extends Activity {
 
     /**
      * Whether a game that starts from its file has a Prepare: its console's (Console.prepares: the GBA, the PS1, the
-     * N64), and not a .chd image (XBA-168: the PS1 recompiler reads .cue / .bin / .iso; a .chd plays, interpreted).
+     * N64). A PS1 .chd too (XBA-168: PrepareService.ps1Source reads its boot EXE through the native disc reader).
      */
     static boolean romPrepares(LibraryScreen.Entry e) {
-        if (!e.console().prepares())
-            return false;
-        String name = e.active == null ? "" : e.active.name;
-        return !name.toLowerCase(java.util.Locale.ROOT).endsWith(".chd");
+        return e.console().prepares();
     }
 
     /**

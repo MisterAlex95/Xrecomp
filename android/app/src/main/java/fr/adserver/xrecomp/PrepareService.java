@@ -607,18 +607,21 @@ public class PrepareService extends Service {
      * document of a library folder seen through the Storage Access Framework (a single-file .bin / .iso, or a .cue
      * whose track documents the library index lists): the sectors that lead to the boot EXE, copied from its data
      * track (the .cue's first FILE) into &lt;work&gt;/disc.iso (Ps1Disc: a sparse image of a few hundred KB on disk).
-     * A .chd cannot be prepared (tools.prepare reads .cue / .bin / .iso).
+     * A .chd, a path or a document alike, goes the same way through the native disc reader the game uses
+     * (Ps1Native.discOpener: libchdr, every codec), so tools.prepare reads a plain ISO; without the native library a
+     * path is handed over as it is (tools.prepare's own CHD reader: zlib and LZMA hunks).
      */
     static String ps1Source(Context c, String spec, String titleId, File work, PrepareRunner runner)
             throws IOException {
-        if (!spec.startsWith("content:"))
-            return spec;
-        android.content.ContentResolver cr = c.getContentResolver();
-        String name = documentName(c, spec);
+        boolean doc = spec.startsWith("content:");
+        String name = doc ? documentName(c, spec) : new File(spec).getName();
         String low = (name != null ? name : android.net.Uri.parse(spec).getLastPathSegment() + "")
                 .toLowerCase(java.util.Locale.ROOT);
         if (low.endsWith(".chd"))
-            throw new IOException(name + ": a .chd image cannot be prepared (.cue / .bin / .iso only); it still plays");
+            return ps1Chd(c, spec, doc, work, runner);
+        if (!doc)
+            return spec;
+        android.content.ContentResolver cr = c.getContentResolver();
         String track = spec;
         if (low.endsWith(".cue")) {
             String text;
@@ -658,6 +661,43 @@ public class PrepareService extends Service {
         }
         if (runner != null)
             runner.logLine("disc: " + track + " -> " + out + " (boot " + r.boot + ", " + r.exeSize + " bytes, "
+                           + r.sectors + " sectors copied)");
+        return out.getAbsolutePath();
+    }
+
+    /** ps1Source for a .chd (XBA-168): its boot EXE's sectors, read by the native reader, into &lt;work&gt;/disc.iso. */
+    private static String ps1Chd(Context c, String spec, boolean doc, File work, PrepareRunner runner)
+            throws IOException {
+        File out = new File(work, "disc.iso");
+        Ps1Disc.Result r;
+        android.os.ParcelFileDescriptor pfd = null;
+        try {
+            String nativePath = spec;
+            if (doc) {
+                pfd = c.getContentResolver().openFileDescriptor(android.net.Uri.parse(spec), "r");
+                if (pfd == null)
+                    throw new IOException("cannot open " + spec);
+                nativePath = "fd:" + pfd.getFd();
+            }
+            Ps1Native.Disc d = Ps1Native.discOpener.open(nativePath);
+            if (d == null) {
+                if (!doc)
+                    return spec;   // no native reader: tools.prepare reads the .chd itself
+                throw new IOException(spec + ": a .chd document needs the native disc reader (libxba_import.so)");
+            }
+            try {
+                r = Ps1Disc.extract(Ps1Disc.raw(d), out);
+            } finally {
+                d.close();
+            }
+        } catch (SecurityException e) {
+            throw new IOException("no access to " + spec + ": " + e.getMessage());
+        } finally {
+            if (pfd != null)
+                pfd.close();
+        }
+        if (runner != null)
+            runner.logLine("disc: " + spec + " (chd) -> " + out + " (boot " + r.boot + ", " + r.exeSize + " bytes, "
                            + r.sectors + " sectors copied)");
         return out.getAbsolutePath();
     }

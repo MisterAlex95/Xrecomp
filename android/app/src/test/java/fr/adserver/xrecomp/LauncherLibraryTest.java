@@ -1002,8 +1002,8 @@ public class LauncherLibraryTest {
     }
 
     /**
-     * A .chd plays but has no Prepare (XBA-168: the PS1 recompiler reads .cue / .bin / .iso); a GBA ROM and an N64
-     * cartridge have one.
+     * Every PS1 disc has a Prepare, a .chd too (XBA-168: its boot EXE is read by the native disc reader); a GBA ROM
+     * and an N64 cartridge have one.
      */
     @Test
     public void romPrepares() {
@@ -1012,7 +1012,7 @@ public class LauncherLibraryTest {
         e.active.name = "Space Race.cue";
         assertTrue(LauncherActivity.romPrepares(e));
         e.active.name = "Space Race.CHD";
-        assertFalse(LauncherActivity.romPrepares(e));
+        assertTrue(LauncherActivity.romPrepares(e));
         e.active = null;
         assertTrue(LauncherActivity.romPrepares(e));
         assertTrue(LauncherActivity.romPrepares(new LibraryScreen.Entry("gba-AXVE-00000001")));

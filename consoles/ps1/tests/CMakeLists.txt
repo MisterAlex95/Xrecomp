@@ -134,6 +134,15 @@ if(TARGET ps1_run)
             # OpenBIOS boots the disc through SYSTEM.CNF (Setloc, SeekL, ReadN per file)
             set_tests_properties(ps1_hb_disc_${prog} PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
         endforeach()
+        # The overlay disc as CHDs ps1_tools.chd writes (cdlz, cdzl; XBA-168): booted through libchdr by the BIOS
+        if(XBR_PS1_CHD)
+            foreach(codec cdlz cdzl)
+                add_test(NAME ps1_hb_chd_overlay_${codec} COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/run_chd.sh
+                         $<TARGET_FILE:ps1_run> ${PS1_BIOS} ${PS1_HOMEBREW_DIR}/overlay.bin ${codec}
+                         ${CMAKE_CURRENT_BINARY_DIR}/chd/overlay_${codec}.chd --result --frames 3000 --quiet)
+                set_tests_properties(ps1_hb_chd_overlay_${codec} PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
+            endforeach()
+        endif()
     endif()
 
     # JaCzekanski/ps1-tests: each runs to "Done." with no failing check; EXPECT strings pin the key verdicts.

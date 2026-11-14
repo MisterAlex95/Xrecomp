@@ -1,8 +1,9 @@
 """PS-X EXE and PlayStation disc input (XBA-160): the program a title boots, from an EXE file or from a disc image.
 
-A disc (.cue / .bin / .iso) is read as ISO 9660: SYSTEM.CNF's BOOT line names the EXE (cdrom:\\SLUS_005.94;1); without
+A disc (.cue / .bin / .iso / .chd) is read as ISO 9660: SYSTEM.CNF's BOOT line names the EXE (cdrom:\\SLUS_005.94;1); without
 SYSTEM.CNF, PSX.EXE. Raw images (2352-byte sectors, mode 1 or mode 2 form 1) and cooked ones (2048) are recognised by
-their sync pattern. Pure Python, no native extension (the app's embedded CPython runs it).
+their sync pattern; a .chd (MAME compressed hunks, told by its MComprHD magic) through chd.py. Pure Python, no native
+extension (the app's embedded CPython runs it).
 """
 
 import hashlib
@@ -37,10 +38,19 @@ class Exe:
 
 
 class Disc:
-    """Reads 2048-byte user data sectors from a .cue / .bin / .iso image (first data track)."""
+    """Reads 2048-byte user data sectors from a .cue / .bin / .iso image (first data track) or a .chd."""
 
     def __init__(self, path):
         self.path = path
+        self.chd = None
+        with open(path, "rb") as f:
+            if f.read(8) == b"MComprHD":
+                from ps1_tools import chd
+                self.chd = chd.Chd(path)
+                if not self.chd.tracks or self.chd.tracks[0].audio:
+                    self.chd.close()
+                    raise ValueError("chd: the first track is not a data track")
+                return
         bin_path, mode = path, None
         if path.lower().endswith(".cue"):
             bin_path, mode = self._parse_cue(path)
@@ -74,9 +84,14 @@ class Disc:
         return cur_file, mode
 
     def close(self):
-        self.f.close()
+        if self.chd:
+            self.chd.close()
+        else:
+            self.f.close()
 
     def sector(self, lba):
+        if self.chd:
+            return self.chd.user_data(lba)
         self.f.seek(lba * self.size)
         raw = self.f.read(self.size)
         if len(raw) < self.size:
@@ -149,7 +164,7 @@ class Disc:
 
 
 def load_input(path):
-    """An Exe from a PS-X EXE file or a disc image (.cue / .bin / .iso / .img)."""
+    """An Exe from a PS-X EXE file or a disc image (.cue / .bin / .iso / .img / .chd)."""
     with open(path, "rb") as f:
         head = f.read(8)
     if head == b"PS-X EXE":

@@ -96,7 +96,7 @@
     <string name="ROM_PREPARED_DONE">%1$s est préparé : il tourne maintenant en natif.</string>
 <!-- A PS1 game's Home (XBA-168). -->
     <string name="ROM_PS1_LINE">Joue dans l\'interpréteur</string>
-    <string name="ROM_PS1_CHD_NOTE">Jouer lance le jeu depuis son disque, avec le BIOS PlayStation fourni par l\'application (OpenBIOS). Une image .chd ne peut pas être préparée : convertissez-la en .cue / .bin (chdman extractcd) pour qu\'il tourne en natif.</string>
+    <string name="ROM_PS1_NOTE">Jouer lance le jeu depuis son disque, avec le BIOS PlayStation fourni par l\'application (OpenBIOS).</string>
 <!-- An N64 game's Home (XBA-174). -->
     <string name="N64_PAK_CONTROLLER">Controller Pak</string>
     <string name="N64_PAK_RUMBLE">Rumble Pak</string>

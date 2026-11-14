@@ -27,6 +27,13 @@ CC = shutil.which(os.environ.get("CC", "cc"))
 HOMEBREW = os.environ.get("PS1_HOMEBREW_DIR") or os.path.join(ROOT, "build", "homebrew", "ps1")
 
 
+def ps1_chd():
+    """consoles/ps1/tools/ps1_tools/chd.py (its writer makes the test CHDs)."""
+    ps1._ps1_tools_exe()
+    from ps1_tools import chd
+    return chd
+
+
 def make_exe(size=0x1800, pc0=0x80010000, fill=0x11):
     """A PS-X EXE: header, text at 0x80010000."""
     text = bytes([fill]) * (size - 0x800)
@@ -158,7 +165,7 @@ def test_read_source(tmp_path):
     assert not ps1.is_ps1(str(tmp_path / "pc.iso"))
     (tmp_path / "default.xbe").write_bytes(b"XBEH" + bytes(300))
     assert not ps1.is_ps1(str(tmp_path / "default.xbe")) and not ps1.is_ps1(str(tmp_path))
-    # Readable but wrong: a boot file that is not there, a .chd.
+    # Readable but wrong: a boot file that is not there, a .chd that is no CHD v5.
     img, _ = make_iso(exe, cnf=b"BOOT=cdrom:\\GONE.EXE;1\n")
     (tmp_path / "gone.bin").write_bytes(img)
     with pytest.raises(ValueError):
@@ -167,6 +174,14 @@ def test_read_source(tmp_path):
     assert ps1.is_ps1(str(tmp_path / "d.chd"))
     with pytest.raises(ValueError, match="chd"):
         ps1.read_source(str(tmp_path / "d.chd"))
+    # A .chd of the same disc (cdlz, cdzl, uncompressed): the same key, boot name and EXE as its .bin.
+    img, _ = make_iso(exe, raw=True)
+    frames = [img[i:i + 2352] for i in range(0, len(img), 2352)]
+    for codec in ("cdlz", "cdzl", "none"):
+        p = tmp_path / ("g-%s.chd" % codec)
+        ps1_chd().write_cd(str(p), [("MODE2_RAW", frames)], codec=codec)
+        assert ps1.is_ps1(str(p))
+        assert ps1.read_source(str(p)) == ("SLUS-00594", "SLUS_005.94", exe)
 
 
 def test_records(tmp_path):
@@ -207,7 +222,7 @@ def test_errors(tmp_path):
     (tmp_path / "d.chd").write_bytes(b"MComprHD" + bytes(200))
     rc, lines = prepare([str(tmp_path / "d.chd"), "--work", str(tmp_path / "w"), "--pack-dir", str(tmp_path / "p")],
                         env_fake())
-    assert rc == 1 and lines[-1]["code"] == "BAD_DISC" and ".chd" in lines[-1]["msg"]
+    assert rc == 1 and lines[-1]["code"] == "BAD_DISC" and "chd: version 0" in lines[-1]["msg"]
     (tmp_path / "lost.cue").write_text('FILE "lost.bin" BINARY\n  TRACK 01 MODE2/2352\n')
     rc, lines = prepare([str(tmp_path / "lost.cue"), "--work", str(tmp_path / "w2")], env_fake())
     assert rc == 1 and lines[-1]["code"] == "NO_DISC"
@@ -339,6 +354,35 @@ def test_real_lifter_on_the_homebrew_disc(tmp_path):
     rc, lines = prepare([os.path.join(HOMEBREW, "overlay.exe"), "--work", str(tmp_path / "w2"), "--pack-dir",
                          str(packs), "--opt", "1"], env_real())
     assert rc == 0 and os.path.basename(lines[-1]["pack"]) == "ps1-" + ps1.exe_key(exe)
+
+
+@pytest.mark.skipif(not (CC and os.path.isfile(os.path.join(HOMEBREW, "overlay.cue"))),
+                    reason="no host C compiler or no PS1 homebrew (tools/consoles/build_homebrew.sh ps1)")
+def test_real_lifter_on_the_homebrew_chd(tmp_path):
+    """The overlay disc as a .chd (chdman's own when it is on the PATH, else one ps1_tools.chd writes in chdman's
+    shape, cdlz): the same pack as from its .cue (key, source identity, boot EXE)."""
+    with open(os.path.join(HOMEBREW, "overlay.exe"), "rb") as f:
+        exe = f.read()
+    chd_path = tmp_path / "overlay.chd"
+    chdman = shutil.which("chdman")
+    if chdman:
+        subprocess.run([chdman, "createcd", "-f", "-i", os.path.join(HOMEBREW, "overlay.cue"), "-o", str(chd_path)],
+                       check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=300)
+    else:
+        with open(os.path.join(HOMEBREW, "overlay.bin"), "rb") as f:
+            img = f.read()
+        ps1_chd().write_cd(str(chd_path), [("MODE2_RAW", [img[i:i + 2352] for i in range(0, len(img), 2352)])],
+                           codec="cdlz")
+    ref = ps1.read_source(os.path.join(HOMEBREW, "overlay.cue"))
+    assert ps1.read_source(str(chd_path)) == ref and ref[2] == exe
+    work, packs = tmp_path / "work", tmp_path / "packs"
+    rc, lines = prepare([str(chd_path), "--work", str(work), "--pack-dir", str(packs), "--opt", "1"], env_real())
+    assert rc == 0, lines[-1]
+    final = lines[-1]["pack"]
+    assert os.path.basename(final) == "ps1-" + ref[0]
+    meta = json.loads(open(os.path.join(final, "pack.json")).read())
+    assert meta["source_sha256"] == hashlib.sha256(exe).hexdigest() and meta["boot"] == "OVERLAY.EXE"
+    assert (work / "boot.exe").read_bytes() == exe
 
 
 # ── --android, with the NDK ──

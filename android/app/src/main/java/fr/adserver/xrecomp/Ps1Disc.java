@@ -181,6 +181,37 @@ final class Ps1Disc {
     }
 
     /**
+     * A disc the native reader opened (a .chd, XBA-168) as the raw image extract reads: 2352-byte sectors from LBA 0,
+     * the one sector being read kept.
+     */
+    static Console.Source raw(Ps1Native.Disc d) {
+        return new Console.Source() {
+            private final byte[] sec = new byte[2352];
+            private int cached = -1;
+
+            @Override
+            public long length() {
+                return (long)d.sectors() * 2352;
+            }
+
+            @Override
+            public int read(long pos, byte[] b, int off, int len) throws IOException {
+                if (pos < 0 || pos >= length())
+                    return -1;
+                int lba = (int)(pos / 2352), in = (int)(pos % 2352);
+                if (lba != cached) {
+                    if (!d.read(lba, sec))
+                        return -1;
+                    cached = lba;
+                }
+                int n = Math.min(len, 2352 - in);
+                System.arraycopy(sec, in, b, off, n);
+                return n;
+            }
+        };
+    }
+
+    /**
      * Copies the sectors that lead to src's boot EXE into out (a cooked, sparse ISO image; replaced). IOException
      * when src is not a PS1 data track or its boot EXE cannot be found or read.
      */

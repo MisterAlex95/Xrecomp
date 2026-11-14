@@ -25,7 +25,11 @@ seconds at every start, the boot EXE is 2 MB at most, and it is what the table i
 Overlays and other files are not part of it: the table's entries are content-checked in RAM (ps1_recomp.h), so code
 the disc changed never runs from the pack.
 
-A .chd cannot be prepared: ps1_tools reads .cue / .bin / .iso (no CHD decoder in pure Python); BAD_DISC says so.
+A .chd is read by ps1_tools' own CHD v5 reader (consoles/ps1/tools/ps1_tools/chd.py, pure Python: cdzl / cdlz
+through zlib / lzma, cdzs through Python 3.14's compression.zstd; cdfl, FLAC, is chdman's codec for audio hunks and
+never needed). Only the hunks that hold ISO 9660, SYSTEM.CNF and the boot EXE are decompressed. A hunk it cannot
+decode (a data hunk in FLAC, zstd on an older Python, a diff CHD's parent) gives BAD_DISC with why. The Android app
+hands a .chd over as the sparse disc.iso its native reader extracted (PrepareService.ps1Source).
 """
 
 import errno
@@ -84,7 +88,7 @@ def is_exe(head):
 
 
 def is_ps1(path):
-    """A PS-X EXE, a .cue or a .chd, or a .bin / .iso / .img whose ISO 9660 volume says PLAYSTATION."""
+    """A PS-X EXE, a .cue, a .chd (its magic), or a .bin / .iso / .img whose ISO 9660 volume says PLAYSTATION."""
     if not os.path.isfile(path):
         return False
     try:
@@ -145,9 +149,6 @@ def read_source(path):
                 raise ValueError("a PS-X EXE of over 2 MB")
             _ps1_tools_exe().Exe(data)      # the header and its text in main RAM
             return exe_key(data), os.path.basename(path), data
-    if path.lower().endswith(".chd"):
-        raise ValueError("a .chd image: the recompiler reads .cue / .bin / .iso only (chdman extractcd makes a "
-                         ".cue / .bin of it); the game still plays from the .chd, interpreted")
     exe = _ps1_tools_exe()
     d = exe.Disc(path)
     try:

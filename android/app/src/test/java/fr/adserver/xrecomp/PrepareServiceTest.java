@@ -403,6 +403,50 @@ public class PrepareServiceTest {
      * XBA-168: the disc a PS1 Prepare reads. A path goes as it is (tools.prepare opens a .cue and its tracks itself);
      * a .cue document's track documents come from the library index (its item's parts, under the same tree).
      */
+    /**
+     * XBA-168: a .chd goes through the native disc reader into &lt;work&gt;/disc.iso (its boot EXE's sectors), a path
+     * as well as a document; without the reader a path is handed to tools.prepare as it is.
+     */
+    @Test
+    public void ps1SourceChd() throws Exception {
+        File work = tmp.newFolder("work-chd");
+        byte[] exe = Ps1DiscTest.exe(6000);
+        byte[] raw = Ps1DiscTest.disc(true, "BOOT=cdrom:\\GAME.EXE;1\n", "GAME.EXE;1", false, exe);
+        Ps1Native.DiscOpener saved = Ps1Native.discOpener;
+        final String[] opened = new String[1];
+        final boolean[] closed = new boolean[1];
+        try {
+            Ps1Native.discOpener = path -> {
+                opened[0] = path;
+                return Ps1DiscTest.nativeDisc(raw, closed);
+            };
+            String got = PrepareService.ps1Source(app, "/sdcard/ps1/Game.CHD", "ps1-SLUS-00594", work, null);
+            assertEquals(new File(work, "disc.iso").getAbsolutePath(), got);
+            assertEquals("/sdcard/ps1/Game.CHD", opened[0]);
+            assertTrue("the native disc is closed", closed[0]);
+            byte[] img = java.nio.file.Files.readAllBytes(new File(got).toPath());
+            byte[] boot = new byte[6000];
+            System.arraycopy(img, 30 * 2048, boot, 0, 6000);
+            org.junit.Assert.assertArrayEquals(exe, boot);
+            // No native library (a JVM, an APK without it): the path, for tools.prepare's own reader.
+            Ps1Native.discOpener = path -> null;
+            assertEquals("/sdcard/ps1/Game.chd", PrepareService.ps1Source(app, "/sdcard/ps1/Game.chd",
+                                                                          "ps1-SLUS-00594", work, null));
+            // The reader refuses it: the Prepare fails with why.
+            Ps1Native.discOpener = path -> {
+                throw new java.io.IOException(path + ": not a disc image");
+            };
+            try {
+                PrepareService.ps1Source(app, "/sdcard/ps1/Bad.chd", "ps1-X", work, null);
+                org.junit.Assert.fail("a bad .chd");
+            } catch (java.io.IOException e) {
+                assertTrue(e.getMessage(), e.getMessage().contains("Bad.chd"));
+            }
+        } finally {
+            Ps1Native.discOpener = saved;
+        }
+    }
+
     @Test
     public void ps1Source() throws Exception {
         File work = tmp.newFolder("work");

@@ -131,6 +131,46 @@ public class Ps1DiscTest {
         }
     }
 
+    /** A raw image served sector by sector, as the native reader serves a .chd (Ps1Native.Disc). */
+    static Ps1Native.Disc nativeDisc(byte[] raw, boolean[] closed) {
+        return new Ps1Native.Disc() {
+            @Override
+            public int sectors() {
+                return raw.length / 2352;
+            }
+
+            @Override
+            public boolean read(int lba, byte[] out) {
+                if (lba < 0 || lba >= sectors())
+                    return false;
+                System.arraycopy(raw, lba * 2352, out, 0, 2352);
+                return true;
+            }
+
+            @Override
+            public void close() {
+                closed[0] = true;
+            }
+        };
+    }
+
+    /** XBA-168: a .chd through the native reader (raw sectors): the same copy as from its raw image. */
+    @Test
+    public void nativeDiscAsRawImage() throws Exception {
+        byte[] exe = exe(7000);
+        byte[] d = disc(true, "BOOT=cdrom:\\GAME.EXE;1\n", "GAME.EXE;1", false, exe);
+        Console.Source src = Ps1Disc.raw(nativeDisc(d, new boolean[1]));
+        assertEquals(d.length, src.length());
+        byte[] head = new byte[3000];
+        assertEquals("one sector per read at most", 2352 - 100, src.read(100, head, 0, head.length));
+        assertEquals(-1, src.read(d.length, head, 0, 10));
+        File a = new File(tmp.getRoot(), "a.iso"), b = new File(tmp.getRoot(), "b.iso");
+        Ps1Disc.Result r = Ps1Disc.extract(src, a);
+        Ps1Disc.extract(Console.source(d), b);
+        assertEquals("\\GAME.EXE;1", r.boot);
+        assertArrayEquals(Files.readAllBytes(b.toPath()), Files.readAllBytes(a.toPath()));
+    }
+
     @Test
     public void psxExeWithoutSystemCnf() throws Exception {
         byte[] exe = exe(2048);
