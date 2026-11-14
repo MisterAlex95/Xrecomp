@@ -153,7 +153,9 @@ public class LauncherActivity extends Activity {
         /** A GBA, PS1 or N64 game's Controls (ConsolePadMap): its console's mapping or its own; romEntry. */
         ROM_CONTROLS,
         /** A GBA, PS1 or N64 game's Options (XBA-181): its own scale and filter, its saves and Prepare files; romEntry. */
-        ROM_OPTIONS
+        ROM_OPTIONS,
+        /** Settings › Graphics › Vulkan driver: the system driver, the installed ones, the downloadable list. */
+        DRIVERS
     }
 
     /** The Preparing screen dims after this long without input (OLED burn-in); any key or touch wakes it. */
@@ -178,6 +180,7 @@ public class LauncherActivity extends Activity {
     private static final int REQ_LSFG_DLL = 5;
     private static final int REQ_LIBRARY_TREE = 6;
     static final int REQ_PACK_HANDOVER = 7;
+    private static final int REQ_VK_DRIVER = 8;
     /** The library re-reads its entries' states (Prepare, queue, running game) every this many polls. */
     private static final int LIBRARY_POLL_EVERY = 4;
 
@@ -521,6 +524,9 @@ public class LauncherActivity extends Activity {
             go(Screen.PREPARE);
         // A game's own app without a current pack: XRecomp's, if it hands it over (XBA-176).
         askParentForPack();
+        // A game's own app: XRecomp's Vulkan driver choice, as it is now (VkDriverShare).
+        if (savedInstanceState == null)
+            syncVkDriverFromParent();
         // Library folders all through the Storage Access Framework: scanned at a cold start (and on Y) only.
         if (savedInstanceState == null && lib && !Library.folders(this).isEmpty() && !Library.anyFolderPath(this))
             startScan();
@@ -1000,6 +1006,9 @@ public class LauncherActivity extends Activity {
             break;
         case ROM_OPTIONS:
             buildRomOptions();
+            break;
+        case DRIVERS:
+            buildDrivers();
             break;
         }
         restoreFocus(false);
@@ -2114,6 +2123,8 @@ public class LauncherActivity extends Activity {
                 lsfgDllRow(list);
         }
         refreshRendererDims();
+        if (settingsTab == TAB_GRAPHICS)
+            vkDriverRow(list);
         if (settingsTab == TAB_ADVANCED) {
             MenuRow reset = listRow(list, getString(R.string.RESET), getString(R.string.RESET_DETAIL),
                                     this::resetSettings);
@@ -2451,6 +2462,329 @@ public class LauncherActivity extends Activity {
         Log.i(TAG, "launcher: Lossless.dll import: " + status);
         workerNoteKind = kind[0];
         workerNote = status;
+    }
+
+    // ---- Vulkan drivers (Settings › Graphics › Vulkan driver; docs/android/app-shell.md « Vulkan drivers ») -------
+
+    /** The downloadable list shown on DRIVERS (VkDriverIndex.cached, then a refresh), or null before it opens. */
+    private VkDriverIndex.Listing vkdListing;
+    private VkDriverIndex vkdIndex;
+    private Thread vkdRefresher;
+    /** The list was asked once (when DRIVERS first opened with a copy older than 24 h): not again by itself. */
+    private boolean vkdAutoAsked;
+    /** The driver row DRIVERS focuses when it is built next (just installed), or null. */
+    private volatile String vkdFocusId;
+    /** DRIVERS: each installed driver's row (X deletes the focused one). */
+    private final java.util.Map<View, VkDrivers.Driver> vkdRows = new java.util.HashMap<>();
+    private String vkdArmedId;
+
+    /** Tests: stands in for VkDriverIndex.forContext (a fake HTTP layer). */
+    static java.util.function.Function<android.content.Context, VkDriverIndex> vkdIndexFactory;
+
+    private VkDriverIndex vkdIndex() {
+        if (vkdIndex == null)
+            vkdIndex = vkdIndexFactory != null ? vkdIndexFactory.apply(this) : VkDriverIndex.forContext(this);
+        return vkdIndex;
+    }
+
+    /** A game's own app: no list, no download, no choice of its own (it uses XRecomp's, VkDriverShare). */
+    private boolean vkdInherits() {
+        return TitleApp.ownTitleId(this) != null;
+    }
+
+    /** The active driver for a value: « System », or its name and version. */
+    private String vkdActiveLabel(VkDrivers.Driver d) {
+        return d == null ? getString(R.string.VKD_SYSTEM_SHORT) : VkDriverStore.label(d);
+    }
+
+    /**
+     * Settings › Graphics › « Vulkan driver »: the active driver as the value; A opens DRIVERS (in a game's own app,
+     * the driver comes from XRecomp: a note says so).
+     */
+    private void vkDriverRow(LinearLayout list) {
+        VkDrivers drivers = VkDrivers.of(this);
+        VkDrivers.Driver d = drivers.active();
+        boolean inherits = vkdInherits();
+        String detail = getString(inherits ? R.string.OPT_VK_DRIVER_DETAIL_GAME_APP : R.string.OPT_VK_DRIVER_DETAIL);
+        MenuRow r = listRow(list, getString(R.string.OPT_VK_DRIVER), detail,
+                            inherits ? () -> setNote(getString(R.string.VKD_GAME_APP_NOTE), NOTE_INFO)
+                                     : () -> go(Screen.DRIVERS));
+        r.setValue(vkdActiveLabel(d));
+        int warn = d == null ? 0 : VkDriverStore.lastStartWarning(VkDriverStore.lastStart(drivers, d.id));
+        onFocus(r, () -> describe(detail, warn != 0 ? getString(warn) : null, Theme.WARN));
+    }
+
+    /**
+     * DRIVERS: « System driver », the installed drivers (A makes one active, X twice deletes it), « Import a zip »,
+     * then « Refresh the list » (its state as the value; Y too) and the drivers one can download (A downloads, then
+     * the new one is focused to be chosen). A game's own app never shows it.
+     */
+    private void buildDrivers() {
+        screenTitle.setText(R.string.VKD_TITLE);
+        VkDrivers drivers = VkDrivers.of(this);
+        VkDrivers.Driver active = drivers.active();
+        List<VkDrivers.Driver> installed = drivers.list();
+        vkdRows.clear();
+        vkdArmedId = null;
+        LinearLayout list = listTemplate();
+        String footer = getString(R.string.VKD_FOOTER);
+
+        listLabel(list, getString(R.string.VKD_SECTION_INSTALLED));
+        MenuRow sys = listRow(list, getString(R.string.VKD_SYSTEM), getString(R.string.VKD_SYSTEM_DETAIL),
+                              () -> vkdSelect(null));
+        if (active == null)
+            sys.setBadge(getString(R.string.VKD_ACTIVE), Theme.ACCENT);
+        onFocus(sys, () -> describe(sys.description, footer, Theme.TEXT_DIM));
+        MenuRow focus = null;
+        String want = vkdFocusId;
+        vkdFocusId = null;
+        for (VkDrivers.Driver d : installed) {
+            MenuRow r = vkdInstalledRow(list, drivers, d, active != null && active.id.equals(d.id), footer);
+            if (d.id.equals(want))
+                focus = r;
+        }
+
+        MenuRow imp = listRow(list, getString(R.string.VKD_IMPORT), getString(R.string.VKD_IMPORT_DETAIL),
+                              this::openVkDriverPicker);
+        onFocus(imp, () -> describe(imp.description, footer, Theme.TEXT_DIM));
+
+        if (!vkdInherits()) {
+            if (vkdListing == null)
+                vkdListing = vkdIndex().cached();
+            // The list is asked by itself once, when the copy is older than 24 h (or missing); Refresh asks anyway.
+            if (!vkdAutoAsked && VkDriverIndex.networkAllowed(this)) {
+                for (VkDriverIndex.SourceStatus s : vkdListing.status) {
+                    if (s.state == VkDriverIndex.State.STALE || s.state == VkDriverIndex.State.NONE) {
+                        vkdAutoAsked = true;
+                        vkdRefresh(false);
+                        break;
+                    }
+                }
+            }
+            listLabel(list, getString(R.string.VKD_SECTION_AVAILABLE));
+            boolean refreshing = vkdRefresher != null && vkdRefresher.isAlive();
+            MenuRow refresh = listRow(list, getString(R.string.VKD_REFRESH), getString(R.string.VKD_REFRESH_DETAIL),
+                                      () -> vkdRefresh(true));
+            refresh.setValue(VkDriverStore.listState(this, vkdListing, refreshing, false));
+            String state = VkDriverStore.listState(this, vkdListing, refreshing);
+            onFocus(refresh, () -> describe(refresh.description + "\n\n" + state, footer, Theme.TEXT_DIM));
+            List<VkDriverIndex.Entry> avail = VkDriverStore.toDownload(vkdListing, drivers);
+            java.util.Map<String, Integer> names = new java.util.HashMap<>();
+            for (VkDriverIndex.Entry e : avail)
+                names.merge(e.assetName, 1, Integer::sum);
+            for (VkDriverIndex.Entry e : avail)   // the same file name in several releases: its tag too
+                vkdAvailableRow(list, e, names.get(e.assetName) > 1, footer);
+            if (avail.isEmpty()) {
+                TextView none = Theme.body(this, getString(vkdListing.entries.isEmpty() ? R.string.VKD_NONE_LISTED
+                                                                                         : R.string.VKD_ALL_INSTALLED));
+                none.setPadding(Theme.ROW_INSET, Theme.S1, 0, Theme.S2);
+                list.addView(none, lp(MATCH, WRAP));
+            }
+            yAction = () -> vkdRefresh(true);
+        }
+        if (focus != null)
+            focusMemory.put(Screen.DRIVERS, focusables.indexOf(focus));
+        xAction = this::vkdDeleteFocused;
+        addHint("A", R.string.HINT_CHOOSE, this::clickFocused);
+        addHint("X", R.string.VKD_HINT_DELETE, this::vkdDeleteFocused);
+        addHint("B", R.string.HINT_BACK, this::back);
+        if (gameRunning())
+            setNote(getString(R.string.VKD_GAME_RUNNING), NOTE_INFO);
+    }
+
+    /** An installed driver: its name, version as the value, Active or a warning as the badge; A chooses it. */
+    private MenuRow vkdInstalledRow(LinearLayout list, VkDrivers drivers, VkDrivers.Driver d, boolean isActive,
+                                    String footer) {
+        MenuRow r = listRow(list, d.name, null, () -> vkdSelect(d));
+        String version = d.driverVersion != null && !d.driverVersion.isEmpty() ? d.driverVersion : d.packageVersion;
+        r.setValue(version == null ? "" : version);
+        int warn = VkDriverStore.lastStartWarning(VkDriverStore.lastStart(drivers, d.id));
+        if (isActive && warn != 0)
+            r.setBadge(getString(R.string.VKD_ACTIVE_WARN_BADGE), Theme.WARN);
+        else if (isActive)
+            r.setBadge(getString(R.string.VKD_ACTIVE), Theme.ACCENT);
+        else if (warn != 0)
+            r.setBadge(getString(R.string.VKD_WARN_BADGE), Theme.WARN);
+        List<String> facts = new ArrayList<>();
+        if (version != null && !version.isEmpty())
+            facts.add(kv(R.string.VKD_KV_VERSION, version));
+        facts.add(kv(R.string.VKD_KV_SOURCE, VkDriverStore.originText(this, d)));
+        facts.add(kv(R.string.VKD_KV_SIZE, size(d.sizeOnDisk())));
+        String text = (d.description.isEmpty() ? "" : d.description + "\n\n") + TextUtils.join("\n", facts)
+                      + "\n\n" + getString(R.string.VKD_INSTALLED_HELP);
+        r.setDescription(text);
+        onFocus(r, () -> describe(text, warn != 0 ? getString(warn) : footer, warn != 0 ? Theme.WARN : Theme.TEXT_DIM));
+        vkdRows.put(r, d);
+        return r;
+    }
+
+    /**
+     * A downloadable driver: its file name without .zip (a release may hold several), its size as the value,
+     * « Pre-release » as the badge; A downloads it.
+     */
+    private void vkdAvailableRow(LinearLayout list, VkDriverIndex.Entry e, boolean withTag, String footer) {
+        String file = e.assetName.toLowerCase(Locale.ROOT).endsWith(".zip")
+                      ? e.assetName.substring(0, e.assetName.length() - 4) : e.assetName;
+        MenuRow r = listRow(list, withTag ? file + " · " + e.tag : file, null, () -> vkdDownload(e));
+        r.setValue(e.size > 0 ? size(e.size) : "");
+        if (e.prerelease)
+            r.setBadge(getString(R.string.VKD_PRERELEASE), Theme.WARN);
+        List<String> facts = new ArrayList<>();
+        if (!e.release.trim().isEmpty())
+            facts.add(e.release.trim());
+        facts.add(kv(R.string.VKD_KV_SOURCE, e.source));
+        facts.add(kv(R.string.VKD_KV_TAG, e.tag));
+        facts.add(kv(R.string.VKD_KV_FILE, e.assetName));
+        if (e.publishedAt > 0)
+            facts.add(kv(R.string.VKD_KV_DATE, VkDriverStore.date(e.publishedAt)));
+        if (e.size > 0)
+            facts.add(kv(R.string.VKD_KV_SIZE, size(e.size)));
+        if (e.prerelease)
+            facts.add(getString(R.string.VKD_PRERELEASE_DETAIL));
+        String text = getString(R.string.VKD_DOWNLOAD_HELP) + "\n\n" + TextUtils.join("\n", facts);
+        r.setDescription(text);
+        onFocus(r, () -> describe(text, footer, Theme.TEXT_DIM));
+    }
+
+    /** A on « System driver » (d null) or an installed driver: it becomes the active one. */
+    private void vkdSelect(VkDrivers.Driver d) {
+        VkDrivers drivers = VkDrivers.of(this);
+        boolean ok = d == null ? drivers.clearActive() : drivers.setActive(d.id);
+        Log.i(TAG, "launcher: vulkan driver " + (d == null ? "system" : d.name + " (" + d.id + ")")
+                   + (ok ? "" : ": not saved"));
+        refreshKeepingFocus();
+        if (!ok)
+            setNote(getString(R.string.VKD_SELECT_FAILED), NOTE_ERROR);
+        else
+            setNote(getString(gameRunning() ? R.string.VKD_SELECTED_RUNNING : R.string.VKD_SELECTED,
+                              vkdActiveLabel(d)), NOTE_OK);
+    }
+
+    /** X on an installed driver: twice within CONFIRM_MS deletes it (the active one: back to the system driver). */
+    private void vkdDeleteFocused() {
+        View f = focused();
+        VkDrivers.Driver d = f == null ? null : vkdRows.get(f);
+        if (d == null) {
+            setNote(getString(R.string.VKD_DELETE_WHICH), NOTE_INFO);
+            return;
+        }
+        long now = SystemClock.uptimeMillis();
+        if (!d.id.equals(vkdArmedId) || now - deleteArmedAt > CONFIRM_MS) {
+            vkdArmedId = d.id;
+            deleteArmedAt = now;
+            ((MenuRow)f).setBadge(getString(R.string.VKD_DELETE_BADGE), Theme.WARN);
+            setNote(getString(R.string.VKD_DELETE_CONFIRM, d.name), NOTE_WARN);
+            return;
+        }
+        vkdArmedId = null;
+        deleteArmedAt = 0;
+        boolean ok = VkDrivers.of(this).delete(d.id);
+        Log.i(TAG, "launcher: vulkan driver " + d.id + " deleted" + (ok ? "" : " (failed)"));
+        refreshKeepingFocus();
+        setNote(getString(ok ? R.string.VKD_DELETED : R.string.VKD_DELETE_FAILED, d.name), ok ? NOTE_OK : NOTE_ERROR);
+    }
+
+    /** Refresh (force) or the first look at a stale list: on a thread; the screen is rebuilt when it answers. */
+    private void vkdRefresh(boolean force) {
+        if (vkdInherits() || (vkdRefresher != null && vkdRefresher.isAlive()))
+            return;
+        VkDriverIndex index = vkdIndex();
+        vkdRefresher = new Thread(() -> {
+            VkDriverIndex.Listing l = index.refresh(force);
+            for (VkDriverIndex.SourceStatus s : l.status)
+                Log.i(TAG, "launcher: vulkan drivers list " + s.source.id() + ": " + s.state
+                           + (s.detail.isEmpty() ? "" : " (" + s.detail + ")"));
+            runOnUiThread(() -> {
+                vkdListing = l;
+                if (screen == Screen.DRIVERS && !isFinishing()) {
+                    refreshKeepingFocus();
+                    if (force)
+                        setNote(VkDriverStore.listState(this, l, false), NOTE_INFO);
+                }
+            });
+        }, "xba-vkd-list");
+        vkdRefresher.start();
+        if (screen == Screen.DRIVERS && !building)
+            refreshKeepingFocus();   // « Updating… »
+    }
+
+    /** Tests: the list's thread. */
+    Thread vkdRefresherForTest() {
+        return vkdRefresher;
+    }
+
+    /** A on a downloadable driver: the download behind the progress screen (B cancels), then its row is focused. */
+    private void vkdDownload(VkDriverIndex.Entry e) {
+        VkDriverIndex index = vkdIndex();
+        VkDriverStore.Adapter store = new VkDriverStore.Adapter(VkDrivers.of(this));
+        Log.i(TAG, "launcher: vulkan driver download " + e.key());
+        runWorker(R.string.VKD_DOWNLOADING, () -> {
+            try {
+                String sha = index.download(e, store, (done, total) -> progress(done, total, e.assetName),
+                                            () -> cancelRequested);
+                Log.i(TAG, "launcher: vulkan driver " + e.key() + " installed, sha256 " + sha);
+                vkdInstalled(store.installed);
+            } catch (IOException ex) {
+                vkdFailed(ex);
+            }
+        });
+    }
+
+    /** Worker: an install went through: its row gets the focus, the note offers to make it active. */
+    private void vkdInstalled(VkDrivers.Driver d) {
+        if (d == null)
+            return;
+        vkdFocusId = d.id;
+        workerNoteKind = NOTE_OK;
+        workerNote = getString(R.string.VKD_INSTALLED, VkDriverStore.label(d));
+    }
+
+    /** Worker: a download or an import failed, in plain words (cancelled: said so). */
+    private void vkdFailed(IOException e) {
+        boolean cancel = e instanceof VkDriverIndex.DownloadException
+                         && ((VkDriverIndex.DownloadException)e).reason
+                            == VkDriverIndex.DownloadException.Reason.CANCELLED;
+        Log.w(TAG, "launcher: vulkan driver: " + e);
+        workerNoteKind = cancel ? NOTE_INFO : NOTE_ERROR;
+        workerNote = VkDriverStore.errorText(this, e);
+    }
+
+    private void openVkDriverPicker() {
+        Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("*/*");
+        try {
+            startActivityForResult(i, REQ_VK_DRIVER);
+        } catch (ActivityNotFoundException e) {
+            setNote(getString(R.string.PICKER_MISSING), NOTE_ERROR);
+        }
+    }
+
+    /** « Import a zip »: the picked file is checked and installed on the worker (VkDrivers validates it). */
+    private void onVkDriverPicked(Uri uri) {
+        String name = displayName(uri);
+        Log.i(TAG, "launcher: vulkan driver zip picked (" + name + ")");
+        runWorker(R.string.VKD_IMPORTING, () -> {
+            try (java.io.InputStream in = getContentResolver().openInputStream(uri)) {
+                if (in == null)
+                    throw new IOException("cannot open " + name);
+                vkdInstalled(VkDrivers.of(this).install(in, VkDrivers.Origin.manual()));
+            } catch (IOException ex) {
+                vkdFailed(ex);
+            }
+        });
+    }
+
+    /** A game's own app at its start: XRecomp's driver choice (VkDriverShare.sync), on a thread. */
+    private void syncVkDriverFromParent() {
+        if (TitleApp.ownParent(this) == null || !vkdInherits())
+            return;
+        new Thread(() -> {
+            VkDriverShare.Outcome o = VkDriverShare.sync(this);
+            if (o != VkDriverShare.Outcome.UNCHANGED && o != VkDriverShare.Outcome.NO_ANSWER)
+                runOnUiThread(() -> {
+                    if (screen == Screen.SETTINGS && !isFinishing())
+                        refreshKeepingFocus();
+                });
+        }, "xba-vkd-sync").start();
     }
 
     // ---- GAME_DATA ---------------------------------------------------------------------------------------------
@@ -7036,5 +7370,7 @@ public class LauncherActivity extends Activity {
             onIsoPicked(data);
         else if (requestCode == REQ_LSFG_DLL)
             onLsfgDllPicked(data.getData());
+        else if (requestCode == REQ_VK_DRIVER)
+            onVkDriverPicked(data.getData());
     }
 }

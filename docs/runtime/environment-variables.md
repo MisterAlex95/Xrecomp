@@ -347,8 +347,11 @@ Only in a build configured with `-DXBOXRECOMP_LSFG=ON` (POSIX hosts); see [Frame
 
 A Vulkan driver the player supplied (Mesa Turnip on an Adreno) for the N64 Vulkan RDP, opened through libadrenotools
 (`libxba_vkdriver.so`, Android arm64 only; [third_party/adrenotools](../../third_party/adrenotools/README.md)). The app
-sets these before the game starts, from its driver choice (`files/settings/vk_driver`, the drivers installed under
-`files/vk_drivers/<id>/` with their `meta.json`); they can also be written to `recomp.cfg` by hand for a test. Chain:
+sets these before the game starts (`ShellActivity`, N64 games only), from its driver choice (Settings › Graphics ›
+Vulkan driver: `files/settings/vk_driver`, the drivers installed under `files/vk_drivers/<id>/` with their
+`meta.json`; [app-shell.md « Vulkan drivers »](../android/app-shell.md#vulkan-drivers)); they can also be written to
+`recomp.cfg` by hand for a test (with a driver chosen in the app its values win; with the system driver chosen the
+app unsets them and such lines would apply, so remove them after the test). Chain:
 custom driver, then the system driver, then the software RDP, each step logged; the start line names the driver
 (`n64: Vulkan RDP on <GPU> (paraLLEl-RDP, <shaders>; driver <driverName> <driverInfo>, custom <id>|system)`).
 See [consoles/README.md](../../consoles/README.md) (N64 RDP) and `consoles/n64/runtime/n64_vk_driver.h`.

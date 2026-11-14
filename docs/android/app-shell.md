@@ -153,6 +153,7 @@ One activity, a small state machine of screens (`LauncherActivity.Screen`) with 
 | Preparing the game (import) | A plain progress ring (percent), the step (« Checking », « Copying », « Extracting »), « X of Y », the current file, the free space. The screen stays on; B cancels (nothing to focus). | A picked folder or image. |
 | Home | No top bar: the game's title image (or a monogram) in the [game theme](#game-theme)'s colours, its title (the XBE certificate's name, else the folder's name), **one line** — when it was played (« Yesterday · 12 h 40 min played », « Not played yet »), or its state when it is not ready (« Needs preparing · once, about 20–30 min », « Prepare failed · CODE », the Prepare's progress, « Queued (n) », « Game data missing » with the folder, …) — and **one row of buttons**: a solid **Play** (or **Prepare**, **Preparing…**, **See what failed**, **Choose a game**) and three quiet pills, **Settings**, **Controls**, **Manage**. Before the first play the note says where the in-game menu is. | A finished import (Play focused), every start when « Start in the game » is off, the « Launcher » shortcut, B from the screens above. |
 | Settings | Four tabs (General, Graphics, Audio, Advanced; L1 / R1) of [options](#settings) as « label  value » rows, left / right (or A) to change, the focused option's description on the right. About ends Advanced. | Home, Options. |
+| Vulkan drivers | « System driver », the installed drivers, « Import a zip », « Refresh the list », the drivers one can download ([Vulkan drivers](#vulkan-drivers)). A chooses, X twice deletes, Y refreshes. Not in a game's own app. | Settings › Graphics › Vulkan driver. |
 | Controls | The player's **remapping** ([Controls and remapping](#controls-and-remapping)): one row per Xbox control (A B X Y, Black, White, the triggers; Back, Start, the stick presses; the D-pad; the two sticks), its value the player's button, changed like a setting; « Reset controls » (also Y). The description column says what the focused row does and draws the handheld with, next to each control, what the game gets from it. | Home. |
 | Controls (GBA, PS1, N64) | The console's buttons remapped, for all its games or this game only ([Controls for the other consoles](#controls-for-the-other-consoles)): Mapping for, one row per console button, the sticks, the N64 stick's range and dead zone, the on-screen pad, « Reset controls » (also Y). | A GBA / PS1 / N64 game's Home (its « Controls » pill). |
 | Manage | **Change game** (another folder or image, or the same one again to re-import; **Library** when the [game library](#game-library) is on); **Delete the imported copy** (only when the game is the app's own copy, `files/games/<TID>/` or the older `files/game/`; its size as the value; press A twice within 5 s; saves are kept); **Add to home screen** (a [shortcut for this game](#a-game-on-the-home-screen), only when the home screen takes pin requests); **Create an app** (the game's [own app](#a-games-own-app), made and installed on the device; its size as the description; **only for a prepared game** (a valid pack built from this disc): before that the row says « Prepare this game first » and pressing it only repeats that in the note, so the app it makes always takes the pack over and starts straight into the game; not in a game's own app); the game's pack, Prepare files, caches and saves with their sizes, each deleted on its own ([Storage](#storage)). The technical facts (title ID, prepared date, pack size, folder, source, size, free space) are the first row's description. | Home. |
@@ -259,7 +260,7 @@ installed APK (`ApplicationInfo.sourceDir`), copied entry by entry into `files/t
    `android:roundIcon` to the slot (`R.mipmap.xba_title_icon`, the same id since the template is this APK); every
    provider authority (`<package>.logs`) and package-derived name (permissions, task affinity, process) moved to the
    new package; XRecomp-only permissions left out (`INTERNET`, see
-   [Vulkan drivers](#vulkan-drivers-list-and-download)); component class names written in full against the old package (AGP's merged manifest has them in
+   [Vulkan drivers](#vulkan-drivers)); component class names written in full against the old package (AGP's merged manifest has them in
    full already), so they stay `fr.adserver.xrecomp.*`; the three meta-data added (replaced when present).
    Attributes stay sorted by resource id; a manifest read and written back unchanged gives the same bytes.
 2. The slot's PNG replaced (its path is what `Resources.getValue` says, `res/drawable-nodpi-v4/…`, so a release build
@@ -659,6 +660,7 @@ exist in the runtime and mean something to a player are offered. Graphics and Au
 | Graphics › Frame generation (only in a [frame generation](#frame-generation) APK) | Off (default), 2×, 2× performance | `RECOMP_LSFG=1`, `RECOMP_LSFG_MULT=2`, plus `RECOMP_LSFG_PERF=1` for 2× performance |
 | Graphics › Choose Lossless.dll (same) | a document picker; the row shows the shaders' state | `RECOMP_LSFG_DIR=<files>/lsfg/<key>` once the shaders are there (not removed by « Reset all ») |
 | Graphics › Texture filtering | Sharp (default), Smooth, Anisotropic 8×, Anisotropic 16× | `RECOMP_TEX_BILINEAR=1`, `RECOMP_TEX_ANISO=8` / `16` |
+| Graphics › Vulkan driver (N64 Vulkan renderer only, for now) | the active driver: **System** (default) or its name and version; A opens the [Drivers screen](#vulkan-drivers). In a game's own app: XRecomp's driver, nothing to choose | not in `recomp.cfg`: `files/settings/vk_driver`, turned into `RECOMP_VK_DRIVER_*` by `ShellActivity` for an N64 game |
 | Audio › 3D audio (HRTF) (Xbox only) | On (default), Off | `RECOMP_APU_HRTF=0` when off |
 | Audio › Audio buffer (all consoles) | Short (256), Normal (default, 512), Long (1024), Very long (2048) | `RECOMP_AUDIO_BUF_SAMPLES=…` |
 | Advanced › Drawing threads | Auto (default), 1, 2, 4, 6, 8 | `RECOMP_RASTER_THREADS=…` |
@@ -973,12 +975,69 @@ In the launcher, Settings › Graphics:
 
 Device check: [framegen.md](../technical/framegen.md) and the Device checklist of the frame generation work.
 
-### Vulkan drivers (list and download)
+### Vulkan drivers
 
-The N64 Vulkan RDP can run on a Mesa Turnip driver instead of the system one. **No driver is part of the app**: the
-player picks one from a list of public GitHub releases (or imports a zip), and it is downloaded into the app's own
-storage. `VkDriverIndex` makes the list and the download; the driver store (`VkDrivers`) and the Drivers screen are
-separate pieces.
+The N64 Vulkan RDP can run on a Mesa Turnip driver instead of the system one (only the N64 Vulkan renderer, for
+now). **No driver is part of the app**: the player picks one from a list of public GitHub releases (or imports a
+zip), and it is downloaded into the app's own storage. `VkDriverIndex` makes the list and the download, `VkDrivers`
+keeps the drivers and the choice, `VkDriverStore` joins them (the `VkDriverIndex.Store` adapter, the readable
+texts), `LauncherActivity` draws the screen, `VkDriverShare` / `VkDriverProvider` hand the choice to a game's own
+app.
+
+**Settings › Graphics › Vulkan driver.** The value is the active driver: **System** (the default), or its name and
+version (« Turnip … (Mesa 26.3.0) »); the description says it applies to the N64 Vulkan renderer for now and that a
+driver that does not work falls back to the device's driver, then the software renderer; when the last start with
+the active driver went wrong, the description says how (below). A opens the Drivers screen.
+
+**The Drivers screen** (`Screen.DRIVERS`, the list template, every row reachable with the D-pad; hints A Choose,
+X Delete, B Back; Y refreshes):
+
+| Row | Value / badge | A | Description |
+|---|---|---|---|
+| On this device › **System driver** | « Active » when no driver is chosen | back to the system driver | the device's own driver; the footer below |
+| one row per installed driver (by name) | `driverVersion` (else `packageVersion`); « Active », or « Failed last time » / « Active · failed last time » | makes it the active one (and clears the trial marker) | its description, version, source (« GitHub · owner/repo · tag », « Imported zip », « From XRecomp »), size on disk; the last start's warning in amber |
+| **Import a zip** | | the system document picker (`ACTION_OPEN_DOCUMENT`, `REQ_VK_DRIVER`), then the package is checked and installed on the worker | what a package is |
+| To download › **Refresh the list** | the list's state: « List from <date> », « <date> (old) », « Updating… », « No connection · List from <date> », « GitHub limit reached, retry after <time> · … », « GitHub did not answer (HTTP n) », « Not fetched yet » | asks GitHub now (every source; on a thread, the screen is rebuilt when it answers, the note repeats the state) | which repositories, and that this is the only network use |
+| one row per listed driver not installed (same sha256, or the id that sha256 gives), by file name (without `.zip`; with its release tag when two releases hold the same name) | its size; « Pre-release » | downloads it behind the progress screen (percent, bytes; B cancels), then installs it | release title, source, tag, file, date, size, pre-release; the footer |
+| (no row) | | | « No list yet. Refresh … » or « Every listed driver is installed. » as a line of text |
+
+X twice within 5 s on an installed driver deletes it (the badge says « Press X again »; the active one: back to the
+system driver); X elsewhere only says how. After a download or an import the new driver's row has the focus and the
+note says « … installed. Press A to use it. »: it is not made active by itself. The footer (in the description
+column): drivers come from third parties, are never part of the app, and run as native code inside it. A choice
+made while a game runs applies at its next start (the note says so). When the screen opens and a source's copy is
+older than 24 h (or missing), the list is asked once by itself; nothing else is fetched.
+
+Last start (the native runtime's `vk_drivers/trying` and `vk_drivers/last_start`,
+[environment variables](../runtime/environment-variables.md#custom-vulkan-driver-n64-rdp)): the trial marker or
+`crashed` → « crashed the game at its last start: skipped until you choose it again »; `failed` → « could not be
+opened, or the renderer could not run on it »; `not_loaded` → « was not loaded (Android kept the device's own
+driver) ». `ok`, another driver's line, or no file: nothing.
+
+Refusals in plain words (`VkDriverStore.errorText`, nothing kept in every case): not a zip; not an adrenotools
+package (entries, `meta.json`, the library); over 256 MB; not a 64-bit ARM library; needs a newer Android; not the
+file GitHub lists (size or sha256, from the store or the download); a disk error (with its detail); an address not
+allowed; an HTTP status; no connection; cancelled.
+
+**Stored where** (app-private `files/`, excluded from backups and from `LogProvider`): `vk_drivers/<id>/` (the
+package's files, read-only, and `origin.json`; a directory without `origin.json`, put there by hand, counts as an
+imported zip), `vk_drivers/index/` (the list's cache), `vk_drivers/trying` and `last_start` (the runtime's),
+`settings/vk_driver` (the choice: an id, or empty for the system driver). `ShellActivity.applyVkDriver` turns the
+choice into `RECOMP_VK_DRIVER_DIR` / `_LIB` / `_ID` / `RECOMP_VK_HOOK_DIR` for an N64 game (logcat
+`shell: vulkan driver <name> (<id>), game <key>` or `system`).
+
+**A game's own app** has no network permission, no list, no download, no import and no choice of its own: its
+Graphics row shows the driver it took from XRecomp and pressing it says the driver is chosen in XRecomp. At each
+start (its launcher, on a thread; and `ShellActivity` before an N64 game, synchronously) it asks XRecomp through
+`VkDriverProvider` (`<XRecomp's package>.vkdrivers`, exported; every call is checked like the pack handover:
+`PackHandover.checkCaller`, package `fr.adserver.xrecomp.t<tid>` signed by the game apps' key):
+`call("active", <tid>)` gives the active id (empty: system); a new id is read from `content://…vkdrivers/<id>`
+(`VkDrivers.exportZip` streamed through a pipe; only the active driver is served), installed with
+`Origin.inherited` under XRecomp's id and made active; the system driver clears the choice; inherited drivers no
+longer chosen are deleted; an unchanged choice writes nothing (the runtime's trial marker stays). Limits: XRecomp
+not installed, older than this provider, or refusing → the app keeps what it had; a change in XRecomp reaches the
+game app at its next start, not while it runs; a game's own app exists only for Xbox titles today, so the inherited
+driver has no effect until an N64 game can have one.
 
 **Network use.** This is the only place XRecomp uses the network, hence `android.permission.INTERNET` in the manifest
 (no `ACCESS_NETWORK_STATE`; cleartext stays off). Requests are made only when the Drivers screen asks: nothing at
@@ -1027,7 +1086,24 @@ proves the file is the one GitHub lists, not that the build is trustworthy: a dr
 Tests: `VkDriverIndexTest` (recorded releases pages of both sources trimmed to the fields used,
 `src/test/resources/vkdriver/`; T30 with its date, size and sha256; the Turnip filter; ETag, 24 h, 304; limit,
 offline, errors; verified download with a fake HTTP layer, no driver binary), `TitleApkTest` (INTERNET not in a
-game's own app).
+game's own app), `VkDriversTest` (packages, storage, choice), `VkDriverStoreTest` (the adapter, a download through
+it, last start, texts, a driver without `origin.json`), `VkDriverShareTest` (a game's own app following XRecomp),
+`LauncherDriversTest` (the Graphics row, the Drivers screen with a fake GitHub: choose, delete, offline, limit;
+screenshots `build/screenshots/ui-drivers-*.png`).
+
+#### Device check (Vulkan drivers), for Alex
+
+1. Settings › Graphics (R1): the last row is « Vulkan driver », value « System » on a fresh install.
+2. A: the Drivers screen; « System driver » is « Active »; the list is asked once (« Updating… », then « List from
+   <today> ») and lists purple-turnip and K11MCH1's Turnip builds, no Qualcomm build.
+3. A on a listed driver: the progress screen (percent), then back on the screen with the new driver focused and
+   « … installed. Press A to use it. »; A: it shows « Active ».
+4. Start an N64 game: `adb logcat -d | grep "shell: vulkan driver"` names the driver and its id; the `n64:` start
+   line says `custom <id>`.
+5. Airplane mode, Y: « No connection · List from … », the list still there.
+6. X, X on the active driver: deleted, « System driver » active again.
+7. « Import a zip »: pick a Turnip `.zip` from Downloads: installed as « Imported zip »; pick any other zip: a plain
+   refusal, nothing kept.
 
 ## Choosing the game
 

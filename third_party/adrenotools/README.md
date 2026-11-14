@@ -4,6 +4,10 @@ Loads a Vulkan driver the player supplied (Mesa Turnip, for example) in place of
 Billy Laws. Upstream's README is `README.upstream.md`. The app uses it for the N64 Vulkan RDP only
 (`consoles/n64/runtime/n64_vk_driver.c`, `android/app/src/main/cpp/vkdriver.c`, `consoles/README.md`).
 
+**No driver is part of the app.** The player downloads one (the app's Drivers screen lists public GitHub releases
+of Turnip builds; it contacts `api.github.com` / `github.com` only from that screen) or imports a zip:
+[docs/android/app-shell.md « Vulkan drivers »](../../docs/android/app-shell.md#vulkan-drivers).
+
 ## Source
 
 - <https://github.com/bylaws/libadrenotools> at `8fae8ce254dfc1344527e05301e43f37dea2df80` (2024-09-10).

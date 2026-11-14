@@ -302,6 +302,8 @@ public class ShellActivity extends SDLActivity {
     private void applyVkDriver(boolean romLaunch) {
         String tid = romLaunch ? GameStore.launchedTitleId(this) : null;
         boolean n64 = tid != null && Console.ofKey(tid) == Console.N64;
+        if (n64 && gameApp())   // XRecomp's choice as it is now (VkDriverShare); unchanged: nothing written
+            VkDriverShare.sync(this);
         VkDrivers drivers = VkDrivers.of(this);
         VkDrivers.Driver d = n64 ? drivers.active() : null;
         for (String[] kv : VkDrivers.runEnv(d, getApplicationInfo().nativeLibraryDir)) {

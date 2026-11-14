@@ -557,6 +557,27 @@ final class VkDrivers {
         return id != null && id.equals(trialMarker());
     }
 
+    /** The native runtime's report of the last start that used a custom driver (files/vk_drivers/last_start). */
+    static final String LAST_START = "last_start";
+
+    /**
+     * The status the native runtime wrote for this driver's last start (« ok », « failed », « not_loaded »,
+     * « crashed »), or null when the last start with a custom driver was another driver's (or none yet).
+     */
+    String lastStartStatus(String id) {
+        if (!validId(id))
+            return null;
+        File f = new File(root(), LAST_START);
+        if (!f.isFile())
+            return null;
+        try (InputStream in = new FileInputStream(f)) {
+            String[] w = new String(readAll(in, 256), StandardCharsets.UTF_8).trim().split("\\s+");
+            return w.length == 2 && w[0].equals(id) ? w[1] : null;
+        } catch (IOException e) {
+            return null;
+        }
+    }
+
     // ---- To the native runtime -------------------------------------------------------------------------------------
 
     /**
