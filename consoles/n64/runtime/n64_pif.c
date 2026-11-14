@@ -6,6 +6,30 @@
  * and ra in DMEM), the PIF RAM's CIC status byte, and the CPU at 0xA4000040. The RDRAM is reported configured
  * (RI_SELECT != 0, osMemSize at 0x80000318), so IPL3 skips the RDRAM init.
  *
+ * IMEM: the PIF's IPL1 copies IPL2 into the RSP's IMEM and IPL2 runs from there, so when IPL3 starts IMEM still holds
+ * IPL2's code. n64_pif_boot puts IPL2's first eight words there, for every CIC as the PIF does (only the 6105 / 7105
+ * IPL3 reads them). Source: the PIF ROM's IPL2; the same words are what mupen64plus-core's HLE boot
+ * (src/device/pif/bootrom_hle.c, "required by CIC x105") and Project64 (N64System/Mips/Register.cpp, CIC_NUS_6105)
+ * store at 0xA4001000; Project64 has 0xBDA807FC instead of 0x8DA807FC in the second word on PAL consoles, which we
+ * follow. ares and cen64 run the PIF ROM itself, so IMEM holds IPL2 there without such code.
+ *
+ * CIC-6105 / 7105 IPL3 and the RSP: its first loop XORs IMEM words with its own words at DMEM 0x84.. until an IMEM
+ * word with its low 12 bits clear (the eighth), which yields a small RSP program; it then lets the RSP run it from
+ * IMEM 0. That program DMAs more code from RDRAM 0x1E8 (leaving $11 = SP_DRAM_ADDR = 0x3D8), loads $4 = DMEM[0x40],
+ * takes SP_SEMAPHORE and spins on it with $5 counting down from 0x200000 (it gives up at -1) while the CPU computes
+ * the boot checksum; when the CPU releases the semaphore it loads $6 from what it DMA'd from RDRAM 0x180, checksums
+ * 4 KB with the vector unit, writes the result back and breaks. The games check what it leaves: Ocarina of Time's
+ * rspboot wants $4 = 0x03A04820, $6 = 0x25290004, $11 = 0x3D8 and 0x4C <= ($5 >> 12) <= 0x4F on its first task, and
+ * when that fails it patches itself into a path that copies 8 bytes of SP memory to RDRAM at DPC_CLOCK >> 2 on every
+ * task (random RAM corruption, then a crash). $5 measures the console's CPU against its RSP within 0.2 %, which our
+ * cost model (an estimate per instruction) cannot meet: on OoT our CPU releases the semaphore after about 18 M CPU
+ * cycles, while our RSP gives up after its 0x200000 iterations (about 12 M), so the console's CPU must be quicker. So for this IPL3 only (n64_pif_x105_*): from IPL3 starting the RSP until the CPU
+ * releases the semaphore, the RSP is not run while the semaphore is held (it would only spin), and once the RSP
+ * program has ended $5 gets X105_RSP_R5, the middle of the window the game accepts (no console dump of the value was
+ * found: mupen64plus and Project64 leave it to their RSP plugins, ares to its timing). Everything else the program
+ * does ($4, $6, $11, its DMAs, DPC_STATUS) is the RSP interpreter running the real code. Checked on OoT PAL 1.1
+ * (NZLP): the check passes (rspboot's first word becomes 0x08000436, SP_STATUS signal 7 set).
+ *
  * Joybus (PIF RAM command block, channel by channel): on the four controller channels 0x00 / 0xFF info, 0x01 buttons
  * and stick, 0x02 / 0x03 pak read / write (32 bytes, address CRC ignored, data CRC returned); the controller pak is
  * 32 KB of memory (a fresh one formatted: n64_pak_format), the rumble pak answers 0x80 at 0x8000 once probed and
@@ -52,6 +76,23 @@ void n64_pif_boot(n64_machine *m)
     n64_cpu *c = &m->cpu;
     uint8_t *dmem = m->spmem;
     memcpy(dmem, m->rom, m->rom_size < 0x1000 ? m->rom_size : 0x1000);
+    /* IPL2's first words, left in IMEM (header comment): wait for PIF RAM 0x3C bit 7, read the CIC byte at 0x24, point
+     * t3 at the cartridge. The 6105 / 7105 IPL3 decrypts its RSP program with them. */
+    static const uint32_t ipl2_head[8] = {
+        0x3C0DBFC0u, /* lui   t5, 0xBFC0        */
+        0x8DA807FCu, /* lw    t0, 0x07FC(t5)    (PAL: 0xBDA807FC, below) */
+        0x25AD07C0u, /* addiu t5, t5, 0x07C0    */
+        0x31080080u, /* andi  t0, t0, 0x0080    */
+        0x5500FFFCu, /* bnel  t0, zero, -4      */
+        0x3C0DBFC0u, /* lui   t5, 0xBFC0        */
+        0x8DA80024u, /* lw    t0, 0x0024(t5)    */
+        0x3C0BB000u, /* lui   t3, 0xB000        */
+    };
+    for (int i = 0; i < 8; i++)
+        n64_wbe32(dmem + 0x1000 + 4 * i, ipl2_head[i]);
+    if (m->pal)
+        n64_wbe32(dmem + 0x1004, 0xBDA807FCu);
+    m->boot_x105 = m->info.cic == N64_CIC_6105 ? N64_X105_ARMED : N64_X105_OFF;
 
     uint32_t h = m->info.pi_config;
     m->pi_dom[0][0] = h & 0xFF;
@@ -94,6 +135,44 @@ void n64_pif_boot(n64_machine *m)
     /* The CIC status the PIF leaves in its RAM (byte 0x24..0x27): seed and checksum flags. */
     m->pif_ram[0x26] = cic_seed(m->info.cic);
     m->pif_ram[0x27] = 0x3F;
+}
+
+/* The CIC-6105 IPL3's RSP semaphore wait (header comment). */
+#define X105_RSP_R5 0x0004E000u
+
+bool n64_pif_x105_hold(n64_machine *m)
+{
+    return m->boot_x105 == N64_X105_RUNNING && n64_rsp_semaphore_held(m->rsp) && !n64_rsp_halted(m->rsp);
+}
+
+void n64_pif_x105_release(n64_machine *m)
+{
+    if (m->boot_x105 == N64_X105_RUNNING)
+        m->boot_x105 = N64_X105_RELEASED;
+}
+
+void n64_pif_x105_step(n64_machine *m)
+{
+    bool halted = n64_rsp_halted(m->rsp) != 0;
+    switch (m->boot_x105) {
+    case N64_X105_ARMED:
+        if (!halted)
+            m->boot_x105 = N64_X105_RUNNING; /* IPL3 started the RSP */
+        break;
+    case N64_X105_RUNNING:
+        if (halted)
+            m->boot_x105 = N64_X105_OFF; /* ended without the semaphore handshake: not the code we know */
+        break;
+    case N64_X105_RELEASED:
+        if (halted) {
+            n64_rsp_set_gpr(m->rsp, 5, X105_RSP_R5);
+            m->boot_x105 = N64_X105_OFF;
+        }
+        break;
+    default:
+        m->boot_x105 = N64_X105_OFF;
+        break;
+    }
 }
 
 /* ---- Saves ----------------------------------------------------------------------------------------------------- */

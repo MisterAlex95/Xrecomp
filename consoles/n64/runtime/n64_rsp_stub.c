@@ -50,6 +50,19 @@ void n64_rsp_reset(n64_rsp *s)
 void n64_rsp_attach_rdp(n64_rsp *s, n64_rdp *dp) { s->dp = dp; }
 uint8_t *n64_rsp_mem(n64_rsp *s) { return s->mem; }
 int n64_rsp_halted(n64_rsp *s) { return (s->status & ST_HALT) != 0; }
+uint32_t n64_rsp_get_gpr(n64_rsp *s, int r)
+{
+    (void)s;
+    (void)r;
+    return 0; /* no scalar unit */
+}
+void n64_rsp_set_gpr(n64_rsp *s, int r, uint32_t v)
+{
+    (void)s;
+    (void)r;
+    (void)v;
+}
+int n64_rsp_semaphore_held(n64_rsp *s) { return s->semaphore != 0; }
 
 static void dma(n64_rsp *s, uint32_t v, int to_rdram)
 {

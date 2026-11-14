@@ -213,6 +213,7 @@ static void pi_dma(n64_machine *m, bool to_rdram, uint32_t len_reg)
     m->pi_cart = cart;
     m->pi_status |= 1u;
     n64_schedule(m, EV_PI, m->now + pi_dma_ticks(m, start_cart, len));
+    m->pi_dmas++;
 }
 
 /* CPU accesses to the cartridge bus (PI I/O). A write is held by the PI: the next read anywhere on the bus returns it
@@ -312,6 +313,7 @@ static void si_write(n64_machine *m, uint32_t reg, uint32_t v)
         m->si_dram = v & 0x00FFFFFCu;
         break;
     case 1: /* PIF_AD_RD64B: PIF RAM -> RDRAM */
+        m->si_dmas++;
         if (m->si_dram + 64 <= m->rdram_size) {
             memcpy(m->rdram + m->si_dram, m->pif_ram, 64);
             n64_rdram_wrote(m, m->si_dram, 64);
@@ -320,6 +322,7 @@ static void si_write(n64_machine *m, uint32_t reg, uint32_t v)
         n64_schedule(m, EV_SI, m->now + SI_DMA_TICKS);
         break;
     case 4: /* PIF_AD_WR64B: RDRAM -> PIF RAM, then the PIF runs the commands */
+        m->si_dmas++;
         if (m->si_dram + 64 <= m->rdram_size)
             for (uint32_t i = 0; i < 64; i += 4)
                 n64_pif_write_ram(m, i, n64_be32(m->rdram + m->si_dram + i));
@@ -397,8 +400,11 @@ void n64_bus_write32(n64_machine *m, uint32_t pa, uint32_t v, uint32_t mask)
         return;
     }
     if (pa < 0x04100000u) {
-        if (pa < 0x04080000u)
+        if (pa < 0x04080000u) {
             n64_rsp_write_reg(m->rsp, (pa >> 2) & 7, v);
+            if (((pa >> 2) & 7) == 7)
+                n64_pif_x105_release(m);
+        }
         else
             n64_rsp_write_reg(m->rsp, 8 + ((pa >> 2) & 1), v);
         m->stop_at = m->now; /* the RSP may have been started: let the scheduler see it */

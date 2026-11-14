@@ -178,6 +178,67 @@ static void test_helpers(void)
     CHECK(n64_runtime_pak_parse("transfer") == N64_RT_PAK_DEFAULT);
     CHECK(n64_runtime_pak_parse(NULL) == N64_RT_PAK_DEFAULT);
 
+    /* Guest stuck detector: a healthy game (picture changes now and then, DMAs and audio every frame) never; no
+     * progress at all for the limit: once; a fault then no new picture while the controller is still polled: once. */
+    {
+        n64_runtime_stuck st;
+        n64_runtime_stuck_init(&st);
+        uint64_t vi = 0, other = 0, faults = 0;
+        int hits = 0;
+        for (int f = 0; f < 2000; f++) {
+            if (f % 40 == 0)
+                vi++; /* a static screen for 40 frames at a time */
+            other += 3;
+            hits += n64_runtime_stuck_check(&st, vi, other, faults, 250) != N64_RT_STUCK_NONE;
+        }
+        CHECK(hits == 0);
+        int got = 0;
+        for (int f = 0; f < 600; f++) { /* an exception storm: nothing moves but the fault count */
+            int w = n64_runtime_stuck_check(&st, vi, other, faults += 1000, 250);
+            if (w != N64_RT_STUCK_NONE) {
+                CHECK(f < 250); /* the picture had been still for a while already: the fault reason comes first */
+                got++;
+            }
+        }
+        CHECK(got == 1);
+        vi++;
+        got = 0;
+        for (int f = 0; f < 600; f++) { /* a deadlock: nothing moves at all */
+            int w = n64_runtime_stuck_check(&st, vi, other, faults, 250);
+            if (w != N64_RT_STUCK_NONE) {
+                CHECK(w == N64_RT_STUCK_IDLE && f == 250);
+                got++;
+            }
+        }
+        CHECK(got == 1);
+        vi++; /* it came back */
+        CHECK(n64_runtime_stuck_check(&st, vi, other, faults, 250) == N64_RT_STUCK_NONE);
+        got = 0;
+        faults++; /* the game's crash screen: one fault, the picture stays, SI / audio go on */
+        for (int f = 0; f < 600; f++) {
+            int w = n64_runtime_stuck_check(&st, vi, other += 19, faults, 250);
+            if (w != N64_RT_STUCK_NONE) {
+                CHECK(w == N64_RT_STUCK_FAULT);
+                got++;
+            }
+        }
+        CHECK(got == 1);
+        vi++;
+        n64_runtime_stuck_check(&st, vi, other, faults, 250);
+        faults++; /* a fault, then the crash screen drawn a few frames later, then that picture stays */
+        got = 0;
+        for (int f = 0; f < 600; f++) {
+            if (f == 5)
+                vi++;
+            got += n64_runtime_stuck_check(&st, vi, other += 19, faults, 250) == N64_RT_STUCK_FAULT;
+        }
+        CHECK(got == 1);
+        for (int f = 0; f < 600; f++) /* an old fault and a later static screen: not a crash */
+            got += n64_runtime_stuck_check(&st, vi += (f == 300), other += 19, faults, 250) != N64_RT_STUCK_NONE;
+        CHECK(got == 1);
+        CHECK(n64_runtime_stuck_check(&st, vi, other, faults, 0) == N64_RT_STUCK_NONE);
+    }
+
     /* Frame skip: parse, auto (late by more than half a frame or audio low, 3 in a row at most), fixed, off. */
     CHECK(n64_runtime_frameskip_parse("auto") == N64_RT_FRAMESKIP_AUTO);
     CHECK(n64_runtime_frameskip_parse(NULL) == N64_RT_FRAMESKIP_AUTO);

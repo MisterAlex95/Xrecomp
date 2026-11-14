@@ -202,6 +202,10 @@ struct n64_machine {
     n64_rsp *rsp;
     n64_rdp *rdp;
     uint8_t *spmem;              /* n64_rsp_mem: DMEM + IMEM */
+    uint8_t boot_x105;           /* N64_X105_*: the CIC-6105 IPL3's RSP semaphore wait (n64_pif.c) */
+    n64_guest_fault fault;       /* the first guest fault exception and how many (n64_guest_fault_info) */
+    uint64_t vi_origin_changes;  /* n64_guest_activity: VI_ORIGIN writes with a new value, */
+    uint64_t si_dmas, pi_dmas, ai_buffers; /* SI / PI DMAs, audio buffers queued */
     uint64_t rsp_tick;           /* the RSP has run up to here */
 
     /* MI (mi_mode is in the head above) */
@@ -365,6 +369,13 @@ void n64_ai_event(n64_machine *m);
 
 /* ---- PIF / joybus / saves (n64_pif.c) -------------------------------------------------------------------------- */
 void n64_pif_boot(n64_machine *m);
+/* The CIC-6105 IPL3's RSP part (n64_pif.c header): n64_pif_x105_hold says whether the RSP is held this slice (it waits
+ * on the semaphore IPL3 holds), n64_pif_x105_step follows the RSP after each slice, n64_pif_x105_release sees the CPU
+ * write SP_SEMAPHORE. */
+enum { N64_X105_OFF = 0, N64_X105_ARMED, N64_X105_RUNNING, N64_X105_RELEASED };
+bool n64_pif_x105_hold(n64_machine *m);
+void n64_pif_x105_step(n64_machine *m);
+void n64_pif_x105_release(n64_machine *m);
 void n64_pif_process(n64_machine *m); /* runs the joybus commands in PIF RAM */
 void n64_pif_write_ram(n64_machine *m, uint32_t off, uint32_t v); /* CPU or SI write of a word */
 uint32_t n64_cart2_read32(n64_machine *m, uint32_t pa);
