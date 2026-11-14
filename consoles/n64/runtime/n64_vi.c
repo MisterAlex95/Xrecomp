@@ -33,7 +33,9 @@
  *     line (ORIGIN / WIDTH and the Y offset: the field 0.5 line or one line further down is the odd one), else the
  *     VI's field bit. A game that renders 480 lines and shows them as two fields gets its picture back whole, no
  *     combing and no bobbing; one that shows the same 240 lines in both fields gets them line-doubled.
- * Not modelled: the VI's fetch bugs and exact edge pixels, the AA filter's exact neighbour set (an approximation),
+ * Horizontal guard band: the first 8 and last 7 VI pixels of the active area are black (not when that edge is clamped
+ * to the scan-out), so a standard 640-pixel mode shows VI pixels 8..632 (canvas columns 4..316 at 320 wide).
+ * Not modelled: the VI's fetch bugs, the AA filter's exact neighbour set (an approximation),
  * per-line register changes within a field (the picture uses the registers at the call). */
 #include "n64_internal.h"
 #include "n64_rdp.h"
@@ -339,15 +341,15 @@ int n64_display(n64_machine *m, uint32_t *xrgb, int max_w, int max_h, int *w, in
     int gamma = (ctrl & 0x8) != 0, gdither = (ctrl & 0x4) != 0;
 
     /* Columns of the canvas inside the active area, and their framebuffer positions. */
-    int c0 = (hs - href + k - 1) / k, c1 = (he - href + k - 1) / k;
+    int a0 = (hs - href + k - 1) / k, a1 = (he - href + k - 1) / k;
     if (hs < href)
-        c0 = 0;
-    if (c0 < 0)
-        c0 = 0;
-    if (c1 > cw)
-        c1 = cw;
+        a0 = 0;
+    if (a0 < 0)
+        a0 = 0;
+    if (a1 > cw)
+        a1 = cw;
     int maxx = 0, anyxf = 0;
-    for (int col = c0; col < c1; col++) {
+    for (int col = a0; col < a1; col++) {
         int32_t p = (int32_t)xoff + (href + col * k - hs) * (int32_t)xs;
         if (p < 0)
             p = 0;
@@ -356,6 +358,16 @@ int n64_display(n64_machine *m, uint32_t *xrgb, int max_w, int max_h, int *w, in
         if ((p >> 10) + 1 > maxx)
             maxx = (p >> 10) + 1;
     }
+    /* The VI blanks a guard band of 8 VI pixels at the start and 7 at the end of the active area, unless that edge
+     * is clamped to the scan-out (H_START before the canvas / H_END past it), as paraLLEl-RDP's VI and angrylion
+     * do. Only the visible range shrinks: the sampling positions (and the pixels the filters decode) are those of
+     * the whole active area. */
+    int h0 = hs < href ? hs : hs + 8, h1 = he > href + CANVAS_W ? he : he - 7;
+    int c0 = h0 <= href ? 0 : (h0 - href + k - 1) / k, c1 = h1 <= href ? 0 : (h1 - href + k - 1) / k;
+    if (c0 < a0)
+        c0 = a0;
+    if (c1 > a1)
+        c1 = a1;
     c.npix = maxx < (int)width ? maxx : (int)width;
     if (c.npix > LINE_MAX)
         c.npix = LINE_MAX;

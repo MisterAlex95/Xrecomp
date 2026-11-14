@@ -360,7 +360,10 @@ build/n64/n64_runtime/n64_run build/n64-systemtest/n64-systemtest.z64 --tty --fr
 **The VI's picture (`n64_vi.c`, `n64_display`).** What a television showed, not a crop of the framebuffer: a fixed
 canvas of 640 VI pixels from H = 108 (NTSC) / 128 (PAL) and 240 / 288 lines from half-line 34 / 44 (480 / 576
 interlaced), the active area placed where H / V_VIDEO put it and black around it (a narrow or short picture keeps
-its aspect and place); 320 wide when X_SCALE is 0.5 or less (a 320 x 240 game comes out at its own pixels). Per
+its aspect and place); 320 wide when X_SCALE is 0.5 or less (a 320 x 240 game comes out at its own pixels). The
+VI's horizontal guard band is modelled (as paraLLEl-RDP's VI and angrylion do): the first 8 and last 7 VI pixels of
+the active area are black unless that edge is clamped to the scan-out, so a standard mode shows canvas columns
+4..316 of 320 (OoT draws its fades one column short; a console never shows that column). Per
 pixel: X / Y_SCALE steps and their start offsets, bilinear resampling (AA modes 0..2) or replication (mode 3), the AA
 filter on partially covered pixels (coverage from the RDP's hidden RDRAM bits, `n64_rdp_hidden_bits`; without them
 the pixel's low bit), the divot filter, the dither filter (16-bit), gamma and gamma dither. Interlaced modes are
