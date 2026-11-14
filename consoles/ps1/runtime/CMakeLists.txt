@@ -8,13 +8,32 @@ project(ps1_runtime C)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
-if(NOT TARGET xbr_host)
-    add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../../src/host ${CMAKE_CURRENT_BINARY_DIR}/xbr_host)
+# ps1_gpu: the GPU (P-7, XBA-165, ps1_devices.h): plain C11, no host dependency, so tests build anywhere. ps1_gpu.c
+# replaces the core's ps1_gpu_stub.c when it is present.
+if(NOT TARGET ps1_gpu)
+    if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/ps1_gpu.c)
+        set(PS1_GPU_SRC ps1_gpu.c)
+    else()
+        set(PS1_GPU_SRC ps1_gpu_stub.c)
+    endif()
+    add_library(ps1_gpu STATIC ${PS1_GPU_SRC})
+    target_include_directories(ps1_gpu PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+    target_compile_options(ps1_gpu PRIVATE -Wall -Wextra)
+    if(NOT CMAKE_BUILD_TYPE OR CMAKE_BUILD_TYPE STREQUAL "Debug")
+        target_compile_options(ps1_gpu PRIVATE -O2) # the software renderer is far too slow unoptimised
+    endif()
+    set_target_properties(ps1_gpu PROPERTIES POSITION_INDEPENDENT_CODE ON)
 endif()
 
-if(NOT TARGET ps1_runtime)
+# PS1_CORE_ONLY=ON skips ps1_runtime (no xbr_host / SDL2), so a host without SDL2 can still build and test the
+# devices (like GBA_CORE_ONLY).
+option(PS1_CORE_ONLY "Build only the PS1 devices, not ps1_runtime (no xbr_host / SDL2)" OFF)
+if(NOT PS1_CORE_ONLY AND NOT TARGET xbr_host)
+    add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../../src/host ${CMAKE_CURRENT_BINARY_DIR}/xbr_host)
+endif()
+if(NOT PS1_CORE_ONLY AND NOT TARGET ps1_runtime)
     add_library(ps1_runtime STATIC ps1_runtime.c)
     target_include_directories(ps1_runtime PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-    target_link_libraries(ps1_runtime PUBLIC xbr_host)
+    target_link_libraries(ps1_runtime PUBLIC ps1_gpu xbr_host)
     target_compile_options(ps1_runtime PRIVATE -Wall -Wextra)
 endif()
