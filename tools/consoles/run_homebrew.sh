@@ -97,9 +97,17 @@ for c in "${consoles[@]}"; do
     image="xba-$c-oracle"
     echo "== $c: oracle image $image"
     start=$(date +%s)
-    # shellcheck disable=SC2086
-    timeout "$tmo" docker build ${DOCKER_BUILD_ARGS:-} --build-arg JOBS="$jobs" -t "$image" - \
-        <"$repo/tools/docker/$c-oracle.Dockerfile"
+    # The image carries the sha256 of its Dockerfile (label xba.dockerfile): an image built from the same file is
+    # reused as is, so a pruned build cache never forces a cold rebuild (16 min for PS1). XBA_ORACLE_REBUILD=1 forces it.
+    dsum=$(sha256sum "$repo/tools/docker/$c-oracle.Dockerfile" | cut -d' ' -f1)
+    have=$(docker image inspect -f '{{ index .Config.Labels "xba.dockerfile" }}' "$image" 2>/dev/null || true)
+    if [ "$have" = "$dsum" ] && [ -z "${XBA_ORACLE_REBUILD:-}" ]; then
+        echo "== $c: $image is up to date with its Dockerfile, not rebuilt"
+    else
+        # shellcheck disable=SC2086
+        timeout "$tmo" docker build ${DOCKER_BUILD_ARGS:-} --build-arg JOBS="$jobs" --label "xba.dockerfile=$dsum" \
+            -t "$image" - <"$repo/tools/docker/$c-oracle.Dockerfile"
+    fi
     echo "== $c: image ready in $(($(date +%s) - start)) s"
     docker run --rm "$image" sh -c 'cat /opt/*/VERSION'
 

@@ -22,7 +22,7 @@ RUN git init -q /src \
     && test "$(git rev-parse HEAD)" = "${PCSX_REDUX_COMMIT}" \
     && (git submodule update --init --recursive --depth 1 -j 4 \
         || CI= ./.github/scripts/update-submodules.sh) \
-    && make -j"${JOBS}" all \
+    && (make -j"${JOBS}" all || make all) \
     && make -C src/mips/openbios -j"${JOBS}" all \
     && make install DESTDIR=/opt/pcsx-redux \
     && cp src/mips/openbios/openbios.bin /opt/pcsx-redux/share/pcsx-redux/resources/ \
