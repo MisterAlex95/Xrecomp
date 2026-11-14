@@ -513,6 +513,28 @@ static void setup_game(const char *name, uint32_t tid, const char *lib, long lon
     write_pack_json(dir, id, shell_abi, n);
 }
 
+/* xba_pack_load_rom with stdout captured into log (through the file out): the runtime's lines are the checks. */
+static int load_rom_logged(int (*load_rom)(const char *, const char *, int *, char *, size_t), const char *files,
+                           const char *rom, int *runtime_rc, char *reason, size_t reason_n, const char *out,
+                           char *log, size_t log_n)
+{
+    fflush(stdout);
+    int saved = dup(1);
+    FILE *cap = fopen(out, "w");
+    dup2(fileno(cap), 1);
+    int rc = load_rom(files, rom, runtime_rc, reason, reason_n);
+    fflush(stdout);
+    dup2(saved, 1);
+    close(saved);
+    fclose(cap);
+    cap = fopen(out, "r");
+    size_t n = fread(log, 1, log_n - 1, cap);
+    log[n] = 0;
+    fclose(cap);
+    fputs(log, stdout);
+    return rc;
+}
+
 static void test_routing(const char *shell_path, const char *title_path, const char *title_min_path,
                          const char *static_path)
 {
@@ -741,6 +763,59 @@ static void test_routing(const char *shell_path, const char *title_path, const c
 
         /* An Xbox game is not one: the Xbox loader's. */
         CHECK(load_rom(files, xbe, &runtime_rc, reason, sizeof reason) == RECOMP_PACK_INVALID);
+    }
+
+    /* XBA-168: a PS1 disc the same way. Its pack, when the shell accepts it, is handed to ps1_runtime_start (a
+     * stand-in here, fake_ps1_runtime.c: the real one checks source_sha256 = the boot EXE's, lib_sha256 and the
+     * table, consoles/ps1/tests test_pack.c); without a pack, or with one the shell refuses, it runs interpreted. */
+    {
+        int (*load_rom)(const char *, const char *, int *, char *, size_t) =
+            (int (*)(const char *, const char *, int *, char *, size_t))dlsym(shell, "xba_pack_load_rom");
+        char disc[1100], key[64], dir[1200], so[1300], text[1024], out[1300], log[4096];
+        unsigned char bytes[64] = { 0 };
+        int c = -1, runtime_rc = -1, rc;
+
+        CHECK(load_rom != NULL);
+        if (!load_rom)
+            return;
+        snprintf(disc, sizeof disc, "%s/ps1", root);
+        mkdirs(disc);
+        snprintf(disc, sizeof disc, "%s/ps1/Game.bin", root);
+        make_ps1(disc, 1, "BOOT = cdrom:\\SLUS_005.94;1\r\n");
+        CHECK(recomp_pack_rom_identify(disc, &c, key, sizeof key) == 0 && c == RECOMP_CONSOLE_PS1);
+        CHECK(!strcmp(key, "SLUS-00594"));
+
+        snprintf(out, sizeof out, "%s/ps1/stdout-none.txt", root);
+        rc = load_rom_logged(load_rom, files, disc, &runtime_rc, reason, sizeof reason, out, log, sizeof log);
+        CHECK(rc == RECOMP_PACK_OK && runtime_rc == 0 && reason[0] == 0);
+        CHECK(strstr(log, "PACK_NONE ps1 SLUS-00594") != NULL);
+        CHECK(strstr(log, "ps1 runtime ready") != NULL && strstr(log, "pack none") != NULL);
+        CHECK(strstr(log, "ps1 work dir ") != NULL && strstr(log, "/work\n") != NULL);
+
+        snprintf(dir, sizeof dir, "%s/packs/ps1-%s", files, key);
+        mkdirs(dir);
+        snprintf(so, sizeof so, "%s/libtitle.so", dir);
+        write_file(so, bytes, sizeof bytes);
+        snprintf(text, sizeof text, "{\"format\":1,\"console\":\"ps1\",\"title_key\":\"%s\",\"title\":\"Fake PS1\","
+                 "\"abi\":\"%s\",\"shell_abi\":1,\"lib\":\"libtitle.so\",\"lib_size\":64}", key, recomp_pack_host_abi());
+        snprintf(out, sizeof out, "%s/pack.json", dir);
+        write_file(out, text, strlen(text));
+        snprintf(out, sizeof out, "%s/ps1/stdout.txt", root);
+        rc = load_rom_logged(load_rom, files, disc, &runtime_rc, reason, sizeof reason, out, log, sizeof log);
+        CHECK(rc == RECOMP_PACK_OK && runtime_rc == 0);
+        CHECK(strstr(log, "PACK_NONE") == NULL && strstr(log, "PACK_STALE") == NULL && strstr(log, "IGNORED") == NULL);
+        CHECK(strstr(log, "ps1 runtime ready") != NULL && strstr(log, so) != NULL);   /* the pack handed over */
+
+        snprintf(text, sizeof text, "{\"format\":1,\"console\":\"ps1\",\"title_key\":\"%s\",\"abi\":\"%s\","
+                 "\"shell_abi\":2,\"lib\":\"libtitle.so\",\"lib_size\":64}", key, recomp_pack_host_abi());
+        snprintf(out, sizeof out, "%s/pack.json", dir);
+        write_file(out, text, strlen(text));
+        runtime_rc = 5;
+        snprintf(out, sizeof out, "%s/ps1/stdout-stale.txt", root);
+        rc = load_rom_logged(load_rom, files, disc, &runtime_rc, reason, sizeof reason, out, log, sizeof log);
+        CHECK(rc == RECOMP_PACK_OK && runtime_rc == 0);
+        CHECK(strstr(log, "PACK_STALE ps1 SLUS-00594 (") != NULL && strstr(log, "shell_abi 2") != NULL);
+        CHECK(strstr(log, "pack none") != NULL);
     }
 
     /* A title linked into the shell: its strong symbols, not the forwarders. */

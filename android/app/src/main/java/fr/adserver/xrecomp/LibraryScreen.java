@@ -195,8 +195,8 @@ final class LibraryScreen {
             f.hasData = true;
             f.dataKind = Library.KIND_IN_PLACE;
         }
-        // A GBA game (XBA-158) has a Prepare and a pack too, keyed by its library key (packs/gba-<KEY>); a PS1 game
-        // not yet (XBA-168: no PS1 recompiler), so its card never shows a Prepare state.
+        // A GBA game (XBA-158) and a PS1 disc (XBA-168) have a Prepare and a pack too, keyed by their library key
+        // (packs/gba-<KEY>, packs/ps1-<KEY>).
         boolean prepares = en.realTid() || (en.directLaunch() && en.console().prepares());
         f.toolchain = env.toolchain && prepares;
         if (prepares) {

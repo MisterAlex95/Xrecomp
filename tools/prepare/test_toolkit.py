@@ -119,6 +119,9 @@ PACK_INPUTS = (
     # GBA packs (XBA-157 / 158): the Prepare's GBA path, the lifter's package, the headers its C includes.
     "tools/prepare/gba.py", "consoles/gba/tools/gba_tools/__init__.py", "consoles/gba/runtime/gba_recomp.h",
     "consoles/gba/runtime/gba_core.h",
+    # PS1 packs (XBA-168): the Prepare's PS1 path, the lifter (its disc reader too), the headers its C includes.
+    "tools/prepare/ps1.py", "consoles/ps1/tools/ps1_tools/recomp.py", "consoles/ps1/tools/ps1_tools/exe.py",
+    "consoles/ps1/runtime/ps1_recomp.h", "consoles/ps1/runtime/ps1_recomp_rt.h", "consoles/ps1/runtime/ps1_core.h",
 )
 
 
@@ -129,6 +132,7 @@ def test_the_tree_covers_what_a_pack_is_made_of():
     assert not [p for p in PACK_INPUTS if not os.path.exists(os.path.join(toolkit.ROOT, p))], "renamed? update the list"
     assert "tools/recomp/test_seh_frames.py" not in sel and "src/kernel/xbox_seh.c" not in sel
     assert "consoles/gba/runtime/gba_cpu.c" not in sel                  # the core is the shell's (libmain.so)
+    assert "consoles/ps1/runtime/ps1_cpu.c" not in sel
     assert not [p for p in sel if "/test_" in p]
 
 

@@ -367,4 +367,34 @@ public class PrepareServiceTest {
         sc.startCommand(0, 1);
         assertEquals(PrepareProtocol.CANCELLED, status(TID2).state);
     }
+
+    /**
+     * XBA-168: the disc a PS1 Prepare reads. A path goes as it is (tools.prepare opens a .cue and its tracks itself);
+     * a .cue document's track documents come from the library index (its item's parts, under the same tree).
+     */
+    @Test
+    public void ps1Source() throws Exception {
+        File work = tmp.newFolder("work");
+        assertEquals("/sdcard/ps1/Game.cue", PrepareService.ps1Source(app, "/sdcard/ps1/Game.cue", "ps1-SLUS-00594",
+                                                                      work, null));
+        String tree = "content://com.android.externalstorage.documents/tree/primary%3Aps1";
+        LibraryIndex x = new LibraryIndex();
+        LibraryIndex.Item it = new LibraryIndex.Item();
+        it.loc = "doc:primary:ps1/Game.cue";
+        it.name = "Game.cue";
+        it.parts.add("doc:primary:ps1/Game (Track 1).bin");
+        it.parts.add("doc:primary:ps1/Game (Track 2).bin");
+        x.items.add(it);
+        LibraryIndex.write(Library.indexFile(PrepareService.filesDir(app)), x);
+        String cue = android.provider.DocumentsContract.buildDocumentUriUsingTree(android.net.Uri.parse(tree),
+                                                                                  "primary:ps1/Game.cue").toString();
+        assertEquals(java.util.Arrays.asList(
+                         tree + "/document/primary%3Aps1%2FGame%20(Track%201).bin",
+                         tree + "/document/primary%3Aps1%2FGame%20(Track%202).bin"),
+                     PrepareService.cueParts(PrepareService.filesDir(app), cue));
+        String other = android.provider.DocumentsContract.buildDocumentUriUsingTree(android.net.Uri.parse(tree),
+                                                                                    "primary:ps1/Other.cue").toString();
+        assertTrue(PrepareService.cueParts(PrepareService.filesDir(app), other).isEmpty());
+        assertTrue(PrepareService.cueParts(PrepareService.filesDir(app), "/sdcard/x.cue").isEmpty());
+    }
 }

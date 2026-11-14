@@ -90,31 +90,14 @@ if(NOT TARGET ps1_core)
     set_target_properties(ps1_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 endif()
 
-# PS1_CORE_ONLY=ON skips ps1_runtime (no xbr_host / SDL2), so a host without SDL2 can still build and test the
-# devices (like GBA_CORE_ONLY).
-option(PS1_CORE_ONLY "Build only ps1_core, the PS1 devices and ps1_run, not ps1_runtime (no xbr_host / SDL2)" OFF)
-if(NOT PS1_CORE_ONLY AND NOT TARGET xbr_host)
-    add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../../src/host ${CMAKE_CURRENT_BINARY_DIR}/xbr_host)
-endif()
-# ps1_runtime: the core + the host layer (ps1_runtime_run plays a disc or an EXE: window, pads, audio, memory cards,
-# pacing; XBA-168).
-if(NOT PS1_CORE_ONLY AND NOT TARGET ps1_runtime)
-    add_library(ps1_runtime STATIC ps1_runtime.c)
-    target_include_directories(ps1_runtime PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-    target_link_libraries(ps1_runtime PUBLIC ps1_core xbr_host)
-    target_compile_options(ps1_runtime PRIVATE -Wall -Wextra)
-    set_target_properties(ps1_runtime PROPERTIES POSITION_INDEPENDENT_CODE ON)
-endif()
-
-# ps1_play: plays a disc or an EXE on a desktop through ps1_runtime (XBA-168). The title key comes from the disc as
-# the app reads it (recomp_pack_rom_identify): src/platform/recomp_pack.c is compiled in (libc + recomp_cfg, which
-# xbr_host brings), so a project that adds this directory alone needs nothing more.
-if(NOT ANDROID AND TARGET ps1_runtime AND NOT TARGET ps1_play)
-    get_filename_component(PS1_PLATFORM_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../../src/platform ABSOLUTE)
-    add_executable(ps1_play tools/ps1_play.c ${PS1_PLATFORM_DIR}/recomp_pack.c)
-    target_include_directories(ps1_play PRIVATE ${PS1_PLATFORM_DIR})
-    target_link_libraries(ps1_play PRIVATE ps1_runtime ps1_identify ${CMAKE_DL_LIBS})
-    target_compile_options(ps1_play PRIVATE -Wall -Wextra)
+# ps1_pack: a PS1 title pack, the runtime's side (pack.json checks, the boot EXE's identity, dlopen of the table,
+# the discovered code written at exit; ps1_pack.h, XBA-168). No SDL: the tests link it alone.
+if(NOT TARGET ps1_pack)
+    add_library(ps1_pack STATIC ps1_pack.c)
+    target_include_directories(ps1_pack PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(ps1_pack PUBLIC ps1_core ${CMAKE_DL_LIBS})
+    target_compile_options(ps1_pack PRIVATE -Wall -Wextra)
+    set_target_properties(ps1_pack PROPERTIES POSITION_INDEPENDENT_CODE ON)
 endif()
 
 # ps1_core_exported(target): the executable exports the core's symbols, which a recompiled title pack (ps1_recomp.h,
@@ -128,6 +111,35 @@ function(ps1_core_exported tgt)
     endif()
     target_link_libraries(${tgt} PRIVATE ${CMAKE_DL_LIBS})
 endfunction()
+
+# PS1_CORE_ONLY=ON skips ps1_runtime (no xbr_host / SDL2), so a host without SDL2 can still build and test the
+# devices (like GBA_CORE_ONLY).
+option(PS1_CORE_ONLY "Build only ps1_core, the PS1 devices and ps1_run, not ps1_runtime (no xbr_host / SDL2)" OFF)
+if(NOT PS1_CORE_ONLY AND NOT TARGET xbr_host)
+    add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../../src/host ${CMAKE_CURRENT_BINARY_DIR}/xbr_host)
+endif()
+# ps1_runtime: the core + the host layer (ps1_runtime_run plays a disc or an EXE: window, pads, audio, memory cards,
+# pacing; XBA-168).
+if(NOT PS1_CORE_ONLY AND NOT TARGET ps1_runtime)
+    add_library(ps1_runtime STATIC ps1_runtime.c)
+    target_include_directories(ps1_runtime PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(ps1_runtime PUBLIC ps1_core ps1_pack xbr_host)
+    target_compile_options(ps1_runtime PRIVATE -Wall -Wextra)
+    set_target_properties(ps1_runtime PROPERTIES POSITION_INDEPENDENT_CODE ON)
+endif()
+
+# ps1_play: plays a disc or an EXE on a desktop through ps1_runtime (XBA-168). The title key comes from the disc as
+# the app reads it (recomp_pack_rom_identify): src/platform/recomp_pack.c is compiled in (libc + recomp_cfg, which
+# xbr_host brings), so a project that adds this directory alone needs nothing more. It loads title packs (--pack,
+# tools/prepare/ps1.py): the whole core is exported.
+if(NOT ANDROID AND TARGET ps1_runtime AND NOT TARGET ps1_play)
+    get_filename_component(PS1_PLATFORM_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../../src/platform ABSOLUTE)
+    add_executable(ps1_play tools/ps1_play.c ${PS1_PLATFORM_DIR}/recomp_pack.c)
+    ps1_core_exported(ps1_play) # first, so the whole archive comes before the plain one
+    target_include_directories(ps1_play PRIVATE ${PS1_PLATFORM_DIR})
+    target_link_libraries(ps1_play PRIVATE ps1_runtime ps1_identify ${CMAKE_DL_LIBS})
+    target_compile_options(ps1_play PRIVATE -Wall -Wextra)
+endif()
 
 # ps1_run: the headless runner (desktop hosts only); --pack loads a recompiled title (static recompilation, XBA-160..162).
 if(NOT ANDROID AND NOT TARGET ps1_run)

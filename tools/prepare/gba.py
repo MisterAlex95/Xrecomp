@@ -460,7 +460,8 @@ class Run:
         return final
 
 
-def run(a, host, android):
+def run(a, host, android, run_class=None):
+    """The five steps; run_class: Run or a subclass (tools/prepare/ps1.py's)."""
     rep = Reporter()
     if android:
         from tools.prepare.android import REQUIRED
@@ -468,7 +469,7 @@ def run(a, host, android):
         if missing:
             rep.error("BAD_ARGS", "--android needs " + ", ".join("--" + k.replace("_", "-") for k in missing))
             return 1
-    r = Run(a, host, android)
+    r = (run_class or Run)(a, host, android)
     r.rep = rep
 
     def on_signal(signum, frame):

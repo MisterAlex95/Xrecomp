@@ -753,16 +753,18 @@ public class LauncherLibraryTest {
     }
 
     /**
-     * XBA-168: with the toolchain, A on a PS1 card opens its Home like a GBA game's, but with Play only (its Prepare
-     * comes with the PS1 recompiler): « Plays in the interpreter », a note on the BIOS and the memory cards; nothing
-     * right of Play; Play launches the disc.
+     * XBA-168: with the toolchain, A on a PS1 card opens its Home like a GBA game's: Play first (the interpreter, no
+     * pack needed), « Not prepared » and Prepare beside it. Prepare starts PrepareService with the .cue and the library
+     * key ps1-<serial> and shows the Preparing screen; a valid pack says « Prepared »; code the runs found since (the
+     * runtime's records: address, hash, bytes) offers Prepare again; Play launches the disc in every state.
      */
     @Test
-    public void ps1HomePlaysOnly() throws Exception {
+    public void ps1HomePrepares() throws Exception {
         Toolchain.assetsOverride = TestSupport.toolAssets(tmp.newFolder("assets"), "1");
         Toolchain.nativeDirOverride = TestSupport.fakeNativeDir(tmp.getRoot()).getAbsolutePath();
         folderGame(0);
         File cue = ps1Disc("ps1");
+        String key = "ps1-SLUS-00594";
         LauncherActivity a = launch();
         a.forceFocusForTest();
         idle(300);
@@ -771,15 +773,78 @@ public class LauncherLibraryTest {
         key(a, KeyEvent.KEYCODE_BUTTON_A);
         assertEquals(LauncherActivity.Screen.ROM_HOME, a.screenForTest());
         assertNull("not launched", shadowOf(a).getNextStartedActivity());
-        assertEquals("ps1-SLUS-00594", a.romEntryForTest().tid);
-        assertEquals(app.getString(R.string.ROM_PS1_NOTE), a.noteForTest());
-        TestSupport.screenshot(a.getWindow().getDecorView(), "ps1-home");
+        assertEquals(key, a.romEntryForTest().tid);
+        assertEquals(app.getString(R.string.ROM_NOT_PREPARED_NOTE), a.noteForTest());
+        TestSupport.screenshot(a.getWindow().getDecorView(), "ps1-1-home-not-prepared");
+
+        // Prepare (right of Play): the service with the .cue and the library key, then the Preparing screen.
+        key(a, KeyEvent.KEYCODE_DPAD_RIGHT);
         key(a, KeyEvent.KEYCODE_BUTTON_A);
-        assertNull("no Prepare for a PS1 game", shadowOf(app).getNextStartedService());
-        Intent game = shadowOf(a).getNextStartedActivity();
+        Intent started = shadowOf(app).getNextStartedService();
+        assertNotNull("PrepareService started", started);
+        assertEquals(PrepareService.ACTION_START, started.getAction());
+        assertEquals(key, started.getStringExtra(PrepareService.EXTRA_TITLE_ID));
+        assertEquals(cue.getAbsolutePath(), started.getStringExtra(PrepareService.EXTRA_GAME_DIR));
+        assertEquals(LauncherActivity.Screen.PREPARE, a.screenForTest());
+        assertEquals(PrepareProtocol.RUNNING, PrepareProtocol.readStatus(PrepareService.statusFile(app, key)).state);
+
+        // Done: a valid pack (console ps1). Its Home says Prepared, Play first.
+        File dir = Pack.packDir(app.getFilesDir(), key);
+        TestSupport.write(new File(dir, "libtitle.so"), new byte[16]);
+        org.json.JSONObject o = new org.json.JSONObject().put("format", 1).put("console", "ps1")
+                .put("title_key", "SLUS-00594").put("abi", "arm64-v8a").put("shell_abi", Pack.SHELL_ABI)
+                .put("lib", "libtitle.so").put("lib_size", 16).put("source_sha256", "ab").put("discovered", 1);
+        TestSupport.write(new File(dir, "pack.json"), o.toString());
+        PrepareProtocol.Status st = PrepareProtocol.readStatus(PrepareService.statusFile(app, key));
+        st.state = PrepareProtocol.DONE;
+        PrepareProtocol.writeStatus(PrepareService.statusFile(app, key), st);
+        TestSupport.write(Pack.discoveredFile(app.getFilesDir(), key),
+                          "80100000 00000000000000AA 0000E0AF\n");   // what the pack was built with
+        LauncherActivity b = launch();
+        b.forceFocusForTest();
+        idle(300);
+        card(b, "Space Race").requestFocusFromTouch();
+        idle(300);
+        key(b, KeyEvent.KEYCODE_BUTTON_A);
+        assertEquals(LauncherActivity.Screen.ROM_HOME, b.screenForTest());
+        assertEquals(app.getString(R.string.ROM_PREPARED_NOTE), b.noteForTest());
+        TestSupport.screenshot(b.getWindow().getDecorView(), "ps1-2-home-prepared");
+
+        // The runs found code since (two more records, an overlay at the same address included): Prepare again.
+        TestSupport.write(Pack.discoveredFile(app.getFilesDir(), key),
+                          "80100000 00000000000000AA 0000E0AF\n80100000 00000000000000BB 1111E0AF\n"
+                          + "80020000 0000000000000001 00000000\n");
+        LauncherActivity c = launch();
+        c.forceFocusForTest();
+        idle(300);
+        card(c, "Space Race").requestFocusFromTouch();
+        idle(300);
+        key(c, KeyEvent.KEYCODE_BUTTON_A);
+        assertEquals(app.getString(R.string.ROM_NEW_CODE_NOTE, 2), c.noteForTest());
+        TestSupport.screenshot(c.getWindow().getDecorView(), "ps1-3-home-new-code");
+
+        // Play (focused first): the disc to the game activity.
+        key(c, KeyEvent.KEYCODE_BUTTON_A);
+        Intent game = shadowOf(c).getNextStartedActivity();
         assertNotNull(game);
         assertEquals(ShellActivity.class.getName(), game.getComponent().getClassName());
         assertEquals(cue.getAbsolutePath(), GameStore.launchedRom(app));
+        assertEquals(key, GameStore.launchedTitleId(app));
+    }
+
+    /** A .chd plays but has no Prepare (XBA-168: the PS1 recompiler reads .cue / .bin / .iso); a GBA ROM has one. */
+    @Test
+    public void romPrepares() {
+        LibraryScreen.Entry e = new LibraryScreen.Entry("ps1-SLUS-00594");
+        e.active = new LibraryIndex.Item();
+        e.active.name = "Space Race.cue";
+        assertTrue(LauncherActivity.romPrepares(e));
+        e.active.name = "Space Race.CHD";
+        assertFalse(LauncherActivity.romPrepares(e));
+        e.active = null;
+        assertTrue(LauncherActivity.romPrepares(e));
+        assertTrue(LauncherActivity.romPrepares(new LibraryScreen.Entry("gba-AXVE-00000001")));
+        assertFalse(LauncherActivity.romPrepares(new LibraryScreen.Entry("n64-NSME-00000001")));
     }
 
     /** The track documents of a .cue seen through SAF (XBA-168): their URIs under the tree; nothing otherwise. */

@@ -44,7 +44,7 @@ public class GameStateTest {
     /**
      * XBA-157: a GBA game plays its ROM as it is: Ready while it is in a library folder (whatever the toolchain or
      * packs), Running while it runs, No file access when its folder cannot be read, gone without it. A PS1 disc the
-     * same (XBA-168), without a Prepare; N64 stays « Not playable yet ».
+     * same (XBA-168), with its Prepare; N64 stays « Not playable yet ».
      */
     @Test
     public void otherConsoles() {
@@ -83,13 +83,12 @@ public class GameStateTest {
         assertTrue(Console.GBA.playable() && Console.GBA.directLaunch() && Console.GBA.prepares());
         assertTrue(Console.XBOX.playable());
         assertFalse(Console.XBOX.directLaunch());
-        // XBA-168: a PS1 disc plays as it is too, Ready / Running / No file access like a GBA ROM; no Prepare yet.
-        assertTrue(Console.PS1.playable() && Console.PS1.directLaunch());
-        assertFalse(Console.PS1.prepares());
+        // XBA-168: a PS1 disc plays as it is too, Ready / Running / No file access like a GBA ROM, and prepares.
+        assertTrue(Console.PS1.playable() && Console.PS1.directLaunch() && Console.PS1.prepares());
         f.console = Console.PS1;
         f.titleId = "ps1-SLUS-00594";
         f.source = GameState.Source.PRESENT;
-        f.toolchain = false;   // LibraryScreen gives a PS1 game no toolchain: it has no Prepare
+        f.toolchain = false;
         f.pack = Pack.Check.NO_PACK;
         f.prepare = null;
         f.runningTid = null;

@@ -62,8 +62,14 @@ typedef struct ps1_runtime_opts {
     /* 1: every host pad drives PS1 port 1 (a handheld's own controls and an external pad alike); 2: host pad 0 ->
      * port 1, host pad 1 -> port 2 (two players). -1 = $RECOMP_PS1_PLAYERS (default 1). */
     int players;
-    /* A PS1 title pack's library: ignored until the PS1 recompiler lands (logged); the interpreter runs the game. */
+    /* A PS1 title pack's library (XBA-168, ps1_pack.h): taken when its pack.json (beside it) says it is this game's
+     * (title key, boot EXE), this shell's and this host's and its table loads, else the game runs interpreted (a log
+     * line says why). NULL or "": the interpreter alone. */
     const char *pack_lib;
+    /* At exit (and from the in-game menu's Quit), the code the interpreter had to run while a pack was attached
+     * (ps1_recomp_write_missed: address, hash, bytes) is appended to this file without repeats, which the next
+     * Prepare hands to the lifter (the discovery loop). NULL: not written. */
+    const char *discovered_path;
 } ps1_runtime_opts;
 
 void ps1_runtime_opts_init(ps1_runtime_opts *o);
@@ -76,13 +82,18 @@ int ps1_runtime_run(const ps1_runtime_opts *o);
 /* Where ps1_runtime_start keeps memory cards (the app shell's <internal files>/save); NULL: none. Copied. */
 void ps1_runtime_set_save_dir(const char *dir);
 
+/* Where ps1_runtime_start writes the discovered code: <dir>/ps1-<KEY>/discovered.txt (the app shell's
+ * <internal files>/work: the Prepare's work folder of the game, which it reads them from); NULL: not written. */
+void ps1_runtime_set_work_dir(const char *dir);
+
 /* The BIOS image ps1_runtime_start uses when $RECOMP_PS1_BIOS is not set; NULL: the default search. Copied. */
 void ps1_runtime_set_bios(const char *path);
 
 /* The app shell's entry point (XBA-147, android/app/src/main/cpp/pack_loader.c): rom is the game (a path or
- * "fd:N"), pack_lib a title pack's library (ignored for now: NULL or not, the interpreter runs the game),
- * title_key the game's key. Plays it with ps1_runtime_run (cards in ps1_runtime_set_save_dir's dir;
- * $RECOMP_PS1_FRAMES bounds the run) and returns its result once the player quit. */
+ * "fd:N"), pack_lib a title pack's library (NULL or "" without a pack: the interpreter alone; a pack that is not
+ * this game's: logged, interpreted), title_key the game's key. Plays it with ps1_runtime_run (cards in
+ * ps1_runtime_set_save_dir's dir, discovered code in ps1_runtime_set_work_dir's; $RECOMP_PS1_FRAMES bounds the
+ * run) and returns its result once the player quit. */
 int ps1_runtime_start(const char *rom, const char *pack_lib, const char *title_key);
 
 /* ---- Pure helpers (tested in consoles/ps1/tests) ---- */

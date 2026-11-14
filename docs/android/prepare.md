@@ -31,7 +31,8 @@ its own private storage: it takes XRecomp's pack over instead of preparing again
 ([Handing a pack to a game's own app](#handing-a-pack-to-a-games-own-app)).
 
 `TITLEID` is the XBE's title ID in 8 upper-case hex digits (`4D5300D1`). A Game Boy Advance game's pack is
-`packs/gba-<KEY>/` ([GBA packs](#gba-packs-xba-157-xba-158)).
+`packs/gba-<KEY>/` ([GBA packs](#gba-packs-xba-157-xba-158)), a PlayStation disc's `packs/ps1-<KEY>/`
+([PS1 packs](#ps1-packs-xba-168)).
 
 **Atomic publish.** A pack is built in `packs/<TITLEID>.partial/`; `pack.json` is written last (temp file, fsync,
 rename), then the directory is renamed to `packs/<TITLEID>`. An existing pack is first renamed to
@@ -186,6 +187,7 @@ XBA_RESULT ok pack=/data/user/0/<app>/files/packs/12345678
 | `BAD_ARGS` | a required flag is missing (`--work`, `--pack-dir`, `--cc`, `--sysroot`, `--shell-lib`) |
 | `NO_XBE` | no `default.xbe` in the source |
 | `NO_ROM`, `BAD_ROM` | a GBA ROM that cannot be read, or is empty or over 32 MB ([GBA packs](#gba-packs-xba-157-xba-158)) |
+| `NO_DISC`, `BAD_DISC` | a PS1 disc that cannot be read, or whose boot EXE is missing or not one, or a `.chd` ([PS1 packs](#ps1-packs-xba-168)) |
 | `BAD_XBE` | `xbe_parser` cannot read it |
 | `ANALYSE_FAILED`, `LIFT_FAILED` | a pipeline tool failed; details in `prepare.log` |
 | `COMPILE_FAILED` | a C file did not compile; `msg` = file and first error |
@@ -622,6 +624,147 @@ against `gba_play` at load), `"abi"` the host's (`x86_64`, `arm64-v8a`). Work an
 `--jobs`, `--opt`, `--force`, `--discovered` as above. With `--android` and the NDK it is the device's build (« Checking
 on a host »). Tests: `python3 -m pytest tools/prepare/test_gba_prepare.py` (the NDK case runs where
 `ANDROID_NDK_HOME` is set), `consoles/gba/tests` `gba_pack`, `tests/recomp_pack`.
+
+## PS1 packs (XBA-168)
+
+A PlayStation disc plays in the interpreter with no pack (consoles/README.md « Playing a PS1 game »); a pack makes it
+run natively. It is the GBA's path for a disc: the same command, steps, compile driver and publish,
+`tools/prepare/ps1.py` (a subclass of `gba.py`'s run), taken whenever SOURCE is a `.cue`, a `.chd`, a `.bin` / `.iso`
+/ `.img` whose ISO 9660 volume says `PLAYSTATION`, or a PS-X EXE. Contract of the lifted code:
+`consoles/ps1/runtime/ps1_recomp.h`; the lifter: `consoles/ps1/tools` (`ps1_tools`).
+
+```
+<files dir>/packs/ps1-<KEY>/libtitle.so
+<files dir>/packs/ps1-<KEY>/pack.json
+<files dir>/work/ps1-<KEY>/      --work: boot.exe, gen/, obj/, stamp.json, prepare.log, discovered.txt (disc.iso)
+```
+
+`KEY` is the title key (`recomp_pack_rom_identify`, `Console.identify`, `ps1.disc_key`): the serial of SYSTEM.CNF's
+`BOOT` line (`SLUS-00594`), else `PSX-<CRC32 of the 2048 bytes of the volume descriptor>`; a bare EXE (desktop):
+`EXE-<CRC32 of the file>`. The app's Prepare goes by the library key `ps1-<KEY>`.
+
+**The source identity** (pack.json `source_sha256`) is the SHA-256 of the **boot EXE** (SYSTEM.CNF's `BOOT` file,
+else `PSX.EXE`; for an EXE, the file), not of the image:
+
+- reading a whole 700 MB image on a phone takes tens of seconds, at every Prepare and at every start; the boot EXE is
+  2 MB at most, a few sectors away from the volume descriptor;
+- it is what the lifted table records itself (`ps1_recomp_table.source_sha256`), so the runtime checks one value
+  against pack.json and against the library;
+- it is the same for the `.cue` / `.bin`, the `.iso` and the `.chd` of one disc (a pack built from one plays the
+  others), and differs for another release or a patched EXE;
+- what it does not cover cannot run wrong code: overlays and anything else loaded at run time are matched by content
+  in RAM, entry by entry (ps1_recomp.h), so a disc whose other files differ only runs more in the interpreter.
+
+**The steps** (same progress lines and ids, `n` = 5):
+
+| # | id | Does | Stamp |
+|---|---|---|---|
+| 1 | `identify` | reads the disc with the lifter's own reader (`ps1_tools.exe`: ISO 9660 on cooked or raw sectors, a `.cue`'s first data track): title key, the boot EXE (over 2 MB + 2 KB, missing, not a PS-X EXE: `BAD_DISC`; unreadable: `NO_DISC`; a `.chd`: `BAD_DISC`, see below), its SHA-256; copies it to `<work>/boot.exe` | `source` + `toolkit_sha256` (another EXE or toolkit starts over) |
+| 2 | `analyse` | the code earlier runs had to interpret: `<work>/discovered.txt` (plus `--discovered FILE`), one record kept per address + hash, sorted, into `<work>/discovered-seeds.txt` | (their digest, in the lift's key) |
+| 3 | `lift` | `python -m ps1_tools.recomp <work>/boot.exe <work>/gen.new [--discovered seeds]`, then `gen.new` → `gen` (the stamp is dropped first) | `lift` |
+| 4 | `compile` | each `gen/*.c` with the flags below, the object cache of « Compile and link » | the object cache |
+| 5 | `pack` | `libtitle.so`, `pack.json`, atomic publish as `packs/ps1-<KEY>` | `link` |
+
+The lift reads the copied EXE, not the image: the image is opened once, in step 1. Compile flags: the GBA's with
+`-I<toolkit>/consoles/ps1/runtime` (`--target=aarch64-linux-android30 --sysroot=<sysroot> [-resource-dir=…] -O<opt>
+-g0 -fPIC -std=gnu11 -w -DNDEBUG -I<work>/gen`). The link is the Xbox pack's (`ld.lld … -shared -soname libtitle.so
+-Bsymbolic --no-undefined … -l:libmain.so`): every core function the lifted code calls (`ps1_rc_*`, ps1_recomp_rt.h)
+must be exported by `libmain.so`, which links the whole PS1 core (`--whole-archive ps1_core`,
+android/app/src/main/cpp/CMakeLists.txt). The toolkit tree ships `consoles/ps1/tools/**/*.py` (on `PYTHONPATH` for
+step 3; step 1 imports its disc reader) and `consoles/ps1/runtime/*.h`; both count in the toolkit digest.
+`XBA_PS1_RECOMP` (a module name) and `XBA_PS1_TOOLS_DIR` replace the lifter for the tests
+(`tools/prepare/tests/fake_ps1_recomp.py`).
+
+**A disc behind the Storage Access Framework.** tools.prepare opens files by path; a library folder added with the
+file picker gives documents. `PrepareService.ps1Source` then copies, from the disc's data track (a single-file `.bin`
+/ `.iso` document, or a `.cue`'s first FILE among the track documents the library index lists for it), exactly the
+sectors that lead to the boot EXE (the volume descriptor, the root directory, SYSTEM.CNF, the directories on the
+EXE's path, the EXE) to their place in `<work>/disc.iso`, a cooked image with holes everywhere else (`Ps1Disc`: a
+sparse file, a few hundred KB on disk whatever the disc's size), and passes that as SOURCE. The rules are
+`ps1_tools.exe`'s, so the key and the EXE found there are the disc's. A path (All files access) goes as it is: a
+`.cue` finds its tracks beside it.
+
+**A `.chd`** cannot be prepared: `ps1_tools` is pure Python (the app's embedded CPython) and reads `.cue` / `.bin` /
+`.iso`; there is no CHD decoder for it. The step fails with `BAD_DISC` (« a .chd image: … chdman extractcd makes a .cue
+/ .bin of it »), and the app does not offer Prepare for one (its Home says why). The game still plays from the
+`.chd`, interpreted; a pack made from the same disc's `.cue` / `.bin` would be taken (same boot EXE) if the key
+matched, but `.chd` has no title key in the app yet.
+
+**pack.json** of a PS1 pack (format 1; unknown fields ignored):
+
+```json
+{"format": 1, "console": "ps1", "title_key": "SLUS-00594", "title": "Space Race", "source_sha256": "...",
+ "boot": "SLUS_005.94", "abi": "arm64-v8a", "shell_abi": 1, "toolkit": "<commit>", "toolkit_sha256": "...",
+ "lib": "libtitle.so", "lib_sha256": "...", "lib_size": 123456, "entry": "ps1_recomp_title_table",
+ "cc": "clang 19.0.1 -O2", "built_at": "2026-11-14T21:10:35Z", "discovered": 21, "prepare": {...}}
+```
+
+| Field | Meaning |
+|---|---|
+| `console`, `title_key` | `ps1` and the title key, in place of `title_id`. |
+| `title` | The image's file name without its extension, for display. |
+| `source_sha256` | The boot EXE it was built from (above). The runtime compares it with the disc it plays and with the table's own `source_sha256`. |
+| `boot` | The boot file's path on the disc (information). |
+| `entry` | `ps1_recomp_title_table`: `const ps1_recomp_table *ps1_recomp_title_table(void)`. |
+| `discovered` | How many discovered records the lift was given. The app compares it with the file's line count to offer Prepare again. |
+
+The other fields are the Xbox pack's. `tools/prepare/ps1.py` (`read`, `check`) is the reference.
+
+**The loader.** `pack_loader.c` (`xba_pack_load_rom`) never refuses to start a PS1 game:
+
+1. `packs/ps1-<KEY>/pack.json` missing → `PACK_NONE ps1 <KEY> (not prepared, the interpreter runs it)`.
+2. `recomp_pack_find_key` refuses it (format, console, title_key, abi, shell_abi, lib, lib_size) → `PACK_STALE ps1
+   <KEY> (<reason>), running interpreted`.
+3. Else `ps1_runtime_start(disc, <pack>/libtitle.so, key)`; the runtime (`consoles/ps1/runtime/ps1_pack.c`) checks
+   again with what only it knows: `source_sha256` = the SHA-256 of the boot EXE it reads from the disc
+   (`ps1_pack_disc_boot_sha256`: ISO 9660 through `ps1_disc`, so `.cue`, `.bin`, `.iso`, `.chd`, `fd:N` and the
+   `/proc/self/fd` cue of a SAF disc alike; the same rules as `ps1_tools.exe`), `lib_sha256` (hashed at each start),
+   `entry`; then `dlopen(RTLD_NOW | RTLD_LOCAL)`, the table, its `abi` (`ps1_attach_recomp`) and its `source_sha256`.
+   `PACK_LOADED ps1 <KEY> (<N> functions)`, or `PACK_STALE ps1 <KEY> (<why>), running interpreted` (a boot EXE that
+   cannot be read is one: nothing to check the pack against).
+
+On a desktop, `ps1_runtime_opts.pack_lib` (`ps1_play --pack`) does the same (a library with no `pack.json` beside it:
+the table's checks only); `ps1_play` exports the core (`ps1_core_exported`: `ENABLE_EXPORTS` + the whole archive).
+
+**The discovery loop.** At exit (also the in-game menu's Quit, through the exit hook) the runtime appends the code
+the interpreter had to start running while the pack was attached and the table did not cover
+(`ps1_recomp_write_missed`) to `<files>/work/ps1-<KEY>/discovered.txt`: one record per line, `ADDR HASH HEXBYTES`
+(the address, the content hash, up to 2 KB of the code bytes as they were in RAM), a record the file already holds
+(same address and hash) never written twice, the folder made first. The bytes are what lets the next Prepare lift
+code that is not in the EXE: overlays read from the disc at run time, several of them at one address. Log: `ps1: code
+at <N> address(es) the pack did not cover, <A> new record(s), in <path>`. The next Prepare runs with `--work
+<files>/work/ps1-<KEY>`, finds the file, and the lift takes it (`--discovered`). Home compares the file's line count
+with the pack's `discovered`: more → « Prepared · N new addresses found · prepare again », Play stays first
+(app-shell.md « PlayStation games »). Without a pack nothing is recorded: the first Prepare lifts what the EXE
+holds, the runs with its pack find the rest.
+
+**On a desktop** (Linux x86-64 or arm64, macOS): `python3 -m tools.prepare game.cue` builds a pack for `ps1_play`
+with the host's `cc` (or `--cc`, `$CC`), the core left undefined (resolved against `ps1_play` at load), `"abi"` the
+host's; work and packs default to `$XDG_DATA_HOME/xrecomp/work/ps1-<KEY>` and `…/packs/ps1-<KEY>`. With `--android`
+and the NDK it is the device's build. Checked on 2026-11-14 with our homebrew overlay disc
+(`tools/consoles/build_homebrew.sh ps1`):
+
+```sh
+python3 -m tools.prepare build/homebrew/ps1/overlay.cue --work /tmp/w --pack-dir /tmp/p --opt 1
+build/ps1/ps1_runtime/ps1_play build/homebrew/ps1/overlay.cue --frames 3000 --pack /tmp/p/ps1-PSX-4009E1ED/libtitle.so \
+    --missed /tmp/w/discovered.txt            # PACK_LOADED ps1 PSX-4009E1ED (69 functions); 21 new records
+python3 -m tools.prepare build/homebrew/ps1/overlay.cue --work /tmp/w --pack-dir /tmp/p --opt 1   # discovered 21
+build/ps1/ps1_runtime/ps1_play …                 # PACK_LOADED (86 functions): both overlays native, nothing new
+build/ps1/ps1_runtime/ps1_run build/homebrew/ps1/overlay.cue --pack /tmp/p/ps1-PSX-4009E1ED/libtitle.so --lockstep \
+    --result --frames 3000                       # LOCKSTEP OK, result PASS
+```
+
+The device's build, checked the same day: `--android` with the NDK's clang, then with the shipped toolchain itself
+(`libxbacc.so` under qemu-aarch64, the extracted `sysroot.zip`, `--cc-prefix-arg clang`), both against the real
+`libmain.so` built from `android/app/src/main/cpp`: `XBA_RESULT ok` (69 s under qemu, 3 files at -O2, the real
+`ps1_tools`); `libtitle.so` AArch64 DYN, NEEDED libmain / libm / libdl / liblog / libc, `ps1_recomp_title_table`
+exported, its four undefined core symbols (`ps1_rc_lw`, `ps1_rc_read`, `ps1_rc_write`, `ps1_rc_swlr`; more for code
+with GTE commands) all exported by `libmain.so`; `"cc": "clang 19.1.7 -O2"`.
+
+Tests: `python3 -m pytest tools/prepare/test_ps1_prepare.py` (a fake lifter on images the test makes; the real
+`ps1_tools` on the homebrew disc when it is built; the NDK case where `ANDROID_NDK_HOME` is set),
+`consoles/ps1/tests` `ps1_pack`, `tests/recomp_pack`, the app's `Ps1DiscTest`, `PrepareServiceTest.ps1Source`,
+`LauncherLibraryTest.ps1HomePrepares`.
 
 ## The loader
 

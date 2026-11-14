@@ -19,7 +19,8 @@ target_include_directories(recomp_pack_test PRIVATE ${SRC})
 target_link_libraries(recomp_pack_test PRIVATE ${CMAKE_DL_LIBS})
 
 # The other consoles' runtimes pack_loader.c routes to (XBA-147): their sources only (stubs with no dependency yet),
-# as libmain.so links them. The GBA one plays games now (core + SDL host layer, XBA-157): a stand-in that logs.
+# as libmain.so links them. The GBA and PS1 ones play games now (core + SDL host layer, XBA-157 / XBA-168): stand-ins
+# that log.
 set(CONSOLES ${CMAKE_CURRENT_SOURCE_DIR}/../../consoles)
 set(CONSOLE_SRC ${CMAKE_CURRENT_SOURCE_DIR}/fake_gba_runtime.c ${CMAKE_CURRENT_SOURCE_DIR}/fake_ps1_runtime.c
                 ${CONSOLES}/n64/runtime/n64_runtime.c)
