@@ -293,7 +293,10 @@ static void emit(const uint8_t *px, uint32_t w, uint32_t h, uint64_t due, int ge
         pthread_mutex_unlock(&P.mu);
         return;
     }
-    P.sink.show(px, w, h, 4, due);
+    if (P.sink.show_ex)
+        P.sink.show_ex(px, w, h, 4, due, generated);
+    else
+        P.sink.show(px, w, h, 4, due);
     pthread_mutex_lock(&P.mu);
     if (generated)
         P.cnt.shown_generated++;
@@ -445,7 +448,7 @@ void framegen_pacer_set_generator(const FramegenGenerator *gen)
 
 int framegen_pacer_start_ex(const FramegenSink *sink, const FramegenPacerConfig *cfg)
 {
-    if (P.running || !sink || !sink->show || !cfg || !cfg->gen || !cfg->gen->open
+    if (P.running || !sink || (!sink->show && !sink->show_ex) || !cfg || !cfg->gen || !cfg->gen->open
         || !cfg->gen->generate || !cfg->gen->close)
         return -1;
     memset(&P, 0, sizeof P);
@@ -478,13 +481,18 @@ int framegen_pacer_start_ex(const FramegenSink *sink, const FramegenPacerConfig 
     return 0;
 }
 
+const FramegenGenerator *framegen_pacer_env_generator(void)
+{
+    return framegen_policy_env_on("RECOMP_LSFG_FAKE") ? &framegen_fake_generator : s_registered;
+}
+
 int framegen_pacer_start(const FramegenSink *sink)
 {
     FramegenPacerConfig cfg;
     if (!framegen_policy_enabled())
         return -1;
     memset(&cfg, 0, sizeof cfg);
-    cfg.gen = framegen_policy_env_on("RECOMP_LSFG_FAKE") ? &framegen_fake_generator : s_registered;
+    cfg.gen = framegen_pacer_env_generator();
     if (!cfg.gen) {
         fprintf(stderr, "[LSFG] off: no generator in this build\n");
         return -1;

@@ -5598,8 +5598,9 @@ public class LauncherActivity extends Activity {
     // ---- ROM_OPTIONS (XBA-181) ----------------------------------------------------------------------------------
 
     /**
-     * A GBA, PS1 or N64 game's Options: its own scale and filter, and for a PS1 or N64 game its internal resolution
-     * (XBA-184) (ConsoleVideo: « As in Settings », then each value;
+     * A GBA, PS1 or N64 game's Options: its own scale and filter, for a PS1 or N64 game its internal resolution
+     * (XBA-184), and frame generation on or off in an APK built with it (XBA-186) (ConsoleVideo: « As in Settings »,
+     * then each value;
      * ShellActivity hands them to the runtime at the game's next start), then its stored things (the saves, the pack,
      * the Prepare's files: Storage, each deleted on its own, A twice, as in Manage).
      */
@@ -5618,11 +5619,15 @@ public class LauncherActivity extends Activity {
         for (ConsoleVideo.Setting s : ConsoleVideo.Setting.values()) {
             if (!ConsoleVideo.applies(s, Console.ofKey(key)))
                 continue;
+            if (s == ConsoleVideo.Setting.FRAMEGEN && !lsfgBuilt())
+                continue;   // XBA-186: only an APK built with frame generation offers it
             int title = s == ConsoleVideo.Setting.SCALE ? R.string.OPT_CSCALE
-                        : s == ConsoleVideo.Setting.FILTER ? R.string.OPT_CFILTER : R.string.OPT_UPSCALE;
+                        : s == ConsoleVideo.Setting.FILTER ? R.string.OPT_CFILTER
+                        : s == ConsoleVideo.Setting.FRAMEGEN ? R.string.OPT_LSFG : R.string.OPT_UPSCALE;
             int detail = s == ConsoleVideo.Setting.SCALE ? R.string.ROM_OPT_SCALE_DETAIL
                          : s == ConsoleVideo.Setting.FILTER ? R.string.ROM_OPT_FILTER_DETAIL
-                                                            : R.string.ROM_OPT_UPSCALE_DETAIL;
+                         : s == ConsoleVideo.Setting.FRAMEGEN ? R.string.ROM_OPT_FRAMEGEN_DETAIL
+                                                              : R.string.ROM_OPT_UPSCALE_DETAIL;
             RecompConfig.Option global = optionTitled(title);
             String follow = getString(R.string.ROM_OPT_FOLLOW, choiceLabel(cfg, global));
             String[] labels = new String[s.values.length + 1];

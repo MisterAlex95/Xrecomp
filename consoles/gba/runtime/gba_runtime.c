@@ -433,14 +433,10 @@ static uint64_t now_ns(void)
 }
 
 /* Relative sleeps to an absolute deadline (macOS has no clock_nanosleep); the deadline itself never drifts. */
+/* Through the window: with frame generation (XBA-186) it draws the generated and real frames due meanwhile. */
 static void sleep_until(uint64_t t)
 {
-    uint64_t now;
-    while ((now = now_ns()) < t) {
-        uint64_t d = t - now;
-        struct timespec ts = {(time_t)(d / 1000000000ull), (long)(d % 1000000000ull)};
-        nanosleep(&ts, NULL);
-    }
+    host_window_sleep_until(t);
 }
 
 /* Desktop keys: arrows, X / Z = A / B, A / S = L / R, Enter = Start, Backspace or right Shift = Select. */

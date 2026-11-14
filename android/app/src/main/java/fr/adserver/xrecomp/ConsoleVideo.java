@@ -9,12 +9,15 @@ import java.util.Locale;
 /**
  * The picture of a GBA, PS1 or N64 game (XBA-181): its scale on the screen (RECOMP_SCALE: aspect, integer, stretch)
  * and its filter (RECOMP_FILTER: nearest, linear), read by every console runtime (RECOMP_GBA_SCALE and the other
- * per-console variables still win there); and, for a PS1 or N64 game, its internal resolution (XBA-184,
- * RECOMP_UPSCALE: 1, 2, 4 or 8 times the console's; 8 is the N64 Vulkan renderer's alone, the PS1 stops at 4). Which
- * one applies, first found wins:
+ * per-console variables still win there); for a PS1 or N64 game, its internal resolution (XBA-184,
+ * RECOMP_UPSCALE: 1, 2, 4 or 8 times the console's; 8 is the N64 Vulkan renderer's alone, the PS1 stops at 4); and
+ * frame generation on or off (XBA-186, RECOMP_LSFG: offered only by an APK built with it, R.bool.xba_lsfg; its
+ * multiplier, performance set and shader cache stay Settings', {@link #LSFG_ENV}). Which one applies, first found
+ * wins:
  * <ol>
  *   <li>the game's own choice (its Home › Options, or the in-game menu), a file per library key: scale_&lt;KEY&gt;,
- *       filter_&lt;KEY&gt;, upscale_&lt;KEY&gt;, as {@link ConsoleControls} keeps pad_map_&lt;KEY&gt;;</li>
+ *       filter_&lt;KEY&gt;, upscale_&lt;KEY&gt;, framegen_&lt;KEY&gt; (Home › Options only), as {@link ConsoleControls}
+ *       keeps pad_map_&lt;KEY&gt;;</li>
  *   <li>Settings › Graphics, a line in recomp.cfg;</li>
  *   <li>the runtime's default (scale: aspect; filter: the console's own, GBA nearest, PS1 and N64 linear).</li>
  * </ol>
@@ -29,6 +32,11 @@ final class ConsoleVideo {
     static final String SCALE_ASPECT = "aspect", SCALE_INTEGER = "integer", SCALE_STRETCH = "stretch";
     static final String FILTER_NEAREST = "nearest", FILTER_LINEAR = "linear";
     static final String UPSCALE_NATIVE = "1", UPSCALE_2X = "2", UPSCALE_4X = "4", UPSCALE_8X = "8";
+    /** XBA-186: frame generation for a console game (src/video/host_window.c, docs/technical/framegen.md). */
+    static final String ENV_LSFG = "RECOMP_LSFG";
+    static final String LSFG_ON = "1", LSFG_OFF = "0";
+    /** Frame generation's other settings, Settings' (recomp.cfg's lines) for every game, exported for a console game. */
+    static final String[] LSFG_ENV = { "RECOMP_LSFG_MULT", "RECOMP_LSFG_PERF", RecompConfig.LSFG_DIR_KEY };
 
     /** Settings shared with the Xbox that the console runtimes read too (recomp.cfg's line, exported as it is). */
     static final String[] SHARED_ENV = { "RECOMP_PRESENT_VSYNC", "RECOMP_AUDIO_BUF_SAMPLES", "RECOMP_RUMBLE" };
@@ -41,7 +49,10 @@ final class ConsoleVideo {
         /** XBA-184: PS1 and N64 games only ({@link #applies}). */
         UPSCALE(ENV_UPSCALE, "upscale_", new String[] { UPSCALE_NATIVE, UPSCALE_2X, UPSCALE_4X, UPSCALE_8X },
                 new int[] { R.string.VAL_UPSCALE_NATIVE, R.string.VAL_UPSCALE_2X, R.string.VAL_UPSCALE_4X,
-                            R.string.VAL_UPSCALE_8X });
+                            R.string.VAL_UPSCALE_8X }),
+        /** XBA-186: every console game, in an APK with frame generation (the caller checks R.bool.xba_lsfg). */
+        FRAMEGEN(ENV_LSFG, "framegen_", new String[] { LSFG_ON, LSFG_OFF },
+                 new int[] { R.string.VAL_ON, R.string.VAL_OFF });
 
         final String env;
         final String filePrefix;
@@ -125,6 +136,16 @@ final class ConsoleVideo {
      */
     static List<String[]> runEnv(Console con, String gameScale, String gameFilter, String gameUpscale,
                                  RecompConfig cfg) {
+        return runEnv(con, gameScale, gameFilter, gameUpscale, null, cfg);
+    }
+
+    /**
+     * The same with the game's frame generation choice (XBA-186, gameFramegen: "1", "0" or null): a console game gets
+     * RECOMP_LSFG (its choice, else Settings') and {@link #LSFG_ENV} from cfg; an Xbox game gets RECOMP_LSFG unset
+     * (the runtime reads recomp.cfg's line itself), so a console game's own choice does not stay in the process.
+     */
+    static List<String[]> runEnv(Console con, String gameScale, String gameFilter, String gameUpscale,
+                                 String gameFramegen, RecompConfig cfg) {
         List<String[]> out = new ArrayList<>();
         boolean console = con != null && con != Console.XBOX;
         out.add(new String[] { ENV_SCALE, console ? resolve(gameScale, cfg == null ? null : cfg.get(ENV_SCALE)) : null });
@@ -134,6 +155,12 @@ final class ConsoleVideo {
         out.add(new String[] { ENV_UPSCALE, console ? resolve(up, cfg == null ? null : cfg.get(ENV_UPSCALE)) : null });
         if (console) {
             for (String k : SHARED_ENV)
+                out.add(new String[] { k, resolve(null, cfg == null ? null : cfg.get(k)) });
+        }
+        out.add(new String[] { ENV_LSFG, console ? resolve(gameFramegen, cfg == null ? null : cfg.get(ENV_LSFG))
+                                                 : null });
+        if (console) {
+            for (String k : LSFG_ENV)
                 out.add(new String[] { k, resolve(null, cfg == null ? null : cfg.get(k)) });
         }
         return out;

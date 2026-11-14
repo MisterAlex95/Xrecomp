@@ -688,14 +688,10 @@ static uint64_t now_ns(void)
     return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
 }
 
+/* Through the window: with frame generation (XBA-186) it draws the generated and real frames due meanwhile. */
 static void sleep_until(uint64_t t)
 {
-    uint64_t now;
-    while ((now = now_ns()) < t) {
-        uint64_t d = t - now;
-        struct timespec ts = {(time_t)(d / 1000000000ull), (long)(d % 1000000000ull)};
-        nanosleep(&ts, NULL);
-    }
+    host_window_sleep_until(t);
 }
 
 static int env_choice(const char *name, const char *one, int def)

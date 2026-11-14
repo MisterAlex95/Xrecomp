@@ -96,6 +96,9 @@ const char *recomp_states_console(void);
 /* Saves / loads a slot (1..RECOMP_STATE_SLOTS) of the attached game, between its frames. RECOMP_STATE_*. */
 int recomp_states_save(int slot);
 int recomp_states_load(int slot);
+/* States loaded so far (successful recomp_states_load calls), from any thread: the console window resets its frame
+ * generation history when it changes (XBA-186), so no frame from before the load is blended with one after it. */
+unsigned recomp_states_loads(void);
 
 /* What a slot holds: RECOMP_STATE_OK with meta (and the thumbnail when thumb is not NULL), else _EEMPTY /
  * _ECORRUPT / _EVERSION / _ENOGAME. */

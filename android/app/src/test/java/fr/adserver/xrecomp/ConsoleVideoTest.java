@@ -102,7 +102,8 @@ public class ConsoleVideoTest {
         // Nothing anywhere: everything unset (the runtime's defaults), and an unset value clears a previous game's.
         List<String[]> env = ConsoleVideo.runEnv(Console.PS1, null, null, cfg);
         assertEquals(List.of("RECOMP_SCALE", "RECOMP_FILTER", "RECOMP_UPSCALE", "RECOMP_PRESENT_VSYNC",
-                             "RECOMP_AUDIO_BUF_SAMPLES", "RECOMP_RUMBLE"), keys(env));
+                             "RECOMP_AUDIO_BUF_SAMPLES", "RECOMP_RUMBLE", "RECOMP_LSFG", "RECOMP_LSFG_MULT",
+                             "RECOMP_LSFG_PERF", "RECOMP_LSFG_DIR"), keys(env));
         for (String[] kv : env)
             assertNull(kv[0], kv[1]);
         // Settings' lines.
@@ -122,9 +123,11 @@ public class ConsoleVideoTest {
         assertEquals("integer", value(env, "RECOMP_SCALE"));
         assertEquals("linear", value(env, "RECOMP_FILTER"));
         assertEquals("0", value(env, "RECOMP_PRESENT_VSYNC"));
-        // An Xbox game: scale, filter and internal resolution unset, the shared ones left to recomp.cfg.
+        // An Xbox game: scale, filter, internal resolution and frame generation unset, the shared ones left to
+        // recomp.cfg (which the Xbox runtime reads itself).
         env = ConsoleVideo.runEnv(Console.XBOX, "integer", "linear", "4", cfg);
-        assertEquals(List.of("RECOMP_SCALE", "RECOMP_FILTER", "RECOMP_UPSCALE"), keys(env));
+        assertEquals(List.of("RECOMP_SCALE", "RECOMP_FILTER", "RECOMP_UPSCALE", "RECOMP_LSFG"), keys(env));
+        assertNull(value(env, "RECOMP_LSFG"));
         assertNull(value(env, "RECOMP_SCALE"));
         assertNull(value(env, "RECOMP_FILTER"));
         assertNull(value(env, "RECOMP_UPSCALE"));
@@ -132,6 +135,42 @@ public class ConsoleVideoTest {
         env = ConsoleVideo.runEnv(Console.GBA, null, "nearest", null);
         assertNull(value(env, "RECOMP_SCALE"));
         assertEquals("nearest", value(env, "RECOMP_FILTER"));
+    }
+
+    /** XBA-186: frame generation for a console game: its own on / off (framegen_&lt;KEY&gt;) over Settings' RECOMP_LSFG;
+     *  the multiplier, performance set and shader cache always Settings'; an Xbox game gets RECOMP_LSFG unset. */
+    @Test
+    public void framegen() throws Exception {
+        File dir = tmp.newFolder("ext-fg");
+        RecompConfig cfg = RecompConfig.load(dir);
+        assertNull(value(ConsoleVideo.runEnv(Console.PS1, null, null, null, null, cfg), "RECOMP_LSFG"));
+        cfg.set("RECOMP_LSFG", "1");
+        cfg.set("RECOMP_LSFG_MULT", "2");
+        cfg.set("RECOMP_LSFG_PERF", "1");
+        cfg.set("RECOMP_LSFG_DIR", "/data/x/files/lsfg/abc");
+        List<String[]> env = ConsoleVideo.runEnv(Console.N64, null, null, null, null, cfg);
+        assertEquals("1", value(env, "RECOMP_LSFG"));
+        assertEquals("2", value(env, "RECOMP_LSFG_MULT"));
+        assertEquals("1", value(env, "RECOMP_LSFG_PERF"));
+        assertEquals("/data/x/files/lsfg/abc", value(env, "RECOMP_LSFG_DIR"));
+        // The game's own choice wins; the rest stays Settings'.
+        env = ConsoleVideo.runEnv(Console.GBA, null, null, null, "0", cfg);
+        assertEquals("0", value(env, "RECOMP_LSFG"));
+        assertEquals("2", value(env, "RECOMP_LSFG_MULT"));
+        assertNull(value(ConsoleVideo.runEnv(Console.XBOX, null, null, null, "1", cfg), "RECOMP_LSFG"));
+        // Stored per game key, cycled « as in Settings » -> On -> Off -> « as in Settings ».
+        Context app = RuntimeEnvironment.getApplication();
+        String key = "PS1-SCUS94163";
+        assertNull(ConsoleVideo.gameChoice(app, key, ConsoleVideo.Setting.FRAMEGEN));
+        String v = ConsoleVideo.next(ConsoleVideo.Setting.FRAMEGEN, null, 1);
+        assertEquals("1", v);
+        assertTrue(ConsoleVideo.setGameChoice(app, key, ConsoleVideo.Setting.FRAMEGEN, v));
+        assertEquals("1", ConsoleVideo.gameChoice(app, key, ConsoleVideo.Setting.FRAMEGEN));
+        assertEquals("0", ConsoleVideo.next(ConsoleVideo.Setting.FRAMEGEN, "1", 1));
+        assertNull(ConsoleVideo.next(ConsoleVideo.Setting.FRAMEGEN, "0", 1));
+        assertEquals(R.string.VAL_OFF, ConsoleVideo.label(ConsoleVideo.Setting.FRAMEGEN, "0"));
+        assertTrue(ConsoleVideo.applies(ConsoleVideo.Setting.FRAMEGEN, Console.GBA));
+        assertFalse(ConsoleVideo.applies(ConsoleVideo.Setting.FRAMEGEN, Console.XBOX));
     }
 
     /** XBA-184: the internal resolution, RECOMP_UPSCALE: a PS1 or N64 game's own (upscale_&lt;KEY&gt;), else Settings',

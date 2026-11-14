@@ -5,7 +5,8 @@
 > and generated frames at even intervals.
 >
 > **Read this when:** you work on `src/framegen/`, the presenter's frame
-> generation path (`src/video/fb_present_sdl.c`), the launcher's Frame
+> generation path (`src/video/fb_present_sdl.c`), the console window's
+> (`src/video/host_window.c`, `framegen_console.c`), the launcher's Frame
 > generation settings, or a log says `[LSFG] off: ...`.
 >
 > Part of the [Documentation Index](../INDEX.md)
@@ -41,6 +42,7 @@ end) is a later phase.
 | Vulkan bridge over framegen | `src/framegen/lsfg_bridge.cpp` | C++20 behind `extern "C"` |
 | Bridge as the pacer's generator | `src/framegen/lsfg_generator.c` | C |
 | Pacer, fake generator, cap rule | `framegen_pacer.c`, `framegen_fake.c`, `framegen_policy.h` | C |
+| Console window: distinct frames, timed FIFO (XBA-186) | `framegen_console.c`, `src/video/host_window.c` | C |
 | Listing a DLL's resources (metadata only) | `tools/lsfg/inspect_dll.py` | Python |
 | Filling the cache on a desktop | `tools/lsfg/lsfg_translate` | C |
 | "Choose Lossless.dll" JNI | `android/app/src/main/cpp/lsfg_jni.c` (`libxba_import.so`), `LsfgNative.java` | C |
@@ -414,6 +416,75 @@ Generation here includes upload and read-back on a loaded machine (the
 bridge benchmark alone: 4.4 ms). Before the display-rate rule above, a 120 Hz
 Mac display gave a cap of 60: shown 44-48 fps, half the pairs skipped.
 
+## Console window
+
+XBA-186. The GBA, PS1 and N64 runtimes present through the host layer's window (`src/video/host_window.c`), not
+the Xbox presenter. In a build with `XBOXRECOMP_LSFG` (the root CMakeLists defines it on `xbr_host` and links
+`xbox_framegen`; without it the path is compiled out), under `RECOMP_LSFG=1`, the window feeds the same pacer and
+generator. The front end is `src/framegen/framegen_console.c` (C, no SDL or GL, part of `host_framegen`), the GL
+side stays in `host_window.c`.
+
+- **Start**: `host_window_open` calls `lsfg_bridge_register()` when the bridge is built, then `fgc_start_env`:
+  the generator as `framegen_pacer_start` picks it (fake under `RECOMP_LSFG_FAKE=1`), `RECOMP_LSFG_MULT`,
+  `RECOMP_LSFG_BUDGET_MS`, and a cap of display rate / multiplier with the Xbox presenter's display rule (the SDL
+  display's rate when below 60 Hz, else 60; `RECOMP_LSFG_DISPLAY_HZ` wins): 30 at 60 Hz, 2x. The console's own
+  rate is never lowered: the cap only bounds the pacer's period. Log: `[LSFG] console window: <generator>, 2x, cap
+  30 fps (display 60 Hz, pacing for 60 Hz), frames up to 1280 wide`. No generator, or the pacer cannot start:
+  `[LSFG] off: ...` and the window presents as before. `host_window_close` stops the pacer (and closes the bridge)
+  before the GL context goes.
+- **Distinct frames**: a console presents at its field rate whatever the game draws; a 30 fps game presents each
+  picture twice (N64 VI at 60 Hz, PS1 games at 30), a 20 fps one three times. `host_window_present_rgba` hands
+  every picture to `fgc_frame`, which hashes it (64-bit, four lanes, every byte of each row): a picture equal to the
+  previous one is a repeat and draws nothing (the FIFO has the frame for that slot); a different one goes to the
+  pacer with its present time. So the pacer's period is the game's (33.3 ms at 30 fps) and its generated frames
+  fill the repeats: G(N-1, N) due at T + c, N at T + c + P/2, one picture per field, 60 distinct pictures a second
+  on a 60 Hz display at 2x (20 fps: 40 at 2x, 60 at `RECOMP_LSFG_MULT=3`). The hash is exact (no runtime hint is
+  trusted: a game that draws into the scanned-out buffer would freeze); its cost is one read of the picture: about
+  0.1 ms at 320 x 240, a few ms for a 2560 x 1920 picture on a phone.
+- **Pass-through**: a game that already draws a new picture every field gains nothing. When the mean of its last 8
+  distinct intervals (stalls beyond 2 x the cap period left out) is below 3/4 of the cap period (above 40 fps at a
+  30 fps cap), pictures are drawn as they come (`[LSFG] console: the game draws 60.0 distinct fps, above 30.0: shown
+  as it comes`) until it slows down again; frame generation then resumes from a fresh history.
+- **Timed FIFO**: the pacer's sink (`show_ex`, which also says real or generated) converts each frame to RGBA into
+  a ring of 4 entries. `present_rgba` draws the newest due entry after `fgc_frame`; `host_window_sleep_until`,
+  which the runtimes' frame pacing now sleeps through (`sleep_until` in `gba_runtime.c`, `ps1_runtime.c`,
+  `n64_runtime.c`), draws each entry at its due time while it waits (a condition variable wakes it when the pacer
+  delivers; within 1 ms counts as due), so frames due between two console frames are on time, and a skipped N64
+  frame (frame skip) does not lose its slot. Without frame generation it is the plain sleep it replaced.
+- **Fast-forward** (`recomp_ff_active`): pictures are drawn directly, nothing reaches the pacer; the first frame
+  after it starts a fresh history (it only primes the generator). **State load**: `recomp_states_loads()` changed
+  since the last frame: fresh history, the frame is distinct even if it equals the previous one. **Pause, resume,
+  the in-game menu**: a lifecycle listener calls `fgc_reset` (pacer reset, FIFO cleared at once).
+- **Internal resolution** (XBA-184 / 185): a picture wider than `RECOMP_LSFG_MAX_WIDTH` (1280) is box-filtered by a
+  whole factor before the pacer (2560 x 1920 -> 1280 x 960, PS1 4x at 640 wide -> 2x): every frame shown while frame
+  generation runs, real or generated, is at that size, so sharpness does not alternate. LSFG's cost grows with the
+  pixel count (Measurements: 4.4 ms at 640 x 480, 8.0 ms at 1280 x 960 in the performance set on an M1 Max).
+- **Screenshots**: `host_window_screenshot_bmp` keeps the last real picture as presented (full size, never a
+  generated one); `host_window_capture` skips generated frames and captures the next real one drawn.
+- **Fallback**: once `framegen_pacer_active()` is 0 the window logs `[HOST] window: frame generation off
+  (<reason>); normal present` once and draws every picture directly.
+- **Logs**: `[LSFG] console: real / shown fps, generation ms; pictures (distinct, repeats, direct, downscaled),
+  generated, window drew (generated), late, FIFO full, skipped pairs, resets` every 5 s and at close.
+
+**Latency added**: a real frame is shown (M - 1) / M of the game's frame period after it was presented, plus the
+generation cost: 16.7 ms + c for a 30 fps game at 2x (one field), 25 ms + c for a 20 fps game at 2x, 33.3 ms + c at
+3x. Interpolation cannot do less: G(N-1, N) needs N. The window draws nothing late on its own (no extra queue): with
+vsync each swap waits for the display as before.
+
+**Not covered**: `host_window_present_texture` (a renderer's own GL texture: none of the three runtimes uses it
+today); no performance overlay line in the console window (the counters are in the log); 20 fps games at 2x show
+40, unevenly spaced on a 60 Hz display (25 ms against a 16.7 ms grid): `RECOMP_LSFG_MULT=3` for them; the
+multiplier is fixed for the run.
+
+Tests: `tests/framegen_console` (C, POSIX, the real pacer with the fake generator and a fake clock): 30 fps at
+60 Hz (distinct frames only to the pacer, a generated frame in every repeat, 119 frames drawn for 120 fields, one
+field apart, blends exact, latency P/2 + c, 60 shown a second), 20 fps at 2x and 3x (25 ms / one field apart), 60
+fps (pass-through after 4 intervals, back to generation at 30 with a fresh history), fast-forward (nothing to the
+pacer, then a primed frame and a G between post-FF pictures only), a state load on an identical picture and a
+pause (FIFO cleared at once, the next frame primes), the size cap (box filter, every shown frame at the capped
+size), a failing generator (fallback, then direct), not started, the hash, and a threaded run with the real clock
+and the window's wait loop. Clean under ThreadSanitizer, UBSan and ASan.
+
 ## Android
 
 - **Build**: `-PxbaLsfg=1 -PlsfgVkSrc=<lsfg-vk-android checkout> -PdxvkSrc=<dxvk
@@ -422,7 +493,8 @@ Mac display gave a cap of 60: shown 44-48 fps, half the pairs skipped.
   Without `lsfgVkSrc` gradle warns and the launcher hides the rows; without
   `dxvkSrc` the phone only extracts (a desktop-translated cache can be pushed
   into the directory).
-- **Launcher**: Settings › Graphics › **Frame generation**: Off (default) /
+- **Launcher**: Settings › Graphics › All consoles › **Frame generation** (XBA-186: every console reads it; it
+  was under Xbox only before): Off (default) /
   2× / 2× performance writes `RECOMP_LSFG`, `RECOMP_LSFG_MULT`,
   `RECOMP_LSFG_PERF` to `recomp.cfg`. **Choose Lossless.dll** below it opens
   `ACTION_OPEN_DOCUMENT`; the picked document's fd goes to
@@ -435,7 +507,11 @@ Mac display gave a cap of 60: shown 44-48 fps, half the pairs skipped.
   pack forces `RECOMP_LSFG` off (`pack.json` `env_force`, from its title
   profile), the row stays (the setting is global) but is dimmed, and its
   description (shown when it is focused) says « Frame generation unavailable
-  for this title » and why (`Pack.forcesOff`).
+  for this title » and why (`Pack.forcesOff`). A GBA, PS1 or N64 game's Options (Home) has its own **Frame
+  generation** row (« As in Settings (…) », On, Off; `framegen_<KEY>`), in an APK with the bridge only;
+  `ShellActivity` exports `RECOMP_LSFG` (the game's choice, else recomp.cfg's), `RECOMP_LSFG_MULT`,
+  `RECOMP_LSFG_PERF` and `RECOMP_LSFG_DIR` for a console game (`ConsoleVideo.runEnv`) and unsets `RECOMP_LSFG` for
+  an Xbox game, whose runtime reads recomp.cfg's line itself.
 - **Storage**: `files/lsfg` is excluded from backups (`allowBackup="false"`,
   plus `fullBackupContent` and `dataExtractionRules`, which also cover a
   device-to-device transfer) and never served by `LogProvider`.
@@ -497,4 +573,5 @@ with extra terms: read for nothing, copy nothing).
 | `tools/lsfg/test_inspect_dll.py` | inspect_dll on synthetic PE | pytest |
 | `tests/lsfg_bridge` | argument checks; moving square (generated square between the inputs), history-only and reset, pipeline cache reuse; `--bench [frames]` | `LSFG_VK_SRC` at build time; a Vulkan driver and `RECOMP_LSFG_DIR` (or `RECOMP_LSFG_DLL` + the translator built in) at run time, else exit 77 |
 | `tests/framegen_pacer` | pacing (below) | nothing |
+| `tests/framegen_console` | the console window's distinct frames, FIFO, bypass, reset, size cap ([Console window](#console-window)) | nothing |
 

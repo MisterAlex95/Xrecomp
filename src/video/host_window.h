@@ -60,6 +60,22 @@ void host_window_set_event_hook(host_window_event_fn fn, void *user);
  * window's own texture and presents it. Returns 1, or 0 on a GL error. */
 int host_window_present_rgba(const void *px, int w, int h, int pitch);
 
+/* Frame generation (XBA-186, docs/technical/framegen.md « Console window »): in a build with XBOXRECOMP_LSFG,
+ * under RECOMP_LSFG=1, host_window_open starts the pacer (the LSFG bridge when built in, the fake generator under
+ * RECOMP_LSFG_FAKE=1; "[LSFG] off: ..." and the usual present when it cannot). host_window_present_rgba then hands
+ * each picture to it, distinct pictures only (a 30 fps game presented at 60 Hz shows each one twice), and draws
+ * the real and generated frames of its timed FIFO at their due times, during the next presents and during
+ * host_window_sleep_until. Fast-forward (recomp_ff_active) draws directly; a state load (recomp_states_loads), the
+ * app pausing or resuming and the in-game menu start a fresh history; host_window_screenshot_bmp keeps the last
+ * real picture, host_window_capture never captures a generated one. Not used by host_window_present_texture. */
+
+/* Sleeps until CLOCK_MONOTONIC deadline_ns (xbox_HostNowNs), drawing the frame generation FIFO's entries at their
+ * due times meanwhile; a plain sleep without frame generation. The runtimes' frame pacing sleeps through it. */
+void host_window_sleep_until(uint64_t deadline_ns);
+
+/* 1 while frame generation runs for the window (started and not fallen back). */
+int host_window_framegen_active(void);
+
 /* Presents texture `tex` of this context (w x h, its aspect kept). top_down:
  * 1 when its row 0 is the top of the picture (uploaded pixels), 0 when it is
  * the bottom (a texture rendered by GL). Binds framebuffer 0, draws, swaps.

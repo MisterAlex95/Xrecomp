@@ -11,6 +11,18 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <time.h>
+
+#if defined(XBOXRECOMP_LSFG)
+/* Frame generation in the console window (XBA-186, docs/technical/framegen.md « Console window »): only in a build
+ * with XBOXRECOMP_LSFG (the root CMakeLists defines it on xbr_host), active under RECOMP_LSFG=1. */
+#include "framegen_console.h"
+#include "framegen_policy.h"
+#include "recomp_states.h"
+#if defined(XBOXRECOMP_LSFG_BRIDGE)
+#include "lsfg_generator.h"
+#endif
+#endif
 
 /* The few GL entry points the present needs, from SDL: no GL header or GL
  * library at build time, the same code on GLES 3.0 and desktop 3.2 core. */
@@ -96,6 +108,11 @@ static void *s_hook_user;
 static int s_scale = HOST_SCALE_ASPECT, s_filter = HOST_FILTER_LINEAR, s_tex_filter = -1;
 static int s_aspect_num, s_aspect_den; /* host_window_set_aspect; 0: the picture's own */
 static char s_capture[1024];
+static int s_drawing_generated; /* the picture being drawn is a generated frame: no capture of it */
+#if defined(XBOXRECOMP_LSFG)
+static void fg_open(void);  /* frame generation (XBA-186), below present_rgba */
+static void fg_close(void);
+#endif
 
 /* host_window_stats: written by the presenting thread, read from any. */
 static int s_open;
@@ -318,6 +335,9 @@ int host_window_open(const char *title, int width, int height, int vsync)
     __atomic_store_n(&s_open, 1, __ATOMIC_RELEASE);
     fprintf(stderr, "  [HOST] window: %dx%d, GL%s %d.%d, vsync %s\n", width, height, s_gles ? " ES" : " core",
             s_major, s_minor, s_vsync ? "on" : "off");
+#if defined(XBOXRECOMP_LSFG)
+    fg_open();
+#endif
     return 1;
 }
 
@@ -395,6 +415,8 @@ static void count_frame(void)
 /* host_window_screenshot_bmp: keeps the picture just shown. */
 static void keep_last(const uint8_t *px, int w, int h, int pitch)
 {
+    if (w <= 0 || h <= 0)
+        return;
     size_t need = (size_t)w * h * 4;
 
     pthread_mutex_lock(&s_last_mu);
@@ -467,7 +489,7 @@ static int draw(unsigned tex, int w, int h, int top_down)
     s_gl.DrawArrays(XGL_TRIANGLES, 0, 3);
     s_gl.BindVertexArray(0);
     unsigned err = s_gl.GetError();
-    if (s_capture[0])
+    if (s_capture[0] && !s_drawing_generated)
         capture(dw, dh);
     SDL_GL_SwapWindow(s_win);
     s_frames++;
@@ -484,10 +506,9 @@ int host_window_present_texture(unsigned tex, int w, int h, int top_down)
     return draw(tex, w, h, top_down);
 }
 
-int host_window_present_rgba(const void *px, int w, int h, int pitch)
+/* Uploads RGBA pixels into the window's texture and draws it. */
+static int upload_draw(const void *px, int w, int h, int pitch)
 {
-    if (!s_win || !px || w <= 0 || h <= 0 || pitch < w * 4)
-        return 0;
     if (!s_tex) {
         s_gl.GenTextures(1, &s_tex);
         s_tex_w = s_tex_h = 0;
@@ -512,9 +533,174 @@ int host_window_present_rgba(const void *px, int w, int h, int pitch)
         s_gl.TexSubImage2D(XGL_TEXTURE_2D, 0, 0, 0, w, h, XGL_RGBA, XGL_UNSIGNED_BYTE, px);
     }
     s_gl.PixelStorei(XGL_UNPACK_ROW_LENGTH, 0);
-    int ok = draw(s_tex, w, h, 1);
-    keep_last(px, w, h, pitch);
-    return ok;
+    return draw(s_tex, w, h, 1);
+}
+
+#if defined(XBOXRECOMP_LSFG)
+/* ── Frame generation (XBA-186) ─────────────────────────────────────────
+ * present_rgba hands each picture to framegen_console (distinct frames to the pacer, repeats dropped) and draws
+ * what its timed FIFO has due; host_window_sleep_until keeps drawing FIFO entries at their due times while the
+ * runtime waits for its next frame. Fast-forward and a fallen-back pacer draw directly; a state load, the app
+ * pausing or resuming and the in-game menu reset the history. */
+static int s_fg;                 /* framegen_console running for this window */
+static int s_fg_off_logged;      /* the pacer fell back: logged once */
+static unsigned s_fg_loads;      /* recomp_states_loads() at the last frame */
+static uint64_t s_fg_log_at;     /* the next statistics line */
+static uint64_t s_fg_drawn, s_fg_drawn_gen;
+
+static void fg_lifecycle(int paused, void *user)
+{
+    (void)paused;
+    (void)user;
+    fgc_reset();
+}
+
+static void fg_log(const char *when)
+{
+    uint32_t real = 0, shown = 0, gen_us = 0;
+    FgcCounters c;
+    FramegenPacerCounters p;
+
+    framegen_pacer_stats(&real, &shown, &gen_us);
+    fgc_counters(&c);
+    framegen_pacer_counters(&p);
+    fprintf(stderr,
+            "[LSFG] console%s: real %.2f / shown %.2f fps, generation %.2f ms; pictures %llu (distinct %llu, repeats "
+            "%llu, direct %llu, downscaled %llu), generated %llu, window drew %llu (%llu generated), late %llu, FIFO "
+            "full %llu, skipped pairs %llu, resets %llu%s\n",
+            when, real / 100.0, shown / 100.0, gen_us / 1000.0, (unsigned long long)c.frames,
+            (unsigned long long)c.distinct, (unsigned long long)c.repeats, (unsigned long long)c.direct,
+            (unsigned long long)c.downscaled, (unsigned long long)p.generated, (unsigned long long)s_fg_drawn,
+            (unsigned long long)s_fg_drawn_gen, (unsigned long long)c.late, (unsigned long long)c.fifo_full,
+            (unsigned long long)p.skipped, (unsigned long long)c.resets, c.passthrough ? ", pass-through" : "");
+}
+
+static void fg_open(void)
+{
+    static int listening;
+    SDL_DisplayMode mode;
+    int hz = 0, idx;
+
+    s_fg = 0;
+    if (!framegen_policy_enabled())
+        return;
+#if defined(XBOXRECOMP_LSFG_BRIDGE)
+    lsfg_bridge_register();
+#endif
+    idx = SDL_GetWindowDisplayIndex(s_win);
+    if (idx >= 0 && SDL_GetCurrentDisplayMode(idx, &mode) == 0)
+        hz = mode.refresh_rate;
+    if (fgc_start_env(hz) < 0)
+        return;
+    s_fg = 1;
+    s_fg_off_logged = 0;
+    s_fg_loads = recomp_states_loads();
+    s_fg_log_at = xbox_HostNowNs() + 5000000000ull;
+    s_fg_drawn = s_fg_drawn_gen = 0;
+    if (!listening)
+        listening = recomp_lifecycle_listen(fg_lifecycle, NULL) == 0;
+}
+
+static void fg_close(void)
+{
+    if (!s_fg)
+        return;
+    fg_log(" at close");
+    fgc_stop();
+    s_fg = 0;
+}
+
+/* Draws the newest FIFO entry due at now, if any. */
+static void fg_service(uint64_t now)
+{
+    FgcShown e;
+
+    if (now >= s_fg_log_at) {
+        s_fg_log_at = now + 5000000000ull;
+        fg_log("");
+    }
+    if (!fgc_take(now, &e))
+        return;
+    s_drawing_generated = e.generated;
+    upload_draw(e.px, e.w, e.h, e.w * 4);
+    s_drawing_generated = 0;
+    s_fg_drawn++;
+    s_fg_drawn_gen += (uint64_t)e.generated;
+}
+
+/* 1 when the picture was taken by frame generation (nothing to draw now), 0 to draw it as usual. */
+static int fg_present(const void *px, int w, int h, int pitch)
+{
+    unsigned flags = 0, loads;
+    uint64_t now = xbox_HostNowNs();
+
+    if (!s_fg)
+        return 0;
+    if (recomp_ff_active())
+        flags |= FGC_BYPASS;
+    loads = recomp_states_loads();
+    if (loads != s_fg_loads) {
+        s_fg_loads = loads;
+        flags |= FGC_RESET;
+    }
+    int r = fgc_frame(px, w, h, pitch, now, flags);
+    if (!framegen_pacer_active() && !s_fg_off_logged) {
+        s_fg_off_logged = 1;
+        fprintf(stderr, "  [HOST] window: frame generation off (%s); normal present\n", framegen_pacer_off_reason());
+    }
+    if (r == FGC_DIRECT)
+        return 0;
+    fg_service(now);
+    return 1;
+}
+#endif /* XBOXRECOMP_LSFG */
+
+int host_window_present_rgba(const void *px, int w, int h, int pitch)
+{
+    if (!s_win || !px || w <= 0 || h <= 0 || pitch < w * 4)
+        return 0;
+    keep_last(px, w, h, pitch);   /* the real picture, for host_window_screenshot_bmp */
+#if defined(XBOXRECOMP_LSFG)
+    if (fg_present(px, w, h, pitch))
+        return 1;
+#endif
+    return upload_draw(px, w, h, pitch);
+}
+
+void host_window_sleep_until(uint64_t deadline_ns)
+{
+    uint64_t now;
+
+#if defined(XBOXRECOMP_LSFG)
+    if (s_fg && s_win) {
+        for (;;) {
+            now = xbox_HostNowNs();
+            fg_service(now);
+            now = xbox_HostNowNs();
+            if (now >= deadline_ns)
+                return;
+            uint64_t due = fgc_next_due(), until = deadline_ns;
+            if (due && due < until)
+                until = due > now + 1000000ull ? due - 1000000ull : now; /* within a millisecond counts as due */
+            if (until > now)
+                fgc_wait(until);
+        }
+    }
+#endif
+    while ((now = xbox_HostNowNs()) < deadline_ns) {
+        uint64_t d = deadline_ns - now;
+        struct timespec ts = {(time_t)(d / 1000000000ull), (long)(d % 1000000000ull)};
+        nanosleep(&ts, NULL);
+    }
+}
+
+int host_window_framegen_active(void)
+{
+#if defined(XBOXRECOMP_LSFG)
+    return s_fg && framegen_pacer_active();
+#else
+    return 0;
+#endif
 }
 
 void host_window_set_scaling(int scale, int filter)
@@ -699,6 +885,9 @@ void host_window_close(void)
 {
     if (!s_win)
         return;
+#if defined(XBOXRECOMP_LSFG)
+    fg_close(); /* the pacer's thread stops (and the bridge closes) before the GL context goes */
+#endif
     __atomic_store_n(&s_open, 0, __ATOMIC_RELEASE);
     pthread_mutex_lock(&s_last_mu);
     free(s_last);

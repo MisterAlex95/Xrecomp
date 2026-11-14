@@ -658,8 +658,8 @@ exist in the runtime and mean something to a player are offered. Graphics and Au
 | Graphics › Aspect ratio | Auto (default), 4:3 (original), 16:9 | `RECOMP_ASPECT=4:3` / `16:9`. Auto: 16:9 for the frames a title draws wide (a title patch declares them; Fable on Android) with menus and videos kept in their shape, 4:3 otherwise; 16:9 stretches every frame of a title that draws no wide frames; see [GPU back end](../technical/gpu-backend.md#aspect-modes) |
 | Graphics › Widescreen | Off (default), On | `RECOMP_WIDESCREEN=1`: the console's widescreen setting (EEPROM `XC_VIDEO` and the AV capabilities, XBA-121); a title that supports it draws 16:9 frames, shown full width with Aspect ratio 16:9 |
 | Graphics › 480p | Off (default), On | `RECOMP_480P=1`: the console's 480p setting (same places); a title that offers progressive output picks it |
-| Graphics › Frame generation (only in a [frame generation](#frame-generation) APK) | Off (default), 2×, 2× performance | `RECOMP_LSFG=1`, `RECOMP_LSFG_MULT=2`, plus `RECOMP_LSFG_PERF=1` for 2× performance |
-| Graphics › Choose Lossless.dll (same) | a document picker; the row shows the shaders' state | `RECOMP_LSFG_DIR=<files>/lsfg/<key>` once the shaders are there (not removed by « Reset all ») |
+| Graphics › Frame generation (all consoles; only in a [frame generation](#frame-generation) APK) | Off (default), 2×, 2× performance | `RECOMP_LSFG=1`, `RECOMP_LSFG_MULT=2`, plus `RECOMP_LSFG_PERF=1` for 2× performance. XBA-186: the GBA, PS1 and N64 read it too; a console game can have its own on / off |
+| Graphics › Choose Lossless.dll (all consoles; same) | a document picker; the row shows the shaders' state | `RECOMP_LSFG_DIR=<files>/lsfg/<key>` once the shaders are there (not removed by « Reset all ») |
 | Graphics › Texture filtering | Sharp (default), Smooth, Anisotropic 8×, Anisotropic 16× | `RECOMP_TEX_BILINEAR=1`, `RECOMP_TEX_ANISO=8` / `16` |
 | Graphics › Vulkan driver (under « All consoles »; N64 Vulkan renderer only, for now) | the default driver: **System** (default) or its name and version; a game can have its own in its Options; A opens the [Drivers screen](#vulkan-drivers). In a game's own app: XRecomp's driver, nothing to choose | not in `recomp.cfg`: `files/settings/vk_driver` (a game's own: `vk_driver_<KEY>`), turned into `RECOMP_VK_DRIVER_*` by `ShellActivity` for an N64 game |
 | Audio › 3D audio (HRTF) (Xbox only) | On (default), Off | `RECOMP_APU_HRTF=0` when off |
@@ -712,7 +712,8 @@ XBA-181. Which settings reach which console's game (the native side reads them i
 | Graphics › Scale (`RECOMP_SCALE`) | no | yes | console game: its Home › Options, or the in-game menu (`scale_<KEY>`) |
 | Graphics › Picture filter (`RECOMP_FILTER`) | no | yes | console game: the same (`filter_<KEY>`) |
 | Graphics › Internal resolution (`RECOMP_UPSCALE`) | no | PS1, N64 (the GBA ignores it) | PS1 / N64 game: the same (`upscale_<KEY>`) |
-| Graphics › Renderer, Frame cap, Resolution, Aspect ratio, Widescreen, 480p, Frame generation, Texture filtering | yes | no | Widescreen, 480p: Xbox game, in-game menu |
+| Graphics › Frame generation (`RECOMP_LSFG*`), Choose Lossless.dll | yes | yes (XBA-186: generated frames in place of the repeats) | console game: its Home › Options (`framegen_<KEY>`, on / off) |
+| Graphics › Renderer, Frame cap, Resolution, Aspect ratio, Widescreen, 480p, Texture filtering | yes | no | Widescreen, 480p: Xbox game, in-game menu |
 | Audio › Audio buffer (`RECOMP_AUDIO_BUF_SAMPLES`) | yes | yes | no |
 | Audio › 3D audio (HRTF) | yes | no | no |
 | Advanced › Drawing threads, Self-test | yes | no | no |
@@ -735,6 +736,13 @@ row after Picture filter in the game's Options (« As in Settings (<Settings' va
 Vulkan)) and « Resolution (next start) » in the in-game menu › Settings; a GBA game has neither (its 240 x 160 picture
 is drawn as it is). `ShellActivity` exports `RECOMP_UPSCALE` with the scale and filter: the game's value (PS1 / N64),
 else recomp.cfg's line, else unset; unset for an Xbox game. The PS1 caps 8 at 4 (`ps1_runtime_upscale`).
+
+**A console game's own frame generation** (XBA-186, `ConsoleVideo.Setting.FRAMEGEN`). In an APK with frame generation
+(`R.bool.xba_lsfg`) only: `files/settings/framegen_<KEY>` (`1`, `0`; empty or absent: follows Settings), a **Frame
+generation** row at the end of the picture rows in the game's Options (« As in Settings (<Settings' value>) », On,
+Off; not in the in-game menu). `ShellActivity` exports `RECOMP_LSFG` (the game's value, else recomp.cfg's line, else
+unset) and `RECOMP_LSFG_MULT`, `RECOMP_LSFG_PERF`, `RECOMP_LSFG_DIR` from recomp.cfg for a GBA, PS1 or N64 game, and
+unsets `RECOMP_LSFG` for an Xbox game (its runtime reads recomp.cfg's line). On sets no multiplier: Settings' or 2×.
 
 **An N64 game's own Vulkan driver.** The same Options screen, for an N64 game (only the N64 Vulkan renderer uses a
 driver, for now), has a **Vulkan driver** row after the picture: « As in Settings (<Settings' driver>) », **System**,
@@ -977,8 +985,11 @@ cd android && JAVA_HOME=… SDL2_SRC=… gradle -PxbaLsfg=1 \
 
 In the launcher, Settings › Graphics:
 
-- **Frame generation**: Off / 2× / 2× performance (above). The game then runs at 30 real fps (cap rule) and shows 60;
-  the overlay's `LSFG` line gives real / shown fps and generation time. Any failure (no Vulkan, no shaders, too slow
+- **Frame generation** (under « All consoles » since XBA-186): Off / 2× / 2× performance (above). An Xbox game then
+  runs at 30 real fps (cap rule) and shows 60; the overlay's `LSFG` line gives real / shown fps and generation time.
+  A GBA, PS1 or N64 game keeps its own rate: the pictures it shows twice or three times are replaced by generated
+  ones (a 30 fps game shows 60; one at 60 is left as it is; [Console window](../technical/framegen.md#console-window)),
+  and the log has `[LSFG] console: ...` every 5 s. Any failure (no Vulkan, no shaders, too slow
   30 frames in a row) logs `[LSFG] off: <reason>`, shows one toast, and the game goes on with normal frames.
 - **Choose Lossless.dll**: `ACTION_OPEN_DOCUMENT`; the picked file's fd goes to `LsfgNative.importDll(fd,
   <files>/lsfg, …)` on the import worker (the ring screen, « Preparing the frame generation shaders… »). The DLL is

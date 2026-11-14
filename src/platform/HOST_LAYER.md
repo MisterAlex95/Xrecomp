@@ -13,7 +13,7 @@ hosts only (Linux, macOS, Android).
 | `xbr_host_core` | `android_log.c`, `recomp_lifecycle.c`, `recomp_quit.c` (+ `host_time`, `host_cpus`, `recomp_cfg`, `recomp_exit_hook`) | `src/platform/host_core.cmake` |
 | `recomp_storage` | `recomp_storage.c` | `src/platform/host_core.cmake` |
 | `input_ports` | `src/input/input_ports.c` | `src/input/mapping/input_ports.cmake` |
-| `host_framegen` | `src/framegen/framegen_pacer.c`, `framegen_fake.c` | `src/framegen/host_framegen.cmake` |
+| `host_framegen` | `src/framegen/framegen_pacer.c`, `framegen_fake.c`, `framegen_console.c` (the console window's front end, XBA-186) | `src/framegen/host_framegen.cmake` |
 | `xbr_host` | `src/video/host_window.c`, `perf_overlay.c`, `display_vsync_android.c` (Android), `src/input/host_pad.c`, `src/audio/host_audio.c`; links all of the above + SDL2 | `src/host/CMakeLists.txt` |
 
 The Xbox libraries keep their names and link the host layer. `platform` links `xbr_host_core`, `xbox_input_map` links
@@ -71,5 +71,5 @@ The Xbox audio out is `src/apu/apu_sdl2.c` (APU-bound, X).
 ### src/framegen
 | File | Class | Note |
 |---|---|---|
-| `framegen_pacer.[ch]`, `framegen_fake.c`, `framegen_policy.h` | G | `host_framegen` |
+| `framegen_pacer.[ch]`, `framegen_fake.c`, `framegen_policy.h`, `framegen_console.[ch]` | G | `host_framegen` |
 | `lsfg_*` (bridge, generator, cache, dll, spv, dxbc) | G, optional | Vulkan LSFG; stays in `xbox_framegen` / `lsfg_shaders` (heavy, opt-in). A console can link them as they are |

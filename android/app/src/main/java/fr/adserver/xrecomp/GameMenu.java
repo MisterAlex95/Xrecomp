@@ -1476,6 +1476,8 @@ final class GameMenu {
         if (r != null)
             r.setValue(videoLabel(GameVideo.Setting.P480));
         for (ConsoleVideo.Setting cv : ConsoleVideo.Setting.values()) {
+            if (cv == ConsoleVideo.Setting.FRAMEGEN)
+                continue;   // Home › Options only (XBA-186): no in-game row
             r = rows.get(cv == ConsoleVideo.Setting.SCALE ? Item.SCALE
                          : cv == ConsoleVideo.Setting.FILTER ? Item.FILTER : Item.UPSCALE);
             if (r != null)
