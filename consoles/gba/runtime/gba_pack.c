@@ -395,6 +395,7 @@ int gba_pack_load(gba_machine *m, const char *pack_lib, const char *key, const c
 {
     char dir[1100], json[1200], lib[1300], why[512] = "";
     memset(out, 0, sizeof *out);
+    gba_attach_recomp(m, NULL); /* whatever was attached before goes, loaded or not */
     if (!pack_lib || !*pack_lib)
         return GBA_PACK_NONE;
     snprintf(dir, sizeof dir, "%s", pack_lib);

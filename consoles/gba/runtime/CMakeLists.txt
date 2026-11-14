@@ -69,6 +69,7 @@ endif()
 # gba_run: the headless runner (desktop hosts only).
 if(NOT ANDROID AND NOT TARGET gba_run)
     add_executable(gba_run tools/gba_run.c)
-    target_link_libraries(gba_run PRIVATE gba_core)
+    gba_core_exported(gba_run)    # --pack (gba_pack.c); first, so the whole archive comes before the plain one
+    target_link_libraries(gba_run PRIVATE gba_pack)
     target_compile_options(gba_run PRIVATE -Wall -Wextra)
 endif()

@@ -990,6 +990,10 @@ void gba_cpu_step(gba_machine *m)
 
 void gba_cpu_run(gba_machine *m)
 {
+    if (m->rc) {
+        gba_recomp_run(m);
+        return;
+    }
     while (m->now < m->next_event) {
         if (m->cpu.halted || m->cpu.stopped) {
             m->now = m->next_event;

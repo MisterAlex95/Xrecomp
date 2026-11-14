@@ -27,7 +27,10 @@ extern "C" {
 #define GBA_RECOMP_ABI 1
 
 /* Entered with the CPU state at the entry's address (ARM or Thumb as flagged); returns when control leaves the
- * recompiled code, with the CPU's PC (and mode) set to where execution continues. */
+ * recompiled code, with the CPU's PC (and mode) set to where execution continues. The core may also enter it at a
+ * later address of the same function (resuming after a scheduler event or an IRQ): see gba_recomp_rt.h, which
+ * holds the rest of the lifted code's ABI (machine layout, bus symbols, exit codes). Entries: the start of each
+ * contiguous run of a function's instructions. */
 typedef void (*gba_recomp_fn)(gba_machine *m);
 
 enum { GBA_RECOMP_THUMB = 1u << 0 };
@@ -55,6 +58,21 @@ int gba_attach_recomp(gba_machine *m, const gba_recomp_table *t);
 /* Discovery: the distinct ROM addresses (bit 0 set = Thumb) where the interpreter had to start running code that
  * the attached table does not cover, since creation. Copies at most max into out, returns the total count. */
 size_t gba_recomp_missed(gba_machine *m, uint32_t *out, size_t max);
+
+/* ---- Helpers for hosts and tests (not part of the pack ABI; loading a pack: gba_pack.h) ---- */
+
+typedef struct gba_recomp_stats {
+    uint64_t native;       /* instructions lifted code ran (only counted by packs built with -DGBA_RC_COUNT) */
+    uint64_t interp_rom;   /* cartridge instructions the interpreter ran while a table was attached */
+    uint64_t fallbacks;    /* of those, instructions lifted code handed to the interpreter (SWI, MSR, ...) */
+    uint64_t calls;        /* calls into lifted code */
+    uint64_t slow_lookups; /* dispatch cache misses */
+} gba_recomp_stats;
+void gba_recomp_get_stats(gba_machine *m, gba_recomp_stats *out);
+
+/* Differential testing: 0 when two machines are in the same state (CPU, banks, cycle count, scheduler, IRQ
+ * registers, every memory but the cartridge, the save chip); else 1 and the first difference in why. */
+int gba_recomp_compare(gba_machine *a, gba_machine *b, char *why, size_t why_n);
 
 #ifdef __cplusplus
 }

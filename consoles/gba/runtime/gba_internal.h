@@ -5,6 +5,9 @@
 
 #include "gba_core.h"
 #include "gba_ppu.h"
+#include "gba_recomp_rt.h"
+
+#include <stddef.h>
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -53,16 +56,6 @@ enum {
 /* DMA start timings. */
 enum { DMA_NOW = 0, DMA_VBLANK = 1, DMA_HBLANK = 2, DMA_SPECIAL = 3 };
 
-typedef struct gba_cpu {
-    uint32_t r[16];         /* current bank; between instructions r[15] = next instruction + 8 (ARM) / + 4 (Thumb) */
-    uint32_t n, z, c, v;    /* flags, 0 or 1 */
-    uint32_t cpsr_ctl;      /* CPSR bits 0-7 (mode, T, F, I); flags live in n z c v */
-    uint32_t bank_r13[BANK_COUNT], bank_r14[BANK_COUNT], spsr[BANK_COUNT];
-    uint32_t fiq_r8_12[5], usr_r8_12[5];
-    bool branched;          /* set by an instruction that wrote r15 */
-    bool halted;
-    bool stopped;
-} gba_cpu;
 
 typedef struct gba_timer {
     uint16_t reload;
@@ -160,11 +153,30 @@ typedef struct gba_dma {
     bool active_special;
 } gba_dma;
 
-struct gba_machine {
-    gba_cpu cpu;
+struct gba_rc_state; /* gba_recomp.c */
 
+struct gba_machine {
+    /* These first members are gba_rc_head (gba_recomp_rt.h), what lifted code sees: same order, checked below. */
+    gba_cpu cpu;
     uint64_t now;           /* cycles since creation */
     uint64_t next_event;    /* the CPU loop runs until now reaches it */
+    /* Wait states, rebuilt on WAITCNT writes: cycles of one access, [region 0..15][seq]; fetch16 / fetch32: a
+     * sequential opcode fetch, the cartridge prefetch included. */
+    uint8_t wait16[16][2];
+    uint8_t wait32[16][2];
+    uint8_t fetch16[16];
+    uint8_t fetch32[16];
+    bool prefetch;
+    bool irq_line;          /* IME && (IE & IF): the CPU takes an IRQ when CPSR.I is clear */
+    uint8_t rc_exit;        /* GBA_RC_EXIT_* */
+    uint8_t rc_reserved;
+    uint32_t open_bus;      /* last fetched opcode (open bus approximation) */
+    uint64_t rc_native;     /* instructions lifted code ran (packs built with -DGBA_RC_COUNT) */
+    uint8_t *rc_ewram;      /* = ewram, iwram below (lifted code's inline accesses) */
+    uint8_t *rc_iwram;
+
+    struct gba_rc_state *rc; /* the attached recompiled code (gba_recomp.c), NULL: interpreter only */
+
     uint64_t line_start;    /* cycle the current line began */
     int line_phase;         /* 0: HDraw, 1: after the render point, 2: HBlank */
     uint32_t vcount;
@@ -174,7 +186,6 @@ struct gba_machine {
 
     /* Interrupts. */
     uint16_t ie, if_, ime;
-    bool irq_line;          /* IME && (IE & IF): the CPU takes an IRQ when CPSR.I is clear */
 
     uint16_t keys;          /* KEYINPUT as read (0 = pressed) */
     uint16_t keycnt;
@@ -186,13 +197,7 @@ struct gba_machine {
     /* Affine reference points, 20.8 fixed point sign-extended from 28 bits. */
     int32_t bg2x, bg2y, bg3x, bg3y;
 
-    /* Wait states, rebuilt on WAITCNT writes: cycles of one access, [region 0..15][seq]. */
-    uint8_t wait16[16][2];
-    uint8_t wait32[16][2];
-    bool prefetch;
-
     uint32_t bios_latch;    /* last opcode read from the BIOS (what other code reads there) */
-    uint32_t open_bus;      /* last fetched opcode (open bus approximation) */
     bool builtin_bios;      /* no BIOS image given: our own vectors + HLE SWIs */
     uint32_t rom_size;
 
@@ -210,6 +215,25 @@ struct gba_machine {
 
     int16_t sine[256];      /* BIOS sine table (HLE BgAffineSet / ObjAffineSet), 1.14 fixed point */
 };
+
+/* gba_machine starts with gba_rc_head's members. */
+#define GBA_RC_SAME(f) \
+    _Static_assert(offsetof(gba_machine, f) == offsetof(gba_rc_head, f), "gba_rc_head layout: " #f)
+GBA_RC_SAME(cpu);
+GBA_RC_SAME(now);
+GBA_RC_SAME(next_event);
+GBA_RC_SAME(wait16);
+GBA_RC_SAME(wait32);
+GBA_RC_SAME(fetch16);
+GBA_RC_SAME(fetch32);
+GBA_RC_SAME(prefetch);
+GBA_RC_SAME(irq_line);
+GBA_RC_SAME(rc_exit);
+GBA_RC_SAME(open_bus);
+GBA_RC_SAME(rc_native);
+GBA_RC_SAME(rc_ewram);
+GBA_RC_SAME(rc_iwram);
+_Static_assert(BANK_COUNT == 6, "gba_cpu banks");
 
 /* Little-endian helpers. */
 static inline uint16_t rd16(const uint8_t *p) { return (uint16_t)(p[0] | p[1] << 8); }
@@ -287,6 +311,10 @@ void gba_set_mode(gba_machine *m, uint32_t mode);
 uint32_t gba_cpu_pc(const gba_machine *m);
 /* Jumps to addr in the given state (thumb = 1 for Thumb). */
 void gba_cpu_jump(gba_machine *m, uint32_t addr, bool thumb);
+
+/* gba_recomp.c: the run loop with a table attached (dispatch to lifted code, interpreter otherwise). */
+void gba_recomp_run(gba_machine *m);
+void gba_recomp_free(gba_machine *m);
 
 /* gba_bios.c */
 void gba_bios_install_builtin(gba_machine *m);

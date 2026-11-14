@@ -14,9 +14,19 @@
  * --keys MASK   keys held during the whole run (KEYINPUT bit order, 1 = pressed)
  * --reg-result R  after the frames, exit 0 if register rR is 0, 1 if not, 2 if the CPU is not in an idle
  *               loop (jsmolka/gba-tests leave the number of the first failed test in r12 and spin: --reg-result 12)
+ * --pack LIB    run with a recompiled title pack (gba_tools.recomp + cc -shared; gba_recomp.h): lifted code where
+ *               the table covers the PC, the interpreter elsewhere
+ * --missed FILE with --pack: write the cartridge addresses the interpreter had to run (merged with FILE's; the
+ *               discovery loop feeds them back to gba_tools.recomp --discovered)
+ * --stats       with --pack: print how many cartridge instructions ran natively vs interpreted
+ * --lockstep    with --pack: run a second, interpreter-only machine side by side and compare the whole state
+ *               (CPU, cycles, memories, frame) after every frame; exit 4 at the first difference
+ * --hash        print a hash of the last frame and of the RAM (FNV-1a 64) and the cycle count
  * Prints the frame rate reached on stderr. Exit 3 on a usage or file error. */
 #define _POSIX_C_SOURCE 199309L /* clock_gettime */
 #include "gba_core.h"
+#include "gba_pack.h"
+#include "gba_recomp.h"
 
 #include <stdbool.h>
 #include <stdio.h>
@@ -100,6 +110,14 @@ static double now_s(void)
     return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
 }
 
+static uint64_t fnv1a(uint64_t h, const void *p, size_t n)
+{
+    const uint8_t *b = p;
+    for (size_t i = 0; i < n; i++)
+        h = (h ^ b[i]) * 0x100000001B3ull;
+    return h;
+}
+
 static void fourcc(uint32_t v, char out[5])
 {
     for (int i = 0; i < 4; i++) {
@@ -112,6 +130,8 @@ static void fourcc(uint32_t v, char out[5])
 int main(int argc, char **argv)
 {
     const char *rom_path = NULL, *bios_path = NULL, *ppm = NULL, *wav = NULL, *save = NULL;
+    const char *pack = NULL, *missed = NULL;
+    int stats = 0, lockstep = 0, hash = 0;
     long frames = 600;
     int result = 0, bios_boot = 0, quiet = 0, reg_result = -1;
     unsigned keys = 0;
@@ -131,6 +151,16 @@ int main(int argc, char **argv)
             keys = (unsigned)strtoul(argv[++i], NULL, 0);
         else if (!strcmp(argv[i], "--reg-result") && i + 1 < argc)
             reg_result = (int)strtol(argv[++i], NULL, 0);
+        else if (!strcmp(argv[i], "--pack") && i + 1 < argc)
+            pack = argv[++i];
+        else if (!strcmp(argv[i], "--missed") && i + 1 < argc)
+            missed = argv[++i];
+        else if (!strcmp(argv[i], "--stats"))
+            stats = 1;
+        else if (!strcmp(argv[i], "--lockstep"))
+            lockstep = 1;
+        else if (!strcmp(argv[i], "--hash"))
+            hash = 1;
         else if (!strcmp(argv[i], "--result"))
             result = 1;
         else if (!strcmp(argv[i], "--bios-boot"))
@@ -141,7 +171,8 @@ int main(int argc, char **argv)
             rom_path = argv[i];
         else {
             fprintf(stderr, "usage: gba_run ROM [--frames N] [--bios PATH] [--bios-boot] [--result] [--ppm OUT] "
-                            "[--wav OUT] [--save PATH] [--keys MASK] [--reg-result R] [--quiet]\n");
+                            "[--wav OUT] [--save PATH] [--keys MASK] [--reg-result R] [--pack LIB] [--missed FILE] [--stats] "
+                            "[--lockstep] [--hash] [--quiet]\n");
             return 3;
         }
     }
@@ -161,15 +192,33 @@ int main(int argc, char **argv)
         return 3;
     }
     gba_machine *m = gba_create(rom, rom_size, bios, bios_size);
+    gba_machine *ref = lockstep && pack ? gba_create(rom, rom_size, bios, bios_size) : NULL;
+    char rom_sha[65];
+    uint8_t sum[32];
+    gba_pack_sha256(rom, rom_size, sum);
+    gba_pack_hex(sum, rom_sha);
     free(rom);
     free(bios);
-    if (!m) {
+    if (!m || (lockstep && pack && !ref)) {
         fprintf(stderr, "gba_run: bad ROM or BIOS size\n");
         return 3;
+    }
+    gba_pack pk = {0};
+    if (pack) {
+        char why[256];
+        if (gba_pack_open(pack, rom_sha, &pk, why, sizeof why) != 0 || gba_attach_recomp(m, pk.table) != 0) {
+            fprintf(stderr, "gba_run: pack %s: %s\n", pack, why);
+            return 3;
+        }
     }
     if (bios_boot)
         gba_boot_bios(m);
     gba_set_keys(m, (uint16_t)keys);
+    if (ref) {
+        if (bios_boot)
+            gba_boot_bios(ref);
+        gba_set_keys(ref, (uint16_t)keys);
+    }
     if (save) {
         size_t n = 0;
         uint8_t *img = load_file(save, &n);
@@ -193,8 +242,28 @@ int main(int argc, char **argv)
     uint32_t status = 0;
     long f;
     double t0 = now_s();
+    static uint16_t ref_fb[GBA_SCREEN_W * GBA_SCREEN_H];
+    int diverged = 0;
     for (f = 0; f < frames; f++) {
         gba_run_frame(m, fb);
+        if (ref) {
+            char why[160] = "";
+            static int16_t sink[2 * 4096];
+            gba_run_frame(ref, ref_fb);
+            while (gba_audio_pull(ref, sink, 4096) > 0) /* keeps both audio rings alike */
+                ;
+            int d = gba_recomp_compare(ref, m, why, sizeof why);
+            if (!d && memcmp(fb, ref_fb, sizeof fb) != 0) {
+                snprintf(why, sizeof why, "framebuffer");
+                d = 1;
+            }
+            if (d) {
+                printf("LOCKSTEP DIVERGED at frame %ld: %s (interpreter vs recompiled)\n", f + 1, why);
+                diverged = 1;
+                f++;
+                break;
+            }
+        }
         if (wf) {
             size_t n;
             while ((n = gba_audio_pull(m, pcm, 4096)) > 0) {
@@ -214,6 +283,8 @@ int main(int argc, char **argv)
         }
     }
     double dt = now_s() - t0;
+    if (ref && !diverged)
+        printf("LOCKSTEP OK: %ld frames identical (interpreter vs recompiled)\n", f);
     if (!quiet)
         fprintf(stderr, "gba_run: %ld frames in %.3f s = %.1f frames/s (%.1fx real time)\n", f, dt,
                 dt > 0 ? f / dt : 0.0, dt > 0 ? f / dt / 59.7275 : 0.0);
@@ -234,6 +305,38 @@ int main(int argc, char **argv)
         FILE *sf = img ? fopen(save, "wb") : NULL;
         if (!sf || fwrite(img, 1, n, sf) != n || fclose(sf) != 0)
             fprintf(stderr, "gba_run: cannot write %s\n", save);
+    }
+
+    if (hash) {
+        uint64_t h = fnv1a(0xCBF29CE484222325ull, fb, sizeof fb);
+        uint64_t r = 0xCBF29CE484222325ull;
+        for (uint32_t a = 0x02000000; a < 0x02040000; a += 4) {
+            uint32_t v = gba_peek32(m, a);
+            r = fnv1a(r, &v, 4);
+        }
+        for (uint32_t a = 0x03000000; a < 0x03008000; a += 4) {
+            uint32_t v = gba_peek32(m, a);
+            r = fnv1a(r, &v, 4);
+        }
+        printf("frame-hash %016llx ram-hash %016llx cycles %llu\n", (unsigned long long)h, (unsigned long long)r,
+               (unsigned long long)gba_cycles(m));
+    }
+    if (pack && stats) {
+        gba_recomp_stats st;
+        gba_recomp_get_stats(m, &st);
+        uint64_t tot = st.native + st.interp_rom;
+        printf("recomp: native %llu, interpreted cartridge %llu (fallbacks %llu): %.2f%% native; %llu calls, "
+               "%llu slow lookups, %zu missed\n",
+               (unsigned long long)st.native, (unsigned long long)st.interp_rom, (unsigned long long)st.fallbacks,
+               tot ? 100.0 * (double)st.native / (double)tot : 0.0, (unsigned long long)st.calls,
+               (unsigned long long)st.slow_lookups, gba_recomp_missed(m, NULL, 0));
+    }
+    if (pack && missed) {
+        size_t n = gba_recomp_missed(m, NULL, 0);
+        uint32_t *v = malloc((n ? n : 1) * sizeof *v);
+        if (!v || gba_pack_write_discovered(missed, v, gba_recomp_missed(m, v, n), NULL) != 0)
+            fprintf(stderr, "gba_run: cannot write %s\n", missed);
+        free(v);
     }
 
     int rc = 0;
@@ -263,5 +366,7 @@ int main(int argc, char **argv)
         rc = !idle ? 2 : v ? 1 : rc;
     }
     gba_destroy(m);
-    return rc;
+    gba_destroy(ref);
+    gba_pack_close(&pk);
+    return diverged ? 4 : rc;
 }

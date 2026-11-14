@@ -59,6 +59,18 @@ void gba_update_waitstates(gba_machine *m)
         m->wait32[r][1] = (uint8_t)s32;
     }
     m->prefetch = (w & 0x4000) != 0;
+    /* Sequential opcode fetches as gba_fetch16 / gba_fetch32 charge them (lifted code adds these). */
+    for (int r = 0; r < 16; r++) {
+        if (r == 3) {
+            m->fetch16[r] = m->fetch32[r] = 1;
+        } else if (r >= 8 && r <= 0xD) {
+            m->fetch16[r] = m->prefetch ? 1 : m->wait16[r][1];
+            m->fetch32[r] = m->prefetch ? 2 : m->wait32[r][1];
+        } else {
+            m->fetch16[r] = m->wait16[r][1];
+            m->fetch32[r] = m->wait32[r][1];
+        }
+    }
 }
 
 /* ---- reads ---------------------------------------------------------------------------------------------- */

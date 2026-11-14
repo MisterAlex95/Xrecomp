@@ -22,6 +22,8 @@ gba_machine *gba_create(const uint8_t *rom, size_t rom_size, const uint8_t *bios
         return NULL;
     }
     memcpy(m->rom, rom, rom_size);
+    m->rc_ewram = m->ewram;
+    m->rc_iwram = m->iwram;
     m->rom_size = (uint32_t)rom_size;
     gba_save_init(m); /* save kind from the ROM, erased chip (0xFF) */
 
@@ -53,6 +55,7 @@ void gba_destroy(gba_machine *m)
 {
     if (!m)
         return;
+    gba_recomp_free(m);
     free(m->rom);
     free(m);
 }

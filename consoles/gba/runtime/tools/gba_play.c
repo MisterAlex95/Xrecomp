@@ -3,6 +3,7 @@
  *
  *   gba_play ROM [--frames N] [--save-dir DIR] [--bios PATH] [--scale aspect|integer] [--filter nearest|linear]
  *                [--headless] [--unpaced] [--keys MASK] [--screenshot OUT.ppm] [--capture N OUT.ppm] [--key KEY]
+ *                [--pack LIB.so] [--missed FILE]
  *
  * --frames N        stop after N frames (default: until the window is closed)
  * --save-dir DIR    saves in DIR/gba-<KEY>/game.sav (default $XDG_DATA_HOME/xrecomp/save, else
@@ -15,6 +16,10 @@
  * --screenshot OUT  the last frame (240 x 160) as a PPM
  * --capture N OUT   the window's whole drawable at frame N, read back before the swap (the real present path)
  * --key KEY         the title key (default: computed from the ROM, as the app does)
+ * --pack LIB.so     a title pack library (Prepare, or tools/consoles/gba_recomp_build.py): lifted code, interpreter
+ *                   elsewhere; with a pack.json beside it, gba_pack_check first (gba_pack.h)
+ * --missed FILE     with --pack: at exit, add the cartridge addresses the interpreter had to run to FILE (the
+ *                   discovery loop: gba_tools.recomp --discovered FILE)
  * Keyboard: arrows, X = A, Z = B, A = L, S = R, Enter = Start, Backspace = Select; any game controller (Xbox layout).
  * Exit 0, 1 when the ROM cannot run, 2 on a usage error. */
 #include "gba_runtime.h"
@@ -30,7 +35,8 @@ static int usage(void)
 {
     fprintf(stderr, "usage: gba_play ROM [--frames N] [--save-dir DIR] [--bios PATH] [--scale aspect|integer]\n"
                     "                [--filter nearest|linear] [--headless] [--unpaced] [--keys MASK]\n"
-                    "                [--screenshot OUT.ppm] [--capture N OUT.ppm] [--key KEY]\n");
+                    "                [--screenshot OUT.ppm] [--capture N OUT.ppm] [--key KEY] [--pack LIB.so]\n"
+                    "                [--missed FILE]\n");
     return 2;
 }
 
@@ -70,6 +76,10 @@ int main(int argc, char **argv)
             o.capture_path = argv[++i];
         } else if (!strcmp(a, "--key") && more)
             o.title_key = argv[++i];
+        else if (!strcmp(a, "--pack") && more)
+            o.pack_lib = argv[++i];
+        else if (!strcmp(a, "--missed") && more)
+            o.discovered_path = argv[++i];
         else if (a[0] == '-' || o.rom)
             return usage();
         else
