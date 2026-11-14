@@ -60,5 +60,6 @@ against an accurate emulator, not only against the ARM ARM.
 | libtonc (linked) | devkitPro's `libtonc` | MIT |
 | libgba (in the image, not linked) | devkitPro's | LGPL with static-linking exception |
 
-No BIOS is used or needed: the runtime HLEs the SWIs these programs call (`Div` 0x06, `Sqrt` 0x08,
-`VBlankIntrWait` 0x05).
+No BIOS dump is used or needed: the core's built-in BIOS handles the SWIs these programs call (`Div` 0x06, `Sqrt`
+0x08, `VBlankIntrWait` 0x05), and they also pass through the open-source Cult-of-GBA BIOS (`gba_run --bios`,
+`consoles/gba/tests`: `gba_hb_*` and `gba_hb_lle_*`).

@@ -14,7 +14,8 @@ game for these consoles runs yet. Goal, order, rules (legal, Linux arm64 first),
 Each one has:
 
 - `runtime/`: C, CMake target `<name>_runtime`. It links only the host layer `xbr_host` (`src/host`,
-  `src/platform/HOST_LAYER.md`) and never the Xbox libraries. It is empty for now: one version function.
+  `src/platform/HOST_LAYER.md`) and never the Xbox libraries. PS1 and N64 are empty for now (one version function);
+  GBA has its core, see below.
 - `tools/`: the Python pipeline (parse → disasm → function discovery → lift → C), package `<name>_tools`. Its
   tests live in the package and run with the tools suite: `python3 -m pytest tools/ consoles/`.
 - `tests/`: a self-contained CMake test project. `tools/run_c_tests.sh` runs it as `console_<name>` (exit 77 =
@@ -34,6 +35,15 @@ content decides (Xbox volume magic `MICROSOFT*XBOX*MEDIA` first, then an ISO 966
 
 CMake options `XBR_CONSOLE_GBA`, `XBR_CONSOLE_PS1` and `XBR_CONSOLE_N64` are ON by default on Linux and macOS and OFF
 on Android and Windows. A console is turned on for Android once it is ready.
+
+**GBA core (XBA-152, XBA-153).** Interpreter first (decision of 2026-11-14, XBA-142); the static lifter comes later as an
+acceleration layer. `consoles/gba/runtime/gba_core.h`: an ARM7TDMI interpreter (ARM + Thumb), the memory map, LCD
+timing, timers, DMA, interrupts, keypad, and either a BIOS image (LLE: the open-source Cult-of-GBA BIOS built by
+`tools/consoles/build_gba_bios.sh`) or a small built-in BIOS of our own (IRQ vector and IntrWait in ARM code, the other
+SWIs in C). Direct boot by default. The PPU (`gba_ppu.h`) is a pure line renderer the core calls at the end of each
+visible line. CMake target `gba_core` is the machine alone (C11 + libm, no SDL), `gba_runtime` adds the host layer;
+`gba_run ROM [--result] [--bios PATH] [--ppm OUT]` runs a ROM headless. Tests: `consoles/gba/tests/CMakeLists.txt`
+(unit tests, our homebrew HLE and LLE, jsmolka/gba-tests fetched by `tools/consoles/fetch_gba_tests.sh`).
 
 **Legal**: no ROM, disc image, BIOS or game data in this repository, its CI or its artifacts. Tests use homebrew we
 build ourselves (devkitARM / libtonc, PSn00bSDK, libdragon) and dumps Alex made from his own media, kept outside every

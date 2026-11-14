@@ -1,0 +1,381 @@
+/* GBA memory map (XBA-153): BIOS, EWRAM, IWRAM, IO, palette, VRAM, OAM, cartridge ROM and SRAM, with their
+ * mirrors, bus widths and wait states (GBATEK « GBA Memory Map », « GBA System Control »).
+ *
+ * Accesses take an aligned address (the CPU aligns and rotates). Each one adds its cycles to m->now from the
+ * wait-state tables, which follow WAITCNT. Not modelled: the PPU's VRAM / palette / OAM contention, the exact
+ * cartridge prefetch buffer (approximated: with prefetch on, sequential ROM opcode fetches cost 1 cycle per
+ * halfword). */
+#include "gba_internal.h"
+
+static inline uint32_t vram_offset(uint32_t addr)
+{
+    uint32_t a = addr & 0x1FFFF;
+    return a >= 0x18000 ? a - 0x8000 : a;
+}
+
+static inline bool bios_readable(const gba_machine *m)
+{
+    return m->cpu.r[15] < GBA_BIOS_SIZE + 8;
+}
+
+void gba_update_waitstates(gba_machine *m)
+{
+    static const uint8_t nwait[4] = {4, 3, 2, 8};
+    uint16_t w = rd16(&m->io[0x204]);
+    int sram = nwait[w & 3];
+    int ws_n[3] = {nwait[(w >> 2) & 3], nwait[(w >> 5) & 3], nwait[(w >> 8) & 3]};
+    int ws_s[3] = {(w & 0x10) ? 1 : 2, (w & 0x80) ? 1 : 4, (w & 0x400) ? 1 : 8};
+
+    for (int r = 0; r < 16; r++) {
+        int n16 = 1, s16 = 1, n32 = 1, s32 = 1;
+        switch (r) {
+        case 0x2: /* EWRAM: 16-bit bus, 2 wait states */
+            n16 = s16 = 3;
+            n32 = s32 = 6;
+            break;
+        case 0x5:
+        case 0x6: /* palette, VRAM: 16-bit bus */
+            n32 = s32 = 2;
+            break;
+        case 0x8: case 0x9: case 0xA: case 0xB: case 0xC: case 0xD: {
+            int ws = (r - 8) >> 1;
+            n16 = 1 + ws_n[ws];
+            s16 = 1 + ws_s[ws];
+            n32 = n16 + s16;
+            s32 = 2 * s16;
+            break;
+        }
+        case 0xE:
+        case 0xF: /* SRAM: 8-bit bus */
+            n16 = s16 = n32 = s32 = 1 + sram;
+            break;
+        default:
+            break;
+        }
+        m->wait16[r][0] = (uint8_t)n16;
+        m->wait16[r][1] = (uint8_t)s16;
+        m->wait32[r][0] = (uint8_t)n32;
+        m->wait32[r][1] = (uint8_t)s32;
+    }
+    m->prefetch = (w & 0x4000) != 0;
+}
+
+/* ---- reads ---------------------------------------------------------------------------------------------- */
+
+static uint32_t rom_read32(const gba_machine *m, uint32_t addr)
+{
+    uint32_t a = addr & 0x1FFFFFC;
+    if (a < m->rom_size)
+        return rd32(&m->rom[a]);
+    /* Past the end: the cartridge bus returns the address halfwords it latched. */
+    return ((a >> 1) & 0xFFFF) | (((a >> 1) + 1) & 0xFFFF) << 16;
+}
+
+static uint16_t rom_read16(const gba_machine *m, uint32_t addr)
+{
+    uint32_t a = addr & 0x1FFFFFE;
+    if (a < m->rom_size)
+        return rd16(&m->rom[a]);
+    return (uint16_t)(a >> 1);
+}
+
+static uint32_t read32_raw(gba_machine *m, uint32_t addr)
+{
+    switch (addr >> 24) {
+    case 0x0:
+        if (addr < GBA_BIOS_SIZE)
+            return bios_readable(m) ? rd32(&m->bios[addr]) : m->bios_latch;
+        return m->open_bus;
+    case 0x2:
+        return rd32(&m->ewram[addr & (GBA_EWRAM_SIZE - 1)]);
+    case 0x3:
+        return rd32(&m->iwram[addr & (GBA_IWRAM_SIZE - 1)]);
+    case 0x4:
+        if ((addr & 0xFFFFFF) < GBA_IO_SIZE)
+            return gba_io_read16(m, addr) | (uint32_t)gba_io_read16(m, addr + 2) << 16;
+        if ((addr & 0xFFFC) == 0x800)
+            return 0x0D000020;
+        return m->open_bus;
+    case 0x5:
+        return rd32(&m->pal[addr & (GBA_PAL_SIZE - 1)]);
+    case 0x6:
+        return rd32(&m->vram[vram_offset(addr)]);
+    case 0x7:
+        return rd32(&m->oam[addr & (GBA_OAM_SIZE - 1)]);
+    case 0x8: case 0x9: case 0xA: case 0xB: case 0xC: case 0xD:
+        return rom_read32(m, addr);
+    case 0xE:
+    case 0xF:
+        return m->sram[addr & (GBA_SRAM_SIZE - 1)] * 0x01010101u;
+    default:
+        return m->open_bus;
+    }
+}
+
+static uint16_t read16_raw(gba_machine *m, uint32_t addr)
+{
+    switch (addr >> 24) {
+    case 0x0:
+        if (addr < GBA_BIOS_SIZE)
+            return bios_readable(m) ? rd16(&m->bios[addr]) : (uint16_t)(m->bios_latch >> ((addr & 2) * 8));
+        return (uint16_t)(m->open_bus >> ((addr & 2) * 8));
+    case 0x2:
+        return rd16(&m->ewram[addr & (GBA_EWRAM_SIZE - 1)]);
+    case 0x3:
+        return rd16(&m->iwram[addr & (GBA_IWRAM_SIZE - 1)]);
+    case 0x4:
+        if ((addr & 0xFFFFFF) < GBA_IO_SIZE)
+            return gba_io_read16(m, addr);
+        if ((addr & 0xFFFC) == 0x800)
+            return (addr & 2) ? 0x0D00 : 0x0020;
+        return (uint16_t)(m->open_bus >> ((addr & 2) * 8));
+    case 0x5:
+        return rd16(&m->pal[addr & (GBA_PAL_SIZE - 1)]);
+    case 0x6:
+        return rd16(&m->vram[vram_offset(addr)]);
+    case 0x7:
+        return rd16(&m->oam[addr & (GBA_OAM_SIZE - 1)]);
+    case 0x8: case 0x9: case 0xA: case 0xB: case 0xC: case 0xD:
+        return rom_read16(m, addr);
+    case 0xE:
+    case 0xF:
+        return (uint16_t)(m->sram[addr & (GBA_SRAM_SIZE - 1)] * 0x0101u);
+    default:
+        return (uint16_t)(m->open_bus >> ((addr & 2) * 8));
+    }
+}
+
+static uint8_t read8_raw(gba_machine *m, uint32_t addr)
+{
+    switch (addr >> 24) {
+    case 0x2:
+        return m->ewram[addr & (GBA_EWRAM_SIZE - 1)];
+    case 0x3:
+        return m->iwram[addr & (GBA_IWRAM_SIZE - 1)];
+    case 0xE:
+    case 0xF:
+        return m->sram[addr & (GBA_SRAM_SIZE - 1)];
+    default:
+        return (uint8_t)(read16_raw(m, addr & ~1u) >> ((addr & 1) * 8));
+    }
+}
+
+uint32_t gba_read32(gba_machine *m, uint32_t addr, bool seq)
+{
+    m->now += m->wait32[(addr >> 24) & 15][seq];
+    return read32_raw(m, addr);
+}
+
+uint16_t gba_read16(gba_machine *m, uint32_t addr, bool seq)
+{
+    m->now += m->wait16[(addr >> 24) & 15][seq];
+    return read16_raw(m, addr);
+}
+
+uint8_t gba_read8(gba_machine *m, uint32_t addr, bool seq)
+{
+    m->now += m->wait16[(addr >> 24) & 15][seq];
+    return read8_raw(m, addr);
+}
+
+/* Opcode fetches: like reads, plus the open-bus / BIOS latches and the prefetch approximation. */
+uint32_t gba_fetch32(gba_machine *m, uint32_t addr, bool seq)
+{
+    uint32_t r = (addr >> 24) & 15;
+    uint32_t v;
+    if (r == 3) {
+        m->now += 1;
+        v = rd32(&m->iwram[addr & (GBA_IWRAM_SIZE - 1)]);
+    } else if (r >= 8 && r <= 0xD) {
+        m->now += (seq && m->prefetch) ? 2 : m->wait32[r][seq];
+        v = rom_read32(m, addr);
+    } else {
+        m->now += m->wait32[r][seq];
+        if (addr < GBA_BIOS_SIZE) {
+            v = rd32(&m->bios[addr]);
+            m->bios_latch = rd32(&m->bios[(addr + 8) & (GBA_BIOS_SIZE - 4)]); /* the prefetched opcode */
+        } else {
+            v = read32_raw(m, addr);
+        }
+    }
+    m->open_bus = v;
+    return v;
+}
+
+uint16_t gba_fetch16(gba_machine *m, uint32_t addr, bool seq)
+{
+    uint32_t r = (addr >> 24) & 15;
+    uint16_t v;
+    if (r >= 8 && r <= 0xD) {
+        m->now += (seq && m->prefetch) ? 1 : m->wait16[r][seq];
+        v = rom_read16(m, addr);
+    } else if (r == 3) {
+        m->now += 1;
+        v = rd16(&m->iwram[addr & (GBA_IWRAM_SIZE - 1)]);
+    } else {
+        m->now += m->wait16[r][seq];
+        if (addr < GBA_BIOS_SIZE) {
+            v = rd16(&m->bios[addr]);
+            /* The BIOS latch holds the prefetched word: approximate with this halfword pair. */
+            m->bios_latch = rd32(&m->bios[(addr + 4) & (GBA_BIOS_SIZE - 4)]);
+        } else {
+            v = read16_raw(m, addr);
+        }
+    }
+    m->open_bus = v * 0x00010001u;
+    return v;
+}
+
+/* ---- writes --------------------------------------------------------------------------------------------- */
+
+static bool bitmap_mode(const gba_machine *m)
+{
+    return (m->io[0] & 7) >= 3;
+}
+
+void gba_write32(gba_machine *m, uint32_t addr, uint32_t v, bool seq)
+{
+    m->now += m->wait32[(addr >> 24) & 15][seq];
+    switch (addr >> 24) {
+    case 0x2:
+        wr32(&m->ewram[addr & (GBA_EWRAM_SIZE - 1)], v);
+        break;
+    case 0x3:
+        wr32(&m->iwram[addr & (GBA_IWRAM_SIZE - 1)], v);
+        break;
+    case 0x4:
+        if ((addr & 0xFFFFFF) < GBA_IO_SIZE) {
+            gba_io_write16(m, addr, (uint16_t)v);
+            gba_io_write16(m, addr + 2, (uint16_t)(v >> 16));
+        }
+        break;
+    case 0x5:
+        wr32(&m->pal[addr & (GBA_PAL_SIZE - 1)], v);
+        break;
+    case 0x6:
+        wr32(&m->vram[vram_offset(addr)], v);
+        break;
+    case 0x7:
+        wr32(&m->oam[addr & (GBA_OAM_SIZE - 1)], v);
+        break;
+    case 0xE:
+    case 0xF:
+        m->sram[addr & (GBA_SRAM_SIZE - 1)] = (uint8_t)(v >> ((addr & 3) * 8));
+        break;
+    default:
+        break; /* BIOS, ROM, unmapped: ignored */
+    }
+}
+
+void gba_write16(gba_machine *m, uint32_t addr, uint16_t v, bool seq)
+{
+    m->now += m->wait16[(addr >> 24) & 15][seq];
+    switch (addr >> 24) {
+    case 0x2:
+        wr16(&m->ewram[addr & (GBA_EWRAM_SIZE - 1)], v);
+        break;
+    case 0x3:
+        wr16(&m->iwram[addr & (GBA_IWRAM_SIZE - 1)], v);
+        break;
+    case 0x4:
+        if ((addr & 0xFFFFFF) < GBA_IO_SIZE)
+            gba_io_write16(m, addr, v);
+        break;
+    case 0x5:
+        wr16(&m->pal[addr & (GBA_PAL_SIZE - 1)], v);
+        break;
+    case 0x6:
+        wr16(&m->vram[vram_offset(addr)], v);
+        break;
+    case 0x7:
+        wr16(&m->oam[addr & (GBA_OAM_SIZE - 1)], v);
+        break;
+    case 0xE:
+    case 0xF:
+        m->sram[addr & (GBA_SRAM_SIZE - 1)] = (uint8_t)(v >> ((addr & 1) * 8));
+        break;
+    default:
+        break;
+    }
+}
+
+void gba_write8(gba_machine *m, uint32_t addr, uint8_t v, bool seq)
+{
+    m->now += m->wait16[(addr >> 24) & 15][seq];
+    switch (addr >> 24) {
+    case 0x2:
+        m->ewram[addr & (GBA_EWRAM_SIZE - 1)] = v;
+        break;
+    case 0x3:
+        m->iwram[addr & (GBA_IWRAM_SIZE - 1)] = v;
+        break;
+    case 0x4:
+        if ((addr & 0xFFFFFF) < GBA_IO_SIZE)
+            gba_io_write8(m, addr, v);
+        break;
+    case 0x5: /* 8-bit writes to palette fill the halfword */
+        wr16(&m->pal[addr & (GBA_PAL_SIZE - 2)], (uint16_t)(v * 0x0101u));
+        break;
+    case 0x6: { /* BG VRAM: the halfword; OBJ VRAM: ignored */
+        uint32_t a = vram_offset(addr);
+        if (a < (bitmap_mode(m) ? 0x14000u : 0x10000u))
+            wr16(&m->vram[a & ~1u], (uint16_t)(v * 0x0101u));
+        break;
+    }
+    case 0xE:
+    case 0xF:
+        m->sram[addr & (GBA_SRAM_SIZE - 1)] = v;
+        break;
+    default:
+        break; /* OAM ignores 8-bit writes; BIOS, ROM, unmapped too */
+    }
+}
+
+/* ---- side-effect-free peeks (public, for tests) --------------------------------------------------------- */
+
+static const uint8_t *peek_ptr(gba_machine *m, uint32_t addr)
+{
+    switch (addr >> 24) {
+    case 0x0:
+        return addr < GBA_BIOS_SIZE ? &m->bios[addr] : NULL;
+    case 0x2:
+        return &m->ewram[addr & (GBA_EWRAM_SIZE - 1)];
+    case 0x3:
+        return &m->iwram[addr & (GBA_IWRAM_SIZE - 1)];
+    case 0x4:
+        return (addr & 0xFFFFFF) < GBA_IO_SIZE ? &m->io[addr & 0x3FF] : NULL;
+    case 0x5:
+        return &m->pal[addr & (GBA_PAL_SIZE - 1)];
+    case 0x6:
+        return &m->vram[vram_offset(addr)];
+    case 0x7:
+        return &m->oam[addr & (GBA_OAM_SIZE - 1)];
+    case 0x8: case 0x9: case 0xA: case 0xB: case 0xC: case 0xD:
+        return (addr & 0x1FFFFFF) < m->rom_size ? &m->rom[addr & 0x1FFFFFF] : NULL;
+    case 0xE:
+    case 0xF:
+        return &m->sram[addr & (GBA_SRAM_SIZE - 1)];
+    default:
+        return NULL;
+    }
+}
+
+uint8_t gba_peek8(gba_machine *m, uint32_t addr)
+{
+    const uint8_t *p = peek_ptr(m, addr);
+    return p ? *p : 0;
+}
+
+uint16_t gba_peek16(gba_machine *m, uint32_t addr)
+{
+    addr &= ~1u;
+    const uint8_t *p = peek_ptr(m, addr);
+    return p ? rd16(p) : 0;
+}
+
+uint32_t gba_peek32(gba_machine *m, uint32_t addr)
+{
+    addr &= ~3u;
+    const uint8_t *p = peek_ptr(m, addr);
+    return p ? rd32(p) : 0;
+}

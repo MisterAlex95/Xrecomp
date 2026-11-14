@@ -1,4 +1,5 @@
-/* gba_runtime -- the Game Boy Advance runtime (XBA-146): empty for now.
+/* gba_runtime -- the Game Boy Advance runtime (XBA-146). The machine itself is gba_core.h (XBA-152 / XBA-153);
+ * this is the app shell's entry point, still a stub.
  * consoles/README.md, Plane « Spec · Other consoles ». */
 #ifndef XBR_GBA_RUNTIME_H
 #define XBR_GBA_RUNTIME_H
