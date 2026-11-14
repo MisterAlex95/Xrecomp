@@ -18,10 +18,16 @@
  *   - attributes (shade RGBA, S / T / W, Z) are planes: value at a pixel = edge value of its scan line (stepped by
  *     DaDe) + DaDx * (pixel x - major edge x), sampled at the pixel's top-left corner, stepped by DaDx along the span;
  *   - one span routine per (texture, shade, Z, 2-cycle, 32-bit) combination, picked once per primitive; inside, the
- *     rest of the state (blender, dither, filters...) are plain branches on per-primitive constants. The combiner of
- *     each cycle is resolved when the mode changes into: constant (computed once), pass-through of one input, a
- *     product of two inputs, or the generic (A - B) * C + D on input pointers. A blender that cannot change the pixel
- *     is skipped. Fill and copy modes have their own loops.
+ *     rest of the state (blender, dither, filters...) are plain branches on per-primitive constants. 16-bit spans
+ *     without key, noise or LOD (nearly all of them) go to span_fast, which keeps everything in locals (and has an
+ *     F_SIMPLE instance for pixels without memory read, blending or coverage tricks); span_std does the rest. The
+ *     combiner of each cycle is resolved when the mode changes into: constant (computed once), pass-through of one
+ *     input, a product of two inputs, or the generic (A - B) * C + D; a combiner whose inputs are all 0..255 skips the
+ *     9-bit clamps. A blender that cannot change the pixel is skipped. Fill and copy modes have their own loops;
+ *   - textures: each tile's coordinate rules are derived into constants and a sampler routine per (texel kind, filter)
+ *     when tiles or modes change; without LOD a run of up to SPAN_CHUNK pixels is sampled in one call. Texels and
+ *     blender colours are packed 16-bit lanes in a uint64_t (the bilinear filter and the blend are a few multiplies);
+ *     RGBA16 and TLUT texels come from dec16, TMEM decoded ahead, kept up to date after loads.
  * Pixel pipeline (1 / 2 cycle): texture (perspective divide, shift, SL / TL offset, clamp / mirror / mask, point or
  * 3-point bilinear with mid-texel, YUV convert, TLUT, LOD tile selection with detail / sharpen), combiner (2 cycles,
  * every input incl. noise, LOD fraction, K4 / K5, key centre / scale), chroma key (approximated: see key_alpha), alpha
@@ -135,6 +141,15 @@ typedef struct {
 typedef struct rdp_render rdp_render;
 typedef void (*span_fn)(rdp_render *r, const rdp_prim *p, const rdp_row *row);
 
+/* A tile's sampling parameters, per axis (s, t): see tiles_prep. */
+typedef struct {
+    uint8_t shr[2], shl[2], clamp[2], mask[2];
+    uint8_t plain; /* no shift and no mirror on either axis (td_axis's PLAIN case) */
+    int32_t lo3[2], mx[2], mir[2], m[2];
+    uint32_t tmem, line, pal;
+} rdp_tdesc;
+typedef void (*samp_fn)(const rdp_render *r, const rdp_tdesc *d, const int32_t *s, const int32_t *t, int n, uint64_t *o);
+
 struct rdp_render {
     n64_rdp *dp;
     uint8_t *ram;
@@ -148,6 +163,7 @@ struct rdp_render {
     rdp_cin in;
     const int32_t *cp[2][4][4]; /* [cycle][channel r g b a][operand a b c d] */
     uint8_t ccm[2][2];          /* [cycle][rgb, alpha]: CM_* */
+    uint8_t ccsafe[2];          /* [cycle]: output always in 0..255 (cc_in_safe) */
     int32_t ccconst[2][4];
     const int32_t *blp[2], *blm[2], *bla[2];
     uint8_t blb[2];
@@ -157,6 +173,12 @@ struct rdp_render {
     int32_t memcvg;
     int use_tex, use_tex1, use_shade, use_noise, use_lod, use_z, blend_pass;
     span_fn span;
+    int tdirty;          /* a tile changed: tiles_prep */
+    rdp_tdesc td[8];
+    samp_fn samp[8][2]; /* [tile][cycle] */
+    unsigned dec_tiles;  /* tiles whose sampler reads dec16 */
+    uint32_t dlo, dhi;   /* TMEM bytes [dlo, dhi) loaded since dec16 was last brought up to date */
+    uint64_t dec16[2048]; /* every 16-bit TMEM word as RGBA 5551 decoded and packed (pk4), for RGBA16 / TLUT texels */
     uint32_t prim_count; /* noise seed: primitives drawn so far */
 };
 
@@ -196,10 +218,6 @@ struct n64_rdp {
 static inline int imin(int a, int b) { return a < b ? a : b; }
 static inline int imax(int a, int b) { return a > b ? a : b; }
 static inline int32_t sext(uint32_t v, int bits) { return (int32_t)(v << (32 - bits)) >> (32 - bits); }
-static inline int32_t clamp32(int64_t v)
-{
-    return v > INT32_MAX ? INT32_MAX : v < INT32_MIN ? INT32_MIN : (int32_t)v;
-}
 /* The combiner / shade clamp on 9 bits: 0x100..0x17F saturate to 255, 0x180..0x1FF (negative) to 0. */
 static inline int clamp9(int v)
 {
@@ -235,9 +253,16 @@ static inline uint32_t z_decompress(uint32_t z14)
 }
 static inline uint32_t z_compress(uint32_t z18)
 {
+#if defined(__GNUC__) || defined(__clang__)
+    const uint32_t u = (~z18 & 0x3FFFFu) << 14; /* leading ones of z18 = leading zeros of u */
+    uint32_t e = u ? (uint32_t)__builtin_clz(u) : 7;
+    if (e > 7)
+        e = 7;
+#else
     uint32_t e = 0;
     while (e < 7 && ((z18 >> (17 - e)) & 1))
         e++;
+#endif
     return e << 11 | (((z18 - z_base[e]) >> z_shift[e]) & 0x7FF);
 }
 static inline int dz_compress(uint32_t dz)
@@ -255,104 +280,6 @@ static const uint8_t bayer_matrix[16] = { 0, 4, 1, 5, 4, 0, 5, 1, 3, 7, 2, 6, 7,
 static inline int row_mine(const rdp_render *r, int y) { return r->nbands == 1 || ((y >> 2) % r->nbands) == r->band; }
 
 /* ---- Textures ------------------------------------------------------------------------------------------------------ */
-static inline void tlut_entry(const rdp_render *r, int idx, int32_t *o)
-{
-    const uint8_t *e = r->s.tmem + 0x800 + ((idx << 3) & 0x7FF);
-    uint16_t v = (uint16_t)(e[0] << 8 | e[1]);
-    if (r->s.om.tlut_ia) {
-        o[0] = o[1] = o[2] = v >> 8;
-        o[3] = v & 0xFF;
-    } else {
-        o[0] = expand5(v >> 11);
-        o[1] = expand5((v >> 6) & 31);
-        o[2] = expand5((v >> 1) & 31);
-        o[3] = (v & 1) ? 255 : 0;
-    }
-}
-
-/* One texel of tile t at integer coordinates (already wrapped) into o[4] (8-bit channels). YUV texels come out as
- * (U, V, Y, Y) for the convert step. */
-ALWAYS_INLINE void fetch_texel(const rdp_render *r, const rdp_tile *t, int s, int tt, int32_t *o)
-{
-    const uint8_t *tm = r->s.tmem;
-    const uint32_t base = (uint32_t)(t->tmem + tt * t->line);
-    const uint32_t x = (tt & 1) ? 4 : 0;
-    const int tlut = r->s.om.tlut;
-    const uint32_t am = tlut ? 0x7FF : 0xFFF;
-    switch (t->size) {
-    case 0: {
-        int n = (tm[((base + (uint32_t)(s >> 1)) ^ x) & am] >> ((s & 1) ? 0 : 4)) & 15;
-        if (tlut) {
-            tlut_entry(r, t->pal << 4 | n, o);
-            return;
-        }
-        if (t->fmt == FMT_IA) {
-            int i = n >> 1;
-            o[0] = o[1] = o[2] = i << 5 | i << 2 | i >> 1;
-            o[3] = (n & 1) ? 255 : 0;
-        } else if (t->fmt == FMT_CI) {
-            o[0] = o[1] = o[2] = o[3] = t->pal << 4 | n;
-        } else {
-            o[0] = o[1] = o[2] = o[3] = n * 17;
-        }
-        return;
-    }
-    case 1: {
-        int n = tm[((base + (uint32_t)s) ^ x) & am];
-        if (tlut) {
-            tlut_entry(r, n, o);
-            return;
-        }
-        if (t->fmt == FMT_IA) {
-            o[0] = o[1] = o[2] = (n >> 4) * 17;
-            o[3] = (n & 15) * 17;
-        } else {
-            o[0] = o[1] = o[2] = o[3] = n;
-        }
-        return;
-    }
-    case 2: {
-        if (t->fmt == FMT_YUV) {
-            uint32_t ay = ((base + (uint32_t)s) ^ x) & 0x7FF, auv = ((base + (uint32_t)(s & ~1)) ^ x) & 0x7FF;
-            o[0] = tm[auv];
-            o[1] = tm[(auv + 1) & 0x7FF];
-            o[2] = o[3] = tm[0x800 + ay];
-            return;
-        }
-        uint32_t a = ((base + (uint32_t)s * 2) ^ x) & am & ~1u;
-        uint16_t v = (uint16_t)(tm[a] << 8 | tm[a + 1]);
-        if (tlut) {
-            tlut_entry(r, v >> 8, o);
-            return;
-        }
-        if (t->fmt == FMT_IA) {
-            o[0] = o[1] = o[2] = v >> 8;
-            o[3] = v & 0xFF;
-        } else if (t->fmt == FMT_I || t->fmt == FMT_CI) {
-            o[0] = o[1] = o[2] = o[3] = v >> 8;
-        } else {
-            o[0] = expand5(v >> 11);
-            o[1] = expand5((v >> 6) & 31);
-            o[2] = expand5((v >> 1) & 31);
-            o[3] = (v & 1) ? 255 : 0;
-        }
-        return;
-    }
-    default: { /* 32-bit: R G in the low half, B A in the high half */
-        uint32_t a = ((base + (uint32_t)s * 2) ^ x) & 0x7FE;
-        if (tlut) {
-            tlut_entry(r, tm[a], o);
-            return;
-        }
-        o[0] = tm[a];
-        o[1] = tm[a + 1];
-        o[2] = tm[a + 0x800];
-        o[3] = tm[a + 0x801];
-        return;
-    }
-    }
-}
-
 /* Raw texel for copy mode, as a 16-bit pixel (and the 32-bit / 8-bit forms for those colour images). */
 static uint32_t copy_texel(const rdp_render *r, const rdp_tile *t, int s, int tt, int out_size)
 {
@@ -408,50 +335,6 @@ static uint32_t copy_texel(const rdp_render *r, const rdp_tile *t, int s, int tt
     }
 }
 
-/* One texture coordinate (s10.5) of tile t through shift, offset, clamp, mirror and mask: integer coordinates of the
- * texel and its +1 neighbour, and the 5-bit fraction. */
-ALWAYS_INLINE void tc_axis(int32_t c, int shift, int lo, int hi, int clamp_en, int mask, int mirror, int *i0, int *i1,
-                           int *frac)
-{
-    if (shift)
-        c = shift < 11 ? c >> shift : (int32_t)((uint32_t)c << (16 - shift));
-    c -= lo << 3;
-    int i = c >> 5, f = c & 31, j = i + 1;
-    if (clamp_en || !mask) {
-        int mx = imax((hi >> 2) - (lo >> 2), 0);
-        if (c < 0) {
-            i = j = 0;
-            f = 0;
-        } else if (i >= mx) {
-            i = j = mx;
-            f = 0;
-        } else if (j > mx) {
-            j = mx;
-        }
-    }
-    if (mask) {
-        int m = (1 << mask) - 1;
-        if (mirror) {
-            if ((i >> mask) & 1)
-                i = ~i;
-            if ((j >> mask) & 1)
-                j = ~j;
-        }
-        i &= m;
-        j &= m;
-    }
-    *i0 = i;
-    *i1 = j;
-    *frac = f;
-}
-
-static inline void tile_coords(const rdp_tile *t, int32_t s, int32_t tt, int *s0, int *s1, int *fs, int *t0, int *t1,
-                               int *ft)
-{
-    tc_axis(s, t->shift_s, t->sl, t->sh, t->cs, imin(t->mask_s, 10), t->ms, s0, s1, fs);
-    tc_axis(tt, t->shift_t, t->tl, t->th, t->ct, imin(t->mask_t, 10), t->mt, t0, t1, ft);
-}
-
 /* YUV -> RGB with K0..K3 on (U, V, Y) = channels (0, 1, 2); the K4 / K5 part is the combiner's (TEX - K4) * K5 + TEX.
  * Approximation: U and V centred on 128, products rounded, 9-bit results. */
 static void yuv_convert(const rdp_render *r, const int32_t *in, int32_t *o)
@@ -464,45 +347,252 @@ static void yuv_convert(const rdp_render *r, const int32_t *in, int32_t *o)
     o[3] = in[3];
 }
 
-/* Sample tile tn at (s, t) (s10.5) with the filter of cycle cyc. */
-static void sample_tile(const rdp_render *r, int tn, int32_t s, int32_t t, int cyc, int32_t *o)
+/* Texture sampling, specialised: each tile gets its sampling parameters (shift, offset, clamp, mirror, mask resolved
+ * into a few constants) and one sampler routine per cycle, picked from (texel kind, filter) when the tile or the modes
+ * change (tiles_prep), so the per-pixel work has no format or mode switch. */
+enum { K4_TLUT_RGBA, K4_TLUT_IA, K4_IA, K4_CI, K4_I, K8_TLUT_RGBA, K8_TLUT_IA, K8_IA, K8_I, K16_YUV, K16_TLUT_RGBA,
+       K16_TLUT_IA, K16_IA, K16_I, K16_RGBA, K32_TLUT_RGBA, K32_TLUT_IA, K32_RGBA, K_N };
+enum { FL_CONV, FL_POINT, FL_BIL, FL_BILMID, FL_N };
+
+static int texel_kind(const rdp_tile *t, int tlut, int tlut_ia)
 {
-    const rdp_tile *tl = &r->s.tile[tn & 7];
+    switch (t->size) {
+    case 0: return tlut ? (tlut_ia ? K4_TLUT_IA : K4_TLUT_RGBA) : t->fmt == FMT_IA ? K4_IA : t->fmt == FMT_CI ? K4_CI : K4_I;
+    case 1: return tlut ? (tlut_ia ? K8_TLUT_IA : K8_TLUT_RGBA) : t->fmt == FMT_IA ? K8_IA : K8_I;
+    case 2:
+        if (t->fmt == FMT_YUV)
+            return K16_YUV;
+        if (tlut)
+            return tlut_ia ? K16_TLUT_IA : K16_TLUT_RGBA;
+        return t->fmt == FMT_IA ? K16_IA : (t->fmt == FMT_I || t->fmt == FMT_CI) ? K16_I : K16_RGBA;
+    default: return tlut ? (tlut_ia ? K32_TLUT_IA : K32_TLUT_RGBA) : K32_RGBA;
+    }
+}
+
+/* Texels are packed as four 16-bit lanes R:G:B:A (R in the top lane) of a uint64_t: every fetched channel is 0..255, so
+ * the bilinear sums (at most 32 * 255 + 16) never carry into the next lane and the filter is three multiplies. */
+#define LANES(v) ((v) * 0x0001000100010001ull)
+static inline uint64_t pk4(uint32_t r, uint32_t g, uint32_t b, uint32_t a)
+{
+    return (uint64_t)r << 48 | (uint64_t)g << 32 | (uint64_t)b << 16 | a;
+}
+/* Unpacks signed lanes (YUV conversion results can be negative 9-bit values) into o[4]. */
+static inline void unpk4(uint64_t v, int32_t *o)
+{
+    o[0] = (int16_t)(v >> 48);
+    o[1] = (int16_t)(v >> 32);
+    o[2] = (int16_t)(v >> 16);
+    o[3] = (int16_t)v;
+}
+static inline uint64_t pk4s(const int32_t *o)
+{
+    return pk4((uint16_t)o[0], (uint16_t)o[1], (uint16_t)o[2], (uint16_t)o[3]);
+}
+
+ALWAYS_INLINE uint64_t rgba5551_pk(uint32_t v)
+{
+    return pk4((uint32_t)expand5((int)(v >> 11)), (uint32_t)expand5((int)(v >> 6) & 31),
+               (uint32_t)expand5((int)(v >> 1) & 31), (v & 1) ? 255u : 0u);
+}
+
+ALWAYS_INLINE uint64_t tlut_k(const uint8_t *tm, const uint64_t *dec, int idx, int ia)
+{
+    if (!ia)
+        return dec[0x400 + ((idx << 2) & 0x3FF)];
+    const uint8_t *e = tm + 0x800 + ((idx << 3) & 0x7FF);
+    uint32_t v = (uint32_t)(e[0] << 8 | e[1]);
+    return LANES((uint64_t)(v >> 8)) ^ ((v >> 8) ^ (v & 0xFF)); /* I I I A */
+}
+
+/* One texel of a tile at integer coordinates (already wrapped), packed, for one kind K (a constant in each instance).
+ * YUV texels come out as (U, V, Y, Y) for the convert step; 32-bit texels have R G in the low half of TMEM and B A in
+ * the high half. */
+ALWAYS_INLINE uint64_t fetch_k(const uint8_t *tm, const uint64_t *dec, const rdp_tdesc *d, const int K, int s, int tt)
+{
+    const uint32_t base = d->tmem + (uint32_t)tt * d->line;
+    const uint32_t x = (uint32_t)(tt & 1) << 2;
+    switch (K) {
+    case K4_TLUT_RGBA: case K4_TLUT_IA: case K4_IA: case K4_CI: case K4_I: {
+        const uint32_t am = (K == K4_TLUT_RGBA || K == K4_TLUT_IA) ? 0x7FF : 0xFFF;
+        uint32_t n = (uint32_t)(tm[((base + (uint32_t)(s >> 1)) ^ x) & am] >> ((s & 1) ? 0 : 4)) & 15;
+        if (K == K4_TLUT_RGBA || K == K4_TLUT_IA)
+            return tlut_k(tm, dec, (int)(d->pal << 4 | n), K == K4_TLUT_IA);
+        if (K == K4_IA) {
+            uint32_t i = n >> 1, c = i << 5 | i << 2 | i >> 1;
+            return pk4(c, c, c, (n & 1) ? 255u : 0u);
+        }
+        if (K == K4_CI)
+            return LANES((uint64_t)(d->pal << 4 | n));
+        return LANES((uint64_t)(n * 17));
+    }
+    case K8_TLUT_RGBA: case K8_TLUT_IA: case K8_IA: case K8_I: {
+        const uint32_t am = (K == K8_TLUT_RGBA || K == K8_TLUT_IA) ? 0x7FF : 0xFFF;
+        uint32_t n = tm[((base + (uint32_t)s) ^ x) & am];
+        if (K == K8_TLUT_RGBA || K == K8_TLUT_IA)
+            return tlut_k(tm, dec, (int)n, K == K8_TLUT_IA);
+        if (K == K8_IA) {
+            uint32_t i = (n >> 4) * 17;
+            return pk4(i, i, i, (n & 15) * 17);
+        }
+        return LANES((uint64_t)n);
+    }
+    case K16_YUV: {
+        uint32_t ay = ((base + (uint32_t)s) ^ x) & 0x7FF, auv = ((base + (uint32_t)(s & ~1)) ^ x) & 0x7FF;
+        uint32_t y = tm[0x800 + ay];
+        return pk4(tm[auv], tm[(auv + 1) & 0x7FF], y, y);
+    }
+    case K16_TLUT_RGBA: case K16_TLUT_IA: case K16_IA: case K16_I: case K16_RGBA: {
+        const uint32_t am = (K == K16_TLUT_RGBA || K == K16_TLUT_IA) ? 0x7FE : 0xFFE;
+        uint32_t a = ((base + (uint32_t)s * 2) ^ x) & am;
+        uint32_t v = (uint32_t)(tm[a] << 8 | tm[a + 1]);
+        if (K == K16_TLUT_RGBA || K == K16_TLUT_IA)
+            return tlut_k(tm, dec, (int)(v >> 8), K == K16_TLUT_IA);
+        if (K == K16_IA)
+            return pk4(v >> 8, v >> 8, v >> 8, v & 0xFF);
+        if (K == K16_I)
+            return LANES((uint64_t)(v >> 8));
+        return dec[a >> 1];
+    }
+    default: { /* 32-bit */
+        uint32_t a = ((base + (uint32_t)s * 2) ^ x) & 0x7FE;
+        if (K == K32_TLUT_RGBA || K == K32_TLUT_IA)
+            return tlut_k(tm, dec, tm[a], K == K32_TLUT_IA);
+        return pk4(tm[a], tm[a + 1], tm[a + 0x800], tm[a + 0x801]);
+    }
+    }
+}
+
+/* One texture coordinate (s10.5) through the tile's shift, offset, clamp, mirror and mask (derived parameters of axis
+ * ax): integer coordinates of the texel and its +1 neighbour, and the 5-bit fraction. */
+ALWAYS_INLINE void td_axis_t(const rdp_tdesc *d, int ax, int32_t c, int *i0, int *i1, int *frac, const int PLAIN)
+{
+    if (!PLAIN)
+        c = (int32_t)((uint32_t)(c >> d->shr[ax]) << d->shl[ax]);
+    c -= d->lo3[ax];
+    int i = c >> 5, f = c & 31, j = i + 1;
+    if (d->clamp[ax]) {
+        const int mx = d->mx[ax];
+        if (c < 0) {
+            i = j = 0;
+            f = 0;
+        } else if (i >= mx) {
+            i = j = mx;
+            f = 0;
+        }
+    }
+    if (!PLAIN) {
+        const int mb = d->mask[ax];
+        const int mir = d->mir[ax];
+        i ^= mir & -((i >> mb) & 1);
+        j ^= mir & -((j >> mb) & 1);
+    }
+    *i0 = i & d->m[ax];
+    *i1 = j & d->m[ax];
+    *frac = f;
+}
+ALWAYS_INLINE void td_axis(const rdp_tdesc *d, int ax, int32_t c, int *i0, int *i1, int *frac)
+{
+    td_axis_t(d, ax, c, i0, i1, frac, 0);
+}
+
+/* Samples n pixels at (ss[i], ts[i]) (s10.5) into out[i] (packed). The filter: 3-point bilinear on the upper-left or
+ * lower-right triangle of the texel square, written with non-negative weights: a + ((fs (b - a) + ft (c - a) + 16) >> 5)
+ * is exactly ((32 - fs - ft) a + fs b + ft c + 16) >> 5 (and likewise for the other triangle). */
+ALWAYS_INLINE void samp_t(const rdp_render *r, const rdp_tdesc *dp, const int32_t *ss, const int32_t *ts, int n,
+                          uint64_t *out, const int K, const int FL, const int PLAIN)
+{
+    const uint8_t *tm = r->s.tmem;
+    const uint64_t *dec = r->dec16;
+    const rdp_tdesc dd = *dp, *d = &dd;
+    const uint64_t round = LANES(16ull), m8 = LANES(0xFFull);
+    for (int k = 0; k < n; k++) {
+        int s0, s1, fs, t0, t1, ft;
+        td_axis_t(d, 0, ss[k], &s0, &s1, &fs, PLAIN);
+        td_axis_t(d, 1, ts[k], &t0, &t1, &ft, PLAIN);
+        if (FL == FL_CONV) {
+            int32_t raw[4], o[4];
+            unpk4(fetch_k(tm, dec, d, K, s0, t0), raw);
+            yuv_convert(r, raw, o);
+            out[k] = pk4s(o);
+        } else if (FL == FL_POINT) {
+            out[k] = fetch_k(tm, dec, d, K, s0, t0);
+        } else if (FL == FL_BILMID && fs == 16 && ft == 16) {
+            uint64_t sum = fetch_k(tm, dec, d, K, s0, t0) + fetch_k(tm, dec, d, K, s1, t0) + fetch_k(tm, dec, d, K, s0, t1) +
+                           fetch_k(tm, dec, d, K, s1, t1) + LANES(2ull);
+            out[k] = (sum >> 2) & m8;
+        } else {
+            const uint64_t b = fetch_k(tm, dec, d, K, s1, t0), c = fetch_k(tm, dec, d, K, s0, t1);
+            uint64_t sum;
+            if (fs + ft < 32) /* upper-left triangle of the texel square */
+                sum = fetch_k(tm, dec, d, K, s0, t0) * (uint64_t)(32 - fs - ft) + b * (uint64_t)fs + c * (uint64_t)ft;
+            else
+                sum = fetch_k(tm, dec, d, K, s1, t1) * (uint64_t)(fs + ft - 32) + c * (uint64_t)(32 - fs) +
+                      b * (uint64_t)(32 - ft);
+            out[k] = ((sum + round) >> 5) & m8;
+        }
+    }
+}
+
+#define SAMP_FL(k, fl)                                                                                                   \
+    static void samp_##k##_##fl(const rdp_render *r, const rdp_tdesc *d, const int32_t *ss, const int32_t *ts, int n,   \
+                                uint64_t *out)                                                                           \
+    {                                                                                                                    \
+        if (d->plain)                                                                                                    \
+            samp_t(r, d, ss, ts, n, out, k, fl, 1);                                                                      \
+        else                                                                                                             \
+            samp_t(r, d, ss, ts, n, out, k, fl, 0);                                                                      \
+    }
+#define SAMP_K(k) SAMP_FL(k, FL_CONV) SAMP_FL(k, FL_POINT) SAMP_FL(k, FL_BIL) SAMP_FL(k, FL_BILMID)
+SAMP_K(K4_TLUT_RGBA) SAMP_K(K4_TLUT_IA) SAMP_K(K4_IA) SAMP_K(K4_CI) SAMP_K(K4_I)
+SAMP_K(K8_TLUT_RGBA) SAMP_K(K8_TLUT_IA) SAMP_K(K8_IA) SAMP_K(K8_I)
+SAMP_K(K16_YUV) SAMP_K(K16_TLUT_RGBA) SAMP_K(K16_TLUT_IA) SAMP_K(K16_IA) SAMP_K(K16_I) SAMP_K(K16_RGBA)
+SAMP_K(K32_TLUT_RGBA) SAMP_K(K32_TLUT_IA) SAMP_K(K32_RGBA)
+#define SAMP_ROW(k) { samp_##k##_FL_CONV, samp_##k##_FL_POINT, samp_##k##_FL_BIL, samp_##k##_FL_BILMID }
+static const samp_fn samp_table[K_N][FL_N] = {
+    SAMP_ROW(K4_TLUT_RGBA),  SAMP_ROW(K4_TLUT_IA),  SAMP_ROW(K4_IA),       SAMP_ROW(K4_CI),
+    SAMP_ROW(K4_I),          SAMP_ROW(K8_TLUT_RGBA), SAMP_ROW(K8_TLUT_IA), SAMP_ROW(K8_IA),
+    SAMP_ROW(K8_I),          SAMP_ROW(K16_YUV),     SAMP_ROW(K16_TLUT_RGBA), SAMP_ROW(K16_TLUT_IA),
+    SAMP_ROW(K16_IA),        SAMP_ROW(K16_I),       SAMP_ROW(K16_RGBA),    SAMP_ROW(K32_TLUT_RGBA),
+    SAMP_ROW(K32_TLUT_IA),   SAMP_ROW(K32_RGBA),
+};
+
+static void td_axis_prep(rdp_tdesc *d, int ax, int shift, int lo, int hi, int clamp_en, int mask, int mirror)
+{
+    d->shr[ax] = (uint8_t)(shift && shift < 11 ? shift : 0);
+    d->shl[ax] = (uint8_t)(shift >= 11 ? 16 - shift : 0);
+    d->lo3[ax] = lo << 3;
+    d->clamp[ax] = (uint8_t)(clamp_en || !mask);
+    d->mx[ax] = imax((hi >> 2) - (lo >> 2), 0);
+    d->mask[ax] = (uint8_t)(mask ? mask : 31);
+    d->mir[ax] = mask && mirror ? -1 : 0;
+    d->m[ax] = mask ? (1 << mask) - 1 : -1;
+}
+
+/* Derives the sampling parameters and routines of the 8 tiles. */
+static void tiles_prep(rdp_render *r)
+{
     const rdp_modes *om = &r->s.om;
-    int s0, s1, fs, t0, t1, ft;
-    tile_coords(tl, s, t, &s0, &s1, &fs, &t0, &t1, &ft);
-    if (!om->bilerp[cyc]) { /* the filter converts instead of interpolating */
-        int32_t raw[4];
-        fetch_texel(r, tl, s0, t0, raw);
-        yuv_convert(r, raw, o);
-        return;
+    unsigned dec = 0;
+    int fl[2];
+    for (int c = 0; c < 2; c++)
+        fl[c] = !om->bilerp[c] ? FL_CONV : !om->bilinear ? FL_POINT : om->mid_texel ? FL_BILMID : FL_BIL;
+    for (int n = 0; n < 8; n++) {
+        const rdp_tile *t = &r->s.tile[n];
+        rdp_tdesc *d = &r->td[n];
+        td_axis_prep(d, 0, t->shift_s, t->sl, t->sh, t->cs, imin(t->mask_s, 10), t->ms);
+        td_axis_prep(d, 1, t->shift_t, t->tl, t->th, t->ct, imin(t->mask_t, 10), t->mt);
+        d->plain = !d->shr[0] && !d->shl[0] && !d->mir[0] && !d->shr[1] && !d->shl[1] && !d->mir[1];
+        d->tmem = t->tmem;
+        d->line = t->line;
+        d->pal = t->pal;
+        const int k = texel_kind(t, om->tlut, om->tlut_ia);
+        r->samp[n][0] = samp_table[k][fl[0]];
+        r->samp[n][1] = samp_table[k][fl[1]];
+        if (k == K16_RGBA || k == K4_TLUT_RGBA || k == K8_TLUT_RGBA || k == K16_TLUT_RGBA || k == K32_TLUT_RGBA)
+            dec |= 1u << n;
     }
-    if (!om->bilinear) {
-        fetch_texel(r, tl, s0, t0, o);
-        return;
-    }
-    int32_t a[4], b[4], c[4];
-    if (om->mid_texel && fs == 16 && ft == 16) {
-        int32_t d[4];
-        fetch_texel(r, tl, s0, t0, a);
-        fetch_texel(r, tl, s1, t0, b);
-        fetch_texel(r, tl, s0, t1, c);
-        fetch_texel(r, tl, s1, t1, d);
-        for (int i = 0; i < 4; i++)
-            o[i] = (a[i] + b[i] + c[i] + d[i] + 2) >> 2;
-        return;
-    }
-    fetch_texel(r, tl, s1, t0, b);
-    fetch_texel(r, tl, s0, t1, c);
-    if (fs + ft < 32) { /* upper-left triangle of the texel square */
-        fetch_texel(r, tl, s0, t0, a);
-        for (int i = 0; i < 4; i++)
-            o[i] = a[i] + ((fs * (b[i] - a[i]) + ft * (c[i] - a[i]) + 16) >> 5);
-    } else {
-        fetch_texel(r, tl, s1, t1, a);
-        for (int i = 0; i < 4; i++)
-            o[i] = a[i] + (((32 - fs) * (c[i] - a[i]) + (32 - ft) * (b[i] - a[i]) + 16) >> 5);
-    }
+    r->dec_tiles = dec;
+    r->tdirty = 0;
 }
 
 static inline int32_t sat16(int64_t v) { return v > 0x7FFF ? 0x7FFF : v < -0x8000 ? -0x8000 : (int32_t)v; }
@@ -525,17 +615,17 @@ ALWAYS_INLINE void tex_st(int persp, int32_t as, int32_t at, int32_t aw, int32_t
 }
 
 /* Texture stage of one pixel: TEX0, TEX1 and the LOD fraction into r->in. */
-static void tex_stage(rdp_render *r, const rdp_prim *p, const int32_t *a)
+ALWAYS_INLINE void tex_stage(rdp_render *r, const rdp_prim *p, int32_t as, int32_t at, int32_t aw)
 {
     const rdp_modes *om = &r->s.om;
     const int persp = om->persp && !p->rect;
     int32_t s, t;
-    tex_st(persp, a[A_S], a[A_T], a[A_W], &s, &t);
+    tex_st(persp, as, at, aw, &s, &t);
     int t0 = p->tile, t1 = p->tile + 1;
     if (r->use_lod) {
         int32_t s1, tt1, s2, tt2;
-        tex_st(persp, a[A_S] + p->dadx[A_S], a[A_T] + p->dadx[A_T], a[A_W] + p->dadx[A_W], &s1, &tt1);
-        tex_st(persp, a[A_S] + p->dady[A_S], a[A_T] + p->dady[A_T], a[A_W] + p->dady[A_W], &s2, &tt2);
+        tex_st(persp, as + p->dadx[A_S], at + p->dadx[A_T], aw + p->dadx[A_W], &s1, &tt1);
+        tex_st(persp, as + p->dady[A_S], at + p->dady[A_T], aw + p->dady[A_W], &s2, &tt2);
         int lod = imax(imax(abs(s1 - s), abs(tt1 - t)), imax(abs(s2 - s), abs(tt2 - t)));
         if (lod > 0x7FFF)
             lod = 0x7FFF;
@@ -568,15 +658,20 @@ static void tex_stage(rdp_render *r, const rdp_prim *p, const int32_t *a)
         }
         r->in.lodfrac = frac;
     }
-    sample_tile(r, t0, s, t, 0, r->in.tex0);
+    t0 &= 7;
+    uint64_t tx;
+    r->samp[t0][0](r, &r->td[t0], &s, &t, 1, &tx);
+    unpk4(tx, r->in.tex0);
     if (om->cycle == CYC_2) {
         if (!r->use_tex1)
             ; /* TEX1 is not read by the combiner */
         else if (om->convert_one)
             yuv_convert(r, r->in.tex0, r->in.tex1);
-        else
-            sample_tile(r, t1, s, t, 1, r->in.tex1);
-    } else {
+        else {
+            r->samp[t1 & 7][1](r, &r->td[t1 & 7], &s, &t, 1, &tx);
+            unpk4(tx, r->in.tex1);
+        }
+    } else if (r->use_tex1) {
         memcpy(r->in.tex1, r->in.tex0, sizeof r->in.tex1); /* approximation: TEX1 = TEX0 in 1-cycle mode */
     }
 }
@@ -684,6 +779,21 @@ ALWAYS_INLINE int cc_eval(const int32_t *const *op)
 
 static void span_select(rdp_render *r);
 
+/* Whether a combiner input is known to be in 0..255: a combiner output built from such inputs by a pass-through or a
+ * product is in 0..255 too, and its 9-bit clamp / sign extension change nothing (prepare: ccsafe). */
+static int cc_in_safe(const rdp_render *r, const int32_t *p, int comb_ok)
+{
+    const rdp_cin *in = &r->in;
+    const rdp_modes *om = &r->s.om;
+    if ((p >= in->tex0 && p < in->tex0 + 4) || (p >= in->tex1 && p < in->tex1 + 4))
+        return om->bilerp[0] && om->bilerp[1] && !om->convert_one; /* no YUV conversion (9-bit signed) */
+    if (p >= in->comb && p < in->comb + 4)
+        return comb_ok;
+    return (p >= in->shade && p < in->shade + 4) || (p >= in->prim && p < in->prim + 4) ||
+           (p >= in->env && p < in->env + 4) || (p >= in->keyc && p < in->keyc + 4) ||
+           (p >= in->keys && p < in->keys + 4) || p == &in->zero || p == &in->primlod;
+}
+
 /* Re-derives the combiner pointers, fast paths and flags after a state change. */
 static void prepare(rdp_render *r)
 {
@@ -748,6 +858,23 @@ static void prepare(rdp_render *r)
             /* CM_PASS / CM_MUL must hold for every channel of the group (the RGB selectors are shared). */
         }
     }
+    for (int cyc = 0; cyc < 2; cyc++) {
+        const int comb_ok = om->cycle == CYC_2 && cyc == 1 && r->ccsafe[0];
+        int safe = 1;
+        for (int ch = 0; ch < 4; ch++) {
+            const int32_t *const *o = r->cp[cyc][ch];
+            switch (r->ccm[cyc][ch < 3 ? 0 : 1]) {
+            case CM_CONST: safe &= r->ccconst[cyc][ch] >= 0 && r->ccconst[cyc][ch] <= 255; break;
+            case CM_PASS: safe &= cc_in_safe(r, o[3], comb_ok); break;
+            case CM_MUL:
+                safe &= (cc_in_safe(r, o[0], comb_ok) && (cc_in_safe(r, o[2], comb_ok) || o[2] == &in->one)) ||
+                        (o[0] == &in->one && cc_in_safe(r, o[2], comb_ok));
+                break;
+            default: safe = 0; break;
+            }
+        }
+        r->ccsafe[cyc] = (uint8_t)safe;
+    }
 
     /* Blender: in 1-cycle mode the cycle-0 settings blend; in 2-cycle mode cycle 1's pixel input is cycle 0's output. */
     for (int cyc = 0; cyc < 2; cyc++) {
@@ -769,6 +896,8 @@ static void prepare(rdp_render *r)
             pass = pass && om->m1a[0] == 0 && om->m2a[0] == 0 && om->m2b[0] == 0;
         r->blend_pass = pass;
     }
+    if (!om->image_read) /* no memory read: the memory colour is 0 (not the last colour read, which depends on the band) */
+        memset(r->memc, 0, sizeof r->memc);
     r->use_z = om->z_compare || om->z_update;
     r->use_lod = om->lod_en || lodfrac_used;
     if (om->alpha_compare && om->dither_alpha)
@@ -780,36 +909,38 @@ static void prepare(rdp_render *r)
     if (lodfrac_used)
         r->use_tex = 1; /* the LOD fraction comes from the texture coordinates */
     span_select(r);
+    tiles_prep(r);
     r->dirty = 0;
 }
 
 /* ---- Pixel pipeline ------------------------------------------------------------------------------------------------ */
-ALWAYS_INLINE void combine_cycle(const rdp_render *r, int cyc, int32_t *out)
+/* One combiner cycle; cp / m / k: that cycle's operands, CM_* modes and constants (span-local copies). */
+ALWAYS_INLINE void combine_cycle(const int32_t *const cp[4][4], const uint8_t *m, const int32_t *k, int32_t *out)
 {
-    switch (r->ccm[cyc][0]) {
+    switch (m[0]) {
     case CM_CONST:
-        out[0] = r->ccconst[cyc][0];
-        out[1] = r->ccconst[cyc][1];
-        out[2] = r->ccconst[cyc][2];
+        out[0] = k[0];
+        out[1] = k[1];
+        out[2] = k[2];
         break;
     case CM_PASS:
-        out[0] = *r->cp[cyc][0][3];
-        out[1] = *r->cp[cyc][1][3];
-        out[2] = *r->cp[cyc][2][3];
+        out[0] = *cp[0][3];
+        out[1] = *cp[1][3];
+        out[2] = *cp[2][3];
         break;
     case CM_MUL:
         for (int c = 0; c < 3; c++)
-            out[c] = (*r->cp[cyc][c][0] * *r->cp[cyc][c][2] + 0x80) >> 8;
+            out[c] = (*cp[c][0] * *cp[c][2] + 0x80) >> 8;
         break;
     default:
         for (int c = 0; c < 3; c++)
-            out[c] = cc_eval(r->cp[cyc][c]);
+            out[c] = cc_eval(cp[c]);
     }
-    switch (r->ccm[cyc][1]) {
-    case CM_CONST: out[3] = r->ccconst[cyc][3]; break;
-    case CM_PASS: out[3] = *r->cp[cyc][3][3]; break;
-    case CM_MUL: out[3] = (*r->cp[cyc][3][0] * *r->cp[cyc][3][2] + 0x80) >> 8; break;
-    default: out[3] = cc_eval(r->cp[cyc][3]);
+    switch (m[1]) {
+    case CM_CONST: out[3] = k[3]; break;
+    case CM_PASS: out[3] = *cp[3][3]; break;
+    case CM_MUL: out[3] = (*cp[3][0] * *cp[3][2] + 0x80) >> 8; break;
+    default: out[3] = cc_eval(cp[3]);
     }
 }
 
@@ -843,7 +974,7 @@ ALWAYS_INLINE void blend_cycle(const rdp_render *r, int cyc, int divide, int32_t
     }
 }
 
-static int z_test(int mode, uint32_t sz, uint32_t oz, int dzc_new, int dzc_mem, int overflow)
+ALWAYS_INLINE int z_test(int mode, uint32_t sz, uint32_t oz, int dzc_new, int dzc_mem, int overflow)
 {
     int max_z = oz == 0x3FFFF;
     int32_t dzmax = (int32_t)(1u << (dzc_new > dzc_mem ? dzc_new : dzc_mem)) << 3;
@@ -864,6 +995,9 @@ static int z_test(int mode, uint32_t sz, uint32_t oz, int dzc_new, int dzc_mem, 
 #define F_Z 4u
 #define F_2C 8u
 #define F_32 16u
+#define SPAN_CHUNK 64
+#define F_FAST 32u   /* span_fast: 16-bit pixels, no key / noise / LOD */
+#define F_SIMPLE 64u /* and no memory read, blending, alpha compare or coverage tricks: those branches compile away */
 
 static inline int row_cvg(const rdp_row *row, int x)
 {
@@ -886,7 +1020,8 @@ ALWAYS_INLINE void span_std(rdp_render *r, const rdp_prim *p, const rdp_row *row
     uint8_t *restrict ram = r->ram;
     uint8_t *restrict hid = r->hidden;
     const uint32_t size = r->ram_size, ci_addr = s->ci_addr, zi_addr = s->zi_addr;
-    const int use_noise = r->use_noise, blend_pass = r->blend_pass, thr_blend = s->blend[3];
+    const int use_noise = r->use_noise, blend_pass = r->blend_pass;
+    const int thr_blend = s->blend[3];
     const uint32_t seed = r->prim_count;
     const int dzc = p->dzc;
     const uint32_t primz18 = p->primz18;
@@ -894,6 +1029,13 @@ ALWAYS_INLINE void span_std(rdp_render *r, const rdp_prim *p, const rdp_row *row
     memcpy(dadx, p->dadx, sizeof dadx);
     /* A combiner without per-pixel inputs in 1-cycle mode: its output once for the span. */
     const int cc_const = !(F & F_2C) && r->ccm[1][0] == CM_CONST && r->ccm[1][1] == CM_CONST;
+    const int safe0 = r->ccsafe[0], safe1 = r->ccsafe[1];
+    const int32_t *cpl[2][4][4];
+    uint8_t ccm[2][2];
+    int32_t ccc[2][4];
+    memcpy(cpl, r->cp, sizeof cpl);
+    memcpy(ccm, r->ccm, sizeof ccm);
+    memcpy(ccc, r->ccconst, sizeof ccc);
     int32_t ccol[4], ccomb[4];
     for (int c = 0; c < 4; c++) {
         ccol[c] = clamp9(r->ccconst[1][c]);
@@ -909,7 +1051,32 @@ ALWAYS_INLINE void span_std(rdp_render *r, const rdp_prim *p, const rdp_row *row
     memset(in->comb, 0, sizeof in->comb); /* COMBINED before the first pixel: 0, so rows do not depend on each other */
     if (!(F & F_SHADE))
         memset(in->shade, 0, sizeof in->shade);
-    for (int x = row->x0; x <= row->x1; x++) {
+    /* Without LOD the texels of a run of pixels are sampled together (one sampler call per SPAN_CHUNK pixels; pixels
+     * that turn out hidden are sampled for nothing, harmlessly). */
+    const int batch = (F & F_TEX) && !r->use_lod;
+    const int persp = M.persp && !p->rect;
+    const int tn0 = p->tile & 7, tn1 = (p->tile + 1) & 7;
+    const samp_fn samp0 = r->samp[tn0][0], samp1 = r->samp[tn1][1];
+    /* TEX1: 0 unused, 1 = TEX0 (1-cycle), 2 converted TEX0, 3 sampled from the next tile */
+    const int tex1_mode = !r->use_tex1 ? 0 : !(F & F_2C) ? 1 : M.convert_one ? 2 : 3;
+    int32_t bs[SPAN_CHUNK], bt[SPAN_CHUNK];
+    uint64_t bx0[SPAN_CHUNK], bx1[SPAN_CHUNK];
+    for (int xc = row->x0; xc <= row->x1; xc += SPAN_CHUNK) {
+    const int xe = imin(xc + SPAN_CHUNK - 1, row->x1);
+    if (batch) {
+        const int n = xe - xc + 1;
+        int32_t ls = a[A_S], lt = a[A_T], lw = a[A_W];
+        for (int k = 0; k < n; k++) {
+            tex_st(persp, ls, lt, lw, &bs[k], &bt[k]);
+            ls += dadx[A_S];
+            lt += dadx[A_T];
+            lw += dadx[A_W];
+        }
+        samp0(r, &r->td[tn0], bs, bt, n, bx0);
+        if (tex1_mode == 3)
+            samp1(r, &r->td[tn1], bs, bt, n, bx1);
+    }
+    for (int x = xc; x <= xe; x++) {
         int cvg = (x >= row->fx0 && x < row->fx1) ? 8 : row_cvg(row, x);
         if (!cvg)
             goto next;
@@ -959,27 +1126,41 @@ ALWAYS_INLINE void span_std(rdp_render *r, const rdp_prim *p, const rdp_row *row
             in->shade[2] = clamp9(a[A_B] >> 16);
             in->shade[3] = clamp9(a[A_A] >> 16);
         }
-        if (F & F_TEX)
-            tex_stage(r, p, a);
+        if ((F & F_TEX) && batch) {
+            unpk4(bx0[x - xc], in->tex0);
+            if (tex1_mode == 1)
+                memcpy(in->tex1, in->tex0, sizeof in->tex1);
+            else if (tex1_mode == 2)
+                yuv_convert(r, in->tex0, in->tex1);
+            else if (tex1_mode == 3)
+                unpk4(bx1[x - xc], in->tex1);
+        } else if (F & F_TEX) {
+            tex_stage(r, p, a[A_S], a[A_T], a[A_W]);
+        }
         /* Combiner. */
         int32_t col[4];
         if (F & F_2C) {
             int32_t c0[4];
-            combine_cycle(r, 0, c0);
-            for (int c = 0; c < 4; c++)
-                in->comb[c] = sext9(c0[c]);
-            combine_cycle(r, 1, col);
-            for (int c = 0; c < 4; c++)
-                col[c] = clamp9(col[c]);
+            combine_cycle(cpl[0], ccm[0], ccc[0], c0);
+            if (safe0)
+                memcpy(in->comb, c0, sizeof c0);
+            else
+                for (int c = 0; c < 4; c++)
+                    in->comb[c] = sext9(c0[c]);
+            combine_cycle(cpl[1], ccm[1], ccc[1], col);
+            if (!safe1)
+                for (int c = 0; c < 4; c++)
+                    col[c] = clamp9(col[c]);
         } else if (cc_const) {
             memcpy(col, ccol, sizeof col);
             memcpy(in->comb, ccomb, sizeof ccomb);
         } else {
-            combine_cycle(r, 1, col);
-            for (int c = 0; c < 4; c++) {
-                in->comb[c] = sext9(col[c]);
-                col[c] = clamp9(col[c]);
-            }
+            combine_cycle(cpl[1], ccm[1], ccc[1], col);
+            if (!safe1) /* a safe 1-cycle combiner does not read COMBINED: no need to keep it */
+                for (int c = 0; c < 4; c++) {
+                    in->comb[c] = sext9(col[c]);
+                    col[c] = clamp9(col[c]);
+                }
         }
         if (M.key)
             col[3] = key_alpha(r, col);
@@ -1072,18 +1253,373 @@ ALWAYS_INLINE void span_std(rdp_render *r, const rdp_prim *p, const rdp_row *row
         if (F & F_Z)
             a[A_Z] += dadx[A_Z];
     }
+    }
 }
 
-#define SPAN_INST(f)                                                                                                     \
-    static void span_##f(rdp_render *r, const rdp_prim *p, const rdp_row *row) { span_std(r, p, row, f); }
-SPAN_INST(0) SPAN_INST(1) SPAN_INST(2) SPAN_INST(3) SPAN_INST(4) SPAN_INST(5) SPAN_INST(6) SPAN_INST(7)
-SPAN_INST(8) SPAN_INST(9) SPAN_INST(10) SPAN_INST(11) SPAN_INST(12) SPAN_INST(13) SPAN_INST(14) SPAN_INST(15)
-SPAN_INST(16) SPAN_INST(17) SPAN_INST(18) SPAN_INST(19) SPAN_INST(20) SPAN_INST(21) SPAN_INST(22) SPAN_INST(23)
-SPAN_INST(24) SPAN_INST(25) SPAN_INST(26) SPAN_INST(27) SPAN_INST(28) SPAN_INST(29) SPAN_INST(30) SPAN_INST(31)
-static const span_fn span_table[32] = {
-    span_0,  span_1,  span_2,  span_3,  span_4,  span_5,  span_6,  span_7,  span_8,  span_9,  span_10,
-    span_11, span_12, span_13, span_14, span_15, span_16, span_17, span_18, span_19, span_20, span_21,
-    span_22, span_23, span_24, span_25, span_26, span_27, span_28, span_29, span_30, span_31,
+
+/* The span routine of F_FAST primitives (16-bit pixels, no key, noise or LOD: nearly everything games draw): the
+ * same steps as span_std with everything in locals. The combiner reads a local copy of its inputs (q, indexed like
+ * rdp_cin) and the blender local copies of its own, which the RDRAM stores cannot alias. Spans that would reach past
+ * RDRAM or wrap the 24-bit address go to span_std. */
+#define Q_OF(r, ptr) ((uint8_t)((ptr) - (const int32_t *)&(r)->in))
+#define Q_COMB 0
+#define Q_TEX0 4
+#define Q_TEX1 8
+#define Q_SHADE 12
+#define Q_N ((int)(sizeof(rdp_cin) / sizeof(int32_t)))
+
+ALWAYS_INLINE void combine_q(const int32_t *q, const uint8_t ix[4][4], const uint8_t *m, const int32_t *k, int32_t *out)
+{
+    switch (m[0]) {
+    case CM_CONST:
+        out[0] = k[0];
+        out[1] = k[1];
+        out[2] = k[2];
+        break;
+    case CM_PASS:
+        out[0] = q[ix[0][3]];
+        out[1] = q[ix[1][3]];
+        out[2] = q[ix[2][3]];
+        break;
+    case CM_MUL:
+        out[0] = (q[ix[0][0]] * q[ix[0][2]] + 0x80) >> 8;
+        out[1] = (q[ix[1][0]] * q[ix[1][2]] + 0x80) >> 8;
+        out[2] = (q[ix[2][0]] * q[ix[2][2]] + 0x80) >> 8;
+        break;
+    default:
+        for (int c = 0; c < 3; c++)
+            out[c] = ((q[ix[c][0]] - q[ix[c][1]]) * q[ix[c][2]] + q[ix[c][3]] * 256 + 0x80) >> 8;
+    }
+    switch (m[1]) {
+    case CM_CONST: out[3] = k[3]; break;
+    case CM_PASS: out[3] = q[ix[3][3]]; break;
+    case CM_MUL: out[3] = (q[ix[3][0]] * q[ix[3][2]] + 0x80) >> 8; break;
+    default: out[3] = ((q[ix[3][0]] - q[ix[3][1]]) * q[ix[3][2]] + q[ix[3][3]] * 256 + 0x80) >> 8;
+    }
+}
+
+static const span_fn span_table[64];
+
+/* 65536 / d rounded up: (n * recip4[d]) >> 16 == n / d for n <= 4080 and d <= 16 (checked exhaustively). */
+static const uint32_t recip4[17] = { 0,    65536, 32768, 21846, 16384, 13108, 10923, 9363, 8192,
+                                     7282, 6554,  5958,  5462,  5042,  4682,  4370,  4096 };
+
+/* blend_cycle on packed colours (pk4 lanes, the A lane ignored): P / M the colour inputs, a8 the 8-bit A input, bsel
+ * the B input mode. Each lane's P * a + M * (b + 1) is at most 255 * 63, so the three lanes are done at once; the
+ * divided blend's denominator is a multiple of 4 up to 60, divided through recip4. */
+ALWAYS_INLINE uint64_t blend_pk(uint64_t P, uint64_t M, int a8, int bsel, int memcvg, int divide)
+{
+    const int a = a8 >> 3;
+    const int b = bsel == 0 ? (~a & 31) : bsel == 1 ? memcvg << 2 : bsel == 2 ? 31 : 0;
+    const uint64_t sum = P * (uint64_t)a + M * (uint64_t)(b + 1);
+    if (divide) {
+        const uint32_t rc = recip4[((a & ~3) + (b & ~3) + 4) >> 2];
+        uint64_t o = 0;
+        for (int sh = 16; sh < 64; sh += 16) {
+            const uint32_t v = (((uint32_t)(sum >> sh) & 0xFFFF) >> 2) * rc >> 16;
+            o |= (uint64_t)(v > 255 ? 255 : v) << sh;
+        }
+        return o;
+    }
+    uint64_t v = (sum >> 5) & LANES(0x7FFull);                                      /* at most 510 per lane */
+    const uint64_t over = ((v + LANES(0x7F00ull)) & LANES(0x8000ull)) >> 15;          /* 1 where >= 256 */
+    return (v | over * 0xFF) & LANES(0xFFull);
+}
+
+ALWAYS_INLINE void span_fast(rdp_render *r, const rdp_prim *p, const rdp_row *row, const unsigned F)
+{
+    const rdp_state *s = &r->s;
+    const int y = row->y, x0 = row->x0, x1 = row->x1;
+    const uint32_t row_off = (uint32_t)y * (uint32_t)s->ci_width;
+    const uint32_t pa0 = s->ci_addr + ((row_off + (uint32_t)x0) << 1), pa1 = s->ci_addr + ((row_off + (uint32_t)x1) << 1);
+    const uint32_t za0 = s->zi_addr + ((row_off + (uint32_t)x0) << 1), za1 = s->zi_addr + ((row_off + (uint32_t)x1) << 1);
+    if (pa1 + 1 >= r->ram_size || pa0 > pa1 || ((F & F_Z) && (za1 + 1 >= r->ram_size || za0 > za1))) {
+        span_table[F & ~(F_FAST | F_SIMPLE)](r, p, row);
+        return;
+    }
+    const rdp_modes *om = &s->om;
+    uint8_t *restrict ram = r->ram;
+    uint8_t *restrict hid = r->hidden;
+    uint32_t pa = pa0, za = za0;
+    const int z_prim = om->z_prim, z_compare = om->z_compare, z_update = om->z_update, z_mode = om->z_mode;
+    const int SIMPLE = (F & F_SIMPLE) != 0;
+    const int image_read = !SIMPLE && om->image_read, cvg_x_alpha = !SIMPLE && om->cvg_x_alpha;
+    const int alpha_cvg_sel = !SIMPLE && om->alpha_cvg_sel, alpha_compare = !SIMPLE && om->alpha_compare;
+    const int thr_blend = s->blend[3], cvg_dest = om->cvg_dest;
+    const int color_on_cvg = !SIMPLE && om->color_on_cvg, force_blend = om->force_blend;
+    const int dzc = p->dzc;
+    const uint32_t primz18 = p->primz18;
+    const uint16_t zlow = (uint16_t)(dzc >> 2);
+    const uint8_t zhid = (uint8_t)(dzc & 3);
+    const uint8_t *dith = om->rgb_dither == 0   ? magic_matrix + (y & 3) * 4
+                          : om->rgb_dither == 1 ? bayer_matrix + (y & 3) * 4
+                                                : NULL; /* 2 (noise) is not F_FAST */
+    int32_t q[Q_N];
+    memcpy(q, &r->in, sizeof q);
+    q[Q_COMB] = q[Q_COMB + 1] = q[Q_COMB + 2] = q[Q_COMB + 3] = 0;
+    if (!(F & F_SHADE))
+        q[Q_SHADE] = q[Q_SHADE + 1] = q[Q_SHADE + 2] = q[Q_SHADE + 3] = 0;
+    uint8_t ix[2][4][4], ccm[2][2];
+    int32_t ccc[2][4];
+    for (int cy = 0; cy < 2; cy++)
+        for (int c = 0; c < 4; c++)
+            for (int o = 0; o < 4; o++)
+                ix[cy][c][o] = Q_OF(r, r->cp[cy][c][o]);
+    memcpy(ccm, r->ccm, sizeof ccm);
+    memcpy(ccc, r->ccconst, sizeof ccc);
+    const int safe0 = r->ccsafe[0], safe1 = r->ccsafe[1];
+    const int cc_const = !(F & F_2C) && ccm[1][0] == CM_CONST && ccm[1][1] == CM_CONST;
+    int32_t ccol[4];
+    for (int c = 0; c < 4; c++)
+        ccol[c] = clamp9(ccc[1][c]);
+    /* Blender inputs: P / M of each cycle among (pixel, memory, blend colour, fog colour); the pixel input of cycle 1
+     * in 2-cycle mode is cycle 0's output. A among (pixel alpha, fog alpha, shade alpha, 0). */
+    const int blend_pass = SIMPLE || r->blend_pass;
+    uint64_t bcomb = 0, bc0 = 0, memc = 0;
+    const uint64_t blc = pk4((uint32_t)s->blend[0], (uint32_t)s->blend[1], (uint32_t)s->blend[2], 0);
+    const uint64_t fogc = pk4((uint32_t)s->fog[0], (uint32_t)s->fog[1], (uint32_t)s->fog[2], 0);
+    const uint64_t *bP[2], *bM[2];
+    int bA[2], bB[2];
+    for (int cy = 0; cy < 2; cy++) {
+        const uint64_t *pix = ((F & F_2C) && cy == 1) ? &bc0 : &bcomb;
+        const uint64_t *srcs[4] = { pix, &memc, &blc, &fogc };
+        bP[cy] = srcs[om->m1a[cy]];
+        bM[cy] = srcs[om->m2a[cy]];
+        bA[cy] = om->m1b[cy];
+        bB[cy] = om->m2b[cy];
+    }
+    const int fog_a = s->fog[3];
+    const int persp = om->persp && !p->rect;
+    const int tn0 = p->tile & 7, tn1 = (p->tile + 1) & 7;
+    const samp_fn samp0 = r->samp[tn0][0], samp1 = r->samp[tn1][1];
+    const int tex1_mode = !r->use_tex1 ? 0 : !(F & F_2C) ? 1 : om->convert_one ? 2 : 3;
+    const int fx0 = row->fx0, fx1 = row->fx1;
+    const int32_t dr = p->dadx[A_R], dg = p->dadx[A_G], db = p->dadx[A_B], da = p->dadx[A_A];
+    const int32_t ds = p->dadx[A_S], dt = p->dadx[A_T], dw = p->dadx[A_W], dz = p->dadx[A_Z];
+    int32_t ar = row->a[A_R], ag = row->a[A_G], ab = row->a[A_B], aa = row->a[A_A];
+    int32_t as = row->a[A_S], at = row->a[A_T], aw = row->a[A_W], az = row->a[A_Z];
+    int32_t bs[SPAN_CHUNK], bt[SPAN_CHUNK];
+    uint64_t bx0[SPAN_CHUNK], bx1[SPAN_CHUNK];
+    for (int xc = x0; xc <= x1; xc += SPAN_CHUNK) {
+        const int xe = imin(xc + SPAN_CHUNK - 1, x1);
+        if (F & F_TEX) {
+            const int n = xe - xc + 1;
+            for (int k = 0; k < n; k++) {
+                tex_st(persp, as, at, aw, &bs[k], &bt[k]);
+                as += ds;
+                at += dt;
+                aw += dw;
+            }
+            samp0(r, &r->td[tn0], bs, bt, n, bx0);
+            if (tex1_mode == 3)
+                samp1(r, &r->td[tn1], bs, bt, n, bx1);
+        }
+        for (int x = xc; x <= xe; x++, pa += 2, za += 2) {
+            const int k = x - xc;
+            const int32_t sr = ar, sg = ag, sb = ab, sa = aa, cz = az;
+            if (F & F_SHADE) {
+                ar += dr;
+                ag += dg;
+                ab += db;
+                aa += da;
+            }
+            if (F & F_Z)
+                az += dz;
+            const int cvg = (x >= fx0 && x < fx1) ? 8 : row_cvg(row, x);
+            if (!cvg)
+                continue;
+            int memcvg = 7;
+            if (image_read) {
+                const uint16_t v = n64_be16(ram + pa);
+                memc = rgba5551_pk(v);
+                memcvg = (v & 1) << 2 | hid[pa >> 1];
+            }
+            uint32_t z18 = 0;
+            if (F & F_Z) {
+                z18 = z_prim ? primz18 : cz < 0 ? 0 : (uint32_t)cz >> 13;
+                if (z_compare) {
+                    const uint16_t zm = n64_be16(ram + za);
+                    const int dzm = (zm & 3) << 2 | hid[za >> 1];
+                    if (!z_test(z_mode, z18, z_decompress(zm >> 2), dzc, dzm, cvg + memcvg >= 8))
+                        continue;
+                }
+            }
+            if (F & F_SHADE) {
+                q[Q_SHADE] = clamp9(sr >> 16);
+                q[Q_SHADE + 1] = clamp9(sg >> 16);
+                q[Q_SHADE + 2] = clamp9(sb >> 16);
+                q[Q_SHADE + 3] = clamp9(sa >> 16);
+            }
+            if (F & F_TEX) {
+                unpk4(bx0[k], q + Q_TEX0);
+                if (tex1_mode == 1)
+                    memcpy(q + Q_TEX1, q + Q_TEX0, 4 * sizeof *q);
+                else if (tex1_mode == 2)
+                    yuv_convert(r, q + Q_TEX0, q + Q_TEX1);
+                else if (tex1_mode == 3)
+                    unpk4(bx1[k], q + Q_TEX1);
+            }
+            int32_t col[4];
+            if (F & F_2C) {
+                int32_t c0[4];
+                combine_q(q, ix[0], ccm[0], ccc[0], c0);
+                if (safe0)
+                    memcpy(q + Q_COMB, c0, sizeof c0);
+                else
+                    for (int c = 0; c < 4; c++)
+                        q[Q_COMB + c] = sext9(c0[c]);
+                combine_q(q, ix[1], ccm[1], ccc[1], col);
+                if (!safe1)
+                    for (int c = 0; c < 4; c++)
+                        col[c] = clamp9(col[c]);
+            } else if (cc_const) {
+                memcpy(col, ccol, sizeof col);
+            } else {
+                combine_q(q, ix[1], ccm[1], ccc[1], col);
+                if (!safe1)
+                    for (int c = 0; c < 4; c++) {
+                        q[Q_COMB + c] = sext9(col[c]);
+                        col[c] = clamp9(col[c]);
+                    }
+            }
+            int pcvg = cvg;
+            if (cvg_x_alpha)
+                pcvg = (cvg * (col[3] + 1)) >> 8;
+            const int alpha = alpha_cvg_sel ? imin(pcvg << 5, 255) : col[3];
+            if (alpha_compare && alpha < thr_blend)
+                continue;
+            const int overflow = pcvg + memcvg >= 8;
+            int cr = col[0], cg = col[1], cb = col[2];
+            if (!blend_pass) {
+                bcomb = pk4((uint32_t)col[0], (uint32_t)col[1], (uint32_t)col[2], 0);
+                const int shade_a = q[Q_SHADE + 3];
+                int fc = 0;
+                if (F & F_2C) {
+                    const int a8 = bA[0] == 0 ? alpha : bA[0] == 1 ? fog_a : bA[0] == 2 ? shade_a : 0;
+                    bc0 = blend_pk(*bP[0], *bM[0], a8, bB[0], memcvg, 0);
+                    fc = 1;
+                }
+                uint64_t o;
+                if (force_blend || overflow) {
+                    const int a8 = bA[fc] == 0 ? alpha : bA[fc] == 1 ? fog_a : bA[fc] == 2 ? shade_a : 0;
+                    o = blend_pk(*bP[fc], *bM[fc], a8, bB[fc], memcvg, !force_blend);
+                } else {
+                    o = *bP[fc];
+                }
+                cr = (int)(o >> 48) & 0xFF;
+                cg = (int)(o >> 32) & 0xFF;
+                cb = (int)(o >> 16) & 0xFF;
+            }
+            int ncvg;
+            switch (cvg_dest) {
+            case 0: ncvg = overflow ? 7 : pcvg + memcvg; break;
+            case 1: ncvg = (pcvg + memcvg) & 7; break;
+            case 2: ncvg = 7; break;
+            default: ncvg = memcvg; break;
+            }
+            if (color_on_cvg && !overflow) { /* coverage only */
+                ram[pa + 1] = (uint8_t)((ram[pa + 1] & 0xFE) | ncvg >> 2);
+                hid[pa >> 1] = (uint8_t)(ncvg & 3);
+            } else {
+                if (dith) {
+                    const int dv = dith[x & 3];
+                    cr = ((cr & 7) > dv) ? imin(cr + 8, 255) : cr;
+                    cg = ((cg & 7) > dv) ? imin(cg + 8, 255) : cg;
+                    cb = ((cb & 7) > dv) ? imin(cb + 8, 255) : cb;
+                }
+                n64_wbe16(ram + pa, (uint16_t)((cr >> 3) << 11 | (cg >> 3) << 6 | (cb >> 3) << 1 | ncvg >> 2));
+                hid[pa >> 1] = (uint8_t)(ncvg & 3);
+            }
+            if ((F & F_Z) && z_update) {
+                n64_wbe16(ram + za, (uint16_t)(z_compress(z18) << 2 | zlow));
+                hid[za >> 1] = zhid;
+            }
+        }
+    }
+}
+
+#define SPAN_INST(i, f)                                                                                                  \
+    static void span_##i(rdp_render *r, const rdp_prim *p, const rdp_row *row)                                           \
+    {                                                                                                                    \
+        if ((f) & F_FAST)                                                                                                \
+            span_fast(r, p, row, f);                                                                                     \
+        else                                                                                                             \
+            span_std(r, p, row, f);                                                                                      \
+    }
+/* span_table[f] for f < 32 (span_std), [32 + (f & 15)] F_FAST, [48 + (f & 15)] F_FAST | F_SIMPLE. */
+SPAN_INST(0, 0u)
+SPAN_INST(1, 1u)
+SPAN_INST(2, 2u)
+SPAN_INST(3, 3u)
+SPAN_INST(4, 4u)
+SPAN_INST(5, 5u)
+SPAN_INST(6, 6u)
+SPAN_INST(7, 7u)
+SPAN_INST(8, 8u)
+SPAN_INST(9, 9u)
+SPAN_INST(10, 10u)
+SPAN_INST(11, 11u)
+SPAN_INST(12, 12u)
+SPAN_INST(13, 13u)
+SPAN_INST(14, 14u)
+SPAN_INST(15, 15u)
+SPAN_INST(16, 16u)
+SPAN_INST(17, 17u)
+SPAN_INST(18, 18u)
+SPAN_INST(19, 19u)
+SPAN_INST(20, 20u)
+SPAN_INST(21, 21u)
+SPAN_INST(22, 22u)
+SPAN_INST(23, 23u)
+SPAN_INST(24, 24u)
+SPAN_INST(25, 25u)
+SPAN_INST(26, 26u)
+SPAN_INST(27, 27u)
+SPAN_INST(28, 28u)
+SPAN_INST(29, 29u)
+SPAN_INST(30, 30u)
+SPAN_INST(31, 31u)
+SPAN_INST(32, 32u)
+SPAN_INST(33, 33u)
+SPAN_INST(34, 34u)
+SPAN_INST(35, 35u)
+SPAN_INST(36, 36u)
+SPAN_INST(37, 37u)
+SPAN_INST(38, 38u)
+SPAN_INST(39, 39u)
+SPAN_INST(40, 40u)
+SPAN_INST(41, 41u)
+SPAN_INST(42, 42u)
+SPAN_INST(43, 43u)
+SPAN_INST(44, 44u)
+SPAN_INST(45, 45u)
+SPAN_INST(46, 46u)
+SPAN_INST(47, 47u)
+SPAN_INST(48, 96u)
+SPAN_INST(49, 97u)
+SPAN_INST(50, 98u)
+SPAN_INST(51, 99u)
+SPAN_INST(52, 100u)
+SPAN_INST(53, 101u)
+SPAN_INST(54, 102u)
+SPAN_INST(55, 103u)
+SPAN_INST(56, 104u)
+SPAN_INST(57, 105u)
+SPAN_INST(58, 106u)
+SPAN_INST(59, 107u)
+SPAN_INST(60, 108u)
+SPAN_INST(61, 109u)
+SPAN_INST(62, 110u)
+SPAN_INST(63, 111u)
+static const span_fn span_table[64] = {
+    span_0, span_1, span_2, span_3, span_4, span_5, span_6, span_7,
+    span_8, span_9, span_10, span_11, span_12, span_13, span_14, span_15,
+    span_16, span_17, span_18, span_19, span_20, span_21, span_22, span_23,
+    span_24, span_25, span_26, span_27, span_28, span_29, span_30, span_31,
+    span_32, span_33, span_34, span_35, span_36, span_37, span_38, span_39,
+    span_40, span_41, span_42, span_43, span_44, span_45, span_46, span_47,
+    span_48, span_49, span_50, span_51, span_52, span_53, span_54, span_55,
+    span_56, span_57, span_58, span_59, span_60, span_61, span_62, span_63,
 };
 
 /* Fill mode: the fill colour over the span (no coverage, no pipeline). */
@@ -1122,11 +1658,18 @@ static void span_select(rdp_render *r)
         f |= F_2C;
     if (r->s.ci_size == 3)
         f |= F_32;
+    else if (r->s.ci_size == 2 && !om->key && !r->use_noise && !r->use_lod)
+        f |= (!om->image_read && r->blend_pass && !om->cvg_x_alpha && !om->alpha_cvg_sel && !om->alpha_compare &&
+              !om->color_on_cvg)
+                 ? 48u
+                 : 32u;
     r->span = span_table[f];
 }
 
 /* ---- Edge walker --------------------------------------------------------------------------------------------------- */
 static inline int32_t xclamp(int64_t v) { return v > (1 << 30) ? (1 << 30) : v < -(1 << 30) ? -(1 << 30) : (int32_t)v; }
+
+static void dec_update(rdp_render *r);
 
 static void raster(rdp_render *r, const rdp_prim *p)
 {
@@ -1136,12 +1679,27 @@ static void raster(rdp_render *r, const rdp_prim *p)
         return;
     if (r->dirty)
         prepare(r);
+    else if (r->tdirty)
+        tiles_prep(r);
+    if (r->dhi && r->use_tex &&
+        (r->dec_tiles & (r->use_lod ? 0xFFu : (1u << (p->tile & 7) | 1u << ((p->tile + 1) & 7)))))
+        dec_update(r);
     r->prim_count++;
     const int k0 = p->yh & ~3, y0 = k0 >> 2;
     const int32_t ih = p->dxh >> 2, im = p->dxm >> 2, il = p->dxl >> 2;
     const int64_t clx0 = (int64_t)s->sc_x0 << 14, clx1 = (int64_t)s->sc_x1 << 14;
-    for (int y = ytop >> 2; y <= (ybot - 1) >> 2; y++) {
-        if (!row_mine(r, y) || (s->sc_field && (y & 1) != s->sc_odd))
+    /* only the attributes the span reads */
+    const unsigned amask = (r->use_shade ? 0x0Fu : 0u) | (r->use_tex ? 0x70u : 0u) | (r->use_z ? 0x80u : 0u);
+    /* the rows of this renderer's band: blocks of 4 rows, one block in nb */
+    const int nb = r->nbands, ylast = (ybot - 1) >> 2;
+    int y = ytop >> 2;
+    if (nb > 1) {
+        const int blk = y >> 2, m = blk % nb;
+        if (m != r->band)
+            y = (blk + (r->band - m + nb) % nb) * 4;
+    }
+    for (; y <= ylast; y = (nb > 1 && ((y + 1) & 3) == 0) ? y + 1 + 4 * (nb - 1) : y + 1) {
+        if (s->sc_field && (y & 1) != s->sc_odd)
             continue;
         rdp_row row;
         row.y = y;
@@ -1187,7 +1745,8 @@ static void raster(rdp_render *r, const rdp_prim *p)
         const int64_t xm = (int64_t)p->xh + (int64_t)ih * (y * 4 - k0);
         const int64_t dx = ((int64_t)row.x0 << 16) - xm;
         for (int i = 0; i < A_N; i++)
-            row.a[i] = (int32_t)((uint32_t)p->a0[i] + (uint32_t)p->dade[i] * (uint32_t)(y - y0) +
+            row.a[i] = !(amask >> i & 1) ? 0 :
+                       (int32_t)((uint32_t)p->a0[i] + (uint32_t)p->dade[i] * (uint32_t)(y - y0) +
                                  (uint32_t)(((int64_t)p->dadx[i] * dx) >> 16));
         r->span(r, p, &row);
     }
@@ -1264,11 +1823,18 @@ static void fill_rect(rdp_render *r, int xh, int yh, int xl, int yl)
     }
 }
 
+/* Copy mode: texels straight to the pixels. The texel coordinate along the row comes from the tile's derived
+ * parameters (td_axis); the other one is computed once per row. */
 static void copy_rect(rdp_render *r, int xh, int yh, int xl, int yl, int tn, int32_t S, int32_t T, int32_t dsdx,
                       int32_t dtdy, int flip)
 {
     rdp_state *s = &r->s;
+    if (r->dirty)
+        prepare(r);
+    else if (r->tdirty)
+        tiles_prep(r);
     const rdp_tile *t = &s->tile[tn];
+    const rdp_tdesc *td = &r->td[tn];
     int sx0, sy0, sx1, sy1;
     scissor_px(s, &sx0, &sy0, &sx1, &sy1);
     const int bx = xh >> 2, by = yh >> 2;
@@ -1279,35 +1845,40 @@ static void copy_rect(rdp_render *r, int xh, int yh, int xl, int yl, int tn, int
     const int osz = s->ci_size;
     const int acmp = s->om.alpha_compare;
     uint8_t *ram = r->ram;
+    const uint32_t size = r->ram_size, ci_addr = s->ci_addr;
+    const int32_t dx = flip ? dtdy : dsdx; /* per pixel along the row (s10.10, / 4) */
     for (int y = y0; y <= y1; y++) {
         if (!row_mine(r, y) || (s->sc_field && (y & 1) != s->sc_odd))
             continue;
         const uint32_t row = (uint32_t)y * (uint32_t)s->ci_width;
         /* s10.10 coordinates: copy mode steps dsdx / 4 per pixel (4.0 = one texel per pixel). */
-        int32_t fy = (flip ? dsdx : dtdy) * (y - by);
+        const int32_t fy = (flip ? dsdx : dtdy) * (y - by);
+        int i1, f, rc; /* the coordinate constant over the row */
+        td_axis(td, flip ? 0 : 1, ((flip ? S : T) * 32 + fy) >> 5, &rc, &i1, &f);
+        const int ax = flip ? 1 : 0;
+        const int32_t base = (flip ? T : S) * 32;
         for (int x = x0; x <= x1; x++) {
-            int32_t fx = (flip ? dtdy : dsdx) * (x - bx) / 4;
-            int32_t ss = (S * 32 + (flip ? fy : fx)) >> 5, tt = (T * 32 + (flip ? fx : fy)) >> 5;
-            int s0, s1, fs, t0, t1, ft;
-            tile_coords(t, ss, tt, &s0, &s1, &fs, &t0, &t1, &ft);
-            uint32_t v = copy_texel(r, t, s0, t0, osz);
+            int32_t fx = dx * (x - bx) / 4;
+            int c, d0, df;
+            td_axis(td, ax, (base + fx) >> 5, &c, &d0, &df);
+            uint32_t v = flip ? copy_texel(r, t, rc, c, osz) : copy_texel(r, t, c, rc, osz);
             if (osz == 3) {
-                uint32_t a = (s->ci_addr + ((row + (uint32_t)x) << 2)) & 0xFFFFFF;
+                uint32_t a = (ci_addr + ((row + (uint32_t)x) << 2)) & 0xFFFFFF;
                 if (acmp && !(v & 0xFF))
                     continue;
-                if (a + 3 < r->ram_size)
+                if (a + 3 < size)
                     n64_wbe32(ram + a, v);
             } else if (osz == 2) {
-                uint32_t a = (s->ci_addr + ((row + (uint32_t)x) << 1)) & 0xFFFFFF;
+                uint32_t a = (ci_addr + ((row + (uint32_t)x) << 1)) & 0xFFFFFF;
                 if (acmp && !(v & 1))
                     continue;
-                if (a + 1 < r->ram_size) {
+                if (a + 1 < size) {
                     n64_wbe16(ram + a, (uint16_t)v);
                     r->hidden[a >> 1] = (v & 1) ? 3 : 0;
                 }
             } else {
-                uint32_t a = (s->ci_addr + row + (uint32_t)x) & 0xFFFFFF;
-                if (a < r->ram_size)
+                uint32_t a = (ci_addr + row + (uint32_t)x) & 0xFFFFFF;
+                if (a < size)
                     ram[a] = (uint8_t)v;
             }
         }
@@ -1315,6 +1886,32 @@ static void copy_rect(rdp_render *r, int xh, int yh, int xl, int yl, int tn, int
 }
 
 /* ---- TMEM loads ---------------------------------------------------------------------------------------------------- */
+/* TMEM bytes [lo, hi) were written: dec16 is brought up to date before a primitive samples them (dec_update). */
+static void tmem_dirty(rdp_render *r, uint32_t lo, uint32_t hi)
+{
+    if (hi > 4096) { /* wrapped: all of it */
+        lo = 0;
+        hi = 4096;
+    }
+    if (lo >= hi)
+        return;
+    if (r->dhi == 0) {
+        r->dlo = lo;
+        r->dhi = hi;
+    } else {
+        r->dlo = r->dlo < lo ? r->dlo : lo;
+        r->dhi = r->dhi > hi ? r->dhi : hi;
+    }
+}
+
+static void dec_update(rdp_render *r)
+{
+    const uint8_t *tm = r->s.tmem;
+    for (uint32_t i = r->dlo >> 1; i < (r->dhi + 1) >> 1; i++)
+        r->dec16[i] = rgba5551_pk((uint32_t)(tm[2 * i] << 8 | tm[2 * i + 1]));
+    r->dlo = r->dhi = 0;
+}
+
 static void set_tile_size(rdp_tile *t, uint64_t w)
 {
     t->sl = (uint16_t)((w >> 44) & 0xFFF);
@@ -1333,6 +1930,12 @@ static void load_tile(rdp_render *r, uint64_t w)
         return;
     const int n = s1 - s0 + 1;
     uint8_t *tm = s->tmem;
+    if (s->ti_size == 3 || (t->fmt == FMT_YUV && s->ti_size == 2)) {
+        tmem_dirty(r, 0, 4096);
+    } else {
+        const uint32_t bytes = s->ti_size == 0 ? ((uint32_t)n + 1) >> 1 : ((uint32_t)n << s->ti_size) >> 1;
+        tmem_dirty(r, t->tmem & ~7u, (t->tmem + (uint32_t)(t1 - t0) * t->line + bytes + 7) & ~7u);
+    }
     for (int i = 0; i <= t1 - t0; i++) {
         uint32_t src = s->ti_addr + ((((uint32_t)(t0 + i) * (uint32_t)s->ti_width + (uint32_t)s0) << s->ti_size) >> 1);
         uint32_t dst = t->tmem + (uint32_t)(i * t->line), x = (i & 1) ? 4 : 0;
@@ -1378,6 +1981,7 @@ static void load_block(rdp_render *r, uint64_t w)
     uint8_t *tm = s->tmem;
     uint32_t acc = 0;
     if (s->ti_size == 3) { /* 4 texels per TMEM word of each half */
+        tmem_dirty(r, 0, 4096);
         for (uint32_t wd = 0; wd < (n + 3) / 4; wd++) {
             uint32_t x = (acc >> 11) & 1 ? 4 : 0;
             acc += dxt;
@@ -1392,6 +1996,7 @@ static void load_block(rdp_render *r, uint64_t w)
         return;
     }
     const uint32_t bytes = s->ti_size == 0 ? (n + 1) >> 1 : (n << s->ti_size) >> 1;
+    tmem_dirty(r, t->tmem, t->tmem + (bytes + 7) / 8 * 8);
     for (uint32_t wd = 0; wd < (bytes + 7) / 8; wd++) {
         uint32_t x = (acc >> 11) & 1 ? 4 : 0;
         acc += dxt;
@@ -1409,6 +2014,7 @@ static void load_tlut(rdp_render *r, uint64_t w)
     if (s1 < s0)
         return;
     uint32_t src = s->ti_addr + (((uint32_t)(t->tl >> 2) * (uint32_t)s->ti_width + (uint32_t)s0) << 1);
+    tmem_dirty(r, t->tmem, t->tmem + (uint32_t)(s1 - s0 + 1) * 8);
     for (int i = 0; i <= s1 - s0; i++) {
         uint8_t hi = ram8(r, src + (uint32_t)i * 2), lo = ram8(r, src + (uint32_t)i * 2 + 1);
         for (int c = 0; c < 4; c++) {
@@ -1634,11 +2240,12 @@ static void exec_cmd(rdp_render *r, const uint64_t *w)
         set_other_modes(r, w0);
         r->dirty = 1;
         break;
-    case 0x30: load_tlut(r, w0); break;
-    case 0x32: set_tile_size(&s->tile[(w0 >> 24) & 7], w0); break;
-    case 0x33: load_block(r, w0); break;
-    case 0x34: load_tile(r, w0); break;
+    case 0x30: load_tlut(r, w0); r->tdirty = 1; break;
+    case 0x32: set_tile_size(&s->tile[(w0 >> 24) & 7], w0); r->tdirty = 1; break;
+    case 0x33: load_block(r, w0); r->tdirty = 1; break;
+    case 0x34: load_tile(r, w0); r->tdirty = 1; break;
     case 0x35: { /* set tile */
+        r->tdirty = 1;
         rdp_tile *t = &s->tile[(w0 >> 24) & 7];
         t->fmt = (uint8_t)((w0 >> 53) & 7);
         t->size = (uint8_t)((w0 >> 51) & 3);
@@ -1845,6 +2452,8 @@ int n64_rdp_set_threads(n64_rdp *d, int n)
         d->rd[i]->nbands = n;
         d->rd[i]->prim_count = d->rd[0]->prim_count;
         d->rd[i]->dirty = 1;
+        if (i)
+            tmem_dirty(d->rd[i], 0, 4096); /* TMEM copied from renderer 0 */
     }
     d->nthreads = n;
     if (n > 1 && !d->batch) {
@@ -1923,10 +2532,11 @@ static void dispatch(n64_rdp *d, const uint64_t *w, int len)
     d->clock = (d->clock + cost) & 0xFFFFFF;
     d->bufbusy = (d->bufbusy + cost) & 0xFFFFFF;
     const int draw = (id >= 0x08 && id <= 0x0F) || id == 0x24 || id == 0x25 || id == 0x36;
-    if (draw) {
+    if (draw)
         d->pipebusy = (d->pipebusy + cost) & 0xFFFFFF;
+    if (id != 0x29) /* commands after a SYNC_FULL in the same buffer start the pipe again */
         d->status |= ST_PIPE_BUSY | ST_GCLK;
-    }
+
     if (id == 0x30 || id == 0x33 || id == 0x34) {
         uint32_t sh = (uint32_t)(w0 >> 12) & 0xFFF, sl = (uint32_t)(w0 >> 44) & 0xFFF;
         d->tmemc = (d->tmemc + ((sh - sl) >> 2) + 4) & 0xFFFFFF;
@@ -2027,8 +2637,9 @@ n64_rdp *n64_rdp_create(n64_rcp_bus bus)
 #endif
     n64_rdp_reset(d);
     const char *env = getenv("XBR_N64_RDP_THREADS");
-    if (env && atoi(env) > 1)
-        n64_rdp_set_threads(d, atoi(env));
+    const int nt = env ? atoi(env) : N64_RDP_DEFAULT_THREADS;
+    if (nt > 1)
+        n64_rdp_set_threads(d, nt);
     return d;
 }
 
@@ -2073,6 +2684,7 @@ void n64_rdp_reset(n64_rdp *d)
             state_reset(&d->rd[i]->s);
             d->rd[i]->prim_count = 0;
             d->rd[i]->dirty = 1;
+            tmem_dirty(d->rd[i], 0, 4096);
         }
 }
 
@@ -2110,6 +2722,7 @@ void n64_rdp_write_reg(n64_rdp *d, uint32_t reg, uint32_t v)
         break;
     case 1:
         d->end = v & 0xFFFFF8;
+        d->status |= ST_PIPE_BUSY | ST_GCLK; /* the pipe and its clock run from here until SYNC_FULL */
         if (d->start_pending) {
             d->current = d->start;
             d->start_pending = 0;
