@@ -233,6 +233,14 @@ public class TitleApkTest {
                                                        || v.startsWith(old + ":"));
             }
         }
+        // INTERNET (the Drivers screen, VkDriverIndex) is XRecomp's only: the template asks for it, the copy does not.
+        // The other permissions stay.
+        assertTrue(usesPermissions(BinaryXml.parse(m)).contains("android.permission.INTERNET"));
+        List<String> perms = usesPermissions(x);
+        assertFalse(perms.toString(), perms.contains("android.permission.INTERNET"));
+        assertTrue(perms.contains("android.permission.VIBRATE"));
+        assertTrue(perms.contains("android.permission.REQUEST_INSTALL_PACKAGES"));
+        assertEquals(usesPermissions(BinaryXml.parse(m)).size() - 1, perms.size());
         // The one-game meta-data.
         Map<String, String> meta = meta(x);
         assertEquals(TID, meta.get(TitleApk.META_TITLE_ID));
@@ -242,6 +250,16 @@ public class TitleApkTest {
         byte[] again = TitleApk.patchManifest(p, s);
         assertEquals(3, metaCount(BinaryXml.parse(again)));
         assertEquals(meta, meta(BinaryXml.parse(again)));
+        assertFalse(usesPermissions(BinaryXml.parse(again)).contains("android.permission.INTERNET"));
+    }
+
+    private static List<String> usesPermissions(BinaryXml x) {
+        List<String> l = new ArrayList<>();
+        for (int el : x.descendants(x.root())) {
+            if (x.name(el).startsWith("uses-permission"))
+                l.add(x.value(x.attr(el, TitleApk.ATTR_NAME)));
+        }
+        return l;
     }
 
     private static Map<String, String> meta(BinaryXml x) {

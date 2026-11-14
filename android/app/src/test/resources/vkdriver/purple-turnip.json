@@ -1,0 +1,62 @@
+[
+ {
+  "tag_name": "vturnip_mrpurple_T30-toasted.adpkg",
+  "name": "turnip_mrpurple_T30-toasted.adpkg",
+  "draft": false,
+  "prerelease": false,
+  "published_at": "2026-08-17T12:38:01Z",
+  "assets": [
+   {
+    "name": "turnip_mrpurple_T30-toasted.adpkg.zip",
+    "size": 3713730,
+    "digest": "sha256:f65b2d3353fd4aa7190bb5426b94468e99ffea7a58a830bc0c4651db89353227",
+    "browser_download_url": "https://github.com/MrPurple666/purple-turnip/releases/download/vturnip_mrpurple_T30-toasted.adpkg/turnip_mrpurple_T30-toasted.adpkg.zip"
+   }
+  ]
+ },
+ {
+  "tag_name": "vturnip_mrpurple_T29-toasted.adpkg",
+  "name": "turnip_mrpurple_T29-toasted.adpkg",
+  "draft": false,
+  "prerelease": false,
+  "published_at": "2026-07-09T20:14:17Z",
+  "assets": [
+   {
+    "name": "turnip_mrpurple_T29-toasted.adpkg.zip",
+    "size": 3272055,
+    "digest": "sha256:606d5c1d7fa3e54467972d1813682e914565fe6ef8ff4000e320e6ed1a261d05",
+    "browser_download_url": "https://github.com/MrPurple666/purple-turnip/releases/download/vturnip_mrpurple_T29-toasted.adpkg/turnip_mrpurple_T29-toasted.adpkg.zip"
+   }
+  ]
+ },
+ {
+  "tag_name": "vturnip_mrpurple_T28-toasted.adpkg",
+  "name": "turnip_mrpurple_T28-toasted.adpkg",
+  "draft": false,
+  "prerelease": false,
+  "published_at": "2026-04-27T01:41:35Z",
+  "assets": [
+   {
+    "name": "turnip_mrpurple_T28-toasted.adpkg.zip",
+    "size": 3425845,
+    "digest": "sha256:5f1b34dfd7e2b60d6f094d0068bb8af8b9f7706006768941133e02dd148138ef",
+    "browser_download_url": "https://github.com/MrPurple666/purple-turnip/releases/download/vturnip_mrpurple_T28-toasted.adpkg/turnip_mrpurple_T28-toasted.adpkg.zip"
+   }
+  ]
+ },
+ {
+  "tag_name": "vturnip_mrpurple_T27-toasted.adpkg",
+  "name": "turnip_mrpurple_T27-toasted.adpkg",
+  "draft": false,
+  "prerelease": false,
+  "published_at": "2026-04-25T21:20:30Z",
+  "assets": [
+   {
+    "name": "turnip_mrpurple_T27-toasted.adpkg.zip",
+    "size": 3420827,
+    "digest": "sha256:f6f660321518eb720fe5953147adf8fd84f9e3cf90b227db1ab456cc3475a6b3",
+    "browser_download_url": "https://github.com/MrPurple666/purple-turnip/releases/download/vturnip_mrpurple_T27-toasted.adpkg/turnip_mrpurple_T27-toasted.adpkg.zip"
+   }
+  ]
+ }
+]

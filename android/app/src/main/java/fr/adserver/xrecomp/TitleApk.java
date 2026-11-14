@@ -22,7 +22,8 @@ import java.util.function.BooleanSupplier;
  *    label (a literal string), the icon slot mipmap/xba_title_icon as icon and roundIcon, every provider authority and
  *    package-derived name (permissions, task affinity, process) moved to the new package, the component class names
  *    written in full (they stay fr.adserver.xrecomp.*), and the meta-data that put the copy in one-game mode
- *    (META_TITLE_ID, META_XBE_SHA256, META_PARENT).
+ *    (META_TITLE_ID, META_XBE_SHA256, META_PARENT); XRecomp-only permissions (PARENT_ONLY_PERMISSIONS: INTERNET)
+ *    dropped.
  * 2. The icon slot's PNG (res/drawable-nodpi/xba_title_icon_art.png in the template) replaced by the game's icon:
  *    resources.arsc only names the file, so nothing else changes.
  * 3. The old signature files (META-INF/*.SF, .RSA, .DSA, .EC, MANIFEST.MF) and the source stamp dropped.
@@ -55,6 +56,12 @@ final class TitleApk {
         "application", "activity", "activity-alias", "service", "receiver", "provider", "instrumentation");
     private static final List<String> PERMISSION_TAGS = java.util.Arrays.asList(
         "permission", "permission-group", "permission-tree", "uses-permission", "uses-permission-sdk-23");
+    /**
+     * Permissions XRecomp asks for that a game's own app does not get: their {@code <uses-permission>} is dropped
+     * from the copy. INTERNET: only XRecomp's Drivers screen uses the network (VkDriverIndex).
+     */
+    static final List<String> PARENT_ONLY_PERMISSIONS = java.util.Collections.singletonList(
+        "android.permission.INTERNET");
 
     /** What the copy is: the game's title ID, label, the XBE it is locked to, the icon PNG and where it goes. */
     static final class Spec {
@@ -111,6 +118,17 @@ final class TitleApk {
         if (old == null || old.isEmpty())
             throw new IOException("AndroidManifest.xml: no package");
         String pkg = s.packageName();
+
+        // XRecomp-only permissions (PARENT_ONLY_PERMISSIONS) left out of the copy (last first: the indices before a
+        // removed element stay valid).
+        List<Integer> all = x.descendants(root);
+        for (int i = all.size() - 1; i >= 0; i--) {
+            int el = all.get(i);
+            String tag = x.name(el);
+            if ((tag.equals("uses-permission") || tag.equals("uses-permission-sdk-23"))
+                && PARENT_ONLY_PERMISSIONS.contains(x.value(x.attr(el, ATTR_NAME))))
+                x.remove(el);
+        }
 
         for (int el : x.descendants(root)) {
             String tag = x.name(el);

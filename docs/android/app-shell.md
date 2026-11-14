@@ -258,7 +258,8 @@ installed APK (`ApplicationInfo.sourceDir`), copied entry by entry into `files/t
 1. `AndroidManifest.xml` (binary XML) patched: `package`; `android:label` as a string; `android:icon` and
    `android:roundIcon` to the slot (`R.mipmap.xba_title_icon`, the same id since the template is this APK); every
    provider authority (`<package>.logs`) and package-derived name (permissions, task affinity, process) moved to the
-   new package; component class names written in full against the old package (AGP's merged manifest has them in
+   new package; XRecomp-only permissions left out (`INTERNET`, see
+   [Vulkan drivers](#vulkan-drivers-list-and-download)); component class names written in full against the old package (AGP's merged manifest has them in
    full already), so they stay `fr.adserver.xrecomp.*`; the three meta-data added (replaced when present).
    Attributes stay sorted by resource id; a manifest read and written back unchanged gives the same bytes.
 2. The slot's PNG replaced (its path is what `Resources.getValue` says, `res/drawable-nodpi-v4/…`, so a release build
@@ -924,6 +925,62 @@ In the launcher, Settings › Graphics:
   `data_extraction_rules.xml`; `allowBackup` is off anyway) and `LogProvider` refuses any path under it.
 
 Device check: [framegen.md](../technical/framegen.md) and the Device checklist of the frame generation work.
+
+### Vulkan drivers (list and download)
+
+The N64 Vulkan RDP can run on a Mesa Turnip driver instead of the system one. **No driver is part of the app**: the
+player picks one from a list of public GitHub releases (or imports a zip), and it is downloaded into the app's own
+storage. `VkDriverIndex` makes the list and the download; the driver store (`VkDrivers`) and the Drivers screen are
+separate pieces.
+
+**Network use.** This is the only place XRecomp uses the network, hence `android.permission.INTERNET` in the manifest
+(no `ACCESS_NETWORK_STATE`; cleartext stays off). Requests are made only when the Drivers screen asks: nothing at
+start, nothing in the background. A game's own app does not get the permission (`TitleApk.PARENT_ONLY_PERMISSIONS`
+drops its `<uses-permission>` from the copy), and `VkDriverIndex.networkAllowed` is false there: no request, state
+`NO_NETWORK`.
+
+| Source | Listed |
+|---|---|
+| `MrPurple666/purple-turnip` | every `.zip` asset |
+| `K11MCH1/AdrenoToolsDrivers` | `.zip` assets whose name contains « turnip » (case ignored) |
+
+Both: published releases only (no drafts; pre-releases listed and flagged), the asset URL on `https://github.com/`
+under that repository's `releases/download/`, a plain file name; an asset, release title or tag naming « qualcomm »
+is never listed (K11MCH1 also hosts Qualcomm's proprietary drivers: `Qualcomm_*_adpkg.zip`, `8Elite2-*.zip`). The
+same file (sha256) in two releases is listed once, in the newest. Each entry: source, tag, release title, date
+(`published_at`), file name, size, sha256 (GitHub's asset `digest`, when present), URL, install state (same sha256 as
+an installed driver).
+
+**The list.** One request per source: `GET https://api.github.com/repos/<owner>/<repo>/releases?per_page=30`,
+unauthenticated, `User-Agent: XRecomp` (nothing about the player or the device), `If-None-Match` with the saved
+ETag. Cache: `files/vk_drivers/index/<owner>_<repo>.json` (format, ETag, fetch time, every `.zip` asset; the filter
+applies when read, so a new filter in an update applies to an old copy). A copy younger than 24 h is used as is;
+Refresh asks anyway. 304 keeps the copy. A source's state for the screen's note:
+
+| State | Meaning |
+|---|---|
+| `CACHED` / `UPDATED` / `NOT_MODIFIED` | the list is current (copy < 24 h, fetched now, unchanged) |
+| `STALE` | (cached list only) older than 24 h: the next refresh asks |
+| `OFFLINE` | no connection: the cached list, « list from <date> » |
+| `RATE_LIMITED` | GitHub's 60 requests/hour reached (403/429, `x-ratelimit-remaining: 0`): the cached list, retry after `x-ratelimit-reset`; no automatic request before then |
+| `FAILED` | another HTTP status or an unreadable answer: the cached list |
+| `NO_NETWORK` | the app may not use the network (a game's own app) |
+| `NONE` | nothing cached and nothing asked yet |
+
+No exception reaches the UI from `refresh`; with no cache the list is empty (the screen still shows installed
+drivers and the import row).
+
+**The download** (`VkDriverIndex.download`, on the launcher's worker, progress and cancel callbacks): https only,
+`github.com` then at most 5 redirects to `*.githubusercontent.com` (anything else refused), into
+`getCacheDir()/vkd-<asset>.part`; the size must equal the release's, the sha256 its `digest` when GitHub gives one.
+The file then goes to the driver store with its sha256 (it validates the package); the temporary file is deleted in
+every case. A mismatch is reported (`DownloadException`, reason `SIZE` / `SHA256`) and nothing is kept. The hash
+proves the file is the one GitHub lists, not that the build is trustworthy: a driver is third-party native code.
+
+Tests: `VkDriverIndexTest` (recorded releases pages of both sources trimmed to the fields used,
+`src/test/resources/vkdriver/`; T30 with its date, size and sha256; the Turnip filter; ETag, 24 h, 304; limit,
+offline, errors; verified download with a fake HTTP layer, no driver binary), `TitleApkTest` (INTERNET not in a
+game's own app).
 
 ## Choosing the game
 
