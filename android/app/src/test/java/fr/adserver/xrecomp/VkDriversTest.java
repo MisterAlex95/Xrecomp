@@ -145,7 +145,9 @@ public class VkDriversTest {
         assertArrayEquals(goodElf(), Files.readAllBytes(d.library().toPath()));
         assertTrue(new File(d.dir, "meta.json").isFile());
         assertTrue(new File(d.dir, "origin.json").isFile());
-        assertFalse(d.library().canWrite());   // read-only
+        // read-only: check the mode bits, canWrite() is always true for root (CI runs the tests as root)
+        assertFalse(Files.getPosixFilePermissions(d.library().toPath())
+                .contains(java.nio.file.attribute.PosixFilePermission.OWNER_WRITE));
         assertTrue(d.sizeOnDisk() >= goodElf().length);
         assertEquals(1, vk.list().size());
         assertTrue(vk.installedSha256(sha.toUpperCase()));
