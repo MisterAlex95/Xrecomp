@@ -33,6 +33,16 @@ import java.util.List;
 @RunWith(RobolectricTestRunner.class)
 @Config(sdk = 34)
 public class DiscImagesTest {
+    /** A GBA ROM document (XBA-157): ShellActivity hands its descriptor over as "fd:N"; null when it cannot open. */
+    @Test
+    public void romDescriptor() {
+        assertEquals("fd:42", ShellActivity.romDescriptor("content://x/document/a.gba", u -> 42));
+        assertNull(ShellActivity.romDescriptor("content://x/document/a.gba", u -> -1));
+        assertNull(ShellActivity.romDescriptor("content://x/document/a.gba", u -> {
+            throw new IOException("gone");
+        }));
+    }
+
     @Rule
     public TemporaryFolder tmp = new TemporaryFolder();
 

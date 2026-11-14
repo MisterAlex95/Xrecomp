@@ -93,9 +93,17 @@ final class LibraryScreen {
             return Console.ofKey(tid);
         }
 
-        /** A game of another console than the Xbox: listed, « Not playable yet » (no Prepare, no launch, no Home). */
+        /**
+         * A game of another console than the Xbox: no Prepare, no Home; « Not playable yet » unless its console plays
+         * files as they are (the GBA: A or Start launches it, XBA-157).
+         */
         boolean otherConsole() {
             return console() != Console.XBOX;
+        }
+
+        /** A game started from its file as it is (a GBA ROM): A or Start on its card launches it. */
+        boolean directLaunch() {
+            return console().directLaunch();
         }
 
         /**

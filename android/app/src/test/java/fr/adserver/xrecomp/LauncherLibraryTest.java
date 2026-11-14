@@ -564,9 +564,10 @@ public class LauncherLibraryTest {
     // ---- Several library folders (XBA-178) ---------------------------------------------------------------------
 
     /**
-     * Two folders, an Xbox one and a GBA one (read as files): every game in one grid with its console badge, the GBA
-     * game « Not playable yet » (A says why, no Home); Options › Library folders lists both, « Add a folder » last,
-     * and one is taken out of the library (its games leave the grid, nothing in it is deleted).
+     * Two folders, an Xbox one and one of other consoles (read as files): every game in one grid with its console
+     * badge, the N64 game « Not playable yet » (A says why, no Home), the GBA one Ready (its launch: gbaCardLaunches);
+     * Options › Library folders lists both, « Add a folder » last, and one is taken out of the library (its games
+     * leave the grid, nothing in it is deleted).
      */
     @Test
     public void severalFoldersEveryConsole() throws Exception {
@@ -575,34 +576,40 @@ public class LauncherLibraryTest {
         File gba = tmp.newFolder("gba");
         File rom = new File(gba, "Pocket Quest.gba");
         TestSupport.write(rom, ConsoleTest.gba("AXVE"));
+        File race = new File(gba, "Star Race.z64");
+        TestSupport.write(race, ConsoleTest.n64(0));
         useFolder();
         Library.addFolder(app, "content://com.android.externalstorage.documents/tree/primary%3Agba",
                           gba.getAbsolutePath());
         LauncherActivity a = launch();
         assertEquals(LauncherActivity.Screen.LIBRARY, a.screenForTest());
-        assertEquals(3, a.libraryCardsForTest().size());
-        GameCard quest = card(a, "Pocket Quest");
+        assertEquals(4, a.libraryCardsForTest().size());
+        GameCard quest = card(a, "Pocket Quest"), star = card(a, "Star Race");
         assertNotNull(quest);
+        assertNotNull(star);
         assertEquals("GBA", quest.badgeForTest());
+        assertEquals("N64", star.badgeForTest());
         assertEquals("Xbox", card(a, NAMES[0]).badgeForTest());
-        assertEquals(app.getString(R.string.LIB_CHIP_NOT_PLAYABLE_YET), quest.chipForTest());
-        assertTrue(quest.chipShownForTest());
+        assertFalse("Ready: no chip", quest.chipShownForTest());
+        assertEquals(app.getString(R.string.LIB_CHIP_NOT_PLAYABLE_YET), star.chipForTest());
+        assertTrue(star.chipShownForTest());
         TestSupport.screenshot(a.getWindow().getDecorView(), "library-consoles");
 
-        // A on the GBA card: a note, still the library, the selected game unchanged.
+        // A on the N64 card: a note, still the library, the selected game unchanged.
         a.forceFocusForTest();
         idle(300);
-        quest.requestFocusFromTouch();
+        star.requestFocusFromTouch();
         idle(300);
         key(a, KeyEvent.KEYCODE_BUTTON_A);
         assertEquals(LauncherActivity.Screen.LIBRARY, a.screenForTest());
-        assertEquals(app.getString(R.string.LIB_NOT_PLAYABLE_NOTE, "GBA"), a.noteForTest());
+        assertEquals(app.getString(R.string.LIB_NOT_PLAYABLE_NOTE, "N64"), a.noteForTest());
         Library.Games g = Library.read(Library.gamesFile(app.getFilesDir()));
         assertTrue("no record for a game that cannot be selected",
                    g.get(LibraryIndex.read(Library.indexFile(app.getFilesDir()))
-                                .find(LibraryIndex.fileLoc(rom)).tid) == null);
+                                .find(LibraryIndex.fileLoc(race)).tid) == null);
         key(a, KeyEvent.KEYCODE_BUTTON_START);
         assertEquals(LauncherActivity.Screen.LIBRARY, a.screenForTest());
+        assertNull(shadowOf(a).getNextStartedActivity());
 
         // Options › Library folders: both folders, then « Add a folder ».
         key(a, KeyEvent.KEYCODE_BUTTON_Y);
@@ -631,10 +638,82 @@ public class LauncherLibraryTest {
         assertEquals(1, Library.folders(app).size());
         assertEquals(2, a.libraryCardsForTest().size());
         assertNull(card(a, "Pocket Quest"));
+        assertNull(card(a, "Star Race"));
         assertEquals("", card(a, NAMES[0]).badgeForTest());   // an Xbox-only library looks as before
         assertTrue("nothing in the folder is deleted", rom.isFile());
         assertEquals(app.getString(R.string.LIB_FOLDER_REMOVED, "gba"), a.noteForTest());
         assertNull(LibraryIndex.read(Library.indexFile(app.getFilesDir())).find(LibraryIndex.fileLoc(rom)));
+    }
+
+    /**
+     * XBA-157: A on a GBA card starts the game activity at once with its ROM (no Home, Prepare, import or pack): the
+     * ROM becomes the launched game (GameStore.launchedRom, the library key as title_id), the Xbox game's folder stays
+     * the remembered one, and the launcher finishes. Start does the same; an Xbox Play afterwards is another game
+     * (the ROM is forgotten).
+     */
+    @Test
+    public void gbaCardLaunches() throws Exception {
+        folderGame(0);
+        File gba = tmp.newFolder("gba");
+        File rom = new File(gba, "Pocket Quest.gba");
+        TestSupport.write(rom, ConsoleTest.gba("AXVE"));
+        useFolder();
+        Library.addFolder(app, "content://com.android.externalstorage.documents/tree/primary%3Agba",
+                          gba.getAbsolutePath());
+        LauncherActivity a = launch();
+        GameCard quest = card(a, "Pocket Quest");
+        assertNotNull(quest);
+        String key = LibraryIndex.read(Library.indexFile(app.getFilesDir())).find(LibraryIndex.fileLoc(rom)).tid;
+        assertTrue(key, key.startsWith("gba-AXVE-"));
+        String dirBefore = GameStore.chosenDir(app);
+
+        a.forceFocusForTest();
+        idle(300);
+        quest.requestFocusFromTouch();
+        idle(300);
+        key(a, KeyEvent.KEYCODE_BUTTON_A);
+        Intent started = shadowOf(a).getNextStartedActivity();
+        assertNotNull(started);
+        assertEquals(ShellActivity.class.getName(), started.getComponent().getClassName());
+        assertTrue((started.getFlags() & Intent.FLAG_ACTIVITY_NEW_TASK) != 0);
+        assertTrue(a.isFinishing());
+        assertEquals(rom.getAbsolutePath(), GameStore.launchedRom(app));
+        assertEquals("Pocket Quest", GameStore.launchedRomTitle(app));
+        assertEquals(key, GameStore.launchedTitleId(app));
+        assertEquals("the Xbox game's folder is kept", dirBefore, GameStore.chosenDir(app));
+        assertEquals(LauncherActivity.Screen.LIBRARY, a.screenForTest());   // no Home for a GBA game
+        Library.Games g = Library.read(Library.gamesFile(app.getFilesDir()));
+        assertNull("no record: the GBA game is never the selected one", g.get(key));
+
+        // Start on the card (a fresh launcher): the same launch.
+        GameStore.rememberLaunch(app, dirBefore, "", null);   // an Xbox launch clears the ROM
+        assertNull(GameStore.launchedRom(app));
+        LauncherActivity b = launch();
+        b.forceFocusForTest();
+        idle(300);
+        card(b, "Pocket Quest").requestFocusFromTouch();
+        idle(300);
+        key(b, KeyEvent.KEYCODE_BUTTON_START);
+        started = shadowOf(b).getNextStartedActivity();
+        assertNotNull(started);
+        assertEquals(ShellActivity.class.getName(), started.getComponent().getClassName());
+        assertEquals(rom.getAbsolutePath(), GameStore.launchedRom(app));
+    }
+
+    /** What the game process opens for a ROM: its path, or its document under the library folder's tree. */
+    @Test
+    public void romSpec() {
+        LibraryIndex.Item it = new LibraryIndex.Item();
+        it.loc = "file:/storage/emulated/0/gba/Game.gba";
+        assertEquals("/storage/emulated/0/gba/Game.gba", LauncherActivity.romSpec(it, null));
+        it.loc = "doc:primary:gba/Game.gba";
+        String tree = "content://com.android.externalstorage.documents/tree/primary%3Agba";
+        assertEquals("content://com.android.externalstorage.documents/tree/primary%3Agba/document/"
+                     + "primary%3Agba%2FGame.gba", LauncherActivity.romSpec(it, tree));
+        assertNull(LauncherActivity.romSpec(it, null));
+        it.loc = "";
+        assertNull(LauncherActivity.romSpec(it, tree));
+        assertNull(LauncherActivity.romSpec(null, tree));
     }
 
     /** The one library folder of an older launcher: migrated as the first entry, its games listed as before. */

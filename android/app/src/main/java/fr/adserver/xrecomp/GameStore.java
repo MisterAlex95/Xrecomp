@@ -252,7 +252,7 @@ final class GameStore {
      * the default game/ then apply).
      */
     static boolean rememberLaunch(Context c, String dir, String title, String titleId) {
-        SharedPreferences.Editor e = prefs(c).edit();
+        SharedPreferences.Editor e = prefs(c).edit().remove(KEY_ROM).remove(KEY_ROM_TITLE);
         if (dir == null)
             e.remove(KEY_DIR).remove(KEY_TITLE);
         else
@@ -262,6 +262,29 @@ final class GameStore {
         else
             e.putString(Library.PREF_TITLE_ID, titleId);
         return e.commit();
+    }
+
+    /**
+     * A game started from its file as it is (a GBA ROM, XBA-157): the file the game process runs, a path or a
+     * « content: » document URI (ShellActivity opens it and hands « fd:N » to the runtime); game_dir and title stay
+     * the Xbox game's (the launcher's one-game rules keep working), title_id becomes the ROM's library key. Any Xbox
+     * launch (rememberLaunch) clears it.
+     */
+    static final String KEY_ROM = "rom", KEY_ROM_TITLE = "rom_title";
+
+    static boolean rememberRomLaunch(Context c, String rom, String title, String key) {
+        return prefs(c).edit().putString(KEY_ROM, rom).putString(KEY_ROM_TITLE, title == null ? "" : title)
+                       .putString(Library.PREF_TITLE_ID, key).commit();
+    }
+
+    /** The ROM the game process runs (or last ran), or null when that is an Xbox game. */
+    static String launchedRom(Context c) {
+        String s = prefs(c).getString(KEY_ROM, null);
+        return s == null || s.isEmpty() ? null : s;
+    }
+
+    static String launchedRomTitle(Context c) {
+        return prefs(c).getString(KEY_ROM_TITLE, "");
     }
 
     /** The title ID of the game last launched (title_id), or null. */

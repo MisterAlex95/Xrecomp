@@ -41,6 +41,42 @@ public class GameStateTest {
         assertFalse(GameState.playable(GameState.Chip.NEEDS_PREPARING));
     }
 
+    /**
+     * XBA-157: a GBA game plays its ROM as it is: Ready while it is in a library folder (whatever the toolchain or
+     * packs), Running while it runs, No file access when its folder cannot be read, gone without it. PS1 and N64 stay
+     * « Not playable yet ».
+     */
+    @Test
+    public void otherConsoles() {
+        GameState.Facts f = new GameState.Facts();
+        f.titleId = "gba-AXVE-1A2B3C4D";
+        f.console = Console.GBA;
+        f.source = GameState.Source.PRESENT;
+        f.toolchain = true;
+        f.pack = Pack.Check.NO_PACK;
+        assertEquals(GameState.Chip.READY, GameState.chip(f));
+        f.toolchain = false;
+        assertEquals(GameState.Chip.READY, GameState.chip(f));
+        f.runningTid = "gba-AXVE-1A2B3C4D";
+        assertEquals(GameState.Chip.RUNNING, GameState.chip(f));
+        f.runningTid = TID;
+        f.source = GameState.Source.NO_ACCESS;
+        assertEquals(GameState.Chip.NO_FILE_ACCESS, GameState.chip(f));
+        f.source = GameState.Source.MISSING;
+        assertEquals(GameState.Chip.GONE, GameState.chip(f));
+        assertTrue(Console.GBA.playable() && Console.GBA.directLaunch());
+        assertTrue(Console.XBOX.playable());
+        assertFalse(Console.XBOX.directLaunch());
+        for (Console c : new Console[] { Console.PS1, Console.N64 }) {
+            f.console = c;
+            f.titleId = c.id + "-KEY";
+            f.source = GameState.Source.PRESENT;
+            f.runningTid = f.titleId;
+            assertEquals(GameState.Chip.NOT_PLAYABLE_YET, GameState.chip(f));
+            assertFalse(c.playable() || c.directLaunch());
+        }
+    }
+
     @Test
     public void runningBeatsEverything() {
         GameState.Facts f = ready();
