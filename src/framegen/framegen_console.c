@@ -1,5 +1,8 @@
 /* framegen_console.c -- see framegen_console.h (XBA-186). */
 #define _POSIX_C_SOURCE 200809L   /* clock_gettime, pthread_condattr_setclock */
+#if defined(__APPLE__)
+#define _DARWIN_C_SOURCE          /* pthread_cond_timedwait_relative_np, hidden by _POSIX_C_SOURCE */
+#endif
 #include "framegen_console.h"
 #include "framegen_policy.h"
 
