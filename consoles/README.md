@@ -14,8 +14,8 @@ game for these consoles runs yet. Goal, order, rules (legal, Linux arm64 first),
 Each one has:
 
 - `runtime/`: C, CMake target `<name>_runtime`. It links only the host layer `xbr_host` (`src/host`,
-  `src/platform/HOST_LAYER.md`) and never the Xbox libraries. N64 has its RSP and RDP devices, no core yet;
-  GBA and PS1 have their cores, see below.
+  `src/platform/HOST_LAYER.md`) and never the Xbox libraries. GBA, PS1 and N64 have their cores and play games on
+  the host layer, see below.
 - `tools/`: the Python pipeline (parse → disasm → function discovery → lift → C), package `<name>_tools`. Its
   tests live in the package and run with the tools suite: `python3 -m pytest tools/ consoles/`.
 - `tests/`: a self-contained CMake test project. `tools/run_c_tests.sh` runs it as `console_<name>` (exit 77 =
@@ -27,8 +27,8 @@ read from the game's content (`recomp_pack_rom_identify` in `src/platform/recomp
 app): GBA game code + CRC32 of the ROM (`AXVE-1A2B3C4D`), PS1 serial from `SYSTEM.CNF` (`SLUS-00594`, or
 `PSX-<CRC32 of the volume descriptor>` without a serial-shaped boot file), N64 game code + header CRC1
 (`NSME-635A2BFF`, any byte order). Such a pack lives in `packs/<console>-<key>/`. The app shell's loader
-(`android/app/src/main/cpp/pack_loader.c`, `xba_pack_load_rom`) checks it and calls `<console>_runtime_start`, a
-stub that logs `<console> runtime ready` for now (libmain.so links the three runtimes); the GBA's plays the game, and
+(`android/app/src/main/cpp/pack_loader.c`, `xba_pack_load_rom`) checks it and calls `<console>_runtime_start`
+(libmain.so links the three runtimes, which all play games: PS1 XBA-168 and N64 XBA-174 below); the GBA's plays the game, and
 needs no pack (`PACK_NONE`, XBA-157); a GBA pack that Prepare built (`python3 -m tools.prepare game.gba`, XBA-158:
 docs/android/prepare.md « GBA packs ») makes it run natively, checked and loaded by `runtime/gba_pack.c`
 (`PACK_LOADED` / `PACK_STALE`, the game always starts), and the addresses the interpreter had to run are written at
@@ -38,8 +38,8 @@ content decides (Xbox volume magic `MICROSOFT*XBOX*MEDIA` first, then an ISO 966
 `PLAYSTATION`). CHD is accepted by name but not read yet (no title key).
 
 CMake options `XBR_CONSOLE_GBA`, `XBR_CONSOLE_PS1` and `XBR_CONSOLE_N64` are ON by default on Linux and macOS and OFF
-on Android and Windows. A console is turned on for Android once it is ready: the GBA (XBA-157) and the PS1 (XBA-168)
-are.
+on Android and Windows. A console is turned on for Android once it is ready: the GBA (XBA-157), the PS1 (XBA-168) and
+the N64 (XBA-174) are.
 
 **GBA core (XBA-152, XBA-153).** Interpreter first (decision of 2026-11-14, XBA-142); the static lifter (below) is an
 acceleration layer. `consoles/gba/runtime/gba_core.h`: an ARM7TDMI interpreter (ARM + Thumb), the memory map, LCD
@@ -304,6 +304,43 @@ cmake -S consoles/n64/tests -B build/n64 -DN64_CORE_ONLY=ON && cmake --build bui
 build/n64/n64_runtime/n64_run build/homebrew/n64/gfx.z64 --result --ppm gfx.ppm
 build/n64/n64_runtime/n64_run build/n64-systemtest/n64-systemtest.z64 --tty --frames 900
 ```
+
+**Playing an N64 game (XBA-174).** `n64_runtime_run` (`consoles/n64/runtime/n64_runtime.h`) plays a cartridge on the
+host layer, the PS1's way: a ROM file in any byte order (`.z64`, `.v64`, `.n64`, or `fd:N`), no BIOS (the PIF is HLE),
+no pack (a pack's library is ignored, logged, until the N64 recompiler lands). The picture is the VI's visible area at
+framebuffer resolution (320 x 240, 640 x 480 interlaced, PAL 288 / 576 lines...) shown at 4:3 whatever its size,
+letterboxed, linear by default (`RECOMP_N64_FILTER=nearest`, `RECOMP_N64_SCALE=integer`). Controller, Xbox layout: left
+stick → stick (radial dead zone 8 %, `RECOMP_N64_DEADZONE` in percent; ±80 on an axis at full travel,
+`RECOMP_N64_STICK_RANGE`; the diagonals go to about ±68, the real stick's octagonal gate), A → A, B and X → B, right
+stick → C buttons (past half its travel), Y → C-up, LB → L, RB → R, LT or RT → Z, Start, D-pad; keyboard on a desktop
+(arrows = stick, X = A, C = B, Z = Z, Enter = Start, Q / E = L / R, I / K / J / L = C buttons, T / G / F / H = D-pad).
+Every host pad drives controller 1, or with `RECOMP_N64_PLAYERS=2..4` host pad N drives controller N. The accessory
+(`RECOMP_N64_PAK`): a controller pak by default, `rumble` a rumble pak whose motor drives the host pad's rumble, `none`.
+Sound: `n64_audio_pull` (48 kHz) into `host_audio`. Pacing: the frame's length is the CPU cycles the core ran to the
+next VI interrupt (NTSC about 60 Hz, PAL 50 Hz, one field per interrupt when interlaced), absolute deadlines nudged ±2 %
+by the audio queue; a line every 10 s gives the frame rate reached (`n64: N fps over the last 10 s`). The RDP's
+scanline-band threads (`n64_rdp_set_threads`): `RECOMP_N64_RDP_THREADS`, else 2 on Android, else the core's
+(`XBR_N64_RDP_THREADS`, else 1). Saves: `<save dir>/n64-<KEY>/game.eep` (EEPROM 4K 512 B / 16K 2 KB), `game.sra` (SRAM
+32 KB), `game.fla` (FlashRAM 128 KB), `pak1.mpk`..`pak4.mpk` (controller paks, 32 KB): raw images, the files
+mupen64plus and ares use (rename to copy one in). A cartridge save on disk is read before the first frame and also
+fixes the save type (an `.eep`'s size picks 4K or 16K unless the header says; a 2 KB `.eep` for a 4K game gives its
+first 512 bytes); written a second after the game's last write (five at most after its first), at pause and at exit,
+only when changed. `RECOMP_N64_TTY=1` prints the IS-Viewer text. The Android app calls it through `n64_runtime_start`
+([app-shell.md](../docs/android/app-shell.md) « Nintendo 64 games »). On a desktop:
+
+```sh
+cmake -S consoles/n64/tests -B build/n64 && cmake --build build/n64          # or the root build (XBR_CONSOLE_N64 ON)
+build/n64/n64_runtime/n64_play game.z64
+build/n64/n64_runtime/n64_play build/homebrew/n64/gfx.z64 --scale integer --pak rumble --rdp-threads 2
+SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy build/n64/n64_runtime/n64_play gfx.z64 --frames 300 --screenshot last.ppm
+xvfb-run -a build/n64/n64_runtime/n64_play gfx.z64 --frames 200 --capture 180 present.ppm   # the real present path
+```
+
+The title key comes from the ROM as the app reads it (`recomp_pack_rom_identify`: `NSME-635A2BFF`; the same formula
+when it cannot, `n64_runtime_fallback_key`). Every option is listed at the top of `runtime/tools/n64_play.c`. Test:
+`n64_runtime` (`consoles/n64/tests/test_main.c`: the helpers, then gfx.z64's picture, through `fd:N` with two RDP
+threads and a rumble pak, byte-swapped as `.v64`, an EEPROM and a controller pak read back and left alone, the app
+shell's entry, the errors). gfx.z64 runs at about 60 fps paced on the x86 dev host with one RDP thread.
 
 **N64 RSP (N-5, XBA-173).** `consoles/n64/runtime/n64_rsp.c`, the RSP half of `n64_devices.h` (CMake target
 `n64_rsp`, plain C11, no host dependency): LLE, so every microcode runs as on the hardware (no per-game HLE). Scalar
