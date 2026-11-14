@@ -259,6 +259,67 @@ public class PackHandoverTest {
     }
 
     @Test
+    public void theCheckedCallerIsToldWhereTheGameIs() throws Exception {
+        install(app, CLONE, key.cert);
+        File folder = tmp.newFolder("Games", "Sample");
+        File priv = tmp.newFolder("private");
+        Library.Games g = new Library.Games();
+        Library.Record r = new Library.Record();
+        r.titleId = TID;
+        r.dataDir = folder.getAbsolutePath();
+        r.dataKind = Library.KIND_IN_PLACE;
+        g.put(r);
+        Library.write(Library.gamesFile(parentFiles), g);
+
+        // With the pack or with NO_PACK alike, to the checked caller only.
+        PackHandover.Answer a = PackHandover.serve(app, CLONE, request(TID));
+        assertEquals(PackHandover.Refusal.NO_PACK, a.refusal);
+        PackHandover.GameSource s = PackHandover.sourceOf(a.data);
+        assertEquals(PackHandover.GameKind.FOLDER, s.kind);
+        assertEquals(folder.getAbsolutePath(), s.path);
+        writePack(parentFiles, TID, 100, 3, null, false);
+        assertEquals(folder.getAbsolutePath(), PackHandover.sourceOf(PackHandover.serve(app, CLONE, request(TID)).data).path);
+        assertNull(PackHandover.sourceOf(PackHandover.serve(app, "com.example.other", request(TID)).data));
+
+        // XRecomp's imported copy, or a folder in its private storage: not shared, no path.
+        r.dataKind = Library.KIND_IMPORTED;
+        Library.write(Library.gamesFile(parentFiles), g);
+        s = PackHandover.gameSource(app, parentFiles, TID);
+        assertEquals(PackHandover.GameKind.NOT_SHARED, s.kind);
+        assertEquals("", s.path);
+        r.dataKind = Library.KIND_IN_PLACE;
+        r.dataDir = new File(priv, "game").getAbsolutePath();
+        Library.write(Library.gamesFile(parentFiles), g);
+        assertEquals(PackHandover.GameKind.NOT_SHARED, PackHandover.gameSource(app, parentFiles, TID, priv).kind);
+
+        // A disc image read in place by path: that path; by document only: not shared.
+        File companion = tmp.newFolder("discs", TID);
+        DiscImages.Disc d = new DiscImages.Disc();
+        d.path = "/storage/emulated/0/Games/Sample.iso";
+        DiscImages.write(companion, d);
+        r.dataDir = companion.getAbsolutePath();
+        r.dataKind = Library.KIND_IMAGE;
+        Library.write(Library.gamesFile(parentFiles), g);
+        s = PackHandover.gameSource(app, parentFiles, TID);
+        assertEquals(PackHandover.GameKind.IMAGE, s.kind);
+        assertEquals(d.path, s.path);
+        d.path = "";
+        d.uris.add("content://com.android.externalstorage.documents/document/primary%3AGames%2FSample.iso");
+        DiscImages.write(companion, d);
+        assertEquals(PackHandover.GameKind.NOT_SHARED, PackHandover.gameSource(app, parentFiles, TID).kind);
+        // Another title: nothing.
+        assertNull(PackHandover.gameSource(app, parentFiles, "4D530005"));
+
+        // The clone takes only a sane absolute path.
+        for (String bad : new String[] { "relative/dir", "/a/../b", "/a/./b", "" }) {
+            Intent i = new Intent().putExtra(PackHandover.EXTRA_GAME_KIND, "FOLDER")
+                    .putExtra(PackHandover.EXTRA_GAME_PATH, bad);
+            assertNull(bad, PackHandover.sourceOf(i));
+        }
+        assertNull(PackHandover.sourceOf(new Intent().putExtra(PackHandover.EXTRA_GAME_KIND, "OTHER")));
+    }
+
+    @Test
     public void theActivityAnswersTheCallerAndFinishes() throws Exception {
         install(app, CLONE, key.cert);
         writePack(parentFiles, TID, 512, 2, null, false);

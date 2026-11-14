@@ -16,4 +16,20 @@
     <string name="HANDOVER_OTHER_XBE">XRecomp prepared another version of this disc: prepare it here.</string>
     <string name="HANDOVER_NO_SPACE">Not enough space to copy XRecomp\'s prepared game (%1$s needed): free some space and open this app again, or prepare it here.</string>
     <string name="HANDOVER_FAILED">Copying XRecomp\'s prepared game failed (%1$s): open this app again to retry, or prepare it here.</string>
+    <!-- A game's own app straight into the game (docs/android/app-shell.md « Straight into the game »): its one
+         screen before the first play. -->
+    <string name="DIRECT_WAIT">Getting the game ready…</string>
+    <string name="DIRECT_PREPARE_LEAVE">Once, about 20–30 min. You can leave the app: the game starts when you come back.</string>
+    <string name="DIRECT_ACCESS_LINE">Allow file access to play from your game files</string>
+    <string name="DIRECT_ACCESS">XRecomp reads this game from %1$s. With « All files access », this app plays it from there too, with no copy.</string>
+    <string name="DIRECT_CHOOSE_LINE">Where is the game?</string>
+    <string name="DIRECT_CHOOSE">Choose the game\'s folder or disc image, once.</string>
+    <string name="DIRECT_NOT_SHARED">XRecomp keeps its own copy of this game, which this app cannot read: choose the game\'s folder or disc image once.</string>
+    <string name="DIRECT_ACCESS_REFUSED">Without « All files access » this app cannot read the files XRecomp uses: choose the game\'s folder or disc image once (it is copied into this app).</string>
+    <string name="DIRECT_SOURCE_FAILED">The files XRecomp uses could not be used here: choose the game\'s folder or disc image.</string>
+    <string name="DIRECT_SOURCE_GONE">The game is no longer at %1$s, where XRecomp read it.</string>
+    <string name="DIRECT_SOURCE_NOT_USED">The game files could not be used</string>
+    <string name="DIRECT_PACK_BAD">The prepared game could not be loaded</string>
+    <string name="DIRECT_ENDED">The game ended</string>
+    <string name="DIRECT_PREPARE_NOT_STARTED">The preparation could not start</string>
 </resources>

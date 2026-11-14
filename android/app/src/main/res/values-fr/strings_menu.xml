@@ -7,6 +7,7 @@
     <string name="MENU_SCREENSHOT">Capture d\'écran</string>
     <string name="MENU_SHARE_LOG">Partager le journal</string>
     <string name="MENU_LAUNCHER">Retour au lanceur</string>
+    <string name="MENU_LEAVE">Retour à l\'écran d\'accueil</string>
     <string name="MENU_QUIT">Quitter le jeu</string>
     <string name="MENU_QUIT_CONFIRM">Confirmer : quitter</string>
     <string name="MENU_QUIT_CONFIRM_SUB">La progression non sauvegardée est perdue</string>

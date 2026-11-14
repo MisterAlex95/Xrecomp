@@ -103,8 +103,14 @@ public class LauncherTitleAppTest {
                           root.getAbsolutePath());
     }
 
+    /** How the launcher is started (null: the app icon). */
+    private Intent launchIntent;
+
     private LauncherActivity launch() throws Exception {
-        LauncherActivity a = Robolectric.buildActivity(LauncherActivity.class).setup().get();
+        LauncherActivity a = (launchIntent == null ? Robolectric.buildActivity(LauncherActivity.class)
+                                                   : Robolectric.buildActivity(LauncherActivity.class,
+                                                                               new Intent(launchIntent)))
+                .setup().get();
         idle(300);
         Thread t = a.scannerForTest();
         if (t != null)
@@ -244,6 +250,8 @@ public class LauncherTitleAppTest {
         assertEquals("abcdef" + "0".repeat(58), GameStore.expectedSha256(app));
         assertTrue(GameStore.hashMatches(app, "abcdef" + "0".repeat(58)));
         assertTrue(!GameStore.hashMatches(app, "0".repeat(64)));
+        // Its launcher is the « Launcher » app shortcut's (the icon goes into the game: LauncherGameAppTest).
+        launchIntent = new Intent(app, LauncherActivity.class).setAction(LauncherActivity.ACTION_SHOW_LAUNCHER);
         LauncherActivity a = manage();
         assertNull("no « Create an app » in a game's own app", row(a, R.string.TITLE_APP_ADD));
         assertNotNull(row(a, R.string.SHORTCUT_ADD));
