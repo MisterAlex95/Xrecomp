@@ -2,17 +2,18 @@
 
 <h1 align="center">XRecomp</h1>
 
-<p align="center"><b>Original Xbox games, statically recompiled to native code.</b><br>
-Play them on Android, macOS, Linux or Windows. Prepare them on the device itself or on a desktop.</p>
+<p align="center"><b>Console games, statically recompiled to native code.</b><br>
+Original Xbox today; Game Boy Advance, PlayStation and Nintendo 64 on the way.<br>
+Play on Android, macOS, Linux or Windows. Prepare on the device itself or on a desktop.</p>
 
-XRecomp turns the x86 code of an Xbox game (`default.xbe`) into C, compiles it for your machine and runs it against
-a runtime that stands in for the Xbox kernel, GPU, audio and pads. No emulator, no JIT. It is a fork of
-[xboxrecomp](https://github.com/sp00nznet/xboxrecomp) that adds an Android host, launcher apps and a one-step
-**Prepare**.
+XRecomp turns a console game's machine code into C, compiles it for your machine and runs it against a runtime that
+stands in for the console's hardware and OS. No emulator, no JIT. It started as a fork of
+[xboxrecomp](https://github.com/sp00nznet/xboxrecomp), the Xbox recompiler, and adds an Android host, launcher apps,
+a one-step **Prepare** and a console-agnostic host layer that the other consoles build on.
 
 - **Bring your own disc.** You point it at a game you dumped from your own disc. No game data is in this repository,
   the apps or CI, and nothing you prepare leaves your machine.
-- **Prepare once.** Prepare analyses the XBE, lifts it to C and builds it, all in one command. On a phone or handheld,
+- **Prepare once.** Prepare analyses the game's executable, lifts it to C and builds it, all in one command. On a phone or handheld,
   the app does it with no PC (about 20–30 min, once per game).
 - **Play.** You get a native build of the game, started from a launcher (Android, Mac) or from the command line.
 
@@ -20,9 +21,21 @@ a runtime that stands in for the Xbox kernel, GPU, audio and pads. No emulator, 
 > [`profiles/titles/*/`](profiles/titles/) (`title.json` « status », `NOTES.md`). Expect crashes, and expect to
 > prepare a game again after an update.
 
-## Platforms
+## Consoles
 
-| Platform | Play | Prepare | Front end |
+| Console | CPU | State |
+|---|---|---|
+| **Original Xbox** | x86 (Pentium III) | ✅ Experimental: several games boot, a few are playable |
+| **Game Boy Advance** | ARM7TDMI | 🚧 Early: layout, build and homebrew tests in place, runtime empty |
+| **PlayStation** | MIPS R3000A | 🚧 Early: same |
+| **Nintendo 64** | MIPS R4300i | 🚧 Early: same |
+
+Everything below about getting started and Prepare is about the Xbox, the one console that runs games today. The
+other consoles live in [`consoles/`](consoles/README.md) and share the host layer (`src/host`) with it.
+
+## Hosts
+
+| Host | Play | Prepare | Front end |
 |---|---|---|---|
 | **Android** arm64, Android 11+, GLES 3.0 | ✅ AYN Thor first | ✅ on the device | XRecomp app: launcher, gamepad UI, dual screen |
 | **macOS** Apple Silicon / Intel | ✅ SDL2 + OpenGL | ✅ | XRecomp.app launcher, or the command line |
@@ -31,10 +44,6 @@ a runtime that stands in for the Xbox kernel, GPU, audio and pads. No emulator, 
 
 Linux x86-64 and arm64 are tested by CI on every push. On Windows, the upstream route has not been tested by this
 fork. A game runs on Linux arm64 before we debug it on Android.
-
-**Other consoles.** `consoles/` holds the start of Game Boy Advance, PlayStation and Nintendo 64 support: the
-layout, the CMake options and a homebrew test corpus. The runtimes are still empty, so no game for these consoles
-runs yet ([consoles/README.md](consoles/README.md)).
 
 ## Get it
 
@@ -84,6 +93,8 @@ bring up a new game and need to see each stage.
 
 ## How it works
 
+The Xbox path, which the other consoles follow with their own CPU and hardware:
+
 ```
  your disc ─► default.xbe ─► parse ─► disassemble ─► identify ─► calling conventions ─► lift to C
                                       (tools/, Python + capstone)                           │
@@ -110,7 +121,7 @@ bring up a new game and need to see each stage.
 | `templates/new-game/` | The game project Prepare (or you) fills with generated C |
 | `android/` | Android app (SDLActivity, launcher, embedded Prepare) |
 | `macos/` | macOS launcher (SwiftUI, Swift Package) |
-| `consoles/` | GBA, PS1, N64: early work |
+| `consoles/` | GBA, PS1, N64: each with its runtime, pipeline and tests (early work) |
 | `tests/` | C tests, one CMake project each (exit 77 = skipped) |
 | `docs/` | Everything else: [docs/INDEX.md](docs/INDEX.md) |
 
@@ -142,7 +153,7 @@ conformance suite (lifted C against a real x86 CPU), the arm64 qemu run and the 
 
 ## Relation to xboxrecomp
 
-The runtime and the recompilation pipeline come from [sp00nznet/xboxrecomp](https://github.com/sp00nznet/xboxrecomp)
+The Xbox runtime and recompilation pipeline come from [sp00nznet/xboxrecomp](https://github.com/sp00nznet/xboxrecomp)
 by sp00nz and its contributors ([CONTRIBUTORS.md](CONTRIBUTORS.md)). This fork follows upstream
 (`tools/sync_upstream.sh`) and adds the Android host, the launchers, Prepare and the per-title work. Report problems
 with this fork here, not upstream.
