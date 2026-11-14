@@ -442,6 +442,7 @@ apply to them too; the pad mappings are under [Input](#input).
 | `RECOMP_PS1_PAD=analog\|digital` | digital | The pad in port 1: a DualShock in analog or digital mode (`--pad`); Back + L3 + R3 switches while playing. | `ps1_runtime.c` |
 | `RECOMP_PS1_PLAYERS=1\|2` | 1 | `2`: host pad 1 drives port 1, host pad 2 port 2; otherwise every pad drives port 1 (`--players`). | `ps1_runtime.c` |
 | `RECOMP_PS1_FRAMES=N` | unbounded | The Android entry (`ps1_runtime_start`): stop after N frames (checks). | `ps1_runtime.c` |
+| `RECOMP_N64_CROP_EDGES=0` | on (cropped) | Shows the VI's horizontal guard band (the black first 8 and last 7 VI pixels of each line, `n64_vi.c`) as thin black strips left and right. By default 8 VI pixels are cut from each side (4 columns of a 320-wide picture) and the rest fills the 4:3 shape (2.5 % wider), as a television hid them in its overscan. Window only: `--screenshot` and `n64_run --ppm` keep the whole VI picture (`--edges` on `n64_play`). | `n64_runtime.c` |
 | `RECOMP_N64_PAK=controller\|rumble\|none` | controller | The accessory in the controllers: a controller pak (saved as `pakN.mpk`), a rumble pak (drives the host pad's rumble unless `RECOMP_RUMBLE=0`) or none (`--pak`). | `n64_runtime.c` |
 | `RECOMP_N64_PLAYERS=1..4` | 1 | With 2 or more, host pad N drives controller N; otherwise every pad drives controller 1 (`--players`). | `n64_runtime.c` |
 | `RECOMP_N64_STICK_RANGE=N` | 80 | The stick's value at full travel on one axis (the diagonals follow the octagonal gate). | `n64_runtime.c` |

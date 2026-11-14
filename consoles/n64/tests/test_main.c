@@ -61,6 +61,21 @@ static void test_display(void)
     unsetenv("RECOMP_N64_FILTER");
     unsetenv("RECOMP_SCALE");
     unsetenv("RECOMP_FILTER");
+
+    /* The VI's guard band: cropped by default, RECOMP_N64_CROP_EDGES=0 shows it, the caller's choice wins; 8 VI
+     * pixels a side whatever the picture's width. */
+    n64_runtime_opts_init(&o);
+    unsetenv("RECOMP_N64_CROP_EDGES");
+    CHECK(n64_runtime_crop_edges(&o) == 1 && n64_runtime_crop_edges(NULL) == 1);
+    setenv("RECOMP_N64_CROP_EDGES", "0", 1);
+    CHECK(n64_runtime_crop_edges(&o) == 0);
+    setenv("RECOMP_N64_CROP_EDGES", "1", 1);
+    CHECK(n64_runtime_crop_edges(&o) == 1);
+    o.crop_edges = 0;
+    CHECK(n64_runtime_crop_edges(&o) == 0);
+    unsetenv("RECOMP_N64_CROP_EDGES");
+    CHECK(n64_runtime_crop_columns(320) == 4 && n64_runtime_crop_columns(640) == 8 &&
+          n64_runtime_crop_columns(16) == 0 && n64_runtime_crop_columns(0) == 0);
 }
 
 static void test_helpers(void)

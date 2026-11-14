@@ -378,7 +378,8 @@ packs »](../docs/android/prepare.md#n64-packs-xba-174); it runs the lifted code
 this cartridge's, the SHA-256 of the ROM in big-endian order, and the game plays interpreted otherwise; `--missed FILE`
 keeps what it did not cover for the next Prepare, `consoles/n64/runtime/n64_pack.h`). The picture is the VI's
 canvas (320 or 640 x 240, 480 interlaced, PAL 288 / 576 lines; `n64_vi.c` above) shown at 4:3 whatever its size,
-letterboxed, linear by default (`RECOMP_N64_FILTER=nearest`, `RECOMP_N64_SCALE=integer`; or the shared `RECOMP_FILTER` /
+letterboxed, less the VI's black guard band (8 VI pixels cut from each side, 4 columns of 320, the rest still filling
+4:3 as a television's overscan hid them; `RECOMP_N64_CROP_EDGES=0` or `n64_play --edges` shows them), linear by default (`RECOMP_N64_FILTER=nearest`, `RECOMP_N64_SCALE=integer`; or the shared `RECOMP_FILTER` /
 `RECOMP_SCALE`). Controller, Xbox layout: left
 stick → stick (radial dead zone 8 %, `RECOMP_N64_DEADZONE` in percent; ±80 on an axis at full travel,
 `RECOMP_N64_STICK_RANGE`; the diagonals go to about ±68, the real stick's octagonal gate), A → A, B and X → B, right

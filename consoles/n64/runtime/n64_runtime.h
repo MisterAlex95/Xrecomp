@@ -50,6 +50,12 @@ typedef struct n64_runtime_opts {
      * host_window_env_scale); else HOST_SCALE_*. Filter: -1 = $RECOMP_N64_FILTER, else $RECOMP_FILTER ("linear" or
      * "nearest", default linear: the VI's 256..640-wide pictures are stretched to 4:3); else HOST_FILTER_*. */
     int scale, filter;
+    /* The VI's horizontal guard band (the black first 8 and last 7 VI pixels of a line, n64_vi.c): 1 = not shown, 8 VI
+     * pixels cut from each side of the picture (4 columns of a 320-wide one) and the rest shown at 4:3 (2.5 %
+     * wider), as a television hid it in its overscan; 0 = the whole VI picture, thin black strips left and right.
+     * -1 = $RECOMP_N64_CROP_EDGES ("0" shows the edges; default 1). Only the window: --screenshot stays the whole
+     * picture. */
+    int crop_edges;
     /* The accessory in the controllers: N64_RT_PAK_DEFAULT = $RECOMP_N64_PAK ("controller", "rumble" or "none";
      * default controller: the controller pak, saved as pakN.mpk); a rumble pak drives the host pad's rumble. */
     int pak;
@@ -84,6 +90,14 @@ void n64_runtime_opts_init(n64_runtime_opts *o);
 /* How the run shows its picture: o->scale / o->filter when set (>= 0), else $RECOMP_N64_SCALE / _FILTER, else the
  * shared $RECOMP_SCALE / $RECOMP_FILTER (host_window_env_scale / _filter), else aspect and linear. o may be NULL. */
 void n64_runtime_display(const n64_runtime_opts *o, int *scale, int *filter);
+
+/* Whether the window hides the VI's guard band: o->crop_edges when set (>= 0), else 0 when $RECOMP_N64_CROP_EDGES
+ * starts with '0', else 1. o may be NULL. */
+int n64_runtime_crop_edges(const n64_runtime_opts *o);
+
+/* The columns cut from each side of a w-wide VI picture when the guard band is hidden: 8 VI pixels of the 640-pixel
+ * canvas (4 of 320, 8 of 640), 0 for a picture too narrow to crop. */
+int n64_runtime_crop_columns(int w);
 
 /* Plays o->rom until the player quits (window closed, SDL_QUIT) or o->frames ran. Returns 0, or -1 when the ROM cannot
  * be read or the machine cannot start (why on stderr). Logs one "n64: ..." line per step on stdout. */

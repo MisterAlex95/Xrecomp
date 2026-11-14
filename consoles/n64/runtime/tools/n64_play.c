@@ -48,7 +48,7 @@
 static int usage(void)
 {
     fprintf(stderr, "usage: n64_play ROM [--frames N] [--save-dir DIR] [--scale aspect|integer|stretch]\n"
-                    "                [--filter nearest|linear] [--pak controller|rumble|none] [--players 1..4]\n"
+                    "                [--filter nearest|linear] [--edges] [--pak controller|rumble|none] [--players 1..4]\n"
                     "                [--rdp-threads N] [--pal | --ntsc] [--tty] [--headless] [--unpaced]\n"
                     "                [--buttons MASK] [--screenshot OUT.ppm] [--capture N OUT.ppm] [--key KEY]\n"
                     "                [--pack LIB.so] [--missed FILE] [--frameskip auto|0..9]\n");
@@ -79,6 +79,8 @@ int main(int argc, char **argv)
             if (o.filter < 0)
                 return usage();
         }
+        else if (!strcmp(a, "--edges"))
+            o.crop_edges = 0; /* show the VI's guard band (RECOMP_N64_CROP_EDGES=0) */
         else if (!strcmp(a, "--pak") && more) {
             o.pak = n64_runtime_pak_parse(argv[++i]);
             if (o.pak == N64_RT_PAK_DEFAULT)
