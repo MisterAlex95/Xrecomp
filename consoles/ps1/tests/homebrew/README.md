@@ -54,11 +54,20 @@ programs never `malloc`. Overlays load at `0x80100000`, far above the EXEs (`0x8
 
 ## Validation status
 
-Built and inspected (disassembly, disc contents with `dumpsxiso`), **not yet run**: no open-source PS1 emulator
-without a BIOS dump fits a headless check here yet. Expected values come from the R3000A behaviour documented in
-the LSI/IDT manuals and nocash's psx-spx (load delay slot, divide-by-zero results, LWL/LWR merge rules). The first
-run in an emulator (e.g. DuckStation or pcsx-redux with its open BIOS) or in our runtime confirms them; a mismatch
-there means fixing the expectation only after checking the reference.
+All five programs report PASS in **PCSX-Redux** (commit `b3eb3253`, interpreter CPU) with **OpenBIOS** (its
+open-source BIOS, built from source; no Sony BIOS), both as the side-loaded EXE and as the disc booted through
+`SYSTEM.CNF` (2026-11-14):
+
+```sh
+tools/consoles/build_homebrew.sh ps1 && tools/consoles/run_homebrew.sh ps1
+```
+
+`run_homebrew.sh` builds `tools/docker/ps1-oracle.Dockerfile` (about 16 min cold at JOBS=4, 2.9 GB) and runs
+PCSX-Redux `-no-ui`; `tools/consoles/oracle/ps1_watch.lua` reads the block at each VSync and the verdict is decoded by
+`oracle/decode_block.py`. PCSX-Redux (GPL-2.0-or-later) and OpenBIOS (MIT) are **external oracles only**: run in
+their own container, never copied into or linked with our code, the image never published. Expected values come
+from the R3000A behaviour documented in the LSI/IDT manuals and nocash's psx-spx; the first oracle run caught one
+wrong expectation (`gfx` sampled the gouraud quad on its diagonal, fixed), the rest matched as written.
 
 ## Toolchain and licences
 
