@@ -138,6 +138,7 @@ typedef void (*span_fn)(rdp_render *r, const rdp_prim *p, const rdp_row *row);
 /* A tile's sampling parameters, per axis (s, t): see tiles_prep. */
 typedef struct {
     uint8_t shr[2], shl[2], clamp[2], mask[2];
+    uint8_t plain; /* no shift and no mirror on either axis (td_axis's PLAIN case) */
     int32_t lo3[2], mx[2], mir[2], m[2];
     uint32_t tmem, line, pal;
 } rdp_tdesc;
@@ -601,9 +602,10 @@ ALWAYS_INLINE uint64_t fetch_k(const uint8_t *tm, const uint64_t *dec, const rdp
 }
 
 /* tc_axis on the derived parameters of axis ax. */
-ALWAYS_INLINE void td_axis(const rdp_tdesc *d, int ax, int32_t c, int *i0, int *i1, int *frac)
+ALWAYS_INLINE void td_axis_t(const rdp_tdesc *d, int ax, int32_t c, int *i0, int *i1, int *frac, const int PLAIN)
 {
-    c = (int32_t)((uint32_t)(c >> d->shr[ax]) << d->shl[ax]);
+    if (!PLAIN)
+        c = (int32_t)((uint32_t)(c >> d->shr[ax]) << d->shl[ax]);
     c -= d->lo3[ax];
     int i = c >> 5, f = c & 31, j = i + 1;
     if (d->clamp[ax]) {
@@ -616,20 +618,26 @@ ALWAYS_INLINE void td_axis(const rdp_tdesc *d, int ax, int32_t c, int *i0, int *
             f = 0;
         }
     }
-    const int mb = d->mask[ax];
-    const int mir = d->mir[ax];
-    i ^= mir & -((i >> mb) & 1);
-    j ^= mir & -((j >> mb) & 1);
+    if (!PLAIN) {
+        const int mb = d->mask[ax];
+        const int mir = d->mir[ax];
+        i ^= mir & -((i >> mb) & 1);
+        j ^= mir & -((j >> mb) & 1);
+    }
     *i0 = i & d->m[ax];
     *i1 = j & d->m[ax];
     *frac = f;
+}
+ALWAYS_INLINE void td_axis(const rdp_tdesc *d, int ax, int32_t c, int *i0, int *i1, int *frac)
+{
+    td_axis_t(d, ax, c, i0, i1, frac, 0);
 }
 
 /* Samples n pixels at (ss[i], ts[i]) (s10.5) into out[i] (packed). The filter: 3-point bilinear on the upper-left or
  * lower-right triangle of the texel square, written with non-negative weights: a + ((fs (b - a) + ft (c - a) + 16) >> 5)
  * is exactly ((32 - fs - ft) a + fs b + ft c + 16) >> 5 (and likewise for the other triangle). */
 ALWAYS_INLINE void samp_t(const rdp_render *r, const rdp_tdesc *dp, const int32_t *ss, const int32_t *ts, int n,
-                          uint64_t *out, const int K, const int FL)
+                          uint64_t *out, const int K, const int FL, const int PLAIN)
 {
     const uint8_t *tm = r->s.tmem;
     const uint64_t *dec = r->dec16;
@@ -637,8 +645,8 @@ ALWAYS_INLINE void samp_t(const rdp_render *r, const rdp_tdesc *dp, const int32_
     const uint64_t round = LANES(16ull), m8 = LANES(0xFFull);
     for (int k = 0; k < n; k++) {
         int s0, s1, fs, t0, t1, ft;
-        td_axis(d, 0, ss[k], &s0, &s1, &fs);
-        td_axis(d, 1, ts[k], &t0, &t1, &ft);
+        td_axis_t(d, 0, ss[k], &s0, &s1, &fs, PLAIN);
+        td_axis_t(d, 1, ts[k], &t0, &t1, &ft, PLAIN);
         if (FL == FL_CONV) {
             int32_t raw[4], o[4];
             unpk4(fetch_k(tm, dec, d, K, s0, t0), raw);
@@ -667,7 +675,10 @@ ALWAYS_INLINE void samp_t(const rdp_render *r, const rdp_tdesc *dp, const int32_
     static void samp_##k##_##fl(const rdp_render *r, const rdp_tdesc *d, const int32_t *ss, const int32_t *ts, int n,   \
                                 uint64_t *out)                                                                           \
     {                                                                                                                    \
-        samp_t(r, d, ss, ts, n, out, k, fl);                                                                             \
+        if (d->plain)                                                                                                    \
+            samp_t(r, d, ss, ts, n, out, k, fl, 1);                                                                      \
+        else                                                                                                             \
+            samp_t(r, d, ss, ts, n, out, k, fl, 0);                                                                      \
     }
 #define SAMP_K(k) SAMP_FL(k, FL_CONV) SAMP_FL(k, FL_POINT) SAMP_FL(k, FL_BIL) SAMP_FL(k, FL_BILMID)
 SAMP_K(K4_TLUT_RGBA) SAMP_K(K4_TLUT_IA) SAMP_K(K4_IA) SAMP_K(K4_CI) SAMP_K(K4_I)
@@ -708,6 +719,7 @@ static void tiles_prep(rdp_render *r)
         rdp_tdesc *d = &r->td[n];
         td_axis_prep(d, 0, t->shift_s, t->sl, t->sh, t->cs, imin(t->mask_s, 10), t->ms);
         td_axis_prep(d, 1, t->shift_t, t->tl, t->th, t->ct, imin(t->mask_t, 10), t->mt);
+        d->plain = !d->shr[0] && !d->shl[0] && !d->mir[0] && !d->shr[1] && !d->shl[1] && !d->mir[1];
         d->tmem = t->tmem;
         d->line = t->line;
         d->pal = t->pal;
