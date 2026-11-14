@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Controls and the on-screen pad for GBA, PS1 and N64 games (XBA-158 / XBA-168 / XBA-174, ConsolePadMap,
+     ConsoleControls, docs/android/app-shell.md « Controls for the other consoles »). A file of its own. -->
+<resources>
+    <string name="CC_CONSOLE_GBA">Game Boy Advance</string>
+    <string name="CC_CONSOLE_PS1">PlayStation</string>
+    <string name="CC_CONSOLE_N64">Nintendo 64</string>
+
+    <!-- The consoles' buttons (what the game gets). -->
+    <string name="CC_A">A</string>
+    <string name="CC_B">B</string>
+    <string name="CC_L">L</string>
+    <string name="CC_R">R</string>
+    <string name="CC_Z">Z</string>
+    <string name="CC_START">Start</string>
+    <string name="CC_SELECT">Select</string>
+    <string name="CC_CROSS">Cross</string>
+    <string name="CC_CIRCLE">Circle</string>
+    <string name="CC_SQUARE">Square</string>
+    <string name="CC_TRIANGLE">Triangle</string>
+    <string name="CC_L1">L1</string>
+    <string name="CC_R1">R1</string>
+    <string name="CC_L2">L2</string>
+    <string name="CC_R2">R2</string>
+    <string name="CC_L3">L3 (left stick press)</string>
+    <string name="CC_R3">R3 (right stick press)</string>
+    <string name="CC_C_UP">C up</string>
+    <string name="CC_C_DOWN">C down</string>
+    <string name="CC_C_LEFT">C left</string>
+    <string name="CC_C_RIGHT">C right</string>
+    <string name="CC_GROUP_C">C buttons</string>
+    <string name="CC_STICK">Analog stick</string>
+    <string name="CC_GROUP_STICK">Analog stick</string>
+
+    <string name="CC_SCOPE">Mapping for</string>
+    <string name="CC_SCOPE_CONSOLE">All %1$s games</string>
+    <string name="CC_SCOPE_GAME">This game only</string>
+    <string name="CC_SCOPE_DETAIL">All %1$s games share one mapping. This game only: a copy for this game alone, changed without touching the others; back to all games drops it.</string>
+    <string name="CC_LEAD">What the %1$s game gets from your pad. Left and right change the button, Y puts the usual ones back. The launcher and the game\'s menu keep the usual buttons; the on-screen pad is never remapped.</string>
+    <string name="CC_RANGE">Stick range</string>
+    <string name="CC_RANGE_DETAIL">How far the game\'s stick goes at your stick\'s full travel; a real N64 stick reaches about 80. Usual: 80.</string>
+    <string name="CC_DEADZONE">Dead zone</string>
+    <string name="CC_DEADZONE_DETAIL" formatted="false">How far your stick moves before the game sees it. Raise it if a character walks on its own. Usual: 8 %.</string>
+    <string name="CC_RUNTIME_DEFAULT">Usual</string>
+    <string name="CC_RESET_DETAIL">Every %1$s button back to its usual place (for %2$s).</string>
+    <string name="CC_TOUCH_DETAIL">The %1$s\'s own buttons on the game\'s screen, never remapped. Without a controller: shown while no controller is connected, hidden as soon as one is used. The in-game menu shows or hides it for the session. Never on a handheld\'s top screen while the bottom screen shows the panel.</string>
+    <string name="CC_GAME_MAP_ON">This game has its own mapping.</string>
+
+    <!-- The in-game menu (Settings page). -->
+    <string name="MENU_TOUCH">On-screen pad</string>
+    <string name="MENU_TOUCH_SHOWN">Shown</string>
+    <string name="MENU_TOUCH_HIDDEN">Hidden</string>
+</resources>

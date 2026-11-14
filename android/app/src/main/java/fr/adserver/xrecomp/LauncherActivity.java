@@ -143,7 +143,9 @@ public class LauncherActivity extends Activity {
         /** A game's own app on its way into the game: its art, its title, one line, at most one action (gameApp). */
         DIRECT,
         /** A GBA game's Home (XBA-158): Play (the interpreter, or its pack) and its Prepare; romEntry. */
-        ROM_HOME
+        ROM_HOME,
+        /** A GBA, PS1 or N64 game's Controls (ConsolePadMap): its console's mapping or its own; romEntry. */
+        ROM_CONTROLS
     }
 
     /** The Preparing screen dims after this long without input (OLED burn-in); any key or touch wakes it. */
@@ -980,6 +982,9 @@ public class LauncherActivity extends Activity {
         case ROM_HOME:
             buildRomHome();
             break;
+        case ROM_CONTROLS:
+            buildRomControls();
+            break;
         }
         restoreFocus(false);
         if (companion != null && s != Screen.HOME && s != Screen.LIBRARY && s != Screen.PREPARE)
@@ -1015,7 +1020,7 @@ public class LauncherActivity extends Activity {
     private boolean syncTheme(Screen s) {
         // The library and Storage: always the stock colours (only the backdrop's glow follows the focused card).
         boolean stock = s == Screen.LIBRARY || s == Screen.STORAGE || s == Screen.ROM_HOME
-                        || s == Screen.PREPARE && romEntry != null;
+                        || s == Screen.ROM_CONTROLS || s == Screen.PREPARE && romEntry != null;
         String dir = stock ? null : gameDir();
         File gd = dir == null ? null : new File(dir);
         String tid = null;
@@ -3932,6 +3937,8 @@ public class LauncherActivity extends Activity {
                      show(Screen.ROM_HOME, 0);
                  });
         }
+        // XBA-158 / XBA-168 / XBA-174: the console's buttons remapped, for all its games or this one (ROM_CONTROLS).
+        pill(buttons, Icon.PAD, getString(R.string.CONTROLS), false, () -> go(Screen.ROM_CONTROLS));
         homePrimary = play;
         defaultFocus = play;
         startAction = () -> launchRom(e);
@@ -4932,6 +4939,10 @@ public class LauncherActivity extends Activity {
 
     /** Controls › On-screen pad (XBA-42): when it shows, its opacity, its size (TouchSettings, files/settings). */
     private void controlsTouch(LinearLayout list) {
+        controlsTouch(list, getString(R.string.CTL_TOUCH_DETAIL));
+    }
+
+    private void controlsTouch(LinearLayout list, String modeDetail) {
         TouchSettings t = TouchSettings.load(this);
         listLabel(list, getString(R.string.CTL_GROUP_TOUCH));
         MenuRow mode = settingRow(list, getString(R.string.CTL_TOUCH), "");
@@ -4949,7 +4960,8 @@ public class LauncherActivity extends Activity {
             d -> t.size = TouchSettings.step(TouchSettings.SIZES, t.size, d),
         };
         MenuRow[] rows = { mode, opacity, size };
-        int[] details = { R.string.CTL_TOUCH_DETAIL, R.string.CTL_TOUCH_OPACITY_DETAIL, R.string.CTL_TOUCH_SIZE_DETAIL };
+        String[] details = { modeDetail, getString(R.string.CTL_TOUCH_OPACITY_DETAIL),
+                             getString(R.string.CTL_TOUCH_SIZE_DETAIL) };
         for (int i = 0; i < rows.length; i++) {
             MenuRow r = rows[i];
             Widgets.Cycler step = steps[i];
@@ -4961,7 +4973,7 @@ public class LauncherActivity extends Activity {
                 feedback.play(UiFeedback.Cue.MOVE, r);
             };
             r.setOnClickListener(v -> r.cycler.step(1));
-            String text = getString(details[i]);
+            String text = details[i];
             onFocus(r, () -> describe(text));
         }
     }
@@ -5023,6 +5035,187 @@ public class LauncherActivity extends Activity {
         padMap.store(cfg);
         saveSettings();
         show(Screen.CONTROLS, 0);
+        setNote(getString(R.string.CTL_RESET_DONE), NOTE_OK);
+    }
+
+    // ---- ROM_CONTROLS (XBA-158 / XBA-168 / XBA-174) ---------------------------------------------------------------
+
+    /** The mapping ROM_CONTROLS edits: the console's (recomp.cfg) or, romMapGame, the game's own (ConsoleControls). */
+    private ConsolePadMap romMap;
+    private boolean romMapGame;
+
+    ConsolePadMap romMapForTest() {
+        return romMap;
+    }
+
+    /**
+     * A GBA, PS1 or N64 game's Controls: whose mapping (all the console's games, or this game only), one row per
+     * console button (its value the player's controls, left / right or A step it), the sticks (PS1, N64), the N64
+     * stick's range and dead zone, the on-screen pad (shared with the Xbox's), « Reset controls » (also Y). Read by
+     * the console's runtime at the game's start (src/input/console_pad.h): recomp.cfg's line for the console, the
+     * game's own through the environment (ShellActivity). The launcher and the in-game menu keep the usual buttons.
+     */
+    private void buildRomControls() {
+        screenTitle.setText(R.string.CONTROLS);
+        LibraryScreen.Entry e = romEntry;
+        if (e == null) {   // nothing to edit (the activity came back without its game)
+            show(Screen.LIBRARY, 0);
+            return;
+        }
+        Console con = e.console();
+        String key = e.tid, cname = ConsoleControls.consoleName(this, con);
+        cfg = RecompConfig.load(GameStore.externalFilesDir(this));
+        ConsolePadMap own = ConsoleControls.loadGame(this, key);
+        romMapGame = own != null;
+        romMap = own != null ? own : ConsoleControls.loadConsole(cfg, con);
+        LinearLayout list = listTemplate();
+
+        MenuRow scope = settingRow(list, getString(R.string.CC_SCOPE), "");
+        String[] scopes = { getString(R.string.CC_SCOPE_CONSOLE, cname), getString(R.string.CC_SCOPE_GAME) };
+        scope.setChoices(scopes);
+        scope.setValue(scopes[romMapGame ? 1 : 0]);
+        scope.cycler = d -> {
+            // This game only: a copy of the console's mapping to change on its own; all games: the copy goes.
+            ConsoleControls.storeGame(this, key, romMapGame ? null : romMap);
+            Log.i(TAG, "launcher: " + key + " controls " + (romMapGame ? "follow the console's" : "of its own"));
+            feedback.play(UiFeedback.Cue.MOVE, scope);
+            show(Screen.ROM_CONTROLS, 0);
+        };
+        scope.setOnClickListener(v -> scope.cycler.step(1));
+        String scopeText = getString(R.string.CC_SCOPE_DETAIL, cname);
+        onFocus(scope, () -> describe(scopeText));
+
+        PadMapping.Source[] sources = PadMapping.Source.values();
+        String[] sourceLabels = new String[sources.length];
+        for (int i = 0; i < sources.length; i++)
+            sourceLabels[i] = getString(ControlsLabels.source(sources[i]));
+        int[] groupLabels = ConsoleControls.groupLabels(con);
+        int[][] groups = ConsoleControls.groups(con);
+        for (int g = 0; g < groups.length; g++) {
+            listLabel(list, getString(groupLabels[g]));
+            for (int t : groups[g]) {
+                MenuRow r = settingRow(list, getString(ConsoleControls.targetLabel(con, t)), "");
+                r.setChoices(sourceLabels);
+                r.setValue(ConsoleControls.sourcesLabel(this, romMap, t));
+                r.cycler = d -> {
+                    romMap.step(t, d);
+                    r.setValue(ConsoleControls.sourcesLabel(this, romMap, t));
+                    saveRomControls(key);
+                    feedback.play(UiFeedback.Cue.MOVE, r);
+                    romTargetDetail(t);
+                };
+                r.setOnClickListener(v -> r.cycler.step(1));
+                onFocus(r, () -> romTargetDetail(t));
+            }
+        }
+        if (romMap.stick.length > 0) {
+            listLabel(list, getString(con == Console.N64 ? R.string.CC_GROUP_STICK : R.string.CTL_GROUP_STICKS));
+            PadMapping.Stick[] sticks = PadMapping.Stick.values();
+            String[] stickLabels = new String[sticks.length];
+            for (int i = 0; i < sticks.length; i++)
+                stickLabels[i] = getString(ControlsLabels.stick(sticks[i]));
+            for (int i = 0; i < romMap.stick.length; i++) {
+                int si = i;
+                String name = getString(ConsoleControls.stickLabel(con, i));
+                MenuRow r = settingRow(list, name, "");
+                r.setChoices(stickLabels);
+                r.setValue(getString(ControlsLabels.stick(romMap.stick[i])));
+                Runnable detail = () -> describe(romMap.stick[si] == PadMapping.Stick.NONE
+                                                     ? getString(R.string.CTL_STICK_NONE, name)
+                                                     : getString(R.string.CTL_STICK_ROW, name,
+                                                                 getString(ControlsLabels.stick(romMap.stick[si]))));
+                r.cycler = d -> {
+                    romMap.stepStick(si, d);
+                    r.setValue(getString(ControlsLabels.stick(romMap.stick[si])));
+                    saveRomControls(key);
+                    feedback.play(UiFeedback.Cue.MOVE, r);
+                    detail.run();
+                };
+                r.setOnClickListener(v -> r.cycler.step(1));
+                onFocus(r, detail);
+            }
+            if (ConsolePadMap.hasRange(con)) {
+                MenuRow range = settingRow(list, getString(R.string.CC_RANGE), "");
+                MenuRow dead = settingRow(list, getString(R.string.CC_DEADZONE), "");
+                range.setValue(ConsoleControls.rangeLabel(this, romMap.range));
+                dead.setValue(ConsoleControls.deadzoneLabel(this, romMap.deadzone));
+                range.cycler = d -> {
+                    romMap.range = ConsolePadMap.stepIn(ConsolePadMap.RANGES, romMap.range, d);
+                    range.setValue(ConsoleControls.rangeLabel(this, romMap.range));
+                    saveRomControls(key);
+                    feedback.play(UiFeedback.Cue.MOVE, range);
+                };
+                dead.cycler = d -> {
+                    romMap.deadzone = ConsolePadMap.stepIn(ConsolePadMap.DEADZONES, romMap.deadzone, d);
+                    dead.setValue(ConsoleControls.deadzoneLabel(this, romMap.deadzone));
+                    saveRomControls(key);
+                    feedback.play(UiFeedback.Cue.MOVE, dead);
+                };
+                range.setOnClickListener(v -> range.cycler.step(1));
+                dead.setOnClickListener(v -> dead.cycler.step(1));
+                String rt = getString(R.string.CC_RANGE_DETAIL), dt = getString(R.string.CC_DEADZONE_DETAIL);
+                onFocus(range, () -> describe(rt));
+                onFocus(dead, () -> describe(dt));
+            }
+        }
+        controlsTouch(list, getString(R.string.CC_TOUCH_DETAIL, cname));
+        String resetText = getString(R.string.CC_RESET_DETAIL, cname,
+                                     romMapGame ? e.title() : getString(R.string.CC_SCOPE_CONSOLE, cname));
+        MenuRow reset = listRow(list, getString(R.string.CTL_RESET), resetText, this::resetRomControls);
+        onFocus(reset, () -> describe(resetText));
+        describe(getString(R.string.CC_LEAD, cname));
+        romChangedCount();
+        if (romMapGame)
+            setNote(getString(R.string.CC_GAME_MAP_ON), NOTE_INFO);
+        yAction = this::resetRomControls;
+        addHint("A", R.string.HINT_CHANGE, this::clickFocused);
+        addHint("Y", R.string.HINT_DEFAULTS, this::resetRomControls);
+        addHint("B", R.string.HINT_BACK, this::back);
+    }
+
+    /** The focused console button's line: where it comes from, and which other button shares that control. */
+    private void romTargetDetail(int t) {
+        Console con = romMap.console;
+        String name = getString(ConsoleControls.targetLabel(con, t));
+        String from = ConsoleControls.sourcesLabel(this, romMap, t);
+        String text = romMap.source[t] == 0 ? getString(R.string.CTL_ROW_NONE, name)
+                                            : getString(R.string.CTL_ROW, name, from);
+        java.util.List<Integer> shared = romMap.sharing(t);
+        if (!shared.isEmpty()) {
+            StringBuilder b = new StringBuilder();
+            for (int o : shared)
+                b.append(b.length() == 0 ? "" : ", ").append(getString(ConsoleControls.targetLabel(con, o)));
+            text += " " + getString(R.string.CTL_ROW_SHARED, from, b);
+        }
+        describe(text);
+    }
+
+    private void romChangedCount() {
+        int n = romMap == null ? 0 : romMap.changedCount();
+        topRight.setText(n == 0 ? "" : getString(R.string.CTL_CHANGED, n));
+    }
+
+    /** Written at once: the game's own file, or recomp.cfg's line for the console (none for the usual mapping). */
+    private void saveRomControls(String key) {
+        if (romMapGame) {
+            ConsoleControls.storeGame(this, key, romMap);
+            setNote(getString(gameRunning() ? R.string.SETTINGS_SAVED_RUNNING : R.string.SETTINGS_SAVED), NOTE_OK);
+        } else {
+            ConsoleControls.storeConsole(cfg, romMap);
+            saveSettings();
+        }
+        romChangedCount();
+        Log.i(TAG, "launcher: " + romMap.console.id + " controls (" + (romMapGame ? key : "console") + ") "
+                   + (romMap.isDefault() ? "(default)" : romMap.format()));
+    }
+
+    /** Y, or « Reset controls »: the console's usual mapping, for the scope shown. */
+    private void resetRomControls() {
+        if (romMap == null || romEntry == null)
+            return;
+        romMap.reset();
+        saveRomControls(romEntry.tid);
+        show(Screen.ROM_CONTROLS, 0);
         setNote(getString(R.string.CTL_RESET_DONE), NOTE_OK);
     }
 

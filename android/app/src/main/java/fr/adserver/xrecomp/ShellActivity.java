@@ -111,6 +111,7 @@ public class ShellActivity extends SDLActivity {
         applyTitleVideo();
         applyLanguage();
         applyN64Pak(rom != null);
+        Console console = applyConsolePad(rom != null);
         boolean checked = LibraryCheck.applyRunEnv(this);   // a library check's run: status file and pad script (XBA-130)
         applyBuiltinPad();
         super.onCreate(savedInstanceState);
@@ -120,6 +121,7 @@ public class ShellActivity extends SDLActivity {
         applyGameTheme();
         menu = new GameMenu(this, new MenuHost());
         touch = new TouchControls(this, mixer, () -> PadDevices.any(this));
+        touch.layout(TouchPad.layoutFor(console, ps1Analog()));   // the console's own buttons (XBA-158 / 168 / 174)
         touch.checkRun(checked);   // never the on-screen pad during a library check
         touch.attach();   // under the menu
         menu.attach();
@@ -207,6 +209,40 @@ public class ShellActivity extends SDLActivity {
         if (tid != null && Console.ofKey(tid) == Console.N64)
             Log.i(LauncherActivity.TAG, "shell: n64 pak " + (v != null ? v : "default (recomp.cfg, else controller)")
                                         + ", game " + tid);
+    }
+
+    /**
+     * The player's mapping for a GBA, PS1 or N64 game (XBA-158 / XBA-168 / XBA-174, {@link ConsoleControls}): the
+     * launched game's own as RECOMP_&lt;CONSOLE&gt;_PAD_MAP, where it wins over recomp.cfg's line (the console's
+     * mapping); the other consoles' variables unset, so nothing a previous game of this process set stays. Returns
+     * the launched game's console (XBOX for an Xbox game).
+     */
+    private Console applyConsolePad(boolean romLaunch) {
+        String tid = romLaunch ? GameStore.launchedTitleId(this) : null;
+        Console c = tid != null ? Console.ofKey(tid) : Console.XBOX;
+        for (String[] kv : ConsoleControls.runEnv(this, tid)) {
+            try {
+                if (kv[1] != null)
+                    Os.setenv(kv[0], kv[1], true);
+                else
+                    Os.unsetenv(kv[0]);
+            } catch (ErrnoException e) {
+                Log.w(LauncherActivity.TAG, "shell: cannot set " + kv[0], e);
+            }
+        }
+        if (c != Console.XBOX) {
+            String own = ConsoleControls.gameText(this, tid);
+            Log.i(LauncherActivity.TAG, "shell: " + c.id + " controls " + (own == null ? "of the console (recomp.cfg)"
+                                        : "of the game: " + (own.isEmpty() ? "(default)" : own)) + ", game " + tid);
+        }
+        return c;
+    }
+
+    /** RECOMP_PS1_PAD=analog in recomp.cfg: the PS1 on-screen pad gets the DualShock's two sticks. */
+    private boolean ps1Analog() {
+        File ext = GameStore.externalFilesDir(this);
+        String v = ext == null ? null : RecompConfig.load(ext).get("RECOMP_PS1_PAD");
+        return v != null && v.trim().equalsIgnoreCase("analog");
     }
 
     /**
@@ -416,6 +452,26 @@ public class ShellActivity extends SDLActivity {
         @Override
         public void backToLauncher() {
             openLauncher();
+        }
+
+        @Override
+        public Boolean touchShown() {
+            return touch == null ? null : touch.shown();
+        }
+
+        @Override
+        public void setTouchShown(boolean on) {
+            if (touch != null)
+                touch.force(on);
+        }
+
+        @Override
+        public ConsolePadMap consoleMap() {
+            String tid = GameStore.launchedRom(ShellActivity.this) != null
+                         ? GameStore.launchedTitleId(ShellActivity.this) : null;
+            if (tid == null || Console.ofKey(tid) == Console.XBOX)
+                return null;
+            return ConsoleControls.effective(ShellActivity.this, GameStore.externalFilesDir(ShellActivity.this), tid);
         }
 
         @Override

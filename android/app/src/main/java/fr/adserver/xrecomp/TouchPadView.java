@@ -25,7 +25,7 @@ final class TouchPadView extends View {
         void state(TouchPad.State s);
     }
 
-    final TouchPad pad = new TouchPad();
+    TouchPad pad = new TouchPad();
     private final Listener listener;
     private TouchPad.State last = new TouchPad.State();
     private float scale = 1f;
@@ -42,6 +42,17 @@ final class TouchPadView extends View {
         text.setTextAlign(Paint.Align.CENTER);
         text.setTypeface(Theme.MEDIUM);
         setHapticFeedbackEnabled(true);
+    }
+
+    /** The console's layout (TouchPad.Layout): a new pad, nothing held. */
+    void setLayout(TouchPad.Layout l) {
+        if (pad.layout == l)
+            return;
+        pad = new TouchPad(l);
+        if (getWidth() > 0)
+            pad.layout(getWidth(), getHeight(), scale);
+        send();
+        invalidate();
     }
 
     void apply(TouchSettings s) {
@@ -198,16 +209,20 @@ final class TouchPadView extends View {
         }
     }
 
-    /** The face buttons in the Duke's colours, White and Black as discs, the rest as labelled outlines. */
+    /**
+     * The face buttons in the Duke's colours, White and Black as discs, the rest as labelled outlines; the other
+     * consoles' marks in their colours (Control.face), the PlayStation's shapes and the C buttons' arrows drawn.
+     */
     private void drawButton(Canvas c, TouchPad.Control k, boolean held) {
-        int face = 0;
-        switch (k.id) {
+        int face = k.face;
+        if (face == 0 && pad.layout == TouchPad.Layout.XBOX)
+            switch (k.id) {
         case TouchPad.A: face = 0xFF3FB34F; break;
         case TouchPad.B: face = 0xFFE0413A; break;
         case TouchPad.X: face = 0xFF3B7FE0; break;
         case TouchPad.Y: face = 0xFFE8C433; break;
         default: break;
-        }
+            }
         if (k.pill()) {
             rect.set(k.cx - k.hw, k.cy - k.hh, k.cx + k.hw, k.cy + k.hh);
             fill.setColor(a(held ? 0xC0FFFFFF : 0x70202020, 1f));
@@ -225,7 +240,11 @@ final class TouchPadView extends View {
         } else {
             base(c, k.cx, k.cy, k.r, held);
         }
-        if (k.id == TouchPad.BACK || k.id == TouchPad.START) {
+        if (k.glyph != TouchPad.GLYPH_NONE) {
+            drawGlyph(c, k, held ? 0xFF101010 : a(face, 0.95f));
+            return;
+        }
+        if ((k.id == TouchPad.BACK || k.id == TouchPad.START) && k.label.isEmpty()) {
             float d = k.id == TouchPad.BACK ? -1 : 1, t = k.hh * 0.45f;
             path.reset();
             path.moveTo(k.cx + d * t, k.cy);
@@ -236,11 +255,51 @@ final class TouchPadView extends View {
             c.drawPath(path, fill);
             return;
         }
-        float size = k.pill() ? k.hh * 0.9f : k.r * (k.label.length() > 1 ? 0.62f : 0.9f);
+        float size = k.pill() ? k.hh * (k.label.length() > 3 ? 0.62f : 0.9f)
+                              : k.r * (k.label.length() > 1 ? 0.62f : 0.9f);
         text.setTextSize(size);
         text.setColor(face != 0 ? a(face, held ? 1f : 0.95f) : a(held ? 0xFF101010 : 0xF0FFFFFF, 1f));
         if (held && face != 0)
             text.setColor(a(0xFF101010, 1f));
         c.drawText(k.label, k.cx, k.cy + size * 0.35f, text);
+    }
+
+    /** A drawn mark: the PlayStation's cross, circle, square and triangle, an arrow for the C buttons. */
+    private void drawGlyph(Canvas c, TouchPad.Control k, int color) {
+        float g = k.r * 0.42f;
+        stroke.setColor(color);
+        stroke.setStrokeWidth(Math.max(2f, k.r * 0.11f));
+        switch (k.glyph) {
+        case TouchPad.GLYPH_CROSS:
+            c.drawLine(k.cx - g, k.cy - g, k.cx + g, k.cy + g, stroke);
+            c.drawLine(k.cx - g, k.cy + g, k.cx + g, k.cy - g, stroke);
+            return;
+        case TouchPad.GLYPH_CIRCLE:
+            c.drawCircle(k.cx, k.cy, g, stroke);
+            return;
+        case TouchPad.GLYPH_SQUARE:
+            c.drawRect(k.cx - g * 0.85f, k.cy - g * 0.85f, k.cx + g * 0.85f, k.cy + g * 0.85f, stroke);
+            return;
+        case TouchPad.GLYPH_TRIANGLE:
+            path.reset();
+            path.moveTo(k.cx, k.cy - g);
+            path.lineTo(k.cx + g * 1.05f, k.cy + g * 0.75f);
+            path.lineTo(k.cx - g * 1.05f, k.cy + g * 0.75f);
+            path.close();
+            c.drawPath(path, stroke);
+            return;
+        default: {   // an arrow, pointing (dx, dy)
+            int dx = k.glyph == TouchPad.GLYPH_LEFT ? -1 : k.glyph == TouchPad.GLYPH_RIGHT ? 1 : 0;
+            int dy = k.glyph == TouchPad.GLYPH_UP ? -1 : k.glyph == TouchPad.GLYPH_DOWN ? 1 : 0;
+            path.reset();
+            path.moveTo(k.cx + dx * g, k.cy + dy * g);
+            path.lineTo(k.cx - dx * g * 0.6f + dy * g, k.cy - dy * g * 0.6f + dx * g);
+            path.lineTo(k.cx - dx * g * 0.6f - dy * g, k.cy - dy * g * 0.6f - dx * g);
+            path.close();
+            fill.setColor(color);
+            c.drawPath(path, fill);
+            return;
+        }
+        }
     }
 }

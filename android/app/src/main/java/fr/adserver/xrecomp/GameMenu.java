@@ -94,6 +94,19 @@ final class GameMenu {
         void backToLauncher();
 
         void quit();
+
+        /** The on-screen pad (XBA-42): null when the game has none, else whether it shows now. */
+        default Boolean touchShown() {
+            return null;
+        }
+
+        /** Shows or hides the on-screen pad for the rest of the session (the menu's toggle). */
+        default void setTouchShown(boolean on) {}
+
+        /** The launched GBA, PS1 or N64 game's mapping (ConsoleControls.effective), or null for an Xbox game. */
+        default ConsolePadMap consoleMap() {
+            return null;
+        }
     }
 
     static final long ANIM_MS = 200, QUIT_ARM_MS = 4000, FLASH_MS = 3000, PERF_TICK_MS = 500, SESSION_TICK_MS = 1000;
@@ -110,7 +123,7 @@ final class GameMenu {
     enum Page { MAIN, SETTINGS, CONTROLS }
 
     enum Item { RESUME, SETTINGS, CONTROLS, SCREENSHOT, SHARE_LOG, LAUNCHER, QUIT, PERF, VOLUME, BOTTOM, LANGUAGE,
-                WIDESCREEN, P480, BACK }
+                WIDESCREEN, P480, TOUCH, BACK }
 
     private final Activity activity;
     private final Host host;
@@ -801,6 +814,11 @@ final class GameMenu {
                 r.setChoices(new String[] { s(R.string.VAL_PANEL), s(R.string.VAL_BLACK), s(R.string.MENU_SCREEN_OFF) });
                 r.cycler = this::stepBottom;
             }
+            if (host.touchShown() != null) {   // the on-screen pad, for this session (XBA-158 / 168 / 174)
+                r = row(Item.TOUCH, s(R.string.MENU_TOUCH));
+                r.setChoices(new String[] { s(R.string.MENU_TOUCH_SHOWN), s(R.string.MENU_TOUCH_HIDDEN) });
+                r.cycler = dir -> toggleTouch();
+            }
             if (titleId() != null) {
                 r = row(Item.LANGUAGE, s(R.string.MENU_LANGUAGE));
                 String[] labels = new String[GameLanguage.MENU_ORDER.length + 1];
@@ -832,6 +850,20 @@ final class GameMenu {
                            { R.string.CTL_TRIGGERS, R.string.CTL_TRIGGERS_X },
                            { R.string.CTL_START, R.string.CTL_START_X }, { R.string.CTL_SELECT, R.string.CTL_SELECT_X },
                            { R.string.CTL_DPAD, R.string.CTL_DPAD_X }, { R.string.CTL_STICKS, R.string.CTL_STICKS_X } };
+            ConsolePadMap cm = host.consoleMap();
+            if (cm != null) {   // a GBA, PS1 or N64 game: its buttons and where they come from (XBA-158 / 168 / 174)
+                kvRow(s(R.string.CTL_MENU), s(R.string.CTL_MENU_X));
+                kvRow(s(R.string.CTL_COMBO), s(R.string.CTL_COMBO_X));
+                if (!cm.isDefault())
+                    kvRow(s(R.string.MENU_CTL_REMAPPED),
+                          activity.getString(R.string.MENU_CTL_REMAPPED_X, cm.changedCount()));
+                for (int t = 0; t < cm.targetCount(); t++)
+                    kvRow(ConsoleControls.sourcesLabel(activity, cm, t), s(ConsoleControls.targetLabel(cm.console, t)));
+                for (int i = 0; i < cm.stick.length; i++)
+                    kvRow(s(ControlsLabels.stick(cm.stick[i])), s(ConsoleControls.stickLabel(cm.console, i)));
+                row(Item.BACK, s(R.string.MENU_BACK));
+                break;
+            }
             // XBA-131: the player's remapping (the launcher's Controls), first: each changed control, then the usual list.
             PadMapping map = PadMapping.load(RecompConfig.load(GameStore.externalFilesDir(activity)));
             if (!map.isDefault()) {
@@ -931,6 +963,9 @@ final class GameMenu {
             break;
         case P480:
             stepVideo(GameVideo.Setting.P480, 1);
+            break;
+        case TOUCH:
+            toggleTouch();
             break;
         case BACK:
             back();
@@ -1070,6 +1105,15 @@ final class GameMenu {
         return s(on == null ? R.string.MENU_VIDEO_FOLLOW : on ? R.string.MENU_ON : R.string.MENU_OFF);
     }
 
+    private void toggleTouch() {
+        Boolean on = host.touchShown();
+        if (on == null)
+            return;
+        host.setTouchShown(!on);
+        Log.i(LauncherActivity.TAG, "shell: menu: on-screen pad " + (on ? "hidden" : "shown"));
+        updateValues();
+    }
+
     private void updateValues() {
         Widgets.MenuRow r = rows.get(Item.PERF);
         if (r != null)
@@ -1096,6 +1140,10 @@ final class GameMenu {
         r = rows.get(Item.P480);
         if (r != null)
             r.setValue(videoLabel(GameVideo.Setting.P480));
+        r = rows.get(Item.TOUCH);
+        Boolean touch = host.touchShown();
+        if (r != null && touch != null)
+            r.setValue(s(touch ? R.string.MENU_TOUCH_SHOWN : R.string.MENU_TOUCH_HIDDEN));
     }
 
     private String volumeLabel(int v) {

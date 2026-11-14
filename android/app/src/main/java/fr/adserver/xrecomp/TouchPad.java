@@ -19,9 +19,38 @@ import java.util.Map;
  * (sliding off a stick holds it at full tilt); a finger on a button can slide to the next button, as on the companion
  * panel. Sticks are analog (offset from the base's centre, a 6 % dead zone, the circle's edge is full tilt); the
  * D-pad gives eight directions; triggers are full when touched (Android gives no usable pressure).
+ *
+ * The other consoles (XBA-158 / XBA-168 / XBA-174) have layouts of their own ({@link Layout}): the GBA's D-pad, A, B,
+ * L, R, Start and Select; the PS1's D-pad, four face buttons, L1 / R1 / L2 / R2, Start, Select (and the DualShock's
+ * sticks in analog mode); the N64's stick, A, B, Z, L, R, Start and the four C buttons. Their controls still make the
+ * one Xbox-shaped overlay pad, each on the Xbox control that the console's default mapping (src/input/console_pad.c)
+ * reads as that button: L is Black (the left shoulder), Z the left trigger, the C buttons the right stick pushed
+ * fully. The runtime maps the overlay with those defaults, never the player's remapping, so the on-screen « Cross »
+ * is always the PS1's Cross.
  */
 final class TouchPad {
     enum Kind { STICK, DPAD, BUTTON }
+
+    /** Which console's controls: the Xbox's (the default), the GBA's, the PS1's (with sticks: analog), the N64's. */
+    enum Layout { XBOX, GBA, PS1, PS1_ANALOG, N64 }
+
+    /** The layout for a game of console c; ps1Analog: RECOMP_PS1_PAD=analog (the DualShock's sticks shown). */
+    static Layout layoutFor(Console c, boolean ps1Analog) {
+        switch (c == null ? Console.XBOX : c) {
+        case GBA:
+            return Layout.GBA;
+        case PS1:
+            return ps1Analog ? Layout.PS1_ANALOG : Layout.PS1;
+        case N64:
+            return Layout.N64;
+        default:
+            return Layout.XBOX;
+        }
+    }
+
+    /** A face button's mark, drawn rather than typed (the PlayStation's shapes, the C buttons' arrows). */
+    static final int GLYPH_NONE = 0, GLYPH_CROSS = 1, GLYPH_CIRCLE = 2, GLYPH_SQUARE = 3, GLYPH_TRIANGLE = 4,
+                     GLYPH_UP = 5, GLYPH_DOWN = 6, GLYPH_LEFT = 7, GLYPH_RIGHT = 8;
 
     // Xbox pad bits (xinput_xbox.h) and analog indices.
     static final int XB_UP = 0x01, XB_DOWN = 0x02, XB_LEFT = 0x04, XB_RIGHT = 0x08, XB_START = 0x10, XB_BACK = 0x20,
@@ -30,6 +59,9 @@ final class TouchPad {
 
     static final int LSTICK = 1, RSTICK = 2, DPAD = 3, A = 4, B = 5, X = 6, Y = 7, BLACK = 8, WHITE = 9, LT = 10,
                      RT = 11, BACK = 12, START = 13, L3 = 14, R3 = 15;
+    // The other consoles' own controls (on the Xbox controls their default mapping reads, see the class comment).
+    static final int SHOULDER_L = 16, SHOULDER_R = 17, SHOULDER_L2 = 18, SHOULDER_R2 = 19, Z = 20, C_UP = 21,
+                     C_DOWN = 22, C_LEFT = 23, C_RIGHT = 24, SELECT = 25;
 
     static final float DEAD = 0.06f, STICK_SLOP = 1.3f, BUTTON_SLOP = 1.2f, EDGE_FRAC = 0.03f;
 
@@ -39,6 +71,8 @@ final class TouchPad {
         final Kind kind;
         final String label;
         final int bits, analog;   // wButtons bits, bAnalogButtons index (-1 = none)
+        int face, glyph;          // the mark's colour (0: the Duke's, by id) and its drawn shape (GLYPH_*)
+        int pushX, pushY;         // a button that pushes the right stick fully (-1, 0, 1; Y up): the C buttons
         float cx, cy, r, hw, hh;
 
         Control(int id, Kind kind, String label, int bits, int analog) {
@@ -47,6 +81,18 @@ final class TouchPad {
             this.label = label;
             this.bits = bits;
             this.analog = analog;
+        }
+
+        Control face(int argb, int glyph) {
+            this.face = argb;
+            this.glyph = glyph;
+            return this;
+        }
+
+        Control push(int x, int y) {
+            pushX = x;
+            pushY = y;
+            return this;
         }
 
         boolean pill() {
@@ -73,6 +119,9 @@ final class TouchPad {
                 return lt > 0;
             if (c.analog == AN_RT)
                 return rt > 0;
+            if (c.pushX != 0 || c.pushY != 0)
+                return (c.pushX == 0 || Integer.signum(rx) == c.pushX)
+                       && (c.pushY == 0 || Integer.signum(ry) == c.pushY);
             return (c.bits != 0 && (buttons & c.bits) == c.bits) || (c.analog >= 0 && (analogMask & 1 << c.analog) != 0);
         }
 
@@ -98,11 +147,63 @@ final class TouchPad {
     }
 
     final List<Control> controls = new ArrayList<>();
+    final Layout layout;
     private final Map<Integer, float[]> pointers = new HashMap<>();   // id -> { x, y }
     private final Map<Integer, Control> captured = new HashMap<>();   // id -> the stick or D-pad it landed on
     private float width, height;
 
     TouchPad() {
+        this(Layout.XBOX);
+    }
+
+    TouchPad(Layout layout) {
+        this.layout = layout;
+        switch (layout) {
+        case GBA:
+            controls.add(new Control(DPAD, Kind.DPAD, "", 0, -1));
+            controls.add(new Control(A, Kind.BUTTON, "A", 0, AN_A).face(0xFFB9A6F0, GLYPH_NONE));
+            controls.add(new Control(B, Kind.BUTTON, "B", 0, AN_B).face(0xFFB9A6F0, GLYPH_NONE));
+            controls.add(new Control(SHOULDER_L, Kind.BUTTON, "L", 0, AN_BLACK));
+            controls.add(new Control(SHOULDER_R, Kind.BUTTON, "R", 0, AN_WHITE));
+            controls.add(new Control(SELECT, Kind.BUTTON, "SELECT", XB_BACK, -1));
+            controls.add(new Control(START, Kind.BUTTON, "START", XB_START, -1));
+            return;
+        case PS1:
+        case PS1_ANALOG:
+            controls.add(new Control(DPAD, Kind.DPAD, "", 0, -1));
+            if (layout == Layout.PS1_ANALOG) {
+                controls.add(new Control(LSTICK, Kind.STICK, "", 0, -1));
+                controls.add(new Control(RSTICK, Kind.STICK, "", 0, -1));
+                controls.add(new Control(L3, Kind.BUTTON, "L3", XB_LTHUMB, -1));
+                controls.add(new Control(R3, Kind.BUTTON, "R3", XB_RTHUMB, -1));
+            }
+            controls.add(new Control(A, Kind.BUTTON, "", 0, AN_A).face(0xFF8FB4F0, GLYPH_CROSS));
+            controls.add(new Control(B, Kind.BUTTON, "", 0, AN_B).face(0xFFF07A7A, GLYPH_CIRCLE));
+            controls.add(new Control(X, Kind.BUTTON, "", 0, AN_X).face(0xFFF0A0D8, GLYPH_SQUARE));
+            controls.add(new Control(Y, Kind.BUTTON, "", 0, AN_Y).face(0xFF5ED2A6, GLYPH_TRIANGLE));
+            controls.add(new Control(SHOULDER_L, Kind.BUTTON, "L1", 0, AN_BLACK));
+            controls.add(new Control(SHOULDER_R, Kind.BUTTON, "R1", 0, AN_WHITE));
+            controls.add(new Control(SHOULDER_L2, Kind.BUTTON, "L2", 0, AN_LT));
+            controls.add(new Control(SHOULDER_R2, Kind.BUTTON, "R2", 0, AN_RT));
+            controls.add(new Control(SELECT, Kind.BUTTON, "SELECT", XB_BACK, -1));
+            controls.add(new Control(START, Kind.BUTTON, "START", XB_START, -1));
+            return;
+        case N64:
+            controls.add(new Control(LSTICK, Kind.STICK, "", 0, -1));
+            controls.add(new Control(A, Kind.BUTTON, "A", 0, AN_A).face(0xFF5B8CF0, GLYPH_NONE));
+            controls.add(new Control(B, Kind.BUTTON, "B", 0, AN_B).face(0xFF4FC75F, GLYPH_NONE));
+            controls.add(new Control(Z, Kind.BUTTON, "Z", 0, AN_LT));
+            controls.add(new Control(SHOULDER_L, Kind.BUTTON, "L", 0, AN_BLACK));
+            controls.add(new Control(SHOULDER_R, Kind.BUTTON, "R", 0, AN_WHITE));
+            controls.add(new Control(START, Kind.BUTTON, "START", XB_START, -1));
+            controls.add(new Control(C_UP, Kind.BUTTON, "", 0, -1).face(0xFFF0CC40, GLYPH_UP).push(0, 1));
+            controls.add(new Control(C_DOWN, Kind.BUTTON, "", 0, -1).face(0xFFF0CC40, GLYPH_DOWN).push(0, -1));
+            controls.add(new Control(C_LEFT, Kind.BUTTON, "", 0, -1).face(0xFFF0CC40, GLYPH_LEFT).push(-1, 0));
+            controls.add(new Control(C_RIGHT, Kind.BUTTON, "", 0, -1).face(0xFFF0CC40, GLYPH_RIGHT).push(1, 0));
+            return;
+        default:
+            break;
+        }
         controls.add(new Control(LSTICK, Kind.STICK, "", 0, -1));
         controls.add(new Control(RSTICK, Kind.STICK, "", 0, -1));
         controls.add(new Control(DPAD, Kind.DPAD, "", 0, -1));
@@ -127,6 +228,13 @@ final class TouchPad {
         throw new IllegalArgumentException("no control " + id);
     }
 
+    boolean has(int id) {
+        for (Control c : controls)
+            if (c.id == id)
+                return true;
+        return false;
+    }
+
     /** Places the controls on a w x h screen; scale is the size setting (1 = normal). Releases every finger. */
     void layout(float w, float h, float scale) {
         width = w;
@@ -136,6 +244,11 @@ final class TouchPad {
         float o = h / 1000f, u = o * scale;
         // Never closer to the left edge than the in-game menu's swipe zone allows, whatever the size.
         float minLeft = w * EDGE_FRAC;
+        if (layout != Layout.XBOX) {
+            layoutConsole(w, h, o, u, minLeft);
+            cancel();
+            return;
+        }
         circle(LSTICK, left(300 * o, 150 * STICK_SLOP * u, minLeft), 400 * o, 150 * u);
         circle(DPAD, left(390 * o, 125 * 1.1f * u, minLeft), h - 230 * o, 125 * u);
         circle(L3, left(130 * o, 50 * BUTTON_SLOP * u, minLeft), 640 * o, 50 * u);
@@ -153,6 +266,63 @@ final class TouchPad {
         pill(BACK, w / 2 - 110 * u, h - 60 * o, 70 * u, 32 * u);
         pill(START, w / 2 + 110 * u, h - 60 * o, 70 * u, 32 * u);
         cancel();
+    }
+
+    /**
+     * The GBA, PS1 and N64 layouts, on the Xbox's grid: shoulders in the top corners, Start (and Select) at the bottom
+     * centre, the D-pad or the stick on the left, the face buttons on the right.
+     */
+    private void layoutConsole(float w, float h, float o, float u, float minLeft) {
+        float shoulderX = left(165 * o, 110 * BUTTON_SLOP * u, minLeft);
+        pill(SHOULDER_L, shoulderX, 95 * o, 110 * u, 55 * u);
+        pill(SHOULDER_R, w - 165 * o, 95 * o, 110 * u, 55 * u);
+        switch (layout) {
+        case GBA: {
+            circle(DPAD, left(330 * o, 140 * 1.1f * u, minLeft), 560 * o, 140 * u);
+            float fx = w - 300 * o, fy = 560 * o;
+            circle(A, fx + 75 * u, fy - 45 * u, 72 * u);   // the GBA's slant: A up and right of B
+            circle(B, fx - 85 * u, fy + 50 * u, 72 * u);
+            pill(SELECT, w / 2 - 110 * u, h - 60 * o, 70 * u, 32 * u);
+            pill(START, w / 2 + 110 * u, h - 60 * o, 70 * u, 32 * u);
+            break;
+        }
+        case PS1:
+        case PS1_ANALOG: {
+            boolean sticks = layout == Layout.PS1_ANALOG;
+            // L2 / R2 inward of L1 / R1 on the top edge (no room under them for the face buttons on a 4:3 screen).
+            pill(SHOULDER_L2, shoulderX + 240 * u, 95 * o, 110 * u, 55 * u);
+            pill(SHOULDER_R2, w - 165 * o - 240 * u, 95 * o, 110 * u, 55 * u);
+            float dy = sticks ? 430 * o : 560 * o;
+            circle(DPAD, left(330 * o, 125 * 1.1f * u, minLeft), dy, 125 * u);
+            float fx = w - 300 * o, fy = dy, gap = 105 * u, br = 62 * u;
+            circle(A, fx, fy + gap, br);   // Cross
+            circle(B, fx + gap, fy, br);   // Circle
+            circle(X, fx - gap, fy, br);   // Square
+            circle(Y, fx, fy - gap, br);   // Triangle
+            if (sticks) {   // the DualShock's, low and inward, clear of Select / Start
+                circle(LSTICK, left(440 * o, 110 * STICK_SLOP * u, minLeft), h - 250 * o, 110 * u);
+                circle(RSTICK, w - 440 * o, h - 250 * o, 110 * u);
+                circle(L3, left(130 * o, 45 * BUTTON_SLOP * u, minLeft), h - 250 * o, 45 * u);
+                circle(R3, w - 130 * o, h - 250 * o, 45 * u);
+            }
+            pill(SELECT, w / 2 - 110 * u, h - 60 * o, 70 * u, 32 * u);
+            pill(START, w / 2 + 110 * u, h - 60 * o, 70 * u, 32 * u);
+            break;
+        }
+        default: {   // N64
+            circle(LSTICK, left(330 * o, 150 * STICK_SLOP * u, minLeft), 560 * o, 150 * u);
+            pill(Z, left(330 * o, 100 * BUTTON_SLOP * u, minLeft), h - 110 * o, 100 * u, 55 * u);
+            circle(A, w - 330 * o, 640 * o, 72 * u);
+            circle(B, w - 470 * o, 510 * o, 62 * u);
+            float cx = w - 190 * o, cy = 390 * o, gap = 88 * u, cr = 44 * u;
+            circle(C_UP, cx, cy - gap, cr);
+            circle(C_DOWN, cx, cy + gap, cr);
+            circle(C_LEFT, cx - gap, cy, cr);
+            circle(C_RIGHT, cx + gap, cy, cr);
+            pill(START, w / 2, h - 60 * o, 70 * u, 32 * u);
+            break;
+        }
+        }
     }
 
     /** A left-side x, pushed right so that x - reach stays out of the menu's edge zone. */
@@ -255,6 +425,10 @@ final class TouchPad {
                 break;
             default:
                 s.buttons |= c.bits;
+                if (c.pushX != 0)
+                    s.rx = c.pushX * 32767;
+                if (c.pushY != 0)
+                    s.ry = c.pushY * 32767;
                 if (c.analog == AN_LT)
                     s.lt = 255;
                 else if (c.analog == AN_RT)

@@ -26,7 +26,7 @@ target_compile_definitions(main PRIVATE XBA_VERSION="${XBA_VERSION}")
 set(XBA_TOOLKIT_LIBS xbox_kernel xbox_d3d8 xbox_dsound xbox_input xbox_input_map xbox_usb xbox_apu xbox_nv2a
                      xbox_video platform host_time recomp_exit_hook recomp_cfg host_cpus
                      recomp_storage recomp_app recomp_selftest recomp_pack
-                     xbr_host xbr_host_core input_ports)   # the host layer (XBA-145)
+                     xbr_host xbr_host_core input_ports console_pad)   # the host layer (XBA-145)
 if(TARGET xbox_framegen)
     list(APPEND XBA_TOOLKIT_LIBS xbox_framegen)
 endif()

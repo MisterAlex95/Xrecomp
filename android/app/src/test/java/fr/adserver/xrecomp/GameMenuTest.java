@@ -81,6 +81,13 @@ public class GameMenuTest {
         @Override public void shareLog() { shareLogs++; }
         @Override public void backToLauncher() { launchers++; }
         @Override public void quit() { quits++; }
+
+        Boolean touch;            // the on-screen pad: null = none
+        ConsolePadMap console;    // a GBA / PS1 / N64 game's mapping, null = an Xbox game
+
+        @Override public Boolean touchShown() { return touch; }
+        @Override public void setTouchShown(boolean on) { touch = on; }
+        @Override public ConsolePadMap consoleMap() { return console; }
     }
 
     /** A stand-in for the game's frame (ours: gradients and shapes), so the dimming shows in the screenshots. */
@@ -659,6 +666,51 @@ public class GameMenuTest {
         press(KeyEvent.KEYCODE_BUTTON_A);
         assertEquals(GameMenu.Page.MAIN, menu.page());
         assertSame(menu.row(GameMenu.Item.CONTROLS), menu.focusedRow());
+    }
+
+    /** XBA-158 / 168 / 174: Settings' On-screen pad row (only with one) toggles it for the session. */
+    @Test
+    public void touchToggle() {
+        menu.open("Back");
+        menu.row(GameMenu.Item.SETTINGS).performClick();
+        assertNull("no on-screen pad: no row", menu.row(GameMenu.Item.TOUCH));
+        press(KeyEvent.KEYCODE_BUTTON_B);
+        host.touch = true;
+        menu.row(GameMenu.Item.SETTINGS).performClick();
+        Widgets.MenuRow r = menu.row(GameMenu.Item.TOUCH);
+        assertNotNull(r);
+        assertEquals(activity.getString(R.string.MENU_TOUCH_SHOWN), r.value);
+        r.performClick();
+        assertEquals(Boolean.FALSE, host.touch);
+        assertEquals(activity.getString(R.string.MENU_TOUCH_HIDDEN), r.value);
+        r.cycler.step(1);
+        assertEquals(Boolean.TRUE, host.touch);
+        assertEquals(activity.getString(R.string.MENU_TOUCH_SHOWN), r.value);
+    }
+
+    /** A GBA game's Controls page: its buttons and the player's controls for each, not the Xbox list. */
+    @Test
+    public void consoleControlsPage() throws Exception {
+        host.console = ConsolePadMap.parse(Console.GBA, "a=east");
+        menu.open("Back");
+        menu.row(GameMenu.Item.CONTROLS).performClick();
+        assertEquals(GameMenu.Page.CONTROLS, menu.page());
+        java.util.List<String> texts = new java.util.ArrayList<>();
+        collect(menu.drawer, texts);
+        assertTrue(texts.toString(), texts.contains(activity.getString(R.string.MENU_CTL_REMAPPED)));
+        assertTrue(texts.toString(), texts.contains(activity.getString(R.string.CC_SELECT)));
+        assertFalse("not the Xbox list", texts.contains(activity.getString(R.string.CTL_TRIGGERS)));
+        assertSame(menu.row(GameMenu.Item.BACK), menu.focusedRow());
+        idle(100);
+        TestSupport.screenshot(menu.root, "menu-controls-gba");
+    }
+
+    private static void collect(View v, java.util.List<String> out) {
+        if (v instanceof android.widget.TextView)
+            out.add(((android.widget.TextView)v).getText().toString());
+        if (v instanceof android.view.ViewGroup)
+            for (int i = 0; i < ((android.view.ViewGroup)v).getChildCount(); i++)
+                collect(((android.view.ViewGroup)v).getChildAt(i), out);
     }
 
     @Test
