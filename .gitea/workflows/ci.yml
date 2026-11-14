@@ -8,7 +8,8 @@
 #   pull request   linux, then android-toolkit (NDK compile, app unit tests) when the PR touches the Android build
 #   push to main   linux, then linux-arm64 (fails on a failure not in tools/ci/arm64-expected.txt), then android-image,
 #                  then android-toolchain (rebuilt only when its key changes, XBA-125), then android-apk (xrecomp-latest)
-#   both           homebrew after linux (XBA-149: the GBA / PS1 / N64 test corpus; on PRs only when it is touched)
+#   both           homebrew after linux (XBA-149: the GBA / PS1 / N64 test corpus, then the GBA programs as recompiled
+#                  packs with screenshots, XBA-180; on PRs only when it is touched)
 #   weekly         linux, then device-tests (the device test bundle; fails when a project stops building)
 # Heavy jobs (everything but linux) take tools/ci/heavy_lock.sh: one at a time on the shared host, queued, never
 # cancelled. Gitea's `concurrency:` keeps one pending job per group and cancels the others, hence the lock.
@@ -151,6 +152,11 @@ jobs:
   # keeps them between runs (a few seconds when nothing changed, about 10 min cold, mostly libdragon). The binaries
   # stay in the job container and are deleted with it: only their SHA256SUMS are printed, nothing is published.
   # Run by hand with homebrew_oracles ticked, it also checks every PS1 / N64 program's verdict in an emulator.
+  # XBA-180: the GBA programs then go through the user chain (tools/consoles/run_gba_packs.sh, in the linux job's
+  # deps image, about 30 s cached): ctest gba_hb_* / gba_rc_hb_* (skipped in the linux job, which has no corpus), and
+  # each program prepared into a pack (python3 -m tools.prepare), run headless until its verdict, screenshotted; the
+  # screenshots' sha256 must match consoles/gba/tests/corpus_screens.sha256. The PNGs are kept as the run's artefact
+  # gba-corpus-screens. That part also runs when a PR touches the GBA runtime, lifter or Prepare.
   homebrew:
     needs: linux
     if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
@@ -181,7 +187,7 @@ jobs:
           base=${MERGE_BASE:-$BASE_SHA}
           if [ -n "$base" ] && git fetch -q --depth 1 "$url" "$base" 2>/dev/null \
              && files=$(git diff --name-only "$base" HEAD); then
-            if printf '%s\n' "$files" | grep -qE '^(consoles/[^/]+/tests/homebrew/|tools/docker/(gba|ps1|n64)-homebrew\.Dockerfile$|tools/consoles/build_homebrew\.sh$|\.gitea/workflows/ci\.yml$)'; then
+            if printf '%s\n' "$files" | grep -qE '^(consoles/[^/]+/tests/homebrew/|consoles/gba/|tools/prepare/|tools/docker/((gba|ps1|n64)-homebrew|linux)\.Dockerfile$|tools/consoles/(build_homebrew\.sh|run_gba_packs\.sh|gba_corpus_packs\.py|gba_recomp_build\.py)$|\.gitea/workflows/ci\.yml$)'; then
               echo "build=true" >> "$GITHUB_OUTPUT"
             else
               echo "Nothing the homebrew corpus is built from: skipped."
@@ -199,9 +205,34 @@ jobs:
       - name: Build the corpus (GBA, PS1, N64)
         if: steps.paths.outputs.build == 'true'
         run: |
-          apk add --no-cache bash coreutils >/dev/null
+          apk add --no-cache bash coreutils tar >/dev/null
           JOBS=4 bash tools/consoles/build_homebrew.sh all out/homebrew
           for c in gba ps1 n64; do echo "== $c"; cat "out/homebrew/$c/SHA256SUMS"; done
+
+      # A changed screenshot: look at the artefact's PNG; if the change is intended, rewrite the list with
+      # tools/consoles/gba_corpus_packs.py CORPUS OUT --gba-run GBA_RUN --update (consoles/README.md).
+      - name: GBA corpus as recompiled packs (Prepare, headless run, screenshots)
+        if: steps.paths.outputs.build == 'true'
+        run: JOBS=4 bash tools/consoles/run_gba_packs.sh out/homebrew out/gba-packs
+
+      # actions/upload-artifact runs on Node, which the docker CLI image does not have.
+      - name: Node for the artefact upload
+        if: always() && steps.paths.outputs.build == 'true'
+        continue-on-error: true
+        run: apk add --no-cache nodejs >/dev/null
+
+      - name: Keep the GBA screenshots
+        if: always() && steps.paths.outputs.build == 'true'
+        continue-on-error: true
+        uses: actions/upload-artifact@v3
+        with:
+          name: gba-corpus-screens
+          path: |
+            out/gba-packs/*.png
+            out/gba-packs/*.log
+            out/gba-packs/report.md
+            out/gba-packs/SHA256SUMS
+          retention-days: 30
 
       # By hand only (workflow_dispatch, homebrew_oracles): the PS1 and N64 programs in their external oracles
       # (tools/consoles/run_homebrew.sh: PCSX-Redux + OpenBIOS, ares), each program's result block must say PASS.

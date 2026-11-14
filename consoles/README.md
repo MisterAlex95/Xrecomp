@@ -107,6 +107,21 @@ lockstep with the interpreter (HLE and LLE BIOS); `gba_rc_fuzz` does the same wi
 timer IRQs (`recomp_fuzz.py`); pytest `consoles/gba/tools/gba_tools/test_recomp.py` (discovery on hand-encoded code,
 the CLI, Prepare end to end). Design notes: [gba/tools/README.md](gba/tools/README.md).
 
+The ROM tests skip (exit 77) when their ROMs are not built, which is the case in the linux CI job (no Docker inside
+it, so no corpus). The homebrew corpus runs in the **homebrew job** instead (XBA-180), after the corpus build, through
+`tools/consoles/run_gba_packs.sh` in the linux job's deps image: ctest `gba_hb_*` and `gba_rc_hb_*` (the LLE variants
+and jsmolka's ROMs still skip there), then `tools/consoles/gba_corpus_packs.py`, the user's chain on each program:
+`python3 -m tools.prepare <prog>.gba` (a desktop pack), `gba_run --pack libtitle.so --lockstep --result` until the
+verdict, and a screenshot 30 frames later (`--ppm`, kept as PNG in the run's artefact `gba-corpus-screens`). A program
+fails on a failing result block, a lockstep difference, or a screenshot whose sha256 is not the one in
+`consoles/gba/tests/corpus_screens.sha256`. The GitHub mirror runs the same (`.github/workflows/linux.yml`,
+gba-corpus). Locally, and to record new screenshots after an intended change (check the PNGs first):
+
+```sh
+tools/consoles/build_homebrew.sh gba build/homebrew && tools/consoles/run_gba_packs.sh build/homebrew build/gba-packs
+tools/consoles/gba_corpus_packs.py build/homebrew/gba build/gba-packs --gba-run build/gba/gba_runtime/gba_run --update
+```
+
 Saves default to `$XDG_DATA_HOME/xrecomp/save` (else `~/.local/share/xrecomp/save`); `--bios PATH` or
 `RECOMP_GBA_BIOS` uses a BIOS image of your own; every option is listed at the top of `runtime/tools/gba_play.c`. The
 homebrew `pad.gba` (`consoles/gba/tests/homebrew/pad`) shows the keys held and keeps a counter in SRAM: the controls

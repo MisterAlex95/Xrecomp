@@ -67,5 +67,7 @@ int main(void)
     xba_check(i++, t0, t0); /* raw counts, informative */
     xba_check(i++, t1, t1);
     xba_check(i++, hb, hb);
+    REG_DISPCNT = DCNT_MODE0; /* the verdict on screen (gba_corpus_packs.py screenshots it) */
+    pal_bg_mem[0] = XBA_RESULT->detail ? RGB15(31, 0, 0) : RGB15(0, 31, 0);
     xba_finish();
 }

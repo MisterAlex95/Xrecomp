@@ -34,3 +34,6 @@ VBlank since start. Halt loop after `status`; PASS when entries 0-10 hold their 
 
 Validated in mGBA 0.10.1 (`xba-mgba-check` image, GDB stub, watchpoint on `status`, 2026-11-14): PASS, with the same
 DMA count as our core.
+
+Once done, the screen shows the verdict: backdrop green on pass, red on fail (the screenshot of
+`tools/consoles/gba_corpus_packs.py`).
