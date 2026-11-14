@@ -97,4 +97,9 @@
 <!-- A PS1 game's Home (XBA-168). -->
     <string name="ROM_PS1_LINE">Joue dans l\'interpréteur</string>
     <string name="ROM_PS1_CHD_NOTE">Jouer lance le jeu depuis son disque, avec le BIOS PlayStation fourni par l\'application (OpenBIOS). Une image .chd ne peut pas être préparée : convertissez-la en .cue / .bin (chdman extractcd) pour qu\'il tourne en natif.</string>
+<!-- An N64 game's Home (XBA-174). -->
+    <string name="N64_PAK_CONTROLLER">Controller Pak</string>
+    <string name="N64_PAK_RUMBLE">Rumble Pak</string>
+    <string name="ROM_N64_NOTE">Jouer lance le jeu depuis son fichier de cartouche, sans BIOS. Les sauvegardes et le Controller Pak sont conservés pour chaque jeu. Le second bouton met un Rumble Pak dans la manette à la place (sans les sauvegardes du Controller Pak).</string>
+    <string name="ROM_N64_NOTE_RUMBLE">Jouer lance le jeu depuis son fichier de cartouche, sans BIOS. Un Rumble Pak est dans la manette : elle vibre quand le jeu le demande. Le second bouton remet le Controller Pak (ses sauvegardes).</string>
 </resources>

@@ -44,7 +44,7 @@ public class GameStateTest {
     /**
      * XBA-157: a GBA game plays its ROM as it is: Ready while it is in a library folder (whatever the toolchain or
      * packs), Running while it runs, No file access when its folder cannot be read, gone without it. A PS1 disc the
-     * same (XBA-168), with its Prepare; N64 stays « Not playable yet ».
+     * same (XBA-168), with its Prepare; an N64 cartridge the same without one (XBA-174).
      */
     @Test
     public void otherConsoles() {
@@ -100,13 +100,20 @@ public class GameStateTest {
         assertEquals(GameState.Chip.NO_FILE_ACCESS, GameState.chip(f));
         f.source = GameState.Source.MISSING;
         assertEquals(GameState.Chip.GONE, GameState.chip(f));
+        // XBA-174: an N64 cartridge plays as it is, Ready / Running / No file access; no Prepare yet.
         Console c = Console.N64;
+        assertTrue(c.playable() && c.directLaunch());
+        assertFalse(c.prepares());
         f.console = c;
-        f.titleId = c.id + "-KEY";
+        f.titleId = c.id + "-NSME-635A2BFF";
         f.source = GameState.Source.PRESENT;
+        f.runningTid = null;
+        assertEquals(GameState.Chip.READY, GameState.chip(f));
         f.runningTid = f.titleId;
-        assertEquals(GameState.Chip.NOT_PLAYABLE_YET, GameState.chip(f));
-        assertFalse(c.playable() || c.directLaunch() || c.prepares());
+        assertEquals(GameState.Chip.RUNNING, GameState.chip(f));
+        f.runningTid = null;
+        f.source = GameState.Source.NO_ACCESS;
+        assertEquals(GameState.Chip.NO_FILE_ACCESS, GameState.chip(f));
     }
 
     @Test

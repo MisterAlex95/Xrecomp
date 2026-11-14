@@ -818,6 +818,50 @@ static void test_routing(const char *shell_path, const char *title_path, const c
         CHECK(strstr(log, "pack none") != NULL);
     }
 
+    /* XBA-174: an N64 cartridge the same way, always interpreted: no N64 recompiler yet, so a pack there (even one
+     * the shell would accept) is not handed over; the runtime (a stand-in here, fake_n64_runtime.c) gets none. */
+    {
+        int (*load_rom)(const char *, const char *, int *, char *, size_t) =
+            (int (*)(const char *, const char *, int *, char *, size_t))dlsym(shell, "xba_pack_load_rom");
+        char cart[1100], key[64], dir[1200], so[1300], text[1024], out[1300], log[4096];
+        unsigned char rom[0x1000] = { 0 }, bytes[64] = { 0 };
+        int c = -1, runtime_rc = -1, rc;
+
+        CHECK(load_rom != NULL);
+        if (!load_rom)
+            return;
+        snprintf(cart, sizeof cart, "%s/n64", root);
+        mkdirs(cart);
+        snprintf(cart, sizeof cart, "%s/n64/Game.z64", root);
+        rom[0] = 0x80; rom[1] = 0x37; rom[2] = 0x12; rom[3] = 0x40;
+        rom[0x10] = 0x63; rom[0x11] = 0x5A; rom[0x12] = 0x2B; rom[0x13] = 0xFF;
+        memcpy(rom + 0x3B, "NSME", 4);
+        write_file(cart, rom, sizeof rom);
+        CHECK(recomp_pack_rom_identify(cart, &c, key, sizeof key) == 0 && c == RECOMP_CONSOLE_N64);
+        CHECK(!strcmp(key, "NSME-635A2BFF"));
+
+        snprintf(out, sizeof out, "%s/n64/stdout-none.txt", root);
+        rc = load_rom_logged(load_rom, files, cart, &runtime_rc, reason, sizeof reason, out, log, sizeof log);
+        CHECK(rc == RECOMP_PACK_OK && runtime_rc == 0 && reason[0] == 0);
+        CHECK(strstr(log, "PACK_NONE n64 NSME-635A2BFF (not prepared") != NULL);
+        CHECK(strstr(log, "n64 runtime ready") != NULL && strstr(log, "pack none") != NULL);
+
+        snprintf(dir, sizeof dir, "%s/packs/n64-%s", files, key);
+        mkdirs(dir);
+        snprintf(so, sizeof so, "%s/libtitle.so", dir);
+        write_file(so, bytes, sizeof bytes);
+        snprintf(text, sizeof text, "{\"format\":1,\"console\":\"n64\",\"title_key\":\"%s\",\"title\":\"Fake N64\","
+                 "\"abi\":\"%s\",\"shell_abi\":1,\"lib\":\"libtitle.so\",\"lib_size\":64}", key, recomp_pack_host_abi());
+        snprintf(out, sizeof out, "%s/pack.json", dir);
+        write_file(out, text, strlen(text));
+        snprintf(out, sizeof out, "%s/n64/stdout.txt", root);
+        rc = load_rom_logged(load_rom, files, cart, &runtime_rc, reason, sizeof reason, out, log, sizeof log);
+        CHECK(rc == RECOMP_PACK_OK && runtime_rc == 0);
+        CHECK(strstr(log, "PACK_NONE n64 NSME-635A2BFF (a pack is there, ignored") != NULL);
+        CHECK(strstr(log, "PACK_LOADED") == NULL && strstr(log, so) == NULL);
+        CHECK(strstr(log, "n64 runtime ready") != NULL && strstr(log, "pack none") != NULL);
+    }
+
     /* A title linked into the shell: its strong symbols, not the forwarders. */
     void *st = dlopen(static_path, RTLD_NOW | RTLD_LOCAL);
     if (!st) { fprintf(stderr, "FAIL dlopen static shell: %s\n", dlerror()); failures++; return; }

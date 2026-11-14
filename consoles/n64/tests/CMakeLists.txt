@@ -3,7 +3,8 @@ project(console_n64_tests C)
 # The Nintendo 64 runtime's C tests (XBA-146): a self-contained project like those under tests/, run by
 # tools/run_c_tests.sh (as console_n64) and by the root build's ctest when XBR_CONSOLE_N64 is ON. POSIX hosts.
 #
-#   n64_runtime       the runtime links and answers (needs xbr_host / SDL2; not built with N64_CORE_ONLY=ON)
+#   n64_runtime       the runtime: helpers, headless runs of gfx.z64 (saves, fd:N, .v64, the app shell's entry);
+#                     needs xbr_host / SDL2, not built with N64_CORE_ONLY=ON
 #   n64_rdp           RDP feature tests on synthetic command lists (test_rdp.c, with n64_rdp.c); n64_rdp_bench, its
 #                     benchmark, runs by hand (n64_rdp_bench [seconds per case])
 #   n64_rsp           RSP vectors and differential groups vs ares (test_rsp.c); n64_rsp_rdp: RSP microcode driving
@@ -32,11 +33,16 @@ endif()
 
 enable_testing()
 
+get_filename_component(N64_REPO_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../../.. ABSOLUTE)
+set(N64_HOMEBREW_DIR ${N64_REPO_ROOT}/build/homebrew/n64 CACHE PATH "Built N64 homebrew (build_homebrew.sh n64)")
+
+# The runtime (XBA-174): helpers always, headless runs of gfx.z64 when the homebrew is built.
 if(TARGET n64_runtime)
     add_executable(n64_runtime_test test_main.c)
     target_link_libraries(n64_runtime_test PRIVATE n64_runtime)
-    add_test(NAME n64_runtime COMMAND n64_runtime_test)
-    set_tests_properties(n64_runtime PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60)
+    target_compile_options(n64_runtime_test PRIVATE -Wall -Wextra)
+    add_test(NAME n64_runtime COMMAND n64_runtime_test ${N64_HOMEBREW_DIR})
+    set_tests_properties(n64_runtime PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120)
 endif()
 
 if(TARGET n64_rdp AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/../runtime/n64_rdp.c)
@@ -80,8 +86,6 @@ foreach(t cpu io)
     set_tests_properties(n64_${t} PROPERTIES TIMEOUT 60)
 endforeach()
 
-get_filename_component(N64_REPO_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../../.. ABSOLUTE)
-set(N64_HOMEBREW_DIR ${N64_REPO_ROOT}/build/homebrew/n64 CACHE PATH "Built N64 homebrew (build_homebrew.sh n64)")
 set(N64_SYSTEMTEST ${N64_REPO_ROOT}/build/n64-systemtest/n64-systemtest.z64 CACHE FILEPATH
     "n64-systemtest ROM (build_n64_systemtest.sh)")
 set(N64_RT ${CMAKE_CURRENT_SOURCE_DIR}/../runtime)

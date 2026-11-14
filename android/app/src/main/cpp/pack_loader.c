@@ -278,6 +278,23 @@ int xba_pack_load_rom(const char *files_dir, const char *rom_path, int *runtime_
         rc = RECOMP_PACK_OK;
         goto out;
     }
+    if (console == RECOMP_CONSOLE_N64 && start) {
+        /* The N64 runtime is an interpreter too (XBA-174): the cartridge always starts, no BIOS (HLE PIF). There is
+         * no N64 recompiler yet, so a pack is not loaded: without one, PACK_NONE; with one (whatever its state), the
+         * same line saying it is ignored. The runtime gets no library until N64 packs exist. */
+        if (rc == RECOMP_PACK_MISSING)
+            printf("PACK_NONE %s %s (not prepared, the interpreter runs it)\n", recomp_pack_console_name(console), key);
+        else
+            printf("PACK_NONE %s %s (a pack is there, ignored until the N64 recompiler lands; the interpreter runs "
+                   "it)\n", recomp_pack_console_name(console), key);
+        fflush(stdout);
+        why[0] = 0;
+        rc = start(rom_path, NULL, key);
+        if (runtime_rc)
+            *runtime_rc = rc;
+        rc = RECOMP_PACK_OK;
+        goto out;
+    }
     if (rc == RECOMP_PACK_MISSING) {
         snprintf(why, sizeof why, "%s-%s", recomp_pack_console_name(console), key);
         printf("PACK_MISSING %s %s (no %s/packs/%s/pack.json)\n", recomp_pack_console_name(console), key,

@@ -80,13 +80,24 @@ option(N64_CORE_ONLY "Build only n64_core, the RCP devices and n64_run, not n64_
 if(NOT N64_CORE_ONLY AND NOT TARGET xbr_host)
     add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../../src/host ${CMAKE_CURRENT_BINARY_DIR}/xbr_host)
 endif()
-# n64_runtime: the core + the host layer (n64_runtime_start: still the pack stub until the Android hookup).
+# n64_runtime: the core + the host layer (n64_runtime_run plays a ROM: window, pads, audio, saves, pacing; XBA-174).
 if(NOT N64_CORE_ONLY AND NOT TARGET n64_runtime)
     add_library(n64_runtime STATIC n64_runtime.c)
     target_include_directories(n64_runtime PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
     target_link_libraries(n64_runtime PUBLIC n64_core xbr_host)
     target_compile_options(n64_runtime PRIVATE -Wall -Wextra)
     set_target_properties(n64_runtime PROPERTIES POSITION_INDEPENDENT_CODE ON)
+endif()
+
+# n64_play: plays a ROM on a desktop through n64_runtime (XBA-174). The title key comes from the ROM as the app reads
+# it (recomp_pack_rom_identify): src/platform/recomp_pack.c is compiled in (libc + recomp_cfg, which xbr_host brings),
+# so a project that adds this directory alone needs nothing more.
+if(NOT ANDROID AND TARGET n64_runtime AND NOT TARGET n64_play)
+    get_filename_component(N64_PLATFORM_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../../src/platform ABSOLUTE)
+    add_executable(n64_play tools/n64_play.c ${N64_PLATFORM_DIR}/recomp_pack.c)
+    target_include_directories(n64_play PRIVATE ${N64_PLATFORM_DIR})
+    target_link_libraries(n64_play PRIVATE n64_runtime)
+    target_compile_options(n64_play PRIVATE -Wall -Wextra)
 endif()
 
 # n64_run: the headless runner (desktop hosts only).

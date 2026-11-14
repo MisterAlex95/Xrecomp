@@ -110,6 +110,7 @@ public class ShellActivity extends SDLActivity {
         }
         applyTitleVideo();
         applyLanguage();
+        applyN64Pak(rom != null);
         boolean checked = LibraryCheck.applyRunEnv(this);   // a library check's run: status file and pad script (XBA-130)
         applyBuiltinPad();
         super.onCreate(savedInstanceState);
@@ -185,6 +186,27 @@ public class ShellActivity extends SDLActivity {
         }
         Log.i(LauncherActivity.TAG, "shell: controllers " + PadDevices.connected(this)
                                     + (key != null ? ", built-in " + key : ""));
+    }
+
+    /**
+     * RECOMP_N64_PAK for the N64 runtime (XBA-174, {@link N64Pak}): the launched N64 game's own choice (« rumble » or
+     * « controller »), else unset (recomp.cfg, then the controller pak, decide), also clearing what a previous game of
+     * this process chose.
+     */
+    private void applyN64Pak(boolean romLaunch) {
+        String tid = romLaunch ? GameStore.launchedTitleId(this) : null;
+        String v = tid != null && Console.ofKey(tid) == Console.N64 ? N64Pak.choice(this, tid) : null;
+        try {
+            if (v != null)
+                Os.setenv(N64Pak.ENV, v, true);
+            else
+                Os.unsetenv(N64Pak.ENV);
+        } catch (ErrnoException e) {
+            Log.w(LauncherActivity.TAG, "shell: cannot set " + N64Pak.ENV, e);
+        }
+        if (tid != null && Console.ofKey(tid) == Console.N64)
+            Log.i(LauncherActivity.TAG, "shell: n64 pak " + (v != null ? v : "default (recomp.cfg, else controller)")
+                                        + ", game " + tid);
     }
 
     /**

@@ -565,7 +565,7 @@ public class LauncherLibraryTest {
 
     /**
      * Two folders, an Xbox one and one of other consoles (read as files): every game in one grid with its console
-     * badge, the N64 game « Not playable yet » (A says why, no Home), the GBA one Ready (its launch: gbaCardLaunches);
+     * badge, the GBA and N64 ones Ready (their Home and launch: n64HomePlays, gbaCardLaunches);
      * Options › Library folders lists both, « Add a folder » last, and one is taken out of the library (its games
      * leave the grid, nothing in it is deleted).
      */
@@ -591,25 +591,12 @@ public class LauncherLibraryTest {
         assertEquals("N64", star.badgeForTest());
         assertEquals("Xbox", card(a, NAMES[0]).badgeForTest());
         assertFalse("Ready: no chip", quest.chipShownForTest());
-        assertEquals(app.getString(R.string.LIB_CHIP_NOT_PLAYABLE_YET), star.chipForTest());
-        assertTrue(star.chipShownForTest());
+        assertFalse("Ready: no chip (XBA-174)", star.chipShownForTest());
         TestSupport.screenshot(a.getWindow().getDecorView(), "library-consoles");
 
-        // A on the N64 card: a note, still the library, the selected game unchanged.
+        // The N64 card's Home and launch: n64HomePlays (XBA-174).
         a.forceFocusForTest();
         idle(300);
-        star.requestFocusFromTouch();
-        idle(300);
-        key(a, KeyEvent.KEYCODE_BUTTON_A);
-        assertEquals(LauncherActivity.Screen.LIBRARY, a.screenForTest());
-        assertEquals(app.getString(R.string.LIB_NOT_PLAYABLE_NOTE, "N64"), a.noteForTest());
-        Library.Games g = Library.read(Library.gamesFile(app.getFilesDir()));
-        assertTrue("no record for a game that cannot be selected",
-                   g.get(LibraryIndex.read(Library.indexFile(app.getFilesDir()))
-                                .find(LibraryIndex.fileLoc(race)).tid) == null);
-        key(a, KeyEvent.KEYCODE_BUTTON_START);
-        assertEquals(LauncherActivity.Screen.LIBRARY, a.screenForTest());
-        assertNull(shadowOf(a).getNextStartedActivity());
 
         // Options › Library folders: both folders, then « Add a folder ».
         key(a, KeyEvent.KEYCODE_BUTTON_Y);
@@ -830,6 +817,84 @@ public class LauncherLibraryTest {
         assertEquals(ShellActivity.class.getName(), game.getComponent().getClassName());
         assertEquals(cue.getAbsolutePath(), GameStore.launchedRom(app));
         assertEquals(key, GameStore.launchedTitleId(app));
+    }
+
+    /**
+     * XBA-174: an N64 card is Ready (the N64 badge, no chip); A opens its Home, even without the toolchain: Play first
+     * and the pak in the controller beside it, no Prepare (no N64 recompiler yet). The pak button switches this game
+     * to the rumble pak and back (N64Pak, a file per game; the note says which); Play starts the game activity with
+     * the cartridge and the library key n64-<code>-<crc1>. Start on the card launches at once.
+     */
+    @Test
+    public void n64HomePlays() throws Exception {
+        folderGame(0);
+        File dir = tmp.newFolder("n64");
+        File rom = new File(dir, "Star Race.z64");
+        TestSupport.write(rom, ConsoleTest.n64(0));
+        useFolder();
+        Library.addFolder(app, "content://com.android.externalstorage.documents/tree/primary%3An64",
+                          dir.getAbsolutePath());
+        String key = "n64-NSME-635A2BFF";
+        LauncherActivity a = launch();
+        GameCard star = card(a, "Star Race");
+        assertNotNull(star);
+        assertEquals("N64", star.badgeForTest());
+        assertFalse("Ready: no chip", star.chipShownForTest());
+        a.forceFocusForTest();
+        idle(300);
+        star.requestFocusFromTouch();
+        idle(300);
+        key(a, KeyEvent.KEYCODE_BUTTON_A);
+        assertEquals(LauncherActivity.Screen.ROM_HOME, a.screenForTest());
+        assertNull("not launched", shadowOf(a).getNextStartedActivity());
+        assertEquals(key, a.romEntryForTest().tid);
+        assertEquals(app.getString(R.string.PLAY), a.homePrimaryForTest().title);
+        assertEquals(app.getString(R.string.ROM_N64_NOTE), a.noteForTest());
+        TestSupport.screenshot(a.getWindow().getDecorView(), "n64-1-home");
+
+        // The pak button (right of Play): the rumble pak for this game, then back to the controller pak.
+        a.forceFocusForTest();
+        idle(300);
+        key(a, KeyEvent.KEYCODE_DPAD_RIGHT);
+        View pak = a.focusForTest();
+        assertTrue(pak instanceof Widgets.PillButton);
+        assertEquals(app.getString(R.string.N64_PAK_CONTROLLER), ((Widgets.PillButton)pak).title);
+        key(a, KeyEvent.KEYCODE_BUTTON_A);
+        assertEquals(N64Pak.RUMBLE, N64Pak.choice(app, key));
+        assertEquals(LauncherActivity.Screen.ROM_HOME, a.screenForTest());
+        assertEquals(app.getString(R.string.ROM_N64_NOTE_RUMBLE), a.noteForTest());
+        a.forceFocusForTest();
+        idle(300);
+        pak = a.focusForTest();
+        assertTrue("the focus stays on the pak button", pak instanceof Widgets.PillButton
+                   && app.getString(R.string.N64_PAK_RUMBLE).equals(((Widgets.PillButton)pak).title));
+        TestSupport.screenshot(a.getWindow().getDecorView(), "n64-2-home-rumble");
+        key(a, KeyEvent.KEYCODE_BUTTON_A);
+        assertEquals(N64Pak.CONTROLLER, N64Pak.choice(app, key));
+        assertNull("another game keeps its own (none)", N64Pak.choice(app, "n64-NSME-00000001"));
+
+        // Play: the cartridge to the game activity.
+        a.forceFocusForTest();
+        idle(300);
+        key(a, KeyEvent.KEYCODE_DPAD_LEFT);
+        key(a, KeyEvent.KEYCODE_BUTTON_A);
+        Intent game = shadowOf(a).getNextStartedActivity();
+        assertNotNull(game);
+        assertEquals(ShellActivity.class.getName(), game.getComponent().getClassName());
+        assertEquals(rom.getAbsolutePath(), GameStore.launchedRom(app));
+        assertEquals(key, GameStore.launchedTitleId(app));
+
+        // Start on the card (a fresh launcher): the same launch, no Home.
+        GameStore.rememberLaunch(app, GameStore.chosenDir(app), "", null);
+        LauncherActivity b = launch();
+        b.forceFocusForTest();
+        idle(300);
+        card(b, "Star Race").requestFocusFromTouch();
+        idle(300);
+        key(b, KeyEvent.KEYCODE_BUTTON_START);
+        assertNotNull(shadowOf(b).getNextStartedActivity());
+        assertEquals(rom.getAbsolutePath(), GameStore.launchedRom(app));
+        assertEquals(LauncherActivity.Screen.LIBRARY, b.screenForTest());
     }
 
     /** A .chd plays but has no Prepare (XBA-168: the PS1 recompiler reads .cue / .bin / .iso); a GBA ROM has one. */

@@ -88,8 +88,8 @@ if(NOT WIN32)
 endif()
 
 # Other consoles (XBA-146, consoles/README.md): each runtime links xbr_host only. ON by default on Linux and macOS,
-# OFF on Android and Windows until each one is ready there. The GBA (XBA-157) and the PS1 (XBA-168) are ready on
-# Android: the app plays them.
+# OFF on Android and Windows until each one is ready there. The GBA (XBA-157), the PS1 (XBA-168) and the N64
+# (XBA-174) are ready on Android: the app plays them.
 if(ANDROID OR WIN32)
     set(_xbr_console_default OFF)
 else()
@@ -102,7 +102,7 @@ else()
 endif()
 option(XBR_CONSOLE_GBA "Build the Game Boy Advance runtime (consoles/gba)" ${_xbr_gba_default})
 option(XBR_CONSOLE_PS1 "Build the PlayStation runtime (consoles/ps1)" ${_xbr_gba_default})
-option(XBR_CONSOLE_N64 "Build the Nintendo 64 runtime (consoles/n64)" ${_xbr_console_default})
+option(XBR_CONSOLE_N64 "Build the Nintendo 64 runtime (consoles/n64)" ${_xbr_gba_default})
 set(XBR_CONSOLES "")
 foreach(_c gba ps1 n64)
     string(TOUPPER ${_c} _C)

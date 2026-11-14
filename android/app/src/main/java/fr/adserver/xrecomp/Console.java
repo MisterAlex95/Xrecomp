@@ -58,22 +58,24 @@ enum Console {
     }
 
     /**
-     * Its games play in this build: the Xbox (through Prepare and a pack), the Game Boy Advance (XBA-157) and the
-     * PlayStation (XBA-168), whose runtimes are interpreters: no import, no pack needed, the game file goes to the game
-     * activity as it is. N64 games are listed, « Not playable yet ».
+     * Its games play in this build: the Xbox (through Prepare and a pack), the Game Boy Advance (XBA-157), the
+     * PlayStation (XBA-168) and the Nintendo 64 (XBA-174), whose runtimes are interpreters: no import, no pack needed,
+     * the game file goes to the game activity as it is. Every console XRecomp lists plays now; « Not playable yet »
+     * stays for the next one.
      */
     boolean playable() {
-        return this == XBOX || this == GBA || this == PS1;
+        return this == XBOX || this == GBA || this == PS1 || this == N64;
     }
 
-    /** A game of this console starts from its file as it is, no Prepare or import (the GBA, the PS1). */
+    /** A game of this console starts from its file as it is, no Prepare or import (the GBA, the PS1, the N64). */
     boolean directLaunch() {
-        return this == GBA || this == PS1;
+        return this == GBA || this == PS1 || this == N64;
     }
 
     /**
      * A game of this console that starts from its file can also be prepared (translated for the device into a pack):
-     * the GBA (XBA-158) and the PS1 (XBA-168; not a .chd image: LauncherActivity.romPrepares).
+     * the GBA (XBA-158) and the PS1 (XBA-168; not a .chd image: LauncherActivity.romPrepares). Not the N64 until its
+     * recompiler lands (XBA-174): its Home has Play only.
      */
     boolean prepares() {
         return this == GBA || this == PS1;

@@ -1080,9 +1080,10 @@ Without the library (a JVM test, an APK built without it) a `.chd` stays an « o
 PlayStation disc (firmware, a dump) is ignored: kept in the index for the stat-only rescan, shown nowhere.
 
 GBA games play: see [Game Boy Advance games](#game-boy-advance-games-xba-157); PS1 games too:
-[PlayStation games](#playstation-games-xba-168). N64 games show in the grid with the chip **Not playable yet** (a
-neutral grey dot) until their console's runtime exists: no Prepare, no Import, no Home; A or Start on the card says so
-in the note line (« N64 games are listed but not playable yet… ») and selects nothing. When the library holds games of more than one console, every card has a small badge in its art's top left
+[PlayStation games](#playstation-games-xba-168); and N64 games: [Nintendo 64 games](#nintendo-64-games-xba-174). A
+console whose runtime does not exist yet would show its games in the grid with the chip **Not playable yet** (a neutral
+grey dot): no Prepare, no Import, no Home, A or Start on the card says so in the note line (« … games are listed but
+not playable yet… ») and selects nothing; since XBA-174 every listed console plays. When the library holds games of more than one console, every card has a small badge in its art's top left
 corner (**Xbox**, **GBA**, **PS1**, **N64**); an Xbox-only library looks as before. There is no console filter.
 
 ### Game Boy Advance games (XBA-157)
@@ -1155,7 +1156,7 @@ out/hb/gba/hello.gba /sdcard/gba/` (or over USB file transfer into `Internal sto
 
 1. Install the APK. If `/sdcard/gba` is not a library folder yet: Y › Library folders › Add a folder › `gba`.
    Expected: the GBA cards (« pad », « gfx », « hello »: the file names) with the **GBA** badge when Xbox games are
-   listed too, and **no** chip (Ready). N64 cards still read « Not playable yet » (PS1 cards play since XBA-168).
+   listed too, and **no** chip (Ready). PS1 cards play too (XBA-168), and N64 cards (XBA-174).
 2. A on the **pad** card. Expected: the game starts at once, fullscreen, landscape, no Home screen; « XBA PAD + SAVE »
    at the top, the frame counter `F…` moving. logcat: `launcher: library: play gba-XBAT-… from /storage/…/pad.gba`,
    `PACK_NONE gba XBAT-…`, `gba: window on (aspect, nearest), audio on, pads 1` (or more with an external pad).
@@ -1366,6 +1367,107 @@ out/hb/ps1/gfx.cue out/hb/ps1/gfx.bin out/hb/ps1/hello.cue out/hb/ps1/hello.bin 
     digital pad): logcat `ps1: the game set port 1 analog (DualShock)`; if it locks the mode, Back + L3 + R3 logs
     `stays … (locked by the game)`. A game with vibration (in its options): the controller rumbles when the game
     says so, and stops.
+
+### Nintendo 64 games (XBA-174)
+
+The N64 runtime (`consoles/n64/runtime`, an interpreter: `n64_core.h` with the LLE RSP and the software RDP on the
+host layer, consoles/README.md « Playing an N64 game ») plays a cartridge dump as it is, the PS1's way: no Import, no
+pack, no BIOS (the PIF is high-level emulated). There is no N64 recompiler yet, so no Prepare: a pack in
+`packs/n64-<KEY>/` is ignored. An N64 card is **Ready** (no chip) while its file is in a library folder, **Running**
+while it runs, **No file access** when its folder cannot be read.
+
+- **Home.** A on the card opens the game's Home (`Screen.ROM_HOME`), with or without the toolchain: the title, « Plays
+  in the interpreter », **Play** first and the pak button beside it: **Controller pak** (the default) or **Rumble pak**,
+  what the controller holds for this game; A on it switches to the other one (`N64Pak`, a file per game,
+  `files/settings/n64_pak_<KEY>`) and the note under it says what each does. No Prepare until the N64 recompiler
+  lands. Start on the card (and the bottom screen's Play) launches at once.
+- **Launch** (`LauncherActivity.launchRom`, as for the GBA and the PS1): the cartridge becomes the launched game
+  (`rom`, the library key `n64-<CODE>-<CRC1>` as `title_id`); the same game running is brought back, another game
+  ending first.
+- **The cartridge reaches the runtime** as `RECOMP_GAME_DIR`: its path, or `fd:N` for a document of a folder seen
+  through the Storage Access Framework (the GBA's way). `ShellActivity` sets `RECOMP_N64_PAK` to the game's pak choice
+  (logcat `shell: n64 pak rumble, game n64-…`), or unsets it when it has none (a `RECOMP_N64_PAK` line of recomp.cfg,
+  then the controller pak, decide). `shell_main.c` routes it like a GBA ROM; `pack_loader.c` logs `PACK_NONE n64 <KEY>
+  (not prepared, the interpreter runs it)` (or `(a pack is there, ignored until the N64 recompiler lands; …)`) and calls
+  `n64_runtime_start`. A file that cannot be read sends the player back to the launcher with « The game ended: the
+  game file cannot be read ».
+- **Picture.** The VI's visible area at framebuffer resolution (320 x 240 for most games, 640 x 480 interlaced for a
+  few, PAL 288 / 576 lines) through `host_window` at 4:3, letterboxed (1440 x 1080 on the Thor's 1080p screen),
+  smoothed (linear); `RECOMP_N64_FILTER=nearest` keeps sharp pixels, `RECOMP_N64_SCALE=integer` whole multiples.
+- **Controls.** Every connected pad drives controller 1, Xbox layout: left stick → the analog stick (8 % radial dead
+  zone, ±80 at full travel, the diagonals about ±68 like the real stick's octagonal gate), A → A, B and X → B, right
+  stick → the C buttons (C-up / down / left / right, past half its travel), Y → C-up, LB → L, RB → R, LT or RT → Z,
+  Start → Start, D-pad → D-pad. With the rumble pak, the game's motor drives the pad's rumble (`host_pad_rumble`).
+  `RECOMP_N64_PLAYERS=2..4`: host pad N drives controller N. Back on the device opens the in-game menu.
+- **Sound.** 48 kHz stereo from the AI (`n64_audio_pull`) through `host_audio`.
+- **Pacing.** The VI's own rate (NTSC about 60 Hz, PAL 50 Hz, from the cycles each frame ran), absolute deadlines
+  nudged ±2 % by the audio queue; vsync on; a stall of more than three frames resets the clock. The software RDP is
+  what a frame spends its time in on a phone: it draws with 2 scanline-band threads on Android
+  (`RECOMP_N64_RDP_THREADS=N`, 1..8, changes it), and logcat says the rate reached every 10 s (`n64: 58.3 fps over
+  the last 10 s (VI 60.0 Hz), 0 late resets so far`) and at quit (`n64: N frames in S s (… fps), N late resets`).
+- **Saves.** `<internal files>/save/n64-<KEY>/`: `game.eep` (EEPROM 4K, 512 bytes, or 16K, 2 KB), `game.sra` (SRAM,
+  32 KB), `game.fla` (FlashRAM, 128 KB), the one the cartridge uses (the ROM header's save type, else the game's first
+  access), and `pak1.mpk` (the controller pak, 32 KB, once the game writes it): raw images, the files mupen64plus and
+  ares read and write, so one can be copied in or out with `adb` (renamed). Read before the first frame (a cartridge
+  save also fixes the save type: an `.eep`'s size picks 4K or 16K unless the header says); written a second after the
+  game's last write (at most five seconds after its first), at once when the app pauses (Home, the in-game menu) and
+  at exit (the menu's Quit too), through `.tmp` + rename, only when it changed.
+- **Lifecycle.** As for the GBA: Home pauses (no frame runs, audio paused, rumble stopped) and resumes; the in-game
+  menu holds it; Quit ends the process.
+- **Options** (recomp.cfg): `RECOMP_N64_PAK` (`controller`, `rumble`, `none`: every game without its own choice),
+  `RECOMP_N64_SCALE`, `RECOMP_N64_FILTER`, `RECOMP_N64_PLAYERS`, `RECOMP_N64_RDP_THREADS`, `RECOMP_N64_DEADZONE`
+  (percent, default 8), `RECOMP_N64_STICK_RANGE` (default 80), `RECOMP_N64_TTY=1` (the game's IS-Viewer debug text
+  in logcat), `RECOMP_N64_FRAMES=N` (stops after N frames, checks).
+
+On a desktop the same runtime plays a cartridge with `n64_play` (consoles/README.md), where a game is checked first.
+
+### Device check (N64 games, XBA-174), for Alex
+
+On the AYN Thor, `adb logcat -s xboxrecomp SDL` throughout. Our homebrew: `tools/consoles/build_homebrew.sh n64
+out/hb` (Docker; `out/hb/n64/gfx.z64`, `hello.z64`, `cpu.z64`, `timer_irq.z64`). Copy them to the device's N64 folder:
+`adb shell mkdir -p /sdcard/n64 && adb push out/hb/n64/gfx.z64 out/hb/n64/hello.z64 out/hb/n64/cpu.z64 /sdcard/n64/`.
+
+1. Install the APK. If `/sdcard/n64` is not a library folder yet: Y › Library folders › Add a folder › `n64`.
+   Expected: the cards « gfx », « hello », « cpu » with the **N64** badge (when other consoles' games are listed too),
+   **no** chip (no more « Not playable yet »).
+2. A on **gfx**. Expected: its Home, « Plays in the interpreter », **Play** focused, **Controller pak** beside it, no
+   Prepare, a note on what Play and the pak button do. Screenshot. A on Play: the game starts at once, fullscreen,
+   landscape: on black, a red rectangle top left, a blue one under it, a small and a large magenta / white
+   checkerboard, a colour-gradient triangle at the bottom; black bars left and right (4:3). Screenshot. logcat:
+   `launcher: library: play n64-N___-00000000 from /storage/…/gfx.z64`, `PACK_NONE n64 N___-00000000 (not prepared,
+   …)`, `n64: n64_runtime 0.1.0, ROM gfx.z64 (z64, "XBA gfx", …), key N___-00000000, CIC libdragon, NTSC (60 Hz)`,
+   `n64: window on (4:3, aspect, linear), audio on, pads 1, controller pak, RDP threads 2`, `n64: display 320 x 237
+   at frame 3`.
+3. **Frame rate** (the risk on a phone: the software RDP). Leave gfx running 30 s: logcat every 10 s
+   `n64: … fps over the last 10 s (VI 59.8 Hz), N late resets so far`. Note the three values, then Back › Quit game:
+   `n64: N frames in S s (… fps), N late resets`. Then with `RECOMP_N64_RDP_THREADS=1` and `=4` in recomp.cfg (one
+   line each time, removed after), start gfx again and note the rate each time (the line `RDP threads N` confirms it).
+4. A on **hello**: « XBA HELLO N64 » and « homebrew corpus XBA-149 » in white on dark blue. Screenshot. Home, wait 5 s, reopen XRecomp from
+   recents: the game is where it was. logcat `n64: paused at frame …`, `n64: resumed`. Back: the in-game menu, the
+   game holds; Quit game. logcat `clean exit`.
+5. While an N64 game runs, start a GBA, PS1 or Xbox game from the launcher: the N64 one ends, the other starts; then A
+   on gfx, Play: the other ends.
+6. A library folder added with the file picker (no All files access) holding gfx.z64: it plays the same (logcat
+   `shell: ROM document content://… -> fd:N`). The same ROM byte-swapped (`dd if=gfx.z64 of=gfx.v64 conv=swab` on a
+   computer) plays the same and has the same key.
+7. On gfx's Home, right, A on **Controller pak**: it reads **Rumble pak**, the note says the pad vibrates. Play:
+   logcat `shell: n64 pak rumble, game n64-N___-00000000`, `n64: window on (…), rumble pak, …`. Quit, A on the card,
+   A on **Rumble pak**: back to Controller pak (logcat `shell: n64 pak controller` at the next Play).
+8. One of your own cartridge dumps (`.z64`, `.v64` or `.n64`; kept outside every repository): copy it to `/sdcard/n64`,
+   Y (rescan), A on its card (named after the file; its key is `n64-<game code>-<CRC1>`), Play. Note: does it boot, is
+   the picture right (and the 4:3 shape; the `display W x H` lines), sound, controls (the stick: full range, walking
+   vs. running, diagonals; A, B, the C buttons on the right stick, Y = C-up, Z on LT / RT, L, R, Start, D-pad), and
+   **the frame rate** (step 3's lines: around 60 for NTSC, 50 for PAL, and how many late resets). Send the logcat for
+   a game that does not boot, shows wrong graphics or runs slowly.
+9. Saves with that game: save in the game, wait 2 s (logcat `n64: save written (… bytes, written by the game) to
+   /data/user/0/…/files/save/n64-…/game.eep` or `.sra` / `.fla`; `cartridge save type …` says which), quit, start again:
+   the save is there (`n64: save loaded (…)`). A game that saves to the controller pak (its own menu says so): the
+   same with `pak1.mpk` (`n64: controller pak 1 loaded from …`). `adb shell run-as fr.adserver.xrecomp.shell ls -l
+   files/save/n64-*` lists them. Optionally copy a save of yours from mupen64plus in (`run-as … cp`, renamed to
+   `game.eep` / `game.sra` / `game.fla` / `pak1.mpk`) and check the game finds it.
+10. A game with rumble support, set to Rumble pak on its Home: the controller vibrates when the game says so (a hit,
+    an explosion) and stops; Home while it vibrates stops it.
+11. Switch the Thor to French: the N64 Home's buttons (« Controller Pak » / « Rumble Pak ») and note in French.
 
 ### The library screen
 
