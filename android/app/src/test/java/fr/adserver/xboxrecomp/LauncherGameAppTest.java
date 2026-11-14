@@ -1,5 +1,6 @@
 package fr.adserver.xboxrecomp;
 
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
@@ -361,6 +362,30 @@ public class LauncherGameAppTest {
                                             .setAction(LauncherActivity.ACTION_SHOW_LAUNCHER));
         assertEquals(LauncherActivity.Screen.HOME, a.screenForTest());
         LauncherPackHandoverTest.assertGameNotStarted(a);
+    }
+
+    /** Settings › General: no « Start in the game » in a game's own app (it always does); the other rows stay. */
+    @Test
+    public void settingsHaveNoStartInTheGameRow() throws Exception {
+        asGameApp();
+        readyHere();
+        LauncherActivity a = launch(new Intent(app, LauncherActivity.class)
+                                            .setAction(LauncherActivity.ACTION_SHOW_LAUNCHER));
+        a.goForTest(LauncherActivity.Screen.SETTINGS);
+        idle(300);
+        java.util.Set<String> titles = new java.util.HashSet<>();
+        java.util.ArrayDeque<android.view.View> q = new java.util.ArrayDeque<>();
+        q.add(a.getWindow().getDecorView());
+        while (!q.isEmpty()) {
+            android.view.View v = q.poll();
+            if (v instanceof Widgets.MenuRow)
+                titles.add(((Widgets.MenuRow)v).title);
+            if (v instanceof android.view.ViewGroup)
+                for (int i = 0; i < ((android.view.ViewGroup)v).getChildCount(); i++)
+                    q.add(((android.view.ViewGroup)v).getChildAt(i));
+        }
+        assertTrue("Settings has its rows", titles.contains(app.getString(R.string.UI_SOUND)));
+        assertFalse("no « Start in the game »", titles.contains(app.getString(R.string.OPEN_DIRECTLY)));
     }
 
     @Test

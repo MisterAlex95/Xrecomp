@@ -167,7 +167,7 @@ settings saved, errors).
 | Case | What happens |
 |---|---|
 | A usable game and « Start in the game » off (the default) | Home, Play focused. |
-| A usable game and « Start in the game » on | `ShellActivity` starts at once; nothing shows. |
+| A usable game and « Start in the game » on | `ShellActivity` starts at once; nothing shows. (A game's own app has no such setting: it always does this.) |
 | The game is running in the background and the app icon is pressed | Back to the game at once, whatever « Start in the game » says. |
 | Nothing remembered, but `RECOMP_GAME_DIR` in `recomp.cfg`, or `default.xbe` pushed to `files/game/` | A usable game, as above: the adb workflow still works (source « Set in recomp.cfg » or « Imported copy »). |
 | Nothing set up | Welcome. |
@@ -585,7 +585,7 @@ game: the stock colours.
 next game start in the in-game menu.
 
 **Previews on a Mac** (`tools/android/theme_preview/`, Python 3 and Pillow; no art in the repo): `xart.py <xbe> <out>`
-extracts a title image from your own XBE, `palette.py <png>` prints the palette and its contrast checks, `mock.py`
+extracts the title and save images from your own XBE (with `tools/title_art`'s decoder), `palette.py <png>` prints the palette and its contrast checks, `mock.py`
 draws mock-ups, `golden.py` makes `GamePaletteTest`'s golden vectors. With a game folder of your own,
 `gradle testDebugUnitTest -PxbaPreviewGameDir=/path/to/game --tests '*ThemePreviewTest'` renders the real launcher in
 its theme to `build/screenshots/preview-*.png` (git-ignored); without the property the test is skipped.
