@@ -700,6 +700,112 @@ public class LauncherLibraryTest {
         assertEquals(rom.getAbsolutePath(), GameStore.launchedRom(app));
     }
 
+    /** A PS1 disc as a .cue and its one track, in a library folder read as files (ConsoleTest.ps1: SLUS-00594). */
+    private File ps1Disc(String folder) throws Exception {
+        File dir = tmp.newFolder(folder);
+        TestSupport.write(new File(dir, "Space Race.bin"),
+                          ConsoleTest.ps1(true, "BOOT = cdrom:\\SLUS_005.94;1\n", "PLAYSTATION"));
+        File cue = new File(dir, "Space Race.cue");
+        TestSupport.write(cue, "FILE \"Space Race.bin\" BINARY\n  TRACK 01 MODE2/2352\n    INDEX 01 00:00:00\n");
+        useFolder();
+        Library.addFolder(app, "content://com.android.externalstorage.documents/tree/primary%3A" + folder,
+                          dir.getAbsolutePath());
+        return cue;
+    }
+
+    /**
+     * XBA-168: a PS1 card plays like a GBA one: Ready (no chip, the PS1 badge), A or Start starts the game activity at
+     * once with the .cue (its tracks found beside it by the runtime: no track documents to hand over for a folder
+     * read as files), the library key ps1-<serial> as title_id.
+     */
+    @Test
+    public void ps1CardLaunches() throws Exception {
+        folderGame(0);
+        File cue = ps1Disc("ps1");
+        LauncherActivity a = launch();
+        GameCard race = card(a, "Space Race");
+        assertNotNull(race);
+        assertEquals("PS1", race.badgeForTest());
+        assertFalse("Ready: no chip", race.chipShownForTest());
+        TestSupport.screenshot(a.getWindow().getDecorView(), "ps1-library");
+        a.forceFocusForTest();
+        idle(300);
+        race.requestFocusFromTouch();
+        idle(300);
+        key(a, KeyEvent.KEYCODE_BUTTON_A);
+        Intent started = shadowOf(a).getNextStartedActivity();
+        assertNotNull(started);
+        assertEquals(ShellActivity.class.getName(), started.getComponent().getClassName());
+        assertEquals(cue.getAbsolutePath(), GameStore.launchedRom(app));
+        assertEquals("ps1-SLUS-00594", GameStore.launchedTitleId(app));
+        assertTrue(GameStore.launchedRomParts(app).isEmpty());
+        assertEquals(LauncherActivity.Screen.LIBRARY, a.screenForTest());
+
+        GameStore.rememberLaunch(app, GameStore.chosenDir(app), "", null);
+        LauncherActivity b = launch();
+        b.forceFocusForTest();
+        idle(300);
+        card(b, "Space Race").requestFocusFromTouch();
+        idle(300);
+        key(b, KeyEvent.KEYCODE_BUTTON_START);
+        assertNotNull(shadowOf(b).getNextStartedActivity());
+        assertEquals(cue.getAbsolutePath(), GameStore.launchedRom(app));
+    }
+
+    /**
+     * XBA-168: with the toolchain, A on a PS1 card opens its Home like a GBA game's, but with Play only (its Prepare
+     * comes with the PS1 recompiler): « Plays in the interpreter », a note on the BIOS and the memory cards; nothing
+     * right of Play; Play launches the disc.
+     */
+    @Test
+    public void ps1HomePlaysOnly() throws Exception {
+        Toolchain.assetsOverride = TestSupport.toolAssets(tmp.newFolder("assets"), "1");
+        Toolchain.nativeDirOverride = TestSupport.fakeNativeDir(tmp.getRoot()).getAbsolutePath();
+        folderGame(0);
+        File cue = ps1Disc("ps1");
+        LauncherActivity a = launch();
+        a.forceFocusForTest();
+        idle(300);
+        card(a, "Space Race").requestFocusFromTouch();
+        idle(300);
+        key(a, KeyEvent.KEYCODE_BUTTON_A);
+        assertEquals(LauncherActivity.Screen.ROM_HOME, a.screenForTest());
+        assertNull("not launched", shadowOf(a).getNextStartedActivity());
+        assertEquals("ps1-SLUS-00594", a.romEntryForTest().tid);
+        assertEquals(app.getString(R.string.ROM_PS1_NOTE), a.noteForTest());
+        TestSupport.screenshot(a.getWindow().getDecorView(), "ps1-home");
+        key(a, KeyEvent.KEYCODE_BUTTON_A);
+        assertNull("no Prepare for a PS1 game", shadowOf(app).getNextStartedService());
+        Intent game = shadowOf(a).getNextStartedActivity();
+        assertNotNull(game);
+        assertEquals(ShellActivity.class.getName(), game.getComponent().getClassName());
+        assertEquals(cue.getAbsolutePath(), GameStore.launchedRom(app));
+    }
+
+    /** The track documents of a .cue seen through SAF (XBA-168): their URIs under the tree; nothing otherwise. */
+    @Test
+    public void romParts() {
+        String tree = "content://com.android.externalstorage.documents/tree/primary%3Aps1";
+        LibraryIndex.Item it = new LibraryIndex.Item();
+        it.loc = "doc:primary:ps1/Game.cue";
+        it.name = "Game.cue";
+        it.parts.add("doc:primary:ps1/Game (Track 1).bin");
+        it.parts.add("doc:primary:ps1/Game (Track 2).bin");
+        assertEquals(java.util.Arrays.asList(
+                         "content://com.android.externalstorage.documents/tree/primary%3Aps1/document/"
+                         + "primary%3Aps1%2FGame%20(Track%201).bin",
+                         "content://com.android.externalstorage.documents/tree/primary%3Aps1/document/"
+                         + "primary%3Aps1%2FGame%20(Track%202).bin"),
+                     LauncherActivity.romParts(it, tree));
+        assertTrue(LauncherActivity.romParts(it, null).isEmpty());
+        it.loc = "file:/sdcard/ps1/Game.cue";
+        assertTrue("a .cue read as a file finds its tracks itself", LauncherActivity.romParts(it, tree).isEmpty());
+        it.loc = "doc:primary:ps1/Game.bin";
+        it.name = "Game.bin";
+        assertTrue(LauncherActivity.romParts(it, tree).isEmpty());
+        assertTrue(LauncherActivity.romParts(null, tree).isEmpty());
+    }
+
     /** What the game process opens for a ROM: its path, or its document under the library folder's tree. */
     @Test
     public void romSpec() {

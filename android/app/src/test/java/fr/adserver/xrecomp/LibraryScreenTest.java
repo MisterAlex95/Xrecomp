@@ -220,8 +220,8 @@ public class LibraryScreenTest {
 
     /**
      * XBA-178 / XBA-157: a game of another console is keyed by console + title key; a GBA game is Ready (its runtime
-     * plays the ROM as it is: no import; its Prepare, XBA-158, only speeds it up), Running while it runs; PS1 and N64
-     * are « Not playable yet ».
+     * plays the ROM as it is: no import; its Prepare, XBA-158, only speeds it up), Running while it runs; a PS1 disc
+     * the same without a Prepare (XBA-168); N64 is « Not playable yet ».
      */
     @Test
     public void otherConsoles() throws Exception {
@@ -230,10 +230,11 @@ public class LibraryScreenTest {
         LibraryIndex.Item rom = romItem(Console.GBA, "AXVE-1A2B3C4D", "file:/sdcard/gba/Sample.gba", "Sample");
         x.items.add(rom);
         x.items.add(romItem(Console.N64, "NSME-635A2BFF", "file:/sdcard/n64/Race.z64", "Race"));
+        x.items.add(romItem(Console.PS1, "SLUS-00594", "file:/sdcard/ps1/Space Race.cue", "Space Race"));
         LibraryScreen.Env env = env();
         env.toolchain = true;
         List<LibraryScreen.Entry> l = LibraryScreen.entries(files, new Library.Games(), x, env);
-        assertEquals(3, l.size());
+        assertEquals(4, l.size());
         assertEquals(FABLE, l.get(0).tid);
         assertEquals(GameState.Chip.NOT_IMPORTED, l.get(0).chip);   // the Xbox game: unchanged
         LibraryScreen.Entry e = LibraryScreen.entry(files, "gba-AXVE-1A2B3C4D", new Library.Games(), x, env);
@@ -253,6 +254,17 @@ public class LibraryScreenTest {
         assertEquals(GameState.Chip.NO_FILE_ACCESS, LibraryScreen.entry(files, e.tid, new Library.Games(), x, env).chip);
         env.noAccess = java.util.Collections.emptySet();
 
+        // XBA-168: a PS1 disc launches as it is too, Ready; no Prepare state on its card even with the toolchain.
+        LibraryScreen.Entry p = LibraryScreen.entry(files, "ps1-SLUS-00594", new Library.Games(), x, env);
+        assertEquals(Console.PS1, p.console());
+        assertTrue(p.directLaunch());
+        assertFalse("no PS1 Prepare yet", p.facts.toolchain);
+        assertEquals(GameState.Chip.READY, p.chip);
+        assertTrue(GameState.playable(p.chip));
+        env.runningTid = "ps1-SLUS-00594";
+        assertEquals(GameState.Chip.RUNNING, LibraryScreen.entry(files, p.tid, new Library.Games(), x, env).chip);
+        env.runningTid = null;
+
         LibraryScreen.Entry n = LibraryScreen.entry(files, "n64-NSME-635A2BFF", new Library.Games(), x, env);
         assertEquals(Console.N64, n.console());
         assertFalse(n.directLaunch());
@@ -267,7 +279,7 @@ public class LibraryScreenTest {
         r.title = "Sample";
         g.put(r);
         x.items.remove(rom);
-        assertEquals(2, LibraryScreen.entries(files, g, x, env).size());   // Fable and the N64 game
+        assertEquals(3, LibraryScreen.entries(files, g, x, env).size());   // Fable, the N64 and PS1 games
         assertEquals(GameState.Chip.GONE, LibraryScreen.entry(files, r.titleId, g, x, env).chip);
     }
 

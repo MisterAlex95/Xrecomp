@@ -3,8 +3,11 @@ package fr.adserver.xrecomp;
 import android.content.ActivityNotFoundException;
 import android.content.Context;
 import android.content.Intent;
+import android.database.Cursor;
+import android.net.Uri;
 import android.os.Bundle;
 import android.os.Looper;
+import android.provider.DocumentsContract;
 import android.system.ErrnoException;
 import android.system.Os;
 import android.util.Log;
@@ -63,7 +66,18 @@ public class ShellActivity extends SDLActivity {
         /* A GBA ROM launched from the library (XBA-157) may be a document of a library folder seen through the Storage
          * Access Framework: opened here, its descriptor handed over as "fd:N" (detached: the game process keeps it for
          * its life; the runtime reads it from offset 0). Unreachable: "fd:-1", which the runtime reports. */
-        if (rom != null && rom.startsWith("content:")) {
+        java.util.List<String> parts = rom != null && rom.startsWith("content:") ? GameStore.launchedRomParts(this)
+                                                                                : java.util.Collections.emptyList();
+        if (!parts.isEmpty()) {
+            /* A PS1 disc's .cue among documents (XBA-168): its tracks opened here and named in a .cue of our own as
+             * /proc/self/fd/N (Ps1Cue); unreachable: "fd:-1", which the runtime reports. */
+            String cue = Ps1Cue.runtimeCue(rom, parts, u -> getContentResolver().openInputStream(Uri.parse(u)),
+                                           this::documentName, DiscImages.contentOpener(this),
+                                           new File(getCacheDir(), "ps1"));
+            Log.i(LauncherActivity.TAG, "shell: cue sheet " + rom + " (" + parts.size() + " track file(s)) -> "
+                                        + (cue != null ? cue : "unreachable"));
+            dir = cue != null ? cue : "fd:-1";
+        } else if (rom != null && rom.startsWith("content:")) {
             String spec = romDescriptor(rom, DiscImages.contentOpener(this));
             Log.i(LauncherActivity.TAG, "shell: ROM document " + rom + " -> " + (spec != null ? spec : "unreachable"));
             dir = spec != null ? spec : "fd:-1";
@@ -112,6 +126,18 @@ public class ShellActivity extends SDLActivity {
             panel = new CompanionPanel(ctx, new NativeSink(), ShellActivity::stats);
             return panel;
         }, new KeyForwarder());
+    }
+
+    /** A document's display name (a PS1 track's file name, Ps1Cue), or null. */
+    private String documentName(String uri) {
+        try (Cursor c = getContentResolver().query(Uri.parse(uri),
+                                                   new String[] { DocumentsContract.Document.COLUMN_DISPLAY_NAME },
+                                                   null, null, null)) {
+            return c != null && c.moveToFirst() ? c.getString(0) : null;
+        } catch (RuntimeException e) {
+            Log.w(LauncherActivity.TAG, "shell: no name for " + uri, e);
+            return null;
+        }
     }
 
     /** "fd:N" for a ROM document (its descriptor detached, the caller's to keep), or null when it cannot be opened. */

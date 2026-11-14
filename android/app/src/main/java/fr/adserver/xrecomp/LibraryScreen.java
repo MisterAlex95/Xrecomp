@@ -94,14 +94,14 @@ final class LibraryScreen {
         }
 
         /**
-         * A game of another console than the Xbox: no Prepare, no Home; « Not playable yet » unless its console plays
-         * files as they are (the GBA: A or Start launches it, XBA-157).
+         * A game of another console than the Xbox: no Xbox Prepare or Home; « Not playable yet » unless its console
+         * plays files as they are (the GBA, XBA-157, and the PS1, XBA-168: A or Start launches it).
          */
         boolean otherConsole() {
             return console() != Console.XBOX;
         }
 
-        /** A game started from its file as it is (a GBA ROM): A or Start on its card launches it. */
+        /** A game started from its file as it is (a GBA ROM, a PS1 disc): A or Start on its card launches it. */
         boolean directLaunch() {
             return console().directLaunch();
         }
@@ -195,8 +195,9 @@ final class LibraryScreen {
             f.hasData = true;
             f.dataKind = Library.KIND_IN_PLACE;
         }
-        // A GBA game (XBA-158) has a Prepare and a pack too, keyed by its library key (packs/gba-<KEY>).
-        boolean prepares = en.realTid() || en.directLaunch();
+        // A GBA game (XBA-158) has a Prepare and a pack too, keyed by its library key (packs/gba-<KEY>); a PS1 game
+        // not yet (XBA-168: no PS1 recompiler), so its card never shows a Prepare state.
+        boolean prepares = en.realTid() || (en.directLaunch() && en.console().prepares());
         f.toolchain = env.toolchain && prepares;
         if (prepares) {
             f.pack = Pack.check(filesDir, en.tid);

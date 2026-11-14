@@ -94,4 +94,7 @@
     <string name="ROM_NEW_CODE_NOTE">Vos dernières parties ont exécuté du code que la préparation avait manqué (%1$d adresses). Préparez à nouveau pour le traduire aussi ; Jouer fonctionne en attendant.</string>
     <string name="ROM_FAILED_NOTE">La préparation a échoué (%1$s) ; le jeu se joue toujours dans l\'interpréteur. Voir l\'erreur pour le journal.</string>
     <string name="ROM_PREPARED_DONE">%1$s est préparé : il tourne maintenant en natif.</string>
+<!-- A PS1 game's Home (XBA-168). -->
+    <string name="ROM_PS1_LINE">Joue dans l\'interpréteur</string>
+    <string name="ROM_PS1_NOTE">Jouer lance le jeu depuis son disque, avec le BIOS PlayStation fourni par l\'application (OpenBIOS). Les cartes mémoire sont sauvegardées pour chaque jeu.</string>
 </resources>

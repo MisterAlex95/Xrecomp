@@ -3870,11 +3870,13 @@ public class LauncherActivity extends Activity {
         Prep p = romPrep(e);
         romPrepShown = p;
         PrepareProtocol.Status ps = e.facts.prepare;
+        // A PS1 game (XBA-168): Play only, no Prepare until the PS1 recompiler lands (Console.prepares).
+        boolean prepares = e.console().prepares();
         int found = p == Prep.PLAYABLE ? Pack.newlyDiscovered(getFilesDir(), e.tid) : 0;
         LinearLayout info = hero(e.title(), false, null);
         String line;
         int color;
-        switch (p) {
+        switch (prepares ? p : Prep.OFF) {
         case RUNNING:
             line = ps == null ? getString(R.string.PREPARE_STARTING) : progressLine(ps);
             color = Theme.OK;
@@ -3892,7 +3894,7 @@ public class LauncherActivity extends Activity {
             color = found > 0 ? Theme.WARN : Theme.OK;
             break;
         default:
-            line = getString(R.string.ROM_NOT_PREPARED);
+            line = getString(prepares ? R.string.ROM_NOT_PREPARED : R.string.ROM_PS1_LINE);
             color = Theme.TEXT_DIM;
             break;
         }
@@ -3902,7 +3904,7 @@ public class LauncherActivity extends Activity {
 
         LinearLayout buttons = heroButtons(info);
         Widgets.PillButton play = pill(buttons, Icon.PLAY, getString(R.string.PLAY), true, () -> launchRom(e));
-        switch (p) {
+        switch (prepares ? p : Prep.PLAYABLE) {   // PLAYABLE without new code: no second button
         case RUNNING:
             pill(buttons, null, getString(R.string.PREPARING), false, () -> go(Screen.PREPARE));
             break;
@@ -3932,6 +3934,8 @@ public class LauncherActivity extends Activity {
 
         if (e.chip == GameState.Chip.RUNNING)
             setNote(getString(R.string.GAME_RUNNING_HOME), NOTE_INFO);
+        else if (!prepares)
+            setNote(getString(R.string.ROM_PS1_NOTE), NOTE_INFO);
         else if (p == Prep.FAILED)
             setNote(getString(R.string.ROM_FAILED_NOTE, ps == null ? "" : ps.code), NOTE_WARN);
         else if (p == Prep.PLAYABLE)
@@ -4159,7 +4163,8 @@ public class LauncherActivity extends Activity {
     }
 
     /**
-     * A GBA game (XBA-157): straight into the game activity with its ROM, no Home, Prepare, import or pack. The ROM is
+     * A GBA game (XBA-157) or a PS1 disc (XBA-168): straight into the game activity with its file, no Home, Prepare,
+     * import or pack. The ROM is
      * handed over as it is (GameStore.rememberRomLaunch: a path, or the document's URI that ShellActivity opens); the
      * same ROM running is brought back, another game running is ended first (one game process at a time).
      */
@@ -4181,7 +4186,8 @@ public class LauncherActivity extends Activity {
         }
         if (mainProcessPid() != 0)
             endRunningGame();
-        GameStore.rememberRomLaunch(this, rom, e.title(), e.tid);
+        GameStore.rememberRomLaunch(this, rom, e.title(), e.tid,
+                                    romParts(e.active, folder == null ? null : folder.tree));
         Log.i(TAG, "launcher: library: play " + e.tid + " (" + e.title() + ") from " + rom);
         startActivity(new Intent(this, ShellActivity.class)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK));
@@ -4201,6 +4207,22 @@ public class LauncherActivity extends Activity {
         if (it.loc.startsWith("doc:") && tree != null && !tree.isEmpty())
             return DocumentsContract.buildDocumentUriUsingTree(Uri.parse(tree), it.loc.substring(4)).toString();
         return null;
+    }
+
+    /**
+     * The track documents of a PS1 disc's .cue seen through the Storage Access Framework (XBA-168): their URIs under the
+     * folder's tree, in the index's order, which ShellActivity opens and names in a .cue of its own (Ps1Cue). Empty for
+     * anything else (a .cue read as a file finds its tracks itself; a single-file image or a ROM has none).
+     */
+    static List<String> romParts(LibraryIndex.Item it, String tree) {
+        List<String> out = new ArrayList<>();
+        if (it == null || !it.loc.startsWith("doc:") || tree == null || tree.isEmpty()
+            || !it.name.toLowerCase(java.util.Locale.ROOT).endsWith(".cue"))
+            return out;
+        for (String loc : it.parts)
+            if (loc.startsWith("doc:"))
+                out.add(DocumentsContract.buildDocumentUriUsingTree(Uri.parse(tree), loc.substring(4)).toString());
+        return out;
     }
 
     /** The primary action of a library game whose files are not here (State.LIBRARY). */

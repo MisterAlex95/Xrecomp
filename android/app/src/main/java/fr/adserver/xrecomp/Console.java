@@ -58,16 +58,24 @@ enum Console {
     }
 
     /**
-     * Its games play in this build (XBA-157): the Xbox (through Prepare and a pack) and the Game Boy Advance (its
-     * runtime is an interpreter: no Prepare, no pack, the ROM goes to the game activity as it is). PS1 and N64 are
-     * listed, « Not playable yet ».
+     * Its games play in this build: the Xbox (through Prepare and a pack), the Game Boy Advance (XBA-157) and the
+     * PlayStation (XBA-168), whose runtimes are interpreters: no import, no pack needed, the game file goes to the game
+     * activity as it is. N64 games are listed, « Not playable yet ».
      */
     boolean playable() {
-        return this == XBOX || this == GBA;
+        return this == XBOX || this == GBA || this == PS1;
     }
 
-    /** A game of this console starts from its file as it is, no Prepare or import (the GBA). */
+    /** A game of this console starts from its file as it is, no Prepare or import (the GBA, the PS1). */
     boolean directLaunch() {
+        return this == GBA || this == PS1;
+    }
+
+    /**
+     * A game of this console that starts from its file can also be prepared (translated for the device into a pack,
+     * XBA-158): the GBA. The PS1's Prepare comes with its recompiler; its Home has Play only until then.
+     */
+    boolean prepares() {
         return this == GBA;
     }
 

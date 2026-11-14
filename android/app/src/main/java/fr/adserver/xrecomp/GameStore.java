@@ -273,8 +273,32 @@ final class GameStore {
     static final String KEY_ROM = "rom", KEY_ROM_TITLE = "rom_title";
 
     static boolean rememberRomLaunch(Context c, String rom, String title, String key) {
-        return prefs(c).edit().putString(KEY_ROM, rom).putString(KEY_ROM_TITLE, title == null ? "" : title)
-                       .putString(Library.PREF_TITLE_ID, key).commit();
+        return rememberRomLaunch(c, rom, title, key, null);
+    }
+
+    /**
+     * The same with the track documents of a PS1 disc's .cue read through the Storage Access Framework (XBA-168,
+     * LauncherActivity.romParts; null or empty: none), which ShellActivity opens beside the .cue (Ps1Cue).
+     */
+    static final String KEY_ROM_PARTS = "rom_parts";
+
+    static boolean rememberRomLaunch(Context c, String rom, String title, String key, java.util.List<String> parts) {
+        android.content.SharedPreferences.Editor e = prefs(c).edit().putString(KEY_ROM, rom)
+                .putString(KEY_ROM_TITLE, title == null ? "" : title).putString(Library.PREF_TITLE_ID, key);
+        if (parts == null || parts.isEmpty())
+            e.remove(KEY_ROM_PARTS);
+        else
+            e.putString(KEY_ROM_PARTS, String.join("\n", parts));
+        return e.commit();
+    }
+
+    /** The track documents of the launched ROM (rememberRomLaunch), in order; empty when it has none. */
+    static java.util.List<String> launchedRomParts(Context c) {
+        java.util.List<String> out = new java.util.ArrayList<>();
+        for (String p : prefs(c).getString(KEY_ROM_PARTS, "").split("\n"))
+            if (!p.isEmpty())
+                out.add(p);
+        return out;
     }
 
     /** The ROM the game process runs (or last ran), or null when that is an Xbox game. */
