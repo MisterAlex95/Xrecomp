@@ -26,3 +26,4 @@ in NOTICE. Their binary distribution requires the licence text to travel with th
 | `MIT-OpenBIOS.txt` | OpenBIOS, the open-source PlayStation BIOS of PCSX-Redux's nugget tree (`assets/ps1-bios/openbios.bin`, booted by the PS1 runtime), verbatim `LICENSE` of the nugget sources at the pinned commit |
 | `MIT-paraLLEl-RDP.txt` | paraLLEl-RDP, Granite and volk (`libmain.so`: the N64 Vulkan RDP, `third_party/parallel-rdp`), their three MIT licences verbatim |
 | `Apache-2.0-Vulkan-Headers.txt` | the Khronos Vulkan headers paraLLEl-RDP is built with (`third_party/parallel-rdp/vulkan-headers`), verbatim Apache License 2.0 |
+| `BSD-2-Clause-libadrenotools.txt` | libadrenotools and linkernsbypass (`libxba_vkdriver.so` and the four hook libraries: loading a user-supplied Vulkan driver for the N64 RDP, `third_party/adrenotools`), verbatim `LICENSE` of libadrenotools (linkernsbypass carries the same text) |

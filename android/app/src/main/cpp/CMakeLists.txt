@@ -113,6 +113,27 @@ if(TARGET lsfg_dxbc)
 endif()
 target_link_options(xba_import PRIVATE -Wl,--no-undefined)
 
+# libxba_vkdriver.so: a Vulkan driver the player supplied (Mesa Turnip...) for the N64 Vulkan RDP, through the vendored
+# libadrenotools (third_party/adrenotools, BSD-2, arm64 only). Not linked by libmain.so: the N64 runtime dlopens it
+# only when a custom driver is selected (consoles/n64/runtime/n64_vk_driver.c), so linkernsbypass's static constructor
+# never runs otherwise. adrenotools' four hook libraries (libhook_impl, libmain_hook, libfile_redirect_hook,
+# libgsl_alloc_hook) are SHARED targets of its own CMakeLists: packaged next to it (no `targets` filter in gradle) and
+# loaded by name from the native library directory at run time.
+set(XBA_ADRENOTOOLS_DIR "${XBOXRECOMP_ROOT}/third_party/adrenotools")
+if(CMAKE_ANDROID_ARCH_ABI STREQUAL "arm64-v8a" AND EXISTS "${XBA_ADRENOTOOLS_DIR}/CMakeLists.txt")
+    add_subdirectory("${XBA_ADRENOTOOLS_DIR}" adrenotools)
+    foreach(_t adrenotools linkernsbypass hook_impl main_hook file_redirect_hook gsl_alloc_hook)
+        # C++20 designated initialisers, no standard set upstream; not our code: quiet
+        set_target_properties(${_t} PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQUIRED ON POSITION_INDEPENDENT_CODE ON)
+        target_compile_options(${_t} PRIVATE -w)
+    endforeach()
+    add_library(xba_vkdriver SHARED vkdriver.c)
+    set_target_properties(xba_vkdriver PROPERTIES C_VISIBILITY_PRESET hidden)
+    target_link_libraries(xba_vkdriver PRIVATE adrenotools log)
+    target_link_options(xba_vkdriver PRIVATE -Wl,--no-undefined -Wl,--exclude-libs,ALL)
+    message(STATUS "libxba_vkdriver.so: custom Vulkan drivers through libadrenotools")
+endif()
+
 # The title (XBA-52). Its CMakeLists sees XBOXRECOMP_SHELL_TITLE and, instead of an executable, defines the object
 # library xba_title (its main.c then defines recomp_title_main, which shell_main.c calls). Objects, not an archive:
 # every one of them is linked, as an executable would link them.
