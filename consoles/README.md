@@ -222,8 +222,9 @@ command up to ReadTOC (Test 20h answers vC2), ReadN / ReadS with 800h / 924h sec
 37800 / 18900 Hz, psx-spx zigzag interpolation to 44.1 kHz) and CD-DA with the volume matrix into a 44.1 kHz stream. GetID answers a data
 disc as licensed (`SCEx` from the licence text at LBA 4, `SCEA` without one, as a modchip would), so a BIOS boots our
 homebrew. `ps1_spu.c`: 24 ADPCM voices with Gaussian interpolation, exact ADSR and sweep envelopes, noise, pitch
-modulation, ENDX, reverb (psx-spx formula with its FIR), capture buffers, the SPU IRQ, FIFO and DMA4 transfers, CD
-input. `ps1_mdec.c`: RLE, IDCT with the scale table, 4 / 8 / 15 / 24-bit output, DMA0 / DMA1. Tests:
+modulation, ENDX, reverb (psx-spx formula with its FIR, the hardware's IIR form with the vIIR = -8000h quirk), capture
+buffers, the SPU IRQ, FIFO and DMA4 transfers, CD input; KON / KOFF latched to the next sample, a voice starts four
+samples after its key on, and the main volume scales the whole mix (voices, CD, reverb). `ps1_mdec.c`: RLE, IDCT with the scale table, 4 / 8 / 15 / 24-bit output, DMA0 / DMA1. Tests:
 `consoles/ps1/tests/test_{disc,cdrom,spu,mdec}.c` on images and register streams they generate (a compressed CHD
 from `chdman` too when it is installed). The limits are listed at the top of each source.
 

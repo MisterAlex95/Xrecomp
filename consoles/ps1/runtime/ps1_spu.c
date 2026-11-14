@@ -17,10 +17,19 @@
  * when SPUCNT selects manual write), DMA4 write and read; the transfer type in 1F801DACh is stored but only the normal
  * type (2 = 0004h) is modelled.
  *
- * Mix (per sample): voices (and the CD when SPUCNT bit 0) times the main volume, plus the reverb output times EVOL,
- * clamped to 16 bits. SPUCNT bit 14 = 0 mutes the voices and the reverb output, not the CD. Simplifications: register
- * writes take effect at once (the hardware applies them on its next 44.1 kHz cycle), key on starts the voice on the
- * next sample without the hardware's few-sample delay; the vIIR = -8000h quirk is not modelled. */
+ * Mix (per sample, psx-spx « SPU Overview » / Mednafen / DuckStation): voices + CD (times the CD volume, when SPUCNT
+ * bit 0) + reverb output (times EVOL), clamped, then times the main volume: the main volume applies to the CD input
+ * and to the reverb too (CD audio has no path around the mixer). SPUCNT bit 14 = 0 mutes the voices and the reverb
+ * output, not the CD.
+ *
+ * Timing. Register writes land between two samples: the core brings the SPU up to the CPU's cycle before every SPU
+ * access (ps1_devices_sync), and the SPU only changes state on its 44.1 kHz ticks. KON and KOFF are latched and
+ * applied on the next tick (KOFF first, so both in one tick restart the voice). Key on: the voice decodes its first
+ * block, clears ENDX, then stays silent for four samples (Mednafen's decode-play delay: the pitch counter and the
+ * envelope hold) before its attack starts. Reverb: the same-side / different-side reflections use the hardware's
+ * IIR form (input x vIIR + previous x (8000h - vIIR), halved from two 14-bit products), including the vIIR = -8000h
+ * quirk where the second factor overflows and the previous sample's sign flips (Mednafen's IIASM). Not modelled: the
+ * hardware's per-voice stagger within a sample, the transfer types other than normal, the external audio input. */
 #include "ps1_devices.h"
 
 #include <stdlib.h>
@@ -29,6 +38,7 @@
 #define RAM_SIZE (512 * 1024)
 #define RAM_MASK (RAM_SIZE - 1)
 #define CYCLES_PER_SAMPLE 768u
+#define KON_DELAY 4 /* samples between a key on and the voice's first output (Mednafen) */
 #define OUT_RING 8192u /* frames, power of two: more than 8 video frames at 44.1 kHz */
 
 static const int16_t gauss[512] = {
@@ -69,7 +79,7 @@ typedef struct voice {
     int16_t old, older;
     uint8_t flags;     /* this block's flag byte */
     int16_t out;       /* output after ADSR (pitch modulation of the next voice, capture) */
-    int keyed;         /* key on pending for the next sample */
+    int delay;         /* samples of silence left after a key on */
 } voice;
 
 struct ps1_spu {
@@ -286,6 +296,7 @@ static void key_on(ps1_spu *s, int i)
     v->phase = PH_ATTACK;
     v->env = 0;
     v->env_counter = 0;
+    v->delay = KON_DELAY;
     s->endx &= ~(1u << i);
     decode_block(s, v);
 }
@@ -304,6 +315,11 @@ static int16_t voice_sample(ps1_spu *s, int i, int16_t prev_out)
 {
     voice *v = &s->v[i];
     int32_t sample;
+    if (v->delay) {
+        v->delay--;
+        v->out = 0;
+        return 0;
+    }
     if (s->non & (1u << i)) {
         sample = (int16_t)s->noise;
     } else {
@@ -380,6 +396,19 @@ static void rev_wr(ps1_spu *s, int32_t off, int32_t v)
 #define M(x) ((int32_t)s->rev[x] << 3)
 #define MUL(a, b) (((int32_t)(a) * (int32_t)(b)) >> 15)
 
+/* The reflections' IIR, as the hardware computes it (Mednafen): (in x vIIR + prev x (8000h - vIIR)) / 8000h, from two
+ * 14-bit products halved. vIIR = -8000h overflows the second factor: prev x -10000h (0 for prev = -8000h). */
+static int32_t iir(int32_t in, int32_t prev, int32_t alpha)
+{
+    in = clamp16(in);
+    int32_t b;
+    if (alpha == -32768)
+        b = prev == -32768 ? 0 : prev * -65536;
+    else
+        b = prev * (32768 - alpha);
+    return clamp16((((in * alpha) >> 14) + (b >> 14)) >> 1);
+}
+
 /* One 22.05 kHz reverb step: inputs lin / rin (already through the FIR); outputs to out[2]. */
 static void reverb_step(ps1_spu *s, int32_t lin, int32_t rin, int32_t out[2])
 {
@@ -387,12 +416,12 @@ static void reverb_step(ps1_spu *s, int32_t lin, int32_t rin, int32_t out[2])
     if (s->cnt & 0x80) {
         /* same side reflection */
         int32_t ls = rev_rd(s, M(mLSAME) - 2), rs = rev_rd(s, M(mRSAME) - 2);
-        rev_wr(s, M(mLSAME), MUL(Lin + MUL(rev_rd(s, M(dLSAME)), R(vWALL)) - ls, R(vIIR)) + ls);
-        rev_wr(s, M(mRSAME), MUL(Rin + MUL(rev_rd(s, M(dRSAME)), R(vWALL)) - rs, R(vIIR)) + rs);
+        rev_wr(s, M(mLSAME), iir(Lin + MUL(rev_rd(s, M(dLSAME)), R(vWALL)), ls, R(vIIR)));
+        rev_wr(s, M(mRSAME), iir(Rin + MUL(rev_rd(s, M(dRSAME)), R(vWALL)), rs, R(vIIR)));
         /* different side reflection */
         int32_t ld = rev_rd(s, M(mLDIFF) - 2), rd = rev_rd(s, M(mRDIFF) - 2);
-        rev_wr(s, M(mLDIFF), MUL(Lin + MUL(rev_rd(s, M(dRDIFF)), R(vWALL)) - ld, R(vIIR)) + ld);
-        rev_wr(s, M(mRDIFF), MUL(Rin + MUL(rev_rd(s, M(dLDIFF)), R(vWALL)) - rd, R(vIIR)) + rd);
+        rev_wr(s, M(mLDIFF), iir(Lin + MUL(rev_rd(s, M(dRDIFF)), R(vWALL)), ld, R(vIIR)));
+        rev_wr(s, M(mRDIFF), iir(Rin + MUL(rev_rd(s, M(dLDIFF)), R(vWALL)), rd, R(vIIR)));
     }
     /* early echo */
     int32_t L = MUL(R(vCOMB1), rev_rd(s, M(mLCOMB1))) + MUL(R(vCOMB2), rev_rd(s, M(mLCOMB2))) +
@@ -495,6 +524,10 @@ static void sample(ps1_spu *s, ps1_cdrom *cd)
     int16_t prev = 0;
     for (int i = 0; i < 24; i++) {
         voice *v = &s->v[i];
+        if (s->koff & (1u << i)) {
+            s->koff &= ~(1u << i);
+            key_off(s, i);
+        }
         if (s->kon & (1u << i)) {
             s->kon &= ~(1u << i);
             key_on(s, i);
@@ -536,14 +569,14 @@ static void sample(ps1_spu *s, ps1_cdrom *cd)
     }
     int32_t rv[2];
     reverb(s, clamp16(wet[0]), clamp16(wet[1]), rv);
+    if (s->cnt & 0x4000) {
+        mixl += (rv[0] * s->evol[0]) >> 15;
+        mixr += (rv[1] * s->evol[1]) >> 15;
+    }
     sweep_tick(&s->main[0]);
     sweep_tick(&s->main[1]);
-    int32_t outl = ((clamp16(mixl) * s->main[0].level) >> 15);
-    int32_t outr = ((clamp16(mixr) * s->main[1].level) >> 15);
-    if (s->cnt & 0x4000) {
-        outl += (rv[0] * s->evol[0]) >> 15;
-        outr += (rv[1] * s->evol[1]) >> 15;
-    }
+    int32_t outl = (clamp16(mixl) * s->main[0].level) >> 15;
+    int32_t outr = (clamp16(mixr) * s->main[1].level) >> 15;
     if (s->ring_count == OUT_RING) {
         s->ring_head = (s->ring_head + 1) & (OUT_RING - 1);
         s->ring_count--;
@@ -716,9 +749,7 @@ void ps1_spu_write16(ps1_spu *s, uint32_t off, uint16_t v)
         int hi = off == 0x18E;
         s->koff_reg[hi] = v;
         uint32_t bits = hi ? (uint32_t)(v & 0xFF) << 16 : v;
-        for (int i = 0; i < 24; i++)
-            if (bits & (1u << i))
-                key_off(s, i);
+        s->koff |= bits; /* applied on the next sample */
         break;
     }
     case 0x190: s->pmon = (s->pmon & 0xFF0000u) | (v & 0xFFFEu); break; /* voice 0 has no modulator */

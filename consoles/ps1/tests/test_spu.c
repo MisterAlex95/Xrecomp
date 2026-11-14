@@ -52,6 +52,9 @@ static void ram_read(ps1_spu *s, uint32_t addr, void *data, size_t bytes)
     ps1_spu_write16(s, 0x1AA, cnt & ~0x30);
 }
 
+/* A voice's first output comes this many samples after its key on (ps1_spu.c KON_DELAY). */
+#define KON_DELAY 4
+
 static void samples(ps1_spu *s, int n) { ps1_spu_tick(s, 768u * (uint32_t)n, NULL); }
 
 static void voice(ps1_spu *s, int v, uint32_t start, uint16_t pitch, uint16_t adsr1, uint16_t adsr2)
@@ -117,7 +120,7 @@ static void test_adpcm(void)
     voice(s, 1, 0x1000, 0x1000, 0x000F, 0x7FC0 | 0x1F);
     ps1_spu_write16(s, 0x1E, 0x1000 >> 3); /* repeat address */
     key_on(s, 1);
-    samples(s, NB * 28 + 4);
+    samples(s, NB * 28 + 4 + KON_DELAY);
     int16_t ref[NB * 28], cap[512];
     ref_decode(blocks, NB, ref);
     ram_read(s, 0x800, cap, sizeof cap);
@@ -129,9 +132,9 @@ static void test_adpcm(void)
         out += (gauss_ref[0x100] * ref[j - 1]) >> 15;
         out += (gauss_ref[0x000] * ref[j]) >> 15;
         int32_t want = (out * 0x7FFF) >> 15;
-        if (cap[j] != want) {
+        if (cap[j + KON_DELAY] != want) {
             if (bad++ < 5)
-                printf("  sample %d: got %d want %d\n", j, cap[j], want);
+                printf("  sample %d: got %d want %d\n", j, cap[j + KON_DELAY], want);
         }
     }
     CHECK(bad == 0, "%d ADPCM samples differ from the reference", bad);
@@ -157,8 +160,8 @@ static void test_gauss_fraction(void)
     voice(s, 1, 0x2000, 0x0800, 0x000F, 0x7FDF);
     ps1_spu_write16(s, 0x1E, 0x2010 >> 3);
     key_on(s, 1);
-    samples(s, 40);
-    int16_t ref[56], cap[40];
+    samples(s, 40 + KON_DELAY);
+    int16_t ref[56], cap[40 + KON_DELAY];
     ref_decode(blk, 2, ref);
     ram_read(s, 0x800, cap, sizeof cap);
     int bad = 0;
@@ -168,7 +171,7 @@ static void test_gauss_fraction(void)
         o += (gauss_ref[0x1FF - g] * (idx >= 2 ? ref[idx - 2] : 0)) >> 15;
         o += (gauss_ref[0x100 + g] * (idx >= 1 ? ref[idx - 1] : 0)) >> 15;
         o += (gauss_ref[0x000 + g] * ref[idx]) >> 15;
-        bad += cap[j] != (int16_t)((o * 0x7FFF) >> 15);
+        bad += cap[j + KON_DELAY] != (int16_t)((o * 0x7FFF) >> 15);
     }
     CHECK(bad == 0, "%d samples differ at pitch 800h", bad);
     ps1_spu_destroy(s);
@@ -206,7 +209,7 @@ static void test_loop(void)
     blk[32 + 1] = 1;
     ram_write(s, 0x3000, blk, sizeof blk);
     key_on(s, 1);
-    samples(s, 28 * 3 + 2);
+    samples(s, 28 * 3 + 2 + KON_DELAY);
     CHECK(ps1_spu_read16(s, 0x1C) == 0, "ENVX after end + mute: %04X", ps1_spu_read16(s, 0x1C));
     ps1_spu_destroy(s);
 }
@@ -221,12 +224,12 @@ static void test_adsr(void)
     /* linear attack shift 10 step 0: +7 << 1 = 14 per sample */
     voice(s, 0, 0x1000, 0x1000, (10 << 10) | 0x000F, 0x7FDF);
     key_on(s, 0);
-    samples(s, 100);
+    samples(s, 100 + KON_DELAY);
     CHECK(envx(s, 0) == 1400, "linear attack after 100 samples: %d", envx(s, 0));
     /* shift 13: one step of 7 every 4 samples */
     voice(s, 0, 0x1000, 0x1000, (13 << 10) | (0 << 8) | 0x000F, 0x7FDF);
     key_on(s, 0);
-    samples(s, 400);
+    samples(s, 400 + KON_DELAY);
     CHECK(envx(s, 0) == 700, "attack shift 13 after 400 samples: %d", envx(s, 0));
     /* exponential attack: above 6000h it slows down (shift 4: step 7 << 7 = 896, divided by 4) */
     voice(s, 0, 0x1000, 0x1000, 0x8000 | (4 << 10) | 0x000F, 0x7FDF);
@@ -236,14 +239,14 @@ static void test_adsr(void)
         samples(s, 1);
         n++;
     }
-    CHECK(n == 28, "exponential attack: %d samples to pass 6000h", n);
+    CHECK(n == 28 + KON_DELAY, "exponential attack: %d samples to pass 6000h", n);
     int16_t a = envx(s, 0);
     samples(s, 1);
     CHECK(envx(s, 0) - a == 224, "exponential attack step above 6000h: %d", envx(s, 0) - a);
     /* attack to 7FFFh, decay (exponential, shift 2) to sustain level 7 (4000h), then hold */
     voice(s, 0, 0x1000, 0x1000, (0 << 10) | (2 << 4) | 7, 0x7FDF);
     key_on(s, 0);
-    samples(s, 3);
+    samples(s, 3 + KON_DELAY);
     CHECK(envx(s, 0) == 0x7FFF, "attack end %04X", envx(s, 0));
     samples(s, 400);
     int16_t sus = envx(s, 0);
@@ -263,7 +266,7 @@ static void test_adsr(void)
     /* linear release shift 31 (all ones): never steps */
     voice(s, 0, 0x1000, 0x1000, 0x000F, 0x7FC0 | 0x1F);
     key_on(s, 0);
-    samples(s, 5);
+    samples(s, 5 + KON_DELAY);
     ps1_spu_write16(s, 0x18C, 1);
     samples(s, 100);
     CHECK(envx(s, 0) == 0x7FFF, "release rate 1Fh stepped: %04X", envx(s, 0));
@@ -464,6 +467,118 @@ static void test_transfers_irq(void)
     ps1_spu_destroy(s);
 }
 
+/* Key on / key off timing: KON and KOFF are latched to the next sample (KOFF first), and a keyed voice is silent for
+ * KON_DELAY samples, its envelope and pitch counter held, before its attack starts. */
+static void test_key_timing(void)
+{
+    static const uint8_t loud_loop[16] = {0x00, 3, 0x77, 0x77, 0x77, 0x77, 0x77, 0x77, 0x77, 0x77, 0x77, 0x77, 0x77,
+                                          0x77, 0x77, 0x77};
+    ps1_spu *s = spu_new();
+    ram_write(s, 0x1000, loud_loop, 16);
+    voice(s, 1, 0x1000, 0x1000, (10 << 10) | 0x000F, 0x7FC0 | 0x1F); /* +14 per sample, sustain held */
+    ps1_spu_write16(s, 0x1E, 0x1000 >> 3);
+    key_on(s, 1);
+    samples(s, KON_DELAY);
+    CHECK(envx(s, 1) == 0, "envelope moved during the key on delay: %d", envx(s, 1));
+    samples(s, 1);
+    CHECK(envx(s, 1) == 14, "first attack step after the delay: %d", envx(s, 1));
+    int16_t cap[KON_DELAY + 4];
+    ram_read(s, 0x800, cap, sizeof cap);
+    int silent = 1;
+    for (int j = 0; j < KON_DELAY; j++)
+        silent &= cap[j] == 0;
+    CHECK(silent, "voice output during the key on delay");
+    samples(s, 200);
+    int16_t e = envx(s, 1);
+    CHECK(e == 14 * 201, "attack after 201 steps: %d", e);
+    /* KOFF is latched: nothing changes until the next sample, which starts the release */
+    ps1_spu_write16(s, 0xA + 16, 0x7FC0 | 0x0A); /* linear release, shift 10: -8 << 1 per sample */
+    ps1_spu_write16(s, 0x18C, 0x0002);
+    CHECK(envx(s, 1) == e, "KOFF changed ENVX before the next sample");
+    samples(s, 1);
+    CHECK(envx(s, 1) == e - 16, "release step after the latched KOFF: %d -> %d", e, envx(s, 1));
+    /* KOFF and KON in the same sample: the voice restarts (KOFF applied first) */
+    ps1_spu_write16(s, 0x18C, 0x0002);
+    key_on(s, 1);
+    samples(s, 1);
+    CHECK(envx(s, 1) == 0, "KOFF + KON in one sample: ENVX %d (restart expected)", envx(s, 1));
+    samples(s, KON_DELAY);
+    CHECK(envx(s, 1) == 14, "KOFF + KON in one sample: attack %d", envx(s, 1));
+    ps1_spu_destroy(s);
+}
+
+/* The reflections' IIR on a single reverb step: the work area holds prev at mLSAME-2, the input is silent and vWALL is
+ * 0, so [mLSAME] = (0 x vIIR + prev x (8000h - vIIR)) >> 15; vIIR = -8000h flips prev's sign (-2 x prev) where the
+ * plain formula would give +2 x prev. */
+static void test_reverb_iir(void)
+{
+    static const struct { uint16_t viir; int16_t prev, want; } cases[] = {
+        {0x4000, 1000, 500},    /* half: (prev x 4000h) >> 15 */
+        {0x0000, 1000, 1000},   /* no input weight: prev kept */
+        {0x8000, 1000, -2000},  /* the quirk */
+        {0x8000, -32768, 0},    /* the quirk's overflow */
+        {0x8000, 20000, -32768},
+    };
+    for (size_t k = 0; k < sizeof cases / sizeof cases[0]; k++) {
+        ps1_spu *s = spu_new();
+        const uint32_t base = 0x7F000, msame = 0x800;
+        uint16_t z[0x1000 / 2] = {0};
+        z[(msame - 2) / 2] = (uint16_t)cases[k].prev;
+        ram_write(s, base, z, sizeof z);
+        for (int r = 0; r < 32; r++)
+            ps1_spu_write16(s, 0x1C0 + (uint32_t)r * 2, 0);
+        ps1_spu_write16(s, 0x1C0 + 2 * 2, cases[k].viir);           /* vIIR */
+        ps1_spu_write16(s, 0x1C0 + 10 * 2, (uint16_t)(msame >> 3)); /* mLSAME */
+        ps1_spu_write16(s, 0x1A2, (uint16_t)(base >> 3));
+        ps1_spu_write16(s, 0x1AA, 0xC080);
+        samples(s, 1); /* the first sample runs one 22 kHz reverb step at ESA */
+        uint16_t got;
+        ram_read(s, base + msame, &got, 2);
+        CHECK((int16_t)got == cases[k].want, "vIIR %04X prev %d: [mLSAME] %d, want %d", cases[k].viir, cases[k].prev,
+              (int16_t)got, cases[k].want);
+        ps1_spu_destroy(s);
+    }
+}
+
+/* The main volume scales the whole mix, the reverb output included: with it at 0, a ringing reverb is silent. */
+static void test_main_volume_mix(void)
+{
+    static const uint16_t room[32] = {
+        0x007D, 0x005B, 0x6D80, 0x54B8, 0xBED0, 0x0000, 0x0000, 0xBA80, 0x5800, 0x5300, 0x04D6, 0x0333, 0x03F0, 0x0227,
+        0x0374, 0x01EF, 0x0334, 0x01B5, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x01B4, 0x0136,
+        0x00B8, 0x005C, 0x8000, 0x8000,
+    };
+    double e[2] = {0, 0};
+    for (int pass = 0; pass < 2; pass++) {
+        ps1_spu *s = spu_new();
+        uint8_t blk[32] = {0};
+        memset(blk + 2, 0x77, 14);
+        blk[16 + 1] = 1; /* end + mute after two blocks */
+        ram_write(s, 0x1000, blk, sizeof blk);
+        for (int r = 0; r < 32; r++)
+            ps1_spu_write16(s, 0x1C0 + (uint32_t)r * 2, room[r]);
+        ps1_spu_write16(s, 0x1A2, (uint16_t)((0x80000 - 0x26C0) >> 3));
+        ps1_spu_write16(s, 0x184, 0x4000);
+        ps1_spu_write16(s, 0x186, 0x4000);
+        ps1_spu_write16(s, 0x198, 0x0001);
+        ps1_spu_write16(s, 0x1AA, 0xC080);
+        voice(s, 0, 0x1000, 0x1000, 0x000F, 0x7FDF);
+        key_on(s, 0);
+        samples(s, 2000); /* the voice ended long ago (end + mute): what is heard is the reverb */
+        ps1_spu_write16(s, 0x180, pass ? 0 : 0x3FFF);
+        ps1_spu_write16(s, 0x182, pass ? 0 : 0x3FFF);
+        static int16_t out[2 * 8192];
+        ps1_spu_audio_pull(s, out, 8192);
+        samples(s, 4000);
+        size_t n = ps1_spu_audio_pull(s, out, 8192);
+        for (size_t j = 1; j < n; j++) /* the first frame still had the old level */
+            e[pass] += (double)out[2 * j] * out[2 * j];
+        ps1_spu_destroy(s);
+    }
+    CHECK(e[0] > 1e5, "reverb not heard at full main volume: %.0f", e[0]);
+    CHECK(e[1] == 0, "reverb heard with the main volume at 0: %.0f", e[1]);
+}
+
 int main(void)
 {
     test_adpcm();
@@ -473,6 +588,9 @@ int main(void)
     test_sweep_noise_pmon();
     test_reverb();
     test_transfers_irq();
+    test_key_timing();
+    test_reverb_iir();
+    test_main_volume_mix();
     if (failures) {
         printf("%d failure(s)\n", failures);
         return 1;
