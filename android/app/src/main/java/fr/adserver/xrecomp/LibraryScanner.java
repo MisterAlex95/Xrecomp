@@ -761,7 +761,8 @@ final class LibraryScanner {
             public Console.Source source() {
                 // Positional reads: the descriptor's offset is left alone (a FileInputStream over a descriptor it
                 // did not open does not close it; p.close() does).
-                return Console.source(new FileInputStream(p.getFileDescriptor()).getChannel());
+                // fd:N: the CHD reader (native, Console.chdReader) reads the same descriptor through a dup.
+                return Console.source(new FileInputStream(p.getFileDescriptor()).getChannel(), "fd:" + p.getFd());
             }
 
             @Override

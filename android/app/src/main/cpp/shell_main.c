@@ -72,6 +72,7 @@
 #include "pack_loader.h"
 #include "gba_runtime.h"
 #include "ps1_runtime.h"
+#include "ps1_identify.h"
 
 #ifndef XBA_VERSION
 #define XBA_VERSION "dev"
@@ -273,6 +274,7 @@ int main(int argc, char *argv[])
     /* A game of another console (a GBA ROM, XBA-157) named by RECOMP_GAME_DIR, a path or "fd:N" from
      * ShellActivity: no Xbox disc image to mount from it (the mount would close that descriptor on its way out). */
     const char *gd = getenv("RECOMP_GAME_DIR");
+    ps1_identify_install();   /* a .chd PlayStation disc gets its title key through the PS1 disc reader (XBA-159) */
     if (gd && *gd && xba_pack_rom_console(gd) != RECOMP_CONSOLE_UNKNOWN)
         setenv("RECOMP_DISC_IMAGE", "0", 1);
     /* Start-up steps, shared with every title (recomp_app.h). */

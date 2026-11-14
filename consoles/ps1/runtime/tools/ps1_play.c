@@ -29,6 +29,7 @@
  * Exit 0, 1 when the game cannot run, 2 on a usage error. */
 #include "host_window.h"
 #include "ps1_runtime.h"
+#include "ps1_identify.h"
 #include "recomp_pack.h"
 
 #include <SDL.h>
@@ -95,6 +96,7 @@ int main(int argc, char **argv)
         return usage();
     if (!o.title_key) {
         int console = 0;
+        ps1_identify_install(); /* a .chd too */
         if (recomp_pack_rom_identify(o.game, &console, key, sizeof key) == 0 && console == RECOMP_CONSOLE_PS1)
             o.title_key = key;
     }

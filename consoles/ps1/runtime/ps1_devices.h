@@ -80,7 +80,8 @@ const uint16_t *ps1_gpu_vram(ps1_gpu *g);
 /* ---- Disc images ---------------------------------------------------------------------------------------------------- */
 typedef struct ps1_disc ps1_disc;
 
-/* Opens a .cue (with its .bin tracks), a single .bin (one data track), an .iso (2048-byte sectors) or a .chd. path may
+/* Opens a .cue (with its .bin tracks), a single .bin (one data track), an .iso (2048-byte sectors) or a .chd (told by
+ * its "MComprHD" magic whatever the name). path may
  * also be "fd:N" (an open descriptor the app passes; .cue tracks then need their own paths, so fd: is for single-file
  * images). Returns NULL and a message on failure. */
 ps1_disc *ps1_disc_open(const char *path, char *err, size_t errlen);

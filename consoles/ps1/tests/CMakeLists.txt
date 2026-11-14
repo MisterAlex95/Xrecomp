@@ -56,6 +56,18 @@ foreach(t disc cdrom spu mdec)
     add_test(NAME ps1_${t} COMMAND ps1_${t}_test)
     set_tests_properties(ps1_${t} PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120)
 endforeach()
+# The title key of a .chd disc (XBA-159): recomp_pack_rom_identify (src/platform, compiled in) with the PS1 disc reader as
+# its disc hook (ps1_identify), on CHDs the test writes (uncompressed, and cdzl with a huffman-coded map).
+get_filename_component(PS1_PLATFORM_SRC ${CMAKE_CURRENT_SOURCE_DIR}/../../../src/platform ABSOLUTE)
+add_executable(ps1_identify_test test_identify.c ${PS1_PLATFORM_SRC}/recomp_pack.c ${PS1_PLATFORM_SRC}/recomp_cfg.c)
+target_include_directories(ps1_identify_test PRIVATE ${PS1_PLATFORM_SRC})
+target_link_libraries(ps1_identify_test PRIVATE ps1_identify ${CMAKE_DL_LIBS})
+target_compile_options(ps1_identify_test PRIVATE -Wall -Wextra)
+if(XBR_PS1_CHD)
+    target_compile_definitions(ps1_identify_test PRIVATE XBR_PS1_CHD=1)
+endif()
+add_test(NAME ps1_identify COMMAND ps1_identify_test)
+set_tests_properties(ps1_identify PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60)
 # The core (P-4 / P-6 / P-9: XBA-162, XBA-164, XBA-167).
 foreach(t cpu gte)
     add_executable(ps1_${t}_test test_${t}.c)
