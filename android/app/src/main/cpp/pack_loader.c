@@ -236,12 +236,22 @@ int xba_pack_load_rom(const char *files_dir, const char *rom_path, int *runtime_
     default: break;
     }
     rc = recomp_pack_find_key(files_dir, console, key, xba_shell_abi, &m, lib, sizeof lib, why, sizeof why);
-    if (rc == RECOMP_PACK_MISSING && console == RECOMP_CONSOLE_GBA && start) {
-        /* The GBA runtime is an interpreter (XBA-157): no pack needed. */
-        printf("PACK_NONE %s %s (no pack needed, the interpreter runs it)\n", recomp_pack_console_name(console), key);
+    if (console == RECOMP_CONSOLE_GBA && start) {
+        /* The GBA runtime is an interpreter that a pack speeds up (XBA-157 / XBA-158): the game always starts. No
+         * pack: PACK_NONE. A pack this shell refuses (shell_abi, abi, title_key...): PACK_STALE, interpreted. A pack
+         * that passes: the runtime checks the rest (rom_sha256, lib_sha256, its table: gba_pack.h) and logs
+         * PACK_LOADED gba <KEY> (<N> functions) or PACK_STALE. The discovered addresses go to the Prepare's work
+         * folder of the game, <files>/work/gba-<KEY>/discovered.txt. */
+        char work[RECOMP_PACK_PATH_MAX + 8];
+        snprintf(work, sizeof work, "%s/work", files_dir ? files_dir : ".");
+        gba_runtime_set_work_dir(files_dir ? work : NULL);
+        if (rc == RECOMP_PACK_MISSING)
+            printf("PACK_NONE %s %s (not prepared, the interpreter runs it)\n", recomp_pack_console_name(console), key);
+        else if (rc != RECOMP_PACK_OK)
+            printf("PACK_STALE %s %s (%s), running interpreted\n", recomp_pack_console_name(console), key, why);
         fflush(stdout);
         why[0] = 0;
-        rc = start(rom_path, NULL, key);
+        rc = start(rom_path, rc == RECOMP_PACK_OK ? lib : NULL, key);
         if (runtime_rc)
             *runtime_rc = rc;
         rc = RECOMP_PACK_OK;

@@ -11,6 +11,7 @@
 #include "gba_runtime.h"
 
 #include "gba_core.h"
+#include "gba_pack.h"
 #include "host_audio.h"
 #include "host_pad.h"
 #include "host_window.h"
@@ -246,6 +247,7 @@ static gba_machine *s_m;
 static char s_save_path[1100];
 static uint8_t *s_saved;   /* the image as last read or written */
 static size_t s_saved_n;
+static char s_discovered[1200];   /* gba_runtime_opts.discovered_path of the run */
 
 /* Writes the save when it differs from what is on disk (or was there at start). Called with s_mu held. */
 static void save_flush_locked(const char *why)
@@ -281,6 +283,11 @@ static void on_exit_hook(const char *why)
 {
     (void)why;
     save_flush("exit");
+    /* The in-game menu's Quit ends the process here: the discovery loop's addresses too. */
+    pthread_mutex_lock(&s_mu);
+    if (s_m && s_discovered[0])
+        gba_pack_save_missed(s_m, s_discovered);
+    pthread_mutex_unlock(&s_mu);
 }
 
 /* The app paused (background, the in-game menu): the save goes to disk at once, from the thread that paused it. On
@@ -417,6 +424,12 @@ int gba_runtime_run(const gba_runtime_opts *o)
             bios_n = 0;
         }
     }
+    char rom_sha[65] = "";
+    if (o->pack_lib && *o->pack_lib) {
+        uint8_t sum[32];
+        gba_pack_sha256(rom, rom_n, sum);
+        gba_pack_hex(sum, rom_sha);
+    }
     gba_machine *m = gba_create(rom, rom_n, bios, bios_n);
     free(bios);
     free(rom);
@@ -426,12 +439,15 @@ int gba_runtime_run(const gba_runtime_opts *o)
     }
     printf("gba: %s, game %s (%zu KB), key %s, BIOS %s\n", gba_runtime_version(), base_name(o->rom), rom_n / 1024,
            key, bios_n ? bios_path : "built-in");
+    gba_pack pack;
+    gba_pack_load(m, o->pack_lib, key, rom_sha, &pack);   /* the interpreter whatever happens (logged) */
 
     pthread_mutex_lock(&s_mu);
     s_m = m;
     if (gba_runtime_save_path(o->save_dir, key, s_save_path, sizeof s_save_path) != 0)
         s_save_path[0] = 0;
     save_load(m);
+    snprintf(s_discovered, sizeof s_discovered, "%s", o->discovered_path ? o->discovered_path : "");
     pthread_mutex_unlock(&s_mu);
     recomp_exit_hook_set(on_exit_hook);
     static int listening;
@@ -578,13 +594,23 @@ int gba_runtime_run(const gba_runtime_opts *o)
     s_saved = NULL;
     s_saved_n = 0;
     pthread_mutex_unlock(&s_mu);
+    if (s_discovered[0])
+        gba_pack_save_missed(m, s_discovered);
+    s_discovered[0] = 0;
     gba_destroy(m);
+    gba_pack_close(&pack);
     return rc;
 }
 
 /* ---- The app shell's entry ------------------------------------------------------------------------------------ */
 
 static char s_start_save_dir[1024];
+static char s_start_work_dir[1024];
+
+void gba_runtime_set_work_dir(const char *dir)
+{
+    snprintf(s_start_work_dir, sizeof s_start_work_dir, "%s", dir ? dir : "");
+}
 
 void gba_runtime_set_save_dir(const char *dir)
 {
@@ -598,6 +624,12 @@ int gba_runtime_start(const char *rom, const char *pack_lib, const char *title_k
     o.rom = rom;
     o.title_key = title_key;
     o.save_dir = s_start_save_dir[0] ? s_start_save_dir : NULL;
+    o.pack_lib = pack_lib;
+    char discovered[1200];
+    if (s_start_work_dir[0] && title_key && *title_key) {
+        snprintf(discovered, sizeof discovered, "%s/gba-%s/discovered.txt", s_start_work_dir, title_key);
+        o.discovered_path = discovered;
+    }
     const char *frames = getenv("RECOMP_GBA_FRAMES");   /* a bounded run (checks) */
     if (frames && *frames)
         o.frames = strtoull(frames, NULL, 10);

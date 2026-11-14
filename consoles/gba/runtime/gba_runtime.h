@@ -44,6 +44,13 @@ typedef struct gba_runtime_opts {
     /* Window scaling: -1 = $RECOMP_GBA_SCALE ("integer" or "aspect", default aspect); else HOST_SCALE_*. Filter: -1
      * = $RECOMP_GBA_FILTER ("linear" or "nearest", default nearest); else HOST_FILTER_*. */
     int scale, filter;
+    /* A GBA title pack's library (XBA-157 / XBA-158, gba_pack.h): taken when its pack.json (beside it) says it is
+     * this ROM's, this shell's and this host's and its table loads, else the game runs interpreted (a log line says
+     * why). NULL or "": the interpreter alone. */
+    const char *pack_lib;
+    /* At exit, the ROM addresses the interpreter had to run (gba_recomp_missed) are merged into this file, which the
+     * next Prepare hands to the lifter (the discovery loop). NULL: not written. */
+    const char *discovered_path;
 } gba_runtime_opts;
 
 void gba_runtime_opts_init(gba_runtime_opts *o);
@@ -55,9 +62,14 @@ int gba_runtime_run(const gba_runtime_opts *o);
 /* Where gba_runtime_start keeps saves (the app shell's <internal files>/save); NULL: none. Copied. */
 void gba_runtime_set_save_dir(const char *dir);
 
+/* Where gba_runtime_start writes the discovered addresses: <dir>/gba-<KEY>/discovered.txt (the app shell's
+ * <internal files>/work: the Prepare's work folder of the game, which it reads them from); NULL: not written. */
+void gba_runtime_set_work_dir(const char *dir);
+
 /* The app shell's entry point (XBA-147, android/app/src/main/cpp/pack_loader.c): rom is the game file (a path or
- * "fd:N"), pack_lib a title pack's library (NULL or "" without a pack; ignored for now: the interpreter needs no
- * pack), title_key the game's key. Plays it with gba_runtime_run (saves in gba_runtime_set_save_dir's dir) and
+ * "fd:N"), pack_lib a title pack's library (NULL or "" without a pack: the interpreter alone; a pack that is not
+ * this ROM's or does not load is left out, and the game still runs), title_key the game's key. Plays it with
+ * gba_runtime_run (saves in gba_runtime_set_save_dir's dir, discovered addresses in gba_runtime_set_work_dir's) and
  * returns its result once the player quit. */
 int gba_runtime_start(const char *rom, const char *pack_lib, const char *title_key);
 

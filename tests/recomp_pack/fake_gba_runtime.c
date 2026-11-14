@@ -17,3 +17,9 @@ int gba_runtime_start(const char *rom, const char *pack_lib, const char *title_k
     fflush(stdout);
     return 0;
 }
+
+void gba_runtime_set_work_dir(const char *dir)
+{
+    printf("gba work dir %s\n", dir ? dir : "(none)");
+    fflush(stdout);
+}

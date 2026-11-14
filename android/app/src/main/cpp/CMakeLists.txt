@@ -41,7 +41,10 @@ foreach(_console gba ps1 n64)
     endif()
     target_link_libraries(main PRIVATE ${_console}_runtime)
 endforeach()
-set(XBA_CONSOLE_FAST_LIBS gba_core gba_runtime)   # the GBA interpreter: release flags below too
+# A GBA title pack (libtitle.so, XBA-157 / XBA-158) is linked --no-undefined against libmain.so and calls the core
+# (gba_core.h, gba_recomp_rt.h): the whole core goes in, so every symbol of it is exported.
+target_link_libraries(main PRIVATE -Wl,--whole-archive gba_core -Wl,--no-whole-archive)
+set(XBA_CONSOLE_FAST_LIBS gba_core gba_runtime gba_pack)   # the GBA interpreter: release flags below too
 
 # Release flags for the runtime (the software GPU, the kernel, audio): what a frame on the device spends its time in.
 # Every toolkit library pins -O2 in its own CMakeLists, after the NDK's per-configuration flags, so the NDK's -O3 for

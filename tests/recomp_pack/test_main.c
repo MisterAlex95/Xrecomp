@@ -635,9 +635,10 @@ static void test_routing(const char *shell_path, const char *title_path, const c
     }
 
     /* XBA-147: a game of another console goes to that console's runtime. A
-     * fake gba pack (any library bytes: the runtime does not load it yet)
-     * routes to gba_runtime_start (a stand-in here, fake_gba_runtime.c),
-     * which logs "gba runtime ready"; without a pack the GBA runs anyway. */
+     * gba pack the shell accepts is handed to gba_runtime_start (a stand-in
+     * here, fake_gba_runtime.c: the real one checks rom_sha256, lib_sha256
+     * and the table, consoles/gba/tests test_pack.c); without a pack, or with
+     * one the shell refuses, the GBA runs interpreted anyway (XBA-158). */
     {
         typedef int (*load_rom_fn)(const char *, const char *, int *, char *, size_t);
         load_rom_fn load_rom = (load_rom_fn)dlsym(shell, "xba_pack_load_rom");
@@ -677,6 +678,7 @@ static void test_routing(const char *shell_path, const char *title_path, const c
         CHECK(rc == RECOMP_PACK_OK && runtime_rc == 0 && reason[0] == 0);
         CHECK(strstr(log, "PACK_NONE gba XRCT-") != NULL);
         CHECK(strstr(log, "gba runtime ready") != NULL && strstr(log, "pack none") != NULL);
+        CHECK(strstr(log, "gba work dir ") != NULL && strstr(log, "/work\n") != NULL);
 
         snprintf(dir, sizeof dir, "%s/packs/gba-%s", files, key);
         mkdirs(dir);
@@ -704,18 +706,38 @@ static void test_routing(const char *shell_path, const char *title_path, const c
         fclose(cap);
         fputs(log, stdout);
         CHECK(rc == RECOMP_PACK_OK && runtime_rc == 0);
-        CHECK(strstr(log, "PACK_LOADED gba ") != NULL);
-        CHECK(strstr(log, "gba runtime ready") != NULL);
+        CHECK(strstr(log, "PACK_NONE") == NULL && strstr(log, "PACK_STALE") == NULL);
+        CHECK(strstr(log, "gba runtime ready") != NULL && strstr(log, so) != NULL);   /* the pack handed over */
         CHECK(strstr(log, key) != NULL);
 
-        /* The pack says another console: refused, no runtime runs. */
-        snprintf(text, sizeof text, "{\"format\":1,\"console\":\"n64\",\"title_key\":\"%s\",\"abi\":\"%s\","
-                 "\"shell_abi\":1,\"lib\":\"libtitle.so\",\"lib_size\":64}", key, recomp_pack_host_abi());
-        snprintf(out, sizeof out, "%s/pack.json", dir);
-        write_file(out, text, strlen(text));
-        runtime_rc = 5;
-        CHECK(load_rom(files, gba, &runtime_rc, reason, sizeof reason) == RECOMP_PACK_INVALID);
-        CHECK(strstr(reason, "console n64") != NULL && runtime_rc == -1);
+        /* A pack the shell refuses (another console, another shell ABI): PACK_STALE, the game runs interpreted. */
+        const char *bad[2] = { "\"console\":\"n64\",\"shell_abi\":1", "\"console\":\"gba\",\"shell_abi\":2" };
+        for (int i = 0; i < 2; i++) {
+            snprintf(text, sizeof text, "{\"format\":1,%s,\"title_key\":\"%s\",\"abi\":\"%s\","
+                     "\"lib\":\"libtitle.so\",\"lib_size\":64}", bad[i], key, recomp_pack_host_abi());
+            snprintf(out, sizeof out, "%s/pack.json", dir);
+            write_file(out, text, strlen(text));
+            runtime_rc = 5;
+            snprintf(out, sizeof out, "%s/gba/stdout-stale.txt", root);
+            fflush(stdout);
+            saved = dup(1);
+            cap = fopen(out, "w");
+            dup2(fileno(cap), 1);
+            rc = load_rom(files, gba, &runtime_rc, reason, sizeof reason);
+            fflush(stdout);
+            dup2(saved, 1);
+            close(saved);
+            fclose(cap);
+            cap = fopen(out, "r");
+            n = fread(log, 1, sizeof log - 1, cap);
+            log[n] = 0;
+            fclose(cap);
+            fputs(log, stdout);
+            CHECK(rc == RECOMP_PACK_OK && runtime_rc == 0);
+            CHECK(strstr(log, "PACK_STALE gba ") != NULL && strstr(log, "running interpreted") != NULL);
+            CHECK(strstr(log, i == 0 ? "console n64" : "shell_abi 2") != NULL);
+            CHECK(strstr(log, "pack none") != NULL);
+        }
 
         /* An Xbox game is not one: the Xbox loader's. */
         CHECK(load_rom(files, xbe, &runtime_rc, reason, sizeof reason) == RECOMP_PACK_INVALID);

@@ -21,6 +21,27 @@ if(NOT TARGET gba_core)
     set_target_properties(gba_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 endif()
 
+# gba_pack: a GBA title pack, the runtime's side (pack.json checks, dlopen of the table, the discovered addresses
+# written at exit; gba_pack.h, XBA-157 / XBA-158). No SDL: the tests link it alone.
+if(NOT TARGET gba_pack)
+    add_library(gba_pack STATIC gba_pack.c)
+    target_include_directories(gba_pack PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(gba_pack PUBLIC gba_core ${CMAKE_DL_LIBS})
+    target_compile_options(gba_pack PRIVATE -Wall -Wextra)
+    set_target_properties(gba_pack PROPERTIES POSITION_INDEPENDENT_CODE ON)
+endif()
+
+# A program that loads a GBA pack exports the whole core: the pack's lifted code calls into it and is linked without
+# it (its symbols resolve against the program at dlopen). gba_core_exported(<target>) does that for an executable.
+function(gba_core_exported target)
+    set_target_properties(${target} PROPERTIES ENABLE_EXPORTS ON)
+    if(APPLE)
+        target_link_options(${target} PRIVATE "LINKER:-force_load,$<TARGET_FILE:gba_core>")
+    else()
+        target_link_libraries(${target} PRIVATE -Wl,--whole-archive gba_core -Wl,--no-whole-archive)
+    endif()
+endfunction()
+
 # gba_runtime: the core + the host layer (gba_runtime_run plays a game: window, pads, audio, saves, pacing; XBA-157).
 # GBA_CORE_ONLY=ON skips it (a host without SDL2 can still build and test the
 # core).
@@ -32,7 +53,7 @@ if(NOT GBA_CORE_ONLY)
     if(NOT TARGET gba_runtime)
         add_library(gba_runtime STATIC gba_runtime.c)
         target_include_directories(gba_runtime PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-        target_link_libraries(gba_runtime PUBLIC gba_core xbr_host)
+        target_link_libraries(gba_runtime PUBLIC gba_core gba_pack xbr_host)
         target_compile_options(gba_runtime PRIVATE -Wall -Wextra)
     endif()
 endif()
@@ -41,6 +62,7 @@ endif()
 if(NOT ANDROID AND TARGET gba_runtime AND NOT TARGET gba_play)
     add_executable(gba_play tools/gba_play.c)
     target_link_libraries(gba_play PRIVATE gba_runtime)
+    gba_core_exported(gba_play)   # it loads packs (gba_runtime_opts.pack_lib)
     target_compile_options(gba_play PRIVATE -Wall -Wextra)
 endif()
 
