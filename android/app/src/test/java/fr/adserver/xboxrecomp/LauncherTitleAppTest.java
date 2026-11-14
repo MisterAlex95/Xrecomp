@@ -103,8 +103,14 @@ public class LauncherTitleAppTest {
                           root.getAbsolutePath());
     }
 
+    /** How the launcher is started (null: the app icon). */
+    private Intent launchIntent;
+
     private LauncherActivity launch() throws Exception {
-        LauncherActivity a = Robolectric.buildActivity(LauncherActivity.class).setup().get();
+        LauncherActivity a = (launchIntent == null ? Robolectric.buildActivity(LauncherActivity.class)
+                                                   : Robolectric.buildActivity(LauncherActivity.class,
+                                                                               new Intent(launchIntent)))
+                .setup().get();
         idle(300);
         Thread t = a.scannerForTest();
         if (t != null)
@@ -113,8 +119,13 @@ public class LauncherTitleAppTest {
         return a;
     }
 
-    /** The library game's Manage screen. */
+    /** The library game's Manage screen, the game prepared (a valid pack: what « Create an app » needs). */
     private LauncherActivity manage() throws Exception {
+        TestSupport.writePack(app.getFilesDir(), TID_HEX, 4096);
+        return manageUnprepared();
+    }
+
+    private LauncherActivity manageUnprepared() throws Exception {
         libraryGame();
         launch().finish();      // the first start scans the library
         LauncherActivity a = launch();
@@ -164,6 +175,21 @@ public class LauncherTitleAppTest {
         assertEquals(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, next.getAction());
         assertEquals("package:" + app.getPackageName(), next.getDataString());
         assertNull("nothing was built", a.workerForTest());
+    }
+
+    @Test
+    public void anUnpreparedGameIsToldToPrepareFirst() throws Exception {
+        shadowOf(app.getPackageManager()).setCanRequestPackageInstalls(true);
+        LauncherActivity a = manageUnprepared();
+        Widgets.MenuRow r = row(a, R.string.TITLE_APP_ADD);
+        assertNotNull("the row is there, saying why it cannot be used yet", r);
+        assertEquals(app.getString(R.string.TITLE_APP_ADD_UNPREPARED), r.description);
+        r.performClick();
+        idle(300);
+        assertEquals(app.getString(R.string.TITLE_APP_PREPARE_FIRST, NAME), a.noteForTest());
+        assertNull("nothing was built", a.workerForTest());
+        assertNull("no settings screen either", shadowOf(app).getNextStartedActivity());
+        assertTrue(app.getPackageManager().getPackageInstaller().getAllSessions().isEmpty());
     }
 
     @Test
@@ -244,6 +270,8 @@ public class LauncherTitleAppTest {
         assertEquals("abcdef" + "0".repeat(58), GameStore.expectedSha256(app));
         assertTrue(GameStore.hashMatches(app, "abcdef" + "0".repeat(58)));
         assertTrue(!GameStore.hashMatches(app, "0".repeat(64)));
+        // Its launcher is the « Launcher » app shortcut's (the icon goes into the game: LauncherGameAppTest).
+        launchIntent = new Intent(app, LauncherActivity.class).setAction(LauncherActivity.ACTION_SHOW_LAUNCHER);
         LauncherActivity a = manage();
         assertNull("no « Create an app » in a game's own app", row(a, R.string.TITLE_APP_ADD));
         assertNotNull(row(a, R.string.SHORTCUT_ADD));

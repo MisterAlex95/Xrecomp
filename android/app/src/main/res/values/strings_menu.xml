@@ -9,6 +9,8 @@
     <string name="MENU_SCREENSHOT">Screenshot</string>
     <string name="MENU_SHARE_LOG">Share log</string>
     <string name="MENU_LAUNCHER">Back to launcher</string>
+    <!-- A game's own app: no launcher, the game waits behind Android's home screen. -->
+    <string name="MENU_LEAVE">Back to the home screen</string>
     <string name="MENU_QUIT">Quit game</string>
     <string name="MENU_QUIT_CONFIRM">Press again to quit</string>
     <string name="MENU_QUIT_CONFIRM_SUB">Progress since the last save is lost</string>

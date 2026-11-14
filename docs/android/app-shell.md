@@ -153,7 +153,7 @@ One activity, a small state machine of screens (`LauncherActivity.Screen`) with 
 | Home | No top bar: the game's title image (or a monogram) in the [game theme](#game-theme)'s colours, its title (the XBE certificate's name, else the folder's name), **one line** — when it was played (« Yesterday · 12 h 40 min played », « Not played yet »), or its state when it is not ready (« Needs preparing · once, about 20–30 min », « Prepare failed · CODE », the Prepare's progress, « Queued (n) », « Game data missing » with the folder, …) — and **one row of buttons**: a solid **Play** (or **Prepare**, **Preparing…**, **See what failed**, **Choose a game**) and three quiet pills, **Settings**, **Controls**, **Manage**. Before the first play the note says where the in-game menu is. | A finished import (Play focused), every start when « Start in the game » is off, the « Launcher » shortcut, B from the screens above. |
 | Settings | Four tabs (General, Graphics, Audio, Advanced; L1 / R1) of [options](#settings) as « label  value » rows, left / right (or A) to change, the focused option's description on the right. About ends Advanced. | Home, Options. |
 | Controls | The player's **remapping** ([Controls and remapping](#controls-and-remapping)): one row per Xbox control (A B X Y, Black, White, the triggers; Back, Start, the stick presses; the D-pad; the two sticks), its value the player's button, changed like a setting; « Reset controls » (also Y). The description column says what the focused row does and draws the handheld with, next to each control, what the game gets from it. | Home. |
-| Manage | **Change game** (another folder or image, or the same one again to re-import; **Library** when the [game library](#game-library) is on); **Delete the imported copy** (only when the game is the app's own copy, `files/games/<TID>/` or the older `files/game/`; its size as the value; press A twice within 5 s; saves are kept); **Add to home screen** (a [shortcut for this game](#a-game-on-the-home-screen), only when the home screen takes pin requests); **Create an app** (the game's [own app](#a-games-own-app), made and installed on the device; its size as the description; not in a game's own app); the game's pack, Prepare files, caches and saves with their sizes, each deleted on its own ([Storage](#storage)). The technical facts (title ID, prepared date, pack size, folder, source, size, free space) are the first row's description. | Home. |
+| Manage | **Change game** (another folder or image, or the same one again to re-import; **Library** when the [game library](#game-library) is on); **Delete the imported copy** (only when the game is the app's own copy, `files/games/<TID>/` or the older `files/game/`; its size as the value; press A twice within 5 s; saves are kept); **Add to home screen** (a [shortcut for this game](#a-game-on-the-home-screen), only when the home screen takes pin requests); **Create an app** (the game's [own app](#a-games-own-app), made and installed on the device; its size as the description; **only for a prepared game** (a valid pack built from this disc): before that the row says « Prepare this game first » and pressing it only repeats that in the note, so the app it makes always takes the pack over and starts straight into the game; not in a game's own app); the game's pack, Prepare files, caches and saves with their sizes, each deleted on its own ([Storage](#storage)). The technical facts (title ID, prepared date, pack size, folder, source, size, free space) are the first row's description. | Home. |
 | About | Version (`-PxbaVersion`), build (`-PxbaVersionCode`), app id, the game check (the first digits of `-PxbaXbeSha256`, or none), a one-line licence summary, and that no game data is included. **X**: Licences. | The end of Settings › Advanced, Options on the library. |
 | Licences | XBA-100. Every licence text the APK carries, monospaced, one after the other: `LICENSE`, `NOTICE`, then `LICENSES/*.txt` (copied into the assets `licences/` at build time by `xbaLicencesAsset`). D-pad up / down scroll, L1 / R1 page, a finger scrolls too. | X on About. |
 
@@ -177,6 +177,7 @@ settings saved, errors).
 | The native side found no `default.xbe` (`NO_GAME_DATA`) | `shell_main.c` calls `ShellActivity.openGamePicker(dir)`; the launcher opens on Choose your game with `NO_GAME_DATA` and that folder in the note; B goes to Home. |
 | Long-press on the app icon, « Change game » | Choose your game, even with a game set up; B goes to Home. If the game is running, the note says it will close when another game is chosen; saves are in internal storage and stay. |
 | Long-press on the app icon, « Launcher » | Home, even with « Start in the game » on or the game running. |
+| A game's own app (Create an app), its icon | Straight into the game: see [Straight into the game](#straight-into-the-game) (no Home; « Start in the game » does not apply; no « Change game » shortcut). |
 | A game's home-screen shortcut, the game ready | That game becomes the selected one and starts (the rules of « Start in the game »: its files, no Prepare needed or running, a pack from this `default.xbe`, not a wrong game, no crash round to offer), whatever « Start in the game » says. Already running: back to it. Another game running: its Home, the note says that game will close, one press of Play goes on. |
 | A game's home-screen shortcut, the game not ready | That game's Home with its state (Needs preparing, Not imported, Game data missing, …), B to the library; its Prepare screen when one runs or failed. Nothing starts by itself (no Prepare, no import). |
 | A game's home-screen shortcut, the game no longer in the library | The library (or Home / Welcome without one), the note « The game of this shortcut is no longer in the library ». |
@@ -273,8 +274,9 @@ as its status receiver: `STATUS_PENDING_USER_ACTION` opens Android's dialog; the
 launcher (at once, or at its next resume): « … is installed », « The app was not installed (cancelled) », « An app …
 signed by another key is installed », « The app was not installed: <installer message> ».
 
-The game's app is XRecomp with one game: its own private storage, its own settings. At its first start it asks for
-the game like XRecomp's first start (folder or image) and refuses another disc. **It does not prepare the game
+The game's app is XRecomp with one game: its own private storage, its own settings, and **its icon goes straight
+into the game** ([Straight into the game](#straight-into-the-game)): at its first start it reads the game where XRecomp
+does (or asks for it once) and refuses another disc. **It does not prepare the game
 again** when XRecomp has (XBA-176, [prepare.md « Handing a pack to a game's own app »](prepare.md#handing-a-pack-to-a-games-own-app)):
 at its start, with no pack (or one from another toolkit than its own), it asks XRecomp (`…PARENT`) for its pack
 through a translucent activity of XRecomp started for a result. XRecomp answers only `fr.adserver.xboxrecomp.t<tid>`
@@ -282,8 +284,9 @@ for that very title, signed by the game apps' key (its own AndroidKeyStore certi
 and grants read access to the pack's files one URI each through its non-exported `PackProvider`
 (`<package>.packs`, which `TitleApk` moves to the game's app's package like `.logs`). The game's app checks the pack
 fits (format, title, ABI, shell ABI, its disc), copies it into `packs/<TID>.partial/` while checking `lib_size` and
-`lib_sha256`, and publishes it atomically. Home says « Copying the prepared game from XRecomp… 42 % », then Play.
-XRecomp missing, without a pack, refusing, or a pack that does not fit: the normal Prepare, with a note saying why.
+`lib_sha256`, and publishes it atomically, its progress on the app's one screen (« Copying the prepared game from
+XRecomp… 42 % »), then the game starts. XRecomp missing, without a pack, refusing, or a pack that does not fit: the
+Prepare, started by itself on that screen, saying why.
 The copy is the app's own: it keeps playing after XRecomp is uninstalled.
 
 logcat: `launcher: game app fr.adserver.xboxrecomp.t<tid> « <label> »: building from <apk> (<n> bytes)`, `…: <n>
@@ -298,10 +301,100 @@ copy is left in `app/build/title-app/title-app.apk`, for `aapt2 dump badging` (p
 The app carries the game's icon and, once prepared, code made from the player's own disc: it is for the player's own
 use and is never distributed.
 
+### Straight into the game
+
+A game's own app behaves like the game itself: **its icon goes straight into the game** (`ShellActivity`), whatever
+« Open the game directly » says. Its launcher runs with no Home, no library and no buttons of its own; what has to
+happen before the first play happens by itself on one game-branded screen (`LauncherActivity.Screen.DIRECT`): the
+title image (before the game's files are known, the app's own icon art, `xba_title_icon_art`) and the title (else the
+app's name), the game theme's colours and backdrop, **one status line**, a line under it when there is more to say,
+and a button only when the player has to act. B leaves the app. The launcher's Home stays reachable through the
+long-press shortcut **Launcher** (Settings, Controls, Manage, as before); « Change game » is not published (the app is
+locked to its disc). The normal XRecomp app is unchanged.
+
+| Case (a game's own app, its icon) | What happens |
+|---|---|
+| The game runs in the background | Back to it at once (as before). |
+| Its files and a playable pack are here (every start after the first) | `ShellActivity` starts at once: nothing shows. |
+| First start (no pack, no files) | DIRECT, « Getting the game ready… »: XRecomp is asked (pack handover). Its answer also says **where XRecomp reads the game from** (below). The pack is copied (« Copying the prepared game from XRecomp… 42 % »), the files are used in place, then the game starts by itself. |
+| XRecomp reads the game from a folder, or a disc image by path | With All files access: that path is used in place, `default.xbe` checked against the app's lock (`XBE_SHA256`), as a folder or image picked by hand would be. Without it: « Allow file access to play from your game files » and the path, one button **Allow all files access** (the system page); back from it: on with the game, or, refused, the game choice (copied into the app). Asked once per start. |
+| XRecomp only has its own imported copy (its private storage), or reaches the image only through a document grant | « Where is the game? », « XRecomp keeps its own copy of this game, which this app cannot read… », one button **Choose a game**: the usual game choice (folder or image), once. Once chosen, on into the game. |
+| Not the disc the app is locked to | « Wrong game », the `WRONG_GAME` text, **Choose a game**. |
+| The folder or image XRecomp named is gone | « Game data missing », where it was, **Choose a game**. |
+| XRecomp missing, without a pack, refusing, or the copy failing | The Prepare starts by itself on the same screen: its progress line (« Compile · 42 % · about 12 min left »), why it prepares and that the app may be left (the Prepare runs in its service; the next tap shows its progress); when it is done the game starts by itself. |
+| The Prepare failed | « Prepare failed · CODE », its message, **Prepare again** and **Share log**. Stopped from the notification: **Prepare**. |
+| The shell found no game data / refused the pack | « Game data missing » + **Choose the game again** / « The prepared game could not be loaded » (the pack is dropped) + **Prepare again**. |
+| The game ended by itself (dashboard, shutdown) | « The game ended », the kernel's reason, **Play**. |
+| In the game: in-game menu › **Back to the home screen** (« Back to launcher » in XRecomp) | The task goes behind Android's home screen, the game held as in the background; the icon brings it back. The companion panel's Launcher does the same. |
+| In the game: **Quit game** (or the panel's held Quit) | The app's task is removed (`finishAndRemoveTask`), then `recomp_quit(0)`: Android's home screen, never the launcher. |
+| Long-press › **Launcher** | Home, as in XRecomp (Settings, Controls, Manage). |
+
+**Where the game is.** XRecomp's `PackHandoverActivity` adds `HANDOVER_GAME_KIND` (`FOLDER`, `IMAGE`, `NOT_SHARED`) and
+`HANDOVER_GAME_PATH` to its answer, with the pack or with its `NO_PACK` refusal, **only after the caller check**
+([prepare.md « Handing a pack to a game's own app »](prepare.md#handing-a-pack-to-a-games-own-app)): from its library
+record (in place: the folder; image read in place by path: the image's path; a library game not imported: its file in
+the library folder; imported, or a path in XRecomp's own data or `Android/data` directories: `NOT_SHARED`, no path).
+The game's app keeps the last answer in its `handover` preferences and takes only an absolute path without `.` or
+`..`; it never trusts the path beyond reading it: the same checks as a hand-picked folder or image (`default.xbe`, its
+SHA-256 against the lock). It asks XRecomp when it has no pack (as before) and also, on the way into the game, when its
+files are not usable yet.
+
+logcat (`xboxrecomp`): `launcher: game app: ready, starting the game` / `…: the game is running, bringing it back` /
+`…: shown (getting the game ready)`, `pack handover: <parent> reads the game from FOLDER /storage/…`, `game app:
+reading the game where XRecomp does: …`, `game app: asking for All files access, to read …`, `game app: <error line>`,
+`game app: prepare over (…)`; in XRecomp `pack <TID> handed over to <pkg>, the game read from FOLDER /storage/…`; in the
+game `shell: game app: to the home screen (the game waits)`. Code: `LauncherActivity` (`startDirect`, `directStep`,
+`buildDirect`), `PackHandover.GameSource`, `GameMenu` (the row's label), `ShellActivity` (`openLauncher`, `quit`).
+Tests: `LauncherGameAppTest` (no screen when ready, the folder read in place, All files access asked then granted or
+refused, XRecomp's private copy, another disc, a folder gone, the game ending, the « Launcher » shortcut, XRecomp
+unchanged), `LauncherPackHandoverTest` (copy then the game; no pack, a refusal, a damaged copy: the Prepare then the
+game; a failed Prepare), `PackHandoverTest.theCheckedCallerIsToldWhereTheGameIs`, `GameMenuTest.aGameOwnAppLeavesToTheHomeScreen`;
+screenshots `build/screenshots/game-app-*.png`, `handover-*.png`.
+
+### Device check (straight into the game), for Alex
+
+`adb logcat -s xboxrecomp` throughout. XRecomp (a build with this change) with Fable in the library **read in place
+from a folder**, prepared and played once. Uninstall any earlier Fable app first
+(`adb uninstall fr.adserver.xboxrecomp.t4d5300d1`), then Fable › Manage › **Create an app** and install it.
+
+1. Tap the new Fable icon (fresh install). Expected: one screen with Fable's logo and title, « Getting the game
+   ready… », then « Copying the prepared game from XRecomp… n % » (a few seconds), possibly one screen « Allow file
+   access to play from your game files » with Fable's folder path: press **Allow all files access**, turn it on, Back.
+   Then **Fable starts by itself** — no Welcome, no Home, no game choice, no Play button. logcat: `reads the game from
+   FOLDER /storage/…`, `pack handover 4D5300D1: COPIED`, `game app: ready, starting the game`. Note how long it took.
+2. Home button, then tap the Fable icon: back into the running game (no restart).
+3. In the game: Back › **Quit game** twice: Android's home screen (not a launcher screen, not XRecomp). Tap the icon:
+   the game starts at once, no screen at all (`game app: ready, starting the game`).
+4. In the game: Back › the row now reads **Back to the home screen**: Android's home screen, the game waits; the icon
+   brings it back where it was.
+5. Long-press the Fable icon: only **Launcher** (no « Change game »). Launcher: Fable's Home with Settings, Controls,
+   Manage. Change a setting, Play: the game starts.
+6. **ISO source**: in XRecomp, make Fable read from its disc image (Manage › Change game › the .iso, read in place
+   with All files access). Uninstall the Fable app, Create an app again, install, tap: as step 1 (the image's path in
+   the access line if asked); logcat `reads the game from IMAGE /storage/…iso`; the game starts.
+7. **Imported copy**: in XRecomp, import Fable as a copy (Change game › folder › « Copy into the app », or an image
+   with `RECOMP_DISC_IMAGE=0`). Uninstall/Create/install the Fable app, tap: « Where is the game? » with « XRecomp
+   keeps its own copy of this game, which this app cannot read… » and **Choose a game**. Choose Fable's folder or
+   image once: the game starts by itself. Quit, tap again: the game at once.
+8. **Wrong disc**: uninstall the Fable app's data (`adb shell pm clear fr.adserver.xboxrecomp.t4d5300d1`), tap the
+   icon, refuse All files access if asked, then on « Where is the game? » choose **another game's** folder: the usual
+   choice screen says `WRONG_GAME`. (With XRecomp pointing at another region's Fable: the Fable app shows « Wrong game »
+   and **Choose a game**.) No crash, no blank screen.
+9. **Refused access**: `pm clear` the Fable app, tap, on the access screen press Allow but leave it off, Back: « Where
+   is the game? » saying a copy will be made, **Choose a game** works.
+10. **No pack in XRecomp**: delete Fable's pack in XRecomp (Manage) and `pm clear` the Fable app, tap: after the files
+    step, the Prepare's progress line on the same screen with « XRecomp has not prepared this game… »; leave the app
+    and come back: the progress again; when done, the game starts by itself.
+11. In French: the lines and buttons above in French (« Préparation du lancement… », « Où est le jeu ? », « Retour à
+    l'écran d'accueil »).
+12. XRecomp itself: its icon still opens Home (or the game with « Open the game directly »), its long press still has
+    « Change game » and « Launcher », its in-game menu still says « Back to launcher » and opens the launcher.
+
 ### Device check (game's own app), for Alex
 
 `adb logcat -s xboxrecomp` throughout; XRecomp (xrecomp-latest) with Fable in the library, prepared and played once.
 
+0. A game not prepared yet › Manage: the row **Create an app** says « Prepare this game first »; pressing it builds nothing, the note says to prepare first.
 1. Fable › Home › Manage: the row **Create an app**, its description with the size (about the APK's size). Press A.
    If « Install unknown apps » is off for XRecomp, Android's screen for it opens and the note says to come back:
    allow it, Back, press **Create an app** again.
@@ -310,16 +403,16 @@ use and is never distributed.
    « Fable » with Fable's logo: Install.
 3. Back on Manage, the note says « Fable is installed… ». In the app drawer: an app **Fable** with Fable's title
    image as its icon, whole (not cut by the mask), next to XRecomp's own icon, which has not changed. Screenshot.
-4. Open Fable (the new app): XRecomp's welcome / game choice; choose Fable's folder or image: it is accepted. Choose
-   another game's folder instead first: « WRONG_GAME » (the app is locked to Fable's disc). About shows the game
-   check with Fable's hash and the app id `fr.adserver.xboxrecomp.t4d5300d1`.
-5. Home of the new app: XRecomp's pack is copied in seconds (below), then Play: the game starts without a Prepare.
-   With « Open the game directly next time » on, tapping the icon goes straight into the game.
+4. Open Fable (the new app): it goes into the game ([Straight into the game](#straight-into-the-game) and its
+   device check). Long-press › Launcher › Settings › About shows the game check with Fable's hash and the app id
+   `fr.adserver.xboxrecomp.t4d5300d1`.
 
 ### Device check (pack handover, XBA-176), for Alex
 
 `adb logcat -s xboxrecomp` throughout; XRecomp (xrecomp-latest) with Fable prepared and played once; the Fable app not
-installed yet (uninstall it if it is: `adb uninstall fr.adserver.xboxrecomp.t4d5300d1`).
+installed yet (uninstall it if it is: `adb uninstall fr.adserver.xboxrecomp.t4d5300d1`). Since « Straight into the game »
+the icon shows the copy on the game's one screen and starts the game itself (no Home, no Play): steps 1–3 now read that
+way; Home's copy line is what the long-press « Launcher » shows.
 
 1. Fable › Manage › **Create an app**, install it (as above). Open the new Fable app and choose Fable's folder or
    image. Home shows « Copying the prepared game from XRecomp… » with the percentage going up and a dimmed « Copying… »
@@ -1540,7 +1633,7 @@ less the display cutout, so 720p and 1080p look the same.
 | Controls | The usual mapping, compact (plus Back and Select + Start: the menu); with a remapping in `recomp.cfg`, first « Your mapping » and each changed control (your button, the Xbox control). |
 | Screenshot | Closes the menu first, then saves the game's last frame as `<external files>/screenshots/<date>.bmp` (`xbox_FramebufferDumpBmp`, the companion panel's), and says « Saved … » at the top of the screen (and on the panel). |
 | Settings › Share log | This process's logcat to `files/logs/game.log`, then the share sheet (the companion panel's `LogProvider` path). The menu stays open. |
-| Back to launcher | **The game stays alive** (the runtime maps its guest memory once per process: starting it again means a new process), held: the drawer goes at once, the launcher comes up (`ACTION_SHOW_LAUNCHER`), and the menu's hold is let go only in `onStop`, after SDL's pause has put the background hold in place, so no frame runs in between. The launcher's Play brings this task back and the game goes on (`launcher: game running, bringing it back`). |
+| Back to launcher | **The game stays alive** (the runtime maps its guest memory once per process: starting it again means a new process), held: the drawer goes at once, the launcher comes up (`ACTION_SHOW_LAUNCHER`), and the menu's hold is let go only in `onStop`, after SDL's pause has put the background hold in place, so no frame runs in between. The launcher's Play brings this task back and the game goes on (`launcher: game running, bringing it back`). In a game's own app the row is **Back to the home screen**: the task goes behind Android's home screen (`moveTaskToBack`), held the same way; its icon brings it back. |
 | Quit game | The first press turns the row into « Press again to quit » (with « Progress since the last save is lost » under it, the only row that says more) for 4 s (moving away cancels it); the second press quits: `nativeQuit` lets the guest go, `sync()`s the saves, then `recomp_quit(0)` ([Quit](#quit)). |
 
 The header shows the game's title (the launcher's choice) and « Paused · h:mm played », the time since the game
@@ -1934,7 +2027,9 @@ off (the kernel reads `RECOMP_PB_EXEC` by presence, so the `=0` is removed from 
 **Quit game** in the [in-game menu](#in-game-menu) (pressed twice: the second press confirms) lets the guest go
 (`recomp_lifecycle_resume_for(RECOMP_HOLD_ALL)`), `sync()`s the saves the title wrote (plain files under
 `<internal files>/save`) and calls `recomp_quit(0)` (`menu_jni.c`); the companion panel's Quit (a hold) calls
-`recomp_quit(0)` too. Where nothing above SDL takes Back (not the app), Back twice in the title's window does the same.
+`recomp_quit(0)` too. In a game's own app both first remove the app's task (`finishAndRemoveTask`): the player lands on
+Android's home screen, not on a launcher. Where nothing above SDL takes Back (not the app), Back twice in the title's
+window does the same.
 `recomp_quit(0)` (`src/platform/recomp_quit.c`) runs the exit hook (the kernel's
 missing-file summary), `xboxrecomp: clean exit`, `fflush` of stdout and stderr, the log pump drained (at most
 500 ms), then `_exit(0)`. Not `exit()`: the guest's threads are still running, and atexit handlers and destructors must

@@ -48,7 +48,7 @@ import java.util.function.LongSupplier;
  *       it reaches the game.</li>
  *   <li>Items: Resume, Settings (performance overlay, game volume, bottom screen: all live; this game's language,
  *       widescreen and 480p: next start; Share log), Controls, Screenshot, Back to launcher (the game stays alive and held in the
- *       background), Quit game (a second press within {@link #QUIT_ARM_MS} confirms). The header shows the game's
+ *       background; « Back to the home screen » in a game's own app, which has no launcher to show), Quit game (a second press within {@link #QUIT_ARM_MS} confirms). The header shows the game's
  *       title and « Paused · 0:42 played ».</li>
  * </ul>
  *
@@ -781,7 +781,9 @@ final class GameMenu {
             row(Item.SETTINGS, s(R.string.MENU_SETTINGS));
             row(Item.CONTROLS, s(R.string.MENU_CONTROLS));
             row(Item.SCREENSHOT, s(R.string.MENU_SCREENSHOT));
-            row(Item.LAUNCHER, s(R.string.MENU_LAUNCHER));
+            // A game's own app has no launcher to go back to: the row leaves to Android's home screen (the game
+            // waits there as it would behind the launcher; the « Launcher » app shortcut still opens the settings).
+            row(Item.LAUNCHER, s(TitleApp.ownTitleId(activity) != null ? R.string.MENU_LEAVE : R.string.MENU_LAUNCHER));
             list.addView(new View(activity), new LinearLayout.LayoutParams(-1, Theme.S3));   // Quit stands apart
             row(Item.QUIT, s(R.string.MENU_QUIT));
             break;

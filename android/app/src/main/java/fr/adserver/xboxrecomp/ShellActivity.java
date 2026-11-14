@@ -345,6 +345,8 @@ public class ShellActivity extends SDLActivity {
         @Override
         public void quit() {
             overlayOff();
+            if (gameApp())   // a game's own app closes: Android's home screen, not its launcher
+                finishAndRemoveTask();
             try {
                 MenuNative.nativeQuit();
             } catch (UnsatisfiedLinkError e) {
@@ -353,10 +355,24 @@ public class ShellActivity extends SDLActivity {
         }
     }
 
-    /** The launcher on top; this task (the game) stays, and the launcher's Play brings it back. */
+    /**
+     * The launcher on top; this task (the game) stays, and the launcher's Play brings it back. A game's own app has
+     * no launcher to show (docs « Straight into the game »): its task goes behind Android's home screen instead, the
+     * game held as in the background, and its icon brings it back.
+     */
     private void openLauncher() {
+        if (gameApp()) {
+            Log.i(LauncherActivity.TAG, "shell: game app: to the home screen (the game waits)");
+            moveTaskToBack(true);
+            return;
+        }
         startActivity(new Intent(this, LauncherActivity.class)
                 .setAction(LauncherActivity.ACTION_SHOW_LAUNCHER).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+    }
+
+    /** This is a game's own app (Create an app: its one-game meta-data). */
+    private boolean gameApp() {
+        return TitleApp.ownTitleId(this) != null;
     }
 
     /**
@@ -444,6 +460,8 @@ public class ShellActivity extends SDLActivity {
             case CompanionPanel.QUIT:
                 Log.i(LauncherActivity.TAG, "shell: companion: quit (held)");
                 overlayOff();
+                if (gameApp())
+                    finishAndRemoveTask();
                 try {
                     CompanionNative.nativeQuit();
                 } catch (UnsatisfiedLinkError e) {

@@ -59,7 +59,9 @@ final class PackHandover {
     static final String EXTRA_TITLE_ID = "fr.adserver.xboxrecomp.extra.HANDOVER_TITLE_ID",
                         EXTRA_FILES = "fr.adserver.xboxrecomp.extra.HANDOVER_FILES",
                         EXTRA_SIZES = "fr.adserver.xboxrecomp.extra.HANDOVER_SIZES",
-                        EXTRA_REFUSAL = "fr.adserver.xboxrecomp.extra.HANDOVER_REFUSAL";
+                        EXTRA_REFUSAL = "fr.adserver.xboxrecomp.extra.HANDOVER_REFUSAL",
+                        EXTRA_GAME_KIND = "fr.adserver.xboxrecomp.extra.HANDOVER_GAME_KIND",
+                        EXTRA_GAME_PATH = "fr.adserver.xboxrecomp.extra.HANDOVER_GAME_PATH";
     /** Free space kept beyond the pack's size while copying. */
     static final long SPACE_MARGIN = 32L << 20;
     /** At most this many files in a pack (pack.json, the library, RECOMP_PACK_IMAGES_MAX = 8 images). */
@@ -124,6 +126,127 @@ final class PackHandover {
         return new Answer(Activity.RESULT_CANCELED, new Intent().putExtra(EXTRA_REFUSAL, r.name()), r);
     }
 
+    // ---- Where the game's files are (a game's own app starting straight into the game) ----------------------------
+
+    /**
+     * Where the parent reads the game from, told to a checked caller with its pack (or with its NO_PACK refusal), so
+     * that a game's own app reads the same files in place instead of asking the player to choose them again: FOLDER
+     * (a folder read in place: its path), IMAGE (a disc image read in place by path), or NOT_SHARED (the parent's own
+     * imported copy in its private storage, or an image it reaches only through a document grant: the game's app
+     * cannot read either, and asks the player once).
+     */
+    enum GameKind { FOLDER, IMAGE, NOT_SHARED }
+
+    /** A game source: its kind and, for FOLDER and IMAGE, an absolute path. */
+    static final class GameSource {
+        final GameKind kind;
+        final String path;
+
+        GameSource(GameKind kind, String path) {
+            this.kind = kind;
+            this.path = path == null ? "" : path;
+        }
+
+        @Override
+        public String toString() {
+            return kind + (path.isEmpty() ? "" : " " + path);
+        }
+    }
+
+    /**
+     * The parent's source of tid's files: its library record (games.json under filesDir), else the one-game
+     * preference (GameStore.chosenDir, when its default.xbe is tid's); null when it knows none. privateRoots: the
+     * parent's own storage, never handed out as a path (NOT_SHARED instead).
+     */
+    static GameSource gameSource(Context c, File filesDir, String tid, File... privateRoots) {
+        String id = Pack.normTitleId(tid);
+        if (id == null)
+            return null;
+        Library.Record r = Library.read(Library.gamesFile(filesDir)).get(id);
+        String dir, kind;
+        if (r != null) {
+            dir = r.dataDir;
+            kind = r.dataKind;
+            if (dir.isEmpty()) {   // a library game not imported: its file in the library folder, read as a path
+                File f = LibraryIndex.locFile(r.source);
+                return f == null ? null : source(f.isDirectory() ? GameKind.FOLDER : GameKind.IMAGE,
+                                                 f.getAbsolutePath(), privateRoots);
+            }
+        } else {
+            dir = c == null ? null : GameStore.chosenDir(c);
+            if (dir == null || !id.equals(Pack.xbeTitleId(GameStore.findXbe(new File(dir)))))
+                return null;
+            kind = DiscImages.isCompanion(dir) ? Library.KIND_IMAGE : "";
+        }
+        if (Library.KIND_IMPORTED.equals(kind))
+            return new GameSource(GameKind.NOT_SHARED, "");
+        if (Library.KIND_IMAGE.equals(kind)) {
+            DiscImages.Disc d = DiscImages.read(new File(dir));
+            if (d == null || !d.viaPath())
+                return new GameSource(GameKind.NOT_SHARED, "");
+            return source(GameKind.IMAGE, d.path, privateRoots);
+        }
+        return source(GameKind.FOLDER, dir, privateRoots);
+    }
+
+    private static GameSource source(GameKind kind, String path, File... privateRoots) {
+        if (!safePath(path))
+            return null;
+        for (File root : privateRoots) {
+            if (root != null && under(path, root.getAbsolutePath()))
+                return new GameSource(GameKind.NOT_SHARED, "");
+        }
+        return new GameSource(kind, path);
+    }
+
+    private static boolean under(String path, String root) {
+        return path.equals(root) || path.startsWith(root.endsWith("/") ? root : root + "/");
+    }
+
+    /** An absolute path without « . » or « .. » parts, of a sane length. */
+    static boolean safePath(String p) {
+        if (p == null || p.length() < 2 || p.length() > 4096 || !p.startsWith("/") || p.indexOf(0) >= 0)
+            return false;
+        for (String part : p.split("/")) {
+            if (part.equals(".") || part.equals(".."))
+                return false;
+        }
+        return true;
+    }
+
+    /** Puts the source on an answer's data (nothing for null). */
+    static void putSource(Intent data, GameSource s) {
+        if (s == null)
+            return;
+        data.putExtra(EXTRA_GAME_KIND, s.kind.name());
+        if (!s.path.isEmpty())
+            data.putExtra(EXTRA_GAME_PATH, s.path);
+    }
+
+    /** The clone's side: the source in the parent's answer, or null when there is none or it is malformed. */
+    static GameSource sourceOf(Intent data) {
+        String k = data == null ? null : data.getStringExtra(EXTRA_GAME_KIND);
+        if (k == null)
+            return null;
+        GameKind kind;
+        try {
+            kind = GameKind.valueOf(k);
+        } catch (IllegalArgumentException e) {
+            return null;
+        }
+        if (kind == GameKind.NOT_SHARED)
+            return new GameSource(kind, "");
+        String p = data.getStringExtra(EXTRA_GAME_PATH);
+        return safePath(p) ? new GameSource(kind, p) : null;
+    }
+
+    /** The parent's private storage: its data directory, Android/data/<package>, the pack provider's directory. */
+    static File[] privateRoots(Context c) {
+        File data = c.getFilesDir().getParentFile(), ext = GameStore.externalFilesDir(c);
+        File extPkg = ext == null ? null : ext.getParentFile();
+        return new File[] { data, extPkg != null ? extPkg : ext, PackProvider.filesDir(c) };
+    }
+
     /**
      * The parent's answer to request from caller: refused (EXTRA_REFUSAL), or RESULT_OK with the pack's file names
      * and sizes (pack.json first) and one content URI each in the ClipData, read access granted.
@@ -135,11 +258,15 @@ final class PackHandover {
             return refuse(r);
         String id = Pack.normTitleId(tid);
         File filesDir = PackProvider.filesDir(c);
-        if (Pack.check(filesDir, id) != Pack.Check.VALID)
-            return refuse(Refusal.NO_PACK);
-        List<String> names = servableNames(Pack.packDir(filesDir, id));
-        if (names == null)
-            return refuse(Refusal.NO_PACK);
+        // The caller is checked: it is told where the game's files are, with the pack or without it.
+        GameSource src = gameSource(c, filesDir, id, privateRoots(c));
+        List<String> names = Pack.check(filesDir, id) == Pack.Check.VALID ? servableNames(Pack.packDir(filesDir, id))
+                                                                          : null;
+        if (names == null) {
+            Answer a = refuse(Refusal.NO_PACK);
+            putSource(a.data, src);
+            return a;
+        }
         long[] sizes = new long[names.size()];
         ClipData clip = null;
         for (int i = 0; i < names.size(); i++) {
@@ -154,6 +281,7 @@ final class PackHandover {
                 .putExtra(EXTRA_FILES, names.toArray(new String[0])).putExtra(EXTRA_SIZES, sizes);
         data.setClipData(clip);
         data.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        putSource(data, src);
         return new Answer(Activity.RESULT_OK, data, null);
     }
 

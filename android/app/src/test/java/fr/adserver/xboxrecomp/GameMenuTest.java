@@ -428,6 +428,35 @@ public class GameMenuTest {
     }
 
     @Test
+    public void aGameOwnAppLeavesToTheHomeScreen() {
+        // A game's own app has no launcher to go back to: the row says where the player goes (ShellActivity's host
+        // sends the task behind the home screen, the game held).
+        android.content.pm.PackageInfo pi = shadowOf(activity.getPackageManager())
+                .getInternalMutablePackageInfo(activity.getPackageName());
+        android.os.Bundle meta = new android.os.Bundle();
+        meta.putString(TitleApk.META_TITLE_ID, "4D530004");
+        pi.applicationInfo.metaData = meta;
+        TitleApp.resetMeta();
+        try {
+            menu.release();
+            build();
+            menu.open("Back");
+            Widgets.MenuRow r = menu.row(GameMenu.Item.LAUNCHER);
+            assertEquals(activity.getString(R.string.MENU_LEAVE), r.title);
+            r.performClick();
+            assertEquals(1, host.launchers);
+            assertFalse(menu.isOpen());
+        } finally {
+            pi.applicationInfo.metaData = null;
+            TitleApp.resetMeta();
+        }
+        menu.release();
+        build();
+        menu.open("Back");
+        assertEquals(activity.getString(R.string.MENU_LAUNCHER), menu.row(GameMenu.Item.LAUNCHER).title);
+    }
+
+    @Test
     public void quitNeedsASecondPress() {
         menu.open("Back");
         Widgets.MenuRow q = menu.row(GameMenu.Item.QUIT);
