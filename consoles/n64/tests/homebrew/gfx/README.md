@@ -1,6 +1,6 @@
 # n64/gfx
 
-One deterministic 320x240 RGBA16 frame drawn by the RDP through rdpq (VI filters disabled), cleared to black:
+One deterministic 320x240 RGBA16 frame drawn by the RDP through rdpq, cleared to black (VI `FILTERS_RESAMPLE`: libdragon refuses `FILTERS_DISABLED` at 320 wide; the filter only touches the VI output, not the frame buffer the checks read):
 
 | Draw | Mode | Where |
 |---|---|---|
