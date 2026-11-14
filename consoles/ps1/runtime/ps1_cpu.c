@@ -10,6 +10,7 @@
  * Timing: a fixed cost per instruction by fetch region (no instruction cache model) plus a cost per data access by
  * target (no data cache on the R3000A: main RAM loads stall). Tuned so the BIOS and homebrew run at roughly the
  * console's pace; the timers and video are cycle-driven from the same clock. */
+#include "ps1_hle.h"
 #include "ps1_internal.h"
 
 #include <string.h>
@@ -139,6 +140,8 @@ static void hook(ps1_machine *m)
     uint32_t pc = m->pc & 0x1FFFFFFFu;
     uint32_t fn = m->r[9];
     m->hook_at = 0;
+    if (m->hle) /* the HLE BIOS's tables do the console output, and there is no shell */
+        return;
     if (pc == 0xA0) {
         if (fn == 0x3C)
             tty_putc(m, m->r[4]);
@@ -661,6 +664,16 @@ static inline void step(ps1_machine *m)
         break;
     }
     default:
+        if (m->hle && (ins & PS1_HLE_TRAP_MASK) == PS1_HLE_TRAP && p < 0x10000u) {
+            /* the HLE BIOS's trap word, from kernel RAM (ps1_hle.h): the call runs as one instruction */
+            if (m->pend_reg)
+                m->r[m->pend_reg] = m->pend_val;
+            m->pend_reg = 0;
+            m->r[0] = 0;
+            ps1_hle_trap(m, ins & 0xFFFFu);
+            m->r[0] = 0;
+            return;
+        }
         ps1_cpu_exception(m, EXC_RI, 0);
         return;
     }

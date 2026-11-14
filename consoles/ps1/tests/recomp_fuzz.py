@@ -242,7 +242,7 @@ def main(argv=None):
     ap.add_argument("--frames", type=int, default=40)  # the BIOS takes ~16 frames before the EXE starts
     ap.add_argument("--insns", type=int, default=400)
     args = ap.parse_args(argv)
-    if not os.path.exists(args.bios):
+    if args.bios != "hle" and not os.path.exists(args.bios):
         print("skipped: BIOS %s not built" % args.bios)
         return 77
     if not shutil.which(os.environ.get("CC", "cc")):

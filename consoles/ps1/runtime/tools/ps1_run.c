@@ -3,8 +3,9 @@
  *   ps1_run [--bios PATH] [--exe X.exe | --disc X.cue] [--frames N] [--result] [--ppm OUT.ppm] [--wav OUT.wav]
  *           [--tty] [--until-tty TEXT] [--pad MASK] [--hash] [--quiet]
  *
- * --bios PATH   a 512 KB BIOS image; default $RECOMP_PS1_BIOS, else build/ps1-bios/openbios.bin (OpenBIOS:
- *               tools/consoles/build_ps1_bios.sh). Never a Sony BIOS dump in the repository.
+ * --bios PATH   a 512 KB BIOS image, or "hle": the HLE BIOS (no image, ps1_hle.c); default $RECOMP_PS1_BIOS, else
+ *               build/ps1-bios/openbios.bin (OpenBIOS: tools/consoles/build_ps1_bios.sh) when it is there, else HLE.
+ *               Never a Sony BIOS dump in the repository.
  * --exe X.exe   a PS-X EXE, fast-booted where the BIOS would enter its shell (a bare FILE argument ending in .exe
  *               means the same; any other bare FILE is a disc)
  * --disc X.cue  a disc image (.cue / .bin / .iso / .chd, needs ps1_disc.c and ps1_cdrom.c); with --exe too, the EXE
@@ -169,13 +170,14 @@ int main(int argc, char **argv)
     tty_state tty = {0};
     uint16_t pad = 0;
 
-    if (!bios_path || !*bios_path)
+    bool bios_default = !bios_path || !*bios_path;
+    if (bios_default)
         bios_path = "build/ps1-bios/openbios.bin";
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
         bool more = i + 1 < argc;
         if (!strcmp(a, "--bios") && more)
-            bios_path = argv[++i];
+            bios_path = argv[++i], bios_default = false;
         else if (!strcmp(a, "--exe") && more)
             exe_path = argv[++i];
         else if (!strcmp(a, "--disc") && more)
@@ -232,10 +234,16 @@ int main(int argc, char **argv)
         return usage();
 
     size_t bios_size = 0, exe_size = 0;
-    uint8_t *bios = load_file(bios_path, &bios_size), *exe = NULL;
-    if (!bios) {
-        fprintf(stderr, "ps1_run: cannot read the BIOS %s (build OpenBIOS: tools/consoles/build_ps1_bios.sh)\n",
-                bios_path);
+    bool hle = !strcmp(bios_path, "hle");
+    uint8_t *bios = hle ? NULL : load_file(bios_path, &bios_size), *exe = NULL;
+    if (!bios && !hle && bios_default) {
+        hle = true; /* no image built: the HLE BIOS */
+        if (!quiet)
+            fprintf(stderr, "ps1_run: no BIOS image at %s, running the HLE BIOS\n", bios_path);
+    }
+    if (!bios && !hle) {
+        fprintf(stderr, "ps1_run: cannot read the BIOS %s (build OpenBIOS: tools/consoles/build_ps1_bios.sh, or "
+                        "--bios hle)\n", bios_path);
         return 3;
     }
     if (exe_path && !(exe = load_file(exe_path, &exe_size))) {

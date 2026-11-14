@@ -21,6 +21,10 @@ endif()
 #                      ps1_run --card: created on a blank card, found again, an unformatted card formatted; the card
 #                      image checked (check_mcard.py: checksums, directory entry, data)
 #   ps1_jcz_<test>     JaCzekanski/ps1-tests (cpu, gte, dma, timers, pad; spu with ps1_spu.c), console text checked
+#   ps1_hle            the HLE BIOS (test_hle.c): a check for every implemented A / B / C call, the exception path,
+#                      the kernel layout, a synthetic disc booted through SYSTEM.CNF, the memory card file system
+#   ps1_hle_*          the programs above under the HLE BIOS (no image): PASS, the same result block as under
+#                      OpenBIOS (ps1_hle_same_*), disc boots, mcard, ps1-tests, recompiled in lockstep (ps1_hle_rc_*)
 #   ps1_rc_*           the same programs recompiled (ps1_tools.recomp + cc, discovery loop), in lockstep with the
 #                      interpreter; ps1_rc_fuzz: random MIPS programs under timer IRQs (needs python3, cc)
 # The EXE / BIOS tests skip (exit 77) when their inputs are absent, so a CI job without Docker or network stays green.
@@ -77,7 +81,7 @@ endif()
 add_test(NAME ps1_identify COMMAND ps1_identify_test)
 set_tests_properties(ps1_identify PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60)
 # The core (P-4 / P-6 / P-9: XBA-162, XBA-164, XBA-167); test_pad.c: the DualShock config commands (XBA-167).
-foreach(t cpu gte pad)
+foreach(t cpu gte pad hle)
     add_executable(ps1_${t}_test test_${t}.c)
     target_link_libraries(ps1_${t}_test PRIVATE ps1_core)
     target_compile_options(ps1_${t}_test PRIVATE -Wall -Wextra)
@@ -194,6 +198,66 @@ if(TARGET ps1_run)
     endif()
     set_tests_properties(${jcz} PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
 
+    # The HLE BIOS (P-5 HLE, XBA-163): the same programs with no BIOS image (ps1_run --bios hle). ps1_hle_hb_<prog>:
+    # PASS; ps1_hle_same_<prog>: the same result block as under OpenBIOS (checksums, every table entry);
+    # ps1_hle_hb_disc_<prog>: booted from the disc by the HLE BIOS (SYSTEM.CNF read from ISO 9660); ps1_hle_mcard: the
+    # memory card save through the HLE card file system; ps1_hle_jcz_<test>: the ps1-tests above.
+    set(PS1_RUN_HLE sh ${CMAKE_CURRENT_SOURCE_DIR}/run_exe.sh $<TARGET_FILE:ps1_run> hle)
+    set(PS1_SAME sh ${CMAKE_CURRENT_SOURCE_DIR}/compare_bios.sh $<TARGET_FILE:ps1_run> ${PS1_BIOS})
+    set(hle)
+    foreach(prog ${hb})
+        add_test(NAME ps1_hle_hb_${prog} COMMAND ${PS1_RUN_HLE} ${PS1_HOMEBREW_DIR}/${prog}.exe --result --frames 900
+                 --quiet)
+        add_test(NAME ps1_hle_same_${prog} COMMAND ${PS1_SAME} ${PS1_HOMEBREW_DIR}/${prog}.exe --frames 900)
+        list(APPEND hle ps1_hle_hb_${prog} ps1_hle_same_${prog})
+    endforeach()
+    if(Python3_Interpreter_FOUND)
+        add_test(NAME ps1_hle_mcard COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/mcard_test.sh $<TARGET_FILE:ps1_run> hle
+                 ${PS1_HOMEBREW_DIR}/mcard.exe ${CMAKE_CURRENT_BINARY_DIR}/hle_mcard)
+        list(APPEND hle ps1_hle_mcard)
+    endif()
+    if(PS1_HAVE_CD)
+        add_test(NAME ps1_hle_hb_overlay COMMAND ${PS1_RUN_HLE} ${PS1_HOMEBREW_DIR}/overlay.exe
+                 --disc ${PS1_HOMEBREW_DIR}/overlay.cue --result --frames 1800 --quiet)
+        list(APPEND hle ps1_hle_hb_overlay)
+        foreach(prog ${hb} overlay)
+            add_test(NAME ps1_hle_hb_disc_${prog} COMMAND ${PS1_RUN_HLE} ${PS1_HOMEBREW_DIR}/${prog}.cue --result
+                     --frames 1800 --quiet)
+            list(APPEND hle ps1_hle_hb_disc_${prog})
+        endforeach()
+    endif()
+    set(PS1_JCZ_HLE sh ${CMAKE_CURRENT_SOURCE_DIR}/run_jcz.sh $<TARGET_FILE:ps1_run> hle)
+    add_test(NAME ps1_hle_jcz_cpu_cop COMMAND ${PS1_JCZ_HLE} ${PS1_TESTS_DIR}/cpu/cop/cop.exe
+             "testDisabledCoprocessorThrows")
+    add_test(NAME ps1_hle_jcz_cpu_code_in_io COMMAND ${PS1_JCZ_HLE} ${PS1_TESTS_DIR}/cpu/code-in-io/code-in-io.exe
+             "pass - testCodeInDMAControl")
+    add_test(NAME ps1_hle_jcz_gte_test_all COMMAND ${PS1_JCZ_HLE} ${PS1_TESTS_DIR}/gte/test-all/test-all.exe
+             "Passed tests: 1150" "Failed tests: 0")
+    add_test(NAME ps1_hle_jcz_dma_otc COMMAND ${PS1_JCZ_HLE} ${PS1_TESTS_DIR}/dma/otc-test/otc-test.exe
+             "pass - testOtcStandardWithMasterDisabled")
+    add_test(NAME ps1_hle_jcz_dma_dpcr COMMAND ${PS1_JCZ_HLE} ${PS1_TESTS_DIR}/dma/dpcr/dpcr.exe
+             "pass - testSPUDMARead")
+    add_test(NAME ps1_hle_jcz_timers COMMAND ${PS1_JCZ_HLE} ${PS1_TESTS_DIR}/timers/timers.exe
+             "Reached target:                      1 (ok)" "Counter reset AFTER reaching target: 1 (ok)")
+    list(APPEND hle ps1_hle_jcz_cpu_cop ps1_hle_jcz_cpu_code_in_io ps1_hle_jcz_gte_test_all ps1_hle_jcz_dma_otc
+         ps1_hle_jcz_dma_dpcr ps1_hle_jcz_timers)
+    if(EXISTS ${PS1_RT}/ps1_spu.c)
+        add_test(NAME ps1_hle_jcz_spu_memory_transfer COMMAND ${PS1_JCZ_HLE}
+                 ${PS1_TESTS_DIR}/spu/memory-transfer/memory-transfer.exe "pass - testDMAReadTiming"
+                 "pass - testDMAReadToRamSyncMode0")
+        list(APPEND hle ps1_hle_jcz_spu_memory_transfer)
+    endif()
+    if(PS1_HAVE_CD)
+        foreach(t getloc timing disc-swap)
+            string(REPLACE "-" "_" n ${t})
+            add_test(NAME ps1_hle_jcz_cdrom_${n} COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/run_jcz_cd.sh
+                     $<TARGET_FILE:ps1_run> hle ${PS1_TESTS_DIR}/cdrom/${t}/${t}.exe
+                     ${CMAKE_CURRENT_BINARY_DIR}/hle_jcz_cdrom_${n} ${t})
+            list(APPEND hle ps1_hle_jcz_cdrom_${n})
+        endforeach()
+    endif()
+    set_tests_properties(${hle} PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
+
     # Static recompilation (P-2 XBA-160, P-3 XBA-161, P-4 XBA-162): each program above lifted to C (ps1_tools.recomp),
     # built with the host cc at -O1, the discovery loop run to convergence (overlay: the overlays read from the disc
     # are recorded, bytes included, and lifted on the next round; both share 0x80100000), then run in lockstep with
@@ -228,5 +292,21 @@ if(TARGET ps1_run)
                     --bios ${PS1_BIOS} --work ${PS1_RC_WORK}/fuzz --seeds 0-5 --frames 40)
         list(APPEND rc ps1_rc_fuzz)
     endif()
+    # ... and under the HLE BIOS: lifted code reaches the BIOS through the same 0xA0 / 0xB0 / 0xC0 vectors (kernel RAM
+    # stays interpreted), in lockstep with the interpreter.
+    foreach(prog ${hb})
+        add_test(NAME ps1_hle_rc_hb_${prog} COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/recomp_exe.sh $<TARGET_FILE:ps1_run>
+                 hle ${PS1_HOMEBREW_DIR}/${prog}.exe ${PS1_RC_WORK}/hle_hb_${prog} 900 --result --quiet)
+        list(APPEND rc ps1_hle_rc_hb_${prog})
+    endforeach()
+    if(PS1_HAVE_CD)
+        add_test(NAME ps1_hle_rc_hb_disc_overlay COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/recomp_exe.sh
+                 $<TARGET_FILE:ps1_run> hle ${PS1_HOMEBREW_DIR}/overlay.cue ${PS1_RC_WORK}/hle_hb_disc_overlay 3000
+                 --result --quiet)
+        list(APPEND rc ps1_hle_rc_hb_disc_overlay)
+    endif()
+    add_test(NAME ps1_hle_rc_jcz_timers COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/recomp_exe.sh $<TARGET_FILE:ps1_run> hle
+             ${PS1_TESTS_DIR}/timers/timers.exe ${PS1_RC_WORK}/hle_jcz_timers 12000 --tty --until-tty "Done." --quiet)
+    list(APPEND rc ps1_hle_rc_jcz_timers)
     set_tests_properties(${rc} PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900)
 endif()

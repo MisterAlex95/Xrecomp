@@ -852,10 +852,35 @@ public class ShellActivity extends SDLActivity {
     public void titleExited(String why) {
         String w = why == null ? "" : why;
         Log.i(LauncherActivity.TAG, "shell: the game exited by itself (" + w + "), back to the launcher");
+        openLauncherAndFinish(titleExitedIntent(this, w));
+    }
+
+    /**
+     * Called by shell_main.c (the guest thread, through JNI) when the title launched another image of its disc that
+     * the pack names but has not prepared yet (XBA-82, lazy; the native side wrote work/TID/image.pending and the
+     * kernel the launch data). The launcher opens offering « Prepare IMAGE » (LauncherActivity.EXTRA_PREPARE_IMAGE)
+     * and this activity finishes; as titleExited, the native side then ends this process.
+     */
+    @SuppressWarnings("unused")
+    public void prepareImage(String image) {
+        String img = image == null ? "" : image;
+        Log.i(LauncherActivity.TAG, "shell: the game launches " + img + ", not prepared yet, back to the launcher");
+        openLauncherAndFinish(prepareImageIntent(this, img));
+    }
+
+    /** The launcher, on Home offering to prepare image (a disc path, as pack.json names it). */
+    static Intent prepareImageIntent(Context c, String image) {
+        return new Intent(c, LauncherActivity.class)
+                .putExtra(LauncherActivity.EXTRA_PREPARE_IMAGE, image == null ? "" : image)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK);
+    }
+
+    /** Starts the launcher with i and finishes; returns once asked (at most TITLE_EXIT_HANDOFF_MS). */
+    private void openLauncherAndFinish(Intent i) {
         CountDownLatch asked = new CountDownLatch(1);
         Runnable open = () -> {
             try {
-                startActivity(titleExitedIntent(this, w));
+                startActivity(i);
                 finish();
                 overridePendingTransition(0, 0);
             } finally {

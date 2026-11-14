@@ -12,7 +12,7 @@ exe=$3
 work=$4
 shift 4
 here=$(cd "$(dirname "$0")" && pwd)
-[ -f "$bios" ] || { echo "skipped: BIOS $bios not built (tools/consoles/build_ps1_bios.sh)"; exit 77; }
+[ "$bios" = hle ] || [ -f "$bios" ] || { echo "skipped: BIOS $bios not built (tools/consoles/build_ps1_bios.sh)"; exit 77; }
 [ -f "$exe" ] || { echo "skipped: $exe not built"; exit 77; }
 command -v python3 >/dev/null 2>&1 || { echo "skipped: no python3"; exit 77; }
 rm -rf "$work"

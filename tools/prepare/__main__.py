@@ -553,6 +553,11 @@ def main(argv=None):
     an.add_argument("--include-dir", action="append", default=[], metavar="DIR", help="an extra -I")
     an.add_argument("--device-log", metavar="FILE",
                     help="the app's device log (JSON lines: thermal status, compiles allowed now; XBA-128)")
+    an.add_argument("--all-images", action="store_true",
+                    help="build every other image default.xbe names now (default: only those asked with --image, "
+                         "in <work>/images.want or already in the pack; the others are built on their first launch)")
+    an.add_argument("--image", action="append", default=[], metavar="PATH",
+                    help="also build this other image of the disc (its disc path, e.g. game.xbe)")
     mi = ap.add_argument_group("the disc's other images (XBA-82; set by the top-level prepare)")
     mi.add_argument("--image-map", help=argparse.SUPPRESS)   # the map file every image's build bakes in
     mi.add_argument("--game-dir", help=argparse.SUPPRESS)    # D:\ for an image that is not the disc root's

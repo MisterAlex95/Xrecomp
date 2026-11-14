@@ -176,10 +176,10 @@ static void test_images(void)
     recomp_pack_meta m;
     char err[160], dir[1024], lib[1200], out[1200], key[256];
     const char *j = "{\"format\":1,\"lib\":\"libtitle.so\",\"images\":{\"Sub/Game.xbe\":\"libimage-1.so\","
-                    "\"bad.xbe\":\"../x.so\",\"gone.xbe\":\"libimage-3.so\"}}";
+                    "\"bad.xbe\":\"../x.so\",\"gone.xbe\":\"libimage-3.so\",\"lazy.xbe\":\"\"}}";
 
     CHECK(recomp_pack_parse(j, strlen(j), &m, err, sizeof err) == 0);
-    CHECK(m.images_n == 3 && m.images_dropped == 0);
+    CHECK(m.images_n == 4 && m.images_dropped == 0);
     CHECK(!strcmp(m.images[0].path, "Sub/Game.xbe") && !strcmp(m.images[0].lib, "libimage-1.so"));
     snprintf(dir, sizeof dir, "%s/images", root);
     mkdirs(dir);
@@ -198,6 +198,10 @@ static void test_images(void)
           && strstr(err, "missing"));
     CHECK(recomp_pack_image_lib(&m, dir, lib, "other.xbe", out, sizeof out, NULL, 0, err, sizeof err) == -1
           && strstr(err, "not in the pack"));
+    /* Named, not prepared yet (lazy): its own result, the key as pack.json spells it. */
+    CHECK(recomp_pack_image_lib(&m, dir, lib, "\\LAZY.xbe", out, sizeof out, key, sizeof key, err, sizeof err)
+              == RECOMP_PACK_IMAGE_LAZY
+          && !strcmp(key, "lazy.xbe") && strstr(err, "not prepared yet"));
     CHECK(recomp_pack_parse("{\"images\":[]}", 13, &m, err, sizeof err) == -1 && strstr(err, "images"));
 }
 
@@ -623,7 +627,8 @@ static void test_routing(const char *shell_path, const char *title_path, const c
         fclose(f);
         snprintf(text, sizeof text,
                  "{\"format\":1,\"title_id\":\"4D530005\",\"abi\":\"%s\",\"shell_abi\":1,\"lib\":\"libtitle.so\","
-                 "\"lib_size\":%ld,\"images\":{\"Game2.xbe\":\"libimage-1.so\"}}", recomp_pack_host_abi(), n);
+                 "\"lib_size\":%ld,\"images\":{\"Game2.xbe\":\"libimage-1.so\",\"Intro.xbe\":\"\"}}",
+                 recomp_pack_host_abi(), n);
         snprintf(path, sizeof path, "%s/pack.json", dir);
         write_file(path, text, strlen(text));
         snprintf(dir, sizeof dir, "%s/work/4D530005", files);
@@ -648,10 +653,28 @@ static void test_routing(const char *shell_path, const char *title_path, const c
                 n = (long)fread(text, 1, sizeof text - 1, f);
                 text[n] = 0;
                 fclose(f);
-                CHECK(!strcmp(text, "default.xbe\tdefault.xbe\nGame2.xbe\tGame2.xbe\n"));
+                CHECK(!strcmp(text, "default.xbe\tdefault.xbe\nGame2.xbe\tGame2.xbe\nIntro.xbe\tIntro.xbe\n"));
             }
         }
         CHECK(set_next && set_next("default.xbe") == 0 && access(next, F_OK) == 0);
+        /* Lazy images: the image handler asks the pack (built, named only, unknown) and writes image.pending. */
+        {
+            int (*state)(const char *) = (int (*)(const char *))dlsym(shell, "xba_pack_image_state");
+            int (*pending)(const char *) = (int (*)(const char *))dlsym(shell, "xba_pack_set_pending_image");
+            char pend[1300];
+            CHECK(state && pending);
+            if (state && pending) {
+                CHECK(state("game2.xbe") == 0 && state("default.xbe") == 0);
+                CHECK(state("\\intro.XBE") == RECOMP_PACK_IMAGE_LAZY);
+                CHECK(state("other.xbe") == -1 && state("") == -1);
+                snprintf(pend, sizeof pend, "%s/image.pending", dir);
+                CHECK(pending("Intro.xbe") == 0);
+                f = fopen(pend, "r");
+                CHECK(f && fgets(text, sizeof text, f) && !strcmp(text, "Intro.xbe\n"));
+                if (f)
+                    fclose(f);
+            }
+        }
         unsetenv("RECOMP_IMAGE");
         unsetenv("RECOMP_IMAGE_MAP");
     }

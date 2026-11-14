@@ -550,6 +550,7 @@ def test_android_other_images(tmp_path, monkeypatch):
         monkeypatch.setattr(android.Run, name, lambda self, n=name: step(self, n)())
     a = _Args(tmp_path, "libmain.so")
     a.source = str(game)
+    a.all_images = True                         # up front (the app prepares them lazily)
     os.makedirs(a.work, exist_ok=True)
     r = android.Run(a, None)
     lines = []
@@ -560,6 +561,73 @@ def test_android_other_images(tmp_path, monkeypatch):
     assert ("unrelated.xbe", "identify") not in ran and ("menu.xbe", "compile") in ran
     assert any("sub/menu.xbe left out: COMPILE_FAILED" in m for m in lines)
     assert os.path.isdir(os.path.join(a.work, "images", "game.xbe"))
+
+
+def test_android_other_images_lazy(tmp_path, monkeypatch):
+    """Lazy by default: the first Prepare builds default.xbe only and names the other images (library ""); an image
+    the app asked for (images.want), asked with --image, or already in the pack is built, the rest stays named."""
+    from tools.prepare import android
+    game = tmp_path / "game"
+    (game / "sub").mkdir(parents=True)
+    (game / "default.xbe").write_bytes(b"XBEH\0d:\\game.xbe\0menu.xbe\0intro.xbe\0")
+    for n in ("game.xbe", "sub/menu.xbe", "intro.xbe"):
+        (game / n).write_bytes(b"XBEH")
+    ran = []
+
+    def step(self, name):
+        def f():
+            ran.append((os.path.basename(self.a.source), name))
+            if name == "compile":
+                self.objects = ["/o/a.o"]
+        return f
+    for name in ("identify", "analyse", "lift", "compile"):
+        monkeypatch.setattr(android.Run, name, lambda self, n=name: step(self, n)())
+    a = _Args(tmp_path, "libmain.so")
+    a.source = str(game)
+    os.makedirs(a.work, exist_ok=True)
+
+    def run(**kw):
+        for k, v in kw.items():
+            setattr(a, k, v)
+        del ran[:]
+        r = android.Run(a, None)
+        lines = []
+        r.rep = type("R", (), {"progress": lambda self, s, p, m, e=None: lines.append(m)})()
+        r.xbe, r.data_dir, r.tid = str(game / "default.xbe"), str(game), "4541005B"
+        r.other_images()
+        return r, lines
+    r, lines = run()
+    assert r.images == [] and ran == []
+    assert sorted(r.lazy_images) == ["game.xbe", "intro.xbe", "sub/menu.xbe"]
+    assert r.image_libs() == {"game.xbe": "", "intro.xbe": "", "sub/menu.xbe": ""}
+    assert any("3 more image(s) prepared on their first launch" in m for m in lines)
+    # « Prepare game.xbe » in the app: images.want (any case, '\\').
+    (tmp_path / "work" / android.IMAGES_WANT).write_text("\\GAME.XBE\n")
+    r, _ = run()
+    assert [rel for rel, _, _ in r.images] == ["game.xbe"] and ("game.xbe", "compile") in ran
+    assert r.image_libs() == {"game.xbe": "libimage-1.so", "intro.xbe": "", "sub/menu.xbe": ""}
+    # --image on a host, and the pack's built images kept by a later Prepare (images.want gone).
+    os.remove(str(tmp_path / "work" / android.IMAGES_WANT))
+    final = tmp_path / "packs" / "4541005B"
+    final.mkdir(parents=True)
+    meta = dict({k: "" for k in pack.FIELDS}, images={"game.xbe": "libimage-1.so", "intro.xbe": ""})
+    (final / "pack.json").write_text(json.dumps(meta))
+    r, _ = run(image=["Sub/Menu.xbe"])
+    assert sorted(rel for rel, _, _ in r.images) == ["game.xbe", "sub/menu.xbe"] and r.lazy_images == ["intro.xbe"]
+    r, _ = run(image=[], all_images=True)
+    assert len(r.images) == 3 and r.lazy_images == []
+
+
+def test_android_pack_json_lazy_images(tmp_path, monkeypatch):
+    """An image named but not built: library "" in pack.json, no file, the pack still valid."""
+    from tools.prepare import android
+    monkeypatch.setattr(android.Run, "image_libs",
+                        lambda self: dict({rel: "libimage-%d.so" % (i + 1)
+                                           for i, (rel, _, _) in enumerate(self.images)}, **{"intro.xbe": ""}))
+    meta, links = _make_pack(tmp_path, monkeypatch, {}, images=["game.xbe"])
+    assert meta["images"] == {"game.xbe": "libimage-1.so", "intro.xbe": ""}
+    assert [os.path.basename(x) for x in links] == ["libtitle.so", "libimage-1.so"]
+    assert pack.check(pack.final_dir(str(tmp_path / "packs"), "4541005B")) is None
 
 
 @pytest.mark.parametrize("fmt", ["iso", "cso", "split"])
@@ -601,6 +669,7 @@ def test_android_other_images_from_an_image(tmp_path, monkeypatch, fmt):
         monkeypatch.setattr(android.Run, name, lambda self, n=name: step(self, n)())
     a = _Args(tmp_path, "libmain.so")
     a.source = src
+    a.all_images = True
     os.makedirs(a.work, exist_ok=True)
     r = android.Run(a, host)
     r.rep = type("R", (), {"progress": lambda self, s, p, m, e=None: None})()
