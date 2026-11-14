@@ -27,6 +27,10 @@ on:
         description: 'Also build the device test bundle (device-tests job, about 12 min)'
         type: boolean
         default: false
+      homebrew_oracles:
+        description: 'Also run the homebrew corpus in PCSX-Redux and ares (homebrew job; 20 min cold, 2 min cached)'
+        type: boolean
+        default: false
 
 concurrency:
   group: ci-${{ github.event_name }}-${{ github.head_ref || github.ref }}
@@ -146,6 +150,7 @@ jobs:
   # every push to main. The toolchain images keep the stable tags xba-<console>-homebrew so the host's layer cache
   # keeps them between runs (a few seconds when nothing changed, about 10 min cold, mostly libdragon). The binaries
   # stay in the job container and are deleted with it: only their SHA256SUMS are printed, nothing is published.
+  # Run by hand with homebrew_oracles ticked, it also checks every PS1 / N64 program's verdict in an emulator.
   homebrew:
     needs: linux
     if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
@@ -197,6 +202,14 @@ jobs:
           apk add --no-cache bash coreutils >/dev/null
           JOBS=4 bash tools/consoles/build_homebrew.sh all out/homebrew
           for c in gba ps1 n64; do echo "== $c"; cat "out/homebrew/$c/SHA256SUMS"; done
+
+      # By hand only (workflow_dispatch, homebrew_oracles): the PS1 and N64 programs in their external oracles
+      # (tools/consoles/run_homebrew.sh: PCSX-Redux + OpenBIOS, ares), each program's result block must say PASS.
+      # The oracle images (xba-ps1-oracle 2.9 GB, xba-n64-oracle 1.7 GB) take about 20 min to build cold, so this
+      # does not run on every push; cached, the runs take about 2 min.
+      - name: Run the corpus in the oracles (PCSX-Redux, ares)
+        if: steps.paths.outputs.build == 'true' && github.event_name == 'workflow_dispatch' && github.event.inputs.homebrew_oracles == 'true'
+        run: JOBS=4 bash tools/consoles/run_homebrew.sh all out/homebrew
 
       - name: Clean up
         if: always()
