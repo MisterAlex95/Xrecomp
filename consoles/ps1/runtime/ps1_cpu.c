@@ -33,14 +33,6 @@ static inline uint32_t rd32le(const uint8_t *p)
     return v;
 }
 
-static inline void wr32le(uint8_t *p, uint32_t v)
-{
-#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
-    v = __builtin_bswap32(v);
-#endif
-    memcpy(p, &v, 4);
-}
-
 void ps1_cpu_reset(ps1_machine *m)
 {
     memset(m->r, 0, sizeof m->r);
