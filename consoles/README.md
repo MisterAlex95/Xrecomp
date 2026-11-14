@@ -14,8 +14,8 @@ game for these consoles runs yet. Goal, order, rules (legal, Linux arm64 first),
 Each one has:
 
 - `runtime/`: C, CMake target `<name>_runtime`. It links only the host layer `xbr_host` (`src/host`,
-  `src/platform/HOST_LAYER.md`) and never the Xbox libraries. N64 is empty for now (one version function); the PS1 has its devices (below);
-  GBA has its core, see below.
+  `src/platform/HOST_LAYER.md`) and never the Xbox libraries. N64 is empty for now (one version function);
+  GBA and PS1 have their cores, see below.
 - `tools/`: the Python pipeline (parse → disasm → function discovery → lift → C), package `<name>_tools`. Its
   tests live in the package and run with the tools suite: `python3 -m pytest tools/ consoles/`.
 - `tests/`: a self-contained CMake test project. `tools/run_c_tests.sh` runs it as `console_<name>` (exit 77 =
@@ -109,6 +109,41 @@ Saves default to `$XDG_DATA_HOME/xrecomp/save` (else `~/.local/share/xrecomp/sav
 `RECOMP_GBA_BIOS` uses a BIOS image of your own; every option is listed at the top of `runtime/tools/gba_play.c`. The
 homebrew `pad.gba` (`consoles/gba/tests/homebrew/pad`) shows the keys held and keeps a counter in SRAM: the controls
 and saves check on a real host.
+
+**PS1 core (P-4 XBA-162, P-5 XBA-163, P-6 XBA-164, pads / cards of P-9 XBA-167).** Interpreter first, the GBA's
+shape. `consoles/ps1/runtime/ps1_core.h`: an R3000A interpreter (`ps1_cpu.c`: every MIPS I instruction, branch and
+load delay slots with the cancellation rules, LWL / LWR forwarding, all exceptions, COP0 with SR.IsC cache isolation,
+RFE, interrupt entry; a fixed cost per instruction by fetch region, no cache model), the GTE (`ps1_gte.c`, every command,
+44-bit MAC checks, FLAG, the UNR divide, register quirks), the memory map with its mirrors (`ps1_bus.c`), the interrupt
+controller, DMA (7 channels, DPCR / DICR, sync modes 0 / 1 / 2, OTC; bursts stall the CPU, block and linked-list
+transfers complete after their length), the three root counters with every clock source and sync mode, and the
+scanline / VBlank scheduler driven by `ps1_gpu_get_timing` (`ps1_io.c`), SIO0 with the digital pad, the DualShock in
+analog mode and two 128 KB memory cards (`ps1_sio.c`; `ps1_card_data` / `ps1_card_take_dirty` / `ps1_card_load` like
+the GBA saves). The other chips are reached through `ps1_devices.h` only: target `ps1_core` links `ps1_gpu`, `ps1_cd`,
+`ps1_spu` and `ps1_mdec`, each the real module or its placeholder `ps1_<dev>_stub.c` when the source is absent.
+
+BIOS: **OpenBIOS** (MIT, PCSX-Redux's nugget tree), built from source by `tools/consoles/build_ps1_bios.sh` at the
+commit the oracle pins, byte-identical to the oracle's (sha256 `68942dc2…`); never a Sony BIOS. Boot is LLE from the
+reset vector; with a PS-X EXE the BIOS runs its init and, where it would enter its shell (0x80030000), the EXE is loaded
+(header PC / GP / SP+FP / text / BSS: fast boot); with a disc and no EXE the BIOS boots `SYSTEM.CNF` itself. An HLE BIOS
+(P-5 HLE) needs, for games and libpsn00b / Psy-Q: the exception handler and the IRQ / event / thread kernel (B(08h..20h)
+events, B(0Eh..13h) threads, SysEnqIntRP / SysDeqIntRP, ChangeClearPad / ChangeClearRCnt), A(00h..3Fh) file and string
+calls with the `cdrom:` / `bu:` devices (CD and memory card drivers over SIO0), InitPad / StartPad, FlushCache, the
+kernel memory layout at 0x00000000..0x0000FFFF that games peek, and the A0 / B0 / C0 table dispatch; until then the
+image is required.
+
+`ps1_run [--bios PATH] [--exe X.exe | --disc X.cue] [--frames N] [--result] [--ppm OUT] [--wav OUT] [--tty]
+[--until-tty TEXT]` runs a program headless (`--result`: our homebrew's result block at 0x801F0000; `--tty`: the
+console text, BIOS putchar / puts). Tests (`consoles/ps1/tests`): `ps1_cpu` and `ps1_gte` unit tests, our homebrew
+(`ps1_hb_*`, the same results as PCSX-Redux, checksums included), JaCzekanski/ps1-tests (MIT, release fetched by
+`tools/consoles/fetch_ps1_tests.sh`: cpu/cop, cpu/code-in-io, gte/test-all 1150 / 1150, dma/otc-test, dma/dpcr, timers).
+On a desktop:
+
+```sh
+tools/consoles/build_ps1_bios.sh && tools/consoles/build_homebrew.sh ps1 && tools/consoles/fetch_ps1_tests.sh
+cmake -S consoles/ps1/tests -B build/ps1 -DPS1_CORE_ONLY=ON && cmake --build build/ps1 && (cd build/ps1 && ctest)
+build/ps1/ps1_runtime/ps1_run --exe build/homebrew/ps1/gfx.exe --result --ppm gfx.ppm
+```
 
 **PS1 GPU (P-7, XBA-165).** `consoles/ps1/runtime/ps1_gpu.c`, the GPU half of `ps1_devices.h` (CMake target
 `ps1_gpu`, plain C11, no host dependency): GP0 / GP1, GPUSTAT / GPUREAD, CPU / VRAM / DMA transfers and a software

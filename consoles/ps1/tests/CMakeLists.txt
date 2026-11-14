@@ -118,7 +118,7 @@ if(TARGET ps1_run)
     set(jcz ps1_jcz_cpu_cop ps1_jcz_cpu_code_in_io ps1_jcz_gte_test_all ps1_jcz_dma_otc ps1_jcz_dma_dpcr ps1_jcz_timers)
     if(EXISTS ${PS1_RT}/ps1_spu.c)
         add_test(NAME ps1_jcz_spu_memory_transfer COMMAND ${PS1_JCZ}
-                 ${PS1_TESTS_DIR}/spu/memory-transfer/memory-transfer.exe "pass - testDMAReadTiming")
+                 ${PS1_TESTS_DIR}/spu/memory-transfer/memory-transfer.exe "pass - testDMAReadTiming" -SyncMode0)
         list(APPEND jcz ps1_jcz_spu_memory_transfer)
     endif()
     set_tests_properties(${jcz} PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
