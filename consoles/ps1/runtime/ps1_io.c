@@ -424,7 +424,9 @@ static void dma_try(ps1_machine *m, int ch)
     uint32_t chcr = m->dma[ch].chcr;
     if (!(chcr & 0x01000000u) || !((m->dpcr >> (ch * 4 + 3)) & 1) || m->dma_done_at[ch] != UINT64_MAX)
         return;
-    if (((chcr >> 9) & 3) == 0 && !(chcr & 0x10000000u))
+    /* Sync mode 0 waits for the manual trigger (bit 28) or the device's DMA request: the devices (0-4) are taken as
+     * always requesting; OTC (6) and PIO (5) have no request line. */
+    if (((chcr >> 9) & 3) == 0 && !(chcr & 0x10000000u) && ch >= 5)
         return;
     dma_run(m, ch);
 }
