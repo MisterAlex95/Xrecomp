@@ -396,7 +396,7 @@
     <string name="VAL_THEME_OFF">Off</string>
     <!-- Vulkan drivers (Settings › Graphics › Vulkan driver, the Drivers screen; VkDriverStore, VkDriverShare) -->
     <string name="OPT_VK_DRIVER">Vulkan driver</string>
-    <string name="OPT_VK_DRIVER_DETAIL">The Vulkan driver the Nintendo 64 Vulkan renderer uses (for now only it): the device\'s own, or a Mesa Turnip driver you download or import. If the chosen driver does not work, the game falls back to the device\'s driver, then to the software renderer.</string>
+    <string name="OPT_VK_DRIVER_DETAIL">The Vulkan driver games use by default (for now only the Nintendo 64 Vulkan renderer uses one): the device\'s own, or a Mesa Turnip driver you download or import. A game can have its own in its Options. If the chosen driver does not work, the game falls back to the device\'s driver, then to the software renderer.</string>
     <string name="OPT_VK_DRIVER_DETAIL_GAME_APP">This app uses the Vulkan driver chosen in XRecomp (Nintendo 64 Vulkan renderer only, for now), taken again at each start. Change it in XRecomp.</string>
     <string name="VKD_GAME_APP_NOTE">The driver is chosen in XRecomp; this app follows it at its next start.</string>
     <string name="VKD_TITLE">Vulkan drivers</string>
@@ -411,7 +411,13 @@
     <string name="VKD_LAST_CRASHED">This driver crashed the game at its last start: it is skipped (system driver) until you choose it again.</string>
     <string name="VKD_LAST_FAILED">At its last start this driver could not be opened, or the renderer could not run on it: the system driver was used.</string>
     <string name="VKD_LAST_NOT_LOADED">At its last start this driver was not loaded (Android kept the device\'s own driver): the system driver was used.</string>
-    <string name="VKD_INSTALLED_HELP">A: use this driver. X twice: delete it.</string>
+    <string name="VKD_UNSUPPORTED_BADGE">Not compatible</string>
+    <string name="VKD_ACTIVE_UNSUPPORTED_BADGE">Active · not compatible</string>
+    <string name="VKD_LAST_UNSUPPORTED">Not compatible with the N64 renderer: at its last start this driver loaded, but the Nintendo 64 Vulkan renderer (paraLLEl-RDP) cannot run on it. The system driver was used.</string>
+    <string name="VKD_LAST_OPEN_FAILED">At its last start this driver could not be opened: the system driver was used.</string>
+    <string name="ROM_OPT_VK_DRIVER_DETAIL">The Vulkan driver this game\'s Nintendo 64 Vulkan renderer uses: as in Settings › Graphics › Vulkan driver, the device\'s own (System), or one of the installed drivers. Applies the next time the game starts.</string>
+    <string name="MENU_VK_DRIVER">Vulkan driver (next start)</string>
+    <string name="VKD_INSTALLED_HELP">A: make it the default for every game (a game can have its own in its Options). X twice: delete it (games that chose it go back to the default).</string>
     <string name="VKD_KV_VERSION">Version</string>
     <string name="VKD_KV_SOURCE">Source</string>
     <string name="VKD_KV_SIZE">Size</string>

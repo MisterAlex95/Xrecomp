@@ -17,8 +17,9 @@ import java.util.List;
 /**
  * XRecomp's Vulkan driver choice for its games' own apps (VkDriverShare): exported, but every call checks the caller
  * as the pack handover does (PackHandover.checkCaller: package fr.adserver.xrecomp.t&lt;tid&gt;, signed by the game
- * apps' key). call(« active », tid) gives the active driver's id; openFile(content://&lt;authority&gt;/&lt;id&gt;)
- * streams the active driver as a package zip through a pipe. Only the active driver is served. In a game's own app
+ * apps' key). call(« active », tid) gives the id of the driver that title starts with in XRecomp (its own choice, else
+ * the global one: VkDrivers.resolve); openFile(content://&lt;authority&gt;/&lt;id&gt;) streams that driver as a
+ * package zip through a pipe. Only the calling title's driver is served. In a game's own app
  * (TitleApk moves the authority) it refuses everything (NOT_A_PARENT).
  */
 public class VkDriverProvider extends ContentProvider {
@@ -50,7 +51,7 @@ public class VkDriverProvider extends ContentProvider {
             Log.w(LauncherActivity.TAG, "launcher: vulkan driver choice refused (" + arg + "): " + r);
             return VkDriverShare.refusal(r);
         }
-        return VkDriverShare.answer(VkDrivers.of(getContext()));
+        return VkDriverShare.answer(VkDrivers.of(getContext()), Pack.normTitleId(arg));
     }
 
     @Override
@@ -63,7 +64,14 @@ public class VkDriverProvider extends ContentProvider {
         List<String> seg = uri.getPathSegments();
         VkDrivers drivers = VkDrivers.of(getContext());
         String id = seg.size() == 1 ? seg.get(0) : null;
-        if (id == null || !id.equals(drivers.activeId()) || drivers.read(id) == null)
+        String caller;
+        try {
+            caller = getCallingPackage();
+        } catch (SecurityException e) {
+            caller = null;
+        }
+        VkDrivers.Driver served = drivers.resolve(VkDriverShare.callerTitleId(caller));
+        if (id == null || served == null || !id.equals(served.id))
             throw new FileNotFoundException(uri.toString());
         ParcelFileDescriptor[] pipe;
         try {

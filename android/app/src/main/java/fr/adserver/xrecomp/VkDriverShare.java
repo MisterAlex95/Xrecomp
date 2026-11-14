@@ -48,10 +48,13 @@ final class VkDriverShare {
 
     // ---- XRecomp's answer -----------------------------------------------------------------------------------------
 
-    /** The answer to METHOD_ACTIVE: the active driver's id ("" = system) and its origin's description. */
-    static Bundle answer(VkDrivers drivers) {
+    /**
+     * The answer to METHOD_ACTIVE for the game app of title tid: the driver that game starts with in XRecomp (its own
+     * choice, else the global one: VkDrivers.resolve) as an id ("" = system) and its origin's description.
+     */
+    static Bundle answer(VkDrivers drivers, String tid) {
         Bundle b = new Bundle();
-        VkDrivers.Driver d = drivers.active();
+        VkDrivers.Driver d = drivers.resolve(tid);
         b.putString(KEY_ID, d == null ? "" : d.id);
         if (d != null) {
             b.putString(KEY_REPO, d.repo);

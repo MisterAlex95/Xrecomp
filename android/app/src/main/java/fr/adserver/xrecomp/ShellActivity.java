@@ -294,8 +294,9 @@ public class ShellActivity extends SDLActivity {
     }
 
     /**
-     * The custom Vulkan driver for the N64 Vulkan RDP ({@link VkDrivers}): for an N64 game with an active, still
-     * installed driver, RECOMP_VK_DRIVER_DIR / _LIB / _ID and RECOMP_VK_HOOK_DIR; otherwise all four unset, also
+     * The custom Vulkan driver for the N64 Vulkan RDP ({@link VkDrivers}): for an N64 game whose driver (its own choice
+     * in its Options, else Settings' choice, else the system driver: VkDrivers.resolve) is a still installed one,
+     * RECOMP_VK_DRIVER_DIR / _LIB / _ID and RECOMP_VK_HOOK_DIR; otherwise all four unset, also
      * clearing what a previous game of this process had. RECOMP_VK_DRIVER=system in recomp.cfg still wins natively.
      * A game's own app uses its own files/vk_drivers (the driver it took from XRecomp).
      */
@@ -305,7 +306,8 @@ public class ShellActivity extends SDLActivity {
         if (n64 && gameApp())   // XRecomp's choice as it is now (VkDriverShare); unchanged: nothing written
             VkDriverShare.sync(this);
         VkDrivers drivers = VkDrivers.of(this);
-        VkDrivers.Driver d = n64 ? drivers.active() : null;
+        VkDrivers.Driver d = n64 ? drivers.resolve(tid) : null;
+        String own = n64 ? drivers.gameChoice(tid) : null;
         for (String[] kv : VkDrivers.runEnv(d, getApplicationInfo().nativeLibraryDir)) {
             try {
                 if (kv[1] != null)
@@ -320,6 +322,7 @@ public class ShellActivity extends SDLActivity {
             Log.i(LauncherActivity.TAG, "shell: vulkan driver " + (d == null ? "system"
                                         : d.name + " (" + d.id + ")"
                                           + (drivers.failedLastStart(d.id) ? ", failed at the last start" : ""))
+                                        + (own == null ? " (as in Settings)" : " (the game's own choice)")
                                         + ", game " + tid);
     }
 

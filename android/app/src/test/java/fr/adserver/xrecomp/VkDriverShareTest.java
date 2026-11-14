@@ -35,6 +35,7 @@ import java.util.Map;
 public class VkDriverShareTest {
     @Rule public TemporaryFolder tmp = new TemporaryFolder();
 
+    private static final String TID = "4D530004";
     private VkDrivers parent, game;
     private final List<String> opened = new ArrayList<>();
 
@@ -75,11 +76,11 @@ public class VkDriverShareTest {
 
     @Test
     public void answerNamesTheActiveDriver() throws IOException {
-        assertEquals("", VkDriverShare.answer(parent).getString(VkDriverShare.KEY_ID));
+        assertEquals("", VkDriverShare.answer(parent, TID).getString(VkDriverShare.KEY_ID));
         VkDrivers.Driver d = installParent("T30");
-        assertEquals("", VkDriverShare.answer(parent).getString(VkDriverShare.KEY_ID));   // installed, not chosen
+        assertEquals("", VkDriverShare.answer(parent, TID).getString(VkDriverShare.KEY_ID));   // installed, not chosen
         parent.setActive(d.id);
-        Bundle b = VkDriverShare.answer(parent);
+        Bundle b = VkDriverShare.answer(parent, TID);
         assertEquals(d.id, b.getString(VkDriverShare.KEY_ID));
         assertEquals("MrPurple666/purple-turnip", b.getString(VkDriverShare.KEY_REPO));
         assertEquals("T30", b.getString(VkDriverShare.KEY_TAG));
@@ -88,13 +89,13 @@ public class VkDriverShareTest {
     @Test
     public void gameAppFollowsXRecomp() throws IOException {
         // XRecomp on the system driver: nothing to do.
-        assertEquals(VkDriverShare.Outcome.UNCHANGED, VkDriverShare.apply(game, VkDriverShare.answer(parent), opener()));
+        assertEquals(VkDriverShare.Outcome.UNCHANGED, VkDriverShare.apply(game, VkDriverShare.answer(parent, TID), opener()));
         assertTrue(opened.isEmpty());
 
         // A driver chosen in XRecomp: copied once, same id, inherited, active.
         VkDrivers.Driver d = installParent("T30");
         parent.setActive(d.id);
-        assertEquals(VkDriverShare.Outcome.INSTALLED, VkDriverShare.apply(game, VkDriverShare.answer(parent), opener()));
+        assertEquals(VkDriverShare.Outcome.INSTALLED, VkDriverShare.apply(game, VkDriverShare.answer(parent, TID), opener()));
         VkDrivers.Driver g = game.active();
         assertEquals(d.id, g.id);
         assertEquals(VkDrivers.Origin.INHERITED, g.originKind);
@@ -105,21 +106,21 @@ public class VkDriverShareTest {
         // Unchanged: no copy, nothing written; the native trial marker stays (the runtime skips a crashing driver).
         File marker = new File(game.root(), VkDrivers.TRIAL_MARKER);
         Files.write(marker.toPath(), (d.id + "\n").getBytes(StandardCharsets.UTF_8));
-        assertEquals(VkDriverShare.Outcome.UNCHANGED, VkDriverShare.apply(game, VkDriverShare.answer(parent), opener()));
+        assertEquals(VkDriverShare.Outcome.UNCHANGED, VkDriverShare.apply(game, VkDriverShare.answer(parent, TID), opener()));
         assertEquals(1, opened.size());
         assertTrue(marker.isFile());
 
         // Another driver chosen: the new one copied and active, the old inherited one deleted.
         VkDrivers.Driver d2 = installParent("T31");
         parent.setActive(d2.id);
-        assertEquals(VkDriverShare.Outcome.INSTALLED, VkDriverShare.apply(game, VkDriverShare.answer(parent), opener()));
+        assertEquals(VkDriverShare.Outcome.INSTALLED, VkDriverShare.apply(game, VkDriverShare.answer(parent, TID), opener()));
         assertEquals(d2.id, game.activeId());
         assertNull(game.read(d.id));
         assertEquals(1, game.list().size());
 
         // Back to the system driver in XRecomp: cleared, the inherited driver gone.
         parent.clearActive();
-        assertEquals(VkDriverShare.Outcome.SYSTEM, VkDriverShare.apply(game, VkDriverShare.answer(parent), opener()));
+        assertEquals(VkDriverShare.Outcome.SYSTEM, VkDriverShare.apply(game, VkDriverShare.answer(parent, TID), opener()));
         assertNull(game.activeId());
         assertTrue(game.list().isEmpty());
     }
@@ -128,9 +129,9 @@ public class VkDriverShareTest {
     public void aDriverOfItsOwnIsKeptWhenAlreadyThere() throws IOException {
         VkDrivers.Driver d = installParent("T30");
         parent.setActive(d.id);
-        VkDriverShare.apply(game, VkDriverShare.answer(parent), opener());
+        VkDriverShare.apply(game, VkDriverShare.answer(parent, TID), opener());
         game.clearActive();   // say the setting went missing: selected again without a copy
-        assertEquals(VkDriverShare.Outcome.SELECTED, VkDriverShare.apply(game, VkDriverShare.answer(parent), opener()));
+        assertEquals(VkDriverShare.Outcome.SELECTED, VkDriverShare.apply(game, VkDriverShare.answer(parent, TID), opener()));
         assertEquals(d.id, game.activeId());
         assertEquals(1, opened.size());
     }
@@ -139,7 +140,7 @@ public class VkDriverShareTest {
     public void noAnswerOrAFailedCopyChangesNothing() throws IOException {
         VkDrivers.Driver d = installParent("T30");
         parent.setActive(d.id);
-        VkDriverShare.apply(game, VkDriverShare.answer(parent), opener());
+        VkDriverShare.apply(game, VkDriverShare.answer(parent, TID), opener());
         assertEquals(VkDriverShare.Outcome.NO_ANSWER, VkDriverShare.apply(game, null, opener()));
         assertEquals(VkDriverShare.Outcome.NO_ANSWER,
                      VkDriverShare.apply(game, VkDriverShare.refusal(PackHandover.Refusal.WRONG_CERT), opener()));
@@ -153,5 +154,31 @@ public class VkDriverShareTest {
         assertEquals(VkDriverShare.Outcome.FAILED, VkDriverShare.apply(game, gone, opener()));
         assertEquals("the previous choice kept", d.id, game.activeId());
         assertFalse(new File(game.root(), "0123456789abcdef").exists());
+    }
+
+    @Test
+    public void gameAppTakesItsTitlesOwnChoice() throws IOException {
+        VkDrivers.Driver global = installParent("T30"), own = installParent("R8");
+        parent.setActive(global.id);
+        // Its own choice in XRecomp wins over the global one, for that title only.
+        assertTrue(parent.setGameChoice(TID, own.id));
+        assertEquals(own.id, VkDriverShare.answer(parent, TID).getString(VkDriverShare.KEY_ID));
+        assertEquals(global.id, VkDriverShare.answer(parent, "4D530005").getString(VkDriverShare.KEY_ID));
+        assertEquals(global.id, VkDriverShare.answer(parent, null).getString(VkDriverShare.KEY_ID));
+        VkDriverShare.Opener exporter = id -> {
+            ByteArrayOutputStream o = new ByteArrayOutputStream();
+            if (!parent.exportZip(id, o))
+                throw new java.io.FileNotFoundException(id);
+            return new ByteArrayInputStream(o.toByteArray());
+        };
+        assertEquals(VkDriverShare.Outcome.INSTALLED,
+                     VkDriverShare.apply(game, VkDriverShare.answer(parent, TID), exporter));
+        assertEquals(own.id, game.activeId());   // the game app has one choice: its title's
+        // « System » for that title: the game app goes back to the system driver.
+        assertTrue(parent.setGameChoice(TID, VkDrivers.SYSTEM));
+        assertEquals("", VkDriverShare.answer(parent, TID).getString(VkDriverShare.KEY_ID));
+        assertEquals(VkDriverShare.Outcome.SYSTEM,
+                     VkDriverShare.apply(game, VkDriverShare.answer(parent, TID), exporter));
+        assertNull(game.activeId());
     }
 }

@@ -136,7 +136,7 @@ final class GameMenu {
     enum Page { MAIN, SETTINGS, CONTROLS, DISCS }
 
     enum Item { RESUME, SETTINGS, CONTROLS, SCREENSHOT, SHARE_LOG, LAUNCHER, QUIT, PERF, VOLUME, BOTTOM, LANGUAGE,
-                WIDESCREEN, P480, TOUCH, BACK, DISC, SCALE, FILTER }
+                WIDESCREEN, P480, TOUCH, BACK, DISC, SCALE, FILTER, VK_DRIVER }
 
     private final Activity activity;
     private final Host host;
@@ -848,6 +848,16 @@ final class GameMenu {
                 r = row(Item.FILTER, s(R.string.MENU_FILTER));
                 r.setChoices(consoleLabels(ConsoleVideo.Setting.FILTER));
                 r.cycler = dir -> stepConsoleVideo(ConsoleVideo.Setting.FILTER, dir);
+                if (vkDriverShown()) {   // the N64 Vulkan renderer's driver, this game's own (VkDrivers)
+                    r = row(Item.VK_DRIVER, s(R.string.MENU_VK_DRIVER));
+                    VkDrivers drivers = VkDrivers.of(activity);
+                    List<String> choices = VkDriverStore.gameChoices(drivers.list());
+                    String[] labels = new String[choices.size()];
+                    for (int i = 0; i < labels.length; i++)
+                        labels[i] = VkDriverStore.gameChoiceLabel(activity, drivers, choices.get(i));
+                    r.setChoices(labels);
+                    r.cycler = this::stepVkDriver;
+                }
             } else if (titleId() != null) {   // the Xbox's own settings: none of them means anything to a console
                 r = row(Item.LANGUAGE, s(R.string.MENU_LANGUAGE));
                 String[] labels = new String[GameLanguage.MENU_ORDER.length + 1];
@@ -1056,6 +1066,9 @@ final class GameMenu {
         case FILTER:
             stepConsoleVideo(ConsoleVideo.Setting.FILTER, 1);
             break;
+        case VK_DRIVER:
+            stepVkDriver(1);
+            break;
         case TOUCH:
             toggleTouch();
             break;
@@ -1181,6 +1194,28 @@ final class GameMenu {
         updateValues();
     }
 
+    /** An N64 game in XRecomp (a game's own app follows XRecomp's choice, VkDriverShare: no row there). */
+    private boolean vkDriverShown() {
+        return titleId() != null && Console.ofKey(titleId()) == Console.N64 && TitleApp.ownTitleId(activity) == null;
+    }
+
+    /** This N64 game's Vulkan driver (VkDrivers.setGameChoice): remembered per game, applied at its next start. */
+    private void stepVkDriver(int dir) {
+        String v = VkDriverStore.stepGameChoice(VkDrivers.of(activity), titleId(), dir);
+        Log.i(LauncherActivity.TAG, "shell: menu: vulkan driver " + (v == null ? "as in Settings" : v)
+                                    + " for " + titleId() + " (next start)");
+        updateValues();
+    }
+
+    /** The Vulkan driver row's value: the game's choice, and a short warning when that driver went wrong last time. */
+    private String vkDriverLabel() {
+        VkDrivers drivers = VkDrivers.of(activity);
+        String label = VkDriverStore.gameChoiceLabel(activity, drivers, drivers.gameChoice(titleId()));
+        VkDrivers.Driver d = drivers.resolve(titleId());
+        int badge = d == null ? 0 : VkDriverStore.lastStartBadge(VkDriverStore.lastStart(drivers, d.id), false);
+        return badge == 0 ? label : label + " · " + s(badge);
+    }
+
     /** The Language row's position: 0 = as in Settings, then GameLanguage.MENU_ORDER. */
     private int languagePos() {
         int idx = GameLanguage.indexOf(GameLanguage.titleChoice(activity, titleId()));
@@ -1257,6 +1292,9 @@ final class GameMenu {
             if (r != null)
                 r.setValue(s(ConsoleVideo.label(cv, ConsoleVideo.gameChoice(activity, titleId(), cv))));
         }
+        r = rows.get(Item.VK_DRIVER);
+        if (r != null)
+            r.setValue(vkDriverLabel());
         r = rows.get(Item.TOUCH);
         Boolean touch = host.touchShown();
         if (r != null && touch != null)

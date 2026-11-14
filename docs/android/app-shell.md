@@ -660,7 +660,7 @@ exist in the runtime and mean something to a player are offered. Graphics and Au
 | Graphics › Frame generation (only in a [frame generation](#frame-generation) APK) | Off (default), 2×, 2× performance | `RECOMP_LSFG=1`, `RECOMP_LSFG_MULT=2`, plus `RECOMP_LSFG_PERF=1` for 2× performance |
 | Graphics › Choose Lossless.dll (same) | a document picker; the row shows the shaders' state | `RECOMP_LSFG_DIR=<files>/lsfg/<key>` once the shaders are there (not removed by « Reset all ») |
 | Graphics › Texture filtering | Sharp (default), Smooth, Anisotropic 8×, Anisotropic 16× | `RECOMP_TEX_BILINEAR=1`, `RECOMP_TEX_ANISO=8` / `16` |
-| Graphics › Vulkan driver (N64 Vulkan renderer only, for now) | the active driver: **System** (default) or its name and version; A opens the [Drivers screen](#vulkan-drivers). In a game's own app: XRecomp's driver, nothing to choose | not in `recomp.cfg`: `files/settings/vk_driver`, turned into `RECOMP_VK_DRIVER_*` by `ShellActivity` for an N64 game |
+| Graphics › Vulkan driver (under « All consoles »; N64 Vulkan renderer only, for now) | the default driver: **System** (default) or its name and version; a game can have its own in its Options; A opens the [Drivers screen](#vulkan-drivers). In a game's own app: XRecomp's driver, nothing to choose | not in `recomp.cfg`: `files/settings/vk_driver` (a game's own: `vk_driver_<KEY>`), turned into `RECOMP_VK_DRIVER_*` by `ShellActivity` for an N64 game |
 | Audio › 3D audio (HRTF) (Xbox only) | On (default), Off | `RECOMP_APU_HRTF=0` when off |
 | Audio › Audio buffer (all consoles) | Short (256), Normal (default, 512), Long (1024), Very long (2048) | `RECOMP_AUDIO_BUF_SAMPLES=…` |
 | Advanced › Drawing threads | Auto (default), 1, 2, 4, 6, 8 | `RECOMP_RASTER_THREADS=…` |
@@ -726,6 +726,13 @@ else unsets them (the runtime's default: aspect; GBA nearest, PS1 / N64 linear; 
 `_FILTER` still win there), and `RECOMP_PRESENT_VSYNC`, `RECOMP_AUDIO_BUF_SAMPLES`, `RECOMP_RUMBLE` from recomp.cfg
 (unset without a line). An Xbox game gets `RECOMP_SCALE` / `RECOMP_FILTER` unset. Logcat: « shell: console video
 RECOMP_SCALE=… RECOMP_FILTER=… …, game <KEY> ».
+
+**An N64 game's own Vulkan driver.** The same Options screen, for an N64 game (only the N64 Vulkan renderer uses a
+driver, for now), has a **Vulkan driver** row after the picture: « As in Settings (<Settings' driver>) », **System**,
+then each installed driver; the description warns, in amber, when the driver the game would start with went wrong
+last time (« Not compatible with the N64 renderer … », crashed, could not be opened, not loaded). The in-game menu ›
+Settings has the same row, « Vulkan driver (next start) », with a short warning in the value (« … · Not compatible »).
+Not in a game's own app. Details in [Vulkan drivers](#vulkan-drivers).
 
 **Game data of a console game.** The same Options screen lists the game's stored things (`Storage.items`), each
 with its size, A twice to delete (saves: the stronger warning): **Saves** = `<internal>/save/<console>-<KEY>/`
@@ -984,10 +991,20 @@ keeps the drivers and the choice, `VkDriverStore` joins them (the `VkDriverIndex
 texts), `LauncherActivity` draws the screen, `VkDriverShare` / `VkDriverProvider` hand the choice to a game's own
 app.
 
-**Settings › Graphics › Vulkan driver.** The value is the active driver: **System** (the default), or its name and
-version (« Turnip … (Mesa 26.3.0) »); the description says it applies to the N64 Vulkan renderer for now and that a
-driver that does not work falls back to the device's driver, then the software renderer; when the last start with
-the active driver went wrong, the description says how (below). A opens the Drivers screen.
+**Settings › Graphics › Vulkan driver** (the last row of « All consoles »). The value is the default driver, the one
+every game uses unless it has its own: **System** (the default), or its name and version (« Turnip … (Mesa 26.3.0) »);
+the description says it applies to the N64 Vulkan renderer for now, that a game can override it in its Options, and
+that a driver that does not work falls back to the device's driver, then the software renderer; when the default
+driver's last start went wrong, the description says how (below). A opens the Drivers screen.
+
+**A game's own driver** (per game, N64 games only for now): its Home › Options › **Vulkan driver** and the in-game
+menu › Settings › **Vulkan driver (next start)** cycle through « As in Settings (<the default's name>) » (the
+default), **System** (the device's driver whatever Settings says), and each installed driver. Saved at once in
+`files/settings/vk_driver_<KEY>` (the library key upper case, as `n64_pak_<KEY>`: a driver id, `system`, or
+empty / absent to follow Settings); it applies at the game's next start. The warning shown is the one of the driver
+that game would start with. `ShellActivity.applyVkDriver` resolves the driver with `VkDrivers.resolve(key)`: the
+game's choice (`system`: none; an installed id: that driver; an id no longer installed: as if unset), else Settings'
+choice, else the system driver.
 
 **The Drivers screen** (`Screen.DRIVERS`, the list template, every row reachable with the D-pad; hints A Choose,
 X Delete, B Back; Y refreshes):
@@ -995,24 +1012,32 @@ X Delete, B Back; Y refreshes):
 | Row | Value / badge | A | Description |
 |---|---|---|---|
 | On this device › **System driver** | « Active » when no driver is chosen | back to the system driver | the device's own driver; the footer below |
-| one row per installed driver (by name) | `driverVersion` (else `packageVersion`); « Active », or « Failed last time » / « Active · failed last time » | makes it the active one (and clears the trial marker) | its description, version, source (« GitHub · owner/repo · tag », « Imported zip », « From XRecomp »), size on disk; the last start's warning in amber |
+| one row per installed driver (by name) | `driverVersion` (else `packageVersion`); « Active » (Settings' default), or « Not compatible » / « Active · not compatible » (`unsupported`), or « Failed last time » / « Active · failed last time » (any other failure) | makes it the default one (and clears the trial marker) | its description, version, source (« GitHub · owner/repo · tag », « Imported zip », « From XRecomp »), size on disk; the last start's warning in amber |
 | **Import a zip** | | the system document picker (`ACTION_OPEN_DOCUMENT`, `REQ_VK_DRIVER`), then the package is checked and installed on the worker | what a package is |
 | To download › **Refresh the list** | the list's state: « List from <date> », « <date> (old) », « Updating… », « No connection · List from <date> », « GitHub limit reached, retry after <time> · … », « GitHub did not answer (HTTP n) », « Not fetched yet » | asks GitHub now (every source; on a thread, the screen is rebuilt when it answers, the note repeats the state) | which repositories, and that this is the only network use |
-| one row per listed driver not installed (same sha256, or the id that sha256 gives), by file name (without `.zip`; with its release tag when two releases hold the same name) | its size; « Pre-release » | downloads it behind the progress screen (percent, bytes; B cancels), then installs it | release title, source, tag, file, date, size, pre-release; the footer |
+| one row per listed driver not installed (same sha256, or the id that sha256 gives), by file name without `.zip` then `.adpkg` (« turnip_mrpurple_T29-toasted »; `VkDriverStore.rowNames`, with « · <release tag> » when two listed files give the same name) | its size; « Pre-release » | downloads it behind the progress screen (percent, bytes; B cancels), then installs it | release title, source, tag, file, date, size, pre-release; the footer |
 | (no row) | | | « No list yet. Refresh … » or « Every listed driver is installed. » as a line of text |
 
-X twice within 5 s on an installed driver deletes it (the badge says « Press X again »; the active one: back to the
-system driver); X elsewhere only says how. After a download or an import the new driver's row has the focus and the
+X twice within 5 s on an installed driver deletes it (the badge says « Press X again »; the default one: Settings
+back to the system driver; every game that had chosen it follows Settings again, its `vk_driver_<KEY>` removed); X
+elsewhere only says how. After a download or an import the new driver's row has the focus and the
 note says « … installed. Press A to use it. »: it is not made active by itself. The footer (in the description
 column): drivers come from third parties, are never part of the app, and run as native code inside it. A choice
 made while a game runs applies at its next start (the note says so). When the screen opens and a source's copy is
 older than 24 h (or missing), the list is asked once by itself; nothing else is fetched.
 
-Last start (the native runtime's `vk_drivers/trying` and `vk_drivers/last_start`,
-[environment variables](../runtime/environment-variables.md#custom-vulkan-driver-n64-rdp)): the trial marker or
-`crashed` → « crashed the game at its last start: skipped until you choose it again »; `failed` → « could not be
-opened, or the renderer could not run on it »; `not_loaded` → « was not loaded (Android kept the device's own
-driver) ». `ok`, another driver's line, or no file: nothing.
+Last start (the native runtime's `vk_drivers/trying`, `vk_drivers/<id>.status` and `vk_drivers/last_start`,
+[environment variables](../runtime/environment-variables.md#custom-vulkan-driver-n64-rdp)). Per driver: the runtime
+writes each start's status both to `last_start` (`<id> <status>`, the last start with any driver) and to
+`<id>.status` (that driver's own); the app reads `<id>.status` first, else `last_start` when its line names the driver
+(a file from an older runtime). With per-game choices two games can use two drivers, and `last_start` alone would
+only know the last one. The trial marker or `crashed` → « crashed the game at its last start: skipped until you
+choose it again » (choosing it again, in Settings or for a game, clears the marker); `unsupported` → « Not compatible
+with the N64 renderer: … loaded, but paraLLEl-RDP cannot run on it » (no device, « lacks what paraLLEl-RDP needs »,
+or every shader try failed; K11MCH1's `Turnip_v26.0.0_R8` on the Thor); `open_failed` → « could not be opened »;
+`failed` (an older runtime's word for both) → « could not be opened, or the renderer could not run on it »;
+`not_loaded` → « was not loaded (Android kept the device's own driver) ». `ok`, another driver's line, or no file:
+nothing. Deleting a driver deletes its `<id>.status`.
 
 Refusals in plain words (`VkDriverStore.errorText`, nothing kept in every case): not a zip; not an adrenotools
 package (entries, `meta.json`, the library); over 256 MB; not a 64-bit ARM library; needs a newer Android; not the
@@ -1021,22 +1046,25 @@ allowed; an HTTP status; no connection; cancelled.
 
 **Stored where** (app-private `files/`, excluded from backups and from `LogProvider`): `vk_drivers/<id>/` (the
 package's files, read-only, and `origin.json`; a directory without `origin.json`, put there by hand, counts as an
-imported zip), `vk_drivers/index/` (the list's cache), `vk_drivers/trying` and `last_start` (the runtime's),
-`settings/vk_driver` (the choice: an id, or empty for the system driver). `ShellActivity.applyVkDriver` turns the
-choice into `RECOMP_VK_DRIVER_DIR` / `_LIB` / `_ID` / `RECOMP_VK_HOOK_DIR` for an N64 game (logcat
-`shell: vulkan driver <name> (<id>), game <key>` or `system`).
+imported zip), `vk_drivers/index/` (the list's cache), `vk_drivers/trying`, `last_start` and `<id>.status` (the
+runtime's), `settings/vk_driver` (Settings' choice: an id, or empty for the system driver), `settings/vk_driver_<KEY>`
+(a game's own: an id, `system`, or empty / absent to follow Settings). `ShellActivity.applyVkDriver` turns the
+resolved driver into `RECOMP_VK_DRIVER_DIR` / `_LIB` / `_ID` / `RECOMP_VK_HOOK_DIR` for an N64 game (logcat
+`shell: vulkan driver <name> (<id>) (as in Settings|the game's own choice), game <key>`, or `system …`).
 
 **A game's own app** has no network permission, no list, no download, no import and no choice of its own: its
 Graphics row shows the driver it took from XRecomp and pressing it says the driver is chosen in XRecomp. At each
 start (its launcher, on a thread; and `ShellActivity` before an N64 game, synchronously) it asks XRecomp through
 `VkDriverProvider` (`<XRecomp's package>.vkdrivers`, exported; every call is checked like the pack handover:
 `PackHandover.checkCaller`, package `fr.adserver.xrecomp.t<tid>` signed by the game apps' key):
-`call("active", <tid>)` gives the active id (empty: system); a new id is read from `content://…vkdrivers/<id>`
-(`VkDrivers.exportZip` streamed through a pipe; only the active driver is served), installed with
+`call("active", <tid>)` gives the id of the driver that title starts with in XRecomp (`VkDrivers.resolve(<tid>)`: its
+own choice in XRecomp, else Settings'; empty: system); a new id is read from `content://…vkdrivers/<id>`
+(`VkDrivers.exportZip` streamed through a pipe; only the calling title's driver is served), installed with
 `Origin.inherited` under XRecomp's id and made active; the system driver clears the choice; inherited drivers no
 longer chosen are deleted; an unchanged choice writes nothing (the runtime's trial marker stays). Limits: XRecomp
 not installed, older than this provider, or refusing → the app keeps what it had; a change in XRecomp reaches the
-game app at its next start, not while it runs; a game's own app exists only for Xbox titles today, so the inherited
+game app at its next start, not while it runs; the game app keeps one choice (its title's, stored as its own
+`settings/vk_driver`) and has no per-game row; a game's own app exists only for Xbox titles today, so the inherited
 driver has no effect until an N64 game can have one.
 
 **Network use.** This is the only place XRecomp uses the network, hence `android.permission.INTERNET` in the manifest
@@ -1087,13 +1115,20 @@ Tests: `VkDriverIndexTest` (recorded releases pages of both sources trimmed to t
 `src/test/resources/vkdriver/`; T30 with its date, size and sha256; the Turnip filter; ETag, 24 h, 304; limit,
 offline, errors; verified download with a fake HTTP layer, no driver binary), `TitleApkTest` (INTERNET not in a
 game's own app), `VkDriversTest` (packages, storage, choice), `VkDriverStoreTest` (the adapter, a download through
-it, last start, texts, a driver without `origin.json`), `VkDriverShareTest` (a game's own app following XRecomp),
-`LauncherDriversTest` (the Graphics row, the Drivers screen with a fake GitHub: choose, delete, offline, limit;
-screenshots `build/screenshots/ui-drivers-*.png`).
+it, last start, texts, a driver without `origin.json`), `VkDriverPerGameTest` (a game's choice: storage, resolution
+game → Settings → system, the reset on delete, `<id>.status` before `last_start`, the status words, the warnings and
+badges, the row's cycle and labels, download names), `VkDriverShareTest` (a game's own app following XRecomp, its
+title's own choice included), `LauncherDriversTest` (the Graphics row and its place in « All consoles », the Drivers
+screen with a fake GitHub: choose, delete, offline, limit, names without `.zip` / `.adpkg`; screenshots
+`build/screenshots/ui-drivers-*.png`), `LauncherConsoleControlsTest.n64OptionsVulkanDriver` (the Options row,
+screenshot `console-options-2-n64-vkdriver.png`), `GameMenuTest.n64GameVulkanDriverRow`. Native:
+`consoles/n64/tests` ctest `n64_vk_driver` and `n64_vk_driver_wrapper` (a fake `libxba_vkdriver.so`: `ok`,
+`unsupported`, `not_loaded` after an open, `<id>.status`).
 
 #### Device check (Vulkan drivers), for Alex
 
-1. Settings › Graphics (R1): the last row is « Vulkan driver », value « System » on a fresh install.
+1. Settings › Graphics (R1): « Vulkan driver » is the last row of « All consoles » (before « Xbox only »), value
+   « System » on a fresh install; its description says a game can override it in its Options.
 2. A: the Drivers screen; « System driver » is « Active »; the list is asked once (« Updating… », then « List from
    <today> ») and lists purple-turnip and K11MCH1's Turnip builds, no Qualcomm build.
 3. A on a listed driver: the progress screen (percent), then back on the screen with the new driver focused and
@@ -1104,6 +1139,15 @@ screenshots `build/screenshots/ui-drivers-*.png`).
 6. X, X on the active driver: deleted, « System driver » active again.
 7. « Import a zip »: pick a Turnip `.zip` from Downloads: installed as « Imported zip »; pick any other zip: a plain
    refusal, nothing kept.
+8. With K11MCH1 `Turnip_v26.0.0_R8` and purple-turnip T30 installed and Settings on T30: an N64 game's Home ›
+   Options › Vulkan driver « As in Settings (… T30 …) »; set it to R8, start the game: logcat
+   `shell: vulkan driver … (e634db0f929e2205) (the game's own choice)`; back in Options, the description says « Not
+   compatible with the N64 renderer », the Drivers screen shows R8 « Not compatible »;
+   `adb exec-out run-as fr.adserver.xrecomp.shell cat files/vk_drivers/e634db0f929e2205.status` → `unsupported`.
+   Another N64 game (following Settings) starts on T30 (`custom f65b2d3353fd4aa7`), and the first game's warning stays.
+9. In-game menu › Settings of an N64 game: « Vulkan driver (next start) » cycles the same choices.
+10. Delete R8 (X, X): the first game's Options row is « As in Settings » again.
+11. Download names in the list have no `.zip` / `.adpkg` (« turnip_mrpurple_T29-toasted »).
 
 ## Choosing the game
 

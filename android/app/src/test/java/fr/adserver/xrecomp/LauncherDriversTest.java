@@ -179,6 +179,29 @@ public class LauncherDriversTest {
         assertEquals("back on Graphics", LauncherActivity.TAB_GRAPHICS, a.settingsTabForTest());
     }
 
+    /** The row ends « All consoles » (before « Xbox only »), and its description says a game can override it. */
+    @Test
+    public void graphicsRowIsInAllConsoles() throws Exception {
+        LauncherActivity a = openGraphics();
+        List<Widgets.MenuRow> all = rows(a.getWindow().getDecorView(), new ArrayList<>());
+        Widgets.MenuRow vk = row(a, app.getString(R.string.OPT_VK_DRIVER));
+        assertNotNull(vk);
+        int vkAt = all.indexOf(vk), firstXbox = -1, lastShared = -1;
+        for (RecompConfig.Option o : RecompConfig.tabOptions(RecompConfig.shownOptions(false),
+                                                             RecompConfig.Section.GRAPHICS)) {
+            Widgets.MenuRow r = row(a, app.getString(o.title));
+            if (r == null)
+                continue;
+            if (o.shared)
+                lastShared = Math.max(lastShared, all.indexOf(r));
+            else if (firstXbox < 0)
+                firstXbox = all.indexOf(r);
+        }
+        assertTrue("after the shared options", vkAt > lastShared);
+        assertTrue("before the Xbox-only options", firstXbox < 0 || vkAt < firstXbox);
+        assertTrue(vk.description, vk.description.contains("Options"));
+    }
+
     // ---- The Drivers screen ------------------------------------------------------------------------------------
 
     @Test
@@ -204,8 +227,10 @@ public class LauncherDriversTest {
         Widgets.MenuRow refresh = row(a, app.getString(R.string.VKD_REFRESH));
         assertTrue(refresh.value, refresh.value.startsWith(app.getString(R.string.VKD_LIST_FROM, "").trim()));
         assertNotNull(row(a, app.getString(R.string.VKD_IMPORT)));
-        for (Widgets.MenuRow r : rows(a.getWindow().getDecorView(), new ArrayList<>()))
+        for (Widgets.MenuRow r : rows(a.getWindow().getDecorView(), new ArrayList<>())) {
             assertFalse("no Qualcomm build listed: " + r.title, r.title.toLowerCase().contains("qualcomm"));
+            assertFalse("no .zip / .adpkg in a name: " + r.title, r.title.contains(".zip") || r.title.contains(".adpkg"));
+        }
         TestSupport.screenshot(a.getWindow().getDecorView(), "ui-drivers-en-1080");
 
         // A on the installed driver: it becomes the active one.

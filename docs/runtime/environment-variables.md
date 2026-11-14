@@ -347,9 +347,11 @@ Only in a build configured with `-DXBOXRECOMP_LSFG=ON` (POSIX hosts); see [Frame
 
 A Vulkan driver the player supplied (Mesa Turnip on an Adreno) for the N64 Vulkan RDP, opened through libadrenotools
 (`libxba_vkdriver.so`, Android arm64 only; [third_party/adrenotools](../../third_party/adrenotools/README.md)). The app
-sets these before the game starts (`ShellActivity`, N64 games only), from its driver choice (Settings › Graphics ›
-Vulkan driver: `files/settings/vk_driver`, the drivers installed under `files/vk_drivers/<id>/` with their
-`meta.json`; [app-shell.md « Vulkan drivers »](../android/app-shell.md#vulkan-drivers)); they can also be written to
+sets these before the game starts (`ShellActivity`, N64 games only), from the game's driver: its own choice (its
+Options or the in-game menu: `files/settings/vk_driver_<KEY>`, a driver id or `system`), else Settings › Graphics ›
+Vulkan driver (`files/settings/vk_driver`), else the system driver; the drivers are installed under
+`files/vk_drivers/<id>/` with their `meta.json` ([app-shell.md « Vulkan drivers »](../android/app-shell.md#vulkan-drivers));
+they can also be written to
 `recomp.cfg` by hand for a test (with a driver chosen in the app its values win; with the system driver chosen the
 app unsets them and such lines would apply, so remove them after the test). Chain:
 custom driver, then the system driver, then the software RDP, each step logged; the start line names the driver
@@ -367,9 +369,21 @@ See [consoles/README.md](../../consoles/README.md) (N64 RDP) and `consoles/n64/r
 Files next to the drivers (written only when the driver directory's parent is named `vk_drivers`):
 `vk_drivers/trying` holds the id while the driver is being opened and checked; found at the next start with the same
 id (the driver crashed the process), the driver is skipped until the app removes the file (the player picks a driver
-again). `vk_drivers/last_start` is one line `<id> <status>`, status `ok`, `failed` (could not be opened, or
-paraLLEl-RDP could not run on it), `not_loaded` (adrenotools fell back to the device's own driver: logcat tag
-`hook_impl`) or `crashed` (skipped because of the marker).
+again). Each start's outcome goes to `vk_drivers/last_start`, one line `<id> <status>` (the last start with any
+custom driver), and to `vk_drivers/<id>.status`, one word `<status>` (that driver's own last start; only for an id of
+`[A-Za-z0-9_-]`, which the app's always are). Status:
+
+| Status | Meaning |
+|---|---|
+| `ok` | the RDP runs on the custom driver |
+| `open_failed` | it could not be opened (bad variables, no library file, `libxba_vkdriver.so` / adrenotools refused it, no `vkGetInstanceProcAddr`, or the loader answers nothing): the system driver was used |
+| `unsupported` | it was opened, but paraLLEl-RDP cannot run on it (no Vulkan device, the device « lacks what paraLLEl-RDP needs », or every shader try failed): the system driver was used. The app says « Not compatible with the N64 renderer » |
+| `not_loaded` | adrenotools fell back to the device's own driver (logcat tag `hook_impl`) |
+| `crashed` | skipped because of the marker |
+| `failed` | written by a runtime before `open_failed` / `unsupported` for either; the app still reads it |
+
+The app reads `<id>.status` first and falls back to `last_start` when its line names that driver (a file from an older
+runtime), so with per-game choices each driver keeps its own outcome.
 
 ## Audio
 

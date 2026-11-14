@@ -2097,8 +2097,14 @@ public class LauncherActivity extends Activity {
         // XBA-181: what every console reads under « All consoles », the Xbox's own under « Xbox only ».
         List<RecompConfig.Option> tab = RecompConfig.tabOptions(shown, section);
         boolean grouped = RecompConfig.grouped(tab, section);
+        // The Vulkan driver row ends « All consoles » (any console's renderer may use it; for now the N64's).
+        boolean vkPending = settingsTab == TAB_GRAPHICS;
         for (int oi = 0; oi < tab.size(); oi++) {
             RecompConfig.Option o = tab.get(oi);
+            if (vkPending && grouped && oi > 0 && tab.get(oi - 1).shared && !o.shared) {
+                vkDriverRow(list);
+                vkPending = false;
+            }
             if (grouped && (oi == 0 || tab.get(oi - 1).shared != o.shared))
                 listLabel(list, getString(o.shared ? R.string.SET_GROUP_ALL : R.string.SET_GROUP_XBOX));
             MenuRow r = listRow(list, getString(o.title), getString(o.detail), null);
@@ -2123,7 +2129,7 @@ public class LauncherActivity extends Activity {
                 lsfgDllRow(list);
         }
         refreshRendererDims();
-        if (settingsTab == TAB_GRAPHICS)
+        if (vkPending)
             vkDriverRow(list);
         if (settingsTab == TAB_ADVANCED) {
             MenuRow reset = listRow(list, getString(R.string.RESET), getString(R.string.RESET_DETAIL),
@@ -2510,7 +2516,7 @@ public class LauncherActivity extends Activity {
                             inherits ? () -> setNote(getString(R.string.VKD_GAME_APP_NOTE), NOTE_INFO)
                                      : () -> go(Screen.DRIVERS));
         r.setValue(vkdActiveLabel(d));
-        int warn = d == null ? 0 : VkDriverStore.lastStartWarning(VkDriverStore.lastStart(drivers, d.id));
+        int warn = VkDriverStore.effectiveWarning(drivers, null);
         onFocus(r, () -> describe(detail, warn != 0 ? getString(warn) : null, Theme.WARN));
     }
 
@@ -2569,11 +2575,9 @@ public class LauncherActivity extends Activity {
             String state = VkDriverStore.listState(this, vkdListing, refreshing);
             onFocus(refresh, () -> describe(refresh.description + "\n\n" + state, footer, Theme.TEXT_DIM));
             List<VkDriverIndex.Entry> avail = VkDriverStore.toDownload(vkdListing, drivers);
-            java.util.Map<String, Integer> names = new java.util.HashMap<>();
-            for (VkDriverIndex.Entry e : avail)
-                names.merge(e.assetName, 1, Integer::sum);
-            for (VkDriverIndex.Entry e : avail)   // the same file name in several releases: its tag too
-                vkdAvailableRow(list, e, names.get(e.assetName) > 1, footer);
+            List<String> names = VkDriverStore.rowNames(avail);   // the same name in several releases: its tag too
+            for (int i = 0; i < avail.size(); i++)
+                vkdAvailableRow(list, avail.get(i), names.get(i), footer);
             if (avail.isEmpty()) {
                 TextView none = Theme.body(this, getString(vkdListing.entries.isEmpty() ? R.string.VKD_NONE_LISTED
                                                                                          : R.string.VKD_ALL_INSTALLED));
@@ -2598,13 +2602,12 @@ public class LauncherActivity extends Activity {
         MenuRow r = listRow(list, d.name, null, () -> vkdSelect(d));
         String version = d.driverVersion != null && !d.driverVersion.isEmpty() ? d.driverVersion : d.packageVersion;
         r.setValue(version == null ? "" : version);
-        int warn = VkDriverStore.lastStartWarning(VkDriverStore.lastStart(drivers, d.id));
-        if (isActive && warn != 0)
-            r.setBadge(getString(R.string.VKD_ACTIVE_WARN_BADGE), Theme.WARN);
+        VkDriverStore.LastStart last = VkDriverStore.lastStart(drivers, d.id);
+        int warn = VkDriverStore.lastStartWarning(last), badge = VkDriverStore.lastStartBadge(last, isActive);
+        if (badge != 0)
+            r.setBadge(getString(badge), Theme.WARN);
         else if (isActive)
             r.setBadge(getString(R.string.VKD_ACTIVE), Theme.ACCENT);
-        else if (warn != 0)
-            r.setBadge(getString(R.string.VKD_WARN_BADGE), Theme.WARN);
         List<String> facts = new ArrayList<>();
         if (version != null && !version.isEmpty())
             facts.add(kv(R.string.VKD_KV_VERSION, version));
@@ -2619,13 +2622,11 @@ public class LauncherActivity extends Activity {
     }
 
     /**
-     * A downloadable driver: its file name without .zip (a release may hold several), its size as the value,
-     * « Pre-release » as the badge; A downloads it.
+     * A downloadable driver: its file name without .zip / .adpkg (a release may hold several; VkDriverStore.rowNames),
+     * its size as the value, « Pre-release » as the badge; A downloads it.
      */
-    private void vkdAvailableRow(LinearLayout list, VkDriverIndex.Entry e, boolean withTag, String footer) {
-        String file = e.assetName.toLowerCase(Locale.ROOT).endsWith(".zip")
-                      ? e.assetName.substring(0, e.assetName.length() - 4) : e.assetName;
-        MenuRow r = listRow(list, withTag ? file + " · " + e.tag : file, null, () -> vkdDownload(e));
+    private void vkdAvailableRow(LinearLayout list, VkDriverIndex.Entry e, String name, String footer) {
+        MenuRow r = listRow(list, name, null, () -> vkdDownload(e));
         r.setValue(e.size > 0 ? size(e.size) : "");
         if (e.prerelease)
             r.setBadge(getString(R.string.VKD_PRERELEASE), Theme.WARN);
@@ -5642,6 +5643,8 @@ public class LauncherActivity extends Activity {
             if (first == null)
                 first = r;
         }
+        if (Console.ofKey(key) == Console.N64 && !vkdInherits())   // only the N64 Vulkan renderer uses one, for now
+            romVkDriverRow(list, key);
         // Its stored things (XBA-181: the console's save folder, save/<console>-<KEY>/, Storage.saves).
         List<Storage.Item> items = Storage.items(storageDirs(), key, games.get(key));
         if (!items.isEmpty()) {
@@ -5653,6 +5656,42 @@ public class LauncherActivity extends Activity {
         defaultFocus = first;
         addHint("A", R.string.HINT_CHANGE, this::clickFocused);
         addHint("B", R.string.HINT_BACK, this::back);
+    }
+
+    /**
+     * ROM_OPTIONS › « Vulkan driver »: as in Settings (its driver named), the system driver, or each installed driver
+     * (VkDrivers.setGameChoice; ShellActivity.applyVkDriver resolves it at the game's next start); the description
+     * warns when the driver the game would start with went wrong last time.
+     */
+    private void romVkDriverRow(LinearLayout list, String key) {
+        VkDrivers drivers = VkDrivers.of(this);
+        List<String> choices = VkDriverStore.gameChoices(drivers.list());
+        String[] labels = new String[choices.size()];
+        for (int i = 0; i < labels.length; i++)
+            labels[i] = VkDriverStore.gameChoiceLabel(this, drivers, choices.get(i));
+        String detail = getString(R.string.ROM_OPT_VK_DRIVER_DETAIL);
+        MenuRow r = settingRow(list, getString(R.string.OPT_VK_DRIVER), detail);
+        r.setChoices(labels);
+        Runnable refresh = () -> {
+            r.setValue(VkDriverStore.gameChoiceLabel(this, drivers, drivers.gameChoice(key)));
+            int warn = VkDriverStore.effectiveWarning(drivers, key);
+            if (r.hasFocus())
+                describe(detail, warn != 0 ? getString(warn) : null, Theme.WARN);
+        };
+        refresh.run();
+        onFocus(r, () -> {
+            int warn = VkDriverStore.effectiveWarning(drivers, key);
+            describe(detail, warn != 0 ? getString(warn) : null, Theme.WARN);
+        });
+        r.cycler = d -> {
+            String v = VkDriverStore.stepGameChoice(drivers, key, d);
+            refresh.run();
+            feedback.play(UiFeedback.Cue.MOVE, r);
+            setNote(getString(gameRunning() && key.equals(launchedTid()) ? R.string.ROM_OPT_SAVED_RUNNING
+                                                                         : R.string.ROM_OPT_SAVED), NOTE_OK);
+            Log.i(TAG, "launcher: " + key + " vulkan driver " + (v == null ? "as in Settings" : v));
+        };
+        r.setOnClickListener(v -> r.cycler.step(1));
     }
 
     /** The Settings option whose row is titled title (a string resource), or null. */

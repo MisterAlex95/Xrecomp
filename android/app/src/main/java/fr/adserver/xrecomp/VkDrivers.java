@@ -41,9 +41,13 @@ import java.util.zip.ZipOutputStream;
  *   vk_drivers/&lt;id&gt;/&lt;libraryName&gt;  the driver library (and any other flat file of the package), read-only
  *   vk_drivers/&lt;id&gt;/origin.json    where it came from: kind, repo, tag, asset, sha256, size, installed
  *   vk_drivers/trying              written by the native runtime before it opens a custom driver: the id
+ *   vk_drivers/last_start          the native runtime's last start with a custom driver: « &lt;id&gt; &lt;status&gt; »
+ *   vk_drivers/&lt;id&gt;.status       the same status, per driver (the last start that used that driver)
  *   vk_drivers/index/              VkDriverIndex's cache (not a driver)
  *   vk_drivers/.tmp-*, .del-*      an install or a delete under way (removed at the next install)
  *   settings/vk_driver             the global choice: an id, or empty / missing for the system driver
+ *   settings/vk_driver_&lt;KEY&gt;       a game's own choice (library key, upper case): an id, « system », or empty /
+ *                                  missing to follow the global choice
  * </pre>
  * &lt;id&gt; is the first 16 hex digits (lower case) of the package zip's SHA-256: stable, never a name the package
  * chooses. Excluded from backups (res/xml) and from LogProvider.
@@ -60,6 +64,12 @@ final class VkDrivers {
     static final String TRIAL_MARKER = "trying";
     /** The global choice, a one-line file in files/settings (the GameStore.readSettingFile pattern). */
     static final String SETTING = "vk_driver";
+    /** A game's own choice: files/settings/vk_driver_&lt;KEY&gt; (as N64Pak's n64_pak_&lt;KEY&gt;). */
+    static final String GAME_SETTING_PREFIX = "vk_driver_";
+    /** A game's choice of the system driver (whatever the global choice is). */
+    static final String SYSTEM = "system";
+    /** The per-driver status file next to the drivers: vk_drivers/&lt;id&gt;.status (the native runtime writes it). */
+    static final String STATUS_SUFFIX = ".status";
 
     static final String ENV_DIR = "RECOMP_VK_DRIVER_DIR",
                         ENV_LIB = "RECOMP_VK_DRIVER_LIB",
@@ -468,15 +478,20 @@ final class VkDrivers {
         return false;
     }
 
-    /** Deletes a driver; the choice goes back to the system driver when it was the active one. */
+    /**
+     * Deletes a driver; the global choice goes back to the system driver when it was the active one, and every game
+     * that had chosen it follows the global choice again.
+     */
     boolean delete(String id) {
         if (!validId(id))
             return false;
         synchronized (LOCK) {
             if (id.equals(activeId()))
                 clearActive();
+            resetGameChoices(id);
             if (id.equals(trialMarker()))
                 new File(root(), TRIAL_MARKER).delete();
+            new File(root(), id + STATUS_SUFFIX).delete();
             File dir = new File(root(), id);
             if (!dir.exists())
                 return false;
@@ -527,7 +542,11 @@ final class VkDrivers {
     }
 
     private boolean writeSetting(String v) {
-        File f = settingFile(), tmp = new File(f.getPath() + ".tmp");
+        return writeLine(settingFile(), v);
+    }
+
+    private static boolean writeLine(File f, String v) {
+        File tmp = new File(f.getPath() + ".tmp");
         File d = f.getParentFile();
         if (d != null && !(d.mkdirs() || d.isDirectory()))
             return false;
@@ -537,6 +556,87 @@ final class VkDrivers {
             return false;
         }
         return tmp.renameTo(f);
+    }
+
+    // ---- A game's own choice ---------------------------------------------------------------------------------------
+
+    /** A library key usable in a file name (n64-NZLP-B2055FBD), upper case, or null. */
+    static String gameFileKey(String key) {
+        if (key == null)
+            return null;
+        String k = key.trim().toUpperCase(Locale.ROOT);
+        return k.isEmpty() || k.length() > 96 || !NAME.matcher(k).matches() || k.startsWith(".") ? null : k;
+    }
+
+    private File gameSettingFile(String key) {
+        String k = gameFileKey(key);
+        return k == null ? null : new File(new File(filesDir, "settings"), GAME_SETTING_PREFIX + k);
+    }
+
+    /**
+     * A game's own choice: {@link #SYSTEM}, a driver id (maybe no longer installed), or null when it follows the global
+     * choice (no file, an empty one, or a line that is neither).
+     */
+    String gameChoice(String key) {
+        File f = gameSettingFile(key);
+        if (f == null || !f.isFile())
+            return null;
+        try (InputStream in = new FileInputStream(f)) {
+            String s = new String(readAll(in, 256), StandardCharsets.UTF_8).trim();
+            return SYSTEM.equals(s) || validId(s) ? s : null;
+        } catch (IOException e) {
+            return null;
+        }
+    }
+
+    /**
+     * Sets a game's own choice: null (or empty) to follow the global choice, {@link #SYSTEM}, or an installed driver's
+     * id (choosing it again forgets a failed trial of it, as setActive). False when the id is not installed, the key
+     * cannot name a file, or the write fails.
+     */
+    boolean setGameChoice(String key, String choice) {
+        File f = gameSettingFile(key);
+        if (f == null)
+            return false;
+        String v = choice == null ? "" : choice.trim();
+        if (!v.isEmpty() && !SYSTEM.equals(v)) {
+            if (read(v) == null)
+                return false;
+            if (v.equals(trialMarker()))
+                new File(root(), TRIAL_MARKER).delete();
+        }
+        return writeLine(f, v);
+    }
+
+    /**
+     * The driver a game starts with: its own choice (system: null; an installed driver: that one), else the global
+     * choice ({@link #active}). A game's choice naming a driver no longer installed follows the global one. key null:
+     * the global choice.
+     */
+    Driver resolve(String key) {
+        String g = key == null ? null : gameChoice(key);
+        if (SYSTEM.equals(g))
+            return null;
+        if (g != null) {
+            Driver d = read(g);
+            if (d != null)
+                return d;
+        }
+        return active();
+    }
+
+    /** Every game's choice of id goes back to following the global choice (the driver is being deleted). */
+    private void resetGameChoices(String id) {
+        File[] fs = new File(filesDir, "settings").listFiles();
+        if (fs == null)
+            return;
+        for (File f : fs) {
+            String n = f.getName();
+            if (!n.startsWith(GAME_SETTING_PREFIX) || n.endsWith(".tmp") || !f.isFile())
+                continue;
+            if (id.equals(gameChoice(n.substring(GAME_SETTING_PREFIX.length()))))
+                f.delete();
+        }
     }
 
     /** The id in the native runtime's trial marker (a start that never reached its shader check), or null. */
@@ -561,18 +661,38 @@ final class VkDrivers {
     static final String LAST_START = "last_start";
 
     /**
-     * The status the native runtime wrote for this driver's last start (« ok », « failed », « not_loaded »,
-     * « crashed »), or null when the last start with a custom driver was another driver's (or none yet).
+     * The status the native runtime wrote for this driver's last start (« ok », « unsupported », « open_failed »,
+     * « not_loaded », « crashed », or « failed » from a runtime before those two), or null when it has not been used
+     * yet. vk_drivers/&lt;id&gt;.status first (one per driver, so a game with its own choice does not hide another
+     * driver's), else last_start when its line names this driver (written by a runtime without the per-driver file).
      */
     String lastStartStatus(String id) {
         if (!validId(id))
             return null;
-        File f = new File(root(), LAST_START);
+        String own = readWord(new File(root(), id + STATUS_SUFFIX), null);
+        return own != null ? own : readWord(new File(root(), LAST_START), id);
+    }
+
+    /** The status word of a status file: « &lt;status&gt; » (id null) or « &lt;id&gt; &lt;status&gt; » naming id. */
+    static String parseStatus(String text, String id) {
+        if (text == null)
+            return null;
+        String t = text.trim();
+        if (t.isEmpty())
+            return null;
+        String[] w = t.split("\\s+");
+        if (id == null)
+            return w.length == 1 && STATUS_WORD.matcher(w[0]).matches() ? w[0] : null;
+        return w.length == 2 && w[0].equals(id) && STATUS_WORD.matcher(w[1]).matches() ? w[1] : null;
+    }
+
+    private static final Pattern STATUS_WORD = Pattern.compile("[a-z_]{1,32}");
+
+    private static String readWord(File f, String id) {
         if (!f.isFile())
             return null;
         try (InputStream in = new FileInputStream(f)) {
-            String[] w = new String(readAll(in, 256), StandardCharsets.UTF_8).trim().split("\\s+");
-            return w.length == 2 && w[0].equals(id) ? w[1] : null;
+            return parseStatus(new String(readAll(in, 256), StandardCharsets.UTF_8), id);
         } catch (IOException e) {
             return null;
         }

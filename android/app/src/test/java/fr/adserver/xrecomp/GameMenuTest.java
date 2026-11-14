@@ -750,6 +750,48 @@ public class GameMenuTest {
         assertNull(GameLanguage.titleChoice(activity, "4D5300D1"));
     }
 
+    /**
+     * An N64 game: « Vulkan driver (next start) », as in Settings (naming Settings' driver), System, each installed
+     * driver, saved for this game (vk_driver_&lt;KEY&gt;); the value warns when that driver is not compatible. A GBA game
+     * has no such row (only the N64 renderer uses one).
+     */
+    @Test
+    public void n64GameVulkanDriverRow() throws Exception {
+        VkDrivers vk = VkDrivers.of(activity);
+        VkDrivers.Driver d = vk.install(new java.io.ByteArrayInputStream(VkDriversTest.zip(VkDriversTest.good())),
+                                        VkDrivers.Origin.manual());
+        String key = "n64-NZLP-B2055FBD";
+        GameStore.rememberRomLaunch(activity, "/sdcard/roms/zelda.z64", "Zelda", key);
+        menu.release();
+        build();
+        menu.open("Back");
+        menu.row(GameMenu.Item.SETTINGS).performClick();
+        Widgets.MenuRow r = menu.row(GameMenu.Item.VK_DRIVER);
+        assertNotNull(r);
+        assertEquals(activity.getString(R.string.MENU_VK_DRIVER), r.title);
+        assertEquals(activity.getString(R.string.ROM_OPT_FOLLOW, activity.getString(R.string.VKD_SYSTEM_SHORT)),
+                     r.value);
+        r.performClick();
+        assertEquals(VkDrivers.SYSTEM, vk.gameChoice(key));
+        r.performClick();
+        assertEquals(d.id, vk.gameChoice(key));
+        assertEquals(VkDriverStore.label(d), r.value);
+        java.nio.file.Files.write(new java.io.File(vk.root(), d.id + VkDrivers.STATUS_SUFFIX).toPath(),
+                                  "unsupported\n".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        r.performClick();
+        r.cycler.step(-1);   // back on the driver: the value says it is not compatible
+        assertEquals(VkDriverStore.label(d) + " · " + activity.getString(R.string.VKD_UNSUPPORTED_BADGE), r.value);
+        assertNull("Settings untouched", vk.activeId());
+
+        GameStore.rememberRomLaunch(activity, "/sdcard/roms/quest.gba", "Pocket Quest", "gba-AXVE-1A2B3C4D");
+        menu.release();
+        build();
+        menu.open("Back");
+        menu.row(GameMenu.Item.SETTINGS).performClick();
+        assertNotNull(menu.row(GameMenu.Item.SCALE));
+        assertNull(menu.row(GameMenu.Item.VK_DRIVER));
+    }
+
     /** XBA-181: an Xbox game has no console Scale / Filter rows. */
     @Test
     public void noConsoleRowsForAnXboxGame() throws Exception {

@@ -323,6 +323,7 @@ public class LauncherConsoleControlsTest {
         assertEquals(app.getString(R.string.ROM_OPT_FOLLOW, app.getString(R.string.VAL_CFILTER_CONSOLE)),
                      row(a, filterTitle).value);
         assertNotNull("its saves", row(a, app.getString(R.string.LIB_ST_SAVES)));
+        assertNull("no Vulkan driver row: only the N64 renderer uses one", row(a, app.getString(R.string.OPT_VK_DRIVER)));
         shot(a, "console-options-1-gba");
 
         focusRow(a, scaleTitle);
@@ -352,6 +353,47 @@ public class LauncherConsoleControlsTest {
         assertFalse(save.exists());
         key(a, KeyEvent.KEYCODE_BUTTON_B);
         assertEquals(LauncherActivity.Screen.ROM_HOME, a.screenForTest());
+    }
+
+    /**
+     * An N64 game's Options: its own Vulkan driver (« As in Settings (<Settings' driver>) », System, each installed
+     * driver; vk_driver_&lt;KEY&gt;, which ShellActivity resolves), and the warning of the driver it would start with.
+     * (A GBA game has no such row: gbaOptions.)
+     */
+    @Test
+    public void n64OptionsVulkanDriver() throws Exception {
+        Toolchain.assetsOverride = null;
+        Toolchain.nativeDirOverride = null;
+        File n64 = rom("n64", "Star Race.z64", ConsoleTest.n64(0));
+        VkDrivers vk = VkDrivers.of(app);
+        VkDrivers.Driver d = vk.install(new java.io.ByteArrayInputStream(VkDriversTest.zip(VkDriversTest.good())),
+                                        VkDrivers.Origin.manual());
+        java.nio.file.Files.write(new File(vk.root(), d.id + VkDrivers.STATUS_SUFFIX).toPath(),
+                                  "unsupported\n".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        LauncherActivity a = launch();
+        String key = LibraryIndex.read(Library.indexFile(app.getFilesDir())).find(LibraryIndex.fileLoc(n64)).tid;
+        assertEquals(Console.N64, Console.ofKey(key));
+        openControls(a, "Star Race", R.string.ROM_OPTIONS, LauncherActivity.Screen.ROM_OPTIONS);
+        String title = app.getString(R.string.OPT_VK_DRIVER);
+        Widgets.MenuRow r = row(a, title);
+        assertNotNull("N64: the Vulkan driver row", r);
+        assertEquals(app.getString(R.string.ROM_OPT_FOLLOW, app.getString(R.string.VKD_SYSTEM_SHORT)), r.value);
+        focusRow(a, title);
+        assertEquals(app.getString(R.string.ROM_OPT_VK_DRIVER_DETAIL), a.descriptionForTest());
+        key(a, KeyEvent.KEYCODE_DPAD_RIGHT);
+        assertEquals(VkDrivers.SYSTEM, vk.gameChoice(key));
+        assertEquals(app.getString(R.string.VKD_SYSTEM_SHORT), row(a, title).value);
+        key(a, KeyEvent.KEYCODE_DPAD_RIGHT);
+        assertEquals(d.id, vk.gameChoice(key));
+        assertEquals(VkDriverStore.label(d), row(a, title).value);
+        assertEquals(app.getString(R.string.ROM_OPT_SAVED), a.noteForTest());
+        assertTrue("the driver's « not compatible » warning",
+                   a.descriptionForTest().contains(app.getString(R.string.VKD_LAST_UNSUPPORTED)));
+        assertNull("Settings untouched", vk.activeId());
+        assertEquals(d.id, vk.resolve(key).id);
+        shot(a, "console-options-2-n64-vkdriver");
+        key(a, KeyEvent.KEYCODE_DPAD_RIGHT);
+        assertNull("back to Settings' choice", vk.gameChoice(key));
     }
 
     /** A PS1 disc: Cross / Circle / Square / Triangle, L1 .. R3, both DualShock sticks. */
