@@ -1,7 +1,8 @@
 /* The PlayStation runtime (XBA-146, XBA-168): its pure helpers (pad mapping, sticks, colour conversion, card path,
  * EXE magic, fallback key, frame length) and headless runs (SDL's dummy drivers) of our homebrew through OpenBIOS:
  * an EXE fast-booted, the same through "fd:N" (the app shell's documents), a disc booted by the BIOS from its .cue,
- * memory cards read back and left alone while unchanged, the app shell's entry, and the errors.
+ * memory cards read back and left alone while unchanged, the app shell's entry, the errors, and a game's save
+ * (the mcard homebrew: BIOS memory card functions) written to disk after the debounce, then reloaded.
  *
  *   ps1_runtime_test [BIOS HOMEBREW_DIR]     (the runs skip, the helpers still run, when either is absent) */
 #include "host_pad.h"
@@ -119,6 +120,90 @@ static int ppm_size(const char *p, int *w, int *h)
     return ok ? 0 : -1;
 }
 
+/* Runs o with stdout in log (the runtime's "ps1: ..." lines); returns ps1_runtime_run's result. */
+static int run_logged(const ps1_runtime_opts *o, const char *log)
+{
+    fflush(stdout);
+    int saved = dup(1), lf = open(log, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (saved < 0 || lf < 0 || dup2(lf, 1) < 0)
+        return -2;
+    close(lf);
+    int rc = ps1_runtime_run(o);
+    fflush(stdout);
+    dup2(saved, 1);
+    close(saved);
+    return rc;
+}
+
+static int file_has(const char *path, const char *text)
+{
+    static char buf[1 << 16];
+    FILE *f = fopen(path, "rb");
+    if (!f)
+        return 0;
+    size_t n = fread(buf, 1, sizeof buf - 1, f);
+    fclose(f);
+    buf[n] = 0;
+    return strstr(buf, text) != NULL;
+}
+
+/* A game's save (XBA-167): mcard.exe creates XBAMCARD through the BIOS card functions; the runtime writes card1.mcr a
+ * second after the game's last write to the card (the run goes on for seconds after the save: the debounce wrote
+ * it, not the exit), a valid card holding the file (header, directory entry, the 8 KB pattern). Run again on that
+ * card: it is loaded, the game finds its save and reads it (the BIOS's card checks write nothing new), so the file is
+ * not written again; without the reload the game would have created the save on a blank card and the card would
+ * have been written. */
+static void test_save(const char *dir, const char *hb)
+{
+    char exe[600], card[700], log[700], ref[720], cmd[1600];
+    snprintf(exe, sizeof exe, "%s/mcard.exe", hb);
+    if (access(exe, R_OK) != 0) {
+        printf("save run skipped: no %s\n", exe);
+        return;
+    }
+    ps1_runtime_opts o;
+    ps1_runtime_opts_init(&o);
+    o.game = exe;
+    o.save_dir = dir;
+    o.title_key = "MCRD-00001";
+    o.frames = 6000; /* the save is done by frame ~450; seconds of unpaced frames follow */
+    o.unpaced = 1;
+    CHECK(ps1_runtime_card_path(dir, "MCRD-00001", 0, card, sizeof card) == 0);
+    snprintf(log, sizeof log, "%s/save1.log", dir);
+    CHECK(run_logged(&o, log) == 0);
+    CHECK(file_has(log, "memory card 1 written (written by the game)"));
+    CHECK(!file_has(log, "memory card 1 written (exit)"));
+    FILE *f = fopen(card, "rb");
+    static uint8_t d[PS1_CARD_SIZE + 1];
+    size_t n = f ? fread(d, 1, sizeof d, f) : 0;
+    if (f)
+        fclose(f);
+    CHECK(n == PS1_CARD_SIZE);
+    if (n == PS1_CARD_SIZE) {
+        uint8_t x = 0;
+        for (int i = 0; i < 0x7F; i++)
+            x ^= d[i];
+        CHECK(d[0] == 'M' && d[1] == 'C' && d[0x7F] == x);
+        const uint8_t *e = d + 128; /* directory frame 1: the first block */
+        CHECK(e[0] == 0x51 && e[4] == 0x00 && e[5] == 0x20 && !memcmp(e + 10, "XBAMCARD", 9));
+        int same = 1;
+        for (unsigned i = 0; i < 8192; i++)
+            same &= d[0x2000 + i] == (uint8_t)((i * 7u + 0x5Au) ^ (i >> 8));
+        CHECK(same);
+    }
+    snprintf(ref, sizeof ref, "%s.ref", card);
+    snprintf(cmd, sizeof cmd, "cp '%s' '%s'", card, ref);
+    CHECK(system(cmd) == 0);
+
+    o.frames = 900;
+    snprintf(log, sizeof log, "%s/save2.log", dir);
+    CHECK(run_logged(&o, log) == 0);
+    CHECK(file_has(log, "memory card 1 loaded from"));
+    CHECK(!file_has(log, "memory card 1 written"));
+    snprintf(cmd, sizeof cmd, "cmp -s '%s' '%s'", card, ref);
+    CHECK(system(cmd) == 0);
+}
+
 static void test_runs(const char *bios, const char *hb)
 {
     char dir[] = "/tmp/ps1_runtime_test.XXXXXX", exe[600], cue[600], shot[300], card[400], spec[32];
@@ -207,6 +292,9 @@ static void test_runs(const char *bios, const char *hb)
     ps1_runtime_set_save_dir(NULL);
     snprintf(cmd, sizeof cmd, "cmp -s '%s' '%s.ref'", card, card);
     CHECK(system(cmd) == 0);
+
+    /* 6: a game's save written by the debounce, then reloaded. */
+    test_save(dir, hb);
     SDL_Quit();
 
     snprintf(cmd, sizeof cmd, "rm -rf '%s'", dir);

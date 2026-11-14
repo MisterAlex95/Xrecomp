@@ -11,10 +11,12 @@ commercial disc or a BIOS dump. Only our own code lives here; third-party test p
 | [`timer_irq`](timer_irq/README.md) | VBlank callback, root counters 1 (HBlank) and 2 (sysclk/8) IRQs | `timer_irq.exe`, `.bin/.cue` |
 | [`gfx`](gfx/README.md) | TILE, POLY_F3, POLY_G4, POLY_FT4 (16-bit texture), SPRT (4-bit CLUT), VRAM readback | `gfx.exe`, `gfx.bin/.cue` |
 | [`overlay`](overlay/README.md) | code loaded from the disc into RAM and called, then replaced at the same address | `overlay.exe`, `overlay.bin/.cue` |
+| [`mcard`](mcard/README.md) | a save on memory card 1 through the BIOS card functions (format, create, write, read back, list) | `mcard.exe`, `mcard.bin/.cue` |
 
 Every program is a PS-X EXE **and** a BIN/CUE disc (one MODE2/2352 data track, ISO 9660, `SYSTEM.CNF` booting the
 EXE), built by `mkpsxiso`, so disc parsing (ISO 9660, SYSTEM.CNF, EXE header) is tested on every program. Disc file
-names are 8.3: `HELLO.EXE`, `CPU.EXE`, `TIMERIRQ.EXE`, `GFX.EXE`, `OVERLAY.EXE` (+ `OVL_A.BIN`, `OVL_B.BIN`).
+names are 8.3: `HELLO.EXE`, `CPU.EXE`, `TIMERIRQ.EXE`, `GFX.EXE`, `MCARD.EXE`, `OVERLAY.EXE` (+ `OVL_A.BIN`,
+`OVL_B.BIN`).
 The discs carry **no licence data** (the system area is zero-filled): they are for emulators and our recompiler,
 not for booting a retail console.
 
@@ -39,7 +41,7 @@ defined in [`common/xba_result.h`](common/xba_result.h), then spins in a halt lo
 |---|---|---|
 | 0x00 | `magic` | `0x58424152` ("XBAR") once `main` started |
 | 0x04 | `status` | 0 while running, `0x50415353` ("PASS") or `0x4641494C` ("FAIL") at the end |
-| 0x08 | `test_id` | fourcc (`HELO`, `CPU `, `TIRQ`, `GFX `, `OVL `) |
+| 0x08 | `test_id` | fourcc (`HELO`, `CPU `, `TIRQ`, `GFX `, `OVL `, `MCRD`) |
 | 0x0C | `detail` | 0 on pass; on fail 1 + index of the first failing check |
 | 0x10 | `checksum` | program-specific (`cpu`: FNV-1a of the table) |
 | 0x14 | `count` | number of table entries written |
@@ -54,7 +56,7 @@ programs never `malloc`. Overlays load at `0x80100000`, far above the EXEs (`0x8
 
 ## Validation status
 
-All five programs report PASS in **PCSX-Redux** (commit `b3eb3253`, interpreter CPU) with **OpenBIOS** (its
+The first five programs report PASS in **PCSX-Redux** (commit `b3eb3253`, interpreter CPU) with **OpenBIOS** (its
 open-source BIOS, built from source; no Sony BIOS), both as the side-loaded EXE and as the disc booted through
 `SYSTEM.CNF` (2026-11-14):
 

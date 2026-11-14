@@ -27,6 +27,8 @@
  * --missed FILE append the code the interpreter had to run (address, hash, bytes: the discovered file of
  *               ps1_recomp.h) to FILE at exit
  * --stats       print the recompiler's counters (native share needs a pack built with -DPS1_RC_COUNT)
+ * --card FILE   memory card 1 (a 128 KB raw image, .mcr): loaded when the file is there (any 128 KB content: zeros
+ *               are an unformatted card), written back at exit when the game wrote the card
  * Prints the frame rate reached on stderr (unless --quiet). Exit 3 on a usage or file error. */
 #define _POSIX_C_SOURCE 199309L /* clock_gettime */
 #include "ps1_core.h"
@@ -147,14 +149,14 @@ static int usage(void)
 {
     fprintf(stderr, "usage: ps1_run [--bios PATH] [--exe X.exe | --disc X.cue] [--frames N] [--result] [--ppm OUT]\n"
                     "               [--wav OUT] [--tty] [--until-tty TEXT] [--pad MASK] [--hash] [--quiet]\n"
-                    "               [--pack LIB.so [--lockstep]] [--missed FILE] [--stats]\n");
+                    "               [--pack LIB.so [--lockstep]] [--missed FILE] [--stats] [--card FILE]\n");
     return 3;
 }
 
 int main(int argc, char **argv)
 {
     const char *bios_path = getenv("RECOMP_PS1_BIOS"), *exe_path = NULL, *disc_path = NULL;
-    const char *ppm = NULL, *wav = NULL, *until = NULL, *pack = NULL, *missed = NULL;
+    const char *ppm = NULL, *wav = NULL, *until = NULL, *pack = NULL, *missed = NULL, *card = NULL;
     bool lockstep = false, stats = false;
     long lock_cycles = 0;
     long frames = 600;
@@ -197,6 +199,8 @@ int main(int argc, char **argv)
             lockstep = true, lock_cycles = strtol(argv[++i], NULL, 0);
         else if (!strcmp(a, "--missed") && more)
             missed = argv[++i];
+        else if (!strcmp(a, "--card") && more)
+            card = argv[++i];
         else if (!strcmp(a, "--stats"))
             stats = true;
         else if (!strcmp(a, "--quiet"))
@@ -248,6 +252,18 @@ int main(int argc, char **argv)
     } else if (missed) {
         fprintf(stderr, "ps1_run: --missed needs --pack (lift the EXE first: ps1_tools.recomp)\n");
         return 3;
+    }
+    if (card) {
+        size_t n = 0;
+        uint8_t *img = load_file(card, &n);
+        if (img && (n != PS1_CARD_SIZE || ps1_card_load(m, 0, img, n) != 0 ||
+                    (twin && ps1_card_load(twin, 0, img, n) != 0))) {
+            fprintf(stderr, "ps1_run: %s is not a 128 KB memory card image\n", card);
+            free(img);
+            return 3;
+        }
+        free(img);
+        ps1_card_take_dirty(m, 0);
     }
     if (twin)
         ps1_set_pad(twin, 0, PS1_PAD_DIGITAL, pad, 0x80, 0x80, 0x80, 0x80);
@@ -377,6 +393,17 @@ int main(int argc, char **argv)
             count = 120;
         for (uint32_t i = 0; i < count && (st == RESULT_FAIL || !quiet); i++)
             printf("  table[%u] = 0x%08X\n", i, ps1_peek32(m, RESULT_ADDR + 32 + 4 * i));
+    }
+    if (card && ps1_card_take_dirty(m, 0)) {
+        size_t n = 0;
+        const uint8_t *img = ps1_card_data(m, 0, &n);
+        FILE *cf = fopen(card, "wb");
+        if (!cf || fwrite(img, 1, n, cf) != n || fclose(cf) != 0) {
+            fprintf(stderr, "ps1_run: cannot write the memory card %s\n", card);
+            rc = 3;
+        } else if (!quiet) {
+            printf("card: memory card 1 written to %s\n", card);
+        }
     }
     if (until && rc != 0)
         printf("until-tty: \"%s\" not seen in %ld frames\n", until, f);

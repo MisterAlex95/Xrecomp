@@ -39,6 +39,7 @@
 #define XBA_ID_TIMER XBA_FOURCC('T', 'I', 'R', 'Q')
 #define XBA_ID_GFX XBA_FOURCC('G', 'F', 'X', ' ')
 #define XBA_ID_OVL XBA_FOURCC('O', 'V', 'L', ' ')
+#define XBA_ID_MCARD XBA_FOURCC('M', 'C', 'R', 'D')
 
 typedef struct xba_result {
     uint32_t magic;

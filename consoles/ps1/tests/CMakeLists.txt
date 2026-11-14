@@ -12,6 +12,9 @@ project(console_ps1_tests C)
 #   ps1_hb_<prog>      our homebrew EXEs under ps1_run --result through OpenBIOS (LLE + fast boot); gfx needs the real
 #                      GPU (ps1_gpu.c), overlay the disc and CD-ROM modules (ps1_disc.c, ps1_cdrom.c)
 #   ps1_hb_disc_<prog> the same booted from their discs by the BIOS (SYSTEM.CNF), with the disc and CD-ROM modules
+#   ps1_mcard          the mcard homebrew's save through the BIOS memory card functions, kept in a card file by
+#                      ps1_run --card: created on a blank card, found again, an unformatted card formatted; the card
+#                      image checked (check_mcard.py: checksums, directory entry, data)
 #   ps1_jcz_<test>     JaCzekanski/ps1-tests (cpu, gte, dma, timers, pad; spu with ps1_spu.c), console text checked
 #   ps1_rc_*           the same programs recompiled (ps1_tools.recomp + cc, discovery loop), in lockstep with the
 #                      interpreter; ps1_rc_fuzz: random MIPS programs under timer IRQs (needs python3, cc)
@@ -116,7 +119,7 @@ endif()
 
 if(TARGET ps1_run)
     set(PS1_RUN_EXE sh ${CMAKE_CURRENT_SOURCE_DIR}/run_exe.sh $<TARGET_FILE:ps1_run> ${PS1_BIOS})
-    set(hb cpu hello timer_irq)
+    set(hb cpu hello timer_irq mcard)
     if(PS1_HAVE_GPU)
         list(APPEND hb gfx)
     endif()
@@ -124,6 +127,12 @@ if(TARGET ps1_run)
         add_test(NAME ps1_hb_${prog} COMMAND ${PS1_RUN_EXE} ${PS1_HOMEBREW_DIR}/${prog}.exe --result --frames 900 --quiet)
         set_tests_properties(ps1_hb_${prog} PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 180)
     endforeach()
+    find_package(Python3 COMPONENTS Interpreter QUIET)
+    if(Python3_Interpreter_FOUND)
+        add_test(NAME ps1_mcard COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/mcard_test.sh $<TARGET_FILE:ps1_run> ${PS1_BIOS}
+                 ${PS1_HOMEBREW_DIR}/mcard.exe ${CMAKE_CURRENT_BINARY_DIR}/mcard)
+        set_tests_properties(ps1_mcard PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
+    endif()
     if(PS1_HAVE_CD)
         add_test(NAME ps1_hb_overlay COMMAND ${PS1_RUN_EXE} ${PS1_HOMEBREW_DIR}/overlay.exe
                  --disc ${PS1_HOMEBREW_DIR}/overlay.cue --result --frames 1800 --quiet)
@@ -194,7 +203,6 @@ if(TARGET ps1_run)
                  --tty --until-tty "Done." --quiet)
         list(APPEND rc ps1_rc_jcz_${n})
     endforeach()
-    find_package(Python3 COMPONENTS Interpreter QUIET)
     if(Python3_Interpreter_FOUND)
         add_test(NAME ps1_rc_fuzz
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/recomp_fuzz.py --ps1-run $<TARGET_FILE:ps1_run>

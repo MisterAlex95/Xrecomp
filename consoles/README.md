@@ -136,9 +136,13 @@ kernel memory layout at 0x00000000..0x0000FFFF that games peek, and the A0 / B0 
 image is required.
 
 `ps1_run [--bios PATH] [--exe X.exe | --disc X.cue] [--frames N] [--result] [--ppm OUT] [--wav OUT] [--tty]
-[--until-tty TEXT]` runs a program headless (`--result`: our homebrew's result block at 0x801F0000; `--tty`: the
-console text, BIOS putchar / puts). Tests (`consoles/ps1/tests`): `ps1_cpu` and `ps1_gte` unit tests, our homebrew
-(`ps1_hb_*`, the same results as PCSX-Redux, checksums included), JaCzekanski/ps1-tests (MIT, release fetched by
+[--until-tty TEXT] [--card FILE]` runs a program headless (`--result`: our homebrew's result block at 0x801F0000;
+`--tty`: the console text, BIOS putchar / puts; `--card`: memory card 1 kept in a 128 KB .mcr file, loaded when
+there, written back at exit when the game wrote it). Tests (`consoles/ps1/tests`): `ps1_cpu` and `ps1_gte` unit
+tests, our homebrew (`ps1_hb_*`, the same results as PCSX-Redux, checksums included; `mcard` saves through the BIOS
+memory card functions: `ps1_mcard` runs it on a blank card, again on the card it saved (the save found and read
+back, the card unchanged) and on an unformatted one (formatted by the BIOS first), and checks the card image:
+checksums, directory entry, data), JaCzekanski/ps1-tests (MIT, release fetched by
 `tools/consoles/fetch_ps1_tests.sh`: cpu/cop, cpu/code-in-io, gte/test-all 1150 / 1150, dma/otc-test, dma/dpcr, timers).
 On a desktop:
 
@@ -243,7 +247,8 @@ Pacing: the frame's length is the CPU cycles the core ran to the next VBlank (NT
 GPU's mode says), absolute deadlines nudged ±2 % by the audio queue. Memory cards: `<save dir>/ps1-<KEY>/card1.mcr`
 and `card2.mcr`, 128 KB raw images as other emulators write them (.mcr / .mcd), read before the first frame, written
 a second after the game's last write to the card (five at most after its first), at pause and at exit, only when
-changed. BIOS: `--bios`, `RECOMP_PS1_BIOS`, the app's asset `ps1-bios/openbios.bin`, else `build/ps1-bios/openbios.bin`
+changed (the `ps1_runtime` test saves with the mcard homebrew: written by the debounce, then reloaded and found by
+the game). BIOS: `--bios`, `RECOMP_PS1_BIOS`, the app's asset `ps1-bios/openbios.bin`, else `build/ps1-bios/openbios.bin`
 from the working directory or an ancestor of the program. A title pack (`--pack LIB`, XBA-168: `python3 -m
 tools.prepare game.cue` builds one, [prepare.md « PS1 packs »](../docs/android/prepare.md#ps1-packs-xba-168)) runs the
 lifted code when its `pack.json` and table say it is this disc's (the SHA-256 of its boot EXE) and the game plays

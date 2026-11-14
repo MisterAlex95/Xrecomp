@@ -52,6 +52,7 @@ xba_ps1_program(hello HELLO)
 xba_ps1_program(cpu CPU)
 xba_ps1_program(timer_irq TIMERIRQ)
 xba_ps1_program(gfx GFX)
+xba_ps1_program(mcard MCARD)
 set(XBA_EXTRA_FILES
     "\t\t\t<file name=\"OVL_A.BIN\" type=\"data\" source=\"OVL_A.BIN\" />\n\t\t\t<file name=\"OVL_B.BIN\" type=\"data\" source=\"OVL_B.BIN\" />")
 xba_ps1_program(overlay OVERLAY ${PROJECT_BINARY_DIR}/OVL_A.BIN ${PROJECT_BINARY_DIR}/OVL_B.BIN overlays)
