@@ -15,6 +15,7 @@ Downloads: the [GitHub releases](https://github.com/MisterAlex95/Xrecomp/release
 - `xrecomp-v<version>.apk`: the XRecomp Android app with the on-device Prepare. arm64-v8a, Android 11+.
   Release-signed (the same key as `xrecomp-latest`, so either updates the other in place) and **not debuggable**.
 - `xrecomp-v<version>.apk.sha256`.
+- No game, no game data, no generated C: you prepare your own games on your device.
 
 Every XRecomp APK we publish (releases and `xrecomp-latest`) is signed with the same certificate, SHA-256:
 
@@ -24,7 +25,6 @@ BC:F2:04:46:E6:FE:38:6F:3C:FA:A1:B8:75:B2:5E:99:7A:77:0A:E6:1A:B2:48:68:DD:4C:9C
 
 Check a download with `apksigner verify --print-certs xrecomp-v<version>.apk` (Android SDK build-tools): its
 `Signer #1 certificate SHA-256 digest` must be the same, lower case without colons. Any other signer is not ours.
-- No game, no game data, no generated C: you prepare your own games on your device.
 
 The Mac app and the command-line toolkit are built from the source at the tag (README « Get it »).
 
