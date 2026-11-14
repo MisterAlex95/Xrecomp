@@ -1482,8 +1482,8 @@ its folder cannot be read.
   stage of `tools/docker/android.Dockerfile` builds it from its pinned source, sha256 checked, and gradle takes it with
   `-PxbaPs1Bios=FILE` (the same check); its licence is `LICENSES/MIT-OpenBIOS.txt` (About › Licences, NOTICE « The
   Android app »). The runtime reads the asset through SDL. Never a Sony BIOS. `RECOMP_PS1_BIOS=/path` (recomp.cfg)
-  uses another 512 KB image. An APK built without it sends a PS1 game back to the launcher: « The game ended: the game
-  cannot start: its disc or the PlayStation BIOS cannot be read ».
+  uses another 512 KB image, `RECOMP_PS1_BIOS=hle` the HLE BIOS (no image, `consoles/ps1/HLE_BIOS.md`, XBA-163). An APK
+  built without the asset runs PS1 games on the HLE BIOS (logcat `ps1: … BIOS HLE (no image found)`).
 - **Picture.** The GPU's display area (256..640 x 240 / 480, 15- or 24-bit) through `host_window` at 4:3, letterboxed
   (1440 x 1080 on the Thor's 1080p screen), smoothed (linear); `RECOMP_PS1_FILTER=nearest` keeps sharp pixels,
   `RECOMP_PS1_SCALE=integer` whole multiples of the height (4x a 240-line picture: 1280 x 960).
@@ -2853,6 +2853,17 @@ Logcat: `[EXIT] the game returned to the dashboard (routine 2)`, `shell: the gam
 launcher`, `xboxrecomp: title exit: launcher opened (…)`, `xboxrecomp: clean exit`, then in `:launcher`
 `launcher: shown (game exited: …)`. The quick reboot and the other image of the disc (XBA-82) are handled before any
 of this and are unchanged. Test: `LauncherPrepareTest.titleExitShowsWhyOnHome` (Robolectric).
+
+An image of the disc that is not prepared yet (XBA-82, [prepare.md « Images »](prepare.md#images-xba-82)) leaves the
+same way through `ShellActivity.prepareImage(image)` (`EXTRA_PREPARE_IMAGE`; the shell wrote `work/<TID>/
+image.pending` first). Home then says « Goes on in <image> · not prepared yet », its first button is **Prepare
+<image>** and Play is second, with the note « The game goes on in <image>, another program of the disc, which is not
+prepared yet. Prepare it (a few minutes) to go on where you were; Play starts the game from the beginning. ». Once
+the Prepare is done the game starts again in that image (`launchShell` moves `image.pending` to `image.next`); Play,
+or an image the Prepare left out, drops `image.pending` and `launch_data.bin`. A game's own app starts that Prepare at
+once on its DIRECT screen. Logcat: `PACK_IMAGE_LAZY <image>`, `shell: the game launches <image>, not prepared yet`,
+`launcher: prepare <image> of <TID>`, `launcher: the game goes on in <image>`. Test: `LauncherImagePrepareTest`
+(Robolectric; screenshot `prepare-17-image-pending.png`).
 
 ### Last lines before a crash
 

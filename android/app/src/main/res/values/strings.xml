@@ -15,6 +15,11 @@
     <string name="PACK_BAD">The prepared game could not be loaded (%1$s). Prepare it again.</string>
     <string name="TITLE_EXITED">The game ended: %1$s.</string>
     <string name="TITLE_EXITED_PLAIN">The game ended.</string>
+    <!-- XBA-82: the game launched another program of its disc that is not prepared yet. -->
+    <string name="IMAGE_PENDING_NOTE">The game goes on in %1$s, another program of the disc, which is not prepared yet. Prepare it (a few minutes) to go on where you were; Play starts the game from the beginning.</string>
+    <string name="HOME_IMAGE_PENDING">Goes on in %1$s · not prepared yet</string>
+    <string name="PREPARE_IMAGE">Prepare %1$s</string>
+    <string name="IMAGE_NOT_PREPARED">%1$s could not be prepared: Play starts the game from the beginning.</string>
     <string name="STATE_READY">Ready</string>
     <string name="STATE_NONE">No game</string>
     <string name="STATE_MISSING">Game data missing</string>

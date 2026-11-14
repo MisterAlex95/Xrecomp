@@ -128,6 +128,12 @@ public class LauncherActivity extends Activity {
      * process ends by itself right after (it is waited for, then ended), so its play session closes here.
      */
     static final String EXTRA_TITLE_EXITED = "fr.adserver.xrecomp.TITLE_EXITED";
+    /**
+     * Set by ShellActivity when the title launched another image of its disc that the pack names but has not prepared
+     * yet (XBA-82, PendingImage): its disc path. Home offers « Prepare IMAGE »; the game's process ends by itself, as
+     * after EXTRA_TITLE_EXITED.
+     */
+    static final String EXTRA_PREPARE_IMAGE = "fr.adserver.xrecomp.PREPARE_IMAGE";
     /** How long the launcher waits for the game's process to end by itself after EXTRA_TITLE_EXITED. */
     static final long TITLE_EXIT_WAIT_MS = 2000;
 
@@ -367,8 +373,10 @@ public class LauncherActivity extends Activity {
         String noData = in.getStringExtra(EXTRA_NO_GAME_DATA);
         String badPack = in.getStringExtra(EXTRA_BAD_PACK);
         String exited = in.getStringExtra(EXTRA_TITLE_EXITED);
-        boolean forced = change || showLauncher || playTitle || noData != null || badPack != null || exited != null;
-        if (exited != null && savedInstanceState == null)
+        String prepImage = in.getStringExtra(EXTRA_PREPARE_IMAGE);
+        boolean forced = change || showLauncher || playTitle || noData != null || badPack != null || exited != null
+                         || prepImage != null;
+        if ((exited != null || prepImage != null) && savedInstanceState == null)
             awaitGameExit();
         // Back from the game: its play session ends here (Home's « Play time »), then the library is read: the
         // one-game state becomes its first record the first time (Library.migrate moves no file).
@@ -400,7 +408,7 @@ public class LauncherActivity extends Activity {
         // A game's own app: its icon goes into the game (the DIRECT screen while something is needed first).
         direct = ownTid() != null && !change && !showLauncher;
         if (direct) {
-            startDirect(savedInstanceState, noData, badPack, exited);
+            startDirect(savedInstanceState, noData, badPack, exited, prepImage);
             return;
         }
         boolean switchWarn = false;
@@ -441,6 +449,7 @@ public class LauncherActivity extends Activity {
         Log.i(TAG, "launcher: shown (" + (noData != null ? "NO_GAME_DATA in " + noData
                                           : badPack != null ? "pack refused: " + badPack
                                           : exited != null ? "game exited: " + exited
+                                          : prepImage != null ? "game launches " + prepImage + ", not prepared"
                                           : change ? "change game"
                                           : showLauncher ? "launcher shortcut"
                                           : playTitle ? "game shortcut " + in.getStringExtra(EXTRA_TITLE_ID)
@@ -457,7 +466,7 @@ public class LauncherActivity extends Activity {
             if (!lib)
                 history.push(Screen.HOME);
             first = lib ? Screen.LIBRARY : Screen.SOURCE;
-        } else if (badPack != null || exited != null || playTitle && !shortcutGone) {
+        } else if (badPack != null || exited != null || prepImage != null || playTitle && !shortcutGone) {
             if (lib)
                 history.push(Screen.LIBRARY);
             first = Screen.HOME;
@@ -503,6 +512,8 @@ public class LauncherActivity extends Activity {
             setNote(getString(R.string.PACK_BAD, badPack), NOTE_ERROR);
         else if (exited != null)
             setNote(titleExitedNote(this, exited), NOTE_INFO);
+        else if (prepImage != null && pendingImage() != null)
+            setNote(getString(R.string.IMAGE_PENDING_NOTE, pendingImage()), NOTE_INFO);
         else if (shortcutGone)
             setNote(getString(R.string.SHORTCUT_GAME_GONE), NOTE_WARN);
         else if (switchWarn)
@@ -1760,6 +1771,11 @@ public class LauncherActivity extends Activity {
 
         // XBA-176: XRecomp's pack being copied into this game's own app (instead of « Needs preparing »).
         boolean copying = st == State.READY && copying(tid);
+        // XBA-82: the game launched another image of its disc, not prepared yet: offered (Play starts default.xbe).
+        String imagePending = st == State.READY && prep == Prep.PLAYABLE && !running && !copying ? pendingImage()
+                                                                                                  : null;
+        if (imagePending != null && PendingImage.built(Pack.packDir(getFilesDir(), tid), imagePending))
+            imagePending = null;   // prepared already: Play goes on into it (launchShell)
 
         // The one line: the state when it is not « Ready », else when it was last played.
         String statusText = null;
@@ -1794,6 +1810,10 @@ public class LauncherActivity extends Activity {
             View line = heroLine(info, statusText, statusColor);
             if (prep == Prep.RUNNING)
                 homeStatus = (Widgets.Chip)line;
+        } else if (imagePending != null) {
+            statusText = getString(R.string.HOME_IMAGE_PENDING, imagePending);
+            statusColor = Theme.WARN;
+            heroLine(info, statusText, statusColor);
         } else if (st == State.READY && heal != null) {
             statusText = heal.offer == SelfHeal.Offer.PREPARE_AGAIN ? getString(R.string.HOME_CRASHED_FINDS, heal.seeds)
                                                                   : getString(R.string.HOME_NEEDS_FIX);
@@ -1835,6 +1855,9 @@ public class LauncherActivity extends Activity {
                     : otherXbe ? R.string.PREPARE_AGAIN : R.string.PREPARE;
             play = pill(buttons, null, getString(t), true, this::onPlay);
             homePrep = prep;
+        } else if (imagePending != null) {
+            play = pill(buttons, null, getString(R.string.PREPARE_IMAGE, imagePending), true, this::onPrepareImage);
+            pill(buttons, Icon.PLAY, getString(R.string.PLAY), false, this::onPlay);
         } else if (heal != null && heal.offer == SelfHeal.Offer.PREPARE_AGAIN) {
             play = pill(buttons, null, getString(R.string.PREPARE_AGAIN), true, this::onPrepareAgain);
             homeAgain = true;
@@ -3401,11 +3424,21 @@ public class LauncherActivity extends Activity {
      * otherwise DIRECT, which asks XRecomp (pack, where the files are) and goes on step by step (directStep). The
      * game's own reports (no game data, a pack the shell refused, the game ended) show there with their one action.
      */
-    private void startDirect(Bundle saved, String noData, String badPack, String exited) {
+    private void startDirect(Bundle saved, String noData, String badPack, String exited, String prepImage) {
         String tid = ownTid();
         if (games.get(tid) != null)
             games.selected = tid;
         boolean report = noData != null || badPack != null || exited != null;
+        if (saved == null && prepImage != null && pendingImage() != null) {
+            // XBA-82: a game's own app prepares the image at once (it has no Home to offer it on), then goes into it.
+            Log.i(TAG, "launcher: game app: the game launches " + pendingImage() + ", preparing it");
+            setUpWindow();
+            feedback = new UiFeedback(this);
+            syncTheme(Screen.DIRECT);
+            buildStage();
+            onPrepareImage();
+            return;
+        }
         if (saved == null && !report) {
             if (gameRunning()) {
                 Log.i(TAG, "launcher: game app: the game is running, bringing it back");
@@ -6285,6 +6318,8 @@ public class LauncherActivity extends Activity {
      * a round that accepted no new seed stops the loop) and start the game.
      */
     private boolean relaunchAfterPrepare(String tid) {
+        if (tid != null && imageAfterPrepare(tid))
+            return true;
         if (tid == null || !SelfHeal.read(workDir(tid)).roundOpen)
             return false;
         PrepareProtocol.Status s = readPrepStatus();
@@ -6305,6 +6340,56 @@ public class LauncherActivity extends Activity {
         Log.i(TAG, "launcher: prepared again, relaunching " + tid);
         launchShell(false);
         return true;
+    }
+
+    /** The image the game launched that is not prepared yet (PendingImage, XBA-82), for the selected title. */
+    private String pendingImage() {
+        String tid = titleId();
+        return tid == null ? null : PendingImage.pending(workDir(tid));
+    }
+
+    /**
+     * « Prepare IMAGE » (XBA-82): the image goes into images.want and the title's Prepare runs (the same queue); when
+     * it is done, the game starts again in that image (imageAfterPrepare).
+     */
+    private void onPrepareImage() {
+        String tid = titleId(), img = pendingImage();
+        if (tid == null || img == null)
+            return;
+        try {
+            PendingImage.want(workDir(tid), img);
+        } catch (IOException e) {
+            Log.w(TAG, "launcher: cannot write " + tid + "'s images.want", e);
+            setNote(getString(R.string.PREPARE_START_FAILED, String.valueOf(e.getMessage())), NOTE_ERROR);
+            return;
+        }
+        Log.i(TAG, "launcher: prepare " + img + " of " + tid);
+        if (direct)
+            directPrepare();
+        else
+            startPrepare();
+    }
+
+    /**
+     * A Prepare of tid ended with a valid pack while an image of its disc waits (XBA-82): prepared, the game starts
+     * again in it (true); left out by the Prepare, it is dropped with its launch data and Home says so (false).
+     */
+    private boolean imageAfterPrepare(String tid) {
+        String img = PendingImage.pending(workDir(tid));
+        if (img == null || state() != State.READY)
+            return false;
+        if (PendingImage.built(Pack.packDir(getFilesDir(), tid), img)) {
+            Log.i(TAG, "launcher: " + img + " of " + tid + " prepared, going on into it");
+            launchShell(false);
+            return true;
+        }
+        PrepareProtocol.Status s = readPrepStatus();
+        if (s != null && s.background)
+            return false;   // a self-healing round's pack: the image waits for its own Prepare
+        Log.w(TAG, "launcher: " + img + " of " + tid + " not in the new pack, dropped");
+        PendingImage.drop(workDir(tid), GameTheme.saveDir(this));
+        setNote(getString(R.string.IMAGE_NOT_PREPARED, img), NOTE_WARN);
+        return false;
     }
 
     /** The main process, where ShellActivity and the runtime live, when it is running. */
@@ -6392,6 +6477,12 @@ public class LauncherActivity extends Activity {
             } catch (IOException e) {
                 Log.w(TAG, "launcher: cannot switch the game caches to " + owner, e);
             }
+        }
+        if (!resume && owner != null) {   // XBA-82: on into an image prepared since it was launched, or not at all
+            String img = PendingImage.beforeLaunch(workDir(owner), Pack.packDir(getFilesDir(), owner),
+                                                   GameTheme.saveDir(this));
+            if (img != null)
+                Log.i(TAG, "launcher: the game goes on in " + img);
         }
         if (!resume) {
             long now = System.currentTimeMillis();

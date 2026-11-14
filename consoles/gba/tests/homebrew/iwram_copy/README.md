@@ -26,3 +26,6 @@ Block at `0x0203FE00` (see [../README.md](../README.md)), `test_id` = `IWRM` (`0
 | 5 | 1 | EWRAM buffer address is in EWRAM (`0x02xxxxxx`) |
 | 6 | `0x5A5A0333` | EWRAM copy, IMM `0x33` |
 | 7 | `0x5A5A0344` | IWRAM copy called again: still the patched code |
+
+Once done, the screen shows the verdict: backdrop green on pass, red on fail (the screenshot of
+`tools/consoles/gba_corpus_packs.py`).

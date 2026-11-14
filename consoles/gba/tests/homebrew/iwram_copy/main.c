@@ -64,5 +64,7 @@ int main(void)
     xba_check(i++, g(0x100), 0x5A5A0333);
     xba_check(i++, f(0x100), 0x5A5A0344); /* the IWRAM copy is still the patched one */
 
+    REG_DISPCNT = DCNT_MODE0; /* the verdict on screen (gba_corpus_packs.py screenshots it) */
+    pal_bg_mem[0] = XBA_RESULT->detail ? RGB15(31, 0, 0) : RGB15(0, 31, 0);
     xba_finish();
 }

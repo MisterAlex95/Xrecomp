@@ -5,12 +5,13 @@
  * scanline / VBlank scheduler. The other chips (GPU, CD-ROM, SPU, MDEC) are reached only through ps1_devices.h. All
  * the state lives in one ps1_machine: no globals, several machines may run side by side (one per thread).
  *
- * BIOS: an image is required for now (LLE): OpenBIOS (MIT), built from source by tools/consoles/build_ps1_bios.sh.
- * Never a Sony BIOS dump in this repository. An HLE BIOS (A / B / C function tables in C) is a later step (P-5 HLE).
+ * BIOS: an image (LLE), OpenBIOS (MIT) built from source by tools/consoles/build_ps1_bios.sh, never a Sony BIOS dump
+ * in this repository; or none: the HLE BIOS (ps1_hle.c, XBA-163), the kernel and the A / B / C function tables in C.
  *
- * Boot: from the reset vector through the BIOS. With a PS-X EXE the BIOS runs its init stage and, where it would
+ * Boot, LLE: from the reset vector through the BIOS. With a PS-X EXE the BIOS runs its init stage and, where it would
  * enter its shell (0x80030000), the EXE is loaded instead (fast boot). With a disc and no EXE the BIOS boots the disc
- * itself (SYSTEM.CNF) through the CD-ROM controller. */
+ * itself (SYSTEM.CNF) through the CD-ROM controller. HLE: kernel RAM is set up and the EXE (or the disc's SYSTEM.CNF
+ * boot file, read from ISO 9660) starts at once. */
 #ifndef PS1_CORE_H
 #define PS1_CORE_H
 
@@ -62,7 +63,7 @@ typedef enum ps1_pad_kind {
 } ps1_pad_kind;
 
 /* Creates a machine and starts it at the BIOS reset vector.
- *   bios / bios_size: a 512 KB BIOS image (copied). NULL or another size: error (we need OpenBIOS until the HLE BIOS).
+ *   bios / bios_size: a 512 KB BIOS image (copied); another size: error. NULL: the HLE BIOS (no image).
  *   disc_path: a disc image for the CD-ROM controller (ps1_disc_open: .cue, .bin, .iso, .chd, "fd:N"), or NULL.
  *   exe / exe_size: a PS-X EXE to fast-boot (copied), or NULL: then the BIOS boots the disc (or its shell).
  * Returns NULL and a message in err (may be NULL) on failure. Pad 1 is a digital pad, pad 2 empty; both card slots
@@ -133,6 +134,9 @@ void ps1_set_fast_boot(ps1_machine *m, int on);
 
 /* 1 once the fast boot has put the EXE in place (or immediately when there is none). */
 int ps1_exe_started(ps1_machine *m);
+
+/* 1 when the machine runs the HLE BIOS (ps1_create without an image), 0 with a BIOS image. */
+int ps1_bios_hle(ps1_machine *m);
 
 /* Multi-disc games (XBA-166). ps1_set_lid opens (1) or closes (0) the CD drive's lid: opening stops the drive and
  * tells the game (INT5), as the console's lid switch. ps1_change_disc puts another disc image in the drive (a path as

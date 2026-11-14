@@ -1,5 +1,6 @@
 /* PS1 machine: creation, boot (LLE through the BIOS, fast boot of a PS-X EXE), frame loop, public accessors
  * (XBA-162 / XBA-163 / XBA-167). See ps1_core.h. */
+#include "ps1_hle.h"
 #include "ps1_internal.h"
 
 #include <stdio.h>
@@ -66,9 +67,8 @@ void ps1_boot_exe(ps1_machine *m)
 ps1_machine *ps1_create(const uint8_t *bios, size_t bios_size, const char *disc_path, const uint8_t *exe,
                         size_t exe_size, char *err, size_t errlen)
 {
-    if (!bios || bios_size != PS1_BIOS_SIZE) {
-        set_err(err, errlen, bios ? "the BIOS image must be 512 KB" : "a BIOS image is required (OpenBIOS: "
-                                                                     "tools/consoles/build_ps1_bios.sh)");
+    if (bios && bios_size != PS1_BIOS_SIZE) {
+        set_err(err, errlen, "the BIOS image must be 512 KB");
         return NULL;
     }
     if (exe && !exe_valid(exe, exe_size)) {
@@ -88,12 +88,15 @@ ps1_machine *ps1_create(const uint8_t *bios, size_t bios_size, const char *disc_
         m->exe = malloc(exe_size);
         m->exe_size = exe_size;
     }
-    if (!m->ram || !m->ram_gen || !m->bios || (exe && !m->exe)) {
+    if (!m->ram || !m->ram_gen || !m->bios || (exe && !m->exe) || (!bios && ps1_hle_create(m) != 0)) {
         set_err(err, errlen, "out of memory");
         ps1_destroy(m);
         return NULL;
     }
-    memcpy(m->bios, bios, PS1_BIOS_SIZE);
+    if (bios)
+        memcpy(m->bios, bios, PS1_BIOS_SIZE);
+    else
+        memset(m->bios, 0, PS1_BIOS_SIZE); /* HLE: no ROM code; the BIOS region reads zeros */
     if (exe)
         memcpy(m->exe, exe, exe_size);
     m->exe_started = exe == NULL;
@@ -134,6 +137,8 @@ ps1_machine *ps1_create(const uint8_t *bios, size_t bios_size, const char *disc_
         m->cards[i].flag = 0x08;
     }
     ps1_sched_init(m);
+    if (m->hle)
+        ps1_hle_boot(m); /* kernel RAM set up, the EXE (or the disc's boot file) started at once */
     return m;
 }
 
@@ -152,6 +157,7 @@ void ps1_destroy(ps1_machine *m)
     if (m->disc)
         ps1_disc_close(m->disc);
     ps1_recomp_free(m);
+    ps1_hle_destroy(m);
     free(m->ram);
     free(m->ram_gen);
     free(m->bios);
@@ -252,6 +258,7 @@ uint64_t ps1_cycles(ps1_machine *m) { return m->cycles; }
 uint64_t ps1_frames(ps1_machine *m) { return m->frames; }
 uint8_t *ps1_ram(ps1_machine *m) { return m->ram; }
 int ps1_exe_started(ps1_machine *m) { return m->exe_started; }
+int ps1_bios_hle(ps1_machine *m) { return m->hle != NULL; }
 struct ps1_gpu *ps1_get_gpu(ps1_machine *m) { return m->gpu; }
 
 void ps1_set_tty(ps1_machine *m, void (*fn)(void *ctx, char c), void *ctx)

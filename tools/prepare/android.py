@@ -28,6 +28,13 @@ from tools.prepare.progress import Reporter
 REQUIRED = ("work", "pack_dir", "cc", "sysroot", "shell_lib")
 # The disc's other images a pack carries (src/platform/recomp_pack.h RECOMP_PACK_IMAGES_MAX).
 IMAGES_MAX = 8
+# <work>/images.want: the images the app asked for (« Prepare <image> », PendingImage.java), one disc path a line.
+IMAGES_WANT = "images.want"
+
+
+def image_norm(p):
+    """A disc path for comparison: lowercase, '/', no leading separator (recomp_pack.c image_norm)."""
+    return p.strip().replace("\\", "/").lstrip("/").lower()
 
 
 class _ImageReporter:
@@ -57,7 +64,8 @@ class Run:
         self.toolkit_sha = ""         # tools/prepare/toolkit.py: what a stale pack is judged by
         self.data_dir = None
         self.image = None             # a disc image source (XBA-126): the other images come out of it
-        self.images = []              # [(disc path, objects)], other_images()
+        self.images = []              # [(disc path, objects, work)], other_images(): the images built
+        self.lazy_images = []         # [disc path]: named by default.xbe, built on their first launch
         self.steps = metrics.Steps()  # what this run cost (XBA-128): pack.json "prepare"
         self.compile_stats = {}
         self.jobs = 0
@@ -263,11 +271,34 @@ class Run:
         self.rep.progress(4, 100, "%d files, %d compiled" % (len(sources), n))
         self.compiled = n
 
+    def wanted_images(self):
+        """The other images this run builds (normalised disc paths), or None for
+        all of them (--all-images). Lazy by default (docs/android/prepare.md
+        « Images »): those asked with --image, those the app asked for in
+        <work>/images.want, and those the current pack has a library for (a
+        Prepare again keeps them)."""
+        if getattr(self.a, "all_images", False):
+            return None
+        want = {image_norm(x) for x in (getattr(self.a, "image", None) or [])}
+        try:
+            with open(os.path.join(self.work, IMAGES_WANT)) as f:
+                want |= {image_norm(x) for x in f if x.strip()}
+        except OSError:
+            pass
+        if getattr(self, "tid", None):
+            meta = pack.read(pack.final_dir(os.path.abspath(self.a.pack_dir), self.tid))
+            for rel, lib in ((meta or {}).get("images") or {}).items():
+                if lib:
+                    want.add(image_norm(rel))
+        return want
+
     def other_images(self):
         """XBA-82: the disc's other images that default.xbe names (tools.triage's
-        test), each analysed, lifted and compiled in <work>/images/<path>/ with
-        this run's toolchain; make_pack links one library each. An image that
-        fails is left out (default.xbe still runs; its launch then exits as
+        test). The wanted ones (wanted_images) are each analysed, lifted and
+        compiled in <work>/images/<path>/ with this run's toolchain; make_pack
+        links one library each. The others are only named (lazy_images: library
+        "" in pack.json), prepared when the title first launches them. An image
+        that fails is left out (default.xbe still runs; its launch then exits as
         before). From a folder, or from a disc image (XBA-126: the named XBEs
         are copied out of it, nothing else); a lone default.xbe has no others."""
         disc = self.data_dir or self.image
@@ -278,7 +309,11 @@ class Run:
         with open(self.xbe, "rb") as f:
             named = _named_xbes(f.read())
         others = [(rel, p) for rel, p in disc_xbes(disc, self.work, named) if rel.lower() != "default.xbe"]
+        want = self.wanted_images()
         for rel, p in others[:IMAGES_MAX]:
+            if want is not None and image_norm(rel) not in want:
+                self.lazy_images.append(rel)
+                continue
             sub_a = copy.copy(self.a)
             sub_a.source = p
             sub_a.work = os.path.join(self.work, "images", re.sub(r"[^A-Za-z0-9._-]", "_", rel))
@@ -295,12 +330,19 @@ class Run:
                 self.rep.progress(4, 99, "%s left out: %s %s" % (rel, e.code, e.msg))
                 continue
             self.images.append((rel, r.objects, r.work))
+        if self.lazy_images:
+            self.rep.progress(4, 99, "%d more image(s) prepared on their first launch: %s"
+                              % (len(self.lazy_images), ", ".join(self.lazy_images)))
         if others[IMAGES_MAX:]:
             self.rep.progress(4, 99, "%d more image(s) left out (at most %d)" % (len(others) - IMAGES_MAX, IMAGES_MAX))
 
     def image_libs(self):
-        """{disc path: library file name} for pack.json "images"."""
-        return {rel: "libimage-%d.so" % (i + 1) for i, (rel, _, _) in enumerate(self.images)}
+        """{disc path: library file name} for pack.json "images", "" for an
+        image not built yet (prepared on its first launch)."""
+        libs = {rel: "libimage-%d.so" % (i + 1) for i, (rel, _, _) in enumerate(self.images)}
+        for rel in self.lazy_images:
+            libs.setdefault(rel, "")
+        return libs
 
     def make_pack(self):
         a = self.a

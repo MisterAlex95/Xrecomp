@@ -25,3 +25,6 @@ VBlank since start (72 at the end in mGBA). Halt loop after `status`; PASS when 
 
 Phase A and B are separate on purpose: with HBlank and timer IRQs enabled together, mGBA 0.10 dropped 3 of 64 timer
 IRQs; the split keeps the test about counting, not about IRQ-flood ordering.
+
+Once done, the screen shows the verdict: backdrop green on pass, red on fail (the screenshot of
+`tools/consoles/gba_corpus_packs.py`).

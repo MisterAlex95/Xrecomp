@@ -15,7 +15,7 @@ frames=$5
 shift 5
 here=$(cd "$(dirname "$0")" && pwd)
 repo=$(cd "$here/../../.." && pwd)
-if [ ! -f "$bios" ]; then
+if [ "$bios" != hle ] && [ ! -f "$bios" ]; then
     echo "skipped: BIOS $bios not built (tools/consoles/build_ps1_bios.sh)"
     exit 77
 fi

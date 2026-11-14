@@ -74,8 +74,8 @@ def licencesAsset = tasks.register('xbaLicencesAsset', XbaLicencesAsset) {
 // OpenBIOS (MIT, pcsx-redux/nugget; licence LICENSES/MIT-OpenBIOS.txt, copied with the other licences) as built by the
 // ps1-bios stage of tools/docker/android.Dockerfile or tools/consoles/build_ps1_bios.sh, checked against the pinned
 // sha256, as the asset ps1-bios/openbios.bin, which the PS1 runtime reads (ps1_runtime.c, SDL_RWFromFile). Never a
-// Sony BIOS. Without it the APK has none: a PS1 game then needs RECOMP_PS1_BIOS (recomp.cfg) and otherwise goes back
-// to the launcher.
+// Sony BIOS. Without it the APK has none: a PS1 game then runs on the HLE BIOS (consoles/ps1/HLE_BIOS.md, XBA-163)
+// unless RECOMP_PS1_BIOS (recomp.cfg) names an image.
 def xbaPs1Bios = ((findProperty('xbaPs1Bios') ?: System.getenv('XBA_PS1_BIOS') ?: '') as String).trim()
 def xbaPs1BiosSha256 = '68942dc22a85dd7f809d7a99043575096d95d656925dfcd3f056036e22d84085'
 abstract class XbaPs1BiosAsset extends DefaultTask {
@@ -103,7 +103,7 @@ if (xbaPs1Bios) {
         sha256 = xbaPs1BiosSha256
     }
 } else {
-    logger.info('no -PxbaPs1Bios: the APK carries no PlayStation BIOS (PS1 games need RECOMP_PS1_BIOS)')
+    logger.info('no -PxbaPs1Bios: the APK carries no PlayStation BIOS (PS1 games run on the HLE BIOS)')
 }
 // The on-device toolchain of the Prepare (docs/android/toolchain.md, docs/android/prepare.md): -PxbaToolchainDir=DIR,
 // made by tools/android/toolchain/ (the toolchain-out stage of tools/docker/android.Dockerfile). It adds the jniLibs

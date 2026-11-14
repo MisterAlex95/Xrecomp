@@ -107,6 +107,21 @@ lockstep with the interpreter (HLE and LLE BIOS); `gba_rc_fuzz` does the same wi
 timer IRQs (`recomp_fuzz.py`); pytest `consoles/gba/tools/gba_tools/test_recomp.py` (discovery on hand-encoded code,
 the CLI, Prepare end to end). Design notes: [gba/tools/README.md](gba/tools/README.md).
 
+The ROM tests skip (exit 77) when their ROMs are not built, which is the case in the linux CI job (no Docker inside
+it, so no corpus). The homebrew corpus runs in the **homebrew job** instead (XBA-180), after the corpus build, through
+`tools/consoles/run_gba_packs.sh` in the linux job's deps image: ctest `gba_hb_*` and `gba_rc_hb_*` (the LLE variants
+and jsmolka's ROMs still skip there), then `tools/consoles/gba_corpus_packs.py`, the user's chain on each program:
+`python3 -m tools.prepare <prog>.gba` (a desktop pack), `gba_run --pack libtitle.so --lockstep --result` until the
+verdict, and a screenshot 30 frames later (`--ppm`, kept as PNG in the run's artefact `gba-corpus-screens`). A program
+fails on a failing result block, a lockstep difference, or a screenshot whose sha256 is not the one in
+`consoles/gba/tests/corpus_screens.sha256`. The GitHub mirror runs the same (`.github/workflows/linux.yml`,
+gba-corpus). Locally, and to record new screenshots after an intended change (check the PNGs first):
+
+```sh
+tools/consoles/build_homebrew.sh gba build/homebrew && tools/consoles/run_gba_packs.sh build/homebrew build/gba-packs
+tools/consoles/gba_corpus_packs.py build/homebrew/gba build/gba-packs --gba-run build/gba/gba_runtime/gba_run --update
+```
+
 Saves default to `$XDG_DATA_HOME/xrecomp/save` (else `~/.local/share/xrecomp/save`); `--bios PATH` or
 `RECOMP_GBA_BIOS` uses a BIOS image of your own; every option is listed at the top of `runtime/tools/gba_play.c`. The
 homebrew `pad.gba` (`consoles/gba/tests/homebrew/pad`) shows the keys held and keeps a counter in SRAM: the controls
@@ -128,14 +143,17 @@ the GBA saves). The other chips are reached through `ps1_devices.h` only: target
 BIOS: **OpenBIOS** (MIT, PCSX-Redux's nugget tree), built from source by `tools/consoles/build_ps1_bios.sh` at the
 commit the oracle pins, byte-identical to the oracle's (sha256 `68942dc2…`); never a Sony BIOS. Boot is LLE from the
 reset vector; with a PS-X EXE the BIOS runs its init and, where it would enter its shell (0x80030000), the EXE is loaded
-(header PC / GP / SP+FP / text / BSS: fast boot); with a disc and no EXE the BIOS boots `SYSTEM.CNF` itself. An HLE BIOS
-(P-5 HLE) needs, for games and libpsn00b / Psy-Q: the exception handler and the IRQ / event / thread kernel (B(08h..20h)
-events, B(0Eh..13h) threads, SysEnqIntRP / SysDeqIntRP, ChangeClearPad / ChangeClearRCnt), A(00h..3Fh) file and string
-calls with the `cdrom:` / `bu:` devices (CD and memory card drivers over SIO0), InitPad / StartPad, FlushCache, the
-kernel memory layout at 0x00000000..0x0000FFFF that games peek, and the A0 / B0 / C0 table dispatch; until then the
-image is required.
+(header PC / GP / SP+FP / text / BSS: fast boot); with a disc and no EXE the BIOS boots `SYSTEM.CNF` itself. Or no
+image at all: the **HLE BIOS** (P-5 HLE, `runtime/ps1_hle.c`; [ps1/HLE_BIOS.md](ps1/HLE_BIOS.md): how it works and the
+190 implemented calls, each with a check). `ps1_create(NULL, ...)`, `ps1_run --bios hle`, `RECOMP_PS1_BIOS=hle`, and
+the default of `ps1_run` / `ps1_play` / the app when no image is found. Kernel RAM laid out as the retail BIOS /
+OpenBIOS lay it out (vectors, table of tables, A0 / B0 / C0 tables, TCBs, EvCBs), each table entry a trap stub the
+interpreter hands to C (packs reach it the same way: kernel RAM is never lifted), the exception handler and its
+SysEnqIntRP chains in MIPS like OpenBIOS's (syscalls, root counter / IRQ events, custom exit), events, threads, pads,
+`cdrom:` straight from ISO 9660 and `bu00:` / `bu10:` on the card images; the EXE (or the disc's `SYSTEM.CNF` boot
+file) starts at once. A call it does not implement returns 0 and is reported once with its number.
 
-`ps1_run [--bios PATH] [--exe X.exe | --disc X.cue] [--frames N] [--result] [--ppm OUT] [--wav OUT] [--tty]
+`ps1_run [--bios PATH|hle] [--exe X.exe | --disc X.cue] [--frames N] [--result] [--ppm OUT] [--wav OUT] [--tty]
 [--until-tty TEXT] [--card FILE]` runs a program headless (`--result`: our homebrew's result block at 0x801F0000;
 `--tty`: the console text, BIOS putchar / puts; `--card`: memory card 1 kept in a 128 KB .mcr file, loaded when
 there, written back at exit when the game wrote it). Tests (`consoles/ps1/tests`): `ps1_cpu` and `ps1_gte` unit
@@ -143,7 +161,9 @@ tests, our homebrew (`ps1_hb_*`, the same results as PCSX-Redux, checksums inclu
 memory card functions: `ps1_mcard` runs it on a blank card, again on the card it saved (the save found and read
 back, the card unchanged) and on an unformatted one (formatted by the BIOS first), and checks the card image:
 checksums, directory entry, data), JaCzekanski/ps1-tests (MIT, release fetched by
-`tools/consoles/fetch_ps1_tests.sh`: cpu/cop, cpu/code-in-io, gte/test-all 1150 / 1150, dma/otc-test, dma/dpcr, timers).
+`tools/consoles/fetch_ps1_tests.sh`: cpu/cop, cpu/code-in-io, gte/test-all 1150 / 1150, dma/otc-test, dma/dpcr, timers),
+and the same under the HLE BIOS (`ps1_hle` unit tests, one per implemented call; `ps1_hle_*`: the homebrew with the
+same result block as under OpenBIOS, its discs booted by the HLE BIOS, mcard, ps1-tests, packs in lockstep).
 On a desktop:
 
 ```sh

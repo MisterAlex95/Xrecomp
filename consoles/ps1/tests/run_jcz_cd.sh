@@ -16,7 +16,7 @@ bios=$2
 exe=$3
 work=$4
 what=$5
-if [ ! -f "$bios" ]; then
+if [ "$bios" != hle ] && [ ! -f "$bios" ]; then
     echo "skipped: BIOS $bios not built (tools/consoles/build_ps1_bios.sh)"
     exit 77
 fi

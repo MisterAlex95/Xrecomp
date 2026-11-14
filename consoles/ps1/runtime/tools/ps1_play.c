@@ -14,7 +14,8 @@
  * --save-dir DIR    memory cards in DIR/ps1-<KEY>/card1.mcr, card2.mcr (default $XDG_DATA_HOME/xrecomp/save, else
  *                   ~/.local/share/xrecomp/save); "" turns them off
  * --bios PATH       the 512 KB BIOS (default $RECOMP_PS1_BIOS, else build/ps1-bios/openbios.bin from the working
- *                   directory or beside an ancestor of this program: tools/consoles/build_ps1_bios.sh)
+ *                   directory or beside an ancestor of this program: tools/consoles/build_ps1_bios.sh; none: the
+ *                   HLE BIOS); "hle": the HLE BIOS
  * --scale, --filter how the 4:3 picture fills the window (default aspect, linear; $RECOMP_PS1_SCALE / _FILTER)
  * --pad             the pad in port 1 (default digital; $RECOMP_PS1_PAD); Back + L3 + R3 switches while playing
  * --players 2       host pad 1 -> port 1, host pad 2 -> port 2 (default: every pad drives port 1)
