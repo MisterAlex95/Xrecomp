@@ -930,7 +930,13 @@ int recomp_pack_image_lib(const recomp_pack_meta *m, const char *pack_dir, const
         image_norm(m->images[i].path, have, sizeof have);
         if (strcmp(have, want))
             continue;
-        if (!lib[0] || strchr(lib, '/') || !strcmp(lib, ".") || !strcmp(lib, "..")) {
+        if (!lib[0]) {          /* named, not prepared yet (lazy, XBA-82) */
+            if (key && key_n)
+                snprintf(key, key_n, "%s", m->images[i].path);
+            say(reason, reason_n, "image %s is not prepared yet", path);
+            return RECOMP_PACK_IMAGE_LAZY;
+        }
+        if (strchr(lib, '/') || !strcmp(lib, ".") || !strcmp(lib, "..")) {
             say(reason, reason_n, "image %s: lib \"%s\" is not a file name", path, lib);
             return -1;
         }

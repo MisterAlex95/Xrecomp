@@ -2721,6 +2721,17 @@ launcher`, `xboxrecomp: title exit: launcher opened (…)`, `xboxrecomp: clean e
 `launcher: shown (game exited: …)`. The quick reboot and the other image of the disc (XBA-82) are handled before any
 of this and are unchanged. Test: `LauncherPrepareTest.titleExitShowsWhyOnHome` (Robolectric).
 
+An image of the disc that is not prepared yet (XBA-82, [prepare.md « Images »](prepare.md#images-xba-82)) leaves the
+same way through `ShellActivity.prepareImage(image)` (`EXTRA_PREPARE_IMAGE`; the shell wrote `work/<TID>/
+image.pending` first). Home then says « Goes on in <image> · not prepared yet », its first button is **Prepare
+<image>** and Play is second, with the note « The game goes on in <image>, another program of the disc, which is not
+prepared yet. Prepare it (a few minutes) to go on where you were; Play starts the game from the beginning. ». Once
+the Prepare is done the game starts again in that image (`launchShell` moves `image.pending` to `image.next`); Play,
+or an image the Prepare left out, drops `image.pending` and `launch_data.bin`. A game's own app starts that Prepare at
+once on its DIRECT screen. Logcat: `PACK_IMAGE_LAZY <image>`, `shell: the game launches <image>, not prepared yet`,
+`launcher: prepare <image> of <TID>`, `launcher: the game goes on in <image>`. Test: `LauncherImagePrepareTest`
+(Robolectric; screenshot `prepare-17-image-pending.png`).
+
 ### Last lines before a crash
 
 stdout and stderr reach logcat through pipes read by two pump threads (`src/platform/android_log.c`); a line still in

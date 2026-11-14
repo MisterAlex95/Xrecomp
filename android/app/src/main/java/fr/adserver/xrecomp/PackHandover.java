@@ -306,6 +306,8 @@ final class PackHandover {
         if (images != null) {
             for (Iterator<String> it = images.keys(); it.hasNext();) {
                 String n = images.optString(it.next(), "");
+                if (n.isEmpty())
+                    continue;   // named, not prepared yet (XBA-82): no file
                 if (!plainName(n) || !new File(dir, n).isFile())
                     return null;
                 if (!out.contains(n))
@@ -447,6 +449,8 @@ final class PackHandover {
         if (images != null) {
             for (Iterator<String> it = images.keys(); it.hasNext();) {
                 String n = images.optString(it.next(), "");
+                if (n.isEmpty())
+                    continue;   // named, not prepared yet (XBA-82): no file
                 if (!plainName(n) || !offer.uris.containsKey(n))
                     return "image " + n;
             }
@@ -493,6 +497,8 @@ final class PackHandover {
         if (images != null) {
             for (Iterator<String> it = images.keys(); it.hasNext();) {
                 String n = images.optString(it.next(), "");
+                if (n.isEmpty())
+                    continue;   // named, not prepared yet (XBA-82): no file
                 if (!names.contains(n))
                     names.add(n);
             }

@@ -17,7 +17,7 @@ recompiled title is one executable per image, so the hand-over is a process exec
 - When the title launches a path that is not its own image, the kernel (`xbox_launch_image`, `kernel_reboot.c`) looks
   it up in the map, writes the launch data page where the next start reads it (as a quick reboot does), and execs
   that image's executable in the same process (Windows: `CreateProcess`, then this process ends, as the quick reboot
-  does; not built or run by our CI). Not found, or the exec failed: the title exits as before, the launch
+  does; compiled by a MinGW-w64 cross build, [below](#windows), never run). Not found, or the exec failed: the title exits as before, the launch
   is recorded in the discovery file (`{"t":"launch"}`) and the compat runner names it.
 - Tested end to end in CI on a two-image synthetic disc (`tools/compat/test_e2e.py::test_a_launch_of_another_image_hands_over`),
   and on the same disc as a split CSO image booted in place (`test_a_multi_image_disc_boots_from_its_image`,
@@ -43,12 +43,16 @@ is then a hand-over, and a launch of the running image a quick reboot. A launch 
   the shell installs (`xbox_SetImageHandler`): it writes `image.next` and restarts the game process the way a quick
   reboot does (the launcher ends it and starts the game activity again). A quick reboot of a secondary image writes
   `image.next` too, so the same image starts again.
+- The on-device Prepare names the other images up front and builds each one on its first launch: `pack.json` gives
+  it library `""` until then; its launch writes `<work>/image.pending` and the launcher offers « Prepare <image> »,
+  then starts the game again in that image with its launch data
+  ([prepare.md « Images »](../android/prepare.md#images-xba-82)).
 - The on-device Prepare finds the other images in a game folder, in a disc image source (plain, split or compressed,
   the named XBEs copied out) and in the companion folder of an image read in place, which holds every XBE of the
   image (XBA-126, [disc-images.md](disc-images.md)). Only a lone cached `default.xbe` (a library game prepared before
   it is imported) has no others.
 
-## Not yet
+## Windows
 
-A secondary image prepared on its first launch on the device (today the Prepare builds them all up front), and a
-Windows build in CI. Design in Plane XBA-82.
+The `CreateProcess` hand-over compiles in a MinGW-w64 cross build of the libraries
+(`docker build -f tools/docker/windows-mingw.Dockerfile .`); it has not run on Windows, and no CI job builds it yet.
