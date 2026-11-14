@@ -5,6 +5,7 @@
  *   ps1_play DISC|EXE [--exe X.exe] [--frames N] [--save-dir DIR] [--bios PATH] [--scale aspect|integer]
  *                     [--filter nearest|linear] [--pad digital|analog] [--players 1|2] [--headless] [--unpaced]
  *                     [--buttons MASK] [--screenshot OUT.ppm] [--capture N OUT.ppm] [--key KEY]
+ *                     [--pack LIB.so] [--missed FILE]
  *
  * DISC              a .cue (with its tracks), .bin, .iso or .chd: the BIOS boots it (SYSTEM.CNF); EXE: a PS-X EXE,
  *                   fast-booted where the BIOS would enter its shell
@@ -24,6 +25,11 @@
  * --capture N OUT   the window's whole drawable at frame N, read back before the swap (the real present path)
  * --key KEY         the title key (default: read from the disc as the app does, recomp_pack_rom_identify; an EXE or
  *                   an unknown disc: ps1_runtime_fallback_key)
+ * --pack LIB.so     a title pack library (python3 -m tools.prepare DISC: $XDG_DATA_HOME/xrecomp/packs/ps1-<KEY>/,
+ *                   or tools/consoles/ps1_recomp_build.py): lifted code, interpreter elsewhere; with a pack.json
+ *                   beside it, ps1_pack_check first (ps1_pack.h); a pack that is not this game's runs interpreted
+ * --missed FILE     with --pack: at exit, add the code the interpreter had to run (address, hash, bytes) to FILE (the
+ *                   discovery loop: the Prepare's <work>/discovered.txt, or ps1_tools.recomp --discovered FILE)
  * Keyboard: arrows, X = Cross, C = Circle, Z = Square, S = Triangle, Q / E = L1 / R1, 1 / 3 = L2 / R2,
  * Enter = Start, Backspace = Select; any game controller (Xbox layout).
  * Exit 0, 1 when the game cannot run, 2 on a usage error. */
@@ -42,7 +48,8 @@ static int usage(void)
     fprintf(stderr, "usage: ps1_play DISC|EXE [--exe X.exe] [--frames N] [--save-dir DIR] [--bios PATH]\n"
                     "                [--scale aspect|integer] [--filter nearest|linear] [--pad digital|analog]\n"
                     "                [--players 1|2] [--headless] [--unpaced] [--buttons MASK]\n"
-                    "                [--screenshot OUT.ppm] [--capture N OUT.ppm] [--key KEY]\n");
+                    "                [--screenshot OUT.ppm] [--capture N OUT.ppm] [--key KEY]\n"
+                    "                [--pack LIB.so] [--missed FILE]\n");
     return 2;
 }
 
@@ -86,6 +93,10 @@ int main(int argc, char **argv)
             o.capture_path = argv[++i];
         } else if (!strcmp(a, "--key") && more)
             o.title_key = argv[++i];
+        else if (!strcmp(a, "--pack") && more)
+            o.pack_lib = argv[++i];
+        else if (!strcmp(a, "--missed") && more)
+            o.discovered_path = argv[++i];
         else if (a[0] == '-' || o.game)
             return usage();
         else

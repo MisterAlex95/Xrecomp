@@ -18,6 +18,7 @@
 #include "host_window.h"
 #include "ps1_core.h"
 #include "ps1_devices.h"
+#include "ps1_pack.h"
 #include "recomp_exit_hook.h"
 #include "recomp_lifecycle.h"
 
@@ -371,6 +372,7 @@ static pthread_mutex_t s_mu = PTHREAD_MUTEX_INITIALIZER;
 static ps1_machine *s_m;
 static char s_card_path[2][1100];
 static uint8_t s_saved[2][PS1_CARD_SIZE]; /* each card as last read or written */
+static char s_discovered[1200];           /* ps1_runtime_opts.discovered_path of the run */
 
 /* Writes each card that differs from what is on disk (or was there at start). Called with s_mu held. */
 static void cards_flush_locked(const char *why)
@@ -403,6 +405,11 @@ static void on_exit_hook(const char *why)
 {
     (void)why;
     cards_flush("exit");
+    /* The in-game menu's Quit ends the process here: the discovery loop's code too (XBA-168). */
+    pthread_mutex_lock(&s_mu);
+    if (s_m && s_discovered[0])
+        ps1_pack_save_missed(s_m, s_discovered);
+    pthread_mutex_unlock(&s_mu);
 }
 
 /* The app paused (background, the in-game menu): the cards go to disk at once, from the thread that paused it (on
@@ -588,6 +595,17 @@ int ps1_runtime_run(const ps1_runtime_opts *o)
     else
         ps1_runtime_fallback_key(exe_path == o->game ? exe : NULL, exe_path == o->game ? exe_n : 0, disc, key,
                                  sizeof key);
+    /* A pack's source identity (ps1_pack.h): the SHA-256 of the boot EXE, the file itself for an EXE game. */
+    char src_sha[65] = "", src_why[300] = "";
+    if (o->pack_lib && *o->pack_lib) {
+        if (exe_path == o->game) {
+            uint8_t sum[32];
+            ps1_pack_sha256(exe, exe_n, sum);
+            ps1_pack_hex(sum, src_sha);
+        } else if (ps1_pack_disc_boot_sha256(disc, src_sha, NULL, 0, src_why, sizeof src_why) != 0) {
+            fprintf(stderr, "ps1: %s\n", src_why);
+        }
+    }
     char err[256] = "";
     ps1_machine *m = ps1_create(bios, PS1_BIOS_SIZE, disc, exe, exe_n, err, sizeof err);
     free(bios);
@@ -599,8 +617,8 @@ int ps1_runtime_run(const ps1_runtime_opts *o)
     printf("ps1: %s, game %s (%s), key %s, BIOS %s\n", ps1_runtime_version(), base_name(o->game),
            exe_path == o->game ? "EXE, fast boot" : exe_path ? "disc + EXE fast boot" : "disc, BIOS boot", key,
            bios_from);
-    if (o->pack_lib && *o->pack_lib)
-        printf("ps1: pack %s ignored (no PS1 recompiled code path yet), the interpreter runs the game\n", o->pack_lib);
+    ps1_pack pack;
+    ps1_pack_load(m, o->pack_lib, key, src_sha, &pack); /* the interpreter whatever happens (logged) */
 
     int analog = o->analog >= 0 ? o->analog != 0 : env_choice("RECOMP_PS1_PAD", "analog", 0);
     int players = o->players >= 1 ? o->players : 0;
@@ -616,6 +634,7 @@ int ps1_runtime_run(const ps1_runtime_opts *o)
         if (ps1_runtime_card_path(o->save_dir, key, slot, s_card_path[slot], sizeof s_card_path[slot]) != 0)
             s_card_path[slot][0] = 0;
     cards_load(m);
+    snprintf(s_discovered, sizeof s_discovered, "%s", o->discovered_path ? o->discovered_path : "");
     pthread_mutex_unlock(&s_mu);
     recomp_exit_hook_set(on_exit_hook);
     static int listening;
@@ -808,14 +827,24 @@ int ps1_runtime_run(const ps1_runtime_opts *o)
     pthread_mutex_lock(&s_mu);
     s_m = NULL;
     s_card_path[0][0] = s_card_path[1][0] = 0;
+    if (s_discovered[0])
+        ps1_pack_save_missed(m, s_discovered);
+    s_discovered[0] = 0;
     pthread_mutex_unlock(&s_mu);
     ps1_destroy(m);
+    ps1_pack_close(&pack);
     return rc;
 }
 
 /* ---- The app shell's entry ------------------------------------------------------------------------------------ */
 
 static char s_start_save_dir[1024];
+static char s_start_work_dir[1024];
+
+void ps1_runtime_set_work_dir(const char *dir)
+{
+    snprintf(s_start_work_dir, sizeof s_start_work_dir, "%s", dir ? dir : "");
+}
 
 void ps1_runtime_set_save_dir(const char *dir)
 {
@@ -830,6 +859,11 @@ int ps1_runtime_start(const char *rom, const char *pack_lib, const char *title_k
     o.title_key = title_key;
     o.save_dir = s_start_save_dir[0] ? s_start_save_dir : NULL;
     o.pack_lib = pack_lib;
+    char discovered[1200];
+    if (s_start_work_dir[0] && title_key && *title_key) {
+        snprintf(discovered, sizeof discovered, "%s/ps1-%s/discovered.txt", s_start_work_dir, title_key);
+        o.discovered_path = discovered;
+    }
     const char *frames = getenv("RECOMP_PS1_FRAMES"); /* a bounded run (checks) */
     if (frames && *frames)
         o.frames = strtoull(frames, NULL, 10);

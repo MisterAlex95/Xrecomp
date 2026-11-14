@@ -258,19 +258,21 @@ int xba_pack_load_rom(const char *files_dir, const char *rom_path, int *runtime_
         goto out;
     }
     if (console == RECOMP_CONSOLE_PS1 && start) {
-        /* The PS1 runtime is an interpreter too (XBA-168): the game always starts, from its disc (or EXE) and the
-         * OpenBIOS the app ships. No PS1 recompiler yet, so a pack is not used: PACK_NONE without one, PACK_STALE
-         * when this shell refuses it, PACK_IGNORED when it would pass (the runtime is handed NULL either way). */
+        /* The PS1 runtime is an interpreter that a pack speeds up too (XBA-168): the game always starts, from its
+         * disc (or EXE) and the OpenBIOS the app ships. No pack: PACK_NONE. A pack this shell refuses: PACK_STALE,
+         * interpreted. A pack that passes: the runtime checks the rest (source_sha256 = its boot EXE's, lib_sha256,
+         * its table: ps1_pack.h) and logs PACK_LOADED ps1 <KEY> (<N> functions) or PACK_STALE. The discovered code
+         * goes to the Prepare's work folder of the game, <files>/work/ps1-<KEY>/discovered.txt. */
+        char work[RECOMP_PACK_PATH_MAX + 8];
+        snprintf(work, sizeof work, "%s/work", files_dir ? files_dir : ".");
+        ps1_runtime_set_work_dir(files_dir ? work : NULL);
         if (rc == RECOMP_PACK_MISSING)
             printf("PACK_NONE %s %s (not prepared, the interpreter runs it)\n", recomp_pack_console_name(console), key);
         else if (rc != RECOMP_PACK_OK)
             printf("PACK_STALE %s %s (%s), running interpreted\n", recomp_pack_console_name(console), key, why);
-        else
-            printf("PACK_IGNORED %s %s %s (no PS1 recompiled code path yet), running interpreted\n",
-                   recomp_pack_console_name(console), key, lib);
         fflush(stdout);
         why[0] = 0;
-        rc = start(rom_path, NULL, key);
+        rc = start(rom_path, rc == RECOMP_PACK_OK ? lib : NULL, key);
         if (runtime_rc)
             *runtime_rc = rc;
         rc = RECOMP_PACK_OK;

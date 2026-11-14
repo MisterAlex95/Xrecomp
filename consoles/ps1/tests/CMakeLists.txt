@@ -67,6 +67,21 @@ endforeach()
 
 get_filename_component(PS1_REPO_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../../.. ABSOLUTE)
 set(PS1_HOMEBREW_DIR ${PS1_REPO_ROOT}/build/homebrew/ps1 CACHE PATH "Built PS1 homebrew (build_homebrew.sh ps1)")
+
+# A PS1 title pack (XBA-168): fake_ps1_pack is built like tools/prepare's libtitle.so (its core calls resolved against
+# the program that loads it), ps1_pack_test exports the core and checks ps1_pack.h (the homebrew disc's boot EXE
+# too when it is built).
+add_library(fake_ps1_pack SHARED fake_pack.c)
+target_include_directories(fake_ps1_pack PRIVATE ../runtime)
+if(APPLE)
+    target_link_options(fake_ps1_pack PRIVATE -undefined dynamic_lookup)
+endif()
+add_executable(ps1_pack_test test_pack.c)
+ps1_core_exported(ps1_pack_test)
+target_link_libraries(ps1_pack_test PRIVATE ps1_pack)
+target_compile_options(ps1_pack_test PRIVATE -Wall -Wextra)
+add_test(NAME ps1_pack COMMAND ps1_pack_test $<TARGET_FILE:fake_ps1_pack> ${PS1_HOMEBREW_DIR})
+set_tests_properties(ps1_pack PROPERTIES TIMEOUT 60)
 set(PS1_BIOS ${PS1_REPO_ROOT}/build/ps1-bios/openbios.bin CACHE FILEPATH "OpenBIOS (build_ps1_bios.sh)")
 set(PS1_TESTS_DIR ${PS1_REPO_ROOT}/build/ps1-tests CACHE PATH "JaCzekanski/ps1-tests (fetch_ps1_tests.sh)")
 set(PS1_RT ${CMAKE_CURRENT_SOURCE_DIR}/../runtime)
