@@ -169,7 +169,7 @@ struct gba_machine {
     bool prefetch;
     bool irq_line;          /* IME && (IE & IF): the CPU takes an IRQ when CPSR.I is clear */
     uint8_t rc_exit;        /* GBA_RC_EXIT_* */
-    uint8_t rc_reserved;
+    uint8_t rc_hint;        /* set by lifted code with GBA_RC_EXIT_INTERP (gba_recomp_rt.h), cleared before each call */
     uint32_t open_bus;      /* last fetched opcode (open bus approximation) */
     uint64_t rc_native;     /* instructions lifted code ran (packs built with -DGBA_RC_COUNT) */
     uint8_t *rc_ewram;      /* = ewram, iwram below (lifted code's inline accesses) */
@@ -229,6 +229,7 @@ GBA_RC_SAME(fetch32);
 GBA_RC_SAME(prefetch);
 GBA_RC_SAME(irq_line);
 GBA_RC_SAME(rc_exit);
+GBA_RC_SAME(rc_hint);
 GBA_RC_SAME(open_bus);
 GBA_RC_SAME(rc_native);
 GBA_RC_SAME(rc_ewram);

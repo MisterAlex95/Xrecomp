@@ -169,6 +169,26 @@ class HostToolchain(cc.Toolchain):
         return "%s %s" % (os.path.basename(self.cc), m.group(1) if m else "?")
 
 
+# Lifted GBA code (XBA-151, docs/android/prepare.md « GBA packs »): -O2 runs it no faster than -O1 and costs ~10 %
+# more compile time, so -O2 / -O3 compile at -O1. One clang job peaks at ~150 MB: 256 MB per job and a 1 GB reserve
+# (an Xbox title's files need 1 GB and 3 GB) give a phone with little free memory its cores all the same.
+GBA_JOB_RSS = 256 << 20
+GBA_RESERVED = 1 << 30
+
+
+def gba_opt(opt):
+    """The -O level lifted GBA code compiles at for a requested --opt."""
+    return "1" if opt in ("2", "3") else opt
+
+
+def lifted_cflags(opt):
+    """The optimisation flags of lifted GBA code (also tools/consoles/gba_recomp_build.py's). No SLP vectorizer: there
+    is nothing to vectorize, and it was the costliest pass on big functions (half the optimiser's time for aarch64).
+    (clang's basic register allocator would save another 16 % of compile time, for 2-3 % of run time in tight loops:
+    not taken.)"""
+    return ["-O%s" % opt, "-fno-tree-slp-vectorize"]
+
+
 def compile_flags(opt, root, gen, sysroot=None, include_dirs=()):
     """The generated C's flags: -I the GBA runtime (gba_recomp.h, gba_core.h and the lifted code's own header) and
     the generated directory; with a sysroot, the Android target (compile.py's)."""
@@ -178,7 +198,7 @@ def compile_flags(opt, root, gen, sysroot=None, include_dirs=()):
         rd = cc.sysroot_resource_dir(sysroot)
         if rd:
             flags.append("-resource-dir=" + rd)
-    flags += ["-O%s" % opt, "-g0", "-fPIC", "-std=gnu11", "-w", "-DNDEBUG"]
+    flags += lifted_cflags(opt) + ["-g0", "-fPIC", "-std=gnu11", "-w", "-DNDEBUG"]
     for d in [gen, runtime_dir(root)] + list(include_dirs):
         flags.append("-I" + d)
     return flags
@@ -265,6 +285,7 @@ class Run:
         self.compile_stats = {}
         self.stamp = {}
         self.jobs = 0
+        self.opt = None
         self.sources = []
         self.tools_peak_kb = 0
         self.work = None
@@ -386,21 +407,22 @@ class Run:
 
     def compile(self):
         a = self.a
+        self.opt = opt = gba_opt(a.opt)
         if self.android:
             self.tc = cc.Toolchain(a.cc, os.path.abspath(a.sysroot), cc_prefix=a.cc_prefix_arg, ld=a.ld,
                                    ld_prefix=a.ld_prefix_arg, builtins=a.builtins, procs=self.procs)
-            flags = compile_flags(a.opt, self.m.ROOT, self.gen, self.tc.sysroot, a.include_dir)
+            flags = compile_flags(opt, self.m.ROOT, self.gen, self.tc.sysroot, a.include_dir)
         else:
             self.tc = HostToolchain(a.cc or os.environ.get("CC") or "cc", self.procs)
-            flags = compile_flags(a.opt, self.m.ROOT, self.gen, None, a.include_dir)
+            flags = compile_flags(opt, self.m.ROOT, self.gen, None, a.include_dir)
         sources = [os.path.join(self.gen, fn) for fn in sorted(os.listdir(self.gen)) if fn.endswith(".c")]
         sources += [os.path.abspath(s) for s in a.extra_src]
-        jobs = a.jobs or cc.default_jobs(cc.mem_available(), os.cpu_count())
+        jobs = a.jobs or cc.default_jobs(cc.mem_available(), os.cpu_count(), GBA_JOB_RSS, GBA_RESERVED)
         self.jobs, self.sources = jobs, sources
         self.tools_peak_kb = metrics.children_peak_kb()
         device_log = getattr(a, "device_log", None)
         limit = (lambda: metrics.jobs_now(device_log, jobs)) if device_log else None
-        self.rep.progress(4, 0, "compiling %d files, %d jobs, -O%s" % (len(sources), jobs, a.opt))
+        self.rep.progress(4, 0, "compiling %d files, %d jobs, -O%s" % (len(sources), jobs, opt))
 
         def prog(done, total, now, eta):
             self.rep.progress(4, done * 100 // max(1, total), "%d/%d files (%d compiled)" % (done, total, now), eta)
@@ -447,9 +469,9 @@ class Run:
             self.link(lib)
             self.rep.progress(5, 70, "writing pack.json")
             meta = make_meta(lib, self.key, self.title, self.rom_sha, abi, a.shell_abi, self.toolkit,
-                             self.toolkit_sha, "%s -O%s" % (self.tc.short_version(), a.opt), self.discovered)
+                             self.toolkit_sha, "%s -O%s" % (self.tc.short_version(), self.opt), self.discovered)
             meta["prepare"] = metrics.summary(self.steps, self.compile_stats, self.sources, self.objects, self.jobs,
-                                              a.opt, part, getattr(a, "device_log", None), self.tools_peak_kb)
+                                              self.opt, part, getattr(a, "device_log", None), self.tools_peak_kb)
             try:
                 pack.publish(self.packs, self.name, meta)
             except OSError as e:

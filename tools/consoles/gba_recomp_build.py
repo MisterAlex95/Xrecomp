@@ -5,7 +5,8 @@
                                        [--loop N --gba-run PATH [--frames F] [--run-args "ARGS"]]
 
 1. `python3 -m gba_tools.recomp ROM WORKDIR/src [--discovered WORKDIR/discovered.txt]` (consoles/gba/tools)
-2. every WORKDIR/src/*.c compiled with the host compiler (-O2 -fPIC -I consoles/gba/runtime), linked into
+2. every WORKDIR/src/*.c compiled with the host compiler (Prepare's flags: tools/prepare/gba.py lifted_cflags,
+   -fPIC -I consoles/gba/runtime), linked into
    WORKDIR/libtitle.so (on macOS with -undefined dynamic_lookup: the core's symbols come from the executable)
 3. with --loop N: up to N rounds of  gba_run ROM --pack libtitle.so --missed WORKDIR/discovered.txt  then a rebuild
    with the addresses the interpreter had to run, until a round finds nothing new (converged).
@@ -27,6 +28,8 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+sys.path.insert(0, REPO)
+from tools.prepare import gba  # noqa: E402
 TOOLS = os.path.join(REPO, "consoles", "gba", "tools")
 RUNTIME = os.path.join(REPO, "consoles", "gba", "runtime")
 
@@ -69,13 +72,14 @@ def lift(rom, src, discovered):
 
 def build(src, lib, cc, jobs, cflags):
     cfiles = sorted(f for f in os.listdir(src) if f.endswith(".c"))
+    opt_flags = gba.lifted_cflags("1")  # Prepare's (tools/prepare/gba.py)
     objdir = os.path.join(src, "obj")
     shutil.rmtree(objdir, ignore_errors=True)
     os.makedirs(objdir)
 
     def compile_one(f):
         obj = os.path.join(objdir, f[:-2] + ".o")
-        cmd = cc + ["-O2", "-fPIC", "-w", "-I", RUNTIME] + cflags + ["-c", os.path.join(src, f), "-o", obj]
+        cmd = cc + opt_flags + ["-fPIC", "-w", "-I", RUNTIME] + cflags + ["-c", os.path.join(src, f), "-o", obj]
         r = subprocess.run(cmd, capture_output=True, text=True, check=False)
         if r.returncode != 0:
             raise RuntimeError("%s failed:\n%s" % (" ".join(cmd), r.stderr[-4000:]))

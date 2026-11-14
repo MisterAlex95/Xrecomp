@@ -173,12 +173,13 @@ def mem_available(meminfo="/proc/meminfo"):
     return None
 
 
-def default_jobs(avail=None, cpus=None):
+def default_jobs(avail=None, cpus=None, job_rss=JOB_RSS, reserved=RESERVED):
     """min(5, (MemAvailable - 3 GB) / 1 GB), at least 1, at most the CPU
-    count. `avail` None = unknown memory: 1."""
+    count (job_rss / reserved: another console's figures, tools/prepare/gba.py).
+    `avail` None = unknown memory: 1."""
     if avail is None:
         return 1
-    n = int((avail - RESERVED) // JOB_RSS)
+    n = int((avail - reserved) // job_rss)
     n = min(MAX_JOBS, n)
     if cpus:
         n = min(n, cpus)

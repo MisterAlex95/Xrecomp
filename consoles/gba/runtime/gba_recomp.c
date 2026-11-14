@@ -3,9 +3,11 @@
  *
  * Dispatch: the table's entries are the starts of the contiguous runs ("islands") of each lifted function, sorted.
  * For a PC in the cartridge, the entry at or before it (same state) is the only function that can hold it; called
- * with that PC, the function resumes there or answers GBA_RC_EXIT_NOT_COVERED. A direct-mapped cache remembers
- * the answer per address, so calls and returns cost one cache probe. The loop keeps the interpreter's order of
- * checks (scheduler, HALT, IRQ) between every two steps, lifted or interpreted, so both run cycle for cycle alike. */
+ * with that PC, the function resumes there, answers GBA_RC_EXIT_NOT_COVERED, or hands it to the interpreter with the
+ * number of instructions to the end of its block (rc_hint: no resume point inside a block; that many run interpreted
+ * without calling it again). A direct-mapped cache remembers the function per address, so calls and returns cost one
+ * cache probe. The loop keeps the interpreter's order of checks (scheduler, HALT, IRQ) between every two steps,
+ * lifted or interpreted, so both run cycle for cycle alike. */
 #define _POSIX_C_SOURCE 200809L
 #include "gba_internal.h"
 
@@ -34,6 +36,7 @@ struct gba_rc_state {
     uint32_t nisl[2];
     uint32_t expect;               /* key of the instruction after the last interpreted ROM step */
     uint32_t interp_key;           /* lifted code handed this instruction to the interpreter (GBA_RC_EXIT_INTERP) */
+    uint32_t interp_left;          /* and this many in sequence from there (rc_hint: the rest of a lifted block) */
     gba_recomp_stats stats;
     uint32_t *missed_set;          /* open addressing, 2 * MISSED_MAX slots, KEY_NONE = empty */
     uint32_t *missed;              /* insertion order */
@@ -227,12 +230,21 @@ void gba_recomp_run(gba_machine *m)
         uint32_t key = pc | thumb;
         if (key == s->interp_key) {
             /* The instruction lifted code left to the interpreter: run it now, after the loop's checks (the
-             * scheduler may have been due, or an IRQ pending, when the lifted code stopped in front of it). */
+             * scheduler may have been due, or an IRQ pending, when the lifted code stopped in front of it). Then
+             * the rest of its block, while execution stays in sequence: inside a block nothing is a resume point. */
             s->interp_key = KEY_NONE;
             s->stats.fallbacks++;
             s->stats.interp_rom++;
             gba_cpu_step(m);
             s->expect = KEY_NONE;
+            if (s->interp_left > 1) {
+                uint32_t next = key + (thumb ? 2 : 4);
+                uint32_t now_key = gba_cpu_pc(m) | ((m->cpu.cpsr_ctl & CPSR_T) ? 1u : 0u);
+                if (now_key == next) {
+                    s->interp_key = next;
+                    s->interp_left--;
+                }
+            }
             continue;
         }
         s->interp_key = KEY_NONE;
@@ -244,6 +256,7 @@ void gba_recomp_run(gba_machine *m)
         }
         if (ln->fn) {
             m->rc_exit = GBA_RC_EXIT_NORMAL;
+            m->rc_hint = 0;
             if (s->verify)
                 memcpy(s->verify, m, sizeof *m);
             uint64_t before = m->now;
@@ -261,6 +274,7 @@ void gba_recomp_run(gba_machine *m)
                 s->stats.calls++;
                 m->rc_exit = GBA_RC_EXIT_NORMAL;
                 s->interp_key = (gba_cpu_pc(m) | ((m->cpu.cpsr_ctl & CPSR_T) ? 1u : 0u));
+                s->interp_left = m->rc_hint ? m->rc_hint : 1;
                 continue;
             }
             m->rc_exit = GBA_RC_EXIT_NORMAL;

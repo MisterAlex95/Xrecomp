@@ -567,10 +567,36 @@ whole ROM (`AXVE-1A2B3C4D`), so two dumps of one game have two packs. The app's 
 | 4 | `compile` | each `gen/*.c` with the flags below, the object cache of « Compile and link » | the object cache |
 | 5 | `pack` | `libtitle.so`, `pack.json`, atomic publish as `packs/gba-<KEY>` (`.partial`, `.old`, same rules) | `link` |
 
-Compile flags: `--target=aarch64-linux-android30 --sysroot=<sysroot> [-resource-dir=…] -O<opt> -g0 -fPIC -std=gnu11 -w
--DNDEBUG -I<work>/gen -I<toolkit>/consoles/gba/runtime`. The link is the Xbox pack's (`ld.lld … -shared -soname
-libtitle.so -Bsymbolic --no-undefined … -l:libmain.so`): every core function the lifted code calls must be exported by
-`libmain.so`, which links the whole GBA core (`--whole-archive gba_core`, android/app/src/main/cpp/CMakeLists.txt).
+Compile flags: `--target=aarch64-linux-android30 --sysroot=<sysroot> [-resource-dir=…] -O1 -fno-tree-slp-vectorize -g0
+-fPIC -std=gnu11 -w -DNDEBUG -I<work>/gen -I<toolkit>/consoles/gba/runtime` (`gba.compile_flags`). `--opt 2` and `3`
+compile at -O1 for a GBA ROM (`gba_opt`; `pack.json` `cc` says `-O1`): lifted GBA code runs no faster at -O2, which
+costs ~10 % more compile time. Jobs, when `--jobs` is 0: `default_jobs` with 256 MB per job and a 1 GB reserve (one
+compile peaks at ~150 MB), still at most 5 and the CPU count, and the device log's limit as for an Xbox title. The
+link is the Xbox pack's (`ld.lld … -shared -soname libtitle.so -Bsymbolic --no-undefined … -l:libmain.so`): every
+core function the lifted code calls must be exported by `libmain.so`, which links the whole GBA core (`--whole-archive
+gba_core`, android/app/src/main/cpp/CMakeLists.txt).
+
+**Compile time (XBA-151).** The lifter writes blocks with one event check per segment instead of a label, a test and
+an exit per instruction (consoles/gba/tools/README.md « Blocks and event checks »), files whose names and contents
+stay the same when the discovery loop adds functions (the object cache recompiles the files that changed: ~1 per
+function found), and Prepare drops the SLP vectorizer and -O2. Measured on the synthetic ROM of
+`consoles/gba/tests/bench` (`build_rom.sh`: 1858 functions of game-like Thumb code, 200,550 instructions;
+`compile_time.py`), CPU time of all compiles (sum of user time), 6 jobs, on the Zen 5 host of « Measurements »,
+2026-11-14:
+
+| | before (one label per instruction, -O2) | after (-O1) |
+|---|---|---|
+| NDK r28c clang 19, aarch64-linux-android30 | 730 s (3.64 s per 1k instructions) | 147 s (0.73 s per 1k) |
+| Debian clang 19, x86-64 | 545 s (2.72 s per 1k) | 184 s (0.92 s per 1k) |
+| Wall time, 6 jobs (NDK) | 127 s, largest file 28 s | 26 s, largest file 3.7 s |
+| `pad.gba` (5.6k instructions, one 1555-instruction ARM function), NDK | 56 s | 10 s |
+
+On a phone, with the « Measurements » model (5 jobs ≈ 2.2 Zen 5 cores, +25 % sustained clocks, +25 % for the
+embedded clang: ×0.71 of the CPU time): 200k instructions **~1.7 min** (was ~8.6 min), 300k ~2.6 min, 500k ~4.4 min,
+plus the lift (~6 s per 200k on the host) and the link. A commercial game's reachable code is 100k-500k instructions.
+Run time is unchanged: frames per second with the pack, before / after (`gba_run --frames`, best of 7 interleaved
+runs): the synthetic ROM 1091 / 1144, `cpu.gba` 10,040 / 10,020, `gfx.gba` 5,770 / 5,810, jsmolka `arm.gba` 5,820 /
+5,760, `thumb.gba` 5,800 / 5,750 (the test ROMs idle after their checks: a branch to itself and the PPU).
 
 The toolkit tree ships what the lift and the compile need: `consoles/gba/tools/**/*.py` (the lifter, `gba_tools`; on
 `PYTHONPATH` for step 3) and `consoles/gba/runtime/*.h` (`gba_recomp.h`, `gba_core.h`, the lifted code's own header);

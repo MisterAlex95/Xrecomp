@@ -10,7 +10,7 @@ runs on the core in `consoles/gba/runtime` (contract: `gba_recomp.h`, lifted-cod
 | `isa.py` | ARMv4T classification, bit for bit the interpreter's (`gba_cpu.c` `arm_execute` / `thumb_execute`) |
 | `discover.py` | function discovery, data barriers, table islands |
 | `lift.py` | one C function per discovered function |
-| `recomp.py` | the CLI: OUTDIR/gba_rc_NNN.c (about 2500 instructions each) + gba_rc_table.c |
+| `recomp.py` | the CLI: OUTDIR/gba_rc_AAAAAAAA{a,t}.c (1000-4000 instructions, see « Files ») + gba_rc_table.c |
 
 ## Discovery
 
@@ -44,16 +44,38 @@ no-ops): same results, same flags (eager, 0/1 locals), same cycles in the same o
 by the target's region). Literal loads are folded (value from the ROM, the access's cycles kept).
 
 Guest registers, flags, `now` and the next event live in C locals; they are synced around each bus call (EWRAM /
-IWRAM are accessed inline with the same wait states) and written back at every exit. Before each instruction:
-`now >= next_event` leaves for the dispatcher (the interpreter's loop test, so scheduler events and IRQs land on the
-same instruction); after each store: IRQ line / HALTCNT. Every instruction has a label reachable from the function's
-entry switch, so lifted code resumes anywhere (after an event, or when an IRQ handler returns into it).
+IWRAM are accessed inline with the same wait states; an LDM / STM / PUSH / POP checks its whole run once) and written
+back at every exit.
+
+**Blocks and event checks.** The interpreter tests `now < next_event` before every instruction; lifted code must stop
+at the same instructions (scheduler events, IRQs) without paying a test, a C label and an exit per instruction, which
+is what made the compile slow (XBA-151). A function is cut into blocks: a block starts at a resume point (the entry,
+a local jump target, what follows a call or anything else that leaves, the first instruction after an interpreted
+one, and every `MAX_BLOCK` = 12 instructions); only those are labels of the entry switch. Inside a block, a *segment*
+runs up to the next memory access: its instructions cost static cycles (fetch, internal and multiply cycles, folded
+literal loads), so one test at its start, `now + those cycles >= next event`, says whether the event falls inside
+(`RC_STOP` at the block's start, also the exact test for the block's first instruction; `RC_CHECK` after each memory
+access, whose own cycles, and whatever a bus call did to the clock or the next event, are seen by it). When it does,
+lifted code returns `GBA_RC_EXIT_INTERP` with the number of instructions left in the block (`rc_hint`): the
+interpreter runs them, the event lands on the same instruction as without a pack, and the next block is native again.
+Entered at an instruction inside a block (an IRQ handler returning there), a function answers the same way from a
+small table. Only bus writes can raise the IRQ line or halt the CPU: their slow path drops the local next event to 0,
+so the next test stops there. Measured on a synthetic 200k-instruction ROM: 5x less compile time for aarch64 than one
+label per instruction, the same run time (docs/android/prepare.md « GBA packs »).
 
 Control flow: branches to addresses of the same function are `goto`s; calls, returns, BX and computed jumps return
 to the dispatcher with PC set (no C stack growth whatever the game does; a direct-mapped cache makes each dispatch a
 probe). SWI, MSR, MRS of SPSR, exception returns (`movs pc` / `subs pc` / `ldm {pc}^`), LDM/STM with the S bit, SWP,
 undefined and coprocessor encodings and PC write-backs are handed to the interpreter (`GBA_RC_EXIT_INTERP`), which
 runs that one instruction after the dispatcher's usual checks.
+
+**Files.** Functions go to files in address order; a file ends after a function whose entry hashes to 0 mod 8 once
+it holds 1000 instructions (or at 4000), and is named after its first function. A function the discovery loop adds
+or splits changes the file it lands in (rarely the next one too), not the others: Prepare's object cache recompiles
+that file only. Compile flags (Prepare, `gba_recomp_build.py`): `-O1` (-O2 runs this code no faster) and
+`-fno-tree-slp-vectorize` (nothing to vectorize, and the SLP vectorizer was the costliest pass on big functions).
+`consoles/gba/tests/bench/`: `build_rom.sh` builds a synthetic ROM of game-like Thumb code (`gen_rom.py`, ~200k
+instructions), `compile_time.py` measures the compile of any ROM's lift.
 
 ## Checking it
 

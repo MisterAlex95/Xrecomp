@@ -9,16 +9,22 @@
  * for the pack to bind to: gba_read8, gba_read16, gba_read32, gba_write8, gba_write16, gba_write32.
  *
  * Lifted code is cycle-exact with the interpreter (gba_cpu.c): every instruction costs the same fetch, data and
- * internal cycles, in the same order, and before each instruction the lifted code checks `now < next_event`, as the
- * interpreter's run loop does; after a store it checks the IRQ line and HALTCNT. When it must stop (scheduler
- * event, pending IRQ, an indirect jump or a call: the dispatcher picks the next function), it writes the registers
- * back, sets r15 (+ 8 / + 4, the interpreter's convention) and returns. Rare or mode-changing instructions (SWI,
- * MSR, exception returns, LDM/STM with the S bit, SWP, undefined encodings) are run by the interpreter: the lifted
- * code returns with rc_exit = GBA_RC_EXIT_INTERP and PC at that instruction.
+ * internal cycles, in the same order, and it stops where the interpreter's run loop would (`now < next_event` before
+ * each instruction): exactly at the start of a block, and once per segment inside it (gba_tools lift.py « blocks »:
+ * when the next event falls inside a segment, the interpreter runs it). A bus write that raises the IRQ line or halts
+ * the CPU stops it after that instruction. When it must stop (scheduler event, pending IRQ, an indirect jump or a
+ * call: the dispatcher picks the next function), it writes the registers back, sets r15 (+ 8 / + 4, the interpreter's
+ * convention) and returns. Rare or mode-changing instructions (SWI, MSR, exception returns, LDM/STM with the S bit,
+ * SWP, undefined encodings) are run by the interpreter: the lifted code returns with rc_exit = GBA_RC_EXIT_INTERP and
+ * PC at that instruction.
  *
- * Entry: the dispatcher calls a table function with PC at any address. The function resumes at that instruction
- * when it lifted it (every instruction is a resume point: events can stop lifted code anywhere and IRQ handlers
- * return anywhere); otherwise it returns at once with rc_exit = GBA_RC_EXIT_NOT_COVERED and nothing changed. */
+ * Entry: the dispatcher calls a table function with PC at any address. The function resumes there when it is the
+ * start of one of its blocks (the resume points: its entry, jump targets, return points, every few instructions).
+ * At another of its instructions it returns at once with GBA_RC_EXIT_INTERP and rc_hint = the number of
+ * instructions to its block's end, nothing changed: the interpreter runs them (as when an event stopped lifted code
+ * there, or an IRQ handler returns there). At an address it does not hold, it returns at once with
+ * GBA_RC_EXIT_NOT_COVERED and nothing changed. (Packs from before rc_hint resumed at every instruction; both kinds
+ * run on every core of GBA_RECOMP_ABI 1: an older core ignores rc_hint and calls the function back for each.) */
 #ifndef GBA_RECOMP_RT_H
 #define GBA_RECOMP_RT_H
 
@@ -58,7 +64,7 @@ typedef struct gba_rc_head {
     bool prefetch;
     bool irq_line;          /* IME && (IE & IF) */
     uint8_t rc_exit;        /* GBA_RC_EXIT_*: why lifted code returned */
-    uint8_t rc_reserved;
+    uint8_t rc_hint;        /* with GBA_RC_EXIT_INTERP: see below (0 before each call; older cores ignore it) */
     uint32_t open_bus;      /* last fetched opcode (what unmapped reads return) */
     uint64_t rc_native;     /* instructions run natively (counted when the pack is built with -DGBA_RC_COUNT) */
     uint8_t *rc_ewram;      /* the machine's EWRAM (256 KB) and IWRAM (32 KB): lifted code reads and writes them */
@@ -70,6 +76,10 @@ enum {
     GBA_RC_EXIT_INTERP = 1,      /* the interpreter runs the instruction at PC, then dispatch goes on */
     GBA_RC_EXIT_NOT_COVERED = 2, /* this function does not hold PC: nothing ran */
 };
+
+/* rc_hint with GBA_RC_EXIT_INTERP: how many instructions, in sequence from PC, the interpreter may run before
+ * calling lifted code again (the rest of a lifted block: no resume point inside); 0 = 1. The core stops counting as
+ * soon as execution leaves the sequence (a branch, an IRQ). */
 
 /* The core's bus (gba_bus.c): the access's wait states are added to now; seq = sequential access. */
 uint8_t gba_read8(gba_machine *m, uint32_t addr, bool seq);
@@ -145,14 +155,20 @@ static inline uint32_t rc_shift_reg(uint32_t type, uint32_t v, uint32_t amt, uin
  *
  *   void f(gba_machine *m_) {
  *       RC_ENTER(thumb, region);
- *       switch (RC_PC()) { case 0x08000100: goto L_08000100; ... default: RC_NOT_COVERED(); }
- *   L_08000100: RC_I(0x08000100); ... one instruction ...
+ *       switch (RC_PC()) {
+ *       case 0x08000100: goto L_08000100;            (the resume points)
+ *       default: { static const uint8_t mid_[] = {...}; RC_MID_TABLE(0x08000100, mid_); RC_NOT_COVERED(); }
+ *       }
+ *   L_08000100: RC_STOP(0x08000100, 2, 1, 4);         (a block: the first segment's static cycles, its length)
+ *       RC_I(); ... one instruction ...
+ *       RC_I(); ... a memory access ...
+ *       RC_CHECK(0x08000104, 1, 0, 2);               (the next segment)
  *       ...
  *       RC_EPILOGUE();
  *   }
  *
  * Guest registers and flags live in locals between bus calls; `now` and `ne` (next event) too, synced around every
- * call; `fc` is the opcode fetch cost, reloaded after stores (WAITCNT). */
+ * call; `fc` is the opcode fetch cost, reloaded after bus writes (WAITCNT). */
 #define RC_ENTER(T, REGION)                                                                                          \
     gba_rc_head *const h = (gba_rc_head *)(void *)m_;                                                                \
     enum { RC_T = (T), RC_PIPE = (T) ? 4 : 8, RC_REGION = (REGION) };                                                \
@@ -174,16 +190,45 @@ static inline uint32_t rc_shift_reg(uint32_t type, uint32_t v, uint32_t amt, uin
 #define RC_COUNT() ((void)0)
 #endif
 
-/* Start of an instruction at A: stop before it when the scheduler is due (the interpreter's loop test), then its
- * opcode fetch. */
-#define RC_I(A)                                                                                                      \
+/* Start of an instruction: its opcode fetch. */
+#define RC_I()                                                                                                       \
     do {                                                                                                             \
-        if (__builtin_expect(now >= ne, 0)) {                                                                        \
-            epc = (A);                                                                                               \
-            goto x_exit;                                                                                             \
-        }                                                                                                            \
         now += fc;                                                                                                   \
         RC_COUNT();                                                                                                  \
+    } while (0)
+
+/* The event check at the start of a block (A, a resume point), for its first segment (NFC fetches + EXTRA cycles,
+ * lift.py): when the event is due now, leave for the dispatcher (the interpreter's own check); when it falls inside
+ * the segment, the interpreter runs from A. */
+#define RC_STOP(A, NFC, EXTRA, N)                                                                                    \
+    do {                                                                                                             \
+        if (__builtin_expect(now + (uint32_t)(NFC) * fc + (uint32_t)(EXTRA) >= ne, 0)) {                             \
+            epc = (A);                                                                                               \
+            if (now >= ne)                                                                                           \
+                goto x_exit;                                                                                         \
+            h->rc_hint = (N);                                                                                        \
+            goto x_interp;                                                                                           \
+        }                                                                                                            \
+    } while (0)
+
+/* The event check of a segment starting at A (after a memory access): the interpreter runs from A unless the
+ * segment's static cycles end before the next event. */
+#define RC_CHECK(A, NFC, EXTRA, N)                                                                                   \
+    do {                                                                                                             \
+        if (__builtin_expect(now + (uint32_t)(NFC) * fc + (uint32_t)(EXTRA) >= ne, 0)) {                             \
+            epc = (A);                                                                                               \
+            h->rc_hint = (N);                                                                                        \
+            goto x_interp;                                                                                           \
+        }                                                                                                            \
+    } while (0)
+
+/* Entered at an instruction inside a block (not a resume point), N instructions before the block's end: the
+ * interpreter runs them. */
+#define RC_MID(N)                                                                                                    \
+    do {                                                                                                             \
+        h->rc_hint = (N);                                                                                            \
+        epc = RC_PC();                                                                                               \
+        goto x_interp;                                                                                               \
     } while (0)
 
 /* Leaves for the dispatcher at A (same state). */
@@ -200,6 +245,15 @@ static inline uint32_t rc_shift_reg(uint32_t type, uint32_t v, uint32_t amt, uin
         goto x_interp;                                                                                               \
     } while (0)
 
+/* Entered at PC, not a resume point: TAB[(PC - LO) / instruction size] is the number of instructions to the end of
+ * PC's block (0: not an instruction of this function). */
+#define RC_MID_TABLE(LO, TAB)                                                                                        \
+    do {                                                                                                             \
+        uint32_t o__ = RC_PC() - (LO), i__ = o__ >> (RC_T ? 1 : 2);                                                  \
+        if (!(o__ & (RC_T ? 1u : 3u)) && i__ < sizeof(TAB) && (TAB)[i__])                                            \
+            RC_MID((TAB)[i__]);                                                                                      \
+    } while (0)
+
 #define RC_NOT_COVERED()                                                                                             \
     do {                                                                                                             \
         h->rc_exit = GBA_RC_EXIT_NOT_COVERED;                                                                        \
@@ -211,22 +265,20 @@ static inline uint32_t rc_shift_reg(uint32_t type, uint32_t v, uint32_t amt, uin
 #define RC_SYNC_IN() (now = h->now, ne = h->next_event)
 /* EWRAM / IWRAM inline (what gba_bus.c does for them: the wait states of the region, the address masked and
  * aligned), everything else through the core's bus functions. */
+#define RC_IS_RAM(A) (((A) >> 24) - 2u < 2u)
+/* The host address of an EWRAM (region 2, 256 KB) or IWRAM (region 3, 32 KB) address: no branch. */
 static inline uint8_t *rc_ram(gba_rc_head *h, uint32_t a, uint32_t align)
 {
-    switch (a >> 24) {
-    case 2: return h->rc_ewram + (a & 0x3FFFFu & ~align);
-    case 3: return h->rc_iwram + (a & 0x7FFFu & ~align);
-    default: return 0;
-    }
+    uint32_t iw = (a >> 24) & 1;
+    return (iw ? h->rc_iwram : h->rc_ewram) + (a & (0x3FFFFu >> (iw * 3)) & ~align);
 }
 #define RC_RD(BITS, W, ALIGN, A, SEQ, OB)                                                                            \
     ({                                                                                                               \
         uint32_t a__ = (A), rv__;                                                                                    \
-        uint8_t *p__ = rc_ram(h, a__, ALIGN);                                                                        \
-        if (__builtin_expect(p__ != 0, 1)) {                                                                         \
+        if (__builtin_expect(RC_IS_RAM(a__), 1)) {                                                                   \
             uint##BITS##_t t__;                                                                                      \
             now += h->W[a__ >> 24][SEQ];                                                                             \
-            memcpy(&t__, p__, sizeof t__);                                                                           \
+            memcpy(&t__, rc_ram(h, a__, ALIGN), sizeof t__);                                                         \
             rv__ = t__;                                                                                              \
         } else {                                                                                                     \
             RC_SYNC_OUT(OB);                                                                                         \
@@ -239,14 +291,14 @@ static inline uint8_t *rc_ram(gba_rc_head *h, uint32_t a, uint32_t align)
     do {                                                                                                             \
         uint32_t a__ = (A);                                                                                          \
         uint##BITS##_t t__ = (uint##BITS##_t)(V);                                                                    \
-        uint8_t *p__ = rc_ram(h, a__, ALIGN);                                                                        \
-        if (__builtin_expect(p__ != 0, 1)) {                                                                         \
+        if (__builtin_expect(RC_IS_RAM(a__), 1)) {                                                                   \
             now += h->W[a__ >> 24][SEQ];                                                                             \
-            memcpy(p__, &t__, sizeof t__);                                                                           \
+            memcpy(rc_ram(h, a__, ALIGN), &t__, sizeof t__);                                                         \
         } else {                                                                                                     \
             RC_SYNC_OUT(OB);                                                                                         \
             gba_write##BITS(RC_M, a__, t__, (SEQ));                                                                  \
             RC_SYNC_IN();                                                                                            \
+            RC_AFTER_BUS_WRITE();                                                                                    \
         }                                                                                                            \
     } while (0)
 #define RD8(A, SEQ, OB) RC_RD(8, wait16, 0u, A, SEQ, OB)
@@ -256,12 +308,47 @@ static inline uint8_t *rc_ram(gba_rc_head *h, uint32_t a, uint32_t align)
 #define WR16(A, V, SEQ, OB) RC_WR(16, wait16, 1u, A, V, SEQ, OB)
 #define WR32(A, V, SEQ, OB) RC_WR(32, wait32, 3u, A, V, SEQ, OB)
 
-/* After a store instruction: WAITCNT may have changed, an IRQ may be pending, HALTCNT may have stopped the CPU. */
-#define RC_AFTER_STORE(NEXT)                                                                                         \
+/* Multiple transfers (LDM / STM / PUSH / POP): N words from A (aligned). When they all fall in one RAM region, one
+ * check, inline accesses and the waits at once (the first access non-sequential); else each through the bus. */
+#define RC_RUN_RAM(A, N) (RC_IS_RAM(A) && ((A) >> 24) == (((A) + 4u * ((N) - 1)) >> 24))
+#define RC_RUN_WAITS(A, N) (now += h->wait32[(A) >> 24][0] + (uint32_t)((N) - 1) * h->wait32[(A) >> 24][1])
+/* Inside a run (RC_RUN_RAM): the region's base and address mask, then each word. */
+#define RC_RUN_BASE(A)                                                                                               \
+    uint8_t *rb__ = ((A) >> 24) & 1 ? h->rc_iwram : h->rc_ewram;                                                     \
+    uint32_t rm__ = ((A) >> 24) & 1 ? 0x7FFCu : 0x3FFFCu
+#define RC_FRD32(A)                                                                                                  \
+    ({                                                                                                               \
+        uint32_t t__;                                                                                                \
+        memcpy(&t__, rb__ + ((A) & rm__), 4);                                                                        \
+        t__;                                                                                                         \
+    })
+#define RC_FWR32(A, V)                                                                                               \
+    do {                                                                                                             \
+        uint32_t t__ = (V);                                                                                          \
+        memcpy(rb__ + ((A) & rm__), &t__, 4);                                                                        \
+    } while (0)
+#define RC_BRD32(A, SEQ, OB)                                                                                         \
+    ({                                                                                                               \
+        RC_SYNC_OUT(OB);                                                                                             \
+        uint32_t t__ = gba_read32(RC_M, (A), (SEQ));                                                                 \
+        RC_SYNC_IN();                                                                                                \
+        t__;                                                                                                         \
+    })
+#define RC_BWR32(A, V, SEQ, OB)                                                                                      \
+    do {                                                                                                             \
+        RC_SYNC_OUT(OB);                                                                                             \
+        gba_write32(RC_M, (A), (V), (SEQ));                                                                          \
+        RC_SYNC_IN();                                                                                                \
+        RC_AFTER_BUS_WRITE();                                                                                        \
+    } while (0)
+
+/* After a bus write (EWRAM / IWRAM writes have no side effect): WAITCNT may have changed the fetch cost; an IRQ may
+ * be pending or HALTCNT may have stopped the CPU: the local next event drops to 0, so the check after the
+ * instruction leaves (the dispatcher takes the IRQ or halts). */
+#define RC_AFTER_BUS_WRITE()                                                                                         \
     do {                                                                                                             \
         fc = RC_FETCH_COST();                                                                                        \
-        if (__builtin_expect((h->irq_line && !(h->cpu.cpsr_ctl & 0x80u)) || h->cpu.halted || h->cpu.stopped, 0))   \
-            RC_EXIT(NEXT);                                                                                           \
+        ne = ((h->irq_line & !(h->cpu.cpsr_ctl & 0x80u)) | h->cpu.halted | h->cpu.stopped) ? 0 : ne;                 \
     } while (0)
 
 /* Pipeline refill after a write to PC whose new r15 (address + 8 / + 4) is R15, in the current state. */

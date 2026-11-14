@@ -231,7 +231,7 @@ def test_cli_writes_c_and_table(tmp_path):
     (out / "gba_rc_999.c").write_text("stale")
     assert recomp_main([str(rom), str(out)]) == 0
     files = sorted(os.listdir(out))
-    assert "gba_rc_table.c" in files and "gba_rc_000.c" in files and "gba_rc_999.c" not in files
+    assert "gba_rc_table.c" in files and "gba_rc_08000000a.c" in files and "gba_rc_999.c" not in files
     assert all(f.endswith(".c") for f in files)
     table = (out / "gba_rc_table.c").read_text()
     assert "gba_recomp_title_table" in table and Rom(bytes(im.b)).sha256 in table
@@ -289,3 +289,57 @@ def test_prepare_builds_a_pack_with_the_real_lifter(tmp_path):
     assert len(packs) == 1 and packs[0].startswith("gba-ATST-")
     meta = json.loads((tmp_path / "packs" / packs[0] / "pack.json").read_text())
     assert meta["console"] == "gba" and meta["rom_sha256"] == Rom(bytes(im.b)).sha256
+
+
+def test_blocks_resume_points_and_event_checks():
+    """Resume points (lift.py « blocks »): the entry, a local jump target, a call's return point; the instructions
+    inside a block are answered from the mid-block table (instructions to the block's end); one check per segment."""
+    from gba_tools.lift import FnLifter
+    im = header_img()
+    t = BASE + 0x200
+    hi, lo = thumb_bl(t + 6, BASE + 0x300)
+    code = [0x2000,          # t+0  movs r0, #0          entry
+            0x3001,          # t+2  adds r0, #1          loop
+            0x6809,          # t+4  ldr r1, [r1]         (memory: a segment ends here)
+            hi, lo,          # t+6  bl                   (leaves: t+10 is a return point)
+            0x2803,          # t+10 cmp r0, #3
+            0xD1F9,          # t+12 bne t+2
+            0x4770]          # t+14 bx lr
+    for i, op in enumerate(code):
+        im.w16(t + 2 * i, op)
+    lifter = FnLifter(im.rom(), True, [t + 2 * i for i in range(len(code))])
+    c = lifter.function("f", 8, comments=False)
+    for lead in (t, t + 2, t + 10):
+        assert "case 0x%08Xu: goto L_%08X;" % (lead, lead) in c
+        assert "RC_STOP(0x%08Xu" % lead in c
+    assert c.count("RC_STOP(") == 3 and "case 0x%08Xu:" % (t + 4) not in c
+    # t+2 .. t+8: a block of 4 (adds, ldr, bl hi, bl lo); t+10 .. t+12, t+14 after the branch
+    assert "mid_[8] = {0, 0, 3, 2, 1, 0, 2, 1}" in c
+    assert "RC_CHECK(0x%08Xu, 1, 0, 2);" % (t + 6) in c   # after the load: the BL prefix half, then the BL
+    assert "RC_STOP(0x%08Xu, 1, 0, 4);" % (t + 2) in c     # adds (1 fetch) up to the load
+
+
+def test_files_stay_the_same_when_functions_are_added():
+    """A function added (or split) by the discovery loop changes the file it lands in, not the others (names and
+    contents), so Prepare recompiles one file, not every one after it."""
+    import random
+    from gba_tools import recomp
+
+    class F:
+        def __init__(self, entry, n):
+            self.entry, self.thumb, self.addrs = entry, True, set(range(entry, entry + 2 * n, 2))
+
+    rnd = random.Random(5)
+    funcs, a = [], BASE
+    for _ in range(600):
+        n = rnd.randint(5, 400)
+        funcs.append(F(a, n))
+        a += 2 * n + 2 * rnd.randint(0, 40)
+    before = recomp.chunks_of(funcs)
+    assert len(before) > 20 and all(sum(len(f.addrs) for f in c) <= recomp.CHUNK_MAX + 400 for c in before)
+    key = lambda chunks: {(c[0].entry, tuple(f.entry for f in c)) for c in chunks}
+    changed = []
+    for k in range(len(funcs) - 1):
+        extra = F(funcs[k].entry + 2 * len(funcs[k].addrs), 1)   # in the gap after function k
+        changed.append(len(key(recomp.chunks_of(funcs + [extra])) - key(before)))
+    assert max(changed) <= 4 and sum(changed) / len(changed) < 1.2

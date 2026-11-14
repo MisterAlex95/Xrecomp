@@ -79,7 +79,7 @@ misses runs in the interpreter, which records it for the next build (the discove
 `gba_tools`, Prepare, the loader and the core (change together and bump `GBA_RECOMP_ABI`):
 
 - `python3 -m gba_tools.recomp ROM OUTDIR [--discovered FILE]` (`consoles/gba/tools`, pure Python; Capstone only
-  for disassembly comments) writes `OUTDIR/gba_rc_NNN.c` + `gba_rc_table.c`, nothing else; each compiles with
+  for disassembly comments) writes `OUTDIR/gba_rc_*.c` + `gba_rc_table.c`, nothing else; each compiles with
   `-I consoles/gba/runtime` alone. `--discovered`: one hex address per line, bit 0 = Thumb, `#` comments.
 - The library exports `gba_recomp_title_table` (`gba_recomp.h`): sorted entries (address, Thumb flag, function),
   the ROM's SHA-256. The lifted code's ABI is `gba_recomp_rt.h`: the first members of `gba_machine` (`gba_rc_head`:
@@ -90,8 +90,9 @@ misses runs in the interpreter, which records it for the next build (the discove
   whenever the PC is in the cartridge and an entry covers it, the interpreter otherwise; the cartridge addresses
   where the interpreter had to start are the missed set. Loading a pack: `gba_pack.h` (pack.json checks, dlopen).
 
-Lifted code is cycle-exact with the interpreter (same costs, same order, `now < next_event` checked before every
-instruction, the IRQ line after every store), so a recompiled run is the interpreter's run, frame for frame.
+Lifted code is cycle-exact with the interpreter (same costs, same order, it stops before the same instruction when a
+scheduler event or an IRQ is due: one test per block segment, and the interpreter runs the rest of a block an event
+falls in), so a recompiled run is the interpreter's run, frame for frame.
 `gba_run ROM --pack LIB --lockstep` checks it: an interpreter-only twin runs alongside, the whole state compared
 after every frame; `GBA_RC_VERIFY=1` replays every lifted call in the interpreter (debugging). On a desktop:
 
