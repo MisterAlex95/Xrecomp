@@ -3,13 +3,13 @@
   "trees": [
     {
       "include": ["tools/**/*.py", "tools/recomp/data/**", "tools/xbe_ident/*.json", "tools/prepare/toolkit_tree.json",
-                  "consoles/gba/tools/**/*.py"],
+                  "consoles/gba/tools/**/*.py", "consoles/ps1/tools/**/*.py"],
       "exclude": ["**/test_*.py", "**/tests/**", "**/conftest.py", "**/__pycache__/**", "tools/*/output/**",
                   "tools/android/**", "tools/docker/**", "tools/ci/**", "tools/conformance/msvc-wine/**"]
     },
     {
       "include": ["templates/new-game/**", "templates/runtime/**", "profiles/**", "include/**", "src/**/*.h",
-                  "consoles/gba/runtime/*.h"],
+                  "consoles/gba/runtime/*.h", "consoles/ps1/runtime/*.h"],
       "exclude": ["**/build/**"]
     }
   ],
