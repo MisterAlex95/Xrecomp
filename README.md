@@ -28,12 +28,13 @@ a one-step **Prepare** and a console-agnostic host layer that the other consoles
 | Console | CPU | State |
 |---|---|---|
 | **Original Xbox** | x86 (Pentium III) | ✅ Experimental: several games boot, a few are playable |
-| **Game Boy Advance** | ARM7TDMI | 🚧 Early: layout, build and homebrew tests in place, runtime empty |
-| **PlayStation** | MIPS R3000A | 🚧 Early: same |
-| **Nintendo 64** | MIPS R4300i | 🚧 Early: same |
+| **Game Boy Advance** | ARM7TDMI | 🧪 Recompiled with interpreter fallback, Prepare on the device; homebrew and test suites pass, not yet tried on commercial games |
+| **PlayStation** | MIPS R3000A | 🧪 Recompiled with interpreter fallback (overlays included), Prepare on the device, OpenBIOS (MIT) built in; homebrew and test suites pass |
+| **Nintendo 64** | MIPS R4300i | 🚧 Plays in the interpreter (LLE RSP, software RDP, emulated PIF); recompiler in progress |
 
-Everything below about getting started and Prepare is about the Xbox, the one console that runs games today. The
-other consoles live in [`consoles/`](consoles/README.md) and share the host layer (`src/host`) with it.
+Everything below about getting started and Prepare is about the Xbox. The other consoles live in
+[`consoles/`](consoles/README.md) (how to play and prepare them, their pipelines and tests) and share the host layer
+(`src/host`) with it.
 
 ## Hosts
 
@@ -124,7 +125,7 @@ The Xbox path, which the other consoles follow with their own CPU and hardware:
 | `templates/new-game/` | The game project Prepare (or you) fills with generated C |
 | `android/` | Android app (SDLActivity, launcher, embedded Prepare) |
 | `macos/` | macOS launcher (SwiftUI, Swift Package) |
-| `consoles/` | GBA, PS1, N64: each with its runtime, pipeline and tests (early work) |
+| `consoles/` | GBA, PS1, N64: each with its runtime, recompiler pipeline and tests |
 | `tests/` | C tests, one CMake project each (exit 77 = skipped) |
 | `docs/` | Everything else: [docs/INDEX.md](docs/INDEX.md) |
 
