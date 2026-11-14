@@ -32,7 +32,9 @@ static uint16_t pixel(const surface_t *s, int x, int y)
 int main(void)
 {
     xba_begin(XBA_ID_GFX);
-    display_init(RESOLUTION_320x240, DEPTH_16_BPP, 2, GAMMA_NONE, FILTERS_DISABLED);
+    /* FILTERS_RESAMPLE: libdragon asserts that FILTERS_DISABLED needs a width > 320 (the VI cannot
+     * scan out 320 wide unfiltered). Only the VI output is filtered; the frame buffer read below is not. */
+    display_init(RESOLUTION_320x240, DEPTH_16_BPP, 2, GAMMA_NONE, FILTERS_RESAMPLE);
     rdpq_init();
     register_VI_handler(on_vi);
 

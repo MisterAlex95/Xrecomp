@@ -127,7 +127,10 @@ int main(void)
     xba_check(i++, read_pixel(150, 60), rgb555(0, 255, 0));   /* inside POLY_F3 */
     xba_check(i++, read_pixel(5, 5), rgb555(32, 32, 32));     /* background */
     xba_check(i++, read_pixel(17, 121), tex16[0]);            /* textured quad, top-left texel */
-    uint32_t g = read_pixel(260, 56);                         /* gouraud middle: all channels mixed */
+    /* Gouraud: the GPU splits the quad into (v0,v1,v2) and (v1,v2,v3), so its centre lies on the shared
+     * green-blue edge and has no red. (240,36) is a quarter in from the red corner, inside (v0,v1,v2):
+     * about red 1/2, green 1/4, blue 1/4. */
+    uint32_t g = read_pixel(240, 36);
     xba_check(i++, (g & 0x1F) > 4 && ((g >> 5) & 0x1F) > 4 && ((g >> 10) & 0x1F) > 4, 1);
     xba_check(i++, g, g);                                     /* raw, informative */
 

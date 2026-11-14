@@ -50,11 +50,20 @@ top of RDRAM.
 
 ## Validation status
 
-Built and inspected (disassembly of the hand-written sequences), **not yet run**: no headless N64 emulator with
-memory inspection fits here yet (ares has no headless mode; mupen64plus needs a video plugin and the debugger API).
-Expected values come from the VR4300 user manual (64-bit sign extension, branch-likely nullification, LDL/LDR and
-SDL/SDR merge rules, FCSR cause/flag bits, rounding modes) and were computed with Python. The first run in ares or in
-our runtime confirms them; a mismatch there means fixing the expectation only after checking the reference.
+All four programs report PASS in **ares** (commit `0b928930`, N64 core, paraLLEl-RDP on Mesa's lavapipe; ares HLEs
+the PIF boot, so no Nintendo boot ROM is involved) (2026-11-14):
+
+```sh
+tools/consoles/build_homebrew.sh n64 && tools/consoles/run_homebrew.sh n64
+```
+
+ares has no headless mode: `run_homebrew.sh` builds `tools/docker/n64-oracle.Dockerfile` (about 5 min cold,
+1.7 GB), runs ares under Xvfb with its null video driver and its GDB server on, and
+`tools/consoles/oracle/gdb_poll.py` reads the block through the GDB stub while the game runs (`m` packets, the target
+is never halted). ares (ISC) is an **external oracle only**: run in its own container, never copied into or linked
+with our code, the image never published. Expected values come from the VR4300 user manual and were computed with
+Python; the first oracle run matched them all (`cpu`: 116 table words). It caught one bug of ours: `gfx` asked for
+`FILTERS_DISABLED` at 320 wide, which libdragon refuses with an assertion (fixed: `FILTERS_RESAMPLE`).
 
 ## Toolchain and licences
 

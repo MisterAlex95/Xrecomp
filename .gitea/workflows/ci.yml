@@ -8,6 +8,7 @@
 #   pull request   linux, then android-toolkit (NDK compile, app unit tests) when the PR touches the Android build
 #   push to main   linux, then linux-arm64 (fails on a failure not in tools/ci/arm64-expected.txt), then android-image,
 #                  then android-toolchain (rebuilt only when its key changes, XBA-125), then android-apk (xrecomp-latest)
+#   both           homebrew after linux (XBA-149: the GBA / PS1 / N64 test corpus; on PRs only when it is touched)
 #   weekly         linux, then device-tests (the device test bundle; fails when a project stops building)
 # Heavy jobs (everything but linux) take tools/ci/heavy_lock.sh: one at a time on the shared host, queued, never
 # cancelled. Gitea's `concurrency:` keeps one pending job per group and cancels the others, hence the lock.
@@ -24,6 +25,10 @@ on:
     inputs:
       device_tests:
         description: 'Also build the device test bundle (device-tests job, about 12 min)'
+        type: boolean
+        default: false
+      homebrew_oracles:
+        description: 'Also run the homebrew corpus in PCSX-Redux and ares (homebrew job; 20 min cold, 2 min cached)'
         type: boolean
         default: false
 
@@ -137,6 +142,79 @@ jobs:
         run: |
           docker rmi "$IMAGE_TAG" >/dev/null 2>&1 || true
           rm -rf out-unit
+          sh tools/ci/heavy_lock.sh release || true
+
+  # XBA-149: the homebrew test corpus of the other consoles (consoles/{gba,ps1,n64}/tests/homebrew, our own programs,
+  # no game data) still builds with the pinned toolchains (tools/docker/<console>-homebrew.Dockerfile). After linux,
+  # under the heavy-job lock; on a PR only when it touches the corpus, its Dockerfiles, its scripts or this file, on
+  # every push to main. The toolchain images keep the stable tags xba-<console>-homebrew so the host's layer cache
+  # keeps them between runs (a few seconds when nothing changed, about 10 min cold, mostly libdragon). The binaries
+  # stay in the job container and are deleted with it: only their SHA256SUMS are printed, nothing is published.
+  # Run by hand with homebrew_oracles ticked, it also checks every PS1 / N64 program's verdict in an emulator.
+  homebrew:
+    needs: linux
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    runs-on: ubuntu-latest
+    container:
+      image: docker:29.8.1-cli
+    steps:
+      - name: Checkout
+        env:
+          TOKEN: ${{ github.token }}
+        run: |
+          apk add --no-cache git >/dev/null
+          git init -q .
+          git fetch -q --depth 1 "$(printf '%s' "$GITHUB_SERVER_URL" | sed "s#://#://ci:$TOKEN@#")/$GITHUB_REPOSITORY.git" "$GITHUB_SHA"
+          git checkout -q FETCH_HEAD
+
+      # Same diff as android-toolkit's: if the merge base cannot be had, the corpus builds anyway.
+      - name: Does the PR touch the homebrew corpus?
+        id: paths
+        env:
+          TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          MERGE_BASE: ${{ github.event.pull_request.merge_base }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if [ "$EVENT" != pull_request ]; then echo "build=true" >> "$GITHUB_OUTPUT"; exit 0; fi
+          url="$(printf '%s' "$GITHUB_SERVER_URL" | sed "s#://#://ci:$TOKEN@#")/$GITHUB_REPOSITORY.git"
+          base=${MERGE_BASE:-$BASE_SHA}
+          if [ -n "$base" ] && git fetch -q --depth 1 "$url" "$base" 2>/dev/null \
+             && files=$(git diff --name-only "$base" HEAD); then
+            if printf '%s\n' "$files" | grep -qE '^(consoles/[^/]+/tests/homebrew/|tools/docker/(gba|ps1|n64)-homebrew\.Dockerfile$|tools/consoles/build_homebrew\.sh$|\.gitea/workflows/ci\.yml$)'; then
+              echo "build=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "Nothing the homebrew corpus is built from: skipped."
+              echo "build=false" >> "$GITHUB_OUTPUT"
+            fi
+          else
+            echo "No merge base to diff against: building anyway."
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Wait for the heavy-job lock
+        if: steps.paths.outputs.build == 'true'
+        run: sh tools/ci/heavy_lock.sh acquire
+
+      - name: Build the corpus (GBA, PS1, N64)
+        if: steps.paths.outputs.build == 'true'
+        run: |
+          apk add --no-cache bash coreutils >/dev/null
+          JOBS=4 bash tools/consoles/build_homebrew.sh all out/homebrew
+          for c in gba ps1 n64; do echo "== $c"; cat "out/homebrew/$c/SHA256SUMS"; done
+
+      # By hand only (workflow_dispatch, homebrew_oracles): the PS1 and N64 programs in their external oracles
+      # (tools/consoles/run_homebrew.sh: PCSX-Redux + OpenBIOS, ares), each program's result block must say PASS.
+      # The oracle images (xba-ps1-oracle 2.9 GB, xba-n64-oracle 1.7 GB) take about 20 min to build cold, so this
+      # does not run on every push; cached, the runs take about 2 min.
+      - name: Run the corpus in the oracles (PCSX-Redux, ares)
+        if: steps.paths.outputs.build == 'true' && github.event_name == 'workflow_dispatch' && github.event.inputs.homebrew_oracles == 'true'
+        run: JOBS=4 bash tools/consoles/run_homebrew.sh all out/homebrew
+
+      - name: Clean up
+        if: always()
+        run: |
+          rm -rf out
           sh tools/ci/heavy_lock.sh release || true
 
   # arm64: cross-compiled, tests under qemu-user (docs/android/baseline-arm64.md). A build break fails the job, and

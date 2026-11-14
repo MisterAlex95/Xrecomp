@@ -17,6 +17,10 @@ int main(void)
         fprintf(stderr, "FAIL: no host clock\n");
         return 1;
     }
+    if (gba_runtime_start("game", "libtitle.so", "KEY") != 0) {   /* the stub packs route to (XBA-147) */
+        fprintf(stderr, "FAIL: gba_runtime_start\n");
+        return 1;
+    }
     printf("%s: ok\n", v);
     return 0;
 }

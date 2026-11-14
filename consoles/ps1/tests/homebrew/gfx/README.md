@@ -26,5 +26,5 @@ Block at `0x801F0000` (see [../README.md](../README.md)), `test_id` = `GFX ` (`0
 | 1 | pixel (150,60) = triangle green (`0x03E0`) |
 | 2 | pixel (5,5) = background (`0x1084`) |
 | 3 | pixel (17,121) = top-left texel of the textured quad |
-| 4 | 1 if pixel (260,56) of the gouraud quad has all three channels > 4/31 |
+| 4 | 1 if pixel (240,36) of the gouraud quad has all three channels > 4/31 (a quarter in from the red corner, inside the first triangle; the quad's centre is on the green-blue diagonal and has no red) |
 | 5 | raw value of that gouraud pixel (informative) |
