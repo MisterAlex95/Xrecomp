@@ -1,6 +1,7 @@
 /* gba_run: runs a GBA ROM headless on the core (XBA-152 / XBA-153).
  *
- *   gba_run ROM [--frames N] [--bios PATH] [--bios-boot] [--result] [--ppm OUT.ppm] [--keys MASK] [--quiet]
+ *   gba_run ROM [--frames N] [--bios PATH] [--bios-boot] [--result] [--ppm OUT.ppm] [--wav OUT.wav] [--keys MASK]
+ *           [--save PATH] [--quiet]
  *
  * --frames N    frames to run (default 600); with --result, the most frames to wait for a verdict
  * --bios PATH   a 16 KB BIOS image (e.g. Cult-of-GBA, tools/consoles/build_gba_bios.sh); default: built-in
@@ -8,6 +9,8 @@
  * --result      read the 512-byte xba_result block of our homebrew (consoles/gba/tests/homebrew/common/
  *               xba_result.h) at each VBlank, stop at the verdict; exit 0 on PASS, 1 on FAIL, 2 on timeout
  * --ppm OUT     write the last frame as a binary PPM
+ * --wav OUT     write the audio of the run (gba_audio_pull after each frame) as a 48 kHz stereo 16-bit WAV
+ * --save PATH   load the save image from PATH when it exists, write it back at the end if the game wrote it
  * --keys MASK   keys held during the whole run (KEYINPUT bit order, 1 = pressed)
  * --reg-result R  after the frames, exit 0 if register rR is 0, 1 if not, 2 if the CPU is not in an idle
  *               loop (jsmolka/gba-tests leave the number of the first failed test in r12 and spin: --reg-result 12)
@@ -66,6 +69,30 @@ static int write_ppm(const char *path, const uint16_t *fb)
     return fclose(f);
 }
 
+static void put_le(uint8_t *p, uint32_t v, int n)
+{
+    for (int i = 0; i < n; i++)
+        p[i] = (uint8_t)(v >> (8 * i));
+}
+
+/* WAV header for `frames` 16-bit stereo frames at GBA_AUDIO_RATE. */
+static void wav_header(uint8_t h[44], uint32_t frames)
+{
+    uint32_t bytes = frames * 4;
+    memcpy(h, "RIFF", 4);
+    put_le(h + 4, 36 + bytes, 4);
+    memcpy(h + 8, "WAVEfmt ", 8);
+    put_le(h + 16, 16, 4);
+    put_le(h + 20, 1, 2); /* PCM */
+    put_le(h + 22, 2, 2);
+    put_le(h + 24, GBA_AUDIO_RATE, 4);
+    put_le(h + 28, GBA_AUDIO_RATE * 4, 4);
+    put_le(h + 32, 4, 2);
+    put_le(h + 34, 16, 2);
+    memcpy(h + 36, "data", 4);
+    put_le(h + 40, bytes, 4);
+}
+
 static double now_s(void)
 {
     struct timespec ts;
@@ -84,7 +111,7 @@ static void fourcc(uint32_t v, char out[5])
 
 int main(int argc, char **argv)
 {
-    const char *rom_path = NULL, *bios_path = NULL, *ppm = NULL;
+    const char *rom_path = NULL, *bios_path = NULL, *ppm = NULL, *wav = NULL, *save = NULL;
     long frames = 600;
     int result = 0, bios_boot = 0, quiet = 0, reg_result = -1;
     unsigned keys = 0;
@@ -96,6 +123,10 @@ int main(int argc, char **argv)
             bios_path = argv[++i];
         else if (!strcmp(argv[i], "--ppm") && i + 1 < argc)
             ppm = argv[++i];
+        else if (!strcmp(argv[i], "--wav") && i + 1 < argc)
+            wav = argv[++i];
+        else if (!strcmp(argv[i], "--save") && i + 1 < argc)
+            save = argv[++i];
         else if (!strcmp(argv[i], "--keys") && i + 1 < argc)
             keys = (unsigned)strtoul(argv[++i], NULL, 0);
         else if (!strcmp(argv[i], "--reg-result") && i + 1 < argc)
@@ -110,7 +141,7 @@ int main(int argc, char **argv)
             rom_path = argv[i];
         else {
             fprintf(stderr, "usage: gba_run ROM [--frames N] [--bios PATH] [--bios-boot] [--result] [--ppm OUT] "
-                            "[--keys MASK] [--reg-result R] [--quiet]\n");
+                            "[--wav OUT] [--save PATH] [--keys MASK] [--reg-result R] [--quiet]\n");
             return 3;
         }
     }
@@ -139,13 +170,41 @@ int main(int argc, char **argv)
     if (bios_boot)
         gba_boot_bios(m);
     gba_set_keys(m, (uint16_t)keys);
+    if (save) {
+        size_t n = 0;
+        uint8_t *img = load_file(save, &n);
+        if (img && gba_save_load(m, img, n) != 0)
+            fprintf(stderr, "gba_run: %s does not fit the save kind %d, ignored\n", save, (int)gba_save_type(m));
+        free(img);
+    }
+
+    FILE *wf = NULL;
+    uint32_t wav_frames = 0;
+    if (wav) {
+        uint8_t h[44] = {0};
+        if (!(wf = fopen(wav, "wb")) || fwrite(h, 1, sizeof h, wf) != sizeof h) {
+            fprintf(stderr, "gba_run: cannot write %s\n", wav);
+            return 3;
+        }
+    }
 
     static uint16_t fb[GBA_SCREEN_W * GBA_SCREEN_H];
+    static int16_t pcm[2 * 4096];
     uint32_t status = 0;
     long f;
     double t0 = now_s();
     for (f = 0; f < frames; f++) {
         gba_run_frame(m, fb);
+        if (wf) {
+            size_t n;
+            while ((n = gba_audio_pull(m, pcm, 4096)) > 0) {
+                uint8_t le[4 * 4096];
+                for (size_t i = 0; i < 2 * n; i++)
+                    put_le(le + 2 * i, (uint16_t)pcm[i], 2);
+                fwrite(le, 4, n, wf);
+                wav_frames += (uint32_t)n;
+            }
+        }
         if (result && gba_peek32(m, RESULT_ADDR) == RESULT_MAGIC) {
             status = gba_peek32(m, RESULT_ADDR + 4);
             if (status) {
@@ -160,6 +219,22 @@ int main(int argc, char **argv)
                 dt > 0 ? f / dt : 0.0, dt > 0 ? f / dt / 59.7275 : 0.0);
     if (ppm && write_ppm(ppm, fb) != 0)
         fprintf(stderr, "gba_run: cannot write %s\n", ppm);
+    if (wf) {
+        uint8_t h[44];
+        wav_header(h, wav_frames);
+        if (fseek(wf, 0, SEEK_SET) != 0 || fwrite(h, 1, sizeof h, wf) != sizeof h || fclose(wf) != 0)
+            fprintf(stderr, "gba_run: cannot write %s\n", wav);
+        else if (!quiet)
+            fprintf(stderr, "gba_run: %s: %u frames of audio (%.2f s)\n", wav, wav_frames,
+                    (double)wav_frames / GBA_AUDIO_RATE);
+    }
+    if (save && gba_save_take_dirty(m)) {
+        size_t n = 0;
+        const uint8_t *img = gba_save_data(m, &n);
+        FILE *sf = img ? fopen(save, "wb") : NULL;
+        if (!sf || fwrite(img, 1, n, sf) != n || fclose(sf) != 0)
+            fprintf(stderr, "gba_run: cannot write %s\n", save);
+    }
 
     int rc = 0;
     if (result) {

@@ -5,7 +5,7 @@
 # (symbols, for debugging only: the runtime gets the .gba). *.arm.c files are compiled as ARM, the
 # rest of the C as Thumb; *.s files choose their own state.
 
-PROGS := hello cpu timer_irq gfx iwram_copy
+PROGS := hello cpu timer_irq gfx iwram_copy sound
 OUT ?= out
 BUILD ?= build
 

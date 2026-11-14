@@ -11,6 +11,7 @@ commercial ROM or a BIOS dump. Only our own code lives here; third-party test RO
 | [`timer_irq`](timer_irq/README.md) | VBlank / HBlank / timer IRQs, cascade timer, `VBlankIntrWait` | `timer_irq.gba` |
 | [`gfx`](gfx/README.md) | mode 0 tiles + sprites, then mode 3 bitmap; two capture points | `gfx.gba` |
 | [`iwram_copy`](iwram_copy/README.md) | code run from IWRAM/EWRAM: crt0-copied, copied at run time, patched in place | `iwram_copy.gba` |
+| [`sound`](sound/README.md) | PSG squares / wave / noise, Direct Sound A by DMA1 on timer 0, master enable (audible: `gba_run --wav`) | `sound.gba` |
 
 ## Build
 
@@ -31,7 +32,7 @@ Each program writes a 512-byte result block at **EWRAM `0x0203FE00`** (little-en
 |---|---|---|
 | 0x00 | `magic` | `0x58424152` ("XBAR") once `main` started |
 | 0x04 | `status` | 0 while running, `0x50415353` ("PASS") or `0x4641494C` ("FAIL") at the end |
-| 0x08 | `test_id` | fourcc of the program (`HELO`, `CPU `, `TIRQ`, `GFX `, `IWRM`) |
+| 0x08 | `test_id` | fourcc of the program (`HELO`, `CPU `, `TIRQ`, `GFX `, `IWRM`, `SND `) |
 | 0x0C | `detail` | 0 on pass; on fail 1 + index of the first failing check |
 | 0x10 | `checksum` | program-specific (`cpu`: FNV-1a of the table; `gfx`: FNV-1a of the mode 3 frame) |
 | 0x14 | `count` | number of table entries written |
@@ -45,8 +46,8 @@ has no picture of its own (green backdrop = pass, red = fail).
 
 ## Validation status
 
-All five programs report PASS in mGBA 0.10.1 (Debian bookworm `mgba-sdl`, its built-in HLE BIOS, no BIOS file),
-read through mGBA's GDB stub with a watchpoint on `status` (2026-11-13). Expected values are therefore checked
+All six programs report PASS in mGBA 0.10.1 (Debian bookworm `mgba-sdl`, its built-in HLE BIOS, no BIOS file),
+read through mGBA's GDB stub with a watchpoint on `status` (2026-11-13; `sound` 2026-11-14). Expected values are therefore checked
 against an accurate emulator, not only against the ARM ARM.
 
 ## Toolchain and licences

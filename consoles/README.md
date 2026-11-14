@@ -41,9 +41,14 @@ acceleration layer. `consoles/gba/runtime/gba_core.h`: an ARM7TDMI interpreter (
 timing, timers, DMA, interrupts, keypad, and either a BIOS image (LLE: the open-source Cult-of-GBA BIOS built by
 `tools/consoles/build_gba_bios.sh`) or a small built-in BIOS of our own (IRQ vector and IntrWait in ARM code, the other
 SWIs in C). Direct boot by default. The PPU (`gba_ppu.h`) is a pure line renderer the core calls at the end of each
-visible line. CMake target `gba_core` is the machine alone (C11 + libm, no SDL), `gba_runtime` adds the host layer;
-`gba_run ROM [--result] [--bios PATH] [--ppm OUT]` runs a ROM headless. Tests: `consoles/gba/tests/CMakeLists.txt`
-(unit tests, our homebrew HLE and LLE, jsmolka/gba-tests fetched by `tools/consoles/fetch_gba_tests.sh`).
+visible line. The APU (`gba_audio.c`, XBA-155: PSG squares / wave / noise, Direct Sound FIFOs fed by DMA1/2 on
+timer overflows, SOUNDBIAS) mixes at 131 kHz and hands out 48 kHz stereo through `gba_audio_pull`. Saves
+(`gba_save.c`, XBA-156): the kind comes from the ROM's library ID string (SRAM 32 KB, flash 64 / 128 KB, EEPROM
+512 B / 8 KB; none: SRAM from the first write at 0x0E000000), read and written back through `gba_save_data` /
+`gba_save_load` / `gba_save_take_dirty`. CMake target `gba_core` is the machine alone (C11 + libm, no SDL),
+`gba_runtime` adds the host layer; `gba_run ROM [--result] [--bios PATH] [--ppm OUT] [--wav OUT] [--save PATH]` runs
+a ROM headless. Tests: `consoles/gba/tests/CMakeLists.txt` (unit tests, our homebrew HLE and LLE, jsmolka/gba-tests
+CPU / memory / BIOS / save suites fetched by `tools/consoles/fetch_gba_tests.sh`).
 
 **Legal**: no ROM, disc image, BIOS or game data in this repository, its CI or its artifacts. Tests use homebrew we
 build ourselves (devkitARM / libtonc, PSn00bSDK, libdragon) and dumps Alex made from his own media, kept outside every
