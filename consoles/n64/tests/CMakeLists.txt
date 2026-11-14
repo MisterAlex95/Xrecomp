@@ -10,8 +10,9 @@ project(console_n64_tests C)
 #   n64_rsp           RSP vectors and differential groups vs ares (test_rsp.c); n64_rsp_rdp: RSP microcode driving
 #                     the real RDP over XBUS (test_rsp_rdp.c); n64_rsp_bench runs by hand
 #   n64_cpu           core unit tests (test_cpu.c): integer unit, delay slots, exceptions, interrupts, TLB, COP1
-#   n64_io            core unit tests (test_io.c): ROM byte orders / header, PIF boot state, joybus, PI, SRAM,
-#                     FlashRAM, AI, VI
+#   n64_io            core unit tests (test_io.c): ROM byte orders / header, PIF boot state, joybus (paks, EEPROM
+#                     type, RTC), PI, SRAM, FlashRAM, the AI and its resampler (tones, rate change), the VI picture
+#                     path (canvas, scaling, filters, gamma, interlace)
 #   n64_hb_<prog>     our homebrew ROMs under n64_run --result (HLE PIF, libdragon IPL3 run as on the hardware);
 #                     rsp needs the real RSP (n64_rsp.c), gfx the real RSP and RDP (n64_rsp.c, n64_rdp.c)
 #   n64_rc_*          the same ROMs recompiled (n64_tools.recomp + cc, discovery loop) in lockstep with the

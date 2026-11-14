@@ -274,9 +274,10 @@ enables, the unimplemented operation for denormals, quiet NaNs and out-of-range 
 1 register views and the half-mode operand rules), the bus (`n64_bus.c`: RDRAM 8 MB big-endian, MI, PI DMA with the
 PI's block / misalignment rules and its write latch, RI / RDRAM registers reporting configured memory, SI, the RCP bus
 rules for 8 / 16 / 64-bit accesses, MI repeat mode, the IS-Viewer debug buffer), VI and AI (`n64_io.c`: line timing
-from H_SYNC / V_SYNC, the interrupt at V_INTR, the framebuffer (16 / 32-bit) cropped to H / V_VIDEO and X / Y_SCALE at
-framebuffer resolution, no VI filters, AA, gamma or scaler interpolation; double-buffered AI DMA at the DAC rate,
-sample-and-hold to 48 kHz stereo), and the PIF and saves (`n64_pif.c`). The RSP and the RDP are reached only through
+from H_SYNC / V_SYNC, the interrupt at V_INTR; double-buffered AI DMA at the DAC rate, the DAC's pulls switching
+buffers without a gap, resampled to 48 kHz stereo by a 32-tap Kaiser-windowed sinc: SNR above 80 dB for tones up to
+14 kHz from a 32 kHz DAC, no click at buffer boundaries, gaps or DAC rate changes), the VI's picture path
+(`n64_vi.c`, below), and the PIF and saves (`n64_pif.c`). The RSP and the RDP are reached only through
 `n64_devices.h`: target `n64_core` links `n64_rsp` and `n64_rdp`, each the real module or its stub
 (`n64_rsp_stub.c`: SP registers and DMA, halts at once; `n64_rdp_stub.c`: walks the commands, SYNC_FULL interrupt).
 
@@ -284,12 +285,16 @@ Boot: the PIF is HLE, never a PIF ROM: the CIC is recognised from the ROM's IPL3
 6103, 6105, 6106, 7102; libdragon's open IPL3 by its banner; else a 6102), the header and IPL3 go to DMEM, PI domain 1
 timing comes from the header, s3..s7 / sp / ra are what IPL3 expects (seed, TV type from the region, cold reset), the
 RDRAM is reported configured (RI_SELECT, osMemSize at 0x80000318) so IPL3 takes its warm path, and the CPU starts at
-0xA4000040 in the ROM's own IPL3. Joybus: controllers (info, buttons + stick), the controller pak (32 KB, data CRC) and
-the rumble pak, EEPROM 4K / 16K; no RTC. Saves: SRAM 32 KB, FlashRAM 128 KB (MX29L1100 ID, erase / program / read
+0xA4000040 in the ROM's own IPL3. Joybus: controllers (info, buttons + stick), the controller pak (32 KB, data CRC;
+a fresh one is formatted like a new .mpk: ID block and copies, index table, empty notes) and the rumble pak, EEPROM
+4K / 16K, the RTC (status, control and time blocks on the host's local clock plus the offset the game sets). The CIC
+challenge (PIF command bit 1, used by 6105 games) is acknowledged without a response: nothing of ours needs it. Saves: SRAM 32 KB, FlashRAM 128 KB (MX29L1100 ID, erase / program / read
 through the PI), EEPROM, the four paks (`n64_save_data` / `n64_save_take_dirty` / `n64_save_load` per kind). The
 cartridge's kind is never a per-game table: forced by `n64_options`, else the ED64 / libdragon header byte (`ED` at
 0x3C, type in 0x3F), else the first access (a write to the flash command register makes it FlashRAM, any other
-domain 2 access SRAM, an EEPROM command EEPROM, 16K once a block above 63 is used). ROMs: z64 / v64 / n64 byte orders
+domain 2 access SRAM, an EEPROM command EEPROM, 16K once a block above 63 is used). libultra checks EEPROM block
+numbers against the type the status command reports, so unless the kind is fixed the status answers like a 16K part
+(4K games accept it) and the image stays 512 B until a block above 63 is used. ROMs: z64 / v64 / n64 byte orders
 normalised, up to 64 MB, header parsed (`n64_rom_parse`).
 
 `n64_run ROM [--frames N] [--result] [--ppm OUT] [--wav OUT] [--tty] [--pad MASK] [--pal|--ntsc] [--save PATH] [--hash]
@@ -297,7 +302,11 @@ normalised, up to 64 MB, header parsed (`n64_rom_parse`).
 text). Tests (`consoles/n64/tests`): `n64_cpu` and `n64_io` unit tests, our homebrew (`n64_hb_*`: hello, cpu,
 timer_irq; rsp with `n64_rsp.c`, gfx with both modules; the same results as ares), and lemmy-64/n64-systemtest (MIT,
 built from source by `tools/consoles/build_n64_systemtest.sh`; `n64_systemtest` passes when every failing test is a
-known gap of `systemtest_known.txt`: the caches, reverse-endian user mode, one PI end-of-page quirk). About 180 frames/s
+known gap of `systemtest_known.txt`: the caches, reverse-endian user mode, one PI end-of-page quirk). The caches
+are left out on purpose: those tests check stale lines (a cached read not seeing an uncached write until an
+invalidate, write-back timing), which needs a tag lookup on every cached access in the interpreter and the same in
+lifted code (the lockstep must match), for a behaviour games only ever avoid; reverse-endian user mode is used by no
+game (only by Unix-style kernels). About 180 frames/s
 (190 MIPS) on the x86 dev host for cpu.z64 and gfx.z64. On a desktop:
 
 ```sh
@@ -307,14 +316,24 @@ build/n64/n64_runtime/n64_run build/homebrew/n64/gfx.z64 --result --ppm gfx.ppm
 build/n64/n64_runtime/n64_run build/n64-systemtest/n64-systemtest.z64 --tty --frames 900
 ```
 
+**The VI's picture (`n64_vi.c`, `n64_display`).** What a television showed, not a crop of the framebuffer: a fixed
+canvas of 640 VI pixels from H = 108 (NTSC) / 128 (PAL) and 240 / 288 lines from half-line 34 / 44 (480 / 576
+interlaced), the active area placed where H / V_VIDEO put it and black around it (a narrow or short picture keeps
+its aspect and place); 320 wide when X_SCALE is 0.5 or less (a 320 x 240 game comes out at its own pixels). Per
+pixel: X / Y_SCALE steps and their start offsets, bilinear resampling (AA modes 0..2) or replication (mode 3), the AA
+filter on partially covered pixels (coverage from the RDP's hidden RDRAM bits, `n64_rdp_hidden_bits`; without them
+the pixel's low bit), the divot filter, the dither filter (16-bit), gamma and gamma dither. Interlaced modes are
+woven: each field goes to its rows of the canvas (the lower field by the framebuffer position of its first line), so
+a 480-line game is shown whole, without combing or bobbing. About 0.4 ms per 320 x 240 picture on the x86 dev host
+(1.2 ms with AA on every pixel, the worst case).
+
 **Playing an N64 game (XBA-174).** `n64_runtime_run` (`consoles/n64/runtime/n64_runtime.h`) plays a cartridge on the
 host layer, the PS1's way: a ROM file in any byte order (`.z64`, `.v64`, `.n64`, or `fd:N`), no BIOS (the PIF is HLE),
 a title pack optional (`--pack LIB`, XBA-174: `python3 -m tools.prepare game.z64` builds one, [prepare.md « N64
 packs »](../docs/android/prepare.md#n64-packs-xba-174); it runs the lifted code when its `pack.json` and table say it is
 this cartridge's, the SHA-256 of the ROM in big-endian order, and the game plays interpreted otherwise; `--missed FILE`
 keeps what it did not cover for the next Prepare, `consoles/n64/runtime/n64_pack.h`). The picture is the VI's
-visible area at
-framebuffer resolution (320 x 240, 640 x 480 interlaced, PAL 288 / 576 lines...) shown at 4:3 whatever its size,
+canvas (320 or 640 x 240, 480 interlaced, PAL 288 / 576 lines; `n64_vi.c` above) shown at 4:3 whatever its size,
 letterboxed, linear by default (`RECOMP_N64_FILTER=nearest`, `RECOMP_N64_SCALE=integer`). Controller, Xbox layout: left
 stick → stick (radial dead zone 8 %, `RECOMP_N64_DEADZONE` in percent; ±80 on an axis at full travel,
 `RECOMP_N64_STICK_RANGE`; the diagonals go to about ±68, the real stick's octagonal gate), A → A, B and X → B, right
@@ -324,7 +343,11 @@ Every host pad drives controller 1, or with `RECOMP_N64_PLAYERS=2..4` host pad N
 (`RECOMP_N64_PAK`): a controller pak by default, `rumble` a rumble pak whose motor drives the host pad's rumble, `none`.
 Sound: `n64_audio_pull` (48 kHz) into `host_audio`. Pacing: the frame's length is the CPU cycles the core ran to the
 next VI interrupt (NTSC about 60 Hz, PAL 50 Hz, one field per interrupt when interlaced), absolute deadlines nudged ±2 %
-by the audio queue; a line every 10 s gives the frame rate reached (`n64: N fps over the last 10 s`). The RDP's
+by the audio queue; a line every 10 s gives the frame rate reached (`n64: N fps over the last 10 s`, with the frames
+skipped). Frame skip (`RECOMP_N64_FRAMESKIP`, `n64_play --frameskip`): `auto` (default) skips the picture of a frame
+that starts more than half a frame late or while the audio queue is about to run dry, at most 3 in a row; `N` shows
+one frame in N + 1; `0` never. A skipped frame still runs whole (CPU, RSP, the RDP drawing into RDRAM, which games
+read back) and makes its audio: only `n64_display` and the present are skipped. The RDP's
 scanline-band threads (`n64_rdp_set_threads`): `RECOMP_N64_RDP_THREADS`, else 2 on Android, else the core's
 (`XBR_N64_RDP_THREADS`, else 1). Saves: `<save dir>/n64-<KEY>/game.eep` (EEPROM 4K 512 B / 16K 2 KB), `game.sra` (SRAM
 32 KB), `game.fla` (FlashRAM 128 KB), `pak1.mpk`..`pak4.mpk` (controller paks, 32 KB): raw images, the files
