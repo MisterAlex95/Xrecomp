@@ -131,7 +131,12 @@ def disasm(op: int, addr: int, thumb: bool) -> str:
         return ""
     key = bool(thumb)
     if key not in _cs:
-        _cs[key] = capstone.Cs(capstone.CS_ARCH_ARM, capstone.CS_MODE_THUMB if thumb else capstone.CS_MODE_ARM)
+        try:
+            _cs[key] = capstone.Cs(capstone.CS_ARCH_ARM, capstone.CS_MODE_THUMB if thumb else capstone.CS_MODE_ARM)
+        except capstone.CsError:    # a Capstone built without ARM (the app's ships x86 only): no comments
+            _cs[key] = None
+    if _cs[key] is None:
+        return ""
     raw = op.to_bytes(2 if thumb else 4, "little")
     for i in _cs[key].disasm(raw, addr):
         return ("%s %s" % (i.mnemonic, i.op_str)).strip()
