@@ -31,3 +31,25 @@ if(TARGET n64_rdp AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/../runtime/n64_rdp.c)
     target_link_libraries(n64_rdp_bench PRIVATE n64_rdp m)
     target_compile_options(n64_rdp_bench PRIVATE -Wall -Wextra -O2)
 endif()
+
+# The RSP (N-5, XBA-173): hand-checked vectors and the differential groups of homebrew/common/rsp_oracle.h against
+# the checksums recorded from ares (rsp_oracle_expected.h), with a fake RDP (test_rsp.c); test_rsp_rdp.c drives the
+# real RDP through the DPC registers (an XBUS command list built by RSP microcode). n64_rsp_bench, RSP instructions/s
+# on a vector-heavy microcode loop, runs by hand (n64_rsp_bench [seconds]).
+if(TARGET n64_rsp AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/../runtime/n64_rsp.c)
+    add_executable(n64_rsp_test test_rsp.c)
+    target_link_libraries(n64_rsp_test PRIVATE n64_rsp)
+    target_compile_options(n64_rsp_test PRIVATE -Wall -Wextra)
+    add_test(NAME n64_rsp COMMAND n64_rsp_test)
+    set_tests_properties(n64_rsp PROPERTIES TIMEOUT 120)
+    add_executable(n64_rsp_bench bench_rsp.c)
+    target_link_libraries(n64_rsp_bench PRIVATE n64_rsp)
+    target_compile_options(n64_rsp_bench PRIVATE -Wall -Wextra -O2)
+    if(TARGET n64_rdp AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/../runtime/n64_rdp.c)
+        add_executable(n64_rsp_rdp_test test_rsp_rdp.c)
+        target_link_libraries(n64_rsp_rdp_test PRIVATE n64_rsp n64_rdp m)
+        target_compile_options(n64_rsp_rdp_test PRIVATE -Wall -Wextra -Wno-unused-function) # rdp_cmd.h scenes
+        add_test(NAME n64_rsp_rdp COMMAND n64_rsp_rdp_test)
+        set_tests_properties(n64_rsp_rdp PROPERTIES TIMEOUT 60)
+    endif()
+endif()

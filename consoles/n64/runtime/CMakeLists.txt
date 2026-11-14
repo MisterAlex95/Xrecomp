@@ -45,3 +45,22 @@ if(NOT TARGET n64_rdp AND (EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/n64_rdp.c OR EXIST
         target_link_libraries(n64_rdp PUBLIC Threads::Threads)
     endif()
 endif()
+
+# n64_rsp: the RSP (N-5, XBA-173, n64_devices.h), LLE scalar + vector unit: plain C11, no host dependency, so tests
+# build anywhere. n64_rsp.c replaces the core's n64_rsp_stub.c when it is present. It calls the n64_rdp_* functions
+# (COP0 8..15) but does not link an RDP: the consumer links one (n64_rdp, or a test's fake). Vectorisation stays on:
+# the 8-lane vector-unit loops are 1.7x faster with it.
+if(NOT TARGET n64_rsp AND (EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/n64_rsp.c OR EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/n64_rsp_stub.c))
+    if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/n64_rsp.c)
+        set(N64_RSP_SRC n64_rsp.c)
+    else()
+        set(N64_RSP_SRC n64_rsp_stub.c)
+    endif()
+    add_library(n64_rsp STATIC ${N64_RSP_SRC})
+    target_include_directories(n64_rsp PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+    target_compile_options(n64_rsp PRIVATE -Wall -Wextra)
+    if(NOT CMAKE_BUILD_TYPE OR CMAKE_BUILD_TYPE STREQUAL "Debug")
+        target_compile_options(n64_rsp PRIVATE -O2) # microcode must run in real time even in debug builds
+    endif()
+    set_target_properties(n64_rsp PROPERTIES POSITION_INDEPENDENT_CODE ON)
+endif()

@@ -5,7 +5,7 @@
 # $(BUILD_DIR)/<prog>.elf. N64_ROM_ELFCOMPRESS=0 keeps the ELF in the ROM uncompressed, so a parser
 # can read the code straight from the .z64.
 
-PROGS := hello cpu timer_irq gfx
+PROGS := hello cpu timer_irq gfx rsp
 BUILD_DIR ?= build
 SOURCE_DIR := .
 N64_ROM_ELFCOMPRESS := 0
@@ -20,11 +20,13 @@ $(BUILD_DIR)/hello.elf: $(BUILD_DIR)/hello/main.o
 $(BUILD_DIR)/cpu.elf: $(BUILD_DIR)/cpu/main.o $(BUILD_DIR)/cpu/ops.o
 $(BUILD_DIR)/timer_irq.elf: $(BUILD_DIR)/timer_irq/main.o
 $(BUILD_DIR)/gfx.elf: $(BUILD_DIR)/gfx/main.o
+$(BUILD_DIR)/rsp.elf: $(BUILD_DIR)/rsp/main.o
 
 hello.z64: N64_ROM_TITLE = "XBA hello"
 cpu.z64: N64_ROM_TITLE = "XBA cpu"
 timer_irq.z64: N64_ROM_TITLE = "XBA timer_irq"
 gfx.z64: N64_ROM_TITLE = "XBA gfx"
+rsp.z64: N64_ROM_TITLE = "XBA rsp"
 
 clean:
 	rm -rf $(BUILD_DIR) *.z64

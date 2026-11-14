@@ -1,0 +1,29 @@
+/* rsp_oracle_expected.h -- the checksums of the rsp_oracle.h groups as the ares oracle computed them (N-5, XBA-173).
+ * Recorded from homebrew/rsp (rsp.z64, built by tools/consoles/build_homebrew.sh n64) run on ares (xba-n64-oracle,
+ * tools/docker/n64-oracle.Dockerfile) by reading its result block table[0..92]; re-record when a group changes (see
+ * homebrew/rsp/README.md). Never edited to match n64_rsp.c. */
+#ifndef RSP_ORACLE_EXPECTED_H
+#define RSP_ORACLE_EXPECTED_H
+
+#include <stdint.h>
+
+static const uint32_t rspo_expected[93] = {
+    0xAB8C3B5Cu, 0xEA5AF183u, 0x3460F4CFu, 0x902C228Eu, 0x9E3CBD9Bu, 0x8A892AB7u,
+    0x5F4297B9u, 0xE09294FEu, 0xE4C7CE41u, 0x62814E3Cu, 0x6E65009Bu, 0xE5B637A7u,
+    0x909067D3u, 0x0453A48Eu, 0x297944EEu, 0xEA494ED0u, 0x9DB0A4F2u, 0xC4ED98AEu,
+    0x80CE590Fu, 0x1B760BEFu, 0xDAC18900u, 0x7DF9D913u, 0xF2962E7Au, 0xAF1AD855u,
+    0x81A1B5BBu, 0xBAE64D7Eu, 0xC5959B05u, 0x96AEBC4Eu, 0xE111CA8Cu, 0xB8118CF8u,
+    0x06B5A152u, 0x059AD381u, 0xAFDE9246u, 0x15185272u, 0xB6DE60D2u, 0x1C262122u,
+    0xABBCDD65u, 0x4C04D9B3u, 0x597A4A95u, 0x2D251F94u, 0x7AA41C1Eu, 0x8823303Du,
+    0xE6D9784Au, 0x6C90CF81u, 0x8EA6F0BDu, 0x34850028u, 0x720CD808u, 0xC4850CC9u,
+    0xCEA1E1CEu, 0x68D4F91Eu, 0x500A25B6u, 0x9533130Cu, 0xF539D0E1u, 0x015A5DC4u,
+    0x0AC6D310u, 0x44294C9Fu, 0xEE8E795Au, 0x86FDEF4Fu, 0xE50B6C6Fu, 0x4316A64Cu,
+    0x034DB63Fu, 0xAABF61BCu, 0x8EF8E502u, 0xA71E4850u, 0x6457C0F5u, 0x74ACE460u,
+    0x1A1DAA37u, 0x1F164EDFu, 0x0790E3DDu, 0xEE127465u, 0x8C963857u, 0x7038C318u,
+    0x42E0D39Cu, 0x399AAE96u, 0x976C10ECu, 0x7DB453B1u, 0xF22E34CBu, 0x07180FC7u,
+    0xDA40E912u, 0x3761FC19u, 0xB1E6117Fu, 0xECE74A81u, 0xCEB180B3u, 0x389AB699u,
+    0x4CD946D7u, 0xF9CB1E72u, 0x6AC5BC3Bu, 0x3333D6F6u, 0x3F81E872u, 0x6C04FE23u,
+    0xE4270001u, 0x9E94A8FCu, 0xAD197EC6u,
+};
+
+#endif
