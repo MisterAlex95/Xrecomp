@@ -35,4 +35,9 @@
     <string name="MENU_SCREEN_OFF">Off</string>
     <string name="CTL_COMBO">Select + Start</string>
     <string name="CTL_COMBO_X">Game menu (held ½ s)</string>
+    <!-- XBA-166: a multi-disc PlayStation game. -->
+    <string name="MENU_DISC">Change disc</string>
+    <string name="MENU_DISC_PLAYING">In the drive</string>
+    <string name="MENU_DISC_DONE">Disc %1$d: the lid opens, the disc goes in</string>
+    <string name="MENU_DISC_FAILED">The disc cannot be opened</string>
 </resources>

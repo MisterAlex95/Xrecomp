@@ -1331,6 +1331,20 @@ its folder cannot be read.
   `<files>/work/ps1-<KEY>/discovered.txt` for the next Prepare (address, hash and bytes: overlays get lifted). A `.chd` goes over as `fd:N`
   too; `shell_main.c` installs the PS1 disc reader as `recomp_pack_rom_identify`'s disc hook (`ps1_identify_install`)
   before routing, so it is keyed by its serial like a `.bin` (a pack prepared from it or from its `.cue` is taken).
+- **Change disc (XBA-166).** For a multi-disc game the in-game menu has **Change disc** (after Screenshot), shown when
+  at least two discs of the game are found beside the one playing (`Ps1Discs`, from `ShellActivity`: a path's
+  folder listing, or a document's folder listed through its library tree, else the library index's items of that
+  folder): a `.m3u` playlist there that names the disc playing gives its discs in its order (only the file names of
+  its lines count); otherwise the disc images (`.cue`, `.chd`, `.iso`, `.bin`, `.img`) whose names differ only by
+  their disc marker (« (Disc 1) », « Disc 2 », « [Disc 3] », « CD1 », « (CD 2) », « Disk 1 », « (Disc 1 of 2) »),
+  one per disc number (a `.cue`'s tracks are not discs), in disc order. Its page lists them, « In the drive » under
+  the one playing; choosing another closes the menu: `MenuNative.nativePs1ChangeDisc` hands it to
+  `ps1_runtime_change_disc` (a path as it is; a document as `fd:N`; a `.cue` document as a `.cue` of our own naming
+  its track descriptors, `Ps1Cue`, in `<cache>/ps1/disc<N>/`), the lid opens (the game sees it: INT5, the shell bit),
+  a second later the new disc is in and the lid closes; a flash « Disc N: the lid opens, the disc goes in ». logcat
+  `shell: menu: 2 discs: …`, `shell: menu: change disc to Game (Disc 2).chd (…)`, `ps1: lid opened at frame N
+  (changing the disc to …)`, `ps1: lid closed at frame N+60, disc … in`. A disc that cannot be opened: « The disc
+  cannot be opened », the menu stays. The game is still keyed by the disc it started from (memory cards, pack).
 - **BIOS.** OpenBIOS (MIT, PCSX-Redux's nugget tree), inside the APK as `assets/ps1-bios/openbios.bin`: the `ps1-bios`
   stage of `tools/docker/android.Dockerfile` builds it from its pinned source, sha256 checked, and gradle takes it with
   `-PxbaPs1Bios=FILE` (the same check); its licence is `LICENSES/MIT-OpenBIOS.txt` (About › Licences, NOTICE « The
@@ -1394,10 +1408,12 @@ out/hb/ps1/overlay.cue out/hb/ps1/overlay.bin /sdcard/ps1/`), `adb logcat -s xbo
    copied)`, and `run-as … du -k files/work/ps1-PSX-4009E1ED/disc.iso` is small (tens of KB).
 8. One of your own disc dumps (`.cue` + `.bin` tracks): Prepare (note the time and the pack size in `pack.json`),
    Play (`PACK_LOADED`, picture, sound, speed vs. interpreted), quit after a few minutes of play, Prepare again when
-   the Home offers it, play again. Send the logcat and `prepare.log` if a step fails. A `.chd` of it (`chdman
-   createcd`): its Home offers Prepare too; `prepare.log` has `disc: … (chd) -> …/disc.iso (boot …)`, the pack's
-   `source_sha256` is the `.cue`'s, and Play logs `PACK_LOADED`.
-9. Switch the Thor to French: the Home lines and notes in French.
+   the Home offers it, play again. Send the logcat and `prepare.log` if a step fails.
+9. A `.chd` of that disc (`chdman createcd -i Game.cue -o Game.chd`, kept outside every repository) in the library
+   folder: its Home now has **Prepare** beside Play (XBA-168). Prepare it, once from a folder with All files access
+   and once from a folder added with the file picker: `prepare.log` has `disc: … (chd) -> …/disc.iso (boot …)`, the
+   pack's key and `source_sha256` in `pack.json` are those of the `.cue`'s pack, and Play logs `PACK_LOADED`.
+10. Switch the Thor to French: the Home lines and notes in French.
 
 ### Device check (PS1 games, XBA-168), for Alex
 
@@ -1446,6 +1462,17 @@ out/hb/ps1/gfx.cue out/hb/ps1/gfx.bin out/hb/ps1/hello.cue out/hb/ps1/hello.bin 
     digital pad): logcat `ps1: the game set port 1 analog (DualShock)`; if it locks the mode, Back + L3 + R3 logs
     `stays … (locked by the game)`. A game with vibration (in its options): the controller rumbles when the game
     says so, and stops.
+12. Change disc (XBA-166), with our homebrew first: copy `gfx.cue` / `gfx.bin` as `Test (Disc 1).cue` / `.bin`
+    (edit the `.cue`'s FILE line) and `hello.cue` / `hello.bin` as `Test (Disc 2).cue` / `.bin` into `/sdcard/ps1`,
+    Y, play « Test (Disc 1) ». Back: the menu has **Change disc**; its page lists both, « In the drive » under disc 1.
+    Choose disc 2: the menu closes, the flash « Disc 2: … », logcat `shell: menu: change disc to Test (Disc 2).cue`,
+    `ps1: lid opened at frame …`, `ps1: lid closed …, disc … in`. (The homebrew does not react to the swap; the
+    disc is in the drive.) A single-disc game (gfx alone): no Change disc in the menu.
+13. A multi-disc game of your own (`Game (Disc 1).chd`, `Game (Disc 2).chd`…; or `.cue` / `.bin`): play to the
+    point where it asks for the next disc, Back › Change disc › disc 2. Expected: the game sees the lid open and
+    close and goes on from disc 2 (note what it shows); then a `.m3u` in the same folder (`Game.m3u` listing the
+    discs, one file name per line): the page lists them in the playlist's order. Repeat once through a folder
+    added with the file picker. Send the logcat for any game that does not take the new disc.
 
 ### Nintendo 64 games (XBA-174)
 
@@ -2244,6 +2271,7 @@ less the display cutout, so 720p and 1080p look the same.
 | Settings | **Perf overlay** On / Off: fps and frame time (`xbox_FramebufferWindowGetStats`, twice a second) in the top right corner, in the menu's layer, not in the game frame; stays with the menu closed. **Volume** 0–100 % in steps of 10, A mutes / unmutes: one gain on the mixed APU output (`apu_volume.c`, the square of the fraction, after the WAV capture), set through JNI. **Bottom screen** Panel / Black / Off (only with a second screen): `GameStore.setBottomScreen` and the companion is refreshed at once. **On-screen pad** Shown / Hidden (only when the game has one, XBA-158): for this session, whatever Controls › On-screen pad › Show says (never with the companion panel up). These apply **now** (the rows say so) and are remembered (`files/settings/perf_overlay`, `game_volume`, `bottom_screen`); the volume is applied again at the next start. **Language** (only when the game's XBE gives a title ID): As in Settings, then the nine languages; this game's own [language](#game-language), applied at the next start. **Widescreen** and **480p** (same condition, XBA-134): As in Settings / On / Off, this game's own console video setting (`GameVideo.java`, kept in `files/settings/widescreen_<TITLEID>` and `480p_<TITLEID>`), applied at the next start: `ShellActivity` sets `RECOMP_WIDESCREEN` / `RECOMP_480P` to `1` or `0` (the environment wins over the `recomp.cfg` line of Settings › Graphics) and unsets them when the game follows Settings; logcat « shell: title video RECOMP_WIDESCREEN=… RECOMP_480P=…, title … ». Screen filter and scaling are not offered: the SDL window's are fixed at start (`fb_present_sdl.c`: nearest, logical size 640 x 480). |
 | Controls | The usual mapping, compact (plus Back and Select + Start: the menu); with a remapping in `recomp.cfg`, first « Your mapping » and each changed control (your button, the Xbox control). A GBA / PS1 / N64 game: each of its buttons and the controls it comes from ([Controls for the other consoles](#controls-for-the-other-consoles)). |
 | Screenshot | Closes the menu first, then saves the game's last frame as `<external files>/screenshots/<date>.bmp` (`xbox_FramebufferDumpBmp`, the companion panel's), and says « Saved … » at the top of the screen (and on the panel). |
+| Change disc | Only for a PlayStation game with two discs or more found beside it (XBA-166, [PlayStation games](#playstation-games-xba-168)): a page of its discs, « In the drive » under the one playing; choosing another closes the menu and the lid opens, a second later the new disc is in. |
 | Settings › Share log | This process's logcat to `files/logs/game.log`, then the share sheet (the companion panel's `LogProvider` path). The menu stays open. |
 | Back to launcher | **The game stays alive** (the runtime maps its guest memory once per process: starting it again means a new process), held: the drawer goes at once, the launcher comes up (`ACTION_SHOW_LAUNCHER`), and the menu's hold is let go only in `onStop`, after SDL's pause has put the background hold in place, so no frame runs in between. The launcher's Play brings this task back and the game goes on (`launcher: game running, bringing it back`). In a game's own app the row is **Back to the home screen**: the task goes behind Android's home screen (`moveTaskToBack`), held the same way; its icon brings it back. |
 | Quit game | The first press turns the row into « Press again to quit » (with « Progress since the last save is lost » under it, the only row that says more) for 4 s (moving away cancels it); the second press quits: `nativeQuit` lets the guest go, `sync()`s the saves, then `recomp_quit(0)` ([Quit](#quit)). |

@@ -88,6 +88,12 @@ public class GameMenuTest {
         @Override public Boolean touchShown() { return touch; }
         @Override public void setTouchShown(boolean on) { touch = on; }
         @Override public ConsolePadMap consoleMap() { return console; }
+        /** XBA-166: the discs the game has, the ones chosen, whether a change works. */
+        List<Ps1Discs.Disc> discList = List.of();
+        final List<Ps1Discs.Disc> chosen = new ArrayList<>();
+        boolean discOk;
+        @Override public List<Ps1Discs.Disc> discs() { return discList; }
+        @Override public boolean changeDisc(Ps1Discs.Disc d) { chosen.add(d); return discOk; }
     }
 
     /** A stand-in for the game's frame (ours: gradients and shapes), so the dimming shows in the screenshots. */
@@ -523,6 +529,55 @@ public class GameMenuTest {
         assertNotNull(menu.flashText());
         idle(GameMenu.FLASH_MS + 100);
         assertNull(menu.flashText());
+    }
+
+    /**
+     * XBA-166: Change disc shows for a game with two discs or more; its page lists them (« In the drive » under the
+     * one playing), picking another hands it to the host and closes the menu; a disc that does not open keeps it.
+     */
+    @Test
+    public void changeDisc() {
+        menu.open("Back");
+        assertNull("one disc: no Change disc", menu.row(GameMenu.Item.DISC));
+        menu.close();
+        menu.release();
+
+        activity = Robolectric.buildActivity(Activity.class).setup().get();
+        activity.setContentView(new FakeGame(activity));
+        host = new FakeHost();
+        host.discList = List.of(new Ps1Discs.Disc("Game (Disc 1).cue", "/g/Game (Disc 1).cue", 1, true),
+                                new Ps1Discs.Disc("Game (Disc 2).chd", "/g/Game (Disc 2).chd", 2, false));
+        final List<Ps1Discs.Disc> chosen = host.chosen;
+        menu = new GameMenu(activity, host);
+        menu.setAnimate(false);
+        menu.attach();
+        menu.onStart();
+        menu.open("Back");
+        assertNotNull(menu.row(GameMenu.Item.DISC));
+        menu.row(GameMenu.Item.DISC).performClick();
+        List<Widgets.MenuRow> rows = menu.rowsForTest();
+        assertEquals(3, rows.size());   // two discs, Back
+        assertEquals("Game (Disc 1).cue", rows.get(0).title);
+        assertEquals(activity.getString(R.string.MENU_DISC_PLAYING), rows.get(0).subtitle);
+        assertNull(rows.get(1).subtitle);
+        rows.get(1).performClick();      // cannot be opened: the menu stays, a warning
+        assertEquals(1, chosen.size());
+        assertTrue(menu.isOpen());
+        assertEquals(activity.getString(R.string.MENU_DISC_FAILED), menu.flashText());
+        host.discOk = true;
+        rows.get(1).performClick();
+        assertEquals(2, chosen.size());
+        assertEquals("/g/Game (Disc 2).chd", chosen.get(1).spec);
+        assertFalse(menu.isOpen());
+        assertEquals(activity.getString(R.string.MENU_DISC_DONE, 2), menu.flashText());
+        // Opened again: disc 2 is the one in the drive now; Back returns to the main page on Change disc.
+        menu.open("Back");
+        menu.row(GameMenu.Item.DISC).performClick();
+        rows = menu.rowsForTest();
+        assertNull(rows.get(0).subtitle);
+        assertEquals(activity.getString(R.string.MENU_DISC_PLAYING), rows.get(1).subtitle);
+        menu.row(GameMenu.Item.BACK).performClick();
+        assertSame(menu.row(GameMenu.Item.DISC), menu.focusedRow());
     }
 
     @Test

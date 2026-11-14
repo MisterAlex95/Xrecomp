@@ -21,4 +21,11 @@ final class MenuNative {
 
     /** Lets the game go, syncs the saves to disk, then recomp_quit(0). Does not return. */
     static native void nativeQuit();
+
+    /**
+     * XBA-166: the PlayStation game being played gets another disc (ps1_runtime_change_disc: the lid opens, a second
+     * later the disc is in and the lid closes). path: a file path or « fd:N » (a detached descriptor, left open).
+     * False when no PS1 game runs.
+     */
+    static native boolean nativePs1ChangeDisc(String path);
 }

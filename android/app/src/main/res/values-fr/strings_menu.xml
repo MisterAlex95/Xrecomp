@@ -31,4 +31,8 @@
     <string name="MENU_SCREEN_OFF">Aucun</string>
     <string name="CTL_COMBO">Select + Start</string>
     <string name="CTL_COMBO_X">Menu du jeu (maintenus ½ s)</string>
+    <string name="MENU_DISC">Changer de disque</string>
+    <string name="MENU_DISC_PLAYING">Dans le lecteur</string>
+    <string name="MENU_DISC_DONE">Disque %1$d : le capot s\'ouvre, le disque entre</string>
+    <string name="MENU_DISC_FAILED">Le disque ne peut pas être ouvert</string>
 </resources>

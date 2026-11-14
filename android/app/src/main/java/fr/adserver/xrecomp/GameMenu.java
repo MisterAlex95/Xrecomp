@@ -107,6 +107,19 @@ final class GameMenu {
         default ConsolePadMap consoleMap() {
             return null;
         }
+
+        /**
+         * XBA-166: the discs of the PlayStation game being played (Ps1Discs: the current one marked), empty for any
+         * other game or a single disc; « Change disc » shows with two or more.
+         */
+        default List<Ps1Discs.Disc> discs() {
+            return java.util.Collections.emptyList();
+        }
+
+        /** XBA-166: puts that disc in the drive (MenuNative.nativePs1ChangeDisc); false when it cannot. */
+        default boolean changeDisc(Ps1Discs.Disc d) {
+            return false;
+        }
     }
 
     static final long ANIM_MS = 200, QUIT_ARM_MS = 4000, FLASH_MS = 3000, PERF_TICK_MS = 500, SESSION_TICK_MS = 1000;
@@ -120,10 +133,10 @@ final class GameMenu {
     static final int ROW_H = Theme.ROW_H;
     static final int VOLUME_STEP = 10;
 
-    enum Page { MAIN, SETTINGS, CONTROLS }
+    enum Page { MAIN, SETTINGS, CONTROLS, DISCS }
 
     enum Item { RESUME, SETTINGS, CONTROLS, SCREENSHOT, SHARE_LOG, LAUNCHER, QUIT, PERF, VOLUME, BOTTOM, LANGUAGE,
-                WIDESCREEN, P480, TOUCH, BACK }
+                WIDESCREEN, P480, TOUCH, BACK, DISC }
 
     private final Activity activity;
     private final Host host;
@@ -146,6 +159,7 @@ final class GameMenu {
 
     private boolean open, started, animate = true, launcherPending;
     private Page page = Page.MAIN;
+    private List<Ps1Discs.Disc> discList;
     private String openedBy = "";
     private long openedAt, quitArmedAt = -1;
     private boolean perfOn;
@@ -757,7 +771,7 @@ final class GameMenu {
             return;
         feedback.play(UiFeedback.Cue.BACK, drawer);
         if (page != Page.MAIN) {
-            Item from = page == Page.SETTINGS ? Item.SETTINGS : Item.CONTROLS;
+            Item from = page == Page.SETTINGS ? Item.SETTINGS : page == Page.DISCS ? Item.DISC : Item.CONTROLS;
             showPage(Page.MAIN, from);
             return;
         }
@@ -776,6 +790,11 @@ final class GameMenu {
     }
 
     /** The B hint's label (tests). */
+    /** The rows of the page shown, in order (tests). */
+    List<Widgets.MenuRow> rowsForTest() {
+        return focusables();
+    }
+
     String backHintForTest() {
         return ((Widgets.Hint)hints.getChildAt(1)).labelForTest();
     }
@@ -794,6 +813,8 @@ final class GameMenu {
             row(Item.SETTINGS, s(R.string.MENU_SETTINGS));
             row(Item.CONTROLS, s(R.string.MENU_CONTROLS));
             row(Item.SCREENSHOT, s(R.string.MENU_SCREENSHOT));
+            if (discs().size() >= 2)   // XBA-166: a multi-disc PlayStation game
+                row(Item.DISC, s(R.string.MENU_DISC));
             // A game's own app has no launcher to go back to: the row leaves to Android's home screen (the game
             // waits there as it would behind the launcher; the « Launcher » app shortcut still opens the settings).
             row(Item.LAUNCHER, s(TitleApp.ownTitleId(activity) != null ? R.string.MENU_LEAVE : R.string.MENU_LAUNCHER));
@@ -878,6 +899,13 @@ final class GameMenu {
                 kvRow(s(r[0]), s(r[1]));
             row(Item.BACK, s(R.string.MENU_BACK));
             break;
+        case DISCS:
+            pageV.setText(s(R.string.MENU_DISC));
+            pageV.setVisibility(View.VISIBLE);
+            for (Ps1Discs.Disc d : discs())
+                discRow(d);
+            row(Item.BACK, s(R.string.MENU_BACK));
+            break;
         }
         scroll.scrollTo(0, 0);
         if (hadFocus || focusItem != null) {
@@ -899,6 +927,53 @@ final class GameMenu {
         rows.put(item, r);
         list.addView(r, new LinearLayout.LayoutParams(-1, ROW_H));
         return r;
+    }
+
+    /** XBA-166: the discs, read once (the folder is listed the first time the menu opens). */
+    private List<Ps1Discs.Disc> discs() {
+        if (discList == null) {
+            List<Ps1Discs.Disc> d;
+            try {
+                d = host.discs();
+            } catch (RuntimeException e) {
+                Log.w(LauncherActivity.TAG, "shell: menu: the discs cannot be listed", e);
+                d = null;
+            }
+            discList = d != null ? d : new ArrayList<>();
+            if (discList.size() >= 2)
+                Log.i(LauncherActivity.TAG, "shell: menu: " + discList.size() + " discs: " + discList);
+        }
+        return discList;
+    }
+
+    /** A disc of the Change disc page: its file name, « In the drive » under the one playing. */
+    private void discRow(Ps1Discs.Disc d) {
+        Widgets.MenuRow r = new Widgets.MenuRow(activity);
+        r.set(d.name, null);
+        if (d.current)
+            r.setSubtitle(s(R.string.MENU_DISC_PLAYING));
+        r.onPress = () -> feedback.play(UiFeedback.Cue.SELECT, r);
+        r.setOnClickListener(v -> chooseDisc(d));
+        list.addView(r, new LinearLayout.LayoutParams(-1, ROW_H));
+    }
+
+    private void chooseDisc(Ps1Discs.Disc d) {
+        if (d.current) {
+            close();
+            return;
+        }
+        Log.i(LauncherActivity.TAG, "shell: menu: change disc to " + d.name + " (" + d.spec + ")");
+        if (!host.changeDisc(d)) {
+            Log.w(LauncherActivity.TAG, "shell: menu: change disc failed: " + d.spec);
+            flash(s(R.string.MENU_DISC_FAILED), false);
+            return;
+        }
+        List<Ps1Discs.Disc> now = new ArrayList<>();
+        for (Ps1Discs.Disc x : discList)
+            now.add(new Ps1Discs.Disc(x.name, x.spec, x.number, x == d));
+        discList = now;
+        close();
+        flash(activity.getString(R.string.MENU_DISC_DONE, d.number), true);
     }
 
     /** A line of the Controls table: the device's control, what the game gets. */
@@ -929,6 +1004,9 @@ final class GameMenu {
             break;
         case CONTROLS:
             showPage(Page.CONTROLS, Item.BACK);
+            break;
+        case DISC:
+            showPage(Page.DISCS, null);
             break;
         case SCREENSHOT:
             // Closed first: the player sees the game the picture is of (the BMP is the game's frame alone anyway).

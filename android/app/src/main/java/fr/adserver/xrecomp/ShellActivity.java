@@ -143,6 +143,86 @@ public class ShellActivity extends SDLActivity {
         }
     }
 
+    /**
+     * XBA-166: the discs of the PlayStation game being played (title ID « ps1-... »), for the menu's Change disc:
+     * Ps1Discs over the files beside the launched disc (a path's folder; a document's folder listed through its tree,
+     * else the library index's items of that folder). Empty for any other game.
+     */
+    private java.util.List<Ps1Discs.Disc> ps1Discs() {
+        String rom = GameStore.launchedRom(this), tid = GameStore.launchedTitleId(this);
+        if (rom == null || tid == null || !tid.startsWith("ps1-"))
+            return java.util.Collections.emptyList();
+        java.util.Map<String, String> sib = new java.util.LinkedHashMap<>();
+        String current;
+        if (!rom.startsWith("content:")) {
+            File f = new File(rom);
+            current = f.getName();
+            File[] ls = f.getParentFile() != null ? f.getParentFile().listFiles() : null;
+            if (ls != null)
+                for (File x : ls)
+                    if (x.isFile())
+                        sib.put(x.getName(), x.getAbsolutePath());
+            return Ps1Discs.find(current, sib, spec -> readText(new java.io.FileInputStream(spec)));
+        }
+        Uri u = Uri.parse(rom);
+        String doc, tree;
+        try {
+            doc = DocumentsContract.getDocumentId(u);
+            tree = DocumentsContract.getTreeDocumentId(u);
+        } catch (RuntimeException e) {
+            return java.util.Collections.emptyList();
+        }
+        Uri treeUri = DocumentsContract.buildTreeDocumentUri(u.getAuthority(), tree);
+        String name = documentName(rom);
+        current = name != null ? name : doc.substring(doc.lastIndexOf('/') + 1);
+        int slash = doc.lastIndexOf('/');
+        String parent = slash > 0 ? doc.substring(0, slash) : tree;
+        try (Cursor c = getContentResolver().query(DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, parent),
+                new String[] { DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+                               DocumentsContract.Document.COLUMN_DISPLAY_NAME }, null, null, null)) {
+            while (c != null && c.moveToNext())
+                sib.put(c.getString(1), DocumentsContract.buildDocumentUriUsingTree(treeUri, c.getString(0)).toString());
+        } catch (RuntimeException e) {
+            Log.w(LauncherActivity.TAG, "shell: the disc's folder cannot be listed, the library index instead", e);
+        }
+        if (sib.isEmpty())
+            for (java.util.Map.Entry<String, String> e : Ps1Discs.siblingsFromIndex(
+                     LibraryIndex.read(Library.indexFile(getFilesDir())), doc).entrySet())
+                sib.put(e.getKey(), DocumentsContract.buildDocumentUriUsingTree(treeUri, e.getValue()).toString());
+        return Ps1Discs.find(current, sib, spec -> readText(getContentResolver().openInputStream(Uri.parse(spec))));
+    }
+
+    private static String readText(java.io.InputStream in) throws java.io.IOException {
+        if (in == null)
+            throw new java.io.IOException("cannot open");
+        try (java.io.InputStream s = in) {
+            byte[] b = new byte[Ps1Discs.M3U_MAX];
+            int n = 0, r;
+            while (n < b.length && (r = s.read(b, n, b.length - n)) > 0)
+                n += r;
+            return new String(b, 0, n, java.nio.charset.StandardCharsets.UTF_8);
+        }
+    }
+
+    /**
+     * What the runtime opens for a disc chosen in the menu: a path as it is; a document as « fd:N » (detached), a
+     * .cue document as a .cue of our own naming its tracks' descriptors (Ps1Cue, its tracks from the library index);
+     * null when it cannot be opened.
+     */
+    private String ps1DiscSpec(Ps1Discs.Disc d) {
+        if (!d.spec.startsWith("content:"))
+            return d.spec;
+        if (".cue".equals(Ps1Discs.ext(d.name))) {
+            java.util.List<String> parts = PrepareService.cueParts(getFilesDir(), d.spec);
+            if (parts.isEmpty())
+                return null;
+            return Ps1Cue.runtimeCue(d.spec, parts, x -> getContentResolver().openInputStream(Uri.parse(x)),
+                                     this::documentName, DiscImages.contentOpener(this),
+                                     new File(getCacheDir(), "ps1/disc" + d.number));
+        }
+        return romDescriptor(d.spec, DiscImages.contentOpener(this));
+    }
+
     /** "fd:N" for a ROM document (its descriptor detached, the caller's to keep), or null when it cannot be opened. */
     static String romDescriptor(String uri, DiscImages.Opener opener) {
         try {
@@ -472,6 +552,24 @@ public class ShellActivity extends SDLActivity {
             if (tid == null || Console.ofKey(tid) == Console.XBOX)
                 return null;
             return ConsoleControls.effective(ShellActivity.this, GameStore.externalFilesDir(ShellActivity.this), tid);
+        }
+
+        @Override
+        public java.util.List<Ps1Discs.Disc> discs() {
+            return ps1Discs();
+        }
+
+        @Override
+        public boolean changeDisc(Ps1Discs.Disc d) {
+            String spec = ps1DiscSpec(d);
+            if (spec == null)
+                return false;
+            try {
+                return MenuNative.nativePs1ChangeDisc(spec);
+            } catch (UnsatisfiedLinkError e) {
+                Log.w(LauncherActivity.TAG, "shell: menu: no native disc change", e);
+                return false;
+            }
         }
 
         @Override
