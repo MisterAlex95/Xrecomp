@@ -2,9 +2,11 @@
  * the hardware rules n64_rdp.c documents (n64brew wiki RDP pages, libdragon rdpq docs); DPC register behaviour; a
  * replica of the homebrew gfx.z64 frame; golden hashes of busy scenes and of a matrix of random command lists over
  * every mode (regression guards: update them only for a deliberate change) and the same scenes drawn with 1 and 3
- * threads, which must match bit for bit. */
+ * threads, which must match bit for bit; every byte the RDP writes into RDRAM reported through the bus's wrote
+ * callback (the core's write tracking for recompiled code, n64_recomp.h). */
 #include "rdp_cmd.h"
 
+#include <pthread.h>
 #include <stdio.h>
 
 #ifndef GOLDEN_BUSY
@@ -1179,6 +1181,72 @@ static void t_matrix(void)
         printf("mode matrix hash 0x%08X\n", h);
 }
 
+/* bus.wrote (XBA-174): over the mode matrix's random lists (every mode, colour and Z images changing, fill / copy
+ * modes, 8 / 16 / 32-bit pixels), with 1 and 3 threads, every RDRAM byte the RDP changed lies in a range it reported,
+ * the reports come from the thread that runs the RDP and only once the pixels are there, and they stay close to the
+ * images drawn (rows of the primitives, not the whole of RDRAM). */
+typedef struct {
+    uint8_t *mark;     /* a byte per RDRAM byte: reported */
+    uint64_t bytes;    /* reported in all (with repeats) */
+    int calls, other_thread;
+    pthread_t self;
+} wrote_log;
+static void wrote_cb(void *ctx, uint32_t addr, uint32_t len)
+{
+    wrote_log *w = ctx;
+    w->calls++;
+    w->bytes += len;
+    if (!pthread_equal(pthread_self(), w->self))
+        w->other_thread++;
+    for (uint32_t i = 0; i < len && addr + i < RAM_SIZE; i++)
+        w->mark[addr + i] = 1;
+}
+static void t_wrote(void)
+{
+    cur = "wrote callback";
+    uint8_t *before = malloc(RAM_SIZE);
+    wrote_log w = { calloc(RAM_SIZE, 1), 0, 0, 0, pthread_self() };
+    int missed = 0, rounds = 0;
+    for (int i = 0; i < 16 && before && w.mark; i++) {
+        for (int threads = 1; threads <= 3; threads += 2, rounds++) {
+            rdp_rig g;
+            g.ram = calloc(RAM_SIZE, 1);
+            g.irqs = 0;
+            g.dp = n64_rdp_create((n64_rcp_bus){ g.ram, RAM_SIZE, rig_raise, rig_clear, &w, wrote_cb });
+            if (threads > 1)
+                n64_rdp_set_threads(g.dp, threads);
+            mx_s = 0x9E3779B9u * (uint32_t)(i + 1);
+            for (uint32_t a = 0; a < 0x30000; a++) {
+                g.ram[FB_ADDR + a] = (uint8_t)mx_rnd();
+                g.ram[ZB_ADDR + a] = mx(2) ? (uint8_t)mx_rnd() : 0xFF;
+            }
+            for (uint32_t a = 0; a < 0x6000; a++)
+                g.ram[TEX_ADDR + a] = (uint8_t)mx_rnd();
+            mx_list(&scene);
+            for (int k = 0; k < scene.n; k++) {
+                n64_wbe32(g.ram + CMD_BASE + k * 8, (uint32_t)(scene.w[k] >> 32));
+                n64_wbe32(g.ram + CMD_BASE + k * 8 + 4, (uint32_t)scene.w[k]);
+            }
+            memcpy(before, g.ram, RAM_SIZE);
+            memset(w.mark, 0, RAM_SIZE);
+            n64_rdp_write_reg(g.dp, 0, CMD_BASE);
+            n64_rdp_write_reg(g.dp, 1, CMD_BASE + (uint32_t)scene.n * 8);
+            n64_rdp_run(g.dp);
+            for (uint32_t a = 0; a < RAM_SIZE; a++)
+                if (g.ram[a] != before[a] && !w.mark[a] && missed++ < 5)
+                    fprintf(stderr, "  seed %d, %d thread(s): 0x%06X written, not reported\n", i, threads, a);
+            n64_rdp_destroy(g.dp);
+            free(g.ram);
+        }
+    }
+    check(rounds == 32 && missed == 0, "every byte written was reported");
+    check(w.calls > 0 && w.other_thread == 0, "reported from the RDP's caller's thread");
+    /* Each list draws into 0x40000-byte colour and Z areas at most (several images): far less than RDRAM per call. */
+    check(w.calls && w.bytes / (uint64_t)w.calls < 0x100000, "ranges close to the images drawn");
+    free(before);
+    free(w.mark);
+}
+
 /* The homebrew gfx.z64 frame as libdragon's rdpq emits it (fill and copy mode fix-ups included), with its checks. */
 static void t_gfx(void)
 {
@@ -1243,6 +1311,7 @@ int main(void)
     t_lod();
     t_scenes();
     t_matrix();
+    t_wrote();
     t_gfx();
     if (G.dp)
         rig_close(&G);

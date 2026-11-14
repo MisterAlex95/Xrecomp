@@ -124,8 +124,9 @@ compile time on the phone):
 
 ## Limits
 
-- The RDP's rendering into RDRAM is not write-tracked (`n64_rdp.c` writes framebuffers directly): code drawn over
-  by the RDP would not be noticed. Games never do this.
+- The RDP's rendering into RDRAM is write-tracked per command list (XBA-174: `n64_rdp.c` reports the rows of its
+  colour and Z images it drew through the bus's `wrote` callback, once the pixels are written), so code drawn over by
+  the RDP is checked again like code overwritten by DMA. Texture loads only read RDRAM.
 - Lifted code runs in kernel mode only (every N64 game runs in kernel mode); user / supervisor code is interpreted.
 - Compile time: about 0.8-0.9 s of compiler per 1000 instructions at -O1 on a desktop x86 core with gcc (the
   per-instruction design of the first version cost 1.6-2.8 s): homebrew ~28 k instructions in ~4 s with 6 jobs,

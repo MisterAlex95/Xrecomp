@@ -199,7 +199,10 @@ struct n64_rdp {
     /* Front-end view of the state, for the costs and the batch hazards. */
     int fe_cycle, fe_ci_size, fe_ci_width, fe_zon;
     uint32_t fe_ci_addr, fe_zi_addr, fe_ti_addr;
-    int fe_ti_size, fe_ti_width, fe_sc_y1;
+    int fe_ti_size, fe_ti_width, fe_sc_y0, fe_sc_y1;
+    /* RDRAM the drawing commands write (colour image [0], Z image [1]: rows of the primitives, scissored), reported
+     * through bus.wrote once drawn (wrote_report): the core's write tracking for its recompiled code (n64_recomp.h). */
+    uint32_t wr_lo[2], wr_hi[2];
 
     /* Batch (threads > 1). */
     uint64_t *batch;
@@ -2400,10 +2403,48 @@ static void threads_stop(n64_rdp *d)
 }
 #endif
 
+/* The colour and Z image rows [y0, y1] a drawing command touches, added to the ranges wrote_report hands the core. */
+static void wrote_add(n64_rdp *d, int y0, int y1)
+{
+    y0 = imax(y0, d->fe_sc_y0 >> 2);
+    y1 = imin(y1, d->fe_sc_y1 >> 2);
+    if (y0 < 0)
+        y0 = 0;
+    if (y1 < y0)
+        return;
+    const uint32_t stride[2] = { ((uint32_t)d->fe_ci_width << d->fe_ci_size) >> 1, (uint32_t)d->fe_ci_width * 2u };
+    const uint32_t base[2] = { d->fe_ci_addr, d->fe_zi_addr };
+    const int n = d->fe_zon && d->fe_cycle != CYC_FILL && d->fe_cycle != CYC_COPY ? 2 : 1;
+    for (int i = 0; i < n; i++) {
+        uint32_t lo = base[i] + (uint32_t)y0 * stride[i], hi = base[i] + (uint32_t)(y1 + 1) * stride[i];
+        if (d->wr_hi[i] <= d->wr_lo[i]) {
+            d->wr_lo[i] = lo;
+            d->wr_hi[i] = hi;
+        } else {
+            d->wr_lo[i] = lo < d->wr_lo[i] ? lo : d->wr_lo[i];
+            d->wr_hi[i] = hi > d->wr_hi[i] ? hi : d->wr_hi[i];
+        }
+    }
+}
+
+/* Everything drawn so far is in RDRAM: the core hears which ranges were written (bus.wrote; n64_rdram_wrote bumps
+ * its page counters, so recompiled code drawn over is checked again). Called on the CPU's thread only, after the
+ * pixels are written (a batch: once flushed), so the counters are never bumped before the bytes changed. */
+static void wrote_report(n64_rdp *d)
+{
+    for (int i = 0; i < 2; i++) {
+        if (d->wr_hi[i] > d->wr_lo[i] && d->bus.wrote)
+            d->bus.wrote(d->bus.ctx, d->wr_lo[i], d->wr_hi[i] - d->wr_lo[i]);
+        d->wr_lo[i] = d->wr_hi[i] = 0;
+    }
+}
+
 void n64_rdp_flush(n64_rdp *d)
 {
-    if (!d->nbatch)
+    if (!d->nbatch) {
+        wrote_report(d); /* one renderer: drawn already */
         return;
+    }
 #ifdef RDP_THREADS
     if (d->threads_up) {
         pthread_mutex_lock(&d->mu);
@@ -2425,6 +2466,7 @@ void n64_rdp_flush(n64_rdp *d)
     d->nbatch = 0;
     d->haz_lo = UINT32_MAX;
     d->haz_hi = 0;
+    wrote_report(d);
 }
 
 int n64_rdp_set_threads(n64_rdp *d, int n)
@@ -2545,7 +2587,7 @@ static void dispatch(n64_rdp *d, const uint64_t *w, int len)
     const int threaded = d->nthreads > 1;
     switch (id) {
     case 0x2F: d->fe_cycle = (int)(w0 >> 52) & 3; d->fe_zon = (w0 >> 4 & 3) != 0; break;
-    case 0x2D: d->fe_sc_y1 = (int)w0 & 0xFFF; break;
+    case 0x2D: d->fe_sc_y0 = (int)(w0 >> 32) & 0xFFF; d->fe_sc_y1 = (int)w0 & 0xFFF; break;
     case 0x3D:
         d->fe_ti_size = (int)(w0 >> 51) & 3;
         d->fe_ti_width = (int)((w0 >> 32) & 0x3FF) + 1;
@@ -2574,6 +2616,12 @@ static void dispatch(n64_rdp *d, const uint64_t *w, int len)
         }
         break;
     default: break;
+    }
+    if (draw) {
+        if (id <= 0x0F) /* a triangle: YH (top) and YL (bottom), s11.2 */
+            wrote_add(d, sext((uint32_t)w0 & 0x3FFF, 14) >> 2, sext((uint32_t)(w0 >> 32) & 0x3FFF, 14) >> 2);
+        else /* a rectangle: YH (top) and YL (bottom), 10.2; one row more for the fill / copy modes' inclusive edge */
+            wrote_add(d, (int)(w0 & 0xFFF) >> 2, ((int)(w0 >> 32) & 0xFFF) / 4 + 1);
     }
     if (threaded && draw) {
         uint32_t stride = ((uint32_t)d->fe_ci_width << d->fe_ci_size) >> 1;
@@ -2674,8 +2722,10 @@ void n64_rdp_reset(n64_rdp *d)
     d->fe_ci_addr = d->fe_zi_addr = d->fe_ti_addr = 0;
     d->fe_ti_size = 0;
     d->fe_ti_width = 1;
+    d->fe_sc_y0 = 0;
     d->fe_sc_y1 = 0xFFF;
     d->fe_zon = 0;
+    d->wr_lo[0] = d->wr_hi[0] = d->wr_lo[1] = d->wr_hi[1] = 0;
     d->haz_lo = UINT32_MAX;
     d->haz_hi = 0;
     memset(d->hidden, 0, d->bus.rdram_size / 2 + 1);
@@ -2759,4 +2809,6 @@ void n64_rdp_run(n64_rdp *d)
             d->npend = 0;
         }
     }
+    if (!d->nbatch)
+        wrote_report(d); /* drawn (one renderer, or the batch flushed): the core hears it before the CPU runs on */
 }
