@@ -210,6 +210,8 @@ error red); `xrecomp-check` holds the tokens equal to the Java array and checks 
 
 Manage › **Create an app for this game** makes `<Game title>.app` (a save panel, `~/Applications` by default, made
 when missing): an app of its own for the Dock, Launchpad or Spotlight that opens straight on that game.
+Only for a prepared game (playable, as on Android): before that the row says « Prepare this game first » and
+**Create app…** is dimmed.
 
 - **What it is**: a copy of the running `XRecomp.app` (`Bundle.main.bundleURL`; from `swift run` there is no bundle
   and the app says so) with a rewritten `Info.plist`: `CFBundleName` and `CFBundleDisplayName` = the game title,
@@ -424,6 +426,8 @@ For Alex, on the Mac (agents cannot click through Finder):
 
 Game apps ([Game apps](#game-apps)), with `macos/build/XRecomp.app` opened from Finder:
 
+10b. A game not prepared yet › Manage: « Create an app for this game » says « Prepare this game first » and **Create
+    app…** is dimmed.
 11. `swift run --package-path macos XRecomp --demo manage`: the « Create an app for this game » row is last in More;
     `--demo single` opens straight on Sample Racer's Home with the « … » menu and no sidebar; `--demo
     single-missing` shows « This game is not in your library ».

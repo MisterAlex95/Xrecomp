@@ -370,7 +370,8 @@ Code: `PackHandover` (both sides), `PackHandoverActivity` and `PackProvider` (XR
 **When the game's app asks.** At its launcher's start, once per process, when it has no valid pack for its title
 (manifest meta-data `TITLE_ID`) or a valid one lifted by another toolkit than its own (`toolkit_sha256` against
 `prepare/toolkit.zip.id`, [When a pack is stale](#when-a-pack-is-stale)); not while its own Prepare runs or waits,
-nor while its game runs.
+nor while its game runs. On its way into the game it also asks when its game's files are not usable yet: XRecomp
+then says where they are.
 A stale pack of its own that XRecomp did not replace: it asks again only after XRecomp was updated (its
 `lastUpdateTime`, kept in the `handover` preferences). « Open the game directly » or a shortcut that starts a
 playable game skips the launcher, and so the question, until the launcher shows.
@@ -385,9 +386,14 @@ playable game skips the launcher, and so the question, until the launcher shows.
    finishes at once with its answer: the player sees nothing of XRecomp.
 3. Accepted: `RESULT_OK`, extras `HANDOVER_FILES` (file names, `pack.json` first, then `lib`, then the `images`),
    `HANDOVER_SIZES`, one URI per file in the `ClipData` (`content://<XRecomp's package>.packs/<TITLEID>/<file>`) and
-   `FLAG_GRANT_READ_URI_PERMISSION`. Refused: `RESULT_CANCELED` with `HANDOVER_REFUSAL` = the reason.
-4. The game's app copies (below) on a worker thread; Home shows « Copying the prepared game from XRecomp… 42 % » and a
-   dimmed « Copying… » instead of « Needs preparing » / Prepare (Play and Prepare wait while it copies), then Play.
+   `FLAG_GRANT_READ_URI_PERMISSION`. Refused: `RESULT_CANCELED` with `HANDOVER_REFUSAL` = the reason. To a caller
+   that passed the checks (accepted, or refused with `NO_PACK` only), also where XRecomp reads the game from:
+   `HANDOVER_GAME_KIND` (`FOLDER`, `IMAGE`, `NOT_SHARED`) and `HANDOVER_GAME_PATH` (an absolute path; none for
+   `NOT_SHARED`: XRecomp's imported copy, an image reached by document grant, a path in XRecomp's own storage), so
+   the game's app reads the same files in place ([app-shell.md « Straight into the game »](app-shell.md#straight-into-the-game)).
+4. The game's app copies (below) on a worker thread, its progress on its one screen (« Copying the prepared game from
+   XRecomp… 42 % »), then its game starts. Opened through the « Launcher » shortcut, Home shows the copy instead
+   (a dimmed « Copying… »; Play and Prepare wait), then Play.
 
 **Security model.** XRecomp hands its pack only to a caller that Android names and that it can check:
 

@@ -1,6 +1,7 @@
 package fr.adserver.xboxrecomp;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
@@ -33,12 +34,14 @@ import org.robolectric.shadows.ShadowActivity;
 import org.robolectric.shadows.ShadowEnvironment;
 
 import java.io.File;
+import java.time.Duration;
 
 /**
- * A game's own app at its start (XBA-176, docs/android/prepare.md « Handing a pack to a game's own app »): it asks
- * XRecomp for its pack, Home says « Copying the prepared game from XRecomp… » instead of « Needs preparing », then
- * Play; XRecomp missing, without a pack or refusing: the normal Prepare, with a note saying why. XRecomp itself asks
- * nobody. Synthetic XBE and packs only.
+ * A game's own app at its start (XBA-176, docs/android/prepare.md « Handing a pack to a game's own app »; app-shell.md
+ * « Straight into the game »): it asks XRecomp for its pack on its one screen (DIRECT), copies it with its progress on
+ * the line, then the game starts by itself; XRecomp missing, without a pack, refusing or a damaged copy: the Prepare
+ * starts by itself on the same screen, saying why, and the game starts when it is done. XRecomp itself asks nobody.
+ * Synthetic XBE and packs only.
  */
 @RunWith(RobolectricTestRunner.class)
 @Config(sdk = 34, qualifiers = "w1920dp-h1080dp-land-mdpi")
@@ -113,7 +116,7 @@ public class LauncherPackHandoverTest {
     /** What the parent answers with its pack (as PackHandover.serve would, its URIs on PARENT.packs). */
     private Intent parentAnswer() throws Exception {
         org.json.JSONObject m = PackHandoverTest.writePack(parentFiles, TID, 50_000, 21, null, false);
-        // Built from this very default.xbe (Home compares them once it has hashed it).
+        // Built from this very default.xbe (the launcher compares them once it has hashed it).
         m.put("xbe_sha256", PackHandoverTest.sha256(TestSupport.xbe(0x4D530004, "Sample Game")));
         TestSupport.write(new File(Pack.packDir(parentFiles, TID), "pack.json"), m.toString());
         Robolectric.setupContentProvider(PackProvider.class, PARENT + PackProvider.AUTHORITY_SUFFIX);
@@ -145,6 +148,44 @@ public class LauncherPackHandoverTest {
         return r;
     }
 
+    /** a asked the parent for its pack (an activity started for REQ_PACK_HANDOVER); the requests are used up. */
+    static boolean askedParent(Activity a) {
+        boolean asked = false;
+        ShadowActivity.IntentForResult r;
+        while ((r = shadowOf(a).getNextStartedActivityForResult()) != null)
+            asked |= r.requestCode == LauncherActivity.REQ_PACK_HANDOVER;
+        return asked;
+    }
+
+    /** The game was started (ShellActivity among the activities a started), and a is finishing. */
+    static void assertGameStarted(Activity a) {
+        Intent i;
+        boolean shell = false;
+        while ((i = shadowOf(a).getNextStartedActivity()) != null)
+            shell |= i.getComponent() != null && ShellActivity.class.getName().equals(i.getComponent().getClassName());
+        assertTrue("ShellActivity was started", shell);
+        assertTrue("the launcher is gone", a.isFinishing());
+    }
+
+    static void assertGameNotStarted(Activity a) {
+        Intent i;
+        while ((i = shadowOf(a).getNextStartedActivity()) != null)
+            assertFalse("ShellActivity was not started", i.getComponent() != null
+                        && ShellActivity.class.getName().equals(i.getComponent().getClassName()));
+        assertFalse(a.isFinishing());
+    }
+
+    /** The Prepare ends well: a valid pack and a « done » status, then the DIRECT screen's poll sees it. */
+    private void prepareDone() throws Exception {
+        TestSupport.writePack(app.getFilesDir(), TID, 1000);
+        PrepareProtocol.Status s = new PrepareProtocol.Status();
+        s.state = PrepareProtocol.DONE;
+        s.titleId = TID;
+        s.startedAt = s.updatedAt = System.currentTimeMillis();
+        PrepareProtocol.writeStatus(PrepareService.statusFile(app, TID), s);
+        shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(1200));
+    }
+
     private File shot(LauncherActivity a, String name) throws Exception {
         View root = a.getWindow().getDecorView();
         shadowOf(Looper.getMainLooper()).idle();
@@ -157,33 +198,34 @@ public class LauncherPackHandoverTest {
         parentInstalled();
         LauncherActivity a = launch();
         ShadowActivity.IntentForResult r = asked(a);
-        assertEquals(LauncherActivity.Screen.HOME, a.screenForTest());
+        // The game app's one screen, no Home: XRecomp is being asked.
+        assertEquals(LauncherActivity.Screen.DIRECT, a.screenForTest());
+        assertEquals(LauncherActivity.Direct.WAIT, a.directStateForTest());
+        assertNull("no button", a.directPrimaryForTest());
 
         shadowOf(a).receiveResult(r.intent, Activity.RESULT_OK, parentAnswer());
-        // Copying: Home says so instead of « Needs preparing », its button dimmed.
-        assertEquals(app.getString(R.string.HANDOVER_COPYING_BUTTON), a.homePrimaryForTest().title);
-        assertEquals(app.getString(R.string.HANDOVER_COPYING_NOTE), a.noteForTest());
+        // Copying: the one line says so, with its percentage.
+        assertEquals(LauncherActivity.Direct.COPYING, a.directStateForTest());
+        assertTrue(a.directLineForTest(), a.directLineForTest().startsWith(
+                app.getString(R.string.HANDOVER_COPYING, 0).replace("0 %", "")));
         shot(a, "1-copying");
-        // Play while copying waits.
-        a.homePrimaryForTest().performClick();
-        assertEquals(app.getString(R.string.HANDOVER_BUSY), a.noteForTest());
 
         Thread w = a.handoverWorkerForTest();
         assertNotNull(w);
         w.join(20_000);
         shadowOf(Looper.getMainLooper()).idle();
         assertEquals(Pack.Check.VALID, Pack.check(app.getFilesDir(), TID));
-        assertNull("Home offers Play", a.homePrepForTest());
-        assertEquals(app.getString(R.string.PLAY), a.homePrimaryForTest().title);
-        assertEquals(app.getString(R.string.HANDOVER_DONE), a.noteForTest());
         // The parent's Enhancements choice came with its pack (title_layer off).
         assertTrue(!GameStore.enhancements(app, TID));
-        shot(a, "2-copied");
+        // Then the game, by itself.
+        assertGameStarted(a);
 
-        // A later start has a current pack: the parent is not asked again.
+        // A later start has a current pack: the parent is not asked again, the game starts with no screen.
         LauncherActivity.handoverAsked = false;
         LauncherActivity b = launch();
-        assertNull(shadowOf(b).getNextStartedActivityForResult());
+        assertNull("nothing was shown", b.screenForTest());
+        assertGameStarted(b);
+        assertFalse(askedParent(b));
     }
 
     @Test
@@ -195,18 +237,30 @@ public class LauncherPackHandoverTest {
         shadowOf(a).receiveResult(r.intent, Activity.RESULT_CANCELED,
                                   new Intent().putExtra(PackHandover.EXTRA_REFUSAL, "NO_PACK"));
         shadowOf(Looper.getMainLooper()).idle();
-        assertEquals(LauncherActivity.Prep.NEEDED, a.homePrepForTest());
-        assertEquals(app.getString(R.string.HANDOVER_NO_PACK), a.noteForTest());
+        // The Prepare starts by itself, on the same screen, saying why.
+        assertEquals(LauncherActivity.Direct.PREPARING, a.directStateForTest());
+        assertTrue(a.directDetailForTest(), a.directDetailForTest().startsWith(app.getString(R.string.HANDOVER_NO_PACK)));
+        Intent svc = shadowOf(app).getNextStartedService();
+        assertNotNull("the Prepare was started", svc);
+        assertEquals(PrepareService.class.getName(), svc.getComponent().getClassName());
         shot(a, "3-no-pack");
+        assertGameNotStarted(a);
+        // Done: the game starts by itself.
+        prepareDone();
+        assertGameStarted(a);
+    }
 
-        // Any other refusal says which.
-        LauncherActivity.handoverAsked = false;
+    @Test
+    public void aRefusalSaysWhichAndPrepares() throws Exception {
+        asGameApp();
+        parentInstalled();
         LauncherActivity b = launch();
         shadowOf(b).receiveResult(asked(b).intent, Activity.RESULT_CANCELED,
                                   new Intent().putExtra(PackHandover.EXTRA_REFUSAL, "WRONG_CERT"));
         shadowOf(Looper.getMainLooper()).idle();
-        assertEquals(LauncherActivity.Prep.NEEDED, b.homePrepForTest());
-        assertEquals(app.getString(R.string.HANDOVER_REFUSED, "WRONG_CERT"), b.noteForTest());
+        assertEquals(LauncherActivity.Direct.PREPARING, b.directStateForTest());
+        assertTrue(b.directDetailForTest(),
+                   b.directDetailForTest().startsWith(app.getString(R.string.HANDOVER_REFUSED, "WRONG_CERT")));
     }
 
     @Test
@@ -222,25 +276,46 @@ public class LauncherPackHandoverTest {
         a.handoverWorkerForTest().join(20_000);
         shadowOf(Looper.getMainLooper()).idle();
         assertEquals(Pack.Check.NO_PACK, Pack.check(app.getFilesDir(), TID));
-        assertEquals(LauncherActivity.Prep.NEEDED, a.homePrepForTest());
-        assertTrue(a.noteForTest(), a.noteForTest().startsWith(app.getString(R.string.HANDOVER_FAILED, "")
-                                                                  .substring(0, 20)));
+        assertEquals(LauncherActivity.Direct.PREPARING, a.directStateForTest());
+        assertTrue(a.directDetailForTest(), a.directDetailForTest().startsWith(
+                app.getString(R.string.HANDOVER_FAILED, "").substring(0, 20)));
+    }
+
+    @Test
+    public void aFailedPrepareOffersPrepareAgainAndTheLog() throws Exception {
+        asGameApp();
+        LauncherActivity a = launch();
+        assertEquals(LauncherActivity.Direct.PREPARING, a.directStateForTest());
+        PrepareProtocol.Status s = new PrepareProtocol.Status();
+        s.state = PrepareProtocol.FAILED;
+        s.code = "COMPILE_FAILED";
+        s.msg = "clang: error";
+        s.titleId = TID;
+        s.startedAt = s.updatedAt = System.currentTimeMillis();
+        PrepareProtocol.writeStatus(PrepareService.statusFile(app, TID), s);
+        shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(1200));
+        assertEquals(LauncherActivity.Direct.ERROR, a.directStateForTest());
+        assertTrue(a.directLineForTest(), a.directLineForTest().endsWith("COMPILE_FAILED"));
+        assertEquals(app.getString(R.string.PREPARE_AGAIN), a.directPrimaryForTest().title);
+        shot(a, "4-prepare-failed");
+        assertGameNotStarted(a);
     }
 
     @Test
     public void withoutXRecompTheAppPreparesItself() throws Exception {
         asGameApp();
         LauncherActivity a = launch();
-        assertNull(shadowOf(a).getNextStartedActivityForResult());
-        assertEquals(LauncherActivity.Prep.NEEDED, a.homePrepForTest());
-        assertEquals(app.getString(R.string.HANDOVER_NO_PARENT), a.noteForTest());
+        assertFalse(askedParent(a));
+        assertEquals(LauncherActivity.Direct.PREPARING, a.directStateForTest());
+        assertTrue(a.directDetailForTest(), a.directDetailForTest().startsWith(app.getString(R.string.HANDOVER_NO_PARENT)));
     }
 
     @Test
     public void xrecompItselfAsksNobody() throws Exception {
         parentInstalled();
         LauncherActivity a = launch();
-        assertNull(shadowOf(a).getNextStartedActivityForResult());
+        assertFalse(askedParent(a));
+        assertEquals(LauncherActivity.Screen.HOME, a.screenForTest());
         assertEquals(LauncherActivity.Prep.NEEDED, a.homePrepForTest());
     }
 }

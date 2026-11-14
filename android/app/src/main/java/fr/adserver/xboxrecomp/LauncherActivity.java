@@ -139,7 +139,9 @@ public class LauncherActivity extends Activity {
 
     enum Screen {
         WELCOME, SOURCE, FOLDER_ACCESS, IMPORT, HOME, SETTINGS, CONTROLS, GAME_DATA, ABOUT, LICENCES, PREPARE, LIBRARY,
-        STORAGE
+        STORAGE,
+        /** A game's own app on its way into the game: its art, its title, one line, at most one action (gameApp). */
+        DIRECT
     }
 
     /** The Preparing screen dims after this long without input (OLED burn-in); any key or touch wakes it. */
@@ -264,6 +266,8 @@ public class LauncherActivity extends Activity {
 
     // ---- Import ----
     private Thread worker;
+    /** From runWorker until its onWorkerDone (the thread may be over, its outcome not yet handled). */
+    private boolean workerBusy;
     private volatile boolean cancelRequested;
     private long lastUiUpdate;
     private int importLabel;
@@ -379,6 +383,12 @@ public class LauncherActivity extends Activity {
                                && !selectShortcutTitle(in.getStringExtra(EXTRA_TITLE_ID));
         if (badPack != null && savedInstanceState == null)
             dropBadPack(badPack);
+        // A game's own app: its icon goes into the game (the DIRECT screen while something is needed first).
+        direct = ownTid() != null && !change && !showLauncher;
+        if (direct) {
+            startDirect(savedInstanceState, noData, badPack, exited);
+            return;
+        }
         boolean switchWarn = false;
         if (playTitle && !shortcutGone && savedInstanceState == null && shortcutPlayable()) {
             // Played as « Open the game directly » would: brought back when it runs, started when nothing runs.
@@ -728,7 +738,7 @@ public class LauncherActivity extends Activity {
 
     /** The hero backdrop shows on Home and Preparing only; every other screen has the plain gradient and one glow. */
     private Bitmap heroFor(Screen s) {
-        return s == Screen.HOME || s == Screen.PREPARE ? hero : null;
+        return s == Screen.HOME || s == Screen.PREPARE || s == Screen.DIRECT ? hero : null;
     }
 
     /** The top bar: shown with the screen's title, or hidden (Home, Preparing: the game's title is the heading). */
@@ -832,6 +842,15 @@ public class LauncherActivity extends Activity {
             armCancelPrepare();
             return;
         }
+        if (screen == Screen.DIRECT) {   // a game's own app: back to Android (a Prepare goes on in its service)
+            finish();
+            return;
+        }
+        if (direct && history.peek() == Screen.DIRECT) {   // from the game choice: where things stand now
+            history.pop();
+            directStep(true);
+            return;
+        }
         if (history.isEmpty()) {
             if (screen != Screen.LIBRARY && screen != Screen.WELCOME && libraryOn()) {
                 show(Screen.LIBRARY, -1);   // Home of a library game: back to the library
@@ -880,7 +899,7 @@ public class LauncherActivity extends Activity {
         xAction = yAction = startAction = l1Action = r1Action = null;
         topRight.setText("");
         topTabs.removeAllViews();
-        setTopBar(s != Screen.HOME && s != Screen.PREPARE);
+        setTopBar(s != Screen.HOME && s != Screen.PREPARE && s != Screen.DIRECT);
         contextText = "";
         deleteArmedAt = 0;
         storageArmedKey = null;
@@ -895,6 +914,7 @@ public class LauncherActivity extends Activity {
         homePrimary = null;
         homeStatus = null;
         homeChip = null;
+        directStatus = null;
         switchArmedAt = 0;
         libCards.clear();
         libCaption = null;
@@ -939,6 +959,9 @@ public class LauncherActivity extends Activity {
             break;
         case STORAGE:
             buildStorage();
+            break;
+        case DIRECT:
+            buildDirect();
             break;
         }
         restoreFocus(false);
@@ -1575,6 +1598,10 @@ public class LauncherActivity extends Activity {
      * the game's title (Display) over a column the screen fills (returned). No top bar: the title is the heading.
      */
     private LinearLayout hero(String title, boolean empty) {
+        return hero(title, empty, art);
+    }
+
+    private LinearLayout hero(String title, boolean empty, Bitmap art) {
         LinearLayout hero = rowLayout();
         hero.setGravity(Gravity.CENTER_VERTICAL);
         Widgets.ArtTile tile = new Widgets.ArtTile(this);
@@ -1978,8 +2005,9 @@ public class LauncherActivity extends Activity {
         List<RecompConfig.Option> shown = RecompConfig.shownOptions(lsfgBuilt());
         lsfgOff = lsfgForcedOff();
         if (settingsTab == TAB_GENERAL) {
-            launcherToggle(list, R.string.OPEN_DIRECTLY, R.string.OPEN_DIRECTLY_DETAIL, GameStore::autoStart,
-                           GameStore::setAutoStart, R.string.OPEN_DIRECTLY_ON, R.string.OPEN_DIRECTLY_OFF);
+            if (TitleApp.ownTitleId(this) == null)   // a game's own app always goes straight into its game
+                launcherToggle(list, R.string.OPEN_DIRECTLY, R.string.OPEN_DIRECTLY_DETAIL, GameStore::autoStart,
+                               GameStore::setAutoStart, R.string.OPEN_DIRECTLY_ON, R.string.OPEN_DIRECTLY_OFF);
             launcherToggle(list, R.string.UI_SOUND, R.string.UI_SOUND_DETAIL, GameStore::uiSound,
                            GameStore::setUiSound, R.string.UI_SOUND_ON, R.string.UI_SOUND_OFF);
             launcherToggle(list, R.string.UI_HAPTICS, R.string.UI_HAPTICS_DETAIL, GameStore::uiHaptics,
@@ -2388,11 +2416,17 @@ public class LauncherActivity extends Activity {
             listRow(list, getString(R.string.SHORTCUT_ADD), getString(R.string.SHORTCUT_ADD_DETAIL),
                     () -> onAddShortcut(pinTid));
         // A game's own app (TitleApp, TitleApk): the same title ID rule; not in a game's own app itself, nor from a
-        // split install (nothing to copy).
+        // split install (nothing to copy). Only for a prepared game: the app takes this pack over at its first start
+        // (PackHandover) and goes straight into the game; before that the row says to prepare first.
         File template = pinTid != null && TitleApp.ownTitleId(this) == null ? TitleApp.template(this) : null;
-        if (template != null)
-            listRow(list, getString(R.string.TITLE_APP_ADD),
-                    getString(R.string.TITLE_APP_ADD_DETAIL, size(template.length())), () -> onCreateApp(pinTid));
+        if (template != null) {
+            if (prepared(pinTid))
+                listRow(list, getString(R.string.TITLE_APP_ADD),
+                        getString(R.string.TITLE_APP_ADD_DETAIL, size(template.length())), () -> onCreateApp(pinTid));
+            else
+                listRow(list, getString(R.string.TITLE_APP_ADD), getString(R.string.TITLE_APP_ADD_UNPREPARED),
+                        this::notePrepareFirst);
+        }
 
         if (dir != null && ownedCopy(dir)) {
             MenuRow del = listRow(list, getString(R.string.DELETE_COPY), getString(R.string.DELETE_COPY_DETAIL, dir),
@@ -2437,12 +2471,26 @@ public class LauncherActivity extends Activity {
         setNote(getString(ok ? R.string.SHORTCUT_REQUESTED : R.string.SHORTCUT_REFUSED), ok ? NOTE_OK : NOTE_ERROR);
     }
 
+    /** tid has a valid pack built from the selected game's default.xbe: what « Create an app » needs. */
+    private boolean prepared(String tid) {
+        return Pack.check(getFilesDir(), tid) == Pack.Check.VALID && packMatchesSelected(tid);
+    }
+
+    private void notePrepareFirst() {
+        Log.i(TAG, "launcher: game app: not prepared, nothing built");
+        setNote(getString(R.string.TITLE_APP_PREPARE_FIRST, gameTitle(gameDir())), NOTE_WARN);
+    }
+
     /**
      * Manage › Create an app (docs/android/app-shell.md « A game's own app »): this APK copied as the game's own
      * app (TitleApk), behind the progress screen, then handed to Android's installer, whose confirmation
      * TitleAppReceiver shows. Without « Install unknown apps » for this app, its settings screen first.
      */
     private void onCreateApp(String tid) {
+        if (!prepared(tid)) {   // the pack went away since Manage was built
+            notePrepareFirst();
+            return;
+        }
         if (!TitleApp.canInstall(this)) {
             Log.i(TAG, "launcher: game app: Install unknown apps is off, opening its settings");
             setNote(getString(R.string.TITLE_APP_ALLOW), NOTE_WARN);
@@ -2715,51 +2763,92 @@ public class LauncherActivity extends Activity {
      * parent was updated.
      */
     private void askParentForPack() {
+        long parentUpdated = parentToAsk();
         String tid = ownTid(), parent = TitleApp.ownParent(this);
-        if (tid == null || parent == null || handoverAsked || handover != null)
-            return;
-        if (!PackHandover.wanted(getFilesDir(), tid, Toolchain.toolkitDigest(this)))
-            return;
-        PrepareProtocol.Status s = PrepareProtocol.readStatus(PrepareService.statusFile(this, tid));
-        if (statusAlive(s) || (s != null && s.queued() && prepareProcessAlive()))
-            return;
-        if (gameRunning())   // its pack is loaded: replaced at a later start
-            return;
-        boolean ownValid = Pack.check(getFilesDir(), tid) == Pack.Check.VALID;
-        long parentUpdated;
-        try {
-            parentUpdated = getPackageManager().getPackageInfo(parent, 0).lastUpdateTime;
-        } catch (PackageManager.NameNotFoundException e) {
+        boolean ownValid = tid != null && Pack.check(getFilesDir(), tid) == Pack.Check.VALID;
+        if (parentUpdated == PARENT_MISSING) {
             handoverAsked = true;
             Log.i(TAG, "launcher: pack handover: " + parent + " is not installed");
             if (!ownValid)
                 handoverNote(getString(R.string.HANDOVER_NO_PARENT), NOTE_INFO);
             return;
         }
-        if (ownValid && parentUpdated == getSharedPreferences(HANDOVER_PREFS, MODE_PRIVATE).getLong(HANDOVER_DECLINED, -2))
+        if (parentUpdated < 0)
             return;
+        boolean filesWanted = direct && state() != State.READY;
         handoverAsked = true;
         handoverParentUpdated = parentUpdated;
         Intent i = new Intent(PackHandover.ACTION).setClassName(parent, PackHandover.ACTIVITY)
                 .putExtra(PackHandover.EXTRA_TITLE_ID, tid);
         try {
+            handoverWaiting = true;
             startActivityForResult(i, REQ_PACK_HANDOVER);
             overridePendingTransition(0, 0);
             Log.i(TAG, "launcher: pack handover: asking " + parent + " for " + tid
-                       + (ownValid ? " (this app's pack is from another toolkit)" : " (no pack here)"));
+                       + (ownValid ? filesWanted ? " (where its files are)" : " (this app's pack is from another toolkit)"
+                                   : " (no pack here)"));
         } catch (ActivityNotFoundException | SecurityException e) {
+            handoverWaiting = false;
             Log.w(TAG, "launcher: pack handover: cannot ask " + parent + ": " + e);
             if (!ownValid)
                 handoverNote(getString(R.string.HANDOVER_REFUSED, e.getClass().getSimpleName()), NOTE_WARN);
         }
     }
 
+    /** parentToAsk(): the parent is not installed. */
+    private static final long PARENT_MISSING = -2;
+
+    /**
+     * Whether the parent is to be asked now, without asking it: its lastUpdateTime when it is, PARENT_MISSING when it is
+     * not installed (askParentForPack then says so once), -1 otherwise. Asked once per process, for a pack (none here,
+     * or one from another toolkit than this app's, not while this app's own Prepare runs nor the game runs; a stale
+     * pack of its own that the parent did not replace: only after the parent was updated) or, on the way into the
+     * game (direct), for where the game's files are when this app cannot read them yet.
+     */
+    private long parentToAsk() {
+        String tid = ownTid(), parent = TitleApp.ownParent(this);
+        if (tid == null || parent == null || handoverAsked || handover != null)
+            return -1;
+        boolean filesWanted = direct && state() != State.READY;
+        if (!filesWanted && !PackHandover.wanted(getFilesDir(), tid, Toolchain.toolkitDigest(this)))
+            return -1;
+        PrepareProtocol.Status s = PrepareProtocol.readStatus(PrepareService.statusFile(this, tid));
+        if (!filesWanted && (statusAlive(s) || (s != null && s.queued() && prepareProcessAlive())))
+            return -1;
+        if (gameRunning())   // its pack is loaded: replaced at a later start
+            return -1;
+        long parentUpdated;
+        try {
+            parentUpdated = getPackageManager().getPackageInfo(parent, 0).lastUpdateTime;
+        } catch (PackageManager.NameNotFoundException e) {
+            return PARENT_MISSING;
+        }
+        boolean ownValid = Pack.check(getFilesDir(), tid) == Pack.Check.VALID;
+        if (!filesWanted && ownValid
+            && parentUpdated == getSharedPreferences(HANDOVER_PREFS, MODE_PRIVATE).getLong(HANDOVER_DECLINED, -2))
+            return -1;
+        return Math.max(0, parentUpdated);
+    }
+
     /** The parent's answer: an offer to copy, or a refusal (a note when this app has nothing to play). */
     private void onHandoverAnswer(int resultCode, Intent data) {
+        handoverWaiting = false;
         String tid = ownTid(), parent = TitleApp.ownParent(this);
         if (tid == null || parent == null || handover != null)
             return;
+        // Where the parent reads the game from (told with the pack or the NO_PACK refusal): kept for the files step.
+        PackHandover.GameSource src = PackHandover.sourceOf(data);
+        if (src != null) {
+            Log.i(TAG, "launcher: pack handover: " + parent + " reads the game from " + src);
+            saveSource(src);
+        }
         PackHandover.Offer offer = resultCode == RESULT_OK ? PackHandover.offer(data, parent, tid) : null;
+        if (offer != null && !PackHandover.wanted(getFilesDir(), tid, Toolchain.toolkitDigest(this))) {
+            Log.i(TAG, "launcher: pack handover: this app's pack is current, not copying");
+            if (direct)
+                directStep();
+            return;
+        }
         if (offer == null) {
             String r = data == null ? null : data.getStringExtra(PackHandover.EXTRA_REFUSAL);
             Log.w(TAG, "launcher: pack handover: " + parent + " refused: "
@@ -2769,6 +2858,8 @@ public class LauncherActivity extends Activity {
                 handoverNote(PackHandover.Refusal.NO_PACK.name().equals(r) ? getString(R.string.HANDOVER_NO_PACK)
                              : getString(R.string.HANDOVER_REFUSED, r != null ? r : "?"),
                              PackHandover.Refusal.NO_PACK.name().equals(r) ? NOTE_INFO : NOTE_WARN);
+            if (direct)
+                directStep();
             return;
         }
         Log.i(TAG, "launcher: pack handover: " + parent + " offers " + offer.uris.keySet() + ", " + offer.total()
@@ -2776,7 +2867,9 @@ public class LauncherActivity extends Activity {
         Handover h = new Handover(offer.titleId, offer.total());
         handover = h;
         handoverNoteText = null;
-        if (screen == Screen.HOME)
+        if (direct)
+            directStep();
+        else if (screen == Screen.HOME)
             show(Screen.HOME, 0);
         else   // the first start's game choice: the copy goes on behind it
             setNote(getString(R.string.HANDOVER_COPYING_NOTE), NOTE_INFO);
@@ -2808,6 +2901,8 @@ public class LauncherActivity extends Activity {
     private void handoverProgress(Handover h) {
         if (handover == h && screen == Screen.HOME && homeStatus != null)
             homeStatus.set(getString(R.string.HANDOVER_COPYING, h.pct()), Theme.ACCENT);
+        if (handover == h && screen == Screen.DIRECT && directStatus != null && directState == Direct.COPYING)
+            directStatus.set(getString(R.string.HANDOVER_COPYING, h.pct()), Theme.ACCENT);
     }
 
     private void handoverDone(Handover h, PackHandover.Result r) {
@@ -2829,8 +2924,11 @@ public class LauncherActivity extends Activity {
             kind = NOTE_OK;
             break;
         case NOT_NEWER:
-        case CANCELLED:
             handoverDeclined();
+            break;
+        case CANCELLED:   // the app was left during the copy: asked again at its next start
+            handoverDeclined();
+            handoverAsked = false;
             break;
         case UNFIT:
             note = getString(R.string.HANDOVER_UNFIT);
@@ -2859,6 +2957,11 @@ public class LauncherActivity extends Activity {
             handoverNote(note, kind);
         else if (screen == Screen.HOME)
             refreshKeepingFocus();
+        if (direct && !isFinishing()) {
+            if (r.outcome == PackHandover.Outcome.COPIED)
+                handoverNoteText = null;   // straight into the game: nothing to read
+            directStep();
+        }
     }
 
     /** The parent did not replace this app's stale pack: not asked again until it is updated. */
@@ -2876,6 +2979,370 @@ public class LauncherActivity extends Activity {
             show(Screen.HOME, 0);
         else
             setNote(text, kind);
+    }
+
+    // ---- A game's own app, straight into the game (docs/android/app-shell.md « Straight into the game ») ---------
+
+    /**
+     * What DIRECT shows on a game's own app's way into the game: XRecomp being asked, its pack being copied, the
+     * Prepare, All files access asked (to read the files XRecomp uses), those files being checked, the game to choose,
+     * or an error with the one action that fixes it.
+     */
+    enum Direct { WAIT, COPYING, PREPARING, ASK_ACCESS, CHECKING, CHOOSE, ERROR }
+
+    /** Where XRecomp reads the game from (its last answer: PackHandover.GameSource), in HANDOVER_PREFS. */
+    private static final String HANDOVER_GAME_KIND = "game_kind", HANDOVER_GAME_PATH = "game_path";
+
+    /**
+     * This launcher is a game's own app's way into the game: started from its icon (or a game's shortcut, or the game
+     * coming back), not from the « Launcher » shortcut. Home, the library and « Open the game directly » do not apply.
+     */
+    private boolean direct;
+    /** The parent was asked and has not answered yet. */
+    private boolean handoverWaiting;
+    private Direct directState;
+    private String directLine = "", directDetail;
+    private int directColor, directActionLabel;
+    private Runnable directAction;
+    private boolean directShareLog;
+    private Widgets.Chip directStatus;
+    private Widgets.PillButton directPrimary;
+    private Bitmap appArtBitmap;
+    /** The files XRecomp uses were tried in this activity and not accepted. */
+    private boolean directSourceFailed;
+    /** All files access was asked from DIRECT (once per activity); its answer goes on with the next step. */
+    private boolean directAccessAsked, directAccessPending;
+    /** DIRECT started the Prepare once by itself: a second start is the player's. */
+    private boolean directPrepareStarted;
+
+    Direct directStateForTest() {
+        return screen == Screen.DIRECT ? directState : null;
+    }
+
+    String directLineForTest() {
+        return directLine;
+    }
+
+    String directDetailForTest() {
+        return directDetail;
+    }
+
+    Widgets.PillButton directPrimaryForTest() {
+        return directPrimary;
+    }
+
+    /**
+     * onCreate of a game's own app (direct): the game running is brought back, a ready game starts with nothing shown;
+     * otherwise DIRECT, which asks XRecomp (pack, where the files are) and goes on step by step (directStep). The
+     * game's own reports (no game data, a pack the shell refused, the game ended) show there with their one action.
+     */
+    private void startDirect(Bundle saved, String noData, String badPack, String exited) {
+        String tid = ownTid();
+        if (games.get(tid) != null)
+            games.selected = tid;
+        boolean report = noData != null || badPack != null || exited != null;
+        if (saved == null && !report) {
+            if (gameRunning()) {
+                Log.i(TAG, "launcher: game app: the game is running, bringing it back");
+                resumeShell();
+                return;
+            }
+            if (parentToAsk() < 0 && directPlayable()) {
+                Log.i(TAG, "launcher: game app: ready, starting the game");
+                launchShell(false);
+                return;
+            }
+        }
+        Log.i(TAG, "launcher: game app: shown (" + (noData != null ? "NO_GAME_DATA in " + noData
+                                                    : badPack != null ? "pack refused: " + badPack
+                                                    : exited != null ? "game exited: " + exited
+                                                    : "getting the game ready") + ")");
+        setUpWindow();
+        feedback = new UiFeedback(this);
+        syncTheme(Screen.DIRECT);
+        buildStage();
+        if (noData != null)
+            directFail(getString(R.string.STATE_MISSING), getString(R.string.NO_GAME_DATA, noData),
+                       R.string.CHOOSE_AGAIN, this::directChoose, false);
+        else if (badPack != null)
+            directFail(getString(R.string.DIRECT_PACK_BAD), getString(R.string.PACK_BAD, badPack),
+                       R.string.PREPARE_AGAIN, this::directPrepare, false);
+        else if (exited != null)
+            directShow(Direct.ERROR, getString(R.string.DIRECT_ENDED), Theme.WARN, titleExitedNote(this, exited),
+                       R.string.PLAY, this::directRetry, false);
+        else {
+            askParentForPack();
+            directStep(true);
+        }
+    }
+
+    /** The game can start now: its files, no copy running, a pack from this default.xbe (or no Prepare here). */
+    private boolean directPlayable() {
+        if (state() != State.READY || copying(titleId()))
+            return false;
+        xbeChanged();   // hashes default.xbe once: a pack from another one is not playable
+        Prep p = prep();
+        return p == Prep.OFF || p == Prep.PLAYABLE;
+    }
+
+    private void directStep() {
+        directStep(false);
+    }
+
+    /**
+     * Where the way into the game stands, on DIRECT; the game starts as soon as nothing more is needed. Not while the
+     * player is on the game choice (force: coming back from it, or a game chosen there).
+     */
+    private void directStep(boolean force) {
+        if (!direct || isFinishing() || (!force && screen != null && screen != Screen.DIRECT))
+            return;
+        if (handoverWaiting) {
+            directShow(Direct.WAIT, getString(R.string.DIRECT_WAIT), Theme.ACCENT, null, 0, null, false);
+            return;
+        }
+        if (workerBusy) {
+            directShow(Direct.CHECKING, getString(importLabel == 0 ? R.string.CHECKING : importLabel), Theme.ACCENT,
+                       null, 0, null, false);
+            return;
+        }
+        State st = state();
+        if (st != State.READY) {
+            directFiles(st);
+            return;
+        }
+        String tid = titleId();
+        if (copying(tid)) {
+            directShow(Direct.COPYING, getString(R.string.HANDOVER_COPYING, handover.pct()), Theme.ACCENT, null, 0,
+                       null, false);
+            return;
+        }
+        if (directPlayable()) {
+            Log.i(TAG, "launcher: game app: ready, starting the game");
+            launchShell(false);
+            return;
+        }
+        Prep p = prep();
+        PrepareProtocol.Status ps = readPrepStatus();
+        switch (p) {
+        case RUNNING:
+            directShow(Direct.PREPARING, ps == null ? getString(R.string.PREPARE_STARTING) : progressLine(ps), Theme.OK,
+                       directPrepareDetail(), 0, null, false);
+            return;
+        case QUEUED:
+            directShow(Direct.PREPARING, queuedLabel(tid), Theme.ACCENT, directPrepareDetail(), 0, null, false);
+            return;
+        case FAILED:
+            directShow(Direct.ERROR, getString(R.string.CHIP_PREPARE_FAILED)
+                                     + (ps == null || ps.code.isEmpty() ? "" : " · " + ps.code),
+                       Theme.ERROR, ps == null || ps.msg.isEmpty() ? null : ps.msg, R.string.PREPARE_AGAIN,
+                       this::directPrepare, true);
+            return;
+        default:   // NEEDED, INTERRUPTED: started once by itself; CANCELLED (the player stopped it): their choice
+            if (!directPrepareStarted && p != Prep.CANCELLED) {
+                directPrepare();
+                return;
+            }
+            directShow(Direct.ERROR, getString(R.string.HOME_NEEDS_PREPARE, getString(R.string.CHIP_NEEDS_PREPARE),
+                                               estimate()),
+                       Theme.WARN, handoverNoteText, R.string.PREPARE, this::directPrepare, false);
+        }
+    }
+
+    /** Under the Prepare's line: why it prepares (the handover's note), then that the app may be left. */
+    private String directPrepareDetail() {
+        String leave = getString(R.string.DIRECT_PREPARE_LEAVE);
+        return handoverNoteText == null ? leave : handoverNoteText + " " + leave;
+    }
+
+    /**
+     * The game's files are not usable here yet: the files XRecomp uses (All files access asked once for them), else
+     * the game choice with a line saying why; an unreadable folder of its own asks for the access again.
+     */
+    private void directFiles(State st) {
+        if (st == State.NO_ACCESS) {   // its folder, All files access turned off since
+            directAskAccess(gameDir());
+            return;
+        }
+        if (st == State.WRONG) {
+            directFail(getString(R.string.STATE_WRONG), getString(R.string.WRONG_GAME_HOME), R.string.CHOOSE_AGAIN,
+                       this::directChoose, false);
+            return;
+        }
+        PackHandover.GameSource src = savedSource();
+        boolean usable = src != null && src.kind != PackHandover.GameKind.NOT_SHARED && !directSourceFailed;
+        boolean refused = false;
+        if (usable && !Environment.isExternalStorageManager()) {
+            if (!directAccessAsked) {
+                directAskAccess(src.path);
+                return;
+            }
+            usable = false;   // refused: the game choice (a copy, without the permission)
+            refused = true;
+        }
+        if (usable) {
+            directUseSource(src);
+            return;
+        }
+        if (st == State.MISSING) {
+            directFail(getString(R.string.STATE_MISSING), getString(R.string.GAME_FOLDER_GONE, gameDir()),
+                       R.string.CHOOSE_AGAIN, this::directChoose, false);
+            return;
+        }
+        int why = refused ? R.string.DIRECT_ACCESS_REFUSED
+                  : src != null && src.kind == PackHandover.GameKind.NOT_SHARED ? R.string.DIRECT_NOT_SHARED
+                  : directSourceFailed ? R.string.DIRECT_SOURCE_FAILED : R.string.DIRECT_CHOOSE;
+        directShow(Direct.CHOOSE, getString(R.string.DIRECT_CHOOSE_LINE), Theme.WARN, getString(why),
+                   R.string.CHOOSE_GAME, this::directChoose, false);
+    }
+
+    /** One line why, one button: the system page for All files access (its answer: directStep). */
+    private void directAskAccess(String path) {
+        directShow(Direct.ASK_ACCESS, getString(R.string.DIRECT_ACCESS_LINE), Theme.WARN,
+                   getString(R.string.DIRECT_ACCESS, path), R.string.ALL_FILES_GRANT, () -> {
+                       directAccessAsked = true;
+                       directAccessPending = true;
+                       Log.i(TAG, "launcher: game app: asking for All files access, to read " + path);
+                       askAllFilesAccess();
+                   }, false);
+    }
+
+    /**
+     * The files XRecomp uses, read in place: a folder checked as a picked one would be (default.xbe against the
+     * disc this app is locked to), an image as a picked one by path (its companion folder). Behind DIRECT's line.
+     */
+    private void directUseSource(PackHandover.GameSource src) {
+        File f = new File(src.path);
+        boolean folder = src.kind == PackHandover.GameKind.FOLDER;
+        Log.i(TAG, "launcher: game app: reading the game where XRecomp does: " + src);
+        if (folder ? GameStore.findXbe(f) == null : !f.isFile()) {
+            directSourceFailed = true;
+            directFail(getString(R.string.STATE_MISSING), getString(R.string.DIRECT_SOURCE_GONE, src.path),
+                       R.string.CHOOSE_GAME, this::directChoose, false);
+            return;
+        }
+        if (screen != Screen.DIRECT)
+            directShow(Direct.CHECKING, getString(R.string.CHECKING), Theme.ACCENT, null, 0, null, false);
+        if (folder)
+            runWorker(R.string.CHECKING, () -> checkInPlace(f));
+        else
+            runWorker(R.string.CHECKING, () -> importImage(null, null, f, false));
+    }
+
+    /** The normal game choice (folder or image); a game chosen there goes on into the game (onGameChosen). */
+    private void directChoose() {
+        pickLibrary = false;
+        go(Screen.SOURCE);
+    }
+
+    /** « Play » after the game ended by itself: the way into the game again. */
+    private void directRetry() {
+        directStep(true);
+    }
+
+    /** « Prepare » / « Prepare again » on DIRECT; a start refused (space, …) says why there. */
+    private void directPrepare() {
+        directPrepareStarted = true;
+        if (!startPrepare(false)) {
+            String why = noteText;
+            directShow(Direct.ERROR, getString(R.string.DIRECT_PREPARE_NOT_STARTED), Theme.ERROR,
+                       why.isEmpty() ? null : why, R.string.PREPARE, this::directPrepare, false);
+        }
+    }
+
+    private void directFail(String head, String detail, int actionLabel, Runnable action, boolean shareLog) {
+        directShow(Direct.ERROR, head, Theme.ERROR, detail, actionLabel, action, shareLog);
+    }
+
+    private void directShow(Direct st, String line, int color, String detail, int actionLabel, Runnable action,
+                            boolean shareLog) {
+        boolean same = screen == Screen.DIRECT;
+        directState = st;
+        directLine = line == null ? "" : line;
+        directColor = color;
+        directDetail = detail;
+        directActionLabel = actionLabel;
+        directAction = action;
+        directShareLog = shareLog;
+        if (st == Direct.ERROR)
+            Log.i(TAG, "launcher: game app: " + directLine + (detail == null ? "" : " (" + detail + ")"));
+        show(Screen.DIRECT, same ? 0 : 1);
+    }
+
+    /**
+     * DIRECT: Home's layout without its buttons, library or settings: the game's art (its title image, else this
+     * app's icon art) and title (else this app's name), one status line, a line under it when there is more to say,
+     * and the one action that moves things on when the player has to act (Share log beside a failed Prepare). B
+     * leaves the app (a Prepare goes on in its service).
+     */
+    private void buildDirect() {
+        boolean ready = state() == State.READY;
+        String title = ready ? gameTitle(gameDir()) : appLabel();
+        LinearLayout info = hero(title, false, art != null ? art : appArt());
+        View line = heroLine(info, directLine, directColor == 0 ? Theme.ACCENT : directColor);
+        directStatus = line instanceof Widgets.Chip ? (Widgets.Chip)line : null;
+        if (directDetail != null && !directDetail.isEmpty())
+            heroLine(info, directDetail, 0);
+        directPrimary = null;
+        if (directAction != null) {
+            LinearLayout buttons = heroButtons(info);
+            Runnable act = directAction;
+            directPrimary = pill(buttons, directActionLabel == R.string.PLAY ? Icon.PLAY : null,
+                                 getString(directActionLabel), true, act);
+            if (directShareLog)
+                pill(buttons, null, getString(R.string.SHARE_LOG), false, this::shareLog);
+            defaultFocus = directPrimary;
+            startAction = act;
+            addHint("A", R.string.HINT_SELECT, this::clickFocused);
+        }
+        addHint("B", R.string.HINT_QUIT, this::back);
+    }
+
+    /** This app's name (a game's own app: the game's title). */
+    private String appLabel() {
+        CharSequence l = getApplicationInfo().loadLabel(getPackageManager());
+        return l == null || l.length() == 0 ? getString(R.string.app_name) : l.toString();
+    }
+
+    /** This app's icon art (a game's own app: the game's title image on its colour, or its monogram), or null. */
+    private Bitmap appArt() {
+        if (appArtBitmap == null) {
+            try {
+                appArtBitmap = BitmapFactory.decodeResource(getResources(), R.drawable.xba_title_icon_art);
+            } catch (RuntimeException e) {
+                appArtBitmap = null;
+            }
+        }
+        return appArtBitmap;
+    }
+
+    /** Every poll on DIRECT: the Prepare's line; when it is over, the next step (the game, or what failed). */
+    private void directPoll() {
+        if (directState != Direct.PREPARING)
+            return;
+        Prep p = prep();
+        if (p == Prep.RUNNING) {
+            PrepareProtocol.Status s = readPrepStatus();
+            if (s != null && directStatus != null)
+                directStatus.set(progressLine(s), Theme.OK);
+            return;
+        }
+        if (p == Prep.QUEUED)
+            return;
+        Log.i(TAG, "launcher: game app: prepare over (" + p + ")");
+        directStep();
+    }
+
+    private void saveSource(PackHandover.GameSource src) {
+        getSharedPreferences(HANDOVER_PREFS, MODE_PRIVATE).edit().putString(HANDOVER_GAME_KIND, src.kind.name())
+                .putString(HANDOVER_GAME_PATH, src.path).apply();
+    }
+
+    /** XRecomp's last word on where it reads the game from, checked again (PackHandover.sourceOf); null for none. */
+    private PackHandover.GameSource savedSource() {
+        android.content.SharedPreferences p = getSharedPreferences(HANDOVER_PREFS, MODE_PRIVATE);
+        Intent i = new Intent().putExtra(PackHandover.EXTRA_GAME_KIND, p.getString(HANDOVER_GAME_KIND, null))
+                .putExtra(PackHandover.EXTRA_GAME_PATH, p.getString(HANDOVER_GAME_PATH, null));
+        return PackHandover.sourceOf(i);
     }
 
     // ---- A pack that no longer matches (XBA-127, PackFreshness) ------------------------------------------------
@@ -3017,7 +3484,7 @@ public class LauncherActivity extends Activity {
      * background (XBA-129, a self-healing round after a run that ended well): the Prepare runs while Home stays, Play
      * included (the valid pack plays until the new one replaces it).
      */
-    private void startPrepare(boolean background) {
+    private boolean startPrepare(boolean background) {
         // SOURCE: the game's files, or, before an import, the library's cached default.xbe (tools.prepare needs
         // only the XBE).
         String tid = titleId(), dir = gameDir();
@@ -3026,16 +3493,17 @@ public class LauncherActivity extends Activity {
             dir = x == null ? null : x.getAbsolutePath();
         }
         if (tid == null || dir == null)
-            return;
+            return false;
         if (copying(tid)) {   // XBA-176: XRecomp's pack is on its way
             setNote(getString(R.string.HANDOVER_BUSY), NOTE_INFO);
-            return;
+            return false;
         }
-        handoverNoteText = null;
+        if (!direct)
+            handoverNoteText = null;   // a game's own app keeps saying why it prepares
         long free = internalFree();
         if (free < PREPARE_MIN_FREE) {
             setNote(getString(R.string.PREPARE_NO_SPACE, size(PREPARE_MIN_FREE), size(free)), NOTE_ERROR);
-            return;
+            return false;
         }
         if (Build.VERSION.SDK_INT >= 33
             && checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS)
@@ -3067,19 +3535,24 @@ public class LauncherActivity extends Activity {
             } catch (IOException ignored) {
             }
             setNote(getString(R.string.PREPARE_START_FAILED, String.valueOf(e.getMessage())), NOTE_ERROR);
-            return;
+            return false;
         }
         Log.i(TAG, "launcher: prepare started for " + tid + " (" + dir + ")"
                    + (background ? ", in the background" : ""));
         cancelSent = false;
         if (background) {
             refreshKeepingFocus();
-            return;
+            return true;
+        }
+        if (direct) {   // a game's own app: its one line follows the Prepare, then the game starts
+            directStep();
+            return true;
         }
         go(Screen.PREPARE);
         long ram = Toolchain.totalRam(this);
         if (ram > 0 && ram < PREPARE_RAM_WARN)
             setNote(getString(R.string.PREPARE_LOW_RAM, size(ram)), NOTE_WARN);
+        return true;
     }
 
     /** The progress bar's width on the Preparing screen. */
@@ -3247,7 +3720,9 @@ public class LauncherActivity extends Activity {
         if (!resumed)
             return;
         poller.postDelayed(pollTick, PREPARE_POLL_MS);
-        if (screen == Screen.PREPARE) {
+        if (screen == Screen.DIRECT) {
+            directPoll();
+        } else if (screen == Screen.PREPARE) {
             PrepareProtocol.Status s = readPrepStatus();
             boolean wasRunning = prepShown == null || statusAlive(prepShown);
             boolean isRunning = s == null || statusAlive(s);
@@ -4724,7 +5199,9 @@ public class LauncherActivity extends Activity {
                     .setRank(1)
                     .build();
             List<ShortcutInfo> list = new ArrayList<>();
-            Collections.addAll(list, change, home);
+            if (TitleApp.ownTitleId(this) == null)
+                list.add(change);   // a game's own app is locked to its disc: no « Change game »
+            list.add(home);
             sm.setDynamicShortcuts(list);
         } catch (RuntimeException e) {
             Log.w(TAG, "launcher: could not publish the shortcuts", e);
@@ -5104,6 +5581,11 @@ public class LauncherActivity extends Activity {
         hashOk = Boolean.TRUE;
         sizeDir = null;
         history.clear();
+        if (direct) {   // a game's own app: on into the game (its pack, then play)
+            directSourceFailed = false;
+            directStep(true);
+            return;
+        }
         if (libraryOn())
             history.push(Screen.LIBRARY);
         focusMemory.remove(Screen.HOME);
@@ -5616,7 +6098,7 @@ public class LauncherActivity extends Activity {
 
     /** Runs work on a background thread behind the IMPORT screen; its outcome is handled in onWorkerDone. */
     private void runWorker(int label, Work work) {
-        if (worker != null && worker.isAlive())
+        if (workerBusy || (worker != null && worker.isAlive()))
             return;
         cancelRequested = false;
         workerNote = null;
@@ -5631,8 +6113,12 @@ public class LauncherActivity extends Activity {
         int i = focusables.indexOf(focused());
         if (i >= 0 && screen != null)
             focusMemory.put(screen, i);
-        show(Screen.IMPORT);
+        if (direct && screen == Screen.DIRECT)   // a game's own app checking the files XRecomp uses: its one line
+            directShow(Direct.CHECKING, getString(label), Theme.ACCENT, null, 0, null, false);
+        else
+            show(Screen.IMPORT);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        workerBusy = true;
         worker = new Thread(() -> {
             try {
                 work.run();
@@ -5647,6 +6133,7 @@ public class LauncherActivity extends Activity {
     }
 
     private void onWorkerDone() {
+        workerBusy = false;
         getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         if (isFinishing())
             return;
@@ -5658,6 +6145,14 @@ public class LauncherActivity extends Activity {
         importFromLibrary = false;
         String text = workerNote;
         int kind = workerNoteKind;
+        if (direct && importReturn == Screen.DIRECT) {   // the files XRecomp uses were not accepted: the game choice
+            directSourceFailed = true;
+            boolean wrong = getString(R.string.WRONG_GAME).equals(text);
+            directFail(getString(wrong ? R.string.STATE_WRONG : R.string.DIRECT_SOURCE_NOT_USED),
+                       text != null ? text : getString(R.string.DIRECT_SOURCE_FAILED), R.string.CHOOSE_GAME,
+                       this::directChoose, false);
+            return;
+        }
         show(importReturn);
         if (text != null)
             setNote(text, kind);
@@ -5682,6 +6177,9 @@ public class LauncherActivity extends Activity {
             return;
         lastUiUpdate = now;
         runOnUiThread(() -> {
+            if (screen == Screen.DIRECT && directStatus != null && directState == Direct.CHECKING && total > 0)
+                directStatus.set(getString(importLabel) + " · " + String.format(Locale.getDefault(), "%d%%",
+                                 Math.round(Math.min(1f, done / (float)total) * 100)), Theme.ACCENT);
             if (screen != Screen.IMPORT || ring == null)
                 return;
             float frac = total > 0 ? Math.min(1f, done / (float)total) : -1;
@@ -5694,6 +6192,10 @@ public class LauncherActivity extends Activity {
 
     private void progressIndeterminate(int label) {
         runOnUiThread(() -> {
+            if (screen == Screen.DIRECT && directStatus != null && directState == Direct.CHECKING) {
+                importLabel = label;
+                directStatus.set(getString(label), Theme.ACCENT);
+            }
             if (screen != Screen.IMPORT || ring == null)
                 return;
             importLabel = label;
@@ -5724,6 +6226,11 @@ public class LauncherActivity extends Activity {
         if (requestCode == REQ_ALL_FILES) {
             Log.i(TAG, "launcher: All files access "
                        + (Environment.isExternalStorageManager() ? "granted" : "refused"));
+            if (directAccessPending) {   // asked from DIRECT, for the files XRecomp uses: on with the next step
+                directAccessPending = false;
+                directStep(true);
+                return;
+            }
             openTreePicker();   // in place when granted, copied otherwise
             return;
         }

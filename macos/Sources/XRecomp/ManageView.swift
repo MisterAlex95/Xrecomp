@@ -122,8 +122,10 @@ struct ManageView: View {
         HStack {
             VStack(alignment: .leading, spacing: 2) {
                 Text("Create an app for this game").foregroundStyle(Theme.text)
-                Text("An app with the game's logo as its icon, for the Dock or Launchpad, that opens straight on "
-                     + "this game. It holds no game data: it uses this library, its settings and saves.")
+                Text(game?.playable == true
+                     ? "An app with the game's logo as its icon, for the Dock or Launchpad, that opens straight on "
+                       + "this game. It holds no game data: it uses this library, its settings and saves."
+                     : "Prepare this game first (Home › Prepare): its app opens straight on the game.")
                     .font(.caption).foregroundStyle(Theme.textFaint)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -131,7 +133,7 @@ struct ManageView: View {
             if model.creatingApp == gameId { ProgressView().controlSize(.small) }
             Button("Create app…") { pickAppDestination() }
                 .buttonStyle(PillButtonStyle())
-                .disabled(model.creatingApp != nil)
+                .disabled(model.creatingApp != nil || game?.playable != true)
         }
     }
 

@@ -15,4 +15,19 @@
     <string name="HANDOVER_OTHER_XBE">XRecomp a préparé une autre version de ce disque : préparez-le ici.</string>
     <string name="HANDOVER_NO_SPACE">Pas assez de place pour copier le jeu préparé par XRecomp (il faut %1$s) : libérez de la place et rouvrez cette app, ou préparez-le ici.</string>
     <string name="HANDOVER_FAILED">La copie du jeu préparé par XRecomp a échoué (%1$s) : rouvrez cette app pour réessayer, ou préparez-le ici.</string>
+    <!-- L'app d'un jeu lance directement le jeu (docs/android/app-shell.md « Straight into the game »). -->
+    <string name="DIRECT_WAIT">Préparation du lancement…</string>
+    <string name="DIRECT_PREPARE_LEAVE">Une seule fois, 20 à 30 min environ. Vous pouvez quitter l\'app : le jeu se lance à votre retour.</string>
+    <string name="DIRECT_ACCESS_LINE">Autorisez l\'accès aux fichiers pour jouer depuis vos fichiers du jeu</string>
+    <string name="DIRECT_ACCESS">XRecomp lit ce jeu depuis %1$s. Avec « Accès à tous les fichiers », cette app le lance aussi depuis là, sans copie.</string>
+    <string name="DIRECT_CHOOSE_LINE">Où est le jeu ?</string>
+    <string name="DIRECT_CHOOSE">Choisissez le dossier ou l\'image disque du jeu, une seule fois.</string>
+    <string name="DIRECT_NOT_SHARED">XRecomp garde sa propre copie de ce jeu, que cette app ne peut pas lire : choisissez une fois le dossier ou l\'image disque du jeu.</string>
+    <string name="DIRECT_ACCESS_REFUSED">Sans « Accès à tous les fichiers », cette app ne peut pas lire les fichiers qu\'utilise XRecomp : choisissez une fois le dossier ou l\'image disque du jeu (il sera copié dans cette app).</string>
+    <string name="DIRECT_SOURCE_FAILED">Les fichiers qu\'utilise XRecomp n\'ont pas pu servir ici : choisissez le dossier ou l\'image disque du jeu.</string>
+    <string name="DIRECT_SOURCE_GONE">Le jeu n\'est plus dans %1$s, où XRecomp le lisait.</string>
+    <string name="DIRECT_SOURCE_NOT_USED">Les fichiers du jeu n\'ont pas pu servir</string>
+    <string name="DIRECT_PACK_BAD">Le jeu préparé n\'a pas pu être chargé</string>
+    <string name="DIRECT_ENDED">Le jeu s\'est terminé</string>
+    <string name="DIRECT_PREPARE_NOT_STARTED">La préparation n\'a pas pu démarrer</string>
 </resources>
