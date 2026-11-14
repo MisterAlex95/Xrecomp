@@ -19,7 +19,14 @@
  *   - CPU writes (textures, command lists) are seen by the GPU when the commands that read them are flushed, which is
  *     at the latest at SYNC_FULL: as on the hardware, the game must not change what the RDP has not read yet.
  * Write tracking: the colour and Z image rows the drawing commands cover (scissored) are reported through bus.wrote
- * once they are in RDRAM (after a wait), never before, as n64_rdp.c does. */
+ * once they are in RDRAM (after a wait), never before, as n64_rdp.c does.
+ *
+ * Drivers that cannot compile a shader (Adreno 740 on the AYN Thor: one compute pipeline failed at every dispatch,
+ * black screen at 15 fps): at create, a few commands are drawn into a corner of RDRAM (saved and restored) and must
+ * compile and come out right (check()). If not, paraLLEl-RDP is tried again without subgroup operations, then with its
+ * ubershader, then create returns NULL and the software RDP takes over. A failed pipeline is never compiled again
+ * (our Granite patch); one that still fails during the game is logged once and reported through vk_failed, and
+ * n64_rdp_select.c switches to the software RDP. RECOMP_N64_RDP_CHECK=0 skips the check. */
 #include "n64_rdp_backend.h"
 #include "n64_rdp.h"
 
@@ -33,6 +40,7 @@
 #include <cstring>
 #include <memory>
 #include <new>
+#include <vector>
 
 namespace {
 
@@ -67,6 +75,8 @@ struct VkRdp {
     std::unique_ptr<Vulkan::Context> ctx;
     std::unique_ptr<Vulkan::Device> dev;
     std::unique_ptr<RDP::CommandProcessor> cp;
+    RDP::CommandProcessorFlags cp_flags = 0;
+    bool failed = false; /* a pipeline failed during the game: its draws are dropped (vk_failed) */
 };
 
 /* Granite records command buffers per registered thread index: whichever thread drives the RDP is index 0, like
@@ -132,8 +142,87 @@ void sync(VkRdp *d)
         on_thread();
         d->cp->wait_for_timeline(d->cp->signal_timeline());
         d->unsynced = false;
+        if (!d->failed && d->cp->has_pipeline_failure()) {
+            d->failed = true;
+            fprintf(stderr, "n64: Vulkan RDP: a shader failed to compile on %s during the game (the Granite lines "
+                            "above name it); switching to the software RDP\n",
+                    d->dev->get_gpu_properties().deviceName);
+        }
     }
     wrote_report(d);
+}
+
+/* ---- The check at create -------------------------------------------------------------------------------------------- */
+/* A fill of the colour and Z images, a texture loaded and drawn as a rectangle with a Z test: tile binning, the
+ * rasterizer (or the ubershader), depth / blend, TMEM loads and the RDRAM write-back all run. The commands are
+ * encoded as in consoles/n64/tests/rdp_cmd.h. */
+constexpr uint32_t CHECK_W = 32, CHECK_SPAN = 0x2000; /* 32 x 32 RGBA16 colour, Z, an 8 x 8 texture */
+constexpr uint32_t CHECK_FILL = 0xF801F801u;           /* red, coverage bit */
+
+void put(std::vector<uint32_t> &l, uint64_t w)
+{
+    l.push_back((uint32_t)(w >> 32));
+    l.push_back((uint32_t)w);
+}
+
+uint64_t op(int id) { return (uint64_t)id << 56; }
+
+bool check(VkRdp *d)
+{
+    if (const char *e = getenv("RECOMP_N64_RDP_CHECK"))
+        if (atoi(e) == 0)
+            return !d->cp->has_pipeline_failure();
+    const uint32_t base = d->bus.rdram_size - CHECK_SPAN; /* colour, then Z at +0x800, texture at +0x1000 */
+    const uint32_t z = base + 0x800, tex = base + 0x1000;
+    std::vector<uint8_t> saved(d->bus.rdram + base, d->bus.rdram + base + CHECK_SPAN);
+    for (uint32_t i = 0; i < 128; i++) /* the texture: 8 x 8 RGBA16, opaque */
+        d->bus.rdram[tex + i] = (uint8_t)(i & 1 ? 0xFF : 0x7C);
+
+    const uint64_t c10 = (uint64_t)(CHECK_W * 4), last = (uint64_t)((CHECK_W - 1) * 4);
+    std::vector<uint32_t> l;
+    put(l, op(0x2D) | c10 << 12 | c10);                                                     /* scissor 32 x 32 */
+    put(l, op(0x2F) | 3ull << 52);                                                          /* fill mode */
+    put(l, op(0x3F) | 2ull << 51 | (uint64_t)(CHECK_W - 1) << 32 | z);                      /* colour image = Z */
+    put(l, op(0x37) | 0xFFFCFFFCu);                                                         /* far */
+    put(l, op(0x36) | last << 44 | last << 32);                                             /* fill rectangle */
+    put(l, op(0x27));                                                                       /* sync pipe */
+    put(l, op(0x3F) | 2ull << 51 | (uint64_t)(CHECK_W - 1) << 32 | base);                   /* colour image */
+    put(l, op(0x3E) | z);                                                                   /* Z image */
+    put(l, op(0x37) | CHECK_FILL);
+    put(l, op(0x36) | last << 44 | last << 32);
+    put(l, op(0x27));
+    put(l, op(0x3D) | 2ull << 51 | 7ull << 32 | tex);                                       /* texture image */
+    put(l, op(0x35) | 2ull << 51 | 2ull << 41);                                             /* tile 0, line 2 */
+    put(l, op(0x34) | (7ull * 4) << 12 | 7ull * 4);                                         /* load tile 8 x 8 */
+    put(l, op(0x26));                                                                       /* sync load */
+    put(l, op(0x3C) | 15ull << 52 | 31ull << 47 | 7ull << 44 | 7ull << 41 | 15ull << 37 | 31ull << 32 | 15ull << 28 |
+               15ull << 24 | 7ull << 21 | 7ull << 18 | 1ull << 15 | 7ull << 12 | 6ull << 9 | 1ull << 6 | 7ull << 3 |
+               6ull);                                                                       /* combine: texel 0 */
+    put(l, op(0x2E) | 0x100ull << 16);                                                      /* prim depth */
+    put(l, op(0x2F) | 1ull << 43 | 1ull << 42 | 3ull << 38 | 3ull << 36 | 1ull << 5 | 1ull << 4 | 1ull << 2);
+    put(l, op(0x24) | (24ull * 4) << 44 | (24ull * 4) << 32 | (8ull * 4) << 12 | 8ull * 4); /* texture rectangle */
+    put(l, 1ull << 26 | 1ull << 10);                                                        /* s, t 0; 1 texel / px */
+    put(l, op(0x29));                                                                       /* sync full */
+    for (size_t i = 0; i < l.size();) {
+        const int id = (int)(l[i] >> 24) & 0x3F;
+        const unsigned words = (unsigned)cmd_len(id) * 2;
+        d->cp->enqueue_command(words, &l[i]);
+        i += words;
+    }
+    d->cp->wait_for_timeline(d->cp->signal_timeline());
+    d->cp->begin_frame_context();
+
+    const uint8_t *fb = d->bus.rdram + base;
+    const uint32_t far_px = (CHECK_W * CHECK_W - 1) * 2; /* the last pixel: filled, outside the rectangle */
+    const uint32_t tex_px = (12 * CHECK_W + 12) * 2;     /* inside the rectangle: a texel, not the fill colour */
+    const bool fill_ok = fb[0] == 0xF8 && fb[1] == 0x01 && fb[far_px] == 0xF8 && fb[far_px + 1] == 0x01;
+    const bool tex_ok = fb[tex_px] == 0x7C && (fb[tex_px + 1] & 0xFE) == 0xFE; /* low bit: coverage */
+    const bool pipelines_ok = !d->cp->has_pipeline_failure();
+    if (pipelines_ok && !(fill_ok && tex_ok))
+        fprintf(stderr, "n64: Vulkan RDP: check drew %02x%02x (fill, expected f801) and %02x%02x (texture, expected "
+                        "7cff)\n", fb[0], fb[1], fb[tex_px], fb[tex_px + 1]);
+    memcpy(d->bus.rdram + base, saved.data(), CHECK_SPAN);
+    return pipelines_ok && fill_ok && tex_ok;
 }
 
 uint32_t cmd_cost(VkRdp *d, const uint32_t *w, int id)
@@ -252,17 +341,45 @@ void *vk_create(n64_rcp_bus bus)
     }
     d->dev.reset(new Vulkan::Device);
     d->dev->set_context(*d->ctx);
-    d->cp.reset(new RDP::CommandProcessor(*d->dev, bus.rdram, 0, bus.rdram_size, bus.rdram_size / 2, 0));
-    if (!d->cp->device_is_supported()) {
-        fprintf(stderr, "n64: Vulkan RDP: the device (%s) lacks what paraLLEl-RDP needs\n",
-                d->dev->get_gpu_properties().deviceName);
-        d->cp.reset();
-        return nullptr;
+    const char *gpu = d->dev->get_gpu_properties().deviceName;
+
+    /* The default shaders, then without subgroup operations, then the ubershader: the first set that compiles and
+     * draws the check right. The device keeps its programs and their failed pipelines from one try to the next. */
+    static const struct { RDP::CommandProcessorFlags flags; const char *name; } tries[] = {
+        { 0, "default shaders" },
+        { RDP::COMMAND_PROCESSOR_FLAG_NO_SUBGROUPS_BIT, "no subgroup operations" },
+        { RDP::COMMAND_PROCESSOR_FLAG_NO_SUBGROUPS_BIT | RDP::COMMAND_PROCESSOR_FLAG_UBERSHADER_BIT, "ubershader" },
+    };
+    bool subgroups = true; /* the last try used subgroup operations */
+    for (size_t i = 0; i < sizeof tries / sizeof tries[0]; i++) {
+        if (i == 1 && !subgroups)
+            continue; /* the same shaders as the default ones */
+        d->cp.reset(new RDP::CommandProcessor(*d->dev, bus.rdram, 0, bus.rdram_size, bus.rdram_size / 2,
+                                              tries[i].flags));
+        if (!d->cp->device_is_supported()) {
+            fprintf(stderr, "n64: Vulkan RDP: the device (%s) lacks what paraLLEl-RDP needs\n", gpu);
+            d->cp.reset();
+            return nullptr;
+        }
+        subgroups = d->cp->uses_subgroups();
+        if (check(d.get())) {
+            d->cp_flags = tries[i].flags;
+            /* A fresh command processor for the game: none of the check's RDP state. */
+            d->cp->idle();
+            d->cp.reset(new RDP::CommandProcessor(*d->dev, bus.rdram, 0, bus.rdram_size, bus.rdram_size / 2,
+                                                  d->cp_flags));
+            printf("n64: Vulkan RDP on %s (paraLLEl-RDP, %s)\n", gpu, tries[i].name);
+            fflush(stdout);
+            vk_reset(d.get());
+            return d.release();
+        }
+        fprintf(stderr, "n64: Vulkan RDP: %s fail on %s%s\n", tries[i].name, gpu,
+                i + 1 < sizeof tries / sizeof tries[0] ? ", trying again" : "");
+        d->cp->idle();
     }
-    printf("n64: Vulkan RDP on %s (paraLLEl-RDP)\n", d->dev->get_gpu_properties().deviceName);
-    fflush(stdout);
-    vk_reset(d.get());
-    return d.release();
+    fprintf(stderr, "n64: Vulkan RDP: the driver of %s cannot run paraLLEl-RDP's shaders\n", gpu);
+    d->cp.reset();
+    return nullptr;
 }
 
 void vk_destroy(void *p)
@@ -390,7 +507,10 @@ void vk_flush(void *p)
     sync(d);
 }
 
+int vk_failed(void *p) { return static_cast<VkRdp *>(p)->failed; }
+
 } // namespace
 
 extern "C" const n64_rdp_ops n64_rdp_vk_ops = { "vulkan", vk_create, vk_destroy, vk_reset, vk_attach_dmem,
-                                                vk_read_reg, vk_write_reg, vk_run, vk_set_threads, vk_flush };
+                                                vk_read_reg, vk_write_reg, vk_run, vk_set_threads, vk_flush,
+                                                vk_failed };

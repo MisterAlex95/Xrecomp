@@ -46,6 +46,28 @@ words. With `PARALLEL_RDP_HOST_RDRAM_BSWAP32` (set by `CMakeLists.txt`):
 - `parallel-rdp/rdp_device.cpp`: `masked_memcpy` swaps the GPU's words and write masks on the way back. Imported
   host memory (`VK_EXT_external_memory_host`) is never used: the shaders would read our bytes in the wrong order.
 
+Pipelines a driver cannot compile (the Adreno 740 of the AYN Thor failed one compute pipeline at every dispatch,
+~6 ms each, and dropped the dispatch: black screen at 15 fps):
+
+- `vulkan/shader.hpp`, `vulkan/shader.cpp`: `Program` remembers the hashes of its pipelines that failed
+  (`pipeline_failed`, `mark_pipeline_failed`), and whether one failed in a synchronous compile, where nothing
+  replaces it (`has_mandatory_failure`). A specialised rasterizer variant fails in the background thread and the
+  generic rasterizer is used instead: that one does not count. `set_debug_name` names the program for the log.
+- `vulkan/command_buffer.cpp`: `build_compute_pipeline` returns at once for a pipeline that already failed, and on a
+  failure logs the program's name, the shader hash, the spec constants and the subgroup size control, once.
+  `dispatch` and `dispatch_indirect` log the first 16 dropped dispatches only. `PARALLEL_RDP_TEST_FAIL_PROGRAM`
+  (program names, comma-separated) makes those programs fail as such a driver would, to test the fallbacks.
+- `parallel-rdp/rdp_renderer.*`: `set_shader_bank` names the bank's programs. `has_pipeline_failure` tells whether
+  a program these caps use failed (the ubershader, or the rasterizer and depth_blend). `uses_subgroups` and
+  `uses_ubershader` report the caps. `RendererOptions::disable_subgroups` and `force_ubershader` do what
+  `PARALLEL_RDP_SUBGROUP=0` and `PARALLEL_RDP_UBERSHADER=1` do. `init_caps` logs the caps it picked (driver ID,
+  subgroup size, ubershader, small types, subgroups).
+- `parallel-rdp/rdp_device.*`: `COMMAND_PROCESSOR_FLAG_NO_SUBGROUPS_BIT` and `COMMAND_PROCESSOR_FLAG_UBERSHADER_BIT`
+  feed those options, and `CommandProcessor` forwards the three queries.
+
+The N64 runtime uses them (`consoles/n64/runtime/n64_rdp_vk.cpp`): a check at start, then default shaders, no
+subgroups, ubershader, else the software RDP (`consoles/README.md`).
+
 The shaders are unchanged, so the precompiled SPIR-V is upstream's.
 
 ## Symbols

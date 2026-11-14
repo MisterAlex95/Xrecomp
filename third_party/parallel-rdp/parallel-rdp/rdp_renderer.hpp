@@ -70,6 +70,9 @@ struct RendererOptions
 	unsigned upscaling_factor = 1;
 	bool super_sampled_readback = false;
 	bool super_sampled_readback_dither = false;
+	// xboxrecomp-android patch (third_party/parallel-rdp/README.md): see COMMAND_PROCESSOR_FLAG_NO_SUBGROUPS_BIT.
+	bool disable_subgroups = false;
+	bool force_ubershader = false;
 };
 
 enum class ValidationError
@@ -111,6 +114,11 @@ public:
 	void set_shader_bank(const ShaderBank *bank);
 
 	bool init_renderer(const RendererOptions &options);
+
+	// xboxrecomp-android patch (third_party/parallel-rdp/README.md): see CommandProcessor::has_pipeline_failure.
+	bool has_pipeline_failure() const;
+	bool uses_subgroups() const;
+	bool uses_ubershader() const;
 
 	// setup may be mutated to apply various fixups to triangle setup.
 	void draw_flat_primitive(TriangleSetup &setup);
@@ -189,7 +197,7 @@ private:
 	Vulkan::Buffer *tmem = nullptr;
 	const ShaderBank *shader_bank = nullptr;
 
-	bool init_caps();
+	bool init_caps(const RendererOptions &options);
 	void init_blender_lut();
 	void init_buffers(const RendererOptions &options);
 	bool init_internal_upscaling_factor(const RendererOptions &options);

@@ -205,6 +205,9 @@ void CommandProcessor::init_renderer()
 	opts.upscaling_factor = factor;
 	opts.super_sampled_readback = (flags & COMMAND_PROCESSOR_FLAG_SUPER_SAMPLED_READ_BACK_BIT) != 0;
 	opts.super_sampled_readback_dither = (flags & COMMAND_PROCESSOR_FLAG_SUPER_SAMPLED_DITHER_BIT) != 0;
+	// xboxrecomp-android patch (third_party/parallel-rdp/README.md).
+	opts.disable_subgroups = (flags & COMMAND_PROCESSOR_FLAG_NO_SUBGROUPS_BIT) != 0;
+	opts.force_ubershader = (flags & COMMAND_PROCESSOR_FLAG_UBERSHADER_BIT) != 0;
 
 	is_supported = renderer.init_renderer(opts);
 
@@ -229,6 +232,22 @@ void CommandProcessor::init_renderer()
 bool CommandProcessor::device_is_supported() const
 {
 	return is_supported;
+}
+
+// xboxrecomp-android patch (third_party/parallel-rdp/README.md).
+bool CommandProcessor::has_pipeline_failure() const
+{
+	return renderer.has_pipeline_failure();
+}
+
+bool CommandProcessor::uses_subgroups() const
+{
+	return renderer.uses_subgroups();
+}
+
+bool CommandProcessor::uses_ubershader() const
+{
+	return renderer.uses_ubershader();
 }
 
 void CommandProcessor::set_validation_interface(ValidationInterface *iface)

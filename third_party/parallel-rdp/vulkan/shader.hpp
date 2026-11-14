@@ -29,6 +29,9 @@
 #include "limits.hpp"
 #include "vulkan_headers.hpp"
 #include "enum_cast.hpp"
+#include <atomic>
+#include <mutex>
+#include <unordered_set>
 
 namespace spirv_cross
 {
@@ -217,7 +220,31 @@ public:
 
 	void promote_read_write_to_read_only();
 
+	// xboxrecomp-android patch (third_party/parallel-rdp/README.md): a pipeline the driver failed to compile is
+	// remembered, by its hash, and never compiled again (it would be compiled again at every dispatch otherwise).
+	// mandatory: it failed where nothing can replace it (a synchronous compile, the dispatch is dropped), as opposed
+	// to an optional specialised variant compiled in the background. The name only goes into the log.
+	bool pipeline_failed(Util::Hash hash) const;
+	void mark_pipeline_failed(Util::Hash hash, bool mandatory);
+	bool has_mandatory_failure() const
+	{
+		return mandatory_failure.load(std::memory_order_acquire);
+	}
+	void set_debug_name(const char *name)
+	{
+		debug_name = name;
+	}
+	const char *get_debug_name() const
+	{
+		return debug_name ? debug_name : "(unnamed)";
+	}
+
 private:
+	mutable std::mutex failed_lock;
+	std::unordered_set<Util::Hash> failed_pipelines;
+	std::atomic<bool> mandatory_failure{false};
+	const char *debug_name = nullptr;
+
 	void set_shader(ShaderStage stage, Shader *handle);
 	Device *device;
 	Shader *shaders[Util::ecast(ShaderStage::Count)] = {};

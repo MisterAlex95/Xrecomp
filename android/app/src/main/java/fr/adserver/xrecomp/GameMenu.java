@@ -1231,7 +1231,10 @@ final class GameMenu {
     // ---- Header, overlay, messages -----------------------------------------------------------------------------
 
     private String gameTitle() {
-        String t = GameStore.chosenTitle(activity);
+        // A GBA, PS1 or N64 game: its own title. The chosen Xbox game's (chosenTitle) stays remembered while one
+        // runs and is not this game's.
+        String t = GameStore.launchedRom(activity) != null ? GameStore.launchedRomTitle(activity)
+                                                           : GameStore.chosenTitle(activity);
         return t == null || t.isEmpty() ? s(R.string.app_name) : t;
     }
 

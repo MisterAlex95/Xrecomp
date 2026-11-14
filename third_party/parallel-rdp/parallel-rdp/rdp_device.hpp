@@ -48,7 +48,12 @@ enum CommandProcessorFlagBits
 	COMMAND_PROCESSOR_FLAG_UPSCALING_4X_BIT = 1 << 3,
 	COMMAND_PROCESSOR_FLAG_UPSCALING_8X_BIT = 1 << 4,
 	COMMAND_PROCESSOR_FLAG_SUPER_SAMPLED_READ_BACK_BIT = 1 << 5,
-	COMMAND_PROCESSOR_FLAG_SUPER_SAMPLED_DITHER_BIT = 1 << 6
+	COMMAND_PROCESSOR_FLAG_SUPER_SAMPLED_DITHER_BIT = 1 << 6,
+	// xboxrecomp-android patch (third_party/parallel-rdp/README.md): the fallbacks the N64 runtime tries when the
+	// driver cannot compile a pipeline. No subgroup operations (as PARALLEL_RDP_SUBGROUP=0); the ubershader in place
+	// of the rasterizer + depth_blend pair (as PARALLEL_RDP_UBERSHADER=1).
+	COMMAND_PROCESSOR_FLAG_NO_SUBGROUPS_BIT = 1 << 28,
+	COMMAND_PROCESSOR_FLAG_UBERSHADER_BIT = 1 << 29
 };
 using CommandProcessorFlags = uint32_t;
 
@@ -123,6 +128,12 @@ public:
 	void set_validation_interface(ValidationInterface *iface);
 
 	bool device_is_supported() const;
+
+	// xboxrecomp-android patch (third_party/parallel-rdp/README.md): a pipeline nothing can replace failed to
+	// compile (its dispatches are dropped), and whether the shaders use subgroup operations / the ubershader.
+	bool has_pipeline_failure() const;
+	bool uses_subgroups() const;
+	bool uses_ubershader() const;
 
 	// Synchronization.
 	void flush();
