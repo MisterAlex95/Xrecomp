@@ -847,6 +847,38 @@ public class LauncherScreensTest {
         assertEquals(UiFeedback.Cue.DONE, played.get(played.size() - 1));
     }
 
+    /** XBA-186: Frame generation and Choose Lossless.dll sit under « All consoles » (every console reads them). */
+    @Test
+    public void frameGenerationUnderAllConsoles() throws Exception {
+        LauncherActivity.lsfgBuiltOverride = true;
+        LauncherActivity a = launch();
+        a.goForTest(LauncherActivity.Screen.SETTINGS);
+        idle(300);
+        key(a, KeyEvent.KEYCODE_BUTTON_R1);
+        Widgets.MenuRow fg = row(a, app.getString(R.string.OPT_LSFG));
+        Widgets.MenuRow dll = row(a, app.getString(R.string.LSFG_CHOOSE_DLL));
+        assertNotNull(fg);
+        assertNotNull(dll);
+        int all = -1, xbox = -1, at = -1, dllAt = -1, i = 0;
+        for (View v : allViews(a.getWindow().getDecorView(), new ArrayList<>())) {
+            if (v instanceof android.widget.TextView) {
+                CharSequence t = ((android.widget.TextView)v).getText();
+                if (all < 0 && app.getString(R.string.SET_GROUP_ALL).contentEquals(t))
+                    all = i;
+                if (xbox < 0 && app.getString(R.string.SET_GROUP_XBOX).contentEquals(t))
+                    xbox = i;
+            }
+            if (v == fg)
+                at = i;
+            if (v == dll)
+                dllAt = i;
+            i++;
+        }
+        assertTrue("All consoles, then Xbox only", all >= 0 && xbox > all);
+        assertTrue("frame generation under All consoles", at > all && at < xbox);
+        assertTrue("Choose Lossless.dll right after it", dllAt > at && dllAt < xbox);
+    }
+
     /** WP-E: a pack whose title profile forces RECOMP_LSFG=0 (env_force) shows it on the frame generation row. */
     @Test
     public void frameGenerationUnavailableForThisTitle() throws Exception {

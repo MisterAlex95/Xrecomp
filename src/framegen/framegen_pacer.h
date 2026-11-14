@@ -84,6 +84,11 @@ extern const FramegenGenerator framegen_fake_generator;
  * (copy it into a timed FIFO and return). due_ns: CLOCK_MONOTONIC. */
 typedef struct FramegenSink {
     void (*show)(const uint8_t *px, uint32_t w, uint32_t h, uint32_t bpp, uint64_t due_ns);
+    /* Optional, used instead of show when set: the same, plus generated = 1
+     * for a generated frame, 0 for a real one (the console window keeps real
+     * frames for screenshots and captures, XBA-186). */
+    void (*show_ex)(const uint8_t *px, uint32_t w, uint32_t h, uint32_t bpp, uint64_t due_ns,
+                    int generated);
 } FramegenSink;
 
 /* ── Pacer ──────────────────────────────────────────────────────────────── */
@@ -97,6 +102,12 @@ void framegen_pacer_set_generator(const FramegenGenerator *gen);
  * framegen_policy_fps_cap) and starts the pacer thread. 0 = started; < 0 =
  * framegen off (not requested, or no generator: "[LSFG] off: ..." logged). */
 int  framegen_pacer_start(const FramegenSink *sink);
+
+/* The generator framegen_pacer_start() would pick: the fake one under
+ * RECOMP_LSFG_FAKE=1, else the registered one (NULL: none in this build).
+ * For presenters that build their own FramegenPacerConfig (the console
+ * window, framegen_console.h). */
+const FramegenGenerator *framegen_pacer_env_generator(void);
 
 /* px: the frame as flipped, w x h, bpp 2 (R5G6B5) or 4 (BGRX), pitch bytes
  * per row; copied before return. flip_ns: CLOCK_MONOTONIC time of the flip. */

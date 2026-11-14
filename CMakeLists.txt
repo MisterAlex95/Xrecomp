@@ -155,6 +155,11 @@ if(XBOXRECOMP_LSFG AND NOT WIN32)
     # XBOXRECOMP_LSFG_BRIDGE=1 when the bridge is built.
     target_compile_definitions(xbox_video PRIVATE XBOXRECOMP_LSFG=1)
     target_link_libraries(xbox_video PUBLIC xbox_framegen)
+    # The console window (src/video/host_window.c, XBA-186) does the same for the GBA, PS1 and N64 runtimes.
+    if(TARGET xbr_host)
+        target_compile_definitions(xbr_host PRIVATE XBOXRECOMP_LSFG=1)
+        target_link_libraries(xbr_host PUBLIC xbox_framegen)
+    endif()
 endif()
 
 # ── Umbrella target ───────────────────────────────────────────

@@ -153,11 +153,12 @@ final class RecompConfig {
         new Option(Section.GRAPHICS, R.string.OPT_480P, R.string.OPT_480P_DETAIL, keys(ENV_480P),
                    new Choice(R.string.VAL_OFF, (String)null), new Choice(R.string.VAL_ON, "1")),
         // Frame generation (docs/technical/framegen.md): RECOMP_LSFG_DIR, the app-private shader cache, is written by
-        // « Choose Lossless.dll » (LSFG_DIR_KEY), not by this option.
+        // « Choose Lossless.dll » (LSFG_DIR_KEY), not by this option. XBA-186: every console reads it (the GBA, PS1
+        // and N64 window generates between the game's distinct pictures; a game can have its own, framegen_<KEY>).
         new Option(Section.GRAPHICS, R.string.OPT_LSFG, R.string.OPT_LSFG_DETAIL,
                    keys("RECOMP_LSFG", "RECOMP_LSFG_MULT", "RECOMP_LSFG_PERF"),
                    new Choice(R.string.VAL_OFF, null, null, null), new Choice(R.string.VAL_LSFG_2X, "1", "2", null),
-                   new Choice(R.string.VAL_LSFG_2X_PERF, "1", "2", "1")).lsfgOnly(),
+                   new Choice(R.string.VAL_LSFG_2X_PERF, "1", "2", "1")).lsfgOnly().shared(),
         new Option(Section.GRAPHICS, R.string.OPT_TEX, R.string.OPT_TEX_DETAIL,
                    keys("RECOMP_TEX_BILINEAR", "RECOMP_TEX_ANISO"),
                    new Choice(R.string.VAL_TEX_SHARP, null, null), new Choice(R.string.VAL_TEX_SMOOTH, "1", null),

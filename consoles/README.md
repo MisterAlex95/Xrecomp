@@ -634,6 +634,14 @@ alone is within noise of what it was before the page write tracking. Lifted C co
 instructions with gcc -O1 -fno-tree-slp-vectorize on that host (homebrew: 28-38 k instructions in ~4-5 s with 6 jobs;
 n64-systemtest: 407 k instructions in ~77 s with 6 jobs, 1.1 s / 1k).
 
+**Frame generation (XBA-186).** In a build with `XBOXRECOMP_LSFG` (Android `-PxbaLsfg=1`), under `RECOMP_LSFG=1`, the
+host window feeds the LSFG pacer for every console: only distinct pictures reach the generator (a 30 fps game
+presents each one twice at 60 Hz), the generated frames take the repeats' slots, and the runtimes' frame sleep goes
+through `host_window_sleep_until`, which draws the frames due meanwhile. A game already at 60 distinct pictures is shown
+as it comes; fast-forward bypasses it, a state load and a pause start a fresh history; pictures wider than 1280 are
+generated at a reduced size. Latency: half the game's frame period plus the generation cost (16.7 ms + c at 30 fps).
+Details: [Frame generation › Console window](../docs/technical/framegen.md#console-window).
+
 **Save states and fast-forward (XBA-182).** GBA and PS1 (the N64 plugs in the same way, below; the Xbox has none: its
 state is the whole guest memory and GPU). Three layers:
 

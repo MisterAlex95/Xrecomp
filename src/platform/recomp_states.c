@@ -281,6 +281,8 @@ const char *recomp_states_console(void)
     return copy;
 }
 
+static atomic_uint s_loads; /* states loaded (recomp_states_loads) */
+
 /* The registry's lock is held through the callback, so a detach waits for a save / load in progress; the runtime
  * detaches before it takes its own frame lock to end. */
 static int run_op(int slot, int load)
@@ -291,9 +293,13 @@ static int run_op(int slot, int load)
     int rc = RECOMP_STATE_ENOGAME;
     if (s_attached && s_dir[0] && s_ops.save && s_ops.load)
         rc = load ? s_ops.load(slot, s_ops.user) : s_ops.save(slot, s_ops.user);
+    if (load && rc == RECOMP_STATE_OK)
+        atomic_fetch_add(&s_loads, 1);
     pthread_mutex_unlock(&s_mu);
     return rc;
 }
+
+unsigned recomp_states_loads(void) { return (unsigned)atomic_load(&s_loads); }
 
 int recomp_states_save(int slot) { return run_op(slot, 0); }
 int recomp_states_load(int slot) { return run_op(slot, 1); }

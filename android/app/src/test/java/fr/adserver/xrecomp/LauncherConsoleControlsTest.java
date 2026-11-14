@@ -71,6 +71,7 @@ public class LauncherConsoleControlsTest {
     public void tearDown() {
         Toolchain.assetsOverride = null;
         Toolchain.nativeDirOverride = null;
+        LauncherActivity.lsfgBuiltOverride = null;
         RuntimeEnvironment.setQualifiers("en-w1920dp-h1080dp-land-mdpi");
     }
 
@@ -395,6 +396,56 @@ public class LauncherConsoleControlsTest {
         shot(a, "console-options-2-n64-vkdriver");
         key(a, KeyEvent.KEYCODE_DPAD_RIGHT);
         assertNull("back to Settings' choice", vk.gameChoice(key));
+    }
+
+    /**
+     * XBA-186: a console game's Options in an APK with frame generation: its own Frame generation (« As in Settings
+     * (<Settings' value>) », On, Off; framegen_&lt;KEY&gt;, which ShellActivity exports as RECOMP_LSFG with Settings'
+     * multiplier); none in an APK without it.
+     */
+    @Test
+    public void consoleOptionsFrameGeneration() throws Exception {
+        File n64 = rom("n64", "Star Race.z64", ConsoleTest.n64(0));
+        RecompConfig cfg = RecompConfig.load(GameStore.externalFilesDir(app));
+        cfg.set("RECOMP_LSFG", "1");
+        cfg.set("RECOMP_LSFG_MULT", "2");
+        cfg.save();
+        String title = app.getString(R.string.OPT_LSFG);
+
+        LauncherActivity.lsfgBuiltOverride = false;
+        LauncherActivity a = launch();
+        openControls(a, "Star Race", R.string.ROM_OPTIONS, LauncherActivity.Screen.ROM_OPTIONS);
+        assertNull("no frame generation in this APK", row(a, title));
+        a.finish();
+
+        LauncherActivity.lsfgBuiltOverride = true;
+        a = launch();
+        String key = LibraryIndex.read(Library.indexFile(app.getFilesDir())).find(LibraryIndex.fileLoc(n64)).tid;
+        openControls(a, "Star Race", R.string.ROM_OPTIONS, LauncherActivity.Screen.ROM_OPTIONS);
+        Widgets.MenuRow r = row(a, title);
+        assertNotNull("N64: the frame generation row", r);
+        assertEquals(app.getString(R.string.ROM_OPT_FOLLOW, app.getString(R.string.VAL_LSFG_2X)), r.value);
+        focusRow(a, title);
+        assertEquals(app.getString(R.string.ROM_OPT_FRAMEGEN_DETAIL), a.descriptionForTest());
+        key(a, KeyEvent.KEYCODE_DPAD_RIGHT);
+        key(a, KeyEvent.KEYCODE_DPAD_RIGHT);
+        assertEquals("0", ConsoleVideo.gameChoice(app, key, ConsoleVideo.Setting.FRAMEGEN));
+        assertEquals(app.getString(R.string.VAL_OFF), row(a, title).value);
+        assertEquals("recomp.cfg untouched", "1", cfgLine("RECOMP_LSFG"));
+        java.util.List<String[]> env = ConsoleVideo.runEnv(Console.N64, null, null, null,
+                ConsoleVideo.gameChoice(app, key, ConsoleVideo.Setting.FRAMEGEN),
+                RecompConfig.load(GameStore.externalFilesDir(app)));
+        String lsfg = null, mult = null;
+        for (String[] kv : env) {
+            if (kv[0].equals("RECOMP_LSFG"))
+                lsfg = kv[1];
+            if (kv[0].equals("RECOMP_LSFG_MULT"))
+                mult = kv[1];
+        }
+        assertEquals("0", lsfg);
+        assertEquals("2", mult);
+        key(a, KeyEvent.KEYCODE_DPAD_RIGHT);
+        assertNull("back to Settings' choice", ConsoleVideo.gameChoice(app, key, ConsoleVideo.Setting.FRAMEGEN));
     }
 
     /**
