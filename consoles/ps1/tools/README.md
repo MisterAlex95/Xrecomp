@@ -40,7 +40,8 @@ before them, else up to 512 entries while they point into the image); then words
 plausible function start (`addiu sp, sp, -N`, or right after a `jr ra` and its delay slot), jump table words
 excluded. A function ends after the delay slot of an unconditional transfer (J, JR, `b`) when no branch of the
 function points further, at the next known start, or at a reserved encoding; never between a branch and its slot.
-Conditional branches out of a function are not seeds.
+Conditional branches out of a function are not seeds. Bodies longer than 1000 instructions are cut into pieces (one C
+function each, so no single function overwhelms the compiler), never between a branch and its delay slot.
 
 BIOS call stubs (`li t2, 0xA0|0xB0|0xC0 ; jr t2 ; li t1, N`, Psy-Q's and PSn00bSDK's idiom) are named
 `bios_A0_3C` etc. and kept as ordinary calls: the lifted stub jumps to the BIOS table, which the interpreter runs

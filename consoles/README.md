@@ -190,7 +190,9 @@ code) and ps1-tests (cpu/cop, cpu/code-in-io, gte/test-all, dma/otc-test, dma/dp
 loop then in lockstep; `ps1_rc_fuzz`: random MIPS code under a timer IRQ every 37-2000 cycles; pytest
 `consoles/ps1/tools/ps1_tools/test_recomp.py`. All converge in 2-3 rounds at 99.9 % native instructions, except
 gte/test-all (81.7 %: it writes each GTE command into a stub before running it). Lifted C costs about 1.3-2 s of
-compiler per 1000 instructions at -O1 on a desktop x86 core (`--sparse-labels`: ~10 % less). Design notes:
+compiler per 1000 instructions at -O1 on a desktop x86 core for compiled homebrew, up to ~4 s for dense code
+(100 k random instructions of the fuzzer); function bodies are cut at 1000 instructions because compile time grows
+faster than linearly with them (`--sparse-labels`: ~10 % less). Design notes:
 [ps1/tools/README.md](ps1/tools/README.md).
 
 **PS1 GPU (P-7, XBA-165).** `consoles/ps1/runtime/ps1_gpu.c`, the GPU half of `ps1_devices.h` (CMake target

@@ -301,3 +301,16 @@ def test_cli_and_c_compiles(tmp_path, capsys):
                             "-Wno-unused-but-set-variable", "-I", RUNTIME, str(out / f)],
                            capture_output=True, text=True, check=False)
         assert r.returncode == 0, r.stderr[-2000:]
+
+
+def test_long_bodies_are_cut_off_delay_slots():
+    from ps1_tools import discover
+    n = discover.MAX_BODY
+    w = [ADDIU(2, 2, 1)] * (2 * n + 500) + [JR_RA, NOP]
+    w[n - 1] = i_type(4, 2, 3, 1)  # a branch right before the cut: its slot stays with it
+    img = Image(BASE, words(w), "exe")
+    funcs = sorted(Discovery(img, {BASE}).run(), key=lambda f: f.start)
+    assert len(funcs) == 3
+    assert funcs[0].end == BASE + (n - 1) * 4  # cut before the branch, not between it and its slot
+    assert funcs[-1].end == BASE + len(w) * 4
+    assert all(a.end == b.start for a, b in zip(funcs, funcs[1:]))

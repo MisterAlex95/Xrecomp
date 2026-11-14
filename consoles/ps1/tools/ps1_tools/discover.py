@@ -19,6 +19,7 @@ import struct
 from .isa import RA, SP, T1, T2, decode
 
 MAX_TABLE = 512
+MAX_BODY = 1000  # instructions per lifted C function at most (compile time grows faster than linearly with it)
 
 
 class Image:
@@ -269,14 +270,30 @@ class Discovery:
             end = self._walk(s, limit, set())
             if end <= s:
                 continue
-            f = Function(img, s, end)
-            stub = bios_stub(img, s)
-            if stub:
-                f.kind = "bios_stub"
-                f.name = "bios_" + stub
-                self.stats["bios_stubs"] += 1
-            funcs.append(f)
+            for a, b in self._pieces(s, end):
+                f = Function(img, a, b)
+                stub = bios_stub(img, a) if a == s else None
+                if stub:
+                    f.kind = "bios_stub"
+                    f.name = "bios_" + stub
+                    self.stats["bios_stubs"] += 1
+                funcs.append(f)
         return funcs
+
+    def _pieces(self, start, end):
+        """A body longer than MAX_BODY instructions is cut in pieces (one C function each, for the compiler's sake),
+        never between a branch and its delay slot; a piece falls through to the next one via the dispatcher."""
+        out = []
+        a = start
+        while end - a > MAX_BODY * 4:
+            b = a + MAX_BODY * 4
+            while b > a + 8 and self.img.ins(b - 4).is_transfer():
+                b -= 4
+            out.append((a, b))
+            self.stats["cut"] = self.stats.get("cut", 0) + 1
+            a = b
+        out.append((a, end))
+        return out
 
 
 def merge_records(records):
