@@ -543,6 +543,24 @@ static const char *base_name(const char *p)
     return s ? s + 1 : p;
 }
 
+/* The DualShock motors to the host pads (host_pad_rumble: low frequency = the large motor, high = the small one): with
+ * one player every pad (they all drive port 1), with two host pad N for port N. Refreshed every frame while on (so
+ * a lost update cannot leave a pad buzzing for long), stopped once when off. */
+static void rumble_drive(int players, uint8_t motors[2][2], uint8_t sent[2][2])
+{
+    for (int port = 0; port < (players >= 2 ? 2 : 1); port++) {
+        uint8_t small = motors[port][0], large = motors[port][1];
+        int on = small || large;
+        if (!on && !sent[port][0] && !sent[port][1])
+            continue;
+        for (int p = 0; p < HOST_PAD_PORTS; p++)
+            if (players >= 2 ? p == port : 1)
+                host_pad_rumble(p, (uint16_t)(large * 257u), (uint16_t)(small * 257u), on ? 100 : 0);
+        sent[port][0] = small;
+        sent[port][1] = large;
+    }
+}
+
 static const char *pad_name(int analog)
 {
     return analog ? "analog (DualShock)" : "digital";
@@ -655,6 +673,11 @@ int ps1_runtime_run(const ps1_runtime_opts *o)
     uint64_t frames = 0, next = now_ns(), t0 = next, late_resets = 0, dirty_at = 0, dirty_first = 0;
     int was_paused = 0, heard = 0, rc = 0, toggle_held = 0;
     ps1_gpu *gpu = ps1_get_gpu(m);
+    /* DualShocks (XBA-167): plugged in in the mode chosen (RECOMP_PS1_PAD); the game may switch them (config mode)
+     * and the toggle chord is their ANALOG button. The left stick is a D-pad while a port reports digital. */
+    ps1_pad_kind kind = analog ? PS1_PAD_ANALOG : PS1_PAD_DUALSHOCK;
+    int analog2 = analog;
+    uint8_t rumble[2][2] = {{0, 0}, {0, 0}};   /* per port: small, large, as last sent to the host pads */
 
     for (;;) {
         int running = 1;
@@ -690,10 +713,16 @@ int ps1_runtime_run(const ps1_runtime_opts *o)
 
         pad_in p1, p2;
         pads_read(0, players, analog, &p1);
-        pads_read(1, players, analog, &p2);
+        pads_read(1, players, analog2, &p2);
         if (p1.toggle && !toggle_held) {
-            analog = !analog;
-            printf("ps1: port 1 is now %s\n", pad_name(analog));
+            pthread_mutex_lock(&s_mu);
+            int was = analog;
+            analog = ps1_pad_analog_button(m, 0) == 1;
+            pthread_mutex_unlock(&s_mu);
+            if (analog == was)
+                printf("ps1: port 1 stays %s (locked by the game)\n", pad_name(analog));
+            else
+                printf("ps1: port 1 is now %s\n", pad_name(analog));
             fflush(stdout);
         }
         toggle_held = p1.toggle;
@@ -702,7 +731,6 @@ int ps1_runtime_run(const ps1_runtime_opts *o)
         p1.buttons |= o->buttons;
         if (window)
             p1.buttons |= keyboard_buttons();
-        ps1_pad_kind kind = analog ? PS1_PAD_ANALOG : PS1_PAD_DIGITAL;
         pthread_mutex_lock(&s_mu);
         ps1_set_pad(m, 0, kind, p1.buttons, p1.lx, p1.ly, p1.rx, p1.ry);
         if (players >= 2)
@@ -710,10 +738,21 @@ int ps1_runtime_run(const ps1_runtime_opts *o)
         uint64_t c0 = ps1_cycles(m);
         ps1_run_frame(m);
         uint64_t frame_ns = ps1_runtime_frame_ns(ps1_cycles(m) - c0);
+        int was_analog = analog;
+        analog = ps1_pad_analog(m, 0) == 1;
+        analog2 = players >= 2 ? ps1_pad_analog(m, 1) == 1 : analog;
+        uint8_t motors[2][2];
+        for (int port = 0; port < 2; port++)
+            ps1_pad_rumble(m, port, &motors[port][0], &motors[port][1]);
         int dirty = ps1_card_take_dirty(m, 0) | ps1_card_take_dirty(m, 1);
         int on = ps1_display(m, xrgb, DISPLAY_MAX_W, DISPLAY_MAX_H, &dw, &dh) == 0;
         pthread_mutex_unlock(&s_mu);
         frames++;
+        if (analog != was_analog) {
+            printf("ps1: the game set port 1 %s at frame %llu\n", pad_name(analog), (unsigned long long)frames);
+            fflush(stdout);
+        }
+        rumble_drive(players, motors, rumble);
 
         if (gpu) {
             ps1_gpu_timing tm;

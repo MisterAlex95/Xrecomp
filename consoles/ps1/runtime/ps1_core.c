@@ -125,7 +125,8 @@ ps1_machine *ps1_create(const uint8_t *bios, size_t bios_size, const char *disc_
     m->dpcr = 0x07654321u;
     for (int i = 0; i < 3; i++)
         m->tmr[i].mode = 0x400;
-    m->pads[0].kind = PS1_PAD_DIGITAL;
+    ps1_pad_plug(&m->pads[0], PS1_PAD_DIGITAL);
+    ps1_pad_plug(&m->pads[1], PS1_PAD_NONE);
     for (int i = 0; i < 2; i++) {
         m->pads[i].lx = m->pads[i].ly = m->pads[i].rx = m->pads[i].ry = 0x80;
         ps1_card_format(m->cards[i].data);
@@ -164,7 +165,8 @@ void ps1_set_pad(ps1_machine *m, int port, ps1_pad_kind kind, uint16_t buttons, 
     if (port < 0 || port > 1)
         return;
     ps1_pad *p = &m->pads[port];
-    p->kind = kind;
+    if (p->kind != kind)
+        ps1_pad_plug(p, kind);
     p->buttons = buttons;
     p->lx = lx;
     p->ly = ly;

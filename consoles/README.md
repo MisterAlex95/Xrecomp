@@ -118,8 +118,9 @@ RFE, interrupt entry; a fixed cost per instruction by fetch region, no cache mod
 44-bit MAC checks, FLAG, the UNR divide, register quirks), the memory map with its mirrors (`ps1_bus.c`), the interrupt
 controller, DMA (7 channels, DPCR / DICR, sync modes 0 / 1 / 2, OTC; bursts stall the CPU, block and linked-list
 transfers complete after their length), the three root counters with every clock source and sync mode, and the
-scanline / VBlank scheduler driven by `ps1_gpu_get_timing` (`ps1_io.c`), SIO0 with the digital pad, the DualShock in
-analog mode and two 128 KB memory cards (`ps1_sio.c`; `ps1_card_data` / `ps1_card_take_dirty` / `ps1_card_load` like
+scanline / VBlank scheduler driven by `ps1_gpu_get_timing` (`ps1_io.c`), SIO0 with the digital pad, the DualShock
+(digital or analog mode; config mode: 0x43 enter / exit, 0x44 mode + lock, 0x45 status, 0x46 / 0x47 / 0x4C tables,
+0x4D rumble mapping, whose motors `ps1_pad_rumble` reports; `ps1_pad_analog_button`) and two 128 KB memory cards (`ps1_sio.c`; `ps1_card_data` / `ps1_card_take_dirty` / `ps1_card_load` like
 the GBA saves). The other chips are reached through `ps1_devices.h` only: target `ps1_core` links `ps1_gpu`, `ps1_cd`,
 `ps1_spu` and `ps1_mdec`, each the real module or its placeholder `ps1_<dev>_stub.c` when the source is absent.
 
@@ -208,7 +209,11 @@ pixel.
 C11 without host dependency (CMake targets `ps1_cd`, `ps1_spu`, `ps1_mdec`). `ps1_disc.c` reads raw sectors and
 tracks only (no ISO 9660): `.cue` (several `.bin` files, INDEX 00 / 01, PREGAP, relative paths, names matched ignoring
 case), a single `.bin`, `.iso` (2048-byte sectors in a synthesized Mode 2 Form 1 sector), `.chd` through the vendored
-libchdr (`third_party/libchdr`, v0.3.0, option `XBR_PS1_CHD`, ON by default), and `fd:N` for single-file images.
+libchdr (`third_party/libchdr`, master 47d7941 after v0.3.0, with the crafted-CHD bounds fixes; option `XBR_PS1_CHD`,
+ON by default), and `fd:N` for single-file images. `ps1_identify.c` (target `ps1_identify`) makes this reader
+`recomp_pack_rom_identify`'s disc hook (`recomp_pack_set_disc_hook`), so a `.chd` gets its title key (SYSTEM.CNF's
+serial) where both are linked: libmain, the launcher's `libxba_import.so` (`Ps1Native`, the library scan) and
+`ps1_play`; `recomp_pack.c` stays libc-only and leaves a `.chd` unidentified without the hook.
 `ps1_cdrom.c` is the controller of psx-spx: banked registers, parameter / response / data FIFOs, INT1..INT5 queued
 until acknowledged, first / second response times from psx-spx's measurements, seeks approximated by distance, every
 command up to ReadTOC (Test 20h answers vC2), ReadN / ReadS with 800h / 924h sectors and DMA3, XA-ADPCM (filter,
@@ -227,8 +232,9 @@ fast-booted. The picture is the GPU's display area (256 / 320 / 368 / 512 / 640 
 4:3 whatever its width (`host_window_set_aspect`), letterboxed, linear by default (`RECOMP_PS1_FILTER=nearest`,
 `RECOMP_PS1_SCALE=integer`: whole multiples of the height). Pads, Xbox layout: A → Cross, B → Circle, X → Square,
 Y → Triangle, LB / RB → L1 / R1, LT / RT → L2 / R2, Start, Back → Select, stick clicks → L3 / R3, D-pad; port 1 is a
-digital pad (the left stick drives the D-pad too) or, with `RECOMP_PS1_PAD=analog` or Back + L3 + R3 while playing, a
-DualShock in analog mode (both sticks); every host pad drives port 1, or with `RECOMP_PS1_PLAYERS=2` host pads 1 and
+DualShock plugged in in digital mode (the left stick drives the D-pad too) or, with `RECOMP_PS1_PAD=analog`, in
+analog mode (both sticks); the game may switch it itself (config mode) and lock it, Back + L3 + R3 while playing is its
+ANALOG button, and its rumble motors drive the host pad's (`host_pad_rumble`); every host pad drives port 1, or with `RECOMP_PS1_PLAYERS=2` host pads 1 and
 2 drive ports 1 and 2. Sound: `ps1_audio_pull` (44.1 kHz) into `host_audio`, which SDL converts to the device's rate.
 Pacing: the frame's length is the CPU cycles the core ran to the next VBlank (NTSC 59.94 / 59.29, PAL 50 Hz, as the
 GPU's mode says), absolute deadlines nudged ±2 % by the audio queue. Memory cards: `<save dir>/ps1-<KEY>/card1.mcr`

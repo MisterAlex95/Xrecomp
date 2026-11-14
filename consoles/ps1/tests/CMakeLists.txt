@@ -68,8 +68,8 @@ if(XBR_PS1_CHD)
 endif()
 add_test(NAME ps1_identify COMMAND ps1_identify_test)
 set_tests_properties(ps1_identify PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60)
-# The core (P-4 / P-6 / P-9: XBA-162, XBA-164, XBA-167).
-foreach(t cpu gte)
+# The core (P-4 / P-6 / P-9: XBA-162, XBA-164, XBA-167); test_pad.c: the DualShock config commands (XBA-167).
+foreach(t cpu gte pad)
     add_executable(ps1_${t}_test test_${t}.c)
     target_link_libraries(ps1_${t}_test PRIVATE ps1_core)
     target_compile_options(ps1_${t}_test PRIVATE -Wall -Wextra)
