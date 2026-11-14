@@ -11,6 +11,7 @@
  * (VI clock / (DACRATE + 1)), 16-bit big-endian stereo samples, resampled (sample and hold) to 48 kHz into a ring
  * that n64_audio_pull empties. */
 #include "n64_internal.h"
+#include "n64_rdp.h"
 
 #include <string.h>
 
@@ -95,6 +96,7 @@ int n64_display(n64_machine *m, uint32_t *xrgb, int max_w, int max_h, int *w, in
     uint32_t xs = m->vi[12] & 0xFFF, ys = m->vi[13] & 0xFFF;
     *w = 320;
     *h = m->pal ? 288 : 240;
+    n64_rdp_flush(m->rdp); /* with scanline-band threads the RDP may still hold batched primitives */
     if (type < 2 || width == 0 || he <= hs || ve <= vs || xs == 0 || ys == 0)
         return -1;
     int ow = (int)(((uint32_t)(he - hs) * xs + 512) >> 10);

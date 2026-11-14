@@ -1,7 +1,7 @@
 /* Placeholder RDP (n64_devices.h), built when n64_rdp.c (N-6) is absent: the DPC registers and a command walker that
  * draws nothing. Commands from CURRENT to END (RDRAM or, with XBUS, DMEM) are skipped by their length; SYNC_FULL raises
  * the DP interrupt, so code that waits for the RDP to finish carries on. */
-#include "n64_devices.h"
+#include "n64_rdp.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -107,3 +107,13 @@ void n64_rdp_run(n64_rdp *d)
             d->bus.raise(d->bus.ctx, N64_MI_DP);
     }
 }
+
+/* n64_rdp.h: nothing is batched here. */
+int n64_rdp_set_threads(n64_rdp *d, int n)
+{
+    (void)d;
+    (void)n;
+    return 1;
+}
+
+void n64_rdp_flush(n64_rdp *d) { (void)d; }
