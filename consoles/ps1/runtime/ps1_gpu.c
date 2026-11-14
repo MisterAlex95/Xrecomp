@@ -713,7 +713,7 @@ static void *pool_worker(void *arg)
     worker_arg wa = *(worker_arg *)arg;
     free(arg);
     gpu_pool *pool = wa.pool;
-    unsigned seen = atomic_load_explicit(&pool->gen, memory_order_acquire);
+    unsigned seen = 0; /* the generation the pool started at: a job published before this thread ran is not missed */
     for (;;) {
         unsigned gen;
         int spins = 0;

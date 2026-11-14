@@ -948,8 +948,8 @@ int ps1_runtime_run(const ps1_runtime_opts *o)
                             : "disc, BIOS boot",
            key, bios_from);
     if (up_asked > 1)
-        printf("ps1: internal resolution %dx%s, %d GPU worker thread%s\n", up, up == up_asked ? "" : " (no memory for more)",
-               gpu_threads, gpu_threads == 1 ? "" : "s");
+        printf("ps1: internal resolution %dx%s, %d GPU worker thread%s\n", up,
+               up == up_asked ? "" : " (no memory for more)", gpu_threads, gpu_threads == 1 ? "" : "s");
     ps1_pack pack;
     ps1_pack_load(m, o->pack_lib, key, src_sha, &pack); /* the interpreter whatever happens (logged) */
 
