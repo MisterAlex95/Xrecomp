@@ -111,6 +111,7 @@ public class ShellActivity extends SDLActivity {
         applyTitleVideo();
         applyLanguage();
         applyN64Pak(rom != null);
+        applyVkDriver(rom != null);
         Console console = applyConsolePad(rom != null);
         boolean checked = LibraryCheck.applyRunEnv(this);   // a library check's run: status file and pad script (XBA-130)
         applyBuiltinPad();
@@ -288,6 +289,34 @@ public class ShellActivity extends SDLActivity {
         }
         if (tid != null && Console.ofKey(tid) == Console.N64)
             Log.i(LauncherActivity.TAG, "shell: n64 pak " + (v != null ? v : "default (recomp.cfg, else controller)")
+                                        + ", game " + tid);
+    }
+
+    /**
+     * The custom Vulkan driver for the N64 Vulkan RDP ({@link VkDrivers}): for an N64 game with an active, still
+     * installed driver, RECOMP_VK_DRIVER_DIR / _LIB / _ID and RECOMP_VK_HOOK_DIR; otherwise all four unset, also
+     * clearing what a previous game of this process had. RECOMP_VK_DRIVER=system in recomp.cfg still wins natively.
+     * A game's own app uses its own files/vk_drivers (the driver it took from XRecomp).
+     */
+    private void applyVkDriver(boolean romLaunch) {
+        String tid = romLaunch ? GameStore.launchedTitleId(this) : null;
+        boolean n64 = tid != null && Console.ofKey(tid) == Console.N64;
+        VkDrivers drivers = VkDrivers.of(this);
+        VkDrivers.Driver d = n64 ? drivers.active() : null;
+        for (String[] kv : VkDrivers.runEnv(d, getApplicationInfo().nativeLibraryDir)) {
+            try {
+                if (kv[1] != null)
+                    Os.setenv(kv[0], kv[1], true);
+                else
+                    Os.unsetenv(kv[0]);
+            } catch (ErrnoException e) {
+                Log.w(LauncherActivity.TAG, "shell: cannot set " + kv[0], e);
+            }
+        }
+        if (n64)
+            Log.i(LauncherActivity.TAG, "shell: vulkan driver " + (d == null ? "system"
+                                        : d.name + " (" + d.id + ")"
+                                          + (drivers.failedLastStart(d.id) ? ", failed at the last start" : ""))
                                         + ", game " + tid);
     }
 
