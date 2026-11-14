@@ -5598,7 +5598,8 @@ public class LauncherActivity extends Activity {
     // ---- ROM_OPTIONS (XBA-181) ----------------------------------------------------------------------------------
 
     /**
-     * A GBA, PS1 or N64 game's Options: its own scale and filter (ConsoleVideo: « As in Settings », then each value;
+     * A GBA, PS1 or N64 game's Options: its own scale and filter, and for a PS1 or N64 game its internal resolution
+     * (XBA-184) (ConsoleVideo: « As in Settings », then each value;
      * ShellActivity hands them to the runtime at the game's next start), then its stored things (the saves, the pack,
      * the Prepare's files: Storage, each deleted on its own, A twice, as in Manage).
      */
@@ -5615,15 +5616,20 @@ public class LauncherActivity extends Activity {
         listLabel(list, getString(R.string.ROM_OPT_PICTURE));
         MenuRow first = null;
         for (ConsoleVideo.Setting s : ConsoleVideo.Setting.values()) {
-            boolean scale = s == ConsoleVideo.Setting.SCALE;
-            RecompConfig.Option global = optionTitled(scale ? R.string.OPT_CSCALE : R.string.OPT_CFILTER);
+            if (!ConsoleVideo.applies(s, Console.ofKey(key)))
+                continue;
+            int title = s == ConsoleVideo.Setting.SCALE ? R.string.OPT_CSCALE
+                        : s == ConsoleVideo.Setting.FILTER ? R.string.OPT_CFILTER : R.string.OPT_UPSCALE;
+            int detail = s == ConsoleVideo.Setting.SCALE ? R.string.ROM_OPT_SCALE_DETAIL
+                         : s == ConsoleVideo.Setting.FILTER ? R.string.ROM_OPT_FILTER_DETAIL
+                                                            : R.string.ROM_OPT_UPSCALE_DETAIL;
+            RecompConfig.Option global = optionTitled(title);
             String follow = getString(R.string.ROM_OPT_FOLLOW, choiceLabel(cfg, global));
             String[] labels = new String[s.values.length + 1];
             labels[0] = follow;
             for (int i = 0; i < s.values.length; i++)
                 labels[i + 1] = getString(s.labels[i]);
-            MenuRow r = settingRow(list, getString(scale ? R.string.OPT_CSCALE : R.string.OPT_CFILTER),
-                                   getString(scale ? R.string.ROM_OPT_SCALE_DETAIL : R.string.ROM_OPT_FILTER_DETAIL));
+            MenuRow r = settingRow(list, getString(title), getString(detail));
             r.setChoices(labels);
             Runnable refresh = () -> {
                 String v = ConsoleVideo.gameChoice(this, key, s);

@@ -570,6 +570,9 @@ public class LauncherScreensTest {
         assertNotNull(filter);
         assertEquals(app.getString(R.string.VAL_CSCALE_ASPECT), scale.value);
         assertEquals(app.getString(R.string.VAL_CFILTER_CONSOLE), filter.value);
+        Widgets.MenuRow upscale = row(a, app.getString(R.string.OPT_UPSCALE));   // XBA-184
+        assertNotNull(upscale);
+        assertEquals(app.getString(R.string.VAL_UPSCALE_NATIVE), upscale.value);
         scale.requestFocusFromTouch();
         key(a, KeyEvent.KEYCODE_DPAD_RIGHT);
         assertEquals(app.getString(R.string.VAL_CSCALE_INTEGER), scale.value);
@@ -578,6 +581,10 @@ public class LauncherScreensTest {
         RecompConfig c = RecompConfig.load(GameStore.externalFilesDir(app));
         assertEquals("integer", c.get("RECOMP_SCALE"));
         assertEquals("nearest", c.get("RECOMP_FILTER"));
+        upscale.requestFocusFromTouch();
+        key(a, KeyEvent.KEYCODE_DPAD_RIGHT);
+        assertEquals(app.getString(R.string.VAL_UPSCALE_2X), upscale.value);
+        assertEquals("2", RecompConfig.load(GameStore.externalFilesDir(app)).get("RECOMP_UPSCALE"));
         key(a, KeyEvent.KEYCODE_BUTTON_R1);
         assertTrue("Audio", hasText(a, app.getString(R.string.SET_GROUP_ALL)));
         assertNotNull(row(a, app.getString(R.string.OPT_AUDIO_BUF)));

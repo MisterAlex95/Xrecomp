@@ -596,10 +596,10 @@ static void t_display(void)
 }
 
 /* ---- Scenes ------------------------------------------------------------------------------------------------------- */
-static void t_gfx_replica(void)
+/* The homebrew gfx.exe's frame, drawn into g; its 16 bpp texture and CLUT returned. */
+static void gfx_scene(ps1_gpu *g, uint16_t tex16[256], uint16_t clut[16])
 {
-    fresh("gfx.exe replica");
-    uint16_t tex16[256], tex4[64], clut[16];
+    uint16_t tex4[64];
     for (int y = 0; y < 16; y++)
         for (int x = 0; x < 16; x++)
             tex16[y * 16 + x] = ((x >> 2) ^ (y >> 2)) & 1 ? P15(31, 31, 31) : P15(31, 0, 16);
@@ -612,18 +612,25 @@ static void t_gfx_replica(void)
         }
     for (int i = 0; i < 16; i++)
         clut[i] = (uint16_t)(P15(i * 2, 31 - i * 2, 8) | (i ? 0 : 0x8000));
-    upload(G, 640, 0, 16, 16, tex16);
-    upload(G, 640, 256, 4, 16, tex4);
-    upload(G, 640, 480, 16, 1, clut);
-    GP0(G, 0xE3000000, 0xE4000000 | 239 << 10 | 319, 0xE5000000, 0xE1000000);
-    GP0(G, 0x02202020, XY(0, 0), XY(320, 240));
-    GP0(G, 0xE1000000 | TPAGE(10, 1, 0, 0));
-    GP0(G, 0x64808080, XY(160, 140), UV(0, 0, (int)CLUT(640, 480)), XY(16, 16));
-    GP0(G, 0x2C808080, XY(16, 120), UV(0, 0, 0), XY(112, 120), UV(15, 0, (int)TPAGE(10, 0, 0, 2)), XY(16, 216),
+    upload(g, 640, 0, 16, 16, tex16);
+    upload(g, 640, 256, 4, 16, tex4);
+    upload(g, 640, 480, 16, 1, clut);
+    GP0(g, 0xE3000000, 0xE4000000 | 239 << 10 | 319, 0xE5000000, 0xE1000000);
+    GP0(g, 0x02202020, XY(0, 0), XY(320, 240));
+    GP0(g, 0xE1000000 | TPAGE(10, 1, 0, 0));
+    GP0(g, 0x64808080, XY(160, 140), UV(0, 0, (int)CLUT(640, 480)), XY(16, 16));
+    GP0(g, 0x2C808080, XY(16, 120), UV(0, 0, 0), XY(112, 120), UV(15, 0, (int)TPAGE(10, 0, 0, 2)), XY(16, 216),
         UV(0, 15, 0), XY(112, 216), UV(15, 15, 0));
-    GP0(G, 0x380000FF, XY(220, 16), 0x0000FF00, XY(300, 16), 0x00FF0000, XY(220, 96), 0x00FFFFFF, XY(300, 96));
-    GP0(G, 0x2000FF00, XY(120, 16), XY(200, 100), XY(100, 90));
-    GP0(G, 0x600000FF, XY(16, 16), XY(64, 48));
+    GP0(g, 0x380000FF, XY(220, 16), 0x0000FF00, XY(300, 16), 0x00FF0000, XY(220, 96), 0x00FFFFFF, XY(300, 96));
+    GP0(g, 0x2000FF00, XY(120, 16), XY(200, 100), XY(100, 90));
+    GP0(g, 0x600000FF, XY(16, 16), XY(64, 48));
+}
+
+static void t_gfx_replica(void)
+{
+    fresh("gfx.exe replica");
+    uint16_t tex16[256], clut[16];
+    gfx_scene(G, tex16, clut);
     expect_px(20, 20, 0x001F);
     expect_px(150, 60, 0x03E0);
     expect_px(5, 5, 0x1084);
@@ -659,6 +666,253 @@ static void t_busy(void)
     ps1_gpu_dma_write(G, words, 3);
     check(px(5, 5) == 0x1084, "DMA write");
     ps1_gpu_destroy(a);
+}
+
+/* ---- Internal resolution upscale (XBA-184) ----------------------------------------------------------------------- */
+#ifndef GOLDEN_GFX_2X
+#define GOLDEN_GFX_2X 0xB7AB1136u
+#endif
+#ifndef GOLDEN_GFX_4X
+#define GOLDEN_GFX_4X 0xAEAC961Au
+#endif
+#ifndef GOLDEN_BUSY_2X
+#define GOLDEN_BUSY_2X 0xCFF53DF7u
+#endif
+#ifndef GOLDEN_BUSY_4X
+#define GOLDEN_BUSY_4X 0xEAA96334u
+#endif
+
+/* FNV-1a of the shadow's (x, y, w, h) native rectangle, at factor n. */
+static uint32_t hash_hi(ps1_gpu *g, int n, int x, int y, int w, int h)
+{
+    const uint16_t *hi = ps1_gpu_vram_hi(g);
+    uint32_t hsh = 2166136261u;
+    for (int j = 0; j < h * n; j++)
+        for (int i = 0; i < w * n; i++) {
+            uint16_t p = hi[(size_t)(y * n + j) * (size_t)(1024 * n) + (size_t)(x * n + i)];
+            hsh = (hsh ^ (p & 0xFF)) * 16777619u;
+            hsh = (hsh ^ (p >> 8)) * 16777619u;
+        }
+    return hsh;
+}
+
+/* Is the shadow's (x, y, w, h) native rectangle the native VRAM's pixels, each an n x n block? (The first difference
+ * logged unless quiet.) */
+static int hi_blocks(ps1_gpu *g, int n, int x, int y, int w, int h, int quiet)
+{
+    const uint16_t *v = ps1_gpu_vram(g), *hi = ps1_gpu_vram_hi(g);
+    for (int j = 0; j < h * n; j++)
+        for (int i = 0; i < w * n; i++) {
+            int sx = x * n + i, sy = y * n + j;
+            if (hi[(size_t)sy * (size_t)(1024 * n) + (size_t)sx] != v[(sy / n) * 1024 + sx / n]) {
+                if (!quiet)
+                    fprintf(stderr, "  shadow (%d,%d) = %04X, native (%d,%d) = %04X\n", sx, sy,
+                        hi[(size_t)sy * (size_t)(1024 * n) + (size_t)sx], sx / n, sy / n, v[(sy / n) * 1024 + sx / n]);
+                return 0;
+            }
+        }
+    return 1;
+}
+#define hi_is_blocks(g, n, x, y, w, h) hi_blocks(g, n, x, y, w, h, 0)
+
+/* Reads (x, y, w, h) back through GPUREAD (GP0(C0h)). */
+static void gpuread(ps1_gpu *g, int x, int y, int w, int h, uint32_t *out)
+{
+    GP0(g, 0xC0000000, XY(x, y), XY(w, h));
+    for (int i = 0; i < (w * h + 1) / 2; i++)
+        out[i] = ps1_gpu_read(g);
+}
+
+static void t_upscale(void)
+{
+    static const int factors[2] = { 2, 4 };
+    static const uint32_t golden_gfx[2] = { GOLDEN_GFX_2X, GOLDEN_GFX_4X };
+    static const uint32_t golden_busy[2] = { GOLDEN_BUSY_2X, GOLDEN_BUSY_4X };
+    static uint32_t out[640 * 4 * 512 * 4];
+    static uint32_t rd1[320 * 240 / 2], rdn[320 * 240 / 2];
+    uint16_t tex16[256], clut[16];
+
+    fresh("upscale factor");
+    check(ps1_gpu_upscale(G) == 1, "1x by default");
+    check(ps1_gpu_vram_hi(G) == ps1_gpu_vram(G), "no shadow at 1x");
+    check(ps1_gpu_set_upscale(G, 2) == 2 && ps1_gpu_upscale(G) == 2, "2x");
+    check(ps1_gpu_set_upscale(G, 8) == 4, "8x caps at 4x");
+    check(ps1_gpu_set_upscale(G, 3) == 2, "3x is 2x");
+    check(ps1_gpu_set_upscale(G, 1) == 1 && ps1_gpu_vram_hi(G) == ps1_gpu_vram(G), "back to 1x");
+
+    for (int f = 0; f < 2; f++) {
+        int n = factors[f];
+        char name[64];
+        /* The native VRAM is what a game reads back: the same bytes as at 1x, through GPUREAD too. */
+        snprintf(name, sizeof name, "upscale %dx: native VRAM coherent", n);
+        fresh(name);
+        ps1_gpu *one = ps1_gpu_create((ps1_irq_sink){ 0 });
+        gpu_open(one);
+        check(ps1_gpu_set_upscale(G, n) == n, "factor set");
+        scene_textures(one);
+        scene_textures(G);
+        scene_busy(one, 400, 12345);
+        scene_busy(G, 400, 12345);
+        GP0(one, 0x80000000, XY(0, 0), XY(400, 0), XY(64, 32)); /* VRAM->VRAM copy */
+        GP0(G, 0x80000000, XY(0, 0), XY(400, 0), XY(64, 32));
+        check(!memcmp(ps1_gpu_vram(one), ps1_gpu_vram(G), 1024 * 512 * 2), "native VRAM = 1x VRAM");
+        gpuread(one, 0, 0, 320, 240, rd1);
+        gpuread(G, 0, 0, 320, 240, rdn);
+        check(!memcmp(rd1, rdn, sizeof rd1), "GPUREAD = 1x GPUREAD");
+        check(fnv1a16(ps1_gpu_vram(G), 0, 0, 320, 240) == GOLDEN_BUSY, "native busy scene = 1x golden");
+        uint32_t hb = hash_hi(G, n, 0, 0, 320, 240);
+        printf("busy scene %dx shadow hash %08X\n", n, hb);
+        /* the shadow pass's workers change nothing: none, then three, the same picture */
+        for (int th = 0; th <= 3; th += 3) {
+            ps1_gpu *t = ps1_gpu_create((ps1_irq_sink){ 0 });
+            gpu_open(t);
+            ps1_gpu_set_upscale(t, n);
+            check(ps1_gpu_set_threads(t, th) == th, "workers started");
+            scene_textures(t);
+            scene_busy(t, 400, 12345);
+            GP0(t, 0x80000000, XY(0, 0), XY(400, 0), XY(64, 32));
+            check(hash_hi(t, n, 0, 0, 1024, 512) == hash_hi(G, n, 0, 0, 1024, 512), "same shadow whatever the workers");
+            gfx_scene(t, tex16, clut);
+            ps1_gpu *u = ps1_gpu_create((ps1_irq_sink){ 0 });
+            gpu_open(u);
+            ps1_gpu_set_upscale(u, n);
+            ps1_gpu_set_threads(u, 3 - th);
+            scene_textures(u);
+            scene_busy(u, 400, 12345);
+            GP0(u, 0x80000000, XY(0, 0), XY(400, 0), XY(64, 32));
+            gfx_scene(u, tex16, clut);
+            check(hash_hi(t, n, 0, 0, 1024, 512) == hash_hi(u, n, 0, 0, 1024, 512), "gfx scene: same shadow");
+            ps1_gpu_destroy(u);
+            ps1_gpu_destroy(t);
+        }
+        if (golden_busy[f] && hb != golden_busy[f]) {
+            fprintf(stderr, "FAIL busy scene %dx: hash %08X, want %08X\n", n, hb, golden_busy[f]);
+            failures++;
+        }
+        check(!hi_blocks(G, n, 0, 0, 320, 240, 1), "the shadow has more detail than the native picture");
+        /* the copy moved the shadow's blocks: its destination is the source's detail */
+        check(hash_hi(G, n, 400, 0, 64, 32) == hash_hi(G, n, 0, 0, 64, 32), "VRAM copy copies the shadow");
+        ps1_gpu_destroy(one);
+
+        snprintf(name, sizeof name, "upscale %dx: gfx.exe replica", n);
+        fresh(name);
+        ps1_gpu_set_upscale(G, n);
+        gfx_scene(G, tex16, clut);
+        check(fnv1a16(ps1_gpu_vram(G), 0, 0, 320, 240) == GOLDEN_GFX, "native gfx replica = 1x golden");
+        uint32_t hg = hash_hi(G, n, 0, 0, 320, 240);
+        printf("gfx replica %dx shadow hash %08X\n", n, hg);
+        if (golden_gfx[f] && hg != golden_gfx[f]) {
+            fprintf(stderr, "FAIL gfx replica %dx: hash %08X, want %08X\n", n, hg, golden_gfx[f]);
+            failures++;
+        }
+        /* axis-aligned flat rectangles, fills and untextured sprites are exact blocks */
+        check(hi_is_blocks(G, n, 16, 16, 64, 48), "flat rectangle = blocks");
+        check(hi_is_blocks(G, n, 0, 0, 12, 12), "fill = blocks");
+        check(hi_is_blocks(G, n, 160, 140, 16, 16), "4 bpp sprite = blocks");
+
+        /* The display reads the shadow: n times the size. */
+        ps1_gpu_gp1(G, 0x03000000);
+        ps1_gpu_gp1(G, 0x08000001);
+        ps1_gpu_gp1(G, 0x06000000 | 0x260 | (0x260 + 320 * 8) << 12);
+        ps1_gpu_gp1(G, 0x07000000 | 0x10 | (0x10 + 240) << 10);
+        ps1_gpu_gp1(G, 0x05000000);
+        int w = 0, h = 0;
+        check(ps1_gpu_display(G, out, 640 * n, 512 * n, &w, &h) == 0 && w == 320 * n && h == 240 * n,
+              "display n times the size");
+        const uint16_t *hi = ps1_gpu_vram_hi(G);
+        int same = 1;
+        for (int j = 0; j < h && same; j += 7)
+            for (int i = 0; i < w; i += 5) {
+                uint16_t p = hi[(size_t)j * (size_t)(1024 * n) + (size_t)i];
+                uint32_t r = p & 31, gg = (p >> 5) & 31, b = (p >> 10) & 31;
+                uint32_t want = (r << 3 | r >> 2) << 16 | (gg << 3 | gg >> 2) << 8 | (b << 3 | b >> 2);
+                if (out[(size_t)j * (size_t)w + (size_t)i] != want) {
+                    same = 0;
+                    break;
+                }
+            }
+        check(same, "display = the shadow");
+        check(ps1_gpu_display(G, out, 320 * n - 1, 512, &w, &h) == 0 && w == 320 && h == 240,
+              "native picture when the buffer is too small (a thumbnail)");
+        ps1_gpu_gp1(G, 0x08000011); /* 24-bit: native pixels repeated */
+        GP0(G, 0xA0000000, XY(0, 0), XY(4, 1), 0x44332211, 0x00006655);
+        check(ps1_gpu_display(G, out, 640 * n, 512 * n, &w, &h) == 0 && w == 320 * n, "24-bit size");
+        expect_u32("24-bit block corner", out[(size_t)(n - 1) * (size_t)w + (size_t)(n - 1)], 0x112233);
+        expect_u32("24-bit next pixel", out[n], 0x445566);
+
+        /* CPU->VRAM writes and fills set blocks; sprites flipped and lines are blocks too. */
+        snprintf(name, sizeof name, "upscale %dx: writes, flips, lines", n);
+        fresh(name);
+        ps1_gpu_set_upscale(G, n);
+        static uint16_t px16[64 * 16];
+        for (int i = 0; i < 64 * 16; i++)
+            px16[i] = (uint16_t)(i * 0x1357u + 1);
+        upload(G, 640, 0, 16, 16, px16);
+        upload(G, 3, 5, 7, 3, px16);
+        check(hi_is_blocks(G, n, 0, 0, 16, 16), "CPU->VRAM writes = blocks");
+        GP0(G, 0xE1000000 | TPAGE(10, 0, 0, 2) | 1 << 12 | 1 << 13); /* 15 bpp, flipped both ways */
+        GP0(G, 0x65808080, XY(100, 50), UV(2, 3, 0), XY(12, 9));
+        GP0(G, 0xE1000000 | TPAGE(10, 0, 0, 2));
+        GP0(G, 0x65808080, XY(130, 50), UV(1, 1, 0), XY(12, 9));
+        check(hi_is_blocks(G, n, 96, 46, 60, 20), "textured sprites (and flipped) = blocks");
+        GP0(G, 0x40FFFFFF, XY(10, 100), XY(40, 100));  /* horizontal, vertical, single point */
+        GP0(G, 0x4000FF00, XY(60, 120), XY(60, 90));
+        GP0(G, 0x40FF0000, XY(70, 70), XY(70, 70));
+        check(hi_is_blocks(G, n, 0, 60, 100, 70), "straight lines = blocks");
+        GP0(G, 0x40FFFFFF, XY(200, 100), XY(260, 130)); /* a diagonal: 61 native pixels' worth, no gap or overlap */
+        const uint16_t *hl = ps1_gpu_vram_hi(G);
+        int lit = 0;
+        for (int j = 95 * n; j < 135 * n; j++)
+            for (int i = 195 * n; i < 265 * n; i++)
+                lit += hl[(size_t)j * (size_t)(1024 * n) + (size_t)i] != 0;
+        check(lit == 61 * n * n, "diagonal line: 61 x n x n shadow pixels");
+
+        /* A state is the native GPU (the size it had at 1x); loaded, the shadow is made again from its VRAM. */
+        snprintf(name, sizeof name, "upscale %dx: save state", n);
+        fresh(name);
+        ps1_gpu *ref = ps1_gpu_create((ps1_irq_sink){ 0 });
+        size_t sz1 = ps1_gpu_state_size(ref);
+        ps1_gpu_set_upscale(G, n);
+        check(ps1_gpu_state_size(G) == sz1, "state size as at 1x");
+        gfx_scene(G, tex16, clut);
+        static uint8_t blob[1200000];
+        if (sz1 <= sizeof blob) {
+            ps1_gpu_state_save(G, blob);
+            check(ps1_gpu_state_load(ref, blob, sz1) == 0, "a 1x GPU loads it");
+            check(!memcmp(ps1_gpu_vram(ref), ps1_gpu_vram(G), 1024 * 512 * 2), "same VRAM at 1x");
+            ps1_gpu *b = ps1_gpu_create((ps1_irq_sink){ 0 });
+            ps1_gpu_set_upscale(b, n);
+            check(ps1_gpu_state_load(b, blob, sz1) == 0 && ps1_gpu_upscale(b) == n, "an upscaled GPU loads it");
+            check(hi_is_blocks(b, n, 0, 0, 1024, 512), "its shadow rebuilt from the VRAM");
+            GP0(b, 0x02000000, XY(0, 0), XY(16, 16));
+            check(hi_is_blocks(b, n, 0, 0, 16, 16), "and drawn into after the load");
+            ps1_gpu_destroy(b);
+        } else {
+            check(0, "state blob buffer too small");
+        }
+        ps1_gpu_destroy(ref);
+    }
+
+    /* Random streams at 4x: nothing reads or writes outside the shadow (ASan / UBSan), the native VRAM still that of a
+     * 1x GPU. */
+    fresh("upscale 4x fuzz");
+    ps1_gpu *one = ps1_gpu_create((ps1_irq_sink){ 0 });
+    gpu_open(one);
+    ps1_gpu_set_upscale(G, 4);
+    uint32_t sd = 4242;
+    for (int i = 0; i < 60000; i++) {
+        uint32_t r = scene_rand(&sd) ^ scene_rand(&sd) << 24;
+        uint32_t w = i % 5 == 0 ? (0x20u + (r >> 24) % 0xC0u) << 24 | (r & 0xFFFFFF) : r;
+        ps1_gpu_gp0(one, w);
+        ps1_gpu_gp0(G, w);
+        if (i % 997 == 0) {
+            uint32_t g1 = (r & 0x0F00FFFF) | (r % 12) << 24;
+            ps1_gpu_gp1(one, g1);
+            ps1_gpu_gp1(G, g1);
+        }
+    }
+    check(!memcmp(ps1_gpu_vram(one), ps1_gpu_vram(G), 1024 * 512 * 2), "native VRAM = 1x after fuzz");
+    ps1_gpu_destroy(one);
 }
 
 /* Random command streams (random words after random command bytes, random GP1 writes): nothing may crash or read
@@ -707,6 +961,7 @@ int main(void)
     t_display();
     t_gfx_replica();
     t_busy();
+    t_upscale();
     t_fuzz();
     ps1_gpu_destroy(G);
     if (failures) {

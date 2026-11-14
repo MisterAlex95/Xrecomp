@@ -3,7 +3,7 @@
  * debugged on Android.
  *
  *   ps1_play DISC|EXE [--exe X.exe] [--frames N] [--save-dir DIR] [--bios PATH] [--scale aspect|integer|stretch]
- *                     [--filter nearest|linear] [--pad digital|analog] [--players 1|2] [--headless] [--unpaced]
+ *                     [--filter nearest|linear] [--upscale 1|2|4] [--pad digital|analog] [--players 1|2] [--headless] [--unpaced]
  *                     [--buttons MASK] [--screenshot OUT.ppm] [--capture N OUT.ppm] [--key KEY]
  *                     [--pack LIB.so] [--missed FILE] [--no-fast-boot] [--swap FRAME:DISC]
  *
@@ -18,6 +18,8 @@
  *                   HLE BIOS); "hle": the HLE BIOS
  * --scale, --filter how the 4:3 picture fills the window (default aspect, linear; $RECOMP_PS1_SCALE / _FILTER, else
  *                   $RECOMP_SCALE / $RECOMP_FILTER); --scale stretch fills the whole window
+ * --upscale N       internal resolution: the GPU draws N times the PS1's (default $RECOMP_PS1_UPSCALE, else
+ *                   $RECOMP_UPSCALE, else 1); the picture (and --screenshot) is N times wider and higher
  * --pad             the pad in port 1 (default digital; $RECOMP_PS1_PAD); Back + L3 + R3 switches while playing
  * --players 2       host pad 1 -> port 1, host pad 2 -> port 2 (default: every pad drives port 1)
  * --headless        no window (also with SDL_VIDEODRIVER=dummy or no DISPLAY): frames, pads, audio, cards only
@@ -56,7 +58,7 @@
 static int usage(void)
 {
     fprintf(stderr, "usage: ps1_play DISC|EXE [--exe X.exe] [--frames N] [--save-dir DIR] [--bios PATH]\n"
-                    "                [--scale aspect|integer|stretch] [--filter nearest|linear]\n"
+                    "                [--scale aspect|integer|stretch] [--filter nearest|linear] [--upscale 1|2|4]\n"
                     "                [--pad digital|analog] [--players 1|2] [--headless] [--unpaced] [--buttons MASK]\n"
                     "                [--screenshot OUT.ppm] [--capture N OUT.ppm] [--key KEY]\n"
                     "                [--pack LIB.so] [--missed FILE] [--no-fast-boot] [--swap FRAME:DISC]\n");
@@ -91,7 +93,11 @@ int main(int argc, char **argv)
             if (o.filter < 0)
                 return usage();
         }
-        else if (!strcmp(a, "--pad") && more)
+        else if (!strcmp(a, "--upscale") && more) {
+            o.upscale = atoi(argv[++i]);
+            if (o.upscale < 1 || o.upscale > 8)
+                return usage();
+        } else if (!strcmp(a, "--pad") && more)
             o.analog = !strcmp(argv[++i], "analog");
         else if (!strcmp(a, "--players") && more)
             o.players = atoi(argv[++i]) >= 2 ? 2 : 1;

@@ -22,6 +22,7 @@
     <string name="MENU_VIDEO_FOLLOW">Comme les Réglages</string>
     <string name="MENU_SCALE">Échelle (au prochain lancement)</string>
     <string name="MENU_FILTER">Filtre (au prochain lancement)</string>
+    <string name="MENU_UPSCALE">Résolution (au prochain lancement)</string>
     <string name="MENU_BACK">Retour</string>
     <string name="MENU_HINT_SELECT">Choisir</string>
     <string name="MENU_HINT_BACK">Retour</string>

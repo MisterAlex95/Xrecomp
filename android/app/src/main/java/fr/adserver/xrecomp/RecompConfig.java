@@ -124,6 +124,12 @@ final class RecompConfig {
                    new Choice(R.string.VAL_CFILTER_CONSOLE, (String)null),
                    new Choice(R.string.VAL_CFILTER_NEAREST, ConsoleVideo.FILTER_NEAREST),
                    new Choice(R.string.VAL_CFILTER_LINEAR, ConsoleVideo.FILTER_LINEAR)).shared(),
+        // XBA-184: the PS1 and N64 internal resolution (ConsoleVideo; a game can have its own, upscale_<KEY>).
+        new Option(Section.GRAPHICS, R.string.OPT_UPSCALE, R.string.OPT_UPSCALE_DETAIL, keys(ConsoleVideo.ENV_UPSCALE),
+                   new Choice(R.string.VAL_UPSCALE_NATIVE, (String)null),
+                   new Choice(R.string.VAL_UPSCALE_2X, ConsoleVideo.UPSCALE_2X),
+                   new Choice(R.string.VAL_UPSCALE_4X, ConsoleVideo.UPSCALE_4X),
+                   new Choice(R.string.VAL_UPSCALE_8X, ConsoleVideo.UPSCALE_8X)).shared(),
         new Option(Section.GRAPHICS, R.string.OPT_GPU, R.string.OPT_GPU_DETAIL,
                    keys("RECOMP_GPU"),
                    new Choice(R.string.VAL_AUTO, (String)null), new Choice(R.string.VAL_GPU_CPU, "0"),

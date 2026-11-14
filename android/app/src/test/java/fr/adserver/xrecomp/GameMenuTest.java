@@ -759,6 +759,7 @@ public class GameMenuTest {
         assertEquals(activity.getString(R.string.VAL_CSCALE_INTEGER), scale.value);
         filter.performClick();
         assertEquals("nearest", ConsoleVideo.gameChoice(activity, key, ConsoleVideo.Setting.FILTER));
+        assertNull("a GBA game: no internal resolution", menu.row(GameMenu.Item.UPSCALE));
         assertNull("nothing under the Xbox game's ID", ConsoleVideo.gameChoice(activity, "4D5300D1",
                                                                             ConsoleVideo.Setting.SCALE));
         assertNull(GameLanguage.titleChoice(activity, "4D5300D1"));
@@ -780,6 +781,14 @@ public class GameMenuTest {
         build();
         menu.open("Back");
         menu.row(GameMenu.Item.SETTINGS).performClick();
+        Widgets.MenuRow up = menu.row(GameMenu.Item.UPSCALE);   // XBA-184: its internal resolution, next start
+        assertNotNull(up);
+        assertEquals(activity.getString(R.string.MENU_UPSCALE), up.title);
+        assertEquals(activity.getString(R.string.MENU_VIDEO_FOLLOW), up.value);
+        up.performClick();
+        up.performClick();
+        assertEquals("2", ConsoleVideo.gameChoice(activity, key, ConsoleVideo.Setting.UPSCALE));
+        assertEquals(activity.getString(R.string.VAL_UPSCALE_2X), up.value);
         Widgets.MenuRow r = menu.row(GameMenu.Item.VK_DRIVER);
         assertNotNull(r);
         assertEquals(activity.getString(R.string.MENU_VK_DRIVER), r.title);
@@ -819,6 +828,7 @@ public class GameMenuTest {
         assertNotNull(menu.row(GameMenu.Item.LANGUAGE));
         assertNull(menu.row(GameMenu.Item.SCALE));
         assertNull(menu.row(GameMenu.Item.FILTER));
+        assertNull(menu.row(GameMenu.Item.UPSCALE));
     }
 
     @Test

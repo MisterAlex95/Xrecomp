@@ -39,6 +39,9 @@ public class ConsoleVideoTest {
         assertEquals("RECOMP_FILTER", ConsoleVideo.ENV_FILTER);
         assertEquals(List.of("aspect", "integer", "stretch"), List.of(ConsoleVideo.Setting.SCALE.values));
         assertEquals(List.of("nearest", "linear"), List.of(ConsoleVideo.Setting.FILTER.values));
+        assertEquals("RECOMP_UPSCALE", ConsoleVideo.ENV_UPSCALE);
+        assertEquals(List.of("1", "2", "4", "8"), List.of(ConsoleVideo.Setting.UPSCALE.values));
+        assertEquals("upscale_", ConsoleVideo.Setting.UPSCALE.filePrefix);
         assertEquals(List.of("RECOMP_PRESENT_VSYNC", "RECOMP_AUDIO_BUF_SAMPLES", "RECOMP_RUMBLE"),
                      List.of(ConsoleVideo.SHARED_ENV));
         assertEquals("RECOMP_RUMBLE", RecompConfig.ENV_RUMBLE);
@@ -98,8 +101,8 @@ public class ConsoleVideoTest {
         RecompConfig cfg = RecompConfig.load(dir);
         // Nothing anywhere: everything unset (the runtime's defaults), and an unset value clears a previous game's.
         List<String[]> env = ConsoleVideo.runEnv(Console.PS1, null, null, cfg);
-        assertEquals(List.of("RECOMP_SCALE", "RECOMP_FILTER", "RECOMP_PRESENT_VSYNC", "RECOMP_AUDIO_BUF_SAMPLES",
-                             "RECOMP_RUMBLE"), keys(env));
+        assertEquals(List.of("RECOMP_SCALE", "RECOMP_FILTER", "RECOMP_UPSCALE", "RECOMP_PRESENT_VSYNC",
+                             "RECOMP_AUDIO_BUF_SAMPLES", "RECOMP_RUMBLE"), keys(env));
         for (String[] kv : env)
             assertNull(kv[0], kv[1]);
         // Settings' lines.
@@ -119,15 +122,57 @@ public class ConsoleVideoTest {
         assertEquals("integer", value(env, "RECOMP_SCALE"));
         assertEquals("linear", value(env, "RECOMP_FILTER"));
         assertEquals("0", value(env, "RECOMP_PRESENT_VSYNC"));
-        // An Xbox game: scale and filter unset, the shared ones left to recomp.cfg.
-        env = ConsoleVideo.runEnv(Console.XBOX, "integer", "linear", cfg);
-        assertEquals(List.of("RECOMP_SCALE", "RECOMP_FILTER"), keys(env));
+        // An Xbox game: scale, filter and internal resolution unset, the shared ones left to recomp.cfg.
+        env = ConsoleVideo.runEnv(Console.XBOX, "integer", "linear", "4", cfg);
+        assertEquals(List.of("RECOMP_SCALE", "RECOMP_FILTER", "RECOMP_UPSCALE"), keys(env));
         assertNull(value(env, "RECOMP_SCALE"));
         assertNull(value(env, "RECOMP_FILTER"));
+        assertNull(value(env, "RECOMP_UPSCALE"));
         // No recomp.cfg at all (no external storage).
         env = ConsoleVideo.runEnv(Console.GBA, null, "nearest", null);
         assertNull(value(env, "RECOMP_SCALE"));
         assertEquals("nearest", value(env, "RECOMP_FILTER"));
+    }
+
+    /** XBA-184: the internal resolution, RECOMP_UPSCALE: a PS1 or N64 game's own (upscale_&lt;KEY&gt;), else Settings',
+     *  else unset (the runtimes' 1x); a GBA game has no own choice (nothing to upscale), Settings' line passes. */
+    @Test
+    public void upscale() throws Exception {
+        Context c = RuntimeEnvironment.getApplication();
+        ConsoleVideo.Setting u = ConsoleVideo.Setting.UPSCALE;
+        assertTrue(ConsoleVideo.applies(u, Console.PS1));
+        assertTrue(ConsoleVideo.applies(u, Console.N64));
+        assertFalse(ConsoleVideo.applies(u, Console.GBA));
+        assertFalse(ConsoleVideo.applies(u, Console.XBOX));
+        assertFalse(ConsoleVideo.applies(u, null));
+        assertTrue(ConsoleVideo.applies(ConsoleVideo.Setting.SCALE, Console.GBA));
+        String ps1 = "ps1-SLUS-00001", n64 = "n64-NZLP-B2055FBD";
+        assertNull(ConsoleVideo.gameChoice(c, ps1, u));
+        assertTrue(ConsoleVideo.setGameChoice(c, ps1, u, "4"));
+        assertEquals("4", ConsoleVideo.gameChoice(c, ps1, u));
+        assertTrue(new File(new File(c.getFilesDir(), "settings"), "upscale_" + ps1.toUpperCase()).isFile());
+        assertTrue(ConsoleVideo.setGameChoice(c, ps1, u, "3"));   // not a value: follows Settings
+        assertNull(ConsoleVideo.gameChoice(c, ps1, u));
+        assertEquals("1", ConsoleVideo.next(u, null, 1));
+        assertEquals("8", ConsoleVideo.next(u, "4", 1));
+        assertNull(ConsoleVideo.next(u, "8", 1));
+        assertEquals("8", ConsoleVideo.next(u, null, -1));
+        assertEquals(R.string.VAL_UPSCALE_NATIVE, ConsoleVideo.label(u, "1"));
+        assertEquals(R.string.VAL_UPSCALE_8X, ConsoleVideo.label(u, "8"));
+        assertEquals(R.string.MENU_VIDEO_FOLLOW, ConsoleVideo.label(u, null));
+
+        RecompConfig cfg = RecompConfig.load(tmp.newFolder("up"));
+        assertNull(value(ConsoleVideo.runEnv(Console.PS1, null, null, null, cfg), "RECOMP_UPSCALE"));
+        cfg.set("RECOMP_UPSCALE", "2");
+        assertEquals("2", value(ConsoleVideo.runEnv(Console.N64, null, null, null, cfg), "RECOMP_UPSCALE"));
+        assertEquals("the game's own", "4",
+                     value(ConsoleVideo.runEnv(Console.PS1, null, null, "4", cfg), "RECOMP_UPSCALE"));
+        assertEquals("8", value(ConsoleVideo.runEnv(Console.N64, null, null, "8", cfg), "RECOMP_UPSCALE"));
+        assertEquals("a GBA game: Settings' line, never its own", "2",
+                     value(ConsoleVideo.runEnv(Console.GBA, null, null, "4", cfg), "RECOMP_UPSCALE"));
+        assertEquals("the 4-argument form: Settings'", "2",
+                     value(ConsoleVideo.runEnv(Console.PS1, null, null, cfg), "RECOMP_UPSCALE"));
+        assertNull(value(ConsoleVideo.runEnv(Console.PS1, null, null, null, null), "RECOMP_UPSCALE"));
     }
 
     private static List<Integer> titles(List<RecompConfig.Option> l) {
@@ -143,11 +188,11 @@ public class ConsoleVideoTest {
         List<RecompConfig.Option> shown = RecompConfig.shownOptions(false);
         List<RecompConfig.Option> g = RecompConfig.tabOptions(shown, RecompConfig.Section.GRAPHICS);
         assertTrue(RecompConfig.grouped(g, RecompConfig.Section.GRAPHICS));
-        assertEquals(List.of(R.string.OPT_VSYNC, R.string.OPT_CSCALE, R.string.OPT_CFILTER),
-                     titles(g).subList(0, 3));
-        for (int i = 3; i < g.size(); i++)
+        assertEquals(List.of(R.string.OPT_VSYNC, R.string.OPT_CSCALE, R.string.OPT_CFILTER, R.string.OPT_UPSCALE),
+                     titles(g).subList(0, 4));
+        for (int i = 4; i < g.size(); i++)
             assertFalse(g.get(i).title + " is the Xbox's", g.get(i).shared);
-        List<Integer> xbox = titles(g).subList(3, g.size());
+        List<Integer> xbox = titles(g).subList(4, g.size());
         for (int t : new int[] { R.string.OPT_GPU, R.string.OPT_GPU_FPS_CAP, R.string.OPT_GPU_SCALE,
                                  R.string.OPT_ASPECT, R.string.OPT_WIDESCREEN, R.string.OPT_480P, R.string.OPT_TEX })
             assertTrue(xbox.contains(t));
@@ -180,6 +225,15 @@ public class ConsoleVideoTest {
                 assertEquals("linear", cfg.get("RECOMP_FILTER"));
                 cfg.set(o, o.choices[0]);
                 assertNull("Console default", cfg.get("RECOMP_FILTER"));
+            } else if (o.title == R.string.OPT_UPSCALE) {
+                assertEquals(0, o.defaultIndex());
+                assertEquals(4, o.choices.length);
+                cfg.set(o, o.choices[1]);
+                assertEquals("2", cfg.get("RECOMP_UPSCALE"));
+                cfg.set(o, o.choices[3]);
+                assertEquals("8", cfg.get("RECOMP_UPSCALE"));
+                cfg.set(o, o.choices[0]);
+                assertNull("Native writes no line", cfg.get("RECOMP_UPSCALE"));
             } else if (o.title == R.string.OPT_RUMBLE) {
                 cfg.set(o, o.choices[1]);
                 assertEquals("0", cfg.get("RECOMP_RUMBLE"));

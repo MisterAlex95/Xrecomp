@@ -19,12 +19,35 @@
  *   - drawing area clip (inclusive), interlaced 480-line mode skips the displayed field's lines unless GP0(E1h)
  *     bit 10 allows drawing to the displayed area.
  * Speed: spans are drawn by straight-line loops specialised per (textured, depth, raw, gouraud, semi-transparent)
- * combination, picked once per primitive; no per-pixel indirect calls. */
+ * combination, picked once per primitive; no per-pixel indirect calls.
+ *
+ * Internal resolution upscale (XBA-184, ps1_gpu_set_upscale), the way Beetle PSX's software renderer does it: the
+ * native 1024 x 512 VRAM stays the truth (CPU and DMA reads, texture and CLUT fetches, VRAM-to-VRAM copies all see
+ * it exactly as at 1x, so a game cannot tell); at N = 2 or 4 a shadow VRAM of N*1024 x N*512 is drawn too:
+ *   - polygons and rectangles are rasterized a second time into the shadow with their vertices scaled by N (same
+ *     rules, same span loops, the drawing area scaled), sampling textures from the native VRAM, so edges, gouraud
+ *     and texture mapping get N times the detail (no PGXP: vertices stay on the native integer grid);
+ *   - lines are drawn at N times the positional detail and N shadow pixels thick (a native line's width);
+ *   - fills and CPU->VRAM writes set whole N x N blocks; VRAM-to-VRAM copies copy the shadow's blocks (an
+ *     off-screen picture copied to the display keeps its detail); the mask bit works on each copy on its own;
+ *   - the display reads the shadow: the picture is N times wider and higher (24-bit pictures, i.e. MDEC movies, are
+ *     native pixels repeated).
+ * The shadow is derived, never saved: a state holds the native GPU only (the same bytes as before XBA-184) and the
+ * shadow is rebuilt from the native VRAM when a state loads (block copies: the detail returns with the next frame).
+ * At 1x there is no shadow and nothing above runs: output and timing are those of the native renderer alone.
+ * The shadow pass costs N^2 times the native one, so a big primitive's shadow rows are split between the calling
+ * thread and up to three workers (ps1_gpu_set_threads; RECOMP_PS1_GPU_THREADS), rows interleaved: every pixel is
+ * computed as by one thread (the same picture whatever the count), the native VRAM is not written meanwhile (the
+ * workers read textures from it), and the caller waits for the bands before the next command. Idle workers spin a
+ * little, then sleep. */
 #include "ps1_devices.h"
 
+#include <pthread.h>
+#include <stdatomic.h>
 #include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #define VRAM_W 1024
 #define VRAM_H 512
@@ -84,7 +107,40 @@ struct ps1_gpu {
 
     uint8_t sat5[SAT5_SIZE]; /* clamp(i - SAT5_BIAS, 0, 255) >> 3 */
     uint16_t vram[VRAM_W * VRAM_H];
+
+    /* Upscale (XBA-184): host side, not state (everything above is; GPU_STATE_SIZE). */
+    uint16_t *hi;  /* (VRAM_W << up) x (VRAM_H << up) shadow; NULL at 1x */
+    int up;        /* log2 of the factor: 0, 1 or 2 */
+    int threads;   /* workers wanted for the shadow pass (-1: by the host's cores) */
+    struct gpu_pool *pool; /* those workers, while upscaled */
 };
+
+/* A state is the GPU up to the shadow: the size it had before XBA-184 (vram ends where the struct's alignment puts
+ * the shadow pointer, as its tail padding did), so states saved by 0.3.0 still load. */
+#define GPU_STATE_SIZE offsetof(ps1_gpu, hi)
+
+/* Where a primitive is rasterized: the native VRAM, or the shadow (shift = up), with the drawing area in its pixels
+ * (x2 / y2 exclusive); a shadow pass worker draws the rows y with y % parts == part only. */
+typedef struct target {
+    uint16_t *base;
+    int stride, shift;
+    int x1, y1, x2, y2;
+    int part, parts;
+} target;
+
+static inline target target_native(ps1_gpu *g)
+{
+    target t = { g->vram, VRAM_W, 0, g->area_x1, g->area_y1, g->area_x2 + 1, g->area_y2 + 1, 0, 1 };
+    return t;
+}
+
+static inline target target_hi(ps1_gpu *g)
+{
+    int s = g->up;
+    target t = { g->hi, VRAM_W << s, s, g->area_x1 << s, g->area_y1 << s, (g->area_x2 + 1) << s,
+                 (g->area_y2 + 1) << s, 0, 1 };
+    return t;
+}
 
 static const int8_t dither_matrix[4][4] = {
     { -4, 0, -3, 1 },
@@ -391,18 +447,19 @@ static inline int32_t sat32(int64_t v)
     return v > INT32_MAX ? INT32_MAX : v < INT32_MIN ? INT32_MIN : (int32_t)v;
 }
 
-static void draw_triangle(ps1_gpu *g, const vtx *a, const vtx *b, const vtx *c, const prim *p, uint32_t flat)
+/* Rasterizes a triangle (already culled) into tg. flat_forced: shade it flat with a's colour (the native pass did,
+ * for a sliver). Returns 1 when it was shaded flat that way. */
+static int raster_tri(ps1_gpu *g, const target *tg, const vtx *a, const vtx *b, const vtx *c, const prim *p,
+                      uint32_t flat, int flat_forced)
 {
-    if (iabs(a->x - b->x) >= 1024 || iabs(b->x - c->x) >= 1024 || iabs(a->x - c->x) >= 1024 ||
-        iabs(a->y - b->y) >= 512 || iabs(b->y - c->y) >= 512 || iabs(a->y - c->y) >= 512)
-        return;
     int x10 = b->x - a->x, y10 = b->y - a->y, x20 = c->x - a->x, y20 = c->y - a->y;
     int64_t area = (int64_t)x10 * y20 - (int64_t)x20 * y10;
     if (area == 0)
-        return;
+        return 0;
 
     raster rs;
     span_fn span = raster_setup(g, &rs, p, flat);
+    int flattened = 0;
 
     /* Attribute planes: A(x, y) = base + dAdx * x + dAdy * y, 16.16, rounded to nearest. */
     int64_t base_r = 0, base_g = 0, base_b = 0, base_u = 0, base_v = 0;
@@ -419,14 +476,14 @@ static void draw_triangle(ps1_gpu *g, const vtx *a, const vtx *b, const vtx *c, 
         PLANE(g, rs.dgdx, dy_g, base_g);
         PLANE(b, rs.dbdx, dy_b, base_b);
         /* A sliver (tiny area) can need a gradient beyond 16.16: shade it flat with v0's colour rather than read
-         * colours far outside 0..255. */
+         * colours far outside 0..255. The shadow pass follows the native one's choice. */
         int32_t gr[6] = { rs.drdx, rs.dgdx, rs.dbdx, dy_r, dy_g, dy_b };
-        for (int i = 0; i < 6; i++)
-            if (gr[i] == INT32_MAX || gr[i] == INT32_MIN) {
+        for (int i = 0; i < 6 && !flattened; i++)
+            if (flat_forced || gr[i] == INT32_MAX || gr[i] == INT32_MIN) {
                 prim q = *p;
                 q.gouraud = 0;
                 span = raster_setup(g, &rs, &q, (uint32_t)(a->r | a->g << 8 | a->b << 16));
-                break;
+                flattened = 1;
             }
     }
     if (p->textured) {
@@ -441,17 +498,17 @@ static void draw_triangle(ps1_gpu *g, const vtx *a, const vtx *b, const vtx *c, 
     if (bt->y < m->y) tmp = m, m = bt, bt = tmp;
     if (m->y < t->y) tmp = t, t = m, m = tmp;
     if (t->y == bt->y)
-        return;
+        return flattened;
     /* Is the middle vertex left of the long edge t->bt? */
     int64_t side = (int64_t)(m->x - t->x) * (bt->y - t->y) - (int64_t)(bt->x - t->x) * (m->y - t->y);
     int mid_left = side < 0;
 
     int y0 = t->y, y1 = bt->y;
-    if (y0 < g->area_y1) y0 = g->area_y1;
-    if (y1 > g->area_y2 + 1) y1 = g->area_y2 + 1;
+    if (y0 < tg->y1) y0 = tg->y1;
+    if (y1 > tg->y2) y1 = tg->y2;
     if (y0 >= y1)
-        return;
-    int xmin = g->area_x1, xmax = g->area_x2 + 1;
+        return flattened;
+    int xmin = tg->x1, xmax = tg->x2, shift = tg->shift, part = tg->part, parts = tg->parts;
     int skip_field = skip_field_line(g);
 
     edge lng, sh;
@@ -470,7 +527,9 @@ static void draw_triangle(ps1_gpu *g, const vtx *a, const vtx *b, const vtx *c, 
         int xl = mid_left ? sh.x : lng.x, xr = mid_left ? lng.x : sh.x;
         edge_step(&lng);
         edge_step(&sh);
-        if (skip_field && (y & 1) == g->field)
+        if (skip_field && ((y >> shift) & 1) == g->field)
+            continue;
+        if (parts > 1 && y % parts != part)
             continue;
         if (xl < xmin) xl = xmin;
         if (xr > xmax) xr = xmax;
@@ -481,7 +540,30 @@ static void draw_triangle(ps1_gpu *g, const vtx *a, const vtx *b, const vtx *c, 
         uint32_t bb = (uint32_t)(base_b + (int64_t)rs.dbdx * xl + (int64_t)dy_b * y);
         uint32_t u = (uint32_t)(base_u + (int64_t)rs.dudx * xl + (int64_t)dy_u * y);
         uint32_t v = (uint32_t)(base_v + (int64_t)rs.dvdx * xl + (int64_t)dy_v * y);
-        span(&rs, g->vram + y * VRAM_W, y, xl, xr, r, gg, bb, u, v);
+        span(&rs, tg->base + (size_t)y * (size_t)tg->stride, y, xl, xr, r, gg, bb, u, v);
+    }
+    return flattened;
+}
+
+static int pool_tri(ps1_gpu *g, const vtx *a, const vtx *b, const vtx *c, const prim *p, uint32_t flat, int ff);
+
+static void draw_triangle(ps1_gpu *g, const vtx *a, const vtx *b, const vtx *c, const prim *p, uint32_t flat)
+{
+    if (iabs(a->x - b->x) >= 1024 || iabs(b->x - c->x) >= 1024 || iabs(a->x - c->x) >= 1024 ||
+        iabs(a->y - b->y) >= 512 || iabs(b->y - c->y) >= 512 || iabs(a->y - c->y) >= 512)
+        return;
+    target tn = target_native(g);
+    int flattened = raster_tri(g, &tn, a, b, c, p, flat, 0);
+    if (g->hi) { /* the shadow: the same triangle, its vertices scaled */
+        int n = 1 << g->up;
+        vtx sa = *a, sb = *b, sc = *c;
+        sa.x *= n, sa.y *= n;
+        sb.x *= n, sb.y *= n;
+        sc.x *= n, sc.y *= n;
+        if (!pool_tri(g, &sa, &sb, &sc, p, flat, flattened)) {
+            target th = target_hi(g);
+            raster_tri(g, &th, &sa, &sb, &sc, p, flat, flattened);
+        }
     }
 }
 
@@ -534,6 +616,261 @@ static void cmd_polygon(ps1_gpu *g)
         draw_triangle(g, &v[1], &v[2], &v[3], &p, color);
 }
 
+/* A rectangle (native position x, y, size w x h, texture origin u0 v0) into tg: N x N shadow pixels per texel at
+ * N x, texture coordinates stepped by 1/N (flipped: from the texel's far edge, so each texel still covers N). */
+static void raster_rect(ps1_gpu *g, const target *tg, raster *rs, span_fn span, int x, int y, int w, int h, int u0,
+                        int v0)
+{
+    int s = tg->shift, n = 1 << s;
+    int flipx = (g->e1 >> 12) & 1, flipy = (g->e1 >> 13) & 1;
+    int32_t step = 65536 >> s, bias = 65536 - step; /* bias: 0 at 1x */
+    rs->dudx = flipx ? -step : step;
+
+    int rx = x * n, ry = y * n;
+    int x0 = rx, y0 = ry, x1 = (x + w) * n, y1 = (y + h) * n;
+    if (x0 < tg->x1) x0 = tg->x1;
+    if (y0 < tg->y1) y0 = tg->y1;
+    if (x1 > tg->x2) x1 = tg->x2;
+    if (y1 > tg->y2) y1 = tg->y2;
+    if (x0 >= x1 || y0 >= y1)
+        return;
+    int skip_field = skip_field_line(g);
+    uint32_t k = (uint32_t)(x0 - rx);
+    uint32_t u = ((uint32_t)u0 << 16) + (flipx ? (uint32_t)bias - k * (uint32_t)step : k * (uint32_t)step);
+    for (int yy = y0; yy < y1; yy++) {
+        if (skip_field && ((yy >> s) & 1) == g->field)
+            continue;
+        if (tg->parts > 1 && yy % tg->parts != tg->part)
+            continue;
+        uint32_t j = (uint32_t)(yy - ry);
+        uint32_t vv = ((uint32_t)v0 << 16) + (flipy ? (uint32_t)bias - j * (uint32_t)step : j * (uint32_t)step);
+        span(rs, tg->base + (size_t)yy * (size_t)tg->stride, yy, x0, x1, 0, 0, 0, u, vv);
+    }
+}
+
+/* ---- Shadow pass workers ------------------------------------------------------------------------------------- */
+#define POOL_MAX 3
+#define POOL_SPIN 20000        /* polls before an idle worker sleeps (some tens of microseconds) */
+#define POOL_MIN_PIXELS 1000  /* smaller primitives: the caller alone (a hand-off costs about a microsecond) */
+
+enum { JOB_TRI, JOB_RECT };
+
+typedef struct job {
+    int kind;
+    vtx a, b, c;
+    prim p;
+    uint32_t flat;
+    int flat_forced;
+    raster rs; /* rectangles */
+    span_fn span;
+    int x, y, w, h, u0, v0;
+} job;
+
+typedef struct gpu_pool {
+    ps1_gpu *g;
+    int n;
+    pthread_t th[POOL_MAX];
+    atomic_uint gen;  /* a new job */
+    atomic_int done;  /* workers done with it */
+    atomic_int quit;
+    pthread_mutex_t mu;
+    pthread_cond_t cv;
+    int sleepers;     /* under mu */
+    job jb;
+} gpu_pool;
+
+typedef struct worker_arg {
+    gpu_pool *pool;
+    int index;
+} worker_arg;
+
+static inline void cpu_relax(void)
+{
+#if defined(__x86_64__) || defined(__i386__)
+    __builtin_ia32_pause();
+#elif defined(__aarch64__) || defined(__arm__)
+    __asm__ __volatile__("yield");
+#endif
+}
+
+/* Share `part` of `parts` of the job: every parts-th row (rows interleaved, so a triangle's wide and narrow rows are
+ * shared out evenly). */
+static void job_run(ps1_gpu *g, const job *jb, int part, int parts)
+{
+    target t = target_hi(g);
+    t.part = part;
+    t.parts = parts;
+    if (jb->kind == JOB_TRI) {
+        raster_tri(g, &t, &jb->a, &jb->b, &jb->c, &jb->p, jb->flat, jb->flat_forced);
+    } else {
+        raster rs = jb->rs;
+        raster_rect(g, &t, &rs, jb->span, jb->x, jb->y, jb->w, jb->h, jb->u0, jb->v0);
+    }
+}
+
+static void *pool_worker(void *arg)
+{
+    worker_arg wa = *(worker_arg *)arg;
+    free(arg);
+    gpu_pool *pool = wa.pool;
+    unsigned seen = atomic_load_explicit(&pool->gen, memory_order_acquire);
+    for (;;) {
+        unsigned gen;
+        int spins = 0;
+        while ((gen = atomic_load_explicit(&pool->gen, memory_order_acquire)) == seen) {
+            if (atomic_load_explicit(&pool->quit, memory_order_relaxed))
+                return NULL;
+            if (++spins < POOL_SPIN) {
+                cpu_relax();
+                continue;
+            }
+            pthread_mutex_lock(&pool->mu);
+            pool->sleepers++;
+            while (atomic_load_explicit(&pool->gen, memory_order_acquire) == seen &&
+                   !atomic_load_explicit(&pool->quit, memory_order_relaxed))
+                pthread_cond_wait(&pool->cv, &pool->mu);
+            pool->sleepers--;
+            pthread_mutex_unlock(&pool->mu);
+            spins = 0;
+        }
+        seen = gen;
+        if (atomic_load_explicit(&pool->quit, memory_order_relaxed))
+            return NULL;
+        job_run(pool->g, &pool->jb, wa.index + 1, pool->n + 1);
+        atomic_fetch_add_explicit(&pool->done, 1, memory_order_release);
+    }
+}
+
+static void pool_stop(ps1_gpu *g)
+{
+    gpu_pool *pool = g->pool;
+    if (!pool)
+        return;
+    atomic_store(&pool->quit, 1);
+    pthread_mutex_lock(&pool->mu);
+    pthread_cond_broadcast(&pool->cv);
+    pthread_mutex_unlock(&pool->mu);
+    for (int i = 0; i < pool->n; i++)
+        pthread_join(pool->th[i], NULL);
+    pthread_cond_destroy(&pool->cv);
+    pthread_mutex_destroy(&pool->mu);
+    free(pool);
+    g->pool = NULL;
+}
+
+/* Workers for the shadow pass: g->threads, or by the host's cores (3 from 8 cores, 2 from 4, 1 from 2). */
+static void pool_start(ps1_gpu *g)
+{
+    pool_stop(g);
+    int n = g->threads;
+    if (n < 0) {
+        long cores = sysconf(_SC_NPROCESSORS_ONLN);
+        n = cores >= 8 ? 3 : cores >= 4 ? 2 : cores >= 2 ? 1 : 0;
+    }
+    if (n > POOL_MAX)
+        n = POOL_MAX;
+    if (!g->hi || n <= 0)
+        return;
+    gpu_pool *pool = calloc(1, sizeof *pool);
+    if (!pool)
+        return;
+    pool->g = g;
+    pthread_mutex_init(&pool->mu, NULL);
+    pthread_cond_init(&pool->cv, NULL);
+    atomic_init(&pool->gen, 0);
+    atomic_init(&pool->done, 0);
+    atomic_init(&pool->quit, 0);
+    for (int i = 0; i < n; i++) {
+        worker_arg *wa = malloc(sizeof *wa);
+        if (!wa)
+            break;
+        wa->pool = pool;
+        wa->index = i;
+        if (pthread_create(&pool->th[i], NULL, pool_worker, wa) != 0) {
+            free(wa);
+            break;
+        }
+        pool->n++;
+    }
+    g->pool = pool;
+    if (!pool->n)
+        pool_stop(g);
+}
+
+/* Runs pool->jb on every share (the caller's is share 0) and waits for them all. */
+static void pool_run(gpu_pool *pool)
+{
+    atomic_store_explicit(&pool->done, 0, memory_order_relaxed);
+    atomic_fetch_add_explicit(&pool->gen, 1, memory_order_release);
+    pthread_mutex_lock(&pool->mu);
+    if (pool->sleepers)
+        pthread_cond_broadcast(&pool->cv);
+    pthread_mutex_unlock(&pool->mu);
+    job_run(pool->g, &pool->jb, 0, pool->n + 1);
+    while (atomic_load_explicit(&pool->done, memory_order_acquire) < pool->n)
+        cpu_relax();
+}
+
+/* The shadow pass of a triangle (scaled vertices) on the workers when it is big enough; 0: the caller draws it. */
+static int pool_tri(ps1_gpu *g, const vtx *a, const vtx *b, const vtx *c, const prim *p, uint32_t flat, int ff)
+{
+    gpu_pool *pool = g->pool;
+    if (!pool)
+        return 0;
+    int ya = a->y < b->y ? a->y : b->y, yb = a->y > b->y ? a->y : b->y;
+    int xa = a->x < b->x ? a->x : b->x, xb = a->x > b->x ? a->x : b->x;
+    if (c->y < ya) ya = c->y;
+    if (c->y > yb) yb = c->y;
+    if (c->x < xa) xa = c->x;
+    if (c->x > xb) xb = c->x;
+    target t = target_hi(g);
+    if (ya < t.y1) ya = t.y1;
+    if (yb > t.y2) yb = t.y2;
+    if (xa < t.x1) xa = t.x1;
+    if (xb > t.x2) xb = t.x2;
+    if (yb - ya < 2 * (pool->n + 1) || (int64_t)(yb - ya) * (xb - xa) / 2 < POOL_MIN_PIXELS)
+        return 0;
+    job *jb = &pool->jb;
+    jb->kind = JOB_TRI;
+    jb->a = *a;
+    jb->b = *b;
+    jb->c = *c;
+    jb->p = *p;
+    jb->flat = flat;
+    jb->flat_forced = ff;
+    pool_run(pool);
+    return 1;
+}
+
+/* The same for a rectangle (native position and size). */
+static int pool_rect(ps1_gpu *g, const raster *rs, span_fn span, int x, int y, int w, int h, int u0, int v0)
+{
+    gpu_pool *pool = g->pool;
+    if (!pool)
+        return 0;
+    target t = target_hi(g);
+    int n = 1 << g->up;
+    int ya = y * n, yb = (y + h) * n, xa = x * n, xb = (x + w) * n;
+    if (ya < t.y1) ya = t.y1;
+    if (yb > t.y2) yb = t.y2;
+    if (xa < t.x1) xa = t.x1;
+    if (xb > t.x2) xb = t.x2;
+    if (yb - ya < 2 * (pool->n + 1) || (int64_t)(yb - ya) * (xb - xa) < POOL_MIN_PIXELS)
+        return 0;
+    job *jb = &pool->jb;
+    jb->kind = JOB_RECT;
+    jb->rs = *rs;
+    jb->span = span;
+    jb->x = x;
+    jb->y = y;
+    jb->w = w;
+    jb->h = h;
+    jb->u0 = u0;
+    jb->v0 = v0;
+    pool_run(pool);
+    return 1;
+}
+
 static void cmd_rect(ps1_gpu *g)
 {
     uint32_t op = g->cmd[0] >> 24;
@@ -565,23 +902,69 @@ static void cmd_rect(ps1_gpu *g)
     p.semi = (op & 2) != 0;
     raster rs;
     span_fn span = raster_setup(g, &rs, &p, color);
-    int flipx = (g->e1 >> 12) & 1, flipy = (g->e1 >> 13) & 1;
-    rs.dudx = flipx ? -65536 : 65536;
+    target tn = target_native(g);
+    raster_rect(g, &tn, &rs, span, x, y, w, h, u0, v0);
+    if (g->hi && !pool_rect(g, &rs, span, x, y, w, h, u0, v0)) {
+        target th = target_hi(g);
+        raster_rect(g, &th, &rs, span, x, y, w, h, u0, v0);
+    }
+}
 
-    int x0 = x, y0 = y, x1 = x + w, y1 = y + h;
-    if (x0 < g->area_x1) x0 = g->area_x1;
-    if (y0 < g->area_y1) y0 = g->area_y1;
-    if (x1 > g->area_x2 + 1) x1 = g->area_x2 + 1;
-    if (y1 > g->area_y2 + 1) y1 = g->area_y2 + 1;
-    if (x0 >= x1 || y0 >= y1)
-        return;
+/* A line in the shadow (native ends, already culled): from the first end's N x N block to the last's along the major
+ * axis, stepped per shadow pixel, N pixels thick across it (a native line's width, N times the positional detail). */
+static void line_hi(ps1_gpu *g, int x0, int y0, uint32_t c0, int x1, int y1, uint32_t c1, int gour, int semi)
+{
+    int s = g->up, nn = 1 << s;
+    int dx = x1 - x0, dy = y1 - y0, xmajor = iabs(dx) >= iabs(dy);
+    int sx0 = x0 * nn, sy0 = y0 * nn, sx1 = x1 * nn, sy1 = y1 * nn;
+    if (xmajor) {
+        if (dx >= 0) sx1 += nn - 1; else sx0 += nn - 1;
+    } else {
+        if (dy >= 0) sy1 += nn - 1; else sy0 += nn - 1;
+    }
+    dx = sx1 - sx0;
+    dy = sy1 - sy0;
+    int n = xmajor ? iabs(dx) : iabs(dy);
+    const int64_t one = 4294967296LL; /* 32.32 */
+    int64_t xs = sx0 * one + one / 2, ys = sy0 * one + one / 2;
+    int64_t xstep = 0, ystep = 0;
+    int32_t r = (int32_t)((c0 & 0xFF) << 16) + 0x8000, gg = (int32_t)(((c0 >> 8) & 0xFF) << 16) + 0x8000;
+    int32_t b = (int32_t)(((c0 >> 16) & 0xFF) << 16) + 0x8000;
+    int32_t rstep = 0, gstep = 0, bstep = 0;
+    if (n) {
+        xstep = dx * one / n;
+        ystep = dy * one / n;
+        if (xstep < 0) xs--;
+        if (ystep < 0) ys--;
+        if (gour) {
+            rstep = ((int)(c1 & 0xFF) - (int)(c0 & 0xFF)) * 65536 / n;
+            gstep = ((int)((c1 >> 8) & 0xFF) - (int)((c0 >> 8) & 0xFF)) * 65536 / n;
+            bstep = ((int)((c1 >> 16) & 0xFF) - (int)((c0 >> 16) & 0xFF)) * 65536 / n;
+        }
+    }
+    const int8_t (*dm)[4] = (gour && (g->e1 & 0x200)) ? dither_matrix : dither_none;
+    int mode = (g->e1 >> 5) & 3;
+    uint16_t chk = g->check_mask ? 0x8000 : 0, setm = g->set_mask ? 0x8000 : 0;
     int skip_field = skip_field_line(g);
-    uint32_t u = (uint32_t)(u0 + (flipx ? -(x0 - x) : (x0 - x))) << 16;
-    for (int yy = y0; yy < y1; yy++) {
-        if (skip_field && (yy & 1) == g->field)
-            continue;
-        uint32_t vv = (uint32_t)(v0 + (flipy ? -(yy - y) : (yy - y))) << 16;
-        span(&rs, g->vram + yy * VRAM_W, yy, x0, x1, 0, 0, 0, u, vv);
+    target th = target_hi(g);
+    for (int k = 0; k <= n; k++, xs += xstep, ys += ystep, r += rstep, gg += gstep, b += bstep) {
+        int bx = (int)(xs >> 32), by = (int)(ys >> 32);
+        for (int t = 0; t < nn; t++) {
+            int x = xmajor ? bx : bx + t, y = xmajor ? by + t : by;
+            if (x < th.x1 || x >= th.x2 || y < th.y1 || y >= th.y2)
+                continue;
+            if (skip_field && ((y >> s) & 1) == g->field)
+                continue;
+            uint16_t *d = th.base + (size_t)y * (size_t)th.stride + x;
+            if (*d & chk)
+                continue;
+            int dv = dm[y & 3][x & 3];
+            int cr = clamp255((r >> 16) + dv), cg = clamp255((gg >> 16) + dv), cb = clamp255((b >> 16) + dv);
+            uint16_t px = (uint16_t)((cr >> 3) | (cg >> 3) << 5 | (cb >> 3) << 10);
+            if (semi)
+                px = blend(*d, px, mode) & 0x7FFF;
+            *d = px | setm;
+        }
     }
 }
 
@@ -629,6 +1012,8 @@ static void draw_line(ps1_gpu *g, int x0, int y0, uint32_t c0, int x1, int y1, u
             px = blend(*d, px, mode) & 0x7FFF;
         *d = px | setm;
     }
+    if (g->hi)
+        line_hi(g, x0, y0, c0, x1, y1, c1, gour, semi);
 }
 
 static void cmd_line(ps1_gpu *g)
@@ -682,6 +1067,32 @@ static void cmd_fill(ps1_gpu *g)
         for (int i = 0; i < w; i++)
             row[(x + i) & (VRAM_W - 1)] = c;
     }
+    if (g->hi) { /* the same rectangle of the shadow */
+        int sft = g->up, hw = VRAM_W << sft, hh = VRAM_H << sft;
+        for (int j = 0; j < h << sft; j++) {
+            uint16_t *row = g->hi + (size_t)(((y << sft) + j) & (hh - 1)) * (size_t)hw;
+            for (int i = 0; i < w << sft; i++)
+                row[((x << sft) + i) & (hw - 1)] = c;
+        }
+    }
+}
+
+/* The shadow's N x N block of native pixel (x, y) set to px. */
+static inline void hi_block(ps1_gpu *g, int x, int y, uint16_t px)
+{
+    int sft = g->up, n = 1 << sft;
+    uint16_t *d = g->hi + ((size_t)y << sft) * ((size_t)VRAM_W << sft) + ((size_t)x << sft);
+    for (int j = 0; j < n; j++, d += VRAM_W << sft)
+        for (int i = 0; i < n; i++)
+            d[i] = px;
+}
+
+/* The whole shadow from the native VRAM (pixels repeated): when it is made, and when a state loads. */
+static void hi_rebuild(ps1_gpu *g)
+{
+    for (int y = 0; y < VRAM_H; y++)
+        for (int x = 0; x < VRAM_W; x++)
+            hi_block(g, x, y, g->vram[y * VRAM_W + x]);
 }
 
 static inline void xfer_size(uint32_t wh, int *w, int *h)
@@ -709,14 +1120,32 @@ static void cmd_copy(ps1_gpu *g)
                 *d = buf[i] | setm;
         }
     }
+    if (g->hi) { /* the shadow's blocks, so a picture copied keeps its detail; its own mask bits */
+        int sft = g->up, hw = VRAM_W << sft, hh = VRAM_H << sft;
+        uint16_t hbuf[VRAM_W << 2];
+        for (int j = 0; j < h << sft; j++) {
+            const uint16_t *src = g->hi + (size_t)(((sy << sft) + j) & (hh - 1)) * (size_t)hw;
+            uint16_t *dst = g->hi + (size_t)(((dy << sft) + j) & (hh - 1)) * (size_t)hw;
+            for (int i = 0; i < w << sft; i++)
+                hbuf[i] = src[((sx << sft) + i) & (hw - 1)];
+            for (int i = 0; i < w << sft; i++) {
+                uint16_t *d = &dst[((dx << sft) + i) & (hw - 1)];
+                if (!(*d & chk))
+                    *d = hbuf[i] | setm;
+            }
+        }
+    }
 }
 
 static void write_pixel(ps1_gpu *g, uint16_t px)
 {
     int x = (g->wr_x + g->wr_i) & (VRAM_W - 1), y = g->wr_y & (VRAM_H - 1);
     uint16_t *d = g->vram + y * VRAM_W + x;
-    if (!(g->check_mask && (*d & 0x8000)))
+    if (!(g->check_mask && (*d & 0x8000))) {
         *d = px | (g->set_mask ? 0x8000 : 0);
+        if (g->hi)
+            hi_block(g, x, y, *d);
+    }
     if (++g->wr_i == g->wr_w) {
         g->wr_i = 0;
         g->wr_y++;
@@ -1051,6 +1480,45 @@ static inline uint32_t expand15(uint16_t p)
     return r << 16 | gg << 8 | b;
 }
 
+/* The display area (ww x hh native pixels) from the shadow: N times wider and higher. 24-bit: the native pixels,
+ * each repeated N x N (the bytes of a 24-bit picture are only meaningful at native resolution). */
+static int display_hi(ps1_gpu *g, uint32_t *xrgb, int ww, int hh, int *w, int *h)
+{
+    int sft = g->up, n = 1 << sft, hw = VRAM_W << sft, hhi = VRAM_H << sft, ow = ww << sft;
+    if (w) *w = g->display_off ? 0 : ow;
+    if (h) *h = g->display_off ? 0 : hh << sft;
+    if (g->display_off)
+        return -1;
+    if (g->dmode & 0x10) {
+        for (int j = 0; j < hh; j++) {
+            const uint16_t *row = g->vram + ((g->disp_y + j) & (VRAM_H - 1)) * VRAM_W;
+            uint32_t *out = xrgb + ((size_t)j << sft) * (size_t)ow;
+            unsigned byte = (unsigned)g->disp_x * 2;
+            for (int i = 0; i < ww; i++, byte += 3) {
+                uint32_t c = 0;
+                for (int k = 0; k < 3; k++) {
+                    unsigned bb = (byte + k) & 2047;
+                    c |= (uint32_t)((row[bb >> 1] >> ((bb & 1) * 8)) & 0xFF) << (8 * k);
+                }
+                c = (c & 0xFF) << 16 | (c & 0xFF00) | (c >> 16 & 0xFF);
+                for (int k = 0; k < n; k++)
+                    out[(i << sft) + k] = c;
+            }
+            for (int k = 1; k < n; k++)
+                memcpy(out + (size_t)k * (size_t)ow, out, (size_t)ow * sizeof *out);
+        }
+        return 0;
+    }
+    int x0 = g->disp_x << sft, y0 = g->disp_y << sft;
+    for (int j = 0; j < hh << sft; j++) {
+        const uint16_t *row = g->hi + (size_t)((y0 + j) & (hhi - 1)) * (size_t)hw;
+        uint32_t *out = xrgb + (size_t)j * (size_t)ow;
+        for (int i = 0; i < ow; i++)
+            out[i] = expand15(row[(x0 + i) & (hw - 1)]);
+    }
+    return 0;
+}
+
 int ps1_gpu_display(ps1_gpu *g, uint32_t *xrgb, int max_w, int max_h, int *w, int *h)
 {
     static const int nominal_w[4] = { 256, 320, 512, 640 };
@@ -1065,6 +1533,8 @@ int ps1_gpu_display(ps1_gpu *g, uint32_t *xrgb, int max_w, int max_h, int *w, in
         hh = max_lines;
     if ((g->dmode & 0x24) == 0x24)
         hh *= 2;
+    if (g->hi && (ww << g->up) <= max_w && (hh << g->up) <= max_h)
+        return display_hi(g, xrgb, ww, hh, w, h);
     if (ww > max_w) ww = max_w;
     if (hh > max_h) hh = max_h;
     if (w) *w = g->display_off ? 0 : ww;
@@ -1098,41 +1568,82 @@ int ps1_gpu_display(ps1_gpu *g, uint32_t *xrgb, int max_w, int max_h, int *w, in
 
 const uint16_t *ps1_gpu_vram(ps1_gpu *g) { return g->vram; }
 
+const uint16_t *ps1_gpu_vram_hi(ps1_gpu *g) { return g->hi ? g->hi : g->vram; }
+
+int ps1_gpu_set_upscale(ps1_gpu *g, int factor)
+{
+    int up = factor >= 4 ? 2 : factor >= 2 ? 1 : 0;
+    if (up == g->up && (up == 0) == (g->hi == NULL))
+        return 1 << g->up;
+    uint16_t *hi = NULL;
+    if (up && !(hi = malloc(((size_t)VRAM_W << up) * ((size_t)VRAM_H << up) * sizeof *hi)))
+        up = 0; /* no memory for it: native */
+    pool_stop(g);
+    free(g->hi);
+    g->hi = hi;
+    g->up = up;
+    if (hi) {
+        hi_rebuild(g);
+        pool_start(g);
+    }
+    return 1 << up;
+}
+
+int ps1_gpu_upscale(ps1_gpu *g) { return 1 << g->up; }
+
+int ps1_gpu_set_threads(ps1_gpu *g, int n)
+{
+    g->threads = n < 0 ? -1 : n > POOL_MAX ? POOL_MAX : n;
+    if (g->hi)
+        pool_start(g);
+    return g->pool ? g->pool->n : 0;
+}
+
 ps1_gpu *ps1_gpu_create(ps1_irq_sink irq)
 {
     ps1_gpu *g = calloc(1, sizeof *g);
     if (!g)
         return NULL;
     g->irq = irq;
+    g->threads = -1;
     for (int i = 0; i < SAT5_SIZE; i++)
         g->sat5[i] = (uint8_t)(clamp255(i - SAT5_BIAS) >> 3);
     ps1_gpu_reset(g);
     return g;
 }
 
-void ps1_gpu_destroy(ps1_gpu *g) { free(g); }
+void ps1_gpu_destroy(ps1_gpu *g)
+{
+    if (g) {
+        pool_stop(g);
+        free(g->hi);
+    }
+    free(g);
+}
 
 /* ---- Save states (XBA-182) ------------------------------------------------------------------------------------ */
 
 size_t ps1_gpu_state_size(ps1_gpu *g)
 {
     (void)g;
-    return sizeof(ps1_gpu);
+    return GPU_STATE_SIZE;
 }
 
 void ps1_gpu_state_save(ps1_gpu *g, uint8_t *out)
 {
     size_t n = sizeof g->irq;
-    memcpy(out, g, sizeof *g);
+    memcpy(out, g, GPU_STATE_SIZE);
     memset(out + offsetof(ps1_gpu, irq), 0, n); /* the host's sink, not state */
 }
 
 int ps1_gpu_state_load(ps1_gpu *g, const uint8_t *in, size_t n)
 {
-    if (n != sizeof *g)
+    if (n != GPU_STATE_SIZE)
         return -1;
     ps1_irq_sink irq = g->irq;
-    memcpy(g, in, sizeof *g);
+    memcpy(g, in, GPU_STATE_SIZE);
     g->irq = irq;
+    if (g->hi) /* the upscale's shadow is derived: made again from the VRAM loaded */
+        hi_rebuild(g);
     return 0;
 }
