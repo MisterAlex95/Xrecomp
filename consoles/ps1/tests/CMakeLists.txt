@@ -29,3 +29,18 @@ set_tests_properties(ps1_gpu PROPERTIES TIMEOUT 60)
 add_executable(ps1_gpu_bench bench_gpu.c)
 target_link_libraries(ps1_gpu_bench PRIVATE ps1_gpu)
 target_compile_options(ps1_gpu_bench PRIVATE -Wall -Wextra -O2)
+
+# The disc images, CD-ROM controller, SPU and MDEC (P-1 XBA-159, P-8 XBA-166, P-9 XBA-167): unit tests on synthetic
+# images and register sequences the tests make themselves (dev_test.h; no game data, no Docker). The disc test also
+# compares with a compressed CHD when chdman is on the PATH.
+foreach(t disc cdrom spu mdec)
+    add_executable(ps1_${t}_test test_${t}.c)
+    target_link_libraries(ps1_${t}_test PRIVATE ps1_cd ps1_spu ps1_mdec m)
+    target_include_directories(ps1_${t}_test PRIVATE ../runtime) # ps1_spu_gauss.inc (the reference decoder)
+    target_compile_options(ps1_${t}_test PRIVATE -Wall -Wextra)
+    if(XBR_PS1_CHD)
+        target_compile_definitions(ps1_${t}_test PRIVATE XBR_PS1_CHD=1)
+    endif()
+    add_test(NAME ps1_${t} COMMAND ps1_${t}_test)
+    set_tests_properties(ps1_${t} PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120)
+endforeach()

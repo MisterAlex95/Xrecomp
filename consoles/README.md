@@ -14,7 +14,7 @@ game for these consoles runs yet. Goal, order, rules (legal, Linux arm64 first),
 Each one has:
 
 - `runtime/`: C, CMake target `<name>_runtime`. It links only the host layer `xbr_host` (`src/host`,
-  `src/platform/HOST_LAYER.md`) and never the Xbox libraries. PS1 and N64 are empty for now (one version function);
+  `src/platform/HOST_LAYER.md`) and never the Xbox libraries. N64 is empty for now (one version function); the PS1 has its devices (below);
   GBA has its core, see below.
 - `tools/`: the Python pipeline (parse → disasm → function discovery → lift → C), package `<name>_tools`. Its
   tests live in the package and run with the tools suite: `python3 -m pytest tools/ consoles/`.
@@ -118,6 +118,22 @@ per primitive kind; `ps1_gpu_display` crops the display ranges and outputs 15- o
 their last word arrives, so the GPU is never busy. Tests: `consoles/ps1/tests/test_gpu.c` (`PS1_CORE_ONLY=ON` builds
 them without SDL2); `ps1_gpu_bench` is the micro benchmark. The gfx.exe homebrew frame matches PCSX-Redux pixel for
 pixel.
+
+**PS1 disc, CD-ROM, SPU, MDEC (P-1 XBA-159, P-8 XBA-166, P-9 XBA-167).** The other devices of `ps1_devices.h`, plain
+C11 without host dependency (CMake targets `ps1_cd`, `ps1_spu`, `ps1_mdec`). `ps1_disc.c` reads raw sectors and
+tracks only (no ISO 9660): `.cue` (several `.bin` files, INDEX 00 / 01, PREGAP, relative paths, names matched ignoring
+case), a single `.bin`, `.iso` (2048-byte sectors in a synthesized Mode 2 Form 1 sector), `.chd` through the vendored
+libchdr (`third_party/libchdr`, v0.3.0, option `XBR_PS1_CHD`, ON by default), and `fd:N` for single-file images.
+`ps1_cdrom.c` is the controller of psx-spx: banked registers, parameter / response / data FIFOs, INT1..INT5 queued
+until acknowledged, first / second response times from psx-spx's measurements, seeks approximated by distance, every
+command up to ReadTOC (Test 20h answers vC2), ReadN / ReadS with 800h / 924h sectors and DMA3, XA-ADPCM (filter,
+37800 / 18900 Hz, linear resampling) and CD-DA with the volume matrix into a 44.1 kHz stream. GetID answers a data
+disc as licensed (`SCEx` from the licence text at LBA 4, `SCEA` without one, as a modchip would), so a BIOS boots our
+homebrew. `ps1_spu.c`: 24 ADPCM voices with Gaussian interpolation, exact ADSR and sweep envelopes, noise, pitch
+modulation, ENDX, reverb (psx-spx formula with its FIR), capture buffers, the SPU IRQ, FIFO and DMA4 transfers, CD
+input. `ps1_mdec.c`: RLE, IDCT with the scale table, 4 / 8 / 15 / 24-bit output, DMA0 / DMA1. Tests:
+`consoles/ps1/tests/test_{disc,cdrom,spu,mdec}.c` on images and register streams they generate (a compressed CHD
+from `chdman` too when it is installed). The limits are listed at the top of each source.
 
 **Legal**: no ROM, disc image, BIOS or game data in this repository, its CI or its artifacts. Tests use homebrew we
 build ourselves (devkitARM / libtonc, PSn00bSDK, libdragon) and dumps Alex made from his own media, kept outside every
