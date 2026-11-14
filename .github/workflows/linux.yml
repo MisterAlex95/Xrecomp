@@ -2,7 +2,8 @@
 # linux job of .gitea/workflows/ci.yml). Gitea ignores .github/workflows while .gitea/workflows exists, so this runs
 # only on GitHub: on what the mirror pushes, and on pull requests, which never touch the maintainers' machine here.
 # Three parallel jobs (the Dockerfile's PART): the root build + ctest + pytest, and the C test projects in two slices.
-# Together they are what PART=all runs on Gitea.
+# Together they are what PART=all runs on Gitea. gba-corpus is the GBA half of Gitea's homebrew job (XBA-180): the GBA
+# homebrew built (devkitARM image), prepared into packs, run headless, screenshots checked and kept as an artefact.
 name: Linux
 
 on:
@@ -38,3 +39,26 @@ jobs:
         run: |
           docker run --rm xrecomp-linux sh -c 'cat /reports/c-tests.md 2>/dev/null; tail -n 3 /reports/pytest.txt 2>/dev/null; grep -E "Hits|Misses" /reports/ccache.txt 2>/dev/null | head -2' \
             >> "$GITHUB_STEP_SUMMARY" || true
+
+  gba-corpus:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the GBA homebrew corpus
+        run: JOBS=4 bash tools/consoles/build_homebrew.sh gba out/homebrew
+      - name: GBA corpus as recompiled packs (Prepare, headless run, screenshots)
+        run: JOBS=4 bash tools/consoles/run_gba_packs.sh out/homebrew out/gba-packs
+      - name: Report
+        if: always()
+        run: cat out/gba-packs/report.md >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: gba-corpus-screens
+          path: |
+            out/gba-packs/*.png
+            out/gba-packs/*.log
+            out/gba-packs/report.md
+            out/gba-packs/SHA256SUMS
+          if-no-files-found: ignore

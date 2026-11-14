@@ -140,5 +140,7 @@ int main(void)
     xba_check(i++, cleared, 1);
     xba_check(i++, dmas, dmas); /* raw, informative */
     xba_check(i++, duty_read, duty_read);
+    REG_DISPCNT = DCNT_MODE0; /* the verdict on screen (gba_corpus_packs.py screenshots it) */
+    pal_bg_mem[0] = XBA_RESULT->detail ? RGB15(31, 0, 0) : RGB15(0, 31, 0);
     xba_finish();
 }
