@@ -110,13 +110,9 @@ int n64_rdp_set_threads(n64_rdp *d, int n) { return d->ops->set_threads(d->impl,
 void n64_rdp_flush(n64_rdp *d) { d->ops->flush(d->impl); }
 
 /* The 16-bit pixels' hidden coverage bits (n64_rdp.h, for the VI's anti-aliasing filter; NULL: none, the VI then uses
- * the pixel's low bit). The software RDP keeps them in a side array (weak, so a n64_rdp.c without the function links
- * too); the Vulkan RDP keeps them on the GPU: NULL. */
-__attribute__((weak)) const uint8_t *n64_rdp_sw_hidden_bits(n64_rdp_sw *d);
-const uint8_t *n64_rdp_hidden_bits(n64_rdp *d);
+ * the pixel's low bit). The software RDP keeps them in a side array; the Vulkan RDP keeps them on the GPU: NULL. */
+const uint8_t *n64_rdp_sw_hidden_bits(n64_rdp_sw *d);
 const uint8_t *n64_rdp_hidden_bits(n64_rdp *d)
 {
-    if (d->ops != &n64_rdp_sw_ops || !n64_rdp_sw_hidden_bits)
-        return NULL;
-    return n64_rdp_sw_hidden_bits(d->impl);
+    return d->ops == &n64_rdp_sw_ops ? n64_rdp_sw_hidden_bits(d->impl) : NULL;
 }
