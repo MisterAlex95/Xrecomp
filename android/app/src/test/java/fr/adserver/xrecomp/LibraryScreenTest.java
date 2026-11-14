@@ -254,11 +254,12 @@ public class LibraryScreenTest {
         assertEquals(GameState.Chip.NO_FILE_ACCESS, LibraryScreen.entry(files, e.tid, new Library.Games(), x, env).chip);
         env.noAccess = java.util.Collections.emptySet();
 
-        // XBA-168: a PS1 disc launches as it is too, Ready; no Prepare state on its card even with the toolchain.
+        // XBA-168: a PS1 disc launches as it is too, Ready, and has its Prepare (with the toolchain) like a GBA ROM.
         LibraryScreen.Entry p = LibraryScreen.entry(files, "ps1-SLUS-00594", new Library.Games(), x, env);
         assertEquals(Console.PS1, p.console());
         assertTrue(p.directLaunch());
-        assertFalse("no PS1 Prepare yet", p.facts.toolchain);
+        assertTrue("its Prepare (XBA-168)", p.facts.toolchain);
+        assertEquals(Pack.Check.NO_PACK, p.facts.pack);
         assertEquals(GameState.Chip.READY, p.chip);
         assertTrue(GameState.playable(p.chip));
         env.runningTid = "ps1-SLUS-00594";

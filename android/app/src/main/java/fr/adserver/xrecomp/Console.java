@@ -72,11 +72,11 @@ enum Console {
     }
 
     /**
-     * A game of this console that starts from its file can also be prepared (translated for the device into a pack,
-     * XBA-158): the GBA. The PS1's Prepare comes with its recompiler; its Home has Play only until then.
+     * A game of this console that starts from its file can also be prepared (translated for the device into a pack):
+     * the GBA (XBA-158) and the PS1 (XBA-168; not a .chd image: LauncherActivity.romPrepares).
      */
     boolean prepares() {
-        return this == GBA;
+        return this == GBA || this == PS1;
     }
 
     /**

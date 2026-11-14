@@ -102,5 +102,5 @@
     <string name="ROM_PREPARED_DONE">%1$s is prepared: it now runs natively.</string>
 <!-- A PS1 game's Home (XBA-168): Play only (the interpreter); its Prepare comes with the PS1 recompiler. -->
     <string name="ROM_PS1_LINE">Plays in the interpreter</string>
-    <string name="ROM_PS1_NOTE">Play starts the game from its disc, through the PlayStation BIOS the app carries (OpenBIOS). Memory cards are saved for each game.</string>
+    <string name="ROM_PS1_CHD_NOTE">Play starts the game from its disc, through the PlayStation BIOS the app carries (OpenBIOS). A .chd image cannot be prepared: convert it to .cue / .bin (chdman extractcd) to run it natively.</string>
 </resources>

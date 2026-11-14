@@ -491,8 +491,11 @@ public class PrepareService extends Service {
             }
         }
         // A GBA game (XBA-158): its ROM, a path, or a library folder's document that tools.prepare cannot open: then
-        // copied into the work folder first (32 MB at most), where tools.prepare keeps its own copy anyway.
-        final String source = rom ? romSource(c, gameDir, work, runner) : gameDir;
+        // copied into the work folder first (32 MB at most), where tools.prepare keeps its own copy anyway. A PS1 disc
+        // (XBA-168): a path as it is; a document: the sectors that lead to its boot EXE, copied (Ps1Disc).
+        final String source = !rom ? gameDir
+                              : Console.ofKey(titleId) == Console.PS1 ? ps1Source(c, gameDir, titleId, work, runner)
+                              : romSource(c, gameDir, work, runner);
         return new PrepareRunner.CommandFactory() {
             @Override
             public List<String> command(int jobs) {
@@ -582,6 +585,103 @@ public class PrepareService extends Service {
         if (runner != null)
             runner.logLine("rom: " + spec + " copied to " + out + " (" + n + " bytes)");
         return out.getAbsolutePath();
+    }
+
+    /**
+     * The file tools.prepare reads for a PS1 disc (XBA-168): its path as it is (a .cue finds its tracks beside it); a
+     * document of a library folder seen through the Storage Access Framework (a single-file .bin / .iso, or a .cue
+     * whose track documents the library index lists): the sectors that lead to the boot EXE, copied from its data
+     * track (the .cue's first FILE) into &lt;work&gt;/disc.iso (Ps1Disc: a sparse image of a few hundred KB on disk).
+     * A .chd cannot be prepared (tools.prepare reads .cue / .bin / .iso).
+     */
+    static String ps1Source(Context c, String spec, String titleId, File work, PrepareRunner runner)
+            throws IOException {
+        if (!spec.startsWith("content:"))
+            return spec;
+        android.content.ContentResolver cr = c.getContentResolver();
+        String name = documentName(c, spec);
+        String low = (name != null ? name : android.net.Uri.parse(spec).getLastPathSegment() + "")
+                .toLowerCase(java.util.Locale.ROOT);
+        if (low.endsWith(".chd"))
+            throw new IOException(name + ": a .chd image cannot be prepared (.cue / .bin / .iso only); it still plays");
+        String track = spec;
+        if (low.endsWith(".cue")) {
+            String text;
+            try (java.io.InputStream in = cr.openInputStream(android.net.Uri.parse(spec))) {
+                if (in == null)
+                    throw new IOException("cannot open " + spec);
+                byte[] buf = new byte[Ps1Cue.MAX_CUE];
+                int n = 0, r;
+                while (n < buf.length && (r = in.read(buf, n, buf.length - n)) > 0)
+                    n += r;
+                text = new String(buf, 0, n, java.nio.charset.StandardCharsets.ISO_8859_1);
+            } catch (SecurityException e) {
+                throw new IOException("no access to " + spec + ": " + e.getMessage());
+            }
+            List<String> files = Console.cueFiles(text);
+            if (files.isEmpty())
+                throw new IOException(name + " names no track (no FILE line)");
+            String want = Ps1Cue.baseName(files.get(0));
+            track = null;
+            for (String part : cueParts(filesDir(c), spec)) {
+                String pn = documentName(c, part);
+                if (pn != null && pn.toLowerCase(java.util.Locale.ROOT).equals(want)) {
+                    track = part;
+                    break;
+                }
+            }
+            if (track == null)
+                throw new IOException(name + " names " + files.get(0) + ", not found beside it");
+        }
+        File out = new File(work, "disc.iso");
+        Ps1Disc.Result r;
+        try (android.os.ParcelFileDescriptor pfd = cr.openFileDescriptor(android.net.Uri.parse(track), "r");
+             java.io.FileInputStream in = new java.io.FileInputStream(pfd.getFileDescriptor())) {
+            r = Ps1Disc.extract(Console.source(in.getChannel()), out);
+        } catch (SecurityException | NullPointerException e) {
+            throw new IOException("no access to " + track + ": " + e.getMessage());
+        }
+        if (runner != null)
+            runner.logLine("disc: " + track + " -> " + out + " (boot " + r.boot + ", " + r.exeSize + " bytes, "
+                           + r.sectors + " sectors copied)");
+        return out.getAbsolutePath();
+    }
+
+    /** A document's display name, or null. */
+    static String documentName(Context c, String uri) {
+        try (android.database.Cursor cur = c.getContentResolver().query(android.net.Uri.parse(uri),
+                new String[] { android.provider.DocumentsContract.Document.COLUMN_DISPLAY_NAME }, null, null, null)) {
+            return cur != null && cur.moveToFirst() ? cur.getString(0) : null;
+        } catch (RuntimeException e) {
+            return null;
+        }
+    }
+
+    /**
+     * The track documents of the .cue document cueUri, as the library index lists them (LibraryIndex.Item.parts:
+     * « doc: » IDs under the same tree); empty when the index does not know it.
+     */
+    static List<String> cueParts(File filesDir, String cueUri) {
+        List<String> out = new ArrayList<>();
+        android.net.Uri u = android.net.Uri.parse(cueUri);
+        String doc, tree;
+        try {
+            doc = android.provider.DocumentsContract.getDocumentId(u);
+            tree = android.provider.DocumentsContract.getTreeDocumentId(u);
+        } catch (RuntimeException e) {
+            return out;
+        }
+        android.net.Uri treeUri = android.provider.DocumentsContract.buildTreeDocumentUri(u.getAuthority(), tree);
+        LibraryIndex index = LibraryIndex.read(Library.indexFile(filesDir));
+        for (LibraryIndex.Item it : index.items)
+            if (it.loc.equals(LibraryIndex.docLoc(doc))) {
+                for (String loc : it.parts)
+                    if (loc.startsWith("doc:"))
+                        out.add(android.provider.DocumentsContract.buildDocumentUriUsingTree(treeUri, loc.substring(4))
+                                .toString());
+                return out;
+            }
+        return out;
     }
 
     private void onJobEnd(PrepareProtocol.Status s) {
