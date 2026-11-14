@@ -347,6 +347,34 @@ static void test_read(ps1_disc *d)
             break;
     }
 
+    /* Setloc, SeekL, then ReadN (no Setloc pending): reading starts at the seek target, not at the last sector
+     * read (OpenBIOS reads files this way) */
+    uint8_t loc3[3] = {0x00, 0x02, 0x20}; /* LBA 20 is XA; read 30 */
+    loc3[2] = 0x30;
+    m = 0x80;
+    expect(0x0E, &m, 1, 3, r);
+    expect(0x02, loc3, 3, 3, r);
+    command(0x15, NULL, 0);
+    CHECK(wait_int(PS1_CPU_HZ, NULL, 256) == 3, "SeekL INT3");
+    ack();
+    i = wait_int(PS1_CPU_HZ, NULL, 256);
+    response(r);
+    CHECK(i == 2 && r[0] == 0x02, "SeekL INT2 %d stat %02X", i, r[0]);
+    ack();
+    expect(0x06, NULL, 0, 3, r);
+    i = wait_int(PS1_CPU_HZ, NULL, 128);
+    response(r);
+    read_dma_sector(got, 0x800);
+    make_data_sector(s, 30, 0x08);
+    CHECK(i == 1 && memcmp(got, s + 24, 0x800) == 0, "ReadN after SeekL reads the seek target");
+    ack();
+    expect(0x09, NULL, 0, 3, r);
+    while ((i = wait_int(PS1_CPU_HZ * 2, NULL, 256)) != 0) {
+        ack();
+        if (i == 2)
+            break;
+    }
+
     /* 800h by register: padding repeats byte 800h-8 */
     m = 0x80;
     expect(0x0E, &m, 1, 3, r);

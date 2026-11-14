@@ -41,8 +41,10 @@
 #define FIRST_DELAY 0xC4E1u         /* first response, motor on */
 #define FIRST_DELAY_STOPPED 0x5CF4u /* first response, motor off */
 #define INIT_DELAY 0x13CCEu         /* Init's first response */
+#define INIT_SECOND 476300u         /* Init's second response (ps1-tests cdrom/timing hardware log, average) */
 #define GETID_DELAY 0x4A00u         /* GetID's second response */
-#define PAUSE_DELAY_1X 0x21181Cu    /* Pause while reading / playing (about 5 sectors) */
+#define PAUSE_DELAY_1X 0x10BD93u    /* Pause while reading / playing: psx-spx gives 21181Ch at 1x, but the hardware
+                                     * log of ps1-tests cdrom/timing measures about 1.0M cycles at both speeds */
 #define PAUSE_DELAY_2X 0x10BD93u
 #define PAUSE_DELAY_IDLE 0x1DF2u
 #define STOP_DELAY_1X 0xD38ACAu     /* Stop while spinning */
@@ -126,6 +128,7 @@ struct ps1_cdrom {
     uint8_t last_header[8]; /* header (4) + subheader (4) of the last sector read (GetlocL) */
     uint32_t last_lba;
     uint8_t have_read;
+    uint32_t resume_lba; /* where a Read without a new Setloc starts: the last sector received, or the last seek */
     uint8_t license; /* 'A' / 'E' / 'I' */
 
     /* sector buffers: pending (read, INT1 not yet delivered) and current (delivered, loaded by the request bit) */
@@ -133,6 +136,7 @@ struct ps1_cdrom {
     uint8_t current_sector[2352];
     uint8_t data[2352];
     uint32_t data_len, data_pos;
+    uint8_t sector_fresh; /* a sector was delivered (INT1) since the data FIFO was last loaded */
 
     /* audio */
     uint8_t vol[4];      /* applied: L->L, L->R, R->R, R->L (0x80 = 100 %) */
@@ -220,8 +224,10 @@ static void deliver(ps1_cdrom *c)
     memset(c->resp + r->len, 0, 16 - r->len);
     c->resp_len = r->len;
     c->resp_pos = 0;
-    if (r->sector)
+    if (r->sector) {
         memcpy(c->current_sector, c->pending_sector, sizeof c->current_sector);
+        c->sector_fresh = 1;
+    }
     c->iflag = (uint8_t)((c->iflag & ~7) | r->type);
     if (r->type == 3 || r->type == 5)
         c->busy = 0;
@@ -352,6 +358,7 @@ static void start_seek(ps1_cdrom *c, int then)
     c->after_seek = then;
     c->drive_timer = seek_cycles(c, to);
     c->lba = to;
+    c->resume_lba = to;
     c->setloc_pending = 0;
     c->stat = (uint8_t)((c->stat & ~(ST_READ | ST_PLAY)) | ST_SEEK | ST_MOTOR);
 }
@@ -438,6 +445,7 @@ static void drive_step(ps1_cdrom *c)
     } else {
         memcpy(c->last_header, s + 12, 8);
         c->last_lba = c->lba;
+        c->resume_lba = c->lba;
         c->have_read = 1;
         /* psx-spx « Data/ADPCM Sector Filtering/Delivery »: first to the XA decoder, else to the CPU */
         int realtime_audio = s[15] == 2 && (s[18] & 0x44) == 0x44;
@@ -486,7 +494,14 @@ static void drive_tick(ps1_cdrom *c, uint32_t cycles)
                 c->drive_timer += SECTOR_1X;
             } else {
                 c->drive = DRIVE_IDLE;
-                /* SeekL / SeekP complete */
+                /* SeekL / SeekP complete: GetlocL sees the header of the target sector (a data track) */
+                uint8_t sec[2352];
+                int audio = 1;
+                find_track(c, c->lba, NULL, &audio);
+                if (!audio && ps1_disc_read_sector(c->disc, c->lba, sec) == 0) {
+                    memcpy(c->last_header, sec + 12, 8);
+                    c->have_read = 1;
+                }
                 if (c->second_cmd == 0x15 || c->second_cmd == 0x16) {
                     c->second_pending = 0;
                     push1(c, 2, c->stat);
@@ -605,9 +620,8 @@ static void execute(ps1_cdrom *c)
         if (c->setloc_pending || c->drive == DRIVE_PLAY) {
             start_seek(c, DRIVE_READ);
         } else if (c->drive == DRIVE_IDLE) {
-            /* paused: reading resumes at the most recently received sector */
-            if (c->have_read)
-                c->lba = c->last_lba;
+            /* paused: reading resumes at the most recently received sector, or where SeekL / SeekP went */
+            c->lba = c->resume_lba;
             start_seek(c, DRIVE_READ);
         } else if (c->drive == DRIVE_SEEK) {
             c->after_seek = DRIVE_READ;
@@ -649,7 +663,7 @@ static void execute(ps1_cdrom *c)
         if (c->disc)
             c->stat |= ST_MOTOR;
         push1(c, 3, c->stat);
-        schedule_second(c, cmd, INIT_DELAY);
+        schedule_second(c, cmd, INIT_SECOND);
         break;
     case 0x0B: /* Mute */
         c->muted = 1;
@@ -822,7 +836,8 @@ static void second(ps1_cdrom *c)
     case 0x15:
     case 0x16:
         if (kind == 3) {
-            uint8_t r[2] = {(uint8_t)(c->stat | ST_SEEKERR | ST_ERROR), 0x04};
+            c->stat &= (uint8_t)~ST_MOTOR; /* the hardware answers stat 04h: motor stopped */
+            uint8_t r[2] = {(uint8_t)(c->stat | ST_SEEKERR), 0x04};
             push(c, 5, r, 2, 0);
         }
         break;
@@ -887,7 +902,7 @@ void ps1_cdrom_set_disc(ps1_cdrom *c, ps1_disc *disc)
         c->stat |= ST_MOTOR;
     c->license = detect_license(disc);
     c->setloc_pending = 0;
-    c->lba = 0;
+    c->lba = c->resume_lba = 0;
 }
 
 uint8_t ps1_cdrom_read(ps1_cdrom *c, uint32_t reg)
@@ -939,6 +954,7 @@ static void load_data(ps1_cdrom *c)
         c->data_len = 0x800;
     }
     c->data_pos = 0;
+    c->sector_fresh = 0;
 }
 
 void ps1_cdrom_write(ps1_cdrom *c, uint32_t reg, uint8_t v)
@@ -967,7 +983,8 @@ void ps1_cdrom_write(ps1_cdrom *c, uint32_t reg, uint8_t v)
     case 3 * 4 + 0: /* request */
         c->request = v;
         if (v & 0x80) {
-            if (c->data_pos >= c->data_len)
+            /* BFRD: the sector of the last INT1 (a FIFO left half read is replaced by a newer sector) */
+            if (c->sector_fresh || c->data_pos >= c->data_len)
                 load_data(c);
         } else {
             c->data_len = c->data_pos = 0;
@@ -978,11 +995,9 @@ void ps1_cdrom_write(ps1_cdrom *c, uint32_t reg, uint8_t v)
         raise_if_pending(c);
         break;
     case 3 * 4 + 1: /* interrupt flag acknowledge */
+        /* the response stays readable after the acknowledge (PSn00bSDK acknowledges first, then reads it); the
+         * next delivery replaces it */
         c->iflag &= (uint8_t)~(v & 0x1F);
-        if (!(c->iflag & 7)) {
-            c->resp_len = 0;
-            c->resp_pos = 0;
-        }
         if (v & 0x40)
             c->nparams = 0;
         break;
