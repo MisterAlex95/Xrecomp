@@ -120,6 +120,32 @@ const uint16_t *ps1_gpu_vram(ps1_gpu *g)
     return g->vram;
 }
 
+/* No upscale without the real GPU. */
+int ps1_gpu_set_upscale(ps1_gpu *g, int factor)
+{
+    (void)g;
+    (void)factor;
+    return 1;
+}
+
+int ps1_gpu_upscale(ps1_gpu *g)
+{
+    (void)g;
+    return 1;
+}
+
+int ps1_gpu_set_threads(ps1_gpu *g, int n)
+{
+    (void)g;
+    (void)n;
+    return 0;
+}
+
+const uint16_t *ps1_gpu_vram_hi(ps1_gpu *g)
+{
+    return g->vram;
+}
+
 /* Save states (XBA-182): a placeholder has no state worth keeping. */
 size_t ps1_gpu_state_size(ps1_gpu *x)
 {

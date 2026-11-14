@@ -57,6 +57,9 @@ typedef struct ps1_runtime_opts {
      * host_window_env_scale); else HOST_SCALE_*. Filter: -1 = $RECOMP_PS1_FILTER, else $RECOMP_FILTER ("linear" or
      * "nearest", default linear: the PS1's widths 256..640 are stretched to 4:3); else HOST_FILTER_*. */
     int scale, filter;
+    /* Internal resolution (XBA-184, ps1_gpu_set_upscale): 1, 2 or 4 times the PS1's (8 asks for 4); -1 =
+     * $RECOMP_PS1_UPSCALE, else the shared $RECOMP_UPSCALE, else 1 (ps1_runtime_upscale). */
+    int upscale;
     /* The pad plugged in port 1: -1 = $RECOMP_PS1_PAD ("analog" or "digital", default digital), 0 digital
      * (SCPH-1080; the left stick drives the D-pad too), 1 DualShock in analog mode (sticks -> analog). Back + L3 +
      * R3 together switch between the two while playing. */
@@ -87,6 +90,11 @@ void ps1_runtime_opts_init(ps1_runtime_opts *o);
 /* How the run shows its picture: o->scale / o->filter when set (>= 0), else $RECOMP_PS1_SCALE / _FILTER, else the
  * shared $RECOMP_SCALE / $RECOMP_FILTER (host_window_env_scale / _filter), else aspect and linear. o may be NULL. */
 void ps1_runtime_display(const ps1_runtime_opts *o, int *scale, int *filter);
+
+/* The internal resolution factor asked: o->upscale when >= 1, else $RECOMP_PS1_UPSCALE, else $RECOMP_UPSCALE (a
+ * number 1..8, "2x" too; anything else is skipped), else 1. Capped at 4, the GPU's most (an 8 asked for the N64's
+ * renderer is 4 here). o may be NULL. */
+int ps1_runtime_upscale(const ps1_runtime_opts *o);
 
 /* Plays o->game until the player quits (window closed, SDL_QUIT) or o->frames ran. Returns 0, or -1 when the game
  * or the BIOS cannot be read or the machine cannot start (why on stderr). Logs one "ps1: ..." line per step on

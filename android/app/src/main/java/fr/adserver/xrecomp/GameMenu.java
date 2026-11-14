@@ -176,7 +176,8 @@ final class GameMenu {
     enum Page { MAIN, SETTINGS, CONTROLS, DISCS, SAVE_SLOTS, LOAD_SLOTS }
 
     enum Item { RESUME, SETTINGS, CONTROLS, SCREENSHOT, SHARE_LOG, LAUNCHER, QUIT, PERF, VOLUME, BOTTOM, LANGUAGE,
-                WIDESCREEN, P480, TOUCH, BACK, DISC, SCALE, FILTER, VK_DRIVER, STATE_SAVE, STATE_LOAD, FAST_FORWARD }
+                WIDESCREEN, P480, TOUCH, BACK, DISC, SCALE, FILTER, UPSCALE, VK_DRIVER, STATE_SAVE, STATE_LOAD,
+                FAST_FORWARD }
 
     private final Activity activity;
     private final Host host;
@@ -898,6 +899,12 @@ final class GameMenu {
                 r = row(Item.FILTER, s(R.string.MENU_FILTER));
                 r.setChoices(consoleLabels(ConsoleVideo.Setting.FILTER));
                 r.cycler = dir -> stepConsoleVideo(ConsoleVideo.Setting.FILTER, dir);
+                if (ConsoleVideo.applies(ConsoleVideo.Setting.UPSCALE, Console.ofKey(titleId()))) {
+                    // XBA-184: a PS1 or N64 game's internal resolution, from its next start.
+                    r = row(Item.UPSCALE, s(R.string.MENU_UPSCALE));
+                    r.setChoices(consoleLabels(ConsoleVideo.Setting.UPSCALE));
+                    r.cycler = dir -> stepConsoleVideo(ConsoleVideo.Setting.UPSCALE, dir);
+                }
                 if (vkDriverShown()) {   // the N64 Vulkan renderer's driver, this game's own (VkDrivers)
                     r = row(Item.VK_DRIVER, s(R.string.MENU_VK_DRIVER));
                     VkDrivers drivers = VkDrivers.of(activity);
@@ -1235,6 +1242,9 @@ final class GameMenu {
         case FILTER:
             stepConsoleVideo(ConsoleVideo.Setting.FILTER, 1);
             break;
+        case UPSCALE:
+            stepConsoleVideo(ConsoleVideo.Setting.UPSCALE, 1);
+            break;
         case VK_DRIVER:
             stepVkDriver(1);
             break;
@@ -1466,7 +1476,8 @@ final class GameMenu {
         if (r != null)
             r.setValue(videoLabel(GameVideo.Setting.P480));
         for (ConsoleVideo.Setting cv : ConsoleVideo.Setting.values()) {
-            r = rows.get(cv == ConsoleVideo.Setting.SCALE ? Item.SCALE : Item.FILTER);
+            r = rows.get(cv == ConsoleVideo.Setting.SCALE ? Item.SCALE
+                         : cv == ConsoleVideo.Setting.FILTER ? Item.FILTER : Item.UPSCALE);
             if (r != null)
                 r.setValue(s(ConsoleVideo.label(cv, ConsoleVideo.gameChoice(activity, titleId(), cv))));
         }

@@ -28,6 +28,8 @@ if(NOT TARGET ps1_gpu)
         target_compile_options(ps1_gpu PRIVATE -O2) # the software renderer is far too slow unoptimised
     endif()
     set_target_properties(ps1_gpu PROPERTIES POSITION_INDEPENDENT_CODE ON)
+    find_package(Threads REQUIRED) # the upscale's shadow pass workers (XBA-184)
+    target_link_libraries(ps1_gpu PUBLIC Threads::Threads)
 endif()
 
 # ps1_cd (disc images ps1_disc.c, P-1 XBA-159, and the CD-ROM controller ps1_cdrom.c, P-9 XBA-167), ps1_spu (P-8,

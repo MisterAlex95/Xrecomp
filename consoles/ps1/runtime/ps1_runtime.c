@@ -13,7 +13,9 @@
  * between frames under s_mu; fast-forward runs `speed` frames per shown frame, their audio averaged down.
  *
  * Picture: ps1_display gives the display area (256 / 320 / 368 / 512 / 640 x 240 / 480, 15- or 24-bit) as XRGB; it is
- * shown at 4:3 whatever its width (host_window_set_aspect), as a television did. */
+ * shown at 4:3 whatever its width (host_window_set_aspect), as a television did. At an internal resolution above 1x
+ * (XBA-184, RECOMP_UPSCALE) the GPU draws a shadow VRAM N times the size too and the picture is N times wider and
+ * higher (up to 2560 x 2048 at 4x); the frame buffers are sized for it. */
 #define _GNU_SOURCE /* pread, nanosleep, readlink */
 #include "ps1_runtime.h"
 
@@ -786,6 +788,7 @@ void ps1_runtime_opts_init(ps1_runtime_opts *o)
     o->analog = -1;
     o->players = -1;
     o->fast_boot = -1;
+    o->upscale = -1;
 }
 
 static const char *base_name(const char *p)
@@ -826,6 +829,24 @@ void ps1_runtime_display(const ps1_runtime_opts *o, int *scale, int *filter)
         *scale = s;
     if (filter)
         *filter = f;
+}
+
+static int upscale_parse(const char *v)
+{
+    if (!v || *v < '1' || *v > '9')
+        return 0;
+    int n = atoi(v);
+    return n >= 1 && n <= 8 ? n : 0;
+}
+
+int ps1_runtime_upscale(const ps1_runtime_opts *o)
+{
+    int n = o && o->upscale >= 1 ? o->upscale : 0;
+    if (!n)
+        n = upscale_parse(getenv("RECOMP_PS1_UPSCALE"));
+    if (!n)
+        n = upscale_parse(getenv("RECOMP_UPSCALE"));
+    return n >= 4 ? 4 : n >= 2 ? 2 : 1;
 }
 
 int ps1_runtime_run(const ps1_runtime_opts *o)
@@ -903,12 +924,32 @@ int ps1_runtime_run(const ps1_runtime_opts *o)
     }
     int fast_boot = o->fast_boot >= 0 ? o->fast_boot != 0 : !env_choice("RECOMP_PS1_FASTBOOT", "0", 0);
     ps1_set_fast_boot(m, fast_boot);
+    /* Internal resolution (XBA-184): the frame buffers hold the biggest picture at that factor. */
+    int up_asked = ps1_runtime_upscale(o), up = 1, gpu_threads = 0;
+    if (ps1_get_gpu(m) && up_asked > 1) {
+        const char *th = getenv("RECOMP_PS1_GPU_THREADS"); /* the shadow pass's workers (tuning; default by cores) */
+        up = ps1_gpu_set_upscale(ps1_get_gpu(m), up_asked);
+        gpu_threads = ps1_gpu_set_threads(ps1_get_gpu(m), th && *th >= '0' && *th <= '9' ? atoi(th) : -1);
+    }
+    int max_w = DISPLAY_MAX_W * up, max_h = DISPLAY_MAX_H * up;
+    uint32_t *xrgb = malloc((size_t)max_w * (size_t)max_h * sizeof *xrgb);
+    uint8_t *rgba = malloc((size_t)max_w * (size_t)max_h * 4);
+    if (!xrgb || !rgba) {
+        fprintf(stderr, "ps1: no memory for the picture (%d x %d)\n", max_w, max_h);
+        free(xrgb);
+        free(rgba);
+        ps1_destroy(m);
+        return -1;
+    }
     printf("ps1: %s, game %s (%s), key %s, BIOS %s\n", ps1_runtime_version(), base_name(game),
            exe_path == game ? "EXE, fast boot"
            : exe_path       ? "disc + EXE fast boot"
            : fast_boot      ? "disc, BIOS boot without its shell"
                             : "disc, BIOS boot",
            key, bios_from);
+    if (up_asked > 1)
+        printf("ps1: internal resolution %dx%s, %d GPU worker thread%s\n", up,
+               up == up_asked ? "" : " (no memory for more)", gpu_threads, gpu_threads == 1 ? "" : "s");
     ps1_pack pack;
     ps1_pack_load(m, o->pack_lib, key, src_sha, &pack); /* the interpreter whatever happens (logged) */
 
@@ -967,8 +1008,6 @@ int ps1_runtime_run(const ps1_runtime_opts *o)
            audio ? "on" : "off", host_pad_mask(), pad_name(analog), players >= 2 ? ", two players" : "");
     fflush(stdout);
 
-    static uint32_t xrgb[DISPLAY_MAX_W * DISPLAY_MAX_H];
-    static uint8_t rgba[DISPLAY_MAX_W * DISPLAY_MAX_H * 4];
     static int16_t pcm[PS1_AUDIO_RATE / 10 * 2];
     int dw = 320, dh = 240, last_w = 0, last_h = 0, last_pal = -1, last_int = -1, display_on = -1;
     uint64_t frames = 0, next = now_ns(), t0 = next, late_resets = 0, dirty_at = 0, dirty_first = 0;
@@ -1085,7 +1124,7 @@ int ps1_runtime_run(const ps1_runtime_opts *o)
             int last = step == steps - 1 || !ff || (o->frames && frames + 1 >= o->frames) ||
                        (!speed && now_ns() >= burst_end);
             if (last) /* the picture of the frame shown only */
-                on = ps1_display(m, xrgb, DISPLAY_MAX_W, DISPLAY_MAX_H, &dw, &dh) == 0;
+                on = ps1_display(m, xrgb, max_w, max_h, &dw, &dh) == 0;
             pthread_mutex_unlock(&s_mu);
             frames++;
             if (analog != was_analog) {
@@ -1118,7 +1157,7 @@ int ps1_runtime_run(const ps1_runtime_opts *o)
                 last_int = tm.interlaced;
             }
         }
-        if (!on || dw <= 0 || dh <= 0 || dw > DISPLAY_MAX_W || dh > DISPLAY_MAX_H) {
+        if (!on || dw <= 0 || dh <= 0 || dw > max_w || dh > max_h) {
             dw = last_w ? last_w : 320;
             dh = last_h ? last_h : 240;
             memset(xrgb, 0, (size_t)dw * (size_t)dh * sizeof xrgb[0]);
@@ -1202,6 +1241,8 @@ int ps1_runtime_run(const ps1_runtime_opts *o)
     pthread_mutex_unlock(&s_mu);
     ps1_destroy(m);
     ps1_pack_close(&pack);
+    free(xrgb);
+    free(rgba);
     return rc;
 }
 

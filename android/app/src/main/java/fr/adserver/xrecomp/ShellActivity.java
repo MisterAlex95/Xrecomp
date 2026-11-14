@@ -354,9 +354,10 @@ public class ShellActivity extends SDLActivity {
     }
 
     /**
-     * RECOMP_SCALE and RECOMP_FILTER for a GBA, PS1 or N64 game (XBA-181, {@link ConsoleVideo}): the game's own choice,
-     * else Settings' (recomp.cfg), else unset (the runtime's default); with the settings every console shares
-     * (vertical sync, audio buffer, rumble) from recomp.cfg. An Xbox game: scale and filter unset.
+     * RECOMP_SCALE and RECOMP_FILTER for a GBA, PS1 or N64 game (XBA-181, {@link ConsoleVideo}), RECOMP_UPSCALE too
+     * (XBA-184; the game's own choice for a PS1 or N64 game): the game's own choice, else Settings' (recomp.cfg), else
+     * unset (the runtime's default); with the settings every console shares (vertical sync, audio buffer, rumble) from
+     * recomp.cfg. An Xbox game: scale, filter and internal resolution unset.
      */
     private void applyConsoleVideo(Console c) {
         String tid = c != Console.XBOX ? GameStore.launchedTitleId(this) : null;
@@ -364,7 +365,8 @@ public class ShellActivity extends SDLActivity {
         RecompConfig cfg = ext == null ? null : RecompConfig.load(ext);
         String scale = ConsoleVideo.gameChoice(this, tid, ConsoleVideo.Setting.SCALE);
         String filter = ConsoleVideo.gameChoice(this, tid, ConsoleVideo.Setting.FILTER);
-        java.util.List<String[]> env = ConsoleVideo.runEnv(c, scale, filter, cfg);
+        String upscale = ConsoleVideo.gameChoice(this, tid, ConsoleVideo.Setting.UPSCALE);
+        java.util.List<String[]> env = ConsoleVideo.runEnv(c, scale, filter, upscale, cfg);
         StringBuilder line = new StringBuilder("shell: console video");
         for (String[] kv : env) {
             try {

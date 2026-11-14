@@ -232,6 +232,30 @@ their last word arrives, so the GPU is never busy. Tests: `consoles/ps1/tests/te
 them without SDL2); `ps1_gpu_bench` is the micro benchmark. The gfx.exe homebrew frame matches PCSX-Redux pixel for
 pixel.
 
+**PS1 internal resolution (XBA-184).** `ps1_gpu_set_upscale(gpu, 2 | 4)` (`RECOMP_UPSCALE`, `RECOMP_PS1_UPSCALE`,
+`ps1_play --upscale`; Android: Settings › Graphics › Internal resolution, a game's own in its Options), Beetle PSX's
+software way: the native 1024 x 512 VRAM stays the truth (CPU / DMA reads, GPUREAD, texture and CLUT fetches,
+VRAM-to-VRAM copies see exactly what they see at 1x), and a shadow VRAM of 1024N x 512N is drawn as well:
+polygons and rectangles rasterized again with their vertices scaled by N (same rules and span loops, drawing area
+scaled, textures sampled from the native VRAM; no PGXP, vertices stay on the native grid), lines N times finer and N
+pixels thick, fills and CPU writes as N x N blocks, VRAM copies copying the shadow's blocks (an off-screen picture
+copied to the display keeps its detail), the mask bit per copy. `ps1_gpu_display` reads the shadow: the picture is
+N times wider and higher (up to 2560 x 2048 at 4x, which `host_window` uploads as it is; 24-bit MDEC pictures are
+native pixels repeated); given a buffer too small for it (the save state thumbnail at 4x), the native picture. At 1x
+there is no shadow and none of this runs: the output is byte-identical to before (the golden hashes did not move).
+The shadow is derived, never saved: a state is the native GPU only (its size unchanged, so 0.3.0 states load), and
+loading one rebuilds the shadow from the VRAM as N x N blocks, the detail coming back with the next frame drawn.
+Cost: the shadow pass is N^2 times the native one, so a primitive covering enough shadow pixels has its rows shared
+(interleaved) between the emulation thread and up to three workers (`ps1_gpu_set_threads`, `RECOMP_PS1_GPU_THREADS`;
+by default 3 from 8 cores); each pixel is computed as by one thread, so the picture does not depend on the count.
+`ps1_gpu_bench [seconds] [factor] [workers]`, x86-64 (Ryzen AI Max+ 395 at 3 GHz), the busy 2000-primitive frame
+(about 0.5 Mpixels native, the PS1's fill-rate ceiling): 1x 3.8 ms; 2x 17.8 ms alone, 12.6 ms with 3 workers; 4x
+54 ms alone, 22 ms with 3 workers; a big textured triangle's shadow pass scales 3.3 times with 3 workers. Real games
+draw a fraction of that frame. Tests (`test_gpu.c`): the native VRAM and GPUREAD at 2x / 4x equal 1x's, golden hashes
+of the shadow (gfx.exe replica, busy scene), flat rectangles / fills / sprites (flipped too) / straight lines exactly
+the native pixels as blocks, the display, the state round trip, the same shadow with 0 or 3 workers, a 4x fuzz;
+`test_main.c`: gfx.exe through the runtime at 1x / 2x / 4x (screenshot sizes and golden CRCs).
+
 **PS1 disc, CD-ROM, SPU, MDEC (P-1 XBA-159, P-8 XBA-166, P-9 XBA-167).** The other devices of `ps1_devices.h`, plain
 C11 without host dependency (CMake targets `ps1_cd`, `ps1_spu`, `ps1_mdec`). `ps1_disc.c` reads raw sectors and
 tracks only (no ISO 9660): `.cue` (several `.bin` files, INDEX 00 / 01, PREGAP, relative paths, names matched ignoring

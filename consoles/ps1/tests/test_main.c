@@ -3,7 +3,8 @@
  * an EXE fast-booted, the same through "fd:N" (the app shell's documents), a disc booted by the BIOS from its .cue,
  * memory cards read back and left alone while unchanged, the app shell's entry, the errors, and a game's save
  * (the mcard homebrew: BIOS memory card functions) written to disk after the debounce, then reloaded; save states
- * (XBA-182) saved and loaded through recomp_states.h while the game runs on its own thread, another game's refused.
+ * (XBA-182) saved and loaded through recomp_states.h while the game runs on its own thread, another game's refused;
+ * the internal resolution (XBA-184): its keys, and gfx.exe's last picture at 2x and 4x (size, golden CRC).
  *
  *   ps1_runtime_test [BIOS HOMEBREW_DIR]     (the runs skip, the helpers still run, when either is absent) */
 #include "host_pad.h"
@@ -79,6 +80,36 @@ static void test_display(void)
     unsetenv("RECOMP_PS1_FILTER");
     unsetenv("RECOMP_SCALE");
     unsetenv("RECOMP_FILTER");
+}
+
+/* The internal resolution (XBA-184): RECOMP_PS1_UPSCALE over the shared RECOMP_UPSCALE, the caller's over both;
+ * 8 (the N64 renderer's most) is 4 here, 3 is 2, nonsense is skipped. */
+static void test_upscale_keys(void)
+{
+    ps1_runtime_opts o;
+    ps1_runtime_opts_init(&o);
+    unsetenv("RECOMP_PS1_UPSCALE");
+    unsetenv("RECOMP_UPSCALE");
+    CHECK(o.upscale == -1 && ps1_runtime_upscale(&o) == 1 && ps1_runtime_upscale(NULL) == 1);
+    setenv("RECOMP_UPSCALE", "2", 1);
+    CHECK(ps1_runtime_upscale(&o) == 2);
+    setenv("RECOMP_UPSCALE", "8", 1);
+    CHECK(ps1_runtime_upscale(&o) == 4);
+    setenv("RECOMP_UPSCALE", "3", 1);
+    CHECK(ps1_runtime_upscale(&o) == 2);
+    setenv("RECOMP_PS1_UPSCALE", "1", 1);
+    CHECK(ps1_runtime_upscale(&o) == 1);
+    setenv("RECOMP_PS1_UPSCALE", "4x", 1);
+    CHECK(ps1_runtime_upscale(&o) == 4);
+    setenv("RECOMP_PS1_UPSCALE", "native", 1); /* not a number: the shared key */
+    setenv("RECOMP_UPSCALE", "2", 1);
+    CHECK(ps1_runtime_upscale(&o) == 2);
+    setenv("RECOMP_UPSCALE", "0", 1);
+    CHECK(ps1_runtime_upscale(&o) == 1);
+    o.upscale = 4;
+    CHECK(ps1_runtime_upscale(&o) == 4);
+    unsetenv("RECOMP_PS1_UPSCALE");
+    unsetenv("RECOMP_UPSCALE");
 }
 
 static void test_helpers(void)
@@ -358,6 +389,65 @@ static void test_states(const char *dir, const char *hb)
     CHECK(pthread_join(th, &ret) == 0 && ret && *(int *)ret == 0);
 }
 
+/* CRC-32 of a file (at most 32 MB). */
+static uint32_t file_crc(const char *path)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f)
+        return 0;
+    size_t cap = 32u << 20, n;
+    uint8_t *buf = malloc(cap);
+    n = buf ? fread(buf, 1, cap, f) : 0;
+    fclose(f);
+    uint32_t c = buf ? crc32_ref(buf, n) : 0;
+    free(buf);
+    return c;
+}
+
+#ifndef GOLDEN_GFX_SHOT_1X
+#define GOLDEN_GFX_SHOT_1X 0xB6F0655Bu
+#endif
+#ifndef GOLDEN_GFX_SHOT_2X
+#define GOLDEN_GFX_SHOT_2X 0x81A736DDu
+#endif
+#ifndef GOLDEN_GFX_SHOT_4X
+#define GOLDEN_GFX_SHOT_4X 0x5694F051u
+#endif
+
+/* gfx.exe fast-booted, 60 frames, at 1x / 2x / 4x through RECOMP_UPSCALE (the key the app exports): the last picture
+ * 320 x 240 times the factor, the same pixels on every run (golden CRC-32 of the PPM). */
+static void test_upscale_runs(const char *dir, const char *exe)
+{
+    static const int factors[3] = { 1, 2, 4 };
+    static const uint32_t golden[3] = { GOLDEN_GFX_SHOT_1X, GOLDEN_GFX_SHOT_2X, GOLDEN_GFX_SHOT_4X };
+    char shot[300], log[300], val[8];
+    for (int i = 0; i < 3; i++) {
+        int n = factors[i], w = 0, h = 0;
+        ps1_runtime_opts o;
+        ps1_runtime_opts_init(&o);
+        o.game = exe;
+        o.title_key = "UPSC-00001";
+        o.frames = 60;
+        o.unpaced = 1;
+        snprintf(shot, sizeof shot, "%s/up%d.ppm", dir, n);
+        snprintf(log, sizeof log, "%s/up%d.log", dir, n);
+        o.screenshot = shot;
+        snprintf(val, sizeof val, "%d", n);
+        setenv("RECOMP_UPSCALE", val, 1);
+        CHECK(run_logged(&o, log) == 0);
+        unsetenv("RECOMP_UPSCALE");
+        CHECK(ppm_size(shot, &w, &h) == 0 && w == 320 * n && h == 240 * n);
+        if (n > 1)
+            CHECK(file_has(log, n == 2 ? "internal resolution 2x" : "internal resolution 4x"));
+        uint32_t crc = file_crc(shot);
+        printf("gfx.exe at %dx: %d x %d, CRC %08X\n", n, w, h, crc);
+        if (golden[i] && crc != golden[i]) {
+            fprintf(stderr, "FAIL gfx.exe at %dx: CRC %08X, want %08X\n", n, crc, golden[i]);
+            failures++;
+        }
+    }
+}
+
 static void test_runs(const char *bios, const char *hb)
 {
     char dir[] = "/tmp/ps1_runtime_test.XXXXXX", exe[600], cue[600], shot[300], card[400], spec[32];
@@ -447,8 +537,9 @@ static void test_runs(const char *bios, const char *hb)
     snprintf(cmd, sizeof cmd, "cmp -s '%s' '%s.ref'", card, card);
     CHECK(system(cmd) == 0);
 
-    /* 6: a game's save written by the debounce, then reloaded. */
+    /* 6: a game's save written by the debounce, then reloaded; the internal resolution. */
     test_save(dir, hb);
+    test_upscale_runs(dir, exe);
     test_states(dir, hb);
 
     /* 7: multi-disc (XBA-166): a .m3u plays its first disc (fast boot: the BIOS boots it without its shell); a swap
@@ -510,6 +601,7 @@ int main(int argc, char **argv)
     }
     test_helpers();
     test_display();
+    test_upscale_keys();
     test_m3u();
     if (argc >= 3)
         test_runs(argv[1], argv[2]);

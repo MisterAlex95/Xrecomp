@@ -71,11 +71,27 @@ void ps1_gpu_get_timing(ps1_gpu *g, ps1_gpu_timing *t);
 void ps1_gpu_scanline(ps1_gpu *g, int line);
 
 /* The displayed picture (display area of GP1(05h..07h) over VRAM, 15- or 24-bit), as 0x00RRGGBB, at most max_w x max_h
- * (640 x 512 covers every mode). Returns 0 and the size, or -1 when the display is off (then the host shows black). */
+ * (640 x 512 covers every mode). Returns 0 and the size, or -1 when the display is off (then the host shows black).
+ * Upscaled (ps1_gpu_set_upscale): N times wider and higher from the shadow VRAM when that fits max_w x max_h
+ * (640N x 512N covers every mode), else the native picture. */
 int ps1_gpu_display(ps1_gpu *g, uint32_t *xrgb, int max_w, int max_h, int *w, int *h);
 
 /* The 1024 x 512 x 16-bit VRAM, for tests and debugging. */
 const uint16_t *ps1_gpu_vram(ps1_gpu *g);
+
+/* Internal resolution upscale (XBA-184; ps1_gpu.c's header): factor 1, 2 or 4 (above 4: 4; 3: 2). Polygons,
+ * rectangles and lines are also drawn into a shadow VRAM of 1024N x 512N that the display reads; the native VRAM stays
+ * what the game reads back, the same bytes as at 1x. May be called at any time (the shadow is made from the VRAM).
+ * Returns the factor in use (1 when the shadow's memory, 4 MB at 2x and 16 MB at 4x, cannot be had). Not part of a
+ * save state: a state loaded rebuilds the shadow from its VRAM. */
+int ps1_gpu_set_upscale(ps1_gpu *g, int factor);
+int ps1_gpu_upscale(ps1_gpu *g);
+/* Workers that share the shadow pass of big primitives with the caller (0..3; the picture is the same whatever the
+ * count). Default -1: by the host's cores (3 from 8 cores, 2 from 4, 1 from 2). Returns the workers running (none at
+ * 1x). */
+int ps1_gpu_set_threads(ps1_gpu *g, int n);
+/* The shadow VRAM, (1024 x 512) x factor, row stride 1024 x factor; the native VRAM at 1x. Tests. */
+const uint16_t *ps1_gpu_vram_hi(ps1_gpu *g);
 
 /* ---- Disc images ---------------------------------------------------------------------------------------------------- */
 typedef struct ps1_disc ps1_disc;

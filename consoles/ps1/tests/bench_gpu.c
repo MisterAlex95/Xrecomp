@@ -1,7 +1,10 @@
 /* PS1 GPU micro benchmark (XBA-165): Mpixels/s of gouraud and textured gouraud triangles (4 / 8 / 15 bpp, dithered,
  * opaque and semi-transparent), and frames/s of a busy 320x240 scene: 2000 mixed primitives of 4..31 pixels, about
  * 0.5 Mpixels, around what the PS1 GPU's own fill rate allows in a 60 Hz frame.
- *   ps1_gpu_bench [seconds per case]   (default 1) */
+ * Upscaled (XBA-184): the same, the GPU at factor 2 or 4 (Mpixels/s stay native pixels: the native VRAM and the
+ * shadow are both drawn).
+ *   ps1_gpu_bench [seconds per case (default 1)] [upscale factor (default 1)] [shadow pass workers (default: by
+ *                 cores)] */
 #define _POSIX_C_SOURCE 200809L
 #include "gpu_scene.h"
 
@@ -43,6 +46,8 @@ int main(int argc, char **argv)
     double secs = argc > 1 ? atof(argv[1]) : 1.0;
     ps1_gpu *g = ps1_gpu_create((ps1_irq_sink){ 0 });
     gpu_open(g);
+    int up = ps1_gpu_set_upscale(g, argc > 2 ? atoi(argv[2]) : 1);
+    printf("upscale %dx, %d worker thread(s)\n", up, ps1_gpu_set_threads(g, argc > 3 ? atoi(argv[3]) : -1));
     scene_textures(g);
     GP0(g, 0xE1000200);
     tri_case(g, "gouraud (untextured, dithered)", 0x30, 2, secs);

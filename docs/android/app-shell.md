@@ -651,6 +651,7 @@ exist in the runtime and mean something to a player are offered. Graphics and Au
 | Graphics › Vertical sync (all consoles) | On (default), Off | `RECOMP_PRESENT_VSYNC=0` when off |
 | Graphics › Scale (all consoles; GBA, PS1, N64 only) | Keep shape (default), Whole pixels, Stretch | `RECOMP_SCALE=integer` / `stretch`; Keep shape writes nothing (the runtimes' `aspect`). A game can have its own ([Settings per console](#settings-per-console)) |
 | Graphics › Picture filter (all consoles; GBA, PS1, N64 only) | Console default (default: GBA sharp, PS1 and N64 smooth), Sharp, Smooth | `RECOMP_FILTER=nearest` / `linear`; Console default writes nothing. A game can have its own |
+| Graphics › Internal resolution (all consoles; PS1 and N64 only) | Native (default), 2x, 4x, 8x (N64 Vulkan) | `RECOMP_UPSCALE=2` / `4` / `8`; Native writes nothing (the runtimes' 1x). XBA-184 / XBA-185: the console draws N times its resolution; a PS1 game stops at 4x, 8x is the N64 Vulkan renderer's. A PS1 or N64 game can have its own |
 | Graphics › Renderer | Auto (default: GPU, unless the title's pack forces `RECOMP_GPU=0`), Software, GPU | `RECOMP_GPU=0` / `1`; Auto writes nothing and the runtime's Android default (GPU, CPU rasteriser when GLES 3.0 cannot start) applies; see [GPU back end](../technical/gpu-backend.md#android) |
 | Graphics › Frame cap (dimmed when the renderer is Software) | Auto (default: `RECOMP_PACING=auto`, the title's own rate or a steady lower one the device sustains, never dividing a title locked to its rate; WP4), 30, 60, Off | Auto writes nothing; `RECOMP_GPU_FPS_CAP=30` / `60` / `0` (a fixed cap, auto off) |
 | Graphics › Resolution (dimmed when the renderer is Software) | Auto (default: the title profile's choice, 1× for now), 1× (original), 2×, 3×, Fit the screen | `RECOMP_GPU_SCALE=1` / `2` / `3` / `auto` (Fit: the screen's height / 480, at most 3); see [GPU back end](../technical/gpu-backend.md#internal-resolution) |
@@ -710,6 +711,7 @@ XBA-181. Which settings reach which console's game (the native side reads them i
 | Graphics › Vertical sync (`RECOMP_PRESENT_VSYNC`) | yes | yes | no |
 | Graphics › Scale (`RECOMP_SCALE`) | no | yes | console game: its Home › Options, or the in-game menu (`scale_<KEY>`) |
 | Graphics › Picture filter (`RECOMP_FILTER`) | no | yes | console game: the same (`filter_<KEY>`) |
+| Graphics › Internal resolution (`RECOMP_UPSCALE`) | no | PS1, N64 (the GBA ignores it) | PS1 / N64 game: the same (`upscale_<KEY>`) |
 | Graphics › Renderer, Frame cap, Resolution, Aspect ratio, Widescreen, 480p, Frame generation, Texture filtering | yes | no | Widescreen, 480p: Xbox game, in-game menu |
 | Audio › Audio buffer (`RECOMP_AUDIO_BUF_SAMPLES`) | yes | yes | no |
 | Audio › 3D audio (HRTF) | yes | no | no |
@@ -726,6 +728,13 @@ else unsets them (the runtime's default: aspect; GBA nearest, PS1 / N64 linear; 
 `_FILTER` still win there), and `RECOMP_PRESENT_VSYNC`, `RECOMP_AUDIO_BUF_SAMPLES`, `RECOMP_RUMBLE` from recomp.cfg
 (unset without a line). An Xbox game gets `RECOMP_SCALE` / `RECOMP_FILTER` unset. Logcat: « shell: console video
 RECOMP_SCALE=… RECOMP_FILTER=… …, game <KEY> ».
+
+**A PS1 or N64 game's own internal resolution** (XBA-184, `ConsoleVideo.Setting.UPSCALE`). The same way:
+`files/settings/upscale_<KEY>` (`1`, `2`, `4`, `8`; empty or absent: follows Settings), an **Internal resolution**
+row after Picture filter in the game's Options (« As in Settings (<Settings' value>) », Native, 2x, 4x, 8x (N64
+Vulkan)) and « Resolution (next start) » in the in-game menu › Settings; a GBA game has neither (its 240 x 160 picture
+is drawn as it is). `ShellActivity` exports `RECOMP_UPSCALE` with the scale and filter: the game's value (PS1 / N64),
+else recomp.cfg's line, else unset; unset for an Xbox game. The PS1 caps 8 at 4 (`ps1_runtime_upscale`).
 
 **An N64 game's own Vulkan driver.** The same Options screen, for an N64 game (only the N64 Vulkan renderer uses a
 driver, for now), has a **Vulkan driver** row after the picture: « As in Settings (<Settings' driver>) », **System**,

@@ -324,6 +324,7 @@ public class LauncherConsoleControlsTest {
                      row(a, filterTitle).value);
         assertNotNull("its saves", row(a, app.getString(R.string.LIB_ST_SAVES)));
         assertNull("no Vulkan driver row: only the N64 renderer uses one", row(a, app.getString(R.string.OPT_VK_DRIVER)));
+        assertNull("no internal resolution: a GBA picture is not upscaled", row(a, app.getString(R.string.OPT_UPSCALE)));
         shot(a, "console-options-1-gba");
 
         focusRow(a, scaleTitle);
@@ -394,6 +395,38 @@ public class LauncherConsoleControlsTest {
         shot(a, "console-options-2-n64-vkdriver");
         key(a, KeyEvent.KEYCODE_DPAD_RIGHT);
         assertNull("back to Settings' choice", vk.gameChoice(key));
+    }
+
+    /**
+     * XBA-184: an N64 game's Options: its own Internal resolution (« As in Settings (<Settings' value>) », Native, 2x,
+     * 4x, 8x; upscale_&lt;KEY&gt;, which ShellActivity exports as RECOMP_UPSCALE).
+     */
+    @Test
+    public void n64OptionsInternalResolution() throws Exception {
+        File n64 = rom("n64", "Star Race.z64", ConsoleTest.n64(0));
+        RecompConfig cfg = RecompConfig.load(GameStore.externalFilesDir(app));
+        cfg.set("RECOMP_UPSCALE", "2");
+        cfg.save();
+        LauncherActivity a = launch();
+        String key = LibraryIndex.read(Library.indexFile(app.getFilesDir())).find(LibraryIndex.fileLoc(n64)).tid;
+        openControls(a, "Star Race", R.string.ROM_OPTIONS, LauncherActivity.Screen.ROM_OPTIONS);
+        String title = app.getString(R.string.OPT_UPSCALE);
+        Widgets.MenuRow r = row(a, title);
+        assertNotNull("N64: the internal resolution row", r);
+        assertEquals(app.getString(R.string.ROM_OPT_FOLLOW, app.getString(R.string.VAL_UPSCALE_2X)), r.value);
+        focusRow(a, title);
+        assertEquals(app.getString(R.string.ROM_OPT_UPSCALE_DETAIL), a.descriptionForTest());
+        key(a, KeyEvent.KEYCODE_DPAD_LEFT);
+        assertEquals("8", ConsoleVideo.gameChoice(app, key, ConsoleVideo.Setting.UPSCALE));
+        assertEquals(app.getString(R.string.VAL_UPSCALE_8X), row(a, title).value);
+        assertEquals(app.getString(R.string.ROM_OPT_SAVED), a.noteForTest());
+        assertEquals("recomp.cfg untouched", "2", cfgLine("RECOMP_UPSCALE"));
+        assertEquals("8", ConsoleVideo.runEnv(Console.N64, null, null,
+                                              ConsoleVideo.gameChoice(app, key, ConsoleVideo.Setting.UPSCALE),
+                                              RecompConfig.load(GameStore.externalFilesDir(app))).get(2)[1]);
+        shot(a, "console-options-3-n64-upscale");
+        key(a, KeyEvent.KEYCODE_DPAD_RIGHT);
+        assertNull("back to Settings' choice", ConsoleVideo.gameChoice(app, key, ConsoleVideo.Setting.UPSCALE));
     }
 
     /** A PS1 disc: Cross / Circle / Square / Triangle, L1 .. R3, both DualShock sticks. */

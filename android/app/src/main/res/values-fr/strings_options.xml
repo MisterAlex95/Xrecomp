@@ -15,6 +15,12 @@
     <string name="VAL_CFILTER_CONSOLE">Selon la console</string>
     <string name="VAL_CFILTER_NEAREST">Net</string>
     <string name="VAL_CFILTER_LINEAR">Lissé</string>
+    <string name="OPT_UPSCALE">Résolution interne</string>
+    <string name="OPT_UPSCALE_DETAIL">La finesse avec laquelle un jeu PlayStation ou Nintendo 64 dessine son image. Native : la résolution de la console. 2x, 4x, 8x : autant de fois plus de pixels dans chaque sens, pour des contours plus nets (les textures restent celles de la console) ; chaque cran demande beaucoup plus à l\'appareil, essayez d\'abord 2x. 8x : le rendu Vulkan Nintendo 64 seulement ; un jeu PlayStation s\'arrête à 4x. Un jeu peut avoir la sienne (ses Options). S\'applique au prochain lancement d\'un jeu. (RECOMP_UPSCALE)</string>
+    <string name="VAL_UPSCALE_NATIVE">Native</string>
+    <string name="VAL_UPSCALE_2X">2x</string>
+    <string name="VAL_UPSCALE_4X">4x</string>
+    <string name="VAL_UPSCALE_8X">8x (Vulkan N64)</string>
     <string name="OPT_RUMBLE">Vibration de la manette</string>
     <string name="OPT_RUMBLE_DETAIL">Activée : la manette vibre quand le jeu le demande (la DualShock de la PlayStation, le Rumble Pak de la Nintendo 64, la manette Xbox). Désactivée : jamais. Pour toutes les consoles. S\'applique au prochain lancement d\'un jeu. (RECOMP_RUMBLE)</string>
 
@@ -23,6 +29,7 @@
     <string name="ROM_OPT_DATA">Données du jeu</string>
     <string name="ROM_OPT_FOLLOW">Comme les Réglages (%1$s)</string>
     <string name="ROM_OPT_SCALE_DETAIL">Comment ce jeu remplit l\'écran : comme dans Réglages › Graphismes › Mise à l\'échelle, ou la sienne. Garder les proportions : le plus grand possible dans sa forme. Pixels entiers : tous les pixels de la même taille, des bords plus larges. Étirer : tout l\'écran, déformé. S\'applique au prochain lancement du jeu. (RECOMP_SCALE)</string>
+    <string name="ROM_OPT_UPSCALE_DETAIL">La finesse avec laquelle ce jeu dessine son image : comme dans Réglages › Graphismes › Résolution interne, ou la sienne. Native : la résolution de la console. 2x, 4x, 8x : des contours plus nets, beaucoup plus de travail pour l\'appareil. 8x : le rendu Vulkan Nintendo 64 seulement ; un jeu PlayStation s\'arrête à 4x. S\'applique au prochain lancement du jeu. (RECOMP_UPSCALE)</string>
     <string name="ROM_OPT_FILTER_DETAIL">Comment l\'image de ce jeu est agrandie : comme dans Réglages › Graphismes › Filtre de l\'image, ou le sien. Net : des pixels carrés. Lissé : des contours adoucis. S\'applique au prochain lancement du jeu. (RECOMP_FILTER)</string>
     <string name="ROM_OPT_SAVED">Enregistré pour ce jeu</string>
     <string name="ROM_OPT_SAVED_RUNNING">Enregistré pour ce jeu ; s\'applique au prochain lancement du jeu</string>
