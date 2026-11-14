@@ -143,7 +143,8 @@ void n64_run_frame(n64_machine *m);
 void n64_run_cycles(n64_machine *m, uint64_t cycles);
 
 /* The picture the VI shows: 0x00RRGGBB, the visible area (H/V_VIDEO, X/Y_SCALE) at framebuffer resolution, at most
- * max_w x max_h. Returns 0 and the size, or -1 when the VI is blank (w / h then a default size). */
+ * max_w x max_h. Returns 0 and the size, or -1 when the VI is blank (w / h then a default size). With the Vulkan RDP
+ * upscaling (n64_rdp.h n64_rdp_scanout_scale > 0) and a buffer that holds it, its VI's picture at the upscaled size. */
 int n64_display(n64_machine *m, uint32_t *xrgb, int max_w, int max_h, int *w, int *h);
 
 /* Audio: stereo int16, interleaved L/R, N64_AUDIO_RATE, made while n64_run_frame runs (silence while the AI is

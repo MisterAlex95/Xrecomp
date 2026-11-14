@@ -43,6 +43,33 @@ void n64_rdp_set_backend(n64_rdp_backend b); /* for the next n64_rdp_create call
 n64_rdp_backend n64_rdp_backend_parse(const char *s); /* "vulkan" / "software" / anything else: auto */
 const char *n64_rdp_backend_name(const n64_rdp *d); /* "software" or "vulkan" */
 
+/* Internal resolution (XBA-185): the Vulkan RDP draws at 2, 4 or 8 times the N64's resolution (paraLLEl-RDP's
+ * upscaling) and its own VI scans the picture out at that size (n64_rdp_scanout; n64_display takes it when the
+ * caller's buffer is large enough). RDRAM still holds the native picture, so what the game reads back is unchanged.
+ * The software RDP always draws at 1x (logged once at n64_rdp_create when more was asked). n64_rdp_create takes the
+ * factor set here, else $RECOMP_N64_UPSCALE, else the shared $RECOMP_UPSCALE, else 1; the Vulkan RDP may lower it
+ * when the device lacks memory or buffer range for it (logged). Options read at create (Vulkan RDP, factor > 1):
+ *   RECOMP_N64_UPSCALE_DOWNSCALE   0..3: halvings of the scanned-out picture (super-sampling); default: as many as
+ *                                  keep it at most 2560 pixels wide (8x: one), so the readback stays affordable
+ *   RECOMP_N64_UPSCALE_SSREADBACK  1: the native RDRAM copy is the upscaled picture averaged down (default 0: drawn
+ *                                  at 1x, bit-exact)
+ *   RECOMP_N64_UPSCALE_NATIVE_TEXRECT  0: texture rectangles are upscaled too (default 1: drawn at 1x, which avoids
+ *                                  seams in 2D and HUD art that assumes 1:1 texels)
+ *   RECOMP_N64_UPSCALE_NATIVE_LOD  1: texture LOD computed as at 1x (default 0) */
+int n64_rdp_upscale_parse(const char *s); /* "1" / "2" / "4" / "8" (other numbers: the power of two below, at most
+                                             8); NULL, "" or not a number: 0 */
+int n64_rdp_upscale_env(void);            /* $RECOMP_N64_UPSCALE, else $RECOMP_UPSCALE, else 1 */
+void n64_rdp_set_upscale(int factor);     /* for the next n64_rdp_create calls; 0: back to the environment */
+int n64_rdp_upscale(const n64_rdp *d);    /* the factor the RDP draws at: 1, 2, 4 or 8 (software RDP: 1) */
+/* Output pixels per VI pixel of n64_rdp_scanout's picture (the factor less the downscale steps): its width is 640
+ * times this, its height 240 / 288 (480 / 576 interlaced) times this. 0: no scanout (software RDP, or 1x). */
+int n64_rdp_scanout_scale(const n64_rdp *d);
+/* The VI's picture (registers vi[0..13] as n64_io.c holds them, field = the interlace field the VI scans now) as
+ * 0x00RRGGBB pixels from the RDP's own VI at the upscaled size. Returns 0, or -1 when there is no scanout (see
+ * n64_rdp_scanout_scale), the VI shows nothing, or the picture is larger than max_w x max_h. */
+int n64_rdp_scanout(n64_rdp *d, const uint32_t *vi, uint32_t field, uint32_t *xrgb, int max_w, int max_h, int *w,
+                    int *h);
+
 #ifdef __cplusplus
 }
 #endif

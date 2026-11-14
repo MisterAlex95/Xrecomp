@@ -33,7 +33,15 @@
  * its vkGetInstanceProcAddr (libadrenotools, libxba_vkdriver.so) is the first loader, and the same tries run on it.
  * If it cannot be opened, makes no device, or fails every try, the system's libvulkan is loaded again and the tries
  * run there: custom driver -> system driver -> software RDP. The start line names the driver (driverName, driverInfo,
- * custom <id> or system). */
+ * custom <id> or system).
+ *
+ * Internal resolution (XBA-185, n64_rdp.h): with a factor of 2, 4 or 8 (n64_rdp_upscale_wanted) paraLLEl-RDP draws
+ * each frame-buffer pass twice, at 1x into RDRAM as above (what the game reads back) and upscaled into GPU buffers of
+ * RDRAM's size times the factor squared, which its own VI scans out (vk_scanout, read back for n64_display). The
+ * factor is lowered first when those buffers exceed the device's storage buffer range or half its largest
+ * device-local heap (fit_upscale, logged). The check at create then draws into a 256-pixel-wide frame buffer (the
+ * width paraLLEl-RDP upscales from) and scans it out, so the upscaled and VI pipelines are compiled and checked too;
+ * a try that fails upscaled is made again at 1x. */
 #include "n64_rdp_backend.h"
 #include "n64_rdp.h"
 #include "n64_vk_driver.h"
@@ -43,6 +51,7 @@
 #include "rdp_device.hpp"
 #include "thread_id.hpp"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -85,6 +94,11 @@ struct VkRdp {
     std::unique_ptr<RDP::CommandProcessor> cp;
     RDP::CommandProcessorFlags cp_flags = 0;
     bool failed = false; /* a pipeline failed during the game: its draws are dropped (vk_failed) */
+
+    /* Internal resolution (XBA-185): the factor drawn at, the scanout's halvings, the scanout's pixels. */
+    int upscale = 1;
+    unsigned down_steps = 0;
+    std::vector<RDP::RGBA> scan;
 };
 
 /* Granite records command buffers per registered thread index: whichever thread drives the RDP is index 0, like
@@ -160,11 +174,111 @@ void sync(VkRdp *d)
     wrote_report(d);
 }
 
+/* ---- Internal resolution (XBA-185) ---------------------------------------------------------------------------------- */
+int env_int(const char *name, int def)
+{
+    const char *e = getenv(name);
+    return e && *e ? atoi(e) : def;
+}
+
+RDP::CommandProcessorFlags upscale_flags(int f)
+{
+    RDP::CommandProcessorFlags fl = f >= 8   ? RDP::COMMAND_PROCESSOR_FLAG_UPSCALING_8X_BIT
+                                    : f >= 4 ? RDP::COMMAND_PROCESSOR_FLAG_UPSCALING_4X_BIT
+                                    : f >= 2 ? RDP::COMMAND_PROCESSOR_FLAG_UPSCALING_2X_BIT
+                                             : 0;
+    if (fl && env_int("RECOMP_N64_UPSCALE_SSREADBACK", 0) != 0)
+        fl |= RDP::COMMAND_PROCESSOR_FLAG_SUPER_SAMPLED_READ_BACK_BIT;
+    return fl;
+}
+
+/* The largest factor up to f whose buffers the device can hold: paraLLEl-RDP binds the upscaled RDRAM (RDRAM's size
+ * x f^2) as one storage buffer, so it must fit maxStorageBufferRange (128 MB on many mobile drivers: 4x at most with
+ * 8 MB of RDRAM, 2x with the super-sampled readback's write mask), and the upscaled RDRAM, hidden RDRAM and the VI's images must fit in half the largest device-local
+ * heap (the rest is the game's and the system's; on a phone that heap is the shared RAM). */
+int fit_upscale(VkRdp *d, int f)
+{
+    if (f <= 1)
+        return 1;
+    const VkPhysicalDeviceLimits &lim = d->dev->get_gpu_properties().limits;
+    const VkPhysicalDeviceMemoryProperties &mem = d->dev->get_memory_properties();
+    uint64_t heap = 0;
+    for (uint32_t i = 0; i < mem.memoryHeapCount; i++)
+        if (mem.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT)
+            heap = std::max<uint64_t>(heap, mem.memoryHeaps[i].size);
+    const uint64_t rdram = d->bus.rdram_size;
+    const int asked = f;
+    for (; f > 1; f /= 2) {
+        const uint64_t ff = (uint64_t)f * (uint64_t)f;
+        const uint64_t ss = (upscale_flags(f) & RDP::COMMAND_PROCESSOR_FLAG_SUPER_SAMPLED_READ_BACK_BIT)
+                                ? 2ull * RDP::Limits::MaxWidth * RDP::Limits::MaxHeight / 8 /* its write mask */
+                                : 0;
+        const uint64_t range = rdram * ff + ss;
+        const uint64_t images = 4ull * (640ull * (uint64_t)f) * (576ull * (uint64_t)f) * 4ull; /* VI stages, RGBA8 */
+        const uint64_t need = range + rdram / 2 * ff + rdram + images;
+        if (range > lim.maxStorageBufferRange) {
+            fprintf(stderr, "n64: Vulkan RDP: upscale %dx needs a %llu MB storage buffer, %s allows %llu MB\n", f,
+                    (unsigned long long)(range >> 20), d->dev->get_gpu_properties().deviceName,
+                    (unsigned long long)(lim.maxStorageBufferRange >> 20));
+            continue;
+        }
+        if (heap && need > heap / 2) {
+            fprintf(stderr, "n64: Vulkan RDP: upscale %dx needs about %llu MB of video memory, %s has %llu MB\n", f,
+                    (unsigned long long)(need >> 20), d->dev->get_gpu_properties().deviceName,
+                    (unsigned long long)(heap >> 20));
+            continue;
+        }
+        break;
+    }
+    if (f != asked)
+        fprintf(stderr, "n64: Vulkan RDP: upscale lowered from %dx to %dx\n", asked, f);
+    return f;
+}
+
+/* Halvings of the scanout: $RECOMP_N64_UPSCALE_DOWNSCALE (0..3, at most down to 1x), else as many as keep the picture
+ * at most 2560 pixels wide (640 VI pixels x the factor): 8x is read back at 4x, super-sampled. */
+unsigned scanout_steps(int f)
+{
+    unsigned steps = 0, max_steps = 0;
+    while ((f >> (max_steps + 1)) >= 1 && max_steps < 3)
+        max_steps++;
+    const int e = env_int("RECOMP_N64_UPSCALE_DOWNSCALE", -1);
+    if (e >= 0)
+        steps = (unsigned)e;
+    else
+        while (640 * (f >> steps) > 2560)
+            steps++;
+    return std::min(steps, max_steps);
+}
+
+/* The game's command processor: quirks for the upscaled draws (n64_rdp.h). */
+void set_quirks(VkRdp *d)
+{
+    if (d->upscale <= 1)
+        return;
+    RDP::Quirks q;
+    q.set_native_resolution_tex_rect(env_int("RECOMP_N64_UPSCALE_NATIVE_TEXRECT", 1) != 0);
+    q.set_native_texture_lod(env_int("RECOMP_N64_UPSCALE_NATIVE_LOD", 0) != 0);
+    d->cp->set_quirks(q);
+}
+
+/* The VI's picture from paraLLEl-RDP's VI (d->scan); sw / sh 0 when it shows nothing. */
+void scanout_rgb(VkRdp *d, const uint32_t *vi, uint32_t field, unsigned *sw, unsigned *sh)
+{
+    for (unsigned r = 0; r < unsigned(RDP::VIRegister::Count); r++)
+        d->cp->set_vi_register(RDP::VIRegister(r), r == unsigned(RDP::VIRegister::VCurrentLine) ? field : vi[r]);
+    RDP::ScanoutOptions so;
+    so.downscale_steps = d->down_steps;
+    d->cp->scanout_sync(d->scan, *sw, *sh, so);
+}
+
 /* ---- The check at create -------------------------------------------------------------------------------------------- */
 /* A fill of the colour and Z images, a texture loaded and drawn as a rectangle with a Z test: tile binning, the
  * rasterizer (or the ubershader), depth / blend, TMEM loads and the RDRAM write-back all run. The commands are
- * encoded as in consoles/n64/tests/rdp_cmd.h. */
+ * encoded as in consoles/n64/tests/rdp_cmd.h. Upscaled (XBA-185), the images are 256 pixels wide (32 x 32 drawn),
+ * the narrowest paraLLEl-RDP renders upscaled, and the VI then scans the colour image out (check_scanout). */
 constexpr uint32_t CHECK_W = 32, CHECK_SPAN = 0x2000; /* 32 x 32 RGBA16 colour, Z, an 8 x 8 texture */
+constexpr uint32_t CHECK_W_UP = 256, CHECK_SPAN_UP = 0x9000; /* the same, 256-pixel lines */
 constexpr uint32_t CHECK_FILL = 0xF801F801u;           /* red, coverage bit */
 
 void put(std::vector<uint32_t> &l, uint64_t w)
@@ -175,14 +289,40 @@ void put(std::vector<uint32_t> &l, uint64_t w)
 
 uint64_t op(int id) { return (uint64_t)id << 56; }
 
+/* The upscaled VI scanout of the check's colour image (16-bit, 256 wide, 32 lines shown from fb line 0, X scale 0.5,
+ * replicated, no filters): the expected size, and the fill colour at frame-buffer pixel (6, 4). */
+bool check_scanout(VkRdp *d, uint32_t base)
+{
+    const uint32_t vi[14] = { 0x302 /* 16-bit, AA mode 3 */, base, CHECK_W_UP, 0x200, 0, 0x03E52239, 0x20D, 0xC15,
+                              0x0C150C15, 108u << 16 | 748u, 37u << 16 | 101u, 0x000E0204, 0x200, 0x400 };
+    unsigned sw = 0, sh = 0;
+    scanout_rgb(d, vi, 0, &sw, &sh);
+    const unsigned s = unsigned(d->upscale) >> d->down_steps;
+    if (d->cp->has_pipeline_failure())
+        return false;
+    if (sw != 640 * s || sh != 240 * s) {
+        fprintf(stderr, "n64: Vulkan RDP: check scanout is %u x %u, expected %u x %u\n", sw, sh, 640 * s, 240 * s);
+        return false;
+    }
+    /* canvas x = VI pixel (H_START at the canvas' left), 2 per fb pixel; row 1 is active line 0 ((37 - 34) / 2) */
+    const RDP::RGBA &px = d->scan[(size_t)(5 * s + s / 2) * sw + (13 * s + s / 2)];
+    if (px.r < 0xC0 || px.g > 0x40 || px.b > 0x40) {
+        fprintf(stderr, "n64: Vulkan RDP: check scanout drew %02x%02x%02x (expected ff0000)\n", px.r, px.g, px.b);
+        return false;
+    }
+    return true;
+}
+
 bool check(VkRdp *d)
 {
     if (const char *e = getenv("RECOMP_N64_RDP_CHECK"))
         if (atoi(e) == 0)
             return !d->cp->has_pipeline_failure();
-    const uint32_t base = d->bus.rdram_size - CHECK_SPAN; /* colour, then Z at +0x800, texture at +0x1000 */
-    const uint32_t z = base + 0x800, tex = base + 0x1000;
-    std::vector<uint8_t> saved(d->bus.rdram + base, d->bus.rdram + base + CHECK_SPAN);
+    const bool up = d->upscale > 1;
+    const uint32_t W = up ? CHECK_W_UP : CHECK_W, span = up ? CHECK_SPAN_UP : CHECK_SPAN;
+    const uint32_t base = d->bus.rdram_size - span; /* colour, then Z, then the texture */
+    const uint32_t z = base + W * CHECK_W * 2, tex = z + W * CHECK_W * 2;
+    std::vector<uint8_t> saved(d->bus.rdram + base, d->bus.rdram + base + span);
     for (uint32_t i = 0; i < 128; i++) /* the texture: 8 x 8 RGBA16, opaque */
         d->bus.rdram[tex + i] = (uint8_t)(i & 1 ? 0xFF : 0x7C);
 
@@ -190,11 +330,11 @@ bool check(VkRdp *d)
     std::vector<uint32_t> l;
     put(l, op(0x2D) | c10 << 12 | c10);                                                     /* scissor 32 x 32 */
     put(l, op(0x2F) | 3ull << 52);                                                          /* fill mode */
-    put(l, op(0x3F) | 2ull << 51 | (uint64_t)(CHECK_W - 1) << 32 | z);                      /* colour image = Z */
+    put(l, op(0x3F) | 2ull << 51 | (uint64_t)(W - 1) << 32 | z);                            /* colour image = Z */
     put(l, op(0x37) | 0xFFFCFFFCu);                                                         /* far */
     put(l, op(0x36) | last << 44 | last << 32);                                             /* fill rectangle */
     put(l, op(0x27));                                                                       /* sync pipe */
-    put(l, op(0x3F) | 2ull << 51 | (uint64_t)(CHECK_W - 1) << 32 | base);                   /* colour image */
+    put(l, op(0x3F) | 2ull << 51 | (uint64_t)(W - 1) << 32 | base);                         /* colour image */
     put(l, op(0x3E) | z);                                                                   /* Z image */
     put(l, op(0x37) | CHECK_FILL);
     put(l, op(0x36) | last << 44 | last << 32);
@@ -221,16 +361,17 @@ bool check(VkRdp *d)
     d->cp->begin_frame_context();
 
     const uint8_t *fb = d->bus.rdram + base;
-    const uint32_t far_px = (CHECK_W * CHECK_W - 1) * 2; /* the last pixel: filled, outside the rectangle */
-    const uint32_t tex_px = (12 * CHECK_W + 12) * 2;     /* inside the rectangle: a texel, not the fill colour */
+    const uint32_t far_px = ((CHECK_W - 1) * W + CHECK_W - 1) * 2; /* the last pixel: filled, outside the rect. */
+    const uint32_t tex_px = (12 * W + 12) * 2; /* inside the rectangle: a texel, not the fill colour */
     const bool fill_ok = fb[0] == 0xF8 && fb[1] == 0x01 && fb[far_px] == 0xF8 && fb[far_px + 1] == 0x01;
     const bool tex_ok = fb[tex_px] == 0x7C && (fb[tex_px + 1] & 0xFE) == 0xFE; /* low bit: coverage */
     const bool pipelines_ok = !d->cp->has_pipeline_failure();
     if (pipelines_ok && !(fill_ok && tex_ok))
         fprintf(stderr, "n64: Vulkan RDP: check drew %02x%02x (fill, expected f801) and %02x%02x (texture, expected "
                         "7cff)\n", fb[0], fb[1], fb[tex_px], fb[tex_px + 1]);
-    memcpy(d->bus.rdram + base, saved.data(), CHECK_SPAN);
-    return pipelines_ok && fill_ok && tex_ok;
+    const bool scan_ok = !up || !(pipelines_ok && fill_ok && tex_ok) || check_scanout(d, base);
+    memcpy(d->bus.rdram + base, saved.data(), span);
+    return pipelines_ok && fill_ok && tex_ok && scan_ok;
 }
 
 uint32_t cmd_cost(VkRdp *d, const uint32_t *w, int id)
@@ -374,6 +515,8 @@ bool try_driver(VkRdp *d, bool *custom)
         *custom = false;
     }
     driver_label(d->dev.get(), *custom, drv, sizeof drv);
+    d->upscale = fit_upscale(d, n64_rdp_upscale_wanted());
+    d->down_steps = scanout_steps(d->upscale);
 
     /* The default shaders, then without subgroup operations, then the ubershader: the first set that compiles and
      * draws the check right. The device keeps its programs and their failed pipelines from one try to the next. */
@@ -391,22 +534,47 @@ bool try_driver(VkRdp *d, bool *custom)
                             "games (Ocarina of Time), not used (RECOMP_N64_RDP_UBERSHADER=1 to try it)\n", gpu);
             break;
         }
+        d->cp.reset(); /* one set of (upscaled) buffers at a time */
         d->cp.reset(new RDP::CommandProcessor(*d->dev, bus.rdram, 0, bus.rdram_size, bus.rdram_size / 2,
-                                              tries[i].flags));
+                                              tries[i].flags | upscale_flags(d->upscale)));
+        if (!d->cp->device_is_supported() && d->upscale > 1) {
+            fprintf(stderr, "n64: Vulkan RDP: upscale %dx cannot start on %s (%s), trying 1x\n", d->upscale, gpu,
+                    drv);
+            d->upscale = 1;
+            d->down_steps = 0;
+            i--; /* the same try at 1x (at 0 the unsigned wrap is undone by the loop's i++) */
+            continue;
+        }
         if (!d->cp->device_is_supported()) {
             fprintf(stderr, "n64: Vulkan RDP: the device (%s, %s) lacks what paraLLEl-RDP needs\n", gpu, drv);
             break;
         }
         subgroups = d->cp->uses_subgroups();
         if (check(d)) {
-            d->cp_flags = tries[i].flags;
+            d->cp_flags = tries[i].flags | upscale_flags(d->upscale);
             /* A fresh command processor for the game: none of the check's RDP state. */
             d->cp->idle();
+            d->cp.reset();
             d->cp.reset(new RDP::CommandProcessor(*d->dev, bus.rdram, 0, bus.rdram_size, bus.rdram_size / 2,
                                                   d->cp_flags));
-            printf("n64: Vulkan RDP on %s (paraLLEl-RDP, %s; %s)\n", gpu, tries[i].name, drv);
+            set_quirks(d);
+            char up[96] = "";
+            if (d->upscale > 1)
+                snprintf(up, sizeof up, ", upscale %dx, scanout %dx%s", d->upscale, d->upscale >> d->down_steps,
+                         (d->cp_flags & RDP::COMMAND_PROCESSOR_FLAG_SUPER_SAMPLED_READ_BACK_BIT)
+                             ? ", super-sampled readback" : "");
+            printf("n64: Vulkan RDP on %s (paraLLEl-RDP, %s; %s%s)\n", gpu, tries[i].name, drv, up);
             fflush(stdout);
             return true;
+        }
+        if (d->upscale > 1) {
+            fprintf(stderr, "n64: Vulkan RDP: %s fail upscaled (%dx) on %s, trying 1x\n", tries[i].name, d->upscale,
+                    gpu);
+            d->cp->idle();
+            d->upscale = 1;
+            d->down_steps = 0;
+            i--; /* the same try at 1x */
+            continue;
         }
         fprintf(stderr, "n64: Vulkan RDP: %s fail on %s%s\n", tries[i].name, gpu,
                 i + 1 < sizeof tries / sizeof tries[0] ? ", trying again" : "");
@@ -596,8 +764,37 @@ void vk_flush(void *p)
 
 int vk_failed(void *p) { return static_cast<VkRdp *>(p)->failed; }
 
+int vk_upscale(void *p) { return static_cast<VkRdp *>(p)->upscale; }
+
+int vk_scanout_scale(void *p)
+{
+    const VkRdp *d = static_cast<VkRdp *>(p);
+    return d->upscale > 1 ? d->upscale >> d->down_steps : 0;
+}
+
+/* n64_display's picture at the upscaled size (n64_rdp.h n64_rdp_scanout): everything queued is drawn first. */
+int vk_scanout(void *p, const uint32_t *vi, uint32_t field, uint32_t *xrgb, int max_w, int max_h, int *w, int *h)
+{
+    VkRdp *d = static_cast<VkRdp *>(p);
+    if (d->upscale <= 1 || d->failed)
+        return -1;
+    on_thread();
+    sync(d);
+    unsigned sw = 0, sh = 0;
+    scanout_rgb(d, vi, field, &sw, &sh);
+    d->cp->begin_frame_context(); /* the scanout waited: nothing of this frame is in flight */
+    if (!sw || !sh || sw > (unsigned)max_w || sh > (unsigned)max_h)
+        return -1;
+    const RDP::RGBA *src = d->scan.data();
+    for (size_t i = 0, n = (size_t)sw * sh; i < n; i++)
+        xrgb[i] = (uint32_t)src[i].r << 16 | (uint32_t)src[i].g << 8 | src[i].b;
+    *w = (int)sw;
+    *h = (int)sh;
+    return 0;
+}
+
 } // namespace
 
 extern "C" const n64_rdp_ops n64_rdp_vk_ops = { "vulkan", vk_create, vk_destroy, vk_reset, vk_attach_dmem,
                                                 vk_read_reg, vk_write_reg, vk_run, vk_set_threads, vk_flush,
-                                                vk_failed };
+                                                vk_failed, vk_upscale, vk_scanout_scale, vk_scanout };

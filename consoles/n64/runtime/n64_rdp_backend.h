@@ -30,7 +30,15 @@ typedef struct n64_rdp_ops {
     /* Non-zero once this back end can no longer draw (the Vulkan RDP: a shader the driver failed to compile during
      * the game); n64_rdp_select.c then goes on with the software RDP. NULL: never. */
     int (*failed)(void *d);
+    /* Internal resolution (XBA-185, n64_rdp.h): the factor drawn at (NULL: 1), the scanout's output pixels per VI
+     * pixel (NULL or 0: no scanout) and the scanout itself (NULL: none). */
+    int (*upscale)(void *d);
+    int (*scanout_scale)(void *d);
+    int (*scanout)(void *d, const uint32_t *vi, uint32_t field, uint32_t *xrgb, int max_w, int max_h, int *w, int *h);
 } n64_rdp_ops;
+
+/* The factor the next back end is asked to draw at (n64_rdp_select.c: n64_rdp_set_upscale, else the environment). */
+int n64_rdp_upscale_wanted(void);
 
 extern const n64_rdp_ops n64_rdp_sw_ops; /* n64_rdp_select.c, over n64_rdp_sw_* */
 #ifdef N64_RDP_HAVE_VULKAN

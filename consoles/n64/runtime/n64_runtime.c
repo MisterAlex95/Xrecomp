@@ -10,7 +10,9 @@
  *
  * Picture: n64_display gives the VI's visible area at framebuffer resolution (320 x 240, 640 x 480, 512 x 288 PAL...)
  * as XRGB; it is shown at 4:3 whatever its size (host_window_set_aspect), as a television did, less the VI's black
- * guard band (8 VI pixels each side, RECOMP_N64_CROP_EDGES), which a television hid in its overscan. */
+ * guard band (8 VI pixels each side, RECOMP_N64_CROP_EDGES), which a television hid in its overscan. With the Vulkan
+ * RDP upscaling (RECOMP_N64_UPSCALE / RECOMP_UPSCALE, XBA-185) the picture is its scanout, 640 VI pixels x the scale
+ * wide, in buffers allocated for that size. */
 #define _GNU_SOURCE /* pread, nanosleep */
 #include "n64_runtime.h"
 
@@ -886,15 +888,33 @@ int n64_runtime_run(const n64_runtime_opts *o)
         host_pad_init();
     console_pad_load(&s_pad_map, CONSOLE_PAD_N64, getenv(console_pad_env(CONSOLE_PAD_N64)));
     int audio = host_audio_open(N64_AUDIO_RATE, 2);
-    printf("n64: window %s (4:3, %s, %s%s), audio %s, pads %u, %s%s, RDP %s, threads %d\n", window ? "on" : "off",
+    printf("n64: window %s (4:3, %s, %s%s), audio %s, pads %u, %s%s, RDP %s%s, threads %d\n", window ? "on" : "off",
            scale == HOST_SCALE_INTEGER ? "integer" : scale == HOST_SCALE_STRETCH ? "stretch" : "aspect",
            filter == HOST_FILTER_NEAREST ? "nearest" : "linear", crop ? ", edges cropped" : "",
            audio ? "on" : "off", host_pad_mask(), pak_name(pak), players >= 2 ? ", several players" : "",
-           n64_rdp_backend_name(rdp), rdp_threads);
+           n64_rdp_backend_name(rdp), rdp && n64_rdp_upscale(rdp) > 1 ? " upscaled" : "", rdp_threads);
     fflush(stdout);
 
-    static uint32_t xrgb[N64_SCREEN_MAX_W * N64_SCREEN_MAX_H];
-    static uint8_t rgba[N64_SCREEN_MAX_W * N64_SCREEN_MAX_H * 4];
+    static uint32_t xrgb_1x[N64_SCREEN_MAX_W * N64_SCREEN_MAX_H];
+    static uint8_t rgba_1x[N64_SCREEN_MAX_W * N64_SCREEN_MAX_H * 4];
+    /* The Vulkan RDP's upscaled scanout (XBA-185, n64_rdp_scanout_scale): pictures that many times larger. */
+    uint32_t *xrgb = xrgb_1x, *xrgb_up = NULL;
+    uint8_t *rgba = rgba_1x, *rgba_up = NULL;
+    int max_w = N64_SCREEN_MAX_W, max_h = N64_SCREEN_MAX_H;
+    int sscale = rdp ? n64_rdp_scanout_scale(rdp) : 0;
+    if (sscale > 1) {
+        size_t n = (size_t)N64_SCREEN_MAX_W * (size_t)sscale * (size_t)N64_SCREEN_MAX_H * (size_t)sscale;
+        xrgb_up = malloc(n * sizeof *xrgb_up);
+        rgba_up = malloc(n * 4);
+        if (xrgb_up && rgba_up) {
+            xrgb = xrgb_up;
+            rgba = rgba_up;
+            max_w *= sscale;
+            max_h *= sscale;
+        } else {
+            fprintf(stderr, "n64: no memory for the %dx picture, shown at 1x\n", sscale);
+        }
+    }
     static int16_t pcm[N64_AUDIO_RATE / 10 * 2];
     int dw = 320, dh = 240, last_w = 0, last_h = 0, display_on = -1, last_kind = N64_SAVE_NONE;
     uint64_t frames = 0, next = now_ns(), t0 = next, late_resets = 0, dirty_at = 0, dirty_first = 0;
@@ -978,7 +998,7 @@ int n64_runtime_run(const n64_runtime_opts *o)
                                          frame_ns, audio_low, &skip_run);
         if ((o->frames && frames + 1 >= o->frames) || (o->capture_path && o->capture_frame == frames + 1))
             skip = 0; /* the last frame of a bounded run is the screenshot; a capture is a capture */
-        int on = skip ? display_on > 0 : n64_display(m, xrgb, N64_SCREEN_MAX_W, N64_SCREEN_MAX_H, &dw, &dh) == 0;
+        int on = skip ? display_on > 0 : n64_display(m, xrgb, max_w, max_h, &dw, &dh) == 0;
         skipped += (uint64_t)skip;
         if (rumble_on)
             rumble_drive(m, players, rumble_sent); /* RECOMP_RUMBLE=0: never */
@@ -996,7 +1016,7 @@ int n64_runtime_run(const n64_runtime_opts *o)
         }
         if (skip) {
             /* keep the last picture and its size */
-        } else if (!on || dw <= 0 || dh <= 0 || dw > N64_SCREEN_MAX_W || dh > N64_SCREEN_MAX_H) {
+        } else if (!on || dw <= 0 || dh <= 0 || dw > max_w || dh > max_h) {
             dw = last_w ? last_w : 320;
             dh = last_h ? last_h : 240;
             memset(xrgb, 0, (size_t)dw * (size_t)dh * sizeof xrgb[0]);
@@ -1084,6 +1104,8 @@ int n64_runtime_run(const n64_runtime_opts *o)
         else
             rc = -1;
     }
+    free(xrgb_up);
+    free(rgba_up);
     fflush(stdout);
     if (rumble_sent[0] || rumble_sent[1] || rumble_sent[2] || rumble_sent[3])
         for (int p = 0; p < HOST_PAD_PORTS; p++)

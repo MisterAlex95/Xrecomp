@@ -9,7 +9,8 @@
  * --result      read the 512-byte xba_result block of our homebrew (consoles/n64/tests/homebrew/common/xba_result.h,
  *               physical 0x00300000, big-endian) after each frame, stop at the verdict; exit 0 on PASS, 1 on FAIL,
  *               2 on timeout
- * --ppm OUT     write the last frame the VI shows as a binary PPM (black when blank)
+ * --ppm OUT     write the last frame the VI shows as a binary PPM (black when blank); at the upscaled size when the
+ *               Vulkan RDP upscales (RECOMP_N64_RDP=vulkan RECOMP_UPSCALE=2, n64_rdp.h)
  * --wav OUT     write the audio of the run (n64_audio_pull after each frame) as a 48 kHz stereo 16-bit WAV
  * --tty         copy the IS-Viewer debug text (libdragon debugf, osSyncPrintf) to stdout
  * --pad MASK    buttons held on controller 1 for the whole run (N64_BTN_* bits)
@@ -32,6 +33,7 @@
  * Prints the frame rate reached on stderr (unless --quiet). Exit 3 on a usage or file error. */
 #define _POSIX_C_SOURCE 200809L /* clock_gettime */
 #include "n64_core.h"
+#include "n64_rdp.h"
 #include "n64_recomp.h"
 
 #include <dlfcn.h>
@@ -81,18 +83,28 @@ static uint8_t *load_file(const char *path, size_t *size)
 
 static int write_ppm(const char *path, n64_machine *m)
 {
-    static uint32_t px[N64_SCREEN_MAX_W * N64_SCREEN_MAX_H];
-    int w = 320, h = 240;
-    if (n64_display(m, px, N64_SCREEN_MAX_W, N64_SCREEN_MAX_H, &w, &h) != 0)
-        memset(px, 0, sizeof px);
-    FILE *f = fopen(path, "wb");
-    if (!f)
+    struct n64_rdp *rdp = n64_get_rdp(m);
+    int sc = rdp ? n64_rdp_scanout_scale(rdp) : 0; /* the Vulkan RDP's upscaled scanout (XBA-185) */
+    if (sc < 1)
+        sc = 1;
+    int mw = N64_SCREEN_MAX_W * sc, mh = N64_SCREEN_MAX_H * sc;
+    uint32_t *px = calloc((size_t)mw * (size_t)mh, sizeof *px);
+    if (!px)
         return -1;
+    int w = 320, h = 240;
+    if (n64_display(m, px, mw, mh, &w, &h) != 0)
+        memset(px, 0, (size_t)mw * (size_t)mh * sizeof *px);
+    FILE *f = fopen(path, "wb");
+    if (!f) {
+        free(px);
+        return -1;
+    }
     fprintf(f, "P6\n%d %d\n255\n", w, h);
     for (int i = 0; i < w * h; i++) {
         uint8_t rgb[3] = {(uint8_t)(px[i] >> 16), (uint8_t)(px[i] >> 8), (uint8_t)px[i]};
         fwrite(rgb, 1, 3, f);
     }
+    free(px);
     return fclose(f);
 }
 

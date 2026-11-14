@@ -484,6 +484,28 @@ bit for bit against angrylion.
   RDP when the RDP is idle. The RDP state is lost then, and so is the frame being drawn. `RECOMP_N64_RDP_CHECK=0`
   skips the check. `PARALLEL_RDP_TEST_FAIL_PROGRAM=depth_blend` (or `rasterizer`, `tile_binning_combined`, ...)
   fakes a failing driver, to test the fallbacks on lavapipe.
+- **Internal resolution (XBA-185).** `RECOMP_N64_UPSCALE` (else the shared `RECOMP_UPSCALE`) = `1` | `2` | `4` |
+  `8`, default 1, read at `n64_rdp_create` (`n64_rdp_set_upscale` overrides). The Vulkan RDP then draws each frame
+  buffer pass twice: at 1x into RDRAM as before, so whatever the game reads back is unchanged, and at 2x / 4x / 8x
+  into GPU copies of RDRAM (paraLLEl-RDP's upscaling, only for 16 / 32-bit frame buffers at least 256 pixels wide).
+  Its own VI scans the upscaled one out (`n64_rdp_scanout`) and `n64_display` returns that picture, read back to the
+  CPU: 640 VI pixels x the scale wide, 240 / 288 lines (480 / 576 interlaced, upscaled bob instead of our VI's weave)
+  x the scale high, 1280 x 480 at 2x. The runtime shows it at 4:3 and crops the guard band as at 1x
+  (`RECOMP_N64_CROP_EDGES`); `--screenshot` and `n64_run --ppm` write it at that size. Costs and limits:
+  - the upscaled RDRAM (8 MB x the factor squared) is bound as one storage buffer, so it must fit the device's
+    `maxStorageBufferRange` (128 MB on lavapipe and many mobile drivers: 4x at most), and the buffers and the VI's
+    images must fit in half the largest device-local heap. The factor is lowered with a log line otherwise
+    (`upscale 8x needs a 512 MB storage buffer, ... allows 128 MB`, `upscale lowered from 8x to 4x`);
+  - the scanout is halved (filtered, super-sampled) until it is at most 2560 pixels wide, so 8x is read back at 4x;
+    `RECOMP_N64_UPSCALE_DOWNSCALE=0..3` sets the halvings;
+  - texture rectangles are drawn at 1x by default (2D and HUD art made for 1:1 texels shows seams otherwise):
+    `RECOMP_N64_UPSCALE_NATIVE_TEXRECT=0` upscales them; `RECOMP_N64_UPSCALE_NATIVE_LOD=1` computes texture LOD as at
+    1x; `RECOMP_N64_UPSCALE_SSREADBACK=1` makes the RDRAM copy the upscaled picture averaged down (not bit-exact);
+  - the start-up check runs upscaled: its frame buffer is 256 pixels wide, so the upscaled passes run, and its VI
+    scanout must come out at the expected size and colour. A shader try that fails upscaled is made again at 1x
+    (`default shaders fail upscaled (2x) on <GPU>, trying 1x`). The start line ends `upscale 2x, scanout 2x`;
+  - the software RDP always draws at 1x: `n64: upscale 2x needs the Vulkan RDP, the software RDP draws at 1x`, also
+    when the Vulkan RDP cannot start (Qualcomm's own driver on the Thor) or fails during the game.
 - **Custom Vulkan driver (Android).** The player can supply a driver, Mesa Turnip for the Adreno, which compiles
   paraLLEl-RDP's shaders where Qualcomm's driver does not. `n64_vk_driver.c` reads the selection the app put in the
   environment (`RECOMP_VK_DRIVER_DIR`, `RECOMP_VK_DRIVER_LIB`, `RECOMP_VK_DRIVER_ID`, `RECOMP_VK_HOOK_DIR`;
@@ -516,6 +538,10 @@ Tests (`consoles/n64/tests`, built with `-DXBR_N64_RDP_VULKAN=ON`; without a GPU
   system driver passes the same tests. `n64_vk_driver` (every build, no Vulkan): the `RECOMP_VK_*` variables, the
   trial marker and `last_start`.
 - `n64_hb_gfx` passes with `RECOMP_N64_RDP=vulkan` too.
+- Upscaling (XBA-185): `n64_rdp` / `n64_rdp_vulkan` test the option parsing (`RECOMP_N64_UPSCALE` over
+  `RECOMP_UPSCALE`) and a 2x scanout of a 320 x 240 frame buffer (1280 x 480, the colours in place; the software RDP
+  refuses it). `n64_hb_gfx_upscale` (`run_upscale.sh`) runs gfx.z64 at 1x and 2x: the 2x picture is 1280 x 480 and
+  matches the 1x one sampled at its pixel centres (`upscale_compare.py`).
 - lavapipe's speed means nothing for a phone.
 
 **N64 static recompilation (N-1 XBA-169, N-2 XBA-170, N-3 XBA-171).** The PS1's model on the VR4300: an N64 game's

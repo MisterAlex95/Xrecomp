@@ -35,6 +35,9 @@
  *     combing and no bobbing; one that shows the same 240 lines in both fields gets them line-doubled.
  * Horizontal guard band: the first 8 and last 7 VI pixels of the active area are black (not when that edge is clamped
  * to the scan-out), so a standard 640-pixel mode shows VI pixels 8..632 (canvas columns 4..316 at 320 wide).
+ * Upscaled (XBA-185): with the Vulkan RDP drawing at 2x / 4x / 8x, n64_display returns its VI's scanout instead
+ * (paraLLEl-RDP's VI: the same canvas, 640 x 240 / 288 VI pixels times the scale, interlace by upscaled bob rather
+ * than weave) when the buffer is large enough for it.
  * Not modelled: the VI's fetch bugs, the AA filter's exact neighbour set (an approximation),
  * per-line register changes within a field (the picture uses the registers at the call). */
 #include "n64_internal.h"
@@ -291,6 +294,13 @@ int n64_display(n64_machine *m, uint32_t *xrgb, int max_w, int max_h, int *w, in
     *w = 320;
     *h = field_h;
     n64_rdp_flush(m->rdp); /* with scanline-band threads the RDP may still hold batched primitives */
+    /* Internal resolution (XBA-185, n64_rdp.h): the Vulkan RDP's own VI scans out its upscaled picture when the
+     * caller's buffer holds it (640 VI pixels wide times the scale); else, or when it shows nothing, the picture
+     * below, from RDRAM at 1x. */
+    int sscale = n64_rdp_scanout_scale(m->rdp);
+    if (sscale > 0 && max_w >= CANVAS_W * sscale &&
+        n64_rdp_scanout(m->rdp, m->vi, m->vi_field, xrgb, max_w, max_h, w, h) == 0)
+        return 0;
     if (type < 2 || width == 0 || he <= hs || ve <= vs || xs == 0 || ys == 0)
         return -1;
     struct n64_vi_state *v = vi_state(m);

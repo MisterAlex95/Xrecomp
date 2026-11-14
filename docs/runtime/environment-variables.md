@@ -464,6 +464,11 @@ apply to them too; the pad mappings are under [Input](#input).
 | `RECOMP_N64_DEADZONE=0..90` | 8 | The stick's radial dead zone, in percent. | `n64_runtime.c` |
 | `RECOMP_N64_FRAMESKIP=auto\|0\|N` | auto | `auto` skips the picture of frames the host is late for, `0` never, `N` shows one frame in N + 1 (`--frameskip`). A skipped frame still runs and makes its sound. | `n64_runtime.c` |
 | `RECOMP_N64_RDP=vulkan\|software\|auto` | auto: Vulkan on Android (when built in), software elsewhere | The RDP back end (`vk` / `gpu`, `sw` / `cpu` too). The Vulkan one falls back to the software one when it fails its check. | `n64_rdp_select.c` |
+| `RECOMP_N64_UPSCALE=1\|2\|4\|8` | `RECOMP_UPSCALE`, else 1 | The N64's internal resolution (XBA-185): the Vulkan RDP draws at that multiple and its VI scans the picture out at it (1280 x 480 at 2x); RDRAM keeps the 1x picture. Lowered (logged) when the device's storage buffer range or memory cannot hold it (128 MB range: 4x at most). Other numbers take the power of two below. The software RDP stays 1x (logged). | `n64_rdp_select.c`, `n64_rdp_vk.cpp` |
+| `RECOMP_N64_UPSCALE_DOWNSCALE=0..3` | as many as keep the picture at most 2560 wide (8x: 1) | Halvings of the upscaled scanout (filtered: super-sampling), to keep the readback small. | `n64_rdp_vk.cpp` |
+| `RECOMP_N64_UPSCALE_NATIVE_TEXRECT=0` | on | Upscales texture rectangles too (by default they are drawn at 1x: 2D and HUD art made for 1:1 texels). | `n64_rdp_vk.cpp` |
+| `RECOMP_N64_UPSCALE_NATIVE_LOD=1` | off | Computes texture LOD as at 1x when upscaled (games that pick textures through LOD). | `n64_rdp_vk.cpp` |
+| `RECOMP_N64_UPSCALE_SSREADBACK=1` | off | The RDRAM copy the game reads is the upscaled picture averaged down, not the 1x one (not bit-exact). | `n64_rdp_vk.cpp` |
 | `RECOMP_N64_RDP_THREADS=N` | 2 on Android, else `XBR_N64_RDP_THREADS`, else 1 | The software RDP's scanline-band threads (`--rdp-threads`). | `n64_runtime.c`, `n64_rdp.c` |
 | `RECOMP_N64_RDP_CHECK=0` | on | Skips the Vulkan RDP's start-up draw check (only a pipeline failure then falls back). | `n64_rdp_vk.cpp` |
 | `RECOMP_N64_RDP_UBERSHADER=1` | off on Qualcomm's driver | Uses the Vulkan RDP's ubershader on Qualcomm's proprietary driver anyway (games come out black there, so it goes software). | `n64_rdp_vk.cpp` |
