@@ -134,6 +134,7 @@ void n64_destroy(n64_machine *m)
     free(m->rdram_gen);
     free(m->flash);
     free(m->isv);
+    n64_vi_free(m);
     free(m);
 }
 

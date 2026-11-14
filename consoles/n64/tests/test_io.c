@@ -2,7 +2,9 @@
  * controller pak with its CRC, rumble pak, EEPROM), SRAM and FlashRAM through the PI, PI DMA, the AI (queue,
  * interrupt, 48 kHz output) and the VI picture. Register sequences and data are made here; no ROM files. */
 #include "n64_internal.h"
+#include "n64_rdp.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -421,34 +423,316 @@ static void test_ai(void)
     n64_destroy(m);
 }
 
+/* A game's audio loop: buffers of a sine (continuous phase across buffers) queued whenever the AI has room, at the
+ * DAC rate dac_hz (the exact rate the divider gives is used for the phase). Output collected at 48 kHz. */
+typedef struct tone {
+    double phase, freq, amp;
+    uint32_t next_buf;
+} tone;
+
+static size_t play_tone(n64_machine *m, tone *t, uint32_t dacrate, double ms, int16_t *out, size_t max)
+{
+    const double vi_clock = 48681812.0;
+    double fs = vi_clock / (dacrate + 1);
+    w32(m, 0x04500010, dacrate);
+    w32(m, 0x04500008, 1);
+    size_t n = 0;
+    int steps = (int)(ms * 4);
+    for (int s = 0; s < steps; s++) {
+        while (!(r32(m, 0x0450000C) & 0x80000000u)) { /* room for a buffer: 512 frames */
+            uint32_t addr = 0x200000 + (t->next_buf++ & 3) * 0x1000;
+            for (int i = 0; i < 512; i++) {
+                int16_t v = (int16_t)lrint(t->amp * sin(t->phase));
+                t->phase += 2 * 3.14159265358979323846 * t->freq / fs;
+                n64_wbe16(m->rdram + addr + 4 * i, (uint16_t)v);
+                n64_wbe16(m->rdram + addr + 4 * i + 2, (uint16_t)v);
+            }
+            w32(m, 0x04500000, addr);
+            w32(m, 0x04500004, 512 * 4);
+            w32(m, 0x0450000C, 0);
+        }
+        n64_run_cycles(m, N64_CPU_HZ / 4000); /* 0.25 ms */
+        int16_t tmp[2 * 64];
+        size_t got;
+        while ((got = n64_audio_pull(m, tmp, 64)) > 0)
+            for (size_t i = 0; i < got && n < max; i++)
+                out[n++] = tmp[2 * i];
+    }
+    return n;
+}
+
+/* Signal-to-(noise + distortion + images) of a stretch of 48 kHz output against a sine at freq: least-squares fit of
+ * a sine, a cosine and DC, then the residual's power, in dB. */
+static double sine_snr(const int16_t *x, size_t n, double freq)
+{
+    double w = 2 * 3.14159265358979323846 * freq / 48000.0;
+    double A[3][4] = {{0}};
+    for (size_t i = 0; i < n; i++) {
+        double f[3] = {sin(w * (double)i), cos(w * (double)i), 1.0};
+        for (int r = 0; r < 3; r++) {
+            for (int c = 0; c < 3; c++)
+                A[r][c] += f[r] * f[c];
+            A[r][3] += f[r] * x[i];
+        }
+    }
+    for (int col = 0; col < 3; col++) /* Gauss-Jordan on the 3 x 3 normal equations */
+        for (int r = 0; r < 3; r++) {
+            if (r == col)
+                continue;
+            double q = A[r][col] / A[col][col];
+            for (int c = 0; c < 4; c++)
+                A[r][c] -= q * A[col][c];
+        }
+    double a = A[0][3] / A[0][0], b = A[1][3] / A[1][1], dc = A[2][3] / A[2][2];
+    double sig = 0, err = 0;
+    for (size_t i = 0; i < n; i++) {
+        double fit = a * sin(w * (double)i) + b * cos(w * (double)i);
+        double e = x[i] - dc - fit;
+        sig += fit * fit;
+        err += e * e;
+    }
+    return 10 * log10(sig / (err > 1e-9 ? err : 1e-9));
+}
+
+static int max_step(const int16_t *x, size_t n)
+{
+    int mx = 0;
+    for (size_t i = 1; i < n; i++) {
+        int d = abs(x[i] - x[i - 1]);
+        if (d > mx)
+            mx = d;
+    }
+    return mx;
+}
+
+static void test_ai_resampler(void)
+{
+    static int16_t out[48000];
+    const uint32_t vi_clock = 48681812u;
+    /* A sweep of tones from a 32 kHz DAC: sample and hold left the DAC's images (32 kHz - f, folded at 24 kHz) at a
+     * few dB below the tone near the top; the windowed sinc keeps them more than 70 dB down through 12 kHz (60 at
+     * 14 kHz). */
+    static const double freqs[] = {100, 440, 1000, 3000, 6000, 9000, 12000, 14000};
+    for (size_t k = 0; k < sizeof freqs / sizeof freqs[0]; k++) {
+        n64_options ntsc = {.force_pal = 0};
+        n64_machine *m = mk(&ntsc);
+        tone t = {0, freqs[k], 12000, 0};
+        size_t n = play_tone(m, &t, vi_clock / 32000 - 1, 120, out, 48000);
+        double snr = n > 4000 ? sine_snr(out + 1000, n - 2000, freqs[k]) : 0;
+        double want = freqs[k] <= 12000 ? 70 : 60;
+        printf("  32 kHz DAC, %5.0f Hz: SNR %.1f dB\n", freqs[k], snr);
+        CHECK(n > 5000 && snr > want, "32 kHz DAC, %.0f Hz: SNR %.1f dB (want > %.0f), %zu samples", freqs[k], snr,
+              want, n);
+        n64_destroy(m);
+    }
+    /* 22.05 kHz and 44.1 kHz DACs. */
+    static const uint32_t rates[] = {22050, 44100};
+    for (int r = 0; r < 2; r++) {
+        n64_options ntsc = {.force_pal = 0};
+        n64_machine *m = mk(&ntsc);
+        tone t = {0, 5000, 12000, 0};
+        size_t n = play_tone(m, &t, vi_clock / rates[r] - 1, 100, out, 48000);
+        double snr = sine_snr(out + 1000, n - 2000, 5000);
+        CHECK(snr > 70, "%u Hz DAC, 5 kHz: SNR %.1f dB", rates[r], snr);
+        n64_destroy(m);
+    }
+    /* Buffer boundaries and a DAC rate change mid-stream (32 kHz -> 22.05 kHz, the sine's phase continuous): no
+     * click: no step between two output samples beyond what a 440 Hz sine of that amplitude makes (2 pi f A / 48000:
+     * about 690), with margin. Then a gap (no buffer queued: the DAC holds its last sample) and a restart. */
+    {
+        n64_options ntsc = {.force_pal = 0};
+        n64_machine *m = mk(&ntsc);
+        int16_t buf[4096 * 2];
+        n64_run_cycles(m, N64_CPU_HZ / 100);
+        n64_audio_pull(m, buf, 4096);
+        tone t = {0, 440, 12000, 0};
+        size_t n = play_tone(m, &t, vi_clock / 32000 - 1, 50, out, 48000);
+        size_t n2 = play_tone(m, &t, vi_clock / 22050 - 1, 150, out + n, 48000 - n);
+        int step = max_step(out + 200, n + n2 - 200);
+        CHECK(step < 900, "rate change and buffer boundaries: largest step %d", step);
+        /* The two buffers queued before the change play at the new rate (as on the hardware); then 440 Hz again. */
+        double snr = sine_snr(out + n + n2 - 2880, 2880, 440);
+        CHECK(snr > 70, "after the rate change: SNR %.1f dB", snr);
+        n64_destroy(m);
+    }
+}
+
 /* ---- VI -------------------------------------------------------------------------------------------------------- */
+
+static uint32_t rgb_of(int r, int g, int b) { return (uint32_t)r << 16 | (uint32_t)g << 8 | (uint32_t)b; }
+static int near(uint32_t a, uint32_t b, int tol)
+{
+    for (int s = 0; s < 24; s += 8) {
+        int d = (int)((a >> s) & 255) - (int)((b >> s) & 255);
+        if (d < -tol || d > tol)
+            return 0;
+    }
+    return 1;
+}
+static uint16_t c16(int r5, int g5, int b5, int a) { return (uint16_t)(r5 << 11 | g5 << 6 | b5 << 1 | a); }
+
+/* A VI mode: ctrl, origin, width, H / V_VIDEO, X / Y_SCALE (offset << 16 | scale). */
+static void vi_mode(n64_machine *m, uint32_t ctrl, uint32_t origin, uint32_t width, uint32_t hv, uint32_t vv,
+                    uint32_t xs, uint32_t ys)
+{
+    w32(m, 0x04400004, origin);
+    w32(m, 0x04400008, width);
+    w32(m, 0x04400024, hv);
+    w32(m, 0x04400028, vv);
+    w32(m, 0x04400030, xs);
+    w32(m, 0x04400034, ys);
+    w32(m, 0x04400000, ctrl);
+}
 
 static void test_vi(void)
 {
     n64_options ntsc = {.force_pal = 0};
     n64_machine *m = mk(&ntsc);
-    static uint32_t px[640 * 480];
+    static uint32_t px[640 * 576];
     int w, h;
-    CHECK(n64_display(m, px, 640, 480, &w, &h) != 0, "blank before the VI is set up");
-    w32(m, 0x04400004, 0x100000); /* origin */
-    w32(m, 0x04400008, 320);      /* width */
-    w32(m, 0x04400024, 0x006C02EC); /* H_VIDEO 108..748 */
-    w32(m, 0x04400028, 0x002501FF); /* V_VIDEO 37..511 */
-    w32(m, 0x04400030, 0x200);      /* X_SCALE 0.5 */
-    w32(m, 0x04400034, 0x400);      /* Y_SCALE 1.0 */
-    w32(m, 0x04400000, 0x3202);     /* 16-bit */
-    n64_wbe16(m->rdram + 0x100000, 0xF801);           /* red */
-    n64_wbe16(m->rdram + 0x100000 + 2 * 321, 0x07C1); /* green at (1, 1) */
-    CHECK(n64_display(m, px, 640, 480, &w, &h) == 0, "16-bit picture");
-    CHECK(w == 320 && h == 237, "visible area %dx%d", w, h);
-    CHECK_EQ(px[0], 0xFF0000, "red pixel");
-    CHECK_EQ(px[321], 0x00FF00, "green pixel");
-    w32(m, 0x04400000, 0x3203); /* 32-bit */
-    n64_wbe32(m->rdram + 0x100000, 0x123456FF);
-    n64_display(m, px, 640, 480, &w, &h);
-    CHECK_EQ(px[0], 0x123456, "32-bit pixel");
+    CHECK(n64_display(m, px, 640, 576, &w, &h) != 0, "blank before the VI is set up");
+
+    /* NTSC 320 x 240, 16-bit, AA off (replicate): the canvas is 320 x 240, the active area (half-lines 37..511) starts
+     * on row 1, the framebuffer's own pixels. */
+    const uint32_t fb = 0x100000;
+    vi_mode(m, 0x3302, fb, 320, 0x006C02EC, 0x002501FF, 0x200, 0x400);
+    n64_wbe16(m->rdram + fb, c16(31, 0, 0, 1));           /* red */
+    n64_wbe16(m->rdram + fb + 2 * 321, c16(0, 31, 0, 1)); /* green at (1, 1) */
+    CHECK(n64_display(m, px, 640, 576, &w, &h) == 0, "16-bit picture");
+    CHECK(w == 320 && h == 240, "NTSC canvas %dx%d", w, h);
+    CHECK_EQ(px[0], 0, "row 0: border");
+    CHECK_EQ(px[320 * 1 + 0], 0xFF0000, "red pixel");
+    CHECK_EQ(px[320 * 2 + 1], 0x00FF00, "green pixel");
+    CHECK_EQ(px[320 * 239], 0, "last row: border (237 active lines)");
+    w32(m, 0x04400000, 0x3303); /* 32-bit */
+    n64_wbe32(m->rdram + fb, 0x123456FF);
+    n64_display(m, px, 640, 576, &w, &h);
+    CHECK_EQ(px[320], 0x123456, "32-bit pixel");
     CHECK(n64_display(m, px, 100, 50, &w, &h) == 0 && w == 100 && h == 50, "clipped to the buffer");
 
+    /* A narrow active area (H 188..668: 480 VI pixels) keeps its place: 40 output pixels of border either side. */
+    memset(m->rdram + fb, 0xFF, 320 * 240 * 2);
+    vi_mode(m, 0x3302, fb, 240, 0x00BC029C, 0x002501FF, 0x200, 0x400);
+    n64_display(m, px, 640, 576, &w, &h);
+    CHECK(w == 320 && px[320 * 10 + 39] == 0 && px[320 * 10 + 40] == 0xFFFFFF && px[320 * 10 + 279] == 0xFFFFFF &&
+              px[320 * 10 + 280] == 0,
+          "borders around a narrow picture (%06X %06X %06X %06X)", px[320 * 10 + 39], px[320 * 10 + 40],
+          px[320 * 10 + 279], px[320 * 10 + 280]);
+
+    /* 640 wide (X_SCALE 1.0): a 640-pixel canvas. A 256-wide framebuffer stretched to 640 VI pixels (X_SCALE 0.4):
+     * 320 wide, interpolated between framebuffer pixels (resample, AA mode 2). */
+    vi_mode(m, 0x3203, fb, 640, 0x006C02EC, 0x002501FF, 0x400, 0x400);
+    n64_display(m, px, 640, 576, &w, &h);
+    CHECK(w == 640 && h == 240, "640 canvas %dx%d", w, h);
+    for (int x = 0; x < 256; x++)
+        for (int y = 0; y < 4; y++)
+            n64_wbe16(m->rdram + fb + 2 * (y * 256 + x), c16(x & 1 ? 31 : 0, 0, 0, 1));
+    vi_mode(m, 0x3202, fb, 256, 0x006C02EC, 0x002501FF, 0x19A, 0x400);
+    n64_display(m, px, 640, 576, &w, &h);
+    int mid = 0;
+    for (int x = 0; x < 320; x++) {
+        int r = (int)(px[320 + x] >> 16);
+        mid += r > 40 && r < 215;
+    }
+    CHECK(w == 320 && mid > 100, "stretched 256 -> 320: interpolated (%d mid values)", mid);
+    vi_mode(m, 0x3302, fb, 256, 0x006C02EC, 0x002501FF, 0x19A, 0x400);
+    n64_display(m, px, 640, 576, &w, &h);
+    mid = 0;
+    for (int x = 0; x < 320; x++) {
+        int r = (int)(px[320 + x] >> 16);
+        mid += r > 40 && r < 215;
+    }
+    CHECK(mid == 0, "replicate mode: no interpolation (%d)", mid);
+
+    /* Gamma: the square-root curve (0x40 -> 0x80); with gamma dither the low bits vary, within two steps. */
+    for (int i = 0; i < 640 * 4; i++)
+        n64_wbe32(m->rdram + fb + 4 * i, 0x404040FF);
+    vi_mode(m, 0x3303 | 0x8, fb, 640, 0x006C02EC, 0x002501FF, 0x400, 0x400);
+    n64_display(m, px, 640, 576, &w, &h);
+    CHECK(near(px[640 + 5], rgb_of(0x80, 0x80, 0x80), 1), "gamma 0x40 -> %06X", px[640 + 5]);
+    for (int i = 0; i < 640 * 4; i++)
+        n64_wbe32(m->rdram + fb + 4 * i, 0x101010FF); /* 0x10 -> 0x40, and up to 0x42 with the dither */
+    vi_mode(m, 0x3303 | 0xC, fb, 640, 0x006C02EC, 0x002501FF, 0x400, 0x400);
+    n64_display(m, px, 640, 576, &w, &h);
+    int differ = 0;
+    for (int x = 0; x < 64; x++) {
+        CHECK(near(px[640 + x], rgb_of(0x41, 0x41, 0x41), 2), "gamma dither %06X", px[640 + x]);
+        differ += px[640 + x] != px[640];
+    }
+    CHECK(differ > 0, "gamma dither varies");
+
+    /* Dither filter (16-bit, full coverage): alternating 5-bit 15 / 16 comes back near 8-bit 127. */
+    for (int y = 0; y < 8; y++)
+        for (int x = 0; x < 320; x++) {
+            int v = ((x + y) & 1) ? 16 : 15;
+            n64_wbe16(m->rdram + fb + 2 * (y * 320 + x), c16(v, v, v, 1));
+        }
+    uint8_t *hid = (uint8_t *)n64_rdp_hidden_bits(m->rdp);
+    if (hid)
+        memset(hid + (fb >> 1), 3, 320 * 8);
+    vi_mode(m, 0x3302 | 0x10000, fb, 320, 0x006C02EC, 0x002501FF, 0x200, 0x400);
+    n64_display(m, px, 640, 576, &w, &h);
+    CHECK(near(px[320 * 3 + 10], rgb_of(127, 127, 127), 5) && near(px[320 * 3 + 11], rgb_of(127, 127, 127), 5),
+          "dither filter: %06X %06X", px[320 * 3 + 10], px[320 * 3 + 11]);
+
+    /* AA (mode 0) with the RDP's coverage: a partially covered white pixel between full black and full white moves
+     * towards the background; without AA (mode 2) it stays white. */
+    for (int y = 0; y < 8; y++)
+        for (int x = 0; x < 320; x++)
+            n64_wbe16(m->rdram + fb + 2 * (y * 320 + x), x < 100 ? c16(0, 0, 0, 1) : c16(31, 31, 31, 1));
+    if (hid) {
+        memset(hid + (fb >> 1), 3, 320 * 8);
+        n64_wbe16(m->rdram + fb + 2 * (4 * 320 + 100), c16(31, 31, 31, 0)); /* coverage 3 of 7 */
+        hid[(fb + 2 * (4 * 320 + 100)) >> 1] = 3;
+        vi_mode(m, 0x3002, fb, 320, 0x006C02EC, 0x002501FF, 0x200, 0x400);
+        n64_display(m, px, 640, 576, &w, &h);
+        uint32_t aa = px[320 * 5 + 100];
+        CHECK(aa != 0xFFFFFF && (aa & 255) > 40 && (aa & 255) < 230, "AA edge pixel %06X", aa);
+        CHECK_EQ(px[320 * 5 + 150], 0xFFFFFF, "full coverage untouched");
+        vi_mode(m, 0x3202, fb, 320, 0x006C02EC, 0x002501FF, 0x200, 0x400);
+        n64_display(m, px, 640, 576, &w, &h);
+        CHECK_EQ(px[320 * 5 + 100], 0xFFFFFF, "no AA in resample mode");
+    }
+    n64_destroy(m);
+
+    /* Interlaced 640 x 480 (libultra's F1 modes: WIDTH 1280, the second field one line further): weave gives the
+     * framebuffer's 480 lines back in order, whichever field comes first. */
+    m = mk(&ntsc);
+    for (int y = 0; y < 480; y++)
+        for (int x = 0; x < 640; x++)
+            n64_wbe16(m->rdram + fb + 2 * (y * 640 + x), c16(y & 31, (y >> 5) & 31, x & 1, 1));
+    for (int order = 0; order < 2; order++) {
+        for (int f = 0; f < 2; f++) {
+            int field = f ^ order;
+            vi_mode(m, 0x3342, fb + (uint32_t)field * 1280, 640 * 2, 0x006C02EC, 0x002501FF, 0x400, 0x400);
+            CHECK(n64_display(m, px, 640, 576, &w, &h) == 0, "interlaced field");
+        }
+        CHECK(w == 640 && h == 480, "interlaced canvas %dx%d", w, h);
+        int bad = 0;
+        for (int y = 0; y < 474; y++) {
+            uint32_t p = px[(size_t)(y + 2) * 640 + 10]; /* active line 0 on field row 1: canvas rows 2, 3 */
+            int r = (int)(p >> 16), g = (int)((p >> 8) & 255);
+            if (r != ((y & 31) << 3 | (y & 31) >> 2) || g != (((y >> 5) & 31) << 3 | ((y >> 5) & 31) >> 2))
+                bad++;
+        }
+        CHECK(bad == 0, "weave order %d: %d lines out of place", order, bad);
+    }
+    n64_destroy(m);
+
+    /* PAL: 288 lines, the PAL active area (half-lines 95..569) starts on row 25. */
+    n64_options pal = {.force_pal = 1};
+    m = mk(&pal);
+    for (int i = 0; i < 320 * 240; i++)
+        n64_wbe16(m->rdram + fb + 2 * i, c16(0, 0, 31, 1));
+    vi_mode(m, 0x3302, fb, 320, 0x00800300, 0x005F0239, 0x200, 0x400);
+    n64_display(m, px, 640, 576, &w, &h);
+    CHECK(w == 320 && h == 288, "PAL canvas %dx%d", w, h);
+    CHECK(px[320 * 24 + 5] == 0 && px[320 * 25 + 5] == 0x0000FF && px[320 * 261 + 5] == 0x0000FF &&
+              px[320 * 262 + 5] == 0,
+          "PAL active rows 25..261");
+    n64_destroy(m);
+
+    m = mk(&ntsc);
     /* Timing: V_CURRENT counts lines; the VI interrupt at V_INTR ends n64_run_frame; 60 fields a second (NTSC). */
     w32(m, 0x0440000C, 0x200); /* V_INTR: line 256 */
     n64_run_frame(m);
@@ -478,6 +762,7 @@ int main(void)
     test_joybus();
     test_pi_saves();
     test_ai();
+    test_ai_resampler();
     test_vi();
     printf("n64_io: %d checks, %d failed\n", checks, fails);
     return fails ? 1 : 0;

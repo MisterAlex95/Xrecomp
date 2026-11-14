@@ -28,6 +28,9 @@ extern "C" {
 int n64_rdp_set_threads(n64_rdp *d, int n);
 /* Draws whatever is batched (no-op with one thread). */
 void n64_rdp_flush(n64_rdp *d);
+/* The two hidden RDRAM bits of each 16-bit word (the low bits of a 16-bit pixel's coverage), one byte per word:
+ * index = byte address >> 1. The VI's anti-aliasing filter reads them (n64_vi.c). NULL when the renderer has none. */
+const uint8_t *n64_rdp_hidden_bits(n64_rdp *d);
 
 #ifdef __cplusplus
 }

@@ -56,7 +56,7 @@ endif()
 # n64_core: the emulated machine (CPU, COP0 / TLB, COP1, bus, MI / PI / SI / PIF / VI / AI, saves) over n64_rsp and
 # n64_rdp. Plain C11 + libm, no host dependency, so the tests and n64_run build anywhere (no SDL).
 if(NOT TARGET n64_core)
-    add_library(n64_core STATIC n64_core.c n64_cpu.c n64_fpu.c n64_bus.c n64_io.c n64_pif.c n64_rom.c n64_recomp.c)
+    add_library(n64_core STATIC n64_core.c n64_cpu.c n64_fpu.c n64_bus.c n64_io.c n64_vi.c n64_pif.c n64_rom.c n64_recomp.c)
     target_include_directories(n64_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
     target_link_libraries(n64_core PUBLIC n64_rsp n64_rdp)
     find_library(N64_LIBM m)

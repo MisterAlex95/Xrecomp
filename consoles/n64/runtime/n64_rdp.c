@@ -2439,6 +2439,11 @@ static void wrote_report(n64_rdp *d)
     }
 }
 
+const uint8_t *n64_rdp_hidden_bits(n64_rdp *d)
+{
+    return d->hidden;
+}
+
 void n64_rdp_flush(n64_rdp *d)
 {
     if (!d->nbatch) {

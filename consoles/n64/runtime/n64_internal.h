@@ -163,6 +163,9 @@ typedef enum { FLASH_IDLE = 0, FLASH_READ, FLASH_STATUS, FLASH_ERASE, FLASH_WRIT
 
 /* ---- Audio ----------------------------------------------------------------------------------------------------- */
 #define N64_AUDIO_RING 16384u /* sample frames, power of two */
+#define AI_TAPS 32               /* the resampler's taps (n64_io.c) */
+#define AI_PHASES 256            /* its polyphase rows */
+#define AI_HIST 64               /* history ring, a power of two >= AI_TAPS */
 
 /* RDRAM write tracking (static recompilation, n64_recomp.h): one counter per 4 KB page, bumped by every write into
  * RDRAM (CPU stores, lifted stores, PI / SI / SP DMA; not the RDP's rendering). */
@@ -226,6 +229,7 @@ struct n64_machine {
     uint32_t vi_field;
     uint64_t vi_line_ticks;      /* length of a line */
     uint32_t vi_lines;           /* lines per field */
+    struct n64_vi_state *vis;    /* n64_vi.c: the picture path's canvas and buffers (allocated at the first picture) */
     /* AI */
     uint32_t ai_dram, ai_len, ai_control, ai_dacrate, ai_bitrate;
     struct { uint32_t addr, len; } ai_fifo[2];
@@ -235,6 +239,10 @@ struct n64_machine {
     double ai_src_phase;         /* source samples (fraction) since the current one started */
     double ai_out_phase;         /* output samples (fraction) owed */
     int16_t ai_cur[2];           /* the sample the DAC holds */
+    float ai_hist[2][AI_HIST];   /* the DAC's samples, L / R (the resampler's history, ai_nsrc of them so far) */
+    uint32_t ai_nsrc;
+    uint32_t ai_kernel_hz;       /* the DAC rate ai_kernel was built for (0: none) */
+    float ai_kernel[(AI_PHASES + 1) * AI_TAPS]; /* windowed-sinc rows, one per output phase */
     int16_t audio[N64_AUDIO_RING * 2];
     uint32_t audio_rd, audio_wr; /* sample frames, free-running */
     /* Cartridge save */
@@ -343,6 +351,7 @@ void n64_vi_reset(n64_machine *m);
 uint32_t n64_vi_read(n64_machine *m, uint32_t reg);
 void n64_vi_write(n64_machine *m, uint32_t reg, uint32_t v);
 void n64_vi_event(n64_machine *m);
+void n64_vi_free(n64_machine *m); /* n64_vi.c */
 void n64_ai_reset(n64_machine *m);
 uint32_t n64_ai_read(n64_machine *m, uint32_t reg);
 void n64_ai_write(n64_machine *m, uint32_t reg, uint32_t v);

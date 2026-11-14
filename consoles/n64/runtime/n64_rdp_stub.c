@@ -117,3 +117,8 @@ int n64_rdp_set_threads(n64_rdp *d, int n)
 }
 
 void n64_rdp_flush(n64_rdp *d) { (void)d; }
+const uint8_t *n64_rdp_hidden_bits(n64_rdp *d)
+{
+    (void)d;
+    return NULL;
+}
