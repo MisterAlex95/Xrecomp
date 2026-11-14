@@ -128,12 +128,21 @@ def write_json_atomic(path, obj):
     os.replace(tmp, path)
 
 
+# Another console's pack folder (XBA-147): "<console>-<title key>", kept as it is.
+CONSOLE_DIR = re.compile(r"(gba|ps1|n64)-[A-Za-z0-9_-]{1,40}\Z")
+
+
+def dir_name(tid):
+    """The pack folder's name: an Xbox title ID in upper case, another console's "gba-<KEY>" as it is."""
+    return tid if CONSOLE_DIR.match(tid) else tid.upper()
+
+
 def partial_dir(packs, tid):
-    return os.path.join(packs, tid.upper() + ".partial")
+    return os.path.join(packs, dir_name(tid) + ".partial")
 
 
 def final_dir(packs, tid):
-    return os.path.join(packs, tid.upper())
+    return os.path.join(packs, dir_name(tid))
 
 
 def begin(packs, tid):

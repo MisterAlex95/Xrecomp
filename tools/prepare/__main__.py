@@ -28,6 +28,9 @@ the macOS launcher: docs/macos/launcher.md « Prepare interface ».
 With --android it makes a title pack for the Android app instead (libtitle.so
 + pack.json, built with clang and ld.lld, no CMake), with machine-readable
 progress lines: docs/android/prepare.md.
+
+A Game Boy Advance ROM (.gba) makes a GBA title pack, with --android for the
+app or for gba_play on this host (tools/prepare/gba.py).
 """
 
 import argparse
@@ -550,9 +553,15 @@ def main(argv=None):
     mi.add_argument("--image-map", help=argparse.SUPPRESS)   # the map file every image's build bakes in
     mi.add_argument("--game-dir", help=argparse.SUPPRESS)    # D:\ for an image that is not the disc root's
     mi.add_argument("--image-name", help=argparse.SUPPRESS)  # that image's disc path (XeImageFileName)
+    gb = ap.add_argument_group("Game Boy Advance title pack (docs/android/prepare.md « GBA packs »)")
+    gb.add_argument("--discovered", metavar="FILE",
+                    help="a GBA ROM: more addresses the runtime had to interpret (default: <work>/discovered.txt)")
     a = ap.parse_args(argv)
     if a.no_title_layer:
         os.environ["XBA_NO_TITLE_LAYER"] = "1"
+    from tools.prepare import gba
+    if gba.is_gba(a.source):            # a GBA ROM: its own steps, --android or a desktop pack (XBA-157 / 158)
+        return gba.run(a, sys.modules[__name__], a.android)
     if a.android:
         from tools.prepare import android
         return android.run(a, sys.modules[__name__])

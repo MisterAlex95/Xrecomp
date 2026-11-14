@@ -116,6 +116,9 @@ PACK_INPUTS = (
     # Wave 5: the analysis (XBA-137's static discovery) decides which functions are lifted.
     "tools/disasm/discovery.py", "tools/disasm/functions.py", "tools/disasm/engine.py", "tools/disasm/disasm.py",
     "tools/prepare/discovered.py",
+    # GBA packs (XBA-157 / 158): the Prepare's GBA path, the lifter's package, the headers its C includes.
+    "tools/prepare/gba.py", "consoles/gba/tools/gba_tools/__init__.py", "consoles/gba/runtime/gba_recomp.h",
+    "consoles/gba/runtime/gba_core.h",
 )
 
 
@@ -125,6 +128,8 @@ def test_the_tree_covers_what_a_pack_is_made_of():
     assert not missing, missing
     assert not [p for p in PACK_INPUTS if not os.path.exists(os.path.join(toolkit.ROOT, p))], "renamed? update the list"
     assert "tools/recomp/test_seh_frames.py" not in sel and "src/kernel/xbox_seh.c" not in sel
+    assert "consoles/gba/runtime/gba_cpu.c" not in sel                  # the core is the shell's (libmain.so)
+    assert not [p for p in sel if "/test_" in p]
 
 
 def test_a_lifter_change_changes_the_digest(tmp_path):
