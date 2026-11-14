@@ -17,6 +17,7 @@
 #include "host_pad.h"
 #include "host_window.h"
 #include "n64_core.h"
+#include "n64_pack.h"
 #include "n64_rdp.h"
 #include "recomp_exit_hook.h"
 #include "recomp_lifecycle.h"
@@ -300,6 +301,7 @@ static pthread_mutex_t s_mu = PTHREAD_MUTEX_INITIALIZER;
 static n64_machine *s_m;
 static char s_save_dir[1024], s_key[64];
 static uint8_t *s_saved[N_SAVES]; /* each image as last read or written (or as the run started), by kind */
+static char s_discovered[1200];   /* n64_runtime_opts.discovered_path of the run */
 
 static void save_path(int kind, char *out, size_t n)
 {
@@ -350,6 +352,11 @@ static void on_exit_hook(const char *why)
 {
     (void)why;
     saves_flush("exit");
+    /* The in-game menu's Quit ends the process here: the discovery loop's code too (XBA-174). */
+    pthread_mutex_lock(&s_mu);
+    if (s_m && s_discovered[0])
+        n64_pack_save_missed(s_m, s_discovered);
+    pthread_mutex_unlock(&s_mu);
 }
 
 /* The app paused (background, the in-game menu): the saves go to disk at once, from the thread that paused it (on
@@ -622,6 +629,17 @@ int n64_runtime_run(const n64_runtime_opts *o)
         snprintf(key, sizeof key, "N64-UNKNOWN");
 
     n64_options mo = {.force_pal = o->force_pal >= 0 ? o->force_pal != 0 : -1, .save_kind = N64_SAVE_NONE};
+    /* A pack's source identity (n64_pack.h): the SHA-256 of the ROM in big-endian order, computed only when there is
+     * a pack to check (the ROM is in memory already). */
+    char src_sha[65] = "";
+    double sha_ms = 0;
+    if (o->pack_lib && *o->pack_lib) {
+        struct timespec t0, t1;
+        clock_gettime(CLOCK_MONOTONIC, &t0);
+        n64_pack_rom_sha256(rom, rom_n, src_sha);
+        clock_gettime(CLOCK_MONOTONIC, &t1);
+        sha_ms = (double)(t1.tv_sec - t0.tv_sec) * 1e3 + (double)(t1.tv_nsec - t0.tv_nsec) / 1e6;
+    }
     char err[256] = "";
     n64_machine *m = n64_create(rom, rom_n, &mo, err, sizeof err);
     free(rom);
@@ -636,7 +654,9 @@ int n64_runtime_run(const n64_runtime_opts *o)
            order, info->title, info->game_code, rom_n / 1024, key, n64_cic_name(info->cic),
            pal ? "PAL (50 Hz)" : "NTSC (60 Hz)");
     if (o->pack_lib && *o->pack_lib)
-        printf("n64: pack %s ignored: no N64 recompiler yet, the interpreter runs the game\n", o->pack_lib);
+        printf("n64: ROM identity %.16s... (%.0f ms)\n", src_sha, sha_ms);
+    n64_pack pack;
+    n64_pack_load(m, o->pack_lib, key, src_sha, &pack); /* the interpreter whatever happens (logged) */
 
     /* The RDP's scanline-band threads: 2 by default on Android (the phone's big cores), the core's elsewhere. */
     int threads = o->rdp_threads > 0 ? o->rdp_threads : env_int("RECOMP_N64_RDP_THREADS", 0);
@@ -672,6 +692,7 @@ int n64_runtime_run(const n64_runtime_opts *o)
     snprintf(s_save_dir, sizeof s_save_dir, "%s", o->save_dir ? o->save_dir : "");
     snprintf(s_key, sizeof s_key, "%s", key);
     saves_load(m);
+    snprintf(s_discovered, sizeof s_discovered, "%s", o->discovered_path ? o->discovered_path : "");
     pthread_mutex_unlock(&s_mu);
     recomp_exit_hook_set(on_exit_hook);
     static int listening;
@@ -884,14 +905,24 @@ int n64_runtime_run(const n64_runtime_opts *o)
     s_m = NULL;
     s_save_dir[0] = 0;
     saves_clear();
+    if (s_discovered[0])
+        n64_pack_save_missed(m, s_discovered);
+    s_discovered[0] = 0;
     pthread_mutex_unlock(&s_mu);
     n64_destroy(m);
+    n64_pack_close(&pack);
     return rc;
 }
 
 /* ---- The app shell's entry ------------------------------------------------------------------------------------ */
 
 static char s_start_save_dir[1024];
+static char s_start_work_dir[1024];
+
+void n64_runtime_set_work_dir(const char *dir)
+{
+    snprintf(s_start_work_dir, sizeof s_start_work_dir, "%s", dir ? dir : "");
+}
 
 void n64_runtime_set_save_dir(const char *dir)
 {
@@ -906,6 +937,11 @@ int n64_runtime_start(const char *rom, const char *pack_lib, const char *title_k
     o.title_key = title_key;
     o.save_dir = s_start_save_dir[0] ? s_start_save_dir : NULL;
     o.pack_lib = pack_lib;
+    char discovered[1200];
+    if (s_start_work_dir[0] && title_key && *title_key) {
+        snprintf(discovered, sizeof discovered, "%s/n64-%s/discovered.txt", s_start_work_dir, title_key);
+        o.discovered_path = discovered;
+    }
     const char *frames = getenv("RECOMP_N64_FRAMES"); /* a bounded run (checks) */
     if (frames && *frames)
         o.frames = strtoull(frames, NULL, 10);

@@ -279,17 +279,21 @@ int xba_pack_load_rom(const char *files_dir, const char *rom_path, int *runtime_
         goto out;
     }
     if (console == RECOMP_CONSOLE_N64 && start) {
-        /* The N64 runtime is an interpreter too (XBA-174): the cartridge always starts, no BIOS (HLE PIF). There is
-         * no N64 recompiler yet, so a pack is not loaded: without one, PACK_NONE; with one (whatever its state), the
-         * same line saying it is ignored. The runtime gets no library until N64 packs exist. */
+        /* The N64 runtime is an interpreter that a pack speeds up too (XBA-174): the cartridge always starts, no BIOS
+         * (HLE PIF). No pack: PACK_NONE. A pack this shell refuses: PACK_STALE, interpreted. A pack that passes: the
+         * runtime checks the rest (source_sha256 = the ROM's in big-endian order, lib_sha256, its table: n64_pack.h)
+         * and logs PACK_LOADED n64 <KEY> (<N> functions) or PACK_STALE. The discovered code goes to the Prepare's
+         * work folder of the game, <files>/work/n64-<KEY>/discovered.txt. */
+        char work[RECOMP_PACK_PATH_MAX + 8];
+        snprintf(work, sizeof work, "%s/work", files_dir ? files_dir : ".");
+        n64_runtime_set_work_dir(files_dir ? work : NULL);
         if (rc == RECOMP_PACK_MISSING)
             printf("PACK_NONE %s %s (not prepared, the interpreter runs it)\n", recomp_pack_console_name(console), key);
-        else
-            printf("PACK_NONE %s %s (a pack is there, ignored until the N64 recompiler lands; the interpreter runs "
-                   "it)\n", recomp_pack_console_name(console), key);
+        else if (rc != RECOMP_PACK_OK)
+            printf("PACK_STALE %s %s (%s), running interpreted\n", recomp_pack_console_name(console), key, why);
         fflush(stdout);
         why[0] = 0;
-        rc = start(rom_path, NULL, key);
+        rc = start(rom_path, rc == RECOMP_PACK_OK ? lib : NULL, key);
         if (runtime_rc)
             *runtime_rc = rc;
         rc = RECOMP_PACK_OK;

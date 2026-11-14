@@ -137,3 +137,18 @@ if(TARGET n64_run)
         set_tests_properties(n64_rc_fuzz PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 1800)
     endif()
 endif()
+
+# An N64 title pack (XBA-174): fake_n64_pack is built like tools/prepare's libtitle.so (its core calls resolved against
+# the program that loads it), n64_pack_test exports the core and checks n64_pack.h (the homebrew gfx.z64's identity
+# too when it is built).
+add_library(fake_n64_pack SHARED fake_pack.c)
+target_include_directories(fake_n64_pack PRIVATE ../runtime)
+if(APPLE)
+    target_link_options(fake_n64_pack PRIVATE -undefined dynamic_lookup)
+endif()
+add_executable(n64_pack_test test_pack.c)
+n64_core_exported(n64_pack_test)
+target_link_libraries(n64_pack_test PRIVATE n64_pack)
+target_compile_options(n64_pack_test PRIVATE -Wall -Wextra)
+add_test(NAME n64_pack COMMAND n64_pack_test $<TARGET_FILE:fake_n64_pack> ${N64_HOMEBREW_DIR})
+set_tests_properties(n64_pack PROPERTIES TIMEOUT 60)

@@ -5,6 +5,7 @@
  *   n64_play ROM [--frames N] [--save-dir DIR] [--scale aspect|integer] [--filter nearest|linear]
  *                [--pak controller|rumble|none] [--players 1..4] [--rdp-threads N] [--pal | --ntsc] [--tty]
  *                [--headless] [--unpaced] [--buttons MASK] [--screenshot OUT.ppm] [--capture N OUT.ppm] [--key KEY]
+ *                [--pack LIB.so] [--missed FILE]
  *
  * ROM               a .z64 / .v64 / .n64 file (any byte order); no BIOS needed (the PIF is HLE)
  * --frames N        stop after N frames (VI interrupts; default: until the window is closed)
@@ -22,6 +23,11 @@
  * --screenshot OUT  the last displayed picture at its own size as a PPM
  * --capture N OUT   the window's whole drawable at frame N, read back before the swap (the real present path)
  * --key KEY         the title key (default: read from the ROM as the app does, recomp_pack_rom_identify)
+ * --pack LIB.so     a title pack library (python3 -m tools.prepare ROM: $XDG_DATA_HOME/xrecomp/packs/n64-<KEY>/,
+ *                   or tools/consoles/n64_recomp_build.py): lifted code, interpreter elsewhere; with a pack.json
+ *                   beside it, n64_pack_check first (n64_pack.h); a pack that is not this game's runs interpreted
+ * --missed FILE     with --pack: at exit, add the code the interpreter had to run (address, hash, bytes) to FILE (the
+ *                   discovery loop: the Prepare's <work>/discovered.txt, or n64_tools.recomp --discovered FILE)
  * Keyboard: arrows = stick, X = A, C = B, Z = Z, Enter = Start, Q / E = L / R, I / K / J / L = C buttons,
  * T / G / F / H = D-pad; any game controller (Xbox layout).
  * Exit 0, 1 when the game cannot run, 2 on a usage error. */
@@ -40,7 +46,8 @@ static int usage(void)
     fprintf(stderr, "usage: n64_play ROM [--frames N] [--save-dir DIR] [--scale aspect|integer]\n"
                     "                [--filter nearest|linear] [--pak controller|rumble|none] [--players 1..4]\n"
                     "                [--rdp-threads N] [--pal | --ntsc] [--tty] [--headless] [--unpaced]\n"
-                    "                [--buttons MASK] [--screenshot OUT.ppm] [--capture N OUT.ppm] [--key KEY]\n");
+                    "                [--buttons MASK] [--screenshot OUT.ppm] [--capture N OUT.ppm] [--key KEY]\n"
+                    "                [--pack LIB.so] [--missed FILE]\n");
     return 2;
 }
 
@@ -90,6 +97,10 @@ int main(int argc, char **argv)
             o.capture_path = argv[++i];
         } else if (!strcmp(a, "--key") && more)
             o.title_key = argv[++i];
+        else if (!strcmp(a, "--pack") && more)
+            o.pack_lib = argv[++i];
+        else if (!strcmp(a, "--missed") && more)
+            o.discovered_path = argv[++i];
         else if (a[0] == '-' || o.rom)
             return usage();
         else

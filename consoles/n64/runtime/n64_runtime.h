@@ -64,8 +64,14 @@ typedef struct n64_runtime_opts {
     /* 1: copy the game's IS-Viewer debug text (libdragon debugf, osSyncPrintf) to stdout, "n64: tty: ..." lines; -1 =
      * $RECOMP_N64_TTY (default off). */
     int tty;
-    /* A title pack's library: ignored (logged) until the N64 recompiler lands; NULL or "": none. */
+    /* An N64 title pack's library (XBA-174, n64_pack.h): taken when its pack.json (beside it) says it is this game's
+     * (title key, the ROM's big-endian SHA-256), this shell's and this host's and its table loads, else the game runs
+     * interpreted (a log line says why). NULL or "": the interpreter alone. */
     const char *pack_lib;
+    /* At exit (and from the in-game menu's Quit), the code the interpreter had to run while a pack was attached
+     * (n64_recomp_write_missed: address, hash, bytes) is appended to this file without repeats, which the next
+     * Prepare hands to the lifter (the discovery loop). NULL: not written. */
+    const char *discovered_path;
 } n64_runtime_opts;
 
 void n64_runtime_opts_init(n64_runtime_opts *o);
@@ -77,10 +83,15 @@ int n64_runtime_run(const n64_runtime_opts *o);
 /* Where n64_runtime_start keeps saves (the app shell's <internal files>/save); NULL: none. Copied. */
 void n64_runtime_set_save_dir(const char *dir);
 
+/* Where n64_runtime_start writes the discovered code: <dir>/n64-<KEY>/discovered.txt (the app shell's
+ * <internal files>/work: the Prepare's work folder of the game, which it reads them from); NULL: not written. */
+void n64_runtime_set_work_dir(const char *dir);
+
 /* The app shell's entry point (XBA-147, android/app/src/main/cpp/pack_loader.c): rom is the cartridge (a path or
- * "fd:N"), pack_lib a title pack's library (ignored until the N64 recompiler lands), title_key the game's key. Plays it
- * with n64_runtime_run (saves in n64_runtime_set_save_dir's dir; $RECOMP_N64_FRAMES bounds the run) and returns its
- * result once the player quit. */
+ * "fd:N"), pack_lib a title pack's library (NULL or "" without a pack: the interpreter alone; a pack that is not this
+ * game's: logged, interpreted), title_key the game's key. Plays it with n64_runtime_run (saves in
+ * n64_runtime_set_save_dir's dir, discovered code in n64_runtime_set_work_dir's; $RECOMP_N64_FRAMES bounds the run)
+ * and returns its result once the player quit. */
 int n64_runtime_start(const char *rom, const char *pack_lib, const char *title_key);
 
 /* ---- Pure helpers (tested in consoles/n64/tests) ---- */

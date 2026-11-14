@@ -18,6 +18,12 @@ int n64_runtime_start(const char *rom, const char *pack_lib, const char *title_k
     return 0;
 }
 
+void n64_runtime_set_work_dir(const char *dir)
+{
+    printf("n64 work dir %s\n", dir ? dir : "(none)");
+    fflush(stdout);
+}
+
 void n64_runtime_set_save_dir(const char *dir)
 {
     printf("n64 save dir %s\n", dir ? dir : "(none)");
