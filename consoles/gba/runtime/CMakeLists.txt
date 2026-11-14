@@ -12,8 +12,15 @@ if(NOT TARGET xbr_host)
     add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../../src/host ${CMAKE_CURRENT_BINARY_DIR}/xbr_host)
 endif()
 
+# The PPU (XBA-154): the real scanline renderer when present, else the core's placeholder.
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/gba_ppu.c)
+    set(GBA_PPU_SRC gba_ppu.c)
+else()
+    set(GBA_PPU_SRC gba_ppu_stub.c)
+endif()
+
 if(NOT TARGET gba_runtime)
-    add_library(gba_runtime STATIC gba_runtime.c)
+    add_library(gba_runtime STATIC gba_runtime.c ${GBA_PPU_SRC})
     target_include_directories(gba_runtime PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
     target_link_libraries(gba_runtime PUBLIC xbr_host)
     target_compile_options(gba_runtime PRIVATE -Wall -Wextra)

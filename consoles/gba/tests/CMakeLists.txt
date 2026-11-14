@@ -16,3 +16,13 @@ target_link_libraries(gba_runtime_test PRIVATE gba_runtime)
 enable_testing()
 add_test(NAME gba_runtime COMMAND gba_runtime_test)
 set_tests_properties(gba_runtime PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60)
+
+# The PPU (XBA-154): feature tests on synthetic scenes and a micro benchmark (run by hand: gba_ppu_bench [seconds]).
+add_executable(gba_ppu_test test_ppu.c)
+target_link_libraries(gba_ppu_test PRIVATE gba_runtime)
+target_compile_options(gba_ppu_test PRIVATE -Wall -Wextra)
+add_test(NAME gba_ppu COMMAND gba_ppu_test)
+set_tests_properties(gba_ppu PROPERTIES TIMEOUT 60)
+add_executable(gba_ppu_bench bench_ppu.c)
+target_link_libraries(gba_ppu_bench PRIVATE gba_runtime)
+target_compile_options(gba_ppu_bench PRIVATE -Wall -Wextra)
