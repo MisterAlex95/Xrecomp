@@ -544,6 +544,45 @@ public class LauncherScreensTest {
         assertEquals("1", c.get(RecompConfig.ENV_480P));
     }
 
+    private static boolean hasText(LauncherActivity a, String text) {
+        for (View v : allViews(a.getWindow().getDecorView(), new ArrayList<>()))
+            if (v instanceof android.widget.TextView && text.contentEquals(((android.widget.TextView)v).getText()))
+                return true;
+        return false;
+    }
+
+    /**
+     * XBA-181: Graphics groups its rows, « All consoles » (Vertical sync, Scale, Picture filter) then « Xbox only »;
+     * Scale and Picture filter write RECOMP_SCALE / RECOMP_FILTER; Audio puts the buffer under « All consoles ».
+     */
+    @Test
+    public void settingsSharedConsoleRows() throws Exception {
+        LauncherActivity a = launch();
+        a.goForTest(LauncherActivity.Screen.SETTINGS);
+        idle(300);
+        assertNotNull("General, Controller rumble", row(a, app.getString(R.string.OPT_RUMBLE)));
+        key(a, KeyEvent.KEYCODE_BUTTON_R1);
+        assertTrue(hasText(a, app.getString(R.string.SET_GROUP_ALL)));
+        assertTrue(hasText(a, app.getString(R.string.SET_GROUP_XBOX)));
+        Widgets.MenuRow scale = row(a, app.getString(R.string.OPT_CSCALE));
+        Widgets.MenuRow filter = row(a, app.getString(R.string.OPT_CFILTER));
+        assertNotNull(scale);
+        assertNotNull(filter);
+        assertEquals(app.getString(R.string.VAL_CSCALE_ASPECT), scale.value);
+        assertEquals(app.getString(R.string.VAL_CFILTER_CONSOLE), filter.value);
+        scale.requestFocusFromTouch();
+        key(a, KeyEvent.KEYCODE_DPAD_RIGHT);
+        assertEquals(app.getString(R.string.VAL_CSCALE_INTEGER), scale.value);
+        filter.requestFocusFromTouch();
+        key(a, KeyEvent.KEYCODE_DPAD_RIGHT);
+        RecompConfig c = RecompConfig.load(GameStore.externalFilesDir(app));
+        assertEquals("integer", c.get("RECOMP_SCALE"));
+        assertEquals("nearest", c.get("RECOMP_FILTER"));
+        key(a, KeyEvent.KEYCODE_BUTTON_R1);
+        assertTrue("Audio", hasText(a, app.getString(R.string.SET_GROUP_ALL)));
+        assertNotNull(row(a, app.getString(R.string.OPT_AUDIO_BUF)));
+    }
+
     /** Calm: Settings' tabs: L1 / R1 switch them (wrapping), each keeps its focus; Frame cap follows the renderer. */
     @Test
     public void settingsTabs() throws Exception {

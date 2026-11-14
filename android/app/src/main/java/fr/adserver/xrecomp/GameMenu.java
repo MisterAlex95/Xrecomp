@@ -136,7 +136,7 @@ final class GameMenu {
     enum Page { MAIN, SETTINGS, CONTROLS, DISCS }
 
     enum Item { RESUME, SETTINGS, CONTROLS, SCREENSHOT, SHARE_LOG, LAUNCHER, QUIT, PERF, VOLUME, BOTTOM, LANGUAGE,
-                WIDESCREEN, P480, TOUCH, BACK, DISC }
+                WIDESCREEN, P480, TOUCH, BACK, DISC, SCALE, FILTER }
 
     private final Activity activity;
     private final Host host;
@@ -840,7 +840,15 @@ final class GameMenu {
                 r.setChoices(new String[] { s(R.string.MENU_TOUCH_SHOWN), s(R.string.MENU_TOUCH_HIDDEN) });
                 r.cycler = dir -> toggleTouch();
             }
-            if (titleId() != null) {
+            if (titleId() != null && Console.ofKey(titleId()) != Console.XBOX) {
+                // XBA-181: a GBA, PS1 or N64 game's own scale and filter (ConsoleVideo), from its next start.
+                r = row(Item.SCALE, s(R.string.MENU_SCALE));
+                r.setChoices(consoleLabels(ConsoleVideo.Setting.SCALE));
+                r.cycler = dir -> stepConsoleVideo(ConsoleVideo.Setting.SCALE, dir);
+                r = row(Item.FILTER, s(R.string.MENU_FILTER));
+                r.setChoices(consoleLabels(ConsoleVideo.Setting.FILTER));
+                r.cycler = dir -> stepConsoleVideo(ConsoleVideo.Setting.FILTER, dir);
+            } else if (titleId() != null) {   // the Xbox's own settings: none of them means anything to a console
                 r = row(Item.LANGUAGE, s(R.string.MENU_LANGUAGE));
                 String[] labels = new String[GameLanguage.MENU_ORDER.length + 1];
                 labels[0] = s(R.string.MENU_LANGUAGE_FOLLOW);
@@ -1042,6 +1050,12 @@ final class GameMenu {
         case P480:
             stepVideo(GameVideo.Setting.P480, 1);
             break;
+        case SCALE:
+            stepConsoleVideo(ConsoleVideo.Setting.SCALE, 1);
+            break;
+        case FILTER:
+            stepConsoleVideo(ConsoleVideo.Setting.FILTER, 1);
+            break;
         case TOUCH:
             toggleTouch();
             break;
@@ -1138,13 +1152,33 @@ final class GameMenu {
         updateValues();
     }
 
-    /** The game's title ID, read once from its XBE; null hides the Language row (nothing to key the choice on). */
+    /**
+     * The running game's title ID, read once: a GBA, PS1 or N64 game's library key, else the Xbox game's from its XBE
+     * (GameLanguage.runningTitleId, XBA-181); null hides the per-game rows (nothing to key a choice on).
+     */
     private String titleId() {
         if (!titleIdRead) {
             titleIdRead = true;
-            titleIdValue = GameLanguage.currentTitleId(activity);
+            titleIdValue = GameLanguage.runningTitleId(activity);
         }
         return titleIdValue;
+    }
+
+    private String[] consoleLabels(ConsoleVideo.Setting which) {
+        String[] out = new String[which.values.length + 1];
+        out[0] = s(R.string.MENU_VIDEO_FOLLOW);
+        for (int i = 0; i < which.values.length; i++)
+            out[i + 1] = s(which.labels[i]);
+        return out;
+    }
+
+    /** A console game's scale or filter (XBA-181): remembered per game, applied by ShellActivity at its next start. */
+    private void stepConsoleVideo(ConsoleVideo.Setting which, int dir) {
+        String v = ConsoleVideo.next(which, ConsoleVideo.gameChoice(activity, titleId(), which), dir);
+        ConsoleVideo.setGameChoice(activity, titleId(), which, v);
+        Log.i(LauncherActivity.TAG, "shell: menu: " + which.env + " " + (v == null ? "as in Settings" : v)
+                                    + " for " + titleId() + " (next start)");
+        updateValues();
     }
 
     /** The Language row's position: 0 = as in Settings, then GameLanguage.MENU_ORDER. */
@@ -1218,6 +1252,11 @@ final class GameMenu {
         r = rows.get(Item.P480);
         if (r != null)
             r.setValue(videoLabel(GameVideo.Setting.P480));
+        for (ConsoleVideo.Setting cv : ConsoleVideo.Setting.values()) {
+            r = rows.get(cv == ConsoleVideo.Setting.SCALE ? Item.SCALE : Item.FILTER);
+            if (r != null)
+                r.setValue(s(ConsoleVideo.label(cv, ConsoleVideo.gameChoice(activity, titleId(), cv))));
+        }
         r = rows.get(Item.TOUCH);
         Boolean touch = host.touchShown();
         if (r != null && touch != null)

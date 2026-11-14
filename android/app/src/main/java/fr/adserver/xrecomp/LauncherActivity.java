@@ -151,7 +151,9 @@ public class LauncherActivity extends Activity {
         /** A GBA game's Home (XBA-158): Play (the interpreter, or its pack) and its Prepare; romEntry. */
         ROM_HOME,
         /** A GBA, PS1 or N64 game's Controls (ConsolePadMap): its console's mapping or its own; romEntry. */
-        ROM_CONTROLS
+        ROM_CONTROLS,
+        /** A GBA, PS1 or N64 game's Options (XBA-181): its own scale and filter, its saves and Prepare files; romEntry. */
+        ROM_OPTIONS
     }
 
     /** The Preparing screen dims after this long without input (OLED burn-in); any key or touch wakes it. */
@@ -996,6 +998,9 @@ public class LauncherActivity extends Activity {
         case ROM_CONTROLS:
             buildRomControls();
             break;
+        case ROM_OPTIONS:
+            buildRomOptions();
+            break;
         }
         restoreFocus(false);
         if (companion != null && s != Screen.HOME && s != Screen.LIBRARY && s != Screen.PREPARE)
@@ -1031,7 +1036,7 @@ public class LauncherActivity extends Activity {
     private boolean syncTheme(Screen s) {
         // The library and Storage: always the stock colours (only the backdrop's glow follows the focused card).
         boolean stock = s == Screen.LIBRARY || s == Screen.STORAGE || s == Screen.ROM_HOME
-                        || s == Screen.ROM_CONTROLS || s == Screen.PREPARE && romEntry != null;
+                        || s == Screen.ROM_CONTROLS || s == Screen.ROM_OPTIONS || s == Screen.PREPARE && romEntry != null;
         String dir = stock ? null : gameDir();
         File gd = dir == null ? null : new File(dir);
         String tid = null;
@@ -2080,9 +2085,13 @@ public class LauncherActivity extends Activity {
             }
         }
         RecompConfig.Section section = tabSection(settingsTab);
-        for (RecompConfig.Option o : shown) {
-            if (o.section != section)
-                continue;
+        // XBA-181: what every console reads under « All consoles », the Xbox's own under « Xbox only ».
+        List<RecompConfig.Option> tab = RecompConfig.tabOptions(shown, section);
+        boolean grouped = RecompConfig.grouped(tab, section);
+        for (int oi = 0; oi < tab.size(); oi++) {
+            RecompConfig.Option o = tab.get(oi);
+            if (grouped && (oi == 0 || tab.get(oi - 1).shared != o.shared))
+                listLabel(list, getString(o.shared ? R.string.SET_GROUP_ALL : R.string.SET_GROUP_XBOX));
             MenuRow r = listRow(list, getString(o.title), getString(o.detail), null);
             r.onPress = null;   // a press steps the value: the « move » tick, not « select »
             String[] labels = new String[o.choices.length + 1];
@@ -3972,6 +3981,8 @@ public class LauncherActivity extends Activity {
         }
         // XBA-158 / XBA-168 / XBA-174: the console's buttons remapped, for all its games or this one (ROM_CONTROLS).
         pill(buttons, Icon.PAD, getString(R.string.CONTROLS), false, () -> go(Screen.ROM_CONTROLS));
+        // XBA-181: this game's picture (scale, filter) and its stored files (saves, Prepare files): ROM_OPTIONS.
+        pill(buttons, null, getString(R.string.ROM_OPTIONS), false, () -> go(Screen.ROM_OPTIONS));
         homePrimary = play;
         defaultFocus = play;
         startAction = () -> launchRom(e);
@@ -5249,6 +5260,76 @@ public class LauncherActivity extends Activity {
         setNote(getString(R.string.CTL_RESET_DONE), NOTE_OK);
     }
 
+    // ---- ROM_OPTIONS (XBA-181) ----------------------------------------------------------------------------------
+
+    /**
+     * A GBA, PS1 or N64 game's Options: its own scale and filter (ConsoleVideo: « As in Settings », then each value;
+     * ShellActivity hands them to the runtime at the game's next start), then its stored things (the saves, the pack,
+     * the Prepare's files: Storage, each deleted on its own, A twice, as in Manage).
+     */
+    private void buildRomOptions() {
+        screenTitle.setText(R.string.ROM_OPTIONS);
+        LibraryScreen.Entry e = romEntry;
+        if (e == null) {   // nothing to show (the activity came back without its game)
+            show(Screen.LIBRARY, 0);
+            return;
+        }
+        String key = e.tid;
+        cfg = RecompConfig.load(GameStore.externalFilesDir(this));
+        LinearLayout list = listTemplate();
+        listLabel(list, getString(R.string.ROM_OPT_PICTURE));
+        MenuRow first = null;
+        for (ConsoleVideo.Setting s : ConsoleVideo.Setting.values()) {
+            boolean scale = s == ConsoleVideo.Setting.SCALE;
+            RecompConfig.Option global = optionTitled(scale ? R.string.OPT_CSCALE : R.string.OPT_CFILTER);
+            String follow = getString(R.string.ROM_OPT_FOLLOW, choiceLabel(cfg, global));
+            String[] labels = new String[s.values.length + 1];
+            labels[0] = follow;
+            for (int i = 0; i < s.values.length; i++)
+                labels[i + 1] = getString(s.labels[i]);
+            MenuRow r = settingRow(list, getString(scale ? R.string.OPT_CSCALE : R.string.OPT_CFILTER),
+                                   getString(scale ? R.string.ROM_OPT_SCALE_DETAIL : R.string.ROM_OPT_FILTER_DETAIL));
+            r.setChoices(labels);
+            Runnable refresh = () -> {
+                String v = ConsoleVideo.gameChoice(this, key, s);
+                r.setValue(v == null ? follow : getString(ConsoleVideo.label(s, v)));
+            };
+            refresh.run();
+            r.cycler = d -> {
+                String v = ConsoleVideo.next(s, ConsoleVideo.gameChoice(this, key, s), d);
+                ConsoleVideo.setGameChoice(this, key, s, v);
+                refresh.run();
+                feedback.play(UiFeedback.Cue.MOVE, r);
+                setNote(getString(gameRunning() && key.equals(launchedTid()) ? R.string.ROM_OPT_SAVED_RUNNING
+                                                                             : R.string.ROM_OPT_SAVED), NOTE_OK);
+                Log.i(TAG, "launcher: " + key + " " + s.env + " " + (v == null ? "as in Settings" : v));
+            };
+            r.setOnClickListener(v -> r.cycler.step(1));
+            if (first == null)
+                first = r;
+        }
+        // Its stored things (XBA-181: the console's save folder, save/<console>-<KEY>/, Storage.saves).
+        List<Storage.Item> items = Storage.items(storageDirs(), key, games.get(key));
+        if (!items.isEmpty()) {
+            listLabel(list, getString(R.string.ROM_OPT_DATA));
+            for (Storage.Item it : items)
+                storageRow(list, it);
+            storageMeasureLater(items);
+        }
+        defaultFocus = first;
+        addHint("A", R.string.HINT_CHANGE, this::clickFocused);
+        addHint("B", R.string.HINT_BACK, this::back);
+    }
+
+    /** The Settings option whose row is titled title (a string resource), or null. */
+    private static RecompConfig.Option optionTitled(int title) {
+        for (RecompConfig.Option o : RecompConfig.OPTIONS) {
+            if (o.title == title)
+                return o;
+        }
+        return null;
+    }
+
     // ---- STORAGE (docs/android/app-shell.md « Game library », Storage) -------------------------------------------
 
     /**
@@ -5374,7 +5455,7 @@ public class LauncherActivity extends Activity {
                 m.put(storageKey(it), Storage.measure(it));
             runOnUiThread(() -> {
                 storageSizes.putAll(m);
-                if (screen == Screen.STORAGE || screen == Screen.GAME_DATA)
+                if (screen == Screen.STORAGE || screen == Screen.GAME_DATA || screen == Screen.ROM_OPTIONS)
                     refreshKeepingFocus();
             });
         }, "xba-storage");

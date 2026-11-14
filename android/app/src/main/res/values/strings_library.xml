@@ -85,7 +85,7 @@
     <string name="LIB_ST_PACK_DETAIL">What the Prepare built for this game. Once deleted, the game needs preparing again (20 to 60 minutes).</string>
     <string name="LIB_ST_WORK_DETAIL">The Prepare\'s work files (generated code, objects). Only needed to resume or redo a Prepare faster.</string>
     <string name="LIB_ST_CACHES_DETAIL">The game\'s own caches (Z:, the cache partitions, E:\\CACHE), kept aside while another game plays. The game rebuilds them at its next start, which can take a few minutes.</string>
-    <string name="LIB_ST_SAVES_DETAIL">Your saved games for this title (UDATA, TDATA). Deleted saves cannot be recovered.</string>
+    <string name="LIB_ST_SAVES_DETAIL">Your saved games for this title. Deleted saves cannot be recovered.</string>
     <string name="LIB_ST_DELETE_CONFIRM">Press A again within 5 seconds to delete it.</string>
     <string name="LIB_ST_SAVES_CONFIRM">Your saves will be lost for good. Press A again within 5 seconds to delete them.</string>
     <string name="LIB_ST_EMPTY">Nothing stored yet.</string>

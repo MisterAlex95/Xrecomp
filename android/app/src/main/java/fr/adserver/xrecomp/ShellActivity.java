@@ -113,6 +113,7 @@ public class ShellActivity extends SDLActivity {
         applyN64Pak(rom != null);
         applyVkDriver(rom != null);
         Console console = applyConsolePad(rom != null);
+        applyConsoleVideo(console);
         boolean checked = LibraryCheck.applyRunEnv(this);   // a library check's run: status file and pad script (XBA-130)
         applyBuiltinPad();
         super.onCreate(savedInstanceState);
@@ -241,7 +242,7 @@ public class ShellActivity extends SDLActivity {
      * None cached, or the player's « Off »: the stock colours.
      */
     private void applyGameTheme() {
-        String tid = GameLanguage.currentTitleId(this);
+        String tid = GameLanguage.runningTitleId(this);
         GameTheme g = null;
         try {
             g = GameTheme.load(this, tid);
@@ -347,6 +348,34 @@ public class ShellActivity extends SDLActivity {
         return c;
     }
 
+    /**
+     * RECOMP_SCALE and RECOMP_FILTER for a GBA, PS1 or N64 game (XBA-181, {@link ConsoleVideo}): the game's own choice,
+     * else Settings' (recomp.cfg), else unset (the runtime's default); with the settings every console shares
+     * (vertical sync, audio buffer, rumble) from recomp.cfg. An Xbox game: scale and filter unset.
+     */
+    private void applyConsoleVideo(Console c) {
+        String tid = c != Console.XBOX ? GameStore.launchedTitleId(this) : null;
+        File ext = GameStore.externalFilesDir(this);
+        RecompConfig cfg = ext == null ? null : RecompConfig.load(ext);
+        String scale = ConsoleVideo.gameChoice(this, tid, ConsoleVideo.Setting.SCALE);
+        String filter = ConsoleVideo.gameChoice(this, tid, ConsoleVideo.Setting.FILTER);
+        java.util.List<String[]> env = ConsoleVideo.runEnv(c, scale, filter, cfg);
+        StringBuilder line = new StringBuilder("shell: console video");
+        for (String[] kv : env) {
+            try {
+                if (kv[1] != null)
+                    Os.setenv(kv[0], kv[1], true);
+                else
+                    Os.unsetenv(kv[0]);
+            } catch (ErrnoException e) {
+                Log.w(LauncherActivity.TAG, "shell: cannot set " + kv[0], e);
+            }
+            line.append(' ').append(kv[0]).append('=').append(kv[1] != null ? kv[1] : "(default)");
+        }
+        if (c != Console.XBOX)
+            Log.i(LauncherActivity.TAG, line.append(", game ").append(tid).toString());
+    }
+
     /** RECOMP_PS1_PAD=analog in recomp.cfg: the PS1 on-screen pad gets the DualShock's two sticks. */
     private boolean ps1Analog() {
         File ext = GameStore.externalFilesDir(this);
@@ -362,7 +391,7 @@ public class ShellActivity extends SDLActivity {
     private void applyLanguage() {
         File ext = GameStore.externalFilesDir(this);
         String cfg = ext == null ? null : RecompConfig.load(ext).get(GameLanguage.ENV);
-        String tid = GameLanguage.currentTitleId(this);
+        String tid = GameLanguage.runningTitleId(this);
         String lang = GameLanguage.resolve(GameLanguage.titleChoice(this, tid), cfg, Locale.getDefault());
         try {
             if (lang != null)
@@ -381,7 +410,7 @@ public class ShellActivity extends SDLActivity {
      * its own choice, else unset (recomp.cfg, then off, decide), also clearing what a previous game left.
      */
     private void applyTitleVideo() {
-        String tid = GameLanguage.currentTitleId(this);
+        String tid = GameLanguage.runningTitleId(this);
         StringBuilder line = new StringBuilder("shell: title video");
         for (GameVideo.Setting s : GameVideo.Setting.values()) {
             String v = GameVideo.resolve(GameVideo.titleChoice(this, tid, s));

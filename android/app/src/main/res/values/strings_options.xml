@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- XBA-181: options shared by every console (Settings' « All consoles » rows) and a GBA, PS1 or N64 game's own
+     Options (its Home's « Options »). A file of its own so that it does not collide with strings.xml edits. -->
+<resources>
+    <string name="SET_GROUP_ALL">All consoles</string>
+    <string name="SET_GROUP_XBOX">Xbox only</string>
+
+    <string name="OPT_CSCALE">Scale</string>
+    <string name="OPT_CSCALE_DETAIL">How a Game Boy Advance, PlayStation or Nintendo 64 game fills the screen. Keep shape: as large as it goes in its own shape, with borders. Whole pixels: a whole multiple of its picture, every pixel the same size; sharper, with wider borders. Stretch: the whole screen, out of shape. A game can have its own (its Options). Applies the next time a game starts. (RECOMP_SCALE)</string>
+    <string name="VAL_CSCALE_ASPECT">Keep shape</string>
+    <string name="VAL_CSCALE_INTEGER">Whole pixels</string>
+    <string name="VAL_CSCALE_STRETCH">Stretch</string>
+    <string name="OPT_CFILTER">Picture filter</string>
+    <string name="OPT_CFILTER_DETAIL">How the picture of a Game Boy Advance, PlayStation or Nintendo 64 game is enlarged. Sharp: square pixels, as on the console\'s screen. Smooth: softened edges. Console default: sharp for the Game Boy Advance, smooth for the PlayStation and the Nintendo 64. A game can have its own (its Options). Applies the next time a game starts. (RECOMP_FILTER)</string>
+    <string name="VAL_CFILTER_CONSOLE">Console default</string>
+    <string name="VAL_CFILTER_NEAREST">Sharp</string>
+    <string name="VAL_CFILTER_LINEAR">Smooth</string>
+    <string name="OPT_RUMBLE">Controller rumble</string>
+    <string name="OPT_RUMBLE_DETAIL">On: the controller vibrates when the game asks for it (the PlayStation DualShock, the Nintendo 64 Rumble Pak, the Xbox pad). Off: never. For every console. Applies the next time a game starts. (RECOMP_RUMBLE)</string>
+
+    <string name="ROM_OPTIONS">Options</string>
+    <string name="ROM_OPT_PICTURE">This game\'s picture</string>
+    <string name="ROM_OPT_DATA">Game data</string>
+    <string name="ROM_OPT_FOLLOW">As in Settings (%1$s)</string>
+    <string name="ROM_OPT_SCALE_DETAIL">How this game fills the screen: as in Settings › Graphics › Scale, or its own. Keep shape: as large as it goes in its own shape. Whole pixels: every pixel the same size, wider borders. Stretch: the whole screen, out of shape. Applies the next time the game starts. (RECOMP_SCALE)</string>
+    <string name="ROM_OPT_FILTER_DETAIL">How this game\'s picture is enlarged: as in Settings › Graphics › Picture filter, or its own. Sharp: square pixels. Smooth: softened edges. Applies the next time the game starts. (RECOMP_FILTER)</string>
+    <string name="ROM_OPT_SAVED">Saved for this game</string>
+    <string name="ROM_OPT_SAVED_RUNNING">Saved for this game; it applies the next time the game starts</string>
+</resources>

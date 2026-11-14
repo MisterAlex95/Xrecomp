@@ -633,7 +633,9 @@ game's theme (`ui-home-themed-*`) and the Game theme setting (`ui-settings-theme
 The Settings screen has four tabs — **General**, **Graphics**, **Audio**, **Advanced** — switched with L1 / R1; it
 writes a few `RECOMP_*` options to `recomp.cfg` (the file the runtime already reads,
 [RECOMP_* options](#recomp_-options-recompcfg)), and they apply the next time the game starts. Only options that
-exist in the runtime and mean something to a player are offered:
+exist in the runtime and mean something to a player are offered. Graphics and Audio group their rows (XBA-181):
+**All consoles** first (what the GBA, PS1 and N64 runtimes read as well as the Xbox's), then **Xbox only**; see
+[Settings per console](#settings-per-console).
 
 | Row | Choices (default first or marked) | Line in `recomp.cfg` |
 |---|---|---|
@@ -644,7 +646,10 @@ exist in the runtime and mean something to a player are offered:
 | General › Game theme (only with a game that has a title ID) | Art and colours (default), Colours only, Off | none: [Game theme](#game-theme), `files/settings/theme_<TID>` |
 | General › Enhancements (only for a game whose pack has `title_layer`: the toolkit has optional enhancements for it) | On (default), Off | none: `files/settings/enhancements_<TID>`; off, the game's next Prepare runs with `XBA_NO_TITLE_LAYER=1`, and Home offers Prepare again while the pack differs ([profiles.md](../technical/profiles.md#optional-by-construction), [prepare.md](prepare.md#packjson) `title_layer`) |
 | General › Language | Same as Android (default), English, Français, Deutsch, Español, Italiano, Português, 日本語, 한국어, 中文 | `RECOMP_LANGUAGE=…`; « Same as Android » writes nothing ([Game language](#game-language)) |
-| Graphics › Vertical sync | On (default), Off | `RECOMP_PRESENT_VSYNC=0` when off |
+| General › Controller rumble (all consoles) | On (default), Off | `RECOMP_RUMBLE=0` when off: no motor for the Xbox's emulated USB pad, the PS1 DualShock or the N64 Rumble Pak |
+| Graphics › Vertical sync (all consoles) | On (default), Off | `RECOMP_PRESENT_VSYNC=0` when off |
+| Graphics › Scale (all consoles; GBA, PS1, N64 only) | Keep shape (default), Whole pixels, Stretch | `RECOMP_SCALE=integer` / `stretch`; Keep shape writes nothing (the runtimes' `aspect`). A game can have its own ([Settings per console](#settings-per-console)) |
+| Graphics › Picture filter (all consoles; GBA, PS1, N64 only) | Console default (default: GBA sharp, PS1 and N64 smooth), Sharp, Smooth | `RECOMP_FILTER=nearest` / `linear`; Console default writes nothing. A game can have its own |
 | Graphics › Renderer | Auto (default: GPU, unless the title's pack forces `RECOMP_GPU=0`), Software, GPU | `RECOMP_GPU=0` / `1`; Auto writes nothing and the runtime's Android default (GPU, CPU rasteriser when GLES 3.0 cannot start) applies; see [GPU back end](../technical/gpu-backend.md#android) |
 | Graphics › Frame cap (dimmed when the renderer is Software) | Auto (default: `RECOMP_PACING=auto`, the title's own rate or a steady lower one the device sustains, never dividing a title locked to its rate; WP4), 30, 60, Off | Auto writes nothing; `RECOMP_GPU_FPS_CAP=30` / `60` / `0` (a fixed cap, auto off) |
 | Graphics › Resolution (dimmed when the renderer is Software) | Auto (default: the title profile's choice, 1× for now), 1× (original), 2×, 3×, Fit the screen | `RECOMP_GPU_SCALE=1` / `2` / `3` / `auto` (Fit: the screen's height / 480, at most 3); see [GPU back end](../technical/gpu-backend.md#internal-resolution) |
@@ -654,8 +659,8 @@ exist in the runtime and mean something to a player are offered:
 | Graphics › Frame generation (only in a [frame generation](#frame-generation) APK) | Off (default), 2×, 2× performance | `RECOMP_LSFG=1`, `RECOMP_LSFG_MULT=2`, plus `RECOMP_LSFG_PERF=1` for 2× performance |
 | Graphics › Choose Lossless.dll (same) | a document picker; the row shows the shaders' state | `RECOMP_LSFG_DIR=<files>/lsfg/<key>` once the shaders are there (not removed by « Reset all ») |
 | Graphics › Texture filtering | Sharp (default), Smooth, Anisotropic 8×, Anisotropic 16× | `RECOMP_TEX_BILINEAR=1`, `RECOMP_TEX_ANISO=8` / `16` |
-| Audio › 3D audio (HRTF) | On (default), Off | `RECOMP_APU_HRTF=0` when off |
-| Audio › Audio buffer | Short (256), Normal (default, 512), Long (1024), Very long (2048) | `RECOMP_AUDIO_BUF_SAMPLES=…` |
+| Audio › 3D audio (HRTF) (Xbox only) | On (default), Off | `RECOMP_APU_HRTF=0` when off |
+| Audio › Audio buffer (all consoles) | Short (256), Normal (default, 512), Long (1024), Very long (2048) | `RECOMP_AUDIO_BUF_SAMPLES=…` |
 | Advanced › Drawing threads | Auto (default), 1, 2, 4, 6, 8 | `RECOMP_RASTER_THREADS=…` |
 | Advanced › Fast cores | On (default on Android), Off | `RECOMP_BIG_CORES=0` when off |
 | Advanced › Self-test | Off (default), On | `RECOMP_SHELL_SELFTEST=1` |
@@ -683,11 +688,53 @@ title. No shipped profile forces it since WP4: the runtime keeps frame generatio
 locked to 60 ([framegen.md](../technical/framegen.md#titles-locked-to-the-flip-rate)); the row does not know that
 verdict.
 
-Asked for in XBA-41 but left out, because no runtime option backs them on Android: the output scaling and its filter
-(the SDL presenter always letterboxes the 640 x 480 frame with nearest-neighbour sampling, `fb_present_sdl.c`;
-`RECOMP_WINDOW_SCALE` only sizes a desktop window and `RECOMP_PRESENT_FILTER` is the D3D11 presenter's), an fps cap
-for the software renderer (only the GPU renderer has one, `RECOMP_GPU_FPS_CAP`), a stats overlay (no such switch; control remapping has its own screen since XBA-131, [Controls and remapping](#controls-and-remapping)), and vibration (`RECOMP_RUMBLE` only gates the emulated USB
-pad, `RECOMP_USB`, a per-title opt-in). Bring-up and debug switches stay out on purpose.
+Asked for in XBA-41 but left out, because no runtime option backs them on Android: the Xbox's output scaling and its
+filter (the SDL presenter always letterboxes the 640 x 480 frame with nearest-neighbour sampling, `fb_present_sdl.c`;
+`RECOMP_WINDOW_SCALE` only sizes a desktop window and `RECOMP_PRESENT_FILTER` is the D3D11 presenter's; Scale and
+Picture filter are the other consoles'), an fps cap for the software renderer (only the GPU renderer has one,
+`RECOMP_GPU_FPS_CAP`), a stats overlay (no such switch; the in-game menu's Perf overlay; control remapping has its own
+screen since XBA-131, [Controls and remapping](#controls-and-remapping)). Bring-up and debug switches stay out on
+purpose.
+
+#### Settings per console
+
+XBA-181. Which settings reach which console's game (the native side reads them in `src/host` and
+`consoles/*/runtime`):
+
+| Setting | Xbox | GBA, PS1, N64 | Per game |
+|---|---|---|---|
+| General › Language | yes | no | Xbox: in-game menu (`language_<TITLEID>`) |
+| General › Controller rumble (`RECOMP_RUMBLE`) | the emulated USB pad | PS1 DualShock, N64 Rumble Pak | no (an N64 game's pak: its Home, `n64_pak_<KEY>`) |
+| Graphics › Vertical sync (`RECOMP_PRESENT_VSYNC`) | yes | yes | no |
+| Graphics › Scale (`RECOMP_SCALE`) | no | yes | console game: its Home › Options, or the in-game menu (`scale_<KEY>`) |
+| Graphics › Picture filter (`RECOMP_FILTER`) | no | yes | console game: the same (`filter_<KEY>`) |
+| Graphics › Renderer, Frame cap, Resolution, Aspect ratio, Widescreen, 480p, Frame generation, Texture filtering | yes | no | Widescreen, 480p: Xbox game, in-game menu |
+| Audio › Audio buffer (`RECOMP_AUDIO_BUF_SAMPLES`) | yes | yes | no |
+| Audio › 3D audio (HRTF) | yes | no | no |
+| Advanced › Drawing threads, Self-test | yes | no | no |
+| Advanced › Fast cores | yes | yes (the app's start, `recomp_app_start`) | no |
+
+**A console game's own scale and filter** (`ConsoleVideo.java`). Kept per library key in `files/settings/scale_<KEY>`
+and `filter_<KEY>` (as `pad_map_<KEY>`; `aspect` / `integer` / `stretch`, `nearest` / `linear`; empty or absent:
+follows Settings). Set from the game's Home › **Options** (a pill after Controls: « This game's picture », Scale and
+Picture filter, « As in Settings (<Settings' value>) » then each value) or from the in-game menu › Settings
+(**Scale** / **Filter**, « next start » in the row). Before the runtime starts, `ShellActivity.applyConsoleVideo`
+sets, for a GBA, PS1 or N64 game, `RECOMP_SCALE` and `RECOMP_FILTER` to the game's value, else to recomp.cfg's line,
+else unsets them (the runtime's default: aspect; GBA nearest, PS1 / N64 linear; `RECOMP_<CONSOLE>_SCALE` /
+`_FILTER` still win there), and `RECOMP_PRESENT_VSYNC`, `RECOMP_AUDIO_BUF_SAMPLES`, `RECOMP_RUMBLE` from recomp.cfg
+(unset without a line). An Xbox game gets `RECOMP_SCALE` / `RECOMP_FILTER` unset. Logcat: « shell: console video
+RECOMP_SCALE=… RECOMP_FILTER=… …, game <KEY> ».
+
+**Game data of a console game.** The same Options screen lists the game's stored things (`Storage.items`), each
+with its size, A twice to delete (saves: the stronger warning): **Saves** = `<internal>/save/<console>-<KEY>/`
+(`game.sav`, `card1.mcr`, `game.eep`, `pak1.mpk`...; `Storage.saves`), the pack and the Prepare's files when there
+are any. Storage (the library's) lists a console game's save folder too.
+
+**The running game's title ID** (`GameLanguage.runningTitleId`). A GBA, PS1 or N64 launch
+(`GameStore.rememberRomLaunch`) keeps the chosen Xbox folder (`game_dir`), so the XBE there is not the running game:
+the in-game menu and `ShellActivity` (title video, language, game theme) key their per-game choices on the launched
+game's library key while `rom` is set, the Xbox game's title ID otherwise. Before XBA-181 a console game played
+after an Xbox game showed the Xbox game's Language / Widescreen / 480p rows and got its settings and theme.
 
 ### Controls and remapping
 
@@ -2326,7 +2373,7 @@ less the display cutout, so 720p and 1080p look the same.
 | Item | Does |
 |---|---|
 | Resume | Closes the menu. |
-| Settings | **Perf overlay** On / Off: fps and frame time (`xbox_FramebufferWindowGetStats`, twice a second) in the top right corner, in the menu's layer, not in the game frame; stays with the menu closed. **Volume** 0–100 % in steps of 10, A mutes / unmutes: one gain on the mixed APU output (`apu_volume.c`, the square of the fraction, after the WAV capture), set through JNI. **Bottom screen** Panel / Black / Off (only with a second screen): `GameStore.setBottomScreen` and the companion is refreshed at once. **On-screen pad** Shown / Hidden (only when the game has one, XBA-158): for this session, whatever Controls › On-screen pad › Show says (never with the companion panel up). These apply **now** (the rows say so) and are remembered (`files/settings/perf_overlay`, `game_volume`, `bottom_screen`); the volume is applied again at the next start. **Language** (only when the game's XBE gives a title ID): As in Settings, then the nine languages; this game's own [language](#game-language), applied at the next start. **Widescreen** and **480p** (same condition, XBA-134): As in Settings / On / Off, this game's own console video setting (`GameVideo.java`, kept in `files/settings/widescreen_<TITLEID>` and `480p_<TITLEID>`), applied at the next start: `ShellActivity` sets `RECOMP_WIDESCREEN` / `RECOMP_480P` to `1` or `0` (the environment wins over the `recomp.cfg` line of Settings › Graphics) and unsets them when the game follows Settings; logcat « shell: title video RECOMP_WIDESCREEN=… RECOMP_480P=…, title … ». Screen filter and scaling are not offered: the SDL window's are fixed at start (`fb_present_sdl.c`: nearest, logical size 640 x 480). |
+| Settings | **Perf overlay** On / Off: fps and frame time (`xbox_FramebufferWindowGetStats`, twice a second) in the top right corner, in the menu's layer, not in the game frame; stays with the menu closed. **Volume** 0–100 % in steps of 10, A mutes / unmutes: one gain on the mixed APU output (`apu_volume.c`, the square of the fraction, after the WAV capture), set through JNI. **Bottom screen** Panel / Black / Off (only with a second screen): `GameStore.setBottomScreen` and the companion is refreshed at once. **On-screen pad** Shown / Hidden (only when the game has one, XBA-158): for this session, whatever Controls › On-screen pad › Show says (never with the companion panel up). These apply **now** (the rows say so) and are remembered (`files/settings/perf_overlay`, `game_volume`, `bottom_screen`); the volume is applied again at the next start. **Language** (only for an Xbox game whose XBE gives a title ID): As in Settings, then the nine languages; this game's own [language](#game-language), applied at the next start. **Widescreen** and **480p** (same condition, XBA-134): As in Settings / On / Off, this game's own console video setting (`GameVideo.java`, kept in `files/settings/widescreen_<TITLEID>` and `480p_<TITLEID>`), applied at the next start: `ShellActivity` sets `RECOMP_WIDESCREEN` / `RECOMP_480P` to `1` or `0` (the environment wins over the `recomp.cfg` line of Settings › Graphics) and unsets them when the game follows Settings; logcat « shell: title video RECOMP_WIDESCREEN=… RECOMP_480P=…, title … ». A GBA, PS1 or N64 game (XBA-181) has none of these three: **Scale (next start)** and **Filter (next start)** instead, As in Settings then each value, this game's own ([Settings per console](#settings-per-console)); Perf overlay, Volume and Screenshot are the same rows (the native side backs them for the consoles through the same JNI calls). An Xbox game's screen filter and scaling are not offered: the SDL window's are fixed at start (`fb_present_sdl.c`: nearest, logical size 640 x 480). |
 | Controls | The usual mapping, compact (plus Back and Select + Start: the menu); with a remapping in `recomp.cfg`, first « Your mapping » and each changed control (your button, the Xbox control). A GBA / PS1 / N64 game: each of its buttons and the controls it comes from ([Controls for the other consoles](#controls-for-the-other-consoles)). |
 | Screenshot | Closes the menu first, then saves the game's last frame as `<external files>/screenshots/<date>.bmp` (`xbox_FramebufferDumpBmp`, the companion panel's), and says « Saved … » at the top of the screen (and on the panel). |
 | Change disc | Only for a PlayStation game with two discs or more found beside it (XBA-166, [PlayStation games](#playstation-games-xba-168)): a page of its discs, « In the drive » under the one playing; choosing another closes the menu and the lid opens, a second later the new disc is in. |

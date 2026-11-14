@@ -153,6 +153,11 @@ public class LauncherConsoleControlsTest {
 
     /** From the library: A on the card (its Home), then the Controls pill (right of the others) with the pad. */
     private void openControls(LauncherActivity a, String card) {
+        openControls(a, card, R.string.CONTROLS, LauncherActivity.Screen.ROM_CONTROLS);
+    }
+
+    /** The same with another pill of the Home (XBA-181: « Options »), landing on screen. */
+    private void openControls(LauncherActivity a, String card, int pill, LauncherActivity.Screen screen) {
         a.forceFocusForTest();
         idle(300);
         for (GameCard c : a.libraryCardsForTest())
@@ -163,14 +168,14 @@ public class LauncherConsoleControlsTest {
         assertEquals(LauncherActivity.Screen.ROM_HOME, a.screenForTest());
         a.forceFocusForTest();
         idle(300);
-        String controls = app.getString(R.string.CONTROLS);
-        for (int i = 0; i < 5 && !(a.focusForTest() instanceof Widgets.PillButton
+        String controls = app.getString(pill);
+        for (int i = 0; i < 6 && !(a.focusForTest() instanceof Widgets.PillButton
                                    && controls.equals(((Widgets.PillButton)a.focusForTest()).title)); i++)
             key(a, KeyEvent.KEYCODE_DPAD_RIGHT);
-        assertTrue("the Controls pill", a.focusForTest() instanceof Widgets.PillButton
-                                        && controls.equals(((Widgets.PillButton)a.focusForTest()).title));
+        assertTrue("the " + controls + " pill", a.focusForTest() instanceof Widgets.PillButton
+                                                && controls.equals(((Widgets.PillButton)a.focusForTest()).title));
         key(a, KeyEvent.KEYCODE_BUTTON_A);
-        assertEquals(LauncherActivity.Screen.ROM_CONTROLS, a.screenForTest());
+        assertEquals(screen, a.screenForTest());
         a.forceFocusForTest();
         idle(300);
     }
@@ -294,6 +299,59 @@ public class LauncherConsoleControlsTest {
         assertEquals("Votre stick droit", row(b, "Stick analogique").value);
         assertNotNull(row(b, "C gauche"));
         shot(b, "console-controls-4-n64-fr");
+    }
+
+    /**
+     * XBA-181: a GBA game's Options (its Home's « Options » pill): its own Scale and Picture filter (« As in Settings »
+     * showing Settings' value, then each value; scale_&lt;KEY&gt; / filter_&lt;KEY&gt;, which ShellActivity exports), and
+     * its saves (save/gba-&lt;KEY&gt;/), deleted with A twice.
+     */
+    @Test
+    public void gbaOptions() throws Exception {
+        File rom = rom("gba", "Pocket Quest.gba", ConsoleTest.gba("AXVE"));
+        RecompConfig cfg = RecompConfig.load(GameStore.externalFilesDir(app));
+        cfg.set("RECOMP_SCALE", "stretch");
+        cfg.save();
+        LauncherActivity a = launch();
+        String key = LibraryIndex.read(Library.indexFile(app.getFilesDir())).find(LibraryIndex.fileLoc(rom)).tid;
+        File save = new File(app.getFilesDir(), "save/" + key + "/game.sav");
+        TestSupport.write(save, new byte[64]);
+        openControls(a, "Pocket Quest", R.string.ROM_OPTIONS, LauncherActivity.Screen.ROM_OPTIONS);
+        String scaleTitle = app.getString(R.string.OPT_CSCALE), filterTitle = app.getString(R.string.OPT_CFILTER);
+        assertEquals(app.getString(R.string.ROM_OPT_FOLLOW, app.getString(R.string.VAL_CSCALE_STRETCH)),
+                     row(a, scaleTitle).value);
+        assertEquals(app.getString(R.string.ROM_OPT_FOLLOW, app.getString(R.string.VAL_CFILTER_CONSOLE)),
+                     row(a, filterTitle).value);
+        assertNotNull("its saves", row(a, app.getString(R.string.LIB_ST_SAVES)));
+        shot(a, "console-options-1-gba");
+
+        focusRow(a, scaleTitle);
+        key(a, KeyEvent.KEYCODE_DPAD_RIGHT);
+        key(a, KeyEvent.KEYCODE_DPAD_RIGHT);
+        assertEquals("integer", ConsoleVideo.gameChoice(app, key, ConsoleVideo.Setting.SCALE));
+        assertEquals(app.getString(R.string.VAL_CSCALE_INTEGER), row(a, scaleTitle).value);
+        assertEquals(app.getString(R.string.ROM_OPT_SAVED), a.noteForTest());
+        focusRow(a, filterTitle);
+        key(a, KeyEvent.KEYCODE_DPAD_LEFT);
+        assertEquals("linear", ConsoleVideo.gameChoice(app, key, ConsoleVideo.Setting.FILTER));
+        assertEquals("recomp.cfg untouched", "stretch", cfgLine("RECOMP_SCALE"));
+        java.util.List<String[]> env = ConsoleVideo.runEnv(Console.GBA,
+                                                           ConsoleVideo.gameChoice(app, key, ConsoleVideo.Setting.SCALE),
+                                                           ConsoleVideo.gameChoice(app, key, ConsoleVideo.Setting.FILTER),
+                                                           RecompConfig.load(GameStore.externalFilesDir(app)));
+        assertEquals("integer", env.get(0)[1]);
+        assertEquals("linear", env.get(1)[1]);
+
+        focusRow(a, app.getString(R.string.LIB_ST_SAVES));
+        key(a, KeyEvent.KEYCODE_BUTTON_A);
+        assertTrue("armed, not deleted yet", save.isFile());
+        key(a, KeyEvent.KEYCODE_BUTTON_A);
+        for (int i = 0; i < 50 && save.exists(); i++)
+            Thread.sleep(20);
+        idle(300);
+        assertFalse(save.exists());
+        key(a, KeyEvent.KEYCODE_BUTTON_B);
+        assertEquals(LauncherActivity.Screen.ROM_HOME, a.screenForTest());
     }
 
     /** A PS1 disc: Cross / Circle / Square / Triangle, L1 .. R3, both DualShock sticks. */
