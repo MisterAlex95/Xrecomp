@@ -410,9 +410,11 @@ input); n64-systemtest under `--pack` (the interpreter's pass / known-gap set) a
 (`recomp_systemtest.sh`); `n64_rc_fuzz`: random MIPS III code (64-bit ops, branch-likely, unaligned accesses, COP1
 in both FR modes, overflows / traps / FPE exceptions) under a COUNT = COMPARE interrupt every 40-600 COUNT ticks
 (`recomp_fuzz.py`); pytest `consoles/n64/tools/n64_tools/test_recomp.py`. Measured on the x86 dev host (loaded,
-12 cores): the homebrew converge in 1-2 rounds, 98.7-99.9 % native instructions once IPL3 is past; recompiled vs
-interpreted 4200-4400 vs 180 frames/s on timer_irq / gfx (their idle loop after the verdict), 1000-1080 vs 190 on rsp
-(RSP-bound); lifted C costs 1.3-2.8 s of compiler per 1000 instructions at -O1 (homebrew: 28 k instructions, ~8 s
+12 cores): the homebrew converge in 1-2 rounds, 98.7-99.9 % native instructions once IPL3 is past; n64-systemtest
+in 3 rounds at 99.56 % native, its 3721 tests giving the interpreter's result. Recompiled vs interpreted: 770-800 vs
+104-119 frames/s on n64-systemtest (CPU-bound, pack built with the native counter), 4200-4400 vs 180 on timer_irq /
+gfx (their idle loop after the verdict), 1000-1080 vs 190 on rsp (RSP-bound); the interpreter alone is within noise
+of what it was before the page write tracking. Lifted C costs 1.3-2.8 s of compiler per 1000 instructions at -O1 (homebrew: 28 k instructions, ~8 s
 with 8 jobs; n64-systemtest: 407 k instructions, ~150-190 s with 6 jobs).
 
 **Legal**: no ROM, disc image, BIOS or game data in this repository, its CI or its artifacts. Tests use homebrew we
