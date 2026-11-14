@@ -675,31 +675,52 @@ static void test_vi(void)
     CHECK(n64_display(m, px, 640, 576, &w, &h) != 0, "blank before the VI is set up");
 
     /* NTSC 320 x 240, 16-bit, AA off (replicate): the canvas is 320 x 240, the active area (half-lines 37..511) starts
-     * on row 1, the framebuffer's own pixels. */
+     * on row 1, the framebuffer's own pixels. The VI's guard band blanks VI pixels 108..115 and 741..747: canvas
+     * columns 0..3 and 317..319. */
     const uint32_t fb = 0x100000;
     vi_mode(m, 0x3302, fb, 320, 0x006C02EC, 0x002501FF, 0x200, 0x400);
-    n64_wbe16(m->rdram + fb, c16(31, 0, 0, 1));           /* red */
-    n64_wbe16(m->rdram + fb + 2 * 321, c16(0, 31, 0, 1)); /* green at (1, 1) */
+    n64_wbe16(m->rdram + fb + 2 * 4, c16(31, 0, 0, 1));   /* red at (4, 0) */
+    n64_wbe16(m->rdram + fb + 2 * 325, c16(0, 31, 0, 1)); /* green at (5, 1) */
+    n64_wbe16(m->rdram + fb + 2 * 3, c16(31, 31, 31, 1)); /* white in the guard band */
+    n64_wbe16(m->rdram + fb + 2 * 317, c16(31, 31, 31, 1));
+    n64_wbe16(m->rdram + fb + 2 * 316, c16(0, 0, 31, 1)); /* blue: the last visible column */
     CHECK(n64_display(m, px, 640, 576, &w, &h) == 0, "16-bit picture");
     CHECK(w == 320 && h == 240, "NTSC canvas %dx%d", w, h);
     CHECK_EQ(px[0], 0, "row 0: border");
-    CHECK_EQ(px[320 * 1 + 0], 0xFF0000, "red pixel");
-    CHECK_EQ(px[320 * 2 + 1], 0x00FF00, "green pixel");
+    CHECK_EQ(px[320 * 1 + 4], 0xFF0000, "red pixel");
+    CHECK_EQ(px[320 * 2 + 5], 0x00FF00, "green pixel");
+    CHECK_EQ(px[320 * 1 + 3], 0, "guard band: column 3 blank");
+    CHECK_EQ(px[320 * 1 + 316], 0x0000FF, "column 316 visible");
+    CHECK_EQ(px[320 * 1 + 317], 0, "guard band: column 317 blank");
     CHECK_EQ(px[320 * 239], 0, "last row: border (237 active lines)");
     w32(m, 0x04400000, 0x3303); /* 32-bit */
-    n64_wbe32(m->rdram + fb, 0x123456FF);
+    n64_wbe32(m->rdram + fb + 4 * 4, 0x123456FF);
     n64_display(m, px, 640, 576, &w, &h);
-    CHECK_EQ(px[320], 0x123456, "32-bit pixel");
+    CHECK_EQ(px[320 + 4], 0x123456, "32-bit pixel");
     CHECK(n64_display(m, px, 100, 50, &w, &h) == 0 && w == 100 && h == 50, "clipped to the buffer");
 
-    /* A narrow active area (H 188..668: 480 VI pixels) keeps its place: 40 output pixels of border either side. */
+    /* A narrow active area (H 188..668: 480 VI pixels) keeps its place: 40 output pixels of border either side, plus
+     * the guard band (VI 196..660 visible: columns 44..276). */
     memset(m->rdram + fb, 0xFF, 320 * 240 * 2);
     vi_mode(m, 0x3302, fb, 240, 0x00BC029C, 0x002501FF, 0x200, 0x400);
     n64_display(m, px, 640, 576, &w, &h);
-    CHECK(w == 320 && px[320 * 10 + 39] == 0 && px[320 * 10 + 40] == 0xFFFFFF && px[320 * 10 + 279] == 0xFFFFFF &&
-              px[320 * 10 + 280] == 0,
-          "borders around a narrow picture (%06X %06X %06X %06X)", px[320 * 10 + 39], px[320 * 10 + 40],
-          px[320 * 10 + 279], px[320 * 10 + 280]);
+    CHECK(w == 320 && px[320 * 10 + 43] == 0 && px[320 * 10 + 44] == 0xFFFFFF && px[320 * 10 + 276] == 0xFFFFFF &&
+              px[320 * 10 + 277] == 0,
+          "borders around a narrow picture (%06X %06X %06X %06X)", px[320 * 10 + 43], px[320 * 10 + 44],
+          px[320 * 10 + 276], px[320 * 10 + 277]);
+
+    /* No guard band on an edge clamped to the scan-out: H 100..760 starts before the canvas (VI 108) and ends past it
+     * (748), so every canvas column is visible. */
+    vi_mode(m, 0x3302, fb, 330, 0x006402F8, 0x002501FF, 0x200, 0x400);
+    n64_display(m, px, 640, 576, &w, &h);
+    CHECK(w == 320 && px[320 * 10 + 0] == 0xFFFFFF && px[320 * 10 + 319] == 0xFFFFFF,
+          "clamped edges: no guard band (%06X %06X)", px[320 * 10 + 0], px[320 * 10 + 319]);
+    /* Only the left edge clamped (H 100..740): the right guard band stays (VI 733: columns 0..312). */
+    vi_mode(m, 0x3302, fb, 320, 0x006402E4, 0x002501FF, 0x200, 0x400);
+    n64_display(m, px, 640, 576, &w, &h);
+    CHECK(px[320 * 10 + 0] == 0xFFFFFF && px[320 * 10 + 312] == 0xFFFFFF && px[320 * 10 + 313] == 0,
+          "left edge clamped, right guard band (%06X %06X %06X)", px[320 * 10 + 0], px[320 * 10 + 312],
+          px[320 * 10 + 313]);
 
     /* 640 wide (X_SCALE 1.0): a 640-pixel canvas. A 256-wide framebuffer stretched to 640 VI pixels (X_SCALE 0.4):
      * 320 wide, interpolated between framebuffer pixels (resample, AA mode 2). */
@@ -731,15 +752,15 @@ static void test_vi(void)
         n64_wbe32(m->rdram + fb + 4 * i, 0x404040FF);
     vi_mode(m, 0x3303 | 0x8, fb, 640, 0x006C02EC, 0x002501FF, 0x400, 0x400);
     n64_display(m, px, 640, 576, &w, &h);
-    CHECK(near(px[640 + 5], rgb_of(0x80, 0x80, 0x80), 1), "gamma 0x40 -> %06X", px[640 + 5]);
+    CHECK(near(px[640 + 16], rgb_of(0x80, 0x80, 0x80), 1), "gamma 0x40 -> %06X", px[640 + 16]);
     for (int i = 0; i < 640 * 4; i++)
         n64_wbe32(m->rdram + fb + 4 * i, 0x101010FF); /* 0x10 -> 0x40, and up to 0x42 with the dither */
     vi_mode(m, 0x3303 | 0xC, fb, 640, 0x006C02EC, 0x002501FF, 0x400, 0x400);
     n64_display(m, px, 640, 576, &w, &h);
     int differ = 0;
-    for (int x = 0; x < 64; x++) {
+    for (int x = 8; x < 72; x++) { /* columns 0..7: the guard band at 640 wide */
         CHECK(near(px[640 + x], rgb_of(0x41, 0x41, 0x41), 2), "gamma dither %06X", px[640 + x]);
-        differ += px[640 + x] != px[640];
+        differ += px[640 + x] != px[640 + 8];
     }
     CHECK(differ > 0, "gamma dither varies");
 

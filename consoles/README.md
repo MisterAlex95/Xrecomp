@@ -360,7 +360,10 @@ build/n64/n64_runtime/n64_run build/n64-systemtest/n64-systemtest.z64 --tty --fr
 **The VI's picture (`n64_vi.c`, `n64_display`).** What a television showed, not a crop of the framebuffer: a fixed
 canvas of 640 VI pixels from H = 108 (NTSC) / 128 (PAL) and 240 / 288 lines from half-line 34 / 44 (480 / 576
 interlaced), the active area placed where H / V_VIDEO put it and black around it (a narrow or short picture keeps
-its aspect and place); 320 wide when X_SCALE is 0.5 or less (a 320 x 240 game comes out at its own pixels). Per
+its aspect and place); 320 wide when X_SCALE is 0.5 or less (a 320 x 240 game comes out at its own pixels). The
+VI's horizontal guard band is modelled (as paraLLEl-RDP's VI and angrylion do): the first 8 and last 7 VI pixels of
+the active area are black unless that edge is clamped to the scan-out, so a standard mode shows canvas columns
+4..316 of 320 (OoT draws its fades one column short; a console never shows that column). Per
 pixel: X / Y_SCALE steps and their start offsets, bilinear resampling (AA modes 0..2) or replication (mode 3), the AA
 filter on partially covered pixels (coverage from the RDP's hidden RDRAM bits, `n64_rdp_hidden_bits`; without them
 the pixel's low bit), the divot filter, the dither filter (16-bit), gamma and gamma dither. Interlaced modes are
@@ -375,7 +378,8 @@ packs »](../docs/android/prepare.md#n64-packs-xba-174); it runs the lifted code
 this cartridge's, the SHA-256 of the ROM in big-endian order, and the game plays interpreted otherwise; `--missed FILE`
 keeps what it did not cover for the next Prepare, `consoles/n64/runtime/n64_pack.h`). The picture is the VI's
 canvas (320 or 640 x 240, 480 interlaced, PAL 288 / 576 lines; `n64_vi.c` above) shown at 4:3 whatever its size,
-letterboxed, linear by default (`RECOMP_N64_FILTER=nearest`, `RECOMP_N64_SCALE=integer`; or the shared `RECOMP_FILTER` /
+letterboxed, less the VI's black guard band (8 VI pixels cut from each side, 4 columns of 320, the rest still filling
+4:3 as a television's overscan hid them; `RECOMP_N64_CROP_EDGES=0` or `n64_play --edges` shows them), linear by default (`RECOMP_N64_FILTER=nearest`, `RECOMP_N64_SCALE=integer`; or the shared `RECOMP_FILTER` /
 `RECOMP_SCALE`). Controller, Xbox layout: left
 stick → stick (radial dead zone 8 %, `RECOMP_N64_DEADZONE` in percent; ±80 on an axis at full travel,
 `RECOMP_N64_STICK_RANGE`; the diagonals go to about ±68, the real stick's octagonal gate), A → A, B and X → B, right

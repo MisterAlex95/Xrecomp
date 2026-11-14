@@ -9,7 +9,8 @@
  * in-game menu: recomp_lifecycle) no frame runs, the saves are written and the window keeps pumping.
  *
  * Picture: n64_display gives the VI's visible area at framebuffer resolution (320 x 240, 640 x 480, 512 x 288 PAL...)
- * as XRGB; it is shown at 4:3 whatever its size (host_window_set_aspect), as a television did. */
+ * as XRGB; it is shown at 4:3 whatever its size (host_window_set_aspect), as a television did, less the VI's black
+ * guard band (8 VI pixels each side, RECOMP_N64_CROP_EDGES), which a television hid in its overscan. */
 #define _GNU_SOURCE /* pread, nanosleep */
 #include "n64_runtime.h"
 
@@ -618,6 +619,7 @@ void n64_runtime_opts_init(n64_runtime_opts *o)
     memset(o, 0, sizeof *o);
     o->scale = -1;
     o->filter = -1;
+    o->crop_edges = -1;
     o->pak = N64_RT_PAK_DEFAULT;
     o->players = -1;
     o->rdp_threads = -1;
@@ -657,6 +659,20 @@ void n64_runtime_display(const n64_runtime_opts *o, int *scale, int *filter)
         *scale = s;
     if (filter)
         *filter = f;
+}
+
+int n64_runtime_crop_edges(const n64_runtime_opts *o)
+{
+    if (o && o->crop_edges >= 0)
+        return o->crop_edges != 0;
+    const char *v = getenv("RECOMP_N64_CROP_EDGES");
+    return !(v && v[0] == '0');
+}
+
+int n64_runtime_crop_columns(int w)
+{
+    int c = w * 8 / 640; /* the canvas is 640 VI pixels wide, whatever its width in output pixels */
+    return w > 4 * c ? c : 0;
 }
 
 int n64_runtime_run(const n64_runtime_opts *o)
@@ -765,6 +781,7 @@ int n64_runtime_run(const n64_runtime_opts *o)
     n64_runtime_display(o, &scale, &filter);
     host_window_set_scaling(scale, filter);
     host_window_set_aspect(4, 3);
+    int crop = n64_runtime_crop_edges(o);
     if (window) {
         char title[300];
         snprintf(title, sizeof title, "XRecomp N64 - %s", info->title[0] ? info->title : base_name(o->rom));
@@ -777,9 +794,9 @@ int n64_runtime_run(const n64_runtime_opts *o)
         host_pad_init();
     console_pad_load(&s_pad_map, CONSOLE_PAD_N64, getenv(console_pad_env(CONSOLE_PAD_N64)));
     int audio = host_audio_open(N64_AUDIO_RATE, 2);
-    printf("n64: window %s (4:3, %s, %s), audio %s, pads %u, %s%s, RDP %s, threads %d\n", window ? "on" : "off",
+    printf("n64: window %s (4:3, %s, %s%s), audio %s, pads %u, %s%s, RDP %s, threads %d\n", window ? "on" : "off",
            scale == HOST_SCALE_INTEGER ? "integer" : scale == HOST_SCALE_STRETCH ? "stretch" : "aspect",
-           filter == HOST_FILTER_NEAREST ? "nearest" : "linear",
+           filter == HOST_FILTER_NEAREST ? "nearest" : "linear", crop ? ", edges cropped" : "",
            audio ? "on" : "off", host_pad_mask(), pak_name(pak), players >= 2 ? ", several players" : "",
            n64_rdp_backend_name(rdp), rdp_threads);
     fflush(stdout);
@@ -930,7 +947,10 @@ int n64_runtime_run(const n64_runtime_opts *o)
             if (o->capture_path && o->capture_frame == frames)
                 host_window_capture(o->capture_path);
             n64_runtime_xrgb_to_rgba(xrgb, rgba, (size_t)dw * (size_t)dh);
-            host_window_present_rgba(rgba, dw, dh, dw * 4);
+            /* The VI's guard band (RECOMP_N64_CROP_EDGES): the columns either side are left out of the texture and
+             * the rest still fills the 4:3 shape. */
+            int cc = crop ? n64_runtime_crop_columns(dw) : 0;
+            host_window_present_rgba(rgba + 4 * cc, dw - 2 * cc, dh, dw * 4);
         }
         if (o->frames && frames >= o->frames)
             break;
