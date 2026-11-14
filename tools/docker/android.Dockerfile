@@ -77,21 +77,47 @@ RUN mkdir -p /reports \
          | tee /reports/android-artefacts.txt \
     && rm -rf /work
 
+# OpenBIOS (MIT, pcsx-redux/nugget), the PlayStation BIOS the app ships (XBA-168, assets/ps1-bios/openbios.bin, its
+# licence LICENSES/MIT-OpenBIOS.txt): tools/consoles/build_ps1_bios.sh's recipe, same pinned source, same build image
+# (PCSX-Redux's CI image by digest: mipsel-none-elf GCC), same fixed path and SOURCE_DATE_EPOCH, so the same bytes,
+# checked against the oracle-compatible build's sha256 (consoles/README.md « PS1 core »). It copies nothing of this
+# repository, so BuildKit keeps it cached until these lines change; CI may also hand a cached copy over with
+# --build-context xba-ps1-bios=DIR (DIR/openbios.bin). Never a Sony BIOS.
+FROM ghcr.io/pcsx-redux/pcsx-redux-build:noble@sha256:20fece3d1e3b3c3e0a42bce9b986fb659b12bd441352df55abd862c381fb48f2 AS ps1-bios
+ARG JOBS=4
+ADD --checksum=sha256:43ffd423caefe3f07ea9713df453ee96c06cc467795e942ab0a89ef736249c0c \
+    https://codeload.github.com/pcsx-redux/nugget/tar.gz/f044c6b863116cf851acb360ba09adaa54381bd7 /tmp/nugget.tgz
+RUN set -e; mkdir -p /tmp/nugget /out; \
+    tar xzf /tmp/nugget.tgz -C /tmp/nugget --strip-components=1; \
+    cd /tmp/nugget; \
+    SOURCE_DATE_EPOCH=0 make -C openbios -j"$JOBS" all >/tmp/build.log 2>&1 || { tail -n 40 /tmp/build.log; exit 1; }; \
+    cp openbios/openbios.bin LICENSE /out/; \
+    echo "68942dc22a85dd7f809d7a99043575096d95d656925dfcd3f056036e22d84085  /out/openbios.bin" | sha256sum -c -; \
+    cd /; rm -rf /tmp/nugget /tmp/nugget.tgz /tmp/build.log
+
+FROM scratch AS ps1-bios-out
+COPY --from=ps1-bios /out/ /
+
+# What the APK stages take (CI: --build-context xba-ps1-bios=DIR overrides it).
+FROM ps1-bios-out AS xba-ps1-bios
+
 # The app shell APK (XBA-18), debug-signed. Out of the image with:
 #   docker build -f tools/docker/android.Dockerfile --target apk-out --output type=local,dest=out .
 # Its own application id, fr.adserver.xrecomp.dev, and label « XRecomp shell » (XBA-134): it installs next to
 # the XRecomp APK (fr.adserver.xrecomp.shell, xrecomp-latest) instead of over it (or failing on its other key).
 FROM android AS apk
 ARG XBA_VERSION=dev
+COPY --from=xba-ps1-bios /openbios.bin /opt/xba-ps1-bios/openbios.bin
 COPY . /src
 WORKDIR /src/android
 RUN printf 'sdk.dir=%s\ncmake.dir=/usr\n' "$ANDROID_HOME" > local.properties \
-    && gradle --no-daemon --console=plain -PxbaVersion="$XBA_VERSION" \
+    && gradle --no-daemon --console=plain -PxbaVersion="$XBA_VERSION" -PxbaPs1Bios=/opt/xba-ps1-bios/openbios.bin \
          -PxbaApplicationId=fr.adserver.xrecomp.dev -PxbaLabel="XRecomp shell" assembleDebug \
     && mkdir -p /out \
     && cp app/build/outputs/apk/debug/app-debug.apk /out/xboxrecomp-shell.apk \
     && unzip -l /out/xboxrecomp-shell.apk | grep -E 'lib/|classes|assets/' | tee /out/apk-contents.txt \
     && grep -q 'assets/selftest.xbe' /out/apk-contents.txt \
+    && grep -q 'assets/ps1-bios/openbios.bin' /out/apk-contents.txt \
     && unzip -p /out/xboxrecomp-shell.apk lib/arm64-v8a/libmain.so > /tmp/libmain.so \
     && "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-nm" -D --defined-only /tmp/libmain.so \
          | grep -E ' (R xba_shell_abi|W recomp_lookup|W recomp_lookup_manual|W fe_menu_get_pb_state|V g_fe_cursor)$' \
@@ -280,6 +306,7 @@ ARG XBA_SIGNING=auto
 ARG XBA_DEBUGGABLE=1
 ARG JOBS=4
 COPY --from=xba-toolchain / /opt/xba-toolchain/
+COPY --from=xba-ps1-bios /openbios.bin /opt/xba-ps1-bios/openbios.bin
 COPY . /src
 WORKDIR /src/android
 RUN --mount=type=secret,id=xba_keystore --mount=type=secret,id=xba_keystore_password \
@@ -295,6 +322,7 @@ RUN --mount=type=secret,id=xba_keystore --mount=type=secret,id=xba_keystore_pass
     printf 'sdk.dir=%s\ncmake.dir=/usr\n' "$ANDROID_HOME" > local.properties; \
     gradle --no-daemon --console=plain -PxbaVersion="$XBA_VERSION" -PxbaVersionCode="$XBA_VERSION_CODE" \
         -PxbaToolchainDir=/opt/xba-toolchain -PxbaDebuggable="$XBA_DEBUGGABLE" -PxbaJobs="$JOBS" -PxbaRequireReleaseKey=$require \
+        -PxbaPs1Bios=/opt/xba-ps1-bios/openbios.bin \
         assembleRelease; \
     mkdir -p /out; \
     cp app/build/outputs/apk/release/app-release.apk /out/xrecomp.apk; \
@@ -309,7 +337,8 @@ RUN set -e; bt=$(ls -d "$ANDROID_HOME"/build-tools/* | tail -1); apk=/out/xrecom
              assets/prepare/toolkit.zip.sha256 assets/selftest.xbe \
              assets/licences/LICENSE.txt assets/licences/NOTICE.txt \
              assets/licences/Apache-2.0-WITH-LLVM-exception.txt assets/licences/PSF-2.0.txt \
-             assets/licences/BSD-3-Clause-capstone.txt assets/licences/Apache-2.0-apksig.txt; do \
+             assets/licences/BSD-3-Clause-capstone.txt assets/licences/Apache-2.0-apksig.txt \
+             assets/licences/MIT-OpenBIOS.txt assets/ps1-bios/openbios.bin; do \
         grep -q " $f\$" /out/xrecomp-contents.txt || { echo "xrecomp.apk: missing $f"; exit 1; }; done; \
     ! unzip -Z1 "$apk" | grep -iE '\.(xbe|iso|xiso)$' | grep -vx 'assets/selftest.xbe' \
         || { echo "xrecomp.apk: an XBE or disc image other than the self-test"; exit 1; }; \

@@ -23,3 +23,4 @@ in NOTICE. Their binary distribution requires the licence text to travel with th
 | `PSF-2.0.txt` | CPython (`libpython3.13.so`, `libxbapython.so`, the standard library zip), verbatim `LICENSE` of the CPython sources |
 | `Apache-2.0-apksig.txt` | apksig (in `classes.dex`: signs the game apps of Manage › Create an app), verbatim `LICENSE` of the `com.android.tools.build:apksig` jar (its copyright line, then the Apache License 2.0) |
 | `BSD-3-Clause-capstone.txt` | Capstone (`libcapstone.so` and its Python bindings), verbatim from the Capstone distribution |
+| `MIT-OpenBIOS.txt` | OpenBIOS, the open-source PlayStation BIOS of PCSX-Redux's nugget tree (`assets/ps1-bios/openbios.bin`, booted by the PS1 runtime), verbatim `LICENSE` of the nugget sources at the pinned commit |

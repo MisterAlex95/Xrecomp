@@ -263,6 +263,13 @@ The Android app (XRecomp) — what the APK ships
     Copyright (c) 2016, The Android Open Source Project
     Full text: LICENSES/Apache-2.0-apksig.txt
 
+  OpenBIOS (pcsx-redux/nugget f044c6b8), MIT (assets/ps1-bios/openbios.bin:
+    the PlayStation BIOS the PS1 runtime boots; built from source by the
+    ps1-bios stage of tools/docker/android.Dockerfile, as
+    tools/consoles/build_ps1_bios.sh does, sha256 checked; no Sony BIOS)
+    https://github.com/pcsx-redux/nugget
+    Copyright (c) 2019 PCSX-Redux authors. Full text: LICENSES/MIT-OpenBIOS.txt
+
   The packs the app builds on the device (libtitle.so) are made from the
   player's own disc and never leave the device; no game code or data is in
   this repository, an APK or a CI artefact.

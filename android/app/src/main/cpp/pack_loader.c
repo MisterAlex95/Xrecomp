@@ -257,6 +257,25 @@ int xba_pack_load_rom(const char *files_dir, const char *rom_path, int *runtime_
         rc = RECOMP_PACK_OK;
         goto out;
     }
+    if (console == RECOMP_CONSOLE_PS1 && start) {
+        /* The PS1 runtime is an interpreter too (XBA-168): the game always starts, from its disc (or EXE) and the
+         * OpenBIOS the app ships. No PS1 recompiler yet, so a pack is not used: PACK_NONE without one, PACK_STALE
+         * when this shell refuses it, PACK_IGNORED when it would pass (the runtime is handed NULL either way). */
+        if (rc == RECOMP_PACK_MISSING)
+            printf("PACK_NONE %s %s (not prepared, the interpreter runs it)\n", recomp_pack_console_name(console), key);
+        else if (rc != RECOMP_PACK_OK)
+            printf("PACK_STALE %s %s (%s), running interpreted\n", recomp_pack_console_name(console), key, why);
+        else
+            printf("PACK_IGNORED %s %s %s (no PS1 recompiled code path yet), running interpreted\n",
+                   recomp_pack_console_name(console), key, lib);
+        fflush(stdout);
+        why[0] = 0;
+        rc = start(rom_path, NULL, key);
+        if (runtime_rc)
+            *runtime_rc = rc;
+        rc = RECOMP_PACK_OK;
+        goto out;
+    }
     if (rc == RECOMP_PACK_MISSING) {
         snprintf(why, sizeof why, "%s-%s", recomp_pack_console_name(console), key);
         printf("PACK_MISSING %s %s (no %s/packs/%s/pack.json)\n", recomp_pack_console_name(console), key,

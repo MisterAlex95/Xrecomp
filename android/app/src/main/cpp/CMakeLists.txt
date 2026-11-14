@@ -33,8 +33,8 @@ endif()
 target_link_libraries(main PRIVATE -Wl,--whole-archive ${XBA_TOOLKIT_LIBS} -Wl,--no-whole-archive
                                    SDL2::SDL2 GLESv3 log android m)
 # The other consoles' runtimes (XBA-147, consoles/README.md): pack_loader.c hands a game whose console is gba, ps1 or
-# n64 to <console>_runtime_start. The GBA one plays games (XBA-157; the root build turns it on for Android, so its
-# target is there already); PS1 and N64 are stubs the root build leaves OFF on Android, so they are added here.
+# n64 to <console>_runtime_start. The GBA (XBA-157) and PS1 (XBA-168) ones play games (the root build turns them on for
+# Android, so their targets are there already); N64 is a stub the root build leaves OFF on Android, added here.
 foreach(_console gba ps1 n64)
     if(NOT TARGET ${_console}_runtime)
         add_subdirectory("${XBOXRECOMP_ROOT}/consoles/${_console}/runtime" ${_console}_runtime)
@@ -44,7 +44,11 @@ endforeach()
 # A GBA title pack (libtitle.so, XBA-157 / XBA-158) is linked --no-undefined against libmain.so and calls the core
 # (gba_core.h, gba_recomp_rt.h): the whole core goes in, so every symbol of it is exported.
 target_link_libraries(main PRIVATE -Wl,--whole-archive gba_core -Wl,--no-whole-archive)
-set(XBA_CONSOLE_FAST_LIBS gba_core gba_runtime gba_pack)   # the GBA interpreter: release flags below too
+# The PS1 core goes in whole too (ps1_core.h, ps1_devices.h), exported for the PS1 title packs to come (XBA-168: the
+# recompiler's lifted code will call into it as the GBA's does).
+target_link_libraries(main PRIVATE -Wl,--whole-archive ps1_core -Wl,--no-whole-archive)
+set(XBA_CONSOLE_FAST_LIBS gba_core gba_runtime gba_pack   # the interpreters: release flags below too
+                          ps1_core ps1_gpu ps1_cd ps1_spu ps1_mdec ps1_runtime)
 
 # Release flags for the runtime (the software GPU, the kernel, audio): what a frame on the device spends its time in.
 # Every toolkit library pins -O2 in its own CMakeLists, after the NDK's per-configuration flags, so the NDK's -O3 for

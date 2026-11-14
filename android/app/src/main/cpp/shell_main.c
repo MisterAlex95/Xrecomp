@@ -39,6 +39,9 @@
  *   (gba_runtime_start: window, pads, audio, saves under <internal>/save/
  *   gba-<KEY>/), then the process ends (recomp_quit); a ROM that cannot be
  *   read goes back to the launcher (exit_via_launcher);
+ * - a PlayStation disc or EXE (the same way; XBA-168): the PS1 runtime
+ *   plays it with the OpenBIOS the APK carries (ps1_runtime_start: memory
+ *   cards under <internal>/save/ps1-<KEY>/);
  * - otherwise the shell's own black, fullscreen, landscape window. With
  *   default.xbe found but no title linked and no pack, a message box says
  *   so (NO_TITLE) instead of a bare black screen. When
@@ -68,6 +71,7 @@
 
 #include "pack_loader.h"
 #include "gba_runtime.h"
+#include "ps1_runtime.h"
 
 #ifndef XBA_VERSION
 #define XBA_VERSION "dev"
@@ -307,8 +311,10 @@ int main(int argc, char *argv[])
      * The GBA runtime plays it (XBA-157: no pack needed, saves under
      * <internal>/save/gba-<KEY>/) and returns once the player quit: the
      * process ends then, or goes back to the launcher saying why when the
-     * game could not start. PS1 and N64 are stubs: they log "<console>
-     * runtime ready" and return, and the shell stays on its idle screen. */
+     * game could not start. The PS1 runtime the same (XBA-168: its disc or
+     * EXE through the OpenBIOS asset, memory cards under
+     * <internal>/save/ps1-<KEY>/). N64 is a stub: it logs "n64 runtime
+     * ready" and returns, and the shell stays on its idle screen. */
     int console = !s_title_main && have_game <= 0 && store.game_dir[0] ? xba_pack_rom_console(store.game_dir)
                                                                         : RECOMP_CONSOLE_UNKNOWN;
     int console_game = console != RECOMP_CONSOLE_UNKNOWN;
@@ -316,15 +322,19 @@ int main(int argc, char *argv[])
         int console_rc = -1;
         if (console == RECOMP_CONSOLE_GBA)
             gba_runtime_set_save_dir(store.save_dir);
+        if (console == RECOMP_CONSOLE_PS1)
+            ps1_runtime_set_save_dir(store.save_dir);   /* memory cards: <internal>/save/ps1-<KEY>/card1.mcr */
         pack_rc = xba_pack_load_rom(SDL_AndroidGetInternalStoragePath(), store.game_dir, &console_rc,
                                     pack_reason, sizeof pack_reason);
         if (pack_rc == RECOMP_PACK_OK)
             printf("xboxrecomp: %s runtime returned %d\n", recomp_pack_console_name(console), console_rc);
         else
             printf("xboxrecomp: no usable pack for %s (%s)\n", store.game_dir, pack_reason);
-        if (console == RECOMP_CONSOLE_GBA && pack_rc == RECOMP_PACK_OK) {
+        if ((console == RECOMP_CONSOLE_GBA || console == RECOMP_CONSOLE_PS1) && pack_rc == RECOMP_PACK_OK) {
             if (console_rc != 0)
-                exit_via_launcher("the game file cannot be read");
+                exit_via_launcher(console == RECOMP_CONSOLE_PS1
+                                      ? "the game cannot start: its disc or the PlayStation BIOS cannot be read"
+                                      : "the game file cannot be read");
             recomp_quit(console_rc != 0 ? 1 : 0);
         }
     }

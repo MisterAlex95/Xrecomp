@@ -70,6 +70,41 @@ def licencesAsset = tasks.register('xbaLicencesAsset', XbaLicencesAsset) {
     texts.from(rootProject.file('../LICENSE'), rootProject.file('../NOTICE'),
                fileTree(rootProject.file('../LICENSES')) { include '*.txt' })
 }
+// The PlayStation BIOS the app ships (XBA-168, docs/android/app-shell.md « PlayStation games »): -PxbaPs1Bios=FILE,
+// OpenBIOS (MIT, pcsx-redux/nugget; licence LICENSES/MIT-OpenBIOS.txt, copied with the other licences) as built by the
+// ps1-bios stage of tools/docker/android.Dockerfile or tools/consoles/build_ps1_bios.sh, checked against the pinned
+// sha256, as the asset ps1-bios/openbios.bin, which the PS1 runtime reads (ps1_runtime.c, SDL_RWFromFile). Never a
+// Sony BIOS. Without it the APK has none: a PS1 game then needs RECOMP_PS1_BIOS (recomp.cfg) and otherwise goes back
+// to the launcher.
+def xbaPs1Bios = ((findProperty('xbaPs1Bios') ?: System.getenv('XBA_PS1_BIOS') ?: '') as String).trim()
+def xbaPs1BiosSha256 = '68942dc22a85dd7f809d7a99043575096d95d656925dfcd3f056036e22d84085'
+abstract class XbaPs1BiosAsset extends DefaultTask {
+    @InputFile abstract RegularFileProperty getBios()
+    @Input abstract Property<String> getSha256()
+    @OutputDirectory abstract DirectoryProperty getOutputDir()
+    @TaskAction void copy() {
+        def src = bios.get().asFile
+        def sum = java.security.MessageDigest.getInstance('SHA-256').digest(src.bytes).encodeHex().toString()
+        if (sum != sha256.get())
+            throw new GradleException("-PxbaPs1Bios=${src}: sha256 ${sum}, expected ${sha256.get()} (OpenBIOS as " +
+                                      'tools/consoles/build_ps1_bios.sh builds it)')
+        def dir = new File(outputDir.get().asFile, 'ps1-bios')
+        outputDir.get().asFile.deleteDir()
+        dir.mkdirs()
+        java.nio.file.Files.copy(src.toPath(), new File(dir, 'openbios.bin').toPath())
+    }
+}
+def ps1BiosAsset = null
+if (xbaPs1Bios) {
+    if (!new File(xbaPs1Bios).isFile())
+        throw new GradleException("-PxbaPs1Bios=${xbaPs1Bios}: no such file (tools/consoles/build_ps1_bios.sh)")
+    ps1BiosAsset = tasks.register('xbaPs1BiosAsset', XbaPs1BiosAsset) {
+        bios = file(xbaPs1Bios)
+        sha256 = xbaPs1BiosSha256
+    }
+} else {
+    logger.info('no -PxbaPs1Bios: the APK carries no PlayStation BIOS (PS1 games need RECOMP_PS1_BIOS)')
+}
 // The on-device toolchain of the Prepare (docs/android/toolchain.md, docs/android/prepare.md): -PxbaToolchainDir=DIR,
 // made by tools/android/toolchain/ (the toolchain-out stage of tools/docker/android.Dockerfile). It adds the jniLibs
 // libxbapython.so, libpython3.13.so, libcapstone.so and libxbacc.so, the assets prepare/python-stdlib.zip and
@@ -187,6 +222,7 @@ androidComponents {
         variant.sources.assets?.addGeneratedSourceDirectory(selftestAsset, XbaSelftestAsset::getOutputDir)
         variant.sources.assets?.addGeneratedSourceDirectory(licencesAsset, XbaLicencesAsset::getOutputDir)
         if (toolkitAsset) variant.sources.assets?.addGeneratedSourceDirectory(toolkitAsset, XbaToolkitAsset::getOutputDir)
+        if (ps1BiosAsset) variant.sources.assets?.addGeneratedSourceDirectory(ps1BiosAsset, XbaPs1BiosAsset::getOutputDir)
     }
 }
 

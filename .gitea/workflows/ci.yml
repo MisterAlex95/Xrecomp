@@ -530,6 +530,10 @@ jobs:
             echo "::warning::XRecomp APK DEBUG-SIGNED: the secrets XBA_RELEASE_KEYSTORE_B64 / XBA_RELEASE_KEYSTORE_PASSWORD are not set. It cannot update a release-signed install (docs/android/toolchain.md, Signing)."
             signing=debug
           fi
+          # The APK carries OpenBIOS (XBA-168): the ps1-bios stage of android.Dockerfile builds it from its pinned
+          # source in PCSX-Redux's CI image (pinned by digest, pulled once and kept by the host). It reads nothing of
+          # the repository, so BuildKit's cache keeps it (about 6 s cold once the image is there), inside this job's
+          # heavy lock: no job or lock of its own. --build-context xba-ps1-bios=DIR would hand over a cached copy.
           docker build -f tools/docker/android.Dockerfile --target xrecomp-apk-out --progress=plain \
             --build-context xba-toolchain=out/toolchain "$@" --build-arg JOBS=4 --build-arg XBA_SIGNING="$signing" \
             --build-arg XBA_VERSION="$sha8" --build-arg XBA_VERSION_CODE="$code" --output type=local,dest=out/apk .
