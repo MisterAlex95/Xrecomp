@@ -262,6 +262,49 @@ an EXE gets `EXE-<CRC32>`. Every option is listed at the top of `runtime/tools/p
 (`consoles/ps1/tests/test_main.c`: the helpers, then gfx.exe fast-booted, through `fd:N`, a memory card read back and
 left alone, gfx.cue booted by the BIOS to its 320 x 240 picture, the errors).
 
+**N64 core (N-1 XBA-169, N-3 XBA-171, N-4 XBA-172).** Interpreter first, the PS1's shape. `consoles/n64/runtime/n64_core.h`:
+a VR4300 interpreter (`n64_cpu.c`: every MIPS III integer instruction, 64-bit ops, LL / SC / LLD / SCD, LWL..SDR,
+branch-likely, traps; 32- and 64-bit kernel / supervisor / user address spaces; COP0 with COUNT / COMPARE, every
+exception and its EPC / BD / BadVAddr / Context / XContext / EntryHi, the 32-entry TLB with page masks and ASIDs,
+refill / XTLB refill / invalid / modified; a fixed cost per instruction by fetch region, 1.5 cycles from cached RDRAM;
+no cache model: CACHE does nothing), COP1 (`n64_fpu.c`, on the host FPU: rounding modes, FCSR flags / causes /
+enables, the unimplemented operation for denormals, quiet NaNs and out-of-range conversions, FS flushing, the FR = 0 /
+1 register views and the half-mode operand rules), the bus (`n64_bus.c`: RDRAM 8 MB big-endian, MI, PI DMA with the
+PI's block / misalignment rules and its write latch, RI / RDRAM registers reporting configured memory, SI, the RCP bus
+rules for 8 / 16 / 64-bit accesses, MI repeat mode, the IS-Viewer debug buffer), VI and AI (`n64_io.c`: line timing
+from H_SYNC / V_SYNC, the interrupt at V_INTR, the framebuffer (16 / 32-bit) cropped to H / V_VIDEO and X / Y_SCALE at
+framebuffer resolution, no VI filters, AA, gamma or scaler interpolation; double-buffered AI DMA at the DAC rate,
+sample-and-hold to 48 kHz stereo), and the PIF and saves (`n64_pif.c`). The RSP and the RDP are reached only through
+`n64_devices.h`: target `n64_core` links `n64_rsp` and `n64_rdp`, each the real module or its stub
+(`n64_rsp_stub.c`: SP registers and DMA, halts at once; `n64_rdp_stub.c`: walks the commands, SYNC_FULL interrupt).
+
+Boot: the PIF is HLE, never a PIF ROM: the CIC is recognised from the ROM's IPL3 (CRC32 tables for 6101, 6102 / 7101,
+6103, 6105, 6106, 7102; libdragon's open IPL3 by its banner; else a 6102), the header and IPL3 go to DMEM, PI domain 1
+timing comes from the header, s3..s7 / sp / ra are what IPL3 expects (seed, TV type from the region, cold reset), the
+RDRAM is reported configured (RI_SELECT, osMemSize at 0x80000318) so IPL3 takes its warm path, and the CPU starts at
+0xA4000040 in the ROM's own IPL3. Joybus: controllers (info, buttons + stick), the controller pak (32 KB, data CRC) and
+the rumble pak, EEPROM 4K / 16K; no RTC. Saves: SRAM 32 KB, FlashRAM 128 KB (MX29L1100 ID, erase / program / read
+through the PI), EEPROM, the four paks (`n64_save_data` / `n64_save_take_dirty` / `n64_save_load` per kind). The
+cartridge's kind is never a per-game table: forced by `n64_options`, else the ED64 / libdragon header byte (`ED` at
+0x3C, type in 0x3F), else the first access (a write to the flash command register makes it FlashRAM, any other
+domain 2 access SRAM, an EEPROM command EEPROM, 16K once a block above 63 is used). ROMs: z64 / v64 / n64 byte orders
+normalised, up to 64 MB, header parsed (`n64_rom_parse`).
+
+`n64_run ROM [--frames N] [--result] [--ppm OUT] [--wav OUT] [--tty] [--pad MASK] [--pal|--ntsc] [--save PATH] [--hash]
+[--info] [--regs]` runs a ROM headless (`--result`: our homebrew's block at physical 0x00300000; `--tty`: the IS-Viewer
+text). Tests (`consoles/n64/tests`): `n64_cpu` and `n64_io` unit tests, our homebrew (`n64_hb_*`: hello, cpu,
+timer_irq; rsp with `n64_rsp.c`, gfx with both modules; the same results as ares), and lemmy-64/n64-systemtest (MIT,
+built from source by `tools/consoles/build_n64_systemtest.sh`; `n64_systemtest` passes when every failing test is a
+known gap of `systemtest_known.txt`: the caches, reverse-endian user mode, one PI end-of-page quirk). About 180 frames/s
+(190 MIPS) on the x86 dev host for cpu.z64 and gfx.z64. On a desktop:
+
+```sh
+tools/consoles/build_homebrew.sh n64 && tools/consoles/build_n64_systemtest.sh
+cmake -S consoles/n64/tests -B build/n64 -DN64_CORE_ONLY=ON && cmake --build build/n64 && (cd build/n64 && ctest)
+build/n64/n64_runtime/n64_run build/homebrew/n64/gfx.z64 --result --ppm gfx.ppm
+build/n64/n64_runtime/n64_run build/n64-systemtest/n64-systemtest.z64 --tty --frames 900
+```
+
 **N64 RSP (N-5, XBA-173).** `consoles/n64/runtime/n64_rsp.c`, the RSP half of `n64_devices.h` (CMake target
 `n64_rsp`, plain C11, no host dependency): LLE, so every microcode runs as on the hardware (no per-game HLE). Scalar
 unit (MIPS subset, delay slots, wrapping DMEM accesses, BREAK / intr-break), COP0 = SP registers (instant DMA with
