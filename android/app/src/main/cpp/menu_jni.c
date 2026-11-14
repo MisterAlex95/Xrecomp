@@ -140,6 +140,20 @@ JNIEXPORT jintArray JNICALL JNI_FN(nativeStateThumb)(JNIEnv *env, jclass cls, ji
     return out;
 }
 
+/* The last quick save / load / resume (the pad chords, the automatic slot at the start): { seq, kind, slot, rc },
+ * seq 0 when nothing happened yet. The menu polls it and shows a message for each new seq. */
+JNIEXPORT jintArray JNICALL JNI_FN(nativeStateEvent)(JNIEnv *env, jclass cls)
+{
+    (void)cls;
+    recomp_state_event ev;
+    recomp_states_last_event(&ev);
+    jint v[4] = {(jint)ev.seq, ev.kind, ev.slot, ev.rc};
+    jintArray out = (*env)->NewIntArray(env, 4);
+    if (out)
+        (*env)->SetIntArrayRegion(env, out, 0, 4, v);
+    return out;
+}
+
 JNIEXPORT void JNICALL JNI_FN(nativeFastForward)(JNIEnv *env, jclass cls, jboolean on)
 {
     (void)env;

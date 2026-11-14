@@ -116,6 +116,21 @@ final class GameStore {
         return writeSmall(c, PERF_OVERLAY_FILE, on ? "1" : "0");
     }
 
+    /*
+     * « Resume where I left off » (GBA / PS1 games, the in-game menu's Settings): on by default. On, the menu saves the
+     * automatic slot when the player leaves the game (Quit, Back to launcher, the background) and the shell passes
+     * RECOMP_STATE_RESUME=1 so the runtime loads it before its first frame (recomp_states.h).
+     */
+    static final String AUTO_RESUME_FILE = "auto_resume";
+
+    static boolean autoResume(Context c) {
+        return !"0".equals(readSmall(c, AUTO_RESUME_FILE));
+    }
+
+    static boolean setAutoResume(Context c, boolean on) {
+        return writeSmall(c, AUTO_RESUME_FILE, on ? "1" : "0");
+    }
+
     static int gameVolume(Context c) {
         String v = readSmall(c, GAME_VOLUME_FILE);
         try {
@@ -159,7 +174,7 @@ final class GameStore {
         return new File(new File(c.getFilesDir(), "settings"), name);
     }
 
-    private static String readSmall(Context c, String name) {
+    static String readSmall(Context c, String name) {
         File f = smallFile(c, name);
         if (!f.isFile())
             return null;
@@ -171,7 +186,7 @@ final class GameStore {
         }
     }
 
-    private static boolean writeSmall(Context c, String name, String value) {
+    static boolean writeSmall(Context c, String name, String value) {
         File f = smallFile(c, name), tmp = new File(f.getPath() + ".tmp");
         File d = f.getParentFile();
         if (d != null && !(d.mkdirs() || d.isDirectory()))

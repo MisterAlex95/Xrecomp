@@ -661,17 +661,27 @@ state is the whole guest memory and GPU). Three layers:
   `state4.st`, beside the saves: a header (magic `XRSLOT`, version, console, key, the time saved, the frames run), a
   thumbnail of the last frame (RGB565, at most 160 x 120, at the console's display aspect), then the core's blob;
   written through `.tmp` + rename. About 0.6 MB for the GBA, 4.1 MB for the PS1. No save dir, no states.
+- The automatic slot, `auto.st` (slot `RECOMP_STATE_AUTO` = 0), for « resume where I left off »: with
+  `RECOMP_STATE_RESUME=1` the runtime loads it before its first frame (`recomp_states_resume`; an empty slot starts
+  the game as usual, a refused one too) and saves it when the player closes the window. On Android the app sets the
+  variable and the in-game menu saves the slot when the player leaves (Quit, Back to launcher, the background).
+- Quick save / load: on a pad, **Back + right shoulder** saves and **Back + left shoulder** loads the quick slot
+  (the last numbered slot saved or loaded this run; at the start, the most recently saved one, else slot 1). Back and
+  the shoulders then reach the game as nothing. `recomp_states_chord` is the per-pad edge detector the runtimes call
+  each frame; `recomp_states_last_event` tells the UI what the last quick save / load / resume did (the Android menu
+  shows « Saved to slot N »).
 - Fast-forward (`recomp_ff_*`): a toggle (the menu's « Fast-forward ») and a hold (Tab on a desktop; on a pad, Back +
   right trigger held, whose two controls then reach the game as nothing); the speed is `RECOMP_FF_SPEED` (2..16
   times the console's rate, default 4) or `max` (as many frames as fit in one display frame, silent). The runtime
   runs `speed` frames per shown frame and averages their audio down by the same factor (higher pitched, never a gap:
   the audio queue keeps its length, so pacing stays audio-driven).
 
-Desktop: `gba_play` / `ps1_play` F1-F4 save slots 1-4, Shift+F1-F4 load them, Tab held fast-forwards. Headless,
+Desktop: `gba_play` / `ps1_play` F1-F4 save slots 1-4, Shift+F1-F4 load them, Tab held fast-forwards, the pad chords
+as above. Headless,
 `gba_run` / `ps1_run --state-save N:FILE` writes a state after frame N, `--state-load FILE` starts from one (exit 5
 when the core refuses it), `--run-hash` prints one hash of every frame's picture and audio after the save point.
-Tests: `tests/recomp_states` (slot files, refusals, thumbnails, the attach / save / load path, fast-forward speed and
-audio); the round trip on every homebrew (`gba_state_hb_*`, `ps1_state_hb_*`, `ps1_state_hle_hb_*`: save after 120 /
+Tests: `tests/recomp_states` (slot files, refusals, thumbnails, the attach / save / load path, the automatic and quick
+slots, the chords, the events, fast-forward speed and audio); the round trip on every homebrew (`gba_state_hb_*`, `ps1_state_hb_*`, `ps1_state_hle_hb_*`: save after 120 /
 150 frames, hash the next 180 / 150, then the same from the state in a new machine; a run from power-on must differ;
 `consoles/{gba,ps1}/tests/state_*.sh`), the same with each program's pack (`gba_rc_state_hb_*`, `ps1_rc_state_hb_*`:
 the state of a recompiled run loads in the interpreter and the other way round, same hash, and a recompiled run from

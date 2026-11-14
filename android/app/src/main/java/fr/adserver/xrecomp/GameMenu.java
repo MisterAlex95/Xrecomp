@@ -153,7 +153,15 @@ final class GameMenu {
         }
 
         default void setFastForward(boolean on) {}
+
+        /** The last quick save / load / resume: { seq, kind, slot, code } (MenuNative.nativeStateEvent), or null. */
+        default int[] stateEvent() {
+            return null;
+        }
     }
+
+    /** The automatic slot (« Where you left off ») and the kinds of nativeStateEvent. */
+    static final int AUTO_SLOT = 0, EV_SAVED = 1, EV_LOADED = 2, EV_RESUMED = 3;
 
     /** XBA-182: the save state slots, and the native side's codes (menu_jni.c). */
     static final int SLOTS = 4;
@@ -162,7 +170,8 @@ final class GameMenu {
     /** The largest thumbnail the native side hands over (anything bigger is not one). */
     static final int THUMB_MAX_W = 160, THUMB_MAX_H = 120;
 
-    static final long ANIM_MS = 200, QUIT_ARM_MS = 4000, FLASH_MS = 3000, PERF_TICK_MS = 500, SESSION_TICK_MS = 1000;
+    static final long ANIM_MS = 200, QUIT_ARM_MS = 4000, FLASH_MS = 3000, PERF_TICK_MS = 500, SESSION_TICK_MS = 1000,
+                      STATE_TICK_MS = 250;
     /** A Back within this long after a swipe opened the menu is the system's back gesture ending: ignored. */
     static final long SWIPE_BACK_GUARD_MS = 600;
     static final long NAV_FIRST_MS = 380, NAV_REPEAT_MS = 130;
@@ -177,7 +186,7 @@ final class GameMenu {
 
     enum Item { RESUME, SETTINGS, CONTROLS, SCREENSHOT, SHARE_LOG, LAUNCHER, QUIT, PERF, VOLUME, BOTTOM, LANGUAGE,
                 WIDESCREEN, P480, TOUCH, BACK, DISC, SCALE, FILTER, UPSCALE, VK_DRIVER, STATE_SAVE, STATE_LOAD,
-                FAST_FORWARD }
+                FAST_FORWARD, AUTO_RESUME }
 
     private final Activity activity;
     private final Host host;
@@ -246,6 +255,16 @@ final class GameMenu {
             updatePerf();
             if (perfOn && started)
                 handler.postDelayed(this, PERF_TICK_MS);
+        }
+    };
+    /** The quick save / load chords and the resume at the start: a message for each new native event. */
+    private int stateSeq;
+    private final Runnable stateTick = new Runnable() {
+        @Override
+        public void run() {
+            pollStateEvent();
+            if (started)
+                handler.postDelayed(this, STATE_TICK_MS);
         }
     };
     private final Runnable flashEnd = this::hideFlash;
@@ -412,12 +431,16 @@ final class GameMenu {
         handler.removeCallbacks(perfTick);
         if (perfOn)
             handler.post(perfTick);
+        handler.removeCallbacks(stateTick);
+        handler.post(stateTick);
     }
 
     /** After SDLActivity.onStop (the background hold is in place by then): a pending Back to launcher lets go. */
     void onStop() {
         started = false;
         handler.removeCallbacks(perfTick);
+        handler.removeCallbacks(stateTick);
+        autoSave("background");   // Back to launcher, Home, the screen off: the next start resumes here
         settleLauncher();
     }
 
@@ -881,6 +904,11 @@ final class GameMenu {
             r = row(Item.VOLUME, s(R.string.MENU_VOLUME));
             r.setChoices(new String[] { volumeLabel(100), s(R.string.MENU_MUTED) });
             r.cycler = dir -> setVolume(volume + dir * VOLUME_STEP);
+            if (statesSupported()) {   // a GBA or PS1 game: the automatic slot
+                r = row(Item.AUTO_RESUME, s(R.string.MENU_RESUME_AUTO));
+                r.setChoices(new String[] { s(R.string.MENU_ON), s(R.string.MENU_OFF) });
+                r.cycler = dir -> setAutoResume(!GameStore.autoResume(activity));
+            }
             if (host.hasSecondScreen()) {
                 r = row(Item.BOTTOM, s(R.string.MENU_BOTTOM));
                 r.setChoices(new String[] { s(R.string.VAL_PANEL), s(R.string.VAL_BLACK), s(R.string.MENU_SCREEN_OFF) });
@@ -950,8 +978,11 @@ final class GameMenu {
             if (cm != null) {   // a GBA, PS1 or N64 game: its buttons and where they come from (XBA-158 / 168 / 174)
                 kvRow(s(R.string.CTL_MENU), s(R.string.CTL_MENU_X));
                 kvRow(s(R.string.CTL_COMBO), s(R.string.CTL_COMBO_X));
-                if (cm.console == Console.GBA || cm.console == Console.PS1)   // XBA-182: the fixed pad chord
+                if (cm.console == Console.GBA || cm.console == Console.PS1) {   // XBA-182: the fixed pad chords
                     kvRow(s(R.string.CTL_FF), s(R.string.CTL_FF_X));
+                    kvRow(s(R.string.CTL_QUICK_SAVE), s(R.string.CTL_QUICK_SAVE_X));
+                    kvRow(s(R.string.CTL_QUICK_LOAD), s(R.string.CTL_QUICK_LOAD_X));
+                }
                 if (!cm.isDefault())
                     kvRow(s(R.string.MENU_CTL_REMAPPED),
                           activity.getString(R.string.MENU_CTL_REMAPPED_X, cm.changedCount()));
@@ -987,6 +1018,8 @@ final class GameMenu {
         case LOAD_SLOTS:
             pageV.setText(s(p == Page.SAVE_SLOTS ? R.string.MENU_STATE_SAVE : R.string.MENU_STATE_LOAD));
             pageV.setVisibility(View.VISIBLE);
+            if (p == Page.LOAD_SLOTS && host.stateTime(AUTO_SLOT) > 0)   // « Where you left off », when there is one
+                slotRow(AUTO_SLOT, false);
             for (int slot = 1; slot <= SLOTS; slot++)
                 slotRow(slot, p == Page.SAVE_SLOTS);
             row(Item.BACK, s(R.string.MENU_BACK));
@@ -1079,7 +1112,8 @@ final class GameMenu {
     private void slotRow(int slot, boolean save) {
         long when = host.stateTime(slot);
         Widgets.MenuRow r = new Widgets.MenuRow(activity);
-        r.set(activity.getString(R.string.MENU_STATE_SLOT, slot), null);
+        r.set(slot == AUTO_SLOT ? s(R.string.MENU_STATE_AUTO) : activity.getString(R.string.MENU_STATE_SLOT, slot),
+              null);
         r.setSubtitle(when > 0 ? slotTime(activity, when, System.currentTimeMillis()) : s(R.string.MENU_STATE_EMPTY));
         if (when > 0)
             r.setThumb(thumbBitmap(host.stateThumb(slot)));
@@ -1115,9 +1149,54 @@ final class GameMenu {
         Log.i(LauncherActivity.TAG, "shell: menu: load state slot " + slot + ": " + code);
         close();
         if (code == STATE_OK)
-            flash(activity.getString(R.string.MENU_STATE_LOADED, slot), true);
+            flash(slot == AUTO_SLOT ? s(R.string.MENU_STATE_RESUMED)
+                                    : activity.getString(R.string.MENU_STATE_LOADED, slot), true);
         else
             flash(stateError(code, slot, false), false);
+    }
+
+    // ---- Quick save / load and resuming ------------------------------------------------------------------------
+
+    /** « Resume where I left off » applies: a GBA or PS1 game with states, and the setting on. */
+    private boolean autoResumes() {
+        return GameStore.autoResume(activity) && statesSupported();
+    }
+
+    /** Saves the automatic slot when resuming applies (leaving the game: quit, background, back to launcher). */
+    void autoSave(String why) {
+        if (!autoResumes())
+            return;
+        int code = host.saveState(AUTO_SLOT);
+        Log.i(LauncherActivity.TAG, "shell: menu: automatic slot saved (" + why + "): " + code);
+    }
+
+    void setAutoResume(boolean on) {
+        GameStore.setAutoResume(activity, on);
+        Log.i(LauncherActivity.TAG, "shell: menu: resume where I left off " + (on ? "on" : "off"));
+        updateValues();
+    }
+
+    /** A message for each new quick save / load (the pad chords) or resume (the start), from the native side. */
+    void pollStateEvent() {
+        int[] ev;
+        try {
+            ev = host.stateEvent();
+        } catch (RuntimeException e) {
+            return;
+        }
+        if (ev == null || ev.length < 4 || ev[0] == stateSeq)
+            return;
+        stateSeq = ev[0];
+        int kind = ev[1], slot = ev[2], code = ev[3];
+        Log.i(LauncherActivity.TAG, "shell: state event " + kind + " slot " + slot + ": " + code);
+        if (kind == EV_RESUMED)
+            flash(s(code == STATE_OK ? R.string.MENU_STATE_RESUMED : R.string.MENU_STATE_RESUME_FAILED),
+                  code == STATE_OK);
+        else if (code == STATE_OK)
+            flash(activity.getString(kind == EV_SAVED ? R.string.MENU_STATE_SAVED : R.string.MENU_STATE_LOADED, slot),
+                  true);
+        else
+            flash(stateError(code, slot, kind == EV_SAVED), false);
     }
 
     /** The message for a native code that is not STATE_OK. */
@@ -1260,6 +1339,9 @@ final class GameMenu {
         case FAST_FORWARD:
             toggleFastForward();
             break;
+        case AUTO_RESUME:
+            setAutoResume(!GameStore.autoResume(activity));
+            break;
         case BACK:
             back();
             break;
@@ -1292,6 +1374,7 @@ final class GameMenu {
         if (quitArmedAt >= 0 && now - quitArmedAt <= QUIT_ARM_MS) {
             Log.i(LauncherActivity.TAG, "shell: menu: quit (confirmed)");
             host.releaseOverlay();
+            autoSave("quit");
             host.quit();
             return;
         }
@@ -1299,7 +1382,7 @@ final class GameMenu {
         Widgets.MenuRow r = rows.get(Item.QUIT);
         if (r != null) {
             r.setTitle(s(R.string.MENU_QUIT_CONFIRM));
-            r.setSubtitle(s(R.string.MENU_QUIT_CONFIRM_SUB));
+            r.setSubtitle(s(autoResumes() ? R.string.MENU_QUIT_CONFIRM_KEPT : R.string.MENU_QUIT_CONFIRM_SUB));
         }
         feedback.play(UiFeedback.Cue.ERROR, r);
         handler.removeCallbacks(quitDisarm);
@@ -1487,6 +1570,9 @@ final class GameMenu {
         r = rows.get(Item.FAST_FORWARD);
         if (r != null)
             r.setValue(s(host.fastForward() ? R.string.MENU_ON : R.string.MENU_OFF));
+        r = rows.get(Item.AUTO_RESUME);
+        if (r != null)
+            r.setValue(s(GameStore.autoResume(activity) ? R.string.MENU_ON : R.string.MENU_OFF));
         r = rows.get(Item.TOUCH);
         Boolean touch = host.touchShown();
         if (r != null && touch != null)

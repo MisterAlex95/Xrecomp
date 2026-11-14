@@ -33,7 +33,7 @@ final class MenuNative {
     static native boolean nativeStatesAvailable();
 
     /**
-     * XBA-182: saves slot 1..4 between frames. 0 ok, or a negative code: -1 no console game, -2 empty slot, -3 another
+     * XBA-182: saves slot 1..4 (or 0, the automatic slot) between frames. 0 ok, or a negative code: -1 no console game, -2 empty slot, -3 another
      * game's state, -4 saved by another version, -5 the file cannot be written or read, -6 bad slot, -7 not a state
      * file or damaged.
      */
@@ -47,6 +47,12 @@ final class MenuNative {
 
     /** XBA-182: the slot's thumbnail, { w, h, ARGB pixels... } (w * h after the two), at most 160 x 120; or null. */
     static native int[] nativeStateThumb(int slot);
+
+    /**
+     * The last quick save / load (the pad chords Back + RB / Back + LB) or resume (the automatic slot, slot 0, loaded
+     * at the start): { seq, kind (1 saved, 2 loaded, 3 resumed), slot, code }; seq 0 when none yet.
+     */
+    static native int[] nativeStateEvent();
 
     /** XBA-182: fast-forward on or off (the menu's toggle). */
     static native void nativeFastForward(boolean on);

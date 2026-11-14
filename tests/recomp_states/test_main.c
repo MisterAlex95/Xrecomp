@@ -60,7 +60,9 @@ static void test_files(void)
     char path[400];
     CHECK(recomp_states_slot_path(s_dir, 1, path, sizeof path) == 0);
     CHECK(strstr(path, "/state1.st") != NULL);
-    CHECK(recomp_states_slot_path(s_dir, 0, path, sizeof path) == -1);
+    CHECK(recomp_states_slot_path(s_dir, RECOMP_STATE_AUTO, path, sizeof path) == 0);
+    CHECK(strstr(path, "/auto.st") != NULL);
+    CHECK(recomp_states_slot_path(s_dir, -1, path, sizeof path) == -1);
     CHECK(recomp_states_slot_path(s_dir, RECOMP_STATE_SLOTS + 1, path, sizeof path) == -1);
     CHECK(recomp_states_slot_path(NULL, 1, path, sizeof path) == -1);
     CHECK(recomp_states_slot_path(s_dir, 1, path, 8) == -1);
@@ -173,7 +175,7 @@ static void test_attach(void)
     recomp_states_attach(&ops, s_dir);
     CHECK(recomp_states_available());
     CHECK(!strcmp(recomp_states_console(), "gba"));
-    CHECK(recomp_states_save(0) == RECOMP_STATE_ESLOT);
+    CHECK(recomp_states_save(-1) == RECOMP_STATE_ESLOT);
     CHECK(recomp_states_load(RECOMP_STATE_SLOTS + 1) == RECOMP_STATE_ESLOT);
     CHECK(recomp_states_info(2, &m, NULL) == RECOMP_STATE_EEMPTY);
     CHECK(recomp_states_load(2) == RECOMP_STATE_EEMPTY);
@@ -187,6 +189,76 @@ static void test_attach(void)
     recomp_states_detach();
     CHECK(!recomp_states_available());
     CHECK(recomp_states_load(2) == RECOMP_STATE_ENOGAME);
+}
+
+/* The automatic slot, the quick slot, the pad chords and the events. */
+static void test_quick(void)
+{
+    recomp_state_ops ops = {"gba", fake_save, fake_load, &s_machine};
+    recomp_state_event ev, before;
+    char path[400];
+    for (int i = RECOMP_STATE_AUTO; i <= RECOMP_STATE_SLOTS; i++)
+        if (recomp_states_slot_path(s_dir, i, path, sizeof path) == 0)
+            unlink(path);
+    recomp_states_attach(&ops, s_dir);
+
+    /* Nothing saved: the quick slot is 1, a quick load says empty, resume records nothing. */
+    CHECK(recomp_states_quick_slot() == 1);
+    recomp_states_last_event(&before);
+    CHECK(recomp_states_resume() == RECOMP_STATE_EEMPTY);
+    recomp_states_last_event(&ev);
+    CHECK(ev.seq == before.seq);
+    CHECK(recomp_states_quick_load() == RECOMP_STATE_EEMPTY);
+    recomp_states_last_event(&ev);
+    CHECK(ev.seq == before.seq + 1 && ev.kind == RECOMP_STATE_EV_LOADED && ev.slot == 1 &&
+          ev.rc == RECOMP_STATE_EEMPTY);
+
+    /* A numbered slot saved from the menu becomes the quick slot; the automatic slot never does. */
+    s_machine = 7;
+    CHECK(recomp_states_save(3) == RECOMP_STATE_OK);
+    CHECK(recomp_states_quick_slot() == 3);
+    s_machine = 8;
+    CHECK(recomp_states_save(RECOMP_STATE_AUTO) == RECOMP_STATE_OK);
+    CHECK(recomp_states_quick_slot() == 3);
+    CHECK(recomp_states_info(RECOMP_STATE_AUTO, NULL, NULL) == RECOMP_STATE_OK);
+    s_machine = 9;
+    CHECK(recomp_states_quick_save() == RECOMP_STATE_OK);   /* slot 3 now holds 9 */
+    s_machine = 0;
+    CHECK(recomp_states_quick_load() == RECOMP_STATE_OK && s_machine == 9);
+    recomp_states_last_event(&ev);
+    CHECK(ev.kind == RECOMP_STATE_EV_LOADED && ev.slot == 3 && ev.rc == RECOMP_STATE_OK);
+
+    /* Resume loads the automatic slot. */
+    CHECK(recomp_states_resume() == RECOMP_STATE_OK && s_machine == 8);
+    recomp_states_last_event(&ev);
+    CHECK(ev.kind == RECOMP_STATE_EV_RESUMED && ev.slot == RECOMP_STATE_AUTO && ev.rc == RECOMP_STATE_OK);
+
+    /* A new run: the quick slot is the most recently saved numbered slot. */
+    recomp_states_attach(&ops, s_dir);
+    CHECK(recomp_states_quick_slot() == 3);
+
+    /* The chords: once per press, Back first, save wins over load, swallow while held. */
+    int held = 0, sw = 0;
+    CHECK(recomp_states_chord(0, 0, 1, &held, &sw) == RECOMP_CHORD_NONE && !sw);
+    CHECK(recomp_states_chord(1, 0, 0, &held, &sw) == RECOMP_CHORD_NONE && !sw);
+    CHECK(recomp_states_chord(1, 0, 1, &held, &sw) == RECOMP_CHORD_SAVE && sw);
+    CHECK(recomp_states_chord(1, 0, 1, &held, &sw) == RECOMP_CHORD_NONE && sw);
+    CHECK(recomp_states_chord(1, 1, 1, &held, &sw) == RECOMP_CHORD_LOAD && sw);
+    CHECK(recomp_states_chord(1, 0, 0, &held, &sw) == RECOMP_CHORD_NONE && !sw);
+    CHECK(recomp_states_chord(1, 1, 1, &held, &sw) == RECOMP_CHORD_SAVE && sw);
+    CHECK(recomp_states_chord(0, 1, 1, &held, &sw) == RECOMP_CHORD_NONE && !sw);
+    CHECK(recomp_states_chord_run(RECOMP_CHORD_NONE) == RECOMP_STATE_OK);
+
+    /* RECOMP_STATE_RESUME. */
+    unsetenv("RECOMP_STATE_RESUME");
+    CHECK(!recomp_states_resume_enabled());
+    setenv("RECOMP_STATE_RESUME", "1", 1);
+    CHECK(recomp_states_resume_enabled());
+    setenv("RECOMP_STATE_RESUME", "0", 1);
+    CHECK(!recomp_states_resume_enabled());
+    unsetenv("RECOMP_STATE_RESUME");
+    recomp_states_detach();
+    CHECK(recomp_states_quick_save() == RECOMP_STATE_ENOGAME);
 }
 
 static void test_ff(void)
@@ -238,6 +310,7 @@ int main(void)
     test_files();
     test_thumb();
     test_attach();
+    test_quick();
     test_ff();
     char cmd[400];
     snprintf(cmd, sizeof cmd, "rm -rf '%s'", s_dir);

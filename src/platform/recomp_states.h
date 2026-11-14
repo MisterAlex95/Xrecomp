@@ -7,7 +7,8 @@
  * holds its frame mutex in them, so a state is never taken mid-frame). Xbox games never attach: their state is the
  * whole guest memory and GPU, too large to snapshot.
  *
- * Slot files: <dir>/state<N>.st, N = 1..RECOMP_STATE_SLOTS. A small header (magic "XRSLOT", version, console, game
+ * Slot files: <dir>/state<N>.st, N = 1..RECOMP_STATE_SLOTS, and the automatic slot <dir>/auto.st (slot
+ * RECOMP_STATE_AUTO = 0: saved when the player leaves the game, loaded at the next start to resume). A small header (magic "XRSLOT", version, console, game
  * key, time saved, frames run), a thumbnail of the last frame (RGB565, at most RECOMP_STATE_THUMB_W x _H), then the
  * core's own blob (gba_state_save / ps1_state_save: its own header checks the game and format version, so a slot from
  * another game or another build is refused by the core too). Written through <path>.tmp + rename.
@@ -16,6 +17,14 @@
  * Back + right trigger), either one makes recomp_ff_active true. The speed: RECOMP_FF_SPEED = 2..16 (times the
  * console's rate) or "max" (as fast as the host runs, audio muted); default 4. Runtimes run `speed` console frames
  * per shown frame and pass the audio through recomp_ff_audio (averaged down: higher pitched, never gapped).
+ *
+ * Quick save / load: the pad chords Back + right shoulder (save) and Back + left shoulder (load) act on the quick
+ * slot, the last slot 1..N saved or loaded this run (at the start: the most recently saved one, else slot 1). The UI
+ * learns what they did through recomp_states_last_event (the in-game menu shows « Saved to slot N »).
+ *
+ * Resume: with RECOMP_STATE_RESUME=1 (the app's « Resume where I left off »), the runtime loads the automatic slot
+ * before its first frame, and saves it when the player closes the game (desktop: the window; Android: the menu's
+ * Quit, Back to launcher and the background save it from the UI side).
  *
  * libc + pthreads (xbr_host_core); every function may be called from any thread. */
 #ifndef XBR_RECOMP_STATES_H
@@ -32,6 +41,7 @@ extern "C" {
 #define RECOMP_STATE_THUMB_W 160
 #define RECOMP_STATE_THUMB_H 120
 #define RECOMP_STATE_SLOT_VERSION 1
+#define RECOMP_STATE_AUTO 0   /* the automatic slot: <dir>/auto.st */
 
 /* Results (the in-game menu shows a message per code). */
 enum {
@@ -62,7 +72,7 @@ typedef struct recomp_state_ops {
 void recomp_states_attach(const recomp_state_ops *ops, const char *dir);
 void recomp_states_detach(void);
 
-/* "<dir>/state<slot>.st". Returns 0, or -1 (bad slot, no dir, too long). */
+/* "<dir>/state<slot>.st", or "<dir>/auto.st" for RECOMP_STATE_AUTO. Returns 0, or -1 (bad slot, no dir, too long). */
 int recomp_states_slot_path(const char *dir, int slot, char *out, size_t out_n);
 
 typedef struct recomp_state_meta {
@@ -93,13 +103,46 @@ int recomp_states_available(void);
 /* The attached console ("gba", "ps1"), or "" when none. */
 const char *recomp_states_console(void);
 
-/* Saves / loads a slot (1..RECOMP_STATE_SLOTS) of the attached game, between its frames. RECOMP_STATE_*. */
+/* Saves / loads a slot (RECOMP_STATE_AUTO or 1..RECOMP_STATE_SLOTS) of the attached game, between its frames.
+ * RECOMP_STATE_*. A numbered slot saved or loaded becomes the quick slot. */
 int recomp_states_save(int slot);
 int recomp_states_load(int slot);
 
 /* What a slot holds: RECOMP_STATE_OK with meta (and the thumbnail when thumb is not NULL), else _EEMPTY /
  * _ECORRUPT / _EVERSION / _ENOGAME. */
 int recomp_states_info(int slot, recomp_state_meta *meta, uint16_t *thumb);
+
+/* ---- Quick save / load, resume, events ------------------------------------------------------------------------ */
+
+/* The slot quick save / load act on (1..RECOMP_STATE_SLOTS; see above). */
+int recomp_states_quick_slot(void);
+/* Saves / loads the quick slot and records an event. RECOMP_STATE_*. */
+int recomp_states_quick_save(void);
+int recomp_states_quick_load(void);
+
+/* The pad chords, one call per pad per frame: back, the left and right shoulders held now; *held the pad's state
+ * (zero it at the start). Returns RECOMP_CHORD_SAVE / _LOAD on the frame a shoulder goes down with Back held (once
+ * per press), else RECOMP_CHORD_NONE. *swallow: Back + a shoulder are held, so neither should reach the game. */
+enum { RECOMP_CHORD_NONE = 0, RECOMP_CHORD_SAVE = 1, RECOMP_CHORD_LOAD = 2 };
+int recomp_states_chord(int back, int lshoulder, int rshoulder, int *held, int *swallow);
+/* Runs what recomp_states_chord returned (quick save or load); RECOMP_STATE_OK for RECOMP_CHORD_NONE. */
+int recomp_states_chord_run(int action);
+
+/* RECOMP_STATE_RESUME is 1: resume from the automatic slot, save it when the player leaves. */
+int recomp_states_resume_enabled(void);
+/* Loads the automatic slot when it holds this game's state and records an event (RECOMP_STATE_EV_RESUMED, or
+ * nothing when the slot is empty). RECOMP_STATE_*. */
+int recomp_states_resume(void);
+
+/* What the last quick save / load / resume did, for the UI: seq grows with each event (0: none yet). */
+enum { RECOMP_STATE_EV_SAVED = 1, RECOMP_STATE_EV_LOADED = 2, RECOMP_STATE_EV_RESUMED = 3 };
+typedef struct recomp_state_event {
+    uint32_t seq;
+    int kind;   /* RECOMP_STATE_EV_* */
+    int slot;
+    int rc;     /* RECOMP_STATE_* */
+} recomp_state_event;
+void recomp_states_last_event(recomp_state_event *ev);
 
 /* ---- Fast-forward --------------------------------------------------------------------------------------------- */
 

@@ -333,6 +333,11 @@ final class LibraryScreen {
 
     /** The title image from the shared cache (files/art/<TID>.png, TitleArt), decoded once per title; null if none. */
     static Bitmap art(File filesDir, Map<String, Bitmap> cache, Entry e) {
+        if (e.otherConsole() && !Library.isLocalKey(e.tid)) {   // a GBA / PS1 / N64 game: its cover (CoverArt)
+            if (!cache.containsKey(e.tid))
+                cache.put(e.tid, CoverArt.load(filesDir, e.tid));
+            return cache.get(e.tid);
+        }
         if (!e.realTid())
             return null;
         if (cache.containsKey(e.tid))

@@ -111,6 +111,7 @@ public class ShellActivity extends SDLActivity {
         applyTitleVideo();
         applyLanguage();
         applyN64Pak(rom != null);
+        applyAutoResume(rom != null);
         applyVkDriver(rom != null);
         Console console = applyConsolePad(rom != null);
         applyConsoleVideo(console);
@@ -413,6 +414,23 @@ public class ShellActivity extends SDLActivity {
     }
 
     /**
+     * RECOMP_STATE_RESUME for a GBA / PS1 runtime (recomp_states.h): « 1 » when « Resume where I left off » is on, so
+     * the automatic slot the menu saved when the player left is loaded before the first frame; unset otherwise.
+     */
+    private void applyAutoResume(boolean consoleGame) {
+        boolean on = consoleGame && GameStore.autoResume(this);
+        try {
+            if (on)
+                Os.setenv("RECOMP_STATE_RESUME", "1", true);
+            else
+                Os.unsetenv("RECOMP_STATE_RESUME");
+        } catch (ErrnoException e) {
+            Log.w(LauncherActivity.TAG, "shell: cannot set RECOMP_STATE_RESUME", e);
+        }
+        Log.i(LauncherActivity.TAG, "shell: resume where I left off " + (on ? "on" : "off"));
+    }
+
+    /**
      * RECOMP_WIDESCREEN and RECOMP_480P for the runtime (XBA-134, {@link GameVideo}): « 1 » / « 0 » when the title has
      * its own choice, else unset (recomp.cfg, then off, decide), also clearing what a previous game left.
      */
@@ -443,6 +461,9 @@ public class ShellActivity extends SDLActivity {
             touch.start();
         fpsLog.removeCallbacks(fpsTick);
         fpsLog.postDelayed(fpsTick, 10_000);
+        fpsLog.removeCallbacks(coverShot);
+        if (coverShotKey() != null)
+            fpsLog.postDelayed(coverShot, CoverArt.CAPTURE_AFTER_MS);
         if (menu != null)
             menu.onStart();
         /* The companion Presentation (shown in onStart above) takes the focus for a moment on some devices and the
@@ -461,6 +482,7 @@ public class ShellActivity extends SDLActivity {
     @Override
     protected void onStop() {
         fpsLog.removeCallbacks(fpsTick);
+        fpsLog.removeCallbacks(coverShot);
         if (companion != null)
             companion.stop();   // the panel's onDetachedFromWindow releases its buttons
         if (touch != null)
@@ -692,6 +714,15 @@ public class ShellActivity extends SDLActivity {
         }
 
         @Override
+        public int[] stateEvent() {
+            try {
+                return MenuNative.nativeStateEvent();
+            } catch (UnsatisfiedLinkError e) {
+                return null;
+            }
+        }
+
+        @Override
         public boolean fastForward() {
             try {
                 return MenuNative.nativeFastForwardOn();
@@ -846,6 +877,35 @@ public class ShellActivity extends SDLActivity {
             }
         }
     }
+
+    /** The launched GBA / PS1 / N64 game's key when it has no cover yet (CoverArt), else null. */
+    private String coverShotKey() {
+        String tid = GameStore.launchedRom(this) != null ? GameStore.launchedTitleId(this) : null;
+        if (tid == null || Console.ofKey(tid) == Console.XBOX || CoverArt.load(getFilesDir(), tid) != null)
+            return null;
+        return tid;
+    }
+
+    /** CAPTURE_AFTER_MS into a game without a cover: a frame of it becomes its cover, until a real one comes. */
+    private final Runnable coverShot = () -> {
+        String key = coverShotKey();
+        if (key == null || (menu != null && menu.isOpen()))
+            return;
+        java.io.File files = getFilesDir();
+        new Thread(() -> {
+            java.io.File bmp = new java.io.File(getCacheDir(), "cover-shot.bmp");
+            boolean ok;
+            try {
+                ok = CompanionNative.nativeScreenshot(bmp.getPath());
+            } catch (UnsatisfiedLinkError e) {
+                ok = false;
+            }
+            android.graphics.Bitmap b = ok ? android.graphics.BitmapFactory.decodeFile(bmp.getPath()) : null;
+            bmp.delete();
+            boolean kept = CoverArt.storeShot(b, files, key);
+            Log.i(LauncherActivity.TAG, "shell: cover art " + key + ": " + (kept ? "a frame of the game" : "no frame"));
+        }, "cover-shot").start();
+    };
 
     /** <external files>/screenshots/<date>.bmp, written off the UI thread; the panel says how it went. */
     private void screenshot() {

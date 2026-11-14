@@ -265,7 +265,7 @@ final class GameTheme {
         if (tid == null)
             return;
         String k = key(tid);
-        for (String suffix : new String[] { ".png", ".hero.png", ".theme", ".last.jpg" })
+        for (String suffix : new String[] { ".png", ".hero.png", ".theme", ".last.jpg", ".shot.png", ".miss" })
             new File(artDir(c), k + suffix).delete();
     }
 

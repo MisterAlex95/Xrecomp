@@ -63,4 +63,14 @@
     <string name="MENU_STATE_LOAD_FAILED">Slot %1$d: the state was not loaded</string>
     <string name="CTL_FF">Back + RT</string>
     <string name="CTL_FF_X">Fast-forward (hold)</string>
+    <!-- Quick save / load chords, the automatic slot and resuming. -->
+    <string name="CTL_QUICK_SAVE">Back + RB</string>
+    <string name="CTL_QUICK_SAVE_X">Quick save (last slot)</string>
+    <string name="CTL_QUICK_LOAD">Back + LB</string>
+    <string name="CTL_QUICK_LOAD_X">Quick load (last slot)</string>
+    <string name="MENU_STATE_AUTO">Where you left off</string>
+    <string name="MENU_STATE_RESUMED">Resumed where you left off</string>
+    <string name="MENU_STATE_RESUME_FAILED">Could not resume: the game starts from the beginning</string>
+    <string name="MENU_RESUME_AUTO">Resume where I left off</string>
+    <string name="MENU_QUIT_CONFIRM_KEPT">Your place is kept for next time</string>
 </resources>
