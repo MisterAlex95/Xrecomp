@@ -1,7 +1,7 @@
 /* N64 RDP benchmark (XBA-173): Mpixels/s per mode on 320x240 RGBA16 (fill, copy, 1-cycle flat / shaded / textured,
  * bilinear + Z, 2-cycle fog + blend + Z), and frames/s of the busy scene of the tests (1500 mixed primitives, about
- * 0.9 Mpixels: far more than a typical libultra frame) with 1 and 4 threads.
- *   n64_rdp_bench [seconds per case]   (default 1) */
+ * 0.9 Mpixels: far more than a typical libultra frame) with 1, 2 and 4 threads.
+ *   n64_rdp_bench [seconds per case [case name substring]]   (default 1, every case) */
 #define _POSIX_C_SOURCE 199309L
 #include "rdp_cmd.h"
 
@@ -16,6 +16,8 @@ static double now(void)
 }
 
 static rdp_list lst;
+static const char *only; /* run only the cases whose name contains it */
+static int wanted(const char *name) { return !only || strstr(name, only); }
 
 static void setup(rdp_list *l)
 {
@@ -41,6 +43,8 @@ static void setup(rdp_list *l)
 /* Runs the list (after setup) repeatedly; px = pixels drawn per run. */
 static void run_case(rdp_rig *g, const char *name, double px, double secs)
 {
+    if (!wanted(name))
+        return;
     L(&lst, c_sync_full());
     long n = 0;
     double t0 = now(), t;
@@ -67,6 +71,7 @@ static double tris(int shade, int tex, int z)
 int main(int argc, char **argv)
 {
     double secs = argc > 1 ? atof(argv[1]) : 1.0;
+    only = argc > 2 ? argv[2] : NULL;
     rdp_rig g;
     rig_open(&g);
     scene_textures(g.ram);
@@ -113,7 +118,13 @@ int main(int argc, char **argv)
                       CC_ZERO_A, CC_ZERO_MUL, CC_COMBINED, AC_ZERO, AC_ZERO, AC_ZERO, AC_COMBINED));
     run_case(&g, "2-cycle tex * shade, fog, blend, dither, Z", tris(1, 1, 1), secs);
 
-    for (int th = 1; th <= 4; th *= 4) {
+    static const int nth[] = { 1, 2, 4 };
+    for (int i = 0; i < 3; i++) {
+        int th = nth[i];
+        char name[64];
+        snprintf(name, sizeof name, "busy 320x240 scene, 1500 primitives, %d thread%s", th, th > 1 ? "s" : " ");
+        if (!wanted(name))
+            continue;
         n64_rdp_set_threads(g.dp, th);
         lst.n = 0;
         scene_busy(&lst, 1500, 777);
@@ -124,7 +135,7 @@ int main(int argc, char **argv)
             frames++;
             t = now() - t0;
         } while (t < secs * 2);
-        printf("busy 320x240 scene, 1500 primitives, %d thread%s %6.1f frames/s\n", th, th > 1 ? "s" : " ", frames / t);
+        printf("%s %6.1f frames/s\n", name, frames / t);
     }
     rig_close(&g);
     return 0;
