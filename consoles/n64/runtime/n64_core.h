@@ -137,6 +137,10 @@ void n64_set_accessory(n64_machine *m, int port, n64_accessory acc);
 /* 1 while the game runs the rumble pak's motor on that port. */
 int n64_rumble(n64_machine *m, int port);
 
+/* Test hook (XBA-210): on, the machine runs the interpreter's reference loop (one full step per instruction) instead
+ * of its predecoded blocks; n64_run --lockstep-ref runs both and compares them. A host setting, not in save states. */
+void n64_set_interp_reference(n64_machine *m, int on);
+
 /* Runs until the next VI interrupt (one field: 1/60 s NTSC, 1/50 s PAL; a field's length when the game masks it). */
 void n64_run_frame(n64_machine *m);
 /* Runs at least `cycles` CPU cycles (93.75 MHz; tests). */
@@ -203,7 +207,7 @@ uint64_t n64_fpr(n64_machine *m, int r); /* the 64-bit register file as the FR=1
 uint32_t n64_fcsr(n64_machine *m);
 uint64_t n64_cycles(n64_machine *m);
 uint64_t n64_frames(n64_machine *m);
-uint8_t *n64_rdram(n64_machine *m); /* RDRAM, big-endian bytes, writable */
+uint8_t *n64_rdram(n64_machine *m); /* RDRAM, big-endian bytes, writable (code written there is seen) */
 uint32_t n64_rdram_size(n64_machine *m);
 
 /* Debug text: what the game writes to the IS-Viewer 64 buffer (0x13FF0020, length at 0x13FF0014: libdragon's

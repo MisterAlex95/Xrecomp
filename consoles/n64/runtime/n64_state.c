@@ -121,7 +121,7 @@ static void rdram_load(n64_machine *m, const uint8_t *in)
 static size_t sec_size(n64_machine *m, int id)
 {
     switch (id) {
-    case SEC_MACHINE: return sizeof(n64_machine);
+    case SEC_MACHINE: return N64_MACHINE_STATE_BYTES;
     case SEC_RDRAM: return rdram_bytes(m);
     case SEC_RSP: return n64_rsp_state_size(m->rsp);
     case SEC_RDP: return n64_rdp_state_size(m->rdp);
@@ -145,7 +145,7 @@ size_t n64_state_size(n64_machine *m)
 
 static void save_machine(n64_machine *m, uint8_t *out)
 {
-    memcpy(out, m, sizeof *m);
+    memcpy(out, m, N64_MACHINE_STATE_BYTES); /* the host-only tail (blocks, interp_ref) left out */
     /* Host pointers and host-side fields: not the machine's (the blob may not be aligned: by offset). */
 #define CLEAR(f) do { size_t n_ = sizeof m->f; memset(out + offsetof(n64_machine, f), 0, n_); } while (0)
     CLEAR(rdram);
@@ -222,7 +222,7 @@ static int parse(n64_machine *m, const uint8_t *data, size_t size, const uint8_t
             return N64_STATE_ECORRUPT;
         int ok;
         switch (id) {
-        case SEC_MACHINE: ok = n == sizeof(n64_machine); break;
+        case SEC_MACHINE: ok = n == N64_MACHINE_STATE_BYTES; break;
         case SEC_RDRAM: ok = rdram_check(m, data + off, n) == 0; break;
         case SEC_RSP: ok = n == n64_rsp_state_size(m->rsp); break;
         case SEC_RDP: ok = 1; break; /* its own load checks it, first */
@@ -286,7 +286,7 @@ int n64_state_load(n64_machine *m, const uint8_t *data, size_t size)
     int64_t rtc_fixed = m->rtc_fixed;
     uint64_t hash = m->rom_hash;
     bool hashed = m->rom_hashed;
-    memcpy(m, at[SEC_MACHINE], sizeof *m);
+    memcpy(m, at[SEC_MACHINE], N64_MACHINE_STATE_BYTES); /* the host-only tail stays */
     m->rdram = rdram;
     m->rdram_gen = rdram_gen;
     m->rdram_size = rdram_size;

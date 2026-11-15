@@ -109,6 +109,10 @@ void n64_recomp_get_stats(n64_machine *m, n64_recomp_stats *out);
  * COP0 (COUNT included) and the TLB, FPRs and FCSR, time, instruction count, scheduler, MI, RDRAM, RSP memory);
  * else 1 and the first difference in why. */
 int n64_recomp_compare(n64_machine *a, n64_machine *b, char *why, size_t why_n);
+/* The CPU part only (cheap: n64_run --lockstep-ref --lockstep-cycles compares it at every stop): GPRs, HI / LO, PC /
+ * next PC / the delay-slot flags and the instruction being run (cur / ds), LL bit, COP0, FPRs, FCSR, time, instruction
+ * count, stop_at. */
+int n64_cpu_compare(n64_machine *a, n64_machine *b, char *why, size_t why_n);
 
 #ifdef __cplusplus
 }

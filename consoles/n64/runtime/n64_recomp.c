@@ -683,6 +683,38 @@ static int cmp_mem(const char *name, const uint8_t *x, const uint8_t *y, size_t 
     return 1;
 }
 
+int n64_cpu_compare(n64_machine *a, n64_machine *b, char *why, size_t why_n)
+{
+    char name[32];
+    const n64_cpu *x = &a->cpu, *y = &b->cpu;
+    CMP_FIELD("instructions", a->instructions, b->instructions);
+    CMP_FIELD("now", a->now, b->now);
+    CMP_FIELD("stop_at", a->stop_at, b->stop_at);
+    for (int i = 0; i < 32; i++) {
+        snprintf(name, sizeof name, "r%d", i);
+        CMP_FIELD(name, x->gpr[i], y->gpr[i]);
+    }
+    CMP_FIELD("pc", x->pc, y->pc);
+    CMP_FIELD("npc", x->npc, y->npc);
+    CMP_FIELD("cur", x->cur, y->cur);
+    CMP_FIELD("ds", x->ds, y->ds);
+    CMP_FIELD("delay slot", x->next_ds, y->next_ds);
+    CMP_FIELD("irq", x->irq, y->irq);
+    CMP_FIELD("hi", x->hi, y->hi);
+    CMP_FIELD("lo", x->lo, y->lo);
+    CMP_FIELD("llbit", x->llbit, y->llbit);
+    for (int i = 0; i < 32; i++) {
+        snprintf(name, sizeof name, "cop0 %d", i);
+        CMP_FIELD(name, x->cop0[i], y->cop0[i]);
+    }
+    for (int i = 0; i < 32; i++) {
+        snprintf(name, sizeof name, "f%d", i);
+        CMP_FIELD(name, x->fpr[i], y->fpr[i]);
+    }
+    CMP_FIELD("fcsr", x->fcsr, y->fcsr);
+    return 0;
+}
+
 int n64_recomp_compare(n64_machine *a, n64_machine *b, char *why, size_t why_n)
 {
     char name[32];

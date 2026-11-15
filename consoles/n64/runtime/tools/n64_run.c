@@ -2,7 +2,7 @@
  *
  *   n64_run ROM [--frames N] [--result] [--ppm OUT.ppm] [--wav OUT.wav] [--tty] [--pad MASK] [--pal | --ntsc]
  *           [--save PATH] [--hash] [--info] [--regs] [--quiet]
- *           [--pack LIB.so [--lockstep] [--missed FILE] [--stats]]
+ *           [--pack LIB.so [--lockstep] [--missed FILE] [--stats]] [--lockstep-ref]
  *           [--state-save N:FILE] [--state-load FILE] [--run-hash] [--rewind C:R [--rewind-mb M]]
  *           [--cheats FILE] [--peek ADDR]
  *
@@ -27,8 +27,14 @@
  * --lockstep    with --pack: an interpreter-only twin runs alongside; after every frame the whole state (CPU, COP0, TLB,
  *               FPU, time, scheduler, MI, RDRAM, RSP memory) and the picture are compared. Prints "LOCKSTEP OK" or
  *               the first difference ("LOCKSTEP FAIL"), exit 1 then
+ * --lockstep-ref the interpreter's predecoded blocks against its reference loop (XBA-210): the twin runs step()'s own
+ *               loop (n64_set_interp_reference); after every frame the same comparison, then (without --pack) both
+ *               machines' whole save states byte for byte (every field, RDRAM, the RSP and the RDP), and the picture
  * --lockstep-cycles N  compare every N CPU cycles instead of every frame (then --frames counts these steps), and
- *               --lockstep-from C runs C cycles before the first comparison (to close in on a divergence)
+ *               --lockstep-from C runs C cycles before the first comparison (to close in on a divergence). With
+ *               --lockstep-ref, --frames still counts frames' worth of cycles (93.75 MHz / 60), run N cycles at a
+ *               time: the CPU (n64_cpu_compare) is compared at every stop, the whole machine every 1024 stops and at
+ *               the end of each
  * --missed FILE with --pack: append the code the interpreter had to run to FILE (the discovery loop's input)
  * --stats       with --pack: calls, fallbacks, lookups, re-hashes, and the native share of the instructions (packs
  *               built with -DN64_RC_COUNT)
@@ -158,7 +164,7 @@ static int usage(void)
 {
     fprintf(stderr, "usage: n64_run ROM [--frames N] [--result] [--ppm OUT] [--wav OUT] [--tty] [--pad MASK]\n"
                     "               [--pal | --ntsc] [--save PATH] [--hash] [--info] [--regs] [--quiet]\n"
-                    "               [--pack LIB.so [--lockstep] [--missed FILE] [--stats]]\n"
+                    "               [--pack LIB.so [--lockstep] [--missed FILE] [--stats]] [--lockstep-ref]\n"
                     "               [--state-save N:FILE] [--state-load FILE] [--run-hash] [--cheats FILE]\n"
                     "               [--peek ADDR]\n");
     return 3;
@@ -282,12 +288,37 @@ static int rw_load(const uint8_t *in, size_t n, void *m)
     return 0;
 }
 
+/* --lockstep-ref: both machines' save states, byte for byte (the first difference's offset in the blob). */
+static int state_compare(n64_machine *a, n64_machine *b, char *why, size_t n)
+{
+    size_t ca = n64_state_size(a), cb = n64_state_size(b);
+    uint8_t *sa = malloc(ca), *sb = malloc(cb);
+    size_t la = sa ? n64_state_save(a, sa, ca) : 0, lb = sb ? n64_state_save(b, sb, cb) : 0;
+    int d = 0;
+    if (!la || !lb) {
+        d = 1;
+        snprintf(why, n, "save state failed");
+    } else if (la != lb) {
+        d = 1;
+        snprintf(why, n, "save state size %zu vs %zu", la, lb);
+    } else if (memcmp(sa, sb, la)) {
+        size_t i = 0;
+        while (sa[i] == sb[i])
+            i++;
+        d = 1;
+        snprintf(why, n, "save state byte %zu: 0x%02X vs 0x%02X", i, sa[i], sb[i]);
+    }
+    free(sa);
+    free(sb);
+    return d;
+}
+
 int main(int argc, char **argv)
 {
     const char *rom_path = NULL, *ppm = NULL, *wav = NULL, *save = NULL, *pack = NULL, *missed = NULL;
     long frames = 600;
     bool result = false, quiet = false, hash = false, tty = false, info = false, regs = false;
-    bool lockstep = false, stats = false, run_hash = false;
+    bool lockstep = false, lockref = false, stats = false, run_hash = false;
     const char *cheats_path = NULL;
     uint32_t peeks[8];
     int npeek = 0;
@@ -344,6 +375,8 @@ int main(int argc, char **argv)
             missed = argv[++i];
         else if (!strcmp(a, "--lockstep"))
             lockstep = true;
+        else if (!strcmp(a, "--lockstep-ref"))
+            lockref = true;
         else if (!strcmp(a, "--lockstep-cycles") && more)
             lock_cycles = strtoll(argv[++i], NULL, 0);
         else if (!strcmp(a, "--lockstep-from") && more)
@@ -379,10 +412,13 @@ int main(int argc, char **argv)
     char err[256] = "";
     n64_machine *m = n64_create(rom, rom_size, &opts, err, sizeof err);
     n64_machine *twin = NULL;
-    if (m && pack && lockstep)
+    bool want_twin = (pack && lockstep) || lockref;
+    if (m && want_twin)
         twin = n64_create(rom, rom_size, &opts, err, sizeof err);
+    if (twin && lockref)
+        n64_set_interp_reference(twin, 1);
     free(rom);
-    if (!m || (pack && lockstep && !twin)) {
+    if (!m || (want_twin && !twin)) {
         fprintf(stderr, "n64_run: %s\n", err);
         free(save_data);
         n64_destroy(m);
@@ -490,7 +526,36 @@ int main(int argc, char **argv)
     }
     recomp_cheat_bus cbus = {m, NULL, NULL, cheat_peek32, cheat_poke32, 1, NULL, 0};
     recomp_cheat_bus cbus_twin = {twin, NULL, NULL, cheat_peek32, cheat_poke32, 1, NULL, 0};
+    long lock_stops = 0;
     for (f = 0; f < frames; f++) {
+        if (twin && lockref && lock_cycles > 0) {
+            uint64_t end = n64_cycles(m) + 93750000u / 60; /* N64_CPU_HZ */
+            char why[160] = "";
+            while (n64_cycles(m) < end) {
+                uint64_t pa = n64_pc(m);
+                n64_run_cycles(m, (uint64_t)lock_cycles);
+                n64_run_cycles(twin, (uint64_t)lock_cycles);
+                bool full = ++lock_stops % 1024 == 0 || n64_cycles(m) >= end;
+                int d = n64_cpu_compare(m, twin, why, sizeof why);
+                if (!d && full) {
+                    d = n64_recomp_compare(m, twin, why, sizeof why);
+                    if (!d && !pack)
+                        d = state_compare(m, twin, why, sizeof why);
+                }
+                if (d) {
+                    printf("LOCKSTEP FAIL at frame %ld, cycle %llu: %s (blocks vs reference interpreter; pc before "
+                           "0x%016llX, after 0x%016llX vs 0x%016llX)\n", f + 1, (unsigned long long)n64_cycles(m), why,
+                           (unsigned long long)pa, (unsigned long long)n64_pc(m), (unsigned long long)n64_pc(twin));
+                    lock_bad = true;
+                    break;
+                }
+            }
+            if (lock_bad) {
+                f++;
+                break;
+            }
+            continue;
+        }
         if (twin && lock_cycles > 0)
             n64_run_cycles(m, (uint64_t)lock_cycles);
         else
@@ -506,14 +571,16 @@ int main(int argc, char **argv)
                 recomp_cheats_apply(&cheats_twin, &cbus_twin);
             char why[160] = "";
             int d = n64_recomp_compare(m, twin, why, sizeof why);
+            if (!d && lockref && !pack)
+                d = state_compare(m, twin, why, sizeof why);
             if (!d && display_hash(m) != display_hash(twin)) {
                 d = 1;
                 snprintf(why, sizeof why, "the picture");
             }
             if (d) {
-                printf("LOCKSTEP FAIL at frame %ld: %s (recompiled vs interpreter; pc 0x%016llX vs 0x%016llX, "
+                printf("LOCKSTEP FAIL at frame %ld: %s (%s; pc 0x%016llX vs 0x%016llX, "
                        "instructions %llu vs %llu, cycles %llu vs %llu)\n",
-                       f + 1, why, (unsigned long long)n64_pc(m), (unsigned long long)n64_pc(twin),
+                       f + 1, why, pack ? "recompiled vs interpreter" : "blocks vs reference interpreter", (unsigned long long)n64_pc(m), (unsigned long long)n64_pc(twin),
                        (unsigned long long)n64_instructions(m), (unsigned long long)n64_instructions(twin),
                        (unsigned long long)n64_cycles(m), (unsigned long long)n64_cycles(twin));
                 lock_bad = true;

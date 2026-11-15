@@ -3,12 +3,14 @@
  *
  * Semantics follow the VR4300 user's manual; where it is silent, the behaviour the n64-systemtest suite pins (as ares
  * and N64Recomp implement it: 32-bit results sign-extended, SRA / SRAV shifting the whole 64-bit register, LWL / LWR
- * sign-extending the merged word, DIV / DDIV by zero giving LO = +1 / -1 and HI = the dividend). No cache model: the
- * CACHE instruction is accepted and does nothing, every access sees memory. Timing: a fixed cost per instruction by
- * fetch region (1.5 cycles from cached RDRAM, more uncached, RSP memory, ROM) plus a cost per uncached data access
- * and the multiply / divide latencies. */
+ * sign-extending the merged word, DIV / DDIV by zero giving LO = +1 / -1 and HI = the dividend). The caches keep their
+ * tags only (cache_op): every access sees memory. Timing: a fixed cost per instruction by fetch region (1.5 cycles
+ * from cached RDRAM, more uncached, RSP memory, ROM) plus a cost per uncached data access and the multiply / divide
+ * latencies. step() is the reference interpreter; n64_cpu_run runs RDRAM code as predecoded blocks (« Predecoded
+ * blocks » below, XBA-210), instruction for instruction the same machine. */
 #include "n64_internal.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 #define RS(i) (((i) >> 21) & 31)
@@ -1392,18 +1394,1195 @@ uint32_t n64_cpu_step_handed(n64_machine *m, uint32_t *left, bool *chained)
 }
 void n64_cpu_take_interrupt(n64_machine *m) { take_interrupt(m); }
 
+/* ---- Predecoded blocks (XBA-210) ------------------------------------------------------------------------------------
+ * The model is the PS1 interpreter's (ps1_cpu.c, XBA-204). A block is a straight run of code in RDRAM, reached through
+ * KSEG0 (fetch cost COST_CACHED), KSEG1 (COST_UNCACHED_RAM) or a TLB-mapped 32-bit segment (COST_CACHED, as step()
+ * charges a mapped fetch), decoded once into ops: operands extracted, immediates sign- or zero-extended, branch and
+ * jump targets and link values computed, each op holding its handler's address (direct threading) and the block
+ * ending with a K_END op, so an op is a few host instructions and a jump. A block never crosses a 4 KB page (one
+ * rdram_gen counter covers it, and a mapped page translates to contiguous RDRAM). It ends after a branch or jump and its
+ * delay slot (the delay slot is the block's last op: delay slots are resolved at decode, a likely branch that is not
+ * taken skips it, with neither its fetch cost nor its instruction count, as step() does), before an instruction the
+ * ops don't hold (TLB instructions, ERET, LL / SC, traps, SYSCALL / BREAK, COP2 / COP3, a trapping or loading
+ * instruction whose destination is r0, a branch whose delay slot would be one of those or a branch), at the page's end
+ * or at BLK_MAX ops. The RSP's memories and the ROM are not block code (IPL3 only): step() runs them.
+ *
+ * A block is entered only where step() would run its instructions back to back with every check of the run loop
+ * passing: not in a delay slot, kernel mode (so 64-bit operations are allowed and COP0 is usable), MI repeat mode off,
+ * no interrupt pending, now below stop_at. The clock: every op has a bound of the ticks it takes (its fetch plus its
+ * fixed extras: COST_MULT / COST_DMULT / COST_DIV / COST_DDIV, COST_DATA_UNCACHED for a load, the FPU's latency of a
+ * COP1 instruction), cum[k] bounds ops 0..k-1; a block that may meet stop_at runs only the ops sure to start before
+ * it (from a copy of them ending with a K_CUT op), and the run loop then steps to the event, so events (VI lines,
+ * COUNT = COMPARE, PI / SI / AI DMA ends, RSP slices) and interrupts land at the instruction they do with step().
+ * Fetch costs are added for the whole block at entry and taken back for the ops that did not run. A block made of a
+ * branch to itself over a NOP (an idle loop) fast-forwards to stop_at: every op that would start before it is counted
+ * with its fetch cost, nothing else can change meanwhile.
+ *
+ * Exceptions are exact: an op that would raise one (ADD / SUB / ADDI / DADD / DSUB / DADDI overflow, a misaligned
+ * address, a TLB miss / invalid / modified page or an address error on a data access or a CACHE hit operation, COP1
+ * unusable) is detected before it changes anything; the state is rebuilt as step() holds it in front of that
+ * instruction (pc, npc and the delay-slot flag of a delay slot, the clock, the instruction count) and step() runs it,
+ * so EPC / BD / BadVAddr / Context and the TLB refill vector are step()'s. COP1 arithmetic, moves and CTC1 run through
+ * n64_fpu_cop1 with the clock, cur and ds set as step() has them, and an FPE / unimplemented exception it takes ends
+ * the run there. MFC0 / DMFC0 read COUNT and RANDOM from the clock and the instruction count step() would have; MTC0 /
+ * DMTC0 go through cop0_write the same way and the block stops after them (the interrupt line, stop_at, the mode, the
+ * TLB generation may move). Data accesses to RDRAM through KSEG0 / KSEG1 are inline; anything else goes through the
+ * interpreter's own access paths (rd_x / wr_x / rd_partial_x / store_masked_x, non-raising) with the clock where step()
+ * has it: mapped RDRAM goes on; after a bus access (devices, cartridge, PIF) the block stops if the access raised the
+ * interrupt line, moved stop_at, switched MI repeat mode on, wrote into the block's page (a DMA) or took long enough
+ * that its remaining ops might no longer start before stop_at, and goes on otherwise.
+ *
+ * Invalidation: every write into RDRAM bumps its page counter (CPU stores, PI / SI / SP DMA, the RSP, n64_poke32,
+ * n64_rdram, cheats, save state loads, reset: the packs' mechanism, n64_rdram_wrote); a block whose counter moved has
+ * its instruction words compared again and is decoded again if they differ. A store into the running block's own
+ * words stops it after the store. A mapped block also keeps the TLB generation (tlb_gen: TLBWI / TLBWR / EntryHi,
+ * so the ASID, bump it) and Status.ERL it was translated under; when either moved its start is translated again and
+ * must land on the same RDRAM. The CACHE instruction only keeps tags (no data or instructions are cached, cache_op),
+ * so it never changes what a block executes. Blocks are found through a direct-mapped table by address, and through
+ * each block's links to the blocks that ran after it (fall-through and taken), which skip the table but not the
+ * checks above.
+ *
+ * Between the run loop's stops every field of the machine is what step()'s loop leaves (cur and ds too), so frames,
+ * save states and lockstep comparisons are byte-identical; n64_set_interp_reference keeps step()'s loop as the
+ * oracle (n64_run --lockstep-ref). The block cache is host state (the tail of n64_machine), not in save states. */
+enum {
+    K_NOP,
+    /* d = s op t */
+    K_ADDU, K_SUBU, K_AND, K_OR, K_XOR, K_NOR, K_SLT, K_SLTU, K_DADDU, K_DSUBU,
+    K_SLLV, K_SRLV, K_SRAV, K_DSLLV, K_DSRLV, K_DSRAV,
+    K_ADD, K_SUB, K_DADD, K_DSUB,
+    /* d = t op imm (shift amount; DSLL32 & co. as imm + 32) */
+    K_SLL, K_SRL, K_SRA, K_DSLL, K_DSRL, K_DSRA,
+    /* d = s op imm (sign- or zero-extended at decode), K_LI: d = imm */
+    K_ADDIU, K_DADDIU, K_SLTI, K_SLTIU, K_ANDI, K_ORI, K_XORI, K_LI, K_ADDI, K_DADDI,
+    /* HI / LO */
+    K_MFHI, K_MFLO, K_MTHI, K_MTLO, K_MULT, K_MULTU, K_DIV, K_DIVU, K_DMULT, K_DMULTU, K_DDIV, K_DDIVU,
+    /* loads into t, stores of t: address s + imm */
+    K_LB, K_LBU, K_LH, K_LHU, K_LW, K_LWU, K_LD, K_LWL, K_LWR, K_LDL, K_LDR,
+    K_SB, K_SH, K_SW, K_SD, K_SWL, K_SWR, K_SDL, K_SDR,
+    K_LWC1, K_LDC1, K_SWC1, K_SDC1,
+    /* any other COP1 instruction but BC1x (imm: the instruction), through n64_fpu_cop1 */
+    K_COP1,
+    /* COP0: MFC0 / DMFC0 (t = COP0 register d; likely: 64-bit), MTC0 / DMTC0 (through cop0_write, the block stops
+     * after it), CACHE (t: the operation, address s + imm; cache_op) */
+    K_MFC0, K_MTC0, K_CACHE,
+    /* branches (imm: the target; d: 31 for the linking ones; likely: the delay slot is skipped when not taken) and
+     * jumps (J: imm the target, JR: s; d the link register or 0): the block's last op but one */
+    K_BEQ, K_BNE, K_BLEZ, K_BGTZ, K_BLTZ, K_BGEZ, K_BC1F, K_BC1T, K_J, K_JR,
+    K_UNSUPPORTED,
+    K_END, /* after the block's last op */
+    K_CUT, /* after the last op of a run cut short in front of stop_at */
+};
+#define K_IS_BRANCH(k) ((k) >= K_BEQ && (k) <= K_JR)
+
+/* An op: its handler in run_blocks (direct threading), the immediate (sign-extended to 64 bits where it is used: block
+ * code lives in the 32-bit segments, so targets and link values fit), the registers. */
+typedef struct bop {
+    const void *h;
+    int32_t imm;
+    uint8_t s, t, d;
+    uint8_t likely;
+} bop;
+#define IMM64(o) ((uint64_t)(int64_t)(o)->imm)
+
+#define BLK_MAX 64
+#define BLK_TAB 65536u
+#define BLK_ARENA (8u << 20)
+#define BLK_NO_PC 1u /* never a PC (odd): exception_vec overwrites it */
+
+typedef struct blk {
+    uint64_t vpc;      /* its first instruction */
+    uint64_t fall;     /* the address after its last op (the link value of its branch) */
+    uint32_t pa;       /* the RDRAM address of its first instruction */
+    uint32_t page;     /* its rdram_gen page */
+    uint32_t gen;      /* that page's counter when the words were last checked */
+    uint32_t tlb_gen;  /* mapped: the TLB generation it was translated under */
+    uint32_t len4;     /* 4 x n */
+    uint32_t cmp4;     /* the bytes of words (every instruction decode looked at, the first at least) */
+    uint32_t maxcost;  /* bound of the ticks its ops take before the last one starts (cum[n - 1]) */
+    uint32_t fcsum;    /* fetch ticks of all of it */
+    uint16_t n;        /* ops (0: none, step() runs the instruction) */
+    uint8_t fc;        /* fetch ticks per instruction */
+    uint8_t branch;    /* it ends with a branch or jump and its delay slot */
+    uint8_t mapped;    /* translated through the TLB (or kuseg under ERL) */
+    uint8_t erl;       /* mapped: Status.ERL it was translated under */
+    uint8_t idle;      /* a branch to itself with a NOP in its delay slot (nothing changes while it spins) */
+    uint8_t nolink;    /* links may not lead here: mapped (its translation is checked through the table), or replaced
+                        * in the table (decoded again or evicted: no longer revalidated, its counter could wrap) */
+    uint64_t lastpc;   /* its last op's address */
+    /* The blocks run after it last (fall-through / not taken, and taken or jumped to): a link skips the table, the
+     * block's own checks still run. A link is only written when no flush happened since both blocks were found, so it
+     * never points into a reused arena. */
+    struct blk *succ[2];
+    const uint32_t *words; /* the instruction words decode looked at (RDRAM's bytes) */
+    const uint32_t *cum;   /* cum[k]: bound of the ticks ops 0..k-1 take */
+    bop ops[];         /* n ops, then a K_END */
+} blk;
+
+struct n64_blocks {
+    blk *tab[BLK_TAB]; /* direct mapped by vpc */
+    uint8_t *arena;
+    size_t used;
+    uint32_t epoch;    /* bumped by every flush */
+};
+
+void n64_cpu_free(n64_machine *m)
+{
+    if (m->blocks) {
+        free(m->blocks->arena);
+        free(m->blocks);
+        m->blocks = NULL;
+    }
+}
+
+void n64_set_interp_reference(n64_machine *m, int on) { m->interp_ref = on != 0; }
+
+static void blocks_flush(struct n64_blocks *bc)
+{
+    memset(bc->tab, 0, sizeof bc->tab);
+    bc->used = 0;
+    bc->epoch++;
+}
+
+static inline uint32_t blk_index(uint64_t pc) { return (((uint32_t)pc >> 2) ^ ((uint32_t)pc >> 29)) & (BLK_TAB - 1); }
+
+/* The latency n64_fpu_cop1 charges for a COP1 instruction (op_s / op_d: ADD / SUB, MUL, DIV, SQRT). */
+static uint32_t fpu_extra(uint32_t ins)
+{
+    uint32_t fmt = (ins >> 21) & 31, fn = ins & 0x3F;
+    if (fmt == 0x10)
+        return fn <= 1 ? 4 : fn == 2 ? 6 : fn == 3 || fn == 4 ? 56 : 0;
+    if (fmt == 0x11)
+        return fn <= 1 ? 4 : fn == 2 ? 12 : fn == 3 || fn == 4 ? 114 : 0;
+    return 0;
+}
+
+/* Decodes one instruction at ipc into o. Returns its kind (K_UNSUPPORTED: step() runs it) and the bound of the ticks
+ * it adds beyond its fetch in *extra. */
+static uint32_t blk_decode(uint32_t ins, uint64_t ipc, bop *o, uint32_t *extra)
+{
+    uint32_t rs = RS(ins), rt = RT(ins), rd = RD(ins), sa = SA(ins);
+    uint64_t simm = (uint64_t)IMM(ins), zimm = ins & 0xFFFFu;
+    uint32_t k = K_UNSUPPORTED;
+    uint64_t imm64 = 0;
+    memset(o, 0, sizeof *o);
+    *extra = 0;
+    o->s = (uint8_t)rs;
+    o->t = (uint8_t)rt;
+    switch (ins >> 26) {
+    case 0x00: { /* SPECIAL */
+        static const uint8_t rr[64] = {
+            [0x04] = K_SLLV, [0x06] = K_SRLV, [0x07] = K_SRAV, [0x14] = K_DSLLV, [0x16] = K_DSRLV, [0x17] = K_DSRAV,
+            [0x21] = K_ADDU, [0x23] = K_SUBU, [0x24] = K_AND, [0x25] = K_OR, [0x26] = K_XOR, [0x27] = K_NOR,
+            [0x2A] = K_SLT, [0x2B] = K_SLTU, [0x2D] = K_DADDU, [0x2F] = K_DSUBU,
+            [0x00] = K_SLL, [0x02] = K_SRL, [0x03] = K_SRA, [0x38] = K_DSLL, [0x3A] = K_DSRL, [0x3B] = K_DSRA,
+            [0x3C] = K_DSLL, [0x3E] = K_DSRL, [0x3F] = K_DSRA,
+        };
+        uint32_t fn = ins & 0x3F;
+        o->d = (uint8_t)rd;
+        if (rr[fn] || fn == 0x00) {
+            k = rr[fn];
+            imm64 = fn >= 0x3C ? sa + 32 : sa;
+            if (rd == 0)
+                k = K_NOP;
+            break;
+        }
+        switch (fn) {
+        case 0x08: k = K_JR; o->d = 0; break;
+        case 0x09: k = K_JR; break; /* JALR: d the link register (0: none) */
+        case 0x0F: k = K_NOP; break; /* SYNC */
+        case 0x10: k = rd ? K_MFHI : K_NOP; break;
+        case 0x12: k = rd ? K_MFLO : K_NOP; break;
+        case 0x11: k = K_MTHI; break;
+        case 0x13: k = K_MTLO; break;
+        case 0x18: k = K_MULT; *extra = COST_MULT; break;
+        case 0x19: k = K_MULTU; *extra = COST_MULT; break;
+        case 0x1A: k = K_DIV; *extra = COST_DIV; break;
+        case 0x1B: k = K_DIVU; *extra = COST_DIV; break;
+        case 0x1C: k = K_DMULT; *extra = COST_DMULT; break;
+        case 0x1D: k = K_DMULTU; *extra = COST_DMULT; break;
+        case 0x1E: k = K_DDIV; *extra = COST_DDIV; break;
+        case 0x1F: k = K_DDIVU; *extra = COST_DDIV; break;
+        case 0x20: k = rd ? K_ADD : K_UNSUPPORTED; break;
+        case 0x22: k = rd ? K_SUB : K_UNSUPPORTED; break;
+        case 0x2C: k = rd ? K_DADD : K_UNSUPPORTED; break;
+        case 0x2E: k = rd ? K_DSUB : K_UNSUPPORTED; break;
+        default: break; /* traps, SYSCALL, BREAK, reserved */
+        }
+        break;
+    }
+    case 0x01: /* REGIMM */
+        switch (rt) {
+        case 0x00: case 0x02: case 0x10: case 0x12: k = K_BLTZ; break;
+        case 0x01: case 0x03: case 0x11: case 0x13: k = K_BGEZ; break;
+        default: break; /* traps */
+        }
+        o->likely = (rt & 2) != 0;
+        o->d = (rt & 0x10) ? 31 : 0;
+        imm64 = ipc + 4 + (simm << 2);
+        break;
+    case 0x02: case 0x03: /* J JAL */
+        k = K_J;
+        o->d = (ins >> 26) == 0x03 ? 31 : 0;
+        imm64 = ((ipc + 4) & ~0x0FFFFFFFull) | ((uint64_t)(ins & 0x03FFFFFF) << 2);
+        break;
+    case 0x04: case 0x14: k = K_BEQ; goto branch;
+    case 0x05: case 0x15: k = K_BNE; goto branch;
+    case 0x06: case 0x16: k = K_BLEZ; goto branch;
+    case 0x07: case 0x17: k = K_BGTZ;
+    branch:
+        o->likely = (ins >> 26) >= 0x14;
+        imm64 = ipc + 4 + (simm << 2);
+        break;
+    case 0x08: k = rt ? K_ADDI : K_UNSUPPORTED; imm64 = simm; break;
+    case 0x09: k = K_ADDIU; imm64 = simm; break;
+    case 0x0A: k = K_SLTI; imm64 = simm; break;
+    case 0x0B: k = K_SLTIU; imm64 = simm; break;
+    case 0x0C: k = K_ANDI; imm64 = zimm; break;
+    case 0x0D: k = K_ORI; imm64 = zimm; break;
+    case 0x0E: k = K_XORI; imm64 = zimm; break;
+    case 0x0F: k = K_LI; imm64 = simm << 16; break;
+    case 0x18: k = rt ? K_DADDI : K_UNSUPPORTED; imm64 = simm; break;
+    case 0x19: k = K_DADDIU; imm64 = simm; break;
+    case 0x11: /* COP1 */
+        if (rs == 0x08) {
+            k = (rt & 1) ? K_BC1T : K_BC1F;
+            o->likely = (rt & 2) != 0;
+            imm64 = ipc + 4 + (simm << 2);
+        } else {
+            k = K_COP1;
+            imm64 = ins;
+            *extra = fpu_extra(ins);
+        }
+        break;
+    case 0x10: /* COP0: the moves (kernel mode: usable, 64-bit allowed) */
+        o->d = (uint8_t)rd;
+        o->likely = (rs & 1) != 0;
+        if (rs == 0x00 || rs == 0x01)
+            k = rt ? K_MFC0 : K_NOP;
+        else if (rs == 0x04 || rs == 0x05)
+            k = K_MTC0;
+        break;
+    case 0x2F: k = K_CACHE; break;
+    case 0x1A: k = K_LDL; break;
+    case 0x1B: k = K_LDR; break;
+    case 0x20: k = K_LB; *extra = COST_DATA_UNCACHED; break;
+    case 0x21: k = K_LH; *extra = COST_DATA_UNCACHED; break;
+    case 0x22: k = K_LWL; break;
+    case 0x23: k = K_LW; *extra = COST_DATA_UNCACHED; break;
+    case 0x24: k = K_LBU; *extra = COST_DATA_UNCACHED; break;
+    case 0x25: k = K_LHU; *extra = COST_DATA_UNCACHED; break;
+    case 0x26: k = K_LWR; break;
+    case 0x27: k = K_LWU; *extra = COST_DATA_UNCACHED; break;
+    case 0x37: k = K_LD; *extra = COST_DATA_UNCACHED; break;
+    case 0x28: k = K_SB; break;
+    case 0x29: k = K_SH; break;
+    case 0x2A: k = K_SWL; break;
+    case 0x2B: k = K_SW; break;
+    case 0x2C: k = K_SDL; break;
+    case 0x2D: k = K_SDR; break;
+    case 0x2E: k = K_SWR; break;
+    case 0x3F: k = K_SD; break;
+    case 0x31: k = K_LWC1; *extra = COST_DATA_UNCACHED; break;
+    case 0x35: k = K_LDC1; *extra = COST_DATA_UNCACHED; break;
+    case 0x39: k = K_SWC1; break;
+    case 0x3D: k = K_SDC1; break;
+    default: break; /* COP2, COP3, LL / SC / LLD / SCD, reserved */
+    }
+    if ((k >= K_LB && k <= K_LDR) || k == K_LWC1 || k == K_LDC1 || (k >= K_SB && k <= K_SDC1) || k == K_CACHE)
+        imm64 = simm;
+    if (imm64 != (uint64_t)(int64_t)(int32_t)imm64)
+        k = K_UNSUPPORTED; /* a target out of the 32-bit segments (step() faults on it) */
+    o->imm = (int32_t)imm64;
+    if (k >= K_LB && k <= K_LDR && rt == 0)
+        k = K_UNSUPPORTED; /* a load into r0: rare, step() */
+    if (k >= K_ADDIU && k <= K_LI && rt == 0)
+        k = K_NOP;
+    return k;
+}
+
+static __attribute__((noinline)) blk *blk_build(n64_machine *m, struct n64_blocks *bc, const void *const *h,
+                                                uint64_t pc, uint32_t pa, uint32_t fc, bool mapped)
+{
+    uint32_t limit = (0x1000u - (pa & 0xFFFu)) / 4;
+    if (limit > BLK_MAX)
+        limit = BLK_MAX;
+    size_t need = sizeof(blk) + (limit + 1) * sizeof(bop) + 2 * limit * 4 + 32;
+    if (bc->used + need > BLK_ARENA)
+        return NULL;
+    blk *b = (blk *)(void *)(bc->arena + bc->used);
+    const uint8_t *src = m->rdram + pa;
+    uint32_t n = 0, branch = 0, seen = 1, ex[BLK_MAX], kind[BLK_MAX];
+    for (uint32_t i = 0; i < limit; i++) {
+        uint64_t ipc = pc + 4 * i;
+        uint32_t k = blk_decode(n64_be32(src + 4 * i), ipc, &b->ops[i], &ex[i]);
+        kind[i] = k;
+        seen = i + 1;
+        if (k == K_UNSUPPORTED)
+            break;
+        if (K_IS_BRANCH(k)) {
+            /* With its delay slot in the block: an op, not a branch, in the page. */
+            if (i + 1 >= limit)
+                break;
+            seen = i + 2;
+            uint32_t dk = blk_decode(n64_be32(src + 4 * (i + 1)), ipc + 4, &b->ops[i + 1], &ex[i + 1]);
+            if (dk == K_UNSUPPORTED || K_IS_BRANCH(dk))
+                break;
+            kind[i + 1] = dk;
+            n = i + 2;
+            branch = 1;
+            break;
+        }
+        n = i + 1;
+    }
+    for (uint32_t i = 0; i < n; i++)
+        b->ops[i].h = h[kind[i]];
+    memset(&b->ops[n], 0, sizeof(bop));
+    b->ops[n].h = h[K_END];
+    uint32_t *words = (uint32_t *)(void *)&b->ops[n + 1];
+    uint32_t *cum = words + seen;
+    memcpy(words, src, (size_t)seen * 4);
+    for (uint32_t i = 0, t = 0; i < n; i++) {
+        cum[i] = t;
+        t += fc + ex[i];
+    }
+    b->vpc = pc;
+    b->fall = pc + 4 * n;
+    b->pa = pa;
+    b->page = pa >> N64_PAGE_SHIFT;
+    b->gen = m->rdram_gen[b->page];
+    b->tlb_gen = m->cpu.tlb_gen;
+    b->len4 = 4 * n;
+    b->cmp4 = 4 * seen;
+    b->maxcost = n ? cum[n - 1] : 0;
+    b->fcsum = fc * n;
+    b->n = (uint16_t)n;
+    b->fc = (uint8_t)fc;
+    b->branch = (uint8_t)branch;
+    b->mapped = mapped;
+    b->nolink = mapped;
+    b->erl = (m->cpu.cop0[C0_STATUS] & SR_ERL) != 0;
+    b->lastpc = pc + 4 * (n ? n - 1 : 0);
+    b->succ[0] = b->succ[1] = NULL;
+    b->idle = n == 2 && branch && kind[0] != K_JR && kind[0] != K_BC1F && kind[0] != K_BC1T && !b->ops[0].d &&
+              IMM64(&b->ops[0]) == pc && kind[1] == K_NOP;
+#ifdef N64_BLK_NO_IDLE /* measurements of the blocks alone */
+    b->idle = 0;
+#endif
+    b->words = words;
+    b->cum = cum;
+    bc->used += (sizeof(blk) + (size_t)(n + 1) * sizeof(bop) + (size_t)(seen + n) * 4 + 7) & ~(size_t)7;
+    blk **slot = &bc->tab[blk_index(pc)];
+    if (*slot)
+        (*slot)->nolink = 1; /* replaced: links to it now go through the table */
+    *slot = b;
+    return b;
+}
+
+/* The block at pc (kernel mode), decoded when missing, checked against its page counter and its translation. NULL or
+ * n = 0: none (step() runs the instruction). h: run_blocks' handlers. */
+static __attribute__((noinline)) blk *blk_get_slow(n64_machine *m, uint64_t pc, const void *const *h)
+{
+    struct n64_blocks *bc = m->blocks;
+    if (!bc) {
+        bc = m->blocks = calloc(1, sizeof *bc);
+        if (bc && !(bc->arena = malloc(BLK_ARENA))) {
+            free(bc);
+            bc = m->blocks = NULL;
+        }
+        if (!bc)
+            return NULL;
+    }
+    if ((pc & 3) || pc != (uint64_t)(int64_t)(int32_t)pc)
+        return NULL;
+    uint32_t a = (uint32_t)pc, pa, fc = COST_CACHED;
+    bool mapped = false;
+    if (a - 0x80000000u < 0x20000000u) {
+        pa = a - 0x80000000u;
+    } else if (a - 0xA0000000u < 0x20000000u) {
+        pa = a - 0xA0000000u;
+        fc = COST_UNCACHED_RAM;
+    } else {
+        if (!vtop_slow(m, pc, ACC_FETCH, &pa, false))
+            return NULL; /* step() raises the TLB / address exception */
+        mapped = true;
+    }
+    if (pa >= m->rdram_size)
+        return NULL;
+    blk *b = bc->tab[blk_index(pc)];
+    if (b && b->vpc == pc && b->pa == pa && b->fc == fc && !memcmp(m->rdram + pa, b->words, b->cmp4)) {
+        b->gen = m->rdram_gen[b->page]; /* the page was written, not this code; or the TLB, not this mapping */
+        b->tlb_gen = m->cpu.tlb_gen;
+        b->erl = (m->cpu.cop0[C0_STATUS] & SR_ERL) != 0;
+        return b;
+    }
+    b = blk_build(m, bc, h, pc, pa, fc, mapped);
+    if (!b) {
+        blocks_flush(bc);
+        b = blk_build(m, bc, h, pc, pa, fc, mapped);
+    }
+    return b;
+}
+
+static N64_HOT_INLINE blk *blk_get(n64_machine *m, uint64_t pc, const void *const *h)
+{
+    struct n64_blocks *bc = m->blocks;
+    if (N64_LIKELY(bc != NULL)) {
+        blk *b = bc->tab[blk_index(pc)];
+        if (N64_LIKELY(b && b->vpc == pc && m->rdram_gen[b->page] == b->gen &&
+                       (!b->mapped || (b->tlb_gen == m->cpu.tlb_gen &&
+                                       b->erl == ((m->cpu.cop0[C0_STATUS] & SR_ERL) != 0)))))
+            return b;
+    }
+    return blk_get_slow(m, pc, h);
+}
+
+/* A block's data access outside the inline KSEG0 / KSEG1 RDRAM paths (mapped addresses, the bus): the interpreter's
+ * own path, with the clock where step() has it (now). Return -1 with nothing done when the access would raise an
+ * exception (step() then runs the instruction), 0 for RDRAM (*pa: where), 1 for the bus (the block stops after it). */
+static __attribute__((noinline)) int blk_load(n64_machine *m, uint64_t va, int size, bool partial, uint64_t *out,
+                                              uint64_t now)
+{
+    uint32_t pa;
+    if (!vtop(m, va, ACC_LOAD, &pa, false))
+        return -1;
+    m->now = now;
+    if (partial)
+        rd_partial_x(m, va, size, out, false);
+    else
+        rd_x(m, va, size, out, false);
+    return (pa & ~(uint32_t)(size - 1)) >= m->rdram_size;
+}
+
+static __attribute__((noinline)) int blk_store(n64_machine *m, uint64_t va, int size, uint64_t v, uint64_t mask,
+                                               bool partial, uint64_t now, uint32_t *pa_out)
+{
+    uint32_t pa;
+    if (!vtop(m, va, ACC_STORE, &pa, false))
+        return -1;
+    m->now = now;
+    if (partial)
+        store_masked_x(m, va, v, mask, size, false);
+    else
+        wr_x(m, va, size, v, false);
+    pa &= ~(uint32_t)(size - 1);
+    *pa_out = pa;
+    return pa >= m->rdram_size;
+}
+
+/* COP1 through n64_fpu_cop1 with cur / ds / the clock as step() has them. True when it took an exception (pc, npc and
+ * COP0 then hold the exception's entry). */
+static __attribute__((noinline)) bool blk_cop1(n64_machine *m, uint32_t ins, uint64_t pc, bool ds, uint64_t now,
+                                               uint64_t ran)
+{
+    n64_cpu *c = &m->cpu;
+    m->now = now;
+    m->instructions = ran;
+    c->cur = pc;
+    c->ds = ds;
+    c->pc = BLK_NO_PC;
+    n64_fpu_cop1(m, ins);
+    c->gpr[0] = 0;
+    return c->pc != BLK_NO_PC;
+}
+
+enum { BLK_STOPPED, BLK_INTERPRET, BLK_SLOW, BLK_NEAR };
+
+/* After a bus access by op i of b, the clock at now: whether the block must stop after that op (SLOW_DONE). */
+static inline bool bus_moved(n64_machine *m, const blk *b, uint32_t i, uint64_t now, uint64_t stop)
+{
+    return m->cpu.irq || m->stop_at != stop || (m->mi_mode & 0x80) || m->rdram_gen[b->page] != b->gen ||
+           (i + 1 < b->n && now + (b->maxcost - b->cum[i + 1]) >= stop);
+}
+
+static inline uint64_t be_load(const uint8_t *p, int size)
+{
+    switch (size) {
+    case 1: return p[0];
+    case 2: return n64_be16(p);
+    case 4: return n64_be32(p);
+    default: return be64(p);
+    }
+}
+
+static inline void be_store(uint8_t *p, int size, uint64_t v)
+{
+    switch (size) {
+    case 1: p[0] = (uint8_t)v; break;
+    case 2: n64_wbe16(p, (uint16_t)v); break;
+    case 4: n64_wbe32(p, (uint32_t)v); break;
+    default: wbe64(p, v); break;
+    }
+}
+
+/* Runs blocks one after the other from pc (kernel mode, not in a delay slot, MI repeat mode off, no interrupt pending,
+ * now < stop_at). Returns BLK_STOPPED where the run loop must check again (every field of the machine as step()'s loop
+ * leaves it), BLK_INTERPRET when the instruction at pc must be stepped (no block there), BLK_SLOW when step() must run
+ * it (an op that falls back: the machine holds the state in front of it), BLK_NEAR when stop_at is close: the run loop
+ * steps to it. */
+static __attribute__((noinline)) int run_blocks(n64_machine *m)
+{
+    n64_cpu *const c = &m->cpu;
+    uint64_t *const r = c->gpr;
+    uint8_t *const rdram = m->rdram;
+    const uint64_t rdsize = m->rdram_size;
+    const uint32_t sr = (uint32_t)c->cop0[C0_STATUS];
+    uint64_t pc = c->pc, npc, now = m->now, stop = m->stop_at, ran = m->instructions;
+    const blk *b;
+    const bop *o, *ob;
+    uint64_t btgt, va, off, v;
+    uint32_t pa;
+    int brk, ret, nds = 0;
+    bop part[BLK_MAX + 1]; /* a block's first ops and a K_END: a run cut short in front of stop_at */
+    static const void *const op_label[K_CUT + 1] = {
+        [K_NOP] = &&l_nop, [K_ADDU] = &&l_addu, [K_SUBU] = &&l_subu, [K_AND] = &&l_and, [K_OR] = &&l_or,
+        [K_XOR] = &&l_xor, [K_NOR] = &&l_nor, [K_SLT] = &&l_slt, [K_SLTU] = &&l_sltu, [K_DADDU] = &&l_daddu,
+        [K_DSUBU] = &&l_dsubu, [K_SLLV] = &&l_sllv, [K_SRLV] = &&l_srlv, [K_SRAV] = &&l_srav, [K_DSLLV] = &&l_dsllv,
+        [K_DSRLV] = &&l_dsrlv, [K_DSRAV] = &&l_dsrav, [K_ADD] = &&l_add, [K_SUB] = &&l_sub, [K_DADD] = &&l_dadd,
+        [K_DSUB] = &&l_dsub, [K_SLL] = &&l_sll, [K_SRL] = &&l_srl, [K_SRA] = &&l_sra, [K_DSLL] = &&l_dsll,
+        [K_DSRL] = &&l_dsrl, [K_DSRA] = &&l_dsra, [K_ADDIU] = &&l_addiu, [K_DADDIU] = &&l_daddiu,
+        [K_SLTI] = &&l_slti, [K_SLTIU] = &&l_sltiu, [K_ANDI] = &&l_andi, [K_ORI] = &&l_ori, [K_XORI] = &&l_xori,
+        [K_LI] = &&l_li, [K_ADDI] = &&l_addi, [K_DADDI] = &&l_daddi, [K_MFHI] = &&l_mfhi, [K_MFLO] = &&l_mflo,
+        [K_MTHI] = &&l_mthi, [K_MTLO] = &&l_mtlo, [K_MULT] = &&l_mult, [K_MULTU] = &&l_multu, [K_DIV] = &&l_div,
+        [K_DIVU] = &&l_divu, [K_DMULT] = &&l_dmult, [K_DMULTU] = &&l_dmultu, [K_DDIV] = &&l_ddiv,
+        [K_DDIVU] = &&l_ddivu, [K_LB] = &&l_lb, [K_LBU] = &&l_lbu, [K_LH] = &&l_lh, [K_LHU] = &&l_lhu,
+        [K_LW] = &&l_lw, [K_LWU] = &&l_lwu, [K_LD] = &&l_ld, [K_LWL] = &&l_lwl, [K_LWR] = &&l_lwr,
+        [K_LDL] = &&l_ldl, [K_LDR] = &&l_ldr, [K_SB] = &&l_sb, [K_SH] = &&l_sh, [K_SW] = &&l_sw, [K_SD] = &&l_sd,
+        [K_SWL] = &&l_swl, [K_SWR] = &&l_swr, [K_SDL] = &&l_sdl, [K_SDR] = &&l_sdr, [K_LWC1] = &&l_lwc1,
+        [K_LDC1] = &&l_ldc1, [K_SWC1] = &&l_swc1, [K_SDC1] = &&l_sdc1, [K_COP1] = &&l_cop1, [K_MFC0] = &&l_mfc0,
+        [K_MTC0] = &&l_mtc0, [K_CACHE] = &&l_cache, [K_BEQ] = &&l_beq,
+        [K_BNE] = &&l_bne, [K_BLEZ] = &&l_blez, [K_BGTZ] = &&l_bgtz, [K_BLTZ] = &&l_bltz, [K_BGEZ] = &&l_bgez,
+        [K_BC1F] = &&l_bc1f, [K_BC1T] = &&l_bc1t, [K_J] = &&l_j, [K_JR] = &&l_jr, [K_END] = &&l_end,
+        [K_CUT] = &&l_cut,
+    };
+
+/* The next op (the K_END after the last one that runs ends the block). */
+#define NEXT() goto *(++o)->h
+/* After an op that may stop the block (a bus access, a store into its own words). */
+#define NEXT_MEM()                                                                                                     \
+    do {                                                                                                               \
+        if (N64_UNLIKELY(brk))                                                                                         \
+            goto stop_after;                                                                                           \
+        NEXT();                                                                                                        \
+    } while (0)
+#define IDX() ((uint32_t)(o - ob))
+/* The fetch ticks of the ops after o, added at entry: the clock step() has during o is now - REST(). */
+#define REST() ((uint64_t)b->fc * (b->n - IDX() - 1u))
+#define IN_DS() (b->branch && IDX() == b->n - 1u)
+/* After a slow access: -1 falls back. 1, the bus: the block stops after this op if the access raised the interrupt
+ * line, moved stop_at (an event, a DMA's end, the RSP started), switched MI repeat mode on, wrote into the block's page
+ * (a DMA) or took so long (its bus cost) that the ops left may no longer all start before stop_at; otherwise nothing
+ * the block relies on moved and it goes on. */
+#define SLOW_DONE(res)                                                                                                 \
+    do {                                                                                                               \
+        int res_ = (res);                                                                                              \
+        if (res_ < 0)                                                                                                  \
+            goto bail;                                                                                                 \
+        now = m->now + REST();                                                                                         \
+        if (res_ > 0 && N64_UNLIKELY(bus_moved(m, b, IDX(), now - REST(), stop))) {                                    \
+            stop = m->stop_at;                                                                                         \
+            brk = 1;                                                                                                   \
+        }                                                                                                              \
+    } while (0)
+/* An aligned load of size bytes at s + imm into v (rd_x). */
+#define BLOAD(size)                                                                                                    \
+    do {                                                                                                               \
+        va = r[o->s] + IMM64(o);                                                                                       \
+        if (N64_UNLIKELY(va & (uint64_t)((size) - 1)))                                                                 \
+            goto bail;                                                                                                 \
+        off = va - 0xFFFFFFFF80000000ull;                                                                              \
+        if (N64_LIKELY(off < rdsize)) {                                                                                \
+            v = be_load(rdram + off, size);                                                                            \
+        } else if (off - 0x20000000u < rdsize) {                                                                       \
+            v = be_load(rdram + (off - 0x20000000u), size);                                                            \
+            now += COST_DATA_UNCACHED;                                                                                 \
+        } else {                                                                                                       \
+            SLOW_DONE(blk_load(m, va, size, false, &v, now - REST()));                                                 \
+        }                                                                                                              \
+    } while (0)
+/* The word / doubleword a partial load reads (rd_partial_x: the aligned one, no uncached cost). */
+#define BLOAD_PARTIAL(size)                                                                                            \
+    do {                                                                                                               \
+        va = r[o->s] + IMM64(o);                                                                                       \
+        off = va - 0xFFFFFFFF80000000ull;                                                                              \
+        if (N64_LIKELY(off < 0x40000000u) && (pa = ((uint32_t)off & 0x1FFFFFFFu & ~(uint32_t)((size) - 1))) < rdsize) \
+            v = be_load(rdram + pa, size);                                                                             \
+        else                                                                                                           \
+            SLOW_DONE(blk_load(m, va, size, true, &v, now - REST()));                                                  \
+    } while (0)
+/* A store into the running block's words stops it after this op (the next lookup sees the new words). */
+#define WROTE_CHECK(pa_, size)                                                                                         \
+    do {                                                                                                               \
+        if (N64_UNLIKELY((pa_) + (size) - 1 - b->pa < b->len4 + (size) - 1))                                           \
+            brk = 1;                                                                                                   \
+    } while (0)
+/* RDRAM at pa was written inline: its page counter (n64_rdram_wrote_aligned without the lifted range: no lifted
+ * function runs while the interpreter does, rc_len is 0), the check above. */
+#define WROTE(pa_, size)                                                                                               \
+    do {                                                                                                               \
+        m->rdram_gen[(pa_) >> N64_PAGE_SHIFT]++;                                                                       \
+        WROTE_CHECK(pa_, size);                                                                                        \
+    } while (0)
+/* An aligned store of size bytes of val at s + imm (wr_x: no uncached cost). */
+#define BSTORE(size, val)                                                                                              \
+    do {                                                                                                               \
+        va = r[o->s] + IMM64(o);                                                                                       \
+        v = (val);                                                                                                     \
+        if (N64_UNLIKELY(va & (uint64_t)((size) - 1)))                                                                 \
+            goto bail;                                                                                                 \
+        off = va - 0xFFFFFFFF80000000ull;                                                                              \
+        if (N64_LIKELY(off < 0x40000000u) && (pa = (uint32_t)off & 0x1FFFFFFFu) < rdsize) {                            \
+            be_store(rdram + pa, size, v);                                                                             \
+            WROTE(pa, size);                                                                                           \
+        } else {                                                                                                       \
+            int res2_ = blk_store(m, va, size, v, 0, false, now - REST(), &pa);                                        \
+            SLOW_DONE(res2_);                                                                                          \
+            if (res2_ == 0)                                                                                            \
+                WROTE_CHECK(pa, size);                                                                                 \
+        }                                                                                                              \
+    } while (0)
+/* A partial store (store_masked_x): data and mask left-aligned in 64 bits, size 4 uses the upper word. */
+#define BSTORE_MASKED(size, data, mask)                                                                                \
+    do {                                                                                                               \
+        off = va - 0xFFFFFFFF80000000ull;                                                                              \
+        if (N64_LIKELY(off < 0x40000000u) && (pa = ((uint32_t)off & 0x1FFFFFFFu & ~(uint32_t)((size) - 1))) < rdsize) {\
+            uint8_t *q_ = rdram + pa;                                                                                  \
+            for (int i_ = 0; i_ < (size); i_++) {                                                                      \
+                unsigned sh_ = 56 - 8 * (unsigned)i_;                                                                  \
+                if (((mask) >> sh_) & 0xFF)                                                                            \
+                    q_[i_] = (uint8_t)((data) >> sh_);                                                                 \
+            }                                                                                                          \
+            WROTE(pa, size);                                                                                           \
+        } else {                                                                                                       \
+            int res2_ = blk_store(m, va, size, data, mask, true, now - REST(), &pa);                                   \
+            SLOW_DONE(res2_);                                                                                          \
+            if (res2_ == 0)                                                                                            \
+                WROTE_CHECK(pa, size);                                                                                 \
+        }                                                                                                              \
+    } while (0)
+#define BRANCH(cond)                                                                                                   \
+    do {                                                                                                               \
+        if (cond)                                                                                                      \
+            btgt = IMM64(o);                                                                                           \
+        else if (o->likely)                                                                                            \
+            goto likely_skip;                                                                                          \
+    } while (0)
+
+    b = blk_get(m, pc, op_label);
+have_block:
+    if (!b || !b->n) {
+        ret = BLK_INTERPRET;
+        goto out;
+    }
+again:
+    ob = b->ops;
+    btgt = b->fall;
+    brk = 0;
+    if (N64_UNLIKELY(now + b->maxcost >= stop)) {
+        /* Only the ops sure to start before stop_at (the loop checked the first: now < stop_at), from a copy ending
+         * with a K_END. */
+        uint32_t k = 1;
+        while (k < b->n && now + b->cum[k] < stop)
+            k++;
+        memcpy(part, b->ops, k * sizeof(bop));
+        memset(&part[k], 0, sizeof(bop));
+        part[k].h = &&l_cut;
+        ob = part;
+    }
+    now += b->fcsum;
+    o = ob;
+    goto *o->h;
+
+l_nop: NEXT();
+l_addu: r[o->d] = sx32((uint32_t)r[o->s] + (uint32_t)r[o->t]); NEXT();
+l_subu: r[o->d] = sx32((uint32_t)r[o->s] - (uint32_t)r[o->t]); NEXT();
+l_and: r[o->d] = r[o->s] & r[o->t]; NEXT();
+l_or: r[o->d] = r[o->s] | r[o->t]; NEXT();
+l_xor: r[o->d] = r[o->s] ^ r[o->t]; NEXT();
+l_nor: r[o->d] = ~(r[o->s] | r[o->t]); NEXT();
+l_slt: r[o->d] = (int64_t)r[o->s] < (int64_t)r[o->t]; NEXT();
+l_sltu: r[o->d] = r[o->s] < r[o->t]; NEXT();
+l_daddu: r[o->d] = r[o->s] + r[o->t]; NEXT();
+l_dsubu: r[o->d] = r[o->s] - r[o->t]; NEXT();
+l_sllv: r[o->d] = sx32((uint32_t)r[o->t] << (r[o->s] & 31)); NEXT();
+l_srlv: r[o->d] = sx32((uint32_t)r[o->t] >> (r[o->s] & 31)); NEXT();
+l_srav: r[o->d] = sx32((uint64_t)((int64_t)r[o->t] >> (r[o->s] & 31))); NEXT();
+l_dsllv: r[o->d] = r[o->t] << (r[o->s] & 63); NEXT();
+l_dsrlv: r[o->d] = r[o->t] >> (r[o->s] & 63); NEXT();
+l_dsrav: r[o->d] = (uint64_t)((int64_t)r[o->t] >> (r[o->s] & 63)); NEXT();
+l_add: {
+    int32_t x;
+    if (__builtin_add_overflow((int32_t)r[o->s], (int32_t)r[o->t], &x))
+        goto bail;
+    r[o->d] = (uint64_t)(int64_t)x;
+    NEXT();
+}
+l_sub: {
+    int32_t x;
+    if (__builtin_sub_overflow((int32_t)r[o->s], (int32_t)r[o->t], &x))
+        goto bail;
+    r[o->d] = (uint64_t)(int64_t)x;
+    NEXT();
+}
+l_dadd: {
+    int64_t x;
+    if (__builtin_add_overflow((int64_t)r[o->s], (int64_t)r[o->t], &x))
+        goto bail;
+    r[o->d] = (uint64_t)x;
+    NEXT();
+}
+l_dsub: {
+    int64_t x;
+    if (__builtin_sub_overflow((int64_t)r[o->s], (int64_t)r[o->t], &x))
+        goto bail;
+    r[o->d] = (uint64_t)x;
+    NEXT();
+}
+l_sll: r[o->d] = sx32((uint32_t)r[o->t] << IMM64(o)); NEXT();
+l_srl: r[o->d] = sx32((uint32_t)r[o->t] >> IMM64(o)); NEXT();
+l_sra: r[o->d] = sx32((uint64_t)((int64_t)r[o->t] >> IMM64(o))); NEXT();
+l_dsll: r[o->d] = r[o->t] << IMM64(o); NEXT();
+l_dsrl: r[o->d] = r[o->t] >> IMM64(o); NEXT();
+l_dsra: r[o->d] = (uint64_t)((int64_t)r[o->t] >> IMM64(o)); NEXT();
+l_addiu: r[o->t] = sx32((uint32_t)r[o->s] + (uint32_t)IMM64(o)); NEXT();
+l_daddiu: r[o->t] = r[o->s] + IMM64(o); NEXT();
+l_slti: r[o->t] = (int64_t)r[o->s] < (int64_t)IMM64(o); NEXT();
+l_sltiu: r[o->t] = r[o->s] < IMM64(o); NEXT();
+l_andi: r[o->t] = r[o->s] & IMM64(o); NEXT();
+l_ori: r[o->t] = r[o->s] | IMM64(o); NEXT();
+l_xori: r[o->t] = r[o->s] ^ IMM64(o); NEXT();
+l_li: r[o->t] = IMM64(o); NEXT();
+l_addi: {
+    int32_t x;
+    if (__builtin_add_overflow((int32_t)r[o->s], (int32_t)IMM64(o), &x))
+        goto bail;
+    r[o->t] = (uint64_t)(int64_t)x;
+    NEXT();
+}
+l_daddi: {
+    int64_t x;
+    if (__builtin_add_overflow((int64_t)r[o->s], (int64_t)IMM64(o), &x))
+        goto bail;
+    r[o->t] = (uint64_t)x;
+    NEXT();
+}
+l_mfhi: r[o->d] = c->hi; NEXT();
+l_mflo: r[o->d] = c->lo; NEXT();
+l_mthi: c->hi = r[o->s]; NEXT();
+l_mtlo: c->lo = r[o->s]; NEXT();
+l_mult: {
+    int64_t p = (int64_t)(int32_t)r[o->s] * (int32_t)r[o->t];
+    c->lo = sx32((uint64_t)p);
+    c->hi = sx32((uint64_t)p >> 32);
+    now += COST_MULT;
+    NEXT();
+}
+l_multu: {
+    uint64_t p = (uint64_t)(uint32_t)r[o->s] * (uint32_t)r[o->t];
+    c->lo = sx32(p);
+    c->hi = sx32(p >> 32);
+    now += COST_MULT;
+    NEXT();
+}
+l_div: {
+    int32_t a = (int32_t)r[o->s], d = (int32_t)r[o->t];
+    if (d == 0) {
+        c->lo = a < 0 ? 1 : ~0ull;
+        c->hi = sx32((uint32_t)a);
+    } else if (a == INT32_MIN && d == -1) {
+        c->lo = sx32(0x80000000u);
+        c->hi = 0;
+    } else {
+        c->lo = sx32((uint32_t)(a / d));
+        c->hi = sx32((uint32_t)(a % d));
+    }
+    now += COST_DIV;
+    NEXT();
+}
+l_divu: {
+    uint32_t a = (uint32_t)r[o->s], d = (uint32_t)r[o->t];
+    if (d == 0) {
+        c->lo = ~0ull;
+        c->hi = sx32(a);
+    } else {
+        c->lo = sx32(a / d);
+        c->hi = sx32(a % d);
+    }
+    now += COST_DIV;
+    NEXT();
+}
+l_dmult: {
+    uint64_t a = r[o->s], d = r[o->t], hi, lo;
+    mulu64(a, d, &hi, &lo);
+    if ((int64_t)a < 0)
+        hi -= d;
+    if ((int64_t)d < 0)
+        hi -= a;
+    c->hi = hi;
+    c->lo = lo;
+    now += COST_DMULT;
+    NEXT();
+}
+l_dmultu:
+    mulu64(r[o->s], r[o->t], &c->hi, &c->lo);
+    now += COST_DMULT;
+    NEXT();
+l_ddiv: {
+    int64_t a = (int64_t)r[o->s], d = (int64_t)r[o->t];
+    if (d == 0) {
+        c->lo = a < 0 ? 1 : ~0ull;
+        c->hi = (uint64_t)a;
+    } else if (a == INT64_MIN && d == -1) {
+        c->lo = (uint64_t)a;
+        c->hi = 0;
+    } else {
+        c->lo = (uint64_t)(a / d);
+        c->hi = (uint64_t)(a % d);
+    }
+    now += COST_DDIV;
+    NEXT();
+}
+l_ddivu: {
+    uint64_t a = r[o->s], d = r[o->t];
+    if (d == 0) {
+        c->lo = ~0ull;
+        c->hi = a;
+    } else {
+        c->lo = a / d;
+        c->hi = a % d;
+    }
+    now += COST_DDIV;
+    NEXT();
+}
+l_lb: BLOAD(1); r[o->t] = (uint64_t)(int64_t)(int8_t)v; NEXT_MEM();
+l_lbu: BLOAD(1); r[o->t] = v; NEXT_MEM();
+l_lh: BLOAD(2); r[o->t] = (uint64_t)(int64_t)(int16_t)v; NEXT_MEM();
+l_lhu: BLOAD(2); r[o->t] = v; NEXT_MEM();
+l_lw: BLOAD(4); r[o->t] = sx32(v); NEXT_MEM();
+l_lwu: BLOAD(4); r[o->t] = v; NEXT_MEM();
+l_ld: BLOAD(8); r[o->t] = v; NEXT_MEM();
+l_lwl: {
+    BLOAD_PARTIAL(4);
+    unsigned sh = 8 * (unsigned)(va & 3);
+    uint32_t mask = 0xFFFFFFFFu << sh;
+    r[o->t] = sx32(((uint32_t)r[o->t] & ~mask) | ((uint32_t)v << sh)); /* LWL always loads bit 31 */
+    NEXT_MEM();
+}
+l_lwr: {
+    BLOAD_PARTIAL(4);
+    unsigned sh = 8 * (unsigned)((va ^ 3) & 3);
+    uint32_t mask = 0xFFFFFFFFu >> sh;
+    uint32_t x = ((uint32_t)r[o->t] & ~mask) | ((uint32_t)v >> sh);
+    r[o->t] = (va & 3) == 3 ? sx32(x) : (r[o->t] & 0xFFFFFFFF00000000ull) | x;
+    NEXT_MEM();
+}
+l_ldl: {
+    BLOAD_PARTIAL(8);
+    unsigned sh = 8 * (unsigned)(va & 7);
+    uint64_t mask = ~0ull << sh;
+    r[o->t] = (r[o->t] & ~mask) | (v << sh);
+    NEXT_MEM();
+}
+l_ldr: {
+    BLOAD_PARTIAL(8);
+    unsigned sh = 8 * (unsigned)((va ^ 7) & 7);
+    uint64_t mask = ~0ull >> sh;
+    r[o->t] = (r[o->t] & ~mask) | (v >> sh);
+    NEXT_MEM();
+}
+l_sb: BSTORE(1, r[o->t]); NEXT_MEM();
+l_sh: BSTORE(2, r[o->t]); NEXT_MEM();
+l_sw: BSTORE(4, r[o->t]); NEXT_MEM();
+l_sd: BSTORE(8, r[o->t]); NEXT_MEM();
+l_swl: {
+    va = r[o->s] + IMM64(o);
+    unsigned sh = 8 * (unsigned)(va & 3);
+    uint64_t mask = (uint64_t)(0xFFFFFFFFu >> sh) << 32, data = (uint64_t)((uint32_t)r[o->t] >> sh) << 32;
+    BSTORE_MASKED(4, data, mask);
+    NEXT_MEM();
+}
+l_swr: {
+    va = r[o->s] + IMM64(o);
+    unsigned sh = 8 * (unsigned)((va ^ 3) & 3);
+    uint64_t mask = (uint64_t)(0xFFFFFFFFu << sh) << 32, data = (uint64_t)((uint32_t)r[o->t] << sh) << 32;
+    BSTORE_MASKED(4, data, mask);
+    NEXT_MEM();
+}
+l_sdl: {
+    va = r[o->s] + IMM64(o);
+    unsigned sh = 8 * (unsigned)(va & 7);
+    uint64_t mask = ~0ull >> sh, data = r[o->t] >> sh;
+    BSTORE_MASKED(8, data, mask);
+    NEXT_MEM();
+}
+l_sdr: {
+    va = r[o->s] + IMM64(o);
+    unsigned sh = 8 * (unsigned)((va ^ 7) & 7);
+    uint64_t mask = ~0ull << sh, data = r[o->t] << sh;
+    BSTORE_MASKED(8, data, mask);
+    NEXT_MEM();
+}
+l_lwc1:
+    if (!(sr & SR_CU1))
+        goto bail;
+    BLOAD(4);
+    n64_fpu_write_s(c, o->t, (uint32_t)v);
+    NEXT_MEM();
+l_ldc1:
+    if (!(sr & SR_CU1))
+        goto bail;
+    BLOAD(8);
+    n64_fpu_write_d(c, o->t, v);
+    NEXT_MEM();
+l_swc1:
+    if (!(sr & SR_CU1))
+        goto bail;
+    BSTORE(4, n64_fpu_read_s(c, o->t));
+    NEXT_MEM();
+l_sdc1:
+    if (!(sr & SR_CU1))
+        goto bail;
+    BSTORE(8, n64_fpu_read_d(c, o->t));
+    NEXT_MEM();
+l_cop1:
+    if (!(sr & SR_CU1))
+        goto bail;
+    if (blk_cop1(m, (uint32_t)IMM64(o), b->vpc + 4 * IDX(), IN_DS(), now - REST(), ran + IDX())) {
+        ran += IDX() + 1; /* an exception: the machine is where step() leaves it */
+        m->instructions = ran;
+        return BLK_STOPPED;
+    }
+    now = m->now + REST();
+    NEXT();
+l_mfc0:
+    /* cop0_read: COUNT from the clock, RANDOM from the instruction count, as step() has them */
+    m->now = now - REST();
+    m->instructions = ran + IDX();
+    v = cop0_read(m, o->d);
+    r[o->t] = o->likely ? v : sx32(v);
+    NEXT();
+l_mtc0:
+    /* May move the interrupt line, stop_at (COMPARE), the mode (STATUS), the TLB generation (EntryHi): the block
+     * stops after it. */
+    m->now = now - REST();
+    m->instructions = ran + IDX();
+    cop0_write(m, o->d, o->likely ? r[o->t] : sx32(r[o->t]));
+    now = m->now + REST();
+    stop = m->stop_at;
+    brk = 1;
+    NEXT_MEM();
+l_cache:
+    if (!cache_op(m, o->t, r[o->s] + IMM64(o), false))
+        goto bail; /* a TLB exception: step() raises it */
+    NEXT();
+l_beq: BRANCH(r[o->s] == r[o->t]); NEXT();
+l_bne: BRANCH(r[o->s] != r[o->t]); NEXT();
+l_blez: BRANCH((int64_t)r[o->s] <= 0); NEXT();
+l_bgtz: BRANCH((int64_t)r[o->s] > 0); NEXT();
+l_bltz: {
+    bool t = (int64_t)r[o->s] < 0;
+    if (o->d)
+        r[31] = b->fall; /* BLTZAL & co. link whether taken or not */
+    BRANCH(t);
+    NEXT();
+}
+l_bgez: {
+    bool t = (int64_t)r[o->s] >= 0;
+    if (o->d)
+        r[31] = b->fall;
+    BRANCH(t);
+    NEXT();
+}
+l_bc1f:
+    if (!(sr & SR_CU1))
+        goto bail;
+    BRANCH(!(c->fcsr & FCSR_C));
+    NEXT();
+l_bc1t:
+    if (!(sr & SR_CU1))
+        goto bail;
+    BRANCH(c->fcsr & FCSR_C);
+    NEXT();
+l_j:
+    btgt = IMM64(o);
+    if (o->d)
+        r[o->d] = b->fall;
+    NEXT();
+l_jr:
+    btgt = r[o->s];
+    if (o->d)
+        r[o->d] = b->fall;
+    NEXT();
+
+
+l_end:
+    /* The whole block ran: on to its branch's target or its fall-through. */
+    ran += b->n;
+    pc = btgt;
+    c->cur = b->lastpc;
+    c->ds = b->branch;
+    if (N64_UNLIKELY(now >= stop)) {
+        ret = BLK_STOPPED;
+        goto out;
+    }
+    if (pc == b->vpc) {
+        if (N64_UNLIKELY(b->idle)) {
+            /* A branch to itself over a NOP: nothing but the clock and the count move until stop_at. Every op that
+             * starts before it runs (fc ticks each), as step() would run them. */
+            uint64_t nops = (stop - now + b->fc - 1) / b->fc;
+            now += nops * b->fc;
+            ran += nops;
+            if (nops & 1) { /* ends after the branch, its delay slot next */
+                c->cur = b->vpc;
+                c->ds = false;
+                pc = b->vpc + 4;
+                npc = b->vpc;
+                nds = 1;
+                ret = BLK_STOPPED;
+                goto out_npc;
+            }
+            ret = BLK_STOPPED;
+            goto out;
+        }
+        goto again; /* a loop on itself: its words and translation unchanged (no store into them, no TLB write) */
+    }
+    goto link;
+l_cut:
+    /* A run cut short in front of stop_at: the state after op IDX() - 1. */
+    goto cut;
+stop_after:
+    /* The op at o may have changed what the run loop checks (the bus) or written the block's own words. */
+    ++o;
+    if (IDX() == b->n) {
+        ran += b->n;
+        c->cur = b->vpc + 4 * (b->n - 1u);
+        c->ds = b->branch;
+        pc = btgt;
+        ret = BLK_STOPPED;
+        goto out;
+    }
+cut: {
+    uint32_t k = IDX();
+    now -= (uint64_t)b->fc * (b->n - k);
+    ran += k;
+    c->cur = b->vpc + 4 * (k - 1);
+    c->ds = false;
+    pc = b->vpc + 4 * k;
+    if (b->branch && k == b->n - 1u) { /* stopped between the branch and its delay slot */
+        npc = btgt;
+        nds = 1;
+        ret = BLK_STOPPED;
+        goto out_npc;
+    }
+    ret = !brk && now < stop ? BLK_NEAR : BLK_STOPPED;
+    goto out;
+}
+
+likely_skip:
+    /* The likely branch at o not taken: its delay slot (the block's last op) is nullified, neither fetched nor
+     * counted; step() leaves pc after it. */
+    now -= b->fc;
+    ran += b->n - 1;
+    c->cur = b->vpc + 4 * IDX();
+    c->ds = false;
+    pc = b->fall;
+    if (now >= stop) {
+        ret = BLK_STOPPED;
+        goto out;
+    }
+    if (pc == b->vpc)
+        goto again; /* a loop on itself: its words and translation unchanged (no store into them, no TLB write) */
+link: {
+    /* The next block through b's link when it still holds, else the table (and the link remembers it). */
+    unsigned w = pc != b->fall;
+    blk *nb = b->succ[w];
+    if (N64_LIKELY(nb && nb->vpc == pc && m->rdram_gen[nb->page] == nb->gen && !nb->nolink)) {
+        b = nb;
+        goto have_block;
+    }
+    uint32_t ep = m->blocks->epoch;
+    nb = blk_get(m, pc, op_label);
+    if (nb && m->blocks->epoch == ep) /* no flush meanwhile: b is still where it was */
+        ((blk *)b)->succ[w] = nb;
+    b = nb;
+    goto have_block;
+}
+
+bail: {
+    /* The op at o falls back to step(), from the state in front of it. */
+    uint32_t k = IDX();
+    now -= (uint64_t)b->fc * (b->n - k);
+    ran += k;
+    if (k > 0) {
+        c->cur = b->vpc + 4 * (k - 1);
+        c->ds = false;
+    }
+    pc = b->vpc + 4 * k;
+    ret = BLK_SLOW;
+    if (b->branch && k == b->n - 1u) {
+        npc = btgt;
+        nds = 1;
+        goto out_npc;
+    }
+}
+out:
+    npc = pc + 4;
+    nds = 0;
+out_npc:
+    c->pc = pc;
+    c->npc = npc;
+    c->next_ds = nds != 0;
+    m->now = now;
+    m->instructions = ran;
+    return ret;
+#undef NEXT
+#undef NEXT_MEM
+#undef IDX
+#undef REST
+#undef IN_DS
+#undef SLOW_DONE
+#undef BLOAD
+#undef BLOAD_PARTIAL
+#undef WROTE
+#undef WROTE_CHECK
+#undef BSTORE
+#undef BSTORE_MASKED
+#undef BRANCH
+}
+
 void n64_cpu_run(n64_machine *m)
 {
     if (N64_UNLIKELY(m->rc != NULL) && n64_recomp_active(m)) {
         n64_recomp_run(m); /* the same loop, with lifted code where a table covers the PC */
         return;
     }
+    n64_cpu *c = &m->cpu;
+    if (N64_UNLIKELY(m->interp_ref)) { /* the reference: step()'s own loop */
+        while (m->now < m->stop_at) {
+            if (N64_UNLIKELY(c->irq)) {
+                take_interrupt(m);
+                continue;
+            }
+            step(m);
+        }
+        return;
+    }
     while (m->now < m->stop_at) {
-        if (N64_UNLIKELY(m->cpu.irq)) {
+        if (N64_UNLIKELY(c->irq)) {
             take_interrupt(m);
             continue;
         }
-        step(m);
+        if (N64_LIKELY(!c->next_ds && c->ksu == 0 && !(m->mi_mode & 0x80) && c->npc == c->pc + 4)) {
+            int r = run_blocks(m);
+            if (r == BLK_STOPPED)
+                continue;
+            if (r == BLK_NEAR) { /* close to stop_at: step()'s loop to it */
+                while (m->now < m->stop_at && !c->irq)
+                    step(m);
+                continue;
+            }
+        }
+        step(m); /* the loop's checks hold here (BLK_INTERPRET / BLK_SLOW: in front of an instruction that may run) */
     }
 }
 
