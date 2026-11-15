@@ -12,6 +12,7 @@
 #include "rdp_cmd.h"
 
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdio.h>
 
 #ifndef GOLDEN_BUSY
@@ -923,9 +924,20 @@ static void t_lod(void)
 /* ---- Scenes -------------------------------------------------------------------------------------------------------- */
 static rdp_list scene;
 
+/* n64_rdp_set_thread_hook: every renderer thread heard as it starts and as it ends, on its own thread. */
+static atomic_int hook_up, hook_down;
+static void count_hook(int starting, void *user)
+{
+    atomic_fetch_add(starting ? &hook_up : &hook_down, *(int *)user);
+}
+
 static uint32_t busy_hash(int threads)
 {
+    static int one = 1;
     fresh(threads > 1 ? "busy scene, threads" : "busy scene");
+    atomic_store(&hook_up, 0);
+    atomic_store(&hook_down, 0);
+    n64_rdp_set_thread_hook(count_hook, &one);
     if (threads > 1)
         check(n64_rdp_set_threads(G.dp, threads) == (vk ? 1 : threads), "threads started"); /* none on the GPU */
     scene_textures(G.ram);
@@ -933,7 +945,15 @@ static uint32_t busy_hash(int threads)
     scene_busy(&scene, 1500, 12345);
     rig_run(&G, &scene);
     expect("SYNC_FULL interrupt", (uint32_t)G.irqs, 1);
-    return fnv1a(G.ram + FB_ADDR, 320 * 240 * 2) ^ fnv1a(G.ram + ZB_ADDR, 320 * 240 * 2) * 3;
+    uint32_t h = fnv1a(G.ram + FB_ADDR, 320 * 240 * 2) ^ fnv1a(G.ram + ZB_ADDR, 320 * 240 * 2) * 3;
+    if (threads > 1 && !vk) {
+        n64_rdp_set_threads(G.dp, 1); /* the renderer threads end (joined), one starts again */
+        expect("thread hook: ends", (uint32_t)atomic_load(&hook_down), (uint32_t)threads);
+        const int up = atomic_load(&hook_up); /* the new thread may not have reached its hook yet */
+        check(up == threads || up == threads + 1, "thread hook: starts");
+    }
+    n64_rdp_set_thread_hook(NULL, NULL);
+    return h;
 }
 
 static void t_scenes(void)

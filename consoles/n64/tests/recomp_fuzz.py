@@ -15,8 +15,9 @@ time: recorded by the discovery loop, then lifted) moves COMPARE on and returns,
 other exception (overflow, trap, FPE). So interrupts land at any instruction of the lifted code, delay slots
 included. It is lifted and built (tools/consoles/n64_recomp_build.py, discovery loop) and run by n64_run --pack
 --lockstep: the interpreter and the recompiled machine must agree on the whole state (GPRs, FPRs, COP0, time,
-instruction count, scheduler, RDRAM) after every frame. Exit 0 when every seed agrees, 1 at the first difference,
-77 when Python or a C compiler is missing (skipped).
+instruction count, scheduler, RDRAM) after every frame, with the whole table and with part of it (N64_RC_ENTRIES:
+the code left out runs as the interpreter's predecoded blocks between lifted functions). Exit 0 when every seed
+agrees, 1 at the first difference, 77 when Python or a C compiler is missing (skipped).
 
 With --ref (XBA-210) nothing is lifted: the same programs run under n64_run --lockstep-ref, the interpreter's
 predecoded blocks against its reference loop (the whole save state compared after every frame, or every
@@ -451,17 +452,24 @@ def main(argv=None):
             print(r.stdout + r.stderr)
             print("FAIL: seed %d: the pack did not build / converge" % seed)
             return 1
-        r = subprocess.run([args.n64_run, path, "--quiet", "--pack", os.path.join(d, "pack", "libtitle.so"),
-                            "--lockstep", "--stats", "--frames", str(args.frames)],
-                           capture_output=True, text=True, timeout=600, check=False)
-        out = r.stdout
-        native = [ln for ln in out.splitlines() if "native" in ln or ln.startswith("recomp:")]
-        print("seed %d (FR=%d, timer every %d COUNT ticks): %s" % (seed, g.fr, g.period,
-                                                                   " / ".join(native) or out.strip()))
-        if "LOCKSTEP OK" not in out:
-            print(out + r.stderr)
-            print("FAIL: seed %d differs from the interpreter" % seed)
-            return 1
+        # The whole table, then part of it (N64_RC_ENTRIES): the code left out runs as the interpreter's blocks
+        # between lifted functions, which they must stop in front of (n64_recomp_run).
+        for only in ("", "0-0", "1-1000000"):
+            env = dict(os.environ)
+            env.pop("N64_RC_ENTRIES", None)
+            if only:
+                env["N64_RC_ENTRIES"] = only
+            r = subprocess.run([args.n64_run, path, "--quiet", "--pack", os.path.join(d, "pack", "libtitle.so"),
+                                "--lockstep", "--stats", "--frames", str(args.frames)],
+                               capture_output=True, text=True, timeout=600, check=False, env=env)
+            out = r.stdout
+            native = [ln for ln in out.splitlines() if "native" in ln or ln.startswith("recomp:")]
+            print("seed %d (FR=%d, timer every %d COUNT ticks)%s: %s" % (
+                seed, g.fr, g.period, " entries " + only if only else "", " / ".join(native) or out.strip()))
+            if "LOCKSTEP OK" not in out:
+                print(out + r.stderr)
+                print("FAIL: seed %d differs from the interpreter" % seed)
+                return 1
     print("recomp_fuzz: %d seeds, all in lockstep with the interpreter" % len(seeds))
     return 0
 

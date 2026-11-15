@@ -1,10 +1,12 @@
 /* N64 machine (XBA-169 / 171 / 172): creation, reset, the event scheduler (VI lines, COUNT = COMPARE, PI / SI / AI
  * DMA completions) around the CPU loop, the RSP's time slices, and the debug accessors. */
 #include "n64_internal.h"
+#include "n64_rdp.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 /* While the RSP runs, the CPU runs in slices this long (ticks) and the RSP catches up after each. */
 #define RSP_SLICE 600
@@ -198,6 +200,63 @@ static void dispatch(n64_machine *m)
     }
 }
 
+/* ---- Host performance counters (n64_perf_enable): no effect on the machine ----------------------------------- */
+
+static uint64_t perf_ns(void)
+{
+#ifdef _WIN32
+    struct timespec ts;
+    timespec_get(&ts, TIME_UTC);
+#else
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+#endif
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+
+void n64_perf_enable(n64_machine *m, int every)
+{
+    m->perf_every = every > 0 ? (uint32_t)every : 0;
+    m->perf_count = 0;
+}
+
+void n64_perf_get(n64_machine *m, n64_perf *out)
+{
+    *out = m->perf;
+    n64_rdp_stats r;
+    n64_rdp_get_stats(m->rdp, &r);
+    out->rdp_commands = r.commands;
+    out->rdp_full_syncs = r.full_syncs;
+    out->rdp_waits = r.waits;
+    out->rdp_wait_ns = r.wait_ns;
+}
+
+/* One slice timed stage by stage (one frame in perf_every): the same work as below. */
+static void slice_timed(n64_machine *m, bool rsp_on)
+{
+    uint64_t t0 = perf_ns();
+    if (m->now < m->stop_at)
+        n64_cpu_run(m);
+    uint64_t t1 = perf_ns();
+    m->perf.cpu_ns += t1 - t0;
+    if (rsp_on) {
+        uint64_t d = (m->now - m->rsp_tick) / 3;
+        while (d > 0 && !n64_rsp_halted(m->rsp)) {
+            uint32_t n = d > 1000000 ? 1000000 : (uint32_t)d;
+            m->perf.rsp_instructions += n64_rsp_run(m->rsp, n);
+            d -= n;
+        }
+        m->rsp_tick = m->now;
+        uint64_t t2 = perf_ns();
+        n64_rdp_run(m->rdp);
+        uint64_t t3 = perf_ns();
+        m->perf.rsp_ns += t2 - t1;
+        m->perf.rdp_ns += t3 - t2;
+    } else {
+        m->rsp_tick = m->now;
+    }
+}
+
 static void slice(n64_machine *m, uint64_t end)
 {
     uint64_t stop = end;
@@ -208,19 +267,23 @@ static void slice(n64_machine *m, uint64_t end)
     if (rsp_on && stop > m->now + RSP_SLICE)
         stop = m->now + RSP_SLICE;
     m->stop_at = stop;
-    if (m->now < stop)
-        n64_cpu_run(m);
-    if (rsp_on) {
-        uint64_t d = (m->now - m->rsp_tick) / 3;
-        while (d > 0 && !n64_rsp_halted(m->rsp)) {
-            uint32_t n = d > 1000000 ? 1000000 : (uint32_t)d;
-            n64_rsp_run(m->rsp, n);
-            d -= n;
-        }
-        m->rsp_tick = m->now;
-        n64_rdp_run(m->rdp);
+    if (N64_UNLIKELY(m->perf_timing)) {
+        slice_timed(m, rsp_on);
     } else {
-        m->rsp_tick = m->now; /* halted, or started during this slice: it runs from now */
+        if (m->now < stop)
+            n64_cpu_run(m);
+        if (rsp_on) {
+            uint64_t d = (m->now - m->rsp_tick) / 3;
+            while (d > 0 && !n64_rsp_halted(m->rsp)) {
+                uint32_t n = d > 1000000 ? 1000000 : (uint32_t)d;
+                m->perf.rsp_instructions += n64_rsp_run(m->rsp, n);
+                d -= n;
+            }
+            m->rsp_tick = m->now;
+            n64_rdp_run(m->rdp);
+        } else {
+            m->rsp_tick = m->now; /* halted, or started during this slice: it runs from now */
+        }
     }
     if (N64_UNLIKELY(m->boot_x105))
         n64_pif_x105_step(m);
@@ -229,11 +292,24 @@ static void slice(n64_machine *m, uint64_t end)
 
 void n64_run_frame(n64_machine *m)
 {
+    m->perf.frames++;
+    uint64_t t0 = 0;
+    if (m->perf_every && ++m->perf_count >= m->perf_every) {
+        m->perf_count = 0;
+        m->perf_timing = true;
+        t0 = perf_ns();
+    }
     m->frame_done = false;
     uint64_t cap = m->now + m->vi_line_ticks * (uint64_t)(m->vi_lines + 2) * 2;
     while (!m->frame_done && m->now < cap)
         slice(m, cap);
+    n64_rdp_frame_end(m->rdp); /* the software RDP's pixels in RDRAM at an emulated moment, shown or not */
     n64_ai_advance(m);
+    if (N64_UNLIKELY(m->perf_timing)) {
+        m->perf_timing = false;
+        m->perf.timed++;
+        m->perf.frame_ns += perf_ns() - t0;
+    }
 }
 
 void n64_run_cycles(n64_machine *m, uint64_t cycles)

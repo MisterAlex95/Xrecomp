@@ -102,6 +102,7 @@ typedef struct n64_recomp_stats {
     uint64_t rehashes;     /* entries re-hashed because a page they cover was written */
     uint64_t stale;        /* of those, entries whose code was no longer there (overlay swapped, code patched) */
     uint64_t interrupts;   /* interrupts taken */
+    uint64_t blocks;       /* predecoded blocks the interpreter ran for code no entry covers (of interp_ram) */
 } n64_recomp_stats;
 void n64_recomp_get_stats(n64_machine *m, n64_recomp_stats *out);
 

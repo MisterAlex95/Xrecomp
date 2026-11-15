@@ -82,6 +82,25 @@ if(TARGET n64_rdp AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/../runtime/n64_rdp.c)
     target_compile_options(n64_rdp_test PRIVATE -Wall -Wextra)
     add_test(NAME n64_rdp COMMAND n64_rdp_test)
     set_tests_properties(n64_rdp PROPERTIES TIMEOUT 120)
+    # The same tests on a software RDP whose renderer threads stall at random between commands (N64_RDP_STRESS):
+    # the results (golden hashes, 1 vs 3 threads) must not depend on their timing; it also checks after every commit
+    # that no renderer wrote outside the bytes the front end tracked.
+    if(NOT WIN32)
+        set(N64_RT_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../runtime)
+        add_library(n64_rdp_sw_stress STATIC ${N64_RT_DIR}/n64_rdp.c)
+        target_include_directories(n64_rdp_sw_stress PUBLIC ${N64_RT_DIR})
+        target_compile_definitions(n64_rdp_sw_stress PRIVATE N64_RDP_STRESS)
+        target_compile_options(n64_rdp_sw_stress PRIVATE -O2 -Wall -Wextra
+                               "SHELL:-include ${N64_RT_DIR}/n64_rdp_sw_names.h")
+        find_package(Threads REQUIRED)
+        target_link_libraries(n64_rdp_sw_stress PUBLIC Threads::Threads)
+        add_library(n64_rdp_stress STATIC ${N64_RT_DIR}/n64_rdp_select.c)
+        target_link_libraries(n64_rdp_stress PUBLIC n64_rdp_sw_stress)
+        add_executable(n64_rdp_stress_test test_rdp.c)
+        target_link_libraries(n64_rdp_stress_test PRIVATE n64_rdp_stress m)
+        add_test(NAME n64_rdp_stress COMMAND n64_rdp_stress_test)
+        set_tests_properties(n64_rdp_stress PROPERTIES TIMEOUT 300)
+    endif()
     # The Vulkan RDP (XBR_N64_RDP_VULKAN, XBA-173): the same tests on it, and both RDPs on the same lists
     # (n64_rdp_test --compare, a report); skipped (77) without a Vulkan device. Without a GPU, Mesa's lavapipe
     # (mesa-vulkan-drivers; VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json) runs them, slowly: a device and its

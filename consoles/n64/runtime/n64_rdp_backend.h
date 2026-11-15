@@ -11,6 +11,7 @@
 #define N64_RDP_BACKEND_H
 
 #include "n64_devices.h"
+#include "n64_rdp.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -54,6 +55,8 @@ typedef struct n64_rdp_ops {
     size_t (*state_extra_size)(void *d);
     void (*state_save)(void *d, n64_rdp_common_state *c, uint8_t *extra);
     int (*state_load)(void *d, const n64_rdp_common_state *c, const uint8_t *extra, size_t n);
+    /* Host performance counters (n64_rdp.h n64_rdp_get_stats) since this back end's create. NULL: none. */
+    void (*stats)(void *d, n64_rdp_stats *out);
 } n64_rdp_ops;
 
 /* The factor the next back end is asked to draw at (n64_rdp_select.c: n64_rdp_set_upscale, else the environment). */

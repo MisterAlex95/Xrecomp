@@ -10,7 +10,7 @@ hosts only (Linux, macOS, Android).
 
 | Target | Sources | Defined in |
 |---|---|---|
-| `xbr_host_core` | `android_log.c`, `recomp_lifecycle.c`, `recomp_quit.c` (+ `host_time`, `host_cpus`, `recomp_cfg`, `recomp_exit_hook`) | `src/platform/host_core.cmake` |
+| `xbr_host_core` | `android_log.c`, `recomp_lifecycle.c`, `recomp_quit.c` (+ `host_time`, `host_cpus`, `host_perf_hint`, `recomp_cfg`, `recomp_exit_hook`) | `src/platform/host_core.cmake` |
 | `recomp_storage` | `recomp_storage.c` | `src/platform/host_core.cmake` |
 | `input_ports` | `src/input/input_ports.c` | `src/input/mapping/input_ports.cmake` |
 | `host_framegen` | `src/framegen/framegen_pacer.c`, `framegen_fake.c`, `framegen_console.c` (the console window's front end, XBA-186) | `src/framegen/host_framegen.cmake` |

@@ -4,7 +4,7 @@
  *           [--save PATH] [--hash] [--info] [--regs] [--quiet]
  *           [--pack LIB.so [--lockstep] [--missed FILE] [--stats]] [--lockstep-ref]
  *           [--state-save N:FILE] [--state-load FILE] [--run-hash] [--rewind C:R [--rewind-mb M]]
- *           [--cheats FILE] [--peek ADDR]
+ *           [--cheats FILE] [--peek ADDR] [--perf N]
  *
  * ROM           a .z64 / .v64 / .n64 file (any byte order)
  * --frames N    frames (VI interrupts) to run (default 600); with --result, the most frames to wait
@@ -53,6 +53,8 @@
  * --cheats FILE the cheat list FILE (XBA-197, recomp_cheats.h): its enabled GameShark codes run after every frame
  *               (on both machines with --lockstep)
  * --peek ADDR   after the run, print the 32-bit word at ADDR ("peek 0x80300010 = 0x..."); up to 8 times
+ * --perf N      the host performance counters (n64_core.h n64_perf): one frame in N timed stage by stage (1: every
+ *               frame), printed at the end ("perf: cpu ... rsp ... rdp ... ms per timed frame"); no effect on the run
  * Prints the frame rate reached on stderr (unless --quiet). Exit 3 on a usage or file error. */
 #define _POSIX_C_SOURCE 200809L /* clock_gettime */
 #include "n64_core.h"
@@ -168,7 +170,7 @@ static int usage(void)
                     "               [--pal | --ntsc] [--save PATH] [--hash] [--info] [--regs] [--quiet]\n"
                     "               [--pack LIB.so [--lockstep] [--missed FILE] [--stats]] [--lockstep-ref]\n"
                     "               [--state-save N:FILE] [--state-load FILE] [--run-hash] [--cheats FILE]\n"
-                    "               [--peek ADDR]\n");
+                    "               [--peek ADDR] [--perf N]\n");
     return 3;
 }
 
@@ -321,6 +323,7 @@ int main(int argc, char **argv)
     long frames = 600;
     bool result = false, quiet = false, hash = false, tty = false, info = false, regs = false;
     bool lockstep = false, lockref = false, stats = false, run_hash = false;
+    int perf_every = 0;
     const char *cheats_path = NULL;
     uint32_t peeks[8];
     int npeek = 0;
@@ -387,6 +390,8 @@ int main(int argc, char **argv)
             lock_from = strtoll(argv[++i], NULL, 0);
         else if (!strcmp(a, "--stats"))
             stats = true;
+        else if (!strcmp(a, "--perf") && more)
+            perf_every = (int)strtol(argv[++i], NULL, 10);
         else if (!strcmp(a, "--run-hash"))
             run_hash = true;
         else if (!strcmp(a, "--state-load") && more)
@@ -514,6 +519,8 @@ int main(int argc, char **argv)
     }
 
     int rc = result ? 2 : 0;
+    if (perf_every > 0)
+        n64_perf_enable(m, perf_every);
     double t0 = now_s();
     long f;
     if (twin && lock_from > 0) {
@@ -646,14 +653,27 @@ int main(int argc, char **argv)
         else if (!quiet)
             fprintf(stderr, "n64_run: %d new missed records -> %s\n", n, missed);
     }
+    if (perf_every > 0) {
+        n64_perf p;
+        n64_perf_get(m, &p);
+        double tf = p.timed ? 1e6 * (double)p.timed : 1.0, nf = p.frames ? (double)p.frames : 1.0;
+        double other = (double)p.frame_ns - (double)p.cpu_ns - (double)p.rsp_ns - (double)p.rdp_ns;
+        printf("perf: cpu %.2f rsp %.2f rdp %.2f sched %.2f (frame %.2f) ms per timed frame (%llu of %llu), "
+               "rdp wait %.2f ms/frame (%llu waits); %.0f RSP instructions, %.0f RDP commands, %.2f full syncs "
+               "per frame\n",
+               (double)p.cpu_ns / tf, (double)p.rsp_ns / tf, (double)p.rdp_ns / tf, other / tf,
+               (double)p.frame_ns / tf, (unsigned long long)p.timed, (unsigned long long)p.frames,
+               (double)p.rdp_wait_ns / 1e6 / nf, (unsigned long long)p.rdp_waits, (double)p.rsp_instructions / nf,
+               (double)p.rdp_commands / nf, (double)p.rdp_full_syncs / nf);
+    }
     if (pack && stats) {
         n64_recomp_stats st;
         n64_recomp_get_stats(m, &st);
         uint64_t total = n64_instructions(m);
-        printf("recomp: %llu calls, %llu interpreted RDRAM instructions (%llu fallbacks), %llu slow lookups, "
-               "%llu re-hashes (%llu stale), %llu interrupts\n",
+        printf("recomp: %llu calls, %llu interpreted RDRAM instructions (%llu fallbacks, %llu blocks), %llu slow "
+               "lookups, %llu re-hashes (%llu stale), %llu interrupts\n",
                (unsigned long long)st.calls, (unsigned long long)st.interp_ram, (unsigned long long)st.fallbacks,
-               (unsigned long long)st.slow_lookups, (unsigned long long)st.rehashes, (unsigned long long)st.stale,
+               (unsigned long long)st.blocks, (unsigned long long)st.slow_lookups, (unsigned long long)st.rehashes, (unsigned long long)st.stale,
                (unsigned long long)st.interrupts);
         if (st.native)
             printf("recomp: %.2f%% native (%llu of %llu instructions)\n", total ? 100.0 * st.native / total : 0.0,

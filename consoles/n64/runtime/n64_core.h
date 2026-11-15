@@ -225,6 +225,28 @@ struct n64_rdp *n64_get_rdp(n64_machine *m);
 /* Statistics: instructions executed (n64_run_frame / n64_run_cycles). */
 uint64_t n64_instructions(n64_machine *m);
 
+/* Host performance counters (the runtime's « n64: perf » line): where the host's time goes, totals since n64_create.
+ * Host-only: not in save states, no effect on the machine (runs hash the same with them on or off). The stage
+ * timers cost two clock reads per CPU slice (about 5000 a frame while the RSP runs), so they time one frame in
+ * `every` (n64_perf_enable; 0, the default: off). The counts run on every frame. */
+typedef struct n64_perf {
+    uint64_t frames;           /* n64_run_frame calls */
+    uint64_t timed;            /* of those, the frames whose stages were timed */
+    uint64_t cpu_ns;           /* in the timed frames: the CPU (interpreter or pack: n64_cpu_run) */
+    uint64_t rsp_ns;           /* the RSP (n64_rsp_run) */
+    uint64_t rdp_ns;           /* the RDP (n64_rdp_run: the software RDP draws there, the Vulkan RDP queues) */
+    uint64_t frame_ns;         /* the whole n64_run_frame (the scheduler, VI / AI / PI / SI events included) */
+    uint64_t rsp_instructions; /* every frame: RSP instructions run */
+    uint64_t rdp_commands;     /* RDP commands run (n64_rdp_get_stats) */
+    uint64_t rdp_full_syncs;   /* of those, SYNC_FULL */
+    /* RDP flushes that drew or waited (the threaded software RDP's batches, the Vulkan RDP's waits for the GPU) and
+     * their time, wherever they happen: in n64_rdp_run, and those the VI asks for (n64_display, save states). */
+    uint64_t rdp_waits;
+    uint64_t rdp_wait_ns;
+} n64_perf;
+void n64_perf_enable(n64_machine *m, int every);
+void n64_perf_get(n64_machine *m, n64_perf *out);
+
 /* Guest health, for the runtime's diagnostics (no effect on the machine).
  * n64_guest_fault_info: the first exception of a kind a healthy game does not take (TLB refill / invalid / modified,
  * address error, bus error, reserved instruction, coprocessor unusable other than COP1), with the registers at that

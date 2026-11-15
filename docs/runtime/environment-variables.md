@@ -172,7 +172,7 @@ What the title reads as the console's own settings (the dashboard's choices, the
 | Variable | Default | What it does | Where |
 |---|---|---|---|
 | `RECOMP_THREAD_STACK_MB=N` | 8 | POSIX: floor, in MB (1 to 1024), for the host stack of every thread the Win32 shim creates for a routine (`CreateThread`, so guest threads from `PsCreateSystemThreadEx`, plus timer and DPC callbacks). Lifted code recurses on the native stack; without a floor bionic gives about 1 MB and an Xbox thread's 64 KB would be the whole stack. A larger request is kept. Logged once as `[win32_compat] thread stack floor`. The guest main thread has its own 64 MB stack (`fb_present_sdl.c`). The shim's threads are detached, so a thread that ends gives its stack back at once; its handle keeps the exit code and the signalled state (XBA-56). | `win32_compat.c` |
-| `RECOMP_BIG_CORES=0/1` | on for Android, off elsewhere | big.LITTLE hosts: run the runtime on the cores whose cpufreq maximum is above the slowest cluster's (set once at start by `recomp_host_cpus_init`; every thread inherits it). | `host_cpus.c` |
+| `RECOMP_BIG_CORES=0/1` | on for Android, off elsewhere | big.LITTLE hosts: run the runtime on the cores whose cpufreq maximum is above the slowest cluster's (set once at start by `recomp_host_cpus_init`; every thread inherits it). The runtime's threads, the consoles' RDP / GPU workers included, are put back on them after a resume. | `host_cpus.c`, `host_perf_hint.c` |
 | `RECOMP_GUEST_CPUS` | `one` on arm64 Linux and Android, `all` elsewhere | `all`, `one`, or a core number: pin the title's threads to one core. On arm64 this gives the title's threads x86's store order among themselves (XBA-81). | `kernel_thread.c` |
 | `RECOMP_GUEST_LOCK=1` | off | Only one guest thread runs guest code at a time. | `kernel_guest_cpu.c` |
 | `RECOMP_GUEST_QUANTUM=ms` | 4 | With the lock: milliseconds before the lock is handed over (0 = at every call). | `kernel_guest_cpu.c` |
@@ -486,7 +486,7 @@ apply to them too; the pad mappings are under [Input](#input).
 | `RECOMP_N64_UPSCALE_NATIVE_TEXRECT=0` | on | Upscales texture rectangles too (by default they are drawn at 1x: 2D and HUD art made for 1:1 texels). | `n64_rdp_vk.cpp` |
 | `RECOMP_N64_UPSCALE_NATIVE_LOD=1` | off | Computes texture LOD as at 1x when upscaled (games that pick textures through LOD). | `n64_rdp_vk.cpp` |
 | `RECOMP_N64_UPSCALE_SSREADBACK=1` | off | The RDRAM copy the game reads is the upscaled picture averaged down, not the 1x one (not bit-exact). | `n64_rdp_vk.cpp` |
-| `RECOMP_N64_RDP_THREADS=N` | 2 on Android, else `XBR_N64_RDP_THREADS`, else 1 | The software RDP's scanline-band threads (`--rdp-threads`). | `n64_runtime.c`, `n64_rdp.c` |
+| `RECOMP_N64_RDP_THREADS=N` | 2 on Android, else `XBR_N64_RDP_THREADS`, else 1 | The software RDP's renderer threads (`--rdp-threads`): they draw while the emulation thread runs on, the result is the same for any count. | `n64_runtime.c`, `n64_rdp.c` |
 | `RECOMP_N64_RDP_CHECK=0` | on | Skips the Vulkan RDP's start-up draw check (only a pipeline failure then falls back). | `n64_rdp_vk.cpp` |
 | `RECOMP_N64_RDP_UBERSHADER=1` | off on Qualcomm's driver | Uses the Vulkan RDP's ubershader on Qualcomm's proprietary driver anyway (games come out black there, so it goes software). | `n64_rdp_vk.cpp` |
 | `RECOMP_N64_TTY=1` | off | Prints the IS-Viewer text a game writes (`--tty`). | `n64_runtime.c` |

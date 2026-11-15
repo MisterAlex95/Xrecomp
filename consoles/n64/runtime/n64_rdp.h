@@ -10,8 +10,8 @@ extern "C" {
 #endif
 
 #define N64_RDP_MAX_THREADS 8
-/* Renderers at n64_rdp_create when XBR_N64_RDP_THREADS is not set: 2 on Android (phones: the RDP is the heaviest part
- * of a frame, and two big cores are the safe bet), 1 elsewhere. A build may define its own. */
+/* Renderer threads at n64_rdp_create when XBR_N64_RDP_THREADS is not set: 2 on Android (phones: the RDP is the
+ * heaviest part of a frame, and two big cores are the safe bet), 1 elsewhere. A build may define its own. */
 #ifndef N64_RDP_DEFAULT_THREADS
 #ifdef __ANDROID__
 #define N64_RDP_DEFAULT_THREADS 2
@@ -20,14 +20,26 @@ extern "C" {
 #endif
 #endif
 
-/* Scanline-band threads: n renderers each draw every primitive on their own rows ((y / 4) % n), so the output is the
- * same bit for bit whatever n is. With n > 1 the commands are batched and drawn at SYNC_FULL (and at a few hazards:
- * texture loads from a range drawn in the batch, colour / Z image changes, a full batch), which is when libultra and
- * libdragon look at the result. n is clamped to 1..N64_RDP_MAX_THREADS; returns the count in use. The environment
- * variable XBR_N64_RDP_THREADS sets it at n64_rdp_create (default N64_RDP_DEFAULT_THREADS). */
+/* Renderer threads: the emulation thread only queues the commands, n renderers on their own threads each draw every
+ * primitive on their own rows ((y / 4) % n), so the output is the same bit for bit whatever n is, and drawing overlaps
+ * the CPU and RSP work of the same display list. They draw into a mirror of RDRAM: the pixels land in RDRAM at fixed
+ * emulated moments only (commits: SYNC_FULL, which is when libultra and libdragon look at the result; a texture load
+ * from pixels drawn since the last commit; n64_rdp_flush), so what the CPU and the RSP see never depends on host
+ * timing nor on n. Without threads (Windows, or none could start) the emulation thread draws at the commits. n is
+ * clamped to 1..N64_RDP_MAX_THREADS; returns the count in use. The environment variable XBR_N64_RDP_THREADS sets it at
+ * n64_rdp_create (default N64_RDP_DEFAULT_THREADS). */
 int n64_rdp_set_threads(n64_rdp *d, int n);
-/* Draws whatever is batched (no-op with one thread). */
+/* Called by each renderer thread as it starts (starting = 1) and just before it ends (0), on that thread: the
+ * runtime notes the thread there (n64_runtime: its fast cores put back after a resume, the performance hint session;
+ * recomp_host_worker_hook) so the RDP itself needs nothing of the host. Process-wide, for the threads started after
+ * the call; NULL (the default): none. */
+typedef void (*n64_rdp_thread_hook)(int starting, void *user);
+void n64_rdp_set_thread_hook(n64_rdp_thread_hook fn, void *user);
+/* A commit: every command queued is drawn and in RDRAM (the VI reads it next, a save state takes it...). */
 void n64_rdp_flush(n64_rdp *d);
+/* The end of an emulated frame (n64_run_frame): the software RDP commits there, whether or not the host shows the
+ * frame (frame skip, fast-forward), so the moments RDRAM changes stay emulated ones. Other back ends: nothing. */
+void n64_rdp_frame_end(n64_rdp *d);
 /* The two hidden RDRAM bits of each 16-bit word (the low bits of a 16-bit pixel's coverage), one byte per word:
  * index = byte address >> 1. The VI's anti-aliasing filter reads them (n64_vi.c). NULL when the renderer has none. */
 const uint8_t *n64_rdp_hidden_bits(n64_rdp *d);
@@ -69,6 +81,16 @@ int n64_rdp_scanout_scale(const n64_rdp *d);
  * n64_rdp_scanout_scale), the VI shows nothing, or the picture is larger than max_w x max_h. */
 int n64_rdp_scanout(n64_rdp *d, const uint32_t *vi, uint32_t field, uint32_t *xrgb, int max_w, int max_h, int *w,
                     int *h);
+
+/* Host performance counters (n64_core.h n64_perf), totals since n64_rdp_create (kept across a back end replacement):
+ * commands run, SYNC_FULL among them, flushes that drew or waited (the software RDP: the emulation thread waiting for
+ * its renderer threads at commits, barriers and a full queue, or drawing itself without threads; the Vulkan RDP
+ * waiting for the GPU, for the write-back into RDRAM and for the upscaled scanout) and their time in ns.
+ * Not in save states. */
+typedef struct n64_rdp_stats {
+    uint64_t commands, full_syncs, waits, wait_ns;
+} n64_rdp_stats;
+void n64_rdp_get_stats(n64_rdp *d, n64_rdp_stats *out);
 
 #ifdef __cplusplus
 }

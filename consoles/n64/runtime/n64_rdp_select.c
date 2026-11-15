@@ -25,6 +25,7 @@ void n64_rdp_sw_flush(n64_rdp_sw *d);
 size_t n64_rdp_sw_state_extra_size(n64_rdp_sw *d);
 void n64_rdp_sw_state_save(n64_rdp_sw *d, n64_rdp_common_state *c, uint8_t *extra);
 int n64_rdp_sw_state_load(n64_rdp_sw *d, const n64_rdp_common_state *c, const uint8_t *extra, size_t n);
+void n64_rdp_sw_get_stats(n64_rdp_sw *d, n64_rdp_stats *out);
 
 static void *sw_create(n64_rcp_bus bus) { return n64_rdp_sw_create(bus); }
 static void sw_destroy(void *d) { n64_rdp_sw_destroy(d); }
@@ -41,10 +42,12 @@ static int sw_state_load(void *d, const n64_rdp_common_state *c, const uint8_t *
 {
     return n64_rdp_sw_state_load(d, c, extra, n);
 }
+static void sw_stats(void *d, n64_rdp_stats *out) { n64_rdp_sw_get_stats(d, out); }
 
 const n64_rdp_ops n64_rdp_sw_ops = { "software", sw_create, sw_destroy, sw_reset, sw_attach_dmem,
                                      sw_read_reg, sw_write_reg, sw_run, sw_set_threads, sw_flush, NULL,
-                                     NULL, NULL, NULL, sw_state_extra_size, sw_state_save, sw_state_load };
+                                     NULL, NULL, NULL, sw_state_extra_size, sw_state_save, sw_state_load,
+                                     sw_stats };
 
 struct n64_rdp {
     const n64_rdp_ops *ops;
@@ -52,7 +55,28 @@ struct n64_rdp {
     n64_rcp_bus bus;     /* for a replacement back end */
     const uint8_t *dmem;
     int threads;         /* the last n64_rdp_set_threads, 0: never called */
+    n64_rdp_stats past;  /* the counters of the back ends replaced (n64_rdp_get_stats) */
 };
+
+static void backend_stats(const n64_rdp *d, n64_rdp_stats *out)
+{
+    memset(out, 0, sizeof *out);
+    if (d->ops->stats)
+        d->ops->stats(d->impl, out);
+}
+
+void n64_rdp_get_stats(n64_rdp *d, n64_rdp_stats *out)
+{
+    if (!d) {
+        memset(out, 0, sizeof *out);
+        return;
+    }
+    backend_stats(d, out);
+    out->commands += d->past.commands;
+    out->full_syncs += d->past.full_syncs;
+    out->waits += d->past.waits;
+    out->wait_ns += d->past.wait_ns;
+}
 
 #ifndef N64_RDP_DEFAULT_BACKEND
 #if defined(__ANDROID__) && defined(N64_RDP_HAVE_VULKAN)
@@ -204,6 +228,7 @@ static void replace_failed(n64_rdp *d)
     fprintf(stderr, "n64: the %s RDP failed, software RDP from now on\n", d->ops->name);
     if (n64_rdp_upscale(d) > 1)
         upscale_needs_vulkan();
+    n64_rdp_get_stats(d, &d->past);
     d->ops->destroy(d->impl);
     d->ops = &n64_rdp_sw_ops;
     d->impl = sw;
@@ -229,6 +254,12 @@ void n64_rdp_flush(n64_rdp *d)
     d->ops->flush(d->impl);
     if (d->ops->failed && d->ops->failed(d->impl))
         replace_failed(d);
+}
+
+void n64_rdp_frame_end(n64_rdp *d)
+{
+    if (d->ops == &n64_rdp_sw_ops)
+        n64_rdp_flush(d);
 }
 
 /* The 16-bit pixels' hidden coverage bits (n64_rdp.h, for the VI's anti-aliasing filter; NULL: none, the VI then uses

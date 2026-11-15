@@ -707,6 +707,8 @@ typedef struct gpu_pool {
 typedef struct worker_arg {
     gpu_pool *pool;
     int index;
+    ps1_gpu_thread_hook hook; /* as set when the thread was made: the same one hears it end */
+    void *hook_user;
 } worker_arg;
 
 static inline void cpu_relax(void)
@@ -733,10 +735,31 @@ static void job_run(ps1_gpu *g, const job *jb, int part, int parts)
     }
 }
 
+static ps1_gpu_thread_hook s_thread_hook; /* ps1_gpu_set_thread_hook */
+static void *s_thread_hook_user;
+
+void ps1_gpu_set_thread_hook(ps1_gpu_thread_hook fn, void *user)
+{
+    s_thread_hook = fn;
+    s_thread_hook_user = user;
+}
+
+static void *pool_loop(worker_arg wa);
+
 static void *pool_worker(void *arg)
 {
     worker_arg wa = *(worker_arg *)arg;
     free(arg);
+    if (wa.hook)
+        wa.hook(1, wa.hook_user);
+    pool_loop(wa);
+    if (wa.hook)
+        wa.hook(0, wa.hook_user);
+    return NULL;
+}
+
+static void *pool_loop(worker_arg wa)
+{
     gpu_pool *pool = wa.pool;
     unsigned seen = 0; /* the generation the pool started at: a job published before this thread ran is not missed */
     for (;;) {
@@ -811,6 +834,8 @@ static void pool_start(ps1_gpu *g)
             break;
         wa->pool = pool;
         wa->index = i;
+        wa->hook = s_thread_hook;
+        wa->hook_user = s_thread_hook_user;
         if (pthread_create(&pool->th[i], NULL, pool_worker, wa) != 0) {
             free(wa);
             break;

@@ -1,6 +1,7 @@
 /* N64 RDP benchmark (XBA-173): Mpixels/s per mode on 320x240 RGBA16 (fill, copy, 1-cycle flat / shaded / textured,
  * bilinear + Z, 2-cycle fog + blend + Z), and frames/s of the busy scene of the tests (1500 mixed primitives, about
- * 0.9 Mpixels: far more than a typical libultra frame) with 1, 2 and 4 threads.
+ * 0.9 Mpixels: far more than a typical libultra frame) with 1, 2 and 4 threads, and the time per frame of that scene
+ * streamed under emulation work (the renderer threads drawing while the commands come).
  *   n64_rdp_bench [seconds per case [case name substring]]   (default 1, every case) */
 #define _POSIX_C_SOURCE 200809L
 #include "rdp_cmd.h"
@@ -136,6 +137,42 @@ int main(int argc, char **argv)
             t = now() - t0;
         } while (t < secs * 2);
         printf("%s %6.1f frames/s\n", name, frames / t);
+    }
+
+    /* Streamed: the busy scene reaches the RDP in 64-word pieces with emulation work between them (a spin of 15 ms in
+     * all per frame, as the CPU and the RSP would take to make the list), then SYNC_FULL: the time per frame on the
+     * emulation thread. Drawn as the commands come, the RDP's work hides under the emulation's. */
+    for (int i = 0; i < 3; i++) {
+        int th = nth[i];
+        char name[80];
+        snprintf(name, sizeof name, "busy scene streamed under 15 ms of emulation, %d thread%s", th, th > 1 ? "s" : " ");
+        if (!wanted(name))
+            continue;
+        n64_rdp_set_threads(g.dp, th);
+        lst.n = 0;
+        scene_busy(&lst, 1500, 777);
+        for (int k = 0; k < lst.n; k++) {
+            n64_wbe32(g.ram + CMD_BASE + k * 8, (uint32_t)(lst.w[k] >> 32));
+            n64_wbe32(g.ram + CMD_BASE + k * 8 + 4, (uint32_t)lst.w[k]);
+        }
+        const int pieces = (lst.n + 63) / 64;
+        const double work = 0.015 / pieces;
+        long frames = 0;
+        double t0 = now(), t;
+        do {
+            n64_rdp_write_reg(g.dp, 0, CMD_BASE);
+            for (int p = 0; p < pieces; p++) {
+                const int end = (p + 1) * 64 < lst.n ? (p + 1) * 64 : lst.n;
+                n64_rdp_write_reg(g.dp, 1, CMD_BASE + (uint32_t)end * 8);
+                n64_rdp_run(g.dp);
+                for (double s = now(); now() - s < work;) {
+                }
+            }
+            n64_rdp_flush(g.dp);
+            frames++;
+            t = now() - t0;
+        } while (t < secs * 2);
+        printf("%s %6.2f ms/frame\n", name, t * 1e3 / frames);
     }
     rig_close(&g);
     return 0;
