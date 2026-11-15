@@ -183,6 +183,7 @@ static void test_colour(void)
                       rl(1, 4), 0xFE00, rl(1, 0), 0xFE00, rl(1, 0), 0xFE00, rl(1, 8), 0xFE00, rl(1, 8), 0xFE00,
                       rl(1, 8), 0xFE00, rl(1, 8), 0xFE00};
     decode(3u << 27, two, sizeof two / 2);
+    CHECK(ps1_mdec_read(md, 1) & (1u << 29), "not busy with output left after the last parameter");
     ps1_mdec_dma_read(md, out, 128);
     uint16_t p1 = ((const uint16_t *)out)[0];
     ps1_mdec_dma_read(md, out, 128);

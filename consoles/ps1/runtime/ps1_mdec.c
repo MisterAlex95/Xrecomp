@@ -16,10 +16,11 @@
  * reading the data register gets), and DMA1 writes it to RAM as the 16x16 picture in raster order (XBA-200, ps1-tests
  * mdec/frame's PIO and DMA builds); 24-bit pixels are 3 bytes R, G, B packed into words, 15-bit pixels are
  * halfwords; a monochrome block is 8x8 bytes (8-bit) or nibbles (4-bit, low nibble first). Status: output empty (31),
- * input full (30, never: the input is consumed at once), busy (29, parameters remaining), data-in / data-out requests
- * (28 / 27, when enabled by the control register), the command's depth / signed / bit-15 bits (26..23), the current
- * block (18..16), parameters remaining minus one (15..0). Decoding is instantaneous (the hardware takes time per
- * block: a game that polls the busy bit sees it clear at once). */
+ * input full (30, never: the input is consumed at once), busy (29, parameters remaining or a decode's output not
+ * all read), data-in / data-out requests (28 / 27, when enabled by the control register), the command's depth /
+ * signed / bit-15 bits (26..23), the current block (18..16), parameters remaining minus one (15..0). Decoding is
+ * instantaneous (the hardware takes time per block and holds 32-word FIFOs: mdec/step-by-step-log's stepping is not
+ * reproduced). */
 #include "ps1_devices.h"
 
 #include <stddef.h>
@@ -382,7 +383,9 @@ uint32_t ps1_mdec_read(ps1_mdec *d, uint32_t reg)
     int empty = d->out_pos >= d->out_len;
     if (empty)
         st |= 1u << 31;
-    if (d->cmd != CMD_NONE)
+    /* busy: parameters to come, or a decode's output not all read (ps1-tests mdec/step-by-step-log on the hardware:
+     * set after the last parameter until the last word is read) */
+    if (d->cmd != CMD_NONE || ((d->cmd_word >> 29) == 1 && !empty))
         st |= 1u << 29;
     if (d->dma_in && d->cmd != CMD_NONE)
         st |= 1u << 28;
