@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """ctest helper (XBA-200): compare_vram.py REF.png OURS.ppm [--region X0,Y0,X1,Y1] [--ignore X0,Y0,X1,Y1]...
+                                            [--tolerance N]
 
 Compares a 1024x512 VRAM picture that ps1_run --vram wrote (binary PPM) with one of JaCzekanski/ps1-tests' reference
 VRAM dumps (PNG: grey, RGB, RGBA or palette, 1 to 8 bits, no interlace), channel by channel at 5 bits (what VRAM
 holds; the PNGs scale 5-bit values their own way). --region limits the comparison to a rectangle (X1 / Y1 exclusive),
---ignore leaves rectangles out (several allowed). Prints the number of pixels that differ and the first few; exits 0
+--ignore leaves rectangles out (several allowed), --tolerance accepts channels up to N 5-bit units apart (the
+MDEC pictures, whose last unit of rounding is not the hardware's yet). Prints the number of pixels that differ and the first few; exits 0
 when none does, 1 otherwise, 2 on a bad file. Pure Python (zlib), no imaging library."""
 import struct
 import sys
@@ -89,12 +91,14 @@ def main(argv):
     if len(argv) < 3:
         print(__doc__)
         return 2
-    region, ignore, i = None, [], 3
+    region, ignore, tol, i = None, [], 0, 3
     while i < len(argv):
         if argv[i] == '--region' and i + 1 < len(argv):
             region = rect(argv[i + 1])
         elif argv[i] == '--ignore' and i + 1 < len(argv):
             ignore.append(rect(argv[i + 1]))
+        elif argv[i] == '--tolerance' and i + 1 < len(argv):
+            tol = int(argv[i + 1])
         else:
             print('compare_vram: bad argument', argv[i])
             return 2
@@ -117,12 +121,13 @@ def main(argv):
             o = (y * ow + x) * 3
             want = tuple(v >> 3 for v in ref[y][x])
             got = tuple(v >> 3 for v in ours[o:o + 3])
-            if want != got:
+            if any(abs(a - b) > tol for a, b in zip(want, got)):
                 bad += 1
                 if bad <= 10:
                     print('  (%d, %d): reference %s, ours %s (5-bit R, G, B)' % (x, y, want, got))
-    print('compare_vram: %d pixel(s) differ in %d,%d..%d,%d%s' %
-          (bad, x0, y0, x1, y1, ' (%d rectangle(s) ignored)' % len(ignore) if ignore else ''))
+    print('compare_vram: %d pixel(s) differ%s in %d,%d..%d,%d%s' %
+          (bad, ' by more than %d' % tol if tol else '', x0, y0, x1, y1,
+           ' (%d rectangle(s) ignored)' % len(ignore) if ignore else ''))
     return 1 if bad else 0
 
 

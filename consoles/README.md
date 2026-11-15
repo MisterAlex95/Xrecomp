@@ -297,11 +297,15 @@ stepping (32.32, steps rounded away from zero) and dithering of flat lines (gpu/
 CLUT position or a larger depth needs a reload, or GP0(01h); gpu/clut-cache), x-flipped rectangles starting at u0 + 1
 (gpu/texture-flip), a DMA channel started again while its last transfer's completion is pending (PSn00bSDK's
 LoadImage; gpu/texture-overflow), MDEC blocks ending at their 64th coefficient, the decoder's rounding (mdec/4bit
-exact; 8bit and frame within one unit) and its raw 8x8 block order on a PIO read, the HLE printf's `%2-d`. Now
+exact; 8bit and frame within one unit) and its raw 8x8 block order on a PIO read, DMA1 with BA = 0 moving the blocks
+the MDEC has ready (mdec/4bit and 8bit's release binaries), the HLE printf's `%2-d`. Now
 checked by ctest (both BIOSes, skipped without the fetched release): gpu/clipping, clut-cache, lines, quad,
 rectangles, texture-flip, texture-overflow, transparency, triangle, uv-interpolation, vram-to-vram-overlap against
-their dumps (`ps1_jcz_gpu_*`, `ps1_hle_jcz_gpu_*`), gpu/gp0-e1, mask-bit, version-detect, dma/chain-looping and
-input/pad by their text, on top of the earlier cpu / gte / dma / timers / spu / cdrom ones. Not matched, by design or
+their dumps (`ps1_jcz_gpu_*`, `ps1_hle_jcz_gpu_*`), mdec/frame-15bit-dma and frame-15bit within one 5-bit unit
+(`ps1_jcz_mdec_*`, `compare_vram.py --tolerance 1`; the CPU build waits for output after its very last word, as the
+hardware would, so its last column is never uploaded and is left out), gpu/gp0-e1, mask-bit, version-detect,
+dma/chain-looping, input/pad and mdec/4bit by their text, on top of the earlier cpu / gte / dma / timers / spu /
+cdrom ones. Not matched, by design or
 out of reach: the timing measurements (cpu/access-time: no memory wait states; gpu/bandwidth, benchmark's frame
 time, dma/chopping and chain-looping's tick counts: the GPU and DMA take no time), cpu/io-access-bitwidth's
 odd-width IO writes, the MDEC's last unit of rounding and its FIFO stepping (mdec/step-by-step-log, movie),

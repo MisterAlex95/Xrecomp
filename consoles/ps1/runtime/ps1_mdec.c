@@ -433,6 +433,11 @@ size_t ps1_mdec_dma_read(ps1_mdec *d, uint32_t *words, size_t n)
     return got;
 }
 
+size_t ps1_mdec_out_pending(ps1_mdec *d)
+{
+    return d->out_len - d->out_pos;
+}
+
 /* ---- Save states (XBA-182) ------------------------------------------------------------------------------------ */
 
 /* The decoder (tables, command, block in progress), then the output words not read yet. */
