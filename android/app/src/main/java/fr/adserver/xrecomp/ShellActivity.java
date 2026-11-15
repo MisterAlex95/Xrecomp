@@ -519,14 +519,30 @@ public class ShellActivity extends SDLActivity {
 
     @Override
     public boolean dispatchTouchEvent(MotionEvent e) {
-        if (touch != null && touch.editor != null)   // the touch layout editor: no menu swipe, nothing to the game
+        boolean down = e.getActionMasked() == MotionEvent.ACTION_DOWN;
+        if (touch != null && touch.editor != null) {   // the touch layout editor: no menu swipe, nothing to the game
+            if (down && touchDebug)
+                Log.d(TouchPadView.DEBUG_TAG, "shell: down to the touch layout editor");
             return touch.editor.dispatchTouchEvent(e);
-        if (touch != null && e.getActionMasked() == MotionEvent.ACTION_DOWN)
+        }
+        if (touch != null && down)
             touch.onTouch();
-        if (menu != null && menu.dispatchTouch(e))
+        if (menu != null && menu.dispatchTouch(e)) {
+            if (down && touchDebug)
+                Log.d(TouchPadView.DEBUG_TAG, "shell: down taken by the menu's swipe");
             return true;
-        return super.dispatchTouchEvent(e);
+        }
+        boolean r = super.dispatchTouchEvent(e);
+        if (down && touchDebug)
+            Log.d(TouchPadView.DEBUG_TAG, "shell: down at " + Math.round(e.getX()) + "," + Math.round(e.getY())
+                                          + " to the views (" + (r ? "taken" : "not taken") + "), menu "
+                                          + (menu != null && menu.isOpen() ? "open" : "closed") + ", touch controls "
+                                          + (touch == null ? "none" : touch.shown() ? "shown" : "hidden"));
+        return r;
     }
+
+    /** TouchPadView.DEBUG_TAG at DEBUG (adb shell setprop log.tag.XRecompTouch DEBUG): the touch path's log. */
+    private final boolean touchDebug = TouchPadView.debugOn();
 
     private final class MenuHost implements GameMenu.Host {
         @Override
@@ -824,20 +840,38 @@ public class ShellActivity extends SDLActivity {
 
     /** The overlay pad (input_overlay.h) through CompanionNative. */
     private static final class NativeOverlay implements OverlayMixer.Sink {
+        private final boolean debug = TouchPadView.debugOn();
+        private boolean failed;
+
         @Override
         public void pad(int buttons, int analogMask, int lt, int rt, int lx, int ly, int rx, int ry) {
+            if (debug)
+                Log.d(TouchPadView.DEBUG_TAG, String.format(Locale.ROOT, "overlay: buttons=%04x analog=%02x lt=%d rt=%d"
+                                                            + " L=(%d,%d) R=(%d,%d)", buttons, analogMask, lt, rt,
+                                                            lx, ly, rx, ry));
             try {
                 CompanionNative.nativeOverlayPad(buttons, analogMask, lt, rt, lx, ly, rx, ry);
-            } catch (UnsatisfiedLinkError ignored) {
+            } catch (UnsatisfiedLinkError e) {
+                failed(e);
             }
         }
 
         @Override
         public void off() {
+            if (debug)
+                Log.d(TouchPadView.DEBUG_TAG, "overlay: off");
             try {
                 CompanionNative.nativeOverlayOff();
-            } catch (UnsatisfiedLinkError ignored) {
+            } catch (UnsatisfiedLinkError e) {
+                failed(e);
             }
+        }
+
+        /** Once per process: the on-screen pad and the panel cannot reach the game (said, not swallowed). */
+        private void failed(UnsatisfiedLinkError e) {
+            if (!failed)
+                Log.e(LauncherActivity.TAG, "shell: overlay pad: no native call, touch input cannot reach the game", e);
+            failed = true;
         }
     }
 
