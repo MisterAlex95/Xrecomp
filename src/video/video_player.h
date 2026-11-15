@@ -107,6 +107,13 @@ void xbox_FramebufferWindowFrameTris(uint32_t tris);
  * or the window is closed (the process exits). Otherwise, or headless, it
  * just calls guest_main. */
 int  xbox_HostWindowMain(int (*guest_main)(void));
+/* Picture shaders (XBA-203, present_shaders.h): the preset the window draws its frames through (HOST_SHADER_*:
+ * RECOMP_XBOX_SHADER, else RECOMP_SHADER; none before the window opens, without a GL renderer or after the shader
+ * failed to build). Any thread. */
+int  xbox_FramebufferWindowShaderActive(void);
+/* The window as drawn (shader included, a binary PPM of the whole drawable) is written to path after the next
+ * frame it draws; one capture per call, any thread. Screenshots (xbox_FramebufferDumpBmp) stay the raw frame. */
+void xbox_FramebufferWindowCapture(const char *path);
 #endif
 
 #endif /* XBOXRECOMP_VIDEO_PLAYER_H */

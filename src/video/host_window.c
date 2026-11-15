@@ -249,179 +249,28 @@ static int build_program(void)
 }
 
 /* ── Picture shaders (XBA-195) ──────────────────────────────────────────
- * One fragment shader per preset, written for this window (no third-party shader pack), each a single pass at the
- * output resolution over the same full-viewport triangle. Uniforms: u_src the texture's size in texels, u_out the
- * viewport's in pixels, u_cells the console pixels the texture holds (shader_cells), u_strength / u_curve / u_ghost
- * 0..1, u_prev the previous picture (LCD ghosting). Built on first use; a failure falls back to none, logged once. */
-static const char k_fs_common[] =
-    "in vec2 v_uv;\n"
-    "uniform sampler2D u_tex;\n"
-    "uniform sampler2D u_prev;\n"
-    "uniform vec2 u_src, u_out, u_cells;\n"
-    "uniform float u_strength, u_curve, u_ghost;\n"
-    "out vec4 o_color;\n"
-    /* 1 in the lower half of a console line, 0 in the upper, antialiased over one output pixel; faded out when a
-     * line is less than two output pixels tall (no room for a dark half). */
-    "float scan_band(float y) {\n"
-    "    float px = u_out.y / u_cells.y;\n"
-    "    float e = 0.5 / max(px, 1.0);\n"
-    "    float f = fract(y);\n"
-    "    float b = smoothstep(0.5 - e, 0.5 + e, f) - smoothstep(1.0 - e, 1.0 + e, f);\n"
-    "    return b * clamp(px - 1.0, 0.0, 1.0);\n"
-    "}\n";
-
-/* Sharp bilinear: as if the picture were first enlarged by the largest whole factor s with nearest, then linearly
- * to the window. Between two texel centres the blend happens only over the 1/s texel around their shared edge. */
-static const char k_fs_sharp[] =
-    "void main() {\n"
-    "    vec2 t = v_uv * u_src - 0.5;\n"
-    "    vec2 i = floor(t);\n"
-    "    vec2 s = max(floor(u_out / u_src), 1.0);\n"
-    "    vec2 w = clamp((t - i - 0.5) * s + 0.5, 0.0, 1.0);\n"
-    "    o_color = vec4(texture(u_tex, (i + 0.5 + w) / u_src).rgb, 1.0);\n"
-    "}\n";
-
-/* Scanlines: the upper half of each line brightened a little, the lower half darkened by the strength. */
-static const char k_fs_scanlines[] =
-    "void main() {\n"
-    "    vec3 c = texture(u_tex, v_uv).rgb;\n"
-    "    float st = u_strength;\n"
-    "    float m = mix(1.0 + 0.2 * st, 1.0 - 0.8 * st, scan_band(v_uv.y * u_cells.y));\n"
-    "    o_color = vec4(min(c * m, 1.0), 1.0);\n"
-    "}\n";
-
-/* Simple CRT: optional barrel curvature (black outside, a soft vignette), scanlines, and an aperture grille (RGB
- * stripes one output pixel wide), faded out when a console pixel is barely one output pixel wide. */
-static const char k_fs_crt[] =
-    "void main() {\n"
-    "    vec2 uv = v_uv;\n"
-    "    if (u_curve > 0.0) {\n"
-    "        vec2 p = uv * 2.0 - 1.0;\n"
-    "        p *= 1.0 + u_curve * 0.15 * (p.yx * p.yx);\n"
-    "        uv = p * 0.5 + 0.5;\n"
-    "        if (any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0)))) {\n"
-    "            o_color = vec4(0.0, 0.0, 0.0, 1.0);\n"
-    "            return;\n"
-    "        }\n"
-    "    }\n"
-    "    vec3 c = texture(u_tex, uv).rgb;\n"
-    "    float st = u_strength;\n"
-    "    c *= mix(1.0 + 0.25 * st, 1.0 - 0.7 * st, scan_band(uv.y * u_cells.y));\n"
-    "    float col = mod(floor(gl_FragCoord.x), 3.0);\n"
-    "    vec3 mask = col < 0.5 ? vec3(1.0, 0.65, 0.65) : col < 1.5 ? vec3(0.65, 1.0, 0.65) : vec3(0.65, 0.65, 1.0);\n"
-    "    c *= mix(vec3(1.0), mask * 1.2, st * clamp(u_out.x / u_cells.x - 1.0, 0.0, 1.0));\n"
-    "    if (u_curve > 0.0) {\n"
-    "        vec2 d = uv * 2.0 - 1.0;\n"
-    "        c *= 1.0 - 0.3 * u_curve * dot(d * d, d * d);\n"
-    "    }\n"
-    "    o_color = vec4(min(c, 1.0), 1.0);\n"
-    "}\n";
-
-/* LCD grid: each console pixel sharp, its right and bottom edge (one output pixel, antialiased) darkened by the
- * strength, faded out below 2.5 output pixels per cell; ghosting blends in the previous picture. */
-static const char k_fs_lcd[] =
-    "void main() {\n"
-    "    vec2 tc = (floor(v_uv * u_src) + 0.5) / u_src;\n"
-    "    vec3 c = texture(u_tex, tc).rgb;\n"
-    "    if (u_ghost > 0.0)\n"
-    "        c = mix(c, texture(u_prev, tc).rgb, 0.5 * u_ghost);\n"
-    "    vec2 px = u_out / u_cells;\n"
-    "    vec2 f = fract(v_uv * u_cells);\n"
-    "    vec2 g = clamp((f + 0.5 / px - 1.0 + 1.0 / px) * px, 0.0, 1.0) * clamp(px - 1.5, 0.0, 1.0);\n"
-    "    c *= 1.0 - 0.7 * u_strength * max(g.x, g.y);\n"
-    "    o_color = vec4(c, 1.0);\n"
-    "}\n";
-
-static const char *const k_shader_names[HOST_SHADER_COUNT] = { "none", "sharp", "scanlines", "crt", "lcd" };
-static const char *const k_shader_fs[HOST_SHADER_COUNT] = { NULL, k_fs_sharp, k_fs_scanlines, k_fs_crt, k_fs_lcd };
-static const int k_shader_strength[HOST_SHADER_COUNT] = { 0, 0, 50, 60, 50 };
-
-typedef struct {
-    unsigned prog;
-    int failed;   /* did not build in this context: none is drawn instead */
-    int u_tex, u_prev, u_flip, u_src, u_out, u_cells, u_strength, u_curve, u_ghost;
-} ShaderProg;
-
+ * The presets, their GLSL and uniforms are present_shaders.c's (shared with the Xbox presenter, XBA-203): GLSL ES
+ * 3.00 / 1.50 here, over the same full-viewport triangle as the plain present. Built on first use; a failure falls
+ * back to none, logged once. */
 static HostShader s_shader = { HOST_SHADER_NONE, -1, 0, 0 };
-static ShaderProg s_sprog[HOST_SHADER_COUNT];
-static int s_shader_logged[HOST_SHADER_COUNT]; /* a failure is logged once per process */
-
-static unsigned link_program(const char *fs_body)
-{
-    const char *head_vs = s_gles ? "#version 300 es\n" : "#version 150\n";
-    /* highp: texel coordinates of an upscaled picture need more than mediump's 11 bits (GLES 3.0 guarantees it). */
-    const char *head_fs = s_gles ? "#version 300 es\nprecision highp float;\n" : "#version 150\n";
-    unsigned vs, fs, prog;
-    int ok = 0;
-
-    vs = compile(XGL_VERTEX_SHADER, head_vs, k_vs);
-    fs = vs ? compile3(XGL_FRAGMENT_SHADER, head_fs, k_fs_common, fs_body) : 0;
-    if (!vs || !fs) {
-        if (vs)
-            s_gl.DeleteShader(vs);
-        return 0;
-    }
-    prog = s_gl.CreateProgram();
-    s_gl.AttachShader(prog, vs);
-    s_gl.AttachShader(prog, fs);
-    s_gl.LinkProgram(prog);
-    s_gl.DeleteShader(vs);
-    s_gl.DeleteShader(fs);
-    s_gl.GetProgramiv(prog, XGL_LINK_STATUS, &ok);
-    if (!ok) {
-        char log[512] = "";
-        s_gl.GetProgramInfoLog(prog, (int)sizeof log, NULL, log);
-        fprintf(stderr, "  [HOST] window: program: %s\n", log);
-        s_gl.DeleteProgram(prog);
-        return 0;
-    }
-    return prog;
-}
+static PresentShaderProg s_sprog[HOST_SHADER_COUNT];
 
 /* The program of the preset to draw with, built on first use; NULL for none or a preset that failed. */
-static ShaderProg *shader_prog(void)
+static PresentShaderProg *shader_prog(void)
 {
     int p = s_shader.preset;
-    ShaderProg *sp;
 
     if (p <= HOST_SHADER_NONE || p >= HOST_SHADER_COUNT)
         return NULL;
-    sp = &s_sprog[p];
-    if (sp->failed)
+    if (!present_shader_build(&s_sprog[p], s_gles ? PRESENT_GLSL_ES300 : PRESENT_GLSL_150, p, "[HOST] window:"))
         return NULL;
-    if (!sp->prog) {
-        const char *test_fail = getenv("RECOMP_SHADER_TEST_FAIL");   /* the fallback's test: a shader that fails */
-        sp->prog = link_program(test_fail && !strcmp(test_fail, k_shader_names[p]) ? "not glsl;\n" : k_shader_fs[p]);
-        if (!sp->prog) {
-            sp->failed = 1;
-            if (!s_shader_logged[p]) {
-                s_shader_logged[p] = 1;
-                fprintf(stderr, "  [HOST] window: picture shader %s does not build here; drawing without one\n",
-                        k_shader_names[p]);
-            }
-            return NULL;
-        }
-        sp->u_tex = s_gl.GetUniformLocation(sp->prog, "u_tex");
-        sp->u_prev = s_gl.GetUniformLocation(sp->prog, "u_prev");
-        sp->u_flip = s_gl.GetUniformLocation(sp->prog, "u_flip");
-        sp->u_src = s_gl.GetUniformLocation(sp->prog, "u_src");
-        sp->u_out = s_gl.GetUniformLocation(sp->prog, "u_out");
-        sp->u_cells = s_gl.GetUniformLocation(sp->prog, "u_cells");
-        sp->u_strength = s_gl.GetUniformLocation(sp->prog, "u_strength");
-        sp->u_curve = s_gl.GetUniformLocation(sp->prog, "u_curve");
-        sp->u_ghost = s_gl.GetUniformLocation(sp->prog, "u_ghost");
-        fprintf(stderr, "  [HOST] window: picture shader %s\n", k_shader_names[p]);
-    }
-    return sp;
+    return &s_sprog[p];
 }
 
 static void shader_free(void)
 {
-    for (int i = 0; i < HOST_SHADER_COUNT; i++) {
-        if (s_sprog[i].prog && s_gl.DeleteProgram)
-            s_gl.DeleteProgram(s_sprog[i].prog);
-    }
-    memset(s_sprog, 0, sizeof s_sprog);
+    for (int i = 0; i < HOST_SHADER_COUNT; i++)
+        present_shader_release(&s_sprog[i], 0);
 }
 
 /* LCD ghosting wants the previous picture: present_rgba then alternates between two textures. */
@@ -671,29 +520,23 @@ static int draw(unsigned tex, unsigned prev, int w, int h, int top_down)
     s_gl.ClearColor(0.0f, 0.0f, 0.0f, 1.0f);
     s_gl.Clear(XGL_COLOR_BUFFER_BIT);
     s_gl.Viewport((dw - vw) / 2, (dh - vh) / 2, vw, vh);
-    ShaderProg *sp = shader_prog();
+    PresentShaderProg *sp = shader_prog();
     if (sp) {
         /* Console lines: an upscaled picture (XBA-184) holds round(h / 240) output lines per console line. */
-        int k = (h + 120) / 240;
-        int st = s_shader.strength >= 0 ? s_shader.strength : k_shader_strength[s_shader.preset];
-        if (k < 1)
-            k = 1;
-        s_gl.UseProgram(sp->prog);
+        int cells_h = present_shader_console_cells(h);
+        PresentShaderParams pp = {
+            .src_w = (float)w, .src_h = (float)h, .out_w = (float)vw, .out_h = (float)vh,
+            .cells_w = (float)w * (float)cells_h / (float)h, .cells_h = (float)cells_h,
+            .flip = top_down, .strength = present_shader_strength(&s_shader), .curvature = s_shader.curvature,
+            .ghosting = prev && prev != tex ? s_shader.ghosting : 0,
+        };
         if (prev && prev != tex) {
             s_gl.ActiveTexture(XGL_TEXTURE1);
             s_gl.BindTexture(XGL_TEXTURE_2D, prev);
         }
         s_gl.ActiveTexture(XGL_TEXTURE0);
         s_gl.BindTexture(XGL_TEXTURE_2D, tex);
-        s_gl.Uniform1i(sp->u_tex, 0);
-        s_gl.Uniform1i(sp->u_prev, 1);
-        s_gl.Uniform1f(sp->u_flip, top_down ? 1.0f : 0.0f);
-        s_gl.Uniform2f(sp->u_src, (float)w, (float)h);
-        s_gl.Uniform2f(sp->u_out, (float)vw, (float)vh);
-        s_gl.Uniform2f(sp->u_cells, (float)w / (float)k, (float)h / (float)k);
-        s_gl.Uniform1f(sp->u_strength, (float)st / 100.0f);
-        s_gl.Uniform1f(sp->u_curve, (float)s_shader.curvature / 100.0f);
-        s_gl.Uniform1f(sp->u_ghost, prev && prev != tex ? (float)s_shader.ghosting / 100.0f : 0.0f);
+        present_shader_use(sp, &pp);
     } else {
         s_gl.UseProgram(s_prog);
         s_gl.ActiveTexture(XGL_TEXTURE0);
@@ -999,21 +842,9 @@ int host_window_env_vsync(void)
     return !(v && v[0] == '0');
 }
 
-static int clamp100(int v)
-{
-    return v < 0 ? 0 : v > 100 ? 100 : v;
-}
-
 void host_window_set_shader(const HostShader *s)
 {
-    if (!s || s->preset <= HOST_SHADER_NONE || s->preset >= HOST_SHADER_COUNT) {
-        s_shader.preset = HOST_SHADER_NONE;
-        return;
-    }
-    s_shader.preset = s->preset;
-    s_shader.strength = s->strength < 0 ? -1 : clamp100(s->strength);
-    s_shader.curvature = clamp100(s->curvature);
-    s_shader.ghosting = clamp100(s->ghosting);
+    s_shader = present_shader_clamp(s);
 }
 
 int host_window_shader_active(void)
@@ -1025,47 +856,17 @@ int host_window_shader_active(void)
 
 int host_window_shader_parse(const char *v)
 {
-    if (!v)
-        return -1;
-    for (int i = 0; i < HOST_SHADER_COUNT; i++) {
-        if (!strcasecmp(v, k_shader_names[i]))
-            return i;
-    }
-    return -1;
+    return present_shader_parse(v);
 }
 
 const char *host_window_shader_name(int preset)
 {
-    return preset >= 0 && preset < HOST_SHADER_COUNT ? k_shader_names[preset] : k_shader_names[0];
-}
-
-/* An integer 0..100 from $name, else def (unset, empty or not a number). */
-static int env_percent(const char *name, int def)
-{
-    const char *v = getenv(name);
-    char *end;
-    long n;
-
-    if (!v || !v[0])
-        return def;
-    n = strtol(v, &end, 10);
-    if (end == v)
-        return def;
-    return clamp100(n > 1000 ? 1000 : n < -1000 ? -1000 : (int)n);
+    return present_shader_name(preset);
 }
 
 void host_window_env_shader(const char *console_var, int def, HostShader *out)
 {
-    int p = console_var ? host_window_shader_parse(getenv(console_var)) : -1;
-
-    if (!out)
-        return;
-    if (p < 0)
-        p = host_window_shader_parse(getenv("RECOMP_SHADER"));
-    out->preset = p < 0 ? def : p;
-    out->strength = env_percent("RECOMP_SHADER_STRENGTH", -1);
-    out->curvature = env_percent("RECOMP_SHADER_CURVATURE", 0);
-    out->ghosting = env_percent("RECOMP_SHADER_GHOSTING", 0);
+    present_shader_env(console_var, def, out);
 }
 
 void host_window_shader_env(const char *console_var)

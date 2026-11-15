@@ -59,3 +59,7 @@ set_tests_properties(host_layer_window PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60
 # XBA-195: the picture shaders, each drawn and read back (host_window_capture); skipped (77) like the window test
 add_test(NAME host_layer_shaders COMMAND host_layer_test shaders)
 set_tests_properties(host_layer_shaders PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120)
+# XBA-203: the shader module shared with the Xbox presenter: keys and sources everywhere, each preset built in every
+# GL context the display offers (none: those builds are skipped, the rest still runs)
+add_test(NAME host_layer_present_shaders COMMAND host_layer_test present_shaders)
+set_tests_properties(host_layer_present_shaders PROPERTIES TIMEOUT 120)

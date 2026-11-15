@@ -20,6 +20,8 @@
 
 #include <stdint.h>
 
+#include "present_shaders.h"   /* HOST_SHADER_*, HostShader (shared with the Xbox presenter, XBA-203) */
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -111,9 +113,9 @@ int host_window_env_scale(const char *console_var, int def);
 int host_window_env_filter(const char *console_var, int def);
 int host_window_env_vsync(void);
 
-/* Picture shaders (XBA-195, docs/runtime/environment-variables.md « Console picture »): one fragment shader of our
- * own (GLSL ES 3.0 / GLSL 1.50) between the picture and the window, drawn at the output resolution in the same pass
- * as the scaling, so after an upscaled (XBA-184) or generated (XBA-186) frame and with every scale mode:
+/* Picture shaders (XBA-195, docs/runtime/environment-variables.md « Console picture »; sources and keys in
+ * present_shaders.c, shared with the Xbox presenter): one fragment shader of our own (GLSL ES 3.0 / GLSL 1.50)
+ * between the picture and the window, drawn at the output resolution in the same pass as the scaling, so after an upscaled (XBA-184) or generated (XBA-186) frame and with every scale mode:
  *   HOST_SHADER_NONE       the picture as it is (the default; the plain present, no cost)
  *   HOST_SHADER_SHARP      sharp bilinear: whole-pixel prescale then linear, crisp at any non-integer scale
  *                          (samples the window's texture linearly whatever the filter)
@@ -127,20 +129,7 @@ int host_window_env_vsync(void);
  * CRT 60, LCD 50; unused by sharp). A preset whose shader does not compile or link falls back to none (logged
  * once). host_window_screenshot_bmp stays the raw picture; host_window_capture reads the drawable as drawn
  * (shader included). Set before or after open, from the presenting thread; kept across open / close. */
-enum {
-    HOST_SHADER_NONE = 0,
-    HOST_SHADER_SHARP = 1,
-    HOST_SHADER_SCANLINES = 2,
-    HOST_SHADER_CRT = 3,
-    HOST_SHADER_LCD = 4,
-    HOST_SHADER_COUNT = 5
-};
-typedef struct HostShader {
-    int preset;      /* HOST_SHADER_* */
-    int strength;    /* 0..100, -1: the preset's default */
-    int curvature;   /* CRT: 0 (flat, the default)..100 */
-    int ghosting;    /* LCD: 0 (none, the default)..100 */
-} HostShader;
+/* HOST_SHADER_* and HostShader: present_shaders.h. */
 void host_window_set_shader(const HostShader *s);   /* NULL: none */
 /* The preset drawn by the next present: the one set, or none after its shader failed to build. */
 int host_window_shader_active(void);

@@ -39,6 +39,7 @@ endif()
 if(NOT TARGET xbr_host)
     add_library(xbr_host STATIC
         ${XBR_HOST_SRC}/video/host_window.c
+        ${XBR_HOST_SRC}/video/present_shaders.c
         ${XBR_HOST_SRC}/video/perf_overlay.c
         ${XBR_HOST_SRC}/input/host_pad.c
         ${XBR_HOST_SRC}/audio/host_audio.c)

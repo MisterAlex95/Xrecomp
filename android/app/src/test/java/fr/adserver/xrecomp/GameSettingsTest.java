@@ -121,7 +121,8 @@ public class GameSettingsTest {
 
     @Test
     public void pictureShaderPerGame() throws Exception {
-        // XBA-195: a console game's own shader over Settings', its « None » over Settings' line; never an Xbox game's.
+        // XBA-195: a console game's own shader over Settings', its « None » over Settings' line; XBA-203: an Xbox
+        // game's too, but not its LCD ghosting (no LCD grid in the Xbox presenter).
         File files = tmp.newFolder();
         RecompConfig g = game(files, GBA, "RECOMP_SHADER", "lcd", "RECOMP_SHADER_GHOSTING", "30");
         GameSettings.Env env = GameSettings.runEnv(Console.GBA, cfg("RECOMP_SHADER", "crt", "RECOMP_SHADER_STRENGTH",
@@ -133,8 +134,24 @@ public class GameSettingsTest {
         env = GameSettings.runEnv(Console.PS1, cfg("RECOMP_SHADER", "crt"), none, Locale.US, false);
         assertNull(env.value("RECOMP_SHADER"));
         assertEquals("RECOMP_SHADER", env.value(GameSettings.SKIP_ENV));
-        RecompConfig x = game(files, XBOX, "RECOMP_SHADER", "crt");
-        assertNull(GameSettings.runEnv(Console.XBOX, cfg(), x, Locale.US, false).value("RECOMP_SHADER"));
+        RecompConfig x = game(files, XBOX, "RECOMP_SHADER", "crt", "RECOMP_SHADER_CURVATURE", "30",
+                              "RECOMP_SHADER_GHOSTING", "60");
+        env = GameSettings.runEnv(Console.XBOX, cfg("RECOMP_SHADER", "scanlines"), x, Locale.US, false);
+        assertEquals("crt", env.value("RECOMP_SHADER"));
+        assertEquals("30", env.value("RECOMP_SHADER_CURVATURE"));
+        assertNull("no LCD grid on the Xbox", env.value("RECOMP_SHADER_GHOSTING"));
+        RecompConfig xs = game(files, XBOX, "RECOMP_SHADER", "");
+        env = GameSettings.runEnv(Console.XBOX, cfg("RECOMP_SHADER", "crt"), xs, Locale.US, false);
+        assertNull(env.value("RECOMP_SHADER"));
+        assertEquals("the game's None skips Settings' line", "RECOMP_SHADER", env.value(GameSettings.SKIP_ENV));
+        java.util.List<RecompConfig.Option> xo = GameSettings.options(Console.XBOX, false);
+        java.util.List<Integer> titles = new java.util.ArrayList<>();
+        for (RecompConfig.Option o : xo)
+            titles.add(o.title);
+        assertTrue(titles.containsAll(List.of(R.string.OPT_CSHADER, R.string.OPT_CSHADER_STRENGTH,
+                                              R.string.OPT_CSHADER_CURVE)));
+        assertFalse(titles.contains(R.string.OPT_CSHADER_GHOST));
+        assertTrue(GameSettings.options(Console.N64, false).stream().anyMatch(o -> o.title == R.string.OPT_CSHADER_GHOST));
         assertTrue(GameSettings.allExportedKeys().containsAll(List.of("RECOMP_SHADER", "RECOMP_SHADER_STRENGTH",
                                                                       "RECOMP_SHADER_CURVATURE",
                                                                       "RECOMP_SHADER_GHOSTING")));
@@ -201,9 +218,10 @@ public class GameSettingsTest {
             assertTrue(c + " rewind", t.contains("OPT_REWIND") && t.contains("OPT_REWIND_MB"));
         }
         assertFalse(xbox.contains("OPT_REWIND") || xbox.contains("OPT_REWIND_MB"));
-        // XBA-195: the picture shader's rows, for the console window's games only.
+        // XBA-195: the picture shader's rows for every game since XBA-203 (the Xbox presenter's), but the LCD
+        // ghosting only for the console window's (no LCD grid on the Xbox).
         for (String t : new String[] { "OPT_CSHADER", "OPT_CSHADER_STRENGTH", "OPT_CSHADER_CURVE", "OPT_CSHADER_GHOST" }) {
-            assertFalse(t, xbox.contains(t));
+            assertEquals(t, !t.equals("OPT_CSHADER_GHOST"), xbox.contains(t));
             assertTrue(t, gba.contains(t));
             assertTrue(t, titles(GameSettings.options(Console.PS1, false)).contains(t));
             assertTrue(t, titles(GameSettings.options(Console.N64, false)).contains(t));
