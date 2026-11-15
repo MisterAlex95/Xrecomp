@@ -337,7 +337,14 @@ final class GameStore {
         long start = prefs(c).getLong(KEY_SESSION_START, 0);
         if (start <= 0)
             return;
-        long d = Math.max(0, Math.min(SESSION_MAX, now - start));
+        sessionEnd(c, now, Math.max(0, Math.min(SESSION_MAX, now - start)));
+    }
+
+    /** The same with the session's length already known (PlayClock.sessionLength: the time the game was on screen). */
+    static void sessionEnd(Context c, long now, long length) {
+        if (prefs(c).getLong(KEY_SESSION_START, 0) <= 0)
+            return;
+        long d = Math.max(0, Math.min(SESSION_MAX, length));
         prefs(c).edit().putLong(KEY_PLAY_MS, playTime(c) + d).remove(KEY_SESSION_START).commit();
     }
 

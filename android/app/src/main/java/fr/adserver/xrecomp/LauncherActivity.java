@@ -391,20 +391,23 @@ public class LauncherActivity extends Activity {
         String sessionTid = GameStore.sessionTid(this);
         boolean hadLibrary = Library.gamesFile(getFilesDir()).isFile();
         long now = System.currentTimeMillis();
+        // XBA-206: the session lasts the time the game was on screen (ShellActivity's PlayClock), not since launch.
+        long sessionLength = PlayClock.sessionLength(PlayClock.read(PlayClock.file(getFilesDir())), sessionStart, now);
         if (savedInstanceState == null && !gameRunning())
-            GameStore.sessionEnd(this, now);
+            GameStore.sessionEnd(this, now, sessionLength);
         else
             sessionStart = 0;
         games = Library.migrate(this);
         setIndex(LibraryIndex.read(Library.indexFile(getFilesDir())));
         if (sessionStart > 0 && sessionTid != null && hadLibrary) {
-            Library.sessionEnd(games, sessionTid, sessionStart, now);
+            Library.sessionAdd(games, sessionTid, sessionStart, sessionLength);
             writeGames();
+            Log.i(TAG, "launcher: play session of " + sessionTid + ": " + sessionLength / 1000 + " s on screen");
         }
         if (savedInstanceState == null) {
             // The launcher opens on the game last launched (the preferences say which; its record may lack).
             String launched = GameStore.launchedTitleId(this);
-            if (launched != null && games.get(launched) != null)
+            if (launched != null && games.get(launched) != null && Console.ofKey(launched) == Console.XBOX)
                 games.selected = launched;
         }
         // A game's home-screen shortcut: that game becomes the selected one (as A on its card would make it).
@@ -888,6 +891,8 @@ public class LauncherActivity extends Activity {
             directStep(true);
             return;
         }
+        if (clearSearch())   // XBA-206: B first takes the library's search away
+            return;
         if (history.isEmpty()) {
             if (screen != Screen.LIBRARY && screen != Screen.WELCOME && libraryOn()) {
                 show(Screen.LIBRARY, -1);   // Home of a library game: back to the library
@@ -957,7 +962,13 @@ public class LauncherActivity extends Activity {
         directStatus = null;
         switchArmedAt = 0;
         libCards.clear();
+        libRecentCards.clear();
+        libCardEntries.clear();
         libCaption = null;
+        libContent = null;
+        libScroll = null;
+        libSearch = null;
+        libSearchPill = libSortPill = null;
         setNote(null, NOTE_INFO);
         refreshIdentity();
         switch (s) {
@@ -1906,6 +1917,8 @@ public class LauncherActivity extends Activity {
         addHint("B", libraryOn() && history.isEmpty() ? R.string.LIB_TITLE : history.isEmpty() ? R.string.HINT_QUIT
                                                                                                 : R.string.HINT_BACK,
                 this::back);
+        if (st != State.NONE && rec() != null)
+            favouriteHint(currentEntry());   // XBA-206: X adds the game to the favourites
 
         if (copying)
             setNote(getString(R.string.HANDOVER_COPYING_NOTE), NOTE_INFO);
@@ -4180,7 +4193,9 @@ public class LauncherActivity extends Activity {
             if (e != null && e.chip != homeChip)
                 refreshKeepingFocus();
         } else if (screen == Screen.LIBRARY && !scanning()) {
-            if (++libPolls % LIBRARY_POLL_EVERY == 0 && libraryChanged())
+            // (not while the search is typed: the field and its keyboard would go)
+            if (++libPolls % LIBRARY_POLL_EVERY == 0 && (libSearch == null || !libSearch.hasFocus())
+                && libraryChanged())
                 refreshKeepingFocus();
         } else if (screen == Screen.HOME && homePrep != null) {
             Prep now = prep();
@@ -4299,6 +4314,8 @@ public class LauncherActivity extends Activity {
         View status = heroLine(info, line, color);
         if (p == Prep.RUNNING && status instanceof Widgets.Chip)
             homeStatus = (Widgets.Chip)status;
+        if (e.record != null && (e.record.lastPlayed > 0 || e.record.playMs > 0))   // XBA-206: as an Xbox game's Home
+            heroLine(info, homeMeta(e.record.lastPlayed, e.record.playMs), 0);
 
         LinearLayout buttons = heroButtons(info);
         Widgets.PillButton play = pill(buttons, Icon.PLAY, getString(R.string.PLAY), true, () -> launchRom(e));
@@ -4339,6 +4356,7 @@ public class LauncherActivity extends Activity {
         startAction = () -> launchRom(e);
         addHint("A", R.string.HINT_SELECT, this::clickFocused);
         addHint("B", R.string.LIB_TITLE, this::back);
+        favouriteHint(e);   // XBA-206
         if (companion != null) {
             companion.art(null);
             companion.home(e.title(), line, color, true, play.title);
@@ -4440,6 +4458,24 @@ public class LauncherActivity extends Activity {
     private void setIndex(LibraryIndex x) {
         index = x;
         indexGames = x.games();
+    }
+
+    /**
+     * XBA-206: a session still open when another game starts (the last one was left in the background, Back to
+     * launcher): it ends now, with the time its game was on screen.
+     */
+    private void closeOpenSession(long now) {
+        long start = GameStore.sessionStartedAt(this);
+        if (start <= 0)
+            return;
+        String tid = GameStore.sessionTid(this);
+        long d = PlayClock.sessionLength(PlayClock.read(PlayClock.file(getFilesDir())), start, now);
+        GameStore.sessionEnd(this, now, d);
+        if (tid != null && games != null && games.get(tid) != null) {
+            Library.sessionAdd(games, tid, start, d);
+            writeGames();
+        }
+        Log.i(TAG, "launcher: play session of " + tid + " closed at the next launch: " + d / 1000 + " s on screen");
     }
 
     private void writeGames() {
@@ -4618,6 +4654,15 @@ public class LauncherActivity extends Activity {
             endRunningGame();
         GameStore.rememberRomLaunch(this, rom, e.title(), e.tid,
                                     romParts(e.active, folder == null ? null : folder.tree));
+        // XBA-206: a play session as an Xbox game's (Last played, Play time, « Recently played »): its record holds
+        // them (never the selected game: Library.Games.selected skips the other consoles).
+        long now = System.currentTimeMillis();
+        closeOpenSession(now);
+        if (games.get(e.tid) == null)
+            games.put(LibraryScreen.recordFor(e, now));
+        GameStore.sessionStart(this, now, e.tid);
+        Library.sessionStart(games, e.tid, now);
+        writeGames();
         Log.i(TAG, "launcher: library: play " + e.tid + " (" + e.title() + ") from " + rom);
         startActivity(new Intent(this, ShellActivity.class)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK));
@@ -4984,34 +5029,25 @@ public class LauncherActivity extends Activity {
     private void buildLibrary() {
         screenTitle.setText(R.string.LIB_TITLE);
         libEntries = LibraryScreen.entries(getFilesDir(), games, index, libEnv());
-        // Games of several consoles: each card says its console (an Xbox-only library looks as before).
-        java.util.Set<Console> consoles = java.util.EnumSet.noneOf(Console.class);
-        for (LibraryScreen.Entry e : libEntries)
-            consoles.add(e.console());
-        boolean badges = consoles.size() > 1;
+        LibraryView.State view = libView();
+        // Games of several consoles: each card says its console (an Xbox-only library looks as before), and the top
+        // bar's tabs filter them (XBA-206: All, Xbox, GBA, PS1, N64; L1 / R1).
+        libConsoles = LibraryView.consoles(libEntries);
+        libBadges = libConsoles.size() > 1;
+        if (!libBadges || !libConsoles.contains(view.console))
+            view.console = null;   // (not saved: the console's games may come back)
+        if (libBadges) {
+            String[] names = new String[libConsoles.size() + 1];
+            names[0] = getString(R.string.LIB_ALL);
+            for (int i = 0; i < libConsoles.size(); i++)
+                names[i + 1] = libConsoles.get(i).badge();
+            int active = view.console == null ? 0 : libConsoles.indexOf(view.console) + 1;
+            topTabs.addView(new Widgets.Tabs(this, names, active, i -> stepConsole(i - active)), lp(WRAP, MATCH));
+            l1Action = () -> stepConsole(-1);
+            r1Action = () -> stepConsole(1);
+        }
         Library.Record sel = games.selected();
         String want = focusTid != null ? focusTid : sel != null ? sel.titleId : null;
-        GameCard focusCard = null;
-        for (LibraryScreen.Entry e : libEntries) {
-            GameCard c = new GameCard(this);
-            c.setGame(LibraryScreen.art(getFilesDir(), libArt, e), e.tid, e.title(), LibraryScreen.chipText(this, e),
-                      LibraryScreen.chipColor(e.chip));
-            c.setChipShown(e.chip != GameState.Chip.READY);
-            if (badges)
-                c.setBadge(e.console().badge());
-            c.setDim(e.chip == GameState.Chip.SOURCE_GONE || e.chip == GameState.Chip.DATA_MISSING
-                     || e.chip == GameState.Chip.NO_FILE_ACCESS);
-            c.setOnClickListener(v -> {
-                feedback.play(UiFeedback.Cue.SELECT, v);
-                openGame(e);
-            });
-            onFocus(c, () -> libFocus(e));
-            libCards.add(focusable(c));
-            if (e.tid.equals(want))
-                focusCard = c;
-        }
-        if (focusCard == null && !libCards.isEmpty())
-            focusCard = libCards.get(0);
 
         libCaption = Theme.text(this, Theme.T_BODY, Theme.REGULAR, Theme.TEXT_DIM, "");
         libCaption.setLineSpacing(0, 1.3f);
@@ -5036,14 +5072,28 @@ public class LauncherActivity extends Activity {
                                                                                 : R.string.LIB_FOLDER_TILE),
                                   Theme.TEXT_DIM, null, null);
         } else {
-            body.addView(LibraryScreen.grid(this, libCards, libCaption), new FrameLayout.LayoutParams(MATCH, MATCH));
-            defaultFocus = focusCard;
-            for (LibraryScreen.Entry e : libEntries) {
-                if (libCards.get(libEntries.indexOf(e)) == focusCard) {
-                    libFocus(e);
-                    break;
-                }
-            }
+            // XBA-206: the Search and Sort pills over the grid, then « Recently played » and the games.
+            ScrollView scroll = LibraryScreen.scroll(this);
+            libScroll = scroll;
+            LinearLayout col = (LinearLayout)scroll.getChildAt(0);
+            Widgets.PillRow bar = new Widgets.PillRow(this);
+            libSearchPill = pill(bar, Icon.SEARCH, searchLabel(), false, this::openSearch);
+            libSortPill = pill(bar, Icon.SORT, sortLabel(), false, this::stepSort);
+            LinearLayout.LayoutParams bp = lp(MATCH, Theme.BUTTON_H);
+            bp.bottomMargin = Theme.S3;
+            col.addView(bar, bp);
+            libContent = column();
+            libContent.setClipChildren(false);
+            col.addView(libContent, lp(MATCH, WRAP));
+            LinearLayout.LayoutParams cp = lp(MATCH, WRAP);
+            cp.topMargin = Theme.S2;
+            col.addView(libCaption, cp);
+            body.addView(scroll, new FrameLayout.LayoutParams(MATCH, MATCH));
+            GameCard focusCard = fillLibrary(want);
+            defaultFocus = focusCard != null ? focusCard : libSearchPill;
+            LibraryScreen.Entry fe = focusCard == null ? null : cardEntry(focusCard);
+            if (fe != null)
+                libFocus(fe);
         }
         focusMemory.remove(Screen.LIBRARY);   // the focus follows the title, not a place in the grid
 
@@ -5056,10 +5106,321 @@ public class LauncherActivity extends Activity {
         };
         yAction = this::openOptions;
         addHint("A", R.string.LIB_HINT_OPEN, this::clickFocused);
-        addHint("START", R.string.LIB_HINT_PRIMARY, startAction);
+        if (!libEntries.isEmpty()) {   // Start (the primary action) is not hinted, as on Home
+            xAction = this::toggleFocusedFavourite;
+            addHint("X", R.string.LIB_HINT_FAV, xAction);
+        } else {
+            addHint("START", R.string.LIB_HINT_PRIMARY, startAction);
+        }
         addHint("Y", R.string.HINT_OPTIONS, this::openOptions);
         if (gameRunning())
             setNote(getString(R.string.LIB_RUNNING_NOTE, runningTitle()), NOTE_INFO);
+    }
+
+    // ---- The library's view (XBA-206): sort, console filter, search, favourites, « Recently played » --------------
+
+    private LibraryView.State libView;
+    /** The grid's entries as shown (filtered, sorted, favourites first); libEntries keeps them all. */
+    private List<LibraryScreen.Entry> libShown = new ArrayList<>();
+    private final List<GameCard> libRecentCards = new ArrayList<>();
+    private final java.util.Map<GameCard, LibraryScreen.Entry> libCardEntries = new java.util.HashMap<>();
+    private List<Console> libConsoles = new ArrayList<>();
+    private boolean libBadges;
+    /** Under the Search and Sort pills: « Recently played », then the grid (rebuilt as the search is typed). */
+    private LinearLayout libContent;
+    private ScrollView libScroll;
+    private Widgets.PillButton libSearchPill, libSortPill;
+    private android.widget.EditText libSearch;
+
+    private LibraryView.State libView() {
+        if (libView == null)
+            libView = LibraryView.load(getFilesDir());
+        return libView;
+    }
+
+    LibraryView.State libraryViewForTest() {
+        return libView();
+    }
+
+    List<GameCard> libraryRecentCardsForTest() {
+        return libRecentCards;
+    }
+
+    android.widget.EditText librarySearchForTest() {
+        return libSearch;
+    }
+
+    Widgets.PillButton librarySortPillForTest() {
+        return libSortPill;
+    }
+
+    Widgets.PillButton librarySearchPillForTest() {
+        return libSearchPill;
+    }
+
+    private void saveLibView() {
+        if (!LibraryView.save(getFilesDir(), libView()))
+            Log.w(TAG, "launcher: cannot write " + LibraryView.FILE);
+    }
+
+    private LibraryScreen.Entry cardEntry(GameCard c) {
+        return libCardEntries.get(c);
+    }
+
+    /** A card of the library for e (the grid's or the « Recently played » row's). */
+    private GameCard libCard(LibraryScreen.Entry e) {
+        GameCard c = new GameCard(this);
+        c.setGame(LibraryScreen.art(getFilesDir(), libArt, e), e.tid, e.title(), LibraryScreen.chipText(this, e),
+                  LibraryScreen.chipColor(e.chip));
+        c.setChipShown(e.chip != GameState.Chip.READY);
+        if (libBadges)
+            c.setBadge(e.console().badge());
+        c.setFavourite(libView().favourite(e.tid));
+        c.setDim(e.chip == GameState.Chip.SOURCE_GONE || e.chip == GameState.Chip.DATA_MISSING
+                 || e.chip == GameState.Chip.NO_FILE_ACCESS);
+        c.setOnClickListener(v -> {
+            feedback.play(UiFeedback.Cue.SELECT, v);
+            openGame(e);
+        });
+        onFocus(c, () -> {
+            libFocus(e);
+            // The first row of cards: back to the top, the Search and Sort pills in sight (not under the title).
+            boolean top = libRecentCards.contains(c) || libRecentCards.isEmpty() && libCards.indexOf(c) >= 0
+                          && libCards.indexOf(c) < LibraryScreen.COLUMNS;
+            if (top && libScroll != null)
+                libScroll.post(() -> libScroll.scrollTo(0, 0));
+        });
+        libCardEntries.put(c, e);
+        return focusable(c);
+    }
+
+    /**
+     * (Re)builds what is under the pills: « Recently played » (the last games played, any console; not while a console
+     * or a search narrows the grid, nor for a library of one row), then the games as the view shows them. The card of
+     * want (a grid card first), else the first one; null when nothing shows.
+     */
+    private GameCard fillLibrary(String want) {
+        focusables.removeAll(libCards);
+        focusables.removeAll(libRecentCards);
+        for (GameCard c : libCards)
+            libCardEntries.remove(c);
+        for (GameCard c : libRecentCards)
+            libCardEntries.remove(c);
+        libCards.clear();
+        libRecentCards.clear();
+        libContent.removeAllViews();
+        LibraryView.State view = libView();
+        libShown = LibraryView.apply(libEntries, view);
+        List<LibraryScreen.Entry> recent = view.narrowed() || libEntries.size() <= LibraryScreen.COLUMNS
+                                           ? Collections.emptyList()
+                                           : LibraryView.recent(libEntries, LibraryView.RECENT_MAX);
+        GameCard focusCard = null, recentWant = null;
+        if (!recent.isEmpty()) {
+            libContent.addView(Theme.label(this, getString(R.string.LIB_RECENT)), lp(MATCH, WRAP));
+            for (LibraryScreen.Entry e : recent) {
+                GameCard c = libCard(e);
+                libRecentCards.add(c);
+                if (e.tid.equals(want) && recentWant == null)
+                    recentWant = c;
+            }
+            LibraryScreen.addRows(this, libContent, libRecentCards);
+            LinearLayout.LayoutParams p = lp(MATCH, WRAP);
+            p.topMargin = Theme.S3;
+            libContent.addView(Theme.label(this, getString(R.string.LIB_ALL_GAMES)), p);
+        }
+        for (LibraryScreen.Entry e : libShown) {
+            GameCard c = libCard(e);
+            libCards.add(c);
+            if (e.tid.equals(want))
+                focusCard = c;
+        }
+        if (libShown.isEmpty()) {
+            String q = view.query.trim();
+            TextView none = Theme.body(this, q.isEmpty() ? getString(R.string.LIB_NO_GAME_CONSOLE)
+                                                         : getString(R.string.LIB_NO_MATCH, q));
+            LinearLayout.LayoutParams p = lp(MATCH, WRAP);
+            p.topMargin = Theme.S3;
+            libContent.addView(none, p);
+        } else {
+            LibraryScreen.addRows(this, libContent, libCards);
+        }
+        if (focusCard == null)
+            focusCard = recentWant;
+        if (focusCard == null && !libCards.isEmpty())
+            focusCard = libCards.get(0);
+        if (focusCard == null && !libRecentCards.isEmpty())
+            focusCard = libRecentCards.get(0);
+        return focusCard;
+    }
+
+    private String searchLabel() {
+        String q = libView().query.trim();
+        return q.isEmpty() ? getString(R.string.LIB_SEARCH) : getString(R.string.LIB_SEARCH_Q, q);
+    }
+
+    private String sortLabel() {
+        return getString(R.string.LIB_SORT, getString(libView().sort.label));
+    }
+
+    /** A on Sort: the next order (name, last played, console, most played), kept; the focus stays on the pill. */
+    private void stepSort() {
+        if (screen != Screen.LIBRARY || libContent == null)
+            return;
+        LibraryView.State view = libView();
+        view.sort = view.sort.next();
+        saveLibView();
+        Log.i(TAG, "launcher: library: sorted by " + view.sort.name().toLowerCase(Locale.ROOT));
+        fillLibrary(focusTid);
+        libSortPill.set(Icon.SORT, sortLabel(), false);
+        libSortPill.requestLayout();
+        feedback.play(UiFeedback.Cue.MOVE, libSortPill);
+    }
+
+    /** L1 / R1 (or a tab): the previous or next console of the filter, « All » first; kept. */
+    private void stepConsole(int dir) {
+        if (screen != Screen.LIBRARY || !libBadges || dir == 0)
+            return;
+        LibraryView.State view = libView();
+        int n = libConsoles.size() + 1;
+        int i = view.console == null ? 0 : libConsoles.indexOf(view.console) + 1;
+        i = ((i + dir) % n + n) % n;
+        view.console = i == 0 ? null : libConsoles.get(i - 1);
+        saveLibView();
+        Log.i(TAG, "launcher: library: console " + (view.console == null ? "all" : view.console.id));
+        feedback.play(UiFeedback.Cue.MOVE, host);
+        refreshKeepingFocus();
+    }
+
+    /** The search field's width, in design pixels. */
+    static final int SEARCH_W = 720;
+
+    /**
+     * A on Search: a text field in its place with the on-screen keyboard (not full screen: the grid stays in sight),
+     * the grid following each letter; the keyboard's Search (or Enter) goes to the games. B clears the search.
+     */
+    private void openSearch() {
+        if (screen != Screen.LIBRARY || libContent == null)
+            return;
+        if (libSearch == null) {
+            android.widget.EditText t = new android.widget.EditText(this);
+            t.setSingleLine(true);
+            t.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, Theme.T_ROW);
+            t.setTypeface(Theme.REGULAR);
+            t.setTextColor(Theme.TEXT_BRIGHT);
+            t.setHintTextColor(Theme.TEXT_DIM);
+            t.setHint(R.string.LIB_SEARCH_HINT);
+            t.setPadding(Theme.S4, 0, Theme.S4, 0);
+            t.setGravity(Gravity.CENTER_VERTICAL);
+            android.graphics.drawable.GradientDrawable bg = new android.graphics.drawable.GradientDrawable();
+            bg.setColor(Theme.alpha(Theme.PANEL_HI, 0.9f));
+            bg.setCornerRadius(Theme.BUTTON_H / 2f);
+            bg.setStroke(3, Theme.ACCENT);
+            t.setBackground(bg);
+            t.setInputType(android.text.InputType.TYPE_CLASS_TEXT
+                           | android.text.InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
+            t.setImeOptions(android.view.inputmethod.EditorInfo.IME_ACTION_SEARCH
+                            | android.view.inputmethod.EditorInfo.IME_FLAG_NO_EXTRACT_UI
+                            | android.view.inputmethod.EditorInfo.IME_FLAG_NO_FULLSCREEN);
+            t.setText(libView().query);
+            t.setSelection(t.getText().length());
+            t.addTextChangedListener(new android.text.TextWatcher() {
+                @Override
+                public void beforeTextChanged(CharSequence c, int a, int b, int d) {}
+
+                @Override
+                public void onTextChanged(CharSequence c, int a, int b, int d) {}
+
+                @Override
+                public void afterTextChanged(android.text.Editable e) {
+                    onSearchTyped(e.toString());
+                }
+            });
+            t.setOnEditorActionListener((v, action, ev) -> {
+                searchDone();
+                return true;
+            });
+            LinearLayout bar = (LinearLayout)libSearchPill.getParent();
+            bar.addView(t, bar.indexOfChild(libSearchPill), lp(SEARCH_W, Theme.BUTTON_H));
+            libSearchPill.setVisibility(View.GONE);
+            focusables.remove(libSearchPill);
+            focusables.add(0, t);
+            libSearch = t;
+        }
+        libSearch.requestFocus();
+        android.view.inputmethod.InputMethodManager imm = getSystemService(
+                android.view.inputmethod.InputMethodManager.class);
+        if (imm != null)
+            imm.showSoftInput(libSearch, android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT);
+        Log.i(TAG, "launcher: library: search opened");
+    }
+
+    private void onSearchTyped(String q) {
+        if (screen != Screen.LIBRARY || libContent == null)
+            return;
+        libView().query = q;
+        fillLibrary(focusTid);
+        libSearchPill.set(Icon.SEARCH, searchLabel(), false);
+    }
+
+    /** The keyboard's Search: the keyboard goes, the focus to the first game found. */
+    private void searchDone() {
+        hideKeyboard();
+        if (!libCards.isEmpty())
+            libCards.get(0).requestFocus();
+    }
+
+    private void hideKeyboard() {
+        android.view.inputmethod.InputMethodManager imm = getSystemService(
+                android.view.inputmethod.InputMethodManager.class);
+        if (imm != null && host != null)
+            imm.hideSoftInputFromWindow(host.getWindowToken(), 0);
+    }
+
+    /** B with a search typed (or its field open): the search goes, the whole library is back. */
+    private boolean clearSearch() {
+        if (screen != Screen.LIBRARY || (libSearch == null && libView().query.isEmpty()))
+            return false;
+        hideKeyboard();
+        libView().query = "";
+        Log.i(TAG, "launcher: library: search cleared");
+        refreshKeepingFocus();
+        return true;
+    }
+
+    /** X on a library card: that game in or out of the favourites (first in the grid, a star on its card). */
+    private void toggleFocusedFavourite() {
+        if (screen != Screen.LIBRARY || !(focused() instanceof GameCard))
+            return;
+        LibraryScreen.Entry e = cardEntry((GameCard)focused());
+        if (e == null)
+            return;
+        boolean on = toggleFavourite(e);
+        GameCard c = fillLibrary(e.tid);
+        if (c != null) {
+            c.requestFocus();
+            libFocus(e);
+        }
+        feedback.play(UiFeedback.Cue.SELECT, host);
+        setNote(getString(on ? R.string.LIB_FAV_ADDED : R.string.LIB_FAV_REMOVED, e.title()), NOTE_OK);
+    }
+
+    private boolean toggleFavourite(LibraryScreen.Entry e) {
+        boolean on = libView().toggleFavourite(e.tid);
+        saveLibView();
+        Log.i(TAG, "launcher: library: " + e.tid + (on ? " is a favourite" : " is no longer a favourite"));
+        return on;
+    }
+
+    /** X on a game's Home (XBA-206): « Add to favourites » or « Remove from favourites ». */
+    private void favouriteHint(LibraryScreen.Entry e) {
+        if (e == null || !libraryOn())
+            return;
+        xAction = () -> {
+            boolean on = toggleFavourite(e);
+            refreshKeepingFocus();
+            setNote(getString(on ? R.string.LIB_FAV_ADDED : R.string.LIB_FAV_REMOVED, e.title()), NOTE_OK);
+        };
+        addHint("X", libView().favourite(e.tid) ? R.string.LIB_FAV_REMOVE : R.string.LIB_FAV_ADD, xAction);
     }
 
     /** Y on the library: the Options sheet (Rescan, Storage, Library folders, Settings, About). */
@@ -5240,6 +5601,7 @@ public class LauncherActivity extends Activity {
         startAction = this::onPlay;
         addHint("A", R.string.HINT_SELECT, this::clickFocused);
         addHint("B", history.isEmpty() ? R.string.LIB_TITLE : R.string.HINT_BACK, this::back);
+        favouriteHint(e);   // XBA-206
     }
 
     /** The library's entries changed state (a Prepare moved on, the queue, a game ended): true. */
@@ -7022,6 +7384,7 @@ public class LauncherActivity extends Activity {
         }
         if (!resume) {
             long now = System.currentTimeMillis();
+            closeOpenSession(now);   // a game left in the background and replaced: its time counts too
             GameStore.sessionStart(this, now, owner);
             if (owner != null) {
                 try {   // the next exit is this run's (XBA-74)

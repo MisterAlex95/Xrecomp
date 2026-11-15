@@ -146,12 +146,17 @@ final class Library {
             return titleId == null ? null : games.get(titleId);
         }
 
-        /** The selected record, else the most recently played one, else null. */
+        /**
+         * The selected record, else the most recently played Xbox one, else null. A game of another console has a
+         * record for its play time only (XBA-206): never the selected game (Home, Play and Prepare are the Xbox's).
+         */
         Record selected() {
             Record r = games.get(selected);
             if (r != null)
                 return r;
             for (Record x : games.values()) {
+                if (Console.ofKey(x.titleId) != Console.XBOX)
+                    continue;
                 if (r == null || x.lastPlayed > r.lastPlayed)
                     r = x;
             }
@@ -269,10 +274,15 @@ final class Library {
 
     /** Closes a session of titleId: adds its length (at most GameStore.SESSION_MAX) to play_ms. */
     static void sessionEnd(Games g, String titleId, long start, long now) {
+        sessionAdd(g, titleId, start, Math.max(0, Math.min(GameStore.SESSION_MAX, now - start)));
+    }
+
+    /** Closes a session of titleId whose length is known (PlayClock.sessionLength, XBA-206). */
+    static void sessionAdd(Games g, String titleId, long start, long length) {
         Record r = g.get(titleId);
         if (r == null || start <= 0)
             return;
-        r.playMs += Math.max(0, Math.min(GameStore.SESSION_MAX, now - start));
+        r.playMs += Math.max(0, Math.min(GameStore.SESSION_MAX, length));
     }
 
     // ---- Migration (one game, no library yet) -----------------------------------------------------------------------

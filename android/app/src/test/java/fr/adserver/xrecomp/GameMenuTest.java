@@ -1390,6 +1390,35 @@ public class GameMenuTest {
     }
 
     /**
+     * XBA-206: Settings › Picture shader (next start), for an Xbox title too (XBA-203): « As in Settings (None) » then
+     * each shader, this game's own RECOMP_SHADER in its GameSettings file (the Game settings page's same value).
+     */
+    @Test
+    public void pictureShaderRow() throws Exception {
+        java.io.File dir = new java.io.File(activity.getFilesDir(), "sh-game");
+        TestSupport.write(new java.io.File(dir, "default.xbe"), TestSupport.xbe(0x4D5300D1, "Game"));
+        GameStore.remember(activity, dir.getPath(), "Game");
+        menu.release();
+        build();
+        menu.open("Back");
+        menu.row(GameMenu.Item.SETTINGS).performClick();
+        Widgets.MenuRow sh = menu.row(GameMenu.Item.SHADER);
+        assertNotNull(sh);
+        assertEquals(activity.getString(R.string.MENU_SHADER), sh.title);
+        assertEquals(activity.getString(R.string.ROM_OPT_FOLLOW, activity.getString(R.string.VAL_CSHADER_NONE)),
+                     sh.value);
+        sh.performClick();   // None, its own
+        sh.performClick();   // Sharp
+        sh.performClick();   // Scanlines
+        sh.performClick();   // CRT
+        assertEquals(ConsoleVideo.SHADER_CRT, GameSettings.load(activity, "4D5300D1").get("RECOMP_SHADER"));
+        assertEquals(activity.getString(R.string.VAL_CSHADER_CRT), sh.value);
+        assertEquals(activity.getString(R.string.GS_BADGE), sh.badge);
+        sh.cycler.step(-1);  // Scanlines
+        assertEquals(ConsoleVideo.SHADER_SCANLINES, GameSettings.load(activity, "4D5300D1").get("RECOMP_SHADER"));
+    }
+
+    /**
      * XBA-197: a GBA / PS1 / N64 game's Cheats page: each cheat On / Off (written to its .cheats file at once, which the
      * runtime reads again by itself), Add a code (the host's dialog), Delete a code (A twice), B back; none for an Xbox
      * title.

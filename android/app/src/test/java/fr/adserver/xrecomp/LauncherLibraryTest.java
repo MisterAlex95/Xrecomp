@@ -281,7 +281,7 @@ public class LauncherLibraryTest {
         List<String> hints = new ArrayList<>();
         for (Widgets.Hint h : a.hintsForTest())
             hints.add(h.glyphForTest());
-        assertEquals(java.util.Arrays.asList("A", "START", "Y"), hints);
+        assertEquals(java.util.Arrays.asList("A", "X", "Y"), hints);   // XBA-206: X Favourite; Start not hinted
         assertTrue("library: stock colours", Theme.isStock());
         assertTrue(a.companionForTest().libraryForTest());
         render("7", null);
@@ -327,9 +327,11 @@ public class LauncherLibraryTest {
         a.forceFocusForTest();
         idle(300);
         key(a, KeyEvent.KEYCODE_DPAD_RIGHT);
-        GameCard focused = (GameCard)a.focusForTest();
         key(a, KeyEvent.KEYCODE_BUTTON_X);
-        assertEquals("X no longer opens Storage", LauncherActivity.Screen.LIBRARY, a.screenForTest());
+        assertEquals("X no longer opens Storage (XBA-206: a favourite)", LauncherActivity.Screen.LIBRARY,
+                     a.screenForTest());
+        GameCard focused = (GameCard)a.focusForTest();   // (the cards are made again, the favourite first)
+        assertTrue(focused.favouriteForTest());
         key(a, KeyEvent.KEYCODE_BUTTON_Y);
         Widgets.Sheet sheet = a.sheetForTest();
         assertNotNull(sheet);
@@ -671,7 +673,12 @@ public class LauncherLibraryTest {
         assertEquals("the Xbox game's folder is kept", dirBefore, GameStore.chosenDir(app));
         assertEquals(LauncherActivity.Screen.LIBRARY, a.screenForTest());   // no Home for a GBA game
         Library.Games g = Library.read(Library.gamesFile(app.getFilesDir()));
-        assertNull("no record: the GBA game is never the selected one", g.get(key));
+        Library.Record gr = g.get(key);   // XBA-206: a record for its play time, never the selected game
+        assertNotNull(gr);
+        assertTrue(gr.lastPlayed > 0);
+        assertFalse(key.equals(g.selected));
+        assertFalse(g.selected() != null && key.equals(g.selected().titleId));
+        assertEquals(key, GameStore.sessionTid(app));
 
         // Start on the card (a fresh launcher): the same launch.
         GameStore.rememberLaunch(app, dirBefore, "", null);   // an Xbox launch clears the ROM

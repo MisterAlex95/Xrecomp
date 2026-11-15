@@ -117,6 +117,7 @@ public class ShellActivity extends SDLActivity {
         super.onCreate(savedInstanceState);
         if (mBrokenLibraries)
             return;   // SDLActivity shows its error dialog and finishes
+        playBegin();
         SystemBars.hide(this);   // full screen: no status bar, no gesture pill (XBA-99)
         applyGameTheme();
         menu = new GameMenu(this, new MenuHost());
@@ -413,6 +414,7 @@ public class ShellActivity extends SDLActivity {
             touch.start();
         fpsLog.removeCallbacks(fpsTick);
         fpsLog.postDelayed(fpsTick, 10_000);
+        playOnScreen(true);
         fpsLog.removeCallbacks(coverShot);
         if (coverShotKey() != null)
             fpsLog.postDelayed(coverShot, CoverArt.CAPTURE_AFTER_MS);
@@ -434,6 +436,7 @@ public class ShellActivity extends SDLActivity {
     @Override
     protected void onStop() {
         fpsLog.removeCallbacks(fpsTick);
+        playOnScreen(false);
         fpsLog.removeCallbacks(coverShot);
         if (companion != null)
             companion.stop();   // the panel's onDetachedFromWindow releases its buttons
@@ -444,6 +447,44 @@ public class ShellActivity extends SDLActivity {
         super.onStop();
         if (menu != null)
             menu.onStop();      // after SDL's pause: a Back to launcher hands the hold to the background
+    }
+
+    // ---- Play time (XBA-206): the time the game is on screen, for the launcher's « Play time » -----------------------
+
+    private PlayClock playClock;
+    private final Runnable playBeat = new Runnable() {
+        @Override
+        public void run() {
+            if (playClock == null)
+                return;
+            playClock.beat(System.currentTimeMillis());
+            playClock.write(PlayClock.file(getFilesDir()));
+            fpsLog.postDelayed(this, PlayClock.BEAT_MS);
+        }
+    };
+
+    /** The game process starts counting (the same launcher session's count goes on: PlayClock.begin). */
+    private void playBegin() {
+        File f = PlayClock.file(getFilesDir());
+        long now = System.currentTimeMillis();
+        playClock = PlayClock.begin(PlayClock.read(f), GameStore.launchedTitleId(this), GameStore.sessionStartedAt(this),
+                                    now);
+        playClock.write(f);
+    }
+
+    /** The game comes on screen (onStart) or leaves it (onStop, Quit): written at once, a beat every minute between. */
+    private void playOnScreen(boolean on) {
+        if (playClock == null)
+            return;
+        long now = System.currentTimeMillis();
+        fpsLog.removeCallbacks(playBeat);
+        if (on) {
+            playClock.resume(now);
+            fpsLog.postDelayed(playBeat, PlayClock.BEAT_MS);
+        } else {
+            playClock.pause(now);
+        }
+        playClock.write(PlayClock.file(getFilesDir()));
     }
 
     @Override
@@ -700,6 +741,7 @@ public class ShellActivity extends SDLActivity {
         @Override
         public void quit() {
             overlayOff();
+            playOnScreen(false);
             if (gameApp())   // a game's own app closes: Android's home screen, not its launcher
                 finishAndRemoveTask();
             try {
@@ -815,6 +857,7 @@ public class ShellActivity extends SDLActivity {
             case CompanionPanel.QUIT:
                 Log.i(LauncherActivity.TAG, "shell: companion: quit (held)");
                 overlayOff();
+                playOnScreen(false);
                 if (gameApp())
                     finishAndRemoveTask();
                 try {

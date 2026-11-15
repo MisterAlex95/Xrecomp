@@ -279,8 +279,26 @@ final class Widgets {
 
     enum Icon {
         PLAY, SLIDERS, DISC, INFO, FOLDER, KEY, COPY, SWAP, TRASH, ARROW, CHECK, BACK, RESET, PAD, SOUND, BUZZ,
+        // The library's search and sort pills, a favourite (XBA-206).
+        SEARCH, SORT, STAR,
         // The in-game menu's (GameMenu), drawn by PanelIcons.
         CAMERA, SHARE, HOME, POWER, BARS, SCREEN
+    }
+
+    /** A five-pointed star of outer radius r centred on (cx, cy), point up (a favourite, XBA-206). */
+    static Path star(float cx, float cy, float r) {
+        Path p = new Path();
+        for (int i = 0; i < 10; i++) {
+            double a = Math.PI / 5 * i - Math.PI / 2;
+            float rr = i % 2 == 0 ? r : r * 0.42f;
+            float x = cx + (float)(Math.cos(a) * rr), y = cy + (float)(Math.sin(a) * rr);
+            if (i == 0)
+                p.moveTo(x, y);
+            else
+                p.lineTo(x, y);
+        }
+        p.close();
+        return p;
     }
 
     /** Draws an icon in a box of side s centred on (cx, cy), with the stroke paint p (its colour is kept). */
@@ -308,6 +326,19 @@ final class Widgets {
             c.drawCircle(cx, cy, h * 0.82f, p);
             c.drawCircle(cx, cy, h * 0.22f, p);
             c.drawArc(cx - h * 0.55f, cy - h * 0.55f, cx + h * 0.55f, cy + h * 0.55f, 200, 60, false, p);
+            break;
+        case SEARCH:
+            c.drawCircle(cx - h * 0.15f, cy - h * 0.15f, h * 0.55f, p);
+            c.drawLine(cx + h * 0.25f, cy + h * 0.25f, cx + h * 0.8f, cy + h * 0.8f, p);
+            break;
+        case SORT:
+            for (int i = -1; i <= 1; i++) {   // three lines, shorter and shorter
+                float y = cy + i * h * 0.55f;
+                c.drawLine(cx - h * 0.8f, y, cx - h * 0.8f + h * (1.6f - (i + 1) * 0.45f), y, p);
+            }
+            break;
+        case STAR:
+            c.drawPath(star(cx, cy, h * 0.9f), f);
             break;
         case INFO:
             c.drawCircle(cx, cy, h * 0.82f, p);
