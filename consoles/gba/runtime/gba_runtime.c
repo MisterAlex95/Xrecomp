@@ -15,9 +15,13 @@
  *
  * Rewind (XBA-194, recomp_rewind.h): a capture (the state and the last frame's picture) every RECOMP_REWIND_FRAMES
  * frames (2 by default) into a ring of RECOMP_REWIND_MB; while the rewind hotkey is held (Select + LT, R) each shown
- * frame loads the newest capture and drops it, silent; letting go plays on from there. */
+ * frame loads the newest capture and drops it, silent; letting go plays on from there.
+ *
+ * Cheats (XBA-197, gba_cheats.h): RECOMP_CHEATS_FILE's enabled codes run after every GBA frame under s_mu; the file is
+ * read again when the app changes it (checked every 30 shown frames). */
 #define _GNU_SOURCE /* pread, nanosleep */
 #include "gba_runtime.h"
+#include "gba_cheats.h"
 
 #include "gba_core.h"
 #include "gba_pack.h"
@@ -622,6 +626,8 @@ int gba_runtime_run(const gba_runtime_opts *o)
     recomp_hotkeys_get(); /* RECOMP_HOTKEYS / _KEYS, logged once (XBA-190) */
     recomp_rewinder rw;
     recomp_rewinder_init(&rw, "gba", NULL); /* RECOMP_REWIND, _MB, _FRAMES (XBA-194) */
+    gba_cheats cheats;
+    gba_cheats_open(&cheats, m, pack.table, NULL); /* RECOMP_CHEATS_FILE (XBA-197) */
     int resume = recomp_states_resume_enabled() && s_state_dir[0];
     if (resume) {
         int r = recomp_states_resume();
@@ -726,10 +732,12 @@ int gba_runtime_run(const gba_runtime_opts *o)
         /* Fast-forward: `speed` GBA frames per shown frame (max: as many as fit in one display frame). */
         int steps = rewinding ? 0 : ff ? (speed ? speed : 64) : 1, dirty = 0;
         uint64_t burst_end = now_ns() + GBA_FRAME_NS * 9 / 10;
+        gba_cheats_poll(&cheats); /* the app changed the list: read it again */
         for (int step = 0; step < steps; step++) {
             pthread_mutex_lock(&s_mu);
             gba_set_keys(m, keys);
             gba_run_frame(m, fb);
+            gba_cheats_frame(&cheats, keys);
             recomp_rewinder_frame(&rw, rewind_size, rewind_save, m);
             dirty |= gba_save_take_dirty(m);
             if (s_state_loaded) {
@@ -806,6 +814,7 @@ int gba_runtime_run(const gba_runtime_opts *o)
     recomp_states_detach(); /* before s_mu: a save / load in progress finishes first */
     recomp_ff_hold(0);
     recomp_rewinder_free(&rw); /* logs the capture cost */
+    gba_cheats_close(&cheats); /* the cartridge as it was */
     if (audio)
         host_audio_close();
     if (window)

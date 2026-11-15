@@ -1065,6 +1065,60 @@ Tests: `HotkeysTest.rewindAction` (the action, its default and text form, no cla
 every console with save states and not for an Xbox title), `GameSettingsTest.rowsPerConsole` (rewind rows for the
 GBA, PS1 and N64, not for an Xbox title); the runtime's in `tests/recomp_rewind` and the consoles' `*_rewind_*`.
 
+### Cheats
+
+XBA-197. A GBA, PS1 or N64 game's cheat codes, in two places that edit the same list:
+
+- **In-game menu › Cheats** (under Fast-forward): each cheat with « On » / « Off » (A or left / right), **Add a code**
+  and **Delete a code** (A on a cheat arms it, « A again to delete », A again within 4 s deletes). A change is written
+  at once and the running game takes it within half a second of play (the runtime reads the file again when it
+  changes): no restart.
+- **Game settings › Cheats** (the game's Home › Game settings, « This game » group; not for an Xbox title): « 2 on of
+  5 » or « No cheat code yet »; A opens the list: a check box per cheat (saved at each tap), « Add a code », « Delete a
+  code » (a list, tap one).
+
+« Add a code » is a dialog with the keyboard (the one place of the app that types text): a name (« Cheat N » when left
+blank) and the code, one line per code line (`8003A2C4 0063`). The app checks the shape only: hex digits, `AAAAAAAA
+VVVV` or `ADDRESS:VALUE` (and `AAAAAAAA VVVVVVVV` on the GBA, for GameShark / Action Replay codes); the runtime
+decodes the code when it reads the file and logs why one it cannot use is not applied (`<console>: cheat [on] "..."
+not applied: line 1: ...`). The format is detected (GBA: raw, GameShark / Action Replay v1-v2, Action Replay v3,
+CodeBreaker; PS1 / N64: GameShark); the list of code types and what is not supported: [consoles/README.md
+« Cheats »](../../consoles/README.md).
+
+`Cheats` keeps the list in `files/settings/game/<KEY>.cheats` (the game settings' folder, a file of its own: « Reset to
+Settings » leaves the codes), written through a temporary file and a rename; `ShellActivity` sets
+`RECOMP_CHEATS_FILE` to it for a GBA / PS1 / N64 game (even before it exists) and unsets it for an Xbox title.
+Cheats are not part of save states: a state loaded keeps the cheats that are on. Button codes (GBA GameShark 8,
+N64 88 / 89) apply once each time the cheat is turned on.
+
+Tests: `CheatsTest` (the file and its place, the native format both ways, names, codes cleaned up and checked per
+console, add / toggle / delete / save), `GameMenuTest.cheatsPage` (rows for a GBA game, none without a console game,
+On / Off written at once, Add through the host's dialog, Delete armed then done, B back).
+
+### Device check (cheats, XBA-197), for Alex
+
+On the AYN Thor, a GBA, a PS1 and an N64 game of yours in the library, codes for them from a source you trust (one
+constant write each, e.g. infinite lives).
+
+1. GBA game › Home › Game settings: « Cheats · No cheat code yet » in the « This game » group. A: the list says « No
+   cheat code yet »; Add a code: the keyboard shows. Type a name and the code, Add: the list shows it checked; Done:
+   the row reads « 1 on of 1 ». Screenshot.
+2. Add a code with « 1234 » only: the dialog stays, the code field says what a line looks like. Cancel.
+3. Play the game: logcat `gba: cheats: 1 from .../settings/game/GBA-....cheats, 1 on` and `gba: cheat [on] "..."
+   (<format>, N ops)`; the cheat works in the game.
+4. In-game menu (Select + Start) › Cheats: the cheat « On »; left: « Off »; Resume: within a second the game is
+   normal again (lives go down); logcat lists the cheat « [off] ». Menu › Cheats › right: « On », the cheat is back.
+5. Menu › Cheats › Add a code: add a second code; it shows « On » and works after Resume.
+6. Menu › Cheats › Delete a code › A on the second: « A again to delete »; A: « Deleted: <name> », the page lists one
+   cheat. B, B: back on the main page, Cheats focused.
+7. Save state with the cheat on, turn it off, load the state: the game runs, the cheat stays off.
+8. Same as 1 and 3 with the PS1 game (an `80XXXXXX YYYY` code) and the N64 game (`81XXXXXX YYYY`); logcat `ps1:` /
+   `n64: cheat [on] ...`.
+9. An Xbox title: no Cheats row in its Game settings, none in its in-game menu.
+10. French: « Codes de triche », « Ajouter un code », « Supprimer un code », « A de nouveau pour supprimer ».
+11. If you have a GBA pack (Prepare) and an Action Replay ROM patch code: turn it on, logcat says « cheats patch the
+    cartridge: recompiled code set aside »; off: « recompiled code back ».
+
 ### Device check (hotkeys, XBA-190), for Alex
 
 On the AYN Thor, a GBA game and an Xbox title of yours in the library.
@@ -2683,6 +2737,7 @@ less the display cutout, so 720p and 1080p look the same.
 | Resume | Closes the menu. |
 | Save state, Load state | Only for a GBA, PS1 or N64 game whose runtime can save states (XBA-182, XBA-183: `Host.statesSupported`: `Console.hasSaveStates`, then `MenuNative.nativeStatesAvailable`); an Xbox game does not show them. Each opens a page of four slots, « Slot 1 » to « Slot 4 », then Back. Under each slot: « Empty », or when it was saved (the time alone for today, « 14:32 »; the date and the time for another day, in the device's format), and its thumbnail at the right of the row. The slots are read each time the page shows, so a fresh save is there the next time. **Save state**: choosing a slot saves to it (over what it held), closes the menu and says « Saved to slot N » at the top of the screen. **Load state**: an empty slot is dimmed; choosing it says « Slot N is empty » and the menu stays; a saved one loads, closes the menu and says « Slot N loaded ». A failure closes the menu with a warning that names it: the slot holds another game's state, it was saved by another version of the app, it is damaged, it cannot be written or read. B (or Back) returns to the main page on the row that opened the page. |
 | Fast-forward | Same condition: On / Off, a setting row (A or left / right toggles it, the menu stays open). On, the game runs faster until it is turned off. The pad chord **Back + RT, held** does the same while held by default ([Hotkeys](#hotkeys); Controls lists it for a GBA, PS1 or N64 game). |
+| Cheats | A GBA, PS1 or N64 game (XBA-197): the game's cheat codes, each On / Off, Add a code (a keyboard dialog), Delete a code (A twice); a change takes effect at once ([Cheats](#cheats)). |
 | Quick save / load (pad chords) | Same condition, without opening the menu: by default **Back + RB** saves and **Back + LB** loads the quick slot, the last slot saved or loaded (at the start, the most recently saved, else slot 1); the player's [hotkeys](#hotkeys) may move them and add next / previous quick slot. The runtime reads the chords itself; the menu polls `MenuNative.nativeStateEvent` every 250 ms while the game shows and says « Saved to slot N », « Slot N loaded », « Quick slot: N » or the error at the top of the screen. Controls lists the hotkeys. |
 | Resume where I left off | Same condition: Settings › « Resume where I left off », On by default (`files/settings/auto_resume`). On, the menu saves the **automatic slot** (`auto.st`, slot 0) when the player leaves the game: Quit (its confirmation then says « Your place is kept for next time »), Back to launcher, Home or the screen off (`GameMenu.onStop`). At the next start `ShellActivity` sets `RECOMP_STATE_RESUME=1` and the runtime loads it before the first frame; the menu says « Resumed where you left off » (or that it could not, and the game starts from the beginning). Load state lists it first as « Where you left off » when there is one; Save state never offers it. |
 | Settings | **Perf overlay** On / Off: fps and frame time (`xbox_FramebufferWindowGetStats`, twice a second) in the top right corner, in the menu's layer, not in the game frame; stays with the menu closed. **Volume** 0–100 % in steps of 10, A mutes / unmutes: one gain on the mixed APU output (`apu_volume.c`, the square of the fraction, after the WAV capture), set through JNI. **Bottom screen** Panel / Black / Off (only with a second screen): `GameStore.setBottomScreen` and the companion is refreshed at once. **On-screen pad** Shown / Hidden (only when the game has one, XBA-158): for this session, whatever Controls › On-screen pad › Show says (never with the companion panel up). These apply **now** (the rows say so) and are remembered (`files/settings/perf_overlay`, `game_volume`, `bottom_screen`); the volume is applied again at the next start. **Language** (only for an Xbox game whose XBE gives a title ID): As in Settings, then the nine languages; this game's own [language](#game-language), applied at the next start. **Widescreen** and **480p** (same condition, XBA-134): As in Settings / On / Off, this game's own console video setting (`GameVideo.java`, kept in `files/settings/widescreen_<TITLEID>` and `480p_<TITLEID>`), applied at the next start: `ShellActivity` sets `RECOMP_WIDESCREEN` / `RECOMP_480P` to `1` or `0` (the environment wins over the `recomp.cfg` line of Settings › Graphics) and unsets them when the game follows Settings; logcat « shell: title video RECOMP_WIDESCREEN=… RECOMP_480P=…, title … ». A GBA, PS1 or N64 game (XBA-181) has none of these three: **Scale (next start)** and **Filter (next start)** instead, As in Settings then each value, this game's own ([Settings per console](#settings-per-console)); Perf overlay, Volume and Screenshot are the same rows (the native side backs them for the consoles through the same JNI calls). An Xbox game's screen filter and scaling are not offered: the SDL window's are fixed at start (`fb_present_sdl.c`: nearest, logical size 640 x 480). |

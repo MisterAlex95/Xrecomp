@@ -109,6 +109,7 @@ public class ShellActivity extends SDLActivity {
             }
         }
         applyAutoResume(rom != null);
+        applyCheats(rom != null);
         applyVkDriver(rom != null);
         Console console = applyGameSettings(rom != null);
         boolean checked = LibraryCheck.applyRunEnv(this);   // a library check's run: status file and pad script (XBA-130)
@@ -355,6 +356,30 @@ public class ShellActivity extends SDLActivity {
             Log.w(LauncherActivity.TAG, "shell: cannot set RECOMP_STATE_RESUME", e);
         }
         Log.i(LauncherActivity.TAG, "shell: resume where I left off " + (on ? "on" : "off"));
+    }
+
+    /**
+     * RECOMP_CHEATS_FILE for a GBA / PS1 / N64 runtime (XBA-197, {@link Cheats}): the game's cheat list,
+     * files/settings/game/&lt;KEY&gt;.cheats, even before it exists (the runtime reads it once it appears, and again at
+     * every change: the in-game menu's Cheats page takes effect at once); unset for an Xbox title.
+     */
+    private void applyCheats(boolean romLaunch) {
+        String tid = romLaunch ? GameStore.launchedTitleId(this) : null;
+        boolean console = tid != null && Console.ofKey(tid) != Console.XBOX;
+        File f = console ? Cheats.file(getFilesDir(), tid) : null;
+        try {
+            if (f != null)
+                Os.setenv("RECOMP_CHEATS_FILE", f.getPath(), true);
+            else
+                Os.unsetenv("RECOMP_CHEATS_FILE");
+        } catch (ErrnoException e) {
+            Log.w(LauncherActivity.TAG, "shell: cannot set RECOMP_CHEATS_FILE", e);
+        }
+        if (f != null) {
+            Cheats c = Cheats.load(getFilesDir(), tid);
+            Log.i(LauncherActivity.TAG, "shell: cheats " + c.enabledCount() + " on of " + c.list.size() + " (" + f
+                                        + ")");
+        }
     }
 
     /**
@@ -638,6 +663,11 @@ public class ShellActivity extends SDLActivity {
                 Log.w(LauncherActivity.TAG, "shell: menu: no native state load", e);
                 return GameMenu.STATE_NO_GAME;
             }
+        }
+
+        @Override
+        public void addCheat(Console console, String key, java.util.function.Consumer<String> added) {
+            CheatsUi.add(ShellActivity.this, console, key, added);
         }
 
         @Override

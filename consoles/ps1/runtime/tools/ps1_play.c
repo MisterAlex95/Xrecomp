@@ -43,6 +43,8 @@
  * Save states (XBA-182): F1-F4 save slots 1-4, Shift+F1-F4 load them (<save dir>/ps1-<KEY>/state<N>.st); Tab held
  * fast-forwards (RECOMP_FF_SPEED: 2..16 times, default 4, or "max"); on a pad, Back + right trigger held does the same.
  * Rewind (XBA-194): R held goes back in time (Back + left trigger on a pad); RECOMP_REWIND=0 turns it off.
+ * Cheats (XBA-197): --cheats FILE, the game's cheat list (recomp_cheats.h; RECOMP_CHEATS_FILE), read again
+ * when it changes.
  * Exit 0, 1 when the game cannot run, 2 on a usage error. */
 #include "host_window.h"
 #include "ps1_runtime.h"
@@ -62,7 +64,8 @@ static int usage(void)
                     "                [--scale aspect|integer|stretch] [--filter nearest|linear] [--upscale 1|2|4]\n"
                     "                [--pad digital|analog] [--players 1|2] [--headless] [--unpaced] [--buttons MASK]\n"
                     "                [--screenshot OUT.ppm] [--capture N OUT.ppm] [--key KEY]\n"
-                    "                [--pack LIB.so] [--missed FILE] [--no-fast-boot] [--swap FRAME:DISC]\n");
+                    "                [--pack LIB.so] [--missed FILE] [--no-fast-boot] [--swap FRAME:DISC]\n"
+                    "                [--cheats FILE]\n");
     return 2;
 }
 
@@ -104,6 +107,8 @@ int main(int argc, char **argv)
             o.players = atoi(argv[++i]) >= 2 ? 2 : 1;
         else if (!strcmp(a, "--headless"))
             o.headless = 1;
+        else if (!strcmp(a, "--cheats") && more)
+            setenv("RECOMP_CHEATS_FILE", argv[++i], 1); /* XBA-197: the cheat list the runtime reads */
         else if (!strcmp(a, "--unpaced"))
             o.unpaced = 1;
         else if (!strcmp(a, "--buttons") && more)

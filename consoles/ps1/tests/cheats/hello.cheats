@@ -1,0 +1,27 @@
+# Cheats on our homebrew (XBA-197, ps1_cheats_hb_*): GameShark codes writing into the unused top of the xba_result
+# block (consoles/ps1/tests/homebrew/common/xba_result.h, 0x801F0000, table[100..] from 0x801F01B0), read back with
+# ps1_run --peek after the verdict.
+
+[30 / 80: 8 and 16-bit constant writes]
+enabled=1
+801F01B0 1234
+301F01B2 0056
+
+[off: never applied]
+enabled=0
+801F01B6 BAD0
+
+[D0: 16-bit write when the status word's low half is 0x5353 (PASS)]
+enabled=1
+D01F0004 5353
+801F01B4 BEEF
+
+[50: serial repeater, three 16-bit writes]
+enabled=1
+50000302 0001
+801F01B8 0010
+
+[C2: copy two bytes]
+enabled=1
+C21F01B0 0002
+801F01C0 0000

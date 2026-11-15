@@ -311,6 +311,7 @@ void gba_cpu_step(gba_machine *m);
  * cartridge ROM or an IRQ is due to be taken, and the frame's time is not up and the CPU not halted, as that loop
  * would call gba_cpu_step for each, without a call per instruction. */
 void gba_cpu_step_outside_rom(gba_machine *m);
+void gba_state_pin_rom_hash(gba_machine *m); /* gba_state.c: the ROM hash taken now (before a cheat patches it) */
 uint32_t gba_get_cpsr(const gba_machine *m);
 void gba_set_cpsr(gba_machine *m, uint32_t v);
 void gba_set_mode(gba_machine *m, uint32_t mode);

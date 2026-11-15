@@ -1,0 +1,12 @@
+# RAM codes only (XBA-197, gba_rc_cheats_hb_hello): with no cartridge patch the recompiled pack stays attached and
+# must agree with the interpreter frame for frame, the codes running on both. See hello.cheats.
+
+[raw 32-bit constant write]
+enabled=1
+0203FFB0:C0DE0001
+
+[CodeBreaker: 16-bit write and an add]
+enabled=1
+8203FFC0 1234
+8203FFC2 0010
+E203FFC2 0001

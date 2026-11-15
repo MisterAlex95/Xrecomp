@@ -42,11 +42,15 @@
  *               capture every C frames as the runtime takes them, R steps back, the picture and every frame after it
  *               must be the first run's; prints "REWIND OK" and the capture cost, exit 6 on a difference.
  *               --rewind-mb M: the ring's cap (default 64)
+ * --cheats FILE the cheat list FILE (XBA-197, recomp_cheats.h): its enabled codes run after every frame (on both
+ *               machines with --lockstep)
+ * --peek ADDR   after the run, print the 32-bit word at ADDR ("peek 0x801F0010 = 0x..."); up to 8 times
  * Prints the frame rate reached on stderr (unless --quiet). Exit 3 on a usage or file error. */
 #define _POSIX_C_SOURCE 200809L /* clock_gettime */
 #include "ps1_core.h"
 #include "ps1_devices.h"
 #include "ps1_recomp.h"
+#include "recomp_cheats.h"
 #include "recomp_rewind.h"
 
 #include <dlfcn.h>
@@ -222,13 +226,23 @@ static int rw_load(const uint8_t *in, size_t n, void *m)
     return 0;
 }
 
+static uint32_t cheat_peek32(void *m, uint32_t addr)
+{
+    return ps1_peek32(m, addr);
+}
+
+static void cheat_poke32(void *m, uint32_t addr, uint32_t v)
+{
+    ps1_poke32(m, addr, v);
+}
+
 static int usage(void)
 {
     fprintf(stderr, "usage: ps1_run [--bios PATH] [--exe X.exe | --disc X.cue] [--frames N] [--result] [--ppm OUT]\n"
                     "               [--wav OUT] [--tty] [--until-tty TEXT] [--pad MASK] [--hash] [--quiet]\n"
                     "               [--pack LIB.so [--lockstep]] [--missed FILE] [--stats] [--card FILE] [--fast-boot]\n"
                     "               [--swap FRAME:DISC] [--state-save N:FILE] [--state-load FILE] [--run-hash]\n"
-                    "               [--rewind C:R [--rewind-mb M]]\n");
+                    "               [--rewind C:R [--rewind-mb M]] [--cheats FILE] [--peek ADDR]\n");
     return 3;
 }
 
@@ -237,6 +251,9 @@ int main(int argc, char **argv)
     const char *bios_path = getenv("RECOMP_PS1_BIOS"), *exe_path = NULL, *disc_path = NULL;
     const char *ppm = NULL, *wav = NULL, *until = NULL, *pack = NULL, *missed = NULL, *card = NULL;
     bool lockstep = false, stats = false, fast_boot = false;
+    const char *cheats_path = NULL;
+    uint32_t peeks[8];
+    int npeek = 0;
     long swap_frame = -1;
     const char *swap_disc = NULL;
     long lock_cycles = 0;
@@ -312,6 +329,10 @@ int main(int argc, char **argv)
         }
         else if (!strcmp(a, "--rewind-mb") && more)
             rewind_mb = strtod(argv[++i], NULL);
+        else if (!strcmp(a, "--cheats") && more)
+            cheats_path = argv[++i];
+        else if (!strcmp(a, "--peek") && more && npeek < 8)
+            peeks[npeek++] = (uint32_t)strtoul(argv[++i], NULL, 0);
         else if (!strcmp(a, "--quiet"))
             quiet = true;
         else if (a[0] != '-') {
@@ -443,6 +464,16 @@ int main(int argc, char **argv)
     long f;
     long diverged = -1;
     char why[256] = "";
+    recomp_cheats cheats, cheats_twin;
+    recomp_cheats_init(&cheats, RECOMP_CHEAT_PS1);
+    recomp_cheats_init(&cheats_twin, RECOMP_CHEAT_PS1);
+    if (cheats_path) {
+        recomp_cheats_load(&cheats, cheats_path);
+        if (twin)
+            recomp_cheats_load(&cheats_twin, cheats_path);
+    }
+    recomp_cheat_bus cbus = {m, NULL, NULL, cheat_peek32, cheat_poke32, 0, NULL, 0};
+    recomp_cheat_bus cbus_twin = {twin, NULL, NULL, cheat_peek32, cheat_poke32, 0, NULL, 0};
     for (f = 0; f < frames; f++) {
         if (twin && lock_cycles > 0) {
             uint64_t end = ps1_cycles(m) + 33868800 / 60;
@@ -479,8 +510,12 @@ int main(int argc, char **argv)
             }
         }
         ps1_run_frame(m);
+        if (cheats.n)
+            recomp_cheats_apply(&cheats, &cbus);
         if (twin) {
             ps1_run_frame(twin);
+            if (cheats_twin.n)
+                recomp_cheats_apply(&cheats_twin, &cbus_twin);
             if (ps1_recomp_compare(twin, m, why, sizeof why) != 0) {
                 diverged = f;
                 f++;
@@ -622,6 +657,10 @@ int main(int argc, char **argv)
     if (!quiet)
         fprintf(stderr, "ps1_run: %ld frames in %.2f s (%.1f fps, %.1f MHz emulated)\n", f, dt, dt > 0 ? f / dt : 0.0,
                 dt > 0 ? (double)ps1_cycles(m) / dt / 1e6 : 0.0);
+    for (int i = 0; i < npeek; i++)
+        printf("peek 0x%08X = 0x%08X\n", peeks[i], ps1_peek32(m, peeks[i]));
+    recomp_cheats_free(&cheats);
+    recomp_cheats_free(&cheats_twin);
     ps1_destroy(m);
     if (twin)
         ps1_destroy(twin);

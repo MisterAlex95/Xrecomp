@@ -805,6 +805,63 @@ capture schedule under fast-forward, the steps, the check on a fake machine, a l
 `gba_rewind_hb_*`, `gba_rewind_cap` (a 2 MB cap), `ps1_rewind_hb_*` (with a disc read, `overlay`), `ps1_rewind_cap`,
 `n64_rewind_hb_*`; the hotkey's default and text form in `tests/recomp_states`.
 
+**Cheats (XBA-197).** GameShark, Action Replay, CodeBreaker and raw codes for the three consoles, from a per-game
+list the player edits in the app (in-game menu « Cheats », Game settings › Cheats: [app-shell.md
+« Cheats »](../docs/android/app-shell.md#cheats)). `src/platform/recomp_cheats.h` (in `xbr_host_core`, libc only):
+
+- The list is a text file, the app's `files/settings/game/<KEY>.cheats` beside the game's settings (its own file:
+  codes are many lines, and « Reset to Settings » leaves them), one section per cheat: `[name]`, `enabled=1|0`, an
+  optional `format=`, the code's lines. The runtime reads `RECOMP_CHEATS_FILE` at start and again when the file
+  changes (checked every 30 shown frames), so a toggle in the menu takes effect at once; the desktop players take
+  `--cheats FILE`.
+- Each cheat compiles once into a flat op list (writes with repeat / steps, adds, OR / AND, conditional jumps, pointer
+  writes, copies, GBA cartridge patches); one code (even of several lines) is one op, so « the next N codes » is the
+  next N ops, and Action Replay v3 if / else / endif blocks become jumps. The runtime runs the enabled lists after
+  every console frame under its lock. Writes go through the core's side-effect-free accessors (`gba_cheat_poke`: RAM
+  directly, I/O registers through their write handlers; `ps1_poke32` / `n64_poke32` with read-modify-write for 8 /
+  16-bit codes) and **only when the value differs**: a constant write costs a read per frame, and a code page is not
+  invalidated for nothing.
+- Recompiled code: packs read RAM through the bus, so RAM codes need nothing. A write that changes code a PS1 / N64
+  pack runs from RAM bumps that page's write counter (`PS1_RAM_TOUCH`, `n64_rdram_wrote`): the pack's content check
+  drops the lifted function and the interpreter runs the patched code (the existing self-modifying-code path). GBA
+  ROM patch codes (GS `6`, AR v3 `00000000 18..1E`) replace cartridge words (`gba_rom_patch16`; the ROM's hash for
+  save states is taken first, so states stay the game's); lifted code is the ROM's instructions compiled to C (and
+  may fold its literal pool), so while any patch is in place the runtime detaches the pack's table and the
+  interpreter runs the whole cartridge, and attaches it again once none is (`gba_cheats.h`, logged). Patches are put
+  back when the cheat goes off and at exit.
+- Save states and rewind keep working: cheats are not part of a state; after a load they apply again from the next
+  frame.
+
+| Console | Formats (`format=`) | Code types |
+|---|---|---|
+| GBA | `raw` | `AAAAAAAA:VV` / `:VVVV` / `:VVVVVVVV` (or a space): constant write, size from the value's digits |
+| GBA | `gsa` (encrypted), `gsa-raw` | GameShark / Action Replay v1-v2: `0` / `1` / `2` 8 / 16 / 32-bit writes, `3000` group write, `3010`-`3040` add / subtract, `6` ROM patch, `8x1` / `8x2` button writes (once, when turned on), `D` 16-bit if (==, !=, <=, >=) for the next code, `E0` for the next zz codes |
+| GBA | `arv3` (encrypted), `arv3-raw` | Action Replay v3 / GameShark v3: `00` / `02` / `04` writes and fills, `40` / `42` / `44` pointer writes, `80` / `82` / `84` adds, `C6` / `C7` I/O writes, every conditional (==, !=, signed / unsigned <, >, AND, never) for 1 code, 2 codes, a block with else / endif, or the rest; `00000000` specials: end, button writes (once), ROM patches 1-4, slides |
+| GBA | `cb` | CodeBreaker, unencrypted: `2` OR, `3` / `8` writes, `4` slide, `5` super code, `6` AND, `7` / `A` / `B` / `C` / `F` conditionals, `D` keys held / not held, `E` add |
+| PS1 | `gs` | GameShark: `30` / `80` writes, `10` / `11` / `20` / `21` increment / decrement, `D0`-`D3` (16-bit ==, !=, <, >) and `E0`-`E3` (8-bit) for the next code, `50` serial repeater, `C0` master activator, `C1` delay (YYYY / 3 frames), `C2` copy |
+| N64 | `gs` | GameShark: `80` / `81` (and `A0` / `A1`) writes, `88` / `89` (the GameShark button: once, when turned on), `D0`-`D3` (8 / 16-bit ==, !=), `50` serial repeater, `F0` / `F1` boot-time writes (once, after the first frame) |
+
+`auto` (the default): `raw` when a line has `:`; on the GBA `cb` for `AAAAAAAA VVVV` lines, else the reading
+(encrypted or decrypted GameShark v1-v2 or Action Replay v3) whose lines decode to the most plausible codes (real RAM
+/ I/O addresses, ID codes); `gs` on the PS1 and N64. The GBA encryption is the devices' TEA variant (32 rounds, delta
+0x9E3779B9) with their default seeds (GS v1-v2 `09F4FBBD 9681884A 352027E9 F3DEE5A7`, AR v3 `7AA9648F 7FAE6994
+C0EFAAD5 42712C57`, both derived from the devices' DEADFACE tables with parameter 0).
+
+Not supported (the cheat is not applied, the log says why): GBA `DEADFACE` reseeding, encrypted CodeBreaker codes
+(`9xxxxxxx` first line: use the decrypted ones), AR v3 slowdown; PS1 joker codes `D4`-`D6`; N64 `DE` (entry point,
+which only matters to a real cartridge's boot). Ignored with a note: master / hook / ID codes (GBA `F`, `C4`, CB
+`0` / `1`, `xxxxxxxx 001DC0DE`), N64 enabler codes (`EE`, `FF`, `CC`). F0 / F1 apply once after the first frame (the
+game's boot code has run by then; a real GameShark writes them before).
+
+Headless: `gba_run` / `ps1_run` / `n64_run --cheats FILE [--peek ADDR]...` (with `--lockstep`, on both machines).
+Tests: `tests/recomp_cheats` (every code type on a fake memory, the encryption's round trips and fixed vectors, the
+format detection, blocks, once-codes, cartridge patches in and back, writes only on a change, the file and its
+reload), `gba_cheats_hb_hello` (raw, encrypted GS v1-v2 and AR v3, CodeBreaker, a cartridge patch, a cheat off, on
+our `hello`; `consoles/gba/tests/cheats/`), `gba_rc_cheats_hb_hello` (RAM codes on the pack in lockstep) and
+`gba_rc_cheats_hb_hello_rompatch` (the pack set aside), `ps1_cheats_hb_hello`, `ps1_hle_rc_cheats_hb_hello`,
+`n64_cheats_hb_hello`; the app's `CheatsTest` and `GameMenuTest.cheatsPage`. No commercial cheat database is in the
+repository: the codes are the player's.
+
 **Legal**: no ROM, disc image, BIOS or game data in this repository, its CI or its artifacts. Tests use homebrew we
 build ourselves (devkitARM / libtonc, PSn00bSDK, libdragon) and dumps Alex made from his own media, kept outside every
 repository.

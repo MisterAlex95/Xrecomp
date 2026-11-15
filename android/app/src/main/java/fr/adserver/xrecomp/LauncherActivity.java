@@ -5939,6 +5939,8 @@ public class LauncherActivity extends Activity {
         }
         listLabel(list, getString(R.string.GS_GROUP_GAME));
         gameControlsRow(list, key, con);
+        if (con != Console.XBOX)
+            cheatsRow(list, key, con);
         if (con == Console.N64 && !vkdInherits())   // only the N64 Vulkan renderer uses one, for now
             romVkDriverRow(list, key);
         if (con == Console.XBOX) {
@@ -6042,6 +6044,23 @@ public class LauncherActivity extends Activity {
         if (own)
             r.setBadge(getString(R.string.GS_BADGE), Theme.ACCENT);
         onFocus(r, () -> describe(text));
+    }
+
+    /**
+     * XBA-197: Game settings › « Cheats » of a GBA, PS1 or N64 game: how many are on, A opens the list (CheatsUi.manage:
+     * on / off, add, delete, saved at once; the game's in-game menu has the same page). Not touched by « Reset to
+     * Settings » (the codes are the player's, in their own file).
+     */
+    private void cheatsRow(LinearLayout list, String key, Console con) {
+        String text = getString(R.string.CHEATS_DETAIL);
+        MenuRow[] r = new MenuRow[1];
+        Runnable refresh = () -> {
+            r[0].setValue(CheatsUi.countLabel(this, key));
+            r[0].invalidate();
+        };
+        r[0] = listRow(list, getString(R.string.CHEATS), text, () -> CheatsUi.manage(this, con, key, refresh));
+        refresh.run();
+        onFocus(r[0], () -> describe(text));
     }
 
     /** Y, or « Reset to Settings »: the game's file goes (its N64 Vulkan driver choice too); the screen again. */

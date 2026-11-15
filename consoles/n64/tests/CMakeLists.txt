@@ -25,6 +25,7 @@ endif()
 #   n64_state_*       save states (XBA-183, state_rom.sh): round trips on the homebrew ROMs (interpreter, packs as
 #                     n64_rc_state_*, the Vulkan RDP), another ROM's state refused
 #   n64_rewind_*      rewind round trips on the homebrew ROMs (n64_run --rewind, XBA-194)
+#   n64_cheats_*      GameShark codes on the homebrew (n64_run --cheats, XBA-197)
 #   n64_systemtest    lemmy-64/n64-systemtest (MIT) built from source: every CPU / COP0 / TLB / COP1 / memory test
 #                     must pass but the known gaps listed in systemtest_known.txt (RSP / RDP tests only count with
 #                     the real modules)
@@ -171,6 +172,16 @@ if(TARGET n64_run)
                  ${N64_HOMEBREW_DIR}/${prog}.z64 --frames 600 --rewind 4:45 --quiet)
         set_tests_properties(n64_rewind_hb_${prog} PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
     endforeach()
+    # Cheats (XBA-197, n64_run --cheats cheats/hello.cheats): GameShark 80 / 81 writes, a D1 conditional on the result
+    # block's status, a 50 serial repeater, an F1 boot write next to an enabler code, and a cheat that is off, read
+    # back after the verdict (--peek; big-endian words).
+    string(CONCAT want "PASS|peek 0x803001B0 = 0x12345600|peek 0x803001B4 = 0xBEEF0000|peek 0x803001B8 = 0x00100011"
+           "|peek 0x803001BC = 0x00120000|peek 0x80380000 = 0x77770000")
+    add_test(NAME n64_cheats_hb_hello COMMAND sh ${N64_REPO_ROOT}/tools/consoles/expect_output.sh "${want}"
+             sh ${CMAKE_CURRENT_SOURCE_DIR}/run_rom.sh $<TARGET_FILE:n64_run> ${N64_HOMEBREW_DIR}/hello.z64 --result
+             --frames 900 --quiet --cheats ${CMAKE_CURRENT_SOURCE_DIR}/cheats/hello.cheats
+             --peek 0x803001B0 --peek 0x803001B4 --peek 0x803001B8 --peek 0x803001BC --peek 0x80380000)
+    set_tests_properties(n64_cheats_hb_hello PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
     # Save states (XBA-183, state_rom.sh): the round trip (a state saved after frame 150, the next 150 frames' picture
     # and audio hashed, then the same from the state loaded in a new machine) on every homebrew ROM, gfx's also
     # loaded with 2 and 4 RDP threads; with each ROM's pack below (n64_rc_state_*: states cross between lifted and

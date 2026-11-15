@@ -62,6 +62,13 @@ uint32_t gba_peek32(gba_machine *m, uint32_t addr);
 uint16_t gba_peek16(gba_machine *m, uint32_t addr);
 uint8_t gba_peek8(gba_machine *m, uint32_t addr);
 
+/* Cheats (XBA-197, recomp_cheats.h): a write of size 1, 2 or 4 bytes without bus timing, between frames. EWRAM,
+ * IWRAM, palette, VRAM and OAM are written directly, I/O registers through their write handlers; anything else is
+ * ignored. gba_rom_patch16: replaces the 16-bit cartridge word at addr (0x08000000-0x09FFFFFF, inside the ROM),
+ * returns 0 or -1. The ROM's hash for save states is taken before the first patch, so states stay the game's. */
+void gba_cheat_poke(gba_machine *m, uint32_t addr, uint32_t v, int size);
+int gba_rom_patch16(gba_machine *m, uint32_t addr, uint16_t v);
+
 /* CPU registers (r0..r15; r15 = address of the next instruction) and CPSR, for tests and debugging. */
 uint32_t gba_reg(gba_machine *m, int r);
 uint32_t gba_cpsr(gba_machine *m);

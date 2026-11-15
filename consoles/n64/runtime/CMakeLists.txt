@@ -171,8 +171,9 @@ if(NOT ANDROID AND NOT TARGET n64_run)
     add_executable(n64_run tools/n64_run.c)
     n64_core_exported(n64_run) # first, so the whole archive comes before the plain one
     target_link_libraries(n64_run PRIVATE n64_core)
-    # --rewind (XBA-194): the ring alone (libc), not the whole host layer.
-    target_sources(n64_run PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../../src/platform/recomp_rewind.c)
+    # --rewind (XBA-194), --cheats (XBA-197): the ring and the cheat engine alone (libc), not the whole host layer.
+    target_sources(n64_run PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../../src/platform/recomp_rewind.c
+                                   ${CMAKE_CURRENT_SOURCE_DIR}/../../../src/platform/recomp_cheats.c)
     target_include_directories(n64_run PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../../src/platform)
     target_compile_options(n64_run PRIVATE -Wall -Wextra)
 endif()

@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Cheat codes of a GBA, PS1 or N64 game (XBA-197, Cheats / CheatsUi, docs/android/app-shell.md « Cheats »): the
+     in-game menu's Cheats page and Game settings' Cheats row. -->
+<resources>
+    <string name="CHEATS">Cheats</string>
+    <string name="CHEATS_LIVE">Changes apply at once</string>
+    <string name="CHEATS_NONE">No cheat code yet</string>
+    <string name="CHEATS_ADD">Add a code</string>
+    <string name="CHEATS_DELETE">Delete a code</string>
+    <string name="CHEATS_DELETE_ARM">A again to delete</string>
+    <string name="CHEATS_DELETED">Deleted: %1$s</string>
+    <string name="CHEATS_ADDED">Added: %1$s</string>
+    <string name="CHEATS_SAVE_FAILED">The cheats could not be saved</string>
+    <string name="CHEATS_COUNT">%1$d on of %2$d</string>
+    <string name="CHEATS_DETAIL">This game\'s cheat codes: GameShark, Action Replay and CodeBreaker codes (GBA), GameShark codes (PS1, N64) or ADDRESS:VALUE. Turn each on or off, add or delete one; a running game takes a change at once (its in-game menu has the same page).</string>
+    <string name="CHEATS_ADD_TITLE">Add a cheat code</string>
+    <string name="CHEATS_NAME_HINT">Name (e.g. Infinite lives)</string>
+    <string name="CHEATS_CODE_HINT">Code: one line per code line, e.g. 8003A2C4 0063</string>
+    <string name="CHEATS_DEFAULT_NAME">Cheat %1$d</string>
+    <string name="CHEATS_OK">Add</string>
+    <string name="CHEATS_CANCEL">Cancel</string>
+    <string name="CHEATS_DONE">Done</string>
+    <string name="CHEATS_DELETE_TITLE">Delete which code?</string>
+    <string name="CHEATS_P_EMPTY">Type a code first.</string>
+    <string name="CHEATS_P_NOT_HEX">A code is made of hexadecimal digits (0-9, A-F).</string>
+    <string name="CHEATS_P_SHAPE_GBA">Each line: AAAAAAAA VVVVVVVV, AAAAAAAA VVVV or ADDRESS:VALUE.</string>
+    <string name="CHEATS_P_SHAPE">Each line: AAAAAAAA VVVV (GameShark) or ADDRESS:VALUE.</string>
+    <string name="CHEATS_P_TOO_LONG">This code is too long.</string>
+</resources>

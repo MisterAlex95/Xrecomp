@@ -76,8 +76,9 @@ if(NOT ANDROID AND NOT TARGET gba_run)
     add_executable(gba_run tools/gba_run.c)
     gba_core_exported(gba_run)    # --pack (gba_pack.c); first, so the whole archive comes before the plain one
     target_link_libraries(gba_run PRIVATE gba_pack)
-    # --rewind (XBA-194): the ring alone (libc), not the whole host layer.
-    target_sources(gba_run PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../../src/platform/recomp_rewind.c)
+    # --rewind (XBA-194), --cheats (XBA-197): the ring and the cheat engine alone (libc), not the whole host layer.
+    target_sources(gba_run PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../../src/platform/recomp_rewind.c
+                                   ${CMAKE_CURRENT_SOURCE_DIR}/../../../src/platform/recomp_cheats.c)
     target_include_directories(gba_run PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../../src/platform)
     target_compile_options(gba_run PRIVATE -Wall -Wextra)
 endif()

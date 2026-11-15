@@ -38,6 +38,8 @@
  * fast-forwards (RECOMP_FF_SPEED: 2..16 times, default 4, or "max"); on a pad, Back + right trigger held does the same,
  * Back + right / left shoulder quick saves / loads; RECOMP_STATE_RESUME=1 resumes from the automatic slot, saved when
  * the window closes. Rewind (XBA-194), with RECOMP_REWIND=1: R held goes back in time (Back + left trigger on a pad).
+ * Cheats (XBA-197): --cheats FILE, the game's cheat list (recomp_cheats.h; RECOMP_CHEATS_FILE), read again
+ * when it changes.
  * Exit 0, 1 when the game cannot run, 2 on a usage error. */
 #include "host_window.h"
 #include "n64_runtime.h"
@@ -55,7 +57,7 @@ static int usage(void)
                     "                [--filter nearest|linear] [--edges] [--pak controller|rumble|none] [--players 1..4]\n"
                     "                [--rdp-threads N] [--pal | --ntsc] [--tty] [--headless] [--unpaced]\n"
                     "                [--buttons MASK] [--screenshot OUT.ppm] [--capture N OUT.ppm] [--key KEY]\n"
-                    "                [--pack LIB.so] [--missed FILE] [--frameskip auto|0..9]\n");
+                    "                [--pack LIB.so] [--missed FILE] [--frameskip auto|0..9] [--cheats FILE]\n");
     return 2;
 }
 
@@ -103,6 +105,8 @@ int main(int argc, char **argv)
             o.frameskip = n64_runtime_frameskip_parse(argv[++i]);
         else if (!strcmp(a, "--headless"))
             o.headless = 1;
+        else if (!strcmp(a, "--cheats") && more)
+            setenv("RECOMP_CHEATS_FILE", argv[++i], 1); /* XBA-197: the cheat list the runtime reads */
         else if (!strcmp(a, "--unpaced"))
             o.unpaced = 1;
         else if (!strcmp(a, "--buttons") && more)
