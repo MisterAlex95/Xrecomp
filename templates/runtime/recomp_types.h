@@ -1019,6 +1019,75 @@ typedef double   RECOMP_MAY_ALIAS recomp_f64_alias;
 #define MEMF(addr)   (*(volatile recomp_f32_alias *)XBOX_PTR(addr))
 #define MEMD(addr)   (*(volatile recomp_f64_alias *)XBOX_PTR(addr))
 
+/* Guest memory that does not alias g_cpu, in the generated code (XBA-38).
+ *
+ * With the types above, a guest store may alias the uint32_t registers in
+ * g_cpu by the C aliasing rules, so after every MEM32 store the compiler
+ * reloads each register it had in a host register, and keeps every register
+ * write in memory order around it. Guest memory never holds g_cpu, so in the
+ * generated code the accesses go through one-member structs instead, a type
+ * nothing in g_cpu can alias (tools/bench, x86-64 clang 19: -30 % on the SSE
+ * workload, -7 % on x87, the integer ones unchanged).
+ *
+ * What XBA-138's may_alias types gave is kept: a host fault on a guest access
+ * becomes a guest exception built from g_cpu, so every register written
+ * before an access must be in g_cpu when it faults (tests/seh_fault_regs).
+ * recomp_guest_base's asm reads g_cpu ("m" input) and hands back the guest
+ * memory base the access adds to its address: every g_cpu store before it in
+ * program order has happened before the access, and since the asm only reads
+ * memory, nothing has to be reloaded after it. It emits no instruction and,
+ * being the base rather than the whole address, leaves the address modes
+ * alone (passing the address through it cost +5..10 % on loops).
+ *
+ * Generated code only: hand-written runtime C may reach the same guest bytes
+ * through plain uint32_t pointers, which a struct type would not alias.
+ * RECOMP_GUEST_MEM_NOALIAS=0 restores the types above (tools/bench variant
+ * memalias0). MSVC does no type-based alias analysis: nothing to change. */
+#ifndef RECOMP_GUEST_MEM_NOALIAS
+#  if defined(RECOMP_GENERATED_CODE) && (defined(__GNUC__) || defined(__clang__))
+#    define RECOMP_GUEST_MEM_NOALIAS 1
+#  else
+#    define RECOMP_GUEST_MEM_NOALIAS 0
+#  endif
+#endif
+#if RECOMP_GUEST_MEM_NOALIAS
+typedef struct { uint8_t  v; } recomp_gm_u8;
+typedef struct { uint16_t v; } recomp_gm_u16;
+typedef struct { uint32_t v; } recomp_gm_u32;
+typedef struct { int8_t   v; } recomp_gm_s8;
+typedef struct { int16_t  v; } recomp_gm_s16;
+typedef struct { int32_t  v; } recomp_gm_s32;
+typedef struct { int64_t  v; } recomp_gm_s64;
+typedef struct { float    v; } recomp_gm_f32;
+typedef struct { double   v; } recomp_gm_f64;
+static inline uintptr_t recomp_guest_base(void)
+{
+    uintptr_t b = (uintptr_t)g_xbox_mem_offset;
+    __asm__("" : "+r"(b) : "m"(g_cpu));
+    return b;
+}
+#define RECOMP_GM(T, addr) \
+    (((volatile T *)((uintptr_t)(uint32_t)(addr) + recomp_guest_base()))->v)
+#undef MEM8
+#undef MEM16
+#undef MEM32
+#undef SMEM8
+#undef SMEM16
+#undef SMEM32
+#undef SMEM64
+#undef MEMF
+#undef MEMD
+#define MEM8(addr)   RECOMP_GM(recomp_gm_u8,  addr)
+#define MEM16(addr)  RECOMP_GM(recomp_gm_u16, addr)
+#define MEM32(addr)  RECOMP_GM(recomp_gm_u32, addr)
+#define SMEM8(addr)  RECOMP_GM(recomp_gm_s8,  addr)
+#define SMEM16(addr) RECOMP_GM(recomp_gm_s16, addr)
+#define SMEM32(addr) RECOMP_GM(recomp_gm_s32, addr)
+#define SMEM64(addr) RECOMP_GM(recomp_gm_s64, addr)
+#define MEMF(addr)   RECOMP_GM(recomp_gm_f32, addr)
+#define MEMD(addr)   RECOMP_GM(recomp_gm_f64, addr)
+#endif
+
 /* FSAVE's protected-mode image. Only state represented by the double-stack
  * model is restored: CW, TOP, condition codes and eight registers.
  * Tags, exception bits and the instruction/data pointers are not modeled; the
