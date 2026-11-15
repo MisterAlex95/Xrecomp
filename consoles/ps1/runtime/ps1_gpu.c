@@ -945,7 +945,7 @@ static void line_hi(ps1_gpu *g, int x0, int y0, uint32_t c0, int x1, int y1, uin
             bstep = ((int)((c1 >> 16) & 0xFF) - (int)((c0 >> 16) & 0xFF)) * 65536 / n;
         }
     }
-    const int8_t (*dm)[4] = (gour && (g->e1 & 0x200)) ? dither_matrix : dither_none;
+    const int8_t (*dm)[4] = (g->e1 & 0x200) ? dither_matrix : dither_none; /* flat lines too */
     int mode = (g->e1 >> 5) & 3;
     uint16_t chk = g->check_mask ? 0x8000 : 0, setm = g->set_mask ? 0x8000 : 0;
     int skip_field = skip_field_line(g);
@@ -971,31 +971,46 @@ static void line_hi(ps1_gpu *g, int x0, int y0, uint32_t c0, int x1, int y1, uin
     }
 }
 
-/* Lines: max(|dx|, |dy|) + 1 pixels, both ends included, positions and colours stepped in fixed point. */
+/* A line's position step: delta / k in 32.32, rounded away from zero (the hardware's: a line from y to y + 1 over
+ * 80 pixels steps down at its exact middle; ps1-tests gpu/lines, XBA-200). */
+static inline int64_t line_step(int delta, int k)
+{
+    int64_t d = (int64_t)delta * 4294967296LL;
+    if (d < 0)
+        d -= k - 1;
+    else if (d > 0)
+        d += k - 1;
+    return d / k;
+}
+
+/* Lines: max(|dx|, |dy|) + 1 pixels, both ends included. Positions in 32.32 from the pixel centre (less 1024 in x,
+ * and in y when it decreases), colours in 20.12 from the half; steps rounded as the hardware does (gpu/lines' VRAM
+ * dump matches pixel for pixel). */
 static void draw_line(ps1_gpu *g, int x0, int y0, uint32_t c0, int x1, int y1, uint32_t c1, int gour, int semi)
 {
     int dx = x1 - x0, dy = y1 - y0;
     if (iabs(dx) >= 1024 || iabs(dy) >= 512)
         return;
     int n = iabs(dx) > iabs(dy) ? iabs(dx) : iabs(dy);
-    const int64_t one = 4294967296LL; /* 32.32 */
-    int64_t xs = x0 * one + one / 2, ys = y0 * one + one / 2;
+    const int64_t half = 2147483648LL;
+    int64_t xs = x0 * 4294967296LL + half, ys = y0 * 4294967296LL + half;
     int64_t xstep = 0, ystep = 0;
-    int32_t r = (int32_t)((c0 & 0xFF) << 16) + 0x8000, gg = (int32_t)(((c0 >> 8) & 0xFF) << 16) + 0x8000;
-    int32_t b = (int32_t)(((c0 >> 16) & 0xFF) << 16) + 0x8000;
+    int32_t r = (int32_t)((c0 & 0xFF) << 12) | 0x800, gg = (int32_t)(((c0 >> 8) & 0xFF) << 12) | 0x800;
+    int32_t b = (int32_t)(((c0 >> 16) & 0xFF) << 12) | 0x800;
     int32_t rstep = 0, gstep = 0, bstep = 0;
     if (n) {
-        xstep = dx * one / n;
-        ystep = dy * one / n;
-        if (xstep < 0) xs--;
-        if (ystep < 0) ys--;
+        xstep = line_step(dx, n);
+        ystep = line_step(dy, n);
         if (gour) {
-            rstep = ((int)(c1 & 0xFF) - (int)(c0 & 0xFF)) * 65536 / n;
-            gstep = ((int)((c1 >> 8) & 0xFF) - (int)((c0 >> 8) & 0xFF)) * 65536 / n;
-            bstep = ((int)((c1 >> 16) & 0xFF) - (int)((c0 >> 16) & 0xFF)) * 65536 / n;
+            rstep = ((int)(c1 & 0xFF) - (int)(c0 & 0xFF)) * 4096 / n;
+            gstep = ((int)((c1 >> 8) & 0xFF) - (int)((c0 >> 8) & 0xFF)) * 4096 / n;
+            bstep = ((int)((c1 >> 16) & 0xFF) - (int)((c0 >> 16) & 0xFF)) * 4096 / n;
         }
     }
-    const int8_t (*dm)[4] = (gour && (g->e1 & 0x200)) ? dither_matrix : dither_none;
+    xs -= 1024;
+    if (ystep < 0)
+        ys -= 1024;
+    const int8_t (*dm)[4] = (g->e1 & 0x200) ? dither_matrix : dither_none; /* flat lines too */
     int mode = (g->e1 >> 5) & 3;
     uint16_t chk = g->check_mask ? 0x8000 : 0, setm = g->set_mask ? 0x8000 : 0;
     int skip_field = skip_field_line(g);
@@ -1009,7 +1024,7 @@ static void draw_line(ps1_gpu *g, int x0, int y0, uint32_t c0, int x1, int y1, u
         if (*d & chk)
             continue;
         int dv = dm[y & 3][x & 3];
-        int cr = clamp255((r >> 16) + dv), cg = clamp255((gg >> 16) + dv), cb = clamp255((b >> 16) + dv);
+        int cr = clamp255((r >> 12) + dv), cg = clamp255((gg >> 12) + dv), cb = clamp255((b >> 12) + dv);
         uint16_t px = (uint16_t)((cr >> 3) | (cg >> 3) << 5 | (cb >> 3) << 10);
         if (semi)
             px = blend(*d, px, mode) & 0x7FFF;

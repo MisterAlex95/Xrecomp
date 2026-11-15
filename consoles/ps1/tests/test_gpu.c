@@ -10,9 +10,10 @@ static int failures;
 static const char *cur;
 static ps1_gpu *G;
 
-/* FNV-1a of busy scenes (320x240 at (0,0)); regression guards. */
+/* FNV-1a of busy scenes (320x240 at (0,0)); regression guards (the busy scene moved with XBA-200: line stepping
+ * and dithering, gouraud / UV interpolation as the ps1-tests hardware VRAM dumps show). */
 #ifndef GOLDEN_BUSY
-#define GOLDEN_BUSY 0xA2902495u
+#define GOLDEN_BUSY 0x4C718F09u
 #endif
 #ifndef GOLDEN_GFX
 #define GOLDEN_GFX 0x42834BDEu
