@@ -63,27 +63,29 @@ static const uint32_t builtin_code[][2] = {
     {0x190, 0xE3A02004}, /* (value read back after a SWI) */
     /* VBlankIntrWait / IntrWait (r0: discard old flags, r1: the flags): halt until the IRQ handler has set one of
      * them in BIOS_IF (0x03FFFFF8 = 0x03007FF8), acknowledging it there with IME off; run in system mode with the
-     * caller's IRQ mask, as the dispatcher calls them (the BIOS's loop: halt, check, again while none came). */
+     * caller's IRQ mask, as the dispatcher calls them. The Nintendo BIOS's loop, call for call: halt, BL to the
+     * check (which sets r12 again), again while none came; a wake costs what it costs there (timer count-up). */
     {0x200, 0xE3A00001}, /* vblankintrwait: mov r0, #1 */
     {0x204, 0xE3A01001}, /* mov   r1, #1 */
     {0x208, 0xE92D4010}, /* intrwait: stmfd sp!, {r4, lr} */
-    {0x20C, 0xE3A02000}, /* mov   r2, #0 */
-    {0x210, 0xE3A03001}, /* mov   r3, #1 */
+    {0x20C, 0xE3A03000}, /* mov   r3, #0 */
+    {0x210, 0xE3A04001}, /* mov   r4, #1 */
     {0x214, 0xE3A0C301}, /* mov   r12, #0x04000000 */
     {0x218, 0xE3500000}, /* cmp   r0, #0 */
-    {0x21C, 0x1B000001}, /* blne  check (0x228)         discard what already came */
-    {0x220, 0xE28FE01C}, /* add   lr, pc, #0x1C         lr = again (0x244) */
-    {0x224, 0xE5CC2301}, /* halt: strb r2, [r12, #0x301]  HALTCNT */
-    {0x228, 0xE5CC2208}, /* check: strb r2, [r12, #0x208] IME = 0 */
-    {0x22C, 0xE15C40B8}, /* ldrh  r4, [r12, #-8]        BIOS_IF */
-    {0x230, 0xE0110004}, /* ands  r0, r1, r4 */
-    {0x234, 0x10244000}, /* eorne r4, r4, r0 */
-    {0x238, 0x114C40B8}, /* strneh r4, [r12, #-8] */
-    {0x23C, 0xE5CC3208}, /* strb  r3, [r12, #0x208]     IME = 1 */
-    {0x240, 0xE12FFF1E}, /* bx    lr */
-    {0x244, 0x0AFFFFF6}, /* again: beq halt (0x224) */
-    {0x248, 0xE8BD4010}, /* ldmfd sp!, {r4, lr} */
-    {0x24C, 0xE12FFF1E}, /* bx    lr */
+    {0x21C, 0x1B000004}, /* blne  check (0x234)         discard what already came */
+    {0x220, 0xE5CC3301}, /* halt: strb r3, [r12, #0x301]  HALTCNT */
+    {0x224, 0xEB000002}, /* bl    check (0x234) */
+    {0x228, 0x0AFFFFFC}, /* beq   halt (0x220) */
+    {0x22C, 0xE8BD4010}, /* ldmfd sp!, {r4, lr} */
+    {0x230, 0xE12FFF1E}, /* bx    lr */
+    {0x234, 0xE3A0C301}, /* check: mov r12, #0x04000000 */
+    {0x238, 0xE5CC3208}, /* strb  r3, [r12, #0x208]     IME = 0 */
+    {0x23C, 0xE15C20B8}, /* ldrh  r2, [r12, #-8]        BIOS_IF */
+    {0x240, 0xE0110002}, /* ands  r0, r1, r2 */
+    {0x244, 0x10222000}, /* eorne r2, r2, r0 */
+    {0x248, 0x114C20B8}, /* strneh r2, [r12, #-8] */
+    {0x24C, 0xE5CC4208}, /* strb  r4, [r12, #0x208]     IME = 1 */
+    {0x250, 0xE12FFF1E}, /* bx    lr */
     /* Halt, Stop, CustomHalt (r2 = HALTCNT value; the dispatcher keeps r2) */
     {0x2C0, 0xE3A02000}, /* halt: mov r2, #0 */
     {0x2C4, 0xE3A0C301}, /* mov   r12, #0x04000000 */
