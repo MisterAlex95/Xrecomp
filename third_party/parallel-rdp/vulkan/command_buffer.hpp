@@ -959,4 +959,12 @@ using CommandBufferHandle = Util::IntrusivePtr<CommandBuffer>;
 // xboxrecomp-android patch (third_party/parallel-rdp/README.md): the "Stalled compile" pipelines (a compile of 5 ms
 // or more outside the async thread) since the process started, and their total time, from any thread.
 void get_stalled_compiles(uint64_t &count, uint64_t &ns);
+
+// xboxrecomp-android patch: every pipeline built that its caller waited for (sync or fail-on-compile-required that
+// compiled; from the VkPipelineCache or not, the async thread's left out) since the process started, and a hook called
+// after each one (on the building thread, with the new count and the build's time), for the N64 runtime's start-up
+// progress. nullptr removes the hook.
+typedef void (*PipelineBuildHook)(uint64_t builds, uint64_t ns);
+uint64_t get_pipeline_builds();
+void set_pipeline_build_hook(PipelineBuildHook hook);
 }

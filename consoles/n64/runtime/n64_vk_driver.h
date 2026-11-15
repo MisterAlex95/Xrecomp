@@ -52,6 +52,12 @@ const char *n64_vk_driver_id(void);
  * ("ok", "open_failed", "unsupported" or "not_loaded") and <id>.status. The adrenotools handle is never closed. */
 void n64_vk_driver_done(const char *status);
 
+/* The shader warm-up (n64_rdp.h n64_rdp_vk_warmup) opens the driver without the trial: 0 = no marker written, no
+ * last_start / <id>.status (a warm-up killed by the app, or for memory, is not the driver's crash, and the player's
+ * last start stays what the screens show). A marker a game left is still honoured (the driver is skipped). 1 (the
+ * default) restores the trial. */
+void n64_vk_driver_set_trial(int on);
+
 #ifdef __cplusplus
 }
 #endif

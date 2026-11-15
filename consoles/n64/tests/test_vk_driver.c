@@ -244,6 +244,90 @@ static void cache_tests(const char *base)
     rmdir(want);
 }
 
+/* n64_vk_cache.h: startup-<f>x.count (per factor, keyed by the UUID, beside the pipelines; in ssbo-emulation/ at 8x on
+ * Turnip's emulation) and the start-up progress' accounting. */
+static void count_and_progress_tests(const char *base)
+{
+    uint8_t uuid[N64_VK_CACHE_UUID_SIZE], other[N64_VK_CACHE_UUID_SIZE];
+    for (int i = 0; i < N64_VK_CACHE_UUID_SIZE; i++) {
+        uuid[i] = (uint8_t)(0xA0 + i);
+        other[i] = (uint8_t)i;
+    }
+    unsetenv("RECOMP_VK_CACHE_DIR");
+    CHECK(n64_vk_cache_count_load(4, uuid) == 0);
+    CHECK(n64_vk_cache_count_save(4, uuid, 13) == -1); /* no directory */
+
+    char set[700], path[900], line[256];
+    snprintf(set, sizeof set, "%s/countcache", base);
+    setenv("RECOMP_VK_CACHE_DIR", set, 1);
+    CHECK(n64_vk_cache_count_load(4, uuid) == 0);           /* none yet */
+    CHECK(n64_vk_cache_count_save(4, uuid, 0) == -1);       /* nothing to keep */
+    CHECK(n64_vk_cache_count_save(4, uuid, 13) == 0);
+    CHECK(n64_vk_cache_count_load(4, uuid) == 13);
+    CHECK(n64_vk_cache_count_load(2, uuid) == 0);           /* per factor */
+    CHECK(n64_vk_cache_count_load(4, other) == 0);          /* another device or driver */
+    CHECK(n64_vk_cache_count_save(4, uuid, 15) == 0);       /* replaced */
+    CHECK(n64_vk_cache_count_load(4, uuid) == 15);
+    snprintf(path, sizeof path, "%s/startup-4x.count", set);
+    FILE *f = fopen(path, "r");
+    CHECK(f && fgets(line, sizeof line, f) && !strcmp(line, "a0a1a2a3a4a5a6a7a8a9aaabacadaeaf 15\n"));
+    if (f)
+        fclose(f);
+    f = fopen(path, "w"); /* damaged: ignored */
+    fputs("a0a1a2a3a4a5a6a7a8a9aaabacadaeaf\n", f);
+    fclose(f);
+    CHECK(n64_vk_cache_count_load(4, uuid) == 0);
+    f = fopen(path, "w");
+    fputs("a0a1a2a3a4a5a6a7a8a9aaabacadaeaf -3\n", f);
+    fclose(f);
+    CHECK(n64_vk_cache_count_load(4, uuid) == 0);
+    remove(path);
+    /* 8x with Turnip's SSBO emulation: its own sub-directory, as its pipelines */
+    unsetenv("tu_enable_ssbo_emulation");
+    unsetenv("RECOMP_N64_TURNIP_SSBO_EMULATION");
+    CHECK(n64_vk_cache_turnip_env(8) == 1);
+    CHECK(n64_vk_cache_count_save(8, uuid, 21) == 0);
+    snprintf(path, sizeof path, "%s/ssbo-emulation/startup-8x.count", set);
+    CHECK(access(path, F_OK) == 0);
+    CHECK(n64_vk_cache_count_load(8, uuid) == 21);
+    remove(path);
+    CHECK(n64_vk_cache_turnip_env(4) == 0);
+    CHECK(n64_vk_cache_count_load(8, uuid) == 0); /* not in the plain directory */
+    snprintf(path, sizeof path, "%s/ssbo-emulation", set);
+    rmdir(path);
+    rmdir(set);
+    unsetenv("RECOMP_VK_CACHE_DIR");
+
+    /* the progress: inactive, then a start with an unknown total (a spinner), then a known one */
+    int done = -1, total = -1;
+    CHECK(n64_vk_progress_get(&done, &total) == 0 && total == 0);
+    n64_vk_progress_step(); /* outside a start: not counted */
+    n64_vk_progress_begin();
+    CHECK(n64_vk_progress_get(&done, &total) == 1 && done == 0 && total == 0);
+    n64_vk_progress_step();
+    n64_vk_progress_step();
+    CHECK(n64_vk_progress_get(&done, &total) == 1 && done == 2 && total == 0);
+    n64_vk_progress_expect(13);
+    CHECK(n64_vk_progress_get(&done, &total) == 1 && done == 2 && total == 13);
+    for (int i = 0; i < 11; i++)
+        n64_vk_progress_step();
+    CHECK(n64_vk_progress_get(&done, &total) == 1 && done == 13 && total == 13);
+    n64_vk_progress_step(); /* more than expected (another try, a new driver): a spinner, never 14/13 */
+    CHECK(n64_vk_progress_get(&done, &total) == 1 && done == 14 && total == 0);
+    CHECK(n64_vk_progress_end() == 14);
+    CHECK(n64_vk_progress_get(&done, NULL) == 0 && done == 14);
+    CHECK(n64_vk_progress_get(NULL, &total) == 0 && total == 0);
+    n64_vk_progress_begin(); /* a second start counts from 0 */
+    CHECK(n64_vk_progress_get(&done, &total) == 1 && done == 0 && total == 0);
+    n64_vk_progress_expect(-5);
+    CHECK(n64_vk_progress_get(&done, &total) == 1 && total == 0);
+    CHECK(n64_vk_progress_end() == 0);
+    CHECK(n64_vk_progress_total(0, 0) == 0);
+    CHECK(n64_vk_progress_total(7, 13) == 13);
+    CHECK(n64_vk_progress_total(13, 13) == 13);
+    CHECK(n64_vk_progress_total(14, 13) == 0);
+}
+
 /* The fake wrapper opens the driver: the marker is written, n64_vk_driver_done gives the outcome. */
 static int wrapper_tests(void)
 {
@@ -327,6 +411,7 @@ int main(int argc, char **argv)
     }
 
     cache_tests(base);
+    count_and_progress_tests(base);
 
     /* nothing selected: no open, no file */
     CHECK(!n64_vk_driver_selected());
@@ -390,6 +475,19 @@ int main(int argc, char **argv)
     n64_vk_driver_done("ok"); /* nothing was opened: no effect */
     CHECK(read_line("trying", line, sizeof line) && !strcmp(line, "myid"));
     CHECK(read_line("last_start", line, sizeof line) && !strcmp(line, "myid crashed"));
+    clear();
+
+    /* without the trial (the shader warm-up): no last_start or status written, and a game's marker still skips it */
+    n64_vk_driver_set_trial(0);
+    CHECK(n64_vk_driver_open() == NULL); /* not an ELF: open_failed, but nothing written */
+    CHECK(!read_line("last_start", line, sizeof line));
+    CHECK(!read_line("myid.status", line, sizeof line));
+    CHECK(!read_line("trying", line, sizeof line));
+    write_line("trying", "myid\n");
+    CHECK(n64_vk_driver_open() == NULL);
+    CHECK(!read_line("last_start", line, sizeof line));
+    CHECK(read_line("trying", line, sizeof line) && !strcmp(line, "myid")); /* the game's marker stays */
+    n64_vk_driver_set_trial(1);
     clear();
 
     /* outside a vk_drivers directory: no marker, no last_start */

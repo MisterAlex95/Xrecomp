@@ -121,6 +121,14 @@ if(TARGET n64_rdp AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/../runtime/n64_rdp.c)
         add_test(NAME n64_rdp_vulkan_cache COMMAND n64_rdp_test)
         set_tests_properties(n64_rdp_vulkan_cache PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 1800
                              ENVIRONMENT "RECOMP_N64_RDP=vulkan;RECOMP_VK_CACHE_DIR=${CMAKE_CURRENT_BINARY_DIR}/vk_cache/system")
+        # The shader warm-up (n64_rdp.h n64_rdp_vk_warmup) twice into a fresh cache: the second reads it, builds the
+        # same start-up set, and its progress (n64_rdp_shader_progress, polled) counts against the first one's count.
+        find_package(Threads REQUIRED)
+        add_executable(n64_vk_warmup_test test_vk_warmup.c)
+        target_link_libraries(n64_vk_warmup_test PRIVATE n64_rdp Threads::Threads m)
+        target_compile_options(n64_vk_warmup_test PRIVATE -Wall -Wextra)
+        add_test(NAME n64_rdp_vulkan_warmup COMMAND n64_vk_warmup_test ${CMAKE_CURRENT_BINARY_DIR}/vk_warmup 2)
+        set_tests_properties(n64_rdp_vulkan_warmup PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 1800)
     endif()
     add_executable(n64_rdp_bench bench_rdp.c)
     target_link_libraries(n64_rdp_bench PRIVATE n64_rdp m)

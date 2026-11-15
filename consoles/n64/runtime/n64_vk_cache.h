@@ -18,7 +18,13 @@
  * next save.
  *
  * File layout, little-endian: "XRVKPC1\n" (8 bytes), the pipelineCacheUUID (16), the payload's size (u64), the
- * payload's FNV-1a 64 (u64), the payload. Plain C, no Vulkan: the tests run it anywhere (test_vk_driver.c). */
+ * payload's FNV-1a 64 (u64), the payload. Plain C, no Vulkan: the tests run it anywhere (test_vk_driver.c).
+ *
+ * Next to it, startup-<factor>x.count: "<pipelineCacheUUID hex> <count>\n", how many pipelines the last start at that
+ * internal resolution built before the game's first command (the check, then the game's command processor; every
+ * pipeline the start waited for, from the cache or not). The next start shows its progress against it ("Compiling
+ * shaders... 7/13", n64_vk_progress_*); the app's shader warm-up (n64_rdp.h n64_rdp_vk_warmup) writes it too, and the
+ * app reads that it exists. */
 #ifndef N64_VK_CACHE_H
 #define N64_VK_CACHE_H
 
@@ -60,6 +66,39 @@ void *n64_vk_cache_load(const char *path, const uint8_t uuid[N64_VK_CACHE_UUID_S
 
 /* Writes the payload to path through a temporary file and a rename. 0 on success, -1 (logged; the old file stays). */
 int n64_vk_cache_save(const char *path, const uint8_t uuid[N64_VK_CACHE_UUID_SIZE], const void *data, size_t size);
+
+/* The start-up count of factor for this UUID (startup-<factor>x.count), 0 when there is none, it is of another UUID or
+ * unreadable. */
+int n64_vk_cache_count_load(int factor, const uint8_t uuid[N64_VK_CACHE_UUID_SIZE]);
+
+/* Writes it (temporary file and rename). 0, or -1 (no cache directory, count <= 0, cannot write). */
+int n64_vk_cache_count_save(int factor, const uint8_t uuid[N64_VK_CACHE_UUID_SIZE], int count);
+
+/* ---- Start-up progress ---------------------------------------------------------------------------------------------
+ * While the Vulkan RDP starts (the driver's open, the check's pipelines, the game's command processor) the app shows
+ * "Compiling shaders... done/total" (Android: MenuNative.nativeShaderProgress through n64_rdp_shader_progress; a
+ * determinate bar when total > 0, a spinner when 0). Thread-safe (atomics): begin / expect / end on the thread that
+ * creates the RDP, step on whichever thread built a pipeline, get from any thread (the app's UI thread polls it). */
+
+/* A start begins: active, nothing built, total unknown. */
+void n64_vk_progress_begin(void);
+
+/* The count the start is expected to reach (n64_vk_cache_count_load), 0 = unknown. */
+void n64_vk_progress_expect(int expected);
+
+/* One more pipeline built (ignored when no start is active). */
+void n64_vk_progress_step(void);
+
+/* The start is over: inactive; returns how many pipelines it built. */
+int n64_vk_progress_end(void);
+
+/* 1 while a start is active, with *done the pipelines built and *total what is expected; *total is 0 (unknown: a
+ * spinner) when nothing is expected or more were built than expected. 0 otherwise (*done the last start's count,
+ * *total 0). Either pointer may be NULL. */
+int n64_vk_progress_get(int *done, int *total);
+
+/* The pure rule of n64_vk_progress_get: the total shown for built pipelines of expected. */
+int n64_vk_progress_total(int built, int expected);
 
 #ifdef __cplusplus
 }

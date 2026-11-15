@@ -36,9 +36,13 @@ int n64_vk_driver_selected(void)
 
 const char *n64_vk_driver_id(void) { return vkd.id; }
 
+static int s_no_trial; /* n64_vk_driver_set_trial(0): the warm-up writes no marker, last_start or status */
+
+void n64_vk_driver_set_trial(int on) { s_no_trial = !on; }
+
 static void write_file(const char *name, const char *text)
 {
-    if (!vkd.has_state)
+    if (!vkd.has_state || s_no_trial)
         return;
     char path[VKD_PATH_MAX + 192];
     snprintf(path, sizeof path, "%s/%s", vkd.state, name);
@@ -205,7 +209,7 @@ void n64_vk_driver_done(const char *status)
     vkd.open = 0;
     char path[VKD_PATH_MAX + 32];
     snprintf(path, sizeof path, "%s/trying", vkd.state);
-    if (vkd.has_state)
+    if (vkd.has_state && !s_no_trial)
         remove(path);
     last_start(status);
 }
