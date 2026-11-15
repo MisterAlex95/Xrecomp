@@ -110,8 +110,10 @@ the CLI, Prepare end to end). Design notes: [gba/tools/README.md](gba/tools/READ
 
 The ROM tests skip (exit 77) when their ROMs are not built, which is the case in the linux CI job (no Docker inside
 it, so no corpus). The homebrew corpus runs in the **homebrew job** instead (XBA-180), after the corpus build, through
-`tools/consoles/run_gba_packs.sh` in the linux job's deps image: ctest `gba_hb_*` and `gba_rc_hb_*` (the LLE variants
-and jsmolka's ROMs still skip there), then `tools/consoles/gba_corpus_packs.py`, the user's chain on each program:
+`tools/consoles/run_gba_packs.sh` in the linux job's deps image: ctest `gba_hb_*` and `gba_rc_hb_*`, then, with the
+inputs from `tools/consoles/gba_test_inputs.sh` (XBA-193: the Cult-of-GBA BIOS built from source and jsmolka/gba-tests,
+both MIT, never committed or uploaded, cached in the host's Docker as the data image `xba-gba-inputs:<hash of the
+pins>`), `gba_hb_lle_*`, `gba_jsmolka_*` and their `gba_rc_*` (30 tests, about 11 s; one that skips fails the job), then `tools/consoles/gba_corpus_packs.py`, the user's chain on each program:
 `python3 -m tools.prepare <prog>.gba` (a desktop pack), `gba_run --pack libtitle.so --lockstep --result` until the
 verdict, and a screenshot 30 frames later (`--ppm`, kept as PNG in the run's artefact `gba-corpus-screens`). A program
 fails on a failing result block, a lockstep difference, or a screenshot whose sha256 is not the one in
@@ -119,7 +121,8 @@ fails on a failing result block, a lockstep difference, or a screenshot whose sh
 gba-corpus). Locally, and to record new screenshots after an intended change (check the PNGs first):
 
 ```sh
-tools/consoles/build_homebrew.sh gba build/homebrew && tools/consoles/run_gba_packs.sh build/homebrew build/gba-packs
+tools/consoles/build_homebrew.sh gba build/homebrew && tools/consoles/gba_test_inputs.sh build/gba-inputs
+tools/consoles/run_gba_packs.sh build/homebrew build/gba-packs build/gba-inputs
 tools/consoles/gba_corpus_packs.py build/homebrew/gba build/gba-packs --gba-run build/gba/gba_runtime/gba_run --update
 ```
 

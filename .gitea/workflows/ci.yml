@@ -157,6 +157,10 @@ jobs:
   # each program prepared into a pack (python3 -m tools.prepare), run headless until its verdict, screenshotted; the
   # screenshots' sha256 must match consoles/gba/tests/corpus_screens.sha256. The PNGs are kept as the run's artefact
   # gba-corpus-screens. That part also runs when a PR touches the GBA runtime, lifter or Prepare.
+  # XBA-193: it also gets the Cult-of-GBA BIOS (MIT, built from source) and jsmolka/gba-tests (MIT), kept in the
+  # host's Docker as the data image xba-gba-inputs:<hash of the pins> (tools/consoles/gba_test_inputs.sh: about a
+  # second cached, a few seconds cold), and runs ctest gba_hb_lle_* / gba_jsmolka_* and their gba_rc_* too (30 tests,
+  # about 11 s). They are inputs only: never uploaded with the artefact.
   homebrew:
     needs: linux
     if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
@@ -187,7 +191,7 @@ jobs:
           base=${MERGE_BASE:-$BASE_SHA}
           if [ -n "$base" ] && git fetch -q --depth 1 "$url" "$base" 2>/dev/null \
              && files=$(git diff --name-only "$base" HEAD); then
-            if printf '%s\n' "$files" | grep -qE '^(consoles/[^/]+/tests/homebrew/|consoles/gba/|tools/prepare/|tools/docker/((gba|ps1|n64)-homebrew|linux)\.Dockerfile$|tools/consoles/(build_homebrew\.sh|run_gba_packs\.sh|gba_corpus_packs\.py|gba_recomp_build\.py)$|\.gitea/workflows/ci\.yml$)'; then
+            if printf '%s\n' "$files" | grep -qE '^(consoles/[^/]+/tests/homebrew/|consoles/gba/|tools/prepare/|tools/docker/((gba|ps1|n64)-homebrew|linux)\.Dockerfile$|tools/consoles/(build_homebrew\.sh|run_gba_packs\.sh|gba_corpus_packs\.py|gba_recomp_build\.py|gba_test_inputs\.sh|build_gba_bios\.sh|fetch_gba_tests\.sh)$|\.gitea/workflows/ci\.yml$)'; then
               echo "build=true" >> "$GITHUB_OUTPUT"
             else
               echo "Nothing the homebrew corpus is built from: skipped."
@@ -211,9 +215,15 @@ jobs:
 
       # A changed screenshot: look at the artefact's PNG; if the change is intended, rewrite the list with
       # tools/consoles/gba_corpus_packs.py CORPUS OUT --gba-run GBA_RUN --update (consoles/README.md).
+      - name: GBA test inputs (Cult-of-GBA BIOS, jsmolka/gba-tests; cached)
+        if: steps.paths.outputs.build == 'true'
+        run: |
+          apk add --no-cache curl >/dev/null
+          bash tools/consoles/gba_test_inputs.sh out/gba-inputs
+
       - name: GBA corpus as recompiled packs (Prepare, headless run, screenshots)
         if: steps.paths.outputs.build == 'true'
-        run: JOBS=4 bash tools/consoles/run_gba_packs.sh out/homebrew out/gba-packs
+        run: JOBS=4 bash tools/consoles/run_gba_packs.sh out/homebrew out/gba-packs out/gba-inputs
 
       # actions/upload-artifact runs on Node, which the docker CLI image does not have.
       - name: Node for the artefact upload
