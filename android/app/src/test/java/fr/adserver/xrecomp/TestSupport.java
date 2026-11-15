@@ -264,6 +264,11 @@ final class TestSupport {
         out.getParentFile().mkdirs();
         Bitmap bm = Bitmap.createBitmap(Math.max(1, root.getWidth()), Math.max(1, root.getHeight()),
                                         Bitmap.Config.ARGB_8888);
+        // Two frames: a ScrollView settles a smooth scroll while it draws (computeScroll), and the focus highlight
+        // (Widgets.Glide) follows it at the next frame's pre-draw, as on a device.
+        root.draw(new android.graphics.Canvas(bm));
+        root.getViewTreeObserver().dispatchOnPreDraw();
+        bm.eraseColor(0);
         root.draw(new android.graphics.Canvas(bm));
         try (OutputStream o = new FileOutputStream(out)) {
             bm.compress(Bitmap.CompressFormat.PNG, 100, o);
