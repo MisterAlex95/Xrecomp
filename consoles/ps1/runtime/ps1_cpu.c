@@ -199,6 +199,72 @@ static inline int load32(ps1_machine *m, uint32_t addr, uint32_t *v)
     return ps1_read32(m, addr, v);
 }
 
+/* Main RAM as the bus decodes it (ps1_bus.c decode: REG_RAM): KUSEG, or KSEG0 / KSEG1 in kernel mode, below 8 MB
+ * (2 MB mirrored). The interpreter's byte / halfword / word accesses there skip the bus call; everything else (and
+ * stores with the cache isolated) still goes through ps1_read* / ps1_write*. */
+static inline bool ram_addr(const ps1_machine *m, uint32_t addr)
+{
+    uint32_t segs = (m->cop0[C0_SR] & SR_KUC) ? 0x01u : 0x31u; /* bit n: segment n reaches main RAM */
+    return ((segs >> (addr >> 29)) & 1) && (addr & 0x1F800000u) == 0;
+}
+
+static inline int read8(ps1_machine *m, uint32_t addr, uint32_t *v)
+{
+    if (__builtin_expect(ram_addr(m, addr), 1)) {
+        *v = m->ram[addr & 0x1FFFFFu];
+        return 0;
+    }
+    return ps1_read8(m, addr, v);
+}
+
+static inline int read16(ps1_machine *m, uint32_t addr, uint32_t *v) /* addr is even */
+{
+    if (__builtin_expect(ram_addr(m, addr), 1)) {
+        const uint8_t *q = m->ram + (addr & 0x1FFFFEu);
+        *v = (uint32_t)q[0] | (uint32_t)q[1] << 8;
+        return 0;
+    }
+    return ps1_read16(m, addr, v);
+}
+
+static inline int write_ram_ok(const ps1_machine *m, uint32_t addr)
+{
+    return !(m->cop0[C0_SR] & SR_ISC) && ram_addr(m, addr);
+}
+
+static inline int write8(ps1_machine *m, uint32_t addr, uint32_t v)
+{
+    if (__builtin_expect(write_ram_ok(m, addr), 1)) {
+        PS1_RAM_TOUCH(m, addr);
+        m->ram[addr & 0x1FFFFFu] = (uint8_t)v;
+        return 0;
+    }
+    return ps1_write8(m, addr, v);
+}
+
+static inline int write16(ps1_machine *m, uint32_t addr, uint32_t v) /* addr is even */
+{
+    if (__builtin_expect(write_ram_ok(m, addr), 1)) {
+        PS1_RAM_TOUCH(m, addr);
+        uint8_t *q = m->ram + (addr & 0x1FFFFEu);
+        q[0] = (uint8_t)v;
+        q[1] = (uint8_t)(v >> 8);
+        return 0;
+    }
+    return ps1_write16(m, addr, v);
+}
+
+static inline int write32(ps1_machine *m, uint32_t addr, uint32_t v) /* addr is a multiple of 4 */
+{
+    if (__builtin_expect(write_ram_ok(m, addr), 1)) {
+        PS1_RAM_TOUCH(m, addr);
+        v = rd32le((const uint8_t *)&v); /* to little-endian on a big-endian host (rd32le swaps there) */
+        memcpy(m->ram + (addr & 0x1FFFFCu), &v, 4);
+        return 0;
+    }
+    return ps1_write32(m, addr, v);
+}
+
 /* ---- COP0 ---- */
 static int mfc0(ps1_machine *m, uint32_t rd, uint32_t *v)
 {
@@ -527,7 +593,7 @@ static inline __attribute__((always_inline)) void step(ps1_machine *m)
         break;
     case 0x20: /* LB */
         addr = RS + IMM_S;
-        if ((e = ps1_read8(m, addr, &v)) != 0) {
+        if ((e = read8(m, addr, &v)) != 0) {
             if (e == EXC_ADEL) address_error(m, EXC_ADEL, addr); else ps1_cpu_exception(m, (uint32_t)e, 0);
             return;
         }
@@ -539,7 +605,7 @@ static inline __attribute__((always_inline)) void step(ps1_machine *m)
             address_error(m, EXC_ADEL, addr);
             return;
         }
-        if ((e = ps1_read16(m, addr, &v)) != 0) {
+        if ((e = read16(m, addr, &v)) != 0) {
             if (e == EXC_ADEL) address_error(m, EXC_ADEL, addr); else ps1_cpu_exception(m, (uint32_t)e, 0);
             return;
         }
@@ -575,7 +641,7 @@ static inline __attribute__((always_inline)) void step(ps1_machine *m)
         break;
     case 0x24: /* LBU */
         addr = RS + IMM_S;
-        if ((e = ps1_read8(m, addr, &v)) != 0) {
+        if ((e = read8(m, addr, &v)) != 0) {
             if (e == EXC_ADEL) address_error(m, EXC_ADEL, addr); else ps1_cpu_exception(m, (uint32_t)e, 0);
             return;
         }
@@ -587,7 +653,7 @@ static inline __attribute__((always_inline)) void step(ps1_machine *m)
             address_error(m, EXC_ADEL, addr);
             return;
         }
-        if ((e = ps1_read16(m, addr, &v)) != 0) {
+        if ((e = read16(m, addr, &v)) != 0) {
             if (e == EXC_ADEL) address_error(m, EXC_ADEL, addr); else ps1_cpu_exception(m, (uint32_t)e, 0);
             return;
         }
@@ -595,7 +661,7 @@ static inline __attribute__((always_inline)) void step(ps1_machine *m)
         break;
     case 0x28: /* SB */
         addr = RS + IMM_S;
-        if ((e = ps1_write8(m, addr, RT)) != 0) {
+        if ((e = write8(m, addr, RT)) != 0) {
             if (e == EXC_ADES) address_error(m, EXC_ADES, addr); else ps1_cpu_exception(m, (uint32_t)e, 0);
             return;
         }
@@ -606,7 +672,7 @@ static inline __attribute__((always_inline)) void step(ps1_machine *m)
             address_error(m, EXC_ADES, addr);
             return;
         }
-        if ((e = ps1_write16(m, addr, RT)) != 0) {
+        if ((e = write16(m, addr, RT)) != 0) {
             if (e == EXC_ADES) address_error(m, EXC_ADES, addr); else ps1_cpu_exception(m, (uint32_t)e, 0);
             return;
         }
@@ -624,7 +690,7 @@ static inline __attribute__((always_inline)) void step(ps1_machine *m)
             r = sh == 3 ? rt : (w & (0xFFFFFF00u << (sh * 8))) | (rt >> (24 - sh * 8));
         else
             r = sh == 0 ? rt : (w & (0x00FFFFFFu >> (24 - sh * 8))) | (rt << (sh * 8));
-        if ((e = ps1_write32(m, a, r)) != 0) {
+        if ((e = write32(m, a, r)) != 0) {
             if (e == EXC_ADES) address_error(m, EXC_ADES, addr); else ps1_cpu_exception(m, (uint32_t)e, 0);
             return;
         }
@@ -636,7 +702,7 @@ static inline __attribute__((always_inline)) void step(ps1_machine *m)
             address_error(m, EXC_ADES, addr);
             return;
         }
-        if ((e = ps1_write32(m, addr, RT)) != 0) {
+        if ((e = write32(m, addr, RT)) != 0) {
             if (e == EXC_ADES) address_error(m, EXC_ADES, addr); else ps1_cpu_exception(m, (uint32_t)e, 0);
             return;
         }
@@ -667,7 +733,7 @@ static inline __attribute__((always_inline)) void step(ps1_machine *m)
             address_error(m, EXC_ADES, addr);
             return;
         }
-        if ((e = ps1_write32(m, addr, ps1_gte_read_data(&m->gte, (int)RT_N))) != 0) {
+        if ((e = write32(m, addr, ps1_gte_read_data(&m->gte, (int)RT_N))) != 0) {
             if (e == EXC_ADES) address_error(m, EXC_ADES, addr); else ps1_cpu_exception(m, (uint32_t)e, 0);
             return;
         }
