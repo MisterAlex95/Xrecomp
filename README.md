@@ -26,7 +26,7 @@ once, press **Play**. The whole recompiler (Python, capstone, LLVM) runs on the 
 
 <table>
   <tr>
-    <td width="50%" align="center"><img src="docs/images/screens/n64-ocarina-of-time.jpg" alt="The Legend of Zelda: Ocarina of Time, Link in the Kokiri Forest"><br><sub><b>Ocarina of Time</b> · N64 · Vulkan RDP, upscaled</sub></td>
+    <td width="50%" align="center"><img src="docs/images/screens/n64-ocarina-of-time.jpg" alt="The Legend of Zelda: Ocarina of Time, Link meets Saria in the Kokiri Forest"><br><sub><b>Ocarina of Time</b> · N64 · Vulkan RDP, upscaled</sub></td>
     <td width="50%" align="center"><img src="docs/images/screens/ps1-crash-bandicoot.jpg" alt="Crash Bandicoot on N. Sanity Beach, upscaled"><br><sub><b>Crash Bandicoot</b> · PS1 · 4× internal resolution</sub></td>
   </tr>
   <tr>
