@@ -289,7 +289,8 @@ if(TARGET n64_run)
          n64_lockref_rsp_inval_instrs)
     set_tests_properties(${lockref} PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900 ENVIRONMENT "N64_RUN_TIMEOUT=840")
     find_package(Python3 COMPONENTS Interpreter)
-    if(Python3_FOUND)
+    # The fuzzer starts n64_run itself: not under a cross build (no emulator wrapper there, Exec format error).
+    if(Python3_FOUND AND NOT CMAKE_CROSSCOMPILING)
         add_test(NAME n64_lockref_fuzz COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/recomp_fuzz.py --ref
                  --n64-run $<TARGET_FILE:n64_run> --work ${CMAKE_CURRENT_BINARY_DIR}/lockref_fuzz --seeds 0-15
                  --frames 20 --insns 1500)
