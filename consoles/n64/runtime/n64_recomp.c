@@ -8,7 +8,8 @@
  * (physical: for a TLB-mapped entry, the page its virtual page maps to now); when that sum moved since the entry was
  * last hashed, or the entry now maps elsewhere, the words are hashed again and compared with the table's hash. The
  * loop keeps the interpreter's order of checks (scheduler, interrupt) between every two steps, lifted or interpreted,
- * so both run tick for tick alike. */
+ * so both run tick for tick alike. Code no entry covers runs as the interpreter's predecoded blocks (XBA-210), each
+ * stopping in front of the next entry's start, which hold those checks themselves. */
 #define _POSIX_C_SOURCE 200809L
 #include "n64_internal.h"
 #include "n64_recomp_rt.h"
@@ -79,6 +80,10 @@ typedef struct rc_line {
     uint32_t tg;   /* mapped pc: the TLB generation the translation was made under (and ERL in bit 31) */
     uint32_t pbase; /* the physical address the entry's start maps to (E_STALE: unused) */
     uint32_t p0, p1, sum; /* E_STALE: the RDRAM pages of the candidates and their counter sum then */
+    uint32_t run;  /* E_NONE / E_STALE: the instructions from pc that no other entry covers (to the next entry's start
+                    * or the page's end): the interpreter's block may run them (n64_recomp_run) */
+    uint32_t rec_n;   /* E_NONE / E_STALE: 1 + the record count when recording pc last changed nothing, 0: unknown */
+    uint32_t rec_sum; /* and the counter sum of the RDRAM pages its window covers then (rec_window) */
 } rc_line;
 
 typedef struct rc_missed {
@@ -357,8 +362,10 @@ static inline rc_line *line_of(struct n64_rc_state *s, uint32_t pc)
     return &s->cache[((pc >> 2) ^ (pc >> (CACHE_BITS + 2))) & (CACHE_SIZE - 1)];
 }
 
-/* The entry to run at pc (index; *pbase the physical address of its start), or -1. pc_pa: pc's physical address. */
-static int32_t lookup(n64_machine *m, struct n64_rc_state *s, uint32_t pc, uint32_t pc_pa, uint32_t *pbase)
+/* The entry to run at pc (index; *pbase the physical address of its start), or -1 and *run: rc_line.run. pc_pa: pc's
+ * physical address. */
+static int32_t lookup(n64_machine *m, struct n64_rc_state *s, uint32_t pc, uint32_t pc_pa, uint32_t *pbase,
+                      uint32_t *run)
 {
     rc_line *ln = line_of(s, pc);
     bool direct = is_direct(pc);
@@ -370,6 +377,7 @@ static int32_t lookup(n64_machine *m, struct n64_rc_state *s, uint32_t pc, uint3
                 return ln->e;
             }
         } else if (ln->e == E_NONE || page_sum(m, ln->p0, ln->p1) == ln->sum) {
+            *run = ln->run;
             return -1;
         }
     }
@@ -406,11 +414,14 @@ static int32_t lookup(n64_machine *m, struct n64_rc_state *s, uint32_t pc, uint3
     }
     ln->key = pc;
     ln->tg = tg;
+    ln->rec_n = 0;
     if (found >= 0) {
         ln->e = found;
         ln->pbase = fbase;
         *pbase = fbase;
-    } else if (!any) {
+        return found;
+    }
+    if (!any) {
         ln->e = E_NONE;
     } else {
         ln->e = E_STALE;
@@ -418,6 +429,16 @@ static int32_t lookup(n64_machine *m, struct n64_rc_state *s, uint32_t pc, uint3
         ln->p1 = p1;
         ln->sum = page_sum(m, p0, p1);
     }
+    /* Up to the first entry that starts after pc in its page (entries from earlier pages start before pc: they hold
+     * pc, and are the stale candidates above, or end before it), else the page's end. */
+    uint32_t end = PAGE - (pc & (PAGE - 1));
+    for (uint32_t k = lo; k < s->nrefs && s->refs[k].page == page; k++) {
+        uint32_t a = s->table->entries[s->refs[k].e].addr;
+        if (a > pc && a - pc < end)
+            end = a - pc;
+    }
+    ln->run = end / 4;
+    *run = ln->run;
     return found;
 }
 
@@ -497,6 +518,32 @@ static void record_missed(n64_machine *m, struct n64_rc_state *s, uint32_t pc, u
         w[j] = n64_be32(m->rdram + pa + 4 * j);
     s->missed[s->nmissed++] = (rc_missed){pc, n, hash, w, true};
     (*var)++;
+}
+
+/* The counter sum of the RDRAM pages record_missed reads at pa (its window and the words it compares: at most
+ * N64_RECOMP_SNAPSHOT bytes from pa). */
+static inline uint32_t rec_window(const n64_machine *m, uint32_t pa)
+{
+    uint32_t end = pa + N64_RECOMP_SNAPSHOT;
+    if (end > m->rdram_size)
+        end = m->rdram_size;
+    return page_sum(m, pa >> 12, (end - 1) >> 12);
+}
+
+/* record_missed at a miss, skipped when it is sure to change nothing: it changed nothing the last time at this pc (the
+ * line), and neither the records (their count) nor the bytes it reads (the window's page counters) moved since. Its
+ * outcome depends on nothing else, so the record is the same as with a call at every miss. */
+static inline void record_miss(n64_machine *m, struct n64_rc_state *s, uint32_t pc, uint32_t pa)
+{
+    rc_line *ln = line_of(s, pc); /* lookup left pc's line there */
+    uint32_t sum = rec_window(m, pa), before = s->nmissed;
+    if (ln->key == pc && ln->rec_n == before + 1 && ln->rec_sum == sum)
+        return;
+    record_missed(m, s, pc, pa);
+    if (ln->key == pc && s->nmissed == before) {
+        ln->rec_n = before + 1;
+        ln->rec_sum = sum;
+    }
 }
 
 size_t n64_recomp_missed(n64_machine *m, uint32_t *out, size_t max)
@@ -630,8 +677,8 @@ void n64_recomp_run(n64_machine *m)
             n64_cpu_step(m);
             continue;
         }
-        uint32_t base = 0;
-        int32_t e = lookup(m, s, va, pa, &base);
+        uint32_t base = 0, run = 1;
+        int32_t e = lookup(m, s, va, pa, &base, &run);
         if (e >= 0) {
             const n64_recomp_entry *en = &t->entries[e];
             m->rc_lo = base;
@@ -653,8 +700,24 @@ void n64_recomp_run(n64_machine *m)
                 s->expect = 1;
                 continue;
             }
-        } else if (pc != s->expect) {
-            record_missed(m, s, va, pa);
+        } else {
+            if (pc != s->expect)
+                record_miss(m, s, va, pa);
+            if (N64_LIKELY(!m->interp_ref && !(m->mi_mode & 0x80) && c->npc == pc + 4)) {
+                /* Code no entry covers: a predecoded block of the interpreter's (XBA-210) to the next entry's start at
+                 * most, so lifted code is entered where step() would let it. Inside the block execution stays in
+                 * sequence: no instruction of it would be recorded, and none but the first can be a resume point. */
+                if (s->interp_pc - pc - 4 < 4ull * run - 4) /* a hand-off still pending ahead (an interrupt came) */
+                    run = (uint32_t)((s->interp_pc - pc) / 4);
+                uint64_t ran = m->instructions;
+                bool step = n64_cpu_run_block(m, run);
+                s->stats.blocks++;
+                if (step && m->now < m->stop_at && !c->irq)
+                    n64_cpu_step(m);
+                s->stats.interp_ram += m->instructions - ran;
+                s->expect = c->ds ? 1 : c->cur + 4; /* as after the last step: a delay slot sets 1 (the branch above) */
+                continue;
+            }
         }
         s->stats.interp_ram++;
         n64_cpu_step(m);
