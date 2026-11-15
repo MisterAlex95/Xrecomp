@@ -79,11 +79,12 @@ void gba_update_waitstates(gba_machine *m)
     }
 }
 
-/* A data access to the cartridge bus (ROM, SRAM, EEPROM) stops the prefetch buffer. */
+/* A data access to the cartridge bus (ROM, SRAM, EEPROM) stops the prefetch buffer (the cycle's wait when a read
+ * was finishing: for the CPU's accesses, not a DMA's, by the mGBA suite's DMA timings). */
 static inline void cart_data(gba_machine *m, uint32_t addr)
 {
     if ((addr >> 27) & 1) /* 0x08000000-0x0FFFFFFF */
-        m->now += rc_pf_stop((gba_rc_head *)(void *)m, m->now, rc_cart(m->cpu.r[15]));
+        m->now += rc_pf_stop((gba_rc_head *)(void *)m, m->now, !m->dma_active && rc_cart(m->cpu.r[15]));
 }
 
 /* ---- mGBA's debug-print port (gba_set_debug_log, XBA-201) ----------------------------------------------- */
@@ -247,6 +248,8 @@ static inline bool save_region(uint32_t addr)
 
 uint32_t gba_read32(gba_machine *m, uint32_t addr, bool seq)
 {
+    if (!seq)
+        gba_dma_due_check(m);
     cart_data(m, addr);
     m->now += m->wait32[(addr >> 24) & 15][seq];
     if (!save_region(addr))
@@ -256,6 +259,8 @@ uint32_t gba_read32(gba_machine *m, uint32_t addr, bool seq)
 
 uint16_t gba_read16(gba_machine *m, uint32_t addr, bool seq)
 {
+    if (!seq)
+        gba_dma_due_check(m);
     cart_data(m, addr);
     m->now += m->wait16[(addr >> 24) & 15][seq];
     if (!save_region(addr))
@@ -265,6 +270,8 @@ uint16_t gba_read16(gba_machine *m, uint32_t addr, bool seq)
 
 uint8_t gba_read8(gba_machine *m, uint32_t addr, bool seq)
 {
+    if (!seq)
+        gba_dma_due_check(m);
     cart_data(m, addr);
     m->now += m->wait16[(addr >> 24) & 15][seq];
     return read8_raw(m, addr);
@@ -365,6 +372,8 @@ static bool bitmap_mode(const gba_machine *m)
 
 void gba_write32(gba_machine *m, uint32_t addr, uint32_t v, bool seq)
 {
+    if (!seq)
+        gba_dma_due_check(m);
     cart_data(m, addr);
     m->now += m->wait32[(addr >> 24) & 15][seq];
     if (save_region(addr)) { /* 8-bit bus: the byte of the value the address selects */
@@ -404,6 +413,8 @@ void gba_write32(gba_machine *m, uint32_t addr, uint32_t v, bool seq)
 
 void gba_write16(gba_machine *m, uint32_t addr, uint16_t v, bool seq)
 {
+    if (!seq)
+        gba_dma_due_check(m);
     cart_data(m, addr);
     m->now += m->wait16[(addr >> 24) & 15][seq];
     if (save_region(addr)) {
@@ -444,6 +455,8 @@ void gba_write16(gba_machine *m, uint32_t addr, uint16_t v, bool seq)
 
 void gba_write8(gba_machine *m, uint32_t addr, uint8_t v, bool seq)
 {
+    if (!seq)
+        gba_dma_due_check(m);
     cart_data(m, addr);
     m->now += m->wait16[(addr >> 24) & 15][seq];
     switch (addr >> 24) {

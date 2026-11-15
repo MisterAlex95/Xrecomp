@@ -315,8 +315,8 @@ def test_blocks_resume_points_and_event_checks():
     assert c.count("RC_STOP(") == 3 and "case 0x%08Xu:" % (t + 4) not in c
     # t+2 .. t+8: a block of 4 (adds, ldr, bl hi, bl lo); t+10 .. t+12, t+14 after the branch
     assert "mid_[8] = {0, 0, 3, 2, 1, 0, 2, 1}" in c
-    assert "RC_CHECK(0x%08Xu, 1, 0, 2);" % (t + 6) in c   # after the load: the BL prefix half, then the BL
-    assert "RC_STOP(0x%08Xu, 1, 0, 4);" % (t + 2) in c     # adds (1 fetch) up to the load
+    assert "RC_CHECK(0x%08Xu, 2, 0, 2);" % (t + 6) in c   # after the load: the BL prefix half, then the BL's fetch
+    assert "RC_STOP(0x%08Xu, 2, 0, 4);" % (t + 2) in c     # adds (1 fetch) and the load's fetch
 
 
 def test_files_stay_the_same_when_functions_are_added():

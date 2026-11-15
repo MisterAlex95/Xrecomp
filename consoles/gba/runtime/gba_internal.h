@@ -151,6 +151,7 @@ typedef struct gba_dma {
     uint32_t src, dst;      /* internal (latched) */
     uint32_t count;
     bool active_special;
+    bool due;               /* immediate timing: started, waiting for its start delay (dma_due) */
 } gba_dma;
 
 struct gba_rc_state; /* gba_recomp.c */
@@ -198,6 +199,8 @@ struct gba_machine {
     gba_timer timer[4];
     gba_dma dma[4];
     uint32_t dma_latch;     /* last value a DMA moved (open bus of DMA reads) */
+    bool dma_active;        /* a DMA is moving data (its cartridge accesses stop the prefetch buffer without a wait) */
+    uint64_t dma_due;       /* cycle the immediate DMAs started (gba_dma.due) take the bus, UINT64_MAX: none */
 
     /* PPU timing (XBA-201, the mGBA suite's video tests): lines before a newly enabled BG shows, the windows'
      * vertical flags (latched at each line start: set on WINxV's top line, cleared on its bottom one), and OAM as
@@ -312,6 +315,14 @@ void gba_raise_irq_at(gba_machine *m, uint16_t bits, uint64_t when);
 void gba_update_irq(gba_machine *m);
 void gba_schedule(gba_machine *m);
 void gba_io_reset(gba_machine *m);
+/* Runs the immediate DMAs whose start delay is over (m->now >= m->dma_due): the scheduler, and the bus before a
+ * CPU access that would contend with them (gba_dma_due_check). */
+void gba_dma_run_due(gba_machine *m);
+static inline void gba_dma_due_check(gba_machine *m)
+{
+    if (__builtin_expect(m->now >= m->dma_due, 0))
+        gba_dma_run_due(m);
+}
 
 /* gba_audio.c: sound registers 0x60-0xA7 (byte granularity), FIFO timer ticks, catching up. */
 void gba_apu_reset(gba_machine *m);
