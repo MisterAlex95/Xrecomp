@@ -1183,6 +1183,8 @@ public class LauncherActivity extends Activity {
      */
     @Override
     public boolean dispatchKeyEvent(KeyEvent e) {
+        if (touchEditor != null)   // the touch layout editor (XBA-207) takes every key: B cancels, the rest is its own
+            return touchEditor.key(e) || super.dispatchKeyEvent(e);
         if (screen == null)
             return super.dispatchKeyEvent(e);
         int k = e.getKeyCode();
@@ -5751,10 +5753,10 @@ public class LauncherActivity extends Activity {
 
     /** Controls › On-screen pad (XBA-42): when it shows, its opacity, its size (TouchSettings, files/settings). */
     private void controlsTouch(LinearLayout list) {
-        controlsTouch(list, getString(R.string.CTL_TOUCH_DETAIL));
+        controlsTouch(list, getString(R.string.CTL_TOUCH_DETAIL), Console.XBOX, padMapTid);
     }
 
-    private void controlsTouch(LinearLayout list, String modeDetail) {
+    private void controlsTouch(LinearLayout list, String modeDetail, Console con, String gameKey) {
         TouchSettings t = TouchSettings.load(this);
         listLabel(list, getString(R.string.CTL_GROUP_TOUCH));
         MenuRow mode = settingRow(list, getString(R.string.CTL_TOUCH), "");
@@ -5788,7 +5790,56 @@ public class LauncherActivity extends Activity {
             String text = details[i];
             onFocus(r, () -> describe(text));
         }
+        controlsTouchEdit(list, con, gameKey);
     }
+
+    /**
+     * Controls › « Edit touch layout » (XBA-207): left / right pick the console's layout (the page's first), A opens
+     * the editor (TouchEditor) over the launcher. A game's page passes its key: « This game only » for its layout.
+     */
+    private void controlsTouchEdit(LinearLayout list, Console con, String gameKey) {
+        boolean analog = cfg != null && "analog".equalsIgnoreCase(cfg.get("RECOMP_PS1_PAD"));
+        TouchPad.Layout own = TouchPad.layoutFor(con, analog);
+        TouchPad.Layout[] all = TouchPad.Layout.values();
+        String[] labels = new String[all.length];
+        for (int i = 0; i < all.length; i++)
+            labels[i] = TouchEditor.consoleName(this, all[i]);
+        MenuRow edit = settingRow(list, getString(R.string.CTL_TOUCH_EDIT), "");
+        edit.setChoices(labels);
+        TouchPad.Layout[] pick = { own };
+        Runnable detail = () -> describe(getString(R.string.CTL_TOUCH_EDIT_DETAIL, labels[pick[0].ordinal()]));
+        edit.setValue(labels[own.ordinal()]);
+        edit.cycler = d -> {
+            pick[0] = all[Math.floorMod(pick[0].ordinal() + d, all.length)];
+            edit.setValue(labels[pick[0].ordinal()]);
+            detail.run();
+            feedback.play(UiFeedback.Cue.MOVE, edit);
+        };
+        edit.setOnClickListener(v -> openTouchEditor(pick[0], pick[0] == own ? gameKey : null));
+        onFocus(edit, detail);
+    }
+
+    /** The touch layout editor over the launcher; the focus comes back to the row that opened it. */
+    void openTouchEditor(TouchPad.Layout layout, String gameKey) {
+        if (touchEditor != null)
+            return;
+        View back = getCurrentFocus();
+        feedback.play(UiFeedback.Cue.SELECT, back);
+        touchEditor = new TouchEditor(this, layout, gameKey, TouchSettings.load(this), false, saved -> {
+            ViewGroup parent = (ViewGroup)touchEditor.getParent();
+            if (parent != null)
+                parent.removeView(touchEditor);
+            touchEditor = null;
+            if (back != null)
+                back.requestFocus();
+        });
+        addContentView(touchEditor, new ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
+                                                               ViewGroup.LayoutParams.MATCH_PARENT));
+        Log.i(TAG, "launcher: touch layout editor " + layout + (gameKey != null ? " (" + gameKey + ")" : ""));
+    }
+
+    /** The touch layout editor while it is open (XBA-207), else null. */
+    TouchEditor touchEditor;
 
     /** The focused control's line: where it comes from, and which other control shares that button. */
     private void controlDetail(PadMapping.Control c) {
@@ -6190,7 +6241,7 @@ public class LauncherActivity extends Activity {
                 onFocus(dead, () -> describe(dt));
             }
         }
-        controlsTouch(list, getString(R.string.CC_TOUCH_DETAIL, cname));
+        controlsTouch(list, getString(R.string.CC_TOUCH_DETAIL, cname), con, key);
         controlsHotkeys(list, con, key, romMapGame || Hotkeys.gameText(this, key) != null,   // XBA-190
                         () -> Hotkeys.sourcesOf(romMap));
         String resetText = getString(R.string.CC_RESET_DETAIL, cname,

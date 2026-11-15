@@ -105,6 +105,9 @@ final class GameMenu {
         /** Shows or hides the on-screen pad for the rest of the session (the menu's toggle). */
         default void setTouchShown(boolean on) {}
 
+        /** Opens the touch layout editor over the held game (XBA-207); the menu has closed. */
+        default void editTouchLayout() {}
+
         /** The launched GBA, PS1 or N64 game's mapping (ConsoleControls.effective), or null for an Xbox game. */
         default ConsolePadMap consoleMap() {
             return null;
@@ -196,7 +199,8 @@ final class GameMenu {
 
     enum Item { RESUME, SETTINGS, CONTROLS, SCREENSHOT, SHARE_LOG, LAUNCHER, QUIT, PERF, VOLUME, BOTTOM, LANGUAGE,
                 WIDESCREEN, P480, TOUCH, BACK, DISC, SCALE, FILTER, UPSCALE, VK_DRIVER, STATE_SAVE, STATE_LOAD,
-                FAST_FORWARD, AUTO_RESUME, GAME_SETTINGS, GS_RESET, CHEATS, CHEAT_ADD, CHEAT_DELETE, SHADER }
+                FAST_FORWARD, AUTO_RESUME, GAME_SETTINGS, GS_RESET, CHEATS, CHEAT_ADD, CHEAT_DELETE, SHADER,
+                TOUCH_EDIT }
 
     private final Activity activity;
     private final Host host;
@@ -944,6 +948,7 @@ final class GameMenu {
                 r = row(Item.TOUCH, s(R.string.MENU_TOUCH));
                 r.setChoices(new String[] { s(R.string.MENU_TOUCH_SHOWN), s(R.string.MENU_TOUCH_HIDDEN) });
                 r.cycler = dir -> toggleTouch();
+                row(Item.TOUCH_EDIT, s(R.string.MENU_TOUCH_EDIT));   // XBA-207: this game's layout, live
             }
             if (titleId() != null && Console.ofKey(titleId()) != Console.XBOX) {
                 // XBA-181: a GBA, PS1 or N64 game's own scale and filter (ConsoleVideo), from its next start.
@@ -1474,6 +1479,11 @@ final class GameMenu {
             break;
         case TOUCH:
             toggleTouch();
+            break;
+        case TOUCH_EDIT:
+            Log.i(LauncherActivity.TAG, "shell: menu: edit touch layout");
+            close(false);
+            host.editTouchLayout();
             break;
         case STATE_SAVE:
             showPage(Page.SAVE_SLOTS, null);

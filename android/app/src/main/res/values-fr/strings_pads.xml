@@ -23,4 +23,25 @@
     <string name="CTL_SIZE_NORMAL">Normale</string>
     <string name="CTL_SIZE_LARGE">Grande</string>
     <string name="PERCENT">%1$d %%</string>
+    <!-- L'éditeur de disposition tactile (XBA-207, TouchEditor). -->
+    <string name="CTL_TOUCH_EDIT">Modifier la disposition</string>
+    <string name="CTL_TOUCH_EDIT_DETAIL">Déplacer, redimensionner ou masquer les commandes de la manette tactile pour les jeux %1$s : gauche et droite choisissent la console, A ouvre l\'éditeur. Votre disposition garde sa place à toute résolution d\'écran ; tant que vous n\'en enregistrez pas, la disposition habituelle reste.</string>
+    <string name="MENU_TOUCH_EDIT">Modifier la disposition tactile</string>
+    <string name="TE_TITLE">Disposition tactile · %1$s</string>
+    <string name="TE_LAYOUT_XBOX">Xbox</string>
+    <string name="TE_LAYOUT_PS1_ANALOG">PlayStation (analogique)</string>
+    <string name="TE_HINT">Faites glisser une commande pour la déplacer. Sélectionnez-en une, puis pincez avec un second doigt ou utilisez − et + pour la redimensionner.</string>
+    <string name="TE_SELECTED">%1$s · %2$d %%</string>
+    <string name="TE_HIDDEN">masquée</string>
+    <string name="TE_SMALLER">−</string>
+    <string name="TE_BIGGER">+</string>
+    <string name="TE_HIDE">Masquer</string>
+    <string name="TE_SHOW">Afficher</string>
+    <string name="TE_GRID_ON">Grille : oui</string>
+    <string name="TE_GRID_OFF">Grille : non</string>
+    <string name="TE_SCOPE_CONSOLE">Pour tous les jeux</string>
+    <string name="TE_SCOPE_GAME">Ce jeu seulement</string>
+    <string name="TE_RESET">Réinitialiser</string>
+    <string name="TE_CANCEL">Annuler</string>
+    <string name="TE_SAVE">Enregistrer</string>
 </resources>

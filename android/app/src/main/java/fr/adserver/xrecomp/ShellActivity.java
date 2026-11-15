@@ -123,6 +123,7 @@ public class ShellActivity extends SDLActivity {
         menu = new GameMenu(this, new MenuHost());
         touch = new TouchControls(this, mixer, () -> PadDevices.any(this));
         touch.layout(TouchPad.layoutFor(console, ps1Analog()));   // the console's own buttons (XBA-158 / 168 / 174)
+        touch.game(GameLanguage.runningTitleId(this));   // its own touch layout, if it has one (XBA-207)
         touch.checkRun(checked);   // never the on-screen pad during a library check
         touch.attach();   // under the menu
         menu.attach();
@@ -498,6 +499,8 @@ public class ShellActivity extends SDLActivity {
 
     @Override
     public boolean dispatchKeyEvent(KeyEvent e) {
+        if (touch != null && touch.editor != null)   // the touch layout editor (XBA-207) takes every key
+            return touch.editor.key(e) || super.dispatchKeyEvent(e);
         if (touch != null)
             touch.onKey(e);   // a controller used hides the Auto on-screen pad
         if (menu != null && menu.dispatchKey(e))
@@ -516,6 +519,8 @@ public class ShellActivity extends SDLActivity {
 
     @Override
     public boolean dispatchTouchEvent(MotionEvent e) {
+        if (touch != null && touch.editor != null)   // the touch layout editor: no menu swipe, nothing to the game
+            return touch.editor.dispatchTouchEvent(e);
         if (touch != null && e.getActionMasked() == MotionEvent.ACTION_DOWN)
             touch.onTouch();
         if (menu != null && menu.dispatchTouch(e))
@@ -623,6 +628,17 @@ public class ShellActivity extends SDLActivity {
         public void setTouchShown(boolean on) {
             if (touch != null)
                 touch.force(on);
+        }
+
+        @Override
+        public void editTouchLayout() {
+            if (touch == null)
+                return;
+            hold(true);   // the game stays held while the editor is open (the menu closed and let it go)
+            touch.edit(() -> {
+                hold(false);
+                restoreGameFocus();
+            });
         }
 
         @Override
