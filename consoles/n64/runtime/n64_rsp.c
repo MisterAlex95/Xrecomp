@@ -18,6 +18,9 @@
  * family, add / sub, compares, clips, merge, logic, divide moves), the element selectors and the aligned quad / double
  * loads and stores are NEON intrinsics instead (vu_op_neon), bit-identical to the loops.
  *
+ * Dispatch: every IMEM word runs from a predecoded entry (rsp_dec, n64_rsp_run) that checks itself against IMEM at
+ * each fetch, so IMEM writers never invalidate anything; the vector ops are one function per opcode and selector class.
+ *
  * Timing: one RSP cycle per instruction (no dual issue, no pipeline stalls); SP DMA completes instantly (DMA_BUSY and
  * DMA_FULL always read 0). */
 #include "n64_devices.h"
