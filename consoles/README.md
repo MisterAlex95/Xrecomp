@@ -62,14 +62,17 @@ image; the ROM is never committed. `consoles/gba/tests/mgba_suite.sh` runs each 
 `END: passed/total` line from mGBA's debug-print port (`gba_run --debug-log`, `gba_set_debug_log`); the video group
 compares each scene's frame with its reference frame. ctest `gba_mgba_<group>` (built-in BIOS), `gba_mgba_lle_<group>`
 (Cult-of-GBA) and `gba_rc_mgba` (recompiled, in lockstep) fail when a count drops below the one reached (the
-thresholds in the CMakeLists: raise them with each fix). Counts after XBA-205 (HLE / LLE): memory 1498 / 1488 of 1552,
-I/O read 130 of 130, timing 2020 / 1900 of 2020, timer count-up 847 of 936, timer IRQ 90 of 90, shifter, carry,
+thresholds in the CMakeLists: raise them with each fix). Counts after XBA-205 (HLE / LLE): memory 1552 / 1488 of 1552,
+I/O read 130 of 130, timing 2020 / 1900 of 2020, timer count-up 936 / 847 of 936, timer IRQ 90 of 90, shifter, carry,
 DMA, SIO register R/W and multiply long all, BIOS math 615 / 603 of 615, SIO timing 4 of 4, misc 6 of 12, video 6 of
 7. XBA-205 brought the cartridge prefetch buffer (`gba_recomp_rt.h` `rc_pf_*`, shared with lifted code), the BIOS's
 SWI dispatcher and routine cycle counts in HLE, the immediate DMA's start delay, a DMA's wait on the prefetch
 buffer's halfword in flight, the long multiplies' carry flag (bit 31 of the last Booth addend, `rc_mull_carry`) and
-timed normal-mode serial transfers. What is left: timer count-up, memory and the misc edge cases (an H-blank DMA
-seen by the CPU's open bus, H-blank flag flips a cycle or two off).
+timed normal-mode serial transfers, the BIOS's IntrWait loop call for call (BL to its check: the wake's cycles, which
+set the prescaler phase of the timer count-up tests) and CpuSet / CpuFastSet refusing a source in the BIOS area and
+keeping the save chip's unaligned address on LDM / STM. What is left: the misc edge cases (an H-blank DMA seen by the
+CPU's open bus, H-blank flag flips a cycle or two off), video 6 of 7, and through the Cult-of-GBA BIOS (LLE) what its
+own code times or checks differently.
 
 **Playing a GBA game (XBA-157).** `gba_runtime_run` (`gba_runtime.h`) plays a ROM on the host layer: `host_window`
 (RGB555 → RGBA texture, letterboxed, aspect, integer or stretch scaling, nearest by default or linear: the display
