@@ -39,7 +39,7 @@ static void machine_reset(n64_machine *m)
     m->rdram_regs[0] = 0xB4190010u; /* device type */
     m->pi_dram = m->pi_cart = m->pi_rd_len = m->pi_wr_len = m->pi_status = 0;
     memset(m->pi_dom, 0, sizeof m->pi_dom);
-    m->si_dram = m->si_status = 0;
+    m->si_dram = m->si_stat = 0;
     m->si_read_pending = false;
     m->pif_rom_lock = 0;
     m->flash_mode = FLASH_IDLE;
@@ -187,7 +187,7 @@ static void dispatch(n64_machine *m)
             break;
         case EV_SI:
             m->ev[EV_SI] = EV_NEVER;
-            m->si_status &= ~1u;
+            m->si_stat &= ~1u;
             n64_mi_raise(m, N64_MI_SI);
             break;
         case EV_AI:

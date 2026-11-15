@@ -311,7 +311,7 @@ static uint32_t si_read(n64_machine *m, uint32_t reg)
 {
     switch (reg) {
     case 0: return m->si_dram;
-    case 6: return (m->si_status & 3u) | ((m->mi_intr >> N64_MI_SI) & 1u) << 12;
+    case 6: return (m->si_stat & 3u) | ((m->mi_intr >> N64_MI_SI) & 1u) << 12;
     default: return 0;
     }
 }
@@ -328,7 +328,7 @@ static void si_write(n64_machine *m, uint32_t reg, uint32_t v)
             memcpy(m->rdram + m->si_dram, m->pif_ram, 64);
             n64_rdram_wrote(m, m->si_dram, 64);
         }
-        m->si_status |= 1u;
+        m->si_stat |= 1u;
         n64_schedule(m, EV_SI, m->now + SI_DMA_TICKS);
         break;
     case 4: /* PIF_AD_WR64B: RDRAM -> PIF RAM, then the PIF runs the commands */
@@ -337,7 +337,7 @@ static void si_write(n64_machine *m, uint32_t reg, uint32_t v)
             for (uint32_t i = 0; i < 64; i += 4)
                 n64_pif_write_ram(m, i, n64_be32(m->rdram + m->si_dram + i));
         n64_pif_process(m);
-        m->si_status |= 1u;
+        m->si_stat |= 1u;
         n64_schedule(m, EV_SI, m->now + SI_DMA_TICKS);
         break;
     case 6:

@@ -236,7 +236,7 @@ struct n64_machine {
     bool pi_latch_valid;
     uint64_t pi_latch_until;
     /* SI / PIF */
-    uint32_t si_dram, si_status;
+    uint32_t si_dram, si_stat;
     bool si_read_pending;        /* the DMA in flight is PIF -> RDRAM */
     uint8_t pif_ram[64];
     uint8_t pif_rom_lock;
