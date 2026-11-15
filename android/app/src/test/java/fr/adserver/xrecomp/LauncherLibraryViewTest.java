@@ -54,7 +54,9 @@ public class LauncherLibraryViewTest {
     private File root;
     private static final String[] LOCALES = { "en", "fr" };
     private static final String[][] SIZES = { { "720", "w1280dp-h720dp-land-mdpi" },
-                                              { "1080", "w1920dp-h1080dp-land-mdpi" } };
+                                              { "1080", "w1920dp-h1080dp-land-mdpi" },
+                                              { "4x3", "w1440dp-h1080dp-land-mdpi" },
+                                              { "1x1", "w1080dp-h1080dp-land-mdpi" } };
     private static final String[] NAMES = { "Sample Racer", "Sample Quest", "Tiny Tanks", "Night Drive",
                                             "Puzzle Garden", "Space Mail", "Ocean Trip", "Rally Cross",
                                             "Castle Builder", "Robot Soccer", "Snow Board", "Desert Run" };

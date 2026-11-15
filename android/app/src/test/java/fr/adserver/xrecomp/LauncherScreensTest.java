@@ -52,7 +52,9 @@ public class LauncherScreensTest {
     private static final String TID = "4D530004";
     private static final String[] LOCALES = { "en", "fr" };
     private static final String[][] SIZES = { { "720", "w1280dp-h720dp-land-mdpi" },
-                                              { "1080", "w1920dp-h1080dp-land-mdpi" } };
+                                              { "1080", "w1920dp-h1080dp-land-mdpi" },
+                                              { "4x3", "w1440dp-h1080dp-land-mdpi" },
+                                              { "1x1", "w1080dp-h1080dp-land-mdpi" } };
 
     @Before
     public void setUp() throws Exception {
