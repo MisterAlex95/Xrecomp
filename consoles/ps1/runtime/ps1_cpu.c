@@ -263,6 +263,35 @@ static void take_interrupt(ps1_machine *m)
     ps1_cpu_exception(m, EXC_INT, 0);
 }
 
+/* An instruction fetch outside the inline main RAM path (step): an address error, the BIOS ROM, the IO registers
+ * that answer fetches, or a bus error. Returns 0 when it raised an exception. */
+static __attribute__((noinline)) int fetch_slow(ps1_machine *m, uint32_t pc, uint32_t *ins)
+{
+    uint32_t seg = pc >> 29;
+    uint32_t p = pc & 0x1FFFFFFFu;
+    if ((pc & 3) || (seg >= 4 && (m->cop0[C0_SR] & SR_KUC))) {
+        address_error(m, EXC_ADEL, pc);
+        return 0;
+    }
+    if (p < 0x00800000u && (seg == 0 || seg >= 4)) {
+        *ins = rd32le(m->ram + (p & 0x1FFFFCu));
+        m->cycles += seg == 5 ? CPI_RAM_UNCACHED : CPI_RAM;
+    } else if ((p & 0xFFF80000u) == 0x1FC00000u && (seg == 0 || seg >= 4)) {
+        *ins = rd32le(m->bios + (p & 0x7FFFCu));
+        m->cycles += seg == 5 ? CPI_BIOS_UNCACHED : CPI_BIOS;
+    } else if ((seg == 0 || seg >= 4) && ((p >= 0x1F801080u && p < 0x1F801100u) || (p >= 0x1F801C00u && p < 0x1F802000u))) {
+        /* The DMA and SPU registers answer instruction fetches (ps1-tests cpu/code-in-io); other IO, the scratchpad
+         * and unmapped space raise a bus error. */
+        *ins = ps1_io_read(m, p, 4);
+        m->cycles += CPI_RAM_UNCACHED;
+    } else {
+        m->cycles += CPI_RAM_UNCACHED;
+        ps1_cpu_exception(m, EXC_IBE, 0);
+        return 0;
+    }
+    return 1;
+}
+
 /* ---- The interpreter ---- */
 #define RS m->r[(ins >> 21) & 31]
 #define RT m->r[(ins >> 16) & 31]
@@ -272,7 +301,9 @@ static void take_interrupt(ps1_machine *m)
 #define IMM_S ((uint32_t)(int32_t)(int16_t)ins)
 #define IMM_U (ins & 0xFFFFu)
 
-static inline void step(ps1_machine *m)
+/* Inlined into the run loop (ps1_cpu_run): a call per instruction (saving and restoring the callee-saved registers
+ * the big switch needs) cost about a fifth of the interpreter's time. ps1_cpu_step keeps an out-of-line copy. */
+static inline __attribute__((always_inline)) void step(ps1_machine *m)
 {
     uint32_t pc = m->pc, ins;
     m->cur_pc = pc;
@@ -284,27 +315,14 @@ static inline void step(ps1_machine *m)
     m->pend_val = m->ld_val;
     m->ld_reg = 0;
 
-    /* Fetch. */
+    /* Fetch: main RAM inline (aligned, from KUSEG, or KSEG0 / KSEG1 / KSEG2 in kernel mode), the rest in fetch_slow. */
     uint32_t seg = pc >> 29;
     uint32_t p = pc & 0x1FFFFFFFu;
-    if ((pc & 3) || (seg >= 4 && (m->cop0[C0_SR] & SR_KUC))) {
-        address_error(m, EXC_ADEL, pc);
-        return;
-    }
-    if (p < 0x00800000u && (seg == 0 || seg >= 4)) {
+    uint32_t segs = (m->cop0[C0_SR] & SR_KUC) ? 0x01u : 0xF1u; /* bit n: an instruction may come from segment n */
+    if (__builtin_expect((pc & 0x1F800003u) == 0 && ((segs >> seg) & 1), 1)) {
         ins = rd32le(m->ram + (p & 0x1FFFFCu));
         m->cycles += seg == 5 ? CPI_RAM_UNCACHED : CPI_RAM;
-    } else if ((p & 0xFFF80000u) == 0x1FC00000u && (seg == 0 || seg >= 4)) {
-        ins = rd32le(m->bios + (p & 0x7FFFCu));
-        m->cycles += seg == 5 ? CPI_BIOS_UNCACHED : CPI_BIOS;
-    } else if ((seg == 0 || seg >= 4) && ((p >= 0x1F801080u && p < 0x1F801100u) || (p >= 0x1F801C00u && p < 0x1F802000u))) {
-        /* The DMA and SPU registers answer instruction fetches (ps1-tests cpu/code-in-io); other IO, the scratchpad
-         * and unmapped space raise a bus error. */
-        ins = ps1_io_read(m, p, 4);
-        m->cycles += CPI_RAM_UNCACHED;
-    } else {
-        m->cycles += CPI_RAM_UNCACHED;
-        ps1_cpu_exception(m, EXC_IBE, 0);
+    } else if (!fetch_slow(m, pc, &ins)) {
         return;
     }
     m->pc = m->next_pc;
@@ -677,8 +695,8 @@ static inline void step(ps1_machine *m)
         ps1_cpu_exception(m, EXC_RI, 0);
         return;
     }
-    if (m->pend_reg)
-        m->r[m->pend_reg] = m->pend_val;
+    /* The previous instruction's load lands (no pending load: pend_reg 0, and r0 is cleared just after). */
+    m->r[m->pend_reg] = m->pend_val;
     m->r[0] = 0;
 }
 
