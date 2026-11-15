@@ -235,6 +235,12 @@ kernel, `make` reports a signal rather than an error, and re-running picks
 up where it left off and dies on the same file. Check `dmesg` for the OOM
 killer before assuming the generated code is at fault.
 
+`tools.prepare` uses `--split-bytes 1000000` instead: chunks of about 1 MB of C,
+cut at boundaries that a re-lift with a few more functions leaves in place, each
+one declaring the functions it names instead of including `recomp_funcs.h`, so a
+rebuild after new seeds recompiles the chunks that changed, not all of them
+(XBA-209, [prepare.md](android/prepare.md#compile-and-link)).
+
 Without `--gen-dir` the code lands in `src/game/recomp/gen/` **inside the toolkit clone**,
 where no build target compiles it — which is why a plain toolkit build then still
 produces only libraries. `src/recomp/gen/` is the path the template's CMakeLists globs.

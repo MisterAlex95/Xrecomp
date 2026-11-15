@@ -132,7 +132,7 @@ python -m tools.prepare SOURCE --android --work DIR --pack-dir DIR --cc PATH [--
 | `--builtins PATH` | `libclang_rt.builtins-aarch64-android.a`; default: from `<sysroot>/lib/clang/<v>/lib/linux/` when the sysroot carries it, else asked from the compiler (`-print-libgcc-file-name`). |
 | `--shell-lib PATH` | `<nativeLibraryDir>/libmain.so`: the pack links against it (DT_NEEDED `libmain.so`). |
 | `--shell-abi N` | The integer the shell exports (default 1), written to `pack.json`. |
-| `--jobs N` | Parallel compiles; 0 or absent = `min(5, (MemAvailable − 3 GB) / 1 GB)`, at least 1, at most the CPU count (1 GB per job: see Measurements). |
+| `--jobs N` | Parallel compiles; 0 or absent = `min(5, (MemAvailable − 3 GB) / 512 MB)`, at least 1, at most the CPU count (512 MB per job since XBA-209: see Measurements). |
 | `--opt N` | clang `-O` level, default 2 (see Measurements). |
 | `--python PATH` | The interpreter for the pipeline steps; default `$XBA_PYTHON`, else `sys.executable`. |
 | `--extra-src`, `--include-dir` | Development: an extra C file in the pack, an extra `-I`. |
@@ -147,8 +147,8 @@ The steps, each one subprocess (`python -m tools.<tool>`) or a pool of compiler 
 | # | id | Does | Stamp |
 |---|---|---|---|
 | 1 | `identify` | finds `default.xbe`, copies it to `<work>/xbe/`, `xbe_parser` → title ID, title profile; `xbe_ident` → XDK version, engines, profile layers in `<work>/ident.json` (shown in `msg`; never fails the step) | `parse` |
-| 2 | `analyse` | `disasm`, `func_id`, `abi_analysis` | `disasm`, `func_id`, `abi` |
-| 3 | `lift` | the project from `templates/new-game` + the profile layers (`profiles/`, [profiles.md](../technical/profiles.md)), then `tools.recomp` | `lift` (= profile digest) |
+| 2 | `analyse` | `disasm --lean` (no ASM listing, compact JSON), `func_id`, `abi_analysis` | `disasm`, `func_id`, `abi` |
+| 3 | `lift` | the project from `templates/new-game` + the profile layers (`profiles/`, [profiles.md](../technical/profiles.md)), then `tools.recomp --split-bytes 1000000` (below) | `lift` (= profile digest) |
 | 4 | `compile` | every C file to an object, largest first, cached | the object cache |
 | 5 | `pack` | `ld.lld` → `packs/<TID>.partial/libtitle.so`, `pack.json`, publish | `link` |
 
@@ -225,8 +225,25 @@ definitions, a Release-type build). Sources: `src/main.c`, `src/recomp_manual.c`
 
 **Object cache.** `key = sha256(source path, source bytes, flags, compiler id, headers digest)`; compiler id = the
 `--version` line + the binary's size and mtime; headers digest = every `.h` under the include directories. A second
-run with nothing changed compiles 0 files; a new lift rewrites `recomp_funcs.h` and so recompiles everything. After a
-successful link, objects not used by it are deleted (storage).
+run with nothing changed compiles 0 files. After a successful link, objects not used by it are deleted (storage).
+
+**A re-lift recompiles what changed (XBA-209).** The discovery loop re-prepares a title with a few more functions
+([discovery.md](../technical/discovery.md)); until XBA-209 that recompiled all of it. Two things make it cheap:
+
+- *Stable chunks.* `tools.recomp --split-bytes 1000000` cuts the C into chunks of 0.75–1.5 MB (one function larger
+  than that is a chunk alone), ending a chunk after a function chosen by a hash of its address (content-defined
+  chunking, `translator.stable_chunks`): a new function changes its own chunk, and the boundaries after it fall back
+  in place within a chunk or so (`--split 250`, every 250 functions, shifted every chunk after it). Each chunk is
+  self-contained: `#include "recomp_types.h"` and the declarations of the functions it names (all `void name(void)`),
+  not the 1 MB `recomp_funcs.h`.
+- *The key of the lifted C.* For `src/recomp/gen/*.c` the headers digest counts `recomp_funcs.h` without its
+  `void name(void);` lines: a generated file that compiled names only declared functions, all with that signature,
+  so another function's declaration cannot change its object. `main.c`, `src/title` and `src/extra` keep the whole
+  header in their key.
+
+On the synthetic title of « Measurements », one seeded function: 160 of 160 files recompiled before, 4 of 97 now
+(its chunk, the dispatch table, the stubs, the entry): 4.5 s of compile instead of ~80 s. The desktop Prepare (CMake) gains the same: its chunks no longer include `recomp_funcs.h`, and
+unchanged ones keep their bytes and mtime (`sync_generated`).
 
 **Link**, ld.lld directly, what the NDK's `clang -shared` does plus our options:
 
@@ -562,7 +579,9 @@ above is there to measure it on the Thor.
 **Jobs: 1 GB per job instead of 1.5.** The worst file peaks at 0.6 GB, 90 % of them under 0.3 GB, and the files are
 compiled largest first, so the big ones never run all at once. `min(5, (MemAvailable − 3 GB) / 1 GB)` gives a
 12 GB device with ~7 GB available 4 jobs (1.5 GB would give 2). The 3 GB reserve stays: the app's UI, the system,
-and room for a title whose largest file is twice this one.
+and room for a title whose largest file is twice this one. **Since XBA-209: 512 MB** — the 5 MB file came from the
+250-function split; chunks are now at most ~1.5 MB of C and one compile peaks at ~170 MB on the synthetic title
+below, so a device with 5.5 GB available gets the 5 jobs (it got 2).
 
 **On a Thor (Snapdragon 8 Gen 2: 1× X3 3.2 GHz, 4× A715/A710 2.8 GHz, 3× A510), a rough estimate.** Per thread,
 clang runs at about 0.6× a Zen 5 core on the X3 and 0.4× on an A715/A710 (published SPECint-class ratios; clang is
@@ -571,6 +590,27 @@ of CPU at -O2 is ~6 min, plus 20–30 % for sustained clocks under thermal limit
 the NDK's clang. The embedded clang is a plain build of LLVM 19 (the NDK's is PGO + BOLT + LTO, ~20–30 % faster):
 count **8–10 min**. With 2 jobs (the 1.5 GB formula on a 12 GB device) it would be 15–20 min. The largest file alone
 takes ~1 min on a middle core; it starts first. To be measured on the device (« Device » check list).
+
+**Where a Prepare spends its time (XBA-209).** A title-size synthetic title of our own: `tools.bench lift --copies
+3000` (the bench corpus 3000 times: 39,013 functions, 2.3 MB of code, 96 MB of C), `tools.prepare --android` with
+NDK r28c clang 19 as the stand-in for the embedded clang, `--jobs 5` in a container limited to 5 CPUs of the x86-64
+host (a VM shared with other builds: wall times vary by ±15 % run to run, so the compile was also compared A/B on the
+same CPUs, alternating), 2026-11-15. Seconds:
+
+| Step | Before | After |
+|---|---|---|
+| analyse (disasm / func_id / abi) | 23.3 (20 / 1 / 2) | 22.0 (19 / 1 / 2); 23 MB written instead of 113 MB (`--lean`) |
+| lift (`tools.recomp`) | 85.2 | 69.5 (one core alone: 103 → 77) |
+| compile, 5 jobs, cold | 70.1 (160 files, median 2.1 s, largest 3.6 s) | the same: A/B 63.4 / 63.3 and 67.2 / 67.3 s wall, 313 / 313 s CPU (97 files, largest 1.5 MB) |
+| link | 0.1 | 0.1 |
+| re-prepare after one seeded function: compile | 80.0, 160 of 160 files compiled | 4.5, 4 of 97 |
+
+The lift is the largest single cost on this title (a real one has bigger functions: more C per function, and the
+compile weighs more, ~760 s of CPU for 256 MB of C above). The compile is linear in the C (3.1 s/MB of `-O2` on one
+host core whatever the chunk size); `-O1` saves ~6 %, the vectorizers off ~5–10 % (both change the code the game
+runs, so neither is taken); the headers are ~0.08 s of each chunk. Peak RSS per job: median 128 MB, max 171 MB.
+The desktop Prepare (gcc, CMake, the toolkit built too, 5 CPUs): lift 98 → 71 s, build 121 → 91 s; a re-prepare
+after one seeded function rewrote 79 of 160 chunks and rebuilt for 62 s, now 3 of 97 chunks and 3 s.
 
 ## GBA packs (XBA-157, XBA-158)
 
