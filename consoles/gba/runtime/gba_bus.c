@@ -61,6 +61,7 @@ void gba_update_waitstates(gba_machine *m)
         m->wait32[r][1] = (uint8_t)s32;
     }
     m->prefetch = (w & 0x4000) != 0;
+    m->blk_attn++;
     if (!m->prefetch)
         rc_pf_stop((gba_rc_head *)(void *)m, m->now, false);
     /* Sequential opcode fetches without the prefetch buffer (rc_fetch_cost; lifted code adds these), and the most a
@@ -384,9 +385,11 @@ void gba_write32(gba_machine *m, uint32_t addr, uint32_t v, bool seq)
     switch (addr >> 24) {
     case 0x2:
         wr32(&m->ewram[addr & (GBA_EWRAM_SIZE - 1)], v);
+        gba_code_write(m, GBA_CODE_EWRAM(addr), 2);
         break;
     case 0x3:
         wr32(&m->iwram[addr & (GBA_IWRAM_SIZE - 1)], v);
+        gba_code_write(m, GBA_CODE_IWRAM(addr), 2);
         break;
     case 0x4:
         if ((addr & 0xFFFFFF) < GBA_IO_SIZE) {
@@ -425,9 +428,11 @@ void gba_write16(gba_machine *m, uint32_t addr, uint16_t v, bool seq)
     switch (addr >> 24) {
     case 0x2:
         wr16(&m->ewram[addr & (GBA_EWRAM_SIZE - 1)], v);
+        gba_code_write(m, GBA_CODE_EWRAM(addr), 1);
         break;
     case 0x3:
         wr16(&m->iwram[addr & (GBA_IWRAM_SIZE - 1)], v);
+        gba_code_write(m, GBA_CODE_IWRAM(addr), 1);
         break;
     case 0x4:
         if ((addr & 0xFFFFFF) < GBA_IO_SIZE)
@@ -462,9 +467,11 @@ void gba_write8(gba_machine *m, uint32_t addr, uint8_t v, bool seq)
     switch (addr >> 24) {
     case 0x2:
         m->ewram[addr & (GBA_EWRAM_SIZE - 1)] = v;
+        gba_code_write(m, GBA_CODE_EWRAM(addr), 1);
         break;
     case 0x3:
         m->iwram[addr & (GBA_IWRAM_SIZE - 1)] = v;
+        gba_code_write(m, GBA_CODE_IWRAM(addr), 1);
         break;
     case 0x4:
         if ((addr & 0xFFFFFF) < GBA_IO_SIZE)
@@ -560,9 +567,14 @@ void gba_cheat_poke(gba_machine *m, uint32_t addr, uint32_t v, int size)
     if (region < 0x2 || region > 0x7)
         return;
     for (int i = 0; i < size; i++) {
-        uint8_t *p = (uint8_t *)peek_ptr(m, addr + (uint32_t)i);
+        uint32_t a = addr + (uint32_t)i;
+        uint8_t *p = (uint8_t *)peek_ptr(m, a);
         if (p)
             *p = (uint8_t)(v >> (8 * i));
+        if ((a >> 24) == 0x2)
+            gba_code_write(m, GBA_CODE_EWRAM(a), 1);
+        else if ((a >> 24) == 0x3)
+            gba_code_write(m, GBA_CODE_IWRAM(a), 1);
     }
 }
 
@@ -572,6 +584,8 @@ int gba_rom_patch16(gba_machine *m, uint32_t addr, uint16_t v)
     if ((addr >> 24) < 0x8 || (addr >> 24) > 0x9 || off + 2 > m->rom_size)
         return -1;
     gba_state_pin_rom_hash(m);
+    if (m->rom[off] != (uint8_t)v || m->rom[off + 1] != (uint8_t)(v >> 8))
+        gba_cpu_flush_blocks(m); /* the interpreter's blocks of cartridge code */
     m->rom[off] = (uint8_t)v;
     m->rom[off + 1] = (uint8_t)(v >> 8);
     return 0;

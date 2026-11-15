@@ -9,8 +9,14 @@
  * Cycles: each instruction costs its opcode fetch (sequential), its data accesses (first one non-sequential,
  * the rest of an LDM / STM sequential), its internal cycles (multiplies by operand size, register shifts,
  * loads) and, after a branch, the pipeline refill (one non-sequential + one sequential fetch). In the cartridge with
- * WAITCNT bit 14 set, opcode fetches go through the prefetch buffer (gba_recomp_rt.h rc_pf_fetch). */
+ * WAITCNT bit 14 set, opcode fetches go through the prefetch buffer (gba_recomp_rt.h rc_pf_fetch).
+ *
+ * step() runs one instruction; the run loops run predecoded blocks of it (« predecoded blocks » below, XBA-208),
+ * cycle for cycle the same, with step()'s loop kept as the reference. */
 #include "gba_internal.h"
+
+#include <stdlib.h>
+#include <string.h>
 
 #define R (m->cpu.r)
 
@@ -1057,13 +1063,1585 @@ void gba_cpu_step(gba_machine *m)
     step(m);
 }
 
+/* ---- predecoded blocks (XBA-208) ------------------------------------------------------------------------- *
+ *
+ * gba_cpu_run (and the recompiler's loop for code no pack holds) runs straight runs of code from the cartridge ROM,
+ * IWRAM, EWRAM or the BIOS decoded once into ops: the frequent instructions with their operands extracted, the
+ * condition apart, PC-relative values and branch targets computed; every other instruction is a generic op that
+ * runs the decoders above (arm_execute / thumb_execute) as step() does. A block ends after an unconditional
+ * control transfer, at a 256-byte page end or after BLK_MAX_OPS ops. A run goes on into the next block after a taken
+ * branch in the same state and region (a loop back to the block's start without a lookup). The flags live in locals
+ * during a run, the registers in the machine.
+ *
+ * The run loop's per-instruction checks hold inside a run: an op starts only while the clock is below the next
+ * event (as `now < next_event` before each step()). The IRQ line, a halt, the next event, the wait-state tables and
+ * the code only change through an IO register write, a DMA, a write to code or a generic op, which all bump
+ * m->blk_attn: the run stops after that instruction, and the run loop makes its checks. Each instruction costs what
+ * step() charges, in the same order: the opcode fetch (the region's sequential fetch, through the prefetch buffer in
+ * the cartridge when it is on), the data accesses, the internal cycles, the next fetch's non-sequential extra
+ * (nfetch_extra) and the refill after a branch. EWRAM / IWRAM accesses skip the bus (same cycles, no other effect)
+ * while no DMA is due; the others go through it with the clock and r15 where step() has them (the bus reads r15 for
+ * the BIOS's read protection and the prefetch buffer). The opcode fetch's latches (open bus, BIOS latch) are set
+ * before a bus access and at the run's end, from memory that has not changed since the fetch.
+ *
+ * Invalidation: RAM blocks belong to a 256-byte page with a generation; a write to a RAM halfword some block was
+ * decoded from (the code map, a bit per halfword, checked by every bus write and cheat poke) bumps its page's
+ * generation, clears the page's bits and stops a running block after that instruction (self-modifying code, routines
+ * copied to IWRAM). Writes behind the bus (save state loads, the BIOS's RAM resets, cartridge patches) flush
+ * everything. Between the run loop's stops the machine is byte-identical to step()'s loop, which stays as the
+ * reference (gba_cpu_set_reference, gba_run --lockstep-ref). The blocks are host state, outside save states. */
+
+#define BLK_PAGE_SHIFT 8
+#define BLK_RAM_SPACE (GBA_IWRAM_SIZE + GBA_EWRAM_SIZE) /* gba_code_write's index space */
+#define BLK_PAGES (BLK_RAM_SPACE >> BLK_PAGE_SHIFT)
+#define BLK_HASH 65536u
+#define BLK_MAX_OPS 64
+#define BLK_POOL (BLK_HASH * 16u)
+#define BLK_NOPAGE 0xFFFFu
+#define BLK_EMPTY 2u /* no block: an ARM key is word aligned, a Thumb key odd */
+
+enum { RG_NONE, RG_CART, RG_IWRAM, RG_BIOS, RG_EWRAM };
+
+typedef struct blk_op {
+    uint8_t k;      /* TK_* / AK_* */
+    uint8_t cond;   /* ARM: the condition; Thumb Bcond: its condition */
+    uint8_t a, b, c, d;
+    uint8_t x, y;
+    uint32_t imm;
+    uint32_t raw;   /* the opcode (generic ops) */
+} blk_op;
+
+typedef struct gba_block {
+    uint32_t key;   /* pc | thumb */
+    uint32_t gen;   /* the page's generation when decoded */
+    uint16_t page;  /* RAM page, BLK_NOPAGE for ROM / BIOS */
+    uint16_t n;
+    uint8_t region;
+    blk_op *ops;
+} gba_block;
+
+struct gba_blocks {
+    gba_block tab[BLK_HASH];
+    uint32_t used;
+    uint32_t gen[BLK_PAGES];
+    uint8_t code[BLK_RAM_SPACE / 16];   /* a bit per halfword (m->code_map) */
+    blk_op pool[BLK_POOL];
+};
+
+void gba_cpu_flush_blocks(gba_machine *m)
+{
+    struct gba_blocks *bs = m->blocks;
+    if (!bs)
+        return;
+    for (uint32_t i = 0; i < BLK_HASH; i++)
+        bs->tab[i].key = BLK_EMPTY;
+    bs->used = 0;
+    m->blk_attn++;
+    memset(bs->code, 0, sizeof bs->code);
+}
+
+void gba_cpu_free(gba_machine *m)
+{
+    free(m->blocks);
+    m->blocks = NULL;
+    m->code_map = NULL;
+}
+
+void gba_cpu_code_written(gba_machine *m, uint32_t idx)
+{
+    struct gba_blocks *bs = m->blocks;
+    uint32_t page = idx >> BLK_PAGE_SHIFT;
+    bs->gen[page]++;
+    memset(&bs->code[page << (BLK_PAGE_SHIFT - 4)], 0, 1u << (BLK_PAGE_SHIFT - 4));
+    m->blk_attn++;
+}
+
+void gba_cpu_set_reference(gba_machine *m, int on)
+{
+    m->interp_ref = on != 0;
+}
+
+/* The region an instruction at pc is fetched from, as fetch16_seq / fetch32_seq / gba_fetch16 / gba_fetch32 tell
+ * them apart; RG_NONE: not run from blocks (palette, VRAM, OAM, past the ROM's end, unmapped). */
+static inline int blk_region(const gba_machine *m, uint32_t pc, bool thumb)
+{
+    uint32_t r = (pc >> 24) & 15, a = pc & (thumb ? 0x1FFFFFEu : 0x1FFFFFCu);
+    if (r - 8u <= 5u && a < m->rom_size)
+        return RG_CART;
+    if (r == 3)
+        return RG_IWRAM;
+    if (pc < GBA_BIOS_SIZE)
+        return RG_BIOS;
+    if ((pc >> 24) == 2)
+        return RG_EWRAM;
+    return RG_NONE;
+}
+
+static inline uint32_t iwram_half(const gba_machine *m, uint32_t addr)
+{
+    return rd16(&m->iwram[addr & (GBA_IWRAM_SIZE - 2)]);
+}
+
+/* What the opcode fetch of the instruction at pc leaves in the latches (fetch16_seq / fetch32_seq and the bus's
+ * gba_fetch16 / gba_fetch32 for EWRAM). */
+static __attribute__((noinline)) void blk_latch(gba_machine *m, uint32_t pc, bool thumb, int region)
+{
+    switch (region) {
+    case RG_CART:
+        m->open_bus = thumb ? gba_rom_half(m, pc + 4) * 0x00010001u
+                            : gba_rom_half(m, pc + 8) | (uint32_t)gba_rom_half(m, pc + 10) << 16;
+        break;
+    case RG_IWRAM:
+        if (!thumb)
+            m->open_bus = rd32(&m->iwram[(pc + 8) & (GBA_IWRAM_SIZE - 4)]);
+        else if (!(pc & 2))
+            m->open_bus = iwram_half(m, pc + 4) | iwram_half(m, pc + 2) << 16;
+        else
+            m->open_bus = iwram_half(m, pc + 2) | iwram_half(m, pc + 4) << 16;
+        break;
+    case RG_BIOS:
+        m->bios_latch = rd32(&m->bios[(pc + (thumb ? 4u : 8u)) & (GBA_BIOS_SIZE - 4)]);
+        m->open_bus = m->bios_latch;
+        break;
+    default:
+        m->open_bus = gba_prefetch_latch(m, pc, thumb);
+        break;
+    }
+}
+
+/* The CPU loop's stop: the next event, or gba_run_cycles's cap. */
+static inline uint64_t cpu_limit(const gba_machine *m)
+{
+    return m->next_event < m->cpu_cap ? m->next_event : m->cpu_cap;
+}
+
+/* ---- decoding ---- */
+
+enum {
+    TK_GEN,
+    TK_LSL_I, TK_LSR_I, TK_ASR_I,
+    TK_ADD_R, TK_SUB_R, TK_ADD_I3, TK_SUB_I3,
+    TK_MOV_I8, TK_CMP_I8, TK_ADD_I8, TK_SUB_I8,
+    TK_AND, TK_EOR, TK_LSL, TK_LSR, TK_ASR, TK_ADC, TK_SBC, TK_ROR,
+    TK_TST, TK_NEG, TK_CMP, TK_CMN, TK_ORR, TK_MUL, TK_BIC, TK_MVN,
+    TK_HADD, TK_HCMP, TK_HMOV, TK_BX,
+    TK_LDR_PC,
+    TK_STR_R, TK_STRH_R, TK_STRB_R, TK_LDRSB_R, TK_LDR_R, TK_LDRH_R, TK_LDRB_R, TK_LDRSH_R,
+    TK_STR_I, TK_LDR_I, TK_STRB_I, TK_LDRB_I, TK_STRH_I, TK_LDRH_I, TK_STR_SP, TK_LDR_SP,
+    TK_ADD_PC, TK_ADD_SP, TK_ADJ_SP,
+    TK_BCOND, TK_B, TK_BL1, TK_BL2,
+    TK_PUSH, TK_POP, TK_POP_PC, TK_LDMIA, TK_STMIA,
+    TK_COUNT
+};
+
+enum {
+    AK_GEN,
+    /* data processing, immediate operand: AK_DPI + opcode; register operand shifted by an immediate: AK_DPR + opcode */
+    AK_DPI,
+    AK_DPR = AK_DPI + 16,
+    AK_LDR = AK_DPR + 16, AK_STR, AK_LDRB, AK_STRB,
+    AK_B, AK_BL, AK_BX,
+    AK_LDM, AK_STM, AK_LDRH, AK_STRH, AK_LDRSB, AK_LDRSH, AK_MRS,
+    AK_COUNT
+};
+
+/* Thumb: the op for opcode `op` at pc; *ends: the block stops after it (an unconditional control transfer). */
+static void decode_thumb(blk_op *o, uint32_t op, uint32_t pc, bool *ends)
+{
+    memset(o, 0, sizeof *o);
+    o->raw = op;
+    o->k = TK_GEN;
+    *ends = false;
+    switch (op >> 11) {
+    case 0x00: case 0x01: case 0x02:
+        o->k = (uint8_t)(TK_LSL_I + (op >> 11));
+        o->a = op & 7;
+        o->b = (op >> 3) & 7;
+        o->x = (op >> 6) & 31;
+        break;
+    case 0x03:
+        o->k = (uint8_t)((op & 0x400) ? ((op & 0x200) ? TK_SUB_I3 : TK_ADD_I3) : ((op & 0x200) ? TK_SUB_R : TK_ADD_R));
+        o->a = op & 7;
+        o->b = (op >> 3) & 7;
+        o->c = (op >> 6) & 7;
+        break;
+    case 0x04: case 0x05: case 0x06: case 0x07:
+        o->k = (uint8_t)(TK_MOV_I8 + ((op >> 11) - 4));
+        o->a = (op >> 8) & 7;
+        o->imm = op & 0xFF;
+        break;
+    case 0x08:
+        if (!(op & 0x400)) {
+            o->k = (uint8_t)(TK_AND + ((op >> 6) & 15));
+            o->a = op & 7;
+            o->b = (op >> 3) & 7;
+        } else {
+            uint32_t rd = (op & 7) | ((op >> 4) & 8), rs = (op >> 3) & 15;
+            o->a = (uint8_t)rd;
+            o->b = (uint8_t)rs;
+            switch ((op >> 8) & 3) {
+            case 0:
+                if (rd != 15 && rs != 15)
+                    o->k = TK_HADD;
+                else if (rd == 15)
+                    *ends = true;
+                break;
+            case 1:
+                if (rd != 15 && rs != 15)
+                    o->k = TK_HCMP;
+                break;
+            case 2:
+                if (rd != 15 && rs != 15)
+                    o->k = TK_HMOV;
+                else if (rd == 15)
+                    *ends = true;
+                break;
+            default:
+                if (rs != 15)
+                    o->k = TK_BX;
+                *ends = true;
+                break;
+            }
+        }
+        break;
+    case 0x09:
+        o->k = TK_LDR_PC;
+        o->a = (op >> 8) & 7;
+        o->imm = ((pc + 4) & ~2u) + (op & 0xFF) * 4;
+        break;
+    case 0x0A: case 0x0B:
+        o->k = (uint8_t)(TK_STR_R + ((op >> 9) & 7));
+        o->a = op & 7;
+        o->b = (op >> 3) & 7;
+        o->c = (op >> 6) & 7;
+        break;
+    case 0x0C: case 0x0D: case 0x0E: case 0x0F: {
+        bool byte = op & 0x1000, load = op & 0x800;
+        o->k = (uint8_t)(byte ? (load ? TK_LDRB_I : TK_STRB_I) : (load ? TK_LDR_I : TK_STR_I));
+        o->a = op & 7;
+        o->b = (op >> 3) & 7;
+        o->imm = byte ? (op >> 6) & 31 : ((op >> 6) & 31) * 4;
+        break;
+    }
+    case 0x10: case 0x11:
+        o->k = (op & 0x800) ? TK_LDRH_I : TK_STRH_I;
+        o->a = op & 7;
+        o->b = (op >> 3) & 7;
+        o->imm = ((op >> 6) & 31) * 2;
+        break;
+    case 0x12: case 0x13:
+        o->k = (op & 0x800) ? TK_LDR_SP : TK_STR_SP;
+        o->a = (op >> 8) & 7;
+        o->imm = (op & 0xFF) * 4;
+        break;
+    case 0x14:
+        o->k = TK_ADD_PC;
+        o->a = (op >> 8) & 7;
+        o->imm = ((pc + 4) & ~2u) + (op & 0xFF) * 4;
+        break;
+    case 0x15:
+        o->k = TK_ADD_SP;
+        o->a = (op >> 8) & 7;
+        o->imm = (op & 0xFF) * 4;
+        break;
+    case 0x16: case 0x17:
+        if ((op & 0xF00) == 0x000) {
+            uint32_t off = (op & 0x7F) * 4;
+            o->k = TK_ADJ_SP;
+            o->imm = (op & 0x80) ? 0u - off : off;
+        } else if ((op & 0x600) == 0x400) { /* PUSH / POP (x: LR / PC too, y: registers moved) */
+            uint32_t list = op & 0xFF, extra = (op >> 8) & 1;
+            if (!list && !extra) { /* empty list: generic (POP moves PC) */
+                *ends = (op & 0x800) != 0;
+            } else {
+                o->k = (op & 0x800) ? (extra ? TK_POP_PC : TK_POP) : TK_PUSH;
+                o->imm = list;
+                o->x = (uint8_t)extra;
+                o->y = (uint8_t)__builtin_popcount(list);
+                *ends = o->k == TK_POP_PC;
+            }
+        } else {
+            *ends = true; /* undefined */
+        }
+        break;
+    case 0x18: case 0x19: /* LDMIA / STMIA; an empty list (generic) moves PC */
+        if (!(op & 0xFF)) {
+            *ends = (op & 0x800) != 0;
+        } else {
+            o->k = (op & 0x800) ? TK_LDMIA : TK_STMIA;
+            o->b = (op >> 8) & 7;
+            o->imm = op & 0xFF;
+            o->y = (uint8_t)__builtin_popcount(op & 0xFF);
+        }
+        break;
+    case 0x1A: case 0x1B: {
+        uint32_t cond = (op >> 8) & 15;
+        if (cond >= 14) {
+            *ends = true; /* SWI, undefined */
+        } else {
+            o->k = TK_BCOND;
+            o->cond = (uint8_t)cond;
+            o->imm = pc + 4 + (uint32_t)((int32_t)(int8_t)(op & 0xFF) * 2);
+        }
+        break;
+    }
+    case 0x1C:
+        o->k = TK_B;
+        o->imm = pc + 4 + (uint32_t)(((int32_t)(op << 21)) >> 20);
+        *ends = true;
+        break;
+    case 0x1E:
+        o->k = TK_BL1;
+        o->imm = pc + 4 + (uint32_t)(((int32_t)(op << 21)) >> 9);
+        break;
+    case 0x1F:
+        o->k = TK_BL2;
+        o->imm = (op & 0x7FF) * 2;
+        *ends = true;
+        break;
+    default:
+        *ends = true; /* 0x1D: undefined */
+        break;
+    }
+}
+
+/* ARM: the op for opcode `op` at pc. */
+static void decode_arm(blk_op *o, uint32_t op, uint32_t pc, bool *ends)
+{
+    memset(o, 0, sizeof *o);
+    o->raw = op;
+    o->k = AK_GEN;
+    o->cond = (uint8_t)(op >> 28);
+    bool al = o->cond == 0xE;
+    *ends = false;
+    uint32_t rn = (op >> 16) & 15, rd = (op >> 12) & 15, rm = op & 15;
+    switch ((op >> 25) & 7) {
+    case 0:
+        if ((op & 0x0FC000F0) == 0x00000090 || (op & 0x0F8000F0) == 0x00800090) {
+            /* multiplies: generic */
+        } else if ((op & 0x0FB00FF0) == 0x01000090) {
+            if (rd == 15)
+                *ends = al; /* SWP into PC */
+        } else if ((op & 0x0FFFFFF0) == 0x012FFF10) {
+            if (rm != 15) {
+                o->k = AK_BX;
+                o->c = (uint8_t)rm;
+            }
+            *ends = al;
+        } else if ((op & 0x90) == 0x90 && (op & 0x60)) {
+            /* halfword / signed transfers: x = P | U << 1 | W << 2 | immediate offset << 3 */
+            bool p = (op >> 24) & 1, w = (op >> 21) & 1, l = (op >> 20) & 1, imm = (op >> 22) & 1;
+            uint32_t sh = (op >> 5) & 3;
+            if (l && rd == 15) {
+                *ends = al; /* halfword load into PC */
+            } else if (rd != 15 && (l || sh == 1) && !(rn == 15 && (!p || w)) && (imm || rm != 15)) {
+                o->k = (uint8_t)(!l ? AK_STRH : sh == 1 ? AK_LDRH : sh == 2 ? AK_LDRSB : AK_LDRSH);
+                o->a = (uint8_t)rd;
+                o->b = (uint8_t)rn;
+                o->c = (uint8_t)rm;
+                o->x = (uint8_t)((p ? 1 : 0) | (((op >> 23) & 1) ? 2 : 0) | (w ? 4 : 0) | (imm ? 8 : 0));
+                o->imm = ((op >> 4) & 0xF0) | (op & 0xF);
+            }
+        } else if ((op & 0x01900000) == 0x01000000) {
+            /* PSR transfers (MSR / MRS) or undefined */
+            if ((op & 0x0FBF0FFF) == 0x010F0000) {
+                if (rd != 15) {
+                    o->k = AK_MRS;
+                    o->a = (uint8_t)rd;
+                    o->x = (op >> 22) & 1;
+                }
+            } else if ((op & 0x0DB0F000) != 0x0120F000) {
+                *ends = al;
+            }
+        } else if (rd == 15) {
+            *ends = al; /* writes PC (or CPSR = SPSR: TSTP and the like) */
+        } else if (!(op & 0x10) && rn != 15 && rm != 15) {
+            o->k = (uint8_t)(AK_DPR + ((op >> 21) & 15));
+            o->a = (uint8_t)rd;
+            o->b = (uint8_t)rn;
+            o->c = (uint8_t)rm;
+            o->d = (op >> 5) & 3;
+            o->x = (op >> 7) & 31;
+            o->y = (op >> 20) & 1;
+        }
+        break;
+    case 1:
+        if ((op & 0x01900000) == 0x01000000) {
+            if ((op & 0x0FB0F000) != 0x0320F000)
+                *ends = al; /* undefined */
+        } else if (rd == 15) {
+            *ends = al;
+        } else if (rn != 15) {
+            uint32_t rot = (op >> 7) & 0x1E;
+            o->k = (uint8_t)(AK_DPI + ((op >> 21) & 15));
+            o->a = (uint8_t)rd;
+            o->b = (uint8_t)rn;
+            o->imm = ror32(op & 0xFF, rot);
+            o->x = rot != 0;             /* the shifter's carry out is bit 31 of the operand, else C */
+            o->d = (uint8_t)(o->imm >> 31);
+            o->y = (op >> 20) & 1;
+        }
+        break;
+    case 2:
+    case 3: {
+        if (((op >> 25) & 7) == 3 && (op & 0x10)) {
+            *ends = al; /* undefined (the built-in BIOS's HLE trap among them) */
+            break;
+        }
+        bool p = (op >> 24) & 1, w = (op >> 21) & 1, l = (op >> 20) & 1, b = (op >> 22) & 1;
+        bool reg = (op >> 25) & 1;
+        if (rd == 15) {
+            if (l)
+                *ends = al;
+            break; /* load into PC, or a store of PC + 12: generic */
+        }
+        if (rn == 15 && (!p || w))
+            break;
+        if (reg && rm == 15)
+            break;
+        o->k = (uint8_t)(l ? (b ? AK_LDRB : AK_LDR) : (b ? AK_STRB : AK_STR));
+        o->a = (uint8_t)rd;
+        o->b = (uint8_t)rn;
+        o->x = (uint8_t)((p ? 1 : 0) | (((op >> 23) & 1) ? 2 : 0) | (w ? 4 : 0) | (reg ? 8 : 0));
+        if (reg) {
+            o->c = (uint8_t)rm;
+            o->d = (op >> 5) & 3;
+            o->y = (op >> 7) & 31;
+        } else {
+            o->imm = op & 0xFFF;
+        }
+        break;
+    }
+    case 4: { /* LDM / STM (x = P | U << 1 | W << 2, y: registers); with PC, the S bit or an empty list: generic */
+        uint32_t list = op & 0xFFFF;
+        bool l = (op >> 20) & 1;
+        if (!(op & (1u << 22)) && list && !(list & 0x8000) && rn != 15) {
+            o->k = l ? AK_LDM : AK_STM;
+            o->b = (uint8_t)rn;
+            o->imm = list;
+            o->x = (uint8_t)(((op >> 24) & 1) | (((op >> 23) & 1) << 1) | (((op >> 21) & 1) << 2));
+            o->y = (uint8_t)__builtin_popcount(list);
+        } else if (l && ((list & 0x8000) || !list)) {
+            *ends = al; /* moves PC */
+        }
+        break;
+    }
+    case 5:
+        o->k = (op & (1u << 24)) ? AK_BL : AK_B;
+        o->imm = pc + 8 + (uint32_t)(((int32_t)(op << 8)) >> 6);
+        *ends = al;
+        break;
+    default: /* coprocessor (undefined), SWI */
+        *ends = al;
+        break;
+    }
+}
+
+static gba_block *blk_decode(gba_machine *m, gba_block *b, uint32_t pc, bool thumb, int region)
+{
+    struct gba_blocks *bs = m->blocks;
+    if (bs->used + BLK_MAX_OPS > BLK_POOL)
+        gba_cpu_flush_blocks(m); /* the slot b stays valid */
+    blk_op *ops = &bs->pool[bs->used];
+    uint32_t w = thumb ? 2 : 4, n = 0, idx0 = 0;
+    bool ram = region == RG_IWRAM || region == RG_EWRAM;
+    if (region == RG_IWRAM)
+        idx0 = GBA_CODE_IWRAM(pc);
+    else if (region == RG_EWRAM)
+        idx0 = GBA_CODE_EWRAM(pc);
+    for (uint32_t a = pc; n < BLK_MAX_OPS && ((a ^ pc) >> BLK_PAGE_SHIFT) == 0; a += w) {
+        uint32_t op;
+        switch (region) {
+        case RG_CART: {
+            uint32_t o = a & 0x1FFFFFFu;
+            if (o + w > m->rom_size)
+                goto done;
+            op = thumb ? rd16(&m->rom[o]) : rd32(&m->rom[o]);
+            break;
+        }
+        case RG_IWRAM:
+            op = thumb ? rd16(&m->iwram[a & (GBA_IWRAM_SIZE - 2)]) : rd32(&m->iwram[a & (GBA_IWRAM_SIZE - 4)]);
+            break;
+        case RG_EWRAM:
+            op = thumb ? rd16(&m->ewram[a & (GBA_EWRAM_SIZE - 2)]) : rd32(&m->ewram[a & (GBA_EWRAM_SIZE - 4)]);
+            break;
+        default:
+            op = thumb ? rd16(&m->bios[a]) : rd32(&m->bios[a]);
+            break;
+        }
+        bool ends;
+        if (thumb)
+            decode_thumb(&ops[n], op, a, &ends);
+        else
+            decode_arm(&ops[n], op, a, &ends);
+        if (ram) {
+            uint32_t i = idx0 + (a - pc);
+            bs->code[i >> 4] |= (uint8_t)((thumb ? 1u : 3u) << ((i >> 1) & 7));
+        }
+        n++;
+        if (ends)
+            break;
+    }
+done:
+    if (n == 0)
+        return NULL;
+    bs->used += n;
+    b->key = pc | (thumb ? 1u : 0u);
+    b->n = (uint16_t)n;
+    b->region = (uint8_t)region;
+    b->ops = ops;
+    b->page = ram ? (uint16_t)(idx0 >> BLK_PAGE_SHIFT) : BLK_NOPAGE;
+    b->gen = ram ? bs->gen[b->page] : 0;
+    return b;
+}
+
+static __attribute__((noinline)) gba_block *blk_get_slow(gba_machine *m, uint32_t pc, bool thumb)
+{
+    struct gba_blocks *bs = m->blocks;
+    if (!bs) {
+        bs = m->blocks = malloc(sizeof *bs);
+        if (!bs)
+            return NULL;
+        memset(bs->gen, 0, sizeof bs->gen);
+        m->code_map = bs->code;
+        gba_cpu_flush_blocks(m);
+    }
+    uint32_t key = pc | (thumb ? 1u : 0u);
+    gba_block *b = &bs->tab[((key >> 1) ^ (key >> 14)) & (BLK_HASH - 1)];
+    if (b->key == key && (b->page == BLK_NOPAGE || bs->gen[b->page] == b->gen))
+        return b;
+    int region = blk_region(m, pc, thumb);
+    if (region == RG_NONE)
+        return NULL;
+    return blk_decode(m, b, pc, thumb, region);
+}
+
+/* The block at pc (decoded now if needed), NULL when pc is not in a region blocks run from. */
+static inline __attribute__((always_inline)) const gba_block *blk_get(gba_machine *m, uint32_t pc, bool thumb)
+{
+    struct gba_blocks *bs = m->blocks;
+    uint32_t key = pc | (thumb ? 1u : 0u);
+    if (__builtin_expect(bs != NULL, 1)) {
+        const gba_block *b = &bs->tab[((key >> 1) ^ (key >> 14)) & (BLK_HASH - 1)];
+        if (b->key == key && (b->page == BLK_NOPAGE || bs->gen[b->page] == b->gen))
+            return b;
+    }
+    return blk_get_slow(m, pc, thumb);
+}
+
+/* ---- running ---- */
+
+/* rc_refill_cost, its table case inline. */
+static inline uint32_t refill_cost(gba_machine *m, uint64_t now, uint32_t r15, bool thumb)
+{
+    uint32_t r = (r15 >> 24) & 15;
+    if (__builtin_expect(r - 8u <= 5u && m->prefetch, 0))
+        return rc_refill_cost(HEAD(m), now, r15, thumb);
+    return thumb ? (uint32_t)m->wait16[r][0] + m->wait16[r][1] : (uint32_t)m->wait32[r][0] + m->wait32[r][1];
+}
+
+static __attribute__((noinline)) void exec_thumb(gba_machine *m, uint32_t op, uint32_t pc)
+{
+    thumb_execute(m, op, pc);
+}
+
+static __attribute__((noinline)) void exec_arm(gba_machine *m, uint32_t op, uint32_t pc)
+{
+    arm_execute(m, op, pc);
+}
+
+/* The flags live in locals (fN fZ fC fV, 0 or 1) inside a run: the helpers below are the ones above on them. */
+static inline uint32_t l_adc(uint32_t a, uint32_t b, uint32_t cin, uint32_t *n, uint32_t *z, uint32_t *c,
+                             uint32_t *v)
+{
+    uint64_t r = (uint64_t)a + b + cin;
+    uint32_t res = (uint32_t)r;
+    *n = res >> 31;
+    *z = res == 0;
+    *c = (uint32_t)(r >> 32);
+    *v = (~(a ^ b) & (a ^ res)) >> 31;
+    return res;
+}
+
+static inline uint32_t l_shift_imm(uint32_t type, uint32_t v, uint32_t amt, uint32_t cin, uint32_t *carry)
+{
+    switch (type) {
+    case 0:
+        if (amt == 0) {
+            *carry = cin;
+            return v;
+        }
+        *carry = (v >> (32 - amt)) & 1;
+        return v << amt;
+    case 1:
+        if (amt == 0) {
+            *carry = v >> 31;
+            return 0;
+        }
+        *carry = (v >> (amt - 1)) & 1;
+        return v >> amt;
+    case 2:
+        if (amt == 0) {
+            *carry = v >> 31;
+            return (uint32_t)((int32_t)v >> 31);
+        }
+        *carry = (v >> (amt - 1)) & 1;
+        return (uint32_t)((int32_t)v >> amt);
+    default:
+        if (amt == 0) {
+            *carry = v & 1;
+            return cin << 31 | v >> 1;
+        }
+        *carry = (v >> (amt - 1)) & 1;
+        return ror32(v, amt);
+    }
+}
+
+/* Condition codes by NZCV (bit 3 = N .. bit 0 = V): bit nzcv of cond_lut[cond] tells whether cond passes. */
+static const uint16_t cond_lut[16] = {
+    0xF0F0, 0x0F0F, 0xCCCC, 0x3333, 0xFF00, 0x00FF, 0xAAAA, 0x5555,
+    0x0C0C, 0xF3F3, 0xAA55, 0x55AA, 0x0A05, 0xF5FA, 0xFFFF, 0x0000,
+};
+#define L_COND(CC) ((cond_lut[(CC)] >> (fN << 3 | fZ << 2 | fC << 1 | fV)) & 1)
+
+#define FLAGS_OUT() (m->cpu.n = fN, m->cpu.z = fZ, m->cpu.c = fC, m->cpu.v = fV)
+#define FLAGS_IN() (fN = m->cpu.n, fZ = m->cpu.z, fC = m->cpu.c, fV = m->cpu.v)
+#define SET_NZ(RES) (fN = (RES) >> 31, fZ = (RES) == 0)
+#define ADC(A, B, CIN) l_adc((A), (B), (CIN), &fN, &fZ, &fC, &fV)
+
+/* EWRAM / IWRAM accesses without the bus call: what gba_read* / gba_write* do there (no side effect but the memory and
+ * the clock), on the run's clock, while no immediate DMA is due (a non-sequential access would start it); a write
+ * also keeps off the halfwords some block was decoded from and the bytes the running opcode fetch latched (around
+ * pc, in the same region). Otherwise the bus does the access, with r15, the latches and the clock where step() has
+ * them. */
+static inline uint8_t *ram_ptr(gba_machine *m, uint32_t a)
+{
+    return (a >> 24) == 3 ? &m->iwram[a & (GBA_IWRAM_SIZE - 1)] : &m->ewram[a & (GBA_EWRAM_SIZE - 1)];
+}
+
+static inline bool ram_w_clean(const gba_machine *m, uint32_t a, unsigned nhalf, uint32_t pc, uint32_t lreg,
+                               uint32_t lmask)
+{
+    uint32_t idx = (a >> 24) == 3 ? GBA_CODE_IWRAM(a) : GBA_CODE_EWRAM(a);
+    if ((m->code_map[idx >> 4] >> ((idx >> 1) & 7)) & (nhalf == 2 ? 3u : 1u))
+        return false;
+    return (a >> 24) != lreg || ((a - pc + 4) & lmask) >= 20;
+}
+
+#define RAM_R(A, SEQ) ((((A) >> 24) - 2u) <= 1u && ((SEQ) || now < m->dma_due))
+#define RAM_W(A, NH, SEQ) (RAM_R(A, SEQ) && ram_w_clean(m, (A), (NH), pc, lreg, lmask))
+#define WAIT16(A, SEQ) ((uint32_t)m->wait16[(A) >> 24][(SEQ)])
+#define WAIT32(A, SEQ) ((uint32_t)m->wait32[(A) >> 24][(SEQ)])
+
+/* Shared by both runners. W: the opcode size; PIPE: r15 - pc; THUMB. */
+
+#define BLK_NEXT()                                                                                                   \
+    do {                                                                                                             \
+        op++;                                                                                                        \
+        pc += W;                                                                                                     \
+        if (__builtin_expect(op == end, 0))                                                                          \
+            goto out;                                                                                                \
+        goto top;                                                                                                    \
+    } while (0)
+
+/* Before a bus access: r15, the fetch's latches and the clock where step() has them. */
+#define BLK_BUS()                                                                                                    \
+    do {                                                                                                             \
+        R[15] = pc + PIPE;                                                                                           \
+        if (!latched) {                                                                                              \
+            blk_latch(m, pc, THUMB, region);                                                                         \
+            latched = true;                                                                                          \
+        }                                                                                                            \
+        m->now = now;                                                                                                \
+    } while (0)
+
+/* After it (ICYC: the instruction's internal cycles): the next fetch's non-sequential extra. Anything the run loop
+ * checks between instructions (the IRQ line, a halt, the next event), the wait states and the code only change
+ * through an IO register write, a DMA or a write to code, which bump blk_attn: then the block stops after this
+ * instruction (with the extra from the wait states as they are now, as step() computes it). */
+#define BLK_BUS_END(ICYC)                                                                                            \
+    do {                                                                                                             \
+        now = m->now + (ICYC);                                                                                       \
+        if (__builtin_expect(m->blk_attn != attn0, 0)) {                                                             \
+            now += nfetch_extra(m, pc, THUMB);                                                                       \
+            op++;                                                                                                    \
+            pc += W;                                                                                                 \
+            goto out;                                                                                                \
+        }                                                                                                            \
+        now += nx;                                                                                                   \
+    } while (0)
+
+/* A word of a multiple transfer (seq: sequential), by the RAM path or the bus; MT_END after the last one. */
+#define MT_RD(A, SEQ, DST)                                                                                           \
+    do {                                                                                                             \
+        uint32_t a_ = (A);                                                                                           \
+        if (RAM_R(a_, SEQ)) {                                                                                        \
+            now += WAIT32(a_, SEQ);                                                                                  \
+            DST = rd32(ram_ptr(m, a_));                                                                              \
+        } else {                                                                                                     \
+            BLK_BUS();                                                                                               \
+            DST = gba_read32(m, a_, SEQ);                                                                            \
+            now = m->now;                                                                                            \
+        }                                                                                                            \
+    } while (0)
+#define MT_WR(A, V, SEQ)                                                                                             \
+    do {                                                                                                             \
+        uint32_t a_ = (A);                                                                                           \
+        if (RAM_W(a_, 2, SEQ)) {                                                                                     \
+            now += WAIT32(a_, SEQ);                                                                                  \
+            wr32(ram_ptr(m, a_), (V));                                                                               \
+        } else {                                                                                                     \
+            BLK_BUS();                                                                                               \
+            gba_write32(m, a_, (V), SEQ);                                                                            \
+            now = m->now;                                                                                            \
+        }                                                                                                            \
+    } while (0)
+#define MT_END(ICYC)                                                                                                 \
+    do {                                                                                                             \
+        m->now = now;                                                                                                \
+        BLK_BUS_END(ICYC);                                                                                           \
+    } while (0)
+#define MT_SEQ(A) ((((A) + 4) >> 24) == ((A) >> 24)) /* the next word in the same region: sequential */
+
+/* A generic op: step()'s execute and its aftermath, the flags in the machine. */
+#define BLK_GENERIC(EXEC)                                                                                            \
+    do {                                                                                                             \
+        BLK_BUS();                                                                                                   \
+        FLAGS_OUT();                                                                                                 \
+        m->cpu.branched = false;                                                                                     \
+        uint32_t ctl_ = m->cpu.cpsr_ctl;                                                                             \
+        EXEC(m, op->raw, pc);                                                                                        \
+        if (m->cpu.branched) {                                                                                       \
+            m->now += rc_refill_cost(h, m->now, R[15], is_thumb(m));                                                 \
+            return;                                                                                                  \
+        }                                                                                                            \
+        R[15] += W;                                                                                                  \
+        if (m->now != now)                                                                                           \
+            m->now += nfetch_extra(m, pc, THUMB);                                                                    \
+        if (__builtin_expect((m->irq_line && !(m->cpu.cpsr_ctl & CPSR_I)) | m->cpu.halted | m->cpu.stopped |        \
+                                 (m->blk_attn != attn0) | (m->cpu.cpsr_ctl != ctl_),                                 \
+                             0))                                                                                     \
+            return;                                                                                                  \
+        now = m->now;                                                                                                \
+        ne = cpu_limit(m);                                                                                           \
+        FLAGS_IN();                                                                                                  \
+        BLK_NEXT();                                                                                                  \
+    } while (0)
+
+/* A taken branch (R[15] written for the target): the refill; then the target's block runs on in this loop when it is
+ * in the same state and region and the clock is still below the limit (the run loop's other checks cannot have
+ * changed since blk_attn was last checked), else the block stops. */
+#define BLK_BRANCH() goto branch_taken
+
+#define BLK_PROLOGUE(TH)                                                                                             \
+    gba_rc_head *const h = HEAD(m);                                                                                  \
+    const gba_block *cur = b;                                                                                        \
+    const blk_op *op = b->ops, *end = b->ops + b->n;                                                                 \
+    uint32_t pc = b->key & ~1u;                                                                                      \
+    const int region = b->region;                                                                                    \
+    const uint32_t rg = (pc >> 24) & 15;                                                                             \
+    uint64_t now = m->now, ne = cpu_limit(m);                                                                        \
+    const bool pf = region == RG_CART && m->prefetch;                                                                \
+    const uint32_t fc = TH ? m->fetch16[rg] : m->fetch32[rg];                                                        \
+    const uint32_t ncost = TH ? m->wait16[rg][0] : m->wait32[rg][0];                                                 \
+    const uint32_t nx = nfetch_extra(m, pc, TH);                                                                     \
+    const uint32_t attn0 = m->blk_attn;                                                                              \
+    const uint32_t lreg = region == RG_IWRAM ? 3u : region == RG_EWRAM ? 2u : 0xFFu;                                  \
+    const uint32_t lmask = region == RG_IWRAM ? GBA_IWRAM_SIZE - 1 : GBA_EWRAM_SIZE - 1;                             \
+    uint32_t fN = m->cpu.n, fZ = m->cpu.z, fC = m->cpu.c, fV = m->cpu.v;                                             \
+    bool latched = true
+
+/* The block's normal end and the stops between instructions: pc is the next instruction's. */
+#define BLK_OUT()                                                                                                    \
+    out:                                                                                                             \
+    R[15] = pc + PIPE;                                                                                               \
+    m->cpu.branched = false;                                                                                         \
+    if (!latched)                                                                                                    \
+        blk_latch(m, pc - W, THUMB, region);                                                                         \
+    m->now = now;                                                                                                    \
+    FLAGS_OUT()
+
+#define THUMB true
+#define W 2u
+#define PIPE 4u
+
+static void blk_run_thumb(gba_machine *m, const gba_block *b)
+{
+    static const void *const lab[TK_COUNT] = {
+        [TK_GEN] = &&L_GEN, [TK_LSL_I] = &&L_LSL_I, [TK_LSR_I] = &&L_LSR_I, [TK_ASR_I] = &&L_ASR_I,
+        [TK_ADD_R] = &&L_ADD_R, [TK_SUB_R] = &&L_SUB_R, [TK_ADD_I3] = &&L_ADD_I3, [TK_SUB_I3] = &&L_SUB_I3,
+        [TK_MOV_I8] = &&L_MOV_I8, [TK_CMP_I8] = &&L_CMP_I8, [TK_ADD_I8] = &&L_ADD_I8, [TK_SUB_I8] = &&L_SUB_I8,
+        [TK_AND] = &&L_AND, [TK_EOR] = &&L_EOR, [TK_LSL] = &&L_LSL, [TK_LSR] = &&L_LSR, [TK_ASR] = &&L_ASR,
+        [TK_ADC] = &&L_ADC, [TK_SBC] = &&L_SBC, [TK_ROR] = &&L_ROR, [TK_TST] = &&L_TST, [TK_NEG] = &&L_NEG,
+        [TK_CMP] = &&L_CMP, [TK_CMN] = &&L_CMN, [TK_ORR] = &&L_ORR, [TK_MUL] = &&L_MUL, [TK_BIC] = &&L_BIC,
+        [TK_MVN] = &&L_MVN, [TK_HADD] = &&L_HADD, [TK_HCMP] = &&L_HCMP, [TK_HMOV] = &&L_HMOV, [TK_BX] = &&L_BX,
+        [TK_LDR_PC] = &&L_LDR_PC, [TK_STR_R] = &&L_STR_R, [TK_STRH_R] = &&L_STRH_R, [TK_STRB_R] = &&L_STRB_R,
+        [TK_LDRSB_R] = &&L_LDRSB_R, [TK_LDR_R] = &&L_LDR_R, [TK_LDRH_R] = &&L_LDRH_R, [TK_LDRB_R] = &&L_LDRB_R,
+        [TK_LDRSH_R] = &&L_LDRSH_R, [TK_STR_I] = &&L_STR_I, [TK_LDR_I] = &&L_LDR_I, [TK_STRB_I] = &&L_STRB_I,
+        [TK_LDRB_I] = &&L_LDRB_I, [TK_STRH_I] = &&L_STRH_I, [TK_LDRH_I] = &&L_LDRH_I, [TK_STR_SP] = &&L_STR_SP,
+        [TK_LDR_SP] = &&L_LDR_SP, [TK_ADD_PC] = &&L_ADD_PC, [TK_ADD_SP] = &&L_ADD_SP, [TK_ADJ_SP] = &&L_ADJ_SP,
+        [TK_BCOND] = &&L_BCOND, [TK_B] = &&L_B, [TK_BL1] = &&L_BL1, [TK_BL2] = &&L_BL2,
+        [TK_PUSH] = &&L_PUSH, [TK_POP] = &&L_POP, [TK_POP_PC] = &&L_POP_PC, [TK_LDMIA] = &&L_LDMIA,
+        [TK_STMIA] = &&L_STMIA,
+    };
+    BLK_PROLOGUE(true);
+    uint32_t carry, res, addr;
+
+top:
+    if (__builtin_expect(now >= ne, 0))
+        goto out;
+    now += pf ? rc_pf_fetch(h, now, pc + 4, true, ncost) : fc;
+    latched = false;
+    goto *lab[op->k];
+
+L_GEN:
+    BLK_GENERIC(exec_thumb);
+L_LSL_I:
+    res = l_shift_imm(0, R[op->b], op->x, fC, &carry);
+    goto shift_out;
+L_LSR_I:
+    res = l_shift_imm(1, R[op->b], op->x, fC, &carry);
+    goto shift_out;
+L_ASR_I:
+    res = l_shift_imm(2, R[op->b], op->x, fC, &carry);
+shift_out:
+    SET_NZ(res);
+    fC = carry;
+    R[op->a] = res;
+    BLK_NEXT();
+L_ADD_R:
+    R[op->a] = ADC(R[op->b], R[op->c], 0);
+    BLK_NEXT();
+L_SUB_R:
+    R[op->a] = ADC(R[op->b], ~R[op->c], 1);
+    BLK_NEXT();
+L_ADD_I3:
+    R[op->a] = ADC(R[op->b], op->c, 0);
+    BLK_NEXT();
+L_SUB_I3:
+    R[op->a] = ADC(R[op->b], ~(uint32_t)op->c, 1);
+    BLK_NEXT();
+L_MOV_I8:
+    R[op->a] = op->imm;
+    SET_NZ(op->imm);
+    BLK_NEXT();
+L_CMP_I8:
+    ADC(R[op->a], ~op->imm, 1);
+    BLK_NEXT();
+L_ADD_I8:
+    R[op->a] = ADC(R[op->a], op->imm, 0);
+    BLK_NEXT();
+L_SUB_I8:
+    R[op->a] = ADC(R[op->a], ~op->imm, 1);
+    BLK_NEXT();
+L_AND:
+    res = R[op->a] & R[op->b];
+    goto logic_out;
+L_EOR:
+    res = R[op->a] ^ R[op->b];
+    goto logic_out;
+L_ORR:
+    res = R[op->a] | R[op->b];
+    goto logic_out;
+L_BIC:
+    res = R[op->a] & ~R[op->b];
+    goto logic_out;
+L_MVN:
+    res = ~R[op->b];
+logic_out:
+    SET_NZ(res);
+    R[op->a] = res;
+    BLK_NEXT();
+L_LSL:
+    res = rc_shift_reg(0, R[op->a], R[op->b] & 0xFF, fC, &carry);
+    goto rshift_out;
+L_LSR:
+    res = rc_shift_reg(1, R[op->a], R[op->b] & 0xFF, fC, &carry);
+    goto rshift_out;
+L_ASR:
+    res = rc_shift_reg(2, R[op->a], R[op->b] & 0xFF, fC, &carry);
+    goto rshift_out;
+L_ROR:
+    res = rc_shift_reg(3, R[op->a], R[op->b] & 0xFF, fC, &carry);
+rshift_out:
+    SET_NZ(res);
+    fC = carry;
+    R[op->a] = res;
+    now += 1 + nx;
+    BLK_NEXT();
+L_ADC:
+    R[op->a] = ADC(R[op->a], R[op->b], fC);
+    BLK_NEXT();
+L_SBC:
+    R[op->a] = ADC(R[op->a], ~R[op->b], fC);
+    BLK_NEXT();
+L_TST:
+    res = R[op->a] & R[op->b];
+    SET_NZ(res);
+    BLK_NEXT();
+L_NEG:
+    R[op->a] = ADC(0, ~R[op->b], 1);
+    BLK_NEXT();
+L_CMP:
+    ADC(R[op->a], ~R[op->b], 1);
+    BLK_NEXT();
+L_CMN:
+    ADC(R[op->a], R[op->b], 0);
+    BLK_NEXT();
+L_MUL: {
+    uint32_t a = R[op->a];
+    now += (uint32_t)mul_cycles(a, true) + nx;
+    res = a * R[op->b];
+    SET_NZ(res);
+    R[op->a] = res;
+    BLK_NEXT();
+}
+L_HADD:
+    R[op->a] = R[op->a] + R[op->b];
+    BLK_NEXT();
+L_HCMP:
+    ADC(R[op->a], ~R[op->b], 1);
+    BLK_NEXT();
+L_HMOV:
+    R[op->a] = R[op->b];
+    BLK_NEXT();
+L_BX:
+    branch_exchange(m, R[op->b]);
+    BLK_BRANCH();
+L_LDR_PC:
+    BLK_BUS();
+    R[op->a] = gba_read32(m, op->imm, false);
+    BLK_BUS_END(1);
+    BLK_NEXT();
+/* Loads and stores, addr set. */
+#define T_LD32()                                                                                                     \
+    do {                                                                                                             \
+        if (RAM_R(addr, 0)) {                                                                                        \
+            now += WAIT32(addr, 0) + 1 + nx;                                                                         \
+            R[op->a] = ror32(rd32(ram_ptr(m, addr & ~3u)), (addr & 3) * 8);                                          \
+            BLK_NEXT();                                                                                              \
+        }                                                                                                            \
+        BLK_BUS();                                                                                                   \
+        R[op->a] = load32_rot(m, addr, false);                                                                       \
+        BLK_BUS_END(1);                                                                                              \
+        BLK_NEXT();                                                                                                  \
+    } while (0)
+#define T_LDH()                                                                                                      \
+    do {                                                                                                             \
+        if (RAM_R(addr, 0)) {                                                                                        \
+            now += WAIT16(addr, 0) + 1 + nx;                                                                         \
+            R[op->a] = ror32(rd16(ram_ptr(m, addr & ~1u)), (addr & 1) * 8);                                          \
+            BLK_NEXT();                                                                                              \
+        }                                                                                                            \
+        BLK_BUS();                                                                                                   \
+        R[op->a] = ror32(gba_read16(m, addr, false), (addr & 1) * 8);                                                \
+        BLK_BUS_END(1);                                                                                              \
+        BLK_NEXT();                                                                                                  \
+    } while (0)
+#define T_LDB(SIGNED)                                                                                                \
+    do {                                                                                                             \
+        if (RAM_R(addr, 0)) {                                                                                        \
+            now += WAIT16(addr, 0) + 1 + nx;                                                                         \
+            uint8_t b_ = *ram_ptr(m, addr);                                                                          \
+            R[op->a] = (SIGNED) ? (uint32_t)(int32_t)(int8_t)b_ : b_;                                                \
+            BLK_NEXT();                                                                                              \
+        }                                                                                                            \
+        BLK_BUS();                                                                                                   \
+        uint8_t b_ = gba_read8(m, addr, false);                                                                      \
+        R[op->a] = (SIGNED) ? (uint32_t)(int32_t)(int8_t)b_ : b_;                                                    \
+        BLK_BUS_END(1);                                                                                              \
+        BLK_NEXT();                                                                                                  \
+    } while (0)
+#define T_ST32()                                                                                                     \
+    do {                                                                                                             \
+        if (RAM_W(addr & ~3u, 2, 0)) {                                                                               \
+            now += WAIT32(addr, 0) + nx;                                                                             \
+            wr32(ram_ptr(m, addr & ~3u), R[op->a]);                                                                  \
+            BLK_NEXT();                                                                                              \
+        }                                                                                                            \
+        BLK_BUS();                                                                                                   \
+        gba_write32(m, addr, R[op->a], false);                                                                       \
+        BLK_BUS_END(0);                                                                                              \
+        BLK_NEXT();                                                                                                  \
+    } while (0)
+#define T_ST16()                                                                                                     \
+    do {                                                                                                             \
+        if (RAM_W(addr & ~1u, 1, 0)) {                                                                               \
+            now += WAIT16(addr, 0) + nx;                                                                             \
+            wr16(ram_ptr(m, addr & ~1u), (uint16_t)R[op->a]);                                                        \
+            BLK_NEXT();                                                                                              \
+        }                                                                                                            \
+        BLK_BUS();                                                                                                   \
+        gba_write16(m, addr, (uint16_t)R[op->a], false);                                                             \
+        BLK_BUS_END(0);                                                                                              \
+        BLK_NEXT();                                                                                                  \
+    } while (0)
+#define T_ST8()                                                                                                      \
+    do {                                                                                                             \
+        if (RAM_W(addr, 1, 0)) {                                                                                     \
+            now += WAIT16(addr, 0) + nx;                                                                             \
+            *ram_ptr(m, addr) = (uint8_t)R[op->a];                                                                   \
+            BLK_NEXT();                                                                                              \
+        }                                                                                                            \
+        BLK_BUS();                                                                                                   \
+        gba_write8(m, addr, (uint8_t)R[op->a], false);                                                               \
+        BLK_BUS_END(0);                                                                                              \
+        BLK_NEXT();                                                                                                  \
+    } while (0)
+L_STR_R:
+    addr = R[op->b] + R[op->c];
+    T_ST32();
+L_STRH_R:
+    addr = R[op->b] + R[op->c];
+    T_ST16();
+L_STRB_R:
+    addr = R[op->b] + R[op->c];
+    T_ST8();
+L_LDRSB_R:
+    addr = R[op->b] + R[op->c];
+    T_LDB(true);
+L_LDR_R:
+    addr = R[op->b] + R[op->c];
+    T_LD32();
+L_LDRH_R:
+    addr = R[op->b] + R[op->c];
+    T_LDH();
+L_LDRB_R:
+    addr = R[op->b] + R[op->c];
+    T_LDB(false);
+L_LDRSH_R:
+    addr = R[op->b] + R[op->c];
+    if (addr & 1)
+        T_LDB(true); /* misaligned: LDRSB */
+    if (RAM_R(addr, 0)) {
+        now += WAIT16(addr, 0) + 1 + nx;
+        R[op->a] = (uint32_t)(int32_t)(int16_t)rd16(ram_ptr(m, addr));
+        BLK_NEXT();
+    }
+    BLK_BUS();
+    R[op->a] = (uint32_t)(int32_t)(int16_t)gba_read16(m, addr, false);
+    BLK_BUS_END(1);
+    BLK_NEXT();
+L_STR_I:
+    addr = R[op->b] + op->imm;
+    T_ST32();
+L_LDR_I:
+    addr = R[op->b] + op->imm;
+    T_LD32();
+L_STRB_I:
+    addr = R[op->b] + op->imm;
+    T_ST8();
+L_LDRB_I:
+    addr = R[op->b] + op->imm;
+    T_LDB(false);
+L_STRH_I:
+    addr = R[op->b] + op->imm;
+    T_ST16();
+L_LDRH_I:
+    addr = R[op->b] + op->imm;
+    T_LDH();
+L_STR_SP:
+    addr = R[13] + op->imm;
+    T_ST32();
+L_LDR_SP:
+    addr = R[13] + op->imm;
+    T_LD32();
+L_PUSH: { /* x: LR too, y: the low registers */
+    uint32_t list = op->imm;
+    addr = R[13] - 4 * ((uint32_t)op->y + op->x);
+    R[13] = addr;
+    bool seq = false;
+    for (; list; list &= list - 1) {
+        MT_WR(addr & ~3u, R[__builtin_ctz(list)], seq);
+        seq = MT_SEQ(addr);
+        addr += 4;
+    }
+    if (op->x)
+        MT_WR(addr & ~3u, R[14], seq);
+    MT_END(0);
+    BLK_NEXT();
+}
+L_POP:
+L_POP_PC: {
+    uint32_t list = op->imm, v = 0;
+    addr = R[13];
+    bool seq = false;
+    for (; list; list &= list - 1) {
+        MT_RD(addr & ~3u, seq, v);
+        R[__builtin_ctz(list)] = v;
+        seq = MT_SEQ(addr);
+        addr += 4;
+    }
+    if (op->x) {
+        MT_RD(addr & ~3u, seq, v);
+        addr += 4;
+        R[13] = addr;
+        now += 1;
+        R[15] = (v & ~1u) + 4;
+        BLK_BRANCH();
+    }
+    R[13] = addr;
+    MT_END(1);
+    BLK_NEXT();
+}
+L_LDMIA: {
+    uint32_t list = op->imm, rb = op->b, v = 0;
+    addr = R[rb];
+    if (!(list & (1u << rb)))
+        R[rb] = addr + 4 * (uint32_t)op->y;
+    bool seq = false;
+    for (; list; list &= list - 1) {
+        MT_RD(addr & ~3u, seq, v);
+        R[__builtin_ctz(list)] = v;
+        seq = MT_SEQ(addr);
+        addr += 4;
+    }
+    MT_END(1);
+    BLK_NEXT();
+}
+L_STMIA: {
+    uint32_t list = op->imm, rb = op->b, first = (uint32_t)__builtin_ctz(list);
+    addr = R[rb];
+    uint32_t nb = addr + 4 * (uint32_t)op->y;
+    bool seq = false;
+    for (; list; list &= list - 1) {
+        uint32_t i = (uint32_t)__builtin_ctz(list);
+        MT_WR(addr & ~3u, (i == rb && i != first) ? nb : R[i], seq);
+        seq = MT_SEQ(addr);
+        addr += 4;
+    }
+    R[rb] = nb;
+    MT_END(0);
+    BLK_NEXT();
+}
+#undef T_LD32
+#undef T_LDH
+#undef T_LDB
+#undef T_ST32
+#undef T_ST16
+#undef T_ST8
+L_ADD_PC:
+    R[op->a] = op->imm;
+    BLK_NEXT();
+L_ADD_SP:
+    R[op->a] = R[13] + op->imm;
+    BLK_NEXT();
+L_ADJ_SP:
+    R[13] += op->imm;
+    BLK_NEXT();
+L_BCOND:
+    if (!L_COND(op->cond))
+        BLK_NEXT();
+    R[15] = op->imm + 4;
+    BLK_BRANCH();
+L_B:
+    R[15] = op->imm + 4;
+    BLK_BRANCH();
+L_BL1:
+    R[14] = op->imm;
+    BLK_NEXT();
+L_BL2:
+    addr = R[14] + op->imm;
+    R[14] = (pc + 2) | 1;
+    R[15] = (addr & ~1u) + 4;
+    BLK_BRANCH();
+
+branch_taken: {
+    now += refill_cost(m, now, R[15], is_thumb(m));
+    if (now < ne && is_thumb(m) == THUMB) {
+        uint32_t npc_ = R[15] - PIPE;
+        if (npc_ == cur->key - THUMB && m->blk_attn == attn0) { /* a loop back to this block's start */
+            op = cur->ops;
+            pc = npc_;
+            goto top;
+        }
+        const gba_block *nb_ = blk_get(m, npc_, THUMB);
+        if (nb_ && nb_->region == region && ((npc_ >> 24) & 15) == rg && m->blk_attn == attn0) {
+            cur = nb_;
+            op = nb_->ops;
+            end = op + nb_->n;
+            pc = npc_;
+            goto top;
+        }
+    }
+    if (!latched)
+        blk_latch(m, pc, THUMB, region);
+    m->cpu.branched = true;
+    m->now = now;
+    FLAGS_OUT();
+    return;
+}
+    BLK_OUT();
+}
+
+#undef THUMB
+#undef W
+#undef PIPE
+#define THUMB false
+#define W 4u
+#define PIPE 8u
+
+/* ARM data processing (rd, rn and rm are not PC): A, OP2, SC (the shifter's carry out) set by the form's prologue. */
+#define DP_LOGIC(EXPR, WRITE)                                                                                        \
+    do {                                                                                                             \
+        uint32_t r_ = (EXPR);                                                                                        \
+        if (op->y) {                                                                                                 \
+            SET_NZ(r_);                                                                                              \
+            fC = sc;                                                                                                 \
+        }                                                                                                            \
+        if (WRITE)                                                                                                   \
+            R[op->a] = r_;                                                                                           \
+        BLK_NEXT();                                                                                                  \
+    } while (0)
+#define DP_ARITH(X, Y, CIN, WRITE, S)                                                                                \
+    do {                                                                                                             \
+        uint32_t r_;                                                                                                 \
+        if (S)                                                                                                       \
+            r_ = ADC((X), (Y), (CIN));                                                                               \
+        else                                                                                                         \
+            r_ = (X) + (Y) + (CIN);                                                                                  \
+        if (WRITE)                                                                                                   \
+            R[op->a] = r_;                                                                                           \
+        BLK_NEXT();                                                                                                  \
+    } while (0)
+#define DP_BODY(OPC)                                                                                                 \
+    switch (OPC) {                                                                                                   \
+    case 0x0: DP_LOGIC(a & op2, true);                  /* AND */                                                    \
+    case 0x1: DP_LOGIC(a ^ op2, true);                  /* EOR */                                                    \
+    case 0x2: DP_ARITH(a, ~op2, 1, true, op->y);        /* SUB */                                                    \
+    case 0x3: DP_ARITH(op2, ~a, 1, true, op->y);        /* RSB */                                                    \
+    case 0x4: DP_ARITH(a, op2, 0, true, op->y);         /* ADD */                                                    \
+    case 0x5: DP_ARITH(a, op2, fC, true, op->y);        /* ADC */                                                    \
+    case 0x6: DP_ARITH(a, ~op2, fC, true, op->y);       /* SBC */                                                    \
+    case 0x7: DP_ARITH(op2, ~a, fC, true, op->y);       /* RSC */                                                    \
+    case 0x8: DP_LOGIC(a & op2, false);                 /* TST */                                                    \
+    case 0x9: DP_LOGIC(a ^ op2, false);                 /* TEQ */                                                    \
+    case 0xA: DP_ARITH(a, ~op2, 1, false, true);        /* CMP */                                                    \
+    case 0xB: DP_ARITH(a, op2, 0, false, true);         /* CMN */                                                    \
+    case 0xC: DP_LOGIC(a | op2, true);                  /* ORR */                                                    \
+    case 0xD: DP_LOGIC(op2, true);                      /* MOV */                                                    \
+    case 0xE: DP_LOGIC(a & ~op2, true);                 /* BIC */                                                    \
+    default: DP_LOGIC(~op2, true);                      /* MVN */                                                    \
+    }
+/* The immediate form (x: the rotation was not 0, then d is the carry out) and the register form shifted by an
+ * immediate (d: shift type, x: amount). */
+#define DPI(OPC)                                                                                                     \
+    L_DPI##OPC : a = R[op->b];                                                                                       \
+    op2 = op->imm;                                                                                                   \
+    sc = op->x ? op->d : fC;                                                                                         \
+    DP_BODY(OPC)
+#define DPR(OPC)                                                                                                     \
+    L_DPR##OPC : a = R[op->b];                                                                                       \
+    op2 = l_shift_imm(op->d, R[op->c], op->x, fC, &sc);                                                              \
+    DP_BODY(OPC)
+
+static void blk_run_arm(gba_machine *m, const gba_block *b)
+{
+#define DPL(f, n) [AK_##f + n] = &&L_##f##n
+    static const void *const lab[AK_COUNT] = {
+        [AK_GEN] = &&L_GEN,
+        DPL(DPI, 0), DPL(DPI, 1), DPL(DPI, 2), DPL(DPI, 3), DPL(DPI, 4), DPL(DPI, 5), DPL(DPI, 6), DPL(DPI, 7),
+        DPL(DPI, 8), DPL(DPI, 9), DPL(DPI, 10), DPL(DPI, 11), DPL(DPI, 12), DPL(DPI, 13), DPL(DPI, 14), DPL(DPI, 15),
+        DPL(DPR, 0), DPL(DPR, 1), DPL(DPR, 2), DPL(DPR, 3), DPL(DPR, 4), DPL(DPR, 5), DPL(DPR, 6), DPL(DPR, 7),
+        DPL(DPR, 8), DPL(DPR, 9), DPL(DPR, 10), DPL(DPR, 11), DPL(DPR, 12), DPL(DPR, 13), DPL(DPR, 14), DPL(DPR, 15),
+        [AK_LDR] = &&L_LDR, [AK_STR] = &&L_STR, [AK_LDRB] = &&L_LDRB, [AK_STRB] = &&L_STRB,
+        [AK_B] = &&L_B, [AK_BL] = &&L_BL, [AK_BX] = &&L_BX,
+        [AK_LDM] = &&L_LDM, [AK_STM] = &&L_STM, [AK_LDRH] = &&L_LDRH, [AK_STRH] = &&L_STRH, [AK_LDRSB] = &&L_LDRSB,
+        [AK_LDRSH] = &&L_LDRSH, [AK_MRS] = &&L_MRS,
+    };
+#undef DPL
+    BLK_PROLOGUE(false);
+    uint32_t a = 0, op2 = 0, sc = 0, addr, base, moved;
+
+top:
+    if (__builtin_expect(now >= ne, 0))
+        goto out;
+    now += pf ? rc_pf_fetch(h, now, pc + 8, false, ncost) : fc;
+    latched = false;
+    if (op->cond != 0xE && !L_COND(op->cond))
+        BLK_NEXT();
+    goto *lab[op->k];
+
+L_GEN:
+    BLK_GENERIC(exec_arm);
+    DPI(0) DPI(1) DPI(2) DPI(3) DPI(4) DPI(5) DPI(6) DPI(7)
+    DPI(8) DPI(9) DPI(10) DPI(11) DPI(12) DPI(13) DPI(14) DPI(15)
+    DPR(0) DPR(1) DPR(2) DPR(3) DPR(4) DPR(5) DPR(6) DPR(7)
+    DPR(8) DPR(9) DPR(10) DPR(11) DPR(12) DPR(13) DPR(14) DPR(15)
+
+/* Single transfers: x = P | U << 1 | W << 2 | register offset << 3 (shift type d, amount y); rn may be PC (without
+ * write-back). */
+#define ST_ADDR()                                                                                                    \
+    do {                                                                                                             \
+        uint32_t off_;                                                                                               \
+        if (op->x & 8) {                                                                                             \
+            uint32_t dummy_;                                                                                         \
+            off_ = l_shift_imm(op->d, R[op->c], op->y, fC, &dummy_);                                                 \
+        } else {                                                                                                     \
+            off_ = op->imm;                                                                                          \
+        }                                                                                                            \
+        base = op->b == 15 ? pc + 8 : R[op->b];                                                                      \
+        moved = (op->x & 2) ? base + off_ : base - off_;                                                             \
+        addr = (op->x & 1) ? moved : base;                                                                           \
+    } while (0)
+#define ST_WB() ((op->x & 5) != 1) /* !P || W */
+L_LDR:
+    ST_ADDR();
+    if (RAM_R(addr, 0)) {
+        now += WAIT32(addr, 0) + 1 + nx;
+        a = ror32(rd32(ram_ptr(m, addr & ~3u)), (addr & 3) * 8);
+        if (ST_WB())
+            R[op->b] = moved;
+        R[op->a] = a;
+        BLK_NEXT();
+    }
+    BLK_BUS();
+    a = load32_rot(m, addr, false);
+    if (ST_WB())
+        R[op->b] = moved;
+    R[op->a] = a;
+    BLK_BUS_END(1);
+    BLK_NEXT();
+L_LDRB:
+    ST_ADDR();
+    if (RAM_R(addr, 0)) {
+        now += WAIT16(addr, 0) + 1 + nx;
+        a = *ram_ptr(m, addr);
+        if (ST_WB())
+            R[op->b] = moved;
+        R[op->a] = a;
+        BLK_NEXT();
+    }
+    BLK_BUS();
+    a = gba_read8(m, addr, false);
+    if (ST_WB())
+        R[op->b] = moved;
+    R[op->a] = a;
+    BLK_BUS_END(1);
+    BLK_NEXT();
+L_STR:
+    ST_ADDR();
+    if (RAM_W(addr & ~3u, 2, 0)) {
+        now += WAIT32(addr, 0) + nx;
+        wr32(ram_ptr(m, addr & ~3u), R[op->a]);
+        if (ST_WB())
+            R[op->b] = moved;
+        BLK_NEXT();
+    }
+    BLK_BUS();
+    gba_write32(m, addr, R[op->a], false);
+    if (ST_WB())
+        R[op->b] = moved;
+    BLK_BUS_END(0);
+    BLK_NEXT();
+L_STRB:
+    ST_ADDR();
+    if (RAM_W(addr, 1, 0)) {
+        now += WAIT16(addr, 0) + nx;
+        *ram_ptr(m, addr) = (uint8_t)R[op->a];
+        if (ST_WB())
+            R[op->b] = moved;
+        BLK_NEXT();
+    }
+    BLK_BUS();
+    gba_write8(m, addr, (uint8_t)R[op->a], false);
+    if (ST_WB())
+        R[op->b] = moved;
+    BLK_BUS_END(0);
+    BLK_NEXT();
+/* Halfword and signed transfers: x = P | U << 1 | W << 2 | immediate offset << 3. */
+#define HT_ADDR()                                                                                                    \
+    do {                                                                                                             \
+        uint32_t off_ = (op->x & 8) ? op->imm : R[op->c];                                                            \
+        base = op->b == 15 ? pc + 8 : R[op->b];                                                                      \
+        moved = (op->x & 2) ? base + off_ : base - off_;                                                             \
+        addr = (op->x & 1) ? moved : base;                                                                           \
+    } while (0)
+L_LDRH:
+    HT_ADDR();
+    if (RAM_R(addr, 0)) {
+        now += WAIT16(addr, 0) + 1 + nx;
+        a = ror32(rd16(ram_ptr(m, addr & ~1u)), (addr & 1) * 8);
+        goto ht_load_out;
+    }
+    BLK_BUS();
+    a = ror32(gba_read16(m, addr, false), (addr & 1) * 8);
+    goto ht_load_bus;
+L_LDRSB:
+    HT_ADDR();
+    goto ht_ldrsb;
+L_LDRSH:
+    HT_ADDR();
+    if (addr & 1)
+        goto ht_ldrsb; /* misaligned: LDRSB */
+    if (RAM_R(addr, 0)) {
+        now += WAIT16(addr, 0) + 1 + nx;
+        a = (uint32_t)(int32_t)(int16_t)rd16(ram_ptr(m, addr));
+        goto ht_load_out;
+    }
+    BLK_BUS();
+    a = (uint32_t)(int32_t)(int16_t)gba_read16(m, addr, false);
+    goto ht_load_bus;
+ht_ldrsb:
+    if (RAM_R(addr, 0)) {
+        now += WAIT16(addr, 0) + 1 + nx;
+        a = (uint32_t)(int32_t)(int8_t)*ram_ptr(m, addr);
+        goto ht_load_out;
+    }
+    BLK_BUS();
+    a = (uint32_t)(int32_t)(int8_t)gba_read8(m, addr, false);
+ht_load_bus: /* the registers are written before the block may stop */
+    if (ST_WB())
+        R[op->b] = moved;
+    R[op->a] = a;
+    BLK_BUS_END(1);
+    BLK_NEXT();
+ht_load_out:
+    if (ST_WB())
+        R[op->b] = moved;
+    R[op->a] = a;
+    BLK_NEXT();
+L_STRH:
+    HT_ADDR();
+    if (RAM_W(addr & ~1u, 1, 0)) {
+        now += WAIT16(addr, 0) + nx;
+        wr16(ram_ptr(m, addr & ~1u), (uint16_t)R[op->a]);
+        if (ST_WB())
+            R[op->b] = moved;
+        BLK_NEXT();
+    }
+    BLK_BUS();
+    gba_write16(m, addr, (uint16_t)R[op->a], false);
+    if (ST_WB())
+        R[op->b] = moved;
+    BLK_BUS_END(0);
+    BLK_NEXT();
+#undef HT_ADDR
+#undef ST_ADDR
+#undef ST_WB
+/* LDM / STM without PC or the S bit: x = P | U << 1 | W << 2, y: registers. */
+L_LDM: {
+    uint32_t list = op->imm, rn = op->b, size = 4 * (uint32_t)op->y, v = 0;
+    base = R[rn];
+    addr = (op->x & 2) ? base + ((op->x & 1) ? 4 : 0) : base - size + ((op->x & 1) ? 0 : 4);
+    if ((op->x & 4) && !(list & (1u << rn)))
+        R[rn] = (op->x & 2) ? base + size : base - size;
+    bool seq = false;
+    for (; list; list &= list - 1) {
+        MT_RD(addr & ~3u, seq, v);
+        R[__builtin_ctz(list)] = v;
+        seq = MT_SEQ(addr);
+        addr += 4;
+    }
+    MT_END(1);
+    BLK_NEXT();
+}
+L_STM: {
+    uint32_t list = op->imm, rn = op->b, size = 4 * (uint32_t)op->y, first = (uint32_t)__builtin_ctz(list);
+    base = R[rn];
+    addr = (op->x & 2) ? base + ((op->x & 1) ? 4 : 0) : base - size + ((op->x & 1) ? 0 : 4);
+    uint32_t nb = (op->x & 2) ? base + size : base - size;
+    bool w = (op->x & 4) != 0, seq = false;
+    for (; list; list &= list - 1) {
+        uint32_t i = (uint32_t)__builtin_ctz(list);
+        MT_WR(addr & ~3u, (i == rn && w && i != first) ? nb : R[i], seq);
+        seq = MT_SEQ(addr);
+        addr += 4;
+    }
+    if (w)
+        R[rn] = nb;
+    MT_END(0);
+    BLK_NEXT();
+}
+L_MRS: {
+    uint32_t cpsr = fN << 31 | fZ << 30 | fC << 29 | fV << 28 | m->cpu.cpsr_ctl;
+    R[op->a] = (op->x && has_spsr(m)) ? m->cpu.spsr[bank_of(m->cpu.cpsr_ctl & 0x1F)] : cpsr;
+    BLK_NEXT();
+}
+L_B:
+    R[15] = (op->imm & ~3u) + 8;
+    BLK_BRANCH();
+L_BL:
+    R[14] = pc + 4;
+    R[15] = (op->imm & ~3u) + 8;
+    BLK_BRANCH();
+L_BX:
+    branch_exchange(m, R[op->c]);
+    BLK_BRANCH();
+
+branch_taken: {
+    now += refill_cost(m, now, R[15], is_thumb(m));
+    if (now < ne && is_thumb(m) == THUMB) {
+        uint32_t npc_ = R[15] - PIPE;
+        if (npc_ == cur->key - THUMB && m->blk_attn == attn0) { /* a loop back to this block's start */
+            op = cur->ops;
+            pc = npc_;
+            goto top;
+        }
+        const gba_block *nb_ = blk_get(m, npc_, THUMB);
+        if (nb_ && nb_->region == region && ((npc_ >> 24) & 15) == rg && m->blk_attn == attn0) {
+            cur = nb_;
+            op = nb_->ops;
+            end = op + nb_->n;
+            pc = npc_;
+            goto top;
+        }
+    }
+    if (!latched)
+        blk_latch(m, pc, THUMB, region);
+    m->cpu.branched = true;
+    m->now = now;
+    FLAGS_OUT();
+    return;
+}
+    BLK_OUT();
+}
+
+#undef THUMB
+#undef W
+#undef PIPE
+#undef DP_LOGIC
+#undef DP_ARITH
+#undef DP_BODY
+#undef DPI
+#undef DPR
+
+/* Runs from the block at PC (the caller made the run loop's checks: below the limit, not halted, no IRQ to take);
+ * false when PC is not in a region blocks run from. */
+static inline bool blk_step(gba_machine *m)
+{
+    bool thumb = (m->cpu.cpsr_ctl & CPSR_T) != 0;
+    uint32_t pc = R[15] - (thumb ? 4u : 8u);
+    const gba_block *b = blk_get(m, pc, thumb);
+    if (!b)
+        return false;
+    if (thumb)
+        blk_run_thumb(m, b);
+    else
+        blk_run_arm(m, b);
+    return true;
+}
+
+static inline bool irq_due(const gba_machine *m)
+{
+    return m->irq_line && !(m->cpu.cpsr_ctl & CPSR_I);
+}
+
 void gba_cpu_step_outside_rom(gba_machine *m)
 {
+    if (m->interp_ref) {
+        do {
+            step(m);
+        } while (m->now < m->next_event && !m->cpu.halted && !m->cpu.stopped &&
+                 ((R[15] - ((m->cpu.cpsr_ctl & CPSR_T) ? 4u : 8u)) - 0x08000000u >= 0x06000000u || irq_due(m)));
+        return;
+    }
     do {
-        step(m);
+        uint32_t pc = R[15] - ((m->cpu.cpsr_ctl & CPSR_T) ? 4u : 8u);
+        if (irq_due(m) || pc - 0x08000000u < 0x06000000u || !blk_step(m))
+            gba_cpu_step(m);
     } while (m->now < m->next_event && !m->cpu.halted && !m->cpu.stopped &&
-             ((R[15] - ((m->cpu.cpsr_ctl & CPSR_T) ? 4u : 8u)) - 0x08000000u >= 0x06000000u ||
-              (m->irq_line && !(m->cpu.cpsr_ctl & CPSR_I))));
+             ((R[15] - ((m->cpu.cpsr_ctl & CPSR_T) ? 4u : 8u)) - 0x08000000u >= 0x06000000u || irq_due(m)));
 }
 
 void gba_cpu_run(gba_machine *m)
@@ -1072,12 +2650,23 @@ void gba_cpu_run(gba_machine *m)
         gba_recomp_run(m);
         return;
     }
-    while (m->now < m->next_event) {
+    if (m->interp_ref) {
+        while (m->now < cpu_limit(m)) {
+            if (m->cpu.halted || m->cpu.stopped) {
+                m->now = m->next_event;
+                return;
+            }
+            step(m);
+        }
+        return;
+    }
+    while (m->now < cpu_limit(m)) {
         if (m->cpu.halted || m->cpu.stopped) {
             m->now = m->next_event;
             return;
         }
-        step(m);
+        if (irq_due(m) || !blk_step(m))
+            gba_cpu_step(m);
     }
 }
 

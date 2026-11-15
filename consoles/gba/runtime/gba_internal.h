@@ -238,7 +238,16 @@ struct gba_machine {
     void *dbg_ctx;
     bool dbg_open;
     char dbg_str[257];
+
+    /* Host side only, after everything a save state holds (gba_state.c saves the machine up to GBA_MACHINE_SAVED). */
+    struct gba_blocks *blocks; /* the interpreter's predecoded blocks (gba_cpu.c, XBA-208), made on first use */
+    uint8_t *code_map;      /* = blocks->code: a bit per RAM halfword some block was decoded from (gba_code_write) */
+    uint32_t blk_attn;      /* bumped by what a running block cannot see coming: IO register writes, DMA transfers,
+                             * wait-state changes, writes to code (gba_cpu.c « predecoded blocks ») */
+    uint64_t cpu_cap;       /* gba_run_cycles: the CPU loop also stops at this cycle (UINT64_MAX: no cap) */
+    bool interp_ref;        /* the reference interpreter loop (gba_cpu_set_reference) */
 };
+#define GBA_MACHINE_SAVED offsetof(gba_machine, blocks)
 
 /* gba_machine starts with gba_rc_head's members. */
 #define GBA_RC_SAME(f) \
@@ -348,6 +357,21 @@ static inline bool gba_eeprom_area(const gba_machine *m, uint32_t addr)
 
 /* gba_cpu.c */
 void gba_cpu_reset(gba_machine *m, uint32_t pc, uint32_t cpsr);
+void gba_cpu_free(gba_machine *m);         /* the predecoded blocks (gba_destroy) */
+void gba_cpu_flush_blocks(gba_machine *m); /* RAM / ROM changed behind the bus (state load, BIOS resets, ROM
+                                            * patches): decode everything again */
+/* A write reached code RAM at idx (gba_code_write) where a block was decoded from: those blocks go. */
+void gba_cpu_code_written(gba_machine *m, uint32_t idx);
+/* idx: IWRAM offset (0..0x7FFF) or 0x8000 + EWRAM offset; nhalf: 1 for a byte or halfword write, 2 for a word
+ * (aligned). Every write to EWRAM / IWRAM goes through this (the bus, cheats). */
+static inline void gba_code_write(gba_machine *m, uint32_t idx, unsigned nhalf)
+{
+    const uint8_t *cm = m->code_map;
+    if (__builtin_expect(cm != NULL, 1) && ((cm[idx >> 4] >> ((idx >> 1) & 7)) & (nhalf == 2 ? 3u : 1u)))
+        gba_cpu_code_written(m, idx);
+}
+#define GBA_CODE_IWRAM(addr) ((addr) & (GBA_IWRAM_SIZE - 1))
+#define GBA_CODE_EWRAM(addr) (GBA_IWRAM_SIZE + ((addr) & (GBA_EWRAM_SIZE - 1)))
 /* Runs instructions until m->now >= m->next_event (or the CPU halts). */
 void gba_cpu_run(gba_machine *m);
 /* Executes exactly one instruction (or takes a pending IRQ). For tests. */

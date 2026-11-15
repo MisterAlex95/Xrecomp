@@ -202,6 +202,7 @@ static void dma_write_ctl(gba_machine *m, int i, uint16_t v)
 
 void gba_dma_run_due(gba_machine *m)
 {
+    m->blk_attn++; /* a running block stops after this access (gba_cpu.c) */
     m->dma_due = UINT64_MAX;
     for (int i = 0; i < 4; i++) {
         if (m->dma[i].due) {
@@ -460,6 +461,25 @@ void gba_run_frame(gba_machine *m, uint16_t *framebuffer)
     m->fb = NULL;
 }
 
+int gba_run_cycles(gba_machine *m, uint64_t n, uint16_t *framebuffer)
+{
+    uint64_t target = m->now + (n ? n : 1);
+    m->fb = framebuffer;
+    m->frame_done = false;
+    m->cpu_cap = target;
+    while (!m->frame_done && m->now < target) {
+        gba_cpu_run(m);
+        if (m->now >= m->next_event) /* what gba_run_frame does each time the CPU loop returns */
+            run_events(m);
+    }
+    m->cpu_cap = UINT64_MAX;
+    if (!m->frame_done)
+        return 0;
+    gba_apu_sync(m, m->now);
+    m->fb = NULL;
+    return 1;
+}
+
 /* ---- register access ------------------------------------------------------------------------------------ */
 
 /* Registers that do not drive the data bus when read (write-only or unmapped halfwords): the CPU sees the open bus
@@ -535,6 +555,7 @@ uint16_t gba_io_read16(gba_machine *m, uint32_t addr)
 
 void gba_io_write16(gba_machine *m, uint32_t addr, uint16_t v)
 {
+    m->blk_attn++; /* a running block stops after this access (gba_cpu.c) */
     uint32_t a = addr & 0x3FE;
     if (a >= 0x60 && a < 0xA8) { /* sound: byte by byte, low byte first (a FIFO gets them in that order) */
         gba_apu_write8(m, a, (uint8_t)v);
@@ -612,6 +633,7 @@ void gba_io_write16(gba_machine *m, uint32_t addr, uint16_t v)
 
 void gba_io_write8(gba_machine *m, uint32_t addr, uint8_t v)
 {
+    m->blk_attn++; /* a running block stops after this access (gba_cpu.c) */
     uint32_t a = addr & 0x3FF;
     if (a >= 0x60 && a < 0xA8) {
         gba_apu_write8(m, a, v);

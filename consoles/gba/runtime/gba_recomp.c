@@ -193,6 +193,8 @@ static void verify_call(gba_machine *ref, gba_machine *m, uint32_t key)
 {
     char why[160];
     ref->rc = NULL;
+    ref->blocks = NULL; /* the copy steps one instruction at a time: no blocks of its own, and not m's */
+    ref->code_map = NULL;
     ref->rc_ewram = ref->ewram;
     ref->rc_iwram = ref->iwram;
     uint64_t steps = 0;

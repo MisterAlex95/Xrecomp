@@ -14,6 +14,8 @@
 #include "gba_internal.h"
 
 #include <stddef.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define STATE_MAGIC "XRSTATE\0"
@@ -67,7 +69,7 @@ static uint64_t bios_hash(gba_machine *m)
 size_t gba_state_size(gba_machine *m)
 {
     (void)m;
-    return HEADER_BYTES + 8 + sizeof(gba_machine);
+    return HEADER_BYTES + 8 + GBA_MACHINE_SAVED;
 }
 
 size_t gba_state_save(gba_machine *m, uint8_t *out, size_t cap)
@@ -85,9 +87,9 @@ size_t gba_state_save(gba_machine *m, uint8_t *out, size_t cap)
     put32(out + 36, 0);
     uint8_t *s = out + HEADER_BYTES;
     put32(s, SEC_MACHINE);
-    put32(s + 4, (uint32_t)sizeof(gba_machine));
+    put32(s + 4, (uint32_t)GBA_MACHINE_SAVED);
     uint8_t *c = s + 8;
-    memcpy(c, m, sizeof *m);
+    memcpy(c, m, GBA_MACHINE_SAVED); /* the host-only tail (blocks, ...) is not the machine's */
     /* Host pointers and host-side flags: not the machine's (the blob may not be aligned: by offset). */
 #define CLEAR(f) do { size_t n_ = sizeof m->f; memset(c + offsetof(gba_machine, f), 0, n_); } while (0)
     CLEAR(rom);
@@ -113,9 +115,9 @@ int gba_state_check(gba_machine *m, const uint8_t *data, size_t size)
         return GBA_STATE_EGAME;
     if (rd32(data + 32) != 1 || size < HEADER_BYTES + 8 || rd32(data + HEADER_BYTES) != SEC_MACHINE)
         return GBA_STATE_ECORRUPT;
-    if (rd32(data + HEADER_BYTES + 4) != sizeof(gba_machine))
+    if (rd32(data + HEADER_BYTES + 4) != GBA_MACHINE_SAVED)
         return GBA_STATE_EVERSION;
-    if (size < HEADER_BYTES + 8 + sizeof(gba_machine))
+    if (size < HEADER_BYTES + 8 + GBA_MACHINE_SAVED)
         return GBA_STATE_ECORRUPT;
     return GBA_STATE_OK;
 }
@@ -134,7 +136,7 @@ int gba_state_load(gba_machine *m, const uint8_t *data, size_t size)
     bool builtin = m->builtin_bios;
     gba_debug_log_fn dbg_cb = m->dbg_cb;
     void *dbg_ctx = m->dbg_ctx;
-    memcpy(m, data + HEADER_BYTES + 8, sizeof *m);
+    memcpy(m, data + HEADER_BYTES + 8, GBA_MACHINE_SAVED); /* the host-only tail stays */
     m->rom = rom;
     m->rc_ewram = ewram_p;
     m->rc_iwram = iwram_p;
@@ -147,5 +149,57 @@ int gba_state_load(gba_machine *m, const uint8_t *data, size_t size)
     m->dbg_ctx = dbg_ctx;
     m->save.dirty = false; /* the state's save memory reaches storage only once the game writes it again */
     gba_recomp_state_loaded(m);
+    gba_cpu_flush_blocks(m);
+    m->blk_attn++;
     return GBA_STATE_OK;
+}
+
+/* ---- whole-machine comparison (gba_run --lockstep-ref, XBA-208) ---- */
+
+#define FIELD(f) {#f, offsetof(gba_machine, f), sizeof(((gba_machine *)0)->f)}
+static const struct {
+    const char *name;
+    size_t off, size;
+} fields[] = {
+    FIELD(cpu.r), FIELD(cpu.n), FIELD(cpu.z), FIELD(cpu.c), FIELD(cpu.v), FIELD(cpu.cpsr_ctl), FIELD(cpu.bank_r13),
+    FIELD(cpu.bank_r14), FIELD(cpu.spsr), FIELD(cpu.fiq_r8_12), FIELD(cpu.usr_r8_12), FIELD(cpu.branched),
+    FIELD(cpu.halted), FIELD(cpu.stopped), FIELD(now), FIELD(next_event), FIELD(wait16), FIELD(wait32),
+    FIELD(fetch16), FIELD(fetch32), FIELD(prefetch), FIELD(irq_line), FIELD(rc_exit), FIELD(rc_hint),
+    FIELD(open_bus), FIELD(rc_native), FIELD(fetchmax16), FIELD(fetchmax32), FIELD(pf), FIELD(line_start),
+    FIELD(line_phase), FIELD(vcount), FIELD(frames), FIELD(frame_done), FIELD(ie), FIELD(if_), FIELD(ime),
+    FIELD(irq_at), FIELD(keys), FIELD(keycnt), FIELD(timer), FIELD(dma), FIELD(dma_latch), FIELD(dma_active),
+    FIELD(dma_due), FIELD(bg_delay), FIELD(win_latch), FIELD(oam_line), FIELD(bg2x), FIELD(bios_latch),
+    FIELD(ewram), FIELD(iwram), FIELD(io), FIELD(pal), FIELD(vram), FIELD(oam), FIELD(apu), FIELD(save),
+    FIELD(dbg_open), FIELD(dbg_str),
+};
+#undef FIELD
+
+int gba_state_compare(gba_machine *a, gba_machine *b, char *why, size_t why_n)
+{
+    size_t n = gba_state_size(a);
+    uint8_t *x = malloc(n), *y = malloc(n);
+    int d = 0;
+    if (!x || !y || gba_state_save(a, x, n) != n || gba_state_save(b, y, n) != n) {
+        snprintf(why, why_n, "cannot save the states");
+        d = 1;
+    } else {
+        for (size_t i = HEADER_BYTES + 8; i < n; i++) {
+            if (x[i] == y[i])
+                continue;
+            size_t off = i - HEADER_BYTES - 8, base = 0;
+            const char *name = "?";
+            for (size_t k = 0; k < sizeof fields / sizeof fields[0]; k++)
+                if (off >= fields[k].off && off < fields[k].off + fields[k].size) {
+                    name = fields[k].name;
+                    base = fields[k].off;
+                }
+            snprintf(why, why_n, "machine byte 0x%zX (%s + 0x%zX): 0x%02X vs 0x%02X", off, name, off - base, x[i],
+                     y[i]);
+            d = 1;
+            break;
+        }
+    }
+    free(x);
+    free(y);
+    return d;
 }

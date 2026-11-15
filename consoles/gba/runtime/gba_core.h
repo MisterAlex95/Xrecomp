@@ -133,6 +133,16 @@ int gba_state_load(gba_machine *m, const uint8_t *data, size_t size);
 typedef void (*gba_debug_log_fn)(void *ctx, int level, const char *msg);
 void gba_set_debug_log(gba_machine *m, gba_debug_log_fn cb, void *ctx);
 
+/* Test hooks (XBA-208). gba_cpu_set_reference: on, the machine runs the reference interpreter loop (one full step
+ * per instruction) instead of the predecoded blocks; gba_run --lockstep-ref runs both and compares them. A host
+ * setting, not in save states. gba_run_cycles: runs at least n cycles (to the first instruction boundary at or past
+ * them, as a scheduler event would stop the CPU) or until the frame ends; returns 1 when it did (as gba_run_frame
+ * returns); a frame may be run in any number of such slices. gba_state_compare: 0 when both machines hold the same
+ * save state byte for byte (everything a state holds), else 1 and the first difference (offset, field) in why. */
+void gba_cpu_set_reference(gba_machine *m, int on);
+int gba_run_cycles(gba_machine *m, uint64_t n, uint16_t *framebuffer);
+int gba_state_compare(gba_machine *a, gba_machine *b, char *why, size_t why_n);
+
 void gba_destroy(gba_machine *m);
 
 #ifdef __cplusplus
