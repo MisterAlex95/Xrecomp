@@ -139,6 +139,12 @@ void n64_rdp_set_defer_software(int on);
  * field are the same and the RDP drew nothing into [lo, hi) since (else a fresh scanout). n64_rdp_scanout_forget drops
  * it (the CPU wrote there). Nothing elsewhere. */
 void n64_rdp_scanout_prefetch(n64_rdp *d, const uint32_t *vi, uint32_t field, uint32_t lo, uint32_t hi);
+/* n64_rdp_scanout without its copy: *rgba points at the back end's own picture, RGBA8 bytes (r, g, b, a; the alpha
+ * is the VI's, not always 255: show it opaque), *w x *h pixels, rows *pitch bytes apart, read where the GPU wrote it.
+ * Valid until the second scanout after this one (two buffers in turn; an early scanout counts) and while the RDP
+ * lives. 0, or -1 (no scanout, the VI shows nothing). */
+int n64_rdp_scanout_rgba(n64_rdp *d, const uint32_t *vi, uint32_t field, const uint8_t **rgba, int *w, int *h,
+                         int *pitch);
 void n64_rdp_scanout_forget(n64_rdp *d);
 
 #ifdef __cplusplus

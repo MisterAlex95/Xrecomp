@@ -221,6 +221,24 @@ static int run_core(void)
     return s_fail;
 }
 
+/* host_window_present_rgba_shared's caller: its picture on demand (W x H RGBA, tightly packed), counted. */
+static const uint8_t *s_shared_px;
+static int s_shared_calls;
+static int shared_last(void *user, uint8_t **px, int *w, int *h)
+{
+    (void)user;
+    s_shared_calls++;
+    if (!s_shared_px)
+        return -1;
+    *px = malloc(320 * 240 * 4);
+    if (!*px)
+        return -1;
+    memcpy(*px, s_shared_px, 320 * 240 * 4);
+    *w = 320;
+    *h = 240;
+    return 0;
+}
+
 static int run_window(void)
 {
     enum { W = 320, H = 240 };
@@ -303,6 +321,28 @@ static int run_window(void)
         CHECK(hdr[0] == 'B' && hdr[1] == 'M' && bw == W && bh == H && hdr[28] == 24);
         unlink(bmp);
         host_window_set_aspect(0, 0);
+
+        /* A picture the caller keeps (host_window_present_rgba_shared): the screenshot asks for it, no copy made at
+         * present; host_window_keep_shared takes the copy when the caller's pixels go. */
+        s_shared_calls = 0;
+        s_shared_px = (const uint8_t *)px;
+        CHECK(host_window_present_rgba_shared(px, W, H, W * 4, shared_last, NULL));
+        CHECK(s_shared_calls == 0);
+        CHECK(host_window_screenshot_bmp(bmp) == 0);
+        CHECK(s_shared_calls == 1);
+        unlink(bmp);
+        host_window_keep_shared();
+        CHECK(s_shared_calls == 2);
+        s_shared_px = NULL; /* gone: the window's copy answers */
+        CHECK(host_window_screenshot_bmp(bmp) == 0);
+        CHECK(s_shared_calls == 2);
+        unlink(bmp);
+        CHECK(host_window_present_rgba_shared(px, W, H, W * 4, shared_last, NULL));
+        CHECK(host_window_screenshot_bmp(bmp) == -1); /* the caller has none any more */
+        CHECK(host_window_present_rgba(px, W, H, W * 4)); /* a kept copy again */
+        CHECK(host_window_screenshot_bmp(bmp) == 0);
+        CHECK(s_shared_calls == 3);
+        unlink(bmp);
     }
     host_window_close();
     CHECK(host_window_stats(&fps, &presented) == 0);

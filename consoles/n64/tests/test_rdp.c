@@ -1565,6 +1565,32 @@ static void t_upscale(void)
     n64_rdp_get_stats(G.dp, &s1);
     expect("other registers, forgotten: not taken", (uint32_t)(s1.prefetch_hits - s0.prefetch_hits), 0);
     expect("prefetches started", (uint32_t)(s1.prefetches - s0.prefetches), 2);
+
+    /* n64_rdp_scanout_rgba: the same picture as n64_rdp_scanout, RGBA bytes in the RDP's buffer, without a copy; the
+     * last one stays readable through the next scanout (two buffers), prefetched or not. */
+    cur = "scanout rgba";
+    const uint8_t *rgba = NULL, *rgba2 = NULL;
+    int pitch = 0, w2 = 0, h2 = 0, pitch2 = 0;
+    check(n64_rdp_scanout(G.dp, vi, 0, px, 1280, 480, &w, &h) == 0, "xrgb scanout");
+    check(n64_rdp_scanout_rgba(G.dp, vi, 0, &rgba, &w2, &h2, &pitch) == 0 && rgba, "rgba scanout");
+    expect("rgba size", (uint32_t)(w2 << 16 | h2), (uint32_t)(w << 16 | h));
+    expect("rgba pitch", (uint32_t)pitch, (uint32_t)w2 * 4);
+    int same = rgba && w2 == w && h2 == h;
+    for (int y = 0; same && y < h; y++)
+        for (int x = 0; x < w; x++) {
+            const uint8_t *q = rgba + (size_t)y * (size_t)pitch + 4 * (size_t)x;
+            if (((uint32_t)q[0] << 16 | (uint32_t)q[1] << 8 | q[2]) != px[(size_t)y * (size_t)w + x]) {
+                same = 0;
+                break;
+            }
+        }
+    check(same, "the same pixels as the XRGB scanout");
+    uint32_t first = rgba ? n64_be32(rgba + (size_t)(2 * (40 + 1) + 1) * (size_t)pitch + 4 * (4 * 50 + 2)) : 0;
+    n64_rdp_scanout_prefetch(G.dp, vi, 0, lo, hi);
+    check(n64_rdp_scanout_rgba(G.dp, vi, 0, &rgba2, &w2, &h2, &pitch2) == 0 && rgba2 && rgba2 != rgba,
+          "prefetched rgba scanout: the other buffer");
+    expect("the one before still readable", rgba ? n64_be32(rgba + (size_t)(2 * (40 + 1) + 1) * (size_t)pitch +
+                                                            4 * (4 * 50 + 2)) : 0, first);
 }
 
 static void t_gfx(void)

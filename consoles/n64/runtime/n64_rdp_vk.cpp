@@ -43,7 +43,8 @@
  *
  * Internal resolution (XBA-185, n64_rdp.h): with a factor of 2, 4 or 8 (n64_rdp_upscale_wanted) paraLLEl-RDP draws
  * each frame-buffer pass twice, at 1x into RDRAM as above (what the game reads back) and upscaled into GPU buffers of
- * RDRAM's size times the factor squared, which its own VI scans out (vk_scanout, read back for n64_display). The
+ * RDRAM's size times the factor squared, which its own VI scans out (vk_scanout_rgba: into one of two kept host
+ * buffers, read where the GPU copied them by n64_display / n64_display_rgba). The
  * factor is lowered first when those buffers exceed the device's storage buffer range or half its largest
  * device-local heap (fit_upscale, logged). The check at create then draws into a 256-pixel-wide frame buffer (the
  * width paraLLEl-RDP upscales from) and scans it out, so the upscaled and VI pipelines are compiled and checked too;
@@ -1119,39 +1120,68 @@ const RDP::RGBA *pf_take(VkRdp *d, unsigned *sw, unsigned *sh)
     return static_cast<const RDP::RGBA *>(d->dev->map_host_buffer(*b.buffer, Vulkan::MEMORY_ACCESS_READ_BIT));
 }
 
-/* n64_display's picture at the upscaled size (n64_rdp.h n64_rdp_scanout): everything queued is drawn first, unless
- * the prefetched scanout is of this picture (n64_rdp_scanout_prefetch). */
-int vk_scanout(void *p, const uint32_t *vi, uint32_t field, uint32_t *xrgb, int max_w, int max_h, int *w, int *h)
+/* n64_rdp.h n64_rdp_scanout_rgba: the picture in one of the two kept buffers, read where the GPU copied it (mapped,
+ * no copy): the prefetched one when it is of this picture (n64_rdp_scanout_prefetch), else a scanout now, after
+ * everything queued is drawn. */
+int vk_scanout_rgba(void *p, const uint32_t *vi, uint32_t field, const uint8_t **rgba, int *w, int *h, int *pitch)
 {
     VkRdp *d = static_cast<VkRdp *>(p);
     if (d->upscale <= 1 || d->failed)
         return -1;
     on_thread();
-    if (pf_matches(d, vi, field)) {
-        unsigned sw = 0, sh = 0;
-        const RDP::RGBA *src = pf_take(d, &sw, &sh);
-        if (!src || !sw || !sh || sw > (unsigned)max_w || sh > (unsigned)max_h)
-            return -1;
-        const uint64_t t0 = host_ns();
-        for (size_t i = 0, n = (size_t)sw * sh; i < n; i++)
-            xrgb[i] = (uint32_t)src[i].r << 16 | (uint32_t)src[i].g << 8 | src[i].b;
-        d->stats.scanout_ns += host_ns() - t0; /* the read-back's copy, as scanout_sync's memcpy is */
-        *w = (int)sw;
-        *h = (int)sh;
-        return 0;
-    }
-    d->pf_valid = false;
-    sync(d);
     unsigned sw = 0, sh = 0;
-    scanout_rgb(d, vi, field, &sw, &sh);
-    d->cp->begin_frame_context(); /* the scanout waited: nothing of this frame is in flight */
-    if (!sw || !sh || sw > (unsigned)max_w || sh > (unsigned)max_h)
+    const RDP::RGBA *src;
+    if (pf_matches(d, vi, field)) {
+        src = pf_take(d, &sw, &sh);
+    } else {
+        d->pf_valid = false;
+        sync(d);
+        for (unsigned r = 0; r < unsigned(RDP::VIRegister::Count); r++)
+            d->cp->set_vi_register(RDP::VIRegister(r), r == unsigned(RDP::VIRegister::VCurrentLine) ? field : vi[r]);
+        RDP::ScanoutOptions so;
+        so.downscale_steps = d->down_steps;
+        const uint64_t t0 = host_ns();
+        d->pf_cur ^= 1; /* the other buffer: the last picture handed out stays readable */
+        RDP::VIScanoutBuffer &b = d->pf[d->pf_cur];
+        d->cp->scanout_async_buffer(b, so);
+        if (b.fence)
+            b.fence->wait();
+        const uint64_t dt = host_ns() - t0;
+        d->stats.waits++;
+        d->stats.wait_ns += dt;
+        d->stats.scanouts++;
+        d->stats.scanout_ns += dt;
+        d->cp->begin_frame_context(); /* the scanout waited: nothing of this frame is in flight */
+        if (!b.fence || !b.width || !b.height)
+            return -1;
+        sw = b.width;
+        sh = b.height;
+        src = static_cast<const RDP::RGBA *>(d->dev->map_host_buffer(*b.buffer, Vulkan::MEMORY_ACCESS_READ_BIT));
+    }
+    if (!src || !sw || !sh)
         return -1;
-    const RDP::RGBA *src = d->scan.data();
-    for (size_t i = 0, n = (size_t)sw * sh; i < n; i++)
-        xrgb[i] = (uint32_t)src[i].r << 16 | (uint32_t)src[i].g << 8 | src[i].b;
+    *rgba = reinterpret_cast<const uint8_t *>(src); /* RDP::RGBA: r, g, b, a bytes */
     *w = (int)sw;
     *h = (int)sh;
+    *pitch = (int)sw * 4;
+    return 0;
+}
+
+/* n64_display's picture at the upscaled size (n64_rdp.h n64_rdp_scanout) as 0x00RRGGBB: vk_scanout_rgba converted. */
+int vk_scanout(void *p, const uint32_t *vi, uint32_t field, uint32_t *xrgb, int max_w, int max_h, int *w, int *h)
+{
+    const uint8_t *src = nullptr;
+    int sw = 0, sh = 0, pitch = 0;
+    if (vk_scanout_rgba(p, vi, field, &src, &sw, &sh, &pitch) != 0 || sw > max_w || sh > max_h)
+        return -1;
+    for (int y = 0; y < sh; y++) {
+        const uint8_t *s = src + (size_t)y * (size_t)pitch;
+        uint32_t *o = xrgb + (size_t)y * (size_t)sw;
+        for (int x = 0; x < sw; x++)
+            o[x] = (uint32_t)s[4 * x] << 16 | (uint32_t)s[4 * x + 1] << 8 | s[4 * x + 2];
+    }
+    *w = sw;
+    *h = sh;
     return 0;
 }
 
@@ -1315,4 +1345,4 @@ extern "C" const n64_rdp_ops n64_rdp_vk_ops = { "vulkan", vk_create, vk_destroy,
                                                 vk_failed, vk_upscale, vk_scanout_scale, vk_scanout,
                                                 vk_state_extra_size, vk_state_save, vk_state_load,
                                                 vk_stats, vk_unreported, vk_dp_complete, vk_scanout_prefetch,
-                                                vk_scanout_forget };
+                                                vk_scanout_forget, vk_scanout_rgba };

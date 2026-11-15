@@ -150,6 +150,12 @@ void n64_run_cycles(n64_machine *m, uint64_t cycles);
  * max_w x max_h. Returns 0 and the size, or -1 when the VI is blank (w / h then a default size). With the Vulkan RDP
  * upscaling (n64_rdp.h n64_rdp_scanout_scale > 0) and a buffer that holds it, its VI's picture at the upscaled size. */
 int n64_display(n64_machine *m, uint32_t *xrgb, int max_w, int max_h, int *w, int *h);
+/* n64_display's upscaled picture (the Vulkan RDP's scanout, n64_rdp.h n64_rdp_scanout_scale) without its copies:
+ * *rgba points at the RDP's own RGBA8 bytes (r, g, b, a; show it opaque), *w x *h, rows *pitch bytes apart, valid
+ * until the second picture after it (n64_rdp_scanout_rgba). 0; -2 when there is no upscaled scanout now (none, or
+ * interlaced): n64_display then; -1 when the upscaled scanout shows nothing: n64_display with a 1x buffer then (as
+ * n64_display would fall back to). Counts as n64_display for n64_display_changed when it returns 0. */
+int n64_display_rgba(n64_machine *m, const uint8_t **rgba, int *w, int *h, int *pitch);
 /* 0 when n64_display would now give the same picture as at its last call, 1 when it may differ (or there was none).
  * Conservative: 1 unless all of these are as they were then: the VI registers that shape the picture (V_CURRENT
  * aside), the back end and its scanout scale (the caller's buffer the same as then); the field order is not tracked, so an

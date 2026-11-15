@@ -756,6 +756,9 @@ static void test_vi(void)
     static uint32_t px[640 * 576];
     int w, h;
     CHECK(n64_display(m, px, 640, 576, &w, &h) != 0, "blank before the VI is set up");
+    const uint8_t *rgba = NULL;
+    int pitch = 0;
+    CHECK(n64_display_rgba(m, &rgba, &w, &h, &pitch) == -2, "no upscaled scanout: n64_display instead");
 
     /* NTSC 320 x 240, 16-bit, AA off (replicate): the canvas is 320 x 240, the active area (half-lines 37..511) starts
      * on row 1, the framebuffer's own pixels. The VI's guard band blanks VI pixels 108..115 and 741..747: canvas

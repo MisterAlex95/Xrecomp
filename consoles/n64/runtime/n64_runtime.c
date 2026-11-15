@@ -511,6 +511,32 @@ static int write_ppm(const char *path, const uint32_t *px, int w, int h)
 /* The run's machine and its saves, shared with the exit hook (the in-game menu's Quit ends the process from the UI
  * thread) and the lifecycle listener: s_mu is held while a frame runs and while a save is written. */
 static pthread_mutex_t s_mu = PTHREAD_MUTEX_INITIALIZER;
+
+/* The upscaled picture presented last straight from the Vulkan RDP's buffer (n64_display_rgba,
+ * host_window_present_rgba_shared): host_window_screenshot_bmp copies it on demand (any thread) instead of the window
+ * copying every picture. Under s_mu (the RDP's buffers change only while it is held). */
+static struct {
+    const uint8_t *px;
+    int w, h, pitch;
+} s_shared;
+
+static int shared_last(void *user, uint8_t **px, int *w, int *h)
+{
+    (void)user;
+    int rc = -1;
+    pthread_mutex_lock(&s_mu);
+    if (s_shared.px && s_shared.w > 0 && s_shared.h > 0 &&
+        (*px = malloc((size_t)s_shared.w * (size_t)s_shared.h * 4)) != NULL) {
+        for (int y = 0; y < s_shared.h; y++)
+            memcpy(*px + (size_t)y * (size_t)s_shared.w * 4, s_shared.px + (size_t)y * (size_t)s_shared.pitch,
+                   (size_t)s_shared.w * 4);
+        *w = s_shared.w;
+        *h = s_shared.h;
+        rc = 0;
+    }
+    pthread_mutex_unlock(&s_mu);
+    return rc;
+}
 static n64_machine *s_m;
 static char s_save_dir[1024], s_key[64];
 static uint8_t *s_saved[N_SAVES]; /* each image as last read or written (or as the run started), by kind */
@@ -1347,6 +1373,10 @@ int n64_runtime_run(const n64_runtime_opts *o)
             fprintf(stderr, "n64: no memory for the %dx picture, shown at 1x\n", sscale);
         }
     }
+    /* The upscaled picture handed to the window straight from the Vulkan RDP's scanout buffer (n64_display_rgba): one
+     * copy (the texture upload) instead of RGBA -> XRGB -> RGBA and the window's copy for screenshots.
+     * RECOMP_N64_PRESENT_DIRECT=0: through the XRGB buffer as before. */
+    const int rgba_direct = window && xrgb_up && xrgb == xrgb_up && !env_choice("RECOMP_N64_PRESENT_DIRECT", "0", 0);
     static int16_t pcm[N64_AUDIO_RATE / 10 * 2];
     int dw = 320, dh = 240, last_w = 0, last_h = 0, display_on = -1, last_kind = N64_SAVE_NONE;
     uint64_t frames = 0, next = now_ns(), t0 = next, late_resets = 0, dirty_at = 0, dirty_first = 0;
@@ -1497,6 +1527,8 @@ int n64_runtime_run(const n64_runtime_opts *o)
          * (only the last frame's picture is made anyway). */
         int steps = rewinding ? 0 : ff ? (speed ? speed : 64) : 1, dirty = 0, skip = 0, on = display_on > 0;
         int fresh = 1; /* a new picture made this host frame (0: the VI's picture had not changed, nothing made) */
+        const uint8_t *prgba = NULL; /* the picture straight from the Vulkan RDP's scanout (n64_display_rgba) */
+        int ppitch = 0;
         uint64_t frame_ns = 16683333, burst_end = now_ns() + 15000000;
         if (rewinding) { /* rewind held: one capture back per shown frame, no N64 frame runs, nothing heard */
             pthread_mutex_lock(&s_mu);
@@ -1554,7 +1586,21 @@ int n64_runtime_run(const n64_runtime_opts *o)
                 if (forced)
                     skip = 0; /* the last frame of a bounded run is the screenshot; a capture is a capture */
                 uint64_t tv = now_ns();
-                on = skip || !fresh ? display_on > 0 : n64_display(m, xrgb, max_w, max_h, &dw, &dh) == 0;
+                if (skip || !fresh) {
+                    on = display_on > 0;
+                } else {
+                    /* Upscaled: the scanout's own RGBA, no conversion nor copy (the last frame of a bounded run
+                     * keeps the XRGB picture: --screenshot writes it). */
+                    int last_frame = o->frames && frames + 1 >= o->frames;
+                    int r = rgba_direct && !last_frame ? n64_display_rgba(m, &prgba, &dw, &dh, &ppitch) : -2;
+                    if (r != 0) { /* -1: the upscaled scanout shows nothing, the 1x picture (without a second try) */
+                        prgba = NULL;
+                        on = n64_display(m, xrgb, r == -1 ? N64_SCREEN_MAX_W : max_w,
+                                         r == -1 ? N64_SCREEN_MAX_H : max_h, &dw, &dh) == 0;
+                    } else {
+                        on = 1;
+                    }
+                }
                 pacc.vi += now_ns() - tv;
                 skipped += (uint64_t)skip;
                 pacc.skipped += (uint64_t)skip;
@@ -1593,7 +1639,14 @@ int n64_runtime_run(const n64_runtime_opts *o)
 
         if (skip || !fresh) {
             /* keep the last picture and its size */
+        } else if (prgba && on && dw > 0 && dh > 0) {
+            if (dw != last_w || dh != last_h) {
+                printf("n64: display %d x %d at frame %llu\n", dw, dh, (unsigned long long)frames);
+                last_w = dw;
+                last_h = dh;
+            }
         } else if (!on || dw <= 0 || dh <= 0 || dw > max_w || dh > max_h) {
+            prgba = NULL;
             dw = last_w ? last_w : 320;
             dh = last_h ? last_h : 240;
             memset(xrgb, 0, (size_t)dw * (size_t)dh * sizeof xrgb[0]);
@@ -1653,11 +1706,21 @@ int n64_runtime_run(const n64_runtime_opts *o)
             uint64_t tp = now_ns();
             if (o->capture_path && o->capture_frame == frames)
                 host_window_capture(o->capture_path);
-            n64_runtime_xrgb_to_rgba(xrgb, rgba, (size_t)dw * (size_t)dh);
             /* The VI's guard band (RECOMP_N64_CROP_EDGES): the columns either side are left out of the texture and
              * the rest still fills the 4:3 shape. */
             int cc = crop ? n64_runtime_crop_columns(dw) : 0;
-            host_window_present_rgba(rgba + 4 * cc, dw - 2 * cc, dh, dw * 4);
+            if (prgba) { /* one copy, GPU buffer -> texture (the shader shows it opaque: the VI's alpha is ignored) */
+                pthread_mutex_lock(&s_mu);
+                s_shared.px = prgba + 4 * cc;
+                s_shared.w = dw - 2 * cc;
+                s_shared.h = dh;
+                s_shared.pitch = ppitch;
+                pthread_mutex_unlock(&s_mu);
+                host_window_present_rgba_shared(prgba + 4 * cc, dw - 2 * cc, dh, ppitch, shared_last, NULL);
+            } else {
+                n64_runtime_xrgb_to_rgba(xrgb, rgba, (size_t)dw * (size_t)dh);
+                host_window_present_rgba(rgba + 4 * cc, dw - 2 * cc, dh, dw * 4);
+            }
             pacc.present += now_ns() - tp;
         }
         if (o->frames && frames >= o->frames)
@@ -1689,6 +1752,12 @@ int n64_runtime_run(const n64_runtime_opts *o)
     }
 
     recomp_perf_hint_end();
+    if (rgba_direct) { /* the RDP's buffers go with the machine: the window keeps its own copy of the last picture */
+        host_window_keep_shared();
+        pthread_mutex_lock(&s_mu);
+        s_shared.px = NULL;
+        pthread_mutex_unlock(&s_mu);
+    }
     uint64_t t_end = now_ns();
     double secs = (double)(t_end - t0) / 1e9;
     printf("n64: %llu frames in %.1f s (%.2f fps), %llu skipped, %llu late resets\n", (unsigned long long)frames, secs,

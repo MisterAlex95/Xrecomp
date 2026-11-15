@@ -62,6 +62,15 @@ void host_window_set_event_hook(host_window_event_fn fn, void *user);
  * window's own texture and presents it. Returns 1, or 0 on a GL error. */
 int host_window_present_rgba(const void *px, int w, int h, int pitch);
 
+/* host_window_present_rgba for pixels the caller keeps (the N64 runtime: the Vulkan RDP's mapped scanout): no copy
+ * is made for host_window_screenshot_bmp; it asks `last` instead, on its own thread, for the picture shown last: a
+ * malloc'd copy, tightly packed RGBA rows, its size; 0, or -1 when there is none any more. The next
+ * host_window_present_rgba (a copy kept again) or host_window_keep_shared (the caller's pixels are going: `last` is
+ * asked now and the copy kept) ends it. */
+typedef int (*host_window_last_fn)(void *user, uint8_t **px, int *w, int *h);
+int host_window_present_rgba_shared(const void *px, int w, int h, int pitch, host_window_last_fn last, void *user);
+void host_window_keep_shared(void);
+
 /* Draws the picture the last host_window_present_rgba uploaded again (no upload, no copy kept for the screenshot):
  * for a frame whose picture did not change (the N64 runtime: a VI without a new picture). With frame generation
  * running it draws nothing (the pacer shows its FIFO at its own due times and wants distinct pictures only). Returns

@@ -48,7 +48,7 @@ static void sw_stats(void *d, n64_rdp_stats *out) { n64_rdp_sw_get_stats(d, out)
 const n64_rdp_ops n64_rdp_sw_ops = { "software", sw_create, sw_destroy, sw_reset, sw_attach_dmem,
                                      sw_read_reg, sw_write_reg, sw_run, sw_set_threads, sw_flush, NULL,
                                      NULL, NULL, NULL, sw_state_extra_size, sw_state_save, sw_state_load,
-                                     sw_stats, NULL, NULL, NULL, NULL };
+                                     sw_stats, NULL, NULL, NULL, NULL, NULL };
 
 struct n64_rdp {
     const n64_rdp_ops *ops;
@@ -386,6 +386,14 @@ void n64_rdp_scanout_prefetch(n64_rdp *d, const uint32_t *vi, uint32_t field, ui
 {
     if (d && d->ops->scanout_prefetch && n64_rdp_scanout_scale(d))
         d->ops->scanout_prefetch(d->impl, vi, field, lo, hi);
+}
+
+int n64_rdp_scanout_rgba(n64_rdp *d, const uint32_t *vi, uint32_t field, const uint8_t **rgba, int *w, int *h,
+                         int *pitch)
+{
+    if (!n64_rdp_scanout_scale(d) || !d->ops->scanout_rgba)
+        return -1;
+    return d->ops->scanout_rgba(d->impl, vi, field, rgba, w, h, pitch);
 }
 
 void n64_rdp_scanout_forget(n64_rdp *d)

@@ -618,6 +618,27 @@ int n64_display(n64_machine *m, uint32_t *xrgb, int max_w, int max_h, int *w, in
     return r;
 }
 
+int n64_display_rgba(n64_machine *m, const uint8_t **rgba, int *w, int *h, int *pitch)
+{
+    if (n64_rdp_scanout_scale(m->rdp) <= 0 || (m->vi[0] & 0x40))
+        return -2;
+    /* As display_picture: the RDP's rows where the VI reads in RDRAM first; the early scanout unless the CPU wrote
+     * there since. */
+    uint32_t rlo, rhi;
+    vi_read_range(m, &rlo, &rhi);
+    if (rhi <= rlo || n64_rdp_unreported(m->rdp, rlo, rhi))
+        n64_rdp_flush(m->rdp);
+    if (m->pf.on) {
+        m->pf.on = false;
+        if (rlo != m->pf.lo || rhi != m->pf.hi || non_rcp_gen(m, rlo, rhi) != m->pf.gen)
+            n64_rdp_scanout_forget(m->rdp);
+    }
+    if (n64_rdp_scanout_rgba(m->rdp, m->vi, m->vi_field, rgba, w, h, pitch) != 0)
+        return -1; /* the 1x picture then (n64_core.h) */
+    display_snapshot(m);
+    return 0;
+}
+
 int n64_framebuffer(n64_machine *m, uint32_t *xrgb, int max_w, int max_h, int *w, int *h)
 {
     uint32_t type = m->vi[0] & 3, origin = m->vi[1] & 0xFFFFFF, width = m->vi[2] & 0xFFF;

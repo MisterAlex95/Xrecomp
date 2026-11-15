@@ -559,6 +559,14 @@ at the VI_ORIGIN change (`n64_rdp_scanout_prefetch`, while nothing is queued in 
 interrupt in percent of a VI), `RECOMP_N64_SCANOUT_EARLY=0` the early scanout alone. The software RDP never defers
 (`n64_rdp_set_defer_software` / `RECOMP_N64_RDP_DEFER_SOFTWARE=1` route it through the policy, for tests).
 
+Upscaled picture path: the frame loop hands the window the Vulkan RDP's scanout where the GPU copied it
+(`n64_display_rgba` / `n64_rdp_scanout_rgba`: RGBA8 in one of two kept, mapped `VIScanoutBuffer`s, the crop as an
+offset, the row pitch as it is): one copy (the texture upload) instead of the read-back's copy, RGBA -> XRGB -> RGBA
+and the window's copy for screenshots (`host_window_present_rgba_shared`: `host_window_screenshot_bmp` asks the
+runtime for the last picture on demand). The window's shaders draw it opaque (the VI's alpha byte is ignored). The
+last frame of a bounded run (`--screenshot`), save-state thumbnails (1x) and the 1x / software pictures keep the XRGB
+path. `RECOMP_N64_PRESENT_DIRECT=0` goes through the XRGB buffer as before.
+
 Pictures: the frame loop makes, converts and
 uploads a picture only for a VI whose picture changed since the last one shown (`n64_display_changed`: the VI
 registers, the RDRAM it reads written by the CPU, a DMA or the RDP, rows the Vulkan RDP has queued there, a state load;
