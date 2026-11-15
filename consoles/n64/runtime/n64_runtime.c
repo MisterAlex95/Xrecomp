@@ -380,15 +380,21 @@ int n64_runtime_perf_detail_format(const n64_runtime_perf *p, char *out, size_t 
 {
     return snprintf(out, n,
                     "%llu VIs, %llu pictures (%.1f/s), %llu unchanged, %llu skipped; %llu VI_ORIGIN changes, %llu "
-                    "scanouts, %llu full rings; %llu stalled compiles (%.0f ms); worst %.0f ms: core %.1f vi %.1f "
-                    "present %.1f audio %.1f other %.1f (rdp queue %.1f, sync %.1f, scanout %.1f)",
+                    "scanouts (%llu early), %llu full rings; DP %llu deferred (%llu early, %llu backoffs), %llu at "
+                    "once, %llu waited %.1f ms (%.2f ms each); %llu stalled compiles (%.0f ms); worst %.0f ms: core "
+                    "%.1f vi %.1f present %.1f audio %.1f other %.1f (rdp queue %.1f, sync %.1f, deadline %.1f, "
+                    "scanout %.1f)",
                     (unsigned long long)p->frames, (unsigned long long)p->pictures,
                     p->seconds > 0 ? (double)p->pictures / p->seconds : 0.0, (unsigned long long)p->unchanged,
                     (unsigned long long)p->skipped, (unsigned long long)p->vi_origin_changes,
-                    (unsigned long long)p->scanouts, (unsigned long long)p->queue_waits,
+                    (unsigned long long)p->scanouts, (unsigned long long)p->scanouts_early,
+                    (unsigned long long)p->queue_waits, (unsigned long long)p->dp_deferred,
+                    (unsigned long long)p->dp_early, (unsigned long long)p->dp_backoffs,
+                    (unsigned long long)p->dp_now, (unsigned long long)p->dp_waits, p->dp_wait_ms,
+                    p->dp_deferred ? p->dp_wait_ms / (double)p->dp_deferred : 0.0,
                     (unsigned long long)p->stalled_compiles, p->stalled_compile_ms, p->worst_ms, p->worst_core_ms,
                     p->worst_vi_ms, p->worst_present_ms, p->worst_audio_ms, p->worst_other_ms, p->worst_queue_ms,
-                    p->worst_sync_ms, p->worst_scanout_ms);
+                    p->worst_sync_ms, p->worst_deadline_ms, p->worst_scanout_ms);
 }
 
 /* ---- Files ---------------------------------------------------------------------------------------------------- */
@@ -830,7 +836,7 @@ typedef struct rt_perf_acc {
 
 /* The worst host frame's breakdown (ns): its length without the sleep, its stages, the RDP's waits in it. */
 typedef struct rt_worst {
-    uint64_t busy, core, vi, present, audio, queue, wait, scanout;
+    uint64_t busy, core, vi, present, audio, queue, wait, scanout, deadline;
 } rt_worst;
 
 /* Everything a line is the difference of: taken at the start, at each line and after a pause. */
@@ -933,11 +939,19 @@ static void perf_fill(n64_runtime_perf *p, const rt_perf_mark *a, const rt_perf_
     p->worst_queue_ms = (double)worst->queue / 1e6;
     p->worst_scanout_ms = (double)worst->scanout / 1e6;
     p->worst_sync_ms = worst->wait > worst->scanout ? (double)(worst->wait - worst->scanout) / 1e6 : 0.0;
+    p->worst_deadline_ms = (double)worst->deadline / 1e6;
     p->pictures = b->acc.pictures - a->acc.pictures;
     p->unchanged = b->acc.unchanged - a->acc.unchanged;
     p->skipped = b->acc.skipped - a->acc.skipped;
     p->vi_origin_changes = b->vi_origin_changes - a->vi_origin_changes;
     p->scanouts = b->core.rdp_scanouts - a->core.rdp_scanouts;
+    p->scanouts_early = b->core.rdp_prefetch_hits - a->core.rdp_prefetch_hits;
+    p->dp_deferred = b->core.dp_deferred - a->core.dp_deferred;
+    p->dp_now = b->core.dp_now - a->core.dp_now;
+    p->dp_early = b->core.dp_early - a->core.dp_early;
+    p->dp_backoffs = b->core.dp_backoffs - a->core.dp_backoffs;
+    p->dp_waits = b->core.rdp_dp_waits - a->core.rdp_dp_waits;
+    p->dp_wait_ms = (double)(b->core.rdp_dp_wait_ns - a->core.rdp_dp_wait_ns) / 1e6;
     p->queue_waits = b->core.rdp_queue_waits - a->core.rdp_queue_waits;
     p->stalled_compiles = b->core.rdp_stalled_compiles - a->core.rdp_stalled_compiles;
     p->stalled_compile_ms = (double)(b->core.rdp_stalled_compile_ns - a->core.rdp_stalled_compile_ns) / 1e6;
@@ -1429,7 +1443,7 @@ int n64_runtime_run(const n64_runtime_opts *o)
                     rt_worst w = {busy, pacc.core - p_iter_acc.core, pacc.vi - p_iter_acc.vi,
                                   pacc.present - p_iter_acc.present, pacc.audio - p_iter_acc.audio,
                                   rs.queue_ns - p_iter_rdp.queue_ns, rs.wait_ns - p_iter_rdp.wait_ns,
-                                  rs.scanout_ns - p_iter_rdp.scanout_ns};
+                                  rs.scanout_ns - p_iter_rdp.scanout_ns, rs.dp_wait_ns - p_iter_rdp.dp_wait_ns};
                     if (busy > p_worst.busy)
                         p_worst = w;
                     if (busy > p_worst_run.busy)

@@ -508,9 +508,10 @@ n64: perf speed 25 % (15.0 of 60.0 VI/s); cpu 7.9 rsp 4.1 rdp 5.2 (queue 1.0, sy
 present 0.9 audio 0.1 idle 0.0 other 0.2 ms/frame; worst 41 ms, 212 > 16.7 ms, 30 > 33.4 ms of 150 frames; rsp 1.20 M
 instr, rdp 3400 cmds, 2.0 full syncs /frame; pack 83 % native, 3.1 k interp instr/frame, 12 rehashes, 40 slow lookups;
 rdp vulkan, upscale 2x, rewind off; core 6 @ 1.90 GHz
-n64: perf detail 500 VIs, 167 pictures (16.7/s), 333 unchanged, 0 skipped; 167 VI_ORIGIN changes, 167 scanouts, 40
-full rings; 0 stalled compiles (0 ms); worst 40 ms: core 30.1 vi 7.2 present 1.8 audio 0.1 other 0.8 (rdp queue 9.0,
-sync 8.0, scanout 3.0)
+n64: perf detail 500 VIs, 167 pictures (16.7/s), 333 unchanged, 0 skipped; 167 VI_ORIGIN changes, 167 scanouts (160
+early), 40 full rings; DP 160 deferred (0 early, 0 backoffs), 7 at once, 12 waited 3.5 ms (0.02 ms each); 0 stalled
+compiles (0 ms); worst 40 ms: core 30.1 vi 7.2 present 1.8 audio 0.1 other 0.8 (rdp queue 9.0, sync 8.0, deadline
+0.2, scanout 3.0)
 ```
 
 Speed is N64 frames per second against the VI's rate. Times are ms per N64 frame: `n64_run_frame` split into the CPU
@@ -530,10 +531,35 @@ back end (and the software RDP's threads), the internal resolution, rewind, and 
 `scaling_cur_freq` (Linux / Android; `core ?` elsewhere). The counters are host-only: not in save states, no effect on
 the run (`n64_run --perf N` prints the core's part, run hashes unchanged). The detail line that follows: the VIs (N64
 frames) against the pictures made and shown (`n64_display`), the VIs whose picture had not changed and the new
-pictures frame skip dropped; the game's buffer swaps (VI_ORIGIN changes), the Vulkan RDP's upscaled scanouts and the
-times its command ring was full; paraLLEl-RDP's "Stalled compile" pipelines (5 ms or more) and their time; then the
-worst host frame's own breakdown: `n64_run_frame`, `n64_display`, present, audio, the rest, and the RDP's waits inside
-that frame. Pictures: the frame loop makes, converts and
+pictures frame skip dropped; the game's buffer swaps (VI_ORIGIN changes), the Vulkan RDP's upscaled scanouts (of
+which started early, at the VI_ORIGIN change) and the times its command ring was full; the deferred DP interrupts
+(below: SYNC_FULLs deferred, completed early for a save state, backoffs, completed at once; the deadlines where the
+GPU was still drawing, the wait at the deadlines and its mean per deferred one); paraLLEl-RDP's "Stalled compile"
+pipelines (5 ms or more) and their time; then the worst host frame's own breakdown: `n64_run_frame`, `n64_display`,
+present, audio, the rest, and the RDP's waits inside that frame (`deadline`: at a deferred DP interrupt's deadline,
+inside `core`).
+
+Deferred DP interrupt (Vulkan RDP; `n64_core.c` « Deferred DP interrupt », `n64_core.h` `n64_set_rdp_defer`). At a
+SYNC_FULL the Vulkan RDP hands the work to the GPU and asks the core (`n64_devices.h` `bus.defer_dp`) whether the DP
+interrupt may come later; paraLLEl-RDP's command ring holds 1 MB of commands (our patch; 16 KB before, so the
+emulation thread used to wait for the GPU while a display list was queued: `queue`). The core answers from emulated
+facts only, so the interrupt's moment is the same on every host: when the last 3 pictures each lasted 2 VIs or more,
+had exactly one SYNC_FULL, at least 2 VI interrupts before the next VI_ORIGIN change, and their DP interrupt came
+before it (Ocarina of Time PAL: SYNC_FULL at 0.7 VI, the swap 2.3 VIs later), a second after reset or a state load,
+the interrupt comes at the next VI interrupt plus 1/16 VI: the GPU's work is waited for there (`deadline`), after the
+host's frame pacing, at the start of a light frame, instead of inside the frame that queued it. Otherwise (a picture
+every VI, several SYNC_FULLs per picture, a game that swaps at the first VI after the RDP is done) at once as before.
+A picture that comes later than before while deferring stops it for 500 VIs (`backoffs`). Until the deadline the RDP
+keeps its busy bits; `n64_rdp_flush` (a picture to show, a save state) waits for the GPU but leaves the interrupt to
+its deadline; a save state completes a pending one first (states never hold one, their format is unchanged); reset
+and state loads drop it; a second SYNC_FULL completes the first. With it, the upscaled scanout of a new picture starts
+at the VI_ORIGIN change (`n64_rdp_scanout_prefetch`, while nothing is queued in front of it on the GPU) and
+`n64_display` takes it unless the registers changed or something was drawn or written where the VI reads (`scanouts
+(N early)`). `RECOMP_N64_RDP_DEFER=0` turns both off (`auto` default; a number: the deadline's offset after the VI
+interrupt in percent of a VI), `RECOMP_N64_SCANOUT_EARLY=0` the early scanout alone. The software RDP never defers
+(`n64_rdp_set_defer_software` / `RECOMP_N64_RDP_DEFER_SOFTWARE=1` route it through the policy, for tests).
+
+Pictures: the frame loop makes, converts and
 uploads a picture only for a VI whose picture changed since the last one shown (`n64_display_changed`: the VI
 registers, the RDRAM it reads written by the CPU, a DMA or the RDP, rows the Vulkan RDP has queued there, a state load;
 interlaced modes always): a game that draws one picture per 2 or 3 VIs (Ocarina of Time PAL) scans out, converts and

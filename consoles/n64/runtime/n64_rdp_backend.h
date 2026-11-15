@@ -60,6 +60,11 @@ typedef struct n64_rdp_ops {
     /* n64_rdp.h n64_rdp_unreported: 1 when rows drawn but not yet reported through bus.wrote may overlap RDRAM
      * [lo, hi). NULL: the back end is flushed instead (its pixels in RDRAM and reported). */
     int (*unreported)(void *d, uint32_t lo, uint32_t hi);
+    /* n64_rdp.h n64_rdp_dp_complete (NULL: the back end never defers; n64_rdp_select.c raises the interrupt). */
+    void (*dp_complete)(void *d);
+    /* n64_rdp.h n64_rdp_scanout_prefetch / n64_rdp_scanout_forget (NULL: none). */
+    void (*scanout_prefetch)(void *d, const uint32_t *vi, uint32_t field, uint32_t lo, uint32_t hi);
+    void (*scanout_forget)(void *d);
 } n64_rdp_ops;
 
 /* The factor the next back end is asked to draw at (n64_rdp_select.c: n64_rdp_set_upscale, else the environment). */

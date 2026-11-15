@@ -489,6 +489,9 @@ apply to them too; the pad mappings are under [Input](#input).
 | `RECOMP_N64_UPSCALE_NATIVE_LOD=1` | off | Computes texture LOD as at 1x when upscaled (games that pick textures through LOD). | `n64_rdp_vk.cpp` |
 | `RECOMP_N64_UPSCALE_SSREADBACK=1` | off | The RDRAM copy the game reads is the upscaled picture averaged down, not the 1x one (not bit-exact). | `n64_rdp_vk.cpp` |
 | `RECOMP_N64_RDP_THREADS=N` | 2 on Android, else `XBR_N64_RDP_THREADS`, else 1 | The software RDP's renderer threads (`--rdp-threads`): they draw while the emulation thread runs on, the result is the same for any count. | `n64_runtime.c`, `n64_rdp.c` |
+| `RECOMP_N64_RDP_DEFER=0\|auto\|<percent>` | auto | The Vulkan RDP's deferred DP interrupt (`n64_core.c` « Deferred DP interrupt »): for a game that shows a picture every 2 VIs or more with one SYNC_FULL each, the DP interrupt comes after the next VI interrupt and the GPU is waited for there, not inside the frame that queued the work; with it, the upscaled scanout starts at the VI_ORIGIN change. `0` off (both), `auto` the deadline 1/16 VI after the VI interrupt, a number that offset in percent of a VI (1..100). | `n64_core.c` |
+| `RECOMP_N64_SCANOUT_EARLY=0` | on | The early upscaled scanout alone off (`n64_rdp_scanout_prefetch`), to compare. | `n64_vi.c` |
+| `RECOMP_N64_RDP_DEFER_SOFTWARE=1` | 0 | Tests: the software RDP's DP interrupt goes through the deferral policy too (drawn at once, only the interrupt held). | `n64_rdp_select.c` |
 | `RECOMP_N64_RDP_CHECK=0` | on | Skips the Vulkan RDP's start-up draw check (only a pipeline failure then falls back). | `n64_rdp_vk.cpp` |
 | `RECOMP_N64_RDP_UBERSHADER=1` | off on Qualcomm's driver | Uses the Vulkan RDP's ubershader on Qualcomm's proprietary driver anyway (games come out black there, so it goes software). | `n64_rdp_vk.cpp` |
 | `RECOMP_N64_TTY=1` | off | Prints the IS-Viewer text a game writes (`--tty`). | `n64_runtime.c` |

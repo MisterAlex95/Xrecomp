@@ -262,9 +262,33 @@ typedef struct n64_perf {
     uint64_t rdp_queue_waits, rdp_queue_ns;
     uint64_t rdp_scanouts, rdp_scanout_ns;
     uint64_t rdp_stalled_compiles, rdp_stalled_compile_ns;
+    /* The deferred DP interrupt (n64_set_rdp_defer): SYNC_FULLs whose DP interrupt the policy put off to a deadline,
+     * those completed at once (the policy said now), those completed before their deadline (a save state), pictures
+     * that came later while deferring (the policy then stops for a while); the back end's waits for the GPU at the
+     * deadlines and their time (n64_rdp_stats dp_*, inside rdp_ns). */
+    uint64_t dp_deferred, dp_now, dp_early, dp_backoffs;
+    uint64_t rdp_dp_waits, rdp_dp_wait_ns;
+    uint64_t rdp_prefetches, rdp_prefetch_hits; /* early scanouts started, taken (n64_rdp.h n64_rdp_scanout_prefetch) */
 } n64_perf;
 void n64_perf_enable(n64_machine *m, int every);
+
 void n64_perf_get(n64_machine *m, n64_perf *out);
+
+/* Deferred DP interrupt (n64_core.c « Deferred DP interrupt »): an RDP back end that can let the GPU finish a SYNC_FULL
+ * later (the Vulkan RDP: n64_devices.h bus.defer_dp) asks the core at each SYNC_FULL; the core answers from emulated
+ * facts only. When the game shows a picture at most every second VI, each picture had exactly one SYNC_FULL, at least
+ * two VI interrupts before the next VI_ORIGIN change (the game did not swap at the first VI after the RDP was done),
+ * and that held for the last 3 pictures, a second after reset or a state load, the DP interrupt comes at the next VI
+ * interrupt plus offset_pm / 1000 of a VI (default 62: 1/16), and the GPU's work is waited for there, after the host's
+ * frame pacing, instead of inside the frame that queued it. Otherwise (a picture every VI, several SYNC_FULLs per
+ * picture, a game that swaps as soon as the RDP is done), at once as before. A picture that comes later than before
+ * while deferring stops it for 500 VIs. mode: N64_DP_DEFER_OFF, or N64_DP_DEFER_AUTO with offset_pm 1..1000 (0: the
+ * default). n64_create takes $RECOMP_N64_RDP_DEFER: "0" (off), "auto" (default), or a percentage of a VI for the
+ * offset (1..100). No effect with the software RDP. */
+enum { N64_DP_DEFER_OFF = 0, N64_DP_DEFER_AUTO = 1 };
+void n64_set_rdp_defer(n64_machine *m, int mode, int offset_pm);
+/* $RECOMP_N64_RDP_DEFER as above: the mode, and the offset (per mille) through *offset_pm. NULL / "" / "auto": auto. */
+int n64_rdp_defer_parse(const char *s, int *offset_pm);
 
 /* Guest health, for the runtime's diagnostics (no effect on the machine).
  * n64_guest_fault_info: the first exception of a kind a healthy game does not take (TLB refill / invalid / modified,

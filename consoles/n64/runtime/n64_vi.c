@@ -281,6 +281,41 @@ static inline uint32_t noise(uint32_t x, uint32_t y, uint32_t f)
     return h;
 }
 
+static void vi_read_range(const n64_machine *m, uint32_t *lo, uint32_t *hi);
+static void vi_lines_range(const n64_machine *m, uint32_t *lo, uint32_t *hi, int strict);
+static uint64_t non_rcp_gen(const n64_machine *m, uint32_t lo, uint32_t hi);
+
+/* VI_ORIGIN changed (n64_io.c): the Vulkan RDP may start this picture's upscaled scanout now, while nothing is queued
+ * in front of it on the GPU (n64_rdp.h n64_rdp_scanout_prefetch); by the end of the VI frame the game has usually
+ * queued its next picture, which a scanout would wait for. Only for a runtime that shows the upscaled scanout (the last
+ * n64_display used it), progressive modes, and with the deferred DP interrupt on (RECOMP_N64_RDP_DEFER=0 turns both
+ * off; RECOMP_N64_SCANOUT_EARLY=0 this one alone, to compare). Host-side only. */
+void n64_vi_origin_changed(n64_machine *m)
+{
+    static int early = -1;
+    if (early < 0) {
+        const char *e = getenv("RECOMP_N64_SCANOUT_EARLY");
+        early = !(e && *e && atoi(e) == 0);
+    }
+    m->pf.on = false;
+    if (!early || m->dpp.mode != N64_DP_DEFER_AUTO || !m->disp.valid || m->disp.sscale <= 0 || (m->vi[0] & 0x40))
+        return;
+    uint32_t lo, hi;
+    vi_read_range(m, &lo, &hi);
+    if (hi <= lo)
+        return;
+    m->pf.on = true;
+    m->pf.lo = lo;
+    m->pf.hi = hi;
+    m->pf.gen = non_rcp_gen(m, lo, hi);
+    /* The RDP's rows since: tested against the lines shown only (the line under the last one, which the VI blends in
+     * with some weight, is often the next buffer's first, drawn from the start of the next picture: the scanout then
+     * blends in what was there at the VI_ORIGIN change). */
+    uint32_t slo, shi;
+    vi_lines_range(m, &slo, &shi, 1);
+    n64_rdp_scanout_prefetch(m->rdp, m->vi, m->vi_field, slo, shi);
+}
+
 static int display_picture(n64_machine *m, uint32_t *xrgb, int max_w, int max_h, int *w, int *h)
 {
     uint32_t ctrl = m->vi[0], type = ctrl & 3;
@@ -293,7 +328,18 @@ static int display_picture(n64_machine *m, uint32_t *xrgb, int max_w, int max_h,
     int field_h = m->pal ? 288 : 240;
     *w = 320;
     *h = field_h;
-    n64_rdp_flush(m->rdp); /* the software RDP commits what its renderer threads drew */
+    /* The RDRAM read below in RDRAM: the software RDP commits what its renderer threads drew (n64_rdp_unreported
+     * flushes it); the Vulkan RDP waits for the GPU only when rows it drew there are not in RDRAM yet (a deferred
+     * SYNC_FULL drawing the next buffer is not waited for here). */
+    uint32_t rlo, rhi;
+    vi_read_range(m, &rlo, &rhi);
+    if (interlaced || rhi <= rlo || n64_rdp_unreported(m->rdp, rlo, rhi))
+        n64_rdp_flush(m->rdp);
+    if (m->pf.on) { /* the early scanout: not when the CPU wrote where it reads since (n64_vi_origin_changed) */
+        m->pf.on = false;
+        if (rlo != m->pf.lo || rhi != m->pf.hi || non_rcp_gen(m, rlo, rhi) != m->pf.gen)
+            n64_rdp_scanout_forget(m->rdp);
+    }
     /* Internal resolution (XBA-185, n64_rdp.h): the Vulkan RDP's own VI scans out its upscaled picture when the
      * caller's buffer holds it (640 VI pixels wide times the scale); else, or when it shows nothing, the picture
      * below, from RDRAM at 1x. */
@@ -462,7 +508,11 @@ static int display_picture(n64_machine *m, uint32_t *xrgb, int max_w, int max_h,
  * framebuffer lines its visible rows sample, one line more for the vertical interpolation, one more each side for the
  * AA / dither filters' neighbours (n64_display above), and one more line for paraLLEl-RDP's own VI (whose filters
  * are not ours). Lines are whole (WIDTH pixels). */
-static void vi_read_range(const n64_machine *m, uint32_t *lo, uint32_t *hi)
+static void vi_read_range(const n64_machine *m, uint32_t *lo, uint32_t *hi) { vi_lines_range(m, lo, hi, 0); }
+
+/* strict: the framebuffer lines the visible rows start on only, without the neighbours (the early scanout's test for
+ * rows the RDP drew since: a game whose buffers follow each other draws the next one right after the last line). */
+static void vi_lines_range(const n64_machine *m, uint32_t *lo, uint32_t *hi, int strict)
 {
     uint32_t ctrl = m->vi[0], type = ctrl & 3;
     uint32_t origin = m->vi[1] & 0xFFFFFF, width = m->vi[2] & 0xFFF;
@@ -477,9 +527,9 @@ static void vi_read_range(const n64_machine *m, uint32_t *lo, uint32_t *hi)
     if (j1 <= j0)
         return;
     uint64_t stride = (uint64_t)width * (type == 3 ? 4 : 2);
-    int64_t y0 = (int64_t)((yoff + (uint64_t)j0 * ys) >> 10) - 1;
-    int64_t y1 = (int64_t)((yoff + (uint64_t)(j1 - 1) * ys) >> 10) + 3; /* last line read + interpolation, filter,
-                                                                            paraLLEl-RDP's VI */
+    int64_t y0 = (int64_t)((yoff + (uint64_t)j0 * ys) >> 10) - (strict ? 0 : 1);
+    int64_t y1 = (int64_t)((yoff + (uint64_t)(j1 - 1) * ys) >> 10) + (strict ? 0 : 3); /* last line read +
+                                                                            interpolation, filter, paraLLEl-RDP's VI */
     if (y0 < 0)
         y0 = 0;
     uint64_t a = origin + (uint64_t)y0 * stride, b = origin + (uint64_t)(y1 + 1) * stride;

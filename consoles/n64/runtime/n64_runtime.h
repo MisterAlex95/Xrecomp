@@ -212,13 +212,18 @@ typedef struct n64_runtime_perf {
     uint64_t pictures, unchanged, skipped;
     uint64_t vi_origin_changes;   /* the game's buffer swaps (n64_guest_activity) */
     uint64_t scanouts;            /* the Vulkan RDP's upscaled scanouts */
+    uint64_t scanouts_early;      /* of those, started at the VI_ORIGIN change (n64_rdp_scanout_prefetch) */
     uint64_t queue_waits;         /* times the emulation thread found the Vulkan RDP's command ring full */
     uint64_t stalled_compiles;    /* "Stalled compile" pipelines (5 ms or more) */
     double stalled_compile_ms;
+    /* The deferred DP interrupt (n64_core.h n64_set_rdp_defer): SYNC_FULLs deferred, completed at once, completed
+     * before the deadline (save states), backoffs; deadlines where the GPU was still drawing, the wait there (ms). */
+    uint64_t dp_deferred, dp_now, dp_early, dp_backoffs, dp_waits;
+    double dp_wait_ms;
     /* The worst host frame's own breakdown (ms): n64_run_frame (core), n64_display (vi), present, audio, the rest;
      * and the RDP's waits inside it (queue and sync inside core or vi, scanout inside vi). */
     double worst_core_ms, worst_vi_ms, worst_present_ms, worst_audio_ms, worst_other_ms;
-    double worst_queue_ms, worst_sync_ms, worst_scanout_ms;
+    double worst_queue_ms, worst_sync_ms, worst_scanout_ms, worst_deadline_ms;
 } n64_runtime_perf;
 /* The line's text after "n64: perf ": "speed 25 % (15.0 of 60.0 VI/s); cpu 7.9 rsp 4.1 rdp 5.2 (queue 1.0, sync 2.5,
  * scanout 0.5) sched 0.3
@@ -228,8 +233,9 @@ typedef struct n64_runtime_perf {
  * "core ?" / "core 6" when unknown). Returns what snprintf returns. */
 int n64_runtime_perf_format(const n64_runtime_perf *p, char *out, size_t n);
 /* The detail line's text after "n64: perf detail ", logged right after the perf line: "500 VIs, 167 pictures (16.7/s),
- * 333 unchanged, 0 skipped; 167 VI_ORIGIN changes, 167 scanouts, 40 full rings; 0 stalled compiles (0 ms); worst 40
- * ms: core 30.1 vi 7.2 present 1.8 audio 0.1 other 0.8 (rdp queue 9.0, sync 8.0, scanout 3.0)". */
+ * 333 unchanged, 0 skipped; 167 VI_ORIGIN changes, 167 scanouts (160 early), 40 full rings; DP 160 deferred (0
+ * early, 0 backoffs), 7 at once, 12 waited 3.5 ms (0.02 ms each); 0 stalled compiles (0 ms); worst 40 ms: core 30.1
+ * vi 7.2 present 1.8 audio 0.1 other 0.8 (rdp queue 9.0, sync 8.0, deadline 0.2, scanout 3.0)". */
 int n64_runtime_perf_detail_format(const n64_runtime_perf *p, char *out, size_t n);
 /* The whole-run figures of the last n64_runtime_run (zeroed before the first; tests). */
 void n64_runtime_last_perf(n64_runtime_perf *out);
