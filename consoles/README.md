@@ -157,15 +157,17 @@ SysEnqIntRP chains in MIPS like OpenBIOS's (syscalls, root counter / IRQ events,
 `cdrom:` straight from ISO 9660 and `bu00:` / `bu10:` on the card images; the EXE (or the disc's `SYSTEM.CNF` boot
 file) starts at once. A call it does not implement returns 0 and is reported once with its number.
 
-`ps1_run [--bios PATH|hle] [--exe X.exe | --disc X.cue] [--frames N] [--result] [--ppm OUT] [--wav OUT] [--tty]
-[--until-tty TEXT] [--card FILE]` runs a program headless (`--result`: our homebrew's result block at 0x801F0000;
+`ps1_run [--bios PATH|hle] [--exe X.exe | --disc X.cue] [--frames N] [--result] [--ppm OUT] [--vram OUT] [--wav OUT]
+[--tty] [--until-tty TEXT] [--card FILE]` runs a program headless (`--result`: our homebrew's result block at 0x801F0000;
+`--vram`: the whole 1024x512 VRAM as a PPM;
 `--tty`: the console text, BIOS putchar / puts; `--card`: memory card 1 kept in a 128 KB .mcr file, loaded when
 there, written back at exit when the game wrote it). Tests (`consoles/ps1/tests`): `ps1_cpu` and `ps1_gte` unit
 tests, our homebrew (`ps1_hb_*`, the same results as PCSX-Redux, checksums included; `mcard` saves through the BIOS
 memory card functions: `ps1_mcard` runs it on a blank card, again on the card it saved (the save found and read
 back, the card unchanged) and on an unformatted one (formatted by the BIOS first), and checks the card image:
 checksums, directory entry, data), JaCzekanski/ps1-tests (MIT, release fetched by
-`tools/consoles/fetch_ps1_tests.sh`: cpu/cop, cpu/code-in-io, gte/test-all 1150 / 1150, dma/otc-test, dma/dpcr, timers),
+`tools/consoles/fetch_ps1_tests.sh`: cpu/cop, cpu/code-in-io, gte/test-all 1150 / 1150, dma/otc-test, dma/dpcr, timers;
+the GPU, DMA and input programs of « PS1 compatibility » below),
 and the same under the HLE BIOS (`ps1_hle` unit tests, one per implemented call; `ps1_hle_*`: the homebrew with the
 same result block as under OpenBIOS, its discs booted by the HLE BIOS, mcard, ps1-tests, packs in lockstep).
 On a desktop:
@@ -258,6 +260,26 @@ draw a fraction of that frame. Tests (`test_gpu.c`): the native VRAM and GPUREAD
 of the shadow (gfx.exe replica, busy scene), flat rectangles / fills / sprites (flipped too) / straight lines exactly
 the native pixels as blocks, the display, the state round trip, the same shadow with 0 or 3 workers, a 4x fuzz;
 `test_main.c`: gfx.exe through the runtime at 1x / 2x / 4x (screenshot sizes and golden CRCs).
+
+**PS1 compatibility: the whole ps1-tests release (XBA-200).** Every program of JaCzekanski/ps1-tests build-158 run
+headless under OpenBIOS and the HLE BIOS, checked against what the release ships: the hardware VRAM dumps of the GPU
+programs (`ps1_run --vram`, compared at 5 bits per channel by `consoles/ps1/tests/compare_vram.py`), the hardware
+console logs (psx.log) of the others. Fixed on the way: polygon colour / UV interpolation at the hardware's precision
+(gradients in 1/4096 truncated, stepped from the leftmost vertex plus a half: gpu/triangle, uv-interpolation), line
+stepping (32.32, steps rounded away from zero) and dithering of flat lines (gpu/lines), the CLUT cache (kept until the
+CLUT position or a larger depth needs a reload, or GP0(01h); gpu/clut-cache), x-flipped rectangles starting at u0 + 1
+(gpu/texture-flip), a DMA channel started again while its last transfer's completion is pending (PSn00bSDK's
+LoadImage; gpu/texture-overflow), MDEC blocks ending at their 64th coefficient, the decoder's rounding (mdec/4bit
+exact; 8bit and frame within one unit) and its raw 8x8 block order on a PIO read, the HLE printf's `%2-d`. Now
+checked by ctest (both BIOSes, skipped without the fetched release): gpu/clipping, clut-cache, lines, quad,
+rectangles, texture-flip, texture-overflow, transparency, triangle, uv-interpolation, vram-to-vram-overlap against
+their dumps (`ps1_jcz_gpu_*`, `ps1_hle_jcz_gpu_*`), gpu/gp0-e1, mask-bit, version-detect, dma/chain-looping and
+input/pad by their text, on top of the earlier cpu / gte / dma / timers / spu / cdrom ones. Not matched, by design or
+out of reach: the timing measurements (cpu/access-time: no memory wait states; gpu/bandwidth, benchmark's frame
+time, dma/chopping and chain-looping's tick counts: the GPU and DMA take no time), cpu/io-access-bitwidth's
+odd-width IO writes, the MDEC's last unit of rounding and its FIFO stepping (mdec/step-by-step-log, movie),
+timer-dump (needs a modified console); spu/toolbox, ram-sandbox and cdrom/terminal are interactive (spu/stereo
+checked by hand: each voice in the right channel).
 
 **PS1 disc, CD-ROM, SPU, MDEC (P-1 XBA-159, P-8 XBA-166, P-9 XBA-167).** The other devices of `ps1_devices.h`, plain
 C11 without host dependency (CMake targets `ps1_cd`, `ps1_spu`, `ps1_mdec`). `ps1_disc.c` reads raw sectors and
