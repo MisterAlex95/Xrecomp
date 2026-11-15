@@ -185,38 +185,59 @@ static uint32_t isqrt(uint32_t v)
     return r;
 }
 
-/* ArcTan of a 1.14 tangent in [-1, 1]: the BIOS's polynomial (GBATEK), result in 0x4000 = pi/2 units. */
-static int32_t arctan(int32_t t)
+/* 32-bit ARM arithmetic: MUL wraps, ASR keeps the sign. */
+static inline int32_t mul32(int32_t a, int32_t b) { return (int32_t)((uint32_t)a * (uint32_t)b); }
+static inline int32_t asr32(int32_t v, int n) { return v < 0 ? ~(~v >> n) : v >> n; }
+
+/* ArcTan (SWI 0x09): the BIOS's polynomial (GBATEK) on the whole 32-bit r0, in 32-bit arithmetic as the BIOS runs it,
+ * result in 0x4000 = pi/2 units. Like the BIOS it leaves -(t * t) >> 14 in r1 and the polynomial in r3 (the mGBA
+ * test suite checks all three, XBA-201). */
+static int32_t arctan(gba_machine *m, int32_t t)
 {
-    int32_t a = -((t * t) >> 14);
-    int32_t b = ((0xA9 * a) >> 14) + 0x390;
-    b = ((b * a) >> 14) + 0x91C;
-    b = ((b * a) >> 14) + 0xFB6;
-    b = ((b * a) >> 14) + 0x16AA;
-    b = ((b * a) >> 14) + 0x2081;
-    b = ((b * a) >> 14) + 0x3651;
-    b = ((b * a) >> 14) + 0xA2F9;
-    return (b * t) >> 16;
+    int32_t a = -asr32(mul32(t, t), 14);
+    int32_t b = asr32(mul32(0xA9, a), 14) + 0x390;
+    b = asr32(mul32(b, a), 14) + 0x91C;
+    b = asr32(mul32(b, a), 14) + 0xFB6;
+    b = asr32(mul32(b, a), 14) + 0x16AA;
+    b = asr32(mul32(b, a), 14) + 0x2081;
+    b = asr32(mul32(b, a), 14) + 0x3651;
+    b = asr32(mul32(b, a), 14) + 0xA2F9;
+    R[1] = (uint32_t)a;
+    R[3] = (uint32_t)b;
+    return asr32(mul32(t, b), 16);
 }
 
-static uint32_t arctan2(int32_t x, int32_t y)
+/* ArcTan2 (SWI 0x0A), r0 = x, r1 = y: the octant method of the Cult-of-GBA BIOS (MIT, bios_calls/math/arctan.s), which
+ * gives the Nintendo BIOS's results: the angle of the octant plus ArcTan of y / x (or -x / y), computed with Div and
+ * ArcTan, so r1 is what ArcTan leaves; r3 is always 0x170 on return. With x = 0 the BIOS returns before its Div:
+ * r1 keeps y. Result in [0, 0x10000) for [0, 2 pi). */
+static void arctan2(gba_machine *m, int32_t x, int32_t y)
 {
-    int32_t r;
-    if (y == 0)
-        return x >= 0 ? 0 : 0x8000;
-    if (x == 0)
-        return y >= 0 ? 0x4000 : 0xC000;
-    int64_t ax = x < 0 ? -(int64_t)x : x, ay = y < 0 ? -(int64_t)y : y;
-    if (ax >= ay) {
-        r = arctan((int32_t)(((int64_t)y << 14) / x));
-        if (x < 0)
-            r += 0x8000;
-        else if (y < 0)
-            r += 0x10000;
-    } else {
-        r = (y > 0 ? 0x4000 : 0xC000) - arctan((int32_t)(((int64_t)x << 14) / y));
+    static const uint16_t octant[8] = {0x0000, 0x0040, 0x0040, 0x0080, 0x0080, 0x00C0, 0x00C0, 0x0100};
+    int idx = 0;
+    int32_t ay = y, ax = x;
+    if (y < 0) {
+        idx += 4;
+        ay = -y;
     }
-    return (uint32_t)r & 0xFFFF;
+    int32_t sx = x < 0 ? -1 : 0;
+    int32_t e = y ^ sx;
+    if (e < 0)
+        idx += 2;
+    if (x < 0)
+        ax = -x;
+    int32_t d = ax - ay; /* >= 0: |x| >= |y|, y / x; else x / y, negated after */
+    int32_t num = d >= 0 ? y : x, den = d >= 0 ? x : y;
+    if ((e ^ d) < 0)
+        idx += 1;
+    bios_div(m, mul32(num, 1 << 14), den);
+    int32_t r = arctan(m, (int32_t)R[0]);
+    if (d < 0)
+        r = -r;
+    R[0] = (uint32_t)(r + (octant[idx] << 8));
+    R[3] = 0x170;
+    if (x == 0)
+        R[1] = (uint32_t)y;
 }
 
 static void cpu_set(gba_machine *m, uint32_t src, uint32_t dst, uint32_t ctl)
@@ -440,8 +461,8 @@ void gba_bios_hle_swi(gba_machine *m, uint32_t num)
     case 0x06: bios_div(m, (int32_t)R[0], (int32_t)R[1]); break;
     case 0x07: bios_div(m, (int32_t)R[1], (int32_t)R[0]); break;
     case 0x08: R[0] = isqrt(R[0]); break;
-    case 0x09: R[0] = (uint32_t)arctan((int16_t)R[0]) & 0xFFFF; break;
-    case 0x0A: R[0] = arctan2((int16_t)R[0], (int16_t)R[1]); break;
+    case 0x09: R[0] = (uint32_t)arctan(m, (int32_t)R[0]); break;
+    case 0x0A: arctan2(m, (int32_t)R[0], (int32_t)R[1]); break;
     case 0x0B: cpu_set(m, R[0], R[1], R[2]); break;
     case 0x0C: cpu_fast_set(m, R[0], R[1], R[2]); break;
     case 0x0D: R[0] = 0xBAAE187F; break; /* GetBiosChecksum: the value games expect */
