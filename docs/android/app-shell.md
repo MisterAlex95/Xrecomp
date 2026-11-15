@@ -1477,6 +1477,48 @@ screenshot `console-options-2-n64-vkdriver.png`), `GameMenuTest.n64GameVulkanDri
 10. Delete R8 (X, X): the first game's Options row is « As in Settings » again.
 11. Download names in the list have no `.zip` / `.adpkg` (« turnip_mrpurple_T29-toasted »).
 
+### Shader warm-up
+
+The N64 Vulkan RDP builds about 15 compute pipelines when it starts (paraLLEl-RDP's check, then the game's command
+processor), plus the VI's for the first frames. On the Thor's Turnip a first start of a (driver, internal resolution)
+spends 1.5 to 3 s on them, behind a black screen; later starts read them from the pipeline cache
+(`<cache>/vk_cache/<driver id or system>/`, [consoles/README.md](../../consoles/README.md) « Pipeline cache »).
+
+- **Progress at the start.** ShellActivity puts `ShaderOverlay` over an N64 game's surface: it polls
+  `MenuNative.nativeShaderProgress` (`n64_rdp_shader_progress`, two atomic loads) every 100 ms on the UI thread and
+  shows « Compilation des shaders… 7/13 » / "Compiling shaders… 7/13" with a bar near the bottom of the screen once
+  the start has been compiling for 300 ms (a start served from the cache shows nothing). The total is the count the
+  last start of that driver and resolution reached (`startup-<f>x.count`); without one (the very first start), a
+  spinner and « Compilation des shaders… 7 ». It goes away when the start is over, and stops polling after 60 s
+  when no start came (software RDP). `ShaderProgress` decides, `ShaderProgressTest`.
+- **Warm-up ahead of time.** `ShaderWarmup` starts `ShaderWarmupService` in its own process (`:warmup`): the game's
+  Vulkan environment (`VkDrivers.runEnv`, `cacheEnv`), libmain.so, `n64_rdp_vk_warmup(factor)` on a background-priority
+  thread, then the process ends. It warms the driver and internal resolution the game would start with (its own
+  choices, else Settings'):
+  - at the end of an N64 Prepare (after the queue's last job);
+  - 3 s after the Vulkan driver or the internal resolution changed, in a game's Options or in Settings (Settings':
+    for the last N64 game launched);
+  - after an app update, for the last N64 game launched.
+  Never next to a game (at 8x it takes the game's ~2 GB of buffers) nor a Prepare: a request then is kept
+  (`vk_cache/warmup.pending`) and made when the launcher shows again; a game's start ends a running warm-up
+  (`ShaderWarmup.cancel`; the files are written whole or not at all). Once per (driver, factor, APK install): the
+  service writes `vk_cache/<driver>/warmup-<f>x`; a driver whose last start failed is skipped. When it compiled
+  anything, a toast « Shaders prêts » / "Shaders ready". The trial marker and `last_start` are not touched (a
+  warm-up killed for memory is not the driver's crash). Log: `warmup: <reason> <tid> <driver> <f>x: run|pending|
+  skip_warm|...`, then the native `n64: Vulkan RDP: warm-up done at 4x: ...` (tag xboxrecomp).
+  `ShaderWarmupTest`; native `n64_rdp_vulkan_warmup`.
+
+#### Device check (shader warm-up), for Alex
+
+1. Settings › Graphics › Vulkan driver: pick the Turnip driver. With an N64 game launched before, logcat within ~5 s:
+   `warmup: setting <tid> <id> 4x: run`, then `n64: Vulkan RDP: warm-up done at 4x: ...` and the toast « Shaders
+   prêts ».
+2. Start that game: no black pause; logcat `start-up pipelines: N built (N expected), 0 compiled 5 ms or more`.
+3. Game Options › internal resolution 8x, wait 5 s (warm-up at 8x), start: same, at 8x.
+4. Delete `cache/vk_cache` (`run-as fr.adserver.xrecomp.shell rm -r cache/vk_cache`) and start the game: « Compilation
+   des shaders… 7 » with a spinner during the compiles; then remove `pipelines-*.bin` and `mesa/` but keep
+   `startup-*.count`, and start again: « 7/13 » with a bar.
+
 ## Choosing the game
 
 (XBA-54, and the import half of XBA-40.) The runtime reads the game with POSIX calls (`open`, `opendir`, the kernel's

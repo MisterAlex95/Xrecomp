@@ -110,6 +110,7 @@ public class ShellActivity extends SDLActivity {
                 Log.w(LauncherActivity.TAG, "shell: cannot set RECOMP_GAME_DIR", e);
             }
         }
+        ShaderWarmup.cancel(this);   // an N64 shader warm-up never runs next to a game (its GPU memory, its driver)
         applyAutoResume(rom != null);
         applyCheats(rom != null);
         applyVkDriver(rom != null);
