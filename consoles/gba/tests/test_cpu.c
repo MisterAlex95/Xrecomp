@@ -229,7 +229,9 @@ static void test_thumb(void)
 
     m->cpu.r[0] = (uint32_t)-7;
     m->cpu.r[1] = 2;
-    thumb(m, (uint16_t[]){0xDF06}, 1, 1); /* swi 6: Div (HLE) */
+    thumb(m, (uint16_t[]){0xDF06}, 1, 1); /* swi 6: Div (HLE, through the built-in BIOS's dispatcher) */
+    for (int i = 0; i < 100 && gba_cpu_pc(m) < 0x4000; i++)
+        gba_cpu_step(m);
     CHECK(m->cpu.r[0] == (uint32_t)-3 && m->cpu.r[1] == (uint32_t)-1 && m->cpu.r[3] == 3, "Div: %d %d %d",
           (int)m->cpu.r[0], (int)m->cpu.r[1], (int)m->cpu.r[3]);
     CHECK(gba_cpu_pc(m) == CODE + 2 && (gba_get_cpsr(m) & CPSR_T), "after swi: pc %x", gba_cpu_pc(m));

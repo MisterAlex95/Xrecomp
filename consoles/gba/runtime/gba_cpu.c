@@ -153,9 +153,8 @@ static void take_irq(gba_machine *m)
 static void do_swi(gba_machine *m, uint32_t pc, uint32_t num)
 {
     uint32_t next = pc + (is_thumb(m) ? 2 : 4);
-    if (m->builtin_bios && num != 0x04 && num != 0x05) {
-        /* Built-in BIOS: everything but the interrupt waits runs in C, without entering the handler. */
-        m->now += 3 * 4; /* entry + return, roughly */
+    if (m->builtin_bios && num == 0x00) {
+        /* Built-in BIOS: SoftReset in C at once (the other SWIs go through its dispatcher to their HLE stubs). */
         gba_bios_hle_swi(m, num);
         m->bios_latch = 0xE3A02004; /* what a SWI through the BIOS leaves in the latch ([0x188+8]) */
         return;
@@ -641,7 +640,7 @@ static inline __attribute__((always_inline)) void arm_execute(gba_machine *m, ui
     case 3:
         if (op & 0x10) {
             if (op == GBA_HLE_TRAP && m->builtin_bios && pc < GBA_BIOS_SIZE)
-                gba_bios_hle_swi(m, R[12]);
+                gba_bios_hle_swi(m, pc - GBA_HLE_STUBS < 0x800u ? (pc - GBA_HLE_STUBS) >> 3 : R[12]);
             else
                 undefined(m, pc);
         } else {

@@ -367,5 +367,6 @@ void gba_bios_direct_boot(gba_machine *m);
 /* The built-in BIOS's SWI handler hit its HLE trap: run SWI `num` in C. */
 void gba_bios_hle_swi(gba_machine *m, uint32_t num);
 #define GBA_HLE_TRAP 0xE7F0DEF0u   /* an ARM undefined encoding, only honoured inside the built-in BIOS */
+#define GBA_HLE_STUBS 0x800u       /* the built-in BIOS's HLE stub of SWI n: GBA_HLE_STUBS + 8n (trap; bx lr) */
 
 #endif
