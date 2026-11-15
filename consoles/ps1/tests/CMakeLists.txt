@@ -30,6 +30,7 @@ endif()
 #   ps1_cheats_*       GameShark codes on the homebrew (ps1_run --cheats, XBA-197), interpreted and recompiled
 #   ps1_rc_*           the same programs recompiled (ps1_tools.recomp + cc, discovery loop), in lockstep with the
 #                      interpreter; ps1_rc_fuzz: random MIPS programs under timer IRQs (needs python3, cc)
+#   ps1_lockref_*      the interpreter's predecoded blocks against its reference loop (ps1_run --lockstep-ref, XBA-204)
 # The EXE / BIOS tests skip (exit 77) when their inputs are absent, so a CI job without Docker or network stays green.
 # They come from (repo root):
 #   tools/consoles/build_homebrew.sh ps1 build/homebrew   -> PS1_HOMEBREW_DIR (default build/homebrew/ps1)
@@ -381,6 +382,42 @@ if(TARGET ps1_run)
              ${PS1_TESTS_DIR}/timers/timers.exe ${PS1_RC_WORK}/hle_jcz_timers 12000 --tty --until-tty "Done." --quiet)
     list(APPEND rc ps1_hle_rc_jcz_timers)
     set_tests_properties(${rc} PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900)
+
+    # The interpreter's register-cached loop and its predecoded blocks (XBA-204) against its reference loop, one full
+    # step per instruction (ps1_run --lockstep-ref): the whole state compared after every frame, and with
+    # --lockstep-cycles the CPU every 61 cycles (the whole machine every 1024 stops), which also cuts blocks short
+    # at every point; OpenBIOS and the HLE BIOS; random MIPS code under fast timer IRQs (recomp_fuzz.py --ref).
+    set(lockref)
+    foreach(prog ${hb})
+        add_test(NAME ps1_lockref_hb_${prog} COMMAND ${PS1_RUN_EXE} ${PS1_HOMEBREW_DIR}/${prog}.exe --frames 900
+                 --lockstep-ref --quiet)
+        add_test(NAME ps1_lockref_cyc_hb_${prog} COMMAND ${PS1_RUN_EXE} ${PS1_HOMEBREW_DIR}/${prog}.exe --frames 60
+                 --lockstep-ref --lockstep-cycles 61 --quiet)
+        add_test(NAME ps1_hle_lockref_hb_${prog} COMMAND ${PS1_RUN_HLE} ${PS1_HOMEBREW_DIR}/${prog}.exe --frames 900
+                 --lockstep-ref --quiet)
+        list(APPEND lockref ps1_lockref_hb_${prog} ps1_lockref_cyc_hb_${prog} ps1_hle_lockref_hb_${prog})
+    endforeach()
+    if(PS1_HAVE_CD)
+        add_test(NAME ps1_lockref_hb_disc_overlay COMMAND ${PS1_RUN_EXE} ${PS1_HOMEBREW_DIR}/overlay.cue --frames 900
+                 --lockstep-ref --quiet)
+        list(APPEND lockref ps1_lockref_hb_disc_overlay)
+    endif()
+    foreach(t cpu/cop/cop cpu/code-in-io/code-in-io gte/test-all/test-all dma/otc-test/otc-test dma/dpcr/dpcr
+              timers/timers gpu/triangle/triangle)
+        get_filename_component(n ${t} NAME)
+        string(REPLACE "-" "_" n ${n})
+        add_test(NAME ps1_lockref_jcz_${n} COMMAND ${PS1_RUN_EXE} ${PS1_TESTS_DIR}/${t}.exe --frames 600
+                 --lockstep-ref --quiet)
+        list(APPEND lockref ps1_lockref_jcz_${n})
+    endforeach()
+    if(Python3_Interpreter_FOUND)
+        add_test(NAME ps1_lockref_fuzz
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/recomp_fuzz.py --ps1-run $<TARGET_FILE:ps1_run>
+                    --bios ${PS1_BIOS} --work ${CMAKE_CURRENT_BINARY_DIR}/lockref_fuzz --seeds 0-7 --frames 50
+                    --ref --lockstep-cycles 61)
+        list(APPEND lockref ps1_lockref_fuzz)
+    endif()
+    set_tests_properties(${lockref} PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 600)
 
     # Rewind (XBA-194, ps1_run --rewind): 600 frames with pseudo-random pads, a capture every 3 frames as the runtime
     # takes them, 60 steps back: the picture there and the frames after it must be the first run's, on every homebrew

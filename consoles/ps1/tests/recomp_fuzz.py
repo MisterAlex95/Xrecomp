@@ -12,6 +12,11 @@ slots and loads in flight included. It is lifted and built (tools/consoles/ps1_r
 and run by ps1_run --pack --lockstep: the interpreter and the recompiled machine must agree on the whole state
 (registers, cycles, scheduler, RAM, GTE, VRAM) after every frame. Exit 0 when every seed agrees, 1 at the first
 difference, 77 when Python, a C compiler or the BIOS is missing (skipped).
+
+With --ref (XBA-204) nothing is lifted: the same programs run under ps1_run --lockstep-ref, the register-cached
+interpreter loop and its predecoded blocks against the reference loop (one full step per instruction), compared
+after every frame, and with --lockstep-cycles N every N cycles too (the CPU state; the whole machine every 1024
+stops).
 """
 
 import argparse
@@ -241,11 +246,13 @@ def main(argv=None):
     ap.add_argument("--seeds", default="0-5")
     ap.add_argument("--frames", type=int, default=40)  # the BIOS takes ~16 frames before the EXE starts
     ap.add_argument("--insns", type=int, default=400)
+    ap.add_argument("--ref", action="store_true", help="the interpreter loops against each other, no pack")
+    ap.add_argument("--lockstep-cycles", type=int, default=0)
     args = ap.parse_args(argv)
     if args.bios != "hle" and not os.path.exists(args.bios):
         print("skipped: BIOS %s not built" % args.bios)
         return 77
-    if not shutil.which(os.environ.get("CC", "cc")):
+    if not args.ref and not shutil.which(os.environ.get("CC", "cc")):
         print("skipped: no C compiler")
         return 77
     lo, _, hi = args.seeds.partition("-")
@@ -257,6 +264,15 @@ def main(argv=None):
         exe = os.path.join(args.work, "fuzz%d.exe" % seed)
         with open(exe, "wb") as f:
             f.write(make_exe(g.program(target)))
+        if args.ref:
+            cmd = [args.ps1_run, exe, "--bios", args.bios, "--frames", str(args.frames), "--quiet", "--lockstep-ref"]
+            if args.lockstep_cycles:
+                cmd += ["--lockstep-cycles", str(args.lockstep_cycles)]
+            r = subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=900)
+            print("seed %d (timer target %d): %s" % (seed, target, r.stdout.strip().replace("\n", " | ")))
+            if "LOCKSTEP OK" not in r.stdout:
+                return 1
+            continue
         work = os.path.join(args.work, "fuzz%d" % seed)
         shutil.rmtree(work, ignore_errors=True)
         run_args = "--bios %s" % args.bios
@@ -274,7 +290,7 @@ def main(argv=None):
         print("seed %d (timer target %d): %s" % (seed, target, out))
         if "LOCKSTEP OK" not in r.stdout:
             return 1
-    print("all seeds identical to the interpreter")
+    print("all seeds identical to the %sinterpreter" % ("reference " if args.ref else ""))
     return 0
 
 
