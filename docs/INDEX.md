@@ -13,6 +13,7 @@ stuck in.
 - [Runtime Implementation Guide](runtime/README.md) — The four pillars every title needs: memory layout, kernel, graphics, input
 - [macOS Launcher](macos/launcher.md) — The XRecomp Mac app: library, prepare, play, settings; its prepare interface and Mac checklist
 - [Environment Variables](runtime/environment-variables.md) — Every `RECOMP_*` switch: default, effect, and the source file that reads it
+- [XMV movies](runtime/xmv.md) — The runtime's portable XMV decoder (WMV2 + Xbox ADPCM) and the hook a title layer binds in place of the XDK's movie player
 - [Contributing](../CONTRIBUTING.md) — Setup, where to focus, code style, how to submit
 - [Upstream README](upstream/README.md) — xboxrecomp's own README: background, library table, FAQ, community ports, test notes
 - [Releases](releases/README.md) — XRecomp releases: notes per version, how a release is made

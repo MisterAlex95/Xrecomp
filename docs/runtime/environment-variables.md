@@ -322,6 +322,7 @@ The executor is itself opt-in: set `RECOMP_PB_EXEC=1` to execute the pushbuffer.
 | `RECOMP_PVIDEO=0` | on | POSIX hosts: turns off the PVIDEO overlay's scan-out (films a title plays through `D3DDevice_UpdateOverlay`, composed over the last frame at 640x480 and published as a host frame each vblank a bank is pending; logged `[PVIDEO] overlay on: ...`). The STOP handshake in the NV2A ack pass stays. | `src/video/pvideo_posix.c` |
 | `RECOMP_FMV_HOST` | off | Plays a movie through the host player when the title asks to. A substitute for the title's own output. | `kernel_bridge.c` |
 | `RECOMP_FMV_DUMP=<prefix>` | off | Writes two frames of a movie as BMP evidence. | `video_pump.c` |
+| `RECOMP_XMV=skip` | decode | Where a title layer binds the runtime's XMV hook (`xmv_hle_get_next_frame` in place of the XDK's `XMVDecoder_GetNextFrame`): `skip` (or `0`) ends every movie at once (`XMV_ENDOFFILE`, the old skip override) instead of decoding it. No effect on a title that plays its movies with its own lifted decoder. See [xmv.md](xmv.md). | `src/video/xmv_hle.c` |
 
 ## Frame generation
 

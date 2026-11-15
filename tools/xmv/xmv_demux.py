@@ -163,6 +163,7 @@ class XMVFile:
     def _parse_packets(self):
         """Parse all packets in the file."""
         self.packets = []
+        self._pts = 0            # video time runs on across packets (ms)
         offset = self.first_packet_offset
         next_size = self.this_packet_size - self.first_packet_offset
 
@@ -240,7 +241,6 @@ class XMVFile:
         # Parse individual video frames within this packet
         pkt.frames = []
         frame_off = pkt.video_offset
-        pts = 0
         remaining = pkt.video_data_size
         for _ in range(pkt.frame_count):
             if frame_off + 4 > len(d) or remaining < 4:
@@ -255,14 +255,19 @@ class XMVFile:
             frame_data_off = frame_off + 4
             frame_data = d[frame_data_off:frame_data_off + frame_size]
 
-            # Check keyframe: bit 7 of first byte = 0 means keyframe
-            is_key = len(frame_data) > 0 and not (frame_data[0] & 0x80)
+            # The frame is little-endian 32-bit words of an MSB-first
+            # bitstream: its first bit (0 = I frame) is the top bit of the
+            # first word, byte 3.
+            is_key = len(frame_data) > 3 and not (frame_data[3] & 0x80)
 
+            # A frame's time is the previous one's plus its delta (the first
+            # frame's time is its own delta), as FFmpeg's demuxer and
+            # src/video/xmv/xmv_demux.c count it.
+            self._pts += frame_ts
             pkt.frames.append(XMVVideoFrame(
                 offset=frame_data_off, size=frame_size,
-                timestamp=pts, is_keyframe=is_key, data=frame_data))
+                timestamp=self._pts, is_keyframe=is_key, data=frame_data))
 
-            pts += frame_ts
             frame_off += frame_size + 4
             remaining -= frame_size + 4
 

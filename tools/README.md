@@ -298,6 +298,15 @@ py -3 -m tools.xmv game_files/Video/intro.xmv
 
 XMV is the Xbox's proprietary video container format used for FMV sequences, boot videos, and cutscenes. This tool splits the container into separate video and audio elementary streams that can be converted with FFmpeg or played with Media Foundation.
 
+The runtime decodes XMV itself (`src/video/xmv`, [docs/runtime/xmv.md](../docs/runtime/xmv.md)); next to the demuxer:
+
+- `python -m tools.xmv.xmv_mux make-test-set tests/xmv_decode/fixtures` — the decoder's test fixtures: our own
+  synthetic movies (FFmpeg's wmv2 encoder on test patterns, plus `wmv2_synth.py`'s random valid streams for the
+  features that encoder never writes), muxed to XMV with a synthetic Xbox ADPCM tone, and FFmpeg's bit-exact decode of
+  each as the reference. FFmpeg is needed only to remake them.
+- `tools/xmv/xmv_dump.c` (built with `tests/xmv_decode`) — decodes a movie to Y4M + WAV with the runtime's decoder and
+  says how many frames it could not decode.
+
 ### 6. ghidra_naming — Optional function-name recovery (Ghidra headless)
 
 Recovers real function names from an XBE via a headless Ghidra pass and merges

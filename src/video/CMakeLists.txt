@@ -4,6 +4,15 @@ add_library(xbox_video STATIC
     video_pump.c
     fb_present.c
     aspect_policy.c
+    # XMV movies decoded by the runtime (XBA-70, docs/runtime/xmv.md): the
+    # portable decoder (xmv/) and the hook a title layer binds (xmv_hle.c).
+    xmv_hle.c
+    xmv/xmv_demux.c
+    xmv/xmv_player.c
+    xmv/xmv_surface.c
+    xmv/wmv2_dec.c
+    xmv/wmv2_tables.c
+    xmv/xbox_adpcm.c
 )
 target_include_directories(xbox_video PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
