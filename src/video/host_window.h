@@ -139,17 +139,28 @@ int host_window_env_vsync(void);
  *   HOST_SHADER_CRT        scanlines + an RGB aperture-grille mask; curvature (barrel + vignette) when set
  *   HOST_SHADER_LCD        a pixel grid (GBA-like, one output pixel per cell edge); ghosting (a blend with the
  *                          previous picture) when set, present_rgba only
+ *   HOST_SHADER_FXAA       FXAA-class edge smoothing (luma edges blended along their direction; samples linearly)
+ *   HOST_SHADER_CAS        contrast-adaptive sharpening (strength: how much, default 50; samples linearly)
  * "Console lines": the picture's height divided by round(height / 240) (an upscaled 960-line PS1 picture has 240
  * lines, a GBA 160). strength / curvature / ghosting 0..100; strength -1: the preset's default (scanlines 50,
- * CRT 60, LCD 50; unused by sharp). A preset whose shader does not compile or link falls back to none (logged
- * once). host_window_screenshot_bmp stays the raw picture; host_window_capture reads the drawable as drawn
- * (shader included). Set before or after open, from the presenting thread; kept across open / close. */
+ * CRT 60, LCD 50, CAS 50; unused by sharp and FXAA). A preset whose shader does not compile or link falls back to
+ * none (logged once). host_window_screenshot_bmp stays the raw picture; host_window_capture reads the drawable as
+ * drawn (shader included). Set before or after open, from the presenting thread; kept across open / close. */
 /* HOST_SHADER_* and HostShader: present_shaders.h. */
 void host_window_set_shader(const HostShader *s);   /* NULL: none */
 /* The preset drawn by the next present: the one set, or none after its shader failed to build. */
 int host_window_shader_active(void);
-/*   host_window_shader_parse  "none" / "sharp" / "scanlines" / "crt" / "lcd" -> HOST_SHADER_* (case ignored; -1
- *                             for NULL, "" or anything else); host_window_shader_name the other way ("none" for
+/* Downscale-aware present (src/platform/HOST_LAYER.md « Minified pictures »): a picture larger than its viewport by
+ * more than 1.25x in an axis (an upscaled N64 / PS1 scanout in a 1080p window) is drawn with the texels under each
+ * output pixel averaged in that axis, by the preset or, with none, by an area program in place of the plain one;
+ * other pictures as before. On by default, whatever the filter (nearest only drops texels there).
+ *   host_window_set_downscale    1 on, 0 off (one tap per pixel at any scale), -1 $RECOMP_PRESENT_DOWNSCALE (0:
+ *                                off; the default)
+ *   host_window_downscale_drawn  1 when the last present averaged a minified picture */
+void host_window_set_downscale(int on);
+int host_window_downscale_drawn(void);
+/*   host_window_shader_parse  "none" / "sharp" / "scanlines" / "crt" / "lcd" / "fxaa" / "cas" -> HOST_SHADER_*
+ *                             (case ignored; -1 for NULL, "" or anything else); host_window_shader_name the other way ("none" for
  *                             an unknown preset)
  *   host_window_env_shader    preset: $console_var (e.g. "RECOMP_GBA_SHADER") when it parses, else $RECOMP_SHADER,
  *                             else def; strength $RECOMP_SHADER_STRENGTH, curvature $RECOMP_SHADER_CURVATURE,

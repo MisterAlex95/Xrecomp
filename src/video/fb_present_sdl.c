@@ -1390,6 +1390,7 @@ static int xshader_draw(SDL_Renderer *ren, SDL_Texture *tex, uint32_t tw, uint32
             .rect = { 0.0f, (float)y0 / (float)th, 1.0f, (float)rows / (float)th },
             .flip = 1, .swap = xshader_swap(format),
             .strength = present_shader_strength(&s_xshader), .curvature = s_xshader.curvature,
+            .downscale = present_downscale_env(),
         };
         err = present_shader_draw_legacy(&s_xsprog[p], &pp, (ow - (int)rw) / 2, (oh - (int)rh) / 2,
                                          (int)rw, (int)rh);
@@ -1810,8 +1811,9 @@ int xbox_HostWindowMain(int (*guest_main)(void))
                 }
                 linear = tex_w != rw || sh != rh;
             }
-            /* Sharp bilinear blends texels itself: it samples linearly whatever the scale. */
-            if (xshader_preset() == HOST_SHADER_SHARP)
+            /* Sharp bilinear, FXAA and CAS blend texels themselves: they sample linearly whatever the scale. */
+            if (xshader_preset() == HOST_SHADER_SHARP || xshader_preset() == HOST_SHADER_FXAA
+                || xshader_preset() == HOST_SHADER_CAS)
                 linear = 1;
             if (linear != tex_linear) {
                 SDL_SetTextureScaleMode(tex, linear ? SDL_ScaleModeLinear : SDL_ScaleModeNearest);
