@@ -338,7 +338,7 @@ static inline void wbe64(uint8_t *p, uint64_t v)
 static inline bool kseg1(uint64_t va) { return va - 0xFFFFFFFFA0000000ull < 0x20000000ull; }
 
 /* Reads size (1, 2, 4, 8) bytes at va (aligned). False when an exception was raised. */
-static inline bool rd_x(n64_machine *m, uint64_t va, int size, uint64_t *out, bool raise)
+static N64_HOT_INLINE bool rd_x(n64_machine *m, uint64_t va, int size, uint64_t *out, bool raise)
 {
     if (N64_UNLIKELY(va & (uint64_t)(size - 1))) {
         if (raise)
@@ -380,7 +380,10 @@ static inline bool rd_x(n64_machine *m, uint64_t va, int size, uint64_t *out, bo
     return true;
 }
 
-static bool rd(n64_machine *m, uint64_t va, int size, uint64_t *out) { return rd_x(m, va, size, out, true); }
+static N64_HOT_INLINE bool rd(n64_machine *m, uint64_t va, int size, uint64_t *out)
+{
+    return rd_x(m, va, size, out, true);
+}
 
 /* MI repeat mode (MI_MODE bit 7, set with the length): the next RDRAM write repeats the bus word (32 bits, 64 for SD) over the
  * length (less the start's misalignment to 8), wrapping in the 2 KB page, then the mode ends. */
@@ -399,7 +402,7 @@ static void mi_repeat_write(n64_machine *m, uint32_t pa, int size, uint64_t v)
     m->mi_mode &= ~0x80u;
 }
 
-static inline bool wr_x(n64_machine *m, uint64_t va, int size, uint64_t v, bool raise)
+static N64_HOT_INLINE bool wr_x(n64_machine *m, uint64_t va, int size, uint64_t v, bool raise)
 {
     if (N64_UNLIKELY(va & (uint64_t)(size - 1))) {
         if (raise)
@@ -435,7 +438,7 @@ static inline bool wr_x(n64_machine *m, uint64_t va, int size, uint64_t v, bool 
     return true;
 }
 
-static bool wr(n64_machine *m, uint64_t va, int size, uint64_t v) { return wr_x(m, va, size, v, true); }
+static N64_HOT_INLINE bool wr(n64_machine *m, uint64_t va, int size, uint64_t v) { return wr_x(m, va, size, v, true); }
 
 /* The aligned word / doubleword a partial load (LWL / LWR / LDL / LDR) reads, translated from the unaligned address. */
 static inline bool rd_partial_x(n64_machine *m, uint64_t va, int size, uint64_t *out, bool raise)
@@ -750,7 +753,7 @@ static inline bool cop1_usable(n64_machine *m)
     return true;
 }
 
-static void exec_special(n64_machine *m, uint32_t ins)
+static N64_HOT_INLINE void exec_special(n64_machine *m, uint32_t ins)
 {
     n64_cpu *c = &m->cpu;
     uint64_t *g = c->gpr;
@@ -935,7 +938,7 @@ static void exec_special(n64_machine *m, uint32_t ins)
     }
 }
 
-static void exec_regimm(n64_machine *m, uint32_t ins)
+static N64_HOT_INLINE void exec_regimm(n64_machine *m, uint32_t ins)
 {
     n64_cpu *c = &m->cpu;
     int64_t s = (int64_t)c->gpr[RS(ins)];
@@ -959,7 +962,7 @@ static void exec_regimm(n64_machine *m, uint32_t ins)
     }
 }
 
-static void exec(n64_machine *m, uint32_t ins)
+static N64_HOT_INLINE void exec(n64_machine *m, uint32_t ins)
 {
     n64_cpu *c = &m->cpu;
     uint64_t *g = c->gpr;
@@ -1213,7 +1216,7 @@ static inline void take_interrupt(n64_machine *m)
     m->now += COST_INTERRUPT;
 }
 
-static inline void step(n64_machine *m)
+static N64_HOT_INLINE void step(n64_machine *m)
 {
     n64_cpu *c = &m->cpu;
     uint64_t pc = c->pc;

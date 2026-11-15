@@ -17,6 +17,13 @@
 #define N64_LIKELY(x) (x)
 #define N64_UNLIKELY(x) (x)
 #endif
+/* The interpreter's decode and execute, inlined into its run loops (XBA-191): a call per instruction, with the
+ * callee-saved registers of a big switch, was a fifth of the interpreter's cost. */
+#if defined(__GNUC__) || defined(__clang__)
+#define N64_HOT_INLINE inline __attribute__((always_inline))
+#else
+#define N64_HOT_INLINE inline
+#endif
 
 /* Time: the core counts ticks of half a CPU cycle (187.5 MHz), so the 1.5-cycle average instruction is a whole
  * number: COUNT advances every 4 ticks, the RCP (62.5 MHz) every 3. */
