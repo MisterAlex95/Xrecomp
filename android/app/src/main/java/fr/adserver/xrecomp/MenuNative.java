@@ -69,4 +69,10 @@ final class MenuNative {
      */
     static native void nativeSetPicture(boolean xbox, String scale, String filter, String shader, int strength,
                                         int curvature, int ghosting);
+
+    /**
+     * The N64 Vulkan RDP's start-up progress (n64_rdp.h n64_rdp_shader_progress): { active, pipelines built, pipelines
+     * expected (0: unknown) }. Cheap (two atomic loads): ShaderOverlay polls it on the UI thread.
+     */
+    static native int[] nativeShaderProgress();
 }

@@ -127,6 +127,8 @@ public class ShellActivity extends SDLActivity {
         touch.layout(TouchPad.layoutFor(console, ps1Analog()));   // the console's own buttons (XBA-158 / 168 / 174)
         touch.game(GameLanguage.runningTitleId(this));   // its own touch layout, if it has one (XBA-207)
         touch.checkRun(checked);   // never the on-screen pad during a library check
+        if (console == Console.N64)   // « Compilation des shaders… 7/13 » while the Vulkan RDP builds its pipelines
+            new ShaderOverlay(this, MenuNative::nativeShaderProgress).attach();
         touch.attach();   // under the menu
         menu.attach();
         companion = new CompanionScreen(this, "shell", ctx -> {
