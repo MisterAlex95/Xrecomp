@@ -227,11 +227,14 @@ public class ConsoleVideoTest {
         List<RecompConfig.Option> shown = RecompConfig.shownOptions(false);
         List<RecompConfig.Option> g = RecompConfig.tabOptions(shown, RecompConfig.Section.GRAPHICS);
         assertTrue(RecompConfig.grouped(g, RecompConfig.Section.GRAPHICS));
-        assertEquals(List.of(R.string.OPT_VSYNC, R.string.OPT_CSCALE, R.string.OPT_CFILTER, R.string.OPT_UPSCALE),
-                     titles(g).subList(0, 4));
-        for (int i = 4; i < g.size(); i++)
+        // XBA-195: the picture shader's four rows after the internal resolution.
+        assertEquals(List.of(R.string.OPT_VSYNC, R.string.OPT_CSCALE, R.string.OPT_CFILTER, R.string.OPT_UPSCALE,
+                             R.string.OPT_CSHADER, R.string.OPT_CSHADER_STRENGTH, R.string.OPT_CSHADER_CURVE,
+                             R.string.OPT_CSHADER_GHOST),
+                     titles(g).subList(0, 8));
+        for (int i = 8; i < g.size(); i++)
             assertFalse(g.get(i).title + " is the Xbox's", g.get(i).shared);
-        List<Integer> xbox = titles(g).subList(4, g.size());
+        List<Integer> xbox = titles(g).subList(8, g.size());
         for (int t : new int[] { R.string.OPT_GPU, R.string.OPT_GPU_FPS_CAP, R.string.OPT_GPU_SCALE,
                                  R.string.OPT_ASPECT, R.string.OPT_WIDESCREEN, R.string.OPT_480P, R.string.OPT_TEX })
             assertTrue(xbox.contains(t));

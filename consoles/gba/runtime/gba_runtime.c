@@ -636,6 +636,7 @@ int gba_runtime_run(const gba_runtime_opts *o)
     int scale, filter;
     gba_runtime_display(o, &scale, &filter);
     host_window_set_scaling(scale, filter);
+    host_window_shader_env("RECOMP_GBA_SHADER"); /* XBA-195: picture shader */
     if (window) {
         char title[300];
         snprintf(title, sizeof title, "XRecomp GBA - %s", base_name(o->rom));

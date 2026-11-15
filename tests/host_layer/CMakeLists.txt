@@ -6,6 +6,7 @@ project(host_layer_test C)
 # source (below).
 #   host_layer_core    no display: time, lifecycle, config, storage, pads and audio out on SDL's dummy drivers
 #   host_layer_window  the window, GL present and pads; skipped (77) headless or under XBR_BUILD_ONLY
+#   host_layer_shaders the picture shaders (XBA-195) drawn and read back, their cost; skipped the same way
 if(WIN32)
     message(FATAL_ERROR "The host layer is POSIX-only")
 endif()
@@ -55,3 +56,6 @@ add_test(NAME host_layer_core COMMAND host_layer_test core)
 set_tests_properties(host_layer_core PROPERTIES ENVIRONMENT "SDL_AUDIODRIVER=dummy" TIMEOUT 60)
 add_test(NAME host_layer_window COMMAND host_layer_test window)
 set_tests_properties(host_layer_window PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60)
+# XBA-195: the picture shaders, each drawn and read back (host_window_capture); skipped (77) like the window test
+add_test(NAME host_layer_shaders COMMAND host_layer_test shaders)
+set_tests_properties(host_layer_shaders PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120)

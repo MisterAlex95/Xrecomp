@@ -30,6 +30,26 @@
     <string name="VAL_MB_64">64 Mo</string>
     <string name="VAL_MB_128">128 Mo</string>
     <string name="VAL_MB_256">256 Mo</string>
+    <string name="OPT_CSHADER">Shader d\'image</string>
+    <string name="OPT_CSHADER_DETAIL">Un rendu pour l\'image d\'un jeu Game Boy Advance, PlayStation ou Nintendo 64, dessiné à la résolution de l\'écran. Aucun : l\'image telle quelle. Bilinéaire net : des pixels carrés sans largeurs inégales quand l\'échelle n\'est pas entière. Lignes de balayage : les lignes sombres d\'une télé. CRT : les lignes et les bandes rouges, vertes et bleues d\'un tube de télé. Grille LCD : la grille de pixels de l\'écran d\'une console portable. Un jeu peut avoir le sien (ses Options). S\'applique au prochain lancement d\'un jeu. (RECOMP_SHADER)</string>
+    <string name="VAL_CSHADER_NONE">Aucun</string>
+    <string name="VAL_CSHADER_SHARP">Bilinéaire net</string>
+    <string name="VAL_CSHADER_SCANLINES">Lignes de balayage</string>
+    <string name="VAL_CSHADER_CRT">CRT</string>
+    <string name="VAL_CSHADER_LCD">Grille LCD</string>
+    <string name="OPT_CSHADER_STRENGTH">Intensité du shader</string>
+    <string name="OPT_CSHADER_STRENGTH_DETAIL">La netteté des lignes ou de la grille du shader d\'image. Selon le shader : lignes de balayage et grille LCD 50 %, CRT 60 %. Sans effet avec Aucun ou Bilinéaire net. S\'applique au prochain lancement d\'un jeu. (RECOMP_SHADER_STRENGTH)</string>
+    <string name="VAL_CSHADER_STRENGTH_DEFAULT">Selon le shader</string>
+    <string name="VAL_PERCENT_25">25 %</string>
+    <string name="VAL_PERCENT_50">50 %</string>
+    <string name="VAL_PERCENT_75">75 %</string>
+    <string name="VAL_PERCENT_100">100 %</string>
+    <string name="OPT_CSHADER_CURVE">Courbure CRT</string>
+    <string name="OPT_CSHADER_CURVE_DETAIL">L\'écran du shader CRT est bombé comme un tube de télé, avec des coins plus sombres. Seulement avec le shader CRT. S\'applique au prochain lancement d\'un jeu. (RECOMP_SHADER_CURVATURE)</string>
+    <string name="OPT_CSHADER_GHOST">Rémanence LCD</string>
+    <string name="OPT_CSHADER_GHOST_DETAIL">Le shader grille LCD garde une trace de l\'image précédente, comme l\'écran lent d\'une console portable (certains jeux comptent dessus pour la transparence). Seulement avec le shader grille LCD. S\'applique au prochain lancement d\'un jeu. (RECOMP_SHADER_GHOSTING)</string>
+    <string name="VAL_LEVEL_SLIGHT">Légère</string>
+    <string name="VAL_LEVEL_STRONG">Forte</string>
     <string name="OPT_RUMBLE">Vibration de la manette</string>
     <string name="OPT_RUMBLE_DETAIL">Activée : la manette vibre quand le jeu le demande (la DualShock de la PlayStation, le Rumble Pak de la Nintendo 64, la manette Xbox). Désactivée : jamais. Pour toutes les consoles. S\'applique au prochain lancement d\'un jeu. (RECOMP_RUMBLE)</string>
 

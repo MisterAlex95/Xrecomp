@@ -1009,6 +1009,7 @@ int ps1_runtime_run(const ps1_runtime_opts *o)
     int scale, filter;
     ps1_runtime_display(o, &scale, &filter);
     host_window_set_scaling(scale, filter);
+    host_window_shader_env("RECOMP_PS1_SHADER"); /* XBA-195: picture shader */
     host_window_set_aspect(4, 3);
     if (window) {
         char title[300];
