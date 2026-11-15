@@ -113,6 +113,14 @@ struct ps1_gpu {
     int up;        /* log2 of the factor: 0, 1 or 2 */
     int threads;   /* workers wanted for the shadow pass (-1: by the host's cores) */
     struct gpu_pool *pool; /* those workers, while upscaled */
+
+    /* The CLUT cache (XBA-200): the palette a 4 / 8 bpp primitive loaded, kept until a primitive needs another CLUT
+     * position or more entries (4 bpp loads 16, 8 bpp 256) or GP0(01h) clears it; VRAM writes do not reach it
+     * (ps1-tests gpu/clut-cache's hardware dump). Outside the state (states keep their size): a state loaded starts
+     * with it empty, the next primitive loads it from VRAM. */
+    uint16_t clut_cache[256];
+    uint32_t clut_tag; /* the CLUT attribute loaded */
+    int clut_n;        /* entries loaded: 0 (empty), 16 or 256 */
 };
 
 /* A state is the GPU up to the shadow: the size it had before XBA-184 (vram ends where the struct's alignment puts
@@ -393,11 +401,16 @@ static span_fn raster_setup(ps1_gpu *g, raster *rs, const prim *p, uint32_t flat
     rs->tw_and_v = ~(my * 8) & 0xFF;
     rs->tw_or_v = (oy & my) * 8;
     if (depth < 2) {
-        unsigned cx = (p->clut & 0x3F) * 16, cy = (p->clut >> 6) & 0x1FF;
         int n = depth == 0 ? 16 : 256;
-        const uint16_t *src = g->vram + cy * VRAM_W;
-        for (int i = 0; i < n; i++)
-            rs->clut[i] = src[(cx + i) & (VRAM_W - 1)];
+        if (g->clut_n < n || g->clut_tag != (p->clut & 0x7FFF)) {
+            unsigned cx = (p->clut & 0x3F) * 16, cy = (p->clut >> 6) & 0x1FF;
+            const uint16_t *src = g->vram + cy * VRAM_W;
+            for (int i = 0; i < n; i++)
+                g->clut_cache[i] = src[(cx + i) & (VRAM_W - 1)];
+            g->clut_tag = p->clut & 0x7FFF;
+            g->clut_n = n;
+        }
+        memcpy(rs->clut, g->clut_cache, (size_t)n * sizeof rs->clut[0]);
     }
     int shade = p->raw ? 0 : p->gouraud ? 2 : 1;
     /* Flat modulation by 808080h without dithering is the texel itself. */
@@ -1245,7 +1258,9 @@ static void execute(ps1_gpu *g)
     uint32_t w = g->cmd[0], op = w >> 24;
     switch (op >> 5) {
     case 0:
-        if (op == 0x02)
+        if (op == 0x01)
+            g->clut_n = 0; /* clear cache */
+        else if (op == 0x02)
             cmd_fill(g);
         else if (op == 0x1F && !g->irq_flag) {
             g->irq_flag = 1;
@@ -1363,6 +1378,7 @@ static void reset_fifo(ps1_gpu *g)
 void ps1_gpu_reset(ps1_gpu *g)
 {
     reset_fifo(g);
+    g->clut_n = 0;
     g->irq_flag = 0;
     g->display_off = 1;
     g->dma_dir = 0;
@@ -1661,6 +1677,7 @@ int ps1_gpu_state_load(ps1_gpu *g, const uint8_t *in, size_t n)
     ps1_irq_sink irq = g->irq;
     memcpy(g, in, GPU_STATE_SIZE);
     g->irq = irq;
+    g->clut_n = 0;
     if (g->hi) /* the upscale's shadow is derived: made again from the VRAM loaded */
         hi_rebuild(g);
     return 0;
