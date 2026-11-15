@@ -3,8 +3,17 @@
  * hashes of VRAM regions (regression guards: update them only for a deliberate change). */
 #include "gpu_scene.h"
 
+#include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
+
+/* ps1_gpu_set_thread_hook: every worker heard as it starts and as it ends, on its own thread. */
+static atomic_int hook_up, hook_down;
+static void count_hook(int starting, void *user)
+{
+    (void)user;
+    atomic_fetch_add(starting ? &hook_up : &hook_down, 1);
+}
 
 static int failures;
 static const char *cur;
@@ -768,7 +777,11 @@ static void t_upscale(void)
             ps1_gpu *t = ps1_gpu_create((ps1_irq_sink){ 0 });
             gpu_open(t);
             ps1_gpu_set_upscale(t, n);
+            atomic_store(&hook_up, 0);
+            atomic_store(&hook_down, 0);
+            ps1_gpu_set_thread_hook(count_hook, NULL);
             check(ps1_gpu_set_threads(t, th) == th, "workers started");
+            ps1_gpu_set_thread_hook(NULL, NULL); /* the workers keep the hook they started with */
             scene_textures(t);
             scene_busy(t, 400, 12345);
             GP0(t, 0x80000000, XY(0, 0), XY(400, 0), XY(64, 32));
@@ -785,6 +798,8 @@ static void t_upscale(void)
             check(hash_hi(t, n, 0, 0, 1024, 512) == hash_hi(u, n, 0, 0, 1024, 512), "gfx scene: same shadow");
             ps1_gpu_destroy(u);
             ps1_gpu_destroy(t);
+            /* ps1_gpu_set_thread_hook: each of t's workers heard as it started and as it ended */
+            check(atomic_load(&hook_up) == th && atomic_load(&hook_down) == th, "thread hook: a start and an end each");
         }
         if (golden_busy[f] && hb != golden_busy[f]) {
             fprintf(stderr, "FAIL busy scene %dx: hash %08X, want %08X\n", n, hb, golden_busy[f]);

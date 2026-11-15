@@ -137,6 +137,13 @@ void n64_rdp_run(n64_rdp *d)
     }
 }
 
+/* n64_rdp.h: no threads here. */
+void n64_rdp_set_thread_hook(n64_rdp_thread_hook fn, void *user)
+{
+    (void)fn;
+    (void)user;
+}
+
 /* n64_rdp.h: nothing is batched here. */
 int n64_rdp_set_threads(n64_rdp *d, int n)
 {

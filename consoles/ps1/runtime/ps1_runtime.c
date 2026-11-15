@@ -27,6 +27,7 @@
 #include "host_audio.h"
 #include "console_pad.h"
 #include "host_pad.h"
+#include "host_perf_hint.h"
 #include "host_window.h"
 #include "ps1_core.h"
 #include "ps1_devices.h"
@@ -941,6 +942,8 @@ int ps1_runtime_run(const ps1_runtime_opts *o)
         }
     }
     char err[256] = "";
+    /* The GPU's shadow-pass workers, as they start: their fast cores put back after a resume, the performance hint. */
+    ps1_gpu_set_thread_hook(recomp_host_worker_hook, NULL);
     ps1_machine *m = ps1_create(bios, bios ? PS1_BIOS_SIZE : 0, disc, exe, exe_n, err, sizeof err);
     free(bios);
     free(exe);
@@ -1064,6 +1067,7 @@ int ps1_runtime_run(const ps1_runtime_opts *o)
     int analog2 = analog;
     uint8_t rumble[2][2] = {{0, 0}, {0, 0}};   /* per port: small, large, as last sent to the host pads */
     int rumble_on = host_pad_rumble_env();     /* RECOMP_RUMBLE=0 turns the DualShock motors off (XBA-181) */
+    recomp_perf_hint_begin(16683333);          /* the frame period; each frame's own below */
 
     for (;;) {
         int running = 1;
@@ -1098,6 +1102,7 @@ int ps1_runtime_run(const ps1_runtime_opts *o)
             was_paused = 0;
             next = now_ns(); /* the time away is not caught up */
         }
+        uint64_t work_t0 = now_ns(); /* the frame's work, for the performance hint (the sleep after it is not) */
 
         pad_in p1, p2;
         pads_read(0, players, analog, &p1);
@@ -1255,6 +1260,7 @@ int ps1_runtime_run(const ps1_runtime_opts *o)
         }
         if (o->frames && frames >= o->frames)
             break;
+        recomp_perf_hint_frame((int64_t)(now_ns() - work_t0), (int64_t)frame_ns);
 
         if (!o->unpaced && !(ff && !speed)) {
             next += frame_ns;
@@ -1276,6 +1282,7 @@ int ps1_runtime_run(const ps1_runtime_opts *o)
         }
     }
 
+    recomp_perf_hint_end();
     double secs = (double)(now_ns() - t0) / 1e9;
     printf("ps1: %llu frames in %.1f s (%.2f fps), %llu late resets\n", (unsigned long long)frames, secs,
            secs > 0 ? (double)frames / secs : 0.0, (unsigned long long)late_resets);

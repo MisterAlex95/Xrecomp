@@ -2392,17 +2392,32 @@ static void run_batch(rdp_render *r, const uint64_t *w, uint32_t n)
     }
 }
 
+static n64_rdp_thread_hook s_thread_hook; /* n64_rdp_set_thread_hook */
+static void *s_thread_hook_user;
+
+void n64_rdp_set_thread_hook(n64_rdp_thread_hook fn, void *user)
+{
+    s_thread_hook = fn;
+    s_thread_hook_user = user;
+}
+
 #ifdef RDP_THREADS
 typedef struct {
     n64_rdp *d;
     int id;
+    n64_rdp_thread_hook hook; /* as set when the thread was made: the same one hears it end */
+    void *hook_user;
 } worker_arg;
 
 static void *worker(void *arg)
 {
     n64_rdp *d = ((worker_arg *)arg)->d;
     int id = ((worker_arg *)arg)->id;
+    n64_rdp_thread_hook hook = ((worker_arg *)arg)->hook;
+    void *hook_user = ((worker_arg *)arg)->hook_user;
     free(arg);
+    if (hook)
+        hook(1, hook_user);
     unsigned seen = 0;
     pthread_mutex_lock(&d->mu);
     for (;;) {
@@ -2418,6 +2433,8 @@ static void *worker(void *arg)
             pthread_cond_signal(&d->cv_done);
     }
     pthread_mutex_unlock(&d->mu);
+    if (hook)
+        hook(0, hook_user);
     return NULL;
 }
 
@@ -2555,6 +2572,8 @@ int n64_rdp_set_threads(n64_rdp *d, int n)
             if (a) {
                 a->d = d;
                 a->id = i;
+                a->hook = s_thread_hook;
+                a->hook_user = s_thread_hook_user;
             }
             if (!a || pthread_create(&d->th[i], NULL, worker, a) != 0) {
                 free(a);
