@@ -1380,6 +1380,7 @@ int n64_runtime_run(const n64_runtime_opts *o)
     int dw = 320, dh = 240, last_w = 0, last_h = 0, display_on = -1, last_kind = N64_SAVE_NONE;
     uint64_t frames = 0, next = now_ns(), t0 = next, late_resets = 0, dirty_at = 0, dirty_first = 0;
     uint64_t fps_t = t0, fps_frames = 0, last_frame_ns = 0;
+    int fps_windows = 0, advised_8x = 0; /* the 8x advice: one line, after a whole window below 97 % (not the first) */
     int was_paused = 0, heard = 0, rc = 0;
     int rumble_sent[4] = {0, 0, 0, 0};
     int rumble_on = host_pad_rumble_env(); /* RECOMP_RUMBLE=0 turns the Rumble Pak off (XBA-181) */
@@ -1677,6 +1678,12 @@ int n64_runtime_run(const n64_runtime_opts *o)
                    (unsigned long long)(skipped - skipped_log), (unsigned long long)late_resets,
                    (unsigned long long)(n64_pc(m) & 0xFFFFFFFFu));
             skipped_log = skipped;
+            const double speed = (double)fps_frames * (double)frame_ns / (double)(t - fps_t);
+            if (++fps_windows > 1 && !advised_8x && rdp && n64_rdp_upscale(rdp) >= 8 && speed < 0.97) {
+                printf("n64: %.0f %% speed at 8x over the last %.0f s: try 4x (Internal resolution in the game's "
+                       "Options, or RECOMP_UPSCALE=4)\n", speed * 100.0, (double)(t - fps_t) / 1e9);
+                advised_8x = 1;
+            }
             rt_perf_mark pm_now;
             n64_runtime_perf pf;
             char line[1024];

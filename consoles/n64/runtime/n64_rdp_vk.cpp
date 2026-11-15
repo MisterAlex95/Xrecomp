@@ -298,14 +298,25 @@ int env_int(const char *name, int def)
     return e && *e ? atoi(e) : def;
 }
 
+bool g_ss8_logged; /* upscale_flags: the 8x refusal, logged once */
+bool g_ssbo_emulation; /* n64_vk_cache_turnip_env said on: for the start line */
+
 RDP::CommandProcessorFlags upscale_flags(int f)
 {
     RDP::CommandProcessorFlags fl = f >= 8   ? RDP::COMMAND_PROCESSOR_FLAG_UPSCALING_8X_BIT
                                     : f >= 4 ? RDP::COMMAND_PROCESSOR_FLAG_UPSCALING_4X_BIT
                                     : f >= 2 ? RDP::COMMAND_PROCESSOR_FLAG_UPSCALING_2X_BIT
                                              : 0;
-    if (fl && env_int("RECOMP_N64_UPSCALE_SSREADBACK", 0) != 0)
-        fl |= RDP::COMMAND_PROCESSOR_FLAG_SUPER_SAMPLED_READ_BACK_BIT;
+    /* Not at 8x: its write mask would sit past the 512 MB upscaled RDRAM (atomicOr there, memory_interfacing.h), and
+     * it keeps paraLLEl-RDP's full tile-instance sizes (a 2 GiB tile work list). */
+    if (fl && env_int("RECOMP_N64_UPSCALE_SSREADBACK", 0) != 0) {
+        if (f < 8)
+            fl |= RDP::COMMAND_PROCESSOR_FLAG_SUPER_SAMPLED_READ_BACK_BIT;
+        else if (!g_ss8_logged) {
+            fprintf(stderr, "n64: Vulkan RDP: no super-sampled readback at 8x (RECOMP_N64_UPSCALE_SSREADBACK ignored)\n");
+            g_ss8_logged = true;
+        }
+    }
     return fl;
 }
 
@@ -408,6 +419,10 @@ void limits_label(VkRdp *d, char *out, size_t n)
              (unsigned long long)(range >> 20), (unsigned long long)(ft.vk13_props.maxBufferSize >> 20),
              (unsigned long long)(ft.vk11_props.maxMemoryAllocationSize >> 20),
              (unsigned long long)(largest_device_heap(d) >> 20));
+    if (g_ssbo_emulation) {
+        const size_t l = strlen(out);
+        snprintf(out + l, n - l, ", tu_enable_ssbo_emulation");
+    }
     if (env_int("RECOMP_N64_VK_RANGE_MB", 0) > 0) {
         const size_t l = strlen(out);
         snprintf(out + l, n - l, " (RECOMP_N64_VK_RANGE_MB=%d)", env_int("RECOMP_N64_VK_RANGE_MB", 0));
@@ -915,7 +930,7 @@ bool try_driver(VkRdp *d, bool *custom)
                 snprintf(up, sizeof up, ", upscale %dx, scanout %dx%s", d->upscale, d->upscale >> d->down_steps,
                          (d->cp_flags & RDP::COMMAND_PROCESSOR_FLAG_SUPER_SAMPLED_READ_BACK_BIT)
                              ? ", super-sampled readback" : "");
-            char lim[192];
+            char lim[256];
             limits_label(d, lim, sizeof lim);
             printf("n64: Vulkan RDP on %s (paraLLEl-RDP, %s; %s%s%s)\n", gpu, tries[i].name, drv, up, lim);
             fflush(stdout);
@@ -958,7 +973,9 @@ void *vk_create(n64_rcp_bus bus)
         return nullptr;
     d->bus = bus;
     Vulkan::get_stalled_compiles(d->stalls0, d->stall_ns0); /* the check's compiles count as this RDP's */
-    n64_vk_cache_mesa_env(); /* before any driver opens */
+    /* before any driver opens: Turnip's SSBO emulation for 8x (its own cache directory), then Mesa's disk cache */
+    g_ssbo_emulation = n64_vk_cache_turnip_env(n64_rdp_upscale_wanted()) != 0;
+    n64_vk_cache_mesa_env();
     hook_threads();          /* before any command processor starts its threads */
 
     if (void *gipa = n64_vk_driver_open()) {

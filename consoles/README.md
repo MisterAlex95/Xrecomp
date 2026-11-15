@@ -760,6 +760,16 @@ bit for bit against angrylion.
   cache goes to `<dir>/mesa` (`MESA_SHADER_CACHE_DIR`, unless set). Without it every start compiled the same
   pipelines again: ~1.35 s of a 4x start of Ocarina of Time on the Thor's Turnip. `n64_vk_cache.h`;
   [environment variables](../docs/runtime/environment-variables.md#custom-vulkan-driver-n64-rdp).
+- **8x on Turnip (Adreno 7xx).** Turnip's a7xx `maxStorageBufferRange` is 128 MB, so 8x (a 512 MB upscaled RDRAM
+  binding) needs Mesa's driconf `tu_enable_ssbo_emulation` (Mesa 26.2+, e.g. PurpleVK: the range becomes 2 GiB - 1,
+  buffers of 128 MB or more go through bounds-checked global memory). Before any driver opens, when the wanted factor
+  is 8, the runtime sets `tu_enable_ssbo_emulation=true` in the environment unless it is already set
+  (`n64_vk_cache_turnip_env`, logged `tu_enable_ssbo_emulation=true for 8x`); `RECOMP_N64_TURNIP_SSBO_EMULATION=0`
+  keeps it off, and it is never set for 1x-4x (a value set for an earlier 8x start in the process is removed). With
+  it on, the pipeline cache and Mesa's cache live in `<dir>/ssbo-emulation/` (the shaders differ) and the start line
+  ends `, tu_enable_ssbo_emulation`. A driver without the option keeps the 128 MB range: `upscale lowered from 8x to
+  4x`; an upscaled check that fails: 1x. Super-sampled readback is never used at 8x. After a whole 10-s window (not
+  the first) below 97 % speed at 8x the runtime logs once `n64: NN % speed at 8x over the last 10 s: try 4x`.
 
 Tests (`consoles/n64/tests`, built with `-DXBR_N64_RDP_VULKAN=ON`; without a GPU, Mesa's lavapipe with
 `VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json`):
