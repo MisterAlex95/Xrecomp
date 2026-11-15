@@ -214,13 +214,22 @@ static void push_out(n64_machine *m, double frac)
         ph = AI_PHASES - 1;
     float w = (float)(fp - ph);
     const float *k0 = m->ai_kernel + ph * AI_TAPS, *k1 = k0 + AI_TAPS;
-    uint32_t base = m->ai_nsrc - AI_TAPS; /* the oldest sample the taps read */
+    /* The taps first (independent: they vectorise), then the two sums in tap order, the history ring walked as its
+     * two runs instead of masking every index: the same operations in the same order as one loop (XBA-191). */
+    float coef[AI_TAPS];
+    for (int k = 0; k < AI_TAPS; k++)
+        coef[k] = k0[k] + (k1[k] - k0[k]) * w;
+    uint32_t base = (m->ai_nsrc - AI_TAPS) & (AI_HIST - 1); /* the oldest sample the taps read */
+    int run = AI_HIST - (int)base < AI_TAPS ? AI_HIST - (int)base : AI_TAPS;
+    const float *h0 = m->ai_hist[0], *h1 = m->ai_hist[1];
     float acc[2] = {0, 0};
-    for (int k = 0; k < AI_TAPS; k++) {
-        float c = k0[k] + (k1[k] - k0[k]) * w;
-        uint32_t i = (base + (uint32_t)k) & (AI_HIST - 1);
-        acc[0] += c * m->ai_hist[0][i];
-        acc[1] += c * m->ai_hist[1][i];
+    for (int k = 0; k < run; k++) {
+        acc[0] += coef[k] * h0[base + (uint32_t)k];
+        acc[1] += coef[k] * h1[base + (uint32_t)k];
+    }
+    for (int k = run; k < AI_TAPS; k++) {
+        acc[0] += coef[k] * h0[k - run];
+        acc[1] += coef[k] * h1[k - run];
     }
     if (m->audio_wr - m->audio_rd >= N64_AUDIO_RING)
         m->audio_rd++; /* full: drop the oldest */
