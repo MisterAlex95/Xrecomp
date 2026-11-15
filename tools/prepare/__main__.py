@@ -817,7 +817,8 @@ def desktop(a):
         fresh = gen + ".new"
         shutil.rmtree(fresh, ignore_errors=True)
         os.makedirs(fresh)
-        cmd = [py, "-m", "tools.recomp", xbe, "--all", "--split", "250",
+        from tools.prepare.compile import LIFT_CHUNK_BYTES
+        cmd = [py, "-m", "tools.recomp", xbe, "--all", "--split-bytes", str(LIFT_CHUNK_BYTES),
                "--game-name", info["title"],
                "--disasm-dir", os.path.join(an, "disasm"),
                "--func-id-dir", os.path.join(an, "func_id"),

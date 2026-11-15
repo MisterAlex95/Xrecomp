@@ -18,6 +18,7 @@ import os
 import re
 import struct
 import sys
+import zlib
 
 # Import the functions, not the VA constants: configure_from_xbe() rebinds those
 # at startup, so a by-value import would freeze the fallback layout.
@@ -3859,6 +3860,61 @@ class FunctionTranslator:
         return regs
 
 
+def stable_chunks(translations, chunk_bytes):
+    """Cut `translations` ((addr, name, code), in address order) into chunks
+    of about `chunk_bytes` of C whose boundaries survive a lift that adds or
+    drops a few functions (XBA-209).
+
+    `--split N` cuts every N functions: one function found by a run's
+    discovery shifts every chunk after it, so a re-prepare recompiles half of
+    the title on average. Here a chunk ends after a function chosen by its
+    address alone (content-defined chunking, as rsync does), once the chunk
+    holds 3/4 of the target: a change moves the boundaries of its own chunk,
+    and the ones after it fall back on the same addresses within a chunk or
+    so. The chance to end after a function grows with its size, so chunks
+    average `chunk_bytes` whatever the title's function sizes; none grows
+    past 1.5 times the target unless one function alone is that large. Sizing by
+    bytes, not by count, also keeps one huge chunk from compiling alone at
+    the end of a parallel build."""
+    lo = max(1, chunk_bytes * 3 // 4)
+    hi = chunk_bytes * 3 // 2
+    tail = max(1, chunk_bytes - lo)
+    chunks, cur, size = [], [], 0
+    for item in translations:
+        cur.append(item)
+        n = len(item[2]) + 1
+        size += n
+        if size >= hi:
+            cut = True
+        elif size >= lo:
+            # P(cut) = n / tail: past the floor, a chunk runs on for
+            # another `tail` bytes on average.
+            h = zlib.crc32(struct.pack("<I", item[0] & 0xFFFFFFFF))
+            cut = h * tail < n * 0x100000000
+        else:
+            cut = False
+        if cut:
+            chunks.append(cur)
+            cur, size = [], 0
+    if cur:
+        chunks.append(cur)
+    return chunks
+
+
+_C_IDENT = re.compile(r"[A-Za-z_]\w*")
+
+
+def chunk_declarations(chunk, declared):
+    """The functions of `declared` (name -> declaration) that the chunk's
+    code names, sorted: a self-contained chunk declares these instead of
+    including recomp_funcs.h, so a lift that adds a function elsewhere leaves
+    its text, and its object, unchanged (XBA-209)."""
+    used = set()
+    for _, _, code in chunk:
+        used.update(_C_IDENT.findall(code))
+    return [declared[n] for n in sorted(used & declared.keys())]
+
+
 def place_funclet_entries(translations, funclet_entries, manual=()):
     """Add the exception funclet entries to `translations`, in place.
 
@@ -4165,7 +4221,8 @@ class BatchTranslator:
 
     def translate_batch_split(self, func_list, output_dir, chunk_size=1000,
                               header_name="recomp_funcs.h",
-                              prefix="recomp", verbose=False, manual=None):
+                              prefix="recomp", verbose=False, manual=None,
+                              chunk_bytes=None):
         """
         Translate functions into multiple .c files + a shared header.
 
@@ -4181,6 +4238,13 @@ class BatchTranslator:
         are still declared and still count as defined for stub purposes. This
         is how a game replaces a recompiled XDK routine (a D3D8 entry point,
         say) with one that drives the host runtime instead of the hardware.
+
+        chunk_bytes: cut the chunks by size with stable boundaries
+        (stable_chunks) instead of every chunk_size functions, and make each
+        chunk self-contained: it includes recomp_types.h and declares the
+        functions it names (chunk_declarations) instead of including the
+        header, so a re-lift that changes the function list leaves the
+        other chunks byte-identical (XBA-209).
 
         Returns dict with stats and list of generated files.
         """
@@ -4307,9 +4371,11 @@ class BatchTranslator:
             '#include "recomp_types.h"',
             "",
         ]
+        declared = {}       # name -> declaration, for self-contained chunks
         for addr, name, _ in translations:
             decl = self._make_declaration(addr, name)
             header_lines.append(f"{decl};")
+            declared.setdefault(name, f"{decl};")
 
         if manual_decls:
             header_lines.append("")
@@ -4317,12 +4383,16 @@ class BatchTranslator:
             for addr in sorted(manual_decls):
                 header_lines.append(
                     f"void {manual_decls[addr]}(void);  /* 0x{addr:08X} */")
+                declared.setdefault(manual_decls[addr],
+                                    f"void {manual_decls[addr]}(void);")
 
         if unresolved:
             header_lines.append("")
             header_lines.append("/* Unresolved call targets (stubbed) */")
             for addr in sorted(unresolved):
                 header_lines.append(f"void {unresolved[addr]}(void);")
+                declared.setdefault(unresolved[addr],
+                                    f"void {unresolved[addr]}(void);")
 
         header_lines.extend(["", "#endif /* RECOMP_FUNCS_H */", ""])
 
@@ -4380,8 +4450,11 @@ class BatchTranslator:
 
         # Split translations into chunks and write .c files
         generated_files = [header_path]
-        chunks = [translations[i:i+chunk_size]
-                  for i in range(0, len(translations), chunk_size)]
+        if chunk_bytes:
+            chunks = stable_chunks(translations, chunk_bytes)
+        else:
+            chunks = [translations[i:i+chunk_size]
+                      for i in range(0, len(translations), chunk_size)]
 
         # Remove chunk files a previous, larger run left behind. Projects glob
         # gen/*.c into their build, so a stale chunk keeps compiling: it still
@@ -4409,10 +4482,15 @@ class BatchTranslator:
                 " */",
                 "",
                 "#define RECOMP_GENERATED_CODE",
-                f'#include "{header_name}"',
-                '#include <math.h>',
-                "",
             ]
+            if chunk_bytes:
+                # What recomp_funcs.h would give this chunk: the register
+                # model and the declarations it uses (all void(void)).
+                c_lines += ['#include "recomp_types.h"', '#include <math.h>', ""]
+                c_lines += chunk_declarations(chunk, declared)
+                c_lines.append("")
+            else:
+                c_lines += [f'#include "{header_name}"', '#include <math.h>', ""]
             for addr, name, code in chunk:
                 c_lines.append(code)
 
@@ -4549,6 +4627,8 @@ class BatchTranslator:
         stats["files"] = generated_files
         stats["num_chunks"] = len(chunks)
         stats["chunk_size"] = chunk_size
+        if chunk_bytes:
+            stats["chunk_bytes"] = chunk_bytes
         return stats
 
     def _write_dispatch_table(self, translations, output_path, header_name):

@@ -232,7 +232,7 @@ class Run:
             for fn in os.listdir(gen):
                 os.remove(os.path.join(gen, fn))
             an = self.an
-            args = ["tools.recomp", self.xbe, "--all", "--split", "250",
+            args = ["tools.recomp", self.xbe, "--all", "--split-bytes", str(cc.LIFT_CHUNK_BYTES),
                     "--game-name", self.info.get("title", self.tid),
                     "--disasm-dir", os.path.join(an, "disasm"), "--func-id-dir", os.path.join(an, "func_id"),
                     "--abi-dir", os.path.join(an, "abi"), "--gen-dir", gen]

@@ -164,7 +164,7 @@ def lift(out, copies=0, python=sys.executable, recomp_args=()):
          "--strings", os.path.join(d, "strings.json"), "--xrefs", os.path.join(d, "xrefs.json"), "-o", fid],
         ["tools.abi_analysis", xbe, "--disasm-dir", d, "--func-id-dir", fid, "--output-dir", os.path.join(an, "abi")],
         # tools/prepare/android.py Run.lift's arguments.
-        ["tools.recomp", xbe, "--all", "--split", "250", "--game-name", "Bench",
+        ["tools.recomp", xbe, "--all", "--split-bytes", str(pcc.LIFT_CHUNK_BYTES), "--game-name", "Bench",
          "--disasm-dir", d, "--func-id-dir", fid, "--abi-dir", os.path.join(an, "abi"),
          "--gen-dir", gen, "-o", os.path.join(an, "recomp")] + list(recomp_args),
     )
