@@ -10,6 +10,12 @@ any instruction of the lifted code. It is lifted (gba_tools.recomp), built (tool
 and run by gba_run --pack --lockstep: the interpreter and the recompiled machine must agree on the whole state
 (registers, cycles, memory, frame) after every frame. Exit 0 when every seed agrees, 1 at the first difference,
 77 when Python's or a C compiler is missing (skipped).
+
+With --ref (XBA-208) nothing is lifted: the same programs run under gba_run --lockstep-ref, the interpreter's
+predecoded blocks against its reference loop (one full step per instruction), the whole save state compared after
+every frame, and with --lockstep-cycles N the CPU every N cycles too (the whole state every 1024 stops). --iwram:
+the random program runs from IWRAM, copied there from the cartridge before every pass, one of its immediates
+patched each time (a counter): the blocks decoded from it must go each time (self-modifying, copied code).
 """
 
 import argparse
@@ -158,7 +164,10 @@ def rand_thumb(r, a, pushed):
             a.emit16(0x4000 | r.randrange(16) << 6 | r.randrange(8) << 3 | r.choice(LOW))
 
 
-def make_rom(seed, n, irq=True):
+IWRAM_CODE = 0x03002000  # --iwram: where the program runs (the data at 0x03000100 and the stack stay below)
+
+
+def make_rom(seed, n, irq=True, iwram=False):
     r = random.Random(seed)
     a = Asm()
     a.emit32(0xEA00002E)  # b 0x080000C0
@@ -183,6 +192,30 @@ def make_rom(seed, n, irq=True):
     a.emit32(0xE1C010B8 if irq else 0xE1A00000)  # strh r1, [r0, #8] (IME), or a nop: no interrupts
     for reg in ARM_D:
         arm_const(a, reg, r.getrandbits(32))
+    if iwram:
+        # Each pass: copy the program (body, below) to IWRAM_CODE, patch its first instruction's immediate with a
+        # counter kept at 0x03001F00, jump there; the program comes back here at its end.
+        copy = a.pc
+        arm_const(a, 0, 0)  # patched below: the body's cartridge address
+        body_fix = a.pc - 4
+        arm_const(a, 1, IWRAM_CODE)
+        arm_const(a, 2, 0)  # patched below: its size in words
+        size_fix = a.pc - 4
+        a.emit32(0xE4903004)  # ldr r3, [r0], #4
+        a.emit32(0xE4813004)  # str r3, [r1], #4
+        a.emit32(0xE2522001)  # subs r2, r2, #1
+        a.emit32(0x1AFFFFFB)  # bne (the ldr)
+        arm_const(a, 1, 0x03001F00)
+        a.emit32(0xE5913000)  # ldr r3, [r1]
+        a.emit32(0xE2833001)  # add r3, r3, #1
+        a.emit32(0xE5813000)  # str r3, [r1]
+        arm_const(a, 1, IWRAM_CODE)
+        a.emit32(0xE5C13000)  # strb r3, [r1]: mov r0, #counter
+        a.emit32(0xE51FF004)  # ldr pc, [pc, #-4]
+        a.emit32(IWRAM_CODE)
+        body = a.pc
+        a.emit32(0xE3A00000)  # mov r0, #0 (patched in IWRAM)
+        a.emit32(0xE58C0000)  # str r0, [r12]
     loop = a.pc
     for _ in range(n):
         rand_arm(r, a)
@@ -202,8 +235,13 @@ def make_rom(seed, n, irq=True):
     a.align4()
     a.emit16(0x4778)  # bx pc
     a.emit16(0x46C0)
-    off = (loop - (a.pc + 8)) // 4
-    a.emit32(0xEA000000 | (off & 0xFFFFFF))  # b loop
+    if iwram:
+        a.emit32(0xE51FF004)  # ldr pc, [pc, #-4]: back to the copy
+        a.emit32(0x08000000 + copy)
+        body_end = a.pc
+    else:
+        off = (loop - (a.pc + 8)) // 4
+        a.emit32(0xEA000000 | (off & 0xFFFFFF))  # b loop
     handler = a.pc
     a.emit32(0xE3A00301)  # mov r0, #0x04000000
     a.emit32(0xE2800C02)  # add r0, r0, #0x200
@@ -212,6 +250,10 @@ def make_rom(seed, n, irq=True):
     a.emit32(0xE12FFF1E)  # bx lr
     img = bytearray(a.image())
     struct.pack_into("<I", img, handler_fix + 3 * 12 + 8, 0x08000000 + handler)
+    if iwram:
+        assert body_end - body <= 0x03007E00 - IWRAM_CODE, "program too large for IWRAM"
+        struct.pack_into("<I", img, body_fix, 0x08000000 + body)
+        struct.pack_into("<I", img, size_fix, (body_end - body) // 4)
     return bytes(img)
 
 
@@ -222,9 +264,17 @@ def main(argv=None):
     ap.add_argument("--seeds", default="0-7")
     ap.add_argument("--frames", type=int, default=20)
     ap.add_argument("--insns", type=int, default=160)
+    ap.add_argument("--ref", action="store_true", help="the interpreter's blocks against its reference loop, no pack")
+    ap.add_argument("--lockstep-cycles", type=int, default=0)
+    ap.add_argument("--iwram", action="store_true", help="the program runs from IWRAM, copied and patched each pass")
+    ap.add_argument("--bios", help="a BIOS image for gba_run (default: the built-in one)")
     args = ap.parse_args(argv)
+    if args.bios and not os.path.exists(args.bios):
+        print("skipped: BIOS %s not built" % args.bios)
+        return 77
+    bios = ["--bios", args.bios] if args.bios else []
     cc = os.environ.get("CC", "cc")
-    if not shutil.which(cc.split()[0]):
+    if not args.ref and not shutil.which(cc.split()[0]):
         print("skipped: no C compiler (%s)" % cc)
         return 77
     lo, _, hi = args.seeds.partition("-")
@@ -235,7 +285,18 @@ def main(argv=None):
         os.makedirs(d, exist_ok=True)
         rom = os.path.join(d, "fuzz.gba")
         with open(rom, "wb") as f:
-            f.write(make_rom(seed, args.insns))
+            f.write(make_rom(seed, args.insns, iwram=args.iwram))
+        if args.ref:
+            cmd = [args.gba_run, rom, "--quiet", "--frames", str(args.frames), "--lockstep-ref"] + bios
+            if args.lockstep_cycles:
+                cmd += ["--lockstep-cycles", str(args.lockstep_cycles)]
+            r = subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=900)
+            out = (r.stdout + r.stderr).strip()
+            print("seed %d: %s" % (seed, out.replace("\n", " | ")))
+            if r.returncode != 0 or "LOCKSTEP OK" not in out:
+                print("seed %d: DIFFERS (ROM kept in %s)" % (seed, rom))
+                return 1
+            continue
         # the discovery loop too: the IRQ handler is only known once a run met it
         b = subprocess.run([sys.executable, BUILD, rom, d, "--count", "--loop", "3", "--gba-run", args.gba_run,
                             "--frames", "3"], capture_output=True, text=True, check=False)
@@ -243,7 +304,7 @@ def main(argv=None):
             print("seed %d: pack build failed\n%s%s" % (seed, b.stdout, b.stderr))
             return 1
         r = subprocess.run([args.gba_run, rom, "--quiet", "--frames", str(args.frames), "--pack",
-                            os.path.join(d, "libtitle.so"), "--lockstep", "--stats"],
+                            os.path.join(d, "libtitle.so"), "--lockstep", "--stats"] + bios,
                            capture_output=True, text=True, check=False, timeout=600)
         out = (r.stdout + r.stderr).strip()
         print("seed %d: %s" % (seed, out.replace("\n", " | ")))

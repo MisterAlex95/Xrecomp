@@ -21,6 +21,12 @@
  * --stats       with --pack: print how many cartridge instructions ran natively vs interpreted
  * --lockstep    with --pack: run a second, interpreter-only machine side by side and compare the whole state
  *               (CPU, cycles, memories, frame) after every frame; exit 4 at the first difference
+ * --lockstep-ref  without a pack (XBA-208): the twin runs the reference interpreter loop (one full step per
+ *               instruction, gba_cpu_set_reference), this machine the predecoded blocks; the whole save state
+ *               (gba_state_compare: every byte a state holds) and the frame compared after every frame
+ * --lockstep-cycles N  with --lockstep-ref: both machines run in slices of N cycles (gba_run_cycles: the CPU loop
+ *               stops at the first instruction boundary past each, which also cuts blocks short anywhere), the CPU
+ *               registers and the clock compared at every stop, the whole state every 1024 stops and every frame
  * --hash        print a hash of the last frame and of the RAM (FNV-1a 64) and the cycle count
  * --state-save N:FILE  after frame N, write a save state (gba_state_save, XBA-182) to FILE
  * --state-load FILE    load a save state before the first frame (exit 5 when the core refuses it: another game,
@@ -363,7 +369,8 @@ int main(int argc, char **argv)
 {
     const char *rom_path = NULL, *bios_path = NULL, *ppm = NULL, *wav = NULL, *save = NULL;
     const char *pack = NULL, *missed = NULL;
-    int stats = 0, lockstep = 0, hash = 0, run_hash = 0;
+    int stats = 0, lockstep = 0, lock_ref = 0, hash = 0, run_hash = 0;
+    long lock_cycles = 0, lock_stops = 0;
     const char *state_save = NULL, *state_load = NULL;
     long state_at = 0;
     long frames = 600;
@@ -405,6 +412,10 @@ int main(int argc, char **argv)
             stats = 1;
         else if (!strcmp(argv[i], "--lockstep"))
             lockstep = 1;
+        else if (!strcmp(argv[i], "--lockstep-ref"))
+            lockstep = lock_ref = 1;
+        else if (!strcmp(argv[i], "--lockstep-cycles") && i + 1 < argc)
+            lockstep = lock_ref = 1, lock_cycles = strtol(argv[++i], NULL, 0);
         else if (!strcmp(argv[i], "--hash"))
             hash = 1;
         else if (!strcmp(argv[i], "--run-hash"))
@@ -436,7 +447,8 @@ int main(int argc, char **argv)
         else {
             fprintf(stderr, "usage: gba_run ROM [--frames N] [--bios PATH] [--bios-boot] [--result] [--ppm OUT] "
                             "[--wav OUT] [--save PATH] [--keys MASK] [--reg-result R] [--pack LIB] [--missed FILE] [--stats] "
-                            "[--lockstep] [--hash] [--state-save N:FILE] [--state-load FILE] [--run-hash] "
+                            "[--lockstep] [--lockstep-ref [--lockstep-cycles N]] [--hash] "
+                            "[--state-save N:FILE] [--state-load FILE] [--run-hash] "
                             "[--rewind C:R [--rewind-mb M]] [--cheats FILE] [--peek ADDR] [--debug-log] [--pad-script FILE] [--quiet]\n");
             return 3;
         }
@@ -457,14 +469,20 @@ int main(int argc, char **argv)
         return 3;
     }
     gba_machine *m = gba_create(rom, rom_size, bios, bios_size);
-    gba_machine *ref = lockstep && pack ? gba_create(rom, rom_size, bios, bios_size) : NULL;
+    if (lock_ref && pack) {
+        fprintf(stderr, "gba_run: --lockstep-ref compares the interpreter with itself: no --pack\n");
+        return 3;
+    }
+    gba_machine *ref = lockstep && (pack || lock_ref) ? gba_create(rom, rom_size, bios, bios_size) : NULL;
+    if (ref && lock_ref)
+        gba_cpu_set_reference(ref, 1);
     char rom_sha[65];
     uint8_t sum[32];
     gba_pack_sha256(rom, rom_size, sum);
     gba_pack_hex(sum, rom_sha);
     free(rom);
     free(bios);
-    if (!m || (lockstep && pack && !ref)) {
+    if (!m || (lockstep && (pack || lock_ref) && !ref)) {
         fprintf(stderr, "gba_run: bad ROM or BIOS size\n");
         return 3;
     }
@@ -570,24 +588,67 @@ int main(int argc, char **argv)
             if (ref)
                 gba_set_keys(ref, (uint16_t)keys);
         }
-        gba_run_frame(m, fb);
+        const char *pair = lock_ref ? "reference interpreter vs blocks" : "interpreter vs recompiled";
+        if (lock_cycles > 0) {
+            /* Both machines in slices: this one first, the reference up to the same cycle, compared at each stop. */
+            int done = 0, tdone = 0;
+            while (!done) {
+                char why[160] = "";
+                uint32_t pc0 = gba_reg(m, 15);
+                done = gba_run_cycles(m, (uint64_t)lock_cycles, fb);
+                while (!tdone && gba_cycles(ref) < gba_cycles(m))
+                    tdone = gba_run_cycles(ref, gba_cycles(m) - gba_cycles(ref), ref_fb);
+                int d = done != tdone;
+                if (d)
+                    snprintf(why, sizeof why, "frame end");
+                for (int r = 0; r < 16 && !d; r++)
+                    if (gba_reg(ref, r) != gba_reg(m, r)) {
+                        snprintf(why, sizeof why, "r%d: 0x%08X vs 0x%08X", r, gba_reg(ref, r), gba_reg(m, r));
+                        d = 1;
+                    }
+                if (!d && (gba_cpsr(ref) != gba_cpsr(m) || gba_cycles(ref) != gba_cycles(m))) {
+                    snprintf(why, sizeof why, "cpsr / cycles");
+                    d = 1;
+                }
+                if (!d && ++lock_stops % 1024 == 0)
+                    d = gba_state_compare(ref, m, why, sizeof why);
+                if (d) {
+                    printf("LOCKSTEP DIVERGED at frame %ld, cycle %llu: %s (%s); pc before 0x%08X, after 0x%08X / "
+                           "0x%08X\n", f + 1, (unsigned long long)gba_cycles(m), why, pair, pc0, gba_reg(ref, 15),
+                           gba_reg(m, 15));
+                    diverged = 1;
+                    break;
+                }
+            }
+            if (diverged) {
+                f++;
+                break;
+            }
+        } else {
+            gba_run_frame(m, fb);
+        }
         if (pad_path)
             pad_after(&pad);
         gba_cheats_frame(&cheats, (uint16_t)keys);
         if (ref) {
             char why[160] = "";
             static int16_t sink[2 * 4096];
-            gba_run_frame(ref, ref_fb);
+            if (lock_cycles <= 0)
+                gba_run_frame(ref, ref_fb);
             gba_cheats_frame(&cheats_ref, (uint16_t)keys);
-            while (gba_audio_pull(ref, sink, 4096) > 0) /* keeps both audio rings alike */
-                ;
-            int d = gba_recomp_compare(ref, m, why, sizeof why);
+            int d = lock_ref ? gba_state_compare(ref, m, why, sizeof why) : gba_recomp_compare(ref, m, why, sizeof why);
             if (!d && memcmp(fb, ref_fb, sizeof fb) != 0) {
                 snprintf(why, sizeof why, "framebuffer");
                 d = 1;
             }
+            /* Then both audio rings emptied alike: the twin's here, this one's below (or here without a consumer). */
+            while (gba_audio_pull(ref, sink, 4096) > 0)
+                ;
+            if (lock_ref && !run_hash && !wf)
+                while (gba_audio_pull(m, sink, 4096) > 0)
+                    ;
             if (d) {
-                printf("LOCKSTEP DIVERGED at frame %ld: %s (interpreter vs recompiled)\n", f + 1, why);
+                printf("LOCKSTEP DIVERGED at frame %ld: %s (%s)\n", f + 1, why, pair);
                 diverged = 1;
                 f++;
                 break;
@@ -640,7 +701,8 @@ int main(int argc, char **argv)
     }
     double dt = now_s() - t0;
     if (ref && !diverged)
-        printf("LOCKSTEP OK: %ld frames identical (interpreter vs recompiled)\n", f);
+        printf("LOCKSTEP OK: %ld frames identical (%s)\n", f,
+               lock_ref ? "reference interpreter vs blocks" : "interpreter vs recompiled");
     if (!quiet)
         fprintf(stderr, "gba_run: %ld frames in %.3f s = %.1f frames/s (%.1fx real time)\n", f, dt,
                 dt > 0 ? f / dt : 0.0, dt > 0 ? f / dt / 59.7275 : 0.0);
