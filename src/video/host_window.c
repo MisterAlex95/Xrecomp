@@ -255,7 +255,10 @@ static int build_program(void)
  * 3.00 / 1.50 here, over the same full-viewport triangle as the plain present. Built on first use; a failure falls
  * back to none, logged once. */
 static HostShader s_shader = { HOST_SHADER_NONE, -1, 0, 0 };
-static PresentShaderProg s_sprog[HOST_SHADER_COUNT];
+static PresentShaderProg s_sprog[HOST_SHADER_COUNT + 1];   /* the presets, then PRESENT_SHADER_AREA */
+/* Downscale-aware present (present_shader_taps): 1 on, 0 off, -1 from $RECOMP_PRESENT_DOWNSCALE at the next draw.
+ * s_area_drawn: the last draw averaged a minified picture (logged when it changes). */
+static int s_downscale = -1, s_area_drawn = -1;
 
 /* The program of the preset to draw with, built on first use; NULL for none or a preset that failed. */
 static PresentShaderProg *shader_prog(void)
@@ -269,10 +272,27 @@ static PresentShaderProg *shader_prog(void)
     return &s_sprog[p];
 }
 
+/* The area program (none drawn on a minified picture), built on first use; NULL when it failed. */
+static PresentShaderProg *area_prog(void)
+{
+    if (!present_shader_build(&s_sprog[PRESENT_SHADER_AREA], s_gles ? PRESENT_GLSL_ES300 : PRESENT_GLSL_150,
+                              PRESENT_SHADER_AREA, "[HOST] window:"))
+        return NULL;
+    return &s_sprog[PRESENT_SHADER_AREA];
+}
+
 static void shader_free(void)
 {
-    for (int i = 0; i < HOST_SHADER_COUNT; i++)
+    for (int i = 0; i <= PRESENT_SHADER_AREA; i++)
         present_shader_release(&s_sprog[i], 0);
+}
+
+/* The presets that blend texels themselves want the texture sampled linearly whatever the filter. */
+static int shader_wants_linear(void)
+{
+    int p = s_shader.preset;
+
+    return (p == HOST_SHADER_SHARP || p == HOST_SHADER_FXAA || p == HOST_SHADER_CAS) && !s_sprog[p].failed;
 }
 
 /* ── Live picture changes (the in-game menu) ─────────────────────────────
@@ -578,6 +598,21 @@ static int draw(unsigned tex, unsigned prev, int w, int h, int top_down)
     s_gl.Clear(XGL_COLOR_BUFFER_BIT);
     s_gl.Viewport((dw - vw) / 2, (dh - vh) / 2, vw, vh);
     PresentShaderProg *sp = shader_prog();
+    float taps[2];
+    if (s_downscale < 0)
+        s_downscale = present_downscale_env();
+    int minified = present_shader_taps(s_downscale, (float)w, (float)h, (float)vw, (float)vh, taps);
+    /* None on a minified picture: the area program instead of one bilinear (or nearest) tap per pixel. */
+    if (!sp && minified)
+        sp = area_prog();
+    int averaged = minified && sp != NULL;   /* the area program or a preset (all of them average) */
+    if (averaged != s_area_drawn) {
+        if (averaged || s_area_drawn > 0)
+            fprintf(stderr, "  [HOST] window: picture %dx%d in %dx%d: %s\n", w, h, vw, vh,
+                    averaged ? "minified, texels averaged (RECOMP_PRESENT_DOWNSCALE=0: one tap)"
+                             : "one tap per pixel");
+        s_area_drawn = averaged;
+    }
     if (sp) {
         /* Console lines: an upscaled picture (XBA-184) holds round(h / 240) output lines per console line. */
         int cells_h = present_shader_console_cells(h);
@@ -585,7 +620,7 @@ static int draw(unsigned tex, unsigned prev, int w, int h, int top_down)
             .src_w = (float)w, .src_h = (float)h, .out_w = (float)vw, .out_h = (float)vh,
             .cells_w = (float)w * (float)cells_h / (float)h, .cells_h = (float)cells_h,
             .flip = top_down, .strength = present_shader_strength(&s_shader), .curvature = s_shader.curvature,
-            .ghosting = prev && prev != tex ? s_shader.ghosting : 0,
+            .ghosting = prev && prev != tex ? s_shader.ghosting : 0, .downscale = s_downscale,
         };
         if (prev && prev != tex) {
             s_gl.ActiveTexture(XGL_TEXTURE1);
@@ -631,9 +666,9 @@ static int s_again_w, s_again_h;
 static int upload_draw(const void *px, int w, int h, int pitch)
 {
     int ghost = shader_wants_prev();
-    /* Sharp bilinear blends texels itself: it needs linear sampling whatever the filter. */
-    int filter = s_shader.preset == HOST_SHADER_SHARP && !s_sprog[HOST_SHADER_SHARP].failed ? HOST_FILTER_LINEAR
-                                                                                              : s_filter;
+    /* Sharp bilinear, FXAA and CAS blend texels themselves: they need linear sampling whatever the filter. (The
+     * area filter samples texel centres: it draws the same with either.) */
+    int filter = shader_wants_linear() ? HOST_FILTER_LINEAR : s_filter;
 
     if (ghost) {
         /* The texture of the previous picture takes this one; the last one becomes the previous. */
@@ -963,6 +998,16 @@ int host_window_env_vsync(void)
 void host_window_set_shader(const HostShader *s)
 {
     s_shader = present_shader_clamp(s);
+}
+
+void host_window_set_downscale(int on)
+{
+    s_downscale = on < 0 ? -1 : on != 0;
+}
+
+int host_window_downscale_drawn(void)
+{
+    return s_area_drawn > 0;
 }
 
 int host_window_shader_active(void)

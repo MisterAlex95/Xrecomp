@@ -427,6 +427,43 @@ static int shot(const uint32_t *px, int preset, int strength, Ppm *out)
     return ppm_read(path, out) && out->w == WW && out->h == WH;
 }
 
+/* Presents a w x h picture with preset and captures the window (any size; the caller's scaling). */
+static int shot_wh(const uint32_t *px, int w, int h, int preset, int strength, Ppm *out)
+{
+    char path[512];
+    const char *tmp = getenv("TMPDIR");
+    HostShader s = { preset, strength, 0, 0 };
+
+    snprintf(path, sizeof path, "%s/xbr_host_shader_m_%d.ppm", tmp && tmp[0] ? tmp : "/tmp", (int)getpid());
+    host_window_set_shader(&s);
+    host_window_capture(path);
+    if (!host_window_present_rgba(px, w, h, w * 4))
+        return 0;
+    return ppm_read(path, out) && out->w == WW && out->h == WH;
+}
+
+/* The spread of channel 1 along row y: the mean absolute deviation over the row's columns. */
+static double ppm_row_sd(const Ppm *p, int y)
+{
+    double m = ppm_mean_row(p, y, 1), v = 0;
+    for (int x = 0; x < p->w; x++) {
+        double d = ppm_at(p, x, y, 1) - m;
+        v += d < 0 ? -d : d;
+    }
+    return v / p->w;
+}
+
+/* Output pixels of row y neither black nor white (an edge's blend). */
+static int ppm_row_mid(const Ppm *p, int y)
+{
+    int n = 0;
+    for (int x = 0; x < p->w; x++) {
+        int v = ppm_at(p, x, y, 1);
+        n += v > 8 && v < 247;
+    }
+    return n;
+}
+
 /* Milliseconds per present of preset at the window's size, vsync off (llvmpipe here: relative cost only). */
 static double bench(const uint32_t *px, int preset, int n)
 {
@@ -462,6 +499,8 @@ static int run_shaders(void)
     CHECK(host_window_shader_parse("SCANLINES") == HOST_SHADER_SCANLINES);
     CHECK(host_window_shader_parse("crt") == HOST_SHADER_CRT);
     CHECK(host_window_shader_parse("lcd") == HOST_SHADER_LCD);
+    CHECK(host_window_shader_parse("FXAA") == HOST_SHADER_FXAA && host_window_shader_parse("cas") == HOST_SHADER_CAS);
+    CHECK(host_window_shader_parse("area") == -1);   /* not a preset: the minified picture's own program */
     CHECK(host_window_shader_parse("xbr") == -1 && host_window_shader_parse("") == -1);
     CHECK(host_window_shader_parse(NULL) == -1);
     CHECK(!strcmp(host_window_shader_name(HOST_SHADER_CRT), "crt") && !strcmp(host_window_shader_name(99), "none"));
@@ -652,6 +691,139 @@ static int run_shaders(void)
         CHECK(host_window_present_rgba(e2, 150, SH, 150 * 4));
     }
 
+    /* A minified picture (present_shader_taps): 1-texel black / white columns, 1152 of them in 640 output columns
+     * (1.8x, an upscaled N64 scanout in a 1080p window is ~1.8x). One tap per pixel skips texels: the row is a
+     * moire of near-black and near-white; averaged, every pixel is near the mean grey. Also with nearest (which
+     * would keep only whole columns), with each preset, and a picture that is not minified draws as before. */
+    {
+        enum { MW = 1152, MH = 270 };   /* 2.25x vertically too: both axes averaged */
+        static uint32_t stripes[MW * MH], checker[SW * SH];
+        Ppm on = { 0 }, off = { 0 };
+        for (int i = 0; i < SW * SH; i++)
+            checker[i] = ((i % SW) ^ (i / SW)) & 1 ? 0xFFFFFFFFu : 0xFF203040u;
+        for (int y = 0; y < MH; y++)
+            for (int x = 0; x < MW; x++)
+                stripes[y * MW + x] = x & 1 ? 0xFFFFFFFFu : 0xFF000000u;
+        host_window_set_scaling(HOST_SCALE_STRETCH, HOST_FILTER_LINEAR);
+        for (int nearest = 0; nearest < 2; nearest++) {
+            host_window_set_scaling(HOST_SCALE_STRETCH, nearest ? HOST_FILTER_NEAREST : HOST_FILTER_LINEAR);
+            host_window_set_downscale(0);
+            CHECK(shot_wh(stripes, MW, MH, HOST_SHADER_NONE, -1, &off));
+            CHECK(!host_window_downscale_drawn());
+            host_window_set_downscale(1);
+            CHECK(shot_wh(stripes, MW, MH, HOST_SHADER_NONE, -1, &on));
+            CHECK(host_window_downscale_drawn());
+            if (on.rgb && off.rgb) {
+                double sd_off = ppm_row_sd(&off, WH / 2), sd_on = ppm_row_sd(&on, WH / 2);
+                printf("host_layer shaders: 1.8x minified stripes, %s: one tap spread %.1f, averaged %.1f "
+                       "(mean %.0f)\n", nearest ? "nearest" : "linear", sd_off, sd_on, ppm_mean_row(&on, WH / 2, 1));
+                CHECK(sd_off > 50.0);
+                CHECK(sd_on < 20.0);
+                CHECK(ppm_mean_row(&on, WH / 2, 1) > 118.0 && ppm_mean_row(&on, WH / 2, 1) < 138.0);
+            }
+            free(on.rgb);
+            free(off.rgb);
+            on.rgb = off.rgb = NULL;
+        }
+        /* Every preset averages a minified picture (CRT and LCD add their own pattern: the spread of a row of
+         * scanlines stays low too). */
+        host_window_set_scaling(HOST_SCALE_STRETCH, HOST_FILTER_LINEAR);
+        for (int pr = HOST_SHADER_SHARP; pr < HOST_SHADER_COUNT; pr++) {
+            CHECK(shot_wh(stripes, MW, MH, pr, pr == HOST_SHADER_CRT ? 0 : -1, &on));
+            if (on.rgb) {
+                double sd = ppm_row_sd(&on, WH / 2);
+                if (sd >= 25.0)
+                    fprintf(stderr, "FAIL: preset %s on a minified picture: row spread %.1f\n",
+                            host_window_shader_name(pr), sd);
+                CHECK(sd < 25.0);
+            }
+            free(on.rgb);
+            on.rgb = NULL;
+        }
+        /* Not minified (160x120 at 4x): the area program is not used; on and off draw the same. */
+        host_window_set_scaling(HOST_SCALE_INTEGER, HOST_FILTER_NEAREST);
+        host_window_set_downscale(1);
+        CHECK(shot_wh(checker, SW, SH, HOST_SHADER_NONE, -1, &on));
+        CHECK(!host_window_downscale_drawn());
+        host_window_set_downscale(0);
+        CHECK(shot_wh(checker, SW, SH, HOST_SHADER_NONE, -1, &off));
+        if (on.rgb && off.rgb)
+            CHECK(!memcmp(on.rgb, off.rgb, (size_t)WW * WH * 3));
+        free(on.rgb);
+        free(off.rgb);
+        on.rgb = off.rgb = NULL;
+        /* Just above 1x (1.07x, the N64 scanout's vertical): one tap, as before. */
+        host_window_set_downscale(1);
+        host_window_set_scaling(HOST_SCALE_STRETCH, HOST_FILTER_LINEAR);
+        CHECK(host_window_present_rgba(stripes, 684, 256, MW * 4));   /* 1.07x by 0.53x */
+        CHECK(!host_window_downscale_drawn());
+        host_window_set_downscale(-1);
+    }
+
+    /* FXAA: a 640x480 picture 1:1 with a shallow hard black / white edge: none draws no blended pixel, FXAA blends
+     * along the edge; a flat picture stays as it is. CAS: a soft grey edge steepened next to it, the flat parts and
+     * strength 0 unchanged. */
+    {
+        static uint32_t big[WW * WH];
+        Ppm a = { 0 }, b = { 0 };
+        int mid_none = 0, mid_fxaa = 0;
+        for (int y = 0; y < WH; y++)
+            for (int x = 0; x < WW; x++)
+                big[y * WW + x] = y * 10 > x * 3 + 1000 ? 0xFFFFFFFFu : 0xFF000000u;
+        host_window_set_scaling(HOST_SCALE_STRETCH, HOST_FILTER_NEAREST);
+        CHECK(shot_wh(big, WW, WH, HOST_SHADER_NONE, -1, &a));
+        CHECK(shot_wh(big, WW, WH, HOST_SHADER_FXAA, -1, &b));
+        CHECK(host_window_shader_active() == HOST_SHADER_FXAA);
+        if (a.rgb && b.rgb) {
+            for (int y = 100; y < 400; y++) {
+                mid_none += ppm_row_mid(&a, y);
+                mid_fxaa += ppm_row_mid(&b, y);
+            }
+            printf("host_layer shaders: FXAA on a hard diagonal: blended pixels none %d, fxaa %d\n", mid_none,
+                   mid_fxaa);
+            CHECK(mid_none == 0 && mid_fxaa > 200);
+            CHECK(ppm_at(&b, 10, 10, 1) == 0 && ppm_at(&b, 10, WH - 10, 1) == 255);   /* far from the edge */
+        }
+        free(a.rgb);
+        free(b.rgb);
+        a.rgb = b.rgb = NULL;
+        CHECK(shot_wh(flat, SW, SH, HOST_SHADER_FXAA, -1, &b));
+        if (b.rgb && none.rgb)
+            CHECK(!memcmp(b.rgb, none.rgb, (size_t)WW * WH * 3));
+        free(b.rgb);
+        b.rgb = NULL;
+
+        /* CAS: a 64 / 192 edge at 4x linear, a ramp over a few columns; sharpened, the columns next to it move away
+         * from the mean (darker on the dark side, lighter on the light side). */
+        for (int y = 0; y < SH; y++)
+            for (int x = 0; x < SW; x++)
+                big[y * SW + x] = x < SW / 2 ? 0xFF404040u : 0xFFC0C0C0u;
+        host_window_set_scaling(HOST_SCALE_STRETCH, HOST_FILTER_LINEAR);
+        CHECK(shot_wh(big, SW, SH, HOST_SHADER_NONE, -1, &a));
+        CHECK(shot_wh(big, SW, SH, HOST_SHADER_CAS, 100, &b));
+        if (a.rgb && b.rgb) {
+            int x0 = WW / 2 - 4, x1 = WW / 2 + 3;   /* either side of the edge, inside its blend */
+            printf("host_layer shaders: CAS edge columns %d / %d: none %d %d, cas %d %d\n", x0, x1,
+                   ppm_at(&a, x0, WH / 2, 1), ppm_at(&a, x1, WH / 2, 1), ppm_at(&b, x0, WH / 2, 1),
+                   ppm_at(&b, x1, WH / 2, 1));
+            CHECK(ppm_at(&b, x0, WH / 2, 1) < ppm_at(&a, x0, WH / 2, 1));
+            CHECK(ppm_at(&b, x1, WH / 2, 1) > ppm_at(&a, x1, WH / 2, 1));
+            CHECK(abs(ppm_at(&b, 20, WH / 2, 1) - ppm_at(&a, 20, WH / 2, 1)) <= 1);   /* flat: as none */
+        }
+        free(b.rgb);
+        b.rgb = NULL;
+        CHECK(shot_wh(big, SW, SH, HOST_SHADER_CAS, 0, &b));
+        if (a.rgb && b.rgb) {
+            int dmax = 0;
+            for (size_t i = 0; i < (size_t)WW * WH * 3; i++)
+                dmax = abs(a.rgb[i] - b.rgb[i]) > dmax ? abs(a.rgb[i] - b.rgb[i]) : dmax;
+            CHECK(dmax <= 1);   /* strength 0: the picture as none draws it (highp vs mediump rounding at most) */
+        }
+        free(a.rgb);
+        free(b.rgb);
+        a.rgb = b.rgb = NULL;
+    }
+
     /* The screenshot stays the raw picture, whatever the shader. */
     {
         HostShader s = { HOST_SHADER_CRT, 100, 100, 0 };
@@ -721,6 +893,34 @@ static int run_shaders(void)
         for (int i = 0; i < HOST_SHADER_COUNT; i++)
             printf(" %s %.3f", host_window_shader_name(i), bench(flat, i, bench_n));
         printf("\n");
+        /* A minified picture: an N64 4x scanout (2560x1152) shown at 4:3, one tap against averaged. */
+        {
+            enum { BW = 2560, BH = 1152 };
+            uint32_t *big = malloc((size_t)BW * BH * 4);
+            if (big) {
+                HostShader none_s = { HOST_SHADER_NONE, -1, 0, 0 };
+                for (size_t i = 0; i < (size_t)BW * BH; i++)
+                    big[i] = (i ^ (i / BW)) & 1 ? 0xFFFFFFFFu : 0xFF000000u;
+                host_window_set_aspect(4, 3);
+                printf("host_layer shaders: cost of a %dx%d picture at 4:3:", BW, BH);
+                for (int pass = 0; pass < 4; pass++) {
+                    int pr = pass < 2 ? HOST_SHADER_NONE : pass == 2 ? HOST_SHADER_FXAA : HOST_SHADER_CAS;
+                    HostShader bs = { pr, -1, 0, 0 };
+                    host_window_set_downscale(pass != 0);
+                    host_window_set_shader(pr ? &bs : &none_s);
+                    host_window_present_rgba(big, BW, BH, BW * 4);
+                    uint64_t t0 = xbox_HostNowNs();
+                    for (int i = 0; i < bench_n; i++)
+                        host_window_present_rgba(big, BW, BH, BW * 4);
+                    printf(" %s %.3f", pass == 0 ? "one tap" : pass == 1 ? "averaged" : host_window_shader_name(pr),
+                           (double)(xbox_HostNowNs() - t0) / 1e6 / bench_n);
+                }
+                printf("\n");
+                host_window_set_aspect(0, 0);
+                host_window_set_downscale(-1);
+                free(big);
+            }
+        }
     }
     host_window_set_shader(NULL);
     host_window_close();
@@ -776,12 +976,13 @@ static int build_all(const char *what, int es, int major, int minor, int profile
         int d = k ? d2 : (int)d1;
         if (d < 0)
             continue;
-        for (int p = HOST_SHADER_SHARP; p < HOST_SHADER_COUNT; p++) {
+        for (int p = HOST_SHADER_SHARP; p <= PRESENT_SHADER_AREA; p++) {
             PresentShaderProg sp = { 0 };
             int ok = present_shader_build(&sp, (PresentGlsl)d, p, "[TEST]");
             if (!ok)
                 fprintf(stderr, "FAIL: %s dialect %d preset %s does not build\n", what, d, present_shader_name(p));
             CHECK(ok && sp.prog && sp.u_tex >= 0);   /* unused uniforms are optimised out (-1) */
+            CHECK(sp.u_taps >= 0);                   /* every preset samples through the area filter */
             /* The legacy vertex shader carries the crop and the legacy fragment header the swap. */
             CHECK((d == PRESENT_GLSL_ES100 || d == PRESENT_GLSL_120) == (sp.u_rect >= 0));
             built += ok;
@@ -801,6 +1002,10 @@ static int run_present_shaders(void)
     int n = -1;
 
     CHECK(present_shader_parse("CRT") == HOST_SHADER_CRT && present_shader_parse("lcd") == HOST_SHADER_LCD);
+    CHECK(present_shader_parse("fxaa") == HOST_SHADER_FXAA && present_shader_parse("CAS") == HOST_SHADER_CAS);
+    CHECK(present_shader_parse("area") == -1 && !strcmp(present_shader_name(PRESENT_SHADER_AREA), "area"));
+    CHECK(!strcmp(present_shader_name(HOST_SHADER_FXAA), "fxaa"));
+    CHECK(!strcmp(present_shader_name(HOST_SHADER_CAS), "cas"));
     CHECK(present_shader_parse("") == -1 && present_shader_parse(NULL) == -1 && present_shader_parse("xbr") == -1);
     CHECK(!strcmp(present_shader_name(HOST_SHADER_SHARP), "sharp") && !strcmp(present_shader_name(-1), "none"));
     CHECK(present_shader_strength(&s) == 60);
@@ -810,6 +1015,29 @@ static int run_present_shaders(void)
     CHECK(present_shader_strength(&s) == 100);
     s.preset = HOST_SHADER_NONE;
     CHECK(present_shader_strength(&s) == 0);
+    s = (HostShader){ HOST_SHADER_CAS, -1, 0, 0 };
+    CHECK(present_shader_strength(&s) == 50);
+    s.preset = HOST_SHADER_FXAA;
+    CHECK(present_shader_strength(&s) == 0);
+    {
+        /* Taps: one plain tap up to 1.25x (and when off); ceil(ratio) + 1 above, at most 8. */
+        float t[2];
+        CHECK(!present_shader_taps(1, 320, 240, 1440, 1080, t) && t[0] == 1 && t[1] == 1);   /* enlarged */
+        CHECK(!present_shader_taps(1, 1500, 1150, 1440, 1080, t) && t[0] == 1 && t[1] == 1); /* 1.04x / 1.06x */
+        CHECK(present_shader_taps(1, 2560, 1152, 1440, 1080, t) && t[0] == 3 && t[1] == 1);  /* N64 4x scanout */
+        CHECK(!present_shader_taps(0, 2560, 1152, 1440, 1080, t) && t[0] == 1 && t[1] == 1); /* off */
+        CHECK(present_shader_taps(1, 1280, 960, 640, 480, t) && t[0] == 3 && t[1] == 3);     /* exactly 2x */
+        CHECK(present_shader_taps(1, 5120, 2304, 1440, 1080, t) && t[0] == 5 && t[1] == 4);  /* 8x: 3.6x / 2.1x */
+        CHECK(present_shader_taps(1, 5120, 480, 320, 480, t) && t[0] == 8 && t[1] == 1);     /* 16x: capped */
+        CHECK(!present_shader_taps(1, 100, 100, 0, 0, t));
+        unsetenv("RECOMP_PRESENT_DOWNSCALE");
+        CHECK(present_downscale_env() == 1);
+        setenv("RECOMP_PRESENT_DOWNSCALE", "0", 1);
+        CHECK(present_downscale_env() == 0);
+        setenv("RECOMP_PRESENT_DOWNSCALE", "1", 1);
+        CHECK(present_downscale_env() == 1);
+        unsetenv("RECOMP_PRESENT_DOWNSCALE");
+    }
     s = (HostShader){ 9, 30, 30, 30 };
     c = present_shader_clamp(&s);
     CHECK(c.preset == HOST_SHADER_NONE);
@@ -860,6 +1088,13 @@ static int run_present_shaders(void)
     CHECK(!src_has(PRESENT_GLSL_ES300, HOST_SHADER_SCANLINES, "texture2D"));
     present_shader_fs_src(PRESENT_GLSL_ES300, HOST_SHADER_CRT, "not glsl;\n", src, &n);
     CHECK(n == 3 && !strcmp(src[2], "not glsl;\n"));
+    /* The area filter: its own program, and in every preset's common part. */
+    present_shader_fs_src(PRESENT_GLSL_ES100, PRESENT_SHADER_AREA, NULL, src, &n);
+    CHECK(n == 4 && strstr(src[3], "xr_sample"));
+    present_shader_fs_src(PRESENT_GLSL_ES300, PRESENT_SHADER_AREA + 1, NULL, src, &n);
+    CHECK(n == 0);
+    CHECK(src_has(PRESENT_GLSL_120, HOST_SHADER_SCANLINES, "xr_area"));
+    CHECK(src_has(PRESENT_GLSL_ES300, HOST_SHADER_CAS, "u_taps"));
 
     if (host_window_headless()) {
         printf("host_layer present_shaders: no display, GL builds skipped; %s\n", s_fail ? "FAIL" : "ok");

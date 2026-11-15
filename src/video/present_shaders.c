@@ -10,8 +10,10 @@
 
 /* ── Presets and keys ──────────────────────────────────────────────────── */
 
-static const char *const k_names[HOST_SHADER_COUNT] = { "none", "sharp", "scanlines", "crt", "lcd" };
-static const int k_strength[HOST_SHADER_COUNT] = { 0, 0, 50, 60, 50 };
+/* The presets, then the area program (PRESENT_SHADER_AREA, not parsed). */
+static const char *const k_names[HOST_SHADER_COUNT + 1] = { "none", "sharp", "scanlines", "crt", "lcd", "fxaa", "cas",
+                                                            "area" };
+static const int k_strength[HOST_SHADER_COUNT] = { 0, 0, 50, 60, 50, 0, 50 };
 
 static int clamp100(int v)
 {
@@ -31,7 +33,7 @@ int present_shader_parse(const char *v)
 
 const char *present_shader_name(int preset)
 {
-    return preset >= 0 && preset < HOST_SHADER_COUNT ? k_names[preset] : k_names[0];
+    return preset >= 0 && preset <= PRESENT_SHADER_AREA ? k_names[preset] : k_names[0];
 }
 
 int present_shader_strength(const HostShader *s)
@@ -108,6 +110,28 @@ int present_shader_xbox_cells(int h)
     return lines <= 576 && lines >= 2 ? lines / 2 : lines;
 }
 
+int present_shader_taps(int enabled, float src_w, float src_h, float out_w, float out_h, float taps[2])
+{
+    float r[2] = { out_w > 0.0f ? src_w / out_w : 1.0f, out_h > 0.0f ? src_h / out_h : 1.0f };
+
+    for (int i = 0; i < 2; i++) {
+        taps[i] = 1.0f;
+        if (enabled && r[i] > PRESENT_DOWNSCALE_MIN) {
+            float c = r[i] - 1e-4f, n = (float)(int)c;   /* ceil, without libm */
+            n += (n < c ? 1.0f : 0.0f) + 1.0f;
+            taps[i] = n > 8.0f ? 8.0f : n;
+        }
+    }
+    return taps[0] > 1.0f || taps[1] > 1.0f;
+}
+
+int present_downscale_env(void)
+{
+    const char *v = getenv("RECOMP_PRESENT_DOWNSCALE");
+
+    return !(v && v[0] == '0');
+}
+
 /* ── GLSL ──────────────────────────────────────────────────────────────── */
 
 /* One triangle over the viewport. A context of our own: no vertex buffer (gl_VertexID 0..2). */
@@ -163,12 +187,55 @@ static const char k_fs_head_es100[] =
 static const char k_fs_head_120[] = "#version 120\n";
 
 /* Uniforms: u_src the texture's size in texels, u_out the viewport's in pixels, u_cells the console pixels the
- * texture holds, u_strength / u_curve / u_ghost 0..1, u_prev the previous picture (LCD ghosting). */
+ * texture holds, u_strength / u_curve / u_ghost 0..1, u_prev the previous picture (LCD ghosting), u_taps the area
+ * filter's taps per axis (xy, present_shader_taps: 1 one plain tap) and the texels under one output pixel (zw). */
 static const char k_fs_common[] =
     "uniform sampler2D u_tex;\n"
     "uniform sampler2D u_prev;\n"
     "uniform vec2 u_src, u_out, u_cells;\n"
     "uniform float u_strength, u_curve, u_ghost;\n"
+    "uniform vec4 u_taps;\n"
+    /* Tap k of n along one axis, the output pixel centred on texel coordinate c and r texels wide: n == 1 one tap at
+     * c (the texture's own filter); else the texel centres it covers, weighted by how much (a box filter: exact
+     * while the r-wide span crosses at most n texels), or n bilinear taps spread evenly over a wider span. n and r
+     * are uniforms: the branches are the same for every pixel. */
+    "void xr_tap(float k, float n, float r, float c, out float p, out float w) {\n"
+    "    float lo = c - 0.5 * r;\n"
+    "    if (n < 1.5) {\n"
+    "        p = c;\n"
+    "        w = 1.0;\n"
+    "    } else if (r <= n - 1.0) {\n"
+    "        float t = floor(lo) + k;\n"
+    "        p = t + 0.5;\n"
+    "        w = max(min(t + 1.0, lo + r) - max(t, lo), 0.0);\n"
+    "    } else {\n"
+    "        p = lo + (k + 0.5) * r / n;\n"
+    "        w = 1.0;\n"
+    "    }\n"
+    "}\n"
+    /* The average of the texels under the output pixel at uv (separable, at most 8 x 8 taps). */
+    "vec3 xr_area(vec2 uv) {\n"
+    "    vec2 c = uv * u_src;\n"
+    "    vec3 acc = vec3(0.0);\n"
+    "    float ws = 0.0;\n"
+    "    for (int j = 0; j < 8; j++) {\n"
+    "        if (float(j) >= u_taps.y) break;\n"
+    "        float py, wy;\n"
+    "        xr_tap(float(j), u_taps.y, u_taps.w, c.y, py, wy);\n"
+    "        for (int i = 0; i < 8; i++) {\n"
+    "            if (float(i) >= u_taps.x) break;\n"
+    "            float px, wx;\n"
+    "            xr_tap(float(i), u_taps.x, u_taps.z, c.x, px, wx);\n"
+    "            acc += (wx * wy) * texture(u_tex, vec2(px, py) / u_src).rgb;\n"
+    "            ws += wx * wy;\n"
+    "        }\n"
+    "    }\n"
+    "    return acc / max(ws, 0.0001);\n"
+    "}\n"
+    "bool xr_minified() { return u_taps.x + u_taps.y > 2.5; }\n"
+    /* The picture at uv: averaged when minified, else one tap. */
+    "vec3 xr_sample(vec2 uv) { return xr_minified() ? xr_area(uv) : texture(u_tex, uv).rgb; }\n"
+    "float xr_luma(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }\n"
     /* 1 in the lower half of a console line, 0 in the upper, antialiased over one output pixel; faded out when a
      * line is less than two output pixels tall (no room for a dark half). */
     "float scan_band(float y) {\n"
@@ -183,6 +250,11 @@ static const char k_fs_common[] =
  * to the window. Between two texel centres the blend happens only over the 1/s texel around their shared edge. */
 static const char k_fs_sharp[] =
     "void main() {\n"
+    /* Minified there is no whole factor to keep: the area filter. */
+    "    if (xr_minified()) {\n"
+    "        o_color = vec4(xr_area(v_uv), 1.0);\n"
+    "        return;\n"
+    "    }\n"
     "    vec2 t = v_uv * u_src - 0.5;\n"
     "    vec2 i = floor(t);\n"
     "    vec2 s = max(floor(u_out / u_src), 1.0);\n"
@@ -193,7 +265,7 @@ static const char k_fs_sharp[] =
 /* Scanlines: the upper half of each line brightened a little, the lower half darkened by the strength. */
 static const char k_fs_scanlines[] =
     "void main() {\n"
-    "    vec3 c = texture(u_tex, v_uv).rgb;\n"
+    "    vec3 c = xr_sample(v_uv);\n"
     "    float st = u_strength;\n"
     "    float m = mix(1.0 + 0.2 * st, 1.0 - 0.8 * st, scan_band(v_uv.y * u_cells.y));\n"
     "    o_color = vec4(min(c * m, 1.0), 1.0);\n"
@@ -213,7 +285,7 @@ static const char k_fs_crt[] =
     "            return;\n"
     "        }\n"
     "    }\n"
-    "    vec3 c = texture(u_tex, uv).rgb;\n"
+    "    vec3 c = xr_sample(uv);\n"
     "    float st = u_strength;\n"
     "    c *= mix(1.0 + 0.25 * st, 1.0 - 0.7 * st, scan_band(uv.y * u_cells.y));\n"
     "    float col = mod(floor(gl_FragCoord.x), 3.0);\n"
@@ -231,7 +303,7 @@ static const char k_fs_crt[] =
 static const char k_fs_lcd[] =
     "void main() {\n"
     "    vec2 tc = (floor(v_uv * u_src) + 0.5) / u_src;\n"
-    "    vec3 c = texture(u_tex, tc).rgb;\n"
+    "    vec3 c = xr_minified() ? xr_area(v_uv) : texture(u_tex, tc).rgb;\n"
     "    if (u_ghost > 0.0)\n"
     "        c = mix(c, texture(u_prev, tc).rgb, 0.5 * u_ghost);\n"
     "    vec2 px = u_out / u_cells;\n"
@@ -241,7 +313,61 @@ static const char k_fs_lcd[] =
     "    o_color = vec4(c, 1.0);\n"
     "}\n";
 
-static const char *const k_fs_body[HOST_SHADER_COUNT] = { NULL, k_fs_sharp, k_fs_scanlines, k_fs_crt, k_fs_lcd };
+/* The neighbour step of FXAA and CAS, in uv: one output pixel, or one texel when the picture is enlarged (an edge is
+ * then a texel's, the pixels between two texels only its bilinear blend). */
+#define XR_STEP "    vec2 d = max(1.0 / u_out, 1.0 / u_src);\n"
+
+/* FXAA-class edge smoothing (our own take on the console variant's idea): luma at the four diagonal half-steps
+ * gives the edge's direction; along it two and four taps are averaged, the four-tap result kept unless it leaves
+ * the neighbourhood's luma range (then the two-tap one). Areas of low contrast are left as they are. */
+static const char k_fs_fxaa[] =
+    "void main() {\n"
+    XR_STEP
+    "    vec3 cm = xr_sample(v_uv);\n"
+    "    float lnw = xr_luma(texture(u_tex, v_uv + vec2(-0.5, -0.5) * d).rgb);\n"
+    "    float lne = xr_luma(texture(u_tex, v_uv + vec2(0.5, -0.5) * d).rgb);\n"
+    "    float lsw = xr_luma(texture(u_tex, v_uv + vec2(-0.5, 0.5) * d).rgb);\n"
+    "    float lse = xr_luma(texture(u_tex, v_uv + vec2(0.5, 0.5) * d).rgb);\n"
+    "    float lm = xr_luma(cm);\n"
+    "    float lmin = min(lm, min(min(lnw, lne), min(lsw, lse)));\n"
+    "    float lmax = max(lm, max(max(lnw, lne), max(lsw, lse)));\n"
+    "    if (lmax - lmin < max(0.0312, 0.125 * lmax)) {\n"
+    "        o_color = vec4(cm, 1.0);\n"
+    "        return;\n"
+    "    }\n"
+    "    vec2 dir = vec2((lsw + lse) - (lnw + lne), (lnw + lsw) - (lne + lse));\n"
+    "    float red = max((lnw + lne + lsw + lse) * 0.03125, 0.0078125);\n"
+    "    dir = clamp(dir / (min(abs(dir.x), abs(dir.y)) + red), -8.0, 8.0) * d;\n"
+    "    vec3 a = 0.5 * (xr_sample(v_uv - dir * (1.0 / 6.0)) + xr_sample(v_uv + dir * (1.0 / 6.0)));\n"
+    "    vec3 b = 0.5 * a + 0.25 * (xr_sample(v_uv - dir * 0.5) + xr_sample(v_uv + dir * 0.5));\n"
+    "    float lb = xr_luma(b);\n"
+    "    o_color = vec4(lb < lmin || lb > lmax ? a : b, 1.0);\n"
+    "}\n";
+
+/* Contrast-adaptive sharpening (our own, after the published CAS idea): the centre and its four neighbours; the
+ * sharpening weight shrinks where the neighbourhood nears black or white (no halo, no clipping), up to -0.2 per
+ * neighbour at strength 100. Strength 0 draws the picture as none does. */
+static const char k_fs_cas[] =
+    "void main() {\n"
+    XR_STEP
+    "    vec3 e = xr_sample(v_uv);\n"
+    "    vec3 b = xr_sample(v_uv + vec2(0.0, -d.y));\n"
+    "    vec3 h = xr_sample(v_uv + vec2(0.0, d.y));\n"
+    "    vec3 l = xr_sample(v_uv + vec2(-d.x, 0.0));\n"
+    "    vec3 r = xr_sample(v_uv + vec2(d.x, 0.0));\n"
+    "    vec3 mn = min(e, min(min(b, h), min(l, r)));\n"
+    "    vec3 mx = max(e, max(max(b, h), max(l, r)));\n"
+    "    vec3 amp = sqrt(clamp(min(mn, 1.0 - mx) / max(mx, vec3(0.0001)), 0.0, 1.0));\n"
+    "    vec3 w = amp * (-0.2 * u_strength);\n"
+    "    o_color = vec4(clamp((e + (b + h + l + r) * w) / (1.0 + 4.0 * w), 0.0, 1.0), 1.0);\n"
+    "}\n";
+
+/* The area program: the plain picture, averaged where minified. */
+static const char k_fs_area[] =
+    "void main() { o_color = vec4(xr_sample(v_uv), 1.0); }\n";
+
+static const char *const k_fs_body[HOST_SHADER_COUNT + 1] = { NULL, k_fs_sharp, k_fs_scanlines, k_fs_crt, k_fs_lcd,
+                                                              k_fs_fxaa, k_fs_cas, k_fs_area };
 
 static int legacy(PresentGlsl d)
 {
@@ -262,7 +388,7 @@ void present_shader_fs_src(PresentGlsl d, int preset, const char *fs_body, const
     const char *body = fs_body;
 
     *n = 0;
-    if (preset <= HOST_SHADER_NONE || preset >= HOST_SHADER_COUNT)
+    if (preset <= HOST_SHADER_NONE || preset > PRESENT_SHADER_AREA)
         return;
     if (!body)
         body = k_fs_body[preset];
@@ -437,13 +563,13 @@ static unsigned link_program(PresentGlsl d, int preset, const char *fs_body, con
     return prog;
 }
 
-static int s_logged[HOST_SHADER_COUNT]; /* a failure is logged once per process */
+static int s_logged[HOST_SHADER_COUNT + 1]; /* a failure is logged once per process */
 
 int present_shader_build(PresentShaderProg *sp, PresentGlsl d, int preset, const char *tag)
 {
     const char *test_fail;
 
-    if (!sp || preset <= HOST_SHADER_NONE || preset >= HOST_SHADER_COUNT)
+    if (!sp || preset <= HOST_SHADER_NONE || preset > PRESENT_SHADER_AREA)
         return 0;
     if (sp->failed)
         return 0;
@@ -475,6 +601,7 @@ int present_shader_build(PresentShaderProg *sp, PresentGlsl d, int preset, const
     sp->u_strength = g.GetUniformLocation(sp->prog, "u_strength");
     sp->u_curve = g.GetUniformLocation(sp->prog, "u_curve");
     sp->u_ghost = g.GetUniformLocation(sp->prog, "u_ghost");
+    sp->u_taps = g.GetUniformLocation(sp->prog, "u_taps");
     fprintf(stderr, "  %s picture shader %s\n", tag, k_names[preset]);
     return 1;
 }
@@ -508,6 +635,13 @@ void present_shader_use(const PresentShaderProg *sp, const PresentShaderParams *
     g.Uniform1f(sp->u_strength, (float)clamp100(p->strength) / 100.0f);
     g.Uniform1f(sp->u_curve, (float)clamp100(p->curvature) / 100.0f);
     g.Uniform1f(sp->u_ghost, (float)clamp100(p->ghosting) / 100.0f);
+    if (sp->u_taps >= 0) {
+        /* out_* is the whole texture's viewport (a legacy ZOOM crop passes it so): src / out is the minification. */
+        float taps[2];
+        present_shader_taps(p->downscale, p->src_w, p->src_h, p->out_w, p->out_h, taps);
+        g.Uniform4f(sp->u_taps, taps[0], taps[1], p->out_w > 0.0f ? p->src_w / p->out_w : 1.0f,
+                    p->out_h > 0.0f ? p->src_h / p->out_h : 1.0f);
+    }
 }
 
 unsigned present_shader_draw_legacy(const PresentShaderProg *sp, const PresentShaderParams *p,

@@ -328,6 +328,10 @@ public class ConsoleVideoTest {
         assertEquals(40, p.ghosting);
         game.set("RECOMP_SHADER", "bogus");
         assertEquals("none", ConsoleVideo.livePicture(Console.GBA, cfg, game).shader);
+        game.set("RECOMP_SHADER", "fxaa");
+        assertEquals("fxaa", ConsoleVideo.livePicture(Console.N64, cfg, game).shader);
+        game.set("RECOMP_SHADER", "CAS");
+        assertEquals("cas", ConsoleVideo.livePicture(Console.N64, cfg, game).shader);
         ConsoleVideo.Picture x = ConsoleVideo.livePicture(Console.XBOX, cfg, null);
         assertTrue(x.xbox);
         assertNull(x.scale);

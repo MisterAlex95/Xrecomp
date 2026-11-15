@@ -26,8 +26,14 @@ enum {
     HOST_SHADER_SCANLINES = 2,
     HOST_SHADER_CRT = 3,
     HOST_SHADER_LCD = 4,
-    HOST_SHADER_COUNT = 5
+    HOST_SHADER_FXAA = 5,
+    HOST_SHADER_CAS = 6,
+    HOST_SHADER_COUNT = 7
 };
+/* Not a preset the user picks: the plain picture through the area filter, what host_window draws instead of the
+ * plain program when the picture is minified (present_shader_taps). present_shader_build / _fs_src / _name take it
+ * ("area"); present_shader_parse does not. */
+#define PRESENT_SHADER_AREA HOST_SHADER_COUNT
 typedef struct HostShader {
     int preset;      /* HOST_SHADER_* */
     int strength;    /* 0..100, -1: the preset's default */
@@ -35,11 +41,11 @@ typedef struct HostShader {
     int ghosting;    /* LCD: 0 (none, the default)..100 */
 } HostShader;
 
-/*   present_shader_parse     "none" / "sharp" / "scanlines" / "crt" / "lcd" -> HOST_SHADER_* (case ignored; -1 for
- *                            NULL, "" or anything else)
+/*   present_shader_parse     "none" / "sharp" / "scanlines" / "crt" / "lcd" / "fxaa" / "cas" -> HOST_SHADER_* (case
+ *                            ignored; -1 for NULL, "" or anything else)
  *   present_shader_name      the other way ("none" for an unknown preset)
  *   present_shader_strength  the strength drawn, 0..100: s->strength, or the preset's default when -1 (scanlines
- *                            50, CRT 60, LCD 50, none / sharp 0)
+ *                            50, CRT 60, LCD 50, CAS 50, none / sharp / FXAA 0)
  *   present_shader_clamp     a preset outside the list -> none; strength -1 or 0..100, curvature / ghosting 0..100
  *   present_shader_env       preset: $console_var (e.g. "RECOMP_GBA_SHADER", "RECOMP_XBOX_SHADER") when it parses,
  *                            else $RECOMP_SHADER, else def; strength $RECOMP_SHADER_STRENGTH, curvature
@@ -61,6 +67,22 @@ void present_shader_env(const char *console_var, int def, HostShader *out);
 int present_shader_console_cells(int h);
 int present_shader_xbox_cells(int h);
 
+/* Downscale-aware sampling. A picture larger than the rectangle it is drawn into (an upscaled N64 / PS1 scanout of
+ * 2560 columns in a 1440-wide viewport) loses detail through one bilinear tap per output pixel: past ~1.5x a tap
+ * skips texels, thin lines and text break up (nearest only drops whole columns). Each preset, and the area program
+ * host_window draws instead of the plain one, averages instead the texels under the output pixel in an axis that is
+ * minified by more than PRESENT_DOWNSCALE_MIN (a box filter over texel centres, exact up to 7 texels per pixel,
+ * spread bilinear taps beyond); an axis that is not keeps today's single tap (the texture's filter, linear or
+ * nearest).
+ *   present_shader_taps      the taps per axis for a src_w x src_h picture in an out_w x out_h viewport: 1 (one
+ *                            plain tap) unless enabled and src / out > PRESENT_DOWNSCALE_MIN in that axis, then
+ *                            min(ceil(src / out) + 1, 8); taps[0] columns, taps[1] rows. Returns 1 when either > 1
+ *   present_downscale_env    0 when $RECOMP_PRESENT_DOWNSCALE starts with '0' (off: one plain tap at any scale, the
+ *                            look before), else 1 */
+#define PRESENT_DOWNSCALE_MIN 1.25f
+int present_shader_taps(int enabled, float src_w, float src_h, float out_w, float out_h, float taps[2]);
+int present_downscale_env(void);
+
 typedef enum {
     PRESENT_GLSL_ES300 = 0,   /* #version 300 es: host_window on GLES 3.0 */
     PRESENT_GLSL_150 = 1,     /* #version 150: host_window on a 3.2 core context */
@@ -78,7 +100,7 @@ void present_shader_fs_src(PresentGlsl d, int preset, const char *fs_body, const
 typedef struct PresentShaderProg {
     unsigned prog;
     int failed;   /* did not build in this context: none is drawn instead */
-    int u_tex, u_prev, u_flip, u_rect, u_swap, u_src, u_out, u_cells, u_strength, u_curve, u_ghost;
+    int u_tex, u_prev, u_flip, u_rect, u_swap, u_src, u_out, u_cells, u_strength, u_curve, u_ghost, u_taps;
 } PresentShaderProg;
 
 /* Builds preset's program into *sp (once: a built or failed one is left as it is). $RECOMP_SHADER_TEST_FAIL naming
@@ -100,6 +122,7 @@ typedef struct PresentShaderParams {
     int swap;                /* legacy dialects: the texels are B, G, R, A (SDL's opengles2 ARGB textures) */
     int strength;            /* 0..100, present_shader_strength */
     int curvature, ghosting; /* 0..100; ghosting 0 when there is no previous picture */
+    int downscale;           /* average the texels under a minified output pixel (present_shader_taps); 0: one tap */
 } PresentShaderParams;
 
 /* glUseProgram(sp->prog) and every uniform; the caller binds the texture to unit 0 (the previous picture to unit 1),
