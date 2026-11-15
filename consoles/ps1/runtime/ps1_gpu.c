@@ -636,7 +636,10 @@ static void raster_rect(ps1_gpu *g, const target *tg, raster *rs, span_fn span, 
         return;
     int skip_field = skip_field_line(g);
     uint32_t k = (uint32_t)(x0 - rx);
-    uint32_t u = ((uint32_t)u0 << 16) + (flipx ? (uint32_t)bias - k * (uint32_t)step : k * (uint32_t)step);
+    /* x-flipped, the hardware starts one texel right of u0 (u0 + 1, u0, u0 - 1, ...; y-flipped: v0, v0 - 1, ...):
+     * ps1-tests gpu/texture-flip's hardware VRAM dump (XBA-200) */
+    uint32_t u = ((uint32_t)(u0 + flipx) << 16) +
+                 (flipx ? (uint32_t)bias - k * (uint32_t)step : k * (uint32_t)step);
     for (int yy = y0; yy < y1; yy++) {
         if (skip_field && ((yy >> s) & 1) == g->field)
             continue;

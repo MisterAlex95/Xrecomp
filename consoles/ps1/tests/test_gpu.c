@@ -410,8 +410,8 @@ static void t_textures(void)
     GP0(G, 0x65000000, XY(100, 100), UV(0, 0, 0), XY(4, 1));
     expect_px(100, 100, 1);
     expect_px(103, 100, 4);
-    GP0(G, 0xE1000000 | TPAGE(15, 0, 0, 2) | 1 << 12); /* x flip */
-    GP0(G, 0x65000000, XY(100, 101), UV(3, 0, 0), XY(4, 1));
+    GP0(G, 0xE1000000 | TPAGE(15, 0, 0, 2) | 1 << 12); /* x flip: u0 + 1, u0, u0 - 1... (ps1-tests gpu/texture-flip) */
+    GP0(G, 0x65000000, XY(100, 101), UV(2, 0, 0), XY(4, 1));
     expect_px(100, 101, 4);
     expect_px(103, 101, 1);
     GP0(G, 0xE1000000 | TPAGE(15, 0, 0, 2));
