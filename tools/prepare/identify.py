@@ -40,6 +40,22 @@ class IdentifyError(Exception):
         self.code, self.msg = code, msg
 
 
+def folder_xbe(folder):
+    """The folder's default.xbe, whatever its case (DEFAULT.XBE, Default.xbe: discs are FATX/XDVDFS, case-blind,
+    and the app's companion folders keep the name as on the disc); None when absent."""
+    exact = os.path.join(folder, "default.xbe")
+    if os.path.isfile(exact):
+        return exact
+    try:
+        names = os.listdir(folder)
+    except OSError:
+        return None
+    for n in sorted(names):
+        if n.lower() == "default.xbe" and os.path.isfile(os.path.join(folder, n)):
+            return os.path.join(folder, n)
+    return None
+
+
 def source_kind(src):
     """"folder", "image" or "xbe", or IdentifyError."""
     from tools.xiso.source import is_image_name
@@ -60,8 +76,8 @@ def read_source(src):
     src = os.path.abspath(src)
     kind = source_kind(src)
     if kind == "folder":
-        xbe = os.path.join(src, "default.xbe")
-        if not os.path.isfile(xbe):
+        xbe = folder_xbe(src)
+        if xbe is None:
             raise IdentifyError("NO_XBE", "%s: no default.xbe in this folder" % src)
     elif kind == "xbe":
         xbe = src
